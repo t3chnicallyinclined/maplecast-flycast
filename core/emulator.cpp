@@ -37,6 +37,8 @@
 #include "network/ggpo.h"
 #include "network/maplecast.h"
 #include "hw/maple/maple_cfg.h"
+#include <cstdlib>
+#include <string>
 #include "network/ice.h"
 #include "hw/mem/mem_watch.h"
 #include "network/net_handshake.h"
@@ -699,6 +701,37 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 void Emulator::runInternal()
 {
 	runner.init();
+
+	// MapleCast: auto-init from environment variables if set
+	// MAPLECAST_SERVER=host:port MAPLECAST_MATCH=id MAPLECAST_PLAYER=0|1
+	if (!maplecast::active())
+	{
+		const char* server_env = std::getenv("MAPLECAST_SERVER");
+		const char* match_env = std::getenv("MAPLECAST_MATCH");
+		const char* player_env = std::getenv("MAPLECAST_PLAYER");
+
+		if (server_env && match_env && player_env)
+		{
+			maplecast::Config cfg;
+			std::string server_str(server_env);
+			auto colon = server_str.rfind(':');
+			if (colon != std::string::npos)
+			{
+				cfg.serverAddr = server_str.substr(0, colon);
+				cfg.serverPort = std::atoi(server_str.substr(colon + 1).c_str());
+			}
+			else
+			{
+				cfg.serverAddr = server_str;
+			}
+			cfg.matchId = std::atoi(match_env);
+			cfg.localPlayer = std::atoi(player_env);
+			cfg.tournament = std::getenv("MAPLECAST_TOURNAMENT") != nullptr;
+
+			maplecast::init(cfg);
+		}
+	}
+
 	try {
 		if (singleStep)
 		{
