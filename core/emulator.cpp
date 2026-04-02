@@ -36,6 +36,7 @@
 #include "hw/arm7/arm7_rec.h"
 #include "network/ggpo.h"
 #include "network/maplecast.h"
+#include "network/maplecast_stream.h"
 #include "hw/maple/maple_cfg.h"
 #include <cstdlib>
 #include <string>
@@ -1002,6 +1003,15 @@ void Emulator::start()
 		if (p1Env) p1Port = std::atoi(p1Env);
 		if (p2Env) p2Port = std::atoi(p2Env);
 		maplecast::init(p1Port, p2Port);
+
+		// Start NVENC streaming if MAPLECAST_STREAM is set
+		if (std::getenv("MAPLECAST_STREAM"))
+		{
+			int streamPort = 7200;
+			const char* portEnv = std::getenv("MAPLECAST_STREAM_PORT");
+			if (portEnv) streamPort = std::atoi(portEnv);
+			maplecast_stream::init(streamPort);
+		}
 	}
 
 	if (config::GGPOEnable && config::ThreadedRendering)

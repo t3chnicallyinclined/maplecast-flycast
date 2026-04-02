@@ -10,6 +10,7 @@
 #include "hw/sh4/sh4_core.h"
 #include "profiler/fc_profiler.h"
 #include "network/ggpo.h"
+#include "network/maplecast_stream.h"
 
 #include <mutex>
 #include <deque>
@@ -245,6 +246,16 @@ private:
 		if (renderer->Present())
 		{
 			presented = true;
+
+			// MapleCast: capture and stream after Present is fully complete
+			if (maplecast_stream::active())
+			{
+				try {
+					maplecast_stream::onFrameRendered();
+				} catch (...) {
+					// Don't crash the game if streaming fails
+				}
+			}
 			if (!config::ThreadedRendering && !ggpo::active())
 				emu.getSh4Executor()->Stop();
 #ifdef LIBRETRO

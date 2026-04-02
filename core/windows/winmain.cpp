@@ -313,6 +313,15 @@ int main(int argc, char* argv[])
 {
 	nowide::args _(argc, argv);
 
+	// MapleCast: attach console so printf output is visible
+	if (std::getenv("MAPLECAST"))
+	{
+		AllocConsole();
+		freopen("CONOUT$", "w", stdout);
+		freopen("CONOUT$", "w", stderr);
+		printf("[maplecast] console attached\n");
+	}
+
 #ifdef USE_BREAKPAD
 	wchar_t tempDir[MAX_PATH + 1];
 	GetTempPathW(MAX_PATH + 1, tempDir);

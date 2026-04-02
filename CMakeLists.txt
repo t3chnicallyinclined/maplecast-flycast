@@ -1647,6 +1647,18 @@ if(UNIX AND NOT APPLE AND NOT ANDROID AND NOT LIBRETRO)
 	endforeach()
 endif()
 
+# MapleCast: FFmpeg/NVENC for low-latency streaming
+set(FFMPEG_DIR "${CMAKE_SOURCE_DIR}/external/ffmpeg/ffmpeg-8.1-full_build-shared")
+if(EXISTS "${FFMPEG_DIR}/include/libavcodec/avcodec.h")
+	message(STATUS "MapleCast: FFmpeg found at ${FFMPEG_DIR}")
+	target_include_directories(${PROJECT_NAME} PRIVATE "${FFMPEG_DIR}/include")
+	target_link_directories(${PROJECT_NAME} PRIVATE "${FFMPEG_DIR}/lib")
+	target_link_libraries(${PROJECT_NAME} PRIVATE avcodec avutil swscale)
+	target_compile_definitions(${PROJECT_NAME} PRIVATE MAPLECAST_NVENC=1)
+else()
+	message(STATUS "MapleCast: FFmpeg not found, streaming disabled")
+endif()
+
 if(${CMAKE_GENERATOR} MATCHES "^Xcode.*|^Visual Studio.*")
 	file(GLOB_RECURSE SRC_FILES *.h *.cpp *.c *.cc *.mm)
 	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${SRC_FILES})

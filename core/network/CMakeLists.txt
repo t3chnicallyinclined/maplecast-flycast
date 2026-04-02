@@ -6,6 +6,8 @@ target_sources(${PROJECT_NAME} PRIVATE
         ggpo.h
         maplecast.cpp
         maplecast.h
+        maplecast_stream.cpp
+        maplecast_stream.h
         miniupnp.cpp
         miniupnp.h
         naomi_network.cpp
