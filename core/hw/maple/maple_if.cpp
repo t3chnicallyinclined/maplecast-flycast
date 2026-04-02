@@ -6,6 +6,7 @@
 #include "hw/sh4/sh4_mem.h"
 #include "hw/sh4/sh4_sched.h"
 #include "network/ggpo.h"
+#include "network/maplecast.h"
 #include "hw/naomi/card_reader.h"
 
 #include <memory>
@@ -150,7 +151,9 @@ static void maple_DoDma()
 	}
 #endif
 
-	ggpo::getInput(mapleInputState);
+	// MapleCast: skip ggpo input — maplecast::waitForTick() already wrote mapleInputState
+	if (!maplecast::active())
+		ggpo::getInput(mapleInputState);
 	// TODO put this elsewhere and let the card readers handle being called multiple times
 	if (settings.platform.isNaomi())
 	{

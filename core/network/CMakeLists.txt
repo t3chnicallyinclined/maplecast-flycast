@@ -4,6 +4,8 @@ target_sources(${PROJECT_NAME} PRIVATE
         dns.cpp
         ggpo.cpp
         ggpo.h
+        maplecast.cpp
+        maplecast.h
         miniupnp.cpp
         miniupnp.h
         naomi_network.cpp

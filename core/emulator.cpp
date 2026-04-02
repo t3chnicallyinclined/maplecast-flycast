@@ -35,6 +35,8 @@
 #include "hw/pvr/Renderer_if.h"
 #include "hw/arm7/arm7_rec.h"
 #include "network/ggpo.h"
+#include "network/maplecast.h"
+#include "hw/maple/maple_cfg.h"
 #include "network/ice.h"
 #include "hw/mem/mem_watch.h"
 #include "network/net_handshake.h"
@@ -715,6 +717,18 @@ void Emulator::runInternal()
 		{
 			do {
 				resetRequested = false;
+
+				// MapleCast: server-clocked lockstep.
+				// Block until the server tick arrives with both players' inputs.
+				// Flycast doesn't know it's online — it just sees inputs in mapleInputState[].
+				if (maplecast::active())
+				{
+					if (!maplecast::waitForTick(mapleInputState))
+					{
+						// Connection lost
+						break;
+					}
+				}
 
 				getSh4Executor()->Run();
 
