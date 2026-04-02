@@ -1,13 +1,11 @@
 /*
 	MapleCast — Flycast IS the server.
 
-	Two gamepad senders connect over UDP (one per player).
-	Flycast receives button state, runs the game, renders.
-	One state. One screen. Zero desync.
+	One UDP port. Players auto-assigned P1/P2 by connection order.
+	First stick to send a packet = P1. Second = P2.
 
-	Input: pc_gamepad_sender.py sends 4-byte W3 packets (LT, RT, buttons_hi, buttons_lo)
-	P1 → UDP port 7101
-	P2 → UDP port 7102
+	Input: 4-byte W3 packets (LT, RT, buttons_hi, buttons_lo)
+	From: GP2040-CE W6100, pc_gamepad_sender.py, or browser Gamepad API
 */
 #pragma once
 
@@ -16,8 +14,8 @@ struct MapleInputState;
 namespace maplecast
 {
 
-// Start listening for gamepad input on UDP ports
-bool init(int p1Port = 7101, int p2Port = 7102);
+// Start listening for gamepad input on a single UDP port
+bool init(int port = 7100);
 void shutdown();
 
 // Called from maple_DoDma() — writes latest received inputs into mapleInputState[]

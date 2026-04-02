@@ -992,17 +992,14 @@ void Emulator::start()
 	state = Running;
 	SetMemoryHandlers();
 
-	// MapleCast: Flycast IS the server. Listen for gamepad input over UDP.
-	// MAPLECAST=1 enables it. Optional: MAPLECAST_P1_PORT, MAPLECAST_P2_PORT
+	// MapleCast: Flycast IS the server. One UDP port, auto-assign P1/P2.
+	// MAPLECAST=1 enables it. Optional: MAPLECAST_PORT (default 7100)
 	if (!maplecast::active() && std::getenv("MAPLECAST"))
 	{
-		int p1Port = 7101;
-		int p2Port = 7102;
-		const char* p1Env = std::getenv("MAPLECAST_P1_PORT");
-		const char* p2Env = std::getenv("MAPLECAST_P2_PORT");
-		if (p1Env) p1Port = std::atoi(p1Env);
-		if (p2Env) p2Port = std::atoi(p2Env);
-		maplecast::init(p1Port, p2Port);
+		int port = 7100;
+		const char* portEnv = std::getenv("MAPLECAST_PORT");
+		if (portEnv) port = std::atoi(portEnv);
+		maplecast::init(port);
 
 		// Start NVENC streaming if MAPLECAST_STREAM is set
 		if (std::getenv("MAPLECAST_STREAM"))

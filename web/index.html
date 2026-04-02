@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>MapleCast — MVC2 Online</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: monospace; color: #0f0; }
+canvas { image-rendering: pixelated; border: 2px solid #333; }
+#status { margin: 10px; font-size: 14px; }
+#controls { margin: 10px; font-size: 12px; color: #888; }
+button { background: #222; color: #0f0; border: 1px solid #0f0; padding: 8px 16px; margin: 5px; cursor: pointer; font-family: monospace; }
+button:hover { background: #0f0; color: #000; }
+</style>
+</head>
+<body>
+<div id="status">MapleCast — press Connect</div>
+<canvas id="screen" width="640" height="480"></canvas>
+<div id="controls">
+  <button onclick="connect(1)">Connect as P1</button>
+  <button onclick="connect(2)">Connect as P2</button>
+  <span id="stats"></span>
+</div>
+
+<script>
+const canvas = document.getElementById('screen');
+const ctx = canvas.getContext('2d');
+const status = document.getElementById('status');
+const stats = document.getElementById('stats');
+
+let ws = null;
+let decoder = null;
+let frameCount = 0;
+let startTime = 0;
+let playerPort = 7101;
+let gamepadInterval = null;
+
+// WebCodecs H.264 decoder
+function initDecoder() {
+  decoder = new VideoDecoder({
+    output: (frame) => {
+      // Draw decoded frame to canvas
+      ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+      frame.close();
+      frameCount++;
+
+      // Update stats every 60 frames
+      if (frameCount % 60 === 0) {
+        const elapsed = (performance.now() - startTime) / 1000;
+        const fps = frameCount / elapsed;
+        stats.textContent = `${fps.toFixed(1)} fps | ${frameCount} frames`;
+      }
+    },
+    error: (e) => {
+      console.error('Decoder error:', e);
+      status.textContent = 'Decoder error: ' + e.message;
+    }
+  });
+
+  decoder.configure({
+    codec: 'avc1.42001e', // Baseline profile, level 3.0
+    codedWidth: 640,
+    codedHeight: 480,
+    optimizeForLatency: true,
+  });
+}
+
+function connect(player) {
+  if (ws) {
+    ws.close();
+    if (gamepadInterval) clearInterval(gamepadInterval);
+  }
+
+  const wsHost = window.location.hostname || '127.0.0.1';
+  const wsPort = 8080;
+  const path = player === 1 ? '/p1' : '/p2';
+  const url = `ws://${wsHost}:${wsPort}${path}`;
+
+  status.textContent = `Connecting to ${url}...`;
+  playerPort = player === 1 ? 7101 : 7102;
+
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    status.textContent = `Connected as P${player} — play!`;
+    frameCount = 0;
+    startTime = performance.now();
+    initDecoder();
+    startGamepadPolling();
+  };
+
+  ws.onmessage = (event) => {
+    if (!decoder || decoder.state === 'closed') return;
+
+    const data = new Uint8Array(event.data);
+
+    // Every frame is an IDR (keyframe) — type = 'key' always
+    const chunk = new EncodedVideoChunk({
+      type: 'key',
+      timestamp: frameCount * 16667, // 60fps = 16.667ms per frame
+      data: data,
+    });
+
+    try {
+      decoder.decode(chunk);
+    } catch (e) {
+      console.warn('Decode error:', e);
+    }
+  };
+
+  ws.onclose = () => {
+    status.textContent = 'Disconnected';
+    if (gamepadInterval) clearInterval(gamepadInterval);
+  };
+
+  ws.onerror = (e) => {
+    status.textContent = 'Connection error';
+    console.error('WebSocket error:', e);
+  };
+}
+
+// Gamepad API — read controller, send W3 over WebSocket
+function startGamepadPolling() {
+  let prevW3 = null;
+
+  gamepadInterval = setInterval(() => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    const gamepads = navigator.getGamepads();
+    const gp = gamepads[0];
+    if (!gp) return;
+
+    // Build DC W3 button state (active-low: 0 = pressed)
+    let buttons = 0xFFFF;
+
+    // Standard gamepad mapping
+    if (gp.buttons[0]?.pressed) buttons &= ~0x0004; // A
+    if (gp.buttons[1]?.pressed) buttons &= ~0x0002; // B
+    if (gp.buttons[2]?.pressed) buttons &= ~0x0400; // X
+    if (gp.buttons[3]?.pressed) buttons &= ~0x0200; // Y
+    if (gp.buttons[9]?.pressed) buttons &= ~0x0008; // Start
+    if (gp.buttons[12]?.pressed) buttons &= ~0x0010; // DPad Up
+    if (gp.buttons[13]?.pressed) buttons &= ~0x0020; // DPad Down
+    if (gp.buttons[14]?.pressed) buttons &= ~0x0040; // DPad Left
+    if (gp.buttons[15]?.pressed) buttons &= ~0x0080; // DPad Right
+
+    // Triggers (0.0 - 1.0 → 0 - 255)
+    const lt = Math.floor((gp.buttons[6]?.value || 0) * 255);
+    const rt = Math.floor((gp.buttons[7]?.value || 0) * 255);
+
+    // W3 format: {LT, RT, buttons_hi, buttons_lo}
+    const w3 = new Uint8Array([lt, rt, (buttons >> 8) & 0xFF, buttons & 0xFF]);
+
+    // Send on change or every 8ms (120Hz refresh)
+    const w3Hex = Array.from(w3).map(b => b.toString(16).padStart(2,'0')).join('');
+    if (w3Hex !== prevW3) {
+      ws.send(w3);
+      prevW3 = w3Hex;
+    }
+  }, 8); // 120Hz polling — 2x DC poll rate
+}
+
+// Fill canvas with "waiting" screen
+ctx.fillStyle = '#111';
+ctx.fillRect(0, 0, 640, 480);
+ctx.fillStyle = '#0f0';
+ctx.font = '20px monospace';
+ctx.textAlign = 'center';
+ctx.fillText('MapleCast', 320, 220);
+ctx.font = '14px monospace';
+ctx.fillText('Press Connect as P1 or P2', 320, 260);
+</script>
+</body>
+</html>

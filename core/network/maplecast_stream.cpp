@@ -105,8 +105,8 @@ static bool initEncoder()
 	// Pixel format — NVENC wants NV12
 	_codecCtx->pix_fmt = AV_PIX_FMT_NV12;
 
-	// Bitrate — 5 Mbps is plenty for 480p
-	_codecCtx->bit_rate = 5000000;
+	// Bitrate — 15 Mbps for sharp 480p (still tiny for a 3090)
+	_codecCtx->bit_rate = 15000000;
 
 	// ULTRA LOW LATENCY settings
 	_codecCtx->max_b_frames = 0;        // No B-frames — zero reordering delay
