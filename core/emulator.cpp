@@ -702,36 +702,6 @@ void Emulator::runInternal()
 {
 	runner.init();
 
-	// MapleCast: auto-init from environment variables if set
-	// MAPLECAST_SERVER=host:port MAPLECAST_MATCH=id MAPLECAST_PLAYER=0|1
-	if (!maplecast::active())
-	{
-		const char* server_env = std::getenv("MAPLECAST_SERVER");
-		const char* match_env = std::getenv("MAPLECAST_MATCH");
-		const char* player_env = std::getenv("MAPLECAST_PLAYER");
-
-		if (server_env && match_env && player_env)
-		{
-			maplecast::Config cfg;
-			std::string server_str(server_env);
-			auto colon = server_str.rfind(':');
-			if (colon != std::string::npos)
-			{
-				cfg.serverAddr = server_str.substr(0, colon);
-				cfg.serverPort = std::atoi(server_str.substr(colon + 1).c_str());
-			}
-			else
-			{
-				cfg.serverAddr = server_str;
-			}
-			cfg.matchId = std::atoi(match_env);
-			cfg.localPlayer = std::atoi(player_env);
-			cfg.tournament = std::getenv("MAPLECAST_TOURNAMENT") != nullptr;
-
-			maplecast::init(cfg);
-		}
-	}
-
 	try {
 		if (singleStep)
 		{
@@ -750,18 +720,6 @@ void Emulator::runInternal()
 		{
 			do {
 				resetRequested = false;
-
-				// MapleCast: server-clocked lockstep.
-				// Block until the server tick arrives with both players' inputs.
-				// Flycast doesn't know it's online — it just sees inputs in mapleInputState[].
-				if (maplecast::active())
-				{
-					if (!maplecast::waitForTick(mapleInputState))
-					{
-						// Connection lost
-						break;
-					}
-				}
 
 				getSh4Executor()->Run();
 
@@ -1032,6 +990,20 @@ void Emulator::start()
 	}
 	state = Running;
 	SetMemoryHandlers();
+
+	// MapleCast: Flycast IS the server. Listen for gamepad input over UDP.
+	// MAPLECAST=1 enables it. Optional: MAPLECAST_P1_PORT, MAPLECAST_P2_PORT
+	if (!maplecast::active() && std::getenv("MAPLECAST"))
+	{
+		int p1Port = 7101;
+		int p2Port = 7102;
+		const char* p1Env = std::getenv("MAPLECAST_P1_PORT");
+		const char* p2Env = std::getenv("MAPLECAST_P2_PORT");
+		if (p1Env) p1Port = std::atoi(p1Env);
+		if (p2Env) p2Port = std::atoi(p2Env);
+		maplecast::init(p1Port, p2Port);
+	}
+
 	if (config::GGPOEnable && config::ThreadedRendering)
 		// Not supported with GGPO
 		config::EmulateFramebuffer.override(false);

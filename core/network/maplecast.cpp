@@ -1,374 +1,175 @@
 /*
-	MapleCast — server-clocked lockstep netplay for Dreamcast.
+	MapleCast — Flycast IS the server.
 
-	Maple Bus is the protocol. CMD9 is the API. The network is just a longer wire.
+	Receives gamepad input from pc_gamepad_sender.py over UDP.
+	P1 on port 7101, P2 on port 7102.
+	4-byte W3 packet: {LT, RT, buttons_hi, buttons_lo}
+
+	That's it. Flycast runs the game. One state. Zero desync.
 */
 #include "maplecast.h"
 #include "hw/maple/maple_cfg.h"
 #include "input/gamepad.h"
-#include "cfg/option.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 typedef int socklen_t;
+#define INVALID_SOCK INVALID_SOCKET
+#define SOCK_ERROR SOCKET_ERROR
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <poll.h>
-#define INVALID_SOCKET -1
-#define SOCKET_ERROR -1
+#define INVALID_SOCK -1
+#define SOCK_ERROR -1
 #define closesocket close
 typedef int SOCKET;
 #endif
 
 #include <cstring>
-#include <chrono>
-
-// Must match maplecast-server protocol.rs
-static constexpr int CMD9_SIZE = 32;
-
-// Message types — must match relay.rs
-static constexpr u8 MSG_REGISTER = 0x00;
-static constexpr u8 MSG_INPUT    = 0x01;
-static constexpr u8 MSG_DISCONNECT = 0x03;
-
-#pragma pack(push, 1)
-
-// Server → Client tick (68 bytes)
-struct ServerTick
-{
-	u32 frame;
-	u8  p1_cmd9[CMD9_SIZE];
-	u8  p2_cmd9[CMD9_SIZE];
-};
-
-// Server → Client event (64 bytes)
-struct ServerEvent
-{
-	u32 match_id;
-	u8  event;
-	u8  _pad[3];
-	u8  payload[56];
-};
-
-#pragma pack(pop)
-
-static constexpr u8 EVENT_MATCH_START = 0x02;
+#include <cstdio>
 
 namespace maplecast
 {
 
 static bool _active = false;
-static Config _cfg;
-static SOCKET _sock = INVALID_SOCKET;
-static struct sockaddr_in _serverAddr;
+static SOCKET _sockP1 = INVALID_SOCK;
+static SOCKET _sockP2 = INVALID_SOCK;
 
-static u32 _frame = 0;
-static float _fps = 60.0f;
-static float _rtt = 0.0f;
+// Latest received W3 state per player (LT, RT, buttons_hi, buttons_lo)
+// Updated by non-blocking recv in getInput()
+static u8 _p1W3[4] = { 0, 0, 0xFF, 0xFF };  // all buttons released
+static u8 _p2W3[4] = { 0, 0, 0xFF, 0xFF };
 
-static auto _lastTickTime = std::chrono::high_resolution_clock::now();
-
-// Build CMD9 response from local MapleInputState — same format as GP2040-CE
-// This is what a real Dreamcast controller returns for GETCOND
-static void buildCmd9FromInput(const MapleInputState& input, u8 cmd9[CMD9_SIZE])
+static SOCKET createUdpListener(int port)
 {
-	memset(cmd9, 0, CMD9_SIZE);
+	SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (s == INVALID_SOCK)
+		return INVALID_SOCK;
 
-	// Function type: controller (MFID_0_Input = 0x00000001)
-	u32 func = 0x01000000;
-	memcpy(&cmd9[0], &func, 4);
+	// Non-blocking
+#ifdef _WIN32
+	u_long mode = 1;
+	ioctlsocket(s, FIONBIO, &mode);
+#else
+	int flags = fcntl(s, F_GETFL, 0);
+	fcntl(s, F_SETFL, flags | O_NONBLOCK);
+#endif
 
-	// Buttons — kcode is active-low (0 = pressed), 16-bit
-	u16 kcode = (u16)(input.kcode & 0xFFFF);
-	memcpy(&cmd9[4], &kcode, 2);
+	struct sockaddr_in addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = INADDR_ANY;
+	addr.sin_port = htons((u16)port);
 
-	// Right trigger
-	cmd9[6] = (u8)(input.halfAxes[PJTI_R] >> 8);
-	// Left trigger
-	cmd9[7] = (u8)(input.halfAxes[PJTI_L] >> 8);
+	if (bind(s, (struct sockaddr*)&addr, sizeof(addr)) == SOCK_ERROR)
+	{
+		closesocket(s);
+		return INVALID_SOCK;
+	}
 
-	// Analog stick X (convert from signed to unsigned 0-255, 128=center)
-	cmd9[8] = (u8)((input.fullAxes[PJAI_X1] >> 8) + 128);
-	// Analog stick Y
-	cmd9[9] = (u8)((input.fullAxes[PJAI_Y1] >> 8) + 128);
-
-	// Second analog stick X
-	cmd9[10] = (u8)((input.fullAxes[PJAI_X2] >> 8) + 128);
-	// Second analog stick Y
-	cmd9[11] = (u8)((input.fullAxes[PJAI_Y2] >> 8) + 128);
+	return s;
 }
 
-// Parse CMD9 response back into MapleInputState
-static void parseCmd9ToInput(const u8 cmd9[CMD9_SIZE], MapleInputState& input)
+// Drain all pending packets from socket, keep the latest
+static void drainLatest(SOCKET s, u8 w3[4])
 {
-	// Buttons
-	u16 kcode;
-	memcpy(&kcode, &cmd9[4], 2);
-	input.kcode = kcode | 0xFFFF0000;  // upper bits always 1
+	u8 buf[64];
+	struct sockaddr_in from;
+	socklen_t fromLen = sizeof(from);
 
-	// Right trigger
-	input.halfAxes[PJTI_R] = (u16)cmd9[6] << 8;
-	// Left trigger
-	input.halfAxes[PJTI_L] = (u16)cmd9[7] << 8;
-
-	// Analog stick X (convert from unsigned back to signed)
-	input.fullAxes[PJAI_X1] = ((int16_t)cmd9[8] - 128) << 8;
-	// Analog stick Y
-	input.fullAxes[PJAI_Y1] = ((int16_t)cmd9[9] - 128) << 8;
-
-	// Second analog stick
-	input.fullAxes[PJAI_X2] = ((int16_t)cmd9[10] - 128) << 8;
-	input.fullAxes[PJAI_Y2] = ((int16_t)cmd9[11] - 128) << 8;
+	// Read all pending packets, keep only the freshest
+	while (true)
+	{
+		int n = recvfrom(s, (char*)buf, sizeof(buf), 0,
+			(struct sockaddr*)&from, &fromLen);
+		if (n >= 4)
+		{
+			// W3 format: LT, RT, buttons_hi, buttons_lo (big endian from sender)
+			w3[0] = buf[0];
+			w3[1] = buf[1];
+			w3[2] = buf[2];
+			w3[3] = buf[3];
+		}
+		else
+		{
+			break;  // No more packets
+		}
+	}
 }
 
-// Send raw bytes to server
-static bool sendToServer(const void* data, int len)
+// Parse W3 into MapleInputState
+static void w3ToInput(const u8 w3[4], MapleInputState& state)
 {
-	int sent = sendto(_sock, (const char*)data, len, 0,
-		(struct sockaddr*)&_serverAddr, sizeof(_serverAddr));
-	return sent == len;
+	// W3 from pc_gamepad_sender.py: {LT, RT, buttons_hi, buttons_lo} big-endian
+	u16 buttons = ((u16)w3[2] << 8) | w3[3];  // active-low: 0=pressed
+
+	state.kcode = buttons | 0xFFFF0000;  // upper bits always 1
+	state.halfAxes[PJTI_L] = (u16)w3[0] << 8;  // LT: 0-255 → 0-65280
+	state.halfAxes[PJTI_R] = (u16)w3[1] << 8;  // RT: 0-255 → 0-65280
+
+	// No analog sticks from W3 — center position
+	state.fullAxes[PJAI_X1] = 0;
+	state.fullAxes[PJAI_Y1] = 0;
+	state.fullAxes[PJAI_X2] = 0;
+	state.fullAxes[PJAI_Y2] = 0;
 }
 
-// Register with server
-static bool sendRegister()
+bool init(int p1Port, int p2Port)
 {
-	u8 pkt[6];
-	u32 matchId = (u32)_cfg.matchId;
-	memcpy(&pkt[0], &matchId, 4);
-	pkt[4] = MSG_REGISTER;
-	pkt[5] = (u8)_cfg.localPlayer;
-	return sendToServer(pkt, sizeof(pkt));
-}
-
-// Send CMD9 input to server
-static bool sendInput(u32 frame, const u8 cmd9[CMD9_SIZE])
-{
-	u8 pkt[42];
-	u32 matchId = (u32)_cfg.matchId;
-	memcpy(&pkt[0], &matchId, 4);         // match_id
-	pkt[4] = MSG_INPUT;                     // msg_type
-	pkt[5] = (u8)_cfg.localPlayer;          // player
-	memcpy(&pkt[6], &frame, 4);             // frame
-	memcpy(&pkt[10], cmd9, CMD9_SIZE);      // cmd9
-	return sendToServer(pkt, sizeof(pkt));
-}
-
-// Send disconnect
-static void sendDisconnect()
-{
-	u8 pkt[6];
-	u32 matchId = (u32)_cfg.matchId;
-	memcpy(&pkt[0], &matchId, 4);
-	pkt[4] = MSG_DISCONNECT;
-	pkt[5] = (u8)_cfg.localPlayer;
-	sendToServer(pkt, sizeof(pkt));
-}
-
-bool init(const Config& cfg)
-{
-	_cfg = cfg;
-	_frame = 0;
-
 #ifdef _WIN32
 	WSADATA wsaData;
 	WSAStartup(MAKEWORD(2, 2), &wsaData);
 #endif
 
-	// Create UDP socket
-	_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-	if (_sock == INVALID_SOCKET)
+	_sockP1 = createUdpListener(p1Port);
+	if (_sockP1 == INVALID_SOCK)
 	{
-		printf("[maplecast] failed to create socket\n");
+		printf("[maplecast] failed to bind P1 port %d\n", p1Port);
 		return false;
 	}
 
-	// Bind to any port
-	struct sockaddr_in localAddr;
-	memset(&localAddr, 0, sizeof(localAddr));
-	localAddr.sin_family = AF_INET;
-	localAddr.sin_addr.s_addr = INADDR_ANY;
-	localAddr.sin_port = 0;
-	if (bind(_sock, (struct sockaddr*)&localAddr, sizeof(localAddr)) == SOCKET_ERROR)
+	_sockP2 = createUdpListener(p2Port);
+	if (_sockP2 == INVALID_SOCK)
 	{
-		printf("[maplecast] failed to bind socket\n");
-		closesocket(_sock);
-		_sock = INVALID_SOCKET;
+		printf("[maplecast] failed to bind P2 port %d\n", p2Port);
+		closesocket(_sockP1);
+		_sockP1 = INVALID_SOCK;
 		return false;
 	}
-
-	// Set server address
-	memset(&_serverAddr, 0, sizeof(_serverAddr));
-	_serverAddr.sin_family = AF_INET;
-	_serverAddr.sin_port = htons((u16)cfg.serverPort);
-	inet_pton(AF_INET, cfg.serverAddr.c_str(), &_serverAddr.sin_addr);
-
-	// Register with server
-	if (!sendRegister())
-	{
-		printf("[maplecast] failed to register with server\n");
-		closesocket(_sock);
-		_sock = INVALID_SOCKET;
-		return false;
-	}
-
-	printf("[maplecast] registered with %s:%d as P%d, match %d\n",
-		cfg.serverAddr.c_str(), cfg.serverPort, cfg.localPlayer + 1, cfg.matchId);
-
-	// Wait for MATCH_START event
-	char buf[256];
-	struct sockaddr_in fromAddr;
-	socklen_t fromLen = sizeof(fromAddr);
-
-	// Block with timeout waiting for match start
-#ifdef _WIN32
-	DWORD timeout = 30000; // 30 seconds
-	setsockopt(_sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
-#else
-	struct timeval tv;
-	tv.tv_sec = 30;
-	tv.tv_usec = 0;
-	setsockopt(_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-#endif
-
-	int n = recvfrom(_sock, buf, sizeof(buf), 0,
-		(struct sockaddr*)&fromAddr, &fromLen);
-	if (n <= 0)
-	{
-		printf("[maplecast] timeout waiting for match start\n");
-		closesocket(_sock);
-		_sock = INVALID_SOCKET;
-		return false;
-	}
-
-	printf("[maplecast] match started! Entering server-clocked mode.\n");
 
 	_active = true;
-	_lastTickTime = std::chrono::high_resolution_clock::now();
+	printf("[maplecast] server mode — listening P1:%d P2:%d\n", p1Port, p2Port);
+	printf("[maplecast] run: python pc_gamepad_sender.py 127.0.0.1 %d\n", p1Port);
+	printf("[maplecast] run: python pc_gamepad_sender.py 127.0.0.1 %d\n", p2Port);
 	return true;
 }
 
 void shutdown()
 {
-	if (_sock != INVALID_SOCKET)
-	{
-		if (_active)
-			sendDisconnect();
-		closesocket(_sock);
-		_sock = INVALID_SOCKET;
-	}
+	if (_sockP1 != INVALID_SOCK) { closesocket(_sockP1); _sockP1 = INVALID_SOCK; }
+	if (_sockP2 != INVALID_SOCK) { closesocket(_sockP2); _sockP2 = INVALID_SOCK; }
 	_active = false;
-	_frame = 0;
-
-	printf("[maplecast] disconnected\n");
+	printf("[maplecast] shutdown\n");
 }
 
-bool waitForTick(MapleInputState inputState[4])
+void getInput(MapleInputState inputState[4])
 {
-	if (!_active)
-		return false;
+	// Drain all pending UDP packets — keep latest state per player
+	drainLatest(_sockP1, _p1W3);
+	drainLatest(_sockP2, _p2W3);
 
-	auto tickStart = std::chrono::high_resolution_clock::now();
-
-	// 1. Read local input from Flycast's normal input system (SDL/gamepad)
-	//    This is what the local player is pressing RIGHT NOW.
-	//    We don't touch inputState here — Flycast's normal input polling already populated it.
-	u8 localCmd9[CMD9_SIZE];
-	buildCmd9FromInput(inputState[_cfg.localPlayer], localCmd9);
-
-	// 2. Send our CMD9 to the server
-	sendInput(_frame, localCmd9);
-
-	// 3. BLOCK until server tick arrives.
-	//    This is THE frame clock. We do not advance until the server says so.
-	//    Both players block here simultaneously.
-	ServerTick tick;
-	char buf[256];
-	struct sockaddr_in fromAddr;
-	socklen_t fromLen = sizeof(fromAddr);
-
-	while (true)
-	{
-#ifdef _WIN32
-		DWORD timeout = _cfg.tournament ? 100 : 5000;
-		setsockopt(_sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
-#else
-		struct timeval tv;
-		tv.tv_sec = _cfg.tournament ? 0 : 5;
-		tv.tv_usec = _cfg.tournament ? 100000 : 0;
-		setsockopt(_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-#endif
-
-		int n = recvfrom(_sock, (char*)buf, sizeof(buf), 0,
-			(struct sockaddr*)&fromAddr, &fromLen);
-
-		if (n == sizeof(ServerTick))
-		{
-			memcpy(&tick, buf, sizeof(ServerTick));
-			if (tick.frame == _frame + 1)
-				break; // Got the tick we're waiting for
-			// Wrong frame number — discard and keep waiting
-			continue;
-		}
-
-		if (n > 0)
-		{
-			// Non-tick packet (event?) — discard during gameplay
-			continue;
-		}
-
-		// Timeout or error
-		if (_cfg.tournament)
-		{
-			printf("[maplecast] connection lost (tournament timeout)\n");
-			_active = false;
-			return false;
-		}
-		// Casual mode: keep waiting, game freezes
-	}
-
-	// 4. Apply synced inputs to mapleInputState
-	//    Player 1 gets p1_cmd9, Player 2 gets p2_cmd9
-	//    Flycast will read these when maple_DoDma() fires during the frame
-	parseCmd9ToInput(tick.p1_cmd9, inputState[0]);
-	parseCmd9ToInput(tick.p2_cmd9, inputState[1]);
-
-	_frame = tick.frame;
-
-	// 5. Update stats
-	auto now = std::chrono::high_resolution_clock::now();
-	auto frameTimeUs = std::chrono::duration_cast<std::chrono::microseconds>(
-		now - _lastTickTime).count();
-	if (frameTimeUs > 0)
-		_fps = _fps * 0.9f + (1000000.0f / (float)frameTimeUs) * 0.1f;
-	_lastTickTime = now;
-
-	return true;
+	// Write into mapleInputState — game sees this
+	w3ToInput(_p1W3, inputState[0]);
+	w3ToInput(_p2W3, inputState[1]);
 }
 
 bool active()
 {
 	return _active;
-}
-
-float currentFps()
-{
-	return _fps;
-}
-
-float rttMs()
-{
-	return _rtt;
-}
-
-int currentFrame()
-{
-	return (int)_frame;
 }
 
 }  // namespace maplecast

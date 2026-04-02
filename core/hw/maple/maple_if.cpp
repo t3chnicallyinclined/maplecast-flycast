@@ -151,8 +151,11 @@ static void maple_DoDma()
 	}
 #endif
 
-	// MapleCast: skip ggpo input — maplecast::waitForTick() already wrote mapleInputState
-	if (!maplecast::active())
+	// MapleCast: write synced inputs RIGHT HERE — the last moment before the game reads them.
+	// This overwrites whatever SDL polling wrote during Run().
+	if (maplecast::active())
+		maplecast::getInput(mapleInputState);
+	else
 		ggpo::getInput(mapleInputState);
 	// TODO put this elsewhere and let the card readers handle being called multiple times
 	if (settings.platform.isNaomi())

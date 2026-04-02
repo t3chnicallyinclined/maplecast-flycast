@@ -11,6 +11,7 @@
 #include "oslib/storage.h"
 #include "debug/gdb_server.h"
 #include "archive/rzip.h"
+#include <cstdlib>
 #include "ui/mainui.h"
 #include "input/gamepad_device.h"
 #include "lua/lua.h"
@@ -157,6 +158,9 @@ void flycast_term()
 }
 
 bool dc_savestateAllowed() {
+	// MapleCast: always allow save states — we NEED them for sync start
+	if (std::getenv("MAPLECAST_SERVER"))
+		return !settings.content.path.empty();
 	return !settings.content.path.empty() && !settings.network.online
 			&& !settings.naomi.multiboard && !MapleLink::StorageEnabled();
 }

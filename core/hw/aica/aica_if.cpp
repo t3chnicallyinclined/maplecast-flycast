@@ -6,6 +6,7 @@
 
 #include "aica_if.h"
 #include "aica_mem.h"
+#include "network/maplecast.h"
 #include "hw/holly/sb.h"
 #include "hw/holly/holly_intc.h"
 #include "hw/sh4/sh4_mem.h"
@@ -37,7 +38,7 @@ int rtc_schid = -1;
 u32 GetRTC_now()
 {
 	// rtc kept static for netplay when savestate is not loaded
-	if (config::GGPOEnable)
+	if (config::GGPOEnable || maplecast::active())
 		// 1/1/70 00:00:00
 		return (20 * 365 + 5) * 24 * 60 * 60;
 

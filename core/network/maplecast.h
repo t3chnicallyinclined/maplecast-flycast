@@ -1,48 +1,29 @@
 /*
-	MapleCast — server-clocked lockstep netplay for Dreamcast.
+	MapleCast — Flycast IS the server.
 
-	Flycast doesn't know it's online. This module:
-	1. Connects to a MapleCast relay server
-	2. Sends local input as CMD9 to the server
-	3. Blocks until the server tick arrives (BOTH players' inputs)
-	4. Writes both inputs into mapleInputState[]
-	5. Flycast advances one frame on that data
+	Two gamepad senders connect over UDP (one per player).
+	Flycast receives button state, runs the game, renders.
+	One state. One screen. Zero desync.
 
-	No rollback. No speculation. No desync. The server is the clock.
+	Input: pc_gamepad_sender.py sends 4-byte W3 packets (LT, RT, buttons_hi, buttons_lo)
+	P1 → UDP port 7101
+	P2 → UDP port 7102
 */
 #pragma once
-#include <string>
 
 struct MapleInputState;
 
 namespace maplecast
 {
 
-struct Config
-{
-	std::string serverAddr = "127.0.0.1";
-	int serverPort = 7100;
-	int matchId = 0;
-	int localPlayer = 0;     // 0 = P1, 1 = P2
-	bool tournament = false;
-};
-
-// Lifecycle
-bool init(const Config& cfg);
+// Start listening for gamepad input on UDP ports
+bool init(int p1Port = 7101, int p2Port = 7102);
 void shutdown();
 
-// Called BEFORE getSh4Executor()->Run() every frame.
-// Sends local input to server, blocks until server tick arrives.
-// Writes synced inputs into mapleInputState[].
-// Returns false if connection lost.
-bool waitForTick(MapleInputState inputState[4]);
+// Called from maple_DoDma() — writes latest received inputs into mapleInputState[]
+void getInput(MapleInputState inputState[4]);
 
 // Is MapleCast active?
 bool active();
-
-// Stats for HUD overlay
-float currentFps();
-float rttMs();
-int currentFrame();
 
 }
