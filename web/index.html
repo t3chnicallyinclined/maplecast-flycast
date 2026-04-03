@@ -402,73 +402,161 @@ function parseGameState(buf) {
   renderGameState();
 }
 
+// Stage colors
+const STAGE_COLORS = [
+  '#1a2a4a','#c4a050','#3a3a3a','#8a2050','#2a4a2a','#4a3020',
+  '#2a2040','#204a6a','#401020','#1a2a4a','#c4a050','#222',
+  '#8a2050','#2a4a2a','#4a3020','#2a2040','#204a6a'
+];
+
+// Character colors (P1 side = blue/cyan tones, P2 side = red/magenta tones)
+const P1_COLOR = '#00ccff';
+const P2_COLOR = '#ff44aa';
+
 function renderGameState() {
   if (!gameState) return;
 
-  // Clear canvas
-  ctx.fillStyle = '#111';
+  // Stage background
+  const stageBg = STAGE_COLORS[gameState.stage_id] || '#111';
+  ctx.fillStyle = stageBg;
   ctx.fillRect(0, 0, 640, 480);
 
-  ctx.font = '12px monospace';
-  ctx.textAlign = 'left';
+  // Ground line
+  ctx.strokeStyle = '#444';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, 380);
+  ctx.lineTo(640, 380);
+  ctx.stroke();
 
-  // Title
-  ctx.fillStyle = '#0f0';
-  ctx.font = '16px monospace';
-  ctx.textAlign = 'center';
-  ctx.fillText(`HEADLESS MODE — Game State Stream (${sizeof_gs || '~240'} bytes/frame)`, 320, 20);
-
-  // Timer + match state
-  ctx.fillStyle = '#ff0';
-  ctx.font = '24px monospace';
-  ctx.fillText(`TIME: ${gameState.timer}`, 320, 50);
-  ctx.font = '12px monospace';
-  ctx.fillStyle = '#888';
-  ctx.fillText(`Frame: ${gameState.frame}  Stage: ${gameState.stage_id}  Match: ${gameState.in_match ? 'YES' : 'no'}`, 320, 70);
-
-  // Draw characters
-  ctx.textAlign = 'left';
-  const labels = ['P1 Point','P2 Point','P1 Assist1','P2 Assist1','P1 Assist2','P2 Assist2'];
-  const colors = ['#0ff','#f0f','#088','#808','#044','#404'];
-
+  // Draw active characters as rectangles at their positions
   for (let i = 0; i < 6; i++) {
     const c = gameState.chars[i];
-    if (!c) continue;
-    const y = 100 + i * 55;
+    if (!c || !c.active) continue;
+
+    const isP1 = (i % 2 === 0);
+    const color = isP1 ? P1_COLOR : P2_COLOR;
     const name = c.name || MVC2_CHARS[c.id] || '?';
 
-    // Label
-    ctx.fillStyle = colors[i];
-    ctx.font = '14px monospace';
-    ctx.fillText(`${labels[i]}: ${name}`, 10, y);
+    // Map arena position to screen
+    // Arena X is roughly -1200 to +1200, map to 0-640
+    // Arena Y is 0 (ground) to ~500 (air), map to 380 (ground) to 80 (top)
+    const camX = gameState.camera_x || 0;
+    const sx = 320 + (c.pos_x - camX) * 0.25;
+    const sy = 380 - (c.pos_y || 0) * 0.3;
 
-    // Stats
-    ctx.fillStyle = '#ccc';
-    ctx.font = '11px monospace';
-    ctx.fillText(`HP: ${c.health || 0}  Red: ${c.red_health || 0}  Active: ${c.active ? 'YES' : 'no'}`, 10, y + 15);
-    ctx.fillText(`Pos: (${c.pos_x?.toFixed(1) || 0}, ${c.pos_y?.toFixed(1) || 0})  Facing: ${c.facing ? 'R' : 'L'}`, 10, y + 28);
-    ctx.fillText(`Sprite: ${c.sprite_id}  Anim: ${c.anim_state}  Timer: ${c.anim_timer}`, 10, y + 41);
+    // Character body (rectangle)
+    const charW = 40;
+    const charH = 80;
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.8;
+    ctx.fillRect(sx - charW/2, sy - charH, charW, charH);
+    ctx.globalAlpha = 1.0;
 
-    // Draw position dot on mini-map (right side)
-    if (c.active) {
-      const mapX = 400 + (c.pos_x || 0) / 10;
-      const mapY = 350 - (c.pos_y || 0) / 5;
-      ctx.fillStyle = colors[i];
-      ctx.beginPath();
-      ctx.arc(mapX, mapY, 6, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#fff';
-      ctx.font = '9px monospace';
-      ctx.fillText(name.substring(0, 3), mapX + 8, mapY + 3);
+    // Facing indicator (small triangle)
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    if (c.facing) {
+      ctx.moveTo(sx + charW/2, sy - charH/2);
+      ctx.lineTo(sx + charW/2 + 8, sy - charH/2 + 5);
+      ctx.lineTo(sx + charW/2, sy - charH/2 + 10);
+    } else {
+      ctx.moveTo(sx - charW/2, sy - charH/2);
+      ctx.lineTo(sx - charW/2 - 8, sy - charH/2 + 5);
+      ctx.lineTo(sx - charW/2, sy - charH/2 + 10);
+    }
+    ctx.fill();
+
+    // Character name
+    ctx.fillStyle = '#fff';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(name, sx, sy - charH - 5);
+
+    // Health bar above character
+    const hpMax = 144;
+    const hpPct = Math.max(0, (c.health || 0) / hpMax);
+    const redPct = Math.max(0, (c.red_health || 0) / hpMax);
+    const barW = 50;
+    const barH = 4;
+    const barY = sy - charH - 15;
+    // Background
+    ctx.fillStyle = '#333';
+    ctx.fillRect(sx - barW/2, barY, barW, barH);
+    // Red health
+    ctx.fillStyle = '#a00';
+    ctx.fillRect(sx - barW/2, barY, barW * redPct, barH);
+    // Current health
+    ctx.fillStyle = hpPct > 0.3 ? '#0f0' : (hpPct > 0.1 ? '#ff0' : '#f00');
+    ctx.fillRect(sx - barW/2, barY, barW * hpPct, barH);
+
+    // Animation info
+    ctx.fillStyle = '#888';
+    ctx.font = '8px monospace';
+    ctx.fillText(`S:${c.sprite_id} A:${c.anim_state}`, sx, sy + 12);
+  }
+
+  // HUD - Timer
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 28px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(gameState.timer.toString(), 320, 35);
+
+  // HUD - Meters
+  for (let p = 0; p < 2; p++) {
+    const level = p === 0 ? gameState.p1_meter_level : gameState.p2_meter_level;
+    const fill = p === 0 ? gameState.p1_meter_fill : gameState.p2_meter_fill;
+    const baseX = p === 0 ? 20 : 400;
+    const color = p === 0 ? P1_COLOR : P2_COLOR;
+
+    // Meter bars
+    for (let b = 0; b < 5; b++) {
+      ctx.fillStyle = b < level ? color : '#333';
+      ctx.fillRect(baseX + b * 44, 455, 40, 8);
+    }
+    // Fill of current bar
+    if (level < 5) {
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.5;
+      ctx.fillRect(baseX + level * 44, 455, (fill / 65535) * 40, 8);
+      ctx.globalAlpha = 1.0;
     }
   }
 
-  // Meters
-  ctx.fillStyle = '#0f0';
-  ctx.font = '14px monospace';
+  // HUD - Combo counters
+  if (gameState.p1_combo > 1) {
+    ctx.fillStyle = P1_COLOR;
+    ctx.font = 'bold 20px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(`${gameState.p1_combo} HIT!`, 20, 430);
+  }
+  if (gameState.p2_combo > 1) {
+    ctx.fillStyle = P2_COLOR;
+    ctx.font = 'bold 20px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${gameState.p2_combo} HIT!`, 620, 430);
+  }
+
+  // Team display (top corners)
+  ctx.font = '9px monospace';
+  for (let i = 0; i < 6; i++) {
+    const c = gameState.chars[i];
+    if (!c) continue;
+    const isP1 = (i % 2 === 0);
+    const slot = Math.floor(i / 2);  // 0=point, 1=assist1, 2=assist2
+    const name = c.name || MVC2_CHARS[c.id] || '?';
+    const x = isP1 ? 10 : 540;
+    const y = 55 + slot * 14;
+    ctx.fillStyle = c.active ? '#fff' : '#555';
+    ctx.textAlign = 'left';
+    ctx.fillText(`${slot === 0 ? '>' : ' '} ${name} HP:${c.health || 0}`, x, y);
+  }
+
+  // Frame counter + mode label
+  ctx.fillStyle = '#0f04';
+  ctx.font = '8px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText(`P1 Meter: ${gameState.p1_meter_level} bars  |  P2 Meter: ${gameState.p2_meter_level} bars`, 320, 450);
-  ctx.fillText(`P1 Combo: ${gameState.p1_combo}  |  P2 Combo: ${gameState.p2_combo}`, 320, 470);
+  ctx.fillText(`GAMESTATE RENDER | F:${gameState.frame} | 296 bytes/frame | 0ms encode`, 320, 478);
 }
 
 let sizeof_gs = 0;
