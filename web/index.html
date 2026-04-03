@@ -93,42 +93,42 @@ function updateDiagDisplay() {
   const p2btn = (p2.btn !== undefined) ? '0x' + p2.btn.toString(16).padStart(4, '0').toUpperCase() : '?';
 
   diagEl.textContent =
-`═══ MapleCast Diagnostics ═══
+`=== MapleCast Diagnostics ===
 FPS:              ${diag.fps.toFixed(1)}
 Server frame:     ${diag.serverFrame}
 Bitrate:          ${kbps} kbps
 Frame size:       ${diag.bytesPerFrame} B
 Frame interval:   ${frameInt}ms
 
-─── Server Pipeline ───
-Input→Capture:    ${srvCapture}ms
-Capture→Encode:   ${srvEncode}ms
+--- Server Pipeline ---
+Input>Capture:    ${srvCapture}ms
+Capture>Encode:   ${srvEncode}ms
 Total server:     ${srvTotal}ms
 
-─── Client Pipeline ───
+--- Client Pipeline ---
 Decode:           ${clientDecode}ms
 Jitter:           ${jitter}ms
 Dropped:          ${diag.droppedFrames}
 
-─── Player 1 ───
+--- Player 1 ---
 Input rate:       ${p1.pps || 0}/sec
 State changes:    ${p1.cps || 0}/sec
 Buttons:          ${p1btn}
 Triggers:         L:${p1.lt || 0} R:${p1.rt || 0}
 
-─── Player 2 ───
+--- Player 2 ---
 Input rate:       ${p2.pps || 0}/sec
 State changes:    ${p2.cps || 0}/sec
 Buttons:          ${p2btn}
 Triggers:         L:${p2.lt || 0} R:${p2.rt || 0}
 
-─── Browser Input ───
+--- Browser Input ---
 Gamepad:          ${diag.gamepadActive ? 'CONNECTED' : 'none'}
 Sent:             ${diag.inputSendCount}
 
-─── End-to-End ───
+--- End-to-End ---
 Server:           ${srvTotal}ms
-+net+proxy+decode ≈${(parseFloat(srvTotal) + 2.0 + parseFloat(clientDecode)).toFixed(1)}ms`;
++net+proxy+decode ~${(parseFloat(srvTotal) + 2.0 + parseFloat(clientDecode)).toFixed(1)}ms`;
 }
 
 function initDecoder() {
