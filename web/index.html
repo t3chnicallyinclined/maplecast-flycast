@@ -1,346 +1,299 @@
 <!DOCTYPE html>
 <html>
 <head>
-<title>MapleCast — MVC2 Online</title>
+<title>MapleCast - MVC2 Online</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { background: #000; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: monospace; color: #0f0; }
 canvas { image-rendering: pixelated; border: 2px solid #333; }
-#status { margin: 10px; font-size: 14px; }
-#controls { margin: 10px; font-size: 12px; color: #888; }
-#diag { position: fixed; top: 10px; right: 10px; background: rgba(0,0,0,0.85); color: #0f0; font-size: 11px; padding: 10px; border: 1px solid #333; font-family: monospace; white-space: pre; min-width: 280px; }
-button { background: #222; color: #0f0; border: 1px solid #0f0; padding: 8px 16px; margin: 5px; cursor: pointer; font-family: monospace; }
+#status { margin: 10px; font-size: 16px; text-align: center; }
+#lobby { margin: 10px; font-size: 13px; color: #888; }
+#controls { margin: 10px; }
+#diag { position: fixed; top: 10px; right: 10px; background: rgba(0,0,0,0.9); color: #0f0; font-size: 10px; padding: 8px; border: 1px solid #333; font-family: monospace; white-space: pre; min-width: 260px; }
+button { background: #222; color: #0f0; border: 1px solid #0f0; padding: 10px 20px; margin: 5px; cursor: pointer; font-family: monospace; font-size: 14px; }
 button:hover { background: #0f0; color: #000; }
+button:disabled { opacity: 0.3; cursor: not-allowed; }
+input { background: #111; color: #0f0; border: 1px solid #333; padding: 8px; font-family: monospace; font-size: 14px; width: 200px; text-align: center; }
+.slot { display: inline-block; padding: 5px 10px; margin: 3px; border: 1px solid #333; min-width: 120px; text-align: center; }
+.slot.taken { border-color: #0f0; color: #0f0; }
+.slot.me { border-color: #ff0; color: #ff0; }
+.slot.empty { border-color: #333; color: #555; }
 </style>
 </head>
 <body>
-<div id="status">MapleCast — press Connect</div>
+<div id="status">MapleCast - MVC2</div>
 <canvas id="screen" width="640" height="480"></canvas>
+<div id="lobby"></div>
 <div id="controls">
-  <button onclick="connect(1)">Connect as P1</button>
-  <button onclick="connect(2)">Connect as P2</button>
+  <input id="nameInput" placeholder="Your name" maxlength="16" />
+  <button id="joinBtn" onclick="joinGame()">Press START to Join</button>
 </div>
 <div id="diag"></div>
 
 <script>
 const canvas = document.getElementById('screen');
 const ctx = canvas.getContext('2d');
-const status = document.getElementById('status');
+const statusEl = document.getElementById('status');
+const lobbyEl = document.getElementById('lobby');
 const diagEl = document.getElementById('diag');
+const joinBtn = document.getElementById('joinBtn');
+const nameInput = document.getElementById('nameInput');
 
 let ws = null;
 let decoder = null;
 let frameCount = 0;
 let startTime = 0;
 let gamepadInterval = null;
+let mySlot = -1;
+let myId = localStorage.getItem('maplecast_id');
+if (!myId) { myId = crypto.randomUUID(); localStorage.setItem('maplecast_id', myId); }
+let myName = localStorage.getItem('maplecast_name') || '';
+nameInput.value = myName;
 
-// Diagnostics
 const diag = {
-  fps: 0,
-  frameCount: 0,
-  serverFrame: 0,
-  bytesPerFrame: 0,
-  totalBytes: 0,
-
-  // Latency tracking
+  fps: 0, serverFrame: 0, bytesPerFrame: 0, totalBytes: 0,
+  decodeSamples: [], serverCaptureSamples: [], serverEncodeSamples: [],
+  serverTotalSamples: [], jitterSamples: [],
+  prevEncodeDoneUs: 0, prevClientRecvMs: 0,
+  droppedFrames: 0, gamepadActive: false, inputSendCount: 0,
+  frameIntervals: [], p1: {}, p2: {},
   decodeStartMs: 0,
-  decodeEndMs: 0,
-  decodeLat: 0,        // ms to decode one frame
-  decodeSamples: [],
-
-  // Server-side pipeline (microseconds)
-  serverCaptureUs: 0,
-  serverEncodeUs: 0,
-  serverTotalUs: 0,
-  serverCaptureSamples: [],
-  serverEncodeSamples: [],
-  serverTotalSamples: [],
-
-  // Jitter tracking
-  jitterSamples: [],
-  prevEncodeDoneUs: 0,
-  prevClientRecvMs: 0,
-
-  wsRecvMs: 0,
-
-  // Input
-  gamepadActive: false,
-  inputSendCount: 0,
-  lastInputMs: 0,
-
-  // Frame interval
-  frameIntervals: [],
-  avgFrameInterval: 0,
-
-  droppedFrames: 0,
 };
 
 function avg(arr) { return arr.length > 0 ? arr.reduce((a,b) => a+b, 0) / arr.length : 0; }
 
-function updateDiagDisplay() {
-  const kbps = (diag.totalBytes * 8 / 1000 / ((performance.now() - startTime) / 1000)).toFixed(0);
-
-  const srvCapture = (avg(diag.serverCaptureSamples) / 1000).toFixed(2);
-  const srvEncode = (avg(diag.serverEncodeSamples) / 1000).toFixed(2);
-  const srvTotal = (avg(diag.serverTotalSamples) / 1000).toFixed(2);
-  const clientDecode = avg(diag.decodeSamples).toFixed(2);
-  const frameInt = avg(diag.frameIntervals).toFixed(1);
-  const jitter = avg(diag.jitterSamples).toFixed(2);
-
+function updateDiag() {
+  const kbps = startTime > 0 ? (diag.totalBytes * 8 / 1000 / ((performance.now() - startTime) / 1000)).toFixed(0) : '0';
   const p1 = diag.p1 || {};
   const p2 = diag.p2 || {};
-  const p1btn = (p1.btn !== undefined) ? '0x' + p1.btn.toString(16).padStart(4, '0').toUpperCase() : '?';
-  const p2btn = (p2.btn !== undefined) ? '0x' + p2.btn.toString(16).padStart(4, '0').toUpperCase() : '?';
+  const srvTotal = (avg(diag.serverTotalSamples) / 1000).toFixed(2);
+  const srvEnc = (avg(diag.serverEncodeSamples) / 1000).toFixed(2);
+  const dec = avg(diag.decodeSamples).toFixed(2);
+  const jit = avg(diag.jitterSamples).toFixed(2);
+  const fi = avg(diag.frameIntervals).toFixed(1);
 
   diagEl.textContent =
-`=== MapleCast Diagnostics ===
-FPS:              ${diag.fps.toFixed(1)}
-Server frame:     ${diag.serverFrame}
-Bitrate:          ${kbps} kbps
-Frame size:       ${diag.bytesPerFrame} B
-Frame interval:   ${frameInt}ms
+`=== MapleCast ===
+FPS: ${diag.fps.toFixed(1)}  Frame: ${diag.serverFrame}
+${kbps}kbps  ${diag.bytesPerFrame}B  ${fi}ms/f
 
---- Server Pipeline ---
-Input>Capture:    ${srvCapture}ms
-Capture>Encode:   ${srvEncode}ms
-Total server:     ${srvTotal}ms
+-- Server --
+Encode: ${srvEnc}ms  Total: ${srvTotal}ms
 
---- Client Pipeline ---
-Decode:           ${clientDecode}ms
-Jitter:           ${jitter}ms
-Dropped:          ${diag.droppedFrames}
+-- Client --
+Decode: ${dec}ms  Jitter: ${jit}ms
+Drops: ${diag.droppedFrames}
 
---- Player 1 ---
-Input rate:       ${p1.pps || 0}/sec
-State changes:    ${p1.cps || 0}/sec
-Buttons:          ${p1btn}
-Triggers:         L:${p1.lt || 0} R:${p1.rt || 0}
+-- P1 --
+Rate: ${p1.pps||0}/s  Chg: ${p1.cps||0}/s
+Btn: 0x${(p1.btn||0xFFFF).toString(16).padStart(4,'0')}
 
---- Player 2 ---
-Input rate:       ${p2.pps || 0}/sec
-State changes:    ${p2.cps || 0}/sec
-Buttons:          ${p2btn}
-Triggers:         L:${p2.lt || 0} R:${p2.rt || 0}
+-- P2 --
+Rate: ${p2.pps||0}/s  Chg: ${p2.cps||0}/s
+Btn: 0x${(p2.btn||0xFFFF).toString(16).padStart(4,'0')}
 
---- Browser Input ---
-Gamepad:          ${diag.gamepadActive ? 'CONNECTED' : 'none'}
-Sent:             ${diag.inputSendCount}
-
---- End-to-End ---
-Server:           ${srvTotal}ms
-+net+proxy+decode ~${(parseFloat(srvTotal) + 2.0 + parseFloat(clientDecode)).toFixed(1)}ms`;
+-- Me --
+Slot: ${mySlot >= 0 ? 'P'+(mySlot+1) : 'spectator'}
+Pad: ${diag.gamepadActive ? 'YES' : 'no'}  Sent: ${diag.inputSendCount}
+E2E: ~${(parseFloat(srvTotal) + 2.0 + parseFloat(dec)).toFixed(1)}ms`;
 }
 
 function initDecoder() {
   decoder = new VideoDecoder({
     output: (frame) => {
-      diag.decodeEndMs = performance.now();
-      diag.decodeLat = diag.decodeEndMs - diag.decodeStartMs;
-      diag.decodeSamples.push(diag.decodeLat);
+      const decEnd = performance.now();
+      diag.decodeSamples.push(decEnd - diag.decodeStartMs);
       if (diag.decodeSamples.length > 60) diag.decodeSamples.shift();
-
       ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
       frame.close();
       frameCount++;
-
       if (frameCount % 30 === 0) {
-        const elapsed = (performance.now() - startTime) / 1000;
-        diag.fps = frameCount / elapsed;
-        updateDiagDisplay();
+        diag.fps = frameCount / ((performance.now() - startTime) / 1000);
+        updateDiag();
       }
     },
-    error: (e) => {
-      console.error('Decoder error:', e);
-      status.textContent = 'Decoder error: ' + e.message;
-    }
+    error: (e) => { console.error('Decoder error:', e); }
   });
-
   decoder.configure({
     codec: 'avc1.42001e',
-    codedWidth: 640,
-    codedHeight: 480,
+    codedWidth: 640, codedHeight: 480,
     optimizeForLatency: true,
+    hardwareAcceleration: "prefer-hardware",
   });
 }
 
 let lastFrameTime = 0;
 
-function connect(player) {
-  if (ws) {
-    ws.close();
-    if (gamepadInterval) clearInterval(gamepadInterval);
-  }
+function connect() {
+  if (ws) { ws.close(); if (gamepadInterval) clearInterval(gamepadInterval); }
 
   const wsHost = window.location.hostname || '127.0.0.1';
-  const wsPort = 8080;
-  const url = `ws://${wsHost}:${wsPort}/p${player}`;
-
-  status.textContent = `Connecting to ${url}...`;
+  const url = `ws://${wsHost}:8080`;
+  statusEl.textContent = 'Connecting...';
 
   ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
-    status.textContent = `Connected as P${player} — play!`;
+    statusEl.textContent = 'Connected - watching';
     frameCount = 0;
     startTime = performance.now();
     lastFrameTime = 0;
     initDecoder();
-    startGamepadPolling();
+    joinBtn.disabled = false;
   };
 
   ws.onmessage = (event) => {
+    if (typeof event.data === 'string') {
+      // JSON control message
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'assigned') {
+          mySlot = msg.slot;
+          if (mySlot >= 0) {
+            statusEl.textContent = `You are P${mySlot + 1} - FIGHT!`;
+            joinBtn.textContent = `Playing as P${mySlot + 1}`;
+            joinBtn.disabled = true;
+            startGamepadPolling();
+          } else {
+            statusEl.textContent = 'Game full - watching';
+          }
+        }
+        if (msg.type === 'status') {
+          updateLobby(msg);
+        }
+      } catch (e) {}
+      return;
+    }
+
+    // Binary = video frame
     if (!decoder || decoder.state === 'closed') return;
-
     const now = performance.now();
-    diag.wsRecvMs = now;
-
-    // Frame interval tracking
     if (lastFrameTime > 0) {
-      const interval = now - lastFrameTime;
-      diag.frameIntervals.push(interval);
+      diag.frameIntervals.push(now - lastFrameTime);
       if (diag.frameIntervals.length > 60) diag.frameIntervals.shift();
     }
     lastFrameTime = now;
 
     const buf = new Uint8Array(event.data);
-
-    // Parse header: timing(28) + p1stats(8) + p2stats(8) + H.264
-    // = 44 bytes header minimum
     if (buf.length < 44) return;
-
     const view = new DataView(event.data);
-    function readI64(offset) {
-      return view.getUint32(offset, true) + view.getUint32(offset + 4, true) * 4294967296;
-    }
-    // Timing
+    function readI64(o) { return view.getUint32(o,true) + view.getUint32(o+4,true) * 4294967296; }
+
     const inputTimeUs = readI64(0);
     const captureTimeUs = readI64(8);
     const encodeDoneTimeUs = readI64(16);
-    const serverFrame = view.getUint32(24, true);
-    // P1 stats
-    diag.p1 = {
-      pps: view.getUint16(28, true),
-      cps: view.getUint16(30, true),
-      btn: view.getUint16(32, true),
-      lt: buf[34], rt: buf[35],
-    };
-    // P2 stats
-    diag.p2 = {
-      pps: view.getUint16(36, true),
-      cps: view.getUint16(38, true),
-      btn: view.getUint16(40, true),
-      lt: buf[42], rt: buf[43],
-    };
-    const h264Data = buf.slice(44);
+    diag.serverFrame = view.getUint32(24, true);
+    diag.p1 = { pps: view.getUint16(28,true), cps: view.getUint16(30,true), btn: view.getUint16(32,true), lt: buf[34], rt: buf[35] };
+    diag.p2 = { pps: view.getUint16(36,true), cps: view.getUint16(38,true), btn: view.getUint16(40,true), lt: buf[42], rt: buf[43] };
+    const h264 = buf.slice(44);
 
-    diag.serverFrame = serverFrame;
-    diag.bytesPerFrame = h264Data.length;
-    diag.totalBytes += h264Data.length;
+    diag.bytesPerFrame = h264.length;
+    diag.totalBytes += h264.length;
 
-    // Server-side pipeline (all in microseconds, same clock)
-    const serverCaptureUs = captureTimeUs - inputTimeUs;     // input read → capture start
-    const serverEncodeUs = encodeDoneTimeUs - captureTimeUs; // capture → encode done
-    const serverTotalUs = encodeDoneTimeUs - inputTimeUs;    // input → encode done
-    diag.serverCaptureUs = serverCaptureUs;
-    diag.serverEncodeUs = serverEncodeUs;
-    diag.serverTotalUs = serverTotalUs;
-
-    // Track server-side pipeline averages
-    diag.serverCaptureSamples.push(serverCaptureUs);
-    diag.serverEncodeSamples.push(serverEncodeUs);
-    diag.serverTotalSamples.push(serverTotalUs);
+    const srvCapUs = captureTimeUs - inputTimeUs;
+    const srvEncUs = encodeDoneTimeUs - captureTimeUs;
+    const srvTotUs = encodeDoneTimeUs - inputTimeUs;
+    diag.serverCaptureSamples.push(srvCapUs);
+    diag.serverEncodeSamples.push(srvEncUs);
+    diag.serverTotalSamples.push(srvTotUs);
     if (diag.serverCaptureSamples.length > 60) diag.serverCaptureSamples.shift();
     if (diag.serverEncodeSamples.length > 60) diag.serverEncodeSamples.shift();
     if (diag.serverTotalSamples.length > 60) diag.serverTotalSamples.shift();
 
-    // Inter-frame jitter (server timestamps vs client timestamps)
     if (diag.prevEncodeDoneUs > 0) {
-      const serverDeltaUs = encodeDoneTimeUs - diag.prevEncodeDoneUs;
-      const clientDeltaMs = now - diag.prevClientRecvMs;
-      const jitterMs = Math.abs(clientDeltaMs - serverDeltaUs / 1000);
-      diag.jitterSamples.push(jitterMs);
+      const jit = Math.abs((now - diag.prevClientRecvMs) - (encodeDoneTimeUs - diag.prevEncodeDoneUs) / 1000);
+      diag.jitterSamples.push(jit);
       if (diag.jitterSamples.length > 60) diag.jitterSamples.shift();
     }
     diag.prevEncodeDoneUs = encodeDoneTimeUs;
     diag.prevClientRecvMs = now;
 
     diag.decodeStartMs = performance.now();
-
-    const chunk = new EncodedVideoChunk({
-      type: 'key',
-      timestamp: serverFrame * 16667,
-      data: h264Data,
-    });
-
     try {
-      decoder.decode(chunk);
-    } catch (e) {
-      diag.droppedFrames++;
-      console.warn('Decode error:', e);
-    }
+      decoder.decode(new EncodedVideoChunk({ type: 'key', timestamp: diag.serverFrame * 16667, data: h264 }));
+    } catch (e) { diag.droppedFrames++; }
   };
 
   ws.onclose = () => {
-    status.textContent = 'Disconnected';
+    statusEl.textContent = 'Disconnected';
+    joinBtn.disabled = false;
+    joinBtn.textContent = 'Press START to Join';
+    mySlot = -1;
     if (gamepadInterval) clearInterval(gamepadInterval);
   };
-
-  ws.onerror = (e) => {
-    status.textContent = 'Connection error';
-    console.error('WebSocket error:', e);
-  };
+  ws.onerror = () => { statusEl.textContent = 'Connection error'; };
 }
 
-// Gamepad API
+function joinGame() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { connect(); return; }
+  myName = nameInput.value.trim() || 'Player';
+  localStorage.setItem('maplecast_name', myName);
+  ws.send(JSON.dumps ? JSON.dumps({type:'join', id:myId, name:myName}) : JSON.stringify({type:'join', id:myId, name:myName}));
+  joinBtn.textContent = 'Joining...';
+  joinBtn.disabled = true;
+}
+
+function updateLobby(msg) {
+  let html = '';
+  for (const [slot, label] of [['p1','P1'], ['p2','P2']]) {
+    const p = msg[slot];
+    if (p && p.connected) {
+      const isMe = p.id === myId.substring(0,8);
+      html += `<span class="slot ${isMe ? 'me' : 'taken'}">${label}: ${p.name}${isMe ? ' (you)' : ''}</span> `;
+    } else {
+      html += `<span class="slot empty">${label}: open</span> `;
+    }
+  }
+  lobbyEl.innerHTML = html;
+}
+
 function startGamepadPolling() {
+  if (gamepadInterval) clearInterval(gamepadInterval);
   let prevW3 = null;
-
   gamepadInterval = setInterval(() => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-    const gamepads = navigator.getGamepads();
-    const gp = gamepads[0];
+    if (!ws || ws.readyState !== WebSocket.OPEN || mySlot < 0) return;
+    const gp = navigator.getGamepads()[0];
     if (!gp) { diag.gamepadActive = false; return; }
     diag.gamepadActive = true;
 
-    let buttons = 0xFFFF;
-    if (gp.buttons[0]?.pressed) buttons &= ~0x0004; // A
-    if (gp.buttons[1]?.pressed) buttons &= ~0x0002; // B
-    if (gp.buttons[2]?.pressed) buttons &= ~0x0400; // X
-    if (gp.buttons[3]?.pressed) buttons &= ~0x0200; // Y
-    if (gp.buttons[9]?.pressed) buttons &= ~0x0008; // Start
-    if (gp.buttons[12]?.pressed) buttons &= ~0x0010; // Up
-    if (gp.buttons[13]?.pressed) buttons &= ~0x0020; // Down
-    if (gp.buttons[14]?.pressed) buttons &= ~0x0040; // Left
-    if (gp.buttons[15]?.pressed) buttons &= ~0x0080; // Right
+    let btn = 0xFFFF;
+    if (gp.buttons[0]?.pressed) btn &= ~0x0004;
+    if (gp.buttons[1]?.pressed) btn &= ~0x0002;
+    if (gp.buttons[2]?.pressed) btn &= ~0x0400;
+    if (gp.buttons[3]?.pressed) btn &= ~0x0200;
+    if (gp.buttons[9]?.pressed) btn &= ~0x0008;
+    if (gp.buttons[12]?.pressed) btn &= ~0x0010;
+    if (gp.buttons[13]?.pressed) btn &= ~0x0020;
+    if (gp.buttons[14]?.pressed) btn &= ~0x0040;
+    if (gp.buttons[15]?.pressed) btn &= ~0x0080;
+    const lt = Math.floor((gp.buttons[6]?.value||0)*255);
+    const rt = Math.floor((gp.buttons[7]?.value||0)*255);
 
-    const lt = Math.floor((gp.buttons[6]?.value || 0) * 255);
-    const rt = Math.floor((gp.buttons[7]?.value || 0) * 255);
-
-    const w3 = new Uint8Array([lt, rt, (buttons >> 8) & 0xFF, buttons & 0xFF]);
-    const w3Hex = Array.from(w3).map(b => b.toString(16).padStart(2,'0')).join('');
-
-    if (w3Hex !== prevW3) {
-      ws.send(w3);
-      prevW3 = w3Hex;
-      diag.inputSendCount++;
-      diag.lastInputMs = performance.now();
-    }
-  }, 8);
+    const w3 = new Uint8Array([lt, rt, (btn>>8)&0xFF, btn&0xFF]);
+    // Always send — server drains and keeps latest
+    ws.send(w3);
+    diag.inputSendCount++;
+  }, 4); // 250Hz polling
 }
 
 // Waiting screen
 ctx.fillStyle = '#111';
 ctx.fillRect(0, 0, 640, 480);
 ctx.fillStyle = '#0f0';
-ctx.font = '20px monospace';
+ctx.font = '24px monospace';
 ctx.textAlign = 'center';
-ctx.fillText('MapleCast', 320, 220);
+ctx.fillText('MapleCast', 320, 200);
 ctx.font = '14px monospace';
-ctx.fillText('Press Connect as P1 or P2', 320, 260);
+ctx.fillText('MVC2 Online', 320, 230);
+ctx.font = '12px monospace';
+ctx.fillStyle = '#888';
+ctx.fillText('Enter your name and press START to join', 320, 280);
 
-diagEl.textContent = '=== MapleCast Diagnostics ===\nWaiting for connection...';
+diagEl.textContent = '=== MapleCast ===\nWaiting...';
+
+// Auto-connect on page load
+connect();
 </script>
 </body>
 </html>
