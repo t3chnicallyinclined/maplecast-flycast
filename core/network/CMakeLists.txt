@@ -10,6 +10,10 @@ target_sources(${PROJECT_NAME} PRIVATE
         maplecast_stream.h
         maplecast_gamestate.cpp
         maplecast_gamestate.h
+        maplecast_spritelearn.cpp
+        maplecast_spritelearn.h
+        maplecast_ta_capture.cpp
+        maplecast_ta_capture.h
         maplecast_telemetry.cpp
         maplecast_telemetry.h
         miniupnp.cpp

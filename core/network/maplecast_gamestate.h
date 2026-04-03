@@ -27,6 +27,7 @@ struct CharacterState {
 	uint16_t sprite_id;
 	uint16_t animation_state;
 	uint16_t anim_timer;
+	uint32_t anim_pointer;      // pointer to animation table in DC RAM
 };
 
 struct GameState {

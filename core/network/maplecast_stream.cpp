@@ -23,6 +23,7 @@
 #include "maplecast.h"
 #include "maplecast_telemetry.h"
 #include "maplecast_gamestate.h"
+#include "maplecast_ta_capture.h"
 #include "hw/pvr/Renderer_if.h"
 #include "wsi/gl_context.h"
 
@@ -729,16 +730,48 @@ void onFrameRendered()
 		broadcastBinary(_sendBuf, totalPayload);
 
 		// Send game state as binary alongside video (every frame)
-		// 240 bytes — character positions, health, animations, meters, timer
+		// Game state + UV coordinates from TA display list
 		{
-			static uint8_t gsBuf[4 + 300];
+			static uint8_t gsBuf[4 + 600];  // game state + UV data
 			maplecast_gamestate::GameState gs;
 			maplecast_gamestate::readGameState(gs);
+
+			// Capture UV coords from TA display list
+			float sx[6], sy[6];
+			bool act[6];
+			for (int i = 0; i < 6; i++) {
+				sx[i] = gs.chars[i].screen_x;
+				sy[i] = gs.chars[i].screen_y;
+				act[i] = gs.chars[i].active != 0;
+			}
+			maplecast_ta_capture::captureFrame(sx, sy, act);
+
+			// Serialize game state
 			gsBuf[0] = 'G'; gsBuf[1] = 'S';
-			int gsBytes = maplecast_gamestate::serialize(gs, gsBuf + 4, 296);
-			uint16_t gsSize = (uint16_t)gsBytes;
-			memcpy(gsBuf + 2, &gsSize, 2);
-			broadcastBinary(gsBuf, 4 + gsBytes);
+			int off = 4;
+			int gsBytes = maplecast_gamestate::serialize(gs, gsBuf + off, 296);
+			off += gsBytes;
+
+			// Append UV data for each character (24 bytes per char: u0,v0,u1,v1 + tex_w,h + tex_addr + found)
+			for (int i = 0; i < 6; i++) {
+				const auto& sf = maplecast_ta_capture::getFrame(i);
+				memcpy(gsBuf + off, &sf.u0, 4); off += 4;
+				memcpy(gsBuf + off, &sf.v0, 4); off += 4;
+				memcpy(gsBuf + off, &sf.u1, 4); off += 4;
+				memcpy(gsBuf + off, &sf.v1, 4); off += 4;
+				memcpy(gsBuf + off, &sf.tex_width, 2); off += 2;
+				memcpy(gsBuf + off, &sf.tex_height, 2); off += 2;
+				memcpy(gsBuf + off, &sf.tex_addr, 4); off += 4;
+				gsBuf[off++] = sf.found ? 1 : 0;
+				gsBuf[off++] = 0; // padding
+				gsBuf[off++] = 0;
+				gsBuf[off++] = 0;
+				// 28 bytes per character
+			}
+
+			uint16_t totalSize = (uint16_t)(off - 4);
+			memcpy(gsBuf + 2, &totalSize, 2);
+			broadcastBinary(gsBuf, off);
 		}
 
 		if (frameNum % 300 == 0)

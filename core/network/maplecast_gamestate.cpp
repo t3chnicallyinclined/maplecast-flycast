@@ -39,6 +39,7 @@ static const uint32_t OFF_RED_HEALTH      = 0x424;
 static const uint32_t OFF_SPECIAL_MOVE    = 0x1E9;
 static const uint32_t OFF_ASSIST_TYPE     = 0x4C9;
 static const uint32_t OFF_PALETTE         = 0x52D;
+static const uint32_t OFF_ANIM_POINTER    = 0x168;  // pointer to animation table
 
 // Global state addresses
 static const uint32_t ADDR_IN_MATCH       = 0x8C289624;
@@ -102,6 +103,7 @@ void readGameState(GameState& state)
 		c.special_move_id = (uint8_t)addrspace::read8(base + OFF_SPECIAL_MOVE);
 		c.assist_type     = (uint8_t)addrspace::read8(base + OFF_ASSIST_TYPE);
 		c.palette_id      = (uint8_t)addrspace::read8(base + OFF_PALETTE);
+		c.anim_pointer    = addrspace::read32(base + OFF_ANIM_POINTER);
 	}
 }
 

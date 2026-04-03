@@ -419,6 +419,24 @@ function parseGameState(buf) {
     });
   }
 
+  // Parse UV data if present (28 bytes per character, after game state)
+  const uvBase = charBase + 6 * 38;  // after 6 characters
+  if (buf.length >= uvBase + 6 * 28 + 4) {  // +4 for GS header
+    for (let i = 0; i < 6; i++) {
+      const uo = uvBase + i * 28;
+      if (gameState.chars[i]) {
+        gameState.chars[i].uv_u0 = view.getFloat32(uo + 0, true);
+        gameState.chars[i].uv_v0 = view.getFloat32(uo + 4, true);
+        gameState.chars[i].uv_u1 = view.getFloat32(uo + 8, true);
+        gameState.chars[i].uv_v1 = view.getFloat32(uo + 12, true);
+        gameState.chars[i].tex_w  = view.getUint16(uo + 16, true);
+        gameState.chars[i].tex_h  = view.getUint16(uo + 18, true);
+        gameState.chars[i].tex_addr = view.getUint32(uo + 20, true);
+        gameState.chars[i].uv_found = buf[uo + 24];
+      }
+    }
+  }
+
   // Update diag from game state
   frameCount++;
   if (frameCount % 30 === 0) {
@@ -482,19 +500,27 @@ function renderGameState() {
     const spriteImg = spriteImages[String(c.id)];
 
     if (spriteImg) {
-      // Use sprite_id to index into the sprite sheet
-      // Estimate frame size: each character is roughly 80-120px wide in the sheet
-      const frameW = 80;  // estimated frame width
-      const frameH = spriteImg.height;  // full sheet height per frame
-      const numFrames = Math.floor(spriteImg.width / frameW);
+      let srcX, srcY, srcW, srcH;
 
-      // sprite_id modulo number of frames gives us horizontal position
-      const frameIdx = numFrames > 0 ? (c.sprite_id % numFrames) : 0;
-      const srcX = frameIdx * frameW;
-      const srcW = frameW;
-      const srcH = frameH;
+      if (c.uv_found && c.tex_w > 0 && c.tex_h > 0) {
+        // UV coordinates from TA display list — pixel-perfect!
+        // UVs are in texture space [0,1], but may reference a DIFFERENT texture than our sprite sheet
+        // For now, use UVs as proportional crop into our sprite sheet
+        srcX = Math.floor(c.uv_u0 * spriteImg.width);
+        srcY = Math.floor(c.uv_v0 * spriteImg.height);
+        srcW = Math.max(1, Math.floor((c.uv_u1 - c.uv_u0) * spriteImg.width));
+        srcH = Math.max(1, Math.floor((c.uv_v1 - c.uv_v0) * spriteImg.height));
+      } else {
+        // Fallback: use sprite_id as rough index
+        const frameW = 80;
+        const numFrames = Math.max(1, Math.floor(spriteImg.width / frameW));
+        const frameIdx = c.sprite_id % numFrames;
+        srcX = frameIdx * frameW;
+        srcY = 0;
+        srcW = frameW;
+        srcH = spriteImg.height;
+      }
 
-      // Draw scaled to ~60% size
       const drawW = srcW * 0.7;
       const drawH = srcH * 0.7;
 
@@ -502,9 +528,9 @@ function renderGameState() {
       if (!c.facing) {
         ctx.translate(sx, 0);
         ctx.scale(-1, 1);
-        ctx.drawImage(spriteImg, srcX, 0, srcW, srcH, -drawW/2, sy - drawH, drawW, drawH);
+        ctx.drawImage(spriteImg, srcX, srcY, srcW, srcH, -drawW/2, sy - drawH, drawW, drawH);
       } else {
-        ctx.drawImage(spriteImg, srcX, 0, srcW, srcH, sx - drawW/2, sy - drawH, drawW, drawH);
+        ctx.drawImage(spriteImg, srcX, srcY, srcW, srcH, sx - drawW/2, sy - drawH, drawW, drawH);
       }
       ctx.restore();
     } else {
