@@ -105,14 +105,57 @@ void readGameState(GameState& state)
 	}
 }
 
+static void writeU8(uint8_t* buf, int& off, uint8_t v) { buf[off++] = v; }
+static void writeU16(uint8_t* buf, int& off, uint16_t v) { memcpy(buf + off, &v, 2); off += 2; }
+static void writeU32(uint8_t* buf, int& off, uint32_t v) { memcpy(buf + off, &v, 4); off += 4; }
+static void writeF32(uint8_t* buf, int& off, float v) { memcpy(buf + off, &v, 4); off += 4; }
+
 int serialize(const GameState& state, uint8_t* buf, int maxLen)
 {
-	// Simple binary serialization — just memcpy the struct
-	// The struct is packed and consistent across platforms at these sizes
-	int needed = sizeof(GameState);
-	if (needed > maxLen) return 0;
-	memcpy(buf, &state, needed);
-	return needed;
+	if (maxLen < WIRE_SIZE) return 0;
+	int off = 0;
+
+	// Global state (5 bytes)
+	writeU8(buf, off, state.in_match);       // 0
+	writeU8(buf, off, state.game_timer);     // 1
+	writeU8(buf, off, state.stage_id);       // 2
+	writeU8(buf, off, state.p1_meter_level); // 3
+	writeU8(buf, off, state.p2_meter_level); // 4
+
+	// Global u16/u32/float fields (16 bytes)
+	writeU16(buf, off, state.p1_combo);      // 5
+	writeU16(buf, off, state.p2_combo);      // 7
+	writeU16(buf, off, state.p1_meter_fill); // 9
+	writeU16(buf, off, state.p2_meter_fill); // 11
+	writeF32(buf, off, state.camera_x);      // 13
+	writeF32(buf, off, state.camera_y);      // 17
+	writeU32(buf, off, state.frame_counter); // 21
+
+	// 6 characters × 38 bytes each (228 bytes) starting at offset 25
+	for (int i = 0; i < 6; i++)
+	{
+		const CharacterState& c = state.chars[i];
+		writeU8(buf, off, c.active);           // +0
+		writeU8(buf, off, c.character_id);     // +1
+		writeU8(buf, off, c.facing_right);     // +2
+		writeU8(buf, off, c.health);           // +3
+		writeU8(buf, off, c.red_health);       // +4
+		writeU8(buf, off, c.special_move_id);  // +5
+		writeU8(buf, off, c.assist_type);      // +6
+		writeU8(buf, off, c.palette_id);       // +7
+		writeF32(buf, off, c.pos_x);           // +8
+		writeF32(buf, off, c.pos_y);           // +12
+		writeF32(buf, off, c.screen_x);        // +16
+		writeF32(buf, off, c.screen_y);        // +20
+		writeF32(buf, off, c.vel_x);           // +24
+		writeF32(buf, off, c.vel_y);           // +28
+		writeU16(buf, off, c.sprite_id);       // +32
+		writeU16(buf, off, c.animation_state); // +34
+		writeU16(buf, off, c.anim_timer);      // +36
+		// total: 38 bytes per character
+	}
+
+	return off;  // should be WIRE_SIZE = 253
 }
 
 }  // namespace maplecast_gamestate

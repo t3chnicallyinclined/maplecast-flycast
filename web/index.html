@@ -351,50 +351,56 @@ const MVC2_CHARS = [
 let gameState = null;
 
 function parseGameState(buf) {
-  // buf: [G][S][size_u16][GameState struct]
+  // Wire format: [G][S][size_u16][serialized data]
+  // Serialized layout (no padding, field-by-field):
+  //   Global: in_match(1) timer(1) stage(1) p1_lvl(1) p2_lvl(1) = 5 bytes
+  //   p1_combo(2) p2_combo(2) p1_fill(2) p2_fill(2) camera_x(4) camera_y(4) frame(4) = 20 bytes
+  //   6 chars × 38 bytes = 228 bytes
+  //   Total: 253 bytes
   const view = new DataView(buf.buffer, buf.byteOffset);
   const size = view.getUint16(2, true);
   if (buf.length < 4 + size) return;
 
-  const off = 4; // skip GS header
+  const o = 4; // skip GS header
   gameState = {
-    in_match: buf[off + 0],
-    timer: buf[off + 1],
-    stage_id: buf[off + 2],
-    // padding byte at off+3
-    camera_x: view.getFloat32(off + 4, true),
-    camera_y: view.getFloat32(off + 8, true),
-    p1_meter_fill: view.getUint16(off + 12, true),
-    p2_meter_fill: view.getUint16(off + 14, true),
-    p1_meter_level: buf[off + 16],
-    p2_meter_level: buf[off + 17],
-    p1_combo: view.getUint16(off + 18, true),
-    p2_combo: view.getUint16(off + 20, true),
-    frame: view.getUint32(off + 24, true),
+    in_match:       buf[o + 0],
+    timer:          buf[o + 1],
+    stage_id:       buf[o + 2],
+    p1_meter_level: buf[o + 3],
+    p2_meter_level: buf[o + 4],
+    p1_combo:       view.getUint16(o + 5, true),
+    p2_combo:       view.getUint16(o + 7, true),
+    p1_meter_fill:  view.getUint16(o + 9, true),
+    p2_meter_fill:  view.getUint16(o + 11, true),
+    camera_x:       view.getFloat32(o + 13, true),
+    camera_y:       view.getFloat32(o + 17, true),
+    frame:          view.getUint32(o + 21, true),
     chars: []
   };
+  const charBase = o + 25; // global header is 25 bytes
 
-  // Parse 6 characters (36 bytes each, starting at off + 28)
-  const charOff = off + 28;
+  // 6 characters × 38 bytes each
   for (let i = 0; i < 6; i++) {
-    const co = charOff + i * 36;
+    const co = charBase + i * 38;
     gameState.chars.push({
-      active: buf[co + 0],
-      id: buf[co + 1],
-      name: MVC2_CHARS[buf[co + 1]] || '?',
-      // padding at co+2,3
-      pos_x: view.getFloat32(co + 4, true),
-      pos_y: view.getFloat32(co + 8, true),
-      screen_x: view.getFloat32(co + 12, true),
-      screen_y: view.getFloat32(co + 16, true),
-      vel_x: view.getFloat32(co + 20, true),
-      vel_y: view.getFloat32(co + 24, true),
-      facing: buf[co + 28],
-      // padding at co+29
-      sprite_id: view.getUint16(co + 30, true),
-      anim_state: view.getUint16(co + 32, true),
-      anim_timer: view.getUint16(co + 34, true),
-      // next fields would be at co+36 but struct has more padding
+      active:       buf[co + 0],
+      id:           buf[co + 1],
+      name:         MVC2_CHARS[buf[co + 1]] || '?',
+      facing:       buf[co + 2],
+      health:       buf[co + 3],
+      red_health:   buf[co + 4],
+      special_move: buf[co + 5],
+      assist_type:  buf[co + 6],
+      palette_id:   buf[co + 7],
+      pos_x:        view.getFloat32(co + 8, true),
+      pos_y:        view.getFloat32(co + 12, true),
+      screen_x:     view.getFloat32(co + 16, true),
+      screen_y:     view.getFloat32(co + 20, true),
+      vel_x:        view.getFloat32(co + 24, true),
+      vel_y:        view.getFloat32(co + 28, true),
+      sprite_id:    view.getUint16(co + 32, true),
+      anim_state:   view.getUint16(co + 34, true),
+      anim_timer:   view.getUint16(co + 36, true),
     });
   }
 

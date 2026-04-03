@@ -731,15 +731,14 @@ void onFrameRendered()
 		// Send game state as binary alongside video (every frame)
 		// 240 bytes — character positions, health, animations, meters, timer
 		{
-			static uint8_t gsBuf[4 + sizeof(maplecast_gamestate::GameState)];
+			static uint8_t gsBuf[4 + 300];
 			maplecast_gamestate::GameState gs;
 			maplecast_gamestate::readGameState(gs);
-			// Prefix with "GS" marker so client can distinguish from video
 			gsBuf[0] = 'G'; gsBuf[1] = 'S';
-			uint16_t gsSize = sizeof(gs);
+			int gsBytes = maplecast_gamestate::serialize(gs, gsBuf + 4, 296);
+			uint16_t gsSize = (uint16_t)gsBytes;
 			memcpy(gsBuf + 2, &gsSize, 2);
-			memcpy(gsBuf + 4, &gs, sizeof(gs));
-			broadcastBinary(gsBuf, 4 + sizeof(gs));
+			broadcastBinary(gsBuf, 4 + gsBytes);
 		}
 
 		if (frameNum % 300 == 0)
@@ -775,15 +774,15 @@ void onFrameAdvanced()
 	if (!_active || !_headless) return;
 	if (_clientCount.load(std::memory_order_relaxed) == 0) return;
 
-	static uint8_t gsBuf[4 + sizeof(maplecast_gamestate::GameState)];
+	static uint8_t gsBuf[4 + 300];
 	maplecast_gamestate::GameState gs;
 	maplecast_gamestate::readGameState(gs);
 
 	gsBuf[0] = 'G'; gsBuf[1] = 'S';
-	uint16_t gsSize = sizeof(gs);
+	int gsBytes = maplecast_gamestate::serialize(gs, gsBuf + 4, 296);
+	uint16_t gsSize = (uint16_t)gsBytes;
 	memcpy(gsBuf + 2, &gsSize, 2);
-	memcpy(gsBuf + 4, &gs, sizeof(gs));
-	broadcastBinary(gsBuf, 4 + sizeof(gs));
+	broadcastBinary(gsBuf, 4 + gsBytes);
 
 	static uint32_t _gsFrameCount = 0;
 	_gsFrameCount++;
