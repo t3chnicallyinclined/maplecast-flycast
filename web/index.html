@@ -127,8 +127,9 @@ let lastFrameTime = 0;
 function connect() {
   if (ws) { ws.close(); if (gamepadInterval) clearInterval(gamepadInterval); }
 
+  // Connect directly to Flycast WebSocket — NO PROXY
   const wsHost = window.location.hostname || '127.0.0.1';
-  const url = `ws://${wsHost}:8080`;
+  const url = `ws://${wsHost}:7200`;
   statusEl.textContent = 'Connecting...';
 
   ws = new WebSocket(url);
