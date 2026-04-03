@@ -33,9 +33,16 @@
 // CUDA driver API + GL interop
 #include <cuda.h>
 #include <cudaGL.h>
+#include <cuda_runtime.h>
 
 // NVENC direct API
 #include <ffnvcodec/nvEncodeAPI.h>
+
+// nvJPEG — CUDA-accelerated JPEG encode (alternative to H.264)
+#include <nvjpeg.h>
+
+// Embedded CUDA PTX kernels (RGBA→RGB strip for nvJPEG)
+#include "rgba_to_nv12_ptx.h"
 
 // WebSocket server — built into Flycast deps, no external proxy needed
 // ASIO/WSPP macros already defined on command line by Flycast's CMake
@@ -88,6 +95,17 @@ static CUcontext _cuCtx = nullptr;
 // CUDA-GL interop
 static CUgraphicsResource _cuGLResource = nullptr;
 static GLuint _registeredTexID = 0;
+
+// nvJPEG encoder (MAPLECAST_JPEG=1 to enable)
+static nvjpegHandle_t _jpegHandle = nullptr;
+static nvjpegEncoderState_t _jpegState = nullptr;
+static nvjpegEncoderParams_t _jpegParams = nullptr;
+static cudaStream_t _jpegStream = nullptr;
+static bool _useJpeg = false;
+static CUdeviceptr _cudaRGBBuf = 0;
+static size_t _cudaRGBPitch = 0;
+static CUmodule _cudaModule = nullptr;
+static CUfunction _kernelRGBAtoRGB = nullptr;
 
 // NVENC — double-buffered for async pipeline
 typedef NVENCSTATUS (NVENCAPI *PFN_NvEncodeAPICreateInstance)(NV_ENCODE_API_FUNCTION_LIST*);
@@ -351,6 +369,17 @@ static bool initCuda()
 	char name[256];
 	cuDeviceGetName(name, sizeof(name), device);
 	printf("[maplecast-stream] CUDA device: %s\n", name);
+
+	// Load CUDA PTX kernels (RGBA→RGB for nvJPEG)
+	CUresult kr = cuModuleLoadData(&_cudaModule, _ptxRGBAtoNV12);
+	if (kr != CUDA_SUCCESS)
+		printf("[maplecast-stream] PTX load failed: %d (JPEG mode unavailable)\n", kr);
+	else
+	{
+		cuModuleGetFunction(&_kernelRGBAtoRGB, _cudaModule, "rgba_to_rgb");
+		printf("[maplecast-stream] CUDA kernels loaded (RGBA→RGB ready)\n");
+	}
+
 	return true;
 }
 
@@ -528,6 +557,35 @@ bool init(int port)
 		return false;
 	}
 
+	// JPEG mode: MAPLECAST_JPEG=1 (or MAPLECAST_JPEG=85 for quality 85)
+	const char* jpegEnv = std::getenv("MAPLECAST_JPEG");
+	if (jpegEnv)
+	{
+		int quality = std::atoi(jpegEnv);
+		if (quality < 1 || quality > 100) quality = 75;
+
+		nvjpegStatus_t js = nvjpegCreateSimple(&_jpegHandle);
+		if (js == NVJPEG_STATUS_SUCCESS)
+		{
+			nvjpegEncoderStateCreate(_jpegHandle, &_jpegState, nullptr);
+			nvjpegEncoderParamsCreate(_jpegHandle, &_jpegParams, nullptr);
+			nvjpegEncoderParamsSetQuality(_jpegParams, quality, nullptr);
+			nvjpegEncoderParamsSetSamplingFactors(_jpegParams, NVJPEG_CSS_420, nullptr);
+			cudaStreamCreate(&_jpegStream);
+
+			size_t rgbPitch;
+			cuMemAllocPitch(&_cudaRGBBuf, &rgbPitch, _width * 3, _height, 16);
+			_cudaRGBPitch = rgbPitch;
+
+			_useJpeg = true;
+			printf("[maplecast-stream] *** JPEG MODE *** quality=%d, RGB pitch=%zu\n", quality, _cudaRGBPitch);
+		}
+		else
+		{
+			printf("[maplecast-stream] nvJPEG init failed (%d) — using H.264\n", js);
+		}
+	}
+
 	_active = true;
 	_frameCount = 0;
 
@@ -642,6 +700,89 @@ void onFrameRendered()
 	cuGraphicsUnmapResources(1, &_cuGLResource, 0);
 
 	pc2 = nowUs();
+
+	// JPEG path: RGBA → RGB strip (CUDA kernel) → nvJPEG encode
+	if (_useJpeg)
+	{
+		// Step 1: strip alpha channel on GPU
+		if (_kernelRGBAtoRGB && _cudaRGBBuf)
+		{
+			int rgbaPitch = (int)_cudaLinearPitch;
+			int rgbPitch = (int)_cudaRGBPitch;
+			void* args[] = {
+				(void*)&_cudaLinearBuf[0], (void*)&rgbaPitch,
+				(void*)&_cudaRGBBuf, (void*)&rgbPitch,
+				(void*)&_width, (void*)&_height
+			};
+			cuLaunchKernel(_kernelRGBAtoRGB,
+				(_width + 15) / 16, (_height + 15) / 16, 1,
+				16, 16, 1, 0, 0, args, nullptr);
+		}
+
+		// Step 2: nvJPEG encode from RGB buffer
+		nvjpegImage_t imgDesc;
+		memset(&imgDesc, 0, sizeof(imgDesc));
+		imgDesc.channel[0] = (unsigned char*)_cudaRGBBuf;
+		imgDesc.pitch[0] = _cudaRGBPitch;
+
+		nvjpegStatus_t js = nvjpegEncodeImage(_jpegHandle, _jpegState, _jpegParams,
+			&imgDesc, NVJPEG_INPUT_RGBI, _width, _height, _jpegStream);
+		cudaStreamSynchronize(_jpegStream);
+
+		if (js == NVJPEG_STATUS_SUCCESS)
+		{
+			size_t jpegSize = 0;
+			nvjpegEncodeRetrieveBitstream(_jpegHandle, _jpegState, NULL, &jpegSize, _jpegStream);
+			cudaStreamSynchronize(_jpegStream);
+
+			pc3 = nowUs();
+			uint32_t pipelineUs = (uint32_t)(pc3 - pc0);
+			uint32_t copyUs = (uint32_t)(pc2 - pc1);
+			uint32_t encodeUs = (uint32_t)(pc3 - pc2);
+
+			const auto& p1 = maplecast_input::getPlayer(0);
+			const auto& p2 = maplecast_input::getPlayer(1);
+
+			uint32_t headerSize = 16 + 8 + 8;
+			uint32_t totalPayload = headerSize + (uint32_t)jpegSize;
+
+			if (totalPayload > _sendBufSize)
+			{ free(_sendBuf); _sendBufSize = totalPayload + 65536; _sendBuf = (uint8_t*)malloc(_sendBufSize); }
+
+			uint32_t frameNum = (uint32_t)_frameCount;
+			uint32_t off = 0;
+			memcpy(_sendBuf + off, &pipelineUs, 4); off += 4;
+			memcpy(_sendBuf + off, &copyUs, 4); off += 4;
+			memcpy(_sendBuf + off, &encodeUs, 4); off += 4;
+			memcpy(_sendBuf + off, &frameNum, 4); off += 4;
+			uint16_t tmp;
+			tmp = (uint16_t)p1.packetsPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
+			tmp = (uint16_t)p1.changesPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
+			tmp = p1.buttons; memcpy(_sendBuf + off, &tmp, 2); off += 2;
+			_sendBuf[off++] = p1.lt; _sendBuf[off++] = p1.rt;
+			tmp = (uint16_t)p2.packetsPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
+			tmp = (uint16_t)p2.changesPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
+			tmp = p2.buttons; memcpy(_sendBuf + off, &tmp, 2); off += 2;
+			_sendBuf[off++] = p2.lt; _sendBuf[off++] = p2.rt;
+
+			nvjpegEncodeRetrieveBitstream(_jpegHandle, _jpegState, _sendBuf + off, &jpegSize, _jpegStream);
+			cudaStreamSynchronize(_jpegStream);
+
+			broadcastBinary(_sendBuf, totalPayload);
+
+			if (frameNum % 300 == 0)
+			{
+				printf("[maplecast-stream] F:%u JPEG | copy:%uus enc:%uus total:%uus | %zuB\n",
+					frameNum, copyUs, encodeUs, pipelineUs, jpegSize);
+				maplecast_telemetry::send("[maplecast-stream] F:%u JPEG | copy:%uus enc:%uus total:%uus | %zuB",
+					frameNum, copyUs, encodeUs, pipelineUs, jpegSize);
+			}
+		}
+
+		cuCtxPopCurrent(nullptr);
+		_frameCount++;
+		return;
+	}
 
 	// Encode: NVENC from CUDA device memory → H.264 bitstream
 	NV_ENC_MAP_INPUT_RESOURCE mapRes = {};

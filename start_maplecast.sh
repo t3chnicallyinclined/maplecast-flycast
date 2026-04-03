@@ -31,7 +31,13 @@ WEB_PID=$!
 sleep 1
 
 # Start Flycast with MapleCast input server
-echo "[3/3] Starting Flycast server..."
+# Set MAPLECAST_JPEG=75 (or 1-100) for JPEG mode, unset for H.264
+if [ -n "$MAPLECAST_JPEG" ]; then
+  echo "[3/3] Starting Flycast server... JPEG mode (quality $MAPLECAST_JPEG)"
+  export MAPLECAST_JPEG
+else
+  echo "[3/3] Starting Flycast server... H.264 mode"
+fi
 MAPLECAST=1 MAPLECAST_STREAM=1 "$DIR/build/flycast" "$ROM" &
 FLY_PID=$!
 
@@ -39,7 +45,7 @@ echo
 echo "========================================"
 echo "  All services started!"
 echo
-echo "  Flycast:    MVC2 + WebSocket on ws://localhost:7200"
+echo "  Flycast:    MVC2 + WebRTC P2P (signaling on ws://localhost:7200)"
 echo "  Web app:    http://localhost:$WEB_PORT"
 echo "  Telemetry:  UDP:7300"
 echo "  Gamepad:    UDP:7100 (input server)"
