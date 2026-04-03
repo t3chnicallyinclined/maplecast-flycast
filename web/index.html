@@ -73,28 +73,28 @@ function updateDiag() {
   const jit = avg(diag.jitterSamples).toFixed(2);
   const fi = avg(diag.frameIntervals).toFixed(1);
 
+  const hasVideo = diag.serverPipelineSamples.length > 0;
+
   diagEl.textContent =
 `=== MapleCast ===
 FPS: ${diag.fps.toFixed(1)}  Frame: ${diag.serverFrame}
 ${kbps}kbps  ${diag.bytesPerFrame}B  ${fi}ms/f
 
--- Server --
-Copy: ${srvCopy}ms  Encode: ${srvEnc}ms
-Pipeline: ${srvPipe}ms (capture>send)
-
--- Client --
-Decode: ${dec}ms  Jitter: ${jit}ms
-Drops: ${diag.droppedFrames}
+-- Stream --
+Mode: ${hasVideo ? 'H.264 Video' : 'Game State'}
+Copy: ${hasVideo ? srvCopy + 'ms' : '0ms'}
+Encode: ${hasVideo ? srvEnc + 'ms' : '0ms'}
+Pipeline: ${hasVideo ? srvPipe + 'ms' : '0ms'}
+Decode: ${hasVideo ? dec + 'ms' : '0ms (direct)'}
+Jitter: ${jit}ms  Drops: ${diag.droppedFrames}
 
 -- P1 --
 Rate: ${p1.pps||0}/s  Chg: ${p1.cps||0}/s
-Btn: 0x${(p1.btn||0xFFFF).toString(16).padStart(4,'0')}
-E2E: ~${(parseFloat(srvPipe) + ((p1.pps||0) > 1000 ? 0.3 : 1.0) + parseFloat(dec)).toFixed(1)}ms ${(p1.pps||0) > 1000 ? '(HW)' : '(web)'}
+E2E: ${hasVideo ? '~' + (parseFloat(srvPipe) + ((p1.pps||0) > 1000 ? 0.3 : 1.0) + parseFloat(dec)).toFixed(1) + 'ms' : '~0.3ms'} ${(p1.pps||0) > 1000 ? '(HW)' : '(web)'}
 
 -- P2 --
 Rate: ${p2.pps||0}/s  Chg: ${p2.cps||0}/s
-Btn: 0x${(p2.btn||0xFFFF).toString(16).padStart(4,'0')}
-E2E: ~${(parseFloat(srvPipe) + ((p2.pps||0) > 1000 ? 0.3 : 1.0) + parseFloat(dec)).toFixed(1)}ms ${(p2.pps||0) > 1000 ? '(HW)' : '(web)'}
+E2E: ${hasVideo ? '~' + (parseFloat(srvPipe) + ((p2.pps||0) > 1000 ? 0.3 : 1.0) + parseFloat(dec)).toFixed(1) + 'ms' : '~0.3ms'} ${(p2.pps||0) > 1000 ? '(HW)' : '(web)'}
 
 -- Me --
 Slot: ${mySlot >= 0 ? 'P'+(mySlot+1) : 'spectator'}
