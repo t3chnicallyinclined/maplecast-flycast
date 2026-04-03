@@ -45,6 +45,12 @@ let frameCount = 0;
 let startTime = 0;
 let gamepadInterval = null;
 let mySlot = -1;
+
+// WebRTC P2P DataChannel
+let pc = null;
+let videoDc = null;
+let inputDc = null;
+let useDataChannel = false;
 let myId = localStorage.getItem('maplecast_id');
 if (!myId) { myId = crypto.randomUUID(); localStorage.setItem('maplecast_id', myId); }
 let myName = localStorage.getItem('maplecast_name') || '';
@@ -156,7 +162,6 @@ function connect() {
 
   ws.onmessage = (event) => {
     if (typeof event.data === 'string') {
-      // JSON control message
       try {
         const msg = JSON.parse(event.data);
         if (msg.type === 'assigned') {
@@ -165,63 +170,33 @@ function connect() {
             statusEl.textContent = `You are P${mySlot + 1} - FIGHT!`;
             joinBtn.textContent = `Playing as P${mySlot + 1}`;
             joinBtn.disabled = true;
+            setupWebRTC();
             startGamepadPolling();
           } else {
             statusEl.textContent = 'Game full - watching';
+            setupWebRTC(); // spectators get video DataChannel too
           }
         }
         if (msg.type === 'status') {
           updateLobby(msg);
         }
+        // WebRTC signaling: SDP answer from server
+        if (msg.type === 'answer' && pc) {
+          pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: msg.sdp }))
+            .catch(e => console.warn('[rtc] setRemoteDescription failed:', e));
+        }
+        // WebRTC signaling: ICE candidate from server
+        if (msg.type === 'ice-candidate' && pc) {
+          pc.addIceCandidate(new RTCIceCandidate({
+            candidate: msg.candidate, sdpMid: msg.sdpMid
+          })).catch(e => console.warn('[rtc] addIceCandidate failed:', e));
+        }
       } catch (e) {}
       return;
     }
 
-    // Binary = video frame
-    if (!decoder || decoder.state === 'closed') return;
-    const now = performance.now();
-    if (lastFrameTime > 0) {
-      diag.frameIntervals.push(now - lastFrameTime);
-      if (diag.frameIntervals.length > 60) diag.frameIntervals.shift();
-    }
-    lastFrameTime = now;
-
-    const buf = new Uint8Array(event.data);
-    // Header: [pipelineUs(4)][copyUs(4)][encodeUs(4)][frameNum(4)] + p1(8) + p2(8) = 32 bytes
-    if (buf.length < 32) return;
-    const view = new DataView(event.data);
-
-    const pipelineUs = view.getUint32(0, true);   // total capture+encode
-    const copyUs = view.getUint32(4, true);        // GPU copy
-    const encodeUs = view.getUint32(8, true);      // NVENC encode
-    diag.serverFrame = view.getUint32(12, true);
-    diag.p1 = { pps: view.getUint16(16,true), cps: view.getUint16(18,true), btn: view.getUint16(20,true), lt: buf[22], rt: buf[23] };
-    diag.p2 = { pps: view.getUint16(24,true), cps: view.getUint16(26,true), btn: view.getUint16(28,true), lt: buf[30], rt: buf[31] };
-    const h264 = buf.slice(32);
-
-    diag.bytesPerFrame = h264.length;
-    diag.totalBytes += h264.length;
-
-    // Server pipeline — pre-computed uint32, no 64-bit precision issues
-    diag.serverPipelineSamples.push(pipelineUs);
-    diag.serverEncodeSamples.push(encodeUs);
-    diag.serverCopySamples.push(copyUs);
-    if (diag.serverPipelineSamples.length > 60) diag.serverPipelineSamples.shift();
-    if (diag.serverEncodeSamples.length > 60) diag.serverEncodeSamples.shift();
-    if (diag.serverCopySamples.length > 60) diag.serverCopySamples.shift();
-
-    // Jitter = deviation from perfect 16.67ms frame interval
-    if (diag.prevRecvMs > 0) {
-      const jit = Math.abs((now - diag.prevRecvMs) - 16.667);
-      diag.jitterSamples.push(jit);
-      if (diag.jitterSamples.length > 60) diag.jitterSamples.shift();
-    }
-    diag.prevRecvMs = now;
-
-    diag.decodeStartMs = performance.now();
-    try {
-      decoder.decode(new EncodedVideoChunk({ type: 'key', timestamp: diag.serverFrame * 16667, data: h264 }));
-    } catch (e) { diag.droppedFrames++; }
+    // Binary via WebSocket = fallback (only when DataChannel not active)
+    if (!useDataChannel) handleVideoFrame(event.data);
   };
 
   ws.onclose = () => {
@@ -232,6 +207,131 @@ function connect() {
     if (gamepadInterval) clearInterval(gamepadInterval);
   };
   ws.onerror = () => { statusEl.textContent = 'Connection error'; };
+}
+
+// ============================================================
+// Video Frame Handler — shared by WebSocket and DataChannel
+// ============================================================
+function handleVideoFrame(data) {
+  if (!decoder || decoder.state === 'closed') return;
+  const now = performance.now();
+  if (lastFrameTime > 0) {
+    diag.frameIntervals.push(now - lastFrameTime);
+    if (diag.frameIntervals.length > 60) diag.frameIntervals.shift();
+  }
+  lastFrameTime = now;
+
+  const buf = new Uint8Array(data);
+  if (buf.length < 32) return;
+  const view = new DataView(data instanceof ArrayBuffer ? data : data.buffer);
+
+  const pipelineUs = view.getUint32(0, true);
+  const copyUs = view.getUint32(4, true);
+  const encodeUs = view.getUint32(8, true);
+  diag.serverFrame = view.getUint32(12, true);
+  diag.p1 = { pps: view.getUint16(16,true), cps: view.getUint16(18,true), btn: view.getUint16(20,true), lt: buf[22], rt: buf[23] };
+  diag.p2 = { pps: view.getUint16(24,true), cps: view.getUint16(26,true), btn: view.getUint16(28,true), lt: buf[30], rt: buf[31] };
+  const h264 = buf.slice(32);
+
+  diag.bytesPerFrame = h264.length;
+  diag.totalBytes += h264.length;
+
+  diag.serverPipelineSamples.push(pipelineUs);
+  diag.serverEncodeSamples.push(encodeUs);
+  diag.serverCopySamples.push(copyUs);
+  if (diag.serverPipelineSamples.length > 60) diag.serverPipelineSamples.shift();
+  if (diag.serverEncodeSamples.length > 60) diag.serverEncodeSamples.shift();
+  if (diag.serverCopySamples.length > 60) diag.serverCopySamples.shift();
+
+  if (diag.prevRecvMs > 0) {
+    const jit = Math.abs((now - diag.prevRecvMs) - 16.667);
+    diag.jitterSamples.push(jit);
+    if (diag.jitterSamples.length > 60) diag.jitterSamples.shift();
+  }
+  diag.prevRecvMs = now;
+
+  diag.decodeStartMs = performance.now();
+  try {
+    decoder.decode(new EncodedVideoChunk({ type: 'key', timestamp: diag.serverFrame * 16667, data: h264 }));
+  } catch (e) { diag.droppedFrames++; }
+}
+
+// ============================================================
+// WebRTC DataChannel — P2P NAT hole-punching
+// ============================================================
+function setupWebRTC() {
+  if (pc) { pc.close(); pc = null; }
+  useDataChannel = false;
+
+  const config = {
+    iceServers: [
+      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
+    ]
+  };
+  pc = new RTCPeerConnection(config);
+
+  // Create DataChannels (browser creates, server accepts via onDataChannel)
+  videoDc = pc.createDataChannel('video', { ordered: false, maxRetransmits: 0 });
+  inputDc = pc.createDataChannel('input', { ordered: false, maxRetransmits: 0 });
+  videoDc.binaryType = 'arraybuffer';
+  inputDc.binaryType = 'arraybuffer';
+
+  const checkReady = () => {
+    if (videoDc.readyState === 'open' && inputDc.readyState === 'open') {
+      useDataChannel = true;
+      console.log('[rtc] P2P DataChannels open — NAT hole-punched');
+      statusEl.textContent += ' [P2P]';
+    }
+  };
+
+  videoDc.onopen = checkReady;
+  inputDc.onopen = checkReady;
+  videoDc.onclose = () => { useDataChannel = false; console.log('[rtc] video DC closed'); };
+  inputDc.onclose = () => { useDataChannel = false; console.log('[rtc] input DC closed'); };
+
+  // Video frames via DataChannel
+  videoDc.onmessage = (event) => handleVideoFrame(event.data);
+
+  // ICE candidates → send to server via WebSocket
+  pc.onicecandidate = (event) => {
+    if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'ice-candidate',
+        id: myId,
+        candidate: event.candidate.candidate,
+        sdpMid: event.candidate.sdpMid
+      }));
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    console.log('[rtc] connection state:', pc.connectionState);
+    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+      useDataChannel = false;
+      console.log('[rtc] P2P failed — falling back to WebSocket');
+    }
+  };
+
+  // Create offer → send to server via WebSocket
+  pc.createOffer().then(offer => {
+    return pc.setLocalDescription(offer);
+  }).then(() => {
+    ws.send(JSON.stringify({
+      type: 'offer',
+      id: myId,
+      sdp: pc.localDescription.sdp
+    }));
+    console.log('[rtc] SDP offer sent');
+  }).catch(err => {
+    console.error('[rtc] offer failed:', err);
+  });
+
+  // Fallback: if DataChannels don't open in 5s, stay on WebSocket
+  setTimeout(() => {
+    if (!useDataChannel) {
+      console.log('[rtc] DataChannel timeout — using WebSocket');
+    }
+  }, 5000);
 }
 
 function joinGame() {
@@ -295,7 +395,12 @@ function startGamepadPolling() {
 
     const w3 = new Uint8Array([lt, rt, (btn>>8)&0xFF, btn&0xFF]);
     // Always send — server drains and keeps latest
-    ws.send(w3);
+    // Send via DataChannel (P2P) if available, else WebSocket (fallback)
+    if (useDataChannel && inputDc && inputDc.readyState === 'open') {
+      inputDc.send(w3);
+    } else {
+      ws.send(w3);
+    }
     diag.inputSendCount++;
   }, 4); // 250Hz polling
 }

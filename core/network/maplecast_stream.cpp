@@ -26,6 +26,7 @@
 #include "maplecast.h"
 #include "maplecast_telemetry.h"
 #include "maplecast_input_server.h"
+#include "maplecast_webrtc.h"
 #include "hw/pvr/Renderer_if.h"
 #include "wsi/gl_context.h"
 
@@ -225,6 +226,9 @@ static void onWsClose(ConnHdl hdl)
 					void* key = (void*)_ws.get_con_from_hdl(hdl).get();
 					_connSlot.erase(key);
 				} catch (...) {}
+#ifdef MAPLECAST_WEBRTC
+				maplecast_webrtc::removePeer(id);
+#endif
 				break;
 			}
 		} catch (...) {}
@@ -307,6 +311,30 @@ static void onWsMessage(ConnHdl hdl, WsServer::message_ptr msg)
 					catch (...) {}
 				}
 			}
+#ifdef MAPLECAST_WEBRTC
+				// WebRTC signaling: SDP offer from browser
+				else if (ctrl["type"] == "offer")
+				{
+					std::string playerId = ctrl.value("id", "");
+					std::string sdp = ctrl.value("sdp", "");
+					if (!playerId.empty() && !sdp.empty())
+					{
+						int slot = -1;
+						auto it = _players.find(playerId);
+						if (it != _players.end()) slot = it->second.slot;
+						maplecast_webrtc::handleOffer(playerId, sdp, slot);
+					}
+				}
+				// WebRTC signaling: ICE candidate from browser
+				else if (ctrl["type"] == "ice-candidate")
+				{
+					std::string playerId = ctrl.value("id", "");
+					std::string candidate = ctrl.value("candidate", "");
+					std::string sdpMid = ctrl.value("sdpMid", "");
+					if (!playerId.empty())
+						maplecast_webrtc::handleIceCandidate(playerId, candidate, sdpMid);
+				}
+#endif
 		} catch (...) {}
 	}
 }
@@ -432,9 +460,30 @@ static bool initCudaLinearBuffer()
 
 static void broadcastBinary(const void* data, size_t size)
 {
+#ifdef MAPLECAST_WEBRTC
+	// Send via DataChannel to peers that have it (P2P, no TCP overhead)
+	maplecast_webrtc::broadcastFrame(data, size);
+#endif
+
+	// Send via WebSocket to peers that don't have DataChannel (fallback)
 	std::lock_guard<std::mutex> lock(_connMutex);
 	for (auto& conn : _connections)
 	{
+		// Skip peers with active DataChannel — they already got the frame
+#ifdef MAPLECAST_WEBRTC
+		bool hasDc = false;
+		for (auto& [id, p] : _players)
+		{
+			try {
+				if (!(p.conn.owner_before(conn) || conn.owner_before(p.conn)))
+				{
+					hasDc = maplecast_webrtc::peerHasDataChannel(id);
+					break;
+				}
+			} catch (...) {}
+		}
+		if (hasDc) continue;
+#endif
 		try {
 			_ws.send(conn, data, size, websocketpp::frame::opcode::binary);
 		} catch (...) {}
@@ -482,6 +531,32 @@ bool init(int port)
 	_active = true;
 	_frameCount = 0;
 
+	// Init WebRTC DataChannel transport (P2P, NAT hole-punching)
+#ifdef MAPLECAST_WEBRTC
+	maplecast_webrtc::init([](const std::string& playerId, const std::string& type, const std::string& data) {
+		// Signaling callback: send SDP/ICE to browser via WebSocket
+		std::lock_guard<std::mutex> lock(_connMutex);
+		auto it = _players.find(playerId);
+		if (it == _players.end()) return;
+
+		json msg;
+		if (type == "answer") {
+			msg = {{"type", "answer"}, {"sdp", data}};
+		} else if (type == "ice-candidate") {
+			// data format: "candidate|sdpMid"
+			auto sep = data.find('|');
+			msg = {
+				{"type", "ice-candidate"},
+				{"candidate", data.substr(0, sep)},
+				{"sdpMid", sep != std::string::npos ? data.substr(sep + 1) : "0"}
+			};
+		}
+
+		try { _ws.send(it->second.conn, msg.dump(), websocketpp::frame::opcode::text); }
+		catch (...) {}
+	});
+#endif
+
 	printf("[maplecast-stream] ZERO-COPY + DIRECT WebSocket ready\n");
 	maplecast_telemetry::send("[maplecast-stream] ZERO-COPY + WS ready");
 	return true;
@@ -490,6 +565,9 @@ bool init(int port)
 void shutdown()
 {
 	_active = false;
+#ifdef MAPLECAST_WEBRTC
+	maplecast_webrtc::shutdown();
+#endif
 	try { _ws.stop(); } catch (...) {}
 	if (_wsThread.joinable()) _wsThread.join();
 

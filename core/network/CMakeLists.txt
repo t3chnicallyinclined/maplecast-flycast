@@ -31,4 +31,6 @@ target_sources(${PROJECT_NAME} PRIVATE
         maplecast_xdp_input.cpp
         maplecast_xdp_input.h
         maplecast_input_server.cpp
-        maplecast_input_server.h)
+        maplecast_input_server.h
+        maplecast_webrtc.cpp
+        maplecast_webrtc.h)
