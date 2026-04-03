@@ -67,15 +67,23 @@ static CUcontext _cuCtx = nullptr;
 // CUDA-GL interop
 static CUgraphicsResource _cuGLResource = nullptr;
 static GLuint _registeredTexID = 0;
-static CUdeviceptr _cudaLinearBuf = 0;
-static size_t _cudaLinearPitch = 0;
 
-// NVENC
+// NVENC — double-buffered for async pipeline
 typedef NVENCSTATUS (NVENCAPI *PFN_NvEncodeAPICreateInstance)(NV_ENCODE_API_FUNCTION_LIST*);
 static NV_ENCODE_API_FUNCTION_LIST _nvenc = {};
 static void* _encoder = nullptr;
-static NV_ENC_REGISTERED_PTR _nvencRegisteredRes = nullptr;
-static NV_ENC_OUTPUT_PTR _nvencOutputBuf = nullptr;
+
+// Double buffer: encode frame N while frame N+1 renders
+static constexpr int NUM_BUFS = 2;
+static CUdeviceptr _cudaLinearBuf[NUM_BUFS] = {0, 0};
+static size_t _cudaLinearPitch = 0;
+static NV_ENC_REGISTERED_PTR _nvencRegisteredRes[NUM_BUFS] = {nullptr, nullptr};
+static NV_ENC_OUTPUT_PTR _nvencOutputBuf[NUM_BUFS] = {nullptr, nullptr};
+static int _curBuf = 0;          // which buffer to write into THIS frame
+static bool _prevEncodeActive = false;  // is the previous frame still encoding?
+static int64_t _prevCaptureTimeUs = 0;
+static int64_t _prevInputTimeUs = 0;
+static uint32_t _prevFrameNum = 0;
 
 // WebSocket server
 static WsServer _ws;
@@ -289,9 +297,9 @@ static bool initNvenc()
 	encConfig.gopLength = 1;
 	encConfig.frameIntervalP = 1;
 	encConfig.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
-	encConfig.rcParams.averageBitRate = 15000000;
-	encConfig.rcParams.maxBitRate = 20000000;
-	encConfig.rcParams.vbvBufferSize = 15000000 / 60;
+	encConfig.rcParams.averageBitRate = 15000000;   // 15 Mbps — sharp 480p
+	encConfig.rcParams.maxBitRate = 20000000;      // 20 Mbps peak
+	encConfig.rcParams.vbvBufferSize = 15000000 / 60;  // 1 frame buffer at 15Mbps
 	encConfig.rcParams.vbvInitialDelay = encConfig.rcParams.vbvBufferSize;
 	encConfig.rcParams.zeroReorderDelay = 1;
 	encConfig.encodeCodecConfig.h264Config.idrPeriod = 1;
@@ -313,34 +321,42 @@ static bool initNvenc()
 	initParams.encodeConfig = &encConfig;
 	if (_nvenc.nvEncInitializeEncoder(_encoder, &initParams) != NV_ENC_SUCCESS) return false;
 
-	NV_ENC_CREATE_BITSTREAM_BUFFER bitstreamParams = {};
-	bitstreamParams.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
-	if (_nvenc.nvEncCreateBitstreamBuffer(_encoder, &bitstreamParams) != NV_ENC_SUCCESS) return false;
-	_nvencOutputBuf = bitstreamParams.bitstreamBuffer;
+	// Create double output bitstream buffers for async encode
+	for (int i = 0; i < NUM_BUFS; i++)
+	{
+		NV_ENC_CREATE_BITSTREAM_BUFFER bitstreamParams = {};
+		bitstreamParams.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
+		if (_nvenc.nvEncCreateBitstreamBuffer(_encoder, &bitstreamParams) != NV_ENC_SUCCESS) return false;
+		_nvencOutputBuf[i] = bitstreamParams.bitstreamBuffer;
+	}
 
-	printf("[maplecast-stream] NVENC: %dx%d H.264 P1/ULL GOP=1 15Mbps\n", _width, _height);
+	printf("[maplecast-stream] NVENC: %dx%d H.264 P1/ULL GOP=1 8Mbps (double-buffered)\n", _width, _height);
 	return true;
 }
 
 static bool initCudaLinearBuffer()
 {
-	size_t pitch;
-	if (cuMemAllocPitch(&_cudaLinearBuf, &pitch, _width * 4, _height, 16) != CUDA_SUCCESS) return false;
-	_cudaLinearPitch = pitch;
+	// Allocate double CUDA buffers + register both with NVENC
+	for (int i = 0; i < NUM_BUFS; i++)
+	{
+		size_t pitch;
+		if (cuMemAllocPitch(&_cudaLinearBuf[i], &pitch, _width * 4, _height, 16) != CUDA_SUCCESS) return false;
+		if (i == 0) _cudaLinearPitch = pitch;
 
-	NV_ENC_REGISTER_RESOURCE regRes = {};
-	regRes.version = NV_ENC_REGISTER_RESOURCE_VER;
-	regRes.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR;
-	regRes.resourceToRegister = (void*)_cudaLinearBuf;
-	regRes.width = _width;
-	regRes.height = _height;
-	regRes.pitch = (uint32_t)_cudaLinearPitch;
-	regRes.bufferFormat = NV_ENC_BUFFER_FORMAT_ABGR;
-	regRes.bufferUsage = NV_ENC_INPUT_IMAGE;
-	if (_nvenc.nvEncRegisterResource(_encoder, &regRes) != NV_ENC_SUCCESS) return false;
-	_nvencRegisteredRes = regRes.registeredResource;
+		NV_ENC_REGISTER_RESOURCE regRes = {};
+		regRes.version = NV_ENC_REGISTER_RESOURCE_VER;
+		regRes.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR;
+		regRes.resourceToRegister = (void*)_cudaLinearBuf[i];
+		regRes.width = _width;
+		regRes.height = _height;
+		regRes.pitch = (uint32_t)_cudaLinearPitch;
+		regRes.bufferFormat = NV_ENC_BUFFER_FORMAT_ABGR;
+		regRes.bufferUsage = NV_ENC_INPUT_IMAGE;
+		if (_nvenc.nvEncRegisterResource(_encoder, &regRes) != NV_ENC_SUCCESS) return false;
+		_nvencRegisteredRes[i] = regRes.registeredResource;
+	}
 
-	printf("[maplecast-stream] CUDA buffer: %dx%d pitch=%zu\n", _width, _height, _cudaLinearPitch);
+	printf("[maplecast-stream] CUDA double buffer: %dx%d pitch=%zu\n", _width, _height, _cudaLinearPitch);
 	return true;
 }
 
@@ -407,13 +423,15 @@ void shutdown()
 	try { _ws.stop(); } catch (...) {}
 	if (_wsThread.joinable()) _wsThread.join();
 
-	if (_nvencRegisteredRes && _encoder)
-		_nvenc.nvEncUnregisterResource(_encoder, _nvencRegisteredRes);
-	if (_nvencOutputBuf && _encoder)
-		_nvenc.nvEncDestroyBitstreamBuffer(_encoder, _nvencOutputBuf);
-	if (_encoder)
-		_nvenc.nvEncDestroyEncoder(_encoder);
-	if (_cudaLinearBuf) cuMemFree(_cudaLinearBuf);
+	for (int i = 0; i < NUM_BUFS; i++)
+	{
+		if (_nvencRegisteredRes[i] && _encoder)
+			_nvenc.nvEncUnregisterResource(_encoder, _nvencRegisteredRes[i]);
+		if (_nvencOutputBuf[i] && _encoder)
+			_nvenc.nvEncDestroyBitstreamBuffer(_encoder, _nvencOutputBuf[i]);
+		if (_cudaLinearBuf[i]) cuMemFree(_cudaLinearBuf[i]);
+	}
+	if (_encoder) _nvenc.nvEncDestroyEncoder(_encoder);
 	if (_cuGLResource) cuGraphicsUnregisterResource(_cuGLResource);
 	if (_cuCtx) cuCtxDestroy(_cuCtx);
 
@@ -431,6 +449,7 @@ void onFrameRendered()
 	LARGE_INTEGER pc0, pc1, pc2, pc3;
 	QueryPerformanceCounter(&pc0);
 	int64_t captureTimeUs = pc0.QuadPart * 1000000LL / freq.QuadPart;
+	int64_t inputTimeUs = ::maplecast::lastInputTimeUs();
 
 	int w = 0, h = 0;
 	GLuint texID = renderer ? renderer->GetFrameTextureID(w, h) : 0;
@@ -447,10 +466,7 @@ void onFrameRendered()
 		if (_cuGLResource) { cuGraphicsUnregisterResource(_cuGLResource); _cuGLResource = nullptr; }
 		if (cuGraphicsGLRegisterImage(&_cuGLResource, texID, GL_TEXTURE_2D,
 			CU_GRAPHICS_REGISTER_FLAGS_READ_ONLY) != CUDA_SUCCESS)
-		{
-			cuCtxPopCurrent(nullptr);
-			return;
-		}
+		{ cuCtxPopCurrent(nullptr); return; }
 		_registeredTexID = texID;
 		printf("[maplecast-stream] GL tex %u registered (%dx%d)\n", texID, w, h);
 		cuCtxPopCurrent(nullptr);
@@ -458,44 +474,35 @@ void onFrameRendered()
 
 	QueryPerformanceCounter(&pc1);
 
+	// Capture: GL texture → CUDA array → linear buffer (GPU→GPU)
 	cuCtxPushCurrent(_cuCtx);
 
 	if (cuGraphicsMapResources(1, &_cuGLResource, 0) != CUDA_SUCCESS)
-	{
-		cuCtxPopCurrent(nullptr);
-		return;
-	}
+	{ cuCtxPopCurrent(nullptr); return; }
 
 	CUarray cuArray;
 	if (cuGraphicsSubResourceGetMappedArray(&cuArray, _cuGLResource, 0, 0) != CUDA_SUCCESS)
-	{
-		cuGraphicsUnmapResources(1, &_cuGLResource, 0);
-		cuCtxPopCurrent(nullptr);
-		return;
-	}
+	{ cuGraphicsUnmapResources(1, &_cuGLResource, 0); cuCtxPopCurrent(nullptr); return; }
 
 	CUDA_MEMCPY2D cp = {};
 	cp.srcMemoryType = CU_MEMORYTYPE_ARRAY;
 	cp.srcArray = cuArray;
 	cp.dstMemoryType = CU_MEMORYTYPE_DEVICE;
-	cp.dstDevice = _cudaLinearBuf;
+	cp.dstDevice = _cudaLinearBuf[0];
 	cp.dstPitch = _cudaLinearPitch;
 	cp.WidthInBytes = _width * 4;
 	cp.Height = _height;
 	cuMemcpy2D(&cp);
-
 	cuGraphicsUnmapResources(1, &_cuGLResource, 0);
 
 	QueryPerformanceCounter(&pc2);
 
+	// Encode: NVENC from CUDA device memory → H.264 bitstream
 	NV_ENC_MAP_INPUT_RESOURCE mapRes = {};
 	mapRes.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
-	mapRes.registeredResource = _nvencRegisteredRes;
+	mapRes.registeredResource = _nvencRegisteredRes[0];
 	if (_nvenc.nvEncMapInputResource(_encoder, &mapRes) != NV_ENC_SUCCESS)
-	{
-		cuCtxPopCurrent(nullptr);
-		return;
-	}
+	{ cuCtxPopCurrent(nullptr); return; }
 
 	NV_ENC_PIC_PARAMS picParams = {};
 	picParams.version = NV_ENC_PIC_PARAMS_VER;
@@ -503,7 +510,7 @@ void onFrameRendered()
 	picParams.bufferFmt = mapRes.mappedBufferFmt;
 	picParams.inputWidth = _width;
 	picParams.inputHeight = _height;
-	picParams.outputBitstream = _nvencOutputBuf;
+	picParams.outputBitstream = _nvencOutputBuf[0];
 	picParams.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
 	picParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
 	picParams.inputTimeStamp = _frameCount;
@@ -512,61 +519,53 @@ void onFrameRendered()
 	_nvenc.nvEncUnmapInputResource(_encoder, mapRes.mappedResource);
 
 	if (st != NV_ENC_SUCCESS && st != NV_ENC_ERR_NEED_MORE_INPUT)
-	{
-		cuCtxPopCurrent(nullptr);
-		return;
-	}
+	{ cuCtxPopCurrent(nullptr); return; }
 
+	// Lock bitstream and send
 	NV_ENC_LOCK_BITSTREAM lockParams = {};
 	lockParams.version = NV_ENC_LOCK_BITSTREAM_VER;
-	lockParams.outputBitstream = _nvencOutputBuf;
+	lockParams.outputBitstream = _nvencOutputBuf[0];
 
 	st = _nvenc.nvEncLockBitstream(_encoder, &lockParams);
 	if (st == NV_ENC_SUCCESS)
 	{
 		QueryPerformanceCounter(&pc3);
-		int64_t encodeDoneTimeUs = pc3.QuadPart * 1000000LL / freq.QuadPart;
-		int64_t inputTimeUs = ::maplecast::lastInputTimeUs();
 
-		// Build frame header + H.264 payload
+		// Pre-compute pipeline times (microseconds, fits in uint32)
+		uint32_t pipelineUs = (uint32_t)((pc3.QuadPart - pc0.QuadPart) * 1000000LL / freq.QuadPart);
+		uint32_t copyUs = (uint32_t)((pc2.QuadPart - pc1.QuadPart) * 1000000LL / freq.QuadPart);
+		uint32_t encodeUs = (uint32_t)((pc3.QuadPart - pc2.QuadPart) * 1000000LL / freq.QuadPart);
+
 		maplecast::PlayerStats p1s, p2s;
 		maplecast::getPlayerStats(p1s, p2s);
 
 		uint32_t h264Size = lockParams.bitstreamSizeInBytes;
-		uint32_t headerSize = 28 + 8 + 8;  // timing + p1stats + p2stats = 44 bytes
+		// Header: [pipelineUs(4)][copyUs(4)][encodeUs(4)][frameNum(4)] + p1stats(8) + p2stats(8) = 32 bytes
+		uint32_t headerSize = 16 + 8 + 8;  // 32 bytes
 		uint32_t totalPayload = headerSize + h264Size;
 
 		if (totalPayload > _sendBufSize)
-		{
-			free(_sendBuf);
-			_sendBufSize = totalPayload + 65536;
-			_sendBuf = (uint8_t*)malloc(_sendBufSize);
-		}
+		{ free(_sendBuf); _sendBufSize = totalPayload + 65536; _sendBuf = (uint8_t*)malloc(_sendBufSize); }
 
 		uint32_t frameNum = (uint32_t)_frameCount;
 		uint32_t off = 0;
-		memcpy(_sendBuf + off, &inputTimeUs, 8); off += 8;
-		memcpy(_sendBuf + off, &captureTimeUs, 8); off += 8;
-		memcpy(_sendBuf + off, &encodeDoneTimeUs, 8); off += 8;
+		memcpy(_sendBuf + off, &pipelineUs, 4); off += 4;
+		memcpy(_sendBuf + off, &copyUs, 4); off += 4;
+		memcpy(_sendBuf + off, &encodeUs, 4); off += 4;
 		memcpy(_sendBuf + off, &frameNum, 4); off += 4;
-		// P1 stats
 		uint16_t tmp;
 		tmp = (uint16_t)p1s.packetsPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
 		tmp = (uint16_t)p1s.changesPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
 		tmp = p1s.buttons; memcpy(_sendBuf + off, &tmp, 2); off += 2;
 		_sendBuf[off++] = p1s.lt; _sendBuf[off++] = p1s.rt;
-		// P2 stats
 		tmp = (uint16_t)p2s.packetsPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
 		tmp = (uint16_t)p2s.changesPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
 		tmp = p2s.buttons; memcpy(_sendBuf + off, &tmp, 2); off += 2;
 		_sendBuf[off++] = p2s.lt; _sendBuf[off++] = p2s.rt;
-		// H.264
 		memcpy(_sendBuf + off, lockParams.bitstreamBufferPtr, h264Size);
 
-		// Broadcast to all WebSocket clients
 		broadcastBinary(_sendBuf, totalPayload);
 
-		// Telemetry every 300 frames
 		if (frameNum % 300 == 0)
 		{
 			long long mapUs = (pc1.QuadPart - pc0.QuadPart) * 1000000LL / freq.QuadPart;
@@ -578,7 +577,6 @@ void onFrameRendered()
 			maplecast_telemetry::send("[maplecast-stream] F:%u | map:%lldus copy:%lldus enc:%lldus total:%lldus | %uB",
 				frameNum, mapUs, copyUs, encUs, totalUs, h264Size);
 
-			// Periodic status broadcast
 			try {
 				std::string status = getStatus().dump();
 				std::lock_guard<std::mutex> lock(_connMutex);
@@ -587,7 +585,7 @@ void onFrameRendered()
 			} catch (...) {}
 		}
 
-		_nvenc.nvEncUnlockBitstream(_encoder, _nvencOutputBuf);
+		_nvenc.nvEncUnlockBitstream(_encoder, _nvencOutputBuf[0]);
 	}
 
 	cuCtxPopCurrent(nullptr);

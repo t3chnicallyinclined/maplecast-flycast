@@ -52,9 +52,9 @@ nameInput.value = myName;
 
 const diag = {
   fps: 0, serverFrame: 0, bytesPerFrame: 0, totalBytes: 0,
-  decodeSamples: [], serverCaptureSamples: [], serverEncodeSamples: [],
-  serverTotalSamples: [], jitterSamples: [],
-  prevEncodeDoneUs: 0, prevClientRecvMs: 0,
+  decodeSamples: [], serverPipelineSamples: [], serverEncodeSamples: [],
+  serverCopySamples: [], jitterSamples: [],
+  prevRecvMs: 0,
   droppedFrames: 0, gamepadActive: false, inputSendCount: 0,
   frameIntervals: [], p1: {}, p2: {},
   decodeStartMs: 0,
@@ -66,8 +66,9 @@ function updateDiag() {
   const kbps = startTime > 0 ? (diag.totalBytes * 8 / 1000 / ((performance.now() - startTime) / 1000)).toFixed(0) : '0';
   const p1 = diag.p1 || {};
   const p2 = diag.p2 || {};
-  const srvTotal = (avg(diag.serverTotalSamples) / 1000).toFixed(2);
+  const srvPipe = (avg(diag.serverPipelineSamples) / 1000).toFixed(2);
   const srvEnc = (avg(diag.serverEncodeSamples) / 1000).toFixed(2);
+  const srvCopy = (avg(diag.serverCopySamples) / 1000).toFixed(2);
   const dec = avg(diag.decodeSamples).toFixed(2);
   const jit = avg(diag.jitterSamples).toFixed(2);
   const fi = avg(diag.frameIntervals).toFixed(1);
@@ -78,7 +79,8 @@ FPS: ${diag.fps.toFixed(1)}  Frame: ${diag.serverFrame}
 ${kbps}kbps  ${diag.bytesPerFrame}B  ${fi}ms/f
 
 -- Server --
-Encode: ${srvEnc}ms  Total: ${srvTotal}ms
+Copy: ${srvCopy}ms  Encode: ${srvEnc}ms
+Pipeline: ${srvPipe}ms (capture>send)
 
 -- Client --
 Decode: ${dec}ms  Jitter: ${jit}ms
@@ -87,12 +89,12 @@ Drops: ${diag.droppedFrames}
 -- P1 --
 Rate: ${p1.pps||0}/s  Chg: ${p1.cps||0}/s
 Btn: 0x${(p1.btn||0xFFFF).toString(16).padStart(4,'0')}
-E2E: ~${(parseFloat(srvTotal) + ((p1.pps||0) > 1000 ? 0.3 : 2.0) + parseFloat(dec)).toFixed(1)}ms ${(p1.pps||0) > 1000 ? '(HW direct)' : '(via browser)'}
+E2E: ~${(parseFloat(srvPipe) + ((p1.pps||0) > 1000 ? 0.3 : 1.0) + parseFloat(dec)).toFixed(1)}ms ${(p1.pps||0) > 1000 ? '(HW)' : '(web)'}
 
 -- P2 --
 Rate: ${p2.pps||0}/s  Chg: ${p2.cps||0}/s
 Btn: 0x${(p2.btn||0xFFFF).toString(16).padStart(4,'0')}
-E2E: ~${(parseFloat(srvTotal) + ((p2.pps||0) > 1000 ? 0.3 : 2.0) + parseFloat(dec)).toFixed(1)}ms ${(p2.pps||0) > 1000 ? '(HW direct)' : '(via browser)'}
+E2E: ~${(parseFloat(srvPipe) + ((p2.pps||0) > 1000 ? 0.3 : 1.0) + parseFloat(dec)).toFixed(1)}ms ${(p2.pps||0) > 1000 ? '(HW)' : '(web)'}
 
 -- Me --
 Slot: ${mySlot >= 0 ? 'P'+(mySlot+1) : 'spectator'}
@@ -178,38 +180,36 @@ function connect() {
     lastFrameTime = now;
 
     const buf = new Uint8Array(event.data);
-    if (buf.length < 44) return;
+    // Header: [pipelineUs(4)][copyUs(4)][encodeUs(4)][frameNum(4)] + p1(8) + p2(8) = 32 bytes
+    if (buf.length < 32) return;
     const view = new DataView(event.data);
-    function readI64(o) { return view.getUint32(o,true) + view.getUint32(o+4,true) * 4294967296; }
 
-    const inputTimeUs = readI64(0);
-    const captureTimeUs = readI64(8);
-    const encodeDoneTimeUs = readI64(16);
-    diag.serverFrame = view.getUint32(24, true);
-    diag.p1 = { pps: view.getUint16(28,true), cps: view.getUint16(30,true), btn: view.getUint16(32,true), lt: buf[34], rt: buf[35] };
-    diag.p2 = { pps: view.getUint16(36,true), cps: view.getUint16(38,true), btn: view.getUint16(40,true), lt: buf[42], rt: buf[43] };
-    const h264 = buf.slice(44);
+    const pipelineUs = view.getUint32(0, true);   // total capture+encode
+    const copyUs = view.getUint32(4, true);        // GPU copy
+    const encodeUs = view.getUint32(8, true);      // NVENC encode
+    diag.serverFrame = view.getUint32(12, true);
+    diag.p1 = { pps: view.getUint16(16,true), cps: view.getUint16(18,true), btn: view.getUint16(20,true), lt: buf[22], rt: buf[23] };
+    diag.p2 = { pps: view.getUint16(24,true), cps: view.getUint16(26,true), btn: view.getUint16(28,true), lt: buf[30], rt: buf[31] };
+    const h264 = buf.slice(32);
 
     diag.bytesPerFrame = h264.length;
     diag.totalBytes += h264.length;
 
-    const srvCapUs = captureTimeUs - inputTimeUs;
-    const srvEncUs = encodeDoneTimeUs - captureTimeUs;
-    const srvTotUs = encodeDoneTimeUs - inputTimeUs;
-    diag.serverCaptureSamples.push(srvCapUs);
-    diag.serverEncodeSamples.push(srvEncUs);
-    diag.serverTotalSamples.push(srvTotUs);
-    if (diag.serverCaptureSamples.length > 60) diag.serverCaptureSamples.shift();
+    // Server pipeline — pre-computed uint32, no 64-bit precision issues
+    diag.serverPipelineSamples.push(pipelineUs);
+    diag.serverEncodeSamples.push(encodeUs);
+    diag.serverCopySamples.push(copyUs);
+    if (diag.serverPipelineSamples.length > 60) diag.serverPipelineSamples.shift();
     if (diag.serverEncodeSamples.length > 60) diag.serverEncodeSamples.shift();
-    if (diag.serverTotalSamples.length > 60) diag.serverTotalSamples.shift();
+    if (diag.serverCopySamples.length > 60) diag.serverCopySamples.shift();
 
-    if (diag.prevEncodeDoneUs > 0) {
-      const jit = Math.abs((now - diag.prevClientRecvMs) - (encodeDoneTimeUs - diag.prevEncodeDoneUs) / 1000);
+    // Jitter = deviation from perfect 16.67ms frame interval
+    if (diag.prevRecvMs > 0) {
+      const jit = Math.abs((now - diag.prevRecvMs) - 16.667);
       diag.jitterSamples.push(jit);
       if (diag.jitterSamples.length > 60) diag.jitterSamples.shift();
     }
-    diag.prevEncodeDoneUs = encodeDoneTimeUs;
-    diag.prevClientRecvMs = now;
+    diag.prevRecvMs = now;
 
     diag.decodeStartMs = performance.now();
     try {
