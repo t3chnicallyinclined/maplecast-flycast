@@ -25,6 +25,10 @@ void setRendContext(void* ctx) {
 
 void captureFrame(const float screen_x[6], const float screen_y[6], const bool active[6])
 {
+	// Only capture every 3rd frame to reduce overhead
+	static int _skipCount = 0;
+	if (++_skipCount % 3 != 0) return;
+
 	// Reset
 	for (int i = 0; i < 6; i++)
 		_frames[i].found = false;

@@ -27,6 +27,7 @@ input { background: #111; color: #0f0; border: 1px solid #333; padding: 8px; fon
 <div id="controls">
   <input id="nameInput" placeholder="Your name" maxlength="16" />
   <button id="joinBtn" onclick="joinGame()">Press START to Join</button>
+  <button onclick="toggleView()">Toggle: Video / Sprites</button>
 </div>
 <div id="diag"></div>
 
@@ -107,7 +108,7 @@ function initDecoder() {
       const decEnd = performance.now();
       diag.decodeSamples.push(decEnd - diag.decodeStartMs);
       if (diag.decodeSamples.length > 60) diag.decodeSamples.shift();
-      ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+      if (viewMode === 'video') ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
       frame.close();
       frameCount++;
       if (frameCount % 30 === 0) {
@@ -362,6 +363,14 @@ fetch('sprites/manifest.json').then(r => r.json()).then(manifest => {
   console.log('Loading sprite sheets for', Object.keys(manifest).length, 'characters');
 });
 
+// View mode: 'video' = show H.264 stream, 'sprites' = show game state renderer
+let viewMode = 'video';
+
+function toggleView() {
+  viewMode = viewMode === 'video' ? 'sprites' : 'video';
+  console.log('View mode:', viewMode);
+}
+
 // Game state storage
 let gameState = null;
 
@@ -447,8 +456,8 @@ function parseGameState(buf) {
     updateDiag();
   }
 
-  // Render game state to canvas
-  renderGameState();
+  // Render game state to canvas (only in sprites mode)
+  if (viewMode === 'sprites') renderGameState();
 }
 
 // Stage colors
