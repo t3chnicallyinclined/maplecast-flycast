@@ -14,7 +14,7 @@ button { background: #222; color: #0f0; border: 1px solid #0f0; padding: 10px 20
 button:hover { background: #0f0; color: #000; }
 button:disabled { opacity: 0.3; cursor: not-allowed; }
 input { background: #111; color: #0f0; border: 1px solid #333; padding: 8px; font-family: monospace; font-size: 14px; width: 200px; text-align: center; }
-.slot { display: inline-block; padding: 5px 10px; margin: 3px; border: 1px solid #333; min-width: 120px; text-align: center; }
+.slot { display: inline-block; padding: 5px 10px; margin: 3px; border: 1px solid #333; min-width: 180px; text-align: center; line-height: 1.4; }
 .slot.taken { border-color: #0f0; color: #0f0; }
 .slot.me { border-color: #ff0; color: #ff0; }
 .slot.empty { border-color: #333; color: #555; }
@@ -87,15 +87,16 @@ Drops: ${diag.droppedFrames}
 -- P1 --
 Rate: ${p1.pps||0}/s  Chg: ${p1.cps||0}/s
 Btn: 0x${(p1.btn||0xFFFF).toString(16).padStart(4,'0')}
+E2E: ~${(parseFloat(srvTotal) + ((p1.pps||0) > 1000 ? 0.3 : 2.0) + parseFloat(dec)).toFixed(1)}ms ${(p1.pps||0) > 1000 ? '(HW direct)' : '(via browser)'}
 
 -- P2 --
 Rate: ${p2.pps||0}/s  Chg: ${p2.cps||0}/s
 Btn: 0x${(p2.btn||0xFFFF).toString(16).padStart(4,'0')}
+E2E: ~${(parseFloat(srvTotal) + ((p2.pps||0) > 1000 ? 0.3 : 2.0) + parseFloat(dec)).toFixed(1)}ms ${(p2.pps||0) > 1000 ? '(HW direct)' : '(via browser)'}
 
 -- Me --
 Slot: ${mySlot >= 0 ? 'P'+(mySlot+1) : 'spectator'}
-Pad: ${diag.gamepadActive ? 'YES' : 'no'}  Sent: ${diag.inputSendCount}
-E2E: ~${(parseFloat(srvTotal) + 2.0 + parseFloat(dec)).toFixed(1)}ms`;
+Pad: ${diag.gamepadActive ? 'YES' : 'no'}  Sent: ${diag.inputSendCount}`;
 }
 
 function initDecoder() {
@@ -230,21 +231,32 @@ function joinGame() {
   if (!ws || ws.readyState !== WebSocket.OPEN) { connect(); return; }
   myName = nameInput.value.trim() || 'Player';
   localStorage.setItem('maplecast_name', myName);
-  ws.send(JSON.dumps ? JSON.dumps({type:'join', id:myId, name:myName}) : JSON.stringify({type:'join', id:myId, name:myName}));
+
+  // Detect gamepad name
+  let device = 'Browser';
+  const gp = navigator.getGamepads()[0];
+  if (gp) device = gp.id.substring(0, 30);
+
+  ws.send(JSON.stringify({type:'join', id:myId, name:myName, device: device}));
   joinBtn.textContent = 'Joining...';
   joinBtn.disabled = true;
 }
 
 function updateLobby(msg) {
   let html = '';
-  for (const [slot, label] of [['p1','P1'], ['p2','P2']]) {
+  for (const [slot, label, statsKey] of [['p1','P1','p1'], ['p2','P2','p2']]) {
     const p = msg[slot];
+    const s = diag[statsKey] || {};
     if (p && p.connected) {
       const isMe = p.id === myId.substring(0,8);
       const isHw = p.type === 'hardware';
-      const cls = isMe ? 'me' : (isHw ? 'taken' : 'taken');
-      const tag = isMe ? ' (you)' : (isHw ? ' [HW]' : '');
-      html += `<span class="slot ${cls}">${label}: ${p.name}${tag}</span> `;
+      const cls = isMe ? 'me' : 'taken';
+      const deviceTag = isHw ? 'NOBD Stick' : (p.device || 'Browser');
+      const rate = s.pps || 0;
+      html += `<span class="slot ${cls}">` +
+        `<b>${label}: ${p.name}</b>${isMe ? ' (you)' : ''}<br>` +
+        `<small>${deviceTag} | ${rate}/s</small>` +
+        `</span> `;
     } else {
       html += `<span class="slot empty">${label}: open</span> `;
     }

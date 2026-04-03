@@ -88,7 +88,8 @@ static std::atomic<int> _clientCount{0};
 struct WsPlayer {
 	std::string id;
 	std::string name;
-	int slot;        // 0=P1, 1=P2, -1=spectator
+	std::string device;  // gamepad name or "NOBD Stick"
+	int slot;            // 0=P1, 1=P2, -1=spectator
 	ConnHdl conn;
 };
 static std::map<std::string, WsPlayer> _players;  // id → player
@@ -141,10 +142,12 @@ static json getStatus()
 		{
 			auto it = _players.find(_slotOwner[i]);
 			if (it != _players.end())
-				return {{"id", it->second.id.substr(0,8)}, {"name", it->second.name}, {"connected", true}, {"type", "browser"}};
+				return {{"id", it->second.id.substr(0,8)}, {"name", it->second.name},
+					{"device", it->second.device}, {"connected", true}, {"type", "browser"}};
 		}
 		if (hwPps >= HW_THRESHOLD)
-			return {{"id", "hardware"}, {"name", "Stick (" + std::to_string(hwPps) + "/s)"}, {"connected", true}, {"type", "hardware"}};
+			return {{"id", "hardware"}, {"name", "NOBD Player"},
+				{"device", "NOBD Stick"}, {"connected", true}, {"type", "hardware"}};
 		return nullptr;
 	};
 
@@ -216,9 +219,10 @@ static void onWsMessage(ConnHdl hdl, WsServer::message_ptr msg)
 			{
 				std::string playerId = ctrl.value("id", "");
 				std::string name = ctrl.value("name", "Player");
+				std::string device = ctrl.value("device", "Browser");
 
 				int slot = assignSlot(playerId, name);
-				_players[playerId] = {playerId, name, slot, hdl};
+				_players[playerId] = {playerId, name, device, slot, hdl};
 
 				json resp = {{"type", "assigned"}, {"slot", slot}, {"id", playerId.substr(0,8)}, {"name", name}};
 				_ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text);
