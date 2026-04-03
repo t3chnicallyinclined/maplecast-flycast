@@ -397,7 +397,81 @@ function parseGameState(buf) {
       // next fields would be at co+36 but struct has more padding
     });
   }
+
+  // In headless mode, render game state to canvas as visual debug
+  renderGameState();
 }
+
+function renderGameState() {
+  if (!gameState) return;
+
+  // Clear canvas
+  ctx.fillStyle = '#111';
+  ctx.fillRect(0, 0, 640, 480);
+
+  ctx.font = '12px monospace';
+  ctx.textAlign = 'left';
+
+  // Title
+  ctx.fillStyle = '#0f0';
+  ctx.font = '16px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(`HEADLESS MODE — Game State Stream (${sizeof_gs || '~240'} bytes/frame)`, 320, 20);
+
+  // Timer + match state
+  ctx.fillStyle = '#ff0';
+  ctx.font = '24px monospace';
+  ctx.fillText(`TIME: ${gameState.timer}`, 320, 50);
+  ctx.font = '12px monospace';
+  ctx.fillStyle = '#888';
+  ctx.fillText(`Frame: ${gameState.frame}  Stage: ${gameState.stage_id}  Match: ${gameState.in_match ? 'YES' : 'no'}`, 320, 70);
+
+  // Draw characters
+  ctx.textAlign = 'left';
+  const labels = ['P1 Point','P2 Point','P1 Assist1','P2 Assist1','P1 Assist2','P2 Assist2'];
+  const colors = ['#0ff','#f0f','#088','#808','#044','#404'];
+
+  for (let i = 0; i < 6; i++) {
+    const c = gameState.chars[i];
+    if (!c) continue;
+    const y = 100 + i * 55;
+    const name = c.name || MVC2_CHARS[c.id] || '?';
+
+    // Label
+    ctx.fillStyle = colors[i];
+    ctx.font = '14px monospace';
+    ctx.fillText(`${labels[i]}: ${name}`, 10, y);
+
+    // Stats
+    ctx.fillStyle = '#ccc';
+    ctx.font = '11px monospace';
+    ctx.fillText(`HP: ${c.health || 0}  Red: ${c.red_health || 0}  Active: ${c.active ? 'YES' : 'no'}`, 10, y + 15);
+    ctx.fillText(`Pos: (${c.pos_x?.toFixed(1) || 0}, ${c.pos_y?.toFixed(1) || 0})  Facing: ${c.facing ? 'R' : 'L'}`, 10, y + 28);
+    ctx.fillText(`Sprite: ${c.sprite_id}  Anim: ${c.anim_state}  Timer: ${c.anim_timer}`, 10, y + 41);
+
+    // Draw position dot on mini-map (right side)
+    if (c.active) {
+      const mapX = 400 + (c.pos_x || 0) / 10;
+      const mapY = 350 - (c.pos_y || 0) / 5;
+      ctx.fillStyle = colors[i];
+      ctx.beginPath();
+      ctx.arc(mapX, mapY, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.font = '9px monospace';
+      ctx.fillText(name.substring(0, 3), mapX + 8, mapY + 3);
+    }
+  }
+
+  // Meters
+  ctx.fillStyle = '#0f0';
+  ctx.font = '14px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(`P1 Meter: ${gameState.p1_meter_level} bars  |  P2 Meter: ${gameState.p2_meter_level} bars`, 320, 450);
+  ctx.fillText(`P1 Combo: ${gameState.p1_combo}  |  P2 Combo: ${gameState.p2_combo}`, 320, 470);
+}
+
+let sizeof_gs = 0;
 
 // Auto-connect on page load
 connect();

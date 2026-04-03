@@ -46,6 +46,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <mutex>
 #include <thread>
 #include <atomic>
@@ -68,6 +69,7 @@ using WsServer = websocketpp::server<websocketpp::config::asio>;
 using ConnHdl = websocketpp::connection_hdl;
 
 static std::atomic<bool> _active{false};
+static bool _headless = false;  // true = game state only, no video
 static int _width = 640;
 static int _height = 480;
 
@@ -422,9 +424,20 @@ bool init(int port)
 	_sendBufSize = 256 * 1024;
 	_sendBuf = (uint8_t*)malloc(_sendBufSize);
 
-	if (!initCuda()) return false;
-	if (!initNvenc()) return false;
-	if (!initCudaLinearBuffer()) return false;
+	// Check for headless mode — game state only, no video
+	_headless = std::getenv("MAPLECAST_HEADLESS") != nullptr;
+
+	if (!_headless)
+	{
+		if (!initCuda()) return false;
+		if (!initNvenc()) return false;
+		if (!initCudaLinearBuffer()) return false;
+	}
+	else
+	{
+		printf("[maplecast-stream] *** HEADLESS MODE — game state only, no video ***\n");
+		printf("[maplecast-stream] 240 bytes/frame. No GPU. No encode.\n");
+	}
 
 	// Start WebSocket server
 	try {
@@ -755,9 +768,50 @@ void onFrameRendered()
 	_frameCount++;
 }
 
+void onFrameAdvanced()
+{
+	// Called every frame, even in headless/norend mode.
+	// Sends game state only — 240 bytes, no video.
+	if (!_active || !_headless) return;
+	if (_clientCount.load(std::memory_order_relaxed) == 0) return;
+
+	static uint8_t gsBuf[4 + sizeof(maplecast_gamestate::GameState)];
+	maplecast_gamestate::GameState gs;
+	maplecast_gamestate::readGameState(gs);
+
+	gsBuf[0] = 'G'; gsBuf[1] = 'S';
+	uint16_t gsSize = sizeof(gs);
+	memcpy(gsBuf + 2, &gsSize, 2);
+	memcpy(gsBuf + 4, &gs, sizeof(gs));
+	broadcastBinary(gsBuf, 4 + sizeof(gs));
+
+	static uint32_t _gsFrameCount = 0;
+	_gsFrameCount++;
+	if (_gsFrameCount % 300 == 0)
+	{
+		printf("[maplecast-stream] HEADLESS F:%u | %zu bytes | timer:%u in_match:%u\n",
+			_gsFrameCount, 4 + sizeof(gs), gs.game_timer, gs.in_match);
+		maplecast_telemetry::send("[maplecast-stream] HEADLESS F:%u | %zuB | t:%u match:%u",
+			_gsFrameCount, 4 + sizeof(gs), gs.game_timer, gs.in_match);
+
+		// Periodic status
+		try {
+			std::string status = getStatus().dump();
+			std::lock_guard<std::mutex> lock(_connMutex);
+			for (auto& conn : _connections)
+				try { _ws.send(conn, status, websocketpp::frame::opcode::text); } catch (...) {}
+		} catch (...) {}
+	}
+}
+
 bool active()
 {
 	return _active;
+}
+
+bool headless()
+{
+	return _headless;
 }
 
 }  // namespace maplecast_stream
