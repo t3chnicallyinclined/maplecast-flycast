@@ -3,6 +3,7 @@ class PCMProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.buffer = [];  // queue of Float32 stereo chunks
+    this.started = false;  // wait for buffer to fill before playing
     this.port.onmessage = (e) => {
       // Receive Int16 PCM from main thread, convert to Float32
       const pcm = e.data;  // Int16Array, interleaved L,R,L,R
@@ -23,6 +24,17 @@ class PCMProcessor extends AudioWorkletProcessor {
     const outL = outputs[0][0];
     const outR = outputs[0][1];
     if (!outL || !outR) return true;
+
+    // Pre-buffer: wait for 5 chunks (~53ms) before starting playback
+    // This absorbs DataChannel delivery jitter
+    if (!this.started) {
+      if (this.buffer.length < 5) {
+        outL.fill(0);
+        outR.fill(0);
+        return true;
+      }
+      this.started = true;
+    }
 
     let written = 0;
     while (written < outL.length && this.buffer.length > 0) {
