@@ -16,7 +16,7 @@ timeout /t 1 >nul
 
 :: Start Flycast (has built-in WebSocket server on port 7200 — NO PROXY NEEDED)
 echo [3/3] Starting Flycast server...
-start "MapleCast Flycast" cmd /k "set MAPLECAST=1 && set MAPLECAST_STREAM=1 && set MAPLECAST_HEADLESS=1 && C:\Users\trist\projects\maplecast-flycast\build\flycast.exe "C:\roms\mvc2_us\Marvel vs. Capcom 2 v1.001 (2000)(Capcom)(US)[!].gdi""
+start "MapleCast Flycast" cmd /k "set MAPLECAST=1 && set MAPLECAST_STREAM=1 && C:\Users\trist\projects\maplecast-flycast\build\flycast.exe "C:\roms\mvc2_us\Marvel vs. Capcom 2 v1.001 (2000)(Capcom)(US)[!].gdi""
 
 echo.
 echo ========================================

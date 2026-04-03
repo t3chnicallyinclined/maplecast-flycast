@@ -482,21 +482,29 @@ function renderGameState() {
     const spriteImg = spriteImages[String(c.id)];
 
     if (spriteImg) {
-      // Draw a section of the sprite sheet (first idle frame)
-      // TODO: map sprite_id to correct region within the sheet
-      const srcW = Math.min(spriteImg.width, 120);  // crop a character-sized chunk
-      const srcH = Math.min(spriteImg.height, 160);
-      const drawW = srcW * 0.6;
-      const drawH = srcH * 0.6;
+      // Use sprite_id to index into the sprite sheet
+      // Estimate frame size: each character is roughly 80-120px wide in the sheet
+      const frameW = 80;  // estimated frame width
+      const frameH = spriteImg.height;  // full sheet height per frame
+      const numFrames = Math.floor(spriteImg.width / frameW);
+
+      // sprite_id modulo number of frames gives us horizontal position
+      const frameIdx = numFrames > 0 ? (c.sprite_id % numFrames) : 0;
+      const srcX = frameIdx * frameW;
+      const srcW = frameW;
+      const srcH = frameH;
+
+      // Draw scaled to ~60% size
+      const drawW = srcW * 0.7;
+      const drawH = srcH * 0.7;
 
       ctx.save();
       if (!c.facing) {
-        // Flip horizontally for left-facing
         ctx.translate(sx, 0);
         ctx.scale(-1, 1);
-        ctx.drawImage(spriteImg, 0, 0, srcW, srcH, -drawW/2, sy - drawH, drawW, drawH);
+        ctx.drawImage(spriteImg, srcX, 0, srcW, srcH, -drawW/2, sy - drawH, drawW, drawH);
       } else {
-        ctx.drawImage(spriteImg, 0, 0, srcW, srcH, sx - drawW/2, sy - drawH, drawW, drawH);
+        ctx.drawImage(spriteImg, srcX, 0, srcW, srcH, sx - drawW/2, sy - drawH, drawW, drawH);
       }
       ctx.restore();
     } else {
