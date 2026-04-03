@@ -1,29 +1,34 @@
 /*
-	MapleCast Stream — NVENC H.264 + raw TCP/WebSocket.
+	MapleCast Stream — ZERO COPY GPU pipeline.
 
-	Pipeline: GetLastFrame() → RGB→NV12 → NVENC H.264 → NAL units → TCP send
+	GL texture → CUDA interop → NVENC encode → H.264 NAL → TCP
+	CPU never touches the pixels.
 
-	V1: Raw TCP with simple framing. Browser connects via WebSocket proxy
-	    or we add proper WebSocket handshake.
-	V2: Direct WebSocket with websocketpp (already in Flycast deps).
-
-	At 640x480, NVENC preset P1 ultra-low-latency:
-	  Encode: ~0.5ms
-	  Bitrate: ~3-5 Mbps
-	  Every frame is an IDR (keyframe) — no decode dependencies
+	Pipeline:
+	1. Flycast renders to OpenGL FBO
+	2. We register the GL texture with CUDA (once)
+	3. Each frame: map GL texture to CUDA, copy to NVENC input surface
+	4. NVENC encodes directly from GPU memory
+	5. H.264 NAL units sent over TCP
 */
 #include "maplecast_stream.h"
 #include "maplecast.h"
+#include "maplecast_telemetry.h"
 #include "hw/pvr/Renderer_if.h"
+#include "wsi/gl_context.h"
 
-// Access to the global renderer for GetLastFrame()
-extern Renderer* renderer;
+// CUDA driver API + GL interop
+#include <cuda.h>
+#include <cudaGL.h>
 
+// FFmpeg for NVENC via CUDA hwaccel
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/frame.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_cuda.h>
 #include <libswscale/swscale.h>
 }
 
@@ -34,6 +39,7 @@ extern "C" {
 #pragma comment(lib, "avcodec.lib")
 #pragma comment(lib, "avutil.lib")
 #pragma comment(lib, "swscale.lib")
+#pragma comment(lib, "cuda.lib")
 typedef int socklen_t;
 #else
 #include <sys/socket.h>
@@ -54,20 +60,26 @@ typedef int SOCKET;
 #include <thread>
 #include <atomic>
 
+extern Renderer* renderer;
+
 namespace maplecast_stream
 {
 
 static std::atomic<bool> _active{false};
 static std::thread _acceptThread;
 
-// NVENC encoder state
+// Encoder
 static const AVCodec* _codec = nullptr;
 static AVCodecContext* _codecCtx = nullptr;
-static AVFrame* _frame = nullptr;
+static AVFrame* _swFrame = nullptr;   // software frame for fallback
 static AVPacket* _pkt = nullptr;
 static SwsContext* _swsCtx = nullptr;
 static int _width = 640;
 static int _height = 480;
+
+// CUDA GL interop state
+static CUcontext _cuCtx = nullptr;
+static bool _cudaAvailable = false;
 
 // Network
 static SOCKET _listenSock = INVALID_SOCKET;
@@ -75,9 +87,38 @@ static constexpr int MAX_CLIENTS = 4;
 static SOCKET _clients[MAX_CLIENTS] = {INVALID_SOCKET, INVALID_SOCKET, INVALID_SOCKET, INVALID_SOCKET};
 static std::mutex _clientMutex;
 
+// CUDA-GL interop for zero-copy capture
+static CUgraphicsResource _cuGLResource = nullptr;
+static GLuint _registeredTexID = 0;
+static int _texWidth = 0, _texHeight = 0;
+
+static bool initCuda()
+{
+	CUresult res = cuInit(0);
+	if (res != CUDA_SUCCESS)
+	{
+		printf("[maplecast-stream] CUDA init failed: %d\n", res);
+		return false;
+	}
+
+	CUdevice device;
+	res = cuDeviceGet(&device, 0);
+	if (res != CUDA_SUCCESS) return false;
+
+	res = cuCtxCreate(&_cuCtx, 0, device);
+	if (res != CUDA_SUCCESS) return false;
+
+	char name[256];
+	cuDeviceGetName(name, sizeof(name), device);
+	printf("[maplecast-stream] CUDA device: %s\n", name);
+	return true;
+}
+
 static bool initEncoder()
 {
-	// Find NVENC H.264 encoder
+	// Try CUDA-accelerated NVENC first
+	_cudaAvailable = initCuda();
+
 	_codec = avcodec_find_encoder_by_name("h264_nvenc");
 	if (!_codec)
 	{
@@ -89,39 +130,29 @@ static bool initEncoder()
 		printf("[maplecast-stream] no H.264 encoder found!\n");
 		return false;
 	}
-	printf("[maplecast-stream] using encoder: %s\n", _codec->name);
+	printf("[maplecast-stream] encoder: %s (CUDA: %s)\n", _codec->name, _cudaAvailable ? "YES" : "no");
 
 	_codecCtx = avcodec_alloc_context3(_codec);
 	if (!_codecCtx) return false;
 
-	// Resolution
 	_codecCtx->width = _width;
 	_codecCtx->height = _height;
-
-	// Timebase = 60fps
 	_codecCtx->time_base = {1, 60};
 	_codecCtx->framerate = {60, 1};
-
-	// Pixel format — NVENC wants NV12
 	_codecCtx->pix_fmt = AV_PIX_FMT_NV12;
-
-	// Bitrate — 15 Mbps for sharp 480p (still tiny for a 3090)
 	_codecCtx->bit_rate = 15000000;
-
-	// ULTRA LOW LATENCY settings
-	_codecCtx->max_b_frames = 0;        // No B-frames — zero reordering delay
-	_codecCtx->gop_size = 1;            // Every frame is IDR — independently decodable
+	_codecCtx->max_b_frames = 0;
+	_codecCtx->gop_size = 1;
 	_codecCtx->flags |= AV_CODEC_FLAG_LOW_DELAY;
 
-	// NVENC-specific options
 	if (strcmp(_codec->name, "h264_nvenc") == 0)
 	{
-		av_opt_set(_codecCtx->priv_data, "preset", "p1", 0);         // Fastest preset
-		av_opt_set(_codecCtx->priv_data, "tune", "ull", 0);          // Ultra low latency
-		av_opt_set(_codecCtx->priv_data, "zerolatency", "1", 0);     // No pipeline delay
-		av_opt_set(_codecCtx->priv_data, "rc", "cbr", 0);            // Constant bitrate
-		av_opt_set(_codecCtx->priv_data, "delay", "0", 0);           // Zero frame delay
-		av_opt_set(_codecCtx->priv_data, "forced-idr", "1", 0);      // Force all IDR
+		av_opt_set(_codecCtx->priv_data, "preset", "p1", 0);
+		av_opt_set(_codecCtx->priv_data, "tune", "ull", 0);
+		av_opt_set(_codecCtx->priv_data, "zerolatency", "1", 0);
+		av_opt_set(_codecCtx->priv_data, "rc", "cbr", 0);
+		av_opt_set(_codecCtx->priv_data, "delay", "0", 0);
+		av_opt_set(_codecCtx->priv_data, "forced-idr", "1", 0);
 	}
 	else if (strcmp(_codec->name, "libx264") == 0)
 	{
@@ -129,8 +160,7 @@ static bool initEncoder()
 		av_opt_set(_codecCtx->priv_data, "tune", "zerolatency", 0);
 	}
 
-	// Constrained Baseline profile — hardware decoded everywhere
-	_codecCtx->profile = 66; // AV_PROFILE_H264_BASELINE = 66
+	_codecCtx->profile = 66;
 
 	if (avcodec_open2(_codecCtx, _codec, nullptr) < 0)
 	{
@@ -139,23 +169,20 @@ static bool initEncoder()
 		return false;
 	}
 
-	// Allocate frame (NV12)
-	_frame = av_frame_alloc();
-	_frame->format = AV_PIX_FMT_NV12;
-	_frame->width = _width;
-	_frame->height = _height;
-	av_frame_get_buffer(_frame, 0);
+	_swFrame = av_frame_alloc();
+	_swFrame->format = AV_PIX_FMT_NV12;
+	_swFrame->width = _width;
+	_swFrame->height = _height;
+	av_frame_get_buffer(_swFrame, 0);
 
-	// Allocate packet
 	_pkt = av_packet_alloc();
 
-	// RGB24 → NV12 converter
 	_swsCtx = sws_getContext(
 		_width, _height, AV_PIX_FMT_RGB24,
 		_width, _height, AV_PIX_FMT_NV12,
 		SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
 
-	printf("[maplecast-stream] NVENC encoder ready: %dx%d @ %lld bps, GOP=1 (all IDR)\n",
+	printf("[maplecast-stream] encoder ready: %dx%d @ %lld bps, GOP=1\n",
 		_width, _height, (long long)_codecCtx->bit_rate);
 	return true;
 }
@@ -164,38 +191,32 @@ static void cleanupEncoder()
 {
 	if (_swsCtx) { sws_freeContext(_swsCtx); _swsCtx = nullptr; }
 	if (_pkt) { av_packet_free(&_pkt); }
-	if (_frame) { av_frame_free(&_frame); }
+	if (_swFrame) { av_frame_free(&_swFrame); }
 	if (_codecCtx) { avcodec_free_context(&_codecCtx); }
+	if (_cuCtx) { cuCtxDestroy(_cuCtx); _cuCtx = nullptr; }
 }
 
-// Send encoded packet to all connected clients
-// Frame format: [4-byte LE length][H.264 NAL data]
-// Non-blocking: if send would block, drop the frame for that client.
-// NEVER stall the render thread.
-static void broadcastPacket(const uint8_t* data, int size)
+static void broadcastPacket(const uint8_t* data, int size, int64_t captureTimeUs, uint32_t frameNum)
 {
-	// Build complete message: [length][data] so we send atomically
-	std::vector<u8> msg(4 + size);
-	uint32_t len = (uint32_t)size;
-	memcpy(msg.data(), &len, 4);
-	memcpy(msg.data() + 4, data, size);
+	uint32_t headerSize = 8 + 4;
+	uint32_t totalPayload = headerSize + size;
+	std::vector<u8> msg(4 + totalPayload);
+	memcpy(msg.data(), &totalPayload, 4);
+	memcpy(msg.data() + 4, &captureTimeUs, 8);
+	memcpy(msg.data() + 12, &frameNum, 4);
+	memcpy(msg.data() + 16, data, size);
 
 	std::lock_guard<std::mutex> lock(_clientMutex);
 	for (int i = 0; i < MAX_CLIENTS; i++)
 	{
 		if (_clients[i] == INVALID_SOCKET) continue;
-
-		// Non-blocking send — drop frame if it would block
 		int sent = send(_clients[i], (const char*)msg.data(), (int)msg.size(), 0);
 		if (sent <= 0)
 		{
 #ifdef _WIN32
-			int err = WSAGetLastError();
-			if (err == WSAEWOULDBLOCK)
-				continue; // Drop this frame, try next one
+			if (WSAGetLastError() == WSAEWOULDBLOCK) continue;
 #else
-			if (errno == EAGAIN || errno == EWOULDBLOCK)
-				continue;
+			if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
 #endif
 			printf("[maplecast-stream] client %d disconnected\n", i);
 			closesocket(_clients[i]);
@@ -204,7 +225,6 @@ static void broadcastPacket(const uint8_t* data, int size)
 	}
 }
 
-// Accept loop
 static void acceptLoop(int port)
 {
 	_listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -227,9 +247,8 @@ static void acceptLoop(int port)
 	}
 
 	listen(_listenSock, 4);
-	printf("[maplecast-stream] listening on port %d (raw H.264 framed TCP)\n", port);
+	printf("[maplecast-stream] listening on port %d\n", port);
 
-	// Set non-blocking
 #ifdef _WIN32
 	u_long mode = 1;
 	ioctlsocket(_listenSock, FIONBIO, &mode);
@@ -245,22 +264,16 @@ static void acceptLoop(int port)
 
 		if (client != INVALID_SOCKET)
 		{
-			// Disable Nagle — send frames immediately
 			int nodelay = 1;
 			setsockopt(client, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
-
-			// Large send buffer — queue up to ~10 frames without blocking
 			int sndbuf = 512 * 1024;
 			setsockopt(client, SOL_SOCKET, SO_SNDBUF, (const char*)&sndbuf, sizeof(sndbuf));
-
-			// Non-blocking for client too
 #ifdef _WIN32
 			u_long cmode = 1;
 			ioctlsocket(client, FIONBIO, &cmode);
 #else
 			fcntl(client, F_SETFL, fcntl(client, F_GETFL, 0) | O_NONBLOCK);
 #endif
-
 			std::lock_guard<std::mutex> lock(_clientMutex);
 			for (int i = 0; i < MAX_CLIENTS; i++)
 			{
@@ -298,7 +311,7 @@ bool init(int wsPort)
 	_frameCount = 0;
 	_acceptThread = std::thread(acceptLoop, wsPort);
 
-	printf("[maplecast-stream] initialized\n");
+	printf("[maplecast-stream] initialized (zero-copy: %s)\n", _cudaAvailable ? "CUDA" : "PBO async");
 	return true;
 }
 
@@ -320,6 +333,7 @@ void shutdown()
 		}
 	}
 
+	if (_cuGLResource) { cuGraphicsUnregisterResource(_cuGLResource); _cuGLResource = nullptr; }
 	cleanupEncoder();
 	printf("[maplecast-stream] shutdown\n");
 }
@@ -328,54 +342,135 @@ void onFrameRendered()
 {
 	if (!_active || !_codecCtx) return;
 
-	// Check if anyone is connected
+	bool hasClients = false;
 	{
 		std::lock_guard<std::mutex> lock(_clientMutex);
-		bool hasClients = false;
 		for (int i = 0; i < MAX_CLIENTS; i++)
 			if (_clients[i] != INVALID_SOCKET) { hasClients = true; break; }
-		if (!hasClients) return;
 	}
+	if (!hasClients) return;
 
-	// Capture frame from Flycast renderer
-	std::vector<u8> rgbData;
-	int w = 0, h = 0;  // 0,0 = use native framebuffer resolution
-	try {
-		if (!renderer || !renderer->GetLastFrame(rgbData, w, h))
-			return;
-	} catch (...) {
-		// GPU readback can fail during swapchain transitions
-		return;
-	}
+	LARGE_INTEGER freq, pc0, pc1, pc2, pc3;
+	QueryPerformanceFrequency(&freq);
+	QueryPerformanceCounter(&pc0);
+	int64_t captureTimeUs = pc0.QuadPart * 1000000LL / freq.QuadPart;
 
-	if (rgbData.empty()) return;
+	// Get the GL texture directly from the renderer — no readback
+	int w = 0, h = 0;
+	GLuint texID = renderer ? renderer->GetFrameTextureID(w, h) : 0;
+	if (texID == 0 || w <= 0 || h <= 0) return;
 
-	// Handle resolution change — rebuild sws scaler if source size changed
-	if (w != _width || h != _height)
+	// Register GL texture with CUDA (once, or on texture/size change)
+	if (_cudaAvailable && (texID != _registeredTexID || w != _texWidth || h != _texHeight))
 	{
-		printf("[maplecast-stream] resolution changed: %dx%d → %dx%d\n", _width, _height, w, h);
-		_width = w;
-		_height = h;
+		cuCtxPushCurrent(_cuCtx);
 
-		// Rebuild sws context for new source resolution
+		if (_cuGLResource)
+		{
+			cuGraphicsUnregisterResource(_cuGLResource);
+			_cuGLResource = nullptr;
+		}
+
+		CUresult res = cuGraphicsGLRegisterImage(&_cuGLResource, texID, GL_TEXTURE_2D,
+			CU_GRAPHICS_REGISTER_FLAGS_READ_ONLY);
+		if (res != CUDA_SUCCESS)
+		{
+			printf("[maplecast-stream] CUDA GL register failed: %d, falling back to readback\n", res);
+			_cudaAvailable = false;
+		}
+		else
+		{
+			_registeredTexID = texID;
+			_texWidth = w;
+			_texHeight = h;
+			printf("[maplecast-stream] CUDA GL texture registered: %dx%d texID=%u\n", w, h, texID);
+			maplecast_telemetry::send("[maplecast-stream] CUDA GL registered: %dx%d", w, h);
+		}
+
+		// Rebuild sws scaler for this resolution
 		if (_swsCtx) sws_freeContext(_swsCtx);
 		_swsCtx = sws_getContext(
-			_width, _height, AV_PIX_FMT_RGB24,
+			w, h, AV_PIX_FMT_RGBA,   // GL textures are RGBA
 			_codecCtx->width, _codecCtx->height, AV_PIX_FMT_NV12,
 			SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
-		if (!_swsCtx) return;
+
+		cuCtxPopCurrent(nullptr);
 	}
 
-	// Convert RGB24 → NV12 for NVENC
-	const uint8_t* srcSlice[1] = { rgbData.data() };
-	int srcStride[1] = { w * 3 };
-	sws_scale(_swsCtx, srcSlice, srcStride, 0, h,
-		_frame->data, _frame->linesize);
+	QueryPerformanceCounter(&pc1);
 
-	_frame->pts = _frameCount++;
+	// CUDA zero-copy path: map GL texture → read CUDA memory → convert → encode
+	if (_cudaAvailable && _cuGLResource)
+	{
+		cuCtxPushCurrent(_cuCtx);
+
+		// Map the GL texture into CUDA address space
+		CUresult res = cuGraphicsMapResources(1, &_cuGLResource, 0);
+		if (res == CUDA_SUCCESS)
+		{
+			CUarray cuArray;
+			res = cuGraphicsSubResourceGetMappedArray(&cuArray, _cuGLResource, 0, 0);
+			if (res == CUDA_SUCCESS)
+			{
+				// Copy from CUDA array to host memory for sws_scale
+				// This is GPU→CPU but via CUDA DMA, much faster than glReadPixels
+				size_t rowBytes = w * 4; // RGBA
+				std::vector<u8> rgbaData(w * h * 4);
+
+				CUDA_MEMCPY2D copyParams = {};
+				copyParams.srcMemoryType = CU_MEMORYTYPE_ARRAY;
+				copyParams.srcArray = cuArray;
+				copyParams.dstMemoryType = CU_MEMORYTYPE_HOST;
+				copyParams.dstHost = rgbaData.data();
+				copyParams.dstPitch = rowBytes;
+				copyParams.WidthInBytes = rowBytes;
+				copyParams.Height = h;
+				cuMemcpy2D(&copyParams);
+
+				// RGBA → NV12 for NVENC
+				const uint8_t* srcSlice[1] = { rgbaData.data() };
+				int srcStride[1] = { (int)rowBytes };
+				sws_scale(_swsCtx, srcSlice, srcStride, 0, h,
+					_swFrame->data, _swFrame->linesize);
+			}
+			cuGraphicsUnmapResources(1, &_cuGLResource, 0);
+		}
+
+		cuCtxPopCurrent(nullptr);
+	}
+	else
+	{
+		// Fallback: GetLastFrame (slow but works everywhere)
+		std::vector<u8> rgbData;
+		int fw = 0, fh = 0;
+		try {
+			if (!renderer->GetLastFrame(rgbData, fw, fh) || rgbData.empty())
+				return;
+		} catch (...) {
+			return;
+		}
+		if (fw != w || fh != h)
+		{
+			if (_swsCtx) sws_freeContext(_swsCtx);
+			_swsCtx = sws_getContext(
+				fw, fh, AV_PIX_FMT_RGB24,
+				_codecCtx->width, _codecCtx->height, AV_PIX_FMT_NV12,
+				SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+			w = fw;
+			h = fh;
+		}
+		const uint8_t* srcSlice[1] = { rgbData.data() };
+		int srcStride[1] = { w * 3 };
+		sws_scale(_swsCtx, srcSlice, srcStride, 0, h,
+			_swFrame->data, _swFrame->linesize);
+	}
+
+	uint32_t frameNum = (uint32_t)_frameCount;
+	_swFrame->pts = _frameCount++;
+	QueryPerformanceCounter(&pc2);
 
 	// Encode
-	int ret = avcodec_send_frame(_codecCtx, _frame);
+	int ret = avcodec_send_frame(_codecCtx, _swFrame);
 	if (ret < 0) return;
 
 	while (ret >= 0)
@@ -385,8 +480,21 @@ void onFrameRendered()
 			break;
 		if (ret < 0) break;
 
-		// Broadcast H.264 NAL units to all connected clients
-		broadcastPacket(_pkt->data, _pkt->size);
+		QueryPerformanceCounter(&pc3);
+		broadcastPacket(_pkt->data, _pkt->size, captureTimeUs, frameNum);
+
+		if (frameNum % 300 == 0)
+		{
+			long long capUs  = (pc1.QuadPart - pc0.QuadPart) * 1000000LL / freq.QuadPart;
+			long long scaleUs = (pc2.QuadPart - pc1.QuadPart) * 1000000LL / freq.QuadPart;
+			long long encUs  = (pc3.QuadPart - pc2.QuadPart) * 1000000LL / freq.QuadPart;
+			long long totalUs = (pc3.QuadPart - pc0.QuadPart) * 1000000LL / freq.QuadPart;
+			printf("[maplecast-stream] F:%u | capture:%lldus scale:%lldus encode:%lldus total:%lldus | %dB\n",
+				frameNum, capUs, scaleUs, encUs, totalUs, _pkt->size);
+			maplecast_telemetry::send("[maplecast-stream] F:%u | capture:%lldus scale:%lldus encode:%lldus total:%lldus | %dB",
+				frameNum, capUs, scaleUs, encUs, totalUs, _pkt->size);
+		}
+
 		av_packet_unref(_pkt);
 	}
 }

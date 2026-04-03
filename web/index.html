@@ -8,6 +8,7 @@ body { background: #000; display: flex; flex-direction: column; align-items: cen
 canvas { image-rendering: pixelated; border: 2px solid #333; }
 #status { margin: 10px; font-size: 14px; }
 #controls { margin: 10px; font-size: 12px; color: #888; }
+#diag { position: fixed; top: 10px; right: 10px; background: rgba(0,0,0,0.85); color: #0f0; font-size: 11px; padding: 10px; border: 1px solid #333; font-family: monospace; white-space: pre; min-width: 280px; }
 button { background: #222; color: #0f0; border: 1px solid #0f0; padding: 8px 16px; margin: 5px; cursor: pointer; font-family: monospace; }
 button:hover { background: #0f0; color: #000; }
 </style>
@@ -18,36 +19,98 @@ button:hover { background: #0f0; color: #000; }
 <div id="controls">
   <button onclick="connect(1)">Connect as P1</button>
   <button onclick="connect(2)">Connect as P2</button>
-  <span id="stats"></span>
 </div>
+<div id="diag"></div>
 
 <script>
 const canvas = document.getElementById('screen');
 const ctx = canvas.getContext('2d');
 const status = document.getElementById('status');
-const stats = document.getElementById('stats');
+const diagEl = document.getElementById('diag');
 
 let ws = null;
 let decoder = null;
 let frameCount = 0;
 let startTime = 0;
-let playerPort = 7101;
 let gamepadInterval = null;
 
-// WebCodecs H.264 decoder
+// Diagnostics
+const diag = {
+  fps: 0,
+  frameCount: 0,
+  serverFrame: 0,
+  bytesPerFrame: 0,
+  totalBytes: 0,
+
+  // Latency tracking
+  decodeStartMs: 0,
+  decodeEndMs: 0,
+  decodeLat: 0,        // ms to decode one frame
+  decodeSamples: [],
+
+  networkLat: 0,       // estimated network latency (server timestamp delta)
+  networkSamples: [],
+
+  wsRecvMs: 0,         // when WS message arrived
+
+  // Input
+  gamepadActive: false,
+  inputSendCount: 0,
+  lastInputMs: 0,
+
+  // Frame interval
+  frameIntervals: [],
+  avgFrameInterval: 0,
+
+  droppedFrames: 0,
+};
+
+function updateDiagDisplay() {
+  const avgDecode = diag.decodeSamples.length > 0
+    ? (diag.decodeSamples.reduce((a,b) => a+b, 0) / diag.decodeSamples.length).toFixed(1)
+    : '?';
+  const avgInterval = diag.frameIntervals.length > 0
+    ? (diag.frameIntervals.reduce((a,b) => a+b, 0) / diag.frameIntervals.length).toFixed(1)
+    : '?';
+  const avgNetwork = diag.networkSamples.length > 0
+    ? (diag.networkSamples.reduce((a,b) => a+b, 0) / diag.networkSamples.length).toFixed(1)
+    : '?';
+  const kbps = (diag.totalBytes * 8 / 1000 / ((performance.now() - startTime) / 1000)).toFixed(0);
+
+  diagEl.textContent =
+`=== MapleCast Diagnostics ===
+FPS:            ${diag.fps.toFixed(1)}
+Frame:          ${diag.frameCount} (server: ${diag.serverFrame})
+Bitrate:        ${kbps} kbps
+Frame size:     ${diag.bytesPerFrame} bytes
+Frame interval: ${avgInterval}ms (target: 16.7ms)
+
+--- Latency ---
+Decode:         ${avgDecode}ms
+Network est:    ${avgNetwork}ms
+Dropped:        ${diag.droppedFrames}
+
+--- Input ---
+Gamepad:        ${diag.gamepadActive ? 'YES' : 'no'}
+Inputs sent:    ${diag.inputSendCount}`;
+}
+
 function initDecoder() {
   decoder = new VideoDecoder({
     output: (frame) => {
-      // Draw decoded frame to canvas
+      diag.decodeEndMs = performance.now();
+      diag.decodeLat = diag.decodeEndMs - diag.decodeStartMs;
+      diag.decodeSamples.push(diag.decodeLat);
+      if (diag.decodeSamples.length > 60) diag.decodeSamples.shift();
+
       ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
       frame.close();
       frameCount++;
 
-      // Update stats every 60 frames
-      if (frameCount % 60 === 0) {
+      if (frameCount % 30 === 0) {
         const elapsed = (performance.now() - startTime) / 1000;
-        const fps = frameCount / elapsed;
-        stats.textContent = `${fps.toFixed(1)} fps | ${frameCount} frames`;
+        diag.fps = frameCount / elapsed;
+        updateDiagDisplay();
       }
     },
     error: (e) => {
@@ -57,12 +120,14 @@ function initDecoder() {
   });
 
   decoder.configure({
-    codec: 'avc1.42001e', // Baseline profile, level 3.0
+    codec: 'avc1.42001e',
     codedWidth: 640,
     codedHeight: 480,
     optimizeForLatency: true,
   });
 }
+
+let lastFrameTime = 0;
 
 function connect(player) {
   if (ws) {
@@ -72,11 +137,9 @@ function connect(player) {
 
   const wsHost = window.location.hostname || '127.0.0.1';
   const wsPort = 8080;
-  const path = player === 1 ? '/p1' : '/p2';
-  const url = `ws://${wsHost}:${wsPort}${path}`;
+  const url = `ws://${wsHost}:${wsPort}/p${player}`;
 
   status.textContent = `Connecting to ${url}...`;
-  playerPort = player === 1 ? 7101 : 7102;
 
   ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
@@ -85,6 +148,7 @@ function connect(player) {
     status.textContent = `Connected as P${player} — play!`;
     frameCount = 0;
     startTime = performance.now();
+    lastFrameTime = 0;
     initDecoder();
     startGamepadPolling();
   };
@@ -92,18 +156,52 @@ function connect(player) {
   ws.onmessage = (event) => {
     if (!decoder || decoder.state === 'closed') return;
 
-    const data = new Uint8Array(event.data);
+    const now = performance.now();
+    diag.wsRecvMs = now;
 
-    // Every frame is an IDR (keyframe) — type = 'key' always
+    // Frame interval tracking
+    if (lastFrameTime > 0) {
+      const interval = now - lastFrameTime;
+      diag.frameIntervals.push(interval);
+      if (diag.frameIntervals.length > 60) diag.frameIntervals.shift();
+    }
+    lastFrameTime = now;
+
+    const buf = new Uint8Array(event.data);
+
+    // Parse header: [8-byte timestamp_us][4-byte frame_num][H.264 data]
+    if (buf.length < 12) return;
+
+    const view = new DataView(event.data);
+    // Read 64-bit timestamp as two 32-bit values (JS doesn't have native int64)
+    const tsLow = view.getUint32(0, true);
+    const tsHigh = view.getUint32(4, true);
+    const serverTimestampUs = tsLow + tsHigh * 4294967296;
+    const serverFrame = view.getUint32(8, true);
+    const h264Data = buf.slice(12);
+
+    diag.serverFrame = serverFrame;
+    diag.bytesPerFrame = h264Data.length;
+    diag.totalBytes += h264Data.length;
+
+    // Estimate network latency (compare server capture time to our receive time)
+    // This is approximate — clocks aren't synced, but drift is useful
+    const nowUs = performance.now() * 1000;
+    // We can't compare absolute clocks, but we CAN track jitter
+    // by looking at delta between consecutive server timestamps vs our timestamps
+
+    diag.decodeStartMs = performance.now();
+
     const chunk = new EncodedVideoChunk({
       type: 'key',
-      timestamp: frameCount * 16667, // 60fps = 16.667ms per frame
-      data: data,
+      timestamp: serverFrame * 16667,
+      data: h264Data,
     });
 
     try {
       decoder.decode(chunk);
     } catch (e) {
+      diag.droppedFrames++;
       console.warn('Decode error:', e);
     }
   };
@@ -119,7 +217,7 @@ function connect(player) {
   };
 }
 
-// Gamepad API — read controller, send W3 over WebSocket
+// Gamepad API
 function startGamepadPolling() {
   let prevW3 = null;
 
@@ -128,39 +226,36 @@ function startGamepadPolling() {
 
     const gamepads = navigator.getGamepads();
     const gp = gamepads[0];
-    if (!gp) return;
+    if (!gp) { diag.gamepadActive = false; return; }
+    diag.gamepadActive = true;
 
-    // Build DC W3 button state (active-low: 0 = pressed)
     let buttons = 0xFFFF;
-
-    // Standard gamepad mapping
     if (gp.buttons[0]?.pressed) buttons &= ~0x0004; // A
     if (gp.buttons[1]?.pressed) buttons &= ~0x0002; // B
     if (gp.buttons[2]?.pressed) buttons &= ~0x0400; // X
     if (gp.buttons[3]?.pressed) buttons &= ~0x0200; // Y
     if (gp.buttons[9]?.pressed) buttons &= ~0x0008; // Start
-    if (gp.buttons[12]?.pressed) buttons &= ~0x0010; // DPad Up
-    if (gp.buttons[13]?.pressed) buttons &= ~0x0020; // DPad Down
-    if (gp.buttons[14]?.pressed) buttons &= ~0x0040; // DPad Left
-    if (gp.buttons[15]?.pressed) buttons &= ~0x0080; // DPad Right
+    if (gp.buttons[12]?.pressed) buttons &= ~0x0010; // Up
+    if (gp.buttons[13]?.pressed) buttons &= ~0x0020; // Down
+    if (gp.buttons[14]?.pressed) buttons &= ~0x0040; // Left
+    if (gp.buttons[15]?.pressed) buttons &= ~0x0080; // Right
 
-    // Triggers (0.0 - 1.0 → 0 - 255)
     const lt = Math.floor((gp.buttons[6]?.value || 0) * 255);
     const rt = Math.floor((gp.buttons[7]?.value || 0) * 255);
 
-    // W3 format: {LT, RT, buttons_hi, buttons_lo}
     const w3 = new Uint8Array([lt, rt, (buttons >> 8) & 0xFF, buttons & 0xFF]);
-
-    // Send on change or every 8ms (120Hz refresh)
     const w3Hex = Array.from(w3).map(b => b.toString(16).padStart(2,'0')).join('');
+
     if (w3Hex !== prevW3) {
       ws.send(w3);
       prevW3 = w3Hex;
+      diag.inputSendCount++;
+      diag.lastInputMs = performance.now();
     }
-  }, 8); // 120Hz polling — 2x DC poll rate
+  }, 8);
 }
 
-// Fill canvas with "waiting" screen
+// Waiting screen
 ctx.fillStyle = '#111';
 ctx.fillRect(0, 0, 640, 480);
 ctx.fillStyle = '#0f0';
@@ -169,6 +264,8 @@ ctx.textAlign = 'center';
 ctx.fillText('MapleCast', 320, 220);
 ctx.font = '14px monospace';
 ctx.fillText('Press Connect as P1 or P2', 320, 260);
+
+diagEl.textContent = '=== MapleCast Diagnostics ===\nWaiting for connection...';
 </script>
 </body>
 </html>

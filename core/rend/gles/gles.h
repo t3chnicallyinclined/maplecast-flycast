@@ -514,6 +514,15 @@ struct OpenGLRenderer : Renderer
 	}
 	bool GetLastFrame(std::vector<u8>& data, int& width, int& height) override;
 
+	unsigned int GetFrameTextureID(int& width, int& height) override
+	{
+		GlFramebuffer *fb = gl.ofbo2.ready ? gl.ofbo2.framebuffer.get() : gl.ofbo.framebuffer.get();
+		if (!fb) return 0;
+		width = fb->getWidth();
+		height = fb->getHeight();
+		return fb->getTexture();
+	}
+
 	BaseTextureCacheData *GetTexture(TSP tsp, TCW tcw, int area) override;
 
 	bool Present() override

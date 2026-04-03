@@ -74,6 +74,10 @@ struct Renderer
 	// Otherwise either width or height will be used as the maximum width or height respectively.
 	virtual bool GetLastFrame(std::vector<u8>& data, int& width, int& height) { return false; }
 
+	// MapleCast: get the GL texture ID of the last rendered frame for zero-copy GPU capture
+	// Returns 0 if not available (non-GL renderer)
+	virtual unsigned int GetFrameTextureID(int& width, int& height) { width = 0; height = 0; return 0; }
+
 	virtual bool Present() { return true; }
 
 	virtual BaseTextureCacheData *GetTexture(TSP tsp, TCW tcw, int area = 0) { return nullptr; }

@@ -37,6 +37,7 @@
 #include "network/ggpo.h"
 #include "network/maplecast.h"
 #include "network/maplecast_stream.h"
+#include "network/maplecast_telemetry.h"
 #include "hw/maple/maple_cfg.h"
 #include <cstdlib>
 #include <string>
@@ -1000,6 +1001,9 @@ void Emulator::start()
 		const char* portEnv = std::getenv("MAPLECAST_PORT");
 		if (portEnv) port = std::atoi(portEnv);
 		maplecast::init(port);
+
+		// Init telemetry (fire-and-forget UDP to localhost:7300)
+		maplecast_telemetry::init();
 
 		// Start NVENC streaming if MAPLECAST_STREAM is set
 		if (std::getenv("MAPLECAST_STREAM"))

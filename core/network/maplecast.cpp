@@ -2,12 +2,11 @@
 	MapleCast — Flycast IS the server.
 
 	One UDP port. Auto-assign P1/P2 by connection order.
-	First unique sender = P1. Second unique sender = P2.
 	4-byte W3 packet: {LT, RT, buttons_hi, buttons_lo}
-
-	That's it. Flycast runs the game. One state. Zero desync.
+	Comprehensive telemetry for latency analysis.
 */
 #include "maplecast.h"
+#include "maplecast_telemetry.h"
 #include "hw/maple/maple_cfg.h"
 #include "input/gamepad.h"
 
@@ -39,36 +38,50 @@ static bool _active = false;
 static SOCKET _sock = INVALID_SOCK;
 
 // Auto-assigned players by source address
-// First unique sender = P1, second = P2
 static struct sockaddr_in _playerAddr[2];
 static bool _playerAssigned[2] = { false, false };
 static int _playerCount = 0;
 
-// Latest received W3 state per player
+// Latest W3 per player
 static u8 _w3[2][4] = {
-	{ 0, 0, 0xFF, 0xFF },  // P1: all buttons released
-	{ 0, 0, 0xFF, 0xFF },  // P2: all buttons released
+	{ 0, 0, 0xFF, 0xFF },
+	{ 0, 0, 0xFF, 0xFF },
 };
 
-// Compare two sockaddr_in (ip + port)
+// Telemetry counters
+static uint32_t _packetCount[2] = {0, 0};
+static uint32_t _unknownPackets = 0;
+static uint32_t _getInputCount = 0;
+static uint32_t _packetsThisFrame[2] = {0, 0};
+static uint32_t _stateChanges[2] = {0, 0};
+static u8 _prevW3[2][4] = {{0,0,0xFF,0xFF},{0,0,0xFF,0xFF}};
+
 static bool addrMatch(const struct sockaddr_in& a, const struct sockaddr_in& b)
 {
 	return a.sin_addr.s_addr == b.sin_addr.s_addr && a.sin_port == b.sin_port;
 }
 
-// Parse W3 into MapleInputState
 static void w3ToInput(const u8 w3[4], MapleInputState& state)
 {
-	u16 buttons = ((u16)w3[2] << 8) | w3[3];  // active-low: 0=pressed
-
+	u16 buttons = ((u16)w3[2] << 8) | w3[3];
 	state.kcode = buttons | 0xFFFF0000;
 	state.halfAxes[PJTI_L] = (u16)w3[0] << 8;
 	state.halfAxes[PJTI_R] = (u16)w3[1] << 8;
-
 	state.fullAxes[PJAI_X1] = 0;
 	state.fullAxes[PJAI_Y1] = 0;
 	state.fullAxes[PJAI_X2] = 0;
 	state.fullAxes[PJAI_Y2] = 0;
+}
+
+static const char* addrStr(const struct sockaddr_in& addr)
+{
+	static char buf[2][64];
+	static int idx = 0;
+	idx = (idx + 1) % 2;
+	char ip[INET_ADDRSTRLEN];
+	inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
+	snprintf(buf[idx], sizeof(buf[idx]), "%s:%d", ip, ntohs(addr.sin_port));
+	return buf[idx];
 }
 
 bool init(int port)
@@ -85,7 +98,6 @@ bool init(int port)
 		return false;
 	}
 
-	// Non-blocking
 #ifdef _WIN32
 	u_long mode = 1;
 	ioctlsocket(_sock, FIONBIO, &mode);
@@ -111,10 +123,13 @@ bool init(int port)
 	_playerAssigned[0] = false;
 	_playerAssigned[1] = false;
 	_playerCount = 0;
+	_unknownPackets = 0;
 
 	_active = true;
-	printf("[maplecast] server mode — listening on port %d\n", port);
+	printf("[maplecast] === SERVER MODE ===\n");
+	printf("[maplecast] listening on UDP port %d\n", port);
 	printf("[maplecast] first sender = P1, second sender = P2\n");
+	printf("[maplecast] waiting for players...\n");
 	return true;
 }
 
@@ -128,6 +143,9 @@ void shutdown()
 
 void getInput(MapleInputState inputState[4])
 {
+	_packetsThisFrame[0] = 0;
+	_packetsThisFrame[1] = 0;
+
 	// Drain all pending UDP packets
 	u8 buf[64];
 	struct sockaddr_in from;
@@ -140,7 +158,7 @@ void getInput(MapleInputState inputState[4])
 			(struct sockaddr*)&from, &fromLen);
 		if (n < 4) break;
 
-		// Identify which player this packet is from
+		// Identify player
 		int player = -1;
 		for (int i = 0; i < 2; i++)
 		{
@@ -151,32 +169,101 @@ void getInput(MapleInputState inputState[4])
 			}
 		}
 
-		// New sender — auto-assign next available slot
-		if (player < 0 && _playerCount < 2)
+		// New sender — auto-assign
+		if (player < 0)
 		{
-			player = _playerCount;
-			_playerAddr[player] = from;
-			_playerAssigned[player] = true;
-			_playerCount++;
+			if (_playerCount < 2)
+			{
+				player = _playerCount;
+				_playerAddr[player] = from;
+				_playerAssigned[player] = true;
+				_playerCount++;
 
-			char ipStr[INET_ADDRSTRLEN];
-			inet_ntop(AF_INET, &from.sin_addr, ipStr, sizeof(ipStr));
-			printf("[maplecast] P%d assigned: %s:%d\n",
-				player + 1, ipStr, ntohs(from.sin_port));
+				printf("[maplecast] *** P%d ASSIGNED: %s ***\n", player + 1, addrStr(from));
+				maplecast_telemetry::send("[maplecast] P%d ASSIGNED: %s", player + 1, addrStr(from));
+
+				if (_playerCount == 2)
+				{
+					printf("[maplecast] *** BOTH PLAYERS CONNECTED ***\n");
+					printf("[maplecast]   P1: %s\n", addrStr(_playerAddr[0]));
+					printf("[maplecast]   P2: %s\n", addrStr(_playerAddr[1]));
+					maplecast_telemetry::send("[maplecast] BOTH PLAYERS CONNECTED");
+				}
+			}
+			else
+			{
+				// Slots full — check if this is a reconnect (same IP, different port)
+				// This happens when pc_gamepad_sender.py restarts
+				for (int i = 0; i < 2; i++)
+				{
+					if (_playerAddr[i].sin_addr.s_addr == from.sin_addr.s_addr)
+					{
+						// Same IP, different port — reassign
+						printf("[maplecast] P%d RECONNECTED: %s (was %s)\n",
+							i + 1, addrStr(from), addrStr(_playerAddr[i]));
+						maplecast_telemetry::send("[maplecast] P%d RECONNECTED: %s", i + 1, addrStr(from));
+						_playerAddr[i] = from;
+						player = i;
+						break;
+					}
+				}
+
+				if (player < 0)
+				{
+					_unknownPackets++;
+					if (_unknownPackets <= 5)
+					{
+						printf("[maplecast] REJECTED packet from %s (slots full)\n", addrStr(from));
+					}
+				}
+			}
 		}
 
 		if (player >= 0 && player < 2)
 		{
+			// Track state changes
+			if (memcmp(_w3[player], buf, 4) != 0)
+				_stateChanges[player]++;
+
+			memcpy(_prevW3[player], _w3[player], 4);
 			_w3[player][0] = buf[0];
 			_w3[player][1] = buf[1];
 			_w3[player][2] = buf[2];
 			_w3[player][3] = buf[3];
+			_packetCount[player]++;
+			_packetsThisFrame[player]++;
 		}
 	}
 
 	// Write into mapleInputState
 	w3ToInput(_w3[0], inputState[0]);
 	w3ToInput(_w3[1], inputState[1]);
+
+	_getInputCount++;
+
+	// Telemetry every 300 frames (5 seconds at 60fps)
+	if (_getInputCount % 300 == 0)
+	{
+		printf("[maplecast] frame:%u | P1: %u pkts, %u changes, btns=0x%02X%02X | P2: %u pkts, %u changes, btns=0x%02X%02X | rejected:%u\n",
+			_getInputCount,
+			_packetCount[0], _stateChanges[0], _w3[0][2], _w3[0][3],
+			_packetCount[1], _stateChanges[1], _w3[1][2], _w3[1][3],
+			_unknownPackets);
+
+		maplecast_telemetry::send(
+			"[maplecast] frame:%u | P1:%u pkts/%u chg/0x%02X%02X | P2:%u pkts/%u chg/0x%02X%02X | rej:%u | connected:%d",
+			_getInputCount,
+			_packetCount[0], _stateChanges[0], _w3[0][2], _w3[0][3],
+			_packetCount[1], _stateChanges[1], _w3[1][2], _w3[1][3],
+			_unknownPackets, _playerCount);
+
+		// Reset per-interval counters
+		_packetCount[0] = 0;
+		_packetCount[1] = 0;
+		_stateChanges[0] = 0;
+		_stateChanges[1] = 0;
+		_unknownPackets = 0;
+	}
 }
 
 bool active()

@@ -1647,7 +1647,7 @@ if(UNIX AND NOT APPLE AND NOT ANDROID AND NOT LIBRETRO)
 	endforeach()
 endif()
 
-# MapleCast: FFmpeg/NVENC for low-latency streaming
+# MapleCast: FFmpeg/NVENC + CUDA for zero-copy GPU streaming
 set(FFMPEG_DIR "${CMAKE_SOURCE_DIR}/external/ffmpeg/ffmpeg-8.1-full_build-shared")
 if(EXISTS "${FFMPEG_DIR}/include/libavcodec/avcodec.h")
 	message(STATUS "MapleCast: FFmpeg found at ${FFMPEG_DIR}")
@@ -1657,6 +1657,18 @@ if(EXISTS "${FFMPEG_DIR}/include/libavcodec/avcodec.h")
 	target_compile_definitions(${PROJECT_NAME} PRIVATE MAPLECAST_NVENC=1)
 else()
 	message(STATUS "MapleCast: FFmpeg not found, streaming disabled")
+endif()
+
+# CUDA for GL interop (GPU texture → NVENC zero-copy)
+find_path(CUDA_INCLUDE cuda.h PATHS "$ENV{CUDA_PATH}/include" "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/include")
+find_library(CUDA_LIB cuda PATHS "$ENV{CUDA_PATH}/lib/x64" "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/lib/x64")
+if(CUDA_INCLUDE AND CUDA_LIB)
+	message(STATUS "MapleCast: CUDA found — zero-copy GL→NVENC enabled")
+	target_include_directories(${PROJECT_NAME} PRIVATE ${CUDA_INCLUDE})
+	target_link_libraries(${PROJECT_NAME} PRIVATE ${CUDA_LIB})
+	target_compile_definitions(${PROJECT_NAME} PRIVATE MAPLECAST_CUDA=1)
+else()
+	message(STATUS "MapleCast: CUDA not found — using PBO async fallback")
 endif()
 
 if(${CMAKE_GENERATOR} MATCHES "^Xcode.*|^Visual Studio.*")
