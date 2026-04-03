@@ -1649,18 +1649,42 @@ endif()
 
 # MapleCast: CUDA + NVENC direct API — true zero-copy GPU streaming
 # No FFmpeg dependency. GL texture → CUDA → NVENC → H.264, CPU never touches pixels.
-find_path(CUDA_INCLUDE cuda.h PATHS "$ENV{CUDA_PATH}/include" "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/include")
-find_library(CUDA_LIB cuda PATHS "$ENV{CUDA_PATH}/lib/x64" "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/lib/x64")
+find_path(CUDA_INCLUDE cuda.h PATHS
+	"$ENV{CUDA_PATH}/include"
+	"C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/include"
+	"/usr/include"
+	"/usr/local/cuda/include")
+find_library(CUDA_LIB cuda PATHS
+	"$ENV{CUDA_PATH}/lib/x64"
+	"C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/lib/x64"
+	"/usr/lib/x86_64-linux-gnu"
+	"/usr/local/cuda/lib64"
+	"/usr/lib/x86_64-linux-gnu/stubs")
+# NVENC headers: check local vendored copy, then system (nv-codec-headers)
 set(NVENC_INCLUDE "${CMAKE_SOURCE_DIR}/external/nvenc/nv-codec-headers/include")
-if(CUDA_INCLUDE AND CUDA_LIB AND EXISTS "${NVENC_INCLUDE}/ffnvcodec/nvEncodeAPI.h")
+if(NOT EXISTS "${NVENC_INCLUDE}/ffnvcodec/nvEncodeAPI.h")
+	find_path(NVENC_INCLUDE ffnvcodec/nvEncodeAPI.h PATHS "/usr/local/include" "/usr/include")
+endif()
+if(CUDA_INCLUDE AND CUDA_LIB AND NVENC_INCLUDE)
 	message(STATUS "MapleCast: CUDA + NVENC SDK found — ZERO-COPY pipeline enabled")
 	target_include_directories(${PROJECT_NAME} PRIVATE ${CUDA_INCLUDE} ${NVENC_INCLUDE})
-	find_library(NVJPEG_LIB nvjpeg PATHS "$ENV{CUDA_PATH}/lib/x64" "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/lib/x64")
-	find_library(CUDART_LIB cudart PATHS "$ENV{CUDA_PATH}/lib/x64" "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/lib/x64")
-	target_link_libraries(${PROJECT_NAME} PRIVATE ${CUDA_LIB} ${NVJPEG_LIB} ${CUDART_LIB})
+	target_link_libraries(${PROJECT_NAME} PRIVATE ${CUDA_LIB} dl)
 	target_compile_definitions(${PROJECT_NAME} PRIVATE MAPLECAST_NVENC=1 MAPLECAST_CUDA=1)
 else()
 	message(WARNING "MapleCast: CUDA or NVENC headers not found — streaming disabled")
+endif()
+
+# MapleCast: AF_XDP zero-copy input — NIC DMA → ring buffer → kcode[] atomics
+# Bypasses entire kernel socket layer for gamepad UDP packets
+find_path(XDP_INCLUDE xdp/xsk.h PATHS "/usr/include")
+find_library(XDP_LIB xdp PATHS "/usr/lib/x86_64-linux-gnu")
+find_library(BPF_LIB bpf PATHS "/usr/lib/x86_64-linux-gnu")
+if(XDP_INCLUDE AND XDP_LIB AND BPF_LIB)
+	message(STATUS "MapleCast: AF_XDP found — zero-copy input enabled")
+	target_link_libraries(${PROJECT_NAME} PRIVATE ${XDP_LIB} ${BPF_LIB})
+	target_compile_definitions(${PROJECT_NAME} PRIVATE MAPLECAST_XDP=1)
+else()
+	message(WARNING "MapleCast: libxdp/libbpf not found — XDP input disabled, using fallback")
 endif()
 
 if(${CMAKE_GENERATOR} MATCHES "^Xcode.*|^Visual Studio.*")

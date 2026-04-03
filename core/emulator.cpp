@@ -38,6 +38,7 @@
 #include "network/maplecast.h"
 #include "network/maplecast_stream.h"
 #include "network/maplecast_telemetry.h"
+#include "network/maplecast_input_server.h"
 #include "hw/maple/maple_cfg.h"
 #include <cstdlib>
 #include <string>
@@ -993,14 +994,16 @@ void Emulator::start()
 	state = Running;
 	SetMemoryHandlers();
 
-	// MapleCast: Flycast IS the server. One UDP port, auto-assign P1/P2.
-	// MAPLECAST=1 enables it. Optional: MAPLECAST_PORT (default 7100)
-	if (!maplecast::active() && std::getenv("MAPLECAST"))
+	// MapleCast: Flycast IS the server.
+	// MAPLECAST=1 enables it. Input via XDP/fallback thread → kcode[] atomics.
+	if (std::getenv("MAPLECAST"))
 	{
 		int port = 7100;
 		const char* portEnv = std::getenv("MAPLECAST_PORT");
 		if (portEnv) port = std::atoi(portEnv);
-		maplecast::init(port);
+
+		// Input server — single source of truth for all player input
+		maplecast_input::init(port);
 
 		// Init telemetry (fire-and-forget UDP to localhost:7300)
 		maplecast_telemetry::init();

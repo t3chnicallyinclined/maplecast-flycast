@@ -11,8 +11,6 @@
 #include "profiler/fc_profiler.h"
 #include "network/ggpo.h"
 #include "network/maplecast_stream.h"
-#include "network/maplecast_spritelearn.h"
-#include "network/maplecast_ta_capture.h"
 
 #include <mutex>
 #include <deque>
@@ -210,8 +208,6 @@ private:
 		rend_allow_rollback();
 		{
 			FC_PROFILE_SCOPE_NAMED("Renderer::Render");
-			// Save TA context for MapleCast UV capture
-			maplecast_ta_capture::setRendContext(&taContext->rend);
 			try {
 				renderer->Render();
 			} catch (...) {
@@ -256,10 +252,10 @@ private:
 			{
 				try {
 					maplecast_stream::onFrameRendered();
-				} catch (...) {}
+				} catch (...) {
+					// Don't crash the game if streaming fails
+				}
 			}
-			// MapleCast: sprite learner disabled — use TA display list capture instead
-			// maplecast_spritelearn::onFrameRendered();
 			if (!config::ThreadedRendering && !ggpo::active())
 				emu.getSh4Executor()->Stop();
 #ifdef LIBRETRO

@@ -17,16 +17,10 @@ namespace maplecast_stream
 bool init(int wsPort = 7200);
 void shutdown();
 
-// Called after each frame is rendered — captures, encodes, sends video + game state
+// Called after each frame is rendered — captures, encodes, sends
 void onFrameRendered();
-
-// Called every frame even in headless/norend mode — sends game state only (240 bytes)
-void onFrameAdvanced();
 
 // Is streaming active?
 bool active();
-
-// Is headless mode (game state only, no video)?
-bool headless();
 
 }

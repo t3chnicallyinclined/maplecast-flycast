@@ -27,7 +27,6 @@ input { background: #111; color: #0f0; border: 1px solid #333; padding: 8px; fon
 <div id="controls">
   <input id="nameInput" placeholder="Your name" maxlength="16" />
   <button id="joinBtn" onclick="joinGame()">Press START to Join</button>
-  <button onclick="toggleView()">Toggle: Video / Sprites</button>
 </div>
 <div id="diag"></div>
 
@@ -74,28 +73,28 @@ function updateDiag() {
   const jit = avg(diag.jitterSamples).toFixed(2);
   const fi = avg(diag.frameIntervals).toFixed(1);
 
-  const hasVideo = diag.serverPipelineSamples.length > 0;
-
   diagEl.textContent =
 `=== MapleCast ===
 FPS: ${diag.fps.toFixed(1)}  Frame: ${diag.serverFrame}
 ${kbps}kbps  ${diag.bytesPerFrame}B  ${fi}ms/f
 
--- Stream --
-Mode: ${hasVideo ? 'H.264 Video' : 'Game State'}
-Copy: ${hasVideo ? srvCopy + 'ms' : '0ms'}
-Encode: ${hasVideo ? srvEnc + 'ms' : '0ms'}
-Pipeline: ${hasVideo ? srvPipe + 'ms' : '0ms'}
-Decode: ${hasVideo ? dec + 'ms' : '0ms (direct)'}
-Jitter: ${jit}ms  Drops: ${diag.droppedFrames}
+-- Server --
+Copy: ${srvCopy}ms  Encode: ${srvEnc}ms
+Pipeline: ${srvPipe}ms (capture>send)
+
+-- Client --
+Decode: ${dec}ms  Jitter: ${jit}ms
+Drops: ${diag.droppedFrames}
 
 -- P1 --
 Rate: ${p1.pps||0}/s  Chg: ${p1.cps||0}/s
-E2E: ${hasVideo ? '~' + (parseFloat(srvPipe) + ((p1.pps||0) > 1000 ? 0.3 : 1.0) + parseFloat(dec)).toFixed(1) + 'ms' : '~0.3ms'} ${(p1.pps||0) > 1000 ? '(HW)' : '(web)'}
+Btn: 0x${(p1.btn||0xFFFF).toString(16).padStart(4,'0')}
+E2E: ~${(parseFloat(srvPipe) + ((p1.pps||0) > 1000 ? 0.3 : 1.0) + parseFloat(dec)).toFixed(1)}ms ${(p1.pps||0) > 1000 ? '(HW)' : '(web)'}
 
 -- P2 --
 Rate: ${p2.pps||0}/s  Chg: ${p2.cps||0}/s
-E2E: ${hasVideo ? '~' + (parseFloat(srvPipe) + ((p2.pps||0) > 1000 ? 0.3 : 1.0) + parseFloat(dec)).toFixed(1) + 'ms' : '~0.3ms'} ${(p2.pps||0) > 1000 ? '(HW)' : '(web)'}
+Btn: 0x${(p2.btn||0xFFFF).toString(16).padStart(4,'0')}
+E2E: ~${(parseFloat(srvPipe) + ((p2.pps||0) > 1000 ? 0.3 : 1.0) + parseFloat(dec)).toFixed(1)}ms ${(p2.pps||0) > 1000 ? '(HW)' : '(web)'}
 
 -- Me --
 Slot: ${mySlot >= 0 ? 'P'+(mySlot+1) : 'spectator'}
@@ -108,7 +107,7 @@ function initDecoder() {
       const decEnd = performance.now();
       diag.decodeSamples.push(decEnd - diag.decodeStartMs);
       if (diag.decodeSamples.length > 60) diag.decodeSamples.shift();
-      if (viewMode === 'video') ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+      ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
       frame.close();
       frameCount++;
       if (frameCount % 30 === 0) {
@@ -118,11 +117,18 @@ function initDecoder() {
     },
     error: (e) => { console.error('Decoder error:', e); }
   });
-  decoder.configure({
+  // Try hardware decode first, fall back to software
+  const codecCfg = {
     codec: 'avc1.42001e',
     codedWidth: 640, codedHeight: 480,
     optimizeForLatency: true,
-    hardwareAcceleration: "prefer-hardware",
+  };
+  VideoDecoder.isConfigSupported({...codecCfg, hardwareAcceleration: "prefer-hardware"}).then(result => {
+    codecCfg.hardwareAcceleration = result.supported ? "prefer-hardware" : "prefer-software";
+    console.log('[maplecast] decode:', codecCfg.hardwareAcceleration);
+    decoder.configure(codecCfg);
+  }).catch(() => {
+    decoder.configure(codecCfg);
   });
 }
 
@@ -171,15 +177,7 @@ function connect() {
       return;
     }
 
-    // Check if this is game state (starts with "GS") or video frame
-    const rawBuf = new Uint8Array(event.data);
-    if (rawBuf.length > 4 && rawBuf[0] === 0x47 && rawBuf[1] === 0x53) {
-      // Game state packet — parse MVC2 state
-      parseGameState(rawBuf);
-      return;
-    }
-
-    // Video frame
+    // Binary = video frame
     if (!decoder || decoder.state === 'closed') return;
     const now = performance.now();
     if (lastFrameTime > 0) {
@@ -222,26 +220,7 @@ function connect() {
 
     diag.decodeStartMs = performance.now();
     try {
-      // Detect JPEG (starts with FF D8) vs H.264
-      if (h264.length > 2 && h264[0] === 0xFF && h264[1] === 0xD8) {
-        // JPEG frame — decode with createImageBitmap
-        const blob = new Blob([h264], {type: 'image/jpeg'});
-        createImageBitmap(blob).then(bmp => {
-          ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
-          bmp.close();
-          const decEnd = performance.now();
-          diag.decodeSamples.push(decEnd - diag.decodeStartMs);
-          if (diag.decodeSamples.length > 60) diag.decodeSamples.shift();
-          frameCount++;
-          if (frameCount % 30 === 0) {
-            diag.fps = frameCount / ((performance.now() - startTime) / 1000);
-            updateDiag();
-          }
-        });
-      } else {
-        // H.264 frame — decode with WebCodecs
-        decoder.decode(new EncodedVideoChunk({ type: 'key', timestamp: diag.serverFrame * 16667, data: h264 }));
-      }
+      decoder.decode(new EncodedVideoChunk({ type: 'key', timestamp: diag.serverFrame * 16667, data: h264 }));
     } catch (e) { diag.droppedFrames++; }
   };
 
@@ -335,314 +314,6 @@ ctx.fillStyle = '#888';
 ctx.fillText('Enter your name and press START to join', 320, 280);
 
 diagEl.textContent = '=== MapleCast ===\nWaiting...';
-
-// MVC2 Character names
-const MVC2_CHARS = [
-  'Ryu','Zangief','Guile','Morrigan','Anakaris','Strider','Cyclops','Wolverine',
-  'Psylocke','Iceman','Rogue','Cap America','Spider-Man','Hulk','Venom','Dr Doom',
-  'Tron Bonne','Jill','Hayato','Ruby Heart','SonSon','Amingo','Marrow','Cable',
-  'Abyss1','Abyss2','Abyss3','Chun-Li','Mega Man','Roll','Akuma','BB Hood',
-  'Felicia','Charlie','Sakura','Dan','Cammy','Dhalsim','M Bison','Ken',
-  'Gambit','Juggernaut','Storm','Sabretooth','Magneto','Shuma','War Machine',
-  'Silver Samurai','Omega Red','Spiral','Colossus','Iron Man','Sentinel',
-  'Blackheart','Thanos','Jin','Cap Commando','Bone Wolverine','Servbot'
-];
-
-// Sprite sheet loading
-const spriteImages = {};  // character_id -> Image object
-let spriteManifest = null;
-
-fetch('sprites/manifest.json').then(r => r.json()).then(manifest => {
-  spriteManifest = manifest;
-  for (const [id, filename] of Object.entries(manifest)) {
-    if (!filename) continue;
-    const img = new Image();
-    img.src = `sprites/${filename}`;
-    img.onload = () => { spriteImages[id] = img; };
-  }
-  console.log('Loading sprite sheets for', Object.keys(manifest).length, 'characters');
-});
-
-// View mode: 'video' = show H.264 stream, 'sprites' = show game state renderer
-let viewMode = 'video';
-
-function toggleView() {
-  viewMode = viewMode === 'video' ? 'sprites' : 'video';
-  console.log('View mode:', viewMode);
-}
-
-// Game state storage
-let gameState = null;
-
-function parseGameState(buf) {
-  // Wire format: [G][S][size_u16][serialized data]
-  // Serialized layout (no padding, field-by-field):
-  //   Global: in_match(1) timer(1) stage(1) p1_lvl(1) p2_lvl(1) = 5 bytes
-  //   p1_combo(2) p2_combo(2) p1_fill(2) p2_fill(2) camera_x(4) camera_y(4) frame(4) = 20 bytes
-  //   6 chars × 38 bytes = 228 bytes
-  //   Total: 253 bytes
-  const view = new DataView(buf.buffer, buf.byteOffset);
-  const size = view.getUint16(2, true);
-  if (buf.length < 4 + size) return;
-
-  const o = 4; // skip GS header
-  gameState = {
-    in_match:       buf[o + 0],
-    timer:          buf[o + 1],
-    stage_id:       buf[o + 2],
-    p1_meter_level: buf[o + 3],
-    p2_meter_level: buf[o + 4],
-    p1_combo:       view.getUint16(o + 5, true),
-    p2_combo:       view.getUint16(o + 7, true),
-    p1_meter_fill:  view.getUint16(o + 9, true),
-    p2_meter_fill:  view.getUint16(o + 11, true),
-    camera_x:       view.getFloat32(o + 13, true),
-    camera_y:       view.getFloat32(o + 17, true),
-    frame:          view.getUint32(o + 21, true),
-    chars: []
-  };
-  const charBase = o + 25; // global header is 25 bytes
-
-  // 6 characters × 38 bytes each
-  for (let i = 0; i < 6; i++) {
-    const co = charBase + i * 38;
-    gameState.chars.push({
-      active:       buf[co + 0],
-      id:           buf[co + 1],
-      name:         MVC2_CHARS[buf[co + 1]] || '?',
-      facing:       buf[co + 2],
-      health:       buf[co + 3],
-      red_health:   buf[co + 4],
-      special_move: buf[co + 5],
-      assist_type:  buf[co + 6],
-      palette_id:   buf[co + 7],
-      pos_x:        view.getFloat32(co + 8, true),
-      pos_y:        view.getFloat32(co + 12, true),
-      screen_x:     view.getFloat32(co + 16, true),
-      screen_y:     view.getFloat32(co + 20, true),
-      vel_x:        view.getFloat32(co + 24, true),
-      vel_y:        view.getFloat32(co + 28, true),
-      sprite_id:    view.getUint16(co + 32, true),
-      anim_state:   view.getUint16(co + 34, true),
-      anim_timer:   view.getUint16(co + 36, true),
-    });
-  }
-
-  // Parse UV data if present (28 bytes per character, after game state)
-  const uvBase = charBase + 6 * 38;  // after 6 characters
-  if (buf.length >= uvBase + 6 * 28 + 4) {  // +4 for GS header
-    for (let i = 0; i < 6; i++) {
-      const uo = uvBase + i * 28;
-      if (gameState.chars[i]) {
-        gameState.chars[i].uv_u0 = view.getFloat32(uo + 0, true);
-        gameState.chars[i].uv_v0 = view.getFloat32(uo + 4, true);
-        gameState.chars[i].uv_u1 = view.getFloat32(uo + 8, true);
-        gameState.chars[i].uv_v1 = view.getFloat32(uo + 12, true);
-        gameState.chars[i].tex_w  = view.getUint16(uo + 16, true);
-        gameState.chars[i].tex_h  = view.getUint16(uo + 18, true);
-        gameState.chars[i].tex_addr = view.getUint32(uo + 20, true);
-        gameState.chars[i].uv_found = buf[uo + 24];
-      }
-    }
-  }
-
-  // Update diag from game state
-  frameCount++;
-  if (frameCount % 30 === 0) {
-    diag.fps = frameCount / ((performance.now() - startTime) / 1000);
-    diag.serverFrame = gameState.frame;
-    diag.bytesPerFrame = buf.length;
-    diag.totalBytes += buf.length;
-    updateDiag();
-  }
-
-  // Render game state to canvas (only in sprites mode)
-  if (viewMode === 'sprites') renderGameState();
-}
-
-// Stage colors
-const STAGE_COLORS = [
-  '#1a2a4a','#c4a050','#3a3a3a','#8a2050','#2a4a2a','#4a3020',
-  '#2a2040','#204a6a','#401020','#1a2a4a','#c4a050','#222',
-  '#8a2050','#2a4a2a','#4a3020','#2a2040','#204a6a'
-];
-
-// Character colors (P1 side = blue/cyan tones, P2 side = red/magenta tones)
-const P1_COLOR = '#00ccff';
-const P2_COLOR = '#ff44aa';
-
-function renderGameState() {
-  if (!gameState) return;
-
-  // Stage background
-  const stageBg = STAGE_COLORS[gameState.stage_id] || '#111';
-  ctx.fillStyle = stageBg;
-  ctx.fillRect(0, 0, 640, 480);
-
-  // Ground line
-  ctx.strokeStyle = '#444';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(0, 380);
-  ctx.lineTo(640, 380);
-  ctx.stroke();
-
-  // Draw active characters as rectangles at their positions
-  for (let i = 0; i < 6; i++) {
-    const c = gameState.chars[i];
-    if (!c || !c.active) continue;
-
-    const isP1 = (i % 2 === 0);
-    const color = isP1 ? P1_COLOR : P2_COLOR;
-    const name = c.name || MVC2_CHARS[c.id] || '?';
-
-    // Map arena position to screen
-    // Arena X is roughly -1200 to +1200, map to 0-640
-    // Arena Y is 0 (ground) to ~500 (air), map to 380 (ground) to 80 (top)
-    const camX = gameState.camera_x || 0;
-    const sx = 320 + (c.pos_x - camX) * 0.25;
-    const sy = 380 - (c.pos_y || 0) * 0.3;
-
-    // Draw character — sprite if available, rectangle as fallback
-    const charW = 40;
-    const charH = 80;
-    const spriteImg = spriteImages[String(c.id)];
-
-    if (spriteImg) {
-      let srcX, srcY, srcW, srcH;
-
-      if (c.uv_found && c.tex_w > 0 && c.tex_h > 0) {
-        // UV coordinates from TA display list — pixel-perfect!
-        // UVs are in texture space [0,1], but may reference a DIFFERENT texture than our sprite sheet
-        // For now, use UVs as proportional crop into our sprite sheet
-        srcX = Math.floor(c.uv_u0 * spriteImg.width);
-        srcY = Math.floor(c.uv_v0 * spriteImg.height);
-        srcW = Math.max(1, Math.floor((c.uv_u1 - c.uv_u0) * spriteImg.width));
-        srcH = Math.max(1, Math.floor((c.uv_v1 - c.uv_v0) * spriteImg.height));
-      } else {
-        // Fallback: use sprite_id as rough index
-        const frameW = 80;
-        const numFrames = Math.max(1, Math.floor(spriteImg.width / frameW));
-        const frameIdx = c.sprite_id % numFrames;
-        srcX = frameIdx * frameW;
-        srcY = 0;
-        srcW = frameW;
-        srcH = spriteImg.height;
-      }
-
-      const drawW = srcW * 0.7;
-      const drawH = srcH * 0.7;
-
-      ctx.save();
-      if (!c.facing) {
-        ctx.translate(sx, 0);
-        ctx.scale(-1, 1);
-        ctx.drawImage(spriteImg, srcX, srcY, srcW, srcH, -drawW/2, sy - drawH, drawW, drawH);
-      } else {
-        ctx.drawImage(spriteImg, srcX, srcY, srcW, srcH, sx - drawW/2, sy - drawH, drawW, drawH);
-      }
-      ctx.restore();
-    } else {
-      // Fallback: colored rectangle
-      ctx.fillStyle = color;
-      ctx.globalAlpha = 0.8;
-      ctx.fillRect(sx - charW/2, sy - charH, charW, charH);
-      ctx.globalAlpha = 1.0;
-    }
-
-    // Character name
-    ctx.fillStyle = '#fff';
-    ctx.font = '10px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText(name, sx, sy - charH - 5);
-
-    // Health bar above character
-    const hpMax = 144;
-    const hpPct = Math.max(0, (c.health || 0) / hpMax);
-    const redPct = Math.max(0, (c.red_health || 0) / hpMax);
-    const barW = 50;
-    const barH = 4;
-    const barY = sy - charH - 15;
-    // Background
-    ctx.fillStyle = '#333';
-    ctx.fillRect(sx - barW/2, barY, barW, barH);
-    // Red health
-    ctx.fillStyle = '#a00';
-    ctx.fillRect(sx - barW/2, barY, barW * redPct, barH);
-    // Current health
-    ctx.fillStyle = hpPct > 0.3 ? '#0f0' : (hpPct > 0.1 ? '#ff0' : '#f00');
-    ctx.fillRect(sx - barW/2, barY, barW * hpPct, barH);
-
-    // Animation info
-    ctx.fillStyle = '#888';
-    ctx.font = '8px monospace';
-    ctx.fillText(`S:${c.sprite_id} A:${c.anim_state}`, sx, sy + 12);
-  }
-
-  // HUD - Timer
-  ctx.fillStyle = '#fff';
-  ctx.font = 'bold 28px monospace';
-  ctx.textAlign = 'center';
-  ctx.fillText(gameState.timer.toString(), 320, 35);
-
-  // HUD - Meters
-  for (let p = 0; p < 2; p++) {
-    const level = p === 0 ? gameState.p1_meter_level : gameState.p2_meter_level;
-    const fill = p === 0 ? gameState.p1_meter_fill : gameState.p2_meter_fill;
-    const baseX = p === 0 ? 20 : 400;
-    const color = p === 0 ? P1_COLOR : P2_COLOR;
-
-    // Meter bars
-    for (let b = 0; b < 5; b++) {
-      ctx.fillStyle = b < level ? color : '#333';
-      ctx.fillRect(baseX + b * 44, 455, 40, 8);
-    }
-    // Fill of current bar
-    if (level < 5) {
-      ctx.fillStyle = color;
-      ctx.globalAlpha = 0.5;
-      ctx.fillRect(baseX + level * 44, 455, (fill / 65535) * 40, 8);
-      ctx.globalAlpha = 1.0;
-    }
-  }
-
-  // HUD - Combo counters
-  if (gameState.p1_combo > 1) {
-    ctx.fillStyle = P1_COLOR;
-    ctx.font = 'bold 20px monospace';
-    ctx.textAlign = 'left';
-    ctx.fillText(`${gameState.p1_combo} HIT!`, 20, 430);
-  }
-  if (gameState.p2_combo > 1) {
-    ctx.fillStyle = P2_COLOR;
-    ctx.font = 'bold 20px monospace';
-    ctx.textAlign = 'right';
-    ctx.fillText(`${gameState.p2_combo} HIT!`, 620, 430);
-  }
-
-  // Team display (top corners)
-  ctx.font = '9px monospace';
-  for (let i = 0; i < 6; i++) {
-    const c = gameState.chars[i];
-    if (!c) continue;
-    const isP1 = (i % 2 === 0);
-    const slot = Math.floor(i / 2);  // 0=point, 1=assist1, 2=assist2
-    const name = c.name || MVC2_CHARS[c.id] || '?';
-    const x = isP1 ? 10 : 540;
-    const y = 55 + slot * 14;
-    ctx.fillStyle = c.active ? '#fff' : '#555';
-    ctx.textAlign = 'left';
-    ctx.fillText(`${slot === 0 ? '>' : ' '} ${name} HP:${c.health || 0}`, x, y);
-  }
-
-  // Frame counter + mode label
-  ctx.fillStyle = '#0f04';
-  ctx.font = '8px monospace';
-  ctx.textAlign = 'center';
-  ctx.fillText(`GAMESTATE RENDER | F:${gameState.frame} | 296 bytes/frame | 0ms encode`, 320, 478);
-}
-
-let sizeof_gs = 0;
 
 // Auto-connect on page load
 connect();

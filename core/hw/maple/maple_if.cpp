@@ -6,7 +6,6 @@
 #include "hw/sh4/sh4_mem.h"
 #include "hw/sh4/sh4_sched.h"
 #include "network/ggpo.h"
-#include "network/maplecast.h"
 #include "hw/naomi/card_reader.h"
 
 #include <memory>
@@ -151,12 +150,7 @@ static void maple_DoDma()
 	}
 #endif
 
-	// MapleCast: write synced inputs RIGHT HERE — the last moment before the game reads them.
-	// This overwrites whatever SDL polling wrote during Run().
-	if (maplecast::active())
-		maplecast::getInput(mapleInputState);
-	else
-		ggpo::getInput(mapleInputState);
+	ggpo::getInput(mapleInputState);
 	// TODO put this elsewhere and let the card readers handle being called multiple times
 	if (settings.platform.isNaomi())
 	{

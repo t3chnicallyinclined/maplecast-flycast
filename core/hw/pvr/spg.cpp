@@ -5,7 +5,6 @@
 #include "hw/maple/maple_if.h"
 #include "serialize.h"
 #include "network/ggpo.h"
-#include "network/maplecast_stream.h"
 #include "hw/pvr/Renderer_if.h"
 #include "stdclass.h"
 #include <array>
@@ -119,9 +118,6 @@ static int spg_line_sched(int tag, int cycles, int jitter, void *arg)
 		if (SPG_VBLANK_INT.vblank_out_interrupt_line_number == prv_cur_scanline)
 		{
 			maple_vblank();
-			// MapleCast: send game state every vblank (works in headless/norend mode)
-			if (maplecast_stream::active() && maplecast_stream::headless())
-				maplecast_stream::onFrameAdvanced();
 			asic_RaiseInterrupt(holly_SCANINT2);
 		}
 

@@ -8,12 +8,6 @@ target_sources(${PROJECT_NAME} PRIVATE
         maplecast.h
         maplecast_stream.cpp
         maplecast_stream.h
-        maplecast_gamestate.cpp
-        maplecast_gamestate.h
-        maplecast_spritelearn.cpp
-        maplecast_spritelearn.h
-        maplecast_ta_capture.cpp
-        maplecast_ta_capture.h
         maplecast_telemetry.cpp
         maplecast_telemetry.h
         miniupnp.cpp
@@ -33,4 +27,8 @@ target_sources(${PROJECT_NAME} PRIVATE
         dcnet.h
         ice.cpp
         ice.h
-        ifaddrs.c)
+        ifaddrs.c
+        maplecast_xdp_input.cpp
+        maplecast_xdp_input.h
+        maplecast_input_server.cpp
+        maplecast_input_server.h)

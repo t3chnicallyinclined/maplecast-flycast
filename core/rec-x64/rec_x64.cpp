@@ -9,7 +9,6 @@
 using namespace Xbyak::util;
 
 #include "types.h"
-#include "network/maplecast.h"
 #include "hw/sh4/sh4_opcode_list.h"
 #include "hw/sh4/dyna/ngen.h"
 #include "hw/sh4/modules/mmu.h"
@@ -449,7 +448,7 @@ public:
 					{
 						movss(rd, rs1);
 					}
-					if (cpu.has(Cpu::tFMA) && !config::GGPOEnable && !maplecast::active())
+					if (cpu.has(Cpu::tFMA) && !config::GGPOEnable)
 						vfmadd231ss(rd, rs2, rs3);
 					else
 					{

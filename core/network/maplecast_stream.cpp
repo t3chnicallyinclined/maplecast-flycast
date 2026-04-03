@@ -17,28 +17,24 @@
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "cuda.lib")
+#else
+#include <dlfcn.h>
+#include <time.h>
 #endif
 
 #include "maplecast_stream.h"
 #include "maplecast.h"
 #include "maplecast_telemetry.h"
-#include "maplecast_gamestate.h"
-#include "maplecast_ta_capture.h"
+#include "maplecast_input_server.h"
 #include "hw/pvr/Renderer_if.h"
 #include "wsi/gl_context.h"
 
 // CUDA driver API + GL interop
 #include <cuda.h>
 #include <cudaGL.h>
-#include <cuda_runtime.h>
 
 // NVENC direct API
 #include <ffnvcodec/nvEncodeAPI.h>
-
-// nvJPEG — CUDA-accelerated JPEG encode (sub-1ms at 480p)
-#include <nvjpeg.h>
-#pragma comment(lib, "nvjpeg.lib")
-#pragma comment(lib, "cudart.lib")
 
 // WebSocket server — built into Flycast deps, no external proxy needed
 // ASIO/WSPP macros already defined on command line by Flycast's CMake
@@ -47,7 +43,6 @@
 
 #include <cstdio>
 #include <cstring>
-#include <cstdlib>
 #include <mutex>
 #include <thread>
 #include <atomic>
@@ -60,8 +55,21 @@ using json = nlohmann::json;
 
 extern Renderer* renderer;
 
-// Embedded CUDA PTX kernels (compiled from rgba_to_nv12.cu)
-#include "rgba_to_nv12_ptx.h"
+// Cross-platform microsecond timer
+static inline int64_t nowUs()
+{
+#ifdef _WIN32
+	static LARGE_INTEGER freq = {};
+	if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
+	LARGE_INTEGER pc;
+	QueryPerformanceCounter(&pc);
+	return pc.QuadPart * 1000000LL / freq.QuadPart;
+#else
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+#endif
+}
 
 namespace maplecast_stream
 {
@@ -70,7 +78,6 @@ using WsServer = websocketpp::server<websocketpp::config::asio>;
 using ConnHdl = websocketpp::connection_hdl;
 
 static std::atomic<bool> _active{false};
-static bool _headless = false;  // true = game state only, no video
 static int _width = 640;
 static int _height = 480;
 
@@ -80,17 +87,6 @@ static CUcontext _cuCtx = nullptr;
 // CUDA-GL interop
 static CUgraphicsResource _cuGLResource = nullptr;
 static GLuint _registeredTexID = 0;
-
-// nvJPEG encoder (alternative to NVENC — sub-1ms at 480p using CUDA cores)
-static nvjpegHandle_t _jpegHandle = nullptr;
-static nvjpegEncoderState_t _jpegState = nullptr;
-static nvjpegEncoderParams_t _jpegParams = nullptr;
-static cudaStream_t _jpegStream = nullptr;
-static bool _useJpeg = false;  // toggled via MAPLECAST_JPEG=1 env var
-static CUdeviceptr _cudaRGBBuf = 0;   // RGB (3 bytes/pixel) for nvJPEG — stripped from RGBA
-static size_t _cudaRGBPitch = 0;
-static CUmodule _cudaModule = nullptr;
-static CUfunction _kernelRGBAtoRGB = nullptr;
 
 // NVENC — double-buffered for async pipeline
 typedef NVENCSTATUS (NVENCAPI *PFN_NvEncodeAPICreateInstance)(NV_ENCODE_API_FUNCTION_LIST*);
@@ -126,6 +122,18 @@ struct WsPlayer {
 };
 static std::map<std::string, WsPlayer> _players;  // id → player
 static std::string _slotOwner[2] = {"", ""};       // slot → player_id
+
+// Reverse lookup: connection → assigned slot (-1 = spectator)
+static std::map<void*, int> _connSlot;
+
+static int getSlotForConn(ConnHdl hdl)
+{
+	try {
+		void* key = (void*)_ws.get_con_from_hdl(hdl).get();
+		auto it = _connSlot.find(key);
+		return it != _connSlot.end() ? it->second : -1;
+	} catch (...) { return -1; }
+}
 
 // Pre-allocated send buffer
 static uint8_t* _sendBuf = nullptr;
@@ -165,22 +173,20 @@ static int assignSlot(const std::string& playerId, const std::string& name)
 
 static json getStatus()
 {
-	maplecast::PlayerStats p1s, p2s;
-	maplecast::getPlayerStats(p1s, p2s);
-
-	auto slotInfo = [&](int i) -> json {
-		uint32_t hwPps = (i == 0) ? p1s.packetsPerSec : p2s.packetsPerSec;
-		if (!_slotOwner[i].empty())
-		{
-			auto it = _players.find(_slotOwner[i]);
-			if (it != _players.end())
-				return {{"id", it->second.id.substr(0,8)}, {"name", it->second.name},
-					{"device", it->second.device}, {"connected", true}, {"type", "browser"}};
-		}
-		if (hwPps >= HW_THRESHOLD)
-			return {{"id", "hardware"}, {"name", "NOBD Player"},
-				{"device", "NOBD Stick"}, {"connected", true}, {"type", "hardware"}};
-		return nullptr;
+	auto slotInfo = [](int i) -> json {
+		const auto& p = maplecast_input::getPlayer(i);
+		if (!p.connected)
+			return nullptr;
+		const char* typeStr = (p.type == maplecast_input::InputType::NobdUDP) ? "hardware" : "browser";
+		return {
+			{"id", std::string(p.id).substr(0, 8)},
+			{"name", std::string(p.name)},
+			{"device", std::string(p.device)},
+			{"connected", true},
+			{"type", typeStr},
+			{"pps", p.packetsPerSec},
+			{"cps", p.changesPerSec}
+		};
 	};
 
 	return {{"type", "status"}, {"p1", slotInfo(0)}, {"p2", slotInfo(1)}};
@@ -214,6 +220,11 @@ static void onWsClose(ConnHdl hdl)
 			{
 				// Same connection — mark as disconnected but keep slot
 				printf("[maplecast-ws] P%d (%s) disconnected, slot reserved\n", p.slot + 1, p.name.c_str());
+				// Remove connection → slot mapping
+				try {
+					void* key = (void*)_ws.get_con_from_hdl(hdl).get();
+					_connSlot.erase(key);
+				} catch (...) {}
 				break;
 			}
 		} catch (...) {}
@@ -228,7 +239,8 @@ static void onWsMessage(ConnHdl hdl, WsServer::message_ptr msg)
 		const std::string& data = msg->get_payload();
 		if (data.size() >= 4)
 		{
-			// Forward to Flycast via UDP (same as proxy did)
+			// Forward to Flycast via UDP with player slot tag
+			// 5-byte tagged packet: [slot(1)][LT][RT][btn_hi][btn_lo]
 			static int udpSock = -1;
 			static struct sockaddr_in udpDest;
 			if (udpSock < 0)
@@ -239,7 +251,23 @@ static void onWsMessage(ConnHdl hdl, WsServer::message_ptr msg)
 				udpDest.sin_port = htons(7100);
 				udpDest.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 			}
-			sendto(udpSock, data.c_str(), 4, 0, (struct sockaddr*)&udpDest, sizeof(udpDest));
+
+			// Look up this connection's assigned slot
+			int slot = getSlotForConn(hdl);
+
+			if (slot >= 0 && slot <= 1)
+			{
+				// Tagged 5-byte packet: slot + W3 data
+				char tagged[5];
+				tagged[0] = (char)slot;
+				memcpy(tagged + 1, data.c_str(), 4);
+				sendto(udpSock, tagged, 5, 0, (struct sockaddr*)&udpDest, sizeof(udpDest));
+			}
+			else
+			{
+				// Unassigned player — send raw 4-byte (legacy auto-assign)
+				sendto(udpSock, data.c_str(), 4, 0, (struct sockaddr*)&udpDest, sizeof(udpDest));
+			}
 		}
 	}
 	else if (msg->get_opcode() == websocketpp::frame::opcode::text)
@@ -253,8 +281,19 @@ static void onWsMessage(ConnHdl hdl, WsServer::message_ptr msg)
 				std::string name = ctrl.value("name", "Player");
 				std::string device = ctrl.value("device", "Browser");
 
-				int slot = assignSlot(playerId, name);
+				// Register through unified input server
+				int slot = maplecast_input::registerPlayer(
+					playerId.c_str(), name.c_str(), device.c_str(),
+					maplecast_input::InputType::BrowserWS);
 				_players[playerId] = {playerId, name, device, slot, hdl};
+
+				// Register connection → slot mapping for input routing
+				if (slot >= 0) {
+					try {
+						void* key = (void*)_ws.get_con_from_hdl(hdl).get();
+						_connSlot[key] = slot;
+					} catch (...) {}
+				}
 
 				json resp = {{"type", "assigned"}, {"slot", slot}, {"id", playerId.substr(0,8)}, {"name", name}};
 				_ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text);
@@ -284,15 +323,6 @@ static bool initCuda()
 	char name[256];
 	cuDeviceGetName(name, sizeof(name), device);
 	printf("[maplecast-stream] CUDA device: %s\n", name);
-
-	// Load PTX kernels
-	CUresult kr = cuModuleLoadData(&_cudaModule, _ptxRGBAtoNV12);
-	if (kr != CUDA_SUCCESS) { printf("[maplecast-stream] PTX load failed: %d\n", kr); }
-	else {
-		cuModuleGetFunction(&_kernelRGBAtoRGB, _cudaModule, "rgba_to_rgb");
-		printf("[maplecast-stream] CUDA kernels loaded\n");
-	}
-
 	return true;
 }
 
@@ -330,18 +360,16 @@ static bool initNvenc()
 	encConfig.gopLength = 1;
 	encConfig.frameIntervalP = 1;
 	encConfig.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
-	encConfig.rcParams.averageBitRate = 15000000;   // 15 Mbps — sharp 480p
-	encConfig.rcParams.maxBitRate = 20000000;      // 20 Mbps peak
-	encConfig.rcParams.vbvBufferSize = 15000000 / 60;  // 1 frame buffer at 15Mbps
+	encConfig.rcParams.averageBitRate = 30000000;   // 30 Mbps — crisp 480p IDR
+	encConfig.rcParams.maxBitRate = 40000000;      // 40 Mbps peak
+	encConfig.rcParams.vbvBufferSize = 30000000 / 60;  // 1 frame buffer at 30Mbps
 	encConfig.rcParams.vbvInitialDelay = encConfig.rcParams.vbvBufferSize;
 	encConfig.rcParams.zeroReorderDelay = 1;
 	encConfig.encodeCodecConfig.h264Config.idrPeriod = 1;
 	encConfig.encodeCodecConfig.h264Config.repeatSPSPPS = 1;
 	encConfig.encodeCodecConfig.h264Config.chromaFormatIDC = 1;
-
-	// MVC2-specific NVENC optimizations
-	encConfig.encodeCodecConfig.h264Config.disableDeblockingFilterIDC = 1;  // skip deblock filter
-	encConfig.encodeCodecConfig.h264Config.entropyCodingMode = NV_ENC_H264_ENTROPY_CODING_MODE_CAVLC;  // CAVLC faster than CABAC
+	encConfig.encodeCodecConfig.h264Config.disableDeblockingFilterIDC = 0;  // enable deblock — better quality
+	encConfig.encodeCodecConfig.h264Config.entropyCodingMode = NV_ENC_H264_ENTROPY_CODING_MODE_CABAC;  // CABAC — sharper at same bitrate
 	encConfig.encodeCodecConfig.h264Config.sliceMode = 0;       // single slice
 	encConfig.encodeCodecConfig.h264Config.sliceModeData = 0;
 	encConfig.rcParams.multiPass = NV_ENC_MULTI_PASS_DISABLED;  // single pass only
@@ -425,20 +453,9 @@ bool init(int port)
 	_sendBufSize = 256 * 1024;
 	_sendBuf = (uint8_t*)malloc(_sendBufSize);
 
-	// Check for headless mode — game state only, no video
-	_headless = std::getenv("MAPLECAST_HEADLESS") != nullptr;
-
-	if (!_headless)
-	{
-		if (!initCuda()) return false;
-		if (!initNvenc()) return false;
-		if (!initCudaLinearBuffer()) return false;
-	}
-	else
-	{
-		printf("[maplecast-stream] *** HEADLESS MODE — game state only, no video ***\n");
-		printf("[maplecast-stream] 240 bytes/frame. No GPU. No encode.\n");
-	}
+	if (!initCuda()) return false;
+	if (!initNvenc()) return false;
+	if (!initCudaLinearBuffer()) return false;
 
 	// Start WebSocket server
 	try {
@@ -460,30 +477,6 @@ bool init(int port)
 	} catch (const std::exception& e) {
 		printf("[maplecast-stream] WebSocket init failed: %s\n", e.what());
 		return false;
-	}
-
-	// Check if JPEG mode requested
-	if (std::getenv("MAPLECAST_JPEG"))
-	{
-		nvjpegStatus_t js;
-		js = nvjpegCreateSimple(&_jpegHandle);
-		if (js == NVJPEG_STATUS_SUCCESS) {
-			nvjpegEncoderStateCreate(_jpegHandle, &_jpegState, nullptr);
-			nvjpegEncoderParamsCreate(_jpegHandle, &_jpegParams, nullptr);
-			nvjpegEncoderParamsSetQuality(_jpegParams, 60, nullptr);
-			nvjpegEncoderParamsSetSamplingFactors(_jpegParams, NVJPEG_CSS_420, nullptr);
-			cudaStreamCreate(&_jpegStream);
-
-			// Allocate RGB buffer for nvJPEG (strips alpha from RGBA)
-			size_t rgbPitch;
-			cuMemAllocPitch(&_cudaRGBBuf, &rgbPitch, _width * 3, _height, 16);
-			_cudaRGBPitch = rgbPitch;
-
-			_useJpeg = true;
-			printf("[maplecast-stream] JPEG MODE: nvJPEG ready (q85, RGB pitch=%zu)\n", _cudaRGBPitch);
-		} else {
-			printf("[maplecast-stream] nvJPEG init failed: %d, using H.264\n", js);
-		}
 	}
 
 	_active = true;
@@ -521,11 +514,9 @@ void onFrameRendered()
 	if (!_active || !_encoder) return;
 	if (_clientCount.load(std::memory_order_relaxed) == 0) return;
 
-	static LARGE_INTEGER freq = {};
-	if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
-	LARGE_INTEGER pc0, pc1, pc2, pc3;
-	QueryPerformanceCounter(&pc0);
-	int64_t captureTimeUs = pc0.QuadPart * 1000000LL / freq.QuadPart;
+	int64_t pc0, pc1, pc2, pc3;
+	pc0 = nowUs();
+	int64_t captureTimeUs = pc0;
 	int64_t inputTimeUs = ::maplecast::lastInputTimeUs();
 
 	int w = 0, h = 0;
@@ -549,7 +540,7 @@ void onFrameRendered()
 		cuCtxPopCurrent(nullptr);
 	}
 
-	QueryPerformanceCounter(&pc1);
+	pc1 = nowUs();
 
 	// Capture: GL texture → CUDA array → linear buffer (GPU→GPU)
 	cuCtxPushCurrent(_cuCtx);
@@ -572,95 +563,9 @@ void onFrameRendered()
 	cuMemcpy2D(&cp);
 	cuGraphicsUnmapResources(1, &_cuGLResource, 0);
 
-	QueryPerformanceCounter(&pc2);
+	pc2 = nowUs();
 
-	if (_useJpeg)
-	{
-		// JPEG path: RGBA → RGB strip (CUDA kernel) → nvJPEG encode
-		// Step 1: strip alpha channel on GPU
-		if (_kernelRGBAtoRGB && _cudaRGBBuf)
-		{
-			int rgbaPitch = (int)_cudaLinearPitch;
-			int rgbPitch = (int)_cudaRGBPitch;
-			void* args[] = {
-				(void*)&_cudaLinearBuf[0], (void*)&rgbaPitch,
-				(void*)&_cudaRGBBuf, (void*)&rgbPitch,
-				(void*)&_width, (void*)&_height
-			};
-			cuLaunchKernel(_kernelRGBAtoRGB,
-				(_width + 15) / 16, (_height + 15) / 16, 1,
-				16, 16, 1, 0, 0, args, nullptr);
-		}
-
-		// Step 2: nvJPEG encode from RGB buffer
-		nvjpegImage_t imgDesc;
-		memset(&imgDesc, 0, sizeof(imgDesc));
-		imgDesc.channel[0] = (unsigned char*)_cudaRGBBuf;
-		imgDesc.pitch[0] = _cudaRGBPitch;
-
-		nvjpegStatus_t js = nvjpegEncodeImage(_jpegHandle, _jpegState, _jpegParams,
-			&imgDesc, NVJPEG_INPUT_RGBI, _width, _height, _jpegStream);
-		cudaStreamSynchronize(_jpegStream);
-
-		if (js == NVJPEG_STATUS_SUCCESS)
-		{
-			// Get compressed size
-			size_t jpegSize = 0;
-			nvjpegEncodeRetrieveBitstream(_jpegHandle, _jpegState, NULL, &jpegSize, _jpegStream);
-			cudaStreamSynchronize(_jpegStream);
-
-			// Build send buffer: [header(32)] + [JPEG data]
-			QueryPerformanceCounter(&pc3);
-			uint32_t pipelineUs = (uint32_t)((pc3.QuadPart - pc0.QuadPart) * 1000000LL / freq.QuadPart);
-			uint32_t copyUs = (uint32_t)((pc2.QuadPart - pc1.QuadPart) * 1000000LL / freq.QuadPart);
-			uint32_t encodeUs = (uint32_t)((pc3.QuadPart - pc2.QuadPart) * 1000000LL / freq.QuadPart);
-
-			maplecast::PlayerStats p1s, p2s;
-			maplecast::getPlayerStats(p1s, p2s);
-
-			uint32_t headerSize = 16 + 8 + 8;
-			uint32_t totalPayload = headerSize + (uint32_t)jpegSize;
-
-			if (totalPayload > _sendBufSize)
-			{ free(_sendBuf); _sendBufSize = totalPayload + 65536; _sendBuf = (uint8_t*)malloc(_sendBufSize); }
-
-			uint32_t frameNum = (uint32_t)_frameCount;
-			uint32_t off = 0;
-			memcpy(_sendBuf + off, &pipelineUs, 4); off += 4;
-			memcpy(_sendBuf + off, &copyUs, 4); off += 4;
-			memcpy(_sendBuf + off, &encodeUs, 4); off += 4;
-			memcpy(_sendBuf + off, &frameNum, 4); off += 4;
-			uint16_t tmp;
-			tmp = (uint16_t)p1s.packetsPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
-			tmp = (uint16_t)p1s.changesPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
-			tmp = p1s.buttons; memcpy(_sendBuf + off, &tmp, 2); off += 2;
-			_sendBuf[off++] = p1s.lt; _sendBuf[off++] = p1s.rt;
-			tmp = (uint16_t)p2s.packetsPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
-			tmp = (uint16_t)p2s.changesPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
-			tmp = p2s.buttons; memcpy(_sendBuf + off, &tmp, 2); off += 2;
-			_sendBuf[off++] = p2s.lt; _sendBuf[off++] = p2s.rt;
-
-			// Retrieve JPEG data directly into send buffer
-			nvjpegEncodeRetrieveBitstream(_jpegHandle, _jpegState, _sendBuf + off, &jpegSize, _jpegStream);
-			cudaStreamSynchronize(_jpegStream);
-
-			broadcastBinary(_sendBuf, totalPayload);
-
-			if (frameNum % 300 == 0)
-			{
-				printf("[maplecast-stream] F:%u JPEG | copy:%uus enc:%uus total:%uus | %zuB\n",
-					frameNum, copyUs, encodeUs, pipelineUs, jpegSize);
-				maplecast_telemetry::send("[maplecast-stream] F:%u JPEG | copy:%uus enc:%uus total:%uus | %zuB",
-					frameNum, copyUs, encodeUs, pipelineUs, jpegSize);
-			}
-		}
-
-		cuCtxPopCurrent(nullptr);
-		_frameCount++;
-		return;
-	}
-
-	// H.264 path: NVENC from CUDA device memory → H.264 bitstream
+	// Encode: NVENC from CUDA device memory → H.264 bitstream
 	NV_ENC_MAP_INPUT_RESOURCE mapRes = {};
 	mapRes.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
 	mapRes.registeredResource = _nvencRegisteredRes[0];
@@ -692,15 +597,15 @@ void onFrameRendered()
 	st = _nvenc.nvEncLockBitstream(_encoder, &lockParams);
 	if (st == NV_ENC_SUCCESS)
 	{
-		QueryPerformanceCounter(&pc3);
+		pc3 = nowUs();
 
 		// Pre-compute pipeline times (microseconds, fits in uint32)
-		uint32_t pipelineUs = (uint32_t)((pc3.QuadPart - pc0.QuadPart) * 1000000LL / freq.QuadPart);
-		uint32_t copyUs = (uint32_t)((pc2.QuadPart - pc1.QuadPart) * 1000000LL / freq.QuadPart);
-		uint32_t encodeUs = (uint32_t)((pc3.QuadPart - pc2.QuadPart) * 1000000LL / freq.QuadPart);
+		uint32_t pipelineUs = (uint32_t)(pc3 - pc0);
+		uint32_t copyUs = (uint32_t)(pc2 - pc1);
+		uint32_t encodeUs = (uint32_t)(pc3 - pc2);
 
-		maplecast::PlayerStats p1s, p2s;
-		maplecast::getPlayerStats(p1s, p2s);
+		const auto& p1 = maplecast_input::getPlayer(0);
+		const auto& p2 = maplecast_input::getPlayer(1);
 
 		uint32_t h264Size = lockParams.bitstreamSizeInBytes;
 		// Header: [pipelineUs(4)][copyUs(4)][encodeUs(4)][frameNum(4)] + p1stats(8) + p2stats(8) = 32 bytes
@@ -717,69 +622,24 @@ void onFrameRendered()
 		memcpy(_sendBuf + off, &encodeUs, 4); off += 4;
 		memcpy(_sendBuf + off, &frameNum, 4); off += 4;
 		uint16_t tmp;
-		tmp = (uint16_t)p1s.packetsPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
-		tmp = (uint16_t)p1s.changesPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
-		tmp = p1s.buttons; memcpy(_sendBuf + off, &tmp, 2); off += 2;
-		_sendBuf[off++] = p1s.lt; _sendBuf[off++] = p1s.rt;
-		tmp = (uint16_t)p2s.packetsPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
-		tmp = (uint16_t)p2s.changesPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
-		tmp = p2s.buttons; memcpy(_sendBuf + off, &tmp, 2); off += 2;
-		_sendBuf[off++] = p2s.lt; _sendBuf[off++] = p2s.rt;
+		tmp = (uint16_t)p1.packetsPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
+		tmp = (uint16_t)p1.changesPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
+		tmp = p1.buttons; memcpy(_sendBuf + off, &tmp, 2); off += 2;
+		_sendBuf[off++] = p1.lt; _sendBuf[off++] = p1.rt;
+		tmp = (uint16_t)p2.packetsPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
+		tmp = (uint16_t)p2.changesPerSec; memcpy(_sendBuf + off, &tmp, 2); off += 2;
+		tmp = p2.buttons; memcpy(_sendBuf + off, &tmp, 2); off += 2;
+		_sendBuf[off++] = p2.lt; _sendBuf[off++] = p2.rt;
 		memcpy(_sendBuf + off, lockParams.bitstreamBufferPtr, h264Size);
 
 		broadcastBinary(_sendBuf, totalPayload);
 
-		// Send game state as binary alongside video (every frame)
-		// Game state + UV coordinates from TA display list
-		{
-			static uint8_t gsBuf[4 + 600];  // game state + UV data
-			maplecast_gamestate::GameState gs;
-			maplecast_gamestate::readGameState(gs);
-
-			// Capture UV coords from TA display list
-			float sx[6], sy[6];
-			bool act[6];
-			for (int i = 0; i < 6; i++) {
-				sx[i] = gs.chars[i].screen_x;
-				sy[i] = gs.chars[i].screen_y;
-				act[i] = gs.chars[i].active != 0;
-			}
-			maplecast_ta_capture::captureFrame(sx, sy, act);
-
-			// Serialize game state
-			gsBuf[0] = 'G'; gsBuf[1] = 'S';
-			int off = 4;
-			int gsBytes = maplecast_gamestate::serialize(gs, gsBuf + off, 296);
-			off += gsBytes;
-
-			// Append UV data for each character (24 bytes per char: u0,v0,u1,v1 + tex_w,h + tex_addr + found)
-			for (int i = 0; i < 6; i++) {
-				const auto& sf = maplecast_ta_capture::getFrame(i);
-				memcpy(gsBuf + off, &sf.u0, 4); off += 4;
-				memcpy(gsBuf + off, &sf.v0, 4); off += 4;
-				memcpy(gsBuf + off, &sf.u1, 4); off += 4;
-				memcpy(gsBuf + off, &sf.v1, 4); off += 4;
-				memcpy(gsBuf + off, &sf.tex_width, 2); off += 2;
-				memcpy(gsBuf + off, &sf.tex_height, 2); off += 2;
-				memcpy(gsBuf + off, &sf.tex_addr, 4); off += 4;
-				gsBuf[off++] = sf.found ? 1 : 0;
-				gsBuf[off++] = 0; // padding
-				gsBuf[off++] = 0;
-				gsBuf[off++] = 0;
-				// 28 bytes per character
-			}
-
-			uint16_t totalSize = (uint16_t)(off - 4);
-			memcpy(gsBuf + 2, &totalSize, 2);
-			broadcastBinary(gsBuf, off);
-		}
-
 		if (frameNum % 300 == 0)
 		{
-			long long mapUs = (pc1.QuadPart - pc0.QuadPart) * 1000000LL / freq.QuadPart;
-			long long copyUs = (pc2.QuadPart - pc1.QuadPart) * 1000000LL / freq.QuadPart;
-			long long encUs = (pc3.QuadPart - pc2.QuadPart) * 1000000LL / freq.QuadPart;
-			long long totalUs = (pc3.QuadPart - pc0.QuadPart) * 1000000LL / freq.QuadPart;
+			long long mapUs = pc1 - pc0;
+			long long copyUs = pc2 - pc1;
+			long long encUs = pc3 - pc2;
+			long long totalUs = pc3 - pc0;
 			printf("[maplecast-stream] F:%u | map:%lldus copy:%lldus enc:%lldus total:%lldus | %uB\n",
 				frameNum, mapUs, copyUs, encUs, totalUs, h264Size);
 			maplecast_telemetry::send("[maplecast-stream] F:%u | map:%lldus copy:%lldus enc:%lldus total:%lldus | %uB",
@@ -800,50 +660,9 @@ void onFrameRendered()
 	_frameCount++;
 }
 
-void onFrameAdvanced()
-{
-	// Called every frame, even in headless/norend mode.
-	// Sends game state only — 240 bytes, no video.
-	if (!_active || !_headless) return;
-	if (_clientCount.load(std::memory_order_relaxed) == 0) return;
-
-	static uint8_t gsBuf[4 + 300];
-	maplecast_gamestate::GameState gs;
-	maplecast_gamestate::readGameState(gs);
-
-	gsBuf[0] = 'G'; gsBuf[1] = 'S';
-	int gsBytes = maplecast_gamestate::serialize(gs, gsBuf + 4, 296);
-	uint16_t gsSize = (uint16_t)gsBytes;
-	memcpy(gsBuf + 2, &gsSize, 2);
-	broadcastBinary(gsBuf, 4 + gsBytes);
-
-	static uint32_t _gsFrameCount = 0;
-	_gsFrameCount++;
-	if (_gsFrameCount % 300 == 0)
-	{
-		printf("[maplecast-stream] HEADLESS F:%u | %zu bytes | timer:%u in_match:%u\n",
-			_gsFrameCount, 4 + sizeof(gs), gs.game_timer, gs.in_match);
-		maplecast_telemetry::send("[maplecast-stream] HEADLESS F:%u | %zuB | t:%u match:%u",
-			_gsFrameCount, 4 + sizeof(gs), gs.game_timer, gs.in_match);
-
-		// Periodic status
-		try {
-			std::string status = getStatus().dump();
-			std::lock_guard<std::mutex> lock(_connMutex);
-			for (auto& conn : _connections)
-				try { _ws.send(conn, status, websocketpp::frame::opcode::text); } catch (...) {}
-		} catch (...) {}
-	}
-}
-
 bool active()
 {
 	return _active;
-}
-
-bool headless()
-{
-	return _headless;
 }
 
 }  // namespace maplecast_stream
