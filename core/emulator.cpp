@@ -39,6 +39,7 @@
 #include "network/maplecast_stream.h"
 #include "network/maplecast_telemetry.h"
 #include "network/maplecast_input_server.h"
+#include "network/maplecast_audio.h"
 #include "hw/maple/maple_cfg.h"
 #include <cstdlib>
 #include <string>
@@ -1004,6 +1005,9 @@ void Emulator::start()
 
 		// Input server — single source of truth for all player input
 		maplecast_input::init(port);
+
+		// Audio streaming — raw PCM over DataChannel
+		maplecast_audio::init();
 
 		// Init telemetry (fire-and-forget UDP to localhost:7300)
 		maplecast_telemetry::init();

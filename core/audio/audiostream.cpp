@@ -1,6 +1,7 @@
 #include "audiostream.h"
 #include "cfg/option.h"
 #include "emulator.h"
+#include "network/maplecast_audio.h"
 
 static void registerForEvents();
 
@@ -50,6 +51,9 @@ AudioBackend *AudioBackend::getBackend(const std::string& slug)
 
 void WriteSample(s16 r, s16 l)
 {
+	// Stream raw audio to remote players (before local volume scaling)
+	maplecast_audio::pushSample(l, r);
+
 	Buffer[writePtr].r = r * config::AudioVolume.dbPower();
 	Buffer[writePtr].l = l * config::AudioVolume.dbPower();
 

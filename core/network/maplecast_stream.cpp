@@ -340,6 +340,11 @@ static void onWsMessage(ConnHdl hdl, WsServer::message_ptr msg)
 						int slot = -1;
 						auto it = _players.find(playerId);
 						if (it != _players.end()) slot = it->second.slot;
+						// Register connection for signaling even if not "joined"
+						if (it == _players.end())
+							_players[playerId] = {playerId, "spectator", "Browser", -1, hdl};
+						else
+							it->second.conn = hdl;
 						maplecast_webrtc::handleOffer(playerId, sdp, slot);
 					}
 				}

@@ -43,8 +43,10 @@ struct Peer {
 	std::shared_ptr<rtc::PeerConnection> pc;
 	std::shared_ptr<rtc::DataChannel> videoDc;
 	std::shared_ptr<rtc::DataChannel> inputDc;
+	std::shared_ptr<rtc::DataChannel> audioDc;
 	std::atomic<bool> videoReady{false};
 	std::atomic<bool> inputReady{false};
+	std::atomic<bool> audioReady{false};
 };
 
 static std::map<std::string, std::shared_ptr<Peer>> _peers;
@@ -63,6 +65,10 @@ static rtc::Configuration makeRtcConfig()
 
 bool init(SignalCallback signalCb)
 {
+	// Fix locale issue — libdatachannel SDP must use "C" locale for numbers
+	// Otherwise "5000" becomes "5,000" and browser rejects the SDP
+	setlocale(LC_NUMERIC, "C");
+
 	_signalCb = signalCb;
 	_initialized = true;
 	printf("[maplecast-rtc] WebRTC DataChannel transport initialized\n");
@@ -169,6 +175,18 @@ void handleOffer(const std::string& playerId, const std::string& sdp, int slot)
 				}
 			});
 		}
+		else if (label == "audio")
+		{
+			peer->audioDc = dc;
+			dc->onOpen([peer]() {
+				peer->audioReady = true;
+				printf("[maplecast-rtc] audio DC open for %s\n", peer->playerId.c_str());
+			});
+			dc->onClosed([peer]() {
+				peer->audioReady = false;
+				printf("[maplecast-rtc] audio DC closed for %s\n", peer->playerId.c_str());
+			});
+		}
 		else
 		{
 			printf("[maplecast-rtc] unknown DC label: %s\n", label.c_str());
@@ -208,6 +226,24 @@ int broadcastFrame(const void* data, size_t size)
 		{
 			try {
 				peer->videoDc->send(
+					reinterpret_cast<const std::byte*>(data), size);
+				sent++;
+			} catch (...) {}
+		}
+	}
+	return sent;
+}
+
+int broadcastAudio(const void* data, size_t size)
+{
+	int sent = 0;
+	std::lock_guard<std::mutex> lock(_peerMutex);
+	for (auto& [id, peer] : _peers)
+	{
+		if (peer->audioReady.load(std::memory_order_relaxed) && peer->audioDc)
+		{
+			try {
+				peer->audioDc->send(
 					reinterpret_cast<const std::byte*>(data), size);
 				sent++;
 			} catch (...) {}
@@ -261,6 +297,7 @@ void shutdown() {}
 void handleOffer(const std::string&, const std::string&, int) {}
 void handleIceCandidate(const std::string&, const std::string&, const std::string&) {}
 int broadcastFrame(const void*, size_t) { return 0; }
+int broadcastAudio(const void*, size_t) { return 0; }
 bool peerHasDataChannel(const std::string&) { return false; }
 void removePeer(const std::string&) {}
 int activePeerCount() { return 0; }

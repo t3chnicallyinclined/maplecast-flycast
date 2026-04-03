@@ -35,9 +35,12 @@ void handleOffer(const std::string& playerId, const std::string& sdp, int slot);
 // Handle incoming ICE candidate from browser (via WebSocket signaling)
 void handleIceCandidate(const std::string& playerId, const std::string& candidate, const std::string& sdpMid);
 
-// Send H.264 frame to all peers with active video DataChannel
+// Send video frame to all peers with active video DataChannel
 // Returns number of peers sent to via DataChannel (rest fall back to WebSocket)
 int broadcastFrame(const void* data, size_t size);
+
+// Send audio chunk to all peers with active audio DataChannel
+int broadcastAudio(const void* data, size_t size);
 
 // Check if a specific peer has an active DataChannel (for WebSocket fallback decision)
 bool peerHasDataChannel(const std::string& playerId);

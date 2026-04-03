@@ -51,6 +51,12 @@ let pc = null;
 let videoDc = null;
 let inputDc = null;
 let useDataChannel = false;
+
+// Audio streaming state
+let audioCtx = null;
+let audioQueue = [];
+let audioChunksReceived = 0;
+let audioUnderruns = 0;
 let myId = localStorage.getItem('maplecast_id');
 if (!myId) { myId = crypto.randomUUID(); localStorage.setItem('maplecast_id', myId); }
 let myName = localStorage.getItem('maplecast_name') || '';
@@ -104,7 +110,13 @@ E2E: ~${(parseFloat(srvPipe) + ((p2.pps||0) > 1000 ? 0.3 : 1.0) + parseFloat(dec
 
 -- Me --
 Slot: ${mySlot >= 0 ? 'P'+(mySlot+1) : 'spectator'}
-Pad: ${diag.gamepadActive ? 'YES' : 'no'}  Sent: ${diag.inputSendCount}`;
+Pad: ${diag.gamepadActive ? 'YES' : 'no'}  Sent: ${diag.inputSendCount}
+
+-- Audio --
+Chunks: ${typeof audioChunksReceived !== 'undefined' ? audioChunksReceived : 0}
+Queue: ${typeof audioQueue !== 'undefined' ? audioQueue.length : 0}
+Underruns: ${typeof audioUnderruns !== 'undefined' ? audioUnderruns : 0}
+State: ${typeof audioCtx !== 'undefined' && audioCtx ? audioCtx.state : 'off'}`;
 }
 
 function initDecoder() {
@@ -158,6 +170,8 @@ function connect() {
     lastFrameTime = 0;
     initDecoder();
     joinBtn.disabled = false;
+    // Start WebRTC immediately — everyone gets P2P video + audio
+    setupWebRTC();
   };
 
   ws.onmessage = (event) => {
@@ -182,14 +196,23 @@ function connect() {
         }
         // WebRTC signaling: SDP answer from server
         if (msg.type === 'answer' && pc) {
-          pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: msg.sdp }))
+          // Fix locale issue: libdatachannel may format numbers with commas (e.g., "5,000" → "5000")
+          const fixedSdp = msg.sdp.replace(/(\d),(\d)/g, '$1$2');
+          pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: fixedSdp }))
             .catch(e => console.warn('[rtc] setRemoteDescription failed:', e));
         }
         // WebRTC signaling: ICE candidate from server
         if (msg.type === 'ice-candidate' && pc) {
+          console.log('[rtc] ICE candidate from server:', msg.candidate, 'mid:', msg.sdpMid);
+          // libdatachannel sends full candidate line — ensure proper format
+          let candidateStr = msg.candidate;
+          // Fix locale commas in candidate too
+          candidateStr = candidateStr.replace(/(\d),(\d)/g, '$1$2');
           pc.addIceCandidate(new RTCIceCandidate({
-            candidate: msg.candidate, sdpMid: msg.sdpMid
-          })).catch(e => console.warn('[rtc] addIceCandidate failed:', e));
+            candidate: candidateStr,
+            sdpMid: msg.sdpMid || '0',
+            sdpMLineIndex: 0
+          })).catch(e => console.warn('[rtc] addIceCandidate failed:', e, 'candidate:', candidateStr));
         }
       } catch (e) {}
       return;
@@ -292,8 +315,10 @@ function setupWebRTC() {
   // Create DataChannels (browser creates, server accepts via onDataChannel)
   videoDc = pc.createDataChannel('video', { ordered: false, maxRetransmits: 0 });
   inputDc = pc.createDataChannel('input', { ordered: false, maxRetransmits: 0 });
+  const audioDc = pc.createDataChannel('audio', { ordered: true, maxRetransmits: 0 });
   videoDc.binaryType = 'arraybuffer';
   inputDc.binaryType = 'arraybuffer';
+  audioDc.binaryType = 'arraybuffer';
 
   const checkReady = () => {
     if (videoDc.readyState === 'open' && inputDc.readyState === 'open') {
@@ -310,6 +335,50 @@ function setupWebRTC() {
 
   // Video frames via DataChannel
   videoDc.onmessage = (event) => handleVideoFrame(event.data);
+
+  // Audio playback — raw PCM via ScriptProcessor
+  audioDc.onopen = async () => {
+    console.log('[rtc] audio DC open — starting PCM playback via AudioWorklet');
+    try {
+      audioCtx = new AudioContext({ sampleRate: 48000 });
+      // Browser autoplay policy: resume on user interaction
+      if (audioCtx.state === 'suspended') {
+        console.log('[rtc] AudioContext suspended — click page to enable audio');
+        const resume = () => {
+          audioCtx.resume().then(() => console.log('[rtc] AudioContext resumed'));
+          document.removeEventListener('click', resume);
+          document.removeEventListener('keydown', resume);
+        };
+        document.addEventListener('click', resume);
+        document.addEventListener('keydown', resume);
+      }
+      // AudioWorklet runs on dedicated audio thread — never interrupted by main thread
+      await audioCtx.audioWorklet.addModule('pcm-worklet.js');
+      const workletNode = new AudioWorkletNode(audioCtx, 'pcm-processor', {
+        outputChannelCount: [2]
+      });
+      workletNode.connect(audioCtx.destination);
+      window._audioWorkletPort = workletNode.port;
+      console.log('[rtc] AudioWorklet ready — sampleRate:', audioCtx.sampleRate, 'baseLatency:', audioCtx.baseLatency);
+    } catch (e) {
+      console.error('[rtc] AudioWorklet failed:', e);
+    }
+  };
+  audioDc.onmessage = (event) => {
+    const buf = new Uint8Array(event.data);
+    // Header: [0xAD][0x10][seqHi][seqLo][pcm_data...]
+    if (buf.length < 8 || buf[0] !== 0xAD || buf[1] !== 0x10) return;
+    const pcm = new Int16Array(event.data, 4);
+    audioChunksReceived++;
+    // Send to AudioWorklet thread (zero main-thread processing)
+    if (window._audioWorkletPort) {
+      window._audioWorkletPort.postMessage(pcm);
+    }
+  };
+  audioDc.onclose = () => {
+    if (audioCtx) { audioCtx.close(); audioCtx = null; }
+    console.log('[rtc] audio DC closed');
+  };
 
   // ICE candidates → send to server via WebSocket
   pc.onicecandidate = (event) => {
