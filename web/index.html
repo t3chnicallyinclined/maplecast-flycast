@@ -347,6 +347,21 @@ const MVC2_CHARS = [
   'Blackheart','Thanos','Jin','Cap Commando','Bone Wolverine','Servbot'
 ];
 
+// Sprite sheet loading
+const spriteImages = {};  // character_id -> Image object
+let spriteManifest = null;
+
+fetch('sprites/manifest.json').then(r => r.json()).then(manifest => {
+  spriteManifest = manifest;
+  for (const [id, filename] of Object.entries(manifest)) {
+    if (!filename) continue;
+    const img = new Image();
+    img.src = `sprites/${filename}`;
+    img.onload = () => { spriteImages[id] = img; };
+  }
+  console.log('Loading sprite sheets for', Object.keys(manifest).length, 'characters');
+});
+
 // Game state storage
 let gameState = null;
 
@@ -404,7 +419,17 @@ function parseGameState(buf) {
     });
   }
 
-  // In headless mode, render game state to canvas as visual debug
+  // Update diag from game state
+  frameCount++;
+  if (frameCount % 30 === 0) {
+    diag.fps = frameCount / ((performance.now() - startTime) / 1000);
+    diag.serverFrame = gameState.frame;
+    diag.bytesPerFrame = buf.length;
+    diag.totalBytes += buf.length;
+    updateDiag();
+  }
+
+  // Render game state to canvas
   renderGameState();
 }
 
@@ -451,27 +476,36 @@ function renderGameState() {
     const sx = 320 + (c.pos_x - camX) * 0.25;
     const sy = 380 - (c.pos_y || 0) * 0.3;
 
-    // Character body (rectangle)
+    // Draw character — sprite if available, rectangle as fallback
     const charW = 40;
     const charH = 80;
-    ctx.fillStyle = color;
-    ctx.globalAlpha = 0.8;
-    ctx.fillRect(sx - charW/2, sy - charH, charW, charH);
-    ctx.globalAlpha = 1.0;
+    const spriteImg = spriteImages[String(c.id)];
 
-    // Facing indicator (small triangle)
-    ctx.fillStyle = '#fff';
-    ctx.beginPath();
-    if (c.facing) {
-      ctx.moveTo(sx + charW/2, sy - charH/2);
-      ctx.lineTo(sx + charW/2 + 8, sy - charH/2 + 5);
-      ctx.lineTo(sx + charW/2, sy - charH/2 + 10);
+    if (spriteImg) {
+      // Draw a section of the sprite sheet (first idle frame)
+      // TODO: map sprite_id to correct region within the sheet
+      const srcW = Math.min(spriteImg.width, 120);  // crop a character-sized chunk
+      const srcH = Math.min(spriteImg.height, 160);
+      const drawW = srcW * 0.6;
+      const drawH = srcH * 0.6;
+
+      ctx.save();
+      if (!c.facing) {
+        // Flip horizontally for left-facing
+        ctx.translate(sx, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(spriteImg, 0, 0, srcW, srcH, -drawW/2, sy - drawH, drawW, drawH);
+      } else {
+        ctx.drawImage(spriteImg, 0, 0, srcW, srcH, sx - drawW/2, sy - drawH, drawW, drawH);
+      }
+      ctx.restore();
     } else {
-      ctx.moveTo(sx - charW/2, sy - charH/2);
-      ctx.lineTo(sx - charW/2 - 8, sy - charH/2 + 5);
-      ctx.lineTo(sx - charW/2, sy - charH/2 + 10);
+      // Fallback: colored rectangle
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.8;
+      ctx.fillRect(sx - charW/2, sy - charH, charW, charH);
+      ctx.globalAlpha = 1.0;
     }
-    ctx.fill();
 
     // Character name
     ctx.fillStyle = '#fff';
