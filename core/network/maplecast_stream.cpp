@@ -335,6 +335,15 @@ static bool initNvenc()
 	encConfig.encodeCodecConfig.h264Config.repeatSPSPPS = 1;
 	encConfig.encodeCodecConfig.h264Config.chromaFormatIDC = 1;
 
+	// MVC2-specific NVENC optimizations
+	encConfig.encodeCodecConfig.h264Config.disableDeblockingFilterIDC = 1;  // skip deblock filter
+	encConfig.encodeCodecConfig.h264Config.entropyCodingMode = NV_ENC_H264_ENTROPY_CODING_MODE_CAVLC;  // CAVLC faster than CABAC
+	encConfig.encodeCodecConfig.h264Config.sliceMode = 0;       // single slice
+	encConfig.encodeCodecConfig.h264Config.sliceModeData = 0;
+	encConfig.rcParams.multiPass = NV_ENC_MULTI_PASS_DISABLED;  // single pass only
+	encConfig.rcParams.enableLookahead = 0;                     // no lookahead
+	encConfig.rcParams.lowDelayKeyFrameScale = 1;
+
 	NV_ENC_INITIALIZE_PARAMS initParams = {};
 	initParams.version = NV_ENC_INITIALIZE_PARAMS_VER;
 	initParams.encodeGUID = NV_ENC_CODEC_H264_GUID;
