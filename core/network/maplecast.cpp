@@ -52,6 +52,14 @@ static u8 _w3[2][4] = {
 static uint32_t _packetCount[2] = {0, 0};
 static uint32_t _unknownPackets = 0;
 static uint32_t _getInputCount = 0;
+static int64_t _lastInputTimeUs = 0;
+
+// Per-second rate tracking for stats
+static uint32_t _pktPerSec[2] = {0, 0};
+static uint32_t _chgPerSec[2] = {0, 0};
+static uint32_t _pktAccum[2] = {0, 0};
+static uint32_t _chgAccum[2] = {0, 0};
+static uint32_t _lastRateFrame = 0;
 static uint32_t _packetsThisFrame[2] = {0, 0};
 static uint32_t _stateChanges[2] = {0, 0};
 static u8 _prevW3[2][4] = {{0,0,0xFF,0xFF},{0,0,0xFF,0xFF}};
@@ -223,7 +231,10 @@ void getInput(MapleInputState inputState[4])
 		{
 			// Track state changes
 			if (memcmp(_w3[player], buf, 4) != 0)
+			{
 				_stateChanges[player]++;
+				_chgAccum[player]++;
+			}
 
 			memcpy(_prevW3[player], _w3[player], 4);
 			_w3[player][0] = buf[0];
@@ -232,6 +243,7 @@ void getInput(MapleInputState inputState[4])
 			_w3[player][3] = buf[3];
 			_packetCount[player]++;
 			_packetsThisFrame[player]++;
+			_pktAccum[player]++;
 		}
 	}
 
@@ -239,7 +251,26 @@ void getInput(MapleInputState inputState[4])
 	w3ToInput(_w3[0], inputState[0]);
 	w3ToInput(_w3[1], inputState[1]);
 
+	// Timestamp this input read for latency telemetry
+	LARGE_INTEGER _qpc, _qpf;
+	QueryPerformanceFrequency(&_qpf);
+	QueryPerformanceCounter(&_qpc);
+	_lastInputTimeUs = _qpc.QuadPart * 1000000LL / _qpf.QuadPart;
+
 	_getInputCount++;
+
+	// Update per-second rates every 60 frames
+	if (_getInputCount - _lastRateFrame >= 60)
+	{
+		for (int i = 0; i < 2; i++)
+		{
+			_pktPerSec[i] = _pktAccum[i] * 60 / (_getInputCount - _lastRateFrame);
+			_chgPerSec[i] = _chgAccum[i] * 60 / (_getInputCount - _lastRateFrame);
+			_pktAccum[i] = 0;
+			_chgAccum[i] = 0;
+		}
+		_lastRateFrame = _getInputCount;
+	}
 
 	// Telemetry every 300 frames (5 seconds at 60fps)
 	if (_getInputCount % 300 == 0)
@@ -269,6 +300,25 @@ void getInput(MapleInputState inputState[4])
 bool active()
 {
 	return _active;
+}
+
+int64_t lastInputTimeUs()
+{
+	return _lastInputTimeUs;
+}
+
+void getPlayerStats(PlayerStats& p1, PlayerStats& p2)
+{
+	for (int i = 0; i < 2; i++)
+	{
+		PlayerStats& s = (i == 0) ? p1 : p2;
+		s.packetsPerSec = _pktPerSec[i];
+		s.changesPerSec = _chgPerSec[i];
+		s.buttons = ((uint16_t)_w3[i][2] << 8) | _w3[i][3];
+		s.lt = _w3[i][0];
+		s.rt = _w3[i][1];
+		s.connected = _playerAssigned[i];
+	}
 }
 
 }  // namespace maplecast

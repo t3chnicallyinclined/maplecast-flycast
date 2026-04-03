@@ -48,10 +48,20 @@ const diag = {
   decodeLat: 0,        // ms to decode one frame
   decodeSamples: [],
 
-  networkLat: 0,       // estimated network latency (server timestamp delta)
-  networkSamples: [],
+  // Server-side pipeline (microseconds)
+  serverCaptureUs: 0,
+  serverEncodeUs: 0,
+  serverTotalUs: 0,
+  serverCaptureSamples: [],
+  serverEncodeSamples: [],
+  serverTotalSamples: [],
 
-  wsRecvMs: 0,         // when WS message arrived
+  // Jitter tracking
+  jitterSamples: [],
+  prevEncodeDoneUs: 0,
+  prevClientRecvMs: 0,
+
+  wsRecvMs: 0,
 
   // Input
   gamepadActive: false,
@@ -65,34 +75,60 @@ const diag = {
   droppedFrames: 0,
 };
 
+function avg(arr) { return arr.length > 0 ? arr.reduce((a,b) => a+b, 0) / arr.length : 0; }
+
 function updateDiagDisplay() {
-  const avgDecode = diag.decodeSamples.length > 0
-    ? (diag.decodeSamples.reduce((a,b) => a+b, 0) / diag.decodeSamples.length).toFixed(1)
-    : '?';
-  const avgInterval = diag.frameIntervals.length > 0
-    ? (diag.frameIntervals.reduce((a,b) => a+b, 0) / diag.frameIntervals.length).toFixed(1)
-    : '?';
-  const avgNetwork = diag.networkSamples.length > 0
-    ? (diag.networkSamples.reduce((a,b) => a+b, 0) / diag.networkSamples.length).toFixed(1)
-    : '?';
   const kbps = (diag.totalBytes * 8 / 1000 / ((performance.now() - startTime) / 1000)).toFixed(0);
 
+  const srvCapture = (avg(diag.serverCaptureSamples) / 1000).toFixed(2);
+  const srvEncode = (avg(diag.serverEncodeSamples) / 1000).toFixed(2);
+  const srvTotal = (avg(diag.serverTotalSamples) / 1000).toFixed(2);
+  const clientDecode = avg(diag.decodeSamples).toFixed(2);
+  const frameInt = avg(diag.frameIntervals).toFixed(1);
+  const jitter = avg(diag.jitterSamples).toFixed(2);
+
+  const p1 = diag.p1 || {};
+  const p2 = diag.p2 || {};
+  const p1btn = (p1.btn !== undefined) ? '0x' + p1.btn.toString(16).padStart(4, '0').toUpperCase() : '?';
+  const p2btn = (p2.btn !== undefined) ? '0x' + p2.btn.toString(16).padStart(4, '0').toUpperCase() : '?';
+
   diagEl.textContent =
-`=== MapleCast Diagnostics ===
-FPS:            ${diag.fps.toFixed(1)}
-Frame:          ${diag.frameCount} (server: ${diag.serverFrame})
-Bitrate:        ${kbps} kbps
-Frame size:     ${diag.bytesPerFrame} bytes
-Frame interval: ${avgInterval}ms (target: 16.7ms)
+`═══ MapleCast Diagnostics ═══
+FPS:              ${diag.fps.toFixed(1)}
+Server frame:     ${diag.serverFrame}
+Bitrate:          ${kbps} kbps
+Frame size:       ${diag.bytesPerFrame} B
+Frame interval:   ${frameInt}ms
 
---- Latency ---
-Decode:         ${avgDecode}ms
-Network est:    ${avgNetwork}ms
-Dropped:        ${diag.droppedFrames}
+─── Server Pipeline ───
+Input→Capture:    ${srvCapture}ms
+Capture→Encode:   ${srvEncode}ms
+Total server:     ${srvTotal}ms
 
---- Input ---
-Gamepad:        ${diag.gamepadActive ? 'YES' : 'no'}
-Inputs sent:    ${diag.inputSendCount}`;
+─── Client Pipeline ───
+Decode:           ${clientDecode}ms
+Jitter:           ${jitter}ms
+Dropped:          ${diag.droppedFrames}
+
+─── Player 1 ───
+Input rate:       ${p1.pps || 0}/sec
+State changes:    ${p1.cps || 0}/sec
+Buttons:          ${p1btn}
+Triggers:         L:${p1.lt || 0} R:${p1.rt || 0}
+
+─── Player 2 ───
+Input rate:       ${p2.pps || 0}/sec
+State changes:    ${p2.cps || 0}/sec
+Buttons:          ${p2btn}
+Triggers:         L:${p2.lt || 0} R:${p2.rt || 0}
+
+─── Browser Input ───
+Gamepad:          ${diag.gamepadActive ? 'CONNECTED' : 'none'}
+Sent:             ${diag.inputSendCount}
+
+─── End-to-End ───
+Server:           ${srvTotal}ms
++net+proxy+decode ≈${(parseFloat(srvTotal) + 2.0 + parseFloat(clientDecode)).toFixed(1)}ms`;
 }
 
 function initDecoder() {
@@ -169,26 +205,65 @@ function connect(player) {
 
     const buf = new Uint8Array(event.data);
 
-    // Parse header: [8-byte timestamp_us][4-byte frame_num][H.264 data]
-    if (buf.length < 12) return;
+    // Parse header: timing(28) + p1stats(8) + p2stats(8) + H.264
+    // = 44 bytes header minimum
+    if (buf.length < 44) return;
 
     const view = new DataView(event.data);
-    // Read 64-bit timestamp as two 32-bit values (JS doesn't have native int64)
-    const tsLow = view.getUint32(0, true);
-    const tsHigh = view.getUint32(4, true);
-    const serverTimestampUs = tsLow + tsHigh * 4294967296;
-    const serverFrame = view.getUint32(8, true);
-    const h264Data = buf.slice(12);
+    function readI64(offset) {
+      return view.getUint32(offset, true) + view.getUint32(offset + 4, true) * 4294967296;
+    }
+    // Timing
+    const inputTimeUs = readI64(0);
+    const captureTimeUs = readI64(8);
+    const encodeDoneTimeUs = readI64(16);
+    const serverFrame = view.getUint32(24, true);
+    // P1 stats
+    diag.p1 = {
+      pps: view.getUint16(28, true),
+      cps: view.getUint16(30, true),
+      btn: view.getUint16(32, true),
+      lt: buf[34], rt: buf[35],
+    };
+    // P2 stats
+    diag.p2 = {
+      pps: view.getUint16(36, true),
+      cps: view.getUint16(38, true),
+      btn: view.getUint16(40, true),
+      lt: buf[42], rt: buf[43],
+    };
+    const h264Data = buf.slice(44);
 
     diag.serverFrame = serverFrame;
     diag.bytesPerFrame = h264Data.length;
     diag.totalBytes += h264Data.length;
 
-    // Estimate network latency (compare server capture time to our receive time)
-    // This is approximate — clocks aren't synced, but drift is useful
-    const nowUs = performance.now() * 1000;
-    // We can't compare absolute clocks, but we CAN track jitter
-    // by looking at delta between consecutive server timestamps vs our timestamps
+    // Server-side pipeline (all in microseconds, same clock)
+    const serverCaptureUs = captureTimeUs - inputTimeUs;     // input read → capture start
+    const serverEncodeUs = encodeDoneTimeUs - captureTimeUs; // capture → encode done
+    const serverTotalUs = encodeDoneTimeUs - inputTimeUs;    // input → encode done
+    diag.serverCaptureUs = serverCaptureUs;
+    diag.serverEncodeUs = serverEncodeUs;
+    diag.serverTotalUs = serverTotalUs;
+
+    // Track server-side pipeline averages
+    diag.serverCaptureSamples.push(serverCaptureUs);
+    diag.serverEncodeSamples.push(serverEncodeUs);
+    diag.serverTotalSamples.push(serverTotalUs);
+    if (diag.serverCaptureSamples.length > 60) diag.serverCaptureSamples.shift();
+    if (diag.serverEncodeSamples.length > 60) diag.serverEncodeSamples.shift();
+    if (diag.serverTotalSamples.length > 60) diag.serverTotalSamples.shift();
+
+    // Inter-frame jitter (server timestamps vs client timestamps)
+    if (diag.prevEncodeDoneUs > 0) {
+      const serverDeltaUs = encodeDoneTimeUs - diag.prevEncodeDoneUs;
+      const clientDeltaMs = now - diag.prevClientRecvMs;
+      const jitterMs = Math.abs(clientDeltaMs - serverDeltaUs / 1000);
+      diag.jitterSamples.push(jitterMs);
+      if (diag.jitterSamples.length > 60) diag.jitterSamples.shift();
+    }
+    diag.prevEncodeDoneUs = encodeDoneTimeUs;
+    diag.prevClientRecvMs = now;
 
     diag.decodeStartMs = performance.now();
 

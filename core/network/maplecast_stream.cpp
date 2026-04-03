@@ -220,14 +220,22 @@ static bool initCudaLinearBuffer()
 	return true;
 }
 
-static void broadcastPacket(const uint8_t* data, uint32_t size, int64_t captureTimeUs, uint32_t frameNum)
+static void broadcastPacket(const uint8_t* data, uint32_t size,
+	int64_t inputTimeUs, int64_t captureTimeUs, int64_t encodeDoneTimeUs, uint32_t frameNum)
 {
-	// Header: [total_len(4)][timestamp_us(8)][frame_num(4)][h264 data]
-	uint32_t headerSize = 8 + 4;
+	// Get player stats
+	maplecast::PlayerStats p1s, p2s;
+	maplecast::getPlayerStats(p1s, p2s);
+
+	// Header: [total_len(4)] + timing(28) + p1stats(8) + p2stats(8) + [h264 data]
+	// Timing:  [inputTimeUs(8)][captureTimeUs(8)][encodeDoneTimeUs(8)][frame_num(4)] = 28
+	// P1 stats: [pktPerSec(2)][chgPerSec(2)][buttons(2)][lt(1)][rt(1)] = 8
+	// P2 stats: same = 8
+	// Total header: 28 + 8 + 8 = 44 bytes
+	uint32_t headerSize = 28 + 8 + 8;  // 44 bytes
 	uint32_t totalPayload = headerSize + size;
 	uint32_t totalMsg = 4 + totalPayload;
 
-	// Grow pre-allocated buffer if needed (rare)
 	if (totalMsg > _sendBufSize)
 	{
 		free(_sendBuf);
@@ -235,10 +243,33 @@ static void broadcastPacket(const uint8_t* data, uint32_t size, int64_t captureT
 		_sendBuf = (uint8_t*)malloc(_sendBufSize);
 	}
 
-	memcpy(_sendBuf, &totalPayload, 4);
-	memcpy(_sendBuf + 4, &captureTimeUs, 8);
-	memcpy(_sendBuf + 12, &frameNum, 4);
-	memcpy(_sendBuf + 16, data, size);
+	uint32_t off = 0;
+	memcpy(_sendBuf + off, &totalPayload, 4); off += 4;
+	// Timing
+	memcpy(_sendBuf + off, &inputTimeUs, 8); off += 8;
+	memcpy(_sendBuf + off, &captureTimeUs, 8); off += 8;
+	memcpy(_sendBuf + off, &encodeDoneTimeUs, 8); off += 8;
+	memcpy(_sendBuf + off, &frameNum, 4); off += 4;
+	// P1 stats
+	uint16_t p1pps = (uint16_t)p1s.packetsPerSec;
+	uint16_t p1cps = (uint16_t)p1s.changesPerSec;
+	uint16_t p1btn = p1s.buttons;
+	memcpy(_sendBuf + off, &p1pps, 2); off += 2;
+	memcpy(_sendBuf + off, &p1cps, 2); off += 2;
+	memcpy(_sendBuf + off, &p1btn, 2); off += 2;
+	_sendBuf[off++] = p1s.lt;
+	_sendBuf[off++] = p1s.rt;
+	// P2 stats
+	uint16_t p2pps = (uint16_t)p2s.packetsPerSec;
+	uint16_t p2cps = (uint16_t)p2s.changesPerSec;
+	uint16_t p2btn = p2s.buttons;
+	memcpy(_sendBuf + off, &p2pps, 2); off += 2;
+	memcpy(_sendBuf + off, &p2cps, 2); off += 2;
+	memcpy(_sendBuf + off, &p2btn, 2); off += 2;
+	_sendBuf[off++] = p2s.lt;
+	_sendBuf[off++] = p2s.rt;
+	// H.264 payload
+	memcpy(_sendBuf + off, data, size);
 
 	std::lock_guard<std::mutex> lock(_clientMutex);
 	for (int i = 0; i < MAX_CLIENTS; i++)
@@ -397,8 +428,9 @@ void onFrameRendered()
 	if (!_active || !_encoder) return;
 	if (_clientCount.load(std::memory_order_relaxed) == 0) return;
 
-	LARGE_INTEGER freq, pc0, pc1, pc2, pc3;
-	QueryPerformanceFrequency(&freq);
+	static LARGE_INTEGER freq = {}; // cached — never changes
+	if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
+	LARGE_INTEGER pc0, pc1, pc2, pc3;
 	QueryPerformanceCounter(&pc0);
 	int64_t captureTimeUs = pc0.QuadPart * 1000000LL / freq.QuadPart;
 
@@ -513,10 +545,12 @@ void onFrameRendered()
 	if (st == NV_ENC_SUCCESS)
 	{
 		QueryPerformanceCounter(&pc3);
+		int64_t encodeDoneTimeUs = pc3.QuadPart * 1000000LL / freq.QuadPart;
+		int64_t inputTimeUs = ::maplecast::lastInputTimeUs();
 
 		uint32_t frameNum = (uint32_t)_frameCount;
 		broadcastPacket((const uint8_t*)lockParams.bitstreamBufferPtr,
-			lockParams.bitstreamSizeInBytes, captureTimeUs, frameNum);
+			lockParams.bitstreamSizeInBytes, inputTimeUs, captureTimeUs, encodeDoneTimeUs, frameNum);
 
 		// Telemetry every 300 frames
 		if (frameNum % 300 == 0)
