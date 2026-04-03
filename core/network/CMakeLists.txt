@@ -8,6 +8,8 @@ target_sources(${PROJECT_NAME} PRIVATE
         maplecast.h
         maplecast_stream.cpp
         maplecast_stream.h
+        maplecast_gamestate.cpp
+        maplecast_gamestate.h
         maplecast_telemetry.cpp
         maplecast_telemetry.h
         miniupnp.cpp

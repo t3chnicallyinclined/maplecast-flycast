@@ -22,6 +22,7 @@
 #include "maplecast_stream.h"
 #include "maplecast.h"
 #include "maplecast_telemetry.h"
+#include "maplecast_gamestate.h"
 #include "hw/pvr/Renderer_if.h"
 #include "wsi/gl_context.h"
 
@@ -713,6 +714,20 @@ void onFrameRendered()
 		memcpy(_sendBuf + off, lockParams.bitstreamBufferPtr, h264Size);
 
 		broadcastBinary(_sendBuf, totalPayload);
+
+		// Send game state as binary alongside video (every frame)
+		// 240 bytes — character positions, health, animations, meters, timer
+		{
+			static uint8_t gsBuf[4 + sizeof(maplecast_gamestate::GameState)];
+			maplecast_gamestate::GameState gs;
+			maplecast_gamestate::readGameState(gs);
+			// Prefix with "GS" marker so client can distinguish from video
+			gsBuf[0] = 'G'; gsBuf[1] = 'S';
+			uint16_t gsSize = sizeof(gs);
+			memcpy(gsBuf + 2, &gsSize, 2);
+			memcpy(gsBuf + 4, &gs, sizeof(gs));
+			broadcastBinary(gsBuf, 4 + sizeof(gs));
+		}
 
 		if (frameNum % 300 == 0)
 		{

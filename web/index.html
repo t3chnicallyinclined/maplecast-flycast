@@ -170,7 +170,15 @@ function connect() {
       return;
     }
 
-    // Binary = video frame
+    // Check if this is game state (starts with "GS") or video frame
+    const rawBuf = new Uint8Array(event.data);
+    if (rawBuf.length > 4 && rawBuf[0] === 0x47 && rawBuf[1] === 0x53) {
+      // Game state packet — parse MVC2 state
+      parseGameState(rawBuf);
+      return;
+    }
+
+    // Video frame
     if (!decoder || decoder.state === 'closed') return;
     const now = performance.now();
     if (lastFrameTime > 0) {
@@ -326,6 +334,70 @@ ctx.fillStyle = '#888';
 ctx.fillText('Enter your name and press START to join', 320, 280);
 
 diagEl.textContent = '=== MapleCast ===\nWaiting...';
+
+// MVC2 Character names
+const MVC2_CHARS = [
+  'Ryu','Zangief','Guile','Morrigan','Anakaris','Strider','Cyclops','Wolverine',
+  'Psylocke','Iceman','Rogue','Cap America','Spider-Man','Hulk','Venom','Dr Doom',
+  'Tron Bonne','Jill','Hayato','Ruby Heart','SonSon','Amingo','Marrow','Cable',
+  'Abyss1','Abyss2','Abyss3','Chun-Li','Mega Man','Roll','Akuma','BB Hood',
+  'Felicia','Charlie','Sakura','Dan','Cammy','Dhalsim','M Bison','Ken',
+  'Gambit','Juggernaut','Storm','Sabretooth','Magneto','Shuma','War Machine',
+  'Silver Samurai','Omega Red','Spiral','Colossus','Iron Man','Sentinel',
+  'Blackheart','Thanos','Jin','Cap Commando','Bone Wolverine','Servbot'
+];
+
+// Game state storage
+let gameState = null;
+
+function parseGameState(buf) {
+  // buf: [G][S][size_u16][GameState struct]
+  const view = new DataView(buf.buffer, buf.byteOffset);
+  const size = view.getUint16(2, true);
+  if (buf.length < 4 + size) return;
+
+  const off = 4; // skip GS header
+  gameState = {
+    in_match: buf[off + 0],
+    timer: buf[off + 1],
+    stage_id: buf[off + 2],
+    // padding byte at off+3
+    camera_x: view.getFloat32(off + 4, true),
+    camera_y: view.getFloat32(off + 8, true),
+    p1_meter_fill: view.getUint16(off + 12, true),
+    p2_meter_fill: view.getUint16(off + 14, true),
+    p1_meter_level: buf[off + 16],
+    p2_meter_level: buf[off + 17],
+    p1_combo: view.getUint16(off + 18, true),
+    p2_combo: view.getUint16(off + 20, true),
+    frame: view.getUint32(off + 24, true),
+    chars: []
+  };
+
+  // Parse 6 characters (36 bytes each, starting at off + 28)
+  const charOff = off + 28;
+  for (let i = 0; i < 6; i++) {
+    const co = charOff + i * 36;
+    gameState.chars.push({
+      active: buf[co + 0],
+      id: buf[co + 1],
+      name: MVC2_CHARS[buf[co + 1]] || '?',
+      // padding at co+2,3
+      pos_x: view.getFloat32(co + 4, true),
+      pos_y: view.getFloat32(co + 8, true),
+      screen_x: view.getFloat32(co + 12, true),
+      screen_y: view.getFloat32(co + 16, true),
+      vel_x: view.getFloat32(co + 20, true),
+      vel_y: view.getFloat32(co + 24, true),
+      facing: buf[co + 28],
+      // padding at co+29
+      sprite_id: view.getUint16(co + 30, true),
+      anim_state: view.getUint16(co + 32, true),
+      anim_timer: view.getUint16(co + 34, true),
+      // next fields would be at co+36 but struct has more padding
+    });
+  }
+}
 
 // Auto-connect on page load
 connect();
