@@ -213,7 +213,26 @@ function connect() {
 
     diag.decodeStartMs = performance.now();
     try {
-      decoder.decode(new EncodedVideoChunk({ type: 'key', timestamp: diag.serverFrame * 16667, data: h264 }));
+      // Detect JPEG (starts with FF D8) vs H.264
+      if (h264.length > 2 && h264[0] === 0xFF && h264[1] === 0xD8) {
+        // JPEG frame — decode with createImageBitmap
+        const blob = new Blob([h264], {type: 'image/jpeg'});
+        createImageBitmap(blob).then(bmp => {
+          ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+          bmp.close();
+          const decEnd = performance.now();
+          diag.decodeSamples.push(decEnd - diag.decodeStartMs);
+          if (diag.decodeSamples.length > 60) diag.decodeSamples.shift();
+          frameCount++;
+          if (frameCount % 30 === 0) {
+            diag.fps = frameCount / ((performance.now() - startTime) / 1000);
+            updateDiag();
+          }
+        });
+      } else {
+        // H.264 frame — decode with WebCodecs
+        decoder.decode(new EncodedVideoChunk({ type: 'key', timestamp: diag.serverFrame * 16667, data: h264 }));
+      }
     } catch (e) { diag.droppedFrames++; }
   };
 

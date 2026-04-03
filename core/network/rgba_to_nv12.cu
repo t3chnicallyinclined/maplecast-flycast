@@ -1,5 +1,24 @@
-// CUDA kernel: RGBA → NV12 (BT.601 limited range)
-// Compile: nvcc -ptx -arch=sm_80 rgba_to_nv12.cu -o rgba_to_nv12.ptx
+// CUDA kernels for MapleCast frame processing
+// Compile: nvcc -ptx -arch=sm_86 rgba_to_nv12.cu -o rgba_to_nv12.ptx
+
+// Strip alpha channel: RGBA (4 bpp) → RGB (3 bpp) for nvJPEG
+extern "C" __global__ void rgba_to_rgb(
+    const unsigned char* __restrict__ rgba, int rgba_pitch,
+    unsigned char* __restrict__ rgb, int rgb_pitch,
+    int width, int height)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+
+    int src = y * rgba_pitch + x * 4;
+    int dst = y * rgb_pitch + x * 3;
+    rgb[dst + 0] = rgba[src + 0];
+    rgb[dst + 1] = rgba[src + 1];
+    rgb[dst + 2] = rgba[src + 2];
+}
+
+// RGBA → NV12 (BT.601 limited range) for NVENC
 
 extern "C" __global__ void rgba_to_nv12(
     const unsigned char* __restrict__ rgba, int rgba_pitch,
