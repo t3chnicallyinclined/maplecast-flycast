@@ -240,7 +240,10 @@ function updateLobby(msg) {
     const p = msg[slot];
     if (p && p.connected) {
       const isMe = p.id === myId.substring(0,8);
-      html += `<span class="slot ${isMe ? 'me' : 'taken'}">${label}: ${p.name}${isMe ? ' (you)' : ''}</span> `;
+      const isHw = p.type === 'hardware';
+      const cls = isMe ? 'me' : (isHw ? 'taken' : 'taken');
+      const tag = isMe ? ' (you)' : (isHw ? ' [HW]' : '');
+      html += `<span class="slot ${cls}">${label}: ${p.name}${tag}</span> `;
     } else {
       html += `<span class="slot empty">${label}: open</span> `;
     }

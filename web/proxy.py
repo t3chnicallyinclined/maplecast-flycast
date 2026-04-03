@@ -30,6 +30,11 @@ udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 players = {}  # {player_id: {"slot": 0|1, "name": str, "ws": websocket, "connected": bool}}
 slots = [None, None]  # [p1_id, p2_id]
 
+# Hardware player detection — if frame header shows high packet rate, slot is taken by hardware
+HARDWARE_PLAYER_ID = "__hardware__"
+hw_pps = [0, 0]  # last known packets/sec for P1, P2 from frame header
+HW_THRESHOLD = 1000  # packets/sec above this = hardware player connected
+
 
 def assign_slot(player_id, name):
     """Assign a player to the next available slot. Returns slot number or -1."""
@@ -41,9 +46,9 @@ def assign_slot(player_id, name):
         print(f"[proxy] {name} ({player_id[:8]}) reconnected as P{slot+1}")
         return slot
 
-    # Find empty slot
+    # Find empty slot — skip slots taken by hardware players
     for i in range(2):
-        if slots[i] is None:
+        if slots[i] is None and hw_pps[i] < HW_THRESHOLD:
             slots[i] = player_id
             players[player_id] = {"slot": i, "name": name, "ws": None, "connected": True}
             print(f"[proxy] {name} ({player_id[:8]}) assigned P{i+1}")
@@ -63,20 +68,21 @@ def release_slot(player_id):
             print(f"[proxy] P{slot+1} ({player_id[:8]}) disconnected (slot reserved)")
 
 
+def get_slot_info(i):
+    """Get info for a slot — could be browser player or hardware player."""
+    if slots[i] and slots[i] in players:
+        p = players[slots[i]]
+        return {"id": slots[i][:8], "name": p["name"], "connected": p["connected"], "type": "browser"}
+    elif hw_pps[i] >= HW_THRESHOLD:
+        return {"id": "hardware", "name": f"Stick ({hw_pps[i]}/s)", "connected": True, "type": "hardware"}
+    return None
+
 def get_status():
     """Get current lobby status."""
     return {
         "type": "status",
-        "p1": {
-            "id": slots[0][:8] if slots[0] else None,
-            "name": players[slots[0]]["name"] if slots[0] and slots[0] in players else None,
-            "connected": players[slots[0]]["connected"] if slots[0] and slots[0] in players else False,
-        } if slots[0] else None,
-        "p2": {
-            "id": slots[1][:8] if slots[1] else None,
-            "name": players[slots[1]]["name"] if slots[1] and slots[1] in players else None,
-            "connected": players[slots[1]]["connected"] if slots[1] and slots[1] in players else False,
-        } if slots[1] else None,
+        "p1": get_slot_info(0),
+        "p2": get_slot_info(1),
     }
 
 
@@ -112,13 +118,28 @@ async def handle_client(websocket):
     tcp_writer = None
 
     async def send_video():
-        """Forward H.264 frames to browser."""
+        """Forward H.264 frames to browser, parse header for hardware player detection."""
         nonlocal tcp_reader, tcp_writer
         try:
             tcp_reader, tcp_writer = await asyncio.open_connection(FLYCAST_HOST, TCP_PORT)
             print(f"[proxy] video stream connected for {remote}")
+            frame_count = 0
             async for frame in read_tcp_frames(tcp_reader):
                 await websocket.send(frame)
+
+                # Every 60 frames, parse header to detect hardware players
+                frame_count += 1
+                if frame_count % 60 == 0 and len(frame) >= 44:
+                    p1_pps = int.from_bytes(frame[28:30], 'little')
+                    p2_pps = int.from_bytes(frame[36:38], 'little')
+                    hw_pps[0] = p1_pps
+                    hw_pps[1] = p2_pps
+
+                    # Send lobby status update to this client
+                    try:
+                        await websocket.send(json.dumps(get_status()))
+                    except Exception:
+                        pass
         except (asyncio.IncompleteReadError, ConnectionError, ConnectionRefusedError) as e:
             print(f"[proxy] video stream error: {e}")
 
