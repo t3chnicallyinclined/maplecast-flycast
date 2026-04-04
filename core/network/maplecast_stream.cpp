@@ -23,6 +23,7 @@
 #endif
 
 #include "maplecast_stream.h"
+#include "maplecast_mirror.h"
 #include "maplecast.h"
 #include "maplecast_telemetry.h"
 #include "maplecast_input_server.h"
@@ -654,6 +655,9 @@ void shutdown()
 void onFrameRendered()
 {
 	if (!_active || !_encoder) return;
+
+	// Skip H.264 encode when mirror mode is active — delta frames replace video
+	if (maplecast_mirror::isServer()) return;
 	if (_clientCount.load(std::memory_order_relaxed) == 0) return;
 
 	int64_t pc0, pc1, pc2, pc3;
