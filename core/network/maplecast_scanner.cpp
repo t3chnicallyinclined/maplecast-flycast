@@ -102,6 +102,66 @@ static void writeCharState(int slot, int charId, int animState, int frame)
 	addrspace::write8(base + OFF_FACING, 1);  // face right
 }
 
+// Load discovered animation states from visual_cache directory
+static void loadDiscoveredStates(const char* cacheDir)
+{
+	for (int i = 0; i < TOTAL_CHARACTERS; i++)
+		_validStates[i].clear();
+
+	char cmd[512];
+	snprintf(cmd, sizeof(cmd),
+		"ls %s/char_* 2>/dev/null | sed 's/.*char_\\([0-9]*\\)_anim\\([0-9a-f]*\\)_.*/\\1 \\2/' | sort -u",
+		cacheDir);
+
+	FILE* p = popen(cmd, "r");
+	if (!p) return;
+
+	int charId;
+	char animHex[16];
+	int totalLoaded = 0;
+	while (fscanf(p, "%d %s", &charId, animHex) == 2)
+	{
+		if (charId >= 0 && charId < TOTAL_CHARACTERS)
+		{
+			int animState = (int)strtol(animHex, nullptr, 16);
+			_validStates[charId].insert(animState);
+			totalLoaded++;
+		}
+	}
+	pclose(p);
+
+	int charsWithStates = 0;
+	for (int i = 0; i < TOTAL_CHARACTERS; i++)
+		if (!_validStates[i].empty()) charsWithStates++;
+
+	printf("[scanner] loaded %d known states for %d characters from cache\n",
+		totalLoaded, charsWithStates);
+}
+
+// Iterator for targeted scan through known states
+static std::vector<int> _currentCharStates;
+static int _stateIdx = 0;
+
+static void loadNextCharStates()
+{
+	_currentCharStates.clear();
+	_stateIdx = 0;
+
+	// Find next character with known states
+	while (_charId < TOTAL_CHARACTERS)
+	{
+		if (!_validStates[_charId].empty())
+		{
+			_currentCharStates.assign(_validStates[_charId].begin(),
+				_validStates[_charId].end());
+			printf("[scanner] char %d: %zu known states to scan\n",
+				_charId, _currentCharStates.size());
+			return;
+		}
+		_charId++;
+	}
+}
+
 void start(ScanMode mode, int startCharId)
 {
 	_mode = mode;
@@ -112,21 +172,32 @@ void start(ScanMode mode, int startCharId)
 	_totalFramesCaptured = 0;
 	_charsCompleted = 0;
 	_scannedStates.clear();
+	_stateIdx = 0;
+
+	// Load known states from cache for targeted/full scan
+	loadDiscoveredStates("visual_cache");
+
+	// For targeted/full mode, start with known states (safe, no crashes)
+	if (mode == ScanMode::FullScan || mode == ScanMode::Targeted)
+	{
+		loadNextCharStates();
+		if (!_currentCharStates.empty())
+			_animState = _currentCharStates[0];
+	}
+
 	_active = true;
 
 	const char* modeStr = "unknown";
 	switch (mode) {
-		case ScanMode::Discovery: modeStr = "DISCOVERY (sweep 0x0000-0xFFFF)"; break;
-		case ScanMode::Targeted: modeStr = "TARGETED (known states only)"; break;
-		case ScanMode::FullScan: modeStr = "FULL SCAN (all characters)"; break;
+		case ScanMode::Discovery: modeStr = "DISCOVERY (sweep, may crash on invalid states)"; break;
+		case ScanMode::Targeted: modeStr = "TARGETED (known states only, safe)"; break;
+		case ScanMode::FullScan: modeStr = "FULL SCAN (known states for all characters, safe)"; break;
 		default: break;
 	}
 
 	printf("[scanner] === BRUTE FORCE SCANNER STARTED ===\n");
 	printf("[scanner] Mode: %s\n", modeStr);
 	printf("[scanner] Starting from character %d\n", startCharId);
-	printf("[scanner] %d characters × ~300 states × ~10 frames = ~47 minutes\n",
-		TOTAL_CHARACTERS);
 	printf("[scanner] WE ARE INSANE.\n");
 }
 
@@ -188,51 +259,60 @@ static void advanceState()
 {
 	_frame = 0;
 
-	if (_mode == ScanMode::Discovery || _mode == ScanMode::FullScan)
+	if (_mode == ScanMode::Discovery)
 	{
+		// Discovery: sweep all 16-bit states (DANGEROUS — may crash)
 		_animState++;
-
-		// Discovery: sweep through all possible 16-bit animation states
 		if (_animState > 0xFFFF)
 		{
-			// Done with this character
 			printf("[scanner] Character %d complete: %zu valid states found\n",
 				_charId, _validStates[_charId].size());
 			_charsCompleted++;
 			_charId++;
 			_animState = 0;
+			if (_charId >= TOTAL_CHARACTERS) { stop(); return; }
+		}
+		if (_animState % 1000 == 0 && _animState > 0)
+			printf("[scanner] char %d: sweep 0x%04x...\n", _charId, _animState);
+	}
+	else if (_mode == ScanMode::FullScan || _mode == ScanMode::Targeted)
+	{
+		// Safe: only scan KNOWN valid states from gameplay discovery
+		_stateIdx++;
+		if (_stateIdx >= (int)_currentCharStates.size())
+		{
+			// Done with this character
+			printf("[scanner] Character %d complete: scanned %zu known states\n",
+				_charId, _currentCharStates.size());
+			_charsCompleted++;
+			_charId++;
 
 			if (_charId >= TOTAL_CHARACTERS)
 			{
 				printf("[scanner] === ALL CHARACTERS COMPLETE ===\n");
-				printf("[scanner] Total: %d states, %d frames\n",
+				printf("[scanner] Total: %d states, %d frames captured\n",
 					_totalStatesFound, _totalFramesCaptured);
 				stop();
 				return;
 			}
 
-			printf("[scanner] Starting character %d/%d\n", _charId, TOTAL_CHARACTERS);
+			loadNextCharStates();
+			if (_currentCharStates.empty())
+			{
+				// No known states for remaining characters — skip to next
+				_charId++;
+				while (_charId < TOTAL_CHARACTERS)
+				{
+					loadNextCharStates();
+					if (!_currentCharStates.empty()) break;
+					_charId++;
+				}
+				if (_charId >= TOTAL_CHARACTERS) { stop(); return; }
+			}
 		}
 
-		// Progress log every 1000 states
-		if (_animState % 1000 == 0 && _animState > 0)
-		{
-			printf("[scanner] char %d: scanning anim 0x%04x... (%d states found so far)\n",
-				_charId, _animState, _totalStatesFound);
-		}
-	}
-	else if (_mode == ScanMode::Targeted)
-	{
-		// Targeted: only scan known valid states (from previous gameplay)
-		// TODO: load valid states from cache directory scan
-		_animState++;
-		if (_animState > 0xFFFF)
-		{
-			_charsCompleted++;
-			_charId++;
-			_animState = 0;
-			if (_charId >= TOTAL_CHARACTERS) { stop(); return; }
-		}
+		if (_stateIdx < (int)_currentCharStates.size())
+			_animState = _currentCharStates[_stateIdx];
 	}
 }
 
