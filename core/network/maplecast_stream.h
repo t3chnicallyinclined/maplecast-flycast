@@ -23,4 +23,7 @@ void onFrameRendered();
 // Is streaming active?
 bool active();
 
+// Broadcast binary data to all connected WebSocket clients
+void broadcastBinary(const void* data, size_t size);
+
 }

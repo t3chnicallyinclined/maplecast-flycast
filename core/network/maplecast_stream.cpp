@@ -493,7 +493,7 @@ static bool initCudaLinearBuffer()
 	return true;
 }
 
-static void broadcastBinary(const void* data, size_t size)
+void broadcastBinary(const void* data, size_t size)
 {
 #ifdef MAPLECAST_WEBRTC
 	// Send via DataChannel to peers that have it (P2P, no TCP overhead)

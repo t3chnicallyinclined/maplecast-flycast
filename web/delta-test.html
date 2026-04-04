@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>MapleCast Delta Stream Test</title>
+<style>
+  body { background: #111; color: #0f0; font-family: monospace; padding: 20px; }
+  #log { white-space: pre; font-size: 12px; max-height: 80vh; overflow-y: auto; }
+  .stat { color: #ff0; font-size: 16px; margin-bottom: 10px; }
+</style>
+</head>
+<body>
+<h2>MapleCast Delta Stream — Browser Receiver</h2>
+<div class="stat" id="status">Connecting...</div>
+<div class="stat" id="stats"></div>
+<div id="log"></div>
+
+<script>
+const statusEl = document.getElementById('status');
+const statsEl = document.getElementById('stats');
+const logEl = document.getElementById('log');
+
+let frameCount = 0;
+let totalBytes = 0;
+let startTime = 0;
+let lastLogTime = 0;
+
+function log(msg) {
+  logEl.textContent = msg + '\n' + logEl.textContent;
+  if (logEl.textContent.length > 10000)
+    logEl.textContent = logEl.textContent.substring(0, 10000);
+}
+
+const ws = new WebSocket('ws://localhost:7200');
+ws.binaryType = 'arraybuffer';
+
+ws.onopen = () => {
+  statusEl.textContent = 'Connected to ws://localhost:7200';
+  startTime = performance.now();
+  log('WebSocket connected');
+};
+
+ws.onclose = () => {
+  statusEl.textContent = 'Disconnected';
+  log('WebSocket closed');
+};
+
+ws.onmessage = (event) => {
+  if (typeof event.data === 'string') {
+    // Text message — signaling/status
+    log('TEXT: ' + event.data.substring(0, 100));
+    return;
+  }
+
+  // Binary message — could be H.264 frame or delta TA frame
+  const data = new Uint8Array(event.data);
+  const size = data.length;
+  frameCount++;
+  totalBytes += size;
+
+  const now = performance.now();
+  const elapsed = (now - startTime) / 1000;
+  const fps = frameCount / elapsed;
+  const bw = totalBytes / elapsed / 1024;
+
+  // Try to identify the frame type
+  // Our delta frames start with: frameSize(u32) + frameNum(u32) + pvr_snapshot(64 bytes)
+  // H.264 NAL units start with 0x00 0x00 0x00 0x01 or 0x00 0x00 0x01
+  let frameType = 'unknown';
+  if (size > 8) {
+    const dv = new DataView(event.data);
+    const byte0 = data[0];
+    const byte1 = data[1];
+    const byte2 = data[2];
+    const byte3 = data[3];
+
+    if (byte0 === 0 && byte1 === 0 && (byte2 === 1 || (byte2 === 0 && byte3 === 1))) {
+      frameType = 'H.264';
+    } else {
+      // Likely our delta frame — read frameSize and frameNum
+      const frameSize = dv.getUint32(0, true);
+      const frameNum = dv.getUint32(4, true);
+      if (frameSize > 0 && frameSize < 500000 && frameNum > 0 && frameNum < 1000000) {
+        frameType = `DELTA (frame=${frameNum}, payload=${frameSize}B)`;
+      }
+    }
+  }
+
+  // Log every second
+  if (now - lastLogTime > 1000) {
+    statsEl.textContent = `${frameCount} frames | ${fps.toFixed(1)} fps | ${bw.toFixed(0)} KB/s | last: ${size} bytes (${frameType})`;
+    lastLogTime = now;
+  }
+
+  // Log first few frames and then every 60th
+  if (frameCount <= 5 || frameCount % 60 === 0) {
+    log(`Frame ${frameCount}: ${size} bytes — ${frameType}`);
+  }
+};
+
+ws.onerror = (err) => {
+  statusEl.textContent = 'Error';
+  log('WebSocket error: ' + err);
+};
+</script>
+</body>
+</html>

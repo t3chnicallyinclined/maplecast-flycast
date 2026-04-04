@@ -23,6 +23,7 @@
 #include "emulator.h"
 #include "hw/mem/mem_watch.h"
 #include "maplecast_lookup_test.h"
+#include "maplecast_stream.h"
 #include "rend/texconv.h"
 
 #include <cstdio>
@@ -393,6 +394,10 @@ done_diff:
 	hdr->latest_size = totalSize;
 	hdr->write_pos = writePos + totalSize;
 	hdr->frame_count++;
+
+	// Also broadcast over WebSocket to browser clients
+	if (maplecast_stream::active())
+		maplecast_stream::broadcastBinary(dstStart, totalSize);
 
 	// Check if a client is requesting a fresh sync state
 	if (hdr->client_request_sync)
