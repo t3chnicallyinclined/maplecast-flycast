@@ -35,4 +35,8 @@ target_sources(${PROJECT_NAME} PRIVATE
         maplecast_webrtc.cpp
         maplecast_webrtc.h
         maplecast_audio.cpp
-        maplecast_audio.h)
+        maplecast_audio.h
+        maplecast_gamestate.cpp
+        maplecast_gamestate.h
+        maplecast_visual_cache.cpp
+        maplecast_visual_cache.h)

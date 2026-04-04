@@ -40,6 +40,9 @@
 #include "network/maplecast_telemetry.h"
 #include "network/maplecast_input_server.h"
 #include "network/maplecast_audio.h"
+#ifdef MAPLECAST_TA_STREAM
+#include "network/maplecast_visual_cache.h"
+#endif
 #include "hw/maple/maple_cfg.h"
 #include <cstdlib>
 #include <string>
@@ -1008,6 +1011,12 @@ void Emulator::start()
 
 		// Audio streaming — raw PCM over DataChannel
 		maplecast_audio::init();
+
+		// Visual cache — records TA display lists for every game state
+		// Builds a complete map of every visual state MVC2 can produce
+#ifdef MAPLECAST_TA_STREAM
+		maplecast_visual_cache::init("visual_cache");
+#endif
 
 		// Init telemetry (fire-and-forget UDP to localhost:7300)
 		maplecast_telemetry::init();

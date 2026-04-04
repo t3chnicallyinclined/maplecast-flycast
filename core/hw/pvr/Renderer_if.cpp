@@ -11,6 +11,9 @@
 #include "profiler/fc_profiler.h"
 #include "network/ggpo.h"
 #include "network/maplecast_stream.h"
+#ifdef MAPLECAST_TA_STREAM
+#include "network/maplecast_visual_cache.h"
+#endif
 
 #include <mutex>
 #include <deque>
@@ -208,6 +211,12 @@ private:
 		rend_allow_rollback();
 		{
 			FC_PROFILE_SCOPE_NAMED("Renderer::Render");
+#ifdef MAPLECAST_TA_STREAM
+			// Record TA display list for visual cache BEFORE rendering
+			// This captures the complete scene description for every frame
+			if (taContext)
+				maplecast_visual_cache::recordFrame(taContext->rend);
+#endif
 			try {
 				renderer->Render();
 			} catch (...) {

@@ -1706,6 +1706,10 @@ else()
 	message(WARNING "MapleCast: libdatachannel not found — WebRTC disabled, WebSocket-only")
 endif()
 
+# MapleCast: TA Display List Streaming — visual state recording + WebGPU renderer
+target_compile_definitions(${PROJECT_NAME} PRIVATE MAPLECAST_TA_STREAM=1)
+message(STATUS "MapleCast: TA streaming enabled — visual cache recording active")
+
 if(${CMAKE_GENERATOR} MATCHES "^Xcode.*|^Visual Studio.*")
 	file(GLOB_RECURSE SRC_FILES *.h *.cpp *.c *.cc *.mm)
 	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${SRC_FILES})
