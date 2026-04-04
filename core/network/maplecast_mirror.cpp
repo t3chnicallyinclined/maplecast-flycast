@@ -282,7 +282,9 @@ void serverPublish(TA_context* ctx)
 
 	memcpy(dst, &taSize, 4); dst += 4;  // original size
 
-	bool canDelta = !prevTA.empty() && prevTA.size() == taSize && taSize > 0;
+	// Send full keyframe every 60 frames (1 second) for sync recovery
+	bool forceKeyframe = (frameNum % 60 == 0);
+	bool canDelta = !prevTA.empty() && taSize > 0 && !forceKeyframe;
 
 	if (canDelta)
 	{
@@ -291,19 +293,29 @@ void serverPublish(TA_context* ctx)
 		uint8_t* deltaStart = dst;
 		dst += 4;  // placeholder for deltaPayloadSize
 
+		uint32_t prevSize = (uint32_t)prevTA.size();
+		uint32_t commonSize = std::min(taSize, prevSize);
+
 		uint32_t i = 0;
 		while (i < taSize)
 		{
-			// Skip unchanged bytes
-			while (i < taSize && taData[i] == prevTA[i]) i++;
+			// Skip unchanged bytes (only within common range)
+			while (i < commonSize && taData[i] == prevTA[i]) i++;
 			if (i >= taSize) break;
 
 			// Found a changed byte — find the run length
 			uint32_t runStart = i;
-			while (i < taSize && (i - runStart) < 65535 && taData[i] != prevTA[i]) i++;
-			// Include a few trailing bytes to avoid tiny gaps
-			uint32_t extraEnd = std::min(i + 4, taSize);
-			while (i < extraEnd && taData[i] != prevTA[i]) i++;
+			while (i < taSize && (i - runStart) < 65535 &&
+				   (i >= commonSize || taData[i] != prevTA[i])) i++;
+			// Include a few trailing bytes to avoid tiny gaps between runs
+			if (i < taSize) {
+				uint32_t gapEnd = std::min(i + 8, taSize);
+				bool moreChanges = false;
+				for (uint32_t j = i; j < gapEnd; j++)
+					if (j >= commonSize || taData[j] != prevTA[j]) { moreChanges = true; break; }
+				if (moreChanges)
+					while (i < gapEnd) i++;
+			}
 
 			uint16_t runLen = (uint16_t)(i - runStart);
 			memcpy(dst, &runStart, 4); dst += 4;
@@ -321,7 +333,7 @@ void serverPublish(TA_context* ctx)
 		totalTABytes += taSize;
 		deltaFrames++;
 
-		if (frameNum % 60 == 0)
+		if (frameNum % 600 == 0)  // log every 10 seconds instead of every second
 		{
 			float avgDelta = (float)totalDeltaPayload / deltaFrames;
 			float avgTA = (float)totalTABytes / deltaFrames;
@@ -337,6 +349,12 @@ void serverPublish(TA_context* ctx)
 		memcpy(dst, &deltaPayloadSize, 4); dst += 4;
 		if (taSize > 0) { memcpy(dst, taData, taSize); dst += taSize; }
 	}
+
+	// Compute checksum of full TA for client verification
+	uint32_t taChecksum = 0;
+	for (uint32_t i = 0; i < taSize; i += 4)
+		taChecksum ^= *(uint32_t*)(taData + i);
+	memcpy(dst, &taChecksum, 4); dst += 4;
 
 	prevTA.assign(taData, taData + taSize);
 
@@ -384,8 +402,10 @@ done_diff:
 		// Reset shadows so diffs start from this new sync point
 		for (int i = 0; i < _numRegions; i++)
 			memcpy(_regions[i].shadow, _regions[i].ptr, _regions[i].size);
+		// Reset TA delta so next frame is sent as full (client has no prevTA)
+		prevTA.clear();
 		hdr->sync_ready = 1;
-		printf("[MIRROR] Client requested sync — fresh state saved\n");
+		printf("[MIRROR] Client requested sync — fresh state + TA reset\n");
 	}
 
 	// Write full brain snapshot every 30 frames for late-joining clients
@@ -403,7 +423,7 @@ done_diff:
 
 	// Audit disabled — reduced to VRAM+PVR only
 
-	if (frameNum % 60 == 0)
+	if (frameNum % 600 == 0)
 		printf("[MIRROR] Server frame %u | TA=%u bytes | %u dirty pages\n",
 			frameNum, taSize, totalDirty);
 }
@@ -440,16 +460,30 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 	// Client's persistent TA buffer for delta reconstruction
 	static std::vector<uint8_t> clientTA;
 
+	static bool clientHasFullFrame = false;
+
 	if (deltaPayloadSize == taSize)
 	{
 		// Full frame (first frame or size changed)
 		clientTA.assign(src, src + taSize);
 		src += taSize;
+		clientHasFullFrame = true;
+	}
+	else if (!clientHasFullFrame)
+	{
+		// Haven't received a full frame yet — skip this delta
+		src += deltaPayloadSize;
+		// Skip checksum too
+		src += 4;
+		return false;
 	}
 	else
 	{
 		// Delta decode: apply changed runs to previous TA buffer
-		clientTA.resize(taSize);  // ensure correct size
+		if (clientTA.size() < taSize)
+			clientTA.resize(taSize, 0);
+		else if (clientTA.size() > taSize)
+			clientTA.resize(taSize);
 		uint8_t* deltaData = src;
 		uint8_t* deltaEnd = src + deltaPayloadSize;
 
@@ -468,7 +502,30 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		src += deltaPayloadSize;
 	}
 
+	// Read server's checksum
+	uint32_t serverChecksum;
+	memcpy(&serverChecksum, src, 4); src += 4;
+
 	uint8_t* taData = clientTA.data();
+
+	// Verify reconstruction
+	uint32_t clientChecksum = 0;
+	for (uint32_t i = 0; i + 3 < taSize; i += 4)
+		clientChecksum ^= *(uint32_t*)(taData + i);
+
+	static uint32_t checksumFails = 0;
+	static uint32_t checksumTotal = 0;
+	checksumTotal++;
+	if (clientChecksum != serverChecksum)
+	{
+		checksumFails++;
+		// Corruption detected — request full frame next time
+		// For now, log it
+		if (checksumFails <= 10 || checksumFails % 100 == 0)
+			printf("[DELTA] CHECKSUM MISMATCH frame %u (fail %u/%u) delta=%s\n",
+				frameNum, checksumFails, checksumTotal,
+				deltaPayloadSize == taSize ? "FULL" : "DELTA");
+	}
 
 	// === Memory diffs ===
 	uint32_t dirtyPages; memcpy(&dirtyPages, src, 4); src += 4;
@@ -559,51 +616,23 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		// Copy the built rend_context out
 		rc = clientCtx.rend;
 
-		// Debug: what did ta_parse produce?
-		if (frameNum % 30 == 0)
-		{
-			int trWithTex = 0, trNoTex = 0;
-			for (const auto& pp : clientCtx.rend.global_param_tr)
-				if (pp.texture) trWithTex++; else trNoTex++;
-			int opWithTex = 0, opNoTex = 0;
-			for (const auto& pp : clientCtx.rend.global_param_op)
-				if (pp.texture) opWithTex++; else opNoTex++;
-			printf("[MIRROR-DBG] verts=%zu idx=%zu op=%zu(tex:%d/null:%d) tr=%zu(tex:%d/null:%d) passes=%zu sorted_tr=%zu\n",
-				clientCtx.rend.verts.size(), clientCtx.rend.idx.size(),
-				clientCtx.rend.global_param_op.size(), opWithTex, opNoTex,
-				clientCtx.rend.global_param_tr.size(), trWithTex, trNoTex,
-				clientCtx.rend.render_passes.size(),
-				clientCtx.rend.sortedTriangles.size());
-			if (!clientCtx.rend.render_passes.empty()) {
-				auto& p = clientCtx.rend.render_passes[0];
-				printf("[MIRROR-DBG] pass0: op=%u pt=%u tr=%u sorted_tr=%u autosort=%d isRTT=%d fb_W_SOF1=0x%X\n",
-					p.op_count, p.pt_count, p.tr_count, p.sorted_tr_count, p.autosort,
-					clientCtx.rend.isRTT, clientCtx.rend.fb_W_SOF1);
-			}
-		}
+		// Debug removed for clean performance
 	}
 
 	_clientFrameCount = serverFrames;
 
-	// Verify VRAM matches server every 60 frames — auto-resync if drifted
+	// Check VRAM every 60 frames — reset texture cache if drifted
 	if (frameNum % 60 == 0)
 	{
 		uint64_t clientHash = fastVramHash();
 		uint64_t serverHash = hdr->server_vram_hash;
-		bool match = (clientHash == serverHash);
-
-		printf("[MIRROR] Client frame %u | TA=%u bytes | %u dirty pages | VRAM %s\n",
-			frameNum, taSize, dirtyPages, match ? "OK" : "MISMATCH");
-
-		// Audit disabled — was reading past shared memory bounds with reduced regions
-
-		if (!match)
-		{
-			printf("[MIRROR] VRAM mismatch (non-fatal, continuing)\n");
-			// Force texture cache reset to pick up any VRAM changes we got via diffs
+		if (clientHash != serverHash)
 			renderer->resetTextureCache = true;
-		}
 	}
+
+	if (frameNum % 600 == 0)
+		printf("[MIRROR] Client frame %u | delta=%u bytes | dirty=%u pages\n",
+			frameNum, deltaPayloadSize, dirtyPages);
 
 	return taSize > 0;
 }
