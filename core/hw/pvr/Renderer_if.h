@@ -84,10 +84,10 @@ struct Renderer
 
 public:
 	bool resetTextureCache = false;
-protected:
-	bool clearLastFrame = false;
 	bool updatePalette = true;
 	bool updateFogTable = true;
+protected:
+	bool clearLastFrame = false;
 
 private:
 	static void onEvent(Event event, void *arg)

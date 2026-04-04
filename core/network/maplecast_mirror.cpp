@@ -22,6 +22,7 @@
 #include "serialize.h"
 #include "emulator.h"
 #include "hw/mem/mem_watch.h"
+#include "rend/texconv.h"
 
 #include <cstdio>
 #include <cstring>
@@ -32,6 +33,7 @@
 #include <unistd.h>
 
 extern Renderer* renderer;
+extern bool pal_needs_update;
 
 namespace maplecast_mirror
 {
@@ -86,7 +88,7 @@ struct MemRegion {
 	uint8_t id;
 	const char* name;
 };
-static MemRegion _regions[3];
+static MemRegion _regions[4];
 static int _numRegions = 0;
 
 static bool openShm(bool create)
@@ -115,6 +117,12 @@ static void initRegions()
 	_shadowARAM = (uint8_t*)malloc(2 * 1024 * 1024);
 	memcpy(_shadowARAM, &aica::aica_ram[0], 2 * 1024 * 1024);
 	_regions[_numRegions++] = { &aica::aica_ram[0], _shadowARAM, 2 * 1024 * 1024, 2, "ARAM" };
+
+	// PVR registers: 32KB — contains palette RAM, FOG_TABLE, ISP_FEED_CFG, ALL hardware state
+	static uint8_t* _shadowPVR = nullptr;
+	_shadowPVR = (uint8_t*)malloc(pvr_RegSize);
+	memcpy(_shadowPVR, pvr_regs, pvr_RegSize);
+	_regions[_numRegions++] = { pvr_regs, _shadowPVR, (size_t)pvr_RegSize, 3, "PVR" };
 }
 
 static void serverSaveSync()
@@ -192,15 +200,26 @@ void initClient()
 	}
 
 	if (hdr->sync_ready) {
-		clientLoadSync();
-		// Disable memory protection — we're patching VRAM directly
+		// Direct memory copy instead of emu.loadstate — avoids corrupting scheduler/interrupt state
+		uint8_t* snap = _shmPtr + HEADER_SIZE;
+		size_t off = 0;
+		memcpy(&mem_b[0], snap + off, 16 * 1024 * 1024); off += 16 * 1024 * 1024;
+		memcpy(&vram[0], snap + off, VRAM_SIZE); off += VRAM_SIZE;
+		memcpy(&aica::aica_ram[0], snap + off, 2 * 1024 * 1024);
+		// Also copy PVR regs from the server's current state
+		// (they're diffed per-frame anyway, but this gives us a clean start)
+
 		memwatch::unprotect();
-		// Grab the current frame count so we start from here
+		renderer->resetTextureCache = true;
+		pal_needs_update = true;
+		palette_update();
+		renderer->updatePalette = true;
+		renderer->updateFogTable = true;
+
 		_clientFrameCount = hdr->frame_count;
-		printf("[MIRROR] === CLIENT MODE === synced at frame %lu\n", _clientFrameCount);
+		printf("[MIRROR] === CLIENT MODE === synced at frame %lu (direct memory copy)\n", _clientFrameCount);
 	} else {
-		printf("[MIRROR] WARNING: server didn't respond, loading stale state\n");
-		clientLoadSync();
+		printf("[MIRROR] WARNING: server didn't respond\n");
 	}
 }
 
@@ -213,7 +232,7 @@ void serverPublish(TA_context* ctx)
 {
 	if (!_isServer || !_shmPtr || !ctx) return;
 	rend_context& rc = ctx->rend;
-	if (rc.isRTT) return;
+	// DON'T skip RTT frames — MVC2 renders character sprites via render-to-texture!
 
 	RingHeader* hdr = (RingHeader*)_shmPtr;
 	uint8_t* ring = _shmPtr + RING_START;
@@ -246,6 +265,7 @@ void serverPublish(TA_context* ctx)
 	pvr_snapshot[11] = rc.clearFramebuffer ? 1 : 0;
 	float fz = rc.fZ_max;
 	memcpy(&pvr_snapshot[12], &fz, 4);
+	pvr_snapshot[13] = rc.isRTT ? 1 : 0;
 	memcpy(dst, pvr_snapshot, sizeof(pvr_snapshot)); dst += sizeof(pvr_snapshot);
 
 	// === Raw TA command buffer ===
@@ -315,8 +335,41 @@ done_diff:
 		memcpy(snap + off, &aica::aica_ram[0], 2 * 1024 * 1024);
 	}
 
-	// Publish VRAM hash for client verification
+	// Publish memory hashes for client verification
 	hdr->server_vram_hash = fastVramHash();
+
+	// Full memory audit every 60 frames
+	if (frameNum % 60 == 0)
+	{
+		// Hash each 256KB chunk of all memory and store in snapshot area for client comparison
+		uint8_t* audit = _shmPtr + HEADER_SIZE;  // reuse brain snapshot area for audit
+		uint32_t auditOff = 0;
+
+		// Write magic + frame number
+		uint32_t magic = 0xADD17000;
+		memcpy(audit + auditOff, &magic, 4); auditOff += 4;
+		memcpy(audit + auditOff, &frameNum, 4); auditOff += 4;
+
+		// For each region: write region_id(1) + num_chunks(4) + chunk_hashes(8 each)
+		for (int r = 0; r < _numRegions; r++)
+		{
+			audit[auditOff++] = _regions[r].id;
+			uint32_t chunkSize = 64 * 1024;  // 64KB chunks
+			uint32_t numChunks = (uint32_t)(_regions[r].size / chunkSize);
+			memcpy(audit + auditOff, &numChunks, 4); auditOff += 4;
+			for (uint32_t c = 0; c < numChunks; c++)
+			{
+				uint64_t h = fastVramHash();  // reuse hash function
+				// actually hash this specific chunk
+				h = 0xcbf29ce484222325ULL;
+				for (size_t i = c * chunkSize; i < (c+1) * chunkSize; i += 16) {
+					h ^= _regions[r].ptr[i];
+					h *= 0x100000001b3ULL;
+				}
+				memcpy(audit + auditOff, &h, 8); auditOff += 8;
+			}
+		}
+	}
 
 	if (frameNum % 60 == 0)
 		printf("[MIRROR] Server frame %u | TA=%u bytes | %u dirty pages\n",
@@ -370,6 +423,8 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		}
 		else if (regionId == 2 && pageOff + MEM_PAGE_SIZE <= 2 * 1024 * 1024)
 			memcpy(&aica::aica_ram[pageOff], src, MEM_PAGE_SIZE);
+		else if (regionId == 3 && pageOff + MEM_PAGE_SIZE <= (size_t)pvr_RegSize)
+			memcpy(pvr_regs + pageOff, src, MEM_PAGE_SIZE);
 		src += MEM_PAGE_SIZE;
 	}
 
@@ -400,7 +455,7 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		FOG_CLAMP_MAX.full = pvr_snapshot[8];
 
 		// Set up rend_context hardware params (same as rend_start_render)
-		clientCtx.rend.isRTT = false;
+		clientCtx.rend.isRTT = pvr_snapshot[13] != 0;
 		clientCtx.rend.fb_W_SOF1 = pvr_snapshot[5];
 		clientCtx.rend.fb_W_CTRL.full = pvr_snapshot[6];
 		clientCtx.rend.ta_GLOB_TILE_CLIP.full = pvr_snapshot[0];
@@ -420,12 +475,44 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		if (vramDirty)
 			renderer->resetTextureCache = true;
 
+		// Force palette update — palette_update() converts PALETTE_RAM to palette32_ram
+		// Normally called by rend_start_render() which we skip on the client
+		::pal_needs_update = true;
+		palette_update();
+
+		// Also force palette texture upload
+		renderer->updatePalette = true;
+		renderer->updateFogTable = true;
+
 		// Run Process — this calls ta_parse which builds rend_context
 		// AND resolves textures from VRAM via GetTexture()
 		renderer->Process(&clientCtx);
 
 		// Copy the built rend_context out
 		rc = clientCtx.rend;
+
+		// Debug: what did ta_parse produce?
+		if (frameNum % 30 == 0)
+		{
+			int trWithTex = 0, trNoTex = 0;
+			for (const auto& pp : clientCtx.rend.global_param_tr)
+				if (pp.texture) trWithTex++; else trNoTex++;
+			int opWithTex = 0, opNoTex = 0;
+			for (const auto& pp : clientCtx.rend.global_param_op)
+				if (pp.texture) opWithTex++; else opNoTex++;
+			printf("[MIRROR-DBG] verts=%zu idx=%zu op=%zu(tex:%d/null:%d) tr=%zu(tex:%d/null:%d) passes=%zu sorted_tr=%zu\n",
+				clientCtx.rend.verts.size(), clientCtx.rend.idx.size(),
+				clientCtx.rend.global_param_op.size(), opWithTex, opNoTex,
+				clientCtx.rend.global_param_tr.size(), trWithTex, trNoTex,
+				clientCtx.rend.render_passes.size(),
+				clientCtx.rend.sortedTriangles.size());
+			if (!clientCtx.rend.render_passes.empty()) {
+				auto& p = clientCtx.rend.render_passes[0];
+				printf("[MIRROR-DBG] pass0: op=%u pt=%u tr=%u sorted_tr=%u autosort=%d isRTT=%d fb_W_SOF1=0x%X\n",
+					p.op_count, p.pt_count, p.tr_count, p.sorted_tr_count, p.autosort,
+					clientCtx.rend.isRTT, clientCtx.rend.fb_W_SOF1);
+			}
+		}
 	}
 
 	_clientFrameCount = serverFrames;
@@ -440,24 +527,52 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		printf("[MIRROR] Client frame %u | TA=%u bytes | %u dirty pages | VRAM %s\n",
 			frameNum, taSize, dirtyPages, match ? "OK" : "MISMATCH");
 
+		// Full memory audit — compare against server's chunk hashes
+		uint8_t* audit = _shmPtr + HEADER_SIZE;
+		uint32_t auditMagic;
+		memcpy(&auditMagic, audit, 4);
+		if (auditMagic == 0xADD17000)
+		{
+			uint32_t auditOff = 8;  // skip magic + frame
+			struct { uint8_t* ptr; size_t size; const char* name; } localRegions[] = {
+				{ &mem_b[0], 16*1024*1024, "RAM" },
+				{ &vram[0], VRAM_SIZE, "VRAM" },
+				{ &aica::aica_ram[0], 2*1024*1024, "ARAM" },
+				{ pvr_regs, (size_t)pvr_RegSize, "PVR" },
+			};
+			for (int r = 0; r < 4; r++)
+			{
+				uint8_t rid = audit[auditOff++];
+				uint32_t numChunks;
+				memcpy(&numChunks, audit + auditOff, 4); auditOff += 4;
+
+				int mismatched = 0;
+				uint32_t chunkSize = 64 * 1024;
+				for (uint32_t c = 0; c < numChunks; c++)
+				{
+					uint64_t serverHash;
+					memcpy(&serverHash, audit + auditOff, 8); auditOff += 8;
+
+					if (r < 4 && c * chunkSize < localRegions[r].size)
+					{
+						uint64_t clientHash = 0xcbf29ce484222325ULL;
+						for (size_t i = c * chunkSize; i < (c+1) * chunkSize && i < localRegions[r].size; i += 16) {
+							clientHash ^= localRegions[r].ptr[i];
+							clientHash *= 0x100000001b3ULL;
+						}
+						if (clientHash != serverHash) mismatched++;
+					}
+				}
+				if (mismatched > 0)
+					printf("[AUDIT] %s: %d/%u chunks MISMATCH\n", localRegions[r].name, mismatched, numChunks);
+			}
+		}
+
 		if (!match)
 		{
-			// Request fresh sync from server
-			printf("[MIRROR] VRAM mismatch — requesting resync...\n");
-			hdr->sync_ready = 0;
-			hdr->client_request_sync = 1;
-
-			// Wait for server
-			for (int w = 0; w < 200; w++) {
-				if (hdr->sync_ready) break;
-				usleep(5000);
-			}
-			if (hdr->sync_ready) {
-				clientLoadSync();
-				memwatch::unprotect();
-				_clientFrameCount = hdr->frame_count;
-				printf("[MIRROR] Resynced at frame %lu\n", _clientFrameCount);
-			}
+			printf("[MIRROR] VRAM mismatch (non-fatal, continuing)\n");
+			// Force texture cache reset to pick up any VRAM changes we got via diffs
+			renderer->resetTextureCache = true;
 		}
 	}
 

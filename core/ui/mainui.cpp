@@ -61,15 +61,13 @@ bool mainui_rend_frame()
 	}
 	else if (maplecast_mirror::isClient())
 	{
-		// Mirror client: receive TA commands + diffs from server
-		// clientReceive runs ta_parse internally, building rend_context with textures
 		static rend_context mirrorCtx;
 		bool vramDirty = false;
 		if (maplecast_mirror::clientReceive(mirrorCtx, vramDirty))
 		{
-			// gl.rendContext was set by Process() inside clientReceive
-			renderer->Render();
-			renderer->Present();
+			bool isScreen = renderer->Render();
+			if (isScreen)
+				renderer->Present();
 		}
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
