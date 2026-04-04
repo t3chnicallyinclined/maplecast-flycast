@@ -77,7 +77,9 @@ void tick()
 			printf("[gs-loopback] MISMATCH at frame %u!\n", _frameCount);
 	}
 
-	// Step 5: Write back to RAM
+	// Step 5: Write back to RAM (unmodified = lossless round trip)
+	// Health hack test PASSED: forcing health=144 made P1 invincible,
+	// proving writeGameState() controls the game from 253 bytes.
 	maplecast_gamestate::writeGameState(received);
 
 	_frameCount++;
