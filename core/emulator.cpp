@@ -42,6 +42,7 @@
 #include "network/maplecast_audio.h"
 #ifdef MAPLECAST_TA_STREAM
 #include "network/maplecast_visual_cache.h"
+#include "network/maplecast_scanner.h"
 #endif
 #include "hw/maple/maple_cfg.h"
 #include <cstdlib>
@@ -1016,6 +1017,10 @@ void Emulator::start()
 		// Builds a complete map of every visual state MVC2 can produce
 #ifdef MAPLECAST_TA_STREAM
 		maplecast_visual_cache::init("visual_cache");
+
+		// Brute force scanner: MAPLECAST_SCAN=1 to auto-start full scan
+		if (std::getenv("MAPLECAST_SCAN"))
+			maplecast_scanner::start(maplecast_scanner::ScanMode::FullScan, 0);
 #endif
 
 		// Init telemetry (fire-and-forget UDP to localhost:7300)

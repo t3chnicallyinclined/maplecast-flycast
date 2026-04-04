@@ -13,6 +13,7 @@
 #include "network/maplecast_stream.h"
 #ifdef MAPLECAST_TA_STREAM
 #include "network/maplecast_visual_cache.h"
+#include "network/maplecast_scanner.h"
 #endif
 
 #include <mutex>
@@ -212,8 +213,10 @@ private:
 		{
 			FC_PROFILE_SCOPE_NAMED("Renderer::Render");
 #ifdef MAPLECAST_TA_STREAM
+			// Brute force scanner: inject character state into RAM before render
+			if (maplecast_scanner::active())
+				maplecast_scanner::tick();
 			// Record TA display list for visual cache BEFORE rendering
-			// This captures the complete scene description for every frame
 			if (taContext)
 				maplecast_visual_cache::recordFrame(taContext->rend);
 #endif

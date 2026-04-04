@@ -39,4 +39,6 @@ target_sources(${PROJECT_NAME} PRIVATE
         maplecast_gamestate.cpp
         maplecast_gamestate.h
         maplecast_visual_cache.cpp
-        maplecast_visual_cache.h)
+        maplecast_visual_cache.h
+        maplecast_scanner.cpp
+        maplecast_scanner.h)

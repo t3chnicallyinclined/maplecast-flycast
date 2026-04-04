@@ -59,23 +59,11 @@ static uint64_t hashCharState(uint8_t charId, uint16_t animState, uint16_t animT
 	return h;
 }
 
-// Hash the full frame state: all 6 characters combined
-static uint64_t hashFrameState(const maplecast_gamestate::GameState& gs)
-{
-	uint64_t h = 0;
-	for (int i = 0; i < 6; i++)
-	{
-		const auto& c = gs.chars[i];
-		if (!c.active) continue;
-		uint64_t ch = hashCharState(c.character_id, c.animation_state,
-			c.anim_timer, c.facing_right, c.palette_id);
-		h ^= ch + 0x9e3779b9 + (h << 6) + (h >> 2);  // boost::hash_combine
-	}
-	// Include global state
-	h ^= (uint64_t)gs.stage_id << 40;
-	h ^= (uint64_t)gs.in_match << 48;
-	return h;
-}
+// Hash per CHARACTER — not per frame. Same move looks the same regardless of
+// opponent state, position, or stage. Position is a transform, not a visual.
+// This dramatically reduces unique states:
+//   Before: Ryu_jab_at_X100 ≠ Ryu_jab_at_X101 (millions of states)
+//   After:  Ryu_jab_frame3 = Ryu_jab_frame3 everywhere (thousands of states)
 
 // Serialize a TA polygon's essential data (no pointers, fixed size)
 struct SerializedPoly {
@@ -225,52 +213,103 @@ bool init(const char* cacheDir)
 
 void recordFrame(const rend_context& rc)
 {
-	_totalFrames.fetch_add(1, std::memory_order_relaxed);
-
 	// Read game state from RAM
 	maplecast_gamestate::GameState gs;
 	maplecast_gamestate::readGameState(gs);
 
 	if (!gs.in_match) return;  // only record during actual gameplay
 
-	// Hash the visual state
-	uint64_t stateHash = hashFrameState(gs);
+	_totalFrames.fetch_add(1, std::memory_order_relaxed);
 
-	// Check cache
+	// Record PER CHARACTER — each character's visual state is independent
+	// Same Ryu jab looks identical regardless of opponent/position/stage
+	bool anyNew = false;
+	for (int i = 0; i < 6; i++)
 	{
-		std::lock_guard<std::mutex> lock(_cacheMutex);
-		if (_knownStates.count(stateHash))
-		{
-			_cacheHits.fetch_add(1, std::memory_order_relaxed);
+		const auto& c = gs.chars[i];
+		if (!c.active) continue;
 
-			// Still record transitions even on cache hit
-			if (_prevStateHash != 0 && _prevStateHash != stateHash)
-				writeTransition(_prevStateHash, stateHash);
-			_prevStateHash = stateHash;
-			return;
+		uint64_t charHash = hashCharState(c.character_id, c.animation_state,
+			c.anim_timer, c.facing_right, c.palette_id);
+
+		{
+			std::lock_guard<std::mutex> lock(_cacheMutex);
+			if (_knownStates.count(charHash))
+			{
+				_cacheHits.fetch_add(1, std::memory_order_relaxed);
+				continue;
+			}
+		}
+
+		// New character visual state — record it
+		_cacheMisses.fetch_add(1, std::memory_order_relaxed);
+		anyNew = true;
+
+		// Write per-character state file
+		char filename[512];
+		snprintf(filename, sizeof(filename), "%s/char_%02d_anim%04x_frame%04x_%s_pal%d.bin",
+			_cacheDir.c_str(), c.character_id, c.animation_state,
+			c.anim_timer, c.facing_right ? "R" : "L", c.palette_id);
+
+		FILE* f = fopen(filename, "wb");
+		if (f)
+		{
+			uint32_t magic = 0x43485253;  // "CHRS"
+			fwrite(&magic, 4, 1, f);
+			fwrite(&charHash, 8, 1, f);
+			fwrite(&c, sizeof(c), 1, f);
+
+			// Write the full TA frame data alongside (we'll extract per-char polys in Phase 2)
+			// For now: full rend_context gives us everything needed to render this character
+			uint32_t vertCount = (uint32_t)rc.verts.size();
+			uint32_t idxCount = (uint32_t)rc.idx.size();
+			fwrite(&vertCount, 4, 1, f);
+			fwrite(&idxCount, 4, 1, f);
+			// Store vertex + index data (we can extract character-specific polys later)
+			if (vertCount > 0) fwrite(rc.verts.data(), sizeof(Vertex), vertCount, f);
+			if (idxCount > 0) fwrite(rc.idx.data(), sizeof(uint32_t), idxCount, f);
+
+			// Store poly params for all lists
+			uint32_t opCount = (uint32_t)rc.global_param_op.size();
+			uint32_t ptCount = (uint32_t)rc.global_param_pt.size();
+			uint32_t trCount = (uint32_t)rc.global_param_tr.size();
+			fwrite(&opCount, 4, 1, f);
+			fwrite(&ptCount, 4, 1, f);
+			fwrite(&trCount, 4, 1, f);
+			for (const auto& pp : rc.global_param_op) { SerializedPoly sp; serializePoly(pp, sp); fwrite(&sp, sizeof(sp), 1, f); }
+			for (const auto& pp : rc.global_param_pt) { SerializedPoly sp; serializePoly(pp, sp); fwrite(&sp, sizeof(sp), 1, f); }
+			for (const auto& pp : rc.global_param_tr) { SerializedPoly sp; serializePoly(pp, sp); fwrite(&sp, sizeof(sp), 1, f); }
+
+			uint64_t fileSize = ftell(f);
+			fclose(f);
+			_totalBytes.fetch_add(fileSize, std::memory_order_relaxed);
+		}
+
+		{
+			std::lock_guard<std::mutex> lock(_cacheMutex);
+			_knownStates.insert(charHash);
+
+			uint64_t total = _knownStates.size();
+			if (total % 100 == 0)
+			{
+				printf("[visual-cache] %lu unique character states recorded (%.1f MB)\n",
+					total, _totalBytes.load() / (1024.0 * 1024.0));
+			}
 		}
 	}
 
-	// Cache miss — new visual state! Record it.
-	_cacheMisses.fetch_add(1, std::memory_order_relaxed);
-
-	if (writeFrameToDisk(stateHash, rc, gs))
+	// Record frame-level transition (all active chars combined)
+	uint64_t frameHash = 0;
+	for (int i = 0; i < 6; i++)
 	{
-		std::lock_guard<std::mutex> lock(_cacheMutex);
-		_knownStates.insert(stateHash);
-
-		uint64_t total = _knownStates.size();
-		if (total % 100 == 0)
-		{
-			printf("[visual-cache] %lu unique states recorded (%.1f MB on disk)\n",
-				total, _totalBytes.load() / (1024.0 * 1024.0));
-		}
+		if (!gs.chars[i].active) continue;
+		uint64_t ch = hashCharState(gs.chars[i].character_id, gs.chars[i].animation_state,
+			gs.chars[i].anim_timer, gs.chars[i].facing_right, gs.chars[i].palette_id);
+		frameHash ^= ch + 0x9e3779b9 + (frameHash << 6) + (frameHash >> 2);
 	}
-
-	// Record transition
-	if (_prevStateHash != 0 && _prevStateHash != stateHash)
-		writeTransition(_prevStateHash, stateHash);
-	_prevStateHash = stateHash;
+	if (_prevStateHash != 0 && _prevStateHash != frameHash)
+		writeTransition(_prevStateHash, frameHash);
+	_prevStateHash = frameHash;
 }
 
 bool hasState(uint64_t stateHash)
