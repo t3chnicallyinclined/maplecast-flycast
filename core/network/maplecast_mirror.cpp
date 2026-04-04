@@ -272,41 +272,73 @@ void serverPublish(TA_context* ctx)
 	uint32_t taSize = (uint32_t)(ctx->tad.thd_data - ctx->tad.thd_root);
 	uint8_t* taData = ctx->tad.thd_root;
 
-	// Measure delta from previous frame's TA commands
+	// Delta encode TA commands against previous frame
+	// Format: originalSize(u32) + deltaPayloadSize(u32) + XOR delta (only changed bytes)
+	// If sizes differ or no previous frame: send full TA (deltaPayloadSize == originalSize)
 	static std::vector<uint8_t> prevTA;
-	static uint64_t totalDeltaBytes = 0;
+	static uint64_t totalDeltaPayload = 0;
 	static uint64_t totalTABytes = 0;
 	static uint32_t deltaFrames = 0;
 
-	if (!prevTA.empty())
-	{
-		uint32_t changedBytes = 0;
-		uint32_t minSize = std::min((uint32_t)prevTA.size(), taSize);
-		for (uint32_t i = 0; i < minSize; i++)
-			if (taData[i] != prevTA[i]) changedBytes++;
-		// Bytes beyond the shorter buffer count as changed
-		changedBytes += (taSize > prevTA.size()) ? (taSize - prevTA.size()) : (prevTA.size() - taSize);
+	memcpy(dst, &taSize, 4); dst += 4;  // original size
 
-		totalDeltaBytes += changedBytes;
+	bool canDelta = !prevTA.empty() && prevTA.size() == taSize && taSize > 0;
+
+	if (canDelta)
+	{
+		// XOR delta: write only non-zero runs
+		// Format: [offset(u32) + len(u16) + data(len)] repeated, terminated by offset=0xFFFFFFFF
+		uint8_t* deltaStart = dst;
+		dst += 4;  // placeholder for deltaPayloadSize
+
+		uint32_t i = 0;
+		while (i < taSize)
+		{
+			// Skip unchanged bytes
+			while (i < taSize && taData[i] == prevTA[i]) i++;
+			if (i >= taSize) break;
+
+			// Found a changed byte — find the run length
+			uint32_t runStart = i;
+			while (i < taSize && (i - runStart) < 65535 && taData[i] != prevTA[i]) i++;
+			// Include a few trailing bytes to avoid tiny gaps
+			uint32_t extraEnd = std::min(i + 4, taSize);
+			while (i < extraEnd && taData[i] != prevTA[i]) i++;
+
+			uint16_t runLen = (uint16_t)(i - runStart);
+			memcpy(dst, &runStart, 4); dst += 4;
+			memcpy(dst, &runLen, 2); dst += 2;
+			memcpy(dst, taData + runStart, runLen); dst += runLen;
+		}
+		// Terminator
+		uint32_t term = 0xFFFFFFFF;
+		memcpy(dst, &term, 4); dst += 4;
+
+		uint32_t deltaPayloadSize = (uint32_t)(dst - deltaStart - 4);
+		memcpy(deltaStart, &deltaPayloadSize, 4);
+
+		totalDeltaPayload += deltaPayloadSize;
 		totalTABytes += taSize;
 		deltaFrames++;
 
 		if (frameNum % 60 == 0)
 		{
-			float avgDelta = (float)totalDeltaBytes / deltaFrames;
+			float avgDelta = (float)totalDeltaPayload / deltaFrames;
 			float avgTA = (float)totalTABytes / deltaFrames;
-			printf("[MIRROR] TA delta avg: %.1f KB / %.1f KB (%.1f%%) over %u frames | At 60fps: %.1f MB/s\n",
+			printf("[MIRROR] TA DELTA: %.1f KB / %.1f KB (%.1f%%) | stream: %.1f MB/s\n",
 				avgDelta / 1024.0, avgTA / 1024.0,
-				avgDelta * 100.0 / avgTA, deltaFrames,
-				avgDelta * 60.0 / 1024.0 / 1024.0);
+				avgDelta * 100.0 / avgTA, avgDelta * 60.0 / 1024.0 / 1024.0);
 		}
 	}
-	prevTA.assign(taData, taData + taSize);
-
-	memcpy(dst, &taSize, 4); dst += 4;
-	if (taSize > 0 && taData) {
-		memcpy(dst, taData, taSize); dst += taSize;
+	else
+	{
+		// Send full TA (first frame or size changed)
+		uint32_t deltaPayloadSize = taSize;  // full = same as original
+		memcpy(dst, &deltaPayloadSize, 4); dst += 4;
+		if (taSize > 0) { memcpy(dst, taData, taSize); dst += taSize; }
 	}
+
+	prevTA.assign(taData, taData + taSize);
 
 	// === Memory diffs ===
 	uint32_t totalDirty = 0;
@@ -401,10 +433,42 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 	uint32_t pvr_snapshot[16];
 	memcpy(pvr_snapshot, src, sizeof(pvr_snapshot)); src += sizeof(pvr_snapshot);
 
-	// === TA command buffer ===
+	// === TA command buffer (delta encoded) ===
 	uint32_t taSize; memcpy(&taSize, src, 4); src += 4;
-	uint8_t* taData = src;
-	src += taSize;
+	uint32_t deltaPayloadSize; memcpy(&deltaPayloadSize, src, 4); src += 4;
+
+	// Client's persistent TA buffer for delta reconstruction
+	static std::vector<uint8_t> clientTA;
+
+	if (deltaPayloadSize == taSize)
+	{
+		// Full frame (first frame or size changed)
+		clientTA.assign(src, src + taSize);
+		src += taSize;
+	}
+	else
+	{
+		// Delta decode: apply changed runs to previous TA buffer
+		clientTA.resize(taSize);  // ensure correct size
+		uint8_t* deltaData = src;
+		uint8_t* deltaEnd = src + deltaPayloadSize;
+
+		while (deltaData + 4 <= deltaEnd)
+		{
+			uint32_t offset;
+			memcpy(&offset, deltaData, 4); deltaData += 4;
+			if (offset == 0xFFFFFFFF) break;  // terminator
+
+			uint16_t runLen;
+			memcpy(&runLen, deltaData, 2); deltaData += 2;
+			if (offset + runLen <= taSize && deltaData + runLen <= deltaEnd)
+				memcpy(clientTA.data() + offset, deltaData, runLen);
+			deltaData += runLen;
+		}
+		src += deltaPayloadSize;
+	}
+
+	uint8_t* taData = clientTA.data();
 
 	// === Memory diffs ===
 	uint32_t dirtyPages; memcpy(&dirtyPages, src, 4); src += 4;
