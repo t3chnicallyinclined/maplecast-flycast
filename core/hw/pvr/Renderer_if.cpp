@@ -18,6 +18,7 @@
 #include "network/maplecast_rend_diff.h"
 #include "network/maplecast_rend_replay.h"
 #include "network/maplecast_mirror.h"
+#include "network/maplecast_nudge.h"
 #endif
 
 #include <mutex>
@@ -204,6 +205,10 @@ private:
 			// Mirror server: capture TA commands BEFORE Process consumes them
 			if (maplecast_mirror::isServer() && taContext)
 				maplecast_mirror::serverPublish(taContext);
+
+			// Nudge: server publishes after Process (state is fresh)
+			if (maplecast_nudge::isServer())
+				maplecast_nudge::serverTick();
 #endif
 			try {
 				renderer->Process(taContext);
@@ -222,6 +227,12 @@ private:
 		{
 			FC_PROFILE_SCOPE_NAMED("Renderer::Render");
 #ifdef MAPLECAST_TA_STREAM
+			// Nudge client: apply state correction AFTER Process, BEFORE Render
+			// SH4 already ran and built TA commands. We correct RAM state now.
+			// The renderer hasn't read positions yet — it reads during Render.
+			if (maplecast_nudge::isClient())
+				maplecast_nudge::clientTick();
+
 			// Rend replay: record frames AFTER Process (captures full rend_context)
 			if (maplecast_rend_replay::active() && !maplecast_rend_replay::replaying() && taContext)
 				maplecast_rend_replay::tick(taContext->rend);

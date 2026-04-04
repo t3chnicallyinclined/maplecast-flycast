@@ -48,6 +48,7 @@
 #include "network/maplecast_rend_replay.h"
 #include "network/maplecast_client.h"
 #include "network/maplecast_mirror.h"
+#include "network/maplecast_nudge.h"
 #endif
 #include "hw/maple/maple_cfg.h"
 #include <cstdlib>
@@ -1068,6 +1069,12 @@ void Emulator::start()
 #ifdef MAPLECAST_TA_STREAM
 	if (std::getenv("MAPLECAST_MIRROR_SERVER"))
 		maplecast_mirror::initServer();
+	// Nudge mode: lightweight position correction
+	if (std::getenv("MAPLECAST_NUDGE_SERVER"))
+		maplecast_nudge::initServer();
+	if (std::getenv("MAPLECAST_NUDGE_CLIENT"))
+		maplecast_nudge::initClient();
+
 	if (std::getenv("MAPLECAST_MIRROR_CLIENT"))
 	{
 		maplecast_mirror::initClient();

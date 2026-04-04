@@ -51,4 +51,6 @@ target_sources(${PROJECT_NAME} PRIVATE
         maplecast_client.cpp
         maplecast_client.h
         maplecast_mirror.cpp
-        maplecast_mirror.h)
+        maplecast_mirror.h
+        maplecast_nudge.cpp
+        maplecast_nudge.h)

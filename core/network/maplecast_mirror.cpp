@@ -106,23 +106,22 @@ static bool openShm(bool create)
 static void initRegions()
 {
 	_numRegions = 0;
-	_shadowRAM = (uint8_t*)malloc(16 * 1024 * 1024);
-	memcpy(_shadowRAM, &mem_b[0], 16 * 1024 * 1024);
-	_regions[_numRegions++] = { &mem_b[0], _shadowRAM, 16 * 1024 * 1024, 0, "RAM" };
+
+	// SKIP RAM — renderer doesn't read from main RAM
+	// SKIP ARAM — audio RAM not needed for rendering
+	// ONLY diff VRAM (textures) and PVR regs (palette, fog, hardware state)
 
 	_shadowVRAM = (uint8_t*)malloc(VRAM_SIZE);
 	memcpy(_shadowVRAM, &vram[0], VRAM_SIZE);
 	_regions[_numRegions++] = { &vram[0], _shadowVRAM, VRAM_SIZE, 1, "VRAM" };
 
-	_shadowARAM = (uint8_t*)malloc(2 * 1024 * 1024);
-	memcpy(_shadowARAM, &aica::aica_ram[0], 2 * 1024 * 1024);
-	_regions[_numRegions++] = { &aica::aica_ram[0], _shadowARAM, 2 * 1024 * 1024, 2, "ARAM" };
-
-	// PVR registers: 32KB — contains palette RAM, FOG_TABLE, ISP_FEED_CFG, ALL hardware state
+	// PVR registers: 32KB — palette RAM, FOG_TABLE, ISP_FEED_CFG
 	static uint8_t* _shadowPVR = nullptr;
 	_shadowPVR = (uint8_t*)malloc(pvr_RegSize);
 	memcpy(_shadowPVR, pvr_regs, pvr_RegSize);
 	_regions[_numRegions++] = { pvr_regs, _shadowPVR, (size_t)pvr_RegSize, 3, "PVR" };
+
+	// Only 2 regions: VRAM + PVR (no RAM, no ARAM)
 }
 
 static void serverSaveSync()
@@ -338,38 +337,7 @@ done_diff:
 	// Publish memory hashes for client verification
 	hdr->server_vram_hash = fastVramHash();
 
-	// Full memory audit every 60 frames
-	if (frameNum % 60 == 0)
-	{
-		// Hash each 256KB chunk of all memory and store in snapshot area for client comparison
-		uint8_t* audit = _shmPtr + HEADER_SIZE;  // reuse brain snapshot area for audit
-		uint32_t auditOff = 0;
-
-		// Write magic + frame number
-		uint32_t magic = 0xADD17000;
-		memcpy(audit + auditOff, &magic, 4); auditOff += 4;
-		memcpy(audit + auditOff, &frameNum, 4); auditOff += 4;
-
-		// For each region: write region_id(1) + num_chunks(4) + chunk_hashes(8 each)
-		for (int r = 0; r < _numRegions; r++)
-		{
-			audit[auditOff++] = _regions[r].id;
-			uint32_t chunkSize = 64 * 1024;  // 64KB chunks
-			uint32_t numChunks = (uint32_t)(_regions[r].size / chunkSize);
-			memcpy(audit + auditOff, &numChunks, 4); auditOff += 4;
-			for (uint32_t c = 0; c < numChunks; c++)
-			{
-				uint64_t h = fastVramHash();  // reuse hash function
-				// actually hash this specific chunk
-				h = 0xcbf29ce484222325ULL;
-				for (size_t i = c * chunkSize; i < (c+1) * chunkSize; i += 16) {
-					h ^= _regions[r].ptr[i];
-					h *= 0x100000001b3ULL;
-				}
-				memcpy(audit + auditOff, &h, 8); auditOff += 8;
-			}
-		}
-	}
+	// Audit disabled — reduced to VRAM+PVR only
 
 	if (frameNum % 60 == 0)
 		printf("[MIRROR] Server frame %u | TA=%u bytes | %u dirty pages\n",
@@ -527,46 +495,7 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		printf("[MIRROR] Client frame %u | TA=%u bytes | %u dirty pages | VRAM %s\n",
 			frameNum, taSize, dirtyPages, match ? "OK" : "MISMATCH");
 
-		// Full memory audit — compare against server's chunk hashes
-		uint8_t* audit = _shmPtr + HEADER_SIZE;
-		uint32_t auditMagic;
-		memcpy(&auditMagic, audit, 4);
-		if (auditMagic == 0xADD17000)
-		{
-			uint32_t auditOff = 8;  // skip magic + frame
-			struct { uint8_t* ptr; size_t size; const char* name; } localRegions[] = {
-				{ &mem_b[0], 16*1024*1024, "RAM" },
-				{ &vram[0], VRAM_SIZE, "VRAM" },
-				{ &aica::aica_ram[0], 2*1024*1024, "ARAM" },
-				{ pvr_regs, (size_t)pvr_RegSize, "PVR" },
-			};
-			for (int r = 0; r < 4; r++)
-			{
-				uint8_t rid = audit[auditOff++];
-				uint32_t numChunks;
-				memcpy(&numChunks, audit + auditOff, 4); auditOff += 4;
-
-				int mismatched = 0;
-				uint32_t chunkSize = 64 * 1024;
-				for (uint32_t c = 0; c < numChunks; c++)
-				{
-					uint64_t serverHash;
-					memcpy(&serverHash, audit + auditOff, 8); auditOff += 8;
-
-					if (r < 4 && c * chunkSize < localRegions[r].size)
-					{
-						uint64_t clientHash = 0xcbf29ce484222325ULL;
-						for (size_t i = c * chunkSize; i < (c+1) * chunkSize && i < localRegions[r].size; i += 16) {
-							clientHash ^= localRegions[r].ptr[i];
-							clientHash *= 0x100000001b3ULL;
-						}
-						if (clientHash != serverHash) mismatched++;
-					}
-				}
-				if (mismatched > 0)
-					printf("[AUDIT] %s: %d/%u chunks MISMATCH\n", localRegions[r].name, mismatched, numChunks);
-			}
-		}
+		// Audit disabled — was reading past shared memory bounds with reduced regions
 
 		if (!match)
 		{
