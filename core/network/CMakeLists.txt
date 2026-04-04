@@ -55,4 +55,5 @@ target_sources(${PROJECT_NAME} PRIVATE
         maplecast_nudge.cpp
         maplecast_nudge.h
         maplecast_lookup_test.cpp
-        maplecast_lookup_test.h)
+        maplecast_lookup_test.h
+        maplecast_wasm_bridge.cpp)

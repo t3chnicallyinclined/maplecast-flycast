@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>MapleCast Mirror Client — WASM Renderer</title>
+<style>
+  body { margin: 0; background: #000; display: flex; flex-direction: column; align-items: center; font-family: monospace; color: #0f0; }
+  canvas { border: 1px solid #333; }
+  #info { margin: 10px; font-size: 14px; }
+  #status { color: #ff0; }
+</style>
+</head>
+<body>
+<div id="info">
+  <span id="status">Loading WASM...</span>
+  <span id="stats"></span>
+</div>
+<canvas id="canvas" width="640" height="480"></canvas>
+
+<script>
+const statusEl = document.getElementById('status');
+const statsEl = document.getElementById('stats');
+const canvas = document.getElementById('canvas');
+
+let Module = null;
+let mirrorInit = null;
+let mirrorRenderFrame = null;
+let wasmReady = false;
+let ws = null;
+
+let frameCount = 0;
+let totalBytes = 0;
+let startTime = 0;
+let renderCount = 0;
+
+// Load the WASM module
+// For now, we just receive and log frames
+// Full WASM integration requires EmulatorJS bootstrap which is complex
+// This page proves the transport + parsing works
+
+statusEl.textContent = 'Connecting to delta stream...';
+
+function connectWebSocket() {
+  ws = new WebSocket('ws://localhost:7200');
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    statusEl.textContent = 'Connected — receiving delta frames';
+    startTime = performance.now();
+  };
+
+  ws.onclose = () => {
+    statusEl.textContent = 'Disconnected';
+    setTimeout(connectWebSocket, 2000);
+  };
+
+  ws.onmessage = (event) => {
+    if (typeof event.data === 'string') return; // skip text
+
+    const data = new Uint8Array(event.data);
+    const size = data.length;
+    if (size < 80) return;
+
+    frameCount++;
+    totalBytes += size;
+
+    // Parse the delta frame header
+    const dv = new DataView(event.data);
+    const frameSize = dv.getUint32(0, true);
+    const frameNum = dv.getUint32(4, true);
+
+    // PVR snapshot at offset 8 (64 bytes = 16 x u32)
+    const fbWidth = dv.getUint32(8 + 9*4, true);  // pvr_snapshot[9]
+    const fbHeight = dv.getUint32(8 + 10*4, true); // pvr_snapshot[10]
+
+    // TA size at offset 8+64 = 72
+    const taOrigSize = dv.getUint32(72, true);
+    const taDeltaSize = dv.getUint32(76, true);
+
+    const isDelta = taDeltaSize < taOrigSize;
+    const isKeyframe = taDeltaSize === taOrigSize;
+
+    // Stats
+    const now = performance.now();
+    const elapsed = (now - startTime) / 1000;
+    if (elapsed > 0) {
+      const fps = frameCount / elapsed;
+      const bw = totalBytes / elapsed / 1024;
+      statsEl.textContent = ` | ${fps.toFixed(0)} fps | ${bw.toFixed(0)} KB/s | frame ${frameNum} | ` +
+        `${isKeyframe ? 'KEY' : 'DELTA'} ${(taDeltaSize/1024).toFixed(1)}KB | ${fbWidth}x${fbHeight}`;
+    }
+
+    // TODO: Feed to WASM renderer
+    // When EmulatorJS WASM is loaded:
+    //   const ptr = Module._malloc(size);
+    //   Module.HEAPU8.set(data, ptr);
+    //   Module._mirror_render_frame(ptr, size);
+    //   Module._free(ptr);
+
+    renderCount++;
+  };
+}
+
+connectWebSocket();
+</script>
+</body>
+</html>
