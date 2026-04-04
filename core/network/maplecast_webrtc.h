@@ -42,6 +42,9 @@ int broadcastFrame(const void* data, size_t size);
 // Send audio chunk to all peers with active audio DataChannel
 int broadcastAudio(const void* data, size_t size);
 
+// Send game state to all peers with active gamestate DataChannel
+int broadcastGameState(const void* data, size_t size);
+
 // Check if a specific peer has an active DataChannel (for WebSocket fallback decision)
 bool peerHasDataChannel(const std::string& playerId);
 

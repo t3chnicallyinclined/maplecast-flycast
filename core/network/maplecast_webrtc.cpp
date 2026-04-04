@@ -44,9 +44,11 @@ struct Peer {
 	std::shared_ptr<rtc::DataChannel> videoDc;
 	std::shared_ptr<rtc::DataChannel> inputDc;
 	std::shared_ptr<rtc::DataChannel> audioDc;
+	std::shared_ptr<rtc::DataChannel> gsDc;
 	std::atomic<bool> videoReady{false};
 	std::atomic<bool> inputReady{false};
 	std::atomic<bool> audioReady{false};
+	std::atomic<bool> gsReady{false};
 };
 
 static std::map<std::string, std::shared_ptr<Peer>> _peers;
@@ -187,6 +189,18 @@ void handleOffer(const std::string& playerId, const std::string& sdp, int slot)
 				printf("[maplecast-rtc] audio DC closed for %s\n", peer->playerId.c_str());
 			});
 		}
+		else if (label == "gs")
+		{
+			peer->gsDc = dc;
+			dc->onOpen([peer]() {
+				peer->gsReady = true;
+				printf("[maplecast-rtc] gamestate DC open for %s\n", peer->playerId.c_str());
+			});
+			dc->onClosed([peer]() {
+				peer->gsReady = false;
+				printf("[maplecast-rtc] gamestate DC closed for %s\n", peer->playerId.c_str());
+			});
+		}
 		else
 		{
 			printf("[maplecast-rtc] unknown DC label: %s\n", label.c_str());
@@ -252,6 +266,24 @@ int broadcastAudio(const void* data, size_t size)
 	return sent;
 }
 
+int broadcastGameState(const void* data, size_t size)
+{
+	int sent = 0;
+	std::lock_guard<std::mutex> lock(_peerMutex);
+	for (auto& [id, peer] : _peers)
+	{
+		if (peer->gsReady.load(std::memory_order_relaxed) && peer->gsDc)
+		{
+			try {
+				peer->gsDc->send(
+					reinterpret_cast<const std::byte*>(data), size);
+				sent++;
+			} catch (...) {}
+		}
+	}
+	return sent;
+}
+
 bool peerHasDataChannel(const std::string& playerId)
 {
 	std::lock_guard<std::mutex> lock(_peerMutex);
@@ -298,6 +330,7 @@ void handleOffer(const std::string&, const std::string&, int) {}
 void handleIceCandidate(const std::string&, const std::string&, const std::string&) {}
 int broadcastFrame(const void*, size_t) { return 0; }
 int broadcastAudio(const void*, size_t) { return 0; }
+int broadcastGameState(const void*, size_t) { return 0; }
 bool peerHasDataChannel(const std::string&) { return false; }
 void removePeer(const std::string&) {}
 int activePeerCount() { return 0; }

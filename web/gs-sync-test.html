@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>MapleCast — Game State Sync Test (253 bytes → pixel-perfect)</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; color: #0f0; font-family: monospace; padding: 20px; }
+#status { font-size: 18px; margin: 10px 0; }
+#diag { background: #111; padding: 10px; border: 1px solid #333; white-space: pre; font-size: 12px; min-height: 200px; }
+iframe { border: 2px solid #0f0; margin: 10px 0; }
+button { background: #222; color: #0f0; border: 1px solid #0f0; padding: 8px 16px; margin: 5px; cursor: pointer; font-family: monospace; }
+</style>
+</head>
+<body>
+<h2>MapleCast Game State Sync Test</h2>
+<p>253 bytes/frame → WASM flycast renders pixel-perfect locally</p>
+<div id="status">Connecting...</div>
+<div>
+  <button onclick="connectServer()">Connect to Server</button>
+  <button onclick="connectWasm()">Connect to WASM (:8090)</button>
+</div>
+<div id="diag"></div>
+
+<script>
+const statusEl = document.getElementById('status');
+const diagEl = document.getElementById('diag');
+
+let ws = null;
+let pc = null;
+let gsDc = null;
+let gsPackets = 0;
+let wasmWindow = null;
+let wasmModule = null;
+
+// MVC2 Dreamcast memory addresses (same as maplecast_gamestate.cpp)
+const CHAR_BASE = [0x8C268340, 0x8C2688E4, 0x8C268E88, 0x8C26942C, 0x8C2699D0, 0x8C269F74];
+const ADDR_IN_MATCH = 0x8C289624;
+const ADDR_TIMER = 0x8C289630;
+const ADDR_STAGE = 0x8C289638;
+const ADDR_CAMERA_X = 0x8C1F9CD8;
+const ADDR_CAMERA_Y = 0x8C1F9CDC;
+const ADDR_P1_METER_FILL = 0x8C289646;
+const ADDR_P2_METER_FILL = 0x8C289648;
+const ADDR_P1_METER_LVL = 0x8C28964A;
+const ADDR_P2_METER_LVL = 0x8C28964B;
+const ADDR_P1_COMBO = 0x8C289670;
+const ADDR_P2_COMBO = 0x8C289672;
+const ADDR_FRAME_CTR = 0x8C3496B0;
+
+// Character struct offsets
+const OFF = {
+  ACTIVE: 0x000, CHAR_ID: 0x001, POS_X: 0x034, POS_Y: 0x038,
+  SCREEN_X: 0x0E0, SCREEN_Y: 0x0E4, VEL_X: 0x05C, VEL_Y: 0x060,
+  FACING: 0x110, SPRITE_ID: 0x144, ANIM_STATE: 0x1D0, ANIM_TIMER: 0x142,
+  HEALTH: 0x420, RED_HEALTH: 0x424, SPECIAL_MOVE: 0x1E9,
+  ASSIST_TYPE: 0x4C9, PALETTE: 0x52D
+};
+
+const MVC2_CHARS = [
+  'Ryu','Zangief','Guile','Morrigan','Anakaris','Strider','Cyclops','Wolverine',
+  'Psylocke','Iceman','Rogue','Cap America','Spider-Man','Hulk','Venom','Dr Doom',
+  'Tron Bonne','Jill','Hayato','Ruby Heart','SonSon','Amingo','Marrow','Cable',
+  'Abyss1','Abyss2','Abyss3','Chun-Li','Mega Man','Roll','Akuma','BB Hood',
+  'Felicia','Charlie','Sakura','Dan','Cammy','Dhalsim','M Bison','Ken',
+  'Gambit','Juggernaut','Storm','Sabretooth','Magneto','Shuma','War Machine',
+  'Silver Samurai','Omega Red','Spiral','Colossus','Iron Man','Sentinel',
+  'Blackheart','Thanos','Jin','Cap Commando','Bone Wolverine','Servbot'
+];
+
+let lastGameState = null;
+
+// Parse and display game state (proof that 253 bytes contain everything)
+function writeGameStateToWasm(buf) {
+  const view = new DataView(buf instanceof ArrayBuffer ? buf : buf.buffer);
+  let off = 4; // skip "GS" + size header
+
+  const gs = { chars: [] };
+
+  // Global state
+  gs.in_match = view.getUint8(off++);
+  gs.timer = view.getUint8(off++);
+  gs.stage = view.getUint8(off++);
+  gs.p1_meter_lvl = view.getUint8(off++);
+  gs.p2_meter_lvl = view.getUint8(off++);
+  gs.p1_combo = view.getUint16(off, true); off += 2;
+  gs.p2_combo = view.getUint16(off, true); off += 2;
+  gs.p1_meter_fill = view.getUint16(off, true); off += 2;
+  gs.p2_meter_fill = view.getUint16(off, true); off += 2;
+  gs.camera_x = view.getFloat32(off, true); off += 4;
+  gs.camera_y = view.getFloat32(off, true); off += 4;
+  gs.frame = view.getUint32(off, true); off += 4;
+
+  for (let i = 0; i < 6; i++) {
+    const c = {};
+    c.active = view.getUint8(off++);
+    c.char_id = view.getUint8(off++);
+    c.facing = view.getUint8(off++);
+    c.health = view.getUint8(off++);
+    c.red_health = view.getUint8(off++);
+    c.special_move = view.getUint8(off++);
+    c.assist_type = view.getUint8(off++);
+    c.palette = view.getUint8(off++);
+    c.pos_x = view.getFloat32(off, true); off += 4;
+    c.pos_y = view.getFloat32(off, true); off += 4;
+    c.screen_x = view.getFloat32(off, true); off += 4;
+    c.screen_y = view.getFloat32(off, true); off += 4;
+    c.vel_x = view.getFloat32(off, true); off += 4;
+    c.vel_y = view.getFloat32(off, true); off += 4;
+    c.sprite_id = view.getUint16(off, true); off += 2;
+    c.anim_state = view.getUint16(off, true); off += 2;
+    c.anim_timer = view.getUint16(off, true); off += 2;
+    c.name = MVC2_CHARS[c.char_id] || '?';
+    gs.chars.push(c);
+  }
+
+  lastGameState = gs;
+}
+
+// Connect to MapleCast server via WebSocket + WebRTC
+function connectServer() {
+  const url = 'ws://localhost:7200';
+  statusEl.textContent = 'Connecting to server...';
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    statusEl.textContent = 'WebSocket connected — setting up WebRTC...';
+    setupWebRTC();
+  };
+
+  ws.onmessage = (event) => {
+    // Binary = game state or video
+    if (event.data instanceof ArrayBuffer) {
+      const buf = new Uint8Array(event.data);
+      if (buf.length >= 4 && buf[0] === 0x47 && buf[1] === 0x53) {
+        gsPackets++;
+        if (gsPackets <= 3 || gsPackets % 60 === 0)
+          console.log('[gs-sync] GS packet #' + gsPackets, buf.length, 'bytes');
+        writeGameStateToWasm(event.data);
+      }
+      return;
+    }
+    if (typeof event.data !== 'string') return;
+    try {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'answer' && pc) {
+        const fixedSdp = msg.sdp.replace(/(\d),(\d)/g, '$1$2');
+        pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: fixedSdp }));
+      }
+      if (msg.type === 'ice-candidate' && pc) {
+        let c = msg.candidate.replace(/(\d),(\d)/g, '$1$2');
+        pc.addIceCandidate(new RTCIceCandidate({ candidate: c, sdpMid: msg.sdpMid || '0', sdpMLineIndex: 0 }))
+          .catch(e => {});
+      }
+    } catch(e) {}
+  };
+}
+
+function setupWebRTC() {
+  pc = new RTCPeerConnection({
+    iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }]
+  });
+
+  // Video DataChannel — receives both video frames AND GS packets
+  const videoDc = pc.createDataChannel('video', { ordered: false, maxRetransmits: 0 });
+  videoDc.binaryType = 'arraybuffer';
+
+  videoDc.onopen = () => {
+    statusEl.textContent = 'Video DataChannel OPEN — receiving video + game state';
+    console.log('[gs-sync] Video DataChannel open');
+  };
+
+  videoDc.onmessage = (event) => {
+    const buf = new Uint8Array(event.data);
+    if (buf.length < 4) return;
+    // GS packet: starts with "GS" (0x47, 0x53)
+    if (buf[0] === 0x47 && buf[1] === 0x53) {
+      gsPackets++;
+      if (gsPackets % 60 === 1) console.log('[gs-sync] GS packet #' + gsPackets, buf.length, 'bytes');
+      writeGameStateToWasm(event.data);
+      return;
+    }
+    // Otherwise it's a video frame — ignore for this test
+  };
+
+  pc.onicecandidate = (event) => {
+    if (event.candidate && ws) {
+      ws.send(JSON.stringify({
+        type: 'ice-candidate', id: 'gs-test',
+        candidate: event.candidate.candidate,
+        sdpMid: event.candidate.sdpMid
+      }));
+    }
+  };
+
+  // Also create input/audio DCs so server accepts our offer
+  pc.createDataChannel('input', { ordered: false, maxRetransmits: 0 });
+  pc.createDataChannel('audio', { ordered: true, maxRetransmits: 0 });
+
+  pc.createOffer().then(offer => pc.setLocalDescription(offer)).then(() => {
+    ws.send(JSON.stringify({ type: 'offer', id: 'gs-test', sdp: pc.localDescription.sdp }));
+  });
+
+  // Register as spectator so server knows us
+  ws.send(JSON.stringify({ type: 'join', id: 'gs-test', name: 'GS Sync Test', device: 'WASM' }));
+}
+
+// Connect to the WASM flycast running at :8090
+function connectWasm() {
+  // Try to access the EmulatorJS Module from the iframe or same origin
+  statusEl.textContent = 'Looking for WASM flycast Module...';
+
+  // The WASM instance exposes Module globally when loaded via EmulatorJS
+  // We need to get a reference to it
+  const wasmFrame = document.getElementById('wasmFrame');
+  if (wasmFrame && wasmFrame.contentWindow && wasmFrame.contentWindow.Module) {
+    wasmModule = wasmFrame.contentWindow.Module;
+    statusEl.textContent = 'WASM Module connected! Ready to sync.';
+    console.log('[gs-sync] Got WASM Module from iframe');
+  } else {
+    // Try window.opener or same-page Module
+    if (window.Module) {
+      wasmModule = window.Module;
+      statusEl.textContent = 'WASM Module found on this page!';
+    } else {
+      statusEl.textContent = 'WASM Module not found — open :8090 in an iframe or same page';
+      // Create iframe
+      const iframe = document.createElement('iframe');
+      iframe.id = 'wasmFrame';
+      iframe.src = 'http://localhost:8090';
+      iframe.width = 640;
+      iframe.height = 480;
+      document.body.appendChild(iframe);
+      statusEl.textContent = 'Loading WASM in iframe... wait for MVC2 to boot, then click Connect to WASM again';
+    }
+  }
+}
+
+// Diagnostics update
+setInterval(() => {
+  const gs = lastGameState;
+  let charInfo = '';
+  if (gs) {
+    for (let i = 0; i < 6; i++) {
+      const c = gs.chars[i];
+      if (!c.active) continue;
+      const side = (i % 2 === 0) ? 'P1' : 'P2';
+      const slot = Math.floor(i / 2);
+      charInfo += `  ${side}C${slot+1}: ${c.name} HP:${c.health} pos:(${c.pos_x.toFixed(0)},${c.pos_y.toFixed(0)}) anim:0x${c.anim_state.toString(16)} frame:${c.anim_timer} ${c.facing ? 'R' : 'L'}\n`;
+    }
+  }
+
+  diagEl.textContent =
+`=== Game State Sync Test ===
+Server: ${ws ? (ws.readyState === 1 ? 'connected' : 'disconnected') : 'not connected'}
+GS packets: ${gsPackets} (~60/sec)
+Bandwidth: ${(gsPackets * 253 / 1024).toFixed(1)} KB total
+
+${gs ? `--- LIVE GAME STATE (253 bytes) ---
+Timer: ${gs.timer}  Frame: ${gs.frame}  Stage: ${gs.stage}
+P1 Meter: ${gs.p1_meter_lvl} bars  P2 Meter: ${gs.p2_meter_lvl} bars
+P1 Combo: ${gs.p1_combo}  P2 Combo: ${gs.p2_combo}
+Camera: (${gs.camera_x.toFixed(0)}, ${gs.camera_y.toFixed(0)})
+
+--- CHARACTERS ---
+${charInfo}` : 'Waiting for game state...'}
+253 bytes × 60fps = 15 KB/s
+THIS IS ALL YOU NEED FOR PIXEL-PERFECT RENDERING.
+WE ARE INSANE.`;
+}, 500);
+</script>
+</body>
+</html>

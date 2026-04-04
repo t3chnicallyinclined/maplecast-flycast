@@ -27,6 +27,7 @@
 #include "maplecast_telemetry.h"
 #include "maplecast_input_server.h"
 #include "maplecast_webrtc.h"
+#include "maplecast_gamestate.h"
 #include "hw/pvr/Renderer_if.h"
 #include "wsi/gl_context.h"
 
@@ -775,6 +776,32 @@ void onFrameRendered()
 
 			broadcastBinary(_sendBuf, totalPayload);
 
+			// Broadcast game state for WASM clients (253 bytes) via WebSocket
+#ifdef MAPLECAST_TA_STREAM
+			{
+				maplecast_gamestate::GameState gs;
+				maplecast_gamestate::readGameState(gs);
+				if (gs.in_match)
+				{
+					uint8_t gsBuf[256];
+					int gsSize = maplecast_gamestate::serialize(gs, gsBuf, 256);
+					// Send as binary WebSocket with "GS" prefix
+					uint8_t pkt[4 + 256];
+					pkt[0] = 'G'; pkt[1] = 'S';
+					uint16_t sz = (uint16_t)gsSize;
+					memcpy(pkt + 2, &sz, 2);
+					memcpy(pkt + 4, gsBuf, gsSize);
+					// Send directly via WebSocket to ALL clients (not DataChannel)
+					std::lock_guard<std::mutex> lock(_connMutex);
+					for (auto& conn : _connections)
+					{
+						try { _ws.send(conn, pkt, 4 + gsSize, websocketpp::frame::opcode::binary); }
+						catch (...) {}
+					}
+				}
+			}
+#endif
+
 			if (frameNum % 300 == 0)
 			{
 				printf("[maplecast-stream] F:%u JPEG | copy:%uus enc:%uus total:%uus | %zuB\n",
@@ -857,6 +884,19 @@ void onFrameRendered()
 		memcpy(_sendBuf + off, lockParams.bitstreamBufferPtr, h264Size);
 
 		broadcastBinary(_sendBuf, totalPayload);
+
+		// Also broadcast game state via same channel as video
+#ifdef MAPLECAST_TA_STREAM
+		{
+			maplecast_gamestate::GameState gs;
+			maplecast_gamestate::readGameState(gs);
+			uint8_t gsBuf[4 + 256];
+			gsBuf[0] = 'G'; gsBuf[1] = 'S';
+			uint16_t gsSize = (uint16_t)maplecast_gamestate::serialize(gs, gsBuf + 4, 256);
+			memcpy(gsBuf + 2, &gsSize, 2);
+			broadcastBinary(gsBuf, 4 + gsSize);
+		}
+#endif
 
 		if (frameNum % 300 == 0)
 		{
