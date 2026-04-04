@@ -32,6 +32,9 @@
 	#define HOST_CPU CPU_ARM
 #elif defined(__aarch64__) || defined(_M_ARM64)
 	#define HOST_CPU CPU_ARM64
+#elif defined(__EMSCRIPTEN__)
+	#define HOST_CPU CPU_X86
+	#define TARGET_NO_REC
 #else
 	#error Unsupported architecture
 #endif
