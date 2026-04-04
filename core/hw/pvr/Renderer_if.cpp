@@ -19,6 +19,7 @@
 #include "network/maplecast_rend_replay.h"
 #include "network/maplecast_mirror.h"
 #include "network/maplecast_nudge.h"
+#include "network/maplecast_lookup_test.h"
 #endif
 
 #include <mutex>
@@ -206,6 +207,10 @@ private:
 			if (maplecast_mirror::isServer() && taContext)
 				maplecast_mirror::serverPublish(taContext);
 
+			// Lookup test: record game state + TA commands
+			if (maplecast_lookup_test::active() && taContext)
+				maplecast_lookup_test::serverRecord(taContext);
+
 			// Nudge: server publishes after Process (state is fresh)
 			if (maplecast_nudge::isServer())
 				maplecast_nudge::serverTick();
@@ -227,6 +232,17 @@ private:
 		{
 			FC_PROFILE_SCOPE_NAMED("Renderer::Render");
 #ifdef MAPLECAST_TA_STREAM
+			// Lookup test replay: replace live render with lookup render
+			if (maplecast_lookup_test::isReplaying() && taContext)
+			{
+				rend_context lookupRc;
+				if (maplecast_lookup_test::clientLookup(lookupRc))
+				{
+					// gl.rendContext already set by Process inside clientLookup
+					renderer->Render();
+				}
+			}
+
 			// Nudge client: apply state correction AFTER Process, BEFORE Render
 			// SH4 already ran and built TA commands. We correct RAM state now.
 			// The renderer hasn't read positions yet — it reads during Render.

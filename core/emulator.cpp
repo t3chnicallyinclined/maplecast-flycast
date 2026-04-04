@@ -49,6 +49,7 @@
 #include "network/maplecast_client.h"
 #include "network/maplecast_mirror.h"
 #include "network/maplecast_nudge.h"
+#include "network/maplecast_lookup_test.h"
 #endif
 #include "hw/maple/maple_cfg.h"
 #include <cstdlib>
@@ -1074,6 +1075,10 @@ void Emulator::start()
 		maplecast_nudge::initServer();
 	if (std::getenv("MAPLECAST_NUDGE_CLIENT"))
 		maplecast_nudge::initClient();
+
+	// Lookup test: record 10s then replay from lookup table
+	if (std::getenv("MAPLECAST_LOOKUP_TEST"))
+		maplecast_lookup_test::init();
 
 	if (std::getenv("MAPLECAST_MIRROR_CLIENT"))
 	{
