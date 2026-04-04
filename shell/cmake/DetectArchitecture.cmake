@@ -37,3 +37,5 @@ detect_architecture("_M_X64" x86_64)
 detect_architecture("__i386" x86)
 detect_architecture("__i386__" x86)
 detect_architecture("_M_IX86" x86)
+
+detect_architecture("__EMSCRIPTEN__" wasm)
