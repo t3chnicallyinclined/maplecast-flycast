@@ -14,6 +14,7 @@
 #ifdef MAPLECAST_TA_STREAM
 #include "network/maplecast_visual_cache.h"
 #include "network/maplecast_scanner.h"
+#include "network/maplecast_gs_loopback.h"
 #endif
 
 #include <mutex>
@@ -216,6 +217,9 @@ private:
 			// Brute force scanner: inject character state into RAM before render
 			if (maplecast_scanner::active())
 				maplecast_scanner::tick();
+			// Game state loopback test: read → serialize → deserialize → write back
+			if (maplecast_gs_loopback::active())
+				maplecast_gs_loopback::tick();
 			// Record TA display list for visual cache BEFORE rendering
 			if (taContext)
 				maplecast_visual_cache::recordFrame(taContext->rend);

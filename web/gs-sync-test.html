@@ -17,7 +17,8 @@ button { background: #222; color: #0f0; border: 1px solid #0f0; padding: 8px 16p
 <div id="status">Connecting...</div>
 <div>
   <button onclick="connectServer()">Connect to Server</button>
-  <button onclick="connectWasm()">Connect to WASM (:8090)</button>
+  <button onclick="connectWasm()">Connect to WASM</button>
+  <button onclick="loadSaveState()">Load Save State</button>
 </div>
 <div id="diag"></div>
 
@@ -233,6 +234,61 @@ function connectWasm() {
       document.body.appendChild(iframe);
       statusEl.textContent = 'Loading WASM in iframe... wait for MVC2 to boot, then click Connect to WASM again';
     }
+  }
+}
+
+// Load save state into WASM flycast
+async function loadSaveState() {
+  if (!wasmModule) {
+    statusEl.textContent = 'Connect to WASM first!';
+    return;
+  }
+  statusEl.textContent = 'Fetching save state (6.7MB)...';
+  try {
+    const resp = await fetch('/mvc2.state');
+    const buf = await resp.arrayBuffer();
+    const data = new Uint8Array(buf);
+
+    // Try method 1: _load_state_from_buffer (our custom export)
+    if (wasmModule._load_state_from_buffer) {
+      const ptr = wasmModule._malloc(data.length);
+      wasmModule.HEAPU8.set(data, ptr);
+      const result = wasmModule._load_state_from_buffer(ptr, data.length);
+      wasmModule._free(ptr);
+      console.log('[gs-sync] _load_state_from_buffer result:', result);
+      if (result === 1) {
+        statusEl.textContent = 'Save state loaded! (method: buffer)';
+        return;
+      }
+    }
+
+    // Try method 2: write to virtual FS then _load_state(path, slot)
+    if (wasmModule.FS && wasmModule._load_state) {
+      const statePath = '/save.state';
+      wasmModule.FS.writeFile(statePath, data);
+      const result = wasmModule._load_state(wasmModule.allocateUTF8(statePath), 0);
+      console.log('[gs-sync] _load_state(path) result:', result);
+      statusEl.textContent = 'Save state loaded! (method: FS)';
+      return;
+    }
+
+    // Try method 3: EmulatorJS GameManager if available
+    const iframe = document.getElementById('wasmFrame');
+    if (iframe && iframe.contentWindow && iframe.contentWindow.EJS_emulator) {
+      const emu = iframe.contentWindow.EJS_emulator;
+      if (emu.gameManager) {
+        emu.gameManager.FS.writeFile('/save.state', data);
+        emu.gameManager.functions.loadState('/save.state', 0);
+        statusEl.textContent = 'Save state loaded! (method: EmulatorJS)';
+        console.log('[gs-sync] loaded via EmulatorJS gameManager');
+        return;
+      }
+    }
+
+    statusEl.textContent = 'Could not find a working load method';
+  } catch(e) {
+    statusEl.textContent = 'Save state load error: ' + e.message;
+    console.error('[gs-sync] save state error:', e);
   }
 }
 

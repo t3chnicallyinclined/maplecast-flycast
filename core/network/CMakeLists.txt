@@ -41,4 +41,6 @@ target_sources(${PROJECT_NAME} PRIVATE
         maplecast_visual_cache.cpp
         maplecast_visual_cache.h
         maplecast_scanner.cpp
-        maplecast_scanner.h)
+        maplecast_scanner.h
+        maplecast_gs_loopback.cpp
+        maplecast_gs_loopback.h)

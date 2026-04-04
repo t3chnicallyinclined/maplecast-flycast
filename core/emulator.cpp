@@ -43,6 +43,7 @@
 #ifdef MAPLECAST_TA_STREAM
 #include "network/maplecast_visual_cache.h"
 #include "network/maplecast_scanner.h"
+#include "network/maplecast_gs_loopback.h"
 #endif
 #include "hw/maple/maple_cfg.h"
 #include <cstdlib>
@@ -1021,6 +1022,10 @@ void Emulator::start()
 		// Brute force scanner: MAPLECAST_SCAN=1 to auto-start full scan
 		if (std::getenv("MAPLECAST_SCAN"))
 			maplecast_scanner::start(maplecast_scanner::ScanMode::FullScan, 0);
+
+		// Loopback test: MAPLECAST_GS_LOOPBACK=1
+		if (std::getenv("MAPLECAST_GS_LOOPBACK"))
+			maplecast_gs_loopback::init();
 #endif
 
 		// Init telemetry (fire-and-forget UDP to localhost:7300)
