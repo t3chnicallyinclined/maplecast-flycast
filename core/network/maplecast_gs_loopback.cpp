@@ -27,70 +27,84 @@ static std::atomic<bool> _active{false};
 static uint32_t _frameCount = 0;
 static uint32_t _mismatchCount = 0;
 
+// Recording + Replay
+static const int MAX_RECORD_FRAMES = 600;  // 10 seconds at 60fps
+struct RecordedFrame {
+	uint8_t data[256];
+	int size;
+};
+static RecordedFrame* _recorded = nullptr;
+static int _recordCount = 0;
+static int _replayPos = 0;
+static bool _recording = false;
+static bool _replaying = false;
+
 void init()
 {
 	_active = true;
 	_frameCount = 0;
 	_mismatchCount = 0;
-	printf("[gs-loopback] === LOOPBACK TEST ACTIVE ===\n");
-	printf("[gs-loopback] Every frame: read → serialize → deserialize → write back\n");
-	printf("[gs-loopback] If game runs normally, 253 bytes is all you need.\n");
+	_recordCount = 0;
+	_replayPos = 0;
+	_recording = true;
+	_replaying = false;
+	if (!_recorded)
+		_recorded = new RecordedFrame[MAX_RECORD_FRAMES];
+	printf("[gs-loopback] === RECORD + REPLAY TEST ===\n");
+	printf("[gs-loopback] RECORDING %d frames (10 seconds)...\n", MAX_RECORD_FRAMES);
+	printf("[gs-loopback] Play normally — then watch it replay!\n");
 }
 
 void tick()
 {
 	if (!_active) return;
 
-	// Step 1: Read game state from RAM
-	maplecast_gamestate::GameState original;
-	maplecast_gamestate::readGameState(original);
+	maplecast_gamestate::GameState gs;
+	maplecast_gamestate::readGameState(gs);
 
-	if (!original.in_match) return;
+	if (!gs.in_match) return;
 
-	// Step 2: Serialize to 253 bytes (same as network send)
-	uint8_t wire[256];
-	int wireSize = maplecast_gamestate::serialize(original, wire, sizeof(wire));
-
-	// Step 3: Deserialize back to struct (same as network receive)
-	maplecast_gamestate::GameState received;
-	maplecast_gamestate::deserialize(wire, wireSize, received);
-
-	// Step 4: Verify — compare original and received
-	bool match = true;
-	if (original.game_timer != received.game_timer) match = false;
-	if (original.stage_id != received.stage_id) match = false;
-	for (int i = 0; i < 6; i++)
+	if (_recording)
 	{
-		const auto& a = original.chars[i];
-		const auto& b = received.chars[i];
-		if (a.active != b.active) match = false;
-		if (a.character_id != b.character_id) match = false;
-		if (a.health != b.health) match = false;
-		if (a.animation_state != b.animation_state) match = false;
-		if (a.anim_timer != b.anim_timer) match = false;
+		// RECORDING: capture game state every frame
+		uint8_t wire[256];
+		int wireSize = maplecast_gamestate::serialize(gs, wire, sizeof(wire));
+		memcpy(_recorded[_recordCount].data, wire, wireSize);
+		_recorded[_recordCount].size = wireSize;
+		_recordCount++;
+
+		if (_recordCount % 60 == 0)
+			printf("[gs-loopback] RECORDING: frame %d/%d...\n", _recordCount, MAX_RECORD_FRAMES);
+
+		if (_recordCount >= MAX_RECORD_FRAMES)
+		{
+			_recording = false;
+			_replaying = true;
+			_replayPos = 0;
+			printf("[gs-loopback] === RECORDING COMPLETE (%d frames) ===\n", _recordCount);
+			printf("[gs-loopback] === NOW REPLAYING — WATCH THE GAME REPLAY YOUR ACTIONS! ===\n");
+			printf("[gs-loopback] 253 bytes/frame × %d frames = %d bytes total\n",
+				_recordCount, _recordCount * 253);
+		}
 	}
-
-	if (!match)
+	else if (_replaying)
 	{
-		_mismatchCount++;
-		if (_mismatchCount <= 5)
-			printf("[gs-loopback] MISMATCH at frame %u!\n", _frameCount);
-	}
+		// REPLAYING: write recorded state back to RAM
+		maplecast_gamestate::GameState replay;
+		maplecast_gamestate::deserialize(
+			_recorded[_replayPos].data, _recorded[_replayPos].size, replay);
+		maplecast_gamestate::writeGameState(replay);
+		_replayPos++;
 
-	// Step 5: Write back to RAM (unmodified = lossless round trip)
-	// Health hack test PASSED: forcing health=144 made P1 invincible,
-	// proving writeGameState() controls the game from 253 bytes.
-	maplecast_gamestate::writeGameState(received);
+		if (_replayPos % 60 == 0)
+			printf("[gs-loopback] REPLAYING: frame %d/%d...\n", _replayPos, _recordCount);
 
-	_frameCount++;
-
-	// Log every 300 frames
-	if (_frameCount % 300 == 0)
-	{
-		printf("[gs-loopback] frame %u — %u mismatches (%.1f%% match rate) — %d bytes/frame\n",
-			_frameCount, _mismatchCount,
-			100.0 * (1.0 - (double)_mismatchCount / _frameCount),
-			wireSize);
+		if (_replayPos >= _recordCount)
+		{
+			// Loop the replay
+			_replayPos = 0;
+			printf("[gs-loopback] === REPLAY LOOPING ===\n");
+		}
 	}
 }
 
