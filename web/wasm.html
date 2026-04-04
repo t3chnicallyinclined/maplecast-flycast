@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>MapleCast WASM — MVC2 Zero-Latency</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: monospace; color: #0f0; }
+canvas { image-rendering: pixelated; border: 2px solid #333; }
+#status { margin: 10px; font-size: 16px; text-align: center; }
+#diag { position: fixed; top: 10px; right: 10px; background: rgba(0,0,0,0.9); color: #0f0; font-size: 10px; padding: 8px; border: 1px solid #333; font-family: monospace; white-space: pre; min-width: 280px; }
+#controls { margin: 10px; }
+button { background: #222; color: #0f0; border: 1px solid #0f0; padding: 10px 20px; margin: 5px; cursor: pointer; font-family: monospace; font-size: 14px; }
+button:hover { background: #0f0; color: #000; }
+#progress { width: 400px; margin: 10px; }
+</style>
+</head>
+<body>
+<div id="status">MapleCast WASM — Loading...</div>
+<canvas id="screen" width="640" height="480"></canvas>
+<progress id="progress" value="0" max="100" style="display:none"></progress>
+<div id="controls">
+  <button onclick="boot()">Boot MVC2</button>
+  <button onclick="connectWs()">Connect Server</button>
+  <button onclick="toggleDiag()">Diag</button>
+</div>
+<div id="diag"></div>
+
+<script>
+// ============================================================
+// MapleCast WASM Client — Zero-Latency MVC2
+//
+// Minimal libretro frontend. No EmulatorJS. No wrapper.
+// Loads flycast-wasm directly, boots MVC2, receives IS packets
+// from MapleCast server, injects controller state per frame.
+// ============================================================
+
+const CORE_JS  = '/flycast-wasm/pkg_upstream/flycast_libretro.js';
+const ROM_PATH = '/flycast-wasm/demo/roms/mvc2.chd';
+const BIOS_BOOT  = '/flycast-wasm/demo/bios/dc_boot.bin';
+const BIOS_FLASH = '/flycast-wasm/demo/bios/dc_flash.bin';
+
+const statusEl = document.getElementById('status');
+const diagEl = document.getElementById('diag');
+const canvas = document.getElementById('screen');
+const progressEl = document.getElementById('progress');
+
+let Module = null;
+let ws = null;
+let injectInput = null;  // cwrap'd _inject_maple_input
+
+// Latest input state — updated by IS packets, consumed by WASM each frame
+let p1 = { buttons: 0xFFFFFFFF, lt: 0, rt: 0 };
+let p2 = { buttons: 0xFFFFFFFF, lt: 0, rt: 0 };
+
+const diag = {
+  phase: 'init', serverFrame: 0, clientFrame: 0,
+  isPackets: 0, queueLen: 0,
+  lastIsTime: 0, isJitter: [],
+};
+
+let showDiag = true;
+function toggleDiag() { showDiag = !showDiag; diagEl.style.display = showDiag ? 'block' : 'none'; }
+
+function updateDiag() {
+  if (!showDiag) return;
+  const jit = diag.isJitter.length > 0
+    ? (diag.isJitter.reduce((a,b) => a+b, 0) / diag.isJitter.length).toFixed(2)
+    : '—';
+  diagEl.textContent =
+`=== MapleCast WASM ===
+Phase: ${diag.phase}
+Server Frame: ${diag.serverFrame}
+IS packets: ${diag.isPackets}
+IS jitter:  ${jit}ms`;
+}
+setInterval(updateDiag, 250);
+
+// ============================================================
+// Phase 1: Fetch files (BIOS, ROM, core JS+WASM)
+// ============================================================
+async function fetchBin(url, label) {
+  statusEl.textContent = `Fetching ${label}...`;
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`Failed to fetch ${label}: ${resp.status}`);
+  return new Uint8Array(await resp.arrayBuffer());
+}
+
+async function boot() {
+  try {
+    diag.phase = 'fetching';
+    statusEl.textContent = 'Fetching BIOS...';
+    progressEl.style.display = 'block';
+
+    const [biosBootData, biosFlashData] = await Promise.all([
+      fetchBin(BIOS_BOOT, 'dc_boot.bin'),
+      fetchBin(BIOS_FLASH, 'dc_flash.bin'),
+    ]);
+    progressEl.value = 10;
+
+    // Fetch ROM — large file, track progress
+    statusEl.textContent = 'Fetching MVC2 CHD (146MB)...';
+    const romResp = await fetch(ROM_PATH);
+    const reader = romResp.body.getReader();
+    const contentLength = +romResp.headers.get('Content-Length') || 153000000;
+    let received = 0;
+    const chunks = [];
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      const pct = 10 + (received / contentLength) * 60;
+      progressEl.value = pct;
+      statusEl.textContent = `Fetching MVC2 CHD... ${(received/1048576).toFixed(0)}MB`;
+    }
+    const romData = new Uint8Array(received);
+    let offset = 0;
+    for (const chunk of chunks) { romData.set(chunk, offset); offset += chunk.length; }
+    progressEl.value = 70;
+
+    // Fetch core JS
+    statusEl.textContent = 'Loading flycast WASM core...';
+    const coreResp = await fetch(CORE_JS);
+    const coreJs = await coreResp.text();
+    progressEl.value = 75;
+
+    // ============================================================
+    // Phase 2: Initialize WASM module
+    // ============================================================
+    diag.phase = 'init-wasm';
+    statusEl.textContent = 'Initializing WASM module...';
+
+    // Inject the core JS — it defines window.EJS_Runtime
+    const script = document.createElement('script');
+    script.src = URL.createObjectURL(new Blob([coreJs], { type: 'application/javascript' }));
+    await new Promise((resolve, reject) => {
+      script.onload = resolve;
+      script.onerror = reject;
+      document.body.appendChild(script);
+    });
+    progressEl.value = 80;
+
+    // Instantiate the emscripten module
+    Module = await window.EJS_Runtime({
+      noInitialRun: true,
+      canvas: canvas,
+      arguments: [],
+      preRun: [],
+      postRun: [],
+      callbacks: {},
+      parent: canvas.parentElement,
+      print: (msg) => console.log('[flycast]', msg),
+      printErr: (msg) => console.warn('[flycast]', msg),
+      totalDependencies: 0,
+      locateFile: (fileName) => {
+        if (fileName.endsWith('.wasm')) {
+          return '/flycast-wasm/pkg_upstream/flycast_libretro.wasm';
+        }
+        if (fileName.endsWith('.worker.js')) {
+          return '/flycast-wasm/pkg_upstream/' + fileName;
+        }
+        return fileName;
+      },
+    });
+    progressEl.value = 85;
+
+    // ============================================================
+    // Phase 3: Write files to virtual FS, configure, boot
+    // ============================================================
+    diag.phase = 'loading-rom';
+    statusEl.textContent = 'Writing ROM + BIOS to virtual FS...';
+
+    const FS = Module.FS;
+
+    // Create directory structure
+    const mkdirSafe = (p) => { try { FS.mkdir(p); } catch(e) {} };
+    mkdirSafe('/data');
+    mkdirSafe('/data/saves');
+    mkdirSafe('/home');
+    mkdirSafe('/home/web_user');
+    mkdirSafe('/home/web_user/.config');
+    mkdirSafe('/home/web_user/.config/retroarch');
+    mkdirSafe('/home/web_user/retroarch');
+    mkdirSafe('/home/web_user/retroarch/userdata');
+    mkdirSafe('/home/web_user/retroarch/userdata/config');
+    mkdirSafe('/home/web_user/retroarch/userdata/system');
+    mkdirSafe('/home/web_user/retroarch/userdata/system/dc');
+
+    // Write BIOS files where flycast expects them
+    FS.writeFile('/home/web_user/retroarch/userdata/system/dc/dc_boot.bin', biosBootData);
+    FS.writeFile('/home/web_user/retroarch/userdata/system/dc/dc_flash.bin', biosFlashData);
+
+    // RetroArch config — minimal, optimized for latency
+    const retroarchCfg =
+      'autosave_interval = 0\n' +
+      'video_vsync = false\n' +
+      'video_smooth = false\n' +
+      'audio_latency = 32\n' +
+      'video_top_portrait_viewport = true\n' +
+      'savefile_directory = "/data/saves"\n';
+    FS.writeFile('/home/web_user/.config/retroarch/retroarch.cfg', retroarchCfg);
+
+    // Write the ROM
+    FS.writeFile('/mvc2.chd', romData);
+    progressEl.value = 95;
+
+    // ============================================================
+    // Phase 4: Start the emulator
+    // ============================================================
+    diag.phase = 'booting';
+    statusEl.textContent = 'Booting MVC2...';
+
+    // cwrap our custom exports
+    injectInput = Module.cwrap('inject_maple_input', null, ['number', 'number', 'number', 'number']);
+    const toggleMainLoop = Module.cwrap('toggleMainLoop', null, ['number']);
+
+    // Hook postMainLoop — inject latest IS input before each frame
+    Module.postMainLoop = () => {
+      if (injectInput) {
+        injectInput(0, p1.buttons, p1.lt, p1.rt);
+        injectInput(1, p2.buttons, p2.lt, p2.rt);
+      }
+      diag.clientFrame++;
+    };
+
+    // Boot the game
+    Module.callMain(['/mvc2.chd']);
+    Module.resumeMainLoop();
+
+    progressEl.style.display = 'none';
+    diag.phase = 'running';
+    statusEl.textContent = 'MVC2 running — click Connect Server for input sync';
+
+    // Auto-connect to MapleCast server
+    connectWs();
+
+  } catch (err) {
+    statusEl.textContent = 'ERROR: ' + err.message;
+    console.error(err);
+    diag.phase = 'error: ' + err.message;
+  }
+}
+
+// ============================================================
+// WebSocket — receive IS (Input Sync) packets from server
+// ============================================================
+function connectWs() {
+  if (ws) ws.close();
+  const wsHost = window.location.hostname || '127.0.0.1';
+  const url = `ws://${wsHost}:7200`;
+  statusEl.textContent = 'Connecting to ' + url + '...';
+
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    diag.phase = 'synced';
+    statusEl.textContent = 'MVC2 — Input Synced';
+  };
+
+  ws.onmessage = (event) => {
+    if (typeof event.data === 'string') return;
+
+    const buf = new Uint8Array(event.data);
+    if (buf.length < 2) return;
+
+    // IS packet: [I][S][frame_u32_le][P1_lt][P1_rt][P1_btn_hi][P1_btn_lo][P2_lt][P2_rt][P2_btn_hi][P2_btn_lo]
+    if (buf[0] === 0x49 && buf[1] === 0x53 && buf.length >= 14) {
+      const view = new DataView(event.data);
+      diag.serverFrame = view.getUint32(2, true);
+      diag.isPackets++;
+
+      // Track jitter
+      const now = performance.now();
+      if (diag.lastIsTime > 0) {
+        diag.isJitter.push(Math.abs((now - diag.lastIsTime) - 16.667));
+        if (diag.isJitter.length > 60) diag.isJitter.shift();
+      }
+      diag.lastIsTime = now;
+
+      // Update input state — consumed by postMainLoop hook
+      // W3 format: [LT, RT, buttons_hi, buttons_lo]
+      // kcode is u32 active-low, upper 16 bits 0xFFFF
+      p1.lt  = buf[6];
+      p1.rt  = buf[7];
+      p1.buttons = 0xFFFF0000 | (buf[8] << 8) | buf[9];
+      p2.lt  = buf[10];
+      p2.rt  = buf[11];
+      p2.buttons = 0xFFFF0000 | (buf[12] << 8) | buf[13];
+    }
+  };
+
+  ws.onclose = () => { statusEl.textContent = 'Disconnected'; diag.phase = 'disconnected'; };
+  ws.onerror = () => { statusEl.textContent = 'WS Error'; };
+}
+
+// Render initial state
+const ctx = canvas.getContext('2d');
+ctx.fillStyle = '#111';
+ctx.fillRect(0, 0, 640, 480);
+ctx.fillStyle = '#0f0';
+ctx.font = '24px monospace';
+ctx.textAlign = 'center';
+ctx.fillText('MapleCast WASM', 320, 200);
+ctx.font = '14px monospace';
+ctx.fillText('Click "Boot MVC2" to start', 320, 240);
+ctx.font = '12px monospace';
+ctx.fillStyle = '#888';
+ctx.fillText('146MB CHD + 2MB BIOS will be fetched', 320, 270);
+statusEl.textContent = 'Ready — click Boot MVC2';
+updateDiag();
+</script>
+</body>
+</html>

@@ -155,10 +155,20 @@ let lastFrameTime = 0;
 function connect() {
   if (ws) { ws.close(); if (gamepadInterval) clearInterval(gamepadInterval); }
 
-  // Connect directly to Flycast WebSocket — NO PROXY
-  const wsHost = window.location.hostname || '127.0.0.1';
-  const url = `ws://${wsHost}:7200`;
-  statusEl.textContent = 'Connecting...';
+  // Connect to WebSocket signaling — auto-detect local vs tunnel
+  let url;
+  const params = new URLSearchParams(window.location.search);
+  const wsOverride = params.get('ws');  // ?ws=wss://tunnel-url.trycloudflare.com
+  if (wsOverride) {
+    url = wsOverride;
+  } else if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+    url = `ws://${window.location.hostname}:7200`;
+  } else {
+    // On a tunnel/remote domain — assume signaling is on same origin
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    url = `${proto}//${window.location.host}`;
+  }
+  statusEl.textContent = 'Connecting to ' + url + '...';
 
   ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
