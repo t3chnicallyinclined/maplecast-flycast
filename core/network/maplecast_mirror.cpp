@@ -22,6 +22,7 @@
 #include "serialize.h"
 #include "emulator.h"
 #include "hw/mem/mem_watch.h"
+#include "maplecast_lookup_test.h"
 #include "rend/texconv.h"
 
 #include <cstdio>
@@ -271,6 +272,37 @@ void serverPublish(TA_context* ctx)
 	uint32_t taSize = (uint32_t)(ctx->tad.thd_data - ctx->tad.thd_root);
 	uint8_t* taData = ctx->tad.thd_root;
 
+	// Measure delta from previous frame's TA commands
+	static std::vector<uint8_t> prevTA;
+	static uint64_t totalDeltaBytes = 0;
+	static uint64_t totalTABytes = 0;
+	static uint32_t deltaFrames = 0;
+
+	if (!prevTA.empty())
+	{
+		uint32_t changedBytes = 0;
+		uint32_t minSize = std::min((uint32_t)prevTA.size(), taSize);
+		for (uint32_t i = 0; i < minSize; i++)
+			if (taData[i] != prevTA[i]) changedBytes++;
+		// Bytes beyond the shorter buffer count as changed
+		changedBytes += (taSize > prevTA.size()) ? (taSize - prevTA.size()) : (prevTA.size() - taSize);
+
+		totalDeltaBytes += changedBytes;
+		totalTABytes += taSize;
+		deltaFrames++;
+
+		if (frameNum % 60 == 0)
+		{
+			float avgDelta = (float)totalDeltaBytes / deltaFrames;
+			float avgTA = (float)totalTABytes / deltaFrames;
+			printf("[MIRROR] TA delta avg: %.1f KB / %.1f KB (%.1f%%) over %u frames | At 60fps: %.1f MB/s\n",
+				avgDelta / 1024.0, avgTA / 1024.0,
+				avgDelta * 100.0 / avgTA, deltaFrames,
+				avgDelta * 60.0 / 1024.0 / 1024.0);
+		}
+	}
+	prevTA.assign(taData, taData + taSize);
+
 	memcpy(dst, &taSize, 4); dst += 4;
 	if (taSize > 0 && taData) {
 		memcpy(dst, taData, taSize); dst += taSize;
@@ -455,6 +487,10 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		// Run Process — this calls ta_parse which builds rend_context
 		// AND resolves textures from VRAM via GetTexture()
 		renderer->Process(&clientCtx);
+
+		// Build lookup cache from streamed TA commands (client VRAM is frozen = textures stable)
+		if (maplecast_lookup_test::active())
+			maplecast_lookup_test::addToCache(&clientCtx);
 
 		// Copy the built rend_context out
 		rc = clientCtx.rend;

@@ -29,6 +29,7 @@
 #include "oslib/i18n.h"
 #include "network/maplecast_client.h"
 #include "network/maplecast_mirror.h"
+#include "network/maplecast_lookup_test.h"
 #include "rend/gles/gles.h"
 
 #include <chrono>
@@ -63,7 +64,22 @@ bool mainui_rend_frame()
 	{
 		static rend_context mirrorCtx;
 		bool vramDirty = false;
-		if (maplecast_mirror::clientReceive(mirrorCtx, vramDirty))
+
+		// Try lookup first if cache is large enough
+		bool rendered = false;
+		if (maplecast_lookup_test::active() && maplecast_lookup_test::cacheSize() > 100)
+		{
+			rend_context lookupRc;
+			if (maplecast_lookup_test::clientLookup(lookupRc))
+			{
+				renderer->Render();
+				renderer->Present();
+				rendered = true;
+			}
+		}
+
+		// Fall back to streamed TA commands (also builds cache)
+		if (!rendered && maplecast_mirror::clientReceive(mirrorCtx, vramDirty))
 		{
 			bool isScreen = renderer->Render();
 			if (isScreen)

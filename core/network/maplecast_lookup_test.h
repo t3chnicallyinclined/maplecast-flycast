@@ -21,6 +21,8 @@ bool active();
 // Called from render path — records state+TA during record phase,
 // looks up TA during replay phase
 void serverRecord(TA_context* ctx);
+void addToCache(TA_context* ctx);  // mirror client adds templates to cache
 bool clientLookup(rend_context& rc);
 bool isReplaying();
+int cacheSize();
 }

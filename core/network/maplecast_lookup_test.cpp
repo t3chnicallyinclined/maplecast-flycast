@@ -95,6 +95,7 @@ void init()
 
 bool active() { return _active; }
 bool isReplaying() { return _active && !_recording; }
+int cacheSize() { return (int)_lookupTable.size(); }
 
 // Phase 1: called from server render path to record state + TA
 void serverRecord(TA_context* ctx)
@@ -183,11 +184,67 @@ void serverRecord(TA_context* ctx)
 	}
 }
 
+// Add a recorded TA frame to the lookup table (called from mirror client)
+void addToCache(TA_context* ctx)
+{
+	if (!_active || !ctx) return;
+
+	maplecast_gamestate::GameState gs;
+	maplecast_gamestate::readGameState(gs);
+
+	uint8_t visualKey[64];
+	int vk = 0;
+	visualKey[vk++] = gs.stage_id;
+	visualKey[vk++] = gs.in_match;
+	for (int i = 0; i < 6; i++)
+	{
+		visualKey[vk++] = gs.chars[i].active;
+		visualKey[vk++] = gs.chars[i].character_id;
+		visualKey[vk++] = gs.chars[i].facing_right;
+		visualKey[vk++] = gs.chars[i].palette_id;
+		memcpy(visualKey + vk, &gs.chars[i].animation_state, 2); vk += 2;
+		memcpy(visualKey + vk, &gs.chars[i].anim_timer, 2); vk += 2;
+		memcpy(visualKey + vk, &gs.chars[i].sprite_id, 2); vk += 2;
+	}
+	uint64_t hash = fnv1a(visualKey, vk);
+
+	if (_lookupTable.count(hash)) return; // already cached
+
+	RecordedFrame frame;
+	frame.gs_hash = hash;
+	frame.ta_size = (uint32_t)(ctx->tad.thd_data - ctx->tad.thd_root);
+	frame.ta_data.resize(frame.ta_size);
+	memcpy(frame.ta_data.data(), ctx->tad.thd_root, frame.ta_size);
+
+	frame.pvr_snapshot[0] = TA_GLOB_TILE_CLIP.full;
+	frame.pvr_snapshot[1] = SCALER_CTL.full;
+	frame.pvr_snapshot[2] = FB_X_CLIP.full;
+	frame.pvr_snapshot[3] = FB_Y_CLIP.full;
+	frame.pvr_snapshot[4] = FB_W_LINESTRIDE.full;
+	frame.pvr_snapshot[5] = FB_W_SOF1;
+	frame.pvr_snapshot[6] = FB_W_CTRL.full;
+	frame.pvr_snapshot[7] = FOG_CLAMP_MIN.full;
+	frame.pvr_snapshot[8] = FOG_CLAMP_MAX.full;
+	frame.pvr_snapshot[9] = ctx->rend.framebufferWidth;
+	frame.pvr_snapshot[10] = ctx->rend.framebufferHeight;
+	frame.pvr_snapshot[11] = ctx->rend.clearFramebuffer ? 1 : 0;
+	float fz = ctx->rend.fZ_max;
+	memcpy(&frame.pvr_snapshot[12], &fz, 4);
+
+	int idx = (int)_frames.size();
+	_lookupTable[hash] = idx;
+	_frames.push_back(std::move(frame));
+	_recordCount++;
+
+	if (_recordCount % 100 == 0)
+		printf("[LOOKUP] Cache: %d templates stored\n", _recordCount);
+}
+
 // Phase 2: called from render path during replay
 // Reads CURRENT game state, looks up matching TA commands from table
 bool clientLookup(rend_context& rc)
 {
-	if (!_active || _recording) return false;
+	if (!_active) return false;
 
 	// Read current game state from RAM
 	maplecast_gamestate::GameState gs;
