@@ -49,9 +49,16 @@ struct GameState {
 // Read current MVC2 game state from Flycast's emulated RAM
 void readGameState(GameState& state);
 
+// Write game state INTO Flycast's emulated RAM (client-side sync)
+// The exact reverse of readGameState — same addresses, same offsets
+void writeGameState(const GameState& state);
+
 // Serialize to fixed byte layout for network (no padding issues)
 // Returns bytes written. Layout documented in serialize() implementation.
 int serialize(const GameState& state, uint8_t* buf, int maxLen);
+
+// Deserialize from network bytes back to GameState
+void deserialize(const uint8_t* buf, int len, GameState& state);
 
 // Wire format size
 static constexpr int WIRE_SIZE = 5 + 2+2+2+2 + 4+4+4 + 6*38; // = 249 bytes

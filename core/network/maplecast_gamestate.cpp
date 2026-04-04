@@ -107,6 +107,57 @@ void readGameState(GameState& state)
 	}
 }
 
+// Write float to DC memory
+static void writeFloat(uint32_t addr, float f)
+{
+	uint32_t raw;
+	memcpy(&raw, &f, 4);
+	addrspace::write32(addr, raw);
+}
+
+// Write game state INTO Flycast's emulated RAM — exact reverse of readGameState
+void writeGameState(const GameState& state)
+{
+	// Global state
+	addrspace::write8(ADDR_IN_MATCH, state.in_match);
+	addrspace::write8(ADDR_TIMER, state.game_timer);
+	addrspace::write8(ADDR_STAGE, state.stage_id);
+	writeFloat(ADDR_CAMERA_X, state.camera_x);
+	writeFloat(ADDR_CAMERA_Y, state.camera_y);
+	addrspace::write16(ADDR_P1_METER_FILL, state.p1_meter_fill);
+	addrspace::write16(ADDR_P2_METER_FILL, state.p2_meter_fill);
+	addrspace::write8(ADDR_P1_METER_LVL, state.p1_meter_level);
+	addrspace::write8(ADDR_P2_METER_LVL, state.p2_meter_level);
+	addrspace::write16(ADDR_P1_COMBO, state.p1_combo);
+	addrspace::write16(ADDR_P2_COMBO, state.p2_combo);
+	addrspace::write32(ADDR_FRAME_CTR, state.frame_counter);
+
+	// Character states
+	for (int i = 0; i < 6; i++)
+	{
+		uint32_t base = CHAR_BASE[i];
+		const CharacterState& c = state.chars[i];
+
+		addrspace::write8(base + OFF_ACTIVE, c.active);
+		addrspace::write8(base + OFF_CHAR_ID, c.character_id);
+		writeFloat(base + OFF_POS_X, c.pos_x);
+		writeFloat(base + OFF_POS_Y, c.pos_y);
+		writeFloat(base + OFF_SCREEN_X, c.screen_x);
+		writeFloat(base + OFF_SCREEN_Y, c.screen_y);
+		writeFloat(base + OFF_VEL_X, c.vel_x);
+		writeFloat(base + OFF_VEL_Y, c.vel_y);
+		addrspace::write8(base + OFF_FACING, c.facing_right);
+		addrspace::write16(base + OFF_SPRITE_ID, c.sprite_id);
+		addrspace::write16(base + OFF_ANIM_STATE, c.animation_state);
+		addrspace::write16(base + OFF_ANIM_TIMER, c.anim_timer);
+		addrspace::write8(base + OFF_HEALTH, c.health);
+		addrspace::write8(base + OFF_RED_HEALTH, c.red_health);
+		addrspace::write8(base + OFF_SPECIAL_MOVE, c.special_move_id);
+		addrspace::write8(base + OFF_ASSIST_TYPE, c.assist_type);
+		addrspace::write8(base + OFF_PALETTE, c.palette_id);
+	}
+}
+
 static void writeU8(uint8_t* buf, int& off, uint8_t v) { buf[off++] = v; }
 static void writeU16(uint8_t* buf, int& off, uint16_t v) { memcpy(buf + off, &v, 2); off += 2; }
 static void writeU32(uint8_t* buf, int& off, uint32_t v) { memcpy(buf + off, &v, 4); off += 4; }
@@ -158,6 +209,53 @@ int serialize(const GameState& state, uint8_t* buf, int maxLen)
 	}
 
 	return off;  // should be WIRE_SIZE = 253
+}
+
+// Deserialize from network bytes back to GameState — exact reverse of serialize
+static uint8_t readBufU8(const uint8_t* buf, int& off) { return buf[off++]; }
+static uint16_t readBufU16(const uint8_t* buf, int& off) { uint16_t v; memcpy(&v, buf + off, 2); off += 2; return v; }
+static uint32_t readBufU32(const uint8_t* buf, int& off) { uint32_t v; memcpy(&v, buf + off, 4); off += 4; return v; }
+static float readBufF32(const uint8_t* buf, int& off) { float v; memcpy(&v, buf + off, 4); off += 4; return v; }
+
+void deserialize(const uint8_t* buf, int len, GameState& state)
+{
+	if (len < WIRE_SIZE) return;
+	int off = 0;
+
+	state.in_match       = readBufU8(buf, off);
+	state.game_timer     = readBufU8(buf, off);
+	state.stage_id       = readBufU8(buf, off);
+	state.p1_meter_level = readBufU8(buf, off);
+	state.p2_meter_level = readBufU8(buf, off);
+	state.p1_combo       = readBufU16(buf, off);
+	state.p2_combo       = readBufU16(buf, off);
+	state.p1_meter_fill  = readBufU16(buf, off);
+	state.p2_meter_fill  = readBufU16(buf, off);
+	state.camera_x       = readBufF32(buf, off);
+	state.camera_y       = readBufF32(buf, off);
+	state.frame_counter  = readBufU32(buf, off);
+
+	for (int i = 0; i < 6; i++)
+	{
+		CharacterState& c = state.chars[i];
+		c.active          = readBufU8(buf, off);
+		c.character_id    = readBufU8(buf, off);
+		c.facing_right    = readBufU8(buf, off);
+		c.health          = readBufU8(buf, off);
+		c.red_health      = readBufU8(buf, off);
+		c.special_move_id = readBufU8(buf, off);
+		c.assist_type     = readBufU8(buf, off);
+		c.palette_id      = readBufU8(buf, off);
+		c.pos_x           = readBufF32(buf, off);
+		c.pos_y           = readBufF32(buf, off);
+		c.screen_x        = readBufF32(buf, off);
+		c.screen_y        = readBufF32(buf, off);
+		c.vel_x           = readBufF32(buf, off);
+		c.vel_y           = readBufF32(buf, off);
+		c.sprite_id       = readBufU16(buf, off);
+		c.animation_state = readBufU16(buf, off);
+		c.anim_timer      = readBufU16(buf, off);
+	}
 }
 
 }  // namespace maplecast_gamestate
