@@ -15,6 +15,9 @@
 #include "network/maplecast_visual_cache.h"
 #include "network/maplecast_scanner.h"
 #include "network/maplecast_gs_loopback.h"
+#include "network/maplecast_rend_diff.h"
+#include "network/maplecast_rend_replay.h"
+#include "network/maplecast_mirror.h"
 #endif
 
 #include <mutex>
@@ -197,6 +200,11 @@ private:
 #endif
 		{
 			FC_PROFILE_SCOPE_NAMED("Renderer::Process");
+#ifdef MAPLECAST_TA_STREAM
+			// Mirror server: capture TA commands BEFORE Process consumes them
+			if (maplecast_mirror::isServer() && taContext)
+				maplecast_mirror::serverPublish(taContext);
+#endif
 			try {
 				renderer->Process(taContext);
 			} catch (...) {
@@ -214,6 +222,10 @@ private:
 		{
 			FC_PROFILE_SCOPE_NAMED("Renderer::Render");
 #ifdef MAPLECAST_TA_STREAM
+			// Rend replay: record frames AFTER Process (captures full rend_context)
+			if (maplecast_rend_replay::active() && !maplecast_rend_replay::replaying() && taContext)
+				maplecast_rend_replay::tick(taContext->rend);
+
 			// Brute force scanner: inject character state into RAM before render
 			if (maplecast_scanner::active())
 				maplecast_scanner::tick();
@@ -223,6 +235,9 @@ private:
 			// Record TA display list for visual cache BEFORE rendering
 			if (taContext)
 				maplecast_visual_cache::recordFrame(taContext->rend);
+			// Rend diff: compare 253-byte game state vs vertex output
+			if (maplecast_rend_diff::active() && taContext)
+				maplecast_rend_diff::tick(taContext->rend);
 #endif
 			try {
 				renderer->Render();

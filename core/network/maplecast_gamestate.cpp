@@ -40,6 +40,9 @@ static const uint32_t OFF_SPECIAL_MOVE    = 0x1E9;
 static const uint32_t OFF_ASSIST_TYPE     = 0x4C9;
 static const uint32_t OFF_PALETTE         = 0x52D;
 static const uint32_t OFF_ANIM_POINTER    = 0x168;  // pointer to animation table
+// Hidden state discovered by RAM autopsy (rend_diff v2)
+static const uint32_t OFF_SUB_ANIM_PHASE  = 0x502;  // sub-animation phase counter
+static const uint32_t OFF_CHAR_LINK_PTR   = 0x00C;  // linked list pointer between chars
 
 // Global state addresses
 static const uint32_t ADDR_IN_MATCH       = 0x8C289624;
@@ -54,6 +57,12 @@ static const uint32_t ADDR_P2_METER_LVL   = 0x8C28964B;
 static const uint32_t ADDR_P1_COMBO       = 0x8C289670;  // u16
 static const uint32_t ADDR_P2_COMBO       = 0x8C289672;  // u16
 static const uint32_t ADDR_FRAME_CTR      = 0x8C3496B0;  // u32
+// Hidden state discovered by RAM autopsy (rend_diff v2)
+// NOTE: stage_anim(0x8C1F9D80), render_interp/phase(0x8C1F9D8C-98) are frame-deterministic
+// and sync naturally between server+client — excluded from state
+static const uint32_t ADDR_FIGHT_TICK     = 0x8C268250;  // u8: fight engine logic counter
+static const uint32_t ADDR_MATCH_SUB      = 0x8C289621;  // u8: match sub-state
+static const uint32_t ADDR_ROUND_CTR      = 0x8C28962B;  // u8: round/sub-timer
 
 // Helper: read float from DC memory
 static float readFloat(uint32_t addr)

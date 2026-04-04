@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>MapleCast Rend Replay — WebGL2 + Textures</title>
+<style>
+  body { margin: 0; background: #111; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: monospace; color: #0f0; }
+  canvas { border: 1px solid #333; }
+  #info { margin: 10px; font-size: 14px; }
+  #status { color: #ff0; }
+</style>
+</head>
+<body>
+<div id="info">
+  <span id="status">Loading...</span>
+  <span id="stats"></span>
+</div>
+<canvas id="c" width="640" height="480"></canvas>
+
+<script>
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, depth: true });
+if (!gl) { document.getElementById('status').textContent = 'WebGL2 not supported'; throw 'no webgl2'; }
+
+const statusEl = document.getElementById('status');
+const statsEl = document.getElementById('stats');
+
+// Two shader programs: textured and untextured
+const vsrc = `#version 300 es
+precision highp float;
+layout(location=0) in vec3 in_pos;
+layout(location=1) in vec2 in_uv;
+layout(location=2) in vec4 in_base;
+layout(location=3) in vec4 in_offs;
+uniform mat4 ndcMat;
+out vec4 vtx_base;
+out vec4 vtx_offs;
+out vec2 vtx_uv;
+out float vtx_z;
+void main() {
+  vec4 vpos = ndcMat * vec4(in_pos, 1.0);
+  if (abs(vpos.z) > 0.00001) {
+    vpos /= vpos.z;
+    vpos.z = vpos.w;
+  } else {
+    vpos.z = 0.999;  // push background to far plane
+  }
+  vtx_base = in_base;
+  vtx_offs = in_offs;
+  vtx_uv = in_uv * in_pos.z;  // perspective-correct UVs
+  vtx_z = in_pos.z;
+  gl_Position = vpos;
+}`;
+
+const fsrc_tex = `#version 300 es
+precision mediump float;
+in vec4 vtx_base;
+in vec4 vtx_offs;
+in vec2 vtx_uv;
+in float vtx_z;
+uniform sampler2D tex;
+uniform int shadInstr;
+out vec4 fragColor;
+void main() {
+  vec2 uv = vtx_uv / vtx_z;
+  vec4 texcol = texture(tex, uv);
+  vec4 color = vtx_base;
+
+  // Dreamcast shading instructions (TSP.ShadInstr)
+  if (shadInstr == 0) {
+    color = texcol;
+  } else if (shadInstr == 1) {
+    color.rgb *= texcol.rgb;
+    color.a = texcol.a;
+  } else if (shadInstr == 2) {
+    color.rgb = mix(color.rgb, texcol.rgb, texcol.a);
+  } else {
+    color *= texcol;
+  }
+
+  // Add specular offset
+  color.rgb += vtx_offs.rgb;
+  color = clamp(color, 0.0, 1.0);
+
+  if (color.a < 0.02) discard;
+  fragColor = color;
+}`;
+
+const fsrc_notex = `#version 300 es
+precision mediump float;
+in vec4 vtx_base;
+in vec4 vtx_offs;
+in vec2 vtx_uv;
+in float vtx_z;
+out vec4 fragColor;
+void main() {
+  fragColor = vtx_base;
+  fragColor.rgb += vtx_offs.rgb;
+  if (fragColor.a < 0.02) discard;
+}`;
+
+function compileShader(src, type) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+function linkProg(vs, fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compileShader(vs, gl.VERTEX_SHADER));
+  gl.attachShader(p, compileShader(fs, gl.FRAGMENT_SHADER));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) console.error(gl.getProgramInfoLog(p));
+  return p;
+}
+
+const progTex = linkProg(vsrc, fsrc_tex);
+const progNoTex = linkProg(vsrc, fsrc_notex);
+const uNdcTex = gl.getUniformLocation(progTex, 'ndcMat');
+const uNdcNoTex = gl.getUniformLocation(progNoTex, 'ndcMat');
+const uSampler = gl.getUniformLocation(progTex, 'tex');
+const uShadInstr = gl.getUniformLocation(progTex, 'shadInstr');
+
+function makeNdcMatrix(w, h) {
+  return new Float32Array([
+    2.0/w, 0, 0, 0,
+    0, -2.0/h, 0, 0,
+    0, 0, 1, 0,
+    -1, 1, 0, 1,
+  ]);
+}
+
+// Buffers
+const STRIDE = 56;
+const vtxBuf = gl.createBuffer();
+const idxBuf = gl.createBuffer();
+
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+gl.bindBuffer(gl.ARRAY_BUFFER, vtxBuf);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 3, gl.FLOAT, false, STRIDE, 0);
+gl.enableVertexAttribArray(1);
+gl.vertexAttribPointer(1, 2, gl.FLOAT, false, STRIDE, 20);
+gl.enableVertexAttribArray(2);
+gl.vertexAttribPointer(2, 4, gl.UNSIGNED_BYTE, true, STRIDE, 12);
+gl.enableVertexAttribArray(3);
+gl.vertexAttribPointer(3, 4, gl.UNSIGNED_BYTE, true, STRIDE, 16);
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
+
+// Texture cache: TCW -> WebGLTexture
+const texCache = {};
+let texManifest = {};
+let texLoadCount = 0;
+let texTotal = 0;
+
+async function loadTextures() {
+  statusEl.textContent = 'Loading texture manifest...';
+  const resp = await fetch('rend_textures/manifest.json');
+  texManifest = await resp.json();
+  const keys = Object.keys(texManifest);
+  texTotal = keys.length;
+  statusEl.textContent = `Loading ${texTotal} textures...`;
+
+  // Load textures in parallel batches
+  const BATCH = 50;
+  for (let i = 0; i < keys.length; i += BATCH) {
+    const batch = keys.slice(i, i + BATCH);
+    await Promise.all(batch.map(async (tcwStr) => {
+      const info = texManifest[tcwStr];
+      const tcw = parseInt(tcwStr);
+      try {
+        const resp = await fetch(`rend_textures/${info.file}`);
+        const buf = await resp.arrayBuffer();
+        const dv = new DataView(buf);
+        const w = dv.getUint16(0, true);
+        const h = dv.getUint16(2, true);
+        const rgba = new Uint8Array(buf, 4);
+
+        const tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+        texCache[tcw] = tex;
+        texLoadCount++;
+      } catch(e) {}
+    }));
+    statusEl.textContent = `Textures: ${texLoadCount}/${texTotal}`;
+  }
+}
+
+// Parse recording
+let frames = [];
+let currentFrame = 0;
+let playing = false;
+
+async function loadRecording() {
+  statusEl.textContent = 'Fetching rend_recording.bin...';
+  const resp = await fetch('rend_recording.bin');
+  const buf = await resp.arrayBuffer();
+  const dv = new DataView(buf);
+  let off = 0;
+
+  off += 4; // magic
+  off += 4; // version
+  const frameCount = dv.getUint32(off, true); off += 4;
+  off += 4; // fps
+
+  statusEl.textContent = `Parsing ${frameCount} frames...`;
+
+  for (let f = 0; f < frameCount; f++) {
+    const frameSize = dv.getUint32(off, true); off += 4;
+    const frameEnd = off + frameSize;
+
+    const numVerts = dv.getUint32(off, true); off += 4;
+    const vertData = new Float32Array(numVerts * 5);
+    for (let i = 0; i < numVerts * 5; i++) {
+      vertData[i] = dv.getFloat32(off, true); off += 4;
+    }
+
+    const numColors = dv.getUint32(off, true); off += 4;
+    const colorData = new Uint8Array(new ArrayBuffer(numColors * 8));
+    for (let i = 0; i < numColors * 8; i++) {
+      colorData[i] = dv.getUint8(off); off++;
+    }
+
+    // Build interleaved
+    const interleaved = new ArrayBuffer(numVerts * STRIDE);
+    const ilView = new DataView(interleaved);
+    const ilBytes = new Uint8Array(interleaved);
+    for (let i = 0; i < numVerts; i++) {
+      const o = i * STRIDE;
+      ilView.setFloat32(o, vertData[i*5], true);
+      ilView.setFloat32(o+4, vertData[i*5+1], true);
+      ilView.setFloat32(o+8, vertData[i*5+2], true);
+      ilBytes[o+12] = colorData[i*8]; ilBytes[o+13] = colorData[i*8+1];
+      ilBytes[o+14] = colorData[i*8+2]; ilBytes[o+15] = colorData[i*8+3];
+      ilBytes[o+16] = colorData[i*8+4]; ilBytes[o+17] = colorData[i*8+5];
+      ilBytes[o+18] = colorData[i*8+6]; ilBytes[o+19] = colorData[i*8+7];
+      ilView.setFloat32(o+20, vertData[i*5+3], true);
+      ilView.setFloat32(o+24, vertData[i*5+4], true);
+    }
+
+    const numIdx = dv.getUint32(off, true); off += 4;
+    const indices = new Uint32Array(numIdx);
+    for (let i = 0; i < numIdx; i++) { indices[i] = dv.getUint32(off, true); off += 4; }
+
+    const polyLists = [];
+    for (let li = 0; li < 3; li++) {
+      const numPolys = dv.getUint32(off, true); off += 4;
+      const polys = [];
+      for (let i = 0; i < numPolys; i++) {
+        polys.push({
+          first: dv.getUint32(off, true), count: dv.getUint32(off+4, true),
+          tsp: dv.getUint32(off+8, true), tcw: dv.getUint32(off+12, true),
+          isp: dv.getUint32(off+16, true), pcw: dv.getUint32(off+20, true),
+        });
+        off += 24;
+      }
+      polyLists.push(polys);
+    }
+
+    const fZ_max = dv.getFloat32(off, true); off += 4;
+    const fbW = dv.getUint32(off, true); off += 4;
+    const fbH = dv.getUint32(off, true); off += 4;
+    off += 1; // clearFB
+
+    frames.push({ interleaved, indices, polyLists, fZ_max, fbW, fbH, numVerts, numIdx });
+    if (off !== frameEnd) off = frameEnd;
+    if (f % 100 === 0) statusEl.textContent = `Frames: ${f}/${frameCount}`;
+  }
+  statusEl.textContent = `${frames.length} frames ready.`;
+}
+
+function renderFrame(frame) {
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  if (!frame || frame.numVerts === 0) return;
+
+  const ndcMat = makeNdcMatrix(frame.fbW || 640, frame.fbH || 480);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, vtxBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, frame.interleaved, gl.DYNAMIC_DRAW);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, frame.indices, gl.DYNAMIC_DRAW);
+
+  function drawList(polys, blend) {
+    if (blend) {
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.depthMask(false);
+    } else {
+      gl.disable(gl.BLEND);
+      gl.depthMask(true);
+    }
+
+    for (const pp of polys) {
+      if (pp.count < 3 || pp.first + pp.count > frame.numIdx) continue;
+
+      const hasTex = (pp.pcw >> 3) & 1;
+      const glTex = hasTex ? texCache[pp.tcw] : null;
+
+      if (glTex) {
+        gl.useProgram(progTex);
+        gl.uniformMatrix4fv(uNdcTex, false, ndcMat);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, glTex);
+        gl.uniform1i(uSampler, 0);
+        // Extract ShadInstr from TSP bits 6-7
+        const shadInstr = (pp.tsp >> 6) & 3;
+        gl.uniform1i(uShadInstr, shadInstr);
+      } else {
+        gl.useProgram(progNoTex);
+        gl.uniformMatrix4fv(uNdcNoTex, false, ndcMat);
+      }
+
+      gl.drawElements(gl.TRIANGLE_STRIP, pp.count, gl.UNSIGNED_INT, pp.first * 4);
+    }
+  }
+
+  gl.enable(gl.DEPTH_TEST);
+  gl.depthFunc(gl.LEQUAL);
+
+  drawList(frame.polyLists[0], false);   // opaque
+  drawList(frame.polyLists[1], false);   // punch-through
+  drawList(frame.polyLists[2], true);    // translucent
+  gl.depthMask(true);
+}
+
+let lastTime = 0;
+function animate(time) {
+  requestAnimationFrame(animate);
+  if (!playing || frames.length === 0) return;
+  if (time - lastTime >= 1000/60) {
+    renderFrame(frames[currentFrame]);
+    statsEl.textContent = ` | Frame ${currentFrame+1}/${frames.length} | ${frames[currentFrame].numVerts} verts | ${texLoadCount} tex`;
+    currentFrame = (currentFrame + 1) % frames.length;
+    lastTime = time;
+  }
+}
+
+async function main() {
+  await loadRecording();
+  await loadTextures();
+  statusEl.textContent = `${frames.length} frames, ${texLoadCount} textures. Playing!`;
+  playing = true;
+  requestAnimationFrame(animate);
+}
+
+main();
+</script>
+</body>
+</html>

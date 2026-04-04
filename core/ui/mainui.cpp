@@ -27,9 +27,13 @@
 #include "imgui_driver.h"
 #include "profiler/fc_profiler.h"
 #include "oslib/i18n.h"
+#include "network/maplecast_client.h"
+#include "network/maplecast_mirror.h"
+#include "rend/gles/gles.h"
 
 #include <chrono>
 #include <thread>
+#include <cstdlib>
 
 static bool mainui_enabled;
 u32 MainFrameCount;
@@ -54,6 +58,30 @@ bool mainui_rend_frame()
 #ifndef TARGET_IPHONE
 		std::this_thread::sleep_for(std::chrono::milliseconds(16));
 #endif
+	}
+	else if (maplecast_mirror::isClient())
+	{
+		// Mirror client: receive TA commands + diffs from server
+		// clientReceive runs ta_parse internally, building rend_context with textures
+		static rend_context mirrorCtx;
+		bool vramDirty = false;
+		if (maplecast_mirror::clientReceive(mirrorCtx, vramDirty))
+		{
+			// gl.rendContext was set by Process() inside clientReceive
+			renderer->Render();
+			renderer->Present();
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	else if (maplecast_client::active())
+	{
+		try {
+			maplecast_client::renderFrame();
+			renderer->Present();
+		} catch (...) {
+			printf("[CLIENT] Render error\n");
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(16));
 	}
 	else
 	{
@@ -86,6 +114,7 @@ void mainui_init()
 		ERROR_LOG(RENDERER, "Renderer initialization failed");
 		gui_error(i18n::T("Renderer initialization failed.\nPlease select a different graphics API"));
 	}
+	// MapleCast client mode init moved to emulator.cpp (after save state loads)
 }
 
 void mainui_term()

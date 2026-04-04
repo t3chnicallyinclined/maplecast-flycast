@@ -44,6 +44,10 @@
 #include "network/maplecast_visual_cache.h"
 #include "network/maplecast_scanner.h"
 #include "network/maplecast_gs_loopback.h"
+#include "network/maplecast_rend_diff.h"
+#include "network/maplecast_rend_replay.h"
+#include "network/maplecast_client.h"
+#include "network/maplecast_mirror.h"
 #endif
 #include "hw/maple/maple_cfg.h"
 #include <cstdlib>
@@ -1026,6 +1030,19 @@ void Emulator::start()
 		// Loopback test: MAPLECAST_GS_LOOPBACK=1
 		if (std::getenv("MAPLECAST_GS_LOOPBACK"))
 			maplecast_gs_loopback::init();
+
+		// Rend diff: MAPLECAST_REND_DIFF=1 — find hidden state
+		if (std::getenv("MAPLECAST_REND_DIFF"))
+			maplecast_rend_diff::init();
+
+		// Rend replay: MAPLECAST_REND_REPLAY=1 — record 10s, replay in loop
+		if (std::getenv("MAPLECAST_REND_REPLAY"))
+			maplecast_rend_replay::init();
+
+		// Client mode: renderer-only playback from recording
+		if (std::getenv("MAPLECAST_CLIENT"))
+			maplecast_client::init();
+
 #endif
 
 		// Init telemetry (fire-and-forget UDP to localhost:7300)
@@ -1045,6 +1062,20 @@ void Emulator::start()
 		// Not supported with GGPO
 		config::EmulateFramebuffer.override(false);
 	setupPtyPipe();
+
+	// Mirror mode: shared memory rend_context streaming
+	// OUTSIDE the MAPLECAST block — client doesn't need server stack
+#ifdef MAPLECAST_TA_STREAM
+	if (std::getenv("MAPLECAST_MIRROR_SERVER"))
+		maplecast_mirror::initServer();
+	if (std::getenv("MAPLECAST_MIRROR_CLIENT"))
+	{
+		maplecast_mirror::initClient();
+		// Stop the emulator CPU — client only renders from mirror data
+		state = Loaded;
+		printf("[MIRROR] Emulator CPU stopped — renderer-only mode\n");
+	}
+#endif
 
 	memwatch::protect();
 

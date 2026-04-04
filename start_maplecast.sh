@@ -7,15 +7,17 @@ echo
 DIR="$(cd "$(dirname "$0")" && pwd)"
 ROM="$HOME/roms/mvc2_us/Marvel vs. Capcom 2 v1.001 (2000)(Capcom)(US)[!].gdi"
 
-# Kill any existing MapleCast processes
+# Kill any existing MapleCast processes and free ports
 EXISTING=$(pgrep -f "MAPLECAST=1.*flycast|telemetry\.py|http\.server.*--directory.*web" 2>/dev/null)
 if [ -n "$EXISTING" ]; then
   echo "Killing existing MapleCast processes: $EXISTING"
   kill $EXISTING 2>/dev/null
   sleep 1
-  # Force kill stragglers
   kill -9 $EXISTING 2>/dev/null
 fi
+# Force-free ports in case of orphaned processes
+fuser -k 7100/tcp 7200/tcp 7300/udp 8000/tcp 2>/dev/null
+sleep 1
 
 # Start telemetry server
 echo "[1/3] Starting telemetry server..."
@@ -38,7 +40,16 @@ if [ -n "$MAPLECAST_JPEG" ]; then
 else
   echo "[3/3] Starting Flycast server... H.264 mode"
 fi
-MAPLECAST=1 MAPLECAST_STREAM=1 "$DIR/build/flycast" "$ROM" &
+# Forward all MAPLECAST_* env vars to flycast
+export MAPLECAST=1
+export MAPLECAST_STREAM=1
+[ -n "$MAPLECAST_REND_DIFF" ] && export MAPLECAST_REND_DIFF
+[ -n "$MAPLECAST_SCAN" ] && export MAPLECAST_SCAN
+[ -n "$MAPLECAST_GS_LOOPBACK" ] && export MAPLECAST_GS_LOOPBACK
+[ -n "$MAPLECAST_REND_REPLAY" ] && export MAPLECAST_REND_REPLAY
+[ -n "$MAPLECAST_MIRROR_SERVER" ] && export MAPLECAST_MIRROR_SERVER
+[ -n "$MAPLECAST_MIRROR_CLIENT" ] && export MAPLECAST_MIRROR_CLIENT
+"$DIR/build/flycast" "$ROM" &
 FLY_PID=$!
 
 echo

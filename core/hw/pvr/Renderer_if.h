@@ -82,8 +82,9 @@ struct Renderer
 
 	virtual BaseTextureCacheData *GetTexture(TSP tsp, TCW tcw, int area = 0) { return nullptr; }
 
-protected:
+public:
 	bool resetTextureCache = false;
+protected:
 	bool clearLastFrame = false;
 	bool updatePalette = true;
 	bool updateFogTable = true;
