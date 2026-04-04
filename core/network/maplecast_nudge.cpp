@@ -15,6 +15,7 @@
 #include "hw/sh4/sh4_mem.h"
 #include "hw/maple/maple_cfg.h"
 #include "input/gamepad_device.h"
+#include "hw/mem/mem_watch.h"
 
 #include <cstdio>
 #include <cstring>
@@ -80,8 +81,11 @@ void initClient()
 		usleep(10000);
 	}
 
-	printf("[NUDGE] === CLIENT === receiving inputs + position corrections\n");
-	printf("[NUDGE] Server ready — client will receive inputs + 253B state\n");
+	// Unprotect memory so our writes don't hit page protection faults
+	memwatch::unprotect();
+
+	printf("[NUDGE] === CLIENT === receiving inputs + 253B state corrections\n");
+	printf("[NUDGE] Memory unprotected — writes will not trigger faults\n");
 }
 
 bool isServer() { return _isServer; }
