@@ -4,17 +4,23 @@
 	Split from maplecast_stream.cpp — this is JUST the WebSocket server.
 	No CUDA, no NVENC, no JPEG, no H.264. Just WebSocket send/receive.
 
-	Used by the mirror server to broadcast delta frames to clients.
+	On new client connect: sends full VRAM + PVR regs as initial sync.
+	Then delta frames stream normally.
 */
 #include "maplecast_ws_server.h"
+#include "hw/sh4/sh4_mem.h"
+#include "hw/pvr/pvr_mem.h"
+#include "hw/pvr/pvr_regs.h"
 
 #include <websocketpp/config/asio_no_tls.hpp>
 #include <websocketpp/server.hpp>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <set>
 #include <thread>
 #include <atomic>
+#include <vector>
 
 using WsServer = websocketpp::server<websocketpp::config::asio>;
 using ConnHdl = websocketpp::connection_hdl;
@@ -31,10 +37,33 @@ static bool _active = false;
 
 static void onOpen(ConnHdl hdl)
 {
-	std::lock_guard<std::mutex> lock(_connMutex);
-	_connections.insert(hdl);
-	_clientCount++;
+	{
+		std::lock_guard<std::mutex> lock(_connMutex);
+		_connections.insert(hdl);
+		_clientCount++;
+	}
 	printf("[maplecast-ws] client connected (%d total)\n", _clientCount.load());
+
+	// Send initial sync: VRAM (8MB) + PVR regs (32KB)
+	// Format: "SYNC" magic (4 bytes) + VRAM_SIZE (4 bytes) + VRAM data + pvr_RegSize (4 bytes) + PVR data
+	size_t syncSize = 4 + 4 + VRAM_SIZE + 4 + pvr_RegSize;
+	std::vector<uint8_t> syncBuf(syncSize);
+	uint8_t* dst = syncBuf.data();
+
+	memcpy(dst, "SYNC", 4); dst += 4;
+	uint32_t vs = VRAM_SIZE;
+	memcpy(dst, &vs, 4); dst += 4;
+	memcpy(dst, &vram[0], VRAM_SIZE); dst += VRAM_SIZE;
+	uint32_t ps = pvr_RegSize;
+	memcpy(dst, &ps, 4); dst += 4;
+	memcpy(dst, pvr_regs, pvr_RegSize);
+
+	try {
+		_ws.send(hdl, syncBuf.data(), syncSize, websocketpp::frame::opcode::binary);
+		printf("[maplecast-ws] sent initial sync: %.1f MB (VRAM + PVR regs)\n", syncSize / (1024.0 * 1024.0));
+	} catch (...) {
+		printf("[maplecast-ws] failed to send initial sync\n");
+	}
 }
 
 static void onClose(ConnHdl hdl)

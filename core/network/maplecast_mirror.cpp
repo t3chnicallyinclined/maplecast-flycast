@@ -382,7 +382,7 @@ static void wsClientRun(std::string host, int port)
 		printf("[MIRROR-WS] WebSocket handshake failed\n");
 		close(_wsFd); _wsFd = -1; return;
 	}
-	printf("[MIRROR-WS] WebSocket handshake OK — pipelined decode mode\n"); fflush(stdout);
+	printf("[MIRROR-WS] WebSocket handshake OK — waiting for initial sync\n"); fflush(stdout);
 
 	if (!_decodeTaAlloced) {
 		_decodeTaCtx[0].Alloc();
@@ -391,7 +391,30 @@ static void wsClientRun(std::string host, int port)
 	}
 	_decodeIdx = 0;
 
+	// Wait for initial SYNC message (VRAM + PVR regs)
+	bool synced = false;
 	std::vector<uint8_t> frame;
+	while (!synced) {
+		if (!wsReadFrame(_wsFd, frame)) {
+			printf("[MIRROR-WS] Connection lost waiting for sync\n"); fflush(stdout);
+			close(_wsFd); _wsFd = -1; return;
+		}
+		if (frame.size() > 8 && memcmp(frame.data(), "SYNC", 4) == 0) {
+			uint8_t* src = frame.data() + 4;
+			uint32_t vramSize; memcpy(&vramSize, src, 4); src += 4;
+			if (vramSize <= VRAM_SIZE) {
+				memcpy(&vram[0], src, vramSize); src += vramSize;
+				uint32_t pvrSize; memcpy(&pvrSize, src, 4); src += 4;
+				if (pvrSize <= (uint32_t)pvr_RegSize)
+					memcpy(pvr_regs, src, pvrSize);
+			}
+			synced = true;
+			printf("[MIRROR-WS] Initial sync received: %.1f MB — VRAM + PVR loaded\n",
+				frame.size() / (1024.0 * 1024.0));
+			fflush(stdout);
+		}
+	}
+
 	while (true) {
 		if (!wsReadFrame(_wsFd, frame)) {
 			printf("[MIRROR-WS] Connection lost\n"); fflush(stdout);
