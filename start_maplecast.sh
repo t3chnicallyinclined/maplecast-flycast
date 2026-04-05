@@ -42,7 +42,10 @@ else
 fi
 # Forward all MAPLECAST_* env vars to flycast
 export MAPLECAST=1
-export MAPLECAST_STREAM=1
+# Only start NVENC/JPEG stream if NOT in mirror mode — mirror has its own WS server
+if [ -z "$MAPLECAST_MIRROR_SERVER" ]; then
+  export MAPLECAST_STREAM=1
+fi
 [ -n "$MAPLECAST_MIRROR_SERVER" ] && export MAPLECAST_MIRROR_SERVER
 [ -n "$MAPLECAST_MIRROR_CLIENT" ] && export MAPLECAST_MIRROR_CLIENT
 "$DIR/build/flycast" "$ROM" &
