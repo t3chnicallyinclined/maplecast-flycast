@@ -317,6 +317,9 @@ int renderer_frame(uint8_t* data, int size)
     {
         int fbW, fbH;
         getScaledFramebufferSize(_ctx.rend, fbW, fbH);
+        // Cap framebuffer to prevent OOM — max 1920x1440 (4x native)
+        if (fbW > 1920) fbW = 640;
+        if (fbH > 1440) fbH = 480;
         _ctx.rend.framebufferWidth = fbW;
         _ctx.rend.framebufferHeight = fbH;
         if (_frameCount == 0)

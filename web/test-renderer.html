@@ -24,144 +24,53 @@ canvas { border: 2px solid #333; image-rendering: pixelated; max-width: 100%; ma
 #panel .section { margin-bottom: 10px; }
 #log { background: #0a0a0a; color: #888; font-size: 9px; padding: 5px; max-height: 150px; overflow-y: auto; white-space: pre-wrap; border: 1px solid #222; margin-top: 10px; }
 
-/* 3D CRT TUBE — raw tube floating in space */
+/* 3D Floating Panel */
 .crt-active #canvas-wrapper {
   perspective: 900px;
   display: flex; align-items: center; justify-content: center;
-  position: relative;
+  position: relative; min-height: 500px;
 }
 .crt-active .tv-body {
   position: relative;
   transform-style: preserve-3d;
-  transform: rotateY(-5deg) rotateX(2deg);
-  transition: transform 0.3s;
+  transition: transform 0.05s;
 }
-
-/* The glass face — bulging convex front */
-.crt-active .tube-face {
-  position: relative;
-  border-radius: 16px;
-  padding: 4px;
-  background: linear-gradient(145deg, #8a8878 0%, #6b6960 30%, #4a483f 70%, #3a3830 100%);
-  box-shadow:
-    0 0 0 3px #9a9480,
-    0 0 0 5px #706850,
-    8px 12px 40px rgba(0,0,0,0.7),
-    -4px -4px 15px rgba(100,95,80,0.15);
+.crt-active .panel-frame {
+  background: linear-gradient(145deg, #222 0%, #111 50%, #1a1a1a 100%);
+  border-radius: 8px; padding: 12px;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.8), 0 0 60px rgba(40,60,200,0.08),
+    inset 0 1px 0 rgba(80,80,80,0.2);
 }
-
-/* Gold rim around the glass — the metal frame */
-.crt-active .tube-rim {
-  border-radius: 12px;
-  padding: 3px;
-  background: linear-gradient(160deg, #c4a84d 0%, #8b7430 40%, #6b5820 70%, #4a3c10 100%);
-  box-shadow: inset 0 1px 0 rgba(220,200,100,0.4), inset 0 -1px 0 rgba(0,0,0,0.3);
+.crt-active .panel-screen {
+  position: relative; overflow: hidden; border-radius: 4px; background: #000;
 }
-
-/* The glass surface — slightly convex look */
-.crt-active .tube-glass {
-  position: relative;
-  overflow: hidden;
-  border-radius: 10px;
-  background: #0a0a0a;
-}
-.crt-active .tube-glass canvas {
-  display: block;
-  border-radius: 10px;
-  filter: brightness(1.1) contrast(1.08) saturate(1.1);
-}
-
-/* Glass reflection — the curved highlight */
-.crt-active .tube-reflection {
-  position: absolute; top: -10%; left: -10%; right: 50%; bottom: 60%;
-  background: radial-gradient(ellipse at 30% 30%,
-    rgba(255,255,255,0.12) 0%, rgba(255,255,255,0.04) 40%, transparent 70%);
-  border-radius: 50%; pointer-events: none; z-index: 2;
-  transform: rotate(-15deg);
-}
-
-/* Scanlines */
-.crt-active .tube-scanlines {
+.crt-active .panel-screen canvas { display: block; border-radius: 4px; }
+.crt-active .panel-reflection {
   position: absolute; top: 0; left: 0; right: 0; bottom: 0;
-  background: repeating-linear-gradient(0deg,
-    transparent, transparent 1px, rgba(0,0,0,0.06) 1px, rgba(0,0,0,0.06) 3px);
-  pointer-events: none; z-index: 3; border-radius: 10px;
+  background: linear-gradient(160deg, rgba(255,255,255,0.04) 0%, transparent 40%);
+  pointer-events: none; z-index: 2; border-radius: 4px;
+}
+.crt-active .panel-logo {
+  text-align: center; padding: 6px 0 2px;
+  font-family: monospace; font-size: 9px; color: #444; letter-spacing: 4px;
+}
+.crt-active .panel-stand {
+  display: flex; flex-direction: column; align-items: center;
+}
+.crt-active .panel-stand-neck {
+  width: 30px; height: 40px; background: linear-gradient(180deg, #222, #1a1a1a);
+}
+.crt-active .panel-stand-base {
+  width: 120px; height: 8px; background: linear-gradient(180deg, #2a2a2a, #181818);
+  border-radius: 0 0 4px 4px; box-shadow: 0 4px 15px rgba(0,0,0,0.6);
+}
+.crt-active .panel-glow {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: 130%; height: 130%;
+  background: radial-gradient(ellipse at center, rgba(40,60,200,0.06) 0%, transparent 60%);
+  pointer-events: none; z-index: -1;
 }
 
-/* The bulging tube body behind the face */
-.crt-active .tube-bulge {
-  position: absolute;
-  top: 10%; left: 10%; right: 10%; bottom: 10%;
-  background: radial-gradient(ellipse at 50% 50%,
-    #5a5850 0%, #4a4840 40%, #3a3830 70%, #2a2820 100%);
-  border-radius: 50%;
-  z-index: -1;
-  transform: translateZ(-80px) scale(1.15);
-  box-shadow:
-    0 0 30px rgba(0,0,0,0.5),
-    inset 0 0 40px rgba(0,0,0,0.3);
-}
-
-/* The neck / electron gun tapering back */
-.crt-active .tube-neck {
-  position: absolute;
-  left: 50%; top: 50%;
-  transform: translate(-50%, -50%) translateZ(-200px);
-  width: 80px; height: 80px;
-  background: radial-gradient(circle, #4a4840 0%, #3a3830 60%, #2a2820 100%);
-  border-radius: 50%;
-  box-shadow: 0 0 20px rgba(0,0,0,0.5);
-  z-index: -2;
-}
-
-/* Yoke coils around the neck */
-.crt-active .tube-yoke {
-  position: absolute;
-  left: 50%; top: 50%;
-  transform: translate(-50%, -50%) translateZ(-160px);
-  width: 120px; height: 120px;
-  border: 8px solid #8b5e2b;
-  border-radius: 50%;
-  box-shadow:
-    0 0 5px rgba(139,94,43,0.5),
-    inset 0 0 10px rgba(0,0,0,0.3);
-  z-index: -2;
-}
-.crt-active .tube-yoke::after {
-  content: '';
-  position: absolute; top: -4px; left: -4px; right: -4px; bottom: -4px;
-  border: 3px solid #d4842a;
-  border-radius: 50%;
-  opacity: 0.4;
-}
-
-/* Screen glow on the floor/space */
-.crt-active .tube-glow {
-  position: absolute; top: 50%; left: 50%;
-  transform: translate(-50%, -50%);
-  width: 140%; height: 140%;
-  background: radial-gradient(ellipse at center,
-    rgba(60,100,255,0.1) 0%, rgba(40,60,200,0.05) 30%, transparent 60%);
-  pointer-events: none; z-index: -3;
-  animation: glow-pulse 3s ease-in-out infinite alternate;
-}
-@keyframes glow-pulse {
-  from { opacity: 0.6; }
-  to { opacity: 1; }
-}
-
-/* Mounting tabs on the face (those metal brackets) */
-.crt-active .tube-tab {
-  position: absolute; width: 14px; height: 20px;
-  background: linear-gradient(180deg, #888, #555);
-  border-radius: 2px;
-  box-shadow: 1px 1px 3px rgba(0,0,0,0.5);
-  z-index: 5;
-}
-.crt-active .tube-tab.top { top: -8px; left: 50%; transform: translateX(-50%); }
-.crt-active .tube-tab.bottom { bottom: -8px; left: 50%; transform: translateX(-50%); width: 16px; }
-.crt-active .tube-tab.left { left: -8px; top: 50%; transform: translateY(-50%) rotate(90deg); }
-.crt-active .tube-tab.right { right: -8px; top: 50%; transform: translateY(-50%) rotate(90deg); }
 </style>
 </head>
 <body>
@@ -185,9 +94,7 @@ canvas { border: 2px solid #333; image-rendering: pixelated; max-width: 100%; ma
         <option value="960">960p (2x)</option>
         <option value="1440">1440p (3x)</option>
         <option value="1920">1080p (4x)</option>
-        <option value="2160">4K (4.5x)</option>
-        <option value="2880">6x INSANE</option>
-        <option value="3840">8K OVERKILL</option>
+        <option value="1920">4x MAX</option>
       </select>
     </label>
     <label>Texture Upscale:
@@ -248,7 +155,7 @@ canvas { border: 2px solid #333; image-rendering: pixelated; max-width: 100%; ma
 
   <div class="section">
     <h3>[3D] CRT TV Mode</h3>
-    <label><input type="checkbox" id="crt_tv_mode" onchange="toggleCRT3D()"> Enable 3D CRT TV</label>
+    <label><input type="checkbox" id="crt_tv_mode" onchange="toggleCRT3D()"> Enable 3D CRT Tube</label>
     <label>Rotate: <input type="range" id="crt_rotate" min="-30" max="30" value="-5" oninput="updateCRT3D()"> <span id="crt_rotate_val">-5</span></label>
     <label>Tilt: <input type="range" id="crt_tilt" min="-15" max="15" value="2" oninput="updateCRT3D()"> <span id="crt_tilt_val">2</span></label>
     <label>Distance: <input type="range" id="crt_dist" min="500" max="2000" value="900" oninput="updateCRT3D()"> <span id="crt_dist_val">900</span></label>
@@ -366,46 +273,33 @@ function togglePause() {
     paused = !paused;
 }
 
-// 3D CRT TUBE Mode — raw tube floating in void
+// 3D Floating Panel Mode
+let panelRotX = 0, panelRotY = 0, panelDist = 900;
+let panelDragging = false, panelLastX = 0, panelLastY = 0;
+
 function toggleCRT3D() {
     const enabled = document.getElementById('crt_tv_mode').checked;
     const gameCol = document.getElementById('game-col');
     const wrapper = document.getElementById('canvas-wrapper');
     const canvas = document.getElementById('game-canvas');
-
     if (enabled) {
         gameCol.classList.add('crt-active');
         wrapper.innerHTML = '';
         wrapper.style.position = 'relative';
-
         const tvBody = document.createElement('div');
         tvBody.className = 'tv-body';
-        tvBody.innerHTML = `
-            <div class="tube-face">
-                <div class="tube-tab top"></div>
-                <div class="tube-tab bottom"></div>
-                <div class="tube-tab left"></div>
-                <div class="tube-tab right"></div>
-                <div class="tube-rim">
-                    <div class="tube-glass">
-                        <div class="tube-reflection"></div>
-                        <div class="tube-scanlines"></div>
-                    </div>
-                </div>
-            </div>
-            <div class="tube-bulge"></div>
-            <div class="tube-yoke"></div>
-            <div class="tube-neck"></div>
-        `;
-
-        const glass = tvBody.querySelector('.tube-glass');
-        glass.insertBefore(canvas, glass.firstChild);
+        tvBody.innerHTML =
+            '<div class="panel-frame">' +
+            '  <div class="panel-screen"><div class="panel-reflection"></div></div>' +
+            '  <div class="panel-logo">MAPLECAST</div>' +
+            '</div>' +
+            '<div class="panel-stand"><div class="panel-stand-neck"></div><div class="panel-stand-base"></div></div>';
+        const screen = tvBody.querySelector('.panel-screen');
+        screen.insertBefore(canvas, screen.firstChild);
         wrapper.appendChild(tvBody);
-
         const glow = document.createElement('div');
-        glow.className = 'tube-glow';
+        glow.className = 'panel-glow';
         wrapper.appendChild(glow);
-
         updateCRT3D();
     } else {
         gameCol.classList.remove('crt-active');
@@ -417,64 +311,248 @@ function toggleCRT3D() {
     }
 }
 
-// Free rotation state
-let crtRotX = 2, crtRotY = -5;
-let crtDragging = false, crtLastX = 0, crtLastY = 0;
-
 function updateCRT3D() {
     if (!document.getElementById('crt_tv_mode').checked) return;
     const dist = document.getElementById('crt_dist').value;
     const glow = document.getElementById('crt_glow').value;
-
-    document.getElementById('crt_rotate_val').textContent = Math.round(crtRotY);
-    document.getElementById('crt_tilt_val').textContent = Math.round(crtRotX);
+    document.getElementById('crt_rotate_val').textContent = Math.round(panelRotY);
+    document.getElementById('crt_tilt_val').textContent = Math.round(panelRotX);
     document.getElementById('crt_dist_val').textContent = dist;
     document.getElementById('crt_glow_val').textContent = glow;
-
-    // Sync sliders with drag state
-    document.getElementById('crt_rotate').value = Math.max(-30, Math.min(30, crtRotY));
-    document.getElementById('crt_tilt').value = Math.max(-15, Math.min(15, crtRotX));
-
     const wrapper = document.getElementById('canvas-wrapper');
     wrapper.style.perspective = dist + 'px';
-
     const tvBody = wrapper.querySelector('.tv-body');
-    if (tvBody) tvBody.style.transform = `rotateY(${crtRotY}deg) rotateX(${crtRotX}deg)`;
-
-    const glowEl = wrapper.querySelector('.tube-glow');
-    if (glowEl) glowEl.style.background =
-        `radial-gradient(ellipse at center, rgba(60,100,255,${glow/500}) 0%, transparent 60%)`;
+    if (tvBody) tvBody.style.transform = 'rotateY(' + panelRotY + 'deg) rotateX(' + panelRotX + 'deg)';
+    const glowEl = wrapper.querySelector('.panel-glow');
+    if (glowEl) glowEl.style.opacity = glow / 100;
 }
 
-// Slider input also updates rotation
-document.getElementById('crt_rotate').addEventListener('input', function() {
-    crtRotY = parseFloat(this.value);
-    updateCRT3D();
-});
-document.getElementById('crt_tilt').addEventListener('input', function() {
-    crtRotX = parseFloat(this.value);
-    updateCRT3D();
-});
+document.getElementById('crt_rotate').addEventListener('input', function() { panelRotY = parseFloat(this.value); updateCRT3D(); });
+document.getElementById('crt_tilt').addEventListener('input', function() { panelRotX = parseFloat(this.value); updateCRT3D(); });
 
-// Mouse drag for free 3D rotation — NO LIMITS
 document.getElementById('canvas-wrapper').addEventListener('mousedown', function(e) {
     if (!document.getElementById('crt_tv_mode').checked) return;
-    crtDragging = true;
-    crtLastX = e.clientX;
-    crtLastY = e.clientY;
-    e.preventDefault();
+    panelDragging = true; panelLastX = e.clientX; panelLastY = e.clientY; e.preventDefault();
 });
 document.addEventListener('mousemove', function(e) {
-    if (!crtDragging) return;
-    const dx = e.clientX - crtLastX;
-    const dy = e.clientY - crtLastY;
-    crtRotY += dx * 0.5;
-    crtRotX -= dy * 0.5;
-    crtLastX = e.clientX;
-    crtLastY = e.clientY;
+    if (!panelDragging) return;
+    panelRotY += (e.clientX - panelLastX) * 0.5;
+    panelRotX -= (e.clientY - panelLastY) * 0.5;
+    panelLastX = e.clientX; panelLastY = e.clientY;
     updateCRT3D();
 });
-document.addEventListener('mouseup', function() { crtDragging = false; });
+document.addEventListener('mouseup', function() { panelDragging = false; });
+document.getElementById('canvas-wrapper').addEventListener('wheel', function(e) {
+    if (!document.getElementById('crt_tv_mode').checked) return;
+    panelDist = Math.max(300, Math.min(2000, panelDist + e.deltaY));
+    document.getElementById('crt_dist').value = panelDist;
+    updateCRT3D();
+    e.preventDefault();
+});
+
+// Three.js Sony Trinitron CRT TV — full 3D, 360 rotation
+let tvScene, tvCamera, tvRendererGL, tvScreenMesh, tvAnimId, tvGroup;
+let tvDrag = false, tvLastX = 0, tvLastY = 0, tvRotY = 0.3, tvRotX = 0;
+
+function toggleArcade3D() {
+    const enabled = document.getElementById('arcade_3d_mode').checked;
+    if (enabled) { document.getElementById('crt_tv_mode').checked = false; toggleCRT3D(); }
+    const canvas = document.getElementById('game-canvas');
+    const wrapper = document.getElementById('canvas-wrapper');
+    let container = document.getElementById('arcade-3d-container');
+    if (enabled) {
+        canvas.style.display = 'none';
+        if (!container) {
+            container = document.createElement('div');
+            container.id = 'arcade-3d-container';
+            container.style.cssText = 'width:700px;height:550px;cursor:grab;border-radius:8px;';
+            wrapper.appendChild(container);
+        }
+        container.style.display = 'block';
+        if (!window.THREE) {
+            const s = document.createElement('script');
+            s.src = 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
+            s.onload = function() { buildTrinitron(container, canvas); };
+            document.head.appendChild(s);
+        } else { buildTrinitron(container, canvas); }
+    } else {
+        canvas.style.display = 'block';
+        if (container) container.style.display = 'none';
+        if (tvAnimId) cancelAnimationFrame(tvAnimId);
+    }
+}
+
+function buildTrinitron(container, gameCanvas) {
+    tvScene = new THREE.Scene();
+    tvScene.background = new THREE.Color(0x0a0a0f);
+
+    const w = container.clientWidth || 700, h = container.clientHeight || 550;
+    tvCamera = new THREE.PerspectiveCamera(35, w/h, 0.1, 50);
+    tvCamera.position.set(0, 0.1, 3.5);
+
+    tvRendererGL = new THREE.WebGLRenderer({ antialias: true });
+    tvRendererGL.setSize(w, h);
+    tvRendererGL.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    tvRendererGL.shadowMap.enabled = true;
+    container.innerHTML = '';
+    container.appendChild(tvRendererGL.domElement);
+
+    // Lights
+    tvScene.add(new THREE.AmbientLight(0x333340, 0.5));
+    const key = new THREE.DirectionalLight(0xffeedd, 0.6);
+    key.position.set(3, 4, 5); key.castShadow = true; tvScene.add(key);
+    const rim = new THREE.PointLight(0x4455aa, 0.4, 8);
+    rim.position.set(-3, 2, -2); tvScene.add(rim);
+    const screenGlow = new THREE.PointLight(0x5588ff, 1.0, 3);
+    screenGlow.position.set(0, 0, 1.2); tvScene.add(screenGlow);
+
+    tvGroup = new THREE.Group();
+
+    // === TRINITRON BODY ===
+    // Main housing — dark gray plastic, slightly rounded
+    const bodyW = 1.8, bodyH = 1.5, bodyD = 1.6;
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2e, roughness: 0.7 });
+
+    // Front face
+    const frontGeo = new THREE.BoxGeometry(bodyW, bodyH, 0.08);
+    const front = new THREE.Mesh(frontGeo, bodyMat);
+    front.position.z = 0.04; tvGroup.add(front);
+
+    // Back — rounded CRT bulge using a sphere segment
+    const backMat = new THREE.MeshStandardMaterial({ color: 0x222226, roughness: 0.8 });
+    const backGeo = new THREE.SphereGeometry(1.1, 32, 32, 0, Math.PI*2, 0, Math.PI/2);
+    const back = new THREE.Mesh(backGeo, backMat);
+    back.rotation.x = Math.PI/2;
+    back.scale.set(0.82, 0.68, 0.9);
+    back.position.set(0, 0, -0.8);
+    tvGroup.add(back);
+
+    // Top panel
+    const topGeo = new THREE.BoxGeometry(bodyW, 0.06, bodyD * 0.55);
+    const top = new THREE.Mesh(topGeo, bodyMat);
+    top.position.set(0, bodyH/2, -0.4); tvGroup.add(top);
+
+    // Bottom panel
+    const bot = new THREE.Mesh(topGeo, bodyMat);
+    bot.position.set(0, -bodyH/2, -0.4); tvGroup.add(bot);
+
+    // Left side
+    const sideGeo = new THREE.BoxGeometry(0.06, bodyH, bodyD * 0.55);
+    const left = new THREE.Mesh(sideGeo, bodyMat);
+    left.position.set(-bodyW/2, 0, -0.4); tvGroup.add(left);
+
+    // Right side
+    const right = new THREE.Mesh(sideGeo, bodyMat);
+    right.position.set(bodyW/2, 0, -0.4); tvGroup.add(right);
+
+    // Vents on back
+    for (let y = -0.3; y <= 0.3; y += 0.06) {
+        const vent = new THREE.Mesh(
+            new THREE.BoxGeometry(0.6, 0.015, 0.01),
+            new THREE.MeshStandardMaterial({ color: 0x1a1a1e })
+        );
+        vent.position.set(0, y, -1.1);
+        tvGroup.add(vent);
+    }
+
+    // === SCREEN BEZEL ===
+    const bezelMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1e, roughness: 0.9 });
+    const bezelOuter = new THREE.Mesh(new THREE.BoxGeometry(1.55, 1.2, 0.03), bezelMat);
+    bezelOuter.position.z = 0.08; tvGroup.add(bezelOuter);
+
+    // === SCREEN — live game ===
+    const tex = new THREE.CanvasTexture(gameCanvas);
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tvScreenMesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(1.35, 1.0),
+        new THREE.MeshBasicMaterial({ map: tex })
+    );
+    tvScreenMesh.position.z = 0.095;
+    tvGroup.add(tvScreenMesh);
+
+    // Glass overlay — slight reflection
+    const glassMat = new THREE.MeshStandardMaterial({
+        color: 0xffffff, transparent: true, opacity: 0.03,
+        roughness: 0.1, metalness: 0.1
+    });
+    const glass = new THREE.Mesh(new THREE.PlaneGeometry(1.35, 1.0), glassMat);
+    glass.position.z = 0.1; tvGroup.add(glass);
+
+    // === FRONT PANEL CONTROLS ===
+    // Bottom strip with buttons
+    const ctrlStrip = new THREE.Mesh(
+        new THREE.BoxGeometry(1.55, 0.12, 0.04),
+        new THREE.MeshStandardMaterial({ color: 0x222226 })
+    );
+    ctrlStrip.position.set(0, -0.66, 0.08); tvGroup.add(ctrlStrip);
+
+    // Power button
+    const pwrBtn = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.025, 0.025, 0.02, 12),
+        new THREE.MeshStandardMaterial({ color: 0x44aa44, emissive: 0x115511, emissiveIntensity: 0.5 })
+    );
+    pwrBtn.rotation.x = Math.PI/2;
+    pwrBtn.position.set(0.6, -0.66, 0.1); tvGroup.add(pwrBtn);
+
+    // Channel/volume buttons
+    for (let i = 0; i < 3; i++) {
+        const btn = new THREE.Mesh(
+            new THREE.BoxGeometry(0.04, 0.03, 0.015),
+            new THREE.MeshStandardMaterial({ color: 0x333338 })
+        );
+        btn.position.set(0.35 + i * 0.07, -0.66, 0.1);
+        tvGroup.add(btn);
+    }
+
+    // SONY label
+    // (can't do text easily in Three.js without font loader, skip for now)
+
+    // === TRINITRON SPEAKER GRILLE (right side) ===
+    const grilleMat = new THREE.MeshStandardMaterial({ color: 0x1e1e22 });
+    for (let y = -0.4; y <= 0.4; y += 0.04) {
+        const bar = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.01, 0.02), grilleMat);
+        bar.position.set(0.84, y, 0.06);
+        tvGroup.add(bar);
+    }
+
+    // === STAND ===
+    const standMat = new THREE.MeshStandardMaterial({ color: 0x222226, roughness: 0.6 });
+    // Neck
+    const neck = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.15, 0.3), standMat);
+    neck.position.set(0, -0.82, -0.1); tvGroup.add(neck);
+    // Base
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.5, 0.04, 24), standMat);
+    base.position.set(0, -0.91, -0.1); tvGroup.add(base);
+
+    tvScene.add(tvGroup);
+
+    // === CONTROLS ===
+    container.addEventListener('mousedown', e => {
+        tvDrag = true; tvLastX = e.clientX; tvLastY = e.clientY;
+        container.style.cursor = 'grabbing';
+    });
+    document.addEventListener('mousemove', e => {
+        if (!tvDrag) return;
+        tvRotY += (e.clientX - tvLastX) * 0.008;
+        tvRotX = Math.max(-1, Math.min(1, tvRotX + (e.clientY - tvLastY) * 0.005));
+        tvLastX = e.clientX; tvLastY = e.clientY;
+    });
+    document.addEventListener('mouseup', () => { tvDrag = false; container.style.cursor = 'grab'; });
+    container.addEventListener('wheel', e => {
+        tvCamera.position.z = Math.max(1.5, Math.min(8, tvCamera.position.z + e.deltaY * 0.005));
+        e.preventDefault();
+    });
+
+    // Animate
+    (function animate() {
+        tvAnimId = requestAnimationFrame(animate);
+        tvGroup.rotation.y += (tvRotY - tvGroup.rotation.y) * 0.08;
+        tvGroup.rotation.x += (tvRotX - tvGroup.rotation.x) * 0.08;
+        if (tvScreenMesh && tvScreenMesh.material.map) tvScreenMesh.material.map.needsUpdate = true;
+        tvRendererGL.render(tvScene, tvCamera);
+    })();
+}
 
 // CSS Post-Processing
 function toggleCSS() {
