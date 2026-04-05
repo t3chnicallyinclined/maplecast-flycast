@@ -267,4 +267,141 @@ void deserialize(const uint8_t* buf, int len, GameState& state)
 	}
 }
 
+// === Player name patching ===
+// RAM layout at 0x8CBBC316:
+//   +0: "PLAYER" (6 bytes) — shared prefix for both players
+//   +6: \0\0 (2 bytes padding)
+//   +8: "1" (1 byte) — P1 number string
+//   +9: \0\0\0 (3 bytes padding)
+//   +12: "2" (1 byte) — P2 number string
+//   +13: \0\0\0 (3 bytes padding)
+//
+// Strategy: blank out "PLAYER" prefix, write player name into the "1"/"2" field.
+// The "1"/"2" field has 4 bytes (including null). With "PLAYER" blanked,
+// the display becomes just the 3-char tag. Not ideal but works.
+//
+// Better: overwrite the full 12 bytes (PLAYER + padding + number) per player.
+// But "PLAYER" is shared. So we write "      \0\0" (spaces) over PLAYER,
+// then write player name (up to 3 chars) into the number slot.
+
+// Player name patching — two approaches:
+//
+// Approach 1: Patch "PLAYER" prefix + number strings (limited to 3 chars)
+//   0x8CBBC316: "PLAYER\0\0" (8 bytes)
+//   0x8CBBC31E: "1\0\0\0" / "2\0\0\0" (4 bytes each)
+//
+// Approach 2: Patch the "PLAYER%d" format string used by pause/VS screen
+//   0x8CBBC982: "PLAYER%d\0\0\0\0" (12 bytes before "CONTINUE")
+//   The game sprintf's this with player number. If we replace the whole
+//   string with a pre-formatted name, %d never gets substituted.
+//   BUT: this is shared for both players, so we can only show one name at a time.
+//
+// Approach 3 (current): Continuously patch. Every frame, write names to BOTH locations.
+//   We overwrite "PLAYER\0\0" with spaces, then put full names in a custom RAM buffer
+//   and patch the string pointers in the draw call list.
+//
+// For now: use Approach 1 extended — overwrite "PLAYER\0\0" + "1\0\0\0" as one
+//   contiguous 12-byte region per player concept. The prefix "PLAYER" is shared
+//   but we can blank it and use the number field. Max 3 chars per name.
+//
+// ACTUALLY: Let's use unused RAM. Write full names to a free area and patch
+//   the "1" and "2" single-char strings to point... no, they're read as strings
+//   not pointers.
+//
+// BEST: Overwrite at 0x8CBBC316. The layout is:
+//   "PLAYER\0\0" + "1\0\0\0" + "2\0\0\0" + "WIN     %02d\0\0\0\0" + ...
+//   Total 16 bytes for PLAYER+padding+1+padding+2+padding
+//   If we overwrite all 16 bytes, we break WIN display.
+//   Safe: overwrite PLAYER(6) + pad(2) + "1"(1) = 9 bytes for P1 name concept
+//
+// The real solution: find work RAM and write there.
+// DC RAM 0x8C000000-0x8C00FFFF is usually stack/scratch. Let's use 0x8C000100.
+
+static const uint32_t ADDR_PLAYER_PREFIX = 0x8CBBC316;  // "PLAYER\0\0"
+static const uint32_t ADDR_P1_NUM = 0x8CBBC31E;         // "1\0\0\0"
+static const uint32_t ADDR_P2_NUM = 0x8CBBC322;         // "2\0\0\0"
+
+// Custom name buffer in unused low RAM — 16 bytes per player
+static const uint32_t ADDR_P1_NAME_BUF = 0x8C000100;
+static const uint32_t ADDR_P2_NAME_BUF = 0x8C000110;
+
+// Save originals
+static uint8_t _origData[16] = {};
+static bool _origSaved = false;
+static char _p1Name[16] = {};
+static char _p2Name[16] = {};
+static bool _namesActive = false;
+
+static void saveOriginals()
+{
+	if (_origSaved) return;
+	for (int i = 0; i < 16; i++)
+		_origData[i] = (uint8_t)addrspace::read8(ADDR_PLAYER_PREFIX + i);
+	_origSaved = true;
+}
+
+// Write a null-terminated string to DC RAM at addr, up to maxLen bytes
+static void writeString(uint32_t addr, const char* str, int maxLen)
+{
+	int len = strlen(str);
+	if (len > maxLen - 1) len = maxLen - 1;
+	for (int i = 0; i < len; i++)
+		addrspace::write8(addr + i, (uint8_t)str[i]);
+	for (int i = len; i < maxLen; i++)
+		addrspace::write8(addr + i, 0);
+}
+
+void setPlayerName(int slot, const char* name)
+{
+	saveOriginals();
+
+	char* dest = (slot == 0) ? _p1Name : _p2Name;
+	strncpy(dest, name, 15);
+	dest[15] = 0;
+
+	// Write to custom RAM buffer for future use
+	uint32_t bufAddr = (slot == 0) ? ADDR_P1_NAME_BUF : ADDR_P2_NAME_BUF;
+	writeString(bufAddr, dest, 16);
+
+	// SHOTGUN: patch every location that might display player names
+	// Let the user tell us which one actually shows on screen
+
+	// Location 1: "PLAYER\0\0" prefix (0x8CBBC316) — 8 bytes
+	// Blank it so only the number shows
+	writeString(ADDR_PLAYER_PREFIX, "      ", 8);
+
+	// Location 2: "1" / "2" number strings — 4 bytes each
+	uint32_t numAddr = (slot == 0) ? ADDR_P1_NUM : ADDR_P2_NUM;
+	writeString(numAddr, dest, 4);  // 3 chars max here
+
+	// Location 3: "PLAYER%d" format string (0x8CBBC982) — 12 bytes before CONTINUE
+	// Replace with just the name (no %d). Both players share this so only do it once.
+	// This will show the SAME name for both players on pause screen.
+	// writeString(0x8CBBC982, dest, 12);
+
+	// Location 4: "PLAYER\0TART BUTTON" (0x8CD10145+2) — press start area
+	// The \0 separates "PLAYER" from "START BUTTON", overwrite PLAYER part
+	writeString(0x8CD10147, dest, 6);
+
+	// Location 5: Second PLAYER at 0x8CD10187
+	writeString(0x8CD10187, dest, 6);
+
+	// Location 6: "PLAYER SE %x" at 0x8CBBEF24 — some debug string?
+	writeString(0x8CBBEF24, dest, 10);
+
+	_namesActive = true;
+	printf("[gamestate] P%d name SHOTGUN patched to '%s' at 6 locations\n", slot + 1, dest);
+}
+
+void restorePlayerNames()
+{
+	if (!_origSaved) return;
+	for (int i = 0; i < 16; i++)
+		addrspace::write8(ADDR_PLAYER_PREFIX + i, _origData[i]);
+	_namesActive = false;
+	_p1Name[0] = 0;
+	_p2Name[0] = 0;
+	printf("[gamestate] Player names restored\n");
+}
+
 }  // namespace maplecast_gamestate

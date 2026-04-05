@@ -1,0 +1,1779 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KING OF MARVEL — Put Your Quarter Up</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   KING OF MARVEL — SF2-inspired 80s arcade aesthetic
+   ============================================================ */
+@font-face {
+  font-family: 'Arcade';
+  src: local('Press Start 2P');
+}
+
+:root {
+  --bg-dark: #0a0a12;
+  --bg-panel: #10101c;
+  --bg-panel-alt: #14142a;
+  --border-gold: #d4a017;
+  --border-red: #c0392b;
+  --gold: #ffd700;
+  --gold-dim: #b8860b;
+  --hot-red: #ff2020;
+  --hot-blue: #1e90ff;
+  --neon-green: #39ff14;
+  --neon-cyan: #00e5ff;
+  --neon-pink: #ff0066;
+  --white: #f0e6d3;
+  --gray: #555;
+  --sf2-blue: #1a2a6c;
+  --sf2-orange: #e65c00;
+  --sf2-yellow: #f9d423;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--bg-dark);
+  color: var(--white);
+  font-family: 'Press Start 2P', monospace;
+  overflow-x: hidden;
+  min-height: 100vh;
+}
+
+/* === SCANLINE OVERLAY (whole page subtle) === */
+body::after {
+  content: '';
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.08) 2px,
+    rgba(0,0,0,0.08) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* === TOP BANNER — THE MARQUEE === */
+.marquee-banner {
+  background: linear-gradient(180deg, #1a0a2e 0%, #0d0618 50%, #1a0a2e 100%);
+  border-bottom: 4px solid var(--gold);
+  padding: 12px 20px;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.marquee-banner::before {
+  content: '';
+  position: absolute;
+  top: 0; left: -100%; right: -100%; bottom: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,215,0,0.05), transparent);
+  animation: marquee-shine 4s linear infinite;
+}
+
+@keyframes marquee-shine {
+  from { transform: translateX(-33%); }
+  to { transform: translateX(33%); }
+}
+
+.title-main {
+  font-size: 28px;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  background: linear-gradient(180deg, #fff 0%, var(--gold) 40%, var(--sf2-orange) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  text-shadow: none;
+  filter: drop-shadow(0 0 10px rgba(255,215,0,0.5));
+  line-height: 1.4;
+}
+
+.title-sub {
+  font-size: 10px;
+  color: var(--gold-dim);
+  letter-spacing: 6px;
+  margin-top: 4px;
+}
+
+.current-king {
+  margin-top: 10px;
+  padding: 8px 16px;
+  display: inline-block;
+  background: linear-gradient(90deg, transparent, rgba(255,215,0,0.1), transparent);
+  border: 1px solid var(--gold-dim);
+  animation: king-pulse 2s ease-in-out infinite;
+}
+
+.current-king .crown { font-size: 18px; }
+.current-king .king-name {
+  color: var(--gold);
+  font-size: 14px;
+  margin: 0 8px;
+}
+.current-king .king-streak {
+  color: var(--hot-red);
+  font-size: 11px;
+}
+
+@keyframes king-pulse {
+  0%, 100% { border-color: var(--gold-dim); box-shadow: 0 0 5px rgba(255,215,0,0.2); }
+  50% { border-color: var(--gold); box-shadow: 0 0 20px rgba(255,215,0,0.4); }
+}
+
+/* === VIEWER COUNT BAR === */
+.viewer-bar {
+  background: #080810;
+  border-bottom: 2px solid #222;
+  padding: 6px 20px;
+  display: flex;
+  justify-content: center;
+  gap: 30px;
+  font-size: 8px;
+  letter-spacing: 2px;
+}
+.viewer-bar span { opacity: 0.7; }
+.viewer-bar .count { color: var(--neon-green); opacity: 1; }
+
+/* === MAIN LAYOUT === */
+.main-layout {
+  display: grid;
+  grid-template-columns: 260px 1fr 280px;
+  gap: 0;
+  max-width: 1400px;
+  margin: 0 auto;
+  min-height: calc(100vh - 160px);
+}
+
+/* === LEFT SIDEBAR — HALL OF FAME === */
+.sidebar-left {
+  background: var(--bg-panel);
+  border-right: 3px solid #222;
+  padding: 0;
+  overflow-y: auto;
+}
+
+.panel-header {
+  background: linear-gradient(180deg, var(--sf2-blue) 0%, #0d1530 100%);
+  border-bottom: 3px solid var(--gold-dim);
+  padding: 12px 10px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--gold);
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.leaderboard-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  background: #0a0a18;
+  border-bottom: 2px solid #1a1a2e;
+}
+
+.lb-tab {
+  flex: 1;
+  min-width: 33.33%;
+  padding: 8px 4px;
+  font-size: 7px;
+  font-family: 'Press Start 2P', monospace;
+  text-align: center;
+  background: transparent;
+  color: var(--gray);
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s;
+  letter-spacing: 1px;
+  border-bottom: 2px solid transparent;
+}
+
+.lb-tab:hover { color: var(--white); background: rgba(255,255,255,0.03); }
+.lb-tab.active {
+  color: var(--gold);
+  border-bottom-color: var(--gold);
+  background: rgba(255,215,0,0.05);
+}
+
+.leaderboard-list {
+  padding: 8px;
+}
+
+.lb-entry {
+  display: flex;
+  align-items: center;
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  background: rgba(255,255,255,0.02);
+  border-left: 3px solid transparent;
+  transition: all 0.2s;
+  font-size: 8px;
+}
+
+.lb-entry:hover { background: rgba(255,255,255,0.05); }
+
+.lb-entry.rank-1 {
+  border-left-color: var(--gold);
+  background: rgba(255,215,0,0.08);
+}
+.lb-entry.rank-2 { border-left-color: #c0c0c0; }
+.lb-entry.rank-3 { border-left-color: #cd7f32; }
+
+.lb-rank {
+  width: 24px;
+  text-align: center;
+  font-size: 9px;
+  color: var(--gray);
+  flex-shrink: 0;
+}
+
+.lb-entry.rank-1 .lb-rank { color: var(--gold); }
+
+.lb-name {
+  flex: 1;
+  margin: 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 8px;
+}
+
+.lb-entry.rank-1 .lb-name { color: var(--gold); }
+
+.lb-stat {
+  color: var(--neon-cyan);
+  font-size: 8px;
+  flex-shrink: 0;
+}
+
+/* === CENTER — THE CABINET === */
+.cabinet-area {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: radial-gradient(ellipse at center bottom, #1a1030 0%, var(--bg-dark) 70%);
+  padding: 16px 20px;
+  position: relative;
+}
+
+/* Cabinet frame */
+.cabinet-frame {
+  width: 100%;
+  max-width: 720px;
+  position: relative;
+}
+
+/* Marquee on cabinet */
+.cabinet-marquee {
+  background: linear-gradient(180deg, #2d1b4e 0%, #1a0f30 30%, #2d1b4e 100%);
+  border: 3px solid #444;
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  padding: 10px;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.cabinet-marquee::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: linear-gradient(90deg,
+    transparent 0%, rgba(255,255,255,0.03) 50%, transparent 100%
+  );
+  animation: marquee-shine 3s ease-in-out infinite;
+}
+
+.cabinet-marquee-text {
+  font-size: 14px;
+  letter-spacing: 2px;
+  background: linear-gradient(180deg, #fff 0%, var(--sf2-yellow) 50%, var(--sf2-orange) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Screen bezel */
+.screen-bezel {
+  background: #111;
+  border: 4px solid #333;
+  border-top: 4px solid #444;
+  padding: 6px;
+  position: relative;
+}
+
+.screen-bezel::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
+}
+
+/* The game screen */
+#game-screen {
+  width: 100%;
+  aspect-ratio: 4/3;
+  background: #000;
+  position: relative;
+  overflow: hidden;
+  image-rendering: pixelated;
+}
+
+/* CRT effect on game screen */
+#game-screen::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 1px,
+    rgba(0,0,0,0.15) 1px,
+    rgba(0,0,0,0.15) 3px
+  );
+  pointer-events: none;
+  z-index: 5;
+}
+
+#game-screen::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,0.4) 100%);
+  pointer-events: none;
+  z-index: 6;
+}
+
+/* INSERT COIN idle screen */
+.idle-screen {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(ellipse at center, #0a0a30 0%, #000 100%);
+  z-index: 2;
+}
+
+.idle-screen .game-logo {
+  font-size: 20px;
+  letter-spacing: 3px;
+  background: linear-gradient(180deg, #fff 0%, var(--gold) 50%, var(--sf2-orange) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 40px;
+}
+
+.idle-screen .insert-coin {
+  font-size: 12px;
+  color: var(--white);
+  animation: blink-coin 1s step-end infinite;
+}
+
+@keyframes blink-coin {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.idle-screen .vs-art {
+  font-size: 60px;
+  margin-bottom: 20px;
+  filter: drop-shadow(0 0 20px rgba(255,215,0,0.3));
+}
+
+/* Match HUD overlay */
+.match-hud {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  padding: 8px 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  z-index: 4;
+  background: linear-gradient(180deg, rgba(0,0,0,0.7) 0%, transparent 100%);
+  display: none; /* shown during match */
+}
+
+.match-hud.active { display: flex; }
+
+.hud-player {
+  text-align: center;
+  min-width: 120px;
+}
+
+.hud-player .hud-name {
+  font-size: 9px;
+  margin-bottom: 4px;
+}
+
+.hud-player.p1 .hud-name { color: var(--hot-blue); }
+.hud-player.p2 .hud-name { color: var(--hot-red); }
+
+.health-bar-bg {
+  width: 200px;
+  height: 12px;
+  background: #1a1a1a;
+  border: 1px solid #444;
+  position: relative;
+  overflow: hidden;
+}
+
+.health-bar {
+  height: 100%;
+  transition: width 0.3s;
+}
+
+.p1 .health-bar {
+  background: linear-gradient(90deg, #1e90ff, #00bfff);
+  float: right;
+}
+.p2 .health-bar {
+  background: linear-gradient(90deg, #ff3030, #ff6060);
+}
+
+.health-bar-bg::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: linear-gradient(180deg, rgba(255,255,255,0.2) 0%, transparent 50%, rgba(0,0,0,0.2) 100%);
+  pointer-events: none;
+}
+
+.hud-center {
+  text-align: center;
+  padding: 0 10px;
+}
+
+.hud-timer {
+  font-size: 18px;
+  color: var(--sf2-yellow);
+  text-shadow: 2px 2px 0 #000;
+}
+
+.hud-combo {
+  font-size: 8px;
+  color: var(--neon-cyan);
+  margin-top: 4px;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+.hud-combo.visible {
+  opacity: 1;
+  animation: combo-shake 0.15s ease-in-out;
+}
+
+@keyframes combo-shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-2px) scale(1.1); }
+  75% { transform: translateX(2px) scale(1.1); }
+}
+
+/* Control panel (below screen) */
+.control-panel {
+  background: linear-gradient(180deg, #2a2a2a 0%, #1a1a1a 30%, #222 100%);
+  border: 3px solid #333;
+  border-top: none;
+  border-radius: 0 0 4px 4px;
+  padding: 12px 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  position: relative;
+}
+
+.control-panel::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 20px; right: 20px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, #444, transparent);
+}
+
+.cp-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.cp-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.2);
+}
+
+.cp-btn.red { background: radial-gradient(circle at 40% 35%, #ff6060, #cc0000); }
+.cp-btn.blue { background: radial-gradient(circle at 40% 35%, #6060ff, #0000cc); }
+.cp-btn.green { background: radial-gradient(circle at 40% 35%, #60ff60, #00aa00); }
+.cp-btn.yellow { background: radial-gradient(circle at 40% 35%, #ffff60, #ccaa00); }
+
+.cp-joystick {
+  width: 28px;
+  height: 28px;
+  background: radial-gradient(circle at 45% 40%, #555, #222);
+  border-radius: 50%;
+  border: 2px solid #444;
+  box-shadow: 0 3px 6px rgba(0,0,0,0.5);
+}
+
+.cp-side {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Coin slot */
+.coin-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.coin-slot-hole {
+  width: 30px;
+  height: 6px;
+  background: #0a0a0a;
+  border: 1px solid #333;
+  border-radius: 3px;
+  box-shadow: inset 0 1px 3px rgba(0,0,0,0.8);
+}
+
+.coin-slot-label {
+  font-size: 5px;
+  color: #666;
+  letter-spacing: 1px;
+}
+
+/* Match results overlay */
+.match-results {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.85);
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 8;
+  text-align: center;
+}
+
+.match-results.active { display: flex; }
+
+.result-winner {
+  font-size: 11px;
+  color: var(--gold);
+  margin-bottom: 8px;
+  letter-spacing: 2px;
+}
+
+.result-title {
+  font-size: 20px;
+  color: var(--hot-red);
+  margin-bottom: 20px;
+  text-shadow: 2px 2px 0 #000;
+  animation: result-flash 0.5s ease-out;
+}
+
+@keyframes result-flash {
+  0% { transform: scale(2); opacity: 0; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.result-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  font-size: 7px;
+  margin-bottom: 20px;
+}
+
+.result-stat {
+  padding: 6px 12px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid #333;
+}
+
+.result-stat .stat-label { color: var(--gray); margin-bottom: 4px; }
+.result-stat .stat-value { color: var(--neon-cyan); font-size: 10px; }
+
+.result-next {
+  font-size: 8px;
+  color: var(--sf2-yellow);
+  animation: blink-coin 1s step-end infinite;
+}
+
+/* === TICKER BAR === */
+.ticker-bar {
+  background: #080810;
+  border-top: 2px solid #1a1a2e;
+  border-bottom: 2px solid #1a1a2e;
+  padding: 6px 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.ticker-content {
+  display: inline-block;
+  font-size: 8px;
+  color: var(--gold-dim);
+  letter-spacing: 1px;
+  animation: ticker-scroll 30s linear infinite;
+}
+
+@keyframes ticker-scroll {
+  0% { transform: translateX(100vw); }
+  100% { transform: translateX(-100%); }
+}
+
+.ticker-content .ticker-fire { color: var(--hot-red); }
+.ticker-content .ticker-crown { color: var(--gold); }
+.ticker-content .ticker-skull { color: #aaa; }
+
+/* === RIGHT SIDEBAR — THE LINE === */
+.sidebar-right {
+  background: var(--bg-panel);
+  border-left: 3px solid #222;
+  display: flex;
+  flex-direction: column;
+}
+
+/* NOW PLAYING */
+.now-playing {
+  padding: 12px;
+  border-bottom: 2px solid #1a1a2e;
+}
+
+.np-header {
+  font-size: 8px;
+  color: var(--hot-red);
+  letter-spacing: 2px;
+  margin-bottom: 10px;
+  text-align: center;
+}
+
+.np-vs {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 10px;
+}
+
+.np-player {
+  text-align: center;
+  padding: 8px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid #222;
+  min-width: 90px;
+}
+
+.np-player .np-label {
+  font-size: 7px;
+  color: var(--gray);
+  margin-bottom: 4px;
+}
+
+.np-player .np-name {
+  font-size: 9px;
+  margin-bottom: 4px;
+}
+
+.np-player.p1 .np-name { color: var(--hot-blue); }
+.np-player.p2 .np-name { color: var(--hot-red); }
+
+.np-player .np-record {
+  font-size: 7px;
+  color: var(--gray);
+}
+
+.np-vs-text {
+  font-size: 16px;
+  color: var(--sf2-yellow);
+  text-shadow: 1px 1px 0 #000;
+}
+
+/* I GOT NEXT button */
+.got-next-section {
+  padding: 12px;
+  text-align: center;
+  border-bottom: 2px solid #1a1a2e;
+}
+
+.btn-got-next {
+  width: 100%;
+  padding: 14px 16px;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 11px;
+  background: linear-gradient(180deg, var(--sf2-yellow) 0%, var(--sf2-orange) 100%);
+  color: #000;
+  border: 3px solid var(--gold);
+  cursor: pointer;
+  letter-spacing: 2px;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.2s;
+  text-transform: uppercase;
+}
+
+.btn-got-next::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: linear-gradient(45deg, transparent 40%, rgba(255,255,255,0.2) 50%, transparent 60%);
+  animation: btn-shine 3s ease-in-out infinite;
+}
+
+@keyframes btn-shine {
+  0% { transform: translateX(-100%) rotate(0deg); }
+  100% { transform: translateX(100%) rotate(0deg); }
+}
+
+.btn-got-next:hover {
+  transform: scale(1.03);
+  box-shadow: 0 0 20px rgba(255,215,0,0.4);
+}
+
+.btn-got-next:active {
+  transform: scale(0.98);
+}
+
+.btn-got-next.in-queue {
+  background: linear-gradient(180deg, #333 0%, #1a1a1a 100%);
+  color: var(--gold);
+  border-color: var(--gold-dim);
+  font-size: 9px;
+}
+
+.btn-leave-queue {
+  display: none;
+  width: 100%;
+  padding: 8px;
+  margin-top: 6px;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 7px;
+  background: transparent;
+  color: var(--hot-red);
+  border: 1px solid var(--hot-red);
+  cursor: pointer;
+  letter-spacing: 1px;
+}
+
+.btn-leave-queue:hover { background: rgba(255,0,0,0.1); }
+
+/* THE LINE (queue) */
+.queue-section {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0;
+}
+
+.queue-header {
+  font-size: 9px;
+  color: var(--sf2-yellow);
+  letter-spacing: 2px;
+  padding: 10px 12px;
+  background: rgba(255,255,255,0.02);
+  border-bottom: 1px solid #1a1a2e;
+  text-align: center;
+}
+
+.queue-list {
+  padding: 8px;
+}
+
+.queue-entry {
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  margin-bottom: 4px;
+  background: rgba(255,255,255,0.02);
+  border-left: 3px solid #333;
+  transition: all 0.3s;
+  font-size: 8px;
+}
+
+.queue-entry.next-up {
+  border-left-color: var(--neon-green);
+  background: rgba(57,255,20,0.05);
+}
+
+.queue-entry.is-me {
+  border-left-color: var(--gold);
+  background: rgba(255,215,0,0.05);
+}
+
+.queue-pos {
+  width: 20px;
+  text-align: center;
+  color: var(--gray);
+  font-size: 9px;
+  flex-shrink: 0;
+}
+
+.queue-entry.next-up .queue-pos { color: var(--neon-green); }
+
+.queue-name {
+  flex: 1;
+  margin: 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-record {
+  font-size: 7px;
+  color: var(--gray);
+  flex-shrink: 0;
+}
+
+.queue-empty {
+  text-align: center;
+  padding: 20px;
+  color: var(--gray);
+  font-size: 7px;
+  letter-spacing: 1px;
+}
+
+/* === BOTTOM — CHAT === */
+.chat-section {
+  background: var(--bg-panel);
+  border-top: 3px solid var(--gold-dim);
+}
+
+.chat-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 16px;
+  background: linear-gradient(180deg, var(--sf2-blue) 0%, #0d1530 100%);
+  border-bottom: 1px solid #222;
+}
+
+.chat-title {
+  font-size: 8px;
+  color: var(--gold);
+  letter-spacing: 2px;
+}
+
+.chat-reactions {
+  display: flex;
+  gap: 4px;
+}
+
+.reaction-btn {
+  padding: 4px 8px;
+  font-size: 7px;
+  font-family: 'Press Start 2P', monospace;
+  background: rgba(255,255,255,0.05);
+  color: var(--white);
+  border: 1px solid #333;
+  cursor: pointer;
+  transition: all 0.15s;
+  letter-spacing: 0;
+}
+
+.reaction-btn:hover {
+  background: rgba(255,255,255,0.1);
+  border-color: var(--gold-dim);
+  transform: scale(1.05);
+}
+
+.chat-messages {
+  height: 120px;
+  overflow-y: auto;
+  padding: 8px 16px;
+  font-size: 8px;
+  line-height: 1.8;
+}
+
+.chat-msg {
+  animation: chat-fade-in 0.3s ease-out;
+}
+
+@keyframes chat-fade-in {
+  from { opacity: 0; transform: translateX(10px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.chat-msg .msg-name { color: var(--neon-cyan); }
+.chat-msg .msg-name.king { color: var(--gold); }
+.chat-msg .msg-name.king::before { content: '\uD83D\uDC51 '; }
+.chat-msg .msg-text { color: #ccc; }
+.chat-msg .msg-system { color: var(--sf2-yellow); font-style: italic; }
+.chat-msg .msg-hype { color: var(--hot-red); }
+
+.chat-input-row {
+  display: flex;
+  border-top: 1px solid #222;
+}
+
+.chat-input {
+  flex: 1;
+  padding: 10px 16px;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 8px;
+  background: #080810;
+  color: var(--white);
+  border: none;
+  outline: none;
+}
+
+.chat-input::placeholder { color: #444; }
+
+.chat-send-btn {
+  padding: 10px 16px;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 8px;
+  background: var(--sf2-blue);
+  color: var(--gold);
+  border: none;
+  border-left: 1px solid #222;
+  cursor: pointer;
+  letter-spacing: 1px;
+}
+
+.chat-send-btn:hover { background: #243b8c; }
+
+/* === SIGN IN MODAL === */
+.modal-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.8);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-overlay.active { display: flex; }
+
+.modal-box {
+  background: var(--bg-panel);
+  border: 3px solid var(--gold-dim);
+  padding: 0;
+  width: 340px;
+  max-width: 90vw;
+}
+
+.modal-header {
+  background: linear-gradient(180deg, var(--sf2-blue) 0%, #0d1530 100%);
+  padding: 12px 16px;
+  border-bottom: 2px solid var(--gold-dim);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.modal-title {
+  font-size: 10px;
+  color: var(--gold);
+  letter-spacing: 2px;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  color: var(--gray);
+  font-size: 14px;
+  cursor: pointer;
+  font-family: 'Press Start 2P', monospace;
+}
+
+.modal-close:hover { color: var(--hot-red); }
+
+.modal-body {
+  padding: 20px;
+}
+
+.modal-field {
+  margin-bottom: 16px;
+}
+
+.modal-label {
+  display: block;
+  font-size: 7px;
+  color: var(--gray);
+  margin-bottom: 6px;
+  letter-spacing: 1px;
+}
+
+.modal-input {
+  width: 100%;
+  padding: 10px 12px;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 9px;
+  background: #080810;
+  color: var(--white);
+  border: 2px solid #333;
+  outline: none;
+}
+
+.modal-input:focus { border-color: var(--gold-dim); }
+
+.modal-avatars {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.avatar-pick {
+  width: 36px;
+  height: 36px;
+  font-size: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255,255,255,0.03);
+  border: 2px solid #333;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.avatar-pick:hover { border-color: var(--gold-dim); transform: scale(1.1); }
+.avatar-pick.selected { border-color: var(--gold); background: rgba(255,215,0,0.1); }
+
+.btn-sign-in {
+  width: 100%;
+  padding: 12px;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 9px;
+  background: linear-gradient(180deg, var(--sf2-yellow) 0%, var(--sf2-orange) 100%);
+  color: #000;
+  border: 2px solid var(--gold);
+  cursor: pointer;
+  letter-spacing: 2px;
+  margin-top: 8px;
+}
+
+.btn-sign-in:hover { box-shadow: 0 0 15px rgba(255,215,0,0.3); }
+
+/* Sign in button (top right) */
+.top-signin {
+  position: absolute;
+  top: 10px;
+  right: 16px;
+  z-index: 100;
+}
+
+.btn-top-signin {
+  padding: 8px 14px;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 7px;
+  background: transparent;
+  color: var(--gold);
+  border: 1px solid var(--gold-dim);
+  cursor: pointer;
+  letter-spacing: 1px;
+  transition: all 0.2s;
+}
+
+.btn-top-signin:hover {
+  background: rgba(255,215,0,0.1);
+  border-color: var(--gold);
+}
+
+.user-info {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  font-size: 8px;
+  color: var(--gold);
+}
+
+.user-info .user-avatar { font-size: 16px; }
+.user-info .user-name { letter-spacing: 1px; }
+
+/* === HERE COMES A NEW CHALLENGER === */
+.challenger-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.9);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  flex-direction: column;
+}
+
+.challenger-overlay.active {
+  display: flex;
+  animation: challenger-in 0.5s ease-out;
+}
+
+@keyframes challenger-in {
+  0% { opacity: 0; }
+  30% { opacity: 1; }
+}
+
+.challenger-text {
+  font-size: 18px;
+  color: var(--hot-red);
+  letter-spacing: 4px;
+  text-shadow: 3px 3px 0 #000, 0 0 30px rgba(255,0,0,0.5);
+  animation: challenger-flash 0.3s step-end 3;
+  text-align: center;
+  line-height: 1.6;
+}
+
+.challenger-name {
+  font-size: 24px;
+  color: var(--sf2-yellow);
+  margin-top: 16px;
+  text-shadow: 3px 3px 0 #000;
+}
+
+@keyframes challenger-flash {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* === RESPONSIVE === */
+@media (max-width: 1100px) {
+  .main-layout {
+    grid-template-columns: 1fr;
+  }
+  .sidebar-left, .sidebar-right {
+    border: none;
+    border-bottom: 3px solid #222;
+  }
+  .sidebar-left {
+    order: 2;
+  }
+  .cabinet-area {
+    order: 1;
+  }
+  .sidebar-right {
+    order: 3;
+  }
+}
+
+@media (max-width: 600px) {
+  .title-main { font-size: 16px; }
+  .marquee-banner { padding: 8px 10px; }
+  .chat-messages { height: 80px; }
+  .viewer-bar { gap: 12px; font-size: 7px; }
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--bg-dark); }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #555; }
+</style>
+</head>
+<body>
+
+<!-- SIGN IN (top right) -->
+<div class="top-signin">
+  <button class="btn-top-signin" id="signinBtn" onclick="openSignIn()">SIGN IN</button>
+  <div class="user-info" id="userInfo">
+    <span class="user-avatar" id="userAvatar"></span>
+    <span class="user-name" id="userName"></span>
+  </div>
+</div>
+
+<!-- MARQUEE BANNER -->
+<div class="marquee-banner">
+  <div class="title-main">KING OF MARVEL</div>
+  <div class="title-sub">MARVEL VS CAPCOM 2 &mdash; ONLINE ARCADE</div>
+  <div class="current-king">
+    <span class="crown">&#x1F451;</span>
+    <span class="king-name" id="kingName">SHADOW_KING</span>
+    <span class="king-streak" id="kingStreak">12 WIN STREAK</span>
+  </div>
+</div>
+
+<!-- VIEWER BAR -->
+<div class="viewer-bar">
+  <span><span class="count" id="watchCount">47</span> WATCHING</span>
+  <span><span class="count" id="playCount">2</span> PLAYING</span>
+  <span><span class="count" id="queueCount">5</span> IN LINE</span>
+</div>
+
+<!-- MAIN 3-COLUMN LAYOUT -->
+<div class="main-layout">
+
+  <!-- LEFT: HALL OF FAME -->
+  <div class="sidebar-left">
+    <div class="panel-header">&#x1F3C6; HALL OF FAME</div>
+    <div class="leaderboard-tabs">
+      <button class="lb-tab active" onclick="switchTab(this,'streak')">STREAK</button>
+      <button class="lb-tab" onclick="switchTab(this,'combo')">COMBO</button>
+      <button class="lb-tab" onclick="switchTab(this,'speed')">SPEED</button>
+      <button class="lb-tab" onclick="switchTab(this,'perfect')">PERFECT</button>
+      <button class="lb-tab" onclick="switchTab(this,'masher')">MASHER</button>
+      <button class="lb-tab" onclick="switchTab(this,'surgeon')">SURGEON</button>
+    </div>
+    <div class="leaderboard-list" id="leaderboardList">
+      <!-- filled by JS -->
+    </div>
+  </div>
+
+  <!-- CENTER: THE CABINET -->
+  <div class="cabinet-area">
+    <div class="cabinet-frame">
+      <div class="cabinet-marquee">
+        <div class="cabinet-marquee-text">MARVEL VS CAPCOM 2</div>
+      </div>
+      <div class="screen-bezel">
+        <div id="game-screen">
+          <!-- Idle screen (shown when no match) -->
+          <div class="idle-screen" id="idleScreen">
+            <div class="vs-art">&#x1F94A;</div>
+            <div class="game-logo">KING OF MARVEL</div>
+            <div class="insert-coin">INSERT COIN</div>
+          </div>
+
+          <!-- Match HUD (shown during match) -->
+          <div class="match-hud" id="matchHud">
+            <div class="hud-player p1">
+              <div class="hud-name" id="hudP1Name">SHADOW_KING</div>
+              <div class="health-bar-bg"><div class="health-bar" id="hudP1Health" style="width:75%"></div></div>
+            </div>
+            <div class="hud-center">
+              <div class="hud-timer" id="hudTimer">88</div>
+              <div class="hud-combo" id="hudCombo">14 HITS!</div>
+            </div>
+            <div class="hud-player p2">
+              <div class="hud-name" id="hudP2Name">XECUTIONER</div>
+              <div class="health-bar-bg"><div class="health-bar" id="hudP2Health" style="width:40%"></div></div>
+            </div>
+          </div>
+
+          <!-- Match results overlay -->
+          <div class="match-results" id="matchResults">
+            <div class="result-winner">WINNER</div>
+            <div class="result-title" id="resultTitle">SHADOW_KING</div>
+            <div class="result-stats">
+              <div class="result-stat">
+                <div class="stat-label">BEST COMBO</div>
+                <div class="stat-value" id="resultCombo">27 HITS</div>
+              </div>
+              <div class="result-stat">
+                <div class="stat-label">MATCH TIME</div>
+                <div class="stat-value" id="resultTime">42 SEC</div>
+              </div>
+              <div class="result-stat">
+                <div class="stat-label">PERFECTS</div>
+                <div class="stat-value" id="resultPerfects">1</div>
+              </div>
+              <div class="result-stat">
+                <div class="stat-label">ACCURACY</div>
+                <div class="stat-value" id="resultAccuracy">78%</div>
+              </div>
+            </div>
+            <div class="result-next">WINNER STAYS ON</div>
+          </div>
+        </div>
+      </div>
+      <div class="control-panel">
+        <div class="cp-side">
+          <div class="cp-joystick"></div>
+          <div class="cp-buttons">
+            <div class="cp-btn red"></div>
+            <div class="cp-btn yellow"></div>
+            <div class="cp-btn blue"></div>
+          </div>
+        </div>
+        <div class="coin-slot">
+          <div class="coin-slot-hole"></div>
+          <div class="coin-slot-label">INSERT COIN</div>
+        </div>
+        <div class="cp-side">
+          <div class="cp-buttons">
+            <div class="cp-btn green"></div>
+            <div class="cp-btn red"></div>
+            <div class="cp-btn blue"></div>
+          </div>
+          <div class="cp-joystick"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: THE LINE -->
+  <div class="sidebar-right">
+    <div class="panel-header">&#x1F3AE; LIVE ARCADE</div>
+
+    <!-- Now Playing -->
+    <div class="now-playing">
+      <div class="np-header">&#x26A1; NOW PLAYING</div>
+      <div class="np-vs">
+        <div class="np-player p1">
+          <div class="np-label">P1</div>
+          <div class="np-name" id="npP1">SHADOW_KING</div>
+          <div class="np-record">12W-3L</div>
+        </div>
+        <div class="np-vs-text">VS</div>
+        <div class="np-player p2">
+          <div class="np-label">P2</div>
+          <div class="np-name" id="npP2">XECUTIONER</div>
+          <div class="np-record">8W-5L</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- I GOT NEXT -->
+    <div class="got-next-section">
+      <button class="btn-got-next" id="gotNextBtn" onclick="gotNext()">
+        &#x1FA99; I GOT NEXT
+      </button>
+      <button class="btn-leave-queue" id="leaveQueueBtn" onclick="leaveQueue()">
+        &#x274C; LEAVE LINE
+      </button>
+    </div>
+
+    <!-- The Queue -->
+    <div class="queue-section">
+      <div class="queue-header">NEXT UP</div>
+      <div class="queue-list" id="queueList">
+        <!-- filled by JS -->
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- TICKER -->
+<div class="ticker-bar">
+  <div class="ticker-content" id="tickerContent">
+    <span class="ticker-fire">&#x1F525;</span> SHADOW_KING just hit a 47-HIT COMBO &nbsp;&bull;&nbsp;
+    <span class="ticker-crown">&#x1F451;</span> SHADOW_KING has been king for 23 minutes &nbsp;&bull;&nbsp;
+    <span class="ticker-skull">&#x1F480;</span> N00B_SLAYER got PERFECTED &nbsp;&bull;&nbsp;
+    <span class="ticker-fire">&#x1F525;</span> CHAOS_AGENT is mashing at 42 inputs/sec &nbsp;&bull;&nbsp;
+    <span class="ticker-crown">&#x1FA99;</span> 5 challengers in line &nbsp;&bull;&nbsp;
+    <span class="ticker-skull">&#x1F480;</span> XECUTIONER ended a 8-win streak &nbsp;&bull;&nbsp;
+    <span class="ticker-fire">&#x1F525;</span> THE_SURGEON has 94% input accuracy &nbsp;&bull;&nbsp;
+  </div>
+</div>
+
+<!-- CHAT -->
+<div class="chat-section">
+  <div class="chat-header">
+    <div class="chat-title">&#x1F4AC; TRASH TALK</div>
+    <div class="chat-reactions">
+      <button class="reaction-btn" onclick="sendReaction('HYPE')">&#x1F525;HYPE</button>
+      <button class="reaction-btn" onclick="sendReaction('BODIED')">&#x1F480;BODIED</button>
+      <button class="reaction-btn" onclick="sendReaction('RESPECT')">&#x1F451;GGs</button>
+      <button class="reaction-btn" onclick="sendReaction('SALTY')">&#x1F9C2;SALTY</button>
+      <button class="reaction-btn" onclick="sendReaction('FRAUD')">&#x1F6A8;FRAUD</button>
+    </div>
+  </div>
+  <div class="chat-messages" id="chatMessages">
+    <!-- filled by JS -->
+  </div>
+  <div class="chat-input-row">
+    <input class="chat-input" id="chatInput" placeholder="Talk trash..." maxlength="200"
+           onkeydown="if(event.key==='Enter')sendChat()" />
+    <button class="chat-send-btn" onclick="sendChat()">SEND</button>
+  </div>
+</div>
+
+<!-- SIGN IN MODAL -->
+<div class="modal-overlay" id="signInModal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div class="modal-title">ENTER YOUR NAME</div>
+      <button class="modal-close" onclick="closeSignIn()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-field">
+        <label class="modal-label">FIGHTER NAME</label>
+        <input class="modal-input" id="modalName" placeholder="YOUR_TAG" maxlength="16" />
+      </div>
+      <div class="modal-field">
+        <label class="modal-label">PICK YOUR ICON</label>
+        <div class="modal-avatars" id="avatarGrid">
+          <!-- filled by JS -->
+        </div>
+      </div>
+      <button class="btn-sign-in" onclick="confirmSignIn()">FIGHT</button>
+    </div>
+  </div>
+</div>
+
+<!-- HERE COMES A NEW CHALLENGER overlay -->
+<div class="challenger-overlay" id="challengerOverlay">
+  <div class="challenger-text">HERE COMES A<br>NEW CHALLENGER</div>
+  <div class="challenger-name" id="challengerName">???</div>
+</div>
+
+<script>
+// ============================================================
+// KING OF MARVEL — Interactive mockup with placeholder data
+// ============================================================
+
+// === State ===
+let signedIn = false;
+let myName = '';
+let myAvatar = '';
+let inQueue = false;
+let queuePosition = -1;
+
+// === Placeholder Data ===
+const leaderboards = {
+  streak: [
+    { name: 'SHADOW_KING', stat: '12 WINS', king: true },
+    { name: 'XECUTIONER', stat: '9 WINS' },
+    { name: 'RUSH_DOWN', stat: '8 WINS' },
+    { name: 'CABLE_GUY', stat: '7 WINS' },
+    { name: 'MAGNETO_XX', stat: '6 WINS' },
+    { name: 'STORM_CHSR', stat: '5 WINS' },
+    { name: 'SENT_ARMY', stat: '5 WINS' },
+    { name: 'IRON_FIST', stat: '4 WINS' },
+    { name: 'PSYLOCKE_Q', stat: '3 WINS' },
+    { name: 'DOOM_LOOP', stat: '3 WINS' },
+  ],
+  combo: [
+    { name: 'RUSH_DOWN', stat: '87 HITS', king: true },
+    { name: 'MAGNETO_XX', stat: '72 HITS' },
+    { name: 'SHADOW_KING', stat: '63 HITS' },
+    { name: 'STORM_CHSR', stat: '58 HITS' },
+    { name: 'IRON_FIST', stat: '54 HITS' },
+    { name: 'CABLE_GUY', stat: '47 HITS' },
+    { name: 'DOOM_LOOP', stat: '41 HITS' },
+    { name: 'XECUTIONER', stat: '38 HITS' },
+    { name: 'SENT_ARMY', stat: '35 HITS' },
+    { name: 'PSYLOCKE_Q', stat: '29 HITS' },
+  ],
+  speed: [
+    { name: 'XECUTIONER', stat: '12 SEC', king: true },
+    { name: 'SHADOW_KING', stat: '15 SEC' },
+    { name: 'MAGNETO_XX', stat: '18 SEC' },
+    { name: 'RUSH_DOWN', stat: '22 SEC' },
+    { name: 'CABLE_GUY', stat: '24 SEC' },
+    { name: 'STORM_CHSR', stat: '28 SEC' },
+    { name: 'IRON_FIST', stat: '31 SEC' },
+    { name: 'DOOM_LOOP', stat: '33 SEC' },
+    { name: 'SENT_ARMY', stat: '37 SEC' },
+    { name: 'PSYLOCKE_Q', stat: '42 SEC' },
+  ],
+  perfect: [
+    { name: 'SHADOW_KING', stat: '8 ROUNDS', king: true },
+    { name: 'XECUTIONER', stat: '6 ROUNDS' },
+    { name: 'MAGNETO_XX', stat: '5 ROUNDS' },
+    { name: 'RUSH_DOWN', stat: '4 ROUNDS' },
+    { name: 'CABLE_GUY', stat: '3 ROUNDS' },
+    { name: 'STORM_CHSR', stat: '3 ROUNDS' },
+    { name: 'IRON_FIST', stat: '2 ROUNDS' },
+    { name: 'DOOM_LOOP', stat: '2 ROUNDS' },
+    { name: 'SENT_ARMY', stat: '1 ROUND' },
+    { name: 'PSYLOCKE_Q', stat: '1 ROUND' },
+  ],
+  masher: [
+    { name: 'CHAOS_AGENT', stat: '42 INP/S', king: true },
+    { name: 'BUTTONZ', stat: '38 INP/S' },
+    { name: 'RUSH_DOWN', stat: '35 INP/S' },
+    { name: 'MAGNETO_XX', stat: '31 INP/S' },
+    { name: 'SHADOW_KING', stat: '28 INP/S' },
+    { name: 'IRON_FIST', stat: '25 INP/S' },
+    { name: 'XECUTIONER', stat: '22 INP/S' },
+    { name: 'STORM_CHSR', stat: '19 INP/S' },
+    { name: 'CABLE_GUY', stat: '16 INP/S' },
+    { name: 'DOOM_LOOP', stat: '14 INP/S' },
+  ],
+  surgeon: [
+    { name: 'THE_SURGEON', stat: '94.2%', king: true },
+    { name: 'CABLE_GUY', stat: '91.8%' },
+    { name: 'SHADOW_KING', stat: '87.3%' },
+    { name: 'XECUTIONER', stat: '85.1%' },
+    { name: 'DOOM_LOOP', stat: '82.7%' },
+    { name: 'STORM_CHSR', stat: '79.4%' },
+    { name: 'MAGNETO_XX', stat: '76.2%' },
+    { name: 'PSYLOCKE_Q', stat: '73.8%' },
+    { name: 'IRON_FIST', stat: '71.5%' },
+    { name: 'RUSH_DOWN', stat: '68.9%' },
+  ],
+};
+
+const queueData = [
+  { name: 'CABLE_GUY', record: '7W-4L' },
+  { name: 'MAGNETO_XX', record: '6W-6L' },
+  { name: 'STORM_CHSR', record: '5W-3L' },
+  { name: 'DOOM_LOOP', record: '3W-2L' },
+  { name: 'CHAOS_AGENT', record: '2W-9L' },
+];
+
+const chatHistory = [
+  { name: 'SHADOW_KING', text: 'who\'s next', king: true },
+  { name: 'CABLE_GUY', text: 'running it back' },
+  { name: null, system: 'XECUTIONER has joined the game!' },
+  { name: 'MAGNETO_XX', text: 'this streak is getting crazy' },
+  { name: 'SHADOW_KING', text: 'i don\'t lose', king: true },
+  { name: 'CHAOS_AGENT', text: 'lmaooo the mash is real' },
+  { name: 'STORM_CHSR', text: '12 wins?? somebody stop this man' },
+  { name: null, hype: 'RUSH_DOWN hit a 87-HIT COMBO!' },
+  { name: 'DOOM_LOOP', text: 'hidden missiles hidden missiles hidden missiles' },
+  { name: 'XECUTIONER', text: 'ggs shadow but i\'m coming for that crown' },
+];
+
+const avatars = ['&#x1F94A;','&#x26A1;','&#x1F525;','&#x1F480;','&#x1F451;','&#x2694;','&#x1F47E;','&#x1F3AF;','&#x1F4A5;','&#x1F30A;','&#x2B50;','&#x1F40D;'];
+
+// === Init ===
+function init() {
+  renderLeaderboard('streak');
+  renderQueue();
+  renderChat();
+  renderAvatars();
+}
+
+// === Leaderboard ===
+function switchTab(btn, tab) {
+  document.querySelectorAll('.lb-tab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderLeaderboard(tab);
+}
+
+function renderLeaderboard(tab) {
+  const list = document.getElementById('leaderboardList');
+  const data = leaderboards[tab] || [];
+  list.innerHTML = data.map((e, i) => `
+    <div class="lb-entry ${i === 0 ? 'rank-1' : i === 1 ? 'rank-2' : i === 2 ? 'rank-3' : ''}">
+      <div class="lb-rank">${i === 0 ? '\u{1F451}' : i + 1}</div>
+      <div class="lb-name">${e.name}</div>
+      <div class="lb-stat">${e.stat}</div>
+    </div>
+  `).join('');
+}
+
+// === Queue ===
+function renderQueue() {
+  const list = document.getElementById('queueList');
+  if (queueData.length === 0 && !inQueue) {
+    list.innerHTML = '<div class="queue-empty">NO ONE IN LINE<br>STEP UP</div>';
+    return;
+  }
+  let entries = queueData.map((e, i) => `
+    <div class="queue-entry ${i === 0 ? 'next-up' : ''}">
+      <div class="queue-pos">${i + 1}</div>
+      <div class="queue-name">${e.name}</div>
+      <div class="queue-record">${e.record}</div>
+    </div>
+  `).join('');
+
+  if (inQueue) {
+    entries += `
+      <div class="queue-entry is-me">
+        <div class="queue-pos">${queueData.length + 1}</div>
+        <div class="queue-name">${myName || 'YOU'}</div>
+        <div class="queue-record">0W-0L</div>
+      </div>
+    `;
+  }
+
+  list.innerHTML = entries;
+}
+
+// === Chat ===
+function renderChat() {
+  const el = document.getElementById('chatMessages');
+  el.innerHTML = chatHistory.map(m => {
+    if (m.system) return `<div class="chat-msg"><span class="msg-system">&gt; ${m.system}</span></div>`;
+    if (m.hype) return `<div class="chat-msg"><span class="msg-hype">\u{1F525} ${m.hype}</span></div>`;
+    const cls = m.king ? 'msg-name king' : 'msg-name';
+    return `<div class="chat-msg"><span class="${cls}">${m.name}</span>: <span class="msg-text">${escapeHtml(m.text)}</span></div>`;
+  }).join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+function sendChat() {
+  const input = document.getElementById('chatInput');
+  const text = input.value.trim();
+  if (!text) return;
+  if (!signedIn) { openSignIn(); return; }
+  chatHistory.push({ name: myName, text: text, king: false });
+  renderChat();
+  input.value = '';
+}
+
+function sendReaction(type) {
+  if (!signedIn) { openSignIn(); return; }
+  const reactions = {
+    'HYPE': '\u{1F525} HYPE!!!',
+    'BODIED': '\u{1F480} BODIED',
+    'RESPECT': '\u{1F451} GGs RESPECT',
+    'SALTY': '\u{1F9C2} SALTY',
+    'FRAUD': '\u{1F6A8} FRAUD DETECTED',
+  };
+  chatHistory.push({ name: myName, text: reactions[type] || type, king: false });
+  renderChat();
+}
+
+function escapeHtml(str) {
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+// === I GOT NEXT ===
+function gotNext() {
+  if (!signedIn) { openSignIn(); return; }
+  if (inQueue) return;
+
+  inQueue = true;
+  queuePosition = queueData.length + 1;
+  const btn = document.getElementById('gotNextBtn');
+  btn.textContent = `YOU'RE #${queuePosition} IN LINE`;
+  btn.classList.add('in-queue');
+  document.getElementById('leaveQueueBtn').style.display = 'block';
+
+  // Update queue count
+  document.getElementById('queueCount').textContent = queueData.length + 1;
+
+  // Add system message
+  chatHistory.push({ name: null, system: `${myName} says I GOT NEXT!` });
+  renderChat();
+  renderQueue();
+}
+
+function leaveQueue() {
+  inQueue = false;
+  queuePosition = -1;
+  const btn = document.getElementById('gotNextBtn');
+  btn.innerHTML = '&#x1FA99; I GOT NEXT';
+  btn.classList.remove('in-queue');
+  document.getElementById('leaveQueueBtn').style.display = 'none';
+  document.getElementById('queueCount').textContent = queueData.length;
+  renderQueue();
+}
+
+// === Sign In ===
+function renderAvatars() {
+  const grid = document.getElementById('avatarGrid');
+  grid.innerHTML = avatars.map((a, i) =>
+    `<div class="avatar-pick" data-idx="${i}" onclick="pickAvatar(this)">${a}</div>`
+  ).join('');
+}
+
+function pickAvatar(el) {
+  document.querySelectorAll('.avatar-pick').forEach(a => a.classList.remove('selected'));
+  el.classList.add('selected');
+  myAvatar = el.innerHTML;
+}
+
+function openSignIn() {
+  document.getElementById('signInModal').classList.add('active');
+  document.getElementById('modalName').focus();
+}
+
+function closeSignIn() {
+  document.getElementById('signInModal').classList.remove('active');
+}
+
+function confirmSignIn() {
+  const name = document.getElementById('modalName').value.trim().toUpperCase().replace(/\s+/g, '_');
+  if (!name) return;
+  if (!myAvatar) myAvatar = '\u{1F94A}';
+
+  myName = name;
+  signedIn = true;
+
+  document.getElementById('signinBtn').style.display = 'none';
+  const info = document.getElementById('userInfo');
+  info.style.display = 'flex';
+  document.getElementById('userAvatar').innerHTML = myAvatar;
+  document.getElementById('userName').textContent = myName;
+
+  closeSignIn();
+
+  // System message
+  chatHistory.push({ name: null, system: `${myName} has entered the arcade!` });
+  renderChat();
+}
+
+// === Demo: Simulate match / new challenger ===
+function showNewChallenger(name) {
+  const overlay = document.getElementById('challengerOverlay');
+  document.getElementById('challengerName').textContent = name;
+  overlay.classList.add('active');
+  setTimeout(() => overlay.classList.remove('active'), 3000);
+}
+
+function showMatchResults() {
+  document.getElementById('matchResults').classList.add('active');
+  setTimeout(() => document.getElementById('matchResults').classList.remove('active'), 5000);
+}
+
+function startDemoMatch() {
+  document.getElementById('idleScreen').style.display = 'none';
+  document.getElementById('matchHud').classList.add('active');
+
+  // Simulate health drain
+  let p1h = 100, p2h = 100;
+  const iv = setInterval(() => {
+    const attacker = Math.random() > 0.45 ? 'p1' : 'p2';
+    const dmg = Math.floor(Math.random() * 8) + 2;
+    if (attacker === 'p1') { p2h = Math.max(0, p2h - dmg); }
+    else { p1h = Math.max(0, p1h - dmg); }
+
+    document.getElementById('hudP1Health').style.width = p1h + '%';
+    document.getElementById('hudP2Health').style.width = p2h + '%';
+
+    // Timer countdown
+    const t = document.getElementById('hudTimer');
+    const tv = parseInt(t.textContent);
+    if (tv > 0) t.textContent = tv - 1;
+
+    // Random combo display
+    if (Math.random() > 0.7) {
+      const combo = document.getElementById('hudCombo');
+      combo.textContent = (Math.floor(Math.random() * 30) + 2) + ' HITS!';
+      combo.classList.add('visible');
+      setTimeout(() => combo.classList.remove('visible'), 800);
+    }
+
+    if (p1h <= 0 || p2h <= 0) {
+      clearInterval(iv);
+      document.getElementById('matchHud').classList.remove('active');
+      showMatchResults();
+      setTimeout(() => {
+        document.getElementById('idleScreen').style.display = 'flex';
+      }, 5500);
+    }
+  }, 500);
+}
+
+// Keyboard shortcut: press 'D' for demo match, 'C' for challenger
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'd') startDemoMatch();
+  if (e.key === 'c') showNewChallenger('NEW_PLAYER');
+  if (e.key === 'Enter' && document.getElementById('signInModal').classList.contains('active')) {
+    confirmSignIn();
+  }
+});
+
+// Modal close on overlay click
+document.getElementById('signInModal').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeSignIn();
+});
+
+// Boot
+init();
+
+// Simulate viewer count fluctuation
+setInterval(() => {
+  const el = document.getElementById('watchCount');
+  const v = parseInt(el.textContent) + (Math.random() > 0.5 ? 1 : -1);
+  el.textContent = Math.max(12, Math.min(99, v));
+}, 5000);
+</script>
+
+</body>
+</html>

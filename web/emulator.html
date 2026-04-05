@@ -6,7 +6,9 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { background: #000; overflow: hidden; width: 100vw; height: 100vh; }
 #game { width: 100vw; height: 100vh; }
-canvas { aspect-ratio: 4/3 !important; object-fit: contain !important; }
+.ejs_canvas { object-position: center center !important; width: 100% !important; height: 100% !important; }
+.ejs_menu_bar { display: none !important; }
+.ejs_parent, .ejs_parent > div { width: 100% !important; height: 100% !important; overflow: hidden !important; }
 </style>
 </head>
 <body>
@@ -68,7 +70,7 @@ canvas { aspect-ratio: 4/3 !important; object-fit: contain !important; }
 
 <script>
   EJS_cacheConfig = { enabled: false };
-  EJS_Buttons = { playPause: false, restart: false, mute: false, settings: false, fullscreen: false, saveState: false, loadState: false, screenRecord: false, gamepad: false, cheat: false, volume: false, saveSavFiles: false, loadSavFiles: false, quickSave: false, quickLoad: false, screenshot: false, cacheManager: false };
+  // Show all EmulatorJS controls for debugging
   EJS_player = '#game';
   EJS_core = 'flycast';
   EJS_gameUrl = 'roms/mvc2.chd';
@@ -78,22 +80,10 @@ canvas { aspect-ratio: 4/3 !important; object-fit: contain !important; }
   EJS_color = '#0f0';
   EJS_disableLocalStorage = true;
   EJS_defaultOptions = {
-    'reicast_region': '1',
-    'reicast_broadcast': '0',
-    'reicast_language': '1',
     'reicast_hle_bios': 'enabled',
-    'reicast_boot_to_bios': 'disabled',
     'reicast_force_freeplay': 'enabled',
-    'reicast_sh4clock': '200',
-    'reicast_internal_resolution': '640x480',
-    'reicast_threaded_rendering': 'enabled',
     'reicast_enable_rttb': 'enabled',
-    'reicast_mipmapping': 'disabled',
-    'reicast_fog': 'disabled',
-    'reicast_volume_modifier_enable': 'disabled',
-    'reicast_anisotropic_filtering': '1',
-    'reicast_texture_filtering': '0',
-    'reicast_texupscale': '1',
+    'reicast_enable_dsp': 'disabled',
     'reicast_alpha_sorting': 'per-strip (fast, least accurate)',
     'reicast_oit_layers': '4',
     'reicast_delay_frame_swapping': 'disabled',
@@ -152,15 +142,12 @@ canvas { aspect-ratio: 4/3 !important; object-fit: contain !important; }
 
   EJS_onGameStart = function() {
     console.log('[maplecast] Game loaded, auto-starting mirror...');
-    // Strip all EmulatorJS UI — just show the raw canvas
-    var canvas = document.querySelector('canvas');
-    if (canvas) {
-      canvas.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:99999;';
-      // Hide everything else
-      var all = document.querySelectorAll('#game > * > *');
-      for (var i = 0; i < all.length; i++) {
-        if (all[i].tagName !== 'CANVAS') all[i].style.display = 'none';
-      }
+    // Set internal resolution high for quality, EmulatorJS scales it down to fit
+    var emu = window.EJS_emulator;
+    if (emu && emu.gameManager) {
+      emu.gameManager.setVariable('reicast_internal_resolution', '1280x960');
+      emu.gameManager.setVariable('reicast_cable_type', 'VGA');
+      console.log('[maplecast] Set internal resolution to 1280x960 VGA');
     }
     // Expose _startMirror to parent window
     if (window.parent && window.parent !== window) {

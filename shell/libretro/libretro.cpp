@@ -684,13 +684,12 @@ static void setGameGeometry(retro_game_geometry& geometry)
 	if (rotate_screen)
 		geometry.aspect_ratio = 1 / geometry.aspect_ratio;
 
-	// Use same height for rotation potential
 	geometry.max_width = std::max(maxFramebufferWidth, framebufferWidth);
-	geometry.max_height = geometry.max_width;
+	geometry.max_height = std::max(maxFramebufferHeight, framebufferHeight);
 
-	// Avoid gigantic window size at startup
-	geometry.base_width = 640;
-	geometry.base_height = 480;
+	// Match base to actual rendered size so EmulatorJS sizes canvas correctly
+	geometry.base_width = framebufferWidth > 0 ? framebufferWidth : 640;
+	geometry.base_height = framebufferHeight > 0 ? framebufferHeight : 480;
 }
 
 bool setAVInfo(retro_system_av_info& avinfo)
@@ -2511,7 +2510,8 @@ void retro_get_system_av_info(retro_system_av_info *info)
 		environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &msg);
 	}
 
-	framebufferWidth = config::RenderResolution * 16 / 9;
+	// Use 4:3 aspect (Dreamcast native) instead of 16:9 assumption
+	framebufferWidth = config::RenderResolution * 4 / 3;
 	framebufferHeight = config::RenderResolution;
 	maxFramebufferWidth = std::max(maxFramebufferWidth, framebufferWidth);
 	maxFramebufferHeight = std::max(maxFramebufferHeight, framebufferHeight);

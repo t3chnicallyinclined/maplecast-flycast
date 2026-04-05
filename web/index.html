@@ -23,7 +23,10 @@ input { background: #111; color: #0f0; border: 1px solid #333; padding: 8px; fon
 </head>
 <body>
 <div id="status">MapleCast - MVC2</div>
-<iframe id="game" src="emulator.html" style="width:605px;height:600px;border:2px solid #333;" allow="autoplay" scrolling="no"></iframe>
+<div id="gameWrap" style="position:relative;display:inline-block;">
+  <iframe id="game" src="emulator.html" style="width:640px;height:480px;border:2px solid #333;" allow="autoplay" scrolling="no"></iframe>
+  <div id="nameOverlay" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:10;"></div>
+</div>
 <canvas id="screen" width="1" height="1" style="display:none;"></canvas>
 <div id="lobby"></div>
 <div id="controls">
@@ -42,9 +45,8 @@ input { background: #111; color: #0f0; border: 1px solid #333; padding: 8px; fon
 <div id="info"></div>
 <div id="diag"></div>
 
-<!-- Emulator runs in iframe, _startMirror() available from parent console -->
+<!-- Emulator runs in iframe -->
 <script>
-  // Bridge _startMirror to iframe
   function _startMirror() {
     var iframe = document.getElementById('game');
     if (iframe && iframe.contentWindow && iframe.contentWindow._startMirror) {
@@ -327,6 +329,31 @@ P2: ${p2name} ${p2type}
 
 Watching: ${diag.spectators}
 ${matchInfo}${queueList}${lbText}`;
+
+  // Update player name overlays on the game iframe — MVC2 arcade style
+  const overlay = document.getElementById('nameOverlay');
+  if (overlay) {
+    if (p1.connected || p2.connected) {
+      const lb = getLeaderboard();
+      const p1rec = lb[p1.name] || {wins:0, losses:0};
+      const p2rec = lb[p2.name] || {wins:0, losses:0};
+      // MVC2 style: bold uppercase, gold for P1, cyan for P2
+      // thick black text-stroke for arcade look
+      const nameStyle = 'font-family:"Impact","Arial Black","Helvetica Neue",sans-serif;font-weight:900;font-size:14px;letter-spacing:1px;text-transform:uppercase;-webkit-text-stroke:1.5px #000;paint-order:stroke fill;';
+      const recStyle = 'font-family:"Impact","Arial Black",sans-serif;font-size:10px;font-weight:700;letter-spacing:0.5px;-webkit-text-stroke:1px #000;paint-order:stroke fill;';
+      overlay.innerHTML =
+        (p1.connected ? `<div style="position:absolute;bottom:42px;left:10px;">` +
+          `<div style="${nameStyle}color:#FFD700;">${p1.name}</div>` +
+          `<div style="${recStyle}color:#DAA520;">${p1rec.wins}W - ${p1rec.losses}L</div>` +
+          `</div>` : '') +
+        (p2.connected ? `<div style="position:absolute;bottom:42px;right:10px;text-align:right;">` +
+          `<div style="${nameStyle}color:#00E5FF;">${p2.name}</div>` +
+          `<div style="${recStyle}color:#00ACC1;">${p2rec.wins}W - ${p2rec.losses}L</div>` +
+          `</div>` : '');
+    } else {
+      overlay.innerHTML = '';
+    }
+  }
 }
 
 let lastFrameTime = 0;

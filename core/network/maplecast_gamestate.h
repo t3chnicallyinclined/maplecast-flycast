@@ -70,4 +70,11 @@ void deserialize(const uint8_t* buf, int len, GameState& state);
 // background animation and sub-frame interpolation jitter.
 static constexpr int WIRE_SIZE = 5 + 2+2+2+2 + 4+4+4 + 6*38; // = 253 bytes
 
+// Patch the in-game "PLAYER" + "1"/"2" text with custom names
+// slot: 0=P1, 1=P2. name: up to 10 chars (null-terminated)
+void setPlayerName(int slot, const char* name);
+
+// Restore original "PLAYER" + "1"/"2" text
+void restorePlayerNames();
+
 }
