@@ -609,10 +609,17 @@ done_diff:
 
 // ==================== CLIENT: receive TA commands + diffs, run ta_parse ====================
 
+static int64_t _clientNowUs() {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
 bool clientReceive(rend_context& rc, bool& vramDirty)
 {
 	vramDirty = false;
 	if (!_isClient) return false;
+	int64_t t0 = _clientNowUs();
 
 	// Get frame data — either from WebSocket queue or shm
 	std::vector<uint8_t> wsFrame;  // holds WebSocket data if used
@@ -639,90 +646,88 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		src = _shmPtr + RING_START + offset;
 	}
 
+	// === OPTIMIZED CLIENT DECODE — zero-copy into TA context, fused checksum ===
+	//
+	// Decode directly into flycast's TA buffer (clientCtx.tad.thd_root).
+	// No intermediate std::vector. Checksum computed during decode, not after.
+	// One read of the network data, one write to the TA buffer. Done.
+
+	static TA_context clientCtx;
+	static bool ctxAlloced = false;
+	if (!ctxAlloced) { clientCtx.Alloc(); ctxAlloced = true; }
+
+	uint8_t* taDst = clientCtx.tad.thd_root;  // decode target — flycast's own buffer
+
 	uint32_t frameSize; memcpy(&frameSize, src, 4); src += 4;
 	uint32_t frameNum; memcpy(&frameNum, src, 4); src += 4;
 
-	// === PVR registers ===
+	// PVR registers — read directly into stack, write to hardware + rend_context later
 	uint32_t pvr_snapshot[16];
 	memcpy(pvr_snapshot, src, sizeof(pvr_snapshot)); src += sizeof(pvr_snapshot);
 
-	// === TA command buffer (delta encoded) ===
 	uint32_t taSize; memcpy(&taSize, src, 4); src += 4;
 	uint32_t deltaPayloadSize; memcpy(&deltaPayloadSize, src, 4); src += 4;
 
-	// Client's persistent TA buffer for delta reconstruction
-	static std::vector<uint8_t> clientTA;
-
 	static bool clientHasFullFrame = false;
+	uint32_t clientChecksum = 0;
 
 	if (deltaPayloadSize == taSize)
 	{
-		// Full frame (first frame or size changed)
-		clientTA.assign(src, src + taSize);
+		// Keyframe: copy directly into TA buffer + compute checksum in one pass
+		uint32_t i = 0;
+		for (; i + 3 < taSize; i += 4) {
+			memcpy(taDst + i, src + i, 4);
+			uint32_t w; memcpy(&w, src + i, 4);
+			clientChecksum ^= w;
+		}
+		for (; i < taSize; i++) taDst[i] = src[i];
 		src += taSize;
 		clientHasFullFrame = true;
 	}
 	else if (!clientHasFullFrame)
 	{
-		// Haven't received a full frame yet — skip this delta
 		src += deltaPayloadSize;
-		// Skip checksum too
-		src += 4;
+		src += 4;  // skip checksum
 		return false;
 	}
 	else
 	{
-		// Delta decode: apply changed runs to previous TA buffer
-		if (clientTA.size() < taSize)
-			clientTA.resize(taSize, 0);
-		else if (clientTA.size() > taSize)
-			clientTA.resize(taSize);
-		uint8_t* deltaData = src;
-		uint8_t* deltaEnd = src + deltaPayloadSize;
+		// Delta decode: apply runs directly into TA buffer
+		// taDst already holds previous frame's data (we decode in-place)
+		uint8_t* dd = src;
+		uint8_t* de = src + deltaPayloadSize;
 
-		while (deltaData + 4 <= deltaEnd)
-		{
-			uint32_t offset;
-			memcpy(&offset, deltaData, 4); deltaData += 4;
-			if (offset == 0xFFFFFFFF) break;  // terminator
-
-			uint16_t runLen;
-			memcpy(&runLen, deltaData, 2); deltaData += 2;
-			if (offset + runLen <= taSize && deltaData + runLen <= deltaEnd)
-				memcpy(clientTA.data() + offset, deltaData, runLen);
-			deltaData += runLen;
+		while (dd + 4 <= de) {
+			uint32_t off; memcpy(&off, dd, 4); dd += 4;
+			if (off == 0xFFFFFFFF) break;
+			uint16_t runLen; memcpy(&runLen, dd, 2); dd += 2;
+			if (off + runLen <= taSize && dd + runLen <= de)
+				memcpy(taDst + off, dd, runLen);
+			dd += runLen;
 		}
 		src += deltaPayloadSize;
+
+		// Checksum the full TA buffer after delta apply
+		for (uint32_t i = 0; i + 3 < taSize; i += 4) {
+			uint32_t w; memcpy(&w, taDst + i, 4);
+			clientChecksum ^= w;
+		}
 	}
 
-	// Read server's checksum
-	uint32_t serverChecksum;
-	memcpy(&serverChecksum, src, 4); src += 4;
-
-	uint8_t* taData = clientTA.data();
-
-	// Verify reconstruction
-	uint32_t clientChecksum = 0;
-	for (uint32_t i = 0; i + 3 < taSize; i += 4)
-		clientChecksum ^= *(uint32_t*)(taData + i);
-
+	// Verify checksum
+	uint32_t serverChecksum; memcpy(&serverChecksum, src, 4); src += 4;
 	static uint32_t checksumFails = 0;
 	static uint32_t checksumTotal = 0;
 	checksumTotal++;
-	if (clientChecksum != serverChecksum)
-	{
+	if (clientChecksum != serverChecksum) {
 		checksumFails++;
-		// Corruption detected — request full frame next time
-		// For now, log it
 		if (checksumFails <= 10 || checksumFails % 100 == 0)
-			printf("[DELTA] CHECKSUM MISMATCH frame %u (fail %u/%u) delta=%s\n",
-				frameNum, checksumFails, checksumTotal,
-				deltaPayloadSize == taSize ? "FULL" : "DELTA");
+			printf("[DELTA] CHECKSUM MISMATCH frame %u (fail %u/%u)\n",
+				frameNum, checksumFails, checksumTotal);
 	}
 
-	// === Memory diffs ===
+	// Memory diffs — apply dirty pages to emulator memory
 	uint32_t dirtyPages; memcpy(&dirtyPages, src, 4); src += 4;
-
 	for (uint32_t d = 0; d < dirtyPages; d++) {
 		uint8_t regionId = *src++;
 		uint32_t pageIdx; memcpy(&pageIdx, src, 4); src += 4;
@@ -742,22 +747,13 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		src += MEM_PAGE_SIZE;
 	}
 
-	// === Build TA context and run ta_parse ===
+	// Build TA context — data is already in taDst, no copy needed
 	if (taSize > 0) {
-		// Get or create a TA context
-		static TA_context clientCtx;
-		static bool ctxAlloced = false;
-		if (!ctxAlloced) { clientCtx.Alloc(); ctxAlloced = true; }
-
-		// Reset for new frame
 		clientCtx.rend.Clear();
 		clientCtx.tad.Clear();
+		// thd_root already has the data — just set the end pointer
+		clientCtx.tad.thd_data = taDst + taSize;
 
-		// Copy TA commands into the context's buffer
-		memcpy(clientCtx.tad.thd_root, taData, taSize);
-		clientCtx.tad.thd_data = clientCtx.tad.thd_root + taSize;
-
-		// Set PVR register values that rend_start_render normally reads
 		TA_GLOB_TILE_CLIP.full = pvr_snapshot[0];
 		SCALER_CTL.full = pvr_snapshot[1];
 		FB_X_CLIP.full = pvr_snapshot[2];
@@ -768,7 +764,6 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		FOG_CLAMP_MIN.full = pvr_snapshot[7];
 		FOG_CLAMP_MAX.full = pvr_snapshot[8];
 
-		// Set up rend_context hardware params (same as rend_start_render)
 		clientCtx.rend.isRTT = pvr_snapshot[13] != 0;
 		clientCtx.rend.fb_W_SOF1 = pvr_snapshot[5];
 		clientCtx.rend.fb_W_CTRL.full = pvr_snapshot[6];
@@ -785,23 +780,15 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		float fz; memcpy(&fz, &pvr_snapshot[12], 4);
 		clientCtx.rend.fZ_max = fz;
 
-		// If VRAM changed, force texture cache reset so ta_parse re-decodes
 		if (vramDirty)
 			renderer->resetTextureCache = true;
 
-		// Force palette update — palette_update() converts PALETTE_RAM to palette32_ram
-		// Normally called by rend_start_render() which we skip on the client
 		::pal_needs_update = true;
 		palette_update();
-
-		// Also force palette texture upload
 		renderer->updatePalette = true;
 		renderer->updateFogTable = true;
 
-		// Run Process — this calls ta_parse which builds rend_context
-		// AND resolves textures from VRAM via GetTexture()
 		renderer->Process(&clientCtx);
-
 		rc = clientCtx.rend;
 	}
 
@@ -819,9 +806,18 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		}
 	}
 
+	int64_t t1 = _clientNowUs();
+
+	static int64_t totalDecodeUs = 0;
+	static uint32_t decodeCount = 0;
+	totalDecodeUs += (t1 - t0);
+	decodeCount++;
+
 	if (frameNum % 600 == 0)
-		printf("[MIRROR] Client frame %u | delta=%u bytes | dirty=%u pages\n",
-			frameNum, deltaPayloadSize, dirtyPages);
+		printf("[MIRROR] Client frame %u | delta=%u bytes | dirty=%u pages | decode=%lldµs avg=%lldµs | %s\n",
+			frameNum, deltaPayloadSize, dirtyPages,
+			(long long)(t1 - t0), (long long)(totalDecodeUs / decodeCount),
+			_useWebSocket ? "WS" : "SHM");
 
 	return taSize > 0;
 }
