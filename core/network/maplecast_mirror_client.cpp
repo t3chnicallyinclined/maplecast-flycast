@@ -199,8 +199,9 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		if (regionId == 0 && pageOff + MEM_PAGE_SIZE <= 16 * 1024 * 1024)
 			memcpy(&mem_b[pageOff], src, MEM_PAGE_SIZE);
 		else if (regionId == 1 && pageOff + MEM_PAGE_SIZE <= VRAM_SIZE) {
-			memcpy(&vram[pageOff], src, MEM_PAGE_SIZE);
+			// Unprotect BEFORE writing — texture cache may have mprotect'd this page
 			VramLockedWriteOffset(pageOff);
+			memcpy(&vram[pageOff], src, MEM_PAGE_SIZE);
 			vramDirty = true;
 		}
 		else if (regionId == 2 && pageOff + MEM_PAGE_SIZE <= 2 * 1024 * 1024)

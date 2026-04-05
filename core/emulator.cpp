@@ -1066,7 +1066,9 @@ void Emulator::start()
 			(int)config::MaxThreads);
 	}
 
-	memwatch::protect();
+	// Mirror client writes directly to VRAM/RAM — don't re-protect after unprotect
+	if (!maplecast_mirror::isClient())
+		memwatch::protect();
 
 	if (config::ThreadedRendering)
 	{

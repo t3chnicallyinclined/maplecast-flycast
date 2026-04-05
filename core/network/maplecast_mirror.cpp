@@ -353,10 +353,10 @@ static bool wsReadFrame(int fd, std::vector<uint8_t>& out)
 		read += n;
 	}
 
-	// Handle close/ping
+	// Handle close/ping/text
 	if (opcode == 0x8) return false;  // close
-	if (opcode == 0x9) return true;   // ping — ignore for now
-	if (opcode == 0x1) return true;   // text — ignore
+	if (opcode == 0x9) { out.clear(); return true; }  // ping — ignore
+	if (opcode == 0x1) { out.clear(); return true; }  // text (JSON status) — ignore
 
 	return fin && opcode == 0x2;  // binary frame
 }
@@ -436,6 +436,14 @@ static void wsClientRun(std::string host, int port)
 
 		uint32_t taSize; memcpy(&taSize, src, 4); src += 4;
 		uint32_t deltaPayloadSize; memcpy(&deltaPayloadSize, src, 4); src += 4;
+
+		// Sanity check — TA buffers are ~50-300KB, never megabytes
+		if (taSize > 512 * 1024 || deltaPayloadSize > 512 * 1024 ||
+		    frameSize > frame.size()) {
+			printf("[MIRROR-WS] BAD FRAME: taSize=%u delta=%u frameSize=%u bufSize=%zu — skipping\n",
+				taSize, deltaPayloadSize, frameSize, frame.size());
+			continue;
+		}
 
 		// TA delta decode into double-buffered context
 		// _decodeIdx = buffer we write to NOW
@@ -796,8 +804,9 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 			if (rid == 0 && pageOff + MEM_PAGE_SIZE <= 16 * 1024 * 1024)
 				memcpy(&mem_b[pageOff], df.pages[d].data, MEM_PAGE_SIZE);
 			else if (rid == 1 && pageOff + MEM_PAGE_SIZE <= VRAM_SIZE) {
-				memcpy(&vram[pageOff], df.pages[d].data, MEM_PAGE_SIZE);
+				// Unprotect BEFORE writing — texture cache may have mprotect'd this page
 				VramLockedWriteOffset(pageOff);
+				memcpy(&vram[pageOff], df.pages[d].data, MEM_PAGE_SIZE);
 				vramDirty = true;
 			}
 			else if (rid == 2 && pageOff + MEM_PAGE_SIZE <= 2 * 1024 * 1024)
@@ -964,8 +973,9 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		if (regionId == 0 && pageOff + MEM_PAGE_SIZE <= 16 * 1024 * 1024)
 			memcpy(&mem_b[pageOff], src, MEM_PAGE_SIZE);
 		else if (regionId == 1 && pageOff + MEM_PAGE_SIZE <= VRAM_SIZE) {
-			memcpy(&vram[pageOff], src, MEM_PAGE_SIZE);
+			// Unprotect BEFORE writing — texture cache may have mprotect'd this page
 			VramLockedWriteOffset(pageOff);
+			memcpy(&vram[pageOff], src, MEM_PAGE_SIZE);
 			vramDirty = true;
 		}
 		else if (regionId == 2 && pageOff + MEM_PAGE_SIZE <= 2 * 1024 * 1024)
