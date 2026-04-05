@@ -2,7 +2,7 @@
 
 **Date:** April 5, 2026  
 **Branch:** `ta-streaming`  
-**Status:** MVC2 streaming from native server to browser at 60fps over WebSocket
+**Status:** MVC2 streaming from native server to browser at 60fps over WebSocket. Auto-start mirror fully working.
 
 ---
 
@@ -10,18 +10,22 @@
 
 Marvel vs Capcom 2 running in a browser tab. No ROM on the client. Server streams delta-encoded TA commands + VRAM diffs over WebSocket. Browser renders them through flycast's OpenGL renderer compiled to WASM/WebGL2.
 
+EmulatorJS on port 8000 now WORKS with auto-start mirror. The main page (`index.html`) embeds `emulator.html` in an iframe. `emulator.html` is the self-contained EmulatorJS page that handles core loading, BIOS setup, game boot, and mirror connection.
+
 ### The Stack
 ```
 SERVER (native Linux, RTX 3090):
   flycast runs MVC2 → delta encodes TA commands → WebSocket broadcast on :7200
 
-BROWSER CLIENT:
-  EmulatorJS loads flycast WASM core (3.4MB download)
-  → boots Dreamcast BIOS
-  → JS connects WebSocket to server
-  → receives 8MB VRAM SYNC on connect
-  → pumps 60fps delta frames into _mirror_render_frame()
-  → flycast renderer draws to WebGL2 canvas
+BROWSER CLIENT (EmulatorJS + flycast WASM):
+  emulator.html loads flycast WASM core via EmulatorJS
+  → BIOS setup via startGame patch (fetch dc_flash.bin, create /dc/, write core options, set system_directory)
+  → MVC2 CHD loads → game boots
+  → EJS_onGameStart fires → 1s delay → _startMirror() auto-called
+  → receives 8MB VRAM SYNC on connect (mirror_apply_sync)
+  → pumps 60fps delta frames via mirror_render_frame
+  → flycast renderer draws to WebGL2 canvas at 640x480
+  → mirror_present_frame in libretro.cpp handles canvas presentation
 ```
 
 ### Numbers
@@ -29,6 +33,7 @@ BROWSER CLIENT:
 - VRAM sync on connect: 8MB (one-time)
 - Delta frames: ~15-40KB each at 60fps (~4MB/s)
 - Browser rendering: 60fps via WebGL2
+- Internal resolution: 640x480 on client (server sends resolution-independent TA commands)
 
 ---
 
@@ -49,16 +54,49 @@ MAPLECAST_MIRROR_CLIENT=1 MAPLECAST_SERVER_HOST=127.0.0.1 ~/projects/maplecast-f
 ```
 
 ### Browser Client
-1. Start demo server: `cd ~/projects/flycast-wasm/demo && node server.js 3030`
-2. Open http://localhost:3030
-3. Load mvc2.chd (or mirror.bin for BIOS-only)
-4. Once game is running, open console and type: `_startMirror()`
+1. Start the server (see above)
+2. Open http://localhost:8000
+3. `index.html` loads with `emulator.html` embedded in an iframe
+4. MVC2 CHD loads automatically, game boots, mirror starts on its own
 
-### Browser Client (auto-start)
-The `_startMirror()` function is defined in server.js. Can be triggered via:
-- `EJS_onGameStart` callback (auto on game start)
-- Manual console call
-- URL parameter (TODO)
+The flow: MVC2 CHD loads → game boots → `EJS_onGameStart` → 1s delay → `_startMirror()` auto-called. No manual console commands needed.
+
+---
+
+## CRITICAL PATCHES — WebGL2 COMPATIBILITY
+
+These were the main blocker. EmulatorJS + flycast WASM targets WebGL2, but several GL calls fail silently in browsers. All three patches are **REQUIRED**:
+
+1. **GL_VERSION override** — flycast queries `GL_VERSION` and expects a desktop-style string. Must intercept and return a WebGL2-compatible version string.
+
+2. **INVALID_ENUM suppression** — certain GL enum values valid on desktop OpenGL are invalid in WebGL2. These generate `INVALID_ENUM` errors that halt rendering. Must suppress/ignore them.
+
+3. **texParameteri guard** — some `glTexParameteri` calls use parameters not supported in WebGL2 (e.g., `GL_TEXTURE_MAX_LEVEL` edge cases). Must guard or skip these calls.
+
+Without all three, the renderer initializes but produces a black screen or crashes on the first frame.
+
+---
+
+## BIOS SETUP (startGame patch)
+
+EmulatorJS does not natively set up Dreamcast BIOS. The `startGame` function is patched to:
+
+1. Fetch `dc_flash.bin` from the server
+2. Create `/dc/` directory in the WASM filesystem
+3. Write core options file with correct settings
+4. Set `system_directory` so flycast finds the BIOS
+
+This runs before the core starts. Without it, flycast boots to a BIOS error screen.
+
+---
+
+## DEVELOPMENT CONFIG
+
+```javascript
+EJS_cacheConfig = { enabled: false };
+```
+
+Required during development. EmulatorJS aggressively caches the WASM core and assets in IndexedDB. With caching enabled, deploying a new WASM build has no effect until site data is manually cleared. Disable caching to always fetch fresh builds.
 
 ---
 
@@ -83,29 +121,34 @@ The `_startMirror()` function is defined in server.js. Can be triggered via:
 | `core/network/maplecast_mirror.cpp/h` | Client-only mirror code (from maplecast/client/) |
 | `shell/libretro/libretro.cpp` | mirror_present_frame (video_cb wrapper) |
 | `upstream/link-ubuntu.sh` | Link script with all exports + libzip |
-| `demo/server.js` | EmulatorJS page + mirror JS + core options |
+
+### Web Integration
+| File | Purpose |
+|------|---------|
+| `index.html` | Main page, embeds emulator.html in iframe |
+| `emulator.html` | Self-contained EmulatorJS page: core loading, BIOS setup, mirror JS |
 
 ---
 
-## KNOWN ISSUES
+## KNOWN ISSUES — RESOLVED
 
-1. **Browser canvas presentation** — `_mirror_render_frame` renders to flycast's FBO but RetroArch's `video_cb` doesn't always present it. Current workaround: let MVC2 boot first (initializes renderer), then start mirror. Proper fix: bypass RetroArch video pipeline or hook into `retro_run`.
+1. **Canvas presentation** — `_mirror_render_frame` rendered to flycast's FBO but RetroArch's `video_cb` didn't present it. **Fixed:** `mirror_present_frame` added in `libretro.cpp` to explicitly call `video_cb` after mirror renders.
 
-2. **Dual render** — when mirror is active alongside the running game, both render to the same FBO causing occasional flicker. Need to stop the game's render loop while keeping the main loop alive for video_cb.
+2. **Dual render** — when mirror was active alongside the running game, both rendered to the same FBO causing flicker. **Fixed:** `emu.pause()` stops the game's render loop while keeping the main loop alive for video_cb.
 
-3. **EmulatorJS cache** — core files cached in IndexedDB. Clear site data when deploying new WASM builds.
+3. **IndexedDB caching** — core files cached in IndexedDB meant new WASM builds were ignored. **Fixed:** `EJS_cacheConfig = { enabled: false }` during development.
 
-4. **Core options** — all options set in server.js defaultOptions. `reicast_enable_rttb: enabled` is critical for MVC2 sprites. `reicast_hle_bios: enabled` skips BIOS boot screen.
+4. **Core options** — all options set in defaultOptions. `reicast_enable_rttb: enabled` is critical for MVC2 sprites. `reicast_hle_bios: enabled` skips BIOS boot screen.
 
 ---
 
 ## WHAT'S NEXT
 
-- [ ] Auto-start mirror without manual `_startMirror()` call
-- [ ] Stop game CPU while keeping RetroArch main loop for video_cb
-- [ ] Apply SYNC data properly (mirror_apply_sync works but needs link fix)
-- [ ] Browser cache for SYNC data (IndexedDB)
-- [ ] Embed in iframe for web integration
+- [x] Auto-start mirror without manual `_startMirror()` call
+- [x] Stop game CPU while keeping RetroArch main loop for video_cb
+- [x] Apply SYNC data properly (mirror_apply_sync)
+- [x] Embed in iframe for web integration
 - [ ] Input forwarding: browser gamepad → WebSocket → server
 - [ ] Multiple spectators on one server
 - [ ] Remote server (not localhost) — test over internet
+- [ ] Browser cache for SYNC data (IndexedDB)

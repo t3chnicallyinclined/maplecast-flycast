@@ -1,6 +1,6 @@
 # MapleCast Streaming Architecture Options
 
-**Date:** April 4, 2026
+**Date:** April 5, 2026
 **Goal:** Extreme low latency, pixel perfect, competitive play
 **Constraint:** LOW BANDWIDTH, LOW LATENCY
 
@@ -22,10 +22,40 @@
 | RAM autopsy (42 dirty pages mapped) | YES | docs/MVC2-MEMORY-MAP.md |
 | WebGL replay player | YES | web/replay.html |
 | Input injection (maple bus) | YES | maplecast_input_server.cpp |
+| **TA Mirror WASM client** | **YES** | **maplecast_mirror_client.cpp + EmulatorJS** |
 
 ---
 
-## Option 1: H.264 Only (Current Production)
+## Option 4: TA Command Streaming — Mirror Mode [IMPLEMENTED, PRIMARY]
+
+This is the primary streaming mode. Server captures TA display list commands and memory diffs, streams them over WebSocket. The WASM client receives them and renders via WebGL2 — no SH4 CPU emulation, no ROM needed on the client.
+
+```
+Server: SH4 compute → captures TA commands + memory diffs → WebSocket publish
+Client: WASM receives TA commands → ta_parse → WebGL2 render (no CPU)
+
+Bandwidth:  ~4 MB/s (measured)
+Latency:    0.46ms server publish, ~7ms full E2E (browser)
+FPS:        59-60 (measured, stable)
+Client:     Flycast WASM via EmulatorJS (no ROM, no BIOS needed)
+Resolution: ANY — client renders locally via WebGL2, resolution independent
+Status:     IMPLEMENTED — MVC2 running 60fps in browser
+```
+
+**Measured performance:**
+- Server publish time: 0.46ms/frame (telemetry)
+- Client WebSocket ping: 0.2ms (LAN)
+- Stream bandwidth: ~4 Mbps
+- Frame rate: 59-60fps sustained
+
+**Pros:** Pixel perfect, no ROM needed on client, no CPU emulation, any resolution, works in any browser with WebGL2
+**Cons:** Higher bandwidth than pure game state (4MB/s vs 16KB/s), requires WebSocket connection
+
+---
+
+## Option 1: H.264 Video Streaming [IMPLEMENTED, SECONDARY]
+
+Still works, still available. Preferred for native desktop clients or when TA mirror is not suitable.
 
 ```
 Server: SH4 compute → GPU render → CUDA copy → NVENC encode → WebSocket/WebRTC
@@ -33,59 +63,38 @@ Client: Browser receives → hardware decode → display
 
 Bandwidth:  1.9 MB/s
 Latency:    4.2ms E2E (NOBD stick), 4.9ms (browser gamepad)
-Client:     Any browser
+Client:     Any browser with WebCodecs
 Resolution: 640x480 (server-locked)
-Status:     PROVEN, SHIPPING
+Status:     IMPLEMENTED — proven, stable
 ```
 
-**Pros:** Dead simple, works everywhere, rock solid, lowest E2E proven
-**Cons:** Resolution locked, decode latency, bandwidth scales with quality
+**Pros:** Dead simple, works everywhere, rock solid, lowest E2E proven for NOBD
+**Cons:** Resolution locked to server, decode latency, bandwidth scales with quality
+
+**When to use H.264 over TA mirror:** When the client cannot run WASM (old devices), when bandwidth is not a concern and simplicity matters, or for recording/archival.
 
 ---
 
-## Option 2: Input Sync + 253-Byte State Correction
+## Option 2: Input Sync + 253-Byte State Correction [NOT IMPLEMENTED]
 
 ```
 Server: receives inputs → runs SH4 → reads 253B state → broadcasts
 Client: runs flycast + ROM → receives inputs → processes locally
         → receives 253B state → compares → corrects drift
 
-Bandwidth:  ~16 KB/s (14B inputs + 253B state × 60fps)
+Bandwidth:  ~16 KB/s (14B inputs + 253B state x 60fps)
 Latency:    0ms (local render), corrections arrive 1 frame later
 Client:     flycast + ROM
 Resolution: ANY (local render)
-Status:     COMPONENTS PROVEN, NOT INTEGRATED
+Status:     NOT IMPLEMENTED — components proven individually, not integrated
 ```
 
 **Pros:** Lowest bandwidth possible, instant local feedback, any resolution
-**Cons:** Client needs flycast + ROM, possible micro-snaps on correction
-
-### How Drift Correction Works
-- Client runs same inputs through same ROM = 99.7% identical output
-- 0.3% of frames drift (RAM autopsy proved this)
-- Server sends authoritative 253B every frame
-- Client compares and corrects ONLY drifted fields
-- Sub-pixel position corrections = invisible to player
-- Animation frame corrections = rare, 1-frame hitch at worst
-- No rollback, no re-simulation, no lag
-
-### The Snap Problem
-Writing game state every frame causes CPU to fight writes.
-Solutions:
-a) Only correct when drift exceeds threshold (e.g. position > 1 pixel)
-b) Correct AFTER CPU runs but BEFORE renderer reads (between compute + render)
-c) Use soft correction (lerp toward server state instead of snap)
-d) Only correct fields that matter visually (position, animation, health)
-
-### Open Questions
-- Does 253B correction every frame cause visual jitter?
-- Should we correct every frame or only on drift?
-- Can we correct between compute and render to avoid CPU fight?
-- What's the minimum set of fields needed for visual sync?
+**Cons:** Client needs flycast + ROM, possible micro-snaps on correction, complex drift correction logic
 
 ---
 
-## Option 3: Server-Authoritative Hybrid
+## Option 3: Server-Authoritative Hybrid [NOT IMPLEMENTED]
 
 ```
 Server: runs THE game → sends inputs (14B) + state checksum (32B)
@@ -99,32 +108,12 @@ Bandwidth:  ~3 KB/s normal, ~16 KB/s on correction, ~720 KB/s on page sync
 Latency:    0ms local
 Client:     flycast + ROM
 Resolution: ANY
+Status:     NOT IMPLEMENTED — theoretical, complex sync logic
 ```
-
-**Pros:** Absolute minimum bandwidth, instant local play, self-healing
-**Cons:** Complex sync logic, needs careful threshold tuning
 
 ---
 
-## Option 4: TA Command Streaming (Mirror Mode)
-
-```
-Server: SH4 compute → captures TA commands + memory diffs → streams
-Client: receives TA commands → ta_parse → render (no CPU)
-
-Bandwidth:  370 KB/frame = 21 MB/s raw, ~7 MB/s compressed
-Latency:    1 frame (network transit)
-Client:     flycast renderer (no CPU) + save state
-Resolution: ANY (local render)
-Status:     PROVEN — 11 minutes stable, characters rendering
-```
-
-**Pros:** Pixel perfect, no ROM needed on client, no CPU, any resolution
-**Cons:** High bandwidth, 1-frame latency, 11-min crash bug
-
----
-
-## Option 5: Predictive Client
+## Option 5: Predictive Client [NOT IMPLEMENTED]
 
 ```
 Server: compute → sends inputs + 253B + TA commands
@@ -139,18 +128,16 @@ Bandwidth:  ~140 KB/frame = 8 MB/s
 Latency:    0ms for 99.7% of frames, 1 frame for 0.3%
 Client:     flycast + ROM
 Resolution: ANY
+Status:     NOT IMPLEMENTED — requires dual render path
 ```
-
-**Pros:** Best of both worlds — instant AND correct
-**Cons:** Complex, dual render path, needs fast comparison
 
 ---
 
-## Option 6: 253-Byte Lookup Renderer (No Emulator)
+## Option 6: 253-Byte Lookup Renderer (No Emulator) [FUTURE]
 
 ```
 OFFLINE (one-time build):
-  Play every character × every animation × every frame
+  Play every character x every animation x every frame
   Record: (char_id, anim_state, anim_timer, facing, palette) → TA commands
   Store as lookup table (~50-200 MB)
   The visual_cache already has 5000+ entries!
@@ -166,16 +153,8 @@ Bandwidth:  253 bytes/frame = 15 KB/s
 Latency:    0ms (lookup is instant)
 Client:     Custom renderer + lookup table (cached, no ROM)
 Resolution: ANY
+Status:     FUTURE — visual_cache has entries but not complete coverage
 ```
-
-**Pros:** Absolute minimum bandwidth, no ROM, no emulator, any resolution
-**Cons:** Huge offline build step, may miss edge cases (effects, supers), doesn't exist yet
-
-### What We Need to Build This
-- Complete the visual_cache scan for all 59 characters
-- Map every (char_id, anim_state, anim_timer) → TA display list
-- Handle compositing (stage + 6 characters + effects)
-- Handle super moves (unique visual states)
 
 ---
 
@@ -183,56 +162,40 @@ Resolution: ANY
 
 ```
 One server compute cycle produces ALL of:
+  → TA commands       for browser      (0.46ms publish, 4 MB/s)  ← PRIMARY
   → H.264 frame      for player       (4.2ms latency, 1.9 MB/s)
   → 253-byte state   for overlay      (0ms, 15 KB/s)
-  → TA commands       for spectators   (1 frame, 8 MB/s compressed)
   → Memory page diffs for replay       (0ms, 168 KB/frame)
 
 Each consumer subscribes to the streams they need:
-  Player:     H.264 + 253B overlay
-  Spectator:  TA commands (any resolution)
+  Browser:    TA mirror (any resolution, pixel perfect)
+  Player:     H.264 + 253B overlay (lowest latency for NOBD)
+  Spectator:  TA mirror (any resolution)
   Replay:     253B + page diffs (rewindable)
   Analytics:  253B (frame data, combos, damage)
 ```
 
-**Pros:** Every use case served simultaneously, already built
-**Cons:** Server does more work (but it's all parallel, GPU does the heavy lifting)
-
 ---
 
-## RECOMMENDATION FOR COMPETITIVE PLAY
+## CURRENT PRODUCTION SETUP
 
-### Phase 1 (NOW): Option 1 + Option 2 Hybrid
+### For Browser Clients: TA Mirror (Option 4)
 ```
-Player sees: H.264 stream (4.2ms, proven)
-Client also: receives 253B state for overlay (health bars, combo, frame data)
-Background:  record 253B at 60fps for replay
-
-Total bandwidth: 1.9 MB/s + 15 KB/s = basically same as current
-New features: game state overlay, replay recording, frame data display
-```
-
-### Phase 2 (NEXT): Option 2 for Desktop App
-```
-Desktop client: runs flycast + ROM locally
-Input: NOBD stick → local flycast (0ms) + server
-Server: sends 253B corrections at 60fps
-Result: 0ms input latency, 16 KB/s bandwidth, any resolution
-
-This is the COMPETITIVE edge:
-  - Fightcade: ~3-4 frames of rollback latency
-  - MapleCast: 0 frames, server-authoritative, 16 KB/s
+Server publishes TA commands at 60fps (0.46ms/frame)
+Browser runs Flycast WASM via EmulatorJS
+WASM client receives TA commands over WebSocket
+Renders via WebGL2 at any resolution
+No ROM, no BIOS, no save state needed on client
+Bandwidth: ~4 MB/s
+E2E latency: ~7ms (browser)
 ```
 
-### Phase 3 (FUTURE): Option 6 for Browser Spectators
+### For NOBD Stick Players: H.264 (Option 1)
 ```
-Browser client: WebGPU renderer + pre-cached TA lookup
-Server sends: 253 bytes/frame via DataChannel
-Browser renders: at 4K, 120fps, any resolution
-Bandwidth: 15 KB/s for spectators
-
-Thousands of spectators watching a tournament at 4K
-using 15 KB/s each. On a phone. On 3G.
+Server encodes H.264 via NVENC (sub-frame)
+Client decodes via hardware WebCodecs
+E2E latency: ~3-4ms (NOBD XDP input)
+Bandwidth: ~1.9 MB/s
 ```
 
 ---
@@ -244,17 +207,14 @@ using 15 KB/s each. On a phone. On 3G.
 | Fightcade (GGPO) | 3-4 frames (50-67ms) | ~50 KB/s | 640x480 |
 | Parsec | 1-2 frames (16-33ms) | 5-15 MB/s | Any |
 | GeForce NOW | 1-2 frames | 15-25 MB/s | Up to 4K |
-| **MapleCast H.264** | **4.2ms (<1 frame)** | **1.9 MB/s** | 640x480 |
-| **MapleCast Option 2** | **0ms (local)** | **16 KB/s** | Any |
+| **MapleCast TA Mirror** | **~7ms (< 0.5 frame)** | **4 MB/s** | **Any** |
+| **MapleCast H.264** | **3-4ms (<0.25 frame)** | **1.9 MB/s** | 640x480 |
 | **MapleCast Option 6** | **0ms (lookup)** | **15 KB/s** | Any |
 
 ---
 
-## WE ARE INSANE
+## OVERKILL IS NECESSARY.
 
-253 bytes. 16 KB/s. 0ms input latency. Any resolution. Pixel perfect.
-The Dreamcast has a 26 MB brain. Only 168 KB changes per frame.
-We mapped every dirty page. We cracked the palette system.
-We know more about how MVC2 renders than anyone outside Capcom.
+TA mirror mode streams GPU commands, not video. The browser renders them natively via WebGL2. Pixel perfect. Resolution independent. 60fps in a browser tab. No ROM on the client. 4 MB/s. Sub-frame latency.
 
-**OVERKILL IS NECESSARY.**
+We cracked the palette system. We mapped every dirty page. We know more about how MVC2 renders than anyone outside Capcom.

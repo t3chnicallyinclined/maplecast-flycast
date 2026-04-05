@@ -210,6 +210,34 @@ The 253-byte format is a SUBSET of page 616 + 649 + 505.
 
 ---
 
+## LIVE GAME STATE — HOW THE MEMORY MAP IS USED
+
+The memory map above isn't just documentation — it drives the live match overlay in the browser client.
+
+### Server-Side Read
+`maplecast_gamestate::readGameState()` reads the RAM addresses documented above (character structs from page 616, global state from page 649) every frame on the server. The extracted game state is serialized to JSON and broadcast over WebSocket as a status message every 1 second.
+
+### Win Detection
+Win condition is checked by monitoring health values across all 3 characters on each side. When all 3 characters on one side reach 0 HP, that side has lost. The server includes this in the status broadcast, and the client records the result.
+
+### Character ID Mapping
+Character IDs from `+0x001 character_id (u8)` in the character struct are mapped to human-readable names via the `MVC2_CHARS` array defined in `index.html`. This covers the full 56-character MVC2 roster.
+
+### Client-Side Leaderboard
+The browser client tracks wins and losses in `localStorage`. Each time the server broadcasts a win event, the client increments the appropriate counter. The leaderboard persists across page reloads.
+
+### Live Match Stats Display
+The browser overlay displays real-time match data pulled directly from the addresses in this document:
+- **Timer** — from `game_timer` at `0x8C289630`
+- **Teams** — character IDs resolved to names for both P1 and P2 (all 3 slots)
+- **HP per character** — `health` at `+0x420` for each of the 6 character structs
+- **Combo count** — `p1_combo` / `p2_combo` from `0x8C289670` / `0x8C289672`
+- **Meter level** — `p1_meter_level` / `p2_meter_level` from `0x8C28964A` / `0x8C28964B`
+
+This is the 253-byte game state made visible. Every address in the overlay traces back to a specific offset documented in the character struct and global state tables above.
+
+---
+
 ## ADDRESS SOURCES
 
 All addresses verified from 6+ sources:

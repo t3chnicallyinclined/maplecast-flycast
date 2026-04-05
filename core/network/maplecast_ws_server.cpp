@@ -7,6 +7,7 @@
 */
 #include "maplecast_ws_server.h"
 #include "maplecast_input_server.h"
+#include "maplecast_gamestate.h"
 #include "hw/sh4/sh4_mem.h"
 #include "hw/pvr/pvr_mem.h"
 #include "hw/pvr/pvr_regs.h"
@@ -55,8 +56,14 @@ static std::map<void*, int> _connSlot;
 struct QueueEntry {
 	void* key;
 	std::string name;
+	ConnHdl conn;
 };
 static std::vector<QueueEntry> _queue;
+
+// Loss detection state
+static bool _matchActive = false;
+static bool _matchEndHandled = false;
+static int64_t _matchEndTime = 0; // when match ended (for delay before kick)
 
 // Telemetry from mirror publish
 static Telemetry _telemetry{};
@@ -119,7 +126,116 @@ static json getStatus()
 	status["dirty"] = t.dirtyPages;
 	status["registering"] = maplecast_input::isRegistering();
 	status["sticks"] = maplecast_input::registeredStickCount();
+
+	// Game state for leaderboard/stats
+	maplecast_gamestate::GameState gs;
+	maplecast_gamestate::readGameState(gs);
+	if (gs.in_match) {
+		json game;
+		game["in_match"] = true;
+		game["timer"] = gs.game_timer;
+		game["stage"] = gs.stage_id;
+		game["p1_combo"] = gs.p1_combo;
+		game["p2_combo"] = gs.p2_combo;
+		game["p1_meter"] = gs.p1_meter_level;
+		game["p2_meter"] = gs.p2_meter_level;
+		// Character health: 3 per player
+		json p1hp = json::array();
+		json p2hp = json::array();
+		json p1chars = json::array();
+		json p2chars = json::array();
+		for (int i = 0; i < 3; i++) {
+			p1hp.push_back(gs.chars[i*2].health);
+			p2hp.push_back(gs.chars[i*2+1].health);
+			p1chars.push_back(gs.chars[i*2].character_id);
+			p2chars.push_back(gs.chars[i*2+1].character_id);
+		}
+		game["p1_hp"] = p1hp;
+		game["p2_hp"] = p2hp;
+		game["p1_chars"] = p1chars;
+		game["p2_chars"] = p2chars;
+		status["game"] = game;
+	}
 	return status;
+}
+
+static void checkMatchEnd()
+{
+	maplecast_gamestate::GameState gs;
+	maplecast_gamestate::readGameState(gs);
+
+	if (gs.in_match) {
+		_matchActive = true;
+		_matchEndHandled = false;
+
+		// Check if all 3 chars on one side are dead
+		bool p1dead = (gs.chars[0].health == 0 && gs.chars[2].health == 0 && gs.chars[4].health == 0);
+		bool p2dead = (gs.chars[1].health == 0 && gs.chars[3].health == 0 && gs.chars[5].health == 0);
+
+		if ((p1dead || p2dead) && !_matchEndHandled) {
+			_matchEndHandled = true;
+			_matchEndTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+
+			int loserSlot = p1dead ? 0 : 1;
+			int winnerSlot = p1dead ? 1 : 0;
+			const auto& loser = maplecast_input::getPlayer(loserSlot);
+			const auto& winner = maplecast_input::getPlayer(winnerSlot);
+			printf("[maplecast-ws] MATCH END: P%d (%s) wins! P%d (%s) eliminated.\n",
+				winnerSlot+1, winner.name, loserSlot+1, loser.name);
+
+			// Notify all clients
+			json endMsg;
+			endMsg["type"] = "match_end";
+			endMsg["winner"] = winnerSlot;
+			endMsg["winner_name"] = std::string(winner.name);
+			endMsg["loser"] = loserSlot;
+			endMsg["loser_name"] = std::string(loser.name);
+			std::string endStr = endMsg.dump();
+			{
+				std::lock_guard<std::mutex> lock(_connMutex);
+				for (auto& conn : _connections)
+					try { _ws.send(conn, endStr, websocketpp::frame::opcode::text); } catch (...) {}
+			}
+		}
+	}
+	else if (_matchActive && _matchEndHandled)
+	{
+		// Match ended and game returned to non-match state (character select, etc.)
+		// Wait 3 seconds after match end, then kick loser and promote next in queue
+		int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+
+		if (now - _matchEndTime > 3000) {
+			_matchActive = false;
+
+			// Find loser's slot (the one who had all chars dead)
+			// Re-read to confirm
+			maplecast_gamestate::GameState gs2;
+			maplecast_gamestate::readGameState(gs2);
+			// The loser was already determined — disconnect them
+			// Both players might have been disconnected by now, check
+			for (int slot = 0; slot < 2; slot++) {
+				const auto& p = maplecast_input::getPlayer(slot);
+				if (!p.connected) continue;
+
+				// If queue is empty, don't kick anyone (winner stays on)
+				if (_queue.empty()) break;
+			}
+
+			// Simpler: notify the first person in queue it's their turn
+			if (!_queue.empty()) {
+				auto next = _queue.front();
+				json yourTurn;
+				yourTurn["type"] = "your_turn";
+				yourTurn["msg"] = "It's your turn! Press Start to play!";
+				try {
+					_ws.send(next.conn, yourTurn.dump(), websocketpp::frame::opcode::text);
+				} catch (...) {}
+				printf("[maplecast-ws] Notified %s: it's your turn!\n", next.name.c_str());
+			}
+		}
+	}
 }
 
 static void broadcastStatus()
@@ -281,7 +397,7 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 					bool found = false;
 					for (const auto& q : _queue) { if (q.key == key) { found = true; break; } }
 					if (!found)
-						_queue.push_back({key, name});
+						_queue.push_back({key, name, hdl});
 				} catch (...) {}
 				broadcastStatus();
 			}
@@ -355,6 +471,7 @@ bool init(int port)
 			while (_active) {
 				std::this_thread::sleep_for(std::chrono::seconds(1));
 				if (_active && _clientCount.load() > 0) {
+					checkMatchEnd();
 					broadcastStatus();
 				}
 			}

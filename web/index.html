@@ -237,6 +237,40 @@ function initDecoder() {
   // H.264 decoder disabled — WASM mirror handles rendering
 }
 
+// Leaderboard — localStorage
+function getLeaderboard() {
+  try { return JSON.parse(localStorage.getItem('maplecast_leaderboard') || '{}'); }
+  catch(e) { return {}; }
+}
+function recordWin(name) {
+  if (!name) return;
+  const lb = getLeaderboard();
+  if (!lb[name]) lb[name] = { wins: 0, losses: 0 };
+  lb[name].wins++;
+  // Record loss for the other player
+  const otherName = (diag.p1 && diag.p1.name === name) ? (diag.p2 && diag.p2.name) : (diag.p1 && diag.p1.name);
+  if (otherName) {
+    if (!lb[otherName]) lb[otherName] = { wins: 0, losses: 0 };
+    lb[otherName].losses++;
+  }
+  localStorage.setItem('maplecast_leaderboard', JSON.stringify(lb));
+}
+
+// MVC2 character names
+const MVC2_CHARS = [
+  'Ryu','Zangief','Guile','Morrigan','Anakaris','Strider','Cyclops','Wolverine',
+  'Psylocke','Iceman','Rogue','Captain America','Spider-Man','Hulk','Venom',
+  'Dr. Doom','Tron Bonne','Jill','Hayato','Ruby Heart','SonSon','Amingo',
+  'Marrow','Cable','Abyss 1','Abyss 2','Abyss 3','Chun-Li','Mega Man',
+  'Roll','Akuma','B.B. Hood','Felicia','Charlie','Sakura','Dan',
+  'Cammy','Dhalsim','M. Bison','Ken','Gambit','Juggernaut','Storm',
+  'Sabretooth','Magneto','Shuma-Gorath','War Machine','Silver Samurai',
+  'Omega Red','Spiral','Colossus','Iron Man','Sentinel','Blackheart',
+  'Thanos','Jin','Captain Commando','Servbot'
+];
+
+function charName(id) { return MVC2_CHARS[id] || '???'; }
+
 function updateInfo() {
   const p1 = diag.p1 || {};
   const p2 = diag.p2 || {};
@@ -245,6 +279,26 @@ function updateInfo() {
   const p1type = p1.connected ? (p1.type === 'hardware' ? 'NOBD' : 'Web') : '';
   const p2type = p2.connected ? (p2.type === 'hardware' ? 'NOBD' : 'Web') : '';
   const queue = diag.queue || [];
+  const g = diag.game;
+
+  let matchInfo = '\n-- Match --\n';
+  if (g && g.in_match) {
+    const p1team = g.p1_chars.map(id => charName(id)).join('/');
+    const p2team = g.p2_chars.map(id => charName(id)).join('/');
+    const p1hpBar = g.p1_hp.map(h => h > 0 ? Math.round(h/1.44) + '%' : 'KO').join(' ');
+    const p2hpBar = g.p2_hp.map(h => h > 0 ? Math.round(h/1.44) + '%' : 'KO').join(' ');
+    matchInfo += `Timer: ${g.timer}
+P1: ${p1team}
+   HP: ${p1hpBar}
+   Combo: ${g.p1_combo}  Meter: ${g.p1_meter}
+P2: ${p2team}
+   HP: ${p2hpBar}
+   Combo: ${g.p2_combo}  Meter: ${g.p2_meter}
+`;
+  } else {
+    matchInfo += '  Waiting for match...\n';
+  }
+
   let queueList = '';
   if (queue.length > 0) {
     queueList = '\n-- Next Up --\n';
@@ -252,6 +306,19 @@ function updateInfo() {
       queueList += `  ${i+1}. ${queue[i]}\n`;
     }
   }
+
+  // Leaderboard — always show
+  const lb = getLeaderboard();
+  const sorted = Object.entries(lb).sort((a,b) => b[1].wins - a[1].wins).slice(0, 8);
+  let lbText = '\n-- Leaderboard --\n';
+  if (sorted.length > 0) {
+    for (const [name, stats] of sorted) {
+      lbText += `  ${name}: ${stats.wins}W ${stats.losses}L\n`;
+    }
+  } else {
+    lbText += '  No matches yet\n';
+  }
+
   infoEl.textContent =
 `  MAPLECAST  MVC2
 
@@ -259,7 +326,7 @@ P1: ${p1name} ${p1type}
 P2: ${p2name} ${p2type}
 
 Watching: ${diag.spectators}
-${queueList}`;
+${matchInfo}${queueList}${lbText}`;
 }
 
 let lastFrameTime = 0;
@@ -297,6 +364,34 @@ function connect() {
     if (typeof event.data === 'string') {
       try {
         const msg = JSON.parse(event.data);
+        if (msg.type === 'match_end') {
+          const isMe = (msg.loser === mySlot);
+          if (isMe) {
+            statusEl.textContent = 'You lost! Returning to spectator...';
+            setTimeout(function() { leaveGame(); }, 3000);
+          } else {
+            statusEl.textContent = msg.winner_name + ' wins!';
+          }
+        }
+        if (msg.type === 'your_turn') {
+          statusEl.textContent = "IT'S YOUR TURN! Press Start to play!";
+          statusEl.style.color = '#ff0';
+          statusEl.style.fontSize = '20px';
+          // Flash effect
+          let flashes = 0;
+          const flashInterval = setInterval(function() {
+            statusEl.style.color = flashes % 2 === 0 ? '#ff0' : '#0f0';
+            flashes++;
+            if (flashes > 10) {
+              clearInterval(flashInterval);
+              statusEl.style.color = '#0f0';
+              statusEl.style.fontSize = '16px';
+            }
+          }, 300);
+          // Auto-join from queue
+          window._inQueue = false;
+          joinGame();
+        }
         if (msg.type === 'register_started') {
           // Server acknowledged, waiting for rhythm
         }
@@ -349,6 +444,27 @@ function connect() {
             }, 3000);
           }
           diag._wasRegistering = msg.registering;
+          // Track game state for leaderboard
+          if (msg.game) {
+            diag.game = msg.game;
+            // Detect match end: all 3 chars on one side at 0 HP
+            if (msg.game.in_match) {
+              const p1dead = msg.game.p1_hp.every(h => h === 0);
+              const p2dead = msg.game.p2_hp.every(h => h === 0);
+              if ((p1dead || p2dead) && !diag._matchEnded) {
+                diag._matchEnded = true;
+                // Record win
+                const winner = p2dead ? 'p1' : 'p1dead' ? 'p2' : null;
+                if (p2dead && diag.p1 && diag.p1.name) recordWin(diag.p1.name);
+                if (p1dead && diag.p2 && diag.p2.name) recordWin(diag.p2.name);
+              }
+            } else {
+              diag._matchEnded = false;
+            }
+          } else {
+            diag.game = null;
+            diag._matchEnded = false;
+          }
           diag.serverFrame = msg.frame || 0;
           diag.fps = msg.fps || 0;
           diag.streamKbps = msg.stream_kbps || 0;
@@ -661,13 +777,17 @@ diagEl.textContent = '=== MapleCast ===\nWaiting...';
 // Connect for lobby/join only — WASM mirror handles video
 connect();
 
-// Update diag display + send ping every second
+// Update diag + info display + send ping every second
 setInterval(() => {
   updateDiag();
+  updateInfo();
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({type:'ping', t: performance.now()}));
   }
 }, 1000);
+
+// Initial render
+updateInfo();
 </script>
 </body>
 </html>
