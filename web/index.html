@@ -22,13 +22,84 @@ input { background: #111; color: #0f0; border: 1px solid #333; padding: 8px; fon
 </head>
 <body>
 <div id="status">MapleCast - MVC2</div>
-<canvas id="screen" width="640" height="480"></canvas>
+<div id="game" style="width:640px;height:480px;"></div>
+<canvas id="screen" width="1" height="1" style="display:none;"></canvas>
 <div id="lobby"></div>
 <div id="controls">
   <input id="nameInput" placeholder="Your name" maxlength="16" />
   <button id="joinBtn" onclick="joinGame()">Press START to Join</button>
 </div>
 <div id="diag"></div>
+
+<!-- EmulatorJS WASM Mirror -->
+<script>
+  EJS_player = '#game';
+  EJS_core = 'flycast';
+  EJS_gameUrl = 'roms/mvc2.chd';
+  EJS_pathtodata = 'ejs-data/';
+  EJS_biosUrl = 'bios/dc_boot.bin';
+  EJS_startOnLoaded = true;
+  EJS_color = '#0f0';
+  EJS_disableLocalStorage = true;
+  EJS_defaultOptions = {
+    'reicast_hle_bios': 'enabled',
+    'reicast_threaded_rendering': 'enabled',
+    'reicast_enable_rttb': 'enabled',
+    'reicast_mipmapping': 'disabled',
+    'reicast_fog': 'disabled',
+    'reicast_volume_modifier_enable': 'disabled',
+    'reicast_frame_skipping': '0',
+    'reicast_enable_dsp': 'disabled',
+    'reicast_force_freeplay': 'enabled',
+    'reicast_alpha_sorting': 'per-strip (fast, least accurate)',
+    'reicast_oit_layers': '4',
+  };
+
+  var MIRROR_SERVER = 'ws://' + location.hostname + ':7200';
+
+  EJS_onGameStart = function() {
+    console.log('[mirror] Game started, connecting mirror...');
+    var emu = window.EJS_emulator;
+    var Module = emu.Module;
+    if (typeof Module._mirror_init !== 'function') { console.error('[mirror] _mirror_init not found'); return; }
+    Module._mirror_init();
+    console.log('[mirror] Mirror initialized');
+
+    var bufSize = 256 * 1024;
+    var buf = Module._malloc(bufSize);
+    var frames = 0, startTime = 0;
+
+    var ws = new WebSocket(MIRROR_SERVER);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = function() {
+      document.getElementById('status').textContent = 'MapleCast - LIVE';
+      startTime = performance.now();
+    };
+    ws.onclose = function() {
+      document.getElementById('status').textContent = 'MapleCast - Reconnecting...';
+    };
+    ws.onmessage = function(e) {
+      if (typeof e.data === 'string') return;
+      var data = new Uint8Array(e.data);
+      if (data.length < 80) return;
+      if (data[0]===0x53 && data[1]===0x59 && data[2]===0x4E && data[3]===0x43) {
+        if (data.length > bufSize) { Module._free(buf); bufSize = data.length + 65536; buf = Module._malloc(bufSize); }
+        Module.writeArrayToMemory(data, buf);
+        if (Module._mirror_apply_sync) Module._mirror_apply_sync(buf, data.length);
+        return;
+      }
+      if (data.length > bufSize) { Module._free(buf); bufSize = data.length + 65536; buf = Module._malloc(bufSize); }
+      Module.writeArrayToMemory(data, buf);
+      Module._mirror_render_frame(buf, data.length);
+      frames++;
+      if (frames % 300 === 0) {
+        var fps = frames / ((performance.now() - startTime) / 1000);
+        document.getElementById('status').textContent = 'MapleCast - LIVE | ' + fps.toFixed(0) + ' fps';
+      }
+    };
+  };
+</script>
+<script src="ejs-data/loader.js"></script>
 
 <script>
 const canvas = document.getElementById('screen');
@@ -120,34 +191,7 @@ State: ${typeof audioCtx !== 'undefined' && audioCtx ? audioCtx.state : 'off'}`;
 }
 
 function initDecoder() {
-  decoder = new VideoDecoder({
-    output: (frame) => {
-      const decEnd = performance.now();
-      diag.decodeSamples.push(decEnd - diag.decodeStartMs);
-      if (diag.decodeSamples.length > 60) diag.decodeSamples.shift();
-      ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
-      frame.close();
-      frameCount++;
-      if (frameCount % 30 === 0) {
-        diag.fps = frameCount / ((performance.now() - startTime) / 1000);
-        updateDiag();
-      }
-    },
-    error: (e) => { console.error('Decoder error:', e); }
-  });
-  // Try hardware decode first, fall back to software
-  const codecCfg = {
-    codec: 'avc1.42001e',
-    codedWidth: 640, codedHeight: 480,
-    optimizeForLatency: true,
-  };
-  VideoDecoder.isConfigSupported({...codecCfg, hardwareAcceleration: "prefer-hardware"}).then(result => {
-    codecCfg.hardwareAcceleration = result.supported ? "prefer-hardware" : "prefer-software";
-    console.log('[maplecast] decode:', codecCfg.hardwareAcceleration);
-    decoder.configure(codecCfg);
-  }).catch(() => {
-    decoder.configure(codecCfg);
-  });
+  // H.264 decoder disabled — WASM mirror handles rendering
 }
 
 let lastFrameTime = 0;
@@ -178,10 +222,7 @@ function connect() {
     frameCount = 0;
     startTime = performance.now();
     lastFrameTime = 0;
-    initDecoder();
     joinBtn.disabled = false;
-    // Start WebRTC immediately — everyone gets P2P video + audio
-    setupWebRTC();
   };
 
   ws.onmessage = (event) => {
@@ -194,42 +235,20 @@ function connect() {
             statusEl.textContent = `You are P${mySlot + 1} - FIGHT!`;
             joinBtn.textContent = `Playing as P${mySlot + 1}`;
             joinBtn.disabled = true;
-            setupWebRTC();
             startGamepadPolling();
           } else {
             statusEl.textContent = 'Game full - watching';
-            setupWebRTC(); // spectators get video DataChannel too
           }
         }
         if (msg.type === 'status') {
           updateLobby(msg);
         }
-        // WebRTC signaling: SDP answer from server
-        if (msg.type === 'answer' && pc) {
-          // Fix locale issue: libdatachannel may format numbers with commas (e.g., "5,000" → "5000")
-          const fixedSdp = msg.sdp.replace(/(\d),(\d)/g, '$1$2');
-          pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: fixedSdp }))
-            .catch(e => console.warn('[rtc] setRemoteDescription failed:', e));
-        }
-        // WebRTC signaling: ICE candidate from server
-        if (msg.type === 'ice-candidate' && pc) {
-          console.log('[rtc] ICE candidate from server:', msg.candidate, 'mid:', msg.sdpMid);
-          // libdatachannel sends full candidate line — ensure proper format
-          let candidateStr = msg.candidate;
-          // Fix locale commas in candidate too
-          candidateStr = candidateStr.replace(/(\d),(\d)/g, '$1$2');
-          pc.addIceCandidate(new RTCIceCandidate({
-            candidate: candidateStr,
-            sdpMid: msg.sdpMid || '0',
-            sdpMLineIndex: 0
-          })).catch(e => console.warn('[rtc] addIceCandidate failed:', e, 'candidate:', candidateStr));
-        }
+        // WebRTC removed — using WASM mirror for rendering
       } catch (e) {}
       return;
     }
 
-    // Binary via WebSocket = fallback (only when DataChannel not active)
-    if (!useDataChannel) handleVideoFrame(event.data);
+    // Binary frames handled by WASM mirror, not here
   };
 
   ws.onclose = () => {
@@ -242,9 +261,8 @@ function connect() {
   ws.onerror = () => { statusEl.textContent = 'Connection error'; };
 }
 
-// ============================================================
-// Video Frame Handler — shared by WebSocket and DataChannel
-// ============================================================
+// H.264 video handler and WebRTC removed — WASM mirror handles rendering
+/* REMOVED:
 function handleVideoFrame(data) {
   if (!decoder || decoder.state === 'closed') return;
   const now = performance.now();
@@ -431,6 +449,7 @@ function setupWebRTC() {
     }
   }, 5000);
 }
+*/
 
 function joinGame() {
   if (!ws || ws.readyState !== WebSocket.OPEN) { connect(); return; }
@@ -492,33 +511,15 @@ function startGamepadPolling() {
     const rt = Math.floor((gp.buttons[7]?.value||0)*255);
 
     const w3 = new Uint8Array([lt, rt, (btn>>8)&0xFF, btn&0xFF]);
-    // Always send — server drains and keeps latest
-    // Send via DataChannel (P2P) if available, else WebSocket (fallback)
-    if (useDataChannel && inputDc && inputDc.readyState === 'open') {
-      inputDc.send(w3);
-    } else {
-      ws.send(w3);
-    }
+    // Send gamepad input via WebSocket
+    ws.send(w3);
     diag.inputSendCount++;
   }, 4); // 250Hz polling
 }
 
-// Waiting screen
-ctx.fillStyle = '#111';
-ctx.fillRect(0, 0, 640, 480);
-ctx.fillStyle = '#0f0';
-ctx.font = '24px monospace';
-ctx.textAlign = 'center';
-ctx.fillText('MapleCast', 320, 200);
-ctx.font = '14px monospace';
-ctx.fillText('MVC2 Online', 320, 230);
-ctx.font = '12px monospace';
-ctx.fillStyle = '#888';
-ctx.fillText('Enter your name and press START to join', 320, 280);
-
 diagEl.textContent = '=== MapleCast ===\nWaiting...';
 
-// Auto-connect on page load
+// Connect for lobby/join only — WASM mirror handles video
 connect();
 </script>
 </body>

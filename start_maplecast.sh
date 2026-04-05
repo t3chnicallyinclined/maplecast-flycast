@@ -28,7 +28,8 @@ sleep 1
 # Start web server
 WEB_PORT="${MAPLECAST_WEB_PORT:-8000}"
 echo "[2/3] Starting web server on http://localhost:$WEB_PORT ..."
-python3 -m http.server "$WEB_PORT" --directory "$DIR/web" &
+cd "$DIR/web" && python3 serve.py "$WEB_PORT" &
+cd "$DIR"
 WEB_PID=$!
 sleep 1
 

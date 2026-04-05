@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MapleCast - MVC2 Mirror</title>
+<meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin">
+<meta http-equiv="Cross-Origin-Embedder-Policy" content="require-corp">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; display: flex; flex-direction: column; align-items: center; font-family: monospace; color: #0f0; }
+  #game { width: 640px; height: 480px; }
+  #status { margin: 10px; font-size: 14px; }
+  button { background: #222; color: #0f0; border: 1px solid #0f0; padding: 8px 16px; margin: 5px; cursor: pointer; font-family: monospace; }
+  button:hover { background: #0f0; color: #000; }
+</style>
+</head>
+<body>
+
+<div id="status">MapleCast - Loading...</div>
+<div id="game"></div>
+<div style="margin:10px;">
+  <button onclick="_startMirror()">Connect Mirror</button>
+</div>
+
+<script>
+  // EmulatorJS config — load flycast core with dummy ROM, boot to BIOS
+  EJS_player = '#game';
+  EJS_core = 'flycast';
+  EJS_gameUrl = 'roms/mirror.bin';
+  EJS_pathtodata = 'ejs-data/';
+  EJS_biosUrl = 'bios/dc_boot.bin';
+  EJS_startOnLoaded = true;
+  EJS_color = '#0f0';
+  EJS_disableLocalStorage = true;
+  EJS_defaultOptions = {
+    'reicast_hle_bios': 'enabled',
+    'reicast_threaded_rendering': 'enabled',
+    'reicast_enable_rttb': 'enabled',
+    'reicast_mipmapping': 'disabled',
+    'reicast_fog': 'disabled',
+    'reicast_volume_modifier_enable': 'disabled',
+    'reicast_frame_skipping': '0',
+    'reicast_auto_skip_frame': '0',
+    'reicast_enable_dsp': 'disabled',
+    'reicast_force_freeplay': 'enabled',
+    'reicast_internal_resolution': '640x480',
+    'reicast_alpha_sorting': 'per-strip (fast, least accurate)',
+    'reicast_oit_layers': '4',
+  };
+</script>
+
+<script>
+  // Mirror client — triggered by button or auto after game start
+  var MIRROR_SERVER = 'ws://' + location.hostname + ':7200';
+
+  window._startMirror = function() {
+    var emu = window.EJS_emulator;
+    if (!emu || !emu.Module) { console.error('[mirror] EmulatorJS not ready'); return; }
+    var Module = emu.Module;
+
+    if (typeof Module._mirror_init !== 'function') {
+      console.error('[mirror] _mirror_init not found');
+      return;
+    }
+
+    Module._mirror_init();
+    console.log('[mirror] Initialized');
+    document.getElementById('status').textContent = 'MapleCast - Connecting...';
+
+    var bufSize = 256 * 1024;
+    var buf = Module._malloc(bufSize);
+    var frames = 0;
+    var startTime = 0;
+
+    var ws = new WebSocket(MIRROR_SERVER);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = function() {
+      console.log('[mirror] Connected to ' + MIRROR_SERVER);
+      document.getElementById('status').textContent = 'MapleCast - LIVE';
+      startTime = performance.now();
+    };
+    ws.onclose = function() {
+      document.getElementById('status').textContent = 'MapleCast - Disconnected';
+      setTimeout(function() { _startMirror(); }, 2000);
+    };
+    ws.onmessage = function(e) {
+      if (typeof e.data === 'string') return;
+      var data = new Uint8Array(e.data);
+      if (data.length < 80) return;
+
+      // SYNC message
+      if (data[0]===0x53 && data[1]===0x59 && data[2]===0x4E && data[3]===0x43) {
+        if (data.length > bufSize) { Module._free(buf); bufSize = data.length + 65536; buf = Module._malloc(bufSize); }
+        Module.writeArrayToMemory(data, buf);
+        if (Module._mirror_apply_sync) Module._mirror_apply_sync(buf, data.length);
+        console.log('[mirror] SYNC: ' + (data.length/1024/1024).toFixed(1) + ' MB');
+        return;
+      }
+
+      // Delta frame
+      if (data.length > bufSize) { Module._free(buf); bufSize = data.length + 65536; buf = Module._malloc(bufSize); }
+      Module.writeArrayToMemory(data, buf);
+      Module._mirror_render_frame(buf, data.length);
+      frames++;
+
+      if (frames % 300 === 0) {
+        var fps = frames / ((performance.now() - startTime) / 1000);
+        document.getElementById('status').textContent = 'MapleCast - LIVE | ' + fps.toFixed(0) + ' fps | ' + frames + ' frames';
+      }
+    };
+  };
+</script>
+
+<script src="ejs-data/loader.js"></script>
+
+</body>
+</html>
