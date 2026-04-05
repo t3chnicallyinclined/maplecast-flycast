@@ -258,7 +258,7 @@ ws.onmessage = (e) => {
 
     if (data.length > MAX_FRAME) return;
     Module.HEAPU8.set(data, frameBuf);
-    // HACK: Force GL state from JS before WASM render
+    // Force GL state from JS before WASM render — bypasses broken emscripten GL
     if (glCtx) {
         glCtx.enable(glCtx.BLEND);
         glCtx.enable(glCtx.DEPTH_TEST);
