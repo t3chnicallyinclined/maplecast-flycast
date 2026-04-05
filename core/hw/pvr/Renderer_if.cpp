@@ -251,15 +251,12 @@ private:
 		{
 			presented = true;
 
-			// MapleCast: capture and stream after Present is fully complete
-			if (maplecast_stream::active())
-			{
-				try {
-					maplecast_stream::onFrameRendered();
-				} catch (...) {
-					// Don't crash the game if streaming fails
-				}
-			}
+			// MapleCast H.264/JPEG stream — disabled when mirror mode is active
+			// Mirror uses maplecast_ws_server for WebSocket broadcast instead
+			// if (maplecast_stream::active())
+			// {
+			// 	try { maplecast_stream::onFrameRendered(); } catch (...) {}
+			// }
 			if (!config::ThreadedRendering && !ggpo::active())
 				emu.getSh4Executor()->Stop();
 #ifdef LIBRETRO

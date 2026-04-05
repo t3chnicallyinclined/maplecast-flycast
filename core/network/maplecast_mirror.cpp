@@ -22,7 +22,7 @@
 #include "serialize.h"
 #include "emulator.h"
 #include "hw/mem/mem_watch.h"
-#include "maplecast_stream.h"
+#include "maplecast_ws_server.h"
 #include "rend/texconv.h"
 
 #include <cstdio>
@@ -178,6 +178,12 @@ void initServer()
 	_taCur = 0;
 	_taHasPrev = false;
 
+	// Start lightweight WebSocket server — no CUDA, no NVENC
+	int wsPort = 7200;
+	const char* portEnv = std::getenv("MAPLECAST_SERVER_PORT");
+	if (portEnv) wsPort = std::atoi(portEnv);
+	maplecast_ws::init(wsPort);
+
 	printf("[MIRROR] === SERVER MODE === streaming TA + memory diffs\n");
 }
 
@@ -257,6 +263,25 @@ static std::thread _wsThread;
 static std::mutex _frameMutex;
 static std::deque<std::vector<uint8_t>> _frameQueue;
 static std::atomic<uint32_t> _wsFramesReceived{0};
+
+// Double-buffered TA contexts — background decodes into one, render reads the other
+static TA_context _decodeTaCtx[2];
+static bool _decodeTaAlloced = false;
+static int _decodeIdx = 0;  // which buffer background thread writes to
+static bool _decodeHasFullFrame = false;
+
+// Decoded frame metadata — written by background thread, read by render thread
+struct DecodedFrame {
+	uint32_t frameNum;
+	uint32_t pvr_snapshot[16];
+	uint32_t taSize;
+	int taBufferIdx;  // which _decodeTaCtx[] has the TA data
+	uint32_t dirtyCount;
+	struct { uint8_t regionId; uint32_t pageIdx; uint8_t data[4096]; } pages[128];
+	bool vramDirty;
+};
+static DecodedFrame _decoded;
+static std::atomic<bool> _decodedReady{false};
 
 // Raw TCP WebSocket client — bypasses websocketpp/asio resolver entirely
 // Implements RFC 6455 WebSocket framing over a plain POSIX socket
@@ -357,27 +382,106 @@ static void wsClientRun(std::string host, int port)
 		printf("[MIRROR-WS] WebSocket handshake failed\n");
 		close(_wsFd); _wsFd = -1; return;
 	}
-	printf("[MIRROR-WS] WebSocket handshake OK — receiving frames\n"); fflush(stdout);
+	printf("[MIRROR-WS] WebSocket handshake OK — pipelined decode mode\n"); fflush(stdout);
 
-	// Read loop
+	if (!_decodeTaAlloced) {
+		_decodeTaCtx[0].Alloc();
+		_decodeTaCtx[1].Alloc();
+		_decodeTaAlloced = true;
+	}
+	_decodeIdx = 0;
+
 	std::vector<uint8_t> frame;
 	while (true) {
 		if (!wsReadFrame(_wsFd, frame)) {
 			printf("[MIRROR-WS] Connection lost\n"); fflush(stdout);
 			break;
 		}
-		if (frame.size() < 80) continue;  // skip text/small frames
+		if (frame.size() < 80) continue;
 
+		uint8_t* src = frame.data();
+		uint32_t frameSize; memcpy(&frameSize, src, 4); src += 4;
+		uint32_t frameNum; memcpy(&frameNum, src, 4); src += 4;
+
+		uint32_t pvr_snap[16];
+		memcpy(pvr_snap, src, sizeof(pvr_snap)); src += sizeof(pvr_snap);
+
+		uint32_t taSize; memcpy(&taSize, src, 4); src += 4;
+		uint32_t deltaPayloadSize; memcpy(&deltaPayloadSize, src, 4); src += 4;
+
+		// TA delta decode into double-buffered context
+		// _decodeIdx = buffer we write to NOW
+		// 1-_decodeIdx = buffer that has PREVIOUS frame (render thread may be reading it)
+		uint8_t* taDst = _decodeTaCtx[_decodeIdx].tad.thd_root;
+		uint8_t* taPrev = _decodeTaCtx[1 - _decodeIdx].tad.thd_root;
+
+		if (deltaPayloadSize == taSize)
 		{
-			std::lock_guard<std::mutex> lock(_frameMutex);
-			while (_frameQueue.size() >= 2)
-				_frameQueue.pop_front();
-			_frameQueue.push_back(std::move(frame));
-			frame.clear();
+			// Keyframe: straight memcpy into current buffer
+			memcpy(taDst, src, taSize);
+			src += taSize;
+			_decodeHasFullFrame = true;
 		}
+		else if (!_decodeHasFullFrame)
+		{
+			src += deltaPayloadSize + 4;
+			continue;
+		}
+		else
+		{
+			// Delta: copy previous frame into current buffer, then apply runs
+			// This is needed because the previous buffer might be in use by render thread
+			memcpy(taDst, taPrev, taSize);
+
+			uint8_t* dd = src;
+			uint8_t* de = src + deltaPayloadSize;
+			while (dd + 4 <= de) {
+				uint32_t off; memcpy(&off, dd, 4); dd += 4;
+				if (off == 0xFFFFFFFF) break;
+				uint16_t runLen; memcpy(&runLen, dd, 2); dd += 2;
+				if (off + runLen <= taSize && dd + runLen <= de)
+					memcpy(taDst + off, dd, runLen);
+				dd += runLen;
+			}
+			src += deltaPayloadSize;
+		}
+
+		// Skip checksum — TCP guarantees data integrity, checksum was for shm race detection
+		// (commented out, not deleted — can re-enable for debugging)
+		// uint32_t serverChecksum; memcpy(&serverChecksum, src, 4);
+		src += 4;
+
+		// Stage dirty pages — copy page data so render thread can apply safely
+		uint32_t dirtyCount; memcpy(&dirtyCount, src, 4); src += 4;
+		if (dirtyCount > 128) dirtyCount = 128;
+
+		DecodedFrame df;
+		df.frameNum = frameNum;
+		memcpy(df.pvr_snapshot, pvr_snap, sizeof(pvr_snap));
+		df.taSize = taSize;
+		df.dirtyCount = dirtyCount;
+		df.vramDirty = false;
+
+		for (uint32_t d = 0; d < dirtyCount; d++) {
+			df.pages[d].regionId = *src++;
+			memcpy(&df.pages[d].pageIdx, src, 4); src += 4;
+			memcpy(df.pages[d].data, src, MEM_PAGE_SIZE); src += MEM_PAGE_SIZE;
+			if (df.pages[d].regionId == 1) df.vramDirty = true;
+		}
+
+		// Publish — render thread picks it up
+		// Store which TA buffer index this frame was decoded into
+		df.taBufferIdx = _decodeIdx;
+		_decoded = df;
+		_decodedReady.store(true, std::memory_order_release);
+
+		// Swap to other buffer for next frame's decode
+		// Render thread reads buffer [df.taBufferIdx], we write to the other one
+		_decodeIdx = 1 - _decodeIdx;
+
 		uint32_t n = _wsFramesReceived.fetch_add(1, std::memory_order_relaxed);
-		if (n == 0) printf("[MIRROR-WS] First binary frame received\n");
-		if (n > 0 && n % 300 == 0) printf("[MIRROR-WS] %u frames received\n", n);
+		if (n == 0) printf("[MIRROR-WS] First frame decoded\n");
+		if (n > 0 && n % 300 == 0) printf("[MIRROR-WS] %u frames decoded\n", n);
 	}
 
 	close(_wsFd); _wsFd = -1;
@@ -526,10 +630,11 @@ void serverPublish(TA_context* ctx)
 	_taCur = prev;
 	_taHasPrev = true;
 
-	// Checksum
-	uint32_t taChecksum = 0;
-	for (uint32_t i = 0; i < taSize; i += 4)
-		taChecksum ^= *(uint32_t*)(taData + i);
+	// Checksum disabled — client skips it, TCP guarantees integrity
+	// uint32_t taChecksum = 0;
+	// for (uint32_t i = 0; i < taSize; i += 4)
+	// 	taChecksum ^= *(uint32_t*)(taData + i);
+	uint32_t taChecksum = 0;  // placeholder — client expects 4 bytes here
 	memcpy(dst, &taChecksum, 4); dst += 4;
 
 	// === Memory diffs ===
@@ -570,8 +675,8 @@ done_diff:
 	hdr->frame_count++;
 
 	// Also broadcast over WebSocket to browser clients
-	if (maplecast_stream::active())
-		maplecast_stream::broadcastBinary(dstStart, totalSize);
+	if (maplecast_ws::active())
+		maplecast_ws::broadcastBinary(dstStart, totalSize);
 
 	// Check if a client is requesting a fresh sync state
 	if (hdr->client_request_sync)
@@ -587,18 +692,19 @@ done_diff:
 		printf("[MIRROR] Client requested sync — fresh state + TA reset\n");
 	}
 
-	// Write full brain snapshot every 30 frames for late-joining clients
-	if (frameNum % 30 == 0)
-	{
-		uint8_t* snap = _shmPtr + HEADER_SIZE;  // brain snapshot area
-		size_t off = 0;
-		memcpy(snap + off, &mem_b[0], 16 * 1024 * 1024); off += 16 * 1024 * 1024;
-		memcpy(snap + off, &vram[0], VRAM_SIZE); off += VRAM_SIZE;
-		memcpy(snap + off, &aica::aica_ram[0], 2 * 1024 * 1024);
-	}
+	// Brain snapshot disabled — was 26MB memcpy every 30 frames (~5ms stall)
+	// Only needed for shm client initial sync. WebSocket clients use save state instead.
+	// if (frameNum % 30 == 0)
+	// {
+	// 	uint8_t* snap = _shmPtr + HEADER_SIZE;
+	// 	size_t off = 0;
+	// 	memcpy(snap + off, &mem_b[0], 16 * 1024 * 1024); off += 16 * 1024 * 1024;
+	// 	memcpy(snap + off, &vram[0], VRAM_SIZE); off += VRAM_SIZE;
+	// 	memcpy(snap + off, &aica::aica_ram[0], 2 * 1024 * 1024);
+	// }
 
-	// Publish memory hashes for client verification
-	hdr->server_vram_hash = fastVramHash();
+	// VRAM hash disabled — only used by shm client for drift detection
+	// hdr->server_vram_hash = fastVramHash();
 
 	// Audit disabled — reduced to VRAM+PVR only
 
@@ -621,19 +727,90 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 	if (!_isClient) return false;
 	int64_t t0 = _clientNowUs();
 
-	// Get frame data — either from WebSocket queue or shm
-	std::vector<uint8_t> wsFrame;  // holds WebSocket data if used
-	uint8_t* src = nullptr;
-
 	if (_useWebSocket)
 	{
-		std::lock_guard<std::mutex> lock(_frameMutex);
-		if (_frameQueue.empty()) return false;
-		wsFrame = std::move(_frameQueue.back());
-		_frameQueue.clear();
-		src = wsFrame.data();
+		// Pipelined: background thread already decoded TA + staged dirty pages
+		if (!_decodedReady.load(std::memory_order_acquire)) return false;
+		_decodedReady.store(false, std::memory_order_relaxed);
+
+		DecodedFrame& df = _decoded;
+		TA_context& ctx = _decodeTaCtx[df.taBufferIdx];
+		uint8_t* taDst = ctx.tad.thd_root;
+
+		// Apply dirty pages to emulator memory (must happen on render thread)
+		for (uint32_t d = 0; d < df.dirtyCount; d++) {
+			size_t pageOff = df.pages[d].pageIdx * MEM_PAGE_SIZE;
+			uint8_t rid = df.pages[d].regionId;
+
+			if (rid == 0 && pageOff + MEM_PAGE_SIZE <= 16 * 1024 * 1024)
+				memcpy(&mem_b[pageOff], df.pages[d].data, MEM_PAGE_SIZE);
+			else if (rid == 1 && pageOff + MEM_PAGE_SIZE <= VRAM_SIZE) {
+				memcpy(&vram[pageOff], df.pages[d].data, MEM_PAGE_SIZE);
+				VramLockedWriteOffset(pageOff);
+				vramDirty = true;
+			}
+			else if (rid == 2 && pageOff + MEM_PAGE_SIZE <= 2 * 1024 * 1024)
+				memcpy(&aica::aica_ram[pageOff], df.pages[d].data, MEM_PAGE_SIZE);
+			else if (rid == 3 && pageOff + MEM_PAGE_SIZE <= (size_t)pvr_RegSize)
+				memcpy(pvr_regs + pageOff, df.pages[d].data, MEM_PAGE_SIZE);
+		}
+
+		// Render — TA data already decoded in ctx.tad.thd_root by background thread
+		if (df.taSize > 0) {
+			ctx.rend.Clear();
+			ctx.tad.Clear();
+			ctx.tad.thd_data = taDst + df.taSize;
+
+			TA_GLOB_TILE_CLIP.full = df.pvr_snapshot[0];
+			SCALER_CTL.full = df.pvr_snapshot[1];
+			FB_X_CLIP.full = df.pvr_snapshot[2];
+			FB_Y_CLIP.full = df.pvr_snapshot[3];
+			FB_W_LINESTRIDE.full = df.pvr_snapshot[4];
+			FB_W_SOF1 = df.pvr_snapshot[5];
+			FB_W_CTRL.full = df.pvr_snapshot[6];
+			FOG_CLAMP_MIN.full = df.pvr_snapshot[7];
+			FOG_CLAMP_MAX.full = df.pvr_snapshot[8];
+
+			ctx.rend.isRTT = df.pvr_snapshot[13] != 0;
+			ctx.rend.fb_W_SOF1 = df.pvr_snapshot[5];
+			ctx.rend.fb_W_CTRL.full = df.pvr_snapshot[6];
+			ctx.rend.ta_GLOB_TILE_CLIP.full = df.pvr_snapshot[0];
+			ctx.rend.scaler_ctl.full = df.pvr_snapshot[1];
+			ctx.rend.fb_X_CLIP.full = df.pvr_snapshot[2];
+			ctx.rend.fb_Y_CLIP.full = df.pvr_snapshot[3];
+			ctx.rend.fb_W_LINESTRIDE = df.pvr_snapshot[4];
+			ctx.rend.fog_clamp_min.full = df.pvr_snapshot[7];
+			ctx.rend.fog_clamp_max.full = df.pvr_snapshot[8];
+			ctx.rend.framebufferWidth = df.pvr_snapshot[9];
+			ctx.rend.framebufferHeight = df.pvr_snapshot[10];
+			ctx.rend.clearFramebuffer = df.pvr_snapshot[11] != 0;
+			float fz; memcpy(&fz, &df.pvr_snapshot[12], 4);
+			ctx.rend.fZ_max = fz;
+
+			if (vramDirty) renderer->resetTextureCache = true;
+			::pal_needs_update = true;
+			palette_update();
+			renderer->updatePalette = true;
+			renderer->updateFogTable = true;
+
+			renderer->Process(&ctx);
+			rc = ctx.rend;
+		}
+
+		int64_t t1 = _clientNowUs();
+		static int64_t totalUs = 0;
+		static uint32_t count = 0;
+		totalUs += (t1 - t0);
+		count++;
+		if (df.frameNum % 600 == 0)
+			printf("[MIRROR] Client frame %u | dirty=%u pages | render=%lldµs avg=%lldµs | WS-PIPELINE\n",
+				df.frameNum, df.dirtyCount, (long long)(t1 - t0), (long long)(totalUs / count));
+
+		return df.taSize > 0;
 	}
-	else
+
+	// === SHM path ===
+	uint8_t* src = nullptr;
 	{
 		if (!_shmPtr) return false;
 		RingHeader* hdr = (RingHeader*)_shmPtr;

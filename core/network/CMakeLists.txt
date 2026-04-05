@@ -40,4 +40,6 @@ target_sources(${PROJECT_NAME} PRIVATE
         maplecast_gamestate.h
         maplecast_mirror.cpp
         maplecast_mirror.h
+        maplecast_ws_server.cpp
+        maplecast_ws_server.h
         maplecast_wasm_bridge.cpp)
