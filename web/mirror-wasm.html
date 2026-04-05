@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>MapleCast Mirror — WASM Client</title>
+<style>
+  body { margin: 0; background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; }
+  canvas { border: 1px solid #333; }
+  #status { position: fixed; top: 10px; left: 10px; color: #0f0; font-family: monospace; font-size: 14px; z-index: 10; }
+</style>
+</head>
+<body>
+<div id="status">Loading WASM...</div>
+<canvas id="canvas" width="640" height="480"></canvas>
+
+<script>
+// MapleCast WASM Mirror Client
+// Loads flycast WASM, connects WebSocket to server, pumps delta frames
+// No ROM, no BIOS, no save state — server sends everything
+
+const STATUS = document.getElementById('status');
+const CANVAS = document.getElementById('canvas');
+
+// Server WebSocket URL — change this or pass as URL param
+const params = new URLSearchParams(window.location.search);
+const SERVER = params.get('server') || 'ws://localhost:7200';
+
+STATUS.textContent = 'Loading WASM module...';
+
+// Load the WASM module
+// We need the flycast libretro WASM + JS glue
+// For now, load from the flycast-wasm demo server
+const WASM_JS_URL = '/data/cores/flycast_libretro_upstream.js';
+const WASM_URL = '/data/cores/flycast_libretro_upstream.wasm';
+
+// TODO: For standalone deployment, the WASM files would be bundled
+// For now, this page must be served from the flycast-wasm demo server
+
+async function main() {
+  STATUS.textContent = 'Connecting to ' + SERVER + '...';
+
+  // Connect WebSocket first — get the SYNC before we even need the renderer
+  const ws = new WebSocket(SERVER);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onerror = (e) => { STATUS.textContent = 'WebSocket error — is the server running?'; };
+  ws.onclose = () => { STATUS.textContent = 'Disconnected'; };
+
+  ws.onopen = () => {
+    STATUS.textContent = 'Connected — waiting for SYNC...';
+  };
+
+  let frames = 0;
+  let startTime = 0;
+
+  ws.onmessage = (event) => {
+    if (typeof event.data === 'string') return;
+
+    const data = new Uint8Array(event.data);
+    if (data.length < 80) return;
+
+    // Check for SYNC message (first 4 bytes = "SYNC")
+    if (data[0] === 0x53 && data[1] === 0x59 && data[2] === 0x4E && data[3] === 0x43) {
+      STATUS.textContent = 'SYNC received (' + (data.length / 1024 / 1024).toFixed(1) + ' MB) — rendering...';
+      startTime = performance.now();
+      return;
+    }
+
+    // Delta frame — for now just count them
+    frames++;
+    if (frames % 60 === 0) {
+      const elapsed = (performance.now() - startTime) / 1000;
+      const fps = frames / elapsed;
+      STATUS.textContent = frames + ' frames | ' + fps.toFixed(0) + ' fps | ' + (data.length / 1024).toFixed(0) + ' KB/frame';
+    }
+
+    // TODO: When WASM renderer is integrated:
+    // Module._mirror_render_frame(ptr, size);
+  };
+}
+
+main();
+</script>
+</body>
+</html>
