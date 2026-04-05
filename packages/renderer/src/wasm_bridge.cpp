@@ -270,10 +270,9 @@ int renderer_frame(uint8_t* data, int size)
         src += 4096;
     }
 
-    // CRITICAL: Reset texture cache when VRAM changes — without this,
-    // health bars, animations, sprites won't update because the GPU
-    // texture cache still has stale data from previous frames.
-    if (vramDirty) renderer->resetTextureCache = true;
+    // VramLockedWriteOffset() already invalidates specific texture cache entries
+    // for each dirty page. Only do a full reset on SYNC, not per-frame.
+    // Full reset every frame is too aggressive and may cause texture format issues.
 
     // Debug: log palette state on first rendered frame
     if (_frameCount == 0) {
