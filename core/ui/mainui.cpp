@@ -27,10 +27,7 @@
 #include "imgui_driver.h"
 #include "profiler/fc_profiler.h"
 #include "oslib/i18n.h"
-#include "network/maplecast_client.h"
 #include "network/maplecast_mirror.h"
-#include "network/maplecast_lookup_test.h"
-#include "rend/gles/gles.h"
 
 #include <chrono>
 #include <thread>
@@ -65,37 +62,13 @@ bool mainui_rend_frame()
 		static rend_context mirrorCtx;
 		bool vramDirty = false;
 
-		// Try lookup first if cache is large enough
-		bool rendered = false;
-		if (maplecast_lookup_test::active() && maplecast_lookup_test::cacheSize() > 100)
-		{
-			rend_context lookupRc;
-			if (maplecast_lookup_test::clientLookup(lookupRc))
-			{
-				renderer->Render();
-				renderer->Present();
-				rendered = true;
-			}
-		}
-
-		// Fall back to streamed TA commands (also builds cache)
-		if (!rendered && maplecast_mirror::clientReceive(mirrorCtx, vramDirty))
+		if (maplecast_mirror::clientReceive(mirrorCtx, vramDirty))
 		{
 			bool isScreen = renderer->Render();
 			if (isScreen)
 				renderer->Present();
 		}
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
-	}
-	else if (maplecast_client::active())
-	{
-		try {
-			maplecast_client::renderFrame();
-			renderer->Present();
-		} catch (...) {
-			printf("[CLIENT] Render error\n");
-		}
-		std::this_thread::sleep_for(std::chrono::milliseconds(16));
 	}
 	else
 	{

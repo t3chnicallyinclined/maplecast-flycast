@@ -11,16 +11,7 @@
 #include "profiler/fc_profiler.h"
 #include "network/ggpo.h"
 #include "network/maplecast_stream.h"
-#ifdef MAPLECAST_TA_STREAM
-#include "network/maplecast_visual_cache.h"
-#include "network/maplecast_scanner.h"
-#include "network/maplecast_gs_loopback.h"
-#include "network/maplecast_rend_diff.h"
-#include "network/maplecast_rend_replay.h"
 #include "network/maplecast_mirror.h"
-#include "network/maplecast_nudge.h"
-#include "network/maplecast_lookup_test.h"
-#endif
 
 #include <mutex>
 #include <deque>
@@ -202,19 +193,9 @@ private:
 #endif
 		{
 			FC_PROFILE_SCOPE_NAMED("Renderer::Process");
-#ifdef MAPLECAST_TA_STREAM
 			// Mirror server: capture TA commands BEFORE Process consumes them
 			if (maplecast_mirror::isServer() && taContext)
 				maplecast_mirror::serverPublish(taContext);
-
-			// Lookup test: record game state + TA commands
-			if (maplecast_lookup_test::active() && taContext)
-				maplecast_lookup_test::serverRecord(taContext);
-
-			// Nudge: server publishes after Process (state is fresh)
-			if (maplecast_nudge::isServer())
-				maplecast_nudge::serverTick();
-#endif
 			try {
 				renderer->Process(taContext);
 			} catch (...) {
@@ -231,41 +212,6 @@ private:
 		rend_allow_rollback();
 		{
 			FC_PROFILE_SCOPE_NAMED("Renderer::Render");
-#ifdef MAPLECAST_TA_STREAM
-			// Lookup test replay: replace live render with lookup render
-			if (maplecast_lookup_test::isReplaying() && taContext)
-			{
-				rend_context lookupRc;
-				if (maplecast_lookup_test::clientLookup(lookupRc))
-				{
-					// gl.rendContext already set by Process inside clientLookup
-					renderer->Render();
-				}
-			}
-
-			// Nudge client: apply state correction AFTER Process, BEFORE Render
-			// SH4 already ran and built TA commands. We correct RAM state now.
-			// The renderer hasn't read positions yet — it reads during Render.
-			if (maplecast_nudge::isClient())
-				maplecast_nudge::clientTick();
-
-			// Rend replay: record frames AFTER Process (captures full rend_context)
-			if (maplecast_rend_replay::active() && !maplecast_rend_replay::replaying() && taContext)
-				maplecast_rend_replay::tick(taContext->rend);
-
-			// Brute force scanner: inject character state into RAM before render
-			if (maplecast_scanner::active())
-				maplecast_scanner::tick();
-			// Game state loopback test: read → serialize → deserialize → write back
-			if (maplecast_gs_loopback::active())
-				maplecast_gs_loopback::tick();
-			// Record TA display list for visual cache BEFORE rendering
-			if (taContext)
-				maplecast_visual_cache::recordFrame(taContext->rend);
-			// Rend diff: compare 253-byte game state vs vertex output
-			if (maplecast_rend_diff::active() && taContext)
-				maplecast_rend_diff::tick(taContext->rend);
-#endif
 			try {
 				renderer->Render();
 			} catch (...) {

@@ -26,6 +26,7 @@ VramWatcher vramWatcher;
 RamWatcher ramWatcher;
 AicaRamWatcher aramWatcher;
 ElanRamWatcher elanWatcher;
+bool mirrorActive = false;
 
 void AicaRamWatcher::protectMem(u32 addr, u32 size)
 {

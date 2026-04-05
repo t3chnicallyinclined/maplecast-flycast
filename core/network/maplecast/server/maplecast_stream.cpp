@@ -781,7 +781,7 @@ void onFrameRendered()
 			broadcastBinary(_sendBuf, totalPayload);
 
 			// Broadcast game state for WASM clients (253 bytes) via WebSocket
-// Game state broadcast to browser clients
+#ifdef MAPLECAST_TA_STREAM
 			{
 				maplecast_gamestate::GameState gs;
 				maplecast_gamestate::readGameState(gs);
@@ -804,6 +804,7 @@ void onFrameRendered()
 					}
 				}
 			}
+#endif
 
 			if (frameNum % 300 == 0)
 			{
@@ -889,7 +890,7 @@ void onFrameRendered()
 		broadcastBinary(_sendBuf, totalPayload);
 
 		// Also broadcast game state via same channel as video
-// Game state broadcast to browser clients
+#ifdef MAPLECAST_TA_STREAM
 		{
 			maplecast_gamestate::GameState gs;
 			maplecast_gamestate::readGameState(gs);
@@ -899,6 +900,7 @@ void onFrameRendered()
 			memcpy(gsBuf + 2, &gsSize, 2);
 			broadcastBinary(gsBuf, 4 + gsSize);
 		}
+#endif
 
 		if (frameNum % 300 == 0)
 		{

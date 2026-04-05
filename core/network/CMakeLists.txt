@@ -38,22 +38,6 @@ target_sources(${PROJECT_NAME} PRIVATE
         maplecast_audio.h
         maplecast_gamestate.cpp
         maplecast_gamestate.h
-        maplecast_visual_cache.cpp
-        maplecast_visual_cache.h
-        maplecast_scanner.cpp
-        maplecast_scanner.h
-        maplecast_gs_loopback.cpp
-        maplecast_gs_loopback.h
-        maplecast_rend_diff.cpp
-        maplecast_rend_diff.h
-        maplecast_rend_replay.cpp
-        maplecast_rend_replay.h
-        maplecast_client.cpp
-        maplecast_client.h
         maplecast_mirror.cpp
         maplecast_mirror.h
-        maplecast_nudge.cpp
-        maplecast_nudge.h
-        maplecast_lookup_test.cpp
-        maplecast_lookup_test.h
         maplecast_wasm_bridge.cpp)

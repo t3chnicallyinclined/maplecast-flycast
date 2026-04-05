@@ -40,17 +40,7 @@
 #include "network/maplecast_telemetry.h"
 #include "network/maplecast_input_server.h"
 #include "network/maplecast_audio.h"
-#ifdef MAPLECAST_TA_STREAM
-#include "network/maplecast_visual_cache.h"
-#include "network/maplecast_scanner.h"
-#include "network/maplecast_gs_loopback.h"
-#include "network/maplecast_rend_diff.h"
-#include "network/maplecast_rend_replay.h"
-#include "network/maplecast_client.h"
 #include "network/maplecast_mirror.h"
-#include "network/maplecast_nudge.h"
-#include "network/maplecast_lookup_test.h"
-#endif
 #include "hw/maple/maple_cfg.h"
 #include <cstdlib>
 #include <string>
@@ -1006,88 +996,41 @@ void Emulator::start()
 	state = Running;
 	SetMemoryHandlers();
 
-	// MapleCast: Flycast IS the server.
-	// MAPLECAST=1 enables it. Input via XDP/fallback thread → kcode[] atomics.
+	// MapleCast server stack
 	if (std::getenv("MAPLECAST"))
 	{
 		int port = 7100;
 		const char* portEnv = std::getenv("MAPLECAST_PORT");
 		if (portEnv) port = std::atoi(portEnv);
 
-		// Input server — single source of truth for all player input
 		maplecast_input::init(port);
-
-		// Audio streaming — raw PCM over DataChannel
 		maplecast_audio::init();
-
-		// Visual cache — records TA display lists for every game state
-		// Builds a complete map of every visual state MVC2 can produce
-#ifdef MAPLECAST_TA_STREAM
-		maplecast_visual_cache::init("visual_cache");
-
-		// Brute force scanner: MAPLECAST_SCAN=1 to auto-start full scan
-		if (std::getenv("MAPLECAST_SCAN"))
-			maplecast_scanner::start(maplecast_scanner::ScanMode::FullScan, 0);
-
-		// Loopback test: MAPLECAST_GS_LOOPBACK=1
-		if (std::getenv("MAPLECAST_GS_LOOPBACK"))
-			maplecast_gs_loopback::init();
-
-		// Rend diff: MAPLECAST_REND_DIFF=1 — find hidden state
-		if (std::getenv("MAPLECAST_REND_DIFF"))
-			maplecast_rend_diff::init();
-
-		// Rend replay: MAPLECAST_REND_REPLAY=1 — record 10s, replay in loop
-		if (std::getenv("MAPLECAST_REND_REPLAY"))
-			maplecast_rend_replay::init();
-
-		// Client mode: renderer-only playback from recording
-		if (std::getenv("MAPLECAST_CLIENT"))
-			maplecast_client::init();
-
-#endif
-
-		// Init telemetry (fire-and-forget UDP to localhost:7300)
 		maplecast_telemetry::init();
 
-		// Start NVENC streaming if MAPLECAST_STREAM is set
 		if (std::getenv("MAPLECAST_STREAM"))
 		{
 			int streamPort = 7200;
-			const char* portEnv = std::getenv("MAPLECAST_STREAM_PORT");
-			if (portEnv) streamPort = std::atoi(portEnv);
+			const char* sp = std::getenv("MAPLECAST_STREAM_PORT");
+			if (sp) streamPort = std::atoi(sp);
 			maplecast_stream::init(streamPort);
 		}
 	}
 
 	if (config::GGPOEnable && config::ThreadedRendering)
-		// Not supported with GGPO
 		config::EmulateFramebuffer.override(false);
 	setupPtyPipe();
 
-	// Mirror mode: shared memory rend_context streaming
-	// OUTSIDE the MAPLECAST block — client doesn't need server stack
-#ifdef MAPLECAST_TA_STREAM
+	// Mirror server: captures TA commands + memory diffs to shared memory + WebSocket
 	if (std::getenv("MAPLECAST_MIRROR_SERVER"))
 		maplecast_mirror::initServer();
-	// Nudge mode: lightweight position correction
-	if (std::getenv("MAPLECAST_NUDGE_SERVER"))
-		maplecast_nudge::initServer();
-	if (std::getenv("MAPLECAST_NUDGE_CLIENT"))
-		maplecast_nudge::initClient();
 
-	// Lookup test: record 10s then replay from lookup table
-	if (std::getenv("MAPLECAST_LOOKUP_TEST"))
-		maplecast_lookup_test::init();
-
+	// Mirror client: receives TA deltas, renders only (no CPU)
 	if (std::getenv("MAPLECAST_MIRROR_CLIENT"))
 	{
 		maplecast_mirror::initClient();
-		// Stop the emulator CPU — client only renders from mirror data
 		state = Loaded;
 		printf("[MIRROR] Emulator CPU stopped — renderer-only mode\n");
 	}
-#endif
 
 	memwatch::protect();
 

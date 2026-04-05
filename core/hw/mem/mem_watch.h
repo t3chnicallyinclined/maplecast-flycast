@@ -183,9 +183,12 @@ extern RamWatcher ramWatcher;
 extern AicaRamWatcher aramWatcher;
 extern ElanRamWatcher elanWatcher;
 
+// Set by mirror server to enable page-fault tracking without GGPO
+extern bool mirrorActive;
+
 inline static bool writeAccess(void *p)
 {
-	if (!config::GGPOEnable)
+	if (!config::GGPOEnable && !mirrorActive)
 		return false;
 	if (ramWatcher.hit(p))
 	{

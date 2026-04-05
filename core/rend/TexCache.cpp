@@ -16,9 +16,6 @@
 */
 #include "TexCache.h"
 #include "xbrz/xbrz.h"
-#ifdef MAPLECAST_TA_STREAM
-#include "network/maplecast_visual_cache.h"
-#endif
 #include "hw/pvr/pvr_mem.h"
 #include "hw/mem/addrspace.h"
 
@@ -683,16 +680,6 @@ bool BaseTextureCacheData::Update()
 	protectVRam();
 
 	UploadToGPU(upscaled_w, upscaled_h, (const u8 *)temp_tex_buffer, IsMipmapped(), mipmapped);
-#ifdef MAPLECAST_TA_STREAM
-	// Capture decoded texture pixels — exact same data flycast uploads to GPU
-	{
-		bool is32 = (tex_type == TextureType::_8888);
-		uint32_t bpp = is32 ? 4 : 2;
-		maplecast_visual_cache::captureTexture(
-			startAddress, tcw.full, upscaled_w, upscaled_h,
-			temp_tex_buffer, upscaled_w * upscaled_h * bpp, is32);
-	}
-#endif
 	if (config::DumpTextures)
 	{
 		ComputeHash();
