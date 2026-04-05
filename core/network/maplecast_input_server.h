@@ -66,23 +66,49 @@ void injectInput(int slot, uint8_t lt, uint8_t rt, uint16_t buttons);
 // Is the input server running?
 bool active();
 
-// Stick registration — bind a NOBD stick to a browser user
-// Returns true when combo detected and registration complete
+// Stick registration — bind a NOBD stick to a username
+// Rhythm mode: tap any button 5x, pause, 5x again
 void startStickRegistration(const char* browserId);
 void cancelStickRegistration();
 bool isRegistering();
 
-// Lookup: is this NOBD source registered to a browser user?
-// Returns browser ID if registered, nullptr if not
+// Web registration — first unregistered stick to send any input gets bound
+void startWebRegistration(const char* username);
+void cancelWebRegistration();
+bool isWebRegistering();
+const char* webRegisteringUsername();  // who's waiting to register
+
+// Lookup: is this NOBD source registered?
+// Returns username if registered, nullptr if not
+const char* getRegisteredUsername(uint32_t srcIP, uint16_t srcPort);
+
+// Legacy: returns browser ID (same as username now)
 const char* getRegisteredBrowserId(uint32_t srcIP, uint16_t srcPort);
 
-// Bind a specific stick source to a browser user (called after combo detected)
-void registerStick(uint32_t srcIP, uint16_t srcPort, const char* browserId);
+// Bind a specific stick source to a username
+void registerStick(uint32_t srcIP, uint16_t srcPort, const char* username);
 
-// Unregister a stick by browser ID
-void unregisterStick(const char* browserId);
+// Unregister a stick by username
+void unregisterStick(const char* username);
+
+// Check if a registered stick is online (sent input recently)
+bool isStickOnline(const char* username);
+
+// Get stick info for a username
+struct StickInfo {
+    bool registered;
+    bool online;
+    char username[16];
+    uint32_t srcIP;
+    uint16_t srcPort;
+    int64_t lastInputUs;
+};
+StickInfo getStickInfo(const char* username);
 
 // How many registered sticks?
 int registeredStickCount();
+
+// Validate username: 4-12 chars, [a-zA-Z0-9_] only
+bool isValidUsername(const char* name);
 
 }

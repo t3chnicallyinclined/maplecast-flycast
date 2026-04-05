@@ -50,18 +50,24 @@ static std::mutex _registryMutex;
 // Telemetry
 static std::atomic<uint64_t> _totalPackets{0};
 
-// Stick registration
+// Stick registration — username-based
 struct StickBinding {
 	uint32_t srcIP;
 	uint16_t srcPort;
-	char browserId[64];
+	char username[16];       // 4-12 chars, [a-zA-Z0-9_]
+	char browserId[64];      // legacy compat (same as username for new registrations)
+	int64_t lastInputUs;     // for online detection
 };
 static std::vector<StickBinding> _stickBindings;
 
-// Registration in progress — rhythm detection
-// Pattern: tap any button 5 times, pause 0.5-2s, tap 5 times again
+// Rhythm registration in progress (legacy)
 static bool _registering = false;
 static char _registerBrowserId[64] = {};
+
+// Web registration — simpler "any press" mode
+static bool _webRegistering = false;
+static char _webRegisterUsername[16] = {};
+static int64_t _webRegisterStartUs = 0;
 
 struct RhythmTracker {
 	uint32_t srcIP;
@@ -162,6 +168,33 @@ static void udpThreadLoop(int port)
 		{
 			slot = buf[0];
 			w3 = buf + 1;
+		}
+
+		// Web registration — any press from unregistered stick binds it
+		if (_webRegistering && from.sin_addr.s_addr != htonl(INADDR_LOOPBACK))
+		{
+			uint16_t buttons = ((uint16_t)w3[2] << 8) | w3[3];
+			// Any button pressed (active-low: not 0xFFFF)
+			if (buttons != 0xFFFF)
+			{
+				// Only register if this IP isn't already registered
+				if (!getRegisteredBrowserId(from.sin_addr.s_addr, from.sin_port))
+				{
+					registerStick(from.sin_addr.s_addr, from.sin_port, _webRegisterUsername);
+					printf("[input-server] WEB REGISTER: stick %08X bound to '%s'\n",
+						from.sin_addr.s_addr, _webRegisterUsername);
+					_webRegistering = false;
+				}
+			}
+		}
+
+		// Update last input time for online tracking
+		for (auto& b : _stickBindings)
+		{
+			if (b.srcIP == from.sin_addr.s_addr) {
+				b.lastInputUs = nowUs();
+				break;
+			}
 		}
 
 		// Check for stick registration rhythm (only from real NOBD sticks, not loopback)
@@ -446,34 +479,128 @@ const char* getRegisteredBrowserId(uint32_t srcIP, uint16_t srcPort)
 	return nullptr;
 }
 
-void registerStick(uint32_t srcIP, uint16_t srcPort, const char* browserId)
+const char* getRegisteredUsername(uint32_t srcIP, uint16_t srcPort)
 {
-	// Update existing or add new
+	for (const auto& b : _stickBindings)
+		if (b.srcIP == srcIP)
+			return b.username[0] ? b.username : b.browserId;
+	return nullptr;
+}
+
+void registerStick(uint32_t srcIP, uint16_t srcPort, const char* identifier)
+{
+	// Update existing binding for this IP, or existing binding for this username
 	for (auto& b : _stickBindings)
 	{
-		if (b.srcIP == srcIP) {
-			strncpy(b.browserId, browserId, sizeof(b.browserId) - 1);
+		if (b.srcIP == srcIP || strcmp(b.username, identifier) == 0 ||
+			strcmp(b.browserId, identifier) == 0) {
+			b.srcIP = srcIP;
+			b.srcPort = srcPort;
+			strncpy(b.username, identifier, sizeof(b.username) - 1);
+			strncpy(b.browserId, identifier, sizeof(b.browserId) - 1);
+			b.lastInputUs = nowUs();
 			return;
 		}
 	}
 	StickBinding b = {};
 	b.srcIP = srcIP;
 	b.srcPort = srcPort;
-	strncpy(b.browserId, browserId, sizeof(b.browserId) - 1);
+	strncpy(b.username, identifier, sizeof(b.username) - 1);
+	strncpy(b.browserId, identifier, sizeof(b.browserId) - 1);
+	b.lastInputUs = nowUs();
 	_stickBindings.push_back(b);
 }
 
-void unregisterStick(const char* browserId)
+void unregisterStick(const char* identifier)
 {
 	_stickBindings.erase(std::remove_if(_stickBindings.begin(), _stickBindings.end(),
-		[browserId](const StickBinding& b) { return strcmp(b.browserId, browserId) == 0; }),
+		[identifier](const StickBinding& b) {
+			return strcmp(b.browserId, identifier) == 0 ||
+			       strcmp(b.username, identifier) == 0;
+		}),
 		_stickBindings.end());
-	printf("[input-server] Stick unregistered for %s\n", browserId);
+	printf("[input-server] Stick unregistered for %s\n", identifier);
+}
+
+bool isStickOnline(const char* username)
+{
+	int64_t now = nowUs();
+	for (const auto& b : _stickBindings)
+		if ((strcmp(b.username, username) == 0 || strcmp(b.browserId, username) == 0)
+			&& (now - b.lastInputUs) < 10000000)  // 10 seconds
+			return true;
+	return false;
+}
+
+StickInfo getStickInfo(const char* username)
+{
+	StickInfo info = {};
+	int64_t now = nowUs();
+	for (const auto& b : _stickBindings)
+	{
+		if (strcmp(b.username, username) == 0 || strcmp(b.browserId, username) == 0)
+		{
+			info.registered = true;
+			info.online = (now - b.lastInputUs) < 10000000;
+			strncpy(info.username, b.username, sizeof(info.username) - 1);
+			info.srcIP = b.srcIP;
+			info.srcPort = b.srcPort;
+			info.lastInputUs = b.lastInputUs;
+			return info;
+		}
+	}
+	return info;
 }
 
 int registeredStickCount()
 {
 	return (int)_stickBindings.size();
+}
+
+// --- Web registration ---
+
+void startWebRegistration(const char* username)
+{
+	strncpy(_webRegisterUsername, username, sizeof(_webRegisterUsername) - 1);
+	_webRegisterStartUs = nowUs();
+	_webRegistering = true;
+	printf("[input-server] Web registration started for '%s' — press any button\n", username);
+}
+
+void cancelWebRegistration()
+{
+	_webRegistering = false;
+	_webRegisterUsername[0] = 0;
+	printf("[input-server] Web registration cancelled\n");
+}
+
+bool isWebRegistering()
+{
+	// Auto-cancel after 30 seconds
+	if (_webRegistering && (nowUs() - _webRegisterStartUs) > 30000000) {
+		printf("[input-server] Web registration timed out for '%s'\n", _webRegisterUsername);
+		_webRegistering = false;
+	}
+	return _webRegistering;
+}
+
+const char* webRegisteringUsername()
+{
+	return _webRegisterUsername;
+}
+
+bool isValidUsername(const char* name)
+{
+	if (!name) return false;
+	int len = 0;
+	for (const char* p = name; *p; p++, len++)
+	{
+		char c = *p;
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		      (c >= '0' && c <= '9') || c == '_'))
+			return false;
+	}
+	return len >= 4 && len <= 12;
 }
 
 } // namespace maplecast_input

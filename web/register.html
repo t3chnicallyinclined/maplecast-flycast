@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NOBD — Register Your Stick</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg-dark: #0a0a12;
+  --bg-panel: #10101c;
+  --border-gold: #d4a017;
+  --gold: #ffd700;
+  --hot-red: #ff2020;
+  --neon-green: #39ff14;
+  --neon-cyan: #00e5ff;
+  --white: #f0e6d3;
+  --gray: #555;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--bg-dark);
+  color: var(--white);
+  font-family: 'Press Start 2P', monospace;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+}
+
+.register-box {
+  background: var(--bg-panel);
+  border: 2px solid var(--border-gold);
+  padding: 40px;
+  max-width: 500px;
+  width: 90%;
+  text-align: center;
+}
+
+h1 {
+  font-size: 20px;
+  color: var(--gold);
+  margin-bottom: 8px;
+  letter-spacing: 2px;
+}
+
+.subtitle {
+  font-size: 8px;
+  color: var(--gray);
+  margin-bottom: 32px;
+}
+
+label {
+  display: block;
+  font-size: 10px;
+  color: var(--neon-cyan);
+  margin-bottom: 8px;
+  text-align: left;
+}
+
+input[type="text"] {
+  width: 100%;
+  padding: 12px;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 14px;
+  background: #0a0a18;
+  border: 2px solid var(--gray);
+  color: var(--white);
+  outline: none;
+  margin-bottom: 6px;
+  text-transform: lowercase;
+}
+
+input[type="text"]:focus {
+  border-color: var(--neon-cyan);
+}
+
+input[type="text"].invalid {
+  border-color: var(--hot-red);
+}
+
+input[type="text"].valid {
+  border-color: var(--neon-green);
+}
+
+.hint {
+  font-size: 7px;
+  color: var(--gray);
+  text-align: left;
+  margin-bottom: 24px;
+}
+
+.hint.error {
+  color: var(--hot-red);
+}
+
+button {
+  font-family: 'Press Start 2P', monospace;
+  font-size: 12px;
+  padding: 14px 28px;
+  cursor: pointer;
+  border: 2px solid var(--gold);
+  background: transparent;
+  color: var(--gold);
+  letter-spacing: 1px;
+  transition: all 0.2s;
+  width: 100%;
+}
+
+button:hover:not(:disabled) {
+  background: rgba(255,215,0,0.1);
+}
+
+button:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/* States */
+.state { display: none; }
+.state.active { display: block; }
+
+.waiting {
+  margin-top: 24px;
+  padding: 20px;
+  border: 2px dashed var(--neon-cyan);
+  animation: pulse-border 1.5s infinite;
+}
+
+@keyframes pulse-border {
+  0%, 100% { border-color: var(--neon-cyan); }
+  50% { border-color: transparent; }
+}
+
+.waiting-text {
+  font-size: 10px;
+  color: var(--neon-cyan);
+  margin-bottom: 12px;
+}
+
+.waiting-sub {
+  font-size: 7px;
+  color: var(--gray);
+}
+
+.cancel-btn {
+  margin-top: 16px;
+  font-size: 8px;
+  padding: 8px 16px;
+  border-color: var(--hot-red);
+  color: var(--hot-red);
+}
+
+.cancel-btn:hover {
+  background: rgba(255,32,32,0.1);
+}
+
+.success {
+  margin-top: 24px;
+  padding: 20px;
+  border: 2px solid var(--neon-green);
+}
+
+.success-text {
+  font-size: 12px;
+  color: var(--neon-green);
+  margin-bottom: 12px;
+}
+
+.success-sub {
+  font-size: 8px;
+  color: var(--gray);
+  line-height: 1.8;
+}
+
+.play-btn {
+  margin-top: 16px;
+  border-color: var(--neon-green);
+  color: var(--neon-green);
+}
+
+.play-btn:hover {
+  background: rgba(57,255,20,0.1);
+}
+
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+
+.status-dot.online { background: var(--neon-green); }
+.status-dot.offline { background: var(--hot-red); }
+.status-dot.connecting { background: var(--gold); animation: blink 1s infinite; }
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.ws-status {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  font-size: 7px;
+  color: var(--gray);
+}
+</style>
+</head>
+<body>
+
+<div class="ws-status">
+  <span class="status-dot connecting" id="wsDot"></span>
+  <span id="wsLabel">CONNECTING</span>
+</div>
+
+<div class="register-box">
+  <h1>NOBD</h1>
+  <div class="subtitle">REGISTER YOUR STICK</div>
+
+  <!-- State 1: Enter username -->
+  <div class="state active" id="stateInput">
+    <label>CHOOSE YOUR TAG</label>
+    <input type="text" id="username" maxlength="12" placeholder="your_name"
+           autocomplete="off" spellcheck="false">
+    <div class="hint" id="usernameHint">4-12 CHARACTERS, LETTERS NUMBERS UNDERSCORE</div>
+    <button id="registerBtn" disabled onclick="startRegister()">REGISTER STICK</button>
+  </div>
+
+  <!-- State 2: Waiting for stick press -->
+  <div class="state" id="stateWaiting">
+    <div class="waiting">
+      <div class="waiting-text">PRESS ANY BUTTON<br>ON YOUR STICK</div>
+      <div class="waiting-sub">MAKE SURE YOUR STICK IS PLUGGED IN AND POWERED ON</div>
+    </div>
+    <button class="cancel-btn" onclick="cancelRegister()">CANCEL</button>
+  </div>
+
+  <!-- State 3: Success -->
+  <div class="state" id="stateSuccess">
+    <div class="success">
+      <div class="success-text">STICK REGISTERED</div>
+      <div class="success-sub">
+        USERNAME: <span id="registeredName" style="color:var(--neon-cyan)"></span><br>
+        YOUR STICK IS BOUND AND READY
+      </div>
+    </div>
+    <a href="king.html">
+      <button class="play-btn">ENTER THE ARCADE</button>
+    </a>
+  </div>
+
+  <!-- State 4: Error -->
+  <div class="state" id="stateError">
+    <div style="color:var(--hot-red); margin-bottom: 16px; font-size: 10px;" id="errorMsg"></div>
+    <button onclick="showState('stateInput')">TRY AGAIN</button>
+  </div>
+</div>
+
+<script>
+const WS_PORT = 7200;
+const wsUrl = `ws://${location.hostname}:${WS_PORT}`;
+let ws = null;
+let pendingUsername = '';
+
+function showState(id) {
+  document.querySelectorAll('.state').forEach(s => s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+
+// Username validation
+const usernameInput = document.getElementById('username');
+const registerBtn = document.getElementById('registerBtn');
+const usernameHint = document.getElementById('usernameHint');
+
+usernameInput.addEventListener('input', () => {
+  const val = usernameInput.value.replace(/[^a-zA-Z0-9_]/g, '').toLowerCase();
+  usernameInput.value = val;
+
+  const valid = /^[a-z0-9_]{4,12}$/.test(val);
+  usernameInput.className = val.length === 0 ? '' : (valid ? 'valid' : 'invalid');
+  registerBtn.disabled = !valid || !ws || ws.readyState !== 1;
+
+  if (val.length > 0 && val.length < 4) {
+    usernameHint.textContent = `${4 - val.length} MORE CHARACTER${4 - val.length > 1 ? 'S' : ''} NEEDED`;
+    usernameHint.className = 'hint error';
+  } else {
+    usernameHint.textContent = '4-12 CHARACTERS, LETTERS NUMBERS UNDERSCORE';
+    usernameHint.className = 'hint';
+  }
+});
+
+function startRegister() {
+  const username = usernameInput.value.trim().toLowerCase();
+  if (!username || !ws) return;
+
+  pendingUsername = username;
+  ws.send(JSON.stringify({ type: 'register_stick_web', username }));
+}
+
+function cancelRegister() {
+  if (ws) ws.send(JSON.stringify({ type: 'cancel_register_web' }));
+  showState('stateInput');
+}
+
+// WebSocket
+function connectWS() {
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = () => {
+    document.getElementById('wsDot').className = 'status-dot online';
+    document.getElementById('wsLabel').textContent = 'CONNECTED';
+    registerBtn.disabled = !(/^[a-z0-9_]{4,12}$/.test(usernameInput.value));
+  };
+
+  ws.onclose = () => {
+    document.getElementById('wsDot').className = 'status-dot offline';
+    document.getElementById('wsLabel').textContent = 'DISCONNECTED';
+    registerBtn.disabled = true;
+    setTimeout(connectWS, 2000);
+  };
+
+  ws.onmessage = (e) => {
+    if (typeof e.data !== 'string') return;
+    try {
+      const msg = JSON.parse(e.data);
+
+      if (msg.type === 'register_waiting') {
+        showState('stateWaiting');
+      }
+      else if (msg.type === 'register_error') {
+        document.getElementById('errorMsg').textContent = msg.msg.toUpperCase();
+        showState('stateError');
+      }
+      else if (msg.type === 'register_cancelled') {
+        showState('stateInput');
+      }
+      else if (msg.type === 'status') {
+        // Check if web registration just completed (was waiting, now not)
+        if (pendingUsername && !msg.web_registering && document.getElementById('stateWaiting').classList.contains('active')) {
+          // Registration completed — verify by checking stick status
+          ws.send(JSON.stringify({ type: 'check_stick', username: pendingUsername }));
+        }
+      }
+      else if (msg.type === 'stick_status') {
+        if (msg.registered && msg.username === pendingUsername) {
+          document.getElementById('registeredName').textContent = msg.username.toUpperCase();
+          localStorage.setItem('nobd_username', msg.username);
+          showState('stateSuccess');
+          pendingUsername = '';
+        }
+      }
+    } catch (err) {}
+  };
+}
+
+// Check if already registered
+const saved = localStorage.getItem('nobd_username');
+if (saved) {
+  usernameInput.value = saved;
+  usernameInput.dispatchEvent(new Event('input'));
+}
+
+connectWS();
+</script>
+</body>
+</html>

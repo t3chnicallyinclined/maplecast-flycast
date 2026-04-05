@@ -125,6 +125,9 @@ static json getStatus()
 	status["fps"] = (int64_t)t.fps;
 	status["dirty"] = t.dirtyPages;
 	status["registering"] = maplecast_input::isRegistering();
+	status["web_registering"] = maplecast_input::isWebRegistering();
+	status["web_registering_user"] = maplecast_input::isWebRegistering() ?
+		maplecast_input::webRegisteringUsername() : "";
 	status["sticks"] = maplecast_input::registeredStickCount();
 
 	// Game state for leaderboard/stats
@@ -369,6 +372,10 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 				json resp = {{"type", "assigned"}, {"slot", slot}, {"id", playerId.substr(0,8)}, {"name", name}};
 				_ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text);
 
+				// Patch in-game player name
+				if (slot >= 0)
+					maplecast_gamestate::setPlayerName(slot, name.c_str());
+
 				// Broadcast updated status to all
 				broadcastStatus();
 			}
@@ -377,6 +384,7 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 				int slot = getSlotForConn(hdl);
 				if (slot >= 0) {
 					maplecast_input::disconnectPlayer(slot);
+					maplecast_gamestate::restorePlayerNames();
 					try {
 						void* key = (void*)_ws.get_con_from_hdl(hdl).get();
 						_connSlot.erase(key);
@@ -421,6 +429,57 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 					resp["type"] = "stick_unregistered";
 					_ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text);
 					broadcastStatus();
+				}
+			}
+			else if (ctrl["type"] == "register_stick_web")
+			{
+				// Web-based registration: username + "press any button"
+				std::string username = ctrl.value("username", "");
+				if (!maplecast_input::isValidUsername(username.c_str())) {
+					json resp = {{"type", "register_error"}, {"msg", "Invalid username. 4-12 chars, letters/numbers/underscore only."}};
+					_ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text);
+				} else {
+					// Check if username is already registered
+					auto info = maplecast_input::getStickInfo(username.c_str());
+					if (info.registered) {
+						json resp = {{"type", "register_error"}, {"msg", "Username already registered. Unregister first."}};
+						_ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text);
+					} else {
+						maplecast_input::startWebRegistration(username.c_str());
+						json resp = {{"type", "register_waiting"}, {"username", username}, {"msg", "Press any button on your stick..."}};
+						_ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text);
+					}
+				}
+			}
+			else if (ctrl["type"] == "cancel_register_web")
+			{
+				maplecast_input::cancelWebRegistration();
+				json resp = {{"type", "register_cancelled"}};
+				_ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text);
+			}
+			else if (ctrl["type"] == "check_stick")
+			{
+				// Check if a username has a registered stick and if it's online
+				std::string username = ctrl.value("username", "");
+				auto info = maplecast_input::getStickInfo(username.c_str());
+				json resp = {
+					{"type", "stick_status"},
+					{"username", username},
+					{"registered", info.registered},
+					{"online", info.online}
+				};
+				_ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text);
+			}
+			else if (ctrl["type"] == "patch_name")
+			{
+				int slot = ctrl.value("slot", 0);
+				std::string name = ctrl.value("name", "");
+				printf("[maplecast-ws] PATCH_NAME received: slot=%d name='%s'\n", slot, name.c_str());
+				if (!name.empty()) {
+					maplecast_gamestate::setPlayerName(slot, name.c_str());
+					// Verify the write took effect
+					uint8_t check = addrspace::read8(0x8CBBC31E);
+					printf("[maplecast-ws] Verify: 0x8CBBC31E = 0x%02X ('%c')\n", check, check >= 32 ? check : '.');
 				}
 			}
 			else if (ctrl["type"] == "cancel_register")

@@ -1767,12 +1767,114 @@ document.getElementById('signInModal').addEventListener('click', e => {
 // Boot
 init();
 
-// Simulate viewer count fluctuation
-setInterval(() => {
-  const el = document.getElementById('watchCount');
-  const v = parseInt(el.textContent) + (Math.random() > 0.5 ? 1 : -1);
-  el.textContent = Math.max(12, Math.min(99, v));
-}, 5000);
+// === LIVE WebSocket Connection ===
+const WS_PORT = 7200;
+let ws = null;
+let stickOnline = false;
+
+function connectWS() {
+  ws = new WebSocket(`ws://${location.hostname}:${WS_PORT}`);
+
+  ws.onopen = () => {
+    console.log('[king] WebSocket connected');
+    // Auto-login if we have a registered username
+    const saved = localStorage.getItem('nobd_username');
+    if (saved && !signedIn) {
+      ws.send(JSON.stringify({ type: 'check_stick', username: saved }));
+    }
+  };
+
+  ws.onclose = () => {
+    console.log('[king] WebSocket disconnected, reconnecting...');
+    setTimeout(connectWS, 2000);
+  };
+
+  ws.onmessage = (e) => {
+    if (typeof e.data !== 'string') return;
+    try {
+      const msg = JSON.parse(e.data);
+
+      if (msg.type === 'status') {
+        // Update spectator count
+        const watchEl = document.getElementById('watchCount');
+        if (watchEl) watchEl.textContent = msg.spectators || 0;
+
+        // Update queue count
+        const queueCountEl = document.getElementById('queueCount');
+        if (queueCountEl && msg.queue) queueCountEl.textContent = msg.queue.length;
+      }
+      else if (msg.type === 'stick_status') {
+        stickOnline = msg.online;
+        if (msg.registered && !signedIn) {
+          // Auto sign-in with registered username
+          autoSignIn(msg.username);
+        }
+      }
+      else if (msg.type === 'assigned') {
+        if (msg.slot >= 0) {
+          chatHistory.push({ name: null, system: `${myName} is now P${msg.slot + 1}!` });
+          renderChat();
+        }
+      }
+      else if (msg.type === 'your_turn') {
+        showNewChallenger(myName);
+        chatHistory.push({ name: null, system: msg.msg });
+        renderChat();
+      }
+      else if (msg.type === 'match_end') {
+        chatHistory.push({ name: null, system: `${msg.winner_name} WINS!` });
+        renderChat();
+      }
+    } catch (err) {}
+  };
+}
+
+function autoSignIn(username) {
+  myName = username.toUpperCase();
+  myAvatar = '\u{1F3AE}';
+  signedIn = true;
+
+  document.getElementById('signinBtn').style.display = 'none';
+  const info = document.getElementById('userInfo');
+  info.style.display = 'flex';
+  document.getElementById('userAvatar').innerHTML = myAvatar;
+  document.getElementById('userName').textContent = myName;
+
+  chatHistory.push({ name: null, system: `${myName} has entered the arcade!` });
+  renderChat();
+}
+
+// Override gotNext to send real WS message
+const _origGotNext = gotNext;
+gotNext = function() {
+  if (!signedIn) { openSignIn(); return; }
+  if (inQueue) return;
+  _origGotNext();
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'queue_join', name: myName }));
+  }
+};
+
+// Override leaveQueue to send real WS message
+const _origLeaveQueue = leaveQueue;
+leaveQueue = function() {
+  _origLeaveQueue();
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'leave' }));
+  }
+};
+
+// Override confirmSignIn to also save username and check stick
+const _origConfirmSignIn = confirmSignIn;
+confirmSignIn = function() {
+  _origConfirmSignIn();
+  if (myName && ws && ws.readyState === 1) {
+    localStorage.setItem('nobd_username', myName.toLowerCase());
+    ws.send(JSON.stringify({ type: 'check_stick', username: myName.toLowerCase() }));
+  }
+};
+
+connectWS();
 </script>
 
 </body>
