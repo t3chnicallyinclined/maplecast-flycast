@@ -4,167 +4,278 @@
 <title>WASM Renderer Test — King of Marvel</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { background: #000; color: #0f0; font-family: monospace; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; }
+body { background: #000; color: #0f0; font-family: monospace; display: flex; }
+#game-col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
 canvas { border: 2px solid #333; image-rendering: pixelated; }
-#status { margin: 10px; font-size: 14px; }
-#stats { margin: 10px; font-size: 11px; color: #888; white-space: pre; }
+#status { margin: 10px; font-size: 14px; color: #0f0; }
+#stats { margin: 5px; font-size: 10px; color: #888; white-space: pre; }
+#panel {
+  width: 320px; background: #111; border-left: 2px solid #333; padding: 10px;
+  overflow-y: auto; height: 100vh; font-size: 11px; color: #ccc;
+}
+#panel h3 { color: #0f0; margin: 10px 0 5px; font-size: 12px; border-bottom: 1px solid #333; padding-bottom: 3px; }
+#panel label { display: flex; align-items: center; margin: 3px 0; gap: 8px; cursor: pointer; }
+#panel input[type=checkbox] { width: 16px; height: 16px; }
+#panel input[type=range] { flex: 1; }
+#panel .val { color: #0f0; min-width: 40px; text-align: right; }
+#panel button { background: #222; color: #0f0; border: 1px solid #0f0; padding: 5px 10px; margin: 3px; cursor: pointer; font-family: monospace; }
+#panel button:hover { background: #0f0; color: #000; }
+#panel .section { margin-bottom: 10px; }
+#log { background: #0a0a0a; color: #888; font-size: 9px; padding: 5px; max-height: 150px; overflow-y: auto; white-space: pre-wrap; border: 1px solid #222; margin-top: 10px; }
 </style>
 </head>
 <body>
-<div id="status">Standalone WASM Renderer — Connecting...</div>
-<canvas id="game-canvas" width="640" height="480"></canvas>
-<div id="stats"></div>
+<div id="game-col">
+  <div id="status">Standalone WASM Renderer — Connecting...</div>
+  <canvas id="game-canvas" width="640" height="480"></canvas>
+  <div id="stats"></div>
+</div>
 
-<script type="module">
+<div id="panel">
+  <h3>🎛️ WebGL Live Controls</h3>
+
+  <div class="section">
+    <h3>Blending</h3>
+    <label><input type="checkbox" id="forceBlend" checked> Force GL_BLEND on every draw</label>
+    <label><input type="checkbox" id="overrideSrc"> Override SRC blend:</label>
+    <label><select id="srcBlend">
+      <option value="0">ZERO</option><option value="1" selected>ONE</option>
+      <option value="770">SRC_ALPHA</option><option value="771">ONE_MINUS_SRC_ALPHA</option>
+      <option value="772">DST_ALPHA</option><option value="773">ONE_MINUS_DST_ALPHA</option>
+      <option value="774">DST_COLOR</option><option value="775">ONE_MINUS_DST_COLOR</option>
+    </select></label>
+    <label><select id="dstBlend">
+      <option value="0">ZERO</option><option value="1">ONE</option>
+      <option value="770">SRC_ALPHA</option><option value="771" selected>ONE_MINUS_SRC_ALPHA</option>
+      <option value="772">DST_ALPHA</option><option value="773">ONE_MINUS_DST_ALPHA</option>
+      <option value="774">SRC_COLOR</option><option value="775">ONE_MINUS_SRC_COLOR</option>
+    </select></label>
+  </div>
+
+  <div class="section">
+    <h3>Clear Color Alpha</h3>
+    <label>Clear Alpha: <input type="range" id="clearAlpha" min="0" max="100" value="100"> <span class="val" id="clearAlphaVal">1.0</span></label>
+  </div>
+
+  <div class="section">
+    <h3>Depth / Stencil</h3>
+    <label><input type="checkbox" id="forceDepth" checked> Depth Test</label>
+    <label><input type="checkbox" id="forceStencil" checked> Stencil Test</label>
+  </div>
+
+  <div class="section">
+    <h3>Color Mask</h3>
+    <label><input type="checkbox" id="maskR" checked> Red</label>
+    <label><input type="checkbox" id="maskG" checked> Green</label>
+    <label><input type="checkbox" id="maskB" checked> Blue</label>
+    <label><input type="checkbox" id="maskA" checked> Alpha</label>
+    <label><input type="checkbox" id="applyMask"> Apply mask override</label>
+  </div>
+
+  <div class="section">
+    <h3>Canvas Context</h3>
+    <label>Alpha: <span id="ctxAlpha">?</span></label>
+    <label>PremultAlpha: <span id="ctxPremult">?</span></label>
+    <label>Antialias: <span id="ctxAA">?</span></label>
+    <label>DesyncDraw: <span id="ctxDesync">?</span></label>
+  </div>
+
+  <div class="section">
+    <h3>Actions</h3>
+    <button onclick="captureFrame()">📸 Capture Frame GL State</button>
+    <button onclick="togglePause()">⏸ Pause/Resume</button>
+    <button onclick="location.reload()">🔄 Reload</button>
+  </div>
+
+  <div class="section">
+    <h3>GL State Log</h3>
+    <div id="log">Waiting for frame capture...</div>
+  </div>
+</div>
+
+<script>
 // ============================================================================
-// WebGL2 Patches — MUST run before WASM loads
-// Flycast's GLSM uses GL_FOG, GL_ALPHA_TEST etc which don't exist in WebGL2.
-// Patch getContext to wrap enable/disable and silently eat invalid enums.
+// WebGL2 Patches + Live Controls
 // ============================================================================
-{
-    const origGetContext = HTMLCanvasElement.prototype.getContext;
-    HTMLCanvasElement.prototype.getContext = function(type, attrs) {
-        const ctx = origGetContext.call(this, type, attrs);
-        if (ctx && (type === 'webgl2' || type === 'webgl')) {
-            // Wrap glEnable to silently skip invalid enums
-            const origEnable = ctx.enable.bind(ctx);
-            ctx.enable = function(cap) {
-                try { origEnable(cap); } catch(e) {}
-            };
-            // Wrap glDisable to silently skip invalid enums
-            const origDisable = ctx.disable.bind(ctx);
-            ctx.disable = function(cap) {
-                try { origDisable(cap); } catch(e) {}
-            };
-            // Wrap getError to eat GL_INVALID_ENUM after enable/disable
-            const origGetError = ctx.getError.bind(ctx);
-            ctx.getError = function() {
-                const err = origGetError();
-                if (err === ctx.INVALID_ENUM) return ctx.NO_ERROR;
-                return err;
-            };
-            // Wrap texParameteri to skip when no texture bound
-            const origTexParameteri = ctx.texParameteri.bind(ctx);
-            ctx.texParameteri = function(target, pname, param) {
-                try { origTexParameteri(target, pname, param); } catch(e) {}
-            };
-            const origTexParameterf = ctx.texParameterf.bind(ctx);
-            ctx.texParameterf = function(target, pname, param) {
-                try { origTexParameterf(target, pname, param); } catch(e) {}
-            };
-            console.log('[WebGL2 Patch] enable/disable/getError/texParam patched for flycast compatibility');
-        }
-        return ctx;
-    };
+let glCtx = null;
+let captureNext = false;
+let paused = false;
+let frameLog = [];
+
+const origGetContext = HTMLCanvasElement.prototype.getContext;
+HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+    const ctx = origGetContext.call(this, type, attrs);
+    if (ctx && (type === 'webgl2' || type === 'webgl')) {
+        glCtx = ctx;
+
+        // Show context attributes
+        const a = ctx.getContextAttributes();
+        document.getElementById('ctxAlpha').textContent = a.alpha;
+        document.getElementById('ctxPremult').textContent = a.premultipliedAlpha;
+        document.getElementById('ctxAA').textContent = a.antialias;
+        document.getElementById('ctxDesync').textContent = a.desynchronized;
+
+        // Wrap enable/disable to eat invalid enums
+        const origEnable = ctx.enable.bind(ctx);
+        ctx.enable = function(cap) { try { origEnable(cap); } catch(e) {} };
+        const origDisable = ctx.disable.bind(ctx);
+        ctx.disable = function(cap) { try { origDisable(cap); } catch(e) {} };
+
+        // Wrap getError
+        const origGetError = ctx.getError.bind(ctx);
+        ctx.getError = function() {
+            const err = origGetError();
+            if (err === ctx.INVALID_ENUM) return ctx.NO_ERROR;
+            return err;
+        };
+
+        // Wrap texParameteri/f
+        const origTexParameteri = ctx.texParameteri.bind(ctx);
+        ctx.texParameteri = function(t, p, v) { try { origTexParameteri(t, p, v); } catch(e) {} };
+        const origTexParameterf = ctx.texParameterf.bind(ctx);
+        ctx.texParameterf = function(t, p, v) { try { origTexParameterf(t, p, v); } catch(e) {} };
+
+        // Wrap clearColor to intercept alpha
+        const origClearColor = ctx.clearColor.bind(ctx);
+        ctx.clearColor = function(r, g, b, a) {
+            const alphaOverride = document.getElementById('clearAlpha').value / 100;
+            origClearColor(r, g, b, alphaOverride !== undefined ? Math.min(a, alphaOverride > 0.99 ? a : alphaOverride) : a);
+        };
+
+        // Wrap blendFunc for override
+        const origBlendFunc = ctx.blendFunc.bind(ctx);
+        ctx.blendFunc = function(src, dst) {
+            if (document.getElementById('overrideSrc').checked) {
+                src = parseInt(document.getElementById('srcBlend').value);
+                dst = parseInt(document.getElementById('dstBlend').value);
+            }
+            origBlendFunc(src, dst);
+        };
+
+        // Wrap colorMask
+        const origColorMask = ctx.colorMask.bind(ctx);
+        ctx.colorMask = function(r, g, b, a) {
+            if (document.getElementById('applyMask').checked) {
+                r = document.getElementById('maskR').checked;
+                g = document.getElementById('maskG').checked;
+                b = document.getElementById('maskB').checked;
+                a = document.getElementById('maskA').checked;
+            }
+            origColorMask(r, g, b, a);
+        };
+
+        // Wrap drawElements for frame capture
+        const origDrawElements = ctx.drawElements.bind(ctx);
+        ctx.drawElements = function(mode, count, type, offset) {
+            if (captureNext) {
+                const blend = ctx.isEnabled(ctx.BLEND);
+                const bSrc = ctx.getParameter(ctx.BLEND_SRC_RGB);
+                const bDst = ctx.getParameter(ctx.BLEND_DST_RGB);
+                const prog = ctx.getParameter(ctx.CURRENT_PROGRAM);
+                const fbo = ctx.getParameter(ctx.FRAMEBUFFER_BINDING);
+                const tex = ctx.getParameter(ctx.TEXTURE_BINDING_2D);
+                frameLog.push(`draw(${count}) blend=${blend} src=0x${bSrc.toString(16)} dst=0x${bDst.toString(16)} fbo=${fbo?fbo.toString():'0'} tex=${tex?'yes':'null'}`);
+            }
+            origDrawElements(mode, count, type, offset);
+        };
+
+        // Wrap drawArrays too
+        const origDrawArrays = ctx.drawArrays.bind(ctx);
+        ctx.drawArrays = function(mode, first, count) {
+            if (captureNext) {
+                const blend = ctx.isEnabled(ctx.BLEND);
+                frameLog.push(`drawArrays(${count}) blend=${blend}`);
+            }
+            origDrawArrays(mode, first, count);
+        };
+
+        console.log('[WebGL2 Patch] All wraps installed with live controls');
+    }
+    return ctx;
+};
+
+function captureFrame() {
+    captureNext = true;
+    frameLog = [];
+    setTimeout(() => {
+        captureNext = false;
+        const logEl = document.getElementById('log');
+        logEl.textContent = `Captured ${frameLog.length} draw calls:\n\n` + frameLog.join('\n');
+        console.log('[CAPTURE]', frameLog.length, 'draw calls');
+        frameLog.forEach((l, i) => console.log(`  [${i}] ${l}`));
+    }, 50);
 }
 
-// ============================================================================
-// Test harness — loads the standalone WASM renderer and connects to the
-// flycast mirror server. No EmulatorJS, no RetroArch.
-// ============================================================================
+function togglePause() {
+    paused = !paused;
+}
 
+document.getElementById('clearAlpha').oninput = function() {
+    document.getElementById('clearAlphaVal').textContent = (this.value / 100).toFixed(2);
+};
+</script>
+
+<script type="module">
 import createRenderer from './renderer.mjs';
 
 const statusEl = document.getElementById('status');
 const statsEl = document.getElementById('stats');
 
-// Load WASM module
 const Module = await createRenderer({
     canvas: document.getElementById('game-canvas'),
     locateFile: (path) => `./${path}`,
 });
 
-// Initialize renderer
 const initResult = Module._renderer_init(640, 480);
-if (!initResult) {
-    statusEl.textContent = 'ERROR: renderer_init failed';
-    throw new Error('renderer_init failed');
-}
-const info1 = Module._renderer_info();
-console.log('[JS] After init: renderer_info()=', info1, '(111=all good, 0=nothing set)');
+if (!initResult) { statusEl.textContent = 'ERROR: renderer_init failed'; throw new Error('init failed'); }
 statusEl.textContent = 'Renderer initialized — connecting to server...';
 
-// Allocate persistent buffer in WASM memory (512KB max frame)
 const MAX_FRAME = 512 * 1024;
 const frameBuf = Module._malloc(MAX_FRAME);
+let frames = 0, startTime = 0, bytesTotal = 0;
 
-// Stats
-let frames = 0;
-let startTime = 0;
-let bytesTotal = 0;
-let syncReceived = false;
-
-// Connect to mirror server
 const params = new URLSearchParams(window.location.search);
 const wsUrl = params.get('ws') || `ws://${location.hostname}:7200`;
 const ws = new WebSocket(wsUrl);
 ws.binaryType = 'arraybuffer';
 
-ws.onopen = () => {
-    statusEl.textContent = 'Connected — waiting for SYNC...';
-    startTime = performance.now();
-};
+ws.onopen = () => { statusEl.textContent = 'Connected — waiting for SYNC...'; startTime = performance.now(); };
 
 ws.onmessage = (e) => {
-    if (typeof e.data === 'string') return; // Skip JSON messages
-
+    if (typeof e.data === 'string') return;
+    if (window.paused) return;
     const data = new Uint8Array(e.data);
     if (data.length < 8) return;
 
-    // Check for SYNC (0x53='S', 0x59='Y', 0x4E='N', 0x43='C')
-    if (data[0] === 0x53 && data[1] === 0x59 && data[2] === 0x4E && data[3] === 0x43) {
-        console.log('[JS] SYNC received:', data.length, 'bytes');
-        // SYNC — allocate temp buffer (could be >512KB)
+    if (data[0]===0x53 && data[1]===0x59 && data[2]===0x4E && data[3]===0x43) {
         const syncBuf = Module._malloc(data.length);
         Module.HEAPU8.set(data, syncBuf);
-        const result = Module._renderer_sync(syncBuf, data.length);
+        Module._renderer_sync(syncBuf, data.length);
         Module._free(syncBuf);
-        syncReceived = true;
-        console.log('[JS] renderer_sync returned:', result);
-        statusEl.textContent = result
-            ? `SYNC received (${(data.length / 1024 / 1024).toFixed(1)}MB) — streaming...`
-            : 'ERROR: renderer_sync failed';
+        statusEl.textContent = `SYNC (${(data.length/1024/1024).toFixed(1)}MB) — streaming...`;
         return;
     }
 
-    // Delta frame — write directly to pre-allocated WASM buffer
-    if (data.length > MAX_FRAME) {
-        console.warn('[JS] Frame too big, skipping:', data.length);
-        return;
-    }
-    if (frames === 0) console.log('[JS] Pre-frame info()=', Module._renderer_info());
+    if (data.length > MAX_FRAME) return;
     Module.HEAPU8.set(data, frameBuf);
-    const fResult = Module._renderer_frame(frameBuf, data.length);
-    if (frames < 100 || fResult > 0) {
-        // Read taSize and deltaPayloadSize from the frame for debugging
-        const dv = new DataView(e.data);
-        const taSize = dv.getUint32(72, true);
-        const deltaSize = dv.getUint32(76, true);
-        const isKeyframe = (taSize === deltaSize);
-        if (frames < 5 || isKeyframe || fResult !== -10)
-            console.log('[JS] frame', frames, 'size=', data.length, 'result=', fResult,
-                'taSize=', taSize, 'deltaSize=', deltaSize, isKeyframe ? 'KEYFRAME' : 'delta');
+    // HACK: Force GL state from JS before WASM render
+    if (glCtx) {
+        glCtx.enable(glCtx.BLEND);
+        glCtx.enable(glCtx.DEPTH_TEST);
+        glCtx.enable(glCtx.STENCIL_TEST);
+        glCtx.enable(glCtx.SCISSOR_TEST);
     }
+    Module._renderer_frame(frameBuf, data.length);
 
     frames++;
     bytesTotal += data.length;
-
-    // Update stats every 60 frames
     if (frames % 60 === 0) {
         const elapsed = (performance.now() - startTime) / 1000;
         const fps = frames / elapsed;
-        const kbps = (bytesTotal * 8 / 1000 / elapsed).toFixed(0);
-        const avgFrame = (bytesTotal / frames / 1024).toFixed(1);
         statusEl.textContent = `LIVE — ${fps.toFixed(1)} fps`;
-        statsEl.textContent =
-            `Frames: ${frames}\n` +
-            `FPS: ${fps.toFixed(1)}\n` +
-            `Bandwidth: ${kbps} kbps\n` +
-            `Avg frame: ${avgFrame} KB\n` +
-            `Total: ${(bytesTotal / 1024 / 1024).toFixed(1)} MB`;
+        statsEl.textContent = `Frames: ${frames} | ${(bytesTotal*8/1000/elapsed).toFixed(0)}kbps | ${(bytesTotal/frames/1024).toFixed(1)}KB/f`;
     }
 };
-
 ws.onclose = () => { statusEl.textContent = 'Disconnected'; };
 ws.onerror = () => { statusEl.textContent = 'Connection error'; };
 </script>

@@ -111,9 +111,8 @@ int renderer_init(int width, int height)
     config::Fog.override(false);
     config::ModifierVolumes.override(false);
     config::ThreadedRendering.override(false);
-    // EmulateFramebuffer stays FALSE (default) — the native client uses false.
-    // Setting it to true causes writeFramebufferToVRAM() glReadPixels round-trip
-    // which is completely wrong for a mirror renderer.
+    // EmulateFramebuffer=false — use postProcessor path (LIBRETRO default)
+    // postProcessor.render() is called INSIDE renderFrame() at gles.cpp:1324
 
     // Initialize the renderer (compiles shaders, creates FBOs, etc.)
     if (!renderer->Init()) {
@@ -270,9 +269,9 @@ int renderer_frame(uint8_t* data, int size)
         src += 4096;
     }
 
-    // VramLockedWriteOffset() already invalidates specific texture cache entries
-    // for each dirty page. Only do a full reset on SYNC, not per-frame.
-    // Full reset every frame is too aggressive and may cause texture format issues.
+    // Match native client: full texture cache reset when ANY VRAM page changes.
+    // The native client does this at maplecast_mirror.cpp line 850.
+    if (vramDirty) renderer->resetTextureCache = true;
 
     // Debug: log palette state on first rendered frame
     if (_frameCount == 0) {
@@ -343,22 +342,14 @@ int renderer_frame(uint8_t* data, int size)
     renderer->updateFogTable = true;
 
     // ---- RENDER ----
-    // Bind GLSM state — this is what RetroArch does before calling the core.
-    // GLSM tracks GL state internally. STATE_BIND restores the core's GL state.
-    // Without this, the GL state is corrupted and textures render as garbage.
-    glsm_ctl(GLSM_CTL_STATE_BIND, nullptr);
+    // NO GLSM bind/unbind — the native flycast client doesn't use GLSM at all.
+    // GL state persists naturally between frames, tracked by glcache.
 
-    renderer->Process(&_ctx);        // Parse TA commands → vertex/polygon lists
-    bool isScreen = renderer->Render();  // WebGL2 draw calls
+    renderer->Process(&_ctx);
+    bool isScreen = renderer->Render();  // postProcessor.render(0) happens INSIDE renderFrame()
     if (isScreen)
         renderer->Present();
-
-    // Blit the postProcessor FBO to FBO 0 (canvas) with proper Y-flip
-    postProcessor.render(0);
-
-    // Unbind GLSM state — restores "frontend" GL state.
-    // This is what RetroArch does after the core returns from retro_run().
-    glsm_ctl(GLSM_CTL_STATE_UNBIND, nullptr);
+    // No manual blit — postProcessor already blitted to FBO 0 inside Render()
 
     _frameCount++;
     FrameCount++;  // Global frame counter for texture cache cleanup

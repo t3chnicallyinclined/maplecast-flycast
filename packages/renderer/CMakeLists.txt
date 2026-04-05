@@ -52,6 +52,7 @@ set(RENDERER_SOURCES
 
     # ---- Libretro GL state machine (PATCHED for WebGL2 — skip GL_FOG/GL_ALPHA_TEST) ----
     ${CMAKE_CURRENT_SOURCE_DIR}/src/glsm_patched.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/gl_direct.c
     ${FLYCAST_ROOT}/core/deps/libretro-common/glsym/rglgen.c
     ${FLYCAST_ROOT}/core/deps/libretro-common/glsym/glsym_es3.c
 

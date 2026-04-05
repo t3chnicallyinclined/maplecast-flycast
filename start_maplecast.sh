@@ -8,7 +8,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 ROM="$HOME/roms/mvc2_us/Marvel vs. Capcom 2 v1.001 (2000)(Capcom)(US)[!].gdi"
 
 # Kill any existing MapleCast processes and free ports
-EXISTING=$(pgrep -f "MAPLECAST=1.*flycast|telemetry\.py|http\.server.*--directory.*web" 2>/dev/null)
+EXISTING=$(pgrep -f "MAPLECAST=1.*flycast|telemetry\.py|http\.server.*--directory.*web|maplecast-collector" 2>/dev/null)
 if [ -n "$EXISTING" ]; then
   echo "Killing existing MapleCast processes: $EXISTING"
   kill $EXISTING 2>/dev/null
@@ -52,6 +52,18 @@ fi
 "$DIR/build/flycast" "$ROM" &
 FLY_PID=$!
 
+# Start data collector (connects to WS:7200, writes to SurrealDB)
+COLLECTOR="$DIR/web/collector/target/release/maplecast-collector"
+COLLECTOR_PID=""
+if [ -x "$COLLECTOR" ]; then
+  echo "[4/4] Starting data collector (SurrealDB)..."
+  sleep 2  # Wait for flycast WS to be ready
+  "$COLLECTOR" &
+  COLLECTOR_PID=$!
+else
+  echo "[4/4] Collector not built — skipping (run: cd web/collector && cargo build --release)"
+fi
+
 echo
 echo "========================================"
 echo "  All services started!"
@@ -60,16 +72,17 @@ echo "  Flycast:    MVC2 + WebRTC P2P (signaling on ws://localhost:7200)"
 echo "  Web app:    http://localhost:$WEB_PORT"
 echo "  Telemetry:  UDP:7300"
 echo "  Gamepad:    UDP:7100 (input server)"
+echo "  Collector:  SurrealDB → maplecast.db"
 echo
-echo "  PIDs: flycast=$FLY_PID web=$WEB_PID telemetry=$TELE_PID"
+echo "  PIDs: flycast=$FLY_PID web=$WEB_PID telemetry=$TELE_PID collector=$COLLECTOR_PID"
 echo "  Press Ctrl+C to stop all"
 echo "========================================"
 
 cleanup() {
   echo "Stopping MapleCast..."
-  kill $FLY_PID $WEB_PID $TELE_PID 2>/dev/null
+  kill $FLY_PID $WEB_PID $TELE_PID $COLLECTOR_PID 2>/dev/null
   sleep 1
-  kill -9 $FLY_PID $WEB_PID $TELE_PID 2>/dev/null
+  kill -9 $FLY_PID $WEB_PID $TELE_PID $COLLECTOR_PID 2>/dev/null
   echo "Stopped."
   exit
 }
