@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>WASM Renderer Test — King of Marvel</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; color: #0f0; font-family: monospace; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; }
+canvas { border: 2px solid #333; image-rendering: pixelated; }
+#status { margin: 10px; font-size: 14px; }
+#stats { margin: 10px; font-size: 11px; color: #888; white-space: pre; }
+</style>
+</head>
+<body>
+<div id="status">Standalone WASM Renderer — Connecting...</div>
+<canvas id="game-canvas" width="640" height="480"></canvas>
+<div id="stats"></div>
+
+<script type="module">
+// ============================================================================
+// Test harness — loads the standalone WASM renderer and connects to the
+// flycast mirror server. No EmulatorJS, no RetroArch.
+// ============================================================================
+
+import createRenderer from './renderer.mjs';
+
+const statusEl = document.getElementById('status');
+const statsEl = document.getElementById('stats');
+
+// Load WASM module
+const Module = await createRenderer({
+    canvas: document.getElementById('game-canvas'),
+    locateFile: (path) => `./${path}`,
+});
+
+// Initialize renderer
+const initResult = Module._renderer_init(640, 480);
+if (!initResult) {
+    statusEl.textContent = 'ERROR: renderer_init failed';
+    throw new Error('renderer_init failed');
+}
+const info1 = Module._renderer_info();
+console.log('[JS] After init: renderer_info()=', info1, '(111=all good, 0=nothing set)');
+statusEl.textContent = 'Renderer initialized — connecting to server...';
+
+// Allocate persistent buffer in WASM memory (512KB max frame)
+const MAX_FRAME = 512 * 1024;
+const frameBuf = Module._malloc(MAX_FRAME);
+
+// Stats
+let frames = 0;
+let startTime = 0;
+let bytesTotal = 0;
+let syncReceived = false;
+
+// Connect to mirror server
+const params = new URLSearchParams(window.location.search);
+const wsUrl = params.get('ws') || `ws://${location.hostname}:7200`;
+const ws = new WebSocket(wsUrl);
+ws.binaryType = 'arraybuffer';
+
+ws.onopen = () => {
+    statusEl.textContent = 'Connected — waiting for SYNC...';
+    startTime = performance.now();
+};
+
+ws.onmessage = (e) => {
+    if (typeof e.data === 'string') return; // Skip JSON messages
+
+    const data = new Uint8Array(e.data);
+    if (data.length < 8) return;
+
+    // Check for SYNC (0x53='S', 0x59='Y', 0x4E='N', 0x43='C')
+    if (data[0] === 0x53 && data[1] === 0x59 && data[2] === 0x4E && data[3] === 0x43) {
+        console.log('[JS] SYNC received:', data.length, 'bytes');
+        // SYNC — allocate temp buffer (could be >512KB)
+        const syncBuf = Module._malloc(data.length);
+        Module.HEAPU8.set(data, syncBuf);
+        const result = Module._renderer_sync(syncBuf, data.length);
+        Module._free(syncBuf);
+        syncReceived = true;
+        console.log('[JS] renderer_sync returned:', result);
+        statusEl.textContent = result
+            ? `SYNC received (${(data.length / 1024 / 1024).toFixed(1)}MB) — streaming...`
+            : 'ERROR: renderer_sync failed';
+        return;
+    }
+
+    // Delta frame — write directly to pre-allocated WASM buffer
+    if (data.length > MAX_FRAME) {
+        console.warn('[JS] Frame too big, skipping:', data.length);
+        return;
+    }
+    if (frames === 0) console.log('[JS] Pre-frame info()=', Module._renderer_info());
+    Module.HEAPU8.set(data, frameBuf);
+    const fResult = Module._renderer_frame(frameBuf, data.length);
+    if (frames < 100 || fResult > 0) {
+        // Read taSize and deltaPayloadSize from the frame for debugging
+        const dv = new DataView(e.data);
+        const taSize = dv.getUint32(72, true);
+        const deltaSize = dv.getUint32(76, true);
+        const isKeyframe = (taSize === deltaSize);
+        if (frames < 5 || isKeyframe || fResult !== -10)
+            console.log('[JS] frame', frames, 'size=', data.length, 'result=', fResult,
+                'taSize=', taSize, 'deltaSize=', deltaSize, isKeyframe ? 'KEYFRAME' : 'delta');
+    }
+
+    frames++;
+    bytesTotal += data.length;
+
+    // Update stats every 60 frames
+    if (frames % 60 === 0) {
+        const elapsed = (performance.now() - startTime) / 1000;
+        const fps = frames / elapsed;
+        const kbps = (bytesTotal * 8 / 1000 / elapsed).toFixed(0);
+        const avgFrame = (bytesTotal / frames / 1024).toFixed(1);
+        statusEl.textContent = `LIVE — ${fps.toFixed(1)} fps`;
+        statsEl.textContent =
+            `Frames: ${frames}\n` +
+            `FPS: ${fps.toFixed(1)}\n` +
+            `Bandwidth: ${kbps} kbps\n` +
+            `Avg frame: ${avgFrame} KB\n` +
+            `Total: ${(bytesTotal / 1024 / 1024).toFixed(1)} MB`;
+    }
+};
+
+ws.onclose = () => { statusEl.textContent = 'Disconnected'; };
+ws.onerror = () => { statusEl.textContent = 'Connection error'; };
+</script>
+</body>
+</html>
