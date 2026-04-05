@@ -21,6 +21,7 @@
 #include "wsi/gl_context.h"
 #include <glsym/rglgen.h>
 #include <glsm/glsm.h>
+#include <libretro.h>
 
 // Forward declarations
 extern void initSettings();
@@ -38,6 +39,24 @@ static int canvasHeight = 480;
 
 static rglgen_func_t wasm_get_proc_address(const char* name) {
     return (rglgen_func_t)emscripten_webgl_get_proc_address(name);
+}
+
+// ============================================================================
+// RetroArch hw_render callbacks — GLSM calls these, they must not be null
+// ============================================================================
+
+// hw_render is defined in glsm.c as a global
+extern struct retro_hw_render_callback hw_render;
+
+// get_current_framebuffer — returns FBO 0 (the canvas) since we don't
+// use RetroArch's FBO management
+static uintptr_t wasm_get_current_framebuffer(void) {
+    return 0; // FBO 0 = the canvas backbuffer
+}
+
+// get_proc_address — same wrapper as above but with retro callback signature
+static retro_proc_address_t wasm_retro_get_proc_address(const char* sym) {
+    return (retro_proc_address_t)emscripten_webgl_get_proc_address(sym);
 }
 
 // ============================================================================
@@ -85,10 +104,16 @@ bool wasm_gl_init(int width, int height) {
     printf("[renderer] WebGL2 context created: %dx%d\n", width, height);
 
     // ================================================================
-    // CRITICAL: Initialize GLSM function pointers BEFORE any rgl* calls
-    // Without this, every rglGetString/rglViewport/etc crashes with
-    // "function signature mismatch" because the function pointers are null.
+    // CRITICAL: Set up RetroArch hw_render callbacks BEFORE GLSM init
+    // GLSM calls hw_render.get_current_framebuffer() and get_proc_address()
+    // during rendering. If these are null = instant crash with
+    // "function signature mismatch" (null function pointer call in WASM).
     // ================================================================
+    hw_render.get_current_framebuffer = wasm_get_current_framebuffer;
+    hw_render.get_proc_address = wasm_retro_get_proc_address;
+    printf("[renderer] hw_render callbacks set\n");
+
+    // Resolve all rgl* function pointers (rglGetString, rglViewport, etc.)
     rglgen_resolve_symbols(wasm_get_proc_address);
     printf("[renderer] GLSM function pointers resolved\n");
 

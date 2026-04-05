@@ -17,6 +17,48 @@ canvas { border: 2px solid #333; image-rendering: pixelated; }
 
 <script type="module">
 // ============================================================================
+// WebGL2 Patches — MUST run before WASM loads
+// Flycast's GLSM uses GL_FOG, GL_ALPHA_TEST etc which don't exist in WebGL2.
+// Patch getContext to wrap enable/disable and silently eat invalid enums.
+// ============================================================================
+{
+    const origGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+        const ctx = origGetContext.call(this, type, attrs);
+        if (ctx && (type === 'webgl2' || type === 'webgl')) {
+            // Wrap glEnable to silently skip invalid enums
+            const origEnable = ctx.enable.bind(ctx);
+            ctx.enable = function(cap) {
+                try { origEnable(cap); } catch(e) {}
+            };
+            // Wrap glDisable to silently skip invalid enums
+            const origDisable = ctx.disable.bind(ctx);
+            ctx.disable = function(cap) {
+                try { origDisable(cap); } catch(e) {}
+            };
+            // Wrap getError to eat GL_INVALID_ENUM after enable/disable
+            const origGetError = ctx.getError.bind(ctx);
+            ctx.getError = function() {
+                const err = origGetError();
+                if (err === ctx.INVALID_ENUM) return ctx.NO_ERROR;
+                return err;
+            };
+            // Wrap texParameteri to skip when no texture bound
+            const origTexParameteri = ctx.texParameteri.bind(ctx);
+            ctx.texParameteri = function(target, pname, param) {
+                try { origTexParameteri(target, pname, param); } catch(e) {}
+            };
+            const origTexParameterf = ctx.texParameterf.bind(ctx);
+            ctx.texParameterf = function(target, pname, param) {
+                try { origTexParameterf(target, pname, param); } catch(e) {}
+            };
+            console.log('[WebGL2 Patch] enable/disable/getError/texParam patched for flycast compatibility');
+        }
+        return ctx;
+    };
+}
+
+// ============================================================================
 // Test harness — loads the standalone WASM renderer and connects to the
 // flycast mirror server. No EmulatorJS, no RetroArch.
 // ============================================================================

@@ -22,8 +22,11 @@
 #include "hw/pvr/pvr_mem.h"
 #include "hw/pvr/Renderer_if.h"
 #include "rend/gles/gles.h"
+#include "rend/gles/postprocess.h"
+#include <glsm/glsm.h>
 #include "rend/TexCache.h"
 #include "rend/texconv.h"
+#include "rend/transform_matrix.h"
 #include "cfg/option.h"
 
 #include <cstdio>
@@ -49,35 +52,13 @@ extern void FillBGP(TA_context* ctx);
 extern Renderer* rend_GLES2();
 
 // ============================================================================
-// Blit offscreen FBO to canvas — called after every Render()
+// Blit postProcessor FBO to canvas via postProcessor.render()
+// This handles Y-flip, shift, and PowerVR2 filtering correctly —
+// exactly how the native client's renderLastFrame() path works.
 // ============================================================================
 
 extern gl_ctx gl;
-
-static void blitToCanvas() {
-    if (!gl.ofbo.framebuffer) return;
-
-    int fbW = gl.ofbo.framebuffer->getWidth();
-    int fbH = gl.ofbo.framebuffer->getHeight();
-
-    // Bind offscreen FBO as read source, canvas (FBO 0) as draw target
-    gl.ofbo.framebuffer->bind(GL_READ_FRAMEBUFFER);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-
-    extern int wasm_gl_get_width();
-    extern int wasm_gl_get_height();
-    int canvasW = wasm_gl_get_width();
-    int canvasH = wasm_gl_get_height();
-
-    glBlitFramebuffer(
-        0, 0, fbW, fbH,           // source rect (offscreen FBO)
-        0, 0, canvasW, canvasH,   // dest rect (canvas)
-        GL_COLOR_BUFFER_BIT, GL_LINEAR
-    );
-
-    // Restore default FBO
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
+extern PostProcessor postProcessor;
 
 // ============================================================================
 // Static state — pre-allocated, zero malloc in hot path
@@ -123,11 +104,16 @@ int renderer_init(int width, int height)
         return 0;
     }
 
-    // Force EmulateFramebuffer mode — this makes the renderer use
-    // init_output_framebuffer() → gl.ofbo.framebuffer, which we can
-    // then blit to FBO 0 (the canvas). Without this, LIBRETRO mode
-    // renders to the postProcessor FBO and expects RetroArch to present it.
-    config::EmulateFramebuffer.override(true);
+    // Match the native mirror client's config overrides EXACTLY
+    // (from core/emulator.cpp lines 1054-1061)
+    config::PerPixelLayers.override(4);
+    config::UseMipmaps.override(false);
+    config::Fog.override(false);
+    config::ModifierVolumes.override(false);
+    config::ThreadedRendering.override(false);
+    // EmulateFramebuffer stays FALSE (default) — the native client uses false.
+    // Setting it to true causes writeFramebufferToVRAM() glReadPixels round-trip
+    // which is completely wrong for a mirror renderer.
 
     // Initialize the renderer (compiles shaders, creates FBOs, etc.)
     if (!renderer->Init()) {
@@ -264,6 +250,7 @@ int renderer_frame(uint8_t* data, int size)
     // ---- Apply dirty memory pages ----
     uint32_t dirtyPages;
     memcpy(&dirtyPages, src, 4); src += 4;
+    bool vramDirty = false;
 
     for (uint32_t d = 0; d < dirtyPages; d++) {
         uint8_t regionId = *src++;
@@ -275,11 +262,25 @@ int renderer_frame(uint8_t* data, int size)
             // VRAM page — copy + invalidate texture cache for this region
             memcpy(&vram[pageOff], src, 4096);
             VramLockedWriteOffset(pageOff);
+            vramDirty = true;
         } else if (regionId == 3 && pageOff + 4096 <= (size_t)pvr_RegSize) {
             // PVR register page
             memcpy(pvr_regs + pageOff, src, 4096);
         }
         src += 4096;
+    }
+
+    // CRITICAL: Reset texture cache when VRAM changes — without this,
+    // health bars, animations, sprites won't update because the GPU
+    // texture cache still has stale data from previous frames.
+    if (vramDirty) renderer->resetTextureCache = true;
+
+    // Debug: log palette state on first rendered frame
+    if (_frameCount == 0) {
+        printf("[renderer] PAL_RAM_CTRL=%u PALETTE_RAM[0]=0x%08x TEXT_CONTROL=0x%08x\n",
+            PAL_RAM_CTRL, PALETTE_RAM[0], TEXT_CONTROL);
+        printf("[renderer] palette16[0]=0x%04x palette32[0]=0x%08x\n",
+            palette16_ram[0], palette32_ram[0]);
     }
 
     // ---- Build TA context ----
@@ -311,10 +312,19 @@ int renderer_frame(uint8_t* data, int size)
     _ctx.rend.fb_W_CTRL.full         = pvr_snapshot[6];
     _ctx.rend.fog_clamp_min.full     = pvr_snapshot[7];
     _ctx.rend.fog_clamp_max.full     = pvr_snapshot[8];
-    // Clamp framebuffer dimensions to 640x480 — the server sends its own
-    // window size (e.g. 2880x2160) which would create a massive FBO and OOM.
-    _ctx.rend.framebufferWidth       = 640;
-    _ctx.rend.framebufferHeight      = 480;
+    // Compute framebuffer dimensions from PVR registers, scaled to OUR
+    // render resolution — NOT the server's. The server may be running at
+    // 6x resolution (2880x2160) but we render at native 480p.
+    // This matches what Renderer_if.cpp line 184 does on the server.
+    {
+        int fbW, fbH;
+        getScaledFramebufferSize(_ctx.rend, fbW, fbH);
+        _ctx.rend.framebufferWidth = fbW;
+        _ctx.rend.framebufferHeight = fbH;
+        if (_frameCount == 0)
+            printf("[renderer] Computed FB: %dx%d (server sent %ux%u)\n",
+                fbW, fbH, pvr_snapshot[9], pvr_snapshot[10]);
+    }
     _ctx.rend.clearFramebuffer       = pvr_snapshot[11] != 0;
     float fz; memcpy(&fz, &pvr_snapshot[12], 4);
     _ctx.rend.fZ_max                 = fz;
@@ -334,32 +344,22 @@ int renderer_frame(uint8_t* data, int size)
     renderer->updateFogTable = true;
 
     // ---- RENDER ----
-    if (_frameCount < 3 || _frameCount % 300 == 0)
-        printf("[renderer] frame %u: taSize=%u verts(before)=%zu polys(before)=%zu fbW=%u fbH=%u\n",
-            _frameCount, taSize, _ctx.rend.verts.size(), _ctx.rend.global_param_op.size(),
-            pvr_snapshot[9], pvr_snapshot[10]);
+    // Bind GLSM state — this is what RetroArch does before calling the core.
+    // GLSM tracks GL state internally. STATE_BIND restores the core's GL state.
+    // Without this, the GL state is corrupted and textures render as garbage.
+    glsm_ctl(GLSM_CTL_STATE_BIND, nullptr);
 
     renderer->Process(&_ctx);        // Parse TA commands → vertex/polygon lists
-
-    if (_frameCount < 3 || _frameCount % 300 == 0)
-        printf("[renderer] frame %u: verts(after)=%zu op=%zu pt=%zu tr=%zu\n",
-            _frameCount, _ctx.rend.verts.size(),
-            _ctx.rend.global_param_op.size(),
-            _ctx.rend.global_param_pt.size(),
-            _ctx.rend.global_param_tr.size());
-
-    bool isScreen = renderer->Render();  // WebGL2 draw calls → offscreen FBO
-
-    if (_frameCount < 3 || _frameCount % 300 == 0)
-        printf("[renderer] frame %u: Render()=%d ofbo=%p\n",
-            _frameCount, isScreen,
-            gl.ofbo.framebuffer ? (void*)gl.ofbo.framebuffer.get() : nullptr);
-
+    bool isScreen = renderer->Render();  // WebGL2 draw calls
     if (isScreen)
         renderer->Present();
 
-    // ---- BLIT TO CANVAS ----
-    blitToCanvas();
+    // Blit the postProcessor FBO to FBO 0 (canvas) with proper Y-flip
+    postProcessor.render(0);
+
+    // Unbind GLSM state — restores "frontend" GL state.
+    // This is what RetroArch does after the core returns from retro_run().
+    glsm_ctl(GLSM_CTL_STATE_UNBIND, nullptr);
 
     _frameCount++;
     FrameCount++;  // Global frame counter for texture cache cleanup
