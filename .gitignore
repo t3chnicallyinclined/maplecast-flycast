@@ -22,3 +22,5 @@ compile_commands.json
 CMakeUserPresets.json
 external/
 *.7z
+web/collector/target/
+maplecast.db/
