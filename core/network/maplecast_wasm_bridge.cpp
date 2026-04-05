@@ -34,6 +34,39 @@ static bool _wasmInitialized = false;
 
 extern "C" {
 
+// Apply SYNC data from server — writes VRAM + PVR regs directly
+// Format: "SYNC" (4) + vramSize (4) + vram data + pvrSize (4) + pvr data
+EMSCRIPTEN_KEEPALIVE
+int mirror_apply_sync(uint8_t* data, int size)
+{
+	if (size < 12) return 0;
+	uint8_t* src = data;
+
+	// Skip "SYNC" magic
+	if (memcmp(src, "SYNC", 4) != 0) return 0;
+	src += 4;
+
+	uint32_t vramSize; memcpy(&vramSize, src, 4); src += 4;
+	if (vramSize > VRAM_SIZE) vramSize = VRAM_SIZE;
+	memcpy(&vram[0], src, vramSize); src += vramSize;
+
+	uint32_t pvrSize; memcpy(&pvrSize, src, 4); src += 4;
+	if (pvrSize > (uint32_t)pvr_RegSize) pvrSize = pvr_RegSize;
+	memcpy(pvr_regs, src, pvrSize);
+
+	// Force texture cache reset so renderer picks up new VRAM
+	if (renderer) {
+		renderer->resetTextureCache = true;
+		renderer->updatePalette = true;
+		renderer->updateFogTable = true;
+	}
+	pal_needs_update = true;
+	palette_update();
+
+	printf("[WASM-MIRROR] SYNC applied: VRAM=%u PVR=%u bytes\n", vramSize, pvrSize);
+	return 1;
+}
+
 // Initialize the mirror renderer — call after save state is loaded
 EMSCRIPTEN_KEEPALIVE
 int mirror_init()
@@ -173,6 +206,10 @@ int mirror_render_frame(uint8_t* data, int size)
 	bool isScreen = renderer->Render();
 	if (isScreen)
 		renderer->Present();
+
+	// Tell RetroArch to present the frame to the canvas
+	extern void mirror_present_frame();
+	mirror_present_frame();
 
 	return 1;
 }

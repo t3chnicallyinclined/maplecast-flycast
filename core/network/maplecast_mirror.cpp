@@ -32,6 +32,7 @@
 #include <mutex>
 #include <thread>
 #include <deque>
+#include <chrono>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -535,6 +536,7 @@ bool isClient() { return _isClient; }
 void serverPublish(TA_context* ctx)
 {
 	if (!_isServer || !_shmPtr || !ctx) return;
+	auto publishStart = std::chrono::high_resolution_clock::now();
 	rend_context& rc = ctx->rend;
 	// DON'T skip RTT frames — MVC2 renders character sprites via render-to-texture!
 
@@ -700,6 +702,23 @@ done_diff:
 	// Also broadcast over WebSocket to browser clients
 	if (maplecast_ws::active())
 		maplecast_ws::broadcastBinary(dstStart, totalSize);
+
+	// Update telemetry
+	{
+		auto publishEnd = std::chrono::high_resolution_clock::now();
+		uint64_t publishUs = std::chrono::duration_cast<std::chrono::microseconds>(publishEnd - publishStart).count();
+		static uint32_t _fpsCounter = 0;
+		static auto _fpsStart = std::chrono::high_resolution_clock::now();
+		static uint64_t _lastFps = 0;
+		_fpsCounter++;
+		auto fpsElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(publishEnd - _fpsStart).count();
+		if (fpsElapsed >= 1000) {
+			_lastFps = _fpsCounter * 1000 / fpsElapsed;
+			_fpsCounter = 0;
+			_fpsStart = publishEnd;
+		}
+		maplecast_ws::updateTelemetry({frameNum, taSize, totalDirty, totalSize, publishUs, _lastFps});
+	}
 
 	// Check if a client is requesting a fresh sync state
 	if (hdr->client_request_sync)

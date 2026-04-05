@@ -1285,6 +1285,13 @@ void retro_run()
 	first_run = false;
 }
 
+// Called by WASM mirror bridge after rendering a frame — presents to canvas
+extern "C" RETRO_API void mirror_present_frame()
+{
+	if (video_cb)
+		video_cb(RETRO_HW_FRAME_BUFFER_VALID, framebufferWidth, framebufferHeight, 0);
+}
+
 static bool loadGame()
 {
 	try {

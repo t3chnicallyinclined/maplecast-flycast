@@ -23,6 +23,8 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <algorithm>
+#include <vector>
 
 #include <unistd.h>
 #include <sys/socket.h>
@@ -47,6 +49,30 @@ static std::mutex _registryMutex;
 
 // Telemetry
 static std::atomic<uint64_t> _totalPackets{0};
+
+// Stick registration
+struct StickBinding {
+	uint32_t srcIP;
+	uint16_t srcPort;
+	char browserId[64];
+};
+static std::vector<StickBinding> _stickBindings;
+
+// Registration in progress — rhythm detection
+// Pattern: tap any button 5 times, pause 0.5-2s, tap 5 times again
+static bool _registering = false;
+static char _registerBrowserId[64] = {};
+
+struct RhythmTracker {
+	uint32_t srcIP;
+	uint16_t srcPort;
+	uint16_t prevButtons;
+	int tapCount;        // taps in current burst
+	int burstCount;      // completed bursts (need 2)
+	int64_t lastTapUs;   // time of last tap
+	int64_t burstEndUs;  // when first burst ended
+};
+static std::vector<RhythmTracker> _rhythmTrackers;
 
 static inline int64_t nowUs()
 {
@@ -104,43 +130,7 @@ static int findSlotByIP(uint32_t srcIP)
 	return -1;
 }
 
-// Auto-assign a NOBD stick by source IP
-static int autoAssignUDP(uint32_t srcIP, uint16_t srcPort)
-{
-	std::lock_guard<std::mutex> lock(_registryMutex);
-
-	// Already known?
-	int slot = findSlotByIP(srcIP);
-	if (slot >= 0) return slot;
-
-	// Find first empty slot
-	for (int i = 0; i < 2; i++)
-	{
-		if (!_players[i].connected)
-		{
-			_players[i].connected = true;
-			_players[i].type = InputType::NobdUDP;
-			_players[i].srcIP = srcIP;
-			_players[i].srcPort = srcPort;
-			_players[i].buttons = 0xFFFF;
-			_players[i]._prevButtons = 0xFFFF;
-			_players[i]._lastRateTime = nowUs();
-
-			uint8_t *ip = (uint8_t *)&srcIP;
-			snprintf(_players[i].id, sizeof(_players[i].id), "nobd_%u.%u.%u.%u",
-				ip[0], ip[1], ip[2], ip[3]);
-			snprintf(_players[i].name, sizeof(_players[i].name), "NOBD Stick");
-			snprintf(_players[i].device, sizeof(_players[i].device),
-				"NOBD %u.%u.%u.%u:%u", ip[0], ip[1], ip[2], ip[3], ntohs(srcPort));
-
-			printf("[input-server] P%d ASSIGNED: %s (%s)\n", i + 1, _players[i].device, _players[i].id);
-			maplecast_telemetry::send("[input-server] P%d ASSIGNED: %s", i + 1, _players[i].device);
-			return i;
-		}
-	}
-
-	return -1;  // full
-}
+// autoAssignUDP removed — NOBD sticks must register via browser first
 
 // UDP listener thread — receives NOBD stick and WebSocket-forwarded packets
 static void udpThreadLoop(int port)
@@ -174,12 +164,104 @@ static void udpThreadLoop(int port)
 			w3 = buf + 1;
 		}
 
-		// Legacy 4-byte W3 from NOBD stick: identify/assign by source IP
-		if (slot < 0)
+		// Check for stick registration rhythm (only from real NOBD sticks, not loopback)
+		if (_registering && from.sin_addr.s_addr != htonl(INADDR_LOOPBACK))
 		{
+			uint16_t buttons = ((uint16_t)w3[2] << 8) | w3[3];
+			int64_t now = nowUs();
+
+			// Find or create tracker for this source
+			RhythmTracker* rt = nullptr;
+			for (auto& t : _rhythmTrackers)
+				if (t.srcIP == from.sin_addr.s_addr) { rt = &t; break; }
+			if (!rt) {
+				_rhythmTrackers.push_back({from.sin_addr.s_addr, from.sin_port, 0xFFFF, 0, 0, 0, 0});
+				rt = &_rhythmTrackers.back();
+			}
+
+			// Detect button press: any bit went from 1→0 (active-low)
+			uint16_t newPresses = rt->prevButtons & ~buttons;
+			rt->prevButtons = buttons;
+
+			if (newPresses)
+			{
+				int64_t sinceLast = now - rt->lastTapUs;
+				rt->lastTapUs = now;
+
+				if (rt->burstCount == 0)
+				{
+					// First burst
+					if (sinceLast > 2000000) { rt->tapCount = 1; } // reset if >2s gap
+					else { rt->tapCount++; }
+
+					if (rt->tapCount >= 5) {
+						rt->burstCount = 1;
+						rt->burstEndUs = now;
+						rt->tapCount = 0;
+						printf("[input-server] Registration: burst 1 detected from %08X\n", rt->srcIP);
+					}
+				}
+				else if (rt->burstCount == 1)
+				{
+					int64_t sinceBurst = now - rt->burstEndUs;
+					if (sinceBurst < 500000) {
+						// Too fast after first burst — still part of burst 1, ignore
+					} else if (sinceBurst > 3000000) {
+						// Too slow — reset
+						rt->burstCount = 0;
+						rt->tapCount = 1;
+					} else {
+						// In the pause window — count second burst
+						rt->tapCount++;
+						if (rt->tapCount >= 5) {
+							// Pattern complete!
+							registerStick(rt->srcIP, rt->srcPort, _registerBrowserId);
+							_registering = false;
+							_rhythmTrackers.clear();
+							printf("[input-server] STICK REGISTERED to %s via rhythm!\n", _registerBrowserId);
+						}
+					}
+				}
+			}
+		}
+
+		// NOBD stick input routing — only registered sticks with active slots
+		if (slot < 0 && from.sin_addr.s_addr != htonl(INADDR_LOOPBACK))
+		{
+			// First check if already assigned to a slot
 			slot = findSlotByIP(from.sin_addr.s_addr);
+
+			// If not assigned, check if this stick is registered to a browser user
+			// who has an active slot — if so, bind this stick to that slot
 			if (slot < 0)
-				slot = autoAssignUDP(from.sin_addr.s_addr, from.sin_port);
+			{
+				const char* browserId = getRegisteredBrowserId(from.sin_addr.s_addr, from.sin_port);
+				if (browserId)
+				{
+					// Find which slot this browser user is in
+					for (int i = 0; i < 2; i++)
+					{
+						if (_players[i].connected && strncmp(_players[i].id, browserId, 8) == 0)
+						{
+							// Bind this stick's IP to the slot
+							_players[i].srcIP = from.sin_addr.s_addr;
+							_players[i].srcPort = from.sin_port;
+							_players[i].type = InputType::NobdUDP;
+							snprintf(_players[i].device, sizeof(_players[i].device), "NOBD Stick");
+							slot = i;
+							printf("[input-server] P%d NOBD stick bound to %s\n", i + 1, browserId);
+							break;
+						}
+					}
+				}
+				// Unregistered sticks: silently ignore (no auto-assign)
+			}
+		}
+
+		// Tagged packets from WebSocket still need slot lookup
+		if (slot < 0 && from.sin_addr.s_addr == htonl(INADDR_LOOPBACK))
+		{
+			// Already handled above via tagged[0]
 		}
 
 		if (slot < 0) continue;
@@ -334,6 +416,64 @@ int connectedCount()
 bool active()
 {
 	return _active.load(std::memory_order_relaxed);
+}
+
+void startStickRegistration(const char* browserId)
+{
+	strncpy(_registerBrowserId, browserId, sizeof(_registerBrowserId) - 1);
+	_rhythmTrackers.clear();
+	_registering = true;
+	printf("[input-server] Registration started for %s — tap any button 5x, pause, 5x again\n", browserId);
+}
+
+void cancelStickRegistration()
+{
+	_registering = false;
+	_rhythmTrackers.clear();
+	printf("[input-server] Registration cancelled\n");
+}
+
+bool isRegistering()
+{
+	return _registering;
+}
+
+const char* getRegisteredBrowserId(uint32_t srcIP, uint16_t srcPort)
+{
+	for (const auto& b : _stickBindings)
+		if (b.srcIP == srcIP)  // match by IP only, port can change
+			return b.browserId;
+	return nullptr;
+}
+
+void registerStick(uint32_t srcIP, uint16_t srcPort, const char* browserId)
+{
+	// Update existing or add new
+	for (auto& b : _stickBindings)
+	{
+		if (b.srcIP == srcIP) {
+			strncpy(b.browserId, browserId, sizeof(b.browserId) - 1);
+			return;
+		}
+	}
+	StickBinding b = {};
+	b.srcIP = srcIP;
+	b.srcPort = srcPort;
+	strncpy(b.browserId, browserId, sizeof(b.browserId) - 1);
+	_stickBindings.push_back(b);
+}
+
+void unregisterStick(const char* browserId)
+{
+	_stickBindings.erase(std::remove_if(_stickBindings.begin(), _stickBindings.end(),
+		[browserId](const StickBinding& b) { return strcmp(b.browserId, browserId) == 0; }),
+		_stickBindings.end());
+	printf("[input-server] Stick unregistered for %s\n", browserId);
+}
+
+int registeredStickCount()
+{
+	return (int)_stickBindings.size();
 }
 
 } // namespace maplecast_input

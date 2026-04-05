@@ -10,6 +10,7 @@ canvas { image-rendering: pixelated; border: 2px solid #333; }
 #lobby { margin: 10px; font-size: 13px; color: #888; }
 #controls { margin: 10px; }
 #diag { position: fixed; top: 10px; right: 10px; background: rgba(0,0,0,0.9); color: #0f0; font-size: 10px; padding: 8px; border: 1px solid #333; font-family: monospace; white-space: pre; min-width: 260px; }
+#info { position: fixed; top: 10px; left: 10px; background: rgba(0,0,0,0.9); color: #0f0; font-size: 12px; padding: 10px; border: 1px solid #333; font-family: monospace; white-space: pre; min-width: 160px; }
 button { background: #222; color: #0f0; border: 1px solid #0f0; padding: 10px 20px; margin: 5px; cursor: pointer; font-family: monospace; font-size: 14px; }
 button:hover { background: #0f0; color: #000; }
 button:disabled { opacity: 0.3; cursor: not-allowed; }
@@ -22,92 +23,46 @@ input { background: #111; color: #0f0; border: 1px solid #333; padding: 8px; fon
 </head>
 <body>
 <div id="status">MapleCast - MVC2</div>
-<div id="game" style="width:640px;height:480px;"></div>
+<iframe id="game" src="emulator.html" style="width:605px;height:600px;border:2px solid #333;" allow="autoplay" scrolling="no"></iframe>
 <canvas id="screen" width="1" height="1" style="display:none;"></canvas>
 <div id="lobby"></div>
 <div id="controls">
-  <input id="nameInput" placeholder="Your name" maxlength="16" />
-  <button id="joinBtn" onclick="joinGame()">Press START to Join</button>
+  <span id="nameSetup">
+    <input id="nameInput" placeholder="Enter your name" maxlength="16" />
+    <button onclick="setName()">Set Name</button>
+  </span>
+  <span id="nameDisplay" style="display:none;color:#0f0;margin-right:10px;"></span>
+  <button id="changeNameBtn" onclick="changeName()" style="display:none;font-size:11px;padding:5px 10px;">Change Name</button>
+  <button id="nextBtn" onclick="getNext()" style="display:none;">I Got Next</button>
+  <button id="registerBtn" onclick="registerStick()" style="display:none;">Register My Stick</button>
+  <button id="unregisterBtn" onclick="unregisterStick()" style="display:none;font-size:11px;padding:5px 10px;">Unregister Stick</button>
+  <button id="leaveBtn" onclick="leaveGame()" style="display:none;">Disconnect</button>
+  <div id="registerStatus" style="display:none;color:#ff0;margin:5px;font-size:13px;"></div>
 </div>
+<div id="info"></div>
 <div id="diag"></div>
 
-<!-- EmulatorJS WASM Mirror -->
+<!-- Emulator runs in iframe, _startMirror() available from parent console -->
 <script>
-  EJS_player = '#game';
-  EJS_core = 'flycast';
-  EJS_gameUrl = 'roms/mvc2.chd';
-  EJS_pathtodata = 'ejs-data/';
-  EJS_biosUrl = 'bios/dc_boot.bin';
-  EJS_startOnLoaded = true;
-  EJS_color = '#0f0';
-  EJS_disableLocalStorage = true;
-  EJS_defaultOptions = {
-    'reicast_hle_bios': 'enabled',
-    'reicast_threaded_rendering': 'enabled',
-    'reicast_enable_rttb': 'enabled',
-    'reicast_mipmapping': 'disabled',
-    'reicast_fog': 'disabled',
-    'reicast_volume_modifier_enable': 'disabled',
-    'reicast_frame_skipping': '0',
-    'reicast_enable_dsp': 'disabled',
-    'reicast_force_freeplay': 'enabled',
-    'reicast_alpha_sorting': 'per-strip (fast, least accurate)',
-    'reicast_oit_layers': '4',
-  };
-
-  var MIRROR_SERVER = 'ws://' + location.hostname + ':7200';
-
-  EJS_onGameStart = function() {
-    console.log('[mirror] Game started, connecting mirror...');
-    var emu = window.EJS_emulator;
-    var Module = emu.Module;
-    if (typeof Module._mirror_init !== 'function') { console.error('[mirror] _mirror_init not found'); return; }
-    Module._mirror_init();
-    console.log('[mirror] Mirror initialized');
-
-    var bufSize = 256 * 1024;
-    var buf = Module._malloc(bufSize);
-    var frames = 0, startTime = 0;
-
-    var ws = new WebSocket(MIRROR_SERVER);
-    ws.binaryType = 'arraybuffer';
-    ws.onopen = function() {
-      document.getElementById('status').textContent = 'MapleCast - LIVE';
-      startTime = performance.now();
-    };
-    ws.onclose = function() {
-      document.getElementById('status').textContent = 'MapleCast - Reconnecting...';
-    };
-    ws.onmessage = function(e) {
-      if (typeof e.data === 'string') return;
-      var data = new Uint8Array(e.data);
-      if (data.length < 80) return;
-      if (data[0]===0x53 && data[1]===0x59 && data[2]===0x4E && data[3]===0x43) {
-        if (data.length > bufSize) { Module._free(buf); bufSize = data.length + 65536; buf = Module._malloc(bufSize); }
-        Module.writeArrayToMemory(data, buf);
-        if (Module._mirror_apply_sync) Module._mirror_apply_sync(buf, data.length);
-        return;
-      }
-      if (data.length > bufSize) { Module._free(buf); bufSize = data.length + 65536; buf = Module._malloc(bufSize); }
-      Module.writeArrayToMemory(data, buf);
-      Module._mirror_render_frame(buf, data.length);
-      frames++;
-      if (frames % 300 === 0) {
-        var fps = frames / ((performance.now() - startTime) / 1000);
-        document.getElementById('status').textContent = 'MapleCast - LIVE | ' + fps.toFixed(0) + ' fps';
-      }
-    };
-  };
+  // Bridge _startMirror to iframe
+  function _startMirror() {
+    var iframe = document.getElementById('game');
+    if (iframe && iframe.contentWindow && iframe.contentWindow._startMirror) {
+      iframe.contentWindow._startMirror();
+    } else {
+      console.error('[mirror] Emulator not ready yet');
+    }
+  }
 </script>
-<script src="ejs-data/loader.js"></script>
 
 <script>
 const canvas = document.getElementById('screen');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
+const infoEl = document.getElementById('info');
 const lobbyEl = document.getElementById('lobby');
 const diagEl = document.getElementById('diag');
-const joinBtn = document.getElementById('joinBtn');
+const nextBtn = document.getElementById('nextBtn');
 const nameInput = document.getElementById('nameInput');
 
 let ws = null;
@@ -131,7 +86,87 @@ let audioUnderruns = 0;
 let myId = localStorage.getItem('maplecast_id');
 if (!myId) { myId = crypto.randomUUID(); localStorage.setItem('maplecast_id', myId); }
 let myName = localStorage.getItem('maplecast_name') || '';
-nameInput.value = myName;
+
+// If name already set, show it and hide input
+if (myName) {
+  document.getElementById('nameSetup').style.display = 'none';
+  document.getElementById('nameDisplay').style.display = '';
+  document.getElementById('nameDisplay').textContent = myName;
+  document.getElementById('changeNameBtn').style.display = '';
+  document.getElementById('nextBtn').style.display = '';
+  if (localStorage.getItem('maplecast_stick')) {
+    document.getElementById('unregisterBtn').style.display = '';
+  } else {
+    document.getElementById('registerBtn').style.display = '';
+  }
+} else {
+  document.getElementById('nameInput').value = '';
+}
+
+function setName() {
+  const input = document.getElementById('nameInput');
+  const name = input.value.trim();
+  if (!name) { input.placeholder = 'Name required!'; return; }
+  myName = name;
+  localStorage.setItem('maplecast_name', myName);
+  document.getElementById('nameSetup').style.display = 'none';
+  document.getElementById('nameDisplay').style.display = '';
+  document.getElementById('nameDisplay').textContent = myName;
+  document.getElementById('changeNameBtn').style.display = '';
+  document.getElementById('nextBtn').style.display = '';
+  if (localStorage.getItem('maplecast_stick')) {
+    document.getElementById('unregisterBtn').style.display = '';
+  } else {
+    document.getElementById('registerBtn').style.display = '';
+  }
+}
+
+function changeName() {
+  document.getElementById('nameSetup').style.display = '';
+  document.getElementById('nameInput').value = myName;
+  document.getElementById('nameDisplay').style.display = 'none';
+  document.getElementById('changeNameBtn').style.display = 'none';
+  document.getElementById('nextBtn').style.display = 'none';
+}
+
+function getNext() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { connect(); return; }
+  // Try to join directly
+  let device = localStorage.getItem('maplecast_stick') ? 'NOBD Stick' : 'Browser';
+  const gp = navigator.getGamepads()[0];
+  if (gp && !localStorage.getItem('maplecast_stick')) device = gp.id.substring(0, 30);
+  ws.send(JSON.stringify({type:'join', id:myId, name:myName, device: device}));
+  document.getElementById('nextBtn').disabled = true;
+  document.getElementById('nextBtn').textContent = 'Joining...';
+}
+
+function registerStick() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { connect(); return; }
+  ws.send(JSON.stringify({type:'register_stick', id:myId}));
+  document.getElementById('registerBtn').disabled = true;
+  document.getElementById('registerBtn').textContent = 'Listening...';
+  document.getElementById('registerStatus').style.display = '';
+  document.getElementById('registerStatus').textContent = 'Tap any button 5 times, pause, then 5 times again...';
+function unregisterStick() {
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({type:'unregister_stick', id:myId}));
+  localStorage.removeItem('maplecast_stick');
+  document.getElementById('unregisterBtn').style.display = 'none';
+  document.getElementById('registerBtn').style.display = '';
+  document.getElementById('registerBtn').disabled = false;
+  document.getElementById('registerBtn').textContent = 'Register My Stick';
+}
+
+  // Auto-cancel after 15 seconds
+  window._registerTimeout = setTimeout(function() {
+    if (ws && ws.readyState === WebSocket.OPEN)
+      ws.send(JSON.stringify({type:'cancel_register'}));
+    document.getElementById('registerBtn').disabled = false;
+    document.getElementById('registerBtn').textContent = 'Register My Stick';
+    document.getElementById('registerStatus').textContent = 'Timed out — try again';
+    setTimeout(function() { document.getElementById('registerStatus').style.display = 'none'; }, 3000);
+  }, 15000);
+}
 
 const diag = {
   fps: 0, serverFrame: 0, bytesPerFrame: 0, totalBytes: 0,
@@ -141,6 +176,8 @@ const diag = {
   droppedFrames: 0, gamepadActive: false, inputSendCount: 0,
   frameIntervals: [], p1: {}, p2: {},
   decodeStartMs: 0,
+  spectators: 0, queue: [],
+  pingMs: 0, pingSamples: [],
 };
 
 function avg(arr) { return arr.length > 0 ? arr.reduce((a,b) => a+b, 0) / arr.length : 0; }
@@ -156,42 +193,73 @@ function updateDiag() {
   const jit = avg(diag.jitterSamples).toFixed(2);
   const fi = avg(diag.frameIntervals).toFixed(1);
 
+  const publishMs = (diag.publishUs / 1000).toFixed(2);
+  const streamMbps = (diag.streamKbps / 1000).toFixed(1);
+
+  // E2E estimate: publish + network (~1ms LAN) + client decode
+  // Button→Server: input poll (1ms web / 0.3ms NOBD) + server process
+  // Button→Screen: above + publish + network + client render
+  const p1InputMs = (p1.pps||0) > 1000 ? 0.3 : 1.0;
+  const p2InputMs = (p2.pps||0) > 1000 ? 0.3 : 1.0;
+  const networkMs = 1.0; // LAN estimate
+  const clientRenderMs = 2.0; // WebGL render estimate
+  const p1E2E = (p1InputMs + parseFloat(publishMs) + networkMs + clientRenderMs).toFixed(1);
+  const p2E2E = (p2InputMs + parseFloat(publishMs) + networkMs + clientRenderMs).toFixed(1);
+
+  const pingMs = diag.pingMs.toFixed(1);
+
   diagEl.textContent =
 `=== MapleCast ===
-FPS: ${diag.fps.toFixed(1)}  Frame: ${diag.serverFrame}
-${kbps}kbps  ${diag.bytesPerFrame}B  ${fi}ms/f
+FPS: ${diag.fps}  Frame: ${diag.serverFrame}
 
--- Server --
-Copy: ${srvCopy}ms  Encode: ${srvEnc}ms
-Pipeline: ${srvPipe}ms (capture>send)
+-- Connection --
+Ping: ${pingMs}ms
+Stream: ${streamMbps} Mbps
+Publish: ${publishMs}ms/frame
 
--- Client --
-Decode: ${dec}ms  Jitter: ${jit}ms
-Drops: ${diag.droppedFrames}
+-- P1 ${(p1.pps||0) > 1000 ? '(NOBD)' : '(Web)'} --
+Input: ${p1.pps||0}/s  Chg: ${p1.cps||0}/s
+Btn>Server: ${p1InputMs}ms
+Btn>Screen: ${p1E2E}ms E2E
 
--- P1 --
-Rate: ${p1.pps||0}/s  Chg: ${p1.cps||0}/s
-Btn: 0x${(p1.btn||0xFFFF).toString(16).padStart(4,'0')}
-E2E: ~${(parseFloat(srvPipe) + ((p1.pps||0) > 1000 ? 0.3 : 1.0) + parseFloat(dec)).toFixed(1)}ms ${(p1.pps||0) > 1000 ? '(HW)' : '(web)'}
-
--- P2 --
-Rate: ${p2.pps||0}/s  Chg: ${p2.cps||0}/s
-Btn: 0x${(p2.btn||0xFFFF).toString(16).padStart(4,'0')}
-E2E: ~${(parseFloat(srvPipe) + ((p2.pps||0) > 1000 ? 0.3 : 1.0) + parseFloat(dec)).toFixed(1)}ms ${(p2.pps||0) > 1000 ? '(HW)' : '(web)'}
+-- P2 ${(p2.pps||0) > 1000 ? '(NOBD)' : '(Web)'} --
+Input: ${p2.pps||0}/s  Chg: ${p2.cps||0}/s
+Btn>Server: ${p2InputMs}ms
+Btn>Screen: ${p2E2E}ms E2E
 
 -- Me --
-Slot: ${mySlot >= 0 ? 'P'+(mySlot+1) : 'spectator'}
+Slot: ${mySlot >= 0 ? 'P'+(mySlot+1) : (window._inQueue ? 'queued' : 'spectator')}
 Pad: ${diag.gamepadActive ? 'YES' : 'no'}  Sent: ${diag.inputSendCount}
-
--- Audio --
-Chunks: ${typeof audioChunksReceived !== 'undefined' ? audioChunksReceived : 0}
-Queue: ${typeof audioQueue !== 'undefined' ? audioQueue.length : 0}
-Underruns: ${typeof audioUnderruns !== 'undefined' ? audioUnderruns : 0}
-State: ${typeof audioCtx !== 'undefined' && audioCtx ? audioCtx.state : 'off'}`;
+Ping: ${pingMs}ms  RTT>Screen: ${(parseFloat(pingMs) + clientRenderMs).toFixed(1)}ms`;
 }
 
 function initDecoder() {
   // H.264 decoder disabled — WASM mirror handles rendering
+}
+
+function updateInfo() {
+  const p1 = diag.p1 || {};
+  const p2 = diag.p2 || {};
+  const p1name = p1.connected ? p1.name : 'open';
+  const p2name = p2.connected ? p2.name : 'open';
+  const p1type = p1.connected ? (p1.type === 'hardware' ? 'NOBD' : 'Web') : '';
+  const p2type = p2.connected ? (p2.type === 'hardware' ? 'NOBD' : 'Web') : '';
+  const queue = diag.queue || [];
+  let queueList = '';
+  if (queue.length > 0) {
+    queueList = '\n-- Next Up --\n';
+    for (let i = 0; i < queue.length; i++) {
+      queueList += `  ${i+1}. ${queue[i]}\n`;
+    }
+  }
+  infoEl.textContent =
+`  MAPLECAST  MVC2
+
+P1: ${p1name} ${p1type}
+P2: ${p2name} ${p2type}
+
+Watching: ${diag.spectators}
+${queueList}`;
 }
 
 let lastFrameTime = 0;
@@ -222,26 +290,82 @@ function connect() {
     frameCount = 0;
     startTime = performance.now();
     lastFrameTime = 0;
-    joinBtn.disabled = false;
+    nextBtn.disabled = false;
   };
 
   ws.onmessage = (event) => {
     if (typeof event.data === 'string') {
       try {
         const msg = JSON.parse(event.data);
+        if (msg.type === 'register_started') {
+          // Server acknowledged, waiting for rhythm
+        }
+        if (msg.type === 'pong') {
+          const rtt = performance.now() - msg.t;
+          diag.pingSamples.push(rtt);
+          if (diag.pingSamples.length > 10) diag.pingSamples.shift();
+          diag.pingMs = diag.pingSamples.reduce((a,b) => a+b, 0) / diag.pingSamples.length;
+        }
         if (msg.type === 'assigned') {
           mySlot = msg.slot;
           if (mySlot >= 0) {
             statusEl.textContent = `You are P${mySlot + 1} - FIGHT!`;
-            joinBtn.textContent = `Playing as P${mySlot + 1}`;
-            joinBtn.disabled = true;
+            document.getElementById('nextBtn').style.display = 'none';
+            document.getElementById('leaveBtn').style.display = '';
+            document.getElementById('changeNameBtn').style.display = 'none';
+            window._inQueue = false;
+            window._leaving = false;
             startGamepadPolling();
+          } else if (window._leaving) {
+            // Response to our leave request — just reset
+            window._leaving = false;
           } else {
-            statusEl.textContent = 'Game full - watching';
+            // Slot full — enter queue
+            window._inQueue = true;
+            ws.send(JSON.stringify({type:'queue_join', name: myName}));
+            document.getElementById('nextBtn').disabled = true;
+            document.getElementById('nextBtn').textContent = 'In Queue...';
+            document.getElementById('leaveBtn').style.display = '';
+            statusEl.textContent = 'In queue - waiting for open slot';
           }
         }
         if (msg.type === 'status') {
+          // Update diag with live player stats
+          diag.p1 = msg.p1 || {};
+          diag.p2 = msg.p2 || {};
+          diag.spectators = msg.spectators || 0;
+          diag.queue = msg.queue || [];
+          // Check if stick registration just completed
+          if (diag._wasRegistering && !msg.registering) {
+            localStorage.setItem('maplecast_stick', myId);
+            clearTimeout(window._registerTimeout);
+            document.getElementById('registerBtn').textContent = 'Stick Registered!';
+            document.getElementById('registerBtn').disabled = true;
+            document.getElementById('registerStatus').textContent = 'Your stick is registered!';
+            setTimeout(function() {
+              document.getElementById('registerStatus').style.display = 'none';
+              document.getElementById('registerBtn').style.display = 'none';
+              document.getElementById('unregisterBtn').style.display = '';
+            }, 3000);
+          }
+          diag._wasRegistering = msg.registering;
+          diag.serverFrame = msg.frame || 0;
+          diag.fps = msg.fps || 0;
+          diag.streamKbps = msg.stream_kbps || 0;
+          diag.publishUs = msg.publish_us || 0;
+          diag.dirtyPages = msg.dirty || 0;
           updateLobby(msg);
+          updateInfo();
+          // Auto-join from queue when a slot opens
+          if (window._inQueue && mySlot < 0) {
+            const p1open = !msg.p1 || !msg.p1.connected;
+            const p2open = !msg.p2 || !msg.p2.connected;
+            if (p1open || p2open) {
+              window._inQueue = false;
+              ws.send(JSON.stringify({type:'queue_leave'}));
+              joinGame();
+            }
+          }
         }
         // WebRTC removed — using WASM mirror for rendering
       } catch (e) {}
@@ -253,8 +377,8 @@ function connect() {
 
   ws.onclose = () => {
     statusEl.textContent = 'Disconnected';
-    joinBtn.disabled = false;
-    joinBtn.textContent = 'Press START to Join';
+    nextBtn.disabled = false;
+    nextBtn.textContent = 'I Got Next';
     mySlot = -1;
     if (gamepadInterval) clearInterval(gamepadInterval);
   };
@@ -452,18 +576,27 @@ function setupWebRTC() {
 */
 
 function joinGame() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) { connect(); return; }
-  myName = nameInput.value.trim() || 'Player';
-  localStorage.setItem('maplecast_name', myName);
+  getNext();
+}
 
-  // Detect gamepad name
-  let device = 'Browser';
-  const gp = navigator.getGamepads()[0];
-  if (gp) device = gp.id.substring(0, 30);
-
-  ws.send(JSON.stringify({type:'join', id:myId, name:myName, device: device}));
-  joinBtn.textContent = 'Joining...';
-  joinBtn.disabled = true;
+function leaveGame() {
+  window._leaving = true;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    if (mySlot >= 0) {
+      ws.send(JSON.stringify({type:'leave', id:myId}));
+    } else if (window._inQueue) {
+      ws.send(JSON.stringify({type:'queue_leave'}));
+    }
+  }
+  mySlot = -1;
+  window._inQueue = false;
+  if (gamepadInterval) clearInterval(gamepadInterval);
+  document.getElementById('nextBtn').style.display = '';
+  document.getElementById('nextBtn').disabled = false;
+  document.getElementById('nextBtn').textContent = 'I Got Next';
+  document.getElementById('leaveBtn').style.display = 'none';
+  document.getElementById('changeNameBtn').style.display = '';
+  statusEl.textContent = 'Connected - watching';
 }
 
 function updateLobby(msg) {
@@ -485,6 +618,12 @@ function updateLobby(msg) {
       html += `<span class="slot empty">${label}: open</span> `;
     }
   }
+  const spectators = msg.spectators || 0;
+  const queue = msg.queue || [];
+  html += `<span class="slot" style="border-color:#555;color:#888;">` +
+    `<b>Watching: ${spectators}</b><br>` +
+    `<small>Next up: ${queue.length}</small>` +
+    `</span>`;
   lobbyEl.innerHTML = html;
 }
 
@@ -521,6 +660,14 @@ diagEl.textContent = '=== MapleCast ===\nWaiting...';
 
 // Connect for lobby/join only — WASM mirror handles video
 connect();
+
+// Update diag display + send ping every second
+setInterval(() => {
+  updateDiag();
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({type:'ping', t: performance.now()}));
+  }
+}, 1000);
 </script>
 </body>
 </html>

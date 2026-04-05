@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; width: 100vw; height: 100vh; }
+#game { width: 100vw; height: 100vh; }
+canvas { aspect-ratio: 4/3 !important; object-fit: contain !important; }
+</style>
+</head>
+<body>
+<div id="game"></div>
+
+<!-- WebGL2 compatibility patches (required for flycast WASM) -->
+<script>
+  (function() {
+    var origWarn = console.warn;
+    console.warn = function() {
+      if (arguments.length > 0 && typeof arguments[0] === 'string') {
+        var msg = arguments[0];
+        if (msg.indexOf('__syscall_mprotect') !== -1) return;
+        if (msg.indexOf('is not a valid value') !== -1) return;
+      }
+      return origWarn.apply(console, arguments);
+    };
+  })();
+  (function() {
+    var origGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+      var ctx = origGetContext.call(this, type, attrs);
+      if (ctx && (type === 'webgl2' || type === 'experimental-webgl2') && !ctx.__flycastPatched) {
+        ctx.__flycastPatched = true;
+        var origGetParam = ctx.getParameter.bind(ctx);
+        ctx.getParameter = function(pname) {
+          if (pname === 0x1F02 || pname === ctx.VERSION) return 'OpenGL ES 3.0 WebGL 2.0';
+          if (pname === 0x8B8C || pname === ctx.SHADING_LANGUAGE_VERSION) return 'OpenGL ES GLSL ES 3.00';
+          return origGetParam(pname);
+        };
+        var origGetError = ctx.getError.bind(ctx);
+        ctx.getError = function() {
+          var err = origGetError();
+          while (err === 0x500) { err = origGetError(); }
+          return err;
+        };
+        var texBindings = {};
+        texBindings[ctx.TEXTURE_2D] = ctx.TEXTURE_BINDING_2D;
+        texBindings[ctx.TEXTURE_CUBE_MAP] = ctx.TEXTURE_BINDING_CUBE_MAP;
+        if (ctx.TEXTURE_3D) texBindings[ctx.TEXTURE_3D] = ctx.TEXTURE_BINDING_3D;
+        if (ctx.TEXTURE_2D_ARRAY) texBindings[ctx.TEXTURE_2D_ARRAY] = ctx.TEXTURE_BINDING_2D_ARRAY;
+        var origTexParameteri = ctx.texParameteri.bind(ctx);
+        ctx.texParameteri = function(target, pname, param) {
+          var b = texBindings[target];
+          if (b && !origGetParam(b)) return;
+          return origTexParameteri(target, pname, param);
+        };
+        var origTexParameterf = ctx.texParameterf.bind(ctx);
+        ctx.texParameterf = function(target, pname, param) {
+          var b = texBindings[target];
+          if (b && !origGetParam(b)) return;
+          return origTexParameterf(target, pname, param);
+        };
+      }
+      return ctx;
+    };
+  })();
+</script>
+
+<script>
+  EJS_cacheConfig = { enabled: false };
+  EJS_Buttons = { playPause: false, restart: false, mute: false, settings: false, fullscreen: false, saveState: false, loadState: false, screenRecord: false, gamepad: false, cheat: false, volume: false, saveSavFiles: false, loadSavFiles: false, quickSave: false, quickLoad: false, screenshot: false, cacheManager: false };
+  EJS_player = '#game';
+  EJS_core = 'flycast';
+  EJS_gameUrl = 'roms/mvc2.chd';
+  EJS_pathtodata = 'ejs-data/';
+  EJS_biosUrl = 'bios/dc_boot.bin';
+  EJS_startOnLoaded = true;
+  EJS_color = '#0f0';
+  EJS_disableLocalStorage = true;
+  EJS_defaultOptions = {
+    'reicast_region': '1',
+    'reicast_broadcast': '0',
+    'reicast_language': '1',
+    'reicast_hle_bios': 'enabled',
+    'reicast_boot_to_bios': 'disabled',
+    'reicast_force_freeplay': 'enabled',
+    'reicast_sh4clock': '200',
+    'reicast_internal_resolution': '640x480',
+    'reicast_threaded_rendering': 'enabled',
+    'reicast_enable_rttb': 'enabled',
+    'reicast_mipmapping': 'disabled',
+    'reicast_fog': 'disabled',
+    'reicast_volume_modifier_enable': 'disabled',
+    'reicast_anisotropic_filtering': '1',
+    'reicast_texture_filtering': '0',
+    'reicast_texupscale': '1',
+    'reicast_alpha_sorting': 'per-strip (fast, least accurate)',
+    'reicast_oit_layers': '4',
+    'reicast_delay_frame_swapping': 'disabled',
+    'reicast_frame_skipping': '0',
+    'reicast_auto_skip_frame': '0',
+    'reicast_emulate_framebuffer': 'disabled',
+    'reicast_enable_dsp': 'disabled',
+    'reicast_custom_textures': 'disabled',
+  };
+
+  var CORE_OPTS = Object.entries(EJS_defaultOptions).map(function(e) { return e[0] + ' = "' + e[1] + '"'; }).join('\n') + '\n';
+
+  // Patch startGame to set up BIOS + core options
+  (function() {
+    var iv = setInterval(function() {
+      var emu = window.EJS_emulator;
+      if (!emu || emu.__flycastPatched) return;
+      emu.__flycastPatched = true;
+      clearInterval(iv);
+      var origStartGame = emu.startGame;
+      emu.startGame = async function() {
+        try {
+          if (this.gameManager && this.gameManager.FS) {
+            var FS = this.gameManager.FS;
+            try {
+              var resp = await fetch('bios/dc_flash.bin');
+              var buf = await resp.arrayBuffer();
+              FS.writeFile('/dc_flash.bin', new Uint8Array(buf));
+            } catch(e) {}
+            try { if (!FS.analyzePath('/dc').exists) FS.mkdir('/dc'); } catch(e) {}
+            ['dc_boot.bin', 'dc_flash.bin'].forEach(function(f) {
+              try {
+                if (FS.analyzePath('/' + f).exists && !FS.analyzePath('/dc/' + f).exists)
+                  FS.writeFile('/dc/' + f, FS.readFile('/' + f));
+              } catch(e) {}
+            });
+            if (this.Module && this.Module.callbacks) {
+              var origCb = this.Module.callbacks.setupCoreSettingFile;
+              this.Module.callbacks.setupCoreSettingFile = function(filePath) {
+                try { FS.writeFile(filePath, CORE_OPTS); } catch(e) {}
+                if (origCb) origCb(filePath);
+              };
+            }
+            var cfgPath = '/home/web_user/.config/retroarch/retroarch.cfg';
+            try {
+              var cfg = new TextDecoder().decode(FS.readFile(cfgPath));
+              if (cfg.indexOf('system_directory') === -1)
+                FS.writeFile(cfgPath, cfg + 'system_directory = "/"\n');
+            } catch(e) {}
+          }
+        } catch(e) { console.error('[maplecast] startGame patch failed:', e); }
+        return origStartGame.apply(this, arguments);
+      };
+    }, 50);
+  })();
+
+  EJS_onGameStart = function() {
+    console.log('[maplecast] Game loaded, auto-starting mirror...');
+    // Strip all EmulatorJS UI — just show the raw canvas
+    var canvas = document.querySelector('canvas');
+    if (canvas) {
+      canvas.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:99999;';
+      // Hide everything else
+      var all = document.querySelectorAll('#game > * > *');
+      for (var i = 0; i < all.length; i++) {
+        if (all[i].tagName !== 'CANVAS') all[i].style.display = 'none';
+      }
+    }
+    // Expose _startMirror to parent window
+    if (window.parent && window.parent !== window) {
+      window.parent._startMirror = window._startMirror;
+    }
+    // Auto-start: pause CPU + start mirror after brief renderer init
+    setTimeout(function() { window._startMirror(); }, 1000);
+  };
+
+  var MIRROR_SERVER = 'ws://' + location.hostname + ':7200';
+
+  window._startMirror = function() {
+    if (window._mirrorStarted) { console.log('[mirror] Already started'); return; }
+    window._mirrorStarted = true;
+    var emu = window.EJS_emulator;
+    if (!emu || !emu.Module) { console.error('[mirror] EmulatorJS not ready'); window._mirrorStarted = false; return; }
+    var Module = emu.Module;
+    if (typeof Module._mirror_init !== 'function') { console.error('[mirror] _mirror_init not found'); window._mirrorStarted = false; return; }
+
+    emu.pause();
+    console.log('[mirror] CPU paused');
+
+    Module._mirror_init();
+    console.log('[mirror] Mirror initialized');
+
+    var bufSize = 256 * 1024;
+    var buf = Module._malloc(bufSize);
+    var frames = 0, startTime = 0;
+
+    function connectMirror() {
+      console.log('[mirror] Connecting to', MIRROR_SERVER);
+      var ws = new WebSocket(MIRROR_SERVER);
+      ws.binaryType = 'arraybuffer';
+      ws.onopen = function() { startTime = performance.now(); frames = 0; };
+      ws.onclose = function() { setTimeout(connectMirror, 2000); };
+      ws.onerror = function() { console.log('[mirror] WebSocket error'); };
+      ws.onmessage = function(e) {
+        if (typeof e.data === 'string') return;
+        var data = new Uint8Array(e.data);
+        if (data.length < 80) return;
+        if (data[0]===0x53 && data[1]===0x59 && data[2]===0x4E && data[3]===0x43) {
+          console.log('[mirror] SYNC: ' + (data.length/1024/1024).toFixed(1) + ' MB');
+          if (data.length > bufSize) { Module._free(buf); bufSize = data.length + 65536; buf = Module._malloc(bufSize); }
+          Module.writeArrayToMemory(data, buf);
+          try { if (Module._mirror_apply_sync) Module._mirror_apply_sync(buf, data.length); }
+          catch (err) { console.warn('[mirror] SYNC error:', err.message); }
+          return;
+        }
+        if (data.length > bufSize) { Module._free(buf); bufSize = data.length + 65536; buf = Module._malloc(bufSize); }
+        Module.writeArrayToMemory(data, buf);
+        Module._mirror_render_frame(buf, data.length);
+        frames++;
+        if (frames % 300 === 0) {
+          var fps = frames / ((performance.now() - startTime) / 1000);
+          console.log('[mirror] ' + fps.toFixed(0) + ' fps');
+        }
+      };
+    }
+    connectMirror();
+  };
+</script>
+
+<script src="ejs-data/loader.js"></script>
+</body>
+</html>

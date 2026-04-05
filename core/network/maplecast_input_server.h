@@ -66,4 +66,23 @@ void injectInput(int slot, uint8_t lt, uint8_t rt, uint16_t buttons);
 // Is the input server running?
 bool active();
 
+// Stick registration — bind a NOBD stick to a browser user
+// Returns true when combo detected and registration complete
+void startStickRegistration(const char* browserId);
+void cancelStickRegistration();
+bool isRegistering();
+
+// Lookup: is this NOBD source registered to a browser user?
+// Returns browser ID if registered, nullptr if not
+const char* getRegisteredBrowserId(uint32_t srcIP, uint16_t srcPort);
+
+// Bind a specific stick source to a browser user (called after combo detected)
+void registerStick(uint32_t srcIP, uint16_t srcPort, const char* browserId);
+
+// Unregister a stick by browser ID
+void unregisterStick(const char* browserId);
+
+// How many registered sticks?
+int registeredStickCount();
+
 }
