@@ -1,12 +1,13 @@
 <!DOCTYPE html>
 <html>
 <head>
-<title>WASM Renderer Test — King of Marvel</title>
+<meta charset="UTF-8">
+<title>WASM Renderer Test - King of Marvel</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { background: #000; color: #0f0; font-family: monospace; display: flex; }
 #game-col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-canvas { border: 2px solid #333; image-rendering: pixelated; }
+canvas { border: 2px solid #333; image-rendering: pixelated; max-width: 100%; max-height: 70vh; width: 640px; }
 #status { margin: 10px; font-size: 14px; color: #0f0; }
 #stats { margin: 5px; font-size: 10px; color: #888; white-space: pre; }
 #panel {
@@ -22,54 +23,143 @@ canvas { border: 2px solid #333; image-rendering: pixelated; }
 #panel button:hover { background: #0f0; color: #000; }
 #panel .section { margin-bottom: 10px; }
 #log { background: #0a0a0a; color: #888; font-size: 9px; padding: 5px; max-height: 150px; overflow-y: auto; white-space: pre-wrap; border: 1px solid #222; margin-top: 10px; }
+
+/* 3D Floating Panel */
+.crt-active #canvas-wrapper {
+  perspective: 900px;
+  display: flex; align-items: center; justify-content: center;
+  position: relative; min-height: 500px;
+}
+.crt-active .tv-body {
+  position: relative;
+  transform-style: preserve-3d;
+  transition: transform 0.05s;
+}
+.crt-active .panel-frame {
+  background: linear-gradient(145deg, #222 0%, #111 50%, #1a1a1a 100%);
+  border-radius: 8px; padding: 12px;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.8), 0 0 60px rgba(40,60,200,0.08),
+    inset 0 1px 0 rgba(80,80,80,0.2);
+}
+.crt-active .panel-screen {
+  position: relative; overflow: hidden; border-radius: 4px; background: #000;
+}
+.crt-active .panel-screen canvas { display: block; border-radius: 4px; }
+.crt-active .panel-reflection {
+  position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+  background: linear-gradient(160deg, rgba(255,255,255,0.04) 0%, transparent 40%);
+  pointer-events: none; z-index: 2; border-radius: 4px;
+}
+.crt-active .panel-logo {
+  text-align: center; padding: 6px 0 2px;
+  font-family: monospace; font-size: 9px; color: #444; letter-spacing: 4px;
+}
+.crt-active .panel-stand {
+  display: flex; flex-direction: column; align-items: center;
+}
+.crt-active .panel-stand-neck {
+  width: 30px; height: 40px; background: linear-gradient(180deg, #222, #1a1a1a);
+}
+.crt-active .panel-stand-base {
+  width: 120px; height: 8px; background: linear-gradient(180deg, #2a2a2a, #181818);
+  border-radius: 0 0 4px 4px; box-shadow: 0 4px 15px rgba(0,0,0,0.6);
+}
+.crt-active .panel-glow {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: 130%; height: 130%;
+  background: radial-gradient(ellipse at center, rgba(40,60,200,0.06) 0%, transparent 60%);
+  pointer-events: none; z-index: -1;
+}
+
 </style>
 </head>
 <body>
 <div id="game-col">
-  <div id="status">Standalone WASM Renderer — Connecting...</div>
-  <canvas id="game-canvas" width="640" height="480"></canvas>
+  <div id="status">Standalone WASM Renderer -- Connecting...</div>
+  <div id="canvas-wrapper">
+    <canvas id="game-canvas" width="640" height="480"></canvas>
+  </div>
   <div id="stats"></div>
 </div>
 
 <div id="panel">
-  <h3>🎛️ WebGL Live Controls</h3>
+  <h3>[CONTROLS] WebGL Live Controls</h3>
 
   <div class="section">
-    <h3>Blending</h3>
-    <label><input type="checkbox" id="forceBlend" checked> Force GL_BLEND on every draw</label>
-    <label><input type="checkbox" id="overrideSrc"> Override SRC blend:</label>
-    <label><select id="srcBlend">
-      <option value="0">ZERO</option><option value="1" selected>ONE</option>
-      <option value="770">SRC_ALPHA</option><option value="771">ONE_MINUS_SRC_ALPHA</option>
-      <option value="772">DST_ALPHA</option><option value="773">ONE_MINUS_DST_ALPHA</option>
-      <option value="774">DST_COLOR</option><option value="775">ONE_MINUS_DST_COLOR</option>
-    </select></label>
-    <label><select id="dstBlend">
-      <option value="0">ZERO</option><option value="1">ONE</option>
-      <option value="770">SRC_ALPHA</option><option value="771" selected>ONE_MINUS_SRC_ALPHA</option>
-      <option value="772">DST_ALPHA</option><option value="773">ONE_MINUS_DST_ALPHA</option>
-      <option value="774">SRC_COLOR</option><option value="775">ONE_MINUS_SRC_COLOR</option>
-    </select></label>
+    <h3>[QUALITY] Quality Settings</h3>
+    <label>Resolution:
+      <select id="opt_resolution" onchange="setOpt(0, this.value)">
+        <option value="480" selected>480p (Native DC)</option>
+        <option value="720">720p (1.5x)</option>
+        <option value="960">960p (2x)</option>
+        <option value="1440">1440p (3x)</option>
+        <option value="1920">1080p (4x)</option>
+        <option value="1920">4x MAX</option>
+      </select>
+    </label>
+    <label>Texture Upscale:
+      <select id="opt_texupscale" onchange="setOpt(1, this.value)" disabled title="Disabled — xBRZ freezes single-threaded WASM">
+        <option value="1" selected>1x (Native)</option>
+        <option value="2">2x (xBRZ) - disabled</option>
+        <option value="4">4x (xBRZ) - disabled</option>
+      </select>
+    </label>
+    <label>Anisotropic Filter:
+      <select id="opt_aniso" onchange="setOpt(5, this.value)">
+        <option value="1" selected>Off</option>
+        <option value="2">2x</option>
+        <option value="4">4x</option>
+        <option value="8">8x</option>
+        <option value="16">16x</option>
+      </select>
+    </label>
+    <label>Texture Filter:
+      <select id="opt_texfilter" onchange="setOpt(6, this.value)">
+        <option value="0" selected>Default</option>
+        <option value="1">Nearest</option>
+        <option value="2">Linear</option>
+      </select>
+    </label>
+    <label>Transparency Layers:
+      <select id="opt_layers" onchange="setOpt(7, this.value)">
+        <option value="4" selected>4 (Fast)</option>
+        <option value="8">8</option>
+        <option value="16">16</option>
+        <option value="32">32 (Best)</option>
+      </select>
+    </label>
   </div>
 
   <div class="section">
-    <h3>Clear Color Alpha</h3>
-    <label>Clear Alpha: <input type="range" id="clearAlpha" min="0" max="100" value="100"> <span class="val" id="clearAlphaVal">1.0</span></label>
+    <h3>[FEATURES] Renderer Features</h3>
+    <label><input type="checkbox" id="opt_fog" onchange="setOpt(2, this.checked?1:0)"> Fog</label>
+    <label><input type="checkbox" id="opt_modvol" onchange="setOpt(3, this.checked?1:0)"> Modifier Volumes (shadows)</label>
+    <label><input type="checkbox" id="opt_pstrip" onchange="setOpt(4, this.checked?1:0)"> Per-Strip Sorting</label>
   </div>
 
   <div class="section">
-    <h3>Depth / Stencil</h3>
-    <label><input type="checkbox" id="forceDepth" checked> Depth Test</label>
-    <label><input type="checkbox" id="forceStencil" checked> Stencil Test</label>
+    <h3>[CSS] Post-Processing (CSS)</h3>
+    <label><input type="checkbox" id="css_scanlines" onchange="toggleCSS()"> CRT Scanlines</label>
+    <label><input type="checkbox" id="css_bloom" onchange="toggleCSS()"> Bloom Glow</label>
+    <label><input type="checkbox" id="css_sharpen" onchange="toggleCSS()"> Sharpen</label>
+    <label><input type="checkbox" id="css_smooth" onchange="toggleCSS()"> Smooth (bilinear)</label>
+    <label><input type="checkbox" id="css_vignette" onchange="toggleCSS()"> Vignette</label>
+    <label><input type="checkbox" id="css_curvature" onchange="toggleCSS()"> CRT Curvature</label>
+    <label>Brightness: <input type="range" id="css_bright" min="80" max="150" value="100" oninput="toggleCSS()"> <span id="css_bright_val">100%</span></label>
+    <label>Contrast: <input type="range" id="css_contrast" min="80" max="200" value="100" oninput="toggleCSS()"> <span id="css_contrast_val">100%</span></label>
+    <label>Saturation: <input type="range" id="css_sat" min="50" max="200" value="100" oninput="toggleCSS()"> <span id="css_sat_val">100%</span></label>
+    <button onclick="presetArcade()">ARCADE CRT</button>
+    <button onclick="presetHD()">HD REMASTER</button>
+    <button onclick="presetClean()">CLEAN</button>
   </div>
 
   <div class="section">
-    <h3>Color Mask</h3>
-    <label><input type="checkbox" id="maskR" checked> Red</label>
-    <label><input type="checkbox" id="maskG" checked> Green</label>
-    <label><input type="checkbox" id="maskB" checked> Blue</label>
-    <label><input type="checkbox" id="maskA" checked> Alpha</label>
-    <label><input type="checkbox" id="applyMask"> Apply mask override</label>
+    <h3>[3D] CRT TV Mode</h3>
+    <label><input type="checkbox" id="crt_tv_mode" onchange="toggleCRT3D()"> Enable 3D CRT Tube</label>
+    <label>Rotate: <input type="range" id="crt_rotate" min="-30" max="30" value="-5" oninput="updateCRT3D()"> <span id="crt_rotate_val">-5</span></label>
+    <label>Tilt: <input type="range" id="crt_tilt" min="-15" max="15" value="2" oninput="updateCRT3D()"> <span id="crt_tilt_val">2</span></label>
+    <label>Distance: <input type="range" id="crt_dist" min="500" max="2000" value="900" oninput="updateCRT3D()"> <span id="crt_dist_val">900</span></label>
+    <label>Glow: <input type="range" id="crt_glow" min="0" max="100" value="60" oninput="updateCRT3D()"> <span id="crt_glow_val">60</span></label>
   </div>
 
   <div class="section">
@@ -82,9 +172,9 @@ canvas { border: 2px solid #333; image-rendering: pixelated; }
 
   <div class="section">
     <h3>Actions</h3>
-    <button onclick="captureFrame()">📸 Capture Frame GL State</button>
-    <button onclick="togglePause()">⏸ Pause/Resume</button>
-    <button onclick="location.reload()">🔄 Reload</button>
+    <button onclick="captureFrame()">[CAP] Capture Frame GL State</button>
+    <button onclick="togglePause()">[II] Pause/Resume</button>
+    <button onclick="location.reload()">[R] Reload</button>
   </div>
 
   <div class="section">
@@ -135,34 +225,7 @@ HTMLCanvasElement.prototype.getContext = function(type, attrs) {
         const origTexParameterf = ctx.texParameterf.bind(ctx);
         ctx.texParameterf = function(t, p, v) { try { origTexParameterf(t, p, v); } catch(e) {} };
 
-        // Wrap clearColor to intercept alpha
-        const origClearColor = ctx.clearColor.bind(ctx);
-        ctx.clearColor = function(r, g, b, a) {
-            const alphaOverride = document.getElementById('clearAlpha').value / 100;
-            origClearColor(r, g, b, alphaOverride !== undefined ? Math.min(a, alphaOverride > 0.99 ? a : alphaOverride) : a);
-        };
-
-        // Wrap blendFunc for override
-        const origBlendFunc = ctx.blendFunc.bind(ctx);
-        ctx.blendFunc = function(src, dst) {
-            if (document.getElementById('overrideSrc').checked) {
-                src = parseInt(document.getElementById('srcBlend').value);
-                dst = parseInt(document.getElementById('dstBlend').value);
-            }
-            origBlendFunc(src, dst);
-        };
-
-        // Wrap colorMask
-        const origColorMask = ctx.colorMask.bind(ctx);
-        ctx.colorMask = function(r, g, b, a) {
-            if (document.getElementById('applyMask').checked) {
-                r = document.getElementById('maskR').checked;
-                g = document.getElementById('maskG').checked;
-                b = document.getElementById('maskB').checked;
-                a = document.getElementById('maskA').checked;
-            }
-            origColorMask(r, g, b, a);
-        };
+        // No clearColor/blendFunc/colorMask overrides — using WASM quality controls instead
 
         // Wrap drawElements for frame capture
         const origDrawElements = ctx.drawElements.bind(ctx);
@@ -210,9 +273,447 @@ function togglePause() {
     paused = !paused;
 }
 
-document.getElementById('clearAlpha').oninput = function() {
-    document.getElementById('clearAlphaVal').textContent = (this.value / 100).toFixed(2);
-};
+// 3D Floating Panel Mode
+let panelRotX = 0, panelRotY = 0, panelDist = 900;
+let panelDragging = false, panelLastX = 0, panelLastY = 0;
+
+function toggleCRT3D() {
+    const enabled = document.getElementById('crt_tv_mode').checked;
+    const gameCol = document.getElementById('game-col');
+    const wrapper = document.getElementById('canvas-wrapper');
+    const canvas = document.getElementById('game-canvas');
+    if (enabled) {
+        gameCol.classList.add('crt-active');
+        wrapper.innerHTML = '';
+        wrapper.style.position = 'relative';
+        const tvBody = document.createElement('div');
+        tvBody.className = 'tv-body';
+        tvBody.innerHTML =
+            '<div class="panel-frame">' +
+            '  <div class="panel-screen"><div class="panel-reflection"></div></div>' +
+            '  <div class="panel-logo">MAPLECAST</div>' +
+            '</div>' +
+            '<div class="panel-stand"><div class="panel-stand-neck"></div><div class="panel-stand-base"></div></div>';
+        const screen = tvBody.querySelector('.panel-screen');
+        screen.insertBefore(canvas, screen.firstChild);
+        wrapper.appendChild(tvBody);
+        const glow = document.createElement('div');
+        glow.className = 'panel-glow';
+        wrapper.appendChild(glow);
+        updateCRT3D();
+    } else {
+        gameCol.classList.remove('crt-active');
+        wrapper.innerHTML = '';
+        wrapper.style.position = '';
+        canvas.style.filter = '';
+        canvas.style.borderRadius = '';
+        wrapper.appendChild(canvas);
+    }
+}
+
+function updateCRT3D() {
+    if (!document.getElementById('crt_tv_mode').checked) return;
+    const dist = document.getElementById('crt_dist').value;
+    const glow = document.getElementById('crt_glow').value;
+    document.getElementById('crt_rotate_val').textContent = Math.round(panelRotY);
+    document.getElementById('crt_tilt_val').textContent = Math.round(panelRotX);
+    document.getElementById('crt_dist_val').textContent = dist;
+    document.getElementById('crt_glow_val').textContent = glow;
+    const wrapper = document.getElementById('canvas-wrapper');
+    wrapper.style.perspective = dist + 'px';
+    const tvBody = wrapper.querySelector('.tv-body');
+    if (tvBody) tvBody.style.transform = 'rotateY(' + panelRotY + 'deg) rotateX(' + panelRotX + 'deg)';
+    const glowEl = wrapper.querySelector('.panel-glow');
+    if (glowEl) glowEl.style.opacity = glow / 100;
+}
+
+document.getElementById('crt_rotate').addEventListener('input', function() { panelRotY = parseFloat(this.value); updateCRT3D(); });
+document.getElementById('crt_tilt').addEventListener('input', function() { panelRotX = parseFloat(this.value); updateCRT3D(); });
+
+document.getElementById('canvas-wrapper').addEventListener('mousedown', function(e) {
+    if (!document.getElementById('crt_tv_mode').checked) return;
+    panelDragging = true; panelLastX = e.clientX; panelLastY = e.clientY; e.preventDefault();
+});
+document.addEventListener('mousemove', function(e) {
+    if (!panelDragging) return;
+    panelRotY += (e.clientX - panelLastX) * 0.5;
+    panelRotX -= (e.clientY - panelLastY) * 0.5;
+    panelLastX = e.clientX; panelLastY = e.clientY;
+    updateCRT3D();
+});
+document.addEventListener('mouseup', function() { panelDragging = false; });
+document.getElementById('canvas-wrapper').addEventListener('wheel', function(e) {
+    if (!document.getElementById('crt_tv_mode').checked) return;
+    panelDist = Math.max(300, Math.min(2000, panelDist + e.deltaY));
+    document.getElementById('crt_dist').value = panelDist;
+    updateCRT3D();
+    e.preventDefault();
+});
+
+// Three.js Sony Trinitron CRT TV — full 3D, 360 rotation
+let tvScene, tvCamera, tvRendererGL, tvScreenMesh, tvAnimId, tvGroup;
+let tvDrag = false, tvLastX = 0, tvLastY = 0, tvRotY = 0.3, tvRotX = 0;
+
+function toggleArcade3D() {
+    const enabled = document.getElementById('arcade_3d_mode').checked;
+    if (enabled) { document.getElementById('crt_tv_mode').checked = false; toggleCRT3D(); }
+    const canvas = document.getElementById('game-canvas');
+    const wrapper = document.getElementById('canvas-wrapper');
+    let container = document.getElementById('arcade-3d-container');
+    if (enabled) {
+        canvas.style.display = 'none';
+        if (!container) {
+            container = document.createElement('div');
+            container.id = 'arcade-3d-container';
+            container.style.cssText = 'width:700px;height:550px;cursor:grab;border-radius:8px;';
+            wrapper.appendChild(container);
+        }
+        container.style.display = 'block';
+        if (!window.THREE) {
+            const s = document.createElement('script');
+            s.src = 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
+            s.onload = function() { buildTrinitron(container, canvas); };
+            document.head.appendChild(s);
+        } else { buildTrinitron(container, canvas); }
+    } else {
+        canvas.style.display = 'block';
+        if (container) container.style.display = 'none';
+        if (tvAnimId) cancelAnimationFrame(tvAnimId);
+    }
+}
+
+function buildTrinitron(container, gameCanvas) {
+    tvScene = new THREE.Scene();
+    tvScene.background = new THREE.Color(0x0a0a0f);
+
+    const w = container.clientWidth || 700, h = container.clientHeight || 550;
+    tvCamera = new THREE.PerspectiveCamera(35, w/h, 0.1, 50);
+    tvCamera.position.set(0, 0.1, 3.5);
+
+    tvRendererGL = new THREE.WebGLRenderer({ antialias: true });
+    tvRendererGL.setSize(w, h);
+    tvRendererGL.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    tvRendererGL.shadowMap.enabled = true;
+    container.innerHTML = '';
+    container.appendChild(tvRendererGL.domElement);
+
+    // Lights
+    tvScene.add(new THREE.AmbientLight(0x333340, 0.5));
+    const key = new THREE.DirectionalLight(0xffeedd, 0.6);
+    key.position.set(3, 4, 5); key.castShadow = true; tvScene.add(key);
+    const rim = new THREE.PointLight(0x4455aa, 0.4, 8);
+    rim.position.set(-3, 2, -2); tvScene.add(rim);
+    const screenGlow = new THREE.PointLight(0x5588ff, 1.0, 3);
+    screenGlow.position.set(0, 0, 1.2); tvScene.add(screenGlow);
+
+    tvGroup = new THREE.Group();
+
+    // === TRINITRON BODY ===
+    // Main housing — dark gray plastic, slightly rounded
+    const bodyW = 1.8, bodyH = 1.5, bodyD = 1.6;
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2e, roughness: 0.7 });
+
+    // Front face
+    const frontGeo = new THREE.BoxGeometry(bodyW, bodyH, 0.08);
+    const front = new THREE.Mesh(frontGeo, bodyMat);
+    front.position.z = 0.04; tvGroup.add(front);
+
+    // Back — rounded CRT bulge using a sphere segment
+    const backMat = new THREE.MeshStandardMaterial({ color: 0x222226, roughness: 0.8 });
+    const backGeo = new THREE.SphereGeometry(1.1, 32, 32, 0, Math.PI*2, 0, Math.PI/2);
+    const back = new THREE.Mesh(backGeo, backMat);
+    back.rotation.x = Math.PI/2;
+    back.scale.set(0.82, 0.68, 0.9);
+    back.position.set(0, 0, -0.8);
+    tvGroup.add(back);
+
+    // Top panel
+    const topGeo = new THREE.BoxGeometry(bodyW, 0.06, bodyD * 0.55);
+    const top = new THREE.Mesh(topGeo, bodyMat);
+    top.position.set(0, bodyH/2, -0.4); tvGroup.add(top);
+
+    // Bottom panel
+    const bot = new THREE.Mesh(topGeo, bodyMat);
+    bot.position.set(0, -bodyH/2, -0.4); tvGroup.add(bot);
+
+    // Left side
+    const sideGeo = new THREE.BoxGeometry(0.06, bodyH, bodyD * 0.55);
+    const left = new THREE.Mesh(sideGeo, bodyMat);
+    left.position.set(-bodyW/2, 0, -0.4); tvGroup.add(left);
+
+    // Right side
+    const right = new THREE.Mesh(sideGeo, bodyMat);
+    right.position.set(bodyW/2, 0, -0.4); tvGroup.add(right);
+
+    // Vents on back
+    for (let y = -0.3; y <= 0.3; y += 0.06) {
+        const vent = new THREE.Mesh(
+            new THREE.BoxGeometry(0.6, 0.015, 0.01),
+            new THREE.MeshStandardMaterial({ color: 0x1a1a1e })
+        );
+        vent.position.set(0, y, -1.1);
+        tvGroup.add(vent);
+    }
+
+    // === SCREEN BEZEL ===
+    const bezelMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1e, roughness: 0.9 });
+    const bezelOuter = new THREE.Mesh(new THREE.BoxGeometry(1.55, 1.2, 0.03), bezelMat);
+    bezelOuter.position.z = 0.08; tvGroup.add(bezelOuter);
+
+    // === SCREEN — live game ===
+    const tex = new THREE.CanvasTexture(gameCanvas);
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tvScreenMesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(1.35, 1.0),
+        new THREE.MeshBasicMaterial({ map: tex })
+    );
+    tvScreenMesh.position.z = 0.095;
+    tvGroup.add(tvScreenMesh);
+
+    // Glass overlay — slight reflection
+    const glassMat = new THREE.MeshStandardMaterial({
+        color: 0xffffff, transparent: true, opacity: 0.03,
+        roughness: 0.1, metalness: 0.1
+    });
+    const glass = new THREE.Mesh(new THREE.PlaneGeometry(1.35, 1.0), glassMat);
+    glass.position.z = 0.1; tvGroup.add(glass);
+
+    // === FRONT PANEL CONTROLS ===
+    // Bottom strip with buttons
+    const ctrlStrip = new THREE.Mesh(
+        new THREE.BoxGeometry(1.55, 0.12, 0.04),
+        new THREE.MeshStandardMaterial({ color: 0x222226 })
+    );
+    ctrlStrip.position.set(0, -0.66, 0.08); tvGroup.add(ctrlStrip);
+
+    // Power button
+    const pwrBtn = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.025, 0.025, 0.02, 12),
+        new THREE.MeshStandardMaterial({ color: 0x44aa44, emissive: 0x115511, emissiveIntensity: 0.5 })
+    );
+    pwrBtn.rotation.x = Math.PI/2;
+    pwrBtn.position.set(0.6, -0.66, 0.1); tvGroup.add(pwrBtn);
+
+    // Channel/volume buttons
+    for (let i = 0; i < 3; i++) {
+        const btn = new THREE.Mesh(
+            new THREE.BoxGeometry(0.04, 0.03, 0.015),
+            new THREE.MeshStandardMaterial({ color: 0x333338 })
+        );
+        btn.position.set(0.35 + i * 0.07, -0.66, 0.1);
+        tvGroup.add(btn);
+    }
+
+    // SONY label
+    // (can't do text easily in Three.js without font loader, skip for now)
+
+    // === TRINITRON SPEAKER GRILLE (right side) ===
+    const grilleMat = new THREE.MeshStandardMaterial({ color: 0x1e1e22 });
+    for (let y = -0.4; y <= 0.4; y += 0.04) {
+        const bar = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.01, 0.02), grilleMat);
+        bar.position.set(0.84, y, 0.06);
+        tvGroup.add(bar);
+    }
+
+    // === STAND ===
+    const standMat = new THREE.MeshStandardMaterial({ color: 0x222226, roughness: 0.6 });
+    // Neck
+    const neck = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.15, 0.3), standMat);
+    neck.position.set(0, -0.82, -0.1); tvGroup.add(neck);
+    // Base
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.5, 0.04, 24), standMat);
+    base.position.set(0, -0.91, -0.1); tvGroup.add(base);
+
+    tvScene.add(tvGroup);
+
+    // === CONTROLS ===
+    container.addEventListener('mousedown', e => {
+        tvDrag = true; tvLastX = e.clientX; tvLastY = e.clientY;
+        container.style.cursor = 'grabbing';
+    });
+    document.addEventListener('mousemove', e => {
+        if (!tvDrag) return;
+        tvRotY += (e.clientX - tvLastX) * 0.008;
+        tvRotX = Math.max(-1, Math.min(1, tvRotX + (e.clientY - tvLastY) * 0.005));
+        tvLastX = e.clientX; tvLastY = e.clientY;
+    });
+    document.addEventListener('mouseup', () => { tvDrag = false; container.style.cursor = 'grab'; });
+    container.addEventListener('wheel', e => {
+        tvCamera.position.z = Math.max(1.5, Math.min(8, tvCamera.position.z + e.deltaY * 0.005));
+        e.preventDefault();
+    });
+
+    // Animate
+    (function animate() {
+        tvAnimId = requestAnimationFrame(animate);
+        tvGroup.rotation.y += (tvRotY - tvGroup.rotation.y) * 0.08;
+        tvGroup.rotation.x += (tvRotX - tvGroup.rotation.x) * 0.08;
+        if (tvScreenMesh && tvScreenMesh.material.map) tvScreenMesh.material.map.needsUpdate = true;
+        tvRendererGL.render(tvScene, tvCamera);
+    })();
+}
+
+// CSS Post-Processing
+function toggleCSS() {
+    const canvas = document.getElementById('game-canvas');
+    const filters = [];
+
+    const bright = document.getElementById('css_bright').value;
+    const contrast = document.getElementById('css_contrast').value;
+    const sat = document.getElementById('css_sat').value;
+    document.getElementById('css_bright_val').textContent = bright + '%';
+    document.getElementById('css_contrast_val').textContent = contrast + '%';
+    document.getElementById('css_sat_val').textContent = sat + '%';
+
+    filters.push('brightness(' + (bright/100) + ')');
+    filters.push('contrast(' + (contrast/100) + ')');
+    filters.push('saturate(' + (sat/100) + ')');
+
+    if (document.getElementById('css_sharpen').checked)
+        filters.push('contrast(1.1)');
+    if (document.getElementById('css_bloom').checked)
+        filters.push('brightness(1.05) drop-shadow(0 0 4px rgba(255,200,100,0.3))');
+
+    canvas.style.filter = filters.join(' ');
+    canvas.style.imageRendering = document.getElementById('css_smooth').checked ? 'auto' : 'pixelated';
+
+    // Scanline overlay
+    let scanEl = document.getElementById('scanline-overlay');
+    if (document.getElementById('css_scanlines').checked) {
+        if (!scanEl) {
+            scanEl = document.createElement('div');
+            scanEl.id = 'scanline-overlay';
+            scanEl.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;z-index:10;' +
+                'background:repeating-linear-gradient(0deg,transparent,transparent 1px,rgba(0,0,0,0.15) 1px,rgba(0,0,0,0.15) 3px);';
+            canvas.parentElement.style.position = 'relative';
+            canvas.parentElement.appendChild(scanEl);
+        }
+        scanEl.style.display = 'block';
+    } else if (scanEl) {
+        scanEl.style.display = 'none';
+    }
+
+    // Vignette overlay
+    let vigEl = document.getElementById('vignette-overlay');
+    if (document.getElementById('css_vignette').checked) {
+        if (!vigEl) {
+            vigEl = document.createElement('div');
+            vigEl.id = 'vignette-overlay';
+            vigEl.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;z-index:11;' +
+                'background:radial-gradient(ellipse at center,transparent 60%,rgba(0,0,0,0.5) 100%);';
+            canvas.parentElement.appendChild(vigEl);
+        }
+        vigEl.style.display = 'block';
+    } else if (vigEl) {
+        vigEl.style.display = 'none';
+    }
+
+    // CRT curvature
+    if (document.getElementById('css_curvature').checked) {
+        canvas.style.borderRadius = '15px';
+        canvas.style.transform = 'perspective(800px) rotateX(1deg)';
+        canvas.style.boxShadow = '0 0 30px rgba(0,100,255,0.2), inset 0 0 60px rgba(0,0,0,0.3)';
+    } else {
+        canvas.style.borderRadius = '';
+        canvas.style.transform = '';
+        canvas.style.boxShadow = '';
+    }
+}
+
+function presetArcade() {
+    document.getElementById('css_scanlines').checked = true;
+    document.getElementById('css_bloom').checked = true;
+    document.getElementById('css_sharpen').checked = false;
+    document.getElementById('css_smooth').checked = false;
+    document.getElementById('css_vignette').checked = true;
+    document.getElementById('css_curvature').checked = true;
+    document.getElementById('css_bright').value = 110;
+    document.getElementById('css_contrast').value = 120;
+    document.getElementById('css_sat').value = 120;
+    toggleCSS();
+}
+
+function presetHD() {
+    document.getElementById('css_scanlines').checked = false;
+    document.getElementById('css_bloom').checked = true;
+    document.getElementById('css_sharpen').checked = true;
+    document.getElementById('css_smooth').checked = true;
+    document.getElementById('css_vignette').checked = false;
+    document.getElementById('css_curvature').checked = false;
+    document.getElementById('css_bright').value = 105;
+    document.getElementById('css_contrast').value = 115;
+    document.getElementById('css_sat').value = 130;
+    document.getElementById('opt_resolution').value = '1920';
+    setOpt(0, 1920);
+    toggleCSS();
+}
+
+// Save/Load settings to localStorage
+function saveSettings() {
+    const s = {
+        resolution: document.getElementById('opt_resolution').value,
+        aniso: document.getElementById('opt_aniso').value,
+        texfilter: document.getElementById('opt_texfilter').value,
+        layers: document.getElementById('opt_layers').value,
+        fog: document.getElementById('opt_fog').checked,
+        modvol: document.getElementById('opt_modvol').checked,
+        pstrip: document.getElementById('opt_pstrip').checked,
+        scanlines: document.getElementById('css_scanlines').checked,
+        bloom: document.getElementById('css_bloom').checked,
+        sharpen: document.getElementById('css_sharpen').checked,
+        smooth: document.getElementById('css_smooth').checked,
+        vignette: document.getElementById('css_vignette').checked,
+        curvature: document.getElementById('css_curvature').checked,
+        bright: document.getElementById('css_bright').value,
+        contrast: document.getElementById('css_contrast').value,
+        sat: document.getElementById('css_sat').value,
+    };
+    localStorage.setItem('maplecast_render_settings', JSON.stringify(s));
+}
+
+function loadSettings() {
+    const raw = localStorage.getItem('maplecast_render_settings');
+    if (!raw) return false;
+    try {
+        const s = JSON.parse(raw);
+        document.getElementById('opt_resolution').value = s.resolution || '480';
+        document.getElementById('opt_aniso').value = s.aniso || '1';
+        document.getElementById('opt_texfilter').value = s.texfilter || '0';
+        document.getElementById('opt_layers').value = s.layers || '4';
+        document.getElementById('opt_fog').checked = !!s.fog;
+        document.getElementById('opt_modvol').checked = !!s.modvol;
+        document.getElementById('opt_pstrip').checked = !!s.pstrip;
+        document.getElementById('css_scanlines').checked = !!s.scanlines;
+        document.getElementById('css_bloom').checked = !!s.bloom;
+        document.getElementById('css_sharpen').checked = !!s.sharpen;
+        document.getElementById('css_smooth').checked = !!s.smooth;
+        document.getElementById('css_vignette').checked = !!s.vignette;
+        document.getElementById('css_curvature').checked = !!s.curvature;
+        document.getElementById('css_bright').value = s.bright || 100;
+        document.getElementById('css_contrast').value = s.contrast || 100;
+        document.getElementById('css_sat').value = s.sat || 100;
+        return true;
+    } catch(e) { return false; }
+}
+
+// Hook save into every change
+const _origToggleCSS = toggleCSS;
+toggleCSS = function() { _origToggleCSS(); saveSettings(); };
+const _origSetOpt = null; // setOpt is defined later in module script
+
+function presetClean() {
+    document.getElementById('css_scanlines').checked = false;
+    document.getElementById('css_bloom').checked = false;
+    document.getElementById('css_sharpen').checked = false;
+    document.getElementById('css_smooth').checked = false;
+    document.getElementById('css_vignette').checked = false;
+    document.getElementById('css_curvature').checked = false;
+    document.getElementById('css_bright').value = 100;
+    document.getElementById('css_contrast').value = 100;
+    document.getElementById('css_sat').value = 100;
+    toggleCSS();
+}
 </script>
 
 <script type="module">
@@ -232,6 +733,40 @@ statusEl.textContent = 'Renderer initialized — connecting to server...';
 
 const MAX_FRAME = 512 * 1024;
 const frameBuf = Module._malloc(MAX_FRAME);
+
+// Expose Module for quality controls
+window.wasmModule = Module;
+window.setOpt = function(opt, val) {
+    val = parseInt(val);
+    Module._renderer_set_option(opt, val);
+    if (opt === 0) {
+        const h = val;
+        const w = Math.round(h * 4 / 3);
+        const canvas = document.getElementById('game-canvas');
+        canvas.width = w;
+        canvas.height = h;
+        Module._renderer_resize(w, h);
+        console.log('[Quality] Resolution:', w, 'x', h);
+    } else {
+        console.log('[Quality] Set option', opt, '=', val);
+    }
+    saveSettings();
+};
+
+// Load saved settings and apply them
+if (loadSettings()) {
+    console.log('[Settings] Loaded saved settings');
+    // Apply WASM options
+    setOpt(0, parseInt(document.getElementById('opt_resolution').value));
+    setOpt(5, parseInt(document.getElementById('opt_aniso').value));
+    setOpt(6, parseInt(document.getElementById('opt_texfilter').value));
+    setOpt(7, parseInt(document.getElementById('opt_layers').value));
+    setOpt(2, document.getElementById('opt_fog').checked ? 1 : 0);
+    setOpt(3, document.getElementById('opt_modvol').checked ? 1 : 0);
+    setOpt(4, document.getElementById('opt_pstrip').checked ? 1 : 0);
+    // Apply CSS
+    toggleCSS();
+}
 let frames = 0, startTime = 0, bytesTotal = 0;
 
 const params = new URLSearchParams(window.location.search);

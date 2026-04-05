@@ -78,11 +78,11 @@ bool wasm_gl_init(int width, int height) {
     emscripten_webgl_init_context_attributes(&attrs);
     attrs.majorVersion = 2;              // WebGL2 = OpenGL ES 3.0
     attrs.minorVersion = 0;
-    attrs.alpha = 1;                     // Alpha channel needed — GL_DST_ALPHA blend reads it
+    attrs.alpha = 0;                     // No alpha in backbuffer
     attrs.depth = 1;                     // Need depth buffer for PVR rendering
     attrs.stencil = 1;                   // Need stencil for modifier volumes
     attrs.antialias = 0;                 // No AA — pixel-perfect rendering
-    attrs.premultipliedAlpha = 1;        // Chrome compositor needs this to avoid black boxes
+    attrs.premultipliedAlpha = 0;
     attrs.preserveDrawingBuffer = 0;     // Don't preserve — faster swap
     attrs.powerPreference = EM_WEBGL_POWER_PREFERENCE_HIGH_PERFORMANCE;
     attrs.failIfMajorPerformanceCaveat = 0;
