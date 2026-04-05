@@ -28,10 +28,19 @@
 #include <cstdio>
 #include <cstring>
 #include <atomic>
+#include <vector>
+#include <mutex>
+#include <thread>
+#include <deque>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <errno.h>
+
 
 extern Renderer* renderer;
 extern bool pal_needs_update;
@@ -192,9 +201,15 @@ static void clientLoadSync()
 	printf("[MIRROR] Loaded server sync state: %.1f MB\n", size / (1024.0*1024.0));
 }
 
+static void initClientWebSocket();  // forward declaration
+
 void initClient()
 {
-	if (!openShm(false)) return;
+	// Use WebSocket if MAPLECAST_SERVER_HOST is set, or shm_open fails
+	if (std::getenv("MAPLECAST_SERVER_HOST") || !openShm(false)) {
+		initClientWebSocket();
+		return;
+	}
 	_isClient = true;
 	_clientFrameCount = 0;
 	_clientNeedsFullSync = false;
@@ -233,6 +248,156 @@ void initClient()
 	} else {
 		printf("[MIRROR] WARNING: server didn't respond\n");
 	}
+}
+
+// ==================== WebSocket client transport ====================
+
+static bool _useWebSocket = false;
+static std::thread _wsThread;
+static std::mutex _frameMutex;
+static std::deque<std::vector<uint8_t>> _frameQueue;
+static std::atomic<uint32_t> _wsFramesReceived{0};
+
+// Raw TCP WebSocket client — bypasses websocketpp/asio resolver entirely
+// Implements RFC 6455 WebSocket framing over a plain POSIX socket
+
+static int _wsFd = -1;
+
+static bool wsHandshake(int fd, const char* host, int port)
+{
+	// Send HTTP upgrade request
+	char req[512];
+	int len = snprintf(req, sizeof(req),
+		"GET / HTTP/1.1\r\n"
+		"Host: %s:%d\r\n"
+		"Upgrade: websocket\r\n"
+		"Connection: Upgrade\r\n"
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+		"Sec-WebSocket-Version: 13\r\n"
+		"\r\n", host, port);
+	if (send(fd, req, len, 0) != len) return false;
+
+	// Read HTTP response
+	char resp[1024];
+	int total = 0;
+	while (total < (int)sizeof(resp) - 1) {
+		int n = recv(fd, resp + total, 1, 0);
+		if (n <= 0) return false;
+		total += n;
+		if (total >= 4 && memcmp(resp + total - 4, "\r\n\r\n", 4) == 0) break;
+	}
+	resp[total] = 0;
+	return strstr(resp, "101") != nullptr;
+}
+
+static bool wsReadFrame(int fd, std::vector<uint8_t>& out)
+{
+	// Read WebSocket frame header (2 bytes min)
+	uint8_t hdr[2];
+	if (recv(fd, hdr, 2, MSG_WAITALL) != 2) return false;
+
+	bool fin = (hdr[0] & 0x80) != 0;
+	int opcode = hdr[0] & 0x0F;
+	bool masked = (hdr[1] & 0x80) != 0;
+	uint64_t payloadLen = hdr[1] & 0x7F;
+
+	if (payloadLen == 126) {
+		uint8_t ext[2];
+		if (recv(fd, ext, 2, MSG_WAITALL) != 2) return false;
+		payloadLen = (ext[0] << 8) | ext[1];
+	} else if (payloadLen == 127) {
+		uint8_t ext[8];
+		if (recv(fd, ext, 8, MSG_WAITALL) != 8) return false;
+		payloadLen = 0;
+		for (int i = 0; i < 8; i++) payloadLen = (payloadLen << 8) | ext[i];
+	}
+
+	// Skip mask key if present (server→client should not be masked)
+	if (masked) {
+		uint8_t mask[4];
+		if (recv(fd, mask, 4, MSG_WAITALL) != 4) return false;
+	}
+
+	// Read payload
+	out.resize(payloadLen);
+	size_t read = 0;
+	while (read < payloadLen) {
+		ssize_t n = recv(fd, out.data() + read, payloadLen - read, 0);
+		if (n <= 0) return false;
+		read += n;
+	}
+
+	// Handle close/ping
+	if (opcode == 0x8) return false;  // close
+	if (opcode == 0x9) return true;   // ping — ignore for now
+	if (opcode == 0x1) return true;   // text — ignore
+
+	return fin && opcode == 0x2;  // binary frame
+}
+
+static void wsClientRun(std::string host, int port)
+{
+	printf("[MIRROR-WS] Connecting to %s:%d...\n", host.c_str(), port); fflush(stdout);
+
+	_wsFd = socket(AF_INET, SOCK_STREAM, 0);
+	if (_wsFd < 0) { printf("[MIRROR-WS] socket() failed\n"); return; }
+
+	struct sockaddr_in addr = {};
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(port);
+	inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
+
+	if (connect(_wsFd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+		printf("[MIRROR-WS] connect() failed: %s\n", strerror(errno));
+		close(_wsFd); _wsFd = -1; return;
+	}
+	printf("[MIRROR-WS] TCP connected\n"); fflush(stdout);
+
+	if (!wsHandshake(_wsFd, host.c_str(), port)) {
+		printf("[MIRROR-WS] WebSocket handshake failed\n");
+		close(_wsFd); _wsFd = -1; return;
+	}
+	printf("[MIRROR-WS] WebSocket handshake OK — receiving frames\n"); fflush(stdout);
+
+	// Read loop
+	std::vector<uint8_t> frame;
+	while (true) {
+		if (!wsReadFrame(_wsFd, frame)) {
+			printf("[MIRROR-WS] Connection lost\n"); fflush(stdout);
+			break;
+		}
+		if (frame.size() < 80) continue;  // skip text/small frames
+
+		{
+			std::lock_guard<std::mutex> lock(_frameMutex);
+			while (_frameQueue.size() >= 2)
+				_frameQueue.pop_front();
+			_frameQueue.push_back(std::move(frame));
+			frame.clear();
+		}
+		uint32_t n = _wsFramesReceived.fetch_add(1, std::memory_order_relaxed);
+		if (n == 0) printf("[MIRROR-WS] First binary frame received\n");
+		if (n > 0 && n % 300 == 0) printf("[MIRROR-WS] %u frames received\n", n);
+	}
+
+	close(_wsFd); _wsFd = -1;
+}
+
+static void initClientWebSocket()
+{
+	_isClient = true;
+	_useWebSocket = true;
+
+	const char* host = std::getenv("MAPLECAST_SERVER_HOST");
+	if (!host) host = "127.0.0.1";
+	const char* portStr = std::getenv("MAPLECAST_SERVER_PORT");
+	int port = portStr ? std::atoi(portStr) : 7200;
+
+	printf("[MIRROR] === CLIENT MODE (WebSocket) === ws://%s:%d/\n", host, port);
+
+	std::string hostStr(host);
+	_wsThread = std::thread(wsClientRun, hostStr, port);
+	_wsThread.detach();
 }
 
 bool isServer() { return _isServer; }
@@ -447,18 +612,32 @@ done_diff:
 bool clientReceive(rend_context& rc, bool& vramDirty)
 {
 	vramDirty = false;
-	if (!_isClient || !_shmPtr) return false;
+	if (!_isClient) return false;
 
-	RingHeader* hdr = (RingHeader*)_shmPtr;
-	uint64_t serverFrames = hdr->frame_count;
-	if (serverFrames == _clientFrameCount) return false;
+	// Get frame data — either from WebSocket queue or shm
+	std::vector<uint8_t> wsFrame;  // holds WebSocket data if used
+	uint8_t* src = nullptr;
 
-	__sync_synchronize();
-	uint64_t offset = hdr->latest_offset;
-	uint32_t totalSize = hdr->latest_size;
-	if (totalSize == 0 || offset + totalSize > RING_SIZE) return false;
-
-	uint8_t* src = _shmPtr + RING_START + offset;
+	if (_useWebSocket)
+	{
+		std::lock_guard<std::mutex> lock(_frameMutex);
+		if (_frameQueue.empty()) return false;
+		wsFrame = std::move(_frameQueue.back());
+		_frameQueue.clear();
+		src = wsFrame.data();
+	}
+	else
+	{
+		if (!_shmPtr) return false;
+		RingHeader* hdr = (RingHeader*)_shmPtr;
+		uint64_t serverFrames = hdr->frame_count;
+		if (serverFrames == _clientFrameCount) return false;
+		__sync_synchronize();
+		uint64_t offset = hdr->latest_offset;
+		uint32_t totalSize = hdr->latest_size;
+		if (totalSize == 0 || offset + totalSize > RING_SIZE) return false;
+		src = _shmPtr + RING_START + offset;
+	}
 
 	uint32_t frameSize; memcpy(&frameSize, src, 4); src += 4;
 	uint32_t frameNum; memcpy(&frameNum, src, 4); src += 4;
@@ -626,15 +805,18 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		rc = clientCtx.rend;
 	}
 
-	_clientFrameCount = serverFrames;
+	if (!_useWebSocket) {
+		RingHeader* hdr = (RingHeader*)_shmPtr;
+		_clientFrameCount = hdr->frame_count;
 
-	// Check VRAM every 60 frames — reset texture cache if drifted
-	if (frameNum % 60 == 0)
-	{
-		uint64_t clientHash = fastVramHash();
-		uint64_t serverHash = hdr->server_vram_hash;
-		if (clientHash != serverHash)
-			renderer->resetTextureCache = true;
+		// Check VRAM every 60 frames — reset texture cache if drifted
+		if (frameNum % 60 == 0)
+		{
+			uint64_t clientHash = fastVramHash();
+			uint64_t serverHash = hdr->server_vram_hash;
+			if (clientHash != serverHash)
+				renderer->resetTextureCache = true;
+		}
 	}
 
 	if (frameNum % 600 == 0)
