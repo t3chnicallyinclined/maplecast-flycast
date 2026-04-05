@@ -408,9 +408,29 @@ static void onOpen(ConnHdl hdl)
 	}
 	printf("[maplecast-ws] client connected (%d total)\n", _clientCount.load());
 
-	// Don't send SYNC yet — wait for relay_ready to assign into tree.
-	// Seeds get SYNC from server; non-seeds get SYNC from relay parent via WebRTC.
-	// Players (who send "join") get SYNC directly.
+	// Always send SYNC on connect — backward compat for clients without relay.js
+	// (test-renderer.html, standalone clients, etc.)
+	// The bandwidth savings come from delta frames (broadcastBinary), not SYNC.
+	// Non-seed relay clients will also get SYNC from their parent via WebRTC,
+	// but getting it from the server first means they can start rendering immediately.
+	size_t syncSize = 4 + 4 + VRAM_SIZE + 4 + pvr_RegSize;
+	std::vector<uint8_t> syncBuf(syncSize);
+	uint8_t* dst = syncBuf.data();
+
+	memcpy(dst, "SYNC", 4); dst += 4;
+	uint32_t vs = VRAM_SIZE;
+	memcpy(dst, &vs, 4); dst += 4;
+	memcpy(dst, &vram[0], VRAM_SIZE); dst += VRAM_SIZE;
+	uint32_t ps = pvr_RegSize;
+	memcpy(dst, &ps, 4); dst += 4;
+	memcpy(dst, pvr_regs, pvr_RegSize);
+
+	try {
+		_ws.send(hdl, syncBuf.data(), syncSize, websocketpp::frame::opcode::binary);
+		printf("[maplecast-ws] sent initial sync: %.1f MB\n", syncSize / (1024.0 * 1024.0));
+	} catch (...) {
+		printf("[maplecast-ws] failed to send initial sync\n");
+	}
 
 	// Send lobby status
 	try {
@@ -809,29 +829,21 @@ void broadcastBinary(const void* data, size_t size)
 
 	std::lock_guard<std::mutex> lock(_connMutex);
 
-	if (_seedPeers.empty()) {
-		// No relay tree yet — broadcast to all (backward compat)
-		for (auto& conn : _connections) {
-			try { _ws.send(conn, data, size, websocketpp::frame::opcode::binary); }
-			catch (...) {}
-		}
-	} else {
-		// Send only to seed peers + players (everyone else gets relayed via WebRTC)
-		for (auto& seedId : _seedPeers) {
-			auto it = _relayTree.find(seedId);
-			if (it != _relayTree.end()) {
-				try { _ws.send(it->second.conn, data, size, websocketpp::frame::opcode::binary); }
-				catch (...) {}
-			}
-		}
-		// Players always get direct stream
-		for (auto& [key, peerId] : _connToPeerId) {
-			auto it = _relayTree.find(peerId);
-			if (it != _relayTree.end() && it->second.isPlayer) {
-				try { _ws.send(it->second.conn, data, size, websocketpp::frame::opcode::binary); }
-				catch (...) {}
-			}
-		}
+	// Build set of connections that should NOT receive binary
+	// (non-seed relay nodes that get frames via WebRTC instead)
+	std::set<void*> relaySkip;
+	for (auto& [key, peerId] : _connToPeerId) {
+		auto it = _relayTree.find(peerId);
+		if (it != _relayTree.end() && !it->second.isSeed && !it->second.isPlayer)
+			relaySkip.insert(key);
+	}
+
+	for (auto& conn : _connections) {
+		try {
+			void* key = (void*)_ws.get_con_from_hdl(conn).get();
+			if (relaySkip.count(key)) continue;  // gets frames via WebRTC relay
+			_ws.send(conn, data, size, websocketpp::frame::opcode::binary);
+		} catch (...) {}
 	}
 }
 
