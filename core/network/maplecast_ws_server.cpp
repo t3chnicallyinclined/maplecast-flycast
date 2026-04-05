@@ -58,6 +58,31 @@ struct QueueEntry {
 	std::string name;
 	ConnHdl conn;
 };
+
+// ==================== P2P Spectator Relay Tree ====================
+// Server feeds binary TA frames to 2-3 "seed" spectators.
+// Seeds relay to children via WebRTC DataChannels (browser-side JS).
+// Server manages topology, signals parent/child assignments via JSON.
+
+static const int MAX_SEEDS = 3;
+static const int MAX_CHILDREN = 3;
+static int _nextPeerId = 1;
+
+struct RelayNode {
+	std::string peerId;
+	ConnHdl conn;
+	void* connKey = nullptr;
+	bool isPlayer = false;      // players get direct stream, never relay
+	bool isSeed = false;        // seeds receive binary from server
+	bool canRelay = true;       // client reported relay capability
+	std::string parentId;       // empty for seeds/players
+	std::vector<std::string> children;
+	int64_t connectedAt = 0;
+};
+
+static std::map<std::string, RelayNode> _relayTree;
+static std::vector<std::string> _seedPeers;
+static std::map<void*, std::string> _connToPeerId;  // connKey → peerId
 static std::vector<QueueEntry> _queue;
 
 // Loss detection state
@@ -129,6 +154,8 @@ static json getStatus()
 	status["web_registering_user"] = maplecast_input::isWebRegistering() ?
 		maplecast_input::webRegisteringUsername() : "";
 	status["sticks"] = maplecast_input::registeredStickCount();
+	status["relay_seeds"] = (int)_seedPeers.size();
+	status["relay_nodes"] = (int)_relayTree.size();
 
 	// Game state for leaderboard/stats
 	maplecast_gamestate::GameState gs;
@@ -241,6 +268,126 @@ static void checkMatchEnd()
 	}
 }
 
+// ==================== Relay Topology Helpers ====================
+
+static std::string generatePeerId()
+{
+	return "p" + std::to_string(_nextPeerId++);
+}
+
+static void sendJson(ConnHdl hdl, const json& msg)
+{
+	try { _ws.send(hdl, msg.dump(), websocketpp::frame::opcode::text); }
+	catch (...) {}
+}
+
+// Find the shallowest relay node with available child slots (BFS)
+static std::string findBestParent()
+{
+	// BFS from seeds outward
+	std::vector<std::string> queue;
+	for (auto& sid : _seedPeers) queue.push_back(sid);
+
+	size_t idx = 0;
+	while (idx < queue.size()) {
+		const std::string& id = queue[idx++];
+		auto it = _relayTree.find(id);
+		if (it == _relayTree.end()) continue;
+		if ((int)it->second.children.size() < MAX_CHILDREN && it->second.canRelay)
+			return id;
+		for (auto& child : it->second.children)
+			queue.push_back(child);
+	}
+	return "";  // tree is full
+}
+
+static void makeSeed(const std::string& peerId)
+{
+	auto it = _relayTree.find(peerId);
+	if (it == _relayTree.end()) return;
+	it->second.isSeed = true;
+	it->second.parentId.clear();
+	_seedPeers.push_back(peerId);
+
+	// Send SYNC to new seed
+	size_t syncSize = 4 + 4 + VRAM_SIZE + 4 + pvr_RegSize;
+	std::vector<uint8_t> syncBuf(syncSize);
+	uint8_t* dst = syncBuf.data();
+	memcpy(dst, "SYNC", 4); dst += 4;
+	uint32_t vs = VRAM_SIZE;
+	memcpy(dst, &vs, 4); dst += 4;
+	memcpy(dst, &vram[0], VRAM_SIZE); dst += VRAM_SIZE;
+	uint32_t ps = pvr_RegSize;
+	memcpy(dst, &ps, 4); dst += 4;
+	memcpy(dst, pvr_regs, pvr_RegSize);
+	try { _ws.send(it->second.conn, syncBuf.data(), syncSize, websocketpp::frame::opcode::binary); }
+	catch (...) {}
+
+	sendJson(it->second.conn, {{"type", "relay_role"}, {"role", "seed"}, {"peerId", peerId}});
+	printf("[relay] %s promoted to SEED (%d seeds)\n", peerId.c_str(), (int)_seedPeers.size());
+}
+
+static void assignChild(const std::string& childId, const std::string& parentId)
+{
+	auto childIt = _relayTree.find(childId);
+	auto parentIt = _relayTree.find(parentId);
+	if (childIt == _relayTree.end() || parentIt == _relayTree.end()) return;
+
+	childIt->second.parentId = parentId;
+	parentIt->second.children.push_back(childId);
+
+	std::string role = childIt->second.canRelay ? "relay" : "leaf";
+	sendJson(childIt->second.conn, {{"type", "relay_role"}, {"role", role}, {"peerId", childId}});
+	sendJson(childIt->second.conn, {{"type", "relay_assign_parent"}, {"parentId", parentId}});
+	sendJson(parentIt->second.conn, {{"type", "relay_assign_child"}, {"childId", childId}});
+
+	printf("[relay] %s assigned to parent %s (role=%s)\n", childId.c_str(), parentId.c_str(), role.c_str());
+}
+
+static void removeFromTree(const std::string& peerId)
+{
+	auto it = _relayTree.find(peerId);
+	if (it == _relayTree.end()) return;
+
+	// Remove from parent's children list
+	if (!it->second.parentId.empty()) {
+		auto parentIt = _relayTree.find(it->second.parentId);
+		if (parentIt != _relayTree.end()) {
+			auto& pc = parentIt->second.children;
+			pc.erase(std::remove(pc.begin(), pc.end(), peerId), pc.end());
+			sendJson(parentIt->second.conn, {{"type", "relay_remove_child"}, {"childId", peerId}});
+		}
+	}
+
+	// Remove from seed list
+	if (it->second.isSeed)
+		_seedPeers.erase(std::remove(_seedPeers.begin(), _seedPeers.end(), peerId), _seedPeers.end());
+
+	// Orphan children — reassign them
+	std::vector<std::string> orphans = it->second.children;
+	_relayTree.erase(it);
+
+	for (auto& orphanId : orphans) {
+		auto orphanIt = _relayTree.find(orphanId);
+		if (orphanIt == _relayTree.end()) continue;
+		orphanIt->second.parentId.clear();
+		sendJson(orphanIt->second.conn, {{"type", "relay_orphaned"}});
+
+		// Try to find a new parent
+		if ((int)_seedPeers.size() < MAX_SEEDS && orphanIt->second.canRelay) {
+			makeSeed(orphanId);
+		} else {
+			std::string newParent = findBestParent();
+			if (!newParent.empty())
+				assignChild(orphanId, newParent);
+			else
+				makeSeed(orphanId);  // no room, make it a seed
+		}
+	}
+
+	printf("[relay] %s removed from tree, %d orphans reassigned\n", peerId.c_str(), (int)orphans.size());
+}
+
 static void broadcastStatus()
 {
 	std::string status = getStatus().dump();
@@ -261,25 +408,9 @@ static void onOpen(ConnHdl hdl)
 	}
 	printf("[maplecast-ws] client connected (%d total)\n", _clientCount.load());
 
-	// Send initial VRAM sync
-	size_t syncSize = 4 + 4 + VRAM_SIZE + 4 + pvr_RegSize;
-	std::vector<uint8_t> syncBuf(syncSize);
-	uint8_t* dst = syncBuf.data();
-
-	memcpy(dst, "SYNC", 4); dst += 4;
-	uint32_t vs = VRAM_SIZE;
-	memcpy(dst, &vs, 4); dst += 4;
-	memcpy(dst, &vram[0], VRAM_SIZE); dst += VRAM_SIZE;
-	uint32_t ps = pvr_RegSize;
-	memcpy(dst, &ps, 4); dst += 4;
-	memcpy(dst, pvr_regs, pvr_RegSize);
-
-	try {
-		_ws.send(hdl, syncBuf.data(), syncSize, websocketpp::frame::opcode::binary);
-		printf("[maplecast-ws] sent initial sync: %.1f MB (VRAM + PVR regs)\n", syncSize / (1024.0 * 1024.0));
-	} catch (...) {
-		printf("[maplecast-ws] failed to send initial sync\n");
-	}
+	// Don't send SYNC yet — wait for relay_ready to assign into tree.
+	// Seeds get SYNC from server; non-seeds get SYNC from relay parent via WebRTC.
+	// Players (who send "join") get SYNC directly.
 
 	// Send lobby status
 	try {
@@ -295,18 +426,30 @@ static void onClose(ConnHdl hdl)
 		maplecast_input::disconnectPlayer(slot);
 	}
 
+	void* key = nullptr;
 	{
 		std::lock_guard<std::mutex> lock(_connMutex);
 		_connections.erase(hdl);
 		try {
-			void* key = (void*)_ws.get_con_from_hdl(hdl).get();
+			key = (void*)_ws.get_con_from_hdl(hdl).get();
 			_connSlot.erase(key);
 			_queue.erase(std::remove_if(_queue.begin(), _queue.end(),
 				[key](const QueueEntry& e) { return e.key == key; }), _queue.end());
 		} catch (...) {}
 		_clientCount--;
 	}
-	printf("[maplecast-ws] client disconnected (%d total)\n", _clientCount.load());
+
+	// Remove from relay tree (handles orphan reassignment)
+	if (key) {
+		auto peerIt = _connToPeerId.find(key);
+		if (peerIt != _connToPeerId.end()) {
+			removeFromTree(peerIt->second);
+			_connToPeerId.erase(peerIt);
+		}
+	}
+
+	printf("[maplecast-ws] client disconnected (%d total, %d seeds, %d relay nodes)\n",
+		_clientCount.load(), (int)_seedPeers.size(), (int)_relayTree.size());
 
 	// Notify remaining clients of updated status
 	broadcastStatus();
@@ -366,6 +509,14 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 					try {
 						void* key = (void*)_ws.get_con_from_hdl(hdl).get();
 						_connSlot[key] = slot;
+
+						// Mark as player in relay tree (gets direct stream, never relays)
+						auto peerIt = _connToPeerId.find(key);
+						if (peerIt != _connToPeerId.end()) {
+							auto nodeIt = _relayTree.find(peerIt->second);
+							if (nodeIt != _relayTree.end())
+								nodeIt->second.isPlayer = true;
+						}
 					} catch (...) {}
 				}
 
@@ -482,6 +633,93 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 					printf("[maplecast-ws] Verify: 0x8CBBC31E = 0x%02X ('%c')\n", check, check >= 32 ? check : '.');
 				}
 			}
+			// ==================== P2P Relay Messages ====================
+			else if (ctrl["type"] == "relay_ready")
+			{
+				bool canRelay = ctrl.value("canRelay", true);
+				try {
+					void* key = (void*)_ws.get_con_from_hdl(hdl).get();
+					std::string peerId = generatePeerId();
+
+					RelayNode node;
+					node.peerId = peerId;
+					node.conn = hdl;
+					node.connKey = key;
+					node.canRelay = canRelay;
+					node.connectedAt = std::chrono::duration_cast<std::chrono::milliseconds>(
+						std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+
+					_relayTree[peerId] = node;
+					_connToPeerId[key] = peerId;
+
+					// Assign role: seed if we need more, otherwise find a parent
+					if ((int)_seedPeers.size() < MAX_SEEDS && canRelay) {
+						makeSeed(peerId);
+					} else {
+						std::string parentId = findBestParent();
+						if (!parentId.empty()) {
+							assignChild(peerId, parentId);
+						} else {
+							// No room in tree — make another seed
+							makeSeed(peerId);
+						}
+					}
+				} catch (...) {}
+			}
+			else if (ctrl["type"] == "relay_signal")
+			{
+				// Forward WebRTC signaling between peers
+				std::string toPeerId = ctrl.value("toPeerId", "");
+				auto toIt = _relayTree.find(toPeerId);
+				if (toIt != _relayTree.end()) {
+					// Find sender's peerId
+					std::string fromPeerId;
+					try {
+						void* key = (void*)_ws.get_con_from_hdl(hdl).get();
+						auto fromIt = _connToPeerId.find(key);
+						if (fromIt != _connToPeerId.end()) fromPeerId = fromIt->second;
+					} catch (...) {}
+
+					if (!fromPeerId.empty()) {
+						json fwd;
+						fwd["type"] = "relay_signal";
+						fwd["fromPeerId"] = fromPeerId;
+						fwd["signal"] = ctrl["signal"];
+						sendJson(toIt->second.conn, fwd);
+					}
+				}
+			}
+			else if (ctrl["type"] == "relay_parent_lost")
+			{
+				// Child reports parent DataChannel died — reassign
+				try {
+					void* key = (void*)_ws.get_con_from_hdl(hdl).get();
+					auto peerIt = _connToPeerId.find(key);
+					if (peerIt != _connToPeerId.end()) {
+						std::string peerId = peerIt->second;
+						auto nodeIt = _relayTree.find(peerId);
+						if (nodeIt != _relayTree.end()) {
+							// Clear parent
+							nodeIt->second.parentId.clear();
+							// Find new parent
+							if ((int)_seedPeers.size() < MAX_SEEDS && nodeIt->second.canRelay) {
+								makeSeed(peerId);
+							} else {
+								std::string newParent = findBestParent();
+								if (!newParent.empty())
+									assignChild(peerId, newParent);
+								else
+									makeSeed(peerId);
+							}
+						}
+					}
+				} catch (...) {}
+			}
+			else if (ctrl["type"] == "relay_stats")
+			{
+				// Health report from relay node — log for now
+				// Future: use for topology optimization
+			}
 			else if (ctrl["type"] == "cancel_register")
 			{
 				maplecast_input::cancelStickRegistration();
@@ -570,10 +808,30 @@ void broadcastBinary(const void* data, size_t size)
 	if (!_active || _clientCount.load(std::memory_order_relaxed) == 0) return;
 
 	std::lock_guard<std::mutex> lock(_connMutex);
-	for (auto& conn : _connections) {
-		try {
-			_ws.send(conn, data, size, websocketpp::frame::opcode::binary);
-		} catch (...) {}
+
+	if (_seedPeers.empty()) {
+		// No relay tree yet — broadcast to all (backward compat)
+		for (auto& conn : _connections) {
+			try { _ws.send(conn, data, size, websocketpp::frame::opcode::binary); }
+			catch (...) {}
+		}
+	} else {
+		// Send only to seed peers + players (everyone else gets relayed via WebRTC)
+		for (auto& seedId : _seedPeers) {
+			auto it = _relayTree.find(seedId);
+			if (it != _relayTree.end()) {
+				try { _ws.send(it->second.conn, data, size, websocketpp::frame::opcode::binary); }
+				catch (...) {}
+			}
+		}
+		// Players always get direct stream
+		for (auto& [key, peerId] : _connToPeerId) {
+			auto it = _relayTree.find(peerId);
+			if (it != _relayTree.end() && it->second.isPlayer) {
+				try { _ws.send(it->second.conn, data, size, websocketpp::frame::opcode::binary); }
+				catch (...) {}
+			}
+		}
 	}
 }
 

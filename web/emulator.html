@@ -177,39 +177,75 @@ body { background: #000; overflow: hidden; width: 100vw; height: 100vh; }
     var buf = Module._malloc(bufSize);
     var frames = 0, startTime = 0;
 
+    function renderFrame(data) {
+      var arr = new Uint8Array(data instanceof ArrayBuffer ? data : data.buffer);
+      if (arr.length < 80) return;
+      if (arr.length > bufSize) { Module._free(buf); bufSize = arr.length + 65536; buf = Module._malloc(bufSize); }
+      Module.writeArrayToMemory(arr, buf);
+      Module._mirror_render_frame(buf, arr.length);
+      frames++;
+      if (frames % 300 === 0) {
+        var fps = frames / ((performance.now() - startTime) / 1000);
+        console.log('[mirror] ' + fps.toFixed(0) + ' fps | relay:', relay ? relay.getStats() : 'none');
+      }
+    }
+
+    function applySync(data) {
+      var arr = new Uint8Array(data instanceof ArrayBuffer ? data : data.buffer);
+      console.log('[mirror] SYNC: ' + (arr.length/1024/1024).toFixed(1) + ' MB');
+      if (arr.length > bufSize) { Module._free(buf); bufSize = arr.length + 65536; buf = Module._malloc(bufSize); }
+      Module.writeArrayToMemory(arr, buf);
+      try { if (Module._mirror_apply_sync) Module._mirror_apply_sync(buf, arr.length); }
+      catch (err) { console.warn('[mirror] SYNC error:', err.message); }
+    }
+
+    var relay = null;
+
     function connectMirror() {
       console.log('[mirror] Connecting to', MIRROR_SERVER);
       var ws = new WebSocket(MIRROR_SERVER);
       ws.binaryType = 'arraybuffer';
-      ws.onopen = function() { startTime = performance.now(); frames = 0; };
-      ws.onclose = function() { setTimeout(connectMirror, 2000); };
+      ws.onopen = function() {
+        startTime = performance.now(); frames = 0;
+        // Create relay instance and announce readiness
+        relay = new MapleCastRelay(ws, renderFrame, applySync);
+        ws.send(JSON.stringify({ type: 'relay_ready', canRelay: true }));
+      };
+      ws.onclose = function() {
+        if (relay) { relay.destroy(); relay = null; }
+        setTimeout(connectMirror, 2000);
+      };
       ws.onerror = function() { console.log('[mirror] WebSocket error'); };
       ws.onmessage = function(e) {
-        if (typeof e.data === 'string') return;
-        var data = new Uint8Array(e.data);
-        if (data.length < 80) return;
-        if (data[0]===0x53 && data[1]===0x59 && data[2]===0x4E && data[3]===0x43) {
-          console.log('[mirror] SYNC: ' + (data.length/1024/1024).toFixed(1) + ' MB');
-          if (data.length > bufSize) { Module._free(buf); bufSize = data.length + 65536; buf = Module._malloc(bufSize); }
-          Module.writeArrayToMemory(data, buf);
-          try { if (Module._mirror_apply_sync) Module._mirror_apply_sync(buf, data.length); }
-          catch (err) { console.warn('[mirror] SYNC error:', err.message); }
+        if (typeof e.data === 'string') {
+          // JSON messages — route relay_* to relay, ignore others
+          try {
+            var msg = JSON.parse(e.data);
+            if (msg.type && msg.type.startsWith('relay_') && relay) {
+              relay.handleMessage(msg);
+            }
+          } catch(err) {}
           return;
         }
-        if (data.length > bufSize) { Module._free(buf); bufSize = data.length + 65536; buf = Module._malloc(bufSize); }
-        Module.writeArrayToMemory(data, buf);
-        Module._mirror_render_frame(buf, data.length);
-        frames++;
-        if (frames % 300 === 0) {
-          var fps = frames / ((performance.now() - startTime) / 1000);
-          console.log('[mirror] ' + fps.toFixed(0) + ' fps');
+        // Binary messages — SYNC or delta frames
+        var data = new Uint8Array(e.data);
+        if (data.length < 8) return;
+        if (data[0]===0x53 && data[1]===0x59 && data[2]===0x4E && data[3]===0x43) {
+          // SYNC from server (seeds only)
+          if (relay) relay.handleServerSync(e.data);
+          else applySync(e.data);
+          return;
         }
+        // Delta frame from server (seeds only) — route through relay
+        if (relay) relay.handleServerFrame(e.data);
+        else renderFrame(e.data);
       };
     }
     connectMirror();
   };
 </script>
 
+<script src="relay.js"></script>
 <script src="ejs-data/loader.js"></script>
 </body>
 </html>
