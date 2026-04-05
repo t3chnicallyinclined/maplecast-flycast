@@ -23,12 +23,153 @@ canvas { border: 2px solid #333; image-rendering: pixelated; max-width: 100%; ma
 #panel button:hover { background: #0f0; color: #000; }
 #panel .section { margin-bottom: 10px; }
 #log { background: #0a0a0a; color: #888; font-size: 9px; padding: 5px; max-height: 150px; overflow-y: auto; white-space: pre-wrap; border: 1px solid #222; margin-top: 10px; }
+
+/* 3D CRT TUBE — raw tube floating in space */
+.crt-active #canvas-wrapper {
+  perspective: 900px;
+  display: flex; align-items: center; justify-content: center;
+  position: relative;
+}
+.crt-active .tv-body {
+  position: relative;
+  transform-style: preserve-3d;
+  transform: rotateY(-5deg) rotateX(2deg);
+  transition: transform 0.3s;
+}
+
+/* The glass face — bulging convex front */
+.crt-active .tube-face {
+  position: relative;
+  border-radius: 16px;
+  padding: 4px;
+  background: linear-gradient(145deg, #8a8878 0%, #6b6960 30%, #4a483f 70%, #3a3830 100%);
+  box-shadow:
+    0 0 0 3px #9a9480,
+    0 0 0 5px #706850,
+    8px 12px 40px rgba(0,0,0,0.7),
+    -4px -4px 15px rgba(100,95,80,0.15);
+}
+
+/* Gold rim around the glass — the metal frame */
+.crt-active .tube-rim {
+  border-radius: 12px;
+  padding: 3px;
+  background: linear-gradient(160deg, #c4a84d 0%, #8b7430 40%, #6b5820 70%, #4a3c10 100%);
+  box-shadow: inset 0 1px 0 rgba(220,200,100,0.4), inset 0 -1px 0 rgba(0,0,0,0.3);
+}
+
+/* The glass surface — slightly convex look */
+.crt-active .tube-glass {
+  position: relative;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #0a0a0a;
+}
+.crt-active .tube-glass canvas {
+  display: block;
+  border-radius: 10px;
+  filter: brightness(1.1) contrast(1.08) saturate(1.1);
+}
+
+/* Glass reflection — the curved highlight */
+.crt-active .tube-reflection {
+  position: absolute; top: -10%; left: -10%; right: 50%; bottom: 60%;
+  background: radial-gradient(ellipse at 30% 30%,
+    rgba(255,255,255,0.12) 0%, rgba(255,255,255,0.04) 40%, transparent 70%);
+  border-radius: 50%; pointer-events: none; z-index: 2;
+  transform: rotate(-15deg);
+}
+
+/* Scanlines */
+.crt-active .tube-scanlines {
+  position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+  background: repeating-linear-gradient(0deg,
+    transparent, transparent 1px, rgba(0,0,0,0.06) 1px, rgba(0,0,0,0.06) 3px);
+  pointer-events: none; z-index: 3; border-radius: 10px;
+}
+
+/* The bulging tube body behind the face */
+.crt-active .tube-bulge {
+  position: absolute;
+  top: 10%; left: 10%; right: 10%; bottom: 10%;
+  background: radial-gradient(ellipse at 50% 50%,
+    #5a5850 0%, #4a4840 40%, #3a3830 70%, #2a2820 100%);
+  border-radius: 50%;
+  z-index: -1;
+  transform: translateZ(-80px) scale(1.15);
+  box-shadow:
+    0 0 30px rgba(0,0,0,0.5),
+    inset 0 0 40px rgba(0,0,0,0.3);
+}
+
+/* The neck / electron gun tapering back */
+.crt-active .tube-neck {
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%) translateZ(-200px);
+  width: 80px; height: 80px;
+  background: radial-gradient(circle, #4a4840 0%, #3a3830 60%, #2a2820 100%);
+  border-radius: 50%;
+  box-shadow: 0 0 20px rgba(0,0,0,0.5);
+  z-index: -2;
+}
+
+/* Yoke coils around the neck */
+.crt-active .tube-yoke {
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%) translateZ(-160px);
+  width: 120px; height: 120px;
+  border: 8px solid #8b5e2b;
+  border-radius: 50%;
+  box-shadow:
+    0 0 5px rgba(139,94,43,0.5),
+    inset 0 0 10px rgba(0,0,0,0.3);
+  z-index: -2;
+}
+.crt-active .tube-yoke::after {
+  content: '';
+  position: absolute; top: -4px; left: -4px; right: -4px; bottom: -4px;
+  border: 3px solid #d4842a;
+  border-radius: 50%;
+  opacity: 0.4;
+}
+
+/* Screen glow on the floor/space */
+.crt-active .tube-glow {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 140%; height: 140%;
+  background: radial-gradient(ellipse at center,
+    rgba(60,100,255,0.1) 0%, rgba(40,60,200,0.05) 30%, transparent 60%);
+  pointer-events: none; z-index: -3;
+  animation: glow-pulse 3s ease-in-out infinite alternate;
+}
+@keyframes glow-pulse {
+  from { opacity: 0.6; }
+  to { opacity: 1; }
+}
+
+/* Mounting tabs on the face (those metal brackets) */
+.crt-active .tube-tab {
+  position: absolute; width: 14px; height: 20px;
+  background: linear-gradient(180deg, #888, #555);
+  border-radius: 2px;
+  box-shadow: 1px 1px 3px rgba(0,0,0,0.5);
+  z-index: 5;
+}
+.crt-active .tube-tab.top { top: -8px; left: 50%; transform: translateX(-50%); }
+.crt-active .tube-tab.bottom { bottom: -8px; left: 50%; transform: translateX(-50%); width: 16px; }
+.crt-active .tube-tab.left { left: -8px; top: 50%; transform: translateY(-50%) rotate(90deg); }
+.crt-active .tube-tab.right { right: -8px; top: 50%; transform: translateY(-50%) rotate(90deg); }
 </style>
 </head>
 <body>
 <div id="game-col">
-  <div id="status">Standalone WASM Renderer — Connecting...</div>
-  <canvas id="game-canvas" width="640" height="480"></canvas>
+  <div id="status">Standalone WASM Renderer -- Connecting...</div>
+  <div id="canvas-wrapper">
+    <canvas id="game-canvas" width="640" height="480"></canvas>
+  </div>
   <div id="stats"></div>
 </div>
 
@@ -103,6 +244,15 @@ canvas { border: 2px solid #333; image-rendering: pixelated; max-width: 100%; ma
     <button onclick="presetArcade()">ARCADE CRT</button>
     <button onclick="presetHD()">HD REMASTER</button>
     <button onclick="presetClean()">CLEAN</button>
+  </div>
+
+  <div class="section">
+    <h3>[3D] CRT TV Mode</h3>
+    <label><input type="checkbox" id="crt_tv_mode" onchange="toggleCRT3D()"> Enable 3D CRT TV</label>
+    <label>Rotate: <input type="range" id="crt_rotate" min="-30" max="30" value="-5" oninput="updateCRT3D()"> <span id="crt_rotate_val">-5</span></label>
+    <label>Tilt: <input type="range" id="crt_tilt" min="-15" max="15" value="2" oninput="updateCRT3D()"> <span id="crt_tilt_val">2</span></label>
+    <label>Distance: <input type="range" id="crt_dist" min="500" max="2000" value="900" oninput="updateCRT3D()"> <span id="crt_dist_val">900</span></label>
+    <label>Glow: <input type="range" id="crt_glow" min="0" max="100" value="60" oninput="updateCRT3D()"> <span id="crt_glow_val">60</span></label>
   </div>
 
   <div class="section">
@@ -215,6 +365,116 @@ function captureFrame() {
 function togglePause() {
     paused = !paused;
 }
+
+// 3D CRT TUBE Mode — raw tube floating in void
+function toggleCRT3D() {
+    const enabled = document.getElementById('crt_tv_mode').checked;
+    const gameCol = document.getElementById('game-col');
+    const wrapper = document.getElementById('canvas-wrapper');
+    const canvas = document.getElementById('game-canvas');
+
+    if (enabled) {
+        gameCol.classList.add('crt-active');
+        wrapper.innerHTML = '';
+        wrapper.style.position = 'relative';
+
+        const tvBody = document.createElement('div');
+        tvBody.className = 'tv-body';
+        tvBody.innerHTML = `
+            <div class="tube-face">
+                <div class="tube-tab top"></div>
+                <div class="tube-tab bottom"></div>
+                <div class="tube-tab left"></div>
+                <div class="tube-tab right"></div>
+                <div class="tube-rim">
+                    <div class="tube-glass">
+                        <div class="tube-reflection"></div>
+                        <div class="tube-scanlines"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="tube-bulge"></div>
+            <div class="tube-yoke"></div>
+            <div class="tube-neck"></div>
+        `;
+
+        const glass = tvBody.querySelector('.tube-glass');
+        glass.insertBefore(canvas, glass.firstChild);
+        wrapper.appendChild(tvBody);
+
+        const glow = document.createElement('div');
+        glow.className = 'tube-glow';
+        wrapper.appendChild(glow);
+
+        updateCRT3D();
+    } else {
+        gameCol.classList.remove('crt-active');
+        wrapper.innerHTML = '';
+        wrapper.style.position = '';
+        canvas.style.filter = '';
+        canvas.style.borderRadius = '';
+        wrapper.appendChild(canvas);
+    }
+}
+
+// Free rotation state
+let crtRotX = 2, crtRotY = -5;
+let crtDragging = false, crtLastX = 0, crtLastY = 0;
+
+function updateCRT3D() {
+    if (!document.getElementById('crt_tv_mode').checked) return;
+    const dist = document.getElementById('crt_dist').value;
+    const glow = document.getElementById('crt_glow').value;
+
+    document.getElementById('crt_rotate_val').textContent = Math.round(crtRotY);
+    document.getElementById('crt_tilt_val').textContent = Math.round(crtRotX);
+    document.getElementById('crt_dist_val').textContent = dist;
+    document.getElementById('crt_glow_val').textContent = glow;
+
+    // Sync sliders with drag state
+    document.getElementById('crt_rotate').value = Math.max(-30, Math.min(30, crtRotY));
+    document.getElementById('crt_tilt').value = Math.max(-15, Math.min(15, crtRotX));
+
+    const wrapper = document.getElementById('canvas-wrapper');
+    wrapper.style.perspective = dist + 'px';
+
+    const tvBody = wrapper.querySelector('.tv-body');
+    if (tvBody) tvBody.style.transform = `rotateY(${crtRotY}deg) rotateX(${crtRotX}deg)`;
+
+    const glowEl = wrapper.querySelector('.tube-glow');
+    if (glowEl) glowEl.style.background =
+        `radial-gradient(ellipse at center, rgba(60,100,255,${glow/500}) 0%, transparent 60%)`;
+}
+
+// Slider input also updates rotation
+document.getElementById('crt_rotate').addEventListener('input', function() {
+    crtRotY = parseFloat(this.value);
+    updateCRT3D();
+});
+document.getElementById('crt_tilt').addEventListener('input', function() {
+    crtRotX = parseFloat(this.value);
+    updateCRT3D();
+});
+
+// Mouse drag for free 3D rotation — NO LIMITS
+document.getElementById('canvas-wrapper').addEventListener('mousedown', function(e) {
+    if (!document.getElementById('crt_tv_mode').checked) return;
+    crtDragging = true;
+    crtLastX = e.clientX;
+    crtLastY = e.clientY;
+    e.preventDefault();
+});
+document.addEventListener('mousemove', function(e) {
+    if (!crtDragging) return;
+    const dx = e.clientX - crtLastX;
+    const dy = e.clientY - crtLastY;
+    crtRotY += dx * 0.5;
+    crtRotX -= dy * 0.5;
+    crtLastX = e.clientX;
+    crtLastY = e.clientY;
+    updateCRT3D();
+});
+document.addEventListener('mouseup', function() { crtDragging = false; });
 
 // CSS Post-Processing
 function toggleCSS() {
