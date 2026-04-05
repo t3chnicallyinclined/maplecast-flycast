@@ -44,12 +44,18 @@ bool mainui_rend_frame()
 	os_DoEvents();
 	os_UpdateInputState();
 
+	// Mirror client: always run mirror loop, skip GUI
+	if (maplecast_mirror::isClient())
+	{
+		if (gui_is_open())
+			gui_setState(GuiState::Closed);
+	}
+
 	if (gui_is_open())
 	{
 		try {
 			gui_display_ui();
 		} catch (const FlycastException& e) {
-			// Assume this is a graphics API issue
 			forceReinit = true;
 			return false;
 		}

@@ -564,6 +564,28 @@ int getGamePlatform(const std::string& filename)
 void Emulator::loadGame(const char *path, LoadProgress *progress)
 {
 	init();
+
+	// Mirror client: skip ROM/BIOS loading entirely. Server sends all state via WebSocket.
+	if (std::getenv("MAPLECAST_MIRROR_CLIENT") && (path == nullptr || strlen(path) == 0))
+	{
+		printf("[MIRROR] No ROM — initializing renderer only\n");
+		settings.content.path.clear();
+		settings.content.fileName.clear();
+		settings.content.title = "MapleCast Mirror";
+		setPlatform(DC_PLATFORM_DREAMCAST);
+		mem_map_default();
+		config::Settings::instance().reset();
+		config::Settings::instance().load(false);
+		dc_reset(true);
+		nvmem::loadHle();
+		gdr::initDrive("");
+
+		// Go straight to start() — mirror client init happens there
+		state = Loaded;
+		start();
+		return;
+	}
+
 	try {
 		DEBUG_LOG(BOOT, "Loading game %s", path == nullptr ? "(nil)" : path);
 

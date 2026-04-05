@@ -265,6 +265,13 @@ int main(int argc, char* argv[])
 	if (flycast_init(argc, argv))
 		die("Flycast initialization failed\n");
 
+	// Mirror client: auto-load with no ROM — skip game browser
+	if (nowide::getenv("MAPLECAST_MIRROR_CLIENT") && argc < 2) {
+		printf("[MIRROR] Auto-loading without ROM (argc=%d)\n", argc);
+		fflush(stdout);
+		emu.loadGame(nullptr);
+	}
+
 #if defined(USE_BREAKPAD)
 	auto async = std::async(std::launch::async, uploadCrashes, "/tmp");
 #endif
