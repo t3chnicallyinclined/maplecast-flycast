@@ -409,6 +409,10 @@ static void wsClientRun(std::string host, int port)
 				if (pvrSize <= (uint32_t)pvr_RegSize)
 					memcpy(pvr_regs, src, pvrSize);
 			}
+			// Unprotect VRAM so per-frame memcpy patches work (nvmem page protection)
+			memwatch::unprotect();
+			// NOTE: renderer cache/palette updates happen on render thread in clientReceive()
+
 			synced = true;
 			printf("[MIRROR-WS] Initial sync received: %.1f MB — VRAM + PVR loaded\n",
 				frame.size() / (1024.0 * 1024.0));
@@ -522,6 +526,11 @@ static void initClientWebSocket()
 	int port = portStr ? std::atoi(portStr) : 7200;
 
 	printf("[MIRROR] === CLIENT MODE (WebSocket) === ws://%s:%d/\n", host, port);
+
+	// Unprotect VRAM BEFORE spawning WS thread — the thread will memcpy into
+	// VRAM pages during SYNC and per-frame diffs. Without this, nvmem page
+	// protection causes SIGSEGV on the first VRAM write.
+	memwatch::unprotect();
 
 	std::string hostStr(host);
 	_wsThread = std::thread(wsClientRun, hostStr, port);
