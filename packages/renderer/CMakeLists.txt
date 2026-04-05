@@ -50,8 +50,8 @@ set(RENDERER_SOURCES
     # ---- Dependencies ----
     ${FLYCAST_ROOT}/core/deps/xbrz/xbrz.cpp
 
-    # ---- Libretro GL state machine (provides rgl* GL wrappers) ----
-    ${FLYCAST_ROOT}/core/deps/libretro-common/glsm/glsm.c
+    # ---- Libretro GL state machine (PATCHED for WebGL2 — skip GL_FOG/GL_ALPHA_TEST) ----
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/glsm_patched.c
     ${FLYCAST_ROOT}/core/deps/libretro-common/glsym/rglgen.c
     ${FLYCAST_ROOT}/core/deps/libretro-common/glsym/glsym_es3.c
 
