@@ -265,9 +265,31 @@ int main(int argc, char* argv[])
 	if (flycast_init(argc, argv))
 		die("Flycast initialization failed\n");
 
-	// Mirror client: auto-load with no ROM — skip game browser
+	// Mirror client: --server <host>[:<port>] launches romless mirror mode
+	// Also supports env vars MAPLECAST_MIRROR_CLIENT + MAPLECAST_SERVER_HOST
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--server") == 0 && i + 1 < argc) {
+			// Parse host:port
+			std::string addr = argv[i + 1];
+			std::string host = addr;
+			std::string port = "7200";
+			auto colon = addr.rfind(':');
+			if (colon != std::string::npos) {
+				host = addr.substr(0, colon);
+				port = addr.substr(colon + 1);
+			}
+			setenv("MAPLECAST_MIRROR_CLIENT", "1", 1);
+			setenv("MAPLECAST_SERVER_HOST", host.c_str(), 1);
+			setenv("MAPLECAST_SERVER_PORT", port.c_str(), 1);
+			printf("[MIRROR] --server %s:%s\n", host.c_str(), port.c_str());
+			fflush(stdout);
+			emu.loadGame(nullptr);
+			break;
+		}
+	}
+	// Env var fallback
 	if (nowide::getenv("MAPLECAST_MIRROR_CLIENT") && argc < 2) {
-		printf("[MIRROR] Auto-loading without ROM (argc=%d)\n", argc);
+		printf("[MIRROR] Auto-loading without ROM\n");
 		fflush(stdout);
 		emu.loadGame(nullptr);
 	}
