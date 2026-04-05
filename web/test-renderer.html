@@ -1,12 +1,13 @@
 <!DOCTYPE html>
 <html>
 <head>
-<title>WASM Renderer Test — King of Marvel</title>
+<meta charset="UTF-8">
+<title>WASM Renderer Test - King of Marvel</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { background: #000; color: #0f0; font-family: monospace; display: flex; }
 #game-col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-canvas { border: 2px solid #333; image-rendering: pixelated; }
+canvas { border: 2px solid #333; image-rendering: pixelated; max-width: 100%; max-height: 70vh; width: 640px; }
 #status { margin: 10px; font-size: 14px; color: #0f0; }
 #stats { margin: 5px; font-size: 10px; color: #888; white-space: pre; }
 #panel {
@@ -32,44 +33,76 @@ canvas { border: 2px solid #333; image-rendering: pixelated; }
 </div>
 
 <div id="panel">
-  <h3>🎛️ WebGL Live Controls</h3>
+  <h3>[CONTROLS] WebGL Live Controls</h3>
 
   <div class="section">
-    <h3>Blending</h3>
-    <label><input type="checkbox" id="forceBlend" checked> Force GL_BLEND on every draw</label>
-    <label><input type="checkbox" id="overrideSrc"> Override SRC blend:</label>
-    <label><select id="srcBlend">
-      <option value="0">ZERO</option><option value="1" selected>ONE</option>
-      <option value="770">SRC_ALPHA</option><option value="771">ONE_MINUS_SRC_ALPHA</option>
-      <option value="772">DST_ALPHA</option><option value="773">ONE_MINUS_DST_ALPHA</option>
-      <option value="774">DST_COLOR</option><option value="775">ONE_MINUS_DST_COLOR</option>
-    </select></label>
-    <label><select id="dstBlend">
-      <option value="0">ZERO</option><option value="1">ONE</option>
-      <option value="770">SRC_ALPHA</option><option value="771" selected>ONE_MINUS_SRC_ALPHA</option>
-      <option value="772">DST_ALPHA</option><option value="773">ONE_MINUS_DST_ALPHA</option>
-      <option value="774">SRC_COLOR</option><option value="775">ONE_MINUS_SRC_COLOR</option>
-    </select></label>
+    <h3>[QUALITY] Quality Settings</h3>
+    <label>Resolution:
+      <select id="opt_resolution" onchange="setOpt(0, this.value)">
+        <option value="480" selected>480p (Native DC)</option>
+        <option value="720">720p (1.5x)</option>
+        <option value="960">960p (2x)</option>
+        <option value="1440">1440p (3x)</option>
+        <option value="1920">1080p (4x)</option>
+        <option value="2160">4K (4.5x)</option>
+        <option value="2880">6x INSANE</option>
+        <option value="3840">8K OVERKILL</option>
+      </select>
+    </label>
+    <label>Texture Upscale:
+      <select id="opt_texupscale" onchange="setOpt(1, this.value)" disabled title="Disabled — xBRZ freezes single-threaded WASM">
+        <option value="1" selected>1x (Native)</option>
+        <option value="2">2x (xBRZ) - disabled</option>
+        <option value="4">4x (xBRZ) - disabled</option>
+      </select>
+    </label>
+    <label>Anisotropic Filter:
+      <select id="opt_aniso" onchange="setOpt(5, this.value)">
+        <option value="1" selected>Off</option>
+        <option value="2">2x</option>
+        <option value="4">4x</option>
+        <option value="8">8x</option>
+        <option value="16">16x</option>
+      </select>
+    </label>
+    <label>Texture Filter:
+      <select id="opt_texfilter" onchange="setOpt(6, this.value)">
+        <option value="0" selected>Default</option>
+        <option value="1">Nearest</option>
+        <option value="2">Linear</option>
+      </select>
+    </label>
+    <label>Transparency Layers:
+      <select id="opt_layers" onchange="setOpt(7, this.value)">
+        <option value="4" selected>4 (Fast)</option>
+        <option value="8">8</option>
+        <option value="16">16</option>
+        <option value="32">32 (Best)</option>
+      </select>
+    </label>
   </div>
 
   <div class="section">
-    <h3>Clear Color Alpha</h3>
-    <label>Clear Alpha: <input type="range" id="clearAlpha" min="0" max="100" value="100"> <span class="val" id="clearAlphaVal">1.0</span></label>
+    <h3>[FEATURES] Renderer Features</h3>
+    <label><input type="checkbox" id="opt_fog" onchange="setOpt(2, this.checked?1:0)"> Fog</label>
+    <label><input type="checkbox" id="opt_modvol" onchange="setOpt(3, this.checked?1:0)"> Modifier Volumes (shadows)</label>
+    <label><input type="checkbox" id="opt_pstrip" onchange="setOpt(4, this.checked?1:0)"> Per-Strip Sorting</label>
   </div>
 
   <div class="section">
-    <h3>Depth / Stencil</h3>
-    <label><input type="checkbox" id="forceDepth" checked> Depth Test</label>
-    <label><input type="checkbox" id="forceStencil" checked> Stencil Test</label>
-  </div>
-
-  <div class="section">
-    <h3>Color Mask</h3>
-    <label><input type="checkbox" id="maskR" checked> Red</label>
-    <label><input type="checkbox" id="maskG" checked> Green</label>
-    <label><input type="checkbox" id="maskB" checked> Blue</label>
-    <label><input type="checkbox" id="maskA" checked> Alpha</label>
-    <label><input type="checkbox" id="applyMask"> Apply mask override</label>
+    <h3>[CSS] Post-Processing (CSS)</h3>
+    <label><input type="checkbox" id="css_scanlines" onchange="toggleCSS()"> CRT Scanlines</label>
+    <label><input type="checkbox" id="css_bloom" onchange="toggleCSS()"> Bloom Glow</label>
+    <label><input type="checkbox" id="css_sharpen" onchange="toggleCSS()"> Sharpen</label>
+    <label><input type="checkbox" id="css_smooth" onchange="toggleCSS()"> Smooth (bilinear)</label>
+    <label><input type="checkbox" id="css_vignette" onchange="toggleCSS()"> Vignette</label>
+    <label><input type="checkbox" id="css_curvature" onchange="toggleCSS()"> CRT Curvature</label>
+    <label>Brightness: <input type="range" id="css_bright" min="80" max="150" value="100" oninput="toggleCSS()"> <span id="css_bright_val">100%</span></label>
+    <label>Contrast: <input type="range" id="css_contrast" min="80" max="200" value="100" oninput="toggleCSS()"> <span id="css_contrast_val">100%</span></label>
+    <label>Saturation: <input type="range" id="css_sat" min="50" max="200" value="100" oninput="toggleCSS()"> <span id="css_sat_val">100%</span></label>
+    <button onclick="presetArcade()">ARCADE CRT</button>
+    <button onclick="presetHD()">HD REMASTER</button>
+    <button onclick="presetClean()">CLEAN</button>
   </div>
 
   <div class="section">
@@ -82,9 +115,9 @@ canvas { border: 2px solid #333; image-rendering: pixelated; }
 
   <div class="section">
     <h3>Actions</h3>
-    <button onclick="captureFrame()">📸 Capture Frame GL State</button>
-    <button onclick="togglePause()">⏸ Pause/Resume</button>
-    <button onclick="location.reload()">🔄 Reload</button>
+    <button onclick="captureFrame()">[CAP] Capture Frame GL State</button>
+    <button onclick="togglePause()">[II] Pause/Resume</button>
+    <button onclick="location.reload()">[R] Reload</button>
   </div>
 
   <div class="section">
@@ -135,34 +168,7 @@ HTMLCanvasElement.prototype.getContext = function(type, attrs) {
         const origTexParameterf = ctx.texParameterf.bind(ctx);
         ctx.texParameterf = function(t, p, v) { try { origTexParameterf(t, p, v); } catch(e) {} };
 
-        // Wrap clearColor to intercept alpha
-        const origClearColor = ctx.clearColor.bind(ctx);
-        ctx.clearColor = function(r, g, b, a) {
-            const alphaOverride = document.getElementById('clearAlpha').value / 100;
-            origClearColor(r, g, b, alphaOverride !== undefined ? Math.min(a, alphaOverride > 0.99 ? a : alphaOverride) : a);
-        };
-
-        // Wrap blendFunc for override
-        const origBlendFunc = ctx.blendFunc.bind(ctx);
-        ctx.blendFunc = function(src, dst) {
-            if (document.getElementById('overrideSrc').checked) {
-                src = parseInt(document.getElementById('srcBlend').value);
-                dst = parseInt(document.getElementById('dstBlend').value);
-            }
-            origBlendFunc(src, dst);
-        };
-
-        // Wrap colorMask
-        const origColorMask = ctx.colorMask.bind(ctx);
-        ctx.colorMask = function(r, g, b, a) {
-            if (document.getElementById('applyMask').checked) {
-                r = document.getElementById('maskR').checked;
-                g = document.getElementById('maskG').checked;
-                b = document.getElementById('maskB').checked;
-                a = document.getElementById('maskA').checked;
-            }
-            origColorMask(r, g, b, a);
-        };
+        // No clearColor/blendFunc/colorMask overrides — using WASM quality controls instead
 
         // Wrap drawElements for frame capture
         const origDrawElements = ctx.drawElements.bind(ctx);
@@ -210,9 +216,166 @@ function togglePause() {
     paused = !paused;
 }
 
-document.getElementById('clearAlpha').oninput = function() {
-    document.getElementById('clearAlphaVal').textContent = (this.value / 100).toFixed(2);
-};
+// CSS Post-Processing
+function toggleCSS() {
+    const canvas = document.getElementById('game-canvas');
+    const filters = [];
+
+    const bright = document.getElementById('css_bright').value;
+    const contrast = document.getElementById('css_contrast').value;
+    const sat = document.getElementById('css_sat').value;
+    document.getElementById('css_bright_val').textContent = bright + '%';
+    document.getElementById('css_contrast_val').textContent = contrast + '%';
+    document.getElementById('css_sat_val').textContent = sat + '%';
+
+    filters.push('brightness(' + (bright/100) + ')');
+    filters.push('contrast(' + (contrast/100) + ')');
+    filters.push('saturate(' + (sat/100) + ')');
+
+    if (document.getElementById('css_sharpen').checked)
+        filters.push('contrast(1.1)');
+    if (document.getElementById('css_bloom').checked)
+        filters.push('brightness(1.05) drop-shadow(0 0 4px rgba(255,200,100,0.3))');
+
+    canvas.style.filter = filters.join(' ');
+    canvas.style.imageRendering = document.getElementById('css_smooth').checked ? 'auto' : 'pixelated';
+
+    // Scanline overlay
+    let scanEl = document.getElementById('scanline-overlay');
+    if (document.getElementById('css_scanlines').checked) {
+        if (!scanEl) {
+            scanEl = document.createElement('div');
+            scanEl.id = 'scanline-overlay';
+            scanEl.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;z-index:10;' +
+                'background:repeating-linear-gradient(0deg,transparent,transparent 1px,rgba(0,0,0,0.15) 1px,rgba(0,0,0,0.15) 3px);';
+            canvas.parentElement.style.position = 'relative';
+            canvas.parentElement.appendChild(scanEl);
+        }
+        scanEl.style.display = 'block';
+    } else if (scanEl) {
+        scanEl.style.display = 'none';
+    }
+
+    // Vignette overlay
+    let vigEl = document.getElementById('vignette-overlay');
+    if (document.getElementById('css_vignette').checked) {
+        if (!vigEl) {
+            vigEl = document.createElement('div');
+            vigEl.id = 'vignette-overlay';
+            vigEl.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;z-index:11;' +
+                'background:radial-gradient(ellipse at center,transparent 60%,rgba(0,0,0,0.5) 100%);';
+            canvas.parentElement.appendChild(vigEl);
+        }
+        vigEl.style.display = 'block';
+    } else if (vigEl) {
+        vigEl.style.display = 'none';
+    }
+
+    // CRT curvature
+    if (document.getElementById('css_curvature').checked) {
+        canvas.style.borderRadius = '15px';
+        canvas.style.transform = 'perspective(800px) rotateX(1deg)';
+        canvas.style.boxShadow = '0 0 30px rgba(0,100,255,0.2), inset 0 0 60px rgba(0,0,0,0.3)';
+    } else {
+        canvas.style.borderRadius = '';
+        canvas.style.transform = '';
+        canvas.style.boxShadow = '';
+    }
+}
+
+function presetArcade() {
+    document.getElementById('css_scanlines').checked = true;
+    document.getElementById('css_bloom').checked = true;
+    document.getElementById('css_sharpen').checked = false;
+    document.getElementById('css_smooth').checked = false;
+    document.getElementById('css_vignette').checked = true;
+    document.getElementById('css_curvature').checked = true;
+    document.getElementById('css_bright').value = 110;
+    document.getElementById('css_contrast').value = 120;
+    document.getElementById('css_sat').value = 120;
+    toggleCSS();
+}
+
+function presetHD() {
+    document.getElementById('css_scanlines').checked = false;
+    document.getElementById('css_bloom').checked = true;
+    document.getElementById('css_sharpen').checked = true;
+    document.getElementById('css_smooth').checked = true;
+    document.getElementById('css_vignette').checked = false;
+    document.getElementById('css_curvature').checked = false;
+    document.getElementById('css_bright').value = 105;
+    document.getElementById('css_contrast').value = 115;
+    document.getElementById('css_sat').value = 130;
+    document.getElementById('opt_resolution').value = '1920';
+    setOpt(0, 1920);
+    toggleCSS();
+}
+
+// Save/Load settings to localStorage
+function saveSettings() {
+    const s = {
+        resolution: document.getElementById('opt_resolution').value,
+        aniso: document.getElementById('opt_aniso').value,
+        texfilter: document.getElementById('opt_texfilter').value,
+        layers: document.getElementById('opt_layers').value,
+        fog: document.getElementById('opt_fog').checked,
+        modvol: document.getElementById('opt_modvol').checked,
+        pstrip: document.getElementById('opt_pstrip').checked,
+        scanlines: document.getElementById('css_scanlines').checked,
+        bloom: document.getElementById('css_bloom').checked,
+        sharpen: document.getElementById('css_sharpen').checked,
+        smooth: document.getElementById('css_smooth').checked,
+        vignette: document.getElementById('css_vignette').checked,
+        curvature: document.getElementById('css_curvature').checked,
+        bright: document.getElementById('css_bright').value,
+        contrast: document.getElementById('css_contrast').value,
+        sat: document.getElementById('css_sat').value,
+    };
+    localStorage.setItem('maplecast_render_settings', JSON.stringify(s));
+}
+
+function loadSettings() {
+    const raw = localStorage.getItem('maplecast_render_settings');
+    if (!raw) return false;
+    try {
+        const s = JSON.parse(raw);
+        document.getElementById('opt_resolution').value = s.resolution || '480';
+        document.getElementById('opt_aniso').value = s.aniso || '1';
+        document.getElementById('opt_texfilter').value = s.texfilter || '0';
+        document.getElementById('opt_layers').value = s.layers || '4';
+        document.getElementById('opt_fog').checked = !!s.fog;
+        document.getElementById('opt_modvol').checked = !!s.modvol;
+        document.getElementById('opt_pstrip').checked = !!s.pstrip;
+        document.getElementById('css_scanlines').checked = !!s.scanlines;
+        document.getElementById('css_bloom').checked = !!s.bloom;
+        document.getElementById('css_sharpen').checked = !!s.sharpen;
+        document.getElementById('css_smooth').checked = !!s.smooth;
+        document.getElementById('css_vignette').checked = !!s.vignette;
+        document.getElementById('css_curvature').checked = !!s.curvature;
+        document.getElementById('css_bright').value = s.bright || 100;
+        document.getElementById('css_contrast').value = s.contrast || 100;
+        document.getElementById('css_sat').value = s.sat || 100;
+        return true;
+    } catch(e) { return false; }
+}
+
+// Hook save into every change
+const _origToggleCSS = toggleCSS;
+toggleCSS = function() { _origToggleCSS(); saveSettings(); };
+const _origSetOpt = null; // setOpt is defined later in module script
+
+function presetClean() {
+    document.getElementById('css_scanlines').checked = false;
+    document.getElementById('css_bloom').checked = false;
+    document.getElementById('css_sharpen').checked = false;
+    document.getElementById('css_smooth').checked = false;
+    document.getElementById('css_vignette').checked = false;
+    document.getElementById('css_curvature').checked = false;
+    document.getElementById('css_bright').value = 100;
+    document.getElementById('css_contrast').value = 100;
+    document.getElementById('css_sat').value = 100;
+    toggleCSS();
+}
 </script>
 
 <script type="module">
@@ -232,6 +395,40 @@ statusEl.textContent = 'Renderer initialized — connecting to server...';
 
 const MAX_FRAME = 512 * 1024;
 const frameBuf = Module._malloc(MAX_FRAME);
+
+// Expose Module for quality controls
+window.wasmModule = Module;
+window.setOpt = function(opt, val) {
+    val = parseInt(val);
+    Module._renderer_set_option(opt, val);
+    if (opt === 0) {
+        const h = val;
+        const w = Math.round(h * 4 / 3);
+        const canvas = document.getElementById('game-canvas');
+        canvas.width = w;
+        canvas.height = h;
+        Module._renderer_resize(w, h);
+        console.log('[Quality] Resolution:', w, 'x', h);
+    } else {
+        console.log('[Quality] Set option', opt, '=', val);
+    }
+    saveSettings();
+};
+
+// Load saved settings and apply them
+if (loadSettings()) {
+    console.log('[Settings] Loaded saved settings');
+    // Apply WASM options
+    setOpt(0, parseInt(document.getElementById('opt_resolution').value));
+    setOpt(5, parseInt(document.getElementById('opt_aniso').value));
+    setOpt(6, parseInt(document.getElementById('opt_texfilter').value));
+    setOpt(7, parseInt(document.getElementById('opt_layers').value));
+    setOpt(2, document.getElementById('opt_fog').checked ? 1 : 0);
+    setOpt(3, document.getElementById('opt_modvol').checked ? 1 : 0);
+    setOpt(4, document.getElementById('opt_pstrip').checked ? 1 : 0);
+    // Apply CSS
+    toggleCSS();
+}
 let frames = 0, startTime = 0, bytesTotal = 0;
 
 const params = new URLSearchParams(window.location.search);

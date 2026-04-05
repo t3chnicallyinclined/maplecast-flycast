@@ -390,6 +390,52 @@ void renderer_destroy()
     printf("[renderer] Destroyed\n");
 }
 
+// ============================================================================
+// renderer_set_option — Change renderer config options at runtime
+// option: 0=RenderResolution, 1=TextureUpscale, 2=Fog, 3=ModifierVolumes,
+//         4=PerStripSorting, 5=AnisotropicFiltering, 6=TextureFiltering,
+//         7=PerPixelLayers, 8=EmulateFramebuffer
+// ============================================================================
+
+EMSCRIPTEN_KEEPALIVE
+void renderer_set_option(int option, int value)
+{
+    switch (option) {
+        case 0: config::RenderResolution.override(value); break;
+        case 1: config::TextureUpscale.override(value); break;
+        case 2: config::Fog.override(value != 0); break;
+        case 3: config::ModifierVolumes.override(value != 0); break;
+        case 4: config::PerStripSorting.override(value != 0); break;
+        case 5: config::AnisotropicFiltering.override(value); break;
+        case 6: config::TextureFiltering.override(value); break;
+        case 7: config::PerPixelLayers.override(value); break;
+        case 8: config::EmulateFramebuffer.override(value != 0); break;
+    }
+    // Force texture cache rebuild on quality changes
+    if (renderer) {
+        renderer->resetTextureCache = true;
+        renderer->updatePalette = true;
+        renderer->updateFogTable = true;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE
+int renderer_get_option(int option)
+{
+    switch (option) {
+        case 0: return config::RenderResolution;
+        case 1: return config::TextureUpscale;
+        case 2: return config::Fog ? 1 : 0;
+        case 3: return config::ModifierVolumes ? 1 : 0;
+        case 4: return config::PerStripSorting ? 1 : 0;
+        case 5: return config::AnisotropicFiltering;
+        case 6: return config::TextureFiltering;
+        case 7: return config::PerPixelLayers;
+        case 8: return config::EmulateFramebuffer ? 1 : 0;
+        default: return -1;
+    }
+}
+
 } // extern "C"
 
 // ============================================================================

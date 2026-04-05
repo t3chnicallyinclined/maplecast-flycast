@@ -108,7 +108,7 @@ if(EMSCRIPTEN)
     set(EM_LINK_FLAGS
         "-s MODULARIZE=1"
         "-s EXPORT_ES6=1"
-        "-s EXPORTED_FUNCTIONS=['_renderer_init','_renderer_frame','_renderer_sync','_renderer_resize','_renderer_destroy','_renderer_info','_malloc','_free']"
+        "-s EXPORTED_FUNCTIONS=['_renderer_init','_renderer_frame','_renderer_sync','_renderer_resize','_renderer_destroy','_renderer_info','_renderer_set_option','_renderer_get_option','_malloc','_free']"
         "-s EXPORTED_RUNTIME_METHODS=['ccall','cwrap','HEAPU8','HEAPU32']"
         "-s ALLOW_MEMORY_GROWTH=1"
         "-s INITIAL_MEMORY=33554432"
