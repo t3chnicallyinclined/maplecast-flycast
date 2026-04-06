@@ -265,3 +265,290 @@ static std::atomic<int> _clientCount{0};
 | Stream bandwidth | 1.9 MB/s (H.264) | ~4 Mbps (TA mirror) | <4 Mbps |
 | Frame rate | 60fps | 59-60fps | 60fps |
 | Resolution | 640x480 (locked) | Any (client renders) | Any |
+
+---
+
+# INTERNET / RELAY PATH (nobd.net production)
+
+The numbers above are LAN-only. Once the path goes through the public
+internet via the VPS relay, the budget is dominated by network round-trips
+and the GPU pipeline in the browser, not by anything we control in our code.
+
+## Hot Path (button → pixel) over the relay
+
+```
+Stage                                   Cost     What controls it
+─────────────────────────────────────   ──────   ─────────────────────────
+1.  Browser gamepad poll                ~2-4ms   navigator.getGamepads() rate
+2.  Browser → VPS (TCP+TLS)             ~5-25ms  user's network distance
+3.  nginx /ws → relay loopback          ~0.1ms   nginx
+4.  Relay tokio task forward            ~0.2ms   tokio scheduler
+5.  VPS → home (one-way)                ~2.4ms   measured 4.8ms RTT / 2
+6.  Home flycast asio → UDP forward     ~0.05ms  syscall
+7.  Wait for next emu vblank            0-16ms   FRAME ALIGNMENT (the killer)
+8.  Game logic + GPU render             ~5-15ms  emulator native cost
+9.  TA capture + zstd compress          ~0.34ms  serverPublish + level-1 zstd
+10. Home → VPS (one-way)                ~2.5-4ms upload bandwidth + RTT/2
+11. Relay broadcast::send               ~0.1ms   tokio
+12. Relay → browser (one-way)           ~5-25ms  user's network distance
+13. Browser worker → main thread        ~0.1ms   postMessage
+14. WASM zstd decompress                ~30us
+15. WASM TA parse + WebGL2 render       ~2-6ms   GPU pipeline
+16. Browser compositor / vsync          ~8-16ms  display refresh
+
+TOTAL (typical user, ~5ms from VPS):    ~40ms p50, ~60ms p99
+TOTAL (LAN player, no relay):           ~5-7ms (the original budget)
+```
+
+## What dominates the internet budget
+
+Three things, in order:
+
+1. **Frame alignment** (stage 7, 0-16ms, avg 8ms) — the input might arrive
+   anywhere within an emulator frame; on average it waits half a frame for
+   the next vblank. This is bigger than the entire network path combined.
+
+2. **Network round trips** (stages 2, 5, 10, 12 — ~15-50ms total) — bounded
+   by the user's distance to the VPS and the VPS's distance to home. Both
+   are physical network distances we can't shrink.
+
+3. **Browser display pipeline** (stage 16, 8-16ms) — even if the WASM
+   renders the frame instantly, the browser compositor waits for the next
+   monitor vsync. On a 60Hz display, that's average 8ms. On a 144Hz gaming
+   display it drops to ~3.5ms.
+
+Stages 1, 3, 4, 6, 9, 11, 13, 14 sum to under 1ms total. **The
+microsecond-level optimizations we did to flycast and the relay are
+essentially complete.** Further latency wins require attacking the
+network or the framing, not the code.
+
+---
+
+# OVERKILL OPTIMIZATION ROADMAP
+
+Ranked by impact (latency saved at p50) and risk (effort + chance of
+breaking things). Marked DONE for what's already shipped.
+
+## TIER S — asymmetric wins (high impact)
+
+### S1. GGPO-style rollback prediction in the browser  [NOT STARTED]
+**Saves: ~8ms p50, ~16ms p99 (kills frame alignment)**
+**Risk: VERY HIGH (multi-week project)**
+
+Run a second flycast instance in WASM as a "ghost" that locally simulates
+ahead of the server. Apply local input to the ghost. Render the ghost.
+When the server's authoritative frame arrives, compare and reconcile via
+state diff or full state restore. This is the standard GGPO approach.
+
+The biggest single optimization available, but a massive amount of work.
+Requires WASM to run a full deterministic flycast, not just the renderer.
+The current renderer doesn't have CPU/audio/maple bus emulation.
+
+### S2. LAN bypass for local players  [NOT STARTED]
+**Saves: ~15-30ms (entire VPS round trip) for LAN users**
+**Risk: MEDIUM (mixed-content cert pain)**
+
+Browser tries `wss://home.lan.nobd.net:7200` first with a 1-second
+timeout, falls back to the VPS relay if it doesn't connect. Requires:
+
+- A LAN-resolvable hostname (split DNS or `*.local.nobd.net` pointing to
+  the home LAN IP)
+- A real cert for that hostname (Let's Encrypt DNS challenge so you can
+  cert a non-public hostname)
+- Or accept the mixed-content warning for `ws://`
+
+For anyone playing on the same LAN as the home flycast (you, me, anyone
+at your house, in-person tournaments), this saves the entire ~15ms VPS
+round trip. Massive for local play.
+
+### S3. WebRTC DataChannel for player input  [INFRA EXISTS]
+**Saves: ~5-10ms p50, ~15ms p99 (UDP semantics + bypasses TCP HOL)**
+**Risk: MEDIUM (WebRTC signaling complexity, but libdatachannel already linked)**
+
+Player input is currently TCP-stuck-in-the-WS-queue:
+`browser → relay → flycast WS → UDP to input server`. Instead, use a
+WebRTC DataChannel with `{ordered: false, maxRetransmits: 0}` for player
+input. The DataChannel runs over UDP, has no head-of-line blocking, and
+the relay can either forward UDP packets directly or even let the
+browser open a P2P channel to home flycast (NAT-punch via STUN).
+
+`MAPLECAST_WEBRTC=1` is already compiled into the home flycast binary
+(`maplecast_webrtc.cpp`, libdatachannel linked). The signaling
+infrastructure exists. Wiring up a per-player input DataChannel is
+maybe a day of work.
+
+### S4. Browser gamepad polling at 1ms via MessageChannel  [NOT STARTED]
+**Saves: ~2-3ms p50 off stage 1**
+**Risk: LOW**
+
+`setTimeout` has a 4ms minimum on most browsers. `requestAnimationFrame`
+fires at 16.67ms (60Hz) or 6.94ms (144Hz). Neither is fast enough.
+Use a `MessageChannel` postMessage trick to schedule callbacks with no
+clamp:
+
+```js
+const mc = new MessageChannel();
+let pending = false;
+mc.port1.onmessage = () => { pending = false; pollGamepad(); };
+function tick() { if (!pending) { pending = true; mc.port2.postMessage(null); } }
+```
+
+Combined with rAF, you get effectively unlimited polling rate. Send only
+on input change. ~2-3ms savings off the gamepad poll wait.
+
+## TIER A — real wins, lower risk
+
+### A1. Relay→home upstream WebSocket TCP_NODELAY  [DONE]
+Done as part of the recent fix. Server side socket option is now set on
+every accepted socket via websocketpp `set_socket_init_handler`. Status
+JSON, ping echoes, and small frames no longer pay the Nagle 40ms tax.
+
+### A2. Relay-side ping echo  [DONE]
+Done. The diagnostics ping no longer round-trips to home flycast — the
+relay echoes `{"type":"ping"}` directly. Saves ~10ms (one full home↔VPS
+round trip) per ping. Diagnostic overlay should now show ~10-15ms ping
+for users near the VPS instead of ~30ms.
+
+### A3. zstd ZCST compression  [DONE]
+Done. ~2.9x on delta frames, ~13x on SYNC. Saves ~60% bandwidth with
+~80us compress + ~30us decompress overhead. See ARCHITECTURE.md.
+
+### A4. SCHED_FIFO + CPU pinning + mlockall on home flycast  [NOT STARTED]
+**Saves: ~3-10ms p99 (eliminates emu thread preemption)**
+**Risk: LOW**
+
+```bash
+sudo chrt -f 50 ./build/flycast ...           # realtime priority
+sudo taskset -c 4-7 ./build/flycast ...       # pin to physical cores
+ulimit -l unlimited
+```
+
+Or in code: `mlockall(MCL_CURRENT|MCL_FUTURE) + sched_setscheduler(0,
+SCHED_FIFO, ...)` at flycast startup. Removes:
+
+- Memory page faults
+- Scheduler preemption by other processes
+- L1/L2 cache thrashing
+
+Measurable as reduced p99 frame jitter. The user feels it as smoother
+play under system load.
+
+### A5. Move WASM rendering into a Worker thread with OffscreenCanvas  [NOT STARTED]
+**Saves: ~50-200us per frame + huge p99 improvement**
+**Risk: MEDIUM (refactor of frame-worker.mjs + renderer-bridge.mjs)**
+
+Currently the binary frame goes:
+`worker (recv WS) → postMessage to main thread → main thread calls WASM`.
+
+The postMessage has scheduling delay. Worse, the main thread has to
+share CPU with chat updates, lobby polls, gamepad polling, DOM
+re-renders, etc. — any of which can delay the next frame by milliseconds
+under load.
+
+Move the WASM module **into** the worker. Worker owns an OffscreenCanvas
+which the main thread displays. The render path becomes
+`worker (recv WS) → call WASM directly → render to OffscreenCanvas`,
+zero hops, zero main-thread contention.
+
+WebGL2 supports OffscreenCanvas in workers in Chrome and Firefox.
+Refactor of ~1 day. Removes a category of "stuttering when chat is
+busy" complaints we don't have yet but would eventually.
+
+### A6. tokio-tungstenite upgrade for zero-copy fan-out  [NOT STARTED]
+**Saves: ~30 MB/s of memcpy at scale (50 spectators × 60fps × 10KB)**
+**Risk: LOW (Cargo upgrade)**
+
+[fanout.rs:374](relay/src/fanout.rs#L374):
+```rust
+ws_tx.send(Message::Binary(data.to_vec().into())).await
+```
+
+Tungstenite 0.26's `Message::Binary(Vec<u8>)` forces a copy of every
+frame for every spectator. Tungstenite 0.27+ accepts `Bytes` natively
+(refcounted clone, no copy). Upgrade tokio-tungstenite, use
+`Message::Binary(data.clone())` directly.
+
+At 50 spectators this saves ~30 MB/s of pure memory bandwidth and
+reduces fan-out task wakeup latency. At our current 2-3 spectators
+it's not visible, but it's free once we're at scale.
+
+### A7. zstd compression level 0 for ultra-fast mode  [NOT STARTED]
+**Saves: ~50us per frame on the home compress side**
+**Risk: ZERO (1-line config flag)**
+
+zstd-1 takes ~80us. zstd-0 takes ~30us, compresses ~5% worse. For
+deployments where the home upload bandwidth is plentiful, trade the
+bandwidth for latency. Add a `MAPLECAST_ZSTD_LEVEL` env var.
+
+## TIER B — reliability and observability
+
+### B1. Multi-threaded asio io_context for flycast WS  [BLOCKED]
+**Saves: ~0-16ms p99 on player input forwarding**
+**Risk: HIGH (latent thread-safety bugs in shared state)**
+
+Spawn N threads all calling `_ws.run()` so inbound message handlers,
+outbound writes, and accept events run in parallel. Eliminates the
+"binary frame broadcast blocks player input forwarding" tail latency
+entirely.
+
+**Blocker**: several global structures (`_queue`, `_relayTree`,
+`_seedPeers`, parts of the relay tree helpers) are read without
+`_connMutex` in status broadcast and relay-tree code paths. These
+are latent race conditions today (the status thread can already race
+the asio thread). Going multi-threaded asio promotes these from
+"never crashes" to "data race UB".
+
+Audit every access path under `_connMutex` first. Then enable. The
+TODO comment is in the code at the io_context.run() call.
+
+### B2. Per-connection bounded send queues  [NOT STARTED]
+**Saves: nothing directly, but prevents memory blowup with slow clients**
+**Risk: LOW**
+
+websocketpp doesn't bound per-connection send queues. A slow client
+(slow network, paused browser tab, etc.) accumulates queued frames
+indefinitely until the connection drops. Track outstanding bytes per
+connection; drop frames or kick clients exceeding a threshold (say
+500KB queued ≈ 50 frames).
+
+The relay has this via the `tokio::broadcast` channel's 16-slot
+backpressure. Flycast does not.
+
+### B3. Telemetry: per-stage latency measurement in production  [NOT STARTED]
+**Saves: nothing, but tells us where time actually goes**
+
+Right now the diagnostics overlay only knows ping (round-trip) and
+publishUs (server compress time). We don't know:
+
+- How long the relay's tokio task takes to process each frame
+- How long the browser worker takes between WS recv and postMessage
+- How long the WASM render takes
+- How much vsync wait the browser actually does
+
+Add timestamps at every stage, log p50/p95/p99 every 10 seconds.
+Without this, all the optimizations above are guesswork.
+
+---
+
+## What "OVERKILL IS NECESSARY" actually means at this point
+
+The flycast/relay/WASM code path is already at the floor for what we
+control: ~1ms total of code latency between the input hitting the
+server and the pixel being ready to display. **The remaining ~40ms
+of E2E is physics** — the speed of light to and from the VPS, the
+60Hz frame quantization of the emulator, and the 60Hz refresh of the
+user's monitor.
+
+To go below 40ms p50 we have to either:
+
+1. **Cheat physics** — predict ahead (S1: rollback) so the user sees
+   their input applied before it actually arrives at the server.
+2. **Skip the VPS** — direct LAN play (S2) for users on your network.
+3. **Move closer to users** — multi-region relay deployment. Each user
+   connects to the nearest relay; relays form a P2P mesh to the home
+   flycast. New territory, big infrastructure project.
+
+Anything else is shaving microseconds off paths that already cost
+microseconds. Worth doing for the engineering pride and the p99 wins,
+but the visible improvement to a player won't be dramatic until we
+attack one of the three above.
