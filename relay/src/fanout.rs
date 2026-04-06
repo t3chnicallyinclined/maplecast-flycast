@@ -80,6 +80,32 @@ struct RelayStats {
     bytes_broadcast: u64,
     sync_count: u32,
     upstream_connected: bool,
+    /// Frames received in the last 1-second window (computed externally)
+    last_frame_size_bytes: u64,
+    /// Track time of last frame to compute frame interval jitter
+    last_frame_at_us: u64,
+    /// Cumulative jitter sum (microseconds, to avoid float perf hit)
+    frame_interval_sum_us: u64,
+    frame_interval_count: u64,
+    /// Max observed frame interval (worst-case jitter)
+    max_frame_interval_us: u64,
+}
+
+/// Snapshot of relay metrics for /metrics endpoint
+#[derive(Clone, Default)]
+pub struct MetricsSnapshot {
+    pub frames_received: u64,
+    pub frames_broadcast: u64,
+    pub bytes_received: u64,
+    pub bytes_broadcast: u64,
+    pub sync_count: u32,
+    pub upstream_connected: bool,
+    pub clients: u64,
+    pub last_frame_size_bytes: u64,
+    pub avg_frame_interval_us: u64,
+    pub max_frame_interval_us: u64,
+    pub has_sync_cache: bool,
+    pub sync_cache_bytes: u64,
 }
 
 impl RelayState {
@@ -166,6 +192,22 @@ impl RelayState {
             stats.bytes_received += len as u64;
             stats.frames_broadcast += receivers as u64;
             stats.bytes_broadcast += (len * receivers) as u64;
+            stats.last_frame_size_bytes = len as u64;
+
+            // Frame interval jitter — measured between successive frames received
+            let now_us = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_micros() as u64)
+                .unwrap_or(0);
+            if stats.last_frame_at_us > 0 {
+                let interval = now_us.saturating_sub(stats.last_frame_at_us);
+                stats.frame_interval_sum_us += interval;
+                stats.frame_interval_count += 1;
+                if interval > stats.max_frame_interval_us {
+                    stats.max_frame_interval_us = interval;
+                }
+            }
+            stats.last_frame_at_us = now_us;
 
             if stats.frames_received % 600 == 0 {
                 info!(
@@ -185,6 +227,36 @@ impl RelayState {
     async fn get_sync(&self) -> Option<Bytes> {
         let cache = self.inner.sync_cache.read().await;
         cache.as_ref().map(|c| c.raw.clone())
+    }
+
+    /// Snapshot all metrics for /metrics endpoint (called by HTTP listener)
+    pub async fn metrics(&self) -> MetricsSnapshot {
+        let stats = self.inner.stats.lock().await;
+        let clients = *self.inner.client_count.lock().await as u64;
+        let cache = self.inner.sync_cache.read().await;
+        let (has_sync, sync_bytes) = match cache.as_ref() {
+            Some(c) => (true, c.raw.len() as u64),
+            None => (false, 0),
+        };
+        let avg_interval = if stats.frame_interval_count > 0 {
+            stats.frame_interval_sum_us / stats.frame_interval_count
+        } else {
+            0
+        };
+        MetricsSnapshot {
+            frames_received: stats.frames_received,
+            frames_broadcast: stats.frames_broadcast,
+            bytes_received: stats.bytes_received,
+            bytes_broadcast: stats.bytes_broadcast,
+            sync_count: stats.sync_count,
+            upstream_connected: stats.upstream_connected,
+            clients,
+            last_frame_size_bytes: stats.last_frame_size_bytes,
+            avg_frame_interval_us: avg_interval,
+            max_frame_interval_us: stats.max_frame_interval_us,
+            has_sync_cache: has_sync,
+            sync_cache_bytes: sync_bytes,
+        }
     }
 
     /// Subscribe to frame broadcast

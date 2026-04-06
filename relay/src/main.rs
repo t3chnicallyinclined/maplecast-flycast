@@ -86,19 +86,21 @@ async fn main() {
     let ws_addr: SocketAddr = args.ws_listen.parse().expect("invalid ws_listen address");
     let http_addr: SocketAddr = args.http_listen.parse().expect("invalid http_listen address");
 
-    // HTTP /turn-cred endpoint (only if secret is configured)
-    let http_task = if let Some(secret) = args.turn_secret.clone() {
-        let host = args.turn_host.clone();
-        info!("HTTP /turn-cred endpoint: {} → turn:{}:3478", http_addr, host);
-        Some(tokio::spawn(async move {
-            if let Err(e) = turn::http_listener(http_addr, secret, host).await {
-                error!("HTTP listener exited: {:?}", e);
-            }
-        }))
-    } else {
-        info!("HTTP /turn-cred disabled (no TURN_SECRET set)");
-        None
-    };
+    // HTTP endpoint always runs — serves /metrics and /health unconditionally,
+    // /turn-cred only if TURN_SECRET is set.
+    let secret = args.turn_secret.clone();
+    let host = args.turn_host.clone();
+    let state_http = state.clone();
+    info!(
+        "HTTP endpoint: {} (/metrics /health{})",
+        http_addr,
+        if secret.is_some() { " /turn-cred" } else { "" }
+    );
+    let http_task = Some(tokio::spawn(async move {
+        if let Err(e) = turn::http_listener(http_addr, secret, host, state_http).await {
+            error!("HTTP listener exited: {:?}", e);
+        }
+    }));
 
     match upstream_mode {
         "ws" => {
