@@ -25,12 +25,18 @@
 #include <mutex>
 #include <algorithm>
 #include <vector>
+#include <unordered_set>
 
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <pwd.h>
 #include <time.h>
+#include <fstream>
+#include <sstream>
 
 // Gamepad globals — CMD9 reads these via ggpo::getLocalInput()
 extern u32 kcode[4];
@@ -41,34 +47,7 @@ namespace maplecast_input
 
 static std::atomic<bool> _active{false};
 static std::thread _udpThread;
-static std::thread _bufferThread;
 static int _udpSock = -1;
-
-// ==================== Input Buffer (Fairness) ====================
-// Coalesces inputs into N-ms windows so ping differences don't give
-// one player a frame advantage. Each slot's latest input is staged,
-// then flushed to kcode[] every _bufferMs milliseconds.
-// _bufferMs=0 means instant (no buffer, raw arcade mode).
-
-static std::atomic<int> _bufferMs{0};       // configurable per-match
-static std::atomic<bool> _bufferActive{false};
-
-struct StagedInput {
-	uint16_t buttons = 0xFFFF;
-	uint8_t lt = 0;
-	uint8_t rt = 0;
-	std::atomic<bool> dirty{false};         // new input since last flush
-};
-static StagedInput _staged[2];
-
-// Buffer negotiation state
-struct BufferNegotiation {
-	bool pending = false;
-	int proposedMs = 0;
-	bool p1Accepted = false;
-	bool p2Accepted = false;
-};
-static BufferNegotiation _negotiation;
 
 // Player registry — THE single source of truth
 static PlayerInfo _players[2] = {};
@@ -77,15 +56,22 @@ static std::mutex _registryMutex;
 // Telemetry
 static std::atomic<uint64_t> _totalPackets{0};
 
-// Stick registration — username-based
+// Stick registration — username-based.
+// Persistence: WS server drains _pendingStickEvents and forwards to the
+// collector for SurrealDB writes; saveStickCache() also mirrors current
+// state to ~/.maplecast/sticks.json so flycast survives a restart even
+// when the collector is briefly unreachable.
 struct StickBinding {
 	uint32_t srcIP;
 	uint16_t srcPort;
 	char username[16];       // 4-12 chars, [a-zA-Z0-9_]
 	char browserId[64];      // legacy compat (same as username for new registrations)
 	int64_t lastInputUs;     // for online detection
+	bool wasOnline;          // last reported online state — for edge detection
 };
 static std::vector<StickBinding> _stickBindings;
+static std::mutex _stickMutex;
+static std::vector<StickEvent> _pendingStickEvents;
 
 // Rhythm registration in progress (legacy)
 static bool _registering = false;
@@ -107,6 +93,18 @@ struct RhythmTracker {
 };
 static std::vector<RhythmTracker> _rhythmTrackers;
 
+// Forensics: every (srcIP, srcPort) we've ever received a UDP packet from,
+// hashed to a single uint64. First-appearance is logged so we can identify
+// rogue clients sending input. Lifetime = process lifetime; cleared on
+// flycast restart. Memory cost is ~24 bytes per unique source — bounded by
+// the number of distinct IP:port pairs that ever talk to us.
+static std::unordered_set<uint64_t> _seenUdpSources;
+static std::mutex _seenUdpSourcesMutex;
+static inline uint64_t makeSourceKey(uint32_t ip, uint16_t port)
+{
+	return ((uint64_t)ip << 16) | (uint64_t)port;
+}
+
 static inline int64_t nowUs()
 {
 	struct timespec ts;
@@ -114,57 +112,15 @@ static inline int64_t nowUs()
 	return ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
 }
 
-// Flush staged input to kcode[] — called by buffer thread or directly
-static void flushSlot(int slot)
-{
-	if (slot < 0 || slot > 1) return;
-	StagedInput& s = _staged[slot];
-	if (!s.dirty.load(std::memory_order_relaxed)) return;
-	kcode[slot] = s.buttons | 0xFFFF0000;
-	lt[slot] = (uint16_t)s.lt << 8;
-	rt[slot] = (uint16_t)s.rt << 8;
-	s.dirty.store(false, std::memory_order_relaxed);
-}
-
-// Buffer thread — flushes staged inputs every _bufferMs
-static void bufferThreadLoop()
-{
-	printf("[input-server] Buffer thread started\n");
-	while (_active.load()) {
-		int ms = _bufferMs.load(std::memory_order_relaxed);
-		if (ms <= 0) {
-			// Buffer disabled — sleep and check again
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
-			continue;
-		}
-		std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-		if (_bufferActive.load(std::memory_order_relaxed)) {
-			flushSlot(0);
-			flushSlot(1);
-		}
-	}
-	printf("[input-server] Buffer thread stopped\n");
-}
-
 // Write button state to kcode[]/lt[]/rt[] globals AND update player stats
 static void updateSlot(int slot, uint8_t ltVal, uint8_t rtVal, uint16_t buttons)
 {
 	if (slot < 0 || slot > 1) return;
 
-	int ms = _bufferMs.load(std::memory_order_relaxed);
-	if (ms > 0 && _bufferActive.load(std::memory_order_relaxed)) {
-		// Buffer active — stage input, buffer thread flushes on tick
-		StagedInput& s = _staged[slot];
-		s.buttons = buttons;
-		s.lt = ltVal;
-		s.rt = rtVal;
-		s.dirty.store(true, std::memory_order_relaxed);
-	} else {
-		// No buffer — write directly (raw arcade mode)
-		kcode[slot] = buttons | 0xFFFF0000;
-		lt[slot] = (uint16_t)ltVal << 8;
-		rt[slot] = (uint16_t)rtVal << 8;
-	}
+	// Atomic write to gamepad globals — CMD9 reads these
+	kcode[slot] = buttons | 0xFFFF0000;  // active-low, upper 16 bits set
+	lt[slot] = (uint16_t)ltVal << 8;
+	rt[slot] = (uint16_t)rtVal << 8;
 
 	// Update player stats
 	PlayerInfo& p = _players[slot];
@@ -173,11 +129,12 @@ static void updateSlot(int slot, uint8_t ltVal, uint8_t rtVal, uint16_t buttons)
 	p.lt = ltVal;
 	p.rt = rtVal;
 
-	// Track state changes
+	// Track state changes (also drives idle-kick — see ws_server checkIdleKick)
 	if (buttons != p._prevButtons)
 	{
 		p._chgAccum++;
 		p._prevButtons = buttons;
+		p.lastChangeUs = now;
 	}
 	p.buttons = buttons;
 	p._pktAccum++;
@@ -239,6 +196,28 @@ static void udpThreadLoop(int port)
 			w3 = buf + 1;
 		}
 
+		// Forensics: first packet ever from this (ip, port) gets logged with
+		// full context. Subsequent packets from the same source are silent.
+		// Loopback (WS-forwarder) packets are skipped because they're our own
+		// traffic and the WS server already logs join/leave for those.
+		if (from.sin_addr.s_addr != htonl(INADDR_LOOPBACK))
+		{
+			uint64_t key = makeSourceKey(from.sin_addr.s_addr, from.sin_port);
+			bool firstTime = false;
+			{
+				std::lock_guard<std::mutex> lock(_seenUdpSourcesMutex);
+				firstTime = _seenUdpSources.insert(key).second;
+			}
+			if (firstTime)
+			{
+				uint32_t ip = ntohl(from.sin_addr.s_addr);
+				uint16_t btnState = ((uint16_t)w3[2] << 8) | w3[3];
+				printf("[input-server] FORENSIC: new UDP source %u.%u.%u.%u:%u — first packet (buttons=0x%04X len=%d)\n",
+					(ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF,
+					ntohs(from.sin_port), btnState, n);
+			}
+		}
+
 		// Web registration — any press from unregistered stick binds it
 		if (_webRegistering && from.sin_addr.s_addr != htonl(INADDR_LOOPBACK))
 		{
@@ -258,11 +237,14 @@ static void udpThreadLoop(int port)
 		}
 
 		// Update last input time for online tracking
-		for (auto& b : _stickBindings)
 		{
-			if (b.srcIP == from.sin_addr.s_addr) {
-				b.lastInputUs = nowUs();
-				break;
+			std::lock_guard<std::mutex> lock(_stickMutex);
+			for (auto& b : _stickBindings)
+			{
+				if (b.srcIP == from.sin_addr.s_addr) {
+					b.lastInputUs = nowUs();
+					break;
+				}
 			}
 		}
 
@@ -414,9 +396,14 @@ bool init(int udpPort)
 		return false;
 	}
 
+	// Rehydrate stick bindings from local hot-cache (~/.maplecast/sticks.json)
+	// before threads start so the very first UDP packet from a previously-
+	// registered stick routes correctly. Collector will overwrite this with
+	// authoritative DB state when it next connects.
+	loadStickCache();
+
 	_active = true;
 	_udpThread = std::thread(udpThreadLoop, udpPort);
-	_bufferThread = std::thread(bufferThreadLoop);
 
 	printf("[input-server] === READY === port %d\n", udpPort);
 	printf("[input-server] waiting for players (NOBD UDP or browser WebSocket)\n");
@@ -431,7 +418,6 @@ void shutdown()
 
 	if (_udpSock >= 0) { close(_udpSock); _udpSock = -1; }
 	if (_udpThread.joinable()) _udpThread.join();
-	if (_bufferThread.joinable()) _bufferThread.join();
 
 	printf("[input-server] shutdown\n");
 }
@@ -449,6 +435,10 @@ int registerPlayer(const char* id, const char* name, const char* device, InputTy
 			strncpy(_players[i].name, name, sizeof(_players[i].name) - 1);
 			strncpy(_players[i].device, device, sizeof(_players[i].device) - 1);
 			_players[i].type = type;
+			// Reset the idle-kick clock so a reconnect always gets a fresh
+			// grace period (otherwise a long-disconnected player would be
+			// kicked the moment they come back).
+			_players[i].lastChangeUs = nowUs();
 			printf("[input-server] P%d RECONNECTED: %s (%s)\n", i + 1, name, device);
 			return i;
 		}
@@ -464,6 +454,17 @@ int registerPlayer(const char* id, const char* name, const char* device, InputTy
 			_players[i].buttons = 0xFFFF;
 			_players[i]._prevButtons = 0xFFFF;
 			_players[i]._lastRateTime = nowUs();
+			// Seed lastChangeUs so the idle-kick clock starts from join time,
+			// not from whatever stale value the slot had previously.
+			_players[i].lastChangeUs = nowUs();
+			// Clear any leftover source binding from a prior tenant — the
+			// new player must explicitly bind a stick (via NOBD rhythm or
+			// web-register) to get hardware input routed to this slot. This
+			// is the second half of the disconnect-clears-srcIP fix: a fresh
+			// join must NOT inherit a ghost stick binding from whoever held
+			// the slot before us.
+			_players[i].srcIP = 0;
+			_players[i].srcPort = 0;
 			strncpy(_players[i].id, id, sizeof(_players[i].id) - 1);
 			strncpy(_players[i].name, name, sizeof(_players[i].name) - 1);
 			strncpy(_players[i].device, device, sizeof(_players[i].device) - 1);
@@ -486,9 +487,30 @@ void disconnectPlayer(int slot)
 
 	if (_players[slot].connected)
 	{
-		printf("[input-server] P%d DISCONNECTED: %s\n", slot + 1, _players[slot].name);
+		printf("[input-server] P%d DISCONNECTED: %s (was %u.%u.%u.%u:%u)\n",
+			slot + 1, _players[slot].name,
+			(ntohl(_players[slot].srcIP) >> 24) & 0xFF,
+			(ntohl(_players[slot].srcIP) >> 16) & 0xFF,
+			(ntohl(_players[slot].srcIP) >>  8) & 0xFF,
+			(ntohl(_players[slot].srcIP)      ) & 0xFF,
+			ntohs(_players[slot].srcPort));
+
 		_players[slot].connected = false;
 		_players[slot].type = InputType::None;
+
+		// CRITICAL: clear the source binding so a NOBD stick that was routing
+		// to this slot via findSlotByIP() stops doing so the moment the
+		// owning WebSocket disconnects. Without this, a stale srcIP from a
+		// previous session keeps the stick → slot binding alive forever and
+		// any browser that re-joins under a matching id silently inherits
+		// the orphan. This is the root of the "drifter ghost" class of bugs.
+		_players[slot].srcIP = 0;
+		_players[slot].srcPort = 0;
+
+		// Also clear the id so a stale getRegisteredBrowserId() match against
+		// the now-empty slot can't re-bind a stick by accident. The id is
+		// rewritten on the next registerPlayer() call from a real join.
+		_players[slot].id[0] = '\0';
 
 		// Reset gamepad state to neutral
 		kcode[slot] = 0xFFFFFFFF;
@@ -515,6 +537,22 @@ int connectedCount()
 	for (int i = 0; i < 2; i++)
 		if (_players[i].connected) count++;
 	return count;
+}
+
+int findIdlePlayer(int64_t thresholdUs)
+{
+	int64_t now = nowUs();
+	std::lock_guard<std::mutex> lock(_registryMutex);
+	for (int i = 0; i < 2; i++)
+	{
+		if (!_players[i].connected) continue;
+		// Skip slots that haven't established a baseline yet (lastChangeUs==0
+		// would otherwise look like decades-stale).
+		if (_players[i].lastChangeUs == 0) continue;
+		if (now - _players[i].lastChangeUs > thresholdUs)
+			return i;
+	}
+	return -1;
 }
 
 bool active()
@@ -544,6 +582,11 @@ bool isRegistering()
 
 const char* getRegisteredBrowserId(uint32_t srcIP, uint16_t srcPort)
 {
+	// Called from the UDP thread which is the only writer, so the
+	// pointer it returns is stable for the duration of one packet's
+	// processing. The lock guards against concurrent installs from
+	// the WS thread (collector pushes / cache loads).
+	std::lock_guard<std::mutex> lock(_stickMutex);
 	for (const auto& b : _stickBindings)
 		if (b.srcIP == srcIP)  // match by IP only, port can change
 			return b.browserId;
@@ -552,49 +595,89 @@ const char* getRegisteredBrowserId(uint32_t srcIP, uint16_t srcPort)
 
 const char* getRegisteredUsername(uint32_t srcIP, uint16_t srcPort)
 {
+	std::lock_guard<std::mutex> lock(_stickMutex);
 	for (const auto& b : _stickBindings)
 		if (b.srcIP == srcIP)
 			return b.username[0] ? b.username : b.browserId;
 	return nullptr;
 }
 
+// Append a StickEvent to the pending queue. Caller must hold _stickMutex.
+static void enqueueStickEventLocked(StickEventKind kind, const char* username,
+                                    uint32_t srcIP, uint16_t srcPort)
+{
+	StickEvent ev = {};
+	ev.kind = kind;
+	strncpy(ev.username, username, sizeof(ev.username) - 1);
+	ev.srcIP = srcIP;
+	ev.srcPort = srcPort;
+	ev.ts = (int64_t)time(nullptr);
+	_pendingStickEvents.push_back(ev);
+}
+
 void registerStick(uint32_t srcIP, uint16_t srcPort, const char* identifier)
 {
-	// Update existing binding for this IP, or existing binding for this username
-	for (auto& b : _stickBindings)
+	bool created = false;
 	{
-		if (b.srcIP == srcIP || strcmp(b.username, identifier) == 0 ||
-			strcmp(b.browserId, identifier) == 0) {
+		std::lock_guard<std::mutex> lock(_stickMutex);
+		bool updated = false;
+		// Update existing binding for this IP, or existing binding for this username
+		for (auto& b : _stickBindings)
+		{
+			if (b.srcIP == srcIP || strcmp(b.username, identifier) == 0 ||
+				strcmp(b.browserId, identifier) == 0) {
+				b.srcIP = srcIP;
+				b.srcPort = srcPort;
+				strncpy(b.username, identifier, sizeof(b.username) - 1);
+				strncpy(b.browserId, identifier, sizeof(b.browserId) - 1);
+				b.lastInputUs = nowUs();
+				b.wasOnline = true;
+				updated = true;
+				break;
+			}
+		}
+		if (!updated) {
+			StickBinding b = {};
 			b.srcIP = srcIP;
 			b.srcPort = srcPort;
 			strncpy(b.username, identifier, sizeof(b.username) - 1);
 			strncpy(b.browserId, identifier, sizeof(b.browserId) - 1);
 			b.lastInputUs = nowUs();
-			return;
+			b.wasOnline = true;
+			_stickBindings.push_back(b);
+			created = true;
 		}
+		enqueueStickEventLocked(StickEventKind::Register, identifier, srcIP, srcPort);
 	}
-	StickBinding b = {};
-	b.srcIP = srcIP;
-	b.srcPort = srcPort;
-	strncpy(b.username, identifier, sizeof(b.username) - 1);
-	strncpy(b.browserId, identifier, sizeof(b.browserId) - 1);
-	b.lastInputUs = nowUs();
-	_stickBindings.push_back(b);
+	(void)created;
+	saveStickCache();   // hot-cache survives flycast restart even if collector is down
 }
 
 void unregisterStick(const char* identifier)
 {
-	_stickBindings.erase(std::remove_if(_stickBindings.begin(), _stickBindings.end(),
-		[identifier](const StickBinding& b) {
-			return strcmp(b.browserId, identifier) == 0 ||
-			       strcmp(b.username, identifier) == 0;
-		}),
-		_stickBindings.end());
-	printf("[input-server] Stick unregistered for %s\n", identifier);
+	bool removed = false;
+	{
+		std::lock_guard<std::mutex> lock(_stickMutex);
+		auto it = std::remove_if(_stickBindings.begin(), _stickBindings.end(),
+			[identifier](const StickBinding& b) {
+				return strcmp(b.browserId, identifier) == 0 ||
+				       strcmp(b.username, identifier) == 0;
+			});
+		if (it != _stickBindings.end()) {
+			removed = true;
+			_stickBindings.erase(it, _stickBindings.end());
+			enqueueStickEventLocked(StickEventKind::Unregister, identifier, 0, 0);
+		}
+	}
+	if (removed) {
+		printf("[input-server] Stick unregistered for %s\n", identifier);
+		saveStickCache();
+	}
 }
 
 bool isStickOnline(const char* username)
 {
+	std::lock_guard<std::mutex> lock(_stickMutex);
 	int64_t now = nowUs();
 	for (const auto& b : _stickBindings)
 		if ((strcmp(b.username, username) == 0 || strcmp(b.browserId, username) == 0)
@@ -605,6 +688,7 @@ bool isStickOnline(const char* username)
 
 StickInfo getStickInfo(const char* username)
 {
+	std::lock_guard<std::mutex> lock(_stickMutex);
 	StickInfo info = {};
 	int64_t now = nowUs();
 	for (const auto& b : _stickBindings)
@@ -625,7 +709,195 @@ StickInfo getStickInfo(const char* username)
 
 int registeredStickCount()
 {
+	std::lock_guard<std::mutex> lock(_stickMutex);
 	return (int)_stickBindings.size();
+}
+
+// ==================== Stick persistence — public API ====================
+
+std::vector<StickEvent> drainStickEvents()
+{
+	std::lock_guard<std::mutex> lock(_stickMutex);
+
+	// Synthesize Online/Offline edge events from lastInputUs vs wasOnline.
+	// Cheap: at most 2 entries on the typical 2-stick install.
+	int64_t now = nowUs();
+	for (auto& b : _stickBindings)
+	{
+		bool onlineNow = (now - b.lastInputUs) < 10000000;
+		if (onlineNow != b.wasOnline)
+		{
+			enqueueStickEventLocked(
+				onlineNow ? StickEventKind::Online : StickEventKind::Offline,
+				b.username, b.srcIP, b.srcPort);
+			b.wasOnline = onlineNow;
+		}
+	}
+
+	std::vector<StickEvent> out;
+	out.swap(_pendingStickEvents);
+	return out;
+}
+
+std::vector<StickSnapshot> snapshotStickBindings()
+{
+	std::lock_guard<std::mutex> lock(_stickMutex);
+	std::vector<StickSnapshot> out;
+	out.reserve(_stickBindings.size());
+	for (const auto& b : _stickBindings) {
+		StickSnapshot s = {};
+		strncpy(s.username, b.username, sizeof(s.username) - 1);
+		s.srcIP = b.srcIP;
+		s.srcPort = b.srcPort;
+		s.lastInputUs = b.lastInputUs;
+		out.push_back(s);
+	}
+	return out;
+}
+
+void installStickBindings(const std::vector<StickSnapshot>& snapshots)
+{
+	{
+		std::lock_guard<std::mutex> lock(_stickMutex);
+		for (const auto& s : snapshots) {
+			if (!s.username[0]) continue;
+			bool found = false;
+			for (auto& b : _stickBindings) {
+				if (strcmp(b.username, s.username) == 0) {
+					b.srcIP = s.srcIP;
+					b.srcPort = s.srcPort;
+					if (s.lastInputUs > b.lastInputUs)
+						b.lastInputUs = s.lastInputUs;
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				StickBinding b = {};
+				strncpy(b.username, s.username, sizeof(b.username) - 1);
+				strncpy(b.browserId, s.username, sizeof(b.browserId) - 1);
+				b.srcIP = s.srcIP;
+				b.srcPort = s.srcPort;
+				b.lastInputUs = s.lastInputUs;
+				b.wasOnline = false;   // remote install — wait for first packet to flip
+				_stickBindings.push_back(b);
+			}
+		}
+	}
+	printf("[input-server] Installed %zu stick binding(s) from cache/collector\n",
+		snapshots.size());
+}
+
+// --- Local hot-cache (~/.maplecast/sticks.json) ---
+
+static std::string stickCachePath()
+{
+	const char* home = getenv("HOME");
+	if (!home || !*home) {
+		struct passwd* pw = getpwuid(getuid());
+		if (pw) home = pw->pw_dir;
+	}
+	if (!home || !*home) return std::string();
+	std::string dir = std::string(home) + "/.maplecast";
+	mkdir(dir.c_str(), 0700);   // EEXIST ignored
+	return dir + "/sticks.json";
+}
+
+bool saveStickCache()
+{
+	std::string path = stickCachePath();
+	if (path.empty()) return false;
+
+	auto snaps = snapshotStickBindings();   // takes its own lock
+
+	// Atomic write: temp + rename so a crash mid-write can't corrupt the cache.
+	std::string tmp = path + ".tmp";
+	std::ofstream f(tmp, std::ios::trunc);
+	if (!f) {
+		printf("[input-server] saveStickCache: cannot open %s\n", tmp.c_str());
+		return false;
+	}
+	f << "[\n";
+	for (size_t i = 0; i < snaps.size(); i++) {
+		const auto& s = snaps[i];
+		struct in_addr ia;
+		ia.s_addr = s.srcIP;
+		f << "  {\"username\":\"" << s.username
+		  << "\",\"ip\":\"" << inet_ntoa(ia)
+		  << "\",\"port\":" << ntohs(s.srcPort)
+		  << ",\"last_input_us\":" << s.lastInputUs
+		  << "}" << (i + 1 < snaps.size() ? "," : "") << "\n";
+	}
+	f << "]\n";
+	f.close();
+	if (rename(tmp.c_str(), path.c_str()) != 0) {
+		printf("[input-server] saveStickCache: rename failed: %s\n", strerror(errno));
+		return false;
+	}
+	return true;
+}
+
+bool loadStickCache()
+{
+	std::string path = stickCachePath();
+	if (path.empty()) return false;
+
+	std::ifstream f(path);
+	if (!f) return false;   // no cache yet — first run
+
+	std::stringstream ss;
+	ss << f.rdbuf();
+	std::string text = ss.str();
+
+	// Tiny hand-rolled parser to avoid pulling in nlohmann::json here. The
+	// file we just wrote ourselves is well-formed; if a user hand-edits it
+	// and breaks it, we silently fall through and start clean.
+	std::vector<StickSnapshot> loaded;
+	size_t pos = 0;
+	while ((pos = text.find('{', pos)) != std::string::npos) {
+		size_t end = text.find('}', pos);
+		if (end == std::string::npos) break;
+		std::string obj = text.substr(pos, end - pos + 1);
+		pos = end + 1;
+
+		auto extractStr = [&](const char* key, std::string& out) {
+			std::string needle = std::string("\"") + key + "\":\"";
+			size_t k = obj.find(needle);
+			if (k == std::string::npos) return false;
+			k += needle.size();
+			size_t e = obj.find('"', k);
+			if (e == std::string::npos) return false;
+			out = obj.substr(k, e - k);
+			return true;
+		};
+		auto extractNum = [&](const char* key, long long& out) {
+			std::string needle = std::string("\"") + key + "\":";
+			size_t k = obj.find(needle);
+			if (k == std::string::npos) return false;
+			k += needle.size();
+			out = strtoll(obj.c_str() + k, nullptr, 10);
+			return true;
+		};
+
+		std::string username, ip;
+		long long port = 0, lastInputUs = 0;
+		if (!extractStr("username", username) || !extractStr("ip", ip)) continue;
+		extractNum("port", port);
+		extractNum("last_input_us", lastInputUs);
+
+		StickSnapshot s = {};
+		strncpy(s.username, username.c_str(), sizeof(s.username) - 1);
+		s.srcIP = inet_addr(ip.c_str());
+		s.srcPort = htons((uint16_t)port);
+		s.lastInputUs = (int64_t)lastInputUs;
+		loaded.push_back(s);
+	}
+
+	if (!loaded.empty())
+		installStickBindings(loaded);
+	printf("[input-server] Loaded %zu stick binding(s) from %s\n",
+		loaded.size(), path.c_str());
+	return true;
 }
 
 // --- Web registration ---
@@ -673,75 +945,5 @@ bool isValidUsername(const char* name)
 	}
 	return len >= 4 && len <= 12;
 }
-
-// ==================== Input Buffer API ====================
-
-void setBufferMs(int ms)
-{
-	if (ms < 0) ms = 0;
-	if (ms > 16) ms = 16;  // cap at one frame
-	int prev = _bufferMs.exchange(ms);
-	_bufferActive.store(ms > 0, std::memory_order_relaxed);
-	if (ms != prev)
-		printf("[input-server] Input buffer: %dms (%s)\n", ms, ms > 0 ? "fairness" : "raw arcade");
-}
-
-int getBufferMs()
-{
-	return _bufferMs.load(std::memory_order_relaxed);
-}
-
-int getRecommendedBufferMs()
-{
-	// Compute from ping difference between connected players
-	// Uses half-RTT approximation from lastPacketUs jitter
-	if (!_players[0].connected || !_players[1].connected) return 0;
-
-	// Use packets-per-second as proxy: higher PPS = lower latency
-	// For actual ping, we'd need the WS pong RTT. For now, estimate
-	// from input type: NOBD = ~0ms, BrowserWS = use WS ping from status
-	int p1type = (_players[0].type == InputType::NobdUDP) ? 0 : 1;
-	int p2type = (_players[1].type == InputType::NobdUDP) ? 0 : 1;
-
-	// If both same type, small buffer. If mixed, larger buffer.
-	if (p1type == 0 && p2type == 0) return 0;   // both NOBD, no buffer needed
-	if (p1type == 1 && p2type == 1) return 3;   // both browser, small buffer
-	return 5;  // mixed NOBD + browser
-}
-
-void proposeBuffer(int ms)
-{
-	_negotiation.pending = true;
-	_negotiation.proposedMs = ms;
-	_negotiation.p1Accepted = false;
-	_negotiation.p2Accepted = false;
-	printf("[input-server] Buffer proposed: %dms\n", ms);
-}
-
-bool acceptBuffer(int slot)
-{
-	if (!_negotiation.pending) return false;
-	if (slot == 0) _negotiation.p1Accepted = true;
-	if (slot == 1) _negotiation.p2Accepted = true;
-
-	if (_negotiation.p1Accepted && _negotiation.p2Accepted) {
-		setBufferMs(_negotiation.proposedMs);
-		_negotiation.pending = false;
-		printf("[input-server] Buffer ACCEPTED by both: %dms\n", _negotiation.proposedMs);
-		return true;  // both accepted
-	}
-	return false;
-}
-
-void rejectBuffer(int slot)
-{
-	if (!_negotiation.pending) return;
-	_negotiation.pending = false;
-	setBufferMs(0);
-	printf("[input-server] Buffer REJECTED by P%d — raw arcade mode\n", slot + 1);
-}
-
-bool isBufferPending() { return _negotiation.pending; }
-int getProposedBufferMs() { return _negotiation.proposedMs; }
 
 } // namespace maplecast_input

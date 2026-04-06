@@ -3,6 +3,19 @@
 -- Every combo, every clutch, every bodying is recorded forever.
 
 -- ============================================================
+-- ONE-TIME CLEANUP — drop legacy stick schema (mac-keyed) so the
+-- new username-keyed definition below is the only authority. Safe
+-- to re-run: REMOVE on a missing object is silently ignored, and
+-- the field re-DEFINE below uses OVERWRITE for the type change on
+-- `mac` (string → option<string>). DELETE wipes any rows that
+-- pre-date the username field — empty in production at write time,
+-- so nothing of value is lost.
+-- ============================================================
+REMOVE INDEX idx_mac ON TABLE stick;
+DELETE stick;
+DELETE owns;
+
+-- ============================================================
 -- RANK TIERS (ELO-based, inspired by SF6/Tekken)
 -- ============================================================
 -- Rookie:       0-499
@@ -59,16 +72,23 @@ DEFINE INDEX idx_username ON player FIELDS username UNIQUE;
 DEFINE INDEX idx_rating   ON player FIELDS rating;
 
 -- ============================================================
--- STICKS — hardware identity, bound to players
+-- STICKS — hardware identity, bound to players (canonical key: username)
 -- ============================================================
+-- One stick per user. Record id is `stick:<username>` so upserts from the
+-- collector are idempotent. ip/port are mutable observed-state (refreshed
+-- whenever flycast sees a new packet from the bound source). mac is reserved
+-- for a future firmware change that bakes a hardware UID into UDP handshake.
 DEFINE TABLE stick SCHEMAFULL;
-DEFINE FIELD mac         ON stick TYPE string;
+DEFINE FIELD username    ON stick TYPE string ASSERT string::len($value) >= 4 AND string::len($value) <= 16;
 DEFINE FIELD ip          ON stick TYPE string;
 DEFINE FIELD port        ON stick TYPE int;
+-- mac was previously TYPE string (required, indexed) — OVERWRITE so the type
+-- change to option<string> applies cleanly when re-running on an existing DB.
+DEFINE FIELD OVERWRITE mac ON stick TYPE option<string>;
+DEFINE FIELD OVERWRITE firmware ON stick TYPE option<string>;
 DEFINE FIELD registered  ON stick TYPE datetime DEFAULT time::now();
 DEFINE FIELD last_input  ON stick TYPE datetime DEFAULT time::now();
-DEFINE FIELD firmware    ON stick TYPE option<string>;
-DEFINE INDEX idx_mac     ON stick FIELDS mac UNIQUE;
+DEFINE INDEX idx_stick_user ON stick FIELDS username UNIQUE;
 
 DEFINE TABLE owns SCHEMAFULL TYPE RELATION FROM player TO stick;
 DEFINE FIELD since ON owns TYPE datetime DEFAULT time::now();
@@ -190,7 +210,10 @@ DEFINE FIELD value     ON earned TYPE option<int>;       -- the stat value when 
 DEFINE TABLE game_event SCHEMAFULL;
 DEFINE FIELD ts       ON game_event TYPE datetime DEFAULT time::now();
 DEFINE FIELD kind     ON game_event TYPE string;
-DEFINE FIELD data     ON game_event TYPE option<object>;
+-- FLEXIBLE: collector writes ad-hoc match metadata (winner, p1_team, combos…)
+-- under `data` and we don't want to enumerate every possible key here.
+-- OVERWRITE: idempotent across collector restarts.
+DEFINE FIELD OVERWRITE data ON game_event TYPE option<object> FLEXIBLE;
 
 -- ============================================================
 -- SEED: BADGE DEFINITIONS

@@ -9,6 +9,7 @@
 */
 #pragma once
 #include <cstdint>
+#include <vector>
 
 namespace maplecast_input
 {
@@ -30,6 +31,7 @@ struct PlayerInfo {
 
 	// Latency tracking
 	int64_t lastPacketUs; // timestamp of last received packet
+	int64_t lastChangeUs; // timestamp of last button-state change (idle detection)
 	int64_t avgE2eUs;     // rolling average E2E latency
 	int64_t avgJitterUs;  // rolling average jitter
 	uint32_t packetsPerSec;
@@ -59,6 +61,12 @@ const PlayerInfo& getPlayer(int slot);
 
 // Get number of connected players
 int connectedCount();
+
+// Idle detection — returns the lowest connected slot that hasn't sent a
+// button-state CHANGE in `thresholdUs` microseconds, or -1 if everyone
+// is fresh. Pps (gamepad poll rate) is ignored — we only care about
+// changes, so a player holding nothing still counts as idle.
+int findIdlePlayer(int64_t thresholdUs);
 
 // Called by WebSocket message handler to inject browser gamepad input
 void injectInput(int slot, uint8_t lt, uint8_t rt, uint16_t buttons);
@@ -111,22 +119,43 @@ int registeredStickCount();
 // Validate username: 4-12 chars, [a-zA-Z0-9_] only
 bool isValidUsername(const char* name);
 
-// ==================== Input Buffer (Fairness) ====================
-// Coalesces inputs into N-ms windows so ping differences between players
-// don't give one side a frame advantage. 0 = raw arcade mode (no delay).
+// ==================== Stick persistence ====================
+// Bindings live in RAM in this process. Persistence flows out through
+// the WebSocket layer to the Rust collector, which mirrors them to
+// SurrealDB. On boot we also rehydrate from a local JSON hot-cache so
+// flycast survives a restart even if the collector is briefly down.
 
-// Set/get the current buffer window (0-16ms, capped at one frame)
-void setBufferMs(int ms);
-int getBufferMs();
+enum class StickEventKind { Register, Unregister, Online, Offline };
+struct StickEvent {
+    StickEventKind kind;
+    char username[16];
+    uint32_t srcIP;       // network byte order
+    uint16_t srcPort;     // network byte order
+    int64_t  ts;          // unix seconds
+};
+// Returns and clears the pending event queue. Called by the ws server
+// each time it has a place to push events out (immediately on registration
+// since rare, or on the periodic status broadcast).
+std::vector<StickEvent> drainStickEvents();
 
-// Compute recommended buffer from current player ping difference
-int getRecommendedBufferMs();
+// Snapshot all current bindings (for hot-cache writer / debugging).
+struct StickSnapshot {
+    char username[16];
+    uint32_t srcIP;
+    uint16_t srcPort;
+    int64_t lastInputUs;
+};
+std::vector<StickSnapshot> snapshotStickBindings();
 
-// Per-match negotiation: server proposes, both players accept/reject
-void proposeBuffer(int ms);
-bool acceptBuffer(int slot);    // returns true when BOTH accepted
-void rejectBuffer(int slot);
-bool isBufferPending();
-int getProposedBufferMs();
+// Bulk install bindings from local cache or from a `stick_load` push by
+// the collector. Existing bindings for the same username are overwritten.
+// Does NOT emit StickEvents — these are already persisted upstream.
+void installStickBindings(const std::vector<StickSnapshot>& snapshots);
+
+// Local hot-cache I/O. Path: ~/.maplecast/sticks.json. Rewritten on every
+// register/unregister so a flycast crash loses at most the in-flight
+// transition. loadStickCache() is safe to call before init().
+bool loadStickCache();
+bool saveStickCache();
 
 }

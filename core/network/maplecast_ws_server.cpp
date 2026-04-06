@@ -33,6 +33,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <strings.h>   // strcasecmp
 #include <unistd.h>
 #endif
 
@@ -90,6 +91,67 @@ static std::vector<QueueEntry> _queue;
 static bool _matchActive = false;
 static bool _matchEndHandled = false;
 static int64_t _matchEndTime = 0; // when match ended (for delay before kick)
+static int _pendingKickSlot = -1; // loser slot to evict if client doesn't self-disconnect
+
+// Idle-kick threshold: a connected player who hasn't sent a button-state
+// CHANGE in this many microseconds gets evicted from their slot. The clock
+// is seeded fresh on join/reconnect so a slow joiner has the full window.
+static constexpr int64_t IDLE_KICK_THRESHOLD_US = 30LL * 1000000LL;
+
+// Forward declaration — defined further down, used by checkMatchEnd().
+static void broadcastStatus();
+
+// Server-side eviction primitive used by both the loser-kick path and the
+// idle-kick path. Cleans up _connSlot, calls input::disconnectPlayer, and
+// pushes {kicked, reason} + {assigned, slot:-1} to the evicted client so its
+// UI resets without waiting for an onClose. Returns true if a slot was kicked.
+//
+// `slot`   — which player slot to evict (0 or 1)
+// `reason` — short token sent to the client ("match_lost", "idle", ...)
+static bool kickSlot(int slot, const char* reason)
+{
+	if (slot < 0 || slot > 1) return false;
+	const auto& p = maplecast_input::getPlayer(slot);
+	if (!p.connected) return false;
+
+	printf("[maplecast-ws] SERVER KICK: P%d (%s) — reason=%s\n",
+		slot + 1, p.name, reason);
+
+	// Walk _connSlot looking for the connection bound to this slot, drop the
+	// mapping, and resolve a ConnHdl so we can send a kicked message.
+	ConnHdl evictedConn;
+	bool foundConn = false;
+	{
+		std::lock_guard<std::mutex> lock(_connMutex);
+		for (auto it = _connSlot.begin(); it != _connSlot.end(); ) {
+			if (it->second == slot) {
+				for (const auto& c : _connections) {
+					try {
+						if ((void*)_ws.get_con_from_hdl(c).get() == it->first) {
+							evictedConn = c;
+							foundConn = true;
+							break;
+						}
+					} catch (...) {}
+				}
+				it = _connSlot.erase(it);
+			} else {
+				++it;
+			}
+		}
+	}
+
+	maplecast_input::disconnectPlayer(slot);
+	maplecast_gamestate::restorePlayerNames();
+
+	if (foundConn) {
+		json kickMsg = {{"type", "kicked"}, {"reason", reason}};
+		try { _ws.send(evictedConn, kickMsg.dump(), websocketpp::frame::opcode::text); } catch (...) {}
+		json reset = {{"type", "assigned"}, {"slot", -1}};
+		try { _ws.send(evictedConn, reset.dump(), websocketpp::frame::opcode::text); } catch (...) {}
+	}
+	return true;
+}
 
 // Telemetry from mirror publish
 static Telemetry _telemetry{};
@@ -116,6 +178,16 @@ static json getStatus()
 		if (!p.connected)
 			return nullptr;
 		const char* typeStr = (p.type == maplecast_input::InputType::NobdUDP) ? "hardware" : "browser";
+		// Render the input source's IP/port for forensics. srcIP/srcPort
+		// are network byte order; for slots that have never received a
+		// non-loopback packet they're zero.
+		std::string srcIpStr;
+		int srcPortVal = 0;
+		if (p.srcIP != 0) {
+			struct in_addr ia; ia.s_addr = p.srcIP;
+			srcIpStr = inet_ntoa(ia);
+			srcPortVal = ntohs(p.srcPort);
+		}
 		return {
 			{"id", std::string(p.id).substr(0, 8)},
 			{"name", std::string(p.name)},
@@ -123,7 +195,9 @@ static json getStatus()
 			{"connected", true},
 			{"type", typeStr},
 			{"pps", p.packetsPerSec},
-			{"cps", p.changesPerSec}
+			{"cps", p.changesPerSec},
+			{"src_ip", srcIpStr},
+			{"src_port", srcPortVal}
 		};
 	};
 	int players = (maplecast_input::getPlayer(0).connected ? 1 : 0)
@@ -170,8 +244,6 @@ static json getStatus()
 	status["sticks"] = maplecast_input::registeredStickCount();
 	status["relay_seeds"] = seedCount;
 	status["relay_nodes"] = treeSize;
-	status["input_buffer_ms"] = maplecast_input::getBufferMs();
-	status["buffer_pending"] = maplecast_input::isBufferPending();
 
 	// Game state for leaderboard/stats
 	maplecast_gamestate::GameState gs;
@@ -205,6 +277,38 @@ static json getStatus()
 	return status;
 }
 
+// Idle-kick — evict any player who hasn't pressed a button in 30 seconds.
+// Runs from the status thread at 1Hz alongside checkMatchEnd. Decision is
+// based on `lastChangeUs` (button-state changes), not raw packet rate, so a
+// player whose stick polls at 250Hz but never presses anything still counts
+// as idle. Promotes the next queue head into the freed slot.
+static void checkIdleKick()
+{
+	int slot = maplecast_input::findIdlePlayer(IDLE_KICK_THRESHOLD_US);
+	if (slot < 0) return;
+
+	bool kicked = kickSlot(slot, "idle");
+	if (!kicked) return;
+
+	// Promote queue head if there is one (mirrors the post-match loop).
+	std::string nextName;
+	{
+		std::lock_guard<std::mutex> lock(_connMutex);
+		if (!_queue.empty()) {
+			auto& next = _queue.front();
+			nextName = next.name;
+			json yourTurn;
+			yourTurn["type"] = "your_turn";
+			yourTurn["msg"] = "It's your turn! The cabinet is open.";
+			try { _ws.send(next.conn, yourTurn.dump(), websocketpp::frame::opcode::text); } catch (...) {}
+		}
+	}
+	if (!nextName.empty())
+		printf("[maplecast-ws] Notified %s: idle slot freed up\n", nextName.c_str());
+
+	broadcastStatus();
+}
+
 static void checkMatchEnd()
 {
 	maplecast_gamestate::GameState gs;
@@ -225,6 +329,7 @@ static void checkMatchEnd()
 
 			int loserSlot = p1dead ? 0 : 1;
 			int winnerSlot = p1dead ? 1 : 0;
+			_pendingKickSlot = loserSlot;
 			const auto& loser = maplecast_input::getPlayer(loserSlot);
 			const auto& winner = maplecast_input::getPlayer(winnerSlot);
 			printf("[maplecast-ws] MATCH END: P%d (%s) wins! P%d (%s) eliminated.\n",
@@ -248,28 +353,23 @@ static void checkMatchEnd()
 	else if (_matchActive && _matchEndHandled)
 	{
 		// Match ended and game returned to non-match state (character select, etc.)
-		// Wait 3 seconds after match end, then kick loser and promote next in queue
+		// Client gets 3s grace via match_end → leaveGame() self-disconnect.
+		// Server kicks at 5s as a safety net (closed tab, killed JS, malicious client).
 		int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
 			std::chrono::high_resolution_clock::now().time_since_epoch()).count();
 
-		if (now - _matchEndTime > 3000) {
+		if (now - _matchEndTime > 5000) {
 			_matchActive = false;
 
-			// Find loser's slot (the one who had all chars dead)
-			// Re-read to confirm
-			maplecast_gamestate::GameState gs2;
-			maplecast_gamestate::readGameState(gs2);
-			// The loser was already determined — disconnect them
-			// Both players might have been disconnected by now, check
-			for (int slot = 0; slot < 2; slot++) {
-				const auto& p = maplecast_input::getPlayer(slot);
-				if (!p.connected) continue;
-
-				// If queue is empty, don't kick anyone (winner stays on)
-				if (_queue.empty()) break;
+			// King-of-the-hill: only evict loser if someone is waiting in queue.
+			// Empty queue → winner stays on, loser keeps slot for rematch.
+			bool kicked = false;
+			if (!_queue.empty() && _pendingKickSlot >= 0) {
+				kicked = kickSlot(_pendingKickSlot, "match_lost");
 			}
+			_pendingKickSlot = -1;
 
-			// Simpler: notify the first person in queue it's their turn
+			// Notify the first person in queue it's their turn (slot is now free if we kicked).
 			if (!_queue.empty()) {
 				auto next = _queue.front();
 				json yourTurn;
@@ -278,8 +378,12 @@ static void checkMatchEnd()
 				try {
 					_ws.send(next.conn, yourTurn.dump(), websocketpp::frame::opcode::text);
 				} catch (...) {}
-				printf("[maplecast-ws] Notified %s: it's your turn!\n", next.name.c_str());
+				printf("[maplecast-ws] Notified %s: it's your turn!%s\n",
+					next.name.c_str(), kicked ? " (loser kicked)" : "");
 			}
+
+			if (kicked)
+				broadcastStatus();
 		}
 	}
 }
@@ -404,8 +508,51 @@ static void removeFromTree(const std::string& peerId)
 	printf("[relay] %s removed from tree, %d orphans reassigned\n", peerId.c_str(), (int)orphans.size());
 }
 
+static const char* stickEventKindStr(maplecast_input::StickEventKind k)
+{
+	using K = maplecast_input::StickEventKind;
+	switch (k) {
+		case K::Register:   return "register";
+		case K::Unregister: return "unregister";
+		case K::Online:     return "online";
+		case K::Offline:    return "offline";
+	}
+	return "unknown";
+}
+
+static void broadcastStickEvents()
+{
+	auto events = maplecast_input::drainStickEvents();
+	if (events.empty()) return;
+
+	json msg;
+	msg["type"] = "stick_event";
+	msg["events"] = json::array();
+	for (const auto& ev : events) {
+		struct in_addr ia; ia.s_addr = ev.srcIP;
+		msg["events"].push_back({
+			{"kind",     stickEventKindStr(ev.kind)},
+			{"username", ev.username},
+			{"ip",       inet_ntoa(ia)},
+			{"port",     ntohs(ev.srcPort)},
+			{"ts",       ev.ts},
+		});
+	}
+	std::string s = msg.dump();
+	std::lock_guard<std::mutex> lock(_connMutex);
+	for (auto& conn : _connections)
+	{
+		try { _ws.send(conn, s, websocketpp::frame::opcode::text); }
+		catch (...) {}
+	}
+}
+
 static void broadcastStatus()
 {
+	// Drain stick events first so reload-detect / DB persistence reach
+	// listeners (collector + browsers) on every status tick.
+	broadcastStickEvents();
+
 	std::string status = getStatus().dump();
 	std::lock_guard<std::mutex> lock(_connMutex);
 	for (auto& conn : _connections)
@@ -468,8 +615,6 @@ static void onClose(ConnHdl hdl)
 	int slot = getSlotForConn(hdl);
 	if (slot >= 0) {
 		maplecast_input::disconnectPlayer(slot);
-		// Reset buffer when a player leaves
-		maplecast_input::setBufferMs(0);
 	}
 
 	void* key = nullptr;
@@ -546,6 +691,29 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 				std::string name = ctrl.value("name", "Player");
 				std::string device = ctrl.value("device", "Browser");
 
+				// Ghost-slot eviction: if a slot is currently held by a player
+				// with the same display name (case-insensitive), this is almost
+				// certainly the same human reconnecting from a new tab. Free
+				// the old slot first so they get their seat back instead of
+				// being double-booked into the *other* slot. Skip when name is
+				// the generic fallback.
+				if (!name.empty() && name != "Player") {
+					for (int i = 0; i < 2; i++) {
+						const auto& p = maplecast_input::getPlayer(i);
+						if (p.connected && strcasecmp(p.name, name.c_str()) == 0) {
+							printf("[maplecast-ws] Ghost-slot eviction: P%d (%s) freed for reconnect\n",
+								i + 1, p.name);
+							maplecast_input::disconnectPlayer(i);
+							// Drop the stale conn→slot mapping if any
+							for (auto it = _connSlot.begin(); it != _connSlot.end(); ) {
+								if (it->second == i) it = _connSlot.erase(it);
+								else ++it;
+							}
+							break;
+						}
+					}
+				}
+
 				int slot = maplecast_input::registerPlayer(
 					playerId.c_str(), name.c_str(), device.c_str(),
 					maplecast_input::InputType::BrowserWS);
@@ -572,21 +740,6 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 				// Patch in-game player name
 				if (slot >= 0)
 					maplecast_gamestate::setPlayerName(slot, name.c_str());
-
-				// Auto-propose buffer when both players are connected
-				if (maplecast_input::connectedCount() == 2 && !maplecast_input::isBufferPending()) {
-					int rec = maplecast_input::getRecommendedBufferMs();
-					if (rec > 0) {
-						maplecast_input::proposeBuffer(rec);
-						json prop = {{"type", "buffer_propose"}, {"ms", rec},
-							{"p1_type", maplecast_input::getPlayer(0).type == maplecast_input::InputType::NobdUDP ? "hardware" : "browser"},
-							{"p2_type", maplecast_input::getPlayer(1).type == maplecast_input::InputType::NobdUDP ? "hardware" : "browser"}};
-						std::string propStr = prop.dump();
-						std::lock_guard<std::mutex> lock2(_connMutex);
-						for (auto& conn : _connections)
-							try { _ws.send(conn, propStr, websocketpp::frame::opcode::text); } catch (...) {}
-					}
-				}
 
 				// Broadcast updated status to all
 				broadcastStatus();
@@ -671,16 +824,56 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 			}
 			else if (ctrl["type"] == "check_stick")
 			{
-				// Check if a username has a registered stick and if it's online
+				// Reports: do you own a stick, is it online, and are you
+				// already in a slot. The slot field is the missing piece
+				// that lets a reloaded browser tab resync to its existing
+				// player without clicking I GOT NEXT (which would otherwise
+				// double-book the user into the other slot).
 				std::string username = ctrl.value("username", "");
 				auto info = maplecast_input::getStickInfo(username.c_str());
+				int currentSlot = -1;
+				for (int i = 0; i < 2; i++) {
+					const auto& p = maplecast_input::getPlayer(i);
+					if (p.connected && strcasecmp(p.name, username.c_str()) == 0) {
+						currentSlot = i;
+						break;
+					}
+				}
 				json resp = {
 					{"type", "stick_status"},
 					{"username", username},
 					{"registered", info.registered},
-					{"online", info.online}
+					{"online", info.online},
+					{"slot", currentSlot}
 				};
 				_ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text);
+			}
+			else if (ctrl["type"] == "stick_load")
+			{
+				// Collector boot-time push: authoritative DB state replaces
+				// whatever we have in RAM (well — installs, doesn't wipe;
+				// see installStickBindings). Trusted source, so no auth check
+				// here yet — relies on collector being on the same WS:7200
+				// link that already requires being on-host or going through
+				// our nginx auth.
+				if (ctrl.contains("bindings") && ctrl["bindings"].is_array()) {
+					std::vector<maplecast_input::StickSnapshot> snaps;
+					for (const auto& b : ctrl["bindings"]) {
+						maplecast_input::StickSnapshot s = {};
+						std::string user = b.value("username", "");
+						std::string ip   = b.value("ip", "");
+						int port         = b.value("port", 0);
+						strncpy(s.username, user.c_str(), sizeof(s.username) - 1);
+						s.srcIP = inet_addr(ip.c_str());
+						s.srcPort = htons((uint16_t)port);
+						s.lastInputUs = 0;
+						if (s.username[0] && s.srcIP)
+							snaps.push_back(s);
+					}
+					maplecast_input::installStickBindings(snaps);
+					maplecast_input::saveStickCache();
+					printf("[maplecast-ws] stick_load applied: %zu binding(s)\n", snaps.size());
+				}
 			}
 			else if (ctrl["type"] == "patch_name")
 			{
@@ -780,59 +973,6 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 			{
 				// Health report from relay node — log for now
 			}
-			// ==================== Input Buffer Negotiation ====================
-			else if (ctrl["type"] == "buffer_propose")
-			{
-				// Server or admin triggers negotiation
-				int ms = ctrl.value("ms", -1);
-				if (ms < 0) ms = maplecast_input::getRecommendedBufferMs();
-				maplecast_input::proposeBuffer(ms);
-
-				// Notify both players
-				json prop = {{"type", "buffer_propose"},
-					{"ms", ms},
-					{"p1_type", maplecast_input::getPlayer(0).connected ?
-						(maplecast_input::getPlayer(0).type == maplecast_input::InputType::NobdUDP ? "hardware" : "browser") : "none"},
-					{"p2_type", maplecast_input::getPlayer(1).connected ?
-						(maplecast_input::getPlayer(1).type == maplecast_input::InputType::NobdUDP ? "hardware" : "browser") : "none"}};
-				std::string propStr = prop.dump();
-				std::lock_guard<std::mutex> lock(_connMutex);
-				for (auto& conn : _connections)
-					try { _ws.send(conn, propStr, websocketpp::frame::opcode::text); } catch (...) {}
-			}
-			else if (ctrl["type"] == "buffer_accept")
-			{
-				int slot = getSlotForConn(hdl);
-				if (slot >= 0) {
-					bool both = maplecast_input::acceptBuffer(slot);
-					if (both) {
-						// Notify all clients that buffer is active
-						json msg = {{"type", "buffer_active"}, {"ms", maplecast_input::getBufferMs()}};
-						std::string s = msg.dump();
-						std::lock_guard<std::mutex> lock(_connMutex);
-						for (auto& conn : _connections)
-							try { _ws.send(conn, s, websocketpp::frame::opcode::text); } catch (...) {}
-					}
-				}
-			}
-			else if (ctrl["type"] == "buffer_reject")
-			{
-				int slot = getSlotForConn(hdl);
-				if (slot >= 0) {
-					maplecast_input::rejectBuffer(slot);
-					json msg = {{"type", "buffer_rejected"}, {"slot", slot}};
-					std::string s = msg.dump();
-					std::lock_guard<std::mutex> lock(_connMutex);
-					for (auto& conn : _connections)
-						try { _ws.send(conn, s, websocketpp::frame::opcode::text); } catch (...) {}
-				}
-			}
-			else if (ctrl["type"] == "buffer_set")
-			{
-				// Direct set (admin/debug)
-				int ms = ctrl.value("ms", 0);
-				maplecast_input::setBufferMs(ms);
-			}
 			else if (ctrl["type"] == "cancel_register")
 			{
 				maplecast_input::cancelStickRegistration();
@@ -898,6 +1038,7 @@ bool init(int port)
 				std::this_thread::sleep_for(std::chrono::seconds(1));
 				if (_active && _clientCount.load() > 0) {
 					checkMatchEnd();
+					checkIdleKick();
 					broadcastStatus();
 				}
 			}
