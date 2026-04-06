@@ -30,11 +30,29 @@ let _gl = null;
 let _syncBuf = null;
 let _glStateInit = false;
 
+// Telemetry counters — read by telemetry.mjs each tick. Module-local to keep
+// the hot path branch-free (no state.diag lookups per frame).
+export const _telemetry = {
+  framesRendered: 0,        // total frames pushed to GPU since init
+  bytesReceived: 0,         // total bytes of frame data
+  syncCount: 0,             // total SYNCs applied
+  lastFrameAt: 0,           // performance.now() of last frame render
+  lastSyncAt: 0,
+  // Inter-frame interval rolling stats (microseconds)
+  intervalSumUs: 0,
+  intervalCount: 0,
+  intervalMaxUs: 0,
+};
+
 export async function initRenderer() {
   try {
     const Module = await createRenderer({
       canvas: document.getElementById('game-canvas'),
-      locateFile: (path) => `./${path}?v=zstd1`,
+      // !!! BUMP THIS STRING after every renderer.wasm rebuild !!!
+      // nginx serves the wasm with max-age + ETag. Without bumping the query
+      // string, browsers will serve a cached wasm and your fix won't appear.
+      // (See big comment block above handleBinaryFrame for the full story.)
+      locateFile: (path) => `./${path}?v=parity1`,
     });
 
     if (!Module._renderer_init(640, 480)) throw new Error('renderer_init failed');
@@ -63,6 +81,43 @@ export async function initRenderer() {
 // HOT PATH — render IMMEDIATELY on WS frame arrival. Zero buffer.
 // Every frame from the server hits the GPU the instant it arrives.
 // Browser compositor double-buffers and presents at vsync automatically.
+// ============================================================================
+//
+// !!! FRAGILE — READ BEFORE EDITING !!!
+//
+// This is the JS half of the king.html render path. The C++ half lives in
+// packages/renderer/src/wasm_bridge.cpp (renderer_frame / renderer_sync).
+// They MUST stay aligned with the wire format defined by the server in
+// core/network/maplecast_mirror.cpp serverPublish().
+//
+// Common pitfalls:
+//
+//   1. CACHE BUSTING. After ANY rebuild of renderer.wasm, bump the `?v=...`
+//      string in locateFile() above. Without that, browsers will cheerfully
+//      serve a stale wasm forever (nginx caches with ETag, Chrome
+//      respects max-age, and EmulatorJS keeps its own IndexedDB cache).
+//      You will swear your fix didn't land. It did. The browser is lying.
+//
+//   2. SYNC vs DELTA discrimination is by magic + size. SYNC = "SYNC" or
+//      "ZCST" with uncompressedSize > 1MB. DELTA = anything else with ZCST
+//      or raw bytes. Don't add a third type without updating server +
+//      desktop client + both WASM bridges + the Rust relay.
+//
+//   3. MAX_FRAME = 512KB. Compressed deltas are 6-15KB so this is fine.
+//      If you ever see uncompressed deltas, this limit will silently drop
+//      frames > 512KB. Compressed SYNC uses _syncBuf (16MB), separate.
+//
+//   4. The wasm bridge expects the buffer at offset _buf to contain raw wire
+//      bytes — DO NOT pre-decompress or pre-parse them in JS. The WASM does
+//      its own zstd decode. relay.js comments say so explicitly.
+//
+//   5. Black screen with one SYNC log and no KEYFRAME log usually means the
+//      RELAY has lost its upstream connection to home flycast — not a JS or
+//      WASM bug. Check `ssh root@66.55.128.93 journalctl -u maplecast-relay`.
+//      Look for "Lost upstream connection" or "Connection refused".
+//
+// See docs/ARCHITECTURE.md "Mirror Wire Format — Rules of the Road" for the
+// canonical list of rules all four parsers must obey.
 // ============================================================================
 
 export function handleBinaryFrame(buffer) {
@@ -96,6 +151,9 @@ export function handleBinaryFrame(buffer) {
     document.body.classList.add('streaming');
     state.rendererStreaming = true;
     _glStateInit = false;
+    _telemetry.syncCount++;
+    _telemetry.lastSyncAt = performance.now();
+    _telemetry.bytesReceived += len;
     return;
   }
 
@@ -114,6 +172,18 @@ export function handleBinaryFrame(buffer) {
 
   _wasm._renderer_frame(_buf, len);
   state.connState = 'LIVE';
+
+  // Telemetry — track render rate and inter-frame jitter
+  const now = performance.now();
+  if (_telemetry.lastFrameAt > 0) {
+    const intervalUs = (now - _telemetry.lastFrameAt) * 1000;
+    _telemetry.intervalSumUs += intervalUs;
+    _telemetry.intervalCount++;
+    if (intervalUs > _telemetry.intervalMaxUs) _telemetry.intervalMaxUs = intervalUs;
+  }
+  _telemetry.lastFrameAt = now;
+  _telemetry.framesRendered++;
+  _telemetry.bytesReceived += len;
 }
 
 export function setOpt(opt, val) {

@@ -20,6 +20,7 @@ mod fanout;
 mod signaling;
 mod turn;
 mod auth_api;
+mod client_telemetry;
 
 use clap::Parser;
 use std::net::SocketAddr;
@@ -84,6 +85,7 @@ async fn main() {
     info!("Max clients: {}", args.max_clients);
 
     let state = fanout::RelayState::new(args.max_clients);
+    let telemetry = client_telemetry::ClientTelemetry::new();
     let ws_addr: SocketAddr = args.ws_listen.parse().expect("invalid ws_listen address");
     let http_addr: SocketAddr = args.http_listen.parse().expect("invalid http_listen address");
 
@@ -92,13 +94,14 @@ async fn main() {
     let secret = args.turn_secret.clone();
     let host = args.turn_host.clone();
     let state_http = state.clone();
+    let telemetry_http = telemetry.clone();
     info!(
-        "HTTP endpoint: {} (/metrics /health{})",
+        "HTTP endpoint: {} (/metrics /health /api{})",
         http_addr,
         if secret.is_some() { " /turn-cred" } else { "" }
     );
     let http_task = Some(tokio::spawn(async move {
-        if let Err(e) = turn::http_listener(http_addr, secret, host, state_http).await {
+        if let Err(e) = turn::http_listener(http_addr, secret, host, state_http, telemetry_http).await {
             error!("HTTP listener exited: {:?}", e);
         }
     }));

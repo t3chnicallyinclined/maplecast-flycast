@@ -2021,12 +2021,12 @@ import { openSignIn, closeSignIn, confirmSignIn, signOut, showUserBadge,
 import { toggleSettings, applyCSSEffects, presetMaxPerformance,
          presetArcade, presetMaxQuality, loadRenderSettings, applyLoadedSettings } from './js/settings.mjs';
 import { toggleDiag, startDiagInterval } from './js/diagnostics.mjs';
-import { registerStick, unregisterStick, updateStickButtons } from './js/gamepad.mjs';
 import { openProfile, closeProfile, switchProfileTab } from './js/profile.mjs';
 import { setupKeyboardShortcuts } from './js/demo.mjs';
 import { surrealFetchProfile } from './js/surreal.mjs';
 import { initRelay } from './js/relay-bootstrap.mjs';
 import { startTicker } from './js/ticker.mjs';
+import { startTelemetry } from './js/telemetry.mjs';
 
 // Expose to inline onclick handlers in HTML
 window.openSignIn = openSignIn;
@@ -2043,8 +2043,6 @@ window.switchTab = switchTab;
 window.gotNext = gotNext;
 window.leaveQueue = leaveQueue;
 window.leaveGame = leaveGame;
-window.registerStick = registerStick;
-window.unregisterStick = unregisterStick;
 window.sendChat = sendChat;
 window.sendReaction = sendReaction;
 window.toggleSettings = toggleSettings;
@@ -2080,7 +2078,7 @@ if (savedName && !state.signedIn) {
   state.signedIn = true;
   await surrealFetchProfile(state.myName);
   showUserBadge();
-  updateStickButtons();
+  updateCabinetControls();
 }
 
 // Start services
@@ -2089,6 +2087,7 @@ setupKeyboardShortcuts();
 startTicker();
 connectWS();
 initRelay();
+startTelemetry();
 
 // Global event listeners
 document.addEventListener('click', () => {

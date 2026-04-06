@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NOBD — Player Profile</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet" crossorigin="anonymous">
+<style>
+:root {
+  --bg-dark: #0a0a12;
+  --bg-panel: #10101c;
+  --bg-panel-alt: #14142a;
+  --border-gold: #d4a017;
+  --gold: #ffd700;
+  --gold-dim: #b8860b;
+  --hot-red: #ff2020;
+  --hot-blue: #1e90ff;
+  --neon-green: #39ff14;
+  --neon-cyan: #00e5ff;
+  --neon-pink: #ff0066;
+  --white: #f0e6d3;
+  --gray: #555;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--bg-dark);
+  color: var(--white);
+  font-family: 'Press Start 2P', monospace;
+  min-height: 100vh;
+  padding: 24px;
+}
+a { color: var(--neon-cyan); text-decoration: none; }
+a:hover { color: var(--gold); }
+.back {
+  display: inline-block;
+  margin-bottom: 24px;
+  font-size: 10px;
+  opacity: 0.7;
+}
+.back:hover { opacity: 1; }
+.profile-header {
+  background: linear-gradient(180deg, #1a0a2e 0%, #0d0618 100%);
+  border: 4px solid var(--border-gold);
+  padding: 32px;
+  text-align: center;
+  margin-bottom: 24px;
+  box-shadow: 0 0 40px rgba(255, 215, 0, 0.15);
+}
+.profile-name {
+  font-size: 32px;
+  letter-spacing: 4px;
+  color: var(--gold);
+  text-shadow: 0 0 20px rgba(255, 215, 0, 0.5);
+  margin-bottom: 12px;
+  word-break: break-all;
+}
+.profile-tier {
+  font-size: 12px;
+  color: var(--gold-dim);
+  letter-spacing: 4px;
+  margin-bottom: 16px;
+}
+.profile-rating {
+  font-size: 48px;
+  color: var(--neon-cyan);
+  text-shadow: 0 0 30px rgba(0, 229, 255, 0.5);
+}
+.profile-rating-label {
+  font-size: 9px;
+  opacity: 0.6;
+  margin-top: 4px;
+}
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.stat-card {
+  background: var(--bg-panel);
+  border: 2px solid var(--bg-panel-alt);
+  padding: 20px;
+  text-align: center;
+  transition: border-color 0.2s;
+}
+.stat-card:hover { border-color: var(--gold-dim); }
+.stat-value {
+  font-size: 28px;
+  color: var(--gold);
+  margin-bottom: 8px;
+}
+.stat-label {
+  font-size: 8px;
+  letter-spacing: 1px;
+  opacity: 0.7;
+}
+.section {
+  background: var(--bg-panel);
+  border: 2px solid var(--bg-panel-alt);
+  padding: 24px;
+  margin-bottom: 16px;
+}
+.section h2 {
+  font-size: 14px;
+  color: var(--gold);
+  margin-bottom: 16px;
+  letter-spacing: 2px;
+  border-bottom: 1px solid var(--gold-dim);
+  padding-bottom: 8px;
+}
+.row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  font-size: 10px;
+}
+.row + .row { border-top: 1px solid var(--bg-panel-alt); }
+.label { opacity: 0.7; }
+.value { color: var(--gold); }
+.value.win { color: var(--neon-green); }
+.value.loss { color: var(--hot-red); }
+.empty {
+  text-align: center;
+  font-size: 10px;
+  opacity: 0.5;
+  padding: 24px;
+}
+.loading {
+  text-align: center;
+  font-size: 12px;
+  opacity: 0.7;
+  padding: 60px;
+}
+.error {
+  text-align: center;
+  font-size: 12px;
+  color: var(--hot-red);
+  padding: 60px;
+}
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: center;
+}
+.badge {
+  background: var(--bg-panel-alt);
+  border: 1px solid var(--gold-dim);
+  padding: 8px 16px;
+  font-size: 9px;
+  color: var(--gold);
+}
+.badge.gold { background: linear-gradient(180deg, var(--gold-dim), #2a1a00); border-color: var(--gold); }
+</style>
+</head>
+<body>
+
+<a href="/" class="back">&laquo; BACK TO ARCADE</a>
+
+<div id="content">
+  <div class="loading">LOADING PROFILE...</div>
+</div>
+
+<script type="module">
+import { surrealQuery } from './js/surreal.mjs';
+
+const params = new URLSearchParams(location.search);
+const username = (params.get('name') || '').toLowerCase().trim();
+const content = document.getElementById('content');
+
+if (!username) {
+  content.innerHTML = '<div class="error">NO PLAYER NAME PROVIDED<br><br>Try /player.html?name=trisdog</div>';
+} else {
+  loadProfile(username);
+}
+
+async function loadProfile(name) {
+  try {
+    const playerRes = await surrealQuery(`SELECT * FROM player WHERE username = '${escapeSql(name)}'`);
+    if (!playerRes || !playerRes[0]?.result?.length) {
+      content.innerHTML = `<div class="error">FIGHTER NOT FOUND<br><br>"${escapeHtml(name).toUpperCase()}" has not entered the arcade yet.</div>`;
+      return;
+    }
+    const p = playerRes[0].result[0];
+
+    // Recent matches
+    const matchesRes = await surrealQuery(
+      `SELECT *, time::format(created_at, '%Y-%m-%d %H:%M') AS when FROM match WHERE p1_name = '${escapeSql(name)}' OR p2_name = '${escapeSql(name)}' ORDER BY created_at DESC LIMIT 10`
+    );
+    const matches = matchesRes?.[0]?.result || [];
+
+    // Character stats
+    const charsRes = await surrealQuery(
+      `SELECT char_name, games, wins, losses FROM char_stats WHERE username = '${escapeSql(name)}' ORDER BY games DESC LIMIT 6`
+    );
+    const chars = charsRes?.[0]?.result || [];
+
+    // H2H
+    const h2hRes = await surrealQuery(
+      `SELECT * FROM h2h WHERE player1 = '${escapeSql(name)}' OR player2 = '${escapeSql(name)}' ORDER BY last_match DESC LIMIT 5`
+    );
+    const h2h = h2hRes?.[0]?.result || [];
+
+    render(p, matches, chars, h2h);
+  } catch (e) {
+    content.innerHTML = `<div class="error">FAILED TO LOAD<br><br>${escapeHtml(e.message || 'unknown error')}</div>`;
+  }
+}
+
+function render(p, matches, chars, h2h) {
+  const wl = `${p.wins || 0}W - ${p.losses || 0}L`;
+  const winRate = (p.wins + p.losses) > 0
+    ? ((p.wins / (p.wins + p.losses)) * 100).toFixed(1) + '%'
+    : '—';
+  const tier = (p.rank_tier || 'Rookie').toUpperCase();
+
+  let html = `
+    <div class="profile-header">
+      <div class="profile-name">${escapeHtml(p.username || '').toUpperCase()}</div>
+      <div class="profile-tier">${tier}</div>
+      <div class="profile-rating">${p.rating || 1000}</div>
+      <div class="profile-rating-label">RATING</div>
+    </div>
+
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-value">${wl}</div><div class="stat-label">RECORD</div></div>
+      <div class="stat-card"><div class="stat-value">${winRate}</div><div class="stat-label">WIN RATE</div></div>
+      <div class="stat-card"><div class="stat-value">${p.streak || 0}</div><div class="stat-label">CURRENT STREAK</div></div>
+      <div class="stat-card"><div class="stat-value">${p.best_streak || 0}</div><div class="stat-label">BEST STREAK</div></div>
+      <div class="stat-card"><div class="stat-value">${p.best_combo || 0}</div><div class="stat-label">BEST COMBO</div></div>
+      <div class="stat-card"><div class="stat-value">${p.total_matches || 0}</div><div class="stat-label">MATCHES</div></div>
+    </div>
+  `;
+
+  // Achievements
+  const badges = [];
+  if ((p.perfects || 0) > 0)    badges.push({ text: `${p.perfects} PERFECT${p.perfects > 1 ? 'S' : ''}`, gold: true });
+  if ((p.ocvs || 0) > 0)        badges.push({ text: `${p.ocvs} OCV${p.ocvs > 1 ? 'S' : ''}`, gold: true });
+  if ((p.comebacks || 0) > 0)   badges.push({ text: `${p.comebacks} COMEBACK${p.comebacks > 1 ? 'S' : ''}` });
+  if ((p.clutch_wins || 0) > 0) badges.push({ text: `${p.clutch_wins} CLUTCH WIN${p.clutch_wins > 1 ? 'S' : ''}` });
+  if ((p.first_bloods || 0) > 0) badges.push({ text: `${p.first_bloods} FIRST BLOOD${p.first_bloods > 1 ? 'S' : ''}` });
+
+  if (badges.length > 0) {
+    html += `<div class="section"><h2>ACHIEVEMENTS</h2><div class="badges">`;
+    for (const b of badges) {
+      html += `<div class="badge ${b.gold ? 'gold' : ''}">${escapeHtml(b.text)}</div>`;
+    }
+    html += `</div></div>`;
+  }
+
+  // Character usage
+  if (chars.length > 0) {
+    html += `<div class="section"><h2>MAIN CHARACTERS</h2>`;
+    for (const c of chars) {
+      const cwr = c.games > 0 ? ((c.wins / c.games) * 100).toFixed(0) + '%' : '—';
+      html += `<div class="row"><span class="label">${escapeHtml(c.char_name || '?')}</span><span class="value">${c.games}G ${c.wins}W ${c.losses}L (${cwr})</span></div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Recent matches
+  html += `<div class="section"><h2>RECENT MATCHES</h2>`;
+  if (matches.length === 0) {
+    html += `<div class="empty">NO MATCHES YET</div>`;
+  } else {
+    for (const m of matches) {
+      const isP1 = (m.p1_name || '').toLowerCase() === p.username.toLowerCase();
+      const won = (m.winner_slot === 0 && isP1) || (m.winner_slot === 1 && !isP1);
+      const opponent = isP1 ? m.p2_name : m.p1_name;
+      const tag = m.was_perfect ? ' PERFECT' : m.was_ocv ? ' OCV' : m.was_comeback ? ' COMEBACK' : '';
+      html += `<div class="row"><span class="label">vs ${escapeHtml((opponent || '???').toUpperCase())}</span><span class="value ${won ? 'win' : 'loss'}">${won ? 'W' : 'L'}${tag}</span></div>`;
+    }
+  }
+  html += `</div>`;
+
+  // Head to head
+  if (h2h.length > 0) {
+    html += `<div class="section"><h2>RIVALRIES</h2>`;
+    for (const r of h2h) {
+      const isP1 = r.player1 === p.username.toLowerCase();
+      const opponent = isP1 ? r.player2 : r.player1;
+      const myWins = isP1 ? (r.p1_wins || 0) : (r.p2_wins || 0);
+      const oppWins = isP1 ? (r.p2_wins || 0) : (r.p1_wins || 0);
+      const winning = myWins > oppWins;
+      html += `<div class="row"><span class="label">vs ${escapeHtml((opponent || '???').toUpperCase())}</span><span class="value ${winning ? 'win' : 'loss'}">${myWins} - ${oppWins}</span></div>`;
+    }
+    html += `</div>`;
+  }
+
+  content.innerHTML = html;
+}
+
+function escapeSql(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+</script>
+</body>
+</html>

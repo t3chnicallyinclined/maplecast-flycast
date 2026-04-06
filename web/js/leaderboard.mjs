@@ -9,22 +9,25 @@ import { surrealQuery } from './surreal.mjs';
 const _liveCache = {};
 let _currentTab = 'streak';
 
+// Tab keys are kept stable so the HTML doesn't need new onclick handlers,
+// but each one now maps to a real field the collector actually writes to
+// the player table. See web/schema.surql + web/collector/src/main.rs.
 const QUERIES = {
-  streak:  `SELECT username AS name, math::max([streak_current, streak_best]) AS streak FROM player ORDER BY streak DESC LIMIT 10`,
-  combo:   `SELECT username AS name, max_combo AS combo FROM player WHERE max_combo > 0 ORDER BY combo DESC LIMIT 10`,
-  speed:   `SELECT username AS name, fastest_match_sec AS sec FROM player WHERE fastest_match_sec > 0 ORDER BY sec ASC LIMIT 10`,
+  streak:  `SELECT username AS name, best_streak AS streak FROM player WHERE best_streak > 0 ORDER BY streak DESC LIMIT 10`,
+  combo:   `SELECT username AS name, best_combo AS combo FROM player WHERE best_combo > 0 ORDER BY combo DESC LIMIT 10`,
+  speed:   `SELECT username AS name, ocvs FROM player WHERE ocvs > 0 ORDER BY ocvs DESC LIMIT 10`,        // tab labelled "OCV"
   perfect: `SELECT username AS name, perfects AS pf FROM player WHERE perfects > 0 ORDER BY pf DESC LIMIT 10`,
-  masher:  `SELECT username AS name, max_inps AS ips FROM player WHERE max_inps > 0 ORDER BY ips DESC LIMIT 10`,
-  surgeon: `SELECT username AS name, accuracy AS acc FROM player WHERE accuracy > 0 ORDER BY acc DESC LIMIT 10`,
+  masher:  `SELECT username AS name, comebacks AS cb FROM player WHERE comebacks > 0 ORDER BY cb DESC LIMIT 10`,  // tab labelled "COMEBACK"
+  surgeon: `SELECT username AS name, clutch_wins AS cw FROM player WHERE clutch_wins > 0 ORDER BY cw DESC LIMIT 10`, // tab labelled "CLUTCH"
 };
 
 const FORMATTERS = {
   streak:  (e) => `${e.streak || 0} WINS`,
   combo:   (e) => `${e.combo || 0} HITS`,
-  speed:   (e) => `${e.sec || 0} SEC`,
+  speed:   (e) => `${e.ocvs || 0} OCVs`,
   perfect: (e) => `${e.pf || 0} ROUNDS`,
-  masher:  (e) => `${e.ips || 0} INP/S`,
-  surgeon: (e) => `${(e.acc || 0).toFixed(1)}%`,
+  masher:  (e) => `${e.cb || 0} COMEBACKS`,
+  surgeon: (e) => `${e.cw || 0} CLUTCH`,
 };
 
 export function switchTab(btn, tab) {
@@ -65,10 +68,12 @@ function paintList(list, tab, data) {
     return;
   }
   list.innerHTML = data.map((e, i) => `
-    <div class="lb-entry ${i === 0 ? 'rank-1' : i === 1 ? 'rank-2' : i === 2 ? 'rank-3' : ''}">
+    <a class="lb-entry ${i === 0 ? 'rank-1' : i === 1 ? 'rank-2' : i === 2 ? 'rank-3' : ''}"
+       href="/player.html?name=${encodeURIComponent(e.name.toLowerCase())}"
+       style="text-decoration:none;color:inherit;display:flex;">
       <div class="lb-rank">${i === 0 ? '\u{1F451}' : i + 1}</div>
       <div class="lb-name">${e.name}</div>
       <div class="lb-stat">${e.stat}</div>
-    </div>
+    </a>
   `).join('');
 }

@@ -10,6 +10,7 @@
 // ============================================================================
 
 use crate::auth_api;
+use crate::client_telemetry::{ClientReport, ClientTelemetry};
 use crate::fanout::RelayState;
 use base64::Engine;
 use hmac::{Hmac, Mac};
@@ -50,24 +51,27 @@ pub fn build_ice_config_json(turn_host: &str, username: &str, credential: &str) 
     )
 }
 
-/// Lightweight HTTP server: serves GET /turn-cred and GET /metrics.
+/// Lightweight HTTP server: serves GET /turn-cred, /metrics, /health,
+/// and POST /api/register, /api/signin, /api/telemetry.
 /// Listens on a separate port from the relay WS so nginx can proxy it cleanly.
 pub async fn http_listener(
     addr: SocketAddr,
     secret: Option<String>,
     turn_host: String,
     state: RelayState,
+    telemetry: ClientTelemetry,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
-    info!("HTTP endpoint ready on {} (/turn-cred /metrics /health)", addr);
+    info!("HTTP endpoint ready on {} (/turn-cred /metrics /health /api/*)", addr);
 
     loop {
         let (stream, peer) = listener.accept().await?;
         let secret = secret.clone();
         let turn_host = turn_host.clone();
         let state = state.clone();
+        let telemetry = telemetry.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_http(stream, peer, secret.as_deref(), &turn_host, state).await {
+            if let Err(e) = handle_http(stream, peer, secret.as_deref(), &turn_host, state, telemetry).await {
                 warn!("HTTP {} error: {}", peer, e);
             }
         });
@@ -80,6 +84,7 @@ async fn handle_http(
     secret: Option<&str>,
     turn_host: &str,
     state: RelayState,
+    telemetry: ClientTelemetry,
 ) -> std::io::Result<()> {
     // Read the full request: headers + body. Cap at 64KB to prevent abuse.
     let mut buf = Vec::with_capacity(8192);
@@ -130,9 +135,23 @@ async fn handle_http(
         }
     } else if first_line.starts_with("GET /metrics") {
         let snap = state.metrics().await;
-        let body = render_prometheus(&snap);
+        let mut body = render_prometheus(&snap);
+        // Append per-client telemetry aggregates
+        let agg = telemetry.snapshot().await;
+        agg.render_prometheus(&mut body);
         format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(), body
+        )
+    } else if first_line.starts_with("POST /api/telemetry") {
+        // Browser pushes client RTT/FPS/jitter — fire and forget, always 200
+        match serde_json::from_str::<ClientReport>(&body) {
+            Ok(report) => telemetry.ingest(report).await,
+            Err(_) => {} // bad payload, just drop it
+        }
+        let body = "{\"ok\":true}";
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(), body
         )
     } else if first_line.starts_with("GET /health") {
