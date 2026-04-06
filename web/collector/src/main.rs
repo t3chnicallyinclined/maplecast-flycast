@@ -11,12 +11,17 @@
 
 use futures_util::StreamExt;
 use serde::Deserialize;
-use surrealdb::engine::local::RocksDb;
+use surrealdb::engine::any::{self, Any};
+use surrealdb::opt::auth::Root;
 use surrealdb::Surreal;
 use tokio_tungstenite::connect_async;
 
-const WS_URL: &str = "ws://localhost:7200";
-const DB_PATH: &str = "maplecast.db";
+// Defaults — overridable via env:
+//   MAPLECAST_WS=ws://host:port      (where flycast or relay broadcasts)
+//   MAPLECAST_DB=ws://host:port      (SurrealDB endpoint, or rocksdb://path)
+//   MAPLECAST_DB_USER / MAPLECAST_DB_PASS  (only for ws/http remote)
+const DEFAULT_WS_URL: &str = "ws://localhost:7200";
+const DEFAULT_DB_URL: &str = "rocksdb://maplecast.db";
 
 #[derive(Debug, Deserialize)]
 struct StatusMsg {
@@ -176,15 +181,26 @@ impl MatchTracker {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[collector] MapleCast Data Collector (Rust) starting...");
 
-    // Open embedded SurrealDB with RocksDB persistence
-    let db = Surreal::new::<RocksDb>(DB_PATH).await?;
-    db.use_ns("maplecast").use_db("arcade").await?;
-    println!("[collector] SurrealDB opened at {DB_PATH}");
+    let ws_url = std::env::var("MAPLECAST_WS").unwrap_or_else(|_| DEFAULT_WS_URL.to_string());
+    let db_url = std::env::var("MAPLECAST_DB").unwrap_or_else(|_| DEFAULT_DB_URL.to_string());
 
-    // Apply schema
+    // Open SurrealDB — local rocksdb OR remote ws://
+    let db: Surreal<Any> = any::connect(&db_url).await?;
+    println!("[collector] SurrealDB connected: {db_url}");
+
+    // Sign in if remote
+    if db_url.starts_with("ws://") || db_url.starts_with("wss://") || db_url.starts_with("http") {
+        let user = std::env::var("MAPLECAST_DB_USER").unwrap_or_else(|_| "root".to_string());
+        let pass = std::env::var("MAPLECAST_DB_PASS").unwrap_or_else(|_| "root".to_string());
+        db.signin(Root { username: user.clone(), password: pass.clone() }).await?;
+        println!("[collector] Authenticated as {user}");
+    }
+
+    db.use_ns("maplecast").use_db("arcade").await?;
+
+    // Apply schema (idempotent — DEFINE statements are safe to re-run)
     let schema = include_str!("../../schema.surql");
     if let Err(e) = db.query(schema).await {
-        // Schema already exists on subsequent runs — that's fine
         eprintln!("[collector] Schema apply note: {e}");
     }
     println!("[collector] Schema ready");
@@ -193,8 +209,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Reconnect loop
     loop {
-        println!("[collector] Connecting to {WS_URL}...");
-        match connect_async(WS_URL).await {
+        println!("[collector] Connecting to {ws_url}...");
+        match connect_async(&ws_url).await {
             Ok((ws, _)) => {
                 println!("[collector] Connected to flycast WS");
                 let (_, mut read) = ws.split();
@@ -220,7 +236,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn handle_message(
-    db: &Surreal<surrealdb::engine::local::Db>,
+    db: &Surreal<Any>,
     text: &str,
     tracker: &mut MatchTracker,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -243,7 +259,7 @@ async fn handle_message(
 }
 
 async fn handle_status(
-    db: &Surreal<surrealdb::engine::local::Db>,
+    db: &Surreal<Any>,
     msg: &StatusMsg,
     tracker: &mut MatchTracker,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -348,7 +364,7 @@ async fn handle_status(
 }
 
 async fn handle_match_end(
-    db: &Surreal<surrealdb::engine::local::Db>,
+    db: &Surreal<Any>,
     msg: &MatchEndMsg,
     tracker: &mut MatchTracker,
 ) -> Result<(), Box<dyn std::error::Error>> {

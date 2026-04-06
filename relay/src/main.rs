@@ -18,6 +18,7 @@ mod splice;
 mod protocol;
 mod fanout;
 mod signaling;
+mod turn;
 
 use clap::Parser;
 use std::net::SocketAddr;
@@ -41,6 +42,18 @@ struct Args {
     /// Max spectator clients
     #[arg(long, default_value_t = 500)]
     max_clients: usize,
+
+    /// HTTP listen address for /turn-cred endpoint
+    #[arg(long, default_value = "127.0.0.1:7202")]
+    http_listen: String,
+
+    /// TURN shared secret (env: TURN_SECRET). Required for /turn-cred.
+    #[arg(long, env = "TURN_SECRET")]
+    turn_secret: Option<String>,
+
+    /// TURN server hostname (used in ICE config response)
+    #[arg(long, default_value = "nobd.net")]
+    turn_host: String,
 }
 
 #[tokio::main]
@@ -71,6 +84,21 @@ async fn main() {
 
     let state = fanout::RelayState::new(args.max_clients);
     let ws_addr: SocketAddr = args.ws_listen.parse().expect("invalid ws_listen address");
+    let http_addr: SocketAddr = args.http_listen.parse().expect("invalid http_listen address");
+
+    // HTTP /turn-cred endpoint (only if secret is configured)
+    let http_task = if let Some(secret) = args.turn_secret.clone() {
+        let host = args.turn_host.clone();
+        info!("HTTP /turn-cred endpoint: {} → turn:{}:3478", http_addr, host);
+        Some(tokio::spawn(async move {
+            if let Err(e) = turn::http_listener(http_addr, secret, host).await {
+                error!("HTTP listener exited: {:?}", e);
+            }
+        }))
+    } else {
+        info!("HTTP /turn-cred disabled (no TURN_SECRET set)");
+        None
+    };
 
     match upstream_mode {
         "ws" => {
@@ -103,5 +131,9 @@ async fn main() {
                 }
             }
         }
+    }
+
+    if let Some(h) = http_task {
+        h.abort();
     }
 }
