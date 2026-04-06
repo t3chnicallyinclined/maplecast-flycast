@@ -19,6 +19,7 @@ mod protocol;
 mod fanout;
 mod signaling;
 mod turn;
+mod auth_api;
 
 use clap::Parser;
 use std::net::SocketAddr;

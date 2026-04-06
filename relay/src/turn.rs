@@ -9,6 +9,7 @@
 // coturn validates the HMAC using the SAME secret on its end. Stateless.
 // ============================================================================
 
+use crate::auth_api;
 use crate::fanout::RelayState;
 use base64::Engine;
 use hmac::{Hmac, Mac};
@@ -80,14 +81,33 @@ async fn handle_http(
     turn_host: &str,
     state: RelayState,
 ) -> std::io::Result<()> {
-    let mut buf = [0u8; 1024];
-    let n = stream.read(&mut buf).await?;
-    if n == 0 {
+    // Read the full request: headers + body. Cap at 64KB to prevent abuse.
+    let mut buf = Vec::with_capacity(8192);
+    let mut tmp = [0u8; 4096];
+    loop {
+        let n = stream.read(&mut tmp).await?;
+        if n == 0 { break; }
+        buf.extend_from_slice(&tmp[..n]);
+        if buf.len() > 65536 { break; }
+        // Stop once we have headers + declared content-length
+        if let Some(headers_end) = find_double_crlf(&buf) {
+            let headers = &buf[..headers_end];
+            let content_length = parse_content_length(headers);
+            let body_start = headers_end + 4;
+            let body_have = buf.len() - body_start;
+            if body_have >= content_length {
+                break;
+            }
+        }
+    }
+
+    if buf.is_empty() {
         return Ok(());
     }
 
-    let req = String::from_utf8_lossy(&buf[..n]);
+    let req = String::from_utf8_lossy(&buf);
     let first_line = req.lines().next().unwrap_or("");
+    let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
 
     let response = if first_line.starts_with("GET /turn-cred") {
         match secret {
@@ -127,6 +147,22 @@ async fn handle_http(
             "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             code, if healthy { "OK" } else { "Service Unavailable" }, body.len(), body
         )
+    } else if first_line.starts_with("POST /api/register") {
+        let resp = auth_api::handle_register(&body).await;
+        let json = serde_json::to_string(&resp).unwrap_or_else(|_| "{}".to_string());
+        let code = if resp.ok { 200 } else { 400 };
+        format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            code, if resp.ok { "OK" } else { "Bad Request" }, json.len(), json
+        )
+    } else if first_line.starts_with("POST /api/signin") {
+        let resp = auth_api::handle_signin(&body).await;
+        let json = serde_json::to_string(&resp).unwrap_or_else(|_| "{}".to_string());
+        let code = if resp.ok { 200 } else { 401 };
+        format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            code, if resp.ok { "OK" } else { "Unauthorized" }, json.len(), json
+        )
     } else {
         let body = "not found";
         format!(
@@ -138,6 +174,24 @@ async fn handle_http(
     stream.write_all(response.as_bytes()).await?;
     stream.shutdown().await.ok();
     Ok(())
+}
+
+/// Find the position of \r\n\r\n (end of HTTP headers).
+fn find_double_crlf(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+/// Parse Content-Length header from request bytes (case-insensitive).
+fn parse_content_length(headers: &[u8]) -> usize {
+    let s = String::from_utf8_lossy(headers);
+    for line in s.lines() {
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().eq_ignore_ascii_case("content-length") {
+                return v.trim().parse().unwrap_or(0);
+            }
+        }
+    }
+    0
 }
 
 /// Render Prometheus 0.0.4 text format

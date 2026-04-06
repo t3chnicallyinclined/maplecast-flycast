@@ -6,6 +6,7 @@ import { state } from './state.mjs';
 import { renderChat } from './chat.mjs';
 import { stopGamepadPolling, updateStickButtons } from './gamepad.mjs';
 import { surrealQuery, surrealRegister, surrealUpdateLastSeen, surrealFetchProfile } from './surreal.mjs';
+import { updateCabinetControls } from './queue.mjs';
 import { AVATARS } from './ui-common.mjs';
 
 // === User Badge + Dropdown ===
@@ -36,20 +37,19 @@ export function signOut() {
   state.wsInQueue = false;
   state.playerProfile = null;
   state.stickOnline = false;
+  state.stickRegistered = false;
+  state.stickSlot = -1;
   localStorage.removeItem('nobd_username');
   localStorage.removeItem('maplecast_stick');
 
   document.getElementById('signinBtn').style.display = '';
   document.getElementById('userBadge').classList.remove('active');
-  document.getElementById('gotNextBtn').innerHTML = '&#x1FA99; I GOT NEXT';
-  document.getElementById('gotNextBtn').classList.remove('in-queue');
-  document.getElementById('gotNextBtn').disabled = false;
-  document.getElementById('gotNextBtn').style.display = '';
   document.getElementById('leaveQueueBtn').style.display = 'none';
   document.getElementById('leaveGameBtn').style.display = 'none';
   document.getElementById('registerStickBtn').style.display = 'none';
   document.getElementById('unregisterStickBtn').style.display = 'none';
   stopGamepadPolling();
+  updateCabinetControls();
   state.chatHistory.push({ name: null, system: 'A fighter has left the arcade.' });
   renderChat();
 }
@@ -106,45 +106,30 @@ export async function confirmSignIn() {
   document.getElementById('authSubmitBtn').textContent = 'LOADING...';
 
   try {
+    // Both register and signin go through the relay's /api endpoints, which
+    // use the admin SurrealDB credentials server-side. The browser never
+    // touches DB writes directly (the viewer-only role would block them).
+    const endpoint = state.authMode === 'register' ? '/api/register' : '/api/signin';
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: name.toLowerCase(), password: pass }),
+    });
+    const data = await res.json().catch(() => ({ ok: false, error: 'invalid response' }));
+    if (!data.ok) {
+      const errMap = {
+        'name already taken': 'NAME ALREADY TAKEN',
+        'wrong password': 'WRONG PASSWORD',
+        'fighter not found': 'FIGHTER NOT FOUND — REGISTER FIRST',
+        'database unavailable': 'DATABASE OFFLINE — TRY AGAIN',
+      };
+      showAuthError(errMap[data.error] || (data.error || 'AUTH FAILED').toUpperCase());
+      return;
+    }
+    state.playerProfile = data.profile;
     if (state.authMode === 'register') {
-      // Check if username taken
-      const check = await surrealQuery(`SELECT username FROM player WHERE username = '${name.toLowerCase()}'`);
-      if (check === null) { showAuthError('DATABASE OFFLINE — TRY AGAIN'); return; }
-      if (check?.[0]?.result?.length > 0) { showAuthError('NAME ALREADY TAKEN'); return; }
-
-      // Create player — try with password hash, fall back to without
-      let create = await surrealQuery(
-        `CREATE player SET username = '${name.toLowerCase()}', pass_hash = crypto::argon2::generate('${pass.replace(/'/g, "\\'")}'), created_at = time::now(), last_seen = time::now()`
-      );
-      // If argon2 or schema fails, try simpler create
-      if (!create?.[0]?.result?.length) {
-        console.warn('[auth] Argon2 create failed, trying simple create');
-        create = await surrealQuery(
-          `CREATE player SET username = '${name.toLowerCase()}', created_at = time::now(), last_seen = time::now()`
-        );
-      }
-      if (!create?.[0]?.result?.length) {
-        showAuthError('REGISTRATION FAILED — CHECK DB');
-        console.error('[auth] Create result:', JSON.stringify(create));
-        return;
-      }
-      state.playerProfile = create[0].result[0];
       state.chatHistory.push({ name: null, system: `${name} registered! WARRIOR rank.` });
     } else {
-      // Sign in
-      const check = await surrealQuery(`SELECT * FROM player WHERE username = '${name.toLowerCase()}'`);
-      if (check === null) { showAuthError('DATABASE OFFLINE — TRY AGAIN'); return; }
-      if (!check?.[0]?.result?.length) { showAuthError('FIGHTER NOT FOUND — REGISTER FIRST'); return; }
-      const player = check[0].result[0];
-      if (player.pass_hash) {
-        const verify = await surrealQuery(
-          `RETURN crypto::argon2::compare('${player.pass_hash}', '${pass.replace(/'/g, "\\'")}')`
-        );
-        if (!verify?.[0] || verify[0].result !== true) { showAuthError('WRONG PASSWORD'); return; }
-      }
-      // No pass_hash = legacy account, let them in
-      state.playerProfile = player;
-      surrealUpdateLastSeen(name);
       state.chatHistory.push({ name: null, system: `Welcome back, ${name}!` });
     }
 
@@ -154,6 +139,7 @@ export async function confirmSignIn() {
 
     showUserBadge();
     updateStickButtons();
+    updateCabinetControls();
     closeSignIn();
     renderChat();
 
@@ -177,6 +163,7 @@ export async function autoSignIn(username) {
 
   showUserBadge();
   updateStickButtons();
+  updateCabinetControls();
   state.chatHistory.push({ name: null, system: `${state.myName} has entered the arcade!` });
   renderChat();
 
