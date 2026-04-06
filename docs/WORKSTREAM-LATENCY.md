@@ -331,35 +331,88 @@ breaking things). Marked DONE for what's already shipped.
 
 ## TIER S — asymmetric wins (high impact)
 
-### S1. GGPO-style rollback prediction in the browser  [NOT STARTED]
-**Saves: ~8ms p50, ~16ms p99 (kills frame alignment)**
-**Risk: VERY HIGH (multi-week project)**
+### S1. ~~GGPO-style rollback prediction~~  [DROPPED — wrong model]
+**Why this was wrong**: GGPO solves a problem we don't have. GGPO exists
+for peer-to-peer fighting games where each peer runs their own emulator
+and the network can't deliver the opponent's input in time. A peer
+predicts the opponent's input ("they pressed nothing"), runs the frame,
+and rolls back if wrong.
 
-Run a second flycast instance in WASM as a "ghost" that locally simulates
-ahead of the server. Apply local input to the ghost. Render the ghost.
-When the server's authoritative frame arrives, compare and reconcile via
-state diff or full state restore. This is the standard GGPO approach.
+**MapleCast has exactly one authoritative emulator** running on the home
+box. Both players' inputs flow into the same `kcode[]` array. Browsers are
+passive renderers with no game state. There is nothing to roll back
+because there is no client-side simulation; state drift is impossible
+by construction.
 
-The biggest single optimization available, but a massive amount of work.
-Requires WASM to run a full deterministic flycast, not just the renderer.
-The current renderer doesn't have CPU/audio/maple bus emulation.
+The 8ms "frame alignment" cost is just **the natural quantization of
+reading input once per vblank**. The emulator reads `kcode[]` at the
+start of each frame; if the input arrives 2ms after a vblank, it waits
+14.67ms for the next one. Average: half a frame.
 
-### S2. LAN bypass for local players  [NOT STARTED]
+**The only way to beat frame alignment** would be sub-frame input
+sampling — having the emulator read input multiple times per frame, or
+re-running game logic when late input arrives. MVC2's game loop is
+hardcoded to one input read per vblank, so this would require modifying
+the game itself, not the emulator. Not happening.
+
+**Frame alignment is physics**, just like network distance and monitor
+refresh rate. It's a 0-16.67ms uniform distribution we cannot shrink.
+
+### S2. LAN bypass for local players  [JS WIRED, INFRA TODO]
 **Saves: ~15-30ms (entire VPS round trip) for LAN users**
-**Risk: MEDIUM (mixed-content cert pain)**
+**Risk: LOW (race-and-fall-back: no risk of breaking remote users)**
 
-Browser tries `wss://home.lan.nobd.net:7200` first with a 1-second
-timeout, falls back to the VPS relay if it doesn't connect. Requires:
+The browser races a connection to a LAN endpoint against the relay
+endpoint and uses whichever opens first. LAN users win in <100ms;
+remote users' LAN attempt times out in 800ms and the relay wins.
 
-- A LAN-resolvable hostname (split DNS or `*.local.nobd.net` pointing to
-  the home LAN IP)
-- A real cert for that hostname (Let's Encrypt DNS challenge so you can
-  cert a non-public hostname)
-- Or accept the mixed-content warning for `ws://`
+**Browser side: DONE.** `web/js/ws-connection.mjs::pickBestWsUrl()`
+implements the race. Set `LAN_BYPASS_URL` in that file to enable.
+Currently `null` so the function is a no-op pass-through to the relay.
 
-For anyone playing on the same LAN as the home flycast (you, me, anyone
-at your house, in-person tournaments), this saves the entire ~15ms VPS
-round trip. Massive for local play.
+**Home box infrastructure: TODO.** To turn this on:
+
+1. **Pick a hostname**, e.g. `home.nobd.net`. Add a public DNS A record
+   pointing it to your home box's LAN IP (e.g. `192.168.1.100`). Yes,
+   public DNS resolving to a private IP is fine — only machines on your
+   LAN can route to it; everyone else gets a TCP timeout.
+
+2. **Get a Let's Encrypt cert via DNS-01 challenge**, because LE servers
+   can't reach your home box over HTTP-01 to validate. With certbot:
+   ```
+   certbot certonly --manual --preferred-challenges dns -d home.nobd.net
+   ```
+   Or use an ACME client that auto-handles your DNS provider's API.
+   You can run this on the VPS (which already has certbot) and copy
+   the cert to the home box.
+
+3. **Run nginx on the home box** as a TLS terminator. Mirror the VPS
+   nginx config but swap the upstream:
+   ```nginx
+   server {
+       listen 443 ssl http2;
+       server_name home.nobd.net;
+       ssl_certificate     /etc/letsencrypt/live/home.nobd.net/fullchain.pem;
+       ssl_certificate_key /etc/letsencrypt/live/home.nobd.net/privkey.pem;
+
+       location /ws {
+           proxy_pass http://127.0.0.1:7200;
+           proxy_http_version 1.1;
+           proxy_set_header Upgrade $http_upgrade;
+           proxy_set_header Connection "Upgrade";
+           proxy_buffering off;
+           tcp_nodelay on;
+           proxy_read_timeout 86400;
+       }
+   }
+   ```
+
+4. **Set `LAN_BYPASS_URL = 'wss://home.nobd.net/ws'`** in
+   `web/js/ws-connection.mjs` and redeploy to the VPS.
+
+After this, every user on your LAN automatically gets the ~15ms-faster
+direct path with no UI changes. Useful for local play, tournaments,
+testing, and your couch.
 
 ### S3. WebRTC DataChannel for player input  [INFRA EXISTS]
 **Saves: ~5-10ms p50, ~15ms p99 (UDP semantics + bypasses TCP HOL)**
@@ -541,12 +594,14 @@ user's monitor.
 
 To go below 40ms p50 we have to either:
 
-1. **Cheat physics** — predict ahead (S1: rollback) so the user sees
-   their input applied before it actually arrives at the server.
-2. **Skip the VPS** — direct LAN play (S2) for users on your network.
-3. **Move closer to users** — multi-region relay deployment. Each user
-   connects to the nearest relay; relays form a P2P mesh to the home
-   flycast. New territory, big infrastructure project.
+1. **Skip the VPS** — direct LAN play (S2) for users on your network.
+2. **Move closer to users** — multi-region relay mesh. Each user
+   connects to the nearest relay; relays form a hub-and-spoke or
+   anycast topology to the home flycast. The biggest realistic win
+   for remote players because it attacks **two** of the three physics
+   bottlenecks (browser↔VPS and VPS↔home distances).
+3. **Use UDP semantics for player input** (S3) so head-of-line blocking
+   in the WS queue doesn't add jitter to the input path.
 
 Anything else is shaving microseconds off paths that already cost
 microseconds. Worth doing for the engineering pride and the p99 wins,

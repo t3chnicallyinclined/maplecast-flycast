@@ -131,9 +131,19 @@ static json getStatus()
 	// Each browser tab opens 2 WebSocket connections (parent page + iframe mirror)
 	int viewers = (_clientCount.load() - players) / 2;
 	if (viewers < 0) viewers = 0;
+
+	// Snapshot queue + relay tree under _connMutex (caller may not hold it).
 	json queueList = json::array();
-	for (const auto& q : _queue)
-		queueList.push_back(q.name);
+	int seedCount = 0;
+	int treeSize = 0;
+	{
+		std::lock_guard<std::mutex> lock(_connMutex);
+		for (const auto& q : _queue)
+			queueList.push_back(q.name);
+		seedCount = (int)_seedPeers.size();
+		treeSize = (int)_relayTree.size();
+	}
+
 	Telemetry t;
 	{
 		std::lock_guard<std::mutex> lock(_telemetryMutex);
@@ -158,8 +168,8 @@ static json getStatus()
 	status["web_registering_user"] = maplecast_input::isWebRegistering() ?
 		maplecast_input::webRegisteringUsername() : "";
 	status["sticks"] = maplecast_input::registeredStickCount();
-	status["relay_seeds"] = (int)_seedPeers.size();
-	status["relay_nodes"] = (int)_relayTree.size();
+	status["relay_seeds"] = seedCount;
+	status["relay_nodes"] = treeSize;
 	status["input_buffer_ms"] = maplecast_input::getBufferMs();
 	status["buffer_pending"] = maplecast_input::isBufferPending();
 
