@@ -433,6 +433,11 @@ struct DecodedFrame {
 };
 static DecodedFrame _decoded;
 static std::atomic<bool> _decodedReady{false};
+// Guards _decoded.pages and the merge/move operations on it. Without this,
+// the producer can std::move() a new vector into _decoded while the consumer
+// is iterating the previous vector, corrupting both. ~60Hz contention,
+// trivial cost, eliminates the residual PVR phase noise.
+static std::mutex _decodedMtx;
 
 // Raw TCP WebSocket client — bypasses websocketpp/asio resolver entirely
 // Implements RFC 6455 WebSocket framing over a plain POSIX socket
@@ -668,11 +673,32 @@ static void wsClientRun(std::string host, int port)
 			if (df.pages[d].regionId == 1) df.vramDirty = true;
 		}
 
-		// Publish — render thread picks it up
-		// Store which TA buffer index this frame was decoded into
+		// Publish — render thread picks it up.
+		//
+		// CRITICAL: if the consumer hasn't drained the previous frame yet
+		// (_decodedReady still set), we used to OVERWRITE _decoded and lose
+		// the previous frame's dirty pages permanently. Permanently because
+		// the next memcmp on the server side sees `shadow == ptr` for those
+		// pages and never re-ships them.
+		//
+		// Now: prepend the previous frame's dirty pages to the new frame's
+		// pages so the consumer sees the union. The TA buffer is always the
+		// newest (the consumer is going to render whatever's current anyway,
+		// so an older TA is moot), but EVERY dirty page record from every
+		// dropped frame is preserved and applied.
 		df.taBufferIdx = _decodeIdx;
-		_decoded = df;
-		_decodedReady.store(true, std::memory_order_release);
+		{
+			std::lock_guard<std::mutex> lock(_decodedMtx);
+			if (_decodedReady.load(std::memory_order_relaxed)) {
+				// Carry forward unconsumed pages from the previous frame.
+				df.pages.insert(df.pages.begin(),
+					_decoded.pages.begin(), _decoded.pages.end());
+				df.dirtyCount += _decoded.dirtyCount;
+				df.vramDirty = df.vramDirty || _decoded.vramDirty;
+			}
+			_decoded = std::move(df);
+			_decodedReady.store(true, std::memory_order_release);
+		}
 
 		// Swap to other buffer for next frame's decode
 		// Render thread reads buffer [df.taBufferIdx], we write to the other one
@@ -746,6 +772,28 @@ void serverPublish(TA_context* ctx)
 	rend_context& rc = ctx->rend;
 	// DON'T skip RTT frames — MVC2 renders character sprites via render-to-texture!
 
+	// === PVR ATOMIC SNAPSHOT ===
+	// Snapshot the entire 32 KB pvr_regs block ONCE at the top of the
+	// function, into a thread-local buffer. Then everything downstream in
+	// this function (the inline pvr_snapshot[16], the diff loop's PVR
+	// region scan, and the hash log) reads from this snapshot, NOT live
+	// pvr_regs. This eliminates the SPG-vs-diff race where SPG_STATUS
+	// (and other hardware-driven PVR registers) tick mid-function and
+	// cause server-vs-client hash divergence (the "PVR phase noise").
+	//
+	// We point _regions[].ptr for the PVR region at the snapshot for the
+	// duration of this function and restore it before returning.
+	static uint8_t _pvrAtomicSnap[pvr_RegSize];
+	memcpy(_pvrAtomicSnap, pvr_regs, pvr_RegSize);
+	uint8_t* _origPvrPtr = nullptr;
+	for (int r = 0; r < _numRegions; r++) {
+		if (_regions[r].id == 3) {
+			_origPvrPtr = _regions[r].ptr;
+			_regions[r].ptr = _pvrAtomicSnap;
+			break;
+		}
+	}
+
 	RingHeader* hdr = (RingHeader*)_shmPtr;
 	uint8_t* ring = _shmPtr + RING_START;
 
@@ -761,17 +809,21 @@ void serverPublish(TA_context* ctx)
 	memcpy(dst, &frameNum, 4); dst += 4;
 
 	// === PVR registers needed by rend_start_render ===
-	// These set up the rend_context hardware params
+	// These set up the rend_context hardware params. All values come from
+	// the atomic snapshot taken at the top of the function — NOT from live
+	// pvr_regs — so they're consistent with what the diff loop ships.
+	#define _SNAP_U32(addr) (*(u32*)&_pvrAtomicSnap[(addr) & pvr_RegMask])
 	uint32_t pvr_snapshot[16];
-	pvr_snapshot[0] = TA_GLOB_TILE_CLIP.full;
-	pvr_snapshot[1] = SCALER_CTL.full;
-	pvr_snapshot[2] = FB_X_CLIP.full;
-	pvr_snapshot[3] = FB_Y_CLIP.full;
-	pvr_snapshot[4] = FB_W_LINESTRIDE.full;
-	pvr_snapshot[5] = FB_W_SOF1;
-	pvr_snapshot[6] = FB_W_CTRL.full;
-	pvr_snapshot[7] = FOG_CLAMP_MIN.full;
-	pvr_snapshot[8] = FOG_CLAMP_MAX.full;
+	pvr_snapshot[0] = _SNAP_U32(TA_GLOB_TILE_CLIP_addr);
+	pvr_snapshot[1] = _SNAP_U32(SCALER_CTL_addr);
+	pvr_snapshot[2] = _SNAP_U32(FB_X_CLIP_addr);
+	pvr_snapshot[3] = _SNAP_U32(FB_Y_CLIP_addr);
+	pvr_snapshot[4] = _SNAP_U32(FB_W_LINESTRIDE_addr);
+	pvr_snapshot[5] = _SNAP_U32(FB_W_SOF1_addr);
+	pvr_snapshot[6] = _SNAP_U32(FB_W_CTRL_addr);
+	pvr_snapshot[7] = _SNAP_U32(FOG_CLAMP_MIN_addr);
+	pvr_snapshot[8] = _SNAP_U32(FOG_CLAMP_MAX_addr);
+	#undef _SNAP_U32
 	pvr_snapshot[9] = rc.framebufferWidth;
 	pvr_snapshot[10] = rc.framebufferHeight;
 	pvr_snapshot[11] = rc.clearFramebuffer ? 1 : 0;
@@ -783,6 +835,34 @@ void serverPublish(TA_context* ctx)
 	// === Raw TA command buffer — double-buffered delta ===
 	uint32_t taSize = (uint32_t)(ctx->tad.thd_data - ctx->tad.thd_root);
 	uint8_t* taData = ctx->tad.thd_root;
+
+	// === TA DUMP — determinism / decomposition test ===
+	// MAPLECAST_DUMP_TA=1 → write each frame's raw TA buffer to
+	// /tmp/ta-dumps/frame_NNNNNN.bin. Use to capture TA buffers from a
+	// reproducible save state, then byte-diff across runs (determinism)
+	// or across save state variants (per-character decomposition).
+	{
+		static bool _dumpInit = false;
+		static bool _dumpEnabled = false;
+		if (!_dumpInit) {
+			const char* e = std::getenv("MAPLECAST_DUMP_TA");
+			_dumpEnabled = (e && *e && *e != '0');
+			if (_dumpEnabled) {
+				mkdir("/tmp/ta-dumps", 0755);
+				printf("[TA-DUMP] enabled — writing /tmp/ta-dumps/frame_NNNNNN.bin\n");
+			}
+			_dumpInit = true;
+		}
+		if (_dumpEnabled && taSize > 0) {
+			char path[256];
+			snprintf(path, sizeof(path), "/tmp/ta-dumps/frame_%06u.bin", frameNum);
+			FILE* f = fopen(path, "wb");
+			if (f) {
+				fwrite(taData, 1, taSize, f);
+				fclose(f);
+			}
+		}
+	}
 
 	int cur = _taCur;
 	int prev = 1 - cur;
@@ -827,7 +907,18 @@ void serverPublish(TA_context* ctx)
 					while (i < gapEnd) i++;
 			}
 
-			uint16_t runLen = (uint16_t)(i - runStart);
+			// CRITICAL: clamp runLen to u16 max. The gap-merge above can push
+			// (i - runStart) up to 65535+8 = 65543, which would overflow u16
+			// and emit a tiny truncated run on the wire — the client then
+			// mis-decodes the rest of the wire as garbage. Manifested as
+			// scene-change garble on buffer growth (prev=320 → cur=89120):
+			// the first run's wire length wrapped, all subsequent runs shifted.
+			uint32_t fullLen = i - runStart;
+			if (fullLen > 65535) {
+				i = runStart + 65535;
+				fullLen = 65535;
+			}
+			uint16_t runLen = (uint16_t)fullLen;
 			memcpy(dst, &runStart, 4); dst += 4;
 			memcpy(dst, &runLen, 2); dst += 2;
 			memcpy(dst, taData + runStart, runLen); dst += runLen;
@@ -882,6 +973,11 @@ void serverPublish(TA_context* ctx)
 		forcedDirty[i] = _vramDirtyBitmap[i].exchange(0, std::memory_order_acquire);
 
 	// VRAM + PVR regs: memcmp against shadow copies, OR forced-dirty bitmap (VRAM only)
+	//
+	// Snapshot live → shadow ONCE per dirty page, then ship from shadow. The
+	// SH4 thread can race during the diff and write new bytes between the
+	// memcmp and the wire copy; reading via the shadow keeps wire and next
+	// frame's memcmp consistent.
 	for (int r = 0; r < _numRegions; r++) {
 		MemRegion& reg = _regions[r];
 		size_t numPages = reg.size / MEM_PAGE_SIZE;
@@ -892,11 +988,11 @@ void serverPublish(TA_context* ctx)
 			if (forced || memcmp(reg.ptr + off, reg.shadow + off, MEM_PAGE_SIZE) != 0) {
 				if ((size_t)(dst - dstStart) + 5 + MEM_PAGE_SIZE > RING_SIZE / 3)
 					goto done_diff;
+				memcpy(reg.shadow + off, reg.ptr + off, MEM_PAGE_SIZE);
 				*dst++ = reg.id;
 				uint32_t pi = (uint32_t)p;
 				memcpy(dst, &pi, 4); dst += 4;
-				memcpy(dst, reg.ptr + off, MEM_PAGE_SIZE); dst += MEM_PAGE_SIZE;
-				memcpy(reg.shadow + off, reg.ptr + off, MEM_PAGE_SIZE);
+				memcpy(dst, reg.shadow + off, MEM_PAGE_SIZE); dst += MEM_PAGE_SIZE;
 				totalDirty++;
 			}
 		}
@@ -965,6 +1061,43 @@ done_diff:
 	hdr->write_pos = writePos + totalSize;
 	hdr->frame_count++;
 
+	// === MAPLECAST_DUMP_TA hash log: write per-frame VRAM+PVR hash to disk ===
+	// Pair with the same hash on the client receive side to verify the wire
+	// is faithful for memory state, not just for the TA buffer.
+	{
+		static FILE* _hashLog = nullptr;
+		static bool _hashInit = false;
+		if (!_hashInit) {
+			const char* e = std::getenv("MAPLECAST_DUMP_TA");
+			if (e && *e && *e != '0') {
+				_hashLog = fopen("/tmp/ta-dumps/hash.log", "w");
+				if (_hashLog) {
+					setbuf(_hashLog, nullptr);
+					printf("[HASH] server log open\n");
+				}
+			}
+			_hashInit = true;
+		}
+		if (_hashLog) {
+			// FNV-1a 64-bit. Hash the SHADOW buffers, not live vram[]/pvr_regs:
+			// the shadow reflects exactly what the diff loop just shipped on
+			// the wire, while live vram[] may have already been mutated by
+			// the SH4 thread between diff and hash (race window).
+			const uint8_t* svram = nullptr;
+			const uint8_t* spvr  = nullptr;
+			for (int r = 0; r < _numRegions; r++) {
+				if (_regions[r].id == 1) svram = _regions[r].shadow;
+				if (_regions[r].id == 3) spvr  = _regions[r].shadow;
+			}
+			uint64_t vh = 0xcbf29ce484222325ULL;
+			if (svram) for (size_t i = 0; i < VRAM_SIZE; i++) { vh ^= svram[i]; vh *= 0x100000001b3ULL; }
+			uint64_t ph = 0xcbf29ce484222325ULL;
+			if (spvr)  for (size_t i = 0; i < (size_t)pvr_RegSize; i++) { ph ^= spvr[i]; ph *= 0x100000001b3ULL; }
+			fprintf(_hashLog, "%u vram=%016lx pvr=%016lx taSize=%u dirty=%u\n",
+				frameNum, vh, ph, taSize, totalDirty);
+		}
+	}
+
 	// Compress + broadcast over WebSocket to browser clients
 	uint64_t compressUs = 0;
 	uint32_t compressedSize = totalSize;
@@ -1027,6 +1160,13 @@ done_diff:
 		printf("[MIRROR] Server frame %u | TA=%u bytes | %u dirty pages | %u->%u bytes (%.1fx) zstd %luus\n",
 			frameNum, taSize, totalDirty, totalSize, compressedSize,
 			compressedSize > 0 ? (double)totalSize / compressedSize : 0.0, compressUs);
+
+	// Restore PVR region pointer (paired with the atomic snapshot at the top)
+	if (_origPvrPtr) {
+		for (int r = 0; r < _numRegions; r++) {
+			if (_regions[r].id == 3) { _regions[r].ptr = _origPvrPtr; break; }
+		}
+	}
 }
 
 // ==================== CLIENT: receive TA commands + diffs, run ta_parse ====================
@@ -1070,13 +1210,49 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 
 	if (_useWebSocket)
 	{
-		// Pipelined: background thread already decoded TA + staged dirty pages
-		if (!_decodedReady.load(std::memory_order_acquire)) return false;
-		_decodedReady.store(false, std::memory_order_relaxed);
+		// Pipelined: background thread already decoded TA + staged dirty pages.
+		// Take a local snapshot of _decoded under the mutex so the producer
+		// can't std::move() a new vector into it while we're iterating pages.
+		static DecodedFrame df_local;
+		{
+			std::lock_guard<std::mutex> lock(_decodedMtx);
+			if (!_decodedReady.load(std::memory_order_relaxed)) return false;
+			df_local = std::move(_decoded);
+			_decoded = DecodedFrame{};  // reset so producer's next merge starts empty
+			_decodedReady.store(false, std::memory_order_relaxed);
+		}
 
-		DecodedFrame& df = _decoded;
+		DecodedFrame& df = df_local;
 		TA_context& ctx = _decodeTaCtx[df.taBufferIdx];
 		uint8_t* taDst = ctx.tad.thd_root;
+
+		// === CLIENT-SIDE TA DUMP — pair with the server-side dump in serverPublish() ===
+		// MAPLECAST_DUMP_TA=1 → write the received TA buffer to
+		// /tmp/ta-dumps-client/frame_NNNNNN.bin so we can byte-diff it against
+		// the server's /tmp/ta-dumps/frame_NNNNNN.bin for the same frame.
+		// Both should be byte-identical if the wire is faithful.
+		{
+			static bool _dumpInit = false;
+			static bool _dumpEnabled = false;
+			if (!_dumpInit) {
+				const char* e = std::getenv("MAPLECAST_DUMP_TA");
+				_dumpEnabled = (e && *e && *e != '0');
+				if (_dumpEnabled) {
+					mkdir("/tmp/ta-dumps-client", 0755);
+					printf("[TA-DUMP] client enabled — /tmp/ta-dumps-client/frame_NNNNNN.bin\n");
+				}
+				_dumpInit = true;
+			}
+			if (_dumpEnabled && df.taSize > 0) {
+				char path[256];
+				snprintf(path, sizeof(path), "/tmp/ta-dumps-client/frame_%06u.bin", df.frameNum);
+				FILE* f = fopen(path, "wb");
+				if (f) {
+					fwrite(taDst, 1, df.taSize, f);
+					fclose(f);
+				}
+			}
+		}
 
 		// Apply dirty pages to emulator memory (must happen on render thread)
 		for (uint32_t d = 0; d < df.dirtyCount; d++) {
@@ -1095,6 +1271,31 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 				memcpy(&aica::aica_ram[pageOff], df.pages[d].data, MEM_PAGE_SIZE);
 			else if (rid == 3 && pageOff + MEM_PAGE_SIZE <= (size_t)pvr_RegSize)
 				memcpy(pvr_regs + pageOff, df.pages[d].data, MEM_PAGE_SIZE);
+		}
+
+		// === Client-side hash log: pair with server's hash log ===
+		{
+			static FILE* _hashLog = nullptr;
+			static bool _hashInit = false;
+			if (!_hashInit) {
+				const char* e = std::getenv("MAPLECAST_DUMP_TA");
+				if (e && *e && *e != '0') {
+					_hashLog = fopen("/tmp/ta-dumps-client/hash.log", "w");
+					if (_hashLog) {
+						setbuf(_hashLog, nullptr);
+						printf("[HASH] client log open\n");
+					}
+				}
+				_hashInit = true;
+			}
+			if (_hashLog) {
+				uint64_t vh = 0xcbf29ce484222325ULL;
+				for (size_t i = 0; i < VRAM_SIZE; i++) { vh ^= vram[i]; vh *= 0x100000001b3ULL; }
+				uint64_t ph = 0xcbf29ce484222325ULL;
+				for (size_t i = 0; i < (size_t)pvr_RegSize; i++) { ph ^= pvr_regs[i]; ph *= 0x100000001b3ULL; }
+				fprintf(_hashLog, "%u vram=%016lx pvr=%016lx taSize=%u dirty=%u\n",
+					df.frameNum, vh, ph, df.taSize, df.dirtyCount);
+			}
 		}
 
 		// Render — TA data already decoded in ctx.tad.thd_root by background thread
