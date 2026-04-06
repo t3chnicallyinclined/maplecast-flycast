@@ -78,7 +78,8 @@ UDP:7100 ──→ Input Server UDP Thread
 
 
 Browser Gamepad (remote player)
-  │ Gamepad API, 250Hz polling
+  │ Gamepad API, rAF-driven burst poll via MessageChannel
+  │ (16 polls per vsync ≈ 1ms input-change resolution)
   │ 4 bytes: [LT][RT][buttons_hi][buttons_lo]
   ▼
 WebSocket (port 7200) ──→ maplecast_ws_server.cpp
@@ -269,6 +270,130 @@ overhead, zero added latency.
 the JS reader (`magic === 0x5453435A`) and the Rust reader (`&data[0..4] == b"ZCST"`).
 All three sides (C++, JS, Rust) verify against the same wire bytes; the
 constant in `core/network/maplecast_compress.h` is the canonical source.
+
+---
+
+## ⚠️ THE WIRE IS DETERMINISTIC AND BYTE-PERFECT (commit 466d72d54)
+
+**READ THIS BEFORE TOUCHING ANYTHING IN THE MIRROR PIPELINE.**
+
+As of `466d72d54` ("Mirror wire format is now PROVABLY DETERMINISTIC end-to-end"),
+the mirror wire stream is **byte-perfect end to end**. Every TA buffer the server
+captures is reproduced byte-identically on the receiver. Same for VRAM and PVR.
+Verified by a per-frame byte/hash diff harness running server + client side by
+side: **TA 5395/5395 + VRAM 6203/6203 + PVR 6203/6203 = 100/100/100 across
+thousands of frames including scene transitions.**
+
+This was not always true. For months the wire was racy and we masked it with
+workarounds (DMA bitmap, periodic SYNCs, scene-change broadcasts, FSYN-on-connect,
+texture cache resets). Six race conditions in 466d72d54 fixed the underlying
+problem; the workarounds were then removed. **Do not re-add them. Run the
+determinism test rig instead — that's the regression check.**
+
+### The six fixes (don't reintroduce these bugs)
+
+1. **`DecodedFrame::pages` is a `std::vector`, NOT a fixed array.** The previous
+   `pages[128]` silently truncated dirty page records past 128. In-match never
+   tripped this (0–7 pages), scene transitions ship 100–200+ pages, the bulk
+   was dropped. Sanity-bound at 4096 entries.
+
+2. **TA delta encoder runLen MUST be clamped to 65535 BEFORE the gap-merge step.**
+   The gap-merge can push `(i - runStart)` past 65535, and the cast to `uint16_t`
+   wraps. Server then writes `runLen=7` to the wire but copies 65543 bytes of
+   data; client mis-aligns the entire rest of the wire stream. Manifested as
+   scene-change garble on every buffer-grow transition. See `serverPublish()`
+   line ~860, the `if (fullLen > 65535) i = runStart + 65535;` clamp.
+
+3. **The diff loop snapshots live → shadow ONCE per dirty page**, then reads
+   the wire copy from the shadow. Never re-read `reg.ptr` between memcmp and
+   wire memcpy — the SH4 thread can race in there and write new bytes, leaving
+   the shadow holding state the wire never carried, which becomes a permanent
+   divergence (next frame's memcmp sees `shadow == ptr` and never re-ships).
+
+4. **`_decoded` overwrite race in the WS background thread:** the producer used
+   to unconditionally `std::move()` a new frame into `_decoded`, silently losing
+   the previous frame's dirty pages if the consumer hadn't drained yet. The
+   server's next memcmp said "unchanged" and the page was never re-sent.
+   Permanent divergence per dropped frame. Now the producer **merges** the
+   previous frame's unconsumed pages into the new frame's pages.
+
+5. **PVR atomic snapshot at top of `serverPublish`.** The Sync Pulse Generator
+   (`spg.cpp`) writes `SPG_STATUS.scanline`, `SPG_STATUS.fieldnum`,
+   `SPG_STATUS.vsync` from the SH4 scheduler thread, multiple times per frame.
+   The diff loop, the inline `pvr_snapshot[16]`, and the hash log all used to
+   read live `pvr_regs[]` — racing the scheduler. Now the entire 32 KB
+   `pvr_regs` block is snapshotted into a thread-local `_pvrAtomicSnap` once at
+   the top of `serverPublish`, and the PVR region's `_regions[].ptr` is
+   temporarily swapped to point at the snapshot. Restored at function exit.
+
+6. **`_decodedMtx` mutex on producer/consumer.** Even after #4, the producer's
+   `std::move(df)` could destroy the previous `_decoded.pages` vector while the
+   consumer was iterating it. Use-after-free / corrupted iteration. The mutex
+   serializes the merge/move and the snapshot. Consumer takes a local
+   `df_local = std::move(_decoded)` under the lock, then drops the lock and
+   iterates `df_local.pages` outside the lock.
+
+### The determinism test rig — your regression check
+
+Set `MAPLECAST_DUMP_TA=1` on both server and a flycast client (mirror_client
+mode). The server dumps each frame's TA buffer to `/tmp/ta-dumps/frame_NNNNNN.bin`
+and writes per-frame VRAM+PVR hashes to `/tmp/ta-dumps/hash.log`. The client
+does the same to `/tmp/ta-dumps-client/`. Run both, then byte-cmp the dumps
+and line-diff the hash logs. **If either test shows non-zero divergence, you
+have a regression.**
+
+Quick test recipe:
+
+```bash
+# Terminal 1 — server
+MAPLECAST=1 MAPLECAST_MIRROR_SERVER=1 MAPLECAST_DUMP_TA=1 \
+  ./build/flycast "$ROM"
+
+# Terminal 2 — flycast client (renderer-only, CPU stopped)
+MAPLECAST=1 MAPLECAST_MIRROR_CLIENT=1 MAPLECAST_SERVER_HOST=127.0.0.1 \
+MAPLECAST_DUMP_TA=1 ./build/flycast "$ROM"
+
+# Run for a minute, navigate scenes, then in another terminal:
+cd /tmp
+match=0; differ=0
+for f in ta-dumps-client/frame_*.bin; do
+  base=$(basename "$f")
+  if cmp -s "$f" "ta-dumps/$base"; then match=$((match+1));
+  else differ=$((differ+1)); fi
+done
+echo "TA byte: $match match, $differ differ"  # MUST be 0 differ
+```
+
+### Workarounds that were REMOVED — do not bring them back
+
+Each of these existed to mask a wire race that no longer exists. They are
+correlated with classes of bug — if you find yourself reaching for one of these,
+you almost certainly have a regression in the determinism test instead.
+
+- **DMA dirty bitmap** (`markVramDirty` + 11 hooks across `sh4_mem.cpp`,
+  `pvr_mem.cpp`, `elan.cpp`, `ta.cpp`). The function still exists as a no-op so
+  the call sites compile, but it does nothing. The memcmp diff loop catches
+  every VRAM change correctly with shadow snapshot ordering fixed.
+
+- **Scene-change `broadcastFreshSync()` heuristic** (used to fire when
+  `totalDirty >= 128`). Removed; per-frame deltas converge correctly across
+  scene transitions.
+
+- **Periodic 10-second safety SYNC.** Was a band-aid for wasm drift between
+  scene-change broadcasts. No longer needed.
+
+- **`onOpen` FSYN broadcast.** Removed; the initial SYNC alone is sufficient
+  for new clients to bootstrap.
+
+- **`renderer->resetTextureCache = true` on every dirty VRAM page** (still
+  present but no longer load-bearing for correctness — texture cache cleanup
+  on its own would be enough; the forced reset is now just a safety belt).
+
+What's KEPT (these are NOT workarounds, they are real correctness):
+- Initial SYNC on connect (clients need a baseline)
+- Forced SYNC on emulator reset (state is genuinely invalidated)
+- `_decoded.pages` merge in the producer (prevents page loss on consumer overrun)
+- 60-frame keyframe interval (lets new clients bootstrap mid-stream)
 
 ---
 
@@ -797,12 +922,15 @@ NOBD Stick (hardware, LAN):
 
 Browser Gamepad (WebSocket):
   Button press                    0µs
-  → Gamepad API poll              ~4ms (250Hz)
+  → Gamepad API state cache       0-16.67ms (cache refreshes at vsync,
+                                              60Hz monitor; ~7ms on 144Hz)
+  → rAF-burst poll detects change ~1ms (16 MessageChannel polls per vsync)
   → WebSocket send                ~0.01ms
   → UDP forward to 7100           ~0.01ms
   → Input server recvfrom         ~0.01ms
   → kcode[] atomic store          ~10ns
-  ─── input latency ───           ~4ms
+  ─── input latency ───           ~8ms avg, 17ms worst (60Hz monitor)
+                                  ~4ms avg, 8ms worst (144Hz monitor)
   → (same render/publish path)
   → TA capture + VRAM diff        ~0.5ms
   → WebSocket send                ~0.01ms

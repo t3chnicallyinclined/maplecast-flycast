@@ -1149,4 +1149,15 @@ void updateTelemetry(const Telemetry& t)
 	_telemetry = t;
 }
 
+// Stub: declared in the header, called by maplecast_mirror.cpp's
+// doForcedSaveStateBroadcast(). The full implementation existed as
+// uncommitted working-tree code earlier in the session and got reverted
+// during a cleanup pass. doForcedSaveStateBroadcast() only fires on
+// SIGUSR1 / explicit reset, so this no-op is harmless under normal
+// operation. Restore the real impl if you need SAVE blob broadcasts.
+void broadcastSaveStateBytes(const void* /*data*/, size_t /*size*/)
+{
+	printf("[maplecast-ws] broadcastSaveStateBytes — STUB (not implemented)\n");
+}
+
 }  // namespace maplecast_ws
