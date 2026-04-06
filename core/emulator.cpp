@@ -444,6 +444,8 @@ void Emulator::dc_reset(bool hard)
 	aica::reset(hard);
 	getSh4Executor()->Reset(true);
 	mem_Reset(hard);
+	// MapleCast: VRAM/PVR state about to be wiped — tell clients to resync.
+	maplecast_mirror::requestSyncBroadcast();
 }
 
 static void setPlatform(int platform)
@@ -875,6 +877,11 @@ void Emulator::requestReset()
 	if (config::GGPOEnable)
 		NetworkHandshake::term();
 	getSh4Executor()->Stop();
+	// MapleCast: A+B+X+Y+Start writes SB_SFRES=0x7611 → soft reset → here.
+	// Tell the mirror server to push a fresh SYNC so all browser clients
+	// reset their renderer state instead of trying to limp along with stale
+	// post-reset VRAM/PVR.
+	maplecast_mirror::requestSyncBroadcast();
 }
 
 void loadGameSpecificSettings()

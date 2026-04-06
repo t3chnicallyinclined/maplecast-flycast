@@ -103,6 +103,52 @@ struct MemRegion {
 static MemRegion _regions[4];
 static int _numRegions = 0;
 
+// ==================== DMA-write force-dirty bitmap ====================
+//
+// memcmp against a shadow copy misses VRAM writes that arrive via DMA paths
+// (Ch2 DMA, PVR DMA, TAWriteSQ 64-bit, ELAN texture DMA, YUV converter).
+// Those paths memcpy directly into vram[] without tripping the page-protect
+// SIGSEGV handler. The shadow copy gets updated to the new content too, so
+// when serverPublish() runs memcmp the next frame the page looks unchanged
+// and never streams to clients — they keep their stale texture.
+//
+// Fix: DMA write paths call markVramDirty(off, size) to set bits in this
+// bitmap. serverPublish() drains it in addition to running memcmp.
+//
+// Max VRAM is 8MB on Dreamcast (Naomi has the same). 8MB / 4KB pages =
+// 2048 pages = 32 uint64 words. We size for the maximum because VRAM_SIZE
+// is a runtime value (settings.platform.vram_size), not constexpr.
+// Lock-free atomic word fetch_or; serverPublish swaps with 0.
+static constexpr size_t VRAM_MAX_BYTES   = 8 * 1024 * 1024;
+static constexpr size_t VRAM_BITMAP_WORDS = (VRAM_MAX_BYTES / MEM_PAGE_SIZE + 63) / 64;
+static std::atomic<uint64_t> _vramDirtyBitmap[VRAM_BITMAP_WORDS];
+
+void markVramDirty(uint32_t offset, uint32_t size)
+{
+	// Hot path — bail before any work when no mirror server is running.
+	// `_isServer` becomes true once initServer() finishes; before that the
+	// bitmap is unallocated and DMA paths must not touch it.
+	if (!_isServer || size == 0) return;
+	if (offset >= VRAM_SIZE) return;
+	uint32_t startPage = offset / MEM_PAGE_SIZE;
+	uint32_t endPage   = (offset + size - 1) / MEM_PAGE_SIZE;
+	if (endPage >= VRAM_SIZE / MEM_PAGE_SIZE) endPage = VRAM_SIZE / MEM_PAGE_SIZE - 1;
+	for (uint32_t p = startPage; p <= endPage; p++) {
+		_vramDirtyBitmap[p >> 6].fetch_or(1ULL << (p & 63), std::memory_order_relaxed);
+	}
+}
+
+// Set by requestSyncBroadcast() (any thread). Drained by serverPublish() on
+// the render thread, which builds & broadcasts the SYNC there to avoid
+// touching vram[] mid-update from another thread.
+static std::atomic<bool> _forceSyncBroadcast{false};
+
+void requestSyncBroadcast()
+{
+	if (!_isServer) return;
+	_forceSyncBroadcast.store(true, std::memory_order_relaxed);
+}
+
 static bool openShm(bool create)
 {
 	if (create) shm_unlink(SHM_NAME);
@@ -566,7 +612,32 @@ bool isServer() { return _isServer; }
 bool isClient() { return _isClient; }
 
 // ==================== SERVER: publish TA commands + memory diffs ====================
-
+//
+// !!! FRAGILE — WIRE FORMAT IS A CONTRACT WITH FOUR CLIENTS !!!
+//
+// Anything you write into the dst buffer here is decoded by:
+//   1. clientReceive() below — desktop flycast mirror client
+//   2. packages/renderer/src/wasm_bridge.cpp renderer_frame() — king.html WASM
+//   3. core/network/maplecast_wasm_bridge.cpp mirror_render_frame() — emulator.html WASM
+//   4. relay/src/fanout.rs in the Rust VPS relay (parses for SYNC cache + dirty pages)
+//
+// Change the format here without touching all four parsers and you will get
+// silently corrupted frames. The breakage will look LIKE the renderer is buggy
+// (broken character select, missing textures on scene transition) because
+// in-match scenes are stable enough that small format errors don't show.
+//
+// Wire format produced below (after zstd "ZCST" envelope, in clear bytes):
+//   frameSize(4) + frameNum(4) + pvr_snapshot[16](64) +
+//   taOrigSize(4) + deltaPayloadSize(4) + (TA bytes OR delta runs + 0xFFFFFFFF) +
+//   checksum(4) + dirtyPageCount(4) + [regionId(1) + pageIdx(4) + data(4096)] * N
+//
+// Region IDs: 0=mem_b (16MB SH4 RAM), 1=vram, 2=aica_ram, 3=pvr_regs.
+// Keyframe is forced every 60 frames (forceKeyframe). Browser clients waiting
+// for first keyframe will drop up to 60 deltas — DO NOT lengthen this interval
+// without also updating the keyframe-wait logic in every client.
+//
+// See docs/ARCHITECTURE.md "Mirror Wire Format — Rules of the Road" for the
+// canonical list of rules all four parsers must obey.
 void serverPublish(TA_context* ctx)
 {
 	if (!_isServer || !_shmPtr || !ctx) return;
@@ -701,13 +772,23 @@ void serverPublish(TA_context* ctx)
 	uint8_t* dirtyCountPtr = dst;
 	dst += 4;
 
-	// VRAM + PVR regs: memcmp against shadow copies
+	// Drain the DMA force-dirty bitmap atomically. Any page bit set here
+	// is guaranteed to ship even if memcmp would say it's unchanged (e.g.
+	// when DMA wrote new texture data and shadow already matches because
+	// the previous frame already saw it but never sent it).
+	uint64_t forcedDirty[VRAM_BITMAP_WORDS];
+	for (size_t i = 0; i < VRAM_BITMAP_WORDS; i++)
+		forcedDirty[i] = _vramDirtyBitmap[i].exchange(0, std::memory_order_acquire);
+
+	// VRAM + PVR regs: memcmp against shadow copies, OR forced-dirty bitmap (VRAM only)
 	for (int r = 0; r < _numRegions; r++) {
 		MemRegion& reg = _regions[r];
 		size_t numPages = reg.size / MEM_PAGE_SIZE;
+		bool isVram = (reg.id == 1);
 		for (size_t p = 0; p < numPages; p++) {
 			size_t off = p * MEM_PAGE_SIZE;
-			if (memcmp(reg.ptr + off, reg.shadow + off, MEM_PAGE_SIZE) != 0) {
+			bool forced = isVram && (forcedDirty[p >> 6] & (1ULL << (p & 63)));
+			if (forced || memcmp(reg.ptr + off, reg.shadow + off, MEM_PAGE_SIZE) != 0) {
 				if ((size_t)(dst - dstStart) + 5 + MEM_PAGE_SIZE > RING_SIZE / 3)
 					goto done_diff;
 				*dst++ = reg.id;
@@ -721,6 +802,37 @@ void serverPublish(TA_context* ctx)
 	}
 done_diff:
 	memcpy(dirtyCountPtr, &totalDirty, 4);
+
+	// === Scene-change & forced SYNC broadcast ===
+	// Two trigger paths:
+	//   1. Forced flag (soft reset SB_SFRES, hard reset, explicit request) —
+	//      always fires regardless of rate limit. The caller knows the
+	//      renderer state is invalid.
+	//   2. Heuristic: lots of dirty pages in one frame = scene transition
+	//      (stage load, character select → match, intro cinematic, etc.).
+	//      ~512KB threshold — half what was guessed last time. The DMA
+	//      bitmap now catches more pages so the threshold can be lower
+	//      without losing precision. Rate-limited to 1 per 2 seconds so a
+	//      noisy game can't DoS us with constant fresh syncs.
+	//
+	// Skip the first few frames (boot churn) for the heuristic — but the
+	// forced flag bypasses that gate too.
+	static constexpr uint32_t SCENE_CHANGE_PAGE_THRESHOLD = 128;
+	static uint64_t _lastSceneSyncFrame = 0;
+
+	bool forced = _forceSyncBroadcast.exchange(false, std::memory_order_relaxed);
+	bool heuristic = (totalDirty >= SCENE_CHANGE_PAGE_THRESHOLD
+		&& frameNum > 60
+		&& frameNum - _lastSceneSyncFrame > 120);
+
+	if ((forced || heuristic) && maplecast_ws::active())
+	{
+		_lastSceneSyncFrame = frameNum;
+		printf("[MIRROR] %s on frame %u (%u dirty pages) — broadcasting fresh SYNC\n",
+			forced ? "FORCED SYNC" : "Scene change detected",
+			frameNum, totalDirty);
+		maplecast_ws::broadcastFreshSync();
+	}
 
 	// Patch frame size
 	uint32_t totalSize = (uint32_t)(dst - dstStart);
@@ -805,6 +917,31 @@ static int64_t _clientNowUs() {
 	return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
+// !!! THIS FUNCTION IS THE GOLD STANDARD — KEEP IT THAT WAY !!!
+//
+// Three other implementations parse the same wire format and MUST stay aligned
+// with this one (which is the desktop flycast mirror client, the only one that
+// has been correct end-to-end since day one):
+//
+//   1. packages/renderer/src/wasm_bridge.cpp renderer_frame()  (king.html WASM)
+//   2. core/network/maplecast_wasm_bridge.cpp mirror_render_frame()  (emulator.html WASM)
+//   3. relay/src/fanout.rs (the Rust VPS relay — parses dirty pages for its SYNC cache)
+//
+// When fixing a rendering bug in either browser client, the fix is almost
+// always "make it look like clientReceive()". Five bugs we already paid for:
+//
+//   (A) Decompressor sized too small — use 16MB shared between SYNC and frames.
+//   (B) Skipping dirty-pages walk while waiting for first keyframe — DON'T.
+//       Walk pages even when you can't render the TA buffer yet.
+//   (C) VramLockedWriteOffset MUST be called BEFORE memcpy into VRAM.
+//   (D) Don't truncate prevTA when taSize shrinks — only grow.
+//   (E) renderer->resetTextureCache MUST be set whenever any VRAM page is dirty.
+//
+// All five bugs manifest as broken character select / loading screens while
+// in-match looks fine. If you only test in-match, you will not catch them.
+//
+// See docs/ARCHITECTURE.md "Mirror Wire Format — Rules of the Road" for the
+// canonical list of rules all four parsers must obey.
 bool clientReceive(rend_context& rc, bool& vramDirty)
 {
 	vramDirty = false;

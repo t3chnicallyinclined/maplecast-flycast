@@ -315,8 +315,14 @@ static void checkMatchEnd()
 	maplecast_gamestate::readGameState(gs);
 
 	if (gs.in_match) {
-		_matchActive = true;
-		_matchEndHandled = false;
+		// Latch _matchActive on the rising edge only. Resetting it every
+		// tick would also reset _matchEndHandled and re-fire match_end on
+		// every status broadcast — which is exactly the loop bug that
+		// produced 115 ghost match rows in 30 seconds on 2026-04-06.
+		if (!_matchActive) {
+			_matchActive = true;
+			_matchEndHandled = false;
+		}
 
 		// Check if all 3 chars on one side are dead
 		bool p1dead = (gs.chars[0].health == 0 && gs.chars[2].health == 0 && gs.chars[4].health == 0);
@@ -1095,6 +1101,46 @@ void broadcastBinary(const void* data, size_t size)
 			_ws.send(conn, data, size, websocketpp::frame::opcode::binary);
 		} catch (...) {}
 	}
+}
+
+void broadcastFreshSync()
+{
+	if (!_active || _clientCount.load(std::memory_order_relaxed) == 0) return;
+
+	// Build SYNC packet from current VRAM + PVR regs
+	size_t syncSize = 4 + 4 + VRAM_SIZE + 4 + pvr_RegSize;
+	std::vector<uint8_t> syncBuf(syncSize);
+	uint8_t* dst = syncBuf.data();
+	memcpy(dst, "SYNC", 4); dst += 4;
+	uint32_t vs = VRAM_SIZE;
+	memcpy(dst, &vs, 4); dst += 4;
+	memcpy(dst, &vram[0], VRAM_SIZE); dst += VRAM_SIZE;
+	uint32_t ps = pvr_RegSize;
+	memcpy(dst, &ps, 4); dst += 4;
+	memcpy(dst, pvr_regs, pvr_RegSize);
+
+	// Compress with zstd (ZCST magic) — same path as onOpen
+	MirrorCompressor syncComp;
+	syncComp.init(syncSize + 128);
+	size_t compSyncSize = 0;
+	uint64_t compUs = 0;
+	const uint8_t* compSync = syncComp.compress(syncBuf.data(), (uint32_t)syncSize, compSyncSize, compUs, 3);
+
+	// Broadcast to ALL clients — even relay children get this directly. The
+	// relay tree's delta-only path is fine for normal frames but a scene
+	// transition needs to invalidate everyone's state at once.
+	{
+		std::lock_guard<std::mutex> lock(_connMutex);
+		for (auto& conn : _connections) {
+			try { _ws.send(conn, compSync, compSyncSize, websocketpp::frame::opcode::binary); }
+			catch (...) {}
+		}
+	}
+	syncComp.destroy();
+
+	printf("[maplecast-ws] SCENE-CHANGE SYNC: %.1f MB -> %.1f MB (%.1fx) in %lums to %d clients\n",
+		syncSize / (1024.0 * 1024.0), compSyncSize / (1024.0 * 1024.0),
+		(double)syncSize / compSyncSize, compUs / 1000, _clientCount.load());
 }
 
 void updateTelemetry(const Telemetry& t)

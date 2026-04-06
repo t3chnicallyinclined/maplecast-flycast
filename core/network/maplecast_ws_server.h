@@ -13,6 +13,12 @@ void shutdown();
 bool active();
 void broadcastBinary(const void* data, size_t size);
 
+// Build a fresh "SYNC" packet from current vram[]/pvr_regs, zstd-compress it
+// (ZCST magic), and broadcast to ALL connected clients. Called by the mirror
+// server on scene transitions so non-seed clients get a clean state instead
+// of trying to limp along with stale textures from missed DMA writes.
+void broadcastFreshSync();
+
 // Telemetry — updated by mirror publish
 struct Telemetry {
 	uint32_t frameNum;

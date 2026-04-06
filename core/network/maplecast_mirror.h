@@ -13,6 +13,8 @@
 */
 #pragma once
 
+#include <cstdint>
+
 struct rend_context;
 struct TA_context;
 
@@ -29,4 +31,21 @@ void serverPublish(TA_context* ctx);
 // Client: read the latest rend_context from shared memory into rc
 // Returns true if a new frame is available. Sets vramDirty if VRAM pages changed.
 bool clientReceive(rend_context& rc, bool& vramDirty);
+
+// Mark VRAM pages as dirty so the next serverPublish() streams them.
+// Called from DMA paths (Ch2 DMA, PVR DMA, TAWriteSQ 64-bit, ELAN texture
+// DMA, YUV converter) which memcpy directly into vram[] and bypass both the
+// page-protect SIGSEGV handler and the shadow-copy memcmp diff.
+// `offset` and `size` are in VRAM bytes (0..VRAM_SIZE).
+// No-op when the mirror server isn't running.
+void markVramDirty(uint32_t offset, uint32_t size);
+
+// Force a fresh full SYNC broadcast on the next serverPublish() call.
+// Used by:
+//   - SB_SFRES soft reset (player presses A+B+X+Y+Start on a Dreamcast pad)
+//   - dc_reset(true) hard reset / boot
+//   - Anything else that knows the renderer state is about to be invalidated
+// The publish path serializes the SYNC build/broadcast on the render thread
+// to avoid races with VRAM mid-update.
+void requestSyncBroadcast();
 }
