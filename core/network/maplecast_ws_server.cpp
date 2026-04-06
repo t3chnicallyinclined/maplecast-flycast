@@ -856,6 +856,17 @@ bool init(int port)
 		_ws.init_asio();
 		_ws.set_reuse_addr(true);
 
+		// CRITICAL: disable Nagle's algorithm on every accepted socket.
+		// Without this, TCP buffers small writes (status JSON, ping echoes,
+		// 4-byte input forwards) for up to 40ms hoping to coalesce them with
+		// the next write. With it, every send hits the wire immediately.
+		// The relay→home and browser→relay paths benefit by 0-40ms p99.
+		_ws.set_socket_init_handler([](websocketpp::connection_hdl,
+		                               websocketpp::lib::asio::ip::tcp::socket& s) {
+			websocketpp::lib::asio::error_code ec;
+			s.set_option(websocketpp::lib::asio::ip::tcp::no_delay(true), ec);
+		});
+
 		_ws.set_open_handler(&onOpen);
 		_ws.set_close_handler(&onClose);
 		_ws.set_message_handler(&onMessage);
@@ -863,6 +874,11 @@ bool init(int port)
 		_ws.listen(port);
 		_ws.start_accept();
 
+		// TODO: multi-threaded io_context. Several global structures
+		// (_queue, _relayTree, _seedPeers) are read without _connMutex in
+		// status broadcast and relay-tree helpers. Migrating to multi-threaded
+		// asio requires auditing every access path first. For now, single
+		// thread + the relay echoing pings locally keeps the hot path clean.
 		_wsThread = std::thread([&]() { _ws.run(); });
 
 		// Periodic status broadcast (every 1 second)
