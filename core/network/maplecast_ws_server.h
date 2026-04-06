@@ -21,6 +21,8 @@ struct Telemetry {
 	uint32_t deltaSize;
 	uint64_t publishUs;  // time to encode + broadcast one frame
 	uint64_t fps;
+	uint32_t compressedSize; // wire size after zstd compression
+	uint64_t compressUs;     // zstd compression time (microseconds)
 };
 void updateTelemetry(const Telemetry& t);
 }

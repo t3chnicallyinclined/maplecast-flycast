@@ -6,6 +6,7 @@
 	Text frames: JSON lobby (join, status) + binary gamepad input forwarding to UDP 7100.
 */
 #include "maplecast_ws_server.h"
+#include "maplecast_compress.h"
 #include "maplecast_input_server.h"
 #include "maplecast_gamestate.h"
 #include "hw/sh4/sh4_mem.h"
@@ -145,8 +146,11 @@ static json getStatus()
 	status["spectators"] = viewers;
 	status["queue"] = queueList;
 	status["frame"] = t.frameNum;
-	status["stream_kbps"] = (int64_t)(t.deltaSize * t.fps * 8 / 1024);
+	status["stream_kbps"] = (int64_t)(t.compressedSize * t.fps * 8 / 1024);
+	status["raw_kbps"] = (int64_t)(t.deltaSize * t.fps * 8 / 1024);
 	status["publish_us"] = (int64_t)t.publishUs;
+	status["compress_us"] = (int64_t)t.compressUs;
+	status["compression_ratio"] = t.compressedSize > 0 ? (double)t.deltaSize / t.compressedSize : 1.0;
 	status["fps"] = (int64_t)t.fps;
 	status["dirty"] = t.dirtyPages;
 	status["registering"] = maplecast_input::isRegistering();
@@ -156,6 +160,8 @@ static json getStatus()
 	status["sticks"] = maplecast_input::registeredStickCount();
 	status["relay_seeds"] = (int)_seedPeers.size();
 	status["relay_nodes"] = (int)_relayTree.size();
+	status["input_buffer_ms"] = maplecast_input::getBufferMs();
+	status["buffer_pending"] = maplecast_input::isBufferPending();
 
 	// Game state for leaderboard/stats
 	maplecast_gamestate::GameState gs;
@@ -426,8 +432,16 @@ static void onOpen(ConnHdl hdl)
 	memcpy(dst, pvr_regs, pvr_RegSize);
 
 	try {
-		_ws.send(hdl, syncBuf.data(), syncSize, websocketpp::frame::opcode::binary);
-		printf("[maplecast-ws] sent initial sync: %.1f MB\n", syncSize / (1024.0 * 1024.0));
+		MirrorCompressor syncComp;
+		syncComp.init(syncSize + 128);
+		size_t compSyncSize = 0;
+		uint64_t compUs = 0;
+		const uint8_t* compSync = syncComp.compress(syncBuf.data(), (uint32_t)syncSize, compSyncSize, compUs, 3);
+		_ws.send(hdl, compSync, compSyncSize, websocketpp::frame::opcode::binary);
+		syncComp.destroy();
+		printf("[maplecast-ws] sent compressed sync: %.1f MB -> %.1f MB (%.1fx) in %lums\n",
+			syncSize / (1024.0 * 1024.0), compSyncSize / (1024.0 * 1024.0),
+			(double)syncSize / compSyncSize, compUs / 1000);
 	} catch (...) {
 		printf("[maplecast-ws] failed to send initial sync\n");
 	}
@@ -444,6 +458,8 @@ static void onClose(ConnHdl hdl)
 	int slot = getSlotForConn(hdl);
 	if (slot >= 0) {
 		maplecast_input::disconnectPlayer(slot);
+		// Reset buffer when a player leaves
+		maplecast_input::setBufferMs(0);
 	}
 
 	void* key = nullptr;
@@ -546,6 +562,21 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 				// Patch in-game player name
 				if (slot >= 0)
 					maplecast_gamestate::setPlayerName(slot, name.c_str());
+
+				// Auto-propose buffer when both players are connected
+				if (maplecast_input::connectedCount() == 2 && !maplecast_input::isBufferPending()) {
+					int rec = maplecast_input::getRecommendedBufferMs();
+					if (rec > 0) {
+						maplecast_input::proposeBuffer(rec);
+						json prop = {{"type", "buffer_propose"}, {"ms", rec},
+							{"p1_type", maplecast_input::getPlayer(0).type == maplecast_input::InputType::NobdUDP ? "hardware" : "browser"},
+							{"p2_type", maplecast_input::getPlayer(1).type == maplecast_input::InputType::NobdUDP ? "hardware" : "browser"}};
+						std::string propStr = prop.dump();
+						std::lock_guard<std::mutex> lock2(_connMutex);
+						for (auto& conn : _connections)
+							try { _ws.send(conn, propStr, websocketpp::frame::opcode::text); } catch (...) {}
+					}
+				}
 
 				// Broadcast updated status to all
 				broadcastStatus();
@@ -738,7 +769,59 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 			else if (ctrl["type"] == "relay_stats")
 			{
 				// Health report from relay node — log for now
-				// Future: use for topology optimization
+			}
+			// ==================== Input Buffer Negotiation ====================
+			else if (ctrl["type"] == "buffer_propose")
+			{
+				// Server or admin triggers negotiation
+				int ms = ctrl.value("ms", -1);
+				if (ms < 0) ms = maplecast_input::getRecommendedBufferMs();
+				maplecast_input::proposeBuffer(ms);
+
+				// Notify both players
+				json prop = {{"type", "buffer_propose"},
+					{"ms", ms},
+					{"p1_type", maplecast_input::getPlayer(0).connected ?
+						(maplecast_input::getPlayer(0).type == maplecast_input::InputType::NobdUDP ? "hardware" : "browser") : "none"},
+					{"p2_type", maplecast_input::getPlayer(1).connected ?
+						(maplecast_input::getPlayer(1).type == maplecast_input::InputType::NobdUDP ? "hardware" : "browser") : "none"}};
+				std::string propStr = prop.dump();
+				std::lock_guard<std::mutex> lock(_connMutex);
+				for (auto& conn : _connections)
+					try { _ws.send(conn, propStr, websocketpp::frame::opcode::text); } catch (...) {}
+			}
+			else if (ctrl["type"] == "buffer_accept")
+			{
+				int slot = getSlotForConn(hdl);
+				if (slot >= 0) {
+					bool both = maplecast_input::acceptBuffer(slot);
+					if (both) {
+						// Notify all clients that buffer is active
+						json msg = {{"type", "buffer_active"}, {"ms", maplecast_input::getBufferMs()}};
+						std::string s = msg.dump();
+						std::lock_guard<std::mutex> lock(_connMutex);
+						for (auto& conn : _connections)
+							try { _ws.send(conn, s, websocketpp::frame::opcode::text); } catch (...) {}
+					}
+				}
+			}
+			else if (ctrl["type"] == "buffer_reject")
+			{
+				int slot = getSlotForConn(hdl);
+				if (slot >= 0) {
+					maplecast_input::rejectBuffer(slot);
+					json msg = {{"type", "buffer_rejected"}, {"slot", slot}};
+					std::string s = msg.dump();
+					std::lock_guard<std::mutex> lock(_connMutex);
+					for (auto& conn : _connections)
+						try { _ws.send(conn, s, websocketpp::frame::opcode::text); } catch (...) {}
+				}
+			}
+			else if (ctrl["type"] == "buffer_set")
+			{
+				// Direct set (admin/debug)
+				int ms = ctrl.value("ms", 0);
+				maplecast_input::setBufferMs(ms);
 			}
 			else if (ctrl["type"] == "cancel_register")
 			{

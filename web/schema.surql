@@ -17,7 +17,9 @@
 -- PLAYERS — identity + lifetime stats + rating
 -- ============================================================
 DEFINE TABLE player SCHEMAFULL;
-DEFINE FIELD username     ON player TYPE string ASSERT string::len($value) >= 4 AND string::len($value) <= 12;
+DEFINE FIELD username     ON player TYPE string ASSERT string::len($value) >= 4 AND string::len($value) <= 16;
+DEFINE FIELD pass_hash    ON player TYPE option<string>;       -- argon2 hash
+DEFINE FIELD avatar       ON player TYPE option<string>;       -- emoji icon
 DEFINE FIELD created_at   ON player TYPE datetime DEFAULT time::now();
 DEFINE FIELD last_seen    ON player TYPE datetime DEFAULT time::now();
 

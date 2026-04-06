@@ -28,6 +28,7 @@
 #include "rend/texconv.h"
 #include "rend/transform_matrix.h"
 #include "cfg/option.h"
+#include "maplecast_compress.h"
 
 #include <cstdio>
 #include <cstring>
@@ -69,6 +70,8 @@ static bool _ctxAlloced = false;
 static std::vector<uint8_t> _prevTA;       // Previous frame's TA buffer (for delta decode)
 static bool _initialized = false;
 static uint32_t _frameCount = 0;
+static MirrorDecompressor _decomp;
+static bool _decompInit = false;
 
 // ============================================================================
 // renderer_init — Create WebGL2 context and initialize the GLES renderer
@@ -136,8 +139,15 @@ int renderer_init(int width, int height)
 EMSCRIPTEN_KEEPALIVE
 int renderer_sync(uint8_t* data, int size)
 {
-    if (!_initialized || !renderer || size < 12) return 0;
-    uint8_t* src = data;
+    if (!_initialized || !renderer || size < 8) return 0;
+
+    // Decompress if ZCST-compressed
+    if (!_decompInit) { _decomp.init(16 * 1024 * 1024); _decompInit = true; }
+    size_t decompSize = 0;
+    const uint8_t* decompData = _decomp.decompress(data, size, decompSize);
+    if (decompSize < 12) return 0;
+
+    const uint8_t* src = decompData;
 
     // Verify magic
     if (memcmp(src, "SYNC", 4) != 0) return 0;
@@ -194,9 +204,15 @@ int renderer_frame(uint8_t* data, int size)
 {
     if (!_initialized) return -1;
     if (!renderer) return -2;
-    if (size < 80) return -3;
+    if (size < 12) return -3;
 
-    uint8_t* src = data;
+    // Decompress if ZCST-compressed
+    if (!_decompInit) { _decomp.init(512 * 1024); _decompInit = true; }
+    size_t decompSize = 0;
+    const uint8_t* decompData = _decomp.decompress(data, size, decompSize);
+    if (decompSize < 80) return -3;
+
+    const uint8_t* src = decompData;
 
     // ---- Header ----
     uint32_t frameSize; memcpy(&frameSize, src, 4); src += 4;
@@ -225,8 +241,8 @@ int renderer_frame(uint8_t* data, int size)
         _prevTA.resize(taSize, 0);
 
         // Apply delta runs: (offset:4, runLen:2, data:N)*, sentinel 0xFFFFFFFF
-        uint8_t* deltaData = src;
-        uint8_t* deltaEnd  = src + deltaPayloadSize;
+        const uint8_t* deltaData = src;
+        const uint8_t* deltaEnd  = src + deltaPayloadSize;
         while (deltaData + 4 <= deltaEnd) {
             uint32_t offset;
             memcpy(&offset, deltaData, 4); deltaData += 4;
@@ -317,9 +333,10 @@ int renderer_frame(uint8_t* data, int size)
     {
         int fbW, fbH;
         getScaledFramebufferSize(_ctx.rend, fbW, fbH);
-        // Cap framebuffer to prevent OOM — max 1920x1440 (4x native)
-        if (fbW > 1920) fbW = 640;
-        if (fbH > 1440) fbH = 480;
+        // Cap framebuffer to display dimensions to prevent OOM
+        // settings.display.width/height are set by renderer_resize()
+        if (fbW > settings.display.width)  fbW = settings.display.width;
+        if (fbH > settings.display.height) fbH = settings.display.height;
         _ctx.rend.framebufferWidth = fbW;
         _ctx.rend.framebufferHeight = fbH;
         if (_frameCount == 0)

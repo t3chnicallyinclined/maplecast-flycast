@@ -23,6 +23,7 @@
 #include "emulator.h"
 #include "hw/mem/mem_watch.h"
 #include "maplecast_ws_server.h"
+#include "maplecast_compress.h"
 #include "rend/texconv.h"
 
 #include <cstdio>
@@ -155,6 +156,7 @@ static uint8_t* _taBuf[2] = { nullptr, nullptr };
 static uint32_t _taBufSize[2] = { 0, 0 };
 static int _taCur = 0;
 static bool _taHasPrev = false;
+static MirrorCompressor _compressor;
 
 void initServer()
 {
@@ -178,6 +180,9 @@ void initServer()
 	}
 	_taCur = 0;
 	_taHasPrev = false;
+
+	// zstd compression for WebSocket broadcast
+	_compressor.init(256 * 1024);
 
 	// Start lightweight WebSocket server — no CUDA, no NVENC
 	int wsPort = 7200;
@@ -392,16 +397,24 @@ static void wsClientRun(std::string host, int port)
 	}
 	_decodeIdx = 0;
 
+	// zstd decompressor — reused across all frames
+	MirrorDecompressor decomp;
+	decomp.init(16 * 1024 * 1024);  // 16MB covers SYNC + worst-case frames
+
 	// Wait for initial SYNC message (VRAM + PVR regs)
 	bool synced = false;
 	std::vector<uint8_t> frame;
 	while (!synced) {
 		if (!wsReadFrame(_wsFd, frame)) {
 			printf("[MIRROR-WS] Connection lost waiting for sync\n"); fflush(stdout);
-			close(_wsFd); _wsFd = -1; return;
+			close(_wsFd); _wsFd = -1; decomp.destroy(); return;
 		}
-		if (frame.size() > 8 && memcmp(frame.data(), "SYNC", 4) == 0) {
-			uint8_t* src = frame.data() + 4;
+		// Decompress if needed
+		size_t decompSize = 0;
+		const uint8_t* decompData = decomp.decompress(frame.data(), frame.size(), decompSize);
+
+		if (decompSize > 8 && memcmp(decompData, "SYNC", 4) == 0) {
+			const uint8_t* src = decompData + 4;
 			uint32_t vramSize; memcpy(&vramSize, src, 4); src += 4;
 			if (vramSize <= VRAM_SIZE) {
 				memcpy(&vram[0], src, vramSize); src += vramSize;
@@ -414,8 +427,8 @@ static void wsClientRun(std::string host, int port)
 			// NOTE: renderer cache/palette updates happen on render thread in clientReceive()
 
 			synced = true;
-			printf("[MIRROR-WS] Initial sync received: %.1f MB — VRAM + PVR loaded\n",
-				frame.size() / (1024.0 * 1024.0));
+			printf("[MIRROR-WS] Initial sync received: %.1f MB (%.1f MB compressed) — VRAM + PVR loaded\n",
+				decompSize / (1024.0 * 1024.0), frame.size() / (1024.0 * 1024.0));
 			fflush(stdout);
 		}
 	}
@@ -425,9 +438,12 @@ static void wsClientRun(std::string host, int port)
 			printf("[MIRROR-WS] Connection lost\n"); fflush(stdout);
 			break;
 		}
-		if (frame.size() < 80) continue;
+		// Decompress if needed
+		size_t decompSize = 0;
+		const uint8_t* decompData = decomp.decompress(frame.data(), frame.size(), decompSize);
+		if (decompSize < 80) continue;
 
-		uint8_t* src = frame.data();
+		const uint8_t* src = decompData;
 		uint32_t frameSize; memcpy(&frameSize, src, 4); src += 4;
 		uint32_t frameNum; memcpy(&frameNum, src, 4); src += 4;
 
@@ -439,9 +455,9 @@ static void wsClientRun(std::string host, int port)
 
 		// Sanity check — TA buffers are ~50-300KB, never megabytes
 		if (taSize > 512 * 1024 || deltaPayloadSize > 512 * 1024 ||
-		    frameSize > frame.size()) {
+		    frameSize > decompSize) {
 			printf("[MIRROR-WS] BAD FRAME: taSize=%u delta=%u frameSize=%u bufSize=%zu — skipping\n",
-				taSize, deltaPayloadSize, frameSize, frame.size());
+				taSize, deltaPayloadSize, frameSize, decompSize);
 			continue;
 		}
 
@@ -469,8 +485,8 @@ static void wsClientRun(std::string host, int port)
 			// This is needed because the previous buffer might be in use by render thread
 			memcpy(taDst, taPrev, taSize);
 
-			uint8_t* dd = src;
-			uint8_t* de = src + deltaPayloadSize;
+			const uint8_t* dd = src;
+			const uint8_t* de = src + deltaPayloadSize;
 			while (dd + 4 <= de) {
 				uint32_t off; memcpy(&off, dd, 4); dd += 4;
 				if (off == 0xFFFFFFFF) break;
@@ -521,6 +537,7 @@ static void wsClientRun(std::string host, int port)
 	}
 
 	close(_wsFd); _wsFd = -1;
+	decomp.destroy();
 }
 
 static void initClientWebSocket()
@@ -716,9 +733,16 @@ done_diff:
 	hdr->write_pos = writePos + totalSize;
 	hdr->frame_count++;
 
-	// Also broadcast over WebSocket to browser clients
+	// Compress + broadcast over WebSocket to browser clients
+	uint64_t compressUs = 0;
+	uint32_t compressedSize = totalSize;
 	if (maplecast_ws::active())
-		maplecast_ws::broadcastBinary(dstStart, totalSize);
+	{
+		size_t compSize = 0;
+		const uint8_t* compData = _compressor.compress(dstStart, totalSize, compSize, compressUs);
+		maplecast_ws::broadcastBinary(compData, compSize);
+		compressedSize = (uint32_t)compSize;
+	}
 
 	// Update telemetry
 	{
@@ -734,7 +758,7 @@ done_diff:
 			_fpsCounter = 0;
 			_fpsStart = publishEnd;
 		}
-		maplecast_ws::updateTelemetry({frameNum, taSize, totalDirty, totalSize, publishUs, _lastFps});
+		maplecast_ws::updateTelemetry({frameNum, taSize, totalDirty, totalSize, publishUs, _lastFps, compressedSize, compressUs});
 	}
 
 	// Check if a client is requesting a fresh sync state
@@ -768,8 +792,9 @@ done_diff:
 	// Audit disabled — reduced to VRAM+PVR only
 
 	if (frameNum % 600 == 0)
-		printf("[MIRROR] Server frame %u | TA=%u bytes | %u dirty pages\n",
-			frameNum, taSize, totalDirty);
+		printf("[MIRROR] Server frame %u | TA=%u bytes | %u dirty pages | %u->%u bytes (%.1fx) zstd %luus\n",
+			frameNum, taSize, totalDirty, totalSize, compressedSize,
+			compressedSize > 0 ? (double)totalSize / compressedSize : 0.0, compressUs);
 }
 
 // ==================== CLIENT: receive TA commands + diffs, run ta_parse ====================

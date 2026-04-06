@@ -111,4 +111,22 @@ int registeredStickCount();
 // Validate username: 4-12 chars, [a-zA-Z0-9_] only
 bool isValidUsername(const char* name);
 
+// ==================== Input Buffer (Fairness) ====================
+// Coalesces inputs into N-ms windows so ping differences between players
+// don't give one side a frame advantage. 0 = raw arcade mode (no delay).
+
+// Set/get the current buffer window (0-16ms, capped at one frame)
+void setBufferMs(int ms);
+int getBufferMs();
+
+// Compute recommended buffer from current player ping difference
+int getRecommendedBufferMs();
+
+// Per-match negotiation: server proposes, both players accept/reject
+void proposeBuffer(int ms);
+bool acceptBuffer(int slot);    // returns true when BOTH accepted
+void rejectBuffer(int slot);
+bool isBufferPending();
+int getProposedBufferMs();
+
 }

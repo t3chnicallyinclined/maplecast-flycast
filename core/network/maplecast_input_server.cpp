@@ -41,7 +41,34 @@ namespace maplecast_input
 
 static std::atomic<bool> _active{false};
 static std::thread _udpThread;
+static std::thread _bufferThread;
 static int _udpSock = -1;
+
+// ==================== Input Buffer (Fairness) ====================
+// Coalesces inputs into N-ms windows so ping differences don't give
+// one player a frame advantage. Each slot's latest input is staged,
+// then flushed to kcode[] every _bufferMs milliseconds.
+// _bufferMs=0 means instant (no buffer, raw arcade mode).
+
+static std::atomic<int> _bufferMs{0};       // configurable per-match
+static std::atomic<bool> _bufferActive{false};
+
+struct StagedInput {
+	uint16_t buttons = 0xFFFF;
+	uint8_t lt = 0;
+	uint8_t rt = 0;
+	std::atomic<bool> dirty{false};         // new input since last flush
+};
+static StagedInput _staged[2];
+
+// Buffer negotiation state
+struct BufferNegotiation {
+	bool pending = false;
+	int proposedMs = 0;
+	bool p1Accepted = false;
+	bool p2Accepted = false;
+};
+static BufferNegotiation _negotiation;
 
 // Player registry — THE single source of truth
 static PlayerInfo _players[2] = {};
@@ -87,15 +114,57 @@ static inline int64_t nowUs()
 	return ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
 }
 
+// Flush staged input to kcode[] — called by buffer thread or directly
+static void flushSlot(int slot)
+{
+	if (slot < 0 || slot > 1) return;
+	StagedInput& s = _staged[slot];
+	if (!s.dirty.load(std::memory_order_relaxed)) return;
+	kcode[slot] = s.buttons | 0xFFFF0000;
+	lt[slot] = (uint16_t)s.lt << 8;
+	rt[slot] = (uint16_t)s.rt << 8;
+	s.dirty.store(false, std::memory_order_relaxed);
+}
+
+// Buffer thread — flushes staged inputs every _bufferMs
+static void bufferThreadLoop()
+{
+	printf("[input-server] Buffer thread started\n");
+	while (_active.load()) {
+		int ms = _bufferMs.load(std::memory_order_relaxed);
+		if (ms <= 0) {
+			// Buffer disabled — sleep and check again
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			continue;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+		if (_bufferActive.load(std::memory_order_relaxed)) {
+			flushSlot(0);
+			flushSlot(1);
+		}
+	}
+	printf("[input-server] Buffer thread stopped\n");
+}
+
 // Write button state to kcode[]/lt[]/rt[] globals AND update player stats
 static void updateSlot(int slot, uint8_t ltVal, uint8_t rtVal, uint16_t buttons)
 {
 	if (slot < 0 || slot > 1) return;
 
-	// Atomic write to gamepad globals — CMD9 reads these
-	kcode[slot] = buttons | 0xFFFF0000;  // active-low, upper 16 bits set
-	lt[slot] = (uint16_t)ltVal << 8;
-	rt[slot] = (uint16_t)rtVal << 8;
+	int ms = _bufferMs.load(std::memory_order_relaxed);
+	if (ms > 0 && _bufferActive.load(std::memory_order_relaxed)) {
+		// Buffer active — stage input, buffer thread flushes on tick
+		StagedInput& s = _staged[slot];
+		s.buttons = buttons;
+		s.lt = ltVal;
+		s.rt = rtVal;
+		s.dirty.store(true, std::memory_order_relaxed);
+	} else {
+		// No buffer — write directly (raw arcade mode)
+		kcode[slot] = buttons | 0xFFFF0000;
+		lt[slot] = (uint16_t)ltVal << 8;
+		rt[slot] = (uint16_t)rtVal << 8;
+	}
 
 	// Update player stats
 	PlayerInfo& p = _players[slot];
@@ -347,6 +416,7 @@ bool init(int udpPort)
 
 	_active = true;
 	_udpThread = std::thread(udpThreadLoop, udpPort);
+	_bufferThread = std::thread(bufferThreadLoop);
 
 	printf("[input-server] === READY === port %d\n", udpPort);
 	printf("[input-server] waiting for players (NOBD UDP or browser WebSocket)\n");
@@ -361,6 +431,7 @@ void shutdown()
 
 	if (_udpSock >= 0) { close(_udpSock); _udpSock = -1; }
 	if (_udpThread.joinable()) _udpThread.join();
+	if (_bufferThread.joinable()) _bufferThread.join();
 
 	printf("[input-server] shutdown\n");
 }
@@ -602,5 +673,75 @@ bool isValidUsername(const char* name)
 	}
 	return len >= 4 && len <= 12;
 }
+
+// ==================== Input Buffer API ====================
+
+void setBufferMs(int ms)
+{
+	if (ms < 0) ms = 0;
+	if (ms > 16) ms = 16;  // cap at one frame
+	int prev = _bufferMs.exchange(ms);
+	_bufferActive.store(ms > 0, std::memory_order_relaxed);
+	if (ms != prev)
+		printf("[input-server] Input buffer: %dms (%s)\n", ms, ms > 0 ? "fairness" : "raw arcade");
+}
+
+int getBufferMs()
+{
+	return _bufferMs.load(std::memory_order_relaxed);
+}
+
+int getRecommendedBufferMs()
+{
+	// Compute from ping difference between connected players
+	// Uses half-RTT approximation from lastPacketUs jitter
+	if (!_players[0].connected || !_players[1].connected) return 0;
+
+	// Use packets-per-second as proxy: higher PPS = lower latency
+	// For actual ping, we'd need the WS pong RTT. For now, estimate
+	// from input type: NOBD = ~0ms, BrowserWS = use WS ping from status
+	int p1type = (_players[0].type == InputType::NobdUDP) ? 0 : 1;
+	int p2type = (_players[1].type == InputType::NobdUDP) ? 0 : 1;
+
+	// If both same type, small buffer. If mixed, larger buffer.
+	if (p1type == 0 && p2type == 0) return 0;   // both NOBD, no buffer needed
+	if (p1type == 1 && p2type == 1) return 3;   // both browser, small buffer
+	return 5;  // mixed NOBD + browser
+}
+
+void proposeBuffer(int ms)
+{
+	_negotiation.pending = true;
+	_negotiation.proposedMs = ms;
+	_negotiation.p1Accepted = false;
+	_negotiation.p2Accepted = false;
+	printf("[input-server] Buffer proposed: %dms\n", ms);
+}
+
+bool acceptBuffer(int slot)
+{
+	if (!_negotiation.pending) return false;
+	if (slot == 0) _negotiation.p1Accepted = true;
+	if (slot == 1) _negotiation.p2Accepted = true;
+
+	if (_negotiation.p1Accepted && _negotiation.p2Accepted) {
+		setBufferMs(_negotiation.proposedMs);
+		_negotiation.pending = false;
+		printf("[input-server] Buffer ACCEPTED by both: %dms\n", _negotiation.proposedMs);
+		return true;  // both accepted
+	}
+	return false;
+}
+
+void rejectBuffer(int slot)
+{
+	if (!_negotiation.pending) return;
+	_negotiation.pending = false;
+	setBufferMs(0);
+	printf("[input-server] Buffer REJECTED by P%d — raw arcade mode\n", slot + 1);
+}
+
+bool isBufferPending() { return _negotiation.pending; }
+int getProposedBufferMs() { return _negotiation.proposedMs; }
 
 } // namespace maplecast_input

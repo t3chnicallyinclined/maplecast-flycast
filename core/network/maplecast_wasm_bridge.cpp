@@ -18,6 +18,7 @@
 #include "rend/texconv.h"
 #include "hw/mem/mem_watch.h"
 #include "emulator.h"
+#include "maplecast_compress.h"
 
 #include <cstdio>
 #include <cstring>
@@ -31,6 +32,8 @@ static TA_context _wasmCtx;
 static bool _wasmCtxAlloced = false;
 static std::vector<uint8_t> _wasmPrevTA;
 static bool _wasmInitialized = false;
+static MirrorDecompressor _decompressor;
+static bool _decompressorInit = false;
 
 extern "C" {
 
@@ -39,8 +42,15 @@ extern "C" {
 EMSCRIPTEN_KEEPALIVE
 int mirror_apply_sync(uint8_t* data, int size)
 {
-	if (size < 12) return 0;
-	uint8_t* src = data;
+	if (size < 8) return 0;
+
+	// Decompress if ZCST-compressed
+	if (!_decompressorInit) { _decompressor.init(16 * 1024 * 1024); _decompressorInit = true; }
+	size_t decompSize = 0;
+	const uint8_t* decompData = _decompressor.decompress(data, size, decompSize);
+	if (decompSize < 12) return 0;
+
+	const uint8_t* src = decompData;
 
 	// Skip "SYNC" magic
 	if (memcmp(src, "SYNC", 4) != 0) return 0;
@@ -86,9 +96,15 @@ int mirror_init()
 EMSCRIPTEN_KEEPALIVE
 int mirror_render_frame(uint8_t* data, int size)
 {
-	if (!_wasmInitialized || !renderer || size < 80) return 0;
+	if (!_wasmInitialized || !renderer || size < 12) return 0;
 
-	uint8_t* src = data;
+	// Decompress if ZCST-compressed
+	if (!_decompressorInit) { _decompressor.init(512 * 1024); _decompressorInit = true; }
+	size_t decompSize = 0;
+	const uint8_t* decompData = _decompressor.decompress(data, size, decompSize);
+	if (decompSize < 80) return 0;
+
+	const uint8_t* src = decompData;
 
 	// Frame header
 	uint32_t frameSize; memcpy(&frameSize, src, 4); src += 4;
@@ -122,8 +138,8 @@ int mirror_render_frame(uint8_t* data, int size)
 		else if (_wasmPrevTA.size() > taSize)
 			_wasmPrevTA.resize(taSize);
 
-		uint8_t* deltaData = src;
-		uint8_t* deltaEnd = src + deltaPayloadSize;
+		const uint8_t* deltaData = src;
+		const uint8_t* deltaEnd = src + deltaPayloadSize;
 		while (deltaData + 4 <= deltaEnd)
 		{
 			uint32_t offset;

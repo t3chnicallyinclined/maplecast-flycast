@@ -414,6 +414,12 @@ async fn handle_match_end(
         if name.is_empty() { continue; }
         let name_lower = name.to_lowercase();
 
+        // Skip anonymous players — no stats for unregistered users
+        let anon_prefixes = ["wanderer_","drifter_","nomad_","ronin_","ghost_",
+            "shadow_","vagrant_","stranger_","outlaw_","rogue_","exile_","phantom_",
+            "unknown_","nameless_","faceless_"];
+        if anon_prefixes.iter().any(|p| name_lower.starts_with(p)) { continue; }
+
         // Upsert player
         db.query("INSERT INTO player (username, last_seen, total_matches) VALUES ($n, time::now(), 1) \
             ON DUPLICATE KEY UPDATE last_seen=time::now(), total_matches+=1")

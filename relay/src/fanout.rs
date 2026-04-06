@@ -1,0 +1,521 @@
+// ============================================================================
+// FANOUT — Core relay engine
+//
+// Two modes:
+// 1. Raw TCP upstream from flycast → broadcast to WebSocket clients
+// 2. Future: splice() zero-copy for raw TCP clients
+//
+// The relay maintains:
+// - Cached SYNC state (VRAM + PVR), updated incrementally from dirty pages
+// - Latest frame for late joiners
+// - Client list with backpressure tracking
+//
+// Frame flow:
+//   flycast → [raw TCP, 4-byte length prefix] → relay
+//   relay  → [WebSocket binary] → all connected browsers
+//
+// SYNC flow:
+//   On new client connect → send cached SYNC as WebSocket binary
+//   Then stream delta frames
+// ============================================================================
+
+use crate::protocol;
+use bytes::Bytes;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::io::AsyncReadExt;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{broadcast, RwLock, Mutex};
+use tokio_tungstenite::tungstenite::Message;
+use futures_util::{SinkExt, StreamExt};
+use tracing::{info, warn, error, debug};
+
+// ============================================================================
+// Relay State — shared across all tasks
+// ============================================================================
+
+#[derive(Clone)]
+pub struct RelayState {
+    inner: Arc<RelayInner>,
+}
+
+struct RelayInner {
+    /// Broadcast channel for delta frames (binary, opaque bytes)
+    frame_tx: broadcast::Sender<Bytes>,
+
+    /// Cached SYNC state — rebuilt from initial SYNC + incremental dirty pages
+    sync_cache: RwLock<Option<SyncCache>>,
+
+    /// Connected client count
+    client_count: Mutex<usize>,
+    max_clients: usize,
+
+    /// Stats
+    stats: Mutex<RelayStats>,
+
+    /// JSON signaling broadcast (for relay_* messages)
+    signal_tx: broadcast::Sender<String>,
+
+    /// Client → upstream forwarding (text messages: join, queue, register_stick, chat, etc.)
+    upstream_text_tx: tokio::sync::mpsc::Sender<String>,
+    upstream_text_rx: Mutex<Option<tokio::sync::mpsc::Receiver<String>>>,
+
+    /// Client → upstream forwarding (binary messages: gamepad input)
+    upstream_bin_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    upstream_bin_rx: Mutex<Option<tokio::sync::mpsc::Receiver<Vec<u8>>>>,
+}
+
+struct SyncCache {
+    vram: Vec<u8>,
+    pvr: Vec<u8>,
+    /// Pre-built SYNC binary for fast send to new clients
+    raw: Bytes,
+}
+
+#[derive(Default)]
+struct RelayStats {
+    frames_received: u64,
+    frames_broadcast: u64,
+    bytes_received: u64,
+    bytes_broadcast: u64,
+    sync_count: u32,
+    upstream_connected: bool,
+}
+
+impl RelayState {
+    pub fn new(max_clients: usize) -> Self {
+        // 16 slots — if a client falls behind 16 frames, they drop frames (good)
+        let (frame_tx, _) = broadcast::channel(16);
+        let (signal_tx, _) = broadcast::channel(64);
+        let (upstream_text_tx, upstream_text_rx) = tokio::sync::mpsc::channel(256);
+        let (upstream_bin_tx, upstream_bin_rx) = tokio::sync::mpsc::channel(256);
+
+        Self {
+            inner: Arc::new(RelayInner {
+                frame_tx,
+                sync_cache: RwLock::new(None),
+                client_count: Mutex::new(0),
+                max_clients,
+                stats: Mutex::new(RelayStats::default()),
+                signal_tx,
+                upstream_text_tx,
+                upstream_text_rx: Mutex::new(Some(upstream_text_rx)),
+                upstream_bin_tx,
+                upstream_bin_rx: Mutex::new(Some(upstream_bin_rx)),
+            }),
+        }
+    }
+
+    /// Handle incoming frame from upstream flycast server
+    async fn on_upstream_frame(&self, data: Bytes) {
+        if protocol::is_sync(&data) {
+            // SYNC frame — cache it
+            if let Some((vram, pvr)) = protocol::parse_sync(&data) {
+                info!(
+                    "SYNC received: VRAM={:.1}MB PVR={:.1}KB",
+                    vram.len() as f64 / 1024.0 / 1024.0,
+                    pvr.len() as f64 / 1024.0
+                );
+                let raw = Bytes::from(protocol::build_sync(&vram, &pvr));
+                let mut cache = self.inner.sync_cache.write().await;
+                *cache = Some(SyncCache { vram, pvr, raw });
+            }
+
+            let mut stats = self.inner.stats.lock().await;
+            stats.sync_count += 1;
+
+            // Broadcast SYNC to all connected clients via a special channel
+            // (we send it as a frame — clients check for SYNC magic)
+            let _ = self.inner.frame_tx.send(data);
+        } else {
+            // Delta frame — update cached SYNC state + broadcast
+            {
+                let mut cache = self.inner.sync_cache.write().await;
+                if let Some(ref mut c) = *cache {
+                    protocol::apply_dirty_pages(&data, &mut c.vram, &mut c.pvr);
+                    // Rebuild raw SYNC for late joiners
+                    c.raw = Bytes::from(protocol::build_sync(&c.vram, &c.pvr));
+                }
+            }
+
+            let frame_num = protocol::frame_num(&data).unwrap_or(0);
+            let len = data.len();
+
+            // Broadcast to all subscribers
+            let receivers = self.inner.frame_tx.receiver_count();
+            let _ = self.inner.frame_tx.send(data);
+
+            let mut stats = self.inner.stats.lock().await;
+            stats.frames_received += 1;
+            stats.bytes_received += len as u64;
+            stats.frames_broadcast += receivers as u64;
+            stats.bytes_broadcast += (len * receivers) as u64;
+
+            if stats.frames_received % 600 == 0 {
+                info!(
+                    "📊 frame={} clients={} total_frames={} total_rx={:.1}MB total_tx={:.1}MB syncs={}",
+                    frame_num,
+                    receivers,
+                    stats.frames_received,
+                    stats.bytes_received as f64 / 1024.0 / 1024.0,
+                    stats.bytes_broadcast as f64 / 1024.0 / 1024.0,
+                    stats.sync_count,
+                );
+            }
+        }
+    }
+
+    /// Get cached SYNC for new client
+    async fn get_sync(&self) -> Option<Bytes> {
+        let cache = self.inner.sync_cache.read().await;
+        cache.as_ref().map(|c| c.raw.clone())
+    }
+
+    /// Subscribe to frame broadcast
+    fn subscribe_frames(&self) -> broadcast::Receiver<Bytes> {
+        self.inner.frame_tx.subscribe()
+    }
+
+    /// Subscribe to signaling broadcast
+    fn subscribe_signals(&self) -> broadcast::Receiver<String> {
+        self.inner.signal_tx.subscribe()
+    }
+
+    /// Broadcast a signaling message to all clients
+    fn broadcast_signal(&self, msg: &str) {
+        let _ = self.inner.signal_tx.send(msg.to_string());
+    }
+
+    /// Forward a client's text message to the upstream flycast server
+    fn forward_text_to_upstream(&self, msg: &str) {
+        let _ = self.inner.upstream_text_tx.try_send(msg.to_string());
+    }
+
+    /// Forward a client's binary message to the upstream flycast server
+    fn forward_bin_to_upstream(&self, data: &[u8]) {
+        let _ = self.inner.upstream_bin_tx.try_send(data.to_vec());
+    }
+
+    /// Take the upstream receivers (called once by the upstream connector)
+    async fn take_upstream_receivers(&self) -> (
+        tokio::sync::mpsc::Receiver<String>,
+        tokio::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        let text_rx = self.inner.upstream_text_rx.lock().await.take()
+            .expect("upstream receivers already taken");
+        let bin_rx = self.inner.upstream_bin_rx.lock().await.take()
+            .expect("upstream receivers already taken");
+        (text_rx, bin_rx)
+    }
+
+    async fn add_client(&self) -> bool {
+        let mut count = self.inner.client_count.lock().await;
+        if *count >= self.inner.max_clients {
+            return false;
+        }
+        *count += 1;
+        true
+    }
+
+    async fn remove_client(&self) {
+        let mut count = self.inner.client_count.lock().await;
+        *count = count.saturating_sub(1);
+    }
+
+    async fn client_count(&self) -> usize {
+        *self.inner.client_count.lock().await
+    }
+}
+
+// ============================================================================
+// TCP Upstream Listener — flycast pushes frames to us
+// ============================================================================
+
+pub async fn tcp_upstream_listener(
+    addr: SocketAddr,
+    state: RelayState,
+) -> std::io::Result<()> {
+    let listener = TcpListener::bind(addr).await?;
+    info!("TCP upstream listener ready on {}", addr);
+
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        info!("Upstream flycast connected from {}", peer);
+
+        // Disable Nagle — we want frames ASAP
+        stream.set_nodelay(true).ok();
+
+        let state = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_upstream(stream, state.clone()).await {
+                warn!("Upstream connection lost: {}", e);
+            }
+            {
+                let mut stats = state.inner.stats.lock().await;
+                stats.upstream_connected = false;
+            }
+            info!("Upstream disconnected from {}", peer);
+        });
+    }
+}
+
+async fn handle_upstream(mut stream: TcpStream, state: RelayState) -> std::io::Result<()> {
+    {
+        let mut stats = state.inner.stats.lock().await;
+        stats.upstream_connected = true;
+    }
+
+    let mut len_buf = [0u8; 4];
+
+    loop {
+        // Read 4-byte length prefix
+        stream.read_exact(&mut len_buf).await?;
+        let frame_len = u32::from_le_bytes(len_buf) as usize;
+
+        if frame_len == 0 || frame_len > 16 * 1024 * 1024 {
+            warn!("Invalid frame length: {} — skipping", frame_len);
+            continue;
+        }
+
+        // Read frame payload
+        let mut buf = vec![0u8; frame_len];
+        stream.read_exact(&mut buf).await?;
+
+        let data = Bytes::from(buf);
+        state.on_upstream_frame(data).await;
+    }
+}
+
+// ============================================================================
+// WebSocket Client Listener — browsers and players connect here
+// ============================================================================
+
+pub async fn ws_client_listener(
+    addr: SocketAddr,
+    state: RelayState,
+) -> std::io::Result<()> {
+    let listener = TcpListener::bind(addr).await?;
+    info!("WebSocket client listener ready on {}", addr);
+
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        stream.set_nodelay(true).ok();
+
+        let state = state.clone();
+        tokio::spawn(async move {
+            if !state.add_client().await {
+                warn!("Rejected {} — max clients reached", peer);
+                return;
+            }
+
+            let count = state.client_count().await;
+            info!("Client connected: {} (total: {})", peer, count);
+
+            match handle_ws_client(stream, peer, state.clone()).await {
+                Ok(_) => debug!("Client {} disconnected cleanly", peer),
+                Err(e) => debug!("Client {} error: {}", peer, e),
+            }
+
+            state.remove_client().await;
+            let count = state.client_count().await;
+            info!("Client disconnected: {} (total: {})", peer, count);
+        });
+    }
+}
+
+async fn handle_ws_client(
+    stream: TcpStream,
+    peer: SocketAddr,
+    state: RelayState,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let ws = tokio_tungstenite::accept_async(stream).await?;
+    let (mut ws_tx, mut ws_rx) = ws.split();
+
+    // Step 1: Send cached SYNC if available
+    if let Some(sync_data) = state.get_sync().await {
+        info!("Sending cached SYNC to {} ({:.1}MB)", peer, sync_data.len() as f64 / 1024.0 / 1024.0);
+        ws_tx.send(Message::Binary(sync_data.to_vec().into())).await?;
+    } else {
+        info!("No SYNC cached yet — {} will wait for first SYNC", peer);
+    }
+
+    // Step 2: Subscribe to frame broadcast
+    let mut frame_rx = state.subscribe_frames();
+    let mut signal_rx = state.subscribe_signals();
+
+    // Stats for this client
+    let mut frames_sent: u64 = 0;
+    let mut frames_dropped: u64 = 0;
+    let mut bytes_sent: u64 = 0;
+
+    loop {
+        tokio::select! {
+            // Forward TA frames to this client
+            frame = frame_rx.recv() => {
+                match frame {
+                    Ok(data) => {
+                        let len = data.len();
+                        match ws_tx.send(Message::Binary(data.to_vec().into())).await {
+                            Ok(_) => {
+                                frames_sent += 1;
+                                bytes_sent += len as u64;
+                            }
+                            Err(e) => {
+                                debug!("Client {} send error: {}", peer, e);
+                                break;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        frames_dropped += n;
+                        debug!("Client {} lagged {} frames (total dropped: {})", peer, n, frames_dropped);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            // Forward signaling messages
+            signal = signal_rx.recv() => {
+                match signal {
+                    Ok(msg) => {
+                        if ws_tx.send(Message::Text(msg.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            // Handle incoming messages from client — forward to upstream flycast
+            msg = ws_rx.next() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        debug!("Client {} → upstream: {}", peer, &text[..text.len().min(80)]);
+                        // Forward to upstream flycast (join, queue, register_stick, chat, etc.)
+                        state.forward_text_to_upstream(&text);
+                        // Also broadcast relay_* messages to other clients
+                        if text.contains("relay_") {
+                            state.broadcast_signal(&text);
+                        }
+                    }
+                    Some(Ok(Message::Binary(data))) => {
+                        // Binary from client — gamepad input, forward to upstream
+                        state.forward_bin_to_upstream(&data);
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        let _ = ws_tx.send(Message::Pong(data)).await;
+                    }
+                    Some(Err(e)) => {
+                        debug!("Client {} ws error: {}", peer, e);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if frames_sent > 0 {
+        info!(
+            "Client {} final stats: sent={} dropped={} bytes={:.1}MB",
+            peer, frames_sent, frames_dropped, bytes_sent as f64 / 1024.0 / 1024.0
+        );
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// WebSocket Upstream — connect to flycast's existing WS on port 7200
+// Zero modifications to flycast needed. Relay acts as a WS client.
+// ============================================================================
+
+pub async fn ws_upstream_connector(
+    url: String,
+    state: RelayState,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Take the upstream forwarding receivers (one-time)
+    let (mut text_rx, mut bin_rx) = state.take_upstream_receivers().await;
+
+    loop {
+        info!("Connecting to upstream flycast at {}...", url);
+
+        match tokio_tungstenite::connect_async(&url).await {
+            Ok((ws, _response)) => {
+                info!("Connected to upstream flycast at {}", url);
+                {
+                    let mut stats = state.inner.stats.lock().await;
+                    stats.upstream_connected = true;
+                }
+
+                let (mut ws_tx, mut ws_rx) = ws.split();
+                let mut frames: u64 = 0;
+
+                loop {
+                    tokio::select! {
+                        // Receive from upstream flycast → broadcast to clients
+                        msg = ws_rx.next() => {
+                            match msg {
+                                Some(Ok(Message::Binary(data))) => {
+                                    let data = Bytes::from(data.to_vec());
+                                    frames += 1;
+                                    state.on_upstream_frame(data).await;
+                                }
+                                Some(Ok(Message::Text(text))) => {
+                                    debug!("Upstream JSON: {}...", &text[..text.len().min(100)]);
+                                    state.broadcast_signal(&text);
+                                }
+                                Some(Ok(Message::Close(_))) => {
+                                    info!("Upstream closed connection after {} frames", frames);
+                                    break;
+                                }
+                                Some(Ok(Message::Ping(data))) => {
+                                    debug!("Upstream ping ({} bytes)", data.len());
+                                }
+                                Some(Err(e)) => {
+                                    error!("Upstream WS error: {}", e);
+                                    break;
+                                }
+                                None => break,
+                                _ => {}
+                            }
+                        }
+
+                        // Forward client text messages → upstream flycast
+                        text = text_rx.recv() => {
+                            if let Some(text) = text {
+                                if let Err(e) = ws_tx.send(Message::Text(text.into())).await {
+                                    warn!("Failed to forward text to upstream: {}", e);
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Forward client binary messages → upstream flycast
+                        bin = bin_rx.recv() => {
+                            if let Some(data) = bin {
+                                if let Err(e) = ws_tx.send(Message::Binary(data.into())).await {
+                                    warn!("Failed to forward binary to upstream: {}", e);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                {
+                    let mut stats = state.inner.stats.lock().await;
+                    stats.upstream_connected = false;
+                }
+                warn!("Lost upstream connection after {} frames — reconnecting in 2s...", frames);
+            }
+            Err(e) => {
+                warn!("Failed to connect to upstream: {} — retrying in 2s...", e);
+            }
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    }
+}
