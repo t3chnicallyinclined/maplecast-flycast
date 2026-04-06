@@ -407,6 +407,25 @@ async fn handle_ws_client(
             msg = ws_rx.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
+                        // Fast path: ping echo at the relay — saves a full round-trip
+                        // to the home flycast (~10ms on a typical connection).
+                        // The ping format is {"type":"ping","t":<f64>}; we echo back
+                        // {"type":"pong","t":<same>} immediately without parsing JSON.
+                        if text.starts_with("{\"type\":\"ping\"") {
+                            // Extract the "t" field verbatim and reply.
+                            // Avoids serde_json overhead — the timestamp is whatever
+                            // string the client sent us.
+                            if let Some(t_start) = text.find("\"t\":") {
+                                let t_str = &text[t_start + 4..];
+                                let t_end = t_str.find(|c: char| c == '}' || c == ',').unwrap_or(t_str.len());
+                                let t_val = &t_str[..t_end];
+                                let pong = format!("{{\"type\":\"pong\",\"t\":{}}}", t_val);
+                                if ws_tx.send(Message::Text(pong.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
                         debug!("Client {} → upstream: {}", peer, &text[..text.len().min(80)]);
                         // Forward to upstream flycast (join, queue, register_stick, chat, etc.)
                         state.forward_text_to_upstream(&text);
