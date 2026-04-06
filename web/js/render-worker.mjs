@@ -168,7 +168,7 @@ async function handleInit(msg) {
       // which is what GL.createContext() will call internally.
       canvas: offscreen,
       // Worker-relative path so emscripten finds the .wasm sibling
-      locateFile: (path) => `../${path}?v=worker1`,
+      locateFile: (path) => `../${path}?v=worker10`,
       print:    (s) => console.log('[render-worker]', s),
       printErr: (s) => console.warn('[render-worker]', s),
     });
@@ -315,17 +315,29 @@ function handleBinaryFrame(buffer) {
     return;
   }
 
-  // Delta/keyframe — store as pending. Newest wins; older pending = drop.
+  // Delta/keyframe — DIAGNOSTIC: process every frame inline as it arrives,
+  // no pending coalescing. The previous "newest wins" model dropped any
+  // older pending frame when a new one arrived before the next rAF tick,
+  // which silently lost dirty pages on scene transitions when frames
+  // piled up. Lost dirty pages are unrecoverable (the server only re-ships
+  // pages on memcmp delta), causing wasm-only scene-revisit garble.
   if (len > MAX_FRAME) return;
-  if (_pendingFrame !== null) _telemetry.framesDropped++;
-  _pendingFrame = buffer;
-  _pendingLen = len;
   _telemetry.bytesReceived += len;
 
-  // Network jitter — measured at the moment WS hands us the frame.
-  // This is independent of the rAF drain cadence (which is vsync-locked).
-  // If THIS is uneven, the relay→browser hop has jitter. If this is even
-  // but render interval is uneven, the rAF tick is being delayed.
+  // GL state init — same one-shot setup that drainPending() used to do.
+  if (!_glStateInit && _gl) {
+    _gl.enable(_gl.BLEND);
+    _gl.enable(_gl.DEPTH_TEST);
+    _gl.enable(_gl.STENCIL_TEST);
+    _gl.enable(_gl.SCISSOR_TEST);
+    _glStateInit = true;
+  }
+
+  _wasm.HEAPU8.set(new Uint8Array(buffer), _frameBuf);
+  _wasm._renderer_frame(_frameBuf, len);
+  _telemetry.framesRendered++;
+
+  // Arrival jitter telemetry (kept for diagnostics)
   const arrivedAt = performance.now();
   if (_telemetry.lastArrivalAt > 0) {
     const arrivalUs = (arrivedAt - _telemetry.lastArrivalAt) * 1000;

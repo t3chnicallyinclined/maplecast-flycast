@@ -142,11 +142,128 @@ int renderer_init(int width, int height)
     return 1;
 }
 
+// renderer_reinit — Re-run renderer->Init() WITHOUT recreating the WebGL2
+// context or reallocating VRAM. Resets glcache state, recompiles shaders if
+// needed, sets fog/palette flags. Use this to reset renderer state mid-stream
+// when a scene change leaves things in a bad state.
+EMSCRIPTEN_KEEPALIVE
+int renderer_reinit()
+{
+    if (!_initialized || !renderer) {
+        printf("[renderer] reinit failed: not initialized\n");
+        return 0;
+    }
+
+    // Tear down + recreate the renderer. This re-runs glcache.EnableCache()
+    // which resets glcache's state model — the thing the JS-side
+    // _gl.enable(BLEND/...) bootstrap was a hack to fix.
+    renderer->Term();
+    delete renderer;
+    renderer = rend_GLES2();
+    if (!renderer) {
+        printf("[renderer] reinit failed: rend_GLES2() returned null\n");
+        return 0;
+    }
+    if (!renderer->Init()) {
+        printf("[renderer] reinit failed: renderer->Init() returned false\n");
+        delete renderer;
+        renderer = nullptr;
+        return 0;
+    }
+
+    // Force everything to re-upload on next frame
+    renderer->resetTextureCache = true;
+    renderer->updatePalette = true;
+    renderer->updateFogTable = true;
+    pal_needs_update = true;
+    palette_update();
+    _prevTA.clear();
+
+    printf("[renderer] REINIT complete — fresh renderer state\n");
+    return 1;
+}
+
 // ============================================================================
 // renderer_sync — Apply initial SYNC (full VRAM + PVR register snapshot)
 //
 // Format: "SYNC"(4) + vramSize(4) + vram[N] + pvrSize(4) + pvr[N]
 // ============================================================================
+
+// Stubs for TA hardware globals that pvr::serialize emits but the WASM
+// renderer doesn't otherwise need. These exist so we can write the bytes
+// from FSYN packets into them — even though the renderer doesn't read
+// them today, having the values available is harmless and lets us test
+// theories about what state matters.
+namespace {
+    uint8_t  g_ta_fsm[2049];
+    uint32_t g_ta_fsm_cl = 0;
+    uint32_t g_taRenderPass = 0;
+}
+
+// Apply a FSYN tagged-record packet. Walks the records and copies known
+// tags into VRAM/pvr_regs/global stubs. Unknown tags are skipped.
+// Wire format: "FSYN"(4) + version(2) + recordCount(2)
+//              + per record: tag(4) + size(4) + data[size]
+static bool applyFsynPacket(const uint8_t* data, size_t size)
+{
+    if (size < 8) return false;
+    if (memcmp(data, "FSYN", 4) != 0) return false;
+
+    const uint8_t* p = data + 4;
+    const uint8_t* end = data + size;
+    uint16_t version, recordCount;
+    memcpy(&version, p, 2); p += 2;
+    memcpy(&recordCount, p, 2); p += 2;
+
+    int appliedVram = 0, appliedPreg = 0, appliedTafs = 0, appliedTast = 0;
+    int unknown = 0;
+
+    for (uint16_t r = 0; r < recordCount && p + 8 <= end; r++) {
+        char tag[5] = {0};
+        memcpy(tag, p, 4); p += 4;
+        uint32_t recSize;
+        memcpy(&recSize, p, 4); p += 4;
+        if (p + recSize > end) {
+            printf("[renderer] FSYN truncated at record %u tag=%s\n", r, tag);
+            return false;
+        }
+        if (memcmp(tag, "VRAM", 4) == 0) {
+            uint32_t copy = recSize;
+            if (copy > VRAM_SIZE) copy = VRAM_SIZE;
+            memcpy(&vram[0], p, copy);
+            appliedVram = (int)copy;
+        } else if (memcmp(tag, "PREG", 4) == 0) {
+            uint32_t copy = recSize;
+            if (copy > (uint32_t)pvr_RegSize) copy = pvr_RegSize;
+            memcpy(pvr_regs, p, copy);
+            appliedPreg = (int)copy;
+        } else if (memcmp(tag, "TAFS", 4) == 0) {
+            uint32_t copy = recSize;
+            if (copy > sizeof(g_ta_fsm)) copy = sizeof(g_ta_fsm);
+            memcpy(g_ta_fsm, p, copy);
+            appliedTafs = (int)copy;
+        } else if (memcmp(tag, "TAST", 4) == 0 && recSize >= 8) {
+            memcpy(&g_ta_fsm_cl, p, 4);
+            memcpy(&g_taRenderPass, p + 4, 4);
+            appliedTast = 1;
+        } else {
+            unknown++;
+        }
+        p += recSize;
+    }
+
+    printf("[renderer] FSYN applied: VRAM=%d PREG=%d TAFS=%d TAST=%d unknown=%d\n",
+        appliedVram, appliedPreg, appliedTafs, appliedTast, unknown);
+
+    // Force the renderer to re-upload everything that depends on PVR/VRAM.
+    renderer->resetTextureCache = true;
+    renderer->updatePalette = true;
+    renderer->updateFogTable = true;
+    pal_needs_update = true;
+    palette_update();
+    _prevTA.clear();
+    return true;
+}
 
 EMSCRIPTEN_KEEPALIVE
 int renderer_sync(uint8_t* data, int size)
@@ -157,13 +274,33 @@ int renderer_sync(uint8_t* data, int size)
     ensureDecomp();
     size_t decompSize = 0;
     const uint8_t* decompData = _decomp.decompress(data, size, decompSize);
-    if (decompSize < 12) return 0;
+    if (decompSize < 8) return 0;
 
     const uint8_t* src = decompData;
 
-    // Verify magic
-    if (memcmp(src, "SYNC", 4) != 0) return 0;
+    // Dispatch on envelope magic
+    if (memcmp(src, "FSYN", 4) == 0) {
+        return applyFsynPacket(src, decompSize) ? 1 : 0;
+    }
+    if (memcmp(src, "SAVE", 4) == 0) {
+        // SAVE envelope: "SAVE"(4) + uncompSize(4) + dc_serialize blob
+        // We can't safely walk dc_serialize on the WASM side (not
+        // self-describing). Log + ignore — the bytes are useless to
+        // a renderer-only build without linking pvr::deserialize.
+        uint32_t blobSize;
+        memcpy(&blobSize, src + 4, 4);
+        printf("[renderer] SAVE received: blob=%u bytes (decompSize=%zu) — IGNORED (no deserializer)\n",
+            blobSize, decompSize);
+        return 1;
+    }
+    if (memcmp(src, "SYNC", 4) != 0) {
+        printf("[renderer] renderer_sync: unknown magic %02x %02x %02x %02x\n",
+            src[0], src[1], src[2], src[3]);
+        return 0;
+    }
     src += 4;
+
+    if (decompSize < 12) return 0;
 
     // VRAM
     uint32_t vramSize;
@@ -286,10 +423,24 @@ int renderer_frame(uint8_t* data, int size)
     uint32_t deltaPayloadSize; memcpy(&deltaPayloadSize, src, 4); src += 4;
 
     bool skipRender = false;
+    uint32_t clientChecksum = 0;
 
     if (deltaPayloadSize == taSize) {
-        // Keyframe — full TA buffer
-        _prevTA.assign(src, src + taSize);
+        // Keyframe — full TA buffer. GROW-ONLY: never shrink _prevTA, or we
+        // destroy tail bytes that the next delta may reference. Matches desktop
+        // clientReceive() which decodes into a fixed 8 MB clientCtx.tad.thd_root
+        // that never shrinks. std::vector::assign() would resize down to taSize,
+        // and the next delta's resize(taSize, 0) would re-fill that region with
+        // zeros, corrupting any offsets the server's delta encoding assumed
+        // were still present. Symptom: garbled frames after scene transitions.
+        if (_prevTA.size() < taSize)
+            _prevTA.resize(taSize, 0);
+        memcpy(_prevTA.data(), src, taSize);
+        // Checksum the freshly-copied keyframe (matches desktop clientReceive())
+        for (uint32_t i = 0; i + 3 < taSize; i += 4) {
+            uint32_t w; memcpy(&w, _prevTA.data() + i, 4);
+            clientChecksum ^= w;
+        }
         src += taSize;
         if ((frameNum % 60) == 0)
             printf("[renderer] KEYFRAME frame=%u taSize=%u wireSize=%d decompSize=%zu\n",
@@ -332,9 +483,21 @@ int renderer_frame(uint8_t* data, int size)
             deltaData += runLen;
         }
         src += deltaPayloadSize;
+
+        // Checksum the full TA buffer after delta apply (matches desktop)
+        for (uint32_t i = 0; i + 3 < taSize; i += 4) {
+            uint32_t w; memcpy(&w, _prevTA.data() + i, 4);
+            clientChecksum ^= w;
+        }
     }
 
-    // ---- Skip checksum (4 bytes) ----
+    // ---- Skip server checksum (currently a 0 placeholder) ----
+    // Server-side at maplecast_mirror.cpp serverPublish() emits a literal 0
+    // here ("TCP guarantees integrity, checksum disabled"). We compute
+    // clientChecksum above so it's ready if the server ever re-enables it,
+    // but we deliberately don't compare yet — would log false mismatches on
+    // every frame.
+    (void)clientChecksum;
     src += 4;
 
     // ---- Apply dirty memory pages ----

@@ -149,6 +149,30 @@ void requestSyncBroadcast()
 	_forceSyncBroadcast.store(true, std::memory_order_relaxed);
 }
 
+// Set by requestFullSaveStateBroadcast() — same drain pattern. The
+// serverPublish drain calls maplecast_ws::broadcastFullSaveState() which
+// builds the dc_serialize blob, compresses it, and ships it to all
+// connected clients as a "SAVE" envelope.
+static std::atomic<bool> _forceFullSaveStateBroadcast{false};
+
+void requestFullSaveStateBroadcast()
+{
+	if (!_isServer) return;
+	_forceFullSaveStateBroadcast.store(true, std::memory_order_relaxed);
+}
+
+}  // namespace maplecast_mirror
+
+// C wrapper so the SIGUSR1 handler in core/linux/common.cpp can call this
+// without dragging in the C++ namespace declaration via the mirror header.
+extern "C" void maplecast_mirror_request_full_save_state()
+{
+	maplecast_mirror::requestFullSaveStateBroadcast();
+}
+
+namespace maplecast_mirror
+{
+
 static bool openShm(bool create)
 {
 	if (create) shm_unlink(SHM_NAME);
@@ -195,6 +219,72 @@ static void serverSaveSync()
 	if (f) { fwrite(data, 1, ser.size(), f); fclose(f); }
 	free(data);
 	printf("[MIRROR] Sync state saved: %.1f MB\n", ser.size() / (1024.0*1024.0));
+}
+
+// Public wrapper: call serverSaveSync() then broadcast the resulting file
+// to all WS clients wrapped in a "SAVE" envelope. Trigger via SIGUSR1.
+void doForcedSaveStateBroadcast()
+{
+	if (!_isServer) return;
+
+	// 1. Run the same function that produces the on-disk save state
+	serverSaveSync();
+
+	// 2. Read the file back
+	FILE* f = fopen("/dev/shm/maplecast_sync.state", "rb");
+	if (!f) { printf("[MIRROR] forced sync: failed to read save state\n"); return; }
+	fseek(f, 0, SEEK_END);
+	size_t fileSize = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	std::vector<uint8_t> fileBuf(fileSize);
+	if (fread(fileBuf.data(), 1, fileSize, f) != fileSize) {
+		printf("[MIRROR] forced sync: short read\n");
+		fclose(f);
+		return;
+	}
+	fclose(f);
+
+	// 3. Wrap in "SAVE" envelope: "SAVE"(4) + uncompSize(4) + bytes
+	std::vector<uint8_t> wrapped(8 + fileSize);
+	memcpy(wrapped.data(), "SAVE", 4);
+	uint32_t fs = (uint32_t)fileSize;
+	memcpy(wrapped.data() + 4, &fs, 4);
+	memcpy(wrapped.data() + 8, fileBuf.data(), fileSize);
+
+	// 4. Broadcast via WS server
+	maplecast_ws::broadcastSaveStateBytes(wrapped.data(), wrapped.size());
+
+	printf("[MIRROR] forced save state broadcast: %.1f MB raw\n",
+		fileSize / (1024.0 * 1024.0));
+}
+
+// Public API: serialize the full DC state into a freshly malloc'd buffer.
+// Caller owns the returned pointer and must free() it. Returns nullptr on
+// failure. This is the SAME data serverSaveSync() writes to disk — useful
+// for shipping the full save state over the wire to test theories about
+// what data the WASM client is missing.
+uint8_t* buildFullSaveState(size_t& outSize)
+{
+	outSize = 0;
+	try {
+		Serializer dryRun;
+		dc_serialize(dryRun);
+		size_t sz = dryRun.size();
+		uint8_t* data = (uint8_t*)malloc(sz);
+		if (!data) return nullptr;
+		Serializer ser(data, sz);
+		dc_serialize(ser);
+		if (ser.size() != sz) {
+			printf("[MIRROR] buildFullSaveState size mismatch: dry=%zu real=%zu\n", sz, ser.size());
+			free(data);
+			return nullptr;
+		}
+		outSize = sz;
+		return data;
+	} catch (const std::exception& e) {
+		printf("[MIRROR] buildFullSaveState exception: %s\n", e.what());
+		return nullptr;
+	}
 }
 
 // Double-buffered TA for zero-copy delta (replaces std::vector prevTA)
@@ -323,13 +413,22 @@ static int _decodeIdx = 0;  // which buffer background thread writes to
 static bool _decodeHasFullFrame = false;
 
 // Decoded frame metadata — written by background thread, read by render thread
+struct DecodedPage {
+	uint8_t  regionId;
+	uint32_t pageIdx;
+	uint8_t  data[4096];
+};
 struct DecodedFrame {
 	uint32_t frameNum;
 	uint32_t pvr_snapshot[16];
 	uint32_t taSize;
 	int taBufferIdx;  // which _decodeTaCtx[] has the TA data
 	uint32_t dirtyCount;
-	struct { uint8_t regionId; uint32_t pageIdx; uint8_t data[4096]; } pages[128];
+	// Heap-allocated to support full VRAM+PVR resync (2048 VRAM + 8 PVR = 2056
+	// pages on a scene change). The previous fixed pages[128] silently
+	// truncated and lost the bulk of new-scene textures. 4096 entries =
+	// ~16.8MB per DecodedFrame, fine on the heap.
+	std::vector<DecodedPage> pages;
 	bool vramDirty;
 };
 static DecodedFrame _decoded;
@@ -549,9 +648,10 @@ static void wsClientRun(std::string host, int port)
 		// uint32_t serverChecksum; memcpy(&serverChecksum, src, 4);
 		src += 4;
 
-		// Stage dirty pages — copy page data so render thread can apply safely
+		// Stage dirty pages — copy page data so render thread can apply safely.
+		// Allow up to a full VRAM+PVR resync (~2056 pages on scene change).
 		uint32_t dirtyCount; memcpy(&dirtyCount, src, 4); src += 4;
-		if (dirtyCount > 128) dirtyCount = 128;
+		if (dirtyCount > 4096) dirtyCount = 4096;  // sanity bound
 
 		DecodedFrame df;
 		df.frameNum = frameNum;
@@ -559,6 +659,7 @@ static void wsClientRun(std::string host, int port)
 		df.taSize = taSize;
 		df.dirtyCount = dirtyCount;
 		df.vramDirty = false;
+		df.pages.resize(dirtyCount);
 
 		for (uint32_t d = 0; d < dirtyCount; d++) {
 			df.pages[d].regionId = *src++;
@@ -825,12 +926,31 @@ done_diff:
 		&& frameNum > 60
 		&& frameNum - _lastSceneSyncFrame > 120);
 
-	if ((forced || heuristic) && maplecast_ws::active())
+	bool manualSave = _forceFullSaveStateBroadcast.exchange(false, std::memory_order_relaxed);
+
+	// Periodic safety net: every 10 seconds (600 frames at 60fps), force a
+	// fresh SYNC even if no scene change was detected. Catches the case
+	// where the wasm has drifted from missed dirty pages or where revisiting
+	// a previously-loaded scene fires no heuristic (low dirty page count
+	// because server's VRAM already has the textures). Bandwidth: ~600 KB
+	// compressed per 10 sec = ~60 KB/s overhead, negligible.
+	bool periodic = (frameNum > 60 && frameNum - _lastSceneSyncFrame >= 600);
+
+	if ((forced || heuristic || manualSave || periodic) && maplecast_ws::active())
 	{
 		_lastSceneSyncFrame = frameNum;
+		const char* reason = manualSave ? "MANUAL SAVE STATE PUSH"
+			: forced ? "FORCED SYNC"
+			: heuristic ? "Scene change detected"
+			: "Periodic safety SYNC";
 		printf("[MIRROR] %s on frame %u (%u dirty pages) — broadcasting fresh SYNC\n",
-			forced ? "FORCED SYNC" : "Scene change detected",
-			frameNum, totalDirty);
+			reason, frameNum, totalDirty);
+		// Ship a fresh SYNC envelope (full VRAM + PVR). The flycast wasm
+		// browser routes this through renderer_sync() which does the full
+		// _prevTA.clear() + cache reset ritual that the per-frame delta
+		// path doesn't. The flycast client's per-frame loop ignores SYNC
+		// magic mid-stream (sanity-skips), so this is a no-op for it —
+		// safe to fire on both.
 		maplecast_ws::broadcastFreshSync();
 	}
 
