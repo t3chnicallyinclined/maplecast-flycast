@@ -1,203 +1,292 @@
 // ============================================================================
-// RENDERER-BRIDGE.MJS — WASM renderer init + OVERKILL hot path
+// RENDERER-BRIDGE.MJS — Main-thread proxy for the render worker
 //
-// FRAME PACING STRATEGY — ZERO LATENCY:
-//   Render IMMEDIATELY on WS frame arrival (zero buffer, zero delay).
-//   rAF loop acts as SAFETY NET only — if no new frame arrived since last
-//   vsync, the browser holds the last rendered frame (WebGL double-buffer).
-//   This gives us immediate rendering + smooth display without any added
-//   latency. 2 frames of latency kills you in MVC2.
+// FIX 2 ARCHITECTURE — RENDER WORKER + OFFSCREEN CANVAS:
+//   This file no longer instantiates the WASM module on the main thread.
+//   It spawns render-worker.mjs, transfers an OffscreenCanvas to it, and
+//   acts as a thin postMessage bridge for the rest of the app.
 //
-//   Network jitter is absorbed by the DISPLAY, not a buffer:
-//   - Frame arrives early? Render it, browser presents at next vsync.
-//   - Frame arrives late? Previous frame holds on screen (no blank).
-//   - Two frames in one tick? Both render, browser shows the latest.
+//   The worker owns:
+//     - The WASM module + WebGL2 context (rendering to OffscreenCanvas)
+//     - The WebSocket binary frame pipe
+//     - The latest pending frame slot + drain logic
+//     - Telemetry counters
 //
-// OVERKILL IS NECESSARY.
+//   Main thread is responsible for:
+//     - Spawning the worker, transferring the canvas
+//     - Driving requestAnimationFrame: each rAF tick → postMessage('tick')
+//       to the worker, which drains its latest pending frame and presents.
+//     - Forwarding user-driven config changes (setOpt, resize) to the worker
+//     - Polling the worker for telemetry every ~250ms so diagnostics.mjs and
+//       telemetry.mjs can keep their existing sync read interface.
+//
+// Why rAF stays on main: workers don't have requestAnimationFrame. The main
+// thread is the only place that can hand us a vsync-aligned tick. The actual
+// render work runs in the worker, but the *decision to render* still rides
+// on the main-thread rAF. This is the documented Emscripten pattern for
+// non-pthread OffscreenCanvas rendering.
+//
+// Why this is still a big win over Fix 1:
+//   - Process/Render/Present (~700-1090us) runs in the worker, not main.
+//     Main-thread rAF callback is now just a postMessage (~10us).
+//   - The WebSocket binary pipe lives in the worker too — frame intake never
+//     hits the main event loop, so chat/JSON/DOM bursts can't delay frame
+//     receipt or coalescing.
+//   - Telemetry is pulled, not pushed-per-frame, so we don't postMessage on
+//     every frame.
 // ============================================================================
 
 import { state } from './state.mjs';
-import createRenderer from '../renderer.mjs';
 import { saveRenderSettings } from './settings.mjs';
 
-const MAX_FRAME = 512 * 1024;
-const SYNC_BUF_SIZE = 16 * 1024 * 1024;
+// MAX_FRAME / SYNC_BUF_SIZE constants are kept in render-worker.mjs.
+// This file owns nothing wasm-related directly anymore.
 
-// Module-local hot path cache
-let _wasm = null;
-let _buf = null;
-let _gl = null;
-let _syncBuf = null;
-let _glStateInit = false;
+// ---- Worker handle + ready state ----
+let _worker = null;
+let _workerReady = false;        // _renderer_init returned ok in worker
+let _wsConnected = false;        // worker's WebSocket reported open
 
-// Telemetry counters — read by telemetry.mjs each tick. Module-local to keep
-// the hot path branch-free (no state.diag lookups per frame).
+// ---- rAF tick driver ----
+let _rafScheduled = false;
+
+// ---- Telemetry cache, refreshed by polling the worker ----
+//
+// The interface intentionally matches the pre-Fix-2 _telemetry shape so that
+// diagnostics.mjs and telemetry.mjs can keep their synchronous reads. Values
+// are refreshed every ~250ms by _pollTelemetry() — fresh enough for a 1s
+// diag tick and a 5s relay-report tick.
+//
+// Two interval metrics are surfaced (see render-worker.mjs for the full
+// rationale):
+//   - intervalSumUs/Count/Max  : render drain interval (vsync-locked, ~16.67ms)
+//   - arrivalSumUs/Count/Max   : WS frame arrival interval (real network jitter)
 export const _telemetry = {
-  framesRendered: 0,        // total frames pushed to GPU since init
-  bytesReceived: 0,         // total bytes of frame data
-  syncCount: 0,             // total SYNCs applied
-  lastFrameAt: 0,           // performance.now() of last frame render
+  framesRendered: 0,
+  framesDropped: 0,
+  bytesReceived: 0,
+  syncCount: 0,
+  lastFrameAt: 0,        // unused on main now (worker tracks it) — kept for compat
   lastSyncAt: 0,
-  // Inter-frame interval rolling stats (microseconds)
+  // Render drain interval (vsync cadence)
   intervalSumUs: 0,
   intervalCount: 0,
   intervalMaxUs: 0,
+  // WS arrival interval (network jitter)
+  arrivalSumUs: 0,
+  arrivalCount: 0,
+  arrivalMaxUs: 0,
 };
+
+// Whether to ask the worker to reset its rolling jitter window on the next
+// pull. telemetry.mjs flips this on its 5s tick — we forward to the worker,
+// which is the actual owner of the counter.
+let _resetIntervalsOnNextPoll = false;
+
+// ============================================================================
+// Init — create OffscreenCanvas, spawn worker, transfer canvas, kick WS URL
+// ============================================================================
 
 export async function initRenderer() {
   try {
-    const Module = await createRenderer({
-      canvas: document.getElementById('game-canvas'),
-      // !!! BUMP THIS STRING after every renderer.wasm rebuild !!!
-      // nginx serves the wasm with max-age + ETag. Without bumping the query
-      // string, browsers will serve a cached wasm and your fix won't appear.
-      // (See big comment block above handleBinaryFrame for the full story.)
-      locateFile: (path) => `./${path}?v=parity1`,
-    });
-
-    if (!Module._renderer_init(640, 480)) throw new Error('renderer_init failed');
-
-    state.frameBuf = Module._malloc(MAX_FRAME);
-    _syncBuf = Module._malloc(SYNC_BUF_SIZE);
-
-    state.wasmModule = Module;
-    _wasm = Module;
-    _buf = state.frameBuf;
-    _gl = state.glCtx;
-
     const canvas = document.getElementById('game-canvas');
+    if (!canvas) throw new Error('game-canvas element not found');
+
+    // Layout: hand the canvas the same CSS we used to set on init in the
+    // pre-Fix-2 code path. The DOM element keeps its CSS-driven width/height;
+    // only the BACKBUFFER is transferred to the worker.
     canvas.style.width = '100%';
     canvas.style.height = '100%';
 
-    state.connState = 'RENDERER OK';
-    console.log('[renderer] WASM initialized — zero-latency immediate render');
+    const offscreen = canvas.transferControlToOffscreen();
+
+    // Pick the same WebSocket URL the JSON control connection uses, so the
+    // render worker hits the same relay/upstream as ws-connection.mjs. We
+    // import this lazily to avoid a circular import (ws-connection imports
+    // from us via state).
+    const { getRendererWsUrl } = await import('./ws-connection.mjs');
+    const wsUrl = await getRendererWsUrl();
+
+    _worker = new Worker(new URL('./render-worker.mjs', import.meta.url), { type: 'module' });
+
+    _worker.onmessage = _handleWorkerMessage;
+    _worker.onerror = (e) => {
+      console.error('[renderer] worker error:', e.message || e);
+      state.connState = 'WORKER ERROR';
+    };
+
+    // Send the canvas + WS URL. Canvas is transferable; WS URL is a string.
+    _worker.postMessage(
+      { type: 'init', canvas: offscreen, wsUrl, width: 640, height: 480 },
+      [offscreen]
+    );
+
+    // Start polling the worker for telemetry — fresh enough for the 1s diag
+    // tick and 5s relay tick. Doesn't run until _workerReady; the handler
+    // ignores telemetry messages before then.
+    setInterval(_pollTelemetry, 250);
+
+    state.connState = 'INIT WORKER...';
   } catch (err) {
-    console.error('[renderer] Failed to load:', err);
+    console.error('[renderer] failed to spawn render worker:', err);
     state.connState = 'NO RENDERER';
   }
 }
 
 // ============================================================================
-// HOT PATH — render IMMEDIATELY on WS frame arrival. Zero buffer.
-// Every frame from the server hits the GPU the instant it arrives.
-// Browser compositor double-buffers and presents at vsync automatically.
-// ============================================================================
-//
-// !!! FRAGILE — READ BEFORE EDITING !!!
-//
-// This is the JS half of the king.html render path. The C++ half lives in
-// packages/renderer/src/wasm_bridge.cpp (renderer_frame / renderer_sync).
-// They MUST stay aligned with the wire format defined by the server in
-// core/network/maplecast_mirror.cpp serverPublish().
-//
-// Common pitfalls:
-//
-//   1. CACHE BUSTING. After ANY rebuild of renderer.wasm, bump the `?v=...`
-//      string in locateFile() above. Without that, browsers will cheerfully
-//      serve a stale wasm forever (nginx caches with ETag, Chrome
-//      respects max-age, and EmulatorJS keeps its own IndexedDB cache).
-//      You will swear your fix didn't land. It did. The browser is lying.
-//
-//   2. SYNC vs DELTA discrimination is by magic + size. SYNC = "SYNC" or
-//      "ZCST" with uncompressedSize > 1MB. DELTA = anything else with ZCST
-//      or raw bytes. Don't add a third type without updating server +
-//      desktop client + both WASM bridges + the Rust relay.
-//
-//   3. MAX_FRAME = 512KB. Compressed deltas are 6-15KB so this is fine.
-//      If you ever see uncompressed deltas, this limit will silently drop
-//      frames > 512KB. Compressed SYNC uses _syncBuf (16MB), separate.
-//
-//   4. The wasm bridge expects the buffer at offset _buf to contain raw wire
-//      bytes — DO NOT pre-decompress or pre-parse them in JS. The WASM does
-//      its own zstd decode. relay.js comments say so explicitly.
-//
-//   5. Black screen with one SYNC log and no KEYFRAME log usually means the
-//      RELAY has lost its upstream connection to home flycast — not a JS or
-//      WASM bug. Check `ssh root@66.55.128.93 journalctl -u maplecast-relay`.
-//      Look for "Lost upstream connection" or "Connection refused".
-//
-// See docs/ARCHITECTURE.md "Mirror Wire Format — Rules of the Road" for the
-// canonical list of rules all four parsers must obey.
+// Worker message handler — protocol with render-worker.mjs
 // ============================================================================
 
-export function handleBinaryFrame(buffer) {
-  if (!_wasm || !_buf) return;
+function _handleWorkerMessage(e) {
+  const msg = e.data;
+  switch (msg.type) {
+    case 'ready':
+      _workerReady = true;
+      state.connState = 'RENDERER OK';
+      console.log('[renderer] worker ready, starting rAF tick driver');
+      _scheduleTick();
+      break;
 
-  const len = buffer.byteLength;
-  if (len < 8) return;
+    case 'ws_open':
+      _wsConnected = true;
+      console.log('[renderer] worker ws connected');
+      break;
 
-  // SYNC detection — check for raw "SYNC" or ZCST-compressed SYNC
-  const dv = new DataView(buffer);
-  const magic = len >= 4 ? dv.getUint32(0, true) : 0;
-  const isSYNC = magic === 0x434E5953; // "SYNC" little-endian
-  const isZCST = magic === 0x5453435A; // "ZCST" little-endian
-  // ZCST with uncompressedSize > 1MB = compressed SYNC
-  const isCompressedSync = isZCST && len >= 8 && dv.getUint32(4, true) > 1024 * 1024;
+    case 'ws_close':
+      _wsConnected = false;
+      console.log('[renderer] worker ws disconnected');
+      state.rendererStreaming = false;
+      break;
 
-  if (isSYNC || isCompressedSync) {
-    const data = new Uint8Array(buffer);
-    if (len <= SYNC_BUF_SIZE) {
-      _wasm.HEAPU8.set(data, _syncBuf);
-      _wasm._renderer_sync(_syncBuf, len);
-    } else {
-      const tmp = _wasm._malloc(len);
-      _wasm.HEAPU8.set(data, tmp);
-      _wasm._renderer_sync(tmp, len);
-      _wasm._free(tmp);
+    case 'sync_applied': {
+      state.connState = 'SYNC';
+      const idle = document.getElementById('idleScreen');
+      if (idle) idle.style.display = 'none';
+      document.body.classList.add('streaming');
+      state.rendererStreaming = true;
+      _telemetry.lastSyncAt = performance.now();
+      break;
     }
 
-    state.connState = 'SYNC';
-    document.getElementById('idleScreen').style.display = 'none';
-    document.body.classList.add('streaming');
-    state.rendererStreaming = true;
-    _glStateInit = false;
-    _telemetry.syncCount++;
-    _telemetry.lastSyncAt = performance.now();
-    _telemetry.bytesReceived += len;
-    return;
+    case 'telemetry':
+      _telemetry.framesRendered = msg.framesRendered;
+      _telemetry.framesDropped  = msg.framesDropped;
+      _telemetry.bytesReceived  = msg.bytesReceived;
+      _telemetry.syncCount      = msg.syncCount;
+      _telemetry.intervalSumUs  = msg.intervalSumUs;
+      _telemetry.intervalCount  = msg.intervalCount;
+      _telemetry.intervalMaxUs  = msg.intervalMaxUs;
+      _telemetry.arrivalSumUs   = msg.arrivalSumUs   || 0;
+      _telemetry.arrivalCount   = msg.arrivalCount   || 0;
+      _telemetry.arrivalMaxUs   = msg.arrivalMaxUs   || 0;
+      // If LIVE state isn't set yet but frames are flowing, flip it
+      if (msg.framesRendered > 0 && state.connState !== 'LIVE' && state.rendererStreaming) {
+        state.connState = 'LIVE';
+      }
+      break;
+
+    case 'error':
+      console.error('[renderer] worker reported error:', msg.message);
+      state.connState = 'NO RENDERER';
+      break;
   }
-
-  // Delta/keyframe — immediate render
-  if (len > MAX_FRAME) return;
-  _wasm.HEAPU8.set(new Uint8Array(buffer), _buf);
-
-  // GL state — set once after SYNC
-  if (!_glStateInit && _gl) {
-    _gl.enable(_gl.BLEND);
-    _gl.enable(_gl.DEPTH_TEST);
-    _gl.enable(_gl.STENCIL_TEST);
-    _gl.enable(_gl.SCISSOR_TEST);
-    _glStateInit = true;
-  }
-
-  _wasm._renderer_frame(_buf, len);
-  state.connState = 'LIVE';
-
-  // Telemetry — track render rate and inter-frame jitter
-  const now = performance.now();
-  if (_telemetry.lastFrameAt > 0) {
-    const intervalUs = (now - _telemetry.lastFrameAt) * 1000;
-    _telemetry.intervalSumUs += intervalUs;
-    _telemetry.intervalCount++;
-    if (intervalUs > _telemetry.intervalMaxUs) _telemetry.intervalMaxUs = intervalUs;
-  }
-  _telemetry.lastFrameAt = now;
-  _telemetry.framesRendered++;
-  _telemetry.bytesReceived += len;
 }
 
-export function setOpt(opt, val) {
-  if (!_wasm) return;
-  val = parseInt(val);
-  _wasm._renderer_set_option(opt, val);
-  if (opt === 0) {
-    const h = val;
-    const w = Math.round(h * 4 / 3);
-    _wasm._renderer_resize(w, h);
-    const canvas = document.getElementById('game-canvas');
-    canvas.style.width = '100%';
-    canvas.style.height = '100%';
+// ============================================================================
+// rAF tick driver — main thread requestAnimationFrame → worker postMessage
+// ============================================================================
+//
+// We schedule a continuous rAF loop while the worker is ready. Each tick
+// posts a 'tick' message; the worker drains its latest pending frame on
+// receipt. Postmessage is fast (sub-100us) and the worker's drain runs
+// concurrently with the main thread.
+//
+// We also use _rafScheduled defensively to coalesce — if for some reason
+// _scheduleTick is called twice in one rAF window, we don't double-post.
+
+function _scheduleTick() {
+  if (_rafScheduled) return;
+  _rafScheduled = true;
+  requestAnimationFrame(_tick);
+}
+
+function _tick() {
+  _rafScheduled = false;
+  if (_workerReady && _worker) {
+    _worker.postMessage({ type: 'tick' });
   }
-  _glStateInit = false;
+  // Continuous loop while the worker is alive
+  if (_worker) _scheduleTick();
+}
+
+// ============================================================================
+// Telemetry pull — forwards to worker, response cached in _telemetry above
+// ============================================================================
+
+function _pollTelemetry() {
+  if (!_workerReady || !_worker) return;
+  _worker.postMessage({
+    type: 'telemetry',
+    resetIntervals: _resetIntervalsOnNextPoll,
+  });
+  _resetIntervalsOnNextPoll = false;
+}
+
+// telemetry.mjs calls this on its 5s tick to reset the rolling jitter window.
+// We can't reset locally — the counters live in the worker. We set a flag and
+// the next _pollTelemetry tells the worker to reset alongside the read.
+export function resetTelemetryIntervals() {
+  _resetIntervalsOnNextPoll = true;
+}
+
+// ============================================================================
+// Public API — setOpt / resize, called from settings.mjs and elsewhere
+// ============================================================================
+
+export function setOpt(opt, val) {
+  if (!_worker) return;
+  val = parseInt(val);
+  _worker.postMessage({ type: 'set_opt', opt, value: val });
+  if (opt === 0) {
+    // Resolution change — main thread can't read the OffscreenCanvas size,
+    // but the CSS layout already covers visual sizing via 100%/100%.
+    const canvas = document.getElementById('game-canvas');
+    if (canvas) {
+      canvas.style.width = '100%';
+      canvas.style.height = '100%';
+    }
+  }
   saveRenderSettings();
+}
+
+// ============================================================================
+// External binary frame forwarding — relay-bootstrap.mjs (P2P fan-out)
+// ============================================================================
+//
+// The render worker has its own WebSocket and handles the primary binary
+// pipe. But the P2P spectator relay (relay.js + relay-bootstrap.mjs) also
+// produces binary frames — when this client receives a frame from a peer
+// over WebRTC, it needs to be rendered AND optionally re-broadcast to the
+// client's own peer downstream.
+//
+// We forward those frames into the worker via postMessage. ArrayBuffers are
+// transferable, so this is zero-copy on the JS side. The worker treats the
+// forwarded frame identically to one that arrived on its own WebSocket
+// (SYNC vs delta detection, coalescing, drain on next tick).
+//
+// Pre-Fix-2 this function called the WASM module directly on the main
+// thread. The signature is preserved so callers don't need to change.
+
+export function handleBinaryFrame(buffer) {
+  if (!_worker || !_workerReady) return;
+  // Transfer if the caller gave us an ArrayBuffer they don't need anymore.
+  // P2P relay wraps things as Uint8Array sometimes — accept either.
+  if (buffer instanceof ArrayBuffer) {
+    _worker.postMessage({ type: 'binary_frame', buffer }, [buffer]);
+  } else if (ArrayBuffer.isView(buffer)) {
+    // View into a larger buffer — copy out the view's range so we can transfer
+    // a clean ArrayBuffer without breaking the original.
+    const ab = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+    _worker.postMessage({ type: 'binary_frame', buffer: ab }, [ab]);
+  }
 }

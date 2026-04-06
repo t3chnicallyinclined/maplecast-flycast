@@ -19,7 +19,7 @@
 // ============================================================================
 
 import { state } from './state.mjs';
-import { _telemetry } from './renderer-bridge.mjs';
+import { _telemetry, resetTelemetryIntervals } from './renderer-bridge.mjs';
 
 const PUSH_INTERVAL_MS = 5000;
 const PUSH_URL = '/api/telemetry';
@@ -27,6 +27,7 @@ const PUSH_URL = '/api/telemetry';
 let _disabled = false;
 let _lastPushAt = 0;
 let _lastFramesRendered = 0;
+let _lastFramesDropped = 0;
 let _lastBytesReceived = 0;
 let _clientId = null;
 
@@ -50,21 +51,34 @@ async function pushTelemetry() {
   const elapsedMs = _lastPushAt > 0 ? (now - _lastPushAt) : PUSH_INTERVAL_MS;
   _lastPushAt = now;
 
-  const framesDelta = _telemetry.framesRendered - _lastFramesRendered;
-  const bytesDelta  = _telemetry.bytesReceived - _lastBytesReceived;
+  const framesDelta  = _telemetry.framesRendered - _lastFramesRendered;
+  const droppedDelta = _telemetry.framesDropped  - _lastFramesDropped;
+  const bytesDelta   = _telemetry.bytesReceived  - _lastBytesReceived;
   _lastFramesRendered = _telemetry.framesRendered;
+  _lastFramesDropped  = _telemetry.framesDropped;
   _lastBytesReceived  = _telemetry.bytesReceived;
 
   const fps  = (framesDelta * 1000 / elapsedMs);
   const mbps = (bytesDelta * 8 / 1000 / elapsedMs); // bytes/ms * 8 / 1000 = Mbps
-  const avgIntervalUs = _telemetry.intervalCount > 0
+
+  // Render interval (drain cadence — vsync-locked, ~16.67ms always)
+  const renderAvgUs = _telemetry.intervalCount > 0
     ? _telemetry.intervalSumUs / _telemetry.intervalCount
     : 0;
-  const maxIntervalUs = _telemetry.intervalMaxUs;
-  // Reset rolling jitter window
-  _telemetry.intervalSumUs = 0;
-  _telemetry.intervalCount = 0;
-  _telemetry.intervalMaxUs = 0;
+  const renderMaxUs = _telemetry.intervalMaxUs;
+
+  // Arrival interval (WS frame-to-frame — actual network jitter)
+  const arrivalAvgUs = _telemetry.arrivalCount > 0
+    ? _telemetry.arrivalSumUs / _telemetry.arrivalCount
+    : 0;
+  const arrivalMaxUs = _telemetry.arrivalMaxUs;
+
+  // Reset the rolling jitter windows in the render worker. Counters live in
+  // the worker now (Fix 2); the next renderer-bridge telemetry poll will
+  // forward the reset request alongside the read, so the worker zeros its
+  // accumulators atomically with the snapshot. Local _telemetry fields will
+  // pick up the zeroed values on the next poll cycle (~250ms).
+  resetTelemetryIntervals();
 
   const payload = {
     client_id: _clientId,
@@ -72,8 +86,13 @@ async function pushTelemetry() {
     rtt_ms: state.diag.pingMs || 0,
     fps: Math.round(fps * 10) / 10,
     mbps: Math.round(mbps * 100) / 100,
-    frame_jitter_avg_us: Math.round(avgIntervalUs),
-    frame_jitter_max_us: Math.round(maxIntervalUs),
+    frames_dropped: droppedDelta,
+    // Network jitter — gap between WS frame arrivals (the real jitter)
+    frame_jitter_avg_us: Math.round(arrivalAvgUs),
+    frame_jitter_max_us: Math.round(arrivalMaxUs),
+    // Render cadence — gap between drain calls (vsync-locked, sanity check)
+    render_interval_avg_us: Math.round(renderAvgUs),
+    render_interval_max_us: Math.round(renderMaxUs),
     sync_count: _telemetry.syncCount,
     streaming: state.rendererStreaming ? 1 : 0,
   };

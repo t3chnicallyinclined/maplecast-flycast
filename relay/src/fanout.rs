@@ -229,9 +229,15 @@ impl RelayState {
         cache.as_ref().map(|c| c.raw.clone())
     }
 
-    /// Snapshot all metrics for /metrics endpoint (called by HTTP listener)
+    /// Snapshot all metrics for /metrics endpoint (called by HTTP listener).
+    ///
+    /// IMPORTANT: this RESETS the rolling jitter window (avg + max interval)
+    /// so each Prometheus scrape sees a fresh window. Without this, a single
+    /// startup spike would pin max_frame_interval_us forever and the average
+    /// would converge to a meaningless lifetime mean. Counters that should be
+    /// monotonic (frames_received, bytes_received, sync_count) are NOT reset.
     pub async fn metrics(&self) -> MetricsSnapshot {
-        let stats = self.inner.stats.lock().await;
+        let mut stats = self.inner.stats.lock().await;
         let clients = *self.inner.client_count.lock().await as u64;
         let cache = self.inner.sync_cache.read().await;
         let (has_sync, sync_bytes) = match cache.as_ref() {
@@ -243,7 +249,7 @@ impl RelayState {
         } else {
             0
         };
-        MetricsSnapshot {
+        let snap = MetricsSnapshot {
             frames_received: stats.frames_received,
             frames_broadcast: stats.frames_broadcast,
             bytes_received: stats.bytes_received,
@@ -256,7 +262,15 @@ impl RelayState {
             max_frame_interval_us: stats.max_frame_interval_us,
             has_sync_cache: has_sync,
             sync_cache_bytes: sync_bytes,
-        }
+        };
+        // Reset the rolling jitter window so the next scrape covers a fresh
+        // window. We deliberately do NOT reset last_frame_at_us — the very
+        // next frame should compute its delta against the previous frame, not
+        // restart from zero.
+        stats.frame_interval_sum_us = 0;
+        stats.frame_interval_count = 0;
+        stats.max_frame_interval_us = 0;
+        snap
     }
 
     /// Subscribe to frame broadcast
