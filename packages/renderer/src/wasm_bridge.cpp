@@ -73,6 +73,18 @@ static uint32_t _frameCount = 0;
 static MirrorDecompressor _decomp;
 static bool _decompInit = false;
 
+// Single 16MB decompressor shared by SYNC and per-frame paths.
+// SYNC payloads are ~8MB uncompressed; if the per-frame path inits with a
+// smaller buffer first, the SYNC path will overflow it.
+// Matches desktop maplecast_mirror.cpp wsClientRun() which uses one 16MB decompressor.
+static void ensureDecomp()
+{
+    if (!_decompInit) {
+        _decomp.init(16 * 1024 * 1024);
+        _decompInit = true;
+    }
+}
+
 // ============================================================================
 // renderer_init — Create WebGL2 context and initialize the GLES renderer
 // ============================================================================
@@ -142,7 +154,7 @@ int renderer_sync(uint8_t* data, int size)
     if (!_initialized || !renderer || size < 8) return 0;
 
     // Decompress if ZCST-compressed
-    if (!_decompInit) { _decomp.init(16 * 1024 * 1024); _decompInit = true; }
+    ensureDecomp();
     size_t decompSize = 0;
     const uint8_t* decompData = _decomp.decompress(data, size, decompSize);
     if (decompSize < 12) return 0;
@@ -191,6 +203,53 @@ int renderer_sync(uint8_t* data, int size)
 //   frameSize(4) + frameNum(4) + pvr_snapshot[16](64) +
 //   taSize(4) + deltaPayloadSize(4) + deltaData(var) + checksum(4) +
 //   dirtyPageCount(4) + [regionId(1) + pageIdx(4) + data(4096)] * N
+//
+// ============================================================================
+// !!! FRAGILE — READ THIS BEFORE EDITING !!!
+// ============================================================================
+// This bridge MUST stay byte-for-byte compatible with:
+//   1. The server side: maplecast_mirror.cpp serverPublish()
+//   2. The desktop client: maplecast_mirror.cpp clientReceive()
+//   3. The other browser bridge: core/network/maplecast_wasm_bridge.cpp
+//      (used by web/emulator.html — different binary, same wire format)
+//
+// If you edit ANY of those four files, edit ALL of them. The wire format is
+// the contract. Any divergence shows up as broken scenes (character select,
+// loading screens) WHILE in-match still looks fine — because in-match VRAM is
+// stable and survives bugs that only manifest on scene transitions.
+//
+// Five bugs we already paid for and don't want again:
+//
+//   (A) Decompressor sized too small. ONE shared 16MB MirrorDecompressor for
+//       both renderer_sync (8MB SYNC) and renderer_frame. If you split them or
+//       size the per-frame one smaller, the SYNC path will overflow whichever
+//       got initialized first.
+//
+//   (B) Dropping dirty pages during the keyframe-wait window. When a delta
+//       arrives before the first keyframe, we MUST still walk dirty pages to
+//       VRAM/PVR — we just skip Process()/Render(). Dropping them means VRAM
+//       drifts behind the server until the next page rewrite, which can be
+//       seconds later, breaking the first 1-60 frames after every reconnect.
+//
+//   (C) VramLockedWriteOffset(pageOff) MUST be called BEFORE memcpy into VRAM.
+//       Order is "unprotect, then write." Reverse on the desktop client = SIGSEGV
+//       in the texture cache mprotect path. Harmless on WASM but keep aligned.
+//
+//   (D) _prevTA must NEVER shrink. Only grow. Truncating on a smaller frame
+//       loses tail bytes the next delta might patch into.
+//
+//   (E) renderer->resetTextureCache MUST be set whenever ANY VRAM page is dirty.
+//       Without it, the WebGL texture cache shows whatever was uploaded the
+//       first time it saw that VRAM region. Scene transitions (where VRAM
+//       turns over heavily) silently render with stale textures from the
+//       previous scene. This is THE bug that motivated this whole comment.
+//
+// Test surface: load https://nobd.net/king.html, watch character select,
+// stage select, and the rotating-globe scene. If those render right, the
+// bridge is working. If only in-match works, you've broken one of A-E.
+//
+// See also: docs/ARCHITECTURE.md "Mirror Wire Format — Rules of the Road"
+// and the memory note "WASM Bridge Parity".
 // ============================================================================
 
 EMSCRIPTEN_KEEPALIVE
@@ -207,7 +266,7 @@ int renderer_frame(uint8_t* data, int size)
     if (size < 12) return -3;
 
     // Decompress if ZCST-compressed
-    if (!_decompInit) { _decomp.init(512 * 1024); _decompInit = true; }
+    ensureDecomp();
     size_t decompSize = 0;
     const uint8_t* decompData = _decomp.decompress(data, size, decompSize);
     if (decompSize < 80) return -3;
@@ -226,27 +285,35 @@ int renderer_frame(uint8_t* data, int size)
     uint32_t taSize;           memcpy(&taSize,           src, 4); src += 4;
     uint32_t deltaPayloadSize; memcpy(&deltaPayloadSize, src, 4); src += 4;
 
+    bool skipRender = false;
+
     if (deltaPayloadSize == taSize) {
         // Keyframe — full TA buffer
         _prevTA.assign(src, src + taSize);
         src += taSize;
-        printf("[renderer] KEYFRAME received: frame=%u taSize=%u wireSize=%d decompSize=%zu\n",
-            frameNum, taSize, size, decompSize);
+        if ((frameNum % 60) == 0)
+            printf("[renderer] KEYFRAME frame=%u taSize=%u wireSize=%d decompSize=%zu\n",
+                frameNum, taSize, size, decompSize);
+    } else if (_prevTA.empty()) {
+        // Delta arrived before any keyframe — must still walk past delta + checksum
+        // + dirty pages so VRAM updates from this window aren't lost. We just can't
+        // render this frame.
+        static int waitCount = 0;
+        if (waitCount++ < 5)
+            printf("[renderer] DELTA dropped — waiting for keyframe\n");
+        src += deltaPayloadSize;
+        skipRender = true;
     } else {
-        // Delta frame — apply runs to previous buffer
-        if (_prevTA.empty()) {
-            // No previous keyframe — skip until we get one
-            static int waitCount = 0;
-            if (waitCount++ < 5)
-                printf("[renderer] DELTA dropped — waiting for keyframe\n");
-            return -10;  // waiting for keyframe
-        }
-        // Log every 30th delta to confirm decompression works
-        if ((frameNum % 30) == 0)
+        // Delta frame — apply runs to previous buffer.
+        // Match desktop client: do NOT truncate _prevTA when taSize shrinks; only
+        // grow it. The valid region is [0, taSize) on each frame; bytes beyond
+        // that point are dead but don't hurt anything.
+        if (_prevTA.size() < taSize)
+            _prevTA.resize(taSize, 0);
+
+        if ((frameNum % 300) == 0)
             printf("[renderer] DELTA frame=%u taSize=%u deltaSize=%u wireSize=%d decompSize=%zu\n",
                 frameNum, taSize, deltaPayloadSize, size, decompSize);
-        // Resize to match server's TA size
-        _prevTA.resize(taSize, 0);
 
         // Apply delta runs: (offset:4, runLen:2, data:N)*, sentinel 0xFFFFFFFF
         const uint8_t* deltaData = src;
@@ -271,6 +338,10 @@ int renderer_frame(uint8_t* data, int size)
     src += 4;
 
     // ---- Apply dirty memory pages ----
+    // Walk this even when skipRender, so VRAM/PVR updates from the
+    // delta-before-keyframe window don't get dropped on the floor.
+    // Region 0 (mem_b) and region 2 (aica_ram) are intentionally discarded
+    // — this is a renderer-only build with no SH4 RAM and no AICA RAM.
     uint32_t dirtyPages;
     memcpy(&dirtyPages, src, 4); src += 4;
     bool vramDirty = false;
@@ -282,19 +353,23 @@ int renderer_frame(uint8_t* data, int size)
         size_t pageOff = (size_t)pageIdx * 4096;
 
         if (regionId == 1 && pageOff + 4096 <= VRAM_SIZE) {
-            // VRAM page — copy + invalidate texture cache for this region
-            memcpy(&vram[pageOff], src, 4096);
+            // VRAM page — unprotect BEFORE memcpy (matches desktop client),
+            // then memcpy + flag for texture cache invalidation.
             VramLockedWriteOffset(pageOff);
+            memcpy(&vram[pageOff], src, 4096);
             vramDirty = true;
         } else if (regionId == 3 && pageOff + 4096 <= (size_t)pvr_RegSize) {
             // PVR register page
             memcpy(pvr_regs + pageOff, src, 4096);
         }
+        // regions 0 and 2: skip data, this build has no host buffer for them
         src += 4096;
     }
 
+    if (skipRender) return -10;
+
     // Match native client: full texture cache reset when ANY VRAM page changes.
-    // The native client does this at maplecast_mirror.cpp line 850.
+    // The native client does this at maplecast_mirror.cpp clientReceive().
     if (vramDirty) renderer->resetTextureCache = true;
 
     // Debug: log palette state on first rendered frame

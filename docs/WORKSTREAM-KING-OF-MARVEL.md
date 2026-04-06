@@ -1,12 +1,193 @@
 # WORKSTREAM: King of Marvel — Full Architecture & Build Plan
 
-**Date:** April 5, 2026
+**Last updated:** April 6, 2026
 **Branch:** `ta-streaming`
 **Mandate:** OVERKILL IS NECESSARY. EVERY MICROSECOND COUNTS.
 
 ---
 
-## EXECUTIVE SUMMARY
+## STATUS AT A GLANCE
+
+| Phase | Goal | Status |
+|---|---|---|
+| **1** | Standalone WASM renderer | ✅ **SHIPPED** — `web/renderer.{mjs,wasm}`, 60fps, pixel-perfect |
+| **2** | Arcade cabinet UI | ✅ **SHIPPED** — `web/king.html` + `web/js/*.mjs` (vanilla ES modules, not React) |
+| **3** | Game state + stats + leaderboard | ✅ **SHIPPED** — 253-byte RAM reader, SurrealDB, ELO, collector |
+| **4** | Spectator fan-out | ✅ **SHIPPED** — P2P WebRTC tree (`web/relay.js`) + VPS relay (`relay/`) |
+| **5** | Queue system + arcade mode | ✅ **SHIPPED** — queue, winner-stays-on, match detection |
+| **Next** | Latency floor + NOBD desktop app | See `WORKSTREAM-LATENCY.md` |
+
+Phase 2 shipped as vanilla ES modules (`web/js/*.mjs`) instead of React + Vite +
+Zustand. The React plan below is preserved as reference for a possible future
+rewrite; it is NOT the current shipping path.
+
+Everything in "WHAT EXISTS NOW" below is built and running in production on
+nobd.net. The "BUILD ORDER" section at the bottom is historical.
+
+---
+
+## WHAT EXISTS NOW
+
+### 1. Standalone WASM Renderer (PIXEL PERFECT, 60fps)
+
+**Path:** `packages/renderer/`
+**Output:** `web/renderer.mjs` (97KB) + `web/renderer.wasm` (~831KB, includes zstd decompress)
+
+A standalone Dreamcast PVR2 GPU renderer compiled from ~28 flycast source files
++ ~40 stubs. Renders MVC2 pixel-perfect at 60fps from raw TA commands streamed
+over WebSocket. No ROM, no BIOS, no emulator — just the renderer.
+
+**Exported C API (see `packages/renderer/src/wasm_bridge.cpp`):**
+
+```js
+Module._renderer_init(width, height)     // Create WebGL2 context + renderer
+Module._renderer_sync(dataPtr, size)     // Apply 8MB VRAM + 32KB PVR regs (ZCST-aware)
+Module._renderer_frame(dataPtr, size)    // Decode delta frame + render (ZCST-aware)
+Module._renderer_resize(width, height)   // Handle canvas resize
+Module._renderer_set_option(opt, value)  // Change quality settings at runtime
+Module._renderer_get_option(opt)         // Read current quality setting
+Module._renderer_destroy()               // Cleanup
+```
+
+**Quality options:**
+
+| Option ID | Name | Values |
+|---|---|---|
+| 0 | RenderResolution | 480 (native) to 1920 (4x) |
+| 1 | TextureUpscale | 1/2/4 (xBRZ — disabled in WASM, freezes) |
+| 2 | Fog | 0/1 |
+| 3 | ModifierVolumes | 0/1 |
+| 4 | PerStripSorting | 0/1 |
+| 5 | AnisotropicFiltering | 1/2/4/8/16 |
+| 6 | TextureFiltering | 0 (default) / 1 (nearest) / 2 (linear) |
+| 7 | PerPixelLayers | 4/8/16/32 |
+| 8 | EmulateFramebuffer | 0/1 (**MUST stay 0** — true corrupts VRAM via `writeFramebufferToVRAM()`) |
+
+**CRITICAL: the JS GL state hack.** Emscripten's C-level `glEnable`/`glDisable`
+inside the GLSM do NOT propagate to the WebGL2 context. Before EVERY
+`_renderer_frame()` call, you MUST:
+
+```js
+const gl = canvas.getContext('webgl2');
+gl.enable(gl.BLEND);
+gl.enable(gl.DEPTH_TEST);
+gl.enable(gl.STENCIL_TEST);
+gl.enable(gl.SCISSOR_TEST);
+Module._renderer_frame(bufPtr, size);
+```
+
+Without this, all translucent polygons (health bars, sprites, HUD) render as
+opaque black boxes. This is an emscripten bug, not a flycast bug. It lives in
+`web/js/renderer-bridge.mjs`.
+
+**Canvas element:** must have `id="game-canvas"`. The WASM module targets
+`#game-canvas` for WebGL2 context creation.
+
+**WebGL2 patches needed before WASM loads** (`web/js/webgl-patches.mjs`):
+
+```js
+// Wrap enable/disable to silently eat invalid enums (GL_FOG, GL_ALPHA_TEST)
+ctx.enable       = function(cap)       { try { origEnable(cap); } catch(e) {} };
+ctx.disable      = function(cap)       { try { origDisable(cap); } catch(e) {} };
+ctx.getError     = function()          { const e = orig(); return e === 0x500 ? 0 : e; };
+ctx.texParameteri= function(t,p,v)     { try { origTP(t,p,v); } catch(e) {} };
+```
+
+**Other must-knows:**
+
+- `postProcessor.render(0)` is called INSIDE `renderFrame()`. Do NOT call it
+  again from JS/bridge code — double-call causes visual artifacts.
+- `getScaledFramebufferSize()` scales by `config::RenderResolution / 480.0`.
+  Cap at 1920 — anything higher can OOM.
+- SYNC is 8MB. First binary message after WebSocket connect. Allocate a temp
+  buffer, `HEAPU8.set`, call `_renderer_sync`, free.
+- Keyframe detection: `deltaPayloadSize == taSize` means full TA buffer. Client
+  returns -10 until the first keyframe arrives.
+- `FillBGP(&clientCtx)` must be called before `renderer->Process()` in the
+  bridge, or background plane renders incorrectly. The server gets this for
+  free; clients do not.
+
+**Build:** `cd packages/renderer && ./build.sh` (requires emsdk). See
+`docs/WASM-BUILD-GUIDE.md` for the full build pipeline including the parallel
+EmulatorJS WASM core build.
+
+---
+
+### 2. King of Marvel UI (`web/king.html` + `web/js/*.mjs`)
+
+SF2-inspired arcade cabinet interface, shipped as vanilla ES modules (no React).
+
+**Components:**
+- **Top banner:** "KING OF MARVEL" title + current king name + streak
+- **Viewer bar:** Watching / Playing / In Line counts
+- **Left sidebar — Hall of Fame:** Tabbed leaderboard (Streak/Combo/Speed/Perfect/Masher/Surgeon)
+- **Center — Arcade cabinet:** `#game-canvas` — the WASM renderer target
+- **Right sidebar — Live Arcade:** NOW PLAYING (P1 vs P2), "I GOT NEXT" button, THE LINE
+- **Bottom — Chat:** "TRASH TALK" with reaction buttons (HYPE/BODIED/GGs/SALTY/FRAUD)
+- **Ticker bar:** scrolling match highlights
+- **Match HUD:** health bars, timer, combo counter (overlaid on game screen)
+- **Match Results:** post-match stats overlay
+- **"HERE COMES A NEW CHALLENGER"** fullscreen overlay
+- **Sign-in modal:** fighter name + avatar picker
+
+Module layout under `web/js/`:
+
+| Module | Role |
+|---|---|
+| `renderer-bridge.mjs` | WASM init + `handleBinaryFrame()` (ZCST detect → `_renderer_sync` / `_renderer_frame`) |
+| `ws-connection.mjs` | Dual WebSocket: Worker (binary) + main thread (JSON) |
+| `frame-worker.mjs` | Inline Worker — zero-copy ArrayBuffer transfer from WS to main thread |
+| `relay-bootstrap.mjs` | Initializes WebRTC P2P fan-out (`web/relay.js`) |
+| `webgl-patches.mjs` | GL_VERSION override + cap filtering |
+| `lobby.mjs`, `queue.mjs`, `gamepad.mjs`, `chat.mjs`, `leaderboard.mjs` | UI and input |
+| `auth.mjs`, `profile.mjs`, `surreal.mjs`, `diagnostics.mjs`, `settings.mjs` | Auth, stats, diag |
+| `player-cards.mjs`, `ticker.mjs` | Newer UI pieces (untracked in git at time of writing) |
+
+---
+
+### 3. P2P Spectator Relay (`web/relay.js`)
+
+WebRTC tree-topology relay for spectator fan-out. Server feeds 2-3 seed
+spectators directly; seeds relay to up to 3 children each via WebRTC
+DataChannels. Two channels per connection:
+
+- `ta-mirror` (unordered, unreliable) — delta frames at 60fps
+- `ta-sync` (ordered, reliable) — initial 8MB SYNC, chunked to 64KB
+
+Server manages tree via WebSocket signaling. ZCST-aware: skips parsing for
+compressed frames, forwards them as-is.
+
+---
+
+### 4. SurrealDB Stats System (`web/schema.surql`)
+
+Database schema for competitive stats. Running on the VPS at `:8000`.
+
+**Tables:**
+- **player** — ELO rating (K=32), rank tiers (Rookie 0-499 → Legend 3000+), W/L, streaks
+- **stick** — Hardware MAC/IP registration
+- **char_stats** — Per-player per-character: games, wins, best combo, kills/deaths
+- **team_stats** — Per-player per-team-composition stats
+- **h2h** — Head-to-head records between players
+- **match** — Full match detail: players, characters, HP, combos, damage, meter, inputs, finish type
+- **game_event** — Significant moments (combo breaks, perfects, comebacks)
+- **badge** — Achievements (combo monster, streak king, veteran, perfect, OCV, comeback, clutch)
+
+**Rank Tiers:** Rookie → Fighter → Warrior → Champion → Master → Grand Master → Legend
+
+---
+
+### 5. Rust Stats Collector (`web/collector/`)
+
+Rust service bridging flycast WebSocket (port 7200) to SurrealDB.
+
+- **Reads from WS:** Input snapshots, game state, stream telemetry, match events
+- **Writes to SurrealDB:** Player records, character/team stats, ELO changes, badges
+- **Has:** Full MVC2 character ID lookup table (56 characters)
+
+---
+
+## EXECUTIVE SUMMARY (Original Plan)
 
 Build "King of Marvel" — a browser-based MVC2 arcade cabinet where anyone can watch, queue up, and fight. The server runs the game. The browser renders native-quality 3D from raw GPU commands (not video). Players get sub-millisecond direct connections. Spectators fan out via P2P relay.
 
@@ -14,6 +195,10 @@ Build "King of Marvel" — a browser-based MVC2 arcade cabinet where anyone can 
 1. **Standalone WASM Renderer** — stripped flycast renderer (~35 files, ~3MB WASM), renders TA commands to a canvas via WebGL2. No EmulatorJS, no RetroArch.
 2. **React App Shell** — king.html rebuilt as React + Vite + Zustand. Arcade cabinet UI, leaderboard, queue, chat, match HUD.
 3. **LiveKit Spectator Fan-out** — players get direct WebRTC DataChannels from server. Spectators stream via LiveKit SFU. Zero change to player latency.
+
+> Deliverable #1 shipped. Deliverable #2 shipped as vanilla ES modules, not
+> React (the React plan below is reference only). Deliverable #3 shipped as
+> WebRTC P2P tree + Rust VPS relay, not LiveKit SFU.
 
 ---
 

@@ -270,6 +270,150 @@ the JS reader (`magic === 0x5453435A`) and the Rust reader (`&data[0..4] == b"ZC
 All three sides (C++, JS, Rust) verify against the same wire bytes; the
 constant in `core/network/maplecast_compress.h` is the canonical source.
 
+---
+
+## Mirror Wire Format — Rules of the Road
+
+The mirror stream's wire format is decoded by **FOUR independent parsers** that
+must stay byte-for-byte aligned. Editing one without the others is the #1 way
+to break this app:
+
+| Role | File | Language |
+|---|---|---|
+| Producer (server) | `core/network/maplecast_mirror.cpp` `serverPublish()` | C++ |
+| Desktop client | `core/network/maplecast_mirror.cpp` `clientReceive()` | C++ |
+| king.html browser | `packages/renderer/src/wasm_bridge.cpp` `renderer_frame()` | C++ → WASM |
+| emulator.html browser | `core/network/maplecast_wasm_bridge.cpp` `mirror_render_frame()` | C++ → WASM |
+| VPS relay | `relay/src/protocol.rs` + `fanout.rs` | Rust |
+
+Wire envelope is defined in `core/network/maplecast_compress.h` (ZCST magic
+header for zstd-compressed frames). The desktop client (`clientReceive()`) is
+the gold standard — when fixing a render bug in any browser, the answer is
+almost always "make it look like clientReceive()."
+
+### Frame Structure (uncompressed, after ZCST decode)
+
+```
+Delta frame:  frameSize(4) + frameNum(4) + pvr_snapshot(64) +
+              taSize(4) + deltaPayloadSize(4) + deltaData(var) +
+              checksum(4) + dirtyPageCount(4) +
+              [regionId(1) + pageIdx(4) + data(4096)] * N
+
+Keyframe:     deltaPayloadSize == taSize (full TA buffer, emitted every 60 frames)
+
+SYNC:         "SYNC"(4) + vramSize(4) + vram(8MB) + pvrSize(4) + pvr(32KB)
+              (compressed SYNC envelope wraps this in ZCST at level 3, ~13x ratio)
+```
+
+### Five bugs we already paid for (don't reintroduce them)
+
+1. **Decompressor sized too small.** Use a single 16MB shared decompressor for
+   both SYNC and per-frame paths. Browser bridges that init at 512KB on the
+   per-frame path will blow up on the next 8MB SYNC.
+
+2. **Dropping dirty pages while waiting for first keyframe.** When a delta
+   arrives before any keyframe (the first 1-59 frames after connect), you must
+   STILL walk the dirty-pages section and apply VRAM/PVR updates. Skip only
+   the actual `Process()`/`Render()` call. If you skip dirty pages too, VRAM
+   drifts behind the server until the next page rewrite (sometimes seconds
+   later).
+
+3. **`VramLockedWriteOffset(pageOff)` MUST be called BEFORE `memcpy` into VRAM.**
+   On desktop the texture cache mprotects pages, and writing first triggers
+   SIGSEGV. Harmless on WASM but keep aligned across parsers.
+
+4. **`_prevTA` must NEVER shrink.** Only grow. Truncating on a smaller frame
+   loses tail bytes the next delta might patch into.
+
+5. **`renderer->resetTextureCache = true` whenever ANY VRAM page is dirty.**
+   This is THE bug that hid character select / loading screens for weeks.
+   In-match VRAM is stable enough that the WebGL texture cache works without
+   this flag. Scene transitions, where VRAM turns over heavily, silently
+   render with stale textures from the previous scene unless this is set.
+
+### How a fragile-flow bug looks
+
+| Symptom | Likely cause |
+|---|---|
+| In-match perfect, character select garbled / missing | Texture cache reset (#5) or dirty page skip (#2) |
+| Black screen, "[renderer] SYNC applied" but no KEYFRAME log | Relay lost upstream — `ssh root@66.55.128.93 journalctl -u maplecast-relay` |
+| Black screen after a wasm rebuild | Browser cache — bump `?v=...` in `web/js/renderer-bridge.mjs` |
+| SIGSEGV in TexCache on desktop client | `VramLockedWriteOffset` order wrong (#3) |
+| First keyframe takes >1s on connect | Server keyframe interval changed (default 60 frames) |
+| Server change "works" but browsers black | You forgot to update one of the four parsers above |
+
+### Other hard-learned lessons
+
+- **`palette_update()` must be called on every client.** MVC2 uses paletted
+  textures. `PALETTE_RAM` contains raw entries; `palette_update()` converts
+  them to `palette32_ram[]` using `PAL_RAM_CTRL & 3`. Without it, texture
+  decode produces RGBA(0,0,0,0) and characters render invisible. The server
+  gets this for free via `rend_start_render()`; clients skip that and must
+  call `pal_needs_update = true; palette_update(); renderer->updatePalette = true;`
+  manually.
+- **NEVER use `emu.loadstate()` for live resync.** Corrupts scheduler/DMA/interrupt
+  state → SIGSEGV after ~1000 frames. Use direct `memcpy` of RAM/VRAM/ARAM instead.
+- **`memwatch::unprotect()` after any state sync.** `loadstate()` and normal
+  boot call `memwatch::protect()`, which mprotects VRAM pages read-only. Our
+  `memcpy` patches are silently dropped until unprotect.
+- **PVR registers (32KB) must be diffed as their own region.** They contain
+  palette RAM, FOG_TABLE, and ISP_FEED_CFG (translucent sort mode). Treat as
+  a 4th memory region alongside RAM/VRAM/ARAM.
+- **MVC2 characters are NOT render-to-texture.** All frames have `isRTT=0`.
+  Characters are regular translucent textured polygons.
+- **Save states store raw TA commands, not `rend_context`.** After a load,
+  SH4 must run to trigger STARTRENDER → `ta_parse` to rebuild `rend_context`.
+
+### Build pipeline (the easy-to-forget steps)
+
+- **Desktop client:** edit `maplecast_mirror.cpp` → `cmake --build build` (live)
+- **king.html WASM renderer:** edit `packages/renderer/src/wasm_bridge.cpp`
+  → `cd packages/renderer/build && emmake make -j$(nproc)`
+  → `cp build/renderer.{mjs,wasm} ../../web/`
+  → `scp web/renderer.{mjs,wasm} root@66.55.128.93:/var/www/maplecast/`
+  → **bump `?v=...` cache buster in `web/js/renderer-bridge.mjs`**
+  → upload that too
+- **emulator.html WASM core:** edit `core/network/maplecast_wasm_bridge.cpp`
+  → also copy to `~/projects/flycast-wasm/upstream/source/core/network/`
+  → `cd ~/projects/flycast-wasm/upstream/source/build-wasm && emmake make -j$(nproc)`
+  → `cd ~/projects/flycast-wasm && bash upstream/link-ubuntu.sh`
+  → 7z package → deploy → bump report timestamp
+- **Rust relay:** edit `relay/src/*.rs` → `cd relay && bash deploy.sh 66.55.128.93 74.101.20.197`
+
+### Dead code landmines
+
+`core/network/maplecast/{client,server}/` and `core/network/maplecast_mirror_{client,server}.cpp`
+exist but are NOT in the build (see `core/network/maplecast/README_DEAD_CODE.md`).
+The experimental `MAPLECAST_CLIENT` CMake option and two-binary split live
+there, unwired. Don't waste time editing these — your changes won't take effect.
+Single binary with env var switching (`MAPLECAST_MIRROR_SERVER=1` vs
+`MAPLECAST_MIRROR_CLIENT=1`) is the working path.
+
+### Server per-frame breakdown (measured)
+
+```
+PVR snapshot:          ~0µs   (64 bytes)
+TA copy to double buf: ~30µs  (140KB memcpy, double-buffered, no heap churn)
+TA delta encode:       ~50-200µs (byte scan + run encoding vs _prevTA)
+VRAM page diff:        ~200-500µs (memcmp 2048 × 4KB — biggest cost)
+WebSocket send:        ~10-50µs (async)
+zstd compress (lvl 1): ~80µs
+TOTAL:                 ~370-880µs per frame
+```
+
+### Client render thread breakdown (measured)
+
+```
+Apply dirty pages:     ~5-80µs (memcpy to VRAM/PVR)
+palette_update:        ~5-10µs
+renderer->Process:     ~200-500µs (flycast ta_parse + texture resolve)
+renderer->Render:      ~500µs (WebGL2 draw calls)
+TOTAL:                 ~710-1090µs per frame
+```
+
+Decode runs on a background thread via double-buffered TA contexts, so it
+does not add to the render-thread budget above.
+
 ### Mode 2: H.264 (Legacy, still works)
 
 ```
