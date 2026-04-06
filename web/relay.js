@@ -103,9 +103,14 @@ class MapleCastRelay {
   // ---- Frame Pipeline ----
 
   _onFrameFromUpstream(data) {
-    // Frame ordering: discard late arrivals
     const view = new DataView(data instanceof ArrayBuffer ? data : data.buffer);
-    if (data.byteLength >= 8) {
+    // Detect ZCST compressed frame — magic bytes 0x5A 0x43 0x53 0x54
+    const isCompressed = data.byteLength >= 4 &&
+      view.getUint32(0, true) === 0x5453435A;
+
+    // Frame ordering: discard late arrivals (only for uncompressed — compressed
+    // frames hide frameNum behind zstd; trust TCP ordering instead)
+    if (!isCompressed && data.byteLength >= 8) {
       const frameNum = view.getUint32(4, true);
       if (frameNum <= this.highestFrameNum && this.highestFrameNum - frameNum < 1000) {
         // Late frame — skip (but allow wraparound)
@@ -116,13 +121,16 @@ class MapleCastRelay {
 
     this.framesReceived++;
 
-    // Feed to WASM renderer
+    // Feed to WASM renderer (WASM handles decompression internally)
     this.onFrame(data);
 
     // Update cached SYNC state with dirty pages from this frame
-    this._updateCachedState(data);
+    // (skip for compressed frames — children must get fresh SYNC from server)
+    if (!isCompressed) {
+      this._updateCachedState(data);
+    }
 
-    // Forward to children (if seed or relay)
+    // Forward to children (if seed or relay) — verbatim, including compressed
     if (this.role === 'seed' || this.role === 'relay') {
       this._forwardToChildren(data);
     }
@@ -151,6 +159,14 @@ class MapleCastRelay {
     const arr = new Uint8Array(data instanceof ArrayBuffer ? data : data.buffer);
     if (arr.length < 12) return;
     const view = new DataView(arr.buffer, arr.byteOffset);
+
+    // Skip ZCST-compressed SYNC — children must get fresh SYNC from server
+    // (we don't ship a JS zstd decoder; decompression happens inside WASM)
+    if (view.getUint32(0, true) === 0x5453435A) {
+      this.cachedVram = null;
+      this.cachedPvr = null;
+      return;
+    }
 
     let off = 4; // skip "SYNC"
     const vramSize = view.getUint32(off, true); off += 4;

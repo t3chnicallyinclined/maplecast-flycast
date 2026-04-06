@@ -230,7 +230,12 @@ body { background: #000; overflow: hidden; width: 100vw; height: 100vh; }
         // Binary messages — SYNC or delta frames
         var data = new Uint8Array(e.data);
         if (data.length < 8) return;
-        if (data[0]===0x53 && data[1]===0x59 && data[2]===0x4E && data[3]===0x43) {
+        // Check for raw SYNC or ZCST-compressed SYNC
+        var isSYNC = data[0]===0x53 && data[1]===0x59 && data[2]===0x4E && data[3]===0x43;
+        var isZCST = data[0]===0x5A && data[1]===0x43 && data[2]===0x53 && data[3]===0x54;
+        var dv = new DataView(e.data);
+        var isCompSync = isZCST && data.length >= 8 && dv.getUint32(4, true) > 1048576;
+        if (isSYNC || isCompSync) {
           // SYNC from server (seeds only)
           if (relay) relay.handleServerSync(e.data);
           else applySync(e.data);

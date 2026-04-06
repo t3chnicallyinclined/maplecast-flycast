@@ -6,22 +6,68 @@
 //              + deltaPayloadSize(4) + ta_data(N) + taChecksum(4)
 //              + dirtyCount(4) + [regionId(1) + pageIdx(4) + page(4096)] * N
 //
+// Compressed envelope (zstd): "ZCST"(4) + uncompressedSize(4) + zstd_blob(N)
+//   The decompressed payload is one of the formats above.
+//
 // All integers little-endian.
 // ============================================================================
 
 pub const SYNC_MAGIC: &[u8; 4] = b"SYNC";
+pub const ZCST_MAGIC: &[u8; 4] = b"ZCST";
 pub const PAGE_SIZE: usize = 4096;
 pub const VRAM_SIZE: usize = 8 * 1024 * 1024; // 8MB
 pub const PVR_SIZE: usize = 32 * 1024;         // 32KB
 
-/// Check if a message is a SYNC frame
+/// Check if a message is a SYNC frame (uncompressed only)
 pub fn is_sync(data: &[u8]) -> bool {
     data.len() >= 4 && &data[0..4] == SYNC_MAGIC
 }
 
-/// Extract frame number from a delta frame (bytes 4..8, little-endian u32)
+/// Check if a message is a ZCST-compressed frame
+pub fn is_compressed(data: &[u8]) -> bool {
+    data.len() >= 4 && &data[0..4] == ZCST_MAGIC
+}
+
+/// Decompress a ZCST envelope. Returns the decompressed payload bytes.
+pub fn decompress(data: &[u8]) -> Option<Vec<u8>> {
+    if !is_compressed(data) || data.len() < 8 {
+        return None;
+    }
+    let uncompressed_size = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
+    match zstd::stream::decode_all(&data[8..]) {
+        Ok(out) => {
+            if out.len() == uncompressed_size {
+                Some(out)
+            } else {
+                tracing::warn!("zstd decompress size mismatch: expected {} got {}", uncompressed_size, out.len());
+                Some(out)
+            }
+        }
+        Err(e) => {
+            tracing::warn!("zstd decompress failed: {}", e);
+            None
+        }
+    }
+}
+
+/// Returns true if the payload (decompressed if needed) starts with "SYNC".
+/// Used by the relay to detect SYNCs whether or not the wire is compressed.
+pub fn is_sync_or_compressed_sync(data: &[u8]) -> bool {
+    if is_sync(data) {
+        return true;
+    }
+    if is_compressed(data) && data.len() >= 8 {
+        // Compressed SYNC has uncompressedSize > 1MB
+        let uncompressed_size = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
+        return uncompressed_size > 1024 * 1024;
+    }
+    false
+}
+
+/// Extract frame number from a delta frame (bytes 4..8, little-endian u32).
+/// Returns None for SYNC and compressed frames.
 pub fn frame_num(data: &[u8]) -> Option<u32> {
-    if data.len() >= 8 && !is_sync(data) {
+    if data.len() >= 8 && !is_sync(data) && !is_compressed(data) {
         Some(u32::from_le_bytes([data[4], data[5], data[6], data[7]]))
     } else {
         None

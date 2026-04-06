@@ -17,7 +17,9 @@
 #include <cstring>
 #include <zstd.h>
 
-static constexpr uint32_t MCST_MAGIC_COMPRESSED = 0x5A435354; // "ZCST"
+// Wire magic: 4 bytes "ZCST" = 0x5A 0x43 0x53 0x54
+// As little-endian uint32 stored via memcpy: 0x5453435A
+static constexpr uint32_t MCST_MAGIC_COMPRESSED = 0x5453435A; // "ZCST" on the wire
 
 #ifndef MAPLECAST_COMPRESS_ONLY_DECOMPRESS
 

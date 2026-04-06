@@ -230,13 +230,21 @@ int renderer_frame(uint8_t* data, int size)
         // Keyframe — full TA buffer
         _prevTA.assign(src, src + taSize);
         src += taSize;
-        printf("[renderer] KEYFRAME received: frame=%u taSize=%u\n", frameNum, taSize);
+        printf("[renderer] KEYFRAME received: frame=%u taSize=%u wireSize=%d decompSize=%zu\n",
+            frameNum, taSize, size, decompSize);
     } else {
         // Delta frame — apply runs to previous buffer
         if (_prevTA.empty()) {
             // No previous keyframe — skip until we get one
+            static int waitCount = 0;
+            if (waitCount++ < 5)
+                printf("[renderer] DELTA dropped — waiting for keyframe\n");
             return -10;  // waiting for keyframe
         }
+        // Log every 30th delta to confirm decompression works
+        if ((frameNum % 30) == 0)
+            printf("[renderer] DELTA frame=%u taSize=%u deltaSize=%u wireSize=%d decompSize=%zu\n",
+                frameNum, taSize, deltaPayloadSize, size, decompSize);
         // Resize to match server's TA size
         _prevTA.resize(taSize, 0);
 

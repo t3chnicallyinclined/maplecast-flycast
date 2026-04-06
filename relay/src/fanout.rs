@@ -106,17 +106,32 @@ impl RelayState {
         }
     }
 
-    /// Handle incoming frame from upstream flycast server
+    /// Handle incoming frame from upstream flycast server.
+    /// Frames may be ZCST-compressed; we decompress to inspect for state cache,
+    /// but forward the original (compressed) bytes downstream to save bandwidth.
     async fn on_upstream_frame(&self, data: Bytes) {
-        if protocol::is_sync(&data) {
-            // SYNC frame — cache it
-            if let Some((vram, pvr)) = protocol::parse_sync(&data) {
+        // Decompress for inspection if needed (held only as long as we need it)
+        let inspect_buf: Option<Vec<u8>> = if protocol::is_compressed(&data) {
+            protocol::decompress(&data)
+        } else {
+            None
+        };
+        // Inspect view: either the decompressed payload, or the original
+        let inspect: &[u8] = inspect_buf.as_deref().unwrap_or(&data);
+
+        if protocol::is_sync(inspect) {
+            // SYNC frame — cache the decompressed state
+            if let Some((vram, pvr)) = protocol::parse_sync(inspect) {
                 info!(
-                    "SYNC received: VRAM={:.1}MB PVR={:.1}KB",
+                    "SYNC received: VRAM={:.1}MB PVR={:.1}KB (wire={:.1}MB compressed={})",
                     vram.len() as f64 / 1024.0 / 1024.0,
-                    pvr.len() as f64 / 1024.0
+                    pvr.len() as f64 / 1024.0,
+                    data.len() as f64 / 1024.0 / 1024.0,
+                    inspect_buf.is_some(),
                 );
-                let raw = Bytes::from(protocol::build_sync(&vram, &pvr));
+                // Cache stores the ORIGINAL wire bytes (compressed if it came compressed)
+                // so new clients receive the same bandwidth-efficient SYNC
+                let raw = data.clone();
                 let mut cache = self.inner.sync_cache.write().await;
                 *cache = Some(SyncCache { vram, pvr, raw });
             }
@@ -128,20 +143,21 @@ impl RelayState {
             // (we send it as a frame — clients check for SYNC magic)
             let _ = self.inner.frame_tx.send(data);
         } else {
-            // Delta frame — update cached SYNC state + broadcast
+            // Delta frame — update cached SYNC state from the decompressed view
             {
                 let mut cache = self.inner.sync_cache.write().await;
                 if let Some(ref mut c) = *cache {
-                    protocol::apply_dirty_pages(&data, &mut c.vram, &mut c.pvr);
-                    // Rebuild raw SYNC for late joiners
-                    c.raw = Bytes::from(protocol::build_sync(&c.vram, &c.pvr));
+                    protocol::apply_dirty_pages(inspect, &mut c.vram, &mut c.pvr);
+                    // We don't rebuild c.raw here — late joiners get the cached
+                    // SYNC as it was last received from upstream (compressed or not).
+                    // The flycast server sends fresh keyframes periodically anyway.
                 }
             }
 
-            let frame_num = protocol::frame_num(&data).unwrap_or(0);
+            let frame_num = protocol::frame_num(inspect).unwrap_or(0);
             let len = data.len();
 
-            // Broadcast to all subscribers
+            // Broadcast to all subscribers (forwarding original wire bytes)
             let receivers = self.inner.frame_tx.receiver_count();
             let _ = self.inner.frame_tx.send(data);
 

@@ -34,7 +34,7 @@ export async function initRenderer() {
   try {
     const Module = await createRenderer({
       canvas: document.getElementById('game-canvas'),
-      locateFile: (path) => `./${path}`,
+      locateFile: (path) => `./${path}?v=zstd1`,
     });
 
     if (!Module._renderer_init(640, 480)) throw new Error('renderer_init failed');
@@ -71,10 +71,15 @@ export function handleBinaryFrame(buffer) {
   const len = buffer.byteLength;
   if (len < 8) return;
 
-  // SYNC detection via DataView
-  const dv = new DataView(buffer, 0, 4);
-  if (dv.getUint8(0) === 0x53 && dv.getUint8(1) === 0x59 &&
-      dv.getUint8(2) === 0x4E && dv.getUint8(3) === 0x43) {
+  // SYNC detection — check for raw "SYNC" or ZCST-compressed SYNC
+  const dv = new DataView(buffer);
+  const magic = len >= 4 ? dv.getUint32(0, true) : 0;
+  const isSYNC = magic === 0x434E5953; // "SYNC" little-endian
+  const isZCST = magic === 0x5453435A; // "ZCST" little-endian
+  // ZCST with uncompressedSize > 1MB = compressed SYNC
+  const isCompressedSync = isZCST && len >= 8 && dv.getUint32(4, true) > 1024 * 1024;
+
+  if (isSYNC || isCompressedSync) {
     const data = new Uint8Array(buffer);
     if (len <= SYNC_BUF_SIZE) {
       _wasm.HEAPU8.set(data, _syncBuf);
