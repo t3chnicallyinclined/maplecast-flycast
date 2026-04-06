@@ -1632,8 +1632,8 @@ body {
   <div class="title-sub">MARVEL VS CAPCOM 2 &mdash; ONLINE ARCADE</div>
   <div class="current-king">
     <span class="crown">&#x1F451;</span>
-    <span class="king-name" id="kingName">SHADOW_KING</span>
-    <span class="king-streak" id="kingStreak">12 WIN STREAK</span>
+    <span class="king-name" id="kingName">NO KING</span>
+    <span class="king-streak" id="kingStreak">CABINET OPEN</span>
   </div>
 </div>
 
@@ -1657,14 +1657,14 @@ body {
       <div class="np-vs">
         <div class="np-player p1">
           <div class="np-label">P1</div>
-          <div class="np-name" id="npP1">SHADOW_KING</div>
-          <div class="np-record" id="npP1Record">12W-3L</div>
+          <div class="np-name" id="npP1">OPEN</div>
+          <div class="np-record" id="npP1Record">PRESS START</div>
         </div>
         <div class="np-vs-text">VS</div>
         <div class="np-player p2">
           <div class="np-label">P2</div>
-          <div class="np-name" id="npP2">XECUTIONER</div>
-          <div class="np-record" id="npP2Record">8W-5L</div>
+          <div class="np-name" id="npP2">OPEN</div>
+          <div class="np-record" id="npP2Record">PRESS START</div>
         </div>
       </div>
     </div>
@@ -1677,19 +1677,6 @@ body {
       <button class="btn-leave-queue" id="leaveQueueBtn" onclick="leaveQueue()">
         &#x274C; LEAVE LINE
       </button>
-      <div id="nobdSection" style="display:none;border-top:1px solid #1a1a2e;margin-top:8px;padding-top:8px;">
-        <div style="font-size:6px;color:var(--gray);text-align:center;letter-spacing:0;line-height:1.6;margin-bottom:6px;">
-          NOBD HARDWARE STICK<br>
-          <span style="color:var(--gold-dim);">Sub-1ms input. Zero compromise.</span>
-        </div>
-        <button class="btn-leave-queue" id="registerStickBtn" onclick="registerStick()" style="display:none;color:var(--sf2-yellow);border-color:var(--sf2-yellow);">
-          REGISTER NOBD STICK
-        </button>
-        <button class="btn-leave-queue" id="unregisterStickBtn" onclick="unregisterStick()" style="display:none;color:var(--gray);border-color:var(--gray);">
-          UNREGISTER STICK
-        </button>
-        <div class="register-status" id="registerStatus"></div>
-      </div>
       <button class="btn-leave-queue" id="leaveGameBtn" onclick="leaveGame()" style="display:none;color:var(--hot-red);border-color:var(--hot-red);">
         &#x1F6AA; DISCONNECT
       </button>
@@ -1708,10 +1695,10 @@ body {
     <div class="leaderboard-tabs">
       <button class="lb-tab active" onclick="switchTab(this,'streak')">STREAK</button>
       <button class="lb-tab" onclick="switchTab(this,'combo')">COMBO</button>
-      <button class="lb-tab" onclick="switchTab(this,'speed')">SPEED</button>
+      <button class="lb-tab" onclick="switchTab(this,'speed')">OCV</button>
       <button class="lb-tab" onclick="switchTab(this,'perfect')">PERFECT</button>
-      <button class="lb-tab" onclick="switchTab(this,'masher')">MASHER</button>
-      <button class="lb-tab" onclick="switchTab(this,'surgeon')">SURGEON</button>
+      <button class="lb-tab" onclick="switchTab(this,'masher')">COMEBACK</button>
+      <button class="lb-tab" onclick="switchTab(this,'surgeon')">CLUTCH</button>
     </div>
     <div class="leaderboard-list" id="leaderboardList">
       <!-- filled by JS -->
@@ -1812,7 +1799,7 @@ body {
           <!-- Match HUD (shown during match) -->
           <div class="match-hud" id="matchHud">
             <div class="hud-player p1">
-              <div class="hud-name" id="hudP1Name">SHADOW_KING</div>
+              <div class="hud-name" id="hudP1Name"></div>
               <div class="health-bar-bg"><div class="health-bar" id="hudP1Health"></div></div>
             </div>
             <div class="hud-center">
@@ -1820,7 +1807,7 @@ body {
               <div class="hud-combo" id="hudCombo">14 HITS!</div>
             </div>
             <div class="hud-player p2">
-              <div class="hud-name" id="hudP2Name">XECUTIONER</div>
+              <div class="hud-name" id="hudP2Name"></div>
               <div class="health-bar-bg"><div class="health-bar" id="hudP2Health"></div></div>
             </div>
           </div>
@@ -1828,7 +1815,7 @@ body {
           <!-- Match results overlay -->
           <div class="match-results" id="matchResults">
             <div class="result-winner">WINNER</div>
-            <div class="result-title" id="resultTitle">SHADOW_KING</div>
+            <div class="result-title" id="resultTitle"></div>
             <div class="result-stats">
               <div class="result-stat">
                 <div class="stat-label">BEST COMBO</div>
@@ -1903,13 +1890,8 @@ body {
 <!-- TICKER -->
 <div class="ticker-bar">
   <div class="ticker-content" id="tickerContent">
-    <span class="ticker-fire">&#x1F525;</span> SHADOW_KING just hit a 47-HIT COMBO &nbsp;&bull;&nbsp;
-    <span class="ticker-crown">&#x1F451;</span> SHADOW_KING has been king for 23 minutes &nbsp;&bull;&nbsp;
-    <span class="ticker-skull">&#x1F480;</span> N00B_SLAYER got PERFECTED &nbsp;&bull;&nbsp;
-    <span class="ticker-fire">&#x1F525;</span> CHAOS_AGENT is mashing at 42 inputs/sec &nbsp;&bull;&nbsp;
-    <span class="ticker-crown">&#x1FA99;</span> 5 challengers in line &nbsp;&bull;&nbsp;
-    <span class="ticker-skull">&#x1F480;</span> XECUTIONER ended a 8-win streak &nbsp;&bull;&nbsp;
-    <span class="ticker-fire">&#x1F525;</span> THE_SURGEON has 94% input accuracy &nbsp;&bull;&nbsp;
+    <span class="ticker-crown">&#x1FA99;</span> CABINET OPEN — PUT YOUR QUARTER UP &nbsp;&bull;&nbsp;
+    <span class="ticker-fire">&#x1F525;</span> NOBD.NET — KING OF MARVEL &nbsp;&bull;&nbsp;
   </div>
 </div>
 
@@ -2032,7 +2014,7 @@ import { state } from './js/state.mjs';
 import { initRenderer, setOpt } from './js/renderer-bridge.mjs';
 import { connectWS } from './js/ws-connection.mjs';
 import { renderChat, renderChatFull, sendChat, sendReaction } from './js/chat.mjs';
-import { renderQueue, gotNext, leaveQueue, leaveGame } from './js/queue.mjs';
+import { renderQueue, gotNext, leaveQueue, leaveGame, updateCabinetControls } from './js/queue.mjs';
 import { renderLeaderboard, switchTab } from './js/leaderboard.mjs';
 import { openSignIn, closeSignIn, confirmSignIn, signOut, showUserBadge,
          toggleUserMenu, toggleAuthMode, renderAvatars, pickAvatar } from './js/auth.mjs';
@@ -2044,6 +2026,7 @@ import { openProfile, closeProfile, switchProfileTab } from './js/profile.mjs';
 import { setupKeyboardShortcuts } from './js/demo.mjs';
 import { surrealFetchProfile } from './js/surreal.mjs';
 import { initRelay } from './js/relay-bootstrap.mjs';
+import { startTicker } from './js/ticker.mjs';
 
 // Expose to inline onclick handlers in HTML
 window.openSignIn = openSignIn;
@@ -2078,6 +2061,7 @@ renderLeaderboard('streak');
 renderQueue();
 renderChatFull();
 renderAvatars();
+updateCabinetControls();  // Set initial button state based on gamepad presence
 
 // WASM renderer init (must complete before WS connects)
 await initRenderer();
@@ -2102,6 +2086,7 @@ if (savedName && !state.signedIn) {
 // Start services
 startDiagInterval();
 setupKeyboardShortcuts();
+startTicker();
 connectWS();
 initRelay();
 

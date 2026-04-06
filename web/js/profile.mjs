@@ -46,14 +46,6 @@ function updatePadList() {
   const list = document.getElementById('padList');
   let html = '';
 
-  const stickId = localStorage.getItem('maplecast_stick');
-  if (stickId) {
-    html += `<div class="pad-list-item">
-      <div><div style="color:var(--gold);">NOBD STICK</div><div class="pad-type">Registered Hardware</div></div>
-      <div class="pad-status ${state.stickOnline ? 'online' : 'offline'}">${state.stickOnline ? 'ONLINE' : 'OFFLINE'}</div>
-    </div>`;
-  }
-
   const gamepads = navigator.getGamepads();
   for (let i = 0; i < gamepads.length; i++) {
     const gp = gamepads[i];
@@ -66,7 +58,7 @@ function updatePadList() {
   }
 
   if (!html) {
-    html = '<div style="text-align:center;padding:20px;color:var(--gray);font-size:7px;">NO CONTROLLERS DETECTED<br><br>Connect a gamepad or register a NOBD stick</div>';
+    html = '<div style="text-align:center;padding:20px;color:var(--gray);font-size:7px;">NO GAMEPAD DETECTED<br><br>Plug in a USB gamepad and press any button</div>';
   }
   list.innerHTML = html;
 }

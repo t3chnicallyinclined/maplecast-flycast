@@ -22,9 +22,9 @@ import { handleBinaryFrame } from './renderer-bridge.mjs';
 import { renderChat } from './chat.mjs';
 import { updateLobbyState, updateNameOverlay } from './lobby.mjs';
 import { showNewChallenger, showMatchResults } from './demo.mjs';
-import { startGamepadPolling, updateStickButtons } from './gamepad.mjs';
+import { startGamepadPolling, stopGamepadPolling, updateStickButtons } from './gamepad.mjs';
 import { autoSignIn } from './auth.mjs';
-import { leaveGame } from './queue.mjs';
+import { leaveGame, updateCabinetControls } from './queue.mjs';
 import { avg } from './ui-common.mjs';
 
 const WS_PORT = 7200;
@@ -137,9 +137,14 @@ export async function connectWS() {
   ws.onopen = () => {
     console.log('[ws] Control connection open');
     state.connState = 'CONNECTED';
-    const saved = localStorage.getItem('nobd_username');
-    if (saved && !state.signedIn) {
-      ws.send(JSON.stringify({ type: 'check_stick', username: saved }));
+    // Always fire check_stick on connect so a reloaded tab learns its
+    // current slot from the server (the reload-resync path). The handler
+    // at case 'stick_status' below reclaims state.mySlot if appropriate.
+    const username = state.signedIn
+      ? state.myName.toLowerCase()
+      : localStorage.getItem('nobd_username');
+    if (username) {
+      ws.send(JSON.stringify({ type: 'check_stick', username }));
     }
   };
 
@@ -167,7 +172,25 @@ export async function connectWS() {
       } catch (err) {}
     });
   };
+
+  // Free our slot on tab close/reload so the next tab session doesn't see a
+  // ghost player still occupying P1/P2. Server has its own 5s safety-net
+  // eviction (see maplecast_ws_server.cpp), but explicit leave is instant
+  // and avoids the race where the user reloads, sends `check_stick`, and
+  // gets back the wrong slot from the dying connection.
+  if (!_unloadHooked) {
+    _unloadHooked = true;
+    window.addEventListener('beforeunload', () => {
+      try {
+        if (state.ws?.readyState === WebSocket.OPEN && state.mySlot >= 0) {
+          state.ws.send(JSON.stringify({ type: 'leave', id: state.myId }));
+        }
+      } catch {}
+    });
+  }
 }
+
+let _unloadHooked = false;
 
 function handleJsonMessage(msg) {
   const ws = state.ws;
@@ -187,7 +210,32 @@ function handleJsonMessage(msg) {
 
     case 'stick_status':
       state.stickOnline = msg.online;
+      state.stickRegistered = !!msg.registered;
+      state.stickSlot = (typeof msg.slot === 'number') ? msg.slot : -1;
       if (msg.registered && !state.signedIn) autoSignIn(msg.username);
+
+      // Reload resync: server says we already occupy a slot. Bind it back
+      // without sending a fresh `join` (which would land us in the *other*
+      // slot and double-book the user — the screenshot bug). Gamepad polling
+      // is harmless if NOBD UDP is the actual input source: bufferedAmount
+      // backpressure keeps the WS quiet when there's nothing to send.
+      if (state.stickSlot >= 0 && state.mySlot < 0) {
+        state.mySlot = state.stickSlot;
+        startGamepadPolling();
+        document.getElementById('leaveGameBtn').style.display = 'block';
+        document.getElementById('gotNextBtn').style.display = 'none';
+        document.getElementById('leaveQueueBtn').style.display = 'none';
+      }
+      updateCabinetControls();
+      break;
+
+    case 'stick_event':
+      // Authoritative server-side stick lifecycle. We re-poll our own status
+      // so the UI reflects "your stick just came online" without waiting for
+      // the next status broadcast.
+      if (state.signedIn && msg.events?.some(e => e.username === state.myName.toLowerCase())) {
+        state.ws.send(JSON.stringify({ type: 'check_stick', username: state.myName.toLowerCase() }));
+      }
       break;
 
     case 'assigned':
@@ -200,8 +248,10 @@ function handleJsonMessage(msg) {
         document.getElementById('leaveGameBtn').style.display = 'block';
         document.getElementById('gotNextBtn').style.display = 'none';
         document.getElementById('leaveQueueBtn').style.display = 'none';
+        updateCabinetControls();
       } else if (state.leaving) {
         state.leaving = false;
+        updateCabinetControls();
       } else {
         state.wsInQueue = true;
         ws.send(JSON.stringify({ type: 'queue_join', name: state.myName }));
@@ -224,7 +274,10 @@ function handleJsonMessage(msg) {
       state.wsInQueue = false;
       {
         const device = localStorage.getItem('maplecast_stick') ? 'NOBD Stick' : 'Browser';
-        ws.send(JSON.stringify({ type: 'join', id: state.myId, name: state.myName, device }));
+        // Use sessionId so anon and signed-in joins behave consistently with
+        // gotNext(). Falls back to myId if gotNext was never called this session.
+        const id = state.sessionId || state.myId;
+        ws.send(JSON.stringify({ type: 'join', id, name: state.myName, device }));
       }
       break;
 
@@ -258,6 +311,98 @@ function handleJsonMessage(msg) {
   }
 }
 
+// Reconcile state.mySlot against the authoritative server status. Called on
+// every status tick — cheap when nothing changed (just two string compares).
+function syncSlotFromStatus(msg) {
+  // Skip during a deliberate leave so we don't re-bind to a slot the server
+  // hasn't yet released. The 'assigned' {slot:-1} response will clear the flag.
+  if (state.leaving) return;
+
+  // Anonymous users have no persistent identity worth recovering — if their
+  // tab dies, the next visit should be a clean spectator session. Reload-
+  // recovery is a feature for signed-in players. The server-side close
+  // handler / 30s idle kick will clean up the orphaned anon slot.
+  //
+  // This also defends against an old anon slot still bound to state.myId
+  // from a pre-fix gotNext() click: a fresh tab in spectator mode would
+  // otherwise silently inherit it. With this guard the orphan just times out.
+  if (!state.signedIn) return;
+
+  const myShortId = (state.myId || '').substring(0, 8);
+  if (!myShortId) return;
+
+  // Which slot does the server think we're in? (-1 = none)
+  let serverSlot = -1;
+  if (msg.p1?.connected && msg.p1.id === myShortId) serverSlot = 0;
+  else if (msg.p2?.connected && msg.p2.id === myShortId) serverSlot = 1;
+
+  if (serverSlot === state.mySlot) return;  // already in sync
+
+  if (serverSlot >= 0 && state.mySlot < 0) {
+    // We're holding a slot but our local state thinks we're not — page reload
+    // or tab recovery. Adopt the server's view and surface the leave button.
+    console.log('[ws] reconnect sync: adopting server slot', serverSlot);
+    state.mySlot = serverSlot;
+    state.wsInQueue = false;
+    state.inQueue = false;
+
+    // Make sure we have a name. If we signed in via localStorage, state.myName
+    // is already set. If we joined anonymously and reloaded, we lost the
+    // anon name — pull it from the server status (it knows the display name).
+    const slotInfo = serverSlot === 0 ? msg.p1 : msg.p2;
+    if (!state.myName && slotInfo?.name) {
+      state.myName = slotInfo.name.toUpperCase();
+    }
+
+    // UI: hide queue/got-next, show leave-game
+    const gotNextBtn = document.getElementById('gotNextBtn');
+    const leaveQueueBtn = document.getElementById('leaveQueueBtn');
+    const leaveGameBtn = document.getElementById('leaveGameBtn');
+    if (gotNextBtn) gotNextBtn.style.display = 'none';
+    if (leaveQueueBtn) leaveQueueBtn.style.display = 'none';
+    if (leaveGameBtn) leaveGameBtn.style.display = 'block';
+
+    // Resume sending gamepad input from this tab
+    startGamepadPolling();
+
+    state.chatHistory.push({
+      name: null,
+      system: `Reconnected to slot P${serverSlot + 1}.`,
+    });
+    renderChat();
+    return;
+  }
+
+  if (serverSlot < 0 && state.mySlot >= 0) {
+    // Server kicked us / our connection dropped without a clean leave.
+    // Mirror the kicked-handler cleanup so we're back in spectator mode.
+    console.log('[ws] reconnect sync: server dropped us from slot', state.mySlot);
+    state.mySlot = -1;
+    state.wsInQueue = false;
+    state.inQueue = false;
+    stopGamepadPolling();
+    const gotNextBtn = document.getElementById('gotNextBtn');
+    const leaveQueueBtn = document.getElementById('leaveQueueBtn');
+    const leaveGameBtn = document.getElementById('leaveGameBtn');
+    if (gotNextBtn) {
+      gotNextBtn.innerHTML = '&#x1FA99; I GOT NEXT';
+      gotNextBtn.classList.remove('in-queue');
+      gotNextBtn.disabled = false;
+      gotNextBtn.style.display = '';
+    }
+    if (leaveQueueBtn) leaveQueueBtn.style.display = 'none';
+    if (leaveGameBtn) leaveGameBtn.style.display = 'none';
+    return;
+  }
+
+  // serverSlot >= 0 && state.mySlot >= 0 && they differ — slot swap
+  // (rare; e.g. p1 left, server promoted us from p2 to p1). Just adopt.
+  if (serverSlot !== state.mySlot && serverSlot >= 0) {
+    console.log('[ws] reconnect sync: slot swap', state.mySlot, '→', serverSlot);
+    state.mySlot = serverSlot;
+  }
+}
+
 function handleStatus(msg) {
   const d = state.diag;
   d.p1 = msg.p1 || {};
@@ -270,6 +415,17 @@ function handleStatus(msg) {
   d.publishUs = msg.publish_us || 0;
   d.dirtyPages = msg.dirty || 0;
   if (msg.game) d.game = msg.game;
+
+  // === RECONNECT SYNC ===
+  // Server is the authority on which slot we're in. The status message
+  // includes the first 8 chars of each occupant's id; if it matches ours,
+  // we're already that player — make the UI reflect that. Covers two cases:
+  //   1. Page reload while we still hold a slot
+  //   2. Tab survived a transient WS disconnect/reconnect
+  //
+  // The opposite direction matters too: if we *think* we're in a slot but
+  // the server doesn't agree, we got dropped — clean up our state.
+  syncSlotFromStatus(msg);
 
   if (d._wasRegistering && !msg.registering) {
     localStorage.setItem('maplecast_stick', state.myId);
@@ -296,7 +452,9 @@ function handleStatus(msg) {
       const device = localStorage.getItem('maplecast_stick') ? 'NOBD Stick' : 'Browser';
       const gp = navigator.getGamepads()[0];
       const devName = gp && !localStorage.getItem('maplecast_stick') ? gp.id.substring(0, 30) : device;
-      state.ws.send(JSON.stringify({ type: 'join', id: state.myId, name: state.myName, device: devName }));
+      // sessionId for anon/signed-in parity (see gotNext rationale).
+      const id = state.sessionId || state.myId;
+      state.ws.send(JSON.stringify({ type: 'join', id, name: state.myName, device: devName }));
     }
   }
 

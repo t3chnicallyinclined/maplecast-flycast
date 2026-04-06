@@ -20,6 +20,12 @@ export const state = {
   myName: '',
   myAvatar: '',
   myId,
+  // sessionId is the id we send to the server on `join`. For signed-in users
+  // it equals myId (so reload-recovery via syncSlotFromStatus works). For
+  // anonymous users gotNext() mints a fresh ephemeral one per click so an
+  // abandoned anon slot is NOT silently reclaimed by a new tab. Initialised
+  // to myId for back-compat with any non-gotNext join callers.
+  sessionId: myId,
   authMode: 'signin',    // 'signin' or 'register'
   playerProfile: null,
   isAnonymous: false,
@@ -31,11 +37,20 @@ export const state = {
   // Connection
   ws: null,
   stickOnline: false,
+  stickRegistered: false, // server confirmed this user owns a stick
+  stickSlot: -1,          // slot the server says we already occupy (reload resync)
   connState: '',
   rendererStreaming: false,
   mySlot: -1,
   wsInQueue: false,       // server-side queue state
   leaving: false,
+
+  // Gamepad detection — reactive, updated by gamepad.mjs on connect/disconnect.
+  // UX gate: can't join the game without one plugged in. Set by the initial
+  // navigator.getGamepads() sweep and by the gamepadconnected/disconnected
+  // browser events.
+  gamepadConnected: false,
+  gamepadId: '',          // trimmed gamepad.id (for device label on join)
 
   // WASM renderer
   glCtx: null,
@@ -64,19 +79,8 @@ export const state = {
   gamepadInterval: null,
   testerInterval: null,
 
-  // Chat
-  chatHistory: [
-    { name: 'SHADOW_KING', text: 'who\'s next', king: true },
-    { name: 'CABLE_GUY', text: 'running it back' },
-    { name: null, system: 'XECUTIONER has joined the game!' },
-    { name: 'MAGNETO_XX', text: 'this streak is getting crazy' },
-    { name: 'SHADOW_KING', text: 'i don\'t lose', king: true },
-    { name: 'CHAOS_AGENT', text: 'lmaooo the mash is real' },
-    { name: 'STORM_CHSR', text: '12 wins?? somebody stop this man' },
-    { name: null, hype: 'RUSH_DOWN hit a 87-HIT COMBO!' },
-    { name: 'DOOM_LOOP', text: 'hidden missiles hidden missiles hidden missiles' },
-    { name: 'XECUTIONER', text: 'ggs shadow but i\'m coming for that crown' },
-  ],
+  // Chat — empty until real users connect
+  chatHistory: [],
 
   // Placeholder leaderboard data (replaced by SurrealDB when connected)
   leaderboards: {
@@ -154,12 +158,6 @@ export const state = {
     ],
   },
 
-  // Placeholder queue data
-  queueData: [
-    { name: 'CABLE_GUY', record: '7W-4L' },
-    { name: 'MAGNETO_XX', record: '6W-6L' },
-    { name: 'STORM_CHSR', record: '5W-3L' },
-    { name: 'DOOM_LOOP', record: '3W-2L' },
-    { name: 'CHAOS_AGENT', record: '2W-9L' },
-  ],
+  // Queue — empty until real players join
+  queueData: [],
 };

@@ -1,5 +1,5 @@
 // ============================================================================
-// GAMEPAD.MJS — Gamepad polling + stick registration
+// GAMEPAD.MJS — Gamepad polling + connection detection
 //
 // PERF: hybrid rAF + MessageChannel polling.
 //
@@ -16,6 +16,10 @@
 //
 //       Delta compression — only sends on change. Pre-allocated buffer.
 //       bufferedAmount backpressure to drop when WS send queue is full.
+//
+// UX GATE: state.gamepadConnected is the single source of truth for whether
+//       the player can step up to the cabinet. Updated reactively from the
+//       gamepadconnected / gamepaddisconnected browser events.
 // ============================================================================
 
 import { state } from './state.mjs';
@@ -31,6 +35,57 @@ const MAX_BUFFERED = 8192;
 const BURSTS_PER_RAF = 16;
 
 const _mc = new MessageChannel();
+
+// ---- Connection detection ----
+// Chrome/Edge require a button press before getGamepads() returns a non-null
+// entry for a plugged-in pad (security/privacy). The gamepadconnected event
+// fires on that first press, so we listen for both the initial sweep and
+// the event to catch either path.
+
+function sweepGamepads() {
+  const pads = navigator.getGamepads();
+  for (let i = 0; i < pads.length; i++) {
+    if (pads[i]) {
+      setGamepadConnected(true, pads[i].id);
+      return;
+    }
+  }
+  setGamepadConnected(false, '');
+}
+
+function setGamepadConnected(connected, id) {
+  const changed = state.gamepadConnected !== connected;
+  state.gamepadConnected = connected;
+  state.gamepadId = (id || '').substring(0, 30);
+  if (changed) {
+    // Re-evaluate the cabinet button — disabled when no pad, enabled when present
+    import('./queue.mjs').then(m => m.updateCabinetControls?.());
+  }
+}
+
+window.addEventListener('gamepadconnected', (e) => {
+  setGamepadConnected(true, e.gamepad.id);
+});
+
+window.addEventListener('gamepaddisconnected', () => {
+  // Re-sweep in case a second pad is still plugged in
+  sweepGamepads();
+});
+
+// Initial sweep once DOM is ready (Firefox returns pads immediately, Chrome
+// needs a button press but we still want to try).
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', sweepGamepads);
+} else {
+  sweepGamepads();
+}
+
+// Safety-net poll every 2s — Chrome's gamepadconnected event is sometimes
+// flaky when the page reloads with a pad already plugged in. Cheap enough
+// to run forever.
+setInterval(sweepGamepads, 2000);
+
+// ---- Input polling (only runs while in a slot) ----
 
 function pollOnce() {
   if (!state.ws || state.ws.readyState !== WebSocket.OPEN || state.mySlot < 0) return;
@@ -94,49 +149,10 @@ export function stopGamepadPolling() {
   _burstRemaining = 0;
 }
 
-// === Stick Registration ===
-
-export function registerStick() {
-  if (!state.ws || state.ws.readyState !== WebSocket.OPEN || !state.signedIn) return;
-  state.ws.send(JSON.stringify({ type: 'register_stick', id: state.myId }));
-  document.getElementById('registerStickBtn').disabled = true;
-  document.getElementById('registerStickBtn').textContent = 'Listening...';
-  const regStatus = document.getElementById('registerStatus');
-  regStatus.style.display = 'block';
-  regStatus.textContent = 'Tap any button 5 times, pause, then 5 times again...';
-
-  state.registerTimeout = setTimeout(() => {
-    if (state.ws?.readyState === WebSocket.OPEN)
-      state.ws.send(JSON.stringify({ type: 'cancel_register' }));
-    document.getElementById('registerStickBtn').disabled = false;
-    document.getElementById('registerStickBtn').innerHTML = '&#x1F3AE; REGISTER STICK';
-    regStatus.textContent = 'Timed out — try again';
-    setTimeout(() => { regStatus.style.display = 'none'; }, 3000);
-  }, 15000);
-}
-
-export function unregisterStick() {
-  if (state.ws?.readyState === WebSocket.OPEN)
-    state.ws.send(JSON.stringify({ type: 'unregister_stick', id: state.myId }));
-  localStorage.removeItem('maplecast_stick');
-  document.getElementById('unregisterStickBtn').style.display = 'none';
-  document.getElementById('registerStickBtn').style.display = 'block';
-  document.getElementById('registerStickBtn').disabled = false;
-  document.getElementById('registerStickBtn').innerHTML = '&#x1F3AE; REGISTER STICK';
-}
-
-export function updateStickButtons() {
-  const section = document.getElementById('nobdSection');
-  if (!state.signedIn) {
-    if (section) section.style.display = 'none';
-    return;
-  }
-  if (section) section.style.display = 'block';
-  if (localStorage.getItem('maplecast_stick')) {
-    document.getElementById('registerStickBtn').style.display = 'none';
-    document.getElementById('unregisterStickBtn').style.display = 'block';
-  } else {
-    document.getElementById('registerStickBtn').style.display = 'block';
-    document.getElementById('unregisterStickBtn').style.display = 'none';
-  }
-}
+// ---- NOBD stick registration (DISABLED) ----
+// The NOBD hardware stick path is parked until the protocol stabilises.
+// These stubs exist so king.html's inline onclick handlers still bind —
+// wired to deleted UI they're never called, but the export contract stays.
+export function registerStick() { /* disabled */ }
+export function unregisterStick() { /* disabled */ }
+export function updateStickButtons() { /* disabled */ }
