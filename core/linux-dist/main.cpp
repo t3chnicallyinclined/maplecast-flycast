@@ -300,7 +300,16 @@ int main(int argc, char* argv[])
 	// asynchronously), then drop the GUI state to Closed so mainui_loop
 	// falls through to the emu.render() branch without ever calling
 	// gui_display_ui() (which dereferences imguiDriver).
-	if (std::getenv("MAPLECAST_HEADLESS"))
+	//
+	// Triggers on either the compile-time MAPLECAST_HEADLESS_BUILD define
+	// (Phase 3 compile-out binary — always headless) or the runtime
+	// MAPLECAST_HEADLESS=1 env var (Phase 1 runtime gate on GPU builds).
+#ifdef MAPLECAST_HEADLESS_BUILD
+	const bool _headless_mode = true;
+#else
+	const bool _headless_mode = (std::getenv("MAPLECAST_HEADLESS") != nullptr);
+#endif
+	if (_headless_mode)
 	{
 		if (!settings.content.path.empty())
 		{

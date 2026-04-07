@@ -1,0 +1,113 @@
+# MapleCast headless flycast server
+#
+# Build:   docker build -f Dockerfile.headless -t maplecast-headless:latest .
+# Run:     docker run --rm -p 7100:7100/udp -p 7200:7200/tcp \
+#            -v /path/to/mvc2.gdi:/data/mvc2.gdi:ro \
+#            -v /path/to/savestates:/opt/maplecast/savestates \
+#            -e MAPLECAST=1 -e MAPLECAST_MIRROR_SERVER=1 \
+#            maplecast-headless:latest /data/mvc2.gdi
+#
+# Notes:
+#   * No GPU, no DISPLAY, no /dev/dri required.
+#   * Target image is < 200 MB on debian:12-slim.
+#   * Savestate path must be writable (flycast saves state on shutdown).
+#   * The NOBD input server and WS mirror server bind 0.0.0.0 — expose
+#     ports explicitly via -p flags, not --net=host, unless you're
+#     running inside a private network.
+
+# ─────────────────────────────────────────────────────────────────
+# Build stage — full toolchain, builds the stripped headless binary
+# ─────────────────────────────────────────────────────────────────
+FROM debian:12-slim AS build
+
+RUN apt-get update && apt-get install --no-install-recommends -y \
+        build-essential \
+        cmake \
+        ninja-build \
+        git \
+        pkg-config \
+        libcurl4-openssl-dev \
+        libssl-dev \
+        libzip-dev \
+        zlib1g-dev \
+        libxdp-dev \
+        libbpf-dev \
+        libelf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# Copy the repo into the build stage. .dockerignore strips build outputs,
+# ROMs, savestates, web assets, and GPU-only submodules. Requires that
+# the non-excluded submodules are already checked out on the host:
+#   git submodule update --init --recursive \
+#       core/deps/libchdr core/deps/xbyak core/deps/asio \
+#       core/deps/websocketpp core/deps/libjuice core/deps/xxHash \
+#       core/deps/tinygettext core/deps/imgui core/deps/glm \
+#       core/deps/libelf core/deps/rcheevos core/deps/ggpo
+# (Or just `git submodule update --init --recursive` to get everything —
+# the .dockerignore will trim the GPU-only ones out of the build context.)
+COPY . .
+
+RUN cmake -B build-headless -G Ninja \
+        -DMAPLECAST_HEADLESS=ON \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DUSE_HOST_LIBZIP=ON \
+    && cmake --build build-headless -- -j"$(nproc)" \
+    && strip build-headless/flycast \
+    && ls -lh build-headless/flycast
+
+# ─────────────────────────────────────────────────────────────────
+# Runtime stage — minimal, no GPU/audio/window deps
+# ─────────────────────────────────────────────────────────────────
+FROM debian:12-slim
+
+# Runtime deps matching what ldd shows for the compile-out binary:
+#   libcurl (http_client), libxdp+libbpf (XDP input — optional, falls
+#   back to plain UDP if absent), libgomp (OpenMP sh4 JIT), libstdc++,
+#   libm, libz, libgcc_s, libc. ca-certificates for HTTPS.
+RUN apt-get update && apt-get install --no-install-recommends -y \
+        libcurl4 \
+        libxdp1 \
+        libbpf1 \
+        libgomp1 \
+        libzip4 \
+        zlib1g \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --home-dir /opt/maplecast --shell /usr/sbin/nologin maplecast
+
+COPY --from=build /src/build-headless/flycast /usr/local/bin/flycast
+
+# Writable dirs for savestates, cfg, VMU save files, input-server bindings.
+# flycast writes VMU saves under $HOME/.local/share/flycast/ and stick
+# bindings under $HOME/.maplecast/ — both need to exist and be writable.
+RUN mkdir -p /opt/maplecast/savestates \
+             /opt/maplecast/cfg \
+             /opt/maplecast/.local/share/flycast \
+             /opt/maplecast/.maplecast \
+             /data \
+    && chown -R maplecast:maplecast /opt/maplecast
+
+USER maplecast
+WORKDIR /opt/maplecast
+
+ENV MAPLECAST=1
+ENV MAPLECAST_MIRROR_SERVER=1
+# MAPLECAST_HEADLESS=1 is redundant on compile-out builds (the binary is
+# already headless and Renderer_if.cpp/mainui.cpp short-circuit via the
+# MAPLECAST_HEADLESS_BUILD compile-define). Set it anyway so the early
+# runtime gates in nullDC.cpp and main.cpp also take the headless branch,
+# belt-and-suspenders style.
+ENV MAPLECAST_HEADLESS=1
+ENV MAPLECAST_PORT=7100
+ENV MAPLECAST_SERVER_PORT=7200
+ENV XDG_CONFIG_HOME=/opt/maplecast/cfg
+ENV HOME=/opt/maplecast
+
+EXPOSE 7100/udp 7200/tcp
+
+# ROM path is provided at `docker run` time (mount the ROM and pass its
+# path as the command argument). Example:
+#   docker run ... maplecast-headless /data/mvc2.gdi
+ENTRYPOINT ["/usr/local/bin/flycast"]

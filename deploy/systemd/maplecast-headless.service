@@ -1,0 +1,75 @@
+[Unit]
+Description=MapleCast Headless Flycast Server (TA Mirror)
+Documentation=file:///opt/maplecast/docs/WORKSTREAM-HEADLESS-SERVER.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=maplecast
+Group=maplecast
+WorkingDirectory=/opt/maplecast
+
+# Pull env vars from a file the operator can edit without touching the unit.
+# See deploy/systemd/maplecast-headless.env for the defaults.
+EnvironmentFile=-/etc/maplecast/headless.env
+
+# Required env (override in headless.env if defaults don't match):
+#   MAPLECAST=1
+#   MAPLECAST_MIRROR_SERVER=1
+#   MAPLECAST_HEADLESS=1              (no-op on compile-out builds, harmless)
+#   MAPLECAST_PORT=7100               UDP input port
+#   MAPLECAST_SERVER_PORT=7200        WS mirror port
+#   MAPLECAST_ROM=/opt/maplecast/roms/mvc2.gdi
+Environment=MAPLECAST=1
+Environment=MAPLECAST_MIRROR_SERVER=1
+Environment=MAPLECAST_HEADLESS=1
+Environment=MAPLECAST_PORT=7100
+Environment=MAPLECAST_SERVER_PORT=7200
+Environment=MAPLECAST_ROM=/opt/maplecast/roms/mvc2.gdi
+
+ExecStart=/usr/local/bin/flycast ${MAPLECAST_ROM}
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+KillSignal=SIGTERM
+KillMode=mixed
+
+# Hardening. No GPU access, no audio, no display. Read-write only the
+# state directories flycast actually touches.
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectHostname=yes
+ProtectClock=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+ReadWritePaths=/opt/maplecast/savestates /opt/maplecast/cfg /var/log/maplecast
+
+# AF_XDP zero-copy input requires CAP_NET_ADMIN / CAP_BPF / CAP_SYS_ADMIN.
+# If you don't need XDP (most VPS deployments — kernel NIC drivers don't
+# support it anyway), comment these out and the input server will fall
+# back to plain recvfrom on UDP:7100.
+# AmbientCapabilities=CAP_NET_ADMIN CAP_BPF
+# CapabilityBoundingSet=CAP_NET_ADMIN CAP_BPF
+
+# Resource limits — one MVC2 instance comfortably fits in 512MB.
+MemoryMax=1G
+TasksMax=64
+CPUQuota=200%
+
+# Logging — everything goes to journalctl.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=maplecast-headless
+
+[Install]
+WantedBy=multi-user.target

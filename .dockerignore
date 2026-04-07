@@ -1,0 +1,63 @@
+# Docker context trim for Dockerfile.headless.
+# Only affects what's COPY'd into the build stage — doesn't affect git or the
+# host checkout in any way.
+
+# Build outputs — regenerated inside the container.
+build/
+build-*/
+cmake-build-*/
+
+# Host-side state that doesn't belong in the image.
+savestates/
+*.state
+core/dump.txt
+/tmp/
+*.log
+
+# IDE + editor noise.
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Large runtime assets — ROMs are mounted at `docker run` time, NOT baked
+# into the image.
+web/roms/
+roms/
+*.gdi
+*.chd
+*.bin
+*.raw
+*.iso
+*.cue
+
+# Web app — served by the VPS relay, not needed by the headless flycast.
+web/
+packages/renderer/build/
+packages/renderer/dist/
+packages/renderer/node_modules/
+
+# Rust relay — built and deployed separately.
+relay/target/
+
+# GPU-only CMake submodules that the headless build will skip. Leaving
+# them IN is harmless because CMake gates them, but excluding them
+# shrinks the context dramatically.
+core/deps/glslang/
+core/deps/Vulkan-Headers/
+core/deps/VulkanMemoryAllocator/
+core/deps/discord-rpc/
+core/deps/Syphon/
+core/deps/Spout/
+core/deps/breakpad/
+core/deps/oboe/
+core/deps/libadrenotools/
+core/deps/SDL/
+core/deps/DreamPicoPort-API/
+core/deps/libdatachannel/
+core/deps/googletest/
+
+# Git internals — the build doesn't need them.
+.git/
+.gitmodules

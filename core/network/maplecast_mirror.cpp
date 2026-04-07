@@ -742,11 +742,17 @@ bool isClient() { return _isClient; }
 
 bool isHeadless()
 {
+#ifdef MAPLECAST_HEADLESS_BUILD
+	// Compile-out build — always headless, env var optional.
+	return true;
+#else
+	// GPU-capable build — headless mode is opt-in via env var.
 	// Evaluated once on first call. Checked this way (rather than a static
 	// initializer) so we're resilient to early-boot call sites that might
 	// beat any namespace-scope ctor order.
 	static const bool _headless = (std::getenv("MAPLECAST_HEADLESS") != nullptr);
 	return _headless;
+#endif
 }
 
 // ==================== SERVER: publish TA commands + memory diffs ====================
