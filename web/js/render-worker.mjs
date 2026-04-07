@@ -168,7 +168,7 @@ async function handleInit(msg) {
       // which is what GL.createContext() will call internally.
       canvas: offscreen,
       // Worker-relative path so emscripten finds the .wasm sibling
-      locateFile: (path) => `../${path}?v=worker10`,
+      locateFile: (path) => `../${path}?v=worker12`,
       print:    (s) => console.log('[render-worker]', s),
       printErr: (s) => console.warn('[render-worker]', s),
     });
@@ -321,7 +321,6 @@ function handleBinaryFrame(buffer) {
   // which silently lost dirty pages on scene transitions when frames
   // piled up. Lost dirty pages are unrecoverable (the server only re-ships
   // pages on memcmp delta), causing wasm-only scene-revisit garble.
-  if (len > MAX_FRAME) return;
   _telemetry.bytesReceived += len;
 
   // GL state init — same one-shot setup that drainPending() used to do.
@@ -333,8 +332,25 @@ function handleBinaryFrame(buffer) {
     _glStateInit = true;
   }
 
-  _wasm.HEAPU8.set(new Uint8Array(buffer), _frameBuf);
-  _wasm._renderer_frame(_frameBuf, len);
+  // Oversized-frame fallback — mirrors the SYNC path above. The 512KB
+  // _frameBuf fits the in-match steady state (taSize ~230KB + 21 dirty
+  // pages = ~80KB header), but the post-scene-change keyframe that the
+  // server emits right after a SYNC carries 300+ dirty pages plus a fresh
+  // TA buffer. That envelope routinely exceeds 512KB compressed. Silently
+  // dropping it (the previous behaviour) was the wasm scene-change garble
+  // root cause: the wasm received the SYNC, cleared _prevTA, then NEVER
+  // saw the keyframe and got stuck dropping deltas in the empty-prevTA
+  // branch until the next periodic safety SYNC. Use a temp malloc for
+  // the rare giant frame so we never lose one.
+  if (len > MAX_FRAME) {
+    const tmp = _wasm._malloc(len);
+    _wasm.HEAPU8.set(new Uint8Array(buffer), tmp);
+    _wasm._renderer_frame(tmp, len);
+    _wasm._free(tmp);
+  } else {
+    _wasm.HEAPU8.set(new Uint8Array(buffer), _frameBuf);
+    _wasm._renderer_frame(_frameBuf, len);
+  }
   _telemetry.framesRendered++;
 
   // Arrival jitter telemetry (kept for diagnostics)

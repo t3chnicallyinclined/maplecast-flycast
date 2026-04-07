@@ -165,6 +165,7 @@ function _handleWorkerMessage(e) {
       document.body.classList.add('streaming');
       state.rendererStreaming = true;
       _telemetry.lastSyncAt = performance.now();
+      console.log('[renderer] SYNC applied at frame', _telemetry.framesRendered);
       break;
     }
 

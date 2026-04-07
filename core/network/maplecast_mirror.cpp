@@ -1024,21 +1024,12 @@ done_diff:
 
 	bool manualSave = _forceFullSaveStateBroadcast.exchange(false, std::memory_order_relaxed);
 
-	// Periodic safety net: every 10 seconds (600 frames at 60fps), force a
-	// fresh SYNC even if no scene change was detected. Catches the case
-	// where the wasm has drifted from missed dirty pages or where revisiting
-	// a previously-loaded scene fires no heuristic (low dirty page count
-	// because server's VRAM already has the textures). Bandwidth: ~600 KB
-	// compressed per 10 sec = ~60 KB/s overhead, negligible.
-	bool periodic = (frameNum > 60 && frameNum - _lastSceneSyncFrame >= 600);
-
-	if ((forced || heuristic || manualSave || periodic) && maplecast_ws::active())
+	if ((forced || heuristic || manualSave) && maplecast_ws::active())
 	{
 		_lastSceneSyncFrame = frameNum;
 		const char* reason = manualSave ? "MANUAL SAVE STATE PUSH"
 			: forced ? "FORCED SYNC"
-			: heuristic ? "Scene change detected"
-			: "Periodic safety SYNC";
+			: "Scene change detected";
 		printf("[MIRROR] %s on frame %u (%u dirty pages) — broadcasting fresh SYNC\n",
 			reason, frameNum, totalDirty);
 		// Ship a fresh SYNC envelope (full VRAM + PVR). The flycast wasm
@@ -1048,6 +1039,23 @@ done_diff:
 		// magic mid-stream (sanity-skips), so this is a no-op for it —
 		// safe to fire on both.
 		maplecast_ws::broadcastFreshSync();
+		// ARCHITECTURE.md "Mirror Wire Format — Rules of the Road" bug #7:
+		// reset the TA delta encoder. The wasm's renderer_sync() clears its
+		// _prevTA on SYNC receipt. If the very next frame we ship is a delta
+		// (because _taHasPrev is still true here), the wasm hits the
+		// _prevTA.empty() branch in renderer_frame() and silently drops the
+		// delta payload — measured at ~23 dropped frames per scene transition.
+		// Forcing the next frame to be a keyframe re-populates wasm's _prevTA.
+		_taHasPrev = false;
+		// ARCHITECTURE.md bug #8: also re-snapshot the per-region shadows to
+		// match what broadcastFreshSync() just shipped. Without this, the
+		// next frame's memcmp diff is computed against the pre-SYNC shadow
+		// (broadcastFreshSync reads live vram[]/pvr_regs but never touches
+		// _regions[].shadow), shipping wrong-base deltas grafted on top of
+		// the SYNC bytes — permanent vram divergence. Matches the existing
+		// client_request_sync handler pattern.
+		for (int i = 0; i < _numRegions; i++)
+			memcpy(_regions[i].shadow, _regions[i].ptr, _regions[i].size);
 	}
 
 	// Patch frame size
@@ -1060,43 +1068,6 @@ done_diff:
 	hdr->latest_size = totalSize;
 	hdr->write_pos = writePos + totalSize;
 	hdr->frame_count++;
-
-	// === MAPLECAST_DUMP_TA hash log: write per-frame VRAM+PVR hash to disk ===
-	// Pair with the same hash on the client receive side to verify the wire
-	// is faithful for memory state, not just for the TA buffer.
-	{
-		static FILE* _hashLog = nullptr;
-		static bool _hashInit = false;
-		if (!_hashInit) {
-			const char* e = std::getenv("MAPLECAST_DUMP_TA");
-			if (e && *e && *e != '0') {
-				_hashLog = fopen("/tmp/ta-dumps/hash.log", "w");
-				if (_hashLog) {
-					setbuf(_hashLog, nullptr);
-					printf("[HASH] server log open\n");
-				}
-			}
-			_hashInit = true;
-		}
-		if (_hashLog) {
-			// FNV-1a 64-bit. Hash the SHADOW buffers, not live vram[]/pvr_regs:
-			// the shadow reflects exactly what the diff loop just shipped on
-			// the wire, while live vram[] may have already been mutated by
-			// the SH4 thread between diff and hash (race window).
-			const uint8_t* svram = nullptr;
-			const uint8_t* spvr  = nullptr;
-			for (int r = 0; r < _numRegions; r++) {
-				if (_regions[r].id == 1) svram = _regions[r].shadow;
-				if (_regions[r].id == 3) spvr  = _regions[r].shadow;
-			}
-			uint64_t vh = 0xcbf29ce484222325ULL;
-			if (svram) for (size_t i = 0; i < VRAM_SIZE; i++) { vh ^= svram[i]; vh *= 0x100000001b3ULL; }
-			uint64_t ph = 0xcbf29ce484222325ULL;
-			if (spvr)  for (size_t i = 0; i < (size_t)pvr_RegSize; i++) { ph ^= spvr[i]; ph *= 0x100000001b3ULL; }
-			fprintf(_hashLog, "%u vram=%016lx pvr=%016lx taSize=%u dirty=%u\n",
-				frameNum, vh, ph, taSize, totalDirty);
-		}
-	}
 
 	// Compress + broadcast over WebSocket to browser clients
 	uint64_t compressUs = 0;
@@ -1271,31 +1242,6 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 				memcpy(&aica::aica_ram[pageOff], df.pages[d].data, MEM_PAGE_SIZE);
 			else if (rid == 3 && pageOff + MEM_PAGE_SIZE <= (size_t)pvr_RegSize)
 				memcpy(pvr_regs + pageOff, df.pages[d].data, MEM_PAGE_SIZE);
-		}
-
-		// === Client-side hash log: pair with server's hash log ===
-		{
-			static FILE* _hashLog = nullptr;
-			static bool _hashInit = false;
-			if (!_hashInit) {
-				const char* e = std::getenv("MAPLECAST_DUMP_TA");
-				if (e && *e && *e != '0') {
-					_hashLog = fopen("/tmp/ta-dumps-client/hash.log", "w");
-					if (_hashLog) {
-						setbuf(_hashLog, nullptr);
-						printf("[HASH] client log open\n");
-					}
-				}
-				_hashInit = true;
-			}
-			if (_hashLog) {
-				uint64_t vh = 0xcbf29ce484222325ULL;
-				for (size_t i = 0; i < VRAM_SIZE; i++) { vh ^= vram[i]; vh *= 0x100000001b3ULL; }
-				uint64_t ph = 0xcbf29ce484222325ULL;
-				for (size_t i = 0; i < (size_t)pvr_RegSize; i++) { ph ^= pvr_regs[i]; ph *= 0x100000001b3ULL; }
-				fprintf(_hashLog, "%u vram=%016lx pvr=%016lx taSize=%u dirty=%u\n",
-					df.frameNum, vh, ph, df.taSize, df.dirtyCount);
-			}
 		}
 
 		// Render — TA data already decoded in ctx.tad.thd_root by background thread

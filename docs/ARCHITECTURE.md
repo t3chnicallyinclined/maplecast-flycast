@@ -430,7 +430,7 @@ SYNC:         "SYNC"(4) + vramSize(4) + vram(8MB) + pvrSize(4) + pvr(32KB)
               (compressed SYNC envelope wraps this in ZCST at level 3, ~13x ratio)
 ```
 
-### Five bugs we already paid for (don't reintroduce them)
+### Eight bugs we already paid for (don't reintroduce them)
 
 1. **Decompressor sized too small.** Use a single 16MB shared decompressor for
    both SYNC and per-frame paths. Browser bridges that init at 512KB on the
@@ -456,11 +456,49 @@ SYNC:         "SYNC"(4) + vramSize(4) + vram(8MB) + pvrSize(4) + pvr(32KB)
    this flag. Scene transitions, where VRAM turns over heavily, silently
    render with stale textures from the previous scene unless this is set.
 
+6. **Per-frame buffer in `web/js/render-worker.mjs` MUST handle oversized
+   frames via temp malloc — NEVER silently drop them.** The persistent
+   `_frameBuf` is 512KB, sized for the in-match steady state (~80KB header +
+   ~230KB TA + 21 dirty pages). The post-scene-change keyframe that the server
+   emits right after a fresh SYNC carries 300-540 dirty pages plus a fresh TA
+   buffer — that envelope routinely exceeds 512KB compressed. The previous
+   `if (len > MAX_FRAME) return;` silently dropped it. The wasm received the
+   SYNC, cleared `_prevTA`, then NEVER saw the keyframe and got stuck dropping
+   deltas in the empty-prevTA branch until the next periodic safety SYNC.
+   The fix mirrors the SYNC path: malloc a temp buffer for oversized frames,
+   call `_renderer_frame`, free. NEVER reintroduce a silent drop. If you must
+   gate frame size, log it loudly and treat it as a bug.
+
+7. **After `broadcastFreshSync()`, the server MUST reset `_taHasPrev = false`.**
+   The wasm's `renderer_sync()` clears its `_prevTA` on SYNC receipt. If the
+   very next frame the server ships is a delta (because `_taHasPrev` is still
+   true), the wasm hits the `_prevTA.empty()` branch in `renderer_frame()`
+   and silently drops the delta payload. Measured impact before fix: ~23
+   frames of dropped renders per scene transition. Forcing the next frame to
+   be a full keyframe (`deltaPayloadSize == taSize`) makes the wasm hit the
+   keyframe branch which re-populates `_prevTA` from scratch. **Anywhere you
+   call `broadcastFreshSync()`, set `_taHasPrev = false` immediately after.**
+
+8. **After `broadcastFreshSync()`, the server MUST also reset
+   `_regions[].shadow` from live `vram[]/pvr_regs`.** `broadcastFreshSync()`
+   ships the live VRAM/PVR snapshot DIRECTLY — it never touches the per-region
+   shadows that the per-frame diff loop reads. Without resetting the shadows,
+   the next frame's memcmp diff is computed against the pre-SYNC shadow,
+   shipping wrong-base deltas grafted on top of the SYNC bytes. The wasm
+   receives the SYNC bytes correctly, then receives those wrong-base deltas
+   on top — permanent VRAM divergence until something forces a full re-sync.
+   Match the existing `client_request_sync` handler: after every
+   `broadcastFreshSync()`, do `for (i...) memcpy(_regions[i].shadow,
+   _regions[i].ptr, _regions[i].size);`.
+
 ### How a fragile-flow bug looks
 
 | Symptom | Likely cause |
 |---|---|
 | In-match perfect, character select garbled / missing | Texture cache reset (#5) or dirty page skip (#2) |
+| Wasm garbles for ~10s after every scene transition then self-heals | MAX_FRAME drop (#6) — post-SYNC keyframe is being silently discarded |
+| Wasm vram diverges from server starting at scene-change SYNC, never recovers | Shadow reset missing after `broadcastFreshSync()` (#8) |
+| Wasm renders stuck for ~23 frames after every SYNC then re-converges | `_taHasPrev` not reset after `broadcastFreshSync()` (#7) |
 | Black screen, "[renderer] SYNC applied" but no KEYFRAME log | Relay lost upstream — `ssh root@66.55.128.93 journalctl -u maplecast-relay` |
 | Black screen after a wasm rebuild | Browser cache — bump `?v=...` in `web/js/renderer-bridge.mjs` |
 | SIGSEGV in TexCache on desktop client | `VramLockedWriteOffset` order wrong (#3) |
