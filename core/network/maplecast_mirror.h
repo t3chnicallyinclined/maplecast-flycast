@@ -25,6 +25,15 @@ void initClient();
 bool isServer();
 bool isClient();
 
+// True iff MAPLECAST_HEADLESS=1 was set in the environment at startup.
+// When headless, flycast boots without creating an SDL window, without
+// an OpenGL/Vulkan context, and without any imgui driver. The norend
+// renderer is wired in instead, and serverPublish() still runs the exact
+// same CPU-only path. Wire bytes are guaranteed byte-identical to the
+// GPU-backed build (enforced by the MAPLECAST_DUMP_TA determinism rig).
+// Checked once at startup; subsequent env changes are ignored.
+bool isHeadless();
+
 // Server: write this frame's TA context to shared memory
 void serverPublish(TA_context* ctx);
 

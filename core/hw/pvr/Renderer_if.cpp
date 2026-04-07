@@ -296,6 +296,17 @@ Renderer* rend_OITDirectX11();
 
 static void rend_create_renderer()
 {
+	// MapleCast headless: force norend unconditionally, even on GPU builds.
+	// norend's Process() runs ta_parse(ctx, true) on CPU, which is exactly
+	// what serverPublish() needs (serverPublish() is called BEFORE
+	// renderer->Process() in the render message loop below, so the mirror
+	// wire bytes are identical to the GPU-backed path — enforced by the
+	// MAPLECAST_DUMP_TA determinism rig).
+	if (maplecast_mirror::isHeadless())
+	{
+		renderer = rend_norend();
+		return;
+	}
 #ifdef NO_REND
 	renderer	 = rend_norend();
 #else

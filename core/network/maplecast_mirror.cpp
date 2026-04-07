@@ -738,6 +738,15 @@ static void initClientWebSocket()
 bool isServer() { return _isServer; }
 bool isClient() { return _isClient; }
 
+bool isHeadless()
+{
+	// Evaluated once on first call. Checked this way (rather than a static
+	// initializer) so we're resilient to early-boot call sites that might
+	// beat any namespace-scope ctor order.
+	static const bool _headless = (std::getenv("MAPLECAST_HEADLESS") != nullptr);
+	return _headless;
+}
+
 // ==================== SERVER: publish TA commands + memory diffs ====================
 //
 // !!! FRAGILE — WIRE FORMAT IS A CONTRACT WITH FOUR CLIENTS !!!
