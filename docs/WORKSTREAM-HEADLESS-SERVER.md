@@ -1,5 +1,19 @@
 # WORKSTREAM: HEADLESS GPU-LESS FLYCAST SERVER
 
+> **STATUS: SHIPPED** (2026-04-07)
+>
+> Phases 1–5 complete on branch `headless-server`. Commits:
+>   * `4d7dbac69` Phase 1 — runtime gate (`MAPLECAST_HEADLESS=1` on GPU builds)
+>   * `d93abcac1` Phase 3 — CMake `-DMAPLECAST_HEADLESS=ON` compile-out
+>   * `93ceeff9d` Phase 4 — Dockerfile + systemd unit + deploy script + compile-time gate propagation
+>   * (Phase 5 doc updates follow this commit)
+>
+> **Verified on the home box:** 27 MB stripped binary with zero libGL/libSDL/libX11/libvulkan/libcuda linkage, 60.1 fps sustained over 5s, determinism rig **460/460 match, 0 differ, 0 missing**, visual signoff via side-by-side headless server ↔ GPU mirror client. See `docs/ARCHITECTURE.md` "Mode 3: Headless" and `docs/VPS-SETUP.md` §9 for operator docs.
+>
+> Phase 4.1 (Dockerfile) builds cleanly but SIGBUSes at runtime inside the container — suspect seccomp/vmem namespace interaction with the SH4 dynarec's reserved-address strategy. Native/systemd deploy path works. Docker investigation deferred.
+
+---
+
 > **One-shot implementation guide.** Read top-to-bottom, execute in order. Every file path, line number, function, and gotcha is captured here so an agent can land a working headless `flycast` binary on a CPU-only Linux VPS in a single pass.
 
 ---

@@ -645,6 +645,151 @@ ctx.drawImage(frame, 0, 0)                Canvas render
 
 ---
 
+### Mode 3: Headless (No GPU)
+
+The headless build runs flycast on a CPU-only box — no `libGL`, no
+`libSDL2`, no `libX11`, no `libvulkan`, no window system at all. It
+produces **byte-identical** TA mirror wire to the GPU-backed build,
+enforced by the `MAPLECAST_DUMP_TA` determinism rig.
+
+**Two ways to enable headless:**
+
+1. **Runtime gate** on a GPU-capable build:
+   ```bash
+   MAPLECAST=1 MAPLECAST_MIRROR_SERVER=1 MAPLECAST_HEADLESS=1 \
+     ./build/flycast /path/to/mvc2.gdi
+   ```
+   Same binary as the home cab. Just takes a different branch at boot:
+   skips `os_CreateWindow()`, wires `norend`, bypasses the `imguiDriver`
+   null-check in `mainui_loop`, auto-loads the ROM, closes the GUI,
+   enters the `emu.render()` path directly.
+
+2. **Compile-out build** for deployment on CPU-only hosts:
+   ```bash
+   cmake -B build-headless -DMAPLECAST_HEADLESS=ON -DCMAKE_BUILD_TYPE=Release ..
+   cmake --build build-headless
+   # Result: 27 MB stripped binary with zero GPU/SDL/X11/audio linkage
+   ```
+   Forces `USE_OPENGL=OFF`, `USE_VULKAN=OFF`, `USE_DX*=OFF`, `USE_SDL=OFF`,
+   audio backends off (pulseaudio transitively pulls X11), CUDA/NVENC
+   detection skipped, libdatachannel submodule skipped. `MAPLECAST_HEADLESS_BUILD`
+   compile-define is set; `isHeadless()` returns true at compile time, so
+   the env var is optional.
+
+**Why it works** (the invariant):
+
+The mirror wire is generated from CPU-side state only. The render message
+loop in [core/hw/pvr/Renderer_if.cpp:197-198](../core/hw/pvr/Renderer_if.cpp#L197)
+calls `serverPublish()` **before** `renderer->Process()`:
+
+```cpp
+// Mirror server: capture TA commands BEFORE Process consumes them
+if (maplecast_mirror::isServer() && taContext)
+    maplecast_mirror::serverPublish(taContext);
+try {
+    renderer->Process(taContext);   // norend → ta_parse on CPU
+} catch (...) { ... }
+```
+
+So the TA bytes, VRAM page diffs, PVR register snapshot, and dirty page
+list that go out on the wire are the same whether the renderer is
+GLES/Vulkan/DX or [core/rend/norend/norend.cpp](../core/rend/norend/norend.cpp)
+(which just runs `ta_parse(ctx, true)` on CPU and no-ops everything else).
+`Renderer::Present()` defaults to `return true;` in the base class, so
+norend's frame cadence fires `presented = true` and `sh4->Stop()` just
+like the GPU path — no render queue weirdness.
+
+**What the headless build does NOT include:**
+
+- **H.264/NVENC/CUDA** — GPU-only, compile-excluded via `NOT MAPLECAST_HEADLESS`
+  gates on the `find_path(CUDA_INCLUDE)` and `add_subdirectory(libdatachannel)`
+  blocks in `CMakeLists.txt`. `maplecast_stream.cpp` and `maplecast_webrtc.cpp`
+  are dropped from `core/network/CMakeLists.txt` in headless.
+- **Audio output** — `USE_ALSA`, `USE_LIBAO`, `USE_OSS`, `USE_PULSEAUDIO`
+  forced OFF. The mirror wire has never shipped audio anyway; disabling
+  them avoids `libpulse` transitively dragging in `libX11`.
+- **SDL / X11 / DreamLink / libusb / libpico-port** — the entire SDL
+  block is gated on `NOT MAPLECAST_HEADLESS`. Without SDL, the X11
+  fallback in `find_package(X11 REQUIRED)` is also gated so headless
+  builds don't fall through to an X11 dependency.
+- **ImGui driver backends** (`OpenGLDriver`, `VulkanDriver`, DX drivers) —
+  none compiled. `imguiDriver` global stays `nullptr`. The mainui_loop
+  `imguiDriver == nullptr → forceReinit` trap is bypassed via
+  `!headless` guards.
+- **LUA scripting, Discord RPC, Breakpad** — forced OFF (not strictly
+  needed but they pull in deps we don't need).
+
+**What the headless build DOES include** (DT_NEEDED of the final binary):
+
+```
+libcurl.so.4    (http_client for HTTPS auth flows)
+libz.so.1       (generic compression)
+libxdp.so.1     (AF_XDP zero-copy input — optional)
+libbpf.so.1     (companion to libxdp)
+libgomp.so.1    (OpenMP used by the SH4 dynarec in places)
+libudev.so.1    (transitive via libxdp)
+libstdc++.so.6, libm.so.6, libgcc_s.so.1, libc.so.6
+```
+
+That's it. No graphics, no window system, no audio.
+
+**Deployment:**
+
+- **Native / systemd** (recommended): use `deploy/scripts/deploy-headless.sh`.
+  Builds locally with `cmake -DMAPLECAST_HEADLESS=ON`, sanity-checks `ldd`
+  for forbidden libs, scps binary + systemd unit + env file to the VPS,
+  creates the `maplecast` user, installs to `/usr/local/bin/flycast`,
+  enables + starts `maplecast-headless.service`. See `deploy/systemd/`.
+- **Docker** (WIP): `Dockerfile.headless` builds a 117 MB Debian 12 slim
+  image. Build works cleanly end-to-end. Container currently SIGBUSes
+  at runtime before reaching the main loop — suspect seccomp / vmem
+  namespace interaction with the SH4 dynarec's reserved-address space
+  strategy in `addrspace::reserve()`. Use the native systemd path until
+  this is debugged.
+
+**Verified on the home box** (CPU-only runtime via the compile-out binary):
+
+| Metric | Value |
+|--------|-------|
+| Binary size | **27 MB stripped** |
+| `ldd` GPU libs | **zero** (no libGL/libSDL/libX11/libvulkan/libcuda/libpulse) |
+| Frame rate | **60.1 fps sustained** over 5s sample |
+| Bandwidth | **3.7 Mbps** zstd-compressed |
+| Wire magic | `ZCST` (correct envelope) |
+| Determinism rig | **460/460 TA buffers match, 0 differ, 0 missing** |
+| Visual signoff | GPU mirror client pointed at headless server renders MVC2 pixel-perfect |
+
+**Build pipeline** (add to the easy-to-forget steps list):
+
+- **Headless server:**
+  `cmake -B build-headless -DMAPLECAST_HEADLESS=ON -DCMAKE_BUILD_TYPE=Release ..`
+  → `cmake --build build-headless -- -j$(nproc)`
+  → Verify: `ldd build-headless/flycast | grep -iE 'libGL|libSDL|libX11|libvulkan'` returns empty.
+
+**Side-by-side signoff recipe** (when touching anything headless-adjacent):
+
+```bash
+# Terminal 1 — headless server on sandbox ports
+MAPLECAST=1 MAPLECAST_MIRROR_SERVER=1 \
+MAPLECAST_PORT=7130 MAPLECAST_SERVER_PORT=7230 \
+  ./build-headless/flycast path/to/mvc2.gdi
+
+# Terminal 2 — GPU mirror client pointing at headless server
+MAPLECAST=1 MAPLECAST_MIRROR_CLIENT=1 \
+MAPLECAST_SERVER_HOST=127.0.0.1 MAPLECAST_SERVER_PORT=7230 \
+MAPLECAST_PORT=7131 \
+  ./build/flycast path/to/mvc2.gdi
+```
+
+GPU client window must show MVC2. If it stays black for more than
+~2 seconds, the initial SYNC isn't arriving — check headless server
+log for `[MIRROR] === SERVER MODE === streaming TA + memory diffs`.
+
+See `docs/WORKSTREAM-HEADLESS-SERVER.md` for the full implementation
+rationale and the Phase 1–5 history. Branch `headless-server`.
+
+---
+
 ## Connection Flow — How Players Connect
 
 ```
@@ -1022,12 +1167,22 @@ Client-side measurements:
 ## Environment Variables
 
 ```bash
-MAPLECAST=1              # Enable MapleCast server mode
-MAPLECAST_STREAM=1       # Enable H.264 streaming (legacy)
-MAPLECAST_MIRROR=1       # Enable TA Mirror streaming (primary)
-MAPLECAST_PORT=7100      # Input UDP port (default 7100)
-MAPLECAST_STREAM_PORT=7200  # WebSocket port (default 7200)
-MAPLECAST_WEB_PORT=8000  # Web server port (default 8000)
+MAPLECAST=1               # Enable MapleCast server mode
+MAPLECAST_STREAM=1        # Enable H.264 streaming (legacy)
+MAPLECAST_MIRROR=1        # Enable TA Mirror streaming (primary)
+MAPLECAST_MIRROR_SERVER=1 # Mirror server mode (publishes TA wire on :7200)
+MAPLECAST_MIRROR_CLIENT=1 # Mirror client mode (renders from wire, CPU stopped)
+MAPLECAST_HEADLESS=1      # Runtime headless gate on GPU builds. No-op on
+                          # compile-out builds (already headless at build time).
+MAPLECAST_DUMP_TA=1       # Dump per-frame TA buffers to /tmp/ta-dumps/ for
+                          # the determinism rig. Server side also dumps VRAM
+                          # + PVR hashes. Client side dumps to /tmp/ta-dumps-client/.
+MAPLECAST_SERVER_HOST=... # Mirror client: upstream host (default 127.0.0.1)
+MAPLECAST_SERVER_PORT=... # Mirror server: WS listen port (default 7200).
+                          # Mirror client: upstream port.
+MAPLECAST_PORT=7100       # Input UDP port (default 7100)
+MAPLECAST_STREAM_PORT=7200  # H.264 WebSocket port (default 7200, legacy only)
+MAPLECAST_WEB_PORT=8000   # Web server port (default 8000)
 ```
 
 ---
@@ -1055,6 +1210,7 @@ MAPLECAST_WEB_PORT=8000  # Web server port (default 8000)
 | `MAPLECAST_CUDA=1` | CUDA support (H.264 mode) | CMake (auto-detected) |
 | `MAPLECAST_WEBRTC=1` | WebRTC DataChannel (H.264 mode) | CMake (libdatachannel found) |
 | `MAPLECAST_XDP=1` | AF_XDP zero-copy input | CMake (libbpf/libxdp found) |
+| `MAPLECAST_HEADLESS_BUILD` | CPU-only compile-out (no GL/SDL/X11/audio) | CMake `-DMAPLECAST_HEADLESS=ON` |
 
 ---
 

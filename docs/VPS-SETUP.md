@@ -272,3 +272,145 @@ ss -s
 **Site not loading:**
 - Check nginx: `nginx -t && systemctl status nginx`
 - Check files exist: `ls -la /var/www/maplecast/`
+
+---
+
+## 9. Headless Flycast Server (optional — VPS-side emulator)
+
+The headless flycast build runs the emulator on the VPS itself, next to
+the relay. This is useful when you want spectators to hit a
+VPS-resident instance directly (killing the home→VPS hop, ~10–40ms
+saved for remote viewers) or when you want multiple independent game
+rooms on one box. The home cab keeps its own GPU-backed flycast for
+local sub-1ms play — the two are not mutually exclusive.
+
+**What you're installing:**
+
+A compile-out flycast binary with **zero** libGL/libSDL/libX11/libvulkan/
+libcuda/libpulse/libasound/libao linkage. 27 MB stripped. Produces
+byte-identical TA mirror wire to a GPU build, enforced by the
+determinism rig. See `docs/ARCHITECTURE.md` "Mode 3: Headless" for the
+full rationale.
+
+### Prerequisites on the VPS
+
+```bash
+apt-get install -y \
+    libcurl4 libxdp1 libbpf1 libgomp1 libzip4 zlib1g ca-certificates
+```
+
+(Already likely installed if the relay is already running — only
+`libxdp1` and `libbpf1` are new. XDP fails silently to plain UDP on
+kernels that don't support it, so these are technically optional.)
+
+### Build + deploy from your dev box
+
+From the repo root on your local machine:
+
+```bash
+./deploy/scripts/deploy-headless.sh root@66.55.128.93 ~/roms/mvc2.gdi
+```
+
+What this does:
+
+1. Builds locally with `cmake -DMAPLECAST_HEADLESS=ON -DCMAKE_BUILD_TYPE=Release`
+2. Verifies `ldd flycast | grep -iE 'libGL|libSDL|libX11|libvulkan|libcuda'` returns empty
+3. SCPs the binary, systemd unit, and env file to the VPS
+4. Creates the `maplecast` user, `/opt/maplecast/{savestates,cfg,roms}`, `/etc/maplecast/`
+5. Installs the ROM (second arg, optional), binary, unit, env file
+6. `systemctl daemon-reload && systemctl enable --now maplecast-headless`
+
+### systemd unit details
+
+- **Unit:** `/etc/systemd/system/maplecast-headless.service`
+- **Env file:** `/etc/maplecast/headless.env` (operator-editable; not
+  overwritten on redeploy)
+- **User:** `maplecast` (system user, `/opt/maplecast` home,
+  `/usr/sbin/nologin` shell)
+- **Binary:** `/usr/local/bin/flycast`
+- **ROM path:** `/opt/maplecast/roms/mvc2.gdi` (override via `MAPLECAST_ROM`
+  in the env file)
+- **Ports:** `:7100/udp` (input), `:7200/tcp` (TA mirror WebSocket)
+- **Resources:** `MemoryMax=1G`, `TasksMax=64`, `CPUQuota=200%` (safe for
+  a single MVC2 instance on a 2 vCPU box)
+- **Hardening:** `NoNewPrivileges`, `PrivateDevices`, `ProtectSystem=strict`,
+  `ProtectHome`, `ProtectKernel*`, `LockPersonality`, `RestrictRealtime`.
+  Writable paths limited to `/opt/maplecast/savestates`, `/opt/maplecast/cfg`,
+  `/var/log/maplecast`.
+
+### Pointing the relay at the VPS-resident headless instance
+
+The relay's `--upstream` / env config points at a flycast mirror server.
+If you want the relay to consume from the local headless instance
+instead of the home box, change the upstream host to `127.0.0.1`:
+
+```bash
+# /etc/systemd/system/maplecast-relay.service  (ExecStart)
+# Before:
+#   ExecStart=/opt/maplecast-relay --upstream ws://<home-ip>:7200 ...
+# After:
+#   ExecStart=/opt/maplecast-relay --upstream ws://127.0.0.1:7200 ...
+
+systemctl daemon-reload
+systemctl restart maplecast-relay
+```
+
+You can run BOTH in parallel (home-based flycast for local cab play +
+VPS-based headless for a separate spectator-only stream). They're
+independent instances serving independent WebSocket endpoints.
+
+### Verification
+
+```bash
+ssh root@66.55.128.93
+
+# Service alive?
+systemctl status maplecast-headless
+
+# Ports listening?
+ss -ltnp | grep -E '7100|7200'
+
+# Logs (follow live)
+journalctl -u maplecast-headless -f
+
+# Frame count over 5s (needs python3 + websockets on the box)
+python3 -c "
+import asyncio, time, websockets
+async def main():
+    n=0; b=0
+    async with websockets.connect('ws://127.0.0.1:7200', max_size=None) as ws:
+        end = time.time() + 5
+        while time.time() < end:
+            try: m = await asyncio.wait_for(ws.recv(), timeout=1.0)
+            except asyncio.TimeoutError: break
+            if isinstance(m, bytes): n += 1; b += len(m)
+    print(f'{n} frames, {b} bytes, {n/5:.1f} fps')
+asyncio.run(main())
+"
+# Expected: ~60 fps sustained
+```
+
+### Common issues
+
+**`ldd` check in deploy script fails:**
+Your local build still has USE_OPENGL on somehow. Reconfigure:
+`rm -rf build-headless && cmake -B build-headless -DMAPLECAST_HEADLESS=ON ..`
+
+**`systemctl status` shows exit 139 (SIGSEGV):**
+Check `journalctl -u maplecast-headless -n 50` — if it's in `gui_newFrame`,
+the Phase 4 compile-time gate fix isn't in your binary. Rebuild from
+commit `93ceeff9d` or later on the `headless-server` branch.
+
+**No frames on `:7200` but port is listening:**
+Likely the ROM failed to load. Check logs for `[BOOT]` errors. Common
+causes: ROM not at `/opt/maplecast/roms/mvc2.gdi` or wrong permissions
+(should be readable by the `maplecast` user).
+
+**Relay shows `upstream disconnected` repeatedly:**
+Relay is still pointed at the home IP. Update the ExecStart in
+`/etc/systemd/system/maplecast-relay.service` as shown above.
+
+**AF_XDP fallback warning in logs:**
+Harmless. XDP requires kernel NIC driver support; on most VPS instances
+the NIC is virtual and XDP falls back to plain UDP on `:7100`. Both
+paths work.
