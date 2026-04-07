@@ -23,9 +23,15 @@
 #include "cfg/option.h"
 #include "oslib/i18n.h"
 
+#ifdef USE_OPENGL
 #include "gl_context.h"
+#endif
+#ifdef USE_DX9
 #include "rend/dx9/dxcontext.h"
+#endif
+#ifdef USE_DX11
 #include "rend/dx11/dx11context.h"
+#endif
 #ifdef USE_VULKAN
 #include "rend/vulkan/vulkan_context.h"
 

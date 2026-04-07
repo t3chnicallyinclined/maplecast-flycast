@@ -101,6 +101,33 @@ option(ENABLE_FC_PROFILER "Build with support for host app (Flycast) profiler" O
 option(USE_DISCORD "Use Discord Presence API" OFF)
 option(USE_LIBCDIO "Use libcdio for CDROM access" OFF)
 
+# MapleCast headless: build a CPU-only flycast server with no GPU/SDL/window deps.
+# Produces a binary that can run on a VPS with no libGL/libSDL2/libX11 installed.
+# The SH4, SPG, TA capture, VRAM diff, PVR snapshot, zstd, and WebSocket broadcast
+# are all pure CPU. norend is wired in for the Renderer* interface. See
+# docs/WORKSTREAM-HEADLESS-SERVER.md for the full rationale.
+option(MAPLECAST_HEADLESS "Build a headless flycast server (no GL, no SDL, no window)" OFF)
+
+if(MAPLECAST_HEADLESS)
+	set(USE_OPENGL OFF CACHE BOOL "Disabled by MAPLECAST_HEADLESS" FORCE)
+	set(USE_VULKAN OFF CACHE BOOL "Disabled by MAPLECAST_HEADLESS" FORCE)
+	set(USE_DX9    OFF CACHE BOOL "Disabled by MAPLECAST_HEADLESS" FORCE)
+	set(USE_DX11   OFF CACHE BOOL "Disabled by MAPLECAST_HEADLESS" FORCE)
+	set(USE_GLES2  OFF CACHE BOOL "Disabled by MAPLECAST_HEADLESS" FORCE)
+	set(USE_GLES   OFF CACHE BOOL "Disabled by MAPLECAST_HEADLESS" FORCE)
+	set(USE_BREAKPAD OFF CACHE BOOL "Disabled by MAPLECAST_HEADLESS" FORCE)
+	set(USE_LUA    OFF CACHE BOOL "Disabled by MAPLECAST_HEADLESS" FORCE)
+	set(USE_DISCORD OFF CACHE BOOL "Disabled by MAPLECAST_HEADLESS" FORCE)
+	# Audio outputs: all off — mirror wire is video-only and audio backends
+	# (pulse/alsa/ao) transitively pull libX11 via libpulse on Linux.
+	set(USE_ALSA OFF CACHE BOOL "Disabled by MAPLECAST_HEADLESS" FORCE)
+	set(USE_LIBAO OFF CACHE BOOL "Disabled by MAPLECAST_HEADLESS" FORCE)
+	set(USE_OSS OFF CACHE BOOL "Disabled by MAPLECAST_HEADLESS" FORCE)
+	set(USE_PULSEAUDIO OFF CACHE BOOL "Disabled by MAPLECAST_HEADLESS" FORCE)
+	add_compile_definitions(NO_REND MAPLECAST_HEADLESS_BUILD)
+	message(STATUS "MapleCast: HEADLESS build — no GPU/window/SDL/Vulkan/DX/audio deps")
+endif()
+
 if(IOS AND NOT LIBRETRO)
 	set(USE_VULKAN OFF CACHE BOOL "Force vulkan off" FORCE)
 endif()
@@ -482,6 +509,7 @@ if(NOT LIBRETRO)
 	endif()
 
 	if(NOT ANDROID AND NOT IOS)
+	if(NOT MAPLECAST_HEADLESS)
 		if (NOT NINTENDO_SWITCH)
 			# DreamLink enabled for non-mobile Linux, MacOS, and Windows
 			target_compile_definitions(${PROJECT_NAME} PRIVATE USE_DREAMLINK_DEVICES=1)
@@ -541,6 +569,7 @@ if(NOT LIBRETRO)
 
 		target_compile_definitions(${PROJECT_NAME} PRIVATE USE_SDL USE_SDL_AUDIO)
 		add_subdirectory(core/sdl)
+	endif() # NOT MAPLECAST_HEADLESS
 
 		if((UNIX AND NOT APPLE) OR NINTENDO_SWITCH)
 			find_package(CURL REQUIRED)
@@ -669,7 +698,7 @@ if(UNIX AND NOT APPLE AND NOT ANDROID)
 		endif()
 	endif()
 
-	if(NOT SDL2_FOUND AND NOT LIBRETRO)
+	if(NOT SDL2_FOUND AND NOT LIBRETRO AND NOT MAPLECAST_HEADLESS)
 		find_package(X11 REQUIRED)
 		if(X11_FOUND)
 			target_compile_definitions(${PROJECT_NAME} PRIVATE SUPPORT_X11)
@@ -1649,6 +1678,8 @@ endif()
 
 # MapleCast: CUDA + NVENC direct API — true zero-copy GPU streaming
 # No FFmpeg dependency. GL texture → CUDA → NVENC → H.264, CPU never touches pixels.
+# Skipped entirely in headless builds (no GPU, no GL, no CUDA runtime).
+if(NOT MAPLECAST_HEADLESS)
 find_path(CUDA_INCLUDE cuda.h PATHS
 	"$ENV{CUDA_PATH}/include"
 	"C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/include"
@@ -1675,6 +1706,7 @@ if(CUDA_INCLUDE AND CUDA_LIB AND NVENC_INCLUDE)
 else()
 	message(WARNING "MapleCast: CUDA or NVENC headers not found — streaming disabled")
 endif()
+endif() # NOT MAPLECAST_HEADLESS
 
 # MapleCast: AF_XDP zero-copy input — NIC DMA → ring buffer → kcode[] atomics
 # Bypasses entire kernel socket layer for gamepad UDP packets
@@ -1691,7 +1723,9 @@ endif()
 
 # MapleCast: WebRTC DataChannel — P2P NAT hole-punching for video/input
 # libdatachannel: lightweight C++ WebRTC data channels (MPL 2.0, GPL compatible)
-if(EXISTS "${CMAKE_SOURCE_DIR}/core/deps/libdatachannel/CMakeLists.txt")
+# Headless builds skip this: WebRTC is the H.264 client transport, and
+# headless ships TA mirror over WebSocket only.
+if(NOT MAPLECAST_HEADLESS AND EXISTS "${CMAKE_SOURCE_DIR}/core/deps/libdatachannel/CMakeLists.txt")
 	set(NO_MEDIA ON CACHE BOOL "Disable media in libdatachannel" FORCE)
 	set(NO_WEBSOCKET ON CACHE BOOL "Disable WebSocket in libdatachannel" FORCE)
 	set(NO_TESTS ON CACHE BOOL "Disable tests" FORCE)
@@ -1702,7 +1736,7 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/core/deps/libdatachannel/CMakeLists.txt")
 	target_link_libraries(${PROJECT_NAME} PRIVATE LibDataChannel::LibDataChannelStatic)
 	target_compile_definitions(${PROJECT_NAME} PRIVATE MAPLECAST_WEBRTC=1)
 	message(STATUS "MapleCast: WebRTC DataChannel enabled — P2P NAT hole-punching active")
-else()
+elseif(NOT MAPLECAST_HEADLESS)
 	message(WARNING "MapleCast: libdatachannel not found — WebRTC disabled, WebSocket-only")
 endif()
 

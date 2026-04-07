@@ -17,7 +17,9 @@
 #include "hw/pvr/Renderer_if.h"
 #include "hw/sh4/sh4_mem.h"
 #include "hw/aica/aica_if.h"
+#ifndef MAPLECAST_HEADLESS_BUILD
 #include "rend/gles/gles.h"
+#endif
 #include "rend/TexCache.h"
 #include "serialize.h"
 #include "emulator.h"

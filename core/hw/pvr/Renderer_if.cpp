@@ -10,7 +10,9 @@
 #include "hw/sh4/sh4_core.h"
 #include "profiler/fc_profiler.h"
 #include "network/ggpo.h"
+#ifndef MAPLECAST_HEADLESS_BUILD
 #include "network/maplecast_stream.h"
+#endif
 #include "network/maplecast_mirror.h"
 
 #include <mutex>

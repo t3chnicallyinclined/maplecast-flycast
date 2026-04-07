@@ -36,7 +36,9 @@
 #include "hw/arm7/arm7_rec.h"
 #include "network/ggpo.h"
 #include "network/maplecast.h"
+#ifndef MAPLECAST_HEADLESS_BUILD
 #include "network/maplecast_stream.h"
+#endif
 #include "network/maplecast_telemetry.h"
 #include "network/maplecast_input_server.h"
 #include "network/maplecast_audio.h"
@@ -1037,6 +1039,7 @@ void Emulator::start()
 		maplecast_audio::init();
 		maplecast_telemetry::init();
 
+#ifndef MAPLECAST_HEADLESS_BUILD
 		if (std::getenv("MAPLECAST_STREAM"))
 		{
 			int streamPort = 7200;
@@ -1044,6 +1047,7 @@ void Emulator::start()
 			if (sp) streamPort = std::atoi(sp);
 			maplecast_stream::init(streamPort);
 		}
+#endif
 	}
 
 	if (config::GGPOEnable && config::ThreadedRendering)
