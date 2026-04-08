@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OVERLORD — MapleCast Cab Admin</title>
+<link rel="stylesheet" href="/overlord/overlord.css?v=1">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" crossorigin="anonymous">
+</head>
+<body class="overlord-login">
+
+<div class="login-bg">
+  <div class="login-grid"></div>
+</div>
+
+<div class="login-card">
+  <div class="login-title">
+    <span class="login-skull">&#128120;</span>
+    OVERLORD
+  </div>
+  <div class="login-subtitle">MAPLECAST CAB ADMIN</div>
+
+  <form id="loginForm" autocomplete="off" onsubmit="event.preventDefault(); doLogin();">
+    <label class="login-label">USERNAME</label>
+    <input type="text" id="username" autocomplete="username" autocapitalize="off" spellcheck="false" required>
+
+    <label class="login-label">PASSWORD</label>
+    <input type="password" id="password" autocomplete="current-password" required>
+
+    <button type="submit" id="loginBtn" class="login-btn">LOGIN &raquo;</button>
+  </form>
+
+  <div id="loginError" class="login-error"></div>
+
+  <div class="login-footer">
+    Admin role required. Configure via SurrealDB:<br>
+    <code>UPDATE player SET admin = true WHERE username = '...';</code>
+  </div>
+</div>
+
+<script type="module">
+async function doLogin() {
+  const username = document.getElementById('username').value.trim().toLowerCase();
+  const password = document.getElementById('password').value;
+  const errEl = document.getElementById('loginError');
+  const btn = document.getElementById('loginBtn');
+
+  if (!username || !password) {
+    errEl.textContent = 'username and password required';
+    return;
+  }
+
+  errEl.textContent = '';
+  btn.disabled = true;
+  btn.textContent = 'AUTHENTICATING...';
+
+  try {
+    const res = await fetch('/overlord/api/signin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await res.json().catch(() => ({ ok: false, error: 'invalid response' }));
+    if (!data.ok) {
+      const msg = (data.error || 'login failed').toUpperCase();
+      // Surface known errors with friendlier text
+      if (msg.includes('NOT AN ADMIN')) {
+        errEl.innerHTML = '<strong>ACCESS DENIED.</strong><br>This account is not flagged as admin.';
+      } else if (msg.includes('WRONG PASSWORD')) {
+        errEl.textContent = 'WRONG PASSWORD';
+      } else if (msg.includes('FIGHTER NOT FOUND')) {
+        errEl.textContent = 'USER NOT FOUND';
+      } else {
+        errEl.textContent = msg;
+      }
+      return;
+    }
+    if (!data.db_token) {
+      errEl.textContent = 'NO TOKEN RETURNED — DB UNAVAILABLE?';
+      return;
+    }
+    // Stash the token under a separate key from the spectator app's
+    // nobd_token so signing out of /overlord doesn't sign you out of
+    // the spectator site (and vice versa).
+    localStorage.setItem('overlord_token', data.db_token);
+    localStorage.setItem('overlord_username', username);
+    // Redirect to the dashboard.
+    window.location.href = '/overlord/';
+  } catch (e) {
+    errEl.textContent = 'CONNECTION ERROR: ' + (e.message || 'unknown');
+    console.error('[overlord-login]', e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'LOGIN »';
+  }
+}
+
+// Expose for the form's onsubmit handler.
+window.doLogin = doLogin;
+
+// If we already have a token, skip login and go to the dashboard.
+// (The dashboard re-validates the token via /api/status on load — if
+// it's expired or revoked, the dashboard kicks back here.)
+if (localStorage.getItem('overlord_token')) {
+  window.location.href = '/overlord/';
+}
+
+// Auto-focus the username field.
+document.getElementById('username').focus();
+</script>
+</body>
+</html>

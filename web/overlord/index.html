@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Overlord — MapleCast Cab</title>
+<link rel="stylesheet" href="/overlord/overlord.css?v=1">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" crossorigin="anonymous">
+</head>
+<body class="overlord-dash">
+
+<!-- Top bar -->
+<header class="overlord-header">
+  <div class="overlord-brand">
+    <span class="overlord-skull">&#128120;</span>
+    OVERLORD
+  </div>
+  <div class="overlord-status-pill" id="topStatusPill">
+    <span class="dot dot-amber"></span>
+    <span id="topStatusText">CONNECTING…</span>
+  </div>
+  <div class="overlord-user">
+    <span id="topUsername">…</span>
+    <button class="btn-tiny" onclick="overlordLogout()">LOGOUT</button>
+  </div>
+</header>
+
+<!-- Main grid -->
+<main class="overlord-grid">
+
+  <!-- ============================================================
+       LEFT COL — STATUS + LIVE PREVIEW
+       ============================================================ -->
+  <section class="card card-status">
+    <div class="card-header">
+      <span class="card-title">STATUS</span>
+      <span class="card-meta" id="statusMeta">—</span>
+    </div>
+    <div class="status-grid">
+      <div class="status-row">
+        <span class="status-label">SERVICE</span>
+        <span class="status-val" id="statusService">—</span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">PID</span>
+        <span class="status-val" id="statusPid">—</span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">UPTIME</span>
+        <span class="status-val" id="statusUptime">—</span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">MEMORY</span>
+        <span class="status-val" id="statusMem">—</span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">CURRENT SLOT</span>
+        <span class="status-val" id="statusSlot">—</span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">CONTROL WS</span>
+        <span class="status-val mono" id="statusControlWs">—</span>
+      </div>
+    </div>
+    <div class="card-actions">
+      <button class="btn-action btn-warn" onclick="restartService()">RESTART SERVICE</button>
+    </div>
+  </section>
+
+  <section class="card card-preview">
+    <div class="card-header">
+      <span class="card-title">LIVE PREVIEW</span>
+      <span class="card-meta">via /king.html?embed=1</span>
+    </div>
+    <div class="preview-frame">
+      <iframe id="previewFrame" src="/king.html?embed=1" allow="autoplay" loading="lazy"></iframe>
+    </div>
+  </section>
+
+  <!-- ============================================================
+       SAVESTATE MANAGER
+       ============================================================ -->
+  <section class="card card-savestates">
+    <div class="card-header">
+      <span class="card-title">SAVESTATES</span>
+      <span class="card-meta" id="savestateMeta">—</span>
+    </div>
+    <table class="savestate-table">
+      <thead>
+        <tr>
+          <th>SLOT</th>
+          <th>FILE</th>
+          <th>SIZE</th>
+          <th>MODIFIED</th>
+          <th>ACTIONS</th>
+        </tr>
+      </thead>
+      <tbody id="savestateRows">
+        <tr><td colspan="5" class="muted">loading…</td></tr>
+      </tbody>
+    </table>
+    <div class="card-actions card-actions-row">
+      <input type="number" id="newSlotNum" class="input-tiny" min="0" max="99" value="9" placeholder="slot">
+      <button class="btn-action" onclick="saveCurrentTo(parseInt(document.getElementById('newSlotNum').value, 10))">
+        SAVE CURRENT &raquo; SLOT
+      </button>
+      <label class="btn-action btn-secondary" for="uploadInput">
+        UPLOAD FILE
+      </label>
+      <input type="file" id="uploadInput" accept=".state" style="display:none" onchange="handleUpload(this)">
+      <button class="btn-action btn-secondary" onclick="refreshSavestates()">REFRESH</button>
+    </div>
+    <div class="card-note">
+      <strong>Note:</strong> Hot-load is temporarily disabled (Phase A.2 known issue).
+      To switch slots, edit the config below to set <code>Dreamcast.SavestateSlot</code>
+      then click <strong>RESTART SERVICE</strong>.
+    </div>
+  </section>
+
+  <!-- ============================================================
+       CONFIG EDITOR
+       ============================================================ -->
+  <section class="card card-config">
+    <div class="card-header">
+      <span class="card-title">CONFIG (emu.cfg)</span>
+      <span class="card-meta" id="configMeta">—</span>
+    </div>
+    <textarea id="configText" class="config-textarea" spellcheck="false" placeholder="loading…"></textarea>
+    <div class="card-actions card-actions-row">
+      <button class="btn-action" onclick="saveConfig()">SAVE</button>
+      <button class="btn-action btn-secondary" onclick="reloadConfig()">RELOAD</button>
+      <span class="config-dirty-indicator" id="configDirty"></span>
+    </div>
+    <div class="card-note" id="configBanner" style="display:none">
+      &#9888; Config saved. Click <strong>RESTART SERVICE</strong> above to apply.
+    </div>
+  </section>
+
+  <!-- ============================================================
+       LOG TAIL
+       ============================================================ -->
+  <section class="card card-logs">
+    <div class="card-header">
+      <span class="card-title">LOGS — maplecast-headless.service</span>
+      <span class="card-meta">
+        <select id="logLines" class="select-tiny" onchange="reloadLogs()">
+          <option value="50">50 lines</option>
+          <option value="100">100 lines</option>
+          <option value="200" selected>200 lines</option>
+          <option value="500">500 lines</option>
+        </select>
+        <button class="btn-tiny" onclick="reloadLogs()">REFRESH</button>
+      </span>
+    </div>
+    <div class="log-viewer" id="logViewer">loading…</div>
+  </section>
+
+</main>
+
+<!-- Toast notification slot -->
+<div id="toastContainer" class="toast-container"></div>
+
+<script type="module" src="/overlord/overlord.mjs?v=1"></script>
+</body>
+</html>
