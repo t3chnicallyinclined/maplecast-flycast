@@ -303,12 +303,21 @@ ss -s
 - Common: ROM file missing or unreadable by the `maplecast` user →
   check `ls -l /opt/maplecast/roms/mvc2.gdi` and that ownership is
   `maplecast:maplecast`
-- Common: savestate path mismatch → flycast looks for a state named
-  after the ROM basename, so `mvc2.gdi` → `/opt/maplecast/savestates/mvc2.state`
 - If the crash is `gui_newFrame` SIGSEGV, the binary is the wrong
   build — you need the compile-out binary (from `build-headless/`),
   not a GPU build. Check `ldd /usr/local/bin/flycast` returns no
   `libGL`/`libSDL`/`libX11`.
+
+**Flycast boots but REIOS fires instead of loading the savestate:**
+- The boot log shows `REIOS: Booting up` with no
+  `N[SAVESTATE]: Loaded state` line before it.
+- This means flycast couldn't find the savestate file at the path
+  dictated by `emu.cfg` + `SavestateSlot`.
+- See "The flycast config + data layout" subsection below for the
+  full path chain. The TL;DR: the file must be at
+  `/opt/maplecast/.local/share/flycast/mvc2_<slot>.state` where
+  `<slot>` matches the `Dreamcast.SavestateSlot` value in
+  `/opt/maplecast/.config/flycast/emu.cfg`.
 
 **SurrealDB won't start:**
 - Check logs: `journalctl -u surrealdb -n 50`
@@ -349,12 +358,113 @@ overwritten on redeploy)
 **Working directory:** `/opt/maplecast`
 **ROM path:** `/opt/maplecast/roms/mvc2.gdi` (+ `track01.bin`, `track02.raw`,
 `track03.bin` in the same dir)
-**Savestate:** `/opt/maplecast/savestates/mvc2.state` (auto-loaded by
-basename match against the ROM)
 **Ports:** `127.0.0.1:7210/tcp` (TA mirror WS, loopback only),
 `0.0.0.0:7100/udp` (input server)
 **Resources:** `MemoryMax=1G`, `TasksMax=64`, `CPUQuota=200%` —
 headroom is massive (live usage is ~301 MB RSS, ~24% of one core)
+
+### The flycast config + data layout (CRITICAL — easy to get wrong)
+
+Flycast's auto-load-savestate path is determined by a chain that's
+easy to misread. On the VPS, the chain is:
+
+1. Flycast reads **`/opt/maplecast/.config/flycast/emu.cfg`** on
+   startup (the `maplecast` user's `$XDG_CONFIG_HOME/flycast/`).
+2. That config contains:
+   ```
+   Dreamcast.AutoLoadState = yes
+   Dreamcast.SavestatePath =                    # empty → fall back to user_data_dir
+   Dreamcast.SavestateSlot = 1                  # load slot 1 at boot
+   ```
+3. With `SavestatePath` empty, flycast falls back to `user_data_dir`,
+   which on Linux is `$HOME/.local/share/flycast/`. For the
+   `maplecast` user that's **`/opt/maplecast/.local/share/flycast/`**.
+4. The savestate filename is `<rom-basename>_<slot>.state`. With
+   `mvc2.gdi` as the ROM and slot 1, that's **`mvc2_1.state`**.
+5. So the auto-loaded file is
+   **`/opt/maplecast/.local/share/flycast/mvc2_1.state`**.
+
+**Do NOT put the savestate in `/opt/maplecast/savestates/`.** That
+path is a leftover from the initial 2026-04-08 deploy before we
+synced the local flycast config over — flycast never looks there.
+The old files in that dir are kept as backups only (look for
+`.apr3-backup` suffixes).
+
+Full VPS layout of flycast-facing data:
+
+```
+/opt/maplecast/
+├── .config/flycast/
+│   └── emu.cfg                             ← flycast config, synced from ~/.config/flycast/emu.cfg
+├── .local/share/flycast/                   ← flycast user_data_dir (reads savestates, BIOS, VMU, NVRAM here)
+│   ├── dc_boot.bin                         ← 2 MB  Dreamcast BIOS
+│   ├── dc_flash.bin                        ← 128 KB DC flash ROM
+│   ├── dc_nvmem.bin                        ← 128 KB DC persistent state (your dreamcast settings)
+│   ├── mvc2_1.state                        ← 7.7 MB **THE AUTO-LOADED SAVESTATE (slot 1)**
+│   └── T1212N_vmu_save_A1.bin              ← 128 KB MVC2 VMU save (rankings, options)
+├── roms/
+│   ├── mvc2.gdi                            ← 87 B text manifest
+│   ├── track01.bin                         ← 690 KB
+│   ├── track02.raw                         ← 1.2 MB
+│   └── track03.bin                         ← 1.2 GB ROM data
+└── savestates/                             ← LEGACY dir from 2026-04-08 deploy, flycast ignores it
+    ├── mvc2.state.apr3-backup              ← original stale save I shipped first
+    └── mvc2_1.state                        ← backup copy of slot 1 (not loaded)
+```
+
+### Syncing flycast config + data from your dev box
+
+To push a new savestate, new emu.cfg, updated BIOS, or new VMU state
+to the VPS:
+
+```bash
+# From the repo root on your dev box:
+
+# 1. Upload savestate (slot 1 is the live auto-load slot)
+scp "savestates/Marvel vs. Capcom 2 v1.001 (2000)(Capcom)(US)[!]_1.state" \
+    root@66.55.128.93:/tmp/new-state.state
+
+# 2. Upload config (optional — only if you want to overwrite)
+scp /home/tris/.config/flycast/emu.cfg \
+    root@66.55.128.93:/tmp/new-emu.cfg
+
+# 3. Install + restart
+ssh root@66.55.128.93 bash <<'EOF'
+install -m 0644 -o maplecast -g maplecast \
+    /tmp/new-state.state \
+    /opt/maplecast/.local/share/flycast/mvc2_1.state
+
+# For config: patch the paths BEFORE installing so we don't overwrite
+# with a path that points at your home dir
+sed -e 's|^Dreamcast.SavestatePath = .*|Dreamcast.SavestatePath = |' \
+    -e 's|^Dreamcast.SavestateSlot = .*|Dreamcast.SavestateSlot = 1|' \
+    -e 's|^UploadCrashLogs = .*|UploadCrashLogs = no|' \
+    -e 's|^DiscordPresence = .*|DiscordPresence = no|' \
+    /tmp/new-emu.cfg > /opt/maplecast/.config/flycast/emu.cfg
+chown maplecast:maplecast /opt/maplecast/.config/flycast/emu.cfg
+
+rm /tmp/new-state.state /tmp/new-emu.cfg
+systemctl restart maplecast-headless
+
+# Verify the savestate actually loaded (look for "[SAVESTATE]: Loaded")
+sleep 3
+journalctl -u maplecast-headless --no-pager -n 30 | grep -E "SAVESTATE|REIOS"
+EOF
+```
+
+**Expected verification output:**
+```
+N[SAVESTATE]: Loaded state ver 853 from /opt/maplecast/.local/share/flycast/mvc2_1.state size 27785327
+```
+
+If you see `REIOS: Booting up` INSTEAD of the SAVESTATE line, the
+savestate wasn't found. Double-check:
+- Path is `/opt/maplecast/.local/share/flycast/mvc2_1.state` (NOT
+  `/opt/maplecast/savestates/...`)
+- Filename basename matches the ROM basename (`mvc2.gdi` → `mvc2_*.state`)
+- `SavestateSlot` in the VPS config matches the `_N` suffix on the
+  savestate file
+- File is owned by `maplecast:maplecast` and readable
 
 ### Current live configuration
 
@@ -397,15 +507,11 @@ The deploy script:
 5. Verifies `systemctl is-active` + port listening
 
 **ROM and savestate are NOT re-uploaded by the deploy script** — they
-live on the VPS and don't change between deploys. If you need to
-update the ROM or savestate, scp them manually:
-
-```bash
-scp your-rom.gdi root@66.55.128.93:/opt/maplecast/roms/mvc2.gdi
-scp your-state.state root@66.55.128.93:/opt/maplecast/savestates/mvc2.state
-ssh root@66.55.128.93 'chown maplecast:maplecast /opt/maplecast/roms/* /opt/maplecast/savestates/*'
-ssh root@66.55.128.93 'systemctl restart maplecast-headless'
-```
+live on the VPS and don't change between deploys. To update them, see
+the "Syncing flycast config + data from your dev box" subsection
+below, which has the correct paths (hint: savestates live under
+`/opt/maplecast/.local/share/flycast/`, NOT `/opt/maplecast/savestates/`
+— the latter is a legacy stub from the initial deploy).
 
 ### Installed runtime dependencies
 
