@@ -47,8 +47,8 @@ pixels, so the browser renders natively at whatever resolution the canvas is.
 ## Path A: Standalone Renderer (Primary)
 
 Built from `packages/renderer/` in this repo. This is what `web/king.html`
-loads. See [WORKSTREAM-KING-OF-MARVEL.md](WORKSTREAM-KING-OF-MARVEL.md) for the
-exported C API and the quality-option table.
+loads. The exported C API is documented inline in
+[`packages/renderer/src/wasm_bridge.cpp`](../packages/renderer/src/wasm_bridge.cpp).
 
 ### Build
 

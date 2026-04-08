@@ -20,7 +20,10 @@ nobd.net spectators never touch it.
 
 A separate GPU-backed flycast build still exists in the same source tree
 for local sub-1ms play at a physical cab. Both builds coexist from one
-checkout; see "Mode 3: Headless" and `docs/VPS-SETUP.md` §9.
+checkout; see "Mode 3: Headless" below for the headless build invocation.
+Operator-specific VPS configuration (systemd units, credentials, deploy
+paths) lives in a separate private operator repo, not in this public
+source tree.
 
 ## System Topology
 
@@ -899,8 +902,9 @@ GPU client window must show MVC2. If it stays black for more than
 ~2 seconds, the initial SYNC isn't arriving — check headless server
 log for `[MIRROR] === SERVER MODE === streaming TA + memory diffs`.
 
-See `docs/WORKSTREAM-HEADLESS-SERVER.md` for the full implementation
-rationale and the Phase 1–5 history. Branch `headless-server`.
+The full Phase 1–5 implementation history for the headless server lives
+in the `headless-server` branch commit history (and in a local archive
+copy of the workstream doc — not committed to the public repo).
 
 ---
 

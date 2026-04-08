@@ -688,11 +688,11 @@ storage. It composes cleanly with both follow-up layers:
 
 ## 12. References
 
-- GP2040-CE NOBD firmware sync window: [GP2040-CE/src/gp2040.cpp](file:///mnt/win1/Users/trist/projects/GP2040-CE/src/gp2040.cpp) `syncGpioGetAll()` — the prior art that inspired the accumulator design.
-- GP2040-CE WHY-NOBD design rationale: [GP2040-CE/docs/WHY-NOBD.md](file:///mnt/win1/Users/trist/projects/GP2040-CE/docs/WHY-NOBD.md).
+- GP2040-CE-NOBD firmware sync window: [`src/gp2040.cpp` `syncGpioGetAll()`](https://github.com/t3chnicallyinclined/GP2040-CE-NOBD/blob/main/src/gp2040.cpp) — the prior art that inspired the accumulator design. NOBD is the public fork of GP2040-CE that adds the 5 ms input grouping window for fight-stick firmware.
+- GP2040-CE-NOBD design rationale: [`docs/WHY-NOBD.md`](https://github.com/t3chnicallyinclined/GP2040-CE-NOBD/blob/main/docs/WHY-NOBD.md).
 - Determinism rig: [docs/ARCHITECTURE.md](ARCHITECTURE.md) "Mirror Wire Format — Rules of the Road" + "The determinism test rig".
-- VPS deployment: [docs/VPS-SETUP.md](VPS-SETUP.md).
-- Original Phase B proposal + critique: `~/.claude/plans/tidy-wibbling-dongarra.md` (preserved for future reference).
+- Deployment notes: [docs/DEPLOYMENT.md](DEPLOYMENT.md).
+- The original design plan and critique for Phase B is preserved as a local agent plan, not in the public repo.
 
 ---
 
