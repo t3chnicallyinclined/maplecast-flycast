@@ -535,6 +535,247 @@ async function restartService() {
 window.restartService = restartService;
 
 // ----------------------------------------------------------------------------
+// PLAYERS card — slots + queue + kick/promote/backdoor
+// ----------------------------------------------------------------------------
+
+let playersPollHandle = null;
+
+async function refreshPlayers() {
+  try {
+    const data = await apiJson('/players');
+    if (!data.ok) {
+      toast('error', 'PLAYERS', data.error || 'failed');
+      return;
+    }
+    renderPlayers(data.data);
+  } catch (e) {
+    if (e.message !== 'auth') toast('error', 'PLAYERS', e.message);
+  }
+}
+
+function fmtAge(unixIso) {
+  if (!unixIso) return '—';
+  const t = new Date(unixIso).getTime();
+  if (!t) return '—';
+  const ageS = Math.floor((Date.now() - t) / 1000);
+  if (ageS < 0) return 'now';
+  if (ageS < 60) return `${ageS}s ago`;
+  if (ageS < 3600) return `${Math.floor(ageS / 60)}m ago`;
+  if (ageS < 86400) return `${Math.floor(ageS / 3600)}h ago`;
+  return `${Math.floor(ageS / 86400)}d ago`;
+}
+
+function renderPlayers(d) {
+  const slots = d.slots || [];
+  const queue = d.queue || [];
+
+  // Slot tiles
+  for (let i = 0; i < 2; i++) {
+    const slot = slots.find(s => s.slot_num === i) || {};
+    const tile = document.getElementById(`slotTile${i}`);
+    const statusEl = document.getElementById(`slotTileStatus${i}`);
+    const nameEl = document.getElementById(`slotTileName${i}`);
+    const metaEl = document.getElementById(`slotTileMeta${i}`);
+    const kickBtn = document.getElementById(`slotKick${i}`);
+
+    if (slot.occupant_name) {
+      tile.classList.add('occupied');
+      statusEl.textContent = 'OCCUPIED';
+      nameEl.textContent = String(slot.occupant_name).toUpperCase();
+      const lastInput = slot.last_input_at ? `last input ${fmtAge(slot.last_input_at)}` : '';
+      const claimedAt = slot.claimed_at ? `claimed ${fmtAge(slot.claimed_at)}` : '';
+      const device = slot.device || '';
+      metaEl.textContent = [device, claimedAt, lastInput].filter(Boolean).join(' · ') || 'no metadata';
+      kickBtn.disabled = false;
+      kickBtn.classList.remove('btn-row-disabled');
+      kickBtn.classList.add('btn-row');
+      kickBtn.classList.add('btn-pin');
+      kickBtn.style.borderColor = 'var(--ov-red)';
+      kickBtn.style.color = 'var(--ov-red)';
+    } else {
+      tile.classList.remove('occupied');
+      statusEl.textContent = 'EMPTY';
+      nameEl.textContent = '—';
+      metaEl.textContent = 'no occupant';
+      kickBtn.disabled = true;
+      kickBtn.classList.add('btn-row-disabled');
+      kickBtn.style.borderColor = '';
+      kickBtn.style.color = '';
+    }
+  }
+
+  // Queue list
+  document.getElementById('queueMeta').textContent =
+    queue.length === 0 ? 'empty' : `${queue.length} in line`;
+  const list = document.getElementById('queueList');
+  if (queue.length === 0) {
+    list.innerHTML = '<div class="muted">no one in line</div>';
+    return;
+  }
+  list.innerHTML = queue.map((q, i) => {
+    const id = String(q.id || '');
+    const escId = id.replace(/'/g, "\\'");
+    const name = String(q.username || '?').toUpperCase();
+    const isAnon = !!q.is_anon;
+    const ago = fmtAge(q.joined_at);
+    const device = q.device || '';
+    return `<div class="queue-row ${isAnon ? 'qrow-anon' : ''}">
+      <div class="qpos">${i + 1}</div>
+      <div class="qname">${escapeHtml(name)}${isAnon ? ' <span style="font-size:9px;color:var(--ov-text-mute);">(anon)</span>' : ''}</div>
+      <div class="qtime" title="${escapeHtml(device)}">${ago}</div>
+      <div class="qactions">
+        <button class="btn-row btn-promote" onclick="promoteQueue('${escId}', 0)" title="Promote to P1">→ P1</button>
+        <button class="btn-row btn-promote" onclick="promoteQueue('${escId}', 1)" title="Promote to P2">→ P2</button>
+        <button class="btn-row" style="border-color:var(--ov-red);color:var(--ov-red);" onclick="kickQueue('${escId}', '${escapeHtml(name)}')" title="Remove from queue">KICK</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+window.refreshPlayers = refreshPlayers;
+
+window.kickSlot = async function(slot) {
+  const occupantEl = document.getElementById(`slotTileName${slot}`);
+  const occupant = (occupantEl?.textContent || '').trim();
+  if (!occupant || occupant === '—') return;
+  if (!confirm(`Kick ${occupant} from P${slot + 1}?`)) return;
+
+  toast('warn', 'KICK', `kicking ${occupant} from P${slot + 1}…`);
+  try {
+    const data = await apiJson('/players/kick', {
+      method: 'POST',
+      body: JSON.stringify({ slot }),
+    });
+    if (!data.ok) {
+      toast('error', 'KICK', data.error || 'failed');
+      return;
+    }
+    const kicked = data.data?.kicked || occupant;
+    toast('success', 'KICK', `${kicked.toUpperCase()} cleared from P${slot + 1}`);
+    setTimeout(refreshPlayers, 200);
+  } catch (e) {
+    if (e.message !== 'auth') toast('error', 'KICK', e.message);
+  }
+};
+
+window.kickQueue = async function(queueId, displayName) {
+  if (!confirm(`Remove ${displayName} from the queue?`)) return;
+  try {
+    const data = await apiJson('/queue/kick', {
+      method: 'POST',
+      body: JSON.stringify({ queue_id: queueId }),
+    });
+    if (!data.ok) {
+      toast('error', 'QKICK', data.error || 'failed');
+      return;
+    }
+    toast('success', 'QKICK', `${displayName} removed from queue`);
+    setTimeout(refreshPlayers, 200);
+  } catch (e) {
+    if (e.message !== 'auth') toast('error', 'QKICK', e.message);
+  }
+};
+
+window.promoteQueue = async function(queueId, slot) {
+  try {
+    const data = await apiJson('/queue/promote', {
+      method: 'POST',
+      body: JSON.stringify({ queue_id: queueId, slot }),
+    });
+    if (!data.ok) {
+      toast('error', 'PROMOTE', data.error || 'failed');
+      return;
+    }
+    toast('success', 'PROMOTE', `promoted → P${slot + 1}`);
+    setTimeout(refreshPlayers, 400);
+  } catch (e) {
+    if (e.message !== 'auth') toast('error', 'PROMOTE', e.message);
+  }
+};
+
+// ----------------------------------------------------------------------------
+// BACKDOOR PLAY — open king.html in a new tab as the admin user
+// ----------------------------------------------------------------------------
+//
+// The admin user is already registered as a normal player record (we
+// flagged its admin bit in Phase B). Their nobd_token / nobd_username
+// might or might not be set in localStorage depending on whether they
+// also use the spectator app. We seed both keys before opening king.html
+// so the spectator app autosigns in, then optionally autoseeds the slot
+// claim by passing ?admin_join=N in the URL.
+//
+// king.html doesn't need ANY changes — it already supports the auto-
+// signin flow via localStorage. We just hand it credentials. The
+// `admin_join` URL param is consumed by a tiny shim we'll add in the
+// next iteration; for v1, the admin still has to manually click "I GOT
+// NEXT" + wait for promotion.
+
+window.openBackdoor = function() {
+  const username = (localStorage.getItem(USERNAME_KEY) || 'trisdog').toLowerCase();
+  const token = localStorage.getItem(TOKEN_KEY);
+  if (!token) {
+    toast('error', 'BACKDOOR', 'no admin token — re-login first');
+    return;
+  }
+  // Seed the spectator app's auth keys so king.html auto-signs in.
+  // We DON'T overwrite if the user already has spectator credentials
+  // — only seed if missing.
+  if (!localStorage.getItem('nobd_username')) {
+    localStorage.setItem('nobd_username', username);
+  }
+  if (!localStorage.getItem('nobd_db_token')) {
+    localStorage.setItem('nobd_db_token', token);
+  }
+  // Open king.html in a new tab.
+  const url = '/king.html?admin=1';
+  window.open(url, '_blank', 'noopener,noreferrer');
+  toast('info', 'BACKDOOR', `opened king.html as ${username.toUpperCase()}`);
+};
+
+window.backdoorJoinSlot = async function(slot) {
+  // Same as openBackdoor but ALSO promotes the admin user directly into
+  // the slot via the queue/promote path. We do this by:
+  //   1. CREATE a queue row for the admin (using admin SQL via a small
+  //      relay endpoint — or directly via the new /players API).
+  //   2. PROMOTE that row to the target slot.
+  //   3. Open king.html which will auto-sign-in and find itself in slot.
+  //
+  // For v1 simplicity we just kick the slot first to make sure it's
+  // free, then open king.html — the admin can hit "I GOT NEXT" inside
+  // the spectator app and the auto-promote will pick them up. A future
+  // iteration can wire the full claim chain.
+  const username = (localStorage.getItem(USERNAME_KEY) || 'trisdog').toLowerCase();
+  const token = localStorage.getItem(TOKEN_KEY);
+  if (!token) {
+    toast('error', 'BACKDOOR', 'no admin token — re-login first');
+    return;
+  }
+  if (!confirm(`Take P${slot + 1} as admin? Any current occupant will be kicked.`)) return;
+
+  toast('info', 'BACKDOOR', `claiming P${slot + 1}…`);
+  try {
+    // 1. Kick the existing occupant if any
+    await apiJson('/players/kick', {
+      method: 'POST',
+      body: JSON.stringify({ slot }),
+    });
+    // 2. Seed the spectator credentials and open king.html
+    if (!localStorage.getItem('nobd_username')) {
+      localStorage.setItem('nobd_username', username);
+    }
+    if (!localStorage.getItem('nobd_db_token')) {
+      localStorage.setItem('nobd_db_token', token);
+    }
+    const url = `/king.html?admin=1&admin_join=${slot}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+    toast('success', 'BACKDOOR', `P${slot + 1} cleared, opening king.html — click "I GOT NEXT" to take the slot`);
+    setTimeout(refreshPlayers, 400);
+  } catch (e) {
+    if (e.message !== 'auth') toast('error', 'BACKDOOR', e.message);
+  }
+};
+
+// ----------------------------------------------------------------------------
 // Preview controls
 // ----------------------------------------------------------------------------
 
@@ -651,11 +892,13 @@ function boot() {
   // Initial loads
   startStatusPoll();
   refreshSavestates();
+  refreshPlayers();
   reloadConfig();
   reloadLogs();
 
-  // Periodic log refresh every 5 seconds
+  // Periodic refreshes
   setInterval(reloadLogs, 5000);
+  setInterval(refreshPlayers, 3000);
 
   // First-visit hint about the keyboard shortcuts
   if (!localStorage.getItem('overlord_seen_shortcuts')) {

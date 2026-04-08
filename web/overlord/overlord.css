@@ -294,10 +294,11 @@ code {
   display: grid;
   grid-template-columns: 1fr 1fr;
   grid-template-areas:
-    "status preview"
-    "saves  saves"
-    "config config"
-    "logs   logs";
+    "status  preview"
+    "players players"
+    "saves   saves"
+    "config  config"
+    "logs    logs";
   gap: 18px;
   padding: 24px;
   max-width: 1600px;
@@ -307,6 +308,7 @@ code {
 
 .card-status      { grid-area: status; }
 .card-preview     { grid-area: preview; }
+.card-players     { grid-area: players; }
 .card-savestates  { grid-area: saves; }
 .card-config      { grid-area: config; }
 .card-logs        { grid-area: logs; }
@@ -317,6 +319,7 @@ code {
     grid-template-areas:
       "status"
       "preview"
+      "players"
       "saves"
       "config"
       "logs";
@@ -920,4 +923,211 @@ code {
   margin-top: 16px;
   font-size: 10px;
   color: var(--ov-text-mute);
+}
+
+/* ============================================================
+   PLAYERS card — slot tiles + queue list
+   ============================================================ */
+.slots-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.slot-tile {
+  background: linear-gradient(180deg, var(--ov-bg-card-2) 0%, var(--ov-bg-card) 100%);
+  border: 1px solid var(--ov-border-hi);
+  border-radius: 4px;
+  padding: 16px 18px;
+  position: relative;
+  overflow: hidden;
+}
+
+.slot-tile.occupied {
+  border-color: var(--ov-green);
+  box-shadow: 0 0 16px rgba(0, 214, 90, 0.15);
+}
+
+.slot-tile.occupied::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, transparent 0%, rgba(0, 214, 90, 0.05) 100%);
+  pointer-events: none;
+}
+
+.slot-tile-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.slot-tile-num {
+  font-family: var(--ov-arcade);
+  font-size: 16px;
+  color: var(--ov-gold);
+  letter-spacing: 2px;
+}
+
+.slot-tile-status {
+  font-family: var(--ov-arcade);
+  font-size: 8px;
+  letter-spacing: 1px;
+  padding: 3px 8px;
+  border-radius: 99px;
+  background: var(--ov-bg-input);
+  border: 1px solid var(--ov-border);
+  color: var(--ov-text-mute);
+}
+
+.slot-tile.occupied .slot-tile-status {
+  background: rgba(0, 214, 90, 0.15);
+  border-color: var(--ov-green);
+  color: var(--ov-green);
+}
+
+.slot-tile-name {
+  font-family: var(--ov-mono);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--ov-text);
+  margin-bottom: 4px;
+  word-break: break-all;
+  min-height: 22px;
+}
+
+.slot-tile.occupied .slot-tile-name {
+  color: var(--ov-gold);
+  text-shadow: 0 0 6px rgba(255, 215, 0, 0.2);
+}
+
+.slot-tile-meta {
+  font-size: 11px;
+  color: var(--ov-text-mute);
+  margin-bottom: 12px;
+  font-family: var(--ov-mono);
+  word-break: break-all;
+  min-height: 28px;
+  line-height: 1.4;
+}
+
+.slot-tile-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* QUEUE list */
+.queue-section {
+  border-top: 1px dashed var(--ov-border);
+  padding-top: 14px;
+}
+
+.queue-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+
+.queue-section-label {
+  font-family: var(--ov-arcade);
+  font-size: 9px;
+  letter-spacing: 1px;
+  color: var(--ov-text-mute);
+}
+
+.queue-section-meta {
+  font-size: 10px;
+  color: var(--ov-text-mute);
+  font-family: var(--ov-mono);
+}
+
+.queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.queue-list .muted {
+  font-size: 12px;
+  text-align: center;
+  padding: 18px;
+}
+
+.queue-row {
+  display: grid;
+  grid-template-columns: 32px 1fr auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 12px;
+  background: var(--ov-bg-input);
+  border: 1px solid var(--ov-border);
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.queue-row:hover {
+  border-color: var(--ov-border-hi);
+}
+
+.queue-row .qpos {
+  font-family: var(--ov-arcade);
+  font-size: 10px;
+  color: var(--ov-gold);
+  text-align: center;
+}
+
+.queue-row .qname {
+  color: var(--ov-text);
+  font-weight: 700;
+  font-family: var(--ov-mono);
+  word-break: break-all;
+}
+
+.queue-row.qrow-anon .qname {
+  color: var(--ov-text-dim);
+  font-style: italic;
+}
+
+.queue-row .qtime {
+  font-size: 10px;
+  color: var(--ov-text-mute);
+  font-family: var(--ov-mono);
+  white-space: nowrap;
+}
+
+.queue-row .qactions {
+  display: flex;
+  gap: 4px;
+}
+
+/* Gold tiny button variant for the BACKDOOR button */
+.btn-tiny.btn-tiny-gold {
+  background: var(--ov-gold);
+  color: #000;
+  border-color: var(--ov-gold);
+  font-weight: 700;
+}
+
+.btn-tiny.btn-tiny-gold:hover {
+  background: var(--ov-gold-dim);
+  border-color: var(--ov-gold-dim);
+  color: #000;
+  box-shadow: 0 0 12px rgba(255, 215, 0, 0.4);
+}
+
+/* "Promote to" mini-dropdown — inline </> arrows */
+.btn-row.btn-promote {
+  border-color: var(--ov-cyan);
+  color: var(--ov-cyan);
+}
+
+.btn-row.btn-promote:hover {
+  background: var(--ov-cyan);
+  color: #000;
 }

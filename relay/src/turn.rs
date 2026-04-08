@@ -380,6 +380,30 @@ async fn handle_http(
         } else {
             ok_json(&admin_api::handle_set_autoload_slot(&body).await.to_json_string())
         }
+    } else if first_line.starts_with("GET /overlord/api/players") {
+        if !auth_api::check_admin(auth_header.as_deref()).await {
+            forbidden_json()
+        } else {
+            ok_json(&admin_api::handle_players().await.to_json_string())
+        }
+    } else if first_line.starts_with("POST /overlord/api/players/kick") {
+        if !auth_api::check_admin(auth_header.as_deref()).await {
+            forbidden_json()
+        } else {
+            ok_json(&admin_api::handle_kick_player(&body).await.to_json_string())
+        }
+    } else if first_line.starts_with("POST /overlord/api/queue/kick") {
+        if !auth_api::check_admin(auth_header.as_deref()).await {
+            forbidden_json()
+        } else {
+            ok_json(&admin_api::handle_kick_queue(&body).await.to_json_string())
+        }
+    } else if first_line.starts_with("POST /overlord/api/queue/promote") {
+        if !auth_api::check_admin(auth_header.as_deref()).await {
+            forbidden_json()
+        } else {
+            ok_json(&admin_api::handle_promote_queue(&body).await.to_json_string())
+        }
     } else if first_line.starts_with("POST /overlord/api/savestates/upload") {
         if !auth_api::check_admin(auth_header.as_deref()).await {
             forbidden_json()

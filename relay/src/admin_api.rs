@@ -30,6 +30,7 @@
 // config + savestate dirs.
 // ============================================================================
 
+use crate::auth_api::DbConfig;
 use crate::fanout::RelayState;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
@@ -247,6 +248,210 @@ pub async fn handle_status(state: &RelayState) -> AdminResponse {
         sync_count: m.sync_count as u64,
     };
     AdminResponse::ok(serde_json::to_value(data).unwrap_or(json!({})))
+}
+
+// ============================================================================
+// GET /overlord/api/players
+//
+// Returns a snapshot of the live cab roster: P1 + P2 slot rows from
+// SurrealDB plus all waiting queue rows. Used by the admin dashboard's
+// PLAYERS card to render slots and the queue list with per-row kick /
+// promote buttons.
+//
+// Auth: admin only (gated upstream in turn.rs).
+// ============================================================================
+
+pub async fn handle_players() -> AdminResponse {
+    let cfg = DbConfig::from_env();
+    // Two queries in one round-trip — surrealdb returns two result blocks.
+    let q = "SELECT * FROM slot ORDER BY slot_num; SELECT * FROM queue WHERE status = 'waiting' ORDER BY joined_at;";
+    let v = match crate::auth_api::sql_query_as_admin(&cfg, q).await {
+        Ok(v) => v,
+        Err(e) => return AdminResponse::err(format!("db: {e}")),
+    };
+    let arr = match v.as_array() {
+        Some(a) => a,
+        None => return AdminResponse::err("unexpected db response shape"),
+    };
+    // Block 0 = slot rows, Block 1 = queue rows.
+    let slots = arr.first()
+        .and_then(|r| r.get("result"))
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let queue = arr.get(1)
+        .and_then(|r| r.get("result"))
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+
+    AdminResponse::ok(json!({
+        "slots": slots,
+        "queue": queue,
+    }))
+}
+
+// ============================================================================
+// POST /overlord/api/players/kick
+// body: {"slot": 0|1}
+//
+// Lifts the SQL block from auth_api::handle_leave but doesn't require a
+// user JWT — admin clears the slot directly. Same field clears (occupant,
+// player_record, device, session, claim/input timestamps, grace) plus a
+// queue cleanup so a kicked player doesn't get a stuck queue ghost row.
+// ============================================================================
+
+pub async fn handle_kick_player(body: &str) -> AdminResponse {
+    let req: SlotBody = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => return AdminResponse::err(format!("bad json: {e}")),
+    };
+    if req.slot != 0 && req.slot != 1 {
+        return AdminResponse::err("slot must be 0 or 1");
+    }
+    let slot_id = if req.slot == 0 { "slot:p1" } else { "slot:p2" };
+
+    // First, look up who currently occupies the slot so we can also wipe
+    // any queue rows for that user. Same defense-in-depth as handle_leave.
+    let cfg = DbConfig::from_env();
+    let lookup = match crate::auth_api::sql_query_as_admin(&cfg,
+        &format!("SELECT VALUE occupant_name FROM {};", slot_id)).await
+    {
+        Ok(v) => v,
+        Err(e) => return AdminResponse::err(format!("db lookup: {e}")),
+    };
+    let occupant: Option<String> = lookup
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|stmt| stmt.get("result"))
+        .and_then(|r| r.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let occupant_clean = occupant.as_deref().unwrap_or("");
+    info!("[admin] kick slot {} (was: {})", req.slot, occupant_clean);
+
+    let sql = if let Some(name) = occupant.as_deref() {
+        let escaped = name.replace('\\', "\\\\").replace('\'', "\\'");
+        let upper = name.to_uppercase().replace('\\', "\\\\").replace('\'', "\\'");
+        format!(
+            "UPDATE {slot_id} SET \
+                occupant_name = NONE, \
+                player_record = NONE, \
+                device = NONE, \
+                session_id = NONE, \
+                claimed_at = NONE, \
+                last_input_at = NONE, \
+                grace_expires_at = NONE; \
+             DELETE queue WHERE username = '{upper}' OR username = '{escaped}';"
+        )
+    } else {
+        // Empty slot — still no-op clear it (idempotent).
+        format!(
+            "UPDATE {slot_id} SET \
+                occupant_name = NONE, \
+                player_record = NONE, \
+                device = NONE, \
+                session_id = NONE, \
+                claimed_at = NONE, \
+                last_input_at = NONE, \
+                grace_expires_at = NONE;"
+        )
+    };
+
+    match crate::auth_api::sql_query_as_admin(&cfg, &sql).await {
+        Ok(_) => AdminResponse::ok(json!({
+            "slot": req.slot,
+            "kicked": occupant_clean,
+        })),
+        Err(e) => AdminResponse::err(format!("kick failed: {e}")),
+    }
+}
+
+// ============================================================================
+// POST /overlord/api/queue/kick
+// body: {"queue_id": "queue:abc..."}
+//
+// Removes one waiting queue row by id. Used by the admin to evict a
+// stuck or unwanted entry from the line.
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct QueueIdBody {
+    pub queue_id: String,
+}
+
+fn valid_queue_id(s: &str) -> bool {
+    // Defense in depth: only allow `queue:<alnum>` ids. The id comes from
+    // a previous /players response which itself came from SurrealDB, but
+    // never trust round-trips through a client.
+    s.starts_with("queue:")
+        && s.len() > 6
+        && s[6..].chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+pub async fn handle_kick_queue(body: &str) -> AdminResponse {
+    let req: QueueIdBody = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => return AdminResponse::err(format!("bad json: {e}")),
+    };
+    if !valid_queue_id(&req.queue_id) {
+        return AdminResponse::err("invalid queue_id (must be queue:<alphanumeric>)");
+    }
+    info!("[admin] kick queue {}", req.queue_id);
+    let cfg = DbConfig::from_env();
+    let sql = format!("DELETE {};", req.queue_id);
+    match crate::auth_api::sql_query_as_admin(&cfg, &sql).await {
+        Ok(_) => AdminResponse::ok(json!({ "deleted": req.queue_id })),
+        Err(e) => AdminResponse::err(format!("delete failed: {e}")),
+    }
+}
+
+// ============================================================================
+// POST /overlord/api/queue/promote
+// body: {"queue_id": "queue:abc...", "slot": 0|1}
+//
+// Atomically promotes a queue row to a slot. Marks the queue row's
+// status='promoted' with the target slot_num — the collector's slot
+// promotion loop watches for this transition and binds the player to
+// the slot. The queue.mjs browser-side handler then opens its direct
+// controlWs to flycast.
+//
+// This bypasses the normal head-of-queue auto-promotion so the admin
+// can pick anyone in the line, not just the front.
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct PromoteBody {
+    pub queue_id: String,
+    pub slot: i32,
+}
+
+pub async fn handle_promote_queue(body: &str) -> AdminResponse {
+    let req: PromoteBody = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => return AdminResponse::err(format!("bad json: {e}")),
+    };
+    if req.slot != 0 && req.slot != 1 {
+        return AdminResponse::err("slot must be 0 or 1");
+    }
+    if !valid_queue_id(&req.queue_id) {
+        return AdminResponse::err("invalid queue_id");
+    }
+    info!("[admin] promote {} → slot {}", req.queue_id, req.slot);
+    let cfg = DbConfig::from_env();
+    // The collector watches `status = 'promoted'` rows and matches by
+    // promoted_to. We set both atomically.
+    let sql = format!(
+        "UPDATE {} SET status = 'promoted', promoted_to = {};",
+        req.queue_id, req.slot
+    );
+    match crate::auth_api::sql_query_as_admin(&cfg, &sql).await {
+        Ok(_) => AdminResponse::ok(json!({
+            "queue_id": req.queue_id,
+            "slot": req.slot,
+        })),
+        Err(e) => AdminResponse::err(format!("promote failed: {e}")),
+    }
 }
 
 /// Parse Dreamcast.SavestateSlot from emu.cfg. Returns None if the file

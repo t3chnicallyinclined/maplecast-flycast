@@ -80,7 +80,10 @@ impl DbConfig {
 }
 
 /// Send a SurrealDB SQL query as the admin user. Returns parsed JSON.
-async fn sql_query(cfg: &DbConfig, query: &str) -> Result<Json, String> {
+/// pub-visible so admin_api can reuse it for the /overlord/api/* admin
+/// operations (kick player, promote queue row, etc) — same admin creds,
+/// same shape responses, no point duplicating the wrapper.
+pub async fn sql_query_as_admin(cfg: &DbConfig, query: &str) -> Result<Json, String> {
     let client = reqwest::Client::new();
     let res = client
         .post(format!("{}/sql", cfg.url))
@@ -136,7 +139,7 @@ pub async fn handle_register(body: &str) -> AuthResponse {
 
     // Check if username taken
     let check_q = format!("SELECT id FROM player WHERE username = '{}';", esc(&name));
-    match sql_query(&cfg, &check_q).await {
+    match sql_query_as_admin(&cfg, &check_q).await {
         Ok(v) => {
             if let Some(arr) = v.get(0).and_then(|r| r.get("result")).and_then(|r| r.as_array()) {
                 if !arr.is_empty() {
@@ -155,7 +158,7 @@ pub async fn handle_register(body: &str) -> AuthResponse {
         "CREATE player SET username = '{}', pass_hash = crypto::argon2::generate('{}'), created_at = time::now(), last_seen = time::now();",
         esc(&name), esc(&req.password)
     );
-    match sql_query(&cfg, &create_q).await {
+    match sql_query_as_admin(&cfg, &create_q).await {
         Ok(v) => {
             let profile = v.get(0)
                 .and_then(|r| r.get("result"))
@@ -195,7 +198,7 @@ pub async fn handle_signin(body: &str) -> AuthResponse {
         "SELECT *, crypto::argon2::compare(pass_hash, '{}') AS pass_ok FROM player WHERE username = '{}';",
         esc(&req.password), esc(&name)
     );
-    let v = match sql_query(&cfg, &q).await {
+    let v = match sql_query_as_admin(&cfg, &q).await {
         Ok(v) => v,
         Err(e) => {
             warn!("signin query failed: {}", e);
@@ -225,7 +228,7 @@ pub async fn handle_signin(body: &str) -> AuthResponse {
 
     // Update last_seen (fire-and-forget)
     let update_q = format!("UPDATE player SET last_seen = time::now() WHERE username = '{}';", esc(&name));
-    let _ = sql_query(&cfg, &update_q).await;
+    let _ = sql_query_as_admin(&cfg, &update_q).await;
 
     // Mint a browser-scoped JWT so subsequent writes go under the player's
     // own record access. Legacy accounts without pass_hash silently get
@@ -373,7 +376,7 @@ pub async fn check_admin(authorization: Option<&str>) -> bool {
     // a verified JWT, so this is not user-controlled — no SQL injection
     // surface (record ids are alphanumeric).
     let q = format!("SELECT admin FROM {};", record_id);
-    let v = match sql_query(&cfg, &q).await {
+    let v = match sql_query_as_admin(&cfg, &q).await {
         Ok(v) => v,
         Err(e) => {
             warn!("check_admin: admin lookup failed: {}", e);
@@ -460,7 +463,7 @@ pub async fn handle_leave(authorization: Option<&str>) -> AuthResponse {
     // player rows due to table-level PERMISSIONS). Safe: we've already
     // verified the JWT resolves to a real player record via $auth above.
     let lookup_sql = format!("SELECT VALUE username FROM {};", record_id);
-    let lookup = match sql_query(&cfg, &lookup_sql).await {
+    let lookup = match sql_query_as_admin(&cfg, &lookup_sql).await {
         Ok(v) => v,
         Err(e) => return AuthResponse::err(format!("username lookup: {e}")),
     };
@@ -495,7 +498,7 @@ pub async fn handle_leave(authorization: Option<&str>) -> AuthResponse {
          WHERE occupant_name = '{display_esc}'; \
          DELETE queue WHERE username = '{display_esc}' OR username = '{uname_esc}';"
     );
-    match sql_query(&cfg, &sql).await {
+    match sql_query_as_admin(&cfg, &sql).await {
         Ok(_) => AuthResponse { ok: true, ..Default::default() },
         Err(e) => AuthResponse::err(format!("clear failed: {e}")),
     }

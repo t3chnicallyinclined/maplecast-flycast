@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Overlord — MapleCast Cab</title>
-<link rel="stylesheet" href="/overlord/overlord.css?v=2">
+<link rel="stylesheet" href="/overlord/overlord.css?v=3">
 <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" crossorigin="anonymous">
 </head>
 <body class="overlord-dash">
@@ -115,6 +115,58 @@
   </section>
 
   <!-- ============================================================
+       PLAYERS — slots + queue, kick + promote + backdoor play
+       ============================================================ -->
+  <section class="card card-players">
+    <div class="card-header">
+      <span class="card-title">PLAYERS</span>
+      <span class="card-meta">
+        <button class="btn-tiny" onclick="refreshPlayers()" title="Refresh">⟳</button>
+        <button class="btn-tiny btn-tiny-gold" onclick="openBackdoor()" title="Open the cab as admin in a new tab — bypass the queue, take any free slot">↪ BACKDOOR PLAY</button>
+      </span>
+    </div>
+
+    <!-- Two slot tiles: P1 + P2 -->
+    <div class="slots-row">
+      <div class="slot-tile" id="slotTile0">
+        <div class="slot-tile-header">
+          <span class="slot-tile-num">P1</span>
+          <span class="slot-tile-status" id="slotTileStatus0">EMPTY</span>
+        </div>
+        <div class="slot-tile-name" id="slotTileName0">—</div>
+        <div class="slot-tile-meta" id="slotTileMeta0">no occupant</div>
+        <div class="slot-tile-actions">
+          <button class="btn-row btn-row-disabled" id="slotKick0" onclick="kickSlot(0)" disabled>KICK</button>
+          <button class="btn-row btn-pin" onclick="backdoorJoinSlot(0)" title="Open king.html as admin and join slot 1">↪ JOIN P1</button>
+        </div>
+      </div>
+      <div class="slot-tile" id="slotTile1">
+        <div class="slot-tile-header">
+          <span class="slot-tile-num">P2</span>
+          <span class="slot-tile-status" id="slotTileStatus1">EMPTY</span>
+        </div>
+        <div class="slot-tile-name" id="slotTileName1">—</div>
+        <div class="slot-tile-meta" id="slotTileMeta1">no occupant</div>
+        <div class="slot-tile-actions">
+          <button class="btn-row btn-row-disabled" id="slotKick1" onclick="kickSlot(1)" disabled>KICK</button>
+          <button class="btn-row btn-pin" onclick="backdoorJoinSlot(1)" title="Open king.html as admin and join slot 2">↪ JOIN P2</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Queue list -->
+    <div class="queue-section">
+      <div class="queue-section-header">
+        <span class="queue-section-label">QUEUE</span>
+        <span class="queue-section-meta" id="queueMeta">—</span>
+      </div>
+      <div class="queue-list" id="queueList">
+        <div class="muted">loading…</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================
        SAVESTATE MANAGER
        ============================================================ -->
   <section class="card card-savestates">
@@ -197,6 +249,6 @@
 <!-- Toast notification slot -->
 <div id="toastContainer" class="toast-container"></div>
 
-<script type="module" src="/overlord/overlord.mjs?v=2"></script>
+<script type="module" src="/overlord/overlord.mjs?v=3"></script>
 </body>
 </html>
