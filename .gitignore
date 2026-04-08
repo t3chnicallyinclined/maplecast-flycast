@@ -1,5 +1,20 @@
 build/
+build-*/
 artifact/
+
+# Claude Code agent memory + projects state — operator-only context that
+# accumulates per-session notes about the codebase. Should never be in
+# the public repo. The local copy at ~/.claude/projects/... is unaffected.
+.claude/
+
+# Local stick binding cache (NOBD identity bindings, not source)
+.maplecast/
+
+# Savestates and ROMs are never committed
+*.state
+*.gdi
+*.cdi
+*.chd
 
 # macOS
 .DS_Store
