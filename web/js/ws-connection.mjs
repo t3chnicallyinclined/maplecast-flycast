@@ -28,61 +28,21 @@ import { leaveGame, updateCabinetControls } from './queue.mjs';
 import { avg } from './ui-common.mjs';
 
 const WS_PORT = 7200;
-// Optional LAN bypass endpoint. If set, the browser races a connection to
-// this URL against the relay endpoint and uses whichever opens first.
-// Users on the same LAN as the home flycast win the race in <100ms; remote
-// users' attempts time out in ~800ms and fall back to the relay.
-//
-// To enable: set up an A record for some hostname (e.g. home.nobd.net)
-// pointing to the home box LAN IP, get a Let's Encrypt cert via DNS-01
-// challenge, run nginx on the home box terminating TLS and proxying to
-// 127.0.0.1:7200. See docs/WORKSTREAM-LATENCY.md "S2 LAN bypass" section.
-const LAN_BYPASS_URL = null;  // e.g. 'wss://home.nobd.net/ws'
-const LAN_RACE_TIMEOUT_MS = 800;
 
 // Relay mode: served from VPS (port 80/443) → use /ws proxy path
 // Direct mode: served from home box (port 8000) → use :7200 direct
-function getRelayWsUrl() {
+function getWsUrl() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const isRelay = location.port === '' || location.port === '80' || location.port === '443';
   if (isRelay) return `${proto}//${location.hostname}/ws`;
   return `${proto}//${location.hostname}:${WS_PORT}`;
 }
 
-// Race the LAN bypass against the relay. Returns the URL that won.
-async function pickBestWsUrl() {
-  const relayUrl = getRelayWsUrl();
-  if (!LAN_BYPASS_URL) return relayUrl;
-
-  // Spawn both probes in parallel. First onopen wins, the loser is closed.
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (url, winner, loser) => {
-      if (settled) return;
-      settled = true;
-      try { loser?.close(); } catch {}
-      console.log('[ws] LAN race winner:', url);
-      resolve(url);
-    };
-
-    const lanWs = new WebSocket(LAN_BYPASS_URL);
-    const relayWs = new WebSocket(relayUrl);
-
-    lanWs.onopen  = () => finish(LAN_BYPASS_URL, lanWs, relayWs);
-    relayWs.onopen = () => finish(relayUrl, relayWs, lanWs);
-    lanWs.onerror  = () => { /* let relay try */ };
-    relayWs.onerror = () => { /* let LAN try */ };
-
-    // Hard cap — if neither opens in time, fall through to relay
-    setTimeout(() => finish(relayUrl, null, lanWs), LAN_RACE_TIMEOUT_MS);
-  });
-}
-
 let frameWorker = null;
 
 export async function connectWS() {
   state.connState = 'CONNECTING...';
-  const wsUrl = await pickBestWsUrl();
+  const wsUrl = getWsUrl();
   console.log('[ws] URL:', wsUrl);
 
   // === CONNECTION 1: Worker for binary frames (dedicated thread) ===
