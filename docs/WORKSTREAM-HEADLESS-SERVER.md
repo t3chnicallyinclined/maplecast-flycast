@@ -1,16 +1,20 @@
 # WORKSTREAM: HEADLESS GPU-LESS FLYCAST SERVER
 
-> **STATUS: SHIPPED** (2026-04-07)
+> **STATUS: SHIPPED + DEPLOYED TO PRODUCTION** (2026-04-08)
 >
-> Phases 1–5 complete on branch `headless-server`. Commits:
+> Phases 1–5 complete on branch `headless-server` (merged into `wasm-determinism`). Commits:
 >   * `4d7dbac69` Phase 1 — runtime gate (`MAPLECAST_HEADLESS=1` on GPU builds)
 >   * `d93abcac1` Phase 3 — CMake `-DMAPLECAST_HEADLESS=ON` compile-out
 >   * `93ceeff9d` Phase 4 — Dockerfile + systemd unit + deploy script + compile-time gate propagation
->   * (Phase 5 doc updates follow this commit)
+>   * `2d9c0de92` Phase 5 — ARCHITECTURE.md / VPS-SETUP.md / workstream status docs
 >
-> **Verified on the home box:** 27 MB stripped binary with zero libGL/libSDL/libX11/libvulkan/libcuda linkage, 60.1 fps sustained over 5s, determinism rig **460/460 match, 0 differ, 0 missing**, visual signoff via side-by-side headless server ↔ GPU mirror client. See `docs/ARCHITECTURE.md` "Mode 3: Headless" and `docs/VPS-SETUP.md` §9 for operator docs.
+> **Verified on the home box (dev):** 27 MB stripped binary with zero libGL/libSDL/libX11/libvulkan/libcuda linkage, 60.1 fps sustained over 5s, determinism rig **460/460 match, 0 differ, 0 missing**, visual signoff via side-by-side headless server ↔ GPU mirror client.
 >
-> Phase 4.1 (Dockerfile) builds cleanly but SIGBUSes at runtime inside the container — suspect seccomp/vmem namespace interaction with the SH4 dynarec's reserved-address strategy. Native/systemd deploy path works. Docker investigation deferred.
+> **Deployed to nobd.net VPS on 2026-04-08:** `maplecast-headless.service` running on `66.55.128.93`, bound `127.0.0.1:7210`. Relay flipped from `ws://74.101.20.197:7200` (home) to `ws://127.0.0.1:7210` (VPS-local) in a 42 ms reconnect. Live browsers auto-reconnected. Public `wss://nobd.net/ws` measured **59.7 fps** from the deploying machine. **Home box is no longer in the nobd.net production path.** Total VPS footprint: ~322 MB RAM (flycast 301 MB + relay 21 MB), ~12% of 2 vCPU.
+>
+> See `docs/ARCHITECTURE.md` "System Topology" + "Mode 3: Headless" for the new invariants and `docs/VPS-SETUP.md` §9 for operator docs.
+>
+> Phase 4.1 (Dockerfile) builds cleanly but SIGBUSes at runtime inside the container — suspect seccomp/vmem namespace interaction with the SH4 dynarec's reserved-address strategy. The native/systemd deploy path is what shipped to production. Docker investigation deferred — tracked in the "Headless Ideas Backlog" memory entry alongside the other experiments this unlocks.
 
 ---
 

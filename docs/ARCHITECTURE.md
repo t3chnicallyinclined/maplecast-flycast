@@ -2,54 +2,130 @@
 
 ## What Is MapleCast?
 
-MapleCast turns a Flycast Dreamcast emulator into a game streaming server. One instance of MVC2 runs on the server. Players connect with fight sticks (NOBD) or browser gamepads. The server streams the game to all connected clients in real-time via TA Mirror mode (raw GPU commands), zstd-compressed and fanned out through a Rust relay on a public VPS. Sub-5ms end-to-end latency on LAN; ~4 Mbps sustained over the internet.
+MapleCast turns a Flycast Dreamcast emulator into a game streaming server.
+One instance of MVC2 runs on the server. Players connect with fight sticks
+(NOBD) or browser gamepads. The server streams the game to all connected
+clients in real-time via TA Mirror mode (raw GPU commands), zstd-compressed
+and fanned out through a Rust relay on a public VPS.
+
+**Where does the game actually run?** As of 2026-04-08, the entire pipeline
+runs on a **single 2-vCPU VPS with no GPU**. Flycast is compiled in headless
+mode (`-DMAPLECAST_HEADLESS=ON`, see "Mode 3: Headless" below) with zero
+`libGL`/`libSDL`/`libX11`/`libvulkan`/`libcuda` linkage. The SH4 JIT, TA
+capture, VRAM diff, zstd compression, and WebSocket broadcast are all pure
+CPU. Total memory footprint on the VPS: ~322 MB (flycast ~301 MB + relay
+~21 MB). CPU utilization: ~12% of 2 vCPU. Sustained 60 fps to public
+`wss://nobd.net/ws`. The home box is no longer in the production path —
+nobd.net spectators never touch it.
+
+A separate GPU-backed flycast build still exists in the same source tree
+for local sub-1ms play at a physical cab. Both builds coexist from one
+checkout; see "Mode 3: Headless" and `docs/VPS-SETUP.md` §9.
 
 ## System Topology
 
 ```
-HOME (74.101.20.197)                  VPS (66.55.128.93 — nobd.net)        BROWSERS
-═════════════════════                 ═══════════════════════════════      ══════════
+VPS (66.55.128.93 — nobd.net)                                         BROWSERS
+═══════════════════════════════════════════                          ══════════
 
-┌──────────────────────┐              ┌──────────────────────────┐         ┌─────────┐
-│      FLYCAST          │              │   maplecast-relay (Rust) │         │  king   │
-│  (one binary)         │   wss://     │                          │  wss:// │  .html  │
-│                       │  ─────────►  │  - WebSocket upstream    │ ──────► │         │
-│ ┌────────┐ ┌────────┐│   compressed │  - zstd-aware fan-out    │ relay   │ renderer│
-│ │EMULATOR│ │ INPUT  ││  TA frames   │  - SYNC cache for late   │ frames  │  .wasm  │
-│ │ SH4 +  │◄│ SERVER ││              │    joiners               │         │  zstd   │
-│ │ PVR    │ │ 7100   ││              │  - signaling broadcast    │         │ decode  │
-│ └────────┘ └────────┘│              │  - text/bin → upstream    │         │         │
-│ ┌─────────────────┐  │              │                          │         └─────────┘
-│ │ STREAM SERVER   │  │              │  Listens 7201 (nginx ↦) │            │ ▲
-│ │ ws_server.cpp   │  │              │  Connects to flycast 7200│            │ │
-│ │ + mirror.cpp    │  │              └──────────────────────────┘            │ │
-│ │ + compress.h    │  │                          ▲                            │ │
-│ │  port 7200      │  │                          │                            │ │
-│ └─────────────────┘  │              ┌──────────────────────────┐            │ │
-└──────────────────────┘              │  nginx (HTTPS, certbot)  │  HTTPS    │ │
-                                       │  /  → static (king,wasm) │ ◄──────────┘ │
-                                       │  /ws → relay             │              │
-                                       │  /db → SurrealDB         │              │
-                                       └──────────────────────────┘              │
-                                                  │                              │
-                                       ┌──────────────────────────┐              │
-                                       │  SurrealDB (8000)        │              │
-                                       │  player, match, ELO      │ ◄────────────┘
-                                       │  badges, h2h, stats      │   /db queries
-                                       └──────────────────────────┘
+┌─────────────────────────────────────────┐                          ┌─────────┐
+│  maplecast-headless.service              │                          │  king   │
+│  (flycast, compile-out, no GPU libs)     │                          │  .html  │
+│                                           │                          │         │
+│  ┌───────────┐  ┌─────────────────┐      │                          │ renderer│
+│  │ EMULATOR  │  │ INPUT SERVER    │      │                          │  .wasm  │
+│  │ SH4 JIT + │◄─│ 7100/udp        │      │                          │  zstd   │
+│  │ TA parse  │  │ NOBD UDP + WS   │      │                          │ decode  │
+│  │ (norend)  │  │ input bridge    │      │                          │         │
+│  └───────────┘  └─────────────────┘      │                          └─────────┘
+│  ┌─────────────────────────────────┐     │                             ▲  ▲
+│  │ STREAM SERVER                   │     │                             │  │
+│  │  mirror.cpp + ws_server.cpp     │     │                             │  │
+│  │  + compress.h                   │     │                             │  │
+│  │  Listens: 127.0.0.1:7210        │     │                             │  │
+│  │  (relay-only; no public expose) │     │                             │  │
+│  └──────────────┬──────────────────┘     │                             │  │
+└─────────────────┼────────────────────────┘                             │  │
+                  │ ws://127.0.0.1:7210                                  │  │
+                  │ (zstd-compressed TA frames, ~900 Kbps idle,          │  │
+                  │  ~4 Mbps in-match)                                   │  │
+                  ▼                                                      │  │
+┌─────────────────────────────────────────┐                              │  │
+│  maplecast-relay.service (Rust)          │                              │  │
+│                                           │                              │  │
+│  - WebSocket upstream client              │                              │  │
+│  - zstd-aware fan-out                     │                              │  │
+│  - SYNC cache (80× compressed, 0.1 MB)    │                              │  │
+│  - signaling broadcast                    │                              │  │
+│  - text/bin → upstream                    │                              │  │
+│                                           │                              │  │
+│  Listens: 0.0.0.0:7201                    │                              │  │
+└──────────────┬──────────────────────────┘                               │  │
+               │ nginx /ws → 127.0.0.1:7201                               │  │
+               ▼                                                           │  │
+┌─────────────────────────────────────────┐                               │  │
+│  nginx (HTTPS, certbot, Let's Encrypt)   │                               │  │
+│  /       → static (king.html, wasm)      │ ──── HTTPS on 443 ──────────┘  │
+│  /ws     → relay  (wss://nobd.net/ws)    │                                │
+│  /db     → SurrealDB                     │                                │
+└─────────────────────────────────────────┘                                │
+               │                                                            │
+               ▼                                                            │
+┌─────────────────────────────────────────┐                                │
+│  SurrealDB (127.0.0.1:8000)              │                                │
+│  player, match, ELO, badges, h2h, stats  │ ◄───── /db queries ────────────┘
+└─────────────────────────────────────────┘
 ```
 
-### Pillar 1: Emulator (Flycast)
-The Dreamcast emulator. Runs MVC2 at 60fps. The game thinks it's talking to real controllers via the Maple Bus. It sends CMD9 (GetCondition) every frame to ask "what buttons are pressed?" The answer comes from `kcode[]` globals. The server also reads 253 bytes of MVC2 RAM each frame for live game state (health, combos, meter, characters).
+**Everything above lives on one VPS.** Two systemd services
+(`maplecast-headless` and `maplecast-relay`) plus nginx and SurrealDB.
+The flycast upstream listens only on localhost (`127.0.0.1:7210`) —
+outside traffic never reaches flycast directly, it always goes through
+the relay. This also means the input server on `:7100/udp` is
+VPS-bound, so NOBD sticks at a physical cab trying to hit it would
+need to know the VPS IP.
+
+### Pillar 1: Emulator (Flycast, headless)
+The Dreamcast emulator. Runs MVC2 at 60fps. The game thinks it's
+talking to real controllers via the Maple Bus. It sends CMD9
+(GetCondition) every frame to ask "what buttons are pressed?" The
+answer comes from `kcode[]` globals. The server also reads 253 bytes
+of MVC2 RAM each frame for live game state (health, combos, meter,
+characters). **In production this is the headless build** — zero
+GPU libraries, `norend` wired in, ~301 MB RSS, ~12% of 1 CPU. See
+"Mode 3: Headless" later in this doc.
 
 ### Pillar 2: Input Server (`maplecast_input_server.cpp`)
-Single source of truth for all player input. Receives from multiple sources, writes to one place. Tracks who's connected, their latency, their device type. Manages NOBD stick registration (rhythm-based binding to browser users), player queue ("I Got Next"), and slot assignment.
+Single source of truth for all player input. Receives from multiple
+sources, writes to one place. Tracks who's connected, their latency,
+their device type. Manages NOBD stick registration (rhythm-based
+binding to browser users), player queue ("I Got Next"), and slot
+assignment. Binds `0.0.0.0:7100/udp` on the VPS.
 
 ### Pillar 3: Stream Server (`maplecast_mirror.cpp` + `maplecast_ws_server.cpp` + `maplecast_compress.h`)
-Captures raw TA command buffers + 14 PVR registers + VRAM page diffs each frame, run-length-deltas the TA buffer vs the previous frame, then **zstd-compresses** the assembled frame (level 1, ~80us per frame) and broadcasts via WebSocket on port 7200. SHM ring buffer for local mirror clients stays uncompressed. Compressed envelope: `[ZCST(4)][uncompSize(4)][zstd blob]`. Sustained ~4 Mbps for 60fps MVC2.
+Captures raw TA command buffers + 14 PVR registers + VRAM page diffs
+each frame, run-length-deltas the TA buffer vs the previous frame,
+then **zstd-compresses** the assembled frame (level 1, ~80us per
+frame) and broadcasts via WebSocket. SHM ring buffer for local mirror
+clients stays uncompressed. Compressed envelope:
+`[ZCST(4)][uncompSize(4)][zstd blob]`. Sustained ~4 Mbps for 60fps
+MVC2 in-match, ~900 Kbps on a static title screen.
 
-### Pillar 4: Relay (`relay/` — Rust, on VPS)
-**This is a separate process running on a Vultr VPS at nobd.net.** Connects upstream as a WebSocket client to flycast:7200, fans frames out to up to 500 browser clients on port 7201. Maintains a SYNC cache so late joiners get instant initial state. ZCST-aware: decompresses for state inspection, forwards original compressed bytes downstream (zero re-encode overhead). Also forwards client-originated text/binary messages back to upstream flycast (player input, queue commands, chat).
+**Production listen address is `127.0.0.1:7210`** (loopback only —
+only the relay on the same VPS can reach it). The GPU-backed home
+build listens on `0.0.0.0:7200` instead, but that build isn't in
+the nobd.net production path anymore.
+
+### Pillar 4: Relay (`relay/` — Rust, on the same VPS)
+Connects upstream as a WebSocket client to `ws://127.0.0.1:7210`, fans
+frames out to up to 500 browser clients on port 7201. Maintains a
+SYNC cache so late joiners get instant initial state (cached SYNC is
+0.1 MB — the 8 MB full VRAM+PVR dump compresses 80× via zstd level 3).
+ZCST-aware: decompresses for state inspection, forwards original
+compressed bytes downstream (zero re-encode overhead). Also forwards
+client-originated text/binary messages back to upstream flycast
+(player input, queue commands, chat). nginx terminates TLS and
+reverse-proxies `/ws` → `127.0.0.1:7201`.
 
 ---
 
@@ -125,8 +201,8 @@ WebSocket (port 7200) ──→ maplecast_ws_server.cpp
 ### Mode 1: TA Mirror (Primary)
 
 ```
-Flycast Emulator (server, home box at 74.101.20.197)
-  │ PVR GPU renders frame via TA command list
+Flycast Emulator (headless server, VPS at 66.55.128.93, listens on 127.0.0.1:7210)
+  │ (no GPU — `norend` just runs ta_parse() on CPU, see Mode 3 below)
   ▼
 maplecast_mirror::serverPublish()            [maplecast_mirror.cpp]
   │
@@ -157,15 +233,17 @@ maplecast_mirror::serverPublish()            [maplecast_mirror.cpp]
   │
   ▼
 maplecast_ws::broadcastBinary()              [maplecast_ws_server.cpp]
-  │ Port 7200 WebSocket — sends compressed bytes
+  │ Binds 127.0.0.1:7210 (loopback on the VPS).
+  │ GPU/dev builds bind 0.0.0.0:7200 instead.
   │
   ▼
-══════════════════════ INTERNET ══════════════════════
-  │ ~6-15KB per frame instead of 15-40KB (60% bandwidth saved)
+══════════════════════ VPS LOOPBACK ══════════════════════
+  │ Zero network hop — flycast and relay are same-box neighbors.
+  │ ~6-15KB per frame (60% bandwidth saved vs uncompressed).
   │
   ▼
-MapleCast Relay (Rust, VPS at 66.55.128.93:7201)   [relay/src/fanout.rs]
-  │ Connects upstream as a WebSocket client
+MapleCast Relay (Rust, same VPS :7201)       [relay/src/fanout.rs]
+  │ Connects upstream: ws://127.0.0.1:7210
   │
   ├─ on_upstream_frame()
   │  │
@@ -541,7 +619,15 @@ SYNC:         "SYNC"(4) + vramSize(4) + vram(8MB) + pvrSize(4) + pvr(32KB)
   → `cd ~/projects/flycast-wasm/upstream/source/build-wasm && emmake make -j$(nproc)`
   → `cd ~/projects/flycast-wasm && bash upstream/link-ubuntu.sh`
   → 7z package → deploy → bump report timestamp
-- **Rust relay:** edit `relay/src/*.rs` → `cd relay && bash deploy.sh 66.55.128.93 74.101.20.197`
+- **Rust relay:** edit `relay/src/*.rs` → `cd relay && bash deploy.sh 66.55.128.93 127.0.0.1`
+  (upstream is now the VPS-local headless flycast on `127.0.0.1:7210`; the
+  old home IP `74.101.20.197` is no longer in the production path.)
+- **Headless flycast server:** edit any source file → rebuild locally with
+  `cmake --build build-headless -- -j$(nproc)` → run
+  `./deploy/scripts/deploy-headless.sh root@66.55.128.93` to ship the new
+  binary + systemd restart. The deploy script runs an `ldd` sanity check
+  before uploading; if the binary has any `libGL`/`libSDL`/`libX11` linkage
+  it bails.
 
 ### Dead code landmines
 
@@ -645,24 +731,32 @@ ctx.drawImage(frame, 0, 0)                Canvas render
 
 ---
 
-### Mode 3: Headless (No GPU)
+### Mode 3: Headless (No GPU) — PRODUCTION
 
-The headless build runs flycast on a CPU-only box — no `libGL`, no
-`libSDL2`, no `libX11`, no `libvulkan`, no window system at all. It
-produces **byte-identical** TA mirror wire to the GPU-backed build,
-enforced by the `MAPLECAST_DUMP_TA` determinism rig.
+**This is what's running on nobd.net as of 2026-04-08.** The headless
+build runs flycast on a CPU-only box — no `libGL`, no `libSDL2`, no
+`libX11`, no `libvulkan`, no window system at all. It produces
+**byte-identical** TA mirror wire to the GPU-backed build, enforced
+by the `MAPLECAST_DUMP_TA` determinism rig (460/460 TA buffers
+matched, 0 differ in the final validation run).
+
+The VPS instance runs as `maplecast-headless.service`, listens on
+`127.0.0.1:7210` (loopback only), and feeds directly into the
+relay on the same box — see "System Topology" above.
 
 **Two ways to enable headless:**
 
-1. **Runtime gate** on a GPU-capable build:
+1. **Runtime gate** on a GPU-capable build (useful for dev work on a
+   machine that has a display):
    ```bash
    MAPLECAST=1 MAPLECAST_MIRROR_SERVER=1 MAPLECAST_HEADLESS=1 \
      ./build/flycast /path/to/mvc2.gdi
    ```
-   Same binary as the home cab. Just takes a different branch at boot:
-   skips `os_CreateWindow()`, wires `norend`, bypasses the `imguiDriver`
-   null-check in `mainui_loop`, auto-loads the ROM, closes the GUI,
-   enters the `emu.render()` path directly.
+   Same binary that would also drive a physical cab if you wanted one.
+   Takes a different branch at boot: skips `os_CreateWindow()`, wires
+   `norend`, bypasses the `imguiDriver` null-check in `mainui_loop`,
+   auto-loads the ROM, closes the GUI, enters the `emu.render()` path
+   directly.
 
 2. **Compile-out build** for deployment on CPU-only hosts:
    ```bash
@@ -747,17 +841,37 @@ That's it. No graphics, no window system, no audio.
   strategy in `addrspace::reserve()`. Use the native systemd path until
   this is debugged.
 
-**Verified on the home box** (CPU-only runtime via the compile-out binary):
+**Verified on the home box, then deployed to the nobd.net VPS** (CPU-only
+runtime via the compile-out binary):
 
-| Metric | Value |
-|--------|-------|
-| Binary size | **27 MB stripped** |
-| `ldd` GPU libs | **zero** (no libGL/libSDL/libX11/libvulkan/libcuda/libpulse) |
-| Frame rate | **60.1 fps sustained** over 5s sample |
-| Bandwidth | **3.7 Mbps** zstd-compressed |
-| Wire magic | `ZCST` (correct envelope) |
-| Determinism rig | **460/460 TA buffers match, 0 differ, 0 missing** |
-| Visual signoff | GPU mirror client pointed at headless server renders MVC2 pixel-perfect |
+| Metric | Dev verification (home) | Production (VPS 66.55.128.93) |
+|---|---|---|
+| Binary size | 27 MB stripped | 26 MB stripped |
+| `ldd` forbidden libs | **zero** | **zero** |
+| Frame rate | 60.1 fps sustained over 5s | 59.7 fps sustained via public `wss://nobd.net/ws` |
+| Bandwidth | 3.7 Mbps (in-match) | ~900 Kbps (title screen idle), ~4 Mbps projected in-match |
+| Wire magic | `ZCST` (correct envelope) | `ZCST` (same wire) |
+| Determinism rig | **460/460 TA match, 0 differ** | — (not re-run on VPS; wire is the same) |
+| Visual signoff | GPU mirror client from headless server | Browser on nobd.net rendering VPS-backed MVC2 |
+| Memory (flycast) | ~300 MB RSS | **301 MB RSS** |
+| Memory (flycast + relay) | — | **322 MB total** (flycast 301 + relay 21) |
+| CPU (of one core) | ~24% | ~24% (~12% of 2 vCPU) |
+| Relay flip latency (old home upstream → new `127.0.0.1:7210`) | — | **42 ms** (clients auto-reconnected) |
+
+**2026-04-08 deploy timeline:**
+- T+0:   SSH, install `libxdp1` + `libzip4t64` on Ubuntu 24.04 VPS
+- T+30s: scp 26 MB flycast + 1.2 GB ROM + 6.7 MB savestate
+- T+60s: install layout, create `maplecast` user, systemd unit with
+         `MAPLECAST_SERVER_PORT=7210`, `MAPLECAST_ROM=/opt/maplecast/roms/mvc2.gdi`
+- T+65s: `systemctl enable --now maplecast-headless` → alive, listening on `:7210`
+- T+70s: `sed` relay `ExecStart` upstream from `ws://74.101.20.197:7200`
+         to `ws://127.0.0.1:7210`, `systemctl restart maplecast-relay`
+- T+72s: Relay reconnected to local headless upstream (42 ms handshake),
+         3 existing browser clients auto-reconnected, SYNC cached
+- T+80s: Verified from home network via `wss://nobd.net/ws` — **59.7 fps**
+
+The home box has been out of the nobd.net production path since
+T+70s on 2026-04-08.
 
 **Build pipeline** (add to the easy-to-forget steps list):
 
@@ -1080,11 +1194,63 @@ start_maplecast.sh               ← Starts flycast + telemetry + (optional) web
 
 ## Latency Budget
 
-### TA Mirror Mode (Primary)
+The budget depends on **where the flycast instance lives** relative to
+the player. There are two topologies:
+
+1. **VPS-resident headless flycast (nobd.net production, 2026-04-08+).**
+   Flycast and relay are on the same VPS box. Browsers on the internet
+   hit `wss://nobd.net/ws`. Player input pays **internet RTT from
+   player to VPS**. This is the live nobd.net stream for remote
+   spectators.
+
+2. **Home-resident GPU flycast (dev only).** Flycast runs on a local
+   box with a GPU, browser connects over LAN. Player input pays LAN
+   RTT (~0.2 ms). This is what you use when doing local development
+   or sitting at a physical cab.
+
+### Mode 1a — TA Mirror, VPS production (primary)
 
 ```
-BUTTON PRESS → PIXEL ON SCREEN
+BUTTON PRESS → PIXEL ON SCREEN (browser on the internet)
 
+Browser Gamepad:
+  Button press                    0µs
+  → Gamepad API state cache       0-16.67ms (vsync aligned, 60Hz monitor)
+  → rAF-burst poll detects        ~1ms
+  → WebSocket send                ~0.01ms
+  → TLS wrap + NIC queue          ~0.1ms
+  → Internet hop (browser→VPS)    varies by geo:
+                                   - same city:           ~5-10ms RTT → ~2.5-5ms one-way
+                                   - cross-country US:    ~40-70ms RTT → ~20-35ms one-way
+                                   - transoceanic:        ~150-200ms RTT → ~75-100ms one-way
+  → nginx TLS terminate           ~0.2ms
+  → Relay → local flycast         <0.1ms (loopback on VPS)
+  → Input server recvfrom         ~0.01ms
+  → kcode[] atomic store          ~10ns
+  ─── input latency (one-way) ─── ~3-100ms (dominated by geo)
+  → Wait for next vblank          0-16.67ms (frame alignment)
+  → SH4 processes input + renders included in frame
+  → TA capture + VRAM diff        ~0.5ms
+  → zstd compress (level 1)       ~80µs
+  → WebSocket emit → relay        <0.1ms (VPS loopback)
+  → Relay fanout                  <0.1ms (zero re-encode)
+  → Internet hop (VPS→browser)    same as input path, one-way
+  → TLS unwrap                    ~0.1ms
+  → WASM decode + WebGL render    ~2ms
+  ─── total E2E ────────────────── ~10-200ms depending on geo + monitor
+```
+
+**The internet RTT to the VPS is the single biggest variable.** A
+player in New Jersey to a VPS in New Jersey measures sub-20ms total;
+a player in Tokyo to a New Jersey VPS measures ~200ms total. The
+emulator itself only contributes ~3-5ms.
+
+### Mode 1b — TA Mirror, home LAN dev (legacy numbers)
+
+These are the numbers when flycast runs on a LAN box next to the
+player — useful if you're building a physical cab or doing local dev.
+
+```
 NOBD Stick (hardware, LAN):
   Button press                    0µs
   → GPIO → cmd9ReadyW3           1-2µs (firmware ISR)
@@ -1094,29 +1260,22 @@ NOBD Stick (hardware, LAN):
   → kcode[] atomic store         ~10ns
   ─── input latency ───          ~150µs
   → Wait for next vblank         0-16.67ms (frame alignment)
-  → CMD9 reads kcode[]           ~1ns
-  → Game processes input          included in frame
-  → GPU renders frame             included in frame
-  → TA capture + VRAM diff       ~0.5ms (publish)
-  → WebSocket send               ~0.01ms
+  → SH4 + TA capture             ~0.5ms
+  → WebSocket emit               ~0.01ms
   → Network (LAN)                ~0.2ms
   → WASM decode + WebGL render   ~2ms
   ─── total E2E ───              ~3-4ms + frame alignment
 
-Browser Gamepad (WebSocket):
+Browser Gamepad (WebSocket, LAN):
   Button press                    0µs
-  → Gamepad API state cache       0-16.67ms (cache refreshes at vsync,
-                                              60Hz monitor; ~7ms on 144Hz)
-  → rAF-burst poll detects change ~1ms (16 MessageChannel polls per vsync)
+  → Gamepad API state cache       0-16.67ms (vsync aligned)
+  → rAF-burst poll detects change ~1ms
   → WebSocket send                ~0.01ms
   → UDP forward to 7100           ~0.01ms
   → Input server recvfrom         ~0.01ms
   → kcode[] atomic store          ~10ns
-  ─── input latency ───           ~8ms avg, 17ms worst (60Hz monitor)
-                                  ~4ms avg, 8ms worst (144Hz monitor)
-  → (same render/publish path)
-  → TA capture + VRAM diff        ~0.5ms
-  → WebSocket send                ~0.01ms
+  ─── input latency ───           ~8ms avg, 17ms worst
+  → (same render/publish path as NOBD)
   → Network (LAN)                 ~0.2ms
   → WASM decode + WebGL render    ~2ms
   ─── total E2E ───               ~7ms + frame alignment
@@ -1189,16 +1348,31 @@ MAPLECAST_WEB_PORT=8000   # Web server port (default 8000)
 
 ## Ports
 
+**Production (nobd.net) — everything runs on the VPS as of 2026-04-08:**
+
+| Host | Port | Bind | Protocol | Purpose |
+|------|------|------|----------|---------|
+| VPS  | 7100 | 0.0.0.0 | UDP | NOBD stick input + WebSocket-forwarded browser input (input server) |
+| VPS  | 7210 | 127.0.0.1 | TCP (WebSocket) | **Headless flycast mirror server** — loopback only, relay consumes from here |
+| VPS  | 7201 | 0.0.0.0 | TCP (WebSocket) | maplecast-relay listens here. nginx `/ws` → 127.0.0.1:7201 |
+| VPS  | 7202 | 127.0.0.1 | HTTP | relay HTTP endpoint: `/metrics`, `/health`, `/api/*`, `/turn-cred` |
+| VPS  | 80   | 0.0.0.0 | HTTP  | nginx, redirects to HTTPS |
+| VPS  | 443  | 0.0.0.0 | HTTPS | nginx (Let's Encrypt) → static files + `/ws` + `/db` |
+| VPS  | 8000 | 127.0.0.1 | HTTP | SurrealDB (player auth, stats, ELO) |
+
+**Dev / home (GPU build, local development only):**
+
 | Host | Port | Protocol | Purpose |
 |------|------|----------|---------|
-| home | 7100 | UDP | NOBD stick input + WebSocket-forwarded browser input |
-| home | 7200 | TCP (WebSocket) | Mirror binary broadcast (ZCST compressed) + JSON lobby + WebRTC signaling. Relay connects here as upstream client |
+| home | 7100 | UDP | NOBD stick input (dev only) |
+| home | 7200 | TCP (WebSocket) | GPU flycast mirror server (dev only — NOT in nobd.net production path) |
 | home | 7300 | UDP | Telemetry (server → telemetry.py) |
-| home | 8000 | HTTP | Local dev web server (skipped when RELAY_ONLY=1) |
-| VPS  | 7201 | TCP (WebSocket) | maplecast-relay listens here. nginx /ws → 127.0.0.1:7201 |
-| VPS  | 80   | HTTP | nginx, redirects to HTTPS |
-| VPS  | 443  | HTTPS | nginx (Let's Encrypt) → static files + /ws + /db |
-| VPS  | 8000 | HTTP | SurrealDB (player auth, stats, ELO) |
+| home | 8000 | HTTP | Local dev web server (skipped when `RELAY_ONLY=1`) |
+
+When doing local dev against a home flycast, the browser at
+`http://localhost:8000/king.html` bypasses nginx and connects directly
+to the home flycast's `:7200`. Nothing on this side is talking to
+`nobd.net` or the VPS.
 
 ---
 
@@ -1216,7 +1390,27 @@ MAPLECAST_WEB_PORT=8000   # Web server port (default 8000)
 
 ## Current Performance (April 2026)
 
-### TA Mirror Mode (Primary)
+### TA Mirror Mode — VPS production (2026-04-08+)
+
+| Metric | Value |
+|--------|-------|
+| Host | VPS (2 vCPU, 2 GB RAM, no GPU) at 66.55.128.93 |
+| Binary | 26 MB stripped compile-out (`-DMAPLECAST_HEADLESS=ON`) |
+| Publish time (capture→send) | **~0.5ms** |
+| Browser WASM decode + render | ~2ms |
+| P1/P2 E2E | **dominated by internet RTT player↔VPS** (~10-200ms geo-dependent) |
+| FPS | **59.7** (measured via public `wss://nobd.net/ws`) |
+| Drops | 0 |
+| Bandwidth | ~900 Kbps idle, ~4 Mbps in-match (zstd level 1) |
+| SYNC bandwidth | **80× compression** (8 MB → 0.1 MB via zstd level 3) |
+| Frame size | ~15-40 KB uncompressed, ~6-15 KB on wire |
+| Resolution | Resolution-independent (client renders natively) |
+| Codec | Raw TA commands + VRAM page diffs |
+| Memory (flycast) | 301 MB RSS |
+| Memory (flycast + relay) | 322 MB total |
+| CPU | ~12% of 2 vCPU (~24% of one core) |
+
+### TA Mirror Mode — Home GPU build (dev only)
 
 | Metric | Value |
 |--------|-------|
@@ -1228,7 +1422,7 @@ MAPLECAST_WEB_PORT=8000   # Web server port (default 8000)
 | Drops | 0 |
 | Bandwidth | ~4 MB/s (~32 Mbps) |
 | Frame size | ~15-40KB |
-| Resolution | Resolution-independent (client renders natively) |
+| Resolution | Resolution-independent |
 | Codec | Raw TA commands + VRAM page diffs |
 
 ### H.264 Mode (Legacy)

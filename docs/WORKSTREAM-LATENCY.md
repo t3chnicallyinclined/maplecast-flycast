@@ -1,8 +1,51 @@
 # MapleCast Latency Workstream — Every Millisecond is Gold
 
+> **⚠️ 2026-04-08: TOPOLOGY CHANGED — THE NUMBERS BELOW ASSUME HOME LAN**
+>
+> Everything in this doc predates the VPS-resident headless flycast
+> deploy (2026-04-08). The "~7ms browser button-to-pixel" and
+> "~3-4ms NOBD" numbers were measured with flycast on a LAN box next
+> to the player.
+>
+> The nobd.net production topology now runs flycast on the VPS
+> (66.55.128.93). Browsers on the public internet pay **internet RTT
+> to the VPS**, which is geo-dependent:
+>
+> | Player location | RTT to VPS | One-way |
+> |---|---|---|
+> | Same city as VPS | 5-10 ms | 2.5-5 ms |
+> | Cross-country US | 40-70 ms | 20-35 ms |
+> | Transoceanic | 150-200 ms | 75-100 ms |
+>
+> The emulator itself still contributes only ~3-5 ms (publish, wire,
+> decode, WebGL render). The **dominant factor for remote spectators
+> is now internet RTT, not the emulator pipeline**. LAN-topology
+> optimizations (A1-A4, S1-S3 below) are still relevant for a
+> physical cab or local-LAN play, but they no longer apply to the
+> nobd.net public stream.
+>
+> The biggest remaining wins for the VPS topology are now:
+>
+> 1. **Player geo-sharding** — multiple VPS instances in different
+>    regions, clients pick the nearest. Would drop cross-country
+>    players from 40-70 ms to ~10 ms RTT.
+> 2. **Same-region VPS selection** for tournament events.
+> 3. **LAN bypass** (section S1 below) is still useful IF a player
+>    happens to be on the same LAN as a separate home/cab flycast.
+>    It's just not the primary path anymore.
+>
+> The numbers and phases below are preserved as historical reference
+> and as guidance for local-LAN play. Before executing any phase,
+> ask: "does this optimize the VPS topology or just the LAN topology?"
+> and weigh accordingly.
+
 ## Current State (TA Mirror Mode): ~7ms button-to-pixel (browser), ~3-4ms (NOBD)
 ## Previous State (H.264 only): ~35ms button-to-pixel (2.1 frames)
 ## Improvement: 28ms / 80% reduction over original H.264 pipeline
+
+> **These are LAN numbers** (flycast on the same box or LAN as the
+> player). The VPS production path has additional internet RTT on
+> top — see the topology note above.
 
 ---
 

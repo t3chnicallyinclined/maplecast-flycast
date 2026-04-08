@@ -1,5 +1,46 @@
 # WORKSTREAM: NOBD NATIVE CLIENT — "Pro Mode"
 
+> **⚠️ DESIGN PREMISE CHANGED — 2026-04-08**
+>
+> This doc was written when flycast ran on a **home box** and the VPS
+> relay fanned out to browsers over the internet. The native client's
+> killer feature was "skip the VPS entirely — connect directly to home
+> flycast for 6-15ms lower latency than browsers."
+>
+> **That topology no longer exists.** Since 2026-04-08 flycast runs on
+> the VPS (headless compile-out, no GPU), and the home box is out of
+> the nobd.net production path. See `docs/ARCHITECTURE.md` "System
+> Topology" and `docs/VPS-SETUP.md` §9.
+>
+> **What this means for the native client:**
+>
+> 1. "Direct to home" is no longer a shortcut — home isn't the
+>    authoritative instance anymore. The native client now has the
+>    same target as the browser: `wss://nobd.net/ws` (or
+>    `ws://66.55.128.93:7210` if you want to bypass nginx/relay, but
+>    `:7210` is loopback-only by default).
+>
+> 2. The latency win over the browser shrinks. It was "save the
+>    VPS relay hop + browser compositor overhead." Now it's just
+>    "save the browser compositor overhead" — still real (the Gamepad
+>    API vsync-aligned polling alone adds ~8ms), but smaller.
+>
+> 3. The biggest remaining native-client win is **input directness**:
+>    raw HID → UDP packet without Gamepad API delay, and output
+>    directly to a full-screen SDL window without browser compositor.
+>    Both still worth building, but the "direct to home" framing below
+>    is stale and should be reframed as "direct to VPS flycast".
+>
+> 4. The doc below is left intact as a historical record of the
+>    original design. Before executing any phase, reconcile the
+>    endpoint assumptions (references to "home flycast" / "home IP" /
+>    `74.101.20.197`) with the new VPS-resident topology.
+>
+> **If you're picking up this workstream fresh**: read this section,
+> then go read `docs/ARCHITECTURE.md` "System Topology" to understand
+> where flycast actually lives in production, then come back and
+> re-plan the endpoint resolution strategy in §9 accordingly.
+
 > **One-shot implementation guide.** Read top-to-bottom, execute in order. Do not skip phases. Every decision, file path, protocol byte, and edge case is captured here so an agent can land a working Windows/Linux/macOS client in a single pass.
 
 ---
