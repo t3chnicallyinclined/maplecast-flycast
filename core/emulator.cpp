@@ -43,6 +43,7 @@
 #include "network/maplecast_input_server.h"
 #include "network/maplecast_audio.h"
 #include "network/maplecast_mirror.h"
+#include "network/maplecast_control_ws.h"
 #include "hw/maple/maple_cfg.h"
 #include <cstdlib>
 #include <string>
@@ -1056,7 +1057,19 @@ void Emulator::start()
 
 	// Mirror server: captures TA commands + memory diffs to shared memory + WebSocket
 	if (std::getenv("MAPLECAST_MIRROR_SERVER"))
+	{
 		maplecast_mirror::initServer();
+
+		// Control WebSocket — loopback-bound JSON command channel for
+		// /overlord admin operations (savestate hot-load, soft reset,
+		// status query). Same lifecycle as the mirror server because
+		// it manipulates the same emulator state.
+		// See docs/WORKSTREAM-OVERLORD.md Phase A.
+		int controlPort = 7211;
+		if (const char* cpEnv = std::getenv("MAPLECAST_CONTROL_PORT"))
+			controlPort = std::atoi(cpEnv);
+		maplecast_control_ws::init(controlPort);
+	}
 
 	// Mirror client: receives TA deltas, renders only (no CPU)
 	if (std::getenv("MAPLECAST_MIRROR_CLIENT"))

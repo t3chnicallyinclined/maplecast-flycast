@@ -14,6 +14,7 @@
 #include "network/maplecast_stream.h"
 #endif
 #include "network/maplecast_mirror.h"
+#include "network/maplecast_control_ws.h"
 
 #include <mutex>
 #include <deque>
@@ -195,6 +196,15 @@ private:
 #endif
 		{
 			FC_PROFILE_SCOPE_NAMED("Renderer::Process");
+			// /overlord control WS: drain any queued admin commands
+			// (savestate save/load, reset) before publishing TA. This
+			// runs on the render thread so dc_savestate/dc_loadstate
+			// are called from the right thread; the WS handler thread
+			// just queues. After a load, the executor calls
+			// requestSyncBroadcast() so the next serverPublish below
+			// emits a fresh full SYNC and mirror clients realign.
+			if (maplecast_mirror::isServer())
+				maplecast_control_ws::drainCommandQueue();
 			// Mirror server: capture TA commands BEFORE Process consumes them
 			if (maplecast_mirror::isServer() && taContext)
 				maplecast_mirror::serverPublish(taContext);
