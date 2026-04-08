@@ -6,7 +6,7 @@ If you find a security issue in MapleCast — anything that could let someone ga
 
 Instead, report it privately:
 
-- **Email:** [t3chincallyinclined@proton.me](mailto:t3chincallyinclined@proton.me)
+- **Email:** [technicallyinclined@proton.me](mailto:technicallyinclined@proton.me)
 - **Subject line:** start with `[security]` so it doesn't get lost
 - **Include:** what you found, how to reproduce it, and what you think the impact is. A working PoC is appreciated but not required.
 
