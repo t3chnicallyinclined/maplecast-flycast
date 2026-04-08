@@ -62,7 +62,7 @@ cp dist/renderer.{mjs,wasm} ../../web/
 Deploy to VPS:
 
 ```bash
-scp web/renderer.{mjs,wasm} root@66.55.128.93:/var/www/maplecast/
+scp web/renderer.{mjs,wasm} root@<your-vps>:/var/www/maplecast/
 # Then bump the ?v=... cache buster in web/js/renderer-bridge.mjs and upload that too.
 ```
 

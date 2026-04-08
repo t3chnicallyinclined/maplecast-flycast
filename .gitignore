@@ -7,6 +7,12 @@ artifact/
 # the public repo. The local copy at ~/.claude/projects/... is unaffected.
 .claude/
 
+# Local archive of historical workstream docs. These were active during
+# development but contain operator-specific paths, home network IPs, and
+# stale topology references that aren't worth scrubbing for public consumption.
+# Kept on disk for the original author's context; never committed.
+docs-archive/
+
 # Local stick binding cache (NOBD identity bindings, not source)
 .maplecast/
 

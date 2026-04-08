@@ -25,7 +25,7 @@ checkout; see "Mode 3: Headless" and `docs/VPS-SETUP.md` §9.
 ## System Topology
 
 ```
-VPS (66.55.128.93 — nobd.net)                                         BROWSERS
+nobd.net VPS                                         BROWSERS
 ═══════════════════════════════════════════                          ══════════
 
 ┌─────────────────────────────────────────┐                          ┌─────────┐
@@ -201,7 +201,7 @@ WebSocket (port 7200) ──→ maplecast_ws_server.cpp
 ### Mode 1: TA Mirror (Primary)
 
 ```
-Flycast Emulator (headless server, VPS at 66.55.128.93, listens on 127.0.0.1:7210)
+Flycast Emulator (headless server, nobd.net VPS, listens on 127.0.0.1:7210)
   │ (no GPU — `norend` just runs ta_parse() on CPU, see Mode 3 below)
   ▼
 maplecast_mirror::serverPublish()            [maplecast_mirror.cpp]
@@ -577,7 +577,7 @@ SYNC:         "SYNC"(4) + vramSize(4) + vram(8MB) + pvrSize(4) + pvr(32KB)
 | Wasm garbles for ~10s after every scene transition then self-heals | MAX_FRAME drop (#6) — post-SYNC keyframe is being silently discarded |
 | Wasm vram diverges from server starting at scene-change SYNC, never recovers | Shadow reset missing after `broadcastFreshSync()` (#8) |
 | Wasm renders stuck for ~23 frames after every SYNC then re-converges | `_taHasPrev` not reset after `broadcastFreshSync()` (#7) |
-| Black screen, "[renderer] SYNC applied" but no KEYFRAME log | Relay lost upstream — `ssh root@66.55.128.93 journalctl -u maplecast-relay` |
+| Black screen, "[renderer] SYNC applied" but no KEYFRAME log | Relay lost upstream — `ssh root@<your-vps> journalctl -u maplecast-relay` |
 | Black screen after a wasm rebuild | Browser cache — bump `?v=...` in `web/js/renderer-bridge.mjs` |
 | SIGSEGV in TexCache on desktop client | `VramLockedWriteOffset` order wrong (#3) |
 | First keyframe takes >1s on connect | Server keyframe interval changed (default 60 frames) |
@@ -611,7 +611,7 @@ SYNC:         "SYNC"(4) + vramSize(4) + vram(8MB) + pvrSize(4) + pvr(32KB)
 - **king.html WASM renderer:** edit `packages/renderer/src/wasm_bridge.cpp`
   → `cd packages/renderer/build && emmake make -j$(nproc)`
   → `cp build/renderer.{mjs,wasm} ../../web/`
-  → `scp web/renderer.{mjs,wasm} root@66.55.128.93:/var/www/maplecast/`
+  → `scp web/renderer.{mjs,wasm} root@<your-vps>:/var/www/maplecast/`
   → **bump `?v=...` cache buster in `web/js/renderer-bridge.mjs`**
   → upload that too
 - **emulator.html WASM core:** edit `core/network/maplecast_wasm_bridge.cpp`
@@ -619,12 +619,12 @@ SYNC:         "SYNC"(4) + vramSize(4) + vram(8MB) + pvrSize(4) + pvr(32KB)
   → `cd ~/projects/flycast-wasm/upstream/source/build-wasm && emmake make -j$(nproc)`
   → `cd ~/projects/flycast-wasm && bash upstream/link-ubuntu.sh`
   → 7z package → deploy → bump report timestamp
-- **Rust relay:** edit `relay/src/*.rs` → `cd relay && bash deploy.sh 66.55.128.93 127.0.0.1`
+- **Rust relay:** edit `relay/src/*.rs` → `cd relay && bash deploy.sh <your-vps> 127.0.0.1`
   (upstream is now the VPS-local headless flycast on `127.0.0.1:7210`; the
-  old home IP `74.101.20.197` is no longer in the production path.)
+  old home IP `<old-home-ip>` is no longer in the production path.)
 - **Headless flycast server:** edit any source file → rebuild locally with
   `cmake --build build-headless -- -j$(nproc)` → run
-  `./deploy/scripts/deploy-headless.sh root@66.55.128.93` to ship the new
+  `./deploy/scripts/deploy-headless.sh root@<your-vps>` to ship the new
   binary + systemd restart. The deploy script runs an `ldd` sanity check
   before uploading; if the binary has any `libGL`/`libSDL`/`libX11` linkage
   it bails.
@@ -844,7 +844,7 @@ That's it. No graphics, no window system, no audio.
 **Verified on the home box, then deployed to the nobd.net VPS** (CPU-only
 runtime via the compile-out binary):
 
-| Metric | Dev verification (home) | Production (VPS 66.55.128.93) |
+| Metric | Dev verification (home) | Production (nobd.net VPS) |
 |---|---|---|
 | Binary size | 27 MB stripped | 26 MB stripped |
 | `ldd` forbidden libs | **zero** | **zero** |
@@ -864,7 +864,7 @@ runtime via the compile-out binary):
 - T+60s: install layout, create `maplecast` user, systemd unit with
          `MAPLECAST_SERVER_PORT=7210`, `MAPLECAST_ROM=/opt/maplecast/roms/mvc2.gdi`
 - T+65s: `systemctl enable --now maplecast-headless` → alive, listening on `:7210`
-- T+70s: `sed` relay `ExecStart` upstream from `ws://74.101.20.197:7200`
+- T+70s: `sed` relay `ExecStart` upstream from `ws://<old-home-ip>:7200`
          to `ws://127.0.0.1:7210`, `systemctl restart maplecast-relay`
 - T+72s: Relay reconnected to local headless upstream (42 ms handshake),
          3 existing browser clients auto-reconnected, SYNC cached
@@ -981,9 +981,9 @@ rationale and the Phase 1–5 history. Branch `headless-server`.
 │  Slot 0 (P1):                                    │
 │    connected: true                                │
 │    type: NobdUDP                                  │
-│    id: "nobd_192.168.1.100"                      │
+│    id: "nobd_192.0.2.100"                      │
 │    name: "NOBD Stick"                            │
-│    device: "NOBD 192.168.1.100:4977"             │
+│    device: "NOBD 192.0.2.100:4977"             │
 │    pps: 12200/s                                   │
 │    buttons: 0xFFFF (idle)                        │
 │    bound_to: "a1b2c3d4" (browser user ID)        │
@@ -998,7 +998,7 @@ rationale and the Phase 1–5 history. Branch `headless-server`.
 │    buttons: 0xFFFF (idle)                        │
 │                                                   │
 │  Stick Bindings:                                  │
-│    192.168.1.100:4977 → "a1b2c3d4" (browser ID)  │
+│    192.0.2.100:4977 → "a1b2c3d4" (browser ID)  │
 │    (registered via rhythm: 5 taps, pause, 5 taps) │
 │    Unregistered sticks are IGNORED, not routed    │
 │                                                   │
@@ -1394,7 +1394,7 @@ to the home flycast's `:7200`. Nothing on this side is talking to
 
 | Metric | Value |
 |--------|-------|
-| Host | VPS (2 vCPU, 2 GB RAM, no GPU) at 66.55.128.93 |
+| Host | VPS (2 vCPU, 2 GB RAM, no GPU) at nobd.net |
 | Binary | 26 MB stripped compile-out (`-DMAPLECAST_HEADLESS=ON`) |
 | Publish time (capture→send) | **~0.5ms** |
 | Browser WASM decode + render | ~2ms |

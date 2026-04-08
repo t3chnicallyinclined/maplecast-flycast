@@ -510,7 +510,7 @@ Hotkeys (when the modal is open):
 
 ```bash
 # From the VPS:
-ssh root@66.55.128.93 "python3 -c '
+ssh root@<your-vps> "python3 -c '
 import asyncio, json, websockets, time
 async def main():
     async with websockets.connect(\"ws://127.0.0.1:7201\") as ws:
