@@ -31,7 +31,14 @@ savestates/
 # copyrighted ROM content and must not ship in the public repo.
 # visual_cache/ holds the per-frame character animation extractions
 # (was 2 GB of MVC2 sprite frames at one point).
+# web/rend_textures/ and web/textures/ are MVC2 .rgba texture dumps
+# (~2400 files combined).
+# web/sprites/ holds the MVC2 character roster portrait PNGs (Capcom /
+# Marvel character art — copyrighted on multiple axes).
 visual_cache/
+web/rend_textures/
+web/textures/
+web/sprites/
 mvc2.webp
 *.webp
 
