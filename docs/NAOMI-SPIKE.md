@@ -1,9 +1,10 @@
 # Naomi MVC2 Spike — `naomi-mvc2-spike` branch
 
-**Branch base:** `wasm-determinism` @ a28fa8090 (overlord PLAYERS card)
-**Status:** Phase 0 complete — ROMs staged and CRC-verified. Building headless binary next.
+**Branch base:** `wasm-determinism` @ a28fa8090 (overlord PLAYERS card), then a cleanup pass landing in-flight uncommitted work as commits before the spike begins.
+**Status:** Phase 0 complete — ROMs staged and CRC-verified, branch cleaned up, headless binary built green (27 MB stripped, zero forbidden libs). Phase 1 (boot the cart) is next.
 
-**Branch base correction note:** Initially planned to branch off `maplecast`, but the headless server source code (norend wiring, `MAPLECAST_HEADLESS_BUILD` define, CMake compile-out, the entire shipped Phase 1-5 work) lives on `wasm-determinism` and was never merged back to `maplecast`. The 27 MB production binary on the VPS was built from `wasm-determinism`. Branching off `maplecast` would have required cherry-picking ~10-20 infrastructure commits, which is a fork by another name. We branched off `wasm-determinism` HEAD instead. Two stashes (`stash@{0}` web/collector WIP, `stash@{1}` core dead-code cleanup) are parked but not applied — they contain experimental work not needed for the spike.
+**Branch base note:** Initially planned to branch off `maplecast`, but the headless server source code (norend wiring, `MAPLECAST_HEADLESS_BUILD` define, CMake compile-out, the entire shipped Phase 1-5 work) lives on `wasm-determinism` and was never merged back to `maplecast`. The 27 MB production binary on the VPS was built from `wasm-determinism`. Branching off `maplecast` would have required cherry-picking ~10-20 infrastructure commits, which is a fork by another name. We branched off `wasm-determinism` HEAD instead, then committed a small pile of in-flight uncommitted work that committed source already depended on (input latch Phase A/B, the SIGUSR1 force-save broadcast, the dead-code purge, INPUT-LATCH.md, DEPLOYMENT.md). One stash (`stash@{0}`, web/collector WIP) remains parked — it's a different feature pile (overlord SPA / queue / king.html UI work) and doesn't belong on the spike branch.
+
 **Goal:** Validate that the headless flycast can boot Naomi MVC2 (USA M2 cart) and produce a byte-perfect TA mirror wire, as a precondition to migrating nobd.net production from Dreamcast MVC2 (mvc2.gdi) to the arcade original.
 
 The full plan and rationale lives in a local plan file (`floating-hatching-dove.md`) — not in the public repo. This doc is the public-safe summary.
