@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>KING OF MARVEL — Put Your Quarter Up</title>
-<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet" crossorigin="anonymous">
 <style>
 /* ============================================================
    KING OF MARVEL — SF2-inspired 80s arcade aesthetic
@@ -44,21 +44,9 @@ body {
   min-height: 100vh;
 }
 
-/* === SCANLINE OVERLAY (whole page subtle) === */
-body::after {
-  content: '';
-  position: fixed;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background: repeating-linear-gradient(
-    0deg,
-    transparent,
-    transparent 2px,
-    rgba(0,0,0,0.08) 2px,
-    rgba(0,0,0,0.08) 4px
-  );
-  pointer-events: none;
-  z-index: 9999;
-}
+/* SCANLINE OVERLAY REMOVED — was forcing full-viewport compositor blend
+   every frame at z-index 9999, adding 1-3ms overhead per frame.
+   Use per-screen scanlines via settings panel instead. */
 
 /* === TOP BANNER — THE MARQUEE === */
 .marquee-banner {
@@ -92,7 +80,7 @@ body::after {
   -webkit-text-fill-color: transparent;
   background-clip: text;
   text-shadow: none;
-  filter: drop-shadow(0 0 10px rgba(255,215,0,0.5));
+  text-shadow: 0 0 10px rgba(255,215,0,0.5);
   line-height: 1.4;
 }
 
@@ -330,30 +318,8 @@ body::after {
   image-rendering: pixelated;
 }
 
-/* CRT effect on game screen */
-#game-screen::after {
-  content: '';
-  position: absolute;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background: repeating-linear-gradient(
-    0deg,
-    transparent,
-    transparent 1px,
-    rgba(0,0,0,0.15) 1px,
-    rgba(0,0,0,0.15) 3px
-  );
-  pointer-events: none;
-  z-index: 5;
-}
-
-#game-screen::before {
-  content: '';
-  position: absolute;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background: radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,0.4) 100%);
-  pointer-events: none;
-  z-index: 6;
-}
+/* CRT effects on game screen — removed from pseudo-elements,
+   now controlled via settings panel checkboxes + applyCSSEffects() */
 
 /* INSERT COIN idle screen */
 .idle-screen {
@@ -391,7 +357,7 @@ body::after {
 .idle-screen .vs-art {
   font-size: 60px;
   margin-bottom: 20px;
-  filter: drop-shadow(0 0 20px rgba(255,215,0,0.3));
+  text-shadow: 0 0 20px rgba(255,215,0,0.3);
 }
 
 /* Match HUD overlay */
@@ -405,6 +371,10 @@ body::after {
   z-index: 4;
   background: linear-gradient(180deg, rgba(0,0,0,0.7) 0%, transparent 100%);
   display: none; /* shown during match */
+  /* Layer isolation — prevent HUD repaints from hitting canvas */
+  will-change: opacity;
+  transform: translateZ(0);
+  contain: layout style paint;
 }
 
 .match-hud.active { display: flex; }
@@ -433,16 +403,23 @@ body::after {
 
 .health-bar {
   height: 100%;
-  transition: width 0.3s;
+  width: 100%;
+  transform-origin: right;  /* P1 drains from left */
+  transform: scaleX(1);
+  transition: transform 0.2s ease-out;
+  will-change: transform;
 }
 
 .p1 .health-bar {
   background: linear-gradient(90deg, #1e90ff, #00bfff);
-  float: right;
+  transform-origin: right;
 }
 .p2 .health-bar {
   background: linear-gradient(90deg, #ff3030, #ff6060);
+  transform-origin: left;  /* P2 drains from right */
 }
+
+.streaming .health-bar { transition: none !important; }
 
 .health-bar-bg::after {
   content: '';
@@ -614,6 +591,21 @@ body::after {
   font-size: 8px;
   color: var(--sf2-yellow);
   animation: blink-coin 1s step-end infinite;
+}
+
+/* === RIGHT SIDEBAR CHAT (full height) === */
+.sidebar-right .chat-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  flex-shrink: 0;
+}
+
+.sidebar-right .chat-input-row {
+  position: sticky;
+  bottom: 0;
+  background: var(--bg-panel);
+  flex-shrink: 0;
 }
 
 /* === TICKER BAR === */
@@ -850,11 +842,7 @@ body::after {
   letter-spacing: 1px;
 }
 
-/* === BOTTOM — CHAT === */
-.chat-section {
-  background: var(--bg-panel);
-  border-top: 3px solid var(--gold-dim);
-}
+/* === CHAT (now in right sidebar) === */
 
 .chat-header {
   display: flex;
@@ -874,6 +862,7 @@ body::after {
 .chat-reactions {
   display: flex;
   gap: 4px;
+  flex-wrap: wrap;
 }
 
 .reaction-btn {
@@ -895,7 +884,7 @@ body::after {
 }
 
 .chat-messages {
-  height: 120px;
+  flex: 1;
   overflow-y: auto;
   padding: 8px 16px;
   font-size: 8px;
@@ -1075,29 +1064,95 @@ body::after {
   padding: 8px 14px;
   font-family: 'Press Start 2P', monospace;
   font-size: 7px;
-  background: transparent;
-  color: var(--gold);
-  border: 1px solid var(--gold-dim);
+  background: linear-gradient(180deg, var(--sf2-yellow) 0%, var(--sf2-orange) 100%);
+  color: #000;
+  border: 2px solid var(--gold);
   cursor: pointer;
   letter-spacing: 1px;
   transition: all 0.2s;
 }
 
 .btn-top-signin:hover {
-  background: rgba(255,215,0,0.1);
-  border-color: var(--gold);
+  transform: scale(1.05);
+  box-shadow: 0 0 12px rgba(255,215,0,0.4);
 }
 
-.user-info {
+/* === USER BADGE (signed in) === */
+.user-badge {
   display: none;
   align-items: center;
   gap: 8px;
+  padding: 6px 12px;
+  background: linear-gradient(180deg, rgba(30,20,60,0.9) 0%, rgba(15,10,30,0.9) 100%);
+  border: 2px solid var(--gold-dim);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
+}
+.user-badge:hover {
+  border-color: var(--gold);
+  box-shadow: 0 0 15px rgba(255,215,0,0.3);
+}
+.user-badge.active { display: flex; }
+
+.user-badge .badge-avatar {
+  width: 32px; height: 32px;
+  font-size: 22px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255,215,0,0.1);
+  border: 1px solid var(--gold-dim);
+  border-radius: 4px;
+}
+.user-badge .badge-info { line-height: 1.4; }
+.user-badge .badge-name {
   font-size: 8px;
   color: var(--gold);
+  letter-spacing: 1px;
+}
+.user-badge .badge-rank {
+  font-size: 6px;
+  color: var(--neon-cyan);
+  letter-spacing: 0;
+}
+.user-badge .badge-arrow {
+  font-size: 8px;
+  color: var(--gray);
+  margin-left: 4px;
 }
 
-.user-info .user-avatar { font-size: 16px; }
-.user-info .user-name { letter-spacing: 1px; }
+/* User dropdown menu */
+.user-dropdown {
+  display: none;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  background: rgba(10,10,20,0.97);
+  border: 2px solid var(--gold-dim);
+  border-radius: 4px;
+  min-width: 160px;
+  z-index: 200;
+}
+.user-dropdown.open { display: block; }
+.user-dropdown-item {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 7px;
+  color: var(--white);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid #1a1a2e;
+  cursor: pointer;
+  text-align: left;
+  letter-spacing: 0;
+}
+.user-dropdown-item:hover { background: rgba(255,215,0,0.1); color: var(--gold); }
+.user-dropdown-item:last-child { border-bottom: none; }
+.user-dropdown-item.signout { color: var(--hot-red); }
+.user-dropdown-item.signout:hover { background: rgba(255,0,0,0.1); }
 
 /* === HERE COMES A NEW CHALLENGER === */
 .challenger-overlay {
@@ -1166,25 +1221,551 @@ body::after {
 @media (max-width: 600px) {
   .title-main { font-size: 16px; }
   .marquee-banner { padding: 8px 10px; }
-  .chat-messages { height: 80px; }
+  .chat-messages { min-height: 80px; }
   .viewer-bar { gap: 12px; font-size: 7px; }
 }
+
+/* === GAME CANVAS (WASM renderer) === */
+#game-canvas {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100% !important; height: 100% !important;
+  z-index: 1;
+  image-rendering: pixelated;
+  /* GPU layer promotion + repaint isolation — OVERKILL */
+  will-change: transform;
+  transform: translateZ(0);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  contain: strict;
+}
+
+/* === SETTINGS GEAR (overlay on game screen) === */
+.settings-gear {
+  position: absolute;
+  bottom: 8px; right: 8px;
+  z-index: 20;
+  width: 32px; height: 32px;
+  background: rgba(0,0,0,0.6);
+  border: 1px solid #444;
+  border-radius: 50%;
+  color: #aaa;
+  font-size: 18px;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.2s;
+  font-family: sans-serif;
+}
+.settings-gear:hover { color: var(--gold); border-color: var(--gold-dim); background: rgba(0,0,0,0.8); }
+
+/* === SETTINGS PANEL (slides out from cabinet) === */
+.settings-panel {
+  display: none;
+  position: absolute;
+  bottom: 0; right: 0;
+  width: 280px;
+  max-height: 100%;
+  overflow-y: auto;
+  background: rgba(10,10,20,0.95);
+  border: 2px solid var(--gold-dim);
+  border-radius: 4px 0 0 0;
+  z-index: 20;
+  padding: 10px;
+  font-size: 8px;
+}
+.settings-panel.open { display: block; }
+
+.settings-panel h4 {
+  color: var(--gold);
+  font-size: 8px;
+  letter-spacing: 2px;
+  margin: 8px 0 4px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid #333;
+}
+.settings-panel h4:first-child { margin-top: 0; }
+
+.settings-panel label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+  color: #ccc;
+  cursor: pointer;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 7px;
+}
+
+.settings-panel select,
+.settings-panel input[type=range] {
+  flex: 1;
+  background: #111;
+  color: var(--neon-cyan);
+  border: 1px solid #333;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 7px;
+  padding: 2px;
+}
+
+.settings-panel input[type=checkbox] {
+  width: 14px; height: 14px;
+  accent-color: var(--gold);
+}
+
+.settings-panel .val {
+  color: var(--neon-cyan);
+  min-width: 30px;
+  text-align: right;
+  font-size: 7px;
+}
+
+.settings-panel .preset-row {
+  display: flex;
+  gap: 4px;
+  margin: 6px 0;
+}
+
+.settings-panel .preset-btn {
+  flex: 1;
+  padding: 6px 4px;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 6px;
+  background: rgba(255,255,255,0.05);
+  color: var(--gold);
+  border: 1px solid var(--gold-dim);
+  cursor: pointer;
+  text-align: center;
+  letter-spacing: 0;
+}
+.settings-panel .preset-btn:hover { background: rgba(255,215,0,0.1); }
+
+/* === STREAMING MODE — pause ALL non-essential animations + hide pseudo-elements === */
+.streaming .marquee-banner::before,
+.streaming .cabinet-marquee::after,
+.streaming .btn-got-next::before,
+.streaming .current-king,
+.streaming .hud-combo.visible,
+.streaming .chat-msg,
+.streaming .ticker-content,
+.streaming .match-results .result-title,
+.streaming .challenger-overlay .challenger-text {
+  animation-play-state: paused !important;
+}
+/* Hide pseudo-elements that create extra compositor layers over canvas */
+.streaming .screen-bezel::before,
+.streaming .health-bar-bg::after {
+  display: none !important;
+}
+
+/* conn-status removed — info lives in diagnostics panel now */
+
+/* === DIAGNOSTICS OVERLAY === */
+.diag-overlay {
+  display: none;
+  position: absolute;
+  top: 8px; right: 8px;
+  z-index: 22;
+  background: rgba(0,0,0,0.85);
+  color: #0f0;
+  font-family: monospace;
+  font-size: 9px;
+  padding: 8px;
+  border: 1px solid #333;
+  white-space: pre;
+  min-width: 220px;
+  pointer-events: none;
+  line-height: 1.5;
+}
+.diag-overlay.open { display: block; }
+
+.diag-toggle {
+  position: absolute;
+  bottom: 8px; left: 8px;
+  z-index: 20;
+  width: 32px; height: 32px;
+  background: rgba(0,0,0,0.6);
+  border: 1px solid #444;
+  border-radius: 50%;
+  color: #0f0;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.2s;
+  font-family: monospace;
+  font-weight: bold;
+}
+.diag-toggle:hover { color: var(--neon-green); border-color: var(--neon-green); background: rgba(0,0,0,0.8); }
+
+/* === PLAYER NAME OVERLAY (on game screen) === */
+.name-overlay {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  z-index: 3;
+  pointer-events: none;
+  padding: 6px 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+}
+.name-overlay .p-name {
+  font-family: "Impact","Arial Black","Helvetica Neue",sans-serif;
+  font-weight: 900;
+  font-size: 12px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  -webkit-text-stroke: 1.5px #000;
+  paint-order: stroke fill;
+  line-height: 1.2;
+}
+.name-overlay .p-name.p1 { color: #FFD700; }
+.name-overlay .p-name.p2 { color: #00E5FF; text-align: right; }
+.name-overlay .p-record {
+  font-family: "Impact","Arial Black",sans-serif;
+  font-size: 9px;
+  font-weight: 700;
+  -webkit-text-stroke: 1px #000;
+  paint-order: stroke fill;
+}
+.name-overlay .p-record.p1 { color: #DAA520; }
+.name-overlay .p-record.p2 { color: #00ACC1; }
+
+/* === STICK REGISTER STATUS === */
+.register-status {
+  display: none;
+  font-size: 7px;
+  color: var(--sf2-yellow);
+  text-align: center;
+  padding: 4px 8px;
+  letter-spacing: 0;
+  line-height: 1.4;
+}
+
+/* === MY STATUS BAR (below cabinet — playing/queue/spectator) === */
+.my-status-bar {
+  margin-top: 8px;
+  font-size: 8px;
+  color: var(--gray);
+  text-align: center;
+  letter-spacing: 1px;
+}
+.my-status-bar.playing { color: var(--neon-green); }
+.my-status-bar.in-queue { color: var(--sf2-yellow); }
+
+/* === USER PROFILE MODAL === */
+.profile-modal .modal-box { width: 420px; }
+
+.profile-tabs {
+  display: flex;
+  border-bottom: 2px solid #222;
+  background: #0a0a18;
+}
+.profile-tab {
+  flex: 1;
+  padding: 8px 4px;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 7px;
+  text-align: center;
+  background: transparent;
+  color: var(--gray);
+  border: none;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.profile-tab:hover { color: var(--white); }
+.profile-tab.active { color: var(--gold); border-bottom-color: var(--gold); }
+
+.profile-content { padding: 12px 16px; min-height: 200px; }
+.profile-section { display: none; }
+.profile-section.active { display: block; }
+
+.profile-stat-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 5px 0;
+  border-bottom: 1px solid #1a1a2e;
+  font-size: 7px;
+}
+.profile-stat-label { color: var(--gray); }
+.profile-stat-value { color: var(--neon-cyan); }
+
+/* Button Tester */
+.btn-tester {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+}
+.btn-tester-pad-name {
+  font-size: 7px;
+  color: var(--sf2-yellow);
+  text-align: center;
+  letter-spacing: 0;
+}
+.btn-tester-layout {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+.btn-tester-dpad {
+  display: grid;
+  grid-template: 24px 24px 24px / 24px 24px 24px;
+  gap: 2px;
+}
+.dpad-btn {
+  width: 24px; height: 24px;
+  background: #1a1a2e;
+  border: 1px solid #333;
+  border-radius: 2px;
+  transition: background 0.05s;
+}
+.dpad-btn.pressed { background: var(--neon-green); border-color: var(--neon-green); }
+.btn-tester-face {
+  display: grid;
+  grid-template: 28px 28px / 28px 28px;
+  gap: 4px;
+}
+.face-btn {
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  border: 2px solid #444;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 8px;
+  font-family: 'Press Start 2P', monospace;
+  color: #666;
+  transition: all 0.05s;
+}
+.face-btn.pressed { border-color: #fff; color: #fff; }
+.face-btn.red { background: #330000; }
+.face-btn.red.pressed { background: #cc0000; }
+.face-btn.blue { background: #000033; }
+.face-btn.blue.pressed { background: #0000cc; }
+.face-btn.green { background: #003300; }
+.face-btn.green.pressed { background: #00aa00; }
+.face-btn.yellow { background: #333300; }
+.face-btn.yellow.pressed { background: #ccaa00; }
+
+.btn-tester-triggers {
+  display: flex;
+  justify-content: center;
+  gap: 30px;
+}
+.trigger-bar-wrap {
+  text-align: center;
+  font-size: 6px;
+  color: var(--gray);
+}
+.trigger-bar {
+  width: 50px; height: 8px;
+  background: #1a1a2e;
+  border: 1px solid #333;
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 2px;
+}
+.trigger-fill {
+  height: 100%;
+  background: var(--neon-cyan);
+  width: 0%;
+  transition: width 0.05s;
+}
+.btn-tester-extra {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+}
+.extra-btn {
+  padding: 3px 8px;
+  font-size: 6px;
+  font-family: 'Press Start 2P', monospace;
+  background: #1a1a2e;
+  border: 1px solid #333;
+  color: #666;
+  border-radius: 2px;
+  transition: all 0.05s;
+}
+.extra-btn.pressed { background: var(--sf2-yellow); color: #000; border-color: var(--sf2-yellow); }
+
+.pad-list-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid #1a1a2e;
+  font-size: 7px;
+}
+.pad-list-item .pad-type { color: var(--neon-cyan); font-size: 6px; }
+.pad-list-item .pad-status { font-size: 6px; }
+.pad-list-item .pad-status.online { color: var(--neon-green); }
+.pad-list-item .pad-status.offline { color: var(--gray); }
 
 /* Scrollbar styling */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg-dark); }
 ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #555; }
+/* ============================================================
+   EMBED MODE — used by /overlord live preview iframe.
+   Activated by ?embed=1 in the URL.
+   Strategy: use `display: contents` on every ancestor of the
+   game canvas so they collapse to their children (no box, no
+   styling) without `display:none`-ing them (which would hide
+   the canvas inside). All non-canvas-chain elements get
+   visibility:hidden + display:none so they don't paint or
+   take space. Finally, pin the canvas full-viewport.
+   ============================================================ */
+body.embed-mode {
+  background: #000 !important;
+  overflow: hidden !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+/* Collapse the chain ancestors of the canvas to their children only.
+   `display: contents` means "render my children but I have no box of
+   my own" — bezel/cabinet/marquee styling all evaporates. */
+body.embed-mode .main-layout,
+body.embed-mode .cabinet-area,
+body.embed-mode .cabinet-frame,
+body.embed-mode .screen-bezel,
+body.embed-mode #game-screen {
+  display: contents !important;
+}
+
+/* Hide everything else in the body that isn't part of the canvas
+   chain. We list direct children of <body> by class — anything not
+   on the path to the canvas gets nuked. */
+body.embed-mode > .top-signin,
+body.embed-mode > .marquee-banner,
+body.embed-mode > .ticker,
+body.embed-mode > .modal,
+body.embed-mode > div:not(.main-layout):not(#embedHost) {
+  display: none !important;
+}
+
+/* And inside main-layout, hide everything except the cabinet-area. */
+body.embed-mode .main-layout > *:not(.cabinet-area) {
+  display: none !important;
+}
+
+/* Inside cabinet-area, hide everything except cabinet-frame. */
+body.embed-mode .cabinet-area > *:not(.cabinet-frame) {
+  display: none !important;
+}
+
+/* Inside cabinet-frame, hide marquee + chrome — only screen-bezel
+   stays. */
+body.embed-mode .cabinet-frame > *:not(.screen-bezel) {
+  display: none !important;
+}
+
+/* Inside screen-bezel, only #game-screen stays. */
+body.embed-mode .screen-bezel > *:not(#game-screen) {
+  display: none !important;
+}
+
+/* Inside #game-screen, only the canvas stays — hide diagnostics
+   overlay, name overlay, etc. */
+body.embed-mode #game-screen > *:not(#game-canvas) {
+  display: none !important;
+}
+
+/* Pin the canvas full-viewport. position:fixed escapes the
+   layout flow so display:contents ancestors don't matter for
+   sizing. */
+body.embed-mode #game-canvas {
+  display: block !important;
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: 100vw !important;
+  max-height: 100vh !important;
+  object-fit: contain !important;
+  background: #000 !important;
+  z-index: 999999 !important;
+  border: none !important;
+  box-shadow: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+/* ============================================================
+<script>
+// Apply embed mode BEFORE the main app boots so spectator UI never
+// flashes for a frame. Triggered by ?embed=1 in the URL — used by
+// the /overlord admin dashboard's live preview iframe.
+if (new URLSearchParams(window.location.search).get('embed') === '1') {
+  document.documentElement.classList.add('embed-mode-html');
+  document.addEventListener('DOMContentLoaded', () => {
+    document.body.classList.add('embed-mode');
+  });
+  // If body is already parsed by the time this script runs, apply now too.
+  if (document.body) document.body.classList.add('embed-mode');
+}
+</script>
+   EMBED MODE — used by /overlord live preview iframe.
+   Activated by ?embed=1 in the URL. Hides all spectator UI
+   (chat, queue, leaderboard, top bar, marquee) and centers the
+   game canvas full-viewport so admin operators can see exactly
+   what the cab is rendering with zero distractions.
+   ============================================================ */
+body.embed-mode {
+  background: #000 !important;
+  overflow: hidden !important;
+}
+body.embed-mode > *:not(.screen-bezel-wrapper):not(#embedHost) { display: none !important; }
+body.embed-mode .top-signin,
+body.embed-mode .marquee-banner,
+body.embed-mode .leaderboard-panel,
+body.embed-mode .chat-panel,
+body.embed-mode .queue-panel,
+body.embed-mode .player-cards-panel,
+body.embed-mode .ticker,
+body.embed-mode .signin-modal,
+body.embed-mode .profile-modal,
+body.embed-mode .settings-modal,
+body.embed-mode #signInModal,
+body.embed-mode #profileModal,
+body.embed-mode #settingsModal,
+body.embed-mode .arcade-cabinet > *:not(.screen-bezel) { display: none !important; }
+body.embed-mode .arcade-cabinet,
+body.embed-mode .cabinet-wrapper { background: #000 !important; box-shadow: none !important; padding: 0 !important; margin: 0 !important; border: none !important; }
+body.embed-mode .screen-bezel { border: none !important; box-shadow: none !important; padding: 0 !important; margin: 0 !important; background: #000 !important; }
+body.embed-mode #game-screen { border: none !important; box-shadow: none !important; padding: 0 !important; margin: 0 !important; background: #000 !important; width: 100vw !important; height: 100vh !important; display: flex !important; align-items: center !important; justify-content: center !important; }
+body.embed-mode #game-canvas { max-width: 100vw !important; max-height: 100vh !important; width: auto !important; height: auto !important; }
 </style>
+<script>
+// Apply embed mode BEFORE the main app boots so spectator UI never
+// flashes for a frame. Triggered by ?embed=1 in the URL — used by
+// the /overlord admin dashboard's live preview iframe.
+if (new URLSearchParams(window.location.search).get('embed') === '1') {
+  document.documentElement.classList.add('embed-mode-html');
+  document.addEventListener('DOMContentLoaded', () => {
+    document.body.classList.add('embed-mode');
+  });
+  // If body is already parsed by the time this script runs, apply now too.
+  if (document.body) document.body.classList.add('embed-mode');
+}
+</script>
 </head>
 <body>
 
 <!-- SIGN IN (top right) -->
 <div class="top-signin">
   <button class="btn-top-signin" id="signinBtn" onclick="openSignIn()">SIGN IN</button>
-  <div class="user-info" id="userInfo">
-    <span class="user-avatar" id="userAvatar"></span>
-    <span class="user-name" id="userName"></span>
+  <div class="user-badge" id="userBadge" onclick="toggleUserMenu(event)">
+    <div class="badge-avatar" id="userAvatar"></div>
+    <div class="badge-info">
+      <div class="badge-name" id="userName"></div>
+      <div class="badge-rank" id="userRank">WARRIOR</div>
+    </div>
+    <div class="badge-arrow">&#x25BC;</div>
+    <div class="user-dropdown" id="userDropdown">
+      <button class="user-dropdown-item" onclick="openProfile(); event.stopPropagation();">MY PROFILE</button>
+      <button class="user-dropdown-item" onclick="openSettings(); event.stopPropagation();">SETTINGS</button>
+      <button class="user-dropdown-item signout" onclick="signOut(); event.stopPropagation();">SIGN OUT</button>
+    </div>
   </div>
 </div>
 
@@ -1194,8 +1775,8 @@ body::after {
   <div class="title-sub">MARVEL VS CAPCOM 2 &mdash; ONLINE ARCADE</div>
   <div class="current-king">
     <span class="crown">&#x1F451;</span>
-    <span class="king-name" id="kingName">SHADOW_KING</span>
-    <span class="king-streak" id="kingStreak">12 WIN STREAK</span>
+    <span class="king-name" id="kingName">NO KING</span>
+    <span class="king-streak" id="kingStreak">CABINET OPEN</span>
   </div>
 </div>
 
@@ -1209,16 +1790,58 @@ body::after {
 <!-- MAIN 3-COLUMN LAYOUT -->
 <div class="main-layout">
 
-  <!-- LEFT: HALL OF FAME -->
+  <!-- LEFT: LIVE ARCADE + HALL OF FAME -->
   <div class="sidebar-left">
+    <div class="panel-header">&#x1F3AE; LIVE ARCADE</div>
+
+    <!-- Now Playing -->
+    <div class="now-playing">
+      <div class="np-header">&#x26A1; NOW PLAYING</div>
+      <div class="np-vs">
+        <div class="np-player p1">
+          <div class="np-label">P1</div>
+          <div class="np-name" id="npP1">OPEN</div>
+          <div class="np-record" id="npP1Record">PRESS START</div>
+        </div>
+        <div class="np-vs-text">VS</div>
+        <div class="np-player p2">
+          <div class="np-label">P2</div>
+          <div class="np-name" id="npP2">OPEN</div>
+          <div class="np-record" id="npP2Record">PRESS START</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- I GOT NEXT -->
+    <div class="got-next-section">
+      <button class="btn-got-next" id="gotNextBtn" onclick="gotNext()">
+        &#x1FA99; I GOT NEXT
+      </button>
+      <button class="btn-leave-queue" id="leaveQueueBtn" onclick="leaveQueue()">
+        &#x274C; LEAVE LINE
+      </button>
+      <button class="btn-leave-queue" id="leaveGameBtn" onclick="leaveGame()" style="display:none;color:var(--hot-red);border-color:var(--hot-red);">
+        &#x1F6AA; DISCONNECT
+      </button>
+    </div>
+
+    <!-- The Queue -->
+    <div class="queue-section">
+      <div class="queue-header">NEXT UP</div>
+      <div class="queue-list" id="queueList">
+        <!-- filled by JS -->
+      </div>
+    </div>
+
+    <!-- Hall of Fame -->
     <div class="panel-header">&#x1F3C6; HALL OF FAME</div>
     <div class="leaderboard-tabs">
       <button class="lb-tab active" onclick="switchTab(this,'streak')">STREAK</button>
       <button class="lb-tab" onclick="switchTab(this,'combo')">COMBO</button>
-      <button class="lb-tab" onclick="switchTab(this,'speed')">SPEED</button>
+      <button class="lb-tab" onclick="switchTab(this,'speed')">OCV</button>
       <button class="lb-tab" onclick="switchTab(this,'perfect')">PERFECT</button>
-      <button class="lb-tab" onclick="switchTab(this,'masher')">MASHER</button>
-      <button class="lb-tab" onclick="switchTab(this,'surgeon')">SURGEON</button>
+      <button class="lb-tab" onclick="switchTab(this,'masher')">COMEBACK</button>
+      <button class="lb-tab" onclick="switchTab(this,'surgeon')">CLUTCH</button>
     </div>
     <div class="leaderboard-list" id="leaderboardList">
       <!-- filled by JS -->
@@ -1233,7 +1856,83 @@ body::after {
       </div>
       <div class="screen-bezel">
         <div id="game-screen">
-          <!-- Idle screen (shown when no match) -->
+          <!-- WASM renderer canvas -->
+          <canvas id="game-canvas" width="640" height="480"></canvas>
+
+          <!-- Diagnostics toggle -->
+          <button class="diag-toggle" id="diagToggle" onclick="toggleDiag()" title="Diagnostics">&#x2139;</button>
+
+          <!-- Diagnostics overlay -->
+          <div class="diag-overlay" id="diagOverlay"></div>
+
+          <!-- Player name overlay -->
+          <div class="name-overlay" id="nameOverlay"></div>
+
+          <!-- Settings gear -->
+          <button class="settings-gear" id="settingsGear" onclick="toggleSettings()" title="Video Settings">&#x2699;</button>
+
+          <!-- Settings panel -->
+          <div class="settings-panel" id="settingsPanel">
+            <h4>QUALITY</h4>
+            <label>Resolution:
+              <select id="opt_resolution" onchange="setOpt(0, this.value)">
+                <option value="480" selected>480p (Native)</option>
+                <option value="720">720p</option>
+                <option value="960">960p</option>
+                <option value="1440">1440p</option>
+                <option value="1920">1080p (4x)</option>
+              </select>
+            </label>
+            <label>Aniso Filter:
+              <select id="opt_aniso" onchange="setOpt(5, this.value)">
+                <option value="1" selected>Off</option>
+                <option value="2">2x</option>
+                <option value="4">4x</option>
+                <option value="8">8x</option>
+                <option value="16">16x</option>
+              </select>
+            </label>
+            <label>Tex Filter:
+              <select id="opt_texfilter" onchange="setOpt(6, this.value)">
+                <option value="0" selected>Default</option>
+                <option value="1">Nearest</option>
+                <option value="2">Linear</option>
+              </select>
+            </label>
+            <label>Transparency:
+              <select id="opt_layers" onchange="setOpt(7, this.value)">
+                <option value="4" selected>4 (Fast)</option>
+                <option value="8">8</option>
+                <option value="16">16</option>
+                <option value="32">32 (Best)</option>
+              </select>
+            </label>
+
+            <h4>FEATURES</h4>
+            <label><input type="checkbox" id="opt_fog" onchange="setOpt(2, this.checked?1:0)"> Fog</label>
+            <label><input type="checkbox" id="opt_modvol" onchange="setOpt(3, this.checked?1:0)"> Modifier Volumes</label>
+            <label><input type="checkbox" id="opt_pstrip" onchange="setOpt(4, this.checked?1:0)"> Per-Strip Sort</label>
+
+            <h4>POST-PROCESSING</h4>
+            <label><input type="checkbox" id="css_scanlines" onchange="applyCSSEffects()"> CRT Scanlines</label>
+            <label><input type="checkbox" id="css_bloom" onchange="applyCSSEffects()"> Bloom Glow</label>
+            <label><input type="checkbox" id="css_sharpen" onchange="applyCSSEffects()"> Sharpen</label>
+            <label><input type="checkbox" id="css_smooth" onchange="applyCSSEffects()"> Smooth</label>
+            <label><input type="checkbox" id="css_vignette" onchange="applyCSSEffects()"> Vignette</label>
+            <label><input type="checkbox" id="css_curvature" onchange="applyCSSEffects()"> CRT Curve</label>
+            <label>Bright: <input type="range" id="css_bright" min="80" max="150" value="100" oninput="applyCSSEffects()"> <span class="val" id="css_bright_val">100%</span></label>
+            <label>Contrast: <input type="range" id="css_contrast" min="80" max="200" value="100" oninput="applyCSSEffects()"> <span class="val" id="css_contrast_val">100%</span></label>
+            <label>Saturate: <input type="range" id="css_sat" min="50" max="200" value="100" oninput="applyCSSEffects()"> <span class="val" id="css_sat_val">100%</span></label>
+
+            <h4>PRESETS</h4>
+            <div class="preset-row">
+              <button class="preset-btn" onclick="presetMaxPerformance()">MAX PERF</button>
+              <button class="preset-btn" onclick="presetArcade()">ARCADE</button>
+              <button class="preset-btn" onclick="presetMaxQuality()">MAX QUAL</button>
+            </div>
+          </div>
+
+          <!-- Idle screen (shown when no match / no stream) -->
           <div class="idle-screen" id="idleScreen">
             <div class="vs-art">&#x1F94A;</div>
             <div class="game-logo">KING OF MARVEL</div>
@@ -1243,23 +1942,23 @@ body::after {
           <!-- Match HUD (shown during match) -->
           <div class="match-hud" id="matchHud">
             <div class="hud-player p1">
-              <div class="hud-name" id="hudP1Name">SHADOW_KING</div>
-              <div class="health-bar-bg"><div class="health-bar" id="hudP1Health" style="width:75%"></div></div>
+              <div class="hud-name" id="hudP1Name"></div>
+              <div class="health-bar-bg"><div class="health-bar" id="hudP1Health"></div></div>
             </div>
             <div class="hud-center">
               <div class="hud-timer" id="hudTimer">88</div>
               <div class="hud-combo" id="hudCombo">14 HITS!</div>
             </div>
             <div class="hud-player p2">
-              <div class="hud-name" id="hudP2Name">XECUTIONER</div>
-              <div class="health-bar-bg"><div class="health-bar" id="hudP2Health" style="width:40%"></div></div>
+              <div class="hud-name" id="hudP2Name"></div>
+              <div class="health-bar-bg"><div class="health-bar" id="hudP2Health"></div></div>
             </div>
           </div>
 
           <!-- Match results overlay -->
           <div class="match-results" id="matchResults">
             <div class="result-winner">WINNER</div>
-            <div class="result-title" id="resultTitle">SHADOW_KING</div>
+            <div class="result-title" id="resultTitle"></div>
             <div class="result-stats">
               <div class="result-stat">
                 <div class="stat-label">BEST COMBO</div>
@@ -1307,44 +2006,25 @@ body::after {
     </div>
   </div>
 
-  <!-- RIGHT: THE LINE -->
+  <!-- RIGHT: TRASH TALK (chat) -->
   <div class="sidebar-right">
-    <div class="panel-header">&#x1F3AE; LIVE ARCADE</div>
-
-    <!-- Now Playing -->
-    <div class="now-playing">
-      <div class="np-header">&#x26A1; NOW PLAYING</div>
-      <div class="np-vs">
-        <div class="np-player p1">
-          <div class="np-label">P1</div>
-          <div class="np-name" id="npP1">SHADOW_KING</div>
-          <div class="np-record">12W-3L</div>
-        </div>
-        <div class="np-vs-text">VS</div>
-        <div class="np-player p2">
-          <div class="np-label">P2</div>
-          <div class="np-name" id="npP2">XECUTIONER</div>
-          <div class="np-record">8W-5L</div>
-        </div>
+    <div class="chat-header">
+      <div class="chat-title">&#x1F4AC; TRASH TALK</div>
+      <div class="chat-reactions">
+        <button class="reaction-btn" onclick="sendReaction('HYPE')">&#x1F525;HYPE</button>
+        <button class="reaction-btn" onclick="sendReaction('BODIED')">&#x1F480;BODIED</button>
+        <button class="reaction-btn" onclick="sendReaction('RESPECT')">&#x1F451;GGs</button>
+        <button class="reaction-btn" onclick="sendReaction('SALTY')">&#x1F9C2;SALTY</button>
+        <button class="reaction-btn" onclick="sendReaction('FRAUD')">&#x1F6A8;FRAUD</button>
       </div>
     </div>
-
-    <!-- I GOT NEXT -->
-    <div class="got-next-section">
-      <button class="btn-got-next" id="gotNextBtn" onclick="gotNext()">
-        &#x1FA99; I GOT NEXT
-      </button>
-      <button class="btn-leave-queue" id="leaveQueueBtn" onclick="leaveQueue()">
-        &#x274C; LEAVE LINE
-      </button>
+    <div class="chat-messages" id="chatMessages">
+      <!-- filled by JS -->
     </div>
-
-    <!-- The Queue -->
-    <div class="queue-section">
-      <div class="queue-header">NEXT UP</div>
-      <div class="queue-list" id="queueList">
-        <!-- filled by JS -->
-      </div>
+    <div class="chat-input-row">
+      <input class="chat-input" id="chatInput" placeholder="Talk trash..." maxlength="200"
+             onkeydown="if(event.key==='Enter')sendChat()" />
+      <button class="chat-send-btn" onclick="sendChat()">SEND</button>
     </div>
   </div>
 
@@ -1353,49 +2033,29 @@ body::after {
 <!-- TICKER -->
 <div class="ticker-bar">
   <div class="ticker-content" id="tickerContent">
-    <span class="ticker-fire">&#x1F525;</span> SHADOW_KING just hit a 47-HIT COMBO &nbsp;&bull;&nbsp;
-    <span class="ticker-crown">&#x1F451;</span> SHADOW_KING has been king for 23 minutes &nbsp;&bull;&nbsp;
-    <span class="ticker-skull">&#x1F480;</span> N00B_SLAYER got PERFECTED &nbsp;&bull;&nbsp;
-    <span class="ticker-fire">&#x1F525;</span> CHAOS_AGENT is mashing at 42 inputs/sec &nbsp;&bull;&nbsp;
-    <span class="ticker-crown">&#x1FA99;</span> 5 challengers in line &nbsp;&bull;&nbsp;
-    <span class="ticker-skull">&#x1F480;</span> XECUTIONER ended a 8-win streak &nbsp;&bull;&nbsp;
-    <span class="ticker-fire">&#x1F525;</span> THE_SURGEON has 94% input accuracy &nbsp;&bull;&nbsp;
+    <span class="ticker-crown">&#x1FA99;</span> CABINET OPEN — PUT YOUR QUARTER UP &nbsp;&bull;&nbsp;
+    <span class="ticker-fire">&#x1F525;</span> NOBD.NET — KING OF MARVEL &nbsp;&bull;&nbsp;
   </div>
 </div>
 
-<!-- CHAT -->
-<div class="chat-section">
-  <div class="chat-header">
-    <div class="chat-title">&#x1F4AC; TRASH TALK</div>
-    <div class="chat-reactions">
-      <button class="reaction-btn" onclick="sendReaction('HYPE')">&#x1F525;HYPE</button>
-      <button class="reaction-btn" onclick="sendReaction('BODIED')">&#x1F480;BODIED</button>
-      <button class="reaction-btn" onclick="sendReaction('RESPECT')">&#x1F451;GGs</button>
-      <button class="reaction-btn" onclick="sendReaction('SALTY')">&#x1F9C2;SALTY</button>
-      <button class="reaction-btn" onclick="sendReaction('FRAUD')">&#x1F6A8;FRAUD</button>
-    </div>
-  </div>
-  <div class="chat-messages" id="chatMessages">
-    <!-- filled by JS -->
-  </div>
-  <div class="chat-input-row">
-    <input class="chat-input" id="chatInput" placeholder="Talk trash..." maxlength="200"
-           onkeydown="if(event.key==='Enter')sendChat()" />
-    <button class="chat-send-btn" onclick="sendChat()">SEND</button>
-  </div>
-</div>
-
-<!-- SIGN IN MODAL -->
+<!-- SIGN IN / REGISTER MODAL -->
 <div class="modal-overlay" id="signInModal">
   <div class="modal-box">
     <div class="modal-header">
-      <div class="modal-title">ENTER YOUR NAME</div>
+      <div class="modal-title" id="authModalTitle">SIGN IN</div>
       <button class="modal-close" onclick="closeSignIn()">&times;</button>
     </div>
     <div class="modal-body">
+      <div id="authError" style="display:none;color:var(--hot-red);font-size:7px;margin-bottom:10px;text-align:center;"></div>
       <div class="modal-field">
         <label class="modal-label">FIGHTER NAME</label>
-        <input class="modal-input" id="modalName" placeholder="YOUR_TAG" maxlength="16" />
+        <input class="modal-input" id="modalName" placeholder="YOUR_TAG" maxlength="16"
+               onkeydown="if(event.key==='Enter')document.getElementById('modalPass').focus()" />
+      </div>
+      <div class="modal-field">
+        <label class="modal-label">PASSWORD</label>
+        <input class="modal-input" id="modalPass" type="password" placeholder="********" maxlength="64"
+               onkeydown="if(event.key==='Enter')confirmSignIn()" />
       </div>
       <div class="modal-field">
         <label class="modal-label">PICK YOUR ICON</label>
@@ -1403,7 +2063,77 @@ body::after {
           <!-- filled by JS -->
         </div>
       </div>
-      <button class="btn-sign-in" onclick="confirmSignIn()">FIGHT</button>
+      <button class="btn-sign-in" id="authSubmitBtn" onclick="confirmSignIn()">FIGHT</button>
+      <div style="text-align:center;margin-top:10px;">
+        <button id="authToggleBtn" onclick="toggleAuthMode()" style="background:none;border:none;color:var(--neon-cyan);font-family:'Press Start 2P',monospace;font-size:6px;cursor:pointer;letter-spacing:0;">
+          NEW? CREATE ACCOUNT
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- USER PROFILE MODAL -->
+<div class="modal-overlay profile-modal" id="profileModal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div class="modal-title" id="profileTitle">MY PROFILE</div>
+      <button class="modal-close" onclick="closeProfile()">&times;</button>
+    </div>
+    <div class="profile-tabs">
+      <button class="profile-tab active" onclick="switchProfileTab(this,'stats')">STATS</button>
+      <button class="profile-tab" onclick="switchProfileTab(this,'pads')">MY PADS</button>
+      <button class="profile-tab" onclick="switchProfileTab(this,'tester')">TESTER</button>
+    </div>
+    <div class="profile-content">
+      <!-- STATS TAB -->
+      <div class="profile-section active" id="profileStats">
+        <div class="profile-stat-row"><span class="profile-stat-label">RANK</span><span class="profile-stat-value" id="profRank">WARRIOR</span></div>
+        <div class="profile-stat-row"><span class="profile-stat-label">ELO RATING</span><span class="profile-stat-value" id="profElo">1000</span></div>
+        <div class="profile-stat-row"><span class="profile-stat-label">RECORD</span><span class="profile-stat-value" id="profRecord">0W - 0L</span></div>
+        <div class="profile-stat-row"><span class="profile-stat-label">WIN STREAK</span><span class="profile-stat-value" id="profStreak">0</span></div>
+        <div class="profile-stat-row"><span class="profile-stat-label">BEST STREAK</span><span class="profile-stat-value" id="profBestStreak">0</span></div>
+        <div class="profile-stat-row"><span class="profile-stat-label">BEST COMBO</span><span class="profile-stat-value" id="profCombo">0</span></div>
+        <div class="profile-stat-row"><span class="profile-stat-label">PERFECTS</span><span class="profile-stat-value" id="profPerfects">0</span></div>
+        <div class="profile-stat-row"><span class="profile-stat-label">MATCHES</span><span class="profile-stat-value" id="profMatches">0</span></div>
+        <div class="profile-stat-row"><span class="profile-stat-label">MEMBER SINCE</span><span class="profile-stat-value" id="profSince">-</span></div>
+      </div>
+
+      <!-- PADS TAB -->
+      <div class="profile-section" id="profilePads">
+        <div id="padList">
+          <!-- filled by JS -->
+        </div>
+      </div>
+
+      <!-- BUTTON TESTER TAB -->
+      <div class="profile-section" id="profileTester">
+        <div class="btn-tester">
+          <div class="btn-tester-pad-name" id="testerPadName">NO GAMEPAD DETECTED</div>
+          <div class="btn-tester-triggers">
+            <div class="trigger-bar-wrap">LT<div class="trigger-bar"><div class="trigger-fill" id="testerLT"></div></div></div>
+            <div class="trigger-bar-wrap">RT<div class="trigger-bar"><div class="trigger-fill" id="testerRT"></div></div></div>
+          </div>
+          <div class="btn-tester-layout">
+            <div class="btn-tester-dpad">
+              <div></div><div class="dpad-btn" id="dpadU"></div><div></div>
+              <div class="dpad-btn" id="dpadL"></div><div></div><div class="dpad-btn" id="dpadR"></div>
+              <div></div><div class="dpad-btn" id="dpadD"></div><div></div>
+            </div>
+            <div class="btn-tester-face">
+              <div></div><div class="face-btn yellow" id="faceY">Y</div>
+              <div class="face-btn blue" id="faceX">X</div><div class="face-btn red" id="faceB">B</div>
+            </div>
+            <div class="face-btn green" id="faceA" style="margin-left:-4px;margin-top:4px;">A</div>
+          </div>
+          <div class="btn-tester-extra">
+            <div class="extra-btn" id="btnSelect">SEL</div>
+            <div class="extra-btn" id="btnStart">START</div>
+            <div class="extra-btn" id="btnLB">LB</div>
+            <div class="extra-btn" id="btnRB">RB</div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -1414,467 +2144,112 @@ body::after {
   <div class="challenger-name" id="challengerName">???</div>
 </div>
 
-<script>
+<!-- P2P Relay (classic script, defines window.MapleCastRelay) -->
+<script src="relay.js"></script>
+
+<!-- Application Bootstrap -->
+<script type="module">
 // ============================================================
-// KING OF MARVEL — Interactive mockup with placeholder data
+// KING OF MARVEL — Module Bootstrap
 // ============================================================
+import './js/webgl-patches.mjs';
+import { state } from './js/state.mjs';
+import { initRenderer, setOpt } from './js/renderer-bridge.mjs';
+import { connectWS } from './js/ws-connection.mjs';
+import { renderChat, renderChatFull, sendChat, sendReaction } from './js/chat.mjs';
+import { renderQueue, gotNext, leaveQueue, leaveGame, updateCabinetControls } from './js/queue.mjs';
+import { renderLeaderboard, switchTab } from './js/leaderboard.mjs';
+import { openSignIn, closeSignIn, confirmSignIn, signOut, showUserBadge,
+         toggleUserMenu, toggleAuthMode, renderAvatars, pickAvatar } from './js/auth.mjs';
+import { toggleSettings, applyCSSEffects, presetMaxPerformance,
+         presetArcade, presetMaxQuality, loadRenderSettings, applyLoadedSettings } from './js/settings.mjs';
+import { toggleDiag, startDiagInterval } from './js/diagnostics.mjs';
+import { openProfile, closeProfile, switchProfileTab } from './js/profile.mjs';
+import { setupKeyboardShortcuts } from './js/demo.mjs';
+import { surrealFetchProfile } from './js/surreal.mjs';
+import { initRelay } from './js/relay-bootstrap.mjs';
+import { startTicker } from './js/ticker.mjs';
+import { startTelemetry } from './js/telemetry.mjs';
 
-// === State ===
-let signedIn = false;
-let myName = '';
-let myAvatar = '';
-let inQueue = false;
-let queuePosition = -1;
+// Expose to inline onclick handlers in HTML
+window.openSignIn = openSignIn;
+window.closeSignIn = closeSignIn;
+window.confirmSignIn = confirmSignIn;
+window.signOut = signOut;
+window.toggleUserMenu = toggleUserMenu;
+window.toggleAuthMode = toggleAuthMode;
+window.pickAvatar = pickAvatar;
+window.openProfile = openProfile;
+window.closeProfile = closeProfile;
+window.switchProfileTab = switchProfileTab;
+window.switchTab = switchTab;
+window.gotNext = gotNext;
+window.leaveQueue = leaveQueue;
+window.leaveGame = leaveGame;
+window.sendChat = sendChat;
+window.sendReaction = sendReaction;
+window.toggleSettings = toggleSettings;
+window.toggleDiag = toggleDiag;
+window.setOpt = setOpt;
+window.applyCSSEffects = applyCSSEffects;
+window.presetMaxPerformance = presetMaxPerformance;
+window.presetArcade = presetArcade;
+window.presetMaxQuality = presetMaxQuality;
+window.openSettings = () => { document.getElementById('userDropdown').classList.remove('open'); toggleSettings(); };
 
-// === Placeholder Data ===
-const leaderboards = {
-  streak: [
-    { name: 'SHADOW_KING', stat: '12 WINS', king: true },
-    { name: 'XECUTIONER', stat: '9 WINS' },
-    { name: 'RUSH_DOWN', stat: '8 WINS' },
-    { name: 'CABLE_GUY', stat: '7 WINS' },
-    { name: 'MAGNETO_XX', stat: '6 WINS' },
-    { name: 'STORM_CHSR', stat: '5 WINS' },
-    { name: 'SENT_ARMY', stat: '5 WINS' },
-    { name: 'IRON_FIST', stat: '4 WINS' },
-    { name: 'PSYLOCKE_Q', stat: '3 WINS' },
-    { name: 'DOOM_LOOP', stat: '3 WINS' },
-  ],
-  combo: [
-    { name: 'RUSH_DOWN', stat: '87 HITS', king: true },
-    { name: 'MAGNETO_XX', stat: '72 HITS' },
-    { name: 'SHADOW_KING', stat: '63 HITS' },
-    { name: 'STORM_CHSR', stat: '58 HITS' },
-    { name: 'IRON_FIST', stat: '54 HITS' },
-    { name: 'CABLE_GUY', stat: '47 HITS' },
-    { name: 'DOOM_LOOP', stat: '41 HITS' },
-    { name: 'XECUTIONER', stat: '38 HITS' },
-    { name: 'SENT_ARMY', stat: '35 HITS' },
-    { name: 'PSYLOCKE_Q', stat: '29 HITS' },
-  ],
-  speed: [
-    { name: 'XECUTIONER', stat: '12 SEC', king: true },
-    { name: 'SHADOW_KING', stat: '15 SEC' },
-    { name: 'MAGNETO_XX', stat: '18 SEC' },
-    { name: 'RUSH_DOWN', stat: '22 SEC' },
-    { name: 'CABLE_GUY', stat: '24 SEC' },
-    { name: 'STORM_CHSR', stat: '28 SEC' },
-    { name: 'IRON_FIST', stat: '31 SEC' },
-    { name: 'DOOM_LOOP', stat: '33 SEC' },
-    { name: 'SENT_ARMY', stat: '37 SEC' },
-    { name: 'PSYLOCKE_Q', stat: '42 SEC' },
-  ],
-  perfect: [
-    { name: 'SHADOW_KING', stat: '8 ROUNDS', king: true },
-    { name: 'XECUTIONER', stat: '6 ROUNDS' },
-    { name: 'MAGNETO_XX', stat: '5 ROUNDS' },
-    { name: 'RUSH_DOWN', stat: '4 ROUNDS' },
-    { name: 'CABLE_GUY', stat: '3 ROUNDS' },
-    { name: 'STORM_CHSR', stat: '3 ROUNDS' },
-    { name: 'IRON_FIST', stat: '2 ROUNDS' },
-    { name: 'DOOM_LOOP', stat: '2 ROUNDS' },
-    { name: 'SENT_ARMY', stat: '1 ROUND' },
-    { name: 'PSYLOCKE_Q', stat: '1 ROUND' },
-  ],
-  masher: [
-    { name: 'CHAOS_AGENT', stat: '42 INP/S', king: true },
-    { name: 'BUTTONZ', stat: '38 INP/S' },
-    { name: 'RUSH_DOWN', stat: '35 INP/S' },
-    { name: 'MAGNETO_XX', stat: '31 INP/S' },
-    { name: 'SHADOW_KING', stat: '28 INP/S' },
-    { name: 'IRON_FIST', stat: '25 INP/S' },
-    { name: 'XECUTIONER', stat: '22 INP/S' },
-    { name: 'STORM_CHSR', stat: '19 INP/S' },
-    { name: 'CABLE_GUY', stat: '16 INP/S' },
-    { name: 'DOOM_LOOP', stat: '14 INP/S' },
-  ],
-  surgeon: [
-    { name: 'THE_SURGEON', stat: '94.2%', king: true },
-    { name: 'CABLE_GUY', stat: '91.8%' },
-    { name: 'SHADOW_KING', stat: '87.3%' },
-    { name: 'XECUTIONER', stat: '85.1%' },
-    { name: 'DOOM_LOOP', stat: '82.7%' },
-    { name: 'STORM_CHSR', stat: '79.4%' },
-    { name: 'MAGNETO_XX', stat: '76.2%' },
-    { name: 'PSYLOCKE_Q', stat: '73.8%' },
-    { name: 'IRON_FIST', stat: '71.5%' },
-    { name: 'RUSH_DOWN', stat: '68.9%' },
-  ],
-};
+// === Initialize ===
+renderLeaderboard('streak');
+renderQueue();
+renderChatFull();
+renderAvatars();
+updateCabinetControls();  // Set initial button state based on gamepad presence
 
-const queueData = [
-  { name: 'CABLE_GUY', record: '7W-4L' },
-  { name: 'MAGNETO_XX', record: '6W-6L' },
-  { name: 'STORM_CHSR', record: '5W-3L' },
-  { name: 'DOOM_LOOP', record: '3W-2L' },
-  { name: 'CHAOS_AGENT', record: '2W-9L' },
-];
+// WASM renderer init (must complete before WS connects)
+await initRenderer();
+state.setOpt = setOpt;
 
-const chatHistory = [
-  { name: 'SHADOW_KING', text: 'who\'s next', king: true },
-  { name: 'CABLE_GUY', text: 'running it back' },
-  { name: null, system: 'XECUTIONER has joined the game!' },
-  { name: 'MAGNETO_XX', text: 'this streak is getting crazy' },
-  { name: 'SHADOW_KING', text: 'i don\'t lose', king: true },
-  { name: 'CHAOS_AGENT', text: 'lmaooo the mash is real' },
-  { name: 'STORM_CHSR', text: '12 wins?? somebody stop this man' },
-  { name: null, hype: 'RUSH_DOWN hit a 87-HIT COMBO!' },
-  { name: 'DOOM_LOOP', text: 'hidden missiles hidden missiles hidden missiles' },
-  { name: 'XECUTIONER', text: 'ggs shadow but i\'m coming for that crown' },
-];
-
-const avatars = ['&#x1F94A;','&#x26A1;','&#x1F525;','&#x1F480;','&#x1F451;','&#x2694;','&#x1F47E;','&#x1F3AF;','&#x1F4A5;','&#x1F30A;','&#x2B50;','&#x1F40D;'];
-
-// === Init ===
-function init() {
-  renderLeaderboard('streak');
-  renderQueue();
-  renderChat();
-  renderAvatars();
+// Restore saved render settings
+if (loadRenderSettings()) {
+  applyLoadedSettings();
 }
 
-// === Leaderboard ===
-function switchTab(btn, tab) {
-  document.querySelectorAll('.lb-tab').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  renderLeaderboard(tab);
+// Auto-login from localStorage
+const savedName = localStorage.getItem('nobd_username');
+if (savedName && !state.signedIn) {
+  state.myName = savedName.toUpperCase();
+  state.myAvatar = '\u{1F94A}';
+  state.signedIn = true;
+  await surrealFetchProfile(state.myName);
+  showUserBadge();
+  updateCabinetControls();
 }
 
-function renderLeaderboard(tab) {
-  const list = document.getElementById('leaderboardList');
-  const data = leaderboards[tab] || [];
-  list.innerHTML = data.map((e, i) => `
-    <div class="lb-entry ${i === 0 ? 'rank-1' : i === 1 ? 'rank-2' : i === 2 ? 'rank-3' : ''}">
-      <div class="lb-rank">${i === 0 ? '\u{1F451}' : i + 1}</div>
-      <div class="lb-name">${e.name}</div>
-      <div class="lb-stat">${e.stat}</div>
-    </div>
-  `).join('');
-}
+// Start services
+startDiagInterval();
+setupKeyboardShortcuts();
+startTicker();
+connectWS();
+initRelay();
+startTelemetry();
 
-// === Queue ===
-function renderQueue() {
-  const list = document.getElementById('queueList');
-  if (queueData.length === 0 && !inQueue) {
-    list.innerHTML = '<div class="queue-empty">NO ONE IN LINE<br>STEP UP</div>';
-    return;
-  }
-  let entries = queueData.map((e, i) => `
-    <div class="queue-entry ${i === 0 ? 'next-up' : ''}">
-      <div class="queue-pos">${i + 1}</div>
-      <div class="queue-name">${e.name}</div>
-      <div class="queue-record">${e.record}</div>
-    </div>
-  `).join('');
-
-  if (inQueue) {
-    entries += `
-      <div class="queue-entry is-me">
-        <div class="queue-pos">${queueData.length + 1}</div>
-        <div class="queue-name">${myName || 'YOU'}</div>
-        <div class="queue-record">0W-0L</div>
-      </div>
-    `;
-  }
-
-  list.innerHTML = entries;
-}
-
-// === Chat ===
-function renderChat() {
-  const el = document.getElementById('chatMessages');
-  el.innerHTML = chatHistory.map(m => {
-    if (m.system) return `<div class="chat-msg"><span class="msg-system">&gt; ${m.system}</span></div>`;
-    if (m.hype) return `<div class="chat-msg"><span class="msg-hype">\u{1F525} ${m.hype}</span></div>`;
-    const cls = m.king ? 'msg-name king' : 'msg-name';
-    return `<div class="chat-msg"><span class="${cls}">${m.name}</span>: <span class="msg-text">${escapeHtml(m.text)}</span></div>`;
-  }).join('');
-  el.scrollTop = el.scrollHeight;
-}
-
-function sendChat() {
-  const input = document.getElementById('chatInput');
-  const text = input.value.trim();
-  if (!text) return;
-  if (!signedIn) { openSignIn(); return; }
-  chatHistory.push({ name: myName, text: text, king: false });
-  renderChat();
-  input.value = '';
-}
-
-function sendReaction(type) {
-  if (!signedIn) { openSignIn(); return; }
-  const reactions = {
-    'HYPE': '\u{1F525} HYPE!!!',
-    'BODIED': '\u{1F480} BODIED',
-    'RESPECT': '\u{1F451} GGs RESPECT',
-    'SALTY': '\u{1F9C2} SALTY',
-    'FRAUD': '\u{1F6A8} FRAUD DETECTED',
-  };
-  chatHistory.push({ name: myName, text: reactions[type] || type, king: false });
-  renderChat();
-}
-
-function escapeHtml(str) {
-  const d = document.createElement('div');
-  d.textContent = str;
-  return d.innerHTML;
-}
-
-// === I GOT NEXT ===
-function gotNext() {
-  if (!signedIn) { openSignIn(); return; }
-  if (inQueue) return;
-
-  inQueue = true;
-  queuePosition = queueData.length + 1;
-  const btn = document.getElementById('gotNextBtn');
-  btn.textContent = `YOU'RE #${queuePosition} IN LINE`;
-  btn.classList.add('in-queue');
-  document.getElementById('leaveQueueBtn').style.display = 'block';
-
-  // Update queue count
-  document.getElementById('queueCount').textContent = queueData.length + 1;
-
-  // Add system message
-  chatHistory.push({ name: null, system: `${myName} says I GOT NEXT!` });
-  renderChat();
-  renderQueue();
-}
-
-function leaveQueue() {
-  inQueue = false;
-  queuePosition = -1;
-  const btn = document.getElementById('gotNextBtn');
-  btn.innerHTML = '&#x1FA99; I GOT NEXT';
-  btn.classList.remove('in-queue');
-  document.getElementById('leaveQueueBtn').style.display = 'none';
-  document.getElementById('queueCount').textContent = queueData.length;
-  renderQueue();
-}
-
-// === Sign In ===
-function renderAvatars() {
-  const grid = document.getElementById('avatarGrid');
-  grid.innerHTML = avatars.map((a, i) =>
-    `<div class="avatar-pick" data-idx="${i}" onclick="pickAvatar(this)">${a}</div>`
-  ).join('');
-}
-
-function pickAvatar(el) {
-  document.querySelectorAll('.avatar-pick').forEach(a => a.classList.remove('selected'));
-  el.classList.add('selected');
-  myAvatar = el.innerHTML;
-}
-
-function openSignIn() {
-  document.getElementById('signInModal').classList.add('active');
-  document.getElementById('modalName').focus();
-}
-
-function closeSignIn() {
-  document.getElementById('signInModal').classList.remove('active');
-}
-
-function confirmSignIn() {
-  const name = document.getElementById('modalName').value.trim().toUpperCase().replace(/\s+/g, '_');
-  if (!name) return;
-  if (!myAvatar) myAvatar = '\u{1F94A}';
-
-  myName = name;
-  signedIn = true;
-
-  document.getElementById('signinBtn').style.display = 'none';
-  const info = document.getElementById('userInfo');
-  info.style.display = 'flex';
-  document.getElementById('userAvatar').innerHTML = myAvatar;
-  document.getElementById('userName').textContent = myName;
-
-  closeSignIn();
-
-  // System message
-  chatHistory.push({ name: null, system: `${myName} has entered the arcade!` });
-  renderChat();
-}
-
-// === Demo: Simulate match / new challenger ===
-function showNewChallenger(name) {
-  const overlay = document.getElementById('challengerOverlay');
-  document.getElementById('challengerName').textContent = name;
-  overlay.classList.add('active');
-  setTimeout(() => overlay.classList.remove('active'), 3000);
-}
-
-function showMatchResults() {
-  document.getElementById('matchResults').classList.add('active');
-  setTimeout(() => document.getElementById('matchResults').classList.remove('active'), 5000);
-}
-
-function startDemoMatch() {
-  document.getElementById('idleScreen').style.display = 'none';
-  document.getElementById('matchHud').classList.add('active');
-
-  // Simulate health drain
-  let p1h = 100, p2h = 100;
-  const iv = setInterval(() => {
-    const attacker = Math.random() > 0.45 ? 'p1' : 'p2';
-    const dmg = Math.floor(Math.random() * 8) + 2;
-    if (attacker === 'p1') { p2h = Math.max(0, p2h - dmg); }
-    else { p1h = Math.max(0, p1h - dmg); }
-
-    document.getElementById('hudP1Health').style.width = p1h + '%';
-    document.getElementById('hudP2Health').style.width = p2h + '%';
-
-    // Timer countdown
-    const t = document.getElementById('hudTimer');
-    const tv = parseInt(t.textContent);
-    if (tv > 0) t.textContent = tv - 1;
-
-    // Random combo display
-    if (Math.random() > 0.7) {
-      const combo = document.getElementById('hudCombo');
-      combo.textContent = (Math.floor(Math.random() * 30) + 2) + ' HITS!';
-      combo.classList.add('visible');
-      setTimeout(() => combo.classList.remove('visible'), 800);
-    }
-
-    if (p1h <= 0 || p2h <= 0) {
-      clearInterval(iv);
-      document.getElementById('matchHud').classList.remove('active');
-      showMatchResults();
-      setTimeout(() => {
-        document.getElementById('idleScreen').style.display = 'flex';
-      }, 5500);
-    }
-  }, 500);
-}
-
-// Keyboard shortcut: press 'D' for demo match, 'C' for challenger
-document.addEventListener('keydown', e => {
-  if (e.target.tagName === 'INPUT') return;
-  if (e.key === 'd') startDemoMatch();
-  if (e.key === 'c') showNewChallenger('NEW_PLAYER');
-  if (e.key === 'Enter' && document.getElementById('signInModal').classList.contains('active')) {
-    confirmSignIn();
-  }
+// Global event listeners
+document.addEventListener('click', () => {
+  document.getElementById('userDropdown').classList.remove('open');
 });
-
-// Modal close on overlay click
 document.getElementById('signInModal').addEventListener('click', e => {
   if (e.target === e.currentTarget) closeSignIn();
 });
-
-// Boot
-init();
-
-// === LIVE WebSocket Connection ===
-const WS_PORT = 7200;
-let ws = null;
-let stickOnline = false;
-
-function connectWS() {
-  ws = new WebSocket(`ws://${location.hostname}:${WS_PORT}`);
-
-  ws.onopen = () => {
-    console.log('[king] WebSocket connected');
-    // Auto-login if we have a registered username
-    const saved = localStorage.getItem('nobd_username');
-    if (saved && !signedIn) {
-      ws.send(JSON.stringify({ type: 'check_stick', username: saved }));
-    }
-  };
-
-  ws.onclose = () => {
-    console.log('[king] WebSocket disconnected, reconnecting...');
-    setTimeout(connectWS, 2000);
-  };
-
-  ws.onmessage = (e) => {
-    if (typeof e.data !== 'string') return;
-    try {
-      const msg = JSON.parse(e.data);
-
-      if (msg.type === 'status') {
-        // Update spectator count
-        const watchEl = document.getElementById('watchCount');
-        if (watchEl) watchEl.textContent = msg.spectators || 0;
-
-        // Update queue count
-        const queueCountEl = document.getElementById('queueCount');
-        if (queueCountEl && msg.queue) queueCountEl.textContent = msg.queue.length;
-      }
-      else if (msg.type === 'stick_status') {
-        stickOnline = msg.online;
-        if (msg.registered && !signedIn) {
-          // Auto sign-in with registered username
-          autoSignIn(msg.username);
-        }
-      }
-      else if (msg.type === 'assigned') {
-        if (msg.slot >= 0) {
-          chatHistory.push({ name: null, system: `${myName} is now P${msg.slot + 1}!` });
-          renderChat();
-        }
-      }
-      else if (msg.type === 'your_turn') {
-        showNewChallenger(myName);
-        chatHistory.push({ name: null, system: msg.msg });
-        renderChat();
-      }
-      else if (msg.type === 'match_end') {
-        chatHistory.push({ name: null, system: `${msg.winner_name} WINS!` });
-        renderChat();
-      }
-    } catch (err) {}
-  };
-}
-
-function autoSignIn(username) {
-  myName = username.toUpperCase();
-  myAvatar = '\u{1F3AE}';
-  signedIn = true;
-
-  document.getElementById('signinBtn').style.display = 'none';
-  const info = document.getElementById('userInfo');
-  info.style.display = 'flex';
-  document.getElementById('userAvatar').innerHTML = myAvatar;
-  document.getElementById('userName').textContent = myName;
-
-  chatHistory.push({ name: null, system: `${myName} has entered the arcade!` });
-  renderChat();
-}
-
-// Override gotNext to send real WS message
-const _origGotNext = gotNext;
-gotNext = function() {
-  if (!signedIn) { openSignIn(); return; }
-  if (inQueue) return;
-  _origGotNext();
-  if (ws && ws.readyState === 1) {
-    ws.send(JSON.stringify({ type: 'queue_join', name: myName }));
+document.getElementById('profileModal').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeProfile();
+});
+document.addEventListener('click', e => {
+  const panel = document.getElementById('settingsPanel');
+  const gear = document.getElementById('settingsGear');
+  if (panel.classList.contains('open') && !panel.contains(e.target) && e.target !== gear) {
+    panel.classList.remove('open');
   }
-};
+});
 
-// Override leaveQueue to send real WS message
-const _origLeaveQueue = leaveQueue;
-leaveQueue = function() {
-  _origLeaveQueue();
-  if (ws && ws.readyState === 1) {
-    ws.send(JSON.stringify({ type: 'leave' }));
-  }
-};
-
-// Override confirmSignIn to also save username and check stick
-const _origConfirmSignIn = confirmSignIn;
-confirmSignIn = function() {
-  _origConfirmSignIn();
-  if (myName && ws && ws.readyState === 1) {
-    localStorage.setItem('nobd_username', myName.toLowerCase());
-    ws.send(JSON.stringify({ type: 'check_stick', username: myName.toLowerCase() }));
-  }
-};
-
-connectWS();
 </script>
 
 </body>

@@ -127,6 +127,8 @@ void mainui_loop(bool forceStart)
 	{
 		fc_profiler::startThread("main");
 
+		const bool headless = maplecast_mirror::isHeadless();
+
 		if (mainui_rend_frame() && imguiDriver != nullptr)
 		{
 			try {
@@ -135,10 +137,12 @@ void mainui_loop(bool forceStart)
 				forceReinit = true;
 			}
 		}
-		if (imguiDriver == nullptr)
+		// Headless mode has no window → no imguiDriver. That's fine.
+		// Only treat a null driver as an error on GUI builds.
+		if (imguiDriver == nullptr && !headless)
 			forceReinit = true;
 
-		if (config::RendererType != currentRenderer || forceReinit)
+		if (!headless && (config::RendererType != currentRenderer || forceReinit))
 		{
 			mainui_term();
 			int prevApi = isOpenGL(currentRenderer) ? 0 : isVulkan(currentRenderer) ? 1 : currentRenderer == RenderType::DirectX9 ? 2 : 3;

@@ -13,6 +13,9 @@
 */
 #pragma once
 
+#include <cstdint>
+#include <cstddef>
+
 struct rend_context;
 struct TA_context;
 
@@ -23,10 +26,72 @@ void initClient();
 bool isServer();
 bool isClient();
 
+// True iff MAPLECAST_HEADLESS=1 was set in the environment at startup.
+// When headless, flycast boots without creating an SDL window, without
+// an OpenGL/Vulkan context, and without any imgui driver. The norend
+// renderer is wired in instead, and serverPublish() still runs the exact
+// same CPU-only path. Wire bytes are guaranteed byte-identical to the
+// GPU-backed build (enforced by the MAPLECAST_DUMP_TA determinism rig).
+// Checked once at startup; subsequent env changes are ignored.
+bool isHeadless();
+
 // Server: write this frame's TA context to shared memory
 void serverPublish(TA_context* ctx);
 
 // Client: read the latest rend_context from shared memory into rc
 // Returns true if a new frame is available. Sets vramDirty if VRAM pages changed.
 bool clientReceive(rend_context& rc, bool& vramDirty);
+
+// Mark VRAM pages as dirty so the next serverPublish() streams them.
+// Called from DMA paths (Ch2 DMA, PVR DMA, TAWriteSQ 64-bit, ELAN texture
+// DMA, YUV converter) which memcpy directly into vram[] and bypass both the
+// page-protect SIGSEGV handler and the shadow-copy memcmp diff.
+// `offset` and `size` are in VRAM bytes (0..VRAM_SIZE).
+// No-op when the mirror server isn't running.
+void markVramDirty(uint32_t offset, uint32_t size);
+
+// Force a fresh full SYNC broadcast on the next serverPublish() call.
+// Used by:
+//   - SB_SFRES soft reset (player presses A+B+X+Y+Start on a Dreamcast pad)
+//   - dc_reset(true) hard reset / boot
+//   - Anything else that knows the renderer state is about to be invalidated
+// The publish path serializes the SYNC build/broadcast on the render thread
+// to avoid races with VRAM mid-update.
+void requestSyncBroadcast();
+
+// Build the full DC save state via dc_serialize into a freshly malloc'd
+// buffer. Caller must free() it. Returns nullptr on failure. This is the
+// same data serverSaveSync() writes to disk.
+uint8_t* buildFullSaveState(size_t& outSize);
+
+// Run serverSaveSync() (writes /dev/shm/maplecast_sync.state) then read
+// the file back and broadcast it to all WS clients wrapped in a "SAVE"
+// envelope. Triggered by SIGUSR1.
+void doForcedSaveStateBroadcast();
+
+// Set a flag that serverPublish() drains on the next frame to broadcast
+// the full save state to all connected WS clients. Safe to call from any
+// thread (atomic). Used by the SIGUSR1 handler to manually trigger a
+// full-state push for debugging.
+void requestFullSaveStateBroadcast();
+
+// Phase A — read-only accessors for the input latch path (called from
+// ggpo::getLocalInput at vblank time) and the status JSON broadcaster.
+// Both are cheap atomic loads with acquire ordering — safe to call from
+// any thread, no locking, no shm header touching. Updated once per frame
+// at the bottom of serverPublish() under release ordering.
+//
+// currentFrame()    — monotonic frame counter, mirrors hdr->frame_count.
+//                     Returns 0 before the first frame is published.
+// lastLatchTimeUs() — CLOCK_MONOTONIC microseconds at the moment the most
+//                     recent serverPublish() committed. Returns 0 before
+//                     the first frame is published.
+// framePeriodUs()   — exponential moving average of (publish_n - publish_{n-1})
+//                     over the last ~16 frames. Used by the frame_phase block
+//                     in status JSON for browser-side phase-aligned send
+//                     scheduling. Returns ~16670 µs default before the EMA
+//                     has had a chance to converge.
+uint64_t currentFrame();
+int64_t  lastLatchTimeUs();
+int64_t  framePeriodUs();
 }

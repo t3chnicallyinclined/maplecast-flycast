@@ -10,6 +10,7 @@
 #include "hw/holly/sb.h"
 #include "hw/holly/holly_intc.h"
 #include "serialize.h"
+#include "network/maplecast_mirror.h"
 
 static u32 pvr_map32(u32 offset32);
 
@@ -101,6 +102,9 @@ static void YUV_ConvertMacroBlock(const u8 *datap)
 	TA_YUV_TEX_CNT++;
 
 	YUV_Block384(datap, &vram[YUV_dest]);
+	// YUV converter writes 384 bytes of YUV422 directly into VRAM, bypassing
+	// the page-protect handler. Notify the mirror server.
+	maplecast_mirror::markVramDirty(YUV_dest, 384);
 
 	YUV_dest+=32;
 
@@ -230,7 +234,12 @@ void DYNACALL pvr_write32p(u32 addr, T data)
 	if (vaddr >= fb_watch_addr_start && vaddr < fb_watch_addr_end)
 		fb_dirty = true;
 
-	*(T *)&vram[pvr_map32(addr)] = data;
+	u32 mapped = pvr_map32(addr);
+	*(T *)&vram[mapped] = data;
+	// MapleCast: 32-bit VRAM writes (CPU + ch2 DMA store-queue path) bypass
+	// the mprotect handler when memwatch isn't started. Mark the page so the
+	// mirror server ships it. No-op when no mirror server is running.
+	maplecast_mirror::markVramDirty(mapped, sizeof(T));
 }
 template void pvr_write32p<u8, false>(u32 addr, u8 data);
 template void pvr_write32p<u8, true>(u32 addr, u8 data);
@@ -269,9 +278,11 @@ void DYNACALL TAWriteSQ(u32 address, const SQBuffer *sqb)
 		bool path64b = (unlikely(address & 0x02000000) ? SB_LMMODE1 : SB_LMMODE0) == 0;
 		if (path64b)
 		{
-			// 64b path
+			// 64b path — direct VRAM write, bypasses SIGSEGV page-protect.
+			// Notify the MapleCast mirror so it ships this page to clients.
 			SQBuffer *dest = (SQBuffer *)&vram[address_w & VRAM_MASK];
 			*dest = *sq;
+			maplecast_mirror::markVramDirty(address_w & VRAM_MASK, sizeof(SQBuffer));
 		}
 		else
 		{
@@ -323,10 +334,14 @@ template<typename T, bool upper>
 void DYNACALL pvr_write_area4(u32 addr, T data)
 {
 	bool access32 = (upper ? SB_LMMODE1 : SB_LMMODE0) == 1;
-	if (access32)
-		pvr_write32p(addr, data);
-	else
-		*(T*)&vram[addr & VRAM_MASK] = data;
+	if (access32) {
+		pvr_write32p(addr, data);  // already marks dirty
+	} else {
+		u32 off = addr & VRAM_MASK;
+		*(T*)&vram[off] = data;
+		// 64-bit area4 path — direct VRAM write, mirror server needs to know.
+		maplecast_mirror::markVramDirty(off, sizeof(T));
+	}
 }
 template void pvr_write_area4<u8, false>(u32 addr, u8 data);
 template void pvr_write_area4<u16, false>(u32 addr, u16 data);

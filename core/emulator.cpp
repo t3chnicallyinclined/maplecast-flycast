@@ -36,11 +36,14 @@
 #include "hw/arm7/arm7_rec.h"
 #include "network/ggpo.h"
 #include "network/maplecast.h"
+#ifndef MAPLECAST_HEADLESS_BUILD
 #include "network/maplecast_stream.h"
+#endif
 #include "network/maplecast_telemetry.h"
 #include "network/maplecast_input_server.h"
 #include "network/maplecast_audio.h"
 #include "network/maplecast_mirror.h"
+#include "network/maplecast_control_ws.h"
 #include "hw/maple/maple_cfg.h"
 #include <cstdlib>
 #include <string>
@@ -444,6 +447,8 @@ void Emulator::dc_reset(bool hard)
 	aica::reset(hard);
 	getSh4Executor()->Reset(true);
 	mem_Reset(hard);
+	// MapleCast: VRAM/PVR state about to be wiped — tell clients to resync.
+	maplecast_mirror::requestSyncBroadcast();
 }
 
 static void setPlatform(int platform)
@@ -875,6 +880,11 @@ void Emulator::requestReset()
 	if (config::GGPOEnable)
 		NetworkHandshake::term();
 	getSh4Executor()->Stop();
+	// MapleCast: A+B+X+Y+Start writes SB_SFRES=0x7611 → soft reset → here.
+	// Tell the mirror server to push a fresh SYNC so all browser clients
+	// reset their renderer state instead of trying to limp along with stale
+	// post-reset VRAM/PVR.
+	maplecast_mirror::requestSyncBroadcast();
 }
 
 void loadGameSpecificSettings()
@@ -1030,6 +1040,7 @@ void Emulator::start()
 		maplecast_audio::init();
 		maplecast_telemetry::init();
 
+#ifndef MAPLECAST_HEADLESS_BUILD
 		if (std::getenv("MAPLECAST_STREAM"))
 		{
 			int streamPort = 7200;
@@ -1037,6 +1048,7 @@ void Emulator::start()
 			if (sp) streamPort = std::atoi(sp);
 			maplecast_stream::init(streamPort);
 		}
+#endif
 	}
 
 	if (config::GGPOEnable && config::ThreadedRendering)
@@ -1045,7 +1057,19 @@ void Emulator::start()
 
 	// Mirror server: captures TA commands + memory diffs to shared memory + WebSocket
 	if (std::getenv("MAPLECAST_MIRROR_SERVER"))
+	{
 		maplecast_mirror::initServer();
+
+		// Control WebSocket — loopback-bound JSON command channel for
+		// /overlord admin operations (savestate hot-load, soft reset,
+		// status query). Same lifecycle as the mirror server because
+		// it manipulates the same emulator state.
+		// See docs/WORKSTREAM-OVERLORD.md Phase A.
+		int controlPort = 7211;
+		if (const char* cpEnv = std::getenv("MAPLECAST_CONTROL_PORT"))
+			controlPort = std::atoi(cpEnv);
+		maplecast_control_ws::init(controlPort);
+	}
 
 	// Mirror client: receives TA deltas, renders only (no CPU)
 	if (std::getenv("MAPLECAST_MIRROR_CLIENT"))

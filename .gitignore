@@ -1,5 +1,49 @@
 build/
+build-*/
 artifact/
+
+# Claude Code agent memory + projects state — operator-only context that
+# accumulates per-session notes about the codebase. Should never be in
+# the public repo. The local copy at ~/.claude/projects/... is unaffected.
+.claude/
+
+# Local archive of historical workstream docs. These were active during
+# development but contain operator-specific paths, home network IPs, and
+# stale topology references that aren't worth scrubbing for public consumption.
+# Kept on disk for the original author's context; never committed.
+docs-archive/
+
+# Local stick binding cache (NOBD identity bindings, not source)
+.maplecast/
+
+# Savestates, ROMs, and game saves are never committed.
+# *.state catches Flycast savestates regardless of where they sit;
+# savestates/ catches the canonical directory wholesale (including
+# VMU saves and any future files there); the *.gdi/*.cdi/*.chd
+# patterns catch the Dreamcast disc image formats.
+savestates/
+*.state
+*.gdi
+*.cdi
+*.chd
+
+# Extracted game art / cached visual data — these are derived from
+# copyrighted ROM content and must not ship in the public repo.
+# visual_cache/ holds the per-frame character animation extractions
+# (was 2 GB of MVC2 sprite frames at one point).
+visual_cache/
+mvc2.webp
+*.webp
+
+# Runtime logs and per-frame diagnostic dumps
+*.log
+rend_diff_log*.csv
+history.txt
+
+# Compiled local test binaries (the source test_ws_client.cpp stays
+# tracked; the compiled output does not)
+test_ws_client
+test_ws_client2
 
 # macOS
 .DS_Store

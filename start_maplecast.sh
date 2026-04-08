@@ -25,13 +25,18 @@ python3 "$DIR/web/telemetry.py" &
 TELE_PID=$!
 sleep 1
 
-# Start web server
+# Start local web server (skip if RELAY_ONLY=1, site served from VPS)
 WEB_PORT="${MAPLECAST_WEB_PORT:-8000}"
-echo "[2/3] Starting web server on http://localhost:$WEB_PORT ..."
-cd "$DIR/web" && python3 serve.py "$WEB_PORT" &
-cd "$DIR"
-WEB_PID=$!
-sleep 1
+WEB_PID=""
+if [ -z "$RELAY_ONLY" ]; then
+  echo "[2/3] Starting web server on http://localhost:$WEB_PORT ..."
+  cd "$DIR/web" && python3 serve.py "$WEB_PORT" &
+  cd "$DIR"
+  WEB_PID=$!
+  sleep 1
+else
+  echo "[2/3] Web server SKIPPED — site served from VPS relay"
+fi
 
 # Start Flycast with MapleCast input server
 # Set MAPLECAST_JPEG=75 (or 1-100) for JPEG mode, unset for H.264
@@ -68,8 +73,11 @@ echo
 echo "========================================"
 echo "  All services started!"
 echo
-echo "  Flycast:    MVC2 + WebRTC P2P (signaling on ws://localhost:7200)"
+echo "  Flycast:    MVC2 + TA Mirror (ws://0.0.0.0:7200)"
+if [ -z "$RELAY_ONLY" ]; then
 echo "  Web app:    http://localhost:$WEB_PORT"
+fi
+echo "  Relay VPS:  http://66.55.128.93 (ws://66.55.128.93/ws)"
 echo "  Telemetry:  UDP:7300"
 echo "  Gamepad:    UDP:7100 (input server)"
 echo "  Collector:  SurrealDB → maplecast.db"

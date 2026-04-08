@@ -12,6 +12,7 @@
 #include "hw/mem/addrspace.h"
 #include "hw/sh4/modules/mmu.h"
 #include "cfg/option.h"
+#include "network/maplecast_mirror.h"
 
 #ifdef STRICT_MODE
 #include "sh4_cache.h"
@@ -221,6 +222,14 @@ void WriteMemBlock_nommu_dma(u32 dst, u32 src, u32 size)
 		for (u32 i = 0; i < size; i += 4)
 			WriteMem32_nommu(dst + i, ReadMem32_nommu(src + i));
 	}
+
+	// MapleCast: DMA writes to VRAM (Ch2 DMA, PVR DMA) bypass the page-protect
+	// SIGSEGV handler — they go straight through addrspace::writeConst as a
+	// raw pointer + memcpy. The mirror server's memcmp diff can miss them
+	// because the shadow copy gets re-synced before the diff sees a delta.
+	// Mark VRAM regions dirty explicitly so the next serverPublish ships them.
+	if ((dst & 0x1C000000) == 0x04000000)
+		maplecast_mirror::markVramDirty(dst & VRAM_MASK, size);
 }
 
 void WriteMemBlock_nommu_ptr(u32 dst, const u32 *src, u32 size)
@@ -232,6 +241,9 @@ void WriteMemBlock_nommu_ptr(u32 dst, const u32 *src, u32 size)
 	if (dst_ismem)
 	{
 		memcpy(dst_ptr, src, size);
+		// MapleCast: VRAM writes via memcpy bypass page-protect
+		if ((dst & 0x1C000000) == 0x04000000)
+			maplecast_mirror::markVramDirty(dst & VRAM_MASK, size);
 	}
 	else
 	{

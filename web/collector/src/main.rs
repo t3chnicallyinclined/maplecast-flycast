@@ -9,14 +9,21 @@
 //!
 //! Zero impact on game loop — reads from the existing broadcast.
 
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use surrealdb::engine::local::RocksDb;
+use surrealdb::engine::any::{self, Any};
+use surrealdb::opt::auth::{Database, Root};
+use surrealdb::types::SurrealValue;
 use surrealdb::Surreal;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
 
-const WS_URL: &str = "ws://localhost:7200";
-const DB_PATH: &str = "maplecast.db";
+// Defaults — overridable via env:
+//   MAPLECAST_WS=ws://host:port      (where flycast or relay broadcasts)
+//   MAPLECAST_DB=ws://host:port      (SurrealDB endpoint, or rocksdb://path)
+//   MAPLECAST_DB_USER / MAPLECAST_DB_PASS  (only for ws/http remote)
+const DEFAULT_WS_URL: &str = "ws://localhost:7200";
+const DEFAULT_DB_URL: &str = "rocksdb://maplecast.db";
 
 #[derive(Debug, Deserialize)]
 struct StatusMsg {
@@ -63,6 +70,28 @@ struct MatchEndMsg {
     winner: Option<i64>,
     winner_name: Option<String>,
     loser_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StickEventMsg {
+    events: Vec<StickEvent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StickEvent {
+    kind: String,         // "register" | "unregister" | "online" | "offline"
+    username: String,
+    ip: Option<String>,
+    port: Option<i64>,
+    #[allow(dead_code)]
+    ts: Option<i64>,
+}
+
+#[derive(Debug, Clone, SurrealValue, serde::Serialize)]
+struct StickBindingDto {
+    username: String,
+    ip: String,
+    port: i64,
 }
 
 /// MVC2 Character Names (index = char_id from memory map +0x001)
@@ -176,15 +205,46 @@ impl MatchTracker {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[collector] MapleCast Data Collector (Rust) starting...");
 
-    // Open embedded SurrealDB with RocksDB persistence
-    let db = Surreal::new::<RocksDb>(DB_PATH).await?;
-    db.use_ns("maplecast").use_db("arcade").await?;
-    println!("[collector] SurrealDB opened at {DB_PATH}");
+    let ws_url = std::env::var("MAPLECAST_WS").unwrap_or_else(|_| DEFAULT_WS_URL.to_string());
+    let db_url = std::env::var("MAPLECAST_DB").unwrap_or_else(|_| DEFAULT_DB_URL.to_string());
 
-    // Apply schema
+    // Open SurrealDB — local rocksdb OR remote ws://
+    let db: Surreal<Any> = any::connect(&db_url).await?;
+    println!("[collector] SurrealDB connected: {db_url}");
+
+    // Sign in if remote. We support two auth modes:
+    //   - MAPLECAST_DB_SCOPE=root (default if username == "root"): instance-level
+    //   - MAPLECAST_DB_SCOPE=database: NS+DB-scoped user (preferred for least privilege)
+    // Either way, we then `use_ns/use_db` to make sure subsequent queries hit the
+    // right database — for Database-scoped sign-ins this is implicit, for Root it
+    // selects the active database.
+    if db_url.starts_with("ws://") || db_url.starts_with("wss://") || db_url.starts_with("http") {
+        let user = std::env::var("MAPLECAST_DB_USER").unwrap_or_else(|_| "root".to_string());
+        let pass = std::env::var("MAPLECAST_DB_PASS").unwrap_or_else(|_| "root".to_string());
+        let scope = std::env::var("MAPLECAST_DB_SCOPE")
+            .unwrap_or_else(|_| if user == "root" { "root".to_string() } else { "database".to_string() });
+
+        match scope.as_str() {
+            "root" => {
+                db.signin(Root { username: user.clone(), password: pass.clone() }).await?;
+            }
+            _ => {
+                db.signin(Database {
+                    namespace: "maplecast".to_string(),
+                    database: "arcade".to_string(),
+                    username: user.clone(),
+                    password: pass.clone(),
+                }).await?;
+            }
+        }
+        println!("[collector] Authenticated as {user} ({scope})");
+    }
+
+    db.use_ns("maplecast").use_db("arcade").await?;
+
+    // Apply schema (idempotent — DEFINE statements are safe to re-run)
     let schema = include_str!("../../schema.surql");
     if let Err(e) = db.query(schema).await {
-        // Schema already exists on subsequent runs — that's fine
         eprintln!("[collector] Schema apply note: {e}");
     }
     println!("[collector] Schema ready");
@@ -193,11 +253,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Reconnect loop
     loop {
-        println!("[collector] Connecting to {WS_URL}...");
-        match connect_async(WS_URL).await {
+        println!("[collector] Connecting to {ws_url}...");
+        match connect_async(&ws_url).await {
             Ok((ws, _)) => {
                 println!("[collector] Connected to flycast WS");
-                let (_, mut read) = ws.split();
+                let (mut write, mut read) = ws.split();
+
+                // Bootstrap: push the authoritative stick set from SurrealDB
+                // into flycast so a fresh flycast process inherits all known
+                // bindings within seconds of startup. Idempotent: flycast's
+                // installStickBindings dedupes by username.
+                if let Err(e) = push_stick_load(&db, &mut write).await {
+                    eprintln!("[collector] stick_load push failed: {e}");
+                }
 
                 while let Some(Ok(msg)) = read.next().await {
                     if !msg.is_text() {
@@ -219,8 +287,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+/// Query SurrealDB for all known stick bindings and push them to flycast as a
+/// `stick_load` control message. Called once per WS reconnect so flycast can
+/// rehydrate its in-memory _stickBindings table from the canonical store.
+async fn push_stick_load<S>(
+    db: &Surreal<Any>,
+    write: &mut S,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: SinkExt<Message> + Unpin,
+    <S as futures_util::Sink<Message>>::Error: std::error::Error + 'static,
+{
+    let mut res = db.query("SELECT username, ip, port FROM stick").await?;
+    let rows: Vec<StickBindingDto> = res.take(0).unwrap_or_default();
+
+    let payload = serde_json::json!({
+        "type": "stick_load",
+        "bindings": rows,
+    });
+    write.send(Message::Text(payload.to_string().into())).await?;
+    println!("[collector] stick_load pushed ({} binding(s))", payload["bindings"].as_array().map(|a| a.len()).unwrap_or(0));
+    Ok(())
+}
+
 async fn handle_message(
-    db: &Surreal<surrealdb::engine::local::Db>,
+    db: &Surreal<Any>,
     text: &str,
     tracker: &mut MatchTracker,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -236,14 +327,75 @@ async fn handle_message(
             let end: MatchEndMsg = serde_json::from_str(text)?;
             handle_match_end(db, &end, tracker).await?;
         }
+        "stick_event" => {
+            let evs: StickEventMsg = serde_json::from_str(text)?;
+            handle_stick_events(db, &evs).await?;
+        }
         _ => {} // Ignore other message types
     }
 
     Ok(())
 }
 
+/// Apply stick lifecycle events to SurrealDB. Bindings are keyed by username
+/// so register/unregister are simple UPSERT/DELETE; online/offline just bump
+/// `last_input` so the dashboard can display recency without needing a
+/// separate heartbeat. The `owns` graph edge between player and stick is
+/// also created on register.
+async fn handle_stick_events(
+    db: &Surreal<Any>,
+    msg: &StickEventMsg,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for ev in &msg.events {
+        let user = ev.username.to_lowercase();
+        if user.is_empty() { continue; }
+        match ev.kind.as_str() {
+            "register" => {
+                let ip = ev.ip.clone().unwrap_or_default();
+                let port = ev.port.unwrap_or(0);
+                // Idempotent UPSERT keyed by username (record id `stick:<user>`).
+                db.query(
+                    "UPSERT type::record('stick', $u) CONTENT { \
+                        username: $u, ip: $ip, port: $port, \
+                        registered: time::now(), last_input: time::now() }"
+                )
+                    .bind(("u", user.clone()))
+                    .bind(("ip", ip))
+                    .bind(("port", port))
+                    .await?;
+                // Build the owns relation if both ends exist. Skip silently
+                // if the player record hasn't been created yet — that path
+                // runs through the existing match-end upsert and will catch up.
+                db.query(
+                    "LET $p = (SELECT VALUE id FROM player WHERE username = $u LIMIT 1)[0]; \
+                     LET $s = type::record('stick', $u); \
+                     IF $p != NONE THEN RELATE $p->owns->$s END"
+                )
+                    .bind(("u", user.clone()))
+                    .await?;
+                println!("[collector] stick REGISTER {user}");
+            }
+            "unregister" => {
+                db.query("DELETE type::record('stick', $u)")
+                    .bind(("u", user.clone()))
+                    .await?;
+                println!("[collector] stick UNREGISTER {user}");
+            }
+            "online" | "offline" => {
+                db.query(
+                    "UPDATE type::record('stick', $u) SET last_input = time::now()"
+                )
+                    .bind(("u", user.clone()))
+                    .await?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 async fn handle_status(
-    db: &Surreal<surrealdb::engine::local::Db>,
+    db: &Surreal<Any>,
     msg: &StatusMsg,
     tracker: &mut MatchTracker,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -348,7 +500,7 @@ async fn handle_status(
 }
 
 async fn handle_match_end(
-    db: &Surreal<surrealdb::engine::local::Db>,
+    db: &Surreal<Any>,
     msg: &MatchEndMsg,
     tracker: &mut MatchTracker,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -413,6 +565,12 @@ async fn handle_match_end(
     ] {
         if name.is_empty() { continue; }
         let name_lower = name.to_lowercase();
+
+        // Skip anonymous players — no stats for unregistered users
+        let anon_prefixes = ["wanderer_","drifter_","nomad_","ronin_","ghost_",
+            "shadow_","vagrant_","stranger_","outlaw_","rogue_","exile_","phantom_",
+            "unknown_","nameless_","faceless_"];
+        if anon_prefixes.iter().any(|p| name_lower.starts_with(p)) { continue; }
 
         // Upsert player
         db.query("INSERT INTO player (username, last_seen, total_matches) VALUES ($n, time::now(), 1) \

@@ -56,10 +56,14 @@ async function main() {
     if (typeof event.data === 'string') return;
 
     const data = new Uint8Array(event.data);
-    if (data.length < 80) return;
+    if (data.length < 12) return;
 
     // Check for SYNC message (first 4 bytes = "SYNC")
-    if (data[0] === 0x53 && data[1] === 0x59 && data[2] === 0x4E && data[3] === 0x43) {
+    // Check for raw SYNC or ZCST-compressed SYNC (uncompressedSize > 1MB)
+    var isSYNC = data[0]===0x53 && data[1]===0x59 && data[2]===0x4E && data[3]===0x43;
+    var isZCST = data[0]===0x5A && data[1]===0x43 && data[2]===0x53 && data[3]===0x54;
+    var isCompSync = isZCST && data.length >= 8 && new DataView(event.data).getUint32(4, true) > 1048576;
+    if (isSYNC || isCompSync) {
       STATUS.textContent = 'SYNC received (' + (data.length / 1024 / 1024).toFixed(1) + ' MB) — rendering...';
       startTime = performance.now();
       return;

@@ -50,6 +50,17 @@ set(RENDERER_SOURCES
     # ---- Dependencies ----
     ${FLYCAST_ROOT}/core/deps/xbrz/xbrz.cpp
 
+    # ---- zstd (for mirror frame decompression) ----
+    ${FLYCAST_ROOT}/core/deps/libchdr/deps/zstd-1.5.6/lib/decompress/zstd_decompress.c
+    ${FLYCAST_ROOT}/core/deps/libchdr/deps/zstd-1.5.6/lib/decompress/zstd_decompress_block.c
+    ${FLYCAST_ROOT}/core/deps/libchdr/deps/zstd-1.5.6/lib/decompress/zstd_ddict.c
+    ${FLYCAST_ROOT}/core/deps/libchdr/deps/zstd-1.5.6/lib/decompress/huf_decompress.c
+    ${FLYCAST_ROOT}/core/deps/libchdr/deps/zstd-1.5.6/lib/common/zstd_common.c
+    ${FLYCAST_ROOT}/core/deps/libchdr/deps/zstd-1.5.6/lib/common/entropy_common.c
+    ${FLYCAST_ROOT}/core/deps/libchdr/deps/zstd-1.5.6/lib/common/fse_decompress.c
+    ${FLYCAST_ROOT}/core/deps/libchdr/deps/zstd-1.5.6/lib/common/xxhash.c
+    ${FLYCAST_ROOT}/core/deps/libchdr/deps/zstd-1.5.6/lib/common/error_private.c
+
     # ---- Libretro GL state machine (PATCHED for WebGL2 — skip GL_FOG/GL_ALPHA_TEST) ----
     ${CMAKE_CURRENT_SOURCE_DIR}/src/glsm_patched.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gl_direct.c
@@ -76,6 +87,8 @@ set(RENDERER_INCLUDES
     ${FLYCAST_ROOT}/core/rend/gles
     ${FLYCAST_ROOT}/core/hw/pvr
     ${FLYCAST_ROOT}/shell/libretro
+    ${FLYCAST_ROOT}/core/deps/libchdr/deps/zstd-1.5.6/lib
+    ${FLYCAST_ROOT}/core/network
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
@@ -92,6 +105,7 @@ set(RENDERER_DEFINES
     TARGET_NO_THREADS
     STANDALONE_MIRROR_RENDERER
     XXH_INLINE_ALL
+    MAPLECAST_COMPRESS_ONLY_DECOMPRESS
 )
 
 # ==============================================================================

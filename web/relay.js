@@ -11,6 +11,46 @@
 //
 // OVERKILL IS NECESSARY.
 // ============================================================================
+//
+// !!! FRAGILE — DO NOT DECOMPRESS OR PARSE FRAMES IN JS !!!
+//
+// This relay forwards WIRE BYTES verbatim. Browsers receive compressed (ZCST)
+// frames from the upstream and either render them locally OR pass them
+// through to children unchanged. Decompression happens INSIDE the WASM
+// renderer (packages/renderer/src/wasm_bridge.cpp). The reason: there is no
+// pure-JS zstd decoder in this app. If you "improve" this file by parsing or
+// decompressing frames in JS, you will:
+//
+//   1. Add latency that we explicitly tuned out (the whole streaming path
+//      exists to be sub-5ms end-to-end on LAN).
+//   2. Re-introduce the bugs we already fixed in the WASM bridges by
+//      duplicating the parser in a fifth language.
+//
+// The ONLY thing this file is allowed to read out of the wire bytes is the
+// ZCST magic at offset 0 (to detect compressed vs uncompressed) and the
+// uncompressedSize at offset 4 (to distinguish compressed SYNC from
+// compressed delta). Anything else MUST stay opaque.
+//
+// SYNC handling rule (post-2026-04-06): the relay does NOT cache or rebuild
+// SYNC packets from delta state. The server is the single source of truth
+// for SYNC. Two paths:
+//
+//   1. New child connecting to a relay parent → server sends a fresh
+//      compressed SYNC over WebSocket directly to the child via onOpen().
+//      The relay parent does NOT send a cached SYNC — that path is gone.
+//
+//   2. Mid-stream scene change → server pushes a fresh compressed SYNC over
+//      WebSocket to all seeds. Seeds forward it to children over the
+//      reliable ta-sync DataChannel chunked into 64KB pieces.
+//
+// Why no cache: maintaining a cached SYNC by applying delta dirty pages
+// inherits any bug in the dirty-page-tracking. If the server misses a DMA
+// write, the relay's cache is stale and every new child inherits the
+// staleness. Trusting only the server SYNC is simpler and correct.
+//
+// See docs/ARCHITECTURE.md "Mirror Wire Format — Rules of the Road" for the
+// canonical list of rules all four parsers must obey.
+// ============================================================================
 
 class MapleCastRelay {
   constructor(ws, onFrame, onSync) {
@@ -23,14 +63,11 @@ class MapleCastRelay {
     // Parent connection (upstream — where we receive frames from)
     this.parentPc = null;
     this.parentMirrorDc = null;  // unreliable: delta frames
-    this.parentSyncDc = null;    // reliable: SYNC chunks
+    this.parentSyncDc = null;    // reliable: mid-stream SYNC chunks
 
     // Child connections (downstream — where we forward frames to)
-    this.children = new Map();   // peerId -> { pc, mirrorDc, syncDc, syncSent }
+    this.children = new Map();   // peerId -> { pc, mirrorDc, syncDc }
 
-    // Cached SYNC state — maintained live by applying dirty pages
-    this.cachedVram = null;      // Uint8Array(8MB)
-    this.cachedPvr = null;       // Uint8Array(32KB)
     this.syncReceived = false;
 
     // Frame ordering
@@ -41,7 +78,7 @@ class MapleCastRelay {
     this.framesRelayed = 0;
     this.framesDropped = 0;
 
-    // SYNC chunk reassembly (receiving from parent)
+    // SYNC chunk reassembly (receiving mid-stream SYNC from parent)
     this._syncChunks = null;
     this._syncTotalChunks = 0;
     this._syncReceivedChunks = 0;
@@ -96,16 +133,29 @@ class MapleCastRelay {
   // Called when SYNC arrives from server WebSocket (seeds only)
   handleServerSync(data) {
     this.syncReceived = true;
-    this._cacheSyncFromRaw(data);
     this.onSync(data);
   }
 
   // ---- Frame Pipeline ----
 
   _onFrameFromUpstream(data) {
-    // Frame ordering: discard late arrivals
     const view = new DataView(data instanceof ArrayBuffer ? data : data.buffer);
-    if (data.byteLength >= 8) {
+    // Detect ZCST compressed frame — magic bytes 0x5A 0x43 0x53 0x54
+    // (server-side compression of large packets; SYNCs are always ZCST)
+    const isCompressed = data.byteLength >= 4 &&
+      view.getUint32(0, true) === 0x5453435A;
+    // Detect raw SYNC magic — server side scene-change broadcasts may also
+    // arrive uncompressed if zstd is disabled.
+    const isRawSync = data.byteLength >= 4 &&
+      view.getUint32(0, true) === 0x434E5953; // "SYNC" little-endian
+
+    // Compressed frames + raw SYNCs are full-state packets, not deltas.
+    // They get a different forwarding path (reliable, chunked).
+    const isFullState = isCompressed || isRawSync;
+
+    // Frame ordering: discard late arrivals (only for uncompressed deltas —
+    // compressed/SYNC frames have no frameNum in a stable position)
+    if (!isFullState && data.byteLength >= 8) {
       const frameNum = view.getUint32(4, true);
       if (frameNum <= this.highestFrameNum && this.highestFrameNum - frameNum < 1000) {
         // Late frame — skip (but allow wraparound)
@@ -116,15 +166,21 @@ class MapleCastRelay {
 
     this.framesReceived++;
 
-    // Feed to WASM renderer
+    // Feed to WASM renderer (WASM handles decompression internally)
     this.onFrame(data);
-
-    // Update cached SYNC state with dirty pages from this frame
-    this._updateCachedState(data);
 
     // Forward to children (if seed or relay)
     if (this.role === 'seed' || this.role === 'relay') {
-      this._forwardToChildren(data);
+      if (isFullState) {
+        // Full-state SYNC packets are too big for unreliable DataChannel
+        // (1MB+, and SCTP message size caps at ~256KB in Chrome). Send
+        // them over the reliable, ordered ta-sync DC chunked into 64KB
+        // pieces.
+        this._forwardFullStateToChildren(data);
+      } else {
+        // Delta frames — fire-and-forget over unreliable ta-mirror DC.
+        this._forwardToChildren(data);
+      }
     }
   }
 
@@ -144,114 +200,39 @@ class MapleCastRelay {
     }
   }
 
-  // ---- SYNC Caching ----
-
-  _cacheSyncFromRaw(data) {
-    // Parse SYNC: "SYNC"(4) + vramSize(4) + vram(N) + pvrSize(4) + pvr(N)
-    const arr = new Uint8Array(data instanceof ArrayBuffer ? data : data.buffer);
-    if (arr.length < 12) return;
-    const view = new DataView(arr.buffer, arr.byteOffset);
-
-    let off = 4; // skip "SYNC"
-    const vramSize = view.getUint32(off, true); off += 4;
-    this.cachedVram = new Uint8Array(vramSize);
-    this.cachedVram.set(arr.subarray(off, off + vramSize));
-    off += vramSize;
-
-    const pvrSize = view.getUint32(off, true); off += 4;
-    this.cachedPvr = new Uint8Array(pvrSize);
-    this.cachedPvr.set(arr.subarray(off, off + pvrSize));
-  }
-
-  _updateCachedState(data) {
-    // Apply dirty pages from delta frame to cached VRAM/PVR
-    if (!this.cachedVram || !this.cachedPvr) return;
-
-    const arr = new Uint8Array(data instanceof ArrayBuffer ? data : data.buffer);
-    if (arr.length < 80) return;
-    const view = new DataView(arr.buffer, arr.byteOffset);
-
-    // Skip header: frameSize(4) + frameNum(4) + pvr_snapshot(64)
-    let off = 72;
-    const taSize = view.getUint32(off, true); off += 4;
-    const deltaPayloadSize = view.getUint32(off, true); off += 4;
-
-    // Skip TA data + checksum
-    off += deltaPayloadSize + 4;
-
-    // Parse dirty pages
-    if (off + 4 > arr.length) return;
-    const dirtyCount = view.getUint32(off, true); off += 4;
-
-    for (let d = 0; d < dirtyCount; d++) {
-      if (off + 5 + 4096 > arr.length) break;
-      const regionId = arr[off++];
-      const pageIdx = view.getUint32(off, true); off += 4;
-      const pageOff = pageIdx * 4096;
-
-      if (regionId === 1 && pageOff + 4096 <= this.cachedVram.length) {
-        this.cachedVram.set(arr.subarray(off, off + 4096), pageOff);
-      } else if (regionId === 3 && pageOff + 4096 <= this.cachedPvr.length) {
-        this.cachedPvr.set(arr.subarray(off, off + 4096), pageOff);
-      }
-      off += 4096;
-    }
-  }
-
-  _buildSyncBuffer() {
-    // Build SYNC packet from cached state
-    if (!this.cachedVram || !this.cachedPvr) return null;
-    const vramSize = this.cachedVram.length;
-    const pvrSize = this.cachedPvr.length;
-    const totalSize = 4 + 4 + vramSize + 4 + pvrSize;
-    const buf = new Uint8Array(totalSize);
-    const view = new DataView(buf.buffer);
-
-    let off = 0;
-    buf[off++] = 0x53; buf[off++] = 0x59; buf[off++] = 0x4E; buf[off++] = 0x43; // "SYNC"
-    view.setUint32(off, vramSize, true); off += 4;
-    buf.set(this.cachedVram, off); off += vramSize;
-    view.setUint32(off, pvrSize, true); off += 4;
-    buf.set(this.cachedPvr, off);
-
-    return buf;
-  }
-
-  // ---- SYNC Chunked Transfer ----
-
-  _sendSyncToChild(childId) {
-    const child = this.children.get(childId);
-    if (!child || !child.syncDc || child.syncDc.readyState !== 'open') return;
-    if (child.syncSent) return;
-
-    const syncBuf = this._buildSyncBuffer();
-    if (!syncBuf) {
-      console.warn('[relay] No cached SYNC to send');
-      return;
-    }
-
-    // Chunk into 64KB pieces: [chunkIdx:u16][totalChunks:u16][data:<=64KB]
+  _forwardFullStateToChildren(data) {
+    // Chunk a full-state SYNC packet over each child's reliable ta-sync DC.
+    // Wire format: [chunkIdx:u16][totalChunks:u16][data]
+    const arr = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer);
     const CHUNK_SIZE = 64 * 1024;
-    const totalChunks = Math.ceil(syncBuf.length / CHUNK_SIZE);
+    const totalChunks = Math.ceil(arr.length / CHUNK_SIZE);
 
-    console.log(`[relay] Sending SYNC to ${childId}: ${(syncBuf.length / 1024 / 1024).toFixed(1)} MB in ${totalChunks} chunks`);
-
-    for (let i = 0; i < totalChunks; i++) {
-      const start = i * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE, syncBuf.length);
-      const chunkData = syncBuf.subarray(start, end);
-
-      const packet = new Uint8Array(4 + chunkData.length);
-      const pView = new DataView(packet.buffer);
-      pView.setUint16(0, i, true);           // chunkIdx
-      pView.setUint16(2, totalChunks, true);  // totalChunks
-      packet.set(chunkData, 4);
-
-      try { child.syncDc.send(packet); }
-      catch (e) { console.error('[relay] SYNC chunk send failed:', e); return; }
+    let sentTo = 0;
+    for (const [childId, child] of this.children) {
+      if (!child.syncDc || child.syncDc.readyState !== 'open') continue;
+      try {
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, arr.length);
+          const chunkData = arr.subarray(start, end);
+          const packet = new Uint8Array(4 + chunkData.length);
+          const pView = new DataView(packet.buffer);
+          pView.setUint16(0, i, true);
+          pView.setUint16(2, totalChunks, true);
+          packet.set(chunkData, 4);
+          child.syncDc.send(packet);
+        }
+        sentTo++;
+      } catch (e) {
+        console.warn(`[relay] full-state SYNC forward to ${childId} failed:`, e?.message);
+      }
     }
-    child.syncSent = true;
+    if (sentTo > 0) {
+      console.log(`[relay] forwarded full-state SYNC (${(arr.length / 1024 / 1024).toFixed(1)} MB, ${totalChunks} chunks) to ${sentTo} children`);
+    }
   }
+
+  // ---- SYNC chunk reassembly (mid-stream SYNC forwarded from upstream) ----
 
   _handleSyncChunk(data) {
     const arr = new Uint8Array(data);
@@ -280,10 +261,9 @@ class MapleCastRelay {
       let off = 0;
       for (const c of this._syncChunks) { full.set(c, off); off += c.length; }
 
-      console.log(`[relay] SYNC reassembled: ${(totalLen / 1024 / 1024).toFixed(1)} MB`);
+      console.log(`[relay] mid-stream SYNC reassembled: ${(totalLen / 1024 / 1024).toFixed(1)} MB`);
       this._syncChunks = null;
       this.syncReceived = true;
-      this._cacheSyncFromRaw(full.buffer);
       this.onSync(full.buffer);
     }
   }
@@ -379,7 +359,7 @@ class MapleCastRelay {
     console.log(`[relay] Accepting child ${childId}`);
 
     const pc = new RTCPeerConnection(this.rtcConfig);
-    const child = { pc, mirrorDc: null, syncDc: null, syncSent: false };
+    const child = { pc, mirrorDc: null, syncDc: null };
     this.children.set(childId, child);
 
     pc.ondatachannel = (e) => {
@@ -394,8 +374,10 @@ class MapleCastRelay {
       } else if (dc.label === 'ta-sync') {
         child.syncDc = dc;
         dc.onopen = () => {
-          console.log(`[relay] Sync DC to child ${childId} OPEN — sending SYNC`);
-          this._sendSyncToChild(childId);
+          // No initial SYNC push — child gets fresh SYNC from server WS
+          // (onOpen handler) on connect. This DC is reserved for mid-stream
+          // SYNC forwards on scene change.
+          console.log(`[relay] Sync DC to child ${childId} OPEN`);
         };
       }
     };

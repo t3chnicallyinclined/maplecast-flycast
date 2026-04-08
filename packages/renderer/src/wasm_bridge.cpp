@@ -28,6 +28,7 @@
 #include "rend/texconv.h"
 #include "rend/transform_matrix.h"
 #include "cfg/option.h"
+#include "maplecast_compress.h"
 
 #include <cstdio>
 #include <cstring>
@@ -69,6 +70,20 @@ static bool _ctxAlloced = false;
 static std::vector<uint8_t> _prevTA;       // Previous frame's TA buffer (for delta decode)
 static bool _initialized = false;
 static uint32_t _frameCount = 0;
+static MirrorDecompressor _decomp;
+static bool _decompInit = false;
+
+// Single 16MB decompressor shared by SYNC and per-frame paths.
+// SYNC payloads are ~8MB uncompressed; if the per-frame path inits with a
+// smaller buffer first, the SYNC path will overflow it.
+// Matches desktop maplecast_mirror.cpp wsClientRun() which uses one 16MB decompressor.
+static void ensureDecomp()
+{
+    if (!_decompInit) {
+        _decomp.init(16 * 1024 * 1024);
+        _decompInit = true;
+    }
+}
 
 // ============================================================================
 // renderer_init — Create WebGL2 context and initialize the GLES renderer
@@ -127,21 +142,165 @@ int renderer_init(int width, int height)
     return 1;
 }
 
+// renderer_reinit — Re-run renderer->Init() WITHOUT recreating the WebGL2
+// context or reallocating VRAM. Resets glcache state, recompiles shaders if
+// needed, sets fog/palette flags. Use this to reset renderer state mid-stream
+// when a scene change leaves things in a bad state.
+EMSCRIPTEN_KEEPALIVE
+int renderer_reinit()
+{
+    if (!_initialized || !renderer) {
+        printf("[renderer] reinit failed: not initialized\n");
+        return 0;
+    }
+
+    // Tear down + recreate the renderer. This re-runs glcache.EnableCache()
+    // which resets glcache's state model — the thing the JS-side
+    // _gl.enable(BLEND/...) bootstrap was a hack to fix.
+    renderer->Term();
+    delete renderer;
+    renderer = rend_GLES2();
+    if (!renderer) {
+        printf("[renderer] reinit failed: rend_GLES2() returned null\n");
+        return 0;
+    }
+    if (!renderer->Init()) {
+        printf("[renderer] reinit failed: renderer->Init() returned false\n");
+        delete renderer;
+        renderer = nullptr;
+        return 0;
+    }
+
+    // Force everything to re-upload on next frame
+    renderer->resetTextureCache = true;
+    renderer->updatePalette = true;
+    renderer->updateFogTable = true;
+    pal_needs_update = true;
+    palette_update();
+    _prevTA.clear();
+
+    printf("[renderer] REINIT complete — fresh renderer state\n");
+    return 1;
+}
+
 // ============================================================================
 // renderer_sync — Apply initial SYNC (full VRAM + PVR register snapshot)
 //
 // Format: "SYNC"(4) + vramSize(4) + vram[N] + pvrSize(4) + pvr[N]
 // ============================================================================
 
+// Stubs for TA hardware globals that pvr::serialize emits but the WASM
+// renderer doesn't otherwise need. These exist so we can write the bytes
+// from FSYN packets into them — even though the renderer doesn't read
+// them today, having the values available is harmless and lets us test
+// theories about what state matters.
+namespace {
+    uint8_t  g_ta_fsm[2049];
+    uint32_t g_ta_fsm_cl = 0;
+    uint32_t g_taRenderPass = 0;
+}
+
+// Apply a FSYN tagged-record packet. Walks the records and copies known
+// tags into VRAM/pvr_regs/global stubs. Unknown tags are skipped.
+// Wire format: "FSYN"(4) + version(2) + recordCount(2)
+//              + per record: tag(4) + size(4) + data[size]
+static bool applyFsynPacket(const uint8_t* data, size_t size)
+{
+    if (size < 8) return false;
+    if (memcmp(data, "FSYN", 4) != 0) return false;
+
+    const uint8_t* p = data + 4;
+    const uint8_t* end = data + size;
+    uint16_t version, recordCount;
+    memcpy(&version, p, 2); p += 2;
+    memcpy(&recordCount, p, 2); p += 2;
+
+    int appliedVram = 0, appliedPreg = 0, appliedTafs = 0, appliedTast = 0;
+    int unknown = 0;
+
+    for (uint16_t r = 0; r < recordCount && p + 8 <= end; r++) {
+        char tag[5] = {0};
+        memcpy(tag, p, 4); p += 4;
+        uint32_t recSize;
+        memcpy(&recSize, p, 4); p += 4;
+        if (p + recSize > end) {
+            printf("[renderer] FSYN truncated at record %u tag=%s\n", r, tag);
+            return false;
+        }
+        if (memcmp(tag, "VRAM", 4) == 0) {
+            uint32_t copy = recSize;
+            if (copy > VRAM_SIZE) copy = VRAM_SIZE;
+            memcpy(&vram[0], p, copy);
+            appliedVram = (int)copy;
+        } else if (memcmp(tag, "PREG", 4) == 0) {
+            uint32_t copy = recSize;
+            if (copy > (uint32_t)pvr_RegSize) copy = pvr_RegSize;
+            memcpy(pvr_regs, p, copy);
+            appliedPreg = (int)copy;
+        } else if (memcmp(tag, "TAFS", 4) == 0) {
+            uint32_t copy = recSize;
+            if (copy > sizeof(g_ta_fsm)) copy = sizeof(g_ta_fsm);
+            memcpy(g_ta_fsm, p, copy);
+            appliedTafs = (int)copy;
+        } else if (memcmp(tag, "TAST", 4) == 0 && recSize >= 8) {
+            memcpy(&g_ta_fsm_cl, p, 4);
+            memcpy(&g_taRenderPass, p + 4, 4);
+            appliedTast = 1;
+        } else {
+            unknown++;
+        }
+        p += recSize;
+    }
+
+    printf("[renderer] FSYN applied: VRAM=%d PREG=%d TAFS=%d TAST=%d unknown=%d\n",
+        appliedVram, appliedPreg, appliedTafs, appliedTast, unknown);
+
+    // Force the renderer to re-upload everything that depends on PVR/VRAM.
+    renderer->resetTextureCache = true;
+    renderer->updatePalette = true;
+    renderer->updateFogTable = true;
+    pal_needs_update = true;
+    palette_update();
+    _prevTA.clear();
+    return true;
+}
+
 EMSCRIPTEN_KEEPALIVE
 int renderer_sync(uint8_t* data, int size)
 {
-    if (!_initialized || !renderer || size < 12) return 0;
-    uint8_t* src = data;
+    if (!_initialized || !renderer || size < 8) return 0;
 
-    // Verify magic
-    if (memcmp(src, "SYNC", 4) != 0) return 0;
+    // Decompress if ZCST-compressed
+    ensureDecomp();
+    size_t decompSize = 0;
+    const uint8_t* decompData = _decomp.decompress(data, size, decompSize);
+    if (decompSize < 8) return 0;
+
+    const uint8_t* src = decompData;
+
+    // Dispatch on envelope magic
+    if (memcmp(src, "FSYN", 4) == 0) {
+        return applyFsynPacket(src, decompSize) ? 1 : 0;
+    }
+    if (memcmp(src, "SAVE", 4) == 0) {
+        // SAVE envelope: "SAVE"(4) + uncompSize(4) + dc_serialize blob
+        // We can't safely walk dc_serialize on the WASM side (not
+        // self-describing). Log + ignore — the bytes are useless to
+        // a renderer-only build without linking pvr::deserialize.
+        uint32_t blobSize;
+        memcpy(&blobSize, src + 4, 4);
+        printf("[renderer] SAVE received: blob=%u bytes (decompSize=%zu) — IGNORED (no deserializer)\n",
+            blobSize, decompSize);
+        return 1;
+    }
+    if (memcmp(src, "SYNC", 4) != 0) {
+        printf("[renderer] renderer_sync: unknown magic %02x %02x %02x %02x\n",
+            src[0], src[1], src[2], src[3]);
+        return 0;
+    }
     src += 4;
+
+    if (decompSize < 12) return 0;
 
     // VRAM
     uint32_t vramSize;
@@ -181,6 +340,53 @@ int renderer_sync(uint8_t* data, int size)
 //   frameSize(4) + frameNum(4) + pvr_snapshot[16](64) +
 //   taSize(4) + deltaPayloadSize(4) + deltaData(var) + checksum(4) +
 //   dirtyPageCount(4) + [regionId(1) + pageIdx(4) + data(4096)] * N
+//
+// ============================================================================
+// !!! FRAGILE — READ THIS BEFORE EDITING !!!
+// ============================================================================
+// This bridge MUST stay byte-for-byte compatible with:
+//   1. The server side: maplecast_mirror.cpp serverPublish()
+//   2. The desktop client: maplecast_mirror.cpp clientReceive()
+//   3. The other browser bridge: core/network/maplecast_wasm_bridge.cpp
+//      (used by web/emulator.html — different binary, same wire format)
+//
+// If you edit ANY of those four files, edit ALL of them. The wire format is
+// the contract. Any divergence shows up as broken scenes (character select,
+// loading screens) WHILE in-match still looks fine — because in-match VRAM is
+// stable and survives bugs that only manifest on scene transitions.
+//
+// Five bugs we already paid for and don't want again:
+//
+//   (A) Decompressor sized too small. ONE shared 16MB MirrorDecompressor for
+//       both renderer_sync (8MB SYNC) and renderer_frame. If you split them or
+//       size the per-frame one smaller, the SYNC path will overflow whichever
+//       got initialized first.
+//
+//   (B) Dropping dirty pages during the keyframe-wait window. When a delta
+//       arrives before the first keyframe, we MUST still walk dirty pages to
+//       VRAM/PVR — we just skip Process()/Render(). Dropping them means VRAM
+//       drifts behind the server until the next page rewrite, which can be
+//       seconds later, breaking the first 1-60 frames after every reconnect.
+//
+//   (C) VramLockedWriteOffset(pageOff) MUST be called BEFORE memcpy into VRAM.
+//       Order is "unprotect, then write." Reverse on the desktop client = SIGSEGV
+//       in the texture cache mprotect path. Harmless on WASM but keep aligned.
+//
+//   (D) _prevTA must NEVER shrink. Only grow. Truncating on a smaller frame
+//       loses tail bytes the next delta might patch into.
+//
+//   (E) renderer->resetTextureCache MUST be set whenever ANY VRAM page is dirty.
+//       Without it, the WebGL texture cache shows whatever was uploaded the
+//       first time it saw that VRAM region. Scene transitions (where VRAM
+//       turns over heavily) silently render with stale textures from the
+//       previous scene. This is THE bug that motivated this whole comment.
+//
+// Test surface: load https://nobd.net/king.html, watch character select,
+// stage select, and the rotating-globe scene. If those render right, the
+// bridge is working. If only in-match works, you've broken one of A-E.
+//
+// See also: docs/ARCHITECTURE.md "Mirror Wire Format — Rules of the Road"
+// and the memory note "WASM Bridge Parity".
 // ============================================================================
 
 EMSCRIPTEN_KEEPALIVE
@@ -194,9 +400,15 @@ int renderer_frame(uint8_t* data, int size)
 {
     if (!_initialized) return -1;
     if (!renderer) return -2;
-    if (size < 80) return -3;
+    if (size < 12) return -3;
 
-    uint8_t* src = data;
+    // Decompress if ZCST-compressed
+    ensureDecomp();
+    size_t decompSize = 0;
+    const uint8_t* decompData = _decomp.decompress(data, size, decompSize);
+    if (decompSize < 80) return -3;
+
+    const uint8_t* src = decompData;
 
     // ---- Header ----
     uint32_t frameSize; memcpy(&frameSize, src, 4); src += 4;
@@ -210,23 +422,53 @@ int renderer_frame(uint8_t* data, int size)
     uint32_t taSize;           memcpy(&taSize,           src, 4); src += 4;
     uint32_t deltaPayloadSize; memcpy(&deltaPayloadSize, src, 4); src += 4;
 
+    bool skipRender = false;
+    uint32_t clientChecksum = 0;
+
     if (deltaPayloadSize == taSize) {
-        // Keyframe — full TA buffer
-        _prevTA.assign(src, src + taSize);
-        src += taSize;
-        printf("[renderer] KEYFRAME received: frame=%u taSize=%u\n", frameNum, taSize);
-    } else {
-        // Delta frame — apply runs to previous buffer
-        if (_prevTA.empty()) {
-            // No previous keyframe — skip until we get one
-            return -10;  // waiting for keyframe
+        // Keyframe — full TA buffer. GROW-ONLY: never shrink _prevTA, or we
+        // destroy tail bytes that the next delta may reference. Matches desktop
+        // clientReceive() which decodes into a fixed 8 MB clientCtx.tad.thd_root
+        // that never shrinks. std::vector::assign() would resize down to taSize,
+        // and the next delta's resize(taSize, 0) would re-fill that region with
+        // zeros, corrupting any offsets the server's delta encoding assumed
+        // were still present. Symptom: garbled frames after scene transitions.
+        if (_prevTA.size() < taSize)
+            _prevTA.resize(taSize, 0);
+        memcpy(_prevTA.data(), src, taSize);
+        // Checksum the freshly-copied keyframe (matches desktop clientReceive())
+        for (uint32_t i = 0; i + 3 < taSize; i += 4) {
+            uint32_t w; memcpy(&w, _prevTA.data() + i, 4);
+            clientChecksum ^= w;
         }
-        // Resize to match server's TA size
-        _prevTA.resize(taSize, 0);
+        src += taSize;
+        if ((frameNum % 60) == 0)
+            printf("[renderer] KEYFRAME frame=%u taSize=%u wireSize=%d decompSize=%zu\n",
+                frameNum, taSize, size, decompSize);
+    } else if (_prevTA.empty()) {
+        // Delta arrived before any keyframe — must still walk past delta + checksum
+        // + dirty pages so VRAM updates from this window aren't lost. We just can't
+        // render this frame.
+        static int waitCount = 0;
+        if (waitCount++ < 5)
+            printf("[renderer] DELTA dropped — waiting for keyframe\n");
+        src += deltaPayloadSize;
+        skipRender = true;
+    } else {
+        // Delta frame — apply runs to previous buffer.
+        // Match desktop client: do NOT truncate _prevTA when taSize shrinks; only
+        // grow it. The valid region is [0, taSize) on each frame; bytes beyond
+        // that point are dead but don't hurt anything.
+        if (_prevTA.size() < taSize)
+            _prevTA.resize(taSize, 0);
+
+        if ((frameNum % 300) == 0)
+            printf("[renderer] DELTA frame=%u taSize=%u deltaSize=%u wireSize=%d decompSize=%zu\n",
+                frameNum, taSize, deltaPayloadSize, size, decompSize);
 
         // Apply delta runs: (offset:4, runLen:2, data:N)*, sentinel 0xFFFFFFFF
-        uint8_t* deltaData = src;
-        uint8_t* deltaEnd  = src + deltaPayloadSize;
+        const uint8_t* deltaData = src;
+        const uint8_t* deltaEnd  = src + deltaPayloadSize;
         while (deltaData + 4 <= deltaEnd) {
             uint32_t offset;
             memcpy(&offset, deltaData, 4); deltaData += 4;
@@ -241,12 +483,28 @@ int renderer_frame(uint8_t* data, int size)
             deltaData += runLen;
         }
         src += deltaPayloadSize;
+
+        // Checksum the full TA buffer after delta apply (matches desktop)
+        for (uint32_t i = 0; i + 3 < taSize; i += 4) {
+            uint32_t w; memcpy(&w, _prevTA.data() + i, 4);
+            clientChecksum ^= w;
+        }
     }
 
-    // ---- Skip checksum (4 bytes) ----
+    // ---- Skip server checksum (currently a 0 placeholder) ----
+    // Server-side at maplecast_mirror.cpp serverPublish() emits a literal 0
+    // here ("TCP guarantees integrity, checksum disabled"). We compute
+    // clientChecksum above so it's ready if the server ever re-enables it,
+    // but we deliberately don't compare yet — would log false mismatches on
+    // every frame.
+    (void)clientChecksum;
     src += 4;
 
     // ---- Apply dirty memory pages ----
+    // Walk this even when skipRender, so VRAM/PVR updates from the
+    // delta-before-keyframe window don't get dropped on the floor.
+    // Region 0 (mem_b) and region 2 (aica_ram) are intentionally discarded
+    // — this is a renderer-only build with no SH4 RAM and no AICA RAM.
     uint32_t dirtyPages;
     memcpy(&dirtyPages, src, 4); src += 4;
     bool vramDirty = false;
@@ -258,19 +516,23 @@ int renderer_frame(uint8_t* data, int size)
         size_t pageOff = (size_t)pageIdx * 4096;
 
         if (regionId == 1 && pageOff + 4096 <= VRAM_SIZE) {
-            // VRAM page — copy + invalidate texture cache for this region
-            memcpy(&vram[pageOff], src, 4096);
+            // VRAM page — unprotect BEFORE memcpy (matches desktop client),
+            // then memcpy + flag for texture cache invalidation.
             VramLockedWriteOffset(pageOff);
+            memcpy(&vram[pageOff], src, 4096);
             vramDirty = true;
         } else if (regionId == 3 && pageOff + 4096 <= (size_t)pvr_RegSize) {
             // PVR register page
             memcpy(pvr_regs + pageOff, src, 4096);
         }
+        // regions 0 and 2: skip data, this build has no host buffer for them
         src += 4096;
     }
 
+    if (skipRender) return -10;
+
     // Match native client: full texture cache reset when ANY VRAM page changes.
-    // The native client does this at maplecast_mirror.cpp line 850.
+    // The native client does this at maplecast_mirror.cpp clientReceive().
     if (vramDirty) renderer->resetTextureCache = true;
 
     // Debug: log palette state on first rendered frame
@@ -317,9 +579,10 @@ int renderer_frame(uint8_t* data, int size)
     {
         int fbW, fbH;
         getScaledFramebufferSize(_ctx.rend, fbW, fbH);
-        // Cap framebuffer to prevent OOM — max 1920x1440 (4x native)
-        if (fbW > 1920) fbW = 640;
-        if (fbH > 1440) fbH = 480;
+        // Cap framebuffer to display dimensions to prevent OOM
+        // settings.display.width/height are set by renderer_resize()
+        if (fbW > settings.display.width)  fbW = settings.display.width;
+        if (fbH > settings.display.height) fbH = settings.display.height;
         _ctx.rend.framebufferWidth = fbW;
         _ctx.rend.framebufferHeight = fbH;
         if (_frameCount == 0)

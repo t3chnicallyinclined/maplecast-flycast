@@ -86,8 +86,31 @@ int flycast_init(int argc, char* argv[])
 			config::Settings::instance().load(false);
 		}
 		gui_init();
-		os_CreateWindow();
-		os_SetupInput();
+		// MapleCast headless: skip SDL window + local input setup.
+		// The norend renderer is wired in rend_create_renderer(). Input
+		// arrives via the maplecast input server on UDP:7100 instead of
+		// the local SDL/evdev path. See docs/WORKSTREAM-HEADLESS-SERVER.md.
+		//
+		// Two paths trigger headless:
+		//   * MAPLECAST_HEADLESS_BUILD — compile-time define (Phase 3
+		//     compile-out binary). Binary is ALWAYS headless; env var
+		//     optional.
+		//   * MAPLECAST_HEADLESS=1 env var — runtime gate on GPU-capable
+		//     builds (Phase 1 runtime mode).
+#ifdef MAPLECAST_HEADLESS_BUILD
+		const bool headless = true;
+#else
+		const bool headless = (std::getenv("MAPLECAST_HEADLESS") != nullptr);
+#endif
+		if (!headless)
+		{
+			os_CreateWindow();
+			os_SetupInput();
+		}
+		else
+		{
+			NOTICE_LOG(BOOT, "MapleCast headless — skipping os_CreateWindow + os_SetupInput");
+		}
 
 		if(config::GDB)
 			debugger::init(config::GDBPort);
@@ -152,7 +175,14 @@ void flycast_term()
 	gui_cancel_load();
 	lua::term();
 	emu.term();
-	os_DestroyWindow();
+	// Headless: nothing to destroy (os_CreateWindow was skipped in flycast_init).
+#ifdef MAPLECAST_HEADLESS_BUILD
+	const bool _headless_term = true;
+#else
+	const bool _headless_term = (std::getenv("MAPLECAST_HEADLESS") != nullptr);
+#endif
+	if (!_headless_term)
+		os_DestroyWindow();
 	gui_term();
 	os_TermInput();
 }

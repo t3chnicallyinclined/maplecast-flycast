@@ -1,0 +1,1133 @@
+/* ============================================================
+   OVERLORD — admin dashboard styles.
+   Dark / brutalist / arcade-overlord vibe. Reuses some color
+   variables from king.html so the two pages feel related but
+   distinct (overlord is for ops, not for spectating).
+   ============================================================ */
+
+:root {
+  --ov-bg:        #07070d;
+  --ov-bg-card:   #11111c;
+  --ov-bg-card-2: #16162a;
+  --ov-bg-input:  #0c0c16;
+  --ov-border:    #2a2a3e;
+  --ov-border-hi: #44446a;
+
+  --ov-text:      #e8e8f0;
+  --ov-text-dim:  #8888a0;
+  --ov-text-mute: #555570;
+
+  --ov-gold:      #ffd700;
+  --ov-gold-dim:  #b8860b;
+  --ov-red:       #ff3344;
+  --ov-amber:     #ffa500;
+  --ov-green:     #00d65a;
+  --ov-cyan:      #00e5ff;
+  --ov-blue:      #5599ff;
+
+  --ov-mono:      'JetBrains Mono', 'SF Mono', 'Menlo', monospace;
+  --ov-arcade:    'Press Start 2P', monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  background: var(--ov-bg);
+  color: var(--ov-text);
+  font-family: var(--ov-mono);
+  font-size: 14px;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--ov-cyan); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code {
+  font-family: var(--ov-mono);
+  background: var(--ov-bg-input);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--ov-gold);
+  font-size: 0.9em;
+}
+
+/* ============================================================
+   LOGIN PAGE
+   ============================================================ */
+.overlord-login {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  position: relative;
+  overflow: hidden;
+}
+
+.login-bg {
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(circle at 50% 50%, #18182a 0%, #07070d 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.login-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255, 215, 0, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 215, 0, 0.04) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: radial-gradient(circle at 50% 50%, black 30%, transparent 70%);
+  -webkit-mask-image: radial-gradient(circle at 50% 50%, black 30%, transparent 70%);
+}
+
+.login-card {
+  position: relative;
+  z-index: 1;
+  background: var(--ov-bg-card);
+  border: 2px solid var(--ov-border-hi);
+  border-radius: 6px;
+  padding: 40px 50px;
+  width: 420px;
+  max-width: 95vw;
+  box-shadow:
+    0 0 0 1px var(--ov-bg) inset,
+    0 30px 80px rgba(0, 0, 0, 0.6),
+    0 0 60px rgba(255, 215, 0, 0.05);
+}
+
+.login-title {
+  font-family: var(--ov-arcade);
+  font-size: 22px;
+  color: var(--ov-gold);
+  text-align: center;
+  margin-bottom: 8px;
+  letter-spacing: 2px;
+  text-shadow: 0 0 8px rgba(255, 215, 0, 0.3);
+}
+
+.login-skull {
+  font-size: 0.9em;
+  margin-right: 8px;
+  filter: drop-shadow(0 0 6px rgba(255, 215, 0, 0.5));
+}
+
+.login-subtitle {
+  font-family: var(--ov-arcade);
+  font-size: 9px;
+  color: var(--ov-text-dim);
+  text-align: center;
+  letter-spacing: 4px;
+  margin-bottom: 30px;
+}
+
+.login-label {
+  display: block;
+  font-family: var(--ov-arcade);
+  font-size: 9px;
+  color: var(--ov-text-dim);
+  margin: 16px 0 6px 0;
+  letter-spacing: 1px;
+}
+
+.login-card input[type="text"],
+.login-card input[type="password"] {
+  display: block;
+  width: 100%;
+  background: var(--ov-bg-input);
+  border: 1px solid var(--ov-border);
+  color: var(--ov-text);
+  font-family: var(--ov-mono);
+  font-size: 14px;
+  padding: 12px 14px;
+  border-radius: 3px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.login-card input[type="text"]:focus,
+.login-card input[type="password"]:focus {
+  border-color: var(--ov-gold);
+  box-shadow: 0 0 0 2px rgba(255, 215, 0, 0.15);
+}
+
+.login-btn {
+  width: 100%;
+  margin-top: 24px;
+  padding: 14px;
+  background: linear-gradient(180deg, var(--ov-gold) 0%, var(--ov-gold-dim) 100%);
+  color: #000;
+  border: none;
+  border-radius: 3px;
+  font-family: var(--ov-arcade);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  cursor: pointer;
+  transition: transform 0.1s, box-shadow 0.15s;
+}
+
+.login-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(255, 215, 0, 0.3);
+}
+
+.login-btn:active { transform: translateY(0); }
+.login-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.login-error {
+  margin-top: 16px;
+  min-height: 20px;
+  color: var(--ov-red);
+  font-size: 12px;
+  text-align: center;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.login-footer {
+  margin-top: 30px;
+  padding-top: 20px;
+  border-top: 1px solid var(--ov-border);
+  font-size: 10px;
+  color: var(--ov-text-mute);
+  text-align: center;
+  line-height: 1.5;
+}
+
+.login-footer code {
+  font-size: 9px;
+  display: inline-block;
+  margin-top: 4px;
+}
+
+/* ============================================================
+   DASHBOARD PAGE
+   ============================================================ */
+.overlord-dash {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.overlord-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 24px;
+  background: var(--ov-bg-card);
+  border-bottom: 2px solid var(--ov-border-hi);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+}
+
+.overlord-brand {
+  font-family: var(--ov-arcade);
+  font-size: 16px;
+  color: var(--ov-gold);
+  letter-spacing: 2px;
+}
+
+.overlord-skull {
+  margin-right: 8px;
+  filter: drop-shadow(0 0 4px rgba(255, 215, 0, 0.5));
+}
+
+.overlord-status-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--ov-bg-input);
+  border: 1px solid var(--ov-border);
+  padding: 6px 14px;
+  border-radius: 99px;
+  font-family: var(--ov-mono);
+  font-size: 11px;
+  color: var(--ov-text-dim);
+}
+
+.dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.dot-green { background: var(--ov-green); box-shadow: 0 0 8px var(--ov-green); }
+.dot-amber { background: var(--ov-amber); box-shadow: 0 0 8px var(--ov-amber); }
+.dot-red   { background: var(--ov-red);   box-shadow: 0 0 8px var(--ov-red);   }
+.dot-gray  { background: var(--ov-text-mute); }
+
+.overlord-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--ov-text-dim);
+}
+
+#topUsername { color: var(--ov-text); font-weight: 700; }
+
+.btn-tiny {
+  background: var(--ov-bg-input);
+  color: var(--ov-text-dim);
+  border: 1px solid var(--ov-border);
+  padding: 4px 10px;
+  font-family: var(--ov-mono);
+  font-size: 10px;
+  border-radius: 3px;
+  cursor: pointer;
+  letter-spacing: 1px;
+}
+
+.btn-tiny:hover {
+  border-color: var(--ov-gold);
+  color: var(--ov-gold);
+}
+
+/* ============================================================
+   GRID
+   ============================================================ */
+.overlord-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-areas:
+    "status  preview"
+    "players players"
+    "saves   saves"
+    "config  config"
+    "logs    logs";
+  gap: 18px;
+  padding: 24px;
+  max-width: 1600px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.card-status      { grid-area: status; }
+.card-preview     { grid-area: preview; }
+.card-players     { grid-area: players; }
+.card-savestates  { grid-area: saves; }
+.card-config      { grid-area: config; }
+.card-logs        { grid-area: logs; }
+
+@media (max-width: 1100px) {
+  .overlord-grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "status"
+      "preview"
+      "players"
+      "saves"
+      "config"
+      "logs";
+  }
+}
+
+/* ============================================================
+   CARDS
+   ============================================================ */
+.card {
+  background: var(--ov-bg-card);
+  border: 1px solid var(--ov-border);
+  border-radius: 4px;
+  padding: 18px 22px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.card-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--ov-border);
+  padding-bottom: 10px;
+}
+
+.card-title {
+  font-family: var(--ov-arcade);
+  font-size: 11px;
+  color: var(--ov-gold);
+  letter-spacing: 2px;
+}
+
+.card-meta {
+  font-family: var(--ov-mono);
+  font-size: 10px;
+  color: var(--ov-text-mute);
+}
+
+.card-actions {
+  margin-top: 14px;
+}
+
+.card-actions-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.card-note {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: var(--ov-bg-input);
+  border-left: 3px solid var(--ov-amber);
+  font-size: 11px;
+  color: var(--ov-text-dim);
+  line-height: 1.5;
+}
+
+.card-note strong { color: var(--ov-amber); }
+
+/* ============================================================
+   STATUS CARD
+   ============================================================ */
+.status-grid {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--ov-border);
+}
+
+.status-row:last-child { border-bottom: none; }
+
+.status-label {
+  color: var(--ov-text-mute);
+  font-size: 10px;
+  letter-spacing: 1px;
+}
+
+.status-val {
+  color: var(--ov-text);
+  font-weight: 700;
+  font-family: var(--ov-mono);
+}
+
+.status-val.mono { font-size: 11px; color: var(--ov-cyan); }
+
+.status-val.good { color: var(--ov-green); }
+.status-val.bad  { color: var(--ov-red); }
+
+/* ============================================================
+   LIVE PREVIEW
+   ============================================================ */
+.preview-frame {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background: #000;
+  border: 1px solid var(--ov-border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.preview-frame iframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #000;
+}
+
+/* ============================================================
+   SAVESTATES TABLE
+   ============================================================ */
+.savestate-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.savestate-table thead th {
+  text-align: left;
+  font-family: var(--ov-arcade);
+  font-size: 9px;
+  letter-spacing: 1px;
+  color: var(--ov-text-mute);
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--ov-border);
+}
+
+.savestate-table tbody td {
+  padding: 8px 6px;
+  border-bottom: 1px dashed var(--ov-border);
+  color: var(--ov-text);
+}
+
+.savestate-table tbody tr:hover { background: rgba(255, 215, 0, 0.03); }
+
+.savestate-table .row-current {
+  background: rgba(0, 214, 90, 0.06);
+}
+
+.savestate-table .row-current .slot-num {
+  color: var(--ov-green);
+  font-weight: 700;
+}
+
+.slot-num {
+  font-family: var(--ov-arcade);
+  font-size: 11px;
+  color: var(--ov-gold);
+  width: 50px;
+}
+
+.muted { color: var(--ov-text-mute); font-style: italic; }
+
+.row-actions {
+  display: flex;
+  gap: 4px;
+}
+
+/* ============================================================
+   BUTTONS
+   ============================================================ */
+.btn-action {
+  background: var(--ov-bg-input);
+  color: var(--ov-text);
+  border: 1px solid var(--ov-border-hi);
+  padding: 8px 16px;
+  font-family: var(--ov-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn-action:hover:not(:disabled) {
+  border-color: var(--ov-gold);
+  color: var(--ov-gold);
+  box-shadow: 0 0 12px rgba(255, 215, 0, 0.15);
+}
+
+.btn-action:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-action.btn-secondary {
+  background: transparent;
+  color: var(--ov-text-dim);
+}
+
+.btn-action.btn-warn {
+  border-color: var(--ov-amber);
+  color: var(--ov-amber);
+}
+
+.btn-action.btn-warn:hover:not(:disabled) {
+  background: var(--ov-amber);
+  color: #000;
+  box-shadow: 0 0 12px rgba(255, 165, 0, 0.4);
+}
+
+.btn-action.btn-danger {
+  border-color: var(--ov-red);
+  color: var(--ov-red);
+}
+
+.btn-action.btn-danger:hover:not(:disabled) {
+  background: var(--ov-red);
+  color: #000;
+  box-shadow: 0 0 12px rgba(255, 51, 68, 0.4);
+}
+
+.btn-row {
+  background: var(--ov-bg-input);
+  color: var(--ov-text-dim);
+  border: 1px solid var(--ov-border);
+  padding: 4px 10px;
+  font-family: var(--ov-mono);
+  font-size: 10px;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.btn-row:hover:not(:disabled) {
+  border-color: var(--ov-gold);
+  color: var(--ov-gold);
+}
+
+.btn-row:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-row.btn-row-disabled {
+  border-color: var(--ov-border);
+  color: var(--ov-text-mute);
+  text-decoration: line-through;
+}
+
+.input-tiny {
+  background: var(--ov-bg-input);
+  border: 1px solid var(--ov-border);
+  color: var(--ov-text);
+  font-family: var(--ov-mono);
+  font-size: 12px;
+  padding: 7px 10px;
+  border-radius: 3px;
+  width: 70px;
+  text-align: center;
+}
+
+.select-tiny {
+  background: var(--ov-bg-input);
+  color: var(--ov-text);
+  border: 1px solid var(--ov-border);
+  padding: 4px 8px;
+  font-family: var(--ov-mono);
+  font-size: 10px;
+  border-radius: 2px;
+}
+
+/* ============================================================
+   CONFIG EDITOR
+   ============================================================ */
+.config-textarea {
+  width: 100%;
+  min-height: 360px;
+  background: var(--ov-bg-input);
+  border: 1px solid var(--ov-border);
+  color: var(--ov-text);
+  font-family: var(--ov-mono);
+  font-size: 12px;
+  padding: 12px 14px;
+  border-radius: 3px;
+  resize: vertical;
+  outline: none;
+  line-height: 1.5;
+}
+
+.config-textarea:focus {
+  border-color: var(--ov-gold);
+  box-shadow: 0 0 0 1px rgba(255, 215, 0, 0.15);
+}
+
+.config-dirty-indicator {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--ov-amber);
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+/* ============================================================
+   LOG VIEWER
+   ============================================================ */
+.log-viewer {
+  background: #000;
+  border: 1px solid var(--ov-border);
+  border-radius: 3px;
+  font-family: var(--ov-mono);
+  font-size: 11px;
+  color: #d0d0d0;
+  padding: 12px 16px;
+  max-height: 400px;
+  overflow-y: auto;
+  white-space: pre;
+  line-height: 1.5;
+}
+
+.log-viewer .log-line { display: block; }
+.log-viewer .log-line-warn { color: var(--ov-amber); }
+.log-viewer .log-line-err  { color: var(--ov-red); }
+.log-viewer .log-line-info { color: #b0b0d0; }
+.log-viewer .log-line-mirror { color: var(--ov-cyan); }
+.log-viewer .log-line-control { color: var(--ov-green); }
+
+/* ============================================================
+   TOAST NOTIFICATIONS
+   ============================================================ */
+.toast-container {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+.toast {
+  background: var(--ov-bg-card);
+  border: 1px solid var(--ov-border-hi);
+  border-radius: 3px;
+  padding: 12px 18px;
+  color: var(--ov-text);
+  font-size: 12px;
+  min-width: 280px;
+  max-width: 420px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  animation: toastIn 0.2s ease-out;
+  pointer-events: auto;
+  border-left: 3px solid var(--ov-cyan);
+}
+
+.toast.toast-success { border-left-color: var(--ov-green); }
+.toast.toast-warn    { border-left-color: var(--ov-amber); }
+.toast.toast-error   { border-left-color: var(--ov-red); }
+
+.toast-title {
+  font-family: var(--ov-arcade);
+  font-size: 9px;
+  letter-spacing: 1px;
+  margin-bottom: 4px;
+  color: var(--ov-gold);
+}
+
+.toast-body {
+  font-size: 12px;
+  color: var(--ov-text);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(20px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* ============================================================
+   SCROLLBARS
+   ============================================================ */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--ov-bg-input);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--ov-border-hi);
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ov-gold-dim);
+}
+
+/* ============================================================
+   METRIC TILES — fps / mbps / clients with mini sparklines
+   ============================================================ */
+.metrics-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.metric-tile {
+  background: linear-gradient(180deg, var(--ov-bg-card-2) 0%, var(--ov-bg-card) 100%);
+  border: 1px solid var(--ov-border-hi);
+  border-radius: 4px;
+  padding: 12px 14px;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.metric-tile::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, transparent 0%, rgba(255, 215, 0, 0.04) 100%);
+  pointer-events: none;
+}
+
+.metric-label {
+  font-family: var(--ov-arcade);
+  font-size: 8px;
+  letter-spacing: 2px;
+  color: var(--ov-text-dim);
+  margin-bottom: 4px;
+}
+
+.metric-val {
+  font-family: var(--ov-arcade);
+  font-size: 20px;
+  color: var(--ov-gold);
+  text-shadow: 0 0 10px rgba(255, 215, 0, 0.3);
+  font-weight: 700;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-val.metric-warn { color: var(--ov-amber); text-shadow: 0 0 10px rgba(255, 165, 0, 0.3); }
+.metric-val.metric-bad  { color: var(--ov-red);   text-shadow: 0 0 10px rgba(255, 51, 68, 0.3); }
+.metric-val.metric-good { color: var(--ov-green); text-shadow: 0 0 10px rgba(0, 214, 90, 0.3); }
+
+.metric-spark {
+  height: 18px;
+  margin-top: 6px;
+  position: relative;
+}
+
+.metric-spark svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.metric-spark path {
+  fill: none;
+  stroke-width: 1.5;
+}
+
+/* Status pill animation when uptime is updating */
+.dot-green {
+  animation: pulse-green 2s infinite ease-in-out;
+}
+
+@keyframes pulse-green {
+  0%, 100% { box-shadow: 0 0 6px var(--ov-green); }
+  50%      { box-shadow: 0 0 14px var(--ov-green), 0 0 4px var(--ov-green); }
+}
+
+/* ============================================================
+   CRT SCANLINE OVERLAY (preview iframe)
+   ============================================================ */
+.preview-frame.crt-on::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    repeating-linear-gradient(
+      0deg,
+      rgba(0, 0, 0, 0.16) 0px,
+      rgba(0, 0, 0, 0.16) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+  pointer-events: none;
+  z-index: 10;
+  mix-blend-mode: multiply;
+}
+
+.preview-frame.crt-on::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, transparent 60%, rgba(0, 0, 0, 0.5) 100%);
+  pointer-events: none;
+  z-index: 11;
+}
+
+#crtToggle.active {
+  background: var(--ov-gold);
+  color: #000;
+  border-color: var(--ov-gold);
+}
+
+/* ============================================================
+   "Set as auto-load" star button per row
+   ============================================================ */
+.btn-row.btn-pin {
+  border-color: var(--ov-amber);
+  color: var(--ov-amber);
+}
+
+.btn-row.btn-pin:hover {
+  background: var(--ov-amber);
+  color: #000;
+}
+
+/* The auto-load slot row gets a subtle gold accent */
+.savestate-table .row-current {
+  background: linear-gradient(90deg, rgba(255, 215, 0, 0.08) 0%, transparent 100%);
+  border-left: 2px solid var(--ov-gold);
+}
+
+/* ============================================================
+   KEYBOARD HELP overlay (? key)
+   ============================================================ */
+.keyhelp-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 99999;
+  backdrop-filter: blur(4px);
+}
+
+.keyhelp-modal.open { display: flex; }
+
+.keyhelp-card {
+  background: var(--ov-bg-card);
+  border: 2px solid var(--ov-gold);
+  border-radius: 6px;
+  padding: 30px 40px;
+  max-width: 500px;
+  box-shadow: 0 0 60px rgba(255, 215, 0, 0.3);
+}
+
+.keyhelp-title {
+  font-family: var(--ov-arcade);
+  font-size: 14px;
+  color: var(--ov-gold);
+  letter-spacing: 2px;
+  margin-bottom: 16px;
+  text-align: center;
+}
+
+.keyhelp-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--ov-border);
+}
+
+.keyhelp-row:last-child { border-bottom: none; }
+
+.keyhelp-key {
+  background: var(--ov-bg-input);
+  border: 1px solid var(--ov-border-hi);
+  border-radius: 3px;
+  padding: 4px 10px;
+  font-family: var(--ov-mono);
+  font-size: 12px;
+  color: var(--ov-gold);
+  font-weight: 700;
+  min-width: 28px;
+  text-align: center;
+}
+
+.keyhelp-desc {
+  color: var(--ov-text);
+  font-size: 12px;
+  flex: 1;
+  margin-left: 16px;
+}
+
+.keyhelp-close-hint {
+  text-align: center;
+  margin-top: 16px;
+  font-size: 10px;
+  color: var(--ov-text-mute);
+}
+
+/* ============================================================
+   PLAYERS card — slot tiles + queue list
+   ============================================================ */
+.slots-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.slot-tile {
+  background: linear-gradient(180deg, var(--ov-bg-card-2) 0%, var(--ov-bg-card) 100%);
+  border: 1px solid var(--ov-border-hi);
+  border-radius: 4px;
+  padding: 16px 18px;
+  position: relative;
+  overflow: hidden;
+}
+
+.slot-tile.occupied {
+  border-color: var(--ov-green);
+  box-shadow: 0 0 16px rgba(0, 214, 90, 0.15);
+}
+
+.slot-tile.occupied::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, transparent 0%, rgba(0, 214, 90, 0.05) 100%);
+  pointer-events: none;
+}
+
+.slot-tile-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.slot-tile-num {
+  font-family: var(--ov-arcade);
+  font-size: 16px;
+  color: var(--ov-gold);
+  letter-spacing: 2px;
+}
+
+.slot-tile-status {
+  font-family: var(--ov-arcade);
+  font-size: 8px;
+  letter-spacing: 1px;
+  padding: 3px 8px;
+  border-radius: 99px;
+  background: var(--ov-bg-input);
+  border: 1px solid var(--ov-border);
+  color: var(--ov-text-mute);
+}
+
+.slot-tile.occupied .slot-tile-status {
+  background: rgba(0, 214, 90, 0.15);
+  border-color: var(--ov-green);
+  color: var(--ov-green);
+}
+
+.slot-tile-name {
+  font-family: var(--ov-mono);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--ov-text);
+  margin-bottom: 4px;
+  word-break: break-all;
+  min-height: 22px;
+}
+
+.slot-tile.occupied .slot-tile-name {
+  color: var(--ov-gold);
+  text-shadow: 0 0 6px rgba(255, 215, 0, 0.2);
+}
+
+.slot-tile-meta {
+  font-size: 11px;
+  color: var(--ov-text-mute);
+  margin-bottom: 12px;
+  font-family: var(--ov-mono);
+  word-break: break-all;
+  min-height: 28px;
+  line-height: 1.4;
+}
+
+.slot-tile-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* QUEUE list */
+.queue-section {
+  border-top: 1px dashed var(--ov-border);
+  padding-top: 14px;
+}
+
+.queue-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+
+.queue-section-label {
+  font-family: var(--ov-arcade);
+  font-size: 9px;
+  letter-spacing: 1px;
+  color: var(--ov-text-mute);
+}
+
+.queue-section-meta {
+  font-size: 10px;
+  color: var(--ov-text-mute);
+  font-family: var(--ov-mono);
+}
+
+.queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.queue-list .muted {
+  font-size: 12px;
+  text-align: center;
+  padding: 18px;
+}
+
+.queue-row {
+  display: grid;
+  grid-template-columns: 32px 1fr auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 12px;
+  background: var(--ov-bg-input);
+  border: 1px solid var(--ov-border);
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.queue-row:hover {
+  border-color: var(--ov-border-hi);
+}
+
+.queue-row .qpos {
+  font-family: var(--ov-arcade);
+  font-size: 10px;
+  color: var(--ov-gold);
+  text-align: center;
+}
+
+.queue-row .qname {
+  color: var(--ov-text);
+  font-weight: 700;
+  font-family: var(--ov-mono);
+  word-break: break-all;
+}
+
+.queue-row.qrow-anon .qname {
+  color: var(--ov-text-dim);
+  font-style: italic;
+}
+
+.queue-row .qtime {
+  font-size: 10px;
+  color: var(--ov-text-mute);
+  font-family: var(--ov-mono);
+  white-space: nowrap;
+}
+
+.queue-row .qactions {
+  display: flex;
+  gap: 4px;
+}
+
+/* Gold tiny button variant for the BACKDOOR button */
+.btn-tiny.btn-tiny-gold {
+  background: var(--ov-gold);
+  color: #000;
+  border-color: var(--ov-gold);
+  font-weight: 700;
+}
+
+.btn-tiny.btn-tiny-gold:hover {
+  background: var(--ov-gold-dim);
+  border-color: var(--ov-gold-dim);
+  color: #000;
+  box-shadow: 0 0 12px rgba(255, 215, 0, 0.4);
+}
+
+/* "Promote to" mini-dropdown — inline </> arrows */
+.btn-row.btn-promote {
+  border-color: var(--ov-cyan);
+  color: var(--ov-cyan);
+}
+
+.btn-row.btn-promote:hover {
+  background: var(--ov-cyan);
+  color: #000;
+}

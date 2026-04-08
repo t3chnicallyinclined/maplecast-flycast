@@ -7,6 +7,7 @@
 #include "log/LogManager.h"
 #include "emulator.h"
 #include "ui/mainui.h"
+#include "ui/gui.h"
 #include "oslib/directory.h"
 #include "oslib/oslib.h"
 #include "oslib/i18n.h"
@@ -292,6 +293,47 @@ int main(int argc, char* argv[])
 		printf("[MIRROR] Auto-loading without ROM\n");
 		fflush(stdout);
 		emu.loadGame(nullptr);
+	}
+
+	// MapleCast headless: no GUI, no GameLoader. Load the ROM synchronously
+	// on the main thread (same as what BackgroundGameLoader::load would do
+	// asynchronously), then drop the GUI state to Closed so mainui_loop
+	// falls through to the emu.render() branch without ever calling
+	// gui_display_ui() (which dereferences imguiDriver).
+	//
+	// Triggers on either the compile-time MAPLECAST_HEADLESS_BUILD define
+	// (Phase 3 compile-out binary — always headless) or the runtime
+	// MAPLECAST_HEADLESS=1 env var (Phase 1 runtime gate on GPU builds).
+#ifdef MAPLECAST_HEADLESS_BUILD
+	const bool _headless_mode = true;
+#else
+	const bool _headless_mode = (std::getenv("MAPLECAST_HEADLESS") != nullptr);
+#endif
+	if (_headless_mode)
+	{
+		if (!settings.content.path.empty())
+		{
+			printf("[HEADLESS] Loading game: %s\n", settings.content.path.c_str());
+			fflush(stdout);
+			try {
+				emu.loadGame(settings.content.path.c_str());
+				// loadGame leaves us in state=Loaded. Transition to Running so
+				// emu.render() actually runs the SH4 executor. Emulator::start()
+				// is also where maplecast_mirror::initServer() runs.
+				emu.start();
+			} catch (const FlycastException& e) {
+				ERROR_LOG(BOOT, "[HEADLESS] loadGame failed: %s", e.what());
+				return 1;
+			}
+		}
+		else
+		{
+			ERROR_LOG(BOOT, "[HEADLESS] no ROM path — pass a rom as an argument");
+			return 1;
+		}
+		gui_setState(GuiState::Closed);
+		printf("[HEADLESS] Game loaded, GUI closed, entering main loop\n");
+		fflush(stdout);
 	}
 
 #if defined(USE_BREAKPAD)

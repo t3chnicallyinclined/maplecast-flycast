@@ -6,8 +6,6 @@ target_sources(${PROJECT_NAME} PRIVATE
         ggpo.h
         maplecast.cpp
         maplecast.h
-        maplecast_stream.cpp
-        maplecast_stream.h
         maplecast_telemetry.cpp
         maplecast_telemetry.h
         miniupnp.cpp
@@ -32,8 +30,6 @@ target_sources(${PROJECT_NAME} PRIVATE
         maplecast_xdp_input.h
         maplecast_input_server.cpp
         maplecast_input_server.h
-        maplecast_webrtc.cpp
-        maplecast_webrtc.h
         maplecast_audio.cpp
         maplecast_audio.h
         maplecast_gamestate.cpp
@@ -42,4 +38,17 @@ target_sources(${PROJECT_NAME} PRIVATE
         maplecast_mirror.h
         maplecast_ws_server.cpp
         maplecast_ws_server.h
+        maplecast_control_ws.cpp
+        maplecast_control_ws.h
         maplecast_wasm_bridge.cpp)
+
+# maplecast_stream (H.264 / NVENC / CUDA GL interop) and maplecast_webrtc
+# (libdatachannel) are the GPU-dependent legacy streaming paths. Exclude
+# them from the headless build — the TA mirror on port 7200 replaces them.
+if(NOT MAPLECAST_HEADLESS)
+    target_sources(${PROJECT_NAME} PRIVATE
+        maplecast_stream.cpp
+        maplecast_stream.h
+        maplecast_webrtc.cpp
+        maplecast_webrtc.h)
+endif()

@@ -782,7 +782,12 @@ ws.onmessage = (e) => {
     const data = new Uint8Array(e.data);
     if (data.length < 8) return;
 
-    if (data[0]===0x53 && data[1]===0x59 && data[2]===0x4E && data[3]===0x43) {
+    // Check for raw SYNC or ZCST-compressed SYNC (uncompressedSize > 1MB)
+    const isSYNC = data[0]===0x53 && data[1]===0x59 && data[2]===0x4E && data[3]===0x43;
+    const isZCST = data[0]===0x5A && data[1]===0x43 && data[2]===0x53 && data[3]===0x54;
+    const dv0 = new DataView(e.data);
+    const isCompSync = isZCST && data.length >= 8 && dv0.getUint32(4, true) > 1048576;
+    if (isSYNC || isCompSync) {
         const syncBuf = Module._malloc(data.length);
         Module.HEAPU8.set(data, syncBuf);
         Module._renderer_sync(syncBuf, data.length);
