@@ -30,6 +30,7 @@
 // config + savestate dirs.
 // ============================================================================
 
+use crate::fanout::RelayState;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
 use std::path::PathBuf;
@@ -119,6 +120,7 @@ impl AdminResponse {
 
 #[derive(Debug, Serialize)]
 pub struct StatusData {
+    // Flycast process
     pub flycast_active: bool,
     pub flycast_pid: Option<u32>,
     pub flycast_uptime_s: Option<u64>,
@@ -127,9 +129,22 @@ pub struct StatusData {
     pub control_ws: String,
     pub savestate_dir: String,
     pub rom_basename: String,
+
+    // Live relay metrics — pulled from RelayState every poll. These give
+    // the dashboard a real-time pulse of the cab without needing a
+    // separate /metrics fetch.
+    pub upstream_connected: bool,
+    pub clients: u32,
+    pub frames_received: u64,
+    pub bytes_received: u64,
+    pub last_frame_bytes: u32,
+    pub fps: f64,
+    pub mbps: f64,          // current bitrate in Mbps
+    pub frame_jitter_ms: f64, // worst-case jitter spike since last poll
+    pub sync_count: u64,
 }
 
-pub async fn handle_status() -> AdminResponse {
+pub async fn handle_status(state: &RelayState) -> AdminResponse {
     // 1. Is the flycast service active? Shell out to systemctl is-active.
     let unit = flycast_unit();
     let active_check = tokio::process::Command::new("systemctl")
@@ -198,6 +213,19 @@ pub async fn handle_status() -> AdminResponse {
     // 4. Current savestate slot from emu.cfg.
     let current_slot = read_current_slot().await;
 
+    // 5. Live relay metrics — read directly from RelayState (same source
+    //    the /metrics endpoint reads from). The avg_frame_interval_us is
+    //    a rolling EWMA inside the relay, so we can derive instantaneous
+    //    fps without needing client-side delta math.
+    let m = state.metrics().await;
+    let fps: f64 = if m.avg_frame_interval_us > 0 {
+        1_000_000.0 / m.avg_frame_interval_us as f64
+    } else { 0.0 };
+    // Bitrate: bytes_received is monotonic; the dashboard polls every
+    // ~2s. Use the EWMA-equivalent: last_frame_size * fps * 8 / 1e6.
+    let mbps: f64 = (m.last_frame_size_bytes as f64) * fps * 8.0 / 1_000_000.0;
+    let frame_jitter_ms: f64 = m.max_frame_interval_us as f64 / 1000.0;
+
     let data = StatusData {
         flycast_active,
         flycast_pid: pid,
@@ -207,6 +235,16 @@ pub async fn handle_status() -> AdminResponse {
         control_ws: control_ws_url(),
         savestate_dir: savestate_dir().to_string_lossy().to_string(),
         rom_basename: rom_basename(),
+
+        upstream_connected: m.upstream_connected,
+        clients: m.clients as u32,
+        frames_received: m.frames_received,
+        bytes_received: m.bytes_received,
+        last_frame_bytes: m.last_frame_size_bytes as u32,
+        fps,
+        mbps,
+        frame_jitter_ms,
+        sync_count: m.sync_count as u64,
     };
     AdminResponse::ok(serde_json::to_value(data).unwrap_or(json!({})))
 }
@@ -485,6 +523,66 @@ pub async fn handle_config_read() -> AdminResponse {
 #[derive(Debug, Deserialize)]
 pub struct ConfigWriteBody {
     pub text: String,
+}
+
+/// Set Dreamcast.SavestateSlot in emu.cfg to the given slot. Used by
+/// the admin UI's per-row "Set as auto-load" button so the operator
+/// doesn't have to hand-edit the textarea + click save just to flip
+/// which slot loads at boot. Atomic write via tempfile + rename, same
+/// as handle_config_write.
+pub async fn handle_set_autoload_slot(body: &str) -> AdminResponse {
+    let req: SlotBody = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => return AdminResponse::err(format!("bad json: {e}")),
+    };
+    if req.slot < 0 || req.slot > 99 {
+        return AdminResponse::err("slot out of range [0,99]");
+    }
+
+    let path = config_path();
+    let text = match tokio::fs::read_to_string(&path).await {
+        Ok(t) => t,
+        Err(e) => return AdminResponse::err(format!("read config: {e}")),
+    };
+
+    // Replace the SavestateSlot line in place. If the line doesn't
+    // exist, append it under the [config] section. INI files in flycast
+    // are flat-ish — sections are present but the parser tolerates
+    // out-of-section keys, so a simple append works as a fallback.
+    let target = format!("Dreamcast.SavestateSlot = {}", req.slot);
+    let mut found = false;
+    let new_text: String = text
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("Dreamcast.SavestateSlot") {
+                found = true;
+                target.clone()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let new_text = if !found {
+        format!("{}\n{}\n", new_text.trim_end(), target)
+    } else if !new_text.ends_with('\n') {
+        format!("{}\n", new_text)
+    } else {
+        new_text
+    };
+
+    let tmp = path.with_extension("cfg.tmp");
+    if let Err(e) = tokio::fs::write(&tmp, new_text.as_bytes()).await {
+        return AdminResponse::err(format!("tmp write: {e}"));
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, &path).await {
+        return AdminResponse::err(format!("rename: {e}"));
+    }
+    info!("[admin] auto-load slot set to {}", req.slot);
+    AdminResponse::ok(json!({
+        "slot": req.slot,
+        "note": "Restart maplecast-headless to apply",
+    }))
 }
 
 pub async fn handle_config_write(body: &str) -> AdminResponse {

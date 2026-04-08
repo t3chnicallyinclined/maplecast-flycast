@@ -1606,6 +1606,105 @@ body {
 ::-webkit-scrollbar-thumb:hover { background: #555; }
 /* ============================================================
    EMBED MODE — used by /overlord live preview iframe.
+   Activated by ?embed=1 in the URL.
+   Strategy: use `display: contents` on every ancestor of the
+   game canvas so they collapse to their children (no box, no
+   styling) without `display:none`-ing them (which would hide
+   the canvas inside). All non-canvas-chain elements get
+   visibility:hidden + display:none so they don't paint or
+   take space. Finally, pin the canvas full-viewport.
+   ============================================================ */
+body.embed-mode {
+  background: #000 !important;
+  overflow: hidden !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+/* Collapse the chain ancestors of the canvas to their children only.
+   `display: contents` means "render my children but I have no box of
+   my own" — bezel/cabinet/marquee styling all evaporates. */
+body.embed-mode .main-layout,
+body.embed-mode .cabinet-area,
+body.embed-mode .cabinet-frame,
+body.embed-mode .screen-bezel,
+body.embed-mode #game-screen {
+  display: contents !important;
+}
+
+/* Hide everything else in the body that isn't part of the canvas
+   chain. We list direct children of <body> by class — anything not
+   on the path to the canvas gets nuked. */
+body.embed-mode > .top-signin,
+body.embed-mode > .marquee-banner,
+body.embed-mode > .ticker,
+body.embed-mode > .modal,
+body.embed-mode > div:not(.main-layout):not(#embedHost) {
+  display: none !important;
+}
+
+/* And inside main-layout, hide everything except the cabinet-area. */
+body.embed-mode .main-layout > *:not(.cabinet-area) {
+  display: none !important;
+}
+
+/* Inside cabinet-area, hide everything except cabinet-frame. */
+body.embed-mode .cabinet-area > *:not(.cabinet-frame) {
+  display: none !important;
+}
+
+/* Inside cabinet-frame, hide marquee + chrome — only screen-bezel
+   stays. */
+body.embed-mode .cabinet-frame > *:not(.screen-bezel) {
+  display: none !important;
+}
+
+/* Inside screen-bezel, only #game-screen stays. */
+body.embed-mode .screen-bezel > *:not(#game-screen) {
+  display: none !important;
+}
+
+/* Inside #game-screen, only the canvas stays — hide diagnostics
+   overlay, name overlay, etc. */
+body.embed-mode #game-screen > *:not(#game-canvas) {
+  display: none !important;
+}
+
+/* Pin the canvas full-viewport. position:fixed escapes the
+   layout flow so display:contents ancestors don't matter for
+   sizing. */
+body.embed-mode #game-canvas {
+  display: block !important;
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: 100vw !important;
+  max-height: 100vh !important;
+  object-fit: contain !important;
+  background: #000 !important;
+  z-index: 999999 !important;
+  border: none !important;
+  box-shadow: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+/* ============================================================
+<script>
+// Apply embed mode BEFORE the main app boots so spectator UI never
+// flashes for a frame. Triggered by ?embed=1 in the URL — used by
+// the /overlord admin dashboard's live preview iframe.
+if (new URLSearchParams(window.location.search).get('embed') === '1') {
+  document.documentElement.classList.add('embed-mode-html');
+  document.addEventListener('DOMContentLoaded', () => {
+    document.body.classList.add('embed-mode');
+  });
+  // If body is already parsed by the time this script runs, apply now too.
+  if (document.body) document.body.classList.add('embed-mode');
+}
+</script>
+   EMBED MODE — used by /overlord live preview iframe.
    Activated by ?embed=1 in the URL. Hides all spectator UI
    (chat, queue, leaderboard, top bar, marquee) and centers the
    game canvas full-viewport so admin operators can see exactly

@@ -135,18 +135,83 @@ async function fetchStatus() {
   }
 }
 
+// Rolling history buffers for the metric tiles' sparklines.
+const SPARK_LEN = 30;  // ~60 seconds at 2s poll interval
+const sparkData = {
+  fps: [],
+  mbps: [],
+  clients: [],
+};
+
+function pushSpark(key, val) {
+  sparkData[key].push(val);
+  while (sparkData[key].length > SPARK_LEN) sparkData[key].shift();
+}
+
+function renderSpark(elId, key, color) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  const data = sparkData[key];
+  if (data.length < 2) { el.innerHTML = ''; return; }
+  const w = 100, h = 100;
+  const min = Math.min(...data, 0);
+  const max = Math.max(...data, 1);
+  const range = (max - min) || 1;
+  const step = w / (SPARK_LEN - 1);
+  // Right-align: most recent on the right, oldest on the left.
+  const offset = (SPARK_LEN - data.length) * step;
+  const points = data.map((v, i) => {
+    const x = offset + i * step;
+    const y = h - ((v - min) / range) * h;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  // Filled area under the line for visual weight.
+  const areaPath = `M ${points[0]} L ${points.join(' L ')} L ${w},${h} L ${offset},${h} Z`;
+  const linePath = `M ${points.join(' L ')}`;
+  el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+    <path d="${areaPath}" fill="${color}" fill-opacity="0.15" stroke="none"/>
+    <path d="${linePath}" stroke="${color}" stroke-linejoin="round" stroke-linecap="round"/>
+  </svg>`;
+}
+
 function renderStatus(s) {
   const pillEl = document.getElementById('topStatusPill');
   const pillText = document.getElementById('topStatusText');
   const dot = pillEl.querySelector('.dot');
-  if (s.flycast_active) {
+  if (s.flycast_active && s.upstream_connected !== false) {
     pillText.textContent = 'RUNNING';
     dot.className = 'dot dot-green';
+  } else if (s.flycast_active) {
+    pillText.textContent = 'NO UPSTREAM';
+    dot.className = 'dot dot-amber';
   } else {
     pillText.textContent = 'STOPPED';
     dot.className = 'dot dot-red';
   }
 
+  // ---- Metric tiles ----
+  const fpsEl = document.getElementById('metricFps');
+  const mbpsEl = document.getElementById('metricMbps');
+  const clientsEl = document.getElementById('metricClients');
+
+  if (s.fps != null) {
+    fpsEl.textContent = s.fps.toFixed(1);
+    fpsEl.className = 'metric-val ' + (s.fps >= 58 ? 'metric-good' : s.fps >= 50 ? 'metric-warn' : 'metric-bad');
+    pushSpark('fps', s.fps);
+    renderSpark('sparkFps', 'fps', s.fps >= 58 ? '#00d65a' : s.fps >= 50 ? '#ffa500' : '#ff3344');
+  }
+  if (s.mbps != null) {
+    mbpsEl.textContent = s.mbps.toFixed(1);
+    pushSpark('mbps', s.mbps);
+    renderSpark('sparkMbps', 'mbps', '#5599ff');
+  }
+  if (s.clients != null) {
+    clientsEl.textContent = String(s.clients);
+    pushSpark('clients', s.clients);
+    renderSpark('sparkClients', 'clients', '#ffd700');
+  }
+
+  // ---- Status grid ----
   document.getElementById('statusService').textContent = s.flycast_active ? 'active (running)' : 'stopped';
   document.getElementById('statusService').className = `status-val ${s.flycast_active ? 'good' : 'bad'}`;
   document.getElementById('statusPid').textContent = s.flycast_pid != null ? String(s.flycast_pid) : '—';
@@ -154,6 +219,20 @@ function renderStatus(s) {
   document.getElementById('statusMem').textContent = s.flycast_mem_mb != null ? `${s.flycast_mem_mb} MB` : '—';
   document.getElementById('statusSlot').textContent = s.current_slot != null ? `slot ${s.current_slot}` : '—';
   document.getElementById('statusControlWs').textContent = s.control_ws || '—';
+
+  const jitterEl = document.getElementById('statusJitter');
+  if (jitterEl) {
+    if (s.frame_jitter_ms != null) {
+      jitterEl.textContent = `${s.frame_jitter_ms.toFixed(1)} ms`;
+      jitterEl.className = 'status-val ' + (s.frame_jitter_ms < 25 ? 'good' : s.frame_jitter_ms < 50 ? '' : 'bad');
+    } else {
+      jitterEl.textContent = '—';
+    }
+  }
+  const framesEl = document.getElementById('statusFrames');
+  if (framesEl) {
+    framesEl.textContent = s.frames_received != null ? s.frames_received.toLocaleString() : '—';
+  }
 
   const meta = `${s.rom_basename || '—'} @ ${s.savestate_dir || '—'}`;
   document.getElementById('statusMeta').textContent = meta;
@@ -205,18 +284,43 @@ function renderSavestateRows(d) {
   tbody.innerHTML = slots.map(s => {
     const isCurrent = s.is_current ? ' row-current' : '';
     const currentBadge = s.is_current ? ' &laquo;LIVE' : '';
+    const pinTitle = s.is_current
+      ? 'Already the auto-load slot'
+      : 'Set this slot as the auto-load slot for next boot. Requires RESTART SERVICE to take effect.';
     return `<tr class="row${isCurrent}">
       <td class="slot-num">${s.slot}${currentBadge}</td>
       <td>${escapeHtml(s.filename)}</td>
       <td>${fmtBytes(s.size)}</td>
       <td>${fmtMtime(s.mtime)}</td>
       <td class="row-actions">
-        <button class="btn-row btn-row-disabled" title="Hot-load disabled — see Phase A.2 known issue. Workaround: edit emu.cfg to set this slot, then RESTART SERVICE.">LOAD</button>
-        <button class="btn-row" onclick="downloadSlot(${s.slot})">DOWNLOAD</button>
+        <button class="btn-row btn-pin" ${s.is_current ? 'disabled' : ''} onclick="pinSlot(${s.slot})" title="${pinTitle}">${s.is_current ? '★ AUTO' : '☆ PIN'}</button>
+        <button class="btn-row btn-row-disabled" title="Hot-load disabled — see Phase A.2 known issue. Use PIN + RESTART instead.">LOAD</button>
+        <button class="btn-row" onclick="downloadSlot(${s.slot})" title="Download this slot's .state file">DOWNLOAD</button>
       </td>
     </tr>`;
   }).join('');
 }
+
+window.pinSlot = async function(slot) {
+  toast('info', 'PIN', `setting slot ${slot} as auto-load…`);
+  try {
+    const data = await apiJson('/savestates/set-autoload', {
+      method: 'POST',
+      body: JSON.stringify({ slot }),
+    });
+    if (!data.ok) {
+      toast('error', 'PIN', data.error || 'failed');
+      return;
+    }
+    toast('success', 'PIN', `slot ${slot} pinned. Click RESTART to apply.`);
+    // Refresh the table to show the new pin star
+    setTimeout(refreshSavestates, 200);
+    // Also reload the config textarea so it shows the change
+    setTimeout(reloadConfig, 200);
+  } catch (e) {
+    if (e.message !== 'auth') toast('error', 'PIN', e.message);
+  }
+};
 
 window.downloadSlot = async function(slot) {
   try {
@@ -431,6 +535,98 @@ async function restartService() {
 window.restartService = restartService;
 
 // ----------------------------------------------------------------------------
+// Preview controls
+// ----------------------------------------------------------------------------
+
+window.reloadPreview = function() {
+  const iframe = document.getElementById('previewFrame');
+  if (!iframe) return;
+  // Force reload by re-setting src (changing search param to bust any cache)
+  const u = new URL(iframe.src, window.location.href);
+  u.searchParams.set('t', Date.now().toString());
+  iframe.src = u.pathname + u.search;
+  toast('info', 'PREVIEW', 'reloaded');
+};
+
+let crtEnabled = false;
+window.toggleCRT = function() {
+  crtEnabled = !crtEnabled;
+  const wrap = document.getElementById('previewWrap');
+  const btn = document.getElementById('crtToggle');
+  if (crtEnabled) {
+    wrap.classList.add('crt-on');
+    btn.textContent = 'CRT: ON';
+    btn.classList.add('active');
+  } else {
+    wrap.classList.remove('crt-on');
+    btn.textContent = 'CRT: OFF';
+    btn.classList.remove('active');
+  }
+  // Persist preference
+  localStorage.setItem('overlord_crt', crtEnabled ? '1' : '0');
+};
+
+// ----------------------------------------------------------------------------
+// Keyboard shortcuts
+// ----------------------------------------------------------------------------
+
+const SHORTCUTS = [
+  { key: 'r', desc: 'Restart maplecast-headless service', fn: () => restartService() },
+  { key: 's', desc: 'Save current state to selected slot', fn: () => saveCurrentTo(parseInt(document.getElementById('newSlotNum').value, 10)) },
+  { key: 'p', desc: 'Reload live preview iframe', fn: () => window.reloadPreview() },
+  { key: 'c', desc: 'Toggle CRT scanline overlay', fn: () => window.toggleCRT() },
+  { key: 'l', desc: 'Refresh log tail', fn: () => reloadLogs() },
+  { key: 'f', desc: 'Refresh savestate list', fn: () => refreshSavestates() },
+  { key: 'g', desc: 'Refresh config (reload from disk)', fn: () => reloadConfig() },
+  { key: '?', desc: 'Show this help', fn: () => toggleKeyhelp() },
+  { key: 'Escape', desc: 'Close help / dismiss modal', fn: () => closeKeyhelp() },
+];
+
+function buildKeyhelp() {
+  if (document.getElementById('keyhelpModal')) return;
+  const modal = document.createElement('div');
+  modal.id = 'keyhelpModal';
+  modal.className = 'keyhelp-modal';
+  modal.innerHTML = `
+    <div class="keyhelp-card">
+      <div class="keyhelp-title">⌨ KEYBOARD SHORTCUTS</div>
+      ${SHORTCUTS.filter(s => s.key !== 'Escape').map(s =>
+        `<div class="keyhelp-row"><span class="keyhelp-key">${escapeHtml(s.key.toUpperCase())}</span><span class="keyhelp-desc">${escapeHtml(s.desc)}</span></div>`
+      ).join('')}
+      <div class="keyhelp-close-hint">press <strong>ESC</strong> or <strong>?</strong> to close</div>
+    </div>`;
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) closeKeyhelp();
+  });
+  document.body.appendChild(modal);
+}
+
+function toggleKeyhelp() {
+  buildKeyhelp();
+  const m = document.getElementById('keyhelpModal');
+  m.classList.toggle('open');
+}
+
+function closeKeyhelp() {
+  const m = document.getElementById('keyhelpModal');
+  if (m) m.classList.remove('open');
+}
+
+function handleKeydown(e) {
+  // Don't intercept when the user is typing in an input/textarea
+  const tag = (e.target.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+  // Don't intercept modifier-combos (let browser handle Ctrl+R, etc.)
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+  const sc = SHORTCUTS.find(s => s.key === e.key.toLowerCase() || s.key === e.key);
+  if (sc) {
+    e.preventDefault();
+    sc.fn();
+  }
+}
+
+// ----------------------------------------------------------------------------
 // Boot
 // ----------------------------------------------------------------------------
 
@@ -444,6 +640,14 @@ function boot() {
   // Wire config editor's dirty indicator
   document.getElementById('configText').addEventListener('input', updateConfigDirty);
 
+  // Restore CRT toggle preference
+  if (localStorage.getItem('overlord_crt') === '1') {
+    window.toggleCRT();
+  }
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', handleKeydown);
+
   // Initial loads
   startStatusPoll();
   refreshSavestates();
@@ -452,6 +656,14 @@ function boot() {
 
   // Periodic log refresh every 5 seconds
   setInterval(reloadLogs, 5000);
+
+  // First-visit hint about the keyboard shortcuts
+  if (!localStorage.getItem('overlord_seen_shortcuts')) {
+    setTimeout(() => {
+      toast('info', 'TIP', 'Press ? for keyboard shortcuts.', 6000);
+      localStorage.setItem('overlord_seen_shortcuts', '1');
+    }, 2000);
+  }
 }
 
 if (document.readyState === 'loading') {

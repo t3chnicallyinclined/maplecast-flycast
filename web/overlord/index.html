@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Overlord — MapleCast Cab</title>
-<link rel="stylesheet" href="/overlord/overlord.css?v=1">
+<link rel="stylesheet" href="/overlord/overlord.css?v=2">
 <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" crossorigin="anonymous">
 </head>
 <body class="overlord-dash">
@@ -29,13 +29,33 @@
 <main class="overlord-grid">
 
   <!-- ============================================================
-       LEFT COL — STATUS + LIVE PREVIEW
+       LEFT COL — STATUS + METRICS
        ============================================================ -->
   <section class="card card-status">
     <div class="card-header">
       <span class="card-title">STATUS</span>
       <span class="card-meta" id="statusMeta">—</span>
     </div>
+
+    <!-- Big-ticket live metrics: fps + bandwidth + clients -->
+    <div class="metrics-row">
+      <div class="metric-tile">
+        <div class="metric-label">FPS</div>
+        <div class="metric-val" id="metricFps">—</div>
+        <div class="metric-spark" id="sparkFps"></div>
+      </div>
+      <div class="metric-tile">
+        <div class="metric-label">Mbps</div>
+        <div class="metric-val" id="metricMbps">—</div>
+        <div class="metric-spark" id="sparkMbps"></div>
+      </div>
+      <div class="metric-tile">
+        <div class="metric-label">VIEWERS</div>
+        <div class="metric-val" id="metricClients">—</div>
+        <div class="metric-spark" id="sparkClients"></div>
+      </div>
+    </div>
+
     <div class="status-grid">
       <div class="status-row">
         <span class="status-label">SERVICE</span>
@@ -58,21 +78,38 @@
         <span class="status-val" id="statusSlot">—</span>
       </div>
       <div class="status-row">
+        <span class="status-label">FRAME JITTER</span>
+        <span class="status-val" id="statusJitter">—</span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">FRAMES TOTAL</span>
+        <span class="status-val" id="statusFrames">—</span>
+      </div>
+      <div class="status-row">
         <span class="status-label">CONTROL WS</span>
         <span class="status-val mono" id="statusControlWs">—</span>
       </div>
     </div>
-    <div class="card-actions">
-      <button class="btn-action btn-warn" onclick="restartService()">RESTART SERVICE</button>
+
+    <div class="card-actions card-actions-row">
+      <button class="btn-action btn-warn" onclick="restartService()" title="Cold-restart maplecast-headless. Spectators reconnect within ~1s. (R)">
+        RESTART SERVICE
+      </button>
+      <button class="btn-action btn-secondary" onclick="reloadPreview()" title="Reload the preview iframe (P)">
+        RELOAD PREVIEW
+      </button>
     </div>
   </section>
 
   <section class="card card-preview">
     <div class="card-header">
       <span class="card-title">LIVE PREVIEW</span>
-      <span class="card-meta">via /king.html?embed=1</span>
+      <span class="card-meta">
+        <button class="btn-tiny" onclick="toggleCRT()" id="crtToggle" title="CRT scanline overlay">CRT: OFF</button>
+        <button class="btn-tiny" onclick="reloadPreview()" title="Reload preview iframe">⟳</button>
+      </span>
     </div>
-    <div class="preview-frame">
+    <div class="preview-frame" id="previewWrap">
       <iframe id="previewFrame" src="/king.html?embed=1" allow="autoplay" loading="lazy"></iframe>
     </div>
   </section>
@@ -160,6 +197,6 @@
 <!-- Toast notification slot -->
 <div id="toastContainer" class="toast-container"></div>
 
-<script type="module" src="/overlord/overlord.mjs?v=1"></script>
+<script type="module" src="/overlord/overlord.mjs?v=2"></script>
 </body>
 </html>

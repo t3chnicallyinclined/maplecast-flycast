@@ -719,3 +719,205 @@ code {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--ov-gold-dim);
 }
+
+/* ============================================================
+   METRIC TILES — fps / mbps / clients with mini sparklines
+   ============================================================ */
+.metrics-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.metric-tile {
+  background: linear-gradient(180deg, var(--ov-bg-card-2) 0%, var(--ov-bg-card) 100%);
+  border: 1px solid var(--ov-border-hi);
+  border-radius: 4px;
+  padding: 12px 14px;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.metric-tile::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, transparent 0%, rgba(255, 215, 0, 0.04) 100%);
+  pointer-events: none;
+}
+
+.metric-label {
+  font-family: var(--ov-arcade);
+  font-size: 8px;
+  letter-spacing: 2px;
+  color: var(--ov-text-dim);
+  margin-bottom: 4px;
+}
+
+.metric-val {
+  font-family: var(--ov-arcade);
+  font-size: 20px;
+  color: var(--ov-gold);
+  text-shadow: 0 0 10px rgba(255, 215, 0, 0.3);
+  font-weight: 700;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-val.metric-warn { color: var(--ov-amber); text-shadow: 0 0 10px rgba(255, 165, 0, 0.3); }
+.metric-val.metric-bad  { color: var(--ov-red);   text-shadow: 0 0 10px rgba(255, 51, 68, 0.3); }
+.metric-val.metric-good { color: var(--ov-green); text-shadow: 0 0 10px rgba(0, 214, 90, 0.3); }
+
+.metric-spark {
+  height: 18px;
+  margin-top: 6px;
+  position: relative;
+}
+
+.metric-spark svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.metric-spark path {
+  fill: none;
+  stroke-width: 1.5;
+}
+
+/* Status pill animation when uptime is updating */
+.dot-green {
+  animation: pulse-green 2s infinite ease-in-out;
+}
+
+@keyframes pulse-green {
+  0%, 100% { box-shadow: 0 0 6px var(--ov-green); }
+  50%      { box-shadow: 0 0 14px var(--ov-green), 0 0 4px var(--ov-green); }
+}
+
+/* ============================================================
+   CRT SCANLINE OVERLAY (preview iframe)
+   ============================================================ */
+.preview-frame.crt-on::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    repeating-linear-gradient(
+      0deg,
+      rgba(0, 0, 0, 0.16) 0px,
+      rgba(0, 0, 0, 0.16) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+  pointer-events: none;
+  z-index: 10;
+  mix-blend-mode: multiply;
+}
+
+.preview-frame.crt-on::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, transparent 60%, rgba(0, 0, 0, 0.5) 100%);
+  pointer-events: none;
+  z-index: 11;
+}
+
+#crtToggle.active {
+  background: var(--ov-gold);
+  color: #000;
+  border-color: var(--ov-gold);
+}
+
+/* ============================================================
+   "Set as auto-load" star button per row
+   ============================================================ */
+.btn-row.btn-pin {
+  border-color: var(--ov-amber);
+  color: var(--ov-amber);
+}
+
+.btn-row.btn-pin:hover {
+  background: var(--ov-amber);
+  color: #000;
+}
+
+/* The auto-load slot row gets a subtle gold accent */
+.savestate-table .row-current {
+  background: linear-gradient(90deg, rgba(255, 215, 0, 0.08) 0%, transparent 100%);
+  border-left: 2px solid var(--ov-gold);
+}
+
+/* ============================================================
+   KEYBOARD HELP overlay (? key)
+   ============================================================ */
+.keyhelp-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 99999;
+  backdrop-filter: blur(4px);
+}
+
+.keyhelp-modal.open { display: flex; }
+
+.keyhelp-card {
+  background: var(--ov-bg-card);
+  border: 2px solid var(--ov-gold);
+  border-radius: 6px;
+  padding: 30px 40px;
+  max-width: 500px;
+  box-shadow: 0 0 60px rgba(255, 215, 0, 0.3);
+}
+
+.keyhelp-title {
+  font-family: var(--ov-arcade);
+  font-size: 14px;
+  color: var(--ov-gold);
+  letter-spacing: 2px;
+  margin-bottom: 16px;
+  text-align: center;
+}
+
+.keyhelp-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--ov-border);
+}
+
+.keyhelp-row:last-child { border-bottom: none; }
+
+.keyhelp-key {
+  background: var(--ov-bg-input);
+  border: 1px solid var(--ov-border-hi);
+  border-radius: 3px;
+  padding: 4px 10px;
+  font-family: var(--ov-mono);
+  font-size: 12px;
+  color: var(--ov-gold);
+  font-weight: 700;
+  min-width: 28px;
+  text-align: center;
+}
+
+.keyhelp-desc {
+  color: var(--ov-text);
+  font-size: 12px;
+  flex: 1;
+  margin-left: 16px;
+}
+
+.keyhelp-close-hint {
+  text-align: center;
+  margin-top: 16px;
+  font-size: 10px;
+  color: var(--ov-text-mute);
+}
