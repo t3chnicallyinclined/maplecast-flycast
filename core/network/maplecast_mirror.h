@@ -14,6 +14,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 
 struct rend_context;
 struct TA_context;
@@ -57,4 +58,40 @@ void markVramDirty(uint32_t offset, uint32_t size);
 // The publish path serializes the SYNC build/broadcast on the render thread
 // to avoid races with VRAM mid-update.
 void requestSyncBroadcast();
+
+// Build the full DC save state via dc_serialize into a freshly malloc'd
+// buffer. Caller must free() it. Returns nullptr on failure. This is the
+// same data serverSaveSync() writes to disk.
+uint8_t* buildFullSaveState(size_t& outSize);
+
+// Run serverSaveSync() (writes /dev/shm/maplecast_sync.state) then read
+// the file back and broadcast it to all WS clients wrapped in a "SAVE"
+// envelope. Triggered by SIGUSR1.
+void doForcedSaveStateBroadcast();
+
+// Set a flag that serverPublish() drains on the next frame to broadcast
+// the full save state to all connected WS clients. Safe to call from any
+// thread (atomic). Used by the SIGUSR1 handler to manually trigger a
+// full-state push for debugging.
+void requestFullSaveStateBroadcast();
+
+// Phase A — read-only accessors for the input latch path (called from
+// ggpo::getLocalInput at vblank time) and the status JSON broadcaster.
+// Both are cheap atomic loads with acquire ordering — safe to call from
+// any thread, no locking, no shm header touching. Updated once per frame
+// at the bottom of serverPublish() under release ordering.
+//
+// currentFrame()    — monotonic frame counter, mirrors hdr->frame_count.
+//                     Returns 0 before the first frame is published.
+// lastLatchTimeUs() — CLOCK_MONOTONIC microseconds at the moment the most
+//                     recent serverPublish() committed. Returns 0 before
+//                     the first frame is published.
+// framePeriodUs()   — exponential moving average of (publish_n - publish_{n-1})
+//                     over the last ~16 frames. Used by the frame_phase block
+//                     in status JSON for browser-side phase-aligned send
+//                     scheduling. Returns ~16670 µs default before the EMA
+//                     has had a chance to converge.
+uint64_t currentFrame();
+int64_t  lastLatchTimeUs();
+int64_t  framePeriodUs();
 }

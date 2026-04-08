@@ -145,6 +145,30 @@ void markVramDirty(uint32_t offset, uint32_t size)
 // touching vram[] mid-update from another thread.
 static std::atomic<bool> _forceSyncBroadcast{false};
 
+// Phase A — frame counter + monotonic-clock stamp of the most recent
+// serverPublish() call. Mirror the existing hdr->frame_count++ into a
+// std::atomic so the input latch path (ggpo::getLocalInput) can read the
+// current frame number cheaply without touching the shm header. Also stamp
+// the wall-clock time of the latest publish so the latch can compute
+// "frames-since-now" and "ms-since-last-frame-published" for telemetry +
+// the frame_phase block in status JSON. Both updated under the same
+// memory_order_release at the bottom of serverPublish().
+static std::atomic<uint64_t> _atomicCurrentFrame{0};
+static std::atomic<int64_t> _atomicLastLatchTimeUs{0};
+
+// Phase B — live frame period in microseconds, smoothed across the last
+// few publishes via an exponential moving average. PVR can run slightly
+// off 60 Hz; this gives the browser-side phase-aligner an accurate
+// "next vblank in N µs" estimate. Initialized to a sane default (16670 µs
+// = 60 fps) so the first few publishes have a reasonable starting value.
+static std::atomic<int64_t> _atomicFramePeriodUs{16670};
+
+static inline int64_t _publishNowUs() {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
 void requestSyncBroadcast()
 {
 	if (!_isServer) return;
@@ -740,6 +764,13 @@ static void initClientWebSocket()
 bool isServer() { return _isServer; }
 bool isClient() { return _isClient; }
 
+// Phase A — accessors for the input latch path. Cheap atomic loads,
+// no shm header touching, safe from any thread.
+uint64_t currentFrame()      { return _atomicCurrentFrame.load(std::memory_order_acquire); }
+int64_t  lastLatchTimeUs()   { return _atomicLastLatchTimeUs.load(std::memory_order_acquire); }
+// Phase B — live frame period EMA, used by frame_phase in status JSON.
+int64_t  framePeriodUs()     { return _atomicFramePeriodUs.load(std::memory_order_relaxed); }
+
 bool isHeadless()
 {
 #ifdef MAPLECAST_HEADLESS_BUILD
@@ -1029,24 +1060,38 @@ done_diff:
 	//      without losing precision. Rate-limited to 1 per 2 seconds so a
 	//      noisy game can't DoS us with constant fresh syncs.
 	//
-	// Skip the first few frames (boot churn) for the heuristic — but the
-	// forced flag bypasses that gate too.
-	static constexpr uint32_t SCENE_CHANGE_PAGE_THRESHOLD = 128;
+	// Scene-change heuristic SYNC was REMOVED. With ARCHITECTURE.md bugs
+	// #6/#7/#8 fixed, the per-frame delta path ships scene transitions
+	// (300-540 dirty pages in one envelope) byte-perfect to the wasm via
+	// the MAX_FRAME oversized fallback. The heuristic SYNC is redundant
+	// for correctness.
+	//
+	// HOWEVER: a low-frequency (60s) periodic SYNC remains, NOT as a
+	// correctness band-aid but as a NETWORK RESILIENCE measure. Real-world
+	// failure modes the periodic SYNC catches:
+	//   - Browser tab throttling causing the WS worker to fall behind and
+	//     miss frames; when the tab regains focus the per-frame deltas are
+	//     all that's coming and there's no recovery mechanism otherwise.
+	//   - Diff-loop torn page: SH4 thread mutates a VRAM page mid-memcpy.
+	//     The wasm renders garbage for that page until the page is touched
+	//     again. Over a long match this can manifest as persistent corner
+	//     glitches that scene-change SYNCs used to clear up.
+	//   - Relay restarts / brief disconnects.
+	// At ~600 KB compressed every 60s = 10 KB/s overhead, this is free.
+	// Crank the interval lower if you observe more frequent drift.
+	static constexpr uint64_t PERIODIC_SYNC_FRAMES = 60 * 60;  // 60s @ 60fps
 	static uint64_t _lastSceneSyncFrame = 0;
 
 	bool forced = _forceSyncBroadcast.exchange(false, std::memory_order_relaxed);
-	bool heuristic = (totalDirty >= SCENE_CHANGE_PAGE_THRESHOLD
-		&& frameNum > 60
-		&& frameNum - _lastSceneSyncFrame > 120);
-
 	bool manualSave = _forceFullSaveStateBroadcast.exchange(false, std::memory_order_relaxed);
+	bool periodic = (frameNum > 60 && frameNum - _lastSceneSyncFrame >= PERIODIC_SYNC_FRAMES);
 
-	if ((forced || heuristic || manualSave) && maplecast_ws::active())
+	if ((forced || manualSave || periodic) && maplecast_ws::active())
 	{
 		_lastSceneSyncFrame = frameNum;
 		const char* reason = manualSave ? "MANUAL SAVE STATE PUSH"
 			: forced ? "FORCED SYNC"
-			: "Scene change detected";
+			: "60s periodic resilience SYNC";
 		printf("[MIRROR] %s on frame %u (%u dirty pages) — broadcasting fresh SYNC\n",
 			reason, frameNum, totalDirty);
 		// Ship a fresh SYNC envelope (full VRAM + PVR). The flycast wasm
@@ -1085,6 +1130,31 @@ done_diff:
 	hdr->latest_size = totalSize;
 	hdr->write_pos = writePos + totalSize;
 	hdr->frame_count++;
+
+	// Phase A — mirror the new frame number + publish wall-clock time into
+	// the read-only atomics that ggpo::getLocalInput() / status JSON consume.
+	// Release ordering ensures the input latch sees the bumped frame counter
+	// and a fresh latch-time-stamp consistently.
+	//
+	// Phase B — compute live frame period as an exponential moving average of
+	// (this publish - prev publish). EMA factor 1/16 → ~16-frame smoothing,
+	// converges in <0.3 s. Used by the frame_phase block in status JSON for
+	// browser-side phase-aligned send scheduling.
+	const int64_t nowPub = _publishNowUs();
+	const int64_t prevPub = _atomicLastLatchTimeUs.load(std::memory_order_relaxed);
+	if (prevPub > 0) {
+		const int64_t delta = nowPub - prevPub;
+		// Reject obvious outliers (paused emulator, savestate load, etc.)
+		// — anything more than 4 frames or less than 1 ms is not a normal
+		// frame interval and would corrupt the EMA.
+		if (delta >= 1000 && delta <= 70000) {
+			const int64_t prevPeriod = _atomicFramePeriodUs.load(std::memory_order_relaxed);
+			const int64_t newPeriod = prevPeriod + ((delta - prevPeriod) >> 4);  // EMA, 1/16
+			_atomicFramePeriodUs.store(newPeriod, std::memory_order_relaxed);
+		}
+	}
+	_atomicCurrentFrame.store(hdr->frame_count, std::memory_order_release);
+	_atomicLastLatchTimeUs.store(nowPub, std::memory_order_release);
 
 	// Compress + broadcast over WebSocket to browser clients
 	uint64_t compressUs = 0;

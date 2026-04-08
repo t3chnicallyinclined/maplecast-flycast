@@ -20,6 +20,8 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <cstdint>
+#include <climits>
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -35,6 +37,7 @@
 #include <sys/types.h>
 #include <pwd.h>
 #include <time.h>
+#include <strings.h>
 #include <fstream>
 #include <sstream>
 
@@ -52,6 +55,277 @@ static int _udpSock = -1;
 // Player registry — THE single source of truth
 static PlayerInfo _players[2] = {};
 static std::mutex _registryMutex;
+
+// Phase A — tear-free packed input slot for the CMD9 latch path. Storage
+// definition for the extern declared in the header. Initialized to "neutral
+// active-low buttons, zero triggers, seq 0" so a read before the first
+// write produces a sane default rather than UB.
+std::atomic<uint64_t> _slotInputAtomic[2] = {
+	std::atomic<uint64_t>(packSlotInput(0xFFFF, 0, 0, 0)),
+	std::atomic<uint64_t>(packSlotInput(0xFFFF, 0, 0, 0)),
+};
+
+// Phase B — per-slot input accumulator for ConsistencyFirst policy.
+// Initialized to "neutral active-low (0xFFFF), no edges accumulated, zero
+// triggers". Storage for the extern in the header.
+static inline uint64_t _initialAccum() {
+	AccumPacked a{};
+	a.any_pressed = 0;
+	a.any_released = 0;
+	a.current = 0xFFFF;     // active-low neutral — no buttons pressed
+	a.lt = 0;
+	a.rt = 0;
+	return packAccum(a);
+}
+std::atomic<uint64_t> _slotAccum[2] = {
+	std::atomic<uint64_t>(_initialAccum()),
+	std::atomic<uint64_t>(_initialAccum()),
+};
+
+// Phase B — per-slot latch policy. Default LatencyFirst. Set globally by
+// the MAPLECAST_LATCH_POLICY env var at module init; per-slot overrides at
+// runtime via setLatchPolicy() (called from the WS control message handler
+// in B.7). Stored as atomic so the read in getLocalInput() doesn't need a
+// lock.
+static std::atomic<LatchPolicy> _latchPolicy[2] = {
+	std::atomic<LatchPolicy>(LatchPolicy::LatencyFirst),
+	std::atomic<LatchPolicy>(LatchPolicy::LatencyFirst),
+};
+
+// Phase B — guard window for ConsistencyFirst policy. Default 500 us.
+// MAPLECAST_GUARD_US env var overrides at startup. The latch path reads
+// this once per call via std::memory_order_relaxed — it's effectively
+// constant after init.
+static std::atomic<int64_t> _guardUs{500};
+
+int64_t getGuardUs() {
+	return _guardUs.load(std::memory_order_relaxed);
+}
+
+LatchPolicy getLatchPolicy(int slot) {
+	if (slot < 0 || slot > 1) return LatchPolicy::LatencyFirst;
+	return _latchPolicy[slot].load(std::memory_order_acquire);
+}
+
+void setLatchPolicy(int slot, LatchPolicy policy) {
+	if (slot < 0 || slot > 1) return;
+	_latchPolicy[slot].store(policy, std::memory_order_release);
+	const char* name = (policy == LatchPolicy::ConsistencyFirst) ? "consistency" : "latency";
+	printf("[input-server] slot %d latch policy → %s\n", slot, name);
+}
+
+AccumPacked drainAccumulator(int slot) {
+	AccumPacked snap{};
+	if (slot < 0 || slot > 1) return snap;
+	uint64_t old = _slotAccum[slot].load(std::memory_order_acquire);
+	for (;;) {
+		AccumPacked a = unpackAccum(old);
+		AccumPacked cleared = a;
+		cleared.any_pressed = 0;
+		cleared.any_released = 0;
+		uint64_t target = packAccum(cleared);
+		if (_slotAccum[slot].compare_exchange_weak(
+		        old, target,
+		        std::memory_order_acq_rel, std::memory_order_acquire)) {
+			snap = a;
+			break;
+		}
+		// CAS failed: `old` was reloaded by compare_exchange_weak. Loop.
+	}
+	return snap;
+}
+
+// Phase B — full ConsistencyFirst latch computation for one slot.
+// Called from the latch path (ggpo::getLocalInput) when the slot's policy
+// is ConsistencyFirst. Drains the accumulator, applies edge preservation,
+// blip-press deferred releases, and the guard window. Mutates per-slot
+// state in _players[slot].
+ConsistencyLatchResult consistencyFirstLatch(int slot, int64_t tLatchUs)
+{
+	ConsistencyLatchResult r{};
+	if (slot < 0 || slot > 1) {
+		r.buttons = 0xFFFF;
+		return r;
+	}
+
+	PlayerInfo& p = _players[slot];
+
+	// Drain accumulator FIRST. This atomically reads-and-clears the
+	// any_pressed/any_released bits while keeping current/lt/rt. Even when
+	// the guard fires, we still drain — the guard only freezes what THIS
+	// latch reports; the next latch needs a fresh accumulator state. If we
+	// didn't drain, the guarded events would re-fire on the next latch as
+	// "still pressed" instead of "newly pressed".
+	AccumPacked a = drainAccumulator(slot);
+	r.lt = a.lt;
+	r.rt = a.rt;
+	r.packetSeq = p.lastPacketSeq;
+
+	// Compute the latched buttons under edge preservation:
+	//   start from a.current (the most recent button state),
+	//   clear any bit that was pressed at any moment during the interval
+	//   (active-low: pressed = bit cleared) — this catches the case where
+	//   a button was pressed AND released within the interval.
+	uint16_t latched = (uint16_t)(a.current & ~a.any_pressed);
+
+	// Apply the deferred releases from the previous latch. Bits that were
+	// pressed-and-released last frame need to actually go back to released
+	// (active-low: bit set) NOW, on the very next frame. Without this,
+	// blip-presses would stay held forever because nothing else clears
+	// the press-bit in `latched`.
+	latched = (uint16_t)(latched | p.deferredReleaseMask);
+
+	// Compute the new deferred mask for the NEXT latch: bits that were
+	// both pressed AND released during this interval are blip-presses.
+	// They appear pressed THIS frame (cleared by `& ~a.any_pressed` above)
+	// and need to be released NEXT frame.
+	uint16_t newDeferred = (uint16_t)(a.any_pressed & a.any_released);
+
+	// Guard window: if the network thread touched this slot within the
+	// last guardUs and that touch is "fresh" (packet seq advanced since the
+	// previous latch on this slot), classify it as a near-boundary arrival
+	// and freeze the latched buttons at last frame's value. This converts
+	// boundary jitter into a deterministic +1-frame mapping for the affected
+	// inputs. Telemetry counts each guard fire so we can see the rate.
+	//
+	// Note: the accumulator itself was already drained above, so when the
+	// guard fires the next-frame latch will see ALL the events (the ones
+	// that landed inside the guard window plus any new ones from the next
+	// vblank interval) accumulated correctly.
+	const int64_t guard = getGuardUs();
+	const int64_t deltaUs = tLatchUs - p.lastPacketUs;
+	bool guardFired = false;
+	if (guard > 0 && p.lastPacketUs > 0 && deltaUs >= 0 && deltaUs < guard) {
+		// Only freeze if we actually saw activity worth deferring (i.e. the
+		// drained accumulator had at least one press or release event). If
+		// nothing happened this interval, freezing == passing through last
+		// frame's state, which is the same thing — but skipping the freeze
+		// keeps the telemetry counter honest about "real" guard fires.
+		if (a.any_pressed != 0 || a.any_released != 0) {
+			latched = p.lastLatchedButtons;
+			// Don't update deferredReleaseMask either — we're frozen.
+			newDeferred = p.deferredReleaseMask;
+			p.guardHits++;
+			guardFired = true;
+		}
+	}
+
+	// Persist for the next call.
+	p.lastLatchedButtons = latched;
+	p.deferredReleaseMask = newDeferred;
+
+	r.buttons = latched;
+	r.guardFired = guardFired;
+	return r;
+}
+
+// Phase A — latch telemetry. Per-slot ring buffer of recent (delta_us)
+// samples + counters. The maple thread (single producer per slot) writes
+// via recordLatchSample(); the WS thread reads aggregate stats once per
+// second via getLatchStats(). The seq mismatch trick gives "did the
+// network thread touch this slot since the last latch" without locking.
+//
+// Ring size: 256 samples ≈ 4.3 seconds at 60 Hz — a meaningful
+// "recent input quality" window. 256 × 8 bytes × 2 slots = 4 KB total,
+// fits in L1. p99 is computed by copy + sort on the read path; ~10 µs
+// per call, called once per second from the WS status broadcaster.
+constexpr int LATCH_RING_SIZE = 256;
+
+struct LatchStatsAccum {
+	std::atomic<uint64_t> totalLatches{0};
+	std::atomic<uint64_t> latchesWithData{0};
+	std::atomic<uint32_t> lastPacketSeq{0};
+	std::atomic<uint64_t> lastFrameNum{0};
+	std::atomic<uint32_t> lastSeenSeq{0};        // "did packet seq advance since last latch?"
+
+	// Ring buffer of recent delta_us samples, in arrival order. Single
+	// producer (the maple thread) so a plain index + memory_order_release
+	// store is sufficient. Reader copies the whole ring under a snapshot.
+	int64_t  ring[LATCH_RING_SIZE] = {};
+	std::atomic<uint32_t> ringWriteIdx{0};       // monotonic — modulo gives ring slot
+};
+static LatchStatsAccum _latchStats[2];
+
+void recordLatchSample(int slot, int64_t deltaUs, uint32_t packetSeq, uint64_t frameNum)
+{
+	if (slot < 0 || slot > 1) return;
+	LatchStatsAccum& s = _latchStats[slot];
+
+	// Single producer (the maple thread on the headless server, or the SH4
+	// vblank handler in dev builds — same thread either way for a given run).
+	// Multiple producer would require a CAS loop here; we don't need one.
+	s.totalLatches.fetch_add(1, std::memory_order_relaxed);
+
+	// Always record the most recent frame number — even on slots with no
+	// connected input, this is a useful liveness signal ("the input system
+	// is ticking once per vblank").
+	s.lastFrameNum.store(frameNum, std::memory_order_relaxed);
+
+	// If the seq is 0, the network thread has never written to this slot
+	// since boot. The deltaUs the caller computed is meaningless in that
+	// case (it's t_latch - 0 = uptime since boot). Skip the ring write,
+	// don't bump latches_with_data, and don't update lastPacketSeq. The
+	// telemetry histogram should only contain real input timing data.
+	if (packetSeq == 0)
+		return;
+
+	// Did the network thread write to this slot since the previous latch?
+	// Counts as "fresh input arrived this frame interval".
+	uint32_t prev = s.lastSeenSeq.exchange(packetSeq, std::memory_order_relaxed);
+	const bool freshArrival = (packetSeq != prev);
+	if (freshArrival)
+		s.latchesWithData.fetch_add(1, std::memory_order_relaxed);
+
+	// Only write to the ring on vblanks where a FRESH packet arrived this
+	// interval. The metric we want to track is "when a packet arrives, how
+	// stale is it by latch time?" — meaningful only for active vblanks.
+	// Idle vblanks (packetSeq == prev, player hasn't moved their stick) would
+	// otherwise pollute the histogram with "time since last packet" values
+	// that grow without bound during idle periods. The latches_with_data
+	// counter still ticks on every fresh vblank so the "fresh%" stat works
+	// regardless of histogram state.
+	if (freshArrival) {
+		uint32_t idx = s.ringWriteIdx.fetch_add(1, std::memory_order_relaxed);
+		s.ring[idx % LATCH_RING_SIZE] = deltaUs;
+	}
+
+	s.lastPacketSeq.store(packetSeq, std::memory_order_relaxed);
+}
+
+LatchStats getLatchStats(int slot)
+{
+	LatchStats out{};
+	if (slot < 0 || slot > 1) return out;
+	LatchStatsAccum& s = _latchStats[slot];
+
+	out.totalLatches    = s.totalLatches.load(std::memory_order_relaxed);
+	out.latchesWithData = s.latchesWithData.load(std::memory_order_relaxed);
+	out.lastPacketSeq   = s.lastPacketSeq.load(std::memory_order_relaxed);
+	out.lastFrameNum    = s.lastFrameNum.load(std::memory_order_relaxed);
+
+	// Snapshot the ring. There's a benign race here: the maple thread might
+	// write a new sample mid-copy, in which case our snapshot includes one
+	// "in progress" frame. That's fine — we're computing aggregates over a
+	// 256-sample window, one extra sample doesn't move the percentile.
+	uint32_t writeIdx = s.ringWriteIdx.load(std::memory_order_relaxed);
+	uint32_t validCount = (writeIdx < LATCH_RING_SIZE) ? writeIdx : LATCH_RING_SIZE;
+	if (validCount == 0) return out;
+
+	int64_t snap[LATCH_RING_SIZE];
+	for (uint32_t i = 0; i < validCount; ++i) snap[i] = s.ring[i];
+	std::sort(snap, snap + validCount);
+
+	// avg, min, max, p99 over the ring window (last ~4 seconds of latches)
+	int64_t sum = 0;
+	for (uint32_t i = 0; i < validCount; ++i) sum += snap[i];
+	out.avgDeltaUs = sum / (int64_t)validCount;
+	out.minDeltaUs = snap[0];
+	out.maxDeltaUs = snap[validCount - 1];
+	uint32_t p99Idx = (validCount * 99) / 100;
+	if (p99Idx >= validCount) p99Idx = validCount - 1;
+	out.p99DeltaUs = snap[p99Idx];
+	return out;
+}
 
 // Telemetry
 static std::atomic<uint64_t> _totalPackets{0};
@@ -117,13 +391,60 @@ static void updateSlot(int slot, uint8_t ltVal, uint8_t rtVal, uint16_t buttons)
 {
 	if (slot < 0 || slot > 1) return;
 
-	// Atomic write to gamepad globals — CMD9 reads these
+	// Phase A — tear-free packed slot atomic FIRST. The CMD9 latch in
+	// ggpo::getLocalInput() reads from this single 64-bit word, so writers
+	// and readers can never see a torn buttons/lt/rt triple. Sequence number
+	// is incremented monotonically; the network thread is the only writer
+	// per slot, so a non-atomic ++ on lastPacketSeq is fine.
+	PlayerInfo& p = _players[slot];
+	uint32_t seq = ++p.lastPacketSeq;
+	_slotInputAtomic[slot].store(packSlotInput(buttons, ltVal, rtVal, seq),
+	                             std::memory_order_release);
+
+	// Phase B — input accumulator CAS loop. Always update, regardless of
+	// the per-slot LatchPolicy. The accumulator must be live so a runtime
+	// switch from LatencyFirst → ConsistencyFirst doesn't see stale data.
+	// The latch path (getLocalInput → drainAccumulator) reads it only when
+	// the policy is ConsistencyFirst, so it's free for LatencyFirst slots.
+	//
+	// Edge detection (active-low semantics):
+	//   newly_pressed  = bits that were 1 (released) and are now 0 (pressed)
+	//   newly_released = bits that were 0 (pressed)  and are now 1 (released)
+	// any_pressed/any_released are sticky-OR until the next drain — every
+	// transition during a vblank interval is preserved.
+	{
+		uint64_t old = _slotAccum[slot].load(std::memory_order_acquire);
+		for (;;) {
+			AccumPacked a = unpackAccum(old);
+			uint16_t newly_pressed  = (uint16_t)((~buttons) & a.current);
+			uint16_t newly_released = (uint16_t)(buttons & (~a.current));
+			AccumPacked next = a;
+			next.any_pressed  = (uint16_t)(a.any_pressed  | newly_pressed);
+			next.any_released = (uint16_t)(a.any_released | newly_released);
+			next.current = buttons;
+			next.lt = ltVal;
+			next.rt = rtVal;
+			uint64_t target = packAccum(next);
+			if (_slotAccum[slot].compare_exchange_weak(
+			        old, target,
+			        std::memory_order_acq_rel, std::memory_order_acquire))
+				break;
+			// CAS failed: `old` was reloaded by compare_exchange_weak. Loop.
+			// In practice this almost never fails — single producer in the
+			// hot path (UDP/XDP thread for a given slot), and the consumer
+			// (drainAccumulator) is a tiny CAS too.
+		}
+	}
+
+	// Legacy plain globals — kept in sync for non-MapleCast paths (SDL local
+	// gamepads on the dev box still write these directly, and ggpo's
+	// getLocalInput() falls back to them for slots 2/3 and other input fields).
+	// CMD9 still reads these on slots that don't go through the maplecast atomic.
 	kcode[slot] = buttons | 0xFFFF0000;  // active-low, upper 16 bits set
 	lt[slot] = (uint16_t)ltVal << 8;
 	rt[slot] = (uint16_t)rtVal << 8;
 
 	// Update player stats
-	PlayerInfo& p = _players[slot];
 	int64_t now = nowUs();
 	p.lastPacketUs = now;
 	p.lt = ltVal;
@@ -372,6 +693,34 @@ bool init(int udpPort)
 		_players[i]._lastRateTime = nowUs();
 	}
 
+	// Phase B — parse MAPLECAST_LATCH_POLICY env var. "consistency" enables
+	// the accumulator + edge preservation + guard window for both slots;
+	// any other value (or unset) leaves the LatencyFirst default. Per-slot
+	// overrides at runtime via setLatchPolicy() — set globally here as
+	// the boot-time baseline.
+	if (const char* lp = std::getenv("MAPLECAST_LATCH_POLICY")) {
+		if (strcasecmp(lp, "consistency") == 0) {
+			setLatchPolicy(0, LatchPolicy::ConsistencyFirst);
+			setLatchPolicy(1, LatchPolicy::ConsistencyFirst);
+		} else if (strcasecmp(lp, "latency") == 0) {
+			setLatchPolicy(0, LatchPolicy::LatencyFirst);
+			setLatchPolicy(1, LatchPolicy::LatencyFirst);
+		} else {
+			printf("[input-server] ignoring MAPLECAST_LATCH_POLICY='%s' "
+			       "(expected 'latency' or 'consistency')\n", lp);
+		}
+	}
+
+	// Phase B — parse MAPLECAST_GUARD_US env var. Sane bounds: 0..5000 us.
+	// 0 disables the guard window without disabling the accumulator path.
+	if (const char* g = std::getenv("MAPLECAST_GUARD_US")) {
+		long val = strtol(g, nullptr, 10);
+		if (val < 0)    val = 0;
+		if (val > 5000) val = 5000;
+		_guardUs.store(val, std::memory_order_relaxed);
+		printf("[input-server] MAPLECAST_GUARD_US = %ld us\n", val);
+	}
+
 	// Create UDP socket
 	_udpSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 	if (_udpSock < 0)
@@ -522,6 +871,14 @@ void disconnectPlayer(int slot)
 void injectInput(int slot, uint8_t ltVal, uint8_t rtVal, uint16_t buttons)
 {
 	updateSlot(slot, ltVal, rtVal, buttons);
+}
+
+void setPlayerRtt(int slot, int rttMs)
+{
+	if (slot < 0 || slot > 1) return;
+	if (rttMs < 0) rttMs = 0;
+	if (rttMs > 9999) rttMs = 9999;   // sanity clamp; HUD shows 4 digits max
+	_players[slot].rttMs = rttMs;
 }
 
 const PlayerInfo& getPlayer(int slot)

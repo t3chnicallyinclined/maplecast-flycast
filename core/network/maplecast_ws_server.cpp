@@ -9,6 +9,7 @@
 #include "maplecast_compress.h"
 #include "maplecast_input_server.h"
 #include "maplecast_gamestate.h"
+#include "maplecast_mirror.h"
 #include "hw/sh4/sh4_mem.h"
 #include "hw/pvr/pvr_mem.h"
 #include "hw/pvr/pvr_regs.h"
@@ -54,6 +55,19 @@ static bool _active = false;
 
 // Lobby: connection → slot mapping, queue tracking
 static std::map<void*, int> _connSlot;
+
+// Control-only connections — browsers that connect directly to flycast for
+// JSON control + 4-byte gamepad input but get the heavy TA frame downstream
+// from the relay. These are flagged via a `{type:"control_only"}` JSON message
+// sent immediately after WS open by the browser. broadcastBinary() skips them
+// so we don't send 4 Mbps of TA frames out the home upstream just to have the
+// browser drop them (the browser already has them via the relay's downstream).
+//
+// This is the bandwidth-saving half of the "direct upstream WS" architecture.
+// The slot-collision-fixing half is that each browser now has its own dedicated
+// flycast connection, so _connSlot[hdl] keys uniquely per browser instead of
+// colliding on the relay's single multiplexed upstream.
+static std::set<void*> _controlOnlyConns;
 
 struct QueueEntry {
 	void* key;
@@ -244,6 +258,82 @@ static json getStatus()
 	status["sticks"] = maplecast_input::registeredStickCount();
 	status["relay_seeds"] = seedCount;
 	status["relay_nodes"] = treeSize;
+
+	// Phase A — per-slot input latch telemetry. Sourced from the
+	// LatchStatsAccum ring buffer that ggpo::getLocalInput() writes to
+	// once per vblank for slots 0/1. Frontend renders these as a
+	// histogram + counter set in the diagnostics overlay (A.6) so
+	// players can see how their input timing relates to the latch
+	// boundary.
+	//   delta_us avg/p99/min/max — distribution of (t_latch - t_packet_arrival)
+	//                              over the last ~256 latches (~4.3 s @ 60 Hz)
+	//   total_latches             — every CMD9 vblank since boot
+	//   latches_with_data         — vblanks where the network thread had
+	//                              touched the slot since the previous latch
+	//                              (= the slot saw a fresh packet this frame)
+	//   last_seq, last_frame      — for live drift / diagnostics
+	auto latchInfoJson = [](int slot) -> json {
+		auto s = maplecast_input::getLatchStats(slot);
+		return {
+			{"total_latches",     (int64_t)s.totalLatches},
+			{"latches_with_data", (int64_t)s.latchesWithData},
+			{"avg_delta_us",      s.avgDeltaUs},
+			{"p99_delta_us",      s.p99DeltaUs},
+			{"min_delta_us",      s.minDeltaUs},
+			{"max_delta_us",      s.maxDeltaUs},
+			{"last_packet_seq",   (int64_t)s.lastPacketSeq},
+			{"last_frame",        (int64_t)s.lastFrameNum},
+		};
+	};
+	json latchStats;
+	latchStats["p1"] = latchInfoJson(0);
+	latchStats["p2"] = latchInfoJson(1);
+	status["latch_stats"] = latchStats;
+
+	// Phase B — frame phase publication. Tells the browser-side gamepad
+	// scheduler when the most recent vblank latch fired and how long the
+	// vblank interval is, so it can phase-align its send pattern to land
+	// 2-4 ms before the next latch (instead of the random ~8 ms phase
+	// jitter inherent to rAF-aligned sends). The biggest single latency
+	// win for browser players because it cuts average input-to-latch lag
+	// in half.
+	//
+	// All times in microseconds, monotonic clock since process start
+	// (CLOCK_MONOTONIC). Browser maintains its own offset by sampling
+	// `t_last_latch_us` against its local performance.now() at receive
+	// time and tracking the rolling delta.
+	{
+		json fp;
+		fp["frame"]            = (int64_t)maplecast_mirror::currentFrame();
+		fp["t_last_latch_us"]  = (int64_t)maplecast_mirror::lastLatchTimeUs();
+		fp["frame_period_us"]  = (int64_t)maplecast_mirror::framePeriodUs();
+		// t_next_latch_us is the predicted next vblank time. The browser
+		// could compute this itself, but pre-computing here keeps the
+		// client logic simpler and gives the server a single source of
+		// truth in case we ever change the prediction model.
+		const int64_t period = maplecast_mirror::framePeriodUs();
+		const int64_t lastLatch = maplecast_mirror::lastLatchTimeUs();
+		fp["t_next_latch_us"]  = lastLatch + period;
+		// Phase B guard window in microseconds — exposed so the browser
+		// can shift its sends to land just OUTSIDE the guard window
+		// (avoiding the deferred-by-one-frame penalty under
+		// ConsistencyFirst).
+		fp["guard_us"] = (int64_t)maplecast_input::getGuardUs();
+		status["frame_phase"] = fp;
+	}
+
+	// Phase B — per-slot latch policy (latency / consistency). Lets the
+	// browser show the current policy in the diagnostics overlay and offer
+	// the live A/B toggle button (B.9).
+	{
+		json policy;
+		auto policyName = [](maplecast_input::LatchPolicy p) {
+			return (p == maplecast_input::LatchPolicy::ConsistencyFirst) ? "consistency" : "latency";
+		};
+		policy["p1"] = policyName(maplecast_input::getLatchPolicy(0));
+		policy["p2"] = policyName(maplecast_input::getLatchPolicy(1));
+		status["latch_policy"] = policy;
+	}
 
 	// Game state for leaderboard/stats
 	maplecast_gamestate::GameState gs;
@@ -630,6 +720,7 @@ static void onClose(ConnHdl hdl)
 		try {
 			key = (void*)_ws.get_con_from_hdl(hdl).get();
 			_connSlot.erase(key);
+			_controlOnlyConns.erase(key);
 			_queue.erase(std::remove_if(_queue.begin(), _queue.end(),
 				[key](const QueueEntry& e) { return e.key == key; }), _queue.end());
 		} catch (...) {}
@@ -691,6 +782,19 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 		// Text = JSON control
 		try {
 			auto ctrl = json::parse(msg->get_payload());
+			if (ctrl["type"] == "control_only")
+			{
+				// Browser → flycast direct connection that does NOT want the
+				// 4 Mbps TA frame downstream (it gets that from the relay).
+				// Add to the skip-binary set so broadcastBinary() leaves it
+				// alone. Idempotent.
+				try {
+					void* key = (void*)_ws.get_con_from_hdl(hdl).get();
+					std::lock_guard<std::mutex> lock(_connMutex);
+					_controlOnlyConns.insert(key);
+				} catch (...) {}
+				return;
+			}
 			if (ctrl["type"] == "join")
 			{
 				std::string playerId = ctrl.value("id", "");
@@ -703,6 +807,13 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 				// the old slot first so they get their seat back instead of
 				// being double-booked into the *other* slot. Skip when name is
 				// the generic fallback.
+				//
+				// We notify the evicted hdl with a `kicked` JSON message so
+				// the old tab's UI cleans up (closes its controlWs, stops
+				// gamepad polling, surfaces a "taken over by another tab"
+				// message). Without this, the old tab sits in limbo: WS open,
+				// mySlot still set, polling still firing, but flycast drops
+				// every input frame because the slot mapping is gone.
 				if (!name.empty() && name != "Player") {
 					for (int i = 0; i < 2; i++) {
 						const auto& p = maplecast_input::getPlayer(i);
@@ -710,10 +821,28 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 							printf("[maplecast-ws] Ghost-slot eviction: P%d (%s) freed for reconnect\n",
 								i + 1, p.name);
 							maplecast_input::disconnectPlayer(i);
-							// Drop the stale conn→slot mapping if any
+							// Drop the stale conn→slot mapping AND notify the
+							// evicted hdl so its browser cleans up.
 							for (auto it = _connSlot.begin(); it != _connSlot.end(); ) {
-								if (it->second == i) it = _connSlot.erase(it);
-								else ++it;
+								if (it->second == i) {
+									try {
+										json kicked = {{"type", "kicked"}, {"reason", "ghost"}};
+										auto evictedHdlPtr = it->first;
+										// Walk _connections to find the matching hdl by raw pointer.
+										for (auto& chdl : _connections) {
+											try {
+												void* ckey = (void*)_ws.get_con_from_hdl(chdl).get();
+												if (ckey == evictedHdlPtr) {
+													_ws.send(chdl, kicked.dump(), websocketpp::frame::opcode::text);
+													break;
+												}
+											} catch (...) {}
+										}
+									} catch (...) {}
+									it = _connSlot.erase(it);
+								} else {
+									++it;
+								}
 							}
 							break;
 						}
@@ -738,6 +867,26 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 								nodeIt->second.isPlayer = true;
 						}
 					} catch (...) {}
+
+					// Per-user latch policy: if the join handshake carries a
+					// latch_policy preference, push it to the slot the player
+					// just got assigned. This is what makes the policy follow
+					// the PLAYER across slot reassignments — the preference
+					// lives in the browser's localStorage and is transmitted
+					// on every (re)join, so a returning player gets their
+					// chosen mode regardless of which slot opens up.
+					//
+					// When absent, the slot keeps whatever policy it had
+					// (which on a fresh boot is LatencyFirst, the default).
+					std::string latchPref = ctrl.value("latch_policy", "");
+					if (latchPref == "latency") {
+						maplecast_input::setLatchPolicy(slot, maplecast_input::LatchPolicy::LatencyFirst);
+					} else if (latchPref == "consistency") {
+						maplecast_input::setLatchPolicy(slot, maplecast_input::LatchPolicy::ConsistencyFirst);
+					}
+					// Anything else (empty/unknown) leaves the slot at its
+					// current policy. Future stick-memory work can layer in
+					// a stick-binding lookup here as a second source.
 				}
 
 				json resp = {{"type", "assigned"}, {"slot", slot}, {"id", playerId.substr(0,8)}, {"name", name}};
@@ -827,6 +976,51 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 				maplecast_input::cancelWebRegistration();
 				json resp = {{"type", "register_cancelled"}};
 				_ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text);
+			}
+			else if (ctrl["type"] == "set_latch_policy")
+			{
+				// Phase B + per-user gate — live per-slot latch policy switch.
+				// Players choose between LatencyFirst (today's behavior) and
+				// ConsistencyFirst (accumulator + edge preservation + guard
+				// window). The policy follows the PLAYER, not the chair —
+				// it's stored client-side in localStorage and re-pushed via
+				// the join handshake whenever they (re)take a slot.
+				//
+				// Server-side gate: a connection can only set the policy for
+				// the slot IT owns. Spectators and the other player are
+				// rejected. This is the load-bearing security check; the UI
+				// only HIDES the other slot's button, but server enforces.
+				int slot = ctrl.value("slot", -1);
+				std::string policyStr = ctrl.value("policy", "");
+
+				// Identity check — what slot does THIS connection actually own?
+				int ownerSlot = getSlotForConn(hdl);
+				if (slot != ownerSlot || ownerSlot < 0) {
+					json resp = {{"type", "set_latch_policy_error"},
+					             {"msg", "you can only change your own slot's latch policy"}};
+					_ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text);
+				}
+				else if (slot < 0 || slot > 1) {
+					json resp = {{"type", "set_latch_policy_error"},
+					             {"msg", "slot must be 0 or 1"}};
+					_ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text);
+				} else if (policyStr == "latency") {
+					maplecast_input::setLatchPolicy(slot, maplecast_input::LatchPolicy::LatencyFirst);
+					json resp = {{"type", "latch_policy_changed"},
+					             {"slot", slot}, {"policy", "latency"}};
+					_ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text);
+					broadcastStatus();
+				} else if (policyStr == "consistency") {
+					maplecast_input::setLatchPolicy(slot, maplecast_input::LatchPolicy::ConsistencyFirst);
+					json resp = {{"type", "latch_policy_changed"},
+					             {"slot", slot}, {"policy", "consistency"}};
+					_ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text);
+					broadcastStatus();
+				} else {
+					json resp = {{"type", "set_latch_policy_error"},
+					             {"msg", "policy must be 'latency' or 'consistency'"}};
+					_ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text);
+				}
 			}
 			else if (ctrl["type"] == "check_stick")
 			{
@@ -1097,7 +1291,8 @@ void broadcastBinary(const void* data, size_t size)
 	for (auto& conn : _connections) {
 		try {
 			void* key = (void*)_ws.get_con_from_hdl(conn).get();
-			if (relaySkip.count(key)) continue;  // gets frames via WebRTC relay
+			if (relaySkip.count(key)) continue;          // gets frames via WebRTC relay
+			if (_controlOnlyConns.count(key)) continue;  // browser direct control WS — gets frames via VPS relay
 			_ws.send(conn, data, size, websocketpp::frame::opcode::binary);
 		} catch (...) {}
 	}
@@ -1129,11 +1324,16 @@ void broadcastFreshSync()
 	// Broadcast to ALL clients — even relay children get this directly. The
 	// relay tree's delta-only path is fine for normal frames but a scene
 	// transition needs to invalidate everyone's state at once.
+	// EXCEPT control-only connections — they get SYNC via the VPS relay path,
+	// not over the home upstream.
 	{
 		std::lock_guard<std::mutex> lock(_connMutex);
 		for (auto& conn : _connections) {
-			try { _ws.send(conn, compSync, compSyncSize, websocketpp::frame::opcode::binary); }
-			catch (...) {}
+			try {
+				void* key = (void*)_ws.get_con_from_hdl(conn).get();
+				if (_controlOnlyConns.count(key)) continue;
+				_ws.send(conn, compSync, compSyncSize, websocketpp::frame::opcode::binary);
+			} catch (...) {}
 		}
 	}
 	syncComp.destroy();

@@ -25,24 +25,103 @@
 #include "cfg/option.h"
 #include "oslib/oslib.h"
 #include "oslib/i18n.h"
+#include "network/maplecast_input_server.h"
+#include "network/maplecast_mirror.h"
 #include <algorithm>
+#include <ctime>
 
 namespace ggpo
 {
 
 bool inRollback;
 
+// Phase A — monotonic clock helper for latch telemetry. Same pattern as
+// the input server's nowUs() and the mirror's _publishNowUs(), kept local
+// to avoid header churn.
+static inline int64_t _ggpoNowUs() {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
 static void getLocalInput(MapleInputState inputState[4])
 {
 	if (!config::ThreadedRendering)
 		os_UpdateInputState();
 	std::lock_guard<std::mutex> lock(relPosMutex);
+
+	// Phase A — when the MapleCast input server is the source of truth for
+	// slots 0/1, read from the per-slot atomic instead of the live kcode[]/
+	// lt[]/rt[] globals. This closes the torn-read race in the C++ memory
+	// model (the network thread writes the three globals as separate plain
+	// stores; the atomic packs them into a single 64-bit word). Slots 2/3
+	// and the analog/keyboard/mouse fields keep the plain-globals path —
+	// those are written by SDL, not by the network input server.
+	const bool maplecastActive = maplecast_input::active();
+	const int64_t tLatchUs = maplecastActive ? _ggpoNowUs() : 0;
+	const uint64_t latchFrame = maplecastActive ? maplecast_mirror::currentFrame() : 0;
+
 	for (int player = 0; player < 4; player++)
 	{
 		MapleInputState& state = inputState[player];
-		state.kcode = kcode[player];
-		state.halfAxes[PJTI_L] = lt[player];
-		state.halfAxes[PJTI_R] = rt[player];
+
+		if (maplecastActive && (player == 0 || player == 1))
+		{
+			// Phase B — fork on per-slot LatchPolicy.
+			//   LatencyFirst (default): instantaneous packed-atomic load,
+			//                           same as Phase A behavior.
+			//   ConsistencyFirst:        drain accumulator, edge preservation,
+			//                           deferred releases, guard window.
+			const maplecast_input::LatchPolicy policy =
+				maplecast_input::getLatchPolicy(player);
+
+			uint16_t buttons; uint8_t ltRaw; uint8_t rtRaw; uint32_t seq;
+
+			if (policy == maplecast_input::LatchPolicy::ConsistencyFirst)
+			{
+				// ConsistencyFirst path. consistencyFirstLatch() owns all
+				// the accumulator state mutation; we just consume the result.
+				const auto cr = maplecast_input::consistencyFirstLatch(player, tLatchUs);
+				buttons = cr.buttons;
+				ltRaw   = cr.lt;
+				rtRaw   = cr.rt;
+				seq     = cr.packetSeq;
+			}
+			else
+			{
+				// LatencyFirst path — Phase A's instantaneous packed atomic load.
+				// Bit-identical to today's behavior modulo the torn-read fix.
+				const uint64_t packed = maplecast_input::_slotInputAtomic[player].load(
+					std::memory_order_acquire);
+				maplecast_input::unpackSlotInput(packed, buttons, ltRaw, rtRaw, seq);
+			}
+
+			// kcode[] format is active-low low 16 bits + upper-16-bits-set
+			// (see updateSlot in maplecast_input_server.cpp). Match that
+			// here so downstream consumers (CMD9 handler, ggpo Inputs
+			// packing) see the same format they always have. Same wire
+			// format under both policies.
+			state.kcode = (u32)buttons | 0xFFFF0000u;
+			state.halfAxes[PJTI_L] = (u16)((u16)ltRaw << 8);
+			state.halfAxes[PJTI_R] = (u16)((u16)rtRaw << 8);
+
+			// Telemetry: stamp this latch with delta_us, packet seq, and
+			// the current mirror frame number. Identical for both policies.
+			const maplecast_input::PlayerInfo& p = maplecast_input::getPlayer(player);
+			const int64_t deltaUs = tLatchUs - p.lastPacketUs;
+			maplecast_input::recordLatchSample(player, deltaUs, seq, latchFrame);
+		}
+		else
+		{
+			// Slot 2/3, or maplecast inactive: original plain-globals path.
+			state.kcode = kcode[player];
+			state.halfAxes[PJTI_L] = lt[player];
+			state.halfAxes[PJTI_R] = rt[player];
+		}
+
+		// Analog/mouse/keyboard fields aren't owned by the maplecast input
+		// server — these are SDL/keyboard/mouse globals, untouched by the
+		// network thread. Same path for all slots regardless of source.
 		state.halfAxes[PJTI_L2] = lt2[player];
 		state.halfAxes[PJTI_R2] = rt2[player];
 		state.fullAxes[PJAI_X1] = joyx[player];

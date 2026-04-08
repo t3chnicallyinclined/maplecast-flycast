@@ -30,12 +30,24 @@ extern bool pal_needs_update;
 
 static TA_context _wasmCtx;
 static bool _wasmCtxAlloced = false;
-static std::vector<uint8_t> _wasmPrevTA;
+static bool _wasmHasFullFrame = false;
 static bool _wasmInitialized = false;
 static MirrorDecompressor _decompressor;
 static bool _decompressorInit = false;
+static const size_t MEM_PAGE_SIZE = 4096;
 
 extern "C" {
+
+// One decompressor shared by SYNC and per-frame paths. Sized for the worst case
+// (~8MB SYNC payload). Matches the desktop client which uses a single 16MB
+// decompressor for both SYNC and frames in maplecast_mirror.cpp wsClientRun().
+static void ensureDecompressor()
+{
+	if (!_decompressorInit) {
+		_decompressor.init(16 * 1024 * 1024);
+		_decompressorInit = true;
+	}
+}
 
 // Apply SYNC data from server — writes VRAM + PVR regs directly
 // Format: "SYNC" (4) + vramSize (4) + vram data + pvrSize (4) + pvr data
@@ -44,8 +56,7 @@ int mirror_apply_sync(uint8_t* data, int size)
 {
 	if (size < 8) return 0;
 
-	// Decompress if ZCST-compressed
-	if (!_decompressorInit) { _decompressor.init(16 * 1024 * 1024); _decompressorInit = true; }
+	ensureDecompressor();
 	size_t decompSize = 0;
 	const uint8_t* decompData = _decompressor.decompress(data, size, decompSize);
 	if (decompSize < 12) return 0;
@@ -64,6 +75,10 @@ int mirror_apply_sync(uint8_t* data, int size)
 	if (pvrSize > (uint32_t)pvr_RegSize) pvrSize = pvr_RegSize;
 	memcpy(pvr_regs, src, pvrSize);
 
+	// SYNC replaces all VRAM — any cached prior TA buffer is now stale.
+	// Force a wait for the next keyframe before rendering again.
+	_wasmHasFullFrame = false;
+
 	// Force texture cache reset so renderer picks up new VRAM
 	if (renderer) {
 		renderer->resetTextureCache = true;
@@ -72,6 +87,9 @@ int mirror_apply_sync(uint8_t* data, int size)
 	}
 	pal_needs_update = true;
 	palette_update();
+
+	// Unprotect VRAM so per-frame memcpy patches work — matches desktop wsClientRun()
+	memwatch::unprotect();
 
 	printf("[WASM-MIRROR] SYNC applied: VRAM=%u PVR=%u bytes\n", vramSize, pvrSize);
 	return 1;
@@ -93,16 +111,41 @@ int mirror_init()
 
 // Receive and render a delta frame
 // data format: frameSize(4) + frameNum(4) + pvr_snapshot(64) + taOrigSize(4) + taDeltaSize(4) + deltaData + checksum(4) + dirtyPages
+//
+// !!! FRAGILE — KEEP IN LOCKSTEP WITH:
+//   - core/network/maplecast_mirror.cpp clientReceive()  (desktop client)
+//   - packages/renderer/src/wasm_bridge.cpp renderer_frame()  (king.html)
+//   - core/network/maplecast_mirror.cpp serverPublish()  (the producer)
+//
+// All four files implement one wire-format contract. Editing one without the
+// others = silent rendering bugs that ONLY show up on scene transitions
+// (character select, loading screens) because in-match VRAM is stable enough
+// to mask most decode errors. See packages/renderer/src/wasm_bridge.cpp for
+// the long-form list of bugs A-E we already paid for.
+//
+// NOTE: This bridge is the EmulatorJS-bundled version, loaded by web/emulator.html.
+// It is NOT what nobd.net king.html uses (that's the standalone renderer in
+// packages/renderer/). Both must be fixed when the wire format changes.
+//
+// Build pipeline: edit here → sync to ~/projects/flycast-wasm/upstream/source/
+// → emmake make → bash upstream/link-ubuntu.sh → 7z package → deploy →
+// bump report timestamp.
+//
+// See docs/ARCHITECTURE.md "Mirror Wire Format — Rules of the Road" for the
+// canonical list of rules all four parsers must obey.
 EMSCRIPTEN_KEEPALIVE
 int mirror_render_frame(uint8_t* data, int size)
 {
 	if (!_wasmInitialized || !renderer || size < 12) return 0;
 
 	// Decompress if ZCST-compressed
-	if (!_decompressorInit) { _decompressor.init(512 * 1024); _decompressorInit = true; }
+	ensureDecompressor();
 	size_t decompSize = 0;
 	const uint8_t* decompData = _decompressor.decompress(data, size, decompSize);
 	if (decompSize < 80) return 0;
+
+	// Decode directly into flycast's TA buffer (zero-copy, matches desktop client)
+	uint8_t* taDst = _wasmCtx.tad.thd_root;
 
 	const uint8_t* src = decompData;
 
@@ -118,38 +161,35 @@ int mirror_render_frame(uint8_t* data, int size)
 	uint32_t taSize; memcpy(&taSize, src, 4); src += 4;
 	uint32_t deltaPayloadSize; memcpy(&deltaPayloadSize, src, 4); src += 4;
 
+	bool skipRender = false;
+
 	if (deltaPayloadSize == taSize)
 	{
-		// Full frame
-		_wasmPrevTA.assign(src, src + taSize);
+		// Keyframe — copy directly into TA buffer
+		if (taSize > 0) memcpy(taDst, src, taSize);
 		src += taSize;
+		_wasmHasFullFrame = true;
+	}
+	else if (!_wasmHasFullFrame)
+	{
+		// Delta arrived before any keyframe — must still walk past delta + checksum
+		// + dirty pages so the parser stays aligned, but we cannot render this frame.
+		src += deltaPayloadSize;
+		skipRender = true;
 	}
 	else
 	{
-		// Delta decode
-		if (_wasmPrevTA.empty()) {
-			src += deltaPayloadSize;
-			// Skip checksum
-			src += 4;
-			return 0; // Need full frame first
-		}
-		if (_wasmPrevTA.size() < taSize)
-			_wasmPrevTA.resize(taSize, 0);
-		else if (_wasmPrevTA.size() > taSize)
-			_wasmPrevTA.resize(taSize);
-
-		const uint8_t* deltaData = src;
-		const uint8_t* deltaEnd = src + deltaPayloadSize;
-		while (deltaData + 4 <= deltaEnd)
+		// Delta decode in-place into TA buffer
+		const uint8_t* dd = src;
+		const uint8_t* de = src + deltaPayloadSize;
+		while (dd + 4 <= de)
 		{
-			uint32_t offset;
-			memcpy(&offset, deltaData, 4); deltaData += 4;
+			uint32_t offset; memcpy(&offset, dd, 4); dd += 4;
 			if (offset == 0xFFFFFFFF) break;
-			uint16_t runLen;
-			memcpy(&runLen, deltaData, 2); deltaData += 2;
-			if (offset + runLen <= taSize && deltaData + runLen <= deltaEnd)
-				memcpy(_wasmPrevTA.data() + offset, deltaData, runLen);
-			deltaData += runLen;
+			uint16_t runLen; memcpy(&runLen, dd, 2); dd += 2;
+			if (offset + runLen <= taSize && dd + runLen <= de)
+				memcpy(taDst + offset, dd, runLen);
+			dd += runLen;
 		}
 		src += deltaPayloadSize;
 	}
@@ -157,32 +197,44 @@ int mirror_render_frame(uint8_t* data, int size)
 	// Skip checksum
 	src += 4;
 
-	// Apply memory diffs (VRAM, PVR regs)
+	// Apply memory diffs — must process even when skipRender, so dirty pages are
+	// not lost during the delta-before-keyframe window.
+	bool vramDirty = false;
 	uint32_t dirtyPages; memcpy(&dirtyPages, src, 4); src += 4;
 	for (uint32_t d = 0; d < dirtyPages; d++)
 	{
 		uint8_t regionId = *src++;
 		uint32_t pageIdx; memcpy(&pageIdx, src, 4); src += 4;
-		size_t pageOff = pageIdx * 4096;
+		size_t pageOff = pageIdx * MEM_PAGE_SIZE;
 
-		if (regionId == 1 && pageOff + 4096 <= VRAM_SIZE)
+		if (regionId == 0 && pageOff + MEM_PAGE_SIZE <= 16 * 1024 * 1024)
 		{
-			memcpy(&vram[pageOff], src, 4096);
+			memcpy(&mem_b[pageOff], src, MEM_PAGE_SIZE);
+		}
+		else if (regionId == 1 && pageOff + MEM_PAGE_SIZE <= VRAM_SIZE)
+		{
+			// Unprotect BEFORE writing — texture cache may have mprotect'd this page
 			VramLockedWriteOffset(pageOff);
+			memcpy(&vram[pageOff], src, MEM_PAGE_SIZE);
+			vramDirty = true;
 		}
-		else if (regionId == 3 && pageOff + 4096 <= (size_t)pvr_RegSize)
+		else if (regionId == 2 && pageOff + MEM_PAGE_SIZE <= 2 * 1024 * 1024)
 		{
-			memcpy(pvr_regs + pageOff, src, 4096);
+			memcpy(&aica::aica_ram[pageOff], src, MEM_PAGE_SIZE);
 		}
-		src += 4096;
+		else if (regionId == 3 && pageOff + MEM_PAGE_SIZE <= (size_t)pvr_RegSize)
+		{
+			memcpy(pvr_regs + pageOff, src, MEM_PAGE_SIZE);
+		}
+		src += MEM_PAGE_SIZE;
 	}
 
-	// Build TA context
+	if (skipRender || taSize == 0) return 0;
+
+	// Build TA context — data is already in taDst, no copy needed
 	_wasmCtx.rend.Clear();
 	_wasmCtx.tad.Clear();
-
-	memcpy(_wasmCtx.tad.thd_root, _wasmPrevTA.data(), taSize);
-	_wasmCtx.tad.thd_data = _wasmCtx.tad.thd_root + taSize;
+	_wasmCtx.tad.thd_data = taDst + taSize;
 
 	// Set PVR registers
 	TA_GLOB_TILE_CLIP.full = pvr_snapshot[0];
@@ -210,6 +262,12 @@ int mirror_render_frame(uint8_t* data, int size)
 	_wasmCtx.rend.clearFramebuffer = pvr_snapshot[11] != 0;
 	float fz; memcpy(&fz, &pvr_snapshot[12], 4);
 	_wasmCtx.rend.fZ_max = fz;
+
+	// Force texture cache rebuild whenever VRAM moved — without this, a scene
+	// transition (e.g. character select) keeps showing stale textures from the
+	// previous scene because the cache was populated from old VRAM bytes.
+	if (vramDirty)
+		renderer->resetTextureCache = true;
 
 	// Palette update
 	pal_needs_update = true;

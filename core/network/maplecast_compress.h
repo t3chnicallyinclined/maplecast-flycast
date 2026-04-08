@@ -9,6 +9,32 @@
 
 	Define MAPLECAST_COMPRESS_ONLY_DECOMPRESS to exclude the compressor
 	(standalone WASM renderer only links zstd decompress sources).
+
+	!!! FRAGILE — THE MAGIC CONSTANT IS A BYTE-ORDER LANDMINE !!!
+
+	The wire bytes for ZCST are [0x5A, 0x43, 0x53, 0x54] ("ZCST" ASCII).
+	When loaded as a little-endian uint32 (which is what memcpy on x86_64
+	produces), the value MUST be 0x5453435A, NOT 0x5A435354.
+
+	The latter serializes back to bytes "TSCZ" — wire-incompatible with:
+	  - JS: relay.js / renderer-bridge.mjs check `getUint32(0, true) === 0x5453435A`
+	  - Rust: relay/src/protocol.rs checks `&data[0..4] == b"ZCST"`
+	  - C++: this file's MCST_MAGIC_COMPRESSED constant below
+
+	All four sides MUST agree. If you "fix" the constant on one side because
+	"the bytes look wrong" you will break the other three. The current value
+	below is correct. Do not change it.
+
+	This header is the wire format definition for the entire mirror stream.
+	If you change the envelope, you must update:
+	  - core/network/maplecast_mirror.cpp (server publish + desktop client receive)
+	  - core/network/maplecast_wasm_bridge.cpp (emulator.html WASM)
+	  - packages/renderer/src/wasm_bridge.cpp (king.html WASM)
+	  - relay/src/fanout.rs and relay/src/protocol.rs (Rust VPS relay)
+	  - web/relay.js and web/js/renderer-bridge.mjs (browser routing)
+
+	See docs/ARCHITECTURE.md "Mirror Wire Format — Rules of the Road" for the
+	canonical list of rules all four parsers must obey.
 */
 #pragma once
 

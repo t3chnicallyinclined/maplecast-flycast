@@ -158,6 +158,18 @@ static void sigintHandler(int)
 {
 	dc_exit();
 }
+
+// SIGUSR1: trigger a manual full save state broadcast to all WS clients.
+// Use case: ssh into the box and `kill -USR1 <flycast pid>` to push the
+// full 26 MB dc_serialize blob (compressed to ~3-5 MB) to every connected
+// browser. Debug helper for diagnosing what state the WASM client needs.
+// The handler only sets a flag — actual work happens on the render thread
+// in serverPublish() to avoid touching VRAM mid-update from another thread.
+extern "C" void maplecast_mirror_request_full_save_state();
+static void sigusr1Handler(int)
+{
+	maplecast_mirror_request_full_save_state();
+}
 #endif
 
 void common_linux_setup()
@@ -169,6 +181,8 @@ void common_linux_setup()
 #if defined(__unix__) && !defined(LIBRETRO) && !defined(__ANDROID__)
 	// exit cleanly on ^C
 	signal(SIGINT, sigintHandler);
+	// SIGUSR1 → manual full save state broadcast (debug)
+	signal(SIGUSR1, sigusr1Handler);
 #endif
 	
 	DEBUG_LOG(BOOT, "Linux paging: sysconf %ld PAGE_SIZE %ld PAGE_MASK %lX", sysconf(_SC_PAGESIZE), (unsigned long)PAGE_SIZE, (long)PAGE_MASK);
