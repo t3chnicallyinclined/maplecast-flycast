@@ -41,6 +41,17 @@ DEFINE FIELD rating       ON player TYPE int DEFAULT 1000;       -- ELO rating
 DEFINE FIELD peak_rating  ON player TYPE int DEFAULT 1000;       -- all-time high
 DEFINE FIELD rank_tier    ON player TYPE string DEFAULT "Warrior"; -- display tier
 
+-- /overlord access gate. Default false. Flip to true MANUALLY in
+-- SurrealDB after deploying this schema:
+--   UPDATE player SET admin = true WHERE username = '<your_name>';
+-- The /overlord/api/* relay routes call check_admin() which queries
+-- this field with the requesting user's bearer JWT. Anyone whose
+-- record has admin=false (the default) gets a 403 from every admin
+-- write endpoint. There is NO secondary "emergency admin" path —
+-- if you lose access, SSH into the VPS and re-flip the bool.
+-- See docs/WORKSTREAM-OVERLORD.md Phase B.
+DEFINE FIELD admin        ON player TYPE bool DEFAULT false;
+
 -- W/L
 DEFINE FIELD wins         ON player TYPE int DEFAULT 0;
 DEFINE FIELD losses       ON player TYPE int DEFAULT 0;

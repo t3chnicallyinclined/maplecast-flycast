@@ -182,6 +182,19 @@ async fn handle_http(
             "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             code, if resp.ok { "OK" } else { "Unauthorized" }, json.len(), json
         )
+    } else if first_line.starts_with("POST /api/leave") {
+        // Parse the Authorization header out of the raw request.
+        let auth = req.lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))
+            .and_then(|l| l.split_once(':'))
+            .map(|(_, v)| v.trim().to_string());
+        let resp = auth_api::handle_leave(auth.as_deref()).await;
+        let json = serde_json::to_string(&resp).unwrap_or_else(|_| "{}".to_string());
+        let code = if resp.ok { 200 } else { 401 };
+        format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+            code, if resp.ok { "OK" } else { "Unauthorized" }, json.len(), json
+        )
     } else {
         let body = "not found";
         format!(

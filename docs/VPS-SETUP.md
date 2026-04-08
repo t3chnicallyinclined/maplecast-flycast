@@ -205,6 +205,78 @@ curl -X POST -H 'Surreal-NS: maplecast' -H 'Surreal-DB: arcade' \
 2. Copy to VPS: `scp web/schema.surql root@66.55.128.93:/opt/maplecast/schema.surql`
 3. Import: see command above
 
+### /overlord admin role bootstrap
+
+The `/overlord` admin panel (see WORKSTREAM-OVERLORD) gates write
+endpoints with the `admin` bool on the `player` table. The field
+defaults to `false` so newly-registered users can never accidentally
+gain admin access. The first admin (you) has to be flagged manually
+with one SQL statement.
+
+**Adding the field** (once, after deploying the schema change):
+
+```bash
+ssh root@66.55.128.93 'curl -sS -u root:nobd_arcade_2026 \
+  -H "Surreal-NS: maplecast" -H "Surreal-DB: arcade" \
+  -H "Accept: application/json" \
+  --data "DEFINE FIELD admin ON player TYPE bool DEFAULT false;" \
+  http://127.0.0.1:8000/sql'
+```
+
+Expected response: `[{"result":null,"status":"OK", ...}]`
+
+**Backfill existing accounts** (DEFAULT only applies to new records,
+existing accounts get `admin = NONE` until you set it):
+
+```bash
+ssh root@66.55.128.93 'curl -sS -u root:nobd_arcade_2026 \
+  -H "Surreal-NS: maplecast" -H "Surreal-DB: arcade" \
+  -H "Accept: application/json" \
+  --data "UPDATE player SET admin = false WHERE admin = NONE;" \
+  http://127.0.0.1:8000/sql'
+```
+
+**Flag your account as admin:**
+
+```bash
+ssh root@66.55.128.93 'curl -sS -u root:nobd_arcade_2026 \
+  -H "Surreal-NS: maplecast" -H "Surreal-DB: arcade" \
+  -H "Accept: application/json" \
+  --data "UPDATE player SET admin = true WHERE username = '"'"'trisdog'"'"';" \
+  http://127.0.0.1:8000/sql'
+```
+
+**Verify the state:**
+
+```bash
+ssh root@66.55.128.93 'curl -sS -u root:nobd_arcade_2026 \
+  -H "Surreal-NS: maplecast" -H "Surreal-DB: arcade" \
+  -H "Accept: application/json" \
+  --data "SELECT username, admin FROM player;" \
+  http://127.0.0.1:8000/sql' | python3 -m json.tool
+```
+
+Expected: every player has either `admin: true` or `admin: false` —
+**never `None`**. None will fail-deny correctly in `check_admin()` but
+`false` is more obvious-correct.
+
+**Removing admin from a compromised/rotated account:**
+
+```bash
+ssh root@66.55.128.93 'curl -sS -u root:nobd_arcade_2026 \
+  -H "Surreal-NS: maplecast" -H "Surreal-DB: arcade" \
+  -H "Accept: application/json" \
+  --data "UPDATE player SET admin = false WHERE username = '"'"'oldname'"'"';" \
+  http://127.0.0.1:8000/sql'
+```
+
+There is **no secondary admin path** — no shared secret, no
+emergency-override env var. If you lose access to your admin account,
+SSH into the VPS and re-flag yourself or a different account directly
+in SurrealDB. This is by design: every admin write goes through
+`check_admin()` which validates against this single field, so there
+is exactly one trust boundary.
+
 ---
 
 ## 4. Deploying Web Updates
