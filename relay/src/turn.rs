@@ -9,6 +9,7 @@
 // coturn validates the HMAC using the SAME secret on its end. Stateless.
 // ============================================================================
 
+use crate::admin_api;
 use crate::auth_api;
 use crate::client_telemetry::{ClientReport, ClientTelemetry};
 use crate::fanout::RelayState;
@@ -78,6 +79,41 @@ pub async fn http_listener(
     }
 }
 
+// ============================================================================
+// Helpers for /overlord/api/* responses. The admin handlers return their
+// own JSON envelope, so these wrap an already-built JSON string in the
+// HTTP response. CORS headers included so the admin SPA at /overlord/
+// can call these from a (slightly) different origin if needed.
+// ============================================================================
+fn ok_json(json: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+        json.len(), json
+    )
+}
+
+fn forbidden_json() -> String {
+    let body = r#"{"ok":false,"error":"forbidden — admin role required"}"#;
+    format!(
+        "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+        body.len(), body
+    )
+}
+
+fn err_json_with_code(code: u16, msg: &str) -> String {
+    let body = format!(r#"{{"ok":false,"error":"{}"}}"#, msg.replace('"', "\\\""));
+    let reason = match code {
+        400 => "Bad Request",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "Error",
+    };
+    format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+        code, reason, body.len(), body
+    )
+}
+
 async fn handle_http(
     mut stream: TcpStream,
     peer: SocketAddr,
@@ -86,14 +122,38 @@ async fn handle_http(
     state: RelayState,
     telemetry: ClientTelemetry,
 ) -> std::io::Result<()> {
-    // Read the full request: headers + body. Cap at 64KB to prevent abuse.
+    // Read the full request: headers + body.
+    //
+    // Body cap is normally 64 KB to prevent abuse. The savestate upload
+    // endpoint (/overlord/api/savestates/upload) is the only route that
+    // accepts files >64 KB — we bump its cap to 64 MB. Per-route detection
+    // happens after we have enough data to parse the request line.
+    const SMALL_BODY_CAP: usize = 64 * 1024;
+    const LARGE_BODY_CAP: usize = 64 * 1024 * 1024;
+
     let mut buf = Vec::with_capacity(8192);
     let mut tmp = [0u8; 4096];
+    let mut body_cap = SMALL_BODY_CAP;
+    let mut headers_parsed = false;
     loop {
         let n = stream.read(&mut tmp).await?;
         if n == 0 { break; }
         buf.extend_from_slice(&tmp[..n]);
-        if buf.len() > 65536 { break; }
+
+        if !headers_parsed {
+            // Look at the request line as soon as we can to bump the cap
+            // for the upload route.
+            if let Some(headers_end) = find_double_crlf(&buf) {
+                headers_parsed = true;
+                let headers_lossy = String::from_utf8_lossy(&buf[..headers_end]);
+                let first_line = headers_lossy.lines().next().unwrap_or("");
+                if first_line.starts_with("POST /overlord/api/savestates/upload") {
+                    body_cap = LARGE_BODY_CAP;
+                }
+            }
+        }
+
+        if buf.len() > body_cap { break; }
         // Stop once we have headers + declared content-length
         if let Some(headers_end) = find_double_crlf(&buf) {
             let headers = &buf[..headers_end];
@@ -113,6 +173,34 @@ async fn handle_http(
     let req = String::from_utf8_lossy(&buf);
     let first_line = req.lines().next().unwrap_or("");
     let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+    // For binary endpoints that need raw bytes (multipart upload), we use
+    // body_bytes which preserves non-UTF8 content.
+    let headers_end = find_double_crlf(&buf).unwrap_or(0);
+    let body_bytes_start = if headers_end > 0 { headers_end + 4 } else { 0 };
+    let body_bytes: &[u8] = &buf[body_bytes_start..];
+
+    // Helper: extract `Authorization: Bearer <token>` from request lines.
+    let auth_header: Option<String> = req
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))
+        .and_then(|l| l.split_once(':'))
+        .map(|(_, v)| v.trim().to_string());
+
+    // Helper: parse query string from request line ("GET /foo?a=1&b=2 HTTP/1.1" → "a=1&b=2")
+    let query_string: String = first_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|p| p.split_once('?'))
+        .map(|(_, q)| q.to_string())
+        .unwrap_or_default();
+
+    // Helper: extract Content-Type header
+    let content_type: String = req
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("content-type:"))
+        .and_then(|l| l.split_once(':'))
+        .map(|(_, v)| v.trim().to_string())
+        .unwrap_or_default();
 
     let response = if first_line.starts_with("GET /turn-cred") {
         match secret {
@@ -183,18 +271,145 @@ async fn handle_http(
             code, if resp.ok { "OK" } else { "Unauthorized" }, json.len(), json
         )
     } else if first_line.starts_with("POST /api/leave") {
-        // Parse the Authorization header out of the raw request.
-        let auth = req.lines()
-            .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))
-            .and_then(|l| l.split_once(':'))
-            .map(|(_, v)| v.trim().to_string());
-        let resp = auth_api::handle_leave(auth.as_deref()).await;
+        let resp = auth_api::handle_leave(auth_header.as_deref()).await;
         let json = serde_json::to_string(&resp).unwrap_or_else(|_| "{}".to_string());
         let code = if resp.ok { 200 } else { 401 };
         format!(
             "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
             code, if resp.ok { "OK" } else { "Unauthorized" }, json.len(), json
         )
+
+    // ====================================================================
+    // /overlord/* — admin panel routes
+    // ====================================================================
+    //
+    // Every write endpoint is gated by auth_api::check_admin() against the
+    // bearer JWT. Read endpoints (status, list savestates, read config,
+    // tail logs) are also gated — there's no anonymous /overlord access.
+    //
+    // POST /overlord/api/signin — special: this is the login flow itself,
+    // so it can't pre-check admin. Instead, it runs the normal signin and
+    // THEN checks admin against the just-issued token. If admin is false,
+    // returns 403 even though the credentials were valid.
+    } else if first_line.starts_with("POST /overlord/api/signin") {
+        let signin_resp = auth_api::handle_signin(&body).await;
+        if !signin_resp.ok {
+            let json = serde_json::to_string(&signin_resp).unwrap_or_else(|_| "{}".to_string());
+            format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+                json.len(), json
+            )
+        } else {
+            // Use the just-issued db_token to verify admin role.
+            let token = signin_resp.db_token.as_deref();
+            let bearer = token.map(|t| format!("Bearer {}", t));
+            let is_admin = auth_api::check_admin(bearer.as_deref()).await;
+            if is_admin {
+                let json = serde_json::to_string(&signin_resp).unwrap_or_else(|_| "{}".to_string());
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+                    json.len(), json
+                )
+            } else {
+                let body = r#"{"ok":false,"error":"not an admin"}"#;
+                format!(
+                    "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                )
+            }
+        }
+    } else if first_line.starts_with("GET /overlord/api/status") {
+        if !auth_api::check_admin(auth_header.as_deref()).await {
+            forbidden_json()
+        } else {
+            ok_json(&admin_api::handle_status().await.to_json_string())
+        }
+    } else if first_line.starts_with("GET /overlord/api/savestates/download/") {
+        if !auth_api::check_admin(auth_header.as_deref()).await {
+            forbidden_json()
+        } else {
+            // Path: /overlord/api/savestates/download/<slot>
+            let slot_str = first_line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|p| p.strip_prefix("/overlord/api/savestates/download/"))
+                .map(|s| s.split('?').next().unwrap_or(s))
+                .unwrap_or("");
+            let slot = slot_str.parse::<i32>().unwrap_or(-1);
+            match admin_api::handle_savestate_download(slot).await {
+                Ok(bytes) => {
+                    let fname = if slot == 0 {
+                        format!("{}.state", admin_api::rom_basename())
+                    } else {
+                        format!("{}_{}.state", admin_api::rom_basename(), slot)
+                    };
+                    // Build the response headers separately so we can ship raw bytes.
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"{}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        fname, bytes.len()
+                    );
+                    stream.write_all(header.as_bytes()).await?;
+                    stream.write_all(&bytes).await?;
+                    stream.shutdown().await.ok();
+                    return Ok(());
+                }
+                Err(e) => err_json_with_code(500, &e),
+            }
+        }
+    } else if first_line.starts_with("GET /overlord/api/savestates") {
+        if !auth_api::check_admin(auth_header.as_deref()).await {
+            forbidden_json()
+        } else {
+            ok_json(&admin_api::handle_list_savestates().await.to_json_string())
+        }
+    } else if first_line.starts_with("POST /overlord/api/savestates/save") {
+        if !auth_api::check_admin(auth_header.as_deref()).await {
+            forbidden_json()
+        } else {
+            ok_json(&admin_api::handle_savestate_save(&body).await.to_json_string())
+        }
+    } else if first_line.starts_with("POST /overlord/api/savestates/load") {
+        if !auth_api::check_admin(auth_header.as_deref()).await {
+            forbidden_json()
+        } else {
+            ok_json(&admin_api::handle_savestate_load(&body).await.to_json_string())
+        }
+    } else if first_line.starts_with("POST /overlord/api/savestates/upload") {
+        if !auth_api::check_admin(auth_header.as_deref()).await {
+            forbidden_json()
+        } else {
+            ok_json(&admin_api::handle_savestate_upload(&query_string, &content_type, body_bytes).await.to_json_string())
+        }
+    } else if first_line.starts_with("GET /overlord/api/config") {
+        if !auth_api::check_admin(auth_header.as_deref()).await {
+            forbidden_json()
+        } else {
+            ok_json(&admin_api::handle_config_read().await.to_json_string())
+        }
+    } else if first_line.starts_with("POST /overlord/api/config") {
+        if !auth_api::check_admin(auth_header.as_deref()).await {
+            forbidden_json()
+        } else {
+            ok_json(&admin_api::handle_config_write(&body).await.to_json_string())
+        }
+    } else if first_line.starts_with("POST /overlord/api/service/restart") {
+        if !auth_api::check_admin(auth_header.as_deref()).await {
+            forbidden_json()
+        } else {
+            ok_json(&admin_api::handle_service_restart().await.to_json_string())
+        }
+    } else if first_line.starts_with("POST /overlord/api/reset") {
+        if !auth_api::check_admin(auth_header.as_deref()).await {
+            forbidden_json()
+        } else {
+            ok_json(&admin_api::handle_reset().await.to_json_string())
+        }
+    } else if first_line.starts_with("GET /overlord/api/logs/tail") {
+        if !auth_api::check_admin(auth_header.as_deref()).await {
+            forbidden_json()
+        } else {
+            ok_json(&admin_api::handle_logs_tail(&query_string).await.to_json_string())
+        }
     } else {
         let body = "not found";
         format!(

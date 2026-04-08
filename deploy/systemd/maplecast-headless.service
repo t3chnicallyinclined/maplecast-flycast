@@ -52,7 +52,12 @@ LockPersonality=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 RestrictNamespaces=yes
-ReadWritePaths=/opt/maplecast/savestates /opt/maplecast/cfg /var/log/maplecast
+# /opt/maplecast/.local covers flycast's user_data_dir
+# (~/.local/share/flycast/) where savestates, BIOS, VMU saves, and
+# dc_nvmem live. Without it the systemd ProtectHome+ProtectSystem
+# hardening blocks every savestate write — see VPS-SETUP §9
+# "ReadWritePaths" for the full debug story.
+ReadWritePaths=/opt/maplecast/savestates /opt/maplecast/cfg /opt/maplecast/.local /opt/maplecast/.maplecast /var/log/maplecast
 
 # AF_XDP zero-copy input requires CAP_NET_ADMIN / CAP_BPF / CAP_SYS_ADMIN.
 # If you don't need XDP (most VPS deployments — kernel NIC drivers don't

@@ -20,6 +20,7 @@ mod fanout;
 mod signaling;
 mod turn;
 mod auth_api;
+mod admin_api;
 mod client_telemetry;
 
 use clap::Parser;

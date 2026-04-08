@@ -187,6 +187,41 @@ static void executeSavestateLoad(const Command& cmd)
 		sendJson(cmd.conn, errReply(cmd, "savestate_load", "slot out of range [0,99]"));
 		return;
 	}
+	// !!! KNOWN BROKEN — DO NOT TRUST THIS PATH IN PRODUCTION !!!
+	//
+	// dc_loadstate() goes through Emulator::loadstate() which calls
+	// dc_deserialize, getSh4Executor()->ResetCache(), and triggers an
+	// EventManager Event::LoadState. Empirically (verified on the
+	// nobd.net VPS deploy 2026-04-08), this kills the Flycast-emu
+	// thread without an exception log — the thread exits cleanly
+	// because some downstream code transitions Emulator::state away
+	// from Running. After that the SH4 dynarec is dead, no new TA
+	// frames are produced, and (because the render thread is the one
+	// that drains the control WS command queue) every subsequent
+	// control WS command times out.
+	//
+	// ARCHITECTURE.md "Other hard-learned lessons" explicitly says:
+	// "NEVER use emu.loadstate() for live resync. Corrupts scheduler/
+	// DMA/interrupt state → SIGSEGV after ~1000 frames. Use direct
+	// memcpy of RAM/VRAM/ARAM instead." Same root cause we're hitting.
+	//
+	// The proper fix is to parse the savestate file ourselves into a
+	// Deserializer, walk it for the RAM/VRAM/ARAM/PVR sections, and
+	// memcpy them into the live arrays without going through the full
+	// Emulator::loadstate state-machine bounce. That's a Phase A.2
+	// follow-up tracked in WORKSTREAM-OVERLORD §5 "Pitfalls".
+	//
+	// Until then we hard-fail this command rather than silently kill
+	// the SH4 thread.
+	{
+		(void)cmd; // suppress unused-warning while we no-op
+		sendJson(cmd.conn, errReply(cmd, "savestate_load",
+			"savestate_load is temporarily disabled — see WORKSTREAM-OVERLORD Phase A.2"));
+		return;
+	}
+
+	// Unreachable below — kept for the eventual safe-load implementation.
+	#if 0
 	try {
 		dc_loadstate(cmd.slot);
 		printf("[control-ws] dc_loadstate(%d) OK\n", cmd.slot);
@@ -209,6 +244,7 @@ static void executeSavestateLoad(const Command& cmd)
 		printf("[control-ws] dc_loadstate(%d) threw unknown\n", cmd.slot);
 		sendJson(cmd.conn, errReply(cmd, "savestate_load", "unknown exception"));
 	}
+	#endif // disabled until safe-load is implemented
 }
 
 static void executeReset(const Command& cmd)

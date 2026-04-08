@@ -435,6 +435,24 @@ overwritten on redeploy)
 **Resources:** `MemoryMax=1G`, `TasksMax=64`, `CPUQuota=200%` —
 headroom is massive (live usage is ~301 MB RSS, ~24% of one core)
 
+**`ReadWritePaths`** — the systemd unit hardens the filesystem with
+`ProtectSystem=strict` + `ProtectHome=yes`, which makes the entire
+filesystem read-only by default. The unit must explicitly list every
+path the flycast process is allowed to write to. As of 2026-04-08
+the live VPS unit has:
+
+```
+ReadWritePaths=/opt/maplecast/savestates /opt/maplecast/cfg /opt/maplecast/.local /opt/maplecast/.maplecast /var/log/maplecast
+```
+
+The `/opt/maplecast/.local` entry is **CRITICAL** — without it, flycast
+silently fails to write savestates and VMU saves to its `user_data_dir`
+(`/opt/maplecast/.local/share/flycast/`). Look for
+`W[SAVESTATE]: Failed to save state - could not open ... for writing`
+in the journal if you suspect this. Adding `/opt/maplecast/.local`
+covers both `share/flycast` (savestates, BIOS, VMU) and any other
+flycast XDG data dirs.
+
 ### The flycast config + data layout (CRITICAL — easy to get wrong)
 
 Flycast's auto-load-savestate path is determined by a chain that's

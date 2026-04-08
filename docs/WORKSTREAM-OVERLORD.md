@@ -712,9 +712,77 @@ Connect-per-request is fine for admin ops (low frequency, don't need persistent 
 
 ## 5. Pitfalls & Tripwires
 
+### "savestate_load kills the SH4 thread" — KNOWN ISSUE (Phase A.2)
+
+**Status as of 2026-04-08 deploy: `savestate_load` is hard-disabled in
+`maplecast_control_ws.cpp::executeSavestateLoad()`. The endpoint
+returns `{"ok":false,"error":"savestate_load is temporarily disabled
+— see WORKSTREAM-OVERLORD Phase A.2"}`.**
+
+**The bug:** calling `dc_loadstate(slot)` on the render thread (which
+is what the control WS does) causes the `Flycast-emu` thread to exit
+silently — no exception log, no `state = Error` log, just gone. The
+SH4 dynarec stops producing frames, the control WS stops draining its
+command queue (because the queue drain is called from the render
+path), and every subsequent control WS command times out.
+
+**Verified empirically** on the nobd.net VPS deploy: ping → save → ping
+→ save → ping → load → **the moment after the load reply, every new
+WS connection hangs.** Thread inspection (`ps -L -p $PID`) shows the
+`Flycast-emu` thread is gone after the load command. The mirror stream
+also dies because no new TA frames are being produced.
+
+**Why:** `Emulator::loadstate()` calls `dc_deserialize()`,
+`mmu_set_state()`, `getSh4Executor()->ResetCache()`, and broadcasts a
+`Event::LoadState`. Somewhere in that chain, a downstream callback
+sets `Emulator::state` away from `Running`. The `Flycast-emu` thread's
+main loop is `while (state == Running || singleStep || stepRangeTo != 0)`,
+so it exits cleanly the next iteration. There's no exception, hence no
+ERROR_LOG.
+
+**Why this matters generally:** [ARCHITECTURE.md "Other hard-learned
+lessons"](ARCHITECTURE.md) explicitly says: *"NEVER use emu.loadstate()
+for live resync. Corrupts scheduler/DMA/interrupt state → SIGSEGV
+after ~1000 frames. Use direct memcpy of RAM/VRAM/ARAM instead."* Same
+root cause, different failure mode (we hit the "thread dies" path
+instead of the "SIGSEGV later" path).
+
+**The proper fix (Phase A.2):** parse the savestate file ourselves
+into a `Deserializer`, walk the deserialized state to extract the
+RAM / VRAM / ARAM / PVR sections, and `memcpy` them directly over the
+live arrays — bypassing `Emulator::loadstate()` entirely. The mirror
+server already has the per-region pointer table (`_regions[]` in
+`maplecast_mirror.cpp`) that this would write into. After the memcpy,
+trigger `maplecast_mirror::requestSyncBroadcast()` so wasm clients
+realign their shadows.
+
+**Phase A.2 scope:**
+- Add a new `safe_loadstate(slot)` function in `maplecast_mirror.cpp`
+  that does the parse + memcpy without touching the SH4 state machine.
+- Wire `executeSavestateLoad` to call it instead of `dc_loadstate`.
+- Re-enable the endpoint by removing the `#if 0` guard.
+- Verify with the determinism rig that wire bytes still match.
+
+Until Phase A.2 lands, **the admin UI's "Load slot" buttons must show
+a disabled state with a tooltip explaining the limitation.** Save,
+upload, download, and the live preview all still work — operators
+can still curate savestates, just not hot-load them into a running
+session. A workaround is to "click Save → click Restart service"
+which reloads the auto-load slot from disk on boot.
+
 ### "dc_loadstate crashed the emulator"
 
-Almost certainly the shadow-reset invariant. After `dc_loadstate()` you MUST trigger a fresh SYNC so the mirror's per-region shadows realign. Call `maplecast_mirror::requestSyncBroadcast()` right after the load. If the crash is a SIGSEGV inside `serverPublish()`, check that the mirror is actually getting the reset — put a printf at the top of `requestSyncBroadcast` and watch it fire.
+If you're seeing this somewhere OTHER than the control WS path (e.g.
+the existing F4 hotkey or the mirror sync path), check the shadow-reset
+invariant. After `dc_loadstate()` you MUST trigger a fresh SYNC so the
+mirror's per-region shadows realign. Call
+`maplecast_mirror::requestSyncBroadcast()` right after the load. If
+the crash is a SIGSEGV inside `serverPublish()`, check that the mirror
+is actually getting the reset — put a printf at the top of
+`requestSyncBroadcast` and watch it fire.
+
+(But: if the crash is in the control WS path, see the Phase A.2 bug
+above instead. The shadow reset alone won't fix it.)
 
 ### "The admin token works but the browser says 403"
 
