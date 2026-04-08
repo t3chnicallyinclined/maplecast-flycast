@@ -16,11 +16,34 @@ docs-archive/
 # Local stick binding cache (NOBD identity bindings, not source)
 .maplecast/
 
-# Savestates and ROMs are never committed
+# Savestates, ROMs, and game saves are never committed.
+# *.state catches Flycast savestates regardless of where they sit;
+# savestates/ catches the canonical directory wholesale (including
+# VMU saves and any future files there); the *.gdi/*.cdi/*.chd
+# patterns catch the Dreamcast disc image formats.
+savestates/
 *.state
 *.gdi
 *.cdi
 *.chd
+
+# Extracted game art / cached visual data — these are derived from
+# copyrighted ROM content and must not ship in the public repo.
+# visual_cache/ holds the per-frame character animation extractions
+# (was 2 GB of MVC2 sprite frames at one point).
+visual_cache/
+mvc2.webp
+*.webp
+
+# Runtime logs and per-frame diagnostic dumps
+*.log
+rend_diff_log*.csv
+history.txt
+
+# Compiled local test binaries (the source test_ws_client.cpp stays
+# tracked; the compiled output does not)
+test_ws_client
+test_ws_client2
 
 # macOS
 .DS_Store
