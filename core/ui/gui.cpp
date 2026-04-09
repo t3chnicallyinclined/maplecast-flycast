@@ -1649,6 +1649,29 @@ void gui_display_osd() {
 	gui_endFrame(gui_is_open());
 }
 
+// MapleCast mirror-client debug overlay. Drawn on top of the game render
+// when the client build is active and the user has pressed Tab. All of
+// the ImGui content lives in core/ui/gui_mirror_debug.cpp — this wrapper
+// just owns the ImGui frame lifecycle and key handling, which need
+// access to gui.cpp's file-static imguiDriver/gui_newFrame/gui_endFrame.
+#include "gui_mirror_debug.h"
+void gui_displayMirrorDebug()
+{
+	gui_newFrame();
+	ImGui::NewFrame();
+
+	// Toggle on Tab keypress. gui_newFrame() above pushed the current
+	// keyboard state into ImGui::IO, so IsKeyPressed() sees a fresh view.
+	if (ImGui::IsKeyPressed(ImGuiKey_Tab, /*repeat=*/false))
+		gui_mirror_debug::toggleVisible();
+
+	if (gui_mirror_debug::isVisible())
+		gui_mirror_debug::drawContent();
+
+	ImGui::Render();
+	gui_endFrame(true);
+}
+
 void gui_display_profiler()
 {
 #if FC_PROFILER

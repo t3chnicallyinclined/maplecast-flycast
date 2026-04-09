@@ -33,6 +33,10 @@
 #include <thread>
 #include <cstdlib>
 
+#ifdef USE_SDL
+#include <SDL.h>
+#endif
+
 static bool mainui_enabled;
 u32 MainFrameCount;
 static bool forceReinit;
@@ -65,16 +69,64 @@ bool mainui_rend_frame()
 	}
 	else if (maplecast_mirror::isClient())
 	{
+		// === MapleCast mirror client render loop ===
+		//
+		// What I learned the hard way diagnosing the stutter:
+		//
+		//   1. The decode path (clientReceive + renderer->Process) runs on
+		//      this render thread and takes ~15-18 ms per frame. That's
+		//      already near the full 60 Hz budget.
+		//   2. The outer loop (see mainui_loop below) calls
+		//      imguiDriver->present() → SDL_GL_SwapWindow which blocks on
+		//      SwapInterval. On a 240 Hz panel flycast sets SwapInterval=4
+		//      (= 16.67 ms) and on a 60 Hz panel it's 1 (= 16.67 ms).
+		//   3. Total loop time ≈ 18 ms decode + 16.67 ms swap ≈ 34 ms →
+		//      effective ~30 fps, dropping every other server frame, which
+		//      is exactly what "choppy" feels like.
+		//   4. The browser WASM client doesn't have this problem because
+		//      its decode runs on a web worker in parallel with the main
+		//      thread's rAF-paced present — the two halves overlap.
+		//
+		// Proper fix is "run decode on a separate GL context in parallel
+		// with present," which is a real refactor. The interim fix is to
+		// minimize the per-iteration cost so decode can happen at ~60 Hz
+		// unblocked by swap: in mirror-client mode we set SwapInterval=0
+		// (tear is imperceptible at 4 ms scan-out on a 240 Hz panel) so
+		// Present returns immediately and the loop cadence is set by the
+		// decode path instead of by two back-to-back blockers.
+
 		static rend_context mirrorCtx;
+		static bool _swapIntervalOverridden = false;
+		if (!_swapIntervalOverridden)
+		{
+			// One-shot: disable vsync for the mirror-client render loop.
+			// SDL_GL_SetSwapInterval returns -1 if the platform doesn't
+			// support it — we ignore that, it's best-effort.
+			SDL_GL_SetSwapInterval(0);
+			_swapIntervalOverridden = true;
+			printf("[MIRROR] render loop: SwapInterval=0 (vsync off) to let decode pace the loop\n");
+		}
+
 		bool vramDirty = false;
 
-		if (maplecast_mirror::clientReceive(mirrorCtx, vramDirty))
+		// Drain ALL pending frames in one iteration. clientReceive returns
+		// false when there's nothing new — the while loop keeps up if we
+		// fall behind, and runs exactly once in the common case.
+		bool drained = false;
+		while (maplecast_mirror::clientReceive(mirrorCtx, vramDirty))
+			drained = true;
+
+		if (drained)
 		{
 			bool isScreen = renderer->Render();
 			if (isScreen)
 				renderer->Present();
 		}
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+		// Debug overlay draws on top regardless of whether there was a
+		// new server frame — Tab toggle must be live even on frames
+		// where nothing changed.
+		gui_displayMirrorDebug();
 	}
 	else
 	{

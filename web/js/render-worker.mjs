@@ -91,10 +91,25 @@ let _glStateInit = false;
 let _pendingFrame = null;
 let _pendingLen = 0;
 
-// WebSocket
+// WebSocket — video/TA mirror pipe
 let _ws = null;
 let _wsUrl = null;
 let _wsReconnectTimer = null;
+
+// Second WebSocket — dedicated to PCM audio. Runs on its own TCP socket to
+// its own server-side io_service thread so audio sends can NEVER head-of-line
+// block video frames on the shared wire. See core/network/maplecast_audio_ws.h.
+let _audioWs = null;
+let _audioWsUrl = null;
+let _audioWsReconnectTimer = null;
+
+// Direct MessagePort to the pcm-worklet, handed in by the main thread after
+// the AudioContext unlocks. When set, audio packets are shipped here with
+// zero hops through the main thread — the main thread's rAF loop is never
+// touched on the audio path. Until it's set, audio is dropped on the floor
+// (we do NOT fall back to posting to main, because that's the whole bug
+// we're fixing: main-thread postMessage for every audio chunk starves rAF).
+let _audioPort = null;
 
 // Telemetry counters — read by main via {type:'telemetry'}
 //
@@ -142,6 +157,7 @@ self.onmessage = async (e) => {
     case 'resize':       return handleResize(msg);
     case 'telemetry':    return handleTelemetryRequest(msg);
     case 'binary_frame': return handleBinaryFrame(msg.buffer);  // P2P forward
+    case 'audio_port':   _audioPort = msg.port; return;         // direct-to-worklet port
     case 'shutdown':     return handleShutdown();
   }
 };
@@ -151,6 +167,7 @@ async function handleInit(msg) {
 
   const offscreen = msg.canvas;        // transferred OffscreenCanvas
   _wsUrl = msg.wsUrl;
+  _audioWsUrl = msg.audioWsUrl || null;  // optional — main thread resolves it
   const initialW = msg.width || 640;
   const initialH = msg.height || 480;
 
@@ -162,14 +179,25 @@ async function handleInit(msg) {
   offscreen.height = initialH;
 
   try {
+    // Quiet the per-frame WASM printfs from console. wasm_bridge.cpp logs
+    // KEYFRAME / DELTA / SYNC / palette / FB lines on every frame as a dev
+    // aid; in production they drown out everything else (60 lines/sec).
+    // Flip VERBOSE_RENDERER = true here when debugging the renderer itself.
+    const VERBOSE_RENDERER = false;
+    const NOISY_PATTERNS = /KEYFRAME |DELTA dropped|SYNC applied|PAL_RAM_CTRL|palette\d+\[|Computed FB:/;
+    const filteredLog = (s) => {
+      if (!VERBOSE_RENDERER && NOISY_PATTERNS.test(s)) return;
+      console.log('[render-worker]', s);
+    };
+
     const Module = await createRenderer({
       // findCanvasEventTarget("#canvas") in libhtml5.js will resolve to
       // Module.canvas. The OffscreenCanvas supports getContext('webgl2'),
       // which is what GL.createContext() will call internally.
       canvas: offscreen,
       // Worker-relative path so emscripten finds the .wasm sibling
-      locateFile: (path) => `../${path}?v=worker12`,
-      print:    (s) => console.log('[render-worker]', s),
+      locateFile: (path) => `../${path}?v=worker15`,
+      print:    filteredLog,
       printErr: (s) => console.warn('[render-worker]', s),
     });
 
@@ -187,6 +215,13 @@ async function handleInit(msg) {
 
     // Now open the WS — the renderer is ready to consume frames.
     connectWS();
+
+    // Also open the dedicated audio WS. It runs completely independently
+    // from the video pipe: its own TCP socket, its own reconnect loop, its
+    // own server-side io_service thread. Audio frames go straight from
+    // _audioWs.onmessage → _audioPort (the pcm-worklet) with zero detour
+    // through WASM, rAF, or the main thread.
+    if (_audioWsUrl) connectAudioWS();
   } catch (err) {
     console.error('[render-worker] init failed:', err && err.message);
     self.postMessage({ type: 'error', message: 'renderer init failed: ' + (err && err.message) });
@@ -247,6 +282,9 @@ function handleShutdown() {
   if (_ws) try { _ws.close(); } catch {}
   _ws = null;
   if (_wsReconnectTimer) clearTimeout(_wsReconnectTimer);
+  if (_audioWs) try { _audioWs.close(); } catch {}
+  _audioWs = null;
+  if (_audioWsReconnectTimer) clearTimeout(_audioWsReconnectTimer);
   _pendingFrame = null;
   _pendingLen = 0;
 }
@@ -282,6 +320,57 @@ function connectWS() {
   };
 }
 
+// Dedicated audio WebSocket. Binary-only, one-directional (server → client).
+// Every incoming message is a PCM chunk with the 4-byte [0xAD][0x10][seq]
+// header followed by 1024 × int16 stereo samples. We ship it straight to
+// the pcm-worklet via _audioPort. If _audioPort isn't set yet (the user
+// hasn't clicked anything to unlock AudioContext), we drop silently — the
+// browser wouldn't play audio without a gesture anyway.
+//
+// This WS is 100% isolated from the video pipe:
+//   - different TCP socket to server
+//   - different server-side io_service thread
+//   - different asio event loop
+//   - different reconnect state machine here in the worker
+// The only shared state is _audioPort (a MessagePort held by this worker).
+function connectAudioWS() {
+  if (!_audioWsUrl) return;
+  if (_audioWs) try { _audioWs.close(); } catch {}
+
+  const ws = new WebSocket(_audioWsUrl);
+  ws.binaryType = 'arraybuffer';
+  _audioWs = ws;
+
+  ws.onopen = () => {
+    console.log('[render-worker] audio WS connected');
+  };
+
+  ws.onclose = () => {
+    console.log('[render-worker] audio WS closed, reconnecting in 2s');
+    _audioWsReconnectTimer = setTimeout(connectAudioWS, 2000);
+  };
+
+  ws.onerror = () => {
+    // onclose fires and handles reconnect
+  };
+
+  ws.onmessage = (e) => {
+    if (typeof e.data === 'string') return;
+    const buffer = e.data;
+    if (buffer.byteLength < 6) return;
+    // Confirm magic before forwarding to the worklet port. Anything that
+    // isn't 0xAD 0x10 is unexpected noise on this channel and we drop it.
+    const u8 = new Uint8Array(buffer, 0, 2);
+    if (u8[0] !== 0xAD || u8[1] !== 0x10) return;
+    if (_audioPort) {
+      try {
+        const pcm = new Int16Array(buffer, 4);
+        _audioPort.postMessage(pcm);
+      } catch {}
+    }
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Frame intake — SYNC renders immediately, deltas coalesce for rAF drain
 // ---------------------------------------------------------------------------
@@ -290,18 +379,11 @@ function handleBinaryFrame(buffer) {
   const len = buffer.byteLength;
   if (len < 4) return;
 
-  // Audio packet — detect BEFORE the video/WASM gate so audio works even
-  // when WASM hasn't finished initializing. Audio header is
-  //   [0xAD][0x10][seqHi][seqLo][512 × int16 stereo PCM]
-  // = 2052 bytes. We simply forward the raw bytes back to the main thread;
-  // the main thread owns the AudioContext + pcm-worklet and pipes samples
-  // to the worklet's port. Zero WASM involvement on the audio path.
-  const u8 = new Uint8Array(buffer, 0, 2);
-  if (u8[0] === 0xAD && u8[1] === 0x10) {
-    // Transferable postMessage — zero-copy hand-off to main thread.
-    self.postMessage({ type: 'audio', buffer }, [buffer]);
-    return;
-  }
+  // Audio now rides a dedicated WS — see connectAudioWS(). If something
+  // ever sends a 0xAD 0x10 packet on the video pipe anyway, drop it fast
+  // so we don't confuse the frame parser below.
+  const hdr0 = new Uint8Array(buffer, 0, 2);
+  if (hdr0[0] === 0xAD && hdr0[1] === 0x10) return;
 
   // Everything below is video — needs the WASM renderer initialized.
   if (!_initialized || !_wasm) return;

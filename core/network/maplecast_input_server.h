@@ -168,6 +168,10 @@ void        setLatchPolicy(int slot, LatchPolicy policy);
 // instant. Default 500 us. MAPLECAST_GUARD_US env var overrides.
 int64_t getGuardUs();
 
+// Runtime setter used by the ImGui debug overlay on native mirror clients.
+// Clamped to [0, 5000] us. Atomic store — safe from any thread.
+void setGuardUs(int64_t us);
+
 // Phase B — input accumulator for ConsistencyFirst policy. Single 64-bit
 // word per slot, atomic, tear-free. Layout (LSB→MSB):
 //   bits  0..15  any_pressed   — OR of every bit that went 1→0 (active-low pressed)

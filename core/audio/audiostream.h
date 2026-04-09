@@ -64,6 +64,18 @@ void InitAudio();
 void TermAudio();
 void WriteSample(s16 right, s16 left);
 
+// Push an externally-sourced block of samples directly into the currently
+// selected audio backend. Used by the native MapleCast mirror client, which
+// receives PCM from a remote flycast over WebSocket and has no WriteSample()
+// path of its own (no SH4 emulation running locally).
+//
+// - `frames` MUST be exactly SAMPLE_COUNT (512) because that's what every
+//   AudioBackend implementation assumes.
+// - `data` is interleaved int16 stereo (L, R, L, R, ...) = 2048 bytes.
+// - Returns the backend's push() return value (1 on success, 0 on overflow).
+// - Safe to call from any thread; the backends' own locking handles it.
+u32 PushExternalAudio(const void *data, u32 frames);
+
 void StartAudioRecording(bool eight_khz);
 u32 RecordAudio(void *buffer, u32 samples);
 void StopAudioRecording();

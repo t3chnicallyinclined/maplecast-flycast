@@ -1084,6 +1084,23 @@ void Emulator::start()
 		config::VSync.override(true);
 		config::ThreadedRendering.override(false);  // client render loop is single-threaded
 
+		// Force the PulseAudio backend on Linux mirror clients. SDL2's
+		// "auto" path prefers the sdl2 backend, which on a PipeWire host
+		// opens its own 44.1 → 48 kHz stateless resampler (SDL_ConvertAudio),
+		// producing audible crackle at callback boundaries. The "pulse"
+		// backend goes straight to PipeWire's native stateful resampler
+		// and sounds clean. MAPLECAST_AUDIO_BACKEND env var overrides this
+		// for users who prefer alsa / libao / sdl2 explicitly. (Note: the
+		// backend slug is literally "pulse" — not "pulseaudio" — see the
+		// ctor at audiobackend_pulseaudio.cpp:35.)
+#if defined(USE_PULSEAUDIO) && !defined(_WIN32) && !defined(__APPLE__)
+		if (const char* ab = std::getenv("MAPLECAST_AUDIO_BACKEND"))
+			config::AudioBackend.override(ab);
+		else
+			config::AudioBackend.override("pulse");
+		printf("[MIRROR] client audio backend → %s\n", config::AudioBackend.get().c_str());
+#endif
+
 		maplecast_mirror::initClient();
 		state = Loaded;
 		printf("[MIRROR] === CLIENT MODE === CPU stopped, renderer-only, %d texture threads\n",
@@ -1096,10 +1113,14 @@ void Emulator::start()
 
 	if (config::ThreadedRendering)
 	{
+		printf("[emulator] Emulator::start → ThreadedRendering path, spawning Flycast-emu thread\n");
+		fflush(stdout);
 		const std::lock_guard<std::mutex> lock(mutex);
 		getSh4Executor()->Start();
 		threadResult = std::async(std::launch::async, [this] {
 				ThreadName _("Flycast-emu");
+				printf("[emulator] Flycast-emu thread running, about to call InitAudio()\n");
+				fflush(stdout);
 				InitAudio();
 
 				try {

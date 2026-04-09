@@ -29,6 +29,12 @@ void gui_display_ui();
 void gui_draw_osd();
 void gui_display_osd();
 void gui_display_profiler();
+
+// MapleCast mirror client debug overlay. Call once per render frame on
+// the client (non-headless, maplecast_mirror::isClient()) build. Handles
+// its own ImGui frame lifecycle + Tab hotkey; no-op visually until the
+// user presses Tab.
+void gui_displayMirrorDebug();
 void gui_open_onboarding();
 void gui_term();
 void gui_cancel_load();

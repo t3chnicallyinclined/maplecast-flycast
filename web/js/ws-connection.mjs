@@ -18,102 +18,281 @@
 // ============================================================================
 
 import { state } from './state.mjs';
-import { handleBinaryFrame } from './renderer-bridge.mjs';
-import { renderChat } from './chat.mjs';
+// handleBinaryFrame import removed — binary frames are owned by render-worker.mjs
+// (spawned by renderer-bridge.mjs). The main-thread JSON connection below
+// drops any binary frames defensively in case the relay ever sends one here.
+import { systemMessage } from './chat.mjs';
 import { updateLobbyState, updateNameOverlay } from './lobby.mjs';
-import { showNewChallenger, showMatchResults } from './demo.mjs';
-import { startGamepadPolling, stopGamepadPolling, updateStickButtons } from './gamepad.mjs';
+import { showMatchResults } from './demo.mjs';
+import { startGamepadPolling, stopGamepadPolling } from './gamepad.mjs';
+// updateStickButtons was removed when gamepad.mjs went USB-only. The legacy
+// register_complete handler at line ~435 still calls it — stub to no-op so
+// the module graph resolves.
+const updateStickButtons = () => {};
 import { autoSignIn } from './auth.mjs';
 import { leaveGame, updateCabinetControls } from './queue.mjs';
 import { avg } from './ui-common.mjs';
 
 const WS_PORT = 7200;
 
-// Relay mode: served from VPS (port 80/443) → use /ws proxy path
-// Direct mode: served from home box (port 8000) → use :7200 direct
-function getWsUrl() {
+// ============================================================================
+// TWO WebSocket connections per browser, with very different lifecycles:
+//
+//   state.ws        — RELAY WS, ALWAYS-ON. Connects to wss://nobd.net/ws (the
+//                     VPS relay on :7201). Carries the broadcast TA frame
+//                     downstream + status JSON. Every browser opens this on
+//                     page load and never closes it. Spectators only have
+//                     this connection.
+//
+//   state.controlWs — DIRECT FLYCAST WS, LAZY. Connects to wss://<host>/play,
+//                     which nginx proxies straight to flycast on
+//                     127.0.0.1:7210 — bypassing the relay. Opens ONLY when
+//                     the user clicks I GOT NEXT or RECLAIM, closes on
+//                     leave/kick. Carries: join, leave, gamepad input
+//                     (4-byte binary). Receives: assigned, kicked, status.
+//
+// Why two connections?
+//
+// flycast's `_connSlot[hdl]` registry keys on the upstream WS handle. The
+// relay multiplexes ALL its clients onto a single shared upstream hdl, so
+// two players joining via the relay would collide (both map to the same
+// hdl → last-write-wins → one player can't send input). Direct per-browser
+// connections on /play give each player their own hdl, so the existing
+// single-hdl-per-slot logic just works.
+//
+// Why not always use /play?
+//
+// Spectators (95% of traffic) don't need to write to flycast at all, and
+// the relay is what provides the frame cache + SYNC replay for late joiners.
+// Opening a direct flycast WS for every spectator would burn flycast's
+// connection budget and skip the SYNC cache. Lazy-open keeps spectators on
+// the cheap relay path and only upgrades to a direct connection when the
+// user actually steps up to the cabinet.
+//
+// Pre-2026-04-08 this pointed at wss://home.nobd.net/ws (a completely
+// separate flycast instance on the home box). After the headless migration
+// both WS endpoints terminate at the same nobd.net nginx — /ws goes to the
+// relay, /play goes directly to loopback flycast.
+// ============================================================================
+
+// Use the same origin as the page. /play is a same-host nginx location that
+// proxies directly to flycast:7210 (bypassing the relay). Dev (localhost:8000)
+// doesn't have an nginx in front, so we fall back to the relay port there.
+function getControlWsUrl() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const isProd = location.port === '' || location.port === '80' || location.port === '443';
+  if (isProd) return `${proto}//${location.hostname}/play`;
+  // Dev: no /play nginx block, talk straight to the relay — acceptable for
+  // single-player local testing since there's only one browser anyway.
+  return `${proto}//${location.hostname}:${WS_PORT}`;
+}
+const CONTROL_WS_URL = getControlWsUrl();
+
+// 30 second idle timer — if the browser is no longer playing/queued/resuming
+// after this many ms, close the controlWs to free the flycast hdl.
+const CONTROL_IDLE_CLOSE_MS = 30_000;
+
+// Public: the render worker calls this to find its frame source. Async to
+// match the previous LAN-race signature (the worker awaits it), even though
+// the URL is now picked synchronously since the race is gone.
+export async function getRendererWsUrl() {
+  // Frame downstream stays on whatever served the page (the VPS relay in
+  // production, localhost:8000 in dev). Browsers connect to wss://nobd.net/ws
+  // (relay) or ws://localhost:7200 (dev), depending on origin.
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const isRelay = location.port === '' || location.port === '80' || location.port === '443';
   if (isRelay) return `${proto}//${location.hostname}/ws`;
   return `${proto}//${location.hostname}:${WS_PORT}`;
 }
 
-// Renderer worker (render-worker.mjs) imports this via dynamic import to
-// resolve the URL for its own dedicated binary WebSocket. Kept async for
-// forward compatibility with credential-fetching variants that may need
-// to await a token/TURN cred before building the URL.
-export async function getRendererWsUrl() {
-  return getWsUrl();
+// Public: the render worker calls this to find the DEDICATED audio
+// WebSocket source. Audio rides its own TCP socket to flycast's
+// maplecast_audio_ws listener on its own io_service thread — nothing
+// about this path can head-of-line block the TA mirror video pipe on
+// /ws. In relay mode (wss://nobd.net/audio) it goes through an nginx
+// proxy block that forwards directly to 127.0.0.1:7213 on the VPS.
+export async function getRendererAudioWsUrl() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const isRelay = location.port === '' || location.port === '80' || location.port === '443';
+  if (isRelay) return `${proto}//${location.hostname}/audio`;
+  return `${proto}//${location.hostname}:7213`;
 }
 
-let frameWorker = null;
+
+// The relay WS URL — same logic as the renderer URL since they share an
+// origin. Spectators connect here on page load.
+function getRelayWsUrl() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const isRelay = location.port === '' || location.port === '80' || location.port === '443';
+  if (isRelay) return `${proto}//${location.hostname}/ws`;
+  return `${proto}//${location.hostname}:${WS_PORT}`;
+}
+
+// ============================================================================
+// state.controlWs lifecycle helpers
+// ============================================================================
+
+let _controlWsOpenPromise = null;
+let _controlIdleTimer = null;
+
+/**
+ * Open the direct flycast control WS if it isn't already open. Returns a
+ * promise that resolves to the WebSocket once it's ready to send. Idempotent:
+ * subsequent calls while the connection is open return the same socket.
+ * Subsequent calls while it's still opening return the same in-flight promise.
+ *
+ * Throws on failure (CGNAT user can't reach home.nobd.net, cert error, etc.)
+ * — callers should catch and surface "cannot reach game server" UI.
+ */
+export function ensureControlWs() {
+  // Already open
+  if (state.controlWs && state.controlWs.readyState === WebSocket.OPEN) {
+    return Promise.resolve(state.controlWs);
+  }
+  // In flight
+  if (_controlWsOpenPromise) return _controlWsOpenPromise;
+
+  _controlWsOpenPromise = new Promise((resolve, reject) => {
+    console.log('[control-ws] Opening', CONTROL_WS_URL);
+    const ws = new WebSocket(CONTROL_WS_URL);
+    ws.binaryType = 'arraybuffer';
+    state.controlWs = ws;
+
+    let settled = false;
+    const settle = (fn, val) => {
+      if (settled) return;
+      settled = true;
+      _controlWsOpenPromise = null;
+      fn(val);
+    };
+
+    ws.onopen = () => {
+      console.log('[control-ws] open');
+      // Personal-reply receive handler — flycast sends back assigned/kicked/pong
+      // on the direct WS. The actual lobby/queue/slot UI updates come from
+      // SurrealDB live queries, NOT from these messages.
+      ws.onmessage = (e) => {
+        if (typeof e.data !== 'string') return; // defensive: drop binary frames
+        let msg;
+        try { msg = JSON.parse(e.data); } catch { return; }
+        switch (msg.type) {
+          case 'assigned':
+            // Flycast confirmed our slot. The slot row in SurrealDB was already
+            // updated optimistically by queue.mjs handleMyPromotion. Nothing to
+            // do here unless flycast rejected us (slot < 0).
+            if (msg.slot < 0) {
+              console.warn('[control-ws] flycast rejected join');
+              state.mySlot = -1;
+            }
+            break;
+          case 'kicked': {
+            // Server-side eviction. Reasons we see in practice:
+            //   - "idle"     : input was unchanged + no heartbeat for 30s
+            //   - "ghost"    : another tab joined with the same name and
+            //                  flycast's ghost-slot eviction kicked us
+            //   - "leave"    : the user clicked DISCONNECT in another tab
+            //                  which propagated to /api/leave → flycast
+            //
+            // In all cases this tab needs a full local cleanup: close the
+            // controlWs, stop polling, drop mySlot, refresh the cabinet
+            // controls so the right button comes back, and surface a
+            // visible message in chat so the user knows what happened.
+            console.log('[control-ws] kicked by server:', msg.reason);
+            const wasInSlot = state.mySlot;
+            state.mySlot = -1;
+            stopGamepadPolling();
+            try { ws.close(); } catch {}
+            state.controlWs = null;
+            // Lazy import to avoid the auth.mjs ↔ queue.mjs ↔ ws-connection
+            // import cycle going stale.
+            import('./queue.mjs').then(m => m.updateCabinetControls?.());
+            const friendly = msg.reason === 'idle'
+              ? `You were kicked from P${wasInSlot + 1} (idle).`
+              : msg.reason === 'ghost'
+                ? `You were taken over by another tab.`
+                : `You were disconnected from P${wasInSlot + 1}.`;
+            systemMessage(friendly);
+            break;
+          }
+          case 'pong':
+            // Optional latency measurement; ignore for now
+            break;
+          default:
+            // Unknown messages from flycast — log and ignore
+            console.log('[control-ws] msg:', msg.type);
+        }
+      };
+      settle(resolve, ws);
+    };
+
+    ws.onerror = (e) => {
+      console.warn('[control-ws] error', e);
+      settle(reject, new Error('control ws error'));
+    };
+
+    ws.onclose = () => {
+      console.log('[control-ws] closed');
+      if (state.controlWs === ws) state.controlWs = null;
+      settle(reject, new Error('control ws closed before open'));
+      // Do NOT auto-reconnect. The relay WS reconnects because it's the
+      // page-lifetime broadcast bus; the control WS only exists when the
+      // user is actively playing and they'll explicitly reopen by clicking
+      // RESUME or I GOT NEXT.
+    };
+
+    // 5s open timeout — if home.nobd.net is unreachable, fail loudly so the
+    // caller can surface a "cannot reach game server" toast.
+    setTimeout(() => settle(reject, new Error('control ws open timeout')), 5000);
+  });
+
+  return _controlWsOpenPromise;
+}
+
+/**
+ * Close the direct flycast control WS if open. Idempotent.
+ * Caller should ensure any final messages have drained first (or accept loss).
+ */
+export function closeControlWs(reason = 'manual') {
+  if (_controlIdleTimer) { clearTimeout(_controlIdleTimer); _controlIdleTimer = null; }
+  const ws = state.controlWs;
+  if (!ws) return;
+  console.log('[control-ws] closing —', reason);
+  state.controlWs = null;
+  try { ws.close(); } catch {}
+}
+
+/**
+ * Reset the idle close timer. Called whenever the user is in an "active"
+ * state (queued, playing, or pending resume). When activity stops, the timer
+ * fires after CONTROL_IDLE_CLOSE_MS and closes the control WS.
+ */
+export function bumpControlIdle() {
+  if (_controlIdleTimer) clearTimeout(_controlIdleTimer);
+  _controlIdleTimer = setTimeout(() => {
+    if (state.mySlot < 0 && !state.wsInQueue && !state.pendingResumeSlot) {
+      closeControlWs('idle');
+    }
+  }, CONTROL_IDLE_CLOSE_MS);
+}
+
+// ============================================================================
+// connectWS — opens the always-on relay WS (state.ws)
+// ============================================================================
 
 export async function connectWS() {
   state.connState = 'CONNECTING...';
-  const wsUrl = getWsUrl();
-  console.log('[ws] URL:', wsUrl);
+  const wsUrl = getRelayWsUrl();
+  console.log('[ws] Relay URL:', wsUrl);
 
-  // === CONNECTION 1: Worker for binary frames (dedicated thread) ===
-  try {
-    // Workers need a classic script URL, not a module
-    const workerBlob = new Blob([`
-      let ws = null;
-      self.onmessage = (e) => {
-        if (e.data.type === 'connect') connect(e.data.url);
-      };
-      function connect(url) {
-        if (ws) ws.close();
-        ws = new WebSocket(url);
-        ws.binaryType = 'arraybuffer';
-        ws.onopen = () => self.postMessage({ type: 'open' });
-        ws.onclose = () => {
-          self.postMessage({ type: 'close' });
-          setTimeout(() => connect(url), 2000);
-        };
-        ws.onmessage = (e) => {
-          if (typeof e.data === 'string') return;
-          self.postMessage({ type: 'frame', buffer: e.data }, [e.data]);
-        };
-      }
-    `], { type: 'application/javascript' });
-    const workerUrl = URL.createObjectURL(workerBlob);
-    frameWorker = new Worker(workerUrl);
-
-    frameWorker.onmessage = (e) => {
-      if (e.data.type === 'frame') {
-        // Binary frame transferred from Worker — zero copy, render immediately
-        handleBinaryFrame(e.data.buffer);
-      } else if (e.data.type === 'open') {
-        console.log('[ws-worker] Frame pipe connected');
-      } else if (e.data.type === 'close') {
-        state.rendererStreaming = false;
-      }
-    };
-
-    frameWorker.postMessage({ type: 'connect', url: wsUrl });
-    console.log('[ws] Worker frame pipe started');
-  } catch (err) {
-    console.warn('[ws] Worker failed, falling back to single connection:', err.message);
-    frameWorker = null;
-  }
-
-  // === CONNECTION 2: Main thread for JSON control ===
   const ws = new WebSocket(wsUrl);
   ws.binaryType = 'arraybuffer';
   state.ws = ws;
 
   ws.onopen = () => {
-    console.log('[ws] Control connection open');
+    console.log('[ws] Relay connection open');
     state.connState = 'CONNECTED';
-    // Always fire check_stick on connect so a reloaded tab learns its
-    // current slot from the server (the reload-resync path). The handler
-    // at case 'stick_status' below reclaims state.mySlot if appropriate.
-    const username = state.signedIn
-      ? state.myName.toLowerCase()
-      : localStorage.getItem('nobd_username');
-    if (username) {
-      ws.send(JSON.stringify({ type: 'check_stick', username }));
-    }
+    // No check_stick here — that goes through controlWs when the user
+    // explicitly tries to play (gotNext / RESUME). Spectators don't need it.
   };
 
   ws.onclose = () => {
@@ -123,14 +302,10 @@ export async function connectWS() {
   };
 
   ws.onmessage = (e) => {
-    // If Worker is handling binary, skip binary frames on main connection
-    if (typeof e.data !== 'string') {
-      if (!frameWorker) {
-        // Fallback: no Worker, handle binary on main thread
-        handleBinaryFrame(e.data);
-      }
-      return;
-    }
+    // Binary frames are owned by render-worker.mjs (the WASM renderer worker
+    // spawned by renderer-bridge.mjs) on its own dedicated WebSocket. Drop any
+    // binary that lands here defensively.
+    if (typeof e.data !== 'string') return;
 
     // JSON messages → defer to microtask
     const raw = e.data;
@@ -209,8 +384,7 @@ function handleJsonMessage(msg) {
     case 'assigned':
       state.mySlot = msg.slot;
       if (state.mySlot >= 0) {
-        state.chatHistory.push({ name: null, system: `${state.myName} is now P${state.mySlot + 1}!` });
-        renderChat();
+        systemMessage(`${state.myName} is now P${state.mySlot + 1}!`);
         startGamepadPolling();
         state.wsInQueue = false;
         document.getElementById('leaveGameBtn').style.display = 'block';
@@ -236,22 +410,28 @@ function handleJsonMessage(msg) {
       break;
 
     case 'your_turn':
-      showNewChallenger(state.myName);
-      state.chatHistory.push({ name: null, system: msg.msg || `${state.myName} — IT'S YOUR TURN!` });
-      renderChat();
+      systemMessage(msg.msg || `${state.myName} — IT'S YOUR TURN!`);
       state.wsInQueue = false;
       {
         const device = localStorage.getItem('maplecast_stick') ? 'NOBD Stick' : 'Browser';
         // Use sessionId so anon and signed-in joins behave consistently with
         // gotNext(). Falls back to myId if gotNext was never called this session.
         const id = state.sessionId || state.myId;
-        ws.send(JSON.stringify({ type: 'join', id, name: state.myName, device }));
+        // Per-user latch policy ride-along — see queue.mjs for the full
+        // rationale. Lazy import to avoid widening this module's imports.
+        import('./diagnostics.mjs').then(m => {
+          ws.send(JSON.stringify({
+            type: 'join', id, name: state.myName, device,
+            latch_policy: m.getPreferredLatchPolicy?.() || 'latency',
+          }));
+        }).catch(() => {
+          ws.send(JSON.stringify({ type: 'join', id, name: state.myName, device }));
+        });
       }
       break;
 
     case 'match_end':
-      state.chatHistory.push({ name: null, system: `${msg.winner_name} WINS!` });
-      renderChat();
+      systemMessage(`${msg.winner_name} WINS!`);
       showMatchResults();
       if (msg.loser === state.mySlot) setTimeout(() => leaveGame(), 3000);
       break;
@@ -260,15 +440,16 @@ function handleJsonMessage(msg) {
       // Server-side eviction (safety net if our match_end self-disconnect missed).
       // Clear mySlot first so leaveGame() skips sending a redundant 'leave' back.
       console.log('[ws] kicked by server:', msg.reason);
-      state.chatHistory.push({ name: null, system: 'You were kicked from the cabinet.' });
-      renderChat();
+      systemMessage('You were kicked from the cabinet.');
       state.mySlot = -1;
       leaveGame();
       break;
 
     case 'chat':
-      state.chatHistory.push({ name: msg.name || '???', text: msg.text, king: false });
-      renderChat();
+      // Dead path: chat now flows via SurrealDB live query, not WS broadcast.
+      // Kept as a no-op so any in-flight WS chat messages from a stale flycast
+      // build don't crash the dispatcher. Phase 6 cleanup will delete this case
+      // when flycast stops broadcasting it.
       break;
 
     default:
@@ -333,11 +514,7 @@ function syncSlotFromStatus(msg) {
     // Resume sending gamepad input from this tab
     startGamepadPolling();
 
-    state.chatHistory.push({
-      name: null,
-      system: `Reconnected to slot P${serverSlot + 1}.`,
-    });
-    renderChat();
+    systemMessage(`Reconnected to slot P${serverSlot + 1}.`);
     return;
   }
 
@@ -382,18 +559,38 @@ function handleStatus(msg) {
   d.streamKbps = msg.stream_kbps || 0;
   d.publishUs = msg.publish_us || 0;
   d.dirtyPages = msg.dirty || 0;
+  // Phase A — per-slot input latch telemetry. Backed by the LatchStatsAccum
+  // ring buffer in core/network/maplecast_input_server.cpp; see Phase A.4-5.
+  // Null until the server includes the block (older servers / pre-Phase-A
+  // builds).
+  d.latchStats = msg.latch_stats || null;
+  // Phase B — frame phase + per-slot latch policy. Drives the phase-aligned
+  // gamepad sender (B.8) and the diagnostics overlay's policy display (B.9).
+  d.framePhase = msg.frame_phase || null;
+  d.latchPolicy = msg.latch_policy || null;
+  // Wake the gamepad scheduler so it re-arms its phase-timer for this
+  // frame. Lazy-import to avoid the gamepad ↔ ws-connection import cycle.
+  if (d.framePhase) {
+    import('./gamepad.mjs').then(m => {
+      m.onServerFramePhase?.(d.framePhase, d.pingMs || 0);
+    });
+  }
   if (msg.game) d.game = msg.game;
 
-  // === RECONNECT SYNC ===
-  // Server is the authority on which slot we're in. The status message
-  // includes the first 8 chars of each occupant's id; if it matches ours,
-  // we're already that player — make the UI reflect that. Covers two cases:
-  //   1. Page reload while we still hold a slot
-  //   2. Tab survived a transient WS disconnect/reconnect
+  // Slot state used to be reconciled from this broadcast. DISABLED — the
+  // relay WS status comes from the nobd.net fanout flycast, which does NOT
+  // own player connections anymore. The canonical slot table lives in
+  // SurrealDB (written by the collector from HOME flycast's status), and
+  // the browser subscribes to it via queue.mjs initSlotLive. Letting
+  // syncSlotFromStatus run here racks the UI in a loop:
+  //    1. handleMyPromotion opens controlWs to home, sets mySlot = 0
+  //    2. next relay-status tick says p1 is empty (home flycast has it,
+  //       nobd.net fanout doesn't)
+  //    3. syncSlotFromStatus "dropped us from slot 0", clears mySlot
+  //    4. gamepad polling stops (gates on mySlot >= 0), player is stuck
   //
-  // The opposite direction matters too: if we *think* we're in a slot but
-  // the server doesn't agree, we got dropped — clean up our state.
-  syncSlotFromStatus(msg);
+  // Do not re-enable without rewiring the relay status source.
+  // syncSlotFromStatus(msg);
 
   if (d._wasRegistering && !msg.registering) {
     localStorage.setItem('maplecast_stick', state.myId);
@@ -422,7 +619,15 @@ function handleStatus(msg) {
       const devName = gp && !localStorage.getItem('maplecast_stick') ? gp.id.substring(0, 30) : device;
       // sessionId for anon/signed-in parity (see gotNext rationale).
       const id = state.sessionId || state.myId;
-      state.ws.send(JSON.stringify({ type: 'join', id, name: state.myName, device: devName }));
+      // Per-user latch policy ride-along (see queue.mjs for the rationale).
+      import('./diagnostics.mjs').then(m => {
+        state.ws.send(JSON.stringify({
+          type: 'join', id, name: state.myName, device: devName,
+          latch_policy: m.getPreferredLatchPolicy?.() || 'latency',
+        }));
+      }).catch(() => {
+        state.ws.send(JSON.stringify({ type: 'join', id, name: state.myName, device: devName }));
+      });
     }
   }
 

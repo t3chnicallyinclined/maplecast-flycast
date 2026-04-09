@@ -100,13 +100,12 @@ let _resetIntervalsOnNextPoll = false;
 // in a bounded ring until the context is running, then flush them all. The
 // worklet itself has a ~50ms startup buffer so a brief queue dump is fine.
 let _audioCtx = null;
-let _audioWorkletPort = null;
-let _audioPendingChunks = [];           // buffer between worker arrival and worklet ready
+let _audioInitStarted = false;          // gate so we don't double-init
 let _audioCtxUnlockArmed = false;       // have we armed the user-gesture listeners?
-const AUDIO_PENDING_MAX = 64;           // cap to ~730ms so a stalled unlock doesn't leak memory
 
 async function _ensureAudio() {
-  if (_audioCtx) return _audioCtx;
+  if (_audioCtx || _audioInitStarted) return _audioCtx;
+  _audioInitStarted = true;
   try {
     // Dreamcast AICA outputs at 44100 Hz — match it so the browser doesn't
     // resample (which would introduce pitch drift). If the platform refuses
@@ -122,19 +121,24 @@ async function _ensureAudio() {
       outputChannelCount: [2],
     });
     workletNode.connect(_audioCtx.destination);
-    _audioWorkletPort = workletNode.port;
     console.log('[audio] AudioWorklet ready — sampleRate:', _audioCtx.sampleRate,
       'state:', _audioCtx.state, 'baseLatency:', _audioCtx.baseLatency?.toFixed(4));
 
-    // Flush any chunks we received before the worklet was ready.
-    if (_audioPendingChunks.length) {
-      for (const pcm of _audioPendingChunks) _audioWorkletPort.postMessage(pcm);
-      console.log('[audio] flushed', _audioPendingChunks.length, 'pending chunks');
-      _audioPendingChunks.length = 0;
+    // Transfer the worklet's MessagePort to the render-worker. After the
+    // transfer the main thread can no longer post to it — which is exactly
+    // what we want: the worker will post PCM chunks straight to the
+    // worklet's audio-thread onmessage handler, with zero main-thread
+    // involvement per audio chunk. This is the fix for the video-lag
+    // correlated with audio being enabled: main thread's rAF loop stays
+    // clean no matter how many audio packets are flying.
+    if (_worker && workletNode.port) {
+      _worker.postMessage({ type: 'audio_port', port: workletNode.port }, [workletNode.port]);
+      console.log('[audio] worklet port transferred to render-worker');
     }
   } catch (err) {
     console.error('[audio] init failed:', err);
     _audioCtx = null;
+    _audioInitStarted = false;  // allow retry on next gesture
   }
   return _audioCtx;
 }
@@ -162,24 +166,11 @@ function _armAudioUnlock() {
   document.addEventListener('touchstart', unlock);
 }
 
-function _handleAudioChunk(buffer) {
-  // buffer is the full 2052-byte packet including the 4-byte header.
-  // Skip the header and view the remaining bytes as Int16 samples.
-  if (buffer.byteLength < 6) return;  // need at least 4-byte header + 1 sample
-  const pcm = new Int16Array(buffer, 4);
-
-  if (_audioWorkletPort && _audioCtx && _audioCtx.state === 'running') {
-    // Hot path: worklet ready, ship it.
-    _audioWorkletPort.postMessage(pcm);
-    return;
-  }
-  // Cold path: worklet not ready yet. Queue and arm the unlock listeners.
-  _armAudioUnlock();
-  if (_audioPendingChunks.length >= AUDIO_PENDING_MAX) {
-    _audioPendingChunks.shift();  // drop oldest to bound memory
-  }
-  _audioPendingChunks.push(pcm);
-}
+// NOTE: audio PCM no longer passes through the main thread at all. The
+// worker owns a direct MessagePort into the pcm-worklet (handed in by
+// _ensureAudio() above) and posts chunks straight to the audio thread.
+// The main thread's only remaining audio job is setting up the
+// AudioContext + AudioWorkletNode on the first user gesture.
 
 // ============================================================================
 // Init — create OffscreenCanvas, spawn worker, transfer canvas, kick WS URL
@@ -202,8 +193,14 @@ export async function initRenderer() {
     // render worker hits the same relay/upstream as ws-connection.mjs. We
     // import this lazily to avoid a circular import (ws-connection imports
     // from us via state).
-    const { getRendererWsUrl } = await import('./ws-connection.mjs');
+    //
+    // We ALSO resolve the audio WS URL here and pass it to the worker so
+    // the worker can open a second WebSocket dedicated to PCM audio.
+    // Audio rides its own TCP socket to its own server-side io_service
+    // thread — zero coupling to the TA mirror video path.
+    const { getRendererWsUrl, getRendererAudioWsUrl } = await import('./ws-connection.mjs');
     const wsUrl = await getRendererWsUrl();
+    const audioWsUrl = await getRendererAudioWsUrl();
 
     _worker = new Worker(new URL('./render-worker.mjs', import.meta.url), { type: 'module' });
 
@@ -213,11 +210,18 @@ export async function initRenderer() {
       state.connState = 'WORKER ERROR';
     };
 
-    // Send the canvas + WS URL. Canvas is transferable; WS URL is a string.
+    // Send the canvas + WS URLs. Canvas is transferable; URLs are strings.
     _worker.postMessage(
-      { type: 'init', canvas: offscreen, wsUrl, width: 640, height: 480 },
+      { type: 'init', canvas: offscreen, wsUrl, audioWsUrl, width: 640, height: 480 },
       [offscreen]
     );
+
+    // Arm the audio unlock listeners immediately. The first user click/key
+    // will build the AudioContext + worklet and transfer the worklet port
+    // to the render worker (see _ensureAudio). Until then, audio packets
+    // are dropped on the floor inside the worker — browser autoplay policy
+    // forbids playing before a gesture anyway, so this is correct.
+    _armAudioUnlock();
 
     // Start polling the worker for telemetry — fresh enough for the 1s diag
     // tick and 5s relay tick. Doesn't run until _workerReady; the handler
@@ -282,14 +286,6 @@ function _handleWorkerMessage(e) {
       if (msg.framesRendered > 0 && state.connState !== 'LIVE' && state.rendererStreaming) {
         state.connState = 'LIVE';
       }
-      break;
-
-    case 'audio':
-      // PCM audio chunk from the worker's binary WS pipe. buffer is the
-      // full packet including the 4-byte header; _handleAudioChunk strips
-      // it and pipes int16 samples to the pcm-worklet (or queues them
-      // until the user interacts and AudioContext unlocks).
-      _handleAudioChunk(msg.buffer);
       break;
 
     case 'error':

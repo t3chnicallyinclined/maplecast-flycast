@@ -97,7 +97,7 @@ public:
 		audiodev = SDL_OpenAudioDevice(NULL, 0, &wav_spec, &out_spec, 0);
 		if (audiodev == 0)
 		{
-			INFO_LOG(AUDIO, "SDL2: SDL_OpenAudioDevice failed: %s", SDL_GetError());
+			printf("[SDL2-audio] 44.1 kHz open failed (%s), retrying at 48 kHz with resample\n", SDL_GetError());
 			needs_resampling = true;
 			wav_spec.freq = 48000;
 			audiodev = SDL_OpenAudioDevice(NULL, 0, &wav_spec, &out_spec, 0);
@@ -105,7 +105,7 @@ public:
 				ERROR_LOG(AUDIO, "SDL2: SDL_OpenAudioDevice failed: %s", SDL_GetError());
 			else
 			{
-				INFO_LOG(AUDIO, "SDL2: Using resampling to 48 KHz");
+				printf("[SDL2-audio] WARNING: resampling 44.1 → 48 kHz via SDL_ConvertAudio (stateless — may crackle)\n");
 				int ret = SDL_BuildAudioCVT(&audioCvt, AUDIO_S16, 2, 44100, AUDIO_S16, 2, 48000);
 				if (ret != 1 || audioCvt.needed == 0)
 				{

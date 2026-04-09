@@ -1277,25 +1277,53 @@ void broadcastBinary(const void* data, size_t size)
 {
 	if (!_active || _clientCount.load(std::memory_order_relaxed) == 0) return;
 
-	std::lock_guard<std::mutex> lock(_connMutex);
-
-	// Build set of connections that should NOT receive binary
-	// (non-seed relay nodes that get frames via WebRTC instead)
-	std::set<void*> relaySkip;
-	for (auto& [key, peerId] : _connToPeerId) {
-		auto it = _relayTree.find(peerId);
-		if (it != _relayTree.end() && !it->second.isSeed && !it->second.isPlayer)
-			relaySkip.insert(key);
-	}
-
-	for (auto& conn : _connections) {
-		try {
-			void* key = (void*)_ws.get_con_from_hdl(conn).get();
-			if (relaySkip.count(key)) continue;          // gets frames via WebRTC relay
-			if (_controlOnlyConns.count(key)) continue;  // browser direct control WS — gets frames via VPS relay
-			_ws.send(conn, data, size, websocketpp::frame::opcode::binary);
-		} catch (...) {}
-	}
+	// Post the entire broadcast (snapshot + send loop) onto asio's
+	// io_service thread (_wsThread). Caller returns immediately after
+	// the post() — no locks held, no socket work, no contention with
+	// any other thread.
+	//
+	// Why this matters: the TA mirror publish runs on Flycast-rend, the
+	// audio sender runs on its own thread, and both used to call
+	// _ws.send() inline. asio's per-connection write queue is
+	// thread-safe but not lock-free, and having two threads submitting
+	// dense traffic (60 video/sec + 86 audio/sec) caused measurable
+	// stalls that showed up as video lag correlated with audio being
+	// enabled. Centralizing all WS writes on _wsThread removes the
+	// cross-thread contention entirely; audio and video never block
+	// each other because neither ever touches the socket directly.
+	//
+	// The data is copied once into a std::string (asio's native buffer
+	// type for websocketpp send) and moved into the lambda. On _wsThread,
+	// the send loop runs to completion without any other thread waiting
+	// on it.
+	std::string payload(reinterpret_cast<const char*>(data), size);
+	_ws.get_io_service().post([payload = std::move(payload)]() mutable {
+		std::vector<ConnHdl> targets;
+		{
+			std::lock_guard<std::mutex> lock(_connMutex);
+			targets.reserve(_connections.size());
+			std::set<void*> relaySkip;
+			for (auto& [key, peerId] : _connToPeerId) {
+				auto it = _relayTree.find(peerId);
+				if (it != _relayTree.end() && !it->second.isSeed && !it->second.isPlayer)
+					relaySkip.insert(key);
+			}
+			for (auto& conn : _connections) {
+				try {
+					void* key = (void*)_ws.get_con_from_hdl(conn).get();
+					if (relaySkip.count(key)) continue;
+					if (_controlOnlyConns.count(key)) continue;
+					targets.push_back(conn);
+				} catch (...) {}
+			}
+		}
+		for (auto& conn : targets) {
+			try {
+				_ws.send(conn, payload.data(), payload.size(),
+					websocketpp::frame::opcode::binary);
+			} catch (...) {}
+		}
+	});
 }
 
 void broadcastFreshSync()

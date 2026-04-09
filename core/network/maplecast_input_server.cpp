@@ -102,6 +102,17 @@ int64_t getGuardUs() {
 	return _guardUs.load(std::memory_order_relaxed);
 }
 
+// Runtime setter for the guard window. Used by the ImGui debug overlay on
+// native mirror clients so an operator can sweep the value while watching
+// the latch-timing graph. Atomic store; safe to call from any thread. The
+// latch path's getGuardUs() picks up the new value on its next read.
+void setGuardUs(int64_t us) {
+	if (us < 0) us = 0;
+	if (us > 5000) us = 5000;
+	_guardUs.store(us, std::memory_order_relaxed);
+	printf("[input-server] guard window → %lld us\n", (long long)us);
+}
+
 LatchPolicy getLatchPolicy(int slot) {
 	if (slot < 0 || slot > 1) return LatchPolicy::LatencyFirst;
 	return _latchPolicy[slot].load(std::memory_order_acquire);

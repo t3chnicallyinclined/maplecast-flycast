@@ -524,5 +524,24 @@ fn render_prometheus(snap: &crate::fanout::MetricsSnapshot) -> String {
     s.push_str("# TYPE nobd_relay_frame_interval_max_us gauge\n");
     s.push_str(&format!("nobd_relay_frame_interval_max_us {}\n", snap.max_frame_interval_us));
 
+    // Audio (tracked separately so per-frame video metrics above aren't
+    // polluted by ~86 audio packets/sec. Audio packets are 2052 bytes:
+    // [0xAD][0x10][seqHi][seqLo][512 × int16 stereo PCM]).
+    s.push_str("# HELP nobd_relay_audio_packets_received_total Total audio PCM packets from upstream\n");
+    s.push_str("# TYPE nobd_relay_audio_packets_received_total counter\n");
+    s.push_str(&format!("nobd_relay_audio_packets_received_total {}\n", snap.audio_packets_received));
+
+    s.push_str("# HELP nobd_relay_audio_packets_broadcast_total Total audio packets sent to clients (packets * recipients)\n");
+    s.push_str("# TYPE nobd_relay_audio_packets_broadcast_total counter\n");
+    s.push_str(&format!("nobd_relay_audio_packets_broadcast_total {}\n", snap.audio_packets_broadcast));
+
+    s.push_str("# HELP nobd_relay_audio_bytes_received_total Total audio bytes from upstream\n");
+    s.push_str("# TYPE nobd_relay_audio_bytes_received_total counter\n");
+    s.push_str(&format!("nobd_relay_audio_bytes_received_total {}\n", snap.audio_bytes_received));
+
+    s.push_str("# HELP nobd_relay_audio_bytes_broadcast_total Total audio bytes sent to clients\n");
+    s.push_str("# TYPE nobd_relay_audio_bytes_broadcast_total counter\n");
+    s.push_str(&format!("nobd_relay_audio_bytes_broadcast_total {}\n", snap.audio_bytes_broadcast));
+
     s
 }

@@ -94,4 +94,31 @@ void requestFullSaveStateBroadcast();
 uint64_t currentFrame();
 int64_t  lastLatchTimeUs();
 int64_t  framePeriodUs();
+
+// Client-side telemetry snapshot for the ImGui debug overlay. All values
+// are atomic loads — the snapshot may mix a trailing and leading edge of
+// one frame's updates, but that's fine for a once-per-frame overlay.
+struct ClientStats {
+	bool     wsConnected;
+	uint64_t frameCount;            // current client frame
+	uint64_t packetsReceived;       // total WS frames received
+	uint64_t bytesReceived;         // total WS payload bytes received
+	int64_t  lastDecodeUs;          // last clientReceive() decode cost
+	int64_t  decodeEmaUs;           // EMA of decode cost
+	uint32_t lastDirtyPages;        // dirty page count on last applied frame
+	uint32_t lastTaSize;            // TA buffer size on last applied frame
+	bool     lastVramDirty;         // did the last frame touch VRAM
+	int64_t  lastArrivalUs;         // steady_clock µs of last WS frame
+	int64_t  arrivalEmaUs;          // EMA of video-WS arrival interval
+	int64_t  arrivalMaxUs;          // peak video-WS arrival interval since last reset
+};
+ClientStats getClientStats();
+
+// Reset the arrivalMaxUs peak watermark. All other counters keep running.
+void resetClientStatsPeaks();
+
+// Force the video WS client to drop its current connection. The receive
+// thread sees the close and the existing reconnect loop picks it up.
+// Used by the debug overlay's "Reconnect Video" button.
+void requestClientVideoReconnect();
 }

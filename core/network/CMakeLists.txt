@@ -32,6 +32,10 @@ target_sources(${PROJECT_NAME} PRIVATE
         maplecast_input_server.h
         maplecast_audio.cpp
         maplecast_audio.h
+        maplecast_audio_ws.cpp
+        maplecast_audio_ws.h
+        maplecast_audio_client.cpp
+        maplecast_audio_client.h
         maplecast_gamestate.cpp
         maplecast_gamestate.h
         maplecast_mirror.cpp

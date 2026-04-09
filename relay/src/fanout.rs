@@ -74,21 +74,32 @@ struct SyncCache {
 
 #[derive(Default)]
 struct RelayStats {
+    // Video-only counters — audio packets are excluded so FPS / jitter /
+    // bytes-per-frame metrics reflect the video stream only.
     frames_received: u64,
     frames_broadcast: u64,
     bytes_received: u64,
     bytes_broadcast: u64,
     sync_count: u32,
     upstream_connected: bool,
-    /// Frames received in the last 1-second window (computed externally)
+    /// Most recent VIDEO frame size (audio not tracked here)
     last_frame_size_bytes: u64,
-    /// Track time of last frame to compute frame interval jitter
+    /// Track time of last VIDEO frame to compute frame interval jitter
     last_frame_at_us: u64,
     /// Cumulative jitter sum (microseconds, to avoid float perf hit)
     frame_interval_sum_us: u64,
     frame_interval_count: u64,
-    /// Max observed frame interval (worst-case jitter)
+    /// Max observed VIDEO frame interval (worst-case jitter)
     max_frame_interval_us: u64,
+
+    // Audio counters — tracked separately so we know audio is flowing
+    // without polluting the video metrics. The overlord dashboard can
+    // optionally surface these, but the primary FPS / jitter cards
+    // should read the video-only fields above.
+    audio_packets_received: u64,
+    audio_packets_broadcast: u64,
+    audio_bytes_received: u64,
+    audio_bytes_broadcast: u64,
 }
 
 /// Snapshot of relay metrics for /metrics endpoint
@@ -106,6 +117,11 @@ pub struct MetricsSnapshot {
     pub max_frame_interval_us: u64,
     pub has_sync_cache: bool,
     pub sync_cache_bytes: u64,
+    // Audio telemetry (separate from video counters above)
+    pub audio_packets_received: u64,
+    pub audio_packets_broadcast: u64,
+    pub audio_bytes_received: u64,
+    pub audio_bytes_broadcast: u64,
 }
 
 impl RelayState {
@@ -136,6 +152,24 @@ impl RelayState {
     /// Frames may be ZCST-compressed; we decompress to inspect for state cache,
     /// but forward the original (compressed) bytes downstream to save bandwidth.
     async fn on_upstream_frame(&self, data: Bytes) {
+        // Audio packets FIRST — fast path, no decompression, no state cache
+        // update, no video frame counter bookkeeping. Audio rides the same
+        // wire as video so the P2P fan-out tree just works, but we must
+        // keep it out of the video-only FPS / jitter / bytes-per-frame
+        // metrics so the overlord dashboard reports sensible numbers.
+        if protocol::is_audio(&data) {
+            let len = data.len();
+            let receivers = self.inner.frame_tx.receiver_count();
+            let _ = self.inner.frame_tx.send(data);
+
+            let mut stats = self.inner.stats.lock().await;
+            stats.audio_packets_received += 1;
+            stats.audio_bytes_received += len as u64;
+            stats.audio_packets_broadcast += receivers as u64;
+            stats.audio_bytes_broadcast += (len * receivers) as u64;
+            return;
+        }
+
         // Decompress for inspection if needed (held only as long as we need it)
         let inspect_buf: Option<Vec<u8>> = if protocol::is_compressed(&data) {
             protocol::decompress(&data)
@@ -262,6 +296,10 @@ impl RelayState {
             max_frame_interval_us: stats.max_frame_interval_us,
             has_sync_cache: has_sync,
             sync_cache_bytes: sync_bytes,
+            audio_packets_received: stats.audio_packets_received,
+            audio_packets_broadcast: stats.audio_packets_broadcast,
+            audio_bytes_received: stats.audio_bytes_received,
+            audio_bytes_broadcast: stats.audio_bytes_broadcast,
         };
         // Reset the rolling jitter window so the next scrape covers a fresh
         // window. We deliberately do NOT reset last_frame_at_us — the very

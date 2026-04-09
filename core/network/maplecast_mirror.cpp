@@ -25,6 +25,8 @@
 #include "emulator.h"
 #include "hw/mem/mem_watch.h"
 #include "maplecast_ws_server.h"
+#include "maplecast_audio_ws.h"
+#include "maplecast_audio_client.h"
 #include "maplecast_compress.h"
 #include "rend/texconv.h"
 
@@ -83,6 +85,26 @@ struct RingHeader {
 
 static uint64_t _clientFrameCount = 0;
 static bool _clientNeedsFullSync = true;
+
+// Forward-declared helper used by client telemetry updates further up
+// in the file; defined next to the render-path client code below.
+static int64_t _clientNowUs();
+
+// ---- Client telemetry (consumed by the ImGui debug overlay) ----
+// All atomic so the overlay can snapshot them lock-free. Updated once per
+// frame from clientReceive() below (video path) and from wsClientRun() /
+// wsReadFrame (arrival timing).
+static std::atomic<uint64_t> _clientPacketsReceived{0};
+static std::atomic<uint64_t> _clientBytesReceived{0};
+static std::atomic<int64_t>  _clientLastDecodeUs{0};
+static std::atomic<int64_t>  _clientDecodeEmaUs{0};
+static std::atomic<uint32_t> _clientLastDirtyPages{0};
+static std::atomic<uint32_t> _clientLastTaSize{0};
+static std::atomic<bool>     _clientLastVramDirty{false};
+static std::atomic<int64_t>  _clientLastArrivalUs{0};
+static std::atomic<int64_t>  _clientArrivalEmaUs{0};
+static std::atomic<int64_t>  _clientArrivalMaxUs{0};
+static std::atomic<bool>     _clientWsConnected{false};
 
 // Fast hash for VRAM comparison (sample every 64th byte for speed)
 static uint64_t fastVramHash()
@@ -352,6 +374,15 @@ void initServer()
 	if (portEnv) wsPort = std::atoi(portEnv);
 	maplecast_ws::init(wsPort);
 
+	// Dedicated audio-only WebSocket server on its own port + io_service
+	// thread. Keeps PCM audio packets off the TA mirror socket entirely so
+	// video frames never contend for TCP ordering or asio event-loop time.
+	// See maplecast_audio_ws.h for the full rationale.
+	int audioWsPort = wsPort + 3;  // default: 7203 alongside 7200, 7213 alongside 7210
+	const char* audioPortEnv = std::getenv("MAPLECAST_AUDIO_WS_PORT");
+	if (audioPortEnv) audioWsPort = std::atoi(audioPortEnv);
+	maplecast_audio_ws::init(audioWsPort);
+
 	printf("[MIRROR] === SERVER MODE === streaming TA + memory diffs\n");
 }
 
@@ -565,6 +596,7 @@ static void wsClientRun(std::string host, int port)
 		close(_wsFd); _wsFd = -1; return;
 	}
 	printf("[MIRROR-WS] WebSocket handshake OK — waiting for initial sync\n"); fflush(stdout);
+	_clientWsConnected.store(true, std::memory_order_release);
 
 	if (!_decodeTaAlloced) {
 		_decodeTaCtx[0].Alloc();
@@ -585,6 +617,11 @@ static void wsClientRun(std::string host, int port)
 			printf("[MIRROR-WS] Connection lost waiting for sync\n"); fflush(stdout);
 			close(_wsFd); _wsFd = -1; decomp.destroy(); return;
 		}
+		// Audio packet — [0xAD][0x10][seqHi][seqLo][PCM] — ignore on the
+		// native client (no audio playback implemented here). Would be
+		// misparsed as a video frame otherwise.
+		if (frame.size() >= 4 && frame[0] == 0xAD && frame[1] == 0x10)
+			continue;
 		// Decompress if needed
 		size_t decompSize = 0;
 		const uint8_t* decompData = decomp.decompress(frame.data(), frame.size(), decompSize);
@@ -612,7 +649,32 @@ static void wsClientRun(std::string host, int port)
 	while (true) {
 		if (!wsReadFrame(_wsFd, frame)) {
 			printf("[MIRROR-WS] Connection lost\n"); fflush(stdout);
+			_clientWsConnected.store(false, std::memory_order_release);
 			break;
+		}
+		// Audio packet — skip. The native flycast mirror client now has its
+		// own dedicated audio WS (maplecast_audio_client) on port+3, so we
+		// should never see 0xAD 0x10 on the video pipe anymore. Keep the
+		// defensive skip in case a mis-configured server sends one.
+		if (frame.size() >= 4 && frame[0] == 0xAD && frame[1] == 0x10)
+			continue;
+
+		// ---- Client-side arrival telemetry (video WS) ----
+		{
+			const int64_t now = _clientNowUs();
+			const int64_t prev = _clientLastArrivalUs.exchange(now, std::memory_order_relaxed);
+			if (prev != 0) {
+				const int64_t delta = now - prev;
+				const int64_t emaPrev = _clientArrivalEmaUs.load(std::memory_order_relaxed);
+				const int64_t ema = emaPrev + ((delta - emaPrev) >> 4);
+				_clientArrivalEmaUs.store(ema, std::memory_order_relaxed);
+				int64_t mx = _clientArrivalMaxUs.load(std::memory_order_relaxed);
+				while (delta > mx
+				    && !_clientArrivalMaxUs.compare_exchange_weak(mx, delta,
+				        std::memory_order_relaxed)) {}
+			}
+			_clientPacketsReceived.fetch_add(1, std::memory_order_relaxed);
+			_clientBytesReceived.fetch_add(frame.size(), std::memory_order_relaxed);
 		}
 		// Decompress if needed
 		size_t decompSize = 0;
@@ -759,6 +821,14 @@ static void initClientWebSocket()
 	std::string hostStr(host);
 	_wsThread = std::thread(wsClientRun, hostStr, port);
 	_wsThread.detach();
+
+	// Also kick off the audio-only WS client on its dedicated port.
+	// Server-side default is videoPort + 3 (see the matching
+	// initServer() block above). MAPLECAST_AUDIO_WS_PORT overrides.
+	int audioPort = port + 3;
+	if (const char* audioPortStr = std::getenv("MAPLECAST_AUDIO_WS_PORT"))
+		audioPort = std::atoi(audioPortStr);
+	maplecast_audio_client::init(host, audioPort);
 }
 
 bool isServer() { return _isServer; }
@@ -770,6 +840,55 @@ uint64_t currentFrame()      { return _atomicCurrentFrame.load(std::memory_order
 int64_t  lastLatchTimeUs()   { return _atomicLastLatchTimeUs.load(std::memory_order_acquire); }
 // Phase B — live frame period EMA, used by frame_phase in status JSON.
 int64_t  framePeriodUs()     { return _atomicFramePeriodUs.load(std::memory_order_relaxed); }
+
+// ==================== Client telemetry API ====================
+// All lock-free atomic reads. The ImGui debug overlay calls getClientStats()
+// once per frame to refresh its tables and graphs.
+
+ClientStats getClientStats()
+{
+	ClientStats s;
+	s.wsConnected      = _clientWsConnected.load(std::memory_order_relaxed);
+	s.frameCount       = _clientFrameCount;  // updated from render thread, best-effort read
+	s.packetsReceived  = _clientPacketsReceived.load(std::memory_order_relaxed);
+	s.bytesReceived    = _clientBytesReceived.load(std::memory_order_relaxed);
+	s.lastDecodeUs     = _clientLastDecodeUs.load(std::memory_order_relaxed);
+	s.decodeEmaUs      = _clientDecodeEmaUs.load(std::memory_order_relaxed);
+	s.lastDirtyPages   = _clientLastDirtyPages.load(std::memory_order_relaxed);
+	s.lastTaSize       = _clientLastTaSize.load(std::memory_order_relaxed);
+	s.lastVramDirty    = _clientLastVramDirty.load(std::memory_order_relaxed);
+	s.lastArrivalUs    = _clientLastArrivalUs.load(std::memory_order_relaxed);
+	s.arrivalEmaUs     = _clientArrivalEmaUs.load(std::memory_order_relaxed);
+	s.arrivalMaxUs     = _clientArrivalMaxUs.load(std::memory_order_relaxed);
+	return s;
+}
+
+void resetClientStatsPeaks()
+{
+	_clientArrivalMaxUs.store(0, std::memory_order_relaxed);
+}
+
+void requestClientVideoReconnect()
+{
+	// Closing the socket causes wsReadFrame() to return false on the next
+	// recv, which breaks the drain loop. wsClientRun() doesn't currently
+	// retry on its own (it falls out and exits), so a manual reconnect
+	// request here is primarily informational — the overlay shows the
+	// disconnected state and the user knows to restart the client.
+	// TODO: wrap wsClientRun() in an outer reconnect loop similar to the
+	// audio client. For now, just slam the fd so the ops-side UX matches
+	// user expectation: button click → "Disconnected" in the overlay.
+	int fd = _wsFd;
+	if (fd >= 0) {
+#ifdef _WIN32
+		closesocket(fd);
+#else
+		close(fd);
+#endif
+	}
+	_wsFd = -1;
+	_clientWsConnected.store(false, std::memory_order_release);
+}
 
 bool isHeadless()
 {
@@ -1312,7 +1431,11 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 			}
 		}
 
-		// Apply dirty pages to emulator memory (must happen on render thread)
+		// Apply dirty pages to emulator memory (must happen on render thread).
+		// Also track whether ANY PVR-regs page was dirty this frame — used
+		// below to gate the palette/fog re-upload on actual state changes
+		// instead of doing it unconditionally every frame.
+		bool pvrRegsDirty = false;
 		for (uint32_t d = 0; d < df.dirtyCount; d++) {
 			size_t pageOff = df.pages[d].pageIdx * MEM_PAGE_SIZE;
 			uint8_t rid = df.pages[d].regionId;
@@ -1327,8 +1450,10 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 			}
 			else if (rid == 2 && pageOff + MEM_PAGE_SIZE <= 2 * 1024 * 1024)
 				memcpy(&aica::aica_ram[pageOff], df.pages[d].data, MEM_PAGE_SIZE);
-			else if (rid == 3 && pageOff + MEM_PAGE_SIZE <= (size_t)pvr_RegSize)
+			else if (rid == 3 && pageOff + MEM_PAGE_SIZE <= (size_t)pvr_RegSize) {
 				memcpy(pvr_regs + pageOff, df.pages[d].data, MEM_PAGE_SIZE);
+				pvrRegsDirty = true;
+			}
 		}
 
 		// Render — TA data already decoded in ctx.tad.thd_root by background thread
@@ -1364,10 +1489,27 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 			ctx.rend.fZ_max = fz;
 
 			if (vramDirty) renderer->resetTextureCache = true;
-			::pal_needs_update = true;
-			palette_update();
-			renderer->updatePalette = true;
-			renderer->updateFogTable = true;
+
+			// Gate palette + fog re-upload on actual PVR-regs changes
+			// instead of running unconditionally every frame. Profiling
+			// showed render=18100µs avg=15587µs per frame on a 3090 with
+			// no vsync, which dropped the mirror client to ~30 fps. The
+			// overwhelming majority of that cost was palette_update() +
+			// renderer->updatePalette + renderer->updateFogTable running
+			// EVERY frame when the palette/fog had not actually changed.
+			//
+			// Palette RAM and fog LUT both live in the PVR regs region
+			// (rid=3). If no PVR-regs page was dirty this frame, the
+			// palette and fog are the same bytes as last frame — there
+			// is nothing to re-upload. The browser WASM client has an
+			// analogous path but doesn't touch these flags every frame,
+			// which is why the browser runs smoothly on the same feed.
+			if (pvrRegsDirty) {
+				::pal_needs_update = true;
+				palette_update();
+				renderer->updatePalette = true;
+				renderer->updateFogTable = true;
+			}
 
 			renderer->Process(&ctx);
 			rc = ctx.rend;
@@ -1376,11 +1518,23 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		int64_t t1 = _clientNowUs();
 		static int64_t totalUs = 0;
 		static uint32_t count = 0;
-		totalUs += (t1 - t0);
+		const int64_t thisDecodeUs = t1 - t0;
+		totalUs += thisDecodeUs;
 		count++;
 		if (df.frameNum % 600 == 0)
 			printf("[MIRROR] Client frame %u | dirty=%u pages | render=%lldµs avg=%lldµs | WS-PIPELINE\n",
-				df.frameNum, df.dirtyCount, (long long)(t1 - t0), (long long)(totalUs / count));
+				df.frameNum, df.dirtyCount, (long long)thisDecodeUs, (long long)(totalUs / count));
+
+		// Publish debug-overlay telemetry atomics for the WS path.
+		_clientLastDecodeUs.store(thisDecodeUs, std::memory_order_relaxed);
+		{
+			const int64_t prev = _clientDecodeEmaUs.load(std::memory_order_relaxed);
+			_clientDecodeEmaUs.store(prev + ((thisDecodeUs - prev) >> 4),
+			                         std::memory_order_relaxed);
+		}
+		_clientLastDirtyPages.store(df.dirtyCount, std::memory_order_relaxed);
+		_clientLastTaSize.store(df.taSize, std::memory_order_relaxed);
+		_clientLastVramDirty.store(vramDirty, std::memory_order_relaxed);
 
 		return df.taSize > 0;
 	}
@@ -1479,7 +1633,10 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 				frameNum, checksumFails, checksumTotal);
 	}
 
-	// Memory diffs — apply dirty pages to emulator memory
+	// Memory diffs — apply dirty pages to emulator memory. Track whether
+	// any PVR-regs page was dirty so we can gate palette/fog re-upload
+	// below (same optimization as the WS path above).
+	bool pvrRegsDirty = false;
 	uint32_t dirtyPages; memcpy(&dirtyPages, src, 4); src += 4;
 	for (uint32_t d = 0; d < dirtyPages; d++) {
 		uint8_t regionId = *src++;
@@ -1496,8 +1653,10 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		}
 		else if (regionId == 2 && pageOff + MEM_PAGE_SIZE <= 2 * 1024 * 1024)
 			memcpy(&aica::aica_ram[pageOff], src, MEM_PAGE_SIZE);
-		else if (regionId == 3 && pageOff + MEM_PAGE_SIZE <= (size_t)pvr_RegSize)
+		else if (regionId == 3 && pageOff + MEM_PAGE_SIZE <= (size_t)pvr_RegSize) {
 			memcpy(pvr_regs + pageOff, src, MEM_PAGE_SIZE);
+			pvrRegsDirty = true;
+		}
 		src += MEM_PAGE_SIZE;
 	}
 
@@ -1537,10 +1696,18 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		if (vramDirty)
 			renderer->resetTextureCache = true;
 
-		::pal_needs_update = true;
-		palette_update();
-		renderer->updatePalette = true;
-		renderer->updateFogTable = true;
+		// Gate palette + fog re-upload on actual PVR-regs changes
+		// (same fix as the WS path above). Palette RAM and fog LUT
+		// both live in PVR regs; if none of those pages changed this
+		// frame, there is nothing to re-upload. Running these every
+		// frame unconditionally was the root cause of the ~18 ms decode
+		// budget on the client render thread.
+		if (pvrRegsDirty) {
+			::pal_needs_update = true;
+			palette_update();
+			renderer->updatePalette = true;
+			renderer->updateFogTable = true;
+		}
 
 		renderer->Process(&clientCtx);
 		rc = clientCtx.rend;
@@ -1564,13 +1731,26 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 
 	static int64_t totalDecodeUs = 0;
 	static uint32_t decodeCount = 0;
-	totalDecodeUs += (t1 - t0);
+	const int64_t thisDecodeUs = t1 - t0;
+	totalDecodeUs += thisDecodeUs;
 	decodeCount++;
+
+	// Publish to the debug-overlay telemetry atomics. EMA on decode time
+	// uses the same 1/16 alpha shape as the arrival interval EMA.
+	_clientLastDecodeUs.store(thisDecodeUs, std::memory_order_relaxed);
+	{
+		const int64_t prev = _clientDecodeEmaUs.load(std::memory_order_relaxed);
+		_clientDecodeEmaUs.store(prev + ((thisDecodeUs - prev) >> 4),
+		                         std::memory_order_relaxed);
+	}
+	_clientLastDirtyPages.store(dirtyPages, std::memory_order_relaxed);
+	_clientLastTaSize.store(taSize, std::memory_order_relaxed);
+	_clientLastVramDirty.store(vramDirty, std::memory_order_relaxed);
 
 	if (frameNum % 600 == 0)
 		printf("[MIRROR] Client frame %u | delta=%u bytes | dirty=%u pages | decode=%lldµs avg=%lldµs | %s\n",
 			frameNum, deltaPayloadSize, dirtyPages,
-			(long long)(t1 - t0), (long long)(totalDecodeUs / decodeCount),
+			(long long)thisDecodeUs, (long long)(totalDecodeUs / decodeCount),
 			_useWebSocket ? "WS" : "SHM");
 
 	return taSize > 0;

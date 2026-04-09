@@ -18,6 +18,14 @@ pub const PAGE_SIZE: usize = 4096;
 pub const VRAM_SIZE: usize = 8 * 1024 * 1024; // 8MB
 pub const PVR_SIZE: usize = 32 * 1024;         // 32KB
 
+/// Audio packet header bytes. Raw 16-bit stereo PCM over the same WebSocket
+/// as TA mirror frames. Packet layout:
+///   [0xAD][0x10][seqHi][seqLo][512 × int16 stereo PCM]  = 2052 bytes
+/// The relay must distinguish audio from video so per-frame metrics (FPS,
+/// jitter, bytes/frame) aren't polluted by the ~86 audio packets/sec.
+pub const AUDIO_MAGIC_0: u8 = 0xAD;
+pub const AUDIO_MAGIC_1: u8 = 0x10;
+
 /// Check if a message is a SYNC frame (uncompressed only)
 pub fn is_sync(data: &[u8]) -> bool {
     data.len() >= 4 && &data[0..4] == SYNC_MAGIC
@@ -26,6 +34,11 @@ pub fn is_sync(data: &[u8]) -> bool {
 /// Check if a message is a ZCST-compressed frame
 pub fn is_compressed(data: &[u8]) -> bool {
     data.len() >= 4 && &data[0..4] == ZCST_MAGIC
+}
+
+/// Check if a message is an audio PCM packet. Fast path — just two byte reads.
+pub fn is_audio(data: &[u8]) -> bool {
+    data.len() >= 4 && data[0] == AUDIO_MAGIC_0 && data[1] == AUDIO_MAGIC_1
 }
 
 /// Decompress a ZCST envelope. Returns the decompressed payload bytes.

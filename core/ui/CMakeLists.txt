@@ -6,6 +6,8 @@ if(NOT LIBRETRO)
             gui.cpp
             gui.h
             gui_achievements.cpp
+            gui_mirror_debug.cpp
+            gui_mirror_debug.h
             vgamepad.cpp
             vgamepad.h
             gui_chat.h
