@@ -287,8 +287,24 @@ function connectWS() {
 // ---------------------------------------------------------------------------
 
 function handleBinaryFrame(buffer) {
-  if (!_initialized || !_wasm) return;
   const len = buffer.byteLength;
+  if (len < 4) return;
+
+  // Audio packet — detect BEFORE the video/WASM gate so audio works even
+  // when WASM hasn't finished initializing. Audio header is
+  //   [0xAD][0x10][seqHi][seqLo][512 × int16 stereo PCM]
+  // = 2052 bytes. We simply forward the raw bytes back to the main thread;
+  // the main thread owns the AudioContext + pcm-worklet and pipes samples
+  // to the worklet's port. Zero WASM involvement on the audio path.
+  const u8 = new Uint8Array(buffer, 0, 2);
+  if (u8[0] === 0xAD && u8[1] === 0x10) {
+    // Transferable postMessage — zero-copy hand-off to main thread.
+    self.postMessage({ type: 'audio', buffer }, [buffer]);
+    return;
+  }
+
+  // Everything below is video — needs the WASM renderer initialized.
+  if (!_initialized || !_wasm) return;
   if (len < 8) return;
 
   // SYNC detection — magic + size as in renderer-bridge.mjs

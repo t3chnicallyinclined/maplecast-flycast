@@ -83,6 +83,104 @@ export const _telemetry = {
 // which is the actual owner of the counter.
 let _resetIntervalsOnNextPoll = false;
 
+// ---- Audio pipeline (PCM-over-WS, AudioWorklet) ----
+//
+// The flycast server taps the AICA output in WriteSample() and broadcasts
+// 512-sample stereo chunks (2052-byte packets with [0xAD][0x10][seqHi][seqLo]
+// header) over the same WebSocket the TA mirror video frames ride on. The
+// render worker detects the magic and postMessages the raw bytes back here;
+// we strip the 4-byte header, wrap the int16 PCM in a Uint8Array view, and
+// send it to a pcm-worklet AudioWorkletNode running on a dedicated audio
+// thread. The worklet converts int16 → float32 and feeds AudioContext.
+//
+// Audio plays by default. Users mute their own browser tab to silence it.
+//
+// Browser autoplay policy: AudioContext starts suspended until the user
+// interacts with the page (click, keydown, touch). We queue incoming chunks
+// in a bounded ring until the context is running, then flush them all. The
+// worklet itself has a ~50ms startup buffer so a brief queue dump is fine.
+let _audioCtx = null;
+let _audioWorkletPort = null;
+let _audioPendingChunks = [];           // buffer between worker arrival and worklet ready
+let _audioCtxUnlockArmed = false;       // have we armed the user-gesture listeners?
+const AUDIO_PENDING_MAX = 64;           // cap to ~730ms so a stalled unlock doesn't leak memory
+
+async function _ensureAudio() {
+  if (_audioCtx) return _audioCtx;
+  try {
+    // Dreamcast AICA outputs at 44100 Hz — match it so the browser doesn't
+    // resample (which would introduce pitch drift). If the platform refuses
+    // 44100 (some mobile browsers force 48000), fall back gracefully.
+    try {
+      _audioCtx = new AudioContext({ sampleRate: 44100 });
+    } catch {
+      _audioCtx = new AudioContext();
+      console.warn('[audio] 44.1 kHz unavailable — using', _audioCtx.sampleRate, 'Hz (pitch may drift)');
+    }
+    await _audioCtx.audioWorklet.addModule('/pcm-worklet.js');
+    const workletNode = new AudioWorkletNode(_audioCtx, 'pcm-processor', {
+      outputChannelCount: [2],
+    });
+    workletNode.connect(_audioCtx.destination);
+    _audioWorkletPort = workletNode.port;
+    console.log('[audio] AudioWorklet ready — sampleRate:', _audioCtx.sampleRate,
+      'state:', _audioCtx.state, 'baseLatency:', _audioCtx.baseLatency?.toFixed(4));
+
+    // Flush any chunks we received before the worklet was ready.
+    if (_audioPendingChunks.length) {
+      for (const pcm of _audioPendingChunks) _audioWorkletPort.postMessage(pcm);
+      console.log('[audio] flushed', _audioPendingChunks.length, 'pending chunks');
+      _audioPendingChunks.length = 0;
+    }
+  } catch (err) {
+    console.error('[audio] init failed:', err);
+    _audioCtx = null;
+  }
+  return _audioCtx;
+}
+
+function _armAudioUnlock() {
+  if (_audioCtxUnlockArmed) return;
+  _audioCtxUnlockArmed = true;
+  const unlock = async () => {
+    // Browser autoplay policy: AudioContext starts suspended until a gesture.
+    // We attempt creation+resume here so the worklet is alive and the next
+    // audio chunk flows directly.
+    await _ensureAudio();
+    if (_audioCtx && _audioCtx.state === 'suspended') {
+      try { await _audioCtx.resume(); } catch {}
+    }
+    if (_audioCtx && _audioCtx.state === 'running') {
+      console.log('[audio] AudioContext running');
+      document.removeEventListener('click', unlock);
+      document.removeEventListener('keydown', unlock);
+      document.removeEventListener('touchstart', unlock);
+    }
+  };
+  document.addEventListener('click', unlock);
+  document.addEventListener('keydown', unlock);
+  document.addEventListener('touchstart', unlock);
+}
+
+function _handleAudioChunk(buffer) {
+  // buffer is the full 2052-byte packet including the 4-byte header.
+  // Skip the header and view the remaining bytes as Int16 samples.
+  if (buffer.byteLength < 6) return;  // need at least 4-byte header + 1 sample
+  const pcm = new Int16Array(buffer, 4);
+
+  if (_audioWorkletPort && _audioCtx && _audioCtx.state === 'running') {
+    // Hot path: worklet ready, ship it.
+    _audioWorkletPort.postMessage(pcm);
+    return;
+  }
+  // Cold path: worklet not ready yet. Queue and arm the unlock listeners.
+  _armAudioUnlock();
+  if (_audioPendingChunks.length >= AUDIO_PENDING_MAX) {
+    _audioPendingChunks.shift();  // drop oldest to bound memory
+  }
+  _audioPendingChunks.push(pcm);
+}
+
 // ============================================================================
 // Init — create OffscreenCanvas, spawn worker, transfer canvas, kick WS URL
 // ============================================================================
@@ -184,6 +282,14 @@ function _handleWorkerMessage(e) {
       if (msg.framesRendered > 0 && state.connState !== 'LIVE' && state.rendererStreaming) {
         state.connState = 'LIVE';
       }
+      break;
+
+    case 'audio':
+      // PCM audio chunk from the worker's binary WS pipe. buffer is the
+      // full packet including the 4-byte header; _handleAudioChunk strips
+      // it and pipes int16 samples to the pcm-worklet (or queues them
+      // until the user interacts and AudioContext unlocks).
+      _handleAudioChunk(msg.buffer);
       break;
 
     case 'error':

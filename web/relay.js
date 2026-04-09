@@ -140,6 +140,29 @@ class MapleCastRelay {
 
   _onFrameFromUpstream(data) {
     const view = new DataView(data instanceof ArrayBuffer ? data : data.buffer);
+
+    // Audio packet detection FIRST — audio shares the binary WebSocket
+    // with video frames and rides the same P2P fan-out tree, so every
+    // child relay in the tree sees audio packets alongside video.
+    //
+    // Audio header: [0xAD][0x10][seqHi][seqLo][512 × int16 stereo PCM]
+    // = 2052 bytes. We detect before any video-frame parsing runs so the
+    // audio bytes never touch the frameNum discard logic (bytes 4-7 of an
+    // audio packet are PCM samples, not a frame counter).
+    const isAudio = data.byteLength >= 4 &&
+      view.getUint8(0) === 0xAD && view.getUint8(1) === 0x10;
+
+    if (isAudio) {
+      this.framesReceived++;           // audio counts as traffic too
+      this.onFrame(data);              // route to handler; client detects audio, fans to worklet
+      if (this.role === 'seed' || this.role === 'relay') {
+        // Audio is tiny and unreliable-delivery-tolerant — use the same
+        // delta-frame fan-out path (fire-and-forget via ta-mirror DC).
+        this._forwardToChildren(data);
+      }
+      return;
+    }
+
     // Detect ZCST compressed frame — magic bytes 0x5A 0x43 0x53 0x54
     // (server-side compression of large packets; SYNCs are always ZCST)
     const isCompressed = data.byteLength >= 4 &&

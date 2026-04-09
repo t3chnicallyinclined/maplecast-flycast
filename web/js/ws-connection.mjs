@@ -38,6 +38,14 @@ function getWsUrl() {
   return `${proto}//${location.hostname}:${WS_PORT}`;
 }
 
+// Renderer worker (render-worker.mjs) imports this via dynamic import to
+// resolve the URL for its own dedicated binary WebSocket. Kept async for
+// forward compatibility with credential-fetching variants that may need
+// to await a token/TURN cred before building the URL.
+export async function getRendererWsUrl() {
+  return getWsUrl();
+}
+
 let frameWorker = null;
 
 export async function connectWS() {
