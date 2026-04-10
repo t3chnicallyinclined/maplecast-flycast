@@ -3,10 +3,11 @@
 // ============================================================================
 
 import { state } from './state.mjs';
-import { renderChat } from './chat.mjs';
-import { stopGamepadPolling, updateStickButtons } from './gamepad.mjs';
-import { surrealQuery, surrealRegister, surrealUpdateLastSeen, surrealFetchProfile } from './surreal.mjs';
-import { updateCabinetControls } from './queue.mjs';
+import { systemMessage } from './chat.mjs';
+import { stopGamepadPolling } from './gamepad.mjs';
+import { surrealQuery, surrealRegister, surrealUpdateLastSeen, surrealFetchProfile, resetAuthCache } from './surreal.mjs';
+import { upgradeAuth } from './surreal-live.mjs';
+import { updateCabinetControls, leaveGame, leaveQueue } from './queue.mjs';
 import { AVATARS } from './ui-common.mjs';
 
 // === User Badge + Dropdown ===
@@ -27,8 +28,19 @@ export function toggleUserMenu(e) {
   document.getElementById('userDropdown').classList.toggle('open');
 }
 
-export function signOut() {
+export async function signOut() {
   document.getElementById('userDropdown').classList.remove('open');
+
+  // Vacate any DB-side claims FIRST so we don't leave orphaned rows
+  // (queue row stuck on "TRISDOG up next", or slot row holding our name).
+  // Both calls are idempotent and safe even when not in either state.
+  try {
+    if (state.mySlot >= 0) await leaveGame();
+    else if (state.inQueue) await leaveQueue();
+  } catch (e) {
+    console.warn('[auth] signOut DB cleanup failed:', e.message);
+  }
+
   state.signedIn = false;
   state.myName = '';
   state.myAvatar = '';
@@ -36,22 +48,18 @@ export function signOut() {
   state.inQueue = false;
   state.wsInQueue = false;
   state.playerProfile = null;
-  state.stickOnline = false;
-  state.stickRegistered = false;
-  state.stickSlot = -1;
+  state.dbToken = null;
   localStorage.removeItem('nobd_username');
-  localStorage.removeItem('maplecast_stick');
+  localStorage.removeItem('nobd_db_token');
+  resetAuthCache(); // next query falls back to viewer role
 
   document.getElementById('signinBtn').style.display = '';
   document.getElementById('userBadge').classList.remove('active');
   document.getElementById('leaveQueueBtn').style.display = 'none';
   document.getElementById('leaveGameBtn').style.display = 'none';
-  document.getElementById('registerStickBtn').style.display = 'none';
-  document.getElementById('unregisterStickBtn').style.display = 'none';
   stopGamepadPolling();
   updateCabinetControls();
-  state.chatHistory.push({ name: null, system: 'A fighter has left the arcade.' });
-  renderChat();
+  systemMessage('A fighter has left the arcade.');
 }
 
 // === Auth Modal ===
@@ -78,13 +86,15 @@ function updateAuthUI() {
   const btn = document.getElementById('authSubmitBtn');
   const toggle = document.getElementById('authToggleBtn');
   if (state.authMode === 'register') {
-    title.textContent = 'CREATE ACCOUNT';
-    btn.textContent = 'REGISTER';
+    title.innerHTML = '\u2728 NEW FIGHTER';
+    btn.textContent = 'ENTER THE ARCADE';
     toggle.textContent = 'ALREADY HAVE AN ACCOUNT? SIGN IN';
+    document.getElementById('modalPass').setAttribute('autocomplete', 'new-password');
   } else {
-    title.textContent = 'SIGN IN';
+    title.innerHTML = '\u26A1 INSERT COIN';
     btn.textContent = 'FIGHT';
-    toggle.textContent = 'NEW? CREATE ACCOUNT';
+    toggle.textContent = 'NEW? CREATE FIGHTER';
+    document.getElementById('modalPass').setAttribute('autocomplete', 'current-password');
   }
 }
 
@@ -127,25 +137,30 @@ export async function confirmSignIn() {
       return;
     }
     state.playerProfile = data.profile;
-    if (state.authMode === 'register') {
-      state.chatHistory.push({ name: null, system: `${name} registered! WARRIOR rank.` });
-    } else {
-      state.chatHistory.push({ name: null, system: `Welcome back, ${name}!` });
-    }
-
     state.myName = name;
     state.signedIn = true;
     localStorage.setItem('nobd_username', name.toLowerCase());
 
+    // Stash the browser-scoped SurrealDB JWT so subsequent REST/WS calls
+    // run under the player's $auth record access instead of the shared
+    // viewer fallback. Legacy accounts without pass_hash don't get a token
+    // back from the relay — fall through to viewer in that case.
+    if (data.db_token) {
+      state.dbToken = data.db_token;
+      localStorage.setItem('nobd_db_token', data.db_token);
+      resetAuthCache();       // drop stale viewer REST token
+      upgradeAuth().catch(() => {}); // re-auth the existing live-query WS
+    }
+
+    if (state.authMode === 'register') {
+      systemMessage(`${name} registered! WARRIOR rank.`);
+    } else {
+      systemMessage(`Welcome back, ${name}!`);
+    }
+
     showUserBadge();
-    updateStickButtons();
     updateCabinetControls();
     closeSignIn();
-    renderChat();
-
-    if (state.ws?.readyState === 1) {
-      state.ws.send(JSON.stringify({ type: 'check_stick', username: name.toLowerCase() }));
-    }
   } catch (e) {
     showAuthError('CONNECTION ERROR: ' + (e.message || 'UNKNOWN'));
     console.error('[auth]', e);
@@ -162,10 +177,8 @@ export async function autoSignIn(username) {
   state.signedIn = true;
 
   showUserBadge();
-  updateStickButtons();
   updateCabinetControls();
-  state.chatHistory.push({ name: null, system: `${state.myName} has entered the arcade!` });
-  renderChat();
+  systemMessage(`${state.myName} has entered the arcade!`);
 
   await surrealRegister(state.myName);
   surrealUpdateLastSeen(state.myName);

@@ -243,6 +243,146 @@ body {
   flex-shrink: 0;
 }
 
+/* === INLINE PLAYER CARD (under Hall of Fame) === */
+.player-card-wrap {
+  border-top: 2px solid #1a1a2e;
+}
+.player-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.player-card-close {
+  background: transparent;
+  border: none;
+  color: var(--gray);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 8px;
+  line-height: 1;
+}
+.player-card-close:hover { color: var(--hot-red); }
+
+.player-card {
+  padding: 12px;
+  /* 3D flip setup */
+  perspective: 1000px;
+  min-height: 280px;
+}
+.player-card-inner {
+  position: relative;
+  width: 100%;
+  min-height: 260px;
+  transform-style: preserve-3d;
+  transition: transform 0.6s cubic-bezier(0.4, 0.0, 0.2, 1);
+  cursor: pointer;
+}
+.player-card.flipped .player-card-inner {
+  transform: rotateY(180deg);
+}
+.player-card-face {
+  position: absolute;
+  inset: 0;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid #1a1a2e;
+  border-radius: 4px;
+}
+.player-card-face.back {
+  transform: rotateY(180deg);
+}
+
+.pc-name {
+  font-size: 11px;
+  color: var(--gold);
+  text-align: center;
+  margin-bottom: 4px;
+  letter-spacing: 1px;
+}
+.pc-rank {
+  font-size: 7px;
+  color: var(--neon-cyan);
+  text-align: center;
+  margin-bottom: 12px;
+  letter-spacing: 2px;
+}
+.pc-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+  flex: 1;
+}
+.pc-stat {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  border-bottom: 1px dotted #1a1a2e;
+  padding-bottom: 3px;
+}
+.pc-stat-label {
+  font-size: 6px;
+  color: var(--gray);
+  letter-spacing: 1px;
+}
+.pc-stat-val {
+  font-size: 9px;
+  color: var(--white);
+}
+.pc-flip-hint {
+  font-size: 6px;
+  color: var(--gray);
+  text-align: center;
+  margin-top: 8px;
+  opacity: 0.6;
+  letter-spacing: 1px;
+}
+
+.pc-back-label {
+  font-size: 6px;
+  color: var(--neon-cyan);
+  letter-spacing: 2px;
+  margin-top: 10px;
+  margin-bottom: 6px;
+}
+.pc-back-label:first-of-type { margin-top: 0; }
+.pc-chars {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pc-char-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 7px;
+}
+.pc-char-row .pc-char-name { color: var(--white); }
+.pc-char-row .pc-char-games { color: var(--gray); }
+.pc-char-empty {
+  font-size: 7px;
+  color: var(--gray);
+  text-align: center;
+  padding: 10px 0;
+  font-style: italic;
+}
+.pc-winrate {
+  font-size: 14px;
+  color: var(--gold);
+  text-align: center;
+  letter-spacing: 2px;
+}
+
+/* Clickable player-name cues */
+.np-name, .queue-name, .lb-entry {
+  cursor: pointer;
+}
+.np-name:hover, .queue-name:hover {
+  color: var(--gold);
+}
+
 /* === CENTER — THE CABINET === */
 .cabinet-area {
   display: flex;
@@ -382,52 +522,43 @@ body {
 .hud-player {
   text-align: center;
   min-width: 120px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .hud-player .hud-name {
-  font-size: 9px;
-  margin-bottom: 4px;
+  font-size: 11px;
+  margin-bottom: 2px;
+  text-shadow: 2px 2px 0 #000;
 }
 
 .hud-player.p1 .hud-name { color: var(--hot-blue); }
 .hud-player.p2 .hud-name { color: var(--hot-red); }
 
-.health-bar-bg {
-  width: 200px;
-  height: 12px;
-  background: #1a1a1a;
-  border: 1px solid #444;
-  position: relative;
-  overflow: hidden;
+.hud-stat {
+  font-size: 7px;
+  color: var(--gray);
+  letter-spacing: 0.5px;
+  text-shadow: 1px 1px 0 #000;
 }
 
-.health-bar {
-  height: 100%;
-  width: 100%;
-  transform-origin: right;  /* P1 drains from left */
-  transform: scaleX(1);
-  transition: transform 0.2s ease-out;
-  will-change: transform;
+.hud-streak {
+  color: var(--sf2-yellow);
 }
+.hud-streak:empty { display: none; }
 
-.p1 .health-bar {
-  background: linear-gradient(90deg, #1e90ff, #00bfff);
-  transform-origin: right;
-}
-.p2 .health-bar {
-  background: linear-gradient(90deg, #ff3030, #ff6060);
-  transform-origin: left;  /* P2 drains from right */
-}
-
-.streaming .health-bar { transition: none !important; }
-
-.health-bar-bg::after {
-  content: '';
-  position: absolute;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background: linear-gradient(180deg, rgba(255,255,255,0.2) 0%, transparent 50%, rgba(0,0,0,0.2) 100%);
-  pointer-events: none;
-}
+/* RTT color tiers per project_overkill_latency:
+     <20ms  green   (LAN / very-low-latency)
+     20-49  yellow  (typical home WAN)
+     50+    red     (high latency, will feel sluggish)
+   The tier-* classes are also reused by the match-end overlay's
+   #resultPing stat value, so they're scoped globally. */
+.hud-ping { font-variant-numeric: tabular-nums; }
+.tier-green   { color: var(--neon-green) !important; }
+.tier-yellow  { color: var(--sf2-yellow) !important; }
+.tier-red     { color: var(--hot-red)    !important; }
+.tier-unknown { color: var(--gray)       !important; }
 
 .hud-center {
   text-align: center;
@@ -560,9 +691,29 @@ body {
 .result-title {
   font-size: 20px;
   color: var(--hot-red);
-  margin-bottom: 20px;
+  margin-bottom: 12px;
   text-shadow: 2px 2px 0 #000;
   animation: result-flash 0.5s ease-out;
+}
+
+/* PERFECT / OCV / COMEBACK / CLUTCH flash badge — only visible when one of
+   the match-quality flags from the server is true. Hidden by default so the
+   overlay collapses cleanly for vanilla wins. */
+.result-badge {
+  font-size: 13px;
+  color: var(--neon-green);
+  letter-spacing: 3px;
+  margin-bottom: 16px;
+  text-shadow: 0 0 8px var(--neon-green), 2px 2px 0 #000;
+  animation: badge-pulse 0.6s ease-out;
+  display: none;
+}
+.result-badge.active { display: block; }
+
+@keyframes badge-pulse {
+  0%   { transform: scale(0.5); opacity: 0; }
+  50%  { transform: scale(1.3); opacity: 1; }
+  100% { transform: scale(1);   opacity: 1; }
 }
 
 @keyframes result-flash {
@@ -572,7 +723,7 @@ body {
 
 .result-stats {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   gap: 8px;
   font-size: 7px;
   margin-bottom: 20px;
@@ -690,6 +841,14 @@ body {
   font-size: 7px;
   color: var(--gray);
 }
+.np-player .np-record.grace {
+  color: var(--sf2-yellow);
+  animation: grace-pulse 1s ease-in-out infinite;
+}
+@keyframes grace-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
 
 .np-vs-text {
   font-size: 16px;
@@ -752,6 +911,21 @@ body {
   font-size: 9px;
 }
 
+/* RECLAIM/REJOIN visual treatment — make it obvious the user has an
+ * abandoned slot waiting for them. Cyan glow pulse so it stands out
+ * from the regular gold I GOT NEXT button. */
+.btn-got-next.reclaim {
+  background: linear-gradient(180deg, #052028 0%, #0a0a18 100%);
+  color: var(--neon-cyan);
+  border-color: var(--neon-cyan);
+  text-shadow: 0 0 8px rgba(0,229,255,0.6);
+  animation: reclaim-pulse 1.5s ease-in-out infinite;
+}
+@keyframes reclaim-pulse {
+  0%, 100% { box-shadow: 0 0 5px rgba(0,229,255,0.3); }
+  50%      { box-shadow: 0 0 25px rgba(0,229,255,0.7); }
+}
+
 .btn-leave-queue {
   display: none;
   width: 100%;
@@ -768,44 +942,18 @@ body {
 
 .btn-leave-queue:hover { background: rgba(255,0,0,0.1); }
 
-/* SKIN PICKER BUTTON */
-.btn-skins {
-  display: none;
-  width: 100%;
-  padding: 10px;
-  margin-top: 6px;
-  font-family: 'Press Start 2P', monospace;
-  font-size: 8px;
-  background: linear-gradient(180deg, #6a1b9a 0%, #4a0e6b 100%);
-  color: #fff;
-  border: 2px solid #9c27b0;
-  cursor: pointer;
-  letter-spacing: 1px;
-  transition: all 0.2s;
-}
-.btn-skins:hover { transform: scale(1.02); box-shadow: 0 0 12px rgba(156,39,176,0.4); }
-
-/* SKIN MODAL */
-.skin-modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:9999; justify-content:center; align-items:center; }
-.skin-modal.open { display:flex; }
-.skin-modal-box { background:#16213e; border-radius:10px; padding:16px; width:90%; max-width:520px; max-height:80vh; overflow-y:auto; border:2px solid #4fc3f7; }
-.skin-modal h3 { color:#4fc3f7; font-family:'Press Start 2P',monospace; font-size:10px; margin-bottom:10px; }
-.skin-modal .close-btn { float:right; background:none; border:none; color:#ef5350; font-size:18px; cursor:pointer; }
-.skin-char-tabs { display:flex; gap:4px; margin-bottom:10px; flex-wrap:wrap; }
-.skin-char-tab { padding:6px 10px; font-family:'Press Start 2P',monospace; font-size:7px; background:#0f3460; border:1px solid #2a3a5c; color:#aaa; cursor:pointer; border-radius:4px; }
-.skin-char-tab.active { background:#1a4a80; color:#4fc3f7; border-color:#4fc3f7; }
-.skin-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:4px; max-height:300px; overflow-y:auto; }
-.skin-card { background:#0f3460; border-radius:4px; padding:6px; cursor:pointer; border:2px solid transparent; transition:border-color 0.15s; }
-.skin-card:hover { border-color:#4fc3f7; }
-.skin-card .palette-bar { display:flex; height:14px; border-radius:2px; overflow:hidden; margin-bottom:3px; }
-.skin-card .palette-bar span { flex:1; }
-.skin-card .author { font-size:6px; color:#888; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-family:'Press Start 2P',monospace; }
-
 /* THE LINE (queue) */
 .queue-section {
-  flex: 1;
+  /* Fixed bound so the queue stays visible above the chat. flex:1 alone
+   * loses the fight against .chat-messages min-height:180px and ends up
+   * scrolled into a thin strip behind the chat. Give it a guaranteed
+   * minimum and a reasonable cap so it scrolls when >6 entries. */
+  flex: 0 0 auto;
+  min-height: 140px;
+  max-height: 240px;
   overflow-y: auto;
   padding: 0;
+  border-bottom: 1px solid #1a1a2e;
 }
 
 .queue-header {
@@ -917,11 +1065,22 @@ body {
 }
 
 .chat-messages {
-  flex: 1;
+  /* Fixed bound so the chat box can't grow with its contents.
+   * flex:1 alone doesn't bound without a concrete ancestor height,
+   * and we have min-height:100vh on body which defeats that. */
+  flex: 1 1 auto;
+  max-height: 320px;
+  min-height: 120px;
   overflow-y: auto;
   padding: 8px 16px;
   font-size: 8px;
   line-height: 1.8;
+  /* Anchor scrolling to the BOTTOM — new messages pushed in via
+   * insertAdjacentHTML('beforeend', ...) stay visible automatically.
+   * When the user scrolls up to read history, the browser pins them
+   * and new messages don't yank them back down.
+   * Supported in Chrome 77+, Firefox 131+. */
+  overflow-anchor: auto;
 }
 
 .chat-msg {
@@ -976,114 +1135,275 @@ body {
 .modal-overlay {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(0,0,0,0.8);
+  background: rgba(0,0,0,0.85);
+  /* Subtle CRT scanline backdrop so the modal sits on a "screen", not a flat
+   * black overlay. Pure CSS, ~free. */
+  background-image:
+    linear-gradient(180deg, rgba(0,0,0,0.85), rgba(0,0,0,0.85)),
+    repeating-linear-gradient(0deg, rgba(0,229,255,0.02) 0 1px, transparent 1px 3px);
   display: none;
   align-items: center;
   justify-content: center;
   z-index: 1000;
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
 }
 
-.modal-overlay.active { display: flex; }
+.modal-overlay.active { display: flex; animation: modalFadeIn 180ms ease-out; }
+
+@keyframes modalFadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes modalPopIn {
+  from { transform: scale(0.92); opacity: 0; }
+  to   { transform: scale(1);    opacity: 1; }
+}
 
 .modal-box {
   background: var(--bg-panel);
-  border: 3px solid var(--gold-dim);
+  /* Double-bezel: gold outer + neon-cyan inset, like a cabinet marquee
+   * frame. The box-shadow stack draws the inner ring without an extra div. */
+  border: 3px solid var(--gold);
+  box-shadow:
+    0 0 0 2px #000 inset,
+    0 0 0 3px var(--gold-dim) inset,
+    0 0 40px rgba(255,215,0,0.25),
+    0 0 80px rgba(0,229,255,0.08);
   padding: 0;
-  width: 340px;
-  max-width: 90vw;
+  width: 460px;
+  max-width: 92vw;
+  animation: modalPopIn 220ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+  position: relative;
+  overflow: hidden;
 }
 
 .modal-header {
-  background: linear-gradient(180deg, var(--sf2-blue) 0%, #0d1530 100%);
-  padding: 12px 16px;
+  background:
+    linear-gradient(180deg, var(--sf2-blue) 0%, #0a1024 100%),
+    linear-gradient(180deg, transparent 0%, transparent 100%);
+  padding: 18px 22px 14px;
   border-bottom: 2px solid var(--gold-dim);
   display: flex;
   justify-content: space-between;
   align-items: center;
+  position: relative;
+  /* Marquee scanlines on the header strip */
+}
+.modal-header::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(255,215,0,0.05) 0 1px,
+    transparent 1px 3px
+  );
+  pointer-events: none;
 }
 
 .modal-title {
-  font-size: 10px;
+  font-size: 13px;
   color: var(--gold);
-  letter-spacing: 2px;
+  letter-spacing: 3px;
+  text-shadow: 0 0 8px rgba(255,215,0,0.6), 0 2px 0 #000;
+  position: relative;
+  z-index: 1;
 }
 
 .modal-close {
   background: none;
   border: none;
   color: var(--gray);
-  font-size: 14px;
+  font-size: 18px;
   cursor: pointer;
   font-family: 'Press Start 2P', monospace;
+  padding: 4px 8px;
+  transition: all 0.15s;
+  position: relative;
+  z-index: 1;
+}
+.modal-close:hover {
+  color: var(--hot-red);
+  text-shadow: 0 0 8px var(--hot-red);
+  transform: scale(1.2);
 }
 
-.modal-close:hover { color: var(--hot-red); }
-
 .modal-body {
-  padding: 20px;
+  padding: 24px 28px 22px;
+  position: relative;
+}
+/* Subtle scanline overlay on the body, slightly brighter than the backdrop */
+.modal-body::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(255,255,255,0.015) 0 1px,
+    transparent 1px 4px
+  );
+  pointer-events: none;
 }
 
 .modal-field {
-  margin-bottom: 16px;
+  margin-bottom: 18px;
+  position: relative;
 }
 
 .modal-label {
   display: block;
-  font-size: 7px;
-  color: var(--gray);
-  margin-bottom: 6px;
-  letter-spacing: 1px;
+  font-size: 8px;
+  color: var(--neon-cyan);
+  margin-bottom: 8px;
+  letter-spacing: 2px;
+  text-shadow: 0 0 6px rgba(0,229,255,0.4);
 }
 
 .modal-input {
   width: 100%;
-  padding: 10px 12px;
+  padding: 14px 14px;
   font-family: 'Press Start 2P', monospace;
-  font-size: 9px;
-  background: #080810;
-  color: var(--white);
-  border: 2px solid #333;
+  font-size: 11px;
+  background: #060610;
+  color: #fff;
+  border: 2px solid #2a2a44;
   outline: none;
+  letter-spacing: 1px;
+  transition: all 0.15s;
+  box-shadow: 0 2px 0 #000 inset;
+}
+.modal-input::placeholder {
+  color: #3a3a55;
+  font-size: 10px;
+}
+.modal-input:focus {
+  border-color: var(--gold);
+  background: #0a0a18;
+  box-shadow:
+    0 2px 0 #000 inset,
+    0 0 12px rgba(255,215,0,0.25);
 }
 
-.modal-input:focus { border-color: var(--gold-dim); }
-
 .modal-avatars {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 6px;
 }
 
 .avatar-pick {
-  width: 36px;
-  height: 36px;
-  font-size: 20px;
+  aspect-ratio: 1 / 1;
+  font-size: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: rgba(255,255,255,0.03);
-  border: 2px solid #333;
+  border: 2px solid #2a2a44;
   cursor: pointer;
   transition: all 0.15s;
 }
 
-.avatar-pick:hover { border-color: var(--gold-dim); transform: scale(1.1); }
-.avatar-pick.selected { border-color: var(--gold); background: rgba(255,215,0,0.1); }
+.avatar-pick:hover {
+  border-color: var(--gold-dim);
+  background: rgba(255,215,0,0.06);
+  transform: scale(1.08);
+}
+.avatar-pick.selected {
+  border-color: var(--gold);
+  background: rgba(255,215,0,0.15);
+  box-shadow: 0 0 10px rgba(255,215,0,0.4);
+}
 
 .btn-sign-in {
   width: 100%;
-  padding: 12px;
+  padding: 16px;
   font-family: 'Press Start 2P', monospace;
-  font-size: 9px;
+  font-size: 12px;
   background: linear-gradient(180deg, var(--sf2-yellow) 0%, var(--sf2-orange) 100%);
   color: #000;
   border: 2px solid var(--gold);
   cursor: pointer;
-  letter-spacing: 2px;
-  margin-top: 8px;
+  letter-spacing: 3px;
+  margin-top: 10px;
+  text-shadow: 0 1px 0 rgba(255,255,255,0.3);
+  box-shadow: 0 4px 0 #4a2400, 0 0 0 1px #000 inset;
+  transition: all 0.1s;
+}
+.btn-sign-in:hover {
+  box-shadow: 0 4px 0 #4a2400, 0 0 20px rgba(255,215,0,0.5), 0 0 0 1px #000 inset;
+  filter: brightness(1.1);
+}
+.btn-sign-in:active {
+  transform: translateY(2px);
+  box-shadow: 0 2px 0 #4a2400, 0 0 0 1px #000 inset;
+}
+.btn-sign-in:disabled {
+  filter: grayscale(0.7) brightness(0.6);
+  cursor: not-allowed;
 }
 
-.btn-sign-in:hover { box-shadow: 0 0 15px rgba(255,215,0,0.3); }
+/* "OR" divider between password form and the (future) Web3 button */
+.modal-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 22px 0 14px;
+  font-size: 7px;
+  color: var(--gray);
+  letter-spacing: 2px;
+}
+.modal-divider::before,
+.modal-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, #2a2a44, transparent);
+}
+
+/* Web3 placeholder — disabled now, ready when we wire it up */
+.btn-web3 {
+  width: 100%;
+  padding: 14px;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 9px;
+  background: linear-gradient(180deg, #1a0a2e 0%, #0d0418 100%);
+  color: var(--neon-pink);
+  border: 2px solid var(--neon-pink);
+  cursor: not-allowed;
+  letter-spacing: 2px;
+  text-shadow: 0 0 6px rgba(255,0,102,0.6);
+  opacity: 0.55;
+  transition: all 0.15s;
+}
+.btn-web3:hover {
+  opacity: 0.75;
+  box-shadow: 0 0 14px rgba(255,0,102,0.3);
+}
+.btn-web3 .coming-soon {
+  display: block;
+  font-size: 6px;
+  color: var(--gray);
+  margin-top: 4px;
+  letter-spacing: 1px;
+  text-shadow: none;
+}
+
+.modal-toggle-link {
+  background: none;
+  border: none;
+  color: var(--neon-cyan);
+  font-family: 'Press Start 2P', monospace;
+  font-size: 7px;
+  cursor: pointer;
+  letter-spacing: 1px;
+  padding: 6px 12px;
+  text-shadow: 0 0 6px rgba(0,229,255,0.4);
+  transition: all 0.15s;
+}
+.modal-toggle-link:hover {
+  color: #fff;
+  text-shadow: 0 0 10px var(--neon-cyan);
+}
 
 /* Sign in button (top right) */
 .top-signin {
@@ -1373,12 +1693,16 @@ body {
 .settings-panel .preset-btn:hover { background: rgba(255,215,0,0.1); }
 
 /* === STREAMING MODE — pause ALL non-essential animations + hide pseudo-elements === */
+/* NOTE: .streaming .chat-msg deliberately NOT in this list. Chat fade-in is a
+ * one-shot 0.3s animation that fires once per new message (~once every few
+ * seconds at most). Pausing it makes new chat rows stuck at opacity: 0 — i.e.
+ * invisible — because the keyframe never advances past `from`. The perf cost
+ * of letting it run is negligible. */
 .streaming .marquee-banner::before,
 .streaming .cabinet-marquee::after,
 .streaming .btn-got-next::before,
 .streaming .current-king,
 .streaming .hud-combo.visible,
-.streaming .chat-msg,
 .streaming .ticker-content,
 .streaming .match-results .result-title,
 .streaming .challenger-overlay .challenger-text {
@@ -1392,24 +1716,195 @@ body {
 
 /* conn-status removed — info lives in diagnostics panel now */
 
-/* === DIAGNOSTICS OVERLAY === */
-.diag-overlay {
-  display: none;
+/* === DIAGNOSTICS MODAL (Phase B redesign — closeable, tabbed, readable) === */
+.diag-modal {
+  display: none;  /* shown via .open which sets display: flex */
   position: absolute;
   top: 8px; right: 8px;
+  width: 420px;
+  max-height: calc(100% - 16px);
   z-index: 22;
-  background: rgba(0,0,0,0.85);
-  color: #0f0;
+  background: rgba(10,10,20,0.97);
+  border: 2px solid var(--neon-green);
+  border-radius: 4px;
   font-family: monospace;
-  font-size: 9px;
-  padding: 8px;
-  border: 1px solid #333;
-  white-space: pre;
-  min-width: 220px;
-  pointer-events: none;
-  line-height: 1.5;
+  color: #ccc;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 0 24px rgba(57,255,20,0.25);
 }
-.diag-overlay.open { display: block; }
+.diag-modal.open { display: flex; }
+
+.diag-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: rgba(57,255,20,0.08);
+  border-bottom: 1px solid #333;
+  flex-shrink: 0;
+}
+.diag-modal-title {
+  color: var(--neon-green);
+  font-size: 11px;
+  letter-spacing: 1px;
+  font-weight: bold;
+}
+.diag-modal-close {
+  background: transparent;
+  border: 1px solid #444;
+  color: #aaa;
+  width: 22px; height: 22px;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 3px;
+  display: flex; align-items: center; justify-content: center;
+  font-family: sans-serif;
+  font-weight: bold;
+}
+.diag-modal-close:hover { color: var(--neon-pink); border-color: var(--neon-pink); }
+
+.diag-modal-tabs {
+  display: flex;
+  background: rgba(0,0,0,0.4);
+  border-bottom: 1px solid #333;
+  flex-shrink: 0;
+}
+.diag-tab {
+  flex: 1;
+  background: transparent;
+  border: none;
+  border-right: 1px solid #222;
+  color: #888;
+  font-family: monospace;
+  font-size: 10px;
+  letter-spacing: 1px;
+  padding: 8px 0;
+  cursor: pointer;
+  font-weight: bold;
+  transition: color 0.15s, background 0.15s;
+}
+.diag-tab:last-child { border-right: none; }
+.diag-tab:hover { color: #ccc; background: rgba(255,255,255,0.04); }
+.diag-tab.active {
+  color: var(--neon-green);
+  background: rgba(57,255,20,0.08);
+  box-shadow: inset 0 -2px 0 var(--neon-green);
+}
+
+.diag-modal-body {
+  padding: 12px 14px;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  font-size: 11px;
+  line-height: 1.55;
+}
+.diag-tab-panel {
+  display: none;
+  white-space: pre;  /* monospace ASCII tables look right */
+}
+.diag-tab-panel.active { display: block; }
+
+/* Section headers inside panels */
+.diag-tab-panel .diag-section {
+  color: var(--neon-cyan);
+  font-size: 10px;
+  letter-spacing: 1px;
+  margin-top: 12px;
+  margin-bottom: 4px;
+  padding-bottom: 2px;
+  border-bottom: 1px solid #222;
+  font-weight: bold;
+}
+.diag-tab-panel .diag-section:first-child { margin-top: 0; }
+
+/* Plain-English help blurb under section headers — non-mono, wraps naturally */
+.diag-tab-panel .diag-help {
+  color: #888;
+  font-size: 10px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  line-height: 1.5;
+  margin: 4px 0 6px 0;
+  white-space: normal;
+}
+
+/* Monospace data block for the actual numbers */
+.diag-tab-panel .diag-data {
+  color: var(--neon-green);
+  font-family: monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  margin: 4px 0 8px 0;
+  padding: 4px 8px;
+  background: rgba(0,0,0,0.4);
+  border-left: 2px solid var(--neon-green);
+  white-space: pre;
+}
+
+/* Form controls inside panels (for the LATENCY tab and future tweakers) */
+.diag-tab-panel label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+  color: #ccc;
+  font-size: 10px;
+  cursor: pointer;
+}
+.diag-tab-panel label .label-text { flex: 1; }
+.diag-tab-panel select,
+.diag-tab-panel input[type=range] {
+  background: #111;
+  color: var(--neon-cyan);
+  border: 1px solid #333;
+  font-family: monospace;
+  font-size: 10px;
+  padding: 3px 6px;
+}
+.diag-tab-panel input[type=range] { flex: 1; min-width: 100px; }
+.diag-tab-panel .slider-val {
+  color: var(--neon-cyan);
+  min-width: 50px;
+  text-align: right;
+  font-size: 10px;
+}
+.diag-tab-panel .policy-row {
+  display: flex; gap: 8px; margin: 6px 0;
+}
+.diag-tab-panel .policy-btn {
+  flex: 1;
+  padding: 6px 8px;
+  background: rgba(255,255,255,0.04);
+  color: #aaa;
+  border: 1px solid #333;
+  font-family: monospace;
+  font-size: 10px;
+  cursor: pointer;
+  letter-spacing: 0.5px;
+}
+.diag-tab-panel .policy-btn.active {
+  background: rgba(57,255,20,0.12);
+  color: var(--neon-green);
+  border-color: var(--neon-green);
+}
+.diag-tab-panel .policy-btn:hover { background: rgba(255,255,255,0.08); }
+.diag-tab-panel .policy-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.diag-modal-footer {
+  padding: 6px 12px;
+  background: rgba(0,0,0,0.4);
+  border-top: 1px solid #222;
+  flex-shrink: 0;
+}
+.diag-hint {
+  color: #666;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+}
 
 .diag-toggle {
   position: absolute;
@@ -1637,6 +2132,7 @@ body {
 ::-webkit-scrollbar-track { background: var(--bg-dark); }
 ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #555; }
+
 /* ============================================================
    EMBED MODE — used by /overlord live preview iframe.
    Activated by ?embed=1 in the URL.
@@ -1723,50 +2219,6 @@ body.embed-mode #game-canvas {
   margin: 0 !important;
   padding: 0 !important;
 }
-/* ============================================================
-<script>
-// Apply embed mode BEFORE the main app boots so spectator UI never
-// flashes for a frame. Triggered by ?embed=1 in the URL — used by
-// the /overlord admin dashboard's live preview iframe.
-if (new URLSearchParams(window.location.search).get('embed') === '1') {
-  document.documentElement.classList.add('embed-mode-html');
-  document.addEventListener('DOMContentLoaded', () => {
-    document.body.classList.add('embed-mode');
-  });
-  // If body is already parsed by the time this script runs, apply now too.
-  if (document.body) document.body.classList.add('embed-mode');
-}
-</script>
-   EMBED MODE — used by /overlord live preview iframe.
-   Activated by ?embed=1 in the URL. Hides all spectator UI
-   (chat, queue, leaderboard, top bar, marquee) and centers the
-   game canvas full-viewport so admin operators can see exactly
-   what the cab is rendering with zero distractions.
-   ============================================================ */
-body.embed-mode {
-  background: #000 !important;
-  overflow: hidden !important;
-}
-body.embed-mode > *:not(.screen-bezel-wrapper):not(#embedHost) { display: none !important; }
-body.embed-mode .top-signin,
-body.embed-mode .marquee-banner,
-body.embed-mode .leaderboard-panel,
-body.embed-mode .chat-panel,
-body.embed-mode .queue-panel,
-body.embed-mode .player-cards-panel,
-body.embed-mode .ticker,
-body.embed-mode .signin-modal,
-body.embed-mode .profile-modal,
-body.embed-mode .settings-modal,
-body.embed-mode #signInModal,
-body.embed-mode #profileModal,
-body.embed-mode #settingsModal,
-body.embed-mode .arcade-cabinet > *:not(.screen-bezel) { display: none !important; }
-body.embed-mode .arcade-cabinet,
-body.embed-mode .cabinet-wrapper { background: #000 !important; box-shadow: none !important; padding: 0 !important; margin: 0 !important; border: none !important; }
-body.embed-mode .screen-bezel { border: none !important; box-shadow: none !important; padding: 0 !important; margin: 0 !important; background: #000 !important; }
-body.embed-mode #game-screen { border: none !important; box-shadow: none !important; padding: 0 !important; margin: 0 !important; background: #000 !important; width: 100vw !important; height: 100vh !important; display: flex !important; align-items: center !important; justify-content: center !important; }
-body.embed-mode #game-canvas { max-width: 100vw !important; max-height: 100vh !important; width: auto !important; height: auto !important; }
 </style>
 <script>
 // Apply embed mode BEFORE the main app boots so spectator UI never
@@ -1823,63 +2275,8 @@ if (new URLSearchParams(window.location.search).get('embed') === '1') {
 <!-- MAIN 3-COLUMN LAYOUT -->
 <div class="main-layout">
 
-  <!-- LEFT: LIVE ARCADE + HALL OF FAME -->
+  <!-- LEFT: HALL OF FAME + INLINE PLAYER CARD -->
   <div class="sidebar-left">
-    <div class="panel-header">&#x1F3AE; LIVE ARCADE</div>
-
-    <!-- Now Playing -->
-    <div class="now-playing">
-      <div class="np-header">&#x26A1; NOW PLAYING</div>
-      <div class="np-vs">
-        <div class="np-player p1">
-          <div class="np-label">P1</div>
-          <div class="np-name" id="npP1">OPEN</div>
-          <div class="np-record" id="npP1Record">PRESS START</div>
-        </div>
-        <div class="np-vs-text">VS</div>
-        <div class="np-player p2">
-          <div class="np-label">P2</div>
-          <div class="np-name" id="npP2">OPEN</div>
-          <div class="np-record" id="npP2Record">PRESS START</div>
-        </div>
-      </div>
-    </div>
-
-    <!-- I GOT NEXT -->
-    <div class="got-next-section">
-      <button class="btn-got-next" id="gotNextBtn" onclick="gotNext()">
-        &#x1FA99; I GOT NEXT
-      </button>
-      <button class="btn-leave-queue" id="leaveQueueBtn" onclick="leaveQueue()">
-        &#x274C; LEAVE LINE
-      </button>
-      <button class="btn-skins" id="skinBtn" onclick="openSkinPicker()">
-        &#x1F3A8; CHANGE SKINS
-      </button>
-      <button class="btn-leave-queue" id="leaveGameBtn" onclick="leaveGame()" style="display:none;color:var(--hot-red);border-color:var(--hot-red);">
-        &#x1F6AA; DISCONNECT
-      </button>
-    </div>
-
-    <!-- Skin Picker Modal -->
-    <div class="skin-modal" id="skinModal">
-      <div class="skin-modal-box">
-        <button class="close-btn" onclick="closeSkinPicker()">&times;</button>
-        <h3>&#x1F3A8; CHANGE SKINS</h3>
-        <div class="skin-char-tabs" id="skinCharTabs"></div>
-        <div class="skin-grid" id="skinGrid"></div>
-        <div id="skinStatus" style="font-size:7px;color:#999;margin-top:6px;font-family:'Press Start 2P',monospace"></div>
-      </div>
-    </div>
-
-    <!-- The Queue -->
-    <div class="queue-section">
-      <div class="queue-header">NEXT UP</div>
-      <div class="queue-list" id="queueList">
-        <!-- filled by JS -->
-      </div>
-    </div>
-
     <!-- Hall of Fame -->
     <div class="panel-header">&#x1F3C6; HALL OF FAME</div>
     <div class="leaderboard-tabs">
@@ -1892,6 +2289,48 @@ if (new URLSearchParams(window.location.search).get('embed') === '1') {
     </div>
     <div class="leaderboard-list" id="leaderboardList">
       <!-- filled by JS -->
+    </div>
+
+    <!-- Inline Player Card — flips between stats (front) and char usage (back).
+         Populated by profile.mjs showPlayerCard(). Starts with the top player
+         from a random leaderboard category on page load. Click a leaderboard
+         entry (or a slot name, or a queue name) to change who it shows. -->
+    <div class="player-card-wrap" id="playerCardWrap">
+      <div class="panel-header player-card-header">
+        <span>&#x1F464; PLAYER CARD</span>
+        <button class="player-card-close" id="playerCardClose" title="Close" onclick="closePlayerCard()">&times;</button>
+      </div>
+      <div class="player-card" id="playerCard">
+        <div class="player-card-inner" id="playerCardInner">
+          <!-- FRONT: stats -->
+          <div class="player-card-face front">
+            <div class="pc-name" id="pcName">—</div>
+            <div class="pc-rank" id="pcRank">UNRANKED</div>
+            <div class="pc-stats">
+              <div class="pc-stat"><div class="pc-stat-label">ELO</div><div class="pc-stat-val" id="pcElo">1000</div></div>
+              <div class="pc-stat"><div class="pc-stat-label">W-L</div><div class="pc-stat-val" id="pcRecord">0-0</div></div>
+              <div class="pc-stat"><div class="pc-stat-label">STREAK</div><div class="pc-stat-val" id="pcStreak">0</div></div>
+              <div class="pc-stat"><div class="pc-stat-label">BEST</div><div class="pc-stat-val" id="pcBestStreak">0</div></div>
+              <div class="pc-stat"><div class="pc-stat-label">COMBO</div><div class="pc-stat-val" id="pcCombo">0</div></div>
+              <div class="pc-stat"><div class="pc-stat-label">PERFECT</div><div class="pc-stat-val" id="pcPerfects">0</div></div>
+              <div class="pc-stat"><div class="pc-stat-label">OCV</div><div class="pc-stat-val" id="pcOcv">0</div></div>
+              <div class="pc-stat"><div class="pc-stat-label">MATCHES</div><div class="pc-stat-val" id="pcMatches">0</div></div>
+            </div>
+            <div class="pc-flip-hint">click to flip →</div>
+          </div>
+          <!-- BACK: character usage + win rates -->
+          <div class="player-card-face back">
+            <div class="pc-name" id="pcNameBack">—</div>
+            <div class="pc-back-label">MAIN TEAM</div>
+            <div class="pc-chars" id="pcChars">
+              <div class="pc-char-empty">no matches yet</div>
+            </div>
+            <div class="pc-back-label">WIN RATE</div>
+            <div class="pc-winrate" id="pcWinrate">—</div>
+            <div class="pc-flip-hint">← click to flip</div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1906,78 +2345,55 @@ if (new URLSearchParams(window.location.search).get('embed') === '1') {
           <!-- WASM renderer canvas -->
           <canvas id="game-canvas" width="640" height="480"></canvas>
 
-          <!-- Diagnostics toggle -->
-          <button class="diag-toggle" id="diagToggle" onclick="toggleDiag()" title="Diagnostics">&#x2139;</button>
-
-          <!-- Diagnostics overlay -->
-          <div class="diag-overlay" id="diagOverlay"></div>
-
           <!-- Player name overlay -->
           <div class="name-overlay" id="nameOverlay"></div>
 
-          <!-- Settings gear -->
-          <button class="settings-gear" id="settingsGear" onclick="toggleSettings()" title="Video Settings">&#x2699;</button>
+          <!-- Unified settings/diagnostics gear — one icon, one modal,
+               four tabs (Graphics / Stats / Latency / Input). The old
+               separate i-button and settings-panel were merged here. -->
+          <button class="settings-gear" id="settingsGear" onclick="toggleDiag()" title="Settings &amp; Diagnostics">&#x2699;</button>
 
-          <!-- Settings panel -->
-          <div class="settings-panel" id="settingsPanel">
-            <h4>QUALITY</h4>
-            <label>Resolution:
-              <select id="opt_resolution" onchange="setOpt(0, this.value)">
-                <option value="480" selected>480p (Native)</option>
-                <option value="720">720p</option>
-                <option value="960">960p</option>
-                <option value="1440">1440p</option>
-                <option value="1920">1080p (4x)</option>
-              </select>
-            </label>
-            <label>Aniso Filter:
-              <select id="opt_aniso" onchange="setOpt(5, this.value)">
-                <option value="1" selected>Off</option>
-                <option value="2">2x</option>
-                <option value="4">4x</option>
-                <option value="8">8x</option>
-                <option value="16">16x</option>
-              </select>
-            </label>
-            <label>Tex Filter:
-              <select id="opt_texfilter" onchange="setOpt(6, this.value)">
-                <option value="0" selected>Default</option>
-                <option value="1">Nearest</option>
-                <option value="2">Linear</option>
-              </select>
-            </label>
-            <label>Transparency:
-              <select id="opt_layers" onchange="setOpt(7, this.value)">
-                <option value="4" selected>4 (Fast)</option>
-                <option value="8">8</option>
-                <option value="16">16</option>
-                <option value="32">32 (Best)</option>
-              </select>
-            </label>
+          <!-- Unified Settings + Diagnostics modal.
+               Phase B redesign: closeable, tabbed, persistent settings via
+               localStorage under maplecast_diag_settings (future Phase C
+               will sync to SurrealDB profile). The gear above is the only
+               way to open this; toggleDiag() is exported from
+               diagnostics.mjs and exposed on window.
 
-            <h4>FEATURES</h4>
-            <label><input type="checkbox" id="opt_fog" onchange="setOpt(2, this.checked?1:0)"> Fog</label>
-            <label><input type="checkbox" id="opt_modvol" onchange="setOpt(3, this.checked?1:0)"> Modifier Volumes</label>
-            <label><input type="checkbox" id="opt_pstrip" onchange="setOpt(4, this.checked?1:0)"> Per-Strip Sort</label>
-
-            <h4>POST-PROCESSING</h4>
-            <label><input type="checkbox" id="css_scanlines" onchange="applyCSSEffects()"> CRT Scanlines</label>
-            <label><input type="checkbox" id="css_bloom" onchange="applyCSSEffects()"> Bloom Glow</label>
-            <label><input type="checkbox" id="css_sharpen" onchange="applyCSSEffects()"> Sharpen</label>
-            <label><input type="checkbox" id="css_smooth" onchange="applyCSSEffects()"> Smooth</label>
-            <label><input type="checkbox" id="css_vignette" onchange="applyCSSEffects()"> Vignette</label>
-            <label><input type="checkbox" id="css_curvature" onchange="applyCSSEffects()"> CRT Curve</label>
-            <label>Bright: <input type="range" id="css_bright" min="80" max="150" value="100" oninput="applyCSSEffects()"> <span class="val" id="css_bright_val">100%</span></label>
-            <label>Contrast: <input type="range" id="css_contrast" min="80" max="200" value="100" oninput="applyCSSEffects()"> <span class="val" id="css_contrast_val">100%</span></label>
-            <label>Saturate: <input type="range" id="css_sat" min="50" max="200" value="100" oninput="applyCSSEffects()"> <span class="val" id="css_sat_val">100%</span></label>
-
-            <h4>PRESETS</h4>
-            <div class="preset-row">
-              <button class="preset-btn" onclick="presetMaxPerformance()">MAX PERF</button>
-              <button class="preset-btn" onclick="presetArcade()">ARCADE</button>
-              <button class="preset-btn" onclick="presetMaxQuality()">MAX QUAL</button>
+               Tabs:
+                 GRAPHICS  — quality, features, post-processing, presets
+                 STATS     — server fps, ping, render perf, per-player input
+                 LATENCY   — per-slot latch policy + frame phase + histogram
+                 INPUT     — gamepad state + future mapping/deadzone settings -->
+          <div class="diag-modal" id="diagOverlay">
+            <div class="diag-modal-header">
+              <span class="diag-modal-title">MapleCast Settings</span>
+              <button class="diag-modal-close" onclick="toggleDiag()" title="Close (Esc)">&times;</button>
+            </div>
+            <div class="diag-modal-tabs">
+              <button class="diag-tab" data-tab="graphics">GRAPHICS</button>
+              <button class="diag-tab" data-tab="stats">STATS</button>
+              <button class="diag-tab" data-tab="latency">LATENCY</button>
+              <button class="diag-tab" data-tab="input">INPUT</button>
+            </div>
+            <div class="diag-modal-body">
+              <div class="diag-tab-panel" data-panel="graphics"></div>
+              <div class="diag-tab-panel" data-panel="stats"></div>
+              <div class="diag-tab-panel" data-panel="latency"></div>
+              <div class="diag-tab-panel" data-panel="input"></div>
+            </div>
+            <div class="diag-modal-footer">
+              <span class="diag-hint">Esc: close &nbsp; F1: toggle your latch policy</span>
             </div>
           </div>
+
+          <!-- Compatibility shim: the old settings-panel div used to live
+               here. settings.mjs (toggleSettings, applyCSSEffects, presets,
+               loadRenderSettings) still owns the form-control state — the
+               new diagnostics.mjs Graphics tab renders the same control IDs
+               (opt_resolution, css_bright, etc) into its panel via
+               innerHTML and the existing onchange handlers fire as before. -->
+          <div id="settingsPanel" style="display:none"></div>
 
           <!-- Idle screen (shown when no match / no stream) -->
           <div class="idle-screen" id="idleScreen">
@@ -1990,7 +2406,8 @@ if (new URLSearchParams(window.location.search).get('embed') === '1') {
           <div class="match-hud" id="matchHud">
             <div class="hud-player p1">
               <div class="hud-name" id="hudP1Name"></div>
-              <div class="health-bar-bg"><div class="health-bar" id="hudP1Health"></div></div>
+              <div class="hud-stat hud-streak" id="hudP1Streak"></div>
+              <div class="hud-stat hud-ping tier-unknown" id="hudP1Ping">— ms</div>
             </div>
             <div class="hud-center">
               <div class="hud-timer" id="hudTimer">88</div>
@@ -1998,30 +2415,28 @@ if (new URLSearchParams(window.location.search).get('embed') === '1') {
             </div>
             <div class="hud-player p2">
               <div class="hud-name" id="hudP2Name"></div>
-              <div class="health-bar-bg"><div class="health-bar" id="hudP2Health"></div></div>
+              <div class="hud-stat hud-streak" id="hudP2Streak"></div>
+              <div class="hud-stat hud-ping tier-unknown" id="hudP2Ping">— ms</div>
             </div>
           </div>
 
           <!-- Match results overlay -->
           <div class="match-results" id="matchResults">
             <div class="result-winner">WINNER</div>
-            <div class="result-title" id="resultTitle"></div>
+            <div class="result-title" id="resultTitle">—</div>
+            <div class="result-badge" id="resultBadge"></div>
             <div class="result-stats">
               <div class="result-stat">
                 <div class="stat-label">BEST COMBO</div>
-                <div class="stat-value" id="resultCombo">27 HITS</div>
+                <div class="stat-value" id="resultCombo">—</div>
               </div>
               <div class="result-stat">
                 <div class="stat-label">MATCH TIME</div>
-                <div class="stat-value" id="resultTime">42 SEC</div>
+                <div class="stat-value" id="resultTime">—</div>
               </div>
               <div class="result-stat">
-                <div class="stat-label">PERFECTS</div>
-                <div class="stat-value" id="resultPerfects">1</div>
-              </div>
-              <div class="result-stat">
-                <div class="stat-label">ACCURACY</div>
-                <div class="stat-value" id="resultAccuracy">78%</div>
+                <div class="stat-label">WINNER PING</div>
+                <div class="stat-value tier-unknown" id="resultPing">—</div>
               </div>
             </div>
             <div class="result-next">WINNER STAYS ON</div>
@@ -2053,8 +2468,50 @@ if (new URLSearchParams(window.location.search).get('embed') === '1') {
     </div>
   </div>
 
-  <!-- RIGHT: TRASH TALK (chat) -->
+  <!-- RIGHT: LIVE ARCADE (lobby + queue) + TRASH TALK (chat) -->
   <div class="sidebar-right">
+    <div class="panel-header">&#x1F3AE; LIVE ARCADE</div>
+
+    <!-- Now Playing -->
+    <div class="now-playing">
+      <div class="np-header">&#x26A1; NOW PLAYING</div>
+      <div class="np-vs">
+        <div class="np-player p1">
+          <div class="np-label">P1</div>
+          <div class="np-name" id="npP1">OPEN</div>
+          <div class="np-record" id="npP1Record">PRESS START</div>
+        </div>
+        <div class="np-vs-text">VS</div>
+        <div class="np-player p2">
+          <div class="np-label">P2</div>
+          <div class="np-name" id="npP2">OPEN</div>
+          <div class="np-record" id="npP2Record">PRESS START</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- I GOT NEXT -->
+    <div class="got-next-section">
+      <button class="btn-got-next" id="gotNextBtn" onclick="gotNext()">
+        &#x1FA99; I GOT NEXT
+      </button>
+      <button class="btn-leave-queue" id="leaveQueueBtn" onclick="leaveQueue()">
+        &#x274C; LEAVE LINE
+      </button>
+      <button class="btn-leave-queue" id="leaveGameBtn" onclick="leaveGame()" style="display:none;color:var(--hot-red);border-color:var(--hot-red);">
+        &#x1F6AA; DISCONNECT
+      </button>
+    </div>
+
+    <!-- The Queue -->
+    <div class="queue-section">
+      <div class="queue-header">NEXT UP</div>
+      <div class="queue-list" id="queueList">
+        <!-- filled by JS -->
+      </div>
+    </div>
+
+    <!-- Chat -->
     <div class="chat-header">
       <div class="chat-title">&#x1F4AC; TRASH TALK</div>
       <div class="chat-reactions">
@@ -2069,9 +2526,11 @@ if (new URLSearchParams(window.location.search).get('embed') === '1') {
       <!-- filled by JS -->
     </div>
     <div class="chat-input-row">
-      <input class="chat-input" id="chatInput" placeholder="Talk trash..." maxlength="200"
+      <input class="chat-input" id="chatInput" type="text" name="chat" placeholder="Talk trash..." maxlength="200"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+             data-lpignore="true" data-form-type="other"
              onkeydown="if(event.key==='Enter')sendChat()" />
-      <button class="chat-send-btn" onclick="sendChat()">SEND</button>
+      <button class="chat-send-btn" type="button" onclick="sendChat()">SEND</button>
     </div>
   </div>
 
@@ -2089,33 +2548,48 @@ if (new URLSearchParams(window.location.search).get('embed') === '1') {
 <div class="modal-overlay" id="signInModal">
   <div class="modal-box">
     <div class="modal-header">
-      <div class="modal-title" id="authModalTitle">SIGN IN</div>
-      <button class="modal-close" onclick="closeSignIn()">&times;</button>
+      <div class="modal-title" id="authModalTitle">&#x26A1; INSERT COIN</div>
+      <button class="modal-close" onclick="closeSignIn()" aria-label="close">&times;</button>
     </div>
     <div class="modal-body">
-      <div id="authError" style="display:none;color:var(--hot-red);font-size:7px;margin-bottom:10px;text-align:center;"></div>
+      <div id="authError" style="display:none;color:var(--hot-red);font-size:8px;margin-bottom:14px;text-align:center;letter-spacing:1px;text-shadow:0 0 6px rgba(255,32,32,0.5);"></div>
+
       <div class="modal-field">
         <label class="modal-label">FIGHTER NAME</label>
         <input class="modal-input" id="modalName" placeholder="YOUR_TAG" maxlength="16"
+               autocomplete="username"
                onkeydown="if(event.key==='Enter')document.getElementById('modalPass').focus()" />
       </div>
+
       <div class="modal-field">
         <label class="modal-label">PASSWORD</label>
         <input class="modal-input" id="modalPass" type="password" placeholder="********" maxlength="64"
+               autocomplete="current-password"
                onkeydown="if(event.key==='Enter')confirmSignIn()" />
       </div>
+
       <div class="modal-field">
         <label class="modal-label">PICK YOUR ICON</label>
         <div class="modal-avatars" id="avatarGrid">
           <!-- filled by JS -->
         </div>
       </div>
+
       <button class="btn-sign-in" id="authSubmitBtn" onclick="confirmSignIn()">FIGHT</button>
-      <div style="text-align:center;margin-top:10px;">
-        <button id="authToggleBtn" onclick="toggleAuthMode()" style="background:none;border:none;color:var(--neon-cyan);font-family:'Press Start 2P',monospace;font-size:6px;cursor:pointer;letter-spacing:0;">
+
+      <div style="text-align:center;margin-top:12px;">
+        <button id="authToggleBtn" class="modal-toggle-link" onclick="toggleAuthMode()">
           NEW? CREATE ACCOUNT
         </button>
       </div>
+
+      <div class="modal-divider">OR</div>
+
+      <button class="btn-web3" type="button" disabled
+              title="Web3 wallet sign-in is coming soon">
+        &#x1F517; SIGN IN WITH WALLET
+        <span class="coming-soon">CKB / DID &mdash; COMING SOON</span>
+      </button>
     </div>
   </div>
 </div>
@@ -2203,15 +2677,15 @@ import './js/webgl-patches.mjs';
 import { state } from './js/state.mjs';
 import { initRenderer, setOpt } from './js/renderer-bridge.mjs';
 import { connectWS } from './js/ws-connection.mjs';
-import { renderChat, renderChatFull, sendChat, sendReaction } from './js/chat.mjs';
-import { renderQueue, gotNext, leaveQueue, leaveGame, updateCabinetControls } from './js/queue.mjs';
+import { renderChatFull, sendChat, sendReaction, initChat } from './js/chat.mjs';
+import { gotNext, leaveQueue, leaveGame, updateCabinetControls, initQueueLive, initSlotLive } from './js/queue.mjs';
 import { renderLeaderboard, switchTab } from './js/leaderboard.mjs';
 import { openSignIn, closeSignIn, confirmSignIn, signOut, showUserBadge,
          toggleUserMenu, toggleAuthMode, renderAvatars, pickAvatar } from './js/auth.mjs';
 import { toggleSettings, applyCSSEffects, presetMaxPerformance,
          presetArcade, presetMaxQuality, loadRenderSettings, applyLoadedSettings } from './js/settings.mjs';
 import { toggleDiag, startDiagInterval } from './js/diagnostics.mjs';
-import { openProfile, closeProfile, switchProfileTab } from './js/profile.mjs';
+import { openProfile, closeProfile, switchProfileTab, showPlayerCard, closePlayerCard, initPlayerCard } from './js/profile.mjs';
 import { setupKeyboardShortcuts } from './js/demo.mjs';
 import { surrealFetchProfile } from './js/surreal.mjs';
 import { initRelay } from './js/relay-bootstrap.mjs';
@@ -2229,6 +2703,8 @@ window.pickAvatar = pickAvatar;
 window.openProfile = openProfile;
 window.closeProfile = closeProfile;
 window.switchProfileTab = switchProfileTab;
+window.showPlayerCard = showPlayerCard;
+window.closePlayerCard = closePlayerCard;
 window.switchTab = switchTab;
 window.gotNext = gotNext;
 window.leaveQueue = leaveQueue;
@@ -2246,7 +2722,8 @@ window.openSettings = () => { document.getElementById('userDropdown').classList.
 
 // === Initialize ===
 renderLeaderboard('streak');
-renderQueue();
+// queue list is painted by initQueueLive() once the SurrealDB live
+// subscription delivers initial rows; no manual seed needed.
 renderChatFull();
 renderAvatars();
 updateCabinetControls();  // Set initial button state based on gamepad presence
@@ -2260,16 +2737,29 @@ if (loadRenderSettings()) {
   applyLoadedSettings();
 }
 
-// Auto-login from localStorage
-const savedName = localStorage.getItem('nobd_username');
-if (savedName && !state.signedIn) {
-  state.myName = savedName.toUpperCase();
-  state.myAvatar = '\u{1F94A}';
-  state.signedIn = true;
-  await surrealFetchProfile(state.myName);
-  showUserBadge();
-  updateCabinetControls();
+// Auto-login from localStorage — shared helper so we can also re-run on
+// pageshow (handles bfcache restores when the user clicks back from a
+// profile page).
+async function autoLoginFromStorage() {
+  const savedName = localStorage.getItem('nobd_username');
+  if (savedName && !state.signedIn) {
+    state.myName = savedName.toUpperCase();
+    state.myAvatar = '\u{1F94A}';
+    state.signedIn = true;
+    try { await surrealFetchProfile(state.myName); } catch {}
+    showUserBadge();
+    updateCabinetControls();
+  }
 }
+await autoLoginFromStorage();
+
+// Re-run on bfcache restore so a back-nav from player.html doesn't leave
+// the user visually signed-out while localStorage still has their name.
+window.addEventListener('pageshow', (e) => {
+  if (e.persisted) {
+    autoLoginFromStorage();
+  }
+});
 
 // Start services
 startDiagInterval();
@@ -2278,6 +2768,13 @@ startTicker();
 connectWS();
 initRelay();
 startTelemetry();
+initChat();       // SurrealDB live chat — loads history + subscribes
+initSlotLive();   // SurrealDB slot live query — paints lobby P1/P2 from `slot` table
+initQueueLive();  // SurrealDB queue live query — paints queue from `queue` table
+// Live match HUD (HP bars, combos, timer, character portraits) — lazy import
+// since lobby.mjs isn't imported at the top (ws-connection.mjs owns it).
+import('./js/lobby.mjs').then(m => m.initLiveMatch());
+initPlayerCard(); // seed the inline player card with the top player in a random category
 
 // Global event listeners
 document.addEventListener('click', () => {
@@ -2298,227 +2795,48 @@ document.addEventListener('click', e => {
 });
 
 // ============================================================
-// SKIN PICKER — integrated into king.html
+// ADMIN AUTO-CLAIM SHIM — ?admin=1&slot=0|1
 // ============================================================
-const SKIN_DB_BASE = `${location.protocol}//${location.hostname}/db`;
-const SKIN_DB_NS = 'maplecast';
-const SKIN_DB_NAME = 'mvc2';
-
-// Bank formula: bank = 16 * (char_pair + 1) + (8 * player_side)
-const SLOT_TO_BANK = { P1C1:16, P2C1:24, P1C2:32, P2C2:40, P1C3:48, P2C3:56 };
-
-// Character name → directory name mapping for DB queries
-const CHAR_DIR_MAP = {
-  'Ryu':'Ryu','Zangief':'Zangief','Guile':'Guile','Morrigan':'Morrigan',
-  'Anakaris':'Anakaris','Strider':'Strider','Cyclops':'Cyclops','Wolverine':'Wolverine',
-  'Psylocke':'Psylocke','Iceman':'Iceman','Rogue':'Rogue','Capt America':'Captain_America',
-  'Spider-Man':'Spider-Man','Hulk':'Hulk','Venom':'Venom','Dr Doom':'Doctor_Doom',
-  'Tron Bonne':'Tron_Bonne','Jill':'Jill','Hayato':'Hayato','Ruby Heart':'Ruby_Heart',
-  'SonSon':'SonSon','Amingo':'Amingo','Marrow':'Marrow','Cable':'Cable',
-  'Chun-Li':'Chun-Li','Mega Man':'Mega_Man','Roll':'Roll','Akuma':'Akuma',
-  'BB Hood':'BB_Hood','Felicia':'Felicia','Charlie':'Charlie_Nash','Sakura':'Sakura',
-  'Dan':'Dan','Cammy':'Cammy','Dhalsim':'Dhalsim','M.Bison':'M_Bison',
-  'Ken':'Ken','Gambit':'Gambit','Juggernaut':'Juggernaut','Storm':'Storm',
-  'Sabretooth':'Sabretooth','Magneto':'Magneto','Shuma':'Shuma-Gorath',
-  'War Machine':'War_Machine','Silver Samurai':'Silver_Samurai','Omega Red':'Omega_Red',
-  'Spiral':'Spiral','Colossus':'Colossus','Iron Man':'Iron_Man','Sentinel':'Sentinel',
-  'Blackheart':'Blackheart','Thanos':'Thanos','Jin':'Jin',
-  'Capt Commando':'Captain_Commando','Bone Wolverine':'Wolverine_Bone_Claw','Servbot':'Servbot',
-};
-
-// Character ID → name (matches match_info output)
-const CHAR_NAMES = [
-  'Ryu','Zangief','Guile','Morrigan','Anakaris','Strider','Cyclops','Wolverine',
-  'Psylocke','Iceman','Rogue','Capt America','Spider-Man','Hulk','Venom','Dr Doom',
-  'Tron Bonne','Jill','Hayato','Ruby Heart','SonSon','Amingo','Marrow','Cable',
-  'Abyss1','Abyss2','Abyss3','Chun-Li','Mega Man','Roll','Akuma','BB Hood',
-  'Felicia','Charlie','Sakura','Dan','Cammy','Dhalsim','M.Bison','Ken',
-  'Gambit','Juggernaut','Storm','Sabretooth','Magneto','Shuma',
-  'War Machine','Silver Samurai','Omega Red','Spiral','Colossus','Iron Man',
-  'Sentinel','Blackheart','Thanos','Jin','Capt Commando','Bone Wolverine','Servbot',
-];
-
-let _skinSelectedSlot = null;
-let _skinSelectedBank = -1;
-let _skinSelectedCharDir = '';
-let _skinMatchChars = [];
-
-async function skinQueryDB(sql) {
-  try {
-    const resp = await fetch(`${SKIN_DB_BASE}/sql`, {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'surreal-ns': SKIN_DB_NS,
-        'surreal-db': SKIN_DB_NAME,
-        'Authorization': 'Basic ' + btoa('root:nobd_arcade_2026'),
-      },
-      body: sql,
-    });
-    const data = await resp.json();
-    return data[0]?.result || [];
-  } catch (e) {
-    console.error('Skin DB query failed:', e);
-    return [];
-  }
-}
-
-async function skinFetchMatchInfo() {
-  // Use the relay WS to get match info from the server
-  // Send a text message that the server's control WS understands
-  // Actually, we can query the server's control WS via the relay
-  // For now, use the /db endpoint to read match state from a different source
-  // ... or we can add match_info to the lobby status that's already being polled
-
-  // Simplest: read from the server via fetch to the control WS
-  // But control WS is loopback only. We need the relay to forward.
-
-  // For MVP: let the user manually select which characters they have.
-  // The server's status tick already sends player names and slot info.
-  // We can use state.mySlot to know if we're P1 or P2.
-  return [];
-}
-
-function openSkinPicker() {
-  const modal = document.getElementById('skinModal');
-  modal.classList.add('open');
-
-  const mySide = state.mySlot;  // 0=P1, 1=P2, -1=spectator
-  if (mySide < 0) {
-    document.getElementById('skinCharTabs').innerHTML =
-      '<div style="color:#ef5350;font-size:8px;font-family:Press Start 2P,monospace">JOIN A GAME FIRST TO CHANGE SKINS</div>';
-    document.getElementById('skinGrid').innerHTML = '';
-    return;
-  }
-
-  // Show character tabs for the player's side
-  // We need to know which characters are in their team.
-  // For now, show all 56 characters as selectable tabs with a search.
-  // TODO: integrate match_info to auto-detect team composition.
-
-  const prefix = mySide === 0 ? 'P1' : 'P2';
-  const tabs = [`${prefix}C1`, `${prefix}C2`, `${prefix}C3`];
-
-  // Show tabs as "Slot 1", "Slot 2", "Slot 3" — user picks which to skin
-  let html = '';
-  for (const slot of tabs) {
-    const bank = SLOT_TO_BANK[slot];
-    html += `<button class="skin-char-tab" onclick="skinSelectSlot('${slot}', ${bank})">${slot}</button>`;
-  }
-  // Also add a character search
-  html += `<input type="text" id="skinSearch" placeholder="Search character..."
-    style="padding:4px 8px;font-size:10px;background:#0f3460;border:1px solid #2a3a5c;color:#fff;border-radius:4px;margin-left:auto;width:120px"
-    oninput="skinSearchChar(this.value)">`;
-  document.getElementById('skinCharTabs').innerHTML = html;
-  document.getElementById('skinGrid').innerHTML = '<div style="color:#999;font-size:8px;font-family:Press Start 2P,monospace">SELECT A SLOT ABOVE, THEN PICK A CHARACTER</div>';
-}
-
-function closeSkinPicker() {
-  document.getElementById('skinModal').classList.remove('open');
-}
-
-async function skinSelectSlot(slot, bank) {
-  _skinSelectedSlot = slot;
-  _skinSelectedBank = bank;
-
-  // Highlight active tab
-  document.querySelectorAll('.skin-char-tab').forEach(t => t.classList.remove('active'));
-  event.currentTarget.classList.add('active');
-
-  // Show character list for this slot
-  let html = '<div style="font-size:7px;color:#999;margin-bottom:4px;font-family:Press Start 2P,monospace">PICK CHARACTER:</div>';
-  html += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:3px;margin-bottom:8px;max-height:150px;overflow-y:auto">';
-  for (const name of Object.keys(CHAR_DIR_MAP)) {
-    html += `<button style="padding:4px;font-size:6px;background:#0f3460;border:1px solid #2a3a5c;color:#ccc;cursor:pointer;border-radius:3px;font-family:Press Start 2P,monospace"
-      onclick="skinLoadForChar('${CHAR_DIR_MAP[name]}','${name}')">${name}</button>`;
-  }
-  html += '</div><div id="skinCharGrid"></div>';
-  document.getElementById('skinGrid').innerHTML = html;
-}
-
-async function skinLoadForChar(charDir, charName) {
-  _skinSelectedCharDir = charDir;
-  document.getElementById('skinStatus').textContent = `Loading ${charName} skins...`;
-
-  const skins = await skinQueryDB(
-    `SELECT hash, author, palette_hex, colors, credit FROM skin WHERE char_dir = '${charDir}' ORDER BY author LIMIT 200;`
-  );
-
-  if (skins.length === 0) {
-    document.getElementById('skinCharGrid').innerHTML = '<div style="color:#999;font-size:7px">No skins found</div>';
-    document.getElementById('skinStatus').textContent = '';
-    return;
-  }
-
-  let html = `<div style="font-size:7px;color:#4fc3f7;margin-bottom:4px;font-family:Press Start 2P,monospace">${charName} — ${skins.length} SKINS (bank ${_skinSelectedBank})</div>`;
-  html += '<div class="skin-grid">';
-  for (const s of skins) {
-    const colors = s.colors || hexToSkinColors(s.palette_hex);
-    let bar = '';
-    for (let i = 1; i < Math.min(16, colors.length); i++) {
-      const c = colors[i];
-      const r = ((c >> 8) & 0xF) * 17, g = ((c >> 4) & 0xF) * 17, b = (c & 0xF) * 17;
-      bar += `<span style="background:rgb(${r},${g},${b})"></span>`;
+// Used by the /overlord dashboard's live-preview iframe to take
+// direct control of P1 or P2 from inside the dashboard tab. The
+// relay's POST /overlord/api/players/take has already pinned the
+// `slot` row to occupant_name='ADMIN'. We just need to open the
+// control WS, send the join, and start gamepad polling — same as
+// the normal handleMyPromotion() path, minus the queue UI.
+{
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('admin') === '1') {
+    const adminSlot = parseInt(params.get('slot') || '0', 10);
+    if (adminSlot === 0 || adminSlot === 1) {
+      console.log('[admin-shim] auto-claiming slot', adminSlot, 'as ADMIN');
+      // Skip the signin flow entirely. The overlord dashboard already
+      // authenticated separately; here we just need a name for the join
+      // payload so flycast logs the right occupant.
+      state.myName = 'ADMIN';
+      state.myAvatar = '\u{1F480}';
+      state.signedIn = true;
+      state.mySlot = adminSlot;
+      try {
+        const { ensureControlWs } = await import('./js/ws-connection.mjs');
+        const { startGamepadPolling } = await import('./js/gamepad.mjs');
+        const ws = await ensureControlWs();
+        const gp = navigator.getGamepads()[0];
+        const device = gp ? gp.id.substring(0, 30) : 'overlord';
+        ws.send(JSON.stringify({
+          type: 'join',
+          id: state.sessionId,
+          name: 'ADMIN',
+          device,
+          slot: adminSlot,
+        }));
+        startGamepadPolling();
+        console.log('[admin-shim] joined slot', adminSlot, 'as ADMIN');
+      } catch (e) {
+        console.warn('[admin-shim] failed to claim slot:', e.message);
+      }
     }
-    const colorsJson = JSON.stringify(colors).replace(/"/g, '&quot;');
-    html += `<div class="skin-card" onclick='skinApply(${JSON.stringify(colors)})'>
-      <div class="palette-bar">${bar}</div>
-      <div class="author" title="${(s.credit || s.author || '').replace(/'/g, '')}">${s.author || 'Community'}</div>
-    </div>`;
-  }
-  html += '</div>';
-  document.getElementById('skinCharGrid').innerHTML = html;
-  document.getElementById('skinStatus').textContent = `${skins.length} skins loaded. Click to apply.`;
-}
-
-function hexToSkinColors(hex) {
-  const colors = [];
-  for (let i = 0; i < hex.length; i += 4)
-    colors.push(parseInt(hex.substr(i, 4), 16));
-  return colors;
-}
-
-async function skinApply(colors) {
-  if (_skinSelectedBank < 0) return;
-  // Send palette_write to the server via the existing WS connection
-  // The relay WS forwards text messages to the server's control channel
-  if (state.ws && state.ws.readyState === 1) {
-    state.ws.send(JSON.stringify({
-      cmd: 'palette_write',
-      index: _skinSelectedBank * 16,
-      colors: colors,
-      persist: true,
-      reply_id: 'skin_' + Date.now(),
-    }));
-    document.getElementById('skinStatus').textContent = `Skin applied to ${_skinSelectedSlot}!`;
-  } else {
-    document.getElementById('skinStatus').textContent = 'Not connected to server';
   }
 }
-
-function skinSearchChar(query) {
-  const q = query.toLowerCase();
-  document.querySelectorAll('#skinGrid button').forEach(btn => {
-    btn.style.display = btn.textContent.toLowerCase().includes(q) ? '' : 'none';
-  });
-}
-
-// Show/hide skin button based on player state
-function updateSkinButton() {
-  const btn = document.getElementById('skinBtn');
-  if (state.mySlot >= 0) {
-    btn.style.display = 'block';
-  } else {
-    btn.style.display = 'none';
-  }
-}
-
-// Poll skin button visibility
-setInterval(updateSkinButton, 1000);
-
-// Expose to onclick handlers
-window.openSkinPicker = openSkinPicker;
-window.closeSkinPicker = closeSkinPicker;
 
 </script>
 

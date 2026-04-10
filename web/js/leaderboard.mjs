@@ -41,24 +41,29 @@ export async function renderLeaderboard(tab) {
   _currentTab = tab;
   const list = document.getElementById('leaderboardList');
 
-  // Render cached/placeholder immediately so UI doesn't flash
-  let data = _liveCache[tab] || state.leaderboards[tab] || [];
-  paintList(list, tab, data);
+  // Paint cache immediately if we have one, otherwise show "loading…"
+  // (the empty state will paint over it once the query lands).
+  if (_liveCache[tab]) {
+    paintList(list, tab, _liveCache[tab]);
+  } else {
+    list.innerHTML = '<div class="lb-empty">LOADING\u2026</div>';
+  }
 
-  // Fetch live in background
+  // Always fetch live — leaderboards are SurrealDB-backed, no placeholder
+  // fallback. Empty result paints "NO RANKINGS YET — BE THE FIRST".
   try {
     const res = await surrealQuery(QUERIES[tab]);
-    if (res?.[0]?.result?.length > 0) {
-      const rows = res[0].result.map(r => ({
-        name: (r.name || '').toUpperCase(),
-        stat: FORMATTERS[tab](r),
-      }));
-      _liveCache[tab] = rows;
-      // Only repaint if user is still on this tab
-      if (_currentTab === tab) paintList(list, tab, rows);
-    }
+    const rows = (res?.[0]?.result || []).map(r => ({
+      name: (r.name || '').toUpperCase(),
+      stat: FORMATTERS[tab](r),
+    }));
+    _liveCache[tab] = rows;
+    // Only repaint if the user is still on this tab
+    if (_currentTab === tab) paintList(list, tab, rows);
   } catch (e) {
-    // Stay with placeholder/cache on failure
+    if (_currentTab === tab && !_liveCache[tab]) {
+      list.innerHTML = '<div class="lb-empty">LEADERBOARD UNAVAILABLE</div>';
+    }
   }
 }
 
@@ -67,13 +72,15 @@ function paintList(list, tab, data) {
     list.innerHTML = '<div class="lb-empty">NO RANKINGS YET — BE THE FIRST</div>';
     return;
   }
+  // Clicking a leaderboard entry opens the inline player card (same column,
+  // under this leaderboard). No navigation, no modal, no state loss.
   list.innerHTML = data.map((e, i) => `
-    <a class="lb-entry ${i === 0 ? 'rank-1' : i === 1 ? 'rank-2' : i === 2 ? 'rank-3' : ''}"
-       href="/player.html?name=${encodeURIComponent(e.name.toLowerCase())}"
-       style="text-decoration:none;color:inherit;display:flex;">
+    <div class="lb-entry ${i === 0 ? 'rank-1' : i === 1 ? 'rank-2' : i === 2 ? 'rank-3' : ''}"
+         onclick="showPlayerCard('${e.name.replace(/'/g, "\\'")}')"
+         style="display:flex;cursor:pointer;">
       <div class="lb-rank">${i === 0 ? '\u{1F451}' : i + 1}</div>
       <div class="lb-name">${e.name}</div>
       <div class="lb-stat">${e.stat}</div>
-    </a>
+    </div>
   `).join('');
 }

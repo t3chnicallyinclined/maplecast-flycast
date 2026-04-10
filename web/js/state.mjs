@@ -5,7 +5,7 @@
 // Mutations are direct property writes — zero overhead, zero events.
 // ============================================================================
 
-// Persistent client ID
+// Persistent client ID — survives page closes (localStorage)
 let myId = localStorage.getItem('maplecast_id');
 if (!myId) {
   myId = (crypto.randomUUID ? crypto.randomUUID()
@@ -14,18 +14,29 @@ if (!myId) {
   localStorage.setItem('maplecast_id', myId);
 }
 
+// Ephemeral session id — fresh per page load. We INTENTIONALLY don't
+// persist this anywhere. Tab refresh / navigation = lose your spot
+// (modulo the 30s grace window the collector enforces on slot rows).
+// This matches the user-facing rule: "if you leave, you're out, but
+// you have ~30 seconds to come back if you're quick."
+const savedSessionId = null;
+
 export const state = {
   // Auth
   signedIn: false,
   myName: '',
   myAvatar: '',
   myId,
-  // sessionId is the id we send to the server on `join`. For signed-in users
-  // it equals myId (so reload-recovery via syncSlotFromStatus works). For
-  // anonymous users gotNext() mints a fresh ephemeral one per click so an
-  // abandoned anon slot is NOT silently reclaimed by a new tab. Initialised
-  // to myId for back-compat with any non-gotNext join callers.
-  sessionId: myId,
+  // SurrealDB JWT scoped to the `browser` record access. Set on successful
+  // signin/register by auth.mjs (from the relay's /api/signin response),
+  // cleared on sign-out. surreal.mjs and surreal-live.mjs prefer this
+  // token when present and fall back to the viewer role otherwise.
+  dbToken: localStorage.getItem('nobd_db_token') || null,
+  // sessionId: a fresh per-page-load uuid. NOT persisted (sessionStorage
+  // path was removed when we adopted the 30s grace presence model). Two
+  // tabs of the same browser get distinct sessionIds, so the "you're
+  // already playing in another tab" defense actually works.
+  sessionId: 'sess-' + (crypto.randomUUID ? crypto.randomUUID().slice(0, 12) : Math.random().toString(36).slice(2, 14)),
   authMode: 'signin',    // 'signin' or 'register'
   playerProfile: null,
   isAnonymous: false,
@@ -35,15 +46,22 @@ export const state = {
   queuePosition: -1,
 
   // Connection
-  ws: null,
-  stickOnline: false,
-  stickRegistered: false, // server confirmed this user owns a stick
-  stickSlot: -1,          // slot the server says we already occupy (reload resync)
+  ws: null,             // RELAY WS (always-on, broadcast: TA frames + downstream JSON)
+  controlWs: null,      // DIRECT FLYCAST WS (lazy, opens on queue promotion, closes on leave)
   connState: '',
   rendererStreaming: false,
   mySlot: -1,
-  wsInQueue: false,       // server-side queue state
+  wsInQueue: false,       // legacy server-side queue state, retained for older callers
   leaving: false,
+
+  // Reload-recovery: when the server still has us bound to a slot but the
+  // browser tab is fresh, we DO NOT auto-adopt the slot. We surface a
+  // "RESUME P1/P2" button instead and wait for the user to click it.
+  // Reasoning: silently restoring a slot from a stale session can put a
+  // player back in a match they didn't mean to rejoin (especially if they
+  // reloaded for an unrelated reason on the leaderboard or chat tab).
+  // -1 = no pending resume, 0 = P1 pending, 1 = P2 pending.
+  pendingResumeSlot: -1,
 
   // Gamepad detection — reactive, updated by gamepad.mjs on connect/disconnect.
   // UX gate: can't join the game without one plugged in. Set by the initial
@@ -68,96 +86,17 @@ export const state = {
     pingMs: 0, pingSamples: [],
     streamKbps: 0, publishUs: 0, dirtyPages: 0,
     gamepadActive: false, inputSendCount: 0,
-    _matchEnded: false, _wasRegistering: false,
+    _matchEnded: false,
   },
-
-  // Stick registration
-  stickCheckCounter: 0,
-  registerTimeout: null,
 
   // Intervals
   gamepadInterval: null,
   testerInterval: null,
 
-  // Chat — empty until real users connect
-  chatHistory: [],
-
-  // Placeholder leaderboard data (replaced by SurrealDB when connected)
-  leaderboards: {
-    streak: [
-      { name: 'SHADOW_KING', stat: '12 WINS', king: true },
-      { name: 'XECUTIONER', stat: '9 WINS' },
-      { name: 'RUSH_DOWN', stat: '8 WINS' },
-      { name: 'CABLE_GUY', stat: '7 WINS' },
-      { name: 'MAGNETO_XX', stat: '6 WINS' },
-      { name: 'STORM_CHSR', stat: '5 WINS' },
-      { name: 'SENT_ARMY', stat: '5 WINS' },
-      { name: 'IRON_FIST', stat: '4 WINS' },
-      { name: 'PSYLOCKE_Q', stat: '3 WINS' },
-      { name: 'DOOM_LOOP', stat: '3 WINS' },
-    ],
-    combo: [
-      { name: 'RUSH_DOWN', stat: '87 HITS', king: true },
-      { name: 'MAGNETO_XX', stat: '72 HITS' },
-      { name: 'SHADOW_KING', stat: '63 HITS' },
-      { name: 'STORM_CHSR', stat: '58 HITS' },
-      { name: 'IRON_FIST', stat: '54 HITS' },
-      { name: 'CABLE_GUY', stat: '47 HITS' },
-      { name: 'DOOM_LOOP', stat: '41 HITS' },
-      { name: 'XECUTIONER', stat: '38 HITS' },
-      { name: 'SENT_ARMY', stat: '35 HITS' },
-      { name: 'PSYLOCKE_Q', stat: '29 HITS' },
-    ],
-    speed: [
-      { name: 'XECUTIONER', stat: '12 SEC', king: true },
-      { name: 'SHADOW_KING', stat: '15 SEC' },
-      { name: 'MAGNETO_XX', stat: '18 SEC' },
-      { name: 'RUSH_DOWN', stat: '22 SEC' },
-      { name: 'CABLE_GUY', stat: '24 SEC' },
-      { name: 'STORM_CHSR', stat: '28 SEC' },
-      { name: 'IRON_FIST', stat: '31 SEC' },
-      { name: 'DOOM_LOOP', stat: '33 SEC' },
-      { name: 'SENT_ARMY', stat: '37 SEC' },
-      { name: 'PSYLOCKE_Q', stat: '42 SEC' },
-    ],
-    perfect: [
-      { name: 'SHADOW_KING', stat: '8 ROUNDS', king: true },
-      { name: 'XECUTIONER', stat: '6 ROUNDS' },
-      { name: 'MAGNETO_XX', stat: '5 ROUNDS' },
-      { name: 'RUSH_DOWN', stat: '4 ROUNDS' },
-      { name: 'CABLE_GUY', stat: '3 ROUNDS' },
-      { name: 'STORM_CHSR', stat: '3 ROUNDS' },
-      { name: 'IRON_FIST', stat: '2 ROUNDS' },
-      { name: 'DOOM_LOOP', stat: '2 ROUNDS' },
-      { name: 'SENT_ARMY', stat: '1 ROUND' },
-      { name: 'PSYLOCKE_Q', stat: '1 ROUND' },
-    ],
-    masher: [
-      { name: 'CHAOS_AGENT', stat: '42 INP/S', king: true },
-      { name: 'BUTTONZ', stat: '38 INP/S' },
-      { name: 'RUSH_DOWN', stat: '35 INP/S' },
-      { name: 'MAGNETO_XX', stat: '31 INP/S' },
-      { name: 'SHADOW_KING', stat: '28 INP/S' },
-      { name: 'IRON_FIST', stat: '25 INP/S' },
-      { name: 'XECUTIONER', stat: '22 INP/S' },
-      { name: 'STORM_CHSR', stat: '19 INP/S' },
-      { name: 'CABLE_GUY', stat: '16 INP/S' },
-      { name: 'DOOM_LOOP', stat: '14 INP/S' },
-    ],
-    surgeon: [
-      { name: 'THE_SURGEON', stat: '94.2%', king: true },
-      { name: 'CABLE_GUY', stat: '91.8%' },
-      { name: 'SHADOW_KING', stat: '87.3%' },
-      { name: 'XECUTIONER', stat: '85.1%' },
-      { name: 'DOOM_LOOP', stat: '82.7%' },
-      { name: 'STORM_CHSR', stat: '79.4%' },
-      { name: 'MAGNETO_XX', stat: '76.2%' },
-      { name: 'PSYLOCKE_Q', stat: '73.8%' },
-      { name: 'IRON_FIST', stat: '71.5%' },
-      { name: 'RUSH_DOWN', stat: '68.9%' },
-    ],
-  },
-
-  // Queue — empty until real players join
+  // Chat / leaderboards / queue all live in SurrealDB now. The arrays
+  // here used to be the local cache; everything reads directly from
+  // live queries instead. Kept the queueData stub because a few legacy
+  // code paths still poke it (queue.mjs renderQueue() — itself dead code
+  // post-Phase 6, but the import graph would need a sweep before removal).
   queueData: [],
 };

@@ -4,8 +4,22 @@
 
 import { state } from './state.mjs';
 
+// Compatibility shim — the old standalone settings panel was merged into the
+// unified diagnostics modal (Phase B redesign, 2026-04-08). Anything that
+// previously called toggleSettings() should now open the GRAPHICS tab of the
+// unified modal. Keeping this export so the existing window.toggleSettings
+// binding in king.html and any other callers don't break.
+import * as _diag from './diagnostics.mjs';
 export function toggleSettings() {
-  document.getElementById('settingsPanel').classList.toggle('open');
+  // Open the modal if closed; switch to the GRAPHICS tab regardless.
+  const el = document.getElementById('diagOverlay');
+  if (!el) return;
+  const wasOpen = el.classList.contains('open');
+  if (!wasOpen) {
+    _diag.toggleDiag();  // opens it
+  }
+  // Always force-select the GRAPHICS tab when this entry point is used
+  _diag.selectDiagTab?.('graphics');
 }
 
 // === CSS Post-Processing ===

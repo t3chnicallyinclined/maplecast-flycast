@@ -1,8 +1,28 @@
 // ============================================================================
 // RELAY-BOOTSTRAP.MJS — P2P spectator relay initialization
 //
-// Fetches time-limited TURN credentials from /turn-cred on startup, falls back
-// to public STUN if the endpoint is unavailable.
+// ⚠️  DEPRECATED ARCHITECTURE — slated for deletion ⚠️
+//
+// The WebRTC P2P spectator mesh exists to amortize home upstream bandwidth
+// when flycast lives on the home box and the VPS relay would otherwise need
+// to push every TA frame to every viewer over the home→VPS link.
+//
+// As of 2026-04-08 (see docs/VPS-SETUP.md and the project_headless_in_production
+// memory), flycast runs on the SAME VPS as the relay. Frames travel zero
+// internet hops between flycast and the relay, and the relay is hosted on a
+// 1Gbit-symmetric VPS pipe — there is no upstream bandwidth to save. The
+// P2P mesh is doing work that the trivial single-source fanout would do for
+// less code, less latency, and zero ICE/TURN overhead.
+//
+// Why it's still here: the code works, ripping it out is a non-trivial sweep
+// across relay-bootstrap.mjs + relay.js + renderer-bridge.mjs + the relay_*
+// signaling cases in fanout.rs. Slated for Phase 6c proper. For now, the
+// MapleCastRelay constructor is a no-op if the global isn't loaded, and the
+// /turn-cred fetch is harmless if it falls through to STUN.
+//
+// If you're touching this file, ask: "do we still need P2P fanout?" The
+// answer is almost certainly no, and the right move is to delete the whole
+// path rather than maintain it.
 // ============================================================================
 
 import { state } from './state.mjs';

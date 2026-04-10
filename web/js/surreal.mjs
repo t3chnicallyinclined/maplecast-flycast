@@ -1,8 +1,14 @@
 // ============================================================================
-// SURREAL.MJS — SurrealDB client
+// SURREAL.MJS — SurrealDB REST client (one-shot queries + signin fallback)
 //
-// HTTP API client for player auth and stats. Uses Basic auth for now.
-// TODO: Migrate to DEFINE ACCESS TYPE RECORD with JWT tokens.
+// Authentication model (Phase 6a+):
+//   1. If state.dbToken is set (user is signed in, relay minted a scoped JWT
+//      via DEFINE ACCESS browser), use it directly.
+//   2. Otherwise fall back to the viewer database user — which can SELECT
+//      anything but cannot write slot/live_match (blocked by PERMISSIONS NONE).
+//
+// Companion module surreal-live.mjs handles WS-based LIVE SELECT with the
+// same auth precedence. Both share this token cache via getAuthToken().
 // ============================================================================
 
 import { state } from './state.mjs';
@@ -15,16 +21,41 @@ const SURREAL_BASE = isLocal
   : `${location.protocol}//${location.hostname}/db`;
 const SURREAL_NS = 'maplecast';
 const SURREAL_DB = 'arcade';
+
+// Fallback: unauthenticated browsers (and signed-in users whose db_token
+// expired) use the `viewer` database user. VIEWER role can SELECT but is
+// gated from writing `slot` / `live_match` by the table-level PERMISSIONS
+// NONE rule, and can write `chat` / `queue` (PERMISSIONS FULL).
 const VIEWER_USER = 'viewer';
 const VIEWER_PASS = 'nobd_view_2026';
 
-let _token = null;
-let _signinPromise = null;
+let _viewerToken = null;
+let _viewerSigninPromise = null;
 
-async function signin() {
-  if (_token) return _token;
-  if (_signinPromise) return _signinPromise;
-  _signinPromise = (async () => {
+/**
+ * Public: fetch the current best token to use for a SurrealDB call.
+ * Prefers state.dbToken (browser-scoped JWT from auth.mjs) over the
+ * cached viewer token. Exported so surreal-live.mjs can share it.
+ */
+export async function getAuthToken() {
+  if (state.dbToken) return state.dbToken;
+  return viewerSignin();
+}
+
+/**
+ * Reset the cached viewer token. Called after a sign-in/out event so the
+ * next REST call picks up state.dbToken (or drops back to viewer if the
+ * user just signed out).
+ */
+export function resetAuthCache() {
+  _viewerToken = null;
+  _viewerSigninPromise = null;
+}
+
+async function viewerSignin() {
+  if (_viewerToken) return _viewerToken;
+  if (_viewerSigninPromise) return _viewerSigninPromise;
+  _viewerSigninPromise = (async () => {
     try {
       const res = await fetch(`${SURREAL_BASE}/signin`, {
         method: 'POST',
@@ -36,23 +67,23 @@ async function signin() {
       });
       const data = await res.json();
       if (data.token) {
-        _token = data.token;
+        _viewerToken = data.token;
         // Refresh after 50 minutes (token TTL is 1h)
-        setTimeout(() => { _token = null; }, 50 * 60 * 1000);
-        return _token;
+        setTimeout(() => { _viewerToken = null; }, 50 * 60 * 1000);
+        return _viewerToken;
       }
     } catch (e) {
-      console.log('[surreal] signin failed:', e.message);
+      console.log('[surreal] viewer signin failed:', e.message);
     }
-    _signinPromise = null;
+    _viewerSigninPromise = null;
     return null;
   })();
-  return _signinPromise;
+  return _viewerSigninPromise;
 }
 
 export async function surrealQuery(query, vars) {
   try {
-    const token = await signin();
+    const token = await getAuthToken();
     if (!token) return null;
     const body = vars ? JSON.stringify({ query, vars }) : query;
     const res = await fetch(`${SURREAL_BASE}/sql`, {
@@ -67,9 +98,17 @@ export async function surrealQuery(query, vars) {
       body,
     });
     if (!res.ok) {
-      // Token might be expired — clear and retry once
+      // Token might be expired — clear both caches and let next call retry
       if (res.status === 401 || res.status === 403) {
-        _token = null;
+        resetAuthCache();
+        // If it was a scoped browser token that expired, drop it so we fall
+        // back to viewer until the user signs in again. auth.mjs is
+        // responsible for refreshing on explicit re-signin.
+        if (state.dbToken) {
+          console.warn('[surreal] db_token rejected — clearing');
+          state.dbToken = null;
+          localStorage.removeItem('nobd_db_token');
+        }
       }
       return null;
     }
