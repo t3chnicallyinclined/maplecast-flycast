@@ -1219,6 +1219,39 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 			{
 				::maplecast_palette_clear();
 			}
+			else if (ctrl.contains("cmd") && ctrl["cmd"] == "match_info")
+			{
+				// Read character structs from DC RAM for the skin picker
+				static const u32 bases[] = { 0x268340, 0x2688E4, 0x268E88, 0x26942C, 0x2699D0, 0x269F74 };
+				static const char* slotNames[] = { "P1C1","P2C1","P1C2","P2C2","P1C3","P2C3" };
+				static const char* charNames[] = {
+					"Ryu","Zangief","Guile","Morrigan","Anakaris","Strider",
+					"Cyclops","Wolverine","Psylocke","Iceman","Rogue","Captain America",
+					"Spider-Man","Hulk","Venom","Doctor Doom","Tron Bonne","Jill",
+					"Hayato","Ruby Heart","SonSon","Amingo","Marrow","Cable",
+					"Abyss1","Abyss2","Abyss3","Chun-Li","Mega Man","Roll",
+					"Akuma","BB Hood","Felicia","Charlie","Sakura","Dan",
+					"Cammy","Dhalsim","M.Bison","Ken","Gambit","Juggernaut",
+					"Storm","Sabretooth","Magneto","Shuma-Gorath","War Machine",
+					"Silver Samurai","Omega Red","Spiral","Colossus","Iron Man",
+					"Sentinel","Blackheart","Thanos","Jin","Captain Commando",
+					"Bone Wolverine","Servbot"
+				};
+				json chars = json::array();
+				for (int i = 0; i < 6; i++) {
+					u8 active = ::mem_b[bases[i]];
+					u8 charId = ::mem_b[bases[i] + 1];
+					u8 palette = ::mem_b[bases[i] + 0x52D];
+					u8 health = ::mem_b[bases[i] + 0x420];
+					const char* name = (charId < 59) ? charNames[charId] : "Unknown";
+					chars.push_back({{"slot",slotNames[i]},{"charId",charId},{"name",name},
+						{"active",(bool)active},{"palette",palette},{"health",health}});
+				}
+				std::string rid = ctrl.value("reply_id", "");
+				json resp = {{"ok",true},{"cmd","match_info"},{"reply_id",rid},
+					{"data",{{"characters",chars}}}};
+				try { _ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text); } catch(...) {}
+			}
 		} catch (...) {}
 	}
 }
