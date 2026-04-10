@@ -969,8 +969,9 @@ body {
 .skin-card .palette-bar span { flex:1; }
 .skin-card .author { font-size:9px; color:#8888aa; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-family:-apple-system,sans-serif; }
 .skin-status { font-size:10px; color:#888; margin-top:6px; font-family:-apple-system,sans-serif; }
-/* Skin credit overlay on game screen */
-.skin-credit-overlay { position:absolute; top:6px; right:8px; font-size:9px; color:rgba(200,180,255,0.8); font-family:-apple-system,sans-serif; pointer-events:none; text-shadow:0 1px 4px rgba(0,0,0,0.9),0 0 8px rgba(0,0,0,0.6); z-index:4; letter-spacing:0.3px; }
+/* Skin credit overlay — positioned like name overlay but slightly above it */
+.skin-credit-overlay { position:absolute; bottom:22px; left:0; right:0; z-index:4; pointer-events:none; padding:0 10px; display:flex; justify-content:space-between; }
+.skin-credit-overlay .skin-credit { font-size:8px; color:rgba(200,180,255,0.7); font-family:'Press Start 2P',monospace; text-shadow:0 1px 4px rgba(0,0,0,0.9),0 0 8px rgba(0,0,0,0.6); letter-spacing:0.3px; }
 
 /* THE LINE (queue) */
 .queue-section {
@@ -2513,11 +2514,12 @@ if (new URLSearchParams(window.location.search).get('embed') === '1') {
       </div>
       <div class="skin-grid" id="skinGrid"></div>
       <div class="skin-status" id="skinStatus"></div>
-      <div style="font-size:8px;color:#555;margin-top:8px;font-family:-apple-system,sans-serif">
-        Skins by the MVC2 community. Tools by
-        <a href="https://github.com/karttoon/mvc2-skins" target="_blank" style="color:#7c3aed">karttoon</a>,
-        <a href="https://github.com/Preppy/PalMod" target="_blank" style="color:#7c3aed">Preppy (PalMod)</a>,
-        <a href="https://zachd.com/palmod/" target="_blank" style="color:#7c3aed">Paxtez</a>.
+      <div style="font-size:11px;color:#777;margin-top:10px;padding-top:8px;border-top:1px solid #333;font-family:-apple-system,sans-serif;line-height:1.6">
+        🎨 Skins by the <strong style="color:#aaa">MVC2 modding community</strong>. Palette tools by
+        <a href="https://github.com/karttoon/mvc2-skins" target="_blank" style="color:#a78bfa">karttoon</a>,
+        <a href="https://github.com/Preppy/PalMod" target="_blank" style="color:#a78bfa">Preppy (PalMod)</a>, and
+        <a href="https://zachd.com/palmod/" target="_blank" style="color:#a78bfa">Paxtez</a>.
+        Thank you to all skin creators!
       </div>
     </div>
   </div>
@@ -2915,6 +2917,7 @@ const CHAR_ID_TO_DIR = [
 let _skinBank = -1;
 let _skinCharDir = '';
 let _skinLoadedSkins = [];  // cached skins for randomize
+let _skinCredits = {};  // slot → author name for the overlay
 
 async function skinQuery(sql) {
   try {
@@ -2955,12 +2958,12 @@ async function openSkinPicker() {
   const panel = document.getElementById('skinPanel');
   if (panel.classList.contains('open')) { closeSkinPicker(); return; }
   panel.classList.add('open');
-  document.getElementById('skinActions').style.display = 'none';
   const side = state.mySlot;
   if (side < 0) {
     document.getElementById('skinCharTabs').innerHTML =
       '<div style="color:#f87171;font-size:12px">Join the game first to change skins</div>';
     document.getElementById('skinGrid').innerHTML = '';
+    document.getElementById('skinActions').style.display = 'none';
     return;
   }
 
@@ -2975,16 +2978,27 @@ async function openSkinPicker() {
   if (myChars.length === 0) {
     document.getElementById('skinCharTabs').innerHTML =
       '<div style="color:#f87171;font-size:12px">Could not read team. Start a match first.</div>';
+    document.getElementById('skinActions').style.display = 'none';
     return;
   }
 
-  document.getElementById('skinCharTabs').innerHTML = myChars.map(c => {
+  // Build tabs and auto-select the first character
+  document.getElementById('skinCharTabs').innerHTML = myChars.map((c, i) => {
     const bank = SLOT_BANKS[c.slot] || 16;
     const dir = CHAR_ID_TO_DIR[c.charId] || 'Ryu';
-    return `<button class="skin-char-tab" onclick="skinSelectChar('${c.slot}',${bank},'${dir}','${c.name}')">
+    return `<button class="skin-char-tab ${i===0?'active':''}" onclick="skinSelectChar('${c.slot}',${bank},'${dir}','${c.name}')">
       <span class="char-name">${c.name}</span>
     </button>`;
   }).join('');
+
+  // Auto-load the first character's skins immediately
+  const first = myChars[0];
+  const bank = SLOT_BANKS[first.slot] || 16;
+  const dir = CHAR_ID_TO_DIR[first.charId] || 'Ryu';
+  document.getElementById('skinActions').style.display = 'flex';
+  _skinBank = bank;
+  _skinCharDir = dir;
+  skinLoadSkinsForChar(dir, first.name);
 }
 
 function closeSkinPicker() { document.getElementById('skinPanel').classList.remove('open'); }
@@ -2992,10 +3006,14 @@ function closeSkinPicker() { document.getElementById('skinPanel').classList.remo
 async function skinSelectChar(slot, bank, dir, name) {
   _skinBank = bank;
   _skinCharDir = dir;
-  _skinLoadedSkins = [];
   document.querySelectorAll('.skin-char-tab').forEach(t => t.classList.remove('active'));
   event.currentTarget.classList.add('active');
   document.getElementById('skinActions').style.display = 'flex';
+  skinLoadSkinsForChar(dir, name);
+}
+
+async function skinLoadSkinsForChar(dir, name) {
+  _skinLoadedSkins = [];
   document.getElementById('skinStatus').textContent = `Loading ${name}...`;
   document.getElementById('skinGrid').innerHTML = '';
 
@@ -3014,7 +3032,7 @@ async function skinSelectChar(slot, bank, dir, name) {
   let html = '';
   for (const s of skins) {
     const colors = s.colors || s.palette_hex.match(/.{4}/g).map(h => parseInt(h,16));
-    const author = (s.author || 'Community').replace(/'/g, '');
+    const author = (s.author || 'Community').replace(/'/g, '').replace(/"/g, '');
     let bar = '';
     for (let i = 1; i < Math.min(16, colors.length); i++) {
       const c = colors[i];
@@ -3037,12 +3055,19 @@ async function skinApply(colors, author) {
     const ws = await ensureControlWs();
     ws.send(JSON.stringify({cmd:'palette_write', index:_skinBank*16, colors, persist:true}));
     document.getElementById('skinStatus').textContent = 'Skin applied! ✓';
-    // Show credit overlay on game screen
-    if (author) {
-      const overlay = document.getElementById('skinCreditOverlay');
-      if (overlay) overlay.textContent = `skin by ${author}`;
-    }
+    // Track which slot has which skin author
+    const side = _skinBank < 32 ? 'p1' : 'p2';
+    if (author) _skinCredits[side] = author;
+    updateSkinCreditOverlay();
   } catch(e) { document.getElementById('skinStatus').textContent = 'Failed: ' + e.message; }
+}
+
+function updateSkinCreditOverlay() {
+  const overlay = document.getElementById('skinCreditOverlay');
+  if (!overlay) return;
+  const p1 = _skinCredits.p1 ? `<div class="skin-credit">skin: ${_skinCredits.p1}</div>` : '<div></div>';
+  const p2 = _skinCredits.p2 ? `<div class="skin-credit">skin: ${_skinCredits.p2}</div>` : '<div></div>';
+  overlay.innerHTML = p1 + p2;
 }
 
 async function skinRandomize() {
