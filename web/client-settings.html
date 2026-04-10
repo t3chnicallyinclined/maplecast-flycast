@@ -244,27 +244,62 @@ function applyTelemetry(d) {
   // Button tester (slot 0 by default)
   if (d.kcode0 !== undefined) updateButtonGrid(d.kcode0, d.lt0 || 0, d.rt0 || 0);
 
-  // Players
-  if (d.players) {
-    let html = '';
-    for (const p of d.players) {
-      const lp = p.latchPolicy;
-      html += `<div class="player-card">
-        <span class="name">P${p.slot+1}</span>
-        ${p.connected ? p.name : '<i>disconnected</i>'}
-        ${p.device ? '(' + p.device + ')' : ''}<br>
-        PPS: <b>${p.pps}</b> | CPS: <b>${p.cps}</b> |
-        E2E: <b class="v">${p.avgE2eMs?.toFixed(1) ?? '-'}</b> ms |
-        Jitter: <b>${p.avgJitterMs?.toFixed(1) ?? '-'}</b> ms |
-        RTT: <b class="v">${p.rttMs || '-'}</b> ms<br>
-        <span class="latch-btns">Latch:
-          <button class="${lp==='LatencyFirst'?'active':'inactive'}"
-            onclick="send('config_set',{key:'LatchPolicy',slot:${p.slot},value:'LatencyFirst'})">LatencyFirst</button>
-          <button class="${lp==='ConsistencyFirst'?'active':'inactive'}"
-            onclick="send('config_set',{key:'LatchPolicy',slot:${p.slot},value:'ConsistencyFirst'})">ConsistencyFirst</button>
-        </span>
-        | Guard hits: <b>${p.guardHits}</b>
+  // Input sink stats + E2E latency
+  if (d.inputSinkActive !== undefined) {
+    let html = `<div class="player-card">
+      <span class="name">Input Sink</span> ${d.inputSinkActive ? '(active)' : '(inactive)'}<br>
+      Packets sent: <b class="v">${d.inputPacketsSent}</b> |
+      Send rate: <b class="v">${d.inputSendRateHz}</b> Hz<br>
+      Button changes: <b>${d.inputButtonChanges}</b> |
+      Trigger changes: <b>${d.inputTriggerChanges}</b>
+    </div>`;
+    if (d.e2eProbes > 0) {
+      html += `<div class="player-card" style="border-left:3px solid #4fc3f7">
+        <span class="name" style="color:#4fc3f7">E2E Latency</span>
+        (button press → visual change on screen)<br>
+        Last: <b class="v">${d.e2eLastMs.toFixed(1)}</b> ms |
+        Avg: <b class="v">${d.e2eEmaMs.toFixed(1)}</b> ms |
+        Min: <b>${d.e2eMinMs.toFixed(1)}</b> ms |
+        Max: <b>${d.e2eMaxMs.toFixed(1)}</b> ms<br>
+        Probes: <b>${d.e2eProbes}</b>
+        (${(d.e2eEmaMs / 16.67).toFixed(1)} frames)
       </div>`;
+    } else {
+      html += `<div class="player-card" style="border-left:3px solid #555">
+        <span class="name">E2E Latency</span>
+        — press a button to measure
+      </div>`;
+    }
+
+    // Players
+    if (d.players) {
+      for (const p of d.players) {
+        html += `<div class="player-card">
+          <span class="name">P${p.slot+1}</span>
+          ${p.connected ? p.name : '<i>disconnected</i>'}
+          ${p.device ? '(' + p.device + ')' : ''}<br>`;
+        if (p.packetsSent !== undefined) {
+          // Client-side player card
+          html += `PPS: <b class="v">${p.pps}</b> |
+            Pkts sent: <b>${p.packetsSent}</b> |
+            Btn: <b>${p.buttonChanges}</b> |
+            Trg: <b>${p.triggerChanges}</b>`;
+        } else {
+          // Server-side player card
+          html += `PPS: <b>${p.pps}</b> | CPS: <b>${p.cps}</b> |
+            E2E: <b class="v">${p.avgE2eMs?.toFixed(1) ?? '-'}</b> ms |
+            Jitter: <b>${p.avgJitterMs?.toFixed(1) ?? '-'}</b> ms |
+            RTT: <b class="v">${p.rttMs || '-'}</b> ms<br>
+            <span class="latch-btns">Latch:
+              <button class="${p.latchPolicy==='LatencyFirst'?'active':'inactive'}"
+                onclick="send('config_set',{key:'LatchPolicy',slot:${p.slot},value:'LatencyFirst'})">LatencyFirst</button>
+              <button class="${p.latchPolicy==='ConsistencyFirst'?'active':'inactive'}"
+                onclick="send('config_set',{key:'LatchPolicy',slot:${p.slot},value:'ConsistencyFirst'})">ConsistencyFirst</button>
+            </span>
+            | Guard hits: <b>${p.guardHits}</b>`;
+        }
+        html += `</div>`;
+      }
     }
     $('players').innerHTML = html;
   }

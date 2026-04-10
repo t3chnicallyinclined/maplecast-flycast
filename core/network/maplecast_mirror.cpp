@@ -29,6 +29,7 @@
 #include "maplecast_state_sync.h"
 #include "maplecast_input_server.h"
 #include "maplecast_audio_client.h"
+#include "maplecast_input_sink.h"
 #include "maplecast_compress.h"
 #include "rend/texconv.h"
 
@@ -1519,6 +1520,11 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 				pvrRegsDirty = true;
 			}
 		}
+
+		// E2E latency probe — complete if visual change detected.
+		// Zero-cost when no probe is pending (single atomic load).
+		if (vramDirty)
+			maplecast_input_sink::onVisualChange();
 
 		// Render — TA data already decoded in ctx.tad.thd_root by background thread
 		if (df.taSize > 0) {

@@ -33,11 +33,39 @@ static std::atomic<bool> _triggerRun{false};
 // Accumulated button state (active-low, same as kcode[] format).
 static uint16_t       _buttons = 0xFFFF;
 
+// Stats
+static std::atomic<uint64_t> _packetsSent{0};
+static std::atomic<uint64_t> _buttonChanges{0};
+static std::atomic<uint64_t> _triggerChanges{0};
+static std::atomic<int64_t>  _lastSendUs{0};
+static std::atomic<uint64_t> _prevPackets{0};
+static std::atomic<int64_t>  _prevRateTime{0};
+static std::atomic<uint32_t> _sendRateHz{0};
+
+// E2E latency probe — lock-free, zero-cost on the hot path.
+//
+// When a button changes, we store the monotonic timestamp in
+// _probeStartUs. When onVisualChange() is called (from the mirror
+// WS thread on TA frame arrival with dirty pages), it reads the
+// probe, computes the delta, stores the result, and clears the probe.
+// If no probe is pending (0), onVisualChange is a single atomic load.
+static std::atomic<int64_t>  _probeStartUs{0};
+static std::atomic<double>   _e2eLastMs{0.0};
+static std::atomic<double>   _e2eEmaMs{0.0};
+static std::atomic<double>   _e2eMinMs{999999.0};
+static std::atomic<double>   _e2eMaxMs{0.0};
+static std::atomic<uint64_t> _e2eProbes{0};
+
+static inline int64_t nowUs()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+}
+
 static void sendState()
 {
 	if (_sock < 0) return;
-	// Always read live analog trigger values — the button callback
-	// only handles digital triggers, but Xbox LT/RT are analog axes.
 	uint8_t ltVal = (uint8_t)(lt[_slot] >> 8);
 	uint8_t rtVal = (uint8_t)(rt[_slot] >> 8);
 	uint8_t pkt[7] = {
@@ -48,6 +76,8 @@ static void sendState()
 	};
 	sendto(_sock, pkt, sizeof(pkt), 0,
 	       (const sockaddr*)&_addr, sizeof(_addr));
+	_packetsSent.fetch_add(1, std::memory_order_relaxed);
+	_lastSendUs.store(nowUs(), std::memory_order_relaxed);
 }
 
 // SDL ButtonListener — fires synchronously on the main thread the
@@ -61,6 +91,11 @@ static void onButton(int port, DreamcastKey key, bool pressed)
 			_buttons &= ~(uint16_t)key;
 		else
 			_buttons |= (uint16_t)key;
+		_buttonChanges.fetch_add(1, std::memory_order_relaxed);
+		// Arm E2E probe — only if no probe is already pending.
+		// This way we measure from the FIRST button change, not the last.
+		int64_t zero = 0;
+		_probeStartUs.compare_exchange_strong(zero, nowUs(), std::memory_order_relaxed);
 		sendState();
 	}
 	// LT/RT handled by trigger poll thread (analog axes)
@@ -78,6 +113,7 @@ static void triggerPollLoop()
 		if (curLt != lastLt || curRt != lastRt) {
 			lastLt = curLt;
 			lastRt = curRt;
+			_triggerChanges.fetch_add(1, std::memory_order_relaxed);
 			sendState();
 		}
 		std::this_thread::sleep_for(std::chrono::milliseconds(8)); // ~120Hz
@@ -135,5 +171,58 @@ void shutdown()
 }
 
 bool active() { return _active; }
+
+void onVisualChange()
+{
+	// Complete the E2E probe if one is pending.
+	// Single atomic load — zero cost when no probe is armed.
+	int64_t start = _probeStartUs.exchange(0, std::memory_order_relaxed);
+	if (start == 0) return;  // no probe pending
+
+	double ms = (nowUs() - start) / 1000.0;
+	_e2eLastMs.store(ms, std::memory_order_relaxed);
+	_e2eProbes.fetch_add(1, std::memory_order_relaxed);
+
+	// EMA with factor 1/8
+	double prev = _e2eEmaMs.load(std::memory_order_relaxed);
+	double ema = (prev == 0.0) ? ms : prev + (ms - prev) * 0.125;
+	_e2eEmaMs.store(ema, std::memory_order_relaxed);
+
+	// Min/max
+	double curMin = _e2eMinMs.load(std::memory_order_relaxed);
+	if (ms < curMin) _e2eMinMs.store(ms, std::memory_order_relaxed);
+	double curMax = _e2eMaxMs.load(std::memory_order_relaxed);
+	if (ms > curMax) _e2eMaxMs.store(ms, std::memory_order_relaxed);
+}
+
+Stats getStats()
+{
+	Stats s{};
+	s.packetsSent = _packetsSent.load(std::memory_order_relaxed);
+	s.buttonChanges = _buttonChanges.load(std::memory_order_relaxed);
+	s.triggerChanges = _triggerChanges.load(std::memory_order_relaxed);
+	s.lastSendUs = _lastSendUs.load(std::memory_order_relaxed);
+
+	// Compute send rate (packets/sec) from delta
+	int64_t now = nowUs();
+	int64_t prevTime = _prevRateTime.load(std::memory_order_relaxed);
+	uint64_t prevPkts = _prevPackets.load(std::memory_order_relaxed);
+	if (prevTime > 0) {
+		double dt = (now - prevTime) / 1000000.0;
+		if (dt > 0.0)
+			s.sendRateHz = (uint32_t)((s.packetsSent - prevPkts) / dt);
+	}
+	_prevRateTime.store(now, std::memory_order_relaxed);
+	_prevPackets.store(s.packetsSent, std::memory_order_relaxed);
+
+	s.e2eLastMs = _e2eLastMs.load(std::memory_order_relaxed);
+	s.e2eEmaMs  = _e2eEmaMs.load(std::memory_order_relaxed);
+	s.e2eMinMs  = _e2eMinMs.load(std::memory_order_relaxed);
+	s.e2eMaxMs  = _e2eMaxMs.load(std::memory_order_relaxed);
+	s.e2eProbes = _e2eProbes.load(std::memory_order_relaxed);
+	if (s.e2eMinMs > 100000.0) s.e2eMinMs = 0.0;  // not yet measured
+
+	return s;
+}
 
 }

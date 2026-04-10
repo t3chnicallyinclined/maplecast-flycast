@@ -52,6 +52,7 @@
 #include "input/gamepad_device.h"
 #include "input/gamepad.h"
 #include "input/mapping.h"
+#include "maplecast_input_sink.h"
 
 extern u32 kcode[4];
 extern u16 lt[4], rt[4];
@@ -605,27 +606,50 @@ static void onMessage(ControlConnHdl hdl, ControlWsServer::message_ptr msg)
 		auto vs = maplecast_mirror::getClientStats();
 		auto as = maplecast_audio_client::getStats();
 
-		// Per-player info (slot 0 and 1)
+		// Input sink stats (client-side)
+		auto is = maplecast_input_sink::getStats();
+
+		// Per-player info — on the client, only the local player is
+		// meaningful. Server-side PlayerInfo is empty because
+		// maplecast_input::init() wasn't called.
 		json players = json::array();
-		for (int s = 0; s < 2; s++) {
-			const auto& p = maplecast_input::getPlayer(s);
+		if (maplecast_mirror::isClient()) {
+			// Client-side: show input sink stats as the local player
+			auto gp = findGamepadOnPort(0);
 			players.push_back({
-				{"slot", s},
-				{"connected", p.connected},
-				{"name", p.name},
-				{"device", p.device},
-				{"buttons", p.buttons},
-				{"lt", p.lt}, {"rt", p.rt},
-				{"pps", p.packetsPerSec},
-				{"cps", p.changesPerSec},
-				{"avgE2eMs", p.avgE2eUs / 1000.0},
-				{"avgJitterMs", p.avgJitterUs / 1000.0},
-				{"rttMs", p.rttMs},
-				{"latchPolicy", maplecast_input::getLatchPolicy(s) ==
-					maplecast_input::LatchPolicy::ConsistencyFirst
-					? "ConsistencyFirst" : "LatencyFirst"},
-				{"guardHits", p.guardHits},
+				{"slot", 0},
+				{"connected", maplecast_input_sink::active()},
+				{"name", gp ? gp->name() : "unknown"},
+				{"device", gp ? gp->api_name() : ""},
+				{"pps", is.sendRateHz},
+				{"buttonChanges", is.buttonChanges},
+				{"triggerChanges", is.triggerChanges},
+				{"packetsSent", is.packetsSent},
+				{"latchPolicy", "N/A (client)"},
+				{"guardHits", 0},
 			});
+		} else {
+			// Server-side: use the real PlayerInfo
+			for (int s = 0; s < 2; s++) {
+				const auto& p = maplecast_input::getPlayer(s);
+				players.push_back({
+					{"slot", s},
+					{"connected", p.connected},
+					{"name", p.name},
+					{"device", p.device},
+					{"buttons", p.buttons},
+					{"lt", p.lt}, {"rt", p.rt},
+					{"pps", p.packetsPerSec},
+					{"cps", p.changesPerSec},
+					{"avgE2eMs", p.avgE2eUs / 1000.0},
+					{"avgJitterMs", p.avgJitterUs / 1000.0},
+					{"rttMs", p.rttMs},
+					{"latchPolicy", maplecast_input::getLatchPolicy(s) ==
+						maplecast_input::LatchPolicy::ConsistencyFirst
+						? "ConsistencyFirst" : "LatencyFirst"},
+					{"guardHits", p.guardHits},
+				});
+			}
 		}
 
 		json data = {
@@ -653,6 +677,18 @@ static void onMessage(ControlConnHdl hdl, ControlWsServer::message_ptr msg)
 			// Input
 			{"guardUs", maplecast_input::getGuardUs()},
 			{"players", players},
+			// Input sink (client-side)
+			{"inputSinkActive", maplecast_input_sink::active()},
+			{"inputPacketsSent", is.packetsSent},
+			{"inputSendRateHz", is.sendRateHz},
+			{"inputButtonChanges", is.buttonChanges},
+			{"inputTriggerChanges", is.triggerChanges},
+			// E2E latency (button press → visual change on screen)
+			{"e2eLastMs", is.e2eLastMs},
+			{"e2eEmaMs", is.e2eEmaMs},
+			{"e2eMinMs", is.e2eMinMs},
+			{"e2eMaxMs", is.e2eMaxMs},
+			{"e2eProbes", is.e2eProbes},
 			// Raw input state for button tester
 			{"kcode0", (unsigned)(kcode[0] & 0xFFFF)},
 			{"kcode1", (unsigned)(kcode[1] & 0xFFFF)},

@@ -11,13 +11,31 @@
 	the TA stream — no local SH4.
 */
 #pragma once
+#include <cstdint>
 
 namespace maplecast_input_sink
 {
-	// Start the input sink. Opens a UDP socket to host:7100 and
-	// registers the SDL ButtonListener. slot = which DC controller
-	// port this client claims (0 or 1).
 	bool init(const char* host, int slot = 0);
 	void shutdown();
 	bool active();
+
+	struct Stats {
+		uint64_t packetsSent;
+		uint64_t buttonChanges;
+		uint64_t triggerChanges;
+		uint32_t sendRateHz;
+		int64_t  lastSendUs;
+		// E2E latency probe
+		double   e2eLastMs;         // last measured button-to-visual latency
+		double   e2eEmaMs;          // exponential moving average
+		double   e2eMinMs;          // session minimum
+		double   e2eMaxMs;          // session maximum
+		uint64_t e2eProbes;         // number of completed probes
+	};
+	Stats getStats();
+
+	// Called by the mirror WS thread when a TA frame with visual changes
+	// arrives. Completes any pending E2E probe. Zero-cost if no probe is
+	// pending (single atomic load).
+	void onVisualChange();
 }
