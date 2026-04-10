@@ -970,7 +970,7 @@ body {
 .skin-card .author { font-size:9px; color:#8888aa; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-family:-apple-system,sans-serif; }
 .skin-status { font-size:10px; color:#888; margin-top:6px; font-family:-apple-system,sans-serif; }
 /* Skin credit overlay on game screen */
-.skin-credit-overlay { position:absolute; bottom:24px; right:8px; font-size:9px; color:rgba(200,180,255,0.7); font-family:-apple-system,sans-serif; pointer-events:none; text-shadow:0 1px 3px rgba(0,0,0,0.8); z-index:10; }
+.skin-credit-overlay { position:absolute; top:6px; right:8px; font-size:9px; color:rgba(200,180,255,0.8); font-family:-apple-system,sans-serif; pointer-events:none; text-shadow:0 1px 4px rgba(0,0,0,0.9),0 0 8px rgba(0,0,0,0.6); z-index:4; letter-spacing:0.3px; }
 
 /* THE LINE (queue) */
 .queue-section {
@@ -2499,6 +2499,27 @@ if (new URLSearchParams(window.location.search).get('embed') === '1') {
         </div>
       </div>
     </div>
+
+    <!-- Skin Picker Panel (under the cabinet, above the right sidebar) -->
+    <div class="skin-panel" id="skinPanel">
+      <div class="skin-panel-header">
+        <div class="skin-panel-title">&#x1F3A8; Change Skins</div>
+        <button class="close-btn" onclick="closeSkinPicker()">&times;</button>
+      </div>
+      <div class="skin-char-tabs" id="skinCharTabs"></div>
+      <div class="skin-actions" id="skinActions" style="display:none">
+        <button class="btn-randomize" onclick="skinRandomize()">&#x1F3B2; Random</button>
+        <button class="btn-reset-skin" onclick="skinReset()">Reset</button>
+      </div>
+      <div class="skin-grid" id="skinGrid"></div>
+      <div class="skin-status" id="skinStatus"></div>
+      <div style="font-size:8px;color:#555;margin-top:8px;font-family:-apple-system,sans-serif">
+        Skins by the MVC2 community. Tools by
+        <a href="https://github.com/karttoon/mvc2-skins" target="_blank" style="color:#7c3aed">karttoon</a>,
+        <a href="https://github.com/Preppy/PalMod" target="_blank" style="color:#7c3aed">Preppy (PalMod)</a>,
+        <a href="https://zachd.com/palmod/" target="_blank" style="color:#7c3aed">Paxtez</a>.
+      </div>
+    </div>
   </div>
 
   <!-- RIGHT: LIVE ARCADE (lobby + queue) + TRASH TALK (chat) -->
@@ -2537,27 +2558,6 @@ if (new URLSearchParams(window.location.search).get('embed') === '1') {
       <button class="btn-leave-queue" id="leaveGameBtn" onclick="leaveGame()" style="display:none;color:var(--hot-red);border-color:var(--hot-red);">
         &#x1F6AA; DISCONNECT
       </button>
-    </div>
-
-    <!-- Skin Picker Panel (under the TV, not a modal) -->
-    <div class="skin-panel" id="skinPanel">
-      <div class="skin-panel-header">
-        <div class="skin-panel-title">&#x1F3A8; Change Skins</div>
-        <button class="close-btn" onclick="closeSkinPicker()">&times;</button>
-      </div>
-      <div class="skin-char-tabs" id="skinCharTabs"></div>
-      <div class="skin-actions" id="skinActions" style="display:none">
-        <button class="btn-randomize" onclick="skinRandomize()">&#x1F3B2; Random</button>
-        <button class="btn-reset-skin" onclick="skinReset()">Reset</button>
-      </div>
-      <div class="skin-grid" id="skinGrid"></div>
-      <div class="skin-status" id="skinStatus"></div>
-      <div style="font-size:8px;color:#555;margin-top:8px;font-family:-apple-system,sans-serif">
-        Skins by the MVC2 community. Tools by
-        <a href="https://github.com/karttoon/mvc2-skins" target="_blank" style="color:#7c3aed">karttoon</a>,
-        <a href="https://github.com/Preppy/PalMod" target="_blank" style="color:#7c3aed">Preppy (PalMod)</a>,
-        <a href="https://zachd.com/palmod/" target="_blank" style="color:#7c3aed">Paxtez</a>.
-      </div>
     </div>
 
     <!-- The Queue -->
