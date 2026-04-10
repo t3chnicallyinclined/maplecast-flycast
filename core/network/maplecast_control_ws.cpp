@@ -44,8 +44,17 @@
 */
 #include "maplecast_control_ws.h"
 #include "maplecast_mirror.h"
-#include "emulator.h"        // dc_savestate, dc_loadstate
-#include "cfg/option.h"      // config::SavestateSlot
+#include "maplecast_audio_client.h"
+#include "maplecast_input_server.h"
+#include "emulator.h"
+#include "cfg/option.h"
+#include "ui/gui.h"
+#include "input/gamepad_device.h"
+#include "input/gamepad.h"
+#include "input/mapping.h"
+
+extern u32 kcode[4];
+extern u16 lt[4], rt[4];
 
 #include <websocketpp/config/asio_no_tls.hpp>
 #include <websocketpp/server.hpp>
@@ -81,6 +90,7 @@ enum class CmdType {
 	SavestateSave,
 	SavestateLoad,
 	Reset,
+	OpenControls,
 };
 
 struct Command {
@@ -149,6 +159,36 @@ static json errReplyImmediate(const std::string& reply_id, const char* cmdName, 
 		{"reply_id", reply_id},
 		{"error", error},
 	};
+}
+
+// Find the gamepad assigned to a specific DC port (0=P1, 1=P2).
+// GetGamepad(index) returns by registration order, not by port.
+static std::shared_ptr<GamepadDevice> findGamepadOnPort(int port)
+{
+	for (int i = 0; i < GamepadDevice::GetGamepadCount(); i++) {
+		auto gp = GamepadDevice::GetGamepad(i);
+		if (gp && gp->maple_port() == port)
+			return gp;
+	}
+	return nullptr;
+}
+
+// ========================= Pending mapping detect state =========================
+static ControlConnHdl _detectConn;
+static std::string _detectReplyId;
+static std::string _detectDcKey;
+static std::atomic<bool> _detectPending{false};
+
+static void onInputDetected(u32 code, bool analog, bool positive)
+{
+	printf("[control-ws] mapping_detected: code=%u analog=%d positive=%d key=%s\n",
+	       code, analog, positive, _detectDcKey.c_str());
+	if (!_detectPending.load()) return;
+	_detectPending.store(false);
+	json data = {{"code", (int)code}, {"analog", analog}, {"positive", positive}, {"dc_key", _detectDcKey}};
+	sendJson(_detectConn, json{
+		{"ok", true}, {"cmd", "mapping_detected"}, {"reply_id", _detectReplyId}, {"data", data},
+	});
 }
 
 // ========================= Command execution (render thread) =========================
@@ -264,6 +304,14 @@ static void executeReset(const Command& cmd)
 	}
 }
 
+static void executeOpenControls(const Command& cmd)
+{
+	// Open the flycast native settings GUI directly (bypasses the
+	// mirror client's HTML-page redirect in gui_open_settings).
+	gui_setState(GuiState::Settings);
+	sendJson(cmd.conn, okReply(cmd, "open_controls"));
+}
+
 void drainCommandQueue()
 {
 	if (!_active.load(std::memory_order_relaxed)) return;
@@ -284,6 +332,7 @@ void drainCommandQueue()
 			case CmdType::SavestateSave:  executeSavestateSave(cmd); break;
 			case CmdType::SavestateLoad:  executeSavestateLoad(cmd); break;
 			case CmdType::Reset:          executeReset(cmd); break;
+			case CmdType::OpenControls:   executeOpenControls(cmd); break;
 		}
 	}
 }
@@ -361,19 +410,262 @@ static void onMessage(ControlConnHdl hdl, ControlWsServer::message_ptr msg)
 		cmd.slot = parsed["slot"].get<int>();
 	} else if (cmdName == "reset") {
 		cmd.type = CmdType::Reset;
+	} else if (cmdName == "open_controls") {
+		cmd.type = CmdType::OpenControls;
 	} else if (cmdName == "status") {
-		// Synchronous query — answered by the WS handler thread, no
-		// queue bounce needed. Reads cheap atomic-ish state.
 		json data = {
 			{"slot", config::SavestateSlot.get()},
 		};
+		auto vs = maplecast_mirror::getClientStats();
+		data["frame"] = vs.frameCount;
+		data["wsConnected"] = vs.wsConnected;
+		data["packetsReceived"] = vs.packetsReceived;
+		data["bytesReceived"] = vs.bytesReceived;
+		data["isClient"] = maplecast_mirror::isClient();
 		sendJson(hdl, json{
-			{"ok", true},
-			{"cmd", "status"},
-			{"reply_id", reply_id},
-			{"data", data},
+			{"ok", true}, {"cmd", "status"}, {"reply_id", reply_id}, {"data", data},
 		});
 		return;
+
+	} else if (cmdName == "config_get") {
+		// Return all mirror-client-relevant config values
+		json data = {
+			{"RenderResolution", config::RenderResolution.get()},
+			{"TextureFiltering", config::TextureFiltering.get()},
+			{"AnisotropicFiltering", config::AnisotropicFiltering.get()},
+			{"PerPixelLayers", config::PerPixelLayers.get()},
+			{"Fog", (bool)config::Fog},
+			{"ModifierVolumes", (bool)config::ModifierVolumes},
+			{"UseMipmaps", (bool)config::UseMipmaps},
+			{"Widescreen", (bool)config::Widescreen},
+			{"LinearInterpolation", (bool)config::LinearInterpolation},
+			{"ShowFPS", (bool)config::ShowFPS},
+			{"AudioVolume", config::AudioVolume.get()},
+		};
+		sendJson(hdl, json{
+			{"ok", true}, {"cmd", "config_get"}, {"reply_id", reply_id}, {"data", data},
+		});
+		return;
+
+	} else if (cmdName == "config_set") {
+		// Set a single config value: {"cmd":"config_set","key":"RenderResolution","value":1920}
+		if (!parsed.contains("key") || !parsed["key"].is_string()) {
+			sendJson(hdl, errReplyImmediate(reply_id, "config_set", "missing 'key'"));
+			return;
+		}
+		std::string key = parsed["key"].get<std::string>();
+		if (!parsed.contains("value")) {
+			sendJson(hdl, errReplyImmediate(reply_id, "config_set", "missing 'value'"));
+			return;
+		}
+		auto& val = parsed["value"];
+		bool ok = true;
+
+		if      (key == "RenderResolution" && val.is_number()) config::RenderResolution = val.get<int>();
+		else if (key == "TextureFiltering" && val.is_number()) config::TextureFiltering.set(val.get<int>());
+		else if (key == "AnisotropicFiltering" && val.is_number()) config::AnisotropicFiltering.set(val.get<int>());
+		else if (key == "PerPixelLayers" && val.is_number()) config::PerPixelLayers.set(val.get<int>());
+		else if (key == "Fog" && val.is_boolean()) config::Fog.set(val.get<bool>());
+		else if (key == "ModifierVolumes" && val.is_boolean()) config::ModifierVolumes.set(val.get<bool>());
+		else if (key == "UseMipmaps" && val.is_boolean()) config::UseMipmaps.set(val.get<bool>());
+		else if (key == "Widescreen" && val.is_boolean()) config::Widescreen.set(val.get<bool>());
+		else if (key == "LinearInterpolation" && val.is_boolean()) config::LinearInterpolation.set(val.get<bool>());
+		else if (key == "ShowFPS" && val.is_boolean()) config::ShowFPS.set(val.get<bool>());
+		else if (key == "AudioVolume" && val.is_number()) config::AudioVolume.set(val.get<int>());
+		else if (key == "LatchPolicy" && val.is_string() && parsed.contains("slot")) {
+			int slot = parsed["slot"].get<int>();
+			if (slot >= 0 && slot <= 1) {
+				auto p = val.get<std::string>() == "ConsistencyFirst"
+					? maplecast_input::LatchPolicy::ConsistencyFirst
+					: maplecast_input::LatchPolicy::LatencyFirst;
+				maplecast_input::setLatchPolicy(slot, p);
+			} else ok = false;
+		}
+		else if (key == "GuardUs" && val.is_number()) maplecast_input::setGuardUs(val.get<int64_t>());
+		else { ok = false; }
+
+		if (ok) {
+			sendJson(hdl, json{
+				{"ok", true}, {"cmd", "config_set"}, {"reply_id", reply_id},
+				{"data", {{"key", key}}},
+			});
+		} else {
+			sendJson(hdl, errReplyImmediate(reply_id, "config_set",
+				"unknown key or type mismatch: " + key));
+		}
+		return;
+
+	} else if (cmdName == "mapping_get") {
+		// Return current button mapping for the first gamepad
+		auto gp = findGamepadOnPort(0);
+		json data = json::object();
+		if (gp && gp->get_input_mapping()) {
+			auto mapper = gp->get_input_mapping();
+			data["device"] = gp->name();
+			data["api"] = gp->api_name();
+			// Map of DC key name → SDL button code
+			struct { const char* name; DreamcastKey key; } dcKeys[] = {
+				{"A", DC_BTN_A}, {"B", DC_BTN_B}, {"C", DC_BTN_C},
+				{"X", DC_BTN_X}, {"Y", DC_BTN_Y}, {"Z", DC_BTN_Z},
+				{"D", DC_BTN_D}, {"Start", DC_BTN_START},
+				{"DPad_Up", DC_DPAD_UP}, {"DPad_Down", DC_DPAD_DOWN},
+				{"DPad_Left", DC_DPAD_LEFT}, {"DPad_Right", DC_DPAD_RIGHT},
+			};
+			json buttons = json::object();
+			for (auto& dk : dcKeys) {
+				u32 code = mapper->get_button_code(0, dk.key);
+				buttons[dk.name] = (code != InputMapping::InputDef::INVALID_CODE) ? (int)code : -1;
+			}
+			data["buttons"] = buttons;
+			// Axes
+			json axes = json::object();
+			auto [ltCode, ltInv] = mapper->get_axis_code(0, DC_AXIS_LT);
+			auto [rtCode, rtInv] = mapper->get_axis_code(0, DC_AXIS_RT);
+			axes["LT"] = (ltCode != InputMapping::InputDef::INVALID_CODE) ? (int)ltCode : -1;
+			axes["RT"] = (rtCode != InputMapping::InputDef::INVALID_CODE) ? (int)rtCode : -1;
+			data["axes"] = axes;
+		} else {
+			data["error"] = "no gamepad found";
+		}
+		sendJson(hdl, json{
+			{"ok", true}, {"cmd", "mapping_get"}, {"reply_id", reply_id}, {"data", data},
+		});
+		return;
+
+	} else if (cmdName == "mapping_detect") {
+		int gpCount = GamepadDevice::GetGamepadCount();
+		auto gp = findGamepadOnPort(0);
+		if (!gp) {
+			sendJson(hdl, errReplyImmediate(reply_id, "mapping_detect",
+				"no gamepad (count=" + std::to_string(gpCount) + ")"));
+			return;
+		}
+		_detectConn = hdl;
+		_detectReplyId = reply_id;
+		_detectDcKey = parsed.value("dc_key", "");
+		_detectPending.store(true);
+		gp->detectInput(false, onInputDetected);
+		printf("[control-ws] mapping_detect: listening for %s on '%s' (port=%d, count=%d)\n",
+		       _detectDcKey.c_str(), gp->name().c_str(), gp->maple_port(), gpCount);
+		sendJson(hdl, json{
+			{"ok", true}, {"cmd", "mapping_detect"}, {"reply_id", reply_id},
+			{"data", {{"listening", true}, {"dc_key", _detectDcKey},
+			          {"device", gp->name()}, {"port", gp->maple_port()}}},
+		});
+		return;
+
+	} else if (cmdName == "mapping_set") {
+		// Set a button mapping: {"cmd":"mapping_set","dc_key":"A","code":3}
+		auto gp = findGamepadOnPort(0);
+		if (!gp || !gp->get_input_mapping()) {
+			sendJson(hdl, errReplyImmediate(reply_id, "mapping_set", "no gamepad"));
+			return;
+		}
+		std::string dcKeyName = parsed.value("dc_key", "");
+		int code = parsed.value("code", -1);
+		if (dcKeyName.empty() || code < 0) {
+			sendJson(hdl, errReplyImmediate(reply_id, "mapping_set", "need dc_key and code"));
+			return;
+		}
+		// Resolve DC key name to enum
+		DreamcastKey dk = EMU_BTN_NONE;
+		struct { const char* n; DreamcastKey k; } map[] = {
+			{"A", DC_BTN_A}, {"B", DC_BTN_B}, {"C", DC_BTN_C},
+			{"X", DC_BTN_X}, {"Y", DC_BTN_Y}, {"Z", DC_BTN_Z},
+			{"D", DC_BTN_D}, {"Start", DC_BTN_START},
+			{"DPad_Up", DC_DPAD_UP}, {"DPad_Down", DC_DPAD_DOWN},
+			{"DPad_Left", DC_DPAD_LEFT}, {"DPad_Right", DC_DPAD_RIGHT},
+			{"LT", DC_AXIS_LT}, {"RT", DC_AXIS_RT},
+		};
+		for (auto& m : map) { if (dcKeyName == m.n) { dk = m.k; break; } }
+		if (dk == EMU_BTN_NONE) {
+			sendJson(hdl, errReplyImmediate(reply_id, "mapping_set", "unknown dc_key: " + dcKeyName));
+			return;
+		}
+		auto mapper = gp->get_input_mapping();
+		mapper->set_button(0, dk, InputMapping::ButtonCombo{
+			InputMapping::InputSet{InputMapping::InputDef::from_button((u32)code)}, false
+		});
+		gp->save_mapping();
+		sendJson(hdl, json{
+			{"ok", true}, {"cmd", "mapping_set"}, {"reply_id", reply_id},
+			{"data", {{"dc_key", dcKeyName}, {"code", code}}},
+		});
+		return;
+
+	} else if (cmdName == "mapping_cancel") {
+		auto gp = findGamepadOnPort(0);
+		if (gp) gp->cancel_detect_input();
+		sendJson(hdl, json{
+			{"ok", true}, {"cmd", "mapping_cancel"}, {"reply_id", reply_id}, {"data", json::object()},
+		});
+		return;
+
+	} else if (cmdName == "telemetry") {
+		auto vs = maplecast_mirror::getClientStats();
+		auto as = maplecast_audio_client::getStats();
+
+		// Per-player info (slot 0 and 1)
+		json players = json::array();
+		for (int s = 0; s < 2; s++) {
+			const auto& p = maplecast_input::getPlayer(s);
+			players.push_back({
+				{"slot", s},
+				{"connected", p.connected},
+				{"name", p.name},
+				{"device", p.device},
+				{"buttons", p.buttons},
+				{"lt", p.lt}, {"rt", p.rt},
+				{"pps", p.packetsPerSec},
+				{"cps", p.changesPerSec},
+				{"avgE2eMs", p.avgE2eUs / 1000.0},
+				{"avgJitterMs", p.avgJitterUs / 1000.0},
+				{"rttMs", p.rttMs},
+				{"latchPolicy", maplecast_input::getLatchPolicy(s) ==
+					maplecast_input::LatchPolicy::ConsistencyFirst
+					? "ConsistencyFirst" : "LatencyFirst"},
+				{"guardHits", p.guardHits},
+			});
+		}
+
+		json data = {
+			// Video
+			{"frame", vs.frameCount},
+			{"wsConnected", vs.wsConnected},
+			{"videoPackets", vs.packetsReceived},
+			{"videoBytes", vs.bytesReceived},
+			{"arrivalEmaMs", vs.arrivalEmaUs / 1000.0},
+			{"arrivalMaxMs", vs.arrivalMaxUs / 1000.0},
+			{"decodeLastMs", vs.lastDecodeUs / 1000.0},
+			{"decodeEmaMs", vs.decodeEmaUs / 1000.0},
+			{"lastTaSize", vs.lastTaSize},
+			{"lastDirtyPages", vs.lastDirtyPages},
+			{"lastVramDirty", vs.lastVramDirty},
+			// Audio
+			{"audioConnected", as.connected},
+			{"audioPackets", as.packetsReceived},
+			{"audioDropped", as.packetsDropped},
+			{"audioBytes", as.bytesReceived},
+			{"audioPushFails", as.pushFailures},
+			{"audioArrivalEmaMs", as.arrivalIntervalEmaUs / 1000.0},
+			{"audioArrivalMaxMs", as.arrivalIntervalMaxUs / 1000.0},
+			{"audioSeq", as.lastSeq},
+			// Input
+			{"guardUs", maplecast_input::getGuardUs()},
+			{"players", players},
+			// Raw input state for button tester
+			{"kcode0", (unsigned)(kcode[0] & 0xFFFF)},
+			{"kcode1", (unsigned)(kcode[1] & 0xFFFF)},
+			{"lt0", (unsigned)(lt[0] >> 8)},
+			{"rt0", (unsigned)(rt[0] >> 8)},
+			{"lt1", (unsigned)(lt[1] >> 8)},
+			{"rt1", (unsigned)(rt[1] >> 8)},
+		};
+		sendJson(hdl, json{
+			{"ok", true}, {"cmd", "telemetry"}, {"reply_id", reply_id}, {"data", data},
+		});
+		return;
+
 	} else {
 		sendJson(hdl, errReplyImmediate(reply_id, cmdName.c_str(),
 			std::string("unknown command: ") + cmdName));

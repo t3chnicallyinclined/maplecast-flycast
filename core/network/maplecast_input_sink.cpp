@@ -2,18 +2,23 @@
 	MapleCast Input Sink — implementation.
 	See maplecast_input_sink.h for design.
 */
+#include "types.h"
 #include "maplecast_input_sink.h"
 #include "input/gamepad_device.h"
 
 #include <cstdio>
 #include <cstring>
 #include <atomic>
+#include <thread>
+#include <chrono>
 
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+
+extern u16 lt[4], rt[4];
 
 namespace maplecast_input_sink
 {
@@ -22,19 +27,22 @@ static int            _sock = -1;
 static sockaddr_in    _addr{};
 static int            _slot = 0;
 static bool           _active = false;
+static std::thread    _triggerThread;
+static std::atomic<bool> _triggerRun{false};
 
 // Accumulated button state (active-low, same as kcode[] format).
-// Only modified by the ButtonListener callback on the SDL event thread.
 static uint16_t       _buttons = 0xFFFF;
-static uint8_t        _lt = 0;
-static uint8_t        _rt = 0;
 
 static void sendState()
 {
 	if (_sock < 0) return;
+	// Always read live analog trigger values — the button callback
+	// only handles digital triggers, but Xbox LT/RT are analog axes.
+	uint8_t ltVal = (uint8_t)(lt[_slot] >> 8);
+	uint8_t rtVal = (uint8_t)(rt[_slot] >> 8);
 	uint8_t pkt[7] = {
 		'P', 'C', (uint8_t)_slot,
-		_lt, _rt,
+		ltVal, rtVal,
 		(uint8_t)(_buttons >> 8),
 		(uint8_t)(_buttons & 0xFF)
 	};
@@ -55,13 +63,24 @@ static void onButton(int port, DreamcastKey key, bool pressed)
 			_buttons |= (uint16_t)key;
 		sendState();
 	}
-	else if (key == DC_AXIS_LT) {
-		_lt = pressed ? 0xFF : 0;
-		sendState();
-	}
-	else if (key == DC_AXIS_RT) {
-		_rt = pressed ? 0xFF : 0;
-		sendState();
+	// LT/RT handled by trigger poll thread (analog axes)
+}
+
+// Trigger polling thread — reads lt[]/rt[] at ~120Hz and sends when
+// they change. Needed because analog triggers go through the axis path
+// in flycast and never fire the ButtonListener callback.
+static void triggerPollLoop()
+{
+	uint8_t lastLt = 0, lastRt = 0;
+	while (_triggerRun.load(std::memory_order_relaxed)) {
+		uint8_t curLt = (uint8_t)(lt[_slot] >> 8);
+		uint8_t curRt = (uint8_t)(rt[_slot] >> 8);
+		if (curLt != lastLt || curRt != lastRt) {
+			lastLt = curLt;
+			lastRt = curRt;
+			sendState();
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(8)); // ~120Hz
 	}
 }
 
@@ -91,8 +110,11 @@ bool init(const char* host, int slot)
 		return false;
 	}
 
-	// Register the ButtonListener on all gamepad devices
 	GamepadDevice::listenButtonsGlobal(onButton);
+
+	// Start trigger polling thread for analog LT/RT
+	_triggerRun.store(true);
+	_triggerThread = std::thread(triggerPollLoop);
 
 	_active = true;
 	char ipstr[INET_ADDRSTRLEN];
@@ -104,7 +126,9 @@ bool init(const char* host, int slot)
 void shutdown()
 {
 	if (!_active) return;
+	_triggerRun.store(false);
 	GamepadDevice::unlistenButtonsGlobal(onButton);
+	if (_triggerThread.joinable()) _triggerThread.join();
 	if (_sock >= 0) { close(_sock); _sock = -1; }
 	_active = false;
 	printf("[input-sink] shutdown\n");

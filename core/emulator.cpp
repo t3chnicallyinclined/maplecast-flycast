@@ -1143,6 +1143,28 @@ void Emulator::start()
 
 		maplecast_mirror::initClient();
 
+		// Control WS for the settings HTML page (same as the server's
+		// overlord channel, but on the local machine for client settings).
+		{
+			int controlPort = 7211;
+			if (const char* cp = std::getenv("MAPLECAST_CONTROL_PORT"))
+				controlPort = std::atoi(cp);
+			if (maplecast_control_ws::init(controlPort)) {
+				// Auto-open the settings page in the default browser.
+				// The HTML page connects to ws://localhost:PORT and
+				// provides a nice UI for all config/telemetry.
+				char url[256];
+				snprintf(url, sizeof(url),
+					"file://%s/web/client-settings.html?port=%d",
+					std::getenv("PWD") ? std::getenv("PWD") : ".",
+					controlPort);
+				char cmd[512];
+				snprintf(cmd, sizeof(cmd), "xdg-open '%s' &", url);
+				printf("[MIRROR] opening settings: %s\n", url);
+				system(cmd);
+			}
+		}
+
 		// Input sink: send local gamepad events to the server.
 		// Reads MAPLECAST_SERVER_HOST for the target (same as mirror client).
 		{

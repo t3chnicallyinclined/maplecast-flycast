@@ -20,6 +20,9 @@
 #include "network/maplecast_mirror.h"
 #include "gui_mirror_debug.h"
 #include "rend/osd.h"
+#ifdef USE_SDL
+#include <SDL.h>
+#endif
 #include "cfg/cfg.h"
 #include "imgui.h"
 #include "imgui_stdlib.h"
@@ -633,6 +636,21 @@ void gui_plot_render_time(int width, int height)
 
 void gui_open_settings()
 {
+	// Mirror client: open the HTML settings page in the browser.
+	if (maplecast_mirror::isClient()) {
+		int port = 7211;
+		if (const char* cp = std::getenv("MAPLECAST_CONTROL_PORT"))
+			port = std::atoi(cp);
+		char url[256];
+		snprintf(url, sizeof(url),
+			"file://%s/web/client-settings.html?port=%d",
+			std::getenv("PWD") ? std::getenv("PWD") : ".", port);
+		char cmd[512];
+		snprintf(cmd, sizeof(cmd), "xdg-open '%s' &", url);
+		(void)system(cmd);
+		return;
+	}
+
 	const LockGuard lock(guiMutex);
 	if (gui_state == GuiState::Closed && !settings.naomi.slave)
 	{
@@ -1702,13 +1720,41 @@ void gui_display_osd() {
 // just owns the ImGui frame lifecycle and key handling, which need
 // access to gui.cpp's file-static imguiDriver/gui_newFrame/gui_endFrame.
 #include "gui_mirror_debug.h"
+// Gear icon click zone — checked via raw SDL mouse state, not ImGui,
+// because ImGui's click handling conflicts with flycast's DC mouse input.
+static bool _gearWasPressed = false;
+
 void gui_displayMirrorDebug()
 {
 	gui_newFrame();
 	ImGui::NewFrame();
 
+	// Draw a small gear icon in the top-left corner.
+	// Visual only via ImGui; click detection via raw SDL below.
+	ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_Always);
+	ImGui::SetNextWindowBgAlpha(0.5f);
+	ImGui::Begin("##gear_visual", nullptr,
+		ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+		ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
+		ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
+		ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+	ImGui::TextColored(ImVec4(1, 1, 1, 0.7f), "\xe2\x9a\x99");
+	ImGui::End();
+
 	ImGui::Render();
 	gui_endFrame(true);
+
+	// Raw SDL click detection on the gear zone (top-left 40x40 px).
+	// This bypasses ImGui entirely — no WantCaptureMouse conflicts.
+#ifdef USE_SDL
+	int mx, my;
+	Uint32 mstate = SDL_GetMouseState(&mx, &my);
+	bool pressed = (mstate & SDL_BUTTON_LMASK) != 0;
+	if (pressed && !_gearWasPressed && mx < 40 && my < 40) {
+		gui_open_settings();
+	}
+	_gearWasPressed = pressed;
+#endif
 }
 
 void gui_display_profiler()
