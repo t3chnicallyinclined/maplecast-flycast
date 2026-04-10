@@ -62,7 +62,8 @@ button.danger { background: #ef5350; color: #fff; }
     <button onclick="applyTestColors('chrome')">Chrome</button>
     <button class="danger" onclick="clearSkin()">Reset</button>
   </div>
-  <p style="font-size:0.8em;color:#999;margin-bottom:8px">Community skins from SurrealDB coming soon.</p>
+  <div id="skin-list" style="margin-top:10px"></div>
+  <div id="skin-loading" style="font-size:0.8em;color:#999"></div>
 </section>
 
 <script>
@@ -198,6 +199,88 @@ async function applyTestColors(preset = 'pink') {
   await send('palette_clear');
   await send('palette_write', { index: probeBank * 16, colors, persist: true });
 }
+
+// SurrealDB skin browser
+const DB_HOST = new URLSearchParams(location.search).get('db') || HOST;
+const DB_PORT = 8000;
+
+async function queryDB(sql) {
+  try {
+    const resp = await fetch(`http://${DB_HOST}:${DB_PORT}/sql`, {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'surreal-ns': 'maplecast',
+        'surreal-db': 'mvc2',
+        'Authorization': 'Basic ' + btoa('root:nobd_arcade_2026'),
+      },
+      body: sql,
+    });
+    const data = await resp.json();
+    return data[0]?.result || [];
+  } catch (e) {
+    console.error('DB query failed:', e);
+    return [];
+  }
+}
+
+async function loadSkinsForChar(charDir) {
+  document.getElementById('skin-loading').textContent = 'Loading skins...';
+  const skins = await queryDB(
+    `SELECT hash, author, palette_hex, colors, credit FROM skin WHERE char_dir = '${charDir}' ORDER BY author LIMIT 200;`
+  );
+  document.getElementById('skin-loading').textContent = '';
+
+  if (skins.length === 0) {
+    document.getElementById('skin-list').innerHTML =
+      '<div style="color:#999;font-size:0.85em">No skins found in database. Run import_skins.py first.</div>';
+    return;
+  }
+
+  let html = `<div style="font-size:0.8em;color:#999;margin-bottom:6px">${skins.length} community skins</div>`;
+  html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px;max-height:350px;overflow-y:auto">';
+  for (const s of skins) {
+    // Preview: show the palette as a color bar
+    const colors = s.colors || hexToColors(s.palette_hex);
+    let bar = '';
+    for (let i = 1; i < 16; i++) {
+      const c = colors[i];
+      const r = ((c >> 8) & 0xF) * 17, g = ((c >> 4) & 0xF) * 17, b = (c & 0xF) * 17;
+      bar += `<span style="display:inline-block;width:8px;height:16px;background:rgb(${r},${g},${b})"></span>`;
+    }
+    html += `<div style="background:#0f3460;border-radius:4px;padding:6px;cursor:pointer;border:1px solid #2a3a5c"
+      onclick="applySkin(${JSON.stringify(colors)})"
+      title="${s.credit || s.author}">
+      <div style="margin-bottom:3px">${bar}</div>
+      <div style="font-size:0.7em;color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${s.author}</div>
+    </div>`;
+  }
+  html += '</div>';
+  document.getElementById('skin-list').innerHTML = html;
+}
+
+function hexToColors(hex) {
+  const colors = [];
+  for (let i = 0; i < hex.length; i += 4) {
+    colors.push(parseInt(hex.substr(i, 4), 16));
+  }
+  return colors;
+}
+
+async function applySkin(colors) {
+  if (probeBank < 0) { alert('Select a character first'); return; }
+  await send('palette_clear');
+  await send('palette_write', { index: probeBank * 16, colors, persist: true });
+}
+
+// Update selectChar to also load skins
+const _origSelectChar = selectChar;
+selectChar = function(slot, charId, name) {
+  _origSelectChar(slot, charId, name);
+  // Map char name to directory name for DB query
+  const dirName = name.replace(/ /g, '_');
+  loadSkinsForChar(dirName);
+};
 
 connect();
 setInterval(refreshMatch, 5000);
