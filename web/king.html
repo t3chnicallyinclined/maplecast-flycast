@@ -942,6 +942,24 @@ body {
 
 .btn-leave-queue:hover { background: rgba(255,0,0,0.1); }
 
+/* === SKIN PICKER === */
+.btn-skins { display:none; width:100%; padding:10px; margin-top:6px; font-family:'Press Start 2P',monospace; font-size:8px; background:linear-gradient(180deg,#6a1b9a 0%,#4a0e6b 100%); color:#fff; border:2px solid #9c27b0; cursor:pointer; letter-spacing:1px; transition:all 0.2s; }
+.btn-skins:hover { transform:scale(1.02); box-shadow:0 0 12px rgba(156,39,176,0.4); }
+.skin-modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:9999; justify-content:center; align-items:center; }
+.skin-modal.open { display:flex; }
+.skin-modal-box { background:#16213e; border-radius:10px; padding:16px; width:90%; max-width:520px; max-height:80vh; overflow-y:auto; border:2px solid #4fc3f7; }
+.skin-modal h3 { color:#4fc3f7; font-family:'Press Start 2P',monospace; font-size:10px; margin-bottom:10px; }
+.skin-modal .close-btn { float:right; background:none; border:none; color:#ef5350; font-size:18px; cursor:pointer; }
+.skin-char-tabs { display:flex; gap:4px; margin-bottom:10px; flex-wrap:wrap; }
+.skin-char-tab { padding:6px 10px; font-family:'Press Start 2P',monospace; font-size:7px; background:#0f3460; border:1px solid #2a3a5c; color:#aaa; cursor:pointer; border-radius:4px; }
+.skin-char-tab.active { background:#1a4a80; color:#4fc3f7; border-color:#4fc3f7; }
+.skin-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:4px; max-height:300px; overflow-y:auto; }
+.skin-card { background:#0f3460; border-radius:4px; padding:6px; cursor:pointer; border:2px solid transparent; transition:border-color 0.15s; }
+.skin-card:hover { border-color:#4fc3f7; }
+.skin-card .palette-bar { display:flex; height:14px; border-radius:2px; overflow:hidden; margin-bottom:3px; }
+.skin-card .palette-bar span { flex:1; }
+.skin-card .author { font-size:6px; color:#888; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-family:'Press Start 2P',monospace; }
+
 /* THE LINE (queue) */
 .queue-section {
   /* Fixed bound so the queue stays visible above the chat. flex:1 alone
@@ -2498,9 +2516,24 @@ if (new URLSearchParams(window.location.search).get('embed') === '1') {
       <button class="btn-leave-queue" id="leaveQueueBtn" onclick="leaveQueue()">
         &#x274C; LEAVE LINE
       </button>
+      <button class="btn-skins" id="skinBtn" onclick="openSkinPicker()">
+        &#x1F3A8; CHANGE SKINS
+      </button>
       <button class="btn-leave-queue" id="leaveGameBtn" onclick="leaveGame()" style="display:none;color:var(--hot-red);border-color:var(--hot-red);">
         &#x1F6AA; DISCONNECT
       </button>
+    </div>
+
+    <!-- Skin Picker Modal -->
+    <div class="skin-modal" id="skinModal">
+      <div class="skin-modal-box">
+        <button class="close-btn" onclick="closeSkinPicker()">&times;</button>
+        <h3>&#x1F3A8; CHANGE SKINS</h3>
+        <div class="skin-char-tabs" id="skinCharTabs"></div>
+        <div id="skinCharPicker"></div>
+        <div class="skin-grid" id="skinGrid"></div>
+        <div id="skinStatus" style="font-size:7px;color:#999;margin-top:6px;font-family:'Press Start 2P',monospace"></div>
+      </div>
     </div>
 
     <!-- The Queue -->
@@ -2837,6 +2870,129 @@ document.addEventListener('click', e => {
     }
   }
 }
+
+// ============================================================
+// SKIN PICKER — browse + apply community skins from SurrealDB
+// ============================================================
+const SKIN_DB_BASE = `${location.protocol}//${location.hostname}/db`;
+const SLOT_BANKS = { P1C1:16, P2C1:24, P1C2:32, P2C2:40, P1C3:48, P2C3:56 };
+const CHAR_DIRS = {
+  'Ryu':'Ryu','Zangief':'Zangief','Guile':'Guile','Morrigan':'Morrigan',
+  'Anakaris':'Anakaris','Strider':'Strider','Cyclops':'Cyclops','Wolverine':'Wolverine',
+  'Psylocke':'Psylocke','Iceman':'Iceman','Rogue':'Rogue','Captain America':'Captain_America',
+  'Spider-Man':'Spider-Man','Hulk':'Hulk','Venom':'Venom','Doctor Doom':'Doctor_Doom',
+  'Tron Bonne':'Tron_Bonne','Jill':'Jill','Hayato':'Hayato','Ruby Heart':'Ruby_Heart',
+  'SonSon':'SonSon','Amingo':'Amingo','Marrow':'Marrow','Cable':'Cable',
+  'Chun-Li':'Chun-Li','Mega Man':'Mega_Man','Roll':'Roll','Akuma':'Akuma',
+  'BB Hood':'BB_Hood','Felicia':'Felicia','Charlie':'Charlie_Nash','Sakura':'Sakura',
+  'Dan':'Dan','Cammy':'Cammy','Dhalsim':'Dhalsim','M.Bison':'M_Bison',
+  'Ken':'Ken','Gambit':'Gambit','Juggernaut':'Juggernaut','Storm':'Storm',
+  'Sabretooth':'Sabretooth','Magneto':'Magneto','Shuma-Gorath':'Shuma-Gorath',
+  'War Machine':'War_Machine','Silver Samurai':'Silver_Samurai','Omega Red':'Omega_Red',
+  'Spiral':'Spiral','Colossus':'Colossus','Iron Man':'Iron_Man','Sentinel':'Sentinel',
+  'Blackheart':'Blackheart','Thanos':'Thanos','Jin':'Jin',
+  'Captain Commando':'Captain_Commando','Bone Wolverine':'Wolverine_Bone_Claw','Servbot':'Servbot',
+};
+
+let _skinBank = -1;
+
+async function skinQuery(sql) {
+  try {
+    const r = await fetch(`${SKIN_DB_BASE}/sql`, {
+      method:'POST',
+      headers:{'Accept':'application/json','surreal-ns':'maplecast','surreal-db':'mvc2',
+        'Authorization':'Basic '+btoa('root:nobd_arcade_2026')},
+      body: sql,
+    });
+    return (await r.json())[0]?.result || [];
+  } catch(e) { console.error('Skin DB:', e); return []; }
+}
+
+function openSkinPicker() {
+  document.getElementById('skinModal').classList.add('open');
+  const side = state.mySlot;
+  if (side < 0) {
+    document.getElementById('skinCharTabs').innerHTML =
+      '<div style="color:#ef5350;font-size:8px;font-family:Press Start 2P,monospace">JOIN THE GAME TO CHANGE SKINS</div>';
+    document.getElementById('skinGrid').innerHTML = '';
+    document.getElementById('skinCharPicker').innerHTML = '';
+    return;
+  }
+  const prefix = side === 0 ? 'P1' : 'P2';
+  const slots = [`${prefix}C1`,`${prefix}C2`,`${prefix}C3`];
+  document.getElementById('skinCharTabs').innerHTML = slots.map(s =>
+    `<button class="skin-char-tab" onclick="skinPickSlot('${s}')">${s}</button>`
+  ).join('');
+  document.getElementById('skinGrid').innerHTML =
+    '<div style="color:#999;font-size:7px;font-family:Press Start 2P,monospace">SELECT A SLOT, THEN A CHARACTER</div>';
+  document.getElementById('skinCharPicker').innerHTML = '';
+}
+
+function closeSkinPicker() { document.getElementById('skinModal').classList.remove('open'); }
+
+function skinPickSlot(slot) {
+  _skinBank = SLOT_BANKS[slot];
+  document.querySelectorAll('.skin-char-tab').forEach(t => t.classList.remove('active'));
+  event.currentTarget.classList.add('active');
+  // Show character grid
+  let html = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:3px;margin-bottom:8px;max-height:120px;overflow-y:auto">';
+  for (const [name, dir] of Object.entries(CHAR_DIRS)) {
+    html += `<button style="padding:3px;font-size:5px;background:#0f3460;border:1px solid #2a3a5c;color:#ccc;cursor:pointer;border-radius:3px;font-family:Press Start 2P,monospace"
+      onclick="skinLoadChar('${dir}','${name}')">${name}</button>`;
+  }
+  html += '</div>';
+  document.getElementById('skinCharPicker').innerHTML = html;
+  document.getElementById('skinGrid').innerHTML = '';
+}
+
+async function skinLoadChar(dir, name) {
+  document.getElementById('skinStatus').textContent = `Loading ${name}...`;
+  const skins = await skinQuery(
+    `SELECT hash, author, palette_hex, colors, credit FROM skin WHERE char_dir = '${dir}' ORDER BY author LIMIT 200;`
+  );
+  if (!skins.length) {
+    document.getElementById('skinGrid').innerHTML = '<div style="color:#999;font-size:7px">No skins found</div>';
+    document.getElementById('skinStatus').textContent = '';
+    return;
+  }
+  let html = '';
+  for (const s of skins) {
+    const colors = s.colors || s.palette_hex.match(/.{4}/g).map(h => parseInt(h,16));
+    let bar = '';
+    for (let i = 1; i < Math.min(16, colors.length); i++) {
+      const c = colors[i];
+      const r=((c>>8)&0xF)*17, g=((c>>4)&0xF)*17, b=(c&0xF)*17;
+      bar += `<span style="background:rgb(${r},${g},${b})"></span>`;
+    }
+    html += `<div class="skin-card" onclick='skinApply(${JSON.stringify(colors)})'>
+      <div class="palette-bar">${bar}</div>
+      <div class="author" title="${(s.credit||s.author||'').replace(/'/g,'')}">${s.author||'Community'}</div>
+    </div>`;
+  }
+  document.getElementById('skinGrid').innerHTML = html;
+  document.getElementById('skinStatus').textContent = `${name}: ${skins.length} skins (bank ${_skinBank})`;
+}
+
+async function skinApply(colors) {
+  if (_skinBank < 0) return;
+  try {
+    const { ensureControlWs } = await import('./js/ws-connection.mjs');
+    const ws = await ensureControlWs();
+    ws.send(JSON.stringify({cmd:'palette_write', index:_skinBank*16, colors, persist:true}));
+    document.getElementById('skinStatus').textContent = 'Skin applied!';
+  } catch(e) { document.getElementById('skinStatus').textContent = 'Failed: '+e.message; }
+}
+
+// Show skin button only when player has a slot
+setInterval(() => {
+  const btn = document.getElementById('skinBtn');
+  if (btn) btn.style.display = state.mySlot >= 0 ? 'block' : 'none';
+}, 1000);
+
+window.openSkinPicker = openSkinPicker;
+window.closeSkinPicker = closeSkinPicker;
+window.skinPickSlot = skinPickSlot;
+window.skinLoadChar = skinLoadChar;
 
 </script>
 
