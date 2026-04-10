@@ -49,6 +49,9 @@
 #include "emulator.h"
 #include "cfg/option.h"
 #include "ui/gui.h"
+#include "hw/pvr/pvr_regs.h"
+#include "hw/pvr/pvr_mem.h"
+#include "hw/sh4/sh4_mem.h"
 #include "input/gamepad_device.h"
 #include "input/gamepad.h"
 #include "input/mapping.h"
@@ -172,6 +175,29 @@ static std::shared_ptr<GamepadDevice> findGamepadOnPort(int port)
 			return gp;
 	}
 	return nullptr;
+}
+
+// ========================= Persistent palette override =========================
+// When set, re-applied every frame by applyPaletteOverrides() called from
+// serverPublish. Survives game reloads because we write after the game does.
+struct PaletteOverride {
+	bool active = false;
+	int startIndex = 0;
+	std::vector<u16> colors;
+};
+static std::mutex _palOverrideMutex;
+static std::vector<PaletteOverride> _palOverrides;
+
+void applyPaletteOverrides()
+{
+	std::lock_guard<std::mutex> lock(_palOverrideMutex);
+	for (auto& ov : _palOverrides) {
+		if (!ov.active) continue;
+		for (int i = 0; i < (int)ov.colors.size(); i++) {
+			u32 addr = PALETTE_RAM_START_addr + (ov.startIndex + i) * 4;
+			pvr_WriteReg(addr, ov.colors[i]);
+		}
+	}
 }
 
 // ========================= Pending mapping detect state =========================
@@ -494,6 +520,95 @@ static void onMessage(ControlConnHdl hdl, ControlWsServer::message_ptr msg)
 			sendJson(hdl, errReplyImmediate(reply_id, "config_set",
 				"unknown key or type mismatch: " + key));
 		}
+		return;
+
+	} else if (cmdName == "palette_write") {
+		// Write ARGB4444 palette entries to PVR palette RAM.
+		// If "persist":true, re-applies every frame (survives game reloads).
+		int startIdx = parsed.value("index", 0);
+		bool persist = parsed.value("persist", false);
+		if (!parsed.contains("colors") || !parsed["colors"].is_array()) {
+			sendJson(hdl, errReplyImmediate(reply_id, "palette_write", "need 'colors' array"));
+			return;
+		}
+		auto& colors = parsed["colors"];
+		int count = (int)colors.size();
+		if (startIdx < 0 || startIdx + count > 1024) {
+			sendJson(hdl, errReplyImmediate(reply_id, "palette_write", "index+count out of range"));
+			return;
+		}
+		std::vector<u16> colorVec;
+		for (int i = 0; i < count; i++) {
+			u16 c16 = colors[i].get<int>() & 0xFFFF;
+			u32 addr = PALETTE_RAM_START_addr + (startIdx + i) * 4;
+			pvr_WriteReg(addr, c16);
+			colorVec.push_back(c16);
+		}
+		if (persist) {
+			std::lock_guard<std::mutex> lock(_palOverrideMutex);
+			PaletteOverride ov;
+			ov.active = true;
+			ov.startIndex = startIdx;
+			ov.colors = std::move(colorVec);
+			_palOverrides.push_back(std::move(ov));
+		}
+		sendJson(hdl, json{
+			{"ok", true}, {"cmd", "palette_write"}, {"reply_id", reply_id},
+			{"data", {{"index", startIdx}, {"count", count}, {"persist", persist}}},
+		});
+		return;
+
+	} else if (cmdName == "palette_clear") {
+		// Clear all persistent palette overrides
+		std::lock_guard<std::mutex> lock(_palOverrideMutex);
+		_palOverrides.clear();
+		sendJson(hdl, json{
+			{"ok", true}, {"cmd", "palette_clear"}, {"reply_id", reply_id}, {"data", json::object()},
+		});
+		return;
+
+	} else if (cmdName == "palette_read") {
+		// Read current PVR palette RAM entries
+		int startIdx = parsed.value("index", 0);
+		int count = parsed.value("count", 16);
+		if (startIdx < 0 || startIdx + count > 1024) {
+			sendJson(hdl, errReplyImmediate(reply_id, "palette_read", "out of range"));
+			return;
+		}
+		json colors = json::array();
+		for (int i = 0; i < count; i++) {
+			u32 addr = PALETTE_RAM_START_addr + (startIdx + i) * 4;
+			u32 val = pvr_ReadReg(addr);
+			colors.push_back(val & 0xFFFF);
+		}
+		sendJson(hdl, json{
+			{"ok", true}, {"cmd", "palette_read"}, {"reply_id", reply_id},
+			{"data", {{"index", startIdx}, {"count", count}, {"colors", colors}}},
+		});
+		return;
+
+	} else if (cmdName == "ram_write") {
+		// Write bytes to DC RAM at a specific offset.
+		// Used for patching palette source data in main memory.
+		int offset = parsed.value("offset", -1);
+		if (offset < 0 || !parsed.contains("hex")) {
+			sendJson(hdl, errReplyImmediate(reply_id, "ram_write", "need 'offset' and 'hex'"));
+			return;
+		}
+		std::string hex = parsed["hex"].get<std::string>();
+		std::vector<u8> bytes;
+		for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+			bytes.push_back((u8)std::strtol(hex.substr(i, 2).c_str(), nullptr, 16));
+		}
+		if (offset + (int)bytes.size() > 16 * 1024 * 1024) {
+			sendJson(hdl, errReplyImmediate(reply_id, "ram_write", "exceeds 16MB DC RAM"));
+			return;
+		}
+		memcpy(&::mem_b[offset], bytes.data(), bytes.size());
+		sendJson(hdl, json{
+			{"ok", true}, {"cmd", "ram_write"}, {"reply_id", reply_id},
+			{"data", {{"offset", offset}, {"size", bytes.size()}}},
+		});
 		return;
 
 	} else if (cmdName == "mapping_get") {

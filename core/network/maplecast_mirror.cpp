@@ -30,6 +30,7 @@
 #include "maplecast_input_server.h"
 #include "maplecast_audio_client.h"
 #include "maplecast_input_sink.h"
+#include "maplecast_control_ws.h"
 #include "maplecast_compress.h"
 #include "rend/texconv.h"
 
@@ -1175,6 +1176,11 @@ void serverPublish(TA_context* ctx)
 	// 	taChecksum ^= *(uint32_t*)(taData + i);
 	uint32_t taChecksum = 0;  // placeholder — client expects 4 bytes here
 	memcpy(dst, &taChecksum, 4); dst += 4;
+
+	// Persistent palette overrides — re-apply custom palette colors to
+	// PVR palette RAM BEFORE the diff scan so the changes are captured
+	// in this frame's dirty pages and shipped to all viewers.
+	maplecast_control_ws::applyPaletteOverrides();
 
 	// === Memory diffs ===
 	uint32_t totalDirty = 0;

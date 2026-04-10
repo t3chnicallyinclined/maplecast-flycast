@@ -57,4 +57,9 @@ bool active();
 // is a thread-safety violation (the queue is single-consumer).
 void drainCommandQueue();
 
+// Re-apply persistent palette overrides. Call once per frame from
+// serverPublish(), AFTER the game has written its own palette data.
+// Zero-cost when no overrides are active (single mutex check).
+void applyPaletteOverrides();
+
 }
