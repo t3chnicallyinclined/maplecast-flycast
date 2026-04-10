@@ -207,6 +207,13 @@ void applyPaletteOverrides()
 			pvr_WriteReg(addr, ov.colors[i]);
 		}
 	}
+	// Force the PVR palette dirty page to ship every frame. The diff
+	// scan compares PVR regs against a shadow copy; after the first
+	// frame, shadow matches our override and the page stops shipping.
+	// Toggle the last byte of the palette page (entry 1023, unused by
+	// MVC2 which only uses banks 16-56) to ensure shadow != current.
+	static u32 _tick = 0;
+	pvr_WriteReg(PALETTE_RAM_START_addr + 1023 * 4, ++_tick & 0xF);
 }
 
 // ========================= Pending mapping detect state =========================
@@ -560,11 +567,23 @@ static void onMessage(ControlConnHdl hdl, ControlWsServer::message_ptr msg)
 		}
 		if (persist) {
 			std::lock_guard<std::mutex> lock(_palOverrideMutex);
-			PaletteOverride ov;
-			ov.active = true;
-			ov.startIndex = startIdx;
-			ov.colors = std::move(colorVec);
-			_palOverrides.push_back(std::move(ov));
+			// Upsert: replace existing override for the same startIndex
+			bool replaced = false;
+			for (auto& existing : _palOverrides) {
+				if (existing.startIndex == startIdx) {
+					existing.colors = std::move(colorVec);
+					existing.active = true;
+					replaced = true;
+					break;
+				}
+			}
+			if (!replaced) {
+				PaletteOverride ov;
+				ov.active = true;
+				ov.startIndex = startIdx;
+				ov.colors = std::move(colorVec);
+				_palOverrides.push_back(std::move(ov));
+			}
 		}
 		sendJson(hdl, json{
 			{"ok", true}, {"cmd", "palette_write"}, {"reply_id", reply_id},

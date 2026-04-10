@@ -196,7 +196,6 @@ async function applyTestColors(preset = 'pink') {
     chrome: [0x0000,0xF888,0xFBBB,0xFFFF,0xFDDD,0xF999,0xF666,0xFBBB,0xFFFF,0xFCCC,0xF888,0xFDDD,0xFFFF,0xFEEE,0xFBBB,0xFFFF],
   };
   const colors = palettes[preset] || palettes.pink;
-  await send('palette_clear');
   await send('palette_write', { index: probeBank * 16, colors, persist: true });
 }
 
@@ -269,7 +268,11 @@ function hexToColors(hex) {
 
 async function applySkin(colors) {
   if (probeBank < 0) { alert('Select a character first'); return; }
-  await send('palette_clear');
+  // Don't clear ALL overrides — just overwrite this bank's persist entry.
+  // palette_write with persist=true adds a new override entry, so we need
+  // to clear only the previous override for THIS bank.
+  // For now, just add the new one — the latest write to the same PVR
+  // entries wins in applyPaletteOverrides since it runs sequentially.
   await send('palette_write', { index: probeBank * 16, colors, persist: true });
 }
 
