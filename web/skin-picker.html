@@ -127,10 +127,10 @@ async function refreshMatch() {
   document.getElementById('match-chars').innerHTML = html;
 }
 
-// Bank formula: bank = 16 * (char_pair + 1) + player_side
-// P1C1=16, P2C1=17, P1C2=32, P2C2=33, P1C3=48, P2C3=49
+// Bank formula: bank = 16 * (char_pair + 1) + (8 * player_side)
+// Confirmed with all 6 simultaneous skins 2026-04-10
 function slotToBank(slot) {
-  const map = { P1C1: 16, P2C1: 17, P1C2: 32, P2C2: 33, P1C3: 48, P2C3: 49 };
+  const map = { P1C1: 16, P2C1: 24, P1C2: 32, P2C2: 40, P1C3: 48, P2C3: 56 };
   return map[slot] || 16;
 }
 
@@ -149,13 +149,42 @@ function selectChar(slot, charId, name) {
     `${slot} → PVR bank ${probeBank} (entries ${probeBank*16}-${probeBank*16+15})`;
 }
 
+// Store original palette per bank so we can restore on reset
+const savedPalettes = {};
+
+async function saveOriginalPalette(bank) {
+  if (savedPalettes[bank]) return; // already saved
+  const resp = await send('palette_read', { index: bank * 16, count: 16 });
+  if (resp && resp.ok) {
+    savedPalettes[bank] = resp.data.colors;
+  }
+}
+
 async function clearSkin() {
+  // On headless server, PVR palette has no "default" — it's always zeros.
+  // The game's original colors come from DC RAM palette data.
+  // For now: find the character's palette in DC RAM and write it to PVR.
+  if (probeBank < 0 || !selectedCharId) return;
+
+  // Search DC RAM for this character's palette using known signatures
+  // from PL??_DAT.BIN. The first 2 bytes are always 0x0000 (transparent).
+  // We'll use palette_find to locate it, then read the 32 bytes.
+  // For now, just clear the persist and write zeros (character goes invisible
+  // briefly, then the game's next TA frame should re-establish normal rendering).
+
+  // Clear ALL persistent overrides and re-apply the ones we want to keep
   await send('palette_clear');
-  document.getElementById('probe-result').textContent = 'Skin cleared.';
+
+  // Re-apply any other character skins that were set (not this one)
+  // TODO: track per-bank overrides and only remove the target bank
+
+  alert('Skin cleared. Character may appear invisible until next round/swap-in.');
 }
 
 async function applyTestColors(preset = 'pink') {
-  if (probeBank < 0) { alert('Select a bank first'); return; }
+  if (probeBank < 0) { alert('Select a character first'); return; }
+  // Save original before first override
+  await saveOriginalPalette(probeBank);
   const palettes = {
     pink:   [0x0000,0xFF0F,0xFE0E,0xFD0D,0xFC0C,0xFB0B,0xFA0A,0xF909,0xF808,0xF707,0xF606,0xF505,0xF404,0xF303,0xF202,0xFF0F],
     gold:   [0x0000,0xF000,0xFFE6,0xFFD0,0xFC90,0xF850,0xF630,0xF220,0xF88D,0xF66B,0xF449,0xF227,0xF005,0xF003,0xFFFF,0xFF00],
