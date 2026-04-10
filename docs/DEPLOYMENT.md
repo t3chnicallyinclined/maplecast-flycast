@@ -31,9 +31,43 @@ The high-level recipe:
 
 The deploy script at `deploy/scripts/deploy-headless.sh` automates the binary build + install + systemd dance against a remote host you have SSH access to. Read it before running it — it does an `ldd` sanity check to make sure your build doesn't accidentally link `libGL`/`libSDL`/etc.
 
+## Deploy scripts
+
+| Script | What it deploys | Safety |
+|--------|----------------|--------|
+| `deploy/scripts/deploy-headless.sh <HOST>` | Headless flycast binary + systemd unit | ldd sanity check, strip, restart |
+| `deploy/scripts/deploy-web.sh <HOST>` | king.html + JS modules to /var/www/maplecast/ | **Creates timestamped backup**, shows diff, confirms before deploy, prints rollback command |
+
+### Web deploy workflow
+
+**CRITICAL: always edit locally, commit to git, THEN deploy. Never edit production directly.**
+
+```bash
+# 1. Edit locally
+vim web/king.html
+
+# 2. Commit
+git add web/ && git commit -m "feat: description"
+
+# 3. Deploy (creates backup, asks confirmation)
+./deploy/scripts/deploy-web.sh root@66.55.128.93
+
+# 4. Rollback if needed (command printed by deploy script)
+ssh root@66.55.128.93 'rm -rf /var/www/maplecast && mv /var/www/maplecast-backup-YYYYMMDD-HHMMSS /var/www/maplecast'
+```
+
+### Syncing production → git
+
+If someone edited production files directly (via scp), sync them back to git BEFORE making any changes:
+
+```bash
+scp root@66.55.128.93:/var/www/maplecast/king.html web/king.html
+scp root@66.55.128.93:/var/www/maplecast/js/*.mjs web/js/
+git add web/ && git commit -m "sync: pull production web files from VPS"
+```
+
 ## What's NOT in this repo
 
-- **Operator credentials and the live VPS configuration for nobd.net** — these are operator-private and live in a separate repo.
 - **The /overlord admin panel internals** — the admin panel exists at https://nobd.net/overlord but its endpoint map and auth flow are not published.
 - **PYQU (putyourquarterup.com) product/business roadmap** — that's a separate product layer being developed alongside MapleCast.
 
