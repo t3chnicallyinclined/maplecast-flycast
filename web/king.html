@@ -969,9 +969,7 @@ body {
 .skin-card .palette-bar span { flex:1; }
 .skin-card .author { font-size:9px; color:#8888aa; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-family:-apple-system,sans-serif; }
 .skin-status { font-size:10px; color:#888; margin-top:6px; font-family:-apple-system,sans-serif; }
-/* Skin credit overlay — positioned like name overlay but slightly above it */
-.skin-credit-overlay { position:absolute; bottom:22px; left:0; right:0; z-index:4; pointer-events:none; padding:0 10px; display:flex; justify-content:space-between; }
-.skin-credit-overlay .skin-credit { font-size:8px; color:rgba(200,180,255,0.7); font-family:'Press Start 2P',monospace; text-shadow:0 1px 4px rgba(0,0,0,0.9),0 0 8px rgba(0,0,0,0.6); letter-spacing:0.3px; }
+/* (skin credit uses the existing .name-overlay #nameOverlay element) */
 
 /* THE LINE (queue) */
 .queue-section {
@@ -2379,9 +2377,6 @@ if (new URLSearchParams(window.location.search).get('embed') === '1') {
           <!-- Player name overlay -->
           <div class="name-overlay" id="nameOverlay"></div>
 
-          <!-- Skin credit overlay -->
-          <div class="skin-credit-overlay" id="skinCreditOverlay"></div>
-
           <!-- Unified settings/diagnostics gear — one icon, one modal,
                four tabs (Graphics / Stats / Latency / Input). The old
                separate i-button and settings-panel were merged here. -->
@@ -3062,12 +3057,25 @@ async function skinApply(colors, author) {
 }
 
 function updateSkinCreditOverlay() {
-  const overlay = document.getElementById('skinCreditOverlay');
+  // Replace the player name overlay with skin credits when skins are active.
+  // The name is already shown in the HUD health bars at the top — the bottom
+  // overlay is better used for skin attribution.
+  const overlay = document.getElementById('nameOverlay');
   if (!overlay) return;
-  const p1 = _skinCredits.p1 ? `<div class="skin-credit">skin: ${_skinCredits.p1}</div>` : '<div></div>';
-  const p2 = _skinCredits.p2 ? `<div class="skin-credit">skin: ${_skinCredits.p2}</div>` : '<div></div>';
-  overlay.innerHTML = p1 + p2;
+  const p1Credit = _skinCredits.p1 || '';
+  const p2Credit = _skinCredits.p2 || '';
+  if (p1Credit || p2Credit) {
+    overlay.innerHTML =
+      (p1Credit ? `<div><div class="p-name p1" style="font-size:7px;opacity:0.8">skin: ${p1Credit}</div></div>` : '<div></div>') +
+      (p2Credit ? `<div><div class="p-name p2" style="font-size:7px;opacity:0.8">skin: ${p2Credit}</div></div>` : '<div></div>');
+  }
 }
+
+// Keep the skin credit visible — lobby.mjs updateNameOverlay runs periodically
+// and overwrites our content. Re-apply every 500ms when skins are active.
+setInterval(() => {
+  if (_skinCredits.p1 || _skinCredits.p2) updateSkinCreditOverlay();
+}, 500);
 
 async function skinRandomize() {
   if (_skinBank < 0 || !_skinLoadedSkins.length) return;
@@ -3085,8 +3093,7 @@ async function skinReset() {
     const ws = await ensureControlWs();
     ws.send(JSON.stringify({cmd:'palette_clear'}));
     document.getElementById('skinStatus').textContent = 'Skins reset';
-    const overlay = document.getElementById('skinCreditOverlay');
-    if (overlay) overlay.textContent = '';
+    _skinCredits = {};
   } catch(e) {}
 }
 
