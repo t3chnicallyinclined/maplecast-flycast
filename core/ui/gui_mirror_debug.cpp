@@ -300,8 +300,18 @@ static void drawInputSection()
 	if (!ImGui::CollapsingHeader("Input latch"))
 		return;
 
-	drawLatchPolicyButtons(0);
-	drawLatchPolicyButtons(1);
+	// In mirror client mode, only show the local player's slot.
+	// On the server, show both.
+	if (maplecast_mirror::isClient()) {
+		// TODO: read actual local slot from MAPLECAST_PLAYER_SLOT env
+		int localSlot = 0;
+		if (const char* s = std::getenv("MAPLECAST_PLAYER_SLOT"))
+			localSlot = std::atoi(s);
+		drawLatchPolicyButtons(localSlot);
+	} else {
+		drawLatchPolicyButtons(0);
+		drawLatchPolicyButtons(1);
+	}
 
 	int64_t guardUs = maplecast_input::getGuardUs();
 	int guardInt = (int)guardUs;
@@ -336,10 +346,60 @@ static void drawInputSection()
 //     emulator is running — see the Audio subsection below which exposes
 //     it anyway for users who want to override.
 
+// ==== Presets (matching WASM panel) ====
+static void applyPresetPerformance()
+{
+	config::RenderResolution = 480;
+	config::PerPixelLayers = 4;
+	config::Fog = false;
+	config::ModifierVolumes = false;
+	config::AnisotropicFiltering = 1;
+	config::TextureFiltering = 0;
+	config::UseMipmaps = false;
+	gui_mirror_debug::logLine("[preset] Max Performance applied");
+}
+
+static void applyPresetArcade()
+{
+	config::RenderResolution = 960;
+	config::PerPixelLayers = 8;
+	config::Fog = true;
+	config::ModifierVolumes = true;
+	config::AnisotropicFiltering = 4;
+	config::TextureFiltering = 0;
+	config::UseMipmaps = false;
+	gui_mirror_debug::logLine("[preset] Arcade applied");
+}
+
+static void applyPresetMaxQuality()
+{
+	config::RenderResolution = 1920;
+	config::PerPixelLayers = 32;
+	config::Fog = true;
+	config::ModifierVolumes = true;
+	config::AnisotropicFiltering = 16;
+	config::TextureFiltering = 2;  // linear
+	config::UseMipmaps = true;
+	gui_mirror_debug::logLine("[preset] Max Quality applied");
+}
+
 static void drawSettingsSection()
 {
-	if (!ImGui::CollapsingHeader("Settings"))
+	if (!ImGui::CollapsingHeader("Settings", ImGuiTreeNodeFlags_DefaultOpen))
 		return;
+
+	// ==== Presets ====
+	ImGui::Text("Presets:");
+	ImGui::SameLine();
+	if (ImGui::SmallButton("Performance"))
+		applyPresetPerformance();
+	ImGui::SameLine();
+	if (ImGui::SmallButton("Arcade"))
+		applyPresetArcade();
+	ImGui::SameLine();
+	if (ImGui::SmallButton("Max Quality"))
+		applyPresetMaxQuality();
+	ImGui::Separator();
 
 	// ==== Video ====
 	if (ImGui::TreeNodeEx("Video", ImGuiTreeNodeFlags_DefaultOpen))
@@ -418,6 +478,38 @@ static void drawSettingsSection()
 			config::AnisotropicFiltering.set(ANISO_CHOICES[anisoSel]);
 		}
 
+		// Renderer quality options (matching WASM panel)
+		bool fog = config::Fog.get();
+		if (ImGui::Checkbox("Fog", &fog))
+			config::Fog.set(fog);
+
+		bool modVol = config::ModifierVolumes.get();
+		if (ImGui::Checkbox("Modifier volumes", &modVol))
+			config::ModifierVolumes.set(modVol);
+
+		bool mipmaps = config::UseMipmaps.get();
+		if (ImGui::Checkbox("Mipmaps", &mipmaps))
+			config::UseMipmaps.set(mipmaps);
+
+		// Transparency layers — 4, 8, 16, 32
+		static const int LAYER_CHOICES[] = { 4, 8, 16, 32 };
+		static const char* LAYER_LABELS[] = { "4", "8", "16", "32" };
+		int curLayers = config::PerPixelLayers.get();
+		int layerSel = 0;
+		for (size_t i = 0; i < sizeof(LAYER_CHOICES)/sizeof(int); i++) {
+			if (LAYER_CHOICES[i] == curLayers) { layerSel = (int)i; break; }
+		}
+		if (ImGui::Combo("Transparency layers", &layerSel, LAYER_LABELS,
+			sizeof(LAYER_LABELS)/sizeof(const char*)))
+		{
+			config::PerPixelLayers.set(LAYER_CHOICES[layerSel]);
+		}
+
+		ImGui::Separator();
+		ImGui::TextDisabled("Post-processing (CRT, bloom, scanlines)");
+		ImGui::TextDisabled("coming soon — requires custom GLSL shaders");
+
+		ImGui::Separator();
 		bool showFps = config::ShowFPS.get();
 		if (ImGui::Checkbox("Show FPS counter", &showFps))
 			config::ShowFPS.set(showFps);
@@ -516,7 +608,7 @@ void drawContent()
 	ImGui::SetNextWindowSize(ImVec2(400.0f, 0.0f),
 	                          ImGuiCond_FirstUseEver);
 
-	ImGui::Begin("MapleCast Mirror Debug (Tab to hide)",
+	ImGui::Begin("MapleCast Settings (F1 to toggle)",
 		nullptr,
 		ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
 

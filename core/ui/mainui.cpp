@@ -126,13 +126,20 @@ bool mainui_rend_frame()
 		{
 			bool isScreen = renderer->Render();
 			if (isScreen)
+			{
+				// Draw the ImGui overlay AFTER the game render but BEFORE
+				// Present swaps the buffer — so the overlay is composited
+				// on top of the TA frame in the same back buffer.
+				gui_displayMirrorDebug();
 				renderer->Present();
+			}
 		}
-
-		// Debug overlay draws on top regardless of whether there was a
-		// new server frame — Tab toggle must be live even on frames
-		// where nothing changed.
-		gui_displayMirrorDebug();
+		else
+		{
+			// No new server frame this iteration — still pump the overlay
+			// so the gear icon + settings panel stay responsive.
+			gui_displayMirrorDebug();
+		}
 	}
 	else
 	{

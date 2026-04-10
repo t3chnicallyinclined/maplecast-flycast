@@ -25,6 +25,7 @@
 void gui_init();
 void gui_initFonts();
 void gui_open_settings();
+bool gui_want_capture_mouse();
 void gui_display_ui();
 void gui_draw_osd();
 void gui_display_osd();

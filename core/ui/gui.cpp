@@ -17,6 +17,8 @@
     along with Flycast.  If not, see <https://www.gnu.org/licenses/>.
  */
 #include "gui.h"
+#include "network/maplecast_mirror.h"
+#include "gui_mirror_debug.h"
 #include "rend/osd.h"
 #include "cfg/cfg.h"
 #include "imgui.h"
@@ -72,6 +74,7 @@ GuiState gui_state = GuiState::Main;
 static bool commandLineStart;
 std::string launchOnExitUri;
 static u32 mouseButtons;
+static u32 mouseLatchedButtons;  // buttons pressed since last ImGui frame
 static int mouseX, mouseY;
 static float mouseWheel;
 static bool mouseTouchscreen;
@@ -496,6 +499,11 @@ bool gui_mouse_captured() {
 	return io.WantCaptureMouse;
 }
 
+bool gui_want_capture_mouse()
+{
+	return ImGui::GetCurrentContext() != nullptr && ImGui::GetIO().WantCaptureMouse;
+}
+
 void gui_set_mouse_position(int x, int y, bool touchscreen)
 {
 	mouseX = std::round(x * settings.display.pointScale);
@@ -505,10 +513,14 @@ void gui_set_mouse_position(int x, int y, bool touchscreen)
 
 void gui_set_mouse_button(int button, bool pressed, bool touchscreen)
 {
-	if (pressed)
+	if (pressed) {
 		mouseButtons |= 1 << button;
-	else
+		mouseLatchedButtons |= 1 << button;
+		printf("[MOUSE] btn=%d PRESSED  mouseButtons=0x%x\n", button, mouseButtons);
+	} else {
 		mouseButtons &= ~(1 << button);
+		printf("[MOUSE] btn=%d RELEASED mouseButtons=0x%x\n", button, mouseButtons);
+	}
 	mouseTouchscreen = touchscreen;
 }
 
@@ -535,10 +547,14 @@ static void gui_newFrame()
 		io.AddMouseWheelEvent(0, -mouseWheel / 16);
 		mouseWheel = 0;
 	}
-	io.AddMouseButtonEvent(ImGuiMouseButton_Left, (mouseButtons & (1 << 0)) != 0);
-	io.AddMouseButtonEvent(ImGuiMouseButton_Right, (mouseButtons & (1 << 1)) != 0);
-	io.AddMouseButtonEvent(ImGuiMouseButton_Middle, (mouseButtons & (1 << 2)) != 0);
-	io.AddMouseButtonEvent(3, (mouseButtons & (1 << 3)) != 0);
+	// Use latched buttons so short clicks that happen between ImGui frames
+	// (press + release within one render iteration) still register.
+	u32 effectiveButtons = mouseButtons | mouseLatchedButtons;
+	mouseLatchedButtons = 0;
+	io.AddMouseButtonEvent(ImGuiMouseButton_Left, (effectiveButtons & (1 << 0)) != 0);
+	io.AddMouseButtonEvent(ImGuiMouseButton_Right, (effectiveButtons & (1 << 1)) != 0);
+	io.AddMouseButtonEvent(ImGuiMouseButton_Middle, (effectiveButtons & (1 << 2)) != 0);
+	io.AddMouseButtonEvent(3, (effectiveButtons & (1 << 3)) != 0);
 
 	// shows a popup navigation window even in game because of the OSD
 	//io.AddKeyEvent(ImGuiKey_GamepadFaceLeft, ((kcode[0] & DC_BTN_X) == 0));
@@ -726,8 +742,39 @@ void cycleSaveStateSlot(int step)
 	SaveSettings();
 }
 
+static void gui_display_mirror_settings()
+{
+	// Custom settings panel for mirror client mode.
+	// Reuses the full drawContent() from gui_mirror_debug.cpp which
+	// creates its own ImGui::Begin/End window with all the telemetry,
+	// settings, and diagnostics. We just need to add Resume.
+	gui_mirror_debug::setVisible(true);
+	gui_mirror_debug::drawContent();
+
+	// Resume button in a small anchored window at the bottom center
+	const ImGuiIO& io = ImGui::GetIO();
+	ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y - 60.0f),
+	                         ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+	ImGui::SetNextWindowBgAlpha(0.8f);
+	ImGui::Begin("##resume", nullptr,
+		ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+		ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings);
+	if (ImGui::Button("Resume Game", ScaledVec2(200, 40)))
+	{
+		gui_mirror_debug::setVisible(false);
+		gui_setState(GuiState::Closed);
+	}
+	ImGui::End();
+}
+
 static void gui_display_commands()
 {
+	// Mirror client: show our custom settings instead of the default pause menu
+	if (maplecast_mirror::isClient()) {
+		gui_display_mirror_settings();
+		return;
+	}
+
 	fullScreenWindow(false);
 	ImGui::SetNextWindowBgAlpha(0.8f);
 	ImguiStyleVar _{ImGuiStyleVar_WindowBorderSize, 0};
@@ -1659,14 +1706,6 @@ void gui_displayMirrorDebug()
 {
 	gui_newFrame();
 	ImGui::NewFrame();
-
-	// Toggle on Tab keypress. gui_newFrame() above pushed the current
-	// keyboard state into ImGui::IO, so IsKeyPressed() sees a fresh view.
-	if (ImGui::IsKeyPressed(ImGuiKey_Tab, /*repeat=*/false))
-		gui_mirror_debug::toggleVisible();
-
-	if (gui_mirror_debug::isVisible())
-		gui_mirror_debug::drawContent();
 
 	ImGui::Render();
 	gui_endFrame(true);

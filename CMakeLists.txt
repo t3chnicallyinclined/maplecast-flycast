@@ -1084,8 +1084,12 @@ if(USE_OPENGL)
 		target_sources(${PROJECT_NAME} PRIVATE
 				core/deps/imgui/backends/imgui_impl_opengl3.cpp
 				core/deps/imgui/backends/imgui_impl_opengl3.h
+				core/deps/imgui/backends/imgui_impl_sdl2.cpp
+				core/deps/imgui/backends/imgui_impl_sdl2.h
 				core/rend/gles/opengl_driver.cpp
-				core/rend/gles/opengl_driver.h)
+				core/rend/gles/opengl_driver.h
+				core/ui/settings_window.cpp
+				core/ui/settings_window.h)
 	endif()
 
 	if(NOT (APPLE OR USE_GLES2))

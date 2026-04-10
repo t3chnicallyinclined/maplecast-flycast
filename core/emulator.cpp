@@ -47,6 +47,7 @@
 #include "network/maplecast_player.h"
 #include "network/maplecast_replica.h"
 #include "network/maplecast_input_sink.h"
+#include "ui/settings_window.h"
 #include "hw/maple/maple_cfg.h"
 #include <cstdlib>
 #include <string>
