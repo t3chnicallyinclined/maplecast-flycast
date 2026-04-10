@@ -717,6 +717,26 @@ static void wsClientRun(std::string host, int port)
 		// Decompress if needed
 		size_t decompSize = 0;
 		const uint8_t* decompData = decomp.decompress(frame.data(), frame.size(), decompSize);
+		if (decompSize < 8) continue;
+
+		// Handle mid-stream SYNC frames (triggered by palette changes,
+		// soft resets, etc.) — re-apply VRAM + PVR snapshot.
+		if (decompSize > 8 && memcmp(decompData, "SYNC", 4) == 0) {
+			const uint8_t* src = decompData + 4;
+			uint32_t vramSize; memcpy(&vramSize, src, 4); src += 4;
+			if (vramSize <= VRAM_SIZE) {
+				memcpy(&vram[0], src, vramSize); src += vramSize;
+				uint32_t pvrSize; memcpy(&pvrSize, src, 4); src += 4;
+				if (pvrSize <= (uint32_t)pvr_RegSize)
+					memcpy(pvr_regs, src, pvrSize);
+			}
+			memwatch::unprotect();
+			_decodeHasFullFrame = false;  // force next TA frame as keyframe
+			printf("[MIRROR-WS] Mid-stream SYNC applied (%.1f MB)\n",
+				decompSize / (1024.0 * 1024.0));
+			continue;
+		}
+
 		if (decompSize < 80) continue;
 
 		const uint8_t* src = decompData;

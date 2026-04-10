@@ -28,6 +28,7 @@
 #include "profiler/fc_profiler.h"
 #include "oslib/i18n.h"
 #include "network/maplecast_mirror.h"
+#include "network/maplecast_palette.h"
 
 #include <chrono>
 #include <thread>
@@ -124,6 +125,11 @@ bool mainui_rend_frame()
 
 		if (drained)
 		{
+			// Apply client-side palette overrides AFTER the TA stream
+			// wrote the server's palette but BEFORE the renderer reads it.
+			// Zero flicker, zero server involvement.
+			maplecast_palette::applyClientOverrides();
+
 			bool isScreen = renderer->Render();
 			if (isScreen)
 			{

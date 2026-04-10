@@ -52,10 +52,12 @@
 #include "hw/pvr/pvr_regs.h"
 #include "hw/pvr/pvr_mem.h"
 #include "hw/sh4/sh4_mem.h"
+#include "hw/mem/mem_watch.h"
 #include "input/gamepad_device.h"
 #include "input/gamepad.h"
 #include "input/mapping.h"
 #include "maplecast_input_sink.h"
+#include "maplecast_palette.h"
 
 extern u32 kcode[4];
 extern u16 lt[4], rt[4];
@@ -182,10 +184,9 @@ static std::shared_ptr<GamepadDevice> findGamepadOnPort(int port)
 // serverPublish. Survives game reloads because we write after the game does.
 struct PaletteOverride {
 	bool active = false;
-	// DC RAM offset where the palette source data lives (from PL??_DAT.BIN)
-	u32 ramOffset = 0;
-	// The replacement palette bytes (ARGB4444, 32 bytes per 16-color palette)
-	std::vector<u8> data;
+	// PVR palette start index (0-1023) and ARGB4444 colors
+	int startIndex = 0;
+	std::vector<u16> colors;
 };
 static std::mutex _palOverrideMutex;
 static std::vector<PaletteOverride> _palOverrides;
@@ -194,12 +195,16 @@ void applyPaletteOverrides()
 {
 	std::lock_guard<std::mutex> lock(_palOverrideMutex);
 	if (_palOverrides.empty()) return;
+	// Write to PVR palette RAM every frame, AFTER the game writes its
+	// own palette. Runs on the emu thread inside serverPublish, right
+	// before the dirty page diff scan. The diff captures our writes
+	// and ships them through the TA stream to all viewers.
 	for (auto& ov : _palOverrides) {
-		if (!ov.active || ov.data.empty()) continue;
-		// Write directly to DC RAM — the game reads from here into PVR
-		// palette RAM as part of its normal rendering. No flickering
-		// because the game's own copy carries our custom colors.
-		memcpy(&::mem_b[ov.ramOffset], ov.data.data(), ov.data.size());
+		if (!ov.active) continue;
+		for (int i = 0; i < (int)ov.colors.size(); i++) {
+			u32 addr = PALETTE_RAM_START_addr + (ov.startIndex + i) * 4;
+			pvr_WriteReg(addr, ov.colors[i]);
+		}
 	}
 }
 
@@ -532,59 +537,38 @@ static void onMessage(ControlConnHdl hdl, ControlWsServer::message_ptr msg)
 		// "persist":true re-applies every frame via applyPaletteOverrides().
 		bool persist = parsed.value("persist", false);
 
-		if (parsed.contains("ram_offset")) {
-			// RAM mode: write raw palette bytes to DC RAM
-			u32 offset = parsed["ram_offset"].get<int>();
-			if (!parsed.contains("hex") || !parsed["hex"].is_string()) {
-				sendJson(hdl, errReplyImmediate(reply_id, "palette_write", "RAM mode needs 'hex'"));
-				return;
-			}
-			std::string hex = parsed["hex"].get<std::string>();
-			std::vector<u8> bytes;
-			for (size_t i = 0; i + 1 < hex.size(); i += 2)
-				bytes.push_back((u8)std::strtol(hex.substr(i, 2).c_str(), nullptr, 16));
-			if (offset + bytes.size() > 16 * 1024 * 1024) {
-				sendJson(hdl, errReplyImmediate(reply_id, "palette_write", "offset out of range"));
-				return;
-			}
-			memcpy(&::mem_b[offset], bytes.data(), bytes.size());
-			if (persist) {
-				std::lock_guard<std::mutex> lock(_palOverrideMutex);
-				PaletteOverride ov;
-				ov.active = true;
-				ov.ramOffset = offset;
-				ov.data = std::move(bytes);
-				_palOverrides.push_back(std::move(ov));
-			}
-			// Force a SYNC broadcast so the native client gets a fresh
-			// VRAM+PVR snapshot with the new palette data.
-			maplecast_mirror::requestSyncBroadcast();
-			sendJson(hdl, json{
-				{"ok", true}, {"cmd", "palette_write"}, {"reply_id", reply_id},
-				{"data", {{"ram_offset", offset}, {"persist", persist}}},
-			});
-		} else {
-			// PVR mode: write to PVR palette RAM
-			int startIdx = parsed.value("index", 0);
-			if (!parsed.contains("colors") || !parsed["colors"].is_array()) {
-				sendJson(hdl, errReplyImmediate(reply_id, "palette_write", "need 'colors' or 'ram_offset'+'hex'"));
-				return;
-			}
-			auto& colors = parsed["colors"];
-			int count = (int)colors.size();
-			if (startIdx < 0 || startIdx + count > 1024) {
-				sendJson(hdl, errReplyImmediate(reply_id, "palette_write", "index+count out of range"));
-				return;
-			}
-			for (int i = 0; i < count; i++) {
-				u32 addr = PALETTE_RAM_START_addr + (startIdx + i) * 4;
-				pvr_WriteReg(addr, colors[i].get<int>() & 0xFFFF);
-			}
-			sendJson(hdl, json{
-				{"ok", true}, {"cmd", "palette_write"}, {"reply_id", reply_id},
-				{"data", {{"index", startIdx}, {"count", count}}},
-			});
+		// PVR palette write. Takes "index" (0-1023) and "colors" array
+		// of ARGB4444 u16 values. If persist=true, re-applied every frame.
+		int startIdx = parsed.value("index", 0);
+		if (!parsed.contains("colors") || !parsed["colors"].is_array()) {
+			sendJson(hdl, errReplyImmediate(reply_id, "palette_write", "need 'colors' array"));
+			return;
 		}
+		auto& colors = parsed["colors"];
+		int count = (int)colors.size();
+		if (startIdx < 0 || startIdx + count > 1024) {
+			sendJson(hdl, errReplyImmediate(reply_id, "palette_write", "index+count out of range"));
+			return;
+		}
+		// Immediate write
+		std::vector<u16> colorVec;
+		for (int i = 0; i < count; i++) {
+			u16 c16 = colors[i].get<int>() & 0xFFFF;
+			pvr_WriteReg(PALETTE_RAM_START_addr + (startIdx + i) * 4, c16);
+			colorVec.push_back(c16);
+		}
+		if (persist) {
+			std::lock_guard<std::mutex> lock(_palOverrideMutex);
+			PaletteOverride ov;
+			ov.active = true;
+			ov.startIndex = startIdx;
+			ov.colors = std::move(colorVec);
+			_palOverrides.push_back(std::move(ov));
+		}
+		sendJson(hdl, json{
+			{"ok", true}, {"cmd", "palette_write"}, {"reply_id", reply_id},
+			{"data", {{"index", startIdx}, {"count", count}, {"persist", persist}}},
+		});
 		return;
 
 	} else if (cmdName == "palette_clear") {
@@ -592,9 +576,66 @@ static void onMessage(ControlConnHdl hdl, ControlWsServer::message_ptr msg)
 			std::lock_guard<std::mutex> lock(_palOverrideMutex);
 			_palOverrides.clear();
 		}
-		maplecast_mirror::requestSyncBroadcast();
 		sendJson(hdl, json{
 			{"ok", true}, {"cmd", "palette_clear"}, {"reply_id", reply_id}, {"data", json::object()},
+		});
+		return;
+
+	} else if (cmdName == "client_palette_set") {
+		// Client-side palette override — applied locally before each render.
+		int startIdx = parsed.value("index", 0);
+		if (!parsed.contains("colors") || !parsed["colors"].is_array()) {
+			sendJson(hdl, errReplyImmediate(reply_id, "client_palette_set", "need 'colors'"));
+			return;
+		}
+		auto& colors = parsed["colors"];
+		std::vector<u16> colorVec;
+		for (auto& c : colors)
+			colorVec.push_back(c.get<int>() & 0xFFFF);
+		maplecast_palette::setOverride(startIdx, colorVec.data(), (int)colorVec.size());
+		sendJson(hdl, json{
+			{"ok", true}, {"cmd", "client_palette_set"}, {"reply_id", reply_id},
+			{"data", {{"index", startIdx}, {"count", colorVec.size()}}},
+		});
+		return;
+
+	} else if (cmdName == "client_palette_clear") {
+		maplecast_palette::clearOverrides();
+		sendJson(hdl, json{
+			{"ok", true}, {"cmd", "client_palette_clear"}, {"reply_id", reply_id},
+			{"data", json::object()},
+		});
+		return;
+
+	} else if (cmdName == "palette_find") {
+		// Search DC RAM for a byte pattern (palette signature).
+		// Returns the offset where the pattern was found.
+		// Used to dynamically locate character palettes after load.
+		if (!parsed.contains("hex") || !parsed["hex"].is_string()) {
+			sendJson(hdl, errReplyImmediate(reply_id, "palette_find", "need 'hex' pattern"));
+			return;
+		}
+		std::string hex = parsed["hex"].get<std::string>();
+		std::vector<u8> pattern;
+		for (size_t i = 0; i + 1 < hex.size(); i += 2)
+			pattern.push_back((u8)std::strtol(hex.substr(i, 2).c_str(), nullptr, 16));
+		if (pattern.empty()) {
+			sendJson(hdl, errReplyImmediate(reply_id, "palette_find", "empty pattern"));
+			return;
+		}
+		// Search 16MB DC RAM
+		json matches = json::array();
+		const u8* ram = &::mem_b[0];
+		size_t ramSize = 16 * 1024 * 1024;
+		for (size_t i = 0; i + pattern.size() <= ramSize; i++) {
+			if (memcmp(ram + i, pattern.data(), pattern.size()) == 0) {
+				matches.push_back((int)i);
+				if (matches.size() >= 10) break;  // cap results
+			}
+		}
+		sendJson(hdl, json{
+			{"ok", true}, {"cmd", "palette_find"}, {"reply_id", reply_id},
+			{"data", {{"pattern", hex}, {"matches", matches}}},
 		});
 		return;
 

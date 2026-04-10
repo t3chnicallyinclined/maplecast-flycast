@@ -1150,18 +1150,11 @@ void Emulator::start()
 			if (const char* cp = std::getenv("MAPLECAST_CONTROL_PORT"))
 				controlPort = std::atoi(cp);
 			if (maplecast_control_ws::init(controlPort)) {
-				// Auto-open the settings page in the default browser.
-				// The HTML page connects to ws://localhost:PORT and
-				// provides a nice UI for all config/telemetry.
-				char url[256];
-				snprintf(url, sizeof(url),
-					"file://%s/web/client-settings.html?port=%d",
-					std::getenv("PWD") ? std::getenv("PWD") : ".",
-					controlPort);
-				char cmd[512];
-				snprintf(cmd, sizeof(cmd), "xdg-open '%s' &", url);
-				printf("[MIRROR] opening settings: %s\n", url);
-				system(cmd);
+				// Settings page available at:
+				//   file://<PWD>/web/client-settings.html?port=<PORT>
+				// Opened via Back/Select button or gear icon click.
+				printf("[MIRROR] settings page: file://%s/web/client-settings.html?port=%d\n",
+					std::getenv("PWD") ? std::getenv("PWD") : ".", controlPort);
 			}
 		}
 
