@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MapleCast Skin Picker</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 16px; max-width: 700px; margin: 0 auto; }
+h1 { color: #4fc3f7; margin-bottom: 12px; }
+.status { font-size: 0.8em; margin-bottom: 12px; }
+.connected { color: #66bb6a; } .disconnected { color: #ef5350; }
+section { background: #16213e; border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+section h2 { font-size: 0.95em; color: #90caf9; margin-bottom: 8px; border-bottom: 1px solid #2a3a5c; padding-bottom: 4px; }
+.char-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 10px; }
+.char-card { background: #0f3460; border-radius: 6px; padding: 8px; text-align: center; cursor: pointer; border: 2px solid transparent; transition: border-color 0.15s; }
+.char-card:hover { border-color: #4fc3f7; }
+.char-card.selected { border-color: #4fc3f7; background: #1a4a80; }
+.char-card .name { font-weight: bold; color: #4fc3f7; }
+.char-card .info { font-size: 0.75em; color: #999; }
+.char-card.active .name { color: #66bb6a; }
+.probe-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 3px; margin: 8px 0; }
+.probe-cell { width: 100%; aspect-ratio: 1; border-radius: 4px; cursor: pointer; border: 2px solid transparent; }
+.probe-cell:hover { border-color: #fff; }
+.probe-cell.selected { border-color: #4fc3f7; }
+button { background: #4fc3f7; color: #000; border: none; border-radius: 5px; padding: 8px 16px; cursor: pointer; font-weight: bold; margin: 4px; }
+button:hover { filter: brightness(1.15); }
+button.danger { background: #ef5350; color: #fff; }
+.skin-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; max-height: 400px; overflow-y: auto; }
+.skin-thumb { background: #0f3460; border-radius: 4px; padding: 4px; cursor: pointer; text-align: center; border: 2px solid transparent; }
+.skin-thumb:hover { border-color: #4fc3f7; }
+.skin-thumb img { width: 100%; border-radius: 3px; }
+.skin-thumb .label { font-size: 0.7em; color: #aaa; margin-top: 2px; }
+.step { display: none; }
+.step.active { display: block; }
+.v { color: #4fc3f7; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>MapleCast Skin Picker</h1>
+<div class="status">Server: <span id="ws-status" class="disconnected">Connecting...</span></div>
+
+<!-- Step 1: Show match info, pick a character -->
+<section id="step1" class="step active">
+  <h2>Step 1: Select Character</h2>
+  <p style="font-size:0.85em;margin-bottom:8px">Pick which character to skin. Must be in a match.</p>
+  <div id="match-chars" class="char-grid"></div>
+  <button onclick="refreshMatch()">Refresh Match Info</button>
+</section>
+
+<!-- Step 2: Probe palette bank -->
+<section id="step2" class="step">
+  <h2>Step 2: Identify Palette Bank</h2>
+  <p style="font-size:0.85em;margin-bottom:8px">Click the color square that matches your character <span class="v" id="probe-char-name">?</span> in the game:</p>
+  <div id="probe-grid" class="probe-grid"></div>
+  <div style="margin-top:8px">
+    <button onclick="startProbe()">Re-probe</button>
+    <button class="danger" onclick="clearProbe()">Clear Colors</button>
+  </div>
+  <div id="probe-result" style="margin-top:8px;font-size:0.85em"></div>
+</section>
+
+<!-- Step 3: Pick a skin -->
+<section id="step3" class="step">
+  <h2>Step 3: Pick Skin for <span id="skin-char-name" class="v">?</span> (bank <span id="skin-bank" class="v">?</span>)</h2>
+  <div style="margin-bottom:8px">
+    <button onclick="applyTestColors()">Test: Pink</button>
+    <button onclick="applyTestColors('gold')">Test: Gold</button>
+    <button onclick="applyTestColors('ice')">Test: Ice Blue</button>
+    <button onclick="applyTestColors('fire')">Test: Fire Red</button>
+    <button onclick="applyTestColors('toxic')">Test: Toxic Green</button>
+    <button class="danger" onclick="clearSkin()">Reset to Default</button>
+  </div>
+  <p style="font-size:0.8em;color:#999">Community skins from SurrealDB coming soon. For now, use test colors above.</p>
+</section>
+
+<script>
+const PORT = new URLSearchParams(location.search).get('port') || 7211;
+const HOST = new URLSearchParams(location.search).get('host') || 'localhost';
+let ws, rid = 0;
+let selectedSlot = null, selectedCharId = null, selectedCharName = null;
+let probeBank = -1;
+let bankColors = [];
+
+function send(cmd, extra = {}) {
+  return new Promise(resolve => {
+    if (!ws || ws.readyState !== 1) { resolve(null); return; }
+    const id = String(++rid);
+    const handler = e => {
+      const m = JSON.parse(e.data);
+      if (m.reply_id === id) { ws.removeEventListener('message', handler); resolve(m); }
+    };
+    ws.addEventListener('message', handler);
+    ws.send(JSON.stringify({ cmd, reply_id: id, ...extra }));
+  });
+}
+
+function connect() {
+  ws = new WebSocket(`ws://${HOST}:${PORT}`);
+  ws.onopen = () => {
+    document.getElementById('ws-status').textContent = 'Connected';
+    document.getElementById('ws-status').className = 'connected';
+    refreshMatch();
+  };
+  ws.onclose = () => {
+    document.getElementById('ws-status').textContent = 'Disconnected';
+    document.getElementById('ws-status').className = 'disconnected';
+    setTimeout(connect, 2000);
+  };
+}
+
+async function refreshMatch() {
+  const resp = await send('match_info');
+  if (!resp || !resp.ok) return;
+  const chars = resp.data.characters;
+  let html = '';
+  // Show P1 characters
+  for (const c of chars) {
+    const isP1 = c.slot.startsWith('P1');
+    if (!isP1) continue;
+    const activeClass = c.active ? 'active' : '';
+    html += `<div class="char-card ${activeClass}" onclick="selectChar('${c.slot}', ${c.charId}, '${c.name}')">
+      <div class="name">${c.name}</div>
+      <div class="info">${c.slot} | pal=${c.palette} | hp=${c.health} ${c.active ? '(ON SCREEN)' : ''}</div>
+    </div>`;
+  }
+  html += '<div style="grid-column:1/-1;font-size:0.75em;color:#666;text-align:center">--- P2 ---</div>';
+  for (const c of chars) {
+    if (c.slot.startsWith('P1')) continue;
+    const activeClass = c.active ? 'active' : '';
+    html += `<div class="char-card ${activeClass}" onclick="selectChar('${c.slot}', ${c.charId}, '${c.name}')">
+      <div class="name">${c.name}</div>
+      <div class="info">${c.slot} | pal=${c.palette} | hp=${c.health} ${c.active ? '(ON SCREEN)' : ''}</div>
+    </div>`;
+  }
+  document.getElementById('match-chars').innerHTML = html;
+}
+
+function selectChar(slot, charId, name) {
+  selectedSlot = slot;
+  selectedCharId = charId;
+  selectedCharName = name;
+  // Highlight
+  document.querySelectorAll('.char-card').forEach(c => c.classList.remove('selected'));
+  event.currentTarget.classList.add('selected');
+  // Show step 2
+  document.getElementById('step2').classList.add('active');
+  document.getElementById('probe-char-name').textContent = name;
+  startProbe();
+}
+
+async function startProbe() {
+  const resp = await send('palette_probe');
+  if (!resp || !resp.ok) return;
+  bankColors = resp.data.bankColors;
+  let html = '';
+  for (const bc of bankColors) {
+    const r = Math.round(bc.r * 17), g = Math.round(bc.g * 17), b = Math.round(bc.b * 17);
+    const color = `rgb(${r},${g},${b})`;
+    html += `<div class="probe-cell" style="background:${color}"
+      onclick="selectBank(${bc.bank})" title="Bank ${bc.bank}"></div>`;
+  }
+  document.getElementById('probe-grid').innerHTML = html;
+  document.getElementById('probe-result').textContent = 'Click the color that matches ' + selectedCharName + ' in the game.';
+}
+
+function selectBank(bank) {
+  probeBank = bank;
+  document.querySelectorAll('.probe-cell').forEach(c => c.classList.remove('selected'));
+  event.currentTarget.classList.add('selected');
+  document.getElementById('probe-result').innerHTML =
+    `<span class="v">${selectedCharName}</span> uses PVR palette bank <span class="v">${bank}</span> (entries ${bank*16}-${bank*16+15})`;
+  // Show step 3
+  document.getElementById('step3').classList.add('active');
+  document.getElementById('skin-char-name').textContent = selectedCharName;
+  document.getElementById('skin-bank').textContent = bank;
+  // Clear probe colors
+  clearProbe();
+}
+
+async function clearProbe() {
+  await send('palette_clear');
+}
+
+async function clearSkin() {
+  await send('palette_clear');
+  document.getElementById('probe-result').textContent = 'Skin cleared.';
+}
+
+async function applyTestColors(preset = 'pink') {
+  if (probeBank < 0) { alert('Select a bank first'); return; }
+  const palettes = {
+    pink:  [0x0000,0xFF0F,0xFE0E,0xFD0D,0xFC0C,0xFB0B,0xFA0A,0xF909,0xF808,0xF707,0xF606,0xF505,0xF404,0xF303,0xF202,0xFF0F],
+    gold:  [0x0000,0xF000,0xFFE6,0xFFD0,0xFC90,0xF850,0xF630,0xF220,0xF88D,0xF66B,0xF449,0xF227,0xF005,0xF003,0xFFFF,0xFF00],
+    ice:   [0x0000,0xF335,0xF446,0xF557,0xF668,0xF779,0xF88A,0xF99B,0xFAAC,0xFBBD,0xFCCE,0xFDDF,0xFEEF,0xFFFF,0xFBBF,0xF88F],
+    fire:  [0x0000,0xFF00,0xFE10,0xFD20,0xFC30,0xFB40,0xFA50,0xF960,0xF870,0xF780,0xFF90,0xFFA0,0xFFB0,0xFFC0,0xFFD0,0xFFE0],
+    toxic: [0x0000,0xF0F0,0xF1E0,0xF2D0,0xF3C0,0xF4B0,0xF5A0,0xF690,0xF7A0,0xF8B0,0xF9C0,0xFAD0,0xFBE0,0xFCF0,0xFDF0,0xFEF0],
+  };
+  const colors = palettes[preset] || palettes.pink;
+  await send('palette_clear');
+  await send('palette_write', { index: probeBank * 16, colors, persist: true });
+}
+
+connect();
+setInterval(refreshMatch, 5000);
+</script>
+</body>
+</html>
