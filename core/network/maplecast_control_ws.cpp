@@ -556,6 +556,9 @@ static void onMessage(ControlConnHdl hdl, ControlWsServer::message_ptr msg)
 				ov.data = std::move(bytes);
 				_palOverrides.push_back(std::move(ov));
 			}
+			// Force a SYNC broadcast so the native client gets a fresh
+			// VRAM+PVR snapshot with the new palette data.
+			maplecast_mirror::requestSyncBroadcast();
 			sendJson(hdl, json{
 				{"ok", true}, {"cmd", "palette_write"}, {"reply_id", reply_id},
 				{"data", {{"ram_offset", offset}, {"persist", persist}}},
@@ -585,8 +588,11 @@ static void onMessage(ControlConnHdl hdl, ControlWsServer::message_ptr msg)
 		return;
 
 	} else if (cmdName == "palette_clear") {
-		std::lock_guard<std::mutex> lock(_palOverrideMutex);
-		_palOverrides.clear();
+		{
+			std::lock_guard<std::mutex> lock(_palOverrideMutex);
+			_palOverrides.clear();
+		}
+		maplecast_mirror::requestSyncBroadcast();
 		sendJson(hdl, json{
 			{"ok", true}, {"cmd", "palette_clear"}, {"reply_id", reply_id}, {"data", json::object()},
 		});
