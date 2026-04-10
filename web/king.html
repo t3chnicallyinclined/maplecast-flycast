@@ -768,6 +768,39 @@ body {
 
 .btn-leave-queue:hover { background: rgba(255,0,0,0.1); }
 
+/* SKIN PICKER BUTTON */
+.btn-skins {
+  display: none;
+  width: 100%;
+  padding: 10px;
+  margin-top: 6px;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 8px;
+  background: linear-gradient(180deg, #6a1b9a 0%, #4a0e6b 100%);
+  color: #fff;
+  border: 2px solid #9c27b0;
+  cursor: pointer;
+  letter-spacing: 1px;
+  transition: all 0.2s;
+}
+.btn-skins:hover { transform: scale(1.02); box-shadow: 0 0 12px rgba(156,39,176,0.4); }
+
+/* SKIN MODAL */
+.skin-modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:9999; justify-content:center; align-items:center; }
+.skin-modal.open { display:flex; }
+.skin-modal-box { background:#16213e; border-radius:10px; padding:16px; width:90%; max-width:520px; max-height:80vh; overflow-y:auto; border:2px solid #4fc3f7; }
+.skin-modal h3 { color:#4fc3f7; font-family:'Press Start 2P',monospace; font-size:10px; margin-bottom:10px; }
+.skin-modal .close-btn { float:right; background:none; border:none; color:#ef5350; font-size:18px; cursor:pointer; }
+.skin-char-tabs { display:flex; gap:4px; margin-bottom:10px; flex-wrap:wrap; }
+.skin-char-tab { padding:6px 10px; font-family:'Press Start 2P',monospace; font-size:7px; background:#0f3460; border:1px solid #2a3a5c; color:#aaa; cursor:pointer; border-radius:4px; }
+.skin-char-tab.active { background:#1a4a80; color:#4fc3f7; border-color:#4fc3f7; }
+.skin-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:4px; max-height:300px; overflow-y:auto; }
+.skin-card { background:#0f3460; border-radius:4px; padding:6px; cursor:pointer; border:2px solid transparent; transition:border-color 0.15s; }
+.skin-card:hover { border-color:#4fc3f7; }
+.skin-card .palette-bar { display:flex; height:14px; border-radius:2px; overflow:hidden; margin-bottom:3px; }
+.skin-card .palette-bar span { flex:1; }
+.skin-card .author { font-size:6px; color:#888; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-family:'Press Start 2P',monospace; }
+
 /* THE LINE (queue) */
 .queue-section {
   flex: 1;
@@ -1820,9 +1853,23 @@ if (new URLSearchParams(window.location.search).get('embed') === '1') {
       <button class="btn-leave-queue" id="leaveQueueBtn" onclick="leaveQueue()">
         &#x274C; LEAVE LINE
       </button>
+      <button class="btn-skins" id="skinBtn" onclick="openSkinPicker()">
+        &#x1F3A8; CHANGE SKINS
+      </button>
       <button class="btn-leave-queue" id="leaveGameBtn" onclick="leaveGame()" style="display:none;color:var(--hot-red);border-color:var(--hot-red);">
         &#x1F6AA; DISCONNECT
       </button>
+    </div>
+
+    <!-- Skin Picker Modal -->
+    <div class="skin-modal" id="skinModal">
+      <div class="skin-modal-box">
+        <button class="close-btn" onclick="closeSkinPicker()">&times;</button>
+        <h3>&#x1F3A8; CHANGE SKINS</h3>
+        <div class="skin-char-tabs" id="skinCharTabs"></div>
+        <div class="skin-grid" id="skinGrid"></div>
+        <div id="skinStatus" style="font-size:7px;color:#999;margin-top:6px;font-family:'Press Start 2P',monospace"></div>
+      </div>
     </div>
 
     <!-- The Queue -->
@@ -2249,6 +2296,229 @@ document.addEventListener('click', e => {
     panel.classList.remove('open');
   }
 });
+
+// ============================================================
+// SKIN PICKER — integrated into king.html
+// ============================================================
+const SKIN_DB_BASE = `${location.protocol}//${location.hostname}/db`;
+const SKIN_DB_NS = 'maplecast';
+const SKIN_DB_NAME = 'mvc2';
+
+// Bank formula: bank = 16 * (char_pair + 1) + (8 * player_side)
+const SLOT_TO_BANK = { P1C1:16, P2C1:24, P1C2:32, P2C2:40, P1C3:48, P2C3:56 };
+
+// Character name → directory name mapping for DB queries
+const CHAR_DIR_MAP = {
+  'Ryu':'Ryu','Zangief':'Zangief','Guile':'Guile','Morrigan':'Morrigan',
+  'Anakaris':'Anakaris','Strider':'Strider','Cyclops':'Cyclops','Wolverine':'Wolverine',
+  'Psylocke':'Psylocke','Iceman':'Iceman','Rogue':'Rogue','Capt America':'Captain_America',
+  'Spider-Man':'Spider-Man','Hulk':'Hulk','Venom':'Venom','Dr Doom':'Doctor_Doom',
+  'Tron Bonne':'Tron_Bonne','Jill':'Jill','Hayato':'Hayato','Ruby Heart':'Ruby_Heart',
+  'SonSon':'SonSon','Amingo':'Amingo','Marrow':'Marrow','Cable':'Cable',
+  'Chun-Li':'Chun-Li','Mega Man':'Mega_Man','Roll':'Roll','Akuma':'Akuma',
+  'BB Hood':'BB_Hood','Felicia':'Felicia','Charlie':'Charlie_Nash','Sakura':'Sakura',
+  'Dan':'Dan','Cammy':'Cammy','Dhalsim':'Dhalsim','M.Bison':'M_Bison',
+  'Ken':'Ken','Gambit':'Gambit','Juggernaut':'Juggernaut','Storm':'Storm',
+  'Sabretooth':'Sabretooth','Magneto':'Magneto','Shuma':'Shuma-Gorath',
+  'War Machine':'War_Machine','Silver Samurai':'Silver_Samurai','Omega Red':'Omega_Red',
+  'Spiral':'Spiral','Colossus':'Colossus','Iron Man':'Iron_Man','Sentinel':'Sentinel',
+  'Blackheart':'Blackheart','Thanos':'Thanos','Jin':'Jin',
+  'Capt Commando':'Captain_Commando','Bone Wolverine':'Wolverine_Bone_Claw','Servbot':'Servbot',
+};
+
+// Character ID → name (matches match_info output)
+const CHAR_NAMES = [
+  'Ryu','Zangief','Guile','Morrigan','Anakaris','Strider','Cyclops','Wolverine',
+  'Psylocke','Iceman','Rogue','Capt America','Spider-Man','Hulk','Venom','Dr Doom',
+  'Tron Bonne','Jill','Hayato','Ruby Heart','SonSon','Amingo','Marrow','Cable',
+  'Abyss1','Abyss2','Abyss3','Chun-Li','Mega Man','Roll','Akuma','BB Hood',
+  'Felicia','Charlie','Sakura','Dan','Cammy','Dhalsim','M.Bison','Ken',
+  'Gambit','Juggernaut','Storm','Sabretooth','Magneto','Shuma',
+  'War Machine','Silver Samurai','Omega Red','Spiral','Colossus','Iron Man',
+  'Sentinel','Blackheart','Thanos','Jin','Capt Commando','Bone Wolverine','Servbot',
+];
+
+let _skinSelectedSlot = null;
+let _skinSelectedBank = -1;
+let _skinSelectedCharDir = '';
+let _skinMatchChars = [];
+
+async function skinQueryDB(sql) {
+  try {
+    const resp = await fetch(`${SKIN_DB_BASE}/sql`, {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'surreal-ns': SKIN_DB_NS,
+        'surreal-db': SKIN_DB_NAME,
+        'Authorization': 'Basic ' + btoa('root:nobd_arcade_2026'),
+      },
+      body: sql,
+    });
+    const data = await resp.json();
+    return data[0]?.result || [];
+  } catch (e) {
+    console.error('Skin DB query failed:', e);
+    return [];
+  }
+}
+
+async function skinFetchMatchInfo() {
+  // Use the relay WS to get match info from the server
+  // Send a text message that the server's control WS understands
+  // Actually, we can query the server's control WS via the relay
+  // For now, use the /db endpoint to read match state from a different source
+  // ... or we can add match_info to the lobby status that's already being polled
+
+  // Simplest: read from the server via fetch to the control WS
+  // But control WS is loopback only. We need the relay to forward.
+
+  // For MVP: let the user manually select which characters they have.
+  // The server's status tick already sends player names and slot info.
+  // We can use state.mySlot to know if we're P1 or P2.
+  return [];
+}
+
+function openSkinPicker() {
+  const modal = document.getElementById('skinModal');
+  modal.classList.add('open');
+
+  const mySide = state.mySlot;  // 0=P1, 1=P2, -1=spectator
+  if (mySide < 0) {
+    document.getElementById('skinCharTabs').innerHTML =
+      '<div style="color:#ef5350;font-size:8px;font-family:Press Start 2P,monospace">JOIN A GAME FIRST TO CHANGE SKINS</div>';
+    document.getElementById('skinGrid').innerHTML = '';
+    return;
+  }
+
+  // Show character tabs for the player's side
+  // We need to know which characters are in their team.
+  // For now, show all 56 characters as selectable tabs with a search.
+  // TODO: integrate match_info to auto-detect team composition.
+
+  const prefix = mySide === 0 ? 'P1' : 'P2';
+  const tabs = [`${prefix}C1`, `${prefix}C2`, `${prefix}C3`];
+
+  // Show tabs as "Slot 1", "Slot 2", "Slot 3" — user picks which to skin
+  let html = '';
+  for (const slot of tabs) {
+    const bank = SLOT_TO_BANK[slot];
+    html += `<button class="skin-char-tab" onclick="skinSelectSlot('${slot}', ${bank})">${slot}</button>`;
+  }
+  // Also add a character search
+  html += `<input type="text" id="skinSearch" placeholder="Search character..."
+    style="padding:4px 8px;font-size:10px;background:#0f3460;border:1px solid #2a3a5c;color:#fff;border-radius:4px;margin-left:auto;width:120px"
+    oninput="skinSearchChar(this.value)">`;
+  document.getElementById('skinCharTabs').innerHTML = html;
+  document.getElementById('skinGrid').innerHTML = '<div style="color:#999;font-size:8px;font-family:Press Start 2P,monospace">SELECT A SLOT ABOVE, THEN PICK A CHARACTER</div>';
+}
+
+function closeSkinPicker() {
+  document.getElementById('skinModal').classList.remove('open');
+}
+
+async function skinSelectSlot(slot, bank) {
+  _skinSelectedSlot = slot;
+  _skinSelectedBank = bank;
+
+  // Highlight active tab
+  document.querySelectorAll('.skin-char-tab').forEach(t => t.classList.remove('active'));
+  event.currentTarget.classList.add('active');
+
+  // Show character list for this slot
+  let html = '<div style="font-size:7px;color:#999;margin-bottom:4px;font-family:Press Start 2P,monospace">PICK CHARACTER:</div>';
+  html += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:3px;margin-bottom:8px;max-height:150px;overflow-y:auto">';
+  for (const name of Object.keys(CHAR_DIR_MAP)) {
+    html += `<button style="padding:4px;font-size:6px;background:#0f3460;border:1px solid #2a3a5c;color:#ccc;cursor:pointer;border-radius:3px;font-family:Press Start 2P,monospace"
+      onclick="skinLoadForChar('${CHAR_DIR_MAP[name]}','${name}')">${name}</button>`;
+  }
+  html += '</div><div id="skinCharGrid"></div>';
+  document.getElementById('skinGrid').innerHTML = html;
+}
+
+async function skinLoadForChar(charDir, charName) {
+  _skinSelectedCharDir = charDir;
+  document.getElementById('skinStatus').textContent = `Loading ${charName} skins...`;
+
+  const skins = await skinQueryDB(
+    `SELECT hash, author, palette_hex, colors, credit FROM skin WHERE char_dir = '${charDir}' ORDER BY author LIMIT 200;`
+  );
+
+  if (skins.length === 0) {
+    document.getElementById('skinCharGrid').innerHTML = '<div style="color:#999;font-size:7px">No skins found</div>';
+    document.getElementById('skinStatus').textContent = '';
+    return;
+  }
+
+  let html = `<div style="font-size:7px;color:#4fc3f7;margin-bottom:4px;font-family:Press Start 2P,monospace">${charName} — ${skins.length} SKINS (bank ${_skinSelectedBank})</div>`;
+  html += '<div class="skin-grid">';
+  for (const s of skins) {
+    const colors = s.colors || hexToSkinColors(s.palette_hex);
+    let bar = '';
+    for (let i = 1; i < Math.min(16, colors.length); i++) {
+      const c = colors[i];
+      const r = ((c >> 8) & 0xF) * 17, g = ((c >> 4) & 0xF) * 17, b = (c & 0xF) * 17;
+      bar += `<span style="background:rgb(${r},${g},${b})"></span>`;
+    }
+    const colorsJson = JSON.stringify(colors).replace(/"/g, '&quot;');
+    html += `<div class="skin-card" onclick='skinApply(${JSON.stringify(colors)})'>
+      <div class="palette-bar">${bar}</div>
+      <div class="author" title="${(s.credit || s.author || '').replace(/'/g, '')}">${s.author || 'Community'}</div>
+    </div>`;
+  }
+  html += '</div>';
+  document.getElementById('skinCharGrid').innerHTML = html;
+  document.getElementById('skinStatus').textContent = `${skins.length} skins loaded. Click to apply.`;
+}
+
+function hexToSkinColors(hex) {
+  const colors = [];
+  for (let i = 0; i < hex.length; i += 4)
+    colors.push(parseInt(hex.substr(i, 4), 16));
+  return colors;
+}
+
+async function skinApply(colors) {
+  if (_skinSelectedBank < 0) return;
+  // Send palette_write to the server via the existing WS connection
+  // The relay WS forwards text messages to the server's control channel
+  if (state.ws && state.ws.readyState === 1) {
+    state.ws.send(JSON.stringify({
+      cmd: 'palette_write',
+      index: _skinSelectedBank * 16,
+      colors: colors,
+      persist: true,
+      reply_id: 'skin_' + Date.now(),
+    }));
+    document.getElementById('skinStatus').textContent = `Skin applied to ${_skinSelectedSlot}!`;
+  } else {
+    document.getElementById('skinStatus').textContent = 'Not connected to server';
+  }
+}
+
+function skinSearchChar(query) {
+  const q = query.toLowerCase();
+  document.querySelectorAll('#skinGrid button').forEach(btn => {
+    btn.style.display = btn.textContent.toLowerCase().includes(q) ? '' : 'none';
+  });
+}
+
+// Show/hide skin button based on player state
+function updateSkinButton() {
+  const btn = document.getElementById('skinBtn');
+  if (state.mySlot >= 0) {
+    btn.style.display = 'block';
+  } else {
+    btn.style.display = 'none';
+  }
+}
+
+// Poll skin button visibility
+setInterval(updateSkinButton, 1000);
+
+// Expose to onclick handlers
+window.openSkinPicker = openSkinPicker;
+window.closeSkinPicker = closeSkinPicker;
 
 </script>
 

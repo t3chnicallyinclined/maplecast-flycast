@@ -18,6 +18,10 @@
 #include <websocketpp/server.hpp>
 #include "json/json.hpp"
 #include <cstdio>
+
+// Palette functions defined in maplecast_control_ws.cpp
+void maplecast_palette_write(int startIdx, const std::vector<u16>& colors, bool persist);
+void maplecast_palette_clear();
 #include <cstring>
 #include <mutex>
 #include <set>
@@ -1193,6 +1197,27 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 						[key](const QueueEntry& e) { return e.key == key; }), _queue.end());
 				} catch (...) {}
 				broadcastStatus();
+			}
+			// Skin system — palette_write and palette_clear forwarded from
+			// king.html skin picker through the relay WS. These reach the
+			// same handler as the control WS palette commands.
+			else if (ctrl.contains("cmd") && ctrl["cmd"] == "palette_write")
+			{
+				int startIdx = ctrl.value("index", 0);
+				bool persist = ctrl.value("persist", false);
+				if (ctrl.contains("colors") && ctrl["colors"].is_array()) {
+					auto& colors = ctrl["colors"];
+					int count = (int)colors.size();
+					if (startIdx >= 0 && startIdx + count <= 1024) {
+						std::vector<u16> colorVec;
+						for (auto& c : colors) colorVec.push_back(c.get<int>() & 0xFFFF);
+						::maplecast_palette_write(startIdx, colorVec, persist);
+					}
+				}
+			}
+			else if (ctrl.contains("cmd") && ctrl["cmd"] == "palette_clear")
+			{
+				::maplecast_palette_clear();
 			}
 		} catch (...) {}
 	}

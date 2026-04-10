@@ -1144,3 +1144,40 @@ bool active()
 }
 
 } // namespace maplecast_control_ws
+
+// Global palette functions callable from maplecast_ws_server.cpp
+// (king.html skin picker sends commands through the relay WS, which
+// arrives at the mirror WS handler, which calls these)
+void maplecast_palette_write(int startIdx, const std::vector<u16>& colors, bool persist)
+{
+	for (int i = 0; i < (int)colors.size(); i++) {
+		pvr_WriteReg(PALETTE_RAM_START_addr + (startIdx + i) * 4, colors[i]);
+	}
+	if (persist) {
+		using namespace maplecast_control_ws;
+		std::lock_guard<std::mutex> lock(_palOverrideMutex);
+		bool replaced = false;
+		for (auto& existing : _palOverrides) {
+			if (existing.startIndex == startIdx) {
+				existing.colors = colors;
+				existing.active = true;
+				replaced = true;
+				break;
+			}
+		}
+		if (!replaced) {
+			PaletteOverride ov;
+			ov.active = true;
+			ov.startIndex = startIdx;
+			ov.colors = colors;
+			_palOverrides.push_back(std::move(ov));
+		}
+	}
+}
+
+void maplecast_palette_clear()
+{
+	using namespace maplecast_control_ws;
+	std::lock_guard<std::mutex> lock(_palOverrideMutex);
+	_palOverrides.clear();
+}
