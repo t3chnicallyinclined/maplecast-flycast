@@ -182,8 +182,10 @@ static std::shared_ptr<GamepadDevice> findGamepadOnPort(int port)
 // serverPublish. Survives game reloads because we write after the game does.
 struct PaletteOverride {
 	bool active = false;
-	int startIndex = 0;
-	std::vector<u16> colors;
+	// DC RAM offset where the palette source data lives (from PL??_DAT.BIN)
+	u32 ramOffset = 0;
+	// The replacement palette bytes (ARGB4444, 32 bytes per 16-color palette)
+	std::vector<u8> data;
 };
 static std::mutex _palOverrideMutex;
 static std::vector<PaletteOverride> _palOverrides;
@@ -191,12 +193,13 @@ static std::vector<PaletteOverride> _palOverrides;
 void applyPaletteOverrides()
 {
 	std::lock_guard<std::mutex> lock(_palOverrideMutex);
+	if (_palOverrides.empty()) return;
 	for (auto& ov : _palOverrides) {
-		if (!ov.active) continue;
-		for (int i = 0; i < (int)ov.colors.size(); i++) {
-			u32 addr = PALETTE_RAM_START_addr + (ov.startIndex + i) * 4;
-			pvr_WriteReg(addr, ov.colors[i]);
-		}
+		if (!ov.active || ov.data.empty()) continue;
+		// Write directly to DC RAM — the game reads from here into PVR
+		// palette RAM as part of its normal rendering. No flickering
+		// because the game's own copy carries our custom colors.
+		memcpy(&::mem_b[ov.ramOffset], ov.data.data(), ov.data.size());
 	}
 }
 
@@ -523,43 +526,65 @@ static void onMessage(ControlConnHdl hdl, ControlWsServer::message_ptr msg)
 		return;
 
 	} else if (cmdName == "palette_write") {
-		// Write ARGB4444 palette entries to PVR palette RAM.
-		// If "persist":true, re-applies every frame (survives game reloads).
-		int startIdx = parsed.value("index", 0);
+		// Write palette data. Two modes:
+		//   PVR mode (default): writes to PVR palette RAM (immediate, may flicker)
+		//   RAM mode ("ram_offset" set): writes to DC RAM source data (no flicker)
+		// "persist":true re-applies every frame via applyPaletteOverrides().
 		bool persist = parsed.value("persist", false);
-		if (!parsed.contains("colors") || !parsed["colors"].is_array()) {
-			sendJson(hdl, errReplyImmediate(reply_id, "palette_write", "need 'colors' array"));
-			return;
+
+		if (parsed.contains("ram_offset")) {
+			// RAM mode: write raw palette bytes to DC RAM
+			u32 offset = parsed["ram_offset"].get<int>();
+			if (!parsed.contains("hex") || !parsed["hex"].is_string()) {
+				sendJson(hdl, errReplyImmediate(reply_id, "palette_write", "RAM mode needs 'hex'"));
+				return;
+			}
+			std::string hex = parsed["hex"].get<std::string>();
+			std::vector<u8> bytes;
+			for (size_t i = 0; i + 1 < hex.size(); i += 2)
+				bytes.push_back((u8)std::strtol(hex.substr(i, 2).c_str(), nullptr, 16));
+			if (offset + bytes.size() > 16 * 1024 * 1024) {
+				sendJson(hdl, errReplyImmediate(reply_id, "palette_write", "offset out of range"));
+				return;
+			}
+			memcpy(&::mem_b[offset], bytes.data(), bytes.size());
+			if (persist) {
+				std::lock_guard<std::mutex> lock(_palOverrideMutex);
+				PaletteOverride ov;
+				ov.active = true;
+				ov.ramOffset = offset;
+				ov.data = std::move(bytes);
+				_palOverrides.push_back(std::move(ov));
+			}
+			sendJson(hdl, json{
+				{"ok", true}, {"cmd", "palette_write"}, {"reply_id", reply_id},
+				{"data", {{"ram_offset", offset}, {"persist", persist}}},
+			});
+		} else {
+			// PVR mode: write to PVR palette RAM
+			int startIdx = parsed.value("index", 0);
+			if (!parsed.contains("colors") || !parsed["colors"].is_array()) {
+				sendJson(hdl, errReplyImmediate(reply_id, "palette_write", "need 'colors' or 'ram_offset'+'hex'"));
+				return;
+			}
+			auto& colors = parsed["colors"];
+			int count = (int)colors.size();
+			if (startIdx < 0 || startIdx + count > 1024) {
+				sendJson(hdl, errReplyImmediate(reply_id, "palette_write", "index+count out of range"));
+				return;
+			}
+			for (int i = 0; i < count; i++) {
+				u32 addr = PALETTE_RAM_START_addr + (startIdx + i) * 4;
+				pvr_WriteReg(addr, colors[i].get<int>() & 0xFFFF);
+			}
+			sendJson(hdl, json{
+				{"ok", true}, {"cmd", "palette_write"}, {"reply_id", reply_id},
+				{"data", {{"index", startIdx}, {"count", count}}},
+			});
 		}
-		auto& colors = parsed["colors"];
-		int count = (int)colors.size();
-		if (startIdx < 0 || startIdx + count > 1024) {
-			sendJson(hdl, errReplyImmediate(reply_id, "palette_write", "index+count out of range"));
-			return;
-		}
-		std::vector<u16> colorVec;
-		for (int i = 0; i < count; i++) {
-			u16 c16 = colors[i].get<int>() & 0xFFFF;
-			u32 addr = PALETTE_RAM_START_addr + (startIdx + i) * 4;
-			pvr_WriteReg(addr, c16);
-			colorVec.push_back(c16);
-		}
-		if (persist) {
-			std::lock_guard<std::mutex> lock(_palOverrideMutex);
-			PaletteOverride ov;
-			ov.active = true;
-			ov.startIndex = startIdx;
-			ov.colors = std::move(colorVec);
-			_palOverrides.push_back(std::move(ov));
-		}
-		sendJson(hdl, json{
-			{"ok", true}, {"cmd", "palette_write"}, {"reply_id", reply_id},
-			{"data", {{"index", startIdx}, {"count", count}, {"persist", persist}}},
-		});
 		return;
 
 	} else if (cmdName == "palette_clear") {
-		// Clear all persistent palette overrides
 		std::lock_guard<std::mutex> lock(_palOverrideMutex);
 		_palOverrides.clear();
 		sendJson(hdl, json{
