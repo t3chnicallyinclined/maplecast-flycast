@@ -608,6 +608,154 @@ static void onMessage(ControlConnHdl hdl, ControlWsServer::message_ptr msg)
 		});
 		return;
 
+	} else if (cmdName == "palette_probe") {
+		// Auto-discover which PVR palette bank a character slot uses.
+		// Binary search: write a marker to half the banks, wait a frame,
+		// check which half the client reports as changed. 6 iterations
+		// to narrow from 64 banks to 1 exact bank.
+		//
+		// Since the headless server PVR palette is empty, we can probe
+		// by writing to candidate banks and seeing which one produces
+		// visible change on the viewer. But we can't see from the server.
+		//
+		// Alternative approach: write a unique color to each of the 64
+		// banks in ONE shot. The client/viewer sees which color each
+		// character renders as. Return the mapping.
+		//
+		// For now, the command just writes unique-per-bank colors and
+		// returns the mapping. The caller (HTML page) observes the result.
+		//
+		// Usage: call palette_probe, then visually identify which bank
+		// each character uses from the displayed colors.
+
+		// Write unique hue per bank
+		{
+			std::lock_guard<std::mutex> lock(_palOverrideMutex);
+			_palOverrides.clear();
+		}
+		json bankColors = json::array();
+		for (int bank = 0; bank < 64; bank++) {
+			int hue = bank * 4;
+			int r, g, b;
+			if (hue < 64)       { r = 15; g = hue*15/64; b = 0; }
+			else if (hue < 128) { r = 15-(hue-64)*15/64; g = 15; b = 0; }
+			else if (hue < 192) { r = 0; g = 15; b = (hue-128)*15/64; }
+			else                { r = (hue-192)*15/64; g = 0; b = 15; }
+
+			std::vector<u16> colors;
+			colors.push_back(0x0000);
+			for (int i = 1; i < 16; i++) {
+				int s = std::min(15, i);
+				colors.push_back(0xF000 | ((std::min(15,r*s/15))<<8) |
+					((std::min(15,g*s/15))<<4) | std::min(15,b*s/15));
+			}
+
+			// Write immediately
+			for (int i = 0; i < 16; i++)
+				pvr_WriteReg(PALETTE_RAM_START_addr + (bank*16+i)*4, colors[i]);
+
+			// Also persist
+			PaletteOverride ov;
+			ov.active = true;
+			ov.startIndex = bank * 16;
+			ov.colors = std::move(colors);
+			{
+				std::lock_guard<std::mutex> lock(_palOverrideMutex);
+				_palOverrides.push_back(std::move(ov));
+			}
+
+			bankColors.push_back({{"bank", bank}, {"r", r}, {"g", g}, {"b", b}});
+		}
+
+		sendJson(hdl, json{
+			{"ok", true}, {"cmd", "palette_probe"}, {"reply_id", reply_id},
+			{"data", {
+				{"bankColors", bankColors},
+				{"hint", "Each bank has a unique color. Identify which color each character shows to find their bank."},
+			}},
+		});
+		return;
+
+	} else if (cmdName == "ram_read") {
+		int offset = parsed.value("offset", -1);
+		int size = parsed.value("size", 0);
+		if (offset < 0 || size <= 0 || offset + size > 16 * 1024 * 1024) {
+			sendJson(hdl, errReplyImmediate(reply_id, "ram_read", "bad offset/size"));
+			return;
+		}
+		// Return as hex string
+		std::string hex;
+		hex.reserve(size * 2);
+		for (int i = 0; i < size; i++) {
+			char buf[3];
+			snprintf(buf, sizeof(buf), "%02x", (unsigned)::mem_b[offset + i]);
+			hex += buf;
+		}
+		sendJson(hdl, json{
+			{"ok", true}, {"cmd", "ram_read"}, {"reply_id", reply_id},
+			{"data", {{"offset", offset}, {"size", size}, {"hex", hex}}},
+		});
+		return;
+
+	} else if (cmdName == "match_info") {
+		// Read all 6 character structs to get the current match state.
+		// Character struct: +0x000=active, +0x001=character_id, +0x52D=palette
+		struct CharInfo {
+			int slot; u8 active; u8 charId; u8 palette;
+			float posX, posY; u8 health;
+		};
+		static const u32 bases[] = {
+			0x268340, 0x2688E4, 0x268E88,  // P1C1, P2C1, P1C2
+			0x26942C, 0x2699D0, 0x269F74,  // P2C2, P1C3, P2C3
+		};
+		static const char* slotNames[] = {
+			"P1C1", "P2C1", "P1C2", "P2C2", "P1C3", "P2C3"
+		};
+		// Character name table
+		static const char* charNames[] = {
+			"Ryu","Zangief","Guile","Morrigan","Anakaris","Strider",
+			"Cyclops","Wolverine","Psylocke","Iceman","Rogue","Capt America",
+			"Spider-Man","Hulk","Venom","Dr Doom","Tron Bonne","Jill",
+			"Hayato","Ruby Heart","SonSon","Amingo","Marrow","Cable",
+			"Abyss1","Abyss2","Abyss3","Chun-Li","Mega Man","Roll",
+			"Akuma","BB Hood","Felicia","Charlie","Sakura","Dan",
+			"Cammy","Dhalsim","M.Bison","Ken","Gambit","Juggernaut",
+			"Storm","Sabretooth","Magneto","Shuma","War Machine",
+			"Silver Samurai","Omega Red","Spiral","Colossus","Iron Man",
+			"Sentinel","Blackheart","Thanos","Jin","Capt Commando",
+			"Bone Wolverine","Servbot"
+		};
+
+		json chars = json::array();
+		for (int i = 0; i < 6; i++) {
+			u32 base = bases[i];
+			u8 active = ::mem_b[base + 0x000];
+			u8 charId = ::mem_b[base + 0x001];
+			u8 palette = ::mem_b[base + 0x52D];
+			u8 health = ::mem_b[base + 0x420];
+			float posX, posY;
+			memcpy(&posX, &::mem_b[base + 0x034], 4);
+			memcpy(&posY, &::mem_b[base + 0x038], 4);
+
+			const char* name = (charId < 59) ? charNames[charId] : "Unknown";
+			chars.push_back({
+				{"slot", slotNames[i]},
+				{"active", active},
+				{"charId", charId},
+				{"charIdHex", json(std::string("0x") + std::string(1, "0123456789ABCDEF"[charId>>4]) + std::string(1, "0123456789ABCDEF"[charId&0xF]))},
+				{"name", name},
+				{"palette", palette},
+				{"health", health},
+				{"posX", posX},
+				{"posY", posY},
+			});
+		}
+		sendJson(hdl, json{
+			{"ok", true}, {"cmd", "match_info"}, {"reply_id", reply_id},
+			{"data", {{"characters", chars}}},
+		});
+		return;
+
 	} else if (cmdName == "palette_find") {
 		// Search DC RAM for a byte pattern (palette signature).
 		// Returns the offset where the pattern was found.
