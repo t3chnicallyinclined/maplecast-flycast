@@ -44,6 +44,9 @@
 #include "network/maplecast_audio.h"
 #include "network/maplecast_mirror.h"
 #include "network/maplecast_control_ws.h"
+#include "network/maplecast_player.h"
+#include "network/maplecast_replica.h"
+#include "network/maplecast_input_sink.h"
 #include "hw/maple/maple_cfg.h"
 #include <cstdlib>
 #include <string>
@@ -1000,6 +1003,21 @@ void EventManager::broadcastEvent(Event event)
 void Emulator::run()
 {
 	verify(state == Running);
+	// Replica / player client frame gate (non-threaded path). See the
+	// threaded path in start() for the full explanation. The two are
+	// mutually exclusive by env-var contract.
+	if (maplecast_replica::active())
+	{
+		while (state == Running && !maplecast_replica::frameGate())
+			std::this_thread::sleep_for(std::chrono::microseconds(250));
+		if (state != Running) return;
+	}
+	else if (maplecast_player::active())
+	{
+		while (state == Running && !maplecast_player::frameGate())
+			std::this_thread::sleep_for(std::chrono::microseconds(250));
+		if (state != Running) return;
+	}
 	startTime = sh4_sched_now64();
 	renderTimeout = false;
 	if (!singleStep && stepRangeTo == 0)
@@ -1071,6 +1089,27 @@ void Emulator::start()
 		maplecast_control_ws::init(controlPort);
 	}
 
+	// Replica client (MAPLECAST_REPLICA): GGPO-spectator-style replay
+	// engine. Receives authoritative per-frame inputs from the headless
+	// server's tape, runs the local SH4 in lockstep, uses the existing
+	// state-sync STAT envelope to bootstrap mid-match. Catchup loop steps
+	// the SH4 with rendering disabled, the same trick GGPO uses for
+	// rollback fast-forward. See core/network/maplecast_replica.cpp.
+	//
+	// MUTUALLY EXCLUSIVE with the SHELVED MAPLECAST_PLAYER_CLIENT below
+	// (whose frameGate has a desync bug — it fast-forwards a counter
+	// without running the SH4, which diverges the local state from the
+	// server's). Replica wins if both are set.
+	const bool replicaActive = maplecast_replica::init();
+
+	// SHELVED player client: runs full SH4 locally, but inputs are
+	// replayed from the server's frame-stamped tape via the bespoke
+	// frameGate path. Kept compiled for diagnostic comparison; do NOT
+	// add features here. Safe to init before mirror client detection
+	// because the env vars are mutually exclusive by design.
+	if (!replicaActive)
+		maplecast_player::init();
+
 	// Mirror client: receives TA deltas, renders only (no CPU)
 	if (std::getenv("MAPLECAST_MIRROR_CLIENT"))
 	{
@@ -1102,6 +1141,18 @@ void Emulator::start()
 #endif
 
 		maplecast_mirror::initClient();
+
+		// Input sink: send local gamepad events to the server.
+		// Reads MAPLECAST_SERVER_HOST for the target (same as mirror client).
+		{
+			const char* sinkHost = std::getenv("MAPLECAST_SERVER_HOST");
+			if (!sinkHost) sinkHost = "127.0.0.1";
+			int sinkSlot = 0;
+			if (const char* s = std::getenv("MAPLECAST_PLAYER_SLOT"))
+				sinkSlot = std::atoi(s);
+			maplecast_input_sink::init(sinkHost, sinkSlot);
+		}
+
 		state = Loaded;
 		printf("[MIRROR] === CLIENT MODE === CPU stopped, renderer-only, %d texture threads\n",
 			(int)config::MaxThreads);
@@ -1126,10 +1177,43 @@ void Emulator::start()
 				try {
 					while (state == Running || singleStep || stepRangeTo != 0)
 					{
+						// Replica / lockstep player-client frame gate. If
+						// we're in replica or player mode and the tape
+						// hasn't caught up, block here until the next
+						// packet arrives. Short spin — the rx thread is
+						// pushing into the queues at UDP speed, so
+						// worst-case latency is roughly one network RTT.
+						// Replica and player are mutually exclusive by
+						// env-var contract.
+						if (maplecast_replica::active())
+						{
+							while (state == Running && !maplecast_replica::frameGate())
+							{
+								std::this_thread::sleep_for(std::chrono::microseconds(250));
+							}
+							if (state != Running) break;
+						}
+						else if (maplecast_player::active())
+						{
+							while (state == Running && !maplecast_player::frameGate())
+							{
+								// Yield for ~250us per spin. Tighter than
+								// a sleep(0) so we don't miss a 16ms frame
+								// deadline, looser than a busy-loop so we
+								// don't pin a core.
+								std::this_thread::sleep_for(std::chrono::microseconds(250));
+							}
+							if (state != Running) break;
+						}
 						startTime = sh4_sched_now64();
 						renderTimeout = false;
 						runInternal();
-						if (!ggpo::nextFrame())
+						// In replica mode we're not using GGPO, and
+						// ggpo::nextFrame() returns false when no GGPO
+						// session is active (_endOfFrame is never set),
+						// which would break out of the emu loop after
+						// one frame. Skip the check entirely.
+						if (!maplecast_replica::active() && !ggpo::nextFrame())
 							break;
 					}
 					TermAudio();

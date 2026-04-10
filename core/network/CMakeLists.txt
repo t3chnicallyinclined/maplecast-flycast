@@ -44,6 +44,14 @@ target_sources(${PROJECT_NAME} PRIVATE
         maplecast_ws_server.h
         maplecast_control_ws.cpp
         maplecast_control_ws.h
+        maplecast_player.cpp
+        maplecast_player.h
+        maplecast_state_sync.cpp
+        maplecast_state_sync.h
+        maplecast_replica.cpp
+        maplecast_replica.h
+        maplecast_input_sink.cpp
+        maplecast_input_sink.h
         maplecast_wasm_bridge.cpp)
 
 # maplecast_stream (H.264 / NVENC / CUDA GL interop) and maplecast_webrtc

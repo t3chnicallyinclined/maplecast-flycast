@@ -59,6 +59,14 @@ public:
 		if (buttonListener == listener)
 			buttonListener = nullptr;
 	}
+	// Global button listener — fires for ALL devices. Used by input sink.
+	static void listenButtonsGlobal(ButtonListener listener) {
+		globalButtonListener = listener;
+	}
+	static void unlistenButtonsGlobal(ButtonListener listener) {
+		if (globalButtonListener == listener)
+			globalButtonListener = nullptr;
+	}
 
 	std::shared_ptr<InputMapping> get_input_mapping() { return input_mapper; }
 	void save_mapping(int system = settings.platform.system);
@@ -270,6 +278,7 @@ private:
 	u64 _detection_start_time = 0;
 	input_detected_cb _input_detected = nullptr;
 	ButtonListener buttonListener = nullptr;
+	static inline ButtonListener globalButtonListener = nullptr;
 	bool _remappable;
 	bool _is_registered = false;
 	u32 digitalToAnalogState[4];

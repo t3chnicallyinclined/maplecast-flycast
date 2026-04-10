@@ -19,6 +19,7 @@
 #include "network/maplecast_mirror.h"
 #include "network/maplecast_audio_client.h"
 #include "network/maplecast_input_server.h"
+#include "audio/audiostream.h"
 #include "cfg/option.h"
 
 #include <imgui.h>
@@ -312,6 +313,161 @@ static void drawInputSection()
 	ImGui::Separator();
 }
 
+// ---- Settings section ----
+//
+// Video and audio output knobs that are safe to change at runtime in
+// mirror-client mode. The full flycast settings menu has many more options
+// (GGPO netplay, BIOS paths, emulator timings, renderer backend, etc.) but
+// most of them either make no sense on a client that isn't running the
+// emulator, or would break the mirror pipeline if toggled.
+//
+// Load-bearing overrides from emulator.cpp:1077-1091 that we deliberately
+// DO NOT expose:
+//   - ThreadedRendering (must stay off — clientReceive runs on the render
+//     thread)
+//   - Fog, ModifierVolumes, UseMipmaps, PerPixelLayers (performance
+//     safety rails for the client path)
+//   - RendererType (changing the GL/Vulkan backend needs a full renderer
+//     teardown + re-init that the mirror client isn't set up for)
+//   - VSync (we force it off at runtime for render-loop pacing — see
+//     mainui.cpp SwapInterval override)
+//   - AudioBackend (we force "pulse" to dodge SDL2's stateless resampler
+//     crackle on PipeWire hosts). Backend switching IS safe once the
+//     emulator is running — see the Audio subsection below which exposes
+//     it anyway for users who want to override.
+
+static void drawSettingsSection()
+{
+	if (!ImGui::CollapsingHeader("Settings"))
+		return;
+
+	// ==== Video ====
+	if (ImGui::TreeNodeEx("Video", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		// Render resolution. Mirror the set of choices from
+		// settings_video.cpp around line 155 — these are the native render
+		// resolutions flycast supports. RenderResolution is an int that
+		// represents the vertical pixel count (e.g. 480, 960, 1440, 1920).
+		static const int RES_CHOICES[] = { 480, 720, 960, 1080, 1440, 1920, 2160 };
+		static const char* RES_LABELS[] = {
+			"480p (native)", "720p", "960p (2x)", "1080p",
+			"1440p (3x)", "1920p (4x)", "2160p (4.5x)"
+		};
+		int cur = config::RenderResolution.get();
+		int selected = 0;
+		for (size_t i = 0; i < sizeof(RES_CHOICES)/sizeof(int); i++) {
+			if (RES_CHOICES[i] == cur) { selected = (int)i; break; }
+		}
+		if (ImGui::Combo("Resolution", &selected, RES_LABELS,
+			sizeof(RES_LABELS)/sizeof(const char*)))
+		{
+			config::RenderResolution = RES_CHOICES[selected];
+			logLine("[overlay] render resolution changed");
+		}
+
+		bool widescreen = config::Widescreen.get();
+		if (ImGui::Checkbox("Widescreen (16:9)", &widescreen))
+			config::Widescreen.set(widescreen);
+
+		{
+			// Super-widescreen and screen stretching are grayed out if
+			// Widescreen is off — matches flycast's own settings UI.
+			bool disabled = !config::Widescreen.get();
+			if (disabled) ImGui::BeginDisabled();
+			bool superWide = config::SuperWidescreen.get();
+			if (ImGui::Checkbox("Super Widescreen", &superWide))
+				config::SuperWidescreen.set(superWide);
+			if (disabled) ImGui::EndDisabled();
+		}
+
+		int stretch = config::ScreenStretching.get();
+		if (ImGui::SliderInt("H. stretch (%)", &stretch, 100, 250))
+			config::ScreenStretching.set(stretch);
+
+		bool integerScale = config::IntegerScale.get();
+		if (ImGui::Checkbox("Integer scaling", &integerScale))
+			config::IntegerScale.set(integerScale);
+
+		bool linear = config::LinearInterpolation.get();
+		if (ImGui::Checkbox("Linear interpolation", &linear))
+			config::LinearInterpolation.set(linear);
+
+		bool rotate = config::Rotate90.get();
+		if (ImGui::Checkbox("Rotate 90°", &rotate))
+			config::Rotate90.set(rotate);
+
+		// Texture filtering — 0=default, 1=nearest, 2=linear
+		int texFilter = config::TextureFiltering.get();
+		if (ImGui::Combo("Texture filter", &texFilter,
+			"Default\0Nearest\0Linear\0"))
+		{
+			config::TextureFiltering.set(texFilter);
+		}
+
+		// Anisotropic filtering — flycast allows 1, 2, 4, 8, 16
+		static const int ANISO_CHOICES[] = { 1, 2, 4, 8, 16 };
+		static const char* ANISO_LABELS[] = { "Off", "2x", "4x", "8x", "16x" };
+		int curAniso = config::AnisotropicFiltering.get();
+		int anisoSel = 0;
+		for (size_t i = 0; i < sizeof(ANISO_CHOICES)/sizeof(int); i++) {
+			if (ANISO_CHOICES[i] == curAniso) { anisoSel = (int)i; break; }
+		}
+		if (ImGui::Combo("Anisotropic", &anisoSel, ANISO_LABELS,
+			sizeof(ANISO_LABELS)/sizeof(const char*)))
+		{
+			config::AnisotropicFiltering.set(ANISO_CHOICES[anisoSel]);
+		}
+
+		bool showFps = config::ShowFPS.get();
+		if (ImGui::Checkbox("Show FPS counter", &showFps))
+			config::ShowFPS.set(showFps);
+
+		ImGui::TreePop();
+	}
+
+	// ==== Audio ====
+	if (ImGui::TreeNodeEx("Audio", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		// Audio backend dropdown. Shows the backend flycast currently has
+		// selected and lets the user switch at runtime. Switching calls
+		// TermAudio() + InitAudio() via a one-shot action button so we
+		// don't accidentally tear down playback mid-slider-drag.
+		const std::string cur = config::AudioBackend.get();
+		ImGui::Text("Backend (current): %s", cur.c_str());
+
+		// Pre-fill with the likely-available backends. "null" is always
+		// registered; others depend on compile flags.
+		static const char* BACKENDS[] = { "pulse", "alsa", "sdl2", "libao", "null" };
+		static int backendSel = 0;
+		// Sync the selector with whatever's currently selected on first draw
+		static bool backendSelInit = false;
+		if (!backendSelInit) {
+			for (int i = 0; i < (int)(sizeof(BACKENDS)/sizeof(const char*)); i++) {
+				if (cur == BACKENDS[i]) { backendSel = i; break; }
+			}
+			backendSelInit = true;
+		}
+		ImGui::Combo("Switch to", &backendSel, BACKENDS,
+			sizeof(BACKENDS)/sizeof(const char*));
+		ImGui::SameLine();
+		if (ImGui::SmallButton("Apply##backend"))
+		{
+			// Teardown + re-init in place. The mirror client's audio
+			// receive thread notices the new backend via its next push
+			// call because PushExternalAudio reads currentBackend fresh.
+			config::AudioBackend.set(BACKENDS[backendSel]);
+			TermAudio();
+			InitAudio();
+			logLine("[overlay] audio backend switched");
+		}
+		ImGui::TextDisabled("Switch triggers TermAudio + InitAudio.");
+
+		ImGui::TreePop();
+	}
+
+	ImGui::Separator();
+}
+
 static void drawLogSection()
 {
 	if (!ImGui::CollapsingHeader("Log"))
@@ -368,6 +524,7 @@ void drawContent()
 	drawVideoSection(vs);
 	drawAudioSection(as);
 	drawInputSection();
+	drawSettingsSection();
 	drawLogSection();
 
 	ImGui::End();

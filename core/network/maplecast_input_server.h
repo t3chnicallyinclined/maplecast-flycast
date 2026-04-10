@@ -359,4 +359,91 @@ void installStickBindings(const std::vector<StickSnapshot>& snapshots);
 bool loadStickCache();
 bool saveStickCache();
 
+// =====================================================================
+//             INPUT TAPE — Phase 1 of lockstep-player-client
+// =====================================================================
+//
+// The input tape is the authoritative record of what the server's SH4
+// saw on each frame for slots 0 and 1. Every call to updateSlot() pushes
+// a frame-stamped entry into a lock-free SPSC-per-slot ring buffer (the
+// network thread is the only producer per slot); a dedicated publisher
+// thread drains all slots into a UDP datagram stream on port 7101 so
+// native player clients can replay the tape into their own SH4.
+//
+// Wire format is intentionally tiny — absolute state, not deltas, so
+// packet loss is self-healing: any surviving packet re-syncs the slot.
+//
+//   struct TapeEntry {           // 16 bytes, little-endian, naturally aligned
+//       uint64_t frame;          // maplecast_mirror::currentFrame() at write
+//       uint32_t seq;            // lower 24 bits: monotonic packet seq for this slot
+//                                //  upper  8 bits: slot (0 or 1)
+//       uint16_t buttons;        // DC active-low lower 16 bits
+//       uint8_t  lt;             // raw 8-bit trigger
+//       uint8_t  rt;             //           "
+//   };
+//
+// Slot is packed into the high byte of `seq` rather than eating its own
+// word — 24 bits of seq is ~4 hours at 1 kHz which is fine (the client
+// only uses seq for monotonicity checks inside a session, never as an
+// absolute). Dropping `stampUs` from the wire: the receiver timestamps
+// arrival locally, and server wall-clock adds nothing deterministic to
+// the replay — the frame number is the only ordering that matters.
+//
+// UDP datagram format:
+//   4 bytes  magic "INPT"
+//   1 byte   version (=1)
+//   1 byte   entry count
+//   2 bytes  reserved
+//   entries[count]           // TapeEntry repeated
+//
+// Subscriber model: a client sends a 4-byte "HELO" datagram to the tape
+// port; the server remembers (srcIP, srcPort) as a subscriber and starts
+// fanning tape drains to it. Subscribers age out after 5 s of silence —
+// clients re-HELO every ~1 s to stay subscribed (cheap heartbeat).
+
+struct TapeEntry {
+	uint64_t frame;
+	uint32_t seqAndSlot;   // [31:24] slot, [23:0] seq mod 2^24
+	uint16_t buttons;
+	uint8_t  lt;
+	uint8_t  rt;
+};
+static_assert(sizeof(TapeEntry) == 16, "TapeEntry wire layout must be 16 bytes");
+
+inline uint32_t packSeqSlot(uint32_t seq, uint8_t slot) {
+	return (seq & 0x00FFFFFFu) | ((uint32_t)slot << 24);
+}
+inline void unpackSeqSlot(uint32_t v, uint32_t& seq, uint8_t& slot) {
+	seq  = v & 0x00FFFFFFu;
+	slot = (uint8_t)(v >> 24);
+}
+
+// Push a tape entry for slot. Called from updateSlot() on the UDP/XDP
+// input thread. Lock-free, bounded ring per slot — if the ring is full
+// (publisher is wedged), the oldest entry is dropped. Safe to call before
+// the publisher thread has started; entries will sit in the ring until
+// the publisher drains them.
+void pushTapeEntry(int slot, uint16_t buttons, uint8_t lt, uint8_t rt, uint32_t seq);
+
+// GGPO-style dense tape tick: push one tape entry per slot using the
+// current `_slotInputAtomic` packed snapshot, stamped with the explicit
+// frame number `frame`. Called from maplecast_mirror::serverPublish
+// once per server emu frame. This is what makes the player-client
+// frameGate work as a blocking-read GGPO equivalent — every server
+// frame number is guaranteed to have an entry in the tape, even if no
+// input changed since the previous frame.
+void publishFrameTick(uint64_t frame);
+
+// Telemetry snapshot for the input tape publisher. All counters are
+// monotonic process-lifetime totals unless otherwise noted.
+struct TapeStats {
+	uint64_t entriesPushed;     // total pushTapeEntry calls across all slots
+	uint64_t entriesDropped;    // ring-full drops (publisher couldn't keep up)
+	uint64_t packetsSent;       // total UDP datagrams emitted
+	uint64_t bytesSent;         // total UDP payload bytes
+	uint32_t subscribers;       // current live subscriber count
+	uint64_t lastPublishedFrame;// highest frame number ever drained from any slot
+};
+TapeStats getTapeStats();
+
 }

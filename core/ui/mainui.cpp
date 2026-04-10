@@ -48,11 +48,15 @@ bool mainui_rend_frame()
 	os_DoEvents();
 	os_UpdateInputState();
 
-	// Mirror client: always run mirror loop, skip GUI
+	// Mirror client: skip the ROM selection GUI on first frame, but
+	// allow the user to open settings (Back/Select button) afterwards.
 	if (maplecast_mirror::isClient())
 	{
-		if (gui_is_open())
+		static bool firstFrame = true;
+		if (firstFrame && gui_is_open()) {
 			gui_setState(GuiState::Closed);
+			firstFrame = false;
+		}
 	}
 
 	if (gui_is_open())
@@ -102,7 +106,9 @@ bool mainui_rend_frame()
 			// One-shot: disable vsync for the mirror-client render loop.
 			// SDL_GL_SetSwapInterval returns -1 if the platform doesn't
 			// support it — we ignore that, it's best-effort.
+#ifdef USE_SDL
 			SDL_GL_SetSwapInterval(0);
+#endif
 			_swapIntervalOverridden = true;
 			printf("[MIRROR] render loop: SwapInterval=0 (vsync off) to let decode pace the loop\n");
 		}

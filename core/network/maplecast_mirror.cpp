@@ -26,6 +26,8 @@
 #include "hw/mem/mem_watch.h"
 #include "maplecast_ws_server.h"
 #include "maplecast_audio_ws.h"
+#include "maplecast_state_sync.h"
+#include "maplecast_input_server.h"
 #include "maplecast_audio_client.h"
 #include "maplecast_compress.h"
 #include "rend/texconv.h"
@@ -313,24 +315,49 @@ void doForcedSaveStateBroadcast()
 // what data the WASM client is missing.
 uint8_t* buildFullSaveState(size_t& outSize)
 {
+	// Fixed-allocation pattern. The earlier dry-run-then-real-run
+	// approach was racy: `dc_serialize` size differs between back-to-
+	// back calls on a live emu (length-prefixed dynamic arrays and
+	// `Serializer::skip()` reservations don't match between dry and
+	// real runs), which made the old code hit "size mismatch" on
+	// every frame. We solve it by allocating generously, serializing
+	// once, catching any overflow, and trusting `ser.size()` as the
+	// authoritative used length.
+	//
+	// IMPORTANT: rollback=false. GGPO uses rollback=true at
+	// core/network/ggpo.cpp:425, but in that mode several modules
+	// (AICA RAM, SH4 MMR cache, PVR, Elan) deliberately SKIP themselves
+	// on the assumption GGPO's memwatch::PageMap delta cache will
+	// restore them separately. We have no such cache — we ship a
+	// standalone full state that must be self-contained on the wire.
+	// Setting rollback=true here would produce a ~500KB blob that
+	// looks valid to the Deserializer but leaves AICA/MMR/PVR stale,
+	// then crashes the SH4 a few seconds after load with
+	// "SH4 exception when blocked".
+	//
+	// 40 MB covers both DC (real ~28 MB) and Naomi (~28-32 MB) with
+	// headroom. The wasted tail is touched only by the downstream
+	// compressor and elides to ~nothing in the wire payload.
 	outSize = 0;
+	constexpr size_t kAllocSize = 40 * 1024 * 1024;
+	uint8_t* data = (uint8_t*)malloc(kAllocSize);
+	if (!data) {
+		printf("[MIRROR] buildFullSaveState malloc(%zu) failed\n", kAllocSize);
+		return nullptr;
+	}
 	try {
-		Serializer dryRun;
-		dc_serialize(dryRun);
-		size_t sz = dryRun.size();
-		uint8_t* data = (uint8_t*)malloc(sz);
-		if (!data) return nullptr;
-		Serializer ser(data, sz);
+		Serializer ser(data, kAllocSize, /*rollback=*/false);
 		dc_serialize(ser);
-		if (ser.size() != sz) {
-			printf("[MIRROR] buildFullSaveState size mismatch: dry=%zu real=%zu\n", sz, ser.size());
-			free(data);
-			return nullptr;
-		}
-		outSize = sz;
+		outSize = ser.size();
 		return data;
+	} catch (const Serializer::Exception& e) {
+		printf("[MIRROR] buildFullSaveState serializer overflow (%zu-byte buffer): %s\n",
+		       kAllocSize, e.what());
+		free(data);
+		return nullptr;
 	} catch (const std::exception& e) {
 		printf("[MIRROR] buildFullSaveState exception: %s\n", e.what());
+		free(data);
 		return nullptr;
 	}
 }
@@ -383,6 +410,11 @@ void initServer()
 	if (audioPortEnv) audioWsPort = std::atoi(audioPortEnv);
 	maplecast_audio_ws::init(audioWsPort);
 
+	// Phase 3 of lockstep-player-client: start the state-sync TCP listener
+	// so native player clients can subscribe to periodic dc_serialize
+	// snapshots. Failure to start is non-fatal — the TA mirror still works.
+	maplecast_state_sync::serverStart();
+
 	printf("[MIRROR] === SERVER MODE === streaming TA + memory diffs\n");
 }
 
@@ -410,6 +442,10 @@ static void initClientWebSocket();  // forward declaration
 
 void initClient()
 {
+	// Idempotent — if already initialized, don't start a second WS thread.
+	// This happens when flycast GUI settings change triggers stop()+start().
+	if (_isClient) return;
+
 	// Use WebSocket if MAPLECAST_SERVER_HOST is set, or shm_open fails
 	if (std::getenv("MAPLECAST_SERVER_HOST") || !openShm(false)) {
 		initClientWebSocket();
@@ -831,6 +867,19 @@ static void initClientWebSocket()
 	maplecast_audio_client::init(host, audioPort);
 }
 
+void startMirrorStream(const char* host, int port)
+{
+	// Same as initClientWebSocket but does NOT set _isClient, so the GUI
+	// and SH4 keep running normally. Used by maplecast_replica for TA
+	// correction alongside a live local SH4.
+	_useWebSocket = true;
+	printf("[MIRROR] Starting TA correction stream ws://%s:%d/\n", host, port);
+	memwatch::unprotect();
+	std::string hostStr(host);
+	_wsThread = std::thread(wsClientRun, hostStr, port);
+	_wsThread.detach();
+}
+
 bool isServer() { return _isServer; }
 bool isClient() { return _isClient; }
 
@@ -1250,6 +1299,12 @@ done_diff:
 	hdr->write_pos = writePos + totalSize;
 	hdr->frame_count++;
 
+	// Lockstep player-client tape: push one entry per slot per server
+	// frame, stamped with the brand-new frame number we just committed.
+	// This is the GGPO-equivalent dense input log — see publishFrameTick
+	// in maplecast_input_server.cpp for the rationale.
+	maplecast_input::publishFrameTick(hdr->frame_count);
+
 	// Phase A — mirror the new frame number + publish wall-clock time into
 	// the read-only atomics that ggpo::getLocalInput() / status JSON consume.
 	// Release ordering ensures the input latch sees the bumped frame counter
@@ -1274,6 +1329,15 @@ done_diff:
 	}
 	_atomicCurrentFrame.store(hdr->frame_count, std::memory_order_release);
 	_atomicLastLatchTimeUs.store(nowPub, std::memory_order_release);
+
+	// Phase 3 of lockstep-player-client: on a STATE_SYNC_INTERVAL
+	// schedule (default 60 frames), build a fresh dc_serialize snapshot
+	// and broadcast it to connected native player clients. Runs on the
+	// emu thread — the build+compress happens synchronously here, the
+	// wire send is async on per-client send threads. A no-op unless
+	// the state-sync server is running AND at least one client is
+	// connected.
+	maplecast_state_sync::onServerFramePublished(hdr->frame_count);
 
 	// Compress + broadcast over WebSocket to browser clients
 	uint64_t compressUs = 0;
@@ -1482,8 +1546,20 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 			ctx.rend.fb_W_LINESTRIDE = df.pvr_snapshot[4];
 			ctx.rend.fog_clamp_min.full = df.pvr_snapshot[7];
 			ctx.rend.fog_clamp_max.full = df.pvr_snapshot[8];
-			ctx.rend.framebufferWidth = df.pvr_snapshot[9];
-			ctx.rend.framebufferHeight = df.pvr_snapshot[10];
+			{
+				// Server sends its native framebuffer dimensions. Scale
+				// by the client's RenderResolution so the local renderer
+				// draws at the client's chosen upscale factor.
+				u32 serverW = df.pvr_snapshot[9];
+				u32 serverH = df.pvr_snapshot[10];
+				if (config::RenderResolution > 480 && serverH > 0) {
+					float scale = config::RenderResolution / 480.f;
+					serverW = (u32)(serverW * scale);
+					serverH = (u32)(serverH * scale);
+				}
+				ctx.rend.framebufferWidth = serverW;
+				ctx.rend.framebufferHeight = serverH;
+			}
 			ctx.rend.clearFramebuffer = df.pvr_snapshot[11] != 0;
 			float fz; memcpy(&fz, &df.pvr_snapshot[12], 4);
 			ctx.rend.fZ_max = fz;
@@ -1687,8 +1763,17 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		clientCtx.rend.fb_W_LINESTRIDE = pvr_snapshot[4];
 		clientCtx.rend.fog_clamp_min.full = pvr_snapshot[7];
 		clientCtx.rend.fog_clamp_max.full = pvr_snapshot[8];
-		clientCtx.rend.framebufferWidth = pvr_snapshot[9];
-		clientCtx.rend.framebufferHeight = pvr_snapshot[10];
+		{
+			u32 serverW = pvr_snapshot[9];
+			u32 serverH = pvr_snapshot[10];
+			if (config::RenderResolution > 480 && serverH > 0) {
+				float scale = config::RenderResolution / 480.f;
+				serverW = (u32)(serverW * scale);
+				serverH = (u32)(serverH * scale);
+			}
+			clientCtx.rend.framebufferWidth = serverW;
+			clientCtx.rend.framebufferHeight = serverH;
+		}
 		clientCtx.rend.clearFramebuffer = pvr_snapshot[11] != 0;
 		float fz; memcpy(&fz, &pvr_snapshot[12], 4);
 		clientCtx.rend.fZ_max = fz;

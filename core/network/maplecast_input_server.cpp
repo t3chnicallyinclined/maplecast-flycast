@@ -14,6 +14,7 @@
 */
 #include "types.h"
 #include "maplecast_input_server.h"
+#include "maplecast_mirror.h"
 #include "maplecast_telemetry.h"
 #include "input/gamepad_device.h"
 
@@ -51,6 +52,52 @@ namespace maplecast_input
 static std::atomic<bool> _active{false};
 static std::thread _udpThread;
 static int _udpSock = -1;
+
+// ---------------------------------------------------------------------
+// Input tape — Phase 1 (lockstep-player-client branch)
+// ---------------------------------------------------------------------
+//
+// Per-slot bounded ring buffer. Single producer (the UDP/XDP input
+// thread writing via updateSlot → pushTapeEntry) and single consumer
+// (the tape publisher thread draining). Power-of-two capacity so the
+// head/tail wrap is a cheap mask.
+//
+// Sizing: 1024 entries per slot → 16 KB per slot → 32 KB total. At a
+// 1 kHz NOBD input rate that's one second of headroom before the
+// publisher falls behind, which is far more than we'd ever want to
+// buffer (a wedged publisher is better detected than papered over).
+static constexpr size_t kTapeRingSize = 1024;
+static constexpr size_t kTapeRingMask = kTapeRingSize - 1;
+static_assert((kTapeRingSize & kTapeRingMask) == 0, "kTapeRingSize must be power of two");
+
+struct TapeRing {
+	TapeEntry                slots[kTapeRingSize];
+	std::atomic<uint64_t>    head{0};   // next write index (producer)
+	std::atomic<uint64_t>    tail{0};   // next read index  (consumer)
+};
+static TapeRing _tapeRings[2];
+
+// Publisher state
+static std::thread        _tapePubThread;
+static int                _tapeSock = -1;
+static constexpr int      kTapePort = 7101;
+static constexpr int64_t  kSubscriberTtlUs = 5 * 1000000LL;   // 5 s
+static constexpr size_t   kMaxEntriesPerPacket = 72;          // 72 * 16 + 8 = 1160 bytes
+
+struct TapeSubscriber {
+	uint32_t ip;          // network byte order
+	uint16_t port;        // network byte order
+	int64_t  lastSeenUs;
+};
+static std::vector<TapeSubscriber> _tapeSubs;
+static std::mutex                  _tapeSubsMutex;
+
+// Telemetry
+static std::atomic<uint64_t> _tapeEntriesPushed{0};
+static std::atomic<uint64_t> _tapeEntriesDropped{0};
+static std::atomic<uint64_t> _tapePacketsSent{0};
+static std::atomic<uint64_t> _tapeBytesSent{0};
+static std::atomic<uint64_t> _tapeLastPublishedFrame{0};
 
 // Player registry — THE single source of truth
 static PlayerInfo _players[2] = {};
@@ -397,6 +444,229 @@ static inline int64_t nowUs()
 	return ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
 }
 
+// ---------------------------------------------------------------------
+// Input tape — push / publish / stats
+// ---------------------------------------------------------------------
+
+// Internal worker: push a single entry with an explicit frame stamp.
+// Used by both pushTapeEntry (live, currentFrame()) and publishFrameTick
+// (called once per server emu frame from serverPublish, with the new frame
+// number explicitly passed in).
+static void pushTapeEntryAtFrame(int slot, uint64_t frame, uint16_t buttons,
+                                 uint8_t lt_, uint8_t rt_, uint32_t seq)
+{
+	if (slot < 0 || slot > 1) return;
+
+	TapeRing& ring = _tapeRings[slot];
+	const uint64_t head = ring.head.load(std::memory_order_relaxed);
+	const uint64_t tail = ring.tail.load(std::memory_order_acquire);
+
+	// Ring full? Drop the OLDEST entry by advancing tail. We are the sole
+	// producer; the publisher is the sole consumer. Advancing tail from the
+	// producer is safe only because a dropped old entry is strictly
+	// preferable to losing the newest one — clients can re-sync from later
+	// entries since each entry is absolute state, not a delta.
+	if (head - tail >= kTapeRingSize) {
+		ring.tail.store(tail + 1, std::memory_order_release);
+		_tapeEntriesDropped.fetch_add(1, std::memory_order_relaxed);
+	}
+
+	TapeEntry& e = ring.slots[head & kTapeRingMask];
+	e.frame      = frame;
+	e.seqAndSlot = packSeqSlot(seq, (uint8_t)slot);
+	e.buttons    = buttons;
+	e.lt         = lt_;
+	e.rt         = rt_;
+
+	ring.head.store(head + 1, std::memory_order_release);
+	_tapeEntriesPushed.fetch_add(1, std::memory_order_relaxed);
+}
+
+void pushTapeEntry(int slot, uint16_t buttons, uint8_t lt_, uint8_t rt_, uint32_t seq)
+{
+	pushTapeEntryAtFrame(slot, maplecast_mirror::currentFrame(), buttons, lt_, rt_, seq);
+}
+
+// GGPO-style dense tape: called once per server emu frame from
+// maplecast_mirror::serverPublish, RIGHT BEFORE the server frame counter
+// is bumped, with the frame number that's about to become current. We
+// snapshot the live packed-atomic for both slots and push one entry per
+// slot stamped with `frame`. This is what makes the client's blocking
+// frameGate work — every frame number from the server's perspective has
+// at least one entry in the tape, even if no input changed.
+//
+// Bandwidth: 2 slots * 16 bytes * 60 Hz = ~2 KB/sec. Trivial.
+void publishFrameTick(uint64_t frame)
+{
+	for (int slot = 0; slot < 2; slot++) {
+		const uint64_t packed = _slotInputAtomic[slot].load(std::memory_order_acquire);
+		uint16_t buttons;
+		uint8_t  ltVal;
+		uint8_t  rtVal;
+		uint32_t seq;
+		unpackSlotInput(packed, buttons, ltVal, rtVal, seq);
+		pushTapeEntryAtFrame(slot, frame, buttons, ltVal, rtVal, seq);
+	}
+}
+
+TapeStats getTapeStats()
+{
+	TapeStats s{};
+	s.entriesPushed      = _tapeEntriesPushed.load(std::memory_order_relaxed);
+	s.entriesDropped     = _tapeEntriesDropped.load(std::memory_order_relaxed);
+	s.packetsSent        = _tapePacketsSent.load(std::memory_order_relaxed);
+	s.bytesSent          = _tapeBytesSent.load(std::memory_order_relaxed);
+	s.lastPublishedFrame = _tapeLastPublishedFrame.load(std::memory_order_relaxed);
+	{
+		std::lock_guard<std::mutex> lock(_tapeSubsMutex);
+		s.subscribers = (uint32_t)_tapeSubs.size();
+	}
+	return s;
+}
+
+// Drain one slot's ring up to `maxEntries` into out[]. Returns how many
+// were copied. Consumer side — only called from _tapePubThread.
+static size_t drainTapeRing(int slot, TapeEntry* out, size_t maxEntries)
+{
+	TapeRing& ring = _tapeRings[slot];
+	const uint64_t tail = ring.tail.load(std::memory_order_relaxed);
+	const uint64_t head = ring.head.load(std::memory_order_acquire);
+	uint64_t avail = head - tail;
+	if (avail == 0) return 0;
+	if (avail > maxEntries) avail = maxEntries;
+	for (uint64_t i = 0; i < avail; i++)
+		out[i] = ring.slots[(tail + i) & kTapeRingMask];
+	ring.tail.store(tail + avail, std::memory_order_release);
+	return (size_t)avail;
+}
+
+static void tapePublisherLoop()
+{
+	printf("[input-server] tape publisher thread started on port %d\n", kTapePort);
+
+	// Poll both the tape socket (for HELO subscriptions) and the drain ring
+	// in a tight loop. A 1 ms recv timeout gives us ~1 kHz publish cadence
+	// which is well below the tape ring's drop threshold under typical
+	// load (NOBD sticks are ~1 kHz *input*, tape publishing is whatever
+	// rate the publisher chooses — we batch up to kMaxEntriesPerPacket per
+	// datagram).
+	struct timeval tv = { .tv_sec = 0, .tv_usec = 1000 };
+	setsockopt(_tapeSock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+	uint8_t rxBuf[64];
+	struct sockaddr_in from;
+	socklen_t fromLen;
+
+	// Packet assembly buffer: 8-byte header + up to kMaxEntriesPerPacket entries
+	uint8_t pktBuf[8 + kMaxEntriesPerPacket * sizeof(TapeEntry)];
+
+	while (_active.load(std::memory_order_relaxed))
+	{
+		// --- 1. handle one HELO if pending (non-blocking-ish with 1ms timeout) ---
+		fromLen = sizeof(from);
+		int n = recvfrom(_tapeSock, rxBuf, sizeof(rxBuf), 0,
+		                 (struct sockaddr *)&from, &fromLen);
+		if (n >= 4 && memcmp(rxBuf, "HELO", 4) == 0)
+		{
+			std::lock_guard<std::mutex> lock(_tapeSubsMutex);
+			int64_t now = nowUs();
+			bool found = false;
+			for (auto& s : _tapeSubs) {
+				if (s.ip == from.sin_addr.s_addr && s.port == from.sin_port) {
+					s.lastSeenUs = now;
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				TapeSubscriber s{};
+				s.ip         = from.sin_addr.s_addr;
+				s.port       = from.sin_port;
+				s.lastSeenUs = now;
+				_tapeSubs.push_back(s);
+				char ipstr[INET_ADDRSTRLEN];
+				inet_ntop(AF_INET, &from.sin_addr, ipstr, sizeof(ipstr));
+				printf("[input-server] tape subscriber joined: %s:%u (total=%zu)\n",
+				       ipstr, ntohs(from.sin_port), _tapeSubs.size());
+			}
+		}
+
+		// --- 2. age out stale subscribers ---
+		{
+			std::lock_guard<std::mutex> lock(_tapeSubsMutex);
+			int64_t now = nowUs();
+			auto it = _tapeSubs.begin();
+			while (it != _tapeSubs.end()) {
+				if (now - it->lastSeenUs > kSubscriberTtlUs) {
+					char ipstr[INET_ADDRSTRLEN];
+					struct in_addr a; a.s_addr = it->ip;
+					inet_ntop(AF_INET, &a, ipstr, sizeof(ipstr));
+					printf("[input-server] tape subscriber timed out: %s:%u\n",
+					       ipstr, ntohs(it->port));
+					it = _tapeSubs.erase(it);
+				} else {
+					++it;
+				}
+			}
+		}
+
+		// --- 3. drain both slots and build a single packet ---
+		TapeEntry entries[kMaxEntriesPerPacket];
+		size_t count = 0;
+
+		// Interleave slot drains so neither slot starves the other under load.
+		// drainTapeRing returns up to (max - count) entries per call.
+		for (int pass = 0; pass < 2 && count < kMaxEntriesPerPacket; pass++) {
+			for (int slot = 0; slot < 2 && count < kMaxEntriesPerPacket; slot++) {
+				size_t budget = kMaxEntriesPerPacket - count;
+				// First pass: give each slot half the budget so a busy slot
+				// can't starve the other. Second pass mops up whatever's left.
+				if (pass == 0) budget = std::min(budget, kMaxEntriesPerPacket / 2);
+				size_t got = drainTapeRing(slot, entries + count, budget);
+				count += got;
+			}
+		}
+
+		if (count == 0) continue;
+
+		// Track highest frame drained for telemetry
+		uint64_t highestFrame = _tapeLastPublishedFrame.load(std::memory_order_relaxed);
+		for (size_t i = 0; i < count; i++)
+			if (entries[i].frame > highestFrame)
+				highestFrame = entries[i].frame;
+		_tapeLastPublishedFrame.store(highestFrame, std::memory_order_relaxed);
+
+		// --- 4. assemble datagram ---
+		pktBuf[0] = 'I'; pktBuf[1] = 'N'; pktBuf[2] = 'P'; pktBuf[3] = 'T';
+		pktBuf[4] = 1;                        // version
+		pktBuf[5] = (uint8_t)count;           // entry count
+		pktBuf[6] = 0; pktBuf[7] = 0;         // reserved
+		memcpy(pktBuf + 8, entries, count * sizeof(TapeEntry));
+		const size_t pktLen = 8 + count * sizeof(TapeEntry);
+
+		// --- 5. fan out to subscribers ---
+		std::vector<TapeSubscriber> snap;
+		{
+			std::lock_guard<std::mutex> lock(_tapeSubsMutex);
+			snap = _tapeSubs;  // copy so we don't hold the lock during sendto
+		}
+		for (const auto& s : snap) {
+			struct sockaddr_in to = {};
+			to.sin_family      = AF_INET;
+			to.sin_addr.s_addr = s.ip;
+			to.sin_port        = s.port;
+			ssize_t sent = sendto(_tapeSock, pktBuf, pktLen, 0,
+			                      (struct sockaddr *)&to, sizeof(to));
+			if (sent > 0) {
+				_tapePacketsSent.fetch_add(1, std::memory_order_relaxed);
+				_tapeBytesSent.fetch_add((uint64_t)sent, std::memory_order_relaxed);
+			}
+		}
+	}
+
+	printf("[input-server] tape publisher thread stopped\n");
+}
+
 // Write button state to kcode[]/lt[]/rt[] globals AND update player stats
 static void updateSlot(int slot, uint8_t ltVal, uint8_t rtVal, uint16_t buttons)
 {
@@ -411,6 +681,15 @@ static void updateSlot(int slot, uint8_t ltVal, uint8_t rtVal, uint16_t buttons)
 	uint32_t seq = ++p.lastPacketSeq;
 	_slotInputAtomic[slot].store(packSlotInput(buttons, ltVal, rtVal, seq),
 	                             std::memory_order_release);
+
+	// NOTE: tape entries used to be pushed from here on every input
+	// change. They are now pushed exclusively by publishFrameTick(),
+	// called once per server emu frame from maplecast_mirror::serverPublish.
+	// This is what makes the lockstep-player-client tape "dense" — every
+	// server frame produces exactly one entry per slot, so the client's
+	// blocking frameGate can use queue-has-entry-at-frame-N as a
+	// definitive signal. Pushing from updateSlot would race with the
+	// per-frame snapshot and create out-of-order entries.
 
 	// Phase B — input accumulator CAS loop. Always update, regardless of
 	// the per-slot LatchPolicy. The accumulator must be live so a runtime
@@ -526,6 +805,48 @@ static void udpThreadLoop(int port)
 		{
 			slot = buf[0];
 			w3 = buf + 1;
+		}
+
+		// 7-byte player-client packet: "PC"[slot][LT][RT][btn_hi][btn_lo]
+		// Used by the lockstep-player-client branch to let a remote native
+		// flycast forward its local gamepad to the server without going
+		// through browser-WS registration. Auto-binds the source IP to the
+		// declared slot on the first packet. Intended for private/trusted
+		// deployments — there is no auth. Add AUTH before exposing to the
+		// public internet.
+		else if (n == 7 && buf[0] == 'P' && buf[1] == 'C' && buf[2] <= 1)
+		{
+			int claimedSlot = buf[2];
+			w3 = buf + 3;
+
+			// Auto-bind source IP to the claimed slot. Overrides any
+			// prior binding for that slot (last-writer-wins). The slot
+			// must be "connected" first — normally that happens via a
+			// browser WS join. For the Phase 4-lite test, we force it
+			// connected here on first packet.
+			std::lock_guard<std::mutex> lock(_registryMutex);
+			PlayerInfo& p = _players[claimedSlot];
+			bool newBinding = !p.connected
+			               || p.srcIP != from.sin_addr.s_addr
+			               || p.srcPort != from.sin_port;
+			if (newBinding) {
+				p.connected = true;
+				p.type      = InputType::NobdUDP;   // closest fit
+				p.srcIP     = from.sin_addr.s_addr;
+				p.srcPort   = from.sin_port;
+				snprintf(p.id,     sizeof(p.id),     "player-client");
+				snprintf(p.name,   sizeof(p.name),   "PlayerClient%d", claimedSlot + 1);
+				snprintf(p.device, sizeof(p.device), "MapleCast PC");
+				p._prevButtons   = 0xFFFF;
+				p._lastRateTime  = nowUs();
+				p.lastChangeUs   = nowUs();
+				uint32_t ip = ntohl(from.sin_addr.s_addr);
+				printf("[input-server] PC auto-bind: slot %d <- %u.%u.%u.%u:%u\n",
+				       claimedSlot,
+				       (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF,
+				       ntohs(from.sin_port));
+			}
+			slot = claimedSlot;
 		}
 
 		// Forensics: first packet ever from this (ip, port) gets logged with
@@ -762,10 +1083,35 @@ bool init(int udpPort)
 	// authoritative DB state when it next connects.
 	loadStickCache();
 
+	// --- Input tape publisher socket (Phase 1 of lockstep-player-client) ---
+	// Separate UDP socket on kTapePort (7101). Failure to bind is non-fatal:
+	// the main input path still works, only the tape fan-out is lost.
+	_tapeSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (_tapeSock >= 0) {
+		int reuse1 = 1;
+		setsockopt(_tapeSock, SOL_SOCKET, SO_REUSEPORT, &reuse1, sizeof(reuse1));
+		struct sockaddr_in taddr = {};
+		taddr.sin_family      = AF_INET;
+		taddr.sin_addr.s_addr = INADDR_ANY;
+		taddr.sin_port        = htons(kTapePort);
+		if (bind(_tapeSock, (struct sockaddr *)&taddr, sizeof(taddr)) < 0) {
+			printf("[input-server] tape bind port %d failed: %s (tape disabled)\n",
+			       kTapePort, strerror(errno));
+			close(_tapeSock);
+			_tapeSock = -1;
+		}
+	} else {
+		printf("[input-server] tape socket failed: %s (tape disabled)\n", strerror(errno));
+	}
+
 	_active = true;
 	_udpThread = std::thread(udpThreadLoop, udpPort);
+	if (_tapeSock >= 0)
+		_tapePubThread = std::thread(tapePublisherLoop);
 
 	printf("[input-server] === READY === port %d\n", udpPort);
+	if (_tapeSock >= 0)
+		printf("[input-server] tape publisher ready on port %d\n", kTapePort);
 	printf("[input-server] waiting for players (NOBD UDP or browser WebSocket)\n");
 	maplecast_telemetry::send("[input-server] ready on port %d", udpPort);
 	return true;
@@ -777,7 +1123,9 @@ void shutdown()
 	_active = false;
 
 	if (_udpSock >= 0) { close(_udpSock); _udpSock = -1; }
+	if (_tapeSock >= 0) { close(_tapeSock); _tapeSock = -1; }
 	if (_udpThread.joinable()) _udpThread.join();
+	if (_tapePubThread.joinable()) _tapePubThread.join();
 
 	printf("[input-server] shutdown\n");
 }

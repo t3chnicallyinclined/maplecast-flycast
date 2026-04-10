@@ -23,6 +23,10 @@ namespace maplecast_mirror
 {
 void initServer();
 void initClient();
+// Start only the WS mirror stream receiver (for TA correction) without
+// setting isClient mode (which disables the GUI and SH4). Used by
+// maplecast_replica to get VRAM/PVR correction alongside a running SH4.
+void startMirrorStream(const char* host, int port);
 bool isServer();
 bool isClient();
 
