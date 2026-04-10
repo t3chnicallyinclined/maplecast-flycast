@@ -48,30 +48,21 @@ button.danger { background: #ef5350; color: #fff; }
   <button onclick="refreshMatch()">Refresh Match Info</button>
 </section>
 
-<!-- Step 2: Probe palette bank -->
+<!-- Step 2: Pick a skin (bank auto-calculated from slot) -->
 <section id="step2" class="step">
-  <h2>Step 2: Identify Palette Bank</h2>
-  <p style="font-size:0.85em;margin-bottom:8px">Click the color square that matches your character <span class="v" id="probe-char-name">?</span> in the game:</p>
-  <div id="probe-grid" class="probe-grid"></div>
-  <div style="margin-top:8px">
-    <button onclick="startProbe()">Re-probe</button>
-    <button class="danger" onclick="clearProbe()">Clear Colors</button>
-  </div>
-  <div id="probe-result" style="margin-top:8px;font-size:0.85em"></div>
-</section>
-
-<!-- Step 3: Pick a skin -->
-<section id="step3" class="step">
-  <h2>Step 3: Pick Skin for <span id="skin-char-name" class="v">?</span> (bank <span id="skin-bank" class="v">?</span>)</h2>
+  <h2>Step 2: Pick Skin for <span id="skin-char-name" class="v">?</span></h2>
+  <div id="bank-info" style="font-size:0.8em;color:#999;margin-bottom:8px"></div>
   <div style="margin-bottom:8px">
-    <button onclick="applyTestColors()">Test: Pink</button>
-    <button onclick="applyTestColors('gold')">Test: Gold</button>
-    <button onclick="applyTestColors('ice')">Test: Ice Blue</button>
-    <button onclick="applyTestColors('fire')">Test: Fire Red</button>
-    <button onclick="applyTestColors('toxic')">Test: Toxic Green</button>
-    <button class="danger" onclick="clearSkin()">Reset to Default</button>
+    <button onclick="applyTestColors()">Pink</button>
+    <button onclick="applyTestColors('gold')">Gold</button>
+    <button onclick="applyTestColors('ice')">Ice Blue</button>
+    <button onclick="applyTestColors('fire')">Fire Red</button>
+    <button onclick="applyTestColors('toxic')">Toxic Green</button>
+    <button onclick="applyTestColors('shadow')">Shadow</button>
+    <button onclick="applyTestColors('chrome')">Chrome</button>
+    <button class="danger" onclick="clearSkin()">Reset</button>
   </div>
-  <p style="font-size:0.8em;color:#999">Community skins from SurrealDB coming soon. For now, use test colors above.</p>
+  <p style="font-size:0.8em;color:#999;margin-bottom:8px">Community skins from SurrealDB coming soon.</p>
 </section>
 
 <script>
@@ -136,50 +127,26 @@ async function refreshMatch() {
   document.getElementById('match-chars').innerHTML = html;
 }
 
+// Bank formula: bank = 16 * (char_pair + 1) + player_side
+// P1C1=16, P2C1=17, P1C2=32, P2C2=33, P1C3=48, P2C3=49
+function slotToBank(slot) {
+  const map = { P1C1: 16, P2C1: 17, P1C2: 32, P2C2: 33, P1C3: 48, P2C3: 49 };
+  return map[slot] || 16;
+}
+
 function selectChar(slot, charId, name) {
   selectedSlot = slot;
   selectedCharId = charId;
   selectedCharName = name;
+  probeBank = slotToBank(slot);
   // Highlight
   document.querySelectorAll('.char-card').forEach(c => c.classList.remove('selected'));
   event.currentTarget.classList.add('selected');
-  // Show step 2
+  // Show step 2 (now directly the skin picker)
   document.getElementById('step2').classList.add('active');
-  document.getElementById('probe-char-name').textContent = name;
-  startProbe();
-}
-
-async function startProbe() {
-  const resp = await send('palette_probe');
-  if (!resp || !resp.ok) return;
-  bankColors = resp.data.bankColors;
-  let html = '';
-  for (const bc of bankColors) {
-    const r = Math.round(bc.r * 17), g = Math.round(bc.g * 17), b = Math.round(bc.b * 17);
-    const color = `rgb(${r},${g},${b})`;
-    html += `<div class="probe-cell" style="background:${color}"
-      onclick="selectBank(${bc.bank})" title="Bank ${bc.bank}"></div>`;
-  }
-  document.getElementById('probe-grid').innerHTML = html;
-  document.getElementById('probe-result').textContent = 'Click the color that matches ' + selectedCharName + ' in the game.';
-}
-
-function selectBank(bank) {
-  probeBank = bank;
-  document.querySelectorAll('.probe-cell').forEach(c => c.classList.remove('selected'));
-  event.currentTarget.classList.add('selected');
-  document.getElementById('probe-result').innerHTML =
-    `<span class="v">${selectedCharName}</span> uses PVR palette bank <span class="v">${bank}</span> (entries ${bank*16}-${bank*16+15})`;
-  // Show step 3
-  document.getElementById('step3').classList.add('active');
-  document.getElementById('skin-char-name').textContent = selectedCharName;
-  document.getElementById('skin-bank').textContent = bank;
-  // Clear probe colors
-  clearProbe();
-}
-
-async function clearProbe() {
-  await send('palette_clear');
+  document.getElementById('skin-char-name').textContent = name;
+  document.getElementById('bank-info').textContent =
+    `${slot} → PVR bank ${probeBank} (entries ${probeBank*16}-${probeBank*16+15})`;
 }
 
 async function clearSkin() {
@@ -190,11 +157,13 @@ async function clearSkin() {
 async function applyTestColors(preset = 'pink') {
   if (probeBank < 0) { alert('Select a bank first'); return; }
   const palettes = {
-    pink:  [0x0000,0xFF0F,0xFE0E,0xFD0D,0xFC0C,0xFB0B,0xFA0A,0xF909,0xF808,0xF707,0xF606,0xF505,0xF404,0xF303,0xF202,0xFF0F],
-    gold:  [0x0000,0xF000,0xFFE6,0xFFD0,0xFC90,0xF850,0xF630,0xF220,0xF88D,0xF66B,0xF449,0xF227,0xF005,0xF003,0xFFFF,0xFF00],
-    ice:   [0x0000,0xF335,0xF446,0xF557,0xF668,0xF779,0xF88A,0xF99B,0xFAAC,0xFBBD,0xFCCE,0xFDDF,0xFEEF,0xFFFF,0xFBBF,0xF88F],
-    fire:  [0x0000,0xFF00,0xFE10,0xFD20,0xFC30,0xFB40,0xFA50,0xF960,0xF870,0xF780,0xFF90,0xFFA0,0xFFB0,0xFFC0,0xFFD0,0xFFE0],
-    toxic: [0x0000,0xF0F0,0xF1E0,0xF2D0,0xF3C0,0xF4B0,0xF5A0,0xF690,0xF7A0,0xF8B0,0xF9C0,0xFAD0,0xFBE0,0xFCF0,0xFDF0,0xFEF0],
+    pink:   [0x0000,0xFF0F,0xFE0E,0xFD0D,0xFC0C,0xFB0B,0xFA0A,0xF909,0xF808,0xF707,0xF606,0xF505,0xF404,0xF303,0xF202,0xFF0F],
+    gold:   [0x0000,0xF000,0xFFE6,0xFFD0,0xFC90,0xF850,0xF630,0xF220,0xF88D,0xF66B,0xF449,0xF227,0xF005,0xF003,0xFFFF,0xFF00],
+    ice:    [0x0000,0xF335,0xF446,0xF557,0xF668,0xF779,0xF88A,0xF99B,0xFAAC,0xFBBD,0xFCCE,0xFDDF,0xFEEF,0xFFFF,0xFBBF,0xF88F],
+    fire:   [0x0000,0xFF00,0xFE10,0xFD20,0xFC30,0xFB40,0xFA50,0xF960,0xF870,0xF780,0xFF90,0xFFA0,0xFFB0,0xFFC0,0xFFD0,0xFFE0],
+    toxic:  [0x0000,0xF0F0,0xF1E0,0xF2D0,0xF3C0,0xF4B0,0xF5A0,0xF690,0xF7A0,0xF8B0,0xF9C0,0xFAD0,0xFBE0,0xFCF0,0xFDF0,0xFEF0],
+    shadow: [0x0000,0xF111,0xF111,0xF222,0xF222,0xF333,0xF333,0xF444,0xF444,0xF555,0xF555,0xF666,0xF777,0xF888,0xF999,0xFAAA],
+    chrome: [0x0000,0xF888,0xFBBB,0xFFFF,0xFDDD,0xF999,0xF666,0xFBBB,0xFFFF,0xFCCC,0xF888,0xFDDD,0xFFFF,0xFEEE,0xFBBB,0xFFFF],
   };
   const colors = palettes[preset] || palettes.pink;
   await send('palette_clear');
