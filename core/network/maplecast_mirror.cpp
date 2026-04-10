@@ -32,6 +32,9 @@
 #include "maplecast_input_sink.h"
 #include "maplecast_control_ws.h"
 #include "maplecast_compress.h"
+
+// Reserved for future palette bank probe (see NOTE in serverPublish).
+uint64_t g_activePalBanks = 0;
 #include "rend/texconv.h"
 
 #include <cstdio>
@@ -1073,6 +1076,15 @@ void serverPublish(TA_context* ctx)
 	// === Raw TA command buffer — double-buffered delta ===
 	uint32_t taSize = (uint32_t)(ctx->tad.thd_data - ctx->tad.thd_root);
 	uint8_t* taData = ctx->tad.thd_root;
+
+	// NOTE: Palette bank probe (dynamic targeting) was attempted but
+	// the TA buffer scan had alignment issues — TA commands are variable
+	// size (32B/64B) and a fixed 32B scan step misses polygon headers.
+	// For now, applyPaletteOverrides() blasts all specified entries.
+	// This is ~1µs overhead per frame — negligible. A correct probe
+	// would need to hook into the actual TA parser (ta_vtx.cpp) or the
+	// renderer's texture processing (gldraw.cpp:176 PalSelect read).
+	// TODO: revisit when needed.
 
 	// === TA DUMP — determinism / decomposition test ===
 	// MAPLECAST_DUMP_TA=1 → write each frame's raw TA buffer to

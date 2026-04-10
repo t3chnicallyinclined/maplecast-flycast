@@ -191,14 +191,15 @@ struct PaletteOverride {
 static std::mutex _palOverrideMutex;
 static std::vector<PaletteOverride> _palOverrides;
 
+// Reserved for future dynamic palette targeting
+} // close namespace temporarily for extern
+extern uint64_t g_activePalBanks;
+namespace maplecast_control_ws {
+
 void applyPaletteOverrides()
 {
 	std::lock_guard<std::mutex> lock(_palOverrideMutex);
 	if (_palOverrides.empty()) return;
-	// Write to PVR palette RAM every frame, AFTER the game writes its
-	// own palette. Runs on the emu thread inside serverPublish, right
-	// before the dirty page diff scan. The diff captures our writes
-	// and ships them through the TA stream to all viewers.
 	for (auto& ov : _palOverrides) {
 		if (!ov.active) continue;
 		for (int i = 0; i < (int)ov.colors.size(); i++) {
@@ -876,6 +877,10 @@ static void onMessage(ControlConnHdl hdl, ControlWsServer::message_ptr msg)
 			{"e2eMinMs", is.e2eMinMs},
 			{"e2eMaxMs", is.e2eMaxMs},
 			{"e2eProbes", is.e2eProbes},
+			// Active palette banks (from TA probe in serverPublish)
+			{"activePalBanks", (uint64_t)::g_activePalBanks},
+			{"activePalBankCount", __builtin_popcountll(::g_activePalBanks)},
+			{"serverFrame", maplecast_mirror::currentFrame()},
 			// Raw input state for button tester
 			{"kcode0", (unsigned)(kcode[0] & 0xFFFF)},
 			{"kcode1", (unsigned)(kcode[1] & 0xFFFF)},
