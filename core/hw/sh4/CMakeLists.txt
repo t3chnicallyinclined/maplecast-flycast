@@ -18,6 +18,7 @@ target_sources(${PROJECT_NAME} PRIVATE
         interpr/sh4_opcodes.cpp
         interpr/sh4_opcodes.h
         interpr/sh4_recomp_blocks.cpp
+        interpr/sh4_recomp_verify.cpp
         interpr/blocks_000.cpp interpr/blocks_001.cpp interpr/blocks_002.cpp
         interpr/blocks_003.cpp interpr/blocks_004.cpp interpr/blocks_005.cpp
         interpr/blocks_006.cpp interpr/blocks_007.cpp interpr/blocks_008.cpp

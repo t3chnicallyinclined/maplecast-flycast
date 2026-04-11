@@ -242,7 +242,13 @@ static DynarecCodeEntryPtr compilePC(u32 blockcheck_failures)
 			rbi->BranchBlock, rbi->NextBlock);
 	}
 
-	// (SH4Recomp block execution happens in rdv_FailedToFindBlock)
+	// SH4Recomp: verify block correctness against interpreter
+#ifdef SH4RECOMP_VERIFY
+	{
+		extern void sh4recomp_verify_block(u32 vaddr, u32 sh4_size);
+		sh4recomp_verify_block(rbi->vaddr, rbi->sh4_code_size);
+	}
+#endif
 
 	codeBuffer.useTempBuffer(false);
 

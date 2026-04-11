@@ -23,9 +23,10 @@ bool sh4recomp_try_exec(u32 pc) {
     if ((lookup_pc >> 24) == 0x8C || (lookup_pc >> 24) == 0xAC)
         lookup_pc = (lookup_pc & 0x00FFFFFF) | 0x0C000000;
 
-    // Only execute game code blocks (>= 0x0C020000)
-    // BIOS code runs on interpreter — it uses privileged instructions
-    if (lookup_pc < 0x0C020000) {
+    // Only execute game code blocks past init (>= 0x0C021000)
+    // 0x0C020000-0x0C020FFF is init code (memset etc) that conflicts
+    // with savestate loading — let interpreter handle it
+    if (lookup_pc < 0x0C021000) {
         _fallback_hits++;
         return false;
     }
@@ -43,9 +44,9 @@ bool sh4recomp_try_exec(u32 pc) {
     u32 next_pc = block(nullptr, &Sh4cntx);
     Sh4cntx.pc = next_pc;
 
-    if (_static_hits <= 5 || (_static_hits % 100000) == 0) {
-        printf("[sh4recomp] Block #%lu: 0x%08X → 0x%08X\n",
-            _static_hits, pc, next_pc);
+    if (_static_hits <= 10 || (_static_hits % 10000) == 0) {
+        printf("[sh4recomp] Block #%lu: 0x%08X → 0x%08X (fallbacks=%lu)\n",
+            _static_hits, pc, next_pc, _fallback_hits);
         fflush(stdout);
     }
 
