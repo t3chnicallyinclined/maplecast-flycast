@@ -17,6 +17,7 @@ target_sources(${PROJECT_NAME} PRIVATE
         interpr/sh4_interpreter.cpp
         interpr/sh4_opcodes.cpp
         interpr/sh4_opcodes.h
+        interpr/sh4_recomp_blocks.cpp
         modules/bsc.cpp
         modules/ccn.cpp
         modules/ccn.h

@@ -693,6 +693,54 @@ static void reios_boot()
 			WriteMemBlock_nommu_ptr(0x0c020000, (u32*)CurrentCartridge->GetPtr(0, data_size), size);
 
 			reios_setup_naomi(0x0c021000);
+
+			// SH4Recomp: dump the fully loaded SH4 memory to disk
+			if (getenv("SH4RECOMP_DUMP"))
+			{
+				const char* dump_dir = getenv("SH4RECOMP_DUMP");
+				char path[512];
+
+				// Dump main RAM (16MB at 0x0c000000)
+				snprintf(path, sizeof(path), "%s/sh4_ram_16mb.bin", dump_dir);
+				FILE* f = fopen(path, "wb");
+				if (f) {
+					u32 ram_size = 16 * 1024 * 1024;
+					for (u32 addr = 0; addr < ram_size; addr += 4) {
+						u32 val = ReadMem32_nommu(0x0c000000 + addr);
+						fwrite(&val, 4, 1, f);
+					}
+					fclose(f);
+					printf("[sh4recomp] Dumped 16MB RAM → %s\n", path);
+				}
+
+				// Dump VRAM (8MB at 0x04000000)
+				snprintf(path, sizeof(path), "%s/sh4_vram_8mb.bin", dump_dir);
+				f = fopen(path, "wb");
+				if (f) {
+					u32 vram_size = 8 * 1024 * 1024;
+					for (u32 addr = 0; addr < vram_size; addr += 4) {
+						u32 val = ReadMem32_nommu(0x04000000 + addr);
+						fwrite(&val, 4, 1, f);
+					}
+					fclose(f);
+					printf("[sh4recomp] Dumped 8MB VRAM → %s\n", path);
+				}
+
+				// Write metadata
+				snprintf(path, sizeof(path), "%s/dump_info.txt", dump_dir);
+				f = fopen(path, "w");
+				if (f) {
+					fprintf(f, "entry_point=0x0c021000\n");
+					fprintf(f, "ram_base=0x0c000000\n");
+					fprintf(f, "ram_size=0x01000000\n");
+					fprintf(f, "vram_base=0x04000000\n");
+					fprintf(f, "vram_size=0x00800000\n");
+					fprintf(f, "rom_load_addr=0x0c020000\n");
+					fprintf(f, "rom_data_size=0x%x\n", data_size);
+					fclose(f);
+					printf("[sh4recomp] Metadata → %s\n", path);
+				}
+			}
 		}
 	}
 }

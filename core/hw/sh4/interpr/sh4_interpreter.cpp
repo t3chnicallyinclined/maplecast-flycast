@@ -38,10 +38,27 @@ u16 Sh4Interpreter::ReadNexOp()
 	return IReadMem16(addr);
 }
 
+// SH4Recomp: static block dispatch
+#ifdef SH4RECOMP_BLOCKS
+typedef u32 (*RecompBlockFunc)(Sh4Context* ctx);
+extern RecompBlockFunc sh4recomp_find_block(u32 pc);
+extern u64 sh4recomp_static_hits();
+extern u64 sh4recomp_fallback_hits();
+#endif
+
 void Sh4Interpreter::Run()
 {
 	Instance = this;
 	ctx->restoreHostRoundingMode();
+
+#ifdef SH4RECOMP_BLOCKS
+	static bool _logged_recomp = false;
+	if (!_logged_recomp) {
+		printf("[sh4recomp] Static block dispatch ACTIVE in interpreter loop\n");
+		fflush(stdout);
+		_logged_recomp = true;
+	}
+#endif
 
 	try {
 		do
@@ -49,9 +66,41 @@ void Sh4Interpreter::Run()
 			try {
 				do
 				{
+#ifdef SH4RECOMP_BLOCKS
+					// Try static block first
+					RecompBlockFunc block = sh4recomp_find_block(ctx->pc);
+					if (block) {
+						u32 next_pc = block(ctx);
+						ctx->pc = next_pc;
+					} else {
+						u32 op = ReadNexOp();
+						ExecuteOpcode(op);
+					}
+					// Periodic stats every ~5 seconds
+					{
+						static u64 _last_report = 0;
+						static u64 _pc_sample_count = 0;
+						u64 total = sh4recomp_static_hits() + sh4recomp_fallback_hits();
+						if (total - _last_report > 5000000) {
+							_last_report = total;
+							printf("[sh4recomp] %lu static / %lu fallback (%.1f%% recompiled) pc=0x%08x\n",
+								sh4recomp_static_hits(), sh4recomp_fallback_hits(),
+								100.0 * sh4recomp_static_hits() / (total ? total : 1),
+								ctx->pc);
+							fflush(stdout);
+						}
+						// Log first few PCs to see what addresses are being hit
+						if (_pc_sample_count < 20) {
+							_pc_sample_count++;
+							printf("[sh4recomp] PC sample #%lu: 0x%08x\n", _pc_sample_count, ctx->pc);
+							fflush(stdout);
+						}
+					}
+#else
 					u32 op = ReadNexOp();
 
 					ExecuteOpcode(op);
+#endif
 				} while (ctx->cycle_counter > 0);
 				ctx->cycle_counter += SH4_TIMESLICE;
 				UpdateSystem_INTC();
@@ -63,6 +112,12 @@ void Sh4Interpreter::Run()
 		} while (ctx->CpuRunning);
 	} catch (const debugger::Stop&) {
 	}
+
+#ifdef SH4RECOMP_BLOCKS
+	printf("[sh4recomp] Session stats: %lu static hits, %lu fallbacks\n",
+		sh4recomp_static_hits(), sh4recomp_fallback_hits());
+	fflush(stdout);
+#endif
 
 	ctx->CpuRunning = false;
 	Instance = nullptr;

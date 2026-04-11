@@ -365,10 +365,13 @@ export async function gotNext() {
   // indexes on slot.occupant_name and queue.(username,status); these checks
   // just give the user a clean message instead of a constraint violation.
   const lower = state.myName.toLowerCase();
-  const alreadyPlaying = Array.from(_slotRows.values())
-    .some(r => r.occupant_name && r.occupant_name.toLowerCase() === lower);
-  if (alreadyPlaying) {
-    systemMessage(`${state.myName}, you're already in the arcade.`);
+  const mySlotRow = Array.from(_slotRows.values())
+    .find(r => r.occupant_name && r.occupant_name.toLowerCase() === lower);
+  if (mySlotRow) {
+    // Name is already in a slot (stale from previous tab/refresh). Instead of
+    // blocking with a message, auto-reclaim — this is what the user wants.
+    systemMessage(`${state.myName} reclaiming P${mySlotRow.slot_num + 1}...`);
+    reclaimSlot(mySlotRow);
     return;
   }
   const alreadyQueued = Array.from(_queueRows.values())

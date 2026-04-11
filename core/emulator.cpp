@@ -1048,6 +1048,39 @@ void Emulator::start()
 	state = Running;
 	SetMemoryHandlers();
 
+	// SH4Recomp: dump fully loaded SH4 memory to disk
+	if (const char* dump_dir = getenv("SH4RECOMP_DUMP"))
+	{
+		char path[512];
+		snprintf(path, sizeof(path), "%s/sh4_ram_16mb.bin", dump_dir);
+		FILE* f = fopen(path, "wb");
+		if (f) {
+			fwrite(&mem_b[0], 1, 16 * 1024 * 1024, f);
+			fclose(f);
+			printf("[sh4recomp] Dumped 16MB RAM → %s\n", path);
+		}
+		snprintf(path, sizeof(path), "%s/sh4_vram_8mb.bin", dump_dir);
+		f = fopen(path, "wb");
+		if (f) {
+			extern RamRegion vram;
+			fwrite(&vram[0], 1, 8 * 1024 * 1024, f);
+			fclose(f);
+			printf("[sh4recomp] Dumped 8MB VRAM → %s\n", path);
+		}
+		snprintf(path, sizeof(path), "%s/dump_info.txt", dump_dir);
+		f = fopen(path, "w");
+		if (f) {
+			fprintf(f, "entry_point=0x0c021000\n");
+			fprintf(f, "ram_base=0x0c000000\n");
+			fprintf(f, "ram_size=0x01000000\n");
+			fprintf(f, "vram_base=0x04000000\n");
+			fprintf(f, "vram_size=0x00800000\n");
+			fclose(f);
+			printf("[sh4recomp] Metadata → %s\n", path);
+		}
+		fflush(stdout);
+	}
+
 	// MapleCast server stack
 	if (std::getenv("MAPLECAST"))
 	{

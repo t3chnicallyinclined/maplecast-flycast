@@ -153,10 +153,58 @@ bool RuntimeBlockInfo::Setup(u32 rpc,fpscr_t rfpu_cfg)
 	return true;
 }
 
+#ifdef SH4RECOMP_BLOCKS
+typedef u32 (*RecompBlockFunc)(Sh4Context* ctx);
+extern RecompBlockFunc sh4recomp_find_block(u32 pc);
+#endif
+
 //Called to compile code @pc
+static bool _sh4recomp_dumped = false;
 static DynarecCodeEntryPtr compilePC(u32 blockcheck_failures)
 {
 	const u32 pc = Sh4cntx.pc;
+
+	// SH4Recomp: dump RAM once the game is actually running
+	if (!_sh4recomp_dumped && getenv("SH4RECOMP_DUMP") && pc >= 0x0c020000 && pc < 0x0d000000)
+	{
+		_sh4recomp_dumped = true;
+		const char* dump_dir = getenv("SH4RECOMP_DUMP");
+		char path[512];
+		snprintf(path, sizeof(path), "%s/sh4_ram_16mb.bin", dump_dir);
+		FILE* f = fopen(path, "wb");
+		if (f) {
+			fwrite(&mem_b[0], 1, 16 * 1024 * 1024, f);
+			fclose(f);
+			printf("[sh4recomp] GAME CODE REACHED (pc=0x%08x) — dumped 16MB RAM → %s\n", pc, path);
+		}
+		snprintf(path, sizeof(path), "%s/dump_info.txt", dump_dir);
+		f = fopen(path, "w");
+		if (f) {
+			fprintf(f, "first_pc=0x%08x\n", pc);
+			fprintf(f, "ram_base=0x0c000000\n");
+			fprintf(f, "ram_size=0x01000000\n");
+			fclose(f);
+		}
+		fflush(stdout);
+	}
+
+	// SH4Recomp: log every compiled block for the trace
+	static FILE* _traceFile = nullptr;
+	static bool _traceInit = false;
+	if (!_traceInit) {
+		_traceInit = true;
+		const char* dump_dir = getenv("SH4RECOMP_DUMP");
+		if (dump_dir) {
+			char path[512];
+			snprintf(path, sizeof(path), "%s/block_trace.csv", dump_dir);
+			_traceFile = fopen(path, "w");
+			if (_traceFile) {
+				fprintf(_traceFile, "vaddr,addr,sh4_size,guest_opcodes,block_type,branch_target,next_target\n");
+				printf("[sh4recomp] Block trace → %s\n", path);
+				fflush(stdout);
+			}
+		}
+	}
 
 	if (codeBuffer.getFreeSpace() < 32_KB || pc == 0x8c0000e0 || pc == 0xac010000 || pc == 0xac008300)
 		Sh4Recompiler::Instance->ResetCache();
@@ -184,6 +232,44 @@ static DynarecCodeEntryPtr compilePC(u32 blockcheck_failures)
 	verify(rbi->code != nullptr);
 
 	bm_AddBlock(rbi);
+
+	// SH4Recomp: log block to trace
+	if (_traceFile && rbi->vaddr >= 0x0c000000 && rbi->vaddr < 0x0d000000) {
+		fprintf(_traceFile, "0x%08x,0x%08x,%u,%u,%d,0x%08x,0x%08x\n",
+			rbi->vaddr, rbi->addr, rbi->sh4_code_size,
+			rbi->guest_opcodes, (int)rbi->BlockType,
+			rbi->BranchBlock, rbi->NextBlock);
+	}
+
+#ifdef SH4RECOMP_BLOCKS
+	// Track which JIT blocks we have static versions of
+	{
+		extern RecompBlockFunc sh4recomp_find_block(u32 pc);
+		static u32 _recomp_match = 0, _recomp_miss = 0;
+		static bool _recomp_first_log = true;
+
+		u32 lookup_pc = rbi->vaddr;
+		if ((lookup_pc >> 24) == 0x8C || (lookup_pc >> 24) == 0xAC)
+			lookup_pc = (lookup_pc & 0x00FFFFFF) | 0x0C000000;
+
+		if (sh4recomp_find_block(lookup_pc)) {
+			_recomp_match++;
+			if (_recomp_match <= 10)
+				printf("[sh4recomp] JIT block 0x%08x HAS static version! (%u/%u matched)\n",
+					rbi->vaddr, _recomp_match, _recomp_match + _recomp_miss);
+		} else {
+			_recomp_miss++;
+		}
+
+		if (_recomp_first_log && (_recomp_match + _recomp_miss) >= 100) {
+			_recomp_first_log = false;
+			printf("[sh4recomp] After 100 JIT blocks: %u matched, %u missed (%.1f%% coverage)\n",
+				_recomp_match, _recomp_miss,
+				100.0 * _recomp_match / (_recomp_match + _recomp_miss));
+			fflush(stdout);
+		}
+	}
+#endif
 
 	codeBuffer.useTempBuffer(false);
 

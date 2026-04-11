@@ -128,6 +128,12 @@ if(MAPLECAST_HEADLESS)
 	message(STATUS "MapleCast: HEADLESS build — no GPU/window/SDL/Vulkan/DX/audio deps")
 endif()
 
+option(SH4RECOMP "Include statically recompiled SH4 blocks" OFF)
+if(SH4RECOMP)
+	add_compile_definitions(SH4RECOMP_BLOCKS SH4RECOMP_FLYCAST)
+	message(STATUS "SH4Recomp: static blocks ENABLED")
+endif()
+
 if(IOS AND NOT LIBRETRO)
 	set(USE_VULKAN OFF CACHE BOOL "Force vulkan off" FORCE)
 endif()
