@@ -154,8 +154,9 @@ bool RuntimeBlockInfo::Setup(u32 rpc,fpscr_t rfpu_cfg)
 }
 
 #ifdef SH4RECOMP_BLOCKS
-typedef u32 (*RecompBlockFunc)(Sh4Context* ctx);
-extern RecompBlockFunc sh4recomp_find_block(u32 pc);
+extern bool sh4recomp_try_exec(u32 pc);
+extern u64 sh4recomp_static_hits();
+extern "C" { typedef u32 (*RecompBlockFuncC)(u8*, void*); RecompBlockFuncC recomp_find_block(u32 pc); }
 #endif
 
 //Called to compile code @pc
@@ -241,30 +242,7 @@ static DynarecCodeEntryPtr compilePC(u32 blockcheck_failures)
 			rbi->BranchBlock, rbi->NextBlock);
 	}
 
-#ifdef SH4RECOMP_BLOCKS
-	// Track and execute static blocks
-	{
-		static u32 _recomp_match = 0, _recomp_miss = 0;
-
-		u32 lookup_pc = rbi->vaddr;
-		if ((lookup_pc >> 24) == 0x8C || (lookup_pc >> 24) == 0xAC)
-			lookup_pc = (lookup_pc & 0x00FFFFFF) | 0x0C000000;
-
-		RecompBlockFunc static_block = sh4recomp_find_block(lookup_pc);
-		if (static_block) {
-			_recomp_match++;
-			if (_recomp_match <= 20)
-				printf("[sh4recomp] EXECUTING static block 0x%08x (#%u)\n",
-					rbi->vaddr, _recomp_match);
-			if (_recomp_match == 20) {
-				printf("[sh4recomp] (suppressing further match logs, %u misses so far)\n", _recomp_miss);
-				fflush(stdout);
-			}
-		} else {
-			_recomp_miss++;
-		}
-	}
-#endif
+	// (SH4Recomp block execution happens in rdv_FailedToFindBlock)
 
 	codeBuffer.useTempBuffer(false);
 
@@ -279,6 +257,31 @@ DynarecCodeEntryPtr DYNACALL rdv_FailedToFindBlock_pc()
 DynarecCodeEntryPtr DYNACALL rdv_FailedToFindBlock(u32 pc)
 {
 	Sh4cntx.pc=pc;
+
+#ifdef SH4RECOMP_BLOCKS
+	{
+		extern bool sh4recomp_try_exec(u32 pc);
+		extern u64 sh4recomp_static_hits();
+		// Log static block matches — execution disabled until standalone runner
+		// is built (the JIT context gets corrupted by inline execution)
+		{
+			u32 norm_pc = pc;
+			if ((norm_pc >> 24) == 0x8C || (norm_pc >> 24) == 0xAC)
+				norm_pc = (norm_pc & 0x00FFFFFF) | 0x0C000000;
+			if (norm_pc >= 0x0c020000 && recomp_find_block(norm_pc) != nullptr) {
+				static u32 _match = 0;
+				_match++;
+				if (_match <= 20)
+					printf("[sh4recomp] MATCH #%u: 0x%08x has static C block\n", _match, pc);
+				if (_match == 20) {
+					printf("[sh4recomp] (suppressing further logs)\n");
+					fflush(stdout);
+				}
+			}
+		}
+	}
+#endif
+
 	DynarecCodeEntryPtr code = compilePC(0);
 	if (code == NULL)
 		code = bm_GetCodeByVAddr(Sh4cntx.pc);
