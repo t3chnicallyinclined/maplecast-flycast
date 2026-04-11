@@ -25,6 +25,7 @@
 #include "hw/sh4/sh4_interpreter.h"
 #include <cstdio>
 #include <cstring>
+#include <set>
 
 // Block lookup from generated code
 extern "C" {
@@ -232,6 +233,90 @@ void sh4recomp_verify_block(u32 vaddr, u32 sh4_size) {
             lookup_pc, pass ? "OK" : "FAIL");
         fflush(stdout);
     }
+}
+
+// Bulk verify: test ALL blocks using current memory state
+void sh4recomp_verify_all() {
+    verify_init();
+    printf("[sh4recomp-verify] === BULK VERIFICATION START ===\n");
+    fflush(stdout);
+
+    // Iterate the block table and verify each one
+    extern "C" {
+        typedef struct { u32 addr; RecompBlockFunc func; } BlockEntry;
+        extern const BlockEntry block_table[];
+        extern const int NUM_BLOCKS_COUNT;  // we'll add this
+    }
+
+    // Since we can't easily get NUM_BLOCKS from the dispatch table,
+    // iterate by calling recomp_find_block for addresses in the trace
+    // Read the block trace CSV
+    FILE* trace = fopen("/home/tris/projects/sh4recomp/extracted/block_trace.csv", "r");
+    if (!trace) {
+        printf("[sh4recomp-verify] Can't open block trace\n");
+        return;
+    }
+
+    char line[256];
+    fgets(line, sizeof(line), trace); // skip header
+
+    std::set<u32> tested;
+    int pass = 0, fail = 0, skip = 0;
+
+    while (fgets(line, sizeof(line), trace)) {
+        u32 vaddr, addr, sh4_size, guest_ops, block_type, bt, nt;
+        if (sscanf(line, "0x%x,0x%x,%u,%u,%d,0x%x,0x%x",
+                   &vaddr, &addr, &sh4_size, &guest_ops, &block_type, &bt, &nt) < 5)
+            continue;
+
+        u32 lookup_pc = vaddr;
+        if ((lookup_pc >> 24) == 0x8C || (lookup_pc >> 24) == 0xAC)
+            lookup_pc = (lookup_pc & 0x00FFFFFF) | 0x0C000000;
+
+        if (lookup_pc < 0x0C020000) continue;
+        if (tested.count(lookup_pc)) continue;
+        tested.insert(lookup_pc);
+
+        RecompBlockFunc block = recomp_find_block(lookup_pc);
+        if (!block) { skip++; continue; }
+
+        // Snapshot
+        Sh4Context before;
+        memcpy(&before, &Sh4cntx, sizeof(before));
+
+        // Run interpreter
+        Sh4cntx.pc = vaddr;
+        u32 expected_pc = interp_exec_block(vaddr, sh4_size);
+        Sh4Context expected;
+        memcpy(&expected, &Sh4cntx, sizeof(expected));
+
+        // Restore & run our block
+        memcpy(&Sh4cntx, &before, sizeof(Sh4cntx));
+        u32 actual_pc = block(nullptr, &Sh4cntx);
+        Sh4Context actual;
+        memcpy(&actual, &Sh4cntx, sizeof(actual));
+
+        // Compare
+        bool ok = verify_context(&expected, &actual, lookup_pc, expected_pc, actual_pc);
+        if (ok) {
+            pass++;
+            log_pass(lookup_pc);
+        } else {
+            fail++;
+        }
+
+        // Restore original state
+        memcpy(&Sh4cntx, &before, sizeof(Sh4cntx));
+
+        if ((pass + fail) % 1000 == 0) {
+            printf("[sh4recomp-verify] Progress: %d pass, %d fail, %d skip\n", pass, fail, skip);
+            fflush(stdout);
+        }
+    }
+    fclose(trace);
+
+    printf("[sh4recomp-verify] === BULK RESULT: %d PASS, %d FAIL, %d SKIP ===\n", pass, fail, skip);
+    fflush(stdout);
 }
 
 void sh4recomp_verify_shutdown() {

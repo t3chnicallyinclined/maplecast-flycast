@@ -1081,6 +1081,14 @@ void Emulator::start()
 		fflush(stdout);
 	}
 
+#ifdef SH4RECOMP_VERIFY
+	// Bulk verify all blocks using current memory state
+	{
+		extern void sh4recomp_verify_all();
+		sh4recomp_verify_all();
+	}
+#endif
+
 	// MapleCast server stack
 	if (std::getenv("MAPLECAST"))
 	{
