@@ -57,9 +57,8 @@ void Sh4Interpreter::Run()
 				do
 				{
 #ifdef SH4RECOMP_BLOCKS
-					// Try static block — if it succeeds, ctx->pc is updated
+					// Static blocks operate directly on Sh4cntx — no bridge
 					if (!sh4recomp_try_exec(ctx->pc)) {
-						// No static block — fall through to interpreter
 						u32 op = ReadNexOp();
 						ExecuteOpcode(op);
 					}

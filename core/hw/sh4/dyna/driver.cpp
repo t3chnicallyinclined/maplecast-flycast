@@ -259,26 +259,9 @@ DynarecCodeEntryPtr DYNACALL rdv_FailedToFindBlock(u32 pc)
 	Sh4cntx.pc=pc;
 
 #ifdef SH4RECOMP_BLOCKS
-	{
-		extern bool sh4recomp_try_exec(u32 pc);
-		extern u64 sh4recomp_static_hits();
-		// Log static block matches — execution disabled until standalone runner
-		// is built (the JIT context gets corrupted by inline execution)
-		{
-			u32 norm_pc = pc;
-			if ((norm_pc >> 24) == 0x8C || (norm_pc >> 24) == 0xAC)
-				norm_pc = (norm_pc & 0x00FFFFFF) | 0x0C000000;
-			if (norm_pc >= 0x0c020000 && recomp_find_block(norm_pc) != nullptr) {
-				static u32 _match = 0;
-				_match++;
-				if (_match <= 20)
-					printf("[sh4recomp] MATCH #%u: 0x%08x has static C block\n", _match, pc);
-				if (_match == 20) {
-					printf("[sh4recomp] (suppressing further logs)\n");
-					fflush(stdout);
-				}
-			}
-		}
+	if (sh4recomp_try_exec(pc)) {
+		DynarecCodeEntryPtr next = bm_GetCodeByVAddr(Sh4cntx.pc);
+		return next;
 	}
 #endif
 

@@ -18,7 +18,13 @@ target_sources(${PROJECT_NAME} PRIVATE
         interpr/sh4_opcodes.cpp
         interpr/sh4_opcodes.h
         interpr/sh4_recomp_blocks.cpp
-        interpr/generated_blocks_c.c
+        interpr/blocks_000.cpp interpr/blocks_001.cpp interpr/blocks_002.cpp
+        interpr/blocks_003.cpp interpr/blocks_004.cpp interpr/blocks_005.cpp
+        interpr/blocks_006.cpp interpr/blocks_007.cpp interpr/blocks_008.cpp
+        interpr/blocks_009.cpp interpr/blocks_010.cpp interpr/blocks_011.cpp
+        interpr/blocks_012.cpp interpr/blocks_013.cpp interpr/blocks_014.cpp
+        interpr/blocks_015.cpp interpr/blocks_016.cpp interpr/blocks_dispatch.cpp
+        sh4_recomp_executor.cpp
         modules/bsc.cpp
         modules/ccn.cpp
         modules/ccn.h

@@ -6,45 +6,100 @@
 #include <stddef.h>
 #include <string.h>
 
-#ifdef __cplusplus
-#include <cmath>
-using std::sqrtf;
+#ifdef SH4RECOMP_FLYCAST
+  /* Inside flycast — operate directly on the global Sh4cntx */
+  #include "types.h"
+  #include "hw/sh4/sh4_if.h"
+  #include <cmath>
+  /* Blocks declare local ctx = _ctx, but in flycast mode we override */
+  /* _ctx points to Sh4cntx (passed from sh4recomp_try_exec) */
+  /* Field compatibility: our code uses mach/macl, flycast uses mac.h/mac.l */
+  #define mach mac.h
+  #define macl mac.l
+  /* fpscr: our code uses u32, flycast uses fpscr_t */
+  #define fpscr fpscr.full
+  /* sh4_read_sr / sh4_write_sr */
+  static inline u32 sh4_read_sr_recomp(void) { return Sh4cntx.sr.getFull(); }
+  static inline void sh4_write_sr_recomp(u32 v) { Sh4cntx.sr.setFull(v); }
+  #define sh4_read_sr(c) sh4_read_sr_recomp()
+  #define sh4_write_sr(c,v) sh4_write_sr_recomp(v)
 #else
-#include <math.h>
+  #ifdef __cplusplus
+  #include <cmath>
+  using std::sqrtf;
+  #else
+  #include <math.h>
+  #endif
+
+  typedef uint8_t u8; typedef uint16_t u16;
+  typedef uint32_t u32; typedef uint64_t u64;
+  typedef int8_t s8; typedef int16_t s16;
+  typedef int32_t s32; typedef int64_t s64;
+
+  typedef struct {
+      u32 r[16];
+      u32 r_bank[8];
+      u32 pc, pr, gbr, vbr, ssr, spc;
+      u32 mach, macl;
+      struct { u32 T:1, S:1, _:2, IMASK:4, Q:1, M:1; } sr;
+      u32 fpscr, fpul;
+      float fr[16], xf[16];
+      s32 cycle_counter;
+  } Sh4Context;
+  static inline u32 sh4_read_sr(Sh4Context* ctx) {
+      return ctx->sr.T | (ctx->sr.S<<1) | (ctx->sr.IMASK<<4) | (ctx->sr.Q<<8) | (ctx->sr.M<<9);
+  }
+  static inline void sh4_write_sr(Sh4Context* ctx, u32 v) {
+      ctx->sr.T=v&1; ctx->sr.S=(v>>1)&1; ctx->sr.IMASK=(v>>4)&0xF; ctx->sr.Q=(v>>8)&1; ctx->sr.M=(v>>9)&1;
+  }
 #endif
 
-typedef uint8_t u8; typedef uint16_t u16;
-typedef uint32_t u32; typedef uint64_t u64;
-typedef int8_t s8; typedef int16_t s16;
-typedef int32_t s32; typedef int64_t s64;
-
-typedef struct {
-    u32 r[16];
-    u32 r_bank[8];
-    u32 pc, pr, gbr, vbr, ssr, spc;
-    u32 mach, macl;
-    struct { u32 T:1, S:1, _:2, IMASK:4, Q:1, M:1; } sr;
-    u32 fpscr, fpul;
-    float fr[16], xf[16];
-    s32 cycle_counter;
-} Sh4Context;
-
-/* SR read/write helpers (packs/unpacks bitfields) */
-static inline u32 sh4_read_sr(Sh4Context* ctx) {
-    return ctx->sr.T | (ctx->sr.S<<1) | (ctx->sr.IMASK<<4) | (ctx->sr.Q<<8) | (ctx->sr.M<<9);
-}
-static inline void sh4_write_sr(Sh4Context* ctx, u32 v) {
-    ctx->sr.T=v&1; ctx->sr.S=(v>>1)&1; ctx->sr.IMASK=(v>>4)&0xF; ctx->sr.Q=(v>>8)&1; ctx->sr.M=(v>>9)&1;
+/* MMIO-aware memory read for 32-bit (intercepts hardware registers) */
+static inline u32 mmio_read32(u8* mem, u32 addr) {
+    u32 phys = addr & 0x1FFFFFFF;
+    /* Holly SB registers: 0x005F6000-0x005F7FFF */
+    if (phys >= 0x005F6000 && phys < 0x005F8000) {
+        if (phys == 0x005F6C18) return 1; /* SB_MDST = DMA started (non-zero breaks poll loop) */
+        if (phys == 0x005F6900) return 0x08; /* SB_ISTNRM = VBlank bit */
+        return *(u32*)(mem + phys);
+    }
+    /* PVR registers: 0x005F8000-0x005F9FFF */
+    if (phys >= 0x005F8000 && phys < 0x005FA000) {
+        if (phys == 0x005F810C) { /* SPG_STATUS */
+            static u32 _scanline = 0;
+            _scanline = (_scanline + 1) % 524;
+            return _scanline;
+        }
+        return *(u32*)(mem + phys);
+    }
+    return *(u32*)(mem + phys);
 }
 
-/* Memory access — direct pointer into flat RAM */
-#define MEM_R8(addr)  (*(u8*) (mem + ((addr) & 0x1FFFFFFF)))
-#define MEM_R16(addr) (*(u16*)(mem + ((addr) & 0x1FFFFFFF)))
-#define MEM_R32(addr) (*(u32*)(mem + ((addr) & 0x1FFFFFFF)))
-#define MEM_W8(addr, v)  (*(u8*) (mem + ((addr) & 0x1FFFFFFF)) = (u8)(v))
-#define MEM_W16(addr, v) (*(u16*)(mem + ((addr) & 0x1FFFFFFF)) = (u16)(v))
-#define MEM_W32(addr, v) (*(u32*)(mem + ((addr) & 0x1FFFFFFF)) = (u32)(v))
+/* Memory access macros */
+#ifdef SH4RECOMP_FLYCAST
+  /* Use flycast memory functions directly — full MMIO dispatch */
+  #include "hw/sh4/sh4_mem.h"
+  #define MEM_R8(addr)  (u8)ReadMem8_nommu(addr)
+  #define MEM_R16(addr) (u16)ReadMem16_nommu(addr)
+  #define MEM_R32(addr) ReadMem32_nommu(addr)
+  #define MEM_W8(addr, v)  WriteMem8_nommu(addr, (u8)(v))
+  #define MEM_W16(addr, v) WriteMem16_nommu(addr, (u16)(v))
+  #define MEM_W32(addr, v) WriteMem32_nommu(addr, (u32)(v))
+#else
+  /* Standalone: direct pointer access with MMIO intercept */
+  #define MEM_R8(addr)  (*(u8*) (mem + ((addr) & 0x1FFFFFFF)))
+  #define MEM_R16(addr) (*(u16*)(mem + ((addr) & 0x1FFFFFFF)))
+  #define MEM_R32(addr) mmio_read32(mem, (addr))
+  #define MEM_W8(addr, v)  (*(u8*) (mem + ((addr) & 0x1FFFFFFF)) = (u8)(v))
+  #define MEM_W16(addr, v) (*(u16*)(mem + ((addr) & 0x1FFFFFFF)) = (u16)(v))
+  #define MEM_W32(addr, v) (*(u32*)(mem + ((addr) & 0x1FFFFFFF)) = (u32)(v))
+#endif
 
-/* sh4_interp_op declared in blocks.c (static stub) */
+/* Block function type */
+typedef u32 (*BlockFunc)(u8* mem, Sh4Context* ctx);
+#ifdef __cplusplus
+extern "C"
+#endif
+BlockFunc recomp_find_block(u32 pc);
 
 #endif

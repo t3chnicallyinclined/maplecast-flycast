@@ -3050,7 +3050,9 @@ async function skinApply(colors, author) {
     document.getElementById('skinStatus').textContent = 'Not connected — try again in a moment';
     return;
   }
-  ws.send(JSON.stringify({cmd:'palette_write', index:_skinBank*16, colors, persist:true}));
+  const msg = {cmd:'palette_write', index:_skinBank*16, colors, persist:true};
+  console.log('[skin] sending palette_write', {bank: _skinBank, index: _skinBank*16, colorsLen: colors.length});
+  ws.send(JSON.stringify(msg));
   document.getElementById('skinStatus').textContent = 'Skin applied! ✓';
   // Track which slot has which skin author
   const side = _skinBank < 32 ? 'p1' : 'p2';
