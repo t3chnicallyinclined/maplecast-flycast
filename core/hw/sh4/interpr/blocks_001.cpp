@@ -69,7 +69,7 @@ u32 block_0c04bb70(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     /* nop */
-    return 0x0C04BBAC;
+    return 0x0C04BBAC; /* static branch */
 }
 
 /* Block 0x0C04BBAC, 16B, 8 ops */
@@ -84,8 +84,7 @@ u32 block_0c04bbac(u8* _mem, Sh4Context* _ctx) {
     ctx->r[7] = MEM_R32(ctx->r[15] + 8);
     ctx->pr = 0x0C04BBBC; /* jsr @r3 */
     ctx->r[4] = ctx->r[11];
-    if (ctx->sr.T) return 0x0C0539C0; /* BT */
-    return 0x0C04BBBC;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C0539C0, 70B, 35 ops */
@@ -170,7 +169,7 @@ u32 block_0c053a3c(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[14] + ctx->r[0], ctx->r[12]);
     /* bra — handled at block level */
     MEM_W32(ctx->r[15] + 4, ctx->r[12]);
-    return 0x0C053A52;
+    return 0x0C053A52; /* static branch */
 }
 
 /* Block 0x0C053A52, 4B, 2 ops */
@@ -179,7 +178,7 @@ u32 block_0c053a52(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     ctx->r[8] = ctx->r[13];
-    return 0x0C053A84;
+    return 0x0C053A84; /* static branch */
 }
 
 /* Block 0x0C053A84, 6B, 3 ops */
@@ -221,7 +220,7 @@ u32 block_0c053aa6(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[14] + 48, ctx->r[12]);
     /* bra — handled at block level */
     MEM_W32(ctx->r[14] + 60, ctx->r[12]);
-    return 0x0C053ABC;
+    return 0x0C053ABC; /* static branch */
 }
 
 /* Block 0x0C053ABC, 8B, 4 ops */
@@ -232,7 +231,7 @@ u32 block_0c053abc(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(ctx->r[15] + ctx->r[0]);
     /* bra — handled at block level */
     MEM_W32(ctx->r[14] + 44, ctx->r[2]);
-    return 0x0C053AD8;
+    return 0x0C053AD8; /* static branch */
 }
 
 /* Block 0x0C053AD8, 16B, 8 ops */
@@ -267,8 +266,7 @@ u32 block_0c053aea(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C053B68); /* @(PC,0x70) */
     ctx->pr = 0x0C053AFC; /* jsr @r3 */
     ctx->r[0] = ctx->r[6];
-    if (ctx->sr.T) return 0x0C038AC8; /* BT */
-    return 0x0C053AFC;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C038AC8, 6B, 3 ops */
@@ -779,7 +777,7 @@ u32 block_0c053b96(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[1], ctx->r[10]);
     /* bra — handled at block level */
     MEM_W32(ctx->r[14] + 8, ctx->r[12]);
-    return 0x0C053C0C;
+    return 0x0C053C0C; /* static branch */
 }
 
 /* Block 0x0C053C0C, 10B, 5 ops */
@@ -838,7 +836,7 @@ u32 block_0c053d28(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = (u32)(s32)(s16)MEM_R16(0x0C053DA0);
     /* bra — handled at block level */
     MEM_W32(ctx->r[14] + 16, ctx->r[0]);
-    return 0x0C053D4A;
+    return 0x0C053D4A; /* static branch */
 }
 
 /* Block 0x0C053D4A, 18B, 9 ops */
@@ -854,8 +852,7 @@ u32 block_0c053d4a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C053DA8); /* @(PC,0x50) */
     ctx->pr = 0x0C053D5C; /* jsr @r3 */
     ctx->r[0] = ctx->r[6];
-    if (ctx->sr.T) return 0x0C038AC8; /* BT */
-    return 0x0C053D5C;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C053D5C, 20B, 10 ops */
@@ -872,8 +869,7 @@ u32 block_0c053d5c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[1] = ctx->macl;
     ctx->pr = 0x0C053D70; /* jsr @r3 */
     ctx->r[0] = ctx->r[6];
-    if (ctx->sr.T) return 0x0C038AC8; /* BT */
-    return 0x0C053D70;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C053D70, 16B, 8 ops */
@@ -917,7 +913,7 @@ u32 block_0c053d96(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = (u32)(s32)8;
     /* bra — handled at block level */
     MEM_W32(ctx->r[14] + ctx->r[0], ctx->r[2]);
-    return 0x0C053DC6;
+    return 0x0C053DC6; /* static branch */
 }
 
 /* Block 0x0C053DC6, 24B, 12 ops */
@@ -962,8 +958,7 @@ u32 block_0c053e40(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] -= ctx->r[0];
     ctx->pr = 0x0C053E50; /* jsr @r3 */
     ctx->r[1] = ctx->r[15];
-    if (ctx->sr.T) return 0x0C043F2C; /* BT */
-    return 0x0C053E50;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C053E50, 4B, 2 ops */
@@ -972,7 +967,7 @@ u32 block_0c053e50(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = 0x0C053E54; /* bsr 0x0C053820 */
     /* nop */
-    return 0x0C053820;
+    return 0x0C053820; /* bsr */
 }
 
 /* Block 0x0C053820, 126B, 63 ops */
@@ -1184,7 +1179,7 @@ u32 block_0c04bbbc(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = 0x0C04BBC0; /* bsr 0x0C04B900 */
     ctx->r[15] += (s32)8;
-    return 0x0C04B900;
+    return 0x0C04B900; /* bsr */
 }
 
 /* Block 0x0C04B900, 14B, 7 ops */
@@ -1198,8 +1193,7 @@ u32 block_0c04b900(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = MEM_R32(ctx->r[3]);
     ctx->pr = 0x0C04B90E; /* jsr @r14 */
     ctx->r[4] = (u32)(s32)104;
-    if (ctx->sr.T) return 0x0C0558E4; /* BT */
-    return 0x0C04B90E;
+    return ctx->r[14]; /* jsr @r14 */
 }
 
 /* Block 0x0C04B90E, 8B, 4 ops */
@@ -1332,7 +1326,7 @@ u32 block_0c02ad1a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = (u32)(s32)(s16)MEM_R16(ctx->r[12] + 10);
     ctx->pr = 0x0C02AD26; /* bsr 0x0C02AAE0 */
     MEM_W16(ctx->r[13] + 6, ctx->r[0]);
-    return 0x0C02AAE0;
+    return 0x0C02AAE0; /* bsr */
 }
 
 /* Block 0x0C02AAE0, 142B, 71 ops */
@@ -1410,8 +1404,7 @@ u32 block_0c02aae0(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[4], 4); MEM_W32(ctx->r[0] + ctx->r[14], tmp); }
     ctx->pr = 0x0C02AB6E; /* jsr @r3 */
     ctx->r[4] = ctx->r[14];
-    if (ctx->sr.T) return 0x0C048380; /* BT */
-    return 0x0C02AB6E;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C048380, 72B, 36 ops */
@@ -1657,7 +1650,7 @@ u32 block_0c04854a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = MEM_R32(0x0C04857C); /* @(PC,0x30) */
     /* bra — handled at block level */
     ctx->r[14] |= ctx->r[4];
-    return 0x0C048582;
+    return 0x0C048582; /* static branch */
 }
 
 /* Block 0x0C048582, 6B, 3 ops */
@@ -1840,7 +1833,7 @@ u32 block_0c0486da(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C048704); /* @(PC,0x28) */
     /* bra — handled at block level */
     ctx->r[14] |= ctx->r[2];
-    return 0x0C048724;
+    return 0x0C048724; /* static branch */
 }
 
 /* Block 0x0C048724, 8B, 4 ops */
@@ -2280,8 +2273,7 @@ u32 block_0c02ab6e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = ctx->r[14];
     /* jmp — handled at block level */
     ctx->r[14] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
-    if (ctx->sr.T) return 0x0C04C2A6; /* BT */
-    return 0x0C02AB78;
+    return 0x0C04C2A6; /* static branch */
 }
 
 /* Block 0x0C04C2A6, 148B, 74 ops */
@@ -2396,7 +2388,7 @@ u32 block_0c02ad26(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(0x0C02ADD0); /* @(PC,0xA8) */
     ctx->pr = 0x0C02AD2C; /* bsr 0x0C02AA10 */
     MEM_W32(ctx->r[15], ctx->r[4]);
-    return 0x0C02AA10;
+    return 0x0C02AA10; /* bsr */
 }
 
 /* Block 0x0C02AA10, 144B, 72 ops */
@@ -2475,8 +2467,7 @@ u32 block_0c02aa10(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[4], 4); MEM_W32(ctx->r[0] + ctx->r[14], tmp); }
     ctx->pr = 0x0C02AAA0; /* jsr @r3 */
     ctx->r[4] = ctx->r[14];
-    if (ctx->sr.T) return 0x0C048380; /* BT */
-    return 0x0C02AAA0;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C048544, 6B, 3 ops */
@@ -2486,7 +2477,7 @@ u32 block_0c048544(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = MEM_R32(0x0C048568); /* @(PC,0x20) */
     /* bra — handled at block level */
     /* nop */
-    return 0x0C04854C;
+    return 0x0C04854C; /* static branch */
 }
 
 /* Block 0x0C04854C, 4B, 2 ops */
@@ -2495,7 +2486,7 @@ u32 block_0c04854c(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     ctx->r[14] |= ctx->r[4];
-    return 0x0C048582;
+    return 0x0C048582; /* static branch */
 }
 
 /* Block 0x0C0485E8, 6B, 3 ops */
@@ -2505,7 +2496,7 @@ u32 block_0c0485e8(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = ctx->r[4];
     /* bra — handled at block level */
     ctx->r[14] |= ctx->r[7];
-    return 0x0C048608;
+    return 0x0C048608; /* static branch */
 }
 
 /* Block 0x0C048608, 10B, 5 ops */
@@ -2544,8 +2535,7 @@ u32 block_0c02aaa0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = ctx->r[14];
     /* jmp — handled at block level */
     ctx->r[14] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
-    if (ctx->sr.T) return 0x0C048B20; /* BT */
-    return 0x0C02AAAA;
+    return 0x0C048B20; /* static branch */
 }
 
 /* Block 0x0C048B20, 34B, 17 ops */
@@ -2704,7 +2694,7 @@ u32 block_0c048c80(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     ctx->r[4] += (s32)16;
-    return 0x0C048DDC;
+    return 0x0C048DDC; /* static branch */
 }
 
 /* Block 0x0C048DDC, 16B, 8 ops */
@@ -2783,8 +2773,7 @@ u32 block_0c02ae00(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[7] = (float)(s32)ctx->fpul;
     ctx->pr = 0x0C02AE0E; /* jsr @r2 */
     ctx->fr[4] = ctx->fr[15];
-    if (ctx->sr.T) return 0x0C02A2E0; /* BT */
-    return 0x0C02AE0E;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C02A2E0, 34B, 17 ops */
@@ -2870,7 +2859,7 @@ u32 block_0c02a366(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     { u32 tmp; memcpy(&tmp, &ctx->fr[5], 4); MEM_W32(ctx->r[6], tmp); }
-    return 0x0C02A372;
+    return 0x0C02A372; /* static branch */
 }
 
 /* Block 0x0C02A372, 6B, 3 ops */
@@ -2880,7 +2869,7 @@ u32 block_0c02a372(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(0x0C02A408); /* @(PC,0x94) */
     ctx->pr = 0x0C02A378; /* bsr 0x0C02A200 */
     /* nop */
-    return 0x0C02A200;
+    return 0x0C02A200; /* bsr */
 }
 
 /* Block 0x0C02A200, 108B, 54 ops */
@@ -3213,8 +3202,7 @@ u32 block_0c02ae0e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = 0x0C02AF10; /* mova */
     ctx->pr = 0x0C02AE16; /* jsr @r3 */
     { u32 tmp = MEM_R32(ctx->r[0]); memcpy(&ctx->fr[4], &tmp, 4); }
-    if (ctx->sr.T) return 0x0C04C07A; /* BT */
-    return 0x0C02AE16;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04C07A, 20B, 10 ops */
@@ -3231,8 +3219,7 @@ u32 block_0c04c07a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] &= ctx->r[3];
     ctx->pr = 0x0C04C08E; /* jsr @r2 */
     ctx->r[4] = (u32)(s32)120;
-    if (ctx->sr.T) return 0x0C0558E4; /* BT */
-    return 0x0C04C08E;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C04C08E, 8B, 4 ops */
@@ -3261,8 +3248,7 @@ u32 block_0c02ae16(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[0], ctx->r[1]);
     ctx->pr = 0x0C02AE2C; /* jsr @r2 */
     ctx->r[4] = MEM_R32(ctx->r[15] + 4);
-    if (ctx->sr.T) return 0x0C04C6C6; /* BT */
-    return 0x0C02AE2C;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C04C6C6, 10B, 5 ops */
@@ -3284,7 +3270,7 @@ u32 block_0c02ae2c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(0x0C02AF28); /* @(PC,0xF8) */
     ctx->pr = 0x0C02AE32; /* bsr 0x0C02B190 */
     /* nop */
-    return 0x0C02B190;
+    return 0x0C02B190; /* bsr */
 }
 
 /* Block 0x0C02B190, 102B, 51 ops */
@@ -3351,7 +3337,7 @@ u32 block_0c02ae32(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = 0x0C02AE36; /* bsr 0x0C02BA60 */
     ctx->r[4] = (u32)(s32)0;
-    return 0x0C02BA60;
+    return 0x0C02BA60; /* bsr */
 }
 
 /* Block 0x0C02BA60, 4B, 2 ops */
@@ -3371,7 +3357,7 @@ u32 block_0c02ba64(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(0x0C02BBAC); /* @(PC,0x144) */
     /* bra — handled at block level */
     /* nop */
-    return 0x0C02BA72;
+    return 0x0C02BA72; /* static branch */
 }
 
 /* Block 0x0C02BA72, 6B, 3 ops */
@@ -3381,8 +3367,7 @@ u32 block_0c02ba72(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C02BBB4); /* @(PC,0x140) */
     /* jmp — handled at block level */
     /* nop */
-    if (ctx->sr.T) return 0x0C04B81E; /* BT */
-    return 0x0C02BA78;
+    return 0x0C04B81E; /* static branch */
 }
 
 /* Block 0x0C04B81E, 18B, 9 ops */
@@ -3398,7 +3383,7 @@ u32 block_0c04b81e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C04B860); /* @(PC,0x34) */
     ctx->pr = 0x0C04B830; /* bsr 0x0C04B462 */
     ctx->r[4] = MEM_R32(ctx->r[3]);
-    return 0x0C04B462;
+    return 0x0C04B462; /* bsr */
 }
 
 /* Block 0x0C04B462, 24B, 12 ops */
@@ -3417,8 +3402,7 @@ u32 block_0c04b462(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] &= ctx->r[3];
     ctx->r[0] |= 0xF0u;
     sh4_write_sr(ctx, ctx->r[0]); /* LDC SR */
-    if (ctx->sr.T) return 0x0C04B47A; /* BT */
-    return 0x0C04B47A;
+    return 0x0C04B47A; /* sequential */
 }
 
 /* Block 0x0C04B47A, 4B, 2 ops */
@@ -3448,7 +3432,7 @@ u32 block_0c04b47e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] += ctx->r[3];
     /* bra — handled at block level */
     MEM_W32(ctx->r[2] + 4, ctx->r[7]);
-    return 0x0C04B4C4;
+    return 0x0C04B4C4; /* static branch */
 }
 
 /* Block 0x0C04B4C4, 18B, 9 ops */
@@ -3464,8 +3448,7 @@ u32 block_0c04b4c4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] <<= 2;
     ctx->r[0] |= ctx->r[3];
     sh4_write_sr(ctx, ctx->r[0]); /* LDC SR */
-    if (ctx->sr.T) return 0x0C04B4D6; /* BT */
-    return 0x0C04B4D6;
+    return 0x0C04B4D6; /* sequential */
 }
 
 /* Block 0x0C04B4D6, 8B, 4 ops */
@@ -3504,8 +3487,7 @@ u32 block_0c02ae36(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = (u32)(s32)(s16)MEM_R16(0x0C02AF06);
     ctx->r[0] &= ctx->r[3];
     sh4_write_sr(ctx, ctx->r[0]); /* LDC SR */
-    if (ctx->sr.T) return 0x0C02AE4A; /* BT */
-    return 0x0C02AE4A;
+    return 0x0C02AE4A; /* sequential */
 }
 
 /* Block 0x0C000600, 20B, 10 ops */
@@ -3532,7 +3514,7 @@ u32 block_0c001cba(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = MEM_R32(0x0C001E80); /* @(PC,0x1C4) */
     /* bra — handled at block level */
     ctx->r[1] = MEM_R32(ctx->r[0]);
-    return 0x0C001CC0;
+    return 0x0C001CC0; /* static branch */
 }
 
 /* Block 0x0C001CC0, 78B, 39 ops */
@@ -3578,7 +3560,7 @@ u32 block_0c001cc0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = ctx->fpscr;
     ctx->r[2] |= ctx->r[1];
     ctx->fpscr = ctx->r[2];
-    return 0x0C001D0E;
+    return 0x0C001D0E; /* static branch */
 }
 
 /* Block 0x0C001D0E, 66B, 33 ops */
@@ -3652,8 +3634,7 @@ u32 block_0c055512(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(0x0C0555DC); /* @(PC,0xC4) */
     ctx->pr = 0x0C05551C; /* jsr @r3 */
     ctx->r[5] = (u32)(s32)0;
-    if (ctx->sr.T) return 0x0C052CA8; /* BT */
-    return 0x0C05551C;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C052CA8, 20B, 10 ops */
@@ -3670,7 +3651,7 @@ u32 block_0c052ca8(u8* _mem, Sh4Context* _ctx) {
     ctx->r[1] = ~ctx->r[1];
     ctx->r[0] &= ctx->r[1];
     ctx->fpscr = ctx->r[0];
-    return 0x0C052CBC;
+    return 0x0C052CBC; /* static branch */
 }
 
 /* Block 0x0C052CBC, 46B, 23 ops */
@@ -3731,7 +3712,7 @@ u32 block_0c05553e(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = 0x0C055542; /* bsr 0x0C054EA0 */
     /* nop */
-    return 0x0C054EA0;
+    return 0x0C054EA0; /* bsr */
 }
 
 /* Block 0x0C054EA0, 50B, 25 ops */
@@ -3778,7 +3759,7 @@ u32 block_0c054ed2(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] >>= 8;
     /* bra — handled at block level */
     ctx->r[0] >>= 2;
-    return 0x0C054EEC;
+    return 0x0C054EEC; /* static branch */
 }
 
 /* Block 0x0C054EEC, 18B, 9 ops */
@@ -3868,7 +3849,7 @@ u32 block_0c054fea(u8* _mem, Sh4Context* _ctx) {
     ctx->r[11] = ctx->r[8];
     /* bra — handled at block level */
     ctx->r[11] += (s32)-60;
-    return 0x0C0551B4;
+    return 0x0C0551B4; /* static branch */
 }
 
 /* Block 0x0C0551B4, 8B, 4 ops */
@@ -4413,7 +4394,7 @@ u32 block_0c052cea(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp = MEM_R32(ctx->r[15]); memcpy(&ctx->fr[0], &tmp, 4); ctx->r[15] += 4; }
     ctx->r[0] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
     ctx->fpscr = ctx->r[0];
-    return 0x0C052D14;
+    return 0x0C052D14; /* static branch */
 }
 
 /* Block 0x0C052D14, 8B, 4 ops */
@@ -4494,7 +4475,7 @@ u32 block_0c001dc8(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] += (s32)-72;
     ctx->fpul = MEM_R32(ctx->r[0]); ctx->r[0] += 4;
     ctx->fpscr = MEM_R32(ctx->r[0]); ctx->r[0] += 4;
-    return 0x0C001E16;
+    return 0x0C001E16; /* static branch */
 }
 
 /* Block 0x0C02AE4A, 20B, 10 ops */
@@ -4522,8 +4503,7 @@ u32 block_0c0207b2(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = (u32)(s32)(s16)MEM_R16(0x0C020804);
     ctx->r[0] &= ctx->r[3];
     sh4_write_sr(ctx, ctx->r[0]); /* LDC SR */
-    if (ctx->sr.T) return 0x0C0207BA; /* BT */
-    return 0x0C0207BA;
+    return 0x0C0207BA; /* sequential */
 }
 
 /* Block 0x0C0207BA, 4B, 2 ops */
@@ -4532,7 +4512,7 @@ u32 block_0c0207ba(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = 0x0C0207BE; /* bsr 0x0C020120 */
     /* nop */
-    return 0x0C020120;
+    return 0x0C020120; /* bsr */
 }
 
 /* Block 0x0C020120, 46B, 23 ops */
@@ -4618,8 +4598,7 @@ u32 block_0c020162(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C020238); /* @(PC,0xD4) */
     ctx->pr = 0x0C020168; /* jsr @r2 */
     ctx->r[4] = ctx->r[14];
-    if (ctx->sr.T) return 0x0C029010; /* BT */
-    return 0x0C020168;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C029010, 6B, 3 ops */
@@ -4629,8 +4608,7 @@ u32 block_0c029010(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C029074); /* @(PC,0x60) */
     /* jmp — handled at block level */
     /* nop */
-    if (ctx->sr.T) return 0x0C04C110; /* BT */
-    return 0x0C029016;
+    return 0x0C04C110; /* static branch */
 }
 
 /* Block 0x0C04C110, 80B, 40 ops */
@@ -4683,8 +4661,7 @@ u32 block_0c04c110(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = ctx->r[5] & 0xFFFF;
     ctx->pr = 0x0C04C160; /* jsr @r9 */
     ctx->r[4] += ctx->r[11];
-    if (ctx->sr.T) return 0x0C0558E4; /* BT */
-    return 0x0C04C160;
+    return ctx->r[9]; /* jsr @r9 */
 }
 
 /* Block 0x0C04C160, 4B, 2 ops */
@@ -4749,8 +4726,7 @@ u32 block_0c020168(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = 0x0C02023C; /* mova */
     ctx->pr = 0x0C020170; /* jsr @r3 */
     { u32 tmp = MEM_R32(ctx->r[0]); memcpy(&ctx->fr[4], &tmp, 4); }
-    if (ctx->sr.T) return 0x0C029020; /* BT */
-    return 0x0C020170;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C029020, 34B, 17 ops */
@@ -4792,8 +4768,7 @@ u32 block_0c02904a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] |= ctx->r[4];
     ctx->pr = 0x0C029058; /* jsr @r3 */
     ctx->r[4] = ctx->r[14];
-    if (ctx->sr.T) return 0x0C04C178; /* BT */
-    return 0x0C029058;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04C178, 16B, 8 ops */
@@ -4808,8 +4783,7 @@ u32 block_0c04c178(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = (u32)(s32)(s16)MEM_R16(0x0C04C1A8);
     ctx->pr = 0x0C04C188; /* jsr @r3 */
     /* nop */
-    if (ctx->sr.T) return 0x0C0558E4; /* BT */
-    return 0x0C04C188;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04C188, 8B, 4 ops */
@@ -4843,8 +4817,7 @@ u32 block_0c020170(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(0x0C020244); /* @(PC,0xD0) */
     ctx->pr = 0x0C020178; /* jsr @r2 */
     /* nop */
-    if (ctx->sr.T) return 0x0C028F80; /* BT */
-    return 0x0C020178;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C028F80, 50B, 25 ops */
@@ -4891,8 +4864,7 @@ u32 block_0c04c0ae(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = (u32)(s32)(s16)MEM_R16(0x0C04C0C6);
     ctx->pr = 0x0C04C0B8; /* jsr @r3 */
     ctx->r[5] = MEM_R32(ctx->r[15] + 4);
-    if (ctx->sr.T) return 0x0C0558E4; /* BT */
-    return 0x0C04C0B8;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04C0B8, 6B, 3 ops */
@@ -4924,8 +4896,7 @@ u32 block_0c020178(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(0x0C02024C); /* @(PC,0xD0) */
     ctx->pr = 0x0C020180; /* jsr @r3 */
     ctx->r[5] = (u32)(s32)16;
-    if (ctx->sr.T) return 0x0C02C210; /* BT */
-    return 0x0C020180;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C02C210, 22B, 11 ops */
@@ -4943,7 +4914,7 @@ u32 block_0c02c210(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = MEM_R32(0x0C02C268); /* @(PC,0x44) */
     ctx->pr = 0x0C02C226; /* bsr 0x0C02C1D0 */
     ctx->r[4] += (s32)24;
-    return 0x0C02C1D0;
+    return 0x0C02C1D0; /* bsr */
 }
 
 /* Block 0x0C02C1D0, 18B, 9 ops */
@@ -4987,8 +4958,7 @@ u32 block_0c02c1ec(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[14] + 8, ctx->r[4]);
     ctx->pr = 0x0C02C1FC; /* jsr @r2 */
     MEM_W32(ctx->r[14] + 4, ctx->r[4]);
-    if (ctx->sr.T) return 0x0C02D640; /* BT */
-    return 0x0C02C1FC;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C02D640, 36B, 18 ops */
@@ -5031,8 +5001,7 @@ u32 block_0c02c1fc(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C02C260); /* @(PC,0x60) */
     ctx->pr = 0x0C02C202; /* jsr @r3 */
     ctx->r[4] = MEM_R32(ctx->r[14] + 8);
-    if (ctx->sr.T) return 0x0C02BFC0; /* BT */
-    return 0x0C02C202;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C02BFC0, 4B, 2 ops */
@@ -5102,7 +5071,7 @@ u32 block_0c02c226(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = (u32)(s32)3;
     ctx->pr = 0x0C02C230; /* bsr 0x0C02C1D0 */
     ctx->r[4] += (s32)36;
-    return 0x0C02C1D0;
+    return 0x0C02C1D0; /* bsr */
 }
 
 /* Block 0x0C02C230, 14B, 7 ops */
@@ -5116,7 +5085,7 @@ u32 block_0c02c230(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] += (s32)1;
     ctx->pr = 0x0C02C23E; /* bsr 0x0C02C1D0 */
     MEM_W32(ctx->r[15] + 8, ctx->r[4]);
-    return 0x0C02C1D0;
+    return 0x0C02C1D0; /* bsr */
 }
 
 /* Block 0x0C02C23E, 18B, 9 ops */
@@ -5132,8 +5101,7 @@ u32 block_0c02c23e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(ctx->r[15] + 8);
     ctx->pr = 0x0C02C250; /* jsr @r3 */
     ctx->r[0] = (u32)(s32)12;
-    if (ctx->sr.T) return 0x0C038CF8; /* BT */
-    return 0x0C02C250;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C038CF8, 12B, 6 ops */
@@ -5182,8 +5150,7 @@ u32 block_0c020180(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C020254); /* @(PC,0xD0) */
     ctx->pr = 0x0C020186; /* jsr @r2 */
     ctx->r[4] = (u32)(s32)3;
-    if (ctx->sr.T) return 0x0C02CA30; /* BT */
-    return 0x0C020186;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C02CA30, 12B, 6 ops */
@@ -5196,8 +5163,7 @@ u32 block_0c02ca30(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[4]);
     ctx->pr = 0x0C02CA3C; /* jsr @r3 */
     ctx->r[4] = (u32)(s32)0;
-    if (ctx->sr.T) return 0x0C02BFC0; /* BT */
-    return 0x0C02CA3C;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C02BFC4, 48B, 24 ops */
@@ -5256,8 +5222,7 @@ u32 block_0c02ca3c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[1] += ctx->r[5];
     ctx->pr = 0x0C02CA56; /* jsr @r3 */
     ctx->r[0] = (u32)(s32)12;
-    if (ctx->sr.T) return 0x0C038CF8; /* BT */
-    return 0x0C02CA56;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C02CA56, 24B, 12 ops */
@@ -5276,8 +5241,7 @@ u32 block_0c02ca56(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] += ctx->r[5];
     ctx->pr = 0x0C02CA6E; /* jsr @r3 */
     ctx->r[0] = (u32)(s32)12;
-    if (ctx->sr.T) return 0x0C038CF8; /* BT */
-    return 0x0C02CA6E;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C02CA6E, 12B, 6 ops */
@@ -5290,8 +5254,7 @@ u32 block_0c02ca6e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C02CAD0); /* @(PC,0x58) */
     /* jmp — handled at block level */
     ctx->r[14] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
-    if (ctx->sr.T) return 0x0C02C720; /* BT */
-    return 0x0C02CA7A;
+    return 0x0C02C720; /* static branch */
 }
 
 /* Block 0x0C02C720, 4B, 2 ops */
@@ -5345,8 +5308,7 @@ u32 block_0c020186(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C020258); /* @(PC,0xD0) */
     ctx->pr = 0x0C02018C; /* jsr @r3 */
     /* nop */
-    if (ctx->sr.T) return 0x0C02D640; /* BT */
-    return 0x0C02018C;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C02018C, 20B, 10 ops */
@@ -5363,8 +5325,7 @@ u32 block_0c02018c(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[5] = ctx->fr[14];
     ctx->pr = 0x0C0201A0; /* jsr @r3 */
     { u32 tmp = MEM_R32(ctx->r[0]); memcpy(&ctx->fr[4], &tmp, 4); }
-    if (ctx->sr.T) return 0x0C0298B0; /* BT */
-    return 0x0C0201A0;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C0298B0, 46B, 23 ops */
@@ -5394,8 +5355,7 @@ u32 block_0c0298b0(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[13] = ctx->fr[5];
     ctx->pr = 0x0C0298DE; /* jsr @r11 */
     ctx->r[4] = ctx->r[13];
-    if (ctx->sr.T) return 0x0C039CE0; /* BT */
-    return 0x0C0298DE;
+    return ctx->r[11]; /* jsr @r11 */
 }
 
 /* Block 0x0C039CE0, 12B, 6 ops */
@@ -5448,7 +5408,7 @@ u32 block_0c039cec(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[6] *= ctx->fr[4];
     /* bra — handled at block level */
     ctx->r[5] = (u32)(s32)3;
-    return 0x0C039D3C;
+    return 0x0C039D3C; /* static branch */
 }
 
 /* Block 0x0C039D3C, 4B, 2 ops */
@@ -5550,7 +5510,7 @@ u32 block_0c03932c(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     ctx->fr[5] = ctx->fr[4];
-    return 0x0C039334;
+    return 0x0C039334; /* static branch */
 }
 
 /* Block 0x0C039334, 38B, 19 ops */
@@ -5687,7 +5647,7 @@ u32 block_0c0394b0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] -= ctx->r[14];
     /* bra — handled at block level */
     ctx->r[14] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
-    return 0x0C039A20;
+    return 0x0C039A20; /* static branch */
 }
 
 /* Block 0x0C039A20, 78B, 39 ops */
@@ -5870,7 +5830,7 @@ u32 block_0c0299fc(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     { u32 tmp; memcpy(&tmp, &ctx->fr[5], 4); MEM_W32(ctx->r[6], tmp); }
-    return 0x0C029A02;
+    return 0x0C029A02; /* static branch */
 }
 
 /* Block 0x0C029A02, 4B, 2 ops */
@@ -5938,8 +5898,7 @@ u32 block_0c029a3e(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[3], 4); MEM_W32(ctx->r[10], tmp); }
     ctx->pr = 0x0C029A4C; /* jsr @r3 */
     ctx->r[4] = MEM_R32(ctx->r[15] + 4);
-    if (ctx->sr.T) return 0x0C039A20; /* BT */
-    return 0x0C029A4C;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C029A4C, 10B, 5 ops */
@@ -5966,8 +5925,7 @@ u32 block_0c029a56(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[3], 4); MEM_W32(ctx->r[0] + ctx->r[9], tmp); }
     ctx->pr = 0x0C029A66; /* jsr @r3 */
     ctx->r[4] = ctx->r[13];
-    if (ctx->sr.T) return 0x0C039A20; /* BT */
-    return 0x0C029A66;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C029A66, 156B, 78 ops */
@@ -6052,8 +6010,7 @@ u32 block_0c029a66(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = ctx->r[15];
     ctx->pr = 0x0C029B02; /* jsr @r3 */
     ctx->r[4] += (s32)24;
-    if (ctx->sr.T) return 0x0C02CA80; /* BT */
-    return 0x0C029B02;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C02CA80, 60B, 30 ops */
@@ -6120,8 +6077,7 @@ u32 block_0c029b02(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C029C60); /* @(PC,0x15C) */
     ctx->pr = 0x0C029B08; /* jsr @r2 */
     /* nop */
-    if (ctx->sr.T) return 0x0C02A790; /* BT */
-    return 0x0C029B08;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C02A790, 14B, 7 ops */
@@ -6135,8 +6091,7 @@ u32 block_0c02a790(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = MEM_R32(0x0C02A7C4); /* @(PC,0x28) */
     ctx->pr = 0x0C02A79E; /* jsr @r13 */
     ctx->r[4] = ctx->r[14];
-    if (ctx->sr.T) return 0x0C02C0B0; /* BT */
-    return 0x0C02A79E;
+    return ctx->r[13]; /* jsr @r13 */
 }
 
 /* Block 0x0C02C0B0, 4B, 2 ops */
@@ -6186,8 +6141,7 @@ u32 block_0c02a79e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(0x0C02A7CC); /* @(PC,0x28) */
     ctx->pr = 0x0C02A7A6; /* jsr @r3 */
     /* nop */
-    if (ctx->sr.T) return 0x0C02A750; /* BT */
-    return 0x0C02A7A6;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C02A750, 56B, 28 ops */
@@ -6240,8 +6194,7 @@ u32 block_0c02a7a6(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C02A7D4); /* @(PC,0x2C) */
     ctx->pr = 0x0C02A7AC; /* jsr @r2 */
     ctx->r[4] = ctx->r[14];
-    if (ctx->sr.T) return 0x0C02CAE0; /* BT */
-    return 0x0C02A7AC;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C02CAE0, 52B, 26 ops */
@@ -6335,8 +6288,7 @@ u32 block_0c02a7b8(u8* _mem, Sh4Context* _ctx) {
     ctx->r[13] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
     /* jmp — handled at block level */
     ctx->r[14] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
-    if (ctx->sr.T) return 0x0C02C790; /* BT */
-    return 0x0C02A7C4;
+    return 0x0C02C790; /* static branch */
 }
 
 /* Block 0x0C02C790, 4B, 2 ops */
@@ -6403,8 +6355,7 @@ u32 block_0c0201a0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C020254); /* @(PC,0xB0) */
     ctx->pr = 0x0C0201A6; /* jsr @r2 */
     ctx->r[4] = (u32)(s32)1;
-    if (ctx->sr.T) return 0x0C02CA30; /* BT */
-    return 0x0C0201A6;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C0201A6, 6B, 3 ops */
@@ -6414,8 +6365,7 @@ u32 block_0c0201a6(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C02026C); /* @(PC,0xC4) */
     ctx->pr = 0x0C0201AC; /* jsr @r3 */
     /* nop */
-    if (ctx->sr.T) return 0x0C02B210; /* BT */
-    return 0x0C0201AC;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C02B210, 8B, 4 ops */
@@ -6445,7 +6395,7 @@ u32 block_0c02b218(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[4] + 4, ctx->r[0]);
     /* bra — handled at block level */
     MEM_W32(ctx->r[1], ctx->r[3]);
-    return 0x0C02B240;
+    return 0x0C02B240; /* static branch */
 }
 
 /* Block 0x0C02B240, 4B, 2 ops */
@@ -6465,8 +6415,7 @@ u32 block_0c0201ac(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(0x0C020270); /* @(PC,0xC0) */
     ctx->pr = 0x0C0201B4; /* jsr @r2 */
     /* nop */
-    if (ctx->sr.T) return 0x0C02B200; /* BT */
-    return 0x0C0201B4;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C02B200, 6B, 3 ops */
@@ -6489,8 +6438,7 @@ u32 block_0c0201b4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = MEM_R32(0x0C020278); /* @(PC,0xBC) */
     ctx->pr = 0x0C0201C0; /* jsr @r3 */
     ctx->r[5] = ctx->r[7];
-    if (ctx->sr.T) return 0x0C02B580; /* BT */
-    return 0x0C0201C0;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C02B580, 12B, 6 ops */
@@ -6513,7 +6461,7 @@ u32 block_0c02b58c(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = 0x0C02B590; /* bsr 0x0C02B400 */
     /* nop */
-    return 0x0C02B400;
+    return 0x0C02B400; /* bsr */
 }
 
 /* Block 0x0C02B400, 28B, 14 ops */
@@ -6557,7 +6505,7 @@ u32 block_0c02b438(u8* _mem, Sh4Context* _ctx) {
     ctx->r[13] = ctx->r[5];
     /* bra — handled at block level */
     ctx->r[13] += ctx->r[6];
-    return 0x0C02B446;
+    return 0x0C02B446; /* static branch */
 }
 
 /* Block 0x0C02B446, 6B, 3 ops */
@@ -6567,7 +6515,7 @@ u32 block_0c02b446(u8* _mem, Sh4Context* _ctx) {
     ctx->r[13] += ctx->r[7];
     /* bra — handled at block level */
     ctx->r[13] += ctx->r[12];
-    return 0x0C02B45E;
+    return 0x0C02B45E; /* static branch */
 }
 
 /* Block 0x0C02B45E, 54B, 27 ops */
@@ -6639,7 +6587,7 @@ u32 block_0c02b4d0(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[6], 4); MEM_W32(ctx->r[0] + ctx->r[14], tmp); }
     /* bra — handled at block level */
     /* nop */
-    return 0x0C02B50C;
+    return 0x0C02B50C; /* static branch */
 }
 
 /* Block 0x0C02B50C, 6B, 3 ops */
@@ -6649,7 +6597,7 @@ u32 block_0c02b50c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = (u32)(s32)60;
     /* bra — handled at block level */
     { u32 tmp; memcpy(&tmp, &ctx->fr[8], 4); MEM_W32(ctx->r[0] + ctx->r[14], tmp); }
-    return 0x0C02B544;
+    return 0x0C02B544; /* static branch */
 }
 
 /* Block 0x0C02B544, 8B, 4 ops */
@@ -6660,8 +6608,7 @@ u32 block_0c02b544(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(0x0C02B5D0); /* @(PC,0x88) */
     ctx->pr = 0x0C02B54C; /* jsr @r3 */
     /* nop */
-    if (ctx->sr.T) return 0x0C04A120; /* BT */
-    return 0x0C02B54C;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04A120, 32B, 16 ops */
@@ -6684,8 +6631,7 @@ u32 block_0c04a120(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] += (s32)-104;
     ctx->pr = 0x0C04A140; /* jsr @r3 */
     MEM_W32(ctx->r[15] + 8, ctx->r[14]);
-    if (ctx->sr.T) return 0x0C04E620; /* BT */
-    return 0x0C04A140;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04E54E, 6B, 3 ops */
@@ -6695,8 +6641,7 @@ u32 block_0c04e54e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C04E608); /* @(PC,0xB8) */
     ctx->pr = 0x0C04E554; /* jsr @r2 */
     ctx->r[14] = MEM_R32(ctx->r[4] + 8);
-    if (ctx->sr.T) return 0x0C050060; /* BT */
-    return 0x0C04E554;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C050060, 18B, 9 ops */
@@ -6820,8 +6765,7 @@ u32 block_0c04e572(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C04E608); /* @(PC,0x94) */
     ctx->pr = 0x0C04E578; /* jsr @r2 */
     ctx->r[14] = MEM_R32(ctx->r[4] + 8);
-    if (ctx->sr.T) return 0x0C050060; /* BT */
-    return 0x0C04E578;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C050080, 16B, 8 ops */
@@ -6858,8 +6802,7 @@ u32 block_0c04a140(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C04A1B4); /* @(PC,0x70) */
     ctx->pr = 0x0C04A146; /* jsr @r2 */
     /* nop */
-    if (ctx->sr.T) return 0x0C04B22E; /* BT */
-    return 0x0C04A146;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C04A146, 16B, 8 ops */
@@ -6884,7 +6827,7 @@ u32 block_0c04a156(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     MEM_W32(ctx->r[15] + 16, ctx->r[9]);
-    return 0x0C04A15C;
+    return 0x0C04A15C; /* static branch */
 }
 
 /* Block 0x0C04A15C, 6B, 3 ops */
@@ -6934,8 +6877,7 @@ u32 block_0c04a1d0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = MEM_R32(ctx->r[13] + 20);
     ctx->pr = 0x0C04A1DE; /* jsr @r3 */
     ctx->r[5] = MEM_R32(ctx->r[15] + 12);
-    if (ctx->sr.T) return 0x0C047F04; /* BT */
-    return 0x0C04A1DE;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C047F04, 42B, 21 ops */
@@ -6974,7 +6916,7 @@ u32 block_0c047f36(u8* _mem, Sh4Context* _ctx) {
     ctx->r[7] = (u32)(s32)(s16)MEM_R16(0x0C047F42);
     /* bra — handled at block level */
     /* nop */
-    return 0x0C047F62;
+    return 0x0C047F62; /* static branch */
 }
 
 /* Block 0x0C047F62, 6B, 3 ops */
@@ -7007,7 +6949,7 @@ u32 block_0c047fc0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = (u32)(s32)(s16)MEM_R16(0x0C047FE4);
     /* bra — handled at block level */
     /* nop */
-    return 0x0C048002;
+    return 0x0C048002; /* static branch */
 }
 
 /* Block 0x0C048002, 16B, 8 ops */
@@ -7092,7 +7034,7 @@ u32 block_0c04a1f8(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C04A268); /* @(PC,0x68) */
     /* bra — handled at block level */
     MEM_W32(ctx->r[2], ctx->r[9]);
-    return 0x0C04A206;
+    return 0x0C04A206; /* static branch */
 }
 
 /* Block 0x0C04A206, 8B, 4 ops */
@@ -7103,7 +7045,7 @@ u32 block_0c04a206(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = MEM_R32(ctx->r[13] + ctx->r[0]);
     ctx->pr = 0x0C04A20E; /* bsr 0x0C04A040 */
     ctx->r[4] = MEM_R32(ctx->r[3]);
-    return 0x0C04A040;
+    return 0x0C04A040; /* bsr */
 }
 
 /* Block 0x0C04A040, 28B, 14 ops */
@@ -7206,7 +7148,7 @@ u32 block_0c04a250(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = ctx->r[14];
     /* bra — handled at block level */
     ctx->r[11] = (u32)(s32)5;
-    return 0x0C04A2A6;
+    return 0x0C04A2A6; /* static branch */
 }
 
 /* Block 0x0C04A2A6, 4B, 2 ops */
@@ -7240,7 +7182,7 @@ u32 block_0c04a2aa(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] += (s32)44;
     /* bra — handled at block level */
     ctx->r[4] = ctx->r[11];
-    return 0x0C04A2B8;
+    return 0x0C04A2B8; /* static branch */
 }
 
 /* Block 0x0C04A2B8, 4B, 2 ops */
@@ -7287,7 +7229,7 @@ u32 block_0c04a2ea(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = ctx->r[12];
     /* bra — handled at block level */
     ctx->r[5] = ctx->r[12];
-    return 0x0C04A300;
+    return 0x0C04A300; /* static branch */
 }
 
 /* Block 0x0C04A300, 4B, 2 ops */
@@ -7325,7 +7267,7 @@ u32 block_0c04a304(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = ctx->r[12];
     /* bra — handled at block level */
     ctx->r[5] = ctx->r[12];
-    return 0x0C04A37A;
+    return 0x0C04A37A; /* static branch */
 }
 
 /* Block 0x0C04A37A, 4B, 2 ops */
@@ -7670,7 +7612,7 @@ u32 block_0c04a4b4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = MEM_R32(ctx->r[5]);
     ctx->pr = 0x0C04A4FC; /* bsr 0x0C04A84E */
     ctx->r[4] = MEM_R32(ctx->r[4]);
-    return 0x0C04A84E;
+    return 0x0C04A84E; /* bsr */
 }
 
 /* Block 0x0C04A84E, 36B, 18 ops */
@@ -7887,7 +7829,7 @@ u32 block_0c04a4fc(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(0x0C04A530); /* @(PC,0x28) */
     /* bra — handled at block level */
     ctx->r[5] = (u32)(s32)0;
-    return 0x0C04A546;
+    return 0x0C04A546; /* static branch */
 }
 
 /* Block 0x0C04A546, 4B, 2 ops */
@@ -7925,7 +7867,7 @@ u32 block_0c04a54a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = MEM_R32(ctx->r[14] + 4);
     ctx->pr = 0x0C04A55A; /* bsr 0x0C04A960 */
     ctx->r[4] = MEM_R32(ctx->r[14]);
-    return 0x0C04A960;
+    return 0x0C04A960; /* bsr */
 }
 
 /* Block 0x0C04A960, 54B, 27 ops */
@@ -8175,7 +8117,7 @@ u32 block_0c04a55a(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[15] + 4, ctx->r[0]);
     ctx->pr = 0x0C04A562; /* bsr 0x0C04ACE0 */
     ctx->r[4] = ctx->r[0];
-    return 0x0C04ACE0;
+    return 0x0C04ACE0; /* bsr */
 }
 
 /* Block 0x0C04ACE0, 98B, 49 ops */
@@ -8302,7 +8244,7 @@ u32 block_0c04a56a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[7] = MEM_R32(ctx->r[14] + 12);
     ctx->pr = 0x0C04A580; /* bsr 0x0C04AD86 */
     ctx->r[4] = MEM_R32(ctx->r[14]);
-    return 0x0C04AD86;
+    return 0x0C04AD86; /* bsr */
 }
 
 /* Block 0x0C04AD86, 88B, 44 ops */
@@ -8412,7 +8354,7 @@ u32 block_0c04ae26(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(ctx->r[15]);
     /* bra — handled at block level */
     MEM_W32(ctx->r[2], ctx->r[9]);
-    return 0x0C04AE4E;
+    return 0x0C04AE4E; /* static branch */
 }
 
 /* Block 0x0C04AE4E, 24B, 12 ops */
@@ -8519,7 +8461,7 @@ u32 block_0c04af0e(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[1] + 8, ctx->r[3]);
     /* bra — handled at block level */
     ctx->r[14] &= ctx->r[10];
-    return 0x0C04AF2A;
+    return 0x0C04AF2A; /* static branch */
 }
 
 /* Block 0x0C04AF2A, 24B, 12 ops */
@@ -8670,7 +8612,7 @@ u32 block_0c04a580(u8* _mem, Sh4Context* _ctx) {
     ctx->r[7] = MEM_R32(0x0C04A708); /* @(PC,0x168) */
     /* bra — handled at block level */
     ctx->r[4] = ctx->r[12];
-    return 0x0C04A5AC;
+    return 0x0C04A5AC; /* static branch */
 }
 
 /* Block 0x0C04A5AC, 4B, 2 ops */
@@ -8749,7 +8691,7 @@ u32 block_0c04a5ea(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = 0x0C04A5EE; /* bsr 0x0C04AAE0 */
     ctx->r[4] = MEM_R32(ctx->r[15] + 8);
-    return 0x0C04AAE0;
+    return 0x0C04AAE0; /* bsr */
 }
 
 /* Block 0x0C04AAE0, 74B, 37 ops */
@@ -8963,7 +8905,7 @@ u32 block_0c04a5ee(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = ctx->r[12];
     /* bra — handled at block level */
     ctx->r[4] = ctx->r[12];
-    return 0x0C04A608;
+    return 0x0C04A608; /* static branch */
 }
 
 /* Block 0x0C04A608, 4B, 2 ops */
@@ -9032,8 +8974,7 @@ u32 block_0c04a6be(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = MEM_R32(0x0C04A734); /* @(PC,0x54) */
     ctx->pr = 0x0C04A6E2; /* jsr @r3 */
     ctx->r[6] = (u32)(s32)0;
-    if (ctx->sr.T) return 0x0C053340; /* BT */
-    return 0x0C04A6E2;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04A6E2, 4B, 2 ops */
@@ -9084,8 +9025,7 @@ u32 block_0c04a77c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] += (s32)60;
     ctx->pr = 0x0C04A78A; /* jsr @r3 */
     ctx->r[4] = ctx->r[14];
-    if (ctx->sr.T) return 0x0C04E960; /* BT */
-    return 0x0C04A78A;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04E960, 26B, 13 ops */
@@ -9105,8 +9045,7 @@ u32 block_0c04e960(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C04EA04); /* @(PC,0x8C) */
     ctx->pr = 0x0C04E97A; /* jsr @r3 */
     ctx->r[0] = (u32)(s32)32;
-    if (ctx->sr.T) return 0x0C038C24; /* BT */
-    return 0x0C04E97A;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C038C24, 6B, 3 ops */
@@ -9616,8 +9555,7 @@ u32 block_0c04e986(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = ctx->r[13];
     ctx->pr = 0x0C04E994; /* jsr @r2 */
     ctx->r[4] = (u32)(s32)0;
-    if (ctx->sr.T) return 0x0C04F800; /* BT */
-    return 0x0C04E994;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C04F800, 30B, 15 ops */
@@ -9639,8 +9577,7 @@ u32 block_0c04f800(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] += (s32)-4;
     ctx->pr = 0x0C04F81E; /* jsr @r3 */
     ctx->r[0] = (u32)(s32)32;
-    if (ctx->sr.T) return 0x0C038C24; /* BT */
-    return 0x0C04F81E;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04F81E, 6B, 3 ops */
@@ -9694,7 +9631,7 @@ u32 block_0c04f84c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = ctx->r[4];
     /* bra — handled at block level */
     ctx->r[4] = ctx->r[5];
-    return 0x0C04F854;
+    return 0x0C04F854; /* static branch */
 }
 
 /* Block 0x0C04F854, 4B, 2 ops */
@@ -9735,7 +9672,7 @@ u32 block_0c04f8ec(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = 0x0C04F8F0; /* bsr 0x0C050000 */
     /* nop */
-    return 0x0C050000;
+    return 0x0C050000; /* bsr */
 }
 
 /* Block 0x0C04F8F0, 6B, 3 ops */
@@ -9769,7 +9706,7 @@ u32 block_0c04f8f6(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] += (s32)4;
     ctx->pr = 0x0C04F916; /* bsr 0x0C0500B4 */
     ctx->r[4] = MEM_R32(ctx->r[15]);
-    return 0x0C0500B4;
+    return 0x0C0500B4; /* bsr */
 }
 
 /* Block 0x0C0500B4, 6B, 3 ops */
@@ -9793,7 +9730,7 @@ u32 block_0c0500ba(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[4], ctx->r[6]);
     /* bra — handled at block level */
     MEM_W32(ctx->r[5], ctx->r[6]);
-    return 0x0C0500D4;
+    return 0x0C0500D4; /* static branch */
 }
 
 /* Block 0x0C0500D4, 4B, 2 ops */
@@ -9840,7 +9777,7 @@ u32 block_0c04f960(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] |= ctx->r[3];
     /* bra — handled at block level */
     MEM_W16(ctx->r[13], ctx->r[2]);
-    return 0x0C04F976;
+    return 0x0C04F976; /* static branch */
 }
 
 /* Block 0x0C04F976, 38B, 19 ops */
@@ -9888,8 +9825,7 @@ u32 block_0c04e99a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[12] = MEM_R32(ctx->r[13]);
     ctx->pr = 0x0C04E9A2; /* jsr @r2 */
     ctx->r[4] = ctx->r[12];
-    if (ctx->sr.T) return 0x0C050BD2; /* BT */
-    return 0x0C04E9A2;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C050BD2, 20B, 10 ops */
@@ -9940,8 +9876,7 @@ u32 block_0c04e9a2(u8* _mem, Sh4Context* _ctx) {
     ctx->r[8] = MEM_R32(ctx->r[15]);
     ctx->pr = 0x0C04E9AE; /* jsr @r3 */
     ctx->r[4] += (s32)4;
-    if (ctx->sr.T) return 0x0C050BD2; /* BT */
-    return 0x0C04E9AE;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C050BE6, 8B, 4 ops */
@@ -10024,8 +9959,7 @@ u32 block_0c04a790(u8* _mem, Sh4Context* _ctx) {
       if (shift >= 0) ctx->r[4] <<= shift & 31;
       else if (shift == -32) ctx->r[4] = 0;
       else ctx->r[4] >>= (-shift) & 31; }
-    if (ctx->sr.T) return 0x0C0583C6; /* BT */
-    return 0x0C04A7C2;
+    return ctx->r[1]; /* jsr @r1 */
 }
 
 /* Block 0x0C0585E4, 74B, 37 ops */
@@ -10127,8 +10061,7 @@ u32 block_0c057f0c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C057F68); /* @(PC,0x54) */
     ctx->pr = 0x0C057F16; /* jsr @r3 */
     ctx->r[0] = MEM_R32(ctx->r[2]);
-    if (ctx->sr.T) return 0x0C038B7C; /* BT */
-    return 0x0C057F16;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C038B7C, 6B, 3 ops */
@@ -10582,8 +10515,7 @@ u32 block_0c057f16(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C057F70); /* @(PC,0x50) */
     ctx->pr = 0x0C057F22; /* jsr @r3 */
     ctx->r[1] = ctx->r[13];
-    if (ctx->sr.T) return 0x0C041A10; /* BT */
-    return 0x0C057F96;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C041A10, 4B, 2 ops */
@@ -11043,7 +10975,7 @@ u32 block_0c057f22(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     /* nop */
-    return 0x0C057F96;
+    return 0x0C057F96; /* static branch */
 }
 
 /* Block 0x0C057F96, 10B, 5 ops */
@@ -11299,7 +11231,7 @@ u32 block_0c04a7d0(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[3], ctx->r[4]);
     ctx->pr = 0x0C04A834; /* bsr 0x0C04B020 */
     ctx->r[4] = MEM_R32(ctx->r[10] + ctx->r[0]);
-    return 0x0C04B020;
+    return 0x0C04B020; /* bsr */
 }
 
 /* Block 0x0C04B020, 30B, 15 ops */
@@ -11379,8 +11311,7 @@ u32 block_0c04b086(u8* _mem, Sh4Context* _ctx) {
     ctx->r[7] = MEM_R32(ctx->r[14] + 24);
     ctx->pr = 0x0C04B09C; /* jsr @r9 */
     ctx->r[4] = MEM_R32(ctx->r[13]);
-    if (ctx->sr.T) return 0x0C047D60; /* BT */
-    return 0x0C04B09C;
+    return ctx->r[9]; /* jsr @r9 */
 }
 
 /* Block 0x0C047D60, 140B, 70 ops */
@@ -11468,8 +11399,7 @@ u32 block_0c047df4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C047E78); /* @(PC,0x80) */
     ctx->pr = 0x0C047DFA; /* jsr @r2 */
     /* nop */
-    if (ctx->sr.T) return 0x0C04B228; /* BT */
-    return 0x0C047DFA;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C04B228, 6B, 3 ops */
@@ -11502,8 +11432,7 @@ u32 block_0c047e00(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = ctx->r[14];
     ctx->pr = 0x0C047E0A; /* jsr @r2 */
     ctx->r[4] = MEM_R32(ctx->r[13] + ctx->r[0]);
-    if (ctx->sr.T) return 0x0C04E800; /* BT */
-    return 0x0C047E0A;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C04E800, 24B, 12 ops */
@@ -11522,8 +11451,7 @@ u32 block_0c04e800(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C04E940); /* @(PC,0x12C) */
     ctx->pr = 0x0C04E818; /* jsr @r3 */
     ctx->r[0] = (u32)(s32)32;
-    if (ctx->sr.T) return 0x0C038C24; /* BT */
-    return 0x0C04E818;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04E818, 6B, 3 ops */
@@ -11585,7 +11513,7 @@ u32 block_0c04e844(u8* _mem, Sh4Context* _ctx) {
     ctx->r[7] = (u32)(s32)8;
     /* bra — handled at block level */
     ctx->r[4] = (u32)(s32)1;
-    return 0x0C04E852;
+    return 0x0C04E852; /* static branch */
 }
 
 /* Block 0x0C04E852, 6B, 3 ops */
@@ -11595,8 +11523,7 @@ u32 block_0c04e852(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C04E954); /* @(PC,0x100) */
     ctx->pr = 0x0C04E858; /* jsr @r3 */
     /* nop */
-    if (ctx->sr.T) return 0x0C04F800; /* BT */
-    return 0x0C04E858;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04F926, 16B, 8 ops */
@@ -11611,7 +11538,7 @@ u32 block_0c04f926(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] |= 0x08u;
     /* bra — handled at block level */
     MEM_W16(ctx->r[13], ctx->r[0]);
-    return 0x0C04F976;
+    return 0x0C04F976; /* static branch */
 }
 
 /* Block 0x0C04E858, 4B, 2 ops */
@@ -11620,7 +11547,7 @@ u32 block_0c04e858(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     ctx->r[12] = ctx->r[0];
-    return 0x0C04E868;
+    return 0x0C04E868; /* static branch */
 }
 
 /* Block 0x0C04E868, 4B, 2 ops */
@@ -11644,8 +11571,7 @@ u32 block_0c04e86c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C04E958); /* @(PC,0xE0) */
     ctx->pr = 0x0C04E87A; /* jsr @r2 */
     MEM_W32(ctx->r[14] + 20, ctx->r[13]);
-    if (ctx->sr.T) return 0x0C050BD2; /* BT */
-    return 0x0C04E87A;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C050BEE, 6B, 3 ops */
@@ -11665,7 +11591,7 @@ u32 block_0c04e87a(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[14] + 28, ctx->r[0]);
     /* bra — handled at block level */
     ctx->r[0] = ctx->r[12];
-    return 0x0C04E894;
+    return 0x0C04E894; /* static branch */
 }
 
 /* Block 0x0C04E894, 14B, 7 ops */
@@ -11797,8 +11723,7 @@ u32 block_0c047ece(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = ctx->r[13];
     ctx->pr = 0x0C047EDC; /* jsr @r10 */
     ctx->r[4] += ctx->r[12];
-    if (ctx->sr.T) return 0x0C05591C; /* BT */
-    return 0x0C047EDC;
+    return ctx->r[10]; /* jsr @r10 */
 }
 
 /* Block 0x0C047EDC, 8B, 4 ops */
@@ -11892,8 +11817,7 @@ u32 block_0c04e880(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(ctx->r[11]);
     ctx->pr = 0x0C04E88A; /* jsr @r2 */
     ctx->r[4] += (s32)4;
-    if (ctx->sr.T) return 0x0C050BD2; /* BT */
-    return 0x0C04E88A;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C04E88A, 24B, 12 ops */
@@ -11927,8 +11851,7 @@ u32 block_0c04b0e8(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = MEM_R32(ctx->r[14] + 24);
     ctx->pr = 0x0C04B0F8; /* jsr @r3 */
     ctx->r[4] = MEM_R32(ctx->r[14] + 60);
-    if (ctx->sr.T) return 0x0C045BC6; /* BT */
-    return 0x0C04B0F8;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C045BC6, 32B, 16 ops */
@@ -11981,8 +11904,7 @@ u32 block_0c045c20(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C045CE8); /* @(PC,0xB4) */
     ctx->pr = 0x0C045C38; /* jsr @r2 */
     MEM_W32(ctx->r[3], ctx->r[11]);
-    if (ctx->sr.T) return 0x0C04B228; /* BT */
-    return 0x0C045C38;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C045C38, 6B, 3 ops */
@@ -12041,8 +11963,7 @@ u32 block_0c045c5a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = MEM_R32(ctx->r[1]);
     ctx->pr = 0x0C045C7C; /* jsr @r14 */
     ctx->r[4] = (u32)(s32)80;
-    if (ctx->sr.T) return 0x0C0558E4; /* BT */
-    return 0x0C045C7C;
+    return ctx->r[14]; /* jsr @r14 */
 }
 
 /* Block 0x0C045C7C, 8B, 4 ops */
@@ -12131,7 +12052,7 @@ u32 block_0c045cd0(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[3], ctx->r[1]);
     /* bra — handled at block level */
     /* nop */
-    return 0x0C045D40;
+    return 0x0C045D40; /* static branch */
 }
 
 /* Block 0x0C045D40, 20B, 10 ops */
@@ -12198,8 +12119,7 @@ u32 block_0c04b10e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = MEM_R32(0x0C04B1E4); /* @(PC,0xB0) */
     ctx->pr = 0x0C04B136; /* jsr @r14 */
     ctx->r[4] = (u32)(s32)8;
-    if (ctx->sr.T) return 0x0C0558E4; /* BT */
-    return 0x0C04B136;
+    return ctx->r[14]; /* jsr @r14 */
 }
 
 /* Block 0x0C04B136, 6B, 3 ops */
@@ -12290,8 +12210,7 @@ u32 block_0c04b174(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = (u32)(s32)(s16)MEM_R16(0x0C04B1CA);
     ctx->pr = 0x0C04B17C; /* jsr @r3 */
     /* nop */
-    if (ctx->sr.T) return 0x0C055916; /* BT */
-    return 0x0C04B17C;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04B17C, 36B, 18 ops */
@@ -12373,8 +12292,7 @@ u32 block_0c02b564(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C02B5F0); /* @(PC,0x88) */
     ctx->pr = 0x0C02B56A; /* jsr @r3 */
     /* nop */
-    if (ctx->sr.T) return 0x0C028ED0; /* BT */
-    return 0x0C02B56A;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C028ED0, 20B, 10 ops */
@@ -12391,8 +12309,7 @@ u32 block_0c028ed0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[7] = MEM_R32(ctx->r[14] + 4);
     ctx->pr = 0x0C028EE4; /* jsr @r3 */
     ctx->r[5] = (u32)(s32)(s16)MEM_R16(ctx->r[14]);
-    if (ctx->sr.T) return 0x0C04C7AC; /* BT */
-    return 0x0C028EE4;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04C7AC, 10B, 5 ops */
@@ -12404,7 +12321,7 @@ u32 block_0c04c7ac(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->pr);
     ctx->pr = 0x0C04C7B6; /* bsr 0x0C04CFE0 */
     ctx->r[14] = ctx->r[4];
-    return 0x0C04CFE0;
+    return 0x0C04CFE0; /* bsr */
 }
 
 /* Block 0x0C04CFE0, 34B, 17 ops */
@@ -12520,7 +12437,7 @@ u32 block_0c04d0e0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C04D100); /* @(PC,0x1C) */
     /* bra — handled at block level */
     /* nop */
-    return 0x0C04D0EE;
+    return 0x0C04D0EE; /* static branch */
 }
 
 /* Block 0x0C04D0EE, 4B, 2 ops */
@@ -12529,7 +12446,7 @@ u32 block_0c04d0ee(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     MEM_W32(ctx->r[4] + 8, ctx->r[2]);
-    return 0x0C04D122;
+    return 0x0C04D122; /* static branch */
 }
 
 /* Block 0x0C04D122, 10B, 5 ops */
@@ -12706,7 +12623,7 @@ u32 block_0c04d1d4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[1] = (u32)(s32)(s16)MEM_R16(0x0C04D1F2);
     /* bra — handled at block level */
     /* nop */
-    return 0x0C04D200;
+    return 0x0C04D200; /* static branch */
 }
 
 /* Block 0x0C04D200, 4B, 2 ops */
@@ -12838,7 +12755,7 @@ u32 block_0c04d26c(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = 0x0C04D270; /* bsr 0x0C04D366 */
     /* nop */
-    return 0x0C04D366;
+    return 0x0C04D366; /* bsr */
 }
 
 /* Block 0x0C04D366, 14B, 7 ops */
@@ -12883,7 +12800,7 @@ u32 block_0c04d396(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = 0x0C04D39A; /* bsr 0x0C04D3C0 */
     ctx->r[4] = ctx->r[14];
-    return 0x0C04D3C0;
+    return 0x0C04D3C0; /* bsr */
 }
 
 /* Block 0x0C04D3C0, 16B, 8 ops */
@@ -12919,7 +12836,7 @@ u32 block_0c04d406(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     ctx->sr.T = (ctx->r[7] >> 31) & 1; ctx->r[7] <<= 1;
-    return 0x0C04D40C;
+    return 0x0C04D40C; /* static branch */
 }
 
 /* Block 0x0C04D40C, 4B, 2 ops */
@@ -12990,8 +12907,7 @@ u32 block_0c04c7d2(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = ctx->r[14];
     ctx->pr = 0x0C04C7DA; /* jsr @r2 */
     ctx->r[4] = MEM_R32(ctx->r[14] + 20);
-    if (ctx->sr.T) return 0x0C04E9C0; /* BT */
-    return 0x0C04C7DA;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C04E9C0, 20B, 10 ops */
@@ -13020,7 +12936,7 @@ u32 block_0c04e9d4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] += (s32)4;
     ctx->pr = 0x0C04E9DC; /* bsr 0x0C04F126 */
     ctx->r[4] = ctx->r[15];
-    return 0x0C04F126;
+    return 0x0C04F126; /* bsr */
 }
 
 /* Block 0x0C04F126, 20B, 10 ops */
@@ -13206,7 +13122,7 @@ u32 block_0c04e9e4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = ctx->r[14];
     /* bra — handled at block level */
     ctx->r[4] = (u32)(s32)1;
-    return 0x0C04E9F2;
+    return 0x0C04E9F2; /* static branch */
 }
 
 /* Block 0x0C04E9F2, 6B, 3 ops */
@@ -13216,8 +13132,7 @@ u32 block_0c04e9f2(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C04EA14); /* @(PC,0x20) */
     ctx->pr = 0x0C04E9F8; /* jsr @r2 */
     /* nop */
-    if (ctx->sr.T) return 0x0C04F9C0; /* BT */
-    return 0x0C04E9F8;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C04F9C0, 38B, 19 ops */
@@ -13243,8 +13158,7 @@ u32 block_0c04f9c0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C04FA84); /* @(PC,0xA0) */
     ctx->pr = 0x0C04F9E6; /* jsr @r3 */
     ctx->r[0] = (u32)(s32)32;
-    if (ctx->sr.T) return 0x0C038C24; /* BT */
-    return 0x0C04F9E6;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04F9E6, 8B, 4 ops */
@@ -13313,8 +13227,7 @@ u32 block_0c04fa1e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[1] = MEM_R32(ctx->r[4] + 12);
     ctx->pr = 0x0C04FA28; /* jsr @r3 */
     ctx->r[0] = ctx->r[7];
-    if (ctx->sr.T) return 0x0C038C24; /* BT */
-    return 0x0C04FA28;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04FA28, 4B, 2 ops */
@@ -13336,7 +13249,7 @@ u32 block_0c04fa5c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = ctx->r[4];
     /* bra — handled at block level */
     ctx->r[4] = ctx->r[13];
-    return 0x0C04FAA2;
+    return 0x0C04FAA2; /* static branch */
 }
 
 /* Block 0x0C04FAA2, 4B, 2 ops */
@@ -13397,7 +13310,7 @@ u32 block_0c04fb16(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = 0x0C04FB1A; /* bsr 0x0C050000 */
     /* nop */
-    return 0x0C050000;
+    return 0x0C050000; /* bsr */
 }
 
 /* Block 0x0C04FB1A, 6B, 3 ops */
@@ -13431,7 +13344,7 @@ u32 block_0c04fb24(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] += (s32)4;
     ctx->pr = 0x0C04FB44; /* bsr 0x0C0500B4 */
     ctx->r[4] = MEM_R32(ctx->r[15]);
-    return 0x0C0500B4;
+    return 0x0C0500B4; /* bsr */
 }
 
 /* Block 0x0C0500C6, 18B, 9 ops */
@@ -13500,7 +13413,7 @@ u32 block_0c04e9f8(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     ctx->r[4] = ctx->r[0];
-    return 0x0C04EA2C;
+    return 0x0C04EA2C; /* static branch */
 }
 
 /* Block 0x0C04EA2C, 12B, 6 ops */
@@ -13549,8 +13462,7 @@ u32 block_0c028ee4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = ctx->r[7];
     ctx->pr = 0x0C028EF0; /* jsr @r2 */
     ctx->r[5] = MEM_R32(ctx->r[14] + 8);
-    if (ctx->sr.T) return 0x0C04C9FA; /* BT */
-    return 0x0C028EF0;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C04C9FA, 12B, 6 ops */
@@ -13621,8 +13533,7 @@ u32 block_0c04ca4c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = MEM_R32(ctx->r[14] + 20);
     ctx->pr = 0x0C04CA54; /* jsr @r2 */
     ctx->r[4] = MEM_R32(ctx->r[14] + 28);
-    if (ctx->sr.T) return 0x0C055980; /* BT */
-    return 0x0C04CA54;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C055980, 42B, 21 ops */
@@ -13675,8 +13586,7 @@ u32 block_0c055a40(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = ctx->r[14];
     ctx->pr = 0x0C055A4C; /* jsr @r3 */
     ctx->r[4] += ctx->r[12];
-    if (ctx->sr.T) return 0x0C050C7E; /* BT */
-    return 0x0C055A4C;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C055A4C, 22B, 11 ops */
@@ -13716,7 +13626,7 @@ u32 block_0c028ef0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(0x0C028F20); /* @(PC,0x2C) */
     /* bra — handled at block level */
     ctx->r[14] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
-    return 0x0C028D90;
+    return 0x0C028D90; /* static branch */
 }
 
 /* Block 0x0C028D90, 18B, 9 ops */
@@ -13732,7 +13642,7 @@ u32 block_0c028d90(u8* _mem, Sh4Context* _ctx) {
     ctx->r[13] = ctx->r[4];
     ctx->pr = 0x0C028DA2; /* bsr 0x0C028C90 */
     ctx->r[4] = MEM_R32(ctx->r[14] + 12);
-    return 0x0C028C90;
+    return 0x0C028C90; /* bsr */
 }
 
 /* Block 0x0C028C90, 6B, 3 ops */
@@ -13752,7 +13662,7 @@ u32 block_0c028c96(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     ctx->r[4] = (u32)(s32)0;
-    return 0x0C028D28;
+    return 0x0C028D28; /* static branch */
 }
 
 /* Block 0x0C028D28, 4B, 2 ops */
@@ -13776,7 +13686,7 @@ u32 block_0c028da2(u8* _mem, Sh4Context* _ctx) {
     ctx->r[8] = ctx->r[0];
     ctx->pr = 0x0C028DB2; /* bsr 0x0C028C90 */
     ctx->r[4] = MEM_R32(ctx->r[14] + 16);
-    return 0x0C028C90;
+    return 0x0C028C90; /* bsr */
 }
 
 /* Block 0x0C028DB2, 80B, 40 ops */
@@ -13855,7 +13765,7 @@ u32 block_0c02b590(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     /* nop */
-    return 0x0C02B5A4;
+    return 0x0C02B5A4; /* static branch */
 }
 
 /* Block 0x0C02B5A4, 6B, 3 ops */
@@ -13875,8 +13785,7 @@ u32 block_0c0201c0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C020284); /* @(PC,0xC0) */
     ctx->pr = 0x0C0201C6; /* jsr @r2 */
     /* nop */
-    if (ctx->sr.T) return 0x0C02B610; /* BT */
-    return 0x0C0201C6;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C02B610, 10B, 5 ops */
@@ -13888,8 +13797,7 @@ u32 block_0c02b610(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] &= ctx->r[3];
     ctx->r[0] |= 0xE0u;
     sh4_write_sr(ctx, ctx->r[0]); /* LDC SR */
-    if (ctx->sr.T) return 0x0C02B61A; /* BT */
-    return 0x0C02B61A;
+    return 0x0C02B61A; /* sequential */
 }
 
 /* Block 0x0C02B61A, 54B, 27 ops */
@@ -13923,8 +13831,7 @@ u32 block_0c02b61a(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[3], 4); MEM_W32(ctx->r[3], tmp); }
     ctx->r[0] &= ctx->r[2];
     sh4_write_sr(ctx, ctx->r[0]); /* LDC SR */
-    if (ctx->sr.T) return 0x0C02B650; /* BT */
-    return 0x0C02B650;
+    return 0x0C02B650; /* sequential */
 }
 
 /* Block 0x0C02B650, 4B, 2 ops */
@@ -13946,8 +13853,7 @@ u32 block_0c0201c6(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = MEM_R32(0x0C020288); /* @(PC,0xB8) */
     ctx->pr = 0x0C0201D2; /* jsr @r3 */
     /* nop */
-    if (ctx->sr.T) return 0x0C038D90; /* BT */
-    return 0x0C0201D2;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C0201D2, 12B, 6 ops */
@@ -13960,8 +13866,7 @@ u32 block_0c0201d2(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = ctx->r[14];
     ctx->pr = 0x0C0201DE; /* jsr @r2 */
     ctx->r[5] = ctx->r[14];
-    if (ctx->sr.T) return 0x0C0288F0; /* BT */
-    return 0x0C0201DE;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C0288F0, 24B, 12 ops */
@@ -13980,7 +13885,7 @@ u32 block_0c0288f0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[13] += (s32)1;
     ctx->pr = 0x0C028908; /* bsr 0x0C028D60 */
     ctx->r[5] = ctx->r[13];
-    return 0x0C028D60;
+    return 0x0C028D60; /* bsr */
 }
 
 /* Block 0x0C028D60, 26B, 13 ops */
@@ -14073,7 +13978,7 @@ u32 block_0c028930(u8* _mem, Sh4Context* _ctx) {
     ctx->r[7] = ctx->r[14];
     /* bra — handled at block level */
     ctx->r[5] = (u32)(s32)-8;
-    return 0x0C028960;
+    return 0x0C028960; /* static branch */
 }
 
 /* Block 0x0C028960, 6B, 3 ops */
@@ -14113,7 +14018,7 @@ u32 block_0c028966(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = ctx->r[4];
     /* bra — handled at block level */
     ctx->r[5] = ctx->r[4];
-    return 0x0C028978;
+    return 0x0C028978; /* static branch */
 }
 
 /* Block 0x0C028978, 6B, 3 ops */
@@ -14164,8 +14069,7 @@ u32 block_0c0201de(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C02029C); /* @(PC,0xBC) */
     ctx->pr = 0x0C0201E4; /* jsr @r3 */
     /* nop */
-    if (ctx->sr.T) return 0x0C028990; /* BT */
-    return 0x0C0201E4;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C028990, 6B, 3 ops */
@@ -14175,7 +14079,7 @@ u32 block_0c028990(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->pr);
     ctx->pr = 0x0C028996; /* bsr 0x0C028E50 */
     /* nop */
-    return 0x0C028E50;
+    return 0x0C028E50; /* bsr */
 }
 
 /* Block 0x0C028E50, 26B, 13 ops */
@@ -14195,7 +14099,7 @@ u32 block_0c028e50(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = MEM_R32(ctx->r[3]);
     /* bra — handled at block level */
     ctx->r[12] = ctx->r[13];
-    return 0x0C028E84;
+    return 0x0C028E84; /* static branch */
 }
 
 /* Block 0x0C028E84, 6B, 3 ops */
@@ -14242,7 +14146,7 @@ u32 block_0c028e8a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(ctx->r[1]);
     /* bra — handled at block level */
     ctx->r[6] = ctx->r[13];
-    return 0x0C028EAA;
+    return 0x0C028EAA; /* static branch */
 }
 
 /* Block 0x0C028EAA, 6B, 3 ops */
@@ -14312,7 +14216,7 @@ u32 block_0c02899e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[7] = ctx->r[1];
     /* bra — handled at block level */
     ctx->r[5] = (u32)(s32)-8;
-    return 0x0C0289C0;
+    return 0x0C0289C0; /* static branch */
 }
 
 /* Block 0x0C0289C0, 6B, 3 ops */
@@ -14354,7 +14258,7 @@ u32 block_0c0289c6(u8* _mem, Sh4Context* _ctx) {
     ctx->r[1] = MEM_R32(0x0C028A90); /* @(PC,0xC4) */
     /* bra — handled at block level */
     ctx->r[5] = ctx->r[4];
-    return 0x0C0289D8;
+    return 0x0C0289D8; /* static branch */
 }
 
 /* Block 0x0C0289D8, 6B, 3 ops */
@@ -14400,8 +14304,7 @@ u32 block_0c0201e4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C0202A0); /* @(PC,0xB8) */
     ctx->pr = 0x0C0201EA; /* jsr @r2 */
     /* nop */
-    if (ctx->sr.T) return 0x0C0290C0; /* BT */
-    return 0x0C0201EA;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C0290C0, 98B, 49 ops */
@@ -14494,8 +14397,7 @@ u32 block_0c029122(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = (u32)(s32)(s16)MEM_R16(0x0C029184);
     ctx->pr = 0x0C02912E; /* jsr @r2 */
     ctx->r[5] = (u32)(s32)8;
-    if (ctx->sr.T) return 0x0C04C7AC; /* BT */
-    return 0x0C02912E;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C04D090, 4B, 2 ops */
@@ -14515,7 +14417,7 @@ u32 block_0c04d0e6(u8* _mem, Sh4Context* _ctx) {
     ctx->r[1] = MEM_R32(0x0C04D104); /* @(PC,0x1C) */
     /* bra — handled at block level */
     /* nop */
-    return 0x0C04D0F4;
+    return 0x0C04D0F4; /* static branch */
 }
 
 /* Block 0x0C04D0F4, 4B, 2 ops */
@@ -14524,7 +14426,7 @@ u32 block_0c04d0f4(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     MEM_W32(ctx->r[4] + 8, ctx->r[1]);
-    return 0x0C04D122;
+    return 0x0C04D122; /* static branch */
 }
 
 /* Block 0x0C04D158, 4B, 2 ops */
@@ -14684,7 +14586,7 @@ u32 block_0c04fa54(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     ctx->r[6] = (u32)(s32)2;
-    return 0x0C04FA60;
+    return 0x0C04FA60; /* static branch */
 }
 
 /* Block 0x0C04FA60, 6B, 3 ops */
@@ -14694,7 +14596,7 @@ u32 block_0c04fa60(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = ctx->r[4];
     /* bra — handled at block level */
     ctx->r[4] = ctx->r[13];
-    return 0x0C04FAA2;
+    return 0x0C04FAA2; /* static branch */
 }
 
 /* Block 0x0C04FABC, 14B, 7 ops */
@@ -14708,7 +14610,7 @@ u32 block_0c04fabc(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = (u32)(s32)(s16)MEM_R16(ctx->r[15] + 16);
     ctx->pr = 0x0C04FACA; /* bsr 0x0C04F4CE */
     ctx->r[4] = ctx->r[0];
-    return 0x0C04F4CE;
+    return 0x0C04F4CE; /* bsr */
 }
 
 /* Block 0x0C04F4CE, 40B, 20 ops */
@@ -14735,8 +14637,7 @@ u32 block_0c04f4ce(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C04F540); /* @(PC,0x4C) */
     ctx->pr = 0x0C04F4F6; /* jsr @r3 */
     ctx->r[0] = (u32)(s32)32;
-    if (ctx->sr.T) return 0x0C038C24; /* BT */
-    return 0x0C04F4F6;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04F4F6, 8B, 4 ops */
@@ -14825,7 +14726,7 @@ u32 block_0c04f53a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = ctx->r[4];
     /* bra — handled at block level */
     ctx->r[4] = ctx->r[7];
-    return 0x0C04F562;
+    return 0x0C04F562; /* static branch */
 }
 
 /* Block 0x0C04F562, 4B, 2 ops */
@@ -14889,7 +14790,7 @@ u32 block_0c04f702(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = 0x0C04F706; /* bsr 0x0C050000 */
     /* nop */
-    return 0x0C050000;
+    return 0x0C050000; /* bsr */
 }
 
 /* Block 0x0C04F706, 6B, 3 ops */
@@ -14909,7 +14810,7 @@ u32 block_0c04f70c(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = 0x0C04F710; /* bsr 0x0C050000 */
     /* nop */
-    return 0x0C050000;
+    return 0x0C050000; /* bsr */
 }
 
 /* Block 0x0C04F710, 6B, 3 ops */
@@ -14944,7 +14845,7 @@ u32 block_0c04f740(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[13] + 16, ctx->r[12]);
     ctx->pr = 0x0C04F762; /* bsr 0x0C0500B4 */
     ctx->r[4] = ctx->r[14];
-    return 0x0C0500B4;
+    return 0x0C0500B4; /* bsr */
 }
 
 /* Block 0x0C04F762, 28B, 14 ops */
@@ -14965,7 +14866,7 @@ u32 block_0c04f762(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = MEM_R32(ctx->r[15]);
     ctx->pr = 0x0C04F77E; /* bsr 0x0C050100 */
     ctx->r[4] += (s32)12;
-    return 0x0C050100;
+    return 0x0C050100; /* bsr */
 }
 
 /* Block 0x0C050100, 6B, 3 ops */
@@ -14987,7 +14888,7 @@ u32 block_0c050106(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[5] + 4, ctx->r[6]);
     /* bra — handled at block level */
     ctx->r[3] = (u32)(s32)0;
-    return 0x0C050116;
+    return 0x0C050116; /* static branch */
 }
 
 /* Block 0x0C050116, 6B, 3 ops */
@@ -15072,7 +14973,7 @@ u32 block_0c04faca(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     ctx->r[15] += (s32)8;
-    return 0x0C04FB70;
+    return 0x0C04FB70; /* static branch */
 }
 
 /* Block 0x0C04FB70, 20B, 10 ops */
@@ -15103,8 +15004,7 @@ u32 block_0c02912e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C029188); /* @(PC,0x50) */
     ctx->pr = 0x0C02913C; /* jsr @r2 */
     ctx->r[5] = MEM_R32(ctx->r[3]);
-    if (ctx->sr.T) return 0x0C04C9FA; /* BT */
-    return 0x0C02913C;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C0559B0, 4B, 2 ops */
@@ -15124,7 +15024,7 @@ u32 block_0c0559b4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = ctx->r[11];
     ctx->pr = 0x0C0559BA; /* bsr 0x0C0558EE */
     ctx->r[4] = ctx->r[14];
-    return 0x0C0558EE;
+    return 0x0C0558EE; /* bsr */
 }
 
 /* Block 0x0C0558EE, 20B, 10 ops */
@@ -15214,8 +15114,7 @@ u32 block_0c0559c2(u8* _mem, Sh4Context* _ctx) {
     ctx->r[7] = (u32)(s32)24;
     ctx->pr = 0x0C0559D8; /* jsr @r3 */
     ctx->r[4] = ctx->r[8];
-    if (ctx->sr.T) return 0x0C052E70; /* BT */
-    return 0x0C0559D8;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C052E70, 34B, 17 ops */
@@ -15239,8 +15138,7 @@ u32 block_0c052e70(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] &= ctx->r[3];
     ctx->r[0] |= 0xE0u;
     sh4_write_sr(ctx, ctx->r[0]); /* LDC SR */
-    if (ctx->sr.T) return 0x0C052E92; /* BT */
-    return 0x0C052E92;
+    return 0x0C052E92; /* sequential */
 }
 
 /* Block 0x0C052E92, 4B, 2 ops */
@@ -15471,8 +15369,7 @@ u32 block_0c05302c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] <<= 2;
     ctx->r[0] |= ctx->r[3];
     sh4_write_sr(ctx, ctx->r[0]); /* LDC SR */
-    if (ctx->sr.T) return 0x0C053076; /* BT */
-    return 0x0C053076;
+    return 0x0C053076; /* sequential */
 }
 
 /* Block 0x0C055560, 12B, 6 ops */
@@ -15501,8 +15398,7 @@ u32 block_0c055640(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C05573C); /* @(PC,0xF0) */
     ctx->pr = 0x0C055650; /* jsr @r2 */
     MEM_W32(ctx->r[11], ctx->r[5]);
-    if (ctx->sr.T) return 0x0C0530E0; /* BT */
-    return 0x0C055650;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C0530E0, 90B, 45 ops */
@@ -15644,7 +15540,7 @@ u32 block_0c0559de(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(ctx->r[3]);
     /* bra — handled at block level */
     MEM_W32(ctx->r[1], ctx->r[2]);
-    return 0x0C0559EE;
+    return 0x0C0559EE; /* static branch */
 }
 
 /* Block 0x0C0559EE, 8B, 4 ops */
@@ -15679,8 +15575,7 @@ u32 block_0c055a0c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[1] = MEM_R32(0x0C055A2C); /* @(PC,0x1C) */
     ctx->pr = 0x0C055A14; /* jsr @r3 */
     ctx->r[4] = MEM_R32(ctx->r[1]);
-    if (ctx->sr.T) return 0x0C053274; /* BT */
-    return 0x0C055A4C;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C053274, 10B, 5 ops */
@@ -15692,7 +15587,7 @@ u32 block_0c053274(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[15], ctx->r[4]);
     ctx->pr = 0x0C05327E; /* bsr 0x0C053218 */
     ctx->r[4] = MEM_R32(ctx->r[15]);
-    return 0x0C053218;
+    return 0x0C053218; /* bsr */
 }
 
 /* Block 0x0C053218, 44B, 22 ops */
@@ -15832,7 +15727,7 @@ u32 block_0c055a14(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     /* nop */
-    return 0x0C055A4C;
+    return 0x0C055A4C; /* static branch */
 }
 
 /* Block 0x0C02913C, 4B, 2 ops */
@@ -15841,7 +15736,7 @@ u32 block_0c02913c(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = 0x0C029140; /* bsr 0x0C029260 */
     /* nop */
-    return 0x0C029260;
+    return 0x0C029260; /* bsr */
 }
 
 /* Block 0x0C029260, 20B, 10 ops */
@@ -15858,7 +15753,7 @@ u32 block_0c029260(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[14] + 4, ctx->r[2]);
     ctx->pr = 0x0C029274; /* bsr 0x0C029210 */
     MEM_W32(ctx->r[14] + 8, ctx->r[3]);
-    return 0x0C029210;
+    return 0x0C029210; /* bsr */
 }
 
 /* Block 0x0C029210, 66B, 33 ops */
@@ -15939,8 +15834,7 @@ u32 block_0c0201ea(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C0202A4); /* @(PC,0xB8) */
     ctx->pr = 0x0C0201F0; /* jsr @r3 */
     /* nop */
-    if (ctx->sr.T) return 0x0C029400; /* BT */
-    return 0x0C0201F0;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C029400, 10B, 5 ops */
@@ -15962,8 +15856,7 @@ u32 block_0c0201f0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C0202A8); /* @(PC,0xB4) */
     ctx->pr = 0x0C0201F6; /* jsr @r2 */
     /* nop */
-    if (ctx->sr.T) return 0x0C02D6A0; /* BT */
-    return 0x0C0201F6;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C02D6A0, 92B, 46 ops */
@@ -16026,7 +15919,7 @@ u32 block_0c02d6fc(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     { u32 tmp; memcpy(&tmp, &ctx->fr[4], 4); MEM_W32(ctx->r[0] + ctx->r[1], tmp); }
-    return 0x0C02D710;
+    return 0x0C02D710; /* static branch */
 }
 
 /* Block 0x0C02D710, 6B, 3 ops */
@@ -16160,8 +16053,7 @@ u32 block_0c0201f6(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[6] = ctx->fr[15];
     ctx->pr = 0x0C020200; /* jsr @r3 */
     ctx->fr[4] = ctx->fr[15];
-    if (ctx->sr.T) return 0x0C02D930; /* BT */
-    return 0x0C020200;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C02D930, 24B, 12 ops */
@@ -16180,8 +16072,7 @@ u32 block_0c02d930(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[6], 4); MEM_W32(ctx->r[0] + ctx->r[4], tmp); }
     ctx->pr = 0x0C02D948; /* jsr @r3 */
     ctx->r[0] = (u32)(s32)12;
-    if (ctx->sr.T) return 0x0C038CF8; /* BT */
-    return 0x0C02D948;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C02D948, 6B, 3 ops */
@@ -16201,8 +16092,7 @@ u32 block_0c020200(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C0202B0); /* @(PC,0xAC) */
     ctx->pr = 0x0C020206; /* jsr @r2 */
     ctx->fr[4] = ctx->fr[14];
-    if (ctx->sr.T) return 0x0C02D830; /* BT */
-    return 0x0C020206;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C02D830, 10B, 5 ops */
@@ -16226,8 +16116,7 @@ u32 block_0c020206(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = (u32)(s32)(s16)MEM_R16(0x0C020230);
     ctx->pr = 0x0C020210; /* jsr @r3 */
     ctx->r[5] = ctx->r[14];
-    if (ctx->sr.T) return 0x0C02DF00; /* BT */
-    return 0x0C020210;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C02DF00, 34B, 17 ops */
@@ -16251,7 +16140,7 @@ u32 block_0c02df00(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = 0x0C02E11C; /* mova */
     ctx->pr = 0x0C02DF22; /* bsr 0x0C02E620 */
     { u32 tmp = MEM_R32(ctx->r[0]); memcpy(&ctx->fr[4], &tmp, 4); }
-    return 0x0C02E620;
+    return 0x0C02E620; /* bsr */
 }
 
 /* Block 0x0C02E620, 24B, 12 ops */
@@ -16343,7 +16232,7 @@ u32 block_0c02df74(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     ctx->r[4] = ctx->r[5];
-    return 0x0C02DF8A;
+    return 0x0C02DF8A; /* static branch */
 }
 
 /* Block 0x0C02DF8A, 10B, 5 ops */
@@ -16409,8 +16298,7 @@ u32 block_0c020210(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = 0x0C0202C0; /* mova */
     ctx->pr = 0x0C02021C; /* jsr @r3 */
     { u32 tmp = MEM_R32(ctx->r[0]); memcpy(&ctx->fr[4], &tmp, 4); }
-    if (ctx->sr.T) return 0x0C02E620; /* BT */
-    return 0x0C02021C;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C02021C, 10B, 5 ops */
@@ -16422,7 +16310,7 @@ u32 block_0c02021c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = MEM_R32(0x0C0202C8); /* @(PC,0xA4) */
     /* bra — handled at block level */
     /* nop */
-    return 0x0C0202D4;
+    return 0x0C0202D4; /* static branch */
 }
 
 /* Block 0x0C0202D4, 6B, 3 ops */
@@ -16432,8 +16320,7 @@ u32 block_0c0202d4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C0203C4); /* @(PC,0xEC) */
     ctx->pr = 0x0C0202DA; /* jsr @r2 */
     /* nop */
-    if (ctx->sr.T) return 0x0C038D90; /* BT */
-    return 0x0C0202DA;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C0202DA, 10B, 5 ops */
@@ -16445,8 +16332,7 @@ u32 block_0c0202da(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = (u32)(s32)(s16)MEM_R16(0x0C0203C0);
     ctx->pr = 0x0C0202E4; /* jsr @r3 */
     /* nop */
-    if (ctx->sr.T) return 0x0C02F204; /* BT */
-    return 0x0C0202E4;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C02F204, 26B, 13 ops */
@@ -16502,7 +16388,7 @@ u32 block_0c02f23c(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[3], ctx->r[2]);
     /* bra — handled at block level */
     /* nop */
-    return 0x0C02F24C;
+    return 0x0C02F24C; /* static branch */
 }
 
 /* Block 0x0C02F24C, 36B, 18 ops */
@@ -16527,7 +16413,7 @@ u32 block_0c02f24c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = (u32)(s32)0;
     /* bra — handled at block level */
     /* nop */
-    return 0x0C02F27A;
+    return 0x0C02F27A; /* static branch */
 }
 
 /* Block 0x0C02F27A, 8B, 4 ops */
@@ -16570,7 +16456,7 @@ u32 block_0c02f282(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = (u32)(s32)0;
     /* bra — handled at block level */
     /* nop */
-    return 0x0C02F2CA;
+    return 0x0C02F2CA; /* static branch */
 }
 
 /* Block 0x0C02F2CA, 6B, 3 ops */
@@ -16622,7 +16508,7 @@ u32 block_0c02f2d0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = (u32)(s32)0;
     /* bra — handled at block level */
     /* nop */
-    return 0x0C02F31C;
+    return 0x0C02F31C; /* static branch */
 }
 
 /* Block 0x0C02F31C, 6B, 3 ops */
@@ -16684,7 +16570,7 @@ u32 block_0c02f322(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = (u32)(s32)0;
     /* bra — handled at block level */
     /* nop */
-    return 0x0C02F368;
+    return 0x0C02F368; /* static branch */
 }
 
 /* Block 0x0C02F368, 6B, 3 ops */
@@ -16772,7 +16658,7 @@ u32 block_0c02f36e(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[1], ctx->r[0]);
     /* bra — handled at block level */
     /* nop */
-    return 0x0C02F3A4;
+    return 0x0C02F3A4; /* static branch */
 }
 
 /* Block 0x0C02F3A4, 8B, 4 ops */
@@ -16794,7 +16680,7 @@ u32 block_0c02f3ac(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = (u32)(s32)0;
     /* bra — handled at block level */
     /* nop */
-    return 0x0C02F3EC;
+    return 0x0C02F3EC; /* static branch */
 }
 
 /* Block 0x0C02F3EC, 14B, 7 ops */
@@ -16817,7 +16703,7 @@ u32 block_0c0202e4(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = 0x0C0202E8; /* bsr 0x0C0200D8 */
     /* nop */
-    return 0x0C0200D8;
+    return 0x0C0200D8; /* bsr */
 }
 
 /* Block 0x0C0200D8, 8B, 4 ops */
@@ -16839,8 +16725,7 @@ u32 block_0c0202e8(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(0x0C0203D0); /* @(PC,0xE4) */
     ctx->pr = 0x0C0202F0; /* jsr @r3 */
     /* nop */
-    if (ctx->sr.T) return 0x0C02B0C0; /* BT */
-    return 0x0C0202F0;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C02B0C0, 6B, 3 ops */
@@ -16850,8 +16735,7 @@ u32 block_0c02b0c0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C02B174); /* @(PC,0xB0) */
     /* jmp — handled at block level */
     ctx->r[5] = (u32)(s32)0;
-    if (ctx->sr.T) return 0x0C04B4DE; /* BT */
-    return 0x0C02B0C6;
+    return 0x0C04B4DE; /* static branch */
 }
 
 /* Block 0x0C04B4DE, 20B, 10 ops */
@@ -16868,7 +16752,7 @@ u32 block_0c04b4de(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C04B564); /* @(PC,0x74) */
     ctx->pr = 0x0C04B4F2; /* bsr 0x0C04B462 */
     ctx->r[4] = MEM_R32(ctx->r[3]);
-    return 0x0C04B462;
+    return 0x0C04B462; /* bsr */
 }
 
 /* Block 0x0C04B4F2, 8B, 4 ops */
@@ -16890,8 +16774,7 @@ u32 block_0c0202f0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(0x0C0203D8); /* @(PC,0xE4) */
     ctx->pr = 0x0C0202F8; /* jsr @r2 */
     ctx->r[5] = (u32)(s32)0;
-    if (ctx->sr.T) return 0x0C02B960; /* BT */
-    return 0x0C0202F8;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C02B960, 20B, 10 ops */
@@ -16908,8 +16791,7 @@ u32 block_0c02b960(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C02B9AC); /* @(PC,0x3C) */
     ctx->pr = 0x0C02B974; /* jsr @r3 */
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[2]);
-    if (ctx->sr.T) return 0x0C04C096; /* BT */
-    return 0x0C02B974;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04C096, 10B, 5 ops */
@@ -16921,8 +16803,7 @@ u32 block_0c04c096(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = (u32)(s32)(s16)MEM_R16(0x0C04C0C2);
     ctx->pr = 0x0C04C0A0; /* jsr @r3 */
     ctx->r[5] = MEM_R32(ctx->r[15] + 4);
-    if (ctx->sr.T) return 0x0C0558E4; /* BT */
-    return 0x0C04C0A0;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04C0A0, 8B, 4 ops */
@@ -16933,8 +16814,7 @@ u32 block_0c04c0a0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = (u32)(s32)(s16)MEM_R16(0x0C04C0C4);
     ctx->pr = 0x0C04C0A8; /* jsr @r3 */
     ctx->r[5] = MEM_R32(ctx->r[15] + 8);
-    if (ctx->sr.T) return 0x0C0558E4; /* BT */
-    return 0x0C04C0A8;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04C0A8, 6B, 3 ops */
@@ -16967,8 +16847,7 @@ u32 block_0c0202f8(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = ctx->r[6];
     ctx->pr = 0x0C020302; /* jsr @r3 */
     ctx->r[4] = ctx->r[6];
-    if (ctx->sr.T) return 0x0C02AB80; /* BT */
-    return 0x0C020302;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C02AB80, 8B, 4 ops */
@@ -16979,8 +16858,7 @@ u32 block_0c02ab80(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = 0x0C02AC08; /* mova */
     /* jmp — handled at block level */
     { u32 tmp = MEM_R32(ctx->r[0]); memcpy(&ctx->fr[4], &tmp, 4); }
-    if (ctx->sr.T) return 0x0C02BAF0; /* BT */
-    return 0x0C02AB88;
+    return 0x0C02BAF0; /* static branch */
 }
 
 /* Block 0x0C02BAF0, 66B, 33 ops */
@@ -17064,8 +16942,7 @@ u32 block_0c02bb40(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C02BBE8); /* @(PC,0x64) */
     ctx->pr = 0x0C02BB88; /* jsr @r3 */
     ctx->r[4] = ctx->r[12];
-    if (ctx->sr.T) return 0x0C04C360; /* BT */
-    return 0x0C02BB88;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04C360, 18B, 9 ops */
@@ -17204,7 +17081,7 @@ u32 block_0c055d00(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[2], ctx->r[5]);
     ctx->pr = 0x0C055DE8; /* bsr 0x0C055B8A */
     ctx->r[4] = ctx->r[13];
-    return 0x0C055B8A;
+    return 0x0C055B8A; /* bsr */
 }
 
 /* Block 0x0C055B8A, 8B, 4 ops */
@@ -17236,7 +17113,7 @@ u32 block_0c055de8(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = ctx->r[0];
     ctx->pr = 0x0C055DF0; /* bsr 0x0C055B60 */
     ctx->r[6] = ctx->r[5];
-    return 0x0C055B60;
+    return 0x0C055B60; /* bsr */
 }
 
 /* Block 0x0C055B60, 16B, 8 ops */
@@ -17340,7 +17217,7 @@ u32 block_0c0207be(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = MEM_R32(ctx->r[1]);
     ctx->pr = 0x0C0207C6; /* bsr 0x0C02039C */
     ctx->r[4] = MEM_R32(ctx->r[10]);
-    return 0x0C02039C;
+    return 0x0C02039C; /* bsr */
 }
 
 /* Block 0x0C02039C, 14B, 7 ops */
@@ -17354,8 +17231,7 @@ u32 block_0c02039c(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[15] + 4, ctx->r[5]);
     ctx->pr = 0x0C0203AA; /* jsr @r3 */
     ctx->r[4] = ctx->r[5];
-    if (ctx->sr.T) return 0x0C029150; /* BT */
-    return 0x0C0203AA;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C029150, 6B, 3 ops */
@@ -17385,7 +17261,7 @@ u32 block_0c0203b0(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bra — handled at block level */
     ctx->r[5] = (u32)(s32)16;
-    return 0x0C0203B6;
+    return 0x0C0203B6; /* static branch */
 }
 
 /* Block 0x0C0203B6, 10B, 5 ops */
@@ -17397,8 +17273,7 @@ u32 block_0c0203b6(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C0203F8); /* @(PC,0x3C) */
     /* jmp — handled at block level */
     ctx->pr = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
-    if (ctx->sr.T) return 0x0C029420; /* BT */
-    return 0x0C0203C0;
+    return 0x0C029420; /* static branch */
 }
 
 /* Block 0x0C029420, 10B, 5 ops */
@@ -17419,7 +17294,7 @@ u32 block_0c0207c6(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = 0x0C0207CA; /* bsr 0x0C02059E */
     /* nop */
-    return 0x0C02059E;
+    return 0x0C02059E; /* bsr */
 }
 
 /* Block 0x0C02059E, 14B, 7 ops */
@@ -17523,8 +17398,7 @@ u32 block_0c0207e4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[11] = MEM_R32(0x0C020818); /* @(PC,0x30) */
     ctx->pr = 0x0C0207EC; /* jsr @r3 */
     ctx->r[4] = (u32)(s32)0;
-    if (ctx->sr.T) return 0x0C033EF0; /* BT */
-    return 0x0C0207EC;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C0207EC, 10B, 5 ops */
@@ -17547,8 +17421,7 @@ u32 block_0c02089c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C020938); /* @(PC,0x98) */
     ctx->pr = 0x0C0208A2; /* jsr @r2 */
     /* nop */
-    if (ctx->sr.T) return 0x0C0360E0; /* BT */
-    return 0x0C0208A2;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C0360E0, 92B, 46 ops */
@@ -17782,7 +17655,7 @@ u32 block_0c03617a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[12] = ctx->macl;
     /* bra — handled at block level */
     ctx->r[12] += ctx->r[11];
-    return 0x0C0361D4;
+    return 0x0C0361D4; /* static branch */
 }
 
 /* Block 0x0C0361D4, 6B, 3 ops */
@@ -17874,7 +17747,7 @@ u32 block_0c03618a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[12] = ctx->macl;
     /* bra — handled at block level */
     ctx->r[12] += ctx->r[11];
-    return 0x0C0361D4;
+    return 0x0C0361D4; /* static branch */
 }
 
 /* Block 0x0C03620C, 14B, 7 ops */
@@ -17899,7 +17772,7 @@ u32 block_0c03621a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[7] = ctx->r[5];
     /* bra — handled at block level */
     ctx->r[13] = ctx->r[4];
-    return 0x0C036224;
+    return 0x0C036224; /* static branch */
 }
 
 /* Block 0x0C036224, 6B, 3 ops */
@@ -17946,7 +17819,7 @@ u32 block_0c036230(u8* _mem, Sh4Context* _ctx) {
     ctx->r[11] = (u32)(s32)3;
     ctx->pr = 0x0C03623A; /* bsr 0x0C035BB4 */
     /* nop */
-    return 0x0C035BB4;
+    return 0x0C035BB4; /* bsr */
 }
 
 #endif /* SH4RECOMP_BLOCKS */

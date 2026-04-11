@@ -37,8 +37,7 @@ u32 block_0c1149ae(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1149C2, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C1149C4, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C1149C6, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C048D10; /* BT */
-    return 0x0C1149C8;
+    return 0x0C048D10; /* call target */
 }
 
 /* Block 0x0C1149C8, 6B, 3 ops */
@@ -48,8 +47,7 @@ u32 block_0c1149c8(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1149C8, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C1149CA, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C1149CC, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C04445A; /* BT */
-    return 0x0C1149CE;
+    return 0x0C04445A; /* call target */
 }
 
 /* Block 0x0C1149CE, 8B, 4 ops */
@@ -60,8 +58,7 @@ u32 block_0c1149ce(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1149D0, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C1149D2, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C1149D4, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C02A4FA; /* BT */
-    return 0x0C1149D6;
+    return 0x0C02A4FA; /* call target */
 }
 
 /* Block 0x0C1149D6, 12B, 6 ops */
@@ -74,8 +71,7 @@ u32 block_0c1149d6(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1149DC, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C1149DE, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C1149E0, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C114A0A; /* BT */
-    return 0x0C1149E2;
+    return 0x0C1149E2; /* sequential */
 }
 
 /* Block 0x0C1149E2, 10B, 5 ops */
@@ -87,8 +83,7 @@ u32 block_0c1149e2(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1149E6, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C1149E8, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C1149EA, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C04342A; /* BT */
-    return 0x0C1149EC;
+    return 0x0C04342A; /* call target */
 }
 
 /* Block 0x0C1149EC, 16B, 8 ops */
@@ -103,8 +98,7 @@ u32 block_0c1149ec(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1149F6, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C1149F8, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C1149FA, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C114A02; /* BT */
-    return 0x0C1149FC;
+    return 0x0C1149FC; /* sequential */
 }
 
 /* Block 0x0C114A02, 8B, 4 ops */
@@ -115,7 +109,7 @@ u32 block_0c114a02(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    return 0x0C114A4E;
+    return 0x0C114A4E; /* static branch */
 }
 
 /* Block 0x0C114A4E, 52B, 26 ops */
@@ -148,8 +142,7 @@ u32 block_0c114a4e(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C02A224; /* BT */
-    return 0x0C114A82;
+    return 0x0C02A224; /* call target */
 }
 
 /* Block 0x0C114A82, 124B, 62 ops */
@@ -218,8 +211,7 @@ u32 block_0c114a82(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     sh4_interp_op(mem, ctx, 0x0C114AFC, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C114B0E; /* BT */
-    return 0x0C114AFE;
+    return 0x0C114AFE; /* sequential */
 }
 
 /* Block 0x0C114AFE, 52B, 26 ops */
@@ -252,8 +244,7 @@ u32 block_0c114afe(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     MEM_W8(ctx->r[7] + 11, ctx->r[0]);
     MEM_W8(ctx->r[7] + 11, ctx->r[0]);
-    if (ctx->sr.T) return 0x0C02A186; /* BT */
-    return 0x0C114B32;
+    return 0x0C02A186; /* call target */
 }
 
 /* Block 0x0C114B32, 8B, 4 ops */
@@ -264,8 +255,7 @@ u32 block_0c114b32(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C114B34, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114B36, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114B38, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C114B66; /* BT */
-    return 0x0C114B3A;
+    return 0x0C114B3A; /* sequential */
 }
 
 /* Block 0x0C114B66, 8B, 4 ops */
@@ -291,8 +281,7 @@ u32 block_0c114b22(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     MEM_W8(ctx->r[7] + 11, ctx->r[0]);
     MEM_W8(ctx->r[7] + 11, ctx->r[0]);
-    if (ctx->sr.T) return 0x0C02A186; /* BT */
-    return 0x0C114B32;
+    return 0x0C02A186; /* call target */
 }
 
 /* Block 0x0C044C6E, 6B, 3 ops */
@@ -302,7 +291,7 @@ u32 block_0c044c6e(u8* _mem, Sh4Context* _ctx) {
     ctx->pr = 0x0C044C72; /* jsr @r9 */
     ctx->fpscr = ctx->r[2];
     ctx->sr.T = (s32)ctx->r[0] >= 0 ? 1 : 0;
-    return 0x0C044C78;
+    return 0x0C044C78; /* static branch */
 }
 
 /* Block 0x0C044C78, 16B, 8 ops */
@@ -327,7 +316,7 @@ u32 block_0c044c88(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
     ctx->r[8] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
-    return 0x0C044C8E;
+    return 0x0C044C8E; /* static branch */
 }
 
 /* Block 0x0C044C8E, 18B, 9 ops */
@@ -343,8 +332,7 @@ u32 block_0c044c8e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C044C9A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C044C9C, 0xFFFFu); /* UNIMPL 0xFFFF */
     { u32 tmp; memcpy(&tmp, &ctx->fr[14], 4); MEM_W32(ctx->r[0] + ctx->r[15], tmp); }
-    if (ctx->sr.T) return 0x0C044CAC; /* BT */
-    return 0x0C044CA0;
+    return 0x0C044CA0; /* sequential */
 }
 
 /* Block 0x0C044CA0, 6B, 3 ops */
@@ -357,7 +345,7 @@ u32 block_0c044ca0(u8* _mem, Sh4Context* _ctx) {
       else ctx->r[13] = (u32)((s32)ctx->r[13] >> ((-shift) & 31)); }
     MEM_W8(ctx->r[12] + ctx->r[0], ctx->r[0]);
     ctx->r[1] = MEM_R32(ctx->r[1] + 0);
-    return 0x0C044CBC;
+    return 0x0C044CBC; /* call target */
 }
 
 /* Block 0x0C044CA6, 6B, 3 ops */
@@ -367,8 +355,7 @@ u32 block_0c044ca6(u8* _mem, Sh4Context* _ctx) {
     MEM_W8(ctx->r[12] + ctx->r[0], ctx->r[0]);
     sh4_interp_op(mem, ctx, 0x0C044CA8, 0x8AC8u); /* UNIMPL 0x8AC8 */
     ctx->pr = 0x0C044CAE; /* bsrf r12 */
-    if (ctx->sr.T) return 0x0C044CB4; /* BT */
-    return 0x0C044CAC;
+    return 0x0C044CAC; /* sequential */
 }
 
 /* Block 0x0C044CB4, 8B, 4 ops */
@@ -390,8 +377,7 @@ u32 block_0c1d4fd4(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D4FD6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D4FD8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D4FDA, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D4FE2; /* BT */
-    return 0x0C1D4FDC;
+    return 0x0C1D4FDC; /* sequential */
 }
 
 /* Block 0x0C1D4FE2, 90B, 45 ops */
@@ -443,8 +429,7 @@ u32 block_0c1d4fe2(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D5036, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D5038, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D503A, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D5042; /* BT */
-    return 0x0C1D503C;
+    return 0x0C1D503C; /* sequential */
 }
 
 /* Block 0x0C1D5042, 20B, 10 ops */
@@ -500,8 +485,7 @@ u32 block_0c10125c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C101260, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C101262, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C101264, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C16F6D0; /* BT */
-    return 0x0C101266;
+    return 0x0C16F6D0; /* call target */
 }
 
 /* Block 0x0C16F6D0, 34B, 17 ops */
@@ -528,8 +512,7 @@ u32 block_0c16f6d0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] -= 2; MEM_W16(ctx->r[6], ctx->r[3]);
     ctx->fr[14] += ctx->fr[1];
     ctx->r[11] = (u32)(s32)-17;
-    if (ctx->sr.T) return 0x0C03763A; /* BT */
-    return 0x0C16F6F2;
+    return 0x0C03763A; /* call target */
 }
 
 /* Block 0x0C16F6F2, 6B, 3 ops */
@@ -539,8 +522,7 @@ u32 block_0c16f6f2(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[4] += ctx->fr[15];
     { u32 tmp = MEM_R32(ctx->r[0] + ctx->r[15]); memcpy(&ctx->fr[11], &tmp, 4); }
     sh4_interp_op(mem, ctx, 0x0C16F6F6, 0x0D09u); /* UNIMPL 0x0D09 */
-    if (ctx->sr.T) return 0x0C16F726; /* BT */
-    return 0x0C16F6F8;
+    return 0x0C16F6F8; /* sequential */
 }
 
 /* Block 0x0C16F6F8, 46B, 23 ops */
@@ -572,8 +554,7 @@ u32 block_0c16f6f8(u8* _mem, Sh4Context* _ctx) {
     ctx->r[7] -= 4; MEM_W32(ctx->r[7], ctx->r[2]);
     MEM_W32(ctx->r[4] + 20, ctx->r[2]);
     ctx->sr.T = ctx->fr[10] > ctx->fr[0] ? 1 : 0;
-    if (ctx->sr.T) return 0x0C16F6EA; /* BT */
-    return 0x0C16F726;
+    return 0x0C16F726; /* sequential */
 }
 
 /* Block 0x0C16F6EA, 8B, 4 ops */
@@ -638,8 +619,7 @@ u32 block_0c16f73a(u8* _mem, Sh4Context* _ctx) {
     ctx->macl = (u32)((u16)ctx->r[1] * (u16)ctx->r[1]);
     MEM_W32(ctx->r[14] + 8, ctx->r[2]);
     MEM_W32(ctx->r[9] + 48, ctx->r[1]);
-    if (ctx->sr.T) return 0x0C16F768; /* BT */
-    return 0x0C16F74C;
+    return 0x0C16F74C; /* sequential */
 }
 
 /* Block 0x0C16F768, 20B, 10 ops */
@@ -656,8 +636,7 @@ u32 block_0c16f768(u8* _mem, Sh4Context* _ctx) {
     ctx->pr = 0x0C16F77A; /* bsrf r12 */
     MEM_W32(ctx->r[3] + 8, ctx->r[1]);
     MEM_W32(ctx->r[8] + 12, ctx->r[1]);
-    if (ctx->sr.T) return 0x0C1FB998; /* BT */
-    return 0x0C16F77C;
+    return 0x0C16F776 + 4 + ctx->r[12]; /* bsrf */
 }
 
 /* Block 0x0C16F77C, 58B, 29 ops */
@@ -693,8 +672,7 @@ u32 block_0c16f77c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[8] = (u32)(s32)-28;
     ctx->r[5] = (u32)(s32)-22;
     ctx->r[14] = (u32)(s32)-25;
-    if (ctx->sr.T) return 0x0C1FB900; /* BT */
-    return 0x0C16F7B6;
+    return 0x0C1FB900; /* call target */
 }
 
 /* Block 0x0C16F7B6, 74B, 37 ops */
@@ -740,8 +718,7 @@ u32 block_0c16f7b6(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = (u32)(s32)(s16)MEM_R16(ctx->r[0] + ctx->r[0]);
     MEM_W32(ctx->r[7] + 8, ctx->r[1]);
     MEM_W32(ctx->r[11] + 52, ctx->r[1]);
-    if (ctx->sr.T) return 0x0C16F830; /* BT */
-    return 0x0C16F800;
+    return 0x0C16F800; /* sequential */
 }
 
 /* Block 0x0C16F830, 94B, 47 ops */
@@ -795,8 +772,7 @@ u32 block_0c16f830(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = (u32)(s32)-14;
     ctx->r[2] = (u32)(s32)-24;
     ctx->r[2] = (u32)(s32)-30;
-    if (ctx->sr.T) return 0x0C16F890; /* BT */
-    return 0x0C16F88E;
+    return 0x0C16F88E; /* sequential */
 }
 
 /* Block 0x0C16F88E, 16B, 8 ops */
@@ -811,8 +787,7 @@ u32 block_0c16f88e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = (u32)(s32)-18;
     ctx->r[7] = (u32)(s32)-21;
     ctx->r[12] = (u32)(s32)-23;
-    if (ctx->sr.T) return 0x0C1B60EC; /* BT */
-    return 0x0C16F89E;
+    return 0x0C1B60EC; /* call target */
 }
 
 /* Block 0x0C16F89E, 10B, 5 ops */
@@ -824,8 +799,7 @@ u32 block_0c16f89e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[1] = (u32)(s32)-23;
     ctx->r[4] = (u32)(s32)-31;
     { u32 tmp; memcpy(&tmp, &ctx->fr[14], 4); MEM_W32(ctx->r[0] + ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C02A224; /* BT */
-    return 0x0C16F8A8;
+    return 0x0C02A224; /* call target */
 }
 
 /* Block 0x0C16F8A8, 22B, 11 ops */
@@ -857,7 +831,7 @@ u32 block_0c16f904(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C16F90C, 0x080Bu); /* UNIMPL 0x080B */
     sh4_interp_op(mem, ctx, 0x0C16F90E, 0x0508u); /* UNIMPL 0x0508 */
     ctx->fr[11] += ctx->fr[0];
-    return 0x0C16FC6A;
+    return 0x0C16FC6A; /* call target */
 }
 
 /* Block 0x0C16FC6A, 6B, 3 ops */
@@ -867,8 +841,7 @@ u32 block_0c16fc6a(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[10] -= ctx->fr[15];
     { u32 tmp; memcpy(&tmp, &ctx->fr[15], 4); MEM_W32(ctx->r[8], tmp); }
     { u32 tmp = MEM_R32(ctx->r[15]); memcpy(&ctx->fr[14], &tmp, 4); ctx->r[15] += 4; }
-    if (ctx->sr.T) return 0x0C16FC94; /* BT */
-    return 0x0C16FC70;
+    return 0x0C16FC70; /* sequential */
 }
 
 /* Block 0x0C16FC70, 8B, 4 ops */
@@ -879,8 +852,7 @@ u32 block_0c16fc70(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] = (u32)(s32)-12;
     ctx->fr[4] -= ctx->fr[15];
     { u32 tmp = MEM_R32(ctx->r[0] + ctx->r[15]); memcpy(&ctx->fr[13], &tmp, 4); }
-    if (ctx->sr.T) return 0x0C16FC94; /* BT */
-    return 0x0C16FC78;
+    return 0x0C16FC78; /* sequential */
 }
 
 /* Block 0x0C16FC78, 8B, 4 ops */
@@ -891,8 +863,7 @@ u32 block_0c16fc78(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[9] + 28, ctx->r[1]);
     ctx->macl = (u32)((u16)ctx->r[6] * (u16)ctx->r[1]);
     ctx->r[11] |= ctx->r[2];
-    if (ctx->sr.T) return 0x0C16FC94; /* BT */
-    return 0x0C16FC80;
+    return 0x0C16FC80; /* sequential */
 }
 
 /* Block 0x0C16FC80, 8B, 4 ops */
@@ -903,8 +874,7 @@ u32 block_0c16fc80(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[11] + 0, ctx->r[2]);
     MEM_W32(ctx->r[5] + 28, ctx->r[1]);
     MEM_W32(ctx->r[0] + 12, ctx->r[1]);
-    if (ctx->sr.T) return 0x0C16FC94; /* BT */
-    return 0x0C16FC88;
+    return 0x0C16FC88; /* sequential */
 }
 
 /* Block 0x0C16FC88, 12B, 6 ops */
@@ -917,8 +887,7 @@ u32 block_0c16fc88(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C16FC8E, 0xF7FFu); /* UNIMPL 0xF7FF */
     ctx->r[11] = (u32)(s32)-17;
     ctx->r[14] = MEM_R32(0x0C17002C); /* @(PC,0x398) */
-    if (ctx->sr.T) return 0x0C16FC98; /* BT */
-    return 0x0C16FC94;
+    return 0x0C16FC94; /* sequential */
 }
 
 /* Block 0x0C16FC98, 6B, 3 ops */
@@ -938,8 +907,7 @@ u32 block_0c16f912(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] = (u32)(s32)-9;
     ctx->r[4] = (u32)(s32)-28;
     ctx->r[7] = MEM_R32(0x0C16FC98); /* @(PC,0x380) */
-    if (ctx->sr.T) return 0x0C16F950; /* BT */
-    return 0x0C16F918;
+    return 0x0C16F918; /* sequential */
 }
 
 /* Block 0x0C16F950, 6B, 3 ops */
@@ -949,8 +917,7 @@ u32 block_0c16f950(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C16F950, 0x0901u); /* UNIMPL 0x0901 */
     MEM_W32(ctx->r[15] + 16, ctx->r[1]);
     ctx->sr.T = (ctx->r[14] & ctx->r[2]) == 0 ? 1 : 0;
-    if (ctx->sr.T) return 0x0C02A186; /* BT */
-    return 0x0C16F956;
+    return 0x0C02A186; /* call target */
 }
 
 /* Block 0x0C16F956, 6B, 3 ops */
@@ -960,8 +927,7 @@ u32 block_0c16f956(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C16F956, 0x3A35u); /* UNIMPL 0x3A35 */
     sh4_interp_op(mem, ctx, 0x0C16F958, 0x373Bu); /* UNIMPL 0x373B */
     MEM_W8(ctx->r[10], ctx->r[3]);
-    if (ctx->sr.T) return 0x0C16F9B4; /* BT */
-    return 0x0C16F95C;
+    return 0x0C16F95C; /* sequential */
 }
 
 /* Block 0x0C16F9B4, 10B, 5 ops */
@@ -984,8 +950,7 @@ u32 block_0c16f8be(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp = MEM_R32(ctx->r[0] + ctx->r[15]); memcpy(&ctx->fr[1], &tmp, 4); }
     ctx->fr[7] -= ctx->fr[15];
     ctx->r[0] = MEM_R32(ctx->r[15] + ctx->r[0]);
-    if (ctx->sr.T) return 0x0C16F8DC; /* BT */
-    return 0x0C16F8C6;
+    return 0x0C16F8C6; /* sequential */
 }
 
 /* Block 0x0C16F8DC, 8B, 4 ops */
@@ -996,7 +961,7 @@ u32 block_0c16f8dc(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[3] + 48, ctx->r[0]);
     MEM_W32(ctx->r[15] + 52, ctx->r[1]);
     MEM_W16(ctx->r[5], ctx->r[2]);
-    return 0x0C16F8FC;
+    return 0x0C16F8FC; /* static branch */
 }
 
 /* Block 0x0C16F8FC, 8B, 4 ops */
@@ -1018,8 +983,7 @@ u32 block_0c1d5066(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D5068, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D506A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D506C, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D5074; /* BT */
-    return 0x0C1D506E;
+    return 0x0C1D506E; /* sequential */
 }
 
 /* Block 0x0C1D5074, 44B, 22 ops */
@@ -1059,8 +1023,7 @@ u32 block_0c1d50e0(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D50E2, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D50E4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D50E6, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D50EE; /* BT */
-    return 0x0C1D50E8;
+    return 0x0C1D50E8; /* sequential */
 }
 
 /* Block 0x0C1D50EE, 44B, 22 ops */
@@ -1100,8 +1063,7 @@ u32 block_0c1d512a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D512C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D512E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D5130, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D5138; /* BT */
-    return 0x0C1D5132;
+    return 0x0C1D5132; /* sequential */
 }
 
 /* Block 0x0C1D5138, 44B, 22 ops */
@@ -1139,7 +1101,7 @@ u32 block_0c028ed4(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->pr);
     ctx->r[0] = (u32)(s32)(s16)MEM_R16(ctx->r[14] + 2);
-    return 0x0C0290FA;
+    return 0x0C0290FA; /* static branch */
 }
 
 /* Block 0x0C0378F8, 22B, 11 ops */
@@ -1170,7 +1132,7 @@ u32 block_0c029f9c(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[0] ^= 0x38u;
     MEM_W16(ctx->r[12] + ctx->r[0], ctx->r[0]);
-    return 0x0C029C60;
+    return 0x0C029C60; /* call target */
 }
 
 /* Block 0x0C029C60, 62B, 31 ops */
@@ -1208,8 +1170,7 @@ u32 block_0c029c60(u8* _mem, Sh4Context* _ctx) {
     ctx->r[11] = ctx->r[4];
     ctx->r[12] = ctx->r[11];
     ctx->r[9] = ctx->r[11];
-    if (ctx->sr.T) return 0x0C029CB4; /* BT */
-    return 0x0C029C9E;
+    return 0x0C029C9E; /* sequential */
 }
 
 /* Block 0x0C029C9E, 6B, 3 ops */
@@ -1241,7 +1202,7 @@ u32 block_0c029cac(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[15], 4); MEM_W32(ctx->r[9], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[15], 4); MEM_W32(ctx->r[12], tmp); }
     ctx->pr = 0x0C029CB6; /* jsr @r14 */
-    return 0x0C029D1E;
+    return 0x0C029D1E; /* static branch */
 }
 
 /* Block 0x0C029D1E, 66B, 33 ops */
@@ -1281,8 +1242,7 @@ u32 block_0c029d1e(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[15], 4); MEM_W32(ctx->r[0] + ctx->r[15], tmp); }
     ctx->r[0] = (u32)(s32)28;
     { u32 tmp; memcpy(&tmp, &ctx->fr[13], 4); MEM_W32(ctx->r[0] + ctx->r[4], tmp); }
-    if (ctx->sr.T) return 0x0C029D64; /* BT */
-    return 0x0C029D60;
+    return 0x0C029D60; /* sequential */
 }
 
 /* Block 0x0C029D64, 152B, 76 ops */
@@ -1389,8 +1349,7 @@ u32 block_0c029e6c(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[1], 4); MEM_W32(ctx->r[4], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[3], 4); MEM_W32(ctx->r[5], tmp); }
     { u32 tmp = MEM_R32(ctx->r[4]); memcpy(&ctx->fr[3], &tmp, 4); }
-    if (ctx->sr.T) return 0x0C029EA6; /* BT */
-    return 0x0C029E8C;
+    return 0x0C029E8C; /* sequential */
 }
 
 /* Block 0x0C029EA6, 8B, 4 ops */
@@ -1401,8 +1360,7 @@ u32 block_0c029ea6(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[6], 4); MEM_W32(ctx->r[5], tmp); }
     /* nop */
     /* nop */
-    if (ctx->sr.T) return 0x0C029ECA; /* BT */
-    return 0x0C029EAE;
+    return 0x0C029EAE; /* sequential */
 }
 
 /* Block 0x0C029EAE, 62B, 31 ops */
@@ -1440,8 +1398,7 @@ u32 block_0c029eae(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[3], 4); MEM_W32(ctx->r[0] + ctx->r[15], tmp); }
     ctx->r[0] = (u32)(s32)60;
     { u32 tmp; memcpy(&tmp, &ctx->fr[15], 4); MEM_W32(ctx->r[0] + ctx->r[15], tmp); }
-    if (ctx->sr.T) return 0x0C029EFE; /* BT */
-    return 0x0C029EEC;
+    return 0x0C029EEC; /* sequential */
 }
 
 /* Block 0x0C029EEC, 18B, 9 ops */
@@ -1457,7 +1414,7 @@ u32 block_0c029eec(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[3] *= ctx->fr[12];
     { u32 tmp; memcpy(&tmp, &ctx->fr[4], 4); MEM_W32(ctx->r[0] + ctx->r[15], tmp); }
     ctx->r[0] = (u32)(s32)72;
-    return 0x0C029F3C;
+    return 0x0C029F3C; /* static branch */
 }
 
 /* Block 0x0C029F3C, 22B, 11 ops */
@@ -1489,8 +1446,7 @@ u32 block_0c029f52(u8* _mem, Sh4Context* _ctx) {
     ctx->r[12] = ctx->sr.T;
     ctx->r[10] = (u32)(s32)(s16)MEM_R16(0x0C029FA0);
     ctx->pr = 0x0C029F62; /* bsrf r12 */
-    if (ctx->sr.T) return 0x0C029F64; /* BT */
-    return 0x0C029F60;
+    return 0x0C029F60; /* sequential */
 }
 
 /* Block 0x0C029F60, 4B, 2 ops */
@@ -1499,7 +1455,7 @@ u32 block_0c029f60(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C029F60, 0x83A0u); /* UNIMPL 0x83A0 */
     ctx->r[12] = ctx->pr;
-    return 0x0C029D64;
+    return 0x0C029D64; /* static branch */
 }
 
 /* Block 0x0C029F64, 30B, 15 ops */
@@ -1530,7 +1486,7 @@ u32 block_0c029fa0(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[0] ^= 0x28u;
     MEM_W16(ctx->r[12] + ctx->r[0], ctx->r[0]);
-    return 0x0C029FA8;
+    return 0x0C029FA8; /* static branch */
 }
 
 /* Block 0x0C039DC4, 20B, 10 ops */
@@ -1562,8 +1518,7 @@ u32 block_0c1012b8(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1012C2, 0xFFFFu); /* UNIMPL 0xFFFF */
     sh4_interp_op(mem, ctx, 0x0C1012C4, 0xFFFFu); /* UNIMPL 0xFFFF */
     sh4_interp_op(mem, ctx, 0x0C1012C6, 0xFFFFu); /* UNIMPL 0xFFFF */
-    if (ctx->sr.T) return 0x0C10130C; /* BT */
-    return 0x0C1012C8;
+    return 0x0C1012C8; /* sequential */
 }
 
 /* Block 0x0C10130C, 6B, 3 ops */
@@ -1573,8 +1528,7 @@ u32 block_0c10130c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C10130C, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C10130E, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C101310, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C02A186; /* BT */
-    return 0x0C101312;
+    return 0x0C02A186; /* call target */
 }
 
 /* Block 0x0C101312, 8B, 4 ops */
@@ -1585,8 +1539,7 @@ u32 block_0c101312(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C101314, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C101316, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C101318, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C101326; /* BT */
-    return 0x0C10131A;
+    return 0x0C10131A; /* sequential */
 }
 
 /* Block 0x0C10131A, 12B, 6 ops */
@@ -1599,8 +1552,7 @@ u32 block_0c10131a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C101320, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C101322, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C101324, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C101334; /* BT */
-    return 0x0C101326;
+    return 0x0C101326; /* sequential */
 }
 
 /* Block 0x0C101334, 6B, 3 ops */
@@ -1625,8 +1577,7 @@ u32 block_0c1b625c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1B6266, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1B6268, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1B626A, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1B62CA; /* BT */
-    return 0x0C1B626C;
+    return 0x0C1B626C; /* sequential */
 }
 
 /* Block 0x0C1B626C, 20B, 10 ops */
@@ -1643,8 +1594,7 @@ u32 block_0c1b626c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1B627A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1B627C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1B627E, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB998; /* BT */
-    return 0x0C1B6280;
+    return 0x0C1FB998; /* call target */
 }
 
 /* Block 0x0C1B6280, 58B, 29 ops */
@@ -1680,8 +1630,7 @@ u32 block_0c1b6280(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1B62B4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1B62B6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1B62B8, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB900; /* BT */
-    return 0x0C1B62BA;
+    return 0x0C1FB900; /* call target */
 }
 
 /* Block 0x0C1B62BA, 16B, 8 ops */
@@ -1696,8 +1645,7 @@ u32 block_0c1b62ba(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1B62C4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1B62C6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1B62C8, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C029FD0; /* BT */
-    return 0x0C1B62CA;
+    return 0x0C029FD0; /* call target */
 }
 
 /* Block 0x0C1B62CA, 20B, 10 ops */
@@ -1714,8 +1662,7 @@ u32 block_0c1b62ca(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1B62D8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1B62DA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1B62DC, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C02A124; /* BT */
-    return 0x0C1B62DE;
+    return 0x0C02A124; /* call target */
 }
 
 /* Block 0x0C1B62DE, 6B, 3 ops */
@@ -1725,8 +1672,7 @@ u32 block_0c1b62de(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1B62DE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1B62E0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1B62E2, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1B62F0; /* BT */
-    return 0x0C1B62E4;
+    return 0x0C1B62E4; /* sequential */
 }
 
 /* Block 0x0C1B62F0, 8B, 4 ops */
@@ -1746,8 +1692,7 @@ u32 block_0c16f74c(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[0] = (u32)(s32)(s16)MEM_R16(ctx->r[0] + ctx->r[0]);
     ctx->r[13] = (u32)(s32)-10;
-    if (ctx->sr.T) return 0x0C16F754; /* BT */
-    return 0x0C16F8A8;
+    return 0x0C16F750; /* sequential */
 }
 
 /* Block 0x0C029ECA, 34B, 17 ops */
@@ -1771,8 +1716,7 @@ u32 block_0c029eca(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[3], 4); MEM_W32(ctx->r[0] + ctx->r[15], tmp); }
     ctx->r[0] = (u32)(s32)60;
     { u32 tmp; memcpy(&tmp, &ctx->fr[15], 4); MEM_W32(ctx->r[0] + ctx->r[15], tmp); }
-    if (ctx->sr.T) return 0x0C029EFE; /* BT */
-    return 0x0C029EEC;
+    return 0x0C029EEC; /* sequential */
 }
 
 /* Block 0x0C114B3A, 32B, 16 ops */
@@ -1795,8 +1739,7 @@ u32 block_0c114b3a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C114B54, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114B56, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114B58, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C114B66; /* BT */
-    return 0x0C114B5A;
+    return 0x0C114B5A; /* sequential */
 }
 
 /* Block 0x0C114B5A, 12B, 6 ops */
@@ -1809,8 +1752,7 @@ u32 block_0c114b5a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C114B60, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114B62, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114B64, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C045352; /* BT */
-    return 0x0C114B66;
+    return 0x0C045352; /* static branch */
 }
 
 /* Block 0x0C045352, 10B, 5 ops */
@@ -1861,8 +1803,7 @@ u32 block_0c0488b6(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = 0x0C048CBC; /* mova */
     sh4_interp_op(mem, ctx, 0x0C0488C0, 0x0000u); /* UNIMPL 0x0000 */
     MEM_W8(ctx->r[8], ctx->r[0]);
-    if (ctx->sr.T) return 0x0C048904; /* BT */
-    return 0x0C0488C4;
+    return 0x0C0488C4; /* sequential */
 }
 
 /* Block 0x0C048904, 6B, 3 ops */
@@ -1872,7 +1813,7 @@ u32 block_0c048904(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] |= ctx->r[4];
     ctx->r[0] = (u32)(s32)108;
     ctx->r[3] = MEM_R32(0x0C04898C); /* @(PC,0x80) */
-    return 0x0C049816;
+    return 0x0C049816; /* call target */
 }
 
 /* Block 0x0C049816, 12B, 6 ops */
@@ -1885,7 +1826,7 @@ u32 block_0c049816(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] += (s32)44;
     ctx->r[0] = MEM_R32(ctx->r[14]);
     ctx->pr = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
-    return 0x0C0498A4;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C049822, 24B, 12 ops */
@@ -1917,7 +1858,7 @@ u32 block_0c1d274a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D2750, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2752, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2754, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D2516;
+    return 0x0C1D2516; /* call target */
 }
 
 /* Block 0x0C1D2516, 18B, 9 ops */
@@ -1933,8 +1874,7 @@ u32 block_0c1d2516(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D2522, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2524, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2526, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C03763A; /* BT */
-    return 0x0C1D2528;
+    return 0x0C03763A; /* call target */
 }
 
 /* Block 0x0C1D2528, 6B, 3 ops */
@@ -1944,8 +1884,7 @@ u32 block_0c1d2528(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D2528, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D252A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D252C, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D2564; /* BT */
-    return 0x0C1D252E;
+    return 0x0C1D252E; /* sequential */
 }
 
 /* Block 0x0C1D252E, 36B, 18 ops */
@@ -1970,8 +1909,7 @@ u32 block_0c1d252e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D254C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D254E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2550, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB900; /* BT */
-    return 0x0C1D2552;
+    return 0x0C1FB900; /* call target */
 }
 
 /* Block 0x0C1D2552, 26B, 13 ops */
@@ -2001,7 +1939,7 @@ u32 block_0c1d2756(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D2756, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2758, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D275A, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D25CE;
+    return 0x0C1D25CE; /* call target */
 }
 
 /* Block 0x0C1D25CE, 18B, 9 ops */
@@ -2017,8 +1955,7 @@ u32 block_0c1d25ce(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D25DA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D25DC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D25DE, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C03763A; /* BT */
-    return 0x0C1D25E0;
+    return 0x0C03763A; /* call target */
 }
 
 /* Block 0x0C1D25E0, 6B, 3 ops */
@@ -2028,8 +1965,7 @@ u32 block_0c1d25e0(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D25E0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D25E2, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D25E4, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D261A; /* BT */
-    return 0x0C1D25E6;
+    return 0x0C1D25E6; /* sequential */
 }
 
 /* Block 0x0C1D25E6, 34B, 17 ops */
@@ -2053,8 +1989,7 @@ u32 block_0c1d25e6(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D2602, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2604, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2606, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB900; /* BT */
-    return 0x0C1D2608;
+    return 0x0C1FB900; /* call target */
 }
 
 /* Block 0x0C1D2608, 26B, 13 ops */
@@ -2087,7 +2022,7 @@ u32 block_0c1d275c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D2762, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2764, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2766, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D26DC;
+    return 0x0C1D26DC; /* static branch */
 }
 
 /* Block 0x0C1D26DC, 18B, 9 ops */
@@ -2103,8 +2038,7 @@ u32 block_0c1d26dc(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D26E8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D26EA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D26EC, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C03763A; /* BT */
-    return 0x0C1D26EE;
+    return 0x0C03763A; /* call target */
 }
 
 /* Block 0x0C1D26EE, 6B, 3 ops */
@@ -2114,8 +2048,7 @@ u32 block_0c1d26ee(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D26EE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D26F0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D26F2, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D2742; /* BT */
-    return 0x0C1D26F4;
+    return 0x0C1D26F4; /* sequential */
 }
 
 /* Block 0x0C1D26F4, 36B, 18 ops */
@@ -2140,8 +2073,7 @@ u32 block_0c1d26f4(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D2712, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2714, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2716, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB900; /* BT */
-    return 0x0C1D2718;
+    return 0x0C1FB900; /* call target */
 }
 
 /* Block 0x0C1D2718, 36B, 18 ops */
@@ -2166,8 +2098,7 @@ u32 block_0c1d2718(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D2736, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2738, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D273A, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB900; /* BT */
-    return 0x0C1D273C;
+    return 0x0C1FB900; /* call target */
 }
 
 /* Block 0x0C1D273C, 14B, 7 ops */
@@ -2200,8 +2131,7 @@ u32 block_0c04983a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C04984C, 0x0000u); /* UNIMPL 0x0000 */
     ctx->r[0] = (u32)(s32)0;
     sh4_interp_op(mem, ctx, 0x0C049850, 0x0C60u); /* UNIMPL 0x0C60 */
-    if (ctx->sr.T) return 0x0C049854; /* BT */
-    return 0x0C049852;
+    return 0x0C049852; /* sequential */
 }
 
 /* Block 0x0C049854, 6B, 3 ops */
@@ -2257,7 +2187,7 @@ u32 block_0c048050(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C048050, 0x0900u); /* UNIMPL 0x0900 */
     sh4_interp_op(mem, ctx, 0x0C048052, 0x0900u); /* UNIMPL 0x0900 */
     sh4_interp_op(mem, ctx, 0x0C048054, 0x0900u); /* UNIMPL 0x0900 */
-    return 0x0C048A34;
+    return 0x0C048A34; /* call target */
 }
 
 /* Block 0x0C048A34, 48B, 24 ops */
@@ -2320,7 +2250,7 @@ u32 block_0c048a7e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C048A7E, 0x0900u); /* UNIMPL 0x0900 */
     ctx->r[0] = (u32)(s32)(s8)MEM_R8(ctx->r[11] + ctx->r[0]);
     sh4_interp_op(mem, ctx, 0x0C048A82, 0xFF3Fu); /* UNIMPL 0xFF3F */
-    return 0x0C048A9C;
+    return 0x0C048A9C; /* call target */
 }
 
 /* Block 0x0C048A9C, 46B, 23 ops */
@@ -2372,8 +2302,7 @@ u32 block_0c048ad2(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C048AE8, 0x0900u); /* UNIMPL 0x0900 */
     sh4_interp_op(mem, ctx, 0x0C048AEA, 0x0900u); /* UNIMPL 0x0900 */
     sh4_interp_op(mem, ctx, 0x0C048AEC, 0x0900u); /* UNIMPL 0x0900 */
-    if (ctx->sr.T) return 0x0C048B3A; /* BT */
-    return 0x0C048AEE;
+    return 0x0C048AEE; /* sequential */
 }
 
 /* Block 0x0C048AEE, 12B, 6 ops */
@@ -2386,8 +2315,7 @@ u32 block_0c048aee(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C048AF4, 0x0900u); /* UNIMPL 0x0900 */
     sh4_interp_op(mem, ctx, 0x0C048AF6, 0x0900u); /* UNIMPL 0x0900 */
     sh4_interp_op(mem, ctx, 0x0C048AF8, 0x0900u); /* UNIMPL 0x0900 */
-    if (ctx->sr.T) return 0x0C048B3A; /* BT */
-    return 0x0C048AFA;
+    return 0x0C048AFA; /* sequential */
 }
 
 /* Block 0x0C048B3A, 24B, 12 ops */
@@ -2418,8 +2346,7 @@ u32 block_0c048b52(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = (u32)(s32)112;
     MEM_W32(ctx->r[6] + 24, ctx->r[3]);
     { u32 tmp = MEM_R32(ctx->r[0] + ctx->r[4]); memcpy(&ctx->fr[3], &tmp, 4); }
-    if (ctx->sr.T) return 0x0C048B6A; /* BT */
-    return 0x0C048B5A;
+    return 0x0C048B5A; /* sequential */
 }
 
 /* Block 0x0C048B5A, 8B, 4 ops */
@@ -2430,8 +2357,7 @@ u32 block_0c048b5a(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[3], 4); MEM_W32(ctx->r[0] + ctx->r[6], tmp); }
     ctx->r[0] = (u32)(s32)116;
     { u32 tmp = MEM_R32(ctx->r[0] + ctx->r[4]); memcpy(&ctx->fr[3], &tmp, 4); }
-    if (ctx->sr.T) return 0x0C048BD6; /* BT */
-    return 0x0C048B62;
+    return 0x0C048B62; /* sequential */
 }
 
 /* Block 0x0C048BD6, 18B, 9 ops */
@@ -2447,8 +2373,7 @@ u32 block_0c048bd6(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[2], ctx->r[3]);
     ctx->r[3] = MEM_R32(ctx->r[6]);
     MEM_W32(ctx->r[4], ctx->r[3]);
-    if (ctx->sr.T) return 0x0C048BF2; /* BT */
-    return 0x0C048BE8;
+    return 0x0C048BE8; /* sequential */
 }
 
 /* Block 0x0C048BE8, 10B, 5 ops */
@@ -2460,8 +2385,7 @@ u32 block_0c048be8(u8* _mem, Sh4Context* _ctx) {
     ctx->r[7] = MEM_R32(0x0C048C60); /* @(PC,0x70) */
     ctx->r[2] &= ctx->r[3];
     ctx->r[2] >>= 16;
-    if (ctx->sr.T) return 0x0C048C64; /* BT */
-    return 0x0C048BF2;
+    return 0x0C048BF2; /* sequential */
 }
 
 /* Block 0x0C048C64, 4B, 2 ops */
@@ -2470,7 +2394,7 @@ u32 block_0c048c64(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C048C64, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C048C66, 0x0700u); /* UNIMPL 0x0700 */
-    return 0x0C048F4A;
+    return 0x0C048F4A; /* call target */
 }
 
 /* Block 0x0C048C68, 8B, 4 ops */
@@ -2503,8 +2427,7 @@ u32 block_0c048c70(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[4], ctx->r[1]);
     ctx->r[1] = ctx->r[6];
     ctx->r[1] = MEM_R32(ctx->r[1] + 36);
-    if (ctx->sr.T) return 0x0C048CDC; /* BT */
-    return 0x0C048C8E;
+    return 0x0C048C8E; /* sequential */
 }
 
 /* Block 0x0C048C8E, 12B, 6 ops */
@@ -2517,8 +2440,7 @@ u32 block_0c048c8e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[1] = MEM_R32(ctx->r[1] + 40);
     ctx->r[4] += (s32)4;
     MEM_W32(ctx->r[4], ctx->r[1]);
-    if (ctx->sr.T) return 0x0C048CE6; /* BT */
-    return 0x0C048C9A;
+    return 0x0C048C9A; /* sequential */
 }
 
 /* Block 0x0C048C9A, 12B, 6 ops */
@@ -2531,8 +2453,7 @@ u32 block_0c048c9a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[1] = MEM_R32(ctx->r[1] + 44);
     ctx->r[0] = ctx->r[14];
     ctx->r[0] = MEM_R32(ctx->r[0] + 16);
-    if (ctx->sr.T) return 0x0C048CF0; /* BT */
-    return 0x0C048CA6;
+    return 0x0C048CA6; /* sequential */
 }
 
 /* Block 0x0C048CA6, 10B, 5 ops */
@@ -2544,8 +2465,7 @@ u32 block_0c048ca6(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = ctx->r[6];
     ctx->r[0] = MEM_R32(ctx->r[0] + 36);
     ctx->r[4] += (s32)4;
-    if (ctx->sr.T) return 0x0C048CF0; /* BT */
-    return 0x0C048CB0;
+    return 0x0C048CB0; /* sequential */
 }
 
 /* Block 0x0C048CF0, 14B, 7 ops */
@@ -2585,7 +2505,7 @@ u32 block_0c048a84(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C048A84, 0x00A0u); /* UNIMPL 0x00A0 */
     sh4_interp_op(mem, ctx, 0x0C048A86, 0xFF7Fu); /* UNIMPL 0xFF7F */
     MEM_W8(ctx->r[4] + ctx->r[0], ctx->r[7]);
-    return 0x0C04963C;
+    return 0x0C04963C; /* call target */
 }
 
 /* Block 0x0C04963C, 26B, 13 ops */
@@ -2605,8 +2525,7 @@ u32 block_0c04963c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C049650, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C049652, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C049654, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C04965A; /* BT */
-    return 0x0C049656;
+    return 0x0C049656; /* sequential */
 }
 
 /* Block 0x0C04965A, 12B, 6 ops */
@@ -2619,8 +2538,7 @@ u32 block_0c04965a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[14]);
     ctx->r[14] = ctx->r[4];
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[13]);
-    if (ctx->sr.T) return 0x0C049672; /* BT */
-    return 0x0C049666;
+    return 0x0C049666; /* sequential */
 }
 
 /* Block 0x0C049672, 10B, 5 ops */
@@ -2632,8 +2550,7 @@ u32 block_0c049672(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[15], ctx->r[4]);
     ctx->r[0] = MEM_R32(ctx->r[14]);
     ctx->r[3] = MEM_R32(0x0C049840); /* @(PC,0x1C4) */
-    if (ctx->sr.T) return 0x0C049680; /* BT */
-    return 0x0C04967C;
+    return 0x0C04967C; /* sequential */
 }
 
 /* Block 0x0C049680, 12B, 6 ops */
@@ -2646,8 +2563,7 @@ u32 block_0c049680(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[3], ctx->r[6]);
     ctx->r[2] = MEM_R32(0x0C049844); /* @(PC,0x1B8) */
     MEM_W32(ctx->r[2], ctx->r[6]);
-    if (ctx->sr.T) return 0x0C049694; /* BT */
-    return 0x0C04968C;
+    return 0x0C04968C; /* sequential */
 }
 
 /* Block 0x0C04968C, 8B, 4 ops */
@@ -2658,8 +2574,7 @@ u32 block_0c04968c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = ctx->r[13];
     ctx->r[1] = MEM_R32(0x0C04984C); /* @(PC,0x1B8) */
     ctx->r[3] = MEM_R32(0x0C049850); /* @(PC,0x1BC) */
-    if (ctx->sr.T) return 0x0C049786; /* BT */
-    return 0x0C049694;
+    return 0x0C049694; /* sequential */
 }
 
 /* Block 0x0C049694, 10B, 5 ops */
@@ -2671,8 +2586,7 @@ u32 block_0c049694(u8* _mem, Sh4Context* _ctx) {
     ctx->pr = 0x0C04969C; /* jsr @r3 */
     ctx->r[4] = ctx->r[12];
     sh4_interp_op(mem, ctx, 0x0C04969C, 0x0C83u); /* UNIMPL 0x0C83 */
-    if (ctx->sr.T) return 0x0C0496A2; /* BT */
-    return 0x0C04969E;
+    return 0x0C04969E; /* sequential */
 }
 
 /* Block 0x0C0496A2, 6B, 3 ops */
@@ -2703,8 +2617,7 @@ u32 block_0c0496a8(u8* _mem, Sh4Context* _ctx) {
     ctx->r[13] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
     /* rts — handled at block level */
     ctx->r[14] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
-    if (ctx->sr.T) return 0x0C0496C6; /* BT */
-    return 0x0C0496C4;
+    return 0x0C0496C4; /* sequential */
 }
 
 /* Block 0x0C0496C6, 6B, 3 ops */
@@ -2714,8 +2627,7 @@ u32 block_0c0496c6(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[13]);
     ctx->r[13] = ctx->r[4];
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[12]);
-    if (ctx->sr.T) return 0x0C0496E0; /* BT */
-    return 0x0C0496CC;
+    return 0x0C0496CC; /* sequential */
 }
 
 /* Block 0x0C0496E0, 10B, 5 ops */
@@ -2727,8 +2639,7 @@ u32 block_0c0496e0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = ctx->r[4];
     ctx->r[6] >>= 16;
     ctx->r[6] >>= 8;
-    if (ctx->sr.T) return 0x0C049786; /* BT */
-    return 0x0C0496EA;
+    return 0x0C0496EA; /* sequential */
 }
 
 /* Block 0x0C0496EA, 10B, 5 ops */
@@ -2740,8 +2651,7 @@ u32 block_0c0496ea(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[1], ctx->r[6]);
     ctx->r[14] = MEM_R32(0x0C049848); /* @(PC,0x154) */
     ctx->r[6] = ctx->r[12];
-    if (ctx->sr.T) return 0x0C049786; /* BT */
-    return 0x0C0496F4;
+    return 0x0C0496F4; /* sequential */
 }
 
 /* Block 0x0C0496F4, 8B, 4 ops */
@@ -2752,8 +2662,7 @@ u32 block_0c0496f4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C049850); /* @(PC,0x158) */
     ctx->r[14] &= ctx->r[4];
     ctx->r[14] |= ctx->r[3];
-    if (ctx->sr.T) return 0x0C049786; /* BT */
-    return 0x0C0496FC;
+    return 0x0C0496FC; /* sequential */
 }
 
 /* Block 0x0C0496FC, 14B, 7 ops */
@@ -2788,8 +2697,7 @@ u32 block_0c04970e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[12] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
     ctx->r[13] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
     /* rts — handled at block level */
-    if (ctx->sr.T) return 0x0C049774; /* BT */
-    return 0x0C049728;
+    return 0x0C049728; /* sequential */
 }
 
 /* Block 0x0C049774, 18B, 9 ops */
@@ -2832,8 +2740,7 @@ u32 block_0c048056(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C048058, 0x0900u); /* UNIMPL 0x0900 */
     sh4_interp_op(mem, ctx, 0x0C04805A, 0x0900u); /* UNIMPL 0x0900 */
     sh4_interp_op(mem, ctx, 0x0C04805C, 0x0900u); /* UNIMPL 0x0900 */
-    if (ctx->sr.T) return 0x0C048062; /* BT */
-    return 0x0C04805E;
+    return 0x0C04805E; /* sequential */
 }
 
 /* Block 0x0C04805E, 4B, 2 ops */
@@ -2842,7 +2749,7 @@ u32 block_0c04805e(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C04805E, 0x0900u); /* UNIMPL 0x0900 */
     sh4_interp_op(mem, ctx, 0x0C048060, 0x00F0u); /* UNIMPL 0x00F0 */
-    return 0x0C048384;
+    return 0x0C048384; /* static branch */
 }
 
 /* Block 0x0C048384, 16B, 8 ops */
@@ -2880,8 +2787,7 @@ u32 block_0c046530(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] += (s32)68;
     ctx->r[3] = MEM_R32(ctx->r[3] + ctx->r[0]);
     ctx->r[0] = MEM_R32(ctx->r[3]);
-    if (ctx->sr.T) return 0x0C046540; /* BT */
-    return 0x0C046536;
+    return 0x0C046536; /* sequential */
 }
 
 /* Block 0x0C046536, 10B, 5 ops */
@@ -2903,8 +2809,7 @@ u32 block_0c11398a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C11398A, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C11398C, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C11398E, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C1139A2; /* BT */
-    return 0x0C113990;
+    return 0x0C113990; /* sequential */
 }
 
 /* Block 0x0C113990, 10B, 5 ops */
@@ -2916,8 +2821,7 @@ u32 block_0c113990(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C113994, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C113996, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C113998, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C1139A2; /* BT */
-    return 0x0C11399A;
+    return 0x0C11399A; /* sequential */
 }
 
 /* Block 0x0C11399A, 8B, 4 ops */
@@ -2928,8 +2832,7 @@ u32 block_0c11399a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C11399C, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C11399E, 0x0FFFu); /* UNIMPL 0x0FFF */
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C1139A6; /* BT */
-    return 0x0C1139A2;
+    return 0x0C1139A2; /* sequential */
 }
 
 /* Block 0x0C0433F0, 26B, 13 ops */
@@ -2963,8 +2866,7 @@ u32 block_0c1d24d4(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D24DC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D24DE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D24E0, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D24EC; /* BT */
-    return 0x0C1D24E2;
+    return 0x0C1D24E2; /* sequential */
 }
 
 /* Block 0x0C1D24EC, 12B, 6 ops */
@@ -2977,8 +2879,7 @@ u32 block_0c1d24ec(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D24F2, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D24F4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D24F6, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1CEA24; /* BT */
-    return 0x0C1D24F8;
+    return 0x0C1CEA24; /* call target */
 }
 
 /* Block 0x0C1D24F8, 30B, 15 ops */
@@ -3014,8 +2915,7 @@ u32 block_0c1d256c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D2574, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2576, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2578, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D2584; /* BT */
-    return 0x0C1D257A;
+    return 0x0C1D257A; /* sequential */
 }
 
 /* Block 0x0C1D2584, 20B, 10 ops */
@@ -3032,8 +2932,7 @@ u32 block_0c1d2584(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D2592, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2594, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2596, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1CEA24; /* BT */
-    return 0x0C1D2598;
+    return 0x0C1CEA24; /* call target */
 }
 
 /* Block 0x0C1D2598, 24B, 12 ops */
@@ -3052,8 +2951,7 @@ u32 block_0c1d2598(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D25AA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D25AC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D25AE, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1CEA24; /* BT */
-    return 0x0C1D25B0;
+    return 0x0C1CEA24; /* call target */
 }
 
 /* Block 0x0C1D25B0, 30B, 15 ops */
@@ -3089,8 +2987,7 @@ u32 block_0c1d265c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D2664, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2666, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2668, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D2674; /* BT */
-    return 0x0C1D266A;
+    return 0x0C1D266A; /* sequential */
 }
 
 /* Block 0x0C1D2674, 42B, 21 ops */
@@ -3118,8 +3015,7 @@ u32 block_0c1d2674(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D2698, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D269A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D269C, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1CEA24; /* BT */
-    return 0x0C1D269E;
+    return 0x0C1CEA24; /* call target */
 }
 
 /* Block 0x0C1D269E, 32B, 16 ops */
@@ -3142,8 +3038,7 @@ u32 block_0c1d269e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D26B8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D26BA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D26BC, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1CEA24; /* BT */
-    return 0x0C1D26BE;
+    return 0x0C1CEA24; /* call target */
 }
 
 /* Block 0x0C1D26BE, 30B, 15 ops */
@@ -3176,8 +3071,7 @@ u32 block_0c1139b2(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C1139D4; /* BT */
-    return 0x0C1139BA;
+    return 0x0C1139BA; /* sequential */
 }
 
 /* Block 0x0C1139BA, 16B, 8 ops */
@@ -3192,8 +3086,7 @@ u32 block_0c1139ba(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1139C4, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C1139C6, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C1139C8, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C1139D4; /* BT */
-    return 0x0C1139CA;
+    return 0x0C1139CA; /* sequential */
 }
 
 /* Block 0x0C1139CA, 14B, 7 ops */
@@ -3226,7 +3119,7 @@ u32 block_0c047984(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->sr.T = (ctx->r[9] & ctx->r[9]) == 0 ? 1 : 0;
     /* bt — handled at block level */
-    return 0x0C047B06;
+    return 0x0C047B06; /* call target */
 }
 
 /* Block 0x0C047B06, 8B, 4 ops */
@@ -3237,8 +3130,7 @@ u32 block_0c047b06(u8* _mem, Sh4Context* _ctx) {
     MEM_W8(ctx->r[1] + ctx->r[0], ctx->r[6]);
     MEM_W8(ctx->r[1] + ctx->r[0], ctx->r[4]);
     sh4_interp_op(mem, ctx, 0x0C047B0C, 0x04A0u); /* UNIMPL 0x04A0 */
-    if (ctx->sr.T) return 0x0C047BE2; /* BT */
-    return 0x0C047B0E;
+    return 0x0C047B0E; /* sequential */
 }
 
 /* Block 0x0C047B0E, 8B, 4 ops */
@@ -3249,8 +3141,7 @@ u32 block_0c047b0e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C047B10, 0x0608u); /* UNIMPL 0x0608 */
     sh4_interp_op(mem, ctx, 0x0C047B12, 0x0C2Bu); /* UNIMPL 0x0C2B */
     ctx->r[8] = MEM_R32(ctx->r[14] + 16);
-    if (ctx->sr.T) return 0x0C047BE2; /* BT */
-    return 0x0C047B16;
+    return 0x0C047B16; /* sequential */
 }
 
 /* Block 0x0C047B16, 12B, 6 ops */
@@ -3263,8 +3154,7 @@ u32 block_0c047b16(u8* _mem, Sh4Context* _ctx) {
     ctx->r[7] = (u32)(s32)(s8)MEM_R8(ctx->r[0] + ctx->r[0]);
     sh4_interp_op(mem, ctx, 0x0C047B1E, 0x0C2Bu); /* UNIMPL 0x0C2B */
     MEM_W8(ctx->r[7] + ctx->r[0], ctx->r[1]);
-    if (ctx->sr.T) return 0x0C047B2A; /* BT */
-    return 0x0C047B22;
+    return 0x0C047B22; /* sequential */
 }
 
 /* Block 0x0C047B22, 8B, 4 ops */
@@ -3275,8 +3165,7 @@ u32 block_0c047b22(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C047B24, 0x0718u); /* UNIMPL 0x0718 */
     sh4_interp_op(mem, ctx, 0x0C047B26, 0x0C2Bu); /* UNIMPL 0x0C2B */
     sh4_interp_op(mem, ctx, 0x0C047B28, 0x0710u); /* UNIMPL 0x0710 */
-    if (ctx->sr.T) return 0x0C047B32; /* BT */
-    return 0x0C047B2A;
+    return 0x0C047B2A; /* sequential */
 }
 
 /* Block 0x0C047B32, 10B, 5 ops */
@@ -3288,8 +3177,7 @@ u32 block_0c047b32(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C047B36, 0x0C2Bu); /* UNIMPL 0x0C2B */
     sh4_interp_op(mem, ctx, 0x0C047B38, 0x06F8u); /* UNIMPL 0x06F8 */
     sh4_interp_op(mem, ctx, 0x0C047B3A, 0x0C2Bu); /* UNIMPL 0x0C2B */
-    if (ctx->sr.T) return 0x0C047BE2; /* BT */
-    return 0x0C047B3C;
+    return 0x0C047B3C; /* sequential */
 }
 
 /* Block 0x0C047B3C, 6B, 3 ops */
@@ -3299,8 +3187,7 @@ u32 block_0c047b3c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C047B3C, 0x05F8u); /* UNIMPL 0x05F8 */
     sh4_interp_op(mem, ctx, 0x0C047B3E, 0x0C2Bu); /* UNIMPL 0x0C2B */
     ctx->r[5] = (u32)(s32)(s8)MEM_R8(ctx->r[14] + ctx->r[0]);
-    if (ctx->sr.T) return 0x0C047BE2; /* BT */
-    return 0x0C047B42;
+    return 0x0C047B42; /* sequential */
 }
 
 /* Block 0x0C047B42, 10B, 5 ops */
@@ -3312,8 +3199,7 @@ u32 block_0c047b42(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C047B46, 0x0C2Bu); /* UNIMPL 0x0C2B */
     MEM_W8(ctx->r[4] + ctx->r[0], ctx->r[10]);
     sh4_interp_op(mem, ctx, 0x0C047B4A, 0x0C2Bu); /* UNIMPL 0x0C2B */
-    if (ctx->sr.T) return 0x0C047BE2; /* BT */
-    return 0x0C047B4C;
+    return 0x0C047B4C; /* sequential */
 }
 
 /* Block 0x0C047B4C, 10B, 5 ops */
@@ -3325,8 +3211,7 @@ u32 block_0c047b4c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = (u32)(s32)(s8)MEM_R8(ctx->r[13] + ctx->r[0]);
     sh4_interp_op(mem, ctx, 0x0C047B52, 0x0C2Bu); /* UNIMPL 0x0C2B */
     sh4_interp_op(mem, ctx, 0x0C047B54, 0x0900u); /* UNIMPL 0x0900 */
-    if (ctx->sr.T) return 0x0C047BE2; /* BT */
-    return 0x0C047B56;
+    return 0x0C047B56; /* sequential */
 }
 
 /* Block 0x0C047B56, 10B, 5 ops */
@@ -3338,8 +3223,7 @@ u32 block_0c047b56(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C047B5A, 0x0900u); /* UNIMPL 0x0900 */
     sh4_interp_op(mem, ctx, 0x0C047B5C, 0x0900u); /* UNIMPL 0x0900 */
     sh4_interp_op(mem, ctx, 0x0C047B5E, 0x0900u); /* UNIMPL 0x0900 */
-    if (ctx->sr.T) return 0x0C047BA0; /* BT */
-    return 0x0C047B60;
+    return 0x0C047B60; /* sequential */
 }
 
 /* Block 0x0C047B60, 8B, 4 ops */
@@ -3350,8 +3234,7 @@ u32 block_0c047b60(u8* _mem, Sh4Context* _ctx) {
     ctx->r[7] = (u32)(s32)(s16)MEM_R16(0x0C047BC2);
     ctx->r[6] = (u32)(s32)(s16)MEM_R16(0x0C047BC0);
     ctx->r[0] = MEM_R32(ctx->r[3]);
-    if (ctx->sr.T) return 0x0C047B9C; /* BT */
-    return 0x0C047B68;
+    return 0x0C047B68; /* sequential */
 }
 
 /* Block 0x0C047B9C, 4B, 2 ops */
@@ -3387,8 +3270,7 @@ u32 block_0c047bac(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C047BB0, 0x0900u); /* UNIMPL 0x0900 */
     sh4_interp_op(mem, ctx, 0x0C047BB2, 0x0900u); /* UNIMPL 0x0900 */
     sh4_interp_op(mem, ctx, 0x0C047BB4, 0x0900u); /* UNIMPL 0x0900 */
-    if (ctx->sr.T) return 0x0C047BD4; /* BT */
-    return 0x0C047BB6;
+    return 0x0C047BB6; /* sequential */
 }
 
 /* Block 0x0C047BD4, 14B, 7 ops */
@@ -3402,8 +3284,7 @@ u32 block_0c047bd4(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C047BDC, 0x0900u); /* UNIMPL 0x0900 */
     sh4_interp_op(mem, ctx, 0x0C047BDE, 0x0900u); /* UNIMPL 0x0900 */
     /* bra — handled at block level */
-    if (ctx->sr.T) return 0x0C047BE6; /* BT */
-    return 0x0C047BE2;
+    return 0x0C047BE2; /* sequential */
 }
 
 /* Block 0x0C047BE6, 6B, 3 ops */
@@ -3423,8 +3304,7 @@ u32 block_0c047988(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C047A3C); /* @(PC,0xB0) */
     /* bra — handled at block level */
     /* nop */
-    if (ctx->sr.T) return 0x0C04799C; /* BT */
-    return 0x0C04798E;
+    return 0x0C04798E; /* sequential */
 }
 
 /* Block 0x0C100224, 10B, 5 ops */
@@ -3436,8 +3316,7 @@ u32 block_0c100224(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C100228, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C10022A, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C10022C, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C100244; /* BT */
-    return 0x0C10022E;
+    return 0x0C10022E; /* sequential */
 }
 
 /* Block 0x0C100244, 10B, 5 ops */
@@ -3449,8 +3328,7 @@ u32 block_0c100244(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C100248, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C10024A, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C10024C, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C100252; /* BT */
-    return 0x0C10024E;
+    return 0x0C10024E; /* sequential */
 }
 
 /* Block 0x0C100252, 10B, 5 ops */
@@ -3462,8 +3340,7 @@ u32 block_0c100252(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C100256, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C100258, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C10025A, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C047C0C; /* BT */
-    return 0x0C10025C;
+    return 0x0C047C0C; /* call target */
 }
 
 /* Block 0x0C047C3A, 16B, 8 ops */
@@ -3478,8 +3355,7 @@ u32 block_0c047c3a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C047C44, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C047C46, 0x0800u); /* UNIMPL 0x0800 */
     MEM_W8(ctx->r[5] + ctx->r[0], ctx->r[12]);
-    if (ctx->sr.T) return 0x0C047C4E; /* BT */
-    return 0x0C047C4A;
+    return 0x0C047C4A; /* sequential */
 }
 
 /* Block 0x0C10025C, 16B, 8 ops */
@@ -3494,8 +3370,7 @@ u32 block_0c10025c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C100266, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C100268, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C10026A, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C0453A8; /* BT */
-    return 0x0C10026C;
+    return 0x0C0453A8; /* call target */
 }
 
 /* Block 0x0C045416, 4B, 2 ops */
@@ -3504,8 +3379,7 @@ u32 block_0c045416(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[6] = (u32)(s32)16;
     ctx->r[13] += (s32)16;
-    if (ctx->sr.T) return 0x0C045426; /* BT */
-    return 0x0C04541A;
+    return 0x0C04541A; /* sequential */
 }
 
 /* Block 0x0C04541A, 8B, 4 ops */
@@ -3516,8 +3390,7 @@ u32 block_0c04541a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = ctx->r[13];
     ctx->r[3] = ctx->r[13];
     ctx->r[12] = MEM_R32(0x0C045470); /* @(PC,0x4C) */
-    if (ctx->sr.T) return 0x0C045426; /* BT */
-    return 0x0C045422;
+    return 0x0C045422; /* sequential */
 }
 
 /* Block 0x0C045434, 8B, 4 ops */
@@ -3528,8 +3401,7 @@ u32 block_0c045434(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = ctx->r[11];
     ctx->pr = 0x0C04543C; /* jsr @r3 */
     ctx->r[4] = (u32)(s32)0;
-    if (ctx->sr.T) return 0x0C045520; /* BT */
-    return 0x0C04543C;
+    return 0x0C04543C; /* sequential */
 }
 
 /* Block 0x0C04543C, 10B, 5 ops */
@@ -3558,8 +3430,7 @@ u32 block_0c045446(u8* _mem, Sh4Context* _ctx) {
     ctx->pr = 0x0C045456; /* jsr @r2 */
     ctx->r[4] = ctx->r[14];
     ctx->r[5] = (u32)(s32)12;
-    if (ctx->sr.T) return 0x0C0454A4; /* BT */
-    return 0x0C045458;
+    return 0x0C045458; /* sequential */
 }
 
 /* Block 0x0C045458, 60B, 30 ops */
@@ -3596,7 +3467,7 @@ u32 block_0c045458(u8* _mem, Sh4Context* _ctx) {
     ctx->sr.T = (ctx->r[2] & ctx->r[2]) == 0 ? 1 : 0;
     /* bf — handled at block level */
     ctx->r[0] = (u32)(s32)(s8)MEM_R8(ctx->r[14] + 1);
-    return 0x0C0454F8;
+    return 0x0C0454F8; /* static branch */
 }
 
 /* Block 0x0C0454F8, 40B, 20 ops */
@@ -3676,8 +3547,7 @@ u32 block_0c10134c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C101358, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C10135A, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C10135C, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C10136A; /* BT */
-    return 0x0C10135E;
+    return 0x0C10135E; /* sequential */
 }
 
 /* Block 0x0C10136A, 12B, 6 ops */
@@ -3690,8 +3560,7 @@ u32 block_0c10136a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C101370, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C101372, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C101374, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (!ctx->sr.T) return 0x0C04445A; /* BF */
-    return 0x0C101376;
+    return 0x0C04445A; /* call target */
 }
 
 /* Block 0x0C101376, 12B, 6 ops */
@@ -3715,8 +3584,7 @@ u32 block_0c101382(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C101382, 0xFFFFu); /* UNIMPL 0xFFFF */
     sh4_interp_op(mem, ctx, 0x0C101384, 0xFFFFu); /* UNIMPL 0xFFFF */
     sh4_interp_op(mem, ctx, 0x0C101386, 0xFFFFu); /* UNIMPL 0xFFFF */
-    if (ctx->sr.T) return 0x0C04342A; /* BT */
-    return 0x0C101388;
+    return 0x0C04342A; /* call target */
 }
 
 /* Block 0x0C101388, 12B, 6 ops */
@@ -3729,8 +3597,7 @@ u32 block_0c101388(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     sh4_interp_op(mem, ctx, 0x0C101390, 0xFFFFu); /* UNIMPL 0xFFFF */
     sh4_interp_op(mem, ctx, 0x0C101392, 0xFFFFu); /* UNIMPL 0xFFFF */
-    if (ctx->sr.T) return 0x0C02A4FA; /* BT */
-    return 0x0C101394;
+    return 0x0C02A4FA; /* call target */
 }
 
 /* Block 0x0C101394, 52B, 26 ops */
@@ -3763,8 +3630,7 @@ u32 block_0c101394(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1013C2, 0xFFFFu); /* UNIMPL 0xFFFF */
     sh4_interp_op(mem, ctx, 0x0C1013C4, 0xFFFFu); /* UNIMPL 0xFFFF */
     sh4_interp_op(mem, ctx, 0x0C1013C6, 0xFFFFu); /* UNIMPL 0xFFFF */
-    if (ctx->sr.T) return 0x0C02A224; /* BT */
-    return 0x0C1013C8;
+    return 0x0C02A224; /* static branch */
 }
 
 /* Block 0x0C1D24E2, 10B, 5 ops */
@@ -3776,8 +3642,7 @@ u32 block_0c1d24e2(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D24E6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D24E8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D24EA, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C0377E8; /* BT */
-    return 0x0C1D24EC;
+    return 0x0C0377E8; /* static branch */
 }
 
 /* Block 0x0C1013C8, 30B, 15 ops */
@@ -3799,8 +3664,7 @@ u32 block_0c1013c8(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C101420; /* BT */
-    return 0x0C1013E6;
+    return 0x0C1013E6; /* sequential */
 }
 
 /* Block 0x0C101420, 12B, 6 ops */
@@ -3813,8 +3677,7 @@ u32 block_0c101420(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C02A186; /* BT */
-    return 0x0C10142C;
+    return 0x0C02A186; /* call target */
 }
 
 /* Block 0x0C10142C, 6B, 3 ops */
@@ -3824,8 +3687,7 @@ u32 block_0c10142c(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C101456; /* BT */
-    return 0x0C101432;
+    return 0x0C101432; /* sequential */
 }
 
 /* Block 0x0C101456, 8B, 4 ops */
@@ -3836,8 +3698,7 @@ u32 block_0c101456(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C101458, 0xF8BDu); /* UNIMPL 0xF8BD */
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     sh4_interp_op(mem, ctx, 0x0C10145C, 0xF8BDu); /* UNIMPL 0xF8BD */
-    if (ctx->sr.T) return 0x0C10148A; /* BT */
-    return 0x0C10145E;
+    return 0x0C10145E; /* sequential */
 }
 
 /* Block 0x0C10148A, 8B, 4 ops */
@@ -3858,8 +3719,7 @@ u32 block_0c1d506e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D506E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D5070, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D5072, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C0377E8; /* BT */
-    return 0x0C1D5074;
+    return 0x0C0377E8; /* static branch */
 }
 
 /* Block 0x0C1D50E8, 6B, 3 ops */
@@ -3869,8 +3729,7 @@ u32 block_0c1d50e8(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D50E8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D50EA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D50EC, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C0377E8; /* BT */
-    return 0x0C1D50EE;
+    return 0x0C0377E8; /* static branch */
 }
 
 /* Block 0x0C1D5132, 6B, 3 ops */
@@ -3880,8 +3739,7 @@ u32 block_0c1d5132(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D5132, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D5134, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D5136, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C0377E8; /* BT */
-    return 0x0C1D5138;
+    return 0x0C0377E8; /* static branch */
 }
 
 /* Block 0x0C039CF6, 12B, 6 ops */
@@ -3894,8 +3752,7 @@ u32 block_0c039cf6(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp = MEM_R32(ctx->r[0]); memcpy(&ctx->fr[5], &tmp, 4); }
     ctx->r[0] = 0x0C039DE4; /* mova */
     { u32 tmp = MEM_R32(ctx->r[0]); memcpy(&ctx->fr[0], &tmp, 4); }
-    if (ctx->sr.T) return 0x0C039D08; /* BT */
-    return 0x0C039D02;
+    return 0x0C039D02; /* sequential */
 }
 
 /* Block 0x0C039DAC, 12B, 6 ops */
@@ -3908,8 +3765,7 @@ u32 block_0c039dac(u8* _mem, Sh4Context* _ctx) {
     /* nop */
     /* nop */
     /* nop */
-    if (ctx->sr.T) return 0x0C039DBC; /* BT */
-    return 0x0C039DB8;
+    return 0x0C039DB8; /* sequential */
 }
 
 /* Block 0x0C1D4F80, 6B, 3 ops */
@@ -3973,8 +3829,7 @@ u32 block_0c10145e(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[11] += ctx->fr[0] * ctx->fr[13];
     sh4_interp_op(mem, ctx, 0x0C101486, 0xFFFFu); /* UNIMPL 0xFFFF */
     ctx->fr[9] += ctx->fr[0] * ctx->fr[12];
-    if (ctx->sr.T) return 0x0C042B04; /* BT */
-    return 0x0C10148A;
+    return 0x0C042B04; /* call target */
 }
 
 /* Block 0x0C042B04, 30B, 15 ops */
@@ -4010,8 +3865,7 @@ u32 block_0c042b8c(u8* _mem, Sh4Context* _ctx) {
     /* bra — handled at block level */
     /* nop */
     /* bra — handled at block level */
-    if (ctx->sr.T) return 0x0C042BD6; /* BT */
-    return 0x0C042B98;
+    return 0x0C042B98; /* sequential */
 }
 
 /* Block 0x0C042BD6, 12B, 6 ops */
@@ -4061,7 +3915,7 @@ u32 block_0c042be2(u8* _mem, Sh4Context* _ctx) {
     ctx->pr = 0x0C042C1A; /* bsr 0x0C042E20 */
     ctx->r[0] += (s32)-1;
     /* bf — handled at block level */
-    return 0x0C042C32;
+    return 0x0C042C32; /* bsr */
 }
 
 /* Block 0x0C042C32, 58B, 29 ops */
@@ -4097,8 +3951,7 @@ u32 block_0c042c32(u8* _mem, Sh4Context* _ctx) {
     /* bf/s — delay slot handled at block level */
     ctx->r[4] += (s32)32;
     ctx->r[14] = MEM_R32(ctx->r[14] + 4);
-    if (!ctx->sr.T) return 0x0C048E2C; /* BF */
-    return 0x0C042C6C;
+    return 0x0C048E2C; /* bsr */
 }
 
 /* Block 0x0C048E2C, 16B, 8 ops */
@@ -4113,8 +3966,7 @@ u32 block_0c048e2c(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp = MEM_R32(ctx->r[0] + ctx->r[4]); memcpy(&ctx->fr[3], &tmp, 4); }
     ctx->r[0] = (u32)(s32)80;
     { u32 tmp; memcpy(&tmp, &ctx->fr[3], 4); MEM_W32(ctx->r[0] + ctx->r[5], tmp); }
-    if (ctx->sr.T) return 0x0C048E42; /* BT */
-    return 0x0C048E3C;
+    return 0x0C048E3C; /* sequential */
 }
 
 /* Block 0x0C048E42, 4B, 2 ops */
@@ -4134,8 +3986,7 @@ u32 block_0c042c6c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] += ctx->r[4];
     { u32 tmp = MEM_R32(ctx->r[14]); memcpy(&ctx->fr[4], &tmp, 4); ctx->r[14] += 4; }
     { u32 tmp = MEM_R32(ctx->r[14]); memcpy(&ctx->fr[5], &tmp, 4); ctx->r[14] += 4; }
-    if (ctx->sr.T) return 0x0C1C111C; /* BT */
-    return 0x0C042C74;
+    return 0x0C1C111C; /* call target */
 }
 
 /* Block 0x0C1C111C, 20B, 10 ops */
@@ -4152,8 +4003,7 @@ u32 block_0c1c111c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C112A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C112C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C112E, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C03764E; /* BT */
-    return 0x0C1C1130;
+    return 0x0C03764E; /* call target */
 }
 
 /* Block 0x0C1C1130, 6B, 3 ops */
@@ -4163,8 +4013,7 @@ u32 block_0c1c1130(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C1130, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C1132, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C1134, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C1196; /* BT */
-    return 0x0C1C1136;
+    return 0x0C1C1136; /* sequential */
 }
 
 /* Block 0x0C1C1136, 26B, 13 ops */
@@ -4184,8 +4033,7 @@ u32 block_0c1c1136(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C114A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C114C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C114E, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB998; /* BT */
-    return 0x0C1C1150;
+    return 0x0C1FB998; /* call target */
 }
 
 /* Block 0x0C1C1150, 58B, 29 ops */
@@ -4221,8 +4069,7 @@ u32 block_0c1c1150(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C1184, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C1186, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C1188, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB900; /* BT */
-    return 0x0C1C118A;
+    return 0x0C1FB900; /* call target */
 }
 
 /* Block 0x0C1C118A, 24B, 12 ops */
@@ -4250,8 +4097,7 @@ u32 block_0c042c74(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     { u32 tmp = MEM_R32(ctx->r[14]); memcpy(&ctx->fr[6], &tmp, 4); }
     ctx->r[1] = ctx->r[14];
-    if (ctx->sr.T) return 0x0C042D6C; /* BT */
-    return 0x0C042C78;
+    return 0x0C042C78; /* sequential */
 }
 
 /* Block 0x0C042C78, 14B, 7 ops */
@@ -4265,8 +4111,7 @@ u32 block_0c042c78(u8* _mem, Sh4Context* _ctx) {
     ctx->sr.T = (s32)ctx->r[0] > 0 ? 1 : 0;
     ctx->r[0] = ctx->r[8] & 0xFF;
     /* bf/s — delay slot handled at block level */
-    if (!ctx->sr.T) return 0x0C1FB900; /* BF */
-    return 0x0C042C86;
+    return 0x0C1FB900; /* call target */
 }
 
 /* Block 0x0C042C86, 22B, 11 ops */
@@ -4288,8 +4133,7 @@ u32 block_0c042c86(u8* _mem, Sh4Context* _ctx) {
     ctx->fpul = ctx->r[0];
     ctx->r[0] = (u32)(s32)(s8)ctx->r[2];
     ctx->fr[0] = (float)(s32)ctx->fpul;
-    if (ctx->sr.T) return 0x0C042CD0; /* BT */
-    return 0x0C042C9C;
+    return 0x0C042C9C; /* sequential */
 }
 
 /* Block 0x0C042CD0, 28B, 14 ops */
@@ -4310,8 +4154,7 @@ u32 block_0c042cd0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[8] >>= 8;
     ctx->fr[9] = (float)(s32)ctx->fpul;
     ctx->fpul = ctx->r[8];
-    if (ctx->sr.T) return 0x0C1D0BEC; /* BT */
-    return 0x0C042CEC;
+    return 0x0C1D0BEC; /* call target */
 }
 
 /* Block 0x0C1D0BEC, 16B, 8 ops */
@@ -4326,8 +4169,7 @@ u32 block_0c1d0bec(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0BF6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0BF8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0BFA, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C03763A; /* BT */
-    return 0x0C1D0BFC;
+    return 0x0C03763A; /* call target */
 }
 
 /* Block 0x0C1D0BFC, 6B, 3 ops */
@@ -4337,8 +4179,7 @@ u32 block_0c1d0bfc(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0BFC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0BFE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0C00, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D0C18; /* BT */
-    return 0x0C1D0C02;
+    return 0x0C1D0C02; /* sequential */
 }
 
 /* Block 0x0C1D0C02, 22B, 11 ops */
@@ -4356,8 +4197,7 @@ u32 block_0c1d0c02(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0C12, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0C14, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0C16, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB900; /* BT */
-    return 0x0C1D0C18;
+    return 0x0C1FB900; /* call target */
 }
 
 /* Block 0x0C1D0C18, 8B, 4 ops */
@@ -4380,8 +4220,7 @@ u32 block_0c042cec(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[11] *= ctx->fr[15];
     ctx->r[0] = ctx->fpul;
     ctx->fr[10] *= ctx->fr[14];
-    if (ctx->sr.T) return 0x0C027428; /* BT */
-    return 0x0C042CF6;
+    return 0x0C027428; /* call target */
 }
 
 /* Block 0x0C042CF6, 8B, 4 ops */
@@ -4392,8 +4231,7 @@ u32 block_0c042cf6(u8* _mem, Sh4Context* _ctx) {
     /* bf/s — delay slot handled at block level */
     ctx->fr[9] *= ctx->fr[13];
     ctx->fr[9] *= ctx->fr[2];
-    if (!ctx->sr.T) return 0x0C034ACA; /* BF */
-    return 0x0C042CFE;
+    return 0x0C034ACA; /* call target */
 }
 
 /* Block 0x0C034ACA, 24B, 12 ops */
@@ -4412,7 +4250,7 @@ u32 block_0c034aca(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C034ADC, 0x0000u); /* UNIMPL 0x0000 */
     /* bra — handled at block level */
     MEM_W8(ctx->r[0] + ctx->r[0], ctx->r[0]);
-    return 0x0C03483A;
+    return 0x0C034AD2 + 4 + ctx->r[12]; /* bsrf */
 }
 
 /* Block 0x0C034AE2, 10B, 5 ops */
@@ -4424,7 +4262,7 @@ u32 block_0c034ae2(u8* _mem, Sh4Context* _ctx) {
     ctx->pr = 0x0C034AEA; /* bsrf r12 */
     /* nop */
     /* nop */
-    return 0x0C034554;
+    return 0x0C034554; /* static branch */
 }
 
 /* Block 0x0C042CFE, 8B, 4 ops */
@@ -4435,8 +4273,7 @@ u32 block_0c042cfe(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[11] *= ctx->fr[2];
     ctx->sr.T = ctx->r[12] > ctx->r[0] ? 1 : 0;
     ctx->fr[8] *= ctx->fr[12];
-    if (ctx->sr.T) return 0x0C03483A; /* BT */
-    return 0x0C042D06;
+    return 0x0C03483A; /* call target */
 }
 
 /* Block 0x0C042D06, 8B, 4 ops */
@@ -4447,8 +4284,7 @@ u32 block_0c042d06(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[7] = ctx->fr[1];
     /* nop */
     /* nop */
-    if (ctx->sr.T) return 0x0C034600; /* BT */
-    return 0x0C042D0E;
+    return 0x0C034600; /* call target */
 }
 
 /* Block 0x0C042D0E, 4B, 2 ops */
@@ -4457,7 +4293,7 @@ u32 block_0c042d0e(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* nop */
     /* nop */
-    return 0x0C043278;
+    return 0x0C043278; /* call target */
 }
 
 /* Block 0x0C043278, 56B, 28 ops */
@@ -4503,8 +4339,7 @@ u32 block_0c042d12(u8* _mem, Sh4Context* _ctx) {
     /* nop */
     /* nop */
     /* nop */
-    if (ctx->sr.T) return 0x0C1C3D60; /* BT */
-    return 0x0C042D1A;
+    return 0x0C1C3D60; /* call target */
 }
 
 /* Block 0x0C1C3D60, 30B, 15 ops */
@@ -4526,8 +4361,7 @@ u32 block_0c1c3d60(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C3D78, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3D7A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3D7C, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C3D82; /* BT */
-    return 0x0C1C3EAC;
+    return 0x0C1C3D7E; /* sequential */
 }
 
 /* Block 0x0C1C3D82, 18B, 9 ops */
@@ -4543,8 +4377,7 @@ u32 block_0c1c3d82(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C3D8E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3D90, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3D92, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C3D98; /* BT */
-    return 0x0C1C3EAC;
+    return 0x0C1C3D94; /* sequential */
 }
 
 /* Block 0x0C1C3D98, 10B, 5 ops */
@@ -4556,8 +4389,7 @@ u32 block_0c1c3d98(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C3D9C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3D9E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3DA0, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C3DB2; /* BT */
-    return 0x0C1C3DA2;
+    return 0x0C1C3DA2; /* sequential */
 }
 
 /* Block 0x0C1C3DB2, 8B, 4 ops */
@@ -4568,8 +4400,7 @@ u32 block_0c1c3db2(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C3DB4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3DB6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3DB8, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C3DD8; /* BT */
-    return 0x0C1C3DBA;
+    return 0x0C1C3DBA; /* sequential */
 }
 
 /* Block 0x0C1C3DBA, 6B, 3 ops */
@@ -4579,8 +4410,7 @@ u32 block_0c1c3dba(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C3DBA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3DBC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3DBE, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C02CE34; /* BT */
-    return 0x0C1C3E1A;
+    return 0x0C02CE34; /* call target */
 }
 
 /* Block 0x0C02CE34, 18B, 9 ops */
@@ -4631,7 +4461,7 @@ u32 block_0c1c3dc0(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1C3DC0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3DC2, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1C3E1A;
+    return 0x0C1C3E1A; /* static branch */
 }
 
 /* Block 0x0C1C3E1A, 8B, 4 ops */
@@ -4642,8 +4472,7 @@ u32 block_0c1c3e1a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C3E1C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3E1E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3E20, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C3EAC; /* BT */
-    return 0x0C1C3E22;
+    return 0x0C1C3E22; /* sequential */
 }
 
 /* Block 0x0C1C3E22, 32B, 16 ops */
@@ -4666,8 +4495,7 @@ u32 block_0c1c3e22(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C3E3C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3E3E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3E40, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C3E46; /* BT */
-    return 0x0C1C3E42;
+    return 0x0C1C3E42; /* sequential */
 }
 
 /* Block 0x0C1C3E42, 4B, 2 ops */
@@ -4676,8 +4504,7 @@ u32 block_0c1c3e42(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1C3E42, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3E44, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C3E62; /* BT */
-    return 0x0C1C3E46;
+    return 0x0C1C3E46; /* sequential */
 }
 
 /* Block 0x0C1C3E62, 10B, 5 ops */
@@ -4689,8 +4516,7 @@ u32 block_0c1c3e62(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C3E66, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3E68, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3E6A, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C03763A; /* BT */
-    return 0x0C1C3E6C;
+    return 0x0C03763A; /* call target */
 }
 
 /* Block 0x0C1C3E6C, 6B, 3 ops */
@@ -4700,8 +4526,7 @@ u32 block_0c1c3e6c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C3E6C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3E6E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3E70, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C3EA6; /* BT */
-    return 0x0C1C3E72;
+    return 0x0C1C3E72; /* sequential */
 }
 
 /* Block 0x0C1C3E72, 58B, 29 ops */
@@ -4737,8 +4562,7 @@ u32 block_0c1c3e72(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C3EA6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3EA8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3EAA, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C3E22; /* BT */
-    return 0x0C1C3EAC;
+    return 0x0C1C3EAC; /* sequential */
 }
 
 /* Block 0x0C1C3EAC, 18B, 9 ops */
@@ -4780,8 +4604,7 @@ u32 block_0c042d1a(u8* _mem, Sh4Context* _ctx) {
     ctx->sr.T = ctx->r[0] & 1; ctx->r[0] = (u32)((s32)ctx->r[0] >> 1);
     { u32 tmp; memcpy(&tmp, &ctx->fr[6], 4); ctx->r[6] -= 4; MEM_W32(ctx->r[6], tmp); }
     ctx->r[3]--; ctx->sr.T = ctx->r[3] == 0 ? 1 : 0;
-    if (ctx->sr.T) return 0x0C02A4FA; /* BT */
-    return 0x0C042D38;
+    return 0x0C02A4FA; /* call target */
 }
 
 /* Block 0x0C02A56A, 4B, 2 ops */
@@ -4790,7 +4613,7 @@ u32 block_0c02a56a(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[0] = (u32)(s32)40;
     ctx->r[3] = MEM_R32(0x0C02A664); /* @(PC,0xF4) */
-    return 0x0C02A6F4;
+    return 0x0C02A6F4; /* static branch */
 }
 
 /* Block 0x0C02A6F4, 14B, 7 ops */
@@ -4804,8 +4627,7 @@ u32 block_0c02a6f4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(0x0C02A730); /* @(PC,0x30) */
     ctx->pr = 0x0C02A702; /* jsr @r3 */
     ctx->r[4] = MEM_R32(ctx->r[4] + 8);
-    if (ctx->sr.T) return 0x0C02A6F8; /* BT */
-    return 0x0C02A702;
+    return 0x0C02A702; /* sequential */
 }
 
 /* Block 0x0C02A6F8, 10B, 5 ops */
@@ -4817,8 +4639,7 @@ u32 block_0c02a6f8(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(0x0C02A730); /* @(PC,0x30) */
     ctx->pr = 0x0C02A702; /* jsr @r3 */
     ctx->r[4] = MEM_R32(ctx->r[4] + 8);
-    if (ctx->sr.T) return 0x0C02A6F8; /* BT */
-    return 0x0C02A702;
+    return 0x0C02A702; /* sequential */
 }
 
 /* Block 0x0C02A702, 4B, 2 ops */
@@ -4827,7 +4648,7 @@ u32 block_0c02a702(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[3] = MEM_R32(0x0C02A734); /* @(PC,0x30) */
     ctx->r[4] = MEM_R32(0x0C02A738); /* @(PC,0x30) */
-    return 0x0C02A774;
+    return 0x0C02A774; /* static branch */
 }
 
 /* Block 0x0C042D38, 26B, 13 ops */
@@ -4929,8 +4750,7 @@ u32 block_0c03996c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C039978, 0x0000u); /* UNIMPL 0x0000 */
     ctx->sr.T = (ctx->r[11] >> 31) & 1; ctx->r[11] <<= 1;
     /* nop */
-    if (ctx->sr.T) return 0x0C03999E; /* BT */
-    return 0x0C03997E;
+    return 0x0C03997E; /* sequential */
 }
 
 /* Block 0x0C03997E, 8B, 4 ops */
@@ -4941,8 +4761,7 @@ u32 block_0c03997e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = (u32)(-(s32)ctx->r[4]);
     ctx->fpul = ctx->r[4];
     ctx->fr[3] = (float)(s32)ctx->fpul;
-    if (ctx->sr.T) return 0x0C03998E; /* BT */
-    return 0x0C039986;
+    return 0x0C039986; /* sequential */
 }
 
 /* Block 0x0C039986, 8B, 4 ops */
@@ -5054,8 +4873,7 @@ u32 block_0c025b9c(u8* _mem, Sh4Context* _ctx) {
     ctx->pr = 0x0C025BA0; /* jsr @r3 */
     ctx->r[8] = (u32)(s32)0;
     ctx->sr.T = (ctx->r[0] & ctx->r[0]) == 0 ? 1 : 0;
-    if (ctx->sr.T) return 0x0C025BAC; /* BT */
-    return 0x0C025BA2;
+    return 0x0C025BA2; /* sequential */
 }
 
 /* Block 0x0C025BAC, 10B, 5 ops */
@@ -5082,7 +4900,7 @@ u32 block_0c0255dc(u8* _mem, Sh4Context* _ctx) {
     ctx->r[12] += (s32)16;
     ctx->r[5] = (u32)(s32)1;
     /* bra — handled at block level */
-    return 0x0C025C68;
+    return 0x0C025C68; /* call target */
 }
 
 /* Block 0x0C0255EC, 14B, 7 ops */
@@ -5096,7 +4914,7 @@ u32 block_0c0255ec(u8* _mem, Sh4Context* _ctx) {
     /* nop */
     ctx->r[2] = MEM_R32(0x0C0257C4); /* @(PC,0x1CC) */
     ctx->r[3] = MEM_R32(0x0C0257C8); /* @(PC,0x1CC) */
-    return 0x0C0257F4;
+    return ctx->r[14]; /* jsr @r14 */
 }
 
 /* Block 0x0C0255FA, 10B, 5 ops */
@@ -5108,7 +4926,7 @@ u32 block_0c0255fa(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[3]);
     ctx->r[2] = MEM_R32(0x0C0257CC); /* @(PC,0x1C8) */
     ctx->r[3] = MEM_R32(0x0C0257D0); /* @(PC,0x1CC) */
-    return 0x0C0258AA;
+    return 0x0C0258AA; /* static branch */
 }
 
 /* Block 0x0C025BB6, 4B, 2 ops */
@@ -5117,7 +4935,7 @@ u32 block_0c025bb6(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[12] = ctx->r[8];
     ctx->pr = 0x0C025BBC; /* jsr @r11 */
-    return 0x0C025C3A;
+    return 0x0C025C3A; /* static branch */
 }
 
 /* Block 0x0C025C3A, 18B, 9 ops */
@@ -5146,8 +4964,7 @@ u32 block_0c025604(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C0257D4); /* @(PC,0x1C8) */
     ctx->pr = 0x0C025610; /* jsr @r13 */
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[2]);
-    if (ctx->sr.T) return 0x0C025614; /* BT */
-    return 0x0C025610;
+    return 0x0C025610; /* sequential */
 }
 
 /* Block 0x0C025610, 4B, 2 ops */
@@ -5156,7 +4973,7 @@ u32 block_0c025610(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[3] = (u32)(s32)(s8)MEM_R8(ctx->r[12]); ctx->r[12] += 1;
     ctx->r[10] = MEM_R32(0x0C0257D8); /* @(PC,0x1C4) */
-    return 0x0C0253C2;
+    return 0x0C0253C2; /* static branch */
 }
 
 /* Block 0x0C0253C2, 36B, 18 ops */
@@ -5192,8 +5009,7 @@ u32 block_0c0253e6(u8* _mem, Sh4Context* _ctx) {
     ctx->r[11] += ctx->r[2];
     /* bra — handled at block level */
     /* nop */
-    if (ctx->sr.T) return 0x0C0253EE; /* BT */
-    return 0x0C0253EC;
+    return 0x0C0253EC; /* sequential */
 }
 
 /* Block 0x0C0253EE, 16B, 8 ops */
@@ -5228,7 +5044,7 @@ u32 block_0c02540e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] &= 0x0Fu;
     ctx->r[0] <<= 2;
     ctx->r[2] &= ctx->r[3];
-    return 0x0C025CA2;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C025426, 20B, 10 ops */
@@ -5256,7 +5072,7 @@ u32 block_0c025444(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = ctx->r[14];
     MEM_W32(ctx->r[15], ctx->r[0]);
     ctx->pr = 0x0C02544C; /* bsr 0x0C025018 */
-    return 0x0C025850;
+    return 0x0C025850; /* bsr */
 }
 
 /* Block 0x0C02544A, 10B, 5 ops */
@@ -5268,7 +5084,7 @@ u32 block_0c02544a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[12] |= ctx->r[0];
     ctx->sr.T = (ctx->r[13] & ctx->r[13]) == 0 ? 1 : 0;
     /* bf — handled at block level */
-    return 0x0C0258D4;
+    return 0x0C0258D4; /* static branch */
 }
 
 /* Block 0x0C0384AE, 4B, 2 ops */
@@ -5290,8 +5106,7 @@ u32 block_0c1d78e0(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D78E6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D78E8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D78EA, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7924; /* BT */
-    return 0x0C1D78EC;
+    return 0x0C1D78EC; /* sequential */
 }
 
 /* Block 0x0C1D78EC, 8B, 4 ops */
@@ -5302,8 +5117,7 @@ u32 block_0c1d78ec(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D78EE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D78F0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D78F2, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7924; /* BT */
-    return 0x0C1D78F4;
+    return 0x0C1D78F4; /* sequential */
 }
 
 /* Block 0x0C0384B2, 4B, 2 ops */
@@ -5331,8 +5145,7 @@ u32 block_0c1d0b3a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0B4C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B4E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B50, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D0B58; /* BT */
-    return 0x0C1D0B52;
+    return 0x0C1D0B52; /* sequential */
 }
 
 /* Block 0x0C1D0B58, 8B, 4 ops */
@@ -5343,8 +5156,7 @@ u32 block_0c1d0b58(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0B5A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B5C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B5E, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D0B6C; /* BT */
-    return 0x0C1D0B60;
+    return 0x0C1D0B60; /* sequential */
 }
 
 /* Block 0x0C1D0B6C, 6B, 3 ops */
@@ -5354,7 +5166,7 @@ u32 block_0c1d0b6c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0B6C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B6E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B70, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D0B7C;
+    return 0x0C1D0B7C; /* static branch */
 }
 
 /* Block 0x0C1D0B7C, 4B, 2 ops */
@@ -5363,8 +5175,7 @@ u32 block_0c1d0b7c(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D0B7C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B7E, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D0B72; /* BT */
-    return 0x0C1D0B80;
+    return 0x0C1D0B80; /* sequential */
 }
 
 /* Block 0x0C1D0B72, 8B, 4 ops */
@@ -5375,7 +5186,7 @@ u32 block_0c1d0b72(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0B74, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B76, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B78, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D085C;
+    return 0x0C1D085C; /* call target */
 }
 
 /* Block 0x0C1D085C, 18B, 9 ops */
@@ -5391,8 +5202,7 @@ u32 block_0c1d085c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0868, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D086A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D086C, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C03763A; /* BT */
-    return 0x0C1D086E;
+    return 0x0C03763A; /* call target */
 }
 
 /* Block 0x0C1D086E, 6B, 3 ops */
@@ -5402,8 +5212,7 @@ u32 block_0c1d086e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D086E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0870, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0872, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D0918; /* BT */
-    return 0x0C1D0874;
+    return 0x0C1D0874; /* sequential */
 }
 
 /* Block 0x0C1D0874, 48B, 24 ops */
@@ -5434,8 +5243,7 @@ u32 block_0c1d0874(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D089E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D08A0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D08A2, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB900; /* BT */
-    return 0x0C1D08A4;
+    return 0x0C1FB900; /* call target */
 }
 
 /* Block 0x0C1D08A4, 124B, 62 ops */
@@ -5514,8 +5322,7 @@ u32 block_0c1d0b7a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0B7A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B7C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B7E, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D0B72; /* BT */
-    return 0x0C1D0B80;
+    return 0x0C1D0B80; /* sequential */
 }
 
 /* Block 0x0C1D0B80, 8B, 4 ops */
@@ -5526,7 +5333,7 @@ u32 block_0c1d0b80(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0B82, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B84, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B86, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D0BBE;
+    return 0x0C1D0BBE; /* static branch */
 }
 
 /* Block 0x0C1D0BBE, 10B, 5 ops */
@@ -5549,7 +5356,7 @@ u32 block_0c1d0810(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0812, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0814, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0816, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D07E4;
+    return 0x0C1D07E4; /* call target */
 }
 
 /* Block 0x0C1D07E4, 44B, 22 ops */
@@ -5605,8 +5412,7 @@ u32 block_0c1d0818(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D083A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D083C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D083E, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D0848; /* BT */
-    return 0x0C1D0840;
+    return 0x0C1D0840; /* sequential */
 }
 
 /* Block 0x0C1D0840, 8B, 4 ops */
@@ -5617,8 +5423,7 @@ u32 block_0c1d0840(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0842, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0844, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0846, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D0852; /* BT */
-    return 0x0C1D0848;
+    return 0x0C1D0848; /* sequential */
 }
 
 /* Block 0x0C1D0852, 10B, 5 ops */
@@ -5689,8 +5494,7 @@ u32 block_0c1c3ee8(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C3F06, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3F08, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3F0A, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C3FC0; /* BT */
-    return 0x0C1C3F0C;
+    return 0x0C1C3F0C; /* sequential */
 }
 
 /* Block 0x0C1C3F0C, 142B, 71 ops */
@@ -5768,7 +5572,7 @@ u32 block_0c1c3f0c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C3F94, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3F96, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3F98, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1C409E;
+    return 0x0C1C409E; /* static branch */
 }
 
 /* Block 0x0C1C409E, 14B, 7 ops */
@@ -5782,8 +5586,7 @@ u32 block_0c1c409e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C40A6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C40A8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C40AA, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C414A; /* BT */
-    return 0x0C1C40AC;
+    return 0x0C1C40AC; /* sequential */
 }
 
 /* Block 0x0C1C40AC, 8B, 4 ops */
@@ -5794,8 +5597,7 @@ u32 block_0c1c40ac(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C40AE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C40B0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C40B2, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C4128; /* BT */
-    return 0x0C1C40B4;
+    return 0x0C1C40B4; /* sequential */
 }
 
 /* Block 0x0C1C40B4, 60B, 30 ops */
@@ -5832,8 +5634,7 @@ u32 block_0c1c40b4(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C40EA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C40EC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C40EE, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C41CE; /* BT */
-    return 0x0C1C40F0;
+    return 0x0C1C40F0; /* sequential */
 }
 
 /* Block 0x0C1C41CE, 6B, 3 ops */
@@ -5853,8 +5654,7 @@ u32 block_0c023910(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->pr);
     ctx->r[15] += (s32)-4;
     MEM_W32(ctx->r[15], ctx->r[5]);
-    if (ctx->sr.T) return 0x0C02391C; /* BT */
-    return 0x0C023916;
+    return 0x0C023916; /* sequential */
 }
 
 /* Block 0x0C023916, 6B, 3 ops */
@@ -5864,7 +5664,7 @@ u32 block_0c023916(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(ctx->r[15]);
     ctx->r[3] = MEM_R32(0x0C023A44); /* @(PC,0x128) */
     ctx->r[4] = MEM_R32(ctx->r[4] + 8);
-    return 0x0C023A0E;
+    return 0x0C023A0E; /* static branch */
 }
 
 /* Block 0x0C028DEC, 6B, 3 ops */
@@ -5874,8 +5674,7 @@ u32 block_0c028dec(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = ctx->r[1];
     ctx->r[0] >>= 2;
     ctx->sr.T = ctx->r[0] & 1; ctx->r[0] >>= 1;
-    if (ctx->sr.T) return 0x0C028E32; /* BT */
-    return 0x0C028DF2;
+    return 0x0C028DF2; /* sequential */
 }
 
 /* Block 0x0C028DF2, 68B, 34 ops */
@@ -5928,7 +5727,7 @@ u32 block_0c026ac0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = ctx->macl;
     ctx->r[7] += ctx->r[3];
     ctx->r[3] = MEM_R32(ctx->r[15]);
-    return 0x0C026AA4;
+    return 0x0C026AA4; /* static branch */
 }
 
 /* Block 0x0C03852E, 6B, 3 ops */
@@ -5957,8 +5756,7 @@ u32 block_0c04334c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[12] = ctx->pr;
     /* bra — handled at block level */
     MEM_W16(ctx->r[12] + ctx->r[0], ctx->r[0]);
-    if (ctx->sr.T) return 0x0C04337E; /* BT */
-    return 0x0C043364;
+    return 0x0C043364; /* sequential */
 }
 
 /* Block 0x0C043364, 6B, 3 ops */
@@ -5968,8 +5766,7 @@ u32 block_0c043364(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C043364, 0x8AC8u); /* UNIMPL 0x8AC8 */
     ctx->pr = 0x0C04336A; /* bsrf r12 */
     ctx->r[0] = (u32)(s32)(s8)MEM_R8(ctx->r[14]);
-    if (ctx->sr.T) return 0x0C04337E; /* BT */
-    return 0x0C04336A;
+    return 0x0C04336A; /* sequential */
 }
 
 /* Block 0x0C04336A, 10B, 5 ops */
@@ -5981,8 +5778,7 @@ u32 block_0c04336a(u8* _mem, Sh4Context* _ctx) {
     MEM_W8(ctx->r[14], ctx->r[0]);
     MEM_W32(ctx->r[3], ctx->r[8]);
     ctx->r[0] = (u32)(s32)(s8)MEM_R8(ctx->r[12]);
-    if (ctx->sr.T) return 0x0C04339C; /* BT */
-    return 0x0C043374;
+    return 0x0C043374; /* sequential */
 }
 
 /* Block 0x0C04339C, 12B, 6 ops */
@@ -6018,8 +5814,7 @@ u32 block_0c1c11d4(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C11DC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C11DE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C11E0, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C11EA; /* BT */
-    return 0x0C1C11E2;
+    return 0x0C1C11E2; /* sequential */
 }
 
 /* Block 0x0C1C11EA, 12B, 6 ops */
@@ -6032,8 +5827,7 @@ u32 block_0c1c11ea(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C11F0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C11F2, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C11F4, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C12A6; /* BT */
-    return 0x0C1C11F6;
+    return 0x0C1C11F6; /* sequential */
 }
 
 /* Block 0x0C1C12A6, 6B, 3 ops */
@@ -6052,8 +5846,7 @@ u32 block_0c1d0b60(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D0B60, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B62, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D0B88; /* BT */
-    return 0x0C1D0B64;
+    return 0x0C1D0B64; /* sequential */
 }
 
 /* Block 0x0C1D0B88, 14B, 7 ops */
@@ -6067,8 +5860,7 @@ u32 block_0c1d0b88(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0B90, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B92, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B94, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D0BBE; /* BT */
-    return 0x0C1D0B96;
+    return 0x0C1D0B96; /* sequential */
 }
 
 /* Block 0x0C1C40A2, 10B, 5 ops */
@@ -6080,8 +5872,7 @@ u32 block_0c1c40a2(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C40A6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C40A8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C40AA, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C414A; /* BT */
-    return 0x0C1C40AC;
+    return 0x0C1C40AC; /* sequential */
 }
 
 /* Block 0x0C1C40F0, 28B, 14 ops */
@@ -6102,7 +5893,7 @@ u32 block_0c1c40f0(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C4106, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C4108, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C410A, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1C41CE;
+    return 0x0C1C41CE; /* static branch */
 }
 
 /* Block 0x0C1C4128, 12B, 6 ops */
@@ -6115,8 +5906,7 @@ u32 block_0c1c4128(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C412E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C4130, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C4132, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C41B8; /* BT */
-    return 0x0C1C4134;
+    return 0x0C1C4134; /* sequential */
 }
 
 /* Block 0x0C1C41B8, 10B, 5 ops */
@@ -6128,8 +5918,7 @@ u32 block_0c1c41b8(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C41BC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C41BE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C41C0, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C41CE; /* BT */
-    return 0x0C1C41C2;
+    return 0x0C1C41C2; /* sequential */
 }
 
 /* Block 0x0C1C4134, 22B, 11 ops */
@@ -6147,7 +5936,7 @@ u32 block_0c1c4134(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C4144, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C4146, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C4148, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1C41B8;
+    return 0x0C1C41B8; /* static branch */
 }
 
 /* Block 0x0C1D0848, 10B, 5 ops */
@@ -6159,8 +5948,7 @@ u32 block_0c1d0848(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D084C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D084E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0850, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C0377E8; /* BT */
-    return 0x0C1D0852;
+    return 0x0C0377E8; /* static branch */
 }
 
 /* Block 0x0C1D0B96, 6B, 3 ops */
@@ -6170,7 +5958,7 @@ u32 block_0c1d0b96(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0B96, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B98, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B9A, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D09D8;
+    return 0x0C1D09D8; /* call target */
 }
 
 /* Block 0x0C1D09D8, 16B, 8 ops */
@@ -6185,8 +5973,7 @@ u32 block_0c1d09d8(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D09E2, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D09E4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D09E6, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C03763A; /* BT */
-    return 0x0C1D09E8;
+    return 0x0C03763A; /* call target */
 }
 
 /* Block 0x0C1D09E8, 6B, 3 ops */
@@ -6196,8 +5983,7 @@ u32 block_0c1d09e8(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D09E8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D09EA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D09EC, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D0A46; /* BT */
-    return 0x0C1D09EE;
+    return 0x0C1D09EE; /* sequential */
 }
 
 /* Block 0x0C1D09EE, 42B, 21 ops */
@@ -6225,8 +6011,7 @@ u32 block_0c1d09ee(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0A12, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0A14, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0A16, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB900; /* BT */
-    return 0x0C1D0A18;
+    return 0x0C1FB900; /* call target */
 }
 
 /* Block 0x0C1D0A18, 54B, 27 ops */
@@ -6274,7 +6059,7 @@ u32 block_0c1d0b9c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0BA4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0BA6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0BA8, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D0BBE;
+    return 0x0C1D0BBE; /* static branch */
 }
 
 /* Block 0x0C1D094C, 8B, 4 ops */
@@ -6285,7 +6070,7 @@ u32 block_0c1d094c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D094E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0950, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0952, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D07E4;
+    return 0x0C1D07E4; /* call target */
 }
 
 /* Block 0x0C1D0954, 96B, 48 ops */
@@ -6340,8 +6125,7 @@ u32 block_0c1d0954(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D09AE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D09B0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D09B2, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D09BC; /* BT */
-    return 0x0C1D09B4;
+    return 0x0C1D09B4; /* sequential */
 }
 
 /* Block 0x0C1D09BC, 8B, 4 ops */
@@ -6352,8 +6136,7 @@ u32 block_0c1d09bc(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D09BE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D09C0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D09C2, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D09CE; /* BT */
-    return 0x0C1D09C4;
+    return 0x0C1D09C4; /* sequential */
 }
 
 /* Block 0x0C1D09CE, 10B, 5 ops */
@@ -6374,8 +6157,7 @@ u32 block_0c1d0b64(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D0B64, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B66, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D0BAA; /* BT */
-    return 0x0C1D0BBE;
+    return 0x0C1D0B68; /* sequential */
 }
 
 /* Block 0x0C1D0BAA, 6B, 3 ops */
@@ -6385,7 +6167,7 @@ u32 block_0c1d0baa(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0BAA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0BAC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0BAE, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D0AD4;
+    return 0x0C1D0AD4; /* call target */
 }
 
 /* Block 0x0C1D0AD4, 16B, 8 ops */
@@ -6400,8 +6182,7 @@ u32 block_0c1d0ad4(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0ADE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0AE0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0AE2, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C03763A; /* BT */
-    return 0x0C1D0AE4;
+    return 0x0C03763A; /* call target */
 }
 
 /* Block 0x0C1D0AE4, 6B, 3 ops */
@@ -6411,8 +6192,7 @@ u32 block_0c1d0ae4(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0AE4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0AE6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0AE8, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D0B32; /* BT */
-    return 0x0C1D0AEA;
+    return 0x0C1D0AEA; /* sequential */
 }
 
 /* Block 0x0C1D0AEA, 42B, 21 ops */
@@ -6440,8 +6220,7 @@ u32 block_0c1d0aea(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0B0E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B10, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0B12, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB900; /* BT */
-    return 0x0C1D0B14;
+    return 0x0C1FB900; /* call target */
 }
 
 /* Block 0x0C1D0B14, 38B, 19 ops */
@@ -6481,8 +6260,7 @@ u32 block_0c1d0bb0(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0BB8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0BBA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0BBC, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C0377E8; /* BT */
-    return 0x0C1D0BBE;
+    return 0x0C0377E8; /* static branch */
 }
 
 /* Block 0x0C1D0A4E, 64B, 32 ops */
@@ -6521,8 +6299,7 @@ u32 block_0c1d0a4e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0A88, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0A8A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0A8C, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D0A94; /* BT */
-    return 0x0C1D0A8E;
+    return 0x0C1D0A8E; /* sequential */
 }
 
 /* Block 0x0C1D0A94, 8B, 4 ops */
@@ -6545,8 +6322,7 @@ u32 block_0c1d09c4(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D09C8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D09CA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D09CC, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C0377E8; /* BT */
-    return 0x0C1D09CE;
+    return 0x0C0377E8; /* static branch */
 }
 
 /* Block 0x0C1D0A8E, 6B, 3 ops */
@@ -6556,8 +6332,7 @@ u32 block_0c1d0a8e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D0A8E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0A90, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D0A92, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C0377E8; /* BT */
-    return 0x0C1D0A94;
+    return 0x0C0377E8; /* static branch */
 }
 
 /* Block 0x0C1C11F6, 16B, 8 ops */
@@ -6572,7 +6347,7 @@ u32 block_0c1c11f6(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C1200, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C1202, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C1204, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1C1230;
+    return 0x0C1C1230; /* static branch */
 }
 
 /* Block 0x0C1C1230, 4B, 2 ops */
@@ -6581,8 +6356,7 @@ u32 block_0c1c1230(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1C1230, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C1232, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C1206; /* BT */
-    return 0x0C1C1234;
+    return 0x0C1C1234; /* sequential */
 }
 
 /* Block 0x0C1C1206, 28B, 14 ops */
@@ -6603,8 +6377,7 @@ u32 block_0c1c1206(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C121C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C121E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C1220, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C122E; /* BT */
-    return 0x0C1C1222;
+    return 0x0C1C1222; /* sequential */
 }
 
 /* Block 0x0C1C1222, 8B, 4 ops */
@@ -6615,8 +6388,7 @@ u32 block_0c1c1222(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C1224, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C1226, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C1228, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C122E; /* BT */
-    return 0x0C1C122A;
+    return 0x0C1C122A; /* sequential */
 }
 
 /* Block 0x0C1C122A, 10B, 5 ops */
@@ -6628,8 +6400,7 @@ u32 block_0c1c122a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C122E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C1230, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C1232, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C1206; /* BT */
-    return 0x0C1C1234;
+    return 0x0C1C1234; /* sequential */
 }
 
 /* Block 0x0C1C122E, 6B, 3 ops */
@@ -6639,8 +6410,7 @@ u32 block_0c1c122e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C122E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C1230, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C1232, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C1206; /* BT */
-    return 0x0C1C1234;
+    return 0x0C1C1234; /* sequential */
 }
 
 /* Block 0x0C1C1234, 10B, 5 ops */
@@ -6652,8 +6422,7 @@ u32 block_0c1c1234(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C1238, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C123A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C123C, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C1278; /* BT */
-    return 0x0C1C123E;
+    return 0x0C1C123E; /* sequential */
 }
 
 /* Block 0x0C1C1278, 10B, 5 ops */
@@ -6665,8 +6434,7 @@ u32 block_0c1c1278(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C127C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C127E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C1280, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C1288; /* BT */
-    return 0x0C1C1282;
+    return 0x0C1C1282; /* sequential */
 }
 
 /* Block 0x0C1C1282, 6B, 3 ops */
@@ -6676,8 +6444,7 @@ u32 block_0c1c1282(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C1282, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C1284, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C1286, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C129C; /* BT */
-    return 0x0C1C1288;
+    return 0x0C1C1288; /* sequential */
 }
 
 /* Block 0x0C1C1288, 30B, 15 ops */
@@ -6699,8 +6466,7 @@ u32 block_0c1c1288(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C12A0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C12A2, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C12A4, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C0432B0; /* BT */
-    return 0x0C1C12A6;
+    return 0x0C0432B0; /* static branch */
 }
 
 /* Block 0x0C0432B0, 64B, 32 ops */
@@ -6748,7 +6514,7 @@ u32 block_0c02a572(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[0] = (u32)(s32)8;
     { u32 tmp = MEM_R32(ctx->r[0] + ctx->r[15]); memcpy(&ctx->fr[3], &tmp, 4); }
-    return 0x0C02A706;
+    return 0x0C02A706; /* static branch */
 }
 
 /* Block 0x0C02A706, 12B, 6 ops */
@@ -6761,8 +6527,7 @@ u32 block_0c02a706(u8* _mem, Sh4Context* _ctx) {
     ctx->pr = 0x0C02A710; /* jsr @r2 */
     /* nop */
     ctx->r[3] = MEM_R32(0x0C02A740); /* @(PC,0x2C) */
-    if (ctx->sr.T) return 0x0C02A708; /* BT */
-    return 0x0C02A712;
+    return 0x0C02A712; /* sequential */
 }
 
 /* Block 0x0C02A708, 10B, 5 ops */
@@ -6774,8 +6539,7 @@ u32 block_0c02a708(u8* _mem, Sh4Context* _ctx) {
     ctx->pr = 0x0C02A710; /* jsr @r2 */
     /* nop */
     ctx->r[3] = MEM_R32(0x0C02A740); /* @(PC,0x2C) */
-    if (ctx->sr.T) return 0x0C02A708; /* BT */
-    return 0x0C02A712;
+    return 0x0C02A712; /* sequential */
 }
 
 /* Block 0x0C02A712, 4B, 2 ops */
@@ -6784,7 +6548,7 @@ u32 block_0c02a712(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[4] = (u32)(s32)1;
     /* jmp — handled at block level */
-    return 0x0C02A774;
+    return 0x0C02A774; /* static branch */
 }
 
 /* Block 0x0C0432F0, 26B, 13 ops */
@@ -6846,7 +6610,7 @@ u32 block_0c0479bc(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     /* bf/s — delay slot handled at block level */
     ctx->r[5] = (u32)(s32)0;
-    return 0x0C0479CE;
+    return 0x0C0479CE; /* static branch */
 }
 
 /* Block 0x0C0479CE, 10B, 5 ops */
@@ -6884,8 +6648,7 @@ u32 block_0c045f9c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] <<= 2;
     ctx->r[12] = (u32)(s32)(s16)MEM_R16(0x0C046040);
     ctx->r[10] += ctx->r[3];
-    if (ctx->sr.T) return 0x0C046058; /* BT */
-    return 0x0C045FAE;
+    return 0x0C045FAE; /* sequential */
 }
 
 /* Block 0x0C045FAE, 8B, 4 ops */
@@ -6896,8 +6659,7 @@ u32 block_0c045fae(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[2]);
     ctx->r[6] = MEM_R32(ctx->r[9]);
     ctx->r[7] = (u32)(s32)16;
-    if (ctx->sr.T) return 0x0C046058; /* BT */
-    return 0x0C045FB6;
+    return 0x0C045FB6; /* sequential */
 }
 
 /* Block 0x0C045FB6, 10B, 5 ops */
@@ -6909,8 +6671,7 @@ u32 block_0c045fb6(u8* _mem, Sh4Context* _ctx) {
     ctx->pr = 0x0C045FBE; /* jsr @r8 */
     ctx->r[4] = ctx->r[11];
     ctx->sr.T = ctx->r[0] == ctx->r[12] ? 1 : 0;
-    if (ctx->sr.T) return 0x0C046058; /* BT */
-    return 0x0C045FC0;
+    return 0x0C045FC0; /* sequential */
 }
 
 /* Block 0x0C045FC0, 56B, 28 ops */
@@ -6969,8 +6730,7 @@ u32 block_0c046006(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C046058); /* @(PC,0x4C) */
     MEM_W32(ctx->r[2], ctx->r[13]);
     ctx->r[0] = MEM_R32(0x0C04605C); /* @(PC,0x4C) */
-    if (ctx->sr.T) return 0x0C046058; /* BT */
-    return 0x0C04600E;
+    return 0x0C04600E; /* sequential */
 }
 
 /* Block 0x0C04600E, 58B, 29 ops */
@@ -7017,7 +6777,7 @@ u32 block_0c119af6(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C119AF8, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C119AFA, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C119AFC, 0x0FFFu); /* UNIMPL 0x0FFF */
-    return 0x0C119A88;
+    return 0x0C119A88; /* call target */
 }
 
 /* Block 0x0C119A88, 16B, 8 ops */
@@ -7032,8 +6792,7 @@ u32 block_0c119a88(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C119A92, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C119A94, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C119A96, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C046FDE; /* BT */
-    return 0x0C119A98;
+    return 0x0C046FDE; /* call target */
 }
 
 /* Block 0x0C119A98, 6B, 3 ops */
@@ -7043,8 +6802,7 @@ u32 block_0c119a98(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C119A98, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C119A9A, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C119A9C, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C119AA8; /* BT */
-    return 0x0C119A9E;
+    return 0x0C119A9E; /* sequential */
 }
 
 /* Block 0x0C119AA8, 8B, 4 ops */
@@ -7064,8 +6822,7 @@ u32 block_0c119afe(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C119AFE, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C119B00, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C119B0A; /* BT */
-    return 0x0C119B02;
+    return 0x0C119B02; /* sequential */
 }
 
 /* Block 0x0C119B02, 4B, 2 ops */
@@ -7074,7 +6831,7 @@ u32 block_0c119b02(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C119B02, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C119B04, 0x0FFFu); /* UNIMPL 0x0FFF */
-    return 0x0C119AC0;
+    return 0x0C119AC0; /* call target */
 }
 
 /* Block 0x0C119AC0, 16B, 8 ops */
@@ -7089,8 +6846,7 @@ u32 block_0c119ac0(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C119ACA, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C119ACC, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C119ACE, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C046FDE; /* BT */
-    return 0x0C119AD0;
+    return 0x0C046FDE; /* call target */
 }
 
 /* Block 0x0C119AD0, 6B, 3 ops */
@@ -7100,8 +6856,7 @@ u32 block_0c119ad0(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C119AD0, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C119AD2, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C119AD4, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C119AE0; /* BT */
-    return 0x0C119AD6;
+    return 0x0C119AD6; /* sequential */
 }
 
 /* Block 0x0C119AE0, 8B, 4 ops */
@@ -7121,8 +6876,7 @@ u32 block_0c119b06(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C119B06, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C119B08, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C119B12; /* BT */
-    return 0x0C119B0A;
+    return 0x0C119B0A; /* sequential */
 }
 
 /* Block 0x0C119B12, 10B, 5 ops */
@@ -7143,8 +6897,7 @@ u32 block_0c046048(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C046048, 0x0610u); /* UNIMPL 0x0610 */
     sh4_interp_op(mem, ctx, 0x0C04604A, 0x0C2Bu); /* UNIMPL 0x0C2B */
-    if (ctx->sr.T) return 0x0C046058; /* BT */
-    return 0x0C04604C;
+    return 0x0C04604C; /* sequential */
 }
 
 /* Block 0x0C046058, 8B, 4 ops */
@@ -7175,7 +6928,7 @@ u32 block_0c1d7924(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7924, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7926, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7290;
+    return 0x0C1D7290; /* call target */
 }
 
 /* Block 0x0C1D7290, 14B, 7 ops */
@@ -7189,8 +6942,7 @@ u32 block_0c1d7290(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7298, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D729A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D729C, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D72A6; /* BT */
-    return 0x0C1D7346;
+    return 0x0C1D729E; /* sequential */
 }
 
 /* Block 0x0C1D72A6, 24B, 12 ops */
@@ -7209,8 +6961,7 @@ u32 block_0c1d72a6(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D72B8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D72BA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D72BC, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB70C; /* BT */
-    return 0x0C1D72BE;
+    return 0x0C1FB70C; /* call target */
 }
 
 /* Block 0x0C1D72BE, 18B, 9 ops */
@@ -7226,8 +6977,7 @@ u32 block_0c1d72be(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D72CA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D72CC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D72CE, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7308; /* BT */
-    return 0x0C1D72D0;
+    return 0x0C1D72D0; /* sequential */
 }
 
 /* Block 0x0C1D72D0, 64B, 32 ops */
@@ -7266,8 +7016,7 @@ u32 block_0c1d72d0(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D730A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D730C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D730E, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7340; /* BT */
-    return 0x0C1D7310;
+    return 0x0C1D7310; /* sequential */
 }
 
 /* Block 0x0C1D7310, 54B, 27 ops */
@@ -7312,8 +7061,7 @@ u32 block_0c1d7928(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D792A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D792C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D792E, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D79F4; /* BT */
-    return 0x0C1D7930;
+    return 0x0C1D7930; /* sequential */
 }
 
 /* Block 0x0C1D7930, 16B, 8 ops */
@@ -7328,8 +7076,7 @@ u32 block_0c1d7930(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D793A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D793C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D793E, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D794C; /* BT */
-    return 0x0C1D7940;
+    return 0x0C1D7940; /* sequential */
 }
 
 /* Block 0x0C1D794C, 8B, 4 ops */
@@ -7340,8 +7087,7 @@ u32 block_0c1d794c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D794E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7950, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7952, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D795A; /* BT */
-    return 0x0C1D7954;
+    return 0x0C1D7954; /* sequential */
 }
 
 /* Block 0x0C1D795A, 26B, 13 ops */
@@ -7361,8 +7107,7 @@ u32 block_0c1d795a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D796E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7970, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7972, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D9158; /* BT */
-    return 0x0C1D7974;
+    return 0x0C1D9158; /* call target */
 }
 
 /* Block 0x0C1D7974, 16B, 8 ops */
@@ -7377,7 +7122,7 @@ u32 block_0c1d7974(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D797E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7980, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7982, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D79EC;
+    return 0x0C1D79EC; /* static branch */
 }
 
 /* Block 0x0C1D79EC, 4B, 2 ops */
@@ -7395,8 +7140,7 @@ u32 block_0c1d79f0(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D79F0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D79F2, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7984; /* BT */
-    return 0x0C1D79F4;
+    return 0x0C1D79F4; /* sequential */
 }
 
 /* Block 0x0C1D7984, 8B, 4 ops */
@@ -7419,8 +7163,7 @@ u32 block_0c1d798c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7990, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7992, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7994, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D79D0; /* BT */
-    return 0x0C1D7996;
+    return 0x0C1D7996; /* sequential */
 }
 
 /* Block 0x0C1D79D0, 28B, 14 ops */
@@ -7453,8 +7196,7 @@ u32 block_0c1d79f4(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D79F8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D79FA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D79FC, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7A20; /* BT */
-    return 0x0C1D79FE;
+    return 0x0C1D79FE; /* sequential */
 }
 
 /* Block 0x0C1D79FE, 10B, 5 ops */
@@ -7466,8 +7208,7 @@ u32 block_0c1d79fe(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7A02, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A04, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A06, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7A20; /* BT */
-    return 0x0C1D7A08;
+    return 0x0C1D7A08; /* sequential */
 }
 
 /* Block 0x0C1D7A08, 8B, 4 ops */
@@ -7478,8 +7219,7 @@ u32 block_0c1d7a08(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7A0A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A0C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A0E, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7A18; /* BT */
-    return 0x0C1D7A10;
+    return 0x0C1D7A10; /* sequential */
 }
 
 /* Block 0x0C1D7A18, 8B, 4 ops */
@@ -7490,7 +7230,7 @@ u32 block_0c1d7a18(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7A1A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A1C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A1E, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D6FFC;
+    return 0x0C1D6FFC; /* call target */
 }
 
 /* Block 0x0C1D6FFC, 18B, 9 ops */
@@ -7506,8 +7246,7 @@ u32 block_0c1d6ffc(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7008, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D700A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D700C, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C03763A; /* BT */
-    return 0x0C1D700E;
+    return 0x0C03763A; /* call target */
 }
 
 /* Block 0x0C1D700E, 6B, 3 ops */
@@ -7517,8 +7256,7 @@ u32 block_0c1d700e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D700E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7010, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7012, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D705E; /* BT */
-    return 0x0C1D7014;
+    return 0x0C1D7014; /* sequential */
 }
 
 /* Block 0x0C1D7014, 52B, 26 ops */
@@ -7551,8 +7289,7 @@ u32 block_0c1d7014(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7042, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7044, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7046, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D9308; /* BT */
-    return 0x0C1D7048;
+    return 0x0C1D9308; /* call target */
 }
 
 /* Block 0x0C1D7048, 22B, 11 ops */
@@ -7570,8 +7307,7 @@ u32 block_0c1d7048(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7058, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D705A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D705C, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C02618E; /* BT */
-    return 0x0C1D705E;
+    return 0x0C02618E; /* static branch */
 }
 
 /* Block 0x0C1D7A20, 10B, 5 ops */
@@ -7583,8 +7319,7 @@ u32 block_0c1d7a20(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7A24, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A26, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A28, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7A6E; /* BT */
-    return 0x0C1D7A2A;
+    return 0x0C1D7A2A; /* sequential */
 }
 
 /* Block 0x0C1D7940, 8B, 4 ops */
@@ -7595,8 +7330,7 @@ u32 block_0c1d7940(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7942, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7944, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7946, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7954; /* BT */
-    return 0x0C1D795A;
+    return 0x0C1D7948; /* sequential */
 }
 
 /* Block 0x0C1D7996, 12B, 6 ops */
@@ -7609,7 +7343,7 @@ u32 block_0c1d7996(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D799C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D799E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D79A0, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D79DA;
+    return 0x0C1D79DA; /* static branch */
 }
 
 /* Block 0x0C1D79DA, 18B, 9 ops */
@@ -7637,8 +7371,7 @@ u32 block_0c1d7a2a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7A2E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A30, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A32, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7A4C; /* BT */
-    return 0x0C1D7A34;
+    return 0x0C1D7A34; /* sequential */
 }
 
 /* Block 0x0C1D7A34, 8B, 4 ops */
@@ -7649,8 +7382,7 @@ u32 block_0c1d7a34(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7A36, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A38, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A3A, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7A44; /* BT */
-    return 0x0C1D7A3C;
+    return 0x0C1D7A3C; /* sequential */
 }
 
 /* Block 0x0C1D7A44, 8B, 4 ops */
@@ -7661,7 +7393,7 @@ u32 block_0c1d7a44(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7A46, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A48, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A4A, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7A86;
+    return 0x0C1D7A86; /* call target */
 }
 
 /* Block 0x0C1D7A86, 18B, 9 ops */
@@ -7677,8 +7409,7 @@ u32 block_0c1d7a86(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7A92, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A94, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A96, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C03763A; /* BT */
-    return 0x0C1D7A98;
+    return 0x0C03763A; /* call target */
 }
 
 /* Block 0x0C1D7A98, 6B, 3 ops */
@@ -7688,8 +7419,7 @@ u32 block_0c1d7a98(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7A98, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A9A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A9C, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7B5E; /* BT */
-    return 0x0C1D7A9E;
+    return 0x0C1D7A9E; /* sequential */
 }
 
 /* Block 0x0C1D7A9E, 48B, 24 ops */
@@ -7720,8 +7450,7 @@ u32 block_0c1d7a9e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7AC8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7ACA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7ACC, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1EC2F0; /* BT */
-    return 0x0C1D7ACE;
+    return 0x0C1EC2F0; /* call target */
 }
 
 /* Block 0x0C1D7ACE, 10B, 5 ops */
@@ -7733,8 +7462,7 @@ u32 block_0c1d7ace(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7AD2, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7AD4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7AD6, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB70C; /* BT */
-    return 0x0C1D7AD8;
+    return 0x0C1FB70C; /* call target */
 }
 
 /* Block 0x0C1D7AD8, 10B, 5 ops */
@@ -7746,8 +7474,7 @@ u32 block_0c1d7ad8(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7ADC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7ADE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7AE0, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7AE6; /* BT */
-    return 0x0C1D7AE2;
+    return 0x0C1D7AE2; /* sequential */
 }
 
 /* Block 0x0C1D7AE2, 4B, 2 ops */
@@ -7756,7 +7483,7 @@ u32 block_0c1d7ae2(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7AE2, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7AE4, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7AF0;
+    return 0x0C1D7AF0; /* static branch */
 }
 
 /* Block 0x0C1D7AF0, 4B, 2 ops */
@@ -7765,8 +7492,7 @@ u32 block_0c1d7af0(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7AF0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7AF2, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7AF8; /* BT */
-    return 0x0C1D7AF4;
+    return 0x0C1D7AF4; /* sequential */
 }
 
 /* Block 0x0C1D7AF8, 16B, 8 ops */
@@ -7781,8 +7507,7 @@ u32 block_0c1d7af8(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7B02, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7B04, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7B06, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1EC2F0; /* BT */
-    return 0x0C1D7B08;
+    return 0x0C1EC2F0; /* call target */
 }
 
 /* Block 0x0C1D7B08, 10B, 5 ops */
@@ -7794,8 +7519,7 @@ u32 block_0c1d7b08(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7B0C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7B0E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7B10, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB70C; /* BT */
-    return 0x0C1D7B12;
+    return 0x0C1FB70C; /* call target */
 }
 
 /* Block 0x0C1D7B12, 10B, 5 ops */
@@ -7807,8 +7531,7 @@ u32 block_0c1d7b12(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7B16, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7B18, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7B1A, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7B20; /* BT */
-    return 0x0C1D7B1C;
+    return 0x0C1D7B1C; /* sequential */
 }
 
 /* Block 0x0C1D7B1C, 4B, 2 ops */
@@ -7817,7 +7540,7 @@ u32 block_0c1d7b1c(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7B1C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7B1E, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7B2A;
+    return 0x0C1D7B2A; /* static branch */
 }
 
 /* Block 0x0C1D7B2A, 4B, 2 ops */
@@ -7826,8 +7549,7 @@ u32 block_0c1d7b2a(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7B2A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7B2C, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7B32; /* BT */
-    return 0x0C1D7B2E;
+    return 0x0C1D7B2E; /* sequential */
 }
 
 /* Block 0x0C1D7B2E, 4B, 2 ops */
@@ -7836,7 +7558,7 @@ u32 block_0c1d7b2e(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7B2E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7B30, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7B34;
+    return 0x0C1D7B34; /* static branch */
 }
 
 /* Block 0x0C1D7B34, 50B, 25 ops */
@@ -7880,8 +7602,7 @@ u32 block_0c1d7a4c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7A50, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A52, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A54, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7A6E; /* BT */
-    return 0x0C1D7A56;
+    return 0x0C1D7A56; /* sequential */
 }
 
 /* Block 0x0C1D7A56, 8B, 4 ops */
@@ -7892,8 +7613,7 @@ u32 block_0c1d7a56(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7A58, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A5A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A5C, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7A66; /* BT */
-    return 0x0C1D7A5E;
+    return 0x0C1D7A5E; /* sequential */
 }
 
 /* Block 0x0C1D7A66, 8B, 4 ops */
@@ -7904,7 +7624,7 @@ u32 block_0c1d7a66(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7A68, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A6A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A6C, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7C78;
+    return 0x0C1D7C78; /* call target */
 }
 
 /* Block 0x0C1D7C78, 22B, 11 ops */
@@ -7922,8 +7642,7 @@ u32 block_0c1d7c78(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7C88, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7C8A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7C8C, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C03763A; /* BT */
-    return 0x0C1D7C8E;
+    return 0x0C03763A; /* call target */
 }
 
 /* Block 0x0C1D7C8E, 6B, 3 ops */
@@ -7933,8 +7652,7 @@ u32 block_0c1d7c8e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7C8E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7C90, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7C92, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7C98; /* BT */
-    return 0x0C1D7E1C;
+    return 0x0C1D7C94; /* sequential */
 }
 
 /* Block 0x0C1D7C98, 50B, 25 ops */
@@ -7966,8 +7684,7 @@ u32 block_0c1d7c98(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7CC4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7CC6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7CC8, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1EC2F0; /* BT */
-    return 0x0C1D7CCA;
+    return 0x0C1EC2F0; /* call target */
 }
 
 /* Block 0x0C1D7CCA, 10B, 5 ops */
@@ -7979,8 +7696,7 @@ u32 block_0c1d7cca(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7CCE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7CD0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7CD2, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB70C; /* BT */
-    return 0x0C1D7CD4;
+    return 0x0C1FB70C; /* call target */
 }
 
 /* Block 0x0C1D7CD4, 10B, 5 ops */
@@ -7992,8 +7708,7 @@ u32 block_0c1d7cd4(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7CD8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7CDA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7CDC, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7CE2; /* BT */
-    return 0x0C1D7CDE;
+    return 0x0C1D7CDE; /* sequential */
 }
 
 /* Block 0x0C1D7CDE, 4B, 2 ops */
@@ -8002,7 +7717,7 @@ u32 block_0c1d7cde(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7CDE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7CE0, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7CEC;
+    return 0x0C1D7CEC; /* static branch */
 }
 
 /* Block 0x0C1D7CEC, 4B, 2 ops */
@@ -8011,8 +7726,7 @@ u32 block_0c1d7cec(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7CEC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7CEE, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7D30; /* BT */
-    return 0x0C1D7CF0;
+    return 0x0C1D7CF0; /* sequential */
 }
 
 /* Block 0x0C1D7D30, 22B, 11 ops */
@@ -8042,8 +7756,7 @@ u32 block_0c1d7d46(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7D4A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7D4C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7D4E, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB70C; /* BT */
-    return 0x0C1D7D50;
+    return 0x0C1FB70C; /* call target */
 }
 
 /* Block 0x0C1D7D50, 22B, 11 ops */
@@ -8061,8 +7774,7 @@ u32 block_0c1d7d50(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7D60, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7D62, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7D64, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7D6A; /* BT */
-    return 0x0C1D7D66;
+    return 0x0C1D7D66; /* sequential */
 }
 
 /* Block 0x0C1D7D66, 4B, 2 ops */
@@ -8071,7 +7783,7 @@ u32 block_0c1d7d66(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7D66, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7D68, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7D74;
+    return 0x0C1D7D74; /* static branch */
 }
 
 /* Block 0x0C1D7D74, 4B, 2 ops */
@@ -8080,8 +7792,7 @@ u32 block_0c1d7d74(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7D74, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7D76, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7D7C; /* BT */
-    return 0x0C1D7D78;
+    return 0x0C1D7D78; /* sequential */
 }
 
 /* Block 0x0C1D7D7C, 14B, 7 ops */
@@ -8107,8 +7818,7 @@ u32 block_0c1d7d8a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7D8E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7D90, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7D92, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB70C; /* BT */
-    return 0x0C1D7D94;
+    return 0x0C1FB70C; /* call target */
 }
 
 /* Block 0x0C1D7D94, 10B, 5 ops */
@@ -8120,8 +7830,7 @@ u32 block_0c1d7d94(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7D98, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7D9A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7D9C, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7DA2; /* BT */
-    return 0x0C1D7D9E;
+    return 0x0C1D7D9E; /* sequential */
 }
 
 /* Block 0x0C1D7D9E, 4B, 2 ops */
@@ -8130,7 +7839,7 @@ u32 block_0c1d7d9e(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7D9E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7DA0, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7DAC;
+    return 0x0C1D7DAC; /* static branch */
 }
 
 /* Block 0x0C1D7DAC, 4B, 2 ops */
@@ -8139,8 +7848,7 @@ u32 block_0c1d7dac(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7DAC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7DAE, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7DB4; /* BT */
-    return 0x0C1D7DB0;
+    return 0x0C1D7DB0; /* sequential */
 }
 
 /* Block 0x0C1D7DB4, 40B, 20 ops */
@@ -8176,8 +7884,7 @@ u32 block_0c1d7ddc(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7DDC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7DDE, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7DE4; /* BT */
-    return 0x0C1D7DE0;
+    return 0x0C1D7DE0; /* sequential */
 }
 
 /* Block 0x0C1D7DE0, 4B, 2 ops */
@@ -8186,7 +7893,7 @@ u32 block_0c1d7de0(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7DE0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7DE2, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7DEE;
+    return 0x0C1D7DEE; /* static branch */
 }
 
 /* Block 0x0C1D7DEE, 8B, 4 ops */
@@ -8197,8 +7904,7 @@ u32 block_0c1d7dee(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7DF0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7DF2, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7DF4, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7DFA; /* BT */
-    return 0x0C1D7DF6;
+    return 0x0C1D7DF6; /* sequential */
 }
 
 /* Block 0x0C1D7DFA, 46B, 23 ops */
@@ -8261,8 +7967,7 @@ u32 block_0c1d7078(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7086, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7088, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D708A, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1EC2F0; /* BT */
-    return 0x0C1D708C;
+    return 0x0C1EC2F0; /* call target */
 }
 
 /* Block 0x0C1D708C, 10B, 5 ops */
@@ -8274,8 +7979,7 @@ u32 block_0c1d708c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7090, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7092, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7094, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB70C; /* BT */
-    return 0x0C1D7096;
+    return 0x0C1FB70C; /* call target */
 }
 
 /* Block 0x0C1D7096, 12B, 6 ops */
@@ -8288,8 +7992,7 @@ u32 block_0c1d7096(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D709C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D709E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D70A0, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D70A6; /* BT */
-    return 0x0C1D70A2;
+    return 0x0C1D70A2; /* sequential */
 }
 
 /* Block 0x0C1D70A2, 4B, 2 ops */
@@ -8298,7 +8001,7 @@ u32 block_0c1d70a2(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D70A2, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D70A4, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D70B0;
+    return 0x0C1D70B0; /* static branch */
 }
 
 /* Block 0x0C1D70B0, 4B, 2 ops */
@@ -8307,8 +8010,7 @@ u32 block_0c1d70b0(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D70B0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D70B2, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D70B8; /* BT */
-    return 0x0C1D70B4;
+    return 0x0C1D70B4; /* sequential */
 }
 
 /* Block 0x0C1D70B4, 4B, 2 ops */
@@ -8317,7 +8019,7 @@ u32 block_0c1d70b4(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D70B4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D70B6, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D70BA;
+    return 0x0C1D70BA; /* static branch */
 }
 
 /* Block 0x0C1D70BA, 16B, 8 ops */
@@ -8366,8 +8068,7 @@ u32 block_0c1d7b78(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7B88, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7B8A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7B8C, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C0285FA; /* BT */
-    return 0x0C1D7B8E;
+    return 0x0C0285FA; /* call target */
 }
 
 /* Block 0x0C1D7B8E, 22B, 11 ops */
@@ -8425,8 +8126,7 @@ u32 block_0c1d7e3a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7E56, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7E58, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7E5A, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C02618E; /* BT */
-    return 0x0C1D7E5C;
+    return 0x0C02618E; /* static branch */
 }
 
 /* Block 0x0C1C41C2, 18B, 9 ops */
@@ -8467,8 +8167,7 @@ u32 block_0c1d7172(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7190, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7192, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7194, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D9158; /* BT */
-    return 0x0C1D7196;
+    return 0x0C1D9158; /* call target */
 }
 
 /* Block 0x0C1D7196, 14B, 7 ops */
@@ -8482,7 +8181,7 @@ u32 block_0c1d7196(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D719E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D71A0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D71A2, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D71C8;
+    return 0x0C1D71C8; /* static branch */
 }
 
 /* Block 0x0C1D71C8, 4B, 2 ops */
@@ -8500,8 +8199,7 @@ u32 block_0c1d71cc(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D71CC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D71CE, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D71A4; /* BT */
-    return 0x0C1D71D0;
+    return 0x0C1D71D0; /* sequential */
 }
 
 /* Block 0x0C1D71A4, 8B, 4 ops */
@@ -8574,8 +8272,7 @@ u32 block_0c1d7fbc(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7FDA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7FDC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7FDE, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7FEA; /* BT */
-    return 0x0C1D7FE0;
+    return 0x0C1D7FE0; /* sequential */
 }
 
 /* Block 0x0C1D7FEA, 14B, 7 ops */
@@ -8602,7 +8299,7 @@ u32 block_0c1d7ff8(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7FFE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D8000, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D8002, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D8028;
+    return 0x0C1D8028; /* static branch */
 }
 
 /* Block 0x0C1D8028, 4B, 2 ops */
@@ -8620,8 +8317,7 @@ u32 block_0c1d802c(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D802C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D802E, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D8004; /* BT */
-    return 0x0C1D8030;
+    return 0x0C1D8030; /* sequential */
 }
 
 /* Block 0x0C1D8004, 8B, 4 ops */
@@ -8687,8 +8383,7 @@ u32 block_0c101432(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C101444, 0xF8BDu); /* UNIMPL 0xF8BD */
     sh4_interp_op(mem, ctx, 0x0C101446, 0xFFFFu); /* UNIMPL 0xFFFF */
     sh4_interp_op(mem, ctx, 0x0C101448, 0xF8BDu); /* UNIMPL 0xF8BD */
-    if (ctx->sr.T) return 0x0C02A224; /* BT */
-    return 0x0C10144A;
+    return 0x0C02A224; /* call target */
 }
 
 /* Block 0x0C10144A, 8B, 4 ops */
@@ -8699,8 +8394,7 @@ u32 block_0c10144a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C10144C, 0xF8BDu); /* UNIMPL 0xF8BD */
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     sh4_interp_op(mem, ctx, 0x0C101450, 0xF8BDu); /* UNIMPL 0xF8BD */
-    if (ctx->sr.T) return 0x0C034600; /* BT */
-    return 0x0C10148A;
+    return 0x0C034600; /* call target */
 }
 
 /* Block 0x0C101452, 4B, 2 ops */
@@ -8709,7 +8403,7 @@ u32 block_0c101452(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C101452, 0xFFFFu); /* UNIMPL 0xFFFF */
     sh4_interp_op(mem, ctx, 0x0C101454, 0xF8BDu); /* UNIMPL 0xF8BD */
-    return 0x0C10148A;
+    return 0x0C10148A; /* static branch */
 }
 
 /* Block 0x0C1C1540, 6B, 3 ops */
@@ -8719,8 +8413,7 @@ u32 block_0c1c1540(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C1540, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C1542, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C1544, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C0377E8; /* BT */
-    return 0x0C1C1546;
+    return 0x0C0377E8; /* static branch */
 }
 
 /* Block 0x0C16F95C, 46B, 23 ops */
@@ -8750,8 +8443,7 @@ u32 block_0c16f95c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = MEM_R32(0x0C16FCF0); /* @(PC,0x368) */
     ctx->r[1] = MEM_R32(0x0C16FCD8); /* @(PC,0x350) */
     ctx->r[13] = MEM_R32(0x0C16FCD8); /* @(PC,0x34C) */
-    if (ctx->sr.T) return 0x0C0289DE; /* BT */
-    return 0x0C16F98A;
+    return 0x0C0289DE; /* call target */
 }
 
 /* Block 0x0C204980, 6B, 3 ops */
@@ -8761,8 +8453,7 @@ u32 block_0c204980(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C204980, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C204982, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C204984, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C204988; /* BT */
-    return 0x0C204986;
+    return 0x0C204986; /* sequential */
 }
 
 /* Block 0x0C204988, 6B, 3 ops */
@@ -8772,8 +8463,7 @@ u32 block_0c204988(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C204988, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C20498A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C20498C, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C204990; /* BT */
-    return 0x0C20498E;
+    return 0x0C20498E; /* sequential */
 }
 
 /* Block 0x0C204990, 10B, 5 ops */
@@ -8785,8 +8475,7 @@ u32 block_0c204990(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C204994, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C204996, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C204998, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C2049A0; /* BT */
-    return 0x0C20499A;
+    return 0x0C20499A; /* sequential */
 }
 
 /* Block 0x0C2049A0, 30B, 15 ops */
@@ -8808,8 +8497,7 @@ u32 block_0c2049a0(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C2049B8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C2049BA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C2049BC, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C2049C0; /* BT */
-    return 0x0C2049BE;
+    return 0x0C2049BE; /* sequential */
 }
 
 /* Block 0x0C2049C0, 4B, 2 ops */
@@ -8848,8 +8536,7 @@ u32 block_0c16f98a(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[11] + 16, ctx->r[1]);
     ctx->r[3]--; MEM_W8(ctx->r[3], ctx->r[2]);
     sh4_interp_op(mem, ctx, 0x0C16F99C, 0x2923u); /* UNIMPL 0x2923 */
-    if (ctx->sr.T) return 0x0C16F9A4; /* BT */
-    return 0x0C16F99E;
+    return 0x0C16F99E; /* sequential */
 }
 
 /* Block 0x0C16F99E, 6B, 3 ops */
@@ -8859,7 +8546,7 @@ u32 block_0c16f99e(u8* _mem, Sh4Context* _ctx) {
     ctx->sr.T = ctx->r[2] == ctx->r[3] ? 1 : 0;
     ctx->macl = (u32)((s32)(s16)ctx->r[15] * (s32)(s16)ctx->r[2]);
     ctx->r[6] |= ctx->r[2];
-    return 0x0C16F9A6;
+    return 0x0C16F9A6; /* static branch */
 }
 
 /* Block 0x0C16F9A6, 14B, 7 ops */
@@ -8873,8 +8560,7 @@ u32 block_0c16f9a6(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = MEM_R32(0x0C16FCFC); /* @(PC,0x34C) */
     ctx->r[14] = MEM_R32(0x0C16FD18); /* @(PC,0x364) */
     ctx->sr.T = ctx->fr[2] == ctx->fr[14] ? 1 : 0;
-    if (ctx->sr.T) return 0x0C02A224; /* BT */
-    return 0x0C16F9B4;
+    return 0x0C02A224; /* call target */
 }
 
 /* Block 0x0C1D7308, 8B, 4 ops */
@@ -8885,8 +8571,7 @@ u32 block_0c1d7308(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D730A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D730C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D730E, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7340; /* BT */
-    return 0x0C1D7310;
+    return 0x0C1D7310; /* sequential */
 }
 
 /* Block 0x0C1D7A10, 8B, 4 ops */
@@ -8897,7 +8582,7 @@ u32 block_0c1d7a10(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7A12, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A14, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A16, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7A20;
+    return 0x0C1D7A20; /* static branch */
 }
 
 /* Block 0x0C1D7A3C, 8B, 4 ops */
@@ -8908,7 +8593,7 @@ u32 block_0c1d7a3c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7A3E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A40, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A42, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7A4C;
+    return 0x0C1D7A4C; /* static branch */
 }
 
 /* Block 0x0C1D7A5E, 8B, 4 ops */
@@ -8919,7 +8604,7 @@ u32 block_0c1d7a5e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7A60, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A62, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7A64, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7A6E;
+    return 0x0C1D7A6E; /* static branch */
 }
 
 /* Block 0x0C1D70CA, 22B, 11 ops */
@@ -8937,8 +8622,7 @@ u32 block_0c1d70ca(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D70DA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D70DC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D70DE, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D70EA; /* BT */
-    return 0x0C1D70E0;
+    return 0x0C1D70E0; /* sequential */
 }
 
 /* Block 0x0C1D70E0, 10B, 5 ops */
@@ -8950,7 +8634,7 @@ u32 block_0c1d70e0(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D70E4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D70E6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D70E8, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D713A;
+    return 0x0C1D713A; /* static branch */
 }
 
 /* Block 0x0C1D713A, 14B, 7 ops */
@@ -8964,8 +8648,7 @@ u32 block_0c1d713a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7142, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7144, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7146, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D714C; /* BT */
-    return 0x0C1D7148;
+    return 0x0C1D7148; /* sequential */
 }
 
 /* Block 0x0C1D714C, 14B, 7 ops */
@@ -8979,8 +8662,7 @@ u32 block_0c1d714c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7154, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7156, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7158, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7162; /* BT */
-    return 0x0C1D715A;
+    return 0x0C1D715A; /* sequential */
 }
 
 /* Block 0x0C1D715A, 8B, 4 ops */
@@ -8991,8 +8673,7 @@ u32 block_0c1d715a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D715C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D715E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7160, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D716E; /* BT */
-    return 0x0C1D7162;
+    return 0x0C1D7162; /* sequential */
 }
 
 /* Block 0x0C1D716E, 4B, 2 ops */
@@ -9019,8 +8700,7 @@ u32 block_0c1d7be0(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7BF0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7BF2, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7BF4, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7C0C; /* BT */
-    return 0x0C1D7BF6;
+    return 0x0C1D7BF6; /* sequential */
 }
 
 /* Block 0x0C1D7BF6, 14B, 7 ops */
@@ -9034,8 +8714,7 @@ u32 block_0c1d7bf6(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7BFE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7C00, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7C02, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7C18; /* BT */
-    return 0x0C1D7C04;
+    return 0x0C1D7C04; /* sequential */
 }
 
 /* Block 0x0C1D7C04, 8B, 4 ops */
@@ -9046,8 +8725,7 @@ u32 block_0c1d7c04(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7C06, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7C08, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7C0A, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7C18; /* BT */
-    return 0x0C1D7C0C;
+    return 0x0C1D7C0C; /* sequential */
 }
 
 /* Block 0x0C1D7C18, 14B, 7 ops */
@@ -9061,7 +8739,7 @@ u32 block_0c1d7c18(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7C20, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7C22, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7C24, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7422;
+    return 0x0C1D7422; /* call target */
 }
 
 /* Block 0x0C1D7422, 14B, 7 ops */
@@ -9075,8 +8753,7 @@ u32 block_0c1d7422(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D742A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D742C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D742E, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D743C; /* BT */
-    return 0x0C1D7430;
+    return 0x0C1D7430; /* sequential */
 }
 
 /* Block 0x0C1D7430, 4B, 2 ops */
@@ -9085,8 +8762,7 @@ u32 block_0c1d7430(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7430, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7432, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7454; /* BT */
-    return 0x0C1D74F0;
+    return 0x0C1D7434; /* sequential */
 }
 
 /* Block 0x0C1D7454, 16B, 8 ops */
@@ -9101,8 +8777,7 @@ u32 block_0c1d7454(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D745E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7460, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7462, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D74B4; /* BT */
-    return 0x0C1D7464;
+    return 0x0C1D7464; /* sequential */
 }
 
 /* Block 0x0C1D7464, 24B, 12 ops */
@@ -9121,8 +8796,7 @@ u32 block_0c1d7464(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7476, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7478, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D747A, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D74B4; /* BT */
-    return 0x0C1D747C;
+    return 0x0C1D747C; /* sequential */
 }
 
 /* Block 0x0C1D747C, 64B, 32 ops */
@@ -9161,8 +8835,7 @@ u32 block_0c1d747c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D74B6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D74B8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D74BA, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D74EC; /* BT */
-    return 0x0C1D74BC;
+    return 0x0C1D74BC; /* sequential */
 }
 
 /* Block 0x0C1D74BC, 52B, 26 ops */
@@ -9205,8 +8878,7 @@ u32 block_0c1d7c26(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7C26, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7C28, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7C2A, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7C50; /* BT */
-    return 0x0C1D7C2C;
+    return 0x0C1D7C2C; /* sequential */
 }
 
 /* Block 0x0C1D7C2C, 36B, 18 ops */
@@ -9231,7 +8903,7 @@ u32 block_0c1d7c2c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7C4A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7C4C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7C4E, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7C5E;
+    return 0x0C1D7C5E; /* static branch */
 }
 
 /* Block 0x0C1D7C5E, 6B, 3 ops */
@@ -9259,8 +8931,7 @@ u32 block_0c1d7e90(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7EA0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7EA2, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7EA4, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7EBA; /* BT */
-    return 0x0C1D7EA6;
+    return 0x0C1D7EA6; /* sequential */
 }
 
 /* Block 0x0C1D7EA6, 12B, 6 ops */
@@ -9273,8 +8944,7 @@ u32 block_0c1d7ea6(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7EAC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7EAE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7EB0, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7EC6; /* BT */
-    return 0x0C1D7EB2;
+    return 0x0C1D7EB2; /* sequential */
 }
 
 /* Block 0x0C1D7EB2, 8B, 4 ops */
@@ -9285,8 +8955,7 @@ u32 block_0c1d7eb2(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7EB4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7EB6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7EB8, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7EC6; /* BT */
-    return 0x0C1D7EBA;
+    return 0x0C1D7EBA; /* sequential */
 }
 
 /* Block 0x0C1D7EC6, 4B, 2 ops */
@@ -9295,7 +8964,7 @@ u32 block_0c1d7ec6(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7EC6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7EC8, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D75CC;
+    return 0x0C1D75CC; /* call target */
 }
 
 /* Block 0x0C1D75CC, 14B, 7 ops */
@@ -9309,8 +8978,7 @@ u32 block_0c1d75cc(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D75D4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D75D6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D75D8, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D75E6; /* BT */
-    return 0x0C1D75DA;
+    return 0x0C1D75DA; /* sequential */
 }
 
 /* Block 0x0C1D75DA, 4B, 2 ops */
@@ -9319,8 +8987,7 @@ u32 block_0c1d75da(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D75DA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D75DC, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D75EA; /* BT */
-    return 0x0C1D7686;
+    return 0x0C1D75DE; /* sequential */
 }
 
 /* Block 0x0C1D75EA, 16B, 8 ops */
@@ -9335,8 +9002,7 @@ u32 block_0c1d75ea(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D75F4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D75F6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D75F8, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D764A; /* BT */
-    return 0x0C1D75FA;
+    return 0x0C1D75FA; /* sequential */
 }
 
 /* Block 0x0C1D75FA, 24B, 12 ops */
@@ -9355,8 +9021,7 @@ u32 block_0c1d75fa(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D760C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D760E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7610, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D764A; /* BT */
-    return 0x0C1D7612;
+    return 0x0C1D7612; /* sequential */
 }
 
 /* Block 0x0C1D7612, 64B, 32 ops */
@@ -9395,8 +9060,7 @@ u32 block_0c1d7612(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D764C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D764E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7650, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7682; /* BT */
-    return 0x0C1D7652;
+    return 0x0C1D7652; /* sequential */
 }
 
 /* Block 0x0C1D7652, 52B, 26 ops */
@@ -9446,8 +9110,7 @@ u32 block_0c1d7eca(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7ED8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7EDA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7EDC, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1FB70C; /* BT */
-    return 0x0C1D7EDE;
+    return 0x0C1FB70C; /* call target */
 }
 
 /* Block 0x0C1D7EDE, 8B, 4 ops */
@@ -9458,8 +9121,7 @@ u32 block_0c1d7ede(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7EE0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7EE2, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7EE4, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7F2C; /* BT */
-    return 0x0C1D7EE6;
+    return 0x0C1D7EE6; /* sequential */
 }
 
 /* Block 0x0C1D7F2C, 6B, 3 ops */
@@ -9469,8 +9131,7 @@ u32 block_0c1d7f2c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7F2C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7F2E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7F30, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7F7A; /* BT */
-    return 0x0C1D7F32;
+    return 0x0C1D7F32; /* sequential */
 }
 
 /* Block 0x0C1D7F32, 42B, 21 ops */
@@ -9498,8 +9159,7 @@ u32 block_0c1d7f32(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7F56, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7F58, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7F5A, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7F94; /* BT */
-    return 0x0C1D7F5C;
+    return 0x0C1D7F5C; /* sequential */
 }
 
 /* Block 0x0C1D7F94, 6B, 3 ops */
@@ -9542,8 +9202,7 @@ u32 block_0c101492(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C02A186; /* BT */
-    return 0x0C1014AA;
+    return 0x0C02A186; /* call target */
 }
 
 /* Block 0x0C1014AA, 12B, 6 ops */
@@ -9556,8 +9215,7 @@ u32 block_0c1014aa(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C1014DC; /* BT */
-    return 0x0C1014B6;
+    return 0x0C1014B6; /* sequential */
 }
 
 /* Block 0x0C1014DC, 12B, 6 ops */
@@ -9570,8 +9228,7 @@ u32 block_0c1014dc(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C1014FE; /* BT */
-    return 0x0C1014E8;
+    return 0x0C1014E8; /* sequential */
 }
 
 /* Block 0x0C1014FE, 6B, 3 ops */
@@ -9597,8 +9254,7 @@ u32 block_0c16f9be(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = (u32)(s32)-21;
     ctx->fr[4] -= ctx->fr[15];
     ctx->r[0] = (u32)(s32)(s16)MEM_R16(ctx->r[15] + ctx->r[0]);
-    if (ctx->sr.T) return 0x0C16FA46; /* BT */
-    return 0x0C16F9D0;
+    return 0x0C16F9D0; /* sequential */
 }
 
 /* Block 0x0C16FA46, 6B, 3 ops */
@@ -9608,7 +9264,7 @@ u32 block_0c16fa46(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[15], 4); ctx->r[5] -= 4; MEM_W32(ctx->r[5], tmp); }
     ctx->r[12] = (u32)(s32)-17;
     ctx->fr[4] -= ctx->fr[15];
-    return 0x0C16FC6A;
+    return 0x0C16FC6A; /* call target */
 }
 
 /* Block 0x0C16FA4C, 6B, 3 ops */
@@ -9618,8 +9274,7 @@ u32 block_0c16fa4c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = (u32)(s32)-15;
     ctx->r[12] = (u32)(s32)-18;
     ctx->r[4] = (u32)(s32)-26;
-    if (ctx->sr.T) return 0x0C16FA5E; /* BT */
-    return 0x0C16FA52;
+    return 0x0C16FA52; /* sequential */
 }
 
 /* Block 0x0C16FA52, 12B, 6 ops */
@@ -9632,8 +9287,7 @@ u32 block_0c16fa52(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = (u32)(s32)-27;
     ctx->r[8] = (u32)(s32)-25;
     ctx->r[1] = (u32)(s32)-28;
-    if (ctx->sr.T) return 0x0C16FA98; /* BT */
-    return 0x0C16FA5E;
+    return 0x0C16FA5E; /* sequential */
 }
 
 /* Block 0x0C16FA98, 12B, 6 ops */
@@ -9647,8 +9301,7 @@ u32 block_0c16fa98(u8* _mem, Sh4Context* _ctx) {
     ctx->sr.T = ctx->r[4] > ctx->r[3] ? 1 : 0;
     { u32 tmp = ctx->r[2] ^ ctx->r[2];
       ctx->sr.T = ((tmp>>24)&0xFF)==0 || ((tmp>>16)&0xFF)==0 || ((tmp>>8)&0xFF)==0 || (tmp&0xFF)==0 ? 1 : 0; }
-    if (ctx->sr.T) return 0x0C16FAF2; /* BT */
-    return 0x0C16FAA4;
+    return 0x0C16FAA4; /* sequential */
 }
 
 /* Block 0x0C16FAF2, 12B, 6 ops */
@@ -9661,8 +9314,7 @@ u32 block_0c16faf2(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = (u32)(s32)-14;
     sh4_interp_op(mem, ctx, 0x0C16FAFA, 0xCDD6u); /* UNIMPL 0xCDD6 */
     ctx->sr.T = (ctx->r[0] & 0xC8u) == 0 ? 1 : 0;
-    if (ctx->sr.T) return 0x0C16FB08; /* BT */
-    return 0x0C16FAFE;
+    return 0x0C16FAFE; /* sequential */
 }
 
 /* Block 0x0C16FB08, 10B, 5 ops */
@@ -9675,8 +9327,7 @@ u32 block_0c16fb08(u8* _mem, Sh4Context* _ctx) {
     ctx->sr.T = ctx->r[9] == ctx->r[3] ? 1 : 0;
     { u64 tmp = (u64)ctx->r[11] + ctx->r[3] + ctx->sr.T;
       ctx->sr.T = (tmp >> 32) & 1; ctx->r[11] = (u32)tmp; }
-    if (ctx->sr.T) return 0x0C028A08; /* BT */
-    return 0x0C16FB12;
+    return 0x0C028A08; /* call target */
 }
 
 /* Block 0x0C028A08, 62B, 31 ops */
@@ -9802,8 +9453,7 @@ u32 block_0c16fb12(u8* _mem, Sh4Context* _ctx) {
       }
       ctx->sr.T = (ctx->sr.Q == ctx->sr.M) ? 1 : 0; }
     sh4_interp_op(mem, ctx, 0x0C16FB1C, 0x3839u); /* UNIMPL 0x3839 */
-    if (ctx->sr.T) return 0x0C02A186; /* BT */
-    return 0x0C16FB1E;
+    return 0x0C02A186; /* static branch */
 }
 
 /* Block 0x0C16FAFE, 10B, 5 ops */
@@ -9815,8 +9465,7 @@ u32 block_0c16fafe(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = (u32)(s32)-36;
     ctx->r[3] = (u32)(s32)-27;
     ctx->r[3] = (u32)(s32)-32;
-    if (ctx->sr.T) return 0x0C037E6C; /* BT */
-    return 0x0C16FB08;
+    return 0x0C037E6C; /* call target */
 }
 
 /* Block 0x0C1D257A, 10B, 5 ops */
@@ -9828,8 +9477,7 @@ u32 block_0c1d257a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D257E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2580, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2582, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C0377E8; /* BT */
-    return 0x0C1D2584;
+    return 0x0C0377E8; /* static branch */
 }
 
 /* Block 0x0C1D266A, 10B, 5 ops */
@@ -9841,8 +9489,7 @@ u32 block_0c1d266a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D266E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2670, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D2672, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C0377E8; /* BT */
-    return 0x0C1D2674;
+    return 0x0C0377E8; /* static branch */
 }
 
 /* Block 0x0C1D74B4, 8B, 4 ops */
@@ -9853,8 +9500,7 @@ u32 block_0c1d74b4(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D74B6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D74B8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D74BA, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D74EC; /* BT */
-    return 0x0C1D74BC;
+    return 0x0C1D74BC; /* sequential */
 }
 
 /* Block 0x0C1D764A, 8B, 4 ops */
@@ -9865,8 +9511,7 @@ u32 block_0c1d764a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D764C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D764E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7650, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7682; /* BT */
-    return 0x0C1D7652;
+    return 0x0C1D7652; /* sequential */
 }
 
 /* Block 0x0C1C41E2, 6B, 3 ops */
@@ -9876,8 +9521,7 @@ u32 block_0c1c41e2(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C41E2, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C41E4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C41E6, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C0377E8; /* BT */
-    return 0x0C1C41E8;
+    return 0x0C0377E8; /* static branch */
 }
 
 /* Block 0x0C1014E8, 8B, 4 ops */
@@ -9888,8 +9532,7 @@ u32 block_0c1014e8(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[9] += ctx->fr[0] * ctx->fr[12];
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     ctx->fr[11] += ctx->fr[0] * ctx->fr[13];
-    if (ctx->sr.T) return 0x0C0285FA; /* BT */
-    return 0x0C1014F0;
+    return 0x0C0285FA; /* call target */
 }
 
 /* Block 0x0C1014F0, 14B, 7 ops */
@@ -9903,8 +9546,7 @@ u32 block_0c1014f0(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     sh4_interp_op(mem, ctx, 0x0C1014FA, 0xFFFFu); /* UNIMPL 0xFFFF */
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C16EB74; /* BT */
-    return 0x0C1014FE;
+    return 0x0C16EB74; /* static branch */
 }
 
 /* Block 0x0C16EB74, 20B, 10 ops */
@@ -9921,8 +9563,7 @@ u32 block_0c16eb74(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = MEM_R32(0x0C16EEE4); /* @(PC,0x360) */
     ctx->r[11] = MEM_R32(0x0C16EEE8); /* @(PC,0x360) */
     ctx->sr.T = ctx->fr[6] > ctx->fr[14] ? 1 : 0;
-    if (ctx->sr.T) return 0x0C03763A; /* BT */
-    return 0x0C16EB88;
+    return 0x0C03763A; /* call target */
 }
 
 /* Block 0x0C16EB88, 6B, 3 ops */
@@ -9932,8 +9573,7 @@ u32 block_0c16eb88(u8* _mem, Sh4Context* _ctx) {
     ctx->macl = (u32)((u16)ctx->r[0] * (u16)ctx->r[0]);
     ctx->r[15] &= ctx->r[2];
     ctx->r[12] -= ctx->r[3];
-    if (ctx->sr.T) return 0x0C16EBB6; /* BT */
-    return 0x0C16EB8E;
+    return 0x0C16EB8E; /* sequential */
 }
 
 /* Block 0x0C16EB8E, 52B, 26 ops */
@@ -9986,8 +9626,7 @@ u32 block_0c16ebc2(u8* _mem, Sh4Context* _ctx) {
     ctx->sr.T = ctx->fr[7] > ctx->fr[15] ? 1 : 0;
     ctx->r[8] = (u32)(s32)-14;
     ctx->r[13] = MEM_R32(0x0C16EF58); /* @(PC,0x380) */
-    if (ctx->sr.T) return 0x0C16EC04; /* BT */
-    return 0x0C16EBD8;
+    return 0x0C16EBD8; /* sequential */
 }
 
 /* Block 0x0C16EC04, 6B, 3 ops */
@@ -9997,8 +9636,7 @@ u32 block_0c16ec04(u8* _mem, Sh4Context* _ctx) {
     ctx->r[8] = MEM_R32(0x0C16EF80); /* @(PC,0x378) */
     ctx->r[11] = MEM_R32(0x0C16EF64); /* @(PC,0x35C) */
     ctx->r[2] = (u32)(s32)-35;
-    if (ctx->sr.T) return 0x0C16EC0E; /* BT */
-    return 0x0C16ED14;
+    return 0x0C16EC0A; /* sequential */
 }
 
 /* Block 0x0C16EC0E, 20B, 10 ops */
@@ -10015,8 +9653,7 @@ u32 block_0c16ec0e(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[0], 4); MEM_W32(ctx->r[9], tmp); }
     ctx->r[1] = MEM_R32(0x0C16EFB8); /* @(PC,0x398) */
     ctx->r[0] ^= 0xC8u;
-    if (ctx->sr.T) return 0x0C1FB998; /* BT */
-    return 0x0C16EC22;
+    return 0x0C1FB998; /* call target */
 }
 
 /* Block 0x0C16EC22, 58B, 29 ops */
@@ -10053,8 +9690,7 @@ u32 block_0c16ec22(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C16EC56, 0xCFE0u); /* UNIMPL 0xCFE0 */
     ctx->pr = 0x0C16EC5C; /* bsr 0x0C16E7E0 */
     ctx->r[0] = (u32)(s32)(s8)MEM_R8(ctx->gbr + 190);
-    if (ctx->sr.T) return 0x0C1FB900; /* BT */
-    return 0x0C16EC5C;
+    return 0x0C1FB900; /* bsr */
 }
 
 /* Block 0x0C16EC5C, 44B, 22 ops */
@@ -10098,8 +9734,7 @@ u32 block_0c16ec5c(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[10] *= ctx->fr[15];
     ctx->pr = 0x0C16EC88; /* bsrf r14 */
     MEM_W32(ctx->r[11] + 36, ctx->r[1]);
-    if (ctx->sr.T) return 0x0C0285FA; /* BT */
-    return 0x0C16EC88;
+    return 0x0C16EC84 + 4 + ctx->r[14]; /* bsrf */
 }
 
 /* Block 0x0C16EC88, 14B, 7 ops */
@@ -10113,8 +9748,7 @@ u32 block_0c16ec88(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C16EFEC); /* @(PC,0x358) */
     ctx->r[13] = MEM_R32(0x0C16EFEC); /* @(PC,0x358) */
     { u32 tmp = MEM_R32(ctx->r[14]); memcpy(&ctx->fr[10], &tmp, 4); }
-    if (ctx->sr.T) return 0x0C16EC98; /* BT */
-    return 0x0C16EC96;
+    return 0x0C16EC96; /* sequential */
 }
 
 /* Block 0x0C16EC98, 20B, 10 ops */
@@ -10146,8 +9780,7 @@ u32 block_0c16ecac(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = (u32)(s32)-36;
     ctx->r[4] = (u32)(s32)-24;
     ctx->r[5] = (u32)(s32)-29;
-    if (ctx->sr.T) return 0x0C16ECBA; /* BT */
-    return 0x0C16ECB8;
+    return 0x0C16ECB8; /* sequential */
 }
 
 /* Block 0x0C16ECBA, 44B, 22 ops */
@@ -10191,8 +9824,7 @@ u32 block_0c16ece6(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C16ECF0, 0xCCCDu); /* UNIMPL 0xCCCD */
     ctx->r[13] = MEM_R32(0x0C16F038); /* @(PC,0x344) */
     ctx->r[2] = MEM_R32(ctx->r[14] + ctx->r[0]);
-    if (ctx->sr.T) return 0x0C16ECFE; /* BT */
-    return 0x0C16ECF6;
+    return 0x0C16ECF6; /* sequential */
 }
 
 /* Block 0x0C16ECF6, 8B, 4 ops */
@@ -10203,7 +9835,7 @@ u32 block_0c16ecf6(u8* _mem, Sh4Context* _ctx) {
     ctx->r[9] &= ctx->r[2];
     ctx->r[5] &= ctx->r[2];
     MEM_W32(ctx->r[10] + 0, ctx->r[2]);
-    return 0x0C16ED04;
+    return 0x0C16ED04; /* static branch */
 }
 
 /* Block 0x0C16ED04, 16B, 8 ops */
@@ -10219,8 +9851,7 @@ u32 block_0c16ed04(u8* _mem, Sh4Context* _ctx) {
     MEM_W8(ctx->r[5], ctx->r[2]);
     ctx->r[7] -= 2; MEM_W16(ctx->r[7], ctx->r[2]);
     ctx->r[6] += ctx->r[2];
-    if (ctx->sr.T) return 0x0C02A224; /* BT */
-    return 0x0C16ED14;
+    return 0x0C02A224; /* static branch */
 }
 
 /* Block 0x0C16ED14, 22B, 11 ops */
@@ -10250,8 +9881,7 @@ u32 block_0c16ed2a(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[9] + 20, ctx->r[1]);
     ctx->r[3] = ctx->gbr; /* STC GBR */
     { u32 tmp; memcpy(&tmp, &ctx->fr[15], 4); MEM_W32(ctx->r[2], tmp); }
-    if (ctx->sr.T) return 0x0C02A186; /* BT */
-    return 0x0C16ED34;
+    return 0x0C02A186; /* call target */
 }
 
 /* Block 0x0C16ED34, 6B, 3 ops */
@@ -10261,8 +9891,7 @@ u32 block_0c16ed34(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = MEM_R32(0x0C16F0D0); /* @(PC,0x398) */
     ctx->pr = 0x0C16ED3A; /* bsr 0x0C16DEC4 */
     ctx->pr = 0x0C16ED3C; /* bsr 0x0C16FC9E */
-    if (ctx->sr.T) return 0x0C16ED52; /* BT */
-    return 0x0C16ED3A;
+    return 0x0C16ED3A; /* sequential */
 }
 
 /* Block 0x0C16ED52, 6B, 3 ops */
@@ -10285,8 +9914,7 @@ u32 block_0c1d7ee6(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7EEC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7EEE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7EF0, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7EF6; /* BT */
-    return 0x0C1D7EF2;
+    return 0x0C1D7EF2; /* sequential */
 }
 
 /* Block 0x0C1D7EF2, 4B, 2 ops */
@@ -10295,7 +9923,7 @@ u32 block_0c1d7ef2(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7EF2, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7EF4, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7F00;
+    return 0x0C1D7F00; /* static branch */
 }
 
 /* Block 0x0C1D7F00, 8B, 4 ops */
@@ -10306,8 +9934,7 @@ u32 block_0c1d7f00(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7F02, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7F04, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7F06, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7F2C; /* BT */
-    return 0x0C1D7F08;
+    return 0x0C1D7F08; /* sequential */
 }
 
 /* Block 0x0C16ECFE, 22B, 11 ops */
@@ -10326,8 +9953,7 @@ u32 block_0c16ecfe(u8* _mem, Sh4Context* _ctx) {
     MEM_W8(ctx->r[5], ctx->r[2]);
     ctx->r[7] -= 2; MEM_W16(ctx->r[7], ctx->r[2]);
     ctx->r[6] += ctx->r[2];
-    if (ctx->sr.T) return 0x0C02A224; /* BT */
-    return 0x0C16ED14;
+    return 0x0C02A224; /* static branch */
 }
 
 /* Block 0x0C16ECB8, 46B, 23 ops */
@@ -10385,8 +10011,7 @@ u32 block_0c037c48(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = (u32)(s32)(s16)MEM_R16(ctx->r[15] + 4);
     ctx->r[0] |= 0x0Fu;
     MEM_W16(ctx->r[15] + 4, ctx->r[0]);
-    if (ctx->sr.T) return 0x0C037C8A; /* BT */
-    return 0x0C037C72;
+    return 0x0C037C72; /* sequential */
 }
 
 /* Block 0x0C047EF4, 8B, 4 ops */
@@ -10397,8 +10022,7 @@ u32 block_0c047ef4(u8* _mem, Sh4Context* _ctx) {
     ctx->pr = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
     ctx->r[10] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
     ctx->r[11] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
-    if (ctx->sr.T) return 0x0C047F12; /* BT */
-    return 0x0C047EFC;
+    return 0x0C047EFC; /* sequential */
 }
 
 /* Block 0x0C047EFC, 8B, 4 ops */
@@ -10409,8 +10033,7 @@ u32 block_0c047efc(u8* _mem, Sh4Context* _ctx) {
     ctx->r[13] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
     /* rts — handled at block level */
     ctx->r[14] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
-    if (ctx->sr.T) return 0x0C047F12; /* BT */
-    return 0x0C047F04;
+    return 0x0C047F04; /* sequential */
 }
 
 /* Block 0x0C048F94, 12B, 6 ops */
@@ -10423,8 +10046,7 @@ u32 block_0c048f94(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] += (s32)4;
     /* bra — handled at block level */
     MEM_W32(ctx->r[4], ctx->r[0]);
-    if (ctx->sr.T) return 0x0C048FA2; /* BT */
-    return 0x0C048FA0;
+    return 0x0C048FA0; /* sequential */
 }
 
 /* Block 0x0C048FA2, 10B, 5 ops */
@@ -10436,8 +10058,7 @@ u32 block_0c048fa2(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = (u32)(s32)72;
     ctx->r[1] = MEM_R32(ctx->r[5] + ctx->r[0]);
     ctx->r[4] += (s32)4;
-    if (ctx->sr.T) return 0x0C048FAE; /* BT */
-    return 0x0C048FAC;
+    return 0x0C048FAC; /* sequential */
 }
 
 /* Block 0x0C0496C4, 8B, 4 ops */
@@ -10448,8 +10069,7 @@ u32 block_0c0496c4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[13]);
     ctx->r[13] = ctx->r[4];
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[12]);
-    if (ctx->sr.T) return 0x0C0496E0; /* BT */
-    return 0x0C0496CC;
+    return 0x0C0496CC; /* sequential */
 }
 
 /* Block 0x0C04E096, 8B, 4 ops */
@@ -10472,7 +10092,7 @@ u32 block_0c03b32a(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp = MEM_R32(ctx->r[0]); memcpy(&ctx->fr[4], &tmp, 4); ctx->r[0] += 4; }
     { u32 tmp = MEM_R32(ctx->r[0]); memcpy(&ctx->fr[5], &tmp, 4); ctx->r[0] += 4; }
     { u32 tmp = MEM_R32(ctx->r[0]); memcpy(&ctx->fr[6], &tmp, 4); ctx->r[0] += 4; }
-    return 0x0C03B3E2;
+    return 0x0C03B3E2; /* static branch */
 }
 
 /* Block 0x0C1B62E4, 12B, 6 ops */
@@ -10485,8 +10105,7 @@ u32 block_0c1b62e4(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1B62EA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1B62EC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1B62EE, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C0377E8; /* BT */
-    return 0x0C1B62F0;
+    return 0x0C0377E8; /* static branch */
 }
 
 /* Block 0x0C16F9D0, 6B, 3 ops */
@@ -10496,8 +10115,7 @@ u32 block_0c16f9d0(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[3] = ctx->fr[15];
     ctx->fr[0] *= ctx->fr[15];
     ctx->r[6] = (u32)(s32)-21;
-    if (ctx->sr.T) return 0x0C04491C; /* BT */
-    return 0x0C16F9D6;
+    return 0x0C04491C; /* call target */
 }
 
 /* Block 0x0C04491C, 8B, 4 ops */
@@ -10509,8 +10127,7 @@ u32 block_0c04491c(u8* _mem, Sh4Context* _ctx) {
     ctx->sr.T = (s32)ctx->r[3] > (s32)ctx->r[9] ? 1 : 0;
     { u64 tmp = (u64)ctx->r[9] + ctx->r[3] + ctx->sr.T;
       ctx->sr.T = (tmp >> 32) & 1; ctx->r[9] = (u32)tmp; }
-    if (ctx->sr.T) return 0x0C04499C; /* BT */
-    return 0x0C044924;
+    return 0x0C044924; /* sequential */
 }
 
 /* Block 0x0C044924, 10B, 5 ops */
@@ -10534,8 +10151,7 @@ u32 block_0c04492e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = ctx->r[13];
     ctx->pr = 0x0C044936; /* jsr @r3 */
     ctx->r[4] += ctx->r[12];
-    if (ctx->sr.T) return 0x0C04499C; /* BT */
-    return 0x0C044936;
+    return 0x0C044936; /* sequential */
 }
 
 /* Block 0x0C04499C, 4B, 2 ops */
@@ -10553,8 +10169,7 @@ u32 block_0c16f9d6(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[2] = (u32)(s32)-29;
     ctx->r[9] = (u32)(s32)-31;
-    if (ctx->sr.T) return 0x0C16FA5E; /* BT */
-    return 0x0C16F9DA;
+    return 0x0C16F9DA; /* sequential */
 }
 
 /* Block 0x0C16FA5E, 12B, 6 ops */
@@ -10567,7 +10182,7 @@ u32 block_0c16fa5e(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[15], 4); MEM_W32(ctx->r[0] + ctx->r[10], tmp); }
     ctx->pr = 0x0C16FA6A; /* bsrf r11 */
     MEM_W32(ctx->r[2] + 56, ctx->r[0]);
-    return 0x0C16FC9E;
+    return 0x0C16FC9E; /* static branch */
 }
 
 /* Block 0x0C16FC9E, 34B, 17 ops */
@@ -10591,8 +10206,7 @@ u32 block_0c16fc9e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = (u32)(s32)-23;
     ctx->r[8] = (u32)(s32)-28;
     ctx->r[15] = (u32)(s32)-21;
-    if (ctx->sr.T) return 0x0C02A224; /* BT */
-    return 0x0C16FCC0;
+    return 0x0C02A224; /* static branch */
 }
 
 /* Block 0x0C16FC94, 4B, 2 ops */
@@ -10653,8 +10267,7 @@ u32 block_0c114b94(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C114BE8, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114BEA, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114BEC, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C114BF4; /* BT */
-    return 0x0C114BEE;
+    return 0x0C114BEE; /* sequential */
 }
 
 /* Block 0x0C114BF4, 14B, 7 ops */
@@ -10668,8 +10281,7 @@ u32 block_0c114bf4(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C114BFC, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114BFE, 0x0FFFu); /* UNIMPL 0x0FFF */
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C114C14; /* BT */
-    return 0x0C114C02;
+    return 0x0C114C02; /* sequential */
 }
 
 /* Block 0x0C114C14, 8B, 4 ops */
@@ -10680,8 +10292,7 @@ u32 block_0c114c14(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C114C28; /* BT */
-    return 0x0C114C1C;
+    return 0x0C114C1C; /* sequential */
 }
 
 /* Block 0x0C114C28, 8B, 4 ops */
@@ -10692,8 +10303,7 @@ u32 block_0c114c28(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C114C32; /* BT */
-    return 0x0C114C30;
+    return 0x0C114C30; /* sequential */
 }
 
 /* Block 0x0C114C32, 6B, 3 ops */
@@ -10703,8 +10313,7 @@ u32 block_0c114c32(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C02A186; /* BT */
-    return 0x0C114C38;
+    return 0x0C02A186; /* call target */
 }
 
 /* Block 0x0C114C38, 6B, 3 ops */
@@ -10714,8 +10323,7 @@ u32 block_0c114c38(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C114C46; /* BT */
-    return 0x0C114C3E;
+    return 0x0C114C3E; /* sequential */
 }
 
 /* Block 0x0C114C3E, 8B, 4 ops */
@@ -10726,8 +10334,7 @@ u32 block_0c114c3e(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C114C9C; /* BT */
-    return 0x0C114C46;
+    return 0x0C114C46; /* sequential */
 }
 
 /* Block 0x0C114C9C, 12B, 6 ops */
@@ -10749,8 +10356,7 @@ u32 block_0c16f754(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[12] = MEM_R32(0x0C16FAAC); /* @(PC,0x354) */
     ctx->fr[2] /= ctx->fr[14];
-    if (ctx->sr.T) return 0x0C16F75C; /* BT */
-    return 0x0C16F8E4;
+    return 0x0C16F758; /* sequential */
 }
 
 /* Block 0x0C16F8E4, 6B, 3 ops */
@@ -10760,8 +10366,7 @@ u32 block_0c16f8e4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[8] ^= ctx->r[2];
     MEM_W32(ctx->r[8] + 4, ctx->r[2]);
     ctx->r[6] = ctx->gbr; /* STC GBR */
-    if (ctx->sr.T) return 0x0C02A186; /* BT */
-    return 0x0C16F8EA;
+    return 0x0C02A186; /* call target */
 }
 
 /* Block 0x0C16F8EA, 6B, 3 ops */
@@ -10771,8 +10376,7 @@ u32 block_0c16f8ea(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[9] = ctx->fr[15];
     { u32 tmp; memcpy(&tmp, &ctx->fr[15], 4); MEM_W32(ctx->r[0] + ctx->r[4], tmp); }
     ctx->fr[8] /= ctx->fr[15];
-    if (ctx->sr.T) return 0x0C16F8FC; /* BT */
-    return 0x0C16F8F0;
+    return 0x0C16F8F0; /* sequential */
 }
 
 /* Block 0x0C1D7AF4, 4B, 2 ops */
@@ -10781,7 +10385,7 @@ u32 block_0c1d7af4(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7AF4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7AF6, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7AFA;
+    return 0x0C1D7AFA; /* static branch */
 }
 
 /* Block 0x0C1D7AFA, 14B, 7 ops */
@@ -10795,8 +10399,7 @@ u32 block_0c1d7afa(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7B02, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7B04, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7B06, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1EC2F0; /* BT */
-    return 0x0C1D7B08;
+    return 0x0C1EC2F0; /* call target */
 }
 
 /* Block 0x0C16EC96, 22B, 11 ops */
@@ -10841,8 +10444,7 @@ u32 block_0c114c46(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C114C64, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114C66, 0x0FFFu); /* UNIMPL 0x0FFF */
     MEM_W8(ctx->r[7] + 11, ctx->r[0]);
-    if (ctx->sr.T) return 0x0C114C72; /* BT */
-    return 0x0C114C6A;
+    return 0x0C114C6A; /* sequential */
 }
 
 /* Block 0x0C114C72, 34B, 17 ops */
@@ -10866,8 +10468,7 @@ u32 block_0c114c72(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C02A224; /* BT */
-    return 0x0C114C94;
+    return 0x0C02A224; /* call target */
 }
 
 /* Block 0x0C114C94, 20B, 10 ops */
@@ -10932,8 +10533,7 @@ u32 block_0c114cc4(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C114D10, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114D12, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114D14, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C114D1C; /* BT */
-    return 0x0C114D16;
+    return 0x0C114D16; /* sequential */
 }
 
 /* Block 0x0C114D1C, 10B, 5 ops */
@@ -10945,8 +10545,7 @@ u32 block_0c114d1c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C114D20, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114D22, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114D24, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C114D50; /* BT */
-    return 0x0C114D26;
+    return 0x0C114D26; /* sequential */
 }
 
 /* Block 0x0C114D26, 6B, 3 ops */
@@ -10956,8 +10555,7 @@ u32 block_0c114d26(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C114D26, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114D28, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114D2A, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C02A186; /* BT */
-    return 0x0C114D2C;
+    return 0x0C02A186; /* call target */
 }
 
 /* Block 0x0C114D2C, 12B, 6 ops */
@@ -10970,8 +10568,7 @@ u32 block_0c114d2c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C114D32, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114D34, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114D36, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C114D68; /* BT */
-    return 0x0C114D38;
+    return 0x0C114D38; /* sequential */
 }
 
 /* Block 0x0C114D68, 8B, 4 ops */
@@ -11001,8 +10598,7 @@ u32 block_0c16ed3a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C16ED4C, 0x4039u); /* UNIMPL 0x4039 */
     sh4_interp_op(mem, ctx, 0x0C16ED4E, 0x4845u); /* UNIMPL 0x4845 */
     ctx->sr.T = ctx->r[10] > ctx->r[4] ? 1 : 0;
-    if (ctx->sr.T) return 0x0C02A224; /* BT */
-    return 0x0C16ED52;
+    return 0x0C02A224; /* static branch */
 }
 
 /* Block 0x0C16ED8C, 16B, 8 ops */
@@ -11017,8 +10613,7 @@ u32 block_0c16ed8c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = (u32)(s32)-32;
     ctx->fr[4+3] = ctx->fr[4]*ctx->fr[12] + ctx->fr[4+1]*ctx->fr[12+1] + ctx->fr[4+2]*ctx->fr[12+2] + ctx->fr[4+3]*ctx->fr[12+3]; /* FIPR */
     { u32 tmp; memcpy(&tmp, &ctx->fr[15], 4); MEM_W32(ctx->r[15], tmp); }
-    if (ctx->sr.T) return 0x0C02A186; /* BT */
-    return 0x0C16ED9C;
+    return 0x0C02A186; /* call target */
 }
 
 /* Block 0x0C16ED9C, 6B, 3 ops */
@@ -11028,8 +10623,7 @@ u32 block_0c16ed9c(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[5] + 40, ctx->r[0]);
     ctx->r[0] = (ctx->r[1] << 16) | (ctx->r[0] >> 16);
     ctx->macl = (u32)((s32)(s16)ctx->r[0] * (s32)(s16)ctx->r[1]);
-    if (ctx->sr.T) return 0x0C16EE36; /* BT */
-    return 0x0C16EDA2;
+    return 0x0C16EDA2; /* sequential */
 }
 
 /* Block 0x0C16EE36, 10B, 5 ops */
@@ -11054,8 +10648,7 @@ u32 block_0c16f8f0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[12] = (u32)(s32)-16;
     ctx->fr[3] = ctx->fr[14];
     { u32 tmp; memcpy(&tmp, &ctx->fr[15], 4); ctx->r[15] -= 4; MEM_W32(ctx->r[15], tmp); }
-    if (ctx->sr.T) return 0x0C0377E8; /* BT */
-    return 0x0C16F8FC;
+    return 0x0C0377E8; /* static branch */
 }
 
 /* Block 0x0C1D7B32, 52B, 26 ops */
@@ -11099,8 +10692,7 @@ u32 block_0c1d70ea(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D70EC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D70EE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D70F0, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7134; /* BT */
-    return 0x0C1D70F2;
+    return 0x0C1D70F2; /* sequential */
 }
 
 /* Block 0x0C1D7134, 20B, 10 ops */
@@ -11117,8 +10709,7 @@ u32 block_0c1d7134(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7142, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7144, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7146, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D714C; /* BT */
-    return 0x0C1D7148;
+    return 0x0C1D7148; /* sequential */
 }
 
 /* Block 0x0C1D7C50, 20B, 10 ops */
@@ -11159,8 +10750,7 @@ u32 block_0c1d7c72(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7C72, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7C74, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7C76, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C0377E8; /* BT */
-    return 0x0C1D7C78;
+    return 0x0C0377E8; /* static branch */
 }
 
 /* Block 0x0C16EDA2, 18B, 9 ops */
@@ -11178,8 +10768,7 @@ u32 block_0c16eda2(u8* _mem, Sh4Context* _ctx) {
     ctx->sr.Q = (ctx->r[0] >> 31) & 1;
     ctx->sr.M = (ctx->r[2] >> 31) & 1;
     ctx->sr.T = ctx->sr.Q ^ ctx->sr.M;
-    if (ctx->sr.T) return 0x0C16EDBE; /* BT */
-    return 0x0C16EDB4;
+    return 0x0C16EDB4; /* sequential */
 }
 
 /* Block 0x0C16EDB4, 10B, 5 ops */
@@ -11192,7 +10781,7 @@ u32 block_0c16edb4(u8* _mem, Sh4Context* _ctx) {
       ctx->sr.T = ((tmp>>24)&0xFF)==0 || ((tmp>>16)&0xFF)==0 || ((tmp>>8)&0xFF)==0 || (tmp&0xFF)==0 ? 1 : 0; }
     ctx->r[7]--; MEM_W8(ctx->r[7], ctx->r[2]);
     ctx->r[1] += ctx->r[2];
-    return 0x0C16EDC4;
+    return 0x0C16EDC4; /* static branch */
 }
 
 /* Block 0x0C16EDC4, 34B, 17 ops */
@@ -11216,8 +10805,7 @@ u32 block_0c16edc4(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[11] += ctx->fr[0];
     sh4_interp_op(mem, ctx, 0x0C16EDE2, 0x0AFFu); /* UNIMPL 0x0AFF */
     MEM_W32(ctx->r[15] + 24, ctx->r[1]);
-    if (ctx->sr.T) return 0x0C0285FA; /* BT */
-    return 0x0C16EDE6;
+    return 0x0C0285FA; /* bsr */
 }
 
 /* Block 0x0C16EDE6, 16B, 8 ops */
@@ -11232,8 +10820,7 @@ u32 block_0c16ede6(u8* _mem, Sh4Context* _ctx) {
     ctx->r[11] = (u32)(s32)-28;
     sh4_interp_op(mem, ctx, 0x0C16EDF2, 0x08FBu); /* UNIMPL 0x08FB */
     MEM_W32(ctx->r[10] + 4, ctx->r[1]);
-    if (ctx->sr.T) return 0x0C16EDFE; /* BT */
-    return 0x0C16EDF6;
+    return 0x0C16EDF6; /* sequential */
 }
 
 /* Block 0x0C16EDFE, 8B, 4 ops */
@@ -11248,8 +10835,7 @@ u32 block_0c16edfe(u8* _mem, Sh4Context* _ctx) {
       ctx->fr[8+1] = ctx->xf[1]*v0 + ctx->xf[5]*v1 + ctx->xf[9]*v2  + ctx->xf[13]*v3;
       ctx->fr[8+2] = ctx->xf[2]*v0 + ctx->xf[6]*v1 + ctx->xf[10]*v2 + ctx->xf[14]*v3;
       ctx->fr[8+3] = ctx->xf[3]*v0 + ctx->xf[7]*v1 + ctx->xf[11]*v2 + ctx->xf[15]*v3; }
-    if (ctx->sr.T) return 0x0C16EE20; /* BT */
-    return 0x0C16EE06;
+    return 0x0C16EE06; /* sequential */
 }
 
 /* Block 0x0C16EE06, 4B, 2 ops */
@@ -11276,7 +10862,7 @@ u32 block_0c16ee0a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C16F148); /* @(PC,0x32C) */
     ctx->r[15] = MEM_R32(0x0C16F184); /* @(PC,0x364) */
     ctx->r[14] = (u32)(s32)-27;
-    return 0x0C16EE36;
+    return 0x0C16EE36; /* static branch */
 }
 
 /* Block 0x0C16EE40, 14B, 7 ops */
@@ -11290,8 +10876,7 @@ u32 block_0c16ee40(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[11] + 28, ctx->r[1]);
     MEM_W32(ctx->r[12] + 56, ctx->r[1]);
     MEM_W32(ctx->r[0] + 32, ctx->r[1]);
-    if (ctx->sr.T) return 0x0C16EE72; /* BT */
-    return 0x0C16EE4E;
+    return 0x0C16EE4E; /* sequential */
 }
 
 /* Block 0x0C16EE4E, 10B, 5 ops */
@@ -11303,8 +10888,7 @@ u32 block_0c16ee4e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C16EE52, 0x0501u); /* UNIMPL 0x0501 */
     MEM_W32(ctx->r[2] + 44, ctx->r[0]);
     MEM_W32(ctx->r[0] + 16, ctx->r[1]);
-    if (ctx->sr.T) return 0x0C028A08; /* BT */
-    return 0x0C16EE58;
+    return 0x0C028A08; /* call target */
 }
 
 /* Block 0x0C16EE58, 6B, 3 ops */
@@ -11314,8 +10898,7 @@ u32 block_0c16ee58(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C16EE58, 0x0D0Bu); /* UNIMPL 0x0D0B */
     ctx->sr.T = ctx->fr[15] > ctx->fr[0] ? 1 : 0;
     ctx->fr[15] += ctx->fr[0];
-    if (ctx->sr.T) return 0x0C02A186; /* BT */
-    return 0x0C16EE5E;
+    return 0x0C02A186; /* call target */
 }
 
 /* Block 0x0C16EE5E, 6B, 3 ops */
@@ -11327,8 +10910,7 @@ u32 block_0c16ee5e(u8* _mem, Sh4Context* _ctx) {
     ctx->sr.Q = (ctx->r[5] >> 31) & 1;
     ctx->sr.M = (ctx->r[1] >> 31) & 1;
     ctx->sr.T = ctx->sr.Q ^ ctx->sr.M;
-    if (ctx->sr.T) return 0x0C02866E; /* BT */
-    return 0x0C16EE64;
+    return 0x0C02866E; /* call target */
 }
 
 /* Block 0x0C16EE64, 4B, 2 ops */
@@ -11337,8 +10919,7 @@ u32 block_0c16ee64(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->sr.T = ctx->r[8] == ctx->r[3] ? 1 : 0;
     sh4_interp_op(mem, ctx, 0x0C16EE66, 0x423Eu); /* UNIMPL 0x423E */
-    if (ctx->sr.T) return 0x0C16EE72; /* BT */
-    return 0x0C16EE68;
+    return 0x0C16EE68; /* sequential */
 }
 
 /* Block 0x0C16EE68, 10B, 5 ops */
@@ -11351,8 +10932,7 @@ u32 block_0c16ee68(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = (u32)(s32)-6;
     ctx->r[7] = (u32)(s32)-23;
     ctx->r[15] = MEM_R32(0x0C16F204); /* @(PC,0x390) */
-    if (ctx->sr.T) return 0x0C037E6C; /* BT */
-    return 0x0C16EE72;
+    return 0x0C037E6C; /* static branch */
 }
 
 /* Block 0x0C16EDBE, 40B, 20 ops */
@@ -11379,8 +10959,7 @@ u32 block_0c16edbe(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[11] += ctx->fr[0];
     sh4_interp_op(mem, ctx, 0x0C16EDE2, 0x0AFFu); /* UNIMPL 0x0AFF */
     MEM_W32(ctx->r[15] + 24, ctx->r[1]);
-    if (ctx->sr.T) return 0x0C0285FA; /* BT */
-    return 0x0C16EDE6;
+    return 0x0C0285FA; /* bsr */
 }
 
 /* Block 0x0C1D7954, 32B, 16 ops */
@@ -11403,8 +10982,7 @@ u32 block_0c1d7954(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D796E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7970, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7972, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D9158; /* BT */
-    return 0x0C1D7974;
+    return 0x0C1D9158; /* call target */
 }
 
 /* Block 0x0C0486D8, 18B, 9 ops */
@@ -11420,7 +10998,7 @@ u32 block_0c0486d8(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C0486E4, 0x0800u); /* UNIMPL 0x0800 */
     sh4_interp_op(mem, ctx, 0x0C0486E6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C0486E8, 0xFFFFu); /* UNIMPL 0xFFFF */
-    return 0x0C04871E;
+    return 0x0C04871E; /* static branch */
 }
 
 /* Block 0x0C04871E, 22B, 11 ops */
@@ -11463,7 +11041,7 @@ u32 block_0c1d70f2(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D70F4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D70F6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D70F8, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7138;
+    return 0x0C1D7138; /* static branch */
 }
 
 /* Block 0x0C1D7138, 16B, 8 ops */
@@ -11478,8 +11056,7 @@ u32 block_0c1d7138(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7142, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7144, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7146, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D714C; /* BT */
-    return 0x0C1D7148;
+    return 0x0C1D7148; /* sequential */
 }
 
 /* Block 0x0C041C98, 20B, 10 ops */
@@ -11496,8 +11073,7 @@ u32 block_0c041c98(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C041CA6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C041CA8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C041CAA, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C041CB8; /* BT */
-    return 0x0C041CAC;
+    return 0x0C041CAC; /* sequential */
 }
 
 /* Block 0x0C041CC2, 40B, 20 ops */
@@ -11543,7 +11119,7 @@ u32 block_0c114d38(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C114D4A, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114D4C, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114D4E, 0x0FFFu); /* UNIMPL 0x0FFF */
-    return 0x0C114D5C;
+    return 0x0C114D5C; /* static branch */
 }
 
 /* Block 0x0C114D5C, 12B, 6 ops */
@@ -11556,8 +11132,7 @@ u32 block_0c114d5c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C114D62, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114D64, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C114D66, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C043918; /* BT */
-    return 0x0C114D68;
+    return 0x0C043918; /* static branch */
 }
 
 /* Block 0x0C0453E6, 8B, 4 ops */
@@ -11568,8 +11143,7 @@ u32 block_0c0453e6(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[15], ctx->r[7]);
     ctx->pr = 0x0C0453EE; /* jsr @r12 */
     ctx->r[4] = ctx->r[14];
-    if (ctx->sr.T) return 0x0C0453FC; /* BT */
-    return 0x0C0453EE;
+    return 0x0C0453EE; /* sequential */
 }
 
 /* Block 0x0C0453EE, 10B, 5 ops */
@@ -11581,8 +11155,7 @@ u32 block_0c0453ee(u8* _mem, Sh4Context* _ctx) {
     ctx->r[8] = MEM_R32(0x0C04546C); /* @(PC,0x78) */
     ctx->r[4] += (s32)4;
     ctx->r[6] = (u32)(s32)8;
-    if (ctx->sr.T) return 0x0C0453FC; /* BT */
-    return 0x0C0453F8;
+    return 0x0C0453F8; /* sequential */
 }
 
 /* Block 0x0C043A38, 6B, 3 ops */
@@ -11603,8 +11176,7 @@ u32 block_0c037318(u8* _mem, Sh4Context* _ctx) {
     ctx->r[11] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
     ctx->r[12] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
     ctx->r[13] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
-    if (ctx->sr.T) return 0x0C03736A; /* BT */
-    return 0x0C037320;
+    return 0x0C037320; /* sequential */
 }
 
 /* Block 0x0C037320, 10B, 5 ops */
@@ -11616,8 +11188,7 @@ u32 block_0c037320(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[14]);
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[13]);
     ctx->r[13] = (u32)(s32)1;
-    if (ctx->sr.T) return 0x0C03736A; /* BT */
-    return 0x0C03732A;
+    return 0x0C03732A; /* sequential */
 }
 
 /* Block 0x0C03732A, 6B, 3 ops */
@@ -11627,8 +11198,7 @@ u32 block_0c03732a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[12]);
     ctx->r[12] = (u32)(s32)0;
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[11]);
-    if (ctx->sr.T) return 0x0C037332; /* BT */
-    return 0x0C037330;
+    return 0x0C037330; /* sequential */
 }
 
 /* Block 0x0C037330, 14B, 7 ops */
@@ -11642,8 +11212,7 @@ u32 block_0c037330(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = ctx->r[15];
     ctx->pr = 0x0C03733E; /* bsr 0x0C037390 */
     ctx->r[4] += (s32)4;
-    if (ctx->sr.T) return 0x0C037346; /* BT */
-    return 0x0C03733E;
+    return 0x0C03733E; /* sequential */
 }
 
 /* Block 0x0C03733E, 8B, 4 ops */
@@ -11654,7 +11223,7 @@ u32 block_0c03733e(u8* _mem, Sh4Context* _ctx) {
     ctx->sr.T = (ctx->r[4] & ctx->r[4]) == 0 ? 1 : 0;
     /* bf — handled at block level */
     ctx->r[14] = ctx->r[13];
-    return 0x0C037356;
+    return 0x0C037356; /* static branch */
 }
 
 /* Block 0x0C037356, 6B, 3 ops */
@@ -11691,8 +11260,7 @@ u32 block_0c03c778(u8* _mem, Sh4Context* _ctx) {
     ctx->pr = 0x0C03C782; /* bsr 0x0C03C620 */
     ctx->r[0] = (u32)(s32)0;
     ctx->sr.T = 1;
-    if (ctx->sr.T) return 0x0C03C7AE; /* BT */
-    return 0x0C03C784;
+    return 0x0C03C784; /* sequential */
 }
 
 /* Block 0x0C03C784, 42B, 21 ops */
@@ -11720,8 +11288,7 @@ u32 block_0c03c784(u8* _mem, Sh4Context* _ctx) {
     /* bra — handled at block level */
     /* nop */
     ctx->sr.T = 0;
-    if (ctx->sr.T) return 0x0C02A224; /* BT */
-    return 0x0C03C7AE;
+    return 0x0C02A224; /* static branch */
 }
 
 /* Block 0x0C03C7AE, 6B, 3 ops */
@@ -11731,8 +11298,7 @@ u32 block_0c03c7ae(u8* _mem, Sh4Context* _ctx) {
     ctx->pr = 0x0C03C7B2; /* bsr 0x0C03C5E0 */
     ctx->r[0] = (u32)(s32)0;
     ctx->sr.T = 0;
-    if (ctx->sr.T) return 0x0C02A186; /* BT */
-    return 0x0C03C7B4;
+    return 0x0C02A186; /* bsr */
 }
 
 /* Block 0x0C03C7B4, 12B, 6 ops */
@@ -11745,8 +11311,7 @@ u32 block_0c03c7b4(u8* _mem, Sh4Context* _ctx) {
     ctx->sr.T = 1;
     ctx->r[11] = (u32)(s32)2;
     ctx->pr = 0x0C03C7C2; /* bsr 0x0C03C620 */
-    if (ctx->sr.T) return 0x0C03C7D0; /* BT */
-    return 0x0C03C7C0;
+    return 0x0C03C7C0; /* sequential */
 }
 
 /* Block 0x0C03C7D0, 6B, 3 ops */
@@ -11765,7 +11330,7 @@ u32 block_0c1d7db0(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7DB0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7DB2, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7DB6;
+    return 0x0C1D7DB6; /* static branch */
 }
 
 /* Block 0x0C1D7DB6, 38B, 19 ops */
@@ -11800,7 +11365,7 @@ u32 block_0c1d7df6(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1D7DF6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7DF8, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7DFC;
+    return 0x0C1D7DFC; /* static branch */
 }
 
 /* Block 0x0C1D7DFC, 44B, 22 ops */
@@ -11841,8 +11406,7 @@ u32 block_0c16ee72(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = (u32)(s32)-29;
     { u32 tmp = MEM_R32(ctx->r[14]); memcpy(&ctx->fr[3], &tmp, 4); ctx->r[14] += 4; }
     ctx->r[2] = (u32)(s32)(s8)MEM_R8(ctx->r[15] + ctx->r[0]);
-    if (ctx->sr.T) return 0x0C0377E8; /* BT */
-    return 0x0C16EE7C;
+    return 0x0C0377E8; /* static branch */
 }
 
 /* Block 0x0C1D7162, 12B, 6 ops */
@@ -11855,8 +11419,7 @@ u32 block_0c1d7162(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7168, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D716A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D716C, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C02618E; /* BT */
-    return 0x0C1D716E;
+    return 0x0C02618E; /* static branch */
 }
 
 /* Block 0x0C1D71E2, 14B, 7 ops */
@@ -11884,8 +11447,7 @@ u32 block_0c1d71f0(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D71F8, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D71FA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D71FC, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C0377E8; /* BT */
-    return 0x0C1D71FE;
+    return 0x0C0377E8; /* static branch */
 }
 
 /* Block 0x0C051470, 8B, 4 ops */
@@ -11911,8 +11473,7 @@ u32 block_0c1d7f08(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7F12, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7F14, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7F16, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7F22; /* BT */
-    return 0x0C1D7F18;
+    return 0x0C1D7F18; /* sequential */
 }
 
 /* Block 0x0C1D7F18, 10B, 5 ops */
@@ -11924,7 +11485,7 @@ u32 block_0c1d7f18(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7F1C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7F1E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7F20, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7F28;
+    return 0x0C1D7F28; /* static branch */
 }
 
 /* Block 0x0C1D7F28, 10B, 5 ops */
@@ -11936,8 +11497,7 @@ u32 block_0c1d7f28(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7F2C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7F2E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7F30, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1D7F7A; /* BT */
-    return 0x0C1D7F32;
+    return 0x0C1D7F32; /* sequential */
 }
 
 /* Block 0x0C1D7FE0, 10B, 5 ops */
@@ -11949,7 +11509,7 @@ u32 block_0c1d7fe0(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7FE4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7FE6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7FE8, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7FF2;
+    return 0x0C1D7FF2; /* static branch */
 }
 
 /* Block 0x0C1D7FF2, 6B, 3 ops */
@@ -12003,8 +11563,7 @@ u32 block_0c03c05e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C03C076, 0x0683u); /* UNIMPL 0x0683 */
     /* bra — handled at block level */
     ctx->r[6] += (s32)64;
-    if (ctx->sr.T) return 0x0C02A224; /* BT */
-    return 0x0C03C07C;
+    return 0x0C02A224; /* static branch */
 }
 
 /* Block 0x0C0286BE, 4B, 2 ops */
@@ -12013,7 +11572,7 @@ u32 block_0c0286be(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     MEM_W16(ctx->r[3], ctx->r[4]);
     ctx->r[4] = MEM_R32(ctx->r[2]);
-    return 0x0C0286F6;
+    return 0x0C0286F6; /* static branch */
 }
 
 /* Block 0x0C0286F6, 52B, 26 ops */
@@ -12076,8 +11635,7 @@ u32 block_0c1014b6(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[4] = ctx->fr[9];
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C02A224; /* BT */
-    return 0x0C1014DC;
+    return 0x0C02A224; /* static branch */
 }
 
 /* Block 0x0C037452, 38B, 19 ops */
@@ -12143,7 +11701,7 @@ u32 block_0c1d7eba(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7EC4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7EC6, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7EC8, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D75CC;
+    return 0x0C1D75CC; /* call target */
 }
 
 /* Block 0x0C1D75E6, 4B, 2 ops */
@@ -12172,8 +11730,7 @@ u32 block_0c1d7f7a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7F8E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7F90, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7F92, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C02618E; /* BT */
-    return 0x0C1D7F94;
+    return 0x0C02618E; /* static branch */
 }
 
 /* Block 0x0C1D7C0C, 26B, 13 ops */
@@ -12193,7 +11750,7 @@ u32 block_0c1d7c0c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1D7C20, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7C22, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1D7C24, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1D7422;
+    return 0x0C1D7422; /* call target */
 }
 
 /* Block 0x0C1D743C, 4B, 2 ops */
@@ -12214,8 +11771,7 @@ u32 block_0c101504(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C101508, 0xF8BDu); /* UNIMPL 0xF8BD */
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     sh4_interp_op(mem, ctx, 0x0C10150C, 0xF8BDu); /* UNIMPL 0xF8BD */
-    if (ctx->sr.T) return 0x0C02A186; /* BT */
-    return 0x0C10150E;
+    return 0x0C02A186; /* call target */
 }
 
 /* Block 0x0C10150E, 6B, 3 ops */
@@ -12225,8 +11781,7 @@ u32 block_0c10150e(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     sh4_interp_op(mem, ctx, 0x0C101510, 0xF8BDu); /* UNIMPL 0xF8BD */
     sh4_interp_op(mem, ctx, 0x0C101512, 0xFFFFu); /* UNIMPL 0xFFFF */
-    if (ctx->sr.T) return 0x0C101522; /* BT */
-    return 0x0C101514;
+    return 0x0C101514; /* sequential */
 }
 
 /* Block 0x0C101522, 6B, 3 ops */
@@ -12306,8 +11861,7 @@ u32 block_0c1e081e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1E084A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1E084C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1E084E, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1EC420; /* BT */
-    return 0x0C1E0850;
+    return 0x0C1EC420; /* call target */
 }
 
 /* Block 0x0C04612E, 14B, 7 ops */
@@ -12321,8 +11875,7 @@ u32 block_0c04612e(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[1] + ctx->r[0], ctx->r[2]);
     ctx->r[1] = MEM_R32(0x0C0461B4); /* @(PC,0x78) */
     MEM_W32(ctx->r[1], ctx->r[14]);
-    if (ctx->sr.T) return 0x0C04614E; /* BT */
-    return 0x0C04613C;
+    return 0x0C04613C; /* sequential */
 }
 
 /* Block 0x0C04613C, 8B, 4 ops */
@@ -12333,8 +11886,7 @@ u32 block_0c04613c(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[3], ctx->r[14]);
     ctx->r[15] += (s32)8;
     ctx->pr = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
-    if (ctx->sr.T) return 0x0C04614E; /* BT */
-    return 0x0C046144;
+    return 0x0C046144; /* sequential */
 }
 
 /* Block 0x0C046144, 10B, 5 ops */
@@ -12346,8 +11898,7 @@ u32 block_0c046144(u8* _mem, Sh4Context* _ctx) {
     ctx->r[9] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
     ctx->r[10] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
     ctx->r[11] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
-    if (ctx->sr.T) return 0x0C046152; /* BT */
-    return 0x0C04614E;
+    return 0x0C04614E; /* sequential */
 }
 
 /* Block 0x0C101514, 14B, 7 ops */
@@ -12361,7 +11912,7 @@ u32 block_0c101514(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C10151C, 0xF8BDu); /* UNIMPL 0xF8BD */
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    return 0x0C100600;
+    return 0x0C100600; /* static branch */
 }
 
 /* Block 0x0C100600, 6B, 3 ops */
@@ -12371,8 +11922,7 @@ u32 block_0c100600(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C100600, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C100602, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C100604, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C10066E; /* BT */
-    return 0x0C100606;
+    return 0x0C100606; /* sequential */
 }
 
 /* Block 0x0C10066E, 6B, 3 ops */
@@ -12382,8 +11932,7 @@ u32 block_0c10066e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C10066E, 0xCFFFu); /* UNIMPL 0xCFFF */
     sh4_interp_op(mem, ctx, 0x0C100670, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C100672, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C043918; /* BT */
-    return 0x0C100674;
+    return 0x0C043918; /* static branch */
 }
 
 /* Block 0x0C0453F8, 12B, 6 ops */
@@ -12396,8 +11945,7 @@ u32 block_0c0453f8(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = (u32)(s32)0;
     ctx->r[6] = (u32)(s32)4;
     ctx->r[11] += (s32)32;
-    if (ctx->sr.T) return 0x0C045410; /* BT */
-    return 0x0C045404;
+    return 0x0C045404; /* sequential */
 }
 
 /* Block 0x0C0439D8, 12B, 6 ops */
@@ -12422,8 +11970,7 @@ u32 block_0c051336(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C05133A, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C05133C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C05133E, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C051384; /* BT */
-    return 0x0C051340;
+    return 0x0C051340; /* sequential */
 }
 
 /* Block 0x0C051340, 16B, 8 ops */
@@ -12447,7 +11994,7 @@ u32 block_0c04da02(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = 0x0C04DA06; /* jsr @r3 */
     ctx->r[4] = ctx->r[14];
-    return 0x0C04D2DC;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C04DA06, 4B, 2 ops */
@@ -12456,7 +12003,7 @@ u32 block_0c04da06(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[2] = MEM_R32(0x0C04DA64); /* @(PC,0x5C) */
     ctx->r[4] = ctx->r[14];
-    return 0x0C04D746;
+    return 0x0C04D746; /* call target */
 }
 
 /* Block 0x0C04DA0A, 8B, 4 ops */
@@ -12492,8 +12039,7 @@ u32 block_0c04d920(u8* _mem, Sh4Context* _ctx) {
     /* bra — handled at block level */
     ctx->r[4] = MEM_R32(ctx->r[15]);
     ctx->r[0] = MEM_R32(0x0C04D974); /* @(PC,0x44) */
-    if (ctx->sr.T) return 0x0C04D93C; /* BT */
-    return 0x0C04D930;
+    return 0x0C04D930; /* sequential */
 }
 
 /* Block 0x0C04D93C, 22B, 11 ops */
@@ -12526,7 +12072,7 @@ u32 block_0c04dd28(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[2] + 8, ctx->r[3]);
     ctx->r[2] = ctx->r[4];
     ctx->r[0] += (s32)24;
-    return 0x0C04DD46;
+    return 0x0C04DD46; /* static branch */
 }
 
 /* Block 0x0C04DD46, 6B, 3 ops */
@@ -12548,7 +12094,7 @@ u32 block_0c04d952(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
     sh4_interp_op(mem, ctx, 0x0C04D958, 0x0900u); /* UNIMPL 0x0900 */
     sh4_interp_op(mem, ctx, 0x0C04D95A, 0x0900u); /* UNIMPL 0x0900 */
-    return 0x0C04DAA4;
+    return 0x0C04DAA4; /* static branch */
 }
 
 /* Block 0x0C04D930, 4B, 2 ops */
@@ -12557,8 +12103,7 @@ u32 block_0c04d930(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[4] <<= 2;
     ctx->r[5] = ctx->r[4];
-    if (ctx->sr.T) return 0x0C04D952; /* BT */
-    return 0x0C04D934;
+    return 0x0C04D934; /* sequential */
 }
 
 /* Block 0x0C0512A0, 4B, 2 ops */
@@ -12567,7 +12112,7 @@ u32 block_0c0512a0(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C0512A0, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C0512A2, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C051312;
+    return 0x0C051312; /* static branch */
 }
 
 /* Block 0x0C051312, 12B, 6 ops */
@@ -12608,8 +12153,7 @@ u32 block_0c0503c4(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[5] = ctx->r[9];
     ctx->r[6] = ctx->r[11];
-    if (ctx->sr.T) return 0x0C0503CC; /* BT */
-    return 0x0C0503C8;
+    return 0x0C0503C8; /* sequential */
 }
 
 /* Block 0x0C0503CC, 10B, 5 ops */
@@ -12682,8 +12226,7 @@ u32 block_0c0f407c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C0F4094, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F4096, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F4098, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C0F40EC; /* BT */
-    return 0x0C0F409A;
+    return 0x0C0F409A; /* sequential */
 }
 
 /* Block 0x0C0F409A, 8B, 4 ops */
@@ -12694,8 +12237,7 @@ u32 block_0c0f409a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C0F409C, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F409E, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F40A0, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C0F40BC; /* BT */
-    return 0x0C0F40A2;
+    return 0x0C0F40A2; /* sequential */
 }
 
 /* Block 0x0C0F40A2, 10B, 5 ops */
@@ -12707,8 +12249,7 @@ u32 block_0c0f40a2(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C0F40A6, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F40A8, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F40AA, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C0F40BC; /* BT */
-    return 0x0C0F40AC;
+    return 0x0C0F40AC; /* sequential */
 }
 
 /* Block 0x0C0F40AC, 6B, 3 ops */
@@ -12718,8 +12259,7 @@ u32 block_0c0f40ac(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C0F40AC, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F40AE, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F40B0, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C037EB4; /* BT */
-    return 0x0C0F40B2;
+    return 0x0C037EB4; /* call target */
 }
 
 /* Block 0x0C0F40B2, 6B, 3 ops */
@@ -12729,8 +12269,7 @@ u32 block_0c0f40b2(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C0F40B2, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F40B4, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F40B6, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C0F40EC; /* BT */
-    return 0x0C0F40B8;
+    return 0x0C0F40B8; /* sequential */
 }
 
 /* Block 0x0C0F40EC, 8B, 4 ops */
@@ -12776,8 +12315,7 @@ u32 block_0c0f40bc(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C0F40C0, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F40C2, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F40C4, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C0F40EC; /* BT */
-    return 0x0C0F40C6;
+    return 0x0C0F40C6; /* sequential */
 }
 
 /* Block 0x0C0F40C6, 10B, 5 ops */
@@ -12789,8 +12327,7 @@ u32 block_0c0f40c6(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C0F40CA, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F40CC, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F40CE, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C0F40EC; /* BT */
-    return 0x0C0F40D0;
+    return 0x0C0F40D0; /* sequential */
 }
 
 /* Block 0x0C0F40D0, 6B, 3 ops */
@@ -12800,8 +12337,7 @@ u32 block_0c0f40d0(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C0F40D0, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F40D2, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F40D4, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C037EB4; /* BT */
-    return 0x0C0F40D6;
+    return 0x0C037EB4; /* call target */
 }
 
 /* Block 0x0C0F40D6, 6B, 3 ops */
@@ -12811,8 +12347,7 @@ u32 block_0c0f40d6(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C0F40D6, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F40D8, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F40DA, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C0F40EC; /* BT */
-    return 0x0C0F40DC;
+    return 0x0C0F40DC; /* sequential */
 }
 
 /* Block 0x0C050400, 4B, 2 ops */
@@ -12821,8 +12356,7 @@ u32 block_0c050400(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[3] = MEM_R32(ctx->r[14] + 12);
     ctx->r[1] = MEM_R32(ctx->r[14] + 20);
-    if (ctx->sr.T) return 0x0C050406; /* BT */
-    return 0x0C050404;
+    return 0x0C050404; /* sequential */
 }
 
 /* Block 0x0C050406, 32B, 16 ops */
@@ -12845,7 +12379,7 @@ u32 block_0c050406(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = MEM_R32(ctx->r[14] + 20);
     ctx->r[3] = ctx->r[0];
     ctx->r[3] += (s32)12;
-    return 0x0C0508F2;
+    return 0x0C0508F2; /* static branch */
 }
 
 /* Block 0x0C050B0A, 16B, 8 ops */
@@ -12948,8 +12482,7 @@ u32 block_0c04ff6a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(ctx->r[11] + 8);
     ctx->r[14] = ctx->r[13];
     ctx->sr.T = (ctx->r[4] & ctx->r[4]) == 0 ? 1 : 0;
-    if (ctx->sr.T) return 0x0C04FF7E; /* BT */
-    return 0x0C04FF72;
+    return 0x0C04FF72; /* sequential */
 }
 
 /* Block 0x0C04FF7E, 14B, 7 ops */
@@ -13015,8 +12548,7 @@ u32 block_0c04fae6(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = ctx->r[14];
     ctx->pr = 0x0C04FAEE; /* bsr 0x0C0500B4 */
     ctx->r[4] = ctx->r[13];
-    if (ctx->sr.T) return 0x0C04FAFC; /* BT */
-    return 0x0C04FAEE;
+    return 0x0C04FAEE; /* sequential */
 }
 
 /* Block 0x0C04FAEE, 6B, 3 ops */
@@ -13026,8 +12558,7 @@ u32 block_0c04faee(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(ctx->r[14] + 12);
     MEM_W32(ctx->r[9] + 28, ctx->r[3]);
     MEM_W32(ctx->r[14] + 20, ctx->r[9]);
-    if (ctx->sr.T) return 0x0C04FB02; /* BT */
-    return 0x0C04FAF4;
+    return 0x0C04FAF4; /* sequential */
 }
 
 /* Block 0x0C04FB02, 6B, 3 ops */
@@ -13037,7 +12568,7 @@ u32 block_0c04fb02(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = (u32)(s32)(s16)MEM_R16(ctx->r[14]);
     ctx->r[0] |= 0x40u;
     MEM_W16(ctx->r[14], ctx->r[0]);
-    return 0x0C04FB26;
+    return 0x0C04FB26; /* static branch */
 }
 
 /* Block 0x0C04FB26, 20B, 10 ops */
@@ -13069,8 +12600,7 @@ u32 block_0c0456ba(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = (u32)(s32)(s16)MEM_R16(ctx->r[2]);
     ctx->r[6] = (u32)(s32)8;
     MEM_W16(ctx->r[15], ctx->r[3]);
-    if (ctx->sr.T) return 0x0C0456D0; /* BT */
-    return 0x0C0456CA;
+    return 0x0C0456CA; /* sequential */
 }
 
 /* Block 0x0C0456CA, 6B, 3 ops */
@@ -13105,7 +12635,7 @@ u32 block_0c0456d0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C0457B4); /* @(PC,0xC4) */
     ctx->r[13] <<= 2;
     ctx->r[3] = MEM_R32(0x0C0457B0); /* @(PC,0xBC) */
-    return 0x0C045F0A;
+    return ctx->r[2]; /* jsr @r2 */
 }
 
 /* Block 0x0C0456F4, 6B, 3 ops */
@@ -13115,8 +12645,7 @@ u32 block_0c0456f4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[12] <<= 2;
     ctx->r[1] = ctx->r[14];
     ctx->r[13] <<= 2;
-    if (ctx->sr.T) return 0x0C04577A; /* BT */
-    return 0x0C0456FA;
+    return 0x0C0456FA; /* sequential */
 }
 
 /* Block 0x0C0456FA, 10B, 5 ops */
@@ -13128,8 +12657,7 @@ u32 block_0c0456fa(u8* _mem, Sh4Context* _ctx) {
     ctx->r[13] += ctx->r[3];
     ctx->r[12] += ctx->r[2];
     ctx->r[3] = ctx->r[10];
-    if (ctx->sr.T) return 0x0C04574C; /* BT */
-    return 0x0C045704;
+    return 0x0C045704; /* sequential */
 }
 
 /* Block 0x0C04574C, 8B, 4 ops */
@@ -13140,8 +12668,7 @@ u32 block_0c04574c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(0x0C0457B8); /* @(PC,0x68) */
     ctx->r[6] = (u32)(s32)(s16)MEM_R16(ctx->r[6]);
     ctx->r[7] = MEM_R32(ctx->r[15] + 12);
-    if (ctx->sr.T) return 0x0C04575C; /* BT */
-    return 0x0C045754;
+    return 0x0C045754; /* sequential */
 }
 
 /* Block 0x0C045754, 4B, 2 ops */
@@ -13150,8 +12677,7 @@ u32 block_0c045754(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = 0x0C045758; /* jsr @r3 */
     ctx->r[4] = ctx->r[15];
-    if (ctx->sr.T) return 0x0C045760; /* BT */
-    return 0x0C045758;
+    return 0x0C045758; /* sequential */
 }
 
 /* Block 0x0C045758, 4B, 2 ops */
@@ -13160,7 +12686,7 @@ u32 block_0c045758(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[2] = MEM_R32(0x0C0457BC); /* @(PC,0x60) */
     ctx->r[5] = (u32)(s32)64;
-    return 0x0C045764;
+    return 0x0C045764; /* static branch */
 }
 
 /* Block 0x0C045764, 10B, 5 ops */
@@ -13199,7 +12725,7 @@ u32 block_0c041f78(u8* _mem, Sh4Context* _ctx) {
       ctx->fr[0+1] = ctx->xf[1]*v0 + ctx->xf[5]*v1 + ctx->xf[9]*v2  + ctx->xf[13]*v3;
       ctx->fr[0+2] = ctx->xf[2]*v0 + ctx->xf[6]*v1 + ctx->xf[10]*v2 + ctx->xf[14]*v3;
       ctx->fr[0+3] = ctx->xf[3]*v0 + ctx->xf[7]*v1 + ctx->xf[11]*v2 + ctx->xf[15]*v3; }
-    return 0x0C041F9A;
+    return 0x0C041F9A; /* static branch */
 }
 
 /* Block 0x0C041F9A, 106B, 53 ops */
@@ -13282,8 +12808,7 @@ u32 block_0c04fb3a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(ctx->r[15]);
     ctx->r[2] = MEM_R32(ctx->r[13] + 12);
     MEM_W32(ctx->r[9] + 28, ctx->r[2]);
-    if (ctx->sr.T) return 0x0C04FB5A; /* BT */
-    return 0x0C04FB48;
+    return 0x0C04FB48; /* sequential */
 }
 
 /* Block 0x0C04FB5A, 16B, 8 ops */
@@ -13317,8 +12842,7 @@ u32 block_0c03a54e(u8* _mem, Sh4Context* _ctx) {
     ctx->sr.T = (s32)ctx->r[0] == 5 ? 1 : 0;
     /* bt — handled at block level */
     ctx->r[0] = ctx->r[4];
-    if (ctx->sr.T) return 0x0C0449A6; /* BT */
-    return 0x0C03A560;
+    return 0x0C0449A6; /* call target */
 }
 
 /* Block 0x0C03A560, 6B, 3 ops */
@@ -13345,8 +12869,7 @@ u32 block_0c03a566(u8* _mem, Sh4Context* _ctx) {
       else if (shift == -32) ctx->r[4] = (u32)((s32)ctx->r[4] >> 31);
       else ctx->r[4] = (u32)((s32)ctx->r[4] >> ((-shift) & 31)); }
     ctx->r[2] |= ctx->r[4];
-    if (ctx->sr.T) return 0x0C03A580; /* BT */
-    return 0x0C03A572;
+    return 0x0C03A572; /* sequential */
 }
 
 /* Block 0x0C03A572, 6B, 3 ops */
@@ -13356,8 +12879,7 @@ u32 block_0c03a572(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[14] + 12, ctx->r[2]);
     ctx->r[3] = MEM_R32(0x0C03A780); /* @(PC,0x208) */
     ctx->pr = 0x0C03A57A; /* jsr @r3 */
-    if (ctx->sr.T) return 0x0C02A186; /* BT */
-    return 0x0C03A578;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C03A578, 8B, 4 ops */
@@ -13368,8 +12890,7 @@ u32 block_0c03a578(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = (u32)(s32)76;
     ctx->r[2] = MEM_R32(ctx->r[14] + ctx->r[0]);
     ctx->r[12] += ctx->r[2];
-    if (ctx->sr.T) return 0x0C03A5A2; /* BT */
-    return 0x0C03A580;
+    return 0x0C03A580; /* sequential */
 }
 
 /* Block 0x0C03A5A2, 6B, 3 ops */
@@ -13420,8 +12941,7 @@ u32 block_0c0507e6(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     MEM_W16(ctx->r[13], ctx->r[0]);
     ctx->r[3] = MEM_R32(ctx->r[15] + 52);
-    if (ctx->sr.T) return 0x0C0507F4; /* BT */
-    return 0x0C0507EA;
+    return 0x0C0507EA; /* sequential */
 }
 
 /* Block 0x0C0507F4, 10B, 5 ops */
@@ -13461,8 +12981,7 @@ u32 block_0c04daba(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = (u32)(s32)(s16)MEM_R16(0x0C04DB20);
     ctx->r[5] = MEM_R32(ctx->r[13] + 28);
     ctx->r[2] = MEM_R32(0x0C04DB28); /* @(PC,0x64) */
-    if (ctx->sr.T) return 0x0C04DACE; /* BT */
-    return 0x0C04DAC4;
+    return 0x0C04DAC4; /* sequential */
 }
 
 /* Block 0x0C04D934, 4B, 2 ops */
@@ -13471,8 +12990,7 @@ u32 block_0c04d934(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[6] = MEM_R32(ctx->r[4] + ctx->r[0]);
     MEM_W32(ctx->r[15], ctx->r[13]);
-    if (ctx->sr.T) return 0x0C04D96C; /* BT */
-    return 0x0C04D938;
+    return 0x0C04D938; /* sequential */
 }
 
 /* Block 0x0C04D96C, 10B, 5 ops */
@@ -13484,7 +13002,7 @@ u32 block_0c04d96c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[12] = MEM_R32(ctx->r[8] + ctx->r[0]);
     MEM_W16(ctx->r[12] + ctx->r[0], ctx->r[0]);
     ctx->pr = 0x0C04D978; /* bsr 0x0C04DCB0 */
-    return 0x0C04DB2A;
+    return 0x0C04DB2A; /* static branch */
 }
 
 /* Block 0x0C03A580, 26B, 13 ops */
@@ -13504,8 +13022,7 @@ u32 block_0c03a580(u8* _mem, Sh4Context* _ctx) {
     /* bf — handled at block level */
     /* bra — handled at block level */
     /* nop */
-    if (!ctx->sr.T) return 0x0C0453A8; /* BF */
-    return 0x0C03A59A;
+    return 0x0C0453A8; /* call target */
 }
 
 /* Block 0x0C03A59A, 8B, 4 ops */
@@ -13516,7 +13033,7 @@ u32 block_0c03a59a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = MEM_R32(ctx->r[15] + 12);
     ctx->r[15] += (s32)16;
     ctx->macl = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
-    return 0x0C03A5D0;
+    return 0x0C03A5D0; /* static branch */
 }
 
 /* Block 0x0C03A5D0, 10B, 5 ops */
@@ -13528,8 +13045,7 @@ u32 block_0c03a5d0(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->pr);
     ctx->r[15] += (s32)-12;
     ctx->r[14] = (u32)(s32)0;
-    if (ctx->sr.T) return 0x0C043B70; /* BT */
-    return 0x0C03A5DA;
+    return 0x0C043B70; /* call target */
 }
 
 /* Block 0x0C03A5DA, 6B, 3 ops */
@@ -13539,8 +13055,7 @@ u32 block_0c03a5da(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[15] + 8, ctx->r[4]);
     ctx->r[13] = ctx->r[14];
     MEM_W32(ctx->r[15] + 4, ctx->r[5]);
-    if (ctx->sr.T) return 0x0C03A678; /* BT */
-    return 0x0C03A5E0;
+    return 0x0C03A5E0; /* sequential */
 }
 
 /* Block 0x0C03A5E0, 6B, 3 ops */
@@ -13550,8 +13065,7 @@ u32 block_0c03a5e0(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[15], ctx->r[14]);
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[14]);
     ctx->r[6] = MEM_R32(ctx->r[15] + 4);
-    if (ctx->sr.T) return 0x0C0449A6; /* BT */
-    return 0x0C03A5E6;
+    return 0x0C0449A6; /* call target */
 }
 
 /* Block 0x0C044C34, 6B, 3 ops */
@@ -13561,8 +13075,7 @@ u32 block_0c044c34(u8* _mem, Sh4Context* _ctx) {
     ctx->r[7] = ctx->r[11];
     ctx->r[2] = ctx->fpscr;
     ctx->r[3] += (s32)1;
-    if (ctx->sr.T) return 0x0C044C3E; /* BT */
-    return 0x0C044C3A;
+    return 0x0C044C3A; /* sequential */
 }
 
 /* Block 0x0C03A5E6, 6B, 3 ops */
@@ -13572,8 +13085,7 @@ u32 block_0c03a5e6(u8* _mem, Sh4Context* _ctx) {
     ctx->r[7] = ctx->r[15];
     ctx->r[5] = MEM_R32(ctx->r[15] + 8);
     ctx->r[7] += (s32)4;
-    if (ctx->sr.T) return 0x0C03A678; /* BT */
-    return 0x0C03A5EC;
+    return 0x0C03A5EC; /* sequential */
 }
 
 /* Block 0x0C03A5EC, 22B, 11 ops */
@@ -13609,8 +13121,7 @@ u32 block_0c03a60e(u8* _mem, Sh4Context* _ctx) {
     /* rts — handled at block level */
     /* nop */
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[14]);
-    if (ctx->sr.T) return 0x0C03A628; /* BT */
-    return 0x0C03A622;
+    return 0x0C03A622; /* sequential */
 }
 
 /* Block 0x0C03A628, 8B, 4 ops */
@@ -13621,8 +13132,7 @@ u32 block_0c03a628(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = (u32)(s32)0;
     ctx->r[14] = ctx->r[4];
     ctx->r[13] = (u32)(s32)1;
-    if (ctx->sr.T) return 0x0C03A63C; /* BT */
-    return 0x0C03A630;
+    return 0x0C03A630; /* sequential */
 }
 
 /* Block 0x0C03A63C, 6B, 3 ops */
@@ -13632,8 +13142,7 @@ u32 block_0c03a63c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[7] += (s32)4;
     ctx->pr = 0x0C03A642; /* bsr 0x0C03A300 */
     ctx->r[4] = MEM_R32(ctx->r[15] + 8);
-    if (ctx->sr.T) return 0x0C02A186; /* BT */
-    return 0x0C03A642;
+    return 0x0C02A186; /* bsr */
 }
 
 /* Block 0x0C03A642, 6B, 3 ops */
@@ -13643,8 +13152,7 @@ u32 block_0c03a642(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] += (s32)4;
     ctx->r[2] = MEM_R32(ctx->r[15]);
     ctx->r[14] |= ctx->r[0];
-    if (ctx->sr.T) return 0x0C042178; /* BT */
-    return 0x0C03A648;
+    return 0x0C042178; /* call target */
 }
 
 /* Block 0x0C0421A8, 8B, 4 ops */
@@ -13659,8 +13167,7 @@ u32 block_0c0421a8(u8* _mem, Sh4Context* _ctx) {
       ctx->fr[4+1] = ctx->xf[1]*v0 + ctx->xf[5]*v1 + ctx->xf[9]*v2  + ctx->xf[13]*v3;
       ctx->fr[4+2] = ctx->xf[2]*v0 + ctx->xf[6]*v1 + ctx->xf[10]*v2 + ctx->xf[14]*v3;
       ctx->fr[4+3] = ctx->xf[3]*v0 + ctx->xf[7]*v1 + ctx->xf[11]*v2 + ctx->xf[15]*v3; }
-    if (ctx->sr.T) return 0x0C0421B6; /* BT */
-    return 0x0C0421B0;
+    return 0x0C0421B0; /* sequential */
 }
 
 /* Block 0x0C0421B0, 6B, 3 ops */
@@ -13670,7 +13177,7 @@ u32 block_0c0421b0(u8* _mem, Sh4Context* _ctx) {
     ctx->fr[3] = 0.0f;
     { u32 tmp = MEM_R32(ctx->r[4]); memcpy(&ctx->fr[10], &tmp, 4); ctx->r[4] += 4; }
     ctx->r[0] = ctx->r[13];
-    return 0x0C0421FA;
+    return 0x0C0421FA; /* static branch */
 }
 
 /* Block 0x0C03A648, 6B, 3 ops */
@@ -13680,8 +13187,7 @@ u32 block_0c03a648(u8* _mem, Sh4Context* _ctx) {
     ctx->sr.T = (ctx->r[2] & ctx->r[2]) == 0 ? 1 : 0;
     /* bf — handled at block level */
     ctx->r[0] = ctx->r[14];
-    if (!ctx->sr.T) return 0x0C044FB2; /* BF */
-    return 0x0C03A64E;
+    return 0x0C044FB2; /* call target */
 }
 
 /* Block 0x0C03A64E, 6B, 3 ops */
@@ -13691,8 +13197,7 @@ u32 block_0c03a64e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] += (s32)12;
     ctx->pr = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
     ctx->r[13] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
-    if (ctx->sr.T) return 0x0C03A678; /* BT */
-    return 0x0C03A654;
+    return 0x0C03A654; /* sequential */
 }
 
 /* Block 0x0C03A678, 6B, 3 ops */
@@ -13714,8 +13219,7 @@ u32 block_0c04dac4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = MEM_R32(ctx->r[15]);
     ctx->r[0] = ctx->r[12];
     ctx->sr.T = (s32)ctx->r[0] == 2 ? 1 : 0;
-    if (ctx->sr.T) return 0x0C04DAF2; /* BT */
-    return 0x0C04DACE;
+    return 0x0C04DACE; /* sequential */
 }
 
 /* Block 0x0C0508A2, 12B, 6 ops */
@@ -13783,8 +13287,7 @@ u32 block_0c100d34(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C100D42, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C100D44, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C100D46, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C02A224; /* BT */
-    return 0x0C100D48;
+    return 0x0C02A224; /* static branch */
 }
 
 /* Block 0x0C100D4E, 10B, 5 ops */
@@ -13796,8 +13299,7 @@ u32 block_0c100d4e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C100D52, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C100D54, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C100D56, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C02A186; /* BT */
-    return 0x0C100D58;
+    return 0x0C02A186; /* call target */
 }
 
 /* Block 0x0C100D58, 6B, 3 ops */
@@ -13807,8 +13309,7 @@ u32 block_0c100d58(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C100D58, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C100D5A, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C100D5C, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C100D68; /* BT */
-    return 0x0C100D5E;
+    return 0x0C100D5E; /* sequential */
 }
 
 /* Block 0x0C100D68, 8B, 4 ops */
@@ -13828,7 +13329,7 @@ u32 block_0c044d8a(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[6] = ctx->r[13];
     ctx->sr.T = (ctx->r[11] >> 31) & 1; ctx->r[11] <<= 1;
-    return 0x0C045524;
+    return 0x0C045524; /* call target */
 }
 
 /* Block 0x0C044D8E, 8B, 4 ops */
@@ -13854,8 +13355,7 @@ u32 block_0c043e1a(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C043E24, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C043E26, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C043E28, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C043E34; /* BT */
-    return 0x0C043E2A;
+    return 0x0C043E2A; /* sequential */
 }
 
 /* Block 0x0C048DA8, 18B, 9 ops */
@@ -13874,8 +13374,7 @@ u32 block_0c048da8(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = (u32)(s32)40;
     { u32 tmp = MEM_R32(ctx->r[0] + ctx->r[14]); memcpy(&ctx->fr[3], &tmp, 4); }
     ctx->fr[3] *= ctx->fr[4];
-    if (ctx->sr.T) return 0x0C048DC0; /* BT */
-    return 0x0C048DBA;
+    return 0x0C048DBA; /* sequential */
 }
 
 /* Block 0x0C048DC0, 8B, 4 ops */
@@ -13898,7 +13397,7 @@ u32 block_0c048dc8(u8* _mem, Sh4Context* _ctx) {
       else if (fv <= -2147483649.0f) ctx->fpul = 0x80000000;
       else ctx->fpul = (u32)(s32)fv; }
     ctx->r[0] = ctx->fpul;
-    return 0x0C048E1E;
+    return 0x0C048E1E; /* static branch */
 }
 
 /* Block 0x0C03A654, 6B, 3 ops */
@@ -13908,8 +13407,7 @@ u32 block_0c03a654(u8* _mem, Sh4Context* _ctx) {
     /* rts — handled at block level */
     ctx->r[14] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
     /* nop */
-    if (ctx->sr.T) return 0x0C0449A6; /* BT */
-    return 0x0C03A65A;
+    return 0x0C0449A6; /* call target */
 }
 
 /* Block 0x0C03A65A, 6B, 3 ops */
@@ -13919,8 +13417,7 @@ u32 block_0c03a65a(u8* _mem, Sh4Context* _ctx) {
     /* nop */
     /* nop */
     /* nop */
-    if (ctx->sr.T) return 0x0C03A678; /* BT */
-    return 0x0C03A660;
+    return 0x0C03A660; /* sequential */
 }
 
 /* Block 0x0C03A660, 8B, 4 ops */
@@ -13931,8 +13428,7 @@ u32 block_0c03a660(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[13]);
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[12]);
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[11]);
-    if (ctx->sr.T) return 0x0C03A66E; /* BT */
-    return 0x0C03A668;
+    return 0x0C03A668; /* sequential */
 }
 
 /* Block 0x0C03A668, 6B, 3 ops */
@@ -13942,8 +13438,7 @@ u32 block_0c03a668(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[10]);
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[9]);
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[8]);
-    if (ctx->sr.T) return 0x0C04445A; /* BT */
-    return 0x0C03A66E;
+    return 0x0C04445A; /* call target */
 }
 
 /* Block 0x0C03A66E, 10B, 5 ops */
@@ -13955,8 +13450,7 @@ u32 block_0c03a66e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[8] = ctx->r[5];
     MEM_W32(ctx->r[15], ctx->r[6]);
     ctx->r[3] = MEM_R32(ctx->r[4]);
-    if (ctx->sr.T) return 0x0C04507C; /* BT */
-    return 0x0C03A678;
+    return 0x0C04507C; /* static branch */
 }
 
 /* Block 0x0C04A5C8, 10B, 5 ops */
@@ -14056,8 +13550,7 @@ u32 block_0c1e057c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1E0580, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1E0582, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1E0584, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1E06A8; /* BT */
-    return 0x0C1E0710;
+    return 0x0C1E0586; /* sequential */
 }
 
 /* Block 0x0C04D020, 46B, 23 ops */
@@ -14098,8 +13591,7 @@ u32 block_0c04a68c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = MEM_R32(ctx->r[15] + 16);
     ctx->r[7] = MEM_R32(ctx->r[15] + 12);
     ctx->r[5] = MEM_R32(ctx->r[11]);
-    if (ctx->sr.T) return 0x0C04A70C; /* BT */
-    return 0x0C04A694;
+    return 0x0C04A694; /* sequential */
 }
 
 /* Block 0x0C04A69C, 12B, 6 ops */
@@ -14112,8 +13604,7 @@ u32 block_0c04a69c(u8* _mem, Sh4Context* _ctx) {
     ctx->pr = 0x0C04A6A6; /* bsr 0x0C04ACE0 */
     ctx->r[4] = ctx->r[0];
     ctx->r[2] = MEM_R32(ctx->r[13] + 28);
-    if (ctx->sr.T) return 0x0C04A6BA; /* BT */
-    return 0x0C04A6A8;
+    return 0x0C04A6A8; /* sequential */
 }
 
 /* Block 0x0C04A6D4, 8B, 4 ops */
@@ -14124,8 +13615,7 @@ u32 block_0c04a6d4(u8* _mem, Sh4Context* _ctx) {
     MEM_W32(ctx->r[10] + ctx->r[0], ctx->r[3]);
     ctx->r[3] = MEM_R32(0x0C04A73C); /* @(PC,0x60) */
     ctx->r[4] = MEM_R32(0x0C04A738); /* @(PC,0x5C) */
-    if (ctx->sr.T) return 0x0C04A704; /* BT */
-    return 0x0C04A6DC;
+    return 0x0C04A6DC; /* sequential */
 }
 
 /* Block 0x0C04A704, 6B, 3 ops */
@@ -14135,8 +13625,7 @@ u32 block_0c04a704(u8* _mem, Sh4Context* _ctx) {
     MEM_W8(ctx->r[2] + ctx->r[0], ctx->r[2]);
     sh4_interp_op(mem, ctx, 0x0C04A706, 0x0C2Bu); /* UNIMPL 0x0C2B */
     sh4_interp_op(mem, ctx, 0x0C04A708, 0x0260u); /* UNIMPL 0x0260 */
-    if (ctx->sr.T) return 0x0C04A70C; /* BT */
-    return 0x0C04A70A;
+    return 0x0C04A70A; /* sequential */
 }
 
 /* Block 0x0C03A7E4, 8B, 4 ops */
@@ -14147,8 +13636,7 @@ u32 block_0c03a7e4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = MEM_R32(ctx->r[3]);
     ctx->r[2] = (u32)(s32)0;
     ctx->sr.T = ctx->r[0] > ctx->r[2] ? 1 : 0;
-    if (ctx->sr.T) return 0x0C045524; /* BT */
-    return 0x0C03A7EC;
+    return 0x0C045524; /* call target */
 }
 
 /* Block 0x0C03A7EC, 14B, 7 ops */
@@ -14162,8 +13650,7 @@ u32 block_0c03a7ec(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] += (s32)-1;
     MEM_W32(ctx->r[3], ctx->r[0]);
     ctx->r[3] = MEM_R32(ctx->r[14]);
-    if (!ctx->sr.T) return 0x0C02A224; /* BF */
-    return 0x0C03A7FA;
+    return 0x0C02A224; /* static branch */
 }
 
 /* Block 0x0C03A970, 10B, 5 ops */
@@ -14175,8 +13662,7 @@ u32 block_0c03a970(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[14]);
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[13]);
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[12]);
-    if (ctx->sr.T) return 0x0C043DC6; /* BT */
-    return 0x0C03A97A;
+    return 0x0C043DC6; /* call target */
 }
 
 /* Block 0x0C03A97A, 4B, 2 ops */
@@ -14185,8 +13671,7 @@ u32 block_0c03a97a(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[11]);
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[10]);
-    if (ctx->sr.T) return 0x0C03AA14; /* BT */
-    return 0x0C03A97E;
+    return 0x0C03A97E; /* sequential */
 }
 
 /* Block 0x0C03A97E, 6B, 3 ops */
@@ -14196,8 +13681,7 @@ u32 block_0c03a97e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[9]);
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->r[8]);
     ctx->r[0] = (u32)(s32)0;
-    if (ctx->sr.T) return 0x0C043B70; /* BT */
-    return 0x0C03A984;
+    return 0x0C043B70; /* call target */
 }
 
 /* Block 0x0C03A984, 6B, 3 ops */
@@ -14207,8 +13691,7 @@ u32 block_0c03a984(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->pr);
     ctx->r[15] += (s32)-64;
     ctx->fr[7] = 1.0f;
-    if (ctx->sr.T) return 0x0C03AA14; /* BT */
-    return 0x0C03A98A;
+    return 0x0C03A98A; /* sequential */
 }
 
 /* Block 0x0C03A98A, 6B, 3 ops */
@@ -14218,8 +13701,7 @@ u32 block_0c03a98a(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[4], 4); MEM_W32(ctx->r[0] + ctx->r[15], tmp); }
     ctx->r[0] = (u32)(s32)4;
     { u32 tmp; memcpy(&tmp, &ctx->fr[0], 4); tmp &= 0x7FFFFFFF; memcpy(&ctx->fr[0], &tmp, 4); }
-    if (ctx->sr.T) return 0x0C0449A6; /* BT */
-    return 0x0C03A990;
+    return 0x0C0449A6; /* call target */
 }
 
 /* Block 0x0C03A990, 6B, 3 ops */
@@ -14229,8 +13711,7 @@ u32 block_0c03a990(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[0], 4); MEM_W32(ctx->r[0] + ctx->r[15], tmp); }
     ctx->r[0] = MEM_R32(0x0C03AD0C); /* @(PC,0x378) */
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); MEM_W32(ctx->r[7], tmp); }
-    if (ctx->sr.T) return 0x0C03AA14; /* BT */
-    return 0x0C03A996;
+    return 0x0C03A996; /* sequential */
 }
 
 /* Block 0x0C03A996, 8B, 4 ops */
@@ -14241,8 +13722,7 @@ u32 block_0c03a996(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(0x0C03AD14); /* @(PC,0x378) */
     MEM_W32(ctx->r[15] + 8, ctx->r[1]);
     ctx->r[1] = MEM_R32(ctx->r[2]);
-    if (ctx->sr.T) return 0x0C03A9CE; /* BT */
-    return 0x0C03A99E;
+    return 0x0C03A99E; /* sequential */
 }
 
 /* Block 0x0C03A99E, 6B, 3 ops */
@@ -14252,8 +13732,7 @@ u32 block_0c03a99e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = MEM_R32(0x0C03AD18); /* @(PC,0x378) */
     ctx->r[2] = MEM_R32(0x0C03AD10); /* @(PC,0x36C) */
     MEM_W32(ctx->r[15] + 16, ctx->r[1]);
-    if (ctx->sr.T) return 0x0C046624; /* BT */
-    return 0x0C03A9A4;
+    return 0x0C046624; /* call target */
 }
 
 /* Block 0x0C03A9A4, 6B, 3 ops */
@@ -14263,8 +13742,7 @@ u32 block_0c03a9a4(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(ctx->r[2]);
     ctx->r[1] = MEM_R32(ctx->r[0]);
     MEM_W32(ctx->r[15] + 12, ctx->r[3]);
-    if (ctx->sr.T) return 0x0C03AA14; /* BT */
-    return 0x0C03A9AA;
+    return 0x0C03A9AA; /* sequential */
 }
 
 /* Block 0x0C03A9AA, 6B, 3 ops */
@@ -14274,8 +13752,7 @@ u32 block_0c03a9aa(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp = MEM_R32(ctx->r[5]); memcpy(&ctx->fr[10], &tmp, 4); ctx->r[5] += 4; }
     MEM_W32(ctx->r[15] + 20, ctx->r[1]);
     { u32 tmp = MEM_R32(ctx->r[5]); memcpy(&ctx->fr[8], &tmp, 4); ctx->r[5] += 4; }
-    if (ctx->sr.T) return 0x0C046190; /* BT */
-    return 0x0C03A9B0;
+    return 0x0C046190; /* call target */
 }
 
 /* Block 0x0C03A9B0, 6B, 3 ops */
@@ -14285,8 +13762,7 @@ u32 block_0c03a9b0(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp = MEM_R32(ctx->r[5]); memcpy(&ctx->fr[9], &tmp, 4); ctx->r[5] += 4; }
     ctx->r[12] = MEM_R32(ctx->r[5]); ctx->r[5] += 4;
     ctx->r[0] = (u32)(s32)56;
-    if (ctx->sr.T) return 0x0C03AA14; /* BT */
-    return 0x0C03A9B6;
+    return 0x0C03A9B6; /* sequential */
 }
 
 /* Block 0x0C03A9B6, 8B, 4 ops */
@@ -14297,8 +13773,7 @@ u32 block_0c03a9b6(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = (u32)(s32)48;
     { u32 tmp; memcpy(&tmp, &ctx->fr[8], 4); MEM_W32(ctx->r[0] + ctx->r[15], tmp); }
     ctx->r[0] = (u32)(s32)52;
-    if (ctx->sr.T) return 0x0C043B38; /* BT */
-    return 0x0C03A9BE;
+    return 0x0C043B38; /* call target */
 }
 
 /* Block 0x0C03A9BE, 4B, 2 ops */
@@ -14307,8 +13782,7 @@ u32 block_0c03a9be(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     { u32 tmp; memcpy(&tmp, &ctx->fr[9], 4); MEM_W32(ctx->r[0] + ctx->r[15], tmp); }
     { u32 tmp = MEM_R32(ctx->r[5]); memcpy(&ctx->fr[14], &tmp, 4); ctx->r[5] += 4; }
-    if (ctx->sr.T) return 0x0C03AA14; /* BT */
-    return 0x0C03A9C2;
+    return 0x0C03A9C2; /* sequential */
 }
 
 /* Block 0x0C03AA14, 6B, 3 ops */
@@ -14331,7 +13805,7 @@ u32 block_0c04c53c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] += ctx->r[4];
     MEM_W32(ctx->r[0], ctx->r[2]);
     ctx->r[2] = MEM_R32(0x0C04C590); /* @(PC,0x48) */
-    return 0x0C04C54C;
+    return 0x0C04C54C; /* static branch */
 }
 
 /* Block 0x0C04C54C, 10B, 5 ops */
@@ -14420,7 +13894,7 @@ u32 block_0c0251aa(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = MEM_R32(ctx->r[2] + 8);
     MEM_W32(ctx->r[15] + 12, ctx->r[3]);
     /* bf/s — delay slot handled at block level */
-    return 0x0C025C68;
+    return 0x0C025C68; /* call target */
 }
 
 /* Block 0x0C048F00, 24B, 12 ops */
@@ -14439,8 +13913,7 @@ u32 block_0c048f00(u8* _mem, Sh4Context* _ctx) {
     MEM_W8(ctx->r[0], ctx->r[0]);
     sh4_interp_op(mem, ctx, 0x0C048F14, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C048F16, 0x0100u); /* UNIMPL 0x0100 */
-    if (ctx->sr.T) return 0x0C048F1A; /* BT */
-    return 0x0C048F18;
+    return 0x0C048F18; /* sequential */
 }
 
 /* Block 0x0C048746, 26B, 13 ops */
@@ -14485,8 +13958,7 @@ u32 block_0c04f6b4(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[5] = ctx->r[9];
     ctx->r[4] = MEM_R32(ctx->r[14] + 16);
-    if (ctx->sr.T) return 0x0C04F6EC; /* BT */
-    return 0x0C04F6B8;
+    return 0x0C04F6B8; /* sequential */
 }
 
 /* Block 0x0C04F6B8, 10B, 5 ops */
@@ -14529,8 +14001,7 @@ u32 block_0c04f6d2(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[0] = (u32)(s32)(s16)MEM_R16(ctx->r[15] + 4);
     ctx->sr.T = (ctx->r[0] & ctx->r[0]) == 0 ? 1 : 0;
-    if (ctx->sr.T) return 0x0C04F6EC; /* BT */
-    return 0x0C04F6D6;
+    return 0x0C04F6D6; /* sequential */
 }
 
 /* Block 0x0C04F6D6, 8B, 4 ops */
@@ -14585,8 +14056,7 @@ u32 block_0c045984(u8* _mem, Sh4Context* _ctx) {
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->macl);
     ctx->r[15] += (s32)-24;
     ctx->r[10] = ctx->r[6];
-    if (ctx->sr.T) return 0x0C045998; /* BT */
-    return 0x0C045992;
+    return 0x0C045992; /* sequential */
 }
 
 /* Block 0x0C045992, 6B, 3 ops */
@@ -14611,7 +14081,7 @@ u32 block_0c045998(u8* _mem, Sh4Context* _ctx) {
     ctx->r[8] = (u32)(s32)7;
     ctx->r[11] = ctx->r[8];
     ctx->r[13] += (s32)8;
-    return 0x0C045F0A;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C0459A8, 6B, 3 ops */
@@ -14621,8 +14091,7 @@ u32 block_0c0459a8(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] = (u32)(s32)(s16)ctx->r[11];
     ctx->r[0] = ctx->r[14];
     ctx->r[3] = (u32)(s32)(s8)MEM_R8(ctx->r[9] + ctx->r[0]);
-    if (ctx->sr.T) return 0x0C0459E8; /* BT */
-    return 0x0C0459AE;
+    return 0x0C0459AE; /* sequential */
 }
 
 /* Block 0x0C0459AE, 30B, 15 ops */
@@ -14671,7 +14140,7 @@ u32 block_0c04f71c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C04F722, 0x0900u); /* UNIMPL 0x0900 */
     sh4_interp_op(mem, ctx, 0x0C04F724, 0x0900u); /* UNIMPL 0x0900 */
     sh4_interp_op(mem, ctx, 0x0C04F726, 0x0900u); /* UNIMPL 0x0900 */
-    return 0x0C04F74C;
+    return 0x0C04F74C; /* static branch */
 }
 
 /* Block 0x0C04F74C, 14B, 7 ops */
@@ -14685,8 +14154,7 @@ u32 block_0c04f74c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[14] += ctx->r[10];
     MEM_W32(ctx->r[13] + 12, ctx->r[11]);
     ctx->r[5] = ctx->r[14];
-    if (ctx->sr.T) return 0x0C04F7B4; /* BT */
-    return 0x0C04F75A;
+    return 0x0C04F75A; /* sequential */
 }
 
 /* Block 0x0C04F75A, 10B, 5 ops */
@@ -14698,8 +14166,7 @@ u32 block_0c04f75a(u8* _mem, Sh4Context* _ctx) {
     ctx->pr = 0x0C04F762; /* bsr 0x0C0500B4 */
     ctx->r[4] = ctx->r[14];
     ctx->r[2] = MEM_R32(ctx->r[15]);
-    if (ctx->sr.T) return 0x0C04F77A; /* BT */
-    return 0x0C04F764;
+    return 0x0C04F764; /* sequential */
 }
 
 /* Block 0x0C04F77A, 16B, 8 ops */
@@ -14729,8 +14196,7 @@ u32 block_0c04f78c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = (u32)(s32)(s16)MEM_R16(0x0C04F7E0);
     ctx->r[2] |= ctx->r[3];
     MEM_W16(ctx->r[13], ctx->r[2]);
-    if (ctx->sr.T) return 0x0C04F7B4; /* BT */
-    return 0x0C04F79A;
+    return 0x0C04F79A; /* sequential */
 }
 
 /* Block 0x0C04F79A, 26B, 13 ops */
@@ -14768,8 +14234,7 @@ u32 block_0c03ac34(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] |= ctx->r[3];
     ctx->sr.T = (ctx->r[0] & 0x10u) == 0 ? 1 : 0;
     ctx->r[4] += (s32)32;
-    if (ctx->sr.T) return 0x0C03ACC6; /* BT */
-    return 0x0C03AC44;
+    return 0x0C03AC44; /* sequential */
 }
 
 /* Block 0x0C03AC44, 8B, 4 ops */
@@ -14791,8 +14256,7 @@ u32 block_0c03ac54(u8* _mem, Sh4Context* _ctx) {
     ctx->sr.T = (s32)ctx->r[2] >= 0 ? 1 : 0;
     ctx->r[2] = (u32)(s32)27;
     /* bt/s — delay slot handled at block level */
-    if (ctx->sr.T) return 0x0C046190; /* BT */
-    return 0x0C03AC5A;
+    return 0x0C046190; /* call target */
 }
 
 /* Block 0x0C03AC5A, 6B, 3 ops */
@@ -14805,8 +14269,7 @@ u32 block_0c03ac5a(u8* _mem, Sh4Context* _ctx) {
       if (shift >= 0) ctx->r[0] <<= shift & 31;
       else if (shift == -32) ctx->r[0] = 0;
       else ctx->r[0] >>= (-shift) & 31; }
-    if (ctx->sr.T) return 0x0C03ACD4; /* BT */
-    return 0x0C03AC60;
+    return 0x0C03AC60; /* sequential */
 }
 
 /* Block 0x0C03AC60, 6B, 3 ops */
@@ -14820,8 +14283,7 @@ u32 block_0c03ac60(u8* _mem, Sh4Context* _ctx) {
       ctx->fr[0+1] = ctx->xf[1]*v0 + ctx->xf[5]*v1 + ctx->xf[9]*v2  + ctx->xf[13]*v3;
       ctx->fr[0+2] = ctx->xf[2]*v0 + ctx->xf[6]*v1 + ctx->xf[10]*v2 + ctx->xf[14]*v3;
       ctx->fr[0+3] = ctx->xf[3]*v0 + ctx->xf[7]*v1 + ctx->xf[11]*v2 + ctx->xf[15]*v3; }
-    if (ctx->sr.T) return 0x0C046624; /* BT */
-    return 0x0C03AC66;
+    return 0x0C046624; /* call target */
 }
 
 /* Block 0x0C03AC66, 6B, 3 ops */
@@ -14834,8 +14296,7 @@ u32 block_0c03ac66(u8* _mem, Sh4Context* _ctx) {
       else ctx->r[3] >>= (-shift) & 31; }
     sh4_interp_op(mem, ctx, 0x0C03AC68, 0x0483u); /* UNIMPL 0x0483 */
     ctx->r[3] = ~ctx->r[3];
-    if (ctx->sr.T) return 0x0C03ACD4; /* BT */
-    return 0x0C03AC6C;
+    return 0x0C03AC6C; /* sequential */
 }
 
 /* Block 0x0C03AC6C, 6B, 3 ops */
@@ -14845,8 +14306,7 @@ u32 block_0c03ac6c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[2] = MEM_R32(ctx->r[9]); ctx->r[9] += 4;
     ctx->r[2] &= ctx->r[3];
     memcpy(&ctx->fr[0], &ctx->fpul, 4);
-    if (ctx->sr.T) return 0x0C043DC6; /* BT */
-    return 0x0C03AC72;
+    return 0x0C043DC6; /* call target */
 }
 
 /* Block 0x0C03AC72, 4B, 2 ops */
@@ -14855,8 +14315,7 @@ u32 block_0c03ac72(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[2] |= ctx->r[0];
     ctx->fpul = ctx->r[2];
-    if (ctx->sr.T) return 0x0C03ACD4; /* BT */
-    return 0x0C03AC76;
+    return 0x0C03AC76; /* sequential */
 }
 
 /* Block 0x0C03AC76, 6B, 3 ops */
@@ -14866,8 +14325,7 @@ u32 block_0c03ac76(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] += (s32)-32;
     memcpy(&ctx->fr[1], &ctx->fpul, 4);
     ctx->r[6] += (s32)16;
-    if (ctx->sr.T) return 0x0C043B70; /* BT */
-    return 0x0C03AC7C;
+    return 0x0C043B70; /* call target */
 }
 
 /* Block 0x0C03AC7C, 6B, 3 ops */
@@ -14877,8 +14335,7 @@ u32 block_0c03ac7c(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp = MEM_R32(ctx->r[9]); memcpy(&ctx->fr[2], &tmp, 4); ctx->r[9] += 4; }
     { u32 tmp; memcpy(&tmp, &ctx->fr[2], 4); ctx->r[6] -= 4; MEM_W32(ctx->r[6], tmp); }
     ctx->r[5] += (s32)32;
-    if (ctx->sr.T) return 0x0C03ACD4; /* BT */
-    return 0x0C03AC82;
+    return 0x0C03AC82; /* sequential */
 }
 
 /* Block 0x0C03AC82, 6B, 3 ops */
@@ -14892,8 +14349,7 @@ u32 block_0c03ac82(u8* _mem, Sh4Context* _ctx) {
       ctx->fr[0+2] = ctx->xf[2]*v0 + ctx->xf[6]*v1 + ctx->xf[10]*v2 + ctx->xf[14]*v3;
       ctx->fr[0+3] = ctx->xf[3]*v0 + ctx->xf[7]*v1 + ctx->xf[11]*v2 + ctx->xf[15]*v3; }
     sh4_interp_op(mem, ctx, 0x0C03AC86, 0x0683u); /* UNIMPL 0x0683 */
-    if (ctx->sr.T) return 0x0C044B08; /* BT */
-    return 0x0C03AC88;
+    return 0x0C044B08; /* call target */
 }
 
 /* Block 0x0C044B08, 10B, 5 ops */
@@ -14929,8 +14385,7 @@ u32 block_0c044b1c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] = ctx->r[4];
     ctx->r[4] += (s32)1;
     ctx->r[3] = (u32)(s32)(s8)MEM_R8(ctx->r[3]);
-    if (ctx->sr.T) return 0x0C044B96; /* BT */
-    return 0x0C044B24;
+    return 0x0C044B24; /* sequential */
 }
 
 /* Block 0x0C044B24, 8B, 4 ops */
@@ -14966,8 +14421,7 @@ u32 block_0c044b3e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[12] <<= 2;
     ctx->sr.T = (ctx->r[12] >> 31) & 1; ctx->r[12] <<= 1;
     ctx->r[6] = ctx->r[9];
-    if (ctx->sr.T) return 0x0C044B4C; /* BT */
-    return 0x0C044B46;
+    return 0x0C044B46; /* sequential */
 }
 
 /* Block 0x0C044B4C, 22B, 11 ops */
@@ -14985,8 +14439,7 @@ u32 block_0c044b4c(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = ctx->r[9];
     ctx->r[2] &= ctx->r[3];
     ctx->r[3] = MEM_R32(0x0C044CA4); /* @(PC,0x140) */
-    if (ctx->sr.T) return 0x0C044B66; /* BT */
-    return 0x0C044B62;
+    return 0x0C044B62; /* sequential */
 }
 
 /* Block 0x0C044B66, 20B, 10 ops */
@@ -15003,8 +14456,7 @@ u32 block_0c044b66(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = (u32)(s32)8;
     MEM_W32(ctx->r[15] + 4, ctx->r[0]);
     ctx->r[5] -= ctx->r[0];
-    if (ctx->sr.T) return 0x0C044B96; /* BT */
-    return 0x0C044B7A;
+    return 0x0C044B7A; /* sequential */
 }
 
 /* Block 0x0C044B96, 8B, 4 ops */
@@ -15038,8 +14490,7 @@ u32 block_0c03ac8e(u8* _mem, Sh4Context* _ctx) {
     { u32 old_t = ctx->sr.T; ctx->sr.T = ctx->r[12] & 1;
       ctx->r[12] = (ctx->r[12] >> 1) | (old_t << 31); }
     ctx->r[0] = ctx->r[1];
-    if (ctx->sr.T) return 0x0C03ACB2; /* BT */
-    return 0x0C03AC96;
+    return 0x0C03AC96; /* sequential */
 }
 
 /* Block 0x0C03AC96, 6B, 3 ops */
@@ -15049,8 +14500,7 @@ u32 block_0c03ac96(u8* _mem, Sh4Context* _ctx) {
     /* bt/s — delay slot handled at block level */
     ctx->sr.T = (ctx->r[12] >> 31) & 1; ctx->r[12] <<= 1;
     ctx->sr.T = (ctx->r[0] & 0x08u) == 0 ? 1 : 0;
-    if (ctx->sr.T) return 0x0C043E9A; /* BT */
-    return 0x0C03AC9C;
+    return 0x0C043E9A; /* call target */
 }
 
 /* Block 0x0C03AC9C, 6B, 3 ops */
@@ -15071,8 +14521,7 @@ u32 block_0c03aca2(u8* _mem, Sh4Context* _ctx) {
     /* bra — handled at block level */
     ctx->r[0] = MEM_R32(ctx->r[4]); ctx->r[4] += 4;
     /* nop */
-    if (ctx->sr.T) return 0x0C044D6C; /* BT */
-    return 0x0C03ACA8;
+    return 0x0C044D6C; /* call target */
 }
 
 /* Block 0x0C03ACA8, 6B, 3 ops */
@@ -15082,8 +14531,7 @@ u32 block_0c03aca8(u8* _mem, Sh4Context* _ctx) {
     /* nop */
     /* bra — handled at block level */
     ctx->r[0] = MEM_R32(ctx->r[4]); ctx->r[4] += 4;
-    if (ctx->sr.T) return 0x0C03ACD4; /* BT */
-    return 0x0C03ACC6;
+    return 0x0C03ACAE; /* sequential */
 }
 
 /* Block 0x0C03ACC6, 14B, 7 ops */
@@ -15132,8 +14580,7 @@ u32 block_0c0f1ff0(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C0F2002, 0x0FFFu); /* UNIMPL 0x0FFF */
     { u32 tmp; memcpy(&tmp, &ctx->fr[8], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     sh4_interp_op(mem, ctx, 0x0C0F2006, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C0F203C; /* BT */
-    return 0x0C0F2008;
+    return 0x0C0F2008; /* sequential */
 }
 
 /* Block 0x0C0F2008, 6B, 3 ops */
@@ -15143,7 +14590,7 @@ u32 block_0c0f2008(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C0F2008, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F200A, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F200C, 0x0FFFu); /* UNIMPL 0x0FFF */
-    return 0x0C0F2040;
+    return 0x0C0F2040; /* static branch */
 }
 
 /* Block 0x0C0F2040, 12B, 6 ops */
@@ -15156,8 +14603,7 @@ u32 block_0c0f2040(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C0F2046, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F2048, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F204A, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C0F2052; /* BT */
-    return 0x0C0F204C;
+    return 0x0C0F204C; /* sequential */
 }
 
 /* Block 0x0C0F204C, 6B, 3 ops */
@@ -15167,7 +14613,7 @@ u32 block_0c0f204c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C0F204C, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F204E, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F2050, 0x0FFFu); /* UNIMPL 0x0FFF */
-    return 0x0C0F2056;
+    return 0x0C0F2056; /* static branch */
 }
 
 /* Block 0x0C0F2056, 10B, 5 ops */
@@ -15220,8 +14666,7 @@ u32 block_0c0f2060(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C0F209E, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F20A0, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F20A2, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C02A186; /* BT */
-    return 0x0C0F20A4;
+    return 0x0C02A186; /* call target */
 }
 
 /* Block 0x0C0F20A4, 12B, 6 ops */
@@ -15234,8 +14679,7 @@ u32 block_0c0f20a4(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C0F20AA, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F20AC, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C0F20AE, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C0F20F0; /* BT */
-    return 0x0C0F20B0;
+    return 0x0C0F20B0; /* sequential */
 }
 
 /* Block 0x0C0F20F0, 6B, 3 ops */
@@ -15260,8 +14704,7 @@ u32 block_0c04f78a(u8* _mem, Sh4Context* _ctx) {
     ctx->r[3] = (u32)(s32)(s16)MEM_R16(0x0C04F7E0);
     ctx->r[2] |= ctx->r[3];
     MEM_W16(ctx->r[13], ctx->r[2]);
-    if (ctx->sr.T) return 0x0C04F7B4; /* BT */
-    return 0x0C04F79A;
+    return 0x0C04F79A; /* sequential */
 }
 
 /* Block 0x0C04C9BE, 14B, 7 ops */
@@ -15284,7 +14727,7 @@ u32 block_0c04a3de(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[1] = ctx->r[2];
     ctx->sr.T = (s32)ctx->r[1] > (s32)ctx->r[5] ? 1 : 0;
-    return 0x0C04A404;
+    return 0x0C04A404; /* static branch */
 }
 
 /* Block 0x0C1C2E64, 8B, 4 ops */
@@ -15295,8 +14738,7 @@ u32 block_0c1c2e64(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C2E66, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C2E68, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C2E6A, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C2E6E; /* BT */
-    return 0x0C1C2E6C;
+    return 0x0C1C2E6C; /* sequential */
 }
 
 /* Block 0x0C1C2E6C, 8B, 4 ops */
@@ -15307,8 +14749,7 @@ u32 block_0c1c2e6c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C2E6E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C2E70, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C2E72, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C2E76; /* BT */
-    return 0x0C1C2E74;
+    return 0x0C1C2E74; /* sequential */
 }
 
 /* Block 0x0C1C2E74, 8B, 4 ops */
@@ -15319,8 +14760,7 @@ u32 block_0c1c2e74(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C2E76, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C2E78, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C2E7A, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C2E7E; /* BT */
-    return 0x0C1C2E7C;
+    return 0x0C1C2E7C; /* sequential */
 }
 
 /* Block 0x0C1C2E7C, 8B, 4 ops */
@@ -15331,8 +14771,7 @@ u32 block_0c1c2e7c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C2E7E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C2E80, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C2E82, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C2E86; /* BT */
-    return 0x0C1C2E84;
+    return 0x0C1C2E84; /* sequential */
 }
 
 /* Block 0x0C1C2E84, 8B, 4 ops */
@@ -15343,8 +14782,7 @@ u32 block_0c1c2e84(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C2E86, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C2E88, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C2E8A, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C2E8E; /* BT */
-    return 0x0C1C2E8C;
+    return 0x0C1C2E8C; /* sequential */
 }
 
 /* Block 0x0C1C2E8E, 6B, 3 ops */
@@ -15354,8 +14792,7 @@ u32 block_0c1c2e8e(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C2E8E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C2E90, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C2E92, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C2E96; /* BT */
-    return 0x0C1C2E94;
+    return 0x0C1C2E94; /* sequential */
 }
 
 /* Block 0x0C1C2E96, 4B, 2 ops */
@@ -15364,8 +14801,7 @@ u32 block_0c1c2e96(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     sh4_interp_op(mem, ctx, 0x0C1C2E96, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C2E98, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C2E9C; /* BT */
-    return 0x0C1C2E9A;
+    return 0x0C1C2E9A; /* sequential */
 }
 
 /* Block 0x0C1C2E9C, 22B, 11 ops */
@@ -15383,7 +14819,7 @@ u32 block_0c1c2e9c(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C2EAC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C2EAE, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C2EB0, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1C3314;
+    return 0x0C1C3314; /* call target */
 }
 
 /* Block 0x0C1C2ECC, 4B, 2 ops */
@@ -15405,8 +14841,7 @@ u32 block_0c1c33cc(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C33D2, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C33D4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C33D6, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C33E8; /* BT */
-    return 0x0C1C33D8;
+    return 0x0C1C33D8; /* sequential */
 }
 
 /* Block 0x0C1C33D8, 8B, 4 ops */
@@ -15417,8 +14852,7 @@ u32 block_0c1c33d8(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C33DA, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C33DC, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C33DE, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1C33E8; /* BT */
-    return 0x0C1C33E0;
+    return 0x0C1C33E0; /* sequential */
 }
 
 /* Block 0x0C1C33E0, 8B, 4 ops */
@@ -15429,7 +14863,7 @@ u32 block_0c1c33e0(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C33E2, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C33E4, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C33E6, 0x0000u); /* UNIMPL 0x0000 */
-    return 0x0C1C33EE;
+    return 0x0C1C33EE; /* static branch */
 }
 
 /* Block 0x0C1C3546, 12B, 6 ops */
@@ -15442,8 +14876,7 @@ u32 block_0c1c3546(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C1C354C, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C354E, 0x0000u); /* UNIMPL 0x0000 */
     sh4_interp_op(mem, ctx, 0x0C1C3550, 0x0000u); /* UNIMPL 0x0000 */
-    if (ctx->sr.T) return 0x0C1EEC70; /* BT */
-    return 0x0C1C3552;
+    return 0x0C1EEC70; /* call target */
 }
 
 /* Block 0x0C04F7B4, 20B, 10 ops */
@@ -15486,8 +14919,7 @@ u32 block_0c04ebac(u8* _mem, Sh4Context* _ctx) {
     ctx->r[11] = ctx->r[4];
     ctx->r[15] -= 4; MEM_W32(ctx->r[15], ctx->pr);
     ctx->r[3] = MEM_R32(0x0C04ECE4); /* @(PC,0x110) */
-    if (ctx->sr.T) return 0x0C04EC10; /* BT */
-    return 0x0C04EBD2;
+    return 0x0C04EBD2; /* sequential */
 }
 
 /* Block 0x0C04EC10, 56B, 28 ops */
@@ -15538,7 +14970,7 @@ u32 block_0c04ec48(u8* _mem, Sh4Context* _ctx) {
     ctx->r[5] = ctx->r[13];
     ctx->r[2] = (u32)(s32)(s16)MEM_R16(ctx->r[13]);
     ctx->r[3] = MEM_R32(ctx->r[15] + 8);
-    return 0x0C04EC62;
+    return 0x0C04EC62; /* static branch */
 }
 
 /* Block 0x0C04EC62, 16B, 8 ops */
@@ -15562,8 +14994,7 @@ u32 block_0c04ec72(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[3] = MEM_R32(ctx->r[15] + 4);
     ctx->sr.T = (s32)ctx->r[2] >= (s32)ctx->r[3] ? 1 : 0;
-    if (ctx->sr.T) return 0x0C04EC8E; /* BT */
-    return 0x0C04EC76;
+    return 0x0C04EC76; /* sequential */
 }
 
 /* Block 0x0C04EC8E, 12B, 6 ops */
@@ -15576,7 +15007,7 @@ u32 block_0c04ec8e(u8* _mem, Sh4Context* _ctx) {
     ctx->r[6] = ctx->r[13];
     ctx->pr = 0x0C04EC9A; /* jsr @r2 */
     ctx->r[4] = (u32)(s32)1;
-    return 0x0C04F74C;
+    return 0x0C04F74C; /* static branch */
 }
 
 /* Block 0x0C04F764, 8B, 4 ops */
@@ -15587,8 +15018,7 @@ u32 block_0c04f764(u8* _mem, Sh4Context* _ctx) {
     ctx->r[4] = ctx->r[14];
     MEM_W32(ctx->r[2] + 12, ctx->r[11]);
     ctx->r[2] = MEM_R32(ctx->r[15] + 12);
-    if (ctx->sr.T) return 0x0C04F77A; /* BT */
-    return 0x0C04F76C;
+    return 0x0C04F76C; /* sequential */
 }
 
 /* Block 0x0C1EBDA8, 8B, 4 ops */
@@ -15618,8 +15048,7 @@ u32 block_0c1009dc(u8* _mem, Sh4Context* _ctx) {
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
     { u32 tmp; memcpy(&tmp, &ctx->fr[7], 4); ctx->r[0] -= 4; MEM_W32(ctx->r[0], tmp); }
-    if (ctx->sr.T) return 0x0C02A224; /* BT */
-    return 0x0C1009F4;
+    return 0x0C02A224; /* static branch */
 }
 
 /* Block 0x0C100A40, 14B, 7 ops */
@@ -15633,8 +15062,7 @@ u32 block_0c100a40(u8* _mem, Sh4Context* _ctx) {
     sh4_interp_op(mem, ctx, 0x0C100A48, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C100A4A, 0x0FFFu); /* UNIMPL 0x0FFF */
     sh4_interp_op(mem, ctx, 0x0C100A4C, 0x0FFFu); /* UNIMPL 0x0FFF */
-    if (ctx->sr.T) return 0x0C043918; /* BT */
-    return 0x0C100A4E;
+    return 0x0C043918; /* static branch */
 }
 
 /* Block 0x0C043998, 14B, 7 ops */
@@ -15658,7 +15086,7 @@ u32 block_0c0439a6(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->pr = 0x0C0439AA; /* bsrf r12 */
     MEM_W32(ctx->r[7] + 32, ctx->r[9]);
-    return 0x0C0439AC;
+    return 0x0C0439AC; /* static branch */
 }
 
 /* Block 0x0C0439AC, 8B, 4 ops */
@@ -15689,7 +15117,7 @@ u32 block_0c0457cc(u8* _mem, Sh4Context* _ctx) {
     ctx->r[13] += ctx->r[4];
     /* bra — handled at block level */
     ctx->r[0] &= 0x07u;
-    return 0x0C044E1C;
+    return ctx->r[3]; /* jsr @r3 */
 }
 
 /* Block 0x0C0457E6, 4B, 2 ops */
@@ -15698,7 +15126,7 @@ u32 block_0c0457e6(u8* _mem, Sh4Context* _ctx) {
     ctx->cycle_counter -= 2; /* cycle accounting */
     ctx->r[0] = ~ctx->r[0];
     ctx->r[0] += (s32)1;
-    return 0x0C045F0A;
+    return 0x0C045F0A; /* call target */
 }
 
 /* Block 0x0C0457EA, 6B, 3 ops */
@@ -15708,8 +15136,7 @@ u32 block_0c0457ea(u8* _mem, Sh4Context* _ctx) {
     ctx->r[0] &= 0x07u;
     ctx->r[0] = ~ctx->r[0];
     ctx->r[0] += (s32)1;
-    if (ctx->sr.T) return 0x0C045802; /* BT */
-    return 0x0C0457F0;
+    return 0x0C0457F0; /* sequential */
 }
 
 /* Block 0x0C0457F0, 18B, 9 ops */
@@ -15740,8 +15167,7 @@ u32 block_0c03a884(u8* _mem, Sh4Context* _ctx) {
     ctx->r[8] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
     ctx->r[9] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
     ctx->r[10] = MEM_R32(ctx->r[15]); ctx->r[15] += 4;
-    if (ctx->sr.T) return 0x0C043DC6; /* BT */
-    return 0x0C03A88E;
+    return 0x0C043DC6; /* call target */
 }
 
 #endif /* SH4RECOMP_BLOCKS */

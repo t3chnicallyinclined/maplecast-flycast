@@ -39,7 +39,7 @@ static u64 g_total_failed = 0;
 
 static void verify_init() {
     if (g_verify_log) return;
-    g_verify_log = fopen("verify_results.csv", "w");
+    g_verify_log = fopen("/tmp/sh4recomp_verify.csv", "w");
     if (g_verify_log) {
         fprintf(g_verify_log, "block_addr,result,fail_field,expected,actual\n");
         printf("[sh4recomp-verify] Verification log → verify_results.csv\n");
@@ -87,16 +87,30 @@ static u32 interp_exec_block(u32 start_pc, u32 sh4_size) {
     Sh4cntx.pc = start_pc;
     int insn_count = sh4_size / 2;
 
+    // Execute exactly insn_count instructions — matches our block which
+    // runs each instruction once (even in loops, the block exits after
+    // one iteration and returns the branch target)
     for (int i = 0; i < insn_count; i++) {
         u32 addr = Sh4cntx.pc;
         u16 op = IReadMem16(addr);
         Sh4cntx.pc = addr + 2;
 
-        // Check for FPU disable
         if (Sh4cntx.sr.FD == 1 && OpDesc[op]->IsFloatingPoint())
             continue;
 
+        // For branch instructions with delay slots, the handler will
+        // execute the delay slot internally and set PC to the target.
+        // We need to stop after this — the delay slot counts as the
+        // next instruction, so skip one from our count.
+        u32 pc_before = Sh4cntx.pc;
         OpPtr[op](&Sh4cntx, op);
+
+        // If the handler changed PC to outside the block (branch taken),
+        // the delay slot was already executed internally. Stop here.
+        if (Sh4cntx.pc < start_pc || Sh4cntx.pc >= start_pc + sh4_size) {
+            // PC left the block — branch was taken (with delay slot)
+            break;
+        }
     }
 
     Sh4Interpreter::Instance = old_instance;
