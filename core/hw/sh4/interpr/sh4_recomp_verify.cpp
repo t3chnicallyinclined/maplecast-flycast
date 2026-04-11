@@ -194,6 +194,13 @@ void sh4recomp_verify_block(u32 vaddr, u32 sh4_size) {
     RecompBlockFunc block = recomp_find_block(lookup_pc);
     if (!block) return;
 
+    // On first game code block, trigger bulk verification of ALL blocks
+    static bool bulk_done = false;
+    if (!bulk_done && lookup_pc >= 0x0C020000) {
+        bulk_done = true;
+        sh4recomp_verify_all();
+    }
+
     g_total_verified++;
 
     // 1. Snapshot state BEFORE
@@ -241,16 +248,7 @@ void sh4recomp_verify_all() {
     printf("[sh4recomp-verify] === BULK VERIFICATION START ===\n");
     fflush(stdout);
 
-    // Iterate the block table and verify each one
-    extern "C" {
-        typedef struct { u32 addr; RecompBlockFunc func; } BlockEntry;
-        extern const BlockEntry block_table[];
-        extern const int NUM_BLOCKS_COUNT;  // we'll add this
-    }
-
-    // Since we can't easily get NUM_BLOCKS from the dispatch table,
-    // iterate by calling recomp_find_block for addresses in the trace
-    // Read the block trace CSV
+    // Read the block trace CSV and verify each block
     FILE* trace = fopen("/home/tris/projects/sh4recomp/extracted/block_trace.csv", "r");
     if (!trace) {
         printf("[sh4recomp-verify] Can't open block trace\n");
