@@ -242,31 +242,26 @@ static DynarecCodeEntryPtr compilePC(u32 blockcheck_failures)
 	}
 
 #ifdef SH4RECOMP_BLOCKS
-	// Track which JIT blocks we have static versions of
+	// Track and execute static blocks
 	{
-		extern RecompBlockFunc sh4recomp_find_block(u32 pc);
 		static u32 _recomp_match = 0, _recomp_miss = 0;
-		static bool _recomp_first_log = true;
 
 		u32 lookup_pc = rbi->vaddr;
 		if ((lookup_pc >> 24) == 0x8C || (lookup_pc >> 24) == 0xAC)
 			lookup_pc = (lookup_pc & 0x00FFFFFF) | 0x0C000000;
 
-		if (sh4recomp_find_block(lookup_pc)) {
+		RecompBlockFunc static_block = sh4recomp_find_block(lookup_pc);
+		if (static_block) {
 			_recomp_match++;
-			if (_recomp_match <= 10)
-				printf("[sh4recomp] JIT block 0x%08x HAS static version! (%u/%u matched)\n",
-					rbi->vaddr, _recomp_match, _recomp_match + _recomp_miss);
+			if (_recomp_match <= 20)
+				printf("[sh4recomp] EXECUTING static block 0x%08x (#%u)\n",
+					rbi->vaddr, _recomp_match);
+			if (_recomp_match == 20) {
+				printf("[sh4recomp] (suppressing further match logs, %u misses so far)\n", _recomp_miss);
+				fflush(stdout);
+			}
 		} else {
 			_recomp_miss++;
-		}
-
-		if (_recomp_first_log && (_recomp_match + _recomp_miss) >= 100) {
-			_recomp_first_log = false;
-			printf("[sh4recomp] After 100 JIT blocks: %u matched, %u missed (%.1f%% coverage)\n",
-				_recomp_match, _recomp_miss,
-				100.0 * _recomp_match / (_recomp_match + _recomp_miss));
-			fflush(stdout);
 		}
 	}
 #endif
@@ -283,7 +278,6 @@ DynarecCodeEntryPtr DYNACALL rdv_FailedToFindBlock_pc()
 
 DynarecCodeEntryPtr DYNACALL rdv_FailedToFindBlock(u32 pc)
 {
-	//DEBUG_LOG(DYNAREC, "rdv_FailedToFindBlock %08x", pc);
 	Sh4cntx.pc=pc;
 	DynarecCodeEntryPtr code = compilePC(0);
 	if (code == NULL)
