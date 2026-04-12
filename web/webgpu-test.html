@@ -99,6 +99,11 @@ import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs';
 
 const canvas=document.getElementById('c'), ov=document.getElementById('ov'), st=document.getElementById('st');
 let fc=0,lt=performance.now(),fps=0,dMs=0,pMs=0,rMs=0,wB=0;
+// E2E latency tracking
+let e2eSum=0,e2eCount=0,e2eMax=0,e2eMin=999,dropped=0,totalFrames=0,parsed_passes=1;
+// Moving averages (exponential, alpha=0.05 for smooth display)
+const A=0.05;
+let maDecode=0,maParse=0,maRender=0,maTotal=0,maE2E=0;
 const ss=(m,c='')=>{st.textContent=m;st.className=c};
 
 // Debug state — read by renderer
@@ -160,7 +165,8 @@ async function main(){
             if(typeof e.data==='string')return;
             const d=new Uint8Array(e.data); wB+=d.byteLength;
             try{
-                const t0=performance.now();
+                const wsArrival=performance.now();
+                const t0=wsArrival;
                 const fr=D.applyFrame(d);
                 dMs=performance.now()-t0;
                 if(!fr)return;
@@ -248,10 +254,24 @@ async function main(){
                     s+=`\nIgnoreTexA: `;for(const[k,v]of Object.entries(itaFlags))s+=`${k}:${v} `;
                     document.getElementById('dbg_stats').textContent=s;
                 }
+                parsed_passes=g.renderPasses?g.renderPasses.length:1;
                 const t2=performance.now();
                 // Pass debug state to renderer
                 R.renderFrame(g,T,fr.pvrSnapshot,D.vram,DBG);
                 rMs=performance.now()-t2;
+                // E2E: WebSocket arrival → render complete
+                const e2e=performance.now()-wsArrival;
+                e2eSum+=e2e;e2eCount++;
+                if(e2e>e2eMax)e2eMax=e2e;
+                if(e2e<e2eMin)e2eMin=e2e;
+                totalFrames++;
+                // Update moving averages
+                const total=dMs+pMs+rMs;
+                maDecode+=(dMs-maDecode)*A;
+                maParse+=(pMs-maParse)*A;
+                maRender+=(rMs-maRender)*A;
+                maTotal+=(total-maTotal)*A;
+                maE2E+=(e2e-maE2E)*A;
                 fc++;
             }catch(ex){console.error('[webgpu]',ex);}
         };
@@ -259,12 +279,28 @@ async function main(){
 
     (function tick(){
         const now=performance.now(),el=now-lt;
-        if(el>=1000){fps=(fc/el*1000).toFixed(1);fc=0;lt=now;}
+        if(el>=2000){fps=(fc/el*1000).toFixed(1);fc=0;lt=now;} // Update every 2s so you can read it
         const kb=(wB*8/1000).toFixed(0);wB=0;
-        const totalMs=dMs+pMs+rMs;
-        const budget=(totalMs/16.67*100).toFixed(0);
+        const budget=(maTotal/16.67*100).toFixed(0);
         const ts=T.stats;
-        ov.textContent=`FPS: ${fps}  ${budget}% budget\nDecode: ${dMs.toFixed(2)}ms\nParse:  ${pMs.toFixed(2)}ms\nRender: ${rMs.toFixed(2)}ms\nTotal:  ${totalMs.toFixed(2)}ms\nStream: ${kb} kbps\nFrame:  ${D.frameNum}\nTex$: H=${ts.hits} M=${ts.misses} R=${ts.reused}\nStats:  S=${D.stats.syncs} K=${D.stats.keyframes} D=${D.stats.deltas}`;
+        ov.textContent=
+`══ WebGPU (Pure JS, 0 WASM) ═════
+FPS: ${fps}  |  ${budget}% budget used
+─── Moving Averages ─────────────
+Decode:  ${maDecode.toFixed(2)}ms  (zstd+delta)
+Parse:   ${maParse.toFixed(2)}ms  (TA→verts)
+Render:  ${maRender.toFixed(2)}ms  (GPU draw)
+Total:   ${maTotal.toFixed(2)}ms
+─── E2E Latency ─────────────────
+Avg:     ${maE2E.toFixed(2)}ms
+Min:     ${e2eMin.toFixed(2)}ms
+Max:     ${e2eMax.toFixed(2)}ms
+─── Stats ───────────────────────
+Frames:  ${totalFrames} | Stream: ${kb}kbps
+Tex$:    H=${ts.hits} M=${ts.misses} R=${ts.reused}
+Passes:  ${parsed_passes} | Frame ${D.frameNum}
+═════════════════════════════════`;
+        if(e2eCount>300){e2eSum=0;e2eCount=0;e2eMax=0;e2eMin=999;}
         ts.hits=0;ts.misses=0;ts.reused=0;
         requestAnimationFrame(tick);
     })();
