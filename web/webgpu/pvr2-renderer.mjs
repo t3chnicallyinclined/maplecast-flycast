@@ -158,49 +158,60 @@ export class PVR2Renderer {
         // Build index buffer: convert strips to triangle lists
         this._buildIndexBuffer([opaque, punchThrough, translucent]);
 
-        const enc=this.dev.createCommandEncoder();
-        const rp=enc.beginRenderPass({
-            colorAttachments:[{view:this.ctx.getCurrentTexture().createView(),clearValue:{r:0,g:0,b:0,a:1},loadOp:'clear',storeOp:'store'}],
-            depthStencilAttachment:{view:this.depth.createView(),depthClearValue:0.0,depthLoadOp:'clear',depthStoreOp:'store'},
-        });
-        rp.setVertexBuffer(0,this.vBuf);
-        if(this.idxBuf) rp.setIndexBuffer(this.idxBuf,'uint32');
-        const fb=texMgr.getFallbackTexture(), fbBG=this._texBG(fb.texture,fb.sampler);
-
         // Flycast forces opaque blend to (ONE, ZERO) — no blending
         for(const pp of opaque){pp.tsp=(pp.tsp&0x03FFFFFF)|(1<<29)|(0<<26);}
 
-        const draw=(list,lt)=>{let drawIdx=0;const skip=lt==='translucent'?(dbg.trSkip||0):(dbg.opSkip||0);
-        const maxDraw=lt==='translucent'?(dbg.trMax||9999):(dbg.opMax||9999);
-        for(const pp of list){
-            if(pp.count<3||pp._s<0)continue;
-            drawIdx++; if(drawIdx<=skip||drawIdx>skip+maxDraw)continue;
-            const isp=pp.isp,tsp=pp.tsp,tcw=pp.tcw,pcw=pp.pcw;
-            let dm=(isp>>29)&7,cm=(isp>>27)&3,zw=(isp>>26)&1?0:1;
-            if(lt==='opaque'&&dm===0)continue;
-            if(lt==='punch_through'||lt==='translucent')dm=6;
-            if(lt==='translucent')zw=1; if(lt==='punch_through')zw=1; // MVC2: depth write for translucent fixes sprite layering
-            // Debug overrides
-            if(lt==='translucent'&&dbg.trDepthFunc!==undefined)dm=dbg.trDepthFunc;
-            if(lt==='translucent'&&dbg.trDepthWrite)zw=1;
-            let sb=(tsp>>29)&7, db=(tsp>>26)&7;
-            if(dbg.blendOverride){sb=dbg.blendSrc||4;db=dbg.blendDst||5;}
-            let cullIdx = cm^1;
-            if(dbg.cullOverride==='none')cullIdx=0;
-            else if(dbg.cullOverride==='front')cullIdx=2;
-            else if(dbg.cullOverride==='back')cullIdx=3;
-            const pipe=this._pipe(sb,db,dm,zw,cullIdx,'triangle-list');
-            let tbg=fbBG;
-            if((pcw>>3)&1){const t=texMgr.getTexture(tsp,tcw,vram);if(t)tbg=this._texBG(t.texture,t.sampler);}
-            rp.setPipeline(pipe);
-            rp.setBindGroup(0,this.uBG,[pp._s*this.SLOT]);
-            rp.setBindGroup(1,tbg);
-            rp.drawIndexed(pp._idxCount,1,pp._idxFirst,0,0);
-        }};
-        if(dbg.drawOpaque!==false) draw(opaque,'opaque');
-        if(dbg.drawPunch!==false) draw(punchThrough,'punch_through');
-        if(dbg.drawTrans!==false) draw(translucent,'translucent');
-        rp.end();
+        const fb=texMgr.getFallbackTexture(), fbBG=this._texBG(fb.texture,fb.sampler);
+        const enc=this.dev.createCommandEncoder();
+        const texView=this.ctx.getCurrentTexture().createView();
+        const depthView=this.depth.createView();
+        const passes = parsed.renderPasses || [{op_count:opaque.length,pt_count:punchThrough.length,tr_count:translucent.length}];
+
+        const drawSlice=(rp,list,lt,start,count)=>{
+            for(let i=start;i<start+count;i++){
+                const pp=list[i]; if(!pp||pp.count<3||pp._s<0)continue;
+                const isp=pp.isp,tsp=pp.tsp,tcw=pp.tcw,pcw=pp.pcw;
+                let dm=(isp>>29)&7,cm=(isp>>27)&3,zw=(isp>>26)&1?0:1;
+                if(lt==='opaque'&&dm===0)continue;
+                if(lt==='punch_through'||lt==='translucent')dm=6;
+                if(lt==='translucent')zw=1; if(lt==='punch_through')zw=1;
+                if(lt==='translucent'&&dbg.trDepthFunc!==undefined)dm=dbg.trDepthFunc;
+                if(lt==='translucent'&&dbg.trDepthWrite)zw=1;
+                let sb=(tsp>>29)&7, db=(tsp>>26)&7;
+                if(dbg.blendOverride){sb=dbg.blendSrc||4;db=dbg.blendDst||5;}
+                let cullIdx = cm^1;
+                if(dbg.cullOverride==='none')cullIdx=0;
+                else if(dbg.cullOverride==='front')cullIdx=2;
+                else if(dbg.cullOverride==='back')cullIdx=3;
+                const pipe=this._pipe(sb,db,dm,zw,cullIdx,'triangle-list');
+                let tbg=fbBG;
+                if((pcw>>3)&1){const t=texMgr.getTexture(tsp,tcw,vram);if(t)tbg=this._texBG(t.texture,t.sampler);}
+                rp.setPipeline(pipe);
+                rp.setBindGroup(0,this.uBG,[pp._s*this.SLOT]);
+                rp.setBindGroup(1,tbg);
+                rp.drawIndexed(pp._idxCount,1,pp._idxFirst,0,0);
+            }
+        };
+
+        let prevPass = {op_count:0,pt_count:0,tr_count:0};
+        for(let pi=0;pi<passes.length;pi++){
+            const pass=passes[pi];
+            const isFirst=pi===0;
+            // Each render pass gets its own depth clear (color preserved from previous pass)
+            const rp=enc.beginRenderPass({
+                colorAttachments:[{view:texView,clearValue:{r:0,g:0,b:0,a:1},loadOp:isFirst?'clear':'load',storeOp:'store'}],
+                depthStencilAttachment:{view:depthView,depthClearValue:0.0,depthLoadOp:'clear',depthStoreOp:'store'},
+            });
+            rp.setVertexBuffer(0,this.vBuf);
+            if(this.idxBuf) rp.setIndexBuffer(this.idxBuf,'uint32');
+
+            if(dbg.drawOpaque!==false) drawSlice(rp,opaque,'opaque',prevPass.op_count,pass.op_count-prevPass.op_count);
+            if(dbg.drawPunch!==false) drawSlice(rp,punchThrough,'punch_through',prevPass.pt_count,pass.pt_count-prevPass.pt_count);
+            if(dbg.drawTrans!==false) drawSlice(rp,translucent,'translucent',prevPass.tr_count,pass.tr_count-prevPass.tr_count);
+
+            rp.end();
+            prevPass=pass;
+        }
         this.dev.queue.submit([enc.finish()]);
     }
 

@@ -36,19 +36,29 @@ export class TAParser {
     parse(taBuffer, taSize) {
         this._n = 0;
         const op = [], pt = [], tr = [];
+        // Render pass tracking — each pass records cumulative poly counts
+        const renderPasses = [];
+        let listsEnded = new Set(); // track which list types have ended in current pass
         let curList = -1, curPPList = null, curPP = null, tileclip = 0;
         let cISP = 0, cTSP = 0, cTCW = 0, cPCW = 0, cObj = 0;
         let fbc = [0xFF,0xFF,0xFF,0xFF], foc = [0,0,0,0];
         const view = new DataView(taBuffer.buffer, taBuffer.byteOffset, taSize);
         let off = 0;
 
-        const startList = (lt) => { if (curList !== -1) return; curList = lt;
+        const startList = (lt) => { if (curList !== -1) return;
+            // If this list type was already ended in current pass, start new pass
+            if (listsEnded.has(lt)) {
+                renderPasses.push({ op_count: op.length, pt_count: pt.length, tr_count: tr.length });
+                listsEnded.clear();
+            }
+            curList = lt;
             curPPList = lt === 0 ? op : lt === 4 ? pt : lt === 2 ? tr : null; curPP = null; };
         const endList = () => {
             if (curPP && curPP.count === 0) {
                 curPP.count = this._n - curPP.first;
                 if (curPP.count === 0 && curPPList) curPPList.pop();
             }
+            if (curList >= 0) listsEnded.add(curList);
             curPP = null; curPPList = null; curList = -1;
         };
         const newPP = () => {
@@ -222,7 +232,9 @@ export class TAParser {
             if (list.length > 0) { const last = list[list.length-1];
                 if (last.count === 0) { last.count = this._n - last.first; if (last.count === 0) list.pop(); } }
         }
-        return { vertexData: this._u8.subarray(0, this._n * BYTES_PER_VERTEX), vertexCount: this._n, opaque: op, punchThrough: pt, translucent: tr };
+        // Final render pass
+        renderPasses.push({ op_count: op.length, pt_count: pt.length, tr_count: tr.length });
+        return { vertexData: this._u8.subarray(0, this._n * BYTES_PER_VERTEX), vertexCount: this._n, opaque: op, punchThrough: pt, translucent: tr, renderPasses };
     }
 
     // Fill background polygon from PVR registers + VRAM (matches flycast FillBGP)
