@@ -71,6 +71,21 @@ canvas{display:block;background:#000}
 <label>Trans max draw: <input type="range" id="dbg_trMax" min="0" max="200" value="200"> <span class="val" id="dbg_trMaxVal">200</span></label>
 <label>Opaque skip first: <input type="range" id="dbg_opSkip" min="0" max="600" value="0"> <span class="val" id="dbg_opSkipVal">0</span></label>
 <label>Opaque max draw: <input type="range" id="dbg_opMax" min="0" max="600" value="600"> <span class="val" id="dbg_opMaxVal">600</span></label>
+<h2>Shading Override</h2>
+<label><input type="checkbox" id="dbg_shadOverride"> Override ShadInstr</label>
+<label>ShadInstr: <select id="dbg_shadInstr">
+<option value="-1" selected>Per-poly</option>
+<option value="0">0: Replace</option>
+<option value="1">1: Modulate RGB</option>
+<option value="2">2: Decal</option>
+<option value="3">3: Modulate All</option>
+</select></label>
+<h2>UseAlpha Override</h2>
+<label><select id="dbg_useAlpha">
+<option value="-1" selected>Per-poly</option>
+<option value="0">Force OFF</option>
+<option value="1">Force ON</option>
+</select></label>
 <h2>Poly Info (first visible)</h2>
 <pre id="dbg_polyInfo" style="font-size:9px;color:#aaa;white-space:pre-wrap;word-break:break-all">—</pre>
 </div>
@@ -117,6 +132,10 @@ trMax.oninput=e=>{DBG.trMax=+e.target.value;document.getElementById('dbg_trMaxVa
 opSkip.oninput=e=>{DBG.opSkip=+e.target.value;document.getElementById('dbg_opSkipVal').textContent=e.target.value;};
 opMax.oninput=e=>{DBG.opMax=+e.target.value;document.getElementById('dbg_opMaxVal').textContent=e.target.value;};
 DBG.trSkip=0;DBG.trMax=200;DBG.opSkip=0;DBG.opMax=600;
+document.getElementById('dbg_shadOverride').onchange=e=>DBG.shadOverride=e.target.checked;
+document.getElementById('dbg_shadInstr').onchange=e=>DBG.shadInstr=parseInt(e.target.value);
+document.getElementById('dbg_useAlpha').onchange=e=>DBG.useAlphaOverride=parseInt(e.target.value);
+DBG.shadOverride=false;DBG.shadInstr=-1;DBG.useAlphaOverride=-1;
 
 async function main(){
     if(!navigator.gpu){ss('WebGPU not supported. Use Chrome 113+.','err');return;}
@@ -145,6 +164,19 @@ async function main(){
                 const t1=performance.now();
                 const g=P.parse(fr.taBuffer,fr.taSize);
                 pMs=performance.now()-t1;
+                // Dump vertex color for first translucent sprite (first 3 frames only)
+                if(fc<3&&g.translucent.length>0){
+                    const p0=g.translucent[0];
+                    if(p0.count>=3){
+                        const bi=p0.first*28;
+                        console.log('[vtxcol] trans[0] R='+g.vertexData[bi+12]+' G='+g.vertexData[bi+13]+' B='+g.vertexData[bi+14]+' A='+g.vertexData[bi+15]+
+                            ' | blend='+(((p0.tsp>>29)&7)+'/'+((p0.tsp>>26)&7))+' shad='+((p0.tsp>>6)&3)+' ua='+((p0.tsp>>20)&1));
+                    }
+                    // Also dump first opaque
+                    if(g.opaque.length>0){const p1=g.opaque[0];if(p1.count>=3){const bi2=p1.first*28;
+                        console.log('[vtxcol] opaque[0] R='+g.vertexData[bi2+12]+' G='+g.vertexData[bi2+13]+' B='+g.vertexData[bi2+14]+' A='+g.vertexData[bi2+15]+
+                            ' | blend='+(((p1.tsp>>29)&7)+'/'+((p1.tsp>>26)&7))+' shad='+((p1.tsp>>6)&3)+' ua='+((p1.tsp>>20)&1));}}
+                }
                 const t2=performance.now();
                 // Pass debug state to renderer
                 R.renderFrame(g,T,fr.pvrSnapshot,D.vram,DBG);

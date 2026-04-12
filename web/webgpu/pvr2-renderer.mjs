@@ -126,8 +126,6 @@ export class PVR2Renderer {
         this.dev.queue.writeBuffer(this.uBuf,0,this._ndcMat(pvrSnap));
         texMgr.updatePalette(texMgr._lastPvrRegs||new Uint8Array(32768));
         this.texBGs.clear();
-        // Pipeline cache must be cleared when debug settings change depth/cull
-        this.pipes.clear();
 
         // Stage all frag uniforms
         let slot=0;
@@ -136,16 +134,19 @@ export class PVR2Renderer {
             if(lt==='opaque'&&((pp.isp>>29)&7)===0){pp._s=-1;continue;}
             if(slot>=this.MAX_SLOTS){pp._s=-1;continue;}
             const o=slot*this.SLOT, tsp=pp.tsp, pcw=pp.pcw;
+            const shadInstr = (dbg.shadOverride&&dbg.shadInstr>=0) ? dbg.shadInstr : (tsp>>6)&3;
+            const useAlpha = dbg.useAlphaOverride>=0 ? dbg.useAlphaOverride : (tsp>>20)&1;
             this.stagingDV.setFloat32(o,1.0,true);
-            this.stagingDV.setUint32(o+4,(tsp>>6)&3,true);
+            this.stagingDV.setUint32(o+4,shadInstr,true);
             this.stagingDV.setUint32(o+8,(pcw>>3)&1,true);
-            this.stagingDV.setUint32(o+12,(tsp>>20)&1,true);
+            this.stagingDV.setUint32(o+12,useAlpha,true);
             this.stagingDV.setUint32(o+16,(tsp>>19)&1,true);
             this.stagingDV.setUint32(o+20,(pcw>>2)&1,true);
             this.stagingDV.setUint32(o+24,lt==='punch_through'?1:0,true);
-            // _p field: encode shader debug mode (0=normal,1=solid,2=uv,3=depth,4=alpha)
+            // Pack: low 8 bits = debug mode, bit 8 = Gouraud flag
             const modes={normal:0,solid:1,uv:2,depth:3,alpha:4};
-            this.stagingDV.setUint32(o+28,modes[dbg.shaderMode]||0,true);
+            const gouraud = (pcw>>1)&1;
+            this.stagingDV.setUint32(o+28,(modes[dbg.shaderMode]||0)|(gouraud<<8),true);
             pp._s=slot; slot++;
         }};
         stage(opaque,'opaque'); stage(punchThrough,'punch_through'); stage(translucent,'translucent');
