@@ -125,7 +125,7 @@ export class PVR2Renderer {
         this.uploadVerts(vertexData);
         this.dev.queue.writeBuffer(this.uBuf,0,this._ndcMat(pvrSnap));
         texMgr.updatePalette(texMgr._lastPvrRegs||new Uint8Array(32768));
-        this.texBGs.clear();
+        this.texBGs.clear(); // Must rebuild bind groups when textures are re-decoded
 
         // Stage all frag uniforms
         let slot=0;

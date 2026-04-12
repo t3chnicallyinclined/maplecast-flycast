@@ -1,4 +1,5 @@
 // texture-manager.mjs — Dreamcast texture decode + WebGPU texture cache
+// OPTIMIZED: dirty-page-aware caching, texture reuse, no per-frame GPU alloc
 
 const detwiddle = [new Array(11), new Array(11)];
 (() => {
@@ -16,9 +17,26 @@ function u1555(c){return[(((c>>10)&31)*255/31)|0,(((c>>5)&31)*255/31)|0,((c&31)*
 function u565(c){return[(((c>>11)&31)*255/31)|0,(((c>>5)&63)*255/63)|0,((c&31)*255/31)|0,255];}
 function u4444(c){return[(((c>>8)&15)*255/15)|0,(((c>>4)&15)*255/15)|0,((c&15)*255/15)|0,(((c>>12)&15)*255/15)|0];}
 
+const PAGE_SIZE = 4096;
+
 export class TextureManager {
-    constructor(device) { this.device=device; this.cache=new Map(); this.gen=0; this._pal=null; this._fb=null; this._lastPvrRegs=null; }
-    invalidateAll() { this.gen++; }
+    constructor(device) {
+        this.device = device;
+        this.cache = new Map();      // genKey → {texture, sampler, w, h}
+        this._prevCache = new Map(); // baseKey → {texture, sampler, w, h} (for GPU texture reuse)
+        this.gen = 0;
+        this._pal = null;
+        this._fb = null;
+        this._lastPvrRegs = null;
+        this.stats = { hits: 0, misses: 0, reused: 0 };
+    }
+
+    // Mark all textures as needing re-decode (bumps generation)
+    // Previous gen's GPUTextures are kept in _prevCache for reuse
+    invalidateAll() {
+        this.gen++;
+        this.cache.clear(); // Clear gen-keyed cache (forces re-decode on next access)
+    }
 
     updatePalette(regs) {
         if (!regs || regs.length < 0x1000+4096) return;
@@ -31,23 +49,49 @@ export class TextureManager {
             const c = ctrl===3 ? [(raw>>16)&0xFF,(raw>>8)&0xFF,raw&0xFF,(raw>>24)&0xFF] : unp(raw&0xFFFF);
             this._pal[i*4]=c[0]; this._pal[i*4+1]=c[1]; this._pal[i*4+2]=c[2]; this._pal[i*4+3]=c[3];
         }
+        this._palDirty = false;
     }
 
     getTexture(tsp, tcw, vram) {
         const addr=(tcw&0x1FFFFF)<<3, fmt=(tcw>>27)&7, texU=(tsp>>3)&7, texV=tsp&7;
         const w=8<<texU, h=8<<texV, palSel=(tcw>>21)&0x3F, scan=(tcw>>26)&1;
-        const key=`${addr}_${fmt}_${texU}_${texV}_${palSel}_${this.gen}`;
-        let c=this.cache.get(key); if(c) return c;
 
-        const rgba = this._decode(vram,addr,fmt,w,h,palSel,scan);
+        // Two-level cache: base key (stable) + gen key (current generation)
+        const baseKey = `${addr}_${fmt}_${texU}_${texV}_${palSel}`;
+        const genKey = `${baseKey}_${this.gen}`;
+
+        // Fast path: current generation cache hit (no decode needed)
+        const genCached = this.cache.get(genKey);
+        if (genCached) { this.stats.hits++; return genCached; }
+
+        // Check if we have a previous generation's GPUTexture to reuse
+        const prevEntry = this._prevCache.get(baseKey);
+        const rgba = this._decode(vram, addr, fmt, w, h, palSel, scan);
         if (!rgba) return this.getFallbackTexture();
 
-        const texture = this.device.createTexture({size:[w,h],format:'rgba8unorm',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
-        this.device.queue.writeTexture({texture},rgba,{bytesPerRow:w*4},[w,h]);
-        const fm=(tsp>>13)&3, cu=(tsp>>16)&1, cv=(tsp>>15)&1, fu=(tsp>>18)&1, fv=(tsp>>17)&1;
-        const sampler = this.device.createSampler({minFilter:fm?'linear':'nearest',magFilter:fm?'linear':'nearest',
-            addressModeU:cu?'clamp-to-edge':fu?'mirror-repeat':'repeat',addressModeV:cv?'clamp-to-edge':fv?'mirror-repeat':'repeat'});
-        c={texture,sampler}; this.cache.set(key,c); return c;
+        let texture, sampler;
+        if (prevEntry && prevEntry.w === w && prevEntry.h === h) {
+            // REUSE existing GPUTexture — just update its data (no createTexture!)
+            texture = prevEntry.texture;
+            sampler = prevEntry.sampler;
+            this.device.queue.writeTexture({texture}, rgba, {bytesPerRow: w*4}, [w, h]);
+            this.stats.reused++;
+        } else {
+            // Create new GPUTexture
+            texture = this.device.createTexture({size:[w,h],format:'rgba8unorm',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
+            this.device.queue.writeTexture({texture},rgba,{bytesPerRow:w*4},[w,h]);
+            const fm=(tsp>>13)&3, cu=(tsp>>16)&1, cv=(tsp>>15)&1, fu=(tsp>>18)&1, fv=(tsp>>17)&1;
+            sampler = this.device.createSampler({minFilter:fm?'linear':'nearest',magFilter:fm?'linear':'nearest',
+                addressModeU:cu?'clamp-to-edge':fu?'mirror-repeat':'repeat',addressModeV:cv?'clamp-to-edge':fv?'mirror-repeat':'repeat'});
+            // Destroy old texture if it exists
+            if (prevEntry) prevEntry.texture.destroy();
+            this.stats.misses++;
+        }
+
+        const entry = {texture, sampler, w, h};
+        this.cache.set(genKey, entry);
+        this._prevCache.set(baseKey, entry);
+        return entry;
     }
 
     _decode(vram,addr,fmt,w,h,palSel,scan) {

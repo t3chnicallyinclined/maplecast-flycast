@@ -112,7 +112,8 @@ export class FrameDecoder {
         off += 4; // skip checksum
 
         const dirtyPages = view.getUint32(off, true); off += 4;
-        let vramDirty = false;
+        let vramDirty = false, pvrDirty = false;
+        const dirtyPageList = [];
         for (let d = 0; d < dirtyPages; d++) {
             const regionId = data[off]; off += 1;
             const pageIdx = view.getUint32(off, true); off += 4;
@@ -120,13 +121,15 @@ export class FrameDecoder {
             if (regionId === 1 && pageOff + PAGE_SIZE <= VRAM_SIZE) {
                 this.vram.set(data.subarray(off, off + PAGE_SIZE), pageOff);
                 vramDirty = true;
+                dirtyPageList.push(pageIdx);
             } else if (regionId === 3 && pageOff + PAGE_SIZE <= PVR_REG_SIZE) {
                 this.pvrRegs.set(data.subarray(off, off + PAGE_SIZE), pageOff);
+                pvrDirty = true;
             }
             off += PAGE_SIZE;
         }
 
         if (skipRender) return null;
-        return { frameNum, pvrSnapshot, taBuffer: this.prevTA.subarray(0, this.prevTASize), taSize: this.prevTASize, vramDirty };
+        return { frameNum, pvrSnapshot, taBuffer: this.prevTA.subarray(0, this.prevTASize), taSize: this.prevTASize, vramDirty, pvrDirty, dirtyPageList };
     }
 }
