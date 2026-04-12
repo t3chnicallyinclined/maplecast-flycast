@@ -22,6 +22,7 @@ mod turn;
 mod auth_api;
 mod admin_api;
 mod client_telemetry;
+mod webtransport;
 
 use clap::Parser;
 use std::net::SocketAddr;
@@ -57,6 +58,22 @@ struct Args {
     /// TURN server hostname (used in ICE config response)
     #[arg(long, default_value = "nobd.net")]
     turn_host: String,
+
+    /// WebTransport (QUIC/HTTP3) listen address (UDP)
+    #[arg(long, default_value = "0.0.0.0:443")]
+    wt_listen: String,
+
+    /// TLS certificate path (fullchain.pem) for QUIC
+    #[arg(long, default_value = "/etc/letsencrypt/live/nobd.net/fullchain.pem")]
+    tls_cert: String,
+
+    /// TLS private key path (privkey.pem) for QUIC
+    #[arg(long, default_value = "/etc/letsencrypt/live/nobd.net/privkey.pem")]
+    tls_key: String,
+
+    /// Disable WebTransport listener (run WS-only mode)
+    #[arg(long)]
+    no_webtransport: bool,
 }
 
 #[tokio::main]
@@ -83,6 +100,9 @@ async fn main() {
         "tcp"
     };
     info!("Downstream: WebSocket on {}", args.ws_listen);
+    if !args.no_webtransport {
+        info!("Downstream: WebTransport (QUIC) on UDP {}", args.wt_listen);
+    }
     info!("Max clients: {}", args.max_clients);
 
     let state = fanout::RelayState::new(args.max_clients);
@@ -106,6 +126,22 @@ async fn main() {
             error!("HTTP listener exited: {:?}", e);
         }
     }));
+
+    // Spawn WebTransport listener if enabled
+    let wt_task = if !args.no_webtransport {
+        let wt_addr: SocketAddr = args.wt_listen.parse().expect("invalid wt_listen address");
+        let state_wt = state.clone();
+        let cert = args.tls_cert.clone();
+        let key = args.tls_key.clone();
+        Some(tokio::spawn(async move {
+            if let Err(e) = webtransport::wt_client_listener(wt_addr, cert, key, state_wt).await {
+                error!("WebTransport listener exited: {:?}", e);
+            }
+        }))
+    } else {
+        info!("WebTransport: disabled (--no-webtransport)");
+        None
+    };
 
     match upstream_mode {
         "ws" => {
@@ -138,6 +174,10 @@ async fn main() {
                 }
             }
         }
+    }
+
+    if let Some(h) = wt_task {
+        h.abort();
     }
 
     if let Some(h) = http_task {

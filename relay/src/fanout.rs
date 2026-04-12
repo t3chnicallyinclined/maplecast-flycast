@@ -258,7 +258,7 @@ impl RelayState {
     }
 
     /// Get cached SYNC for new client
-    async fn get_sync(&self) -> Option<Bytes> {
+    pub(crate) async fn get_sync(&self) -> Option<Bytes> {
         let cache = self.inner.sync_cache.read().await;
         cache.as_ref().map(|c| c.raw.clone())
     }
@@ -312,7 +312,7 @@ impl RelayState {
     }
 
     /// Subscribe to frame broadcast
-    fn subscribe_frames(&self) -> broadcast::Receiver<Bytes> {
+    pub(crate) fn subscribe_frames(&self) -> broadcast::Receiver<Bytes> {
         self.inner.frame_tx.subscribe()
     }
 
@@ -348,7 +348,7 @@ impl RelayState {
         (text_rx, bin_rx)
     }
 
-    async fn add_client(&self) -> bool {
+    pub(crate) async fn add_client(&self) -> bool {
         let mut count = self.inner.client_count.lock().await;
         if *count >= self.inner.max_clients {
             return false;
@@ -357,12 +357,12 @@ impl RelayState {
         true
     }
 
-    async fn remove_client(&self) {
+    pub(crate) async fn remove_client(&self) {
         let mut count = self.inner.client_count.lock().await;
         *count = count.saturating_sub(1);
     }
 
-    async fn client_count(&self) -> usize {
+    pub(crate) async fn client_count(&self) -> usize {
         *self.inner.client_count.lock().await
     }
 }
