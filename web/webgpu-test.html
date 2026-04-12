@@ -132,7 +132,7 @@ canvas{display:block;background:#000}
 <label><input type="checkbox" id="dbg_tileClipOff"> Disable ALL tile clips</label>
 <label><input type="checkbox" id="dbg_tileClipLog"> Log tile clips (console)</label>
 <h2>Render Passes</h2>
-<label>Force single pass: <input type="checkbox" id="dbg_singlePass"></label>
+<label>Force single pass: <input type="checkbox" id="dbg_singlePass" checked></label>
 <h2>Frame Inspector</h2>
 <label><input type="checkbox" id="dbg_freeze"> FREEZE frame</label>
 <button id="dbg_dumpFrame" style="background:#333;color:#0f0;border:1px solid #0f0;padding:4px 8px;cursor:pointer;font-family:inherit;margin:4px 0">Dump frame to console</button>
@@ -205,7 +205,7 @@ document.getElementById('dbg_shadOverride').onchange=e=>DBG.shadOverride=e.targe
 document.getElementById('dbg_shadInstr').onchange=e=>DBG.shadInstr=parseInt(e.target.value);
 document.getElementById('dbg_useAlpha').onchange=e=>DBG.useAlphaOverride=parseInt(e.target.value);
 DBG.shadOverride=false;DBG.shadInstr=-1;DBG.useAlphaOverride=-1;
-DBG.tileClipOff=false;DBG.tileClipLog=false;DBG.singlePass=false;DBG.freeze=false;DBG.noOffset=false;
+DBG.tileClipOff=false;DBG.tileClipLog=false;DBG.singlePass=true;DBG.freeze=false;DBG.noOffset=false;
 document.getElementById('dbg_tileClipOff').onchange=e=>DBG.tileClipOff=e.target.checked;
 document.getElementById('dbg_tileClipLog').onchange=e=>DBG.tileClipLog=e.target.checked;
 document.getElementById('dbg_singlePass').onchange=e=>DBG.singlePass=e.target.checked;

@@ -184,17 +184,16 @@ export class TextureManager {
                 const ci = idx * 16; // codebook offset in pre-decoded array
                 const px = x * 2, py = y * 2;
 
-                // Pixel 0: top-left (px, py)
-                let d = (py * w + px) * 4;
+                // Pixel layout matches flycast prel(x,y): p[y*w+x]
+                // p_in[0] → (0,0) top-left, p_in[1] → (0,1) bottom-left
+                // p_in[2] → (1,0) top-right, p_in[3] → (1,1) bottom-right
+                let d = (py * w + px) * 4;  // p_in[0]: top-left
                 rgba[d]=cb[ci]; rgba[d+1]=cb[ci+1]; rgba[d+2]=cb[ci+2]; rgba[d+3]=cb[ci+3];
-                // Pixel 1: top-right (px+1, py)
-                d = (py * w + px + 1) * 4;
+                d = ((py+1) * w + px) * 4;  // p_in[1]: bottom-left
                 rgba[d]=cb[ci+4]; rgba[d+1]=cb[ci+5]; rgba[d+2]=cb[ci+6]; rgba[d+3]=cb[ci+7];
-                // Pixel 2: bottom-left (px, py+1)
-                d = ((py+1) * w + px) * 4;
+                d = (py * w + px + 1) * 4;  // p_in[2]: top-right
                 rgba[d]=cb[ci+8]; rgba[d+1]=cb[ci+9]; rgba[d+2]=cb[ci+10]; rgba[d+3]=cb[ci+11];
-                // Pixel 3: bottom-right (px+1, py+1)
-                d = ((py+1) * w + px + 1) * 4;
+                d = ((py+1) * w + px + 1) * 4;  // p_in[3]: bottom-right
                 rgba[d]=cb[ci+12]; rgba[d+1]=cb[ci+13]; rgba[d+2]=cb[ci+14]; rgba[d+3]=cb[ci+15];
             }
         }

@@ -268,7 +268,7 @@ export class PVR2Renderer {
             // Each render pass gets its own depth clear (color preserved from previous pass)
             const rp=enc.beginRenderPass({
                 colorAttachments:[{view:texView,clearValue:{r:0,g:0,b:0,a:1},loadOp:isFirst?'clear':'load',storeOp:'store'}],
-                depthStencilAttachment:{view:depthView,depthClearValue:0.0,depthLoadOp:isFirst?'clear':'load',depthStoreOp:'store'},
+                depthStencilAttachment:{view:depthView,depthClearValue:0.0,depthLoadOp:'clear',depthStoreOp:'store'},
             });
             rp.setVertexBuffer(0,this.vBuf);
             if(this.idxBuf) rp.setIndexBuffer(this.idxBuf,'uint32');
