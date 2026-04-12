@@ -550,8 +550,14 @@ async fn handle_ws_client(
                             }
                             continue;
                         }
+                        // Do NOT forward join/leave — those go via direct /play connection.
+                        // Forwarding them here causes slot conflicts because flycast maps
+                        // the join to the relay's upstream hdl, not the browser's direct hdl.
+                        if text.contains("\"type\":\"join\"") || text.contains("\"type\":\"leave\"") {
+                            debug!("Client {} join/leave NOT forwarded (use /play direct)", peer);
+                            continue;
+                        }
                         debug!("Client {} → upstream: {}", peer, &text[..text.len().min(80)]);
-                        // Forward to upstream flycast (join, queue, register_stick, chat, etc.)
                         state.forward_text_to_upstream(&text);
                         // Also broadcast relay_* messages to other clients
                         if text.contains("relay_") {
