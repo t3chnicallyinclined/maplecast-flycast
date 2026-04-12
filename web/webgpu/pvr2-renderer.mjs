@@ -88,14 +88,18 @@ export class PVR2Renderer {
     }
 
     // Convert triangle-strip polys to triangle-list indices
+    // Reuses Uint32Array across frames to avoid allocation
     _buildIndexBuffer(lists) {
-        // Count total indices needed
         let totalIdx = 0;
         for (const list of lists) for (const pp of list) {
             if (pp.count < 3 || pp._s < 0) continue;
             totalIdx += (pp.count - 2) * 3;
         }
-        const indices = new Uint32Array(totalIdx);
+        // Reuse index array if large enough
+        if (!this._idxArr || this._idxArr.length < totalIdx) {
+            this._idxArr = new Uint32Array(Math.max(totalIdx, 8192));
+        }
+        const indices = this._idxArr;
         let idx = 0;
         for (const list of lists) for (const pp of list) {
             if (pp.count < 3 || pp._s < 0) continue;
@@ -110,7 +114,6 @@ export class PVR2Renderer {
                 pp._idxCount += 3;
             }
         }
-        // Upload
         const byteLen = idx * 4;
         if (!this.idxBuf || this.idxBufSz < byteLen) {
             if (this.idxBuf) this.idxBuf.destroy();
@@ -225,9 +228,9 @@ export class PVR2Renderer {
             if(dbg.drawTrans!==false){
                 const trStart=prevPass.tr_count, trCount=pass.tr_count-prevPass.tr_count;
                 if(trCount>0){
-                    // Build sortable array with Z from first vertex
                     const vf32=new Float32Array(vertexData.buffer,vertexData.byteOffset,vertexCount*7);
-                    const sorted=[];
+                    if(!this._sortBuf)this._sortBuf=[];
+                    const sorted=this._sortBuf; sorted.length=0;
                     for(let i=trStart;i<trStart+trCount;i++){
                         const pp=translucent[i]; if(!pp||pp.count<3||pp._s<0)continue;
                         sorted.push({idx:i, z:vf32[pp.first*7+2]});
