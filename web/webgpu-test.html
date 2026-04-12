@@ -158,6 +158,7 @@ import {FrameDecoder} from './webgpu/frame-decoder.mjs';
 import {TAParser} from './webgpu/ta-parser.mjs';
 import {TextureManager} from './webgpu/texture-manager.mjs';
 import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs';
+import {AdaptiveTransport} from './webgpu/transport.mjs';
 
 const canvas=document.getElementById('c'), ov=document.getElementById('ov'), st=document.getElementById('st');
 let fc=0,lt=performance.now(),fps=0,dMs=0,pMs=0,rMs=0,wB=0;
@@ -261,50 +262,50 @@ async function main(){
         dumpList(g.opaque,'op');dumpList(g.punchThrough,'pt');dumpList(g.translucent,'tr');
     };
 
+    let pendingFrame=null, pendingPvrSnap=null, wsFrames=0;
+
     function connect(){
         ss('Connecting...');
-        const ws=new WebSocket('wss://nobd.net/ws');
-        ws.binaryType='arraybuffer';
-        ws.onopen=()=>ss('Connected — waiting for SYNC','ok');
-        ws.onclose=()=>{ss('Disconnected');setTimeout(connect,2000);};
-        ws.onerror=()=>{};
-        // === VSYNC-DECOUPLED PIPELINE ===
-        // WS onmessage: decode + parse (CPU work only, no GPU)
-        // RAF render loop: render latest frame (GPU work, vsync-locked)
-        let pendingFrame=null, pendingPvrSnap=null, wsFrames=0;
-
-        ws.onmessage=(e)=>{
-            if(typeof e.data==='string')return;
-            const d=new Uint8Array(e.data); wB+=d.byteLength;
-            try{
-                const wsArrival=performance.now();
-                if(lastFrameArrival>0){
-                    const gap=wsArrival-lastFrameArrival;
-                    maInterArrival+=(gap-maInterArrival)*A;
-                    maJitter+=(Math.abs(gap-16.667)-maJitter)*A;
-                }
-                lastFrameArrival=wsArrival;
-                if(DBG.freeze)return;
-                const t0=performance.now();
-                const fr=D.applyFrame(d);
-                dMs=performance.now()-t0;
-                if(!fr)return;
-                // Texture cache updates (CPU-side)
-                if(DBG.texForceInvalidate) T.invalidateAll();
-                T.setDirtyPages(fr.dirtyPageList, fr.pvrDirty);
-                if(!T._pal||fr.vramDirty||fr.pvrDirty) T.updatePalette(D.pvrRegs);
-                const t1=performance.now();
-                const g=P.parse(fr.taBuffer,fr.taSize);
-                try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e2) {}
-                pMs=performance.now()-t1;
-                // Store for RAF render — if previous frame wasn't rendered yet, it's skipped
-                if(pendingFrame) skippedFrames++;
-                pendingFrame=g; pendingPvrSnap=fr.pvrSnapshot;
-                lastParsed=g;
-                parsed_passes=g.renderPasses?g.renderPasses.length:1;
-                wsFrames++;
-            }catch(ex){console.error('[webgpu]',ex);}
-        };
+        const host=location.hostname;
+        const proto=location.protocol==='https:'?'wss':'ws';
+        const transport=new AdaptiveTransport({
+            wsUrl: `${proto}://${host}/ws`,
+            wtUrl: `https://${host}/webtransport`,  // Will fail gracefully → WS fallback
+            onstatus: (msg)=>ss(msg),
+            onopen: ()=>ss(`Connected via ${transport.type} — waiting for SYNC`,'ok'),
+            onclose: ()=>ss('Disconnected'),
+            onframe: (d)=>{
+                wB+=d.byteLength;
+                try{
+                    const wsArrival=performance.now();
+                    if(lastFrameArrival>0){
+                        const gap=wsArrival-lastFrameArrival;
+                        maInterArrival+=(gap-maInterArrival)*A;
+                        maJitter+=(Math.abs(gap-16.667)-maJitter)*A;
+                    }
+                    lastFrameArrival=wsArrival;
+                    if(DBG.freeze)return;
+                    const t0=performance.now();
+                    const fr=D.applyFrame(d);
+                    dMs=performance.now()-t0;
+                    if(!fr)return;
+                    if(DBG.texForceInvalidate) T.invalidateAll();
+                    T.setDirtyPages(fr.dirtyPageList, fr.pvrDirty);
+                    if(!T._pal||fr.vramDirty||fr.pvrDirty) T.updatePalette(D.pvrRegs);
+                    const t1=performance.now();
+                    const g=P.parse(fr.taBuffer,fr.taSize);
+                    try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e2) {}
+                    pMs=performance.now()-t1;
+                    if(pendingFrame) skippedFrames++;
+                    pendingFrame=g; pendingPvrSnap=fr.pvrSnapshot;
+                    lastParsed=g;
+                    parsed_passes=g.renderPasses?g.renderPasses.length:1;
+                    wsFrames++;
+                }catch(ex){console.error('[webgpu]',ex);}
+            }
+        });
+        transport.connect();
+        window._transport=transport; // Expose for diagnostics
 
         // RAF render loop — vsync-locked, renders latest available frame
         function renderTick(){
@@ -390,7 +391,8 @@ async function main(){
             const ts=T.stats;
             ov.textContent=
 `== WebGPU (Pure JS, 0 WASM) =====
-FPS: ${fps}  |  ${budget}% budget used
+FPS: ${fps}  |  ${budget}% budget
+Transport: ${window._transport?window._transport.stats.type:'--'}
 --- Pipeline (WS->render) -------
 Decode:  ${maDecode.toFixed(2)}ms  (zstd+delta)
 Parse:   ${maParse.toFixed(2)}ms  (TA->verts)
