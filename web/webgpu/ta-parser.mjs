@@ -104,6 +104,8 @@ export class TAParser {
                 if (curList === -1) startList(lt);
                 cPCW = pcw; cObj = pcw & 0xFF;
                 cISP = view.getUint32(off + 4, true);
+                // Sprites flip cull mode (ta_vtx.cpp line 979)
+                cISP ^= (1 << 27);
                 cTSP = view.getUint32(off + 8, true);
                 cTCW = view.getUint32(off + 12, true);
                 const sbc = view.getUint32(off + 16, true);
@@ -119,18 +121,37 @@ export class TAParser {
                 const isSpr = ((cPCW >> 29) & 7) === 5;
 
                 if (isSpr && off + 64 <= taSize) {
-                    const x0=view.getFloat32(off+4,true),y0=view.getFloat32(off+8,true),z0=view.getFloat32(off+12,true);
-                    const x1=view.getFloat32(off+16,true),y1=view.getFloat32(off+20,true),z1=view.getFloat32(off+24,true);
-                    const x2=view.getFloat32(off+28,true),y2=view.getFloat32(off+32,true),z2=view.getFloat32(off+36,true);
-                    const x3=view.getFloat32(off+40,true),y3=view.getFloat32(off+44,true);
-                    let u0=0,v0=0,u1=0,v1=0,u2=0,v2=0;
-                    if (tex) { v0=f16(view.getUint16(off+52,true)); u0=f16(view.getUint16(off+54,true));
-                        v1=f16(view.getUint16(off+56,true)); u1=f16(view.getUint16(off+58,true));
-                        v2=f16(view.getUint16(off+60,true)); u2=f16(view.getUint16(off+62,true)); }
+                    // Sprite vertex data (TA_Sprite1A + TA_Sprite1B)
+                    // Flycast sprite vertex order: cv[0]=D(x3,y3) cv[1]=C(x2,y2,z2) cv[2]=A(x0,y0,z0) cv[3]=B(x1,y1,z1)
+                    // Strip renders as: D,C,A,B → triangles DCA + CAB
+                    const Ax=view.getFloat32(off+4,true),Ay=view.getFloat32(off+8,true),Az=view.getFloat32(off+12,true);
+                    const Bx=view.getFloat32(off+16,true),By=view.getFloat32(off+20,true),Bz=view.getFloat32(off+24,true);
+                    const Cx=view.getFloat32(off+28,true),Cy=view.getFloat32(off+32,true),Cz=view.getFloat32(off+36,true);
+                    const Dx=view.getFloat32(off+40,true),Dy=view.getFloat32(off+44,true);
+                    let Au=0,Av=0,Bu=0,Bv=0,Cu=0,Cv=0;
+                    if (tex) { Av=f16(view.getUint16(off+52,true)); Au=f16(view.getUint16(off+54,true));
+                        Bv=f16(view.getUint16(off+56,true)); Bu=f16(view.getUint16(off+58,true));
+                        Cv=f16(view.getUint16(off+60,true)); Cu=f16(view.getUint16(off+62,true)); }
+                    // Calculate D's Z and UV via plane equation (CaclulateSpritePlane)
+                    // A=cv[2], B=cv[3], C=cv[1], P=cv[0] (D)
+                    const ACx=Cx-Ax,ACy=Cy-Ay,ACz=Cz-Az;
+                    const ABx=Bx-Ax,ABy=By-Ay,ABz=Bz-Az;
+                    const APx=Dx-Ax,APy=Dy-Ay;
+                    const ABu=Bu-Au,ABv=Bv-Av,ACu=Cu-Au,ACv=Cv-Av;
+                    const k3=ACx*ABy-ACy*ABx;
+                    const k2=k3!==0?(APx*ABy-APy*ABx)/k3:0;
+                    const k1=ABx!==0?(Dx-Ax-k2*ACx)/ABx:(ABy!==0?(Dy-Ay-k2*ACy)/ABy:0);
+                    const Dz=Az+k1*ABz+k2*ACz;
+                    const Du=Au+k1*ABu+k2*ACu;
+                    const Dv=Av+k1*ABv+k2*ACv;
                     const bc=(fbc[3]<<24)|(fbc[0]<<16)|(fbc[1]<<8)|fbc[2];
-                    this._vtx(x0,y0,z0,bc,0,u0,v0); this._vtx(x1,y1,z1,bc,0,u1,v1);
-                    this._vtx(x2,y2,z2,bc,0,u2,v2); this._vtx(x3,y3,z0,bc,0,u0,v2);
-                    off += 64; if (eos) endStrip(); continue;
+                    const oc=(foc[3]<<24)|(foc[0]<<16)|(foc[1]<<8)|foc[2];
+                    // Emit in flycast strip order: D, C, A, B
+                    this._vtx(Dx,Dy,Dz,bc,oc,Du,Dv);
+                    this._vtx(Cx,Cy,Cz,bc,oc,Cu,Cv);
+                    this._vtx(Ax,Ay,Az,bc,oc,Au,Av);
+                    this._vtx(Bx,By,Bz,bc,oc,Bu,Bv);
+                    off += 64; endStrip(); continue;
                 }
 
                 if (!tex) {
