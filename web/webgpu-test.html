@@ -6,22 +6,75 @@
 <title>MapleCast WebGPU</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#111;color:#eee;font-family:'Courier New',monospace;display:flex;flex-direction:column;align-items:center;min-height:100vh}
+body{background:#111;color:#eee;font-family:'Courier New',monospace;display:flex;min-height:100vh}
+#main{flex:1;display:flex;flex-direction:column;align-items:center}
 h1{font-size:14px;padding:8px;color:#0f0;text-transform:uppercase;letter-spacing:2px}
 #wrap{position:relative;border:1px solid #333}
 canvas{display:block;background:#000}
 #ov{position:absolute;top:4px;left:4px;font-size:11px;color:#0f0;background:rgba(0,0,0,.7);padding:4px 8px;pointer-events:none;white-space:pre;line-height:1.4}
 #st{padding:8px;font-size:12px;color:#888}
 .err{color:#f44}.ok{color:#0f0}
+#panel{width:280px;background:#1a1a1a;border-left:1px solid #333;padding:8px;font-size:11px;overflow-y:auto}
+#panel h2{font-size:12px;color:#0ff;margin:8px 0 4px;border-bottom:1px solid #333;padding-bottom:2px}
+#panel label{display:block;margin:3px 0;cursor:pointer}
+#panel input[type=range]{width:100px;vertical-align:middle}
+#panel select{background:#222;color:#eee;border:1px solid #444;padding:1px 4px}
+#panel .val{color:#0f0;float:right}
 </style>
 </head>
 <body>
+<div id="main">
 <h1>MapleCast WebGPU Renderer</h1>
 <div id="wrap">
     <canvas id="c" width="640" height="480"></canvas>
     <div id="ov">Initializing...</div>
 </div>
 <div id="st">Connecting...</div>
+</div>
+<div id="panel">
+<h2>Render Debug</h2>
+<label><input type="checkbox" id="dbg_opaque" checked> Draw Opaque</label>
+<label><input type="checkbox" id="dbg_punch" checked> Draw Punch-Through</label>
+<label><input type="checkbox" id="dbg_trans" checked> Draw Translucent</label>
+<h2>Shader Mode</h2>
+<label><input type="radio" name="shmode" value="normal" checked> Normal</label>
+<label><input type="radio" name="shmode" value="solid"> Solid Color (no tex)</label>
+<label><input type="radio" name="shmode" value="uv"> UV Debug</label>
+<label><input type="radio" name="shmode" value="depth"> Depth Debug</label>
+<label><input type="radio" name="shmode" value="alpha"> Alpha Debug</label>
+<h2>Translucent Depth</h2>
+<label>DepthFunc: <select id="dbg_trDepth">
+<option value="6" selected>greater-equal (flycast)</option>
+<option value="7">always</option>
+<option value="1">less</option>
+<option value="3">less-equal</option>
+<option value="0">never</option>
+</select></label>
+<label><input type="checkbox" id="dbg_trDepthWrite"> Depth Write (trans)</label>
+<h2>Alpha</h2>
+<label>Discard threshold: <input type="range" id="dbg_alphaDiscard" min="0" max="255" value="1"> <span class="val" id="dbg_alphaDiscardVal">1</span></label>
+<h2>Blend Override</h2>
+<label><input type="checkbox" id="dbg_blendOverride"> Override blend</label>
+<label>Src: <select id="dbg_blendSrc"><option value="4" selected>SrcAlpha</option><option value="1">One</option><option value="0">Zero</option><option value="2">DstColor</option><option value="5">InvSrcAlpha</option></select></label>
+<label>Dst: <select id="dbg_blendDst"><option value="5" selected>InvSrcAlpha</option><option value="1">One</option><option value="0">Zero</option><option value="4">SrcAlpha</option><option value="3">InvSrcColor</option></select></label>
+<h2>Culling</h2>
+<label><select id="dbg_cull">
+<option value="auto" selected>Auto (per-poly)</option>
+<option value="none">None</option>
+<option value="front">Front</option>
+<option value="back">Back</option>
+</select></label>
+<h2>Texture</h2>
+<label><input type="checkbox" id="dbg_texInvalidate"> Force invalidate every frame</label>
+<h2>List Inspector</h2>
+<label>Trans skip first: <input type="range" id="dbg_trSkip" min="0" max="200" value="0"> <span class="val" id="dbg_trSkipVal">0</span></label>
+<label>Trans max draw: <input type="range" id="dbg_trMax" min="0" max="200" value="200"> <span class="val" id="dbg_trMaxVal">200</span></label>
+<label>Opaque skip first: <input type="range" id="dbg_opSkip" min="0" max="600" value="0"> <span class="val" id="dbg_opSkipVal">0</span></label>
+<label>Opaque max draw: <input type="range" id="dbg_opMax" min="0" max="600" value="600"> <span class="val" id="dbg_opMaxVal">600</span></label>
+<h2>Poly Info (first visible)</h2>
+<pre id="dbg_polyInfo" style="font-size:9px;color:#aaa;white-space:pre-wrap;word-break:break-all">—</pre>
+</div>
+
 <script type="module">
 import {FrameDecoder} from './webgpu/frame-decoder.mjs';
 import {TAParser} from './webgpu/ta-parser.mjs';
@@ -29,14 +82,47 @@ import {TextureManager} from './webgpu/texture-manager.mjs';
 import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs';
 
 const canvas=document.getElementById('c'), ov=document.getElementById('ov'), st=document.getElementById('st');
-let fc=0,lt=performance.now(),fps=0,dMs=0,pMs=0,rMs=0,wB=0,lastVerts=0,lastOp=0,lastPt=0,lastTr=0,lastTaSize=0,gpuErrs='';
+let fc=0,lt=performance.now(),fps=0,dMs=0,pMs=0,rMs=0,wB=0;
 const ss=(m,c='')=>{st.textContent=m;st.className=c};
+
+// Debug state — read by renderer
+window.DBG = {
+    drawOpaque: true, drawPunch: true, drawTrans: true,
+    shaderMode: 'normal',
+    trDepthFunc: 6, trDepthWrite: false,
+    alphaDiscard: 1,
+    blendOverride: false, blendSrc: 4, blendDst: 5,
+    cullOverride: 'auto',
+    texForceInvalidate: false,
+};
+
+// Wire up controls
+document.getElementById('dbg_opaque').onchange = e => DBG.drawOpaque = e.target.checked;
+document.getElementById('dbg_punch').onchange = e => DBG.drawPunch = e.target.checked;
+document.getElementById('dbg_trans').onchange = e => DBG.drawTrans = e.target.checked;
+document.querySelectorAll('input[name=shmode]').forEach(r => r.onchange = e => DBG.shaderMode = e.target.value);
+document.getElementById('dbg_trDepth').onchange = e => DBG.trDepthFunc = parseInt(e.target.value);
+document.getElementById('dbg_trDepthWrite').onchange = e => DBG.trDepthWrite = e.target.checked;
+const alphaSlider = document.getElementById('dbg_alphaDiscard');
+alphaSlider.oninput = e => { DBG.alphaDiscard = parseInt(e.target.value); document.getElementById('dbg_alphaDiscardVal').textContent = e.target.value; };
+document.getElementById('dbg_blendOverride').onchange = e => DBG.blendOverride = e.target.checked;
+document.getElementById('dbg_blendSrc').onchange = e => DBG.blendSrc = parseInt(e.target.value);
+document.getElementById('dbg_blendDst').onchange = e => DBG.blendDst = parseInt(e.target.value);
+document.getElementById('dbg_cull').onchange = e => DBG.cullOverride = e.target.value;
+document.getElementById('dbg_texInvalidate').onchange = e => DBG.texForceInvalidate = e.target.checked;
+const trSkip=document.getElementById('dbg_trSkip'),trMax=document.getElementById('dbg_trMax');
+const opSkip=document.getElementById('dbg_opSkip'),opMax=document.getElementById('dbg_opMax');
+trSkip.oninput=e=>{DBG.trSkip=+e.target.value;document.getElementById('dbg_trSkipVal').textContent=e.target.value;};
+trMax.oninput=e=>{DBG.trMax=+e.target.value;document.getElementById('dbg_trMaxVal').textContent=e.target.value;};
+opSkip.oninput=e=>{DBG.opSkip=+e.target.value;document.getElementById('dbg_opSkipVal').textContent=e.target.value;};
+opMax.oninput=e=>{DBG.opMax=+e.target.value;document.getElementById('dbg_opMaxVal').textContent=e.target.value;};
+DBG.trSkip=0;DBG.trMax=200;DBG.opSkip=0;DBG.opMax=600;
 
 async function main(){
     if(!navigator.gpu){ss('WebGPU not supported. Use Chrome 113+.','err');return;}
     const R=new PVR2Renderer();
     try{await R.init(canvas);ss('WebGPU OK','ok');
-        R.dev.addEventListener('uncapturederror',(e)=>{gpuErrs='GPU: '+e.error.message;console.error('[webgpu]',e.error.message);});
+        R.dev.addEventListener('uncapturederror',(e)=>{console.error('[webgpu]',e.error.message);});
     }catch(e){ss('Init failed: '+e.message,'err');return;}
     const D=new FrameDecoder(),P=new TAParser(),T=new TextureManager(R.dev);
 
@@ -55,32 +141,13 @@ async function main(){
                 const fr=D.applyFrame(d);
                 dMs=performance.now()-t0;
                 if(!fr)return;
-                if(!T._lastPvrRegs||fr.vramDirty){T.invalidateAll();T._lastPvrRegs=D.pvrRegs;T.updatePalette(D.pvrRegs);}
+                if(!T._lastPvrRegs||fr.vramDirty||DBG.texForceInvalidate){T.invalidateAll();T._lastPvrRegs=D.pvrRegs;T.updatePalette(D.pvrRegs);}
                 const t1=performance.now();
                 const g=P.parse(fr.taBuffer,fr.taSize);
                 pMs=performance.now()-t1;
-                lastVerts=g.vertexCount;lastOp=g.opaque.length;lastPt=g.punchThrough.length;lastTr=g.translucent.length;lastTaSize=fr.taSize;
-                if(fc<3&&g.vertexCount>0){
-                    // Dump first 5 polys with their vertex positions
-                    const fv=new Float32Array(g.vertexData.buffer,g.vertexData.byteOffset,g.vertexCount*7);
-                    const uv=new Uint8Array(g.vertexData.buffer,g.vertexData.byteOffset,g.vertexCount*28);
-                    console.log('[diag] TRANSLUCENT polys:');
-                    for(let pi=0;pi<Math.min(5,g.translucent.length);pi++){
-                        const p=g.translucent[pi];
-                        if(p.count<3)continue;
-                        let s=`[diag] poly${pi}: first=${p.first} count=${p.count} pcw=0x${p.pcw.toString(16)} obj=0x${(p.pcw&0xFF).toString(16)} | verts:`;
-                        for(let vi=0;vi<Math.min(p.count,6);vi++){
-                            const idx=p.first+vi;
-                            if(idx>=g.vertexCount)break;
-                            const fi=idx*7;
-                            s+=` (${fv[fi].toFixed(0)},${fv[fi+1].toFixed(0)} u=${fv[fi+5].toFixed(3)} v=${fv[fi+6].toFixed(3)})`;
-                        }
-                        console.log(s);
-                    }
-                    console.log('[diag] ndcW='+(((fr.pvrSnapshot[0]&0x3F)+1)*32)+' ndcH='+((((fr.pvrSnapshot[0]>>16)&0x3F)+1)*32));
-                }
                 const t2=performance.now();
-                R.renderFrame(g,T,fr.pvrSnapshot,D.vram);
+                // Pass debug state to renderer
+                R.renderFrame(g,T,fr.pvrSnapshot,D.vram,DBG);
                 rMs=performance.now()-t2;
                 fc++;
             }catch(ex){console.error('[webgpu]',ex);}
@@ -91,7 +158,7 @@ async function main(){
         const now=performance.now(),el=now-lt;
         if(el>=1000){fps=(fc/el*1000).toFixed(1);fc=0;lt=now;}
         const kb=(wB*8/1000).toFixed(0);wB=0;
-        ov.textContent=`FPS: ${fps}\nDecode: ${dMs.toFixed(2)}ms\nParse:  ${pMs.toFixed(2)}ms\nRender: ${rMs.toFixed(2)}ms\nTotal:  ${(dMs+pMs+rMs).toFixed(2)}ms\nStream: ${kb} kbps\nFrame:  ${D.frameNum}\nVerts:  ${lastVerts}  TA: ${lastTaSize}B\nDraws:  Op=${lastOp} PT=${lastPt} Tr=${lastTr}\nStats:  S=${D.stats.syncs} K=${D.stats.keyframes} D=${D.stats.deltas}\n${gpuErrs}`;
+        ov.textContent=`FPS: ${fps}\nDecode: ${dMs.toFixed(2)}ms\nParse:  ${pMs.toFixed(2)}ms\nRender: ${rMs.toFixed(2)}ms\nTotal:  ${(dMs+pMs+rMs).toFixed(2)}ms\nStream: ${kb} kbps\nFrame:  ${D.frameNum}\nStats:  S=${D.stats.syncs} K=${D.stats.keyframes} D=${D.stats.deltas}`;
         requestAnimationFrame(tick);
     })();
     connect();

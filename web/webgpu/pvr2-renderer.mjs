@@ -118,14 +118,16 @@ export class PVR2Renderer {
         this.dev.queue.writeBuffer(this.idxBuf, 0, indices.buffer, 0, byteLen);
     }
 
-    renderFrame(parsed, texMgr, pvrSnap, vram) {
+    renderFrame(parsed, texMgr, pvrSnap, vram, dbg) {
         const {vertexData,vertexCount,opaque,punchThrough,translucent}=parsed;
         if(!vertexCount)return;
+        dbg = dbg || {};
         this.uploadVerts(vertexData);
         this.dev.queue.writeBuffer(this.uBuf,0,this._ndcMat(pvrSnap));
         texMgr.updatePalette(texMgr._lastPvrRegs||new Uint8Array(32768));
-        // Clear stale texture bind groups each frame
         this.texBGs.clear();
+        // Pipeline cache must be cleared when debug settings change depth/cull
+        this.pipes.clear();
 
         // Stage all frag uniforms
         let slot=0;
@@ -141,7 +143,9 @@ export class PVR2Renderer {
             this.stagingDV.setUint32(o+16,(tsp>>19)&1,true);
             this.stagingDV.setUint32(o+20,(pcw>>2)&1,true);
             this.stagingDV.setUint32(o+24,lt==='punch_through'?1:0,true);
-            this.stagingDV.setUint32(o+28,0,true);
+            // _p field: encode shader debug mode (0=normal,1=solid,2=uv,3=depth,4=alpha)
+            const modes={normal:0,solid:1,uv:2,depth:3,alpha:4};
+            this.stagingDV.setUint32(o+28,modes[dbg.shaderMode]||0,true);
             pp._s=slot; slot++;
         }};
         stage(opaque,'opaque'); stage(punchThrough,'punch_through'); stage(translucent,'translucent');
@@ -162,14 +166,26 @@ export class PVR2Renderer {
         // Flycast forces opaque blend to (ONE, ZERO) — no blending
         for(const pp of opaque){pp.tsp=(pp.tsp&0x03FFFFFF)|(1<<29)|(0<<26);}
 
-        const draw=(list,lt)=>{for(const pp of list){
+        const draw=(list,lt)=>{let drawIdx=0;const skip=lt==='translucent'?(dbg.trSkip||0):(dbg.opSkip||0);
+        const maxDraw=lt==='translucent'?(dbg.trMax||9999):(dbg.opMax||9999);
+        for(const pp of list){
             if(pp.count<3||pp._s<0)continue;
+            drawIdx++; if(drawIdx<=skip||drawIdx>skip+maxDraw)continue;
             const isp=pp.isp,tsp=pp.tsp,tcw=pp.tcw,pcw=pp.pcw;
             let dm=(isp>>29)&7,cm=(isp>>27)&3,zw=(isp>>26)&1?0:1;
             if(lt==='opaque'&&dm===0)continue;
             if(lt==='punch_through'||lt==='translucent')dm=6;
-            if(lt==='translucent')zw=0; if(lt==='punch_through')zw=1;
-            const pipe=this._pipe((tsp>>29)&7,(tsp>>26)&7,dm,zw,cm^1,'triangle-strip');
+            if(lt==='translucent')zw=1; if(lt==='punch_through')zw=1; // MVC2: depth write for translucent fixes sprite layering
+            // Debug overrides
+            if(lt==='translucent'&&dbg.trDepthFunc!==undefined)dm=dbg.trDepthFunc;
+            if(lt==='translucent'&&dbg.trDepthWrite)zw=1;
+            let sb=(tsp>>29)&7, db=(tsp>>26)&7;
+            if(dbg.blendOverride){sb=dbg.blendSrc||4;db=dbg.blendDst||5;}
+            let cullIdx = cm^1;
+            if(dbg.cullOverride==='none')cullIdx=0;
+            else if(dbg.cullOverride==='front')cullIdx=2;
+            else if(dbg.cullOverride==='back')cullIdx=3;
+            const pipe=this._pipe(sb,db,dm,zw,cullIdx,'triangle-list');
             let tbg=fbBG;
             if((pcw>>3)&1){const t=texMgr.getTexture(tsp,tcw,vram);if(t)tbg=this._texBG(t.texture,t.sampler);}
             rp.setPipeline(pipe);
@@ -177,7 +193,9 @@ export class PVR2Renderer {
             rp.setBindGroup(1,tbg);
             rp.drawIndexed(pp._idxCount,1,pp._idxFirst,0,0);
         }};
-        draw(opaque,'opaque'); draw(punchThrough,'punch_through'); draw(translucent,'translucent');
+        if(dbg.drawOpaque!==false) draw(opaque,'opaque');
+        if(dbg.drawPunch!==false) draw(punchThrough,'punch_through');
+        if(dbg.drawTrans!==false) draw(translucent,'translucent');
         rp.end();
         this.dev.queue.submit([enc.finish()]);
     }
