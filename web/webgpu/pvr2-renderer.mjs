@@ -55,6 +55,7 @@ export class PVR2Renderer {
         ]});
         this.pipeLayout = d.createPipelineLayout({bindGroupLayouts:[this.bgl0,this.bgl1]});
         this.shader = d.createShaderModule({code:vertexShader+'\n'+fragmentShader});
+        this.shader.getCompilationInfo().then(info=>{for(const m of info.messages)console.log('[WGSL]',m.type,m.message,'line',m.lineNum);});
         this.uBG = d.createBindGroup({layout:this.bgl0,entries:[
             {binding:0,resource:{buffer:this.uBuf}},
             {binding:1,resource:{buffer:this.dynBuf,size:32}},
@@ -88,18 +89,14 @@ export class PVR2Renderer {
     }
 
     // Convert triangle-strip polys to triangle-list indices
-    // Reuses Uint32Array across frames to avoid allocation
     _buildIndexBuffer(lists) {
+        // Count total indices needed
         let totalIdx = 0;
         for (const list of lists) for (const pp of list) {
             if (pp.count < 3 || pp._s < 0) continue;
             totalIdx += (pp.count - 2) * 3;
         }
-        // Reuse index array if large enough
-        if (!this._idxArr || this._idxArr.length < totalIdx) {
-            this._idxArr = new Uint32Array(Math.max(totalIdx, 8192));
-        }
-        const indices = this._idxArr;
+        const indices = new Uint32Array(totalIdx);
         let idx = 0;
         for (const list of lists) for (const pp of list) {
             if (pp.count < 3 || pp._s < 0) continue;
@@ -114,6 +111,7 @@ export class PVR2Renderer {
                 pp._idxCount += 3;
             }
         }
+        // Upload
         const byteLen = idx * 4;
         if (!this.idxBuf || this.idxBufSz < byteLen) {
             if (this.idxBuf) this.idxBuf.destroy();
@@ -130,42 +128,37 @@ export class PVR2Renderer {
         this.uploadVerts(vertexData);
         this.dev.queue.writeBuffer(this.uBuf,0,this._ndcMat(pvrSnap));
         texMgr.updatePalette(texMgr._lastPvrRegs||new Uint8Array(32768));
-        // Only clear bind groups when textures were actually re-decoded (gen changed)
-        if(this._lastTexGen!==texMgr.gen){this.texBGs.clear();this._lastTexGen=texMgr.gen;}
+        this.texBGs.clear(); // Must rebuild bind groups when textures are re-decoded
 
-        // Stage all frag uniforms — hot path, avoid allocations
-        const MODES={normal:0,solid:1,uv:2,depth:3,alpha:4};
-        const dbgMode=MODES[dbg.shaderMode]||0;
-        const dbgNoDiscard=dbg.noDiscard?1:0;
-        const dbgDiscTransOnly=dbg.discardTransOnly?1:0;
-        const dbgShadOverride=dbg.shadOverride&&dbg.shadInstr>=0;
-        const dbgShadVal=dbg.shadInstr||0;
-        const dbgUAOverride=dbg.useAlphaOverride>=0;
-        const dbgUAVal=dbg.useAlphaOverride||0;
-        const dv=this.stagingDV, SZ=this.SLOT;
+        // Stage all frag uniforms
         let slot=0;
-        const stage=(list,lt)=>{
-            const isOp=lt==='opaque',isPT=lt==='punch_through',isTr=lt==='translucent';
-            const ltBit=isTr?1:0, ptBit=isPT?1:0;
-            for(let i=0;i<list.length;i++){
-                const pp=list[i];
-                if(pp.count<3){pp._s=-1;continue;}
-                if(isOp&&((pp.isp>>29)&7)===0){pp._s=-1;continue;}
-                if(slot>=this.MAX_SLOTS){pp._s=-1;continue;}
-                const o=slot*SZ, tsp=pp.tsp, pcw=pp.pcw;
-                dv.setFloat32(o,1.0,true);
-                dv.setUint32(o+4,dbgShadOverride?dbgShadVal:(tsp>>6)&3,true);
-                dv.setUint32(o+8,(pcw>>3)&1,true);
-                dv.setUint32(o+12,dbgUAOverride?dbgUAVal:(tsp>>20)&1,true);
-                dv.setUint32(o+16,(tsp>>19)&1,true);
-                dv.setUint32(o+20,(pcw>>2)&1,true);
-                dv.setUint32(o+24,ptBit,true);
-                dv.setUint32(o+28,dbgMode|((pcw>>1)&1)<<8|ltBit<<9|dbgNoDiscard<<10|dbgDiscTransOnly<<11,true);
-                pp._s=slot++;
-            }
-        };
+        const stage=(list,lt)=>{for(const pp of list){
+            if(pp.count<3){pp._s=-1;continue;}
+            if(lt==='opaque'&&((pp.isp>>29)&7)===0){pp._s=-1;continue;}
+            if(slot>=this.MAX_SLOTS){pp._s=-1;continue;}
+            const o=slot*this.SLOT, tsp=pp.tsp, pcw=pp.pcw;
+            const shadInstr = (dbg.shadOverride&&dbg.shadInstr>=0) ? dbg.shadInstr : (tsp>>6)&3;
+            const useAlpha = dbg.useAlphaOverride>=0 ? dbg.useAlphaOverride : (tsp>>20)&1;
+            // atv: time for effects (simple), extra fx bits packed into upper bits of packed field
+            this.stagingDV.setFloat32(o,(lt==='punch_through')?1.0:(performance.now()/1000.0)%100.0,true);
+            this.stagingDV.setUint32(o+4,shadInstr,true);
+            this.stagingDV.setUint32(o+8,(pcw>>3)&1,true);
+            this.stagingDV.setUint32(o+12,useAlpha,true);
+            this.stagingDV.setUint32(o+16,(tsp>>19)&1,true);
+            this.stagingDV.setUint32(o+20,(pcw>>2)&1,true);
+            this.stagingDV.setUint32(o+24,lt==='punch_through'?1:0,true);
+            // Pack: bits 0-7=debug, bit8=gouraud, bit9=trans, bit10-11=discard, bits12+=effects
+            const modes={normal:0,solid:1,uv:2,depth:3,alpha:4};
+            const gouraud = (pcw>>1)&1;
+            const isTrans = lt==='translucent'?1:0;
+            const noDiscard = dbg.noDiscard?1:0;
+            const discTransOnly = dbg.discardTransOnly?1:0;
+            const fxBits = (dbg.fxBits||0)&0xFFFFF; // 20 bits of effects
+            this.stagingDV.setUint32(o+28,(modes[dbg.shaderMode]||0)|(gouraud<<8)|(isTrans<<9)|(noDiscard<<10)|(discTransOnly<<11)|(fxBits<<12),true);
+            pp._s=slot; slot++;
+        }};
         stage(opaque,'opaque'); stage(punchThrough,'punch_through'); stage(translucent,'translucent');
-        if(slot>0) this.dev.queue.writeBuffer(this.dynBuf,0,this.staging,0,slot*SZ);
+        if(slot>0) this.dev.queue.writeBuffer(this.dynBuf,0,this.staging,0,slot*this.SLOT);
 
         // Build index buffer: convert strips to triangle lists
         this._buildIndexBuffer([opaque, punchThrough, translucent]);
@@ -179,31 +172,28 @@ export class PVR2Renderer {
         const depthView=this.depth.createView();
         const passes = parsed.renderPasses || [{op_count:opaque.length,pt_count:punchThrough.length,tr_count:translucent.length}];
 
-        // Draw loop — skip redundant pipeline/texture state switches
-        let _lastPipe=null, _lastTBG=null;
-        const SZ=this.SLOT;
         const drawSlice=(rp,list,lt,start,count)=>{
-            const isOp=lt==='opaque',isPT=lt==='punch_through',isTr=lt==='translucent';
-            const end=start+count;
-            for(let i=start;i<end;i++){
+            for(let i=start;i<start+count;i++){
                 const pp=list[i]; if(!pp||pp.count<3||pp._s<0)continue;
                 const isp=pp.isp,tsp=pp.tsp,tcw=pp.tcw,pcw=pp.pcw;
-                let dm=(isp>>29)&7,zw=(isp>>26)&1?0:1;
-                if(isOp&&dm===0)continue;
-                if(isPT||isTr)dm=6;
-                if(isTr)zw=0; if(isPT)zw=1;
-                if(isTr&&dbg.trDepthFunc!==undefined)dm=dbg.trDepthFunc;
-                if(isTr&&dbg.trDepthWrite)zw=1;
+                let dm=(isp>>29)&7,cm=(isp>>27)&3,zw=(isp>>26)&1?0:1;
+                if(lt==='opaque'&&dm===0)continue;
+                if(lt==='punch_through'||lt==='translucent')dm=6;
+                if(lt==='translucent')zw=0; if(lt==='punch_through')zw=1; // Translucent: NO depth write in color pass (multipass writes depth separately)
+                if(lt==='translucent'&&dbg.trDepthFunc!==undefined)dm=dbg.trDepthFunc;
+                if(lt==='translucent'&&dbg.trDepthWrite)zw=1;
                 let sb=(tsp>>29)&7, db=(tsp>>26)&7;
                 if(dbg.blendOverride){sb=dbg.blendSrc||4;db=dbg.blendDst||5;}
-                const cm=(isp>>27)&3;
-                const pipe=this._pipe(sb,db,dm,zw,cm^1,'triangle-list');
+                let cullIdx = cm^1;
+                if(dbg.cullOverride==='none')cullIdx=0;
+                else if(dbg.cullOverride==='front')cullIdx=2;
+                else if(dbg.cullOverride==='back')cullIdx=3;
+                const pipe=this._pipe(sb,db,dm,zw,cullIdx,'triangle-list');
                 let tbg=fbBG;
                 if((pcw>>3)&1){const t=texMgr.getTexture(tsp,tcw,vram);if(t)tbg=this._texBG(t.texture,t.sampler);}
-                // Only set state that changed
-                if(pipe!==_lastPipe){rp.setPipeline(pipe);_lastPipe=pipe;}
-                rp.setBindGroup(0,this.uBG,[pp._s*SZ]); // dynamic offset always changes
-                if(tbg!==_lastTBG){rp.setBindGroup(1,tbg);_lastTBG=tbg;}
+                rp.setPipeline(pipe);
+                rp.setBindGroup(0,this.uBG,[pp._s*this.SLOT]);
+                rp.setBindGroup(1,tbg);
                 rp.drawIndexed(pp._idxCount,1,pp._idxFirst,0,0);
             }
         };
@@ -228,9 +218,9 @@ export class PVR2Renderer {
             if(dbg.drawTrans!==false){
                 const trStart=prevPass.tr_count, trCount=pass.tr_count-prevPass.tr_count;
                 if(trCount>0){
+                    // Build sortable array with Z from first vertex
                     const vf32=new Float32Array(vertexData.buffer,vertexData.byteOffset,vertexCount*7);
-                    if(!this._sortBuf)this._sortBuf=[];
-                    const sorted=this._sortBuf; sorted.length=0;
+                    const sorted=[];
                     for(let i=trStart;i<trStart+trCount;i++){
                         const pp=translucent[i]; if(!pp||pp.count<3||pp._s<0)continue;
                         sorted.push({idx:i, z:vf32[pp.first*7+2]});
