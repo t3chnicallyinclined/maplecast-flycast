@@ -177,6 +177,10 @@ canvas{display:block;background:#000}
 <label><input type="checkbox" id="dbg_tileClipLog"> Log tile clips (console)</label>
 <h2>Render Passes</h2>
 <label>Force single pass: <input type="checkbox" id="dbg_singlePass" checked></label>
+<h2>Latency Mode</h2>
+<label><input type="radio" name="latMode" value="vsync" checked> Vsync (smooth, +8ms avg)</label>
+<label><input type="radio" name="latMode" value="immediate"> Immediate (lowest latency)</label>
+<label><input type="checkbox" id="dbg_predictive"> Predictive (extrapolate between frames)</label>
 <h2>Frame Inspector</h2>
 <label><input type="checkbox" id="dbg_freeze"> FREEZE frame</label>
 <button id="dbg_dumpFrame" style="background:#333;color:#0f0;border:1px solid #0f0;padding:4px 8px;cursor:pointer;font-family:inherit;margin:4px 0">Dump frame to console</button>
@@ -191,6 +195,7 @@ import {TAParser} from './webgpu/ta-parser.mjs';
 import {TextureManager} from './webgpu/texture-manager.mjs';
 import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
+import {FramePredictor} from './webgpu/frame-predictor.mjs';
 
 const canvas=document.getElementById('c'), ov=document.getElementById('ov'), st=document.getElementById('st');
 let fc=0,lt=performance.now(),fps=0,dMs=0,pMs=0,rMs=0,wB=0;
@@ -201,7 +206,7 @@ const A=0.05;
 let maDecode=0,maParse=0,maRender=0,maTotal=0,maE2E=0;
 // Network RTT measurement via control WS ping
 let netRTT=-1, lastFrameArrival=0, maJitter=0, maInterArrival=0;
-let skippedFrames=0, renderFrames=0;
+let skippedFrames=0, renderFrames=0, predFrames=0;
 const ss=(m,c='')=>{st.textContent=m;st.className=c};
 
 // Debug state — read by renderer
@@ -258,6 +263,9 @@ document.getElementById('dbg_shadInstr').onchange=e=>DBG.shadInstr=parseInt(e.ta
 document.getElementById('dbg_useAlpha').onchange=e=>DBG.useAlphaOverride=parseInt(e.target.value);
 DBG.shadOverride=false;DBG.shadInstr=-1;DBG.useAlphaOverride=-1;
 DBG.tileClipOff=false;DBG.tileClipLog=false;DBG.singlePass=true;DBG.freeze=false;DBG.noOffset=false;
+DBG.immediateRender=false;DBG.predictive=false;
+document.querySelectorAll('input[name=latMode]').forEach(r=>r.onchange=e=>{DBG.immediateRender=e.target.value==='immediate';});
+document.getElementById('dbg_predictive').onchange=e=>DBG.predictive=e.target.checked;
 document.getElementById('dbg_tileClipOff').onchange=e=>DBG.tileClipOff=e.target.checked;
 document.getElementById('dbg_tileClipLog').onchange=e=>DBG.tileClipLog=e.target.checked;
 document.getElementById('dbg_singlePass').onchange=e=>DBG.singlePass=e.target.checked;
@@ -270,7 +278,7 @@ async function main(){
     try{await R.init(canvas);ss('WebGPU OK','ok');
         R.dev.addEventListener('uncapturederror',(e)=>{console.error('[webgpu]',e.error.message);});
     }catch(e){ss('Init failed: '+e.message,'err');return;}
-    const D=new FrameDecoder(),P=new TAParser(),T=new TextureManager(R.dev);
+    const D=new FrameDecoder(),P=new TAParser(),T=new TextureManager(R.dev),FP=new FramePredictor();
     let lastParsed=null;
     document.getElementById('dbg_dumpFrame').onclick=()=>{
         if(!lastParsed){console.log('[dump] no frame yet');return;}
@@ -328,9 +336,25 @@ async function main(){
                     const g=P.parse(fr.taBuffer,fr.taSize);
                     try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e2) {}
                     pMs=performance.now()-t1;
-                    if(pendingFrame) skippedFrames++;
-                    pendingFrame=g; pendingPvrSnap=fr.pvrSnapshot;
                     lastParsed=g;
+                    // Feed predictor with real frame vertex data
+                    FP.feedFrame(g.vertexData, g.vertexCount);
+                    g._snap = fr.pvrSnapshot; // save for predictive render
+                    if(DBG.immediateRender){
+                        // IMMEDIATE MODE: render NOW, skip RAF wait (~8ms savings)
+                        const t2=performance.now();
+                        R.renderFrame(g,T,fr.pvrSnapshot,D.vram,DBG);
+                        rMs=performance.now()-t2;
+                        totalFrames++; renderFrames++;
+                        const total=dMs+pMs+rMs;
+                        maDecode+=(dMs-maDecode)*A; maParse+=(pMs-maParse)*A;
+                        maRender+=(rMs-maRender)*A; maTotal+=(total-maTotal)*A;
+                        fc++;
+                    } else {
+                        // VSYNC MODE: store for RAF render
+                        if(pendingFrame) skippedFrames++;
+                        pendingFrame=g; pendingPvrSnap=fr.pvrSnapshot;
+                    }
                     parsed_passes=g.renderPasses?g.renderPasses.length:1;
                     wsFrames++;
                 }catch(ex){console.error('[webgpu]',ex);}
@@ -339,9 +363,22 @@ async function main(){
         transport.connect();
         window._transport=transport; // Expose for diagnostics
 
-        // RAF render loop — vsync-locked, renders latest available frame
+        // RAF render loop — vsync-locked, renders latest available frame or prediction
         function renderTick(){
             requestAnimationFrame(renderTick);
+            if(!pendingFrame && DBG.predictive && FP.ready && lastParsed){
+                // NO new frame yet — render PREDICTED frame from extrapolated vertices
+                const pred = FP.predict(1.0);
+                if(pred){
+                    // Replace vertex data in lastParsed with predicted positions
+                    const savedVtx = lastParsed.vertexData;
+                    lastParsed.vertexData = pred.data;
+                    R.renderFrame(lastParsed, T, lastParsed._snap||new Uint32Array(16), D.vram, DBG);
+                    lastParsed.vertexData = savedVtx; // restore
+                    predFrames++;
+                    return;
+                }
+            }
             if(!pendingFrame)return;
             const g=pendingFrame, snap=pendingPvrSnap;
             pendingFrame=null; pendingPvrSnap=null;
@@ -437,7 +474,7 @@ Arrival: ${maInterArrival.toFixed(2)}ms  (inter-frame)
 --- True E2E estimate -----------
 Input->Pixel: ~${netRTT>0?(netRTT/2+maTotal).toFixed(1):'??'}ms
   = RTT/2(${netRTT>0?(netRTT/2).toFixed(0):'?'}) + Proc(${maTotal.toFixed(1)})
-Vsync:   ${renderFrames} rendered, ${skippedFrames} skipped
+Vsync:   ${renderFrames} real, ${predFrames} predicted, ${skippedFrames} skip
 --- Stats -----------------------
 Frames:  ${totalFrames} | Stream: ${kb}kbps
 Tex$:    H=${ts.hits} M=${ts.misses} R=${ts.reused}
