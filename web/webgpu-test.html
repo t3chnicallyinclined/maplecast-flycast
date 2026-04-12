@@ -93,6 +93,13 @@ canvas{display:block;background:#000}
 <label><input type="checkbox" id="fx_13"> 🌙 Night Vision</label>
 <label><input type="checkbox" id="fx_14"> 🔥 Thermal</label>
 <label><input type="checkbox" id="fx_15"> 🌊 Underwater</label>
+<h2 style="color:#0ff">🔧 TRANSFORMS</h2>
+<label>Zoom: <input type="range" id="fx_zoom" min="50" max="300" value="100"> <span class="val" id="fx_zoomVal">100%</span></label>
+<label>Char Scale: <input type="range" id="fx_charScale" min="25" max="400" value="100"> <span class="val" id="fx_charScaleVal">100%</span></label>
+<label>Screen Shake: <input type="range" id="fx_shakeAmt" min="0" max="50" value="0"> <span class="val" id="fx_shakeAmtVal">0</span></label>
+<label><input type="checkbox" id="fx_mirror"> Mirror P2</label>
+<label><input type="checkbox" id="fx_bigHead"> 🗿 BIG HEAD MODE</label>
+<label>Head size: <input type="range" id="fx_headSize" min="100" max="500" value="250"> <span class="val" id="fx_headSizeVal">250%</span></label>
 <h2 style="color:#ff0">🎮 CHARACTER FX</h2>
 <label><input type="checkbox" id="fx_16"> 💎 Char Glow</label>
 <label><input type="checkbox" id="fx_17"> 🌈 Char Rainbow</label>
@@ -164,7 +171,13 @@ document.getElementById('dbg_blendDst').onchange = e => DBG.blendDst = parseInt(
 document.getElementById('dbg_cull').onchange = e => DBG.cullOverride = e.target.value;
 document.getElementById('dbg_texInvalidate').onchange = e => DBG.texForceInvalidate = e.target.checked;
 // Effects — each checkbox sets a bit in DBG.fxBits (mapped to packed bits 12+)
-DBG.fxBits=0; DBG.fxTime=0;
+DBG.fxBits=0; DBG.fxTime=0; DBG.zoom=100; DBG.charScale=100; DBG.shakeAmt=0; DBG.mirror=false;
+document.getElementById('fx_zoom').oninput=e=>{DBG.zoom=+e.target.value;document.getElementById('fx_zoomVal').textContent=e.target.value+'%';};
+document.getElementById('fx_charScale').oninput=e=>{DBG.charScale=+e.target.value;document.getElementById('fx_charScaleVal').textContent=e.target.value+'%';};
+document.getElementById('fx_shakeAmt').oninput=e=>{DBG.shakeAmt=+e.target.value;document.getElementById('fx_shakeAmtVal').textContent=e.target.value;};
+document.getElementById('fx_mirror').onchange=e=>{DBG.mirror=e.target.checked;};
+document.getElementById('fx_bigHead').onchange=e=>{DBG.bigHead=e.target.checked;};
+document.getElementById('fx_headSize').oninput=e=>{DBG.headSize=+e.target.value;document.getElementById('fx_headSizeVal').textContent=e.target.value+'%';}; DBG.bigHead=false; DBG.headSize=250;
 for(let i=0;i<32;i++){const el=document.getElementById('fx_'+i);if(el)el.onchange=e=>{if(e.target.checked)DBG.fxBits|=(1<<i);else DBG.fxBits&=~(1<<i);};}
 
 const trSkip=document.getElementById('dbg_trSkip'),trMax=document.getElementById('dbg_trMax');

@@ -125,8 +125,46 @@ export class PVR2Renderer {
         const {vertexData,vertexCount,opaque,punchThrough,translucent}=parsed;
         if(!vertexCount)return;
         dbg = dbg || {};
+        // Apply character transforms to translucent vertex positions
+        const charScale = (dbg.charScale || 100) / 100.0;
+        const bigHead = dbg.bigHead;
+        const headScale = (dbg.headSize || 250) / 100.0;
+        if (charScale !== 1.0 || bigHead) {
+            const vf = new Float32Array(vertexData.buffer, vertexData.byteOffset, vertexCount * 7);
+            for (const pp of translucent) {
+                if (pp.count < 3) continue;
+                // Find this poly's center Y
+                let sumY = 0;
+                for (let v = pp.first; v < pp.first + pp.count; v++) sumY += vf[v * 7 + 1];
+                const avgY = sumY / pp.count;
+                // Head scaling only for character sprites (Y > 120), not HUD/timer
+                const isChar = avgY > 120;
+                const headFactor = (bigHead && isChar) ? Math.max(0, 1 - (avgY - 180) / 60) : 0;
+                const scale = charScale * (1 + headFactor * (headScale - 1));
+                // Scale around this poly's own center
+                let cx = 0, cy = 0;
+                for (let v = pp.first; v < pp.first + pp.count; v++) { cx += vf[v*7]; cy += vf[v*7+1]; }
+                cx /= pp.count; cy /= pp.count;
+                for (let v = pp.first; v < pp.first + pp.count; v++) {
+                    const fi = v * 7;
+                    vf[fi] = cx + (vf[fi] - cx) * scale;
+                    vf[fi + 1] = cy + (vf[fi + 1] - cy) * scale;
+                }
+            }
+        }
         this.uploadVerts(vertexData);
-        this.dev.queue.writeBuffer(this.uBuf,0,this._ndcMat(pvrSnap));
+        // NDC matrix with zoom + shake
+        const ndcMat = this._ndcMat(pvrSnap);
+        const zoom = (dbg.zoom || 100) / 100.0;
+        if (zoom !== 1.0) { ndcMat[0] *= zoom; ndcMat[5] *= zoom; }
+        const shk = (dbg.shakeAmt || 0) / 100.0;
+        if (shk > 0) {
+            const t = performance.now() / 1000.0;
+            ndcMat[12] += Math.sin(t * 30) * shk;
+            ndcMat[13] += Math.cos(t * 37) * shk * 0.7;
+        }
+        if (dbg.mirror) { ndcMat[0] = -ndcMat[0]; ndcMat[12] = -ndcMat[12]; }
+        this.dev.queue.writeBuffer(this.uBuf, 0, ndcMat);
         texMgr.updatePalette(texMgr._lastPvrRegs||new Uint8Array(32768));
         this.texBGs.clear(); // Must rebuild bind groups when textures are re-decoded
 
