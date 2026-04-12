@@ -443,6 +443,8 @@ document.getElementById('leaveBtn').onclick=()=>leaveSlot();
 
 function joinSlot(slot){
     if(controlWs&&controlWs.readyState===WebSocket.OPEN){
+        // Leave current slot first before switching
+        if(mySlot>=0) controlWs.send(JSON.stringify({type:'leave'}));
         sendJoin(slot);return;
     }
     const url=location.protocol==='https:'?'wss://'+location.hostname+'/play':'ws://'+location.hostname+':7201';
