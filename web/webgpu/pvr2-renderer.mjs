@@ -1,4 +1,35 @@
 // pvr2-renderer.mjs — WebGPU renderer for PVR2 TA stream
+// ═══════════════════════════════════════════════════════════════
+// GOLD STANDARD CONFIG (2026-04-12) — DO NOT CHANGE WITHOUT TESTING
+//
+// Performance: 1.88ms process (11% budget), 24.7ms E2E over QUIC/UDP
+//
+// Rendering settings:
+//   Single pass:         ON  (multi-pass detection doesn't match flycast)
+//   Z-sort:              OFF (submission order — sort + depth write = flicker)
+//   Translucent depth:   write=ON, func=greater-equal (fixes cape rendering)
+//   Opaque depth:        per-poly ISP.DepthMode, write=per-poly ZWriteDis
+//   Opaque blend:        forced ONE/ZERO (no blending, matches flycast)
+//   Culling:             per-poly ISP.CullMode XOR 1
+//   Alpha discard:       c.a < 0.004
+//
+// Texture settings:
+//   Dirty-page cache:    ON (only re-decode on VRAM page overlap)
+//   Palette update:      on vramDirty || pvrDirty || first frame
+//   Formats:             1555/565/4444 + VQ + Pal4/Pal8 + mipmapped
+//   Color expansion:     bit-replication (e5/e6/e4) matching flycast
+//   VQ pixel order:      prel(x,y) = p_in[0]=TL, p_in[1]=BL, p_in[2]=TR, p_in[3]=BR
+//
+// GPU buffer strategy:
+//   Vertex/index:        double-buffered (flip each frame)
+//   Fragment uniforms:   dynamic uniform buffer, 256B aligned, 8192 max slots
+//   Pipeline cache:      keyed by (blend src/dst, depth mode/write, cull, topology)
+//   State batching:      skip redundant setPipeline/setBindGroup/setScissorRect
+//   Bind group cache:    texture bind groups rebuilt per frame (texBGs.clear)
+//
+// Transport: WebTransport (QUIC/UDP) with WebSocket fallback
+// Vsync: decoupled — WS onmessage=decode+parse, RAF=render latest
+// ═══════════════════════════════════════════════════════════════
 
 import { vertexShader, fragmentShader } from './shaders.mjs';
 
