@@ -18,7 +18,10 @@ export class PVR2Renderer {
     constructor() {
         this.dev=null; this.ctx=null; this.fmt=null;
         this.pipes=new Map(); this.texBGs=new Map();
-        this.uBuf=null; this.fBuf=null; this.vBuf=null; this.vBufSz=0;
+        // Double-buffered vertex/index: alternate each frame to avoid GPU write stalls
+        this.vBufs=[null,null]; this.vBufSzs=[0,0]; this.vFrame=0;
+        this.idxBufs=[null,null]; this.idxBufSzs=[0,0];
+        this.vBuf=null; this.idxBuf=null; // Current frame's active buffers
         this.depth=null; this.bgl0=null; this.bgl1=null; this.pipeLayout=null;
         this.shader=null; this.uBG=null;
         // Dynamic frag uniform: 256-byte aligned slots, pre-allocated
@@ -82,9 +85,13 @@ export class PVR2Renderer {
         this.texBGs.set(t,b); return b; }
 
     uploadVerts(data) {
-        const n=data.byteLength;
-        if(!this.vBuf||this.vBufSz<n){if(this.vBuf)this.vBuf.destroy();this.vBufSz=Math.max(n,1<<20);
-            this.vBuf=this.dev.createBuffer({size:this.vBufSz,usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST});}
+        const f=this.vFrame, n=data.byteLength;
+        if(!this.vBufs[f]||this.vBufSzs[f]<n){
+            if(this.vBufs[f])this.vBufs[f].destroy();
+            this.vBufSzs[f]=Math.max(n,1<<20);
+            this.vBufs[f]=this.dev.createBuffer({size:this.vBufSzs[f],usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST});
+        }
+        this.vBuf=this.vBufs[f];
         this.dev.queue.writeBuffer(this.vBuf,0,data);
     }
 
@@ -111,13 +118,14 @@ export class PVR2Renderer {
                 pp._idxCount += 3;
             }
         }
-        // Upload
-        const byteLen = idx * 4;
-        if (!this.idxBuf || this.idxBufSz < byteLen) {
-            if (this.idxBuf) this.idxBuf.destroy();
-            this.idxBufSz = Math.max(byteLen, 512*1024);
-            this.idxBuf = this.dev.createBuffer({size:this.idxBufSz, usage:GPUBufferUsage.INDEX|GPUBufferUsage.COPY_DST});
+        // Upload to double-buffered index buffer
+        const f=this.vFrame, byteLen = idx * 4;
+        if (!this.idxBufs[f] || this.idxBufSzs[f] < byteLen) {
+            if (this.idxBufs[f]) this.idxBufs[f].destroy();
+            this.idxBufSzs[f] = Math.max(byteLen, 512*1024);
+            this.idxBufs[f] = this.dev.createBuffer({size:this.idxBufSzs[f], usage:GPUBufferUsage.INDEX|GPUBufferUsage.COPY_DST});
         }
+        this.idxBuf=this.idxBufs[f];
         this.dev.queue.writeBuffer(this.idxBuf, 0, indices.buffer, 0, byteLen);
         this._idxArr = indices;
     }
@@ -223,8 +231,8 @@ export class PVR2Renderer {
                 rp.setScissorRect(0,0,cW,cH);
             }
         };
+        let _lastPipe=null, _lastTBG=null, _lastClip=-1;
         const drawSlice=(rp,list,lt,start,count)=>{
-            let lastClip=-1;
             for(let i=start;i<start+count;i++){
                 const pp=list[i]; if(!pp||pp.count<3||pp._s<0)continue;
                 const isp=pp.isp,tsp=pp.tsp,tcw=pp.tcw,pcw=pp.pcw;
@@ -241,14 +249,17 @@ export class PVR2Renderer {
                 if(dbg.cullOverride==='none')cullIdx=0;
                 else if(dbg.cullOverride==='front')cullIdx=2;
                 else if(dbg.cullOverride==='back')cullIdx=3;
-                // Apply tile clip (scissor rect)
-                if(!dbg.tileClipOff&&pp.tileclip!==lastClip){applyTileClip(rp,pp.tileclip);lastClip=pp.tileclip;}
+                // Tile clip — only change scissor when needed
+                if(!dbg.tileClipOff&&pp.tileclip!==_lastClip){applyTileClip(rp,pp.tileclip);_lastClip=pp.tileclip;}
+                // Pipeline — only set when changed
                 const pipe=this._pipe(sb,db,dm,zw,cullIdx,'triangle-list');
+                if(pipe!==_lastPipe){rp.setPipeline(pipe);_lastPipe=pipe;}
+                // Texture bind group — only set when changed
                 let tbg=fbBG;
                 if((pcw>>3)&1){const t=texMgr.getTexture(tsp,tcw,vram);if(t)tbg=this._texBG(t.texture,t.sampler);}
-                rp.setPipeline(pipe);
+                if(tbg!==_lastTBG){rp.setBindGroup(1,tbg);_lastTBG=tbg;}
+                // Uniform bind group (always changes — dynamic offset per poly)
                 rp.setBindGroup(0,this.uBG,[pp._s*this.SLOT]);
-                rp.setBindGroup(1,tbg);
                 rp.drawIndexed(pp._idxCount,1,pp._idxFirst,0,0);
             }
         };
@@ -264,6 +275,7 @@ export class PVR2Renderer {
             });
             rp.setVertexBuffer(0,this.vBuf);
             if(this.idxBuf) rp.setIndexBuffer(this.idxBuf,'uint32');
+            _lastPipe=null;_lastTBG=null;_lastClip=-1; // Reset state tracking per pass
 
             rp.setScissorRect(0,0,cW,cH);
             if(dbg.drawOpaque!==false){
@@ -311,7 +323,6 @@ export class PVR2Renderer {
                         order.sort((a,b)=>{const dz=tris[a*3+2]-tris[b*3+2];return Math.abs(dz)<eps?tris[a*3]-tris[b*3]:dz;});
                     }
                     // Draw sorted triangles
-                    let lastPipe2=null,lastTBG2=null,lastSlot2=-1;
                     for(let si=0;si<triCount;si++){
                         const oi=order[si]*3;
                         const polyIdx=tris[oi], idxStart=tris[oi+1];
@@ -325,9 +336,9 @@ export class PVR2Renderer {
                         const pipe=this._pipe(sb,db,dm,zw,cm^1,'triangle-list');
                         let tbg=fbBG;
                         if((pcw>>3)&1){const tx=texMgr.getTexture(tsp,tcw,vram);if(tx)tbg=this._texBG(tx.texture,tx.sampler);}
-                        if(pipe!==lastPipe2){rp.setPipeline(pipe);lastPipe2=pipe;}
-                        if(pp._s!==lastSlot2){rp.setBindGroup(0,this.uBG,[pp._s*this.SLOT]);lastSlot2=pp._s;}
-                        if(tbg!==lastTBG2){rp.setBindGroup(1,tbg);lastTBG2=tbg;}
+                        if(pipe!==_lastPipe){rp.setPipeline(pipe);_lastPipe=pipe;}
+                        rp.setBindGroup(0,this.uBG,[pp._s*this.SLOT]);
+                        if(tbg!==_lastTBG){rp.setBindGroup(1,tbg);_lastTBG=tbg;}
                         rp.drawIndexed(3,1,idxStart,0,0);
                     }
                 }
@@ -353,6 +364,7 @@ export class PVR2Renderer {
             prevPass=pass;
         }
         this.dev.queue.submit([enc.finish()]);
+        this.vFrame^=1; // Flip double buffer for next frame
     }
 
     _ndcMat(snap) {
