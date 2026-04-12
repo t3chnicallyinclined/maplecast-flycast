@@ -250,42 +250,52 @@ export class PVR2Renderer {
 
             if(dbg.drawOpaque!==false) drawSlice(rp,opaque,'opaque',prevPass.op_count,pass.op_count-prevPass.op_count);
             if(dbg.drawPunch!==false) drawSlice(rp,punchThrough,'punch_through',prevPass.pt_count,pass.pt_count-prevPass.pt_count);
-            // Translucent: Z-sort polys then draw with depth write OFF
-            // Sort ensures cape draws before body (painter's algorithm via draw order)
-            // No depth write means combo text letters at same Z all render
+            // Translucent: per-TRIANGLE Z-sort (matches flycast sortTriangles)
+            // Extract individual triangles, sort by min Z, draw sorted
             if(dbg.drawTrans!==false){
                 const trStart=prevPass.tr_count, trCount=pass.tr_count-prevPass.tr_count;
                 if(trCount>0){
-                    // Build sortable array with Z from first vertex
                     const vf32=new Float32Array(vertexData.buffer,vertexData.byteOffset,vertexCount*7);
-                    const sorted=[];
+                    const idxArr=this._idxArr;
+                    // Extract all triangles with their min Z and poly index
+                    if(!this._triSort)this._triSort=[];
+                    const tris=this._triSort; tris.length=0;
                     for(let i=trStart;i<trStart+trCount;i++){
                         const pp=translucent[i]; if(!pp||pp.count<3||pp._s<0)continue;
-                        sorted.push({idx:i, z:vf32[pp.first*7+2]});
+                        for(let t2=0;t2<pp._idxCount;t2+=3){
+                            const ii=pp._idxFirst+t2;
+                            const v0=idxArr[ii],v1=idxArr[ii+1],v2=idxArr[ii+2];
+                            const z0=vf32[v0*7+2],z1=vf32[v1*7+2],z2=vf32[v2*7+2];
+                            const minZ=Math.min(z0,z1,z2);
+                            tris.push(i,ii,minZ); // polyIdx, idxStart, z — packed flat for speed
+                        }
                     }
-                    // Ascending Z = farthest first (painter's algorithm)
-                    // Stable: same-Z polys keep TA submission order (idx tiebreaker)
-                    sorted.sort((a,b)=>a.z-b.z || a.idx-b.idx);
-                    // Draw in sorted order
-                    for(const s of sorted){
-                        const pp=translucent[s.idx]; if(!pp||pp._s<0)continue;
+                    // Sort by Z ascending (farthest first), stable by original order
+                    const triCount=tris.length/3;
+                    // Build sort indices
+                    if(!this._triOrder||this._triOrder.length<triCount)this._triOrder=new Uint32Array(Math.max(triCount,256));
+                    const order=this._triOrder;
+                    for(let i=0;i<triCount;i++)order[i]=i;
+                    order.sort((a,b)=>tris[a*3+2]-tris[b*3+2]||(tris[a*3]-tris[b*3]));
+                    // Draw sorted triangles
+                    let lastPipe2=null,lastTBG2=null,lastSlot2=-1;
+                    for(let si=0;si<triCount;si++){
+                        const oi=order[si]*3;
+                        const polyIdx=tris[oi], idxStart=tris[oi+1];
+                        const pp=translucent[polyIdx];
                         const isp=pp.isp,tsp=pp.tsp,tcw=pp.tcw,pcw=pp.pcw;
                         let dm=6,zw=0,cm=(isp>>27)&3;
                         if(dbg.trDepthFunc!==undefined)dm=dbg.trDepthFunc;
                         if(dbg.trDepthWrite)zw=1;
                         let sb=(tsp>>29)&7,db=(tsp>>26)&7;
                         if(dbg.blendOverride){sb=dbg.blendSrc||4;db=dbg.blendDst||5;}
-                        let cullIdx=cm^1;
-                        if(dbg.cullOverride==='none')cullIdx=0;
-                        else if(dbg.cullOverride==='front')cullIdx=2;
-                        else if(dbg.cullOverride==='back')cullIdx=3;
-                        const pipe=this._pipe(sb,db,dm,zw,cullIdx,'triangle-list');
+                        const pipe=this._pipe(sb,db,dm,zw,cm^1,'triangle-list');
                         let tbg=fbBG;
-                        if((pcw>>3)&1){const t=texMgr.getTexture(tsp,tcw,vram);if(t)tbg=this._texBG(t.texture,t.sampler);}
-                        rp.setPipeline(pipe);
-                        rp.setBindGroup(0,this.uBG,[pp._s*this.SLOT]);
-                        rp.setBindGroup(1,tbg);
-                        rp.drawIndexed(pp._idxCount,1,pp._idxFirst,0,0);
+                        if((pcw>>3)&1){const tx=texMgr.getTexture(tsp,tcw,vram);if(tx)tbg=this._texBG(tx.texture,tx.sampler);}
+                        if(pipe!==lastPipe2){rp.setPipeline(pipe);lastPipe2=pipe;}
+                        if(pp._s!==lastSlot2){rp.setBindGroup(0,this.uBG,[pp._s*this.SLOT]);lastSlot2=pp._s;}
+                        if(tbg!==lastTBG2){rp.setBindGroup(1,tbg);lastTBG2=tbg;}
+                        rp.drawIndexed(3,1,idxStart,0,0);
                     }
                 }
             }
