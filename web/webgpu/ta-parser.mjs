@@ -81,7 +81,15 @@ export class TAParser {
             const paraType = (pcw >> 29) & 7;
 
             if (paraType === 0) { endList(); off += 32; continue; }
-            if (paraType === 1) { off += 32; continue; } // UserTileClip
+            if (paraType === 1) { // UserTileClip — sets clip RECTANGLE only
+                const xmin = view.getUint32(off + 12, true) & 63;
+                const ymin = view.getUint32(off + 16, true) & 31;
+                const xmax = view.getUint32(off + 20, true) & 63;
+                const ymax = view.getUint32(off + 24, true) & 31;
+                // Preserve mode bits (set per-polygon), update rect
+                tileclip = (tileclip & 0xF0000000) | xmin | (xmax << 6) | (ymin << 12) | (ymax << 17);
+                off += 32; continue;
+            }
             if (paraType === 2) { off += 32; continue; } // ObjectListSet
             if (paraType === 3 || paraType === 6) { off += 32; continue; } // Reserved
 
@@ -89,6 +97,8 @@ export class TAParser {
                 const lt = (pcw >> 24) & 7;
                 if (curList === -1) startList(lt);
                 if (curList === 1 || curList === 3) { off += 32; continue; } // mod vol
+                // Set clip MODE from polygon's User_Clip field (PCW bits 16-17)
+                tileclip = (tileclip & 0x0FFFFFFF) | (((pcw >> 16) & 3) << 28);
                 cPCW = pcw; cObj = pcw & 0xFF;
                 cISP = view.getUint32(off + 4, true);
                 cTSP = view.getUint32(off + 8, true);
@@ -132,6 +142,8 @@ export class TAParser {
             if (paraType === 5) { // Sprite param
                 const lt = (pcw >> 24) & 7;
                 if (curList === -1) startList(lt);
+                // Set clip MODE from sprite's User_Clip field (PCW bits 16-17)
+                tileclip = (tileclip & 0x0FFFFFFF) | (((pcw >> 16) & 3) << 28);
                 cPCW = pcw; cObj = pcw & 0xFF;
                 cISP = view.getUint32(off + 4, true);
                 // Sprites flip cull mode (ta_vtx.cpp line 979)

@@ -23,8 +23,10 @@ canvas{display:block;background:#000}
 </head>
 <body>
 <div id="diagPanel" style="width:240px;background:#0a0a0a;border-right:1px solid #333;padding:8px;font-size:11px;overflow-y:auto;max-height:100vh;position:sticky;top:0">
-<h2 style="font-size:12px;color:#0f0;margin:0 0 8px;border-bottom:1px solid #333;padding-bottom:4px">📊 Diagnostics</h2>
+<h2 style="font-size:12px;color:#0f0;margin:0 0 8px;border-bottom:1px solid #333;padding-bottom:4px">Diagnostics</h2>
 <pre id="ov" style="font-size:10px;color:#0f0;white-space:pre;line-height:1.4;margin:0">Initializing...</pre>
+<h2 style="font-size:12px;color:#0ff;margin:12px 0 4px;border-bottom:1px solid #333;padding-bottom:2px">Live Render Stats</h2>
+<pre id="dbg_stats_left" style="font-size:9px;color:#0f0;background:#000;padding:4px;white-space:pre;overflow-y:auto;max-height:400px;border:1px solid #333">-</pre>
 </div>
 <div id="main">
 <h1>MapleCast WebGPU Renderer</h1>
@@ -107,10 +109,10 @@ canvas{display:block;background:#000}
 <label><input type="checkbox" id="fx_19"> 👻 Char Ghost</label>
 <h2 style="color:#0f0">🕹️ PLAY</h2>
 <h2>List Inspector</h2>
-<label>Trans skip first: <input type="range" id="dbg_trSkip" min="0" max="200" value="0"> <span class="val" id="dbg_trSkipVal">0</span></label>
-<label>Trans max draw: <input type="range" id="dbg_trMax" min="0" max="200" value="200"> <span class="val" id="dbg_trMaxVal">200</span></label>
-<label>Opaque skip first: <input type="range" id="dbg_opSkip" min="0" max="600" value="0"> <span class="val" id="dbg_opSkipVal">0</span></label>
-<label>Opaque max draw: <input type="range" id="dbg_opMax" min="0" max="600" value="600"> <span class="val" id="dbg_opMaxVal">600</span></label>
+<label>Trans skip first: <input type="range" id="dbg_trSkip" min="0" max="500" value="0"> <span class="val" id="dbg_trSkipVal">0</span></label>
+<label>Trans max draw: <input type="range" id="dbg_trMax" min="0" max="500" value="500"> <span class="val" id="dbg_trMaxVal">500</span></label>
+<label>Opaque skip first: <input type="range" id="dbg_opSkip" min="0" max="800" value="0"> <span class="val" id="dbg_opSkipVal">0</span></label>
+<label>Opaque max draw: <input type="range" id="dbg_opMax" min="0" max="800" value="800"> <span class="val" id="dbg_opMaxVal">800</span></label>
 <h2>Shading Override</h2>
 <label><input type="checkbox" id="dbg_shadOverride"> Override ShadInstr</label>
 <label>ShadInstr: <select id="dbg_shadInstr">
@@ -126,8 +128,17 @@ canvas{display:block;background:#000}
 <option value="0">Force OFF</option>
 <option value="1">Force ON</option>
 </select></label>
-<h2>Live Render Stats</h2>
-<pre id="dbg_stats" style="font-size:9px;color:#0f0;background:#000;padding:4px;white-space:pre;overflow-y:auto;max-height:300px;border:1px solid #333">—</pre>
+<h2>Tile Clip</h2>
+<label><input type="checkbox" id="dbg_tileClipOff"> Disable ALL tile clips</label>
+<label><input type="checkbox" id="dbg_tileClipLog"> Log tile clips (console)</label>
+<h2>Render Passes</h2>
+<label>Force single pass: <input type="checkbox" id="dbg_singlePass"></label>
+<h2>Frame Inspector</h2>
+<label><input type="checkbox" id="dbg_freeze"> FREEZE frame</label>
+<button id="dbg_dumpFrame" style="background:#333;color:#0f0;border:1px solid #0f0;padding:4px 8px;cursor:pointer;font-family:inherit;margin:4px 0">Dump frame to console</button>
+<h2>Offset Color</h2>
+<label><input type="checkbox" id="dbg_noOffset"> Disable offset color</label>
+<h2>Render Stats (see left panel)</h2>
 </div>
 
 <script type="module">
@@ -186,7 +197,7 @@ trSkip.oninput=e=>{DBG.trSkip=+e.target.value;document.getElementById('dbg_trSki
 trMax.oninput=e=>{DBG.trMax=+e.target.value;document.getElementById('dbg_trMaxVal').textContent=e.target.value;};
 opSkip.oninput=e=>{DBG.opSkip=+e.target.value;document.getElementById('dbg_opSkipVal').textContent=e.target.value;};
 opMax.oninput=e=>{DBG.opMax=+e.target.value;document.getElementById('dbg_opMaxVal').textContent=e.target.value;};
-DBG.trSkip=0;DBG.trMax=200;DBG.opSkip=0;DBG.opMax=600;
+DBG.trSkip=0;DBG.trMax=500;DBG.opSkip=0;DBG.opMax=800;
 document.getElementById('dbg_discardTransOnly').onchange=e=>DBG.discardTransOnly=e.target.checked;
 document.getElementById('dbg_noDiscard').onchange=e=>DBG.noDiscard=e.target.checked;
 DBG.discardTransOnly=false;DBG.noDiscard=false;
@@ -194,6 +205,12 @@ document.getElementById('dbg_shadOverride').onchange=e=>DBG.shadOverride=e.targe
 document.getElementById('dbg_shadInstr').onchange=e=>DBG.shadInstr=parseInt(e.target.value);
 document.getElementById('dbg_useAlpha').onchange=e=>DBG.useAlphaOverride=parseInt(e.target.value);
 DBG.shadOverride=false;DBG.shadInstr=-1;DBG.useAlphaOverride=-1;
+DBG.tileClipOff=false;DBG.tileClipLog=false;DBG.singlePass=false;DBG.freeze=false;DBG.noOffset=false;
+document.getElementById('dbg_tileClipOff').onchange=e=>DBG.tileClipOff=e.target.checked;
+document.getElementById('dbg_tileClipLog').onchange=e=>DBG.tileClipLog=e.target.checked;
+document.getElementById('dbg_singlePass').onchange=e=>DBG.singlePass=e.target.checked;
+document.getElementById('dbg_freeze').onchange=e=>DBG.freeze=e.target.checked;
+document.getElementById('dbg_noOffset').onchange=e=>DBG.noOffset=e.target.checked;
 
 async function main(){
     if(!navigator.gpu){ss('WebGPU not supported. Use Chrome 113+.','err');return;}
@@ -202,6 +219,28 @@ async function main(){
         R.dev.addEventListener('uncapturederror',(e)=>{console.error('[webgpu]',e.error.message);});
     }catch(e){ss('Init failed: '+e.message,'err');return;}
     const D=new FrameDecoder(),P=new TAParser(),T=new TextureManager(R.dev);
+    let lastParsed=null;
+    document.getElementById('dbg_dumpFrame').onclick=()=>{
+        if(!lastParsed){console.log('[dump] no frame yet');return;}
+        const g=lastParsed;
+        const vd=g.vertexData,vf=new Float32Array(vd.buffer,vd.byteOffset,g.vertexCount*7);
+        console.log(`[dump] frame: ${g.vertexCount} verts, ${g.opaque.length} op, ${g.punchThrough.length} pt, ${g.translucent.length} tr, ${(g.renderPasses||[]).length} passes`);
+        const dumpList=(list,name)=>{
+            for(let i=0;i<list.length;i++){
+                const p=list[i];if(p.count<3)continue;
+                const bi=p.first*7;
+                const x=vf[bi],y=vf[bi+1],z=vf[bi+2];
+                const tc=p.tileclip,tcMode=tc>>>28;
+                const dm=(p.isp>>29)&7,cm=(p.isp>>27)&3,zw=(p.isp>>26)&1;
+                const sb=(p.tsp>>29)&7,db=(p.tsp>>26)&7,si=(p.tsp>>6)&3;
+                const tex=(p.pcw>>3)&1,fmt=tex?((p.tcw>>27)&7):-1;
+                const vq=tex?((p.tcw>>30)&1):0,mip=tex?((p.tcw>>31)&1):0;
+                const ua=(p.tsp>>20)&1;
+                console.log(`[${name}][${i}] pos=(${x.toFixed(0)},${y.toFixed(0)}) z=${z.toFixed(6)} cnt=${p.count} blend=${sb}/${db} shad=${si} tex=${tex} fmt=${fmt} vq=${vq} mip=${mip} dm=${dm} cm=${cm} zw=${zw} ua=${ua} tc=${tcMode}/${tc&0x0FFFFFFF}`);
+            }
+        };
+        dumpList(g.opaque,'op');dumpList(g.punchThrough,'pt');dumpList(g.translucent,'tr');
+    };
 
     function connect(){
         ss('Connecting...');
@@ -216,6 +255,7 @@ async function main(){
             try{
                 const wsArrival=performance.now();
                 const t0=wsArrival;
+                if(DBG.freeze)return; // Skip frame processing when frozen
                 const fr=D.applyFrame(d);
                 dMs=performance.now()-t0;
                 if(!fr)return;
@@ -256,7 +296,7 @@ async function main(){
                     }
                 }
                 // Live render stats
-                if(fc%30===0){
+                if(fc%120===0){
                     const blendModes={},shadInstrs={},texFmts={},listCounts={op:0,pt:0,tr:0};
                     const depthModes={},cullModes={},uaFlags={},itaFlags={};
                     let noTexCount=0,texCount=0,totalVerts=g.vertexCount;
@@ -301,9 +341,22 @@ async function main(){
                     s+=`\nCULL: `;for(const[k,v]of Object.entries(cullModes))s+=`${k}:${v} `;
                     s+=`\nUseAlpha: `;for(const[k,v]of Object.entries(uaFlags))s+=`${k}:${v} `;
                     s+=`\nIgnoreTexA: `;for(const[k,v]of Object.entries(itaFlags))s+=`${k}:${v} `;
-                    document.getElementById('dbg_stats').textContent=s;
+                    // Tile clip stats
+                    let tcActive=0,tcTotal=0;
+                    for(const list of [g.opaque,g.punchThrough,g.translucent])
+                        for(const p of list){tcTotal++;if((p.tileclip>>>28)>=2)tcActive++;}
+                    s+=`\nTileClip: ${tcActive}/${tcTotal} active`;
+                    if(g.renderPasses)s+=`\nPasses: ${g.renderPasses.length}`;
+                    document.getElementById('dbg_stats_left').textContent=s;
                 }
+                lastParsed=g;
                 parsed_passes=g.renderPasses?g.renderPasses.length:1;
+                // Tile clip logging
+                if(DBG.tileClipLog&&fc<3){
+                    for(const list of [g.opaque,g.punchThrough,g.translucent])
+                        for(let i=0;i<list.length;i++){const p=list[i];if((p.tileclip>>>28)>=2)
+                            console.log(`[tileclip] poly ${i} mode=${p.tileclip>>>28} rect=${p.tileclip&0x0FFFFFFF}`);}
+                }
                 const t2=performance.now();
                 // Pass debug state to renderer
                 R.renderFrame(g,T,fr.pvrSnapshot,D.vram,DBG);
@@ -328,29 +381,33 @@ async function main(){
 
     (function tick(){
         const now=performance.now(),el=now-lt;
-        if(el>=2000){fps=(fc/el*1000).toFixed(1);fc=0;lt=now;} // Update every 2s so you can read it
-        const kb=(wB*8/1000).toFixed(0);wB=0;
-        const budget=(maTotal/16.67*100).toFixed(0);
-        const ts=T.stats;
-        ov.textContent=
-`══ WebGPU (Pure JS, 0 WASM) ═════
+        if(el>=2000){
+            fps=(fc/el*1000).toFixed(1);fc=0;lt=now;
+            // Update diagnostics every 2s so numbers are readable
+            const kb=(wB*8/1000).toFixed(0);wB=0;
+            const budget=(maTotal/16.67*100).toFixed(0);
+            const ts=T.stats;
+            ov.textContent=
+`== WebGPU (Pure JS, 0 WASM) =====
 FPS: ${fps}  |  ${budget}% budget used
-─── Moving Averages ─────────────
+--- Moving Averages -------------
 Decode:  ${maDecode.toFixed(2)}ms  (zstd+delta)
-Parse:   ${maParse.toFixed(2)}ms  (TA→verts)
+Parse:   ${maParse.toFixed(2)}ms  (TA->verts)
 Render:  ${maRender.toFixed(2)}ms  (GPU draw)
 Total:   ${maTotal.toFixed(2)}ms
-─── E2E Latency ─────────────────
+--- E2E Latency -----------------
 Avg:     ${maE2E.toFixed(2)}ms
 Min:     ${e2eMin.toFixed(2)}ms
 Max:     ${e2eMax.toFixed(2)}ms
-─── Stats ───────────────────────
+--- Stats -----------------------
 Frames:  ${totalFrames} | Stream: ${kb}kbps
 Tex$:    H=${ts.hits} M=${ts.misses} R=${ts.reused}
+VQ: ${ts.vq}  Mip: ${ts.mip}  Unsup: ${ts.unsupported}
 Passes:  ${parsed_passes} | Frame ${D.frameNum}
-═════════════════════════════════`;
-        if(e2eCount>300){e2eSum=0;e2eCount=0;e2eMax=0;e2eMin=999;}
-        ts.hits=0;ts.misses=0;ts.reused=0;
+=================================`;
+            if(e2eCount>300){e2eSum=0;e2eCount=0;e2eMax=0;e2eMin=999;}
+            ts.hits=0;ts.misses=0;ts.reused=0;ts.vq=0;ts.mip=0;ts.unsupported=0;
+        }
         requestAnimationFrame(tick);
     })();
     connect();

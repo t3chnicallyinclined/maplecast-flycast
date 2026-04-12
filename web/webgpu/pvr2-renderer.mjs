@@ -119,6 +119,7 @@ export class PVR2Renderer {
             this.idxBuf = this.dev.createBuffer({size:this.idxBufSz, usage:GPUBufferUsage.INDEX|GPUBufferUsage.COPY_DST});
         }
         this.dev.queue.writeBuffer(this.idxBuf, 0, indices.buffer, 0, byteLen);
+        this._idxArr = indices;
     }
 
     renderFrame(parsed, texMgr, pvrSnap, vram, dbg) {
@@ -131,24 +132,29 @@ export class PVR2Renderer {
         const headScale = (dbg.headSize || 250) / 100.0;
         if (charScale !== 1.0 || bigHead) {
             const vf = new Float32Array(vertexData.buffer, vertexData.byteOffset, vertexCount * 7);
+            // First pass: find shared center of all character polys (Y > 120)
+            let charCX=0, charCY=0, charVN=0;
             for (const pp of translucent) {
                 if (pp.count < 3) continue;
-                // Find this poly's center Y
-                let sumY = 0;
-                for (let v = pp.first; v < pp.first + pp.count; v++) sumY += vf[v * 7 + 1];
+                let sumY=0;
+                for (let v=pp.first;v<pp.first+pp.count;v++) sumY+=vf[v*7+1];
+                if (sumY/pp.count <= 120) continue; // Skip HUD/timer
+                for (let v=pp.first;v<pp.first+pp.count;v++) { charCX+=vf[v*7]; charCY+=vf[v*7+1]; charVN++; }
+            }
+            if (charVN > 0) { charCX /= charVN; charCY /= charVN; }
+            // Second pass: scale around shared character center
+            for (const pp of translucent) {
+                if (pp.count < 3) continue;
+                let sumY=0;
+                for (let v=pp.first;v<pp.first+pp.count;v++) sumY+=vf[v*7+1];
                 const avgY = sumY / pp.count;
-                // Head scaling only for character sprites (Y > 120), not HUD/timer
-                const isChar = avgY > 120;
-                const headFactor = (bigHead && isChar) ? Math.max(0, 1 - (avgY - 180) / 60) : 0;
+                if (avgY <= 120) continue; // Skip HUD/timer
+                const headFactor = bigHead ? Math.max(0, 1 - (avgY - 180) / 60) : 0;
                 const scale = charScale * (1 + headFactor * (headScale - 1));
-                // Scale around this poly's own center
-                let cx = 0, cy = 0;
-                for (let v = pp.first; v < pp.first + pp.count; v++) { cx += vf[v*7]; cy += vf[v*7+1]; }
-                cx /= pp.count; cy /= pp.count;
                 for (let v = pp.first; v < pp.first + pp.count; v++) {
                     const fi = v * 7;
-                    vf[fi] = cx + (vf[fi] - cx) * scale;
-                    vf[fi + 1] = cy + (vf[fi + 1] - cy) * scale;
+                    vf[fi] = charCX + (vf[fi] - charCX) * scale;
+                    vf[fi + 1] = charCY + (vf[fi + 1] - charCY) * scale;
                 }
             }
         }
@@ -183,7 +189,7 @@ export class PVR2Renderer {
             this.stagingDV.setUint32(o+8,(pcw>>3)&1,true);
             this.stagingDV.setUint32(o+12,useAlpha,true);
             this.stagingDV.setUint32(o+16,(tsp>>19)&1,true);
-            this.stagingDV.setUint32(o+20,(pcw>>2)&1,true);
+            this.stagingDV.setUint32(o+20,dbg.noOffset?0:(pcw>>2)&1,true);
             this.stagingDV.setUint32(o+24,lt==='punch_through'?1:0,true);
             // Pack: bits 0-7=debug, bit8=gouraud, bit9=trans, bit10-11=discard, bits12+=effects
             const modes={normal:0,solid:1,uv:2,depth:3,alpha:4};
@@ -208,16 +214,33 @@ export class PVR2Renderer {
         const enc=this.dev.createCommandEncoder();
         const texView=this.ctx.getCurrentTexture().createView();
         const depthView=this.depth.createView();
-        const passes = parsed.renderPasses || [{op_count:opaque.length,pt_count:punchThrough.length,tr_count:translucent.length}];
+        let passes = parsed.renderPasses || [{op_count:opaque.length,pt_count:punchThrough.length,tr_count:translucent.length}];
+        if(dbg.singlePass) passes=[{op_count:opaque.length,pt_count:punchThrough.length,tr_count:translucent.length}];
 
+        const cW=this.depth.width, cH=this.depth.height;
+        const applyTileClip=(rp,tc)=>{
+            const mode=tc>>>28;
+            if(mode>=2){
+                const xmin=(tc&63)*32, xmax=((tc>>6)&63)*32+32;
+                const ymin=((tc>>12)&31)*32, ymax=((tc>>17)&31)*32+32;
+                // mode 2=Outside (render inside), mode 3=Inside (render outside — needs shader, use inside approx)
+                const sx=Math.max(0,xmin), sy=Math.max(0,ymin);
+                const sw=Math.min(cW,xmax)-sx, sh=Math.min(cH,ymax)-sy;
+                if(sw>0&&sh>0) rp.setScissorRect(sx,sy,sw,sh);
+                else rp.setScissorRect(0,0,cW,cH);
+            } else {
+                rp.setScissorRect(0,0,cW,cH);
+            }
+        };
         const drawSlice=(rp,list,lt,start,count)=>{
+            let lastClip=-1;
             for(let i=start;i<start+count;i++){
                 const pp=list[i]; if(!pp||pp.count<3||pp._s<0)continue;
                 const isp=pp.isp,tsp=pp.tsp,tcw=pp.tcw,pcw=pp.pcw;
                 let dm=(isp>>29)&7,cm=(isp>>27)&3,zw=(isp>>26)&1?0:1;
                 if(lt==='opaque'&&dm===0)continue;
                 if(lt==='punch_through'||lt==='translucent')dm=6;
-                if(lt==='translucent')zw=0; if(lt==='punch_through')zw=1; // Translucent: NO depth write in color pass (multipass writes depth separately)
+                if(lt==='translucent')zw=0; if(lt==='punch_through')zw=1;
                 if(lt==='translucent'&&dbg.trDepthFunc!==undefined)dm=dbg.trDepthFunc;
                 if(lt==='translucent'&&dbg.trDepthWrite)zw=1;
                 let sb=(tsp>>29)&7, db=(tsp>>26)&7;
@@ -226,6 +249,8 @@ export class PVR2Renderer {
                 if(dbg.cullOverride==='none')cullIdx=0;
                 else if(dbg.cullOverride==='front')cullIdx=2;
                 else if(dbg.cullOverride==='back')cullIdx=3;
+                // Apply tile clip (scissor rect)
+                if(!dbg.tileClipOff&&pp.tileclip!==lastClip){applyTileClip(rp,pp.tileclip);lastClip=pp.tileclip;}
                 const pipe=this._pipe(sb,db,dm,zw,cullIdx,'triangle-list');
                 let tbg=fbBG;
                 if((pcw>>3)&1){const t=texMgr.getTexture(tsp,tcw,vram);if(t)tbg=this._texBG(t.texture,t.sampler);}
@@ -243,13 +268,15 @@ export class PVR2Renderer {
             // Each render pass gets its own depth clear (color preserved from previous pass)
             const rp=enc.beginRenderPass({
                 colorAttachments:[{view:texView,clearValue:{r:0,g:0,b:0,a:1},loadOp:isFirst?'clear':'load',storeOp:'store'}],
-                depthStencilAttachment:{view:depthView,depthClearValue:0.0,depthLoadOp:'clear',depthStoreOp:'store'},
+                depthStencilAttachment:{view:depthView,depthClearValue:0.0,depthLoadOp:isFirst?'clear':'load',depthStoreOp:'store'},
             });
             rp.setVertexBuffer(0,this.vBuf);
             if(this.idxBuf) rp.setIndexBuffer(this.idxBuf,'uint32');
 
+            rp.setScissorRect(0,0,cW,cH); // Reset scissor for each pass
             if(dbg.drawOpaque!==false) drawSlice(rp,opaque,'opaque',prevPass.op_count,pass.op_count-prevPass.op_count);
             if(dbg.drawPunch!==false) drawSlice(rp,punchThrough,'punch_through',prevPass.pt_count,pass.pt_count-prevPass.pt_count);
+            rp.setScissorRect(0,0,cW,cH); // Reset before translucent sort path
             // Translucent: per-TRIANGLE Z-sort (matches flycast sortTriangles)
             // Extract individual triangles, sort by min Z, draw sorted
             if(dbg.drawTrans!==false){
@@ -264,6 +291,7 @@ export class PVR2Renderer {
                         const pp=translucent[i]; if(!pp||pp.count<3||pp._s<0)continue;
                         for(let t2=0;t2<pp._idxCount;t2+=3){
                             const ii=pp._idxFirst+t2;
+                            if(ii+2>=idxArr.length)continue;
                             const v0=idxArr[ii],v1=idxArr[ii+1],v2=idxArr[ii+2];
                             const z0=vf32[v0*7+2],z1=vf32[v1*7+2],z2=vf32[v2*7+2];
                             const minZ=Math.min(z0,z1,z2);
