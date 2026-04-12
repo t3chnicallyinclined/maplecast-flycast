@@ -238,9 +238,10 @@ export class PVR2Renderer {
                 const pp=list[i]; if(!pp||pp.count<3||pp._s<0)continue;
                 const isp=pp.isp,tsp=pp.tsp,tcw=pp.tcw,pcw=pp.pcw;
                 let dm=(isp>>29)&7,cm=(isp>>27)&3,zw=(isp>>26)&1?0:1;
+                if(lt==='opaque'&&dbg.opDepthFunc>=0)dm=dbg.opDepthFunc;
                 if(lt==='opaque'&&dm===0)continue;
                 if(lt==='punch_through'||lt==='translucent')dm=6;
-                if(lt==='translucent')zw=0; if(lt==='punch_through')zw=1;
+                if(lt==='translucent')zw=1; if(lt==='punch_through')zw=1;
                 if(lt==='translucent'&&dbg.trDepthFunc!==undefined)dm=dbg.trDepthFunc;
                 if(lt==='translucent'&&dbg.trDepthWrite)zw=1;
                 let sb=(tsp>>29)&7, db=(tsp>>26)&7;
@@ -273,14 +274,24 @@ export class PVR2Renderer {
             rp.setVertexBuffer(0,this.vBuf);
             if(this.idxBuf) rp.setIndexBuffer(this.idxBuf,'uint32');
 
-            rp.setScissorRect(0,0,cW,cH); // Reset scissor for each pass
-            if(dbg.drawOpaque!==false) drawSlice(rp,opaque,'opaque',prevPass.op_count,pass.op_count-prevPass.op_count);
+            rp.setScissorRect(0,0,cW,cH);
+            if(dbg.drawOpaque!==false){
+                let opStart=prevPass.op_count+(dbg.opSkip||0), opEnd=Math.min(pass.op_count,prevPass.op_count+(dbg.opMax||9999));
+                drawSlice(rp,opaque,'opaque',opStart,opEnd-opStart);
+            }
             if(dbg.drawPunch!==false) drawSlice(rp,punchThrough,'punch_through',prevPass.pt_count,pass.pt_count-prevPass.pt_count);
-            rp.setScissorRect(0,0,cW,cH); // Reset before translucent sort path
-            // Translucent: per-TRIANGLE Z-sort (matches flycast sortTriangles)
-            // Extract individual triangles, sort by min Z, draw sorted
-            if(dbg.drawTrans!==false){
-                const trStart=prevPass.tr_count, trCount=pass.tr_count-prevPass.tr_count;
+            rp.setScissorRect(0,0,cW,cH);
+            // Translucent rendering
+            if(dbg.drawTrans!==false && dbg.noSort){
+                // No-sort path: draw translucent in submission order (like opaque)
+                let trS=prevPass.tr_count+(dbg.trSkip||0), trE=Math.min(pass.tr_count,prevPass.tr_count+(dbg.trMax||9999));
+                drawSlice(rp,translucent,'translucent',trS,trE-trS);
+            }
+            // Per-TRIANGLE Z-sort path (matches flycast sortTriangles)
+            if(dbg.drawTrans!==false && !dbg.noSort){
+                let trStart=prevPass.tr_count+(dbg.trSkip||0);
+                let trEnd=Math.min(pass.tr_count,prevPass.tr_count+(dbg.trMax||9999));
+                const trCount=trEnd-trStart;
                 if(trCount>0){
                     const vf32=new Float32Array(vertexData.buffer,vertexData.byteOffset,vertexCount*7);
                     const idxArr=this._idxArr;
@@ -304,7 +315,10 @@ export class PVR2Renderer {
                     if(!this._triOrder||this._triOrder.length<triCount)this._triOrder=new Uint32Array(Math.max(triCount,256));
                     const order=this._triOrder;
                     for(let i=0;i<triCount;i++)order[i]=i;
-                    order.sort((a,b)=>tris[a*3+2]-tris[b*3+2]||(tris[a*3]-tris[b*3]));
+                    if(!dbg.noSort){
+                        const eps=dbg.zEpsilon||0.00005;
+                        order.sort((a,b)=>{const dz=tris[a*3+2]-tris[b*3+2];return Math.abs(dz)<eps?tris[a*3]-tris[b*3]:dz;});
+                    }
                     // Draw sorted triangles
                     let lastPipe2=null,lastTBG2=null,lastSlot2=-1;
                     for(let si=0;si<triCount;si++){
@@ -330,7 +344,7 @@ export class PVR2Renderer {
             // Translucent depth-only pass: writes depth for next render pass
             // Only for multi-pass frames and polys with ZWriteDis=0
             if(dbg.drawTrans!==false && pi<passes.length-1){
-                const trStart=prevPass.tr_count, trCount=pass.tr_count-prevPass.tr_count;
+                const trStart=prevPass.tr_count+(dbg.trSkip||0), trCount=Math.min(pass.tr_count,prevPass.tr_count+(dbg.trMax||9999))-trStart;
                 for(let i=trStart;i<trStart+trCount;i++){
                     const pp=translucent[i]; if(!pp||pp.count<3||pp._s<0)continue;
                     if((pp.isp>>26)&1) continue; // ZWriteDis=1, skip

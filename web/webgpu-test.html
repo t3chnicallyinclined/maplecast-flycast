@@ -52,15 +52,27 @@ canvas{display:block;background:#000}
 <label><input type="radio" name="shmode" value="uv"> UV Debug</label>
 <label><input type="radio" name="shmode" value="depth"> Depth Debug</label>
 <label><input type="radio" name="shmode" value="alpha"> Alpha Debug</label>
+<h2>Translucent Sort</h2>
+<label><input type="checkbox" id="dbg_noSort" checked> Disable Z-sort (submission order)</label>
+<label>Z epsilon: <input type="range" id="dbg_zEpsilon" min="0" max="100" value="5"> <span class="val" id="dbg_zEpsilonVal">0.00005</span></label>
 <h2>Translucent Depth</h2>
 <label>DepthFunc: <select id="dbg_trDepth">
 <option value="6" selected>greater-equal (flycast)</option>
 <option value="7">always</option>
+<option value="4">greater</option>
 <option value="1">less</option>
 <option value="3">less-equal</option>
 <option value="0">never</option>
 </select></label>
-<label><input type="checkbox" id="dbg_trDepthWrite"> Depth Write (trans)</label>
+<label><input type="checkbox" id="dbg_trDepthWrite" checked> Depth Write (trans)</label>
+<h2>Opaque Depth</h2>
+<label>Force DepthFunc: <select id="dbg_opDepth">
+<option value="-1" selected>Per-poly (auto)</option>
+<option value="4">greater</option>
+<option value="6">greater-equal</option>
+<option value="7">always</option>
+<option value="1">less</option>
+</select></label>
 <h2>Alpha</h2>
 <label>Discard threshold: <input type="range" id="dbg_alphaDiscard" min="0" max="255" value="1"> <span class="val" id="dbg_alphaDiscardVal">1</span></label>
 <label><input type="checkbox" id="dbg_discardTransOnly"> Discard trans only</label>
@@ -172,8 +184,12 @@ document.getElementById('dbg_opaque').onchange = e => DBG.drawOpaque = e.target.
 document.getElementById('dbg_punch').onchange = e => DBG.drawPunch = e.target.checked;
 document.getElementById('dbg_trans').onchange = e => DBG.drawTrans = e.target.checked;
 document.querySelectorAll('input[name=shmode]').forEach(r => r.onchange = e => DBG.shaderMode = e.target.value);
+document.getElementById('dbg_noSort').onchange=e=>DBG.noSort=e.target.checked;
+document.getElementById('dbg_zEpsilon').oninput=e=>{const v=e.target.value/100000;DBG.zEpsilon=v;document.getElementById('dbg_zEpsilonVal').textContent=v.toFixed(5);};
 document.getElementById('dbg_trDepth').onchange = e => DBG.trDepthFunc = parseInt(e.target.value);
 document.getElementById('dbg_trDepthWrite').onchange = e => DBG.trDepthWrite = e.target.checked;
+document.getElementById('dbg_opDepth').onchange=e=>DBG.opDepthFunc=parseInt(e.target.value);
+DBG.noSort=true;DBG.zEpsilon=0.00005;DBG.opDepthFunc=-1;DBG.trDepthWrite=true;
 const alphaSlider = document.getElementById('dbg_alphaDiscard');
 alphaSlider.oninput = e => { DBG.alphaDiscard = parseInt(e.target.value); document.getElementById('dbg_alphaDiscardVal').textContent = e.target.value; };
 document.getElementById('dbg_blendOverride').onchange = e => DBG.blendOverride = e.target.checked;
