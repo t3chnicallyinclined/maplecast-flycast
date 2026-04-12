@@ -171,8 +171,18 @@ async function main(){
                 // Fill background polygon from PVR registers + VRAM
                 try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e) { if(fc<2) console.error('[BGP]',e); }
                 pMs=performance.now()-t1;
-                // Dump HUD polys (450-470) on first frame
+                // Dump Z values for grid vs HUD comparison
                 if(fc<2){
+                    // Grid polys (early)
+                    for(const i of [1,5,10]){
+                        if(i>=g.opaque.length)continue;
+                        const p=g.opaque[i];if(p.count<3)continue;
+                        const bi=p.first*28;const vd=g.vertexData;
+                        const z=new Float32Array(vd.buffer,vd.byteOffset+bi+8,1)[0];
+                        const logD=Math.log2(1+Math.max(100000*z,-0.999999))/34;
+                        console.log(`[GRID] op[${i}] z=${z.toFixed(6)} logD=${logD.toFixed(4)}`);
+                    }
+                    // HUD polys
                     for(let i=445;i<Math.min(465,g.opaque.length);i++){
                         const p=g.opaque[i];if(p.count<3)continue;
                         const bi=p.first*28;
@@ -182,7 +192,9 @@ async function main(){
                         const obj=p.pcw&0xFF,tex=(obj>>3)&1,fmt=tex?((p.tcw>>27)&7):-1;
                         const sb=(p.tsp>>29)&7,db=(p.tsp>>26)&7,si=(p.tsp>>6)&3;
                         const ua=(p.tsp>>20)&1,ita=(p.tsp>>19)&1;
-                        console.log(`[HUD] op[${i}] pos=(${x.toFixed(0)},${y.toFixed(0)}) cnt=${p.count} R=${vd[bi+12]} G=${vd[bi+13]} B=${vd[bi+14]} A=${vd[bi+15]} | blend=${sb}/${db} shad=${si} tex=${tex} fmt=${fmt} ua=${ua} ita=${ita} obj=0x${obj.toString(16)}`);
+                        const z=new Float32Array(vd.buffer,vd.byteOffset+bi+8,1)[0];
+                        const logD=Math.log2(1+Math.max(100000*z,-0.999999))/34;
+                        console.log(`[HUD] op[${i}] pos=(${x.toFixed(0)},${y.toFixed(0)}) z=${z.toFixed(6)} logD=${logD.toFixed(4)} cnt=${p.count} R=${vd[bi+12]} G=${vd[bi+13]} B=${vd[bi+14]} A=${vd[bi+15]} | shad=${si} tex=${tex} obj=0x${obj.toString(16)}`);
                     }
                 }
                 // Live render stats

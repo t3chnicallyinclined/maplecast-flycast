@@ -84,15 +84,34 @@ export class TAParser {
                 cTSP = view.getUint32(off + 8, true);
                 cTCW = view.getUint32(off + 12, true);
                 const colType = (cObj >> 4) & 3, vol = (cObj >> 6) & 1;
-                // 64B poly params (intensity type 2, or type 4 with volumes)
-                if ((colType === 2 && !vol) || (colType >= 1 && vol)) {
+                // 64B poly params (intensity type 2 with offset, or type 4 with volumes)
+                if (colType === 2 && !vol && (cObj>>2)&1) {
+                    // PolyParam2: 64B — face base + offset colors in second 32B
+                    if (off + 64 <= taSize) {
+                        fbc[3] = clamp255(view.getFloat32(off+32, true));
+                        fbc[0] = clamp255(view.getFloat32(off+36, true));
+                        fbc[1] = clamp255(view.getFloat32(off+40, true));
+                        fbc[2] = clamp255(view.getFloat32(off+44, true));
+                        foc[3] = clamp255(view.getFloat32(off+48, true));
+                        foc[0] = clamp255(view.getFloat32(off+52, true));
+                        foc[1] = clamp255(view.getFloat32(off+56, true));
+                        foc[2] = clamp255(view.getFloat32(off+60, true));
+                        off += 64;
+                    } else { off += 32; }
+                } else if ((colType >= 1 && vol)) {
                     off += (off + 64 <= taSize) ? 64 : 32;
                 } else {
-                    if (colType === 1 && !vol) { // intensity type 1 — face color in param
+                    if (colType === 1 && !vol) { // intensity type 1 — face base color only
+                        fbc[3] = clamp255(view.getFloat32(off+16, true));
                         fbc[0] = clamp255(view.getFloat32(off+20, true));
                         fbc[1] = clamp255(view.getFloat32(off+24, true));
                         fbc[2] = clamp255(view.getFloat32(off+28, true));
+                    } else if (colType === 2 && !vol) {
+                        // intensity type 1 without offset — face base color only
                         fbc[3] = clamp255(view.getFloat32(off+16, true));
+                        fbc[0] = clamp255(view.getFloat32(off+20, true));
+                        fbc[1] = clamp255(view.getFloat32(off+24, true));
+                        fbc[2] = clamp255(view.getFloat32(off+28, true));
                     }
                     off += 32;
                 }
@@ -185,8 +204,10 @@ export class TAParser {
                         if (!uv16) { u=view.getFloat32(off+16,true); v=view.getFloat32(off+20,true); }
                         else { v=f16(view.getUint16(off+16,true)); u=f16(view.getUint16(off+18,true)); }
                         const bi=view.getFloat32(off+24,true);
+                        const oi=view.getFloat32(off+28,true);
                         const bc=(fbc[3]<<24)|(((fbc[0]*bi)&0xFF)<<16)|(((fbc[1]*bi)&0xFF)<<8)|((fbc[2]*bi)&0xFF);
-                        this._vtx(x,y,z,bc,0,u,v); off += 32;
+                        const oc=(foc[3]<<24)|(((foc[0]*oi)&0xFF)<<16)|(((foc[1]*oi)&0xFF)<<8)|((foc[2]*oi)&0xFF);
+                        this._vtx(x,y,z,bc,oc,u,v); off += 32;
                     }
                 } else { off += 32; } // two-volume — skip
 
