@@ -161,11 +161,13 @@ import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs';
 
 const canvas=document.getElementById('c'), ov=document.getElementById('ov'), st=document.getElementById('st');
 let fc=0,lt=performance.now(),fps=0,dMs=0,pMs=0,rMs=0,wB=0;
-// E2E latency tracking
+// Process latency tracking (WS arrival → render complete)
 let e2eSum=0,e2eCount=0,e2eMax=0,e2eMin=999,dropped=0,totalFrames=0,parsed_passes=1;
 // Moving averages (exponential, alpha=0.05 for smooth display)
 const A=0.05;
 let maDecode=0,maParse=0,maRender=0,maTotal=0,maE2E=0;
+// Network RTT measurement via control WS ping
+let netRTT=-1, lastFrameArrival=0, maJitter=0, maInterArrival=0;
 const ss=(m,c='')=>{st.textContent=m;st.className=c};
 
 // Debug state — read by renderer
@@ -270,6 +272,13 @@ async function main(){
             const d=new Uint8Array(e.data); wB+=d.byteLength;
             try{
                 const wsArrival=performance.now();
+                // Frame arrival jitter tracking
+                if(lastFrameArrival>0){
+                    const gap=wsArrival-lastFrameArrival;
+                    maInterArrival+=(gap-maInterArrival)*A;
+                    maJitter+=(Math.abs(gap-16.667)-maJitter)*A;
+                }
+                lastFrameArrival=wsArrival;
                 const t0=wsArrival;
                 if(DBG.freeze)return; // Skip frame processing when frozen
                 const fr=D.applyFrame(d);
@@ -405,15 +414,18 @@ async function main(){
             ov.textContent=
 `== WebGPU (Pure JS, 0 WASM) =====
 FPS: ${fps}  |  ${budget}% budget used
---- Moving Averages -------------
+--- Pipeline (WS->render) -------
 Decode:  ${maDecode.toFixed(2)}ms  (zstd+delta)
 Parse:   ${maParse.toFixed(2)}ms  (TA->verts)
 Render:  ${maRender.toFixed(2)}ms  (GPU draw)
-Total:   ${maTotal.toFixed(2)}ms
---- E2E Latency -----------------
-Avg:     ${maE2E.toFixed(2)}ms
-Min:     ${e2eMin.toFixed(2)}ms
-Max:     ${e2eMax.toFixed(2)}ms
+Process: ${maTotal.toFixed(2)}ms  (total local)
+--- Network ---------------------
+RTT:     ${netRTT>0?netRTT.toFixed(1)+'ms':'--'}  (WS round-trip)
+Jitter:  ${maJitter.toFixed(2)}ms  (frame arrival)
+Arrival: ${maInterArrival.toFixed(2)}ms  (inter-frame)
+--- True E2E estimate -----------
+Input->Pixel: ~${netRTT>0?(netRTT/2+maTotal).toFixed(1):'??'}ms
+  = RTT/2 + Process
 --- Stats -----------------------
 Frames:  ${totalFrames} | Stream: ${kb}kbps
 Tex$:    H=${ts.hits} M=${ts.misses} R=${ts.reused}
@@ -423,6 +435,11 @@ Passes:  ${parsed_passes} | Frame ${D.frameNum}
 =================================`;
             if(e2eCount>300){e2eSum=0;e2eCount=0;e2eMax=0;e2eMin=999;}
             ts.hits=0;ts.misses=0;ts.reused=0;ts.vq=0;ts.mip=0;ts.unsupported=0;ts.dirtyDecodes=0;
+        }
+        // Periodic RTT ping via control WS (every 5s)
+        if(controlWs&&controlWs.readyState===WebSocket.OPEN&&!window._rttPingSent&&totalFrames%300===0){
+            window._rttPingSent=performance.now();
+            controlWs.send(JSON.stringify({type:'status'}));
         }
         requestAnimationFrame(tick);
     })();
@@ -459,6 +476,8 @@ function joinSlot(slot){
             if(m.type==='assigned'){mySlot=m.slot;document.getElementById('padInfo').textContent='Playing as P'+(mySlot+1);}
             if(m.type==='kicked'){mySlot=-1;document.getElementById('padInfo').textContent='Kicked: '+m.reason;
                 document.getElementById('leaveBtn').style.display='none';}
+            // RTT from server telemetry (server sends ping field in ms)
+            if(m.fps&&m.frame&&window._rttPingSent){netRTT=performance.now()-window._rttPingSent;window._rttPingSent=0;}
         }catch{}}};
 }
 function sendJoin(slot){

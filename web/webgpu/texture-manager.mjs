@@ -149,7 +149,12 @@ export class TextureManager {
     }
 
     _decode(vram, addr, fmt, w, h, palSel, scan, vq, mip, texU) {
-        const rgba=new Uint8Array(w*h*4), bx=bsr(w), by=bsr(h);
+        // Reuse decode buffer to avoid GC pressure (max texture = 1024x1024x4 = 4MB)
+        const needed=w*h*4;
+        if(!this._decodeBuf||this._decodeBuf.length<needed) this._decodeBuf=new Uint8Array(Math.max(needed,1024*1024));
+        const rgba=this._decodeBuf.subarray(0,needed);
+        rgba.fill(0); // Clear — important for textures with gaps
+        const bx=bsr(w), by=bsr(h);
         if (vq) { this.stats.vq++; return this._decodeVQ(vram, addr, fmt, w, h, bx, by, mip, texU, rgba); }
         let texAddr = addr;
         if (mip) {
@@ -177,7 +182,8 @@ export class TextureManager {
         if (!unp) { this.stats.unsupported++; return null; }
         const cbAddr = addr;
         let idxAddr = mip ? addr + VQMipPoint[texU + 3] : addr + VQ_CODEBOOK_SIZE;
-        const cb = new Uint8Array(256 * 16);
+        if(!this._vqCB) this._vqCB=new Uint8Array(256*16);
+        const cb = this._vqCB;
         for (let i = 0; i < 256; i++) {
             const co = cbAddr + i * 8;
             for (let p = 0; p < 4; p++) {
