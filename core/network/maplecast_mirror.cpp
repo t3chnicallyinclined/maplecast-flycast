@@ -1378,15 +1378,38 @@ done_diff:
 	// connected.
 	maplecast_state_sync::onServerFramePublished(hdr->frame_count);
 
-	// Compress + broadcast over WebSocket to browser clients
+	// Phase A: Async compress + broadcast — don't block the render thread.
+	// Copy the uncompressed frame data, spawn compression on a background thread.
+	// The render thread continues to the next frame immediately.
 	uint64_t compressUs = 0;
 	uint32_t compressedSize = totalSize;
 	if (maplecast_ws::active())
 	{
-		size_t compSize = 0;
-		const uint8_t* compData = _compressor.compress(dstStart, totalSize, compSize, compressUs);
-		maplecast_ws::broadcastBinary(compData, compSize);
-		compressedSize = (uint32_t)compSize;
+		// Copy frame data so render thread can reuse the ring buffer
+		auto frameCopy = std::make_shared<std::vector<uint8_t>>(dstStart, dstStart + totalSize);
+
+		// Spawn async compress+broadcast
+		static std::thread::id _lastCompressThread;
+		static std::mutex _asyncCompressMtx;
+		static MirrorCompressor _asyncCompressor;
+		static bool _asyncCompressorInit = false;
+
+		// Lazy-init the async compressor (separate from the main one)
+		if (!_asyncCompressorInit) {
+			_asyncCompressor.init(16 * 1024 * 1024);
+			_asyncCompressorInit = true;
+		}
+
+		// Use a detached thread for the compress+broadcast.
+		// The mutex ensures only one compression runs at a time (serializes if overlapping).
+		std::thread([frameCopy, totalSize]() {
+			std::lock_guard<std::mutex> lock(_asyncCompressMtx);
+			uint64_t cUs = 0;
+			size_t compSize = 0;
+			const uint8_t* compData = _asyncCompressor.compress(
+				frameCopy->data(), totalSize, compSize, cUs);
+			maplecast_ws::broadcastBinary(compData, compSize);
+		}).detach();
 	}
 
 	// Update telemetry
