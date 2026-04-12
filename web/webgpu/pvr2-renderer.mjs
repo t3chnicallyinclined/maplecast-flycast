@@ -63,11 +63,13 @@ export class PVR2Renderer {
 
     _pipe(sb,db,dm,dw,cm,topo) {
         const k=`${sb}_${db}_${dm}_${dw}_${cm}_${topo}`; let p=this.pipes.get(k); if(p)return p;
+        const isDepthOnly = topo==='triangle-list-depth';
         p = this.dev.createRenderPipeline({layout:this.pipeLayout,
             vertex:{module:this.shader,entryPoint:'vs_main',buffers:[VBL]},
             fragment:{module:this.shader,entryPoint:'fs_main',targets:[{format:this.fmt,
                 blend:{color:{srcFactor:SBM[sb]||'one',dstFactor:DBM[db]||'zero',operation:'add'},
-                       alpha:{srcFactor:SBM[sb]||'one',dstFactor:DBM[db]||'zero',operation:'add'}},writeMask:GPUColorWrite.ALL}]},
+                       alpha:{srcFactor:SBM[sb]||'one',dstFactor:DBM[db]||'zero',operation:'add'}},
+                writeMask:isDepthOnly?0:GPUColorWrite.ALL}]},
             primitive:{topology:'triangle-list',cullMode:'none',frontFace:'cw'},
             depthStencil:{format:'depth32float',depthWriteEnabled:!!dw,depthCompare:DCM[dm]||'always'},
         });
@@ -174,7 +176,7 @@ export class PVR2Renderer {
                 let dm=(isp>>29)&7,cm=(isp>>27)&3,zw=(isp>>26)&1?0:1;
                 if(lt==='opaque'&&dm===0)continue;
                 if(lt==='punch_through'||lt==='translucent')dm=6;
-                if(lt==='translucent')zw=1; if(lt==='punch_through')zw=1;
+                if(lt==='translucent')zw=0; if(lt==='punch_through')zw=1; // Translucent: NO depth write in color pass (multipass writes depth separately)
                 if(lt==='translucent'&&dbg.trDepthFunc!==undefined)dm=dbg.trDepthFunc;
                 if(lt==='translucent'&&dbg.trDepthWrite)zw=1;
                 let sb=(tsp>>29)&7, db=(tsp>>26)&7;
@@ -207,7 +209,61 @@ export class PVR2Renderer {
 
             if(dbg.drawOpaque!==false) drawSlice(rp,opaque,'opaque',prevPass.op_count,pass.op_count-prevPass.op_count);
             if(dbg.drawPunch!==false) drawSlice(rp,punchThrough,'punch_through',prevPass.pt_count,pass.pt_count-prevPass.pt_count);
-            if(dbg.drawTrans!==false) drawSlice(rp,translucent,'translucent',prevPass.tr_count,pass.tr_count-prevPass.tr_count);
+            // Translucent: Z-sort polys then draw with depth write OFF
+            // Sort ensures cape draws before body (painter's algorithm via draw order)
+            // No depth write means combo text letters at same Z all render
+            if(dbg.drawTrans!==false){
+                const trStart=prevPass.tr_count, trCount=pass.tr_count-prevPass.tr_count;
+                if(trCount>0){
+                    // Build sortable array with Z from first vertex
+                    const vf32=new Float32Array(vertexData.buffer,vertexData.byteOffset,vertexCount*7);
+                    const sorted=[];
+                    for(let i=trStart;i<trStart+trCount;i++){
+                        const pp=translucent[i]; if(!pp||pp.count<3||pp._s<0)continue;
+                        sorted.push({idx:i, z:vf32[pp.first*7+2]});
+                    }
+                    // Ascending Z = farthest first (painter's algorithm)
+                    // Stable: same-Z polys keep TA submission order (idx tiebreaker)
+                    sorted.sort((a,b)=>a.z-b.z || a.idx-b.idx);
+                    // Draw in sorted order
+                    for(const s of sorted){
+                        const pp=translucent[s.idx]; if(!pp||pp._s<0)continue;
+                        const isp=pp.isp,tsp=pp.tsp,tcw=pp.tcw,pcw=pp.pcw;
+                        let dm=6,zw=0,cm=(isp>>27)&3;
+                        if(dbg.trDepthFunc!==undefined)dm=dbg.trDepthFunc;
+                        if(dbg.trDepthWrite)zw=1;
+                        let sb=(tsp>>29)&7,db=(tsp>>26)&7;
+                        if(dbg.blendOverride){sb=dbg.blendSrc||4;db=dbg.blendDst||5;}
+                        let cullIdx=cm^1;
+                        if(dbg.cullOverride==='none')cullIdx=0;
+                        else if(dbg.cullOverride==='front')cullIdx=2;
+                        else if(dbg.cullOverride==='back')cullIdx=3;
+                        const pipe=this._pipe(sb,db,dm,zw,cullIdx,'triangle-list');
+                        let tbg=fbBG;
+                        if((pcw>>3)&1){const t=texMgr.getTexture(tsp,tcw,vram);if(t)tbg=this._texBG(t.texture,t.sampler);}
+                        rp.setPipeline(pipe);
+                        rp.setBindGroup(0,this.uBG,[pp._s*this.SLOT]);
+                        rp.setBindGroup(1,tbg);
+                        rp.drawIndexed(pp._idxCount,1,pp._idxFirst,0,0);
+                    }
+                }
+            }
+            // Translucent depth-only pass: writes depth for next render pass
+            // Only for multi-pass frames and polys with ZWriteDis=0
+            if(dbg.drawTrans!==false && pi<passes.length-1){
+                const trStart=prevPass.tr_count, trCount=pass.tr_count-prevPass.tr_count;
+                for(let i=trStart;i<trStart+trCount;i++){
+                    const pp=translucent[i]; if(!pp||pp.count<3||pp._s<0)continue;
+                    if((pp.isp>>26)&1) continue; // ZWriteDis=1, skip
+                    const cm=(pp.isp>>27)&3;
+                    // Depth-only pipeline: colorWrite=0, depthWrite=true, depthFunc=greater-equal
+                    const depthPipe=this._pipe(0,0,6,1,cm^1,'triangle-list-depth');
+                    rp.setPipeline(depthPipe);
+                    rp.setBindGroup(0,this.uBG,[pp._s*this.SLOT]);
+                    rp.setBindGroup(1,fbBG);
+                    rp.drawIndexed(pp._idxCount,1,pp._idxFirst,0,0);
+                }
+            }
 
             rp.end();
             prevPass=pass;
