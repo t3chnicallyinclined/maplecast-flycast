@@ -155,8 +155,11 @@ function pollOnce() {
   if (gp.buttons[13]?.pressed) btn &= ~0x0020;
   if (gp.buttons[14]?.pressed) btn &= ~0x0040;
   if (gp.buttons[15]?.pressed) btn &= ~0x0080;
-  const lt = Math.floor((gp.buttons[6]?.value || 0) * 255);
-  const rt = Math.floor((gp.buttons[7]?.value || 0) * 255);
+  // Triggers: analog LT/RT + digital LB/RB mapped as triggers (swapped: RB=A1/LT, LB=A2/RT)
+  let lt = Math.floor((gp.buttons[6]?.value || 0) * 255);
+  let rt = Math.floor((gp.buttons[7]?.value || 0) * 255);
+  if (gp.buttons[5]?.pressed) lt = 255; // RB → LT (Assist 1)
+  if (gp.buttons[4]?.pressed) rt = 255; // LB → RT (Assist 2)
 
   // Send when input changed OR when the heartbeat window has elapsed OR
   // when the phase-aligned scheduler has fired (Phase B). The phase

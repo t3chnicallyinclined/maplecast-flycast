@@ -39,35 +39,37 @@ canvas{display:block;background:#000}
     <button id="leaveBtn" style="flex:1;padding:8px;background:#311;color:#f44;border:1px solid #f44;cursor:pointer;font-family:inherit;display:none">LEAVE</button>
 </div>
 <div id="padInfo" style="font-size:10px;color:#888;text-align:center;margin-top:2px">Press a button on your gamepad</div>
-<div id="padViz" style="display:flex;gap:16px;justify-content:center;align-items:center;margin:6px 0;font-size:10px;color:#888">
+<div id="padViz" style="display:flex;gap:12px;justify-content:center;align-items:center;margin:6px 0;font-size:10px;color:#888">
   <div style="text-align:center">
-    <div style="display:grid;grid-template-columns:24px 24px 24px;gap:2px">
-      <div></div><div id="pv_du" style="background:#222;border:1px solid #444;text-align:center;border-radius:2px">U</div><div></div>
-      <div id="pv_dl" style="background:#222;border:1px solid #444;text-align:center;border-radius:2px">L</div>
-      <div style="background:#111;border:1px solid #333;text-align:center;font-size:8px">+</div>
-      <div id="pv_dr" style="background:#222;border:1px solid #444;text-align:center;border-radius:2px">R</div>
-      <div></div><div id="pv_dd" style="background:#222;border:1px solid #444;text-align:center;border-radius:2px">D</div><div></div>
+    <div style="display:grid;grid-template-columns:22px 22px 22px;gap:1px">
+      <div></div><div id="pv_du" style="background:#222;border:1px solid #444;text-align:center;border-radius:2px;line-height:20px">^</div><div></div>
+      <div id="pv_dl" style="background:#222;border:1px solid #444;text-align:center;border-radius:2px;line-height:20px">&lt;</div>
+      <div style="background:#111;border:1px solid #333;text-align:center;font-size:7px;line-height:20px">+</div>
+      <div id="pv_dr" style="background:#222;border:1px solid #444;text-align:center;border-radius:2px;line-height:20px">&gt;</div>
+      <div></div><div id="pv_dd" style="background:#222;border:1px solid #444;text-align:center;border-radius:2px;line-height:20px">v</div><div></div>
     </div>
-    <div style="font-size:8px;color:#555;margin-top:2px">D-PAD</div>
   </div>
   <div style="text-align:center">
-    <div id="pv_stick" style="width:48px;height:48px;background:#111;border:1px solid #333;border-radius:50%;position:relative">
-      <div id="pv_dot" style="width:10px;height:10px;background:#0f0;border-radius:50%;position:absolute;left:19px;top:19px;transition:none"></div>
+    <div id="pv_stick" style="width:44px;height:44px;background:#111;border:1px solid #333;border-radius:50%;position:relative">
+      <div id="pv_dot" style="width:8px;height:8px;background:#0f0;border-radius:50%;position:absolute;left:18px;top:18px"></div>
     </div>
-    <div style="font-size:8px;color:#555;margin-top:2px">L-STICK</div>
   </div>
-  <div style="display:grid;grid-template-columns:28px 28px;gap:3px;text-align:center">
-    <div id="pv_x" style="background:#222;border:1px solid #009;padding:2px;border-radius:3px">X</div>
-    <div id="pv_y" style="background:#222;border:1px solid #990;padding:2px;border-radius:3px">Y</div>
-    <div id="pv_a" style="background:#222;border:1px solid #090;padding:2px;border-radius:3px">A</div>
-    <div id="pv_b" style="background:#222;border:1px solid #900;padding:2px;border-radius:3px">B</div>
+  <div style="text-align:center">
+    <div style="font-size:7px;color:#555;margin-bottom:2px">MVC2</div>
+    <div style="display:grid;grid-template-columns:repeat(3,28px);gap:3px">
+      <div id="pv_lp" style="background:#222;border:1px solid #06f;padding:2px;border-radius:50%;text-align:center;line-height:20px;font-size:9px">LP</div>
+      <div id="pv_hp" style="background:#222;border:1px solid #f00;padding:2px;border-radius:50%;text-align:center;line-height:20px;font-size:9px">HP</div>
+      <div id="pv_a1" style="background:#222;border:1px solid #0f0;padding:2px;border-radius:50%;text-align:center;line-height:20px;font-size:9px">A1</div>
+      <div id="pv_lk" style="background:#222;border:1px solid #06f;padding:2px;border-radius:50%;text-align:center;line-height:20px;font-size:9px">LK</div>
+      <div id="pv_hk" style="background:#222;border:1px solid #f00;padding:2px;border-radius:50%;text-align:center;line-height:20px;font-size:9px">HK</div>
+      <div id="pv_a2" style="background:#222;border:1px solid #0f0;padding:2px;border-radius:50%;text-align:center;line-height:20px;font-size:9px">A2</div>
+    </div>
   </div>
-  <div style="display:flex;flex-direction:column;gap:3px;text-align:center">
-    <div id="pv_lt" style="background:#222;border:1px solid #444;padding:1px 6px;border-radius:3px;font-size:9px">LT:0</div>
-    <div id="pv_rt" style="background:#222;border:1px solid #444;padding:1px 6px;border-radius:3px;font-size:9px">RT:0</div>
-    <div id="pv_st" style="background:#222;border:1px solid #444;padding:1px 6px;border-radius:3px;font-size:9px">START</div>
+  <div style="display:flex;flex-direction:column;gap:2px;text-align:center">
+    <div id="pv_lt" style="background:#222;border:1px solid #444;padding:1px 4px;border-radius:3px;font-size:8px">LT</div>
+    <div id="pv_st" style="background:#222;border:1px solid #f80;padding:1px 4px;border-radius:3px;font-size:8px">START</div>
   </div>
-  <div id="pv_status" style="font-size:9px;color:#555;max-width:60px">No pad</div>
+  <div id="pv_status" style="font-size:8px;color:#555;max-width:50px">No pad</div>
 </div>
 <div id="st">Connecting...</div>
 </div>
@@ -446,10 +448,21 @@ Passes:  ${parsed_passes} | Frame ${D.frameNum}
             if(e2eCount>300){e2eSum=0;e2eCount=0;e2eMax=0;e2eMin=999;}
             ts.hits=0;ts.misses=0;ts.reused=0;ts.vq=0;ts.mip=0;ts.unsupported=0;ts.dirtyDecodes=0;
         }
-        // Periodic RTT ping via control WS (every 5s)
-        if(controlWs&&controlWs.readyState===WebSocket.OPEN&&!window._rttPingSent&&totalFrames%300===0){
-            window._rttPingSent=performance.now();
-            controlWs.send(JSON.stringify({type:'status'}));
+        // RTT ping via control WS — relay echoes {type:'pong',t:X} immediately
+        if(state.controlWs&&state.controlWs.readyState===WebSocket.OPEN){
+            // Hook pong listener once via addEventListener (doesn't clobber ws-connection.mjs handler)
+            if(!state.controlWs._rttHooked){
+                state.controlWs._rttHooked=true;
+                state.controlWs.addEventListener('message',(e)=>{
+                    if(typeof e.data==='string'&&e.data.includes('"pong"')&&window._rttPingSent){
+                        netRTT=performance.now()-window._rttPingSent;window._rttPingSent=0;
+                    }
+                });
+            }
+            if(!window._rttPingSent&&totalFrames%300===0){
+                window._rttPingSent=performance.now();
+                state.controlWs.send(JSON.stringify({type:'ping',t:window._rttPingSent}));
+            }
         }
         requestAnimationFrame(tick);
     })();
@@ -458,138 +471,70 @@ Passes:  ${parsed_passes} | Frame ${D.frameNum}
 main().catch(e=>{ss('Fatal: '+e.message,'err');console.error(e);});
 
 // ═══════════════════════════════════
-//   🎮 GAMEPAD INPUT (inline, no auth)
+//   🎮 GAMEPAD — uses king.html's proven modules
 // ═══════════════════════════════════
-let controlWs=null, mySlot=-1, padRAF=null;
-const inputBuf=new Uint8Array(4);
-let lastBtn=0,lastLT=0,lastRT=0,lastSendMs=0;
+import { state } from './js/state.mjs';
+import { ensureControlWs } from './js/ws-connection.mjs';
+import { startGamepadPolling, stopGamepadPolling } from './js/gamepad.mjs';
 
-document.getElementById('joinP1').onclick=()=>joinSlot(0);
-document.getElementById('joinP2').onclick=()=>joinSlot(1);
-document.getElementById('leaveBtn').onclick=()=>leaveSlot();
+// Wire state.mySlot to our local var for diagnostics
+state.mySlot = -1;
+Object.defineProperty(window, 'mySlot', { get:()=>state.mySlot });
 
-function joinSlot(slot){
-    if(controlWs&&controlWs.readyState===WebSocket.OPEN){
-        sendJoin(slot);return;
-    }
-    const url=location.protocol==='https:'?'wss://'+location.hostname+'/play':'ws://'+location.hostname+':7201';
-    controlWs=new WebSocket(url);
-    controlWs.binaryType='arraybuffer';
-    controlWs.onopen=()=>{console.log('[pad] control WS open');sendJoin(slot);};
-    controlWs.onclose=()=>{console.log('[pad] control WS closed');controlWs=null;mySlot=-1;
-        document.getElementById('leaveBtn').style.display='none';
-        document.getElementById('padInfo').textContent='Disconnected';};
-    controlWs.onmessage=(e)=>{if(typeof e.data==='string'){
-        try{const m=JSON.parse(e.data);console.log('[pad] server:',m);
-            if(m.type==='assigned'&&m.slot>=0){mySlot=m.slot;document.getElementById('padInfo').textContent='Playing as P'+(mySlot+1);}
-            if(m.type==='kicked'){mySlot=-1;document.getElementById('padInfo').textContent='Kicked: '+m.reason;
-                document.getElementById('leaveBtn').style.display='none';}
-            // RTT from server telemetry (server sends ping field in ms)
-            if(m.fps&&m.frame&&window._rttPingSent){netRTT=performance.now()-window._rttPingSent;window._rttPingSent=0;}
-        }catch{}}};
+document.getElementById('joinP1').onclick=()=>doJoin(0);
+document.getElementById('joinP2').onclick=()=>doJoin(1);
+document.getElementById('leaveBtn').onclick=()=>doLeave();
+
+async function doJoin(slot){
+    try{
+        const ws = await ensureControlWs();
+        const gp = navigator.getGamepads()[0];
+        ws.send(JSON.stringify({
+            type:'join', id:state.sessionId, name:state.myName||'WebGPU-'+state.sessionId.slice(0,8),
+            device:gp?gp.id.substring(0,30):'Browser', slot, latch_policy:'latency'
+        }));
+        state.mySlot=slot;
+        startGamepadPolling();
+        document.getElementById('leaveBtn').style.display='block';
+        document.getElementById('padInfo').textContent='Joined P'+(slot+1)+' — press buttons!';
+    }catch(e){document.getElementById('padInfo').textContent='Join failed: '+e.message;}
 }
-function sendJoin(slot){
-    const gp=navigator.getGamepads()[0];
-    const uid='wgpu-'+Math.random().toString(36).substr(2,6);
-    controlWs.send(JSON.stringify({type:'join',id:uid,name:'WebGPU-'+uid,
-        device:gp?gp.id.substring(0,30):'Browser',slot,latch_policy:'latency'}));
-    mySlot=slot;
-    document.getElementById('leaveBtn').style.display='block';
-    document.getElementById('padInfo').textContent='Joining P'+(slot+1)+'...';
-    if(!padRAF)startPad();
-}
-function leaveSlot(){
-    if(controlWs&&controlWs.readyState===WebSocket.OPEN){
-        controlWs.send(JSON.stringify({type:'leave'}));
-    }
-    mySlot=-1;
+function doLeave(){
+    if(state.controlWs&&state.controlWs.readyState===WebSocket.OPEN)
+        state.controlWs.send(JSON.stringify({type:'leave'}));
+    state.mySlot=-1;
+    stopGamepadPolling();
     document.getElementById('leaveBtn').style.display='none';
     document.getElementById('padInfo').textContent='Left game';
-    if(padRAF){cancelAnimationFrame(padRAF);padRAF=null;}
 }
-function startPad(){
-    let padTicks=0;
-    function tick(){
-        padRAF=requestAnimationFrame(tick);
-        padTicks++;
-        const pi=document.getElementById('padInfo');
-        if(!controlWs||controlWs.readyState!==WebSocket.OPEN){pi.textContent='pad: WS not open (slot='+mySlot+')';return;}
-        if(mySlot<0){pi.textContent='pad: no slot assigned (mySlot='+mySlot+')';return;}
-        const pads=navigator.getGamepads();
-        let gp=null;for(let i=0;i<pads.length;i++)if(pads[i])gp=pads[i];
-        if(!gp){pi.textContent='P'+(mySlot+1)+' — NO GAMEPAD DETECTED (tick='+padTicks+')';return;}
-        let btn=0xFFFF;
-        if(gp.buttons[0]?.pressed)btn&=~0x0004; // A
-        if(gp.buttons[1]?.pressed)btn&=~0x0002; // B
-        if(gp.buttons[2]?.pressed)btn&=~0x0400; // X
-        if(gp.buttons[3]?.pressed)btn&=~0x0200; // Y
-        if(gp.buttons[9]?.pressed)btn&=~0x0008; // Start
-        if(gp.buttons[12]?.pressed)btn&=~0x0010; // DUp
-        if(gp.buttons[13]?.pressed)btn&=~0x0020; // DDown
-        if(gp.buttons[14]?.pressed)btn&=~0x0040; // DLeft
-        if(gp.buttons[15]?.pressed)btn&=~0x0080; // DRight
-        // Analog sticks as dpad
-        if(gp.axes[1]<-0.5)btn&=~0x0010; // LStick Up
-        if(gp.axes[1]>0.5)btn&=~0x0020;  // LStick Down
-        if(gp.axes[0]<-0.5)btn&=~0x0040; // LStick Left
-        if(gp.axes[0]>0.5)btn&=~0x0080;  // LStick Right
-        const lt=Math.floor((gp.buttons[6]?.value||0)*255);
-        const rt=Math.floor((gp.buttons[7]?.value||0)*255);
-        const now=performance.now();
-        if(btn===lastBtn&&lt===lastLT&&rt===lastRT&&now-lastSendMs<5000)return;
-        lastBtn=btn;lastLT=lt;lastRT=rt;lastSendMs=now;
-        inputBuf[0]=lt;inputBuf[1]=rt;inputBuf[2]=(btn>>8)&0xFF;inputBuf[3]=btn&0xFF;
-        controlWs.send(inputBuf);
-        pi.textContent='P'+(mySlot+1)+' SENDING | BTN:0x'+btn.toString(16)+' LT:'+lt+' RT:'+rt+' gp:'+gp.id.substring(0,20);
-        // Update visual pad display
-        const on='#0f0',off='#222';
-        document.getElementById('pv_a').style.background=gp.buttons[0]?.pressed?on:off;
-        document.getElementById('pv_b').style.background=gp.buttons[1]?.pressed?on:off;
-        document.getElementById('pv_x').style.background=gp.buttons[2]?.pressed?on:off;
-        document.getElementById('pv_y').style.background=gp.buttons[3]?.pressed?on:off;
-        document.getElementById('pv_st').style.background=gp.buttons[9]?.pressed?on:off;
-        document.getElementById('pv_du').style.background=gp.buttons[12]?.pressed||gp.axes[1]<-0.5?on:off;
-        document.getElementById('pv_dd').style.background=gp.buttons[13]?.pressed||gp.axes[1]>0.5?on:off;
-        document.getElementById('pv_dl').style.background=gp.buttons[14]?.pressed||gp.axes[0]<-0.5?on:off;
-        document.getElementById('pv_dr').style.background=gp.buttons[15]?.pressed||gp.axes[0]>0.5?on:off;
-        document.getElementById('pv_lt').textContent='LT:'+lt;
-        document.getElementById('pv_lt').style.background=lt>10?on:off;
-        document.getElementById('pv_rt').textContent='RT:'+rt;
-        document.getElementById('pv_rt').style.background=rt>10?on:off;
-        // Stick dot position
-        const sx=19+gp.axes[0]*15, sy=19+gp.axes[1]*15;
-        document.getElementById('pv_dot').style.left=sx+'px';
-        document.getElementById('pv_dot').style.top=sy+'px';
-        document.getElementById('pv_status').textContent=gp.id.substring(0,15);
-        document.getElementById('pv_status').style.color='#0f0';
-    }
-    // Always update pad viz even when not sending (for detection)
-    padRAF=requestAnimationFrame(tick);
-}
-// Start pad visualization immediately (don't wait for join)
+
+// Pad viz — runs always, shows gamepad detection + button state
 (function vizTick(){
     requestAnimationFrame(vizTick);
     const pads=navigator.getGamepads();
-    let gp=null;for(let i=0;i<pads.length;i++)if(pads[i])gp=pads[i];
+    let gp=null;for(let i=0;i<pads.length;i++){const p=pads[i];if(p&&(!gp||p.timestamp>gp.timestamp))gp=p;}
     const st=document.getElementById('pv_status');
     if(!gp){st.textContent='No gamepad';st.style.color='#555';return;}
-    if(mySlot>=0)return; // pad tick handles viz when joined
-    st.textContent=gp.id.substring(0,15);st.style.color='#ff0';
-    const on='#ff0',off='#222';
-    document.getElementById('pv_a').style.background=gp.buttons[0]?.pressed?on:off;
-    document.getElementById('pv_b').style.background=gp.buttons[1]?.pressed?on:off;
-    document.getElementById('pv_x').style.background=gp.buttons[2]?.pressed?on:off;
-    document.getElementById('pv_y').style.background=gp.buttons[3]?.pressed?on:off;
+    const joined=state.mySlot>=0;
+    st.textContent=gp.id.substring(0,15);st.style.color=joined?'#0f0':'#ff0';
+    const on=joined?'#0f0':'#ff0',off='#222';
+    // MVC2 layout: LP=X, HP=Y, A1=RB(5)→LT, LK=A, HK=B, A2=LB(4)→RT
+    document.getElementById('pv_lp').style.background=gp.buttons[2]?.pressed?on:off;  // LP = X
+    document.getElementById('pv_hp').style.background=gp.buttons[3]?.pressed?on:off;  // HP = Y
+    document.getElementById('pv_a1').style.background=gp.buttons[5]?.pressed||(gp.buttons[6]?.value||0)>0.1?on:off; // A1 = RB or LT
+    document.getElementById('pv_lk').style.background=gp.buttons[0]?.pressed?on:off;  // LK = A
+    document.getElementById('pv_hk').style.background=gp.buttons[1]?.pressed?on:off;  // HK = B
+    document.getElementById('pv_a2').style.background=gp.buttons[4]?.pressed||(gp.buttons[7]?.value||0)>0.1?on:off; // A2 = LB or RT
     document.getElementById('pv_st').style.background=gp.buttons[9]?.pressed?on:off;
-    document.getElementById('pv_du').style.background=gp.buttons[12]?.pressed||gp.axes[1]<-0.5?on:off;
-    document.getElementById('pv_dd').style.background=gp.buttons[13]?.pressed||gp.axes[1]>0.5?on:off;
-    document.getElementById('pv_dl').style.background=gp.buttons[14]?.pressed||gp.axes[0]<-0.5?on:off;
-    document.getElementById('pv_dr').style.background=gp.buttons[15]?.pressed||gp.axes[0]>0.5?on:off;
-    const lt2=Math.floor((gp.buttons[6]?.value||0)*255), rt2=Math.floor((gp.buttons[7]?.value||0)*255);
-    document.getElementById('pv_lt').textContent='LT:'+lt2;document.getElementById('pv_lt').style.background=lt2>10?on:off;
-    document.getElementById('pv_rt').textContent='RT:'+rt2;document.getElementById('pv_rt').style.background=rt2>10?on:off;
-    const sx=19+gp.axes[0]*15, sy=19+gp.axes[1]*15;
-    document.getElementById('pv_dot').style.left=sx+'px';document.getElementById('pv_dot').style.top=sy+'px';
+    document.getElementById('pv_du').style.background=gp.buttons[12]?.pressed||gp.axes?.[1]<-0.5?on:off;
+    document.getElementById('pv_dd').style.background=gp.buttons[13]?.pressed||gp.axes?.[1]>0.5?on:off;
+    document.getElementById('pv_dl').style.background=gp.buttons[14]?.pressed||gp.axes?.[0]<-0.5?on:off;
+    document.getElementById('pv_dr').style.background=gp.buttons[15]?.pressed||gp.axes?.[0]>0.5?on:off;
+    const lt=Math.floor((gp.buttons[6]?.value||0)*255);
+    document.getElementById('pv_lt').style.background=lt>10?on:off;
+    if(gp.axes){const sx=19+(gp.axes[0]||0)*15,sy=19+(gp.axes[1]||0)*15;
+        document.getElementById('pv_dot').style.left=sx+'px';document.getElementById('pv_dot').style.top=sy+'px';}
+    if(joined)document.getElementById('padInfo').textContent='P'+(state.mySlot+1)+' LIVE | '+gp.id.substring(0,25);
 })();
 </script>
 </body>
