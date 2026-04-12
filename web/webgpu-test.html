@@ -168,6 +168,7 @@ const A=0.05;
 let maDecode=0,maParse=0,maRender=0,maTotal=0,maE2E=0;
 // Network RTT measurement via control WS ping
 let netRTT=-1, lastFrameArrival=0, maJitter=0, maInterArrival=0;
+let skippedFrames=0, renderFrames=0;
 const ss=(m,c='')=>{st.textContent=m;st.className=c};
 
 // Debug state — read by renderer
@@ -267,140 +268,116 @@ async function main(){
         ws.onopen=()=>ss('Connected — waiting for SYNC','ok');
         ws.onclose=()=>{ss('Disconnected');setTimeout(connect,2000);};
         ws.onerror=()=>{};
+        // === VSYNC-DECOUPLED PIPELINE ===
+        // WS onmessage: decode + parse (CPU work only, no GPU)
+        // RAF render loop: render latest frame (GPU work, vsync-locked)
+        let pendingFrame=null, pendingPvrSnap=null, wsFrames=0;
+
         ws.onmessage=(e)=>{
             if(typeof e.data==='string')return;
             const d=new Uint8Array(e.data); wB+=d.byteLength;
             try{
                 const wsArrival=performance.now();
-                // Frame arrival jitter tracking
                 if(lastFrameArrival>0){
                     const gap=wsArrival-lastFrameArrival;
                     maInterArrival+=(gap-maInterArrival)*A;
                     maJitter+=(Math.abs(gap-16.667)-maJitter)*A;
                 }
                 lastFrameArrival=wsArrival;
-                const t0=wsArrival;
-                if(DBG.freeze)return; // Skip frame processing when frozen
+                if(DBG.freeze)return;
+                const t0=performance.now();
                 const fr=D.applyFrame(d);
                 dMs=performance.now()-t0;
                 if(!fr)return;
-                // Dirty-page-aware texture cache: only re-decode textures whose VRAM pages changed
+                // Texture cache updates (CPU-side)
                 if(DBG.texForceInvalidate) T.invalidateAll();
                 T.setDirtyPages(fr.dirtyPageList, fr.pvrDirty);
                 if(!T._pal||fr.vramDirty||fr.pvrDirty) T.updatePalette(D.pvrRegs);
                 const t1=performance.now();
                 const g=P.parse(fr.taBuffer,fr.taSize);
-                // Fill background polygon from PVR registers + VRAM
-                try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e) { if(fc<2) console.error('[BGP]',e); }
+                try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e2) {}
                 pMs=performance.now()-t1;
-                // Dump Z values for grid vs HUD comparison
-                if(fc<2){
-                    // Grid polys (early)
-                    for(const i of [1,5,10]){
-                        if(i>=g.opaque.length)continue;
-                        const p=g.opaque[i];if(p.count<3)continue;
-                        const bi=p.first*28;const vd=g.vertexData;
-                        const z=new Float32Array(vd.buffer,vd.byteOffset+bi+8,1)[0];
-                        const logD=Math.log2(1+Math.max(100000*z,-0.999999))/34;
-                        console.log(`[GRID] op[${i}] z=${z.toFixed(6)} logD=${logD.toFixed(4)}`);
-                    }
-                    // HUD polys
-                    for(let i=445;i<Math.min(465,g.opaque.length);i++){
-                        const p=g.opaque[i];if(p.count<3)continue;
-                        const bi=p.first*28;
-                        const vd=g.vertexData;
-                        const x=new Float32Array(vd.buffer,vd.byteOffset+bi,1)[0];
-                        const y=new Float32Array(vd.buffer,vd.byteOffset+bi+4,1)[0];
-                        const obj=p.pcw&0xFF,tex=(obj>>3)&1,fmt=tex?((p.tcw>>27)&7):-1;
-                        const sb=(p.tsp>>29)&7,db=(p.tsp>>26)&7,si=(p.tsp>>6)&3;
-                        const ua=(p.tsp>>20)&1,ita=(p.tsp>>19)&1;
-                        const z=new Float32Array(vd.buffer,vd.byteOffset+bi+8,1)[0];
-                        const logD=Math.log2(1+Math.max(100000*z,-0.999999))/34;
-                        console.log(`[HUD] op[${i}] pos=(${x.toFixed(0)},${y.toFixed(0)}) z=${z.toFixed(6)} logD=${logD.toFixed(4)} cnt=${p.count} R=${vd[bi+12]} G=${vd[bi+13]} B=${vd[bi+14]} A=${vd[bi+15]} | shad=${si} tex=${tex} obj=0x${obj.toString(16)}`);
-                    }
-                }
-                // Live render stats
-                if(fc%120===0){
-                    const blendModes={},shadInstrs={},texFmts={},listCounts={op:0,pt:0,tr:0};
-                    const depthModes={},cullModes={},uaFlags={},itaFlags={};
-                    let noTexCount=0,texCount=0,totalVerts=g.vertexCount;
-                    const analyze=(list,name)=>{
-                        for(const p of list){
-                            if(p.count<3)continue;
-                            listCounts[name]=(listCounts[name]||0)+1;
-                            const tsp=p.tsp,pcw=p.pcw,isp=p.isp;
-                            const sb=(tsp>>29)&7,db=(tsp>>26)&7,si=(tsp>>6)&3;
-                            const ua=(tsp>>20)&1,ita=(tsp>>19)&1;
-                            const tex=(pcw>>3)&1,dm=(isp>>29)&7,cm=(isp>>27)&3;
-                            const fmt=tex?((p.tcw>>27)&7):-1;
-                            const bk=`${sb}/${db}`;
-                            blendModes[bk]=(blendModes[bk]||0)+1;
-                            shadInstrs[si]=(shadInstrs[si]||0)+1;
-                            if(tex){texCount++;if(fmt>=0)texFmts[fmt]=(texFmts[fmt]||0)+1;}
-                            else noTexCount++;
-                            depthModes[dm]=(depthModes[dm]||0)+1;
-                            cullModes[cm]=(cullModes[cm]||0)+1;
-                            uaFlags[ua]=(uaFlags[ua]||0)+1;
-                            itaFlags[ita]=(itaFlags[ita]||0)+1;
-                        }
-                    };
-                    analyze(g.opaque,'op');analyze(g.punchThrough,'pt');analyze(g.translucent,'tr');
-                    const fmtNames={0:'1555',1:'565',2:'4444',3:'YUV',4:'Bump',5:'Pal4',6:'Pal8',7:'Rsv'};
-                    const blendNames={0:'Zero',1:'One',2:'Other',3:'InvOther',4:'SrcA',5:'InvSrcA',6:'DstA',7:'InvDstA'};
-                    let s=`LISTS: Op=${listCounts.op||0} PT=${listCounts.pt||0} Tr=${listCounts.tr||0}\n`;
-                    s+=`VERTS: ${totalVerts}  TEX: ${texCount}  NOTEX: ${noTexCount}\n\n`;
-                    s+=`BLEND MODES:\n`;
-                    for(const[k,v]of Object.entries(blendModes).sort((a,b)=>b[1]-a[1])){
-                        const[sb,db]=k.split('/');
-                        s+=`  ${blendNames[sb]||sb}/${blendNames[db]||db}: ${v}\n`;
-                    }
-                    s+=`\nSHAD INSTR:\n`;
-                    const siNames={0:'Replace',1:'ModRGB',2:'Decal',3:'ModAll'};
-                    for(const[k,v]of Object.entries(shadInstrs))s+=`  ${siNames[k]||k}: ${v}\n`;
-                    s+=`\nTEX FORMATS:\n`;
-                    for(const[k,v]of Object.entries(texFmts))s+=`  ${fmtNames[k]||k}: ${v}\n`;
-                    s+=`\nDEPTH MODES:\n`;
-                    const dmNames={0:'Never',1:'Less',2:'Equal',3:'LessEq',4:'Greater',5:'NotEq',6:'GreaterEq',7:'Always'};
-                    for(const[k,v]of Object.entries(depthModes))s+=`  ${dmNames[k]||k}: ${v}\n`;
-                    s+=`\nCULL: `;for(const[k,v]of Object.entries(cullModes))s+=`${k}:${v} `;
-                    s+=`\nUseAlpha: `;for(const[k,v]of Object.entries(uaFlags))s+=`${k}:${v} `;
-                    s+=`\nIgnoreTexA: `;for(const[k,v]of Object.entries(itaFlags))s+=`${k}:${v} `;
-                    // Tile clip stats
-                    let tcActive=0,tcTotal=0;
-                    for(const list of [g.opaque,g.punchThrough,g.translucent])
-                        for(const p of list){tcTotal++;if((p.tileclip>>>28)>=2)tcActive++;}
-                    s+=`\nTileClip: ${tcActive}/${tcTotal} active`;
-                    if(g.renderPasses)s+=`\nPasses: ${g.renderPasses.length}`;
-                    document.getElementById('dbg_stats_left').textContent=s;
-                }
+                // Store for RAF render — if previous frame wasn't rendered yet, it's skipped
+                if(pendingFrame) skippedFrames++;
+                pendingFrame=g; pendingPvrSnap=fr.pvrSnapshot;
                 lastParsed=g;
                 parsed_passes=g.renderPasses?g.renderPasses.length:1;
-                // Tile clip logging
-                if(DBG.tileClipLog&&fc<3){
-                    for(const list of [g.opaque,g.punchThrough,g.translucent])
-                        for(let i=0;i<list.length;i++){const p=list[i];if((p.tileclip>>>28)>=2)
-                            console.log(`[tileclip] poly ${i} mode=${p.tileclip>>>28} rect=${p.tileclip&0x0FFFFFFF}`);}
-                }
-                const t2=performance.now();
-                // Pass debug state to renderer
-                R.renderFrame(g,T,fr.pvrSnapshot,D.vram,DBG);
-                rMs=performance.now()-t2;
-                // E2E: WebSocket arrival → render complete
-                const e2e=performance.now()-wsArrival;
-                e2eSum+=e2e;e2eCount++;
-                if(e2e>e2eMax)e2eMax=e2e;
-                if(e2e<e2eMin)e2eMin=e2e;
-                totalFrames++;
-                // Update moving averages
-                const total=dMs+pMs+rMs;
-                maDecode+=(dMs-maDecode)*A;
-                maParse+=(pMs-maParse)*A;
-                maRender+=(rMs-maRender)*A;
-                maTotal+=(total-maTotal)*A;
-                maE2E+=(e2e-maE2E)*A;
-                fc++;
+                wsFrames++;
             }catch(ex){console.error('[webgpu]',ex);}
         };
+
+        // RAF render loop — vsync-locked, renders latest available frame
+        function renderTick(){
+            requestAnimationFrame(renderTick);
+            if(!pendingFrame)return;
+            const g=pendingFrame, snap=pendingPvrSnap;
+            pendingFrame=null; pendingPvrSnap=null;
+            // Live render stats (every 120 rendered frames)
+            if(renderFrames%120===0){
+                const blendModes={},shadInstrs={},texFmts={},listCounts={op:0,pt:0,tr:0};
+                const depthModes={},cullModes={},uaFlags={},itaFlags={};
+                let noTexCount=0,texCount=0,totalVerts=g.vertexCount;
+                const analyze=(list,name)=>{
+                    for(const p of list){
+                        if(p.count<3)continue;
+                        listCounts[name]=(listCounts[name]||0)+1;
+                        const tsp=p.tsp,pcw=p.pcw,isp=p.isp;
+                        const sb=(tsp>>29)&7,db=(tsp>>26)&7,si=(tsp>>6)&3;
+                        const ua=(tsp>>20)&1,ita=(tsp>>19)&1;
+                        const tex=(pcw>>3)&1,dm=(isp>>29)&7,cm=(isp>>27)&3;
+                        const fmt=tex?((p.tcw>>27)&7):-1;
+                        const bk=`${sb}/${db}`;
+                        blendModes[bk]=(blendModes[bk]||0)+1;
+                        shadInstrs[si]=(shadInstrs[si]||0)+1;
+                        if(tex){texCount++;if(fmt>=0)texFmts[fmt]=(texFmts[fmt]||0)+1;}
+                        else noTexCount++;
+                        depthModes[dm]=(depthModes[dm]||0)+1;
+                        cullModes[cm]=(cullModes[cm]||0)+1;
+                        uaFlags[ua]=(uaFlags[ua]||0)+1;
+                        itaFlags[ita]=(itaFlags[ita]||0)+1;
+                    }
+                };
+                analyze(g.opaque,'op');analyze(g.punchThrough,'pt');analyze(g.translucent,'tr');
+                const fmtNames={0:'1555',1:'565',2:'4444',3:'YUV',4:'Bump',5:'Pal4',6:'Pal8',7:'Rsv'};
+                const blendNames={0:'Zero',1:'One',2:'Other',3:'InvOther',4:'SrcA',5:'InvSrcA',6:'DstA',7:'InvDstA'};
+                let s=`LISTS: Op=${listCounts.op||0} PT=${listCounts.pt||0} Tr=${listCounts.tr||0}\n`;
+                s+=`VERTS: ${totalVerts}  TEX: ${texCount}  NOTEX: ${noTexCount}\n\n`;
+                s+=`BLEND MODES:\n`;
+                for(const[k,v]of Object.entries(blendModes).sort((a,b)=>b[1]-a[1])){
+                    const[sb,db]=k.split('/');
+                    s+=`  ${blendNames[sb]||sb}/${blendNames[db]||db}: ${v}\n`;
+                }
+                s+=`\nSHAD INSTR:\n`;
+                const siNames={0:'Replace',1:'ModRGB',2:'Decal',3:'ModAll'};
+                for(const[k,v]of Object.entries(shadInstrs))s+=`  ${siNames[k]||k}: ${v}\n`;
+                s+=`\nTEX FORMATS:\n`;
+                for(const[k,v]of Object.entries(texFmts))s+=`  ${fmtNames[k]||k}: ${v}\n`;
+                s+=`\nDEPTH MODES:\n`;
+                const dmNames={0:'Never',1:'Less',2:'Equal',3:'LessEq',4:'Greater',5:'NotEq',6:'GreaterEq',7:'Always'};
+                for(const[k,v]of Object.entries(depthModes))s+=`  ${dmNames[k]||k}: ${v}\n`;
+                s+=`\nCULL: `;for(const[k,v]of Object.entries(cullModes))s+=`${k}:${v} `;
+                s+=`\nUseAlpha: `;for(const[k,v]of Object.entries(uaFlags))s+=`${k}:${v} `;
+                s+=`\nIgnoreTexA: `;for(const[k,v]of Object.entries(itaFlags))s+=`${k}:${v} `;
+                let tcActive=0,tcTotal=0;
+                for(const list of [g.opaque,g.punchThrough,g.translucent])
+                    for(const p of list){tcTotal++;if((p.tileclip>>>28)>=2)tcActive++;}
+                s+=`\nTileClip: ${tcActive}/${tcTotal} active`;
+                if(g.renderPasses)s+=`\nPasses: ${g.renderPasses.length}`;
+                s+=`\nSkipped: ${skippedFrames} (WS>${'>'}RAF)`;
+                document.getElementById('dbg_stats_left').textContent=s;
+            }
+            const t2=performance.now();
+            R.renderFrame(g,T,snap,D.vram,DBG);
+            rMs=performance.now()-t2;
+            totalFrames++; renderFrames++;
+            const total=dMs+pMs+rMs;
+            maDecode+=(dMs-maDecode)*A;
+            maParse+=(pMs-maParse)*A;
+            maRender+=(rMs-maRender)*A;
+            maTotal+=(total-maTotal)*A;
+            fc++;
+        }
+        requestAnimationFrame(renderTick);
     }
 
     (function tick(){
@@ -425,7 +402,8 @@ Jitter:  ${maJitter.toFixed(2)}ms  (frame arrival)
 Arrival: ${maInterArrival.toFixed(2)}ms  (inter-frame)
 --- True E2E estimate -----------
 Input->Pixel: ~${netRTT>0?(netRTT/2+maTotal).toFixed(1):'??'}ms
-  = RTT/2 + Process
+  = RTT/2(${netRTT>0?(netRTT/2).toFixed(0):'?'}) + Proc(${maTotal.toFixed(1)})
+Vsync:   ${renderFrames} rendered, ${skippedFrames} skipped
 --- Stats -----------------------
 Frames:  ${totalFrames} | Stream: ${kb}kbps
 Tex$:    H=${ts.hits} M=${ts.misses} R=${ts.reused}
