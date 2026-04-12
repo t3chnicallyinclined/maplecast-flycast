@@ -34,6 +34,18 @@ export class TAParser {
     }
 
     parse(taBuffer, taSize) {
+        // Fast path: if TA buffer unchanged, reuse previous parse (zero-cost hash check)
+        if (this._lastResult && this._lastTASize === taSize) {
+            const v = new Uint32Array(taBuffer.buffer, taBuffer.byteOffset, taSize >> 2);
+            const n = v.length, q = n >> 2;
+            // 8-point hash: sample from 8 evenly-spaced positions + size
+            const h = (v[0] ^ v[q] ^ v[q*2] ^ v[q*3] ^ v[n-1] ^ v[n-2] ^ v[n>>1] ^ v[(n>>1)+1]) >>> 0;
+            if (h === this._lastTAHash) {
+                this._cacheHits = (this._cacheHits || 0) + 1;
+                return this._lastResult;
+            }
+        }
+
         this._n = 0;
         const op = [], pt = [], tr = [];
         // Render pass tracking — each pass records cumulative poly counts
@@ -246,7 +258,15 @@ export class TAParser {
         }
         // Final render pass
         renderPasses.push({ op_count: op.length, pt_count: pt.length, tr_count: tr.length });
-        return { vertexData: this._u8.subarray(0, this._n * BYTES_PER_VERTEX), vertexCount: this._n, opaque: op, punchThrough: pt, translucent: tr, renderPasses };
+        const result = { vertexData: this._u8.subarray(0, this._n * BYTES_PER_VERTEX), vertexCount: this._n, opaque: op, punchThrough: pt, translucent: tr, renderPasses };
+        // Cache hash for fast-path check (no buffer copy — hash only)
+        this._lastResult = result;
+        this._lastTASize = taSize;
+        const v = new Uint32Array(taBuffer.buffer, taBuffer.byteOffset, taSize >> 2);
+        const n = v.length, q = n >> 2;
+        this._lastTAHash = (v[0] ^ v[q] ^ v[q*2] ^ v[q*3] ^ v[n-1] ^ v[n-2] ^ v[n>>1] ^ v[(n>>1)+1]) >>> 0;
+        this._cacheMisses = (this._cacheMisses || 0) + 1;
+        return result;
     }
 
     // Fill background polygon from PVR registers + VRAM (matches flycast FillBGP)

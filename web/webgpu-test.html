@@ -443,6 +443,7 @@ Frames:  ${totalFrames} | Stream: ${kb}kbps
 Tex$:    H=${ts.hits} M=${ts.misses} R=${ts.reused}
 Dirty:   ${ts.dirtyDecodes} re-decoded
 VQ: ${ts.vq}  Mip: ${ts.mip}  Unsup: ${ts.unsupported}
+TA$:     H=${P._cacheHits||0} M=${P._cacheMisses||0}
 Passes:  ${parsed_passes} | Frame ${D.frameNum}
 =================================`;
             if(e2eCount>300){e2eSum=0;e2eCount=0;e2eMax=0;e2eMin=999;}

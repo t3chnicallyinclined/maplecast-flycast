@@ -1,7 +1,7 @@
 // frame-decoder.mjs — ZCST decompress, SYNC/FSYN handling, delta frame apply
 // Mirrors wasm_bridge.cpp exactly including all 5 documented bugs.
 
-import { decompress } from 'https://cdn.jsdelivr.net/npm/fzstd@0.1.1/+esm';
+import { decompress } from './fzstd.mjs';
 
 const VRAM_SIZE = 8 * 1024 * 1024;
 const PVR_REG_SIZE = 32 * 1024;
