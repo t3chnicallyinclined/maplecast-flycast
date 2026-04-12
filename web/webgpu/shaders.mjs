@@ -11,8 +11,11 @@ struct VOut { @builtin(position) position: vec4<f32>, @location(0) vb: vec4<f32>
     var o: VOut;
     let vp = uniforms.ndcMat * vec4<f32>(in.pos, 1.0);
     let z = in.pos.z;
-    o.vb = in.col * z;
-    o.vo = in.spc * z;
+    // Colors pass through unchanged (flycast only multiplies by z for Gouraud=1,
+    // but MVC2 sprites are Gouraud=0 — flat shading, no perspective on colors)
+    o.vb = in.col;
+    o.vo = in.spc;
+    // UVs multiplied by z for perspective-correct interpolation
     o.vuv = vec3<f32>(in.uv * z, z);
     o.position = vec4<f32>(vp.xy, 0.0, 1.0);
     return o;
@@ -32,8 +35,10 @@ struct FOut { @builtin(frag_depth) depth: f32, @location(0) color: vec4<f32> };
     var o: FOut;
     let iw = in.vuv.z;
     let sw = select(iw, 0.00001, abs(iw) < 0.00001);
-    var c = in.vb / sw;
-    var ofs = in.vo / sw;
+    // Colors are NOT perspective-divided (passed through from vertex shader)
+    var c = in.vb;
+    var ofs = in.vo;
+    // UVs need perspective divide (were multiplied by z in vertex shader)
     let uv = in.vuv.xy / sw;
 
     if (fu.ua == 0u) { c.a = 1.0; }
