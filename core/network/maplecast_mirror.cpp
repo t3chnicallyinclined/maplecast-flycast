@@ -1214,46 +1214,95 @@ void serverPublish(TA_context* ctx)
 	// in this frame's dirty pages and shipped to all viewers.
 	maplecast_control_ws::applyPaletteOverrides();
 
-	// === Memory diffs ===
-	uint32_t totalDirty = 0;
-	uint8_t* dirtyCountPtr = dst;
-	dst += 4;
-
-	// Drain the DMA force-dirty bitmap atomically. Any page bit set here
-	// is guaranteed to ship even if memcmp would say it's unchanged (e.g.
-	// when DMA wrote new texture data and shadow already matches because
-	// the previous frame already saw it but never sent it).
-	uint64_t forcedDirty[VRAM_BITMAP_WORDS];
-	for (size_t i = 0; i < VRAM_BITMAP_WORDS; i++)
-		forcedDirty[i] = _vramDirtyBitmap[i].exchange(0, std::memory_order_acquire);
-
-	// VRAM + PVR regs: memcmp against shadow copies, OR forced-dirty bitmap (VRAM only)
+	// === Phase B: Async dirty page scan ===
+	// The page-by-page memcmp is the heaviest part of serverPublish (~3-8ms).
+	// We hand it off to a background thread so the render thread (and SH4)
+	// can start the next frame immediately.
 	//
-	// Snapshot live → shadow ONCE per dirty page, then ship from shadow. The
-	// SH4 thread can race during the diff and write new bytes between the
-	// memcmp and the wire copy; reading via the shadow keeps wire and next
-	// frame's memcmp consistent.
-	for (int r = 0; r < _numRegions; r++) {
-		MemRegion& reg = _regions[r];
-		size_t numPages = reg.size / MEM_PAGE_SIZE;
-		bool isVram = (reg.id == 1);
-		for (size_t p = 0; p < numPages; p++) {
-			size_t off = p * MEM_PAGE_SIZE;
-			bool forced = isVram && (forcedDirty[p >> 6] & (1ULL << (p & 63)));
-			if (forced || memcmp(reg.ptr + off, reg.shadow + off, MEM_PAGE_SIZE) != 0) {
-				if ((size_t)(dst - dstStart) + 5 + MEM_PAGE_SIZE > RING_SIZE / 3)
-					goto done_diff;
-				memcpy(reg.shadow + off, reg.ptr + off, MEM_PAGE_SIZE);
-				*dst++ = reg.id;
-				uint32_t pi = (uint32_t)p;
-				memcpy(dst, &pi, 4); dst += 4;
-				memcpy(dst, reg.shadow + off, MEM_PAGE_SIZE); dst += MEM_PAGE_SIZE;
-				totalDirty++;
+	// The background thread:
+	//   1. Drains the atomic dirty bitmap
+	//   2. Scans VRAM + PVR pages (memcmp against shadow)
+	//   3. Assembles dirty page data into the frame buffer
+	//   4. Compresses and broadcasts
+	//
+	// Data safety: the shadow-copy-once pattern handles SH4 races.
+	// The background thread reads live VRAM (reg.ptr) and writes shadow.
+	// SH4 may write new data between memcmp and shadow copy — shadow gets
+	// the newer data, which is fine for next frame's diff.
+
+	// Capture current dst position — dirty pages go here
+	uint8_t* dirtyCountPtr = dst;
+	dst += 4;  // placeholder for dirty page count
+
+	// Snapshot pre-diff frame size for the async thread
+	size_t preDiffSize = (size_t)(dst - dstStart);
+
+	// Build a self-contained buffer for the async thread:
+	// [header+TA delta already assembled] + [space for dirty pages]
+	auto asyncBuf = std::make_shared<std::vector<uint8_t>>(dstStart, dst);
+	asyncBuf->reserve(preDiffSize + (200 * (5 + MEM_PAGE_SIZE)));  // room for ~200 dirty pages
+
+	// Async page scan + compress + broadcast
+	uint32_t asyncFrameNum = frameNum;
+	static std::mutex _asyncPageScanMtx;
+	std::thread([asyncBuf, preDiffSize, asyncFrameNum]() {
+		std::lock_guard<std::mutex> lock(_asyncPageScanMtx);
+
+		uint8_t* buf = asyncBuf->data();
+		size_t pos = preDiffSize;
+		uint32_t totalDirty = 0;
+
+		// Drain atomic dirty bitmap
+		uint64_t forcedDirty[VRAM_BITMAP_WORDS];
+		for (size_t i = 0; i < VRAM_BITMAP_WORDS; i++)
+			forcedDirty[i] = _vramDirtyBitmap[i].exchange(0, std::memory_order_acquire);
+
+		// Scan VRAM + PVR pages
+		for (int r = 0; r < _numRegions; r++) {
+			MemRegion& reg = _regions[r];
+			size_t numPages = reg.size / MEM_PAGE_SIZE;
+			bool isVram = (reg.id == 1);
+			for (size_t p = 0; p < numPages; p++) {
+				size_t off = p * MEM_PAGE_SIZE;
+				bool forced = isVram && (forcedDirty[p >> 6] & (1ULL << (p & 63)));
+				if (forced || memcmp(reg.ptr + off, reg.shadow + off, MEM_PAGE_SIZE) != 0) {
+					// Grow buffer if needed
+					if (pos + 5 + MEM_PAGE_SIZE > asyncBuf->capacity())
+						asyncBuf->resize(pos + 5 + MEM_PAGE_SIZE + 100 * (5 + MEM_PAGE_SIZE));
+					buf = asyncBuf->data();  // refresh after possible realloc
+
+					memcpy(reg.shadow + off, reg.ptr + off, MEM_PAGE_SIZE);
+					buf[pos++] = reg.id;
+					uint32_t pi = (uint32_t)p;
+					memcpy(buf + pos, &pi, 4); pos += 4;
+					memcpy(buf + pos, reg.shadow + off, MEM_PAGE_SIZE); pos += MEM_PAGE_SIZE;
+					totalDirty++;
+				}
 			}
 		}
-	}
-done_diff:
-	memcpy(dirtyCountPtr, &totalDirty, 4);
+
+		// Patch dirty page count
+		memcpy(buf + preDiffSize - 4, &totalDirty, 4);
+
+		// Patch total frame size
+		uint32_t totalSize = (uint32_t)pos;
+		uint32_t frameSizeVal = totalSize - 4;
+		memcpy(buf, &frameSizeVal, 4);
+
+		// Compress + broadcast
+		if (maplecast_ws::active()) {
+			static MirrorCompressor _asyncCompressorB;
+			static bool _asyncCompressorBInit = false;
+			if (!_asyncCompressorBInit) {
+				_asyncCompressorB.init(16 * 1024 * 1024);
+				_asyncCompressorBInit = true;
+			}
+			uint64_t cUs = 0;
+			size_t compSize = 0;
+			const uint8_t* compData = _asyncCompressorB.compress(buf, totalSize, compSize, cUs);
+			maplecast_ws::broadcastBinary(compData, compSize);
+		}
+	}).detach();
 
 	// === Scene-change & forced SYNC broadcast ===
 	// Two trigger paths:
@@ -1299,8 +1348,8 @@ done_diff:
 		const char* reason = manualSave ? "MANUAL SAVE STATE PUSH"
 			: forced ? "FORCED SYNC"
 			: "60s periodic resilience SYNC";
-		printf("[MIRROR] %s on frame %u (%u dirty pages) — broadcasting fresh SYNC\n",
-			reason, frameNum, totalDirty);
+		printf("[MIRROR] %s on frame %u — broadcasting fresh SYNC\n",
+			reason, frameNum);
 		// Ship a fresh SYNC envelope (full VRAM + PVR). The flycast wasm
 		// browser routes this through renderer_sync() which does the full
 		// _prevTA.clear() + cache reset ritual that the per-frame delta
@@ -1327,16 +1376,19 @@ done_diff:
 			memcpy(_regions[i].shadow, _regions[i].ptr, _regions[i].size);
 	}
 
-	// Patch frame size
-	uint32_t totalSize = (uint32_t)(dst - dstStart);
-	uint32_t frameSizeVal = totalSize - 4;
-	memcpy(dstStart, &frameSizeVal, 4);
-
-	__sync_synchronize();
-	hdr->latest_offset = writePos;
-	hdr->latest_size = totalSize;
-	hdr->write_pos = writePos + totalSize;
-	hdr->frame_count++;
+	// Ring buffer commit — frame assembly now partial (dirty pages added async).
+	// Commit the pre-diff portion to the ring for shared memory clients.
+	// WebSocket/WebTransport clients get the full frame from the async thread.
+	{
+		uint32_t ringSize = (uint32_t)(dst - dstStart);
+		uint32_t ringFrameSize = ringSize - 4;
+		memcpy(dstStart, &ringFrameSize, 4);
+		__sync_synchronize();
+		hdr->latest_offset = writePos;
+		hdr->latest_size = ringSize;
+		hdr->write_pos = writePos + ringSize;
+		hdr->frame_count++;
+	}
 
 	// Lockstep player-client tape: push one entry per slot per server
 	// frame, stamped with the brand-new frame number we just committed.
@@ -1378,39 +1430,10 @@ done_diff:
 	// connected.
 	maplecast_state_sync::onServerFramePublished(hdr->frame_count);
 
-	// Phase A: Async compress + broadcast — don't block the render thread.
-	// Copy the uncompressed frame data, spawn compression on a background thread.
-	// The render thread continues to the next frame immediately.
+	// Compress + broadcast now handled by Phase B async page scan thread above.
+	// No inline compression needed.
 	uint64_t compressUs = 0;
-	uint32_t compressedSize = totalSize;
-	if (maplecast_ws::active())
-	{
-		// Copy frame data so render thread can reuse the ring buffer
-		auto frameCopy = std::make_shared<std::vector<uint8_t>>(dstStart, dstStart + totalSize);
-
-		// Spawn async compress+broadcast
-		static std::thread::id _lastCompressThread;
-		static std::mutex _asyncCompressMtx;
-		static MirrorCompressor _asyncCompressor;
-		static bool _asyncCompressorInit = false;
-
-		// Lazy-init the async compressor (separate from the main one)
-		if (!_asyncCompressorInit) {
-			_asyncCompressor.init(16 * 1024 * 1024);
-			_asyncCompressorInit = true;
-		}
-
-		// Use a detached thread for the compress+broadcast.
-		// The mutex ensures only one compression runs at a time (serializes if overlapping).
-		std::thread([frameCopy, totalSize]() {
-			std::lock_guard<std::mutex> lock(_asyncCompressMtx);
-			uint64_t cUs = 0;
-			size_t compSize = 0;
-			const uint8_t* compData = _asyncCompressor.compress(
-				frameCopy->data(), totalSize, compSize, cUs);
-			maplecast_ws::broadcastBinary(compData, compSize);
-		}).detach();
-	}
+	uint32_t compressedSize = (uint32_t)preDiffSize; // approximate — real size computed async
 
 	// Update telemetry
 	{
@@ -1426,7 +1449,8 @@ done_diff:
 			_fpsCounter = 0;
 			_fpsStart = publishEnd;
 		}
-		maplecast_ws::updateTelemetry({frameNum, taSize, totalDirty, totalSize, publishUs, _lastFps, compressedSize, compressUs});
+		uint32_t estDirty = 0; // dirty count computed async, not available inline
+		maplecast_ws::updateTelemetry({frameNum, taSize, estDirty, (uint32_t)preDiffSize, publishUs, _lastFps, compressedSize, compressUs});
 	}
 
 	// Check if a client is requesting a fresh sync state
@@ -1460,9 +1484,8 @@ done_diff:
 	// Audit disabled — reduced to VRAM+PVR only
 
 	if (frameNum % 600 == 0)
-		printf("[MIRROR] Server frame %u | TA=%u bytes | %u dirty pages | %u->%u bytes (%.1fx) zstd %luus\n",
-			frameNum, taSize, totalDirty, totalSize, compressedSize,
-			compressedSize > 0 ? (double)totalSize / compressedSize : 0.0, compressUs);
+		printf("[MIRROR] Server frame %u | TA=%u bytes | async page scan | pre-diff=%zu bytes\n",
+			frameNum, taSize, preDiffSize);
 
 	// Restore PVR region pointer (paired with the atomic snapshot at the top)
 	if (_origPvrPtr) {
