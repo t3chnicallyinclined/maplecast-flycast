@@ -127,7 +127,8 @@ export class PVR2Renderer {
         this.uploadVerts(vertexData);
         this.dev.queue.writeBuffer(this.uBuf,0,this._ndcMat(pvrSnap));
         texMgr.updatePalette(texMgr._lastPvrRegs||new Uint8Array(32768));
-        this.texBGs.clear(); // Must rebuild bind groups when textures are re-decoded
+        // Only clear bind groups when textures were actually re-decoded (gen changed)
+        if(this._lastTexGen!==texMgr.gen){this.texBGs.clear();this._lastTexGen=texMgr.gen;}
 
         // Stage all frag uniforms
         let slot=0;
@@ -176,7 +177,7 @@ export class PVR2Renderer {
                 let dm=(isp>>29)&7,cm=(isp>>27)&3,zw=(isp>>26)&1?0:1;
                 if(lt==='opaque'&&dm===0)continue;
                 if(lt==='punch_through'||lt==='translucent')dm=6;
-                if(lt==='translucent')zw=0; if(lt==='punch_through')zw=1; // Translucent: NO depth write in color pass (multipass writes depth separately)
+                if(lt==='translucent')zw=0; if(lt==='punch_through')zw=1;
                 if(lt==='translucent'&&dbg.trDepthFunc!==undefined)dm=dbg.trDepthFunc;
                 if(lt==='translucent'&&dbg.trDepthWrite)zw=1;
                 let sb=(tsp>>29)&7, db=(tsp>>26)&7;
