@@ -132,17 +132,8 @@ export class PVR2Renderer {
         const headScale = (dbg.headSize || 250) / 100.0;
         if (charScale !== 1.0 || bigHead) {
             const vf = new Float32Array(vertexData.buffer, vertexData.byteOffset, vertexCount * 7);
-            // First pass: find shared center of all character polys (Y > 120)
-            let charCX=0, charCY=0, charVN=0;
-            for (const pp of translucent) {
-                if (pp.count < 3) continue;
-                let sumY=0;
-                for (let v=pp.first;v<pp.first+pp.count;v++) sumY+=vf[v*7+1];
-                if (sumY/pp.count <= 120) continue; // Skip HUD/timer
-                for (let v=pp.first;v<pp.first+pp.count;v++) { charCX+=vf[v*7]; charCY+=vf[v*7+1]; charVN++; }
-            }
-            if (charVN > 0) { charCX /= charVN; charCY /= charVN; }
-            // Second pass: scale around shared character center
+            // Fixed center point (screen center-bottom where characters stand)
+            const cx = 320, cy = 300;
             for (const pp of translucent) {
                 if (pp.count < 3) continue;
                 let sumY=0;
@@ -153,8 +144,8 @@ export class PVR2Renderer {
                 const scale = charScale * (1 + headFactor * (headScale - 1));
                 for (let v = pp.first; v < pp.first + pp.count; v++) {
                     const fi = v * 7;
-                    vf[fi] = charCX + (vf[fi] - charCX) * scale;
-                    vf[fi + 1] = charCY + (vf[fi + 1] - charCY) * scale;
+                    vf[fi] = cx + (vf[fi] - cx) * scale;
+                    vf[fi + 1] = cy + (vf[fi + 1] - cy) * scale;
                 }
             }
         }
