@@ -53,6 +53,8 @@ canvas{display:block;background:#000}
 <label><input type="checkbox" id="dbg_trDepthWrite"> Depth Write (trans)</label>
 <h2>Alpha</h2>
 <label>Discard threshold: <input type="range" id="dbg_alphaDiscard" min="0" max="255" value="1"> <span class="val" id="dbg_alphaDiscardVal">1</span></label>
+<label><input type="checkbox" id="dbg_discardTransOnly"> Discard trans only</label>
+<label><input type="checkbox" id="dbg_noDiscard"> No alpha discard</label>
 <h2>Blend Override</h2>
 <label><input type="checkbox" id="dbg_blendOverride"> Override blend</label>
 <label>Src: <select id="dbg_blendSrc"><option value="4" selected>SrcAlpha</option><option value="1">One</option><option value="0">Zero</option><option value="2">DstColor</option><option value="5">InvSrcAlpha</option></select></label>
@@ -132,6 +134,9 @@ trMax.oninput=e=>{DBG.trMax=+e.target.value;document.getElementById('dbg_trMaxVa
 opSkip.oninput=e=>{DBG.opSkip=+e.target.value;document.getElementById('dbg_opSkipVal').textContent=e.target.value;};
 opMax.oninput=e=>{DBG.opMax=+e.target.value;document.getElementById('dbg_opMaxVal').textContent=e.target.value;};
 DBG.trSkip=0;DBG.trMax=200;DBG.opSkip=0;DBG.opMax=600;
+document.getElementById('dbg_discardTransOnly').onchange=e=>DBG.discardTransOnly=e.target.checked;
+document.getElementById('dbg_noDiscard').onchange=e=>DBG.noDiscard=e.target.checked;
+DBG.discardTransOnly=false;DBG.noDiscard=false;
 document.getElementById('dbg_shadOverride').onchange=e=>DBG.shadOverride=e.target.checked;
 document.getElementById('dbg_shadInstr').onchange=e=>DBG.shadInstr=parseInt(e.target.value);
 document.getElementById('dbg_useAlpha').onchange=e=>DBG.useAlphaOverride=parseInt(e.target.value);
@@ -163,19 +168,22 @@ async function main(){
                 if(!T._lastPvrRegs||fr.vramDirty||DBG.texForceInvalidate){T.invalidateAll();T._lastPvrRegs=D.pvrRegs;T.updatePalette(D.pvrRegs);}
                 const t1=performance.now();
                 const g=P.parse(fr.taBuffer,fr.taSize);
+                // Fill background polygon from PVR registers + VRAM
+                try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e) { if(fc<2) console.error('[BGP]',e); }
                 pMs=performance.now()-t1;
-                // Dump vertex color for first translucent sprite (first 3 frames only)
-                if(fc<3&&g.translucent.length>0){
-                    const p0=g.translucent[0];
-                    if(p0.count>=3){
-                        const bi=p0.first*28;
-                        console.log('[vtxcol] trans[0] R='+g.vertexData[bi+12]+' G='+g.vertexData[bi+13]+' B='+g.vertexData[bi+14]+' A='+g.vertexData[bi+15]+
-                            ' | blend='+(((p0.tsp>>29)&7)+'/'+((p0.tsp>>26)&7))+' shad='+((p0.tsp>>6)&3)+' ua='+((p0.tsp>>20)&1));
+                if(fc<2){
+                    // Dump vertex colors across opaque list
+                    const indices = [0,1,2,5,10,50,100,200,400];
+                    for(const i of indices){
+                        if(i>=g.opaque.length)continue;
+                        const p=g.opaque[i];if(p.count<3)continue;
+                        const bi=p.first*28;
+                        const pcwPara=(p.pcw>>29)&7, objCtrl=p.pcw&0xFF, tex=(objCtrl>>3)&1;
+                        console.log(`[vtxcol] op[${i}] R=${g.vertexData[bi+12]} G=${g.vertexData[bi+13]} B=${g.vertexData[bi+14]} A=${g.vertexData[bi+15]} | shad=${(p.tsp>>6)&3} tex=${tex} obj=0x${objCtrl.toString(16)} para=${pcwPara}`);
                     }
-                    // Also dump first opaque
-                    if(g.opaque.length>0){const p1=g.opaque[0];if(p1.count>=3){const bi2=p1.first*28;
-                        console.log('[vtxcol] opaque[0] R='+g.vertexData[bi2+12]+' G='+g.vertexData[bi2+13]+' B='+g.vertexData[bi2+14]+' A='+g.vertexData[bi2+15]+
-                            ' | blend='+(((p1.tsp>>29)&7)+'/'+((p1.tsp>>26)&7))+' shad='+((p1.tsp>>6)&3)+' ua='+((p1.tsp>>20)&1));}}
+                    // First translucent
+                    if(g.translucent.length>0){const p=g.translucent[0];if(p.count>=3){const bi=p.first*28;
+                        console.log(`[vtxcol] tr[0] R=${g.vertexData[bi+12]} G=${g.vertexData[bi+13]} B=${g.vertexData[bi+14]} A=${g.vertexData[bi+15]} | shad=${(p.tsp>>6)&3}`);}}
                 }
                 const t2=performance.now();
                 // Pass debug state to renderer

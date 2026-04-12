@@ -143,10 +143,13 @@ export class PVR2Renderer {
             this.stagingDV.setUint32(o+16,(tsp>>19)&1,true);
             this.stagingDV.setUint32(o+20,(pcw>>2)&1,true);
             this.stagingDV.setUint32(o+24,lt==='punch_through'?1:0,true);
-            // Pack: low 8 bits = debug mode, bit 8 = Gouraud flag
+            // Pack: bits 0-7=debug mode, bit 8=Gouraud, bit 9=isTranslucent, bit 10=noDiscard, bit 11=discardTransOnly
             const modes={normal:0,solid:1,uv:2,depth:3,alpha:4};
             const gouraud = (pcw>>1)&1;
-            this.stagingDV.setUint32(o+28,(modes[dbg.shaderMode]||0)|(gouraud<<8),true);
+            const isTrans = lt==='translucent'?1:0;
+            const noDiscard = dbg.noDiscard?1:0;
+            const discTransOnly = dbg.discardTransOnly?1:0;
+            this.stagingDV.setUint32(o+28,(modes[dbg.shaderMode]||0)|(gouraud<<8)|(isTrans<<9)|(noDiscard<<10)|(discTransOnly<<11),true);
             pp._s=slot; slot++;
         }};
         stage(opaque,'opaque'); stage(punchThrough,'punch_through'); stage(translucent,'translucent');

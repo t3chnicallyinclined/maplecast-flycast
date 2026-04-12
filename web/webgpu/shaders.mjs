@@ -58,7 +58,16 @@ struct FOut { @builtin(frag_depth) depth: f32, @location(0) color: vec4<f32> };
 
     c = clamp(c, vec4<f32>(0.0), vec4<f32>(1.0));
     if (fu.at == 1u) { let qa = floor(c.a * 255.0 + 0.5) / 255.0; if (fu.atv > qa) { discard; } c.a = 1.0; }
-    if (c.a < 0.004) { discard; }
+    let isTrans = (fu.packed >> 9u) & 1u;
+    let noDiscard = (fu.packed >> 10u) & 1u;
+    let discTransOnly = (fu.packed >> 11u) & 1u;
+    if (noDiscard == 0u) {
+        if (discTransOnly == 1u) {
+            if (isTrans == 1u && c.a < 0.004) { discard; }
+        } else {
+            if (c.a < 0.004) { discard; }
+        }
+    }
 
     let logDepth = log2(1.0 + max(100000.0 * iw, -0.999999)) / 34.0;
     o.depth = logDepth;

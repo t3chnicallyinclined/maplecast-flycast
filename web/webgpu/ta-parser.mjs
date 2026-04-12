@@ -5,6 +5,7 @@ function f16(v) { const b = new ArrayBuffer(4); new Uint32Array(b)[0] = v << 16;
 function clamp255(f) { return Math.min(255, Math.max(0, (f * 255) | 0)); }
 
 const BYTES_PER_VERTEX = 28;
+const VRAM_MASK = 0x7FFFFF; // 8MB
 
 export class TAParser {
     constructor() {
@@ -201,5 +202,147 @@ export class TAParser {
                 if (last.count === 0) { last.count = this._n - last.first; if (last.count === 0) list.pop(); } }
         }
         return { vertexData: this._u8.subarray(0, this._n * BYTES_PER_VERTEX), vertexCount: this._n, opaque: op, punchThrough: pt, translucent: tr };
+    }
+
+    // Fill background polygon from PVR registers + VRAM (matches flycast FillBGP)
+    // Must be called AFTER parse() and inserts opaque[0] as a full-screen background quad
+    fillBGP(result, pvrRegs, vram) {
+        const rv = new DataView(pvrRegs.buffer, pvrRegs.byteOffset, pvrRegs.byteLength);
+        const paramBase = rv.getUint32(0x20, true) & 0xF00000;
+        const ispBgT = rv.getUint32(0x8C, true);
+        const ispBgD = rv.getFloat32(0x88, true);
+
+        // ISP_BACKGND_T fields
+        const tagOffset = ispBgT & 7;
+        const tagAddress = (ispBgT >> 3) & 0x1FFFFF;
+        const skip = (ispBgT >> 24) & 7;
+        const shadow = (ispBgT >> 27) & 1;
+
+        const stripBase = (paramBase + tagAddress * 4) & VRAM_MASK;
+        let stripVs = 3 + skip;
+        stripVs *= 4; // bytes per vertex entry
+
+        const vertexPtr0 = tagOffset * stripVs + stripBase + 12; // +12 skips ISP/TSP/TCW
+
+        // Read ISP/TSP/TCW from VRAM at strip_base
+        const vv = new DataView(vram.buffer, vram.byteOffset, vram.byteLength);
+        if (stripBase + 12 > vram.length) return;
+        const bgISP = vv.getUint32(stripBase, true);
+        const bgTSP = vv.getUint32(stripBase + 4, true);
+        const bgTCW = vv.getUint32(stripBase + 8, true);
+
+        // Decode ISP fields to build PCW
+        const isTexture = (bgISP >> 25) & 1;
+        const isOffset = (bgISP >> 24) & 1;
+        const isGouraud = (bgISP >> 23) & 1;
+        const isUV16 = (bgISP >> 22) & 1;
+        const bgPCW = (isUV16) | (isGouraud << 1) | (isOffset << 2) | (isTexture << 3);
+
+        // Read 3 vertices from VRAM
+        const bgVerts = [];
+        let vptr = vertexPtr0;
+        for (let i = 0; i < 3; i++) {
+            if (vptr + 12 > vram.length) return;
+            const x = vv.getFloat32(vptr, true);
+            const y = vv.getFloat32(vptr + 4, true);
+            const z = vv.getFloat32(vptr + 8, true);
+            let u = 0, v = 0, col = 0xFFFFFFFF, spc = 0;
+            let cptr = vptr + 12;
+
+            if (isTexture) {
+                if (isUV16) {
+                    const uvPacked = vv.getUint32(cptr, true);
+                    u = f16(uvPacked & 0xFFFF);
+                    v = f16((uvPacked >> 16) & 0xFFFF);
+                    cptr += 4;
+                } else {
+                    u = vv.getFloat32(cptr, true);
+                    v = vv.getFloat32(cptr + 4, true);
+                    cptr += 8;
+                }
+            }
+            if (cptr + 4 <= vram.length) {
+                col = vv.getUint32(cptr, true);
+                cptr += 4;
+            }
+            if (isOffset && cptr + 4 <= vram.length) {
+                spc = vv.getUint32(cptr, true);
+            }
+            bgVerts.push({ x, y, z, u, v, col, spc });
+            vptr += stripVs;
+        }
+
+        // Background depth
+        const bgDepth = Math.max(ispBgD - 1e-6, 1e-11);
+
+        // Build 4-vertex quad
+        let v0, v1, v2, v3;
+        if (!isTexture) {
+            // Non-textured: full-screen quad
+            v0 = { x: -256, y: 0, z: bgDepth, u: 0, v: 0, col: bgVerts[0].col, spc: bgVerts[0].spc };
+            v1 = { x: 896, y: 0, z: bgDepth, u: 0, v: 0, col: bgVerts[1].col, spc: bgVerts[1].spc };
+            v2 = { x: -256, y: 480, z: bgDepth, u: 0, v: 0, col: bgVerts[2].col, spc: bgVerts[2].spc };
+            v3 = { x: 896, y: 480, z: bgDepth, u: 0, v: 0, col: bgVerts[2].col, spc: bgVerts[2].spc };
+        } else {
+            // Textured: extend horizontally
+            v0 = { ...bgVerts[0], z: bgDepth };
+            v1 = { ...bgVerts[1], z: bgDepth };
+            v2 = { ...bgVerts[2], z: bgDepth };
+            const deltaU = (v1.u - v0.u) * 0.4;
+            v0.x -= 256; v0.u -= deltaU;
+            v1.x += 256; v1.u += deltaU;
+            v2.x -= 256; v2.u -= deltaU;
+            v3 = { ...v2, x: v1.x, u: v1.u };
+        }
+
+        // Emit 4 background vertices at the START of the vertex buffer
+        // Shift all existing vertices forward by 4
+        const oldN = this._n;
+        const shiftBy = 4;
+        // Grow buffer if needed
+        while (this._n + shiftBy > this._cap) this._grow();
+
+        // Shift existing vertex data forward
+        const shiftBytes = shiftBy * BYTES_PER_VERTEX;
+        this._u8.copyWithin(shiftBytes, 0, oldN * BYTES_PER_VERTEX);
+        this._n = oldN + shiftBy;
+
+        // Write background vertices at position 0-3
+        const emit = (idx, vtx) => {
+            const fi = idx * 7, bi = idx * BYTES_PER_VERTEX;
+            this._f32[fi] = vtx.x; this._f32[fi+1] = vtx.y; this._f32[fi+2] = vtx.z;
+            // Packed color ARGB → RGBA bytes
+            this._u8[bi+12] = (vtx.col>>16)&0xFF;
+            this._u8[bi+13] = (vtx.col>>8)&0xFF;
+            this._u8[bi+14] = vtx.col&0xFF;
+            this._u8[bi+15] = (vtx.col>>24)&0xFF;
+            this._u8[bi+16] = (vtx.spc>>16)&0xFF;
+            this._u8[bi+17] = (vtx.spc>>8)&0xFF;
+            this._u8[bi+18] = vtx.spc&0xFF;
+            this._u8[bi+19] = (vtx.spc>>24)&0xFF;
+            this._f32[fi+5] = vtx.u; this._f32[fi+6] = vtx.v;
+        };
+        emit(0, v0); emit(1, v1); emit(2, v2); emit(3, v3);
+
+        // Update all poly param first/count to account for the shift
+        for (const list of [result.opaque, result.punchThrough, result.translucent]) {
+            for (const pp of list) { pp.first += shiftBy; }
+        }
+
+        // Insert background poly as opaque[0]
+        const bgPP = {
+            first: 0, count: 4,
+            isp: (7 << 29) | (bgISP & 0x1FFFFFFF), // DepthMode=7 (always), keep rest
+            tsp: bgTSP, tcw: bgTCW,
+            pcw: (4 << 29) | bgPCW, // ParaType=4, obj_ctrl from ISP
+            tileclip: 0,
+        };
+        // Force DepthMode=7 (always pass) and CullMode=0 (no cull)
+        bgPP.isp = (bgPP.isp & ~(7 << 27)) | (0 << 27); // CullMode=0
+        bgPP.isp = (bgPP.isp & ~(7 << 29)) | (7 << 29); // DepthMode=7
+
+        result.opaque.unshift(bgPP);
+        result.vertexData = this._u8.subarray(0, this._n * BYTES_PER_VERTEX);
+        result.vertexCount = this._n;
     }
 }
