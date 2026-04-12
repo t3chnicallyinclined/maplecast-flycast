@@ -908,6 +908,83 @@ copy of the workstream doc — not committed to the public repo).
 
 ---
 
+### Mode 4: WebGPU (Pure JS, Zero WASM)
+
+Pure JavaScript + WebGPU renderer. No WASM, no compile step, no build
+toolchain. Edit a `.mjs` file, refresh the browser, see the result. Lives
+at `web/webgpu-test.html` and `web/webgpu/*.mjs`. See
+[WEBGPU-RENDERER.md](WEBGPU-RENDERER.md) for full architecture details.
+
+**Key differences from king.html WASM path:**
+- Decode/parse/render all in JS (~5 KB modules + 60 KB vendored fzstd)
+- WebGPU instead of WebGL2
+- WebTransport (QUIC/UDP) with WebSocket fallback
+- 1.88 ms per-frame process time (11% of 16.67 ms budget)
+- Vsync-decoupled: network decode runs on arrival, RAF renders latest geometry
+
+---
+
+## WebTransport — QUIC/UDP Streaming
+
+### Why WebTransport
+
+The TA mirror stream is inherently loss-tolerant: delta frames are disposable
+(the next keyframe, emitted every 60 frames, corrects any drift), while SYNC
+packets must arrive intact. TCP (WebSocket) forces reliable delivery of every
+byte, causing head-of-line blocking when a delta packet is lost — the entire
+stream stalls while TCP retransmits a frame the renderer doesn't even need.
+
+WebTransport over QUIC provides separate channels: **unreliable datagrams**
+for disposable delta frames (no retransmit, no HOL blocking) and **reliable
+unidirectional streams** for SYNC packets (guaranteed delivery).
+
+### Adaptive transport
+
+Implemented in `web/webgpu/transport.mjs`. The `AdaptiveTransport` class
+tries WebTransport first with a 3-second timeout, then falls back to
+WebSocket. Callers receive frames via a unified `onframe(Uint8Array)`
+callback regardless of underlying transport.
+
+### Relay dual-listener architecture
+
+The Rust relay runs two listeners on the VPS:
+
+| Listener | Port | Protocol | Purpose |
+|----------|------|----------|---------|
+| QUIC | UDP :443 | WebTransport | Browsers with WebTransport support |
+| WebSocket | TCP :7201 | WS (via nginx /ws) | Legacy browsers, native clients |
+
+Both listeners share the same upstream connection to `ws://127.0.0.1:7210`
+(flycast headless on loopback). Compressed ZCST frames are forwarded
+verbatim — zero re-encode on either path. The relay uses the `wtransport`
+Rust crate for the QUIC listener, sharing the same Let's Encrypt TLS
+certificate as nginx.
+
+**Forwarding rule:** The relay MUST NOT forward `join`/`leave` control
+messages to the upstream flycast server. The relay manages its own client
+roster; forwarding these causes slot conflicts. Only gamepad input and
+queue commands are relayed upstream.
+
+### Measured performance (April 2026)
+
+| Metric | WebTransport (QUIC/UDP) | WebSocket (TCP) |
+|--------|------------------------|-----------------|
+| RTT | **45.6 ms** | 72 ms |
+| Process time | **1.88 ms** | ~2.06 ms |
+| True E2E (RTT/2 + process) | **24.7 ms** | ~38 ms |
+| Delta frame loss rate | ~0.1% | 0% |
+| Recovery from loss | Next keyframe (< 1 second) | N/A |
+
+The 37% RTT improvement comes from eliminating TCP head-of-line blocking.
+The process time improvement comes from vsync decoupling enabled by
+datagram arrival (no TCP ordering delay). For MVC2, 13 ms saved is nearly
+one full frame of reduced input-to-pixel latency.
+
+For the full WebGPU renderer architecture, texture decode pipeline, rendering
+details, and known issues, see [WEBGPU-RENDERER.md](WEBGPU-RENDERER.md).
+
+---
+
 ## Connection Flow — How Players Connect
 
 ```
