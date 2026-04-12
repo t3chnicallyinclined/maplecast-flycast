@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MapleCast WebGPU</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#111;color:#eee;font-family:'Courier New',monospace;display:flex;flex-direction:column;align-items:center;min-height:100vh}
+h1{font-size:14px;padding:8px;color:#0f0;text-transform:uppercase;letter-spacing:2px}
+#wrap{position:relative;border:1px solid #333}
+canvas{display:block;background:#000}
+#ov{position:absolute;top:4px;left:4px;font-size:11px;color:#0f0;background:rgba(0,0,0,.7);padding:4px 8px;pointer-events:none;white-space:pre;line-height:1.4}
+#st{padding:8px;font-size:12px;color:#888}
+.err{color:#f44}.ok{color:#0f0}
+</style>
+</head>
+<body>
+<h1>MapleCast WebGPU Renderer</h1>
+<div id="wrap">
+    <canvas id="c" width="640" height="480"></canvas>
+    <div id="ov">Initializing...</div>
+</div>
+<div id="st">Connecting...</div>
+<script type="module">
+import {FrameDecoder} from './webgpu/frame-decoder.mjs';
+import {TAParser} from './webgpu/ta-parser.mjs';
+import {TextureManager} from './webgpu/texture-manager.mjs';
+import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs';
+
+const canvas=document.getElementById('c'), ov=document.getElementById('ov'), st=document.getElementById('st');
+let fc=0,lt=performance.now(),fps=0,dMs=0,pMs=0,rMs=0,wB=0,lastVerts=0,lastOp=0,lastPt=0,lastTr=0,lastTaSize=0,gpuErrs='';
+const ss=(m,c='')=>{st.textContent=m;st.className=c};
+
+async function main(){
+    if(!navigator.gpu){ss('WebGPU not supported. Use Chrome 113+.','err');return;}
+    const R=new PVR2Renderer();
+    try{await R.init(canvas);ss('WebGPU OK','ok');
+        R.dev.addEventListener('uncapturederror',(e)=>{gpuErrs='GPU: '+e.error.message;console.error('[webgpu]',e.error.message);});
+    }catch(e){ss('Init failed: '+e.message,'err');return;}
+    const D=new FrameDecoder(),P=new TAParser(),T=new TextureManager(R.dev);
+
+    function connect(){
+        ss('Connecting...');
+        const ws=new WebSocket('wss://nobd.net/ws');
+        ws.binaryType='arraybuffer';
+        ws.onopen=()=>ss('Connected — waiting for SYNC','ok');
+        ws.onclose=()=>{ss('Disconnected');setTimeout(connect,2000);};
+        ws.onerror=()=>{};
+        ws.onmessage=(e)=>{
+            if(typeof e.data==='string')return;
+            const d=new Uint8Array(e.data); wB+=d.byteLength;
+            try{
+                const t0=performance.now();
+                const fr=D.applyFrame(d);
+                dMs=performance.now()-t0;
+                if(!fr)return;
+                if(!T._lastPvrRegs||fr.vramDirty){T.invalidateAll();T._lastPvrRegs=D.pvrRegs;T.updatePalette(D.pvrRegs);}
+                const t1=performance.now();
+                const g=P.parse(fr.taBuffer,fr.taSize);
+                pMs=performance.now()-t1;
+                lastVerts=g.vertexCount;lastOp=g.opaque.length;lastPt=g.punchThrough.length;lastTr=g.translucent.length;lastTaSize=fr.taSize;
+                if(fc<3&&g.vertexCount>0){
+                    // Dump first 5 polys with their vertex positions
+                    const fv=new Float32Array(g.vertexData.buffer,g.vertexData.byteOffset,g.vertexCount*7);
+                    const uv=new Uint8Array(g.vertexData.buffer,g.vertexData.byteOffset,g.vertexCount*28);
+                    console.log('[diag] TRANSLUCENT polys:');
+                    for(let pi=0;pi<Math.min(5,g.translucent.length);pi++){
+                        const p=g.translucent[pi];
+                        if(p.count<3)continue;
+                        let s=`[diag] poly${pi}: first=${p.first} count=${p.count} pcw=0x${p.pcw.toString(16)} obj=0x${(p.pcw&0xFF).toString(16)} | verts:`;
+                        for(let vi=0;vi<Math.min(p.count,6);vi++){
+                            const idx=p.first+vi;
+                            if(idx>=g.vertexCount)break;
+                            const fi=idx*7;
+                            s+=` (${fv[fi].toFixed(0)},${fv[fi+1].toFixed(0)} u=${fv[fi+5].toFixed(3)} v=${fv[fi+6].toFixed(3)})`;
+                        }
+                        console.log(s);
+                    }
+                    console.log('[diag] ndcW='+(((fr.pvrSnapshot[0]&0x3F)+1)*32)+' ndcH='+((((fr.pvrSnapshot[0]>>16)&0x3F)+1)*32));
+                }
+                const t2=performance.now();
+                R.renderFrame(g,T,fr.pvrSnapshot,D.vram);
+                rMs=performance.now()-t2;
+                fc++;
+            }catch(ex){console.error('[webgpu]',ex);}
+        };
+    }
+
+    (function tick(){
+        const now=performance.now(),el=now-lt;
+        if(el>=1000){fps=(fc/el*1000).toFixed(1);fc=0;lt=now;}
+        const kb=(wB*8/1000).toFixed(0);wB=0;
+        ov.textContent=`FPS: ${fps}\nDecode: ${dMs.toFixed(2)}ms\nParse:  ${pMs.toFixed(2)}ms\nRender: ${rMs.toFixed(2)}ms\nTotal:  ${(dMs+pMs+rMs).toFixed(2)}ms\nStream: ${kb} kbps\nFrame:  ${D.frameNum}\nVerts:  ${lastVerts}  TA: ${lastTaSize}B\nDraws:  Op=${lastOp} PT=${lastPt} Tr=${lastTr}\nStats:  S=${D.stats.syncs} K=${D.stats.keyframes} D=${D.stats.deltas}\n${gpuErrs}`;
+        requestAnimationFrame(tick);
+    })();
+    connect();
+}
+main().catch(e=>{ss('Fatal: '+e.message,'err');console.error(e);});
+</script>
+</body>
+</html>
