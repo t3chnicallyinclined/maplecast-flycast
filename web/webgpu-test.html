@@ -122,9 +122,9 @@ canvas{display:block;background:#000}
 <h2 style="color:#0f0">🕹️ PLAY</h2>
 <h2>List Inspector</h2>
 <label>Trans skip first: <input type="range" id="dbg_trSkip" min="0" max="500" value="0"> <span class="val" id="dbg_trSkipVal">0</span></label>
-<label>Trans max draw: <input type="range" id="dbg_trMax" min="0" max="500" value="500"> <span class="val" id="dbg_trMaxVal">500</span></label>
+<label>Trans max draw: <input type="range" id="dbg_trMax" min="0" max="500" value="0"> <span class="val" id="dbg_trMaxVal">0 (all)</span></label>
 <label>Opaque skip first: <input type="range" id="dbg_opSkip" min="0" max="800" value="0"> <span class="val" id="dbg_opSkipVal">0</span></label>
-<label>Opaque max draw: <input type="range" id="dbg_opMax" min="0" max="800" value="800"> <span class="val" id="dbg_opMaxVal">800</span></label>
+<label>Opaque max draw: <input type="range" id="dbg_opMax" min="0" max="800" value="0"> <span class="val" id="dbg_opMaxVal">0 (all)</span></label>
 <h2>Shading Override</h2>
 <label><input type="checkbox" id="dbg_shadOverride"> Override ShadInstr</label>
 <label>ShadInstr: <select id="dbg_shadInstr">
@@ -213,7 +213,7 @@ trSkip.oninput=e=>{DBG.trSkip=+e.target.value;document.getElementById('dbg_trSki
 trMax.oninput=e=>{DBG.trMax=+e.target.value;document.getElementById('dbg_trMaxVal').textContent=e.target.value;};
 opSkip.oninput=e=>{DBG.opSkip=+e.target.value;document.getElementById('dbg_opSkipVal').textContent=e.target.value;};
 opMax.oninput=e=>{DBG.opMax=+e.target.value;document.getElementById('dbg_opMaxVal').textContent=e.target.value;};
-DBG.trSkip=0;DBG.trMax=500;DBG.opSkip=0;DBG.opMax=800;
+DBG.trSkip=0;DBG.trMax=0;DBG.opSkip=0;DBG.opMax=0;
 document.getElementById('dbg_discardTransOnly').onchange=e=>DBG.discardTransOnly=e.target.checked;
 document.getElementById('dbg_noDiscard').onchange=e=>DBG.noDiscard=e.target.checked;
 DBG.discardTransOnly=false;DBG.noDiscard=false;
