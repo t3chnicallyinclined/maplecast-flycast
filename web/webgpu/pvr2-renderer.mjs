@@ -162,7 +162,7 @@ export class PVR2Renderer {
         }
         if (dbg.mirror) { ndcMat[0] = -ndcMat[0]; ndcMat[12] = -ndcMat[12]; }
         this.dev.queue.writeBuffer(this.uBuf, 0, ndcMat);
-        texMgr.updatePalette(texMgr._lastPvrRegs||new Uint8Array(32768));
+        // Palette already updated per-frame in webgpu-test.html via setDirtyPages + updatePalette
         this.texBGs.clear(); // Must rebuild bind groups when textures are re-decoded
 
         // Stage all frag uniforms

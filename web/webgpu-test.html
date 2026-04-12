@@ -275,11 +275,10 @@ async function main(){
                 const fr=D.applyFrame(d);
                 dMs=performance.now()-t0;
                 if(!fr)return;
-                // Texture invalidation: full invalidation on VRAM changes for now
-                // (dirty-page-aware caching needs more work on page range matching)
-                if(!T._lastPvrRegs||fr.vramDirty||DBG.texForceInvalidate){T.invalidateAll();}
-                T._lastPvrRegs=D.pvrRegs;
-                if(fr.vramDirty||fr.pvrDirty)T.updatePalette(D.pvrRegs);
+                // Dirty-page-aware texture cache: only re-decode textures whose VRAM pages changed
+                if(DBG.texForceInvalidate) T.invalidateAll();
+                T.setDirtyPages(fr.dirtyPageList, fr.pvrDirty);
+                if(!T._pal||fr.vramDirty||fr.pvrDirty) T.updatePalette(D.pvrRegs);
                 const t1=performance.now();
                 const g=P.parse(fr.taBuffer,fr.taSize);
                 // Fill background polygon from PVR registers + VRAM
@@ -418,11 +417,12 @@ Max:     ${e2eMax.toFixed(2)}ms
 --- Stats -----------------------
 Frames:  ${totalFrames} | Stream: ${kb}kbps
 Tex$:    H=${ts.hits} M=${ts.misses} R=${ts.reused}
+Dirty:   ${ts.dirtyDecodes} re-decoded
 VQ: ${ts.vq}  Mip: ${ts.mip}  Unsup: ${ts.unsupported}
 Passes:  ${parsed_passes} | Frame ${D.frameNum}
 =================================`;
             if(e2eCount>300){e2eSum=0;e2eCount=0;e2eMax=0;e2eMin=999;}
-            ts.hits=0;ts.misses=0;ts.reused=0;ts.vq=0;ts.mip=0;ts.unsupported=0;
+            ts.hits=0;ts.misses=0;ts.reused=0;ts.vq=0;ts.mip=0;ts.unsupported=0;ts.dirtyDecodes=0;
         }
         requestAnimationFrame(tick);
     })();
