@@ -88,8 +88,8 @@ canvas{display:block;background:#000}
 <option value="0">Force OFF</option>
 <option value="1">Force ON</option>
 </select></label>
-<h2>Poly Info (first visible)</h2>
-<pre id="dbg_polyInfo" style="font-size:9px;color:#aaa;white-space:pre-wrap;word-break:break-all">—</pre>
+<h2>Live Render Stats</h2>
+<pre id="dbg_stats" style="font-size:9px;color:#0f0;background:#000;padding:4px;white-space:pre;overflow-y:auto;max-height:300px;border:1px solid #333">—</pre>
 </div>
 
 <script type="module">
@@ -171,19 +171,67 @@ async function main(){
                 // Fill background polygon from PVR registers + VRAM
                 try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e) { if(fc<2) console.error('[BGP]',e); }
                 pMs=performance.now()-t1;
+                // Dump HUD polys (450-470) on first frame
                 if(fc<2){
-                    // Dump vertex colors across opaque list
-                    const indices = [0,1,2,5,10,50,100,200,400];
-                    for(const i of indices){
-                        if(i>=g.opaque.length)continue;
+                    for(let i=445;i<Math.min(465,g.opaque.length);i++){
                         const p=g.opaque[i];if(p.count<3)continue;
                         const bi=p.first*28;
-                        const pcwPara=(p.pcw>>29)&7, objCtrl=p.pcw&0xFF, tex=(objCtrl>>3)&1;
-                        console.log(`[vtxcol] op[${i}] R=${g.vertexData[bi+12]} G=${g.vertexData[bi+13]} B=${g.vertexData[bi+14]} A=${g.vertexData[bi+15]} | shad=${(p.tsp>>6)&3} tex=${tex} obj=0x${objCtrl.toString(16)} para=${pcwPara}`);
+                        const vd=g.vertexData;
+                        const x=new Float32Array(vd.buffer,vd.byteOffset+bi,1)[0];
+                        const y=new Float32Array(vd.buffer,vd.byteOffset+bi+4,1)[0];
+                        const obj=p.pcw&0xFF,tex=(obj>>3)&1,fmt=tex?((p.tcw>>27)&7):-1;
+                        const sb=(p.tsp>>29)&7,db=(p.tsp>>26)&7,si=(p.tsp>>6)&3;
+                        const ua=(p.tsp>>20)&1,ita=(p.tsp>>19)&1;
+                        console.log(`[HUD] op[${i}] pos=(${x.toFixed(0)},${y.toFixed(0)}) cnt=${p.count} R=${vd[bi+12]} G=${vd[bi+13]} B=${vd[bi+14]} A=${vd[bi+15]} | blend=${sb}/${db} shad=${si} tex=${tex} fmt=${fmt} ua=${ua} ita=${ita} obj=0x${obj.toString(16)}`);
                     }
-                    // First translucent
-                    if(g.translucent.length>0){const p=g.translucent[0];if(p.count>=3){const bi=p.first*28;
-                        console.log(`[vtxcol] tr[0] R=${g.vertexData[bi+12]} G=${g.vertexData[bi+13]} B=${g.vertexData[bi+14]} A=${g.vertexData[bi+15]} | shad=${(p.tsp>>6)&3}`);}}
+                }
+                // Live render stats
+                if(fc%30===0){
+                    const blendModes={},shadInstrs={},texFmts={},listCounts={op:0,pt:0,tr:0};
+                    const depthModes={},cullModes={},uaFlags={},itaFlags={};
+                    let noTexCount=0,texCount=0,totalVerts=g.vertexCount;
+                    const analyze=(list,name)=>{
+                        for(const p of list){
+                            if(p.count<3)continue;
+                            listCounts[name]=(listCounts[name]||0)+1;
+                            const tsp=p.tsp,pcw=p.pcw,isp=p.isp;
+                            const sb=(tsp>>29)&7,db=(tsp>>26)&7,si=(tsp>>6)&3;
+                            const ua=(tsp>>20)&1,ita=(tsp>>19)&1;
+                            const tex=(pcw>>3)&1,dm=(isp>>29)&7,cm=(isp>>27)&3;
+                            const fmt=tex?((p.tcw>>27)&7):-1;
+                            const bk=`${sb}/${db}`;
+                            blendModes[bk]=(blendModes[bk]||0)+1;
+                            shadInstrs[si]=(shadInstrs[si]||0)+1;
+                            if(tex){texCount++;if(fmt>=0)texFmts[fmt]=(texFmts[fmt]||0)+1;}
+                            else noTexCount++;
+                            depthModes[dm]=(depthModes[dm]||0)+1;
+                            cullModes[cm]=(cullModes[cm]||0)+1;
+                            uaFlags[ua]=(uaFlags[ua]||0)+1;
+                            itaFlags[ita]=(itaFlags[ita]||0)+1;
+                        }
+                    };
+                    analyze(g.opaque,'op');analyze(g.punchThrough,'pt');analyze(g.translucent,'tr');
+                    const fmtNames={0:'1555',1:'565',2:'4444',3:'YUV',4:'Bump',5:'Pal4',6:'Pal8',7:'Rsv'};
+                    const blendNames={0:'Zero',1:'One',2:'Other',3:'InvOther',4:'SrcA',5:'InvSrcA',6:'DstA',7:'InvDstA'};
+                    let s=`LISTS: Op=${listCounts.op||0} PT=${listCounts.pt||0} Tr=${listCounts.tr||0}\n`;
+                    s+=`VERTS: ${totalVerts}  TEX: ${texCount}  NOTEX: ${noTexCount}\n\n`;
+                    s+=`BLEND MODES:\n`;
+                    for(const[k,v]of Object.entries(blendModes).sort((a,b)=>b[1]-a[1])){
+                        const[sb,db]=k.split('/');
+                        s+=`  ${blendNames[sb]||sb}/${blendNames[db]||db}: ${v}\n`;
+                    }
+                    s+=`\nSHAD INSTR:\n`;
+                    const siNames={0:'Replace',1:'ModRGB',2:'Decal',3:'ModAll'};
+                    for(const[k,v]of Object.entries(shadInstrs))s+=`  ${siNames[k]||k}: ${v}\n`;
+                    s+=`\nTEX FORMATS:\n`;
+                    for(const[k,v]of Object.entries(texFmts))s+=`  ${fmtNames[k]||k}: ${v}\n`;
+                    s+=`\nDEPTH MODES:\n`;
+                    const dmNames={0:'Never',1:'Less',2:'Equal',3:'LessEq',4:'Greater',5:'NotEq',6:'GreaterEq',7:'Always'};
+                    for(const[k,v]of Object.entries(depthModes))s+=`  ${dmNames[k]||k}: ${v}\n`;
+                    s+=`\nCULL: `;for(const[k,v]of Object.entries(cullModes))s+=`${k}:${v} `;
+                    s+=`\nUseAlpha: `;for(const[k,v]of Object.entries(uaFlags))s+=`${k}:${v} `;
+                    s+=`\nIgnoreTexA: `;for(const[k,v]of Object.entries(itaFlags))s+=`${k}:${v} `;
+                    document.getElementById('dbg_stats').textContent=s;
                 }
                 const t2=performance.now();
                 // Pass debug state to renderer
