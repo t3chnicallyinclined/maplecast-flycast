@@ -8,6 +8,7 @@ import { TAParser } from '../webgpu/ta-parser.mjs';
 import { TextureManager } from '../webgpu/texture-manager.mjs';
 import { PVR2Renderer } from '../webgpu/pvr2-renderer.mjs';
 import { PostProcessor } from '../webgpu/post-process.mjs';
+import { AdaptiveTransport } from '../webgpu/transport.mjs';
 import { state } from './state.mjs';
 
 let R, D, P, T, PP;
@@ -50,13 +51,21 @@ export async function initRenderer() {
     P = new TAParser();
     T = new TextureManager(R.dev);
 
-    // Connect to stream
-    const { getRendererWsUrl, getRendererAudioWsUrl } = await import('./ws-connection.mjs');
+    // Connect via AdaptiveTransport (WebTransport QUIC first, WebSocket fallback)
+    const { getRendererWsUrl } = await import('./ws-connection.mjs');
     const wsUrl = await getRendererWsUrl();
-    const audioWsUrl = await getRendererAudioWsUrl();
+    const host = location.hostname;
 
-    console.log('[webgpu-bridge] Connecting to', wsUrl);
-    connectStream(wsUrl);
+    const transport = new AdaptiveTransport({
+        wsUrl: wsUrl,
+        wtUrl: `https://${host}/webtransport`,
+        onstatus: (msg) => console.log('[webgpu-bridge]', msg),
+        onopen: () => console.log('[webgpu-bridge] Stream connected via', transport.type),
+        onclose: () => console.log('[webgpu-bridge] Stream disconnected'),
+        onframe: handleFrame,
+    });
+    transport.connect();
+    window._transport = transport; // Expose for gamepad QUIC input
 
     // Audio
     try {
@@ -119,41 +128,31 @@ export async function initRenderer() {
     console.log('[webgpu-bridge] Controls exposed: window.webgpuDBG (try webgpuDBG.bloom=true)');
 }
 
-function connectStream(wsUrl) {
-    const ws = new WebSocket(wsUrl);
-    ws.binaryType = 'arraybuffer';
-    ws.onopen = () => console.log('[webgpu-bridge] Stream connected');
-    ws.onclose = () => { console.log('[webgpu-bridge] Stream disconnected, reconnecting...'); setTimeout(() => connectStream(wsUrl), 2000); };
-    ws.onerror = () => {};
-    ws.onmessage = (e) => {
-        if (typeof e.data === 'string') return;
-        const d = new Uint8Array(e.data);
-
-        // Audio packet
-        if (d.length >= 4 && d[0] === 0xAD && d[1] === 0x10) {
-            if (_audioWorkletPort) {
-                _audioWorkletPort.postMessage(new Int16Array(d.buffer, d.byteOffset + 4, (d.length - 4) / 2));
-            }
-            return;
+function handleFrame(d) {
+    // Audio packet
+    if (d.length >= 4 && d[0] === 0xAD && d[1] === 0x10) {
+        if (_audioWorkletPort) {
+            _audioWorkletPort.postMessage(new Int16Array(d.buffer, d.byteOffset + 4, (d.length - 4) / 2));
         }
+        return;
+    }
 
-        try {
-            const fr = D.applyFrame(d);
-            if (!fr) return;
+    try {
+        const fr = D.applyFrame(d);
+        if (!fr) return;
 
-            T.setDirtyPages(fr.dirtyPageList, fr.pvrDirty);
-            if (!T._pal || fr.vramDirty || fr.pvrDirty) T.updatePalette(D.pvrRegs);
+        T.setDirtyPages(fr.dirtyPageList, fr.pvrDirty);
+        if (!T._pal || fr.vramDirty || fr.pvrDirty) T.updatePalette(D.pvrRegs);
 
-            const g = P.parse(fr.taBuffer, fr.taSize);
-            try { P.fillBGP(g, D.pvrRegs, D.vram); } catch (e2) {}
+        const g = P.parse(fr.taBuffer, fr.taSize);
+        try { P.fillBGP(g, D.pvrRegs, D.vram); } catch (e2) {}
 
-            if (_pendingFrame) _telemetry.framesDropped++;
-            _pendingFrame = g;
-            _pendingSnap = fr.pvrSnapshot;
-        } catch (ex) {
-            console.error('[webgpu-bridge]', ex);
-        }
-    };
+        if (_pendingFrame) _telemetry.framesDropped++;
+        _pendingFrame = g;
+        _pendingSnap = fr.pvrSnapshot;
+    } catch (ex) {
+        console.error('[webgpu-bridge]', ex);
+    }
 }
 
 export function setOpt(opt, val) {
