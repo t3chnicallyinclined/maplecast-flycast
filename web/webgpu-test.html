@@ -141,8 +141,8 @@ canvas{display:block;background:#000}
 <label><input type="checkbox" id="fx_15"> 🌊 Underwater</label>
 <h2 style="color:#f0f">GRAPHICS ENHANCE</h2>
 <label>Resolution: <select id="gfx_res">
-<option value="1" selected>1x (640×480)</option>
-<option value="2">2x (1280×960)</option>
+<option value="1">1x (640×480)</option>
+<option value="2" selected>2x (1280×960)</option>
 <option value="3">3x (1920×1440)</option>
 <option value="4">4x (2560×1920)</option>
 <option value="6">6x (3840×2880)</option>
@@ -320,7 +320,7 @@ async function main(){
     const PP=new PostProcessor();
     PP.init(R.dev, R.fmt);
     window._resizeRenderer=()=>PP.ensureTargets(640, 480, DBG.resScale||1);
-    PP.ensureTargets(640, 480, DBG.resScale||1);
+    PP.ensureTargets(640, 480, DBG.resScale||2);
     let lastParsed=null;
     document.getElementById('dbg_dumpFrame').onclick=()=>{
         if(!lastParsed){console.log('[dump] no frame yet');return;}

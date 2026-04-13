@@ -28,11 +28,16 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
 @vertex fn vs(@builtin(vertex_index) vi: u32) -> VOut {
     var o: VOut;
-    // Fullscreen triangle
-    let x = f32((vi & 1u) << 1u) - 1.0;
-    let y = f32((vi & 2u)) - 1.0;
-    o.pos = vec4<f32>(x, -y, 0.0, 1.0);
-    o.uv = vec2<f32>((x + 1.0) * 0.5, (y + 1.0) * 0.5);
+    // Fullscreen triangle: 3 vertices cover entire screen
+    // vi=0: (-1,-1)  vi=1: (3,-1)  vi=2: (-1,3)
+    var pos = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0)
+    );
+    let p = pos[vi];
+    o.pos = vec4<f32>(p, 0.0, 1.0);
+    o.uv = vec2<f32>(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
     return o;
 }
 
