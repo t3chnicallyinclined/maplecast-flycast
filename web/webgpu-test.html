@@ -204,8 +204,6 @@ canvas{display:block;background:transparent}
 <button id="gfx_loadBg" style="width:48%;background:#333;color:#0f0;border:1px solid #0f0;padding:3px;cursor:pointer;font-family:inherit;font-size:9px">Image</button>
 <button id="gfx_loadVid" style="width:48%;background:#333;color:#0ff;border:1px solid #0ff;padding:3px;cursor:pointer;font-family:inherit;font-size:9px">Video</button>
 <button id="gfx_load3d" style="width:48%;background:#333;color:#ff0;border:1px solid #ff0;padding:3px;cursor:pointer;font-family:inherit;font-size:9px">GLB Model</button>
-<input type="text" id="gfx_aiPrompt" placeholder="AI prompt: cyberpunk arena..." style="width:95%;background:#222;color:#f0f;border:1px solid #808;padding:4px;font-family:inherit;font-size:10px;margin:4px 0">
-<button id="gfx_genBg" style="width:100%;background:#303;color:#f0f;border:1px solid #f0f;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Generate AI Background</button>
 <div id="gfx_bgStatus" style="font-size:9px;color:#555;margin:2px 0">No background loaded</div>
 <h2 style="color:#0ff">🔧 TRANSFORMS</h2>
 <label>Zoom: <input type="range" id="fx_zoom" min="50" max="300" value="100"> <span class="val" id="fx_zoomVal">100%</span></label>
@@ -657,26 +655,7 @@ document.querySelectorAll('.stgBtn').forEach(btn=>btn.onclick=()=>{
     DBG.customBg=true;document.getElementById('gfx_customBg').checked=true;
     document.getElementById('gfx_bgStatus').textContent='Stage: '+btn.textContent;
 });
-document.getElementById('gfx_genBg').onclick=async()=>{
-    const prompt=document.getElementById('gfx_aiPrompt').value.trim()||'massive holographic Marvel vs Capcom 2 arena floating in space, neon purple and blue energy rings, cyberpunk megacity skyline, volumetric god rays, comic book style, ultra detailed 3D render';
-    document.getElementById('gfx_bgStatus').textContent='Generating with Flux Pro Ultra...';
-    try{
-        // fal.ai Flux Schnell via HF Router — 0.2s inference!
-        const resp=await fetch('https://router.huggingface.co/fal-ai/fal-ai/flux-pro/v1.1-ultra',{
-            method:'POST',
-            headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window._hfToken||prompt('Enter HF Token:'))},
-            body:JSON.stringify({prompt:'Photorealistic 3D rendered fighting game arena stage, no characters no text no UI: '+prompt,image_size:{width:1408,height:1024},num_images:1,safety_tolerance:'6'})
-        });
-        const data=await resp.json();
-        if(data.images&&data.images[0]&&data.images[0].url){
-            document.getElementById('gfx_bgUrl').value=data.images[0].url;
-            document.getElementById('gfx_bgStatus').textContent='Generated in '+(data.timings?.inference?.toFixed(1)||'?')+'s! Loading...';
-            document.getElementById('gfx_loadBg').click();
-        } else {
-            document.getElementById('gfx_bgStatus').textContent='Error: '+JSON.stringify(data).substring(0,100);
-        }
-    }catch(e){document.getElementById('gfx_bgStatus').textContent='AI Error: '+e.message;}
-};
+// AI generation removed — use pre-generated stage gallery or paste image URLs
 // Fullscreen
 document.getElementById('fullscreenBtn').onclick=()=>{
     const wrap=document.getElementById('wrap');
