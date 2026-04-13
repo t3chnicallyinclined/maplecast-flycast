@@ -2728,7 +2728,9 @@ if (new URLSearchParams(window.location.search).get('embed') === '1') {
 // ============================================================
 import './js/webgl-patches.mjs';
 import { state } from './js/state.mjs';
-import { initRenderer, setOpt } from './js/renderer-bridge.mjs';
+// WebGPU renderer — pure JS, no WASM, no worker thread
+// To revert to WASM: change to './js/renderer-bridge.mjs'
+import { initRenderer, setOpt } from './js/renderer-bridge-webgpu.mjs';
 import { connectWS } from './js/ws-connection.mjs';
 import { renderChatFull, sendChat, sendReaction, initChat } from './js/chat.mjs';
 import { gotNext, leaveQueue, leaveGame, updateCabinetControls, initQueueLive, initSlotLive } from './js/queue.mjs';
