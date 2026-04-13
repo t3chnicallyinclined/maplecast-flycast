@@ -33883,7 +33883,7 @@ static const BlockEntry block_table[] = {
     { 0x0C2272FE, block_0c2272fe },
 };
 
-extern "C" BlockFunc recomp_find_block(u32 pc) {
+BlockFunc recomp_find_block(u32 pc) {
     int lo = 0, hi = NUM_BLOCKS - 1;
     while (lo <= hi) {
         int mid = (lo + hi) / 2;

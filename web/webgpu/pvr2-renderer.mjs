@@ -161,6 +161,15 @@ export class PVR2Renderer {
         this._idxArr = indices;
     }
 
+    // Custom background texture bind group
+    _customBgBG(tex) {
+        if(!this._bgSampler)this._bgSampler=this.dev.createSampler({minFilter:'linear',magFilter:'linear'});
+        if(this._bgTex!==tex){this._bgTex=tex;
+            this._bgBindGroup=this.dev.createBindGroup({layout:this.bgl1,entries:[
+                {binding:0,resource:tex.createView()},{binding:1,resource:this._bgSampler}]});}
+        return this._bgBindGroup;
+    }
+
     // renderTarget: optional {colorView, depthView, width, height} for offscreen rendering
     renderFrame(parsed, texMgr, pvrSnap, vram, dbg, renderTarget) {
         const {vertexData,vertexCount,opaque,punchThrough,translucent}=parsed;
@@ -272,6 +281,12 @@ export class PVR2Renderer {
                 let dm=(isp>>29)&7,cm=(isp>>27)&3,zw=(isp>>26)&1?0:1;
                 if(lt==='opaque'&&dbg.opDepthFunc>=0)dm=dbg.opDepthFunc;
                 if(lt==='opaque'&&dm===0)continue;
+                // Custom background: skip stage geometry (keep HUD at high Z)
+                if(lt==='opaque'&&dbg.customBg&&dbg.bgTexture){
+                    const vf=new Float32Array(vertexData.buffer,vertexData.byteOffset,vertexCount*7);
+                    const z0=vf[pp.first*7+2];
+                    if(z0<0.005)continue; // Stage geometry has low Z; HUD has Z>0.007
+                }
                 if(lt==='punch_through'||lt==='translucent')dm=6;
                 if(lt==='translucent')zw=1; if(lt==='punch_through')zw=1;
                 if(lt==='translucent'&&dbg.trDepthFunc!==undefined)dm=dbg.trDepthFunc;

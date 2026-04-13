@@ -167,6 +167,13 @@ canvas{display:block;background:#000}
 <label>Vignette: <input type="range" id="gfx_vignette" min="0" max="100" value="0"> <span class="val" id="gfx_vignetteVal">0</span></label>
 <label>Scanlines: <input type="range" id="gfx_scanlines" min="0" max="100" value="0"> <span class="val" id="gfx_scanlinesVal">0</span></label>
 <label>Hue Shift: <input type="range" id="gfx_hue" min="0" max="100" value="0"> <span class="val" id="gfx_hueVal">0</span></label>
+<h2 style="color:#f00">CUSTOM BACKGROUND</h2>
+<label><input type="checkbox" id="gfx_customBg"> Enable Custom Background</label>
+<input type="text" id="gfx_bgUrl" placeholder="Image URL..." style="width:95%;background:#222;color:#0f0;border:1px solid #444;padding:4px;font-family:inherit;font-size:10px;margin:4px 0">
+<button id="gfx_loadBg" style="width:100%;background:#333;color:#0f0;border:1px solid #0f0;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Load Background</button>
+<input type="text" id="gfx_aiPrompt" placeholder="AI prompt: cyberpunk arena..." style="width:95%;background:#222;color:#f0f;border:1px solid #808;padding:4px;font-family:inherit;font-size:10px;margin:4px 0">
+<button id="gfx_genBg" style="width:100%;background:#303;color:#f0f;border:1px solid #f0f;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Generate AI Background</button>
+<div id="gfx_bgStatus" style="font-size:9px;color:#555;margin:2px 0">No background loaded</div>
 <h2 style="color:#0ff">🔧 TRANSFORMS</h2>
 <label>Zoom: <input type="range" id="fx_zoom" min="50" max="300" value="100"> <span class="val" id="fx_zoomVal">100%</span></label>
 <label>Char Scale: <input type="range" id="fx_charScale" min="25" max="400" value="100"> <span class="val" id="fx_charScaleVal">100%</span></label>
@@ -316,6 +323,46 @@ document.getElementById('gfx_sepia').oninput=e=>{DBG.sepia=e.target.value/100;do
 document.getElementById('gfx_vignette').oninput=e=>{DBG.vignette=e.target.value/100;document.getElementById('gfx_vignetteVal').textContent=e.target.value;};
 document.getElementById('gfx_scanlines').oninput=e=>{DBG.scanlines=e.target.value/100;document.getElementById('gfx_scanlinesVal').textContent=e.target.value;};
 document.getElementById('gfx_hue').oninput=e=>{DBG.colorShift=e.target.value/100;document.getElementById('gfx_hueVal').textContent=e.target.value;};
+// Custom background
+DBG.customBg=false; DBG.bgTexture=null;
+document.getElementById('gfx_customBg').onchange=e=>DBG.customBg=e.target.checked;
+document.getElementById('gfx_loadBg').onclick=async()=>{
+    const url=document.getElementById('gfx_bgUrl').value.trim();
+    if(!url){document.getElementById('gfx_bgStatus').textContent='Enter a URL';return;}
+    document.getElementById('gfx_bgStatus').textContent='Loading...';
+    try{
+        const img=new Image();img.crossOrigin='anonymous';
+        await new Promise((ok,fail)=>{img.onload=ok;img.onerror=fail;img.src=url;});
+        const bmp=await createImageBitmap(img);
+        if(DBG._bgGpuTex)DBG._bgGpuTex.destroy();
+        const dev=window._gpuDevice;
+        DBG._bgGpuTex=dev.createTexture({size:[bmp.width,bmp.height],format:'rgba8unorm',
+            usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST|GPUTextureUsage.RENDER_ATTACHMENT});
+        dev.queue.copyExternalImageToTexture({source:bmp},{texture:DBG._bgGpuTex},[bmp.width,bmp.height]);
+        DBG.bgTexture=DBG._bgGpuTex;
+        DBG.customBg=true;document.getElementById('gfx_customBg').checked=true;
+        document.getElementById('gfx_bgStatus').textContent='Loaded: '+bmp.width+'×'+bmp.height;
+    }catch(e){document.getElementById('gfx_bgStatus').textContent='Error: '+e.message;}
+};
+document.getElementById('gfx_genBg').onclick=async()=>{
+    const prompt=document.getElementById('gfx_aiPrompt').value.trim()||'epic Marvel vs Capcom 2 battle arena, neon cyberpunk city, holographic screens, energy portals, comic book style, dramatic lighting';
+    document.getElementById('gfx_bgStatus').textContent='Generating with AI...';
+    try{
+        // Use fal.ai proxy — for now generate via a public endpoint
+        // In production, proxy through relay to keep API key server-side
+        const resp=await fetch('https://fal.run/fal-ai/flux/schnell',{
+            method:'POST',headers:{'Content-Type':'application/json','Authorization':'Key '+window._falApiKey},
+            body:JSON.stringify({prompt,image_size:{width:1280,height:960},num_images:1})
+        });
+        const data=await resp.json();
+        if(data.images&&data.images[0]){
+            document.getElementById('gfx_bgUrl').value=data.images[0].url;
+            document.getElementById('gfx_loadBg').click();
+        } else {
+            document.getElementById('gfx_bgStatus').textContent='No image returned';
+        }
+    }catch(e){document.getElementById('gfx_bgStatus').textContent='AI Error: '+e.message+'. Try pasting an image URL instead.';}
+};
 // Fullscreen
 document.getElementById('fullscreenBtn').onclick=()=>{
     const wrap=document.getElementById('wrap');
@@ -351,6 +398,7 @@ async function main(){
     try{await R.init(canvas);ss('WebGPU OK','ok');
         R.dev.addEventListener('uncapturederror',(e)=>{console.error('[webgpu]',e.error.message);});
     }catch(e){ss('Init failed: '+e.message,'err');return;}
+    window._gpuDevice=R.dev;
     const D=new FrameDecoder(),P=new TAParser(),T=new TextureManager(R.dev),FP=new FramePredictor();
     const PP=new PostProcessor();
     PP.init(R.dev, R.fmt);
