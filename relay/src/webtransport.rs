@@ -18,6 +18,7 @@ use bytes::Bytes;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::net::UdpSocket;
 use tokio::sync::broadcast;
 use tracing::{info, warn, error, debug};
 use wtransport::tls;
@@ -138,7 +139,14 @@ async fn run_session(
         uni.shutdown().await?;
     }
 
-    // Step 2: Subscribe to frame broadcast + forward
+    // Step 2: Set up input forwarding (WT datagram → UDP :7100)
+    // Browser sends [0x49, slot, LT, RT, BTN_hi, BTN_lo] = 6 bytes via datagram
+    // We forward [slot, LT, RT, BTN_hi, BTN_lo] = 5 bytes to flycast UDP input server
+    let input_sock = UdpSocket::bind("0.0.0.0:0").await.ok();
+    let input_target: SocketAddr = "127.0.0.1:7100".parse().unwrap();
+    let mut input_forwarded: u64 = 0;
+
+    // Step 3: Subscribe to frame broadcast + forward
     let mut frame_rx = state.subscribe_frames();
     let mut frames_sent: u64 = 0;
     let mut dgram_sent: u64 = 0;
@@ -147,6 +155,22 @@ async fn run_session(
 
     loop {
         tokio::select! {
+            // Receive datagrams FROM browser (input packets)
+            dgram_in = conn.receive_datagram() => {
+                match dgram_in {
+                    Ok(data) => {
+                        // Input datagram: [0x49 'I'][slot][LT][RT][BTN_hi][BTN_lo] = 6 bytes
+                        if data.len() == 6 && data[0] == 0x49 {
+                            if let Some(ref sock) = input_sock {
+                                // Forward [slot, LT, RT, BTN_hi, BTN_lo] to flycast UDP :7100
+                                let _ = sock.send_to(&data[1..], input_target).await;
+                                input_forwarded += 1;
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
             frame = frame_rx.recv() => {
                 match frame {
                     Ok(data) => {
@@ -188,10 +212,10 @@ async fn run_session(
         }
     }
 
-    if frames_sent > 0 {
+    if frames_sent > 0 || input_forwarded > 0 {
         info!(
-            "WT client final: sent={} (dgram={} stream={}) dropped={}",
-            frames_sent, dgram_sent, stream_sent, frames_dropped
+            "WT client final: sent={} (dgram={} stream={}) dropped={} input_fwd={}",
+            frames_sent, dgram_sent, stream_sent, frames_dropped, input_forwarded
         );
     }
 

@@ -190,13 +190,28 @@ export class AdaptiveTransport {
 
     send(data) {
         if (this._type === 'webtransport' && this._wt) {
-            // Send via datagram (unreliable, low-latency)
             const writer = this._wt.datagrams.writable.getWriter();
             writer.write(data);
             writer.releaseLock();
         } else if (this._type === 'websocket' && this._ws && this._ws.readyState === WebSocket.OPEN) {
             this._ws.send(data);
         }
+    }
+
+    // Send gamepad input via QUIC datagram (lowest latency path)
+    // Format: [0x49 'I'][slot][LT][RT][BTN_hi][BTN_lo] = 6 bytes
+    // Falls back to controlWs TCP if WebTransport not available
+    sendInput(slot, lt, rt, btnHi, btnLo) {
+        if (this._type === 'webtransport' && this._wt) {
+            const buf = new Uint8Array([0x49, slot, lt, rt, btnHi, btnLo]);
+            try {
+                const writer = this._wt.datagrams.writable.getWriter();
+                writer.write(buf);
+                writer.releaseLock();
+                return true; // sent via QUIC
+            } catch (e) {}
+        }
+        return false; // caller should fall back to controlWs
     }
 
     close() {

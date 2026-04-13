@@ -179,8 +179,19 @@ function pollOnce() {
   _inputBuf[1] = rt;
   _inputBuf[2] = (btn >> 8) & 0xFF;
   _inputBuf[3] = btn & 0xFF;
-  cws.send(_inputBuf);
+
+  // Try WebTransport datagram first (QUIC/UDP = lowest latency)
+  // Falls back to controlWs (TCP) if WT not available
+  let sentViaQUIC = false;
+  if (window._transport && window._transport.sendInput) {
+    sentViaQUIC = window._transport.sendInput(
+      state.mySlot, lt, rt, (btn >> 8) & 0xFF, btn & 0xFF);
+  }
+  if (!sentViaQUIC) {
+    cws.send(_inputBuf);  // TCP fallback
+  }
   state.diag.inputSendCount++;
+  state.diag.inputViaQUIC = sentViaQUIC;
 }
 
 // MessageChannel handler — fired ~immediately after postMessage.
