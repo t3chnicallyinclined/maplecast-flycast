@@ -375,16 +375,26 @@ export async function gotNext() {
     return;
   }
   // FAST PATH: if a slot is OPEN, skip the queue and join flycast directly.
-  // Don't write to SurrealDB slot table (that triggers live query loops).
-  // Just open controlWs and send the join — flycast handles slot assignment.
+  // Write to SurrealDB slot table FIRST (live query checks occupant_name),
+  // then open controlWs to flycast.
   const openSlot = Array.from(_slotRows.values())
     .find(r => !r.occupant_name || r.occupant_name === '');
   if (openSlot) {
     console.log('[queue] slot', openSlot.slot_num, 'is open — joining directly (skip queue)');
     systemMessage(`${state.myName} — stepping up to P${openSlot.slot_num + 1}!`);
+
+    // Claim in SurrealDB FIRST so the live query sees our name
+    try {
+      await liveQuery('UPDATE $slot SET occupant_name = $name, session_id = $sid', {
+        slot: openSlot.id, name: state.myName, sid: state.sessionId
+      });
+    } catch (e) { console.warn('[queue] slot claim write failed:', e); }
+
+    // NOW set local state — live query will see our name and not free us
     state.mySlot = openSlot.slot_num;
     state.inQueue = false;
     state.wsInQueue = false;
+
     try {
       const { ensureControlWs } = await import('./ws-connection.mjs');
       const { getPreferredLatchPolicy } = await import('./diagnostics.mjs');
