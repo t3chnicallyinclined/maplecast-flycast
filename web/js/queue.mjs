@@ -551,7 +551,9 @@ async function reclaimSlot(slotRow) {
     }));
     state.inQueue = false;
     state.wsInQueue = false;
-    startGamepadPolling();
+    // Small delay to let server process join before sending input
+    // (QUIC input arrives faster than TCP join — avoids race)
+    setTimeout(() => startGamepadPolling(), 200);
     updateCabinetControls();
   } catch (e) {
     console.warn('[queue] reclaim failed:', e.message);
