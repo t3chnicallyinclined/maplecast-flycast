@@ -48,7 +48,7 @@ The default renderer is **webgpu-test.html** — a pure JavaScript + WebGPU rend
 
 **No build step, no WASM, no compile.** Edit any `.mjs` file → refresh browser → see changes instantly. This is the fastest development loop.
 
-> **Note:** There's also `king.html` — the WASM + WebGL2 renderer used in production at nobd.net. It requires building the WASM module (`packages/renderer/build.sh`). For development and experimentation, use webgpu-test.html.
+> **Note:** There's also `king.html` — the WASM + WebGL2 renderer used in production. It requires building the WASM module (`packages/renderer/build.sh`). For development and experimentation, use webgpu-test.html.
 
 ---
 
@@ -226,7 +226,7 @@ Three processes on localhost. No nginx, no TLS, no VPS needed.
     │ wss://../ws      │ WebTransport      │ UDP :7100
     ▼                  ▼                   ▼
  ┌──────────────────────────────────────────────┐
- │              VPS (e.g. nobd.net)              │
+ │          Production Server (VPS)               │
  │                                               │
  │  nginx (:443 TCP)                             │
  │    ├─ /ws  → relay :7201 (WS)                │
@@ -276,22 +276,26 @@ Audio: 0xAD 0x10 + seq(2) + 512×int16 stereo PCM = 2052 bytes
 
 **Start with WebGPU.** It's the fastest development loop — edit JS, refresh browser, done. No compilation, no WASM, no SDK installation.
 
-## Deployment
+## Deployment (Production VPS)
 
-**ALWAYS use deploy scripts. NEVER raw scp. See CLAUDE.md.**
+For local development, no deployment is needed — just run the quickstart commands.
+
+If deploying to a remote server, use the deploy scripts:
 
 ```bash
 # Headless server
-./deploy/scripts/deploy-headless.sh root@66.55.128.93
+./deploy/scripts/deploy-headless.sh user@your-server-ip
 
 # Web files
-./deploy/scripts/deploy-web.sh root@66.55.128.93
+./deploy/scripts/deploy-web.sh user@your-server-ip
 
 # Relay (manual)
 cd relay && cargo build --release
-scp target/release/maplecast-relay root@66.55.128.93:/opt/maplecast-relay
-ssh root@66.55.128.93 "systemctl restart maplecast-relay"
+scp target/release/maplecast-relay user@your-server-ip:/opt/maplecast-relay
+ssh user@your-server-ip "systemctl restart maplecast-relay"
 ```
+
+**ALWAYS use deploy scripts. NEVER raw scp.** See CLAUDE.md for deployment safety rules.
 
 ## Key Branches
 
