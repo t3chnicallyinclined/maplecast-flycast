@@ -170,12 +170,27 @@ canvas{display:block;background:transparent}
 <label>Hue Shift: <input type="range" id="gfx_hue" min="0" max="100" value="0"> <span class="val" id="gfx_hueVal">0</span></label>
 <h2 style="color:#f00">CUSTOM BACKGROUND</h2>
 <label><input type="checkbox" id="gfx_customBg"> Enable Custom Background</label>
+<label>Floor Z cutoff: <input type="range" id="gfx_floorZ" min="0" max="100" value="30"> <span class="val" id="gfx_floorZVal">0.003</span></label>
 <input type="text" id="gfx_bgUrl" placeholder="Image or Video URL..." style="width:95%;background:#222;color:#0f0;border:1px solid #444;padding:4px;font-family:inherit;font-size:10px;margin:4px 0">
 <button id="gfx_loadBg" style="width:100%;background:#333;color:#0f0;border:1px solid #0f0;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Load Image BG</button>
 <button id="gfx_loadVid" style="width:100%;background:#333;color:#0ff;border:1px solid #0ff;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Load Video BG</button>
 <button id="gfx_load3d" style="width:100%;background:#333;color:#ff0;border:1px solid #ff0;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Load 3D Scene (GLB URL)</button>
-<button id="gfx_demo3d" style="width:100%;background:#530;color:#ff0;border:1px solid #ff0;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Demo: Procedural 3D Arena</button>
-<div style="font-size:9px;color:#888;margin:4px 0">AI STAGE GALLERY:</div>
+<div style="font-size:9px;color:#ff0;margin:4px 0">3D ARENAS (real-time three.js):</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:2px">
+<button class="stg3d" data-scene="neon" style="background:#303;color:#f0f;border:1px solid #f0f;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Neon Arena</button>
+<button class="stg3d" data-scene="lava" style="background:#300;color:#f80;border:1px solid #f80;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Lava Pit</button>
+<button class="stg3d" data-scene="ice" style="background:#036;color:#8df;border:1px solid #8df;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Ice Crystal</button>
+<button class="stg3d" data-scene="space" style="background:#103;color:#c8f;border:1px solid #c8f;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Deep Space</button>
+<button class="stg3d" data-scene="temple" style="background:#330;color:#fd0;border:1px solid #fd0;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Temple</button>
+<button class="stg3d" data-scene="void" style="background:#000;color:#fff;border:1px solid #666;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">The Void</button>
+<button class="stg3d" data-scene="matrix" style="background:#001a00;color:#0f0;border:1px solid #0f0;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Matrix</button>
+<button class="stg3d" data-scene="ocean" style="background:#003;color:#4af;border:1px solid #4af;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Ocean Depths</button>
+<button class="stg3d" data-scene="inferno" style="background:#200;color:#f44;border:1px solid #f44;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Inferno</button>
+<button class="stg3d" data-scene="tron" style="background:#001;color:#0ff;border:1px solid #0ff;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Tron Grid</button>
+<button class="stg3d" data-scene="cosmos" style="background:#100020;color:#f8f;border:1px solid #f8f;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Cosmos</button>
+<button class="stg3d" data-scene="storm" style="background:#111;color:#ccf;border:1px solid #88f;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Thunder</button>
+</div>
+<div style="font-size:9px;color:#888;margin:4px 0">AI IMAGE STAGES:</div>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px">
 <button class="stgBtn" data-bg="/stages/bg-volcanic-arena.jpg" style="background:#300;color:#f80;border:1px solid #f80;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Volcanic</button>
 <button class="stgBtn" data-bg="/stages/bg-underwater-temple.jpg" style="background:#033;color:#0ff;border:1px solid #0ff;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Underwater</button>
@@ -184,6 +199,10 @@ canvas{display:block;background:transparent}
 <button class="stgBtn" data-bg="/stages/bg-olympus-temple.jpg" style="background:#330;color:#fd0;border:1px solid #fd0;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Olympus</button>
 <button class="stgBtn" data-bg="/bg-cosmic-colosseum.jpg" style="background:#203;color:#c8f;border:1px solid #c8f;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Cosmic</button>
 </div>
+<input type="text" id="gfx_bgUrl" placeholder="Image, Video, or GLB URL..." style="width:95%;background:#222;color:#0f0;border:1px solid #444;padding:4px;font-family:inherit;font-size:10px;margin:4px 0">
+<button id="gfx_loadBg" style="width:48%;background:#333;color:#0f0;border:1px solid #0f0;padding:3px;cursor:pointer;font-family:inherit;font-size:9px">Image</button>
+<button id="gfx_loadVid" style="width:48%;background:#333;color:#0ff;border:1px solid #0ff;padding:3px;cursor:pointer;font-family:inherit;font-size:9px">Video</button>
+<button id="gfx_load3d" style="width:48%;background:#333;color:#ff0;border:1px solid #ff0;padding:3px;cursor:pointer;font-family:inherit;font-size:9px">GLB Model</button>
 <input type="text" id="gfx_aiPrompt" placeholder="AI prompt: cyberpunk arena..." style="width:95%;background:#222;color:#f0f;border:1px solid #808;padding:4px;font-family:inherit;font-size:10px;margin:4px 0">
 <button id="gfx_genBg" style="width:100%;background:#303;color:#f0f;border:1px solid #f0f;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Generate AI Background</button>
 <div id="gfx_bgStatus" style="font-size:9px;color:#555;margin:2px 0">No background loaded</div>
@@ -339,6 +358,8 @@ document.getElementById('gfx_hue').oninput=e=>{DBG.colorShift=e.target.value/100
 // Custom background
 DBG.customBg=false; DBG.bgTexture=null;
 document.getElementById('gfx_customBg').onchange=e=>DBG.customBg=e.target.checked;
+DBG.floorZ=0.003;
+document.getElementById('gfx_floorZ').oninput=e=>{DBG.floorZ=e.target.value/10000;document.getElementById('gfx_floorZVal').textContent=DBG.floorZ.toFixed(4);};
 document.getElementById('gfx_loadBg').onclick=()=>{
     const url=document.getElementById('gfx_bgUrl').value.trim();
     if(!url){document.getElementById('gfx_bgStatus').textContent='Enter a URL';return;}
@@ -395,53 +416,166 @@ async function init3dBg(glbUrl){
     const dl=new THREE.DirectionalLight(0x8080ff,2);dl.position.set(5,10,5);scene.add(dl);
     const pl1=new THREE.PointLight(0xff00ff,3,20);pl1.position.set(-3,2,-2);scene.add(pl1);
     const pl2=new THREE.PointLight(0x00ffff,3,20);pl2.position.set(3,1,2);scene.add(pl2);
-    if(glbUrl){
+    if(glbUrl&&!glbUrl.startsWith('scene:')){
         document.getElementById('gfx_bgStatus').textContent='Loading 3D model...';
         try{
             const loader=new GLTFLoader();
             const gltf=await new Promise((ok,fail)=>loader.load(glbUrl,ok,undefined,fail));
             scene.add(gltf.scene);
-            gltf.scene.scale.set(1,1,1);
             document.getElementById('gfx_bgStatus').textContent='3D model loaded!';
         }catch(e){document.getElementById('gfx_bgStatus').textContent='GLB error: '+e.message;}
     } else {
-        // Procedural arena: platform + pillars + particles
-        const platGeo=new THREE.CylinderGeometry(4,4.5,0.3,32);
-        const platMat=new THREE.MeshStandardMaterial({color:0x111122,metalness:0.9,roughness:0.1});
-        const plat=new THREE.Mesh(platGeo,platMat);plat.position.y=-0.5;scene.add(plat);
-        // Glowing ring
-        const ringGeo=new THREE.TorusGeometry(4.2,0.05,8,64);
-        const ringMat=new THREE.MeshBasicMaterial({color:0x8800ff});
-        const ring=new THREE.Mesh(ringGeo,ringMat);ring.rotation.x=Math.PI/2;ring.position.y=-0.3;scene.add(ring);
-        // Pillars
-        for(let i=0;i<8;i++){
-            const a=i/8*Math.PI*2;
-            const pilGeo=new THREE.CylinderGeometry(0.15,0.2,4,8);
-            const pilMat=new THREE.MeshStandardMaterial({color:0x222244,metalness:0.8,roughness:0.2,emissive:0x220044,emissiveIntensity:0.3});
-            const pil=new THREE.Mesh(pilGeo,pilMat);
-            pil.position.set(Math.cos(a)*4.5,1.5,Math.sin(a)*4.5);scene.add(pil);
-            // Pillar glow
-            const glowGeo=new THREE.SphereGeometry(0.2,8,8);
-            const glowMat=new THREE.MeshBasicMaterial({color:i%2?0xff00ff:0x00ffff});
-            const glow=new THREE.Mesh(glowGeo,glowMat);
-            glow.position.set(Math.cos(a)*4.5,3.6,Math.sin(a)*4.5);scene.add(glow);
+        const sceneType=(glbUrl||'').replace('scene:','')||'neon';
+        // Shared helpers
+        const addStars=(n,sz,col)=>{const g=new THREE.BufferGeometry();const p=new Float32Array(n*3);for(let i=0;i<n*3;i++)p[i]=(Math.random()-0.5)*80;g.setAttribute('position',new THREE.BufferAttribute(p,3));scene.add(new THREE.Points(g,new THREE.PointsMaterial({color:col||0xffffff,size:sz||0.08})));};
+        const addRing=(r,c,y)=>{const g=new THREE.TorusGeometry(r,0.04,8,64);const m=new THREE.Mesh(g,new THREE.MeshBasicMaterial({color:c}));m.rotation.x=Math.PI/2;m.position.y=y||0;scene.add(m);return m;};
+        const addPillars=(n,r,h,col,glowCol)=>{for(let i=0;i<n;i++){const a=i/n*Math.PI*2;const p=new THREE.Mesh(new THREE.CylinderGeometry(0.15,0.2,h,8),new THREE.MeshStandardMaterial({color:col,metalness:0.8,roughness:0.2,emissive:col,emissiveIntensity:0.2}));p.position.set(Math.cos(a)*r,h/2-0.5,Math.sin(a)*r);scene.add(p);if(glowCol){const g=new THREE.Mesh(new THREE.SphereGeometry(0.25,8,8),new THREE.MeshBasicMaterial({color:glowCol}));g.position.set(Math.cos(a)*r,h+0.1,Math.sin(a)*r);scene.add(g);}}};
+        const addPlatform=(r,c,y)=>{const p=new THREE.Mesh(new THREE.CylinderGeometry(r,r+0.5,0.3,32),new THREE.MeshStandardMaterial({color:c,metalness:0.9,roughness:0.1}));p.position.y=y||-0.5;scene.add(p);};
+
+        if(sceneType==='neon'){
+            renderer.setClearColor(0x050510);
+            addPlatform(4,0x111122);addRing(4.2,0x8800ff,-0.3);
+            addPillars(8,4.5,4,0x222244,0xff00ff);addStars(2000);
+            scene.add(new THREE.PointLight(0xff00ff,3,20));scene.add(new THREE.PointLight(0x00ffff,3,20));
+        } else if(sceneType==='lava'){
+            renderer.setClearColor(0x100500);
+            addPlatform(5,0x1a0a00);
+            // Lava floor
+            const lava=new THREE.Mesh(new THREE.PlaneGeometry(40,40),new THREE.MeshBasicMaterial({color:0xff3300,transparent:true,opacity:0.4}));
+            lava.rotation.x=-Math.PI/2;lava.position.y=-1;scene.add(lava);
+            addPillars(6,5,5,0x330000,0xff4400);
+            // Ember particles
+            const embG=new THREE.BufferGeometry();const embP=new Float32Array(300*3);for(let i=0;i<300;i++){embP[i*3]=(Math.random()-0.5)*15;embP[i*3+1]=Math.random()*8;embP[i*3+2]=(Math.random()-0.5)*15;}embG.setAttribute('position',new THREE.BufferAttribute(embP,3));scene.add(new THREE.Points(embG,new THREE.PointsMaterial({color:0xff6600,size:0.1})));
+            scene.add(new THREE.PointLight(0xff4400,4,25));
+            scene.fog=new THREE.Fog(0x100500,5,25);
+        } else if(sceneType==='ice'){
+            renderer.setClearColor(0x051525);
+            addPlatform(4.5,0x88bbdd);
+            // Ice crystals
+            for(let i=0;i<12;i++){const a=Math.random()*Math.PI*2;const r2=3+Math.random()*4;const h=1+Math.random()*4;
+                const c=new THREE.Mesh(new THREE.ConeGeometry(0.3+Math.random()*0.4,h,5),new THREE.MeshStandardMaterial({color:0x88ccff,metalness:0.3,roughness:0.1,transparent:true,opacity:0.7}));
+                c.position.set(Math.cos(a)*r2,h/2-0.5,Math.sin(a)*r2);c.rotation.z=(Math.random()-0.5)*0.3;scene.add(c);}
+            addRing(4.7,0x00ccff,-0.3);addStars(1500,0.06,0x88ccff);
+            scene.add(new THREE.PointLight(0x00ccff,3,20));scene.add(new THREE.PointLight(0x4488ff,2,15));
+            scene.fog=new THREE.Fog(0x051525,8,30);
+        } else if(sceneType==='space'){
+            renderer.setClearColor(0x000008);
+            addPlatform(3.5,0x0a0a20);addRing(3.8,0x4400ff,-0.3);addRing(5,0x220088,0.5);addRing(6.5,0x110044,1.5);
+            addStars(5000,0.1);
+            // Nebula particles
+            const nebG=new THREE.BufferGeometry();const nebP=new Float32Array(800*3);for(let i=0;i<800*3;i++)nebP[i]=(Math.random()-0.5)*40;nebG.setAttribute('position',new THREE.BufferAttribute(nebP,3));scene.add(new THREE.Points(nebG,new THREE.PointsMaterial({color:0x6622cc,size:0.15,transparent:true,opacity:0.3})));
+            scene.add(new THREE.PointLight(0x6622cc,2,30));
+        } else if(sceneType==='temple'){
+            renderer.setClearColor(0x1a1008);
+            addPlatform(5,0x8B7355);
+            // Stone columns
+            for(let i=0;i<10;i++){const a=i/10*Math.PI*2;const p=new THREE.Mesh(new THREE.CylinderGeometry(0.25,0.3,5,12),new THREE.MeshStandardMaterial({color:0xC4A882,roughness:0.8}));p.position.set(Math.cos(a)*5.5,2,Math.sin(a)*5.5);scene.add(p);
+                // Column cap
+                const cap=new THREE.Mesh(new THREE.BoxGeometry(0.8,0.2,0.8),new THREE.MeshStandardMaterial({color:0xD4B892}));cap.position.set(Math.cos(a)*5.5,4.5,Math.sin(a)*5.5);scene.add(cap);}
+            // Fire braziers
+            for(let i=0;i<5;i++){const a=i/5*Math.PI*2;const f=new THREE.Mesh(new THREE.SphereGeometry(0.2,8,8),new THREE.MeshBasicMaterial({color:0xff8800}));f.position.set(Math.cos(a)*3,0.3,Math.sin(a)*3);scene.add(f);scene.add(new THREE.PointLight(0xff6600,1.5,8).position.copy(f.position));}
+            addStars(500,0.05,0xffcc88);
+        } else if(sceneType==='void'){
+            renderer.setClearColor(0x000000);
+            addStars(8000,0.04,0xffffff);
+            const voidG=new THREE.BufferGeometry();const voidP=new Float32Array(2000*3);for(let i=0;i<2000*3;i++)voidP[i]=(Math.random()-0.5)*30;voidG.setAttribute('position',new THREE.BufferAttribute(voidP,3));scene.add(new THREE.Points(voidG,new THREE.PointsMaterial({color:0x4400ff,size:0.08,transparent:true,opacity:0.5})));
+            for(let i=0;i<15;i++){const shapes=[new THREE.OctahedronGeometry(0.5),new THREE.TetrahedronGeometry(0.4),new THREE.IcosahedronGeometry(0.3)];
+                const m=new THREE.Mesh(shapes[i%3],new THREE.MeshBasicMaterial({color:0x4400ff,wireframe:true}));
+                m.position.set((Math.random()-0.5)*10,Math.random()*6-1,(Math.random()-0.5)*10);
+                m.userData.spin={x:Math.random()*0.02,y:Math.random()*0.02};scene.add(m);}
+        } else if(sceneType==='matrix'){
+            // Digital rain columns in 3D space
+            renderer.setClearColor(0x000800);
+            for(let x=-8;x<=8;x+=1.5)for(let z=-8;z<=8;z+=1.5){
+                const h=2+Math.random()*6;const col=new THREE.Mesh(new THREE.BoxGeometry(0.05,h,0.05),new THREE.MeshBasicMaterial({color:0x00ff00,transparent:true,opacity:0.3+Math.random()*0.4}));
+                col.position.set(x,h/2-1+Math.random()*2,z);col.userData.spin={y:0};col.userData.drift=Math.random()*0.02;scene.add(col);}
+            // Glowing grid floor
+            const gridH=new THREE.GridHelper(20,40,0x003300,0x001100);gridH.position.y=-0.5;scene.add(gridH);
+            addStars(500,0.03,0x00ff00);
+            scene.add(new THREE.PointLight(0x00ff00,2,20));
+            scene.fog=new THREE.Fog(0x000800,5,20);
+        } else if(sceneType==='ocean'){
+            renderer.setClearColor(0x000a1a);
+            // Underwater with caustics feel
+            addPlatform(5,0x0a2a3a);
+            // Coral formations
+            for(let i=0;i<20;i++){const h=0.5+Math.random()*3;const c=new THREE.Mesh(new THREE.CylinderGeometry(0.05,0.15+Math.random()*0.2,h,6),
+                new THREE.MeshStandardMaterial({color:new THREE.Color().setHSL(Math.random()*0.2+0.45,0.8,0.4)}));
+                const a=Math.random()*Math.PI*2;const r2=2+Math.random()*5;
+                c.position.set(Math.cos(a)*r2,h/2-0.5,Math.sin(a)*r2);c.rotation.z=(Math.random()-0.5)*0.4;scene.add(c);}
+            // Bubble particles rising
+            const bubG=new THREE.BufferGeometry();const bubP=new Float32Array(400*3);for(let i=0;i<400;i++){bubP[i*3]=(Math.random()-0.5)*15;bubP[i*3+1]=Math.random()*12-2;bubP[i*3+2]=(Math.random()-0.5)*15;}
+            bubG.setAttribute('position',new THREE.BufferAttribute(bubP,3));
+            const bubs=new THREE.Points(bubG,new THREE.PointsMaterial({color:0x44aaff,size:0.08,transparent:true,opacity:0.5}));scene.add(bubs);bubs.userData.drift=0.01;
+            // Light rays from above
+            scene.add(new THREE.PointLight(0x0066cc,3,20));scene.add(new THREE.PointLight(0x00aaff,2,15));
+            scene.fog=new THREE.FogExp2(0x001020,0.04);
+        } else if(sceneType==='inferno'){
+            renderer.setClearColor(0x0a0000);
+            // Hellscape with chains and fire
+            addPlatform(4,0x1a0500);
+            // Massive chains hanging from above
+            for(let i=0;i<8;i++){const a=i/8*Math.PI*2;const r2=4+Math.random()*2;
+                for(let j=0;j<8;j++){const link=new THREE.Mesh(new THREE.TorusGeometry(0.15,0.04,6,8),new THREE.MeshStandardMaterial({color:0x444444,metalness:0.9,roughness:0.3}));
+                    link.position.set(Math.cos(a)*r2,6-j*0.8,Math.sin(a)*r2);link.rotation.x=j%2?Math.PI/2:0;scene.add(link);}}
+            // Fire particles everywhere
+            const fireG=new THREE.BufferGeometry();const fireP=new Float32Array(600*3);for(let i=0;i<600;i++){fireP[i*3]=(Math.random()-0.5)*12;fireP[i*3+1]=Math.random()*8-1;fireP[i*3+2]=(Math.random()-0.5)*12;}
+            fireG.setAttribute('position',new THREE.BufferAttribute(fireP,3));scene.add(new THREE.Points(fireG,new THREE.PointsMaterial({color:0xff4400,size:0.12,transparent:true,opacity:0.6})));
+            // Skulls? Nah, more fire lights
+            for(let i=0;i<5;i++){const fl=new THREE.PointLight(0xff2200,3,10);fl.position.set((Math.random()-0.5)*8,Math.random()*3,(Math.random()-0.5)*8);scene.add(fl);}
+            scene.fog=new THREE.Fog(0x0a0000,3,15);
+        } else if(sceneType==='tron'){
+            renderer.setClearColor(0x000005);
+            // TRON grid world
+            const gridT=new THREE.GridHelper(30,60,0x00ffff,0x004444);gridT.position.y=-0.5;scene.add(gridT);
+            // Glowing walls
+            for(let i=0;i<4;i++){const wall=new THREE.Mesh(new THREE.PlaneGeometry(30,8),new THREE.MeshBasicMaterial({color:0x001122,transparent:true,opacity:0.3,side:THREE.DoubleSide}));
+                wall.position.set(i<2?(i*2-1)*15:0,3.5,i>=2?(i*2-5)*15:0);wall.rotation.y=i<2?0:Math.PI/2;scene.add(wall);}
+            // Light cycles (moving glowing cubes)
+            for(let i=0;i<6;i++){const cube=new THREE.Mesh(new THREE.BoxGeometry(0.3,0.15,0.6),new THREE.MeshBasicMaterial({color:i%2?0x00ffff:0xff8800}));
+                cube.position.set((Math.random()-0.5)*20,-0.3,(Math.random()-0.5)*20);
+                cube.userData.spin={y:0};cube.userData.vel={x:(Math.random()-0.5)*0.1,z:(Math.random()-0.5)*0.1};scene.add(cube);}
+            // Trail particles on grid
+            addStars(300,0.04,0x00ffff);
+            scene.add(new THREE.PointLight(0x00ffff,2,25));scene.add(new THREE.PointLight(0xff8800,1.5,20));
+        } else if(sceneType==='cosmos'){
+            renderer.setClearColor(0x050008);
+            // Galaxies and cosmic swirls
+            addStars(6000,0.06);
+            // Spiral galaxy
+            for(let arm=0;arm<3;arm++){const armOff=arm/3*Math.PI*2;
+                for(let i=0;i<200;i++){const a=armOff+i*0.08;const r2=1+i*0.05;const y2=(Math.random()-0.5)*0.3;
+                    const star=new THREE.Mesh(new THREE.SphereGeometry(0.03+Math.random()*0.03,4,4),new THREE.MeshBasicMaterial({color:new THREE.Color().setHSL(0.7+Math.random()*0.2,0.8,0.5+Math.random()*0.3)}));
+                    star.position.set(Math.cos(a)*r2,y2,Math.sin(a)*r2);scene.add(star);}}
+            // Planetary ring
+            addRing(8,0x664488,0);addRing(9,0x443366,0.1);addRing(10,0x332255,0.2);
+            // Nebula glow
+            const nebG2=new THREE.BufferGeometry();const nebP2=new Float32Array(1000*3);for(let i=0;i<1000*3;i++)nebP2[i]=(Math.random()-0.5)*25;
+            nebG2.setAttribute('position',new THREE.BufferAttribute(nebP2,3));scene.add(new THREE.Points(nebG2,new THREE.PointsMaterial({color:0x8844cc,size:0.2,transparent:true,opacity:0.15})));
+            scene.add(new THREE.PointLight(0x8844cc,2,30));scene.add(new THREE.PointLight(0xff44aa,1.5,20));
+        } else if(sceneType==='storm'){
+            renderer.setClearColor(0x080810);
+            addPlatform(5,0x222233);
+            // Storm clouds (layered transparent planes)
+            for(let i=0;i<8;i++){const cloud=new THREE.Mesh(new THREE.PlaneGeometry(8+Math.random()*8,2+Math.random()*2),
+                new THREE.MeshBasicMaterial({color:0x334,transparent:true,opacity:0.2+Math.random()*0.2,side:THREE.DoubleSide}));
+                cloud.position.set((Math.random()-0.5)*10,5+Math.random()*3,(Math.random()-0.5)*10);cloud.rotation.x=-Math.PI/2+Math.random()*0.3;scene.add(cloud);}
+            // Lightning bolts (glowing lines)
+            for(let i=0;i<4;i++){const pts=[];let bx=(Math.random()-0.5)*8,bz=(Math.random()-0.5)*8;
+                for(let j=0;j<8;j++){pts.push(new THREE.Vector3(bx+(Math.random()-0.5)*1,8-j*1.2,bz+(Math.random()-0.5)*1));}
+                const lineGeo=new THREE.BufferGeometry().setFromPoints(pts);
+                const bolt=new THREE.Line(lineGeo,new THREE.LineBasicMaterial({color:0xaaccff,linewidth:2}));
+                bolt.userData.flash=Math.random()*100;bolt.userData.spin={y:0};scene.add(bolt);}
+            // Rain particles
+            const rainG=new THREE.BufferGeometry();const rainP=new Float32Array(1000*3);for(let i=0;i<1000;i++){rainP[i*3]=(Math.random()-0.5)*15;rainP[i*3+1]=Math.random()*10;rainP[i*3+2]=(Math.random()-0.5)*15;}
+            rainG.setAttribute('position',new THREE.BufferAttribute(rainP,3));
+            const rain=new THREE.Points(rainG,new THREE.PointsMaterial({color:0x8888cc,size:0.04}));scene.add(rain);rain.userData.drift=0.05;
+            addStars(500,0.05,0x666688);
+            scene.add(new THREE.PointLight(0x4466aa,3,25));
         }
-        // Particle field
-        const partGeo=new THREE.BufferGeometry();
-        const partPos=new Float32Array(500*3);
-        for(let i=0;i<500*3;i++)partPos[i]=(Math.random()-0.5)*20;
-        partGeo.setAttribute('position',new THREE.BufferAttribute(partPos,3));
-        const partMat=new THREE.PointsMaterial({color:0x8844ff,size:0.05,transparent:true,opacity:0.6});
-        scene.add(new THREE.Points(partGeo,partMat));
-        // Starfield
-        const starGeo=new THREE.BufferGeometry();
-        const starPos=new Float32Array(2000*3);
-        for(let i=0;i<2000*3;i++)starPos[i]=(Math.random()-0.5)*100;
-        starGeo.setAttribute('position',new THREE.BufferAttribute(starPos,3));
-        scene.add(new THREE.Points(starGeo,new THREE.PointsMaterial({color:0xffffff,size:0.08})));
-        document.getElementById('gfx_bgStatus').textContent='3D arena ready!';
+        document.getElementById('gfx_bgStatus').textContent='3D '+sceneType+' arena ready!';
     }
-    // Animate
+    // Animate with void shape spinning
     let t=0;
     (function anim3d(){
         requestAnimationFrame(anim3d);
@@ -450,6 +584,20 @@ async function init3dBg(glbUrl){
         cam.position.x=Math.sin(t)*6;cam.position.z=Math.cos(t)*6;
         cam.position.y=2+Math.sin(t*0.7)*0.5;
         cam.lookAt(0,0.5,0);
+        // Animate scene objects
+        scene.traverse(obj=>{
+            if(obj.userData.spin){obj.rotation.x+=(obj.userData.spin.x||0);obj.rotation.y+=(obj.userData.spin.y||0);}
+            // Drifting particles (rain, bubbles)
+            if(obj.userData.drift&&obj.geometry){
+                const pos=obj.geometry.attributes.position;
+                for(let i=0;i<pos.count;i++){pos.array[i*3+1]+=obj.userData.drift;if(pos.array[i*3+1]>10)pos.array[i*3+1]=-2;if(pos.array[i*3+1]<-2)pos.array[i*3+1]=10;}
+                pos.needsUpdate=true;}
+            // Light cycle movement
+            if(obj.userData.vel){obj.position.x+=obj.userData.vel.x;obj.position.z+=obj.userData.vel.z;
+                if(Math.abs(obj.position.x)>10){obj.userData.vel.x*=-1;}if(Math.abs(obj.position.z)>10){obj.userData.vel.z*=-1;}}
+            // Lightning flash
+            if(obj.userData.flash!==undefined){obj.userData.flash+=1;obj.visible=(Math.sin(obj.userData.flash*0.1)>0.8);}
+        });
         renderer.render(scene,cam);
     })();
     DBG.customBg=true;document.getElementById('gfx_customBg').checked=true;
@@ -459,7 +607,11 @@ document.getElementById('gfx_load3d').onclick=()=>{
     if(!url){document.getElementById('gfx_bgStatus').textContent='Enter a GLB URL';return;}
     init3dBg(url);
 };
-document.getElementById('gfx_demo3d').onclick=()=>{console.log('[3d] starting demo arena');init3dBg(null).catch(e=>console.error('[3d]',e));};
+// 3D scene gallery buttons
+document.querySelectorAll('.stg3d').forEach(btn=>btn.onclick=()=>{
+    console.log('[3d] loading scene:',btn.dataset.scene);
+    init3dBg('scene:'+btn.dataset.scene).catch(e=>console.error('[3d]',e));
+});
 // Stage gallery buttons
 document.querySelectorAll('.stgBtn').forEach(btn=>btn.onclick=()=>{
     const url=btn.dataset.bg;
