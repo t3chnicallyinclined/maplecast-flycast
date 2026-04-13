@@ -139,6 +139,26 @@ canvas{display:block;background:#000}
 <label><input type="checkbox" id="fx_13"> 🌙 Night Vision</label>
 <label><input type="checkbox" id="fx_14"> 🔥 Thermal</label>
 <label><input type="checkbox" id="fx_15"> 🌊 Underwater</label>
+<h2 style="color:#f0f">GRAPHICS ENHANCE</h2>
+<label>Resolution: <select id="gfx_res">
+<option value="1">1x (640×480)</option>
+<option value="2" selected>2x (1280×960)</option>
+<option value="3">3x (1920×1440)</option>
+<option value="4">4x (2560×1920)</option>
+<option value="6">6x (3840×2880)</option>
+<option value="8">8x (5120×3840)</option>
+</select></label>
+<label><input type="checkbox" id="gfx_fxaa"> FXAA Anti-Aliasing</label>
+<label><input type="checkbox" id="gfx_bloom"> Bloom / HDR Glow</label>
+<label>Bloom Intensity: <input type="range" id="gfx_bloomAmt" min="0" max="100" value="30"> <span class="val" id="gfx_bloomAmtVal">30%</span></label>
+<label><input type="checkbox" id="gfx_crtAdv"> Advanced CRT</label>
+<label>CRT Curvature: <input type="range" id="gfx_crtCurve" min="0" max="100" value="20"> <span class="val" id="gfx_crtCurveVal">20%</span></label>
+<label><input type="checkbox" id="gfx_grain"> Film Grain</label>
+<label>Color Temp: <input type="range" id="gfx_colorTemp" min="-50" max="50" value="0"> <span class="val" id="gfx_colorTempVal">0</span></label>
+<label>Saturation: <input type="range" id="gfx_sat" min="0" max="200" value="100"> <span class="val" id="gfx_satVal">100%</span></label>
+<label>Contrast: <input type="range" id="gfx_contrast" min="50" max="200" value="100"> <span class="val" id="gfx_contrastVal">100%</span></label>
+<label>Brightness: <input type="range" id="gfx_bright" min="50" max="200" value="100"> <span class="val" id="gfx_brightVal">100%</span></label>
+<label>Sharpness: <input type="range" id="gfx_sharp" min="0" max="100" value="0"> <span class="val" id="gfx_sharpVal">0%</span></label>
 <h2 style="color:#0ff">🔧 TRANSFORMS</h2>
 <label>Zoom: <input type="range" id="fx_zoom" min="50" max="300" value="100"> <span class="val" id="fx_zoomVal">100%</span></label>
 <label>Char Scale: <input type="range" id="fx_charScale" min="25" max="400" value="100"> <span class="val" id="fx_charScaleVal">100%</span></label>
@@ -194,6 +214,7 @@ import {FrameDecoder} from './webgpu/frame-decoder.mjs';
 import {TAParser} from './webgpu/ta-parser.mjs';
 import {TextureManager} from './webgpu/texture-manager.mjs';
 import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs';
+import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 
@@ -265,6 +286,21 @@ document.getElementById('dbg_shadInstr').onchange=e=>DBG.shadInstr=parseInt(e.ta
 document.getElementById('dbg_useAlpha').onchange=e=>DBG.useAlphaOverride=parseInt(e.target.value);
 DBG.shadOverride=false;DBG.shadInstr=-1;DBG.useAlphaOverride=-1;
 DBG.tileClipOff=false;DBG.tileClipLog=false;DBG.singlePass=true;DBG.freeze=false;DBG.noOffset=false;
+// Graphics enhance
+DBG.resScale=2;DBG.fxaa=false;DBG.bloom=false;DBG.bloomAmt=0.3;DBG.crtAdv=false;DBG.crtCurve=0.2;
+DBG.grain=false;DBG.colorTemp=0;DBG.sat=1.0;DBG.contrast=1.0;DBG.bright=1.0;DBG.sharp=0;
+document.getElementById('gfx_res').onchange=e=>{DBG.resScale=+e.target.value;if(window._resizeRenderer)window._resizeRenderer();};
+document.getElementById('gfx_fxaa').onchange=e=>DBG.fxaa=e.target.checked;
+document.getElementById('gfx_bloom').onchange=e=>DBG.bloom=e.target.checked;
+document.getElementById('gfx_bloomAmt').oninput=e=>{DBG.bloomAmt=e.target.value/100;document.getElementById('gfx_bloomAmtVal').textContent=e.target.value+'%';};
+document.getElementById('gfx_crtAdv').onchange=e=>DBG.crtAdv=e.target.checked;
+document.getElementById('gfx_crtCurve').oninput=e=>{DBG.crtCurve=e.target.value/100;document.getElementById('gfx_crtCurveVal').textContent=e.target.value+'%';};
+document.getElementById('gfx_grain').onchange=e=>DBG.grain=e.target.checked;
+document.getElementById('gfx_colorTemp').oninput=e=>{DBG.colorTemp=e.target.value/50;document.getElementById('gfx_colorTempVal').textContent=e.target.value;};
+document.getElementById('gfx_sat').oninput=e=>{DBG.sat=e.target.value/100;document.getElementById('gfx_satVal').textContent=e.target.value+'%';};
+document.getElementById('gfx_contrast').oninput=e=>{DBG.contrast=e.target.value/100;document.getElementById('gfx_contrastVal').textContent=e.target.value+'%';};
+document.getElementById('gfx_bright').oninput=e=>{DBG.bright=e.target.value/100;document.getElementById('gfx_brightVal').textContent=e.target.value+'%';};
+document.getElementById('gfx_sharp').oninput=e=>{DBG.sharp=e.target.value/100;document.getElementById('gfx_sharpVal').textContent=e.target.value+'%';};
 DBG.immediateRender=false;DBG.predictive=false;
 document.querySelectorAll('input[name=latMode]').forEach(r=>r.onchange=e=>{DBG.immediateRender=e.target.value==='immediate';});
 document.getElementById('dbg_predictive').onchange=e=>DBG.predictive=e.target.checked;
@@ -281,6 +317,10 @@ async function main(){
         R.dev.addEventListener('uncapturederror',(e)=>{console.error('[webgpu]',e.error.message);});
     }catch(e){ss('Init failed: '+e.message,'err');return;}
     const D=new FrameDecoder(),P=new TAParser(),T=new TextureManager(R.dev),FP=new FramePredictor();
+    const PP=new PostProcessor();
+    PP.init(R.dev, R.fmt);
+    window._resizeRenderer=()=>PP.ensureTargets(640, 480, DBG.resScale||1);
+    PP.ensureTargets(640, 480, DBG.resScale||2);
     let lastParsed=null;
     document.getElementById('dbg_dumpFrame').onclick=()=>{
         if(!lastParsed){console.log('[dump] no frame yet');return;}
@@ -353,7 +393,10 @@ async function main(){
                     if(DBG.immediateRender){
                         // IMMEDIATE MODE: render NOW, skip RAF wait (~8ms savings)
                         const t2=performance.now();
-                        R.renderFrame(g,T,fr.pvrSnapshot,D.vram,DBG);
+                        PP.ensureTargets(640,480,DBG.resScale||1);
+                        const rt=DBG.resScale>1?PP.getRenderTarget():null;
+                        R.renderFrame(g,T,fr.pvrSnapshot,D.vram,DBG,rt);
+                        if(rt&&R._lastEncoder){PP.blit(R._lastEncoder,R.ctx.getCurrentTexture().createView(),canvas.width,canvas.height,DBG);R.dev.queue.submit([R._lastEncoder.finish()]);}
                         rMs=performance.now()-t2;
                         totalFrames++; renderFrames++;
                         const total=dMs+pMs+rMs;
@@ -447,7 +490,10 @@ async function main(){
                 document.getElementById('dbg_stats_left').textContent=s;
             }
             const t2=performance.now();
-            R.renderFrame(g,T,snap,D.vram,DBG);
+            PP.ensureTargets(640,480,DBG.resScale||1);
+            const rt=DBG.resScale>1?PP.getRenderTarget():null;
+            R.renderFrame(g,T,snap,D.vram,DBG,rt);
+            if(rt&&R._lastEncoder){PP.blit(R._lastEncoder,R.ctx.getCurrentTexture().createView(),canvas.width,canvas.height,DBG);R.dev.queue.submit([R._lastEncoder.finish()]);};
             rMs=performance.now()-t2;
             totalFrames++; renderFrames++;
             const total=dMs+pMs+rMs;

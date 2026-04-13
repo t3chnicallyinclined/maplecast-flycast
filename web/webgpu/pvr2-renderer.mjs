@@ -161,7 +161,8 @@ export class PVR2Renderer {
         this._idxArr = indices;
     }
 
-    renderFrame(parsed, texMgr, pvrSnap, vram, dbg) {
+    // renderTarget: optional {colorView, depthView, width, height} for offscreen rendering
+    renderFrame(parsed, texMgr, pvrSnap, vram, dbg, renderTarget) {
         const {vertexData,vertexCount,opaque,punchThrough,translucent}=parsed;
         if(!vertexCount)return;
         dbg = dbg || {};
@@ -242,12 +243,13 @@ export class PVR2Renderer {
 
         const fb=texMgr.getFallbackTexture(), fbBG=this._texBG(fb.texture,fb.sampler);
         const enc=this.dev.createCommandEncoder();
-        const texView=this.ctx.getCurrentTexture().createView();
-        const depthView=this.depth.createView();
+        const texView = renderTarget ? renderTarget.colorView : this.ctx.getCurrentTexture().createView();
+        const depthView = renderTarget ? renderTarget.depthView : this.depth.createView();
         let passes = parsed.renderPasses || [{op_count:opaque.length,pt_count:punchThrough.length,tr_count:translucent.length}];
         if(dbg.singlePass) passes=[{op_count:opaque.length,pt_count:punchThrough.length,tr_count:translucent.length}];
 
-        const cW=this.depth.width, cH=this.depth.height;
+        const cW = renderTarget ? renderTarget.width : this.depth.width;
+        const cH = renderTarget ? renderTarget.height : this.depth.height;
         const applyTileClip=(rp,tc)=>{
             const mode=tc>>>28;
             if(mode>=2){
@@ -394,7 +396,12 @@ export class PVR2Renderer {
             rp.end();
             prevPass=pass;
         }
-        this.dev.queue.submit([enc.finish()]);
+        if (!renderTarget) {
+            // Direct to canvas — submit immediately
+            this.dev.queue.submit([enc.finish()]);
+        }
+        // If renderTarget, caller will add post-process pass and submit
+        this._lastEncoder = renderTarget ? enc : null;
         this.vFrame^=1; // Flip double buffer for next frame
     }
 
