@@ -175,6 +175,15 @@ canvas{display:block;background:transparent}
 <button id="gfx_loadVid" style="width:100%;background:#333;color:#0ff;border:1px solid #0ff;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Load Video BG</button>
 <button id="gfx_load3d" style="width:100%;background:#333;color:#ff0;border:1px solid #ff0;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Load 3D Scene (GLB URL)</button>
 <button id="gfx_demo3d" style="width:100%;background:#530;color:#ff0;border:1px solid #ff0;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Demo: Procedural 3D Arena</button>
+<div style="font-size:9px;color:#888;margin:4px 0">AI STAGE GALLERY:</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:2px">
+<button class="stgBtn" data-bg="/stages/bg-volcanic-arena.jpg" style="background:#300;color:#f80;border:1px solid #f80;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Volcanic</button>
+<button class="stgBtn" data-bg="/stages/bg-underwater-temple.jpg" style="background:#033;color:#0ff;border:1px solid #0ff;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Underwater</button>
+<button class="stgBtn" data-bg="/stages/bg-cyberpunk-rooftop.jpg" style="background:#303;color:#f0f;border:1px solid #f0f;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Cyberpunk</button>
+<button class="stgBtn" data-bg="/stages/bg-ice-cave.jpg" style="background:#036;color:#8df;border:1px solid #8df;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Ice Cave</button>
+<button class="stgBtn" data-bg="/stages/bg-olympus-temple.jpg" style="background:#330;color:#fd0;border:1px solid #fd0;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Olympus</button>
+<button class="stgBtn" data-bg="/bg-cosmic-colosseum.jpg" style="background:#203;color:#c8f;border:1px solid #c8f;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Cosmic</button>
+</div>
 <input type="text" id="gfx_aiPrompt" placeholder="AI prompt: cyberpunk arena..." style="width:95%;background:#222;color:#f0f;border:1px solid #808;padding:4px;font-family:inherit;font-size:10px;margin:4px 0">
 <button id="gfx_genBg" style="width:100%;background:#303;color:#f0f;border:1px solid #f0f;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Generate AI Background</button>
 <div id="gfx_bgStatus" style="font-size:9px;color:#555;margin:2px 0">No background loaded</div>
@@ -451,6 +460,18 @@ document.getElementById('gfx_load3d').onclick=()=>{
     init3dBg(url);
 };
 document.getElementById('gfx_demo3d').onclick=()=>{console.log('[3d] starting demo arena');init3dBg(null).catch(e=>console.error('[3d]',e));};
+// Stage gallery buttons
+document.querySelectorAll('.stgBtn').forEach(btn=>btn.onclick=()=>{
+    const url=btn.dataset.bg;
+    const wrap=document.getElementById('wrap');
+    // Remove 3d/video bg
+    const old3d=document.getElementById('bg3dCanvas');if(old3d)old3d.remove();
+    const oldVid=document.getElementById('bgVideo');if(oldVid)oldVid.remove();
+    wrap.style.backgroundImage='url('+url+')';
+    wrap.style.backgroundSize='120%';wrap.style.backgroundPosition='center';
+    DBG.customBg=true;document.getElementById('gfx_customBg').checked=true;
+    document.getElementById('gfx_bgStatus').textContent='Stage: '+btn.textContent;
+});
 document.getElementById('gfx_genBg').onclick=async()=>{
     const prompt=document.getElementById('gfx_aiPrompt').value.trim()||'massive holographic Marvel vs Capcom 2 arena floating in space, neon purple and blue energy rings, cyberpunk megacity skyline, volumetric god rays, comic book style, ultra detailed 3D render';
     document.getElementById('gfx_bgStatus').textContent='Generating with Flux Pro Ultra...';
