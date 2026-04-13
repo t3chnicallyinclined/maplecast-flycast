@@ -183,7 +183,7 @@ function pollOnce() {
   // Try WebTransport datagram first (QUIC/UDP = lowest latency)
   // Falls back to controlWs (TCP) if WT not available
   let sentViaQUIC = false;
-  if (window._transport && window._transport.sendInput) {
+  if (window._transport && window._transport.sendInput && state.mySlot >= 0) {
     sentViaQUIC = window._transport.sendInput(
       state.mySlot, lt, rt, (btn >> 8) & 0xFF, btn & 0xFF);
   }
@@ -191,6 +191,10 @@ function pollOnce() {
     cws.send(_inputBuf);  // TCP fallback
   }
   state.diag.inputSendCount++;
+  if (!state.diag._inputPathLogged && state.diag.inputSendCount === 1) {
+    console.log('[gamepad] Input path:', sentViaQUIC ? 'QUIC/UDP datagram' : 'TCP WebSocket');
+    state.diag._inputPathLogged = true;
+  }
   state.diag.inputViaQUIC = sentViaQUIC;
 }
 
