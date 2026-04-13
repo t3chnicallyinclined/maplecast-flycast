@@ -407,8 +407,9 @@ async function init3dBg(glbUrl){
     const THREE=await import('three');
     const {GLTFLoader}=await import('three/addons/loaders/GLTFLoader.js');
     const scene=new THREE.Scene();
-    const cam=new THREE.PerspectiveCamera(60,640/480,0.1,1000);
-    cam.position.set(0,2,5);cam.lookAt(0,0,0);
+    // Camera positioned so 3D floor aligns with DC character feet (~73% down screen)
+    const cam=new THREE.PerspectiveCamera(50,640/480,0.1,1000);
+    cam.position.set(0,1.8,6);cam.lookAt(0,-0.3,0);
     const renderer=new THREE.WebGLRenderer({canvas:bgC,alpha:false,antialias:true});
     renderer.setSize(640,480);renderer.setClearColor(0x050510);
     // Lighting
@@ -431,15 +432,21 @@ async function init3dBg(glbUrl){
         const addRing=(r,c,y)=>{const g=new THREE.TorusGeometry(r,0.04,8,64);const m=new THREE.Mesh(g,new THREE.MeshBasicMaterial({color:c}));m.rotation.x=Math.PI/2;m.position.y=y||0;scene.add(m);return m;};
         const addPillars=(n,r,h,col,glowCol)=>{for(let i=0;i<n;i++){const a=i/n*Math.PI*2;const p=new THREE.Mesh(new THREE.CylinderGeometry(0.15,0.2,h,8),new THREE.MeshStandardMaterial({color:col,metalness:0.8,roughness:0.2,emissive:col,emissiveIntensity:0.2}));p.position.set(Math.cos(a)*r,h/2-0.5,Math.sin(a)*r);scene.add(p);if(glowCol){const g=new THREE.Mesh(new THREE.SphereGeometry(0.25,8,8),new THREE.MeshBasicMaterial({color:glowCol}));g.position.set(Math.cos(a)*r,h+0.1,Math.sin(a)*r);scene.add(g);}}};
         const addPlatform=(r,c,y)=>{const p=new THREE.Mesh(new THREE.CylinderGeometry(r,r+0.5,0.3,32),new THREE.MeshStandardMaterial({color:c,metalness:0.9,roughness:0.1}));p.position.y=y||-0.5;scene.add(p);};
+        // Wide reflective stage floor — extends across full scene
+        const addFloor=(color,opacity,reflect)=>{
+            const floorGeo=new THREE.PlaneGeometry(40,40);
+            const floorMat=new THREE.MeshStandardMaterial({color:color||0x111111,metalness:reflect||0.8,roughness:0.15,transparent:opacity<1,opacity:opacity||1});
+            const floor=new THREE.Mesh(floorGeo,floorMat);floor.rotation.x=-Math.PI/2;floor.position.y=-0.5;floor.receiveShadow=true;scene.add(floor);return floor;
+        };
 
         if(sceneType==='neon'){
             renderer.setClearColor(0x050510);
-            addPlatform(4,0x111122);addRing(4.2,0x8800ff,-0.3);
+            addFloor(0x080818,1,0.9);addRing(4.2,0x8800ff,-0.3);
             addPillars(8,4.5,4,0x222244,0xff00ff);addStars(2000);
             scene.add(new THREE.PointLight(0xff00ff,3,20));scene.add(new THREE.PointLight(0x00ffff,3,20));
         } else if(sceneType==='lava'){
             renderer.setClearColor(0x100500);
-            addPlatform(5,0x1a0a00);
+            addFloor(0x1a0800,1,0.3);
             // Lava floor
             const lava=new THREE.Mesh(new THREE.PlaneGeometry(40,40),new THREE.MeshBasicMaterial({color:0xff3300,transparent:true,opacity:0.4}));
             lava.rotation.x=-Math.PI/2;lava.position.y=-1;scene.add(lava);
@@ -450,7 +457,7 @@ async function init3dBg(glbUrl){
             scene.fog=new THREE.Fog(0x100500,5,25);
         } else if(sceneType==='ice'){
             renderer.setClearColor(0x051525);
-            addPlatform(4.5,0x88bbdd);
+            addFloor(0x6699bb,0.8,0.95);
             // Ice crystals
             for(let i=0;i<12;i++){const a=Math.random()*Math.PI*2;const r2=3+Math.random()*4;const h=1+Math.random()*4;
                 const c=new THREE.Mesh(new THREE.ConeGeometry(0.3+Math.random()*0.4,h,5),new THREE.MeshStandardMaterial({color:0x88ccff,metalness:0.3,roughness:0.1,transparent:true,opacity:0.7}));
@@ -460,14 +467,14 @@ async function init3dBg(glbUrl){
             scene.fog=new THREE.Fog(0x051525,8,30);
         } else if(sceneType==='space'){
             renderer.setClearColor(0x000008);
-            addPlatform(3.5,0x0a0a20);addRing(3.8,0x4400ff,-0.3);addRing(5,0x220088,0.5);addRing(6.5,0x110044,1.5);
+            addFloor(0x060618,0.5,0.95);addRing(3.8,0x4400ff,-0.3);addRing(5,0x220088,0.5);addRing(6.5,0x110044,1.5);
             addStars(5000,0.1);
             // Nebula particles
             const nebG=new THREE.BufferGeometry();const nebP=new Float32Array(800*3);for(let i=0;i<800*3;i++)nebP[i]=(Math.random()-0.5)*40;nebG.setAttribute('position',new THREE.BufferAttribute(nebP,3));scene.add(new THREE.Points(nebG,new THREE.PointsMaterial({color:0x6622cc,size:0.15,transparent:true,opacity:0.3})));
             scene.add(new THREE.PointLight(0x6622cc,2,30));
         } else if(sceneType==='temple'){
             renderer.setClearColor(0x1a1008);
-            addPlatform(5,0x8B7355);
+            addFloor(0x8B7355,1,0.2);
             // Stone columns
             for(let i=0;i<10;i++){const a=i/10*Math.PI*2;const p=new THREE.Mesh(new THREE.CylinderGeometry(0.25,0.3,5,12),new THREE.MeshStandardMaterial({color:0xC4A882,roughness:0.8}));p.position.set(Math.cos(a)*5.5,2,Math.sin(a)*5.5);scene.add(p);
                 // Column cap
@@ -580,10 +587,12 @@ async function init3dBg(glbUrl){
     (function anim3d(){
         requestAnimationFrame(anim3d);
         if(!DBG.customBg)return;
-        t+=0.005;
-        cam.position.x=Math.sin(t)*6;cam.position.z=Math.cos(t)*6;
-        cam.position.y=2+Math.sin(t*0.7)*0.5;
-        cam.lookAt(0,0.5,0);
+        t+=0.003;
+        // Gentle orbit — keep floor in view, slight sway
+        cam.position.x=Math.sin(t*0.5)*2;
+        cam.position.z=5+Math.cos(t*0.3)*1.5;
+        cam.position.y=1.8+Math.sin(t*0.7)*0.3;
+        cam.lookAt(0,-0.2,0);
         // Animate scene objects
         scene.traverse(obj=>{
             if(obj.userData.spin){obj.rotation.x+=(obj.userData.spin.x||0);obj.rotation.y+=(obj.userData.spin.y||0);}
