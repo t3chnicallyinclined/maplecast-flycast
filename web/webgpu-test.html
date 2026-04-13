@@ -37,6 +37,7 @@ canvas{display:block;background:#000}
     <button id="joinP1" style="flex:1;padding:8px;background:#143;color:#0f0;border:1px solid #0f0;cursor:pointer;font-family:inherit;font-size:13px">🎮 JOIN P1</button>
     <button id="joinP2" style="flex:1;padding:8px;background:#143;color:#0f0;border:1px solid #0f0;cursor:pointer;font-family:inherit;font-size:13px">🎮 JOIN P2</button>
     <button id="leaveBtn" style="flex:1;padding:8px;background:#311;color:#f44;border:1px solid #f44;cursor:pointer;font-family:inherit;display:none">LEAVE</button>
+    <button id="fullscreenBtn" style="flex:1;padding:8px;background:#330;color:#ff0;border:1px solid #ff0;cursor:pointer;font-family:inherit;font-size:13px">FULLSCREEN</button>
 </div>
 <div id="padInfo" style="font-size:10px;color:#888;text-align:center;margin-top:2px">Press a button on your gamepad</div>
 <div id="padViz" style="display:flex;gap:12px;justify-content:center;align-items:center;margin:6px 0;font-size:10px;color:#888">
@@ -315,6 +316,26 @@ document.getElementById('gfx_sepia').oninput=e=>{DBG.sepia=e.target.value/100;do
 document.getElementById('gfx_vignette').oninput=e=>{DBG.vignette=e.target.value/100;document.getElementById('gfx_vignetteVal').textContent=e.target.value;};
 document.getElementById('gfx_scanlines').oninput=e=>{DBG.scanlines=e.target.value/100;document.getElementById('gfx_scanlinesVal').textContent=e.target.value;};
 document.getElementById('gfx_hue').oninput=e=>{DBG.colorShift=e.target.value/100;document.getElementById('gfx_hueVal').textContent=e.target.value;};
+// Fullscreen
+document.getElementById('fullscreenBtn').onclick=()=>{
+    const wrap=document.getElementById('wrap');
+    if(document.fullscreenElement){document.exitFullscreen();return;}
+    wrap.requestFullscreen().then(()=>{
+        const c=document.getElementById('c');
+        const resize=()=>{c.width=window.innerWidth;c.height=window.innerHeight;
+            c.style.width='100vw';c.style.height='100vh';
+            if(window._resizeRenderer)window._resizeRenderer();};
+        resize();
+        window.addEventListener('resize',resize);
+        document.addEventListener('fullscreenchange',()=>{
+            if(!document.fullscreenElement){
+                c.width=640;c.height=480;c.style.width='';c.style.height='';
+                window.removeEventListener('resize',resize);
+                if(window._resizeRenderer)window._resizeRenderer();
+            }
+        },{once:true});
+    });
+};
 DBG.immediateRender=false;DBG.predictive=false;
 document.querySelectorAll('input[name=latMode]').forEach(r=>r.onchange=e=>{DBG.immediateRender=e.target.value==='immediate';});
 document.getElementById('dbg_predictive').onchange=e=>DBG.predictive=e.target.checked;
