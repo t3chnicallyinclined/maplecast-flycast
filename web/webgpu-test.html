@@ -207,6 +207,8 @@ let maDecode=0,maParse=0,maRender=0,maTotal=0,maE2E=0;
 // Network RTT measurement via control WS ping
 let netRTT=-1, lastFrameArrival=0, maJitter=0, maInterArrival=0;
 let skippedFrames=0, renderFrames=0, predFrames=0;
+// Audio
+let audioCtx=null, audioWorkletPort=null, audioPackets=0, audioPacketsTotal=0, audioPlaying=false;
 const ss=(m,c='')=>{st.textContent=m;st.className=c};
 
 // Debug state — read by renderer
@@ -316,6 +318,14 @@ async function main(){
             onclose: ()=>ss('Disconnected'),
             onframe: (d)=>{
                 wB+=d.byteLength;
+                // Audio packet: [0xAD][0x10][seq16][512×int16 stereo PCM]
+                if(d.length>=4 && d[0]===0xAD && d[1]===0x10){
+                    audioPackets++; audioPacketsTotal++;
+                    if(audioWorkletPort){
+                        audioWorkletPort.postMessage(new Int16Array(d.buffer, d.byteOffset+4, (d.length-4)/2));
+                    }
+                    return;
+                }
                 try{
                     const wsArrival=performance.now();
                     if(lastFrameArrival>0){
@@ -481,10 +491,11 @@ Tex$:    H=${ts.hits} M=${ts.misses} R=${ts.reused}
 Dirty:   ${ts.dirtyDecodes} re-decoded
 VQ: ${ts.vq}  Mip: ${ts.mip}  Unsup: ${ts.unsupported}
 TA$:     H=${P._cacheHits||0} M=${P._cacheMisses||0}
+Audio:   ${audioPlaying?'PLAYING':'off'} | ${audioPackets}/2s ${audioPacketsTotal} total
 Passes:  ${parsed_passes} | Frame ${D.frameNum}
 =================================`;
             if(e2eCount>300){e2eSum=0;e2eCount=0;e2eMax=0;e2eMin=999;}
-            ts.hits=0;ts.misses=0;ts.reused=0;ts.vq=0;ts.mip=0;ts.unsupported=0;ts.dirtyDecodes=0;
+            ts.hits=0;ts.misses=0;ts.reused=0;ts.vq=0;ts.mip=0;ts.unsupported=0;ts.dirtyDecodes=0;audioPackets=0;
         }
         // RTT ping via control WS — relay echoes {type:'pong',t:X} immediately
         if(state.controlWs&&state.controlWs.readyState===WebSocket.OPEN){
@@ -512,6 +523,24 @@ main().catch(e=>{ss('Fatal: '+e.message,'err');console.error(e);});
 //   🎮 GAMEPAD — uses king.html's proven modules
 // ═══════════════════════════════════
 import { state } from './js/state.mjs';
+
+// Audio init — needs user gesture for autoplay policy
+async function initAudio(){
+    if(audioCtx) return;
+    try{
+        audioCtx = new AudioContext({sampleRate:44100});
+        await audioCtx.audioWorklet.addModule('/pcm-worklet.js');
+        const node = new AudioWorkletNode(audioCtx,'pcm-processor',{outputChannelCount:[2]});
+        node.connect(audioCtx.destination);
+        audioWorkletPort = node.port;
+        audioPlaying = true;
+        console.log('[audio] ready — sampleRate:',audioCtx.sampleRate,'state:',audioCtx.state);
+        if(audioCtx.state==='suspended') await audioCtx.resume();
+    }catch(e){console.error('[audio] init failed:',e);audioCtx=null;}
+}
+// Arm on first user gesture
+['click','keydown','touchstart'].forEach(ev=>
+    document.addEventListener(ev,()=>initAudio(),{once:true}));
 import { ensureControlWs } from './js/ws-connection.mjs';
 import { startGamepadPolling, stopGamepadPolling } from './js/gamepad.mjs';
 
