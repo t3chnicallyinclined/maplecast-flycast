@@ -27,16 +27,28 @@ cd maplecast-flycast
 # Terminal 2: Build + run the stream relay
 ./scripts/quickstart.sh relay
 
-# Terminal 3: Serve the WebGPU renderer (no build needed!)
+# Terminal 3: Serve the renderer (no build needed!)
 ./scripts/quickstart.sh webgpu
 
 # Open Chrome → http://localhost:8080/webgpu-test.html
-# You should see MVC2 rendering at 60fps!
+# MVC2 at 60fps with full debug controls, effects panel,
+# 3D backgrounds, gamepad support, and diagnostics!
 ```
 
-The WebGPU renderer connects to `ws://localhost:7201` (the relay) by default when running locally. For production, nginx proxies to the same ports.
-
 **That's it.** Three terminals, one browser tab, you're streaming Dreamcast.
+
+The default renderer is **webgpu-test.html** — a pure JavaScript + WebGPU renderer with:
+- Live diagnostics (FPS, latency, texture cache stats)
+- 15+ post-processing effects (FXAA, bloom, CRT, color grading)
+- 12 real-time 3D arena backgrounds
+- Debug controls (draw toggles, depth overrides, scrubbers)
+- Gamepad input with MVC2 button layout
+- Audio playback
+- Fullscreen mode
+
+**No build step, no WASM, no compile.** Edit any `.mjs` file → refresh browser → see changes instantly. This is the fastest development loop.
+
+> **Note:** There's also `king.html` — the WASM + WebGL2 renderer used in production at nobd.net. It requires building the WASM module (`packages/renderer/build.sh`). For development and experimentation, use webgpu-test.html.
 
 ---
 
@@ -253,14 +265,16 @@ Audio: 0xAD 0x10 + seq(2) + 512×int16 stereo PCM = 2052 bytes
 
 ## Build Targets
 
-| Target | Command | Output |
-|--------|---------|--------|
-| Headless server | `cmake -B build-headless -DMAPLECAST_HEADLESS=ON && cmake --build build-headless` | `build-headless/flycast` |
-| Desktop client | `cmake -B build && cmake --build build` | `build/flycast` |
-| Mirror client | `MAPLECAST_MIRROR_CLIENT=1 ./build/flycast` | (runtime flag) |
-| WASM renderer | `cd packages/renderer && ./build.sh` | `packages/renderer/build/` |
-| Relay | `cd relay && cargo build --release` | `relay/target/release/maplecast-relay` |
-| WebGPU renderer | No build — pure JS, edit and deploy | `web/webgpu/*.mjs` |
+| Target | Command | Output | Build required? |
+|--------|---------|--------|-----------------|
+| **WebGPU renderer** | **None — pure JS** | `web/webgpu/*.mjs` | **NO** (default) |
+| Headless server | `cmake -B build-headless -DMAPLECAST_HEADLESS=ON && cmake --build build-headless` | `build-headless/flycast` | Yes (C++) |
+| Relay | `cd relay && cargo build --release` | `relay/target/release/maplecast-relay` | Yes (Rust) |
+| Desktop client | `cmake -B build && cmake --build build` | `build/flycast` | Yes (C++) |
+| Mirror client | `MAPLECAST_MIRROR_CLIENT=1 ./build/flycast` | (runtime flag) | Yes (C++) |
+| WASM renderer | `cd packages/renderer && ./build.sh` | `packages/renderer/build/` | Yes (Emscripten) |
+
+**Start with WebGPU.** It's the fastest development loop — edit JS, refresh browser, done. No compilation, no WASM, no SDK installation.
 
 ## Deployment
 
