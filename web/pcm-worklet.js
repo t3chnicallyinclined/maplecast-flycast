@@ -15,8 +15,8 @@ class PCMProcessor extends AudioWorkletProcessor {
         right[i] = pcm[i * 2 + 1] / 32768.0;
       }
       this.buffer.push({ left, right });
-      // Keep buffer at ~200ms max (19 chunks × 10.67ms)
-      while (this.buffer.length > 19) this.buffer.shift();
+      // Keep buffer tight for low latency (~85ms max, 8 chunks × 10.67ms)
+      while (this.buffer.length > 8) this.buffer.shift();
     };
   }
 
@@ -25,10 +25,10 @@ class PCMProcessor extends AudioWorkletProcessor {
     const outR = outputs[0][1];
     if (!outL || !outR) return true;
 
-    // Pre-buffer: wait for 5 chunks (~53ms) before starting playback
-    // This absorbs DataChannel delivery jitter
+    // Pre-buffer: wait for 2 chunks (~21ms) before starting playback
+    // Low latency for QUIC transport — minimal jitter absorption needed
     if (!this.started) {
-      if (this.buffer.length < 5) {
+      if (this.buffer.length < 2) {
         outL.fill(0);
         outR.fill(0);
         return true;
