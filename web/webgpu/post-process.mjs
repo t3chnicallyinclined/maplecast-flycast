@@ -184,8 +184,9 @@ export class PostProcessor {
         if (this.offscreenDepth) this.offscreenDepth.destroy();
 
         this._w = w; this._h = h; this.scale = scale;
+        // Must match the renderer's pipeline target format (canvas format)
         this.offscreenTex = this.dev.createTexture({
-            size: [w, h], format: 'rgba8unorm',
+            size: [w, h], format: this.canvasFmt,
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
         });
         this.offscreenDepth = this.dev.createTexture({
