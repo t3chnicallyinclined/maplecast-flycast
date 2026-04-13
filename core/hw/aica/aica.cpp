@@ -82,11 +82,17 @@ static bool UpdateSh4Ints()
 
 AicaTimer timers[3];
 int aica_schid = -1;
-constexpr int AICA_TICK = 4535;		// 44.1 KHz
+
+// Phase C: Batch ARM7 execution — process multiple audio samples per callback.
+// Reduces SH4 scheduler overhead from 735 callbacks/frame to ~23.
+// Each batch: 32 samples × 4535 cycles = 145120 SH4 cycles between callbacks.
+// Total ARM7 work per frame is identical, just fewer context switches.
+constexpr int AICA_BATCH = 32;
+constexpr int AICA_TICK = 4535 * AICA_BATCH;  // callback every 32 samples
 
 static int AicaUpdate(int tag, int cycles, int jitter, void *arg)
 {
-	arm::run(1);
+	arm::run(AICA_BATCH);
 
 	return AICA_TICK;
 }
