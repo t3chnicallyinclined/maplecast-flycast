@@ -74,9 +74,13 @@ export async function initRenderer() {
     }
     requestAnimationFrame(renderTick);
 
-    // Expose diagnostics on state
+    // Expose renderer controls globally for king.html UI integration
     state.diag = state.diag || {};
     state.diag.rendererType = 'webgpu';
+    window.webgpuDBG = DBG;
+    window.webgpuRenderer = R;
+    window.webgpuTexMgr = T;
+    console.log('[webgpu-bridge] Controls exposed: window.webgpuDBG (try webgpuDBG.bloom=true)');
 }
 
 function connectStream(wsUrl) {
