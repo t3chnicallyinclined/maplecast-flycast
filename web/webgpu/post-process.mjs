@@ -17,7 +17,14 @@ struct PostUniforms {
     contrast: f32,           // 0.5-2
     bright: f32,             // 0.5-2
     sharp: f32,              // 0-1
-    pad: f32,
+    chromatic: f32,          // 0-1 chromatic aberration
+    pixelate: f32,           // 0-1 pixelation amount
+    edgeDetect: f32,         // 0 or 1
+    sepia: f32,              // 0-1
+    vignette: f32,           // 0-1 standalone vignette
+    scanlines: f32,          // 0-1 scanline intensity
+    colorShift: f32,         // hue rotation 0-1
+    pad2: f32,
 };
 
 @group(0) @binding(0) var sceneTex: texture_2d<f32>;
@@ -135,6 +142,66 @@ fn hash22(p: vec2<f32>) -> f32 {
     c = vec4<f32>((c.rgb - 0.5) * pu.contrast + 0.5, c.a);
     c = vec4<f32>(c.rgb * pu.bright, c.a);
 
+    // === Chromatic Aberration ===
+    if (pu.chromatic > 0.001) {
+        let ca = pu.chromatic * 0.01;
+        let dir = normalize(uv - 0.5);
+        let dist = length(uv - 0.5);
+        let offset = dir * dist * ca;
+        c.r = textureSampleLevel(sceneTex, sceneSampler, uv + offset, 0.0).r;
+        c.b = textureSampleLevel(sceneTex, sceneSampler, uv - offset, 0.0).b;
+    }
+
+    // === Pixelate ===
+    if (pu.pixelate > 0.01) {
+        let blockSize = max(2.0, pu.pixelate * 20.0);
+        let blockUV = floor(uv * pu.resolution / blockSize) * blockSize / pu.resolution;
+        c = textureSampleLevel(sceneTex, sceneSampler, blockUV, 0.0);
+    }
+
+    // === Edge Detection (Sobel) ===
+    if (pu.edgeDetect > 0.5) {
+        let tl = dot(textureSampleLevel(sceneTex, sceneSampler, uv + vec2<f32>(-px.x, -px.y), 0.0).rgb, vec3<f32>(0.3, 0.6, 0.1));
+        let t  = dot(textureSampleLevel(sceneTex, sceneSampler, uv + vec2<f32>(0, -px.y), 0.0).rgb, vec3<f32>(0.3, 0.6, 0.1));
+        let tr = dot(textureSampleLevel(sceneTex, sceneSampler, uv + vec2<f32>(px.x, -px.y), 0.0).rgb, vec3<f32>(0.3, 0.6, 0.1));
+        let l  = dot(textureSampleLevel(sceneTex, sceneSampler, uv + vec2<f32>(-px.x, 0), 0.0).rgb, vec3<f32>(0.3, 0.6, 0.1));
+        let r2 = dot(textureSampleLevel(sceneTex, sceneSampler, uv + vec2<f32>(px.x, 0), 0.0).rgb, vec3<f32>(0.3, 0.6, 0.1));
+        let bl = dot(textureSampleLevel(sceneTex, sceneSampler, uv + vec2<f32>(-px.x, px.y), 0.0).rgb, vec3<f32>(0.3, 0.6, 0.1));
+        let b  = dot(textureSampleLevel(sceneTex, sceneSampler, uv + vec2<f32>(0, px.y), 0.0).rgb, vec3<f32>(0.3, 0.6, 0.1));
+        let br = dot(textureSampleLevel(sceneTex, sceneSampler, uv + vec2<f32>(px.x, px.y), 0.0).rgb, vec3<f32>(0.3, 0.6, 0.1));
+        let gx = -tl - 2.0*l - bl + tr + 2.0*r2 + br;
+        let gy = -tl - 2.0*t - tr + bl + 2.0*b + br;
+        let edge = sqrt(gx*gx + gy*gy);
+        c = vec4<f32>(vec3<f32>(edge * 2.0), 1.0);
+    }
+
+    // === Sepia ===
+    if (pu.sepia > 0.01) {
+        let gray = dot(c.rgb, vec3<f32>(0.299, 0.587, 0.114));
+        let sep = vec3<f32>(gray * 1.2, gray * 1.0, gray * 0.8);
+        c = vec4<f32>(mix(c.rgb, sep, pu.sepia), c.a);
+    }
+
+    // === Standalone Vignette ===
+    if (pu.vignette > 0.01) {
+        let vig = 1.0 - dot((in.uv - 0.5) * (1.0 + pu.vignette), (in.uv - 0.5) * (1.0 + pu.vignette));
+        c = vec4<f32>(c.rgb * max(vig, 0.0), c.a);
+    }
+
+    // === Scanlines (standalone, no CRT) ===
+    if (pu.scanlines > 0.01 && pu.crtAdv < 0.5) {
+        let sl = sin(in.uv.y * pu.canvasSize.y * 3.14159) * 0.5 + 0.5;
+        c = vec4<f32>(c.rgb * (1.0 - pu.scanlines * 0.4 * (1.0 - sl)), c.a);
+    }
+
+    // === Hue Rotation ===
+    if (abs(pu.colorShift) > 0.01) {
+        let cosA = cos(pu.colorShift * 6.28318);
+        let sinA = sin(pu.colorShift * 6.28318);
+        let k = vec3<f32>(0.57735);
+        c = vec4<f32>(c.rgb * cosA + cross(k, c.rgb) * sinA + k * dot(k, c.rgb) * (1.0 - cosA), c.a);
+    }
+
     // === Film Grain ===
     if (pu.grain > 0.5) {
         let n = hash22(in.uv * pu.resolution + vec2<f32>(pu.time * 100.0, pu.time * 73.0));
@@ -164,7 +231,7 @@ export class PostProcessor {
         this.dev = device;
         this.canvasFmt = canvasFmt;
         this.sampler = device.createSampler({ minFilter: 'linear', magFilter: 'linear' });
-        this.uniformBuf = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        this.uniformBuf = device.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
         this.bgl = device.createBindGroupLayout({ entries: [
             { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
@@ -219,12 +286,12 @@ export class PostProcessor {
 
     // Blit offscreen → canvas with post-processing
     blit(encoder, canvasView, canvasW, canvasH, dbg) {
-        const uniforms = new Float32Array(16);
-        uniforms[0] = this._w;          // resolution.x
-        uniforms[1] = this._h;          // resolution.y
-        uniforms[2] = canvasW;           // canvasSize.x
-        uniforms[3] = canvasH;           // canvasSize.y
-        uniforms[4] = (performance.now() / 1000) % 1000; // time
+        const uniforms = new Float32Array(24);
+        uniforms[0] = this._w;
+        uniforms[1] = this._h;
+        uniforms[2] = canvasW;
+        uniforms[3] = canvasH;
+        uniforms[4] = (performance.now() / 1000) % 1000;
         uniforms[5] = dbg.fxaa ? 1 : 0;
         uniforms[6] = dbg.bloom ? dbg.bloomAmt || 0.3 : 0;
         uniforms[7] = dbg.crtAdv ? 1 : 0;
@@ -235,7 +302,14 @@ export class PostProcessor {
         uniforms[12] = dbg.contrast ?? 1.0;
         uniforms[13] = dbg.bright ?? 1.0;
         uniforms[14] = dbg.sharp || 0;
-        uniforms[15] = 0; // pad
+        uniforms[15] = dbg.chromatic || 0;
+        uniforms[16] = dbg.pixelate || 0;
+        uniforms[17] = dbg.edgeDetect ? 1 : 0;
+        uniforms[18] = dbg.sepia || 0;
+        uniforms[19] = dbg.vignette || 0;
+        uniforms[20] = dbg.scanlines || 0;
+        uniforms[21] = dbg.colorShift || 0;
+        uniforms[22] = 0; // pad
         this.dev.queue.writeBuffer(this.uniformBuf, 0, uniforms);
 
         const rp = encoder.beginRenderPass({

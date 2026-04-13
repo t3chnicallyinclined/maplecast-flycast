@@ -159,6 +159,13 @@ canvas{display:block;background:#000}
 <label>Contrast: <input type="range" id="gfx_contrast" min="50" max="200" value="100"> <span class="val" id="gfx_contrastVal">100%</span></label>
 <label>Brightness: <input type="range" id="gfx_bright" min="50" max="200" value="100"> <span class="val" id="gfx_brightVal">100%</span></label>
 <label>Sharpness: <input type="range" id="gfx_sharp" min="0" max="100" value="0"> <span class="val" id="gfx_sharpVal">0%</span></label>
+<label>Chromatic Aberr: <input type="range" id="gfx_chromatic" min="0" max="100" value="0"> <span class="val" id="gfx_chromaticVal">0</span></label>
+<label>Pixelate: <input type="range" id="gfx_pixelate" min="0" max="100" value="0"> <span class="val" id="gfx_pixelateVal">0</span></label>
+<label><input type="checkbox" id="gfx_edge"> Edge Detect (Sobel)</label>
+<label>Sepia: <input type="range" id="gfx_sepia" min="0" max="100" value="0"> <span class="val" id="gfx_sepiaVal">0</span></label>
+<label>Vignette: <input type="range" id="gfx_vignette" min="0" max="100" value="0"> <span class="val" id="gfx_vignetteVal">0</span></label>
+<label>Scanlines: <input type="range" id="gfx_scanlines" min="0" max="100" value="0"> <span class="val" id="gfx_scanlinesVal">0</span></label>
+<label>Hue Shift: <input type="range" id="gfx_hue" min="0" max="100" value="0"> <span class="val" id="gfx_hueVal">0</span></label>
 <h2 style="color:#0ff">🔧 TRANSFORMS</h2>
 <label>Zoom: <input type="range" id="fx_zoom" min="50" max="300" value="100"> <span class="val" id="fx_zoomVal">100%</span></label>
 <label>Char Scale: <input type="range" id="fx_charScale" min="25" max="400" value="100"> <span class="val" id="fx_charScaleVal">100%</span></label>
@@ -301,6 +308,13 @@ document.getElementById('gfx_sat').oninput=e=>{DBG.sat=e.target.value/100;docume
 document.getElementById('gfx_contrast').oninput=e=>{DBG.contrast=e.target.value/100;document.getElementById('gfx_contrastVal').textContent=e.target.value+'%';};
 document.getElementById('gfx_bright').oninput=e=>{DBG.bright=e.target.value/100;document.getElementById('gfx_brightVal').textContent=e.target.value+'%';};
 document.getElementById('gfx_sharp').oninput=e=>{DBG.sharp=e.target.value/100;document.getElementById('gfx_sharpVal').textContent=e.target.value+'%';};
+document.getElementById('gfx_chromatic').oninput=e=>{DBG.chromatic=e.target.value/100;document.getElementById('gfx_chromaticVal').textContent=e.target.value;};
+document.getElementById('gfx_pixelate').oninput=e=>{DBG.pixelate=e.target.value/100;document.getElementById('gfx_pixelateVal').textContent=e.target.value;};
+document.getElementById('gfx_edge').onchange=e=>DBG.edgeDetect=e.target.checked;
+document.getElementById('gfx_sepia').oninput=e=>{DBG.sepia=e.target.value/100;document.getElementById('gfx_sepiaVal').textContent=e.target.value;};
+document.getElementById('gfx_vignette').oninput=e=>{DBG.vignette=e.target.value/100;document.getElementById('gfx_vignetteVal').textContent=e.target.value;};
+document.getElementById('gfx_scanlines').oninput=e=>{DBG.scanlines=e.target.value/100;document.getElementById('gfx_scanlinesVal').textContent=e.target.value;};
+document.getElementById('gfx_hue').oninput=e=>{DBG.colorShift=e.target.value/100;document.getElementById('gfx_hueVal').textContent=e.target.value;};
 DBG.immediateRender=false;DBG.predictive=false;
 document.querySelectorAll('input[name=latMode]').forEach(r=>r.onchange=e=>{DBG.immediateRender=e.target.value==='immediate';});
 document.getElementById('dbg_predictive').onchange=e=>DBG.predictive=e.target.checked;
