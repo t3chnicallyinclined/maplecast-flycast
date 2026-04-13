@@ -374,6 +374,35 @@ export async function gotNext() {
     reclaimSlot(mySlotRow);
     return;
   }
+  // FAST PATH: if a slot is OPEN, skip the queue and join flycast directly.
+  // Don't write to SurrealDB slot table (that triggers live query loops).
+  // Just open controlWs and send the join — flycast handles slot assignment.
+  const openSlot = Array.from(_slotRows.values())
+    .find(r => !r.occupant_name || r.occupant_name === '');
+  if (openSlot) {
+    console.log('[queue] slot', openSlot.slot_num, 'is open — joining directly (skip queue)');
+    systemMessage(`${state.myName} — stepping up to P${openSlot.slot_num + 1}!`);
+    state.mySlot = openSlot.slot_num;
+    state.inQueue = false;
+    state.wsInQueue = false;
+    try {
+      const { ensureControlWs } = await import('./ws-connection.mjs');
+      const { getPreferredLatchPolicy } = await import('./diagnostics.mjs');
+      const ws = await ensureControlWs();
+      const gp = navigator.getGamepads()[0];
+      const device = gp ? gp.id.substring(0, 30) : (state.gamepadId || 'Browser');
+      ws.send(JSON.stringify({
+        type: 'join', id: state.sessionId, name: state.myName,
+        device, slot: openSlot.slot_num, latch_policy: getPreferredLatchPolicy(),
+      }));
+      setTimeout(() => startGamepadPolling(), 200);
+      updateCabinetControls();
+      document.getElementById('leaveGameBtn').style.display = 'block';
+      document.getElementById('gotNextBtn').style.display = 'none';
+    } catch (e) { console.warn('[queue] direct join failed:', e); }
+    return;
+  }
+
   const alreadyQueued = Array.from(_queueRows.values())
     .some(r => r.status === 'waiting' && String(r.username).toLowerCase() === lower);
   if (alreadyQueued) {
