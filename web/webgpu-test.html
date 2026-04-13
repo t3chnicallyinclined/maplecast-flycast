@@ -345,23 +345,24 @@ document.getElementById('gfx_loadBg').onclick=async()=>{
     }catch(e){document.getElementById('gfx_bgStatus').textContent='Error: '+e.message;}
 };
 document.getElementById('gfx_genBg').onclick=async()=>{
-    const prompt=document.getElementById('gfx_aiPrompt').value.trim()||'epic Marvel vs Capcom 2 battle arena, neon cyberpunk city, holographic screens, energy portals, comic book style, dramatic lighting';
-    document.getElementById('gfx_bgStatus').textContent='Generating with AI...';
+    const prompt=document.getElementById('gfx_aiPrompt').value.trim()||'massive holographic Marvel vs Capcom 2 arena floating in space, neon purple and blue energy rings, cyberpunk megacity skyline, volumetric god rays, comic book style, ultra detailed 3D render';
+    document.getElementById('gfx_bgStatus').textContent='Generating with Flux Schnell...';
     try{
-        // Use fal.ai proxy — for now generate via a public endpoint
-        // In production, proxy through relay to keep API key server-side
-        const resp=await fetch('https://fal.run/fal-ai/flux/schnell',{
-            method:'POST',headers:{'Content-Type':'application/json','Authorization':'Key '+window._falApiKey},
-            body:JSON.stringify({prompt,image_size:{width:1280,height:960},num_images:1})
+        // fal.ai Flux Schnell via HF Router — 0.2s inference!
+        const resp=await fetch('https://router.huggingface.co/fal-ai/fal-ai/flux/schnell',{
+            method:'POST',
+            headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window._hfToken||prompt('Enter HF Token:'))},
+            body:JSON.stringify({prompt:'Fighting game stage background, wide panoramic, no characters, no text: '+prompt,image_size:{width:1280,height:960},num_images:1})
         });
         const data=await resp.json();
-        if(data.images&&data.images[0]){
+        if(data.images&&data.images[0]&&data.images[0].url){
             document.getElementById('gfx_bgUrl').value=data.images[0].url;
+            document.getElementById('gfx_bgStatus').textContent='Generated in '+(data.timings?.inference?.toFixed(1)||'?')+'s! Loading...';
             document.getElementById('gfx_loadBg').click();
         } else {
-            document.getElementById('gfx_bgStatus').textContent='No image returned';
+            document.getElementById('gfx_bgStatus').textContent='Error: '+JSON.stringify(data).substring(0,100);
         }
-    }catch(e){document.getElementById('gfx_bgStatus').textContent='AI Error: '+e.message+'. Try pasting an image URL instead.';}
+    }catch(e){document.getElementById('gfx_bgStatus').textContent='AI Error: '+e.message;}
 };
 // Fullscreen
 document.getElementById('fullscreenBtn').onclick=()=>{
@@ -399,6 +400,8 @@ async function main(){
         R.dev.addEventListener('uncapturederror',(e)=>{console.error('[webgpu]',e.error.message);});
     }catch(e){ss('Init failed: '+e.message,'err');return;}
     window._gpuDevice=R.dev;
+    // Auto-load AI-generated cosmic colosseum background
+    setTimeout(()=>{document.getElementById('gfx_bgUrl').value='/webgpu/bg-cosmic-colosseum.jpg';document.getElementById('gfx_loadBg').click();},2000);
     const D=new FrameDecoder(),P=new TAParser(),T=new TextureManager(R.dev),FP=new FramePredictor();
     const PP=new PostProcessor();
     PP.init(R.dev, R.fmt);
@@ -573,6 +576,27 @@ async function main(){
                 document.getElementById('dbg_stats_left').textContent=s;
             }
             const t2=performance.now();
+            // Pre-render custom background if active
+            DBG._bgPreRendered=false;
+            if(DBG.customBg&&DBG.bgTexture){
+                const bgEnc=R.dev.createCommandEncoder();
+                // Create a simple blit of the BG texture to the canvas
+                PP.ensureTargets(640,480,1); // ensure blit pipeline exists
+                // Temporarily swap the scene texture to our BG for the blit
+                const savedView=PP.offscreenView;
+                const bgView=DBG.bgTexture.createView();
+                const bgBG=R.dev.createBindGroup({layout:PP.bgl,entries:[
+                    {binding:0,resource:bgView},{binding:1,resource:PP.sampler},
+                    {binding:2,resource:{buffer:PP.uniformBuf}}]});
+                const noop=new Float32Array(24);noop[0]=DBG.bgTexture.width;noop[1]=DBG.bgTexture.height;
+                noop[2]=canvas.width;noop[3]=canvas.height;noop[11]=1;noop[12]=1;noop[13]=1;
+                R.dev.queue.writeBuffer(PP.uniformBuf,0,noop);
+                const bgRp=bgEnc.beginRenderPass({colorAttachments:[{view:R.ctx.getCurrentTexture().createView(),
+                    clearValue:{r:0,g:0,b:0,a:1},loadOp:'clear',storeOp:'store'}]});
+                bgRp.setPipeline(PP.pipeline);bgRp.setBindGroup(0,bgBG);bgRp.draw(3);bgRp.end();
+                R.dev.queue.submit([bgEnc.finish()]);
+                DBG._bgPreRendered=true;
+            }
             PP.ensureTargets(640,480,DBG.resScale||1);
             const rt=DBG.resScale>1?PP.getRenderTarget():null;
             R.renderFrame(g,T,snap,D.vram,DBG,rt);
