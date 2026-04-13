@@ -95,13 +95,14 @@ export async function initRenderer() {
             R.dev.queue.submit([R._lastEncoder.finish()]);
         }
 
-        // Telemetry
+        // Telemetry — track real jitter (deviation from 16.67ms)
         const now = performance.now();
         if (_telemetry._lastFrameAt > 0) {
-            const interval = (now - _telemetry._lastFrameAt) * 1000; // µs
-            _telemetry.intervalSumUs += interval;
+            const intervalUs = (now - _telemetry._lastFrameAt) * 1000;
+            const deviationUs = Math.abs(intervalUs - 16667); // deviation from perfect 60fps
+            _telemetry.intervalSumUs += deviationUs;
             _telemetry.intervalCount++;
-            if (interval > _telemetry.intervalMaxUs) _telemetry.intervalMaxUs = interval;
+            if (deviationUs > _telemetry.intervalMaxUs) _telemetry.intervalMaxUs = deviationUs;
         }
         _telemetry._lastFrameAt = now;
         _telemetry.framesRendered++;
