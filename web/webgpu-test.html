@@ -142,6 +142,7 @@ canvas{display:block;background:transparent}
 <label><input type="checkbox" id="fx_14"> 🔥 Thermal</label>
 <label><input type="checkbox" id="fx_15"> 🌊 Underwater</label>
 <h2 style="color:#f0f">GRAPHICS ENHANCE</h2>
+<button id="gfx_reset" style="width:100%;background:#333;color:#f44;border:1px solid #f44;padding:6px;cursor:pointer;font-family:inherit;font-size:11px;margin:2px 0;font-weight:bold">RESET ALL EFFECTS</button>
 <label>Resolution: <select id="gfx_res">
 <option value="1">1x (640×480)</option>
 <option value="2" selected>2x (1280×960)</option>
@@ -337,6 +338,29 @@ DBG.tileClipOff=false;DBG.tileClipLog=false;DBG.singlePass=true;DBG.freeze=false
 DBG.resScale=2;DBG.fxaa=false;DBG.bloom=false;DBG.bloomAmt=0.3;DBG.crtAdv=false;DBG.crtCurve=0.2;
 DBG.grain=false;DBG.colorTemp=0;DBG.sat=1.0;DBG.contrast=1.0;DBG.bright=1.0;DBG.sharp=0;
 document.getElementById('gfx_res').onchange=e=>{DBG.resScale=+e.target.value;if(window._resizeRenderer)window._resizeRenderer();};
+document.getElementById('gfx_reset').onclick=()=>{
+    // Reset all graphics settings to defaults
+    DBG.resScale=1;DBG.fxaa=false;DBG.bloom=false;DBG.bloomAmt=0.3;DBG.crtAdv=false;DBG.crtCurve=0.2;
+    DBG.grain=false;DBG.colorTemp=0;DBG.sat=1.0;DBG.contrast=1.0;DBG.bright=1.0;DBG.sharp=0;
+    DBG.chromatic=0;DBG.pixelate=0;DBG.edgeDetect=false;DBG.sepia=0;DBG.vignette=0;DBG.scanlines=0;DBG.colorShift=0;
+    DBG.customBg=false;DBG.floorZ=0.003;
+    // Remove 3D/video backgrounds
+    const old3d=document.getElementById('bg3dCanvas');if(old3d)old3d.remove();
+    const oldVid=document.getElementById('bgVideo');if(oldVid)oldVid.remove();
+    document.getElementById('wrap').style.backgroundImage='none';
+    // Reset all UI controls to defaults
+    document.getElementById('gfx_res').value='1';
+    document.querySelectorAll('#panel input[type=checkbox]').forEach(c=>{if(c.id.startsWith('gfx_'))c.checked=false;});
+    document.querySelectorAll('#panel input[type=range]').forEach(r=>{
+        if(r.id==='gfx_sat'||r.id==='gfx_contrast'||r.id==='gfx_bright'){r.value=100;}
+        else if(r.id==='gfx_bloomAmt'){r.value=30;}else if(r.id==='gfx_crtCurve'){r.value=20;}
+        else if(r.id==='gfx_floorZ'){r.value=30;}
+        else{r.value=0;}
+        const valEl=document.getElementById(r.id+'Val');if(valEl)valEl.textContent=r.value+(r.id.match(/sat|contrast|bright/)?'%':'');
+    });
+    document.getElementById('gfx_bgStatus').textContent='Reset to defaults';
+    if(window._resizeRenderer)window._resizeRenderer();
+};
 document.getElementById('gfx_fxaa').onchange=e=>DBG.fxaa=e.target.checked;
 document.getElementById('gfx_bloom').onchange=e=>DBG.bloom=e.target.checked;
 document.getElementById('gfx_bloomAmt').oninput=e=>{DBG.bloomAmt=e.target.value/100;document.getElementById('gfx_bloomAmtVal').textContent=e.target.value+'%';};
@@ -689,27 +713,8 @@ async function main(){
         R.dev.addEventListener('uncapturederror',(e)=>{console.error('[webgpu]',e.error.message);});
     }catch(e){ss('Init failed: '+e.message,'err');return;}
     window._gpuDevice=R.dev;
-    // Auto-load AI background via CSS (simpler than GPU render)
-    setTimeout(()=>{
-        const wrap=document.getElementById('wrap');
-        wrap.style.backgroundImage='url(/bg-cosmic-colosseum.jpg)';
-        wrap.style.backgroundSize='120%';
-        wrap.style.backgroundPosition='center';
-        // Slow parallax drift — makes the 3D background feel alive
-        let bgT=0;
-        (function bgAnim(){
-            requestAnimationFrame(bgAnim);
-            if(!DBG.customBg)return;
-            bgT+=0.001;
-            const ox=Math.sin(bgT*0.7)*3;
-            const oy=Math.cos(bgT*0.5)*2;
-            const sc=110+Math.sin(bgT*0.3)*5;
-            wrap.style.backgroundSize=sc+'%';
-            wrap.style.backgroundPosition=(50+ox)+'% '+(50+oy)+'%';
-        })();
-        DBG.customBg=true;document.getElementById('gfx_customBg').checked=true;
-        document.getElementById('gfx_bgStatus').textContent='Loaded: cosmic colosseum';
-    },1000);
+    // Clean vanilla DC rendering by default — no background effects
+    // Users enable custom backgrounds from the GRAPHICS ENHANCE panel
     const D=new FrameDecoder(),P=new TAParser(),T=new TextureManager(R.dev),FP=new FramePredictor();
     const PP=new PostProcessor();
     PP.init(R.dev, R.fmt);
