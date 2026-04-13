@@ -1214,87 +1214,46 @@ void serverPublish(TA_context* ctx)
 	// in this frame's dirty pages and shipped to all viewers.
 	maplecast_control_ws::applyPaletteOverrides();
 
-	// === Phase B: Async dirty page scan (v2 — fixed bitmap + PVR races) ===
-	// INLINE: drain dirty bitmap + capture PVR snapshot BEFORE handoff.
-	// This prevents the background thread from stealing the next frame's
-	// dirty bits or reading stale PVR pointers.
+	// === Memory diffs ===
+	uint32_t totalDirty = 0;
+	uint8_t* dirtyCountPtr = dst;
+	dst += 4;
 
-	dst += 4;  // placeholder for dirty page count
-	size_t preDiffSize = (size_t)(dst - dstStart);
-
-	// INLINE: drain dirty bitmap NOW (before SH4 starts setting new bits)
-	uint64_t capturedDirty[VRAM_BITMAP_WORDS];
+	// Drain the DMA force-dirty bitmap atomically. Any page bit set here
+	// is guaranteed to ship even if memcmp would say it's unchanged (e.g.
+	// when DMA wrote new texture data and shadow already matches because
+	// the previous frame already saw it but never sent it).
+	uint64_t forcedDirty[VRAM_BITMAP_WORDS];
 	for (size_t i = 0; i < VRAM_BITMAP_WORDS; i++)
-		capturedDirty[i] = _vramDirtyBitmap[i].exchange(0, std::memory_order_acquire);
+		forcedDirty[i] = _vramDirtyBitmap[i].exchange(0, std::memory_order_acquire);
 
-	// INLINE: capture PVR snapshot pointer (before we restore _regions[].ptr below)
-	// The async thread needs to read PVR pages from the atomic snapshot, not live regs.
-	uint8_t* capturedPvrSnap = _pvrAtomicSnap;
-
-	// Build frame buffer for async thread (copy pre-diff portion)
-	auto asyncBuf = std::make_shared<std::vector<uint8_t>>(dstStart, dst);
-	asyncBuf->reserve(preDiffSize + 250 * (5 + MEM_PAGE_SIZE));
-
-	// Hand off to background thread: page scan + compress + broadcast
-	static std::mutex _asyncPageScanMtx;
-	auto capturedDirtyArr = std::make_shared<std::array<uint64_t, VRAM_BITMAP_WORDS>>();
-	memcpy(capturedDirtyArr->data(), capturedDirty, sizeof(capturedDirty));
-
-	std::thread([asyncBuf, preDiffSize, capturedDirtyArr, capturedPvrSnap]() {
-		std::lock_guard<std::mutex> lock(_asyncPageScanMtx);
-
-		uint32_t totalDirty = 0;
-		const uint64_t* forcedDirty = capturedDirtyArr->data();
-
-		// Scan VRAM + PVR pages against shadows
-		for (int r = 0; r < _numRegions; r++) {
-			MemRegion& reg = _regions[r];
-			// For PVR region: use captured snapshot, not live pointer
-			uint8_t* regionPtr = (reg.id == 3) ? capturedPvrSnap : reg.ptr;
-			size_t numPages = reg.size / MEM_PAGE_SIZE;
-			bool isVram = (reg.id == 1);
-
-			for (size_t p = 0; p < numPages; p++) {
-				size_t off = p * MEM_PAGE_SIZE;
-				bool forced = isVram && (forcedDirty[p >> 6] & (1ULL << (p & 63)));
-				if (forced || memcmp(regionPtr + off, reg.shadow + off, MEM_PAGE_SIZE) != 0) {
-					memcpy(reg.shadow + off, regionPtr + off, MEM_PAGE_SIZE);
-
-					size_t pos = asyncBuf->size();
-					asyncBuf->resize(pos + 5 + MEM_PAGE_SIZE);
-					uint8_t* d = asyncBuf->data() + pos;
-					*d++ = reg.id;
-					uint32_t pi = (uint32_t)p;
-					memcpy(d, &pi, 4); d += 4;
-					memcpy(d, reg.shadow + off, MEM_PAGE_SIZE);
-					totalDirty++;
-				}
+	// VRAM + PVR regs: memcmp against shadow copies, OR forced-dirty bitmap (VRAM only)
+	//
+	// Snapshot live → shadow ONCE per dirty page, then ship from shadow. The
+	// SH4 thread can race during the diff and write new bytes between the
+	// memcmp and the wire copy; reading via the shadow keeps wire and next
+	// frame's memcmp consistent.
+	for (int r = 0; r < _numRegions; r++) {
+		MemRegion& reg = _regions[r];
+		size_t numPages = reg.size / MEM_PAGE_SIZE;
+		bool isVram = (reg.id == 1);
+		for (size_t p = 0; p < numPages; p++) {
+			size_t off = p * MEM_PAGE_SIZE;
+			bool forced = isVram && (forcedDirty[p >> 6] & (1ULL << (p & 63)));
+			if (forced || memcmp(reg.ptr + off, reg.shadow + off, MEM_PAGE_SIZE) != 0) {
+				if ((size_t)(dst - dstStart) + 5 + MEM_PAGE_SIZE > RING_SIZE / 3)
+					goto done_diff;
+				memcpy(reg.shadow + off, reg.ptr + off, MEM_PAGE_SIZE);
+				*dst++ = reg.id;
+				uint32_t pi = (uint32_t)p;
+				memcpy(dst, &pi, 4); dst += 4;
+				memcpy(dst, reg.shadow + off, MEM_PAGE_SIZE); dst += MEM_PAGE_SIZE;
+				totalDirty++;
 			}
 		}
-
-		// Patch dirty page count in frame buffer
-		uint8_t* buf = asyncBuf->data();
-		memcpy(buf + preDiffSize - 4, &totalDirty, 4);
-
-		// Patch total frame size
-		uint32_t totalSize = (uint32_t)asyncBuf->size();
-		uint32_t frameSizeVal = totalSize - 4;
-		memcpy(buf, &frameSizeVal, 4);
-
-		// Compress + broadcast
-		if (maplecast_ws::active()) {
-			static MirrorCompressor _asyncCompressorB;
-			static bool _initB = false;
-			if (!_initB) { _asyncCompressorB.init(16 * 1024 * 1024); _initB = true; }
-			uint64_t cUs = 0;
-			size_t compSize = 0;
-			const uint8_t* compData = _asyncCompressorB.compress(buf, totalSize, compSize, cUs);
-			maplecast_ws::broadcastBinary(compData, compSize);
-		}
-	}).detach();
-
-	// Inline continues immediately — dirty count will be patched by async thread
-	uint32_t totalDirty = 0;  // placeholder for telemetry
+	}
+done_diff:
+	memcpy(dirtyCountPtr, &totalDirty, 4);
 
 	// === Scene-change & forced SYNC broadcast ===
 	// Two trigger paths:
@@ -1368,7 +1327,7 @@ void serverPublish(TA_context* ctx)
 			memcpy(_regions[i].shadow, _regions[i].ptr, _regions[i].size);
 	}
 
-	// Ring buffer: commit pre-diff portion (dirty pages added by async thread to WS clients)
+	// Patch frame size
 	uint32_t totalSize = (uint32_t)(dst - dstStart);
 	uint32_t frameSizeVal = totalSize - 4;
 	memcpy(dstStart, &frameSizeVal, 4);
@@ -1419,9 +1378,16 @@ void serverPublish(TA_context* ctx)
 	// connected.
 	maplecast_state_sync::onServerFramePublished(hdr->frame_count);
 
-	// Compress + broadcast now handled by Phase B async page scan thread.
+	// Compress + broadcast over WebSocket to browser clients
 	uint64_t compressUs = 0;
 	uint32_t compressedSize = totalSize;
+	if (maplecast_ws::active())
+	{
+		size_t compSize = 0;
+		const uint8_t* compData = _compressor.compress(dstStart, totalSize, compSize, compressUs);
+		maplecast_ws::broadcastBinary(compData, compSize);
+		compressedSize = (uint32_t)compSize;
+	}
 
 	// Update telemetry
 	{
