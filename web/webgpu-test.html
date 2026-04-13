@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}</script>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MapleCast WebGPU</title>
 <style>
@@ -172,6 +173,8 @@ canvas{display:block;background:transparent}
 <input type="text" id="gfx_bgUrl" placeholder="Image or Video URL..." style="width:95%;background:#222;color:#0f0;border:1px solid #444;padding:4px;font-family:inherit;font-size:10px;margin:4px 0">
 <button id="gfx_loadBg" style="width:100%;background:#333;color:#0f0;border:1px solid #0f0;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Load Image BG</button>
 <button id="gfx_loadVid" style="width:100%;background:#333;color:#0ff;border:1px solid #0ff;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Load Video BG</button>
+<button id="gfx_load3d" style="width:100%;background:#333;color:#ff0;border:1px solid #ff0;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Load 3D Scene (GLB URL)</button>
+<button id="gfx_demo3d" style="width:100%;background:#530;color:#ff0;border:1px solid #ff0;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Demo: Procedural 3D Arena</button>
 <input type="text" id="gfx_aiPrompt" placeholder="AI prompt: cyberpunk arena..." style="width:95%;background:#222;color:#f0f;border:1px solid #808;padding:4px;font-family:inherit;font-size:10px;margin:4px 0">
 <button id="gfx_genBg" style="width:100%;background:#303;color:#f0f;border:1px solid #f0f;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Generate AI Background</button>
 <div id="gfx_bgStatus" style="font-size:9px;color:#555;margin:2px 0">No background loaded</div>
@@ -335,8 +338,9 @@ document.getElementById('gfx_loadBg').onclick=()=>{
     wrap.style.backgroundSize='cover';wrap.style.backgroundPosition='center';
     DBG.customBg=true;document.getElementById('gfx_customBg').checked=true;
     document.getElementById('gfx_bgStatus').textContent='Loaded!';
-    // Remove any video bg
+    // Remove any video/3d bg
     const oldVid=document.getElementById('bgVideo');if(oldVid)oldVid.remove();
+    const old3d=document.getElementById('bg3dCanvas');if(old3d)old3d.remove();
 };
 document.getElementById('gfx_loadVid').onclick=()=>{
     const url=document.getElementById('gfx_bgUrl').value.trim();
@@ -356,6 +360,97 @@ document.getElementById('gfx_loadVid').onclick=()=>{
     DBG.customBg=true;document.getElementById('gfx_customBg').checked=true;
     document.getElementById('gfx_bgStatus').textContent='Video loaded!';
 };
+// 3D Scene background via three.js
+async function init3dBg(glbUrl){
+    document.getElementById('gfx_bgStatus').textContent='Loading three.js...';
+    const wrap=document.getElementById('wrap');
+    wrap.style.backgroundImage='none';wrap.style.position='relative';wrap.style.overflow='hidden';
+    // Remove old bg elements
+    let old=document.getElementById('bgVideo');if(old)old.remove();
+    old=document.getElementById('bg3dCanvas');if(old)old.remove();
+    // Create three.js canvas behind game canvas
+    const bgC=document.createElement('canvas');bgC.id='bg3dCanvas';
+    bgC.width=640;bgC.height=480;
+    bgC.style.cssText='position:absolute;top:0;left:0;width:100%;height:100%;z-index:-1';
+    wrap.insertBefore(bgC,wrap.firstChild);
+    // Dynamic import three.js from CDN
+    const THREE=await import('three');
+    const {GLTFLoader}=await import('three/addons/loaders/GLTFLoader.js');
+    const scene=new THREE.Scene();
+    const cam=new THREE.PerspectiveCamera(60,640/480,0.1,1000);
+    cam.position.set(0,2,5);cam.lookAt(0,0,0);
+    const renderer=new THREE.WebGLRenderer({canvas:bgC,alpha:false,antialias:true});
+    renderer.setSize(640,480);renderer.setClearColor(0x050510);
+    // Lighting
+    scene.add(new THREE.AmbientLight(0x404060,1.5));
+    const dl=new THREE.DirectionalLight(0x8080ff,2);dl.position.set(5,10,5);scene.add(dl);
+    const pl1=new THREE.PointLight(0xff00ff,3,20);pl1.position.set(-3,2,-2);scene.add(pl1);
+    const pl2=new THREE.PointLight(0x00ffff,3,20);pl2.position.set(3,1,2);scene.add(pl2);
+    if(glbUrl){
+        document.getElementById('gfx_bgStatus').textContent='Loading 3D model...';
+        try{
+            const loader=new GLTFLoader();
+            const gltf=await new Promise((ok,fail)=>loader.load(glbUrl,ok,undefined,fail));
+            scene.add(gltf.scene);
+            gltf.scene.scale.set(1,1,1);
+            document.getElementById('gfx_bgStatus').textContent='3D model loaded!';
+        }catch(e){document.getElementById('gfx_bgStatus').textContent='GLB error: '+e.message;}
+    } else {
+        // Procedural arena: platform + pillars + particles
+        const platGeo=new THREE.CylinderGeometry(4,4.5,0.3,32);
+        const platMat=new THREE.MeshStandardMaterial({color:0x111122,metalness:0.9,roughness:0.1});
+        const plat=new THREE.Mesh(platGeo,platMat);plat.position.y=-0.5;scene.add(plat);
+        // Glowing ring
+        const ringGeo=new THREE.TorusGeometry(4.2,0.05,8,64);
+        const ringMat=new THREE.MeshBasicMaterial({color:0x8800ff});
+        const ring=new THREE.Mesh(ringGeo,ringMat);ring.rotation.x=Math.PI/2;ring.position.y=-0.3;scene.add(ring);
+        // Pillars
+        for(let i=0;i<8;i++){
+            const a=i/8*Math.PI*2;
+            const pilGeo=new THREE.CylinderGeometry(0.15,0.2,4,8);
+            const pilMat=new THREE.MeshStandardMaterial({color:0x222244,metalness:0.8,roughness:0.2,emissive:0x220044,emissiveIntensity:0.3});
+            const pil=new THREE.Mesh(pilGeo,pilMat);
+            pil.position.set(Math.cos(a)*4.5,1.5,Math.sin(a)*4.5);scene.add(pil);
+            // Pillar glow
+            const glowGeo=new THREE.SphereGeometry(0.2,8,8);
+            const glowMat=new THREE.MeshBasicMaterial({color:i%2?0xff00ff:0x00ffff});
+            const glow=new THREE.Mesh(glowGeo,glowMat);
+            glow.position.set(Math.cos(a)*4.5,3.6,Math.sin(a)*4.5);scene.add(glow);
+        }
+        // Particle field
+        const partGeo=new THREE.BufferGeometry();
+        const partPos=new Float32Array(500*3);
+        for(let i=0;i<500*3;i++)partPos[i]=(Math.random()-0.5)*20;
+        partGeo.setAttribute('position',new THREE.BufferAttribute(partPos,3));
+        const partMat=new THREE.PointsMaterial({color:0x8844ff,size:0.05,transparent:true,opacity:0.6});
+        scene.add(new THREE.Points(partGeo,partMat));
+        // Starfield
+        const starGeo=new THREE.BufferGeometry();
+        const starPos=new Float32Array(2000*3);
+        for(let i=0;i<2000*3;i++)starPos[i]=(Math.random()-0.5)*100;
+        starGeo.setAttribute('position',new THREE.BufferAttribute(starPos,3));
+        scene.add(new THREE.Points(starGeo,new THREE.PointsMaterial({color:0xffffff,size:0.08})));
+        document.getElementById('gfx_bgStatus').textContent='3D arena ready!';
+    }
+    // Animate
+    let t=0;
+    (function anim3d(){
+        requestAnimationFrame(anim3d);
+        if(!DBG.customBg)return;
+        t+=0.005;
+        cam.position.x=Math.sin(t)*6;cam.position.z=Math.cos(t)*6;
+        cam.position.y=2+Math.sin(t*0.7)*0.5;
+        cam.lookAt(0,0.5,0);
+        renderer.render(scene,cam);
+    })();
+    DBG.customBg=true;document.getElementById('gfx_customBg').checked=true;
+}
+document.getElementById('gfx_load3d').onclick=()=>{
+    const url=document.getElementById('gfx_bgUrl').value.trim();
+    if(!url){document.getElementById('gfx_bgStatus').textContent='Enter a GLB URL';return;}
+    init3dBg(url);
+};
+document.getElementById('gfx_demo3d').onclick=()=>{console.log('[3d] starting demo arena');init3dBg(null).catch(e=>console.error('[3d]',e));};
 document.getElementById('gfx_genBg').onclick=async()=>{
     const prompt=document.getElementById('gfx_aiPrompt').value.trim()||'massive holographic Marvel vs Capcom 2 arena floating in space, neon purple and blue energy rings, cyberpunk megacity skyline, volumetric god rays, comic book style, ultra detailed 3D render';
     document.getElementById('gfx_bgStatus').textContent='Generating with Flux Pro Ultra...';

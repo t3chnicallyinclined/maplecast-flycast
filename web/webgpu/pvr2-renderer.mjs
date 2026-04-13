@@ -282,10 +282,11 @@ export class PVR2Renderer {
                 if(lt==='opaque'&&dbg.opDepthFunc>=0)dm=dbg.opDepthFunc;
                 if(lt==='opaque'&&dm===0)continue;
                 // Custom background: skip stage geometry + FillBGP (keep HUD at high Z)
+                // Stage: Z=0.0003-0.002, HUD: Z=0.007+, FillBGP: Z~0
                 if(lt==='opaque'&&dbg.customBg){
                     const vf=new Float32Array(vertexData.buffer,vertexData.byteOffset,vertexCount*7);
                     const z0=vf[pp.first*7+2];
-                    if(z0<0.006)continue; // Stage + FillBGP have low Z; HUD has Z>0.007
+                    if(z0<0.003)continue;
                 }
                 if(lt==='punch_through'||lt==='translucent')dm=6;
                 if(lt==='translucent')zw=1; if(lt==='punch_through')zw=1;
