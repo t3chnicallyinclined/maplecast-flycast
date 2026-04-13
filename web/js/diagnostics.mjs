@@ -27,7 +27,9 @@
 //   startDiagInterval() — kick off the 1Hz refresh + ping (called from main)
 
 import { state } from './state.mjs';
-import { _telemetry } from './renderer-bridge.mjs';
+// Import telemetry from whichever renderer bridge is active
+// WebGPU: renderer-bridge-webgpu.mjs, WASM: renderer-bridge.mjs
+import { _telemetry } from './renderer-bridge-webgpu.mjs';
 
 // ----------------------------------------------------------------------------
 // Persistent settings (localStorage)

@@ -7,14 +7,25 @@ import { FrameDecoder } from '../webgpu/frame-decoder.mjs';
 import { TAParser } from '../webgpu/ta-parser.mjs';
 import { TextureManager } from '../webgpu/texture-manager.mjs';
 import { PVR2Renderer } from '../webgpu/pvr2-renderer.mjs';
+import { PostProcessor } from '../webgpu/post-process.mjs';
 import { state } from './state.mjs';
 
-let R, D, P, T;
+let R, D, P, T, PP;
 let _canvas = null;
 let _pendingFrame = null;
 let _pendingSnap = null;
 let _audioWorkletPort = null;
 let _fc = 0;
+
+// Telemetry — exported so diagnostics.mjs can read it
+export const _telemetry = {
+    framesRendered: 0,
+    framesDropped: 0,
+    intervalSumUs: 0,
+    intervalCount: 0,
+    intervalMaxUs: 0,
+    _lastFrameAt: 0,
+};
 
 // Default debug state matching webgpu-test.html gold standard
 const DBG = {
@@ -63,13 +74,37 @@ export async function initRenderer() {
         console.warn('[webgpu-bridge] Audio init failed:', e);
     }
 
-    // RAF render loop
+    // Init post-processor for resolution scaling + effects
+    PP = new PostProcessor();
+    PP.init(R.dev, R.fmt);
+
+    // RAF render loop with telemetry
     function renderTick() {
         requestAnimationFrame(renderTick);
         if (!_pendingFrame) return;
         const g = _pendingFrame, snap = _pendingSnap;
         _pendingFrame = null; _pendingSnap = null;
-        R.renderFrame(g, T, snap, D.vram, DBG);
+
+        // Resolution scaling via PostProcessor
+        const scale = DBG.resScale || 1;
+        PP.ensureTargets(640, 480, scale);
+        const rt = scale > 1 ? PP.getRenderTarget() : null;
+        R.renderFrame(g, T, snap, D.vram, DBG, rt);
+        if (rt && R._lastEncoder) {
+            PP.blit(R._lastEncoder, R.ctx.getCurrentTexture().createView(), _canvas.width, _canvas.height, DBG);
+            R.dev.queue.submit([R._lastEncoder.finish()]);
+        }
+
+        // Telemetry
+        const now = performance.now();
+        if (_telemetry._lastFrameAt > 0) {
+            const interval = (now - _telemetry._lastFrameAt) * 1000; // µs
+            _telemetry.intervalSumUs += interval;
+            _telemetry.intervalCount++;
+            if (interval > _telemetry.intervalMaxUs) _telemetry.intervalMaxUs = interval;
+        }
+        _telemetry._lastFrameAt = now;
+        _telemetry.framesRendered++;
         _fc++;
     }
     requestAnimationFrame(renderTick);
@@ -111,6 +146,7 @@ function connectStream(wsUrl) {
             const g = P.parse(fr.taBuffer, fr.taSize);
             try { P.fillBGP(g, D.pvrRegs, D.vram); } catch (e2) {}
 
+            if (_pendingFrame) _telemetry.framesDropped++;
             _pendingFrame = g;
             _pendingSnap = fr.pvrSnapshot;
         } catch (ex) {
