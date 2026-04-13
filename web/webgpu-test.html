@@ -10,7 +10,7 @@ body{background:#111;color:#eee;font-family:'Courier New',monospace;display:flex
 #main{flex:1;display:flex;flex-direction:column;align-items:center}
 h1{font-size:14px;padding:8px;color:#0f0;text-transform:uppercase;letter-spacing:2px}
 #wrap{position:relative;border:1px solid #333}
-canvas{display:block;background:#000}
+canvas{display:block;background:transparent}
 #st{padding:8px;font-size:12px;color:#888}
 .err{color:#f44}.ok{color:#0f0}
 #panel{width:280px;background:#1a1a1a;border-left:1px solid #333;padding:8px;font-size:11px;overflow-y:auto;max-height:100vh;position:sticky;top:0}
@@ -169,8 +169,9 @@ canvas{display:block;background:#000}
 <label>Hue Shift: <input type="range" id="gfx_hue" min="0" max="100" value="0"> <span class="val" id="gfx_hueVal">0</span></label>
 <h2 style="color:#f00">CUSTOM BACKGROUND</h2>
 <label><input type="checkbox" id="gfx_customBg"> Enable Custom Background</label>
-<input type="text" id="gfx_bgUrl" placeholder="Image URL..." style="width:95%;background:#222;color:#0f0;border:1px solid #444;padding:4px;font-family:inherit;font-size:10px;margin:4px 0">
-<button id="gfx_loadBg" style="width:100%;background:#333;color:#0f0;border:1px solid #0f0;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Load Background</button>
+<input type="text" id="gfx_bgUrl" placeholder="Image or Video URL..." style="width:95%;background:#222;color:#0f0;border:1px solid #444;padding:4px;font-family:inherit;font-size:10px;margin:4px 0">
+<button id="gfx_loadBg" style="width:100%;background:#333;color:#0f0;border:1px solid #0f0;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Load Image BG</button>
+<button id="gfx_loadVid" style="width:100%;background:#333;color:#0ff;border:1px solid #0ff;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Load Video BG</button>
 <input type="text" id="gfx_aiPrompt" placeholder="AI prompt: cyberpunk arena..." style="width:95%;background:#222;color:#f0f;border:1px solid #808;padding:4px;font-family:inherit;font-size:10px;margin:4px 0">
 <button id="gfx_genBg" style="width:100%;background:#303;color:#f0f;border:1px solid #f0f;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">Generate AI Background</button>
 <div id="gfx_bgStatus" style="font-size:9px;color:#555;margin:2px 0">No background loaded</div>
@@ -326,33 +327,44 @@ document.getElementById('gfx_hue').oninput=e=>{DBG.colorShift=e.target.value/100
 // Custom background
 DBG.customBg=false; DBG.bgTexture=null;
 document.getElementById('gfx_customBg').onchange=e=>DBG.customBg=e.target.checked;
-document.getElementById('gfx_loadBg').onclick=async()=>{
+document.getElementById('gfx_loadBg').onclick=()=>{
     const url=document.getElementById('gfx_bgUrl').value.trim();
     if(!url){document.getElementById('gfx_bgStatus').textContent='Enter a URL';return;}
-    document.getElementById('gfx_bgStatus').textContent='Loading...';
-    try{
-        const img=new Image();img.crossOrigin='anonymous';
-        await new Promise((ok,fail)=>{img.onload=ok;img.onerror=fail;img.src=url;});
-        const bmp=await createImageBitmap(img);
-        if(DBG._bgGpuTex)DBG._bgGpuTex.destroy();
-        const dev=window._gpuDevice;
-        DBG._bgGpuTex=dev.createTexture({size:[bmp.width,bmp.height],format:'rgba8unorm',
-            usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST|GPUTextureUsage.RENDER_ATTACHMENT});
-        dev.queue.copyExternalImageToTexture({source:bmp},{texture:DBG._bgGpuTex},[bmp.width,bmp.height]);
-        DBG.bgTexture=DBG._bgGpuTex;
-        DBG.customBg=true;document.getElementById('gfx_customBg').checked=true;
-        document.getElementById('gfx_bgStatus').textContent='Loaded: '+bmp.width+'×'+bmp.height;
-    }catch(e){document.getElementById('gfx_bgStatus').textContent='Error: '+e.message;}
+    const wrap=document.getElementById('wrap');
+    wrap.style.backgroundImage='url('+url+')';
+    wrap.style.backgroundSize='cover';wrap.style.backgroundPosition='center';
+    DBG.customBg=true;document.getElementById('gfx_customBg').checked=true;
+    document.getElementById('gfx_bgStatus').textContent='Loaded!';
+    // Remove any video bg
+    const oldVid=document.getElementById('bgVideo');if(oldVid)oldVid.remove();
+};
+document.getElementById('gfx_loadVid').onclick=()=>{
+    const url=document.getElementById('gfx_bgUrl').value.trim();
+    if(!url){document.getElementById('gfx_bgStatus').textContent='Enter a video URL';return;}
+    const wrap=document.getElementById('wrap');
+    // Remove old video/image bg
+    wrap.style.backgroundImage='none';
+    let vid=document.getElementById('bgVideo');
+    if(!vid){
+        vid=document.createElement('video');vid.id='bgVideo';
+        vid.style.cssText='position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;z-index:-1;pointer-events:none';
+        vid.loop=true;vid.muted=true;vid.playsInline=true;
+        wrap.style.position='relative';wrap.style.overflow='hidden';
+        wrap.insertBefore(vid,wrap.firstChild);
+    }
+    vid.src=url;vid.play();
+    DBG.customBg=true;document.getElementById('gfx_customBg').checked=true;
+    document.getElementById('gfx_bgStatus').textContent='Video loaded!';
 };
 document.getElementById('gfx_genBg').onclick=async()=>{
     const prompt=document.getElementById('gfx_aiPrompt').value.trim()||'massive holographic Marvel vs Capcom 2 arena floating in space, neon purple and blue energy rings, cyberpunk megacity skyline, volumetric god rays, comic book style, ultra detailed 3D render';
-    document.getElementById('gfx_bgStatus').textContent='Generating with Flux Schnell...';
+    document.getElementById('gfx_bgStatus').textContent='Generating with Flux Pro Ultra...';
     try{
         // fal.ai Flux Schnell via HF Router — 0.2s inference!
-        const resp=await fetch('https://router.huggingface.co/fal-ai/fal-ai/flux/schnell',{
+        const resp=await fetch('https://router.huggingface.co/fal-ai/fal-ai/flux-pro/v1.1-ultra',{
             method:'POST',
             headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window._hfToken||prompt('Enter HF Token:'))},
-            body:JSON.stringify({prompt:'Fighting game stage background, wide panoramic, no characters, no text: '+prompt,image_size:{width:1280,height:960},num_images:1})
+            body:JSON.stringify({prompt:'Photorealistic 3D rendered fighting game arena stage, no characters no text no UI: '+prompt,image_size:{width:1408,height:1024},num_images:1,safety_tolerance:'6'})
         });
         const data=await resp.json();
         if(data.images&&data.images[0]&&data.images[0].url){
@@ -400,8 +412,27 @@ async function main(){
         R.dev.addEventListener('uncapturederror',(e)=>{console.error('[webgpu]',e.error.message);});
     }catch(e){ss('Init failed: '+e.message,'err');return;}
     window._gpuDevice=R.dev;
-    // Auto-load AI-generated cosmic colosseum background
-    setTimeout(()=>{document.getElementById('gfx_bgUrl').value='/webgpu/bg-cosmic-colosseum.jpg';document.getElementById('gfx_loadBg').click();},2000);
+    // Auto-load AI background via CSS (simpler than GPU render)
+    setTimeout(()=>{
+        const wrap=document.getElementById('wrap');
+        wrap.style.backgroundImage='url(/bg-cosmic-colosseum.jpg)';
+        wrap.style.backgroundSize='120%';
+        wrap.style.backgroundPosition='center';
+        // Slow parallax drift — makes the 3D background feel alive
+        let bgT=0;
+        (function bgAnim(){
+            requestAnimationFrame(bgAnim);
+            if(!DBG.customBg)return;
+            bgT+=0.001;
+            const ox=Math.sin(bgT*0.7)*3;
+            const oy=Math.cos(bgT*0.5)*2;
+            const sc=110+Math.sin(bgT*0.3)*5;
+            wrap.style.backgroundSize=sc+'%';
+            wrap.style.backgroundPosition=(50+ox)+'% '+(50+oy)+'%';
+        })();
+        DBG.customBg=true;document.getElementById('gfx_customBg').checked=true;
+        document.getElementById('gfx_bgStatus').textContent='Loaded: cosmic colosseum';
+    },1000);
     const D=new FrameDecoder(),P=new TAParser(),T=new TextureManager(R.dev),FP=new FramePredictor();
     const PP=new PostProcessor();
     PP.init(R.dev, R.fmt);
@@ -576,27 +607,6 @@ async function main(){
                 document.getElementById('dbg_stats_left').textContent=s;
             }
             const t2=performance.now();
-            // Pre-render custom background if active
-            DBG._bgPreRendered=false;
-            if(DBG.customBg&&DBG.bgTexture){
-                const bgEnc=R.dev.createCommandEncoder();
-                // Create a simple blit of the BG texture to the canvas
-                PP.ensureTargets(640,480,1); // ensure blit pipeline exists
-                // Temporarily swap the scene texture to our BG for the blit
-                const savedView=PP.offscreenView;
-                const bgView=DBG.bgTexture.createView();
-                const bgBG=R.dev.createBindGroup({layout:PP.bgl,entries:[
-                    {binding:0,resource:bgView},{binding:1,resource:PP.sampler},
-                    {binding:2,resource:{buffer:PP.uniformBuf}}]});
-                const noop=new Float32Array(24);noop[0]=DBG.bgTexture.width;noop[1]=DBG.bgTexture.height;
-                noop[2]=canvas.width;noop[3]=canvas.height;noop[11]=1;noop[12]=1;noop[13]=1;
-                R.dev.queue.writeBuffer(PP.uniformBuf,0,noop);
-                const bgRp=bgEnc.beginRenderPass({colorAttachments:[{view:R.ctx.getCurrentTexture().createView(),
-                    clearValue:{r:0,g:0,b:0,a:1},loadOp:'clear',storeOp:'store'}]});
-                bgRp.setPipeline(PP.pipeline);bgRp.setBindGroup(0,bgBG);bgRp.draw(3);bgRp.end();
-                R.dev.queue.submit([bgEnc.finish()]);
-                DBG._bgPreRendered=true;
-            }
             PP.ensureTargets(640,480,DBG.resScale||1);
             const rt=DBG.resScale>1?PP.getRenderTarget():null;
             R.renderFrame(g,T,snap,D.vram,DBG,rt);

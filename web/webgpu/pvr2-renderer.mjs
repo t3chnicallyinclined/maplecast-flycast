@@ -67,7 +67,7 @@ export class PVR2Renderer {
         this.dev = await a.requestDevice();
         this.ctx = canvas.getContext('webgpu');
         this.fmt = navigator.gpu.getPreferredCanvasFormat();
-        this.ctx.configure({device:this.dev,format:this.fmt,alphaMode:'opaque'});
+        this.ctx.configure({device:this.dev,format:this.fmt,alphaMode:'premultiplied'});
         this._init(canvas.width, canvas.height);
         return this.dev;
     }
@@ -281,11 +281,11 @@ export class PVR2Renderer {
                 let dm=(isp>>29)&7,cm=(isp>>27)&3,zw=(isp>>26)&1?0:1;
                 if(lt==='opaque'&&dbg.opDepthFunc>=0)dm=dbg.opDepthFunc;
                 if(lt==='opaque'&&dm===0)continue;
-                // Custom background: skip stage geometry (keep HUD at high Z)
-                if(lt==='opaque'&&dbg.customBg&&dbg.bgTexture){
+                // Custom background: skip stage geometry + FillBGP (keep HUD at high Z)
+                if(lt==='opaque'&&dbg.customBg){
                     const vf=new Float32Array(vertexData.buffer,vertexData.byteOffset,vertexCount*7);
                     const z0=vf[pp.first*7+2];
-                    if(z0<0.005)continue; // Stage geometry has low Z; HUD has Z>0.007
+                    if(z0<0.006)continue; // Stage + FillBGP have low Z; HUD has Z>0.007
                 }
                 if(lt==='punch_through'||lt==='translucent')dm=6;
                 if(lt==='translucent')zw=1; if(lt==='punch_through')zw=1;
@@ -317,8 +317,11 @@ export class PVR2Renderer {
             const pass=passes[pi];
             const isFirst=pi===0;
             // Each render pass gets its own depth clear (color preserved from previous pass)
+            // If custom BG was pre-rendered, load instead of clear on first pass
+            const firstLoadOp = (isFirst && !dbg._bgPreRendered) ? 'clear' : 'load';
+            const clearAlpha = dbg.customBg ? 0 : 1;  // transparent clear when custom BG
             const rp=enc.beginRenderPass({
-                colorAttachments:[{view:texView,clearValue:{r:0,g:0,b:0,a:1},loadOp:isFirst?'clear':'load',storeOp:'store'}],
+                colorAttachments:[{view:texView,clearValue:{r:0,g:0,b:0,a:clearAlpha},loadOp:firstLoadOp,storeOp:'store'}],
                 depthStencilAttachment:{view:depthView,depthClearValue:0.0,depthLoadOp:'clear',depthStoreOp:'store'},
             });
             rp.setVertexBuffer(0,this.vBuf);
