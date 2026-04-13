@@ -374,24 +374,6 @@ export async function gotNext() {
     reclaimSlot(mySlotRow);
     return;
   }
-  // FAST PATH: if a slot is OPEN right now, skip queue entirely and join directly.
-  // No need to wait for the collector to promote us.
-  const openSlot = Array.from(_slotRows.values())
-    .find(r => !r.occupant_name || r.occupant_name === '');
-  if (openSlot) {
-    console.log('[queue] slot', openSlot.slot_num, 'is open — joining directly (skip queue)');
-    systemMessage(`${state.myName} — stepping up to P${openSlot.slot_num + 1}!`);
-    // Write our name to the slot row so others see it
-    try {
-      await liveQuery('UPDATE $slot SET occupant_name = $name, session_id = $sid', {
-        slot: openSlot.id, name: state.myName, sid: state.sessionId
-      });
-    } catch (e) { console.warn('[queue] slot claim write failed:', e); }
-    // Join directly like reclaimSlot
-    reclaimSlot(openSlot);
-    return;
-  }
-
   const alreadyQueued = Array.from(_queueRows.values())
     .some(r => r.status === 'waiting' && String(r.username).toLowerCase() === lower);
   if (alreadyQueued) {
