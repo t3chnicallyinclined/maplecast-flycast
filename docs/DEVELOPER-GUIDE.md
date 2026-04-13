@@ -2,9 +2,43 @@
 
 ## What is this?
 
-MapleCast turns the Flycast Dreamcast emulator into a **game streaming server**. One MVC2 instance runs on a VPS with NO GPU. Browsers connect and watch/play at 60fps.
+MapleCast turns the Flycast Dreamcast emulator into a **game streaming server**. One MVC2 instance runs on **any machine** — Windows, Mac, Linux, a VPS, even a Raspberry Pi. NO GPU needed. Browsers connect and watch/play at 60fps.
+
+**You can run everything locally.** No VPS required for development. The entire stack runs on localhost — your laptop is the server AND the viewer.
 
 This is a **single repository** that builds multiple components:
+
+## Quick Start (Local Development)
+
+Everything runs on your machine. No VPS, no cloud, no special hardware.
+
+**Prerequisites:** cmake, C++ compiler, Rust, a Dreamcast ROM (GDI format)
+- **Linux/Mac:** cmake, g++/clang, cargo
+- **Windows:** Visual Studio 2022 (or cmake + MinGW), cargo
+
+```bash
+# Clone
+git clone https://github.com/t3chnicallyinclined/maplecast-flycast
+cd maplecast-flycast
+
+# Terminal 1: Build + run the game server
+./scripts/quickstart.sh server ~/roms/mvc2.gdi
+
+# Terminal 2: Build + run the stream relay
+./scripts/quickstart.sh relay
+
+# Terminal 3: Serve the WebGPU renderer (no build needed!)
+./scripts/quickstart.sh webgpu
+
+# Open Chrome → http://localhost:8080/webgpu-test.html
+# You should see MVC2 rendering at 60fps!
+```
+
+The WebGPU renderer connects to `ws://localhost:7201` (the relay) by default when running locally. For production, nginx proxies to the same ports.
+
+**That's it.** Three terminals, one browser tab, you're streaming Dreamcast.
+
+---
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -149,6 +183,24 @@ cd packages/renderer && ./build.sh
 
 ## How They Connect
 
+### Local Development (your machine)
+
+```
+ Browser (Chrome)
+ http://localhost:8080/webgpu-test.html
+    │
+    │ ws://localhost:7201
+    ▼
+ relay (:7201)  ←──  flycast headless (:7210)
+                     ├─ SH4 emulation
+                     ├─ Input :7100 (UDP)
+                     └─ Audio :7213
+```
+
+Three processes on localhost. No nginx, no TLS, no VPS needed.
+
+### Production (VPS deployment)
+
 ```
                     INTERNET
                        │
@@ -162,7 +214,7 @@ cd packages/renderer && ./build.sh
     │ wss://../ws      │ WebTransport      │ UDP :7100
     ▼                  ▼                   ▼
  ┌──────────────────────────────────────────────┐
- │              VPS (nobd.net)                   │
+ │              VPS (e.g. nobd.net)              │
  │                                               │
  │  nginx (:443 TCP)                             │
  │    ├─ /ws  → relay :7201 (WS)                │
@@ -179,6 +231,8 @@ cd packages/renderer && ./build.sh
  │    └─ Audio capture + streaming                │
  └──────────────────────────────────────────────┘
 ```
+
+Same binaries, same ports. The only difference is nginx + TLS in front.
 
 ## Wire Format
 
