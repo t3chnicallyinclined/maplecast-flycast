@@ -120,9 +120,43 @@ function connectStream(wsUrl) {
 }
 
 export function setOpt(opt, val) {
-    // Map king.html quality options to WebGPU DBG state
-    if (opt === 'quality') {
-        // quality: 0=low, 1=medium, 2=high
+    // Map king.html WASM option indices to WebGPU DBG state
+    // opt 0 = resolution, opt 2 = fog, opt 3 = modvol, opt 4 = perstrip sort
+    // opt 5 = aniso, opt 6 = tex filter, opt 7 = transparency layers
+    if (opt === 0) {
+        // Resolution: val is height string (480, 720, 960, 1440, 1920)
+        const h = parseInt(val) || 480;
+        DBG.resScale = Math.round(h / 480);
     }
-    DBG[opt] = val;
+    // Named opts from direct DBG access
+    if (typeof opt === 'string') DBG[opt] = val;
 }
+
+// Wire king.html's CSS effects to WebGPU post-processing
+// Called by applyCSSEffects() in settings.mjs — we override it
+window.applyCSSEffects = function() {
+    if (!window.webgpuDBG) return;
+    const D = window.webgpuDBG;
+    D.crtAdv = !!document.getElementById('css_scanlines')?.checked;
+    D.bloom = !!document.getElementById('css_bloom')?.checked;
+    D.sharp = document.getElementById('css_sharpen')?.checked ? 0.5 : 0;
+    D.vignette = document.getElementById('css_vignette')?.checked ? 0.5 : 0;
+    // Brightness/contrast/saturation sliders
+    const bright = document.getElementById('css_bright');
+    if (bright) { D.bright = bright.value / 100; const v = document.getElementById('css_bright_val'); if(v) v.textContent = bright.value + '%'; }
+    const contrast = document.getElementById('css_contrast');
+    if (contrast) { D.contrast = contrast.value / 100; const v = document.getElementById('css_contrast_val'); if(v) v.textContent = contrast.value + '%'; }
+    const sat = document.getElementById('css_sat');
+    if (sat) { D.sat = sat.value / 100; const v = document.getElementById('css_sat_val'); if(v) v.textContent = sat.value + '%'; }
+};
+
+// Override presets
+window.presetMaxPerformance = function() {
+    Object.assign(DBG, { fxaa:false, bloom:false, crtAdv:false, grain:false, sharp:0, resScale:1, sat:1, contrast:1, bright:1 });
+};
+window.presetArcade = function() {
+    Object.assign(DBG, { crtAdv:true, scanlines:0.3, vignette:0.3, bloom:false, sat:1.1, contrast:1.1, bright:1, resScale:1 });
+};
+window.presetMaxQuality = function() {
+    Object.assign(DBG, { fxaa:true, bloom:true, bloomAmt:0.2, sharp:0.3, sat:1.1, contrast:1.05, bright:1, resScale:2 });
+};
