@@ -3,14 +3,15 @@ Date:        2026-04-14
 Tag:         working-base-queue-heartbeat-20260414
 
 === Deploy artifacts ===
-Relay binary md5: $(md5sum /home/tris/projects/maplecast-flycast/relay/target/release/maplecast-relay | cut -d' ' -f1)
-Web queue.mjs md5: a90de84cea9844f4c1dcc264d870ad3d
+Relay binary md5:  6bdc3a32391d4805202c18dcfb1ad257  /opt/maplecast-relay
+Web queue.mjs md5: a90de84cea9844f4c1dcc264d870ad3d  /var/www/maplecast/js/queue.mjs
 
 Production paths:
   /opt/maplecast-relay                                    (active binary)
-  /opt/maplecast-relay.backup-20260414-002523             (rollback binary)
+  /opt/maplecast-relay.backup-20260414-003241             (rollback binary — pre-sweeper-redeploy)
+  /opt/maplecast-relay.backup-20260414-002523             (rollback binary — pre-/api/join queue cleanup)
   /var/www/maplecast/js/queue.mjs                         (active web)
-  /var/www/maplecast-backup-20260414-002532               (rollback web)
+  /var/www/maplecast-backup-20260414-002532               (rollback web — full snapshot)
 
 === Schema migration applied to production SurrealDB ===
   DEFINE FIELD last_seen_at ON queue
@@ -37,3 +38,10 @@ binary is rolled back. To remove (only if reverting beyond 434df0623):
   - The collector's stmt 1 array::len() type error (same)
   - Both are mitigated by this commit (heartbeat prevents stale rows
     from accumulating to trigger them) but not fixed at the source.
+
+=== Note on first deploy attempt ===
+  An initial deploy at 2026-04-14T04:25 UTC accidentally landed an older
+  binary without the sweeper (cargo target/ had a stale build). Detected
+  via post-deploy `strings | grep queue-sweeper` returning empty + a
+  failing live sweep test. Rebuilt and redeployed at 2026-04-14T04:32 UTC.
+  Active binary md5 above is the verified-correct one.
