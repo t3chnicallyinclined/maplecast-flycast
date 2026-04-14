@@ -1003,6 +1003,36 @@ code {
   text-shadow: 0 0 6px rgba(255, 215, 0, 0.2);
 }
 
+/* ADMIN slot — when overlord has TAKEN P1 or P2 directly. Distinct
+   look so it's obvious which slot is the dashboard's iframe puppet. */
+.slot-tile.occupied-admin {
+  border-color: var(--ov-gold);
+  box-shadow: 0 0 18px rgba(255, 215, 0, 0.25);
+}
+.slot-tile.occupied-admin::before {
+  background: linear-gradient(135deg, transparent 0%, rgba(255, 215, 0, 0.08) 100%);
+}
+.slot-tile.occupied-admin .slot-tile-status {
+  background: rgba(255, 215, 0, 0.18);
+  border-color: var(--ov-gold);
+  color: var(--ov-gold);
+}
+.slot-tile.occupied-admin .slot-tile-name {
+  color: var(--ov-gold);
+  text-shadow: 0 0 8px rgba(255, 215, 0, 0.4);
+}
+
+/* RELEASE ADMIN button row — sits below the two slot tiles. */
+.slots-release-row {
+  display: flex;
+  justify-content: center;
+  margin: -8px 0 14px;
+}
+.slots-release-row .btn-row {
+  min-width: 200px;
+  text-align: center;
+}
+
 .slot-tile-meta {
   font-size: 11px;
   color: var(--ov-text-mute);

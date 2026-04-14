@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Overlord — MapleCast Cab</title>
-<link rel="stylesheet" href="/overlord/overlord.css?v=3">
+<link rel="stylesheet" href="/overlord/overlord.css?v=4">
 <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" crossorigin="anonymous">
 </head>
 <body class="overlord-dash">
@@ -122,7 +122,6 @@
       <span class="card-title">PLAYERS</span>
       <span class="card-meta">
         <button class="btn-tiny" onclick="refreshPlayers()" title="Refresh">⟳</button>
-        <button class="btn-tiny btn-tiny-gold" onclick="openBackdoor()" title="Open the cab as admin in a new tab — bypass the queue, take any free slot">↪ BACKDOOR PLAY</button>
       </span>
     </div>
 
@@ -137,7 +136,7 @@
         <div class="slot-tile-meta" id="slotTileMeta0">no occupant</div>
         <div class="slot-tile-actions">
           <button class="btn-row btn-row-disabled" id="slotKick0" onclick="kickSlot(0)" disabled>KICK</button>
-          <button class="btn-row btn-pin" onclick="backdoorJoinSlot(0)" title="Open king.html as admin and join slot 1">↪ JOIN P1</button>
+          <button class="btn-row btn-pin" onclick="takeSlot(0)" title="Take P1 as ADMIN — control directly from this dashboard">TAKE P1</button>
         </div>
       </div>
       <div class="slot-tile" id="slotTile1">
@@ -149,9 +148,12 @@
         <div class="slot-tile-meta" id="slotTileMeta1">no occupant</div>
         <div class="slot-tile-actions">
           <button class="btn-row btn-row-disabled" id="slotKick1" onclick="kickSlot(1)" disabled>KICK</button>
-          <button class="btn-row btn-pin" onclick="backdoorJoinSlot(1)" title="Open king.html as admin and join slot 2">↪ JOIN P2</button>
+          <button class="btn-row btn-pin" onclick="takeSlot(1)" title="Take P2 as ADMIN — control directly from this dashboard">TAKE P2</button>
         </div>
       </div>
+    </div>
+    <div class="slots-release-row">
+      <button class="btn-row btn-row-disabled" id="releaseAdminBtn" onclick="releaseAdminSlots()" disabled title="Release any ADMIN slots back to the queue">RELEASE ADMIN</button>
     </div>
 
     <!-- Queue list -->
@@ -249,6 +251,6 @@
 <!-- Toast notification slot -->
 <div id="toastContainer" class="toast-container"></div>
 
-<script type="module" src="/overlord/overlord.mjs?v=3"></script>
+<script type="module" src="/overlord/overlord.mjs?v=5"></script>
 </body>
 </html>

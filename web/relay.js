@@ -1,6 +1,14 @@
 // ============================================================================
 // RELAY.JS — P2P Spectator Relay for MapleCast TA Mirror
 //
+// ⚠️  DEPRECATED ARCHITECTURE — slated for deletion. See relay-bootstrap.mjs
+//     header for the full justification. Short version: flycast and the
+//     relay both run on the same VPS now (post-2026-04-08 headless migration),
+//     so the WebRTC mesh is doing zero work that the trivial server-fanout
+//     wouldn't do for less code, less latency, and zero ICE/TURN overhead.
+//     Kept compiled in because rip-out is non-trivial and the path still
+//     works. Don't add new features here. Phase 6c proper will delete it.
+//
 // Server feeds 2-3 seed spectators. Seeds relay delta frames to children
 // via WebRTC DataChannels. Each relay node serves up to 3 children.
 // Tree topology managed by server via WebSocket JSON messages.
@@ -153,7 +161,7 @@ class MapleCastRelay {
       view.getUint8(0) === 0xAD && view.getUint8(1) === 0x10;
 
     if (isAudio) {
-      this.framesReceived++;           // audio counts as traffic too
+      this.framesReceived++;
       this.onFrame(data);              // route to handler; client detects audio, fans to worklet
       if (this.role === 'seed' || this.role === 'relay') {
         // Audio is tiny and unreliable-delivery-tolerant — use the same

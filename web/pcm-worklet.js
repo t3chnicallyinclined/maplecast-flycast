@@ -15,8 +15,8 @@ class PCMProcessor extends AudioWorkletProcessor {
         right[i] = pcm[i * 2 + 1] / 32768.0;
       }
       this.buffer.push({ left, right });
-      // Aggressive: keep only 3 chunks max (~32ms) to stay close to video
-      while (this.buffer.length > 3) this.buffer.shift();
+      // Keep buffer at ~200ms max (19 chunks × 10.67ms)
+      while (this.buffer.length > 19) this.buffer.shift();
     };
   }
 
@@ -25,12 +25,15 @@ class PCMProcessor extends AudioWorkletProcessor {
     const outR = outputs[0][1];
     if (!outL || !outR) return true;
 
-    // Zero prebuffer — play the instant audio arrives
-    // QUIC transport has low enough jitter that we don't need buffering
-    if (this.buffer.length === 0) {
-      outL.fill(0);
-      outR.fill(0);
-      return true;
+    // Pre-buffer: wait for 5 chunks (~53ms) before starting playback
+    // This absorbs DataChannel delivery jitter
+    if (!this.started) {
+      if (this.buffer.length < 5) {
+        outL.fill(0);
+        outR.fill(0);
+        return true;
+      }
+      this.started = true;
     }
 
     let written = 0;

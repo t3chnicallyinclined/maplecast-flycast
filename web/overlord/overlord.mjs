@@ -570,6 +570,7 @@ function renderPlayers(d) {
   const queue = d.queue || [];
 
   // Slot tiles
+  let anyAdmin = false;
   for (let i = 0; i < 2; i++) {
     const slot = slots.find(s => s.slot_num === i) || {};
     const tile = document.getElementById(`slotTile${i}`);
@@ -578,10 +579,15 @@ function renderPlayers(d) {
     const metaEl = document.getElementById(`slotTileMeta${i}`);
     const kickBtn = document.getElementById(`slotKick${i}`);
 
+    const occupantUpper = slot.occupant_name ? String(slot.occupant_name).toUpperCase() : '';
+    const isAdmin = occupantUpper === 'ADMIN';
+    if (isAdmin) anyAdmin = true;
+
     if (slot.occupant_name) {
       tile.classList.add('occupied');
-      statusEl.textContent = 'OCCUPIED';
-      nameEl.textContent = String(slot.occupant_name).toUpperCase();
+      tile.classList.toggle('occupied-admin', isAdmin);
+      statusEl.textContent = isAdmin ? 'ADMIN' : 'OCCUPIED';
+      nameEl.textContent = occupantUpper;
       const lastInput = slot.last_input_at ? `last input ${fmtAge(slot.last_input_at)}` : '';
       const claimedAt = slot.claimed_at ? `claimed ${fmtAge(slot.claimed_at)}` : '';
       const device = slot.device || '';
@@ -594,6 +600,7 @@ function renderPlayers(d) {
       kickBtn.style.color = 'var(--ov-red)';
     } else {
       tile.classList.remove('occupied');
+      tile.classList.remove('occupied-admin');
       statusEl.textContent = 'EMPTY';
       nameEl.textContent = '—';
       metaEl.textContent = 'no occupant';
@@ -601,6 +608,21 @@ function renderPlayers(d) {
       kickBtn.classList.add('btn-row-disabled');
       kickBtn.style.borderColor = '';
       kickBtn.style.color = '';
+    }
+  }
+
+  // Toggle the RELEASE ADMIN button — only enabled when ADMIN holds at
+  // least one slot.
+  const releaseBtn = document.getElementById('releaseAdminBtn');
+  if (releaseBtn) {
+    releaseBtn.disabled = !anyAdmin;
+    releaseBtn.classList.toggle('btn-row-disabled', !anyAdmin);
+    if (anyAdmin) {
+      releaseBtn.style.borderColor = 'var(--ov-red)';
+      releaseBtn.style.color = 'var(--ov-red)';
+    } else {
+      releaseBtn.style.borderColor = '';
+      releaseBtn.style.color = '';
     }
   }
 
@@ -694,84 +716,89 @@ window.promoteQueue = async function(queueId, slot) {
 };
 
 // ----------------------------------------------------------------------------
-// BACKDOOR PLAY — open king.html in a new tab as the admin user
+// TAKE / RELEASE — control P1 or P2 directly from the dashboard iframe
 // ----------------------------------------------------------------------------
 //
-// The admin user is already registered as a normal player record (we
-// flagged its admin bit in Phase B). Their nobd_token / nobd_username
-// might or might not be set in localStorage depending on whether they
-// also use the spectator app. We seed both keys before opening king.html
-// so the spectator app autosigns in, then optionally autoseeds the slot
-// claim by passing ?admin_join=N in the URL.
+// The dashboard's live preview iframe loads /king.html?embed=1. When
+// the admin clicks TAKE P1 or TAKE P2, we:
 //
-// king.html doesn't need ANY changes — it already supports the auto-
-// signin flow via localStorage. We just hand it credentials. The
-// `admin_join` URL param is consumed by a tiny shim we'll add in the
-// next iteration; for v1, the admin still has to manually click "I GOT
-// NEXT" + wait for promotion.
+//   1. POST /overlord/api/players/take {slot} — relay flips the
+//      `slot:p<N>` row to occupant_name='ADMIN' (bypassing the queue,
+//      and clearing the OTHER ADMIN slot first if needed since
+//      idx_slot_occupant_unique is UNIQUE).
+//   2. Reload the iframe with /king.html?embed=1&admin=1&slot=N — the
+//      king.html admin shim picks this up, opens its controlWs to
+//      flycast :7210, sends a {type:join, name:'ADMIN', slot:N}, and
+//      starts gamepad polling. The dashboard tab now has direct
+//      keyboard/gamepad control of that slot, in-place, no new tab.
+//
+// RELEASE clears any ADMIN-occupied slot and reloads the iframe back to
+// plain spectator mode.
+//
+// All of this is gated by the existing admin JWT — same auth as every
+// other /overlord/api/* endpoint.
 
-window.openBackdoor = function() {
-  const username = (localStorage.getItem(USERNAME_KEY) || 'trisdog').toLowerCase();
-  const token = localStorage.getItem(TOKEN_KEY);
-  if (!token) {
-    toast('error', 'BACKDOOR', 'no admin token — re-login first');
-    return;
+function setIframeAdminSlot(slot) {
+  // slot=null → release (back to plain ?embed=1)
+  // slot=0|1 → take (?embed=1&admin=1&slot=N)
+  const iframe = document.getElementById('previewFrame');
+  if (!iframe) return;
+  const t = Date.now();
+  if (slot === null) {
+    iframe.src = `/king.html?embed=1&_t=${t}`;
+  } else {
+    iframe.src = `/king.html?embed=1&admin=1&slot=${slot}&_t=${t}`;
   }
-  // Seed the spectator app's auth keys so king.html auto-signs in.
-  // We DON'T overwrite if the user already has spectator credentials
-  // — only seed if missing.
-  if (!localStorage.getItem('nobd_username')) {
-    localStorage.setItem('nobd_username', username);
-  }
-  if (!localStorage.getItem('nobd_db_token')) {
-    localStorage.setItem('nobd_db_token', token);
-  }
-  // Open king.html in a new tab.
-  const url = '/king.html?admin=1';
-  window.open(url, '_blank', 'noopener,noreferrer');
-  toast('info', 'BACKDOOR', `opened king.html as ${username.toUpperCase()}`);
-};
+}
 
-window.backdoorJoinSlot = async function(slot) {
-  // Same as openBackdoor but ALSO promotes the admin user directly into
-  // the slot via the queue/promote path. We do this by:
-  //   1. CREATE a queue row for the admin (using admin SQL via a small
-  //      relay endpoint — or directly via the new /players API).
-  //   2. PROMOTE that row to the target slot.
-  //   3. Open king.html which will auto-sign-in and find itself in slot.
-  //
-  // For v1 simplicity we just kick the slot first to make sure it's
-  // free, then open king.html — the admin can hit "I GOT NEXT" inside
-  // the spectator app and the auto-promote will pick them up. A future
-  // iteration can wire the full claim chain.
-  const username = (localStorage.getItem(USERNAME_KEY) || 'trisdog').toLowerCase();
-  const token = localStorage.getItem(TOKEN_KEY);
-  if (!token) {
-    toast('error', 'BACKDOOR', 'no admin token — re-login first');
-    return;
-  }
-  if (!confirm(`Take P${slot + 1} as admin? Any current occupant will be kicked.`)) return;
+window.takeSlot = async function(slot) {
+  if (slot !== 0 && slot !== 1) return;
 
-  toast('info', 'BACKDOOR', `claiming P${slot + 1}…`);
+  // Warn if we're stomping a real player
+  const occupantEl = document.getElementById(`slotTileName${slot}`);
+  const occupant = (occupantEl?.textContent || '').trim();
+  if (occupant && occupant !== '—' && occupant !== 'ADMIN') {
+    if (!confirm(`P${slot + 1} is currently held by ${occupant}. Take it as ADMIN anyway?`)) return;
+  }
+
+  toast('info', 'TAKE', `claiming P${slot + 1} as ADMIN…`);
   try {
-    // 1. Kick the existing occupant if any
-    await apiJson('/players/kick', {
+    const data = await apiJson('/players/take', {
       method: 'POST',
       body: JSON.stringify({ slot }),
     });
-    // 2. Seed the spectator credentials and open king.html
-    if (!localStorage.getItem('nobd_username')) {
-      localStorage.setItem('nobd_username', username);
+    if (!data.ok) {
+      toast('error', 'TAKE', data.error || 'failed');
+      return;
     }
-    if (!localStorage.getItem('nobd_db_token')) {
-      localStorage.setItem('nobd_db_token', token);
-    }
-    const url = `/king.html?admin=1&admin_join=${slot}`;
-    window.open(url, '_blank', 'noopener,noreferrer');
-    toast('success', 'BACKDOOR', `P${slot + 1} cleared, opening king.html — click "I GOT NEXT" to take the slot`);
+    toast('success', 'TAKE', `P${slot + 1} is now ADMIN — click the preview to give it focus`);
+    // Reload the in-place iframe with the admin shim params so it opens
+    // controlWs and starts gamepad polling.
+    setIframeAdminSlot(slot);
     setTimeout(refreshPlayers, 400);
   } catch (e) {
-    if (e.message !== 'auth') toast('error', 'BACKDOOR', e.message);
+    if (e.message !== 'auth') toast('error', 'TAKE', e.message);
+  }
+};
+
+window.releaseAdminSlots = async function() {
+  toast('info', 'RELEASE', 'releasing ADMIN slots…');
+  try {
+    const data = await apiJson('/players/release', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    if (!data.ok) {
+      toast('error', 'RELEASE', data.error || 'failed');
+      return;
+    }
+    toast('success', 'RELEASE', 'ADMIN slots cleared');
+    // Drop the iframe back to plain spectator mode so we stop sending
+    // input on behalf of ADMIN.
+    setIframeAdminSlot(null);
+    setTimeout(refreshPlayers, 400);
+  } catch (e) {
+    if (e.message !== 'auth') toast('error', 'RELEASE', e.message);
   }
 };
 
