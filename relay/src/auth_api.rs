@@ -394,6 +394,126 @@ pub async fn check_admin(authorization: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+/// POST /api/join — authenticated slot claim.
+///
+/// Counterpart to /api/leave. The browser JWT cannot UPDATE the slot table
+/// (PERMISSIONS NONE for the `browser` record access), so we proxy the
+/// write through this endpoint using the relay's admin credentials. The
+/// JWT check ensures only the authenticated user's name goes into the slot.
+///
+/// Body: {"slot": 0|1}
+/// Header: Authorization: Bearer <jwt>
+///
+/// Steps:
+///   1. Validate the JWT, extract the player record id via $auth.
+///   2. Look up the username with admin creds.
+///   3. UPDATE the requested slot row with occupant_name, session_id, claimed_at.
+///
+/// Idempotent: re-joining the same slot is a no-op UPDATE.
+pub async fn handle_join(authorization: Option<&str>, body: &str) -> AuthResponse {
+    let token = match authorization.and_then(|h| h.strip_prefix("Bearer ")) {
+        Some(t) if !t.is_empty() => t,
+        _ => return AuthResponse::err("missing bearer token"),
+    };
+
+    // Parse slot number from body
+    #[derive(Deserialize)]
+    struct JoinReq { slot: u8 }
+    let req: JoinReq = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => return AuthResponse::err(format!("bad json: {e}")),
+    };
+    if req.slot > 1 {
+        return AuthResponse::err("slot must be 0 or 1");
+    }
+    let slot_id = if req.slot == 0 { "slot:p1" } else { "slot:p2" };
+
+    let cfg = DbConfig::from_env();
+
+    // Step 1: validate token + extract player record id
+    let client = reqwest::Client::new();
+    let who_res = match client
+        .post(format!("{}/sql", cfg.url))
+        .bearer_auth(token)
+        .header("Surreal-NS", &cfg.ns)
+        .header("Surreal-DB", &cfg.db)
+        .header("Accept", "application/json")
+        .body("RETURN $auth;")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return AuthResponse::err(format!("db network: {e}")),
+    };
+    if !who_res.status().is_success() {
+        return AuthResponse::err("token rejected");
+    }
+    let parsed: Json = match who_res.json().await {
+        Ok(v) => v,
+        Err(e) => return AuthResponse::err(format!("bad db response: {e}")),
+    };
+    let record_id = parsed
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|stmt| stmt.get("result"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let record_id = match record_id {
+        Some(r) if r.starts_with("player:") => r,
+        _ => return AuthResponse::err("no player on token"),
+    };
+
+    // Step 2: look up username with admin creds
+    let lookup_sql = format!("SELECT VALUE username FROM {};", record_id);
+    let lookup = match sql_query_as_admin(&cfg, &lookup_sql).await {
+        Ok(v) => v,
+        Err(e) => return AuthResponse::err(format!("username lookup: {e}")),
+    };
+    let username = lookup
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|stmt| stmt.get("result"))
+        .and_then(|r| r.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let username = match username {
+        Some(u) if !u.is_empty() => u,
+        _ => return AuthResponse::err("username not found"),
+    };
+
+    // Step 3: claim the slot using admin creds
+    let display = username.to_uppercase();
+    let display_esc = esc(&display);
+    let sql = format!(
+        "UPDATE {slot_id} SET \
+            occupant_name = '{display_esc}', \
+            player_record = {record_id}, \
+            session_id = NONE, \
+            claimed_at = time::now(), \
+            last_input_at = time::now(), \
+            grace_expires_at = NONE;"
+    );
+    match sql_query_as_admin(&cfg, &sql).await {
+        Ok(v) => {
+            // SurrealDB returns per-statement {status: 'ERR', result: '<msg>'} for
+            // constraint violations (unique indexes on slot.occupant_name /
+            // slot.player_record / slot.slot_num). sql_query_as_admin only checks
+            // HTTP status, so we must inspect the per-stmt status ourselves —
+            // otherwise a silent unique-idx failure returns ok:true and the
+            // browser thinks the slot is claimed when it isn't.
+            if let Some(stmt) = v.as_array().and_then(|a| a.first()) {
+                if stmt.get("status").and_then(|s| s.as_str()) == Some("ERR") {
+                    let msg = stmt.get("result").and_then(|r| r.as_str()).unwrap_or("unknown");
+                    return AuthResponse::err(format!("slot claim rejected: {msg}"));
+                }
+            }
+            AuthResponse { ok: true, ..Default::default() }
+        }
+        Err(e) => AuthResponse::err(format!("slot claim failed: {e}")),
+    }
+}
+
 /// POST /api/leave — authenticated slot + queue clear.
 ///
 /// The browser sends the scoped JWT it got from /api/signin in the

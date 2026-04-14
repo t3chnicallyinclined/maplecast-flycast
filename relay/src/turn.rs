@@ -270,6 +270,14 @@ async fn handle_http(
             "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             code, if resp.ok { "OK" } else { "Unauthorized" }, json.len(), json
         )
+    } else if first_line.starts_with("POST /api/join") {
+        let resp = auth_api::handle_join(auth_header.as_deref(), &body).await;
+        let json = serde_json::to_string(&resp).unwrap_or_else(|_| "{}".to_string());
+        let code = if resp.ok { 200 } else { 401 };
+        format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+            code, if resp.ok { "OK" } else { "Unauthorized" }, json.len(), json
+        )
     } else if first_line.starts_with("POST /api/leave") {
         let resp = auth_api::handle_leave(auth_header.as_deref()).await;
         let json = serde_json::to_string(&resp).unwrap_or_else(|_| "{}".to_string());
