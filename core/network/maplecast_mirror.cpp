@@ -937,31 +937,32 @@ void startMirrorStream(const char* host, int port)
 bool isServer() { return _isServer; }
 bool isClient() { return _isClient; }
 
-// S1 — STARTRENDER hook. Called from rend_start_render() on the SH4/DC
-// thread immediately after the TA_context is fully populated, BEFORE
-// QueueRender() pushes it onto the render-thread queue.
+// S1 v2 — STARTRENDER hook, TIMESTAMP ONLY.
 //
-// This is the earliest point at which the TA buffer + PVR registers are
-// guaranteed stable (the game has finished submitting, since it just wrote
-// STARTRENDER). Publishing here bypasses the render-thread wake-up + queue
-// drain latency, saving ~1-3 ms of E2E latency on a loaded 2 vCPU VPS.
+// Rationale for v2: v1 called serverPublish() synchronously on the SH4
+// thread. That blocked the emu loop with PVR snapshot + 8 MB VRAM memcmp
+// + zstd compress + WS broadcast — ~2-5 ms per frame on a 2 vCPU VPS,
+// enough to drop sustained fps from 60 to ~5. Verified in production:
+// rolling back via MAPLECAST_USE_OLD_CAPTURE_TRIGGER=1 instantly
+// restored 60 fps.
 //
-// Thread safety: serverPublish uses a PVR atomic snapshot + VRAM shadow
-// memcmp + shm mutex, so it's safe to run from any thread. The only
-// ordering concern is the admin command drain at Renderer_if.cpp:207 —
-// savestate load/save still runs on the render thread there, meaning a
-// just-queued savestate command may process 1 frame later than it would
-// have in the legacy path. This is acceptable: savestate timing is not
-// latency-sensitive.
+// v2 keeps the earliest-possible STARTRENDER timestamp (useful for
+// client pacing via t_startrender_us in frame_phase JSON) but leaves
+// the expensive publish work on the render thread, where it was
+// always safe to run async alongside the SH4.
 //
-// Dedupe: serverPublish's first act is an atomic exchange on
-// _lastPublishedCtxAddr. Whichever call site fires first wins; the other
-// no-ops. Keeps wire bytes identical between old-path and new-path runs.
+// The wall-clock win from v1 was "skip the render-thread queue wake-up
+// delay (~1-3 ms)". v2 gives that up. If we ever want it back, we'd
+// need a dedicated publish thread consuming from a ring buffer the
+// SH4 thread feeds — not a synchronous call.
 void onStartRender(TA_context* ctx)
 {
 	if (!_isServer || !ctx) return;
-	if (!_useStartRenderHook()) return;  // operator opt-out
-	serverPublish(ctx);
+	if (!_useStartRenderHook()) return;  // operator opt-out (legacy)
+	// Stamp the STARTRENDER timestamp now — this is microseconds after
+	// the game wrote the register. The t_startrender_us field in
+	// frame_phase JSON reflects this; clients pace against it.
+	_atomicStartRenderTimeUs.store(_publishNowUs(), std::memory_order_release);
 }
 
 // Phase A — accessors for the input latch path. Cheap atomic loads,
@@ -1067,19 +1068,17 @@ void serverPublish(TA_context* ctx)
 {
 	if (!_isServer || !_shmPtr || !ctx) return;
 
-	// S1 — dedupe: if onStartRender already published this context, skip.
-	// Atomic exchange with the current ctx pointer: returns the PREVIOUS
-	// value. If that matches ctx, we're the second caller for this frame
-	// and bail out. If it doesn't match, we've just claimed publish rights.
-	uintptr_t prevCtxAddr = _lastPublishedCtxAddr.exchange((uintptr_t)ctx, std::memory_order_acq_rel);
-	if (prevCtxAddr == (uintptr_t)ctx) return;
+	// S1 v2 — dedupe no longer needed (onStartRender no longer calls publish).
+	// Update _lastPublishedCtxAddr for diagnostics only.
+	_lastPublishedCtxAddr.store((uintptr_t)ctx, std::memory_order_release);
 
-	// C4 prep — stamp STARTRENDER time as early as possible. Under the S1
-	// path this is ~microseconds after the game's STARTRENDER register
-	// write; under the legacy render-thread fallback path it's ~ms later
-	// (still useful but noisier). Browser C4 pacing code uses this to
-	// schedule eglSwapBuffers relative to the true frame boundary.
-	_atomicStartRenderTimeUs.store(_publishNowUs(), std::memory_order_release);
+	// C4 — under S1 v2, onStartRender (SH4 thread) stamped t_startrender_us
+	// µs ago. We do NOT overwrite here — the SH4-thread stamp is the authoritative
+	// "game wrote STARTRENDER" timestamp. Under MAPLECAST_USE_OLD_CAPTURE_TRIGGER=1
+	// the hook is a no-op, so t_startrender_us would read 0 / stale. Write a
+	// fallback only in that rollback case so clients don't see zeros:
+	if (!_useStartRenderHook())
+		_atomicStartRenderTimeUs.store(_publishNowUs(), std::memory_order_release);
 
 	auto publishStart = std::chrono::high_resolution_clock::now();
 	rend_context& rc = ctx->rend;
