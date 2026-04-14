@@ -3,7 +3,12 @@
 // WebTransport: unreliable datagrams for delta frames, reliable stream for SYNC
 // WebSocket: TCP fallback for browsers without WebTransport support
 
-const WT_TIMEOUT = 3000; // ms to wait for WebTransport before falling back
+// ms to wait for WebTransport handshake before falling back to WS.
+// 3s was too aggressive — observed real handshakes completing at 3.5-4.5s
+// on some networks (cold DNS + QUIC handshake on first page load).
+// At 5s the page waits a bit longer but almost always gets QUIC.
+// Set WT_DISABLE=1 in window-scope to force WS immediately (debugging).
+const WT_TIMEOUT = 5000;
 
 export class AdaptiveTransport {
     constructor(opts = {}) {
@@ -59,17 +64,31 @@ export class AdaptiveTransport {
 
     async _tryWebTransport() {
         return new Promise(async (resolve) => {
+            // Allow forcing WS fallback via window.WT_DISABLE=true (debugging).
+            if (typeof window !== 'undefined' && window.WT_DISABLE) {
+                this._status('WebTransport disabled via WT_DISABLE');
+                resolve(false);
+                return;
+            }
+
+            let wtCandidate = null;
             const timeout = setTimeout(() => {
-                this._status('WebTransport timeout');
+                this._status('WebTransport timeout — falling back to WS');
+                // Abort the late WT so it doesn't quietly succeed AFTER we've
+                // committed to WS. Without close() the handshake would finish
+                // in the background and consume UDP for nothing.
+                if (wtCandidate) {
+                    try { wtCandidate.close(); } catch (e) {}
+                }
                 resolve(false);
             }, WT_TIMEOUT);
 
             try {
-                const wt = new WebTransport(this.wtUrl);
-                await wt.ready;
+                wtCandidate = new WebTransport(this.wtUrl);
+                await wtCandidate.ready;
                 clearTimeout(timeout);
 
-                this._wt = wt;
+                this._wt = wtCandidate;
                 this._type = 'webtransport';
                 this.stats.type = 'webtransport (QUIC/UDP)';
                 this._status('WebTransport connected!');
