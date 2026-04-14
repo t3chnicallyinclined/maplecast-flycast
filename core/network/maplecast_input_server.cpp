@@ -797,6 +797,28 @@ static void udpThreadLoop(int port)
 		int n = recvfrom(_udpSock, buf, sizeof(buf), 0, (struct sockaddr *)&from, &fromLen);
 		if (n < 4) continue;
 
+		// PROBE-ACK responder for native client hub-discovery RTT measurement.
+		// Wire format: client sends [0xFF, seq:u8, 0, 0, 0, 0, 0] (7 bytes).
+		// We echo back [0xFE, seq:u8, ts_lo:u32_LE, ts_hi:u16_LE] (8 bytes)
+		// where ts is server CLOCK_MONOTONIC microseconds (truncated low 48
+		// bits split LE). Client measures RTT as (now - send_time). Doesn't
+		// touch any input state — pure echo, takes ~2µs.
+		if (n >= 4 && buf[0] == 0xFF) {
+			uint64_t ts = nowUs();
+			uint8_t reply[8];
+			reply[0] = 0xFE;
+			reply[1] = buf[1];                       // echo seq
+			reply[2] = (uint8_t)(ts);
+			reply[3] = (uint8_t)(ts >> 8);
+			reply[4] = (uint8_t)(ts >> 16);
+			reply[5] = (uint8_t)(ts >> 24);
+			reply[6] = (uint8_t)(ts >> 32);
+			reply[7] = (uint8_t)(ts >> 40);
+			sendto(_udpSock, reply, sizeof(reply), 0,
+			       (struct sockaddr*)&from, fromLen);
+			continue;
+		}
+
 		const uint8_t *w3 = buf;
 		int slot = -1;
 

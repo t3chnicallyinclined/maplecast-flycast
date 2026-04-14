@@ -11,6 +11,7 @@
 */
 #include "types.h"
 #include "maplecast_mirror.h"
+#include "hub_discovery.h"
 #include "hw/pvr/ta_ctx.h"
 #include "hw/pvr/pvr_mem.h"
 #include "hw/pvr/pvr_regs.h"
@@ -867,10 +868,34 @@ static void initClientWebSocket()
 	_isClient = true;
 	_useWebSocket = true;
 
-	const char* host = std::getenv("MAPLECAST_SERVER_HOST");
+	// Hub-aware discovery (Phase 1): if MAPLECAST_HUB_URL is set, fetch the
+	// list of nearby input servers, UDP-probe each, pick the lowest-RTT one.
+	// Falls back to MAPLECAST_SERVER_HOST/PORT if hub unreachable or no
+	// servers found. Explicit host/port override the hub if both are set.
+	std::string hubHost;
+	int hubPort = 0;
+	if (const char* hubUrl = std::getenv("MAPLECAST_HUB_URL")) {
+		// Don't override an explicit host
+		const char* explicitHost = std::getenv("MAPLECAST_SERVER_HOST");
+		if (!explicitHost || strlen(explicitHost) == 0) {
+			printf("[MIRROR] Hub discovery enabled — querying %s\n", hubUrl);
+			auto winner = maplecast_hub::discoverAndSelect(hubUrl);
+			if (!winner.node_id.empty()) {
+				hubHost = winner.public_host;
+				hubPort = winner.relay_ws_port;
+				printf("[MIRROR] Hub picked input server '%s' at %s:%d (%.1fms RTT)\n",
+				       winner.name.c_str(), hubHost.c_str(), hubPort,
+				       winner.avg_rtt_ms);
+			} else {
+				printf("[MIRROR] Hub discovery failed — falling back to MAPLECAST_SERVER_HOST\n");
+			}
+		}
+	}
+
+	const char* host = hubHost.empty() ? std::getenv("MAPLECAST_SERVER_HOST") : hubHost.c_str();
 	if (!host) host = "127.0.0.1";
 	const char* portStr = std::getenv("MAPLECAST_SERVER_PORT");
-	int port = portStr ? std::atoi(portStr) : 7200;
+	int port = hubPort > 0 ? hubPort : (portStr ? std::atoi(portStr) : 7200);
 
 	printf("[MIRROR] === CLIENT MODE (WebSocket) === ws://%s:%d/\n", host, port);
 
