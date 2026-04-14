@@ -42,6 +42,25 @@ bool isHeadless();
 // Server: write this frame's TA context to shared memory
 void serverPublish(TA_context* ctx);
 
+// S1 — STARTRENDER hook (called from rend_start_render on the SH4/DC
+// thread, right after the TA_context fields are fully populated and
+// BEFORE QueueRender puts it on the render-thread queue).
+//
+// Per Sega SDK docs (POWERVR/DOCS/ta-intro.txt + ta-reg.txt), the game
+// writes STARTRENDER only after the final TA list is complete, so the
+// TA buffer + PVR registers are stable at this instant. Publishing here
+// skips the render-thread queue-drain delay (which on a 2 vCPU VPS can
+// be several hundred µs under load).
+//
+// Dedupes against the legacy render-thread call site at Renderer_if.cpp
+// via an atomic context pointer exchange — whichever fires first for a
+// given context wins, the other is a no-op.
+//
+// Set MAPLECAST_USE_OLD_CAPTURE_TRIGGER=1 to disable this path and fall
+// back to the legacy render-thread publish. Safe rollback knob for
+// operators if a regression is suspected.
+void onStartRender(TA_context* ctx);
+
 // Client: read the latest rend_context from shared memory into rc
 // Returns true if a new frame is available. Sets vramDirty if VRAM pages changed.
 bool clientReceive(rend_context& rc, bool& vramDirty);

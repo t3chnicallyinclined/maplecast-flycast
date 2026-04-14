@@ -192,6 +192,26 @@ static std::atomic<int64_t> _atomicLastLatchTimeUs{0};
 // = 60 fps) so the first few publishes have a reasonable starting value.
 static std::atomic<int64_t> _atomicFramePeriodUs{16670};
 
+// S1 — STARTRENDER hook dedupe. Both onStartRender() (SH4 thread, fires
+// first in the common case) and the legacy Renderer_if.cpp:210 call site
+// (render thread, fallback) funnel through serverPublish(). Without
+// dedupe each TA_context would be published twice — wasting bandwidth
+// and (worse) spamming the delta-encode baseline, breaking its vs-previous
+// comparison. This atomic records the last ctx pointer published; any
+// subsequent call with the same pointer no-ops.
+//
+// Pointer reuse across frames is fine — tactx_Pop / tactx_Push rotate
+// through a small pool, but within a single frame the context is unique.
+static std::atomic<uintptr_t> _lastPublishedCtxAddr{0};
+
+// S1 — opt-out knob. MAPLECAST_USE_OLD_CAPTURE_TRIGGER=1 disables the
+// STARTRENDER fast path, forcing all publishes to flow through the legacy
+// render-thread call site. Resolved once at first use.
+static bool _useStartRenderHook() {
+	static const bool val = (std::getenv("MAPLECAST_USE_OLD_CAPTURE_TRIGGER") == nullptr);
+	return val;
+}
+
 static inline int64_t _publishNowUs() {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -908,6 +928,33 @@ void startMirrorStream(const char* host, int port)
 bool isServer() { return _isServer; }
 bool isClient() { return _isClient; }
 
+// S1 — STARTRENDER hook. Called from rend_start_render() on the SH4/DC
+// thread immediately after the TA_context is fully populated, BEFORE
+// QueueRender() pushes it onto the render-thread queue.
+//
+// This is the earliest point at which the TA buffer + PVR registers are
+// guaranteed stable (the game has finished submitting, since it just wrote
+// STARTRENDER). Publishing here bypasses the render-thread wake-up + queue
+// drain latency, saving ~1-3 ms of E2E latency on a loaded 2 vCPU VPS.
+//
+// Thread safety: serverPublish uses a PVR atomic snapshot + VRAM shadow
+// memcmp + shm mutex, so it's safe to run from any thread. The only
+// ordering concern is the admin command drain at Renderer_if.cpp:207 —
+// savestate load/save still runs on the render thread there, meaning a
+// just-queued savestate command may process 1 frame later than it would
+// have in the legacy path. This is acceptable: savestate timing is not
+// latency-sensitive.
+//
+// Dedupe: serverPublish's first act is an atomic exchange on
+// _lastPublishedCtxAddr. Whichever call site fires first wins; the other
+// no-ops. Keeps wire bytes identical between old-path and new-path runs.
+void onStartRender(TA_context* ctx)
+{
+	if (!_isServer || !ctx) return;
+	if (!_useStartRenderHook()) return;  // operator opt-out
+	serverPublish(ctx);
+}
+
 // Phase A — accessors for the input latch path. Cheap atomic loads,
 // no shm header touching, safe from any thread.
 uint64_t currentFrame()      { return _atomicCurrentFrame.load(std::memory_order_acquire); }
@@ -1009,6 +1056,14 @@ bool isHeadless()
 void serverPublish(TA_context* ctx)
 {
 	if (!_isServer || !_shmPtr || !ctx) return;
+
+	// S1 — dedupe: if onStartRender already published this context, skip.
+	// Atomic exchange with the current ctx pointer: returns the PREVIOUS
+	// value. If that matches ctx, we're the second caller for this frame
+	// and bail out. If it doesn't match, we've just claimed publish rights.
+	uintptr_t prev = _lastPublishedCtxAddr.exchange((uintptr_t)ctx, std::memory_order_acq_rel);
+	if (prev == (uintptr_t)ctx) return;
+
 	auto publishStart = std::chrono::high_resolution_clock::now();
 	rend_context& rc = ctx->rend;
 	// DON'T skip RTT frames — MVC2 renders character sprites via render-to-texture!

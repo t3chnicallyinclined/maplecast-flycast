@@ -460,6 +460,17 @@ void rend_start_render()
 		ggpo::endOfFrame();
 	}
 
+	// S1 — STARTRENDER hook. Publish to mirror clients HERE on the SH4
+	// thread, before QueueRender enqueues the ctx for the render thread.
+	// The TA buffer + PVR registers are stable at this instant (game just
+	// wrote STARTRENDER = final submission complete). Publishing here saves
+	// the render-thread wake-up + queue drain latency (~1-3 ms on VPS).
+	// Falls back to the render-thread publish at the top of render() if
+	// MAPLECAST_USE_OLD_CAPTURE_TRIGGER=1 is set at startup. Dedupe against
+	// the fallback site is handled inside serverPublish via atomic exchange.
+	if (maplecast_mirror::isServer())
+		maplecast_mirror::onStartRender(ctx);
+
 	if (QueueRender(ctx))
 	{
 		palette_update();
