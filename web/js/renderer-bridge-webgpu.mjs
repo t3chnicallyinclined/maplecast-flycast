@@ -61,7 +61,15 @@ export async function initRenderer() {
         wtUrl: `https://${host}/webtransport`,
         onstatus: (msg) => console.log('[webgpu-bridge]', msg),
         onopen: () => console.log('[webgpu-bridge] Stream connected via', transport.type),
-        onclose: () => console.log('[webgpu-bridge] Stream disconnected'),
+        onclose: () => {
+            console.log('[webgpu-bridge] Stream disconnected');
+            // Mirror WASM bridge cleanup (renderer-bridge.mjs:260) — drops the
+            // streaming flag so lobby.mjs's next status tick re-shows the idle
+            // screen overlay. Without this, a dropped stream leaves a dead
+            // canvas with nothing visually indicating disconnect.
+            state.rendererStreaming = false;
+            document.body.classList.remove('streaming');
+        },
         onframe: handleFrame,
     });
     transport.connect();
@@ -114,6 +122,20 @@ export async function initRenderer() {
             if (deviationUs > _telemetry.intervalMaxUs) _telemetry.intervalMaxUs = deviationUs;
         }
         _telemetry._lastFrameAt = now;
+
+        // FIRST FRAME: dismiss the idle screen overlay and flip the streaming
+        // flag so lobby.mjs (line 60) stops re-asserting display:flex on every
+        // 1Hz status tick. Mirrors the WASM bridge's sync_applied handler at
+        // renderer-bridge.mjs:265-268 — the WebGPU bridge swap on 2026-04-13
+        // missed this and the bug only surfaced once gameplay had idle gaps.
+        if (_telemetry.framesRendered === 0) {
+            const idle = document.getElementById('idleScreen');
+            if (idle) idle.style.display = 'none';
+            document.body.classList.add('streaming');
+            state.rendererStreaming = true;
+            state.connState = 'LIVE';
+            console.log('[webgpu-bridge] First frame rendered — idle screen dismissed');
+        }
         _telemetry.framesRendered++;
         _fc++;
     }
