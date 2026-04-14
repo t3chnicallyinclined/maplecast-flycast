@@ -1193,6 +1193,8 @@ void Emulator::start()
 
 		// Input sink: send local gamepad events to the server.
 		// Reads MAPLECAST_SERVER_HOST for the target (same as mirror client).
+		// initClientWebSocket may have setenv()'d this from hub discovery,
+		// so we read AFTER that runs.
 		{
 			const char* sinkHost = std::getenv("MAPLECAST_SERVER_HOST");
 			if (!sinkHost) sinkHost = "127.0.0.1";
@@ -1200,6 +1202,15 @@ void Emulator::start()
 			if (const char* s = std::getenv("MAPLECAST_PLAYER_SLOT"))
 				sinkSlot = std::atoi(s);
 			maplecast_input_sink::init(sinkHost, sinkSlot);
+
+			// Phase 2: if hub discovery picked a runner-up server, wire it
+			// up as the hot-standby for input failover. The input sink
+			// keeps a UDP socket open to it; if the primary stops echoing
+			// for >100ms, sends instantly swap to the standby.
+			const std::string& backup = maplecast_mirror::clientBackupServerHost();
+			if (!backup.empty()) {
+				maplecast_input_sink::setBackupServer(backup.c_str());
+			}
 		}
 
 		state = Loaded;

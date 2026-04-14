@@ -263,4 +263,19 @@ InputServer discoverAndSelect(const std::string& hub_url) {
 	return winner;
 }
 
+std::vector<InputServer> discoverAndRank(const std::string& hub_url, int top_n) {
+	auto servers = discover(hub_url, 5);
+	if (servers.empty()) return {};
+
+	servers = probeServers(std::move(servers));
+
+	std::vector<InputServer> result;
+	for (const auto& s : servers) {
+		if (!std::isfinite(s.avg_rtt_ms)) continue;
+		result.push_back(s);
+		if ((int)result.size() >= top_n) break;
+	}
+	return result;
+}
+
 } // namespace maplecast_hub

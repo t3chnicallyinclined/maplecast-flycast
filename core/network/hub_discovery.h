@@ -57,4 +57,8 @@ std::vector<InputServer> probeServers(std::vector<InputServer> servers);
 // reachable server was found.
 InputServer discoverAndSelect(const std::string& hub_url);
 
+// Like discoverAndSelect but returns up to N best (sorted by avg_rtt_ms).
+// out[0] is primary, out[1] is hot-standby, etc. Empty result if no reachable.
+std::vector<InputServer> discoverAndRank(const std::string& hub_url, int top_n = 2);
+
 } // namespace maplecast_hub

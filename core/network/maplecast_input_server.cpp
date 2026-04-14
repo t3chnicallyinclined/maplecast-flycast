@@ -28,6 +28,7 @@
 #include <mutex>
 #include <algorithm>
 #include <vector>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <unistd.h>
@@ -437,6 +438,15 @@ static inline uint64_t makeSourceKey(uint32_t ip, uint16_t port)
 	return ((uint64_t)ip << 16) | (uint64_t)port;
 }
 
+// Phase 2 input redundancy: dedup by sequence number per source-key.
+// 11-byte packets carry a u32 seq; client sends each packet twice (T+0
+// + T+1ms) for loss tolerance. Server skips packets whose seq <= the
+// last we saw for that source. Map grows with unique sources but each
+// entry is ~16 bytes — bounded by player population.
+static std::unordered_map<uint64_t, uint32_t> _lastSeenSeq;
+static std::mutex _dedupMutex;
+static std::atomic<uint64_t> _dedupCount{0};
+
 static inline int64_t nowUs()
 {
 	struct timespec ts;
@@ -827,6 +837,91 @@ static void udpThreadLoop(int port)
 		{
 			slot = buf[0];
 			w3 = buf + 1;
+		}
+
+		// 11-byte Phase-2 player-client packet:
+		//   "PC"[slot][seq:u32_LE][LT][RT][btn_hi][btn_lo]
+		// Adds a sequence number for server-side dedup. The native client
+		// sends each input twice (T+0 + T+1ms) for loss tolerance —
+		// duplicates with seq <= last_seen_seq are silently dropped.
+		// Otherwise behaves identically to the 7-byte path.
+		else if (n == 11 && buf[0] == 'P' && buf[1] == 'C' && buf[2] <= 1)
+		{
+			int claimedSlot = buf[2];
+			uint32_t seq = (uint32_t)buf[3]
+			             | ((uint32_t)buf[4] << 8)
+			             | ((uint32_t)buf[5] << 16)
+			             | ((uint32_t)buf[6] << 24);
+			w3 = buf + 7;  // [LT][RT][btn_hi][btn_lo]
+
+			// Per-source-IP dedup. Map: source-key → last seq seen.
+			// Skip if seq <= last (handles redundant T+1ms copies and
+			// stray reorderings). 32-bit seq wraps every ~4 billion packets
+			// — at 12 KHz that's >9 days of continuous play, plenty.
+			uint64_t srcKey = makeSourceKey(from.sin_addr.s_addr, from.sin_port);
+			{
+				std::lock_guard<std::mutex> lock(_dedupMutex);
+				auto it = _lastSeenSeq.find(srcKey);
+				if (it != _lastSeenSeq.end()) {
+					uint32_t lastSeq = it->second;
+					// Handle wraparound: treat (lastSeq - seq) > 2^31 as new
+					int32_t diff = (int32_t)(seq - lastSeq);
+					if (diff <= 0) {
+						_dedupCount.fetch_add(1, std::memory_order_relaxed);
+						// Still ACK the duplicate so client failover detection
+						// gets a heartbeat from us
+						{
+							uint64_t ts = nowUs();
+							uint8_t reply[8];
+							reply[0] = 0xFE; reply[1] = (uint8_t)seq;
+							reply[2]=(uint8_t)ts; reply[3]=(uint8_t)(ts>>8);
+							reply[4]=(uint8_t)(ts>>16); reply[5]=(uint8_t)(ts>>24);
+							reply[6]=(uint8_t)(ts>>32); reply[7]=(uint8_t)(ts>>40);
+							sendto(_udpSock, reply, sizeof(reply), 0,
+							       (struct sockaddr*)&from, fromLen);
+						}
+						continue;
+					}
+				}
+				_lastSeenSeq[srcKey] = seq;
+			}
+
+			// ACK the input so the client can heartbeat-detect us
+			{
+				uint64_t ts = nowUs();
+				uint8_t reply[8];
+				reply[0] = 0xFE; reply[1] = (uint8_t)seq;
+				reply[2]=(uint8_t)ts; reply[3]=(uint8_t)(ts>>8);
+				reply[4]=(uint8_t)(ts>>16); reply[5]=(uint8_t)(ts>>24);
+				reply[6]=(uint8_t)(ts>>32); reply[7]=(uint8_t)(ts>>40);
+				sendto(_udpSock, reply, sizeof(reply), 0,
+				       (struct sockaddr*)&from, fromLen);
+			}
+
+			// Same auto-bind logic as 7-byte path
+			std::lock_guard<std::mutex> lock(_registryMutex);
+			PlayerInfo& p = _players[claimedSlot];
+			bool newBinding = !p.connected
+			               || p.srcIP != from.sin_addr.s_addr
+			               || p.srcPort != from.sin_port;
+			if (newBinding) {
+				p.connected = true;
+				p.type      = InputType::NobdUDP;
+				p.srcIP     = from.sin_addr.s_addr;
+				p.srcPort   = from.sin_port;
+				snprintf(p.id,     sizeof(p.id),     "player-client");
+				snprintf(p.name,   sizeof(p.name),   "PlayerClient%d", claimedSlot + 1);
+				snprintf(p.device, sizeof(p.device), "MapleCast PC");
+				p._prevButtons   = 0xFFFF;
+				p._lastRateTime  = nowUs();
+				p.lastChangeUs   = nowUs();
+				uint32_t ip = ntohl(from.sin_addr.s_addr);
+				printf("[input-server] PC auto-bind (11-byte): slot %d <- %u.%u.%u.%u:%u (seq=%u)\n",
+				       claimedSlot,
+				       (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF,
+				       ntohs(from.sin_port), seq);
+			}
+			slot = claimedSlot;
 		}
 
 		// 7-byte player-client packet: "PC"[slot][LT][RT][btn_hi][btn_lo]

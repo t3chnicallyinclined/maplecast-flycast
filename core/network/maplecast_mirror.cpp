@@ -863,6 +863,13 @@ static void wsClientRun(std::string host, int port)
 	decomp.destroy();
 }
 
+// Phase 2: when hub-discovery picks a winner, we ALSO learn the runner-up
+// from the ranked probe list. Stash both so the input-sink (initialized
+// later in emulator.cpp) can configure a hot-standby UDP socket.
+static std::string _hubBackupHost;  // empty = no backup available
+
+const std::string& clientBackupServerHost() { return _hubBackupHost; }
+
 static void initClientWebSocket()
 {
 	_isClient = true;
@@ -872,6 +879,10 @@ static void initClientWebSocket()
 	// list of nearby input servers, UDP-probe each, pick the lowest-RTT one.
 	// Falls back to MAPLECAST_SERVER_HOST/PORT if hub unreachable or no
 	// servers found. Explicit host/port override the hub if both are set.
+	//
+	// Phase 2 extension: discoverAndRank returns top-N. winner = primary,
+	// runner-up = hot-standby for input failover (input-sink reads
+	// clientBackupServerHost()).
 	std::string hubHost;
 	int hubPort = 0;
 	if (const char* hubUrl = std::getenv("MAPLECAST_HUB_URL")) {
@@ -879,13 +890,25 @@ static void initClientWebSocket()
 		const char* explicitHost = std::getenv("MAPLECAST_SERVER_HOST");
 		if (!explicitHost || strlen(explicitHost) == 0) {
 			printf("[MIRROR] Hub discovery enabled — querying %s\n", hubUrl);
-			auto winner = maplecast_hub::discoverAndSelect(hubUrl);
-			if (!winner.node_id.empty()) {
+			auto ranked = maplecast_hub::discoverAndRank(hubUrl, 2);
+			if (!ranked.empty()) {
+				const auto& winner = ranked[0];
 				hubHost = winner.public_host;
 				hubPort = winner.relay_ws_port;
 				printf("[MIRROR] Hub picked input server '%s' at %s:%d (%.1fms RTT)\n",
 				       winner.name.c_str(), hubHost.c_str(), hubPort,
 				       winner.avg_rtt_ms);
+
+				// Cascade to input sink via env var (input sink is init'd
+				// later in emulator.cpp from MAPLECAST_SERVER_HOST)
+				setenv("MAPLECAST_SERVER_HOST", hubHost.c_str(), 1);
+
+				if (ranked.size() >= 2) {
+					_hubBackupHost = ranked[1].public_host;
+					printf("[MIRROR] Hot-standby input server: '%s' at %s (%.1fms RTT)\n",
+					       ranked[1].name.c_str(), _hubBackupHost.c_str(),
+					       ranked[1].avg_rtt_ms);
+				}
 			} else {
 				printf("[MIRROR] Hub discovery failed — falling back to MAPLECAST_SERVER_HOST\n");
 			}

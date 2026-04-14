@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <string>
 
 struct rend_context;
 struct TA_context;
@@ -29,6 +30,11 @@ void initClient();
 void startMirrorStream(const char* host, int port);
 bool isServer();
 bool isClient();
+
+// Phase 2: hub-discovery's runner-up server, used by the input-sink as a
+// hot-standby UDP target for failover. Empty string if no backup
+// available (single-server hub or hub-discovery disabled).
+const std::string& clientBackupServerHost();
 
 // True iff MAPLECAST_HEADLESS=1 was set in the environment at startup.
 // When headless, flycast boots without creating an SDL window, without
