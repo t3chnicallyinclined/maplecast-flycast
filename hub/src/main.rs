@@ -22,15 +22,31 @@
 mod api;
 mod geo;
 mod matchmaker;
+mod replays;
 mod types;
 
-use axum::{Router, routing::{get, post, delete}};
+use axum::{Router, extract::FromRef, routing::{get, post, delete}};
 use clap::Parser;
 use std::net::SocketAddr;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
-use types::Operator;
+use replays::SharedReplayCache;
+use types::{Operator, SharedStore};
+
+// Combined app state — handlers extract just the substate they need via FromRef.
+#[derive(Clone)]
+struct AppState {
+    store: SharedStore,
+    replays: SharedReplayCache,
+}
+
+impl FromRef<AppState> for SharedStore {
+    fn from_ref(app: &AppState) -> SharedStore { app.store.clone() }
+}
+impl FromRef<AppState> for SharedReplayCache {
+    fn from_ref(app: &AppState) -> SharedReplayCache { app.replays.clone() }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "maplecast-hub", about = "Distributed node registry + matchmaker — OVERKILL IS NECESSARY")]
@@ -88,6 +104,17 @@ async fn main() {
         api::stale_sweeper(sweeper_store).await;
     });
 
+    // Replay cache — scans /var/lib/maplecast/replays on boot + every 60s
+    replays::ensure_replay_dir().await;
+    let replay_cache = replays::new_cache();
+    replays::refresh_cache(replay_cache.clone()).await;
+    let refresher_cache = replay_cache.clone();
+    tokio::spawn(async move {
+        replays::cache_refresher(refresher_cache).await;
+    });
+
+    let app_state = AppState { store: store.clone(), replays: replay_cache };
+
     // Build router
     //
     // Two URL prefixes for everything: /nodes (legacy, internal-friendly)
@@ -113,9 +140,16 @@ async fn main() {
         .route("/hub/api/dashboard/stats", get(api::dashboard_stats))
         .route("/hub/api/dashboard/nodes", get(api::dashboard_nodes))
         .route("/hub/api/dashboard/input-servers", get(api::dashboard_nodes))
+        // Replay sharing (Phase 5)
+        .route("/hub/api/replays", post(replays::upload_replay).get(replays::list_replays))
+        .route("/hub/api/replays/{id}", get(replays::download_replay))
+        .route("/hub/api/replays/{id}/info", get(replays::replay_info))
         // CORS — the dashboard and browser clients live on different origins
         .layer(CorsLayer::permissive())
-        .with_state(store);
+        // Allow large .mcrec uploads (default axum limit is 2MB, replays
+        // can be 7-10 MB)
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
+        .with_state(app_state);
 
     let addr: SocketAddr = args.listen.parse().expect("invalid listen address");
     info!("Hub listening on {}", addr);

@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MapleCast Replays — Tournament Archive</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0f;
+      color: #e0e0e0;
+      font-family: 'Courier New', monospace;
+      min-height: 100vh;
+    }
+    .header {
+      background: linear-gradient(135deg, #1a0a2e 0%, #0d1b2a 100%);
+      border-bottom: 2px solid #00ff88;
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .header h1 {
+      font-size: 1.4rem;
+      color: #00ff88;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      text-shadow: 0 0 10px rgba(0,255,136,0.5);
+    }
+    .header a {
+      color: #888;
+      text-decoration: none;
+      font-size: 0.85rem;
+    }
+    .header a:hover { color: #00ff88; }
+    .blurb {
+      padding: 16px 24px;
+      color: #aaa;
+      font-size: 0.85rem;
+      max-width: 900px;
+      line-height: 1.5;
+    }
+    .blurb code {
+      background: #111;
+      padding: 2px 6px;
+      border-radius: 3px;
+      color: #00ff88;
+    }
+    .container {
+      padding: 16px 24px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+    th {
+      text-align: left;
+      color: #666;
+      text-transform: uppercase;
+      font-size: 0.7rem;
+      letter-spacing: 1px;
+      padding: 8px 12px;
+      border-bottom: 1px solid #333;
+    }
+    td {
+      padding: 8px 12px;
+      border-bottom: 1px solid #1a1a1a;
+      vertical-align: middle;
+    }
+    tr:hover td { background: #151520; }
+    .match {
+      color: #e0e0e0;
+    }
+    .match .vs {
+      color: #ff4444;
+      padding: 0 8px;
+    }
+    .winner {
+      color: #00ff88;
+      font-weight: bold;
+    }
+    .dl-btn {
+      background: #003322;
+      color: #00ff88;
+      border: 1px solid #00ff88;
+      padding: 4px 10px;
+      border-radius: 3px;
+      font-family: inherit;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-block;
+      font-size: 0.75rem;
+    }
+    .dl-btn:hover {
+      background: #00ff88;
+      color: #001;
+    }
+    .id {
+      color: #666;
+      font-size: 0.7rem;
+      font-family: 'Courier New', monospace;
+    }
+    .empty {
+      text-align: center;
+      padding: 60px 20px;
+      color: #666;
+    }
+    .empty h2 { color: #888; margin-bottom: 10px; }
+    .empty pre {
+      background: #111;
+      padding: 12px;
+      border-radius: 4px;
+      display: inline-block;
+      text-align: left;
+      margin-top: 12px;
+      color: #aaa;
+    }
+    .footer {
+      text-align: center;
+      padding: 16px;
+      color: #333;
+      font-size: 0.75rem;
+      border-top: 1px solid #111;
+      margin-top: 40px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <h1>MapleCast Replays</h1>
+    <a href="/">Back to Arcade</a>
+  </div>
+
+  <div class="blurb">
+    <p>
+      Tournament matches recorded as <code>.mcrec</code> files &mdash;
+      deterministic input logs plus a starting savestate. ~7&ndash;10 MB per match.
+      Playback is frame-perfect thanks to SH4 emulation being fully deterministic.
+    </p>
+    <p style="margin-top:8px;">
+      Download the native client and replay any match with:
+      <code>flycast --replay-url https://nobd.net/hub/api/replays/&lt;id&gt;</code>
+    </p>
+  </div>
+
+  <div class="container">
+    <table id="replay-table">
+      <thead>
+        <tr>
+          <th>Match</th>
+          <th>Duration</th>
+          <th>Winner</th>
+          <th>Size</th>
+          <th>Uploaded</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div id="empty" class="empty" style="display:none">
+      <h2>No replays yet</h2>
+      <p>Record one on an input server and upload:</p>
+<pre>MAPLECAST_REPLAY_OUT=/tmp/match.mcrec \
+MAPLECAST_REPLAY_UPLOAD_URL=https://nobd.net/hub/api/replays \
+MAPLECAST_REPLAY_P1_NAME=alice \
+MAPLECAST_REPLAY_P2_NAME=bob \
+./flycast mvc2.gdi</pre>
+    </div>
+  </div>
+
+  <div class="footer">
+    MAPLECAST TOURNAMENT ARCHIVE &mdash; OVERKILL IS NECESSARY
+  </div>
+
+  <script type="module">
+    const HUB_URL_BASE = new URLSearchParams(location.search).get('hub')
+      || `${location.protocol}//${location.hostname}/hub/api`;
+
+    function esc(s) {
+      const d = document.createElement('div');
+      d.textContent = s || '';
+      return d.innerHTML;
+    }
+
+    function fmtDuration(ms) {
+      if (!ms || ms < 1000) return '—';
+      const s = Math.floor(ms / 1000);
+      const m = Math.floor(s / 60);
+      const sec = s % 60;
+      return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+    }
+
+    function fmtBytes(b) {
+      if (b > 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)} MB`;
+      if (b > 1024) return `${(b / 1024).toFixed(1)} KB`;
+      return `${b} B`;
+    }
+
+    function fmtTime(iso) {
+      try {
+        const d = new Date(iso);
+        const now = new Date();
+        const diffMs = now - d;
+        const diffMin = Math.floor(diffMs / 60000);
+        if (diffMin < 1) return 'just now';
+        if (diffMin < 60) return `${diffMin}m ago`;
+        if (diffMin < 1440) return `${Math.floor(diffMin/60)}h ago`;
+        return d.toLocaleDateString();
+      } catch { return '—'; }
+    }
+
+    async function loadReplays() {
+      try {
+        const resp = await fetch(`${HUB_URL_BASE}/replays`);
+        const data = await resp.json();
+        const replays = data.replays || [];
+        const tbody = document.getElementById('tbody');
+        const empty = document.getElementById('empty');
+        const table = document.getElementById('replay-table');
+
+        if (replays.length === 0) {
+          table.style.display = 'none';
+          empty.style.display = 'block';
+          return;
+        }
+        empty.style.display = 'none';
+        table.style.display = '';
+
+        tbody.innerHTML = replays.map(r => {
+          const p1 = r.p1_name || 'Player 1';
+          const p2 = r.p2_name || 'Player 2';
+          const winLabel = r.winner === 0 ? `${p1} wins`
+                         : r.winner === 1 ? `${p2} wins`
+                         : '—';
+          return `<tr>
+            <td class="match">
+              <span>${esc(p1)}</span>
+              <span class="vs">VS</span>
+              <span>${esc(p2)}</span>
+              <div class="id">${esc(r.id)}</div>
+            </td>
+            <td>${fmtDuration(r.duration_ms)}</td>
+            <td class="winner">${winLabel}</td>
+            <td>${fmtBytes(r.size_bytes)}</td>
+            <td>${fmtTime(r.uploaded_at)}</td>
+            <td><a class="dl-btn" href="${HUB_URL_BASE}/replays/${r.id}" download="${r.id}.mcrec">DOWNLOAD</a></td>
+          </tr>`;
+        }).join('');
+      } catch (e) {
+        console.error('[replays] fetch failed:', e);
+      }
+    }
+
+    loadReplays();
+    setInterval(loadReplays, 15000);
+  </script>
+</body>
+</html>

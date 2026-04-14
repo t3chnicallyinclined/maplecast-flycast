@@ -18,9 +18,14 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
+#include <thread>
 #include <vector>
+
+#include <curl/curl.h>
 
 #include <zstd.h>
 
@@ -41,6 +46,7 @@ static constexpr size_t      FLUSH_AFTER_BYTES = 16 * 1024;
 
 // Header fields (some filled at finalize)
 static uint64_t              _startUnixUs = 0;
+static std::string           _lastOutPath;
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -115,6 +121,7 @@ bool start(const StartParams& p) {
 	}
 
 	_startUnixUs = nowUnixUs();
+	_lastOutPath = p.out_path;
 	_entryCount.store(0);
 	_inputBuf.clear();
 
@@ -244,6 +251,70 @@ void append(uint64_t frame, uint32_t seqAndSlot, uint16_t buttons,
 	maybeFlush(false);
 }
 
+// ── Upload (optional, triggered by MAPLECAST_REPLAY_UPLOAD_URL) ───────
+//
+// After stop() finalizes the file, if MAPLECAST_REPLAY_UPLOAD_URL is set
+// (e.g. "https://nobd.net/hub/api/replays"), POST the file bytes via
+// libcurl. Returns the id + download URL the server echoes back.
+
+static size_t curlWriteToString(void* contents, size_t size, size_t nmemb, std::string* s) {
+	s->append((char*)contents, size * nmemb);
+	return size * nmemb;
+}
+
+static void uploadToHub(const std::string& filePath, const std::string& hubUrl) {
+	// Read the file into memory
+	FILE* f = fopen(filePath.c_str(), "rb");
+	if (!f) {
+		printf("[replay-upload] cannot open %s\n", filePath.c_str());
+		return;
+	}
+	fseek(f, 0, SEEK_END);
+	size_t sz = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	std::vector<uint8_t> body(sz);
+	if (fread(body.data(), 1, sz, f) != sz) {
+		fclose(f);
+		printf("[replay-upload] file read failed\n");
+		return;
+	}
+	fclose(f);
+
+	CURL* curl = curl_easy_init();
+	if (!curl) return;
+
+	std::string response;
+	struct curl_slist* headers = nullptr;
+	headers = curl_slist_append(headers, "Content-Type: application/octet-stream");
+
+	curl_easy_setopt(curl, CURLOPT_URL, hubUrl.c_str());
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+	curl_easy_setopt(curl, CURLOPT_POST, 1L);
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.data());
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)sz);
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWriteToString);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
+	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+	CURLcode rc = curl_easy_perform(curl);
+	long http_code = 0;
+	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+	curl_slist_free_all(headers);
+	curl_easy_cleanup(curl);
+
+	if (rc != CURLE_OK) {
+		printf("[replay-upload] failed: %s\n", curl_easy_strerror(rc));
+		return;
+	}
+	if (http_code >= 200 && http_code < 300) {
+		printf("[replay-upload] success (%ld bytes → %s): %s\n",
+		       (long)sz, hubUrl.c_str(), response.c_str());
+	} else {
+		printf("[replay-upload] HTTP %ld: %s\n", http_code, response.c_str());
+	}
+}
+
 // ── stop() ────────────────────────────────────────────────────────────
 
 void stop(uint8_t winner) {
@@ -280,6 +351,16 @@ void stop(uint8_t winner) {
 	printf("[replay] stopped: %llu input entries, %.2fs duration\n",
 	       (unsigned long long)_entryCount.load(),
 	       durationUs / 1000000.0);
+
+	// Optional upload to hub. We stashed the out_path for this.
+	if (const char* uploadUrl = std::getenv("MAPLECAST_REPLAY_UPLOAD_URL")) {
+		static std::string lastPath;  // persists for the upload thread
+		lastPath = _lastOutPath;
+		std::string url = uploadUrl;
+		std::thread([url]() {
+			uploadToHub(lastPath, url);
+		}).detach();
+	}
 }
 
 bool active() { return _active.load(std::memory_order_relaxed); }
