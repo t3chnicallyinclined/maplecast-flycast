@@ -54,6 +54,95 @@ pub fn savestate_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/opt/maplecast/.local/share/flycast"))
 }
 
+/// JSON sidecar mapping savestate slot → human-readable label. Format:
+///     { "1": "versus", "2": "training", "3": "arcade" }
+/// Labels are unique per slot — the helpers below enforce that on writes.
+///
+/// Default path is `/var/lib/maplecast-relay/savestate_labels.json` — a
+/// root-owned dir the relay can write without needing CAP_DAC_OVERRIDE.
+/// The savestate .state files themselves live in a maplecast-owned dir
+/// (so flycast, running as `maplecast`, can write them). Putting labels
+/// alongside would require granting the relay (running as root, but with
+/// a restricted capability set) DAC_OVERRIDE, which broadens the attack
+/// surface unnecessarily. Keep the labels in the relay's own state dir.
+///
+/// Override with MAPLECAST_LABELS_PATH for testing.
+fn labels_path() -> PathBuf {
+    std::env::var("MAPLECAST_LABELS_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/var/lib/maplecast-relay/savestate_labels.json"))
+}
+
+/// Read the labels sidecar, returning an empty map if the file doesn't
+/// exist or is malformed (defensive — a stray edit shouldn't break the
+/// admin panel). Map key is the slot number as a decimal string for
+/// JSON-friendliness; callers convert to i32 when matching against
+/// SavestateEntry.slot.
+fn read_labels() -> std::collections::HashMap<String, String> {
+    let path = labels_path();
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+/// Write the labels sidecar atomically (write-tmp + rename) so a crashed
+/// or interrupted write doesn't leave a half-written file. Mirrors the
+/// pattern used elsewhere for emu.cfg edits.
+fn write_labels(labels: &std::collections::HashMap<String, String>) -> Result<(), String> {
+    let path = labels_path();
+    // Make sure the parent dir exists — on a fresh install the relay's
+    // state dir hasn't been created yet. mkdir -p semantics. Ignores
+    // EEXIST. Fails loudly if the parent has a genuine permission issue.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create dir {}: {e}", parent.display()))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let json = serde_json::to_string_pretty(labels)
+        .map_err(|e| format!("encode labels: {e}"))?;
+    std::fs::write(&tmp, json).map_err(|e| format!("tmp write: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("rename: {e}"))?;
+    Ok(())
+}
+
+/// Set a label on a slot, evicting the same label from any other slot
+/// (labels are unique). Pass `None` to clear the label without setting
+/// a new one. Used by both the explicit /label endpoint and as a hook
+/// from the save endpoint when caller provided a label.
+fn upsert_label(slot: i32, label: Option<&str>) -> Result<(), String> {
+    let mut labels = read_labels();
+    let key = slot.to_string();
+    match label {
+        None | Some("") => {
+            labels.remove(&key);
+        }
+        Some(name) => {
+            // Enforce uniqueness: clear this label from any other slot first.
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                labels.remove(&key);
+            } else {
+                labels.retain(|k, v| k == &key || v != trimmed);
+                labels.insert(key, trimmed.to_string());
+            }
+        }
+    }
+    write_labels(&labels)
+}
+
+/// Look up the slot number associated with a label. Returns `None` if no
+/// slot has that label. Public so future code (e.g. an auto-versus-reset
+/// hook in /api/join) can resolve "versus" → slot N without re-reading
+/// the JSON manually.
+pub fn find_slot_by_label(label: &str) -> Option<i32> {
+    let labels = read_labels();
+    labels.iter()
+        .find(|(_, v)| v.as_str() == label)
+        .and_then(|(k, _)| k.parse::<i32>().ok())
+}
+
 /// Where flycast reads its config from on the VPS:
 ///   /opt/maplecast/.config/flycast/emu.cfg
 pub fn config_path() -> PathBuf {
@@ -488,12 +577,17 @@ struct SavestateEntry {
     size: u64,
     mtime: u64,
     is_current: bool,
+    /// Human-readable label from savestate_labels.json, or None if unlabeled.
+    /// Labels are unique per slot — see upsert_label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
 }
 
 pub async fn handle_list_savestates() -> AdminResponse {
     let dir = savestate_dir();
     let basename = rom_basename();
     let current_slot = read_current_slot().await.unwrap_or(0) as i32;
+    let labels = read_labels();
 
     let mut entries = match tokio::fs::read_dir(&dir).await {
         Ok(rd) => rd,
@@ -539,6 +633,7 @@ pub async fn handle_list_savestates() -> AdminResponse {
             size: meta.len(),
             mtime,
             is_current: slot == current_slot,
+            label: labels.get(&slot.to_string()).cloned(),
         });
     }
     out.sort_by_key(|e| e.slot);
@@ -611,8 +706,25 @@ pub struct SlotBody {
     pub slot: i32,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SaveBody {
+    pub slot: i32,
+    /// Optional label to attach to this slot in savestate_labels.json.
+    /// If a different slot already has this label, it'll be moved here
+    /// (labels are unique per slot).
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LabelBody {
+    pub slot: i32,
+    /// New label. Empty string or null clears the existing label.
+    pub label: Option<String>,
+}
+
 pub async fn handle_savestate_save(body: &str) -> AdminResponse {
-    let req: SlotBody = match serde_json::from_str(body) {
+    let req: SaveBody = match serde_json::from_str(body) {
         Ok(r) => r,
         Err(e) => return AdminResponse::err(format!("bad json: {e}")),
     };
@@ -630,6 +742,16 @@ pub async fn handle_savestate_save(body: &str) -> AdminResponse {
             let ok = reply.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
             if ok {
                 info!("[admin] savestate_save slot={} OK", req.slot);
+                // Apply the label after the state file lands. We don't fail
+                // the whole save on a label-write error — the binary state is
+                // the important part; the label is metadata.
+                if let Some(label) = req.label.as_deref() {
+                    if let Err(e) = upsert_label(req.slot, Some(label)) {
+                        warn!("[admin] savestate_save slot={} label write FAIL: {}", req.slot, e);
+                    } else {
+                        info!("[admin] savestate_save slot={} labeled '{}'", req.slot, label);
+                    }
+                }
                 AdminResponse::ok(reply.get("data").cloned().unwrap_or(json!({})))
             } else {
                 let err = reply
@@ -644,6 +766,38 @@ pub async fn handle_savestate_save(body: &str) -> AdminResponse {
         Err(e) => {
             warn!("[admin] savestate_save slot={} ws error: {}", req.slot, e);
             AdminResponse::err(format!("control ws: {e}"))
+        }
+    }
+}
+
+/// POST /overlord/api/savestates/label
+///
+/// Set, change, or clear a label on an existing slot WITHOUT re-saving
+/// the state. Use this to tag historical saves or reorganize labels.
+/// To save a new state with a label in one shot, pass `label` to
+/// /savestates/save instead.
+///
+/// Body: {"slot": N, "label": "versus"}  — set or move label
+/// Body: {"slot": N, "label": ""}        — clear label
+/// Body: {"slot": N, "label": null}      — clear label
+pub async fn handle_set_label(body: &str) -> AdminResponse {
+    let req: LabelBody = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => return AdminResponse::err(format!("bad json: {e}")),
+    };
+    if req.slot < 0 || req.slot > 99 {
+        return AdminResponse::err("slot out of range [0,99]");
+    }
+    match upsert_label(req.slot, req.label.as_deref()) {
+        Ok(()) => {
+            let label_str = req.label.as_deref().unwrap_or("");
+            info!("[admin] label slot={} → '{}'", req.slot, label_str);
+            AdminResponse::ok(json!({"slot": req.slot, "label": req.label}))
+        }
+        Err(e) => {
+            warn!("[admin] label slot={} write FAIL: {} (path={})",
+                  req.slot, e, labels_path().display());
+            AdminResponse::err(format!("label write failed: {e}"))
         }
     }
 }

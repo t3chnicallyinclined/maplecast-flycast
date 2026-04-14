@@ -178,6 +178,7 @@
       <thead>
         <tr>
           <th>SLOT</th>
+          <th>LABEL</th>
           <th>FILE</th>
           <th>SIZE</th>
           <th>MODIFIED</th>
@@ -185,12 +186,22 @@
         </tr>
       </thead>
       <tbody id="savestateRows">
-        <tr><td colspan="5" class="muted">loading…</td></tr>
+        <tr><td colspan="6" class="muted">loading…</td></tr>
       </tbody>
     </table>
+    <!-- QUICK SAVE: presets that grab the first free slot and label it.
+         Common-case workflow — admin navigates to versus character select,
+         clicks SAVE AS VERSUS, done. -->
+    <div class="card-actions card-actions-row" style="border-top:1px solid #333; padding-top:8px;">
+      <span class="card-meta" style="margin-right:4px;">QUICK SAVE:</span>
+      <button class="btn-action" onclick="saveAsLabel('versus')">&#x1F4BE; VERSUS</button>
+      <button class="btn-action" onclick="saveAsLabel('training')">&#x1F4BE; TRAINING</button>
+      <button class="btn-action" onclick="saveAsLabel('arcade')">&#x1F4BE; ARCADE</button>
+    </div>
     <div class="card-actions card-actions-row">
       <input type="number" id="newSlotNum" class="input-tiny" min="0" max="99" value="9" placeholder="slot">
-      <button class="btn-action" onclick="saveCurrentTo(parseInt(document.getElementById('newSlotNum').value, 10))">
+      <input type="text" id="newSlotLabel" class="input-tiny" maxlength="32" placeholder="label (optional)" style="width:140px;">
+      <button class="btn-action" onclick="saveCurrentTo(parseInt(document.getElementById('newSlotNum').value, 10), document.getElementById('newSlotLabel').value)">
         SAVE CURRENT &raquo; SLOT
       </button>
       <label class="btn-action btn-secondary" for="uploadInput">

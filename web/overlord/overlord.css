@@ -854,6 +854,29 @@ code {
   border-left: 2px solid var(--ov-gold);
 }
 
+/* Label chip — shown in the LABEL column when a slot has a label.
+ * Click to edit/clear via the editLabel() prompt. Sized like a btn-row
+ * so the column doesn't shift when toggling between chip and "+ LABEL"
+ * button. */
+.savestate-table .label-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--ov-cyan, #00d4ff);
+  border-radius: 3px;
+  background: rgba(0, 212, 255, 0.12);
+  color: var(--ov-cyan, #00d4ff);
+  font-family: inherit;
+  font-size: 0.85em;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.savestate-table .label-chip:hover {
+  background: var(--ov-cyan, #00d4ff);
+  color: #000;
+}
+
 /* ============================================================
    KEYBOARD HELP overlay (? key)
    ============================================================ */

@@ -382,6 +382,12 @@ async fn handle_http(
         } else {
             ok_json(&admin_api::handle_savestate_load(&body).await.to_json_string())
         }
+    } else if first_line.starts_with("POST /overlord/api/savestates/label") {
+        if !auth_api::check_admin(auth_header.as_deref()).await {
+            forbidden_json()
+        } else {
+            ok_json(&admin_api::handle_set_label(&body).await.to_json_string())
+        }
     } else if first_line.starts_with("POST /overlord/api/savestates/set-autoload") {
         if !auth_api::check_admin(auth_header.as_deref()).await {
             forbidden_json()

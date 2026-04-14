@@ -277,7 +277,7 @@ function renderSavestateRows(d) {
   document.getElementById('savestateMeta').textContent = meta;
 
   if (slots.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="muted">no savestates yet — use SAVE CURRENT &raquo; SLOT below</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="muted">no savestates yet — use QUICK SAVE or SAVE CURRENT &raquo; SLOT below</td></tr>';
     return;
   }
 
@@ -287,8 +287,15 @@ function renderSavestateRows(d) {
     const pinTitle = s.is_current
       ? 'Already the auto-load slot'
       : 'Set this slot as the auto-load slot for next boot. Requires RESTART SERVICE to take effect.';
+    // Label cell: if labeled, show as a colored chip; either way clicking
+    // opens an inline prompt to set/change/clear. Labels are unique per
+    // slot — the relay enforces that.
+    const labelCell = s.label
+      ? `<span class="label-chip" onclick="editLabel(${s.slot}, ${JSON.stringify(s.label).replace(/"/g, '&quot;')})" title="Click to rename or clear">${escapeHtml(s.label).toUpperCase()}</span>`
+      : `<button class="btn-row btn-secondary" onclick="editLabel(${s.slot}, null)" title="Add a label">+ LABEL</button>`;
     return `<tr class="row${isCurrent}">
       <td class="slot-num">${s.slot}${currentBadge}</td>
+      <td>${labelCell}</td>
       <td>${escapeHtml(s.filename)}</td>
       <td>${fmtBytes(s.size)}</td>
       <td>${fmtMtime(s.mtime)}</td>
@@ -300,6 +307,75 @@ function renderSavestateRows(d) {
     </tr>`;
   }).join('');
 }
+
+// Inline label editor — uses prompt() for now. Empty input clears the label.
+// Backend is the POST /savestates/label endpoint which doesn't re-save the
+// state file; it only writes savestate_labels.json.
+window.editLabel = async function(slot, current) {
+  const next = window.prompt(
+    `Label for slot ${slot} (clear by leaving empty)`,
+    current || ''
+  );
+  if (next === null) return; // cancelled
+  const trimmed = next.trim().toLowerCase();
+  try {
+    const data = await apiJson('/savestates/label', {
+      method: 'POST',
+      body: JSON.stringify({ slot, label: trimmed }),
+    });
+    if (!data.ok) {
+      toast('error', 'LABEL', data.error || 'failed');
+      return;
+    }
+    toast('success', 'LABEL', trimmed ? `slot ${slot} = ${trimmed}` : `slot ${slot} cleared`);
+    setTimeout(refreshSavestates, 200);
+  } catch (e) {
+    if (e.message !== 'auth') toast('error', 'LABEL', e.message);
+  }
+};
+
+// Quick-save preset — finds the lowest free slot (or reuses the slot that
+// already holds this label, since labels are unique), saves the current
+// state there, and applies the label in the same call. The relay-side
+// upsert_label takes care of moving the label off any other slot.
+window.saveAsLabel = async function(label) {
+  // Pull the latest list to find the existing slot for this label OR the
+  // lowest free slot. Doing this client-side keeps the API surface tiny —
+  // the server doesn't need a "next free slot" endpoint.
+  let targetSlot = null;
+  try {
+    const list = await apiJson('/savestates');
+    if (!list.ok) {
+      toast('error', 'QUICK SAVE', list.error || 'failed to list');
+      return;
+    }
+    const slots = list.data?.slots || [];
+    // Reuse the existing slot if this label already lives somewhere.
+    const existing = slots.find(s => s.label === label);
+    if (existing) {
+      targetSlot = existing.slot;
+    } else {
+      // Find the lowest unused slot in [1, 99]. Slot 0 is the default
+      // savestate path flycast uses on autoload, leave it alone unless
+      // explicitly chosen.
+      const used = new Set(slots.map(s => s.slot));
+      for (let i = 1; i <= 99; i++) {
+        if (!used.has(i)) { targetSlot = i; break; }
+      }
+      if (targetSlot === null) {
+        toast('error', 'QUICK SAVE', 'all 99 slots are full — clear one first');
+        return;
+      }
+    }
+  } catch (e) {
+    if (e.message === 'auth') return;
+    toast('error', 'QUICK SAVE', e.message);
+    return;
+  }
+  // Confirm overwrite if reusing an existing labeled slot.
+  // (Skipped on a fresh slot to keep the workflow one-click.)
+  await saveCurrentTo(targetSlot, label);
+};
 
 window.pinSlot = async function(slot) {
   toast('info', 'PIN', `setting slot ${slot} as auto-load…`);
@@ -345,24 +421,32 @@ window.downloadSlot = async function(slot) {
   }
 };
 
-window.saveCurrentTo = async function(slot) {
+window.saveCurrentTo = async function(slot, rawLabel) {
   if (!Number.isInteger(slot) || slot < 0 || slot > 99) {
     toast('error', 'SAVE', 'slot must be an integer 0-99');
     return;
   }
-  toast('info', 'SAVE', `saving slot ${slot}…`);
+  // Normalize label: trim, lowercase, max 32 chars. Empty → no label.
+  // Lowercased so callers can resolve by either case via find_slot_by_label.
+  const label = (rawLabel || '').trim().toLowerCase().slice(0, 32);
+  const labelSuffix = label ? ` as '${label}'` : '';
+  toast('info', 'SAVE', `saving slot ${slot}${labelSuffix}…`);
   try {
+    const body = label ? { slot, label } : { slot };
     const data = await apiJson('/savestates/save', {
       method: 'POST',
-      body: JSON.stringify({ slot }),
+      body: JSON.stringify(body),
     });
     if (!data.ok) {
       toast('error', 'SAVE', data.error || 'failed');
       return;
     }
-    toast('success', 'SAVE', `slot ${slot} written`);
-    // Auto-refresh the table after a small delay so the file write
-    // has time to land on disk.
+    toast('success', 'SAVE', `slot ${slot}${labelSuffix} written`);
+    // Clear the label input on the freeform form so the next save doesn't
+    // accidentally inherit a stale label.
+    const labelInput = document.getElementById('newSlotLabel');
+    if (labelInput) labelInput.value = '';
+    // Auto-refresh after a small delay so the file write has time to land.
     setTimeout(refreshSavestates, 400);
   } catch (e) {
     if (e.message !== 'auth') toast('error', 'SAVE', e.message);
