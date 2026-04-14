@@ -19,6 +19,7 @@
 #include "stdclass.h"
 #include "imgui.h"
 #include "ui/gui_competitive_hud.h"
+#include "ui/note_highway.h"
 #include "hw/naomi/card_reader.h"
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(__SWITCH__)
 #include "linux-dist/icon.h"
@@ -359,6 +360,7 @@ void input_sdl_handle()
 							if (event.key.keysym.sym == SDLK_F1) { gui_competitive_hud::toggleNetwork(); break; }
 							if (event.key.keysym.sym == SDLK_F2) { gui_competitive_hud::toggleLatency(); break; }
 							if (event.key.keysym.sym == SDLK_F3) { gui_competitive_hud::toggleInput();   break; }
+							if (event.key.keysym.sym == SDLK_F4) { note_highway::toggle(); break; }
 							if (event.key.keysym.sym == SDLK_F12){ gui_competitive_hud::toggleAll();     break; }
 						}
 						// Alt-Return and F11 toggle full screen

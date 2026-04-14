@@ -10,6 +10,8 @@ if(NOT LIBRETRO)
             gui_mirror_debug.h
             gui_competitive_hud.cpp
             gui_competitive_hud.h
+            note_highway.cpp
+            note_highway.h
             vgamepad.cpp
             vgamepad.h
             gui_chat.h

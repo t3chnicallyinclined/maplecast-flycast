@@ -12,6 +12,7 @@
 	Windows have NoInputs flag so they never steal mouse from the gear.
 */
 #include "gui_competitive_hud.h"
+#include "note_highway.h"
 
 #include <atomic>
 #include <cstdio>
@@ -183,6 +184,10 @@ void draw()
 	if (_showNetwork.load(std::memory_order_relaxed)) drawNetworkSection(y);
 	if (_showLatency.load(std::memory_order_relaxed)) drawLatencySection(y);
 	if (_showInput.load(std::memory_order_relaxed))   drawInputSection(y);
+
+	// Phase 8: Note highway (combo trainer). Draws at the bottom-center.
+	// Cheap no-op when no combo is active.
+	note_highway::draw();
 }
 
 void toggleNetwork() { _showNetwork.store(!_showNetwork.load()); }
