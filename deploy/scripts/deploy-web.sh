@@ -102,7 +102,7 @@ for f in relay.js; do
 done
 
 # Sync skin picker, client settings, network dashboard, replays page
-for f in skin-picker.html client-settings.html network.html replays.html; do
+for f in skin-picker.html client-settings.html network.html replays.html spectate.html; do
     if [ -f "$LOCAL_WEB/$f" ]; then
         scp "$LOCAL_WEB/$f" "$VPS_HOST:$REMOTE_DIR/$f"
         echo "  $f deployed"

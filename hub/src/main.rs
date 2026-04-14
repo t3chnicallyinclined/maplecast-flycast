@@ -144,6 +144,8 @@ async fn main() {
         .route("/hub/api/replays", post(replays::upload_replay).get(replays::list_replays))
         .route("/hub/api/replays/{id}", get(replays::download_replay))
         .route("/hub/api/replays/{id}/info", get(replays::replay_info))
+        // Active matches for spectator discovery (Phase 6)
+        .route("/hub/api/matches/active", get(api::active_matches))
         // CORS — the dashboard and browser clients live on different origins
         .layer(CorsLayer::permissive())
         // Allow large .mcrec uploads (default axum limit is 2MB, replays

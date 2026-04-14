@@ -489,6 +489,40 @@ fn node_to_public(n: &Node) -> NodePublic {
 }
 
 // ============================================================================
+// GET /hub/api/matches/active — list input servers currently in a match.
+// Used by spectator mode to discover what's live.
+// ============================================================================
+
+pub async fn active_matches(State(store): State<SharedStore>) -> impl IntoResponse {
+    let s = store.read().await;
+
+    // Every input server that reports status="in_match" OR has
+    // frames_received > 0 (i.e., actively streaming) is a candidate for
+    // spectating. status="ready" but idle servers are skipped.
+    let matches: Vec<_> = s
+        .nodes
+        .values()
+        .filter(|n| n.status == "in_match" || {
+            // Fallback: consider any node streaming frames as having an
+            // active match (until we have proper match-begin/end signals
+            // from the flycast process)
+            n.metrics.as_ref().map(|m| m.frames_received > 0).unwrap_or(false)
+        })
+        .map(|n| serde_json::json!({
+            "server_id": n.node_id,
+            "server_name": n.name,
+            "region": n.region,
+            "geo": n.geo,
+            "relay_url": n.relay_url(),
+            "spectators": n.metrics.as_ref().map(|m| m.clients).unwrap_or(0),
+            "frames": n.metrics.as_ref().map(|m| m.frames_received).unwrap_or(0),
+        }))
+        .collect();
+
+    Json(serde_json::json!({ "matches": matches }))
+}
+
+// ============================================================================
 // Stale node sweeper — runs as a background tokio task
 // ============================================================================
 

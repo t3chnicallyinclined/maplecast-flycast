@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MapleCast Spectate — Live Matches</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0f;
+      color: #e0e0e0;
+      font-family: 'Courier New', monospace;
+      min-height: 100vh;
+    }
+    .header {
+      background: linear-gradient(135deg, #1a0a2e 0%, #0d1b2a 100%);
+      border-bottom: 2px solid #00ff88;
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .header h1 {
+      font-size: 1.4rem;
+      color: #00ff88;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      text-shadow: 0 0 10px rgba(0,255,136,0.5);
+    }
+    .header a {
+      color: #888;
+      text-decoration: none;
+      font-size: 0.85rem;
+    }
+    .header a:hover { color: #00ff88; }
+    .blurb {
+      padding: 16px 24px;
+      color: #aaa;
+      font-size: 0.85rem;
+      max-width: 900px;
+      line-height: 1.5;
+    }
+    .blurb code {
+      background: #111;
+      padding: 2px 6px;
+      border-radius: 3px;
+      color: #00ff88;
+    }
+    .container {
+      padding: 16px 24px;
+    }
+    .match-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 16px;
+    }
+    .match-card {
+      background: #111118;
+      border: 1px solid #222;
+      border-radius: 6px;
+      padding: 16px;
+      transition: border-color 0.15s;
+    }
+    .match-card:hover {
+      border-color: #00ff88;
+    }
+    .match-card .server-name {
+      color: #00ff88;
+      font-size: 1.1rem;
+      font-weight: bold;
+      margin-bottom: 4px;
+    }
+    .match-card .location {
+      color: #666;
+      font-size: 0.85rem;
+      margin-bottom: 12px;
+    }
+    .match-card .detail-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      font-size: 0.85rem;
+    }
+    .match-card .detail-row .label {
+      color: #666;
+      text-transform: uppercase;
+      font-size: 0.7rem;
+      letter-spacing: 1px;
+    }
+    .match-card .detail-row .value {
+      color: #e0e0e0;
+    }
+    .match-card .actions {
+      margin-top: 16px;
+      display: flex;
+      gap: 8px;
+    }
+    .match-card .btn {
+      flex: 1;
+      background: #003322;
+      color: #00ff88;
+      border: 1px solid #00ff88;
+      padding: 8px;
+      border-radius: 3px;
+      font-family: inherit;
+      cursor: pointer;
+      text-decoration: none;
+      text-align: center;
+      font-size: 0.8rem;
+    }
+    .match-card .btn:hover {
+      background: #00ff88;
+      color: #001;
+    }
+    .empty {
+      text-align: center;
+      padding: 60px 20px;
+      color: #666;
+    }
+    .empty h2 { color: #888; margin-bottom: 10px; }
+    .footer {
+      text-align: center;
+      padding: 16px;
+      color: #333;
+      font-size: 0.75rem;
+      border-top: 1px solid #111;
+      margin-top: 40px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Spectate Live Matches</h1>
+    <a href="/">Back to Arcade</a>
+  </div>
+
+  <div class="blurb">
+    <p>
+      Live matches running across the distributed network.
+      <strong>Watch in your browser</strong> via the main viewer, or
+      <strong>native client at lossless quality</strong>:
+    </p>
+    <p style="margin-top:8px;">
+      <code>MAPLECAST_MIRROR_CLIENT=1 MAPLECAST_SPECTATE=1 MAPLECAST_SERVER_HOST=&lt;host&gt; ./flycast</code>
+    </p>
+  </div>
+
+  <div class="container">
+    <div id="match-grid" class="match-grid"></div>
+    <div id="empty" class="empty" style="display:none">
+      <h2>No live matches right now</h2>
+      <p>Check back when someone is playing on the network.</p>
+    </div>
+  </div>
+
+  <div class="footer">
+    MAPLECAST LIVE SPECTATOR &mdash; OVERKILL IS NECESSARY
+  </div>
+
+  <script type="module">
+    const HUB_URL_BASE = new URLSearchParams(location.search).get('hub')
+      || `${location.protocol}//${location.hostname}/hub/api`;
+
+    function esc(s) {
+      const d = document.createElement('div');
+      d.textContent = s || '';
+      return d.innerHTML;
+    }
+
+    async function load() {
+      try {
+        const resp = await fetch(`${HUB_URL_BASE}/matches/active`);
+        const data = await resp.json();
+        const matches = data.matches || [];
+        const grid = document.getElementById('match-grid');
+        const empty = document.getElementById('empty');
+
+        if (matches.length === 0) {
+          grid.innerHTML = '';
+          empty.style.display = 'block';
+          return;
+        }
+        empty.style.display = 'none';
+
+        grid.innerHTML = matches.map(m => {
+          const loc = m.geo ? `${m.geo.city || '?'}, ${m.geo.country || '?'}` : (m.region || '?');
+          // For the primary "watch in browser" link we route to the
+          // existing king.html with a ?server= hint. king.html's WS
+          // connection already uses nodeState.assignedNode if set —
+          // we push one there via URL param.
+          const watchUrl = `/?spectate=${encodeURIComponent(m.server_id)}`;
+          // Native client invocation pre-filled:
+          const nativeCmd = `MAPLECAST_MIRROR_CLIENT=1 MAPLECAST_SPECTATE=1 MAPLECAST_HUB_URL=${location.protocol}//${location.hostname}/hub/api ./flycast`;
+          return `<div class="match-card">
+            <div class="server-name">${esc(m.server_name)}</div>
+            <div class="location">${esc(loc)}</div>
+            <div class="detail-row">
+              <span class="label">Spectators</span>
+              <span class="value">${m.spectators}</span>
+            </div>
+            <div class="detail-row">
+              <span class="label">Frames</span>
+              <span class="value">${m.frames.toLocaleString()}</span>
+            </div>
+            <div class="detail-row">
+              <span class="label">Relay</span>
+              <span class="value" style="font-size:0.75rem">${esc(m.relay_url)}</span>
+            </div>
+            <div class="actions">
+              <a class="btn" href="${watchUrl}">WATCH IN BROWSER</a>
+              <button class="btn" onclick="navigator.clipboard.writeText(${JSON.stringify(nativeCmd)}); this.textContent='COPIED';">COPY NATIVE CMD</button>
+            </div>
+          </div>`;
+        }).join('');
+      } catch (e) {
+        console.error('[spectate] fetch failed:', e);
+      }
+    }
+
+    load();
+    setInterval(load, 8000);
+  </script>
+</body>
+</html>

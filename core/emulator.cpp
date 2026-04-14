@@ -1195,6 +1195,11 @@ void Emulator::start()
 		// Reads MAPLECAST_SERVER_HOST for the target (same as mirror client).
 		// initClientWebSocket may have setenv()'d this from hub discovery,
 		// so we read AFTER that runs.
+		//
+		// Phase 6: if MAPLECAST_SPECTATE=1, skip the input sink entirely —
+		// this is a read-only spectator (no gamepad routed to the server).
+		// Useful for tournament broadcasters + multi-match grid viewing.
+		if (!std::getenv("MAPLECAST_SPECTATE"))
 		{
 			const char* sinkHost = std::getenv("MAPLECAST_SERVER_HOST");
 			if (!sinkHost) sinkHost = "127.0.0.1";
@@ -1211,6 +1216,10 @@ void Emulator::start()
 			if (!backup.empty()) {
 				maplecast_input_sink::setBackupServer(backup.c_str());
 			}
+		}
+		else
+		{
+			printf("[MIRROR] === SPECTATE MODE === read-only, no gamepad forwarded\n");
 		}
 
 		state = Loaded;
