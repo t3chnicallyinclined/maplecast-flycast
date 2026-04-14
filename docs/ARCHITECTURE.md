@@ -1522,3 +1522,523 @@ to the home flycast's `:7200`. Nothing on this side is talking to
 | Frame size | ~52KB |
 | Resolution | 640x480 |
 | Codec | H.264 Baseline, all-IDR, CABAC |
+
+---
+
+# Pillar 5: Distributed Input Server Network (the moat)
+
+> **READ THIS BEFORE TOUCHING ANY HUB / NODE / NATIVE-CLIENT CODE.**
+>
+> This is the biggest architectural shift since the headless flycast migration.
+> If you're an agent reading this for the first time, internalize the model
+> before making changes.
+
+## What changed and why
+
+Until April 14, 2026, MapleCast ran on **one VPS in NJ**. Two players in LA
+playing through it ate ~40ms one-way input latency from the geographic
+distance alone. The flycast headless server is absurdly cheap (301MB RAM,
+12% of 2 vCPU, no GPU) — anyone with a $5/month VPS can run one.
+
+We turned that observation into the architecture: **anyone can run an "input
+server" (which is just flycast headless + the relay)**. A central hub on
+nobd.net lets browsers and native clients discover available servers,
+ping-test them, and connect to whichever is closest. Same-region players
+get ~2-5ms RTT instead of ~30-100ms. Twenty-fold latency improvement for
+many users.
+
+The hub is **discovery-only — never in the gameplay hot path.** Once a
+match is assigned, browsers/clients connect directly to the chosen input
+server. The hub is never on the data path.
+
+Naming: in user-facing surface area we call them **"input servers"**
+because that's what they ARE — the authoritative source of input for the
+match (plus the SH4 game compute, plus the frame source). Internal
+identifiers in code (`Node` struct, `node_id` field) keep the original
+"node" naming for stability — both `/api/nodes/*` and
+`/api/input-servers/*` URL routes work.
+
+## Topology
+
+```
+                 ┌──────────────────────────────────┐
+                 │ HUB (nobd.net, axum/Rust)         │
+                 │ Discovery + Matchmaking ONLY      │
+                 │ /hub/api/{input-servers,matchmake,│
+                 │           dashboard/*}            │
+                 │ Backed by SurrealDB               │
+                 └──────────┬───────────┬───────────┘
+                            │  10s heartbeat
+              ┌─────────────┴──────┐ ┌──┴──────────────┐
+              │ INPUT SERVER A     │ │ INPUT SERVER B  │  ← anyone runs these
+              │ (nobd.net itself)  │ │ (Chicago, etc.) │
+              │                    │ │                 │
+              │  flycast headless  │ │  flycast headl. │
+              │   + maplecast_relay│ │  + maplecast_relay
+              │     (with hub      │ │   (with hub     │
+              │      registration) │ │    registration)│
+              │                    │ │                 │
+              │ Ports:             │ │ Ports:          │
+              │  7100/udp - input  │ │  7100/udp       │
+              │  7201/tcp - relay  │ │  7201/tcp       │
+              │  7210/tcp - control│ │  7210/tcp       │
+              │  7213/tcp - audio  │ │  7213/tcp       │
+              │  7220/tcp - hub    │ │  (hub on        │
+              │   (only on the     │ │   nobd.net      │
+              │    one running it) │ │   only)         │
+              └────────┬─────┬─────┘ └────────┬─────────┘
+                       ▲     │                ▲
+              HOT PATH (no hub involvement after match assignment)
+                       │     │                │
+              ┌────────┴─────┴────────┐  ┌────┴──────────┐
+              │ BROWSER (king.html)   │  │ NATIVE CLIENT │
+              │ - WebTransport for    │  │ (flycast --   │
+              │   TA frames           │  │  client mode) │
+              │ - WS for control      │  │               │
+              │ - SurrealDB on nobd   │  │ - WS for TA   │
+              │ - Mixed-content note: │  │ - raw UDP for │
+              │   community nodes     │  │   input (sub- │
+              │   need TLS for HTTPS  │  │   1ms native) │
+              │   page to reach them  │  │ - no TLS req'd│
+              └───────────────────────┘  └───────────────┘
+```
+
+## Hub service
+
+**Crate**: `hub/` (Rust + axum). Binds `127.0.0.1:7220`. Nginx proxies
+`/hub/api/*` → `127.0.0.1:7220/hub/api/*`. Systemd unit
+`/etc/systemd/system/maplecast-hub.service`. Storage in process memory
+(SurrealDB for persistence in future); operator/token bootstrap from
+`/etc/maplecast/hub.env`.
+
+### Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/hub/api/input-servers/register` | Node registers itself |
+| POST | `/hub/api/input-servers/{id}/heartbeat` | Status + metrics every 10s |
+| DELETE | `/hub/api/input-servers/{id}` | Graceful shutdown deregister |
+| GET | `/hub/api/input-servers` | List all (public; for browsers/dashboard) |
+| GET | `/hub/api/input-servers/nearby?limit=N` | GeoIP-filtered nearest N (for client probing) |
+| POST | `/hub/api/matchmake` | Player submits ping results |
+| POST | `/hub/api/matchmake/select` | Two players ready → matchmaker picks server |
+| GET | `/hub/api/dashboard/stats` | Aggregate metrics for the map |
+| GET | `/hub/api/dashboard/input-servers` | Full server list with geo for map render |
+
+**Both `/api/input-servers/*` and legacy `/api/nodes/*` work** — same handlers
+behind both prefixes for backward compatibility.
+
+### GeoIP
+
+`hub/src/geo.rs` calls `ip-api.com/json/{ip}` (free tier, no key required)
+on each register. Stores `{lat, lng, city, country, region, isp}`. Used for
+dashboard map pins and `/nearby` pre-filtering. Failures are non-fatal —
+node still registers, just without geo data.
+
+### Matchmaker — min-max fairness
+
+`hub/src/matchmaker.rs:select_node()`. For each candidate server with both
+players' ping results, compute `max(p1_rtt, p2_rtt)` (the WORSE player's
+latency on that server). Pick the server that **minimizes that maximum**.
+Optimizes for fairness: the disadvantaged player's experience is as good
+as possible, rather than averaging (which can disadvantage one).
+
+3 unit tests in `hub/src/matchmaker.rs::tests` — keep them green when
+modifying the algorithm.
+
+### Stale sweeper
+
+Background tokio task every 10s in `hub/src/api.rs::stale_sweeper`:
+- No heartbeat for 30s → status `stale` (excluded from matchmaking)
+- No heartbeat for 60s → status `offline` (hidden from public list)
+- Pending ping reports older than 5min get garbage collected
+
+Important: the in-memory store loses all state on hub restart. Nodes
+auto-recover via the **404-reregister** path in
+`relay/src/hub_client.rs` — when a heartbeat returns HTTP 404, the relay
+re-runs the registration call without restarting the process.
+
+## Input server (node)
+
+An "input server" is **flycast headless + the relay binary**. The
+existing `maplecast-headless.service` runs flycast; the existing
+`maplecast-relay.service` runs the relay. Adding distributed-network
+participation is **just env vars** — set these on the relay's systemd
+unit (or `/etc/systemd/system/maplecast-relay.service.d/hub.conf`):
+
+```
+MAPLECAST_HUB_URL=http://127.0.0.1:7220/hub/api      # or https://nobd.net/hub/api for community nodes
+MAPLECAST_HUB_TOKEN=<operator-token>
+MAPLECAST_NODE_NAME=<human-readable name>
+MAPLECAST_NODE_REGION=<us-east|eu-west|ap-northeast|...>
+MAPLECAST_PUBLIC_HOST=<hostname or IP>               # auto-detected via ifconfig.me if omitted
+# Optional: override URLs for nodes behind nginx TLS termination
+MAPLECAST_PUBLIC_RELAY_URL=wss://your.host/ws        # nginx → :7201 internally
+MAPLECAST_PUBLIC_CONTROL_URL=wss://your.host/play    # nginx → :7210 internally
+MAPLECAST_PUBLIC_AUDIO_URL=wss://your.host/audio     # nginx → :7213 internally
+```
+
+When `MAPLECAST_HUB_URL` is set, `relay/src/hub_client.rs` spawns:
+1. **One-time registration** — POST to `/input-servers/register` with
+   node_id (loaded from `~/.maplecast/node_id`, generated if absent),
+   ports, capacity, GeoIP-resolved location (hub side), and any
+   public_*_url overrides
+2. **10-second heartbeat loop** — POST status + metrics
+   (frames_received, avg_frame_interval_us, etc.) pulled from
+   `RelayState::metrics()` (already exists for `/metrics` endpoint)
+3. **Auto-reregister on 404** — if the hub was restarted and forgot
+   us, transparently re-run the registration without process restart
+
+### node_id persistence
+
+Stored in `~/.maplecast/node_id` (typically `/opt/maplecast/.maplecast/`
+on the VPS). UUIDv4. Stable across relay restarts. The directory must be
+writable by the relay process — for the production VPS this means
+chowned to `root:root` because the systemd unit uses
+`CapabilityBoundingSet=CAP_NET_BIND_SERVICE` which strips
+`CAP_DAC_OVERRIDE`, meaning even root behaves like a normal user for
+file perms.
+
+### Browser-vs-native: TLS requirement
+
+- **Browsers loading https://nobd.net** are subject to the mixed-content
+  rule. They CANNOT open `ws://` connections to a community node — only
+  `wss://`. So: community nodes wanting browser players need TLS
+  (Cloudflare Tunnel, Tailscale Funnel, or own LE cert).
+- **Native clients have no such restriction.** They connect over plain
+  WS + raw UDP. No TLS overhead, no certificate burden. **Community
+  nodes that only want native-client tournament play don't need TLS at
+  all.** Just open ports 7100/udp and 7201/tcp.
+
+This is the cleanest separation: TLS is a browser problem, not a latency
+problem. AEAD encryption costs <1µs per packet; the TLS handshake is a
+one-time ~100ms cost. The real latency villain is TCP head-of-line
+blocking, which we already mitigate via WebTransport (QUIC).
+
+## Native client (`MAPLECAST_MIRROR_CLIENT=1`)
+
+Lives in `core/network/maplecast_mirror.cpp::initClient()` and
+`maplecast_input_sink.cpp`. Mode:
+- No SH4 simulation (CPU stopped)
+- TA frames received via WS, decoded + rendered locally
+- Audio via separate WS on `relay_ws_port + 12` (not `+3` as old docs say —
+  production now uses 7213 not 7203)
+- Gamepad input via raw UDP to server `:7100` (sub-1ms)
+
+### Hub-aware discovery (Phase 1, shipped 2026-04-14)
+
+`core/network/hub_discovery.cpp/.h` — the entry point that makes the
+native client useful in the distributed network:
+
+```cpp
+namespace maplecast_hub {
+    std::vector<InputServer> discover(const std::string& hub_url, int limit = 5);
+    void probeServer(InputServer& server, int probe_count = 5, int interval_ms = 200);
+    std::vector<InputServer> probeServers(std::vector<InputServer> servers);
+    InputServer discoverAndSelect(const std::string& hub_url);
+}
+```
+
+`initClientWebSocket()` in `maplecast_mirror.cpp` calls
+`discoverAndSelect(MAPLECAST_HUB_URL)` if the env var is set AND
+`MAPLECAST_SERVER_HOST` is not (explicit override always wins). The
+returned winner's `public_host:relay_ws_port` is used for the WS connection.
+
+Fallback chain:
+1. Explicit `MAPLECAST_SERVER_HOST/PORT` env vars (highest priority)
+2. Hub discovery winner (if `MAPLECAST_HUB_URL` set)
+3. Default `127.0.0.1:7200` (lowest priority — local dev)
+
+### UDP ping probe protocol
+
+This is what makes "best server" selection accurate. We measure on the
+**actual input UDP path**, not WebSocket RTT (which TCP-stalls and
+underestimates real-world latency).
+
+**Wire format** (in `maplecast_input_server.cpp::udpThreadLoop`):
+
+```
+Client → Server  (probe):  [0xFF, seq:u8, 0, 0, 0, 0, 0]    (7 bytes)
+Server → Client  (ACK):    [0xFE, seq:u8, ts:u48_LE]         (8 bytes)
+                            ts = server CLOCK_MONOTONIC microseconds,
+                                 truncated to 48 bits, little-endian
+```
+
+The probe is detected by `buf[0] == 0xFF` at the very top of the input
+recv loop, before any of the existing input format detection. ~2µs to
+process. Doesn't touch any input state — pure echo.
+
+Client side (`hub_discovery.cpp::probeServer`):
+- 5 probe packets, 200ms apart
+- 50ms recv timeout per probe
+- **Discard the first sample** (TCP/UDP socket cold start)
+- Average remaining 4 → `avg_rtt_ms`
+- Max of remaining 4 → `p95_rtt_ms` (rough approximation)
+- Total wall time per server: ~1 second
+
+`probeServers()` runs probes in parallel (one std::thread per server,
+typically 5 servers max from the GeoIP pre-filter) — total wall time
+stays ~1 second regardless of how many servers.
+
+### What's coming (Phase 2-8)
+
+Documented in detail in `docs/COMPETITIVE-CLIENT.md`. Summary:
+
+| Phase | What | Status |
+|-------|------|--------|
+| 0 | Rename `node` → `input server` in user-facing UI | ✅ Shipped |
+| 1 | Hub-aware discovery + UDP probing | ✅ Shipped |
+| 2 | Multi-socket redundancy + failover + SCHED_FIFO | 🔧 In progress |
+| 3 | Always-on diagnostic HUD overlay | 📋 Planned |
+| 4 | Deterministic replay recording (.mcrec — savestate + input log only) | 📋 Planned |
+| 5 | Replay sharing + browser playback (server on-demand TA gen) | 📋 Planned |
+| 6 | Spectator mode (single + multi-view grid at native res) | 📋 Planned |
+| 7 | ED25519 match signing + ROM hash verification | 📋 Planned |
+| 8 | DDR/Guitar Hero combo trainer (.mccombo files) | 📋 Planned |
+
+## The lossless spectating insight
+
+**This is the unique-in-fighting-games property.** The TA mirror wire
+format streams **GPU draw commands**, not pixels. Every native spectator
+re-renders locally at their native resolution. Implications:
+
+| Property | Twitch / YouTube | MapleCast Native Spectator |
+|----------|-----------------|----------------------------|
+| Resolution | Encoder limit (1080p free, 4K paid) | **Your monitor's native, up to 8K** |
+| Compression artifacts | H.264/H.265, blocky in motion | **None — ever** |
+| Bitrate per stream | 6 Mbps for 1080p60 | **~4 Mbps** for arbitrary resolution |
+| Multi-view (4 matches) | 24 Mbps, 4 decoders | **16 Mbps**, 4 renderers, all 4K |
+| Frame stepping | Keyframe-only | **Every frame is a keyframe** |
+| Replay storage (per hour) | ~3 GB at 1080p60 | **~1.8 GB at any resolution** |
+
+And then deterministic replay (Phase 4) makes that 1.8 GB number wrong:
+
+## Deterministic replay — the 350× storage win
+
+SH4 emulation is fully deterministic. Matches always start from the same
+savestate (or one we record at match-start). For replays we don't need to
+record the TA stream at all — **just the inputs + the start savestate**.
+On playback, `dc_loadstate()` puts the emulator at the start, then we
+inject the recorded inputs frame-by-frame. The emulator regenerates
+byte-perfect identical frames.
+
+Storage math:
+- TA stream approach: ~30 MB/min ≈ 1.8 GB/hour
+- **Inputs-only approach**: 16 bytes/frame × 60 fps ≈ **3.5 MB/hour**
+- **350× reduction.** Tournament's worth of replays in tens of MB.
+
+`.mcrec` file format (Phase 4):
+```
+[HEADER]      magic "MCREC", version, match_id, ROM hash,
+              flycast_version (determinism boundary),
+              players, characters, winner
+[START SAVESTATE]   zstd(dc_serialize) — typically ~600 KB
+[INPUT LOG]   [frame_num: u32, p1_input: u64, p2_input: u64] per frame
+[SIGNATURE]   HMAC-SHA256 + (Phase 7) ED25519 sig from input server
+```
+
+Total file size for a 5-min match: **~1 MB** (vs. ~150 MB for TA-stream
+approach).
+
+### What we lose (acceptable)
+- Browser playback can't run the SH4 emulator natively. Two options:
+  - Include the WASM SH4 emulator (already exists as `/legacy` path)
+  - **OR: server-side on-demand TA stream generation** (Phase 5) —
+    a flycast process loads the .mcrec, plays it deterministically,
+    pipes the resulting TA stream to the browser via WS. The
+    existing WASM TA renderer (king.html) just plays it. Server cost:
+    ~80µs/frame compress on a $5 VPS. Result cached for 5 min. Cheap.
+
+### What we gain
+- **350× smaller storage** + **future-proof rendering** (renderer
+  improvements automatically apply to all old replays — they're
+  re-rendered fresh) + **built-in determinism regression check**
+  (a replay that doesn't reproduce identical state proves a determinism
+  bug).
+
+## Combo trainer (Phase 8) — the killer community feature
+
+Deterministic replay enables this naturally. Every "sick combo" is a
+small `.mccombo` file (input log + start savestate, a subset of `.mcrec`).
+Players upload combos to a community library. Other players load them in
+training mode:
+
+1. Game executes the combo deterministically (same character, same chars,
+   same screen state)
+2. **DDR/Guitar Hero "note highway"** at the bottom of the screen:
+   scrolling buttons fall toward a "hit zone" timed to each input
+3. Player has to hit each button as it crosses the line
+4. Score: PERFECT / GREAT / GOOD / MISS per input
+5. Loop forever, slow-mo (50-110%), shadow-overlay mode
+
+Why this is huge: **infinite community-generated learning content** that
+has never existed for fighting games. Pro replays from EVO become
+training material within hours. Community library grows forever. Network
+effect.
+
+## Dashboard — `web/network.html`
+
+Public page at `https://nobd.net/network.html`. Leaflet.js world map with
+node pins (color-coded by status: ready/in_match/stale/offline). Stats
+bar shows aggregate metrics. Sortable table of all input servers. Auto-
+probes the nearest 5 from your geographic location (browser-side WS ping)
+and shows your latency to each.
+
+Mixed-content gotcha: from `https://nobd.net/` the dashboard can only
+ping nodes with TLS (`wss://`). Plain-`ws://` community nodes show as
+"unreachable" — that's a browser security model thing, not a bug. To
+test plain-ws nodes, serve the dashboard from `http://localhost` with
+`?hub=https://nobd.net/hub/api`.
+
+## Docker packaging — `Dockerfile.node`
+
+Combined flycast + relay image, multi-stage build (debian:12-slim runtime,
+~125MB). Published to `ghcr.io/t3chnicallyinclined/maplecast-node:latest`.
+
+Critical: **`--shm-size=256m` is REQUIRED.** flycast allocates ~168 MB in
+`/dev/shm` for the TA mirror RingHeader + BRAIN + RING buffers. The
+default Docker `/dev/shm` is 64 MB → SIGBUS on the SH4 thread the moment
+it touches the mapping.
+
+Run command for community operators:
+```bash
+docker run -d --net=host --shm-size=256m \
+  -v /path/to/mvc2.gdi:/data/mvc2.gdi:ro \
+  -e MAPLECAST_HUB_URL=https://nobd.net/hub/api \
+  -e MAPLECAST_HUB_TOKEN=<their-operator-token> \
+  -e MAPLECAST_NODE_NAME="MyServer" \
+  -e MAPLECAST_NODE_REGION="us-east" \
+  ghcr.io/t3chnicallyinclined/maplecast-node:latest
+```
+
+`--net=host` is the recommended default. Without it, bridge mode adds
+~1-5µs per UDP packet via iptables NAT — fine for spectator nodes,
+suboptimal for tournament-grade. With `--net=host`, Docker is essentially
+zero-overhead packaging.
+
+## Files added/changed for this pillar
+
+### Hub (new crate)
+- `hub/Cargo.toml` — axum, tokio, serde, reqwest, chrono, uuid, tower-http
+- `hub/src/main.rs` — server entry, route table, bootstrap operator
+- `hub/src/api.rs` — handlers (register, heartbeat, list, nearby,
+  matchmake, dashboard endpoints, stale_sweeper)
+- `hub/src/types.rs` — `Node`, `Operator`, `PingResult`, `SharedStore`
+- `hub/src/matchmaker.rs` — min-max fairness algorithm + 3 unit tests
+- `hub/src/geo.rs` — ip-api.com lookup + Haversine distance
+- `hub/src/schema.surql` — SurrealDB persistence schema (future)
+
+### Relay
+- `relay/src/hub_client.rs` — registration + heartbeat loop +
+  404-reregister fallback
+- `relay/src/main.rs` — new CLI args (`--hub-register`, `--hub-url`,
+  `--hub-token`, `--node-name`, `--node-region`, `--public-host`,
+  `--public-relay-url`, `--public-control-url`, `--public-audio-url`)
+  + env var aliases (`MAPLECAST_INPUT_SERVER_NAME` → `_NODE_NAME`)
+
+### Native client
+- `core/network/hub_discovery.cpp/.h` — fetch, probe, select
+- `core/network/maplecast_mirror.cpp::initClientWebSocket` — branches on
+  `MAPLECAST_HUB_URL`
+- `core/network/maplecast_input_server.cpp::udpThreadLoop` — probe-ACK
+  responder ([0xFF, seq, 0×5] → [0xFE, seq, ts:u48_LE])
+
+### Web dashboard
+- `web/network.html` — Leaflet map, stats, sortable table, auto-probe
+- `web/js/node-router.mjs` — browser-side discovery + WS ping probing
+  for matchmaking
+- `web/js/ws-connection.mjs` — `getControlWsUrl/getRendererWsUrl/`
+  `getRendererAudioWsUrl` check `nodeState.assignedNode` first; if a
+  match was assigned to a community node, route there instead of origin
+- `web/js/queue.mjs` — `gotNext()` probes nodes in background;
+  `handleMyPromotion()` reads `node_urls` from promotion row;
+  `leaveGame()` clears the assignment
+
+### Deployment
+- `deploy/systemd/maplecast-hub.service` — systemd unit for the hub
+- `deploy/scripts/test-network.sh` — local + VPS deploy harness
+- `Dockerfile.node` — combined flycast+relay image (3-stage build)
+- `deploy/node-entrypoint.sh` — starts flycast, waits for :7200, starts
+  relay with hub args from env
+
+### Docs
+- `docs/COMPETITIVE-CLIENT.md` — full vision + feature catalog for the
+  native tournament-grade client (Phases 0-8). Read before adding
+  features to the native client.
+
+## Current production state (2026-04-14)
+
+```
+Hub:           https://nobd.net/hub/api                  (axum, on the same VPS)
+Dashboard:     https://nobd.net/network.html             (Leaflet map)
+Input Server:  nobd-main (Piscataway, NJ)                ← VPS itself
+Operator:      admin (token in /etc/maplecast/hub.env)
+Backups:       /opt/maplecast-relay.backup-YYYYMMDD-HHMMSS (per deploy)
+Image:         ghcr.io/t3chnicallyinclined/maplecast-node:latest
+```
+
+To add a community node from your laptop or another VPS:
+```bash
+docker run -d --net=host --shm-size=256m \
+  -v /path/to/mvc2.gdi:/data/mvc2.gdi:ro \
+  -e MAPLECAST_HUB_URL=https://nobd.net/hub/api \
+  -e MAPLECAST_HUB_TOKEN=<admin-issued> \
+  -e MAPLECAST_NODE_NAME="MyNode" \
+  ghcr.io/t3chnicallyinclined/maplecast-node:latest
+```
+
+To verify hub-aware discovery from the native client:
+```bash
+MAPLECAST_MIRROR_CLIENT=1 \
+MAPLECAST_HUB_URL=https://nobd.net/hub/api \
+./build/flycast
+```
+Expected output:
+```
+[MIRROR] Hub discovery enabled — querying https://nobd.net/hub/api
+[hub-discovery] Discovered N input server(s) from https://nobd.net/hub/api
+[hub-discovery] probe nobd-main: X.Xms avg (4 samples)
+[hub-discovery] ═══ Selected: nobd-main (nobd.net) — X.Xms RTT ═══
+[MIRROR] Hub picked input server 'nobd-main' at nobd.net:7201 (X.Xms RTT)
+```
+
+## Hard-learned lessons (don't repeat these)
+
+1. **Docker `/dev/shm` default is 64MB**, flycast wants ~168MB → SIGBUS.
+   Always `--shm-size=256m`.
+2. **`Text file busy` on cp /opt/maplecast-relay**. Stop the service
+   first, then swap the binary, then start. Or use `install` which
+   handles this.
+3. **`CapabilityBoundingSet=CAP_NET_BIND_SERVICE`** on the relay systemd
+   unit strips `CAP_DAC_OVERRIDE`, so root can't write to non-owned
+   dirs. The `~/.maplecast/` dir for `node_id` persistence must be
+   owned by the running user.
+4. **WebTransport `dgram=0 stream=N` in WT client final stats is normal**
+   — the relay falls back to uni-streams when datagrams aren't
+   compatible. Not a bug. The disconnect-loop pattern ("N=80 in 2s,
+   reconnect, N=80 in 2s, ...") IS a bug — usually a stale browser tab
+   or a relay binary regression.
+5. **Auto-deploys can race a manual deploy.** If you SCP a relay binary
+   and 5 minutes later something else also deploys, your binary gets
+   overwritten without your noticing. Always check
+   `systemctl show maplecast-relay -p MainPID -p ExecMainStartTimestamp`
+   if you suspect a stream regression.
+6. **Hub stores public URLs as opaque strings.** If a node is behind
+   nginx TLS termination, the operator MUST set `MAPLECAST_PUBLIC_RELAY_URL`
+   etc. — otherwise the hub stores `ws://host:7201/ws` which gets
+   mixed-content-blocked from `https://nobd.net/network.html`.
+7. **Browsers cannot probe `ws://` from `https://`.** Don't try to
+   work around this in JS. Either deploy TLS for the node or test
+   from `http://localhost`.
+8. **The probe-ACK responder MUST be early in `udpThreadLoop`** —
+   before the input format detection. Otherwise `[0xFF, ...]` packets
+   would fall through to the legitimate input handlers and either be
+   ignored (fine) or treated as garbage input (less fine).
+9. **Hub in-memory store is volatile.** Hub restart → all nodes vanish.
+   The 404-reregister fallback in `relay/src/hub_client.rs` handles
+   this transparently — don't remove it. Eventually we'll move state
+   to SurrealDB but for now this is the recovery path.
+10. **The hub is NOT in the gameplay hot path.** Don't add latency-
+    sensitive operations to it. Don't proxy game data through it. It's
+    discovery + matchmaking only. If you find yourself adding a
+    websocket relay or input forwarder to the hub, stop and reconsider.

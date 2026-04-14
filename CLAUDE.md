@@ -38,6 +38,8 @@ An AI assistant scp'd the git version of king.html to production, overwriting th
 
 MapleCast turns Flycast (Dreamcast emulator) into a game streaming server. One MVC2 instance runs on a single 2-vCPU VPS with NO GPU. ~322 MB RAM, ~12% CPU. 60fps to `wss://nobd.net/ws`.
 
+**As of 2026-04-14 there's a fifth pillar — the Distributed Input Server Network.** Anyone can run an "input server" (flycast headless + the relay binary). A central hub on nobd.net does discovery + matchmaking. Native clients auto-pick the lowest-RTT server via UDP probing. Browsers connect through nginx-TLS-fronted endpoints. The hub is **NEVER** in the gameplay hot path. **Read `docs/ARCHITECTURE.md` "Pillar 5: Distributed Input Server Network" before touching any hub/node/native-client code.** Companion vision doc: `docs/COMPETITIVE-CLIENT.md`.
+
 ### Three flycast build variants — ALWAYS disambiguate
 | Variant | Build | What it is |
 |---------|-------|------------|
