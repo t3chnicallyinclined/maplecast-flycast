@@ -482,9 +482,15 @@ pub async fn handle_join(authorization: Option<&str>, body: &str) -> AuthRespons
         _ => return AuthResponse::err("username not found"),
     };
 
-    // Step 3: claim the slot using admin creds
+    // Step 3: claim the slot using admin creds, AND clean up any queue row
+    // for this user (they're in a slot now — no queue heartbeat to extend).
+    // Without this, a 'promoted' row sits forever after the user successfully
+    // claims, and the collector's promotion loop can later try to re-promote
+    // it into a different slot. Match by both username and player_record so
+    // we catch rows from prior tabs whose username casing differs.
     let display = username.to_uppercase();
     let display_esc = esc(&display);
+    let uname_esc = esc(&username);
     let sql = format!(
         "UPDATE {slot_id} SET \
             occupant_name = '{display_esc}', \
@@ -492,7 +498,8 @@ pub async fn handle_join(authorization: Option<&str>, body: &str) -> AuthRespons
             session_id = NONE, \
             claimed_at = time::now(), \
             last_input_at = time::now(), \
-            grace_expires_at = NONE;"
+            grace_expires_at = NONE; \
+         DELETE queue WHERE username = '{display_esc}' OR username = '{uname_esc}';"
     );
     match sql_query_as_admin(&cfg, &sql).await {
         Ok(v) => {

@@ -171,6 +171,28 @@ async fn main() {
         None
     };
 
+    // Spawn the queue sweeper — drops stale 'waiting' / 'promoted' rows
+    // whose last_seen_at heartbeat hasn't fired in 30s. The browser
+    // heartbeats every 10s while in queue (queue.mjs startQueueHeartbeat),
+    // so 30s grace = 3 missed beats. Closing the tab → row sweeps inside
+    // the grace window. Refreshing within 30s → reclaim path picks it back
+    // up. Also reaps legacy 'expired' / 'left' rows that have no other
+    // owner. Sweep interval is 15s — strictly less than grace so a row that
+    // just crossed the line gets cleaned within one cycle.
+    let cfg_sweep = auth_api::DbConfig::from_env();
+    let _queue_sweeper = tokio::spawn(async move {
+        let interval = std::time::Duration::from_secs(15);
+        let sql = "DELETE queue WHERE \
+            (status IN ['waiting', 'promoted'] AND last_seen_at < time::now() - 30s) \
+            OR status IN ['expired', 'left'];";
+        loop {
+            tokio::time::sleep(interval).await;
+            if let Err(e) = auth_api::sql_query_as_admin(&cfg_sweep, sql).await {
+                tracing::warn!("[queue-sweeper] sweep failed: {}", e);
+            }
+        }
+    });
+
     // Spawn hub client if registration is enabled (flag or env var)
     let _hub_task = if args.hub_register || args.hub_url.is_some() {
         match (&args.hub_url, &args.hub_token) {

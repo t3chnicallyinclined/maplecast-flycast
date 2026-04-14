@@ -266,6 +266,33 @@ export async function initQueueLive() {
     paintQueueRows();
     console.log(`[queue] loaded ${rows.length} waiting rows`);
 
+    // RECLAIM: if our username is in the waiting queue from a prior tab
+    // (refresh / accidental close within the 30s grace), take over the row
+    // by rotating session_id to ours and starting the heartbeat. Mirrors
+    // the slot reclaim pattern — anonymous queueing is disabled, so this
+    // only fires for signed-in users.
+    if (state.signedIn && state.myName) {
+      const lower = state.myName.toLowerCase();
+      const myRow = rows.find(r =>
+        r.status === 'waiting' &&
+        String(r.username).toLowerCase() === lower
+      );
+      if (myRow) {
+        if (myRow.session_id !== state.sessionId) {
+          try {
+            await liveQuery(
+              'UPDATE queue SET session_id = $sid, last_seen_at = time::now() WHERE id = $id',
+              { sid: state.sessionId, id: myRow.id }
+            );
+            systemMessage(`${state.myName} reclaimed queue position`);
+          } catch (e) {
+            console.warn('[queue] queue reclaim failed:', e.message);
+          }
+        }
+        startQueueHeartbeat();
+      }
+    }
+
     // Track ids we've already acted on as "promoted" so a UPDATE notification
     // on the same row doesn't re-fire handleMyPromotion (which would open a
     // second controlWs).
@@ -292,6 +319,57 @@ export async function initQueueLive() {
     console.log('[queue] live subscription ready');
   } catch (e) {
     console.warn('[queue] initQueueLive failed:', e.message);
+  }
+}
+
+// ============================================================================
+// Queue presence heartbeat
+//
+// The queue table mirrors the slot table's grace-window pattern: a row stays
+// alive only as long as the owning tab keeps refreshing last_seen_at. Stop
+// heartbeating (close tab, lose connection) and the relay sweeper deletes
+// the row after QUEUE_GRACE_MS. Refresh within that window and the next
+// page-load reclaims the row by username (initQueueLive does the takeover).
+//
+// Heartbeat by USERNAME, not session_id — so a refresh in the same browser
+// can take over a row written by the previous tab. The UPDATE also rotates
+// session_id to the current tab so paintQueueRows()' state.inQueue check
+// (which matches by session_id) flips true after the next live notification.
+//
+// Interval is 10s, grace is 30s server-side → 3 heartbeats per grace window
+// is forgiving against single-packet loss / live-WS reconnect blips.
+// ============================================================================
+
+const QUEUE_HEARTBEAT_MS = 10_000;
+let _queueHeartbeatTimer = null;
+
+function startQueueHeartbeat() {
+  if (_queueHeartbeatTimer) return;
+  // Fire one beat immediately so the row's last_seen_at advances without
+  // waiting a full interval (avoids being borderline-stale right after
+  // claim/reclaim).
+  beatQueue();
+  _queueHeartbeatTimer = setInterval(beatQueue, QUEUE_HEARTBEAT_MS);
+}
+
+function stopQueueHeartbeat() {
+  if (_queueHeartbeatTimer) {
+    clearInterval(_queueHeartbeatTimer);
+    _queueHeartbeatTimer = null;
+  }
+}
+
+async function beatQueue() {
+  if (!state.signedIn || !state.myName) return;
+  try {
+    await liveQuery(
+      'UPDATE queue SET last_seen_at = time::now(), session_id = $sid WHERE username = $name AND status IN ["waiting", "promoted"]',
+      { sid: state.sessionId, name: state.myName }
+    );
+  } catch (e) {
+    // Transient failures (live-WS reconnect, etc.) are fine — next beat retries.
+    // Persistent failure beyond the grace window is the intended kick path.
+    console.warn('[queue] heartbeat failed:', e.message);
   }
 }
 
@@ -367,12 +445,15 @@ async function handleMyPromotion(row) {
       latch_policy: getPreferredLatchPolicy(),
     }));
 
-    // Persist in SurrealDB via relay admin creds
+    // Persist in SurrealDB via relay admin creds (also DELETEs our queue row)
     claimSlotViaRelay(row.promoted_to);
 
     state.mySlot = row.promoted_to;
     state.wsInQueue = false;
     state.inQueue = false;
+    // We're in a slot now — heartbeat job is done. /api/join will DELETE
+    // the queue row server-side; stop the timer so we don't race that.
+    stopQueueHeartbeat();
     startGamepadPolling();
     updateCabinetControls();  // flips "I GOT NEXT"/"PLUG IN" → "LEAVE GAME"
     document.getElementById('leaveGameBtn').style.display = 'block';
@@ -532,6 +613,9 @@ export async function gotNext() {
         is_anon: !state.signedIn,
       }
     );
+    // Start heartbeat now so the row stays alive past the 30s grace until
+    // the user is promoted, claims a slot, or explicitly leaves.
+    startQueueHeartbeat();
   } catch (e) {
     console.warn('[queue] gotNext write failed:', e.message);
     // Roll back the optimistic UI
@@ -551,6 +635,7 @@ export async function leaveQueue() {
   state.queuePosition = -1;
   document.getElementById('leaveQueueBtn').style.display = 'none';
   updateCabinetControls();
+  stopQueueHeartbeat();
 
   // Delete my queue row(s). We match BOTH on session_id (this tab's
   // optimistic write that may not have propagated through the live query
@@ -633,6 +718,7 @@ export async function leaveGame() {
   state.inQueue = false;
   state.leaving = false;
   stopGamepadPolling();
+  stopQueueHeartbeat();
 
   // Clear distributed node assignment so next match re-probes
   import('./node-router.mjs').then(({ clearAssignment }) => clearAssignment()).catch(() => {});
