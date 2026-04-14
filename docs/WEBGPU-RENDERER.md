@@ -233,16 +233,16 @@ VQ (Vector Quantization) is the Dreamcast's compressed texture format:
 - **Decode**: For each 2x2 block position, read the twiddled index byte,
   look up 4 texels from the codebook, place in correct (x,y) within block.
 
-VQ pixel order fix (bug found during this renderer's development): within
-the 2x2 codebook entry, pixel indices map to positions as:
+VQ codebook 2×2 layout follows Dreamcast twiddled order (y-bit is LSB
+within the 2×2 Morton index), so the four codebook texels map as:
 ```
   p[0] = (0,0) top-left
-  p[1] = (1,0) top-right      ← was bottom-left, caused garbled VQ textures
-  p[2] = (0,1) bottom-left
+  p[1] = (0,1) bottom-left
+  p[2] = (1,0) top-right
   p[3] = (1,1) bottom-right
 ```
-The correct layout: `prel(x,y) = data[y*w + x]`, reading `p[1]` as bottom-left
-is wrong.
+Cross-checked against DC_MiSTer's `texture_address.v` twop_full bit order
+({u[n],v[n],...,u[0],v[0]}) which places v[0] at the LSB — same order.
 
 ### Mipmapped textures
 
