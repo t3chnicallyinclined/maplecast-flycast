@@ -16,16 +16,39 @@ docs-archive/
 # Local stick binding cache (NOBD identity bindings, not source)
 .maplecast/
 
-# Savestates, ROMs, and game saves are never committed.
+# Savestates, ROMs, and game saves are NEVER committed.
+# Dreamcast/Naomi ROMs are copyrighted — committing them would be a DMCA
+# event and pollute git history forever (filter-repo is the only fix).
 # *.state catches Flycast savestates regardless of where they sit;
 # savestates/ catches the canonical directory wholesale (including
-# VMU saves and any future files there); the *.gdi/*.cdi/*.chd
-# patterns catch the Dreamcast disc image formats.
+# VMU saves). Disc image extensions cover Dreamcast (.gdi/.cdi/.chd),
+# generic optical (.iso/.cue/.nrg/.mdf/.mds/.ccd/.img), and the top-level
+# roms/ folder names catch staged ROM directories before they land.
+# NOTE: tests/files/test_gdis/ predates this rule and is upstream flycast
+# parser test fixtures (dummy bytes, not real ROMs). Leave tracked.
 savestates/
 *.state
+*.sav
+*.eeprom
+*.nvmem
+*.nvmem2
 *.gdi
 *.cdi
 *.chd
+*.iso
+*.cue
+*.nrg
+*.mdf
+*.mds
+*.ccd
+roms/
+ROMs/
+rom/
+
+# Never commit SYMLINKS into savestates/ or roms/ either — git stores the
+# symlink target as a string, so while it won't leak ROM bytes, it DOES
+# bake an absolute host path into history that means nothing to anyone else
+# (see web/mvc2.state incident, removed 2026-04-14).
 
 # Extracted game art / cached visual data — these are derived from
 # copyrighted ROM content and must not ship in the public repo.

@@ -29,6 +29,19 @@ scp root@66.55.128.93:/var/www/maplecast/js/*.mjs web/js/
 git add web/ && git commit -m "sync: pull production web files from VPS"
 ```
 
+### NEVER commit ROMs or disc images
+- MVC2 and all Dreamcast/Naomi ROMs are **copyrighted**. Committing one is a DMCA event and pollutes git history permanently — `git filter-repo` across the full history is the only fix.
+- ROM paths live **outside** the repo: production is `/opt/maplecast/roms/mvc2.gdi`, dev ROMs stay wherever the user keeps them locally. NEVER copy a ROM into the working tree "just to test."
+- `.gitignore` already blocks `*.gdi *.cdi *.chd *.iso *.cue *.nrg *.mdf *.mds *.ccd` and `roms/ ROMs/ rom/` folders. If you need a new ROM-adjacent path, add it to `.gitignore` BEFORE placing any file there.
+- Before `git add -A` or `git add .`, run `git status` and eyeball it. If uncertain whether a file is ROM-derived (sprite rips, texture dumps, palette extracts, audio samples), the answer is **don't commit**.
+- Exception: `tests/files/test_gdis/` contains upstream flycast parser fixtures (dummy bytes, predates our rule). Leave it alone — don't add new files there.
+
+### NEVER commit savestates, VMU, NVRAM, or cartridge saves
+- Savestates are derived from ROM execution — treat them like ROMs. Flycast formats: `*.state` (savestate), `*.sav` (cartridge), `*.eeprom` (JVS/Naomi EEPROM), `*.nvmem`/`*.nvmem2` (NVRAM flash). All are gitignored.
+- Exception: `resources/flash/*.nvmem.zip` are upstream flycast BIOS flash defaults (public, shipped by flycast itself). Leave tracked.
+- **Don't commit symlinks into `savestates/` or `roms/`.** Git stores the target path as a string, which bakes an absolute host path (`/home/tris/...`) into history forever. Useless to anyone else, and signals sloppiness. An incident on 2026-04-14 tracked `web/mvc2.state` as a symlink for ~6 months before removal.
+- In-RAM sync snapshots (state-sync / replica client) are ephemeral by design — they should never hit disk inside the repo.
+
 ### What happened on 2026-04-10
 An AI assistant scp'd the git version of king.html to production, overwriting the real production version which had SurrealDB live subscriptions, live arcade panel, player cards, and other features not yet in git. The site broke for users. Recovery required searching all commits. **This MUST NOT happen again.**
 
