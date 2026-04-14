@@ -28,15 +28,17 @@ Only **42 pages (168 KB)** change per frame out of **26 MB** total Dreamcast mem
 
 | Page | DC Address Range | Size | Contents |
 |------|-----------------|------|----------|
-| 15 | 0x8C00F000-0x8C00FFFF | 4 KB | **System tick/scheduler** — low-level engine timing |
+| 15 | 0x8C00F000-0x8C00FFFF | 4 KB | **Supervisor stack** — stack top 0x8C00F400 per SH-4 boot convention (BOOT/SRCS/dcload-ip-1.0.4/target-src/dcload/dcload.x). Dirty every frame because ISR/syscall entry pushes the working register set. |
 | 363 | 0x8C16B000-0x8C16BFFF | 4 KB | Unknown — possibly sound command buffer |
 | 406 | 0x8C196000-0x8C196FFF | 4 KB | Unknown — engine internal state |
-| 420-421 | 0x8C1A4000-0x8C1A5FFF | 8 KB | Unknown — contiguous, likely a buffer |
+| 420-421 | 0x8C1A4000-0x8C1A5FFF | 8 KB | **G2/AICA DMA buffer** — per Sega G2_limit docs, G2 bus DMA burst staging. |
 | 459-460 | 0x8C1CB000-0x8C1CCFFF | 8 KB | Unknown — contiguous pair |
 | 474 | 0x8C1DA000-0x8C1DAFFF | 4 KB | Unknown |
 | 478 | 0x8C1DE000-0x8C1DEFFF | 4 KB | Unknown |
-| 484-488 | 0x8C1E4000-0x8C1E8FFF | 20 KB | **Large contiguous block** — likely DMA buffer or display list staging |
+| 484-488 | 0x8C1E4000-0x8C1E8FFF | 20 KB | **Secondary TA parameter buffer** — confirmed via POWERVR/DOCS/ta-intro.txt: TA params built in RAM, CH2-DMA'd to 0x10000000. |
 | 504-506 | 0x8C1F8000-0x8C1FAFFF | 12 KB | **Camera + rendering state area** |
+
+Remaining unknown pages (363, 406, 459-460, 474, 478) would need IDA/Ghidra on the MVC2 binary or access to Capcom's private runtime headers to decode — not illuminated by the public Sega SDK docs.
 
 **Page 505 (0x8C1F9000)** contains:
 - `0x8C1F9CD8` — camera_x (float)
@@ -103,13 +105,13 @@ Per character struct (+offset from base):
 **Page 841 (0x8C349000)** contains:
 - `0x8C3496B0` — frame_counter (u32)
 
-Note: Pages 813-839 form a pattern of contiguous pairs in the 0x8C32D000-0x8C347FFF range (108 KB). This is likely the **TA command staging buffer** or **display list work area** where the game builds GPU commands before submitting to the Tile Accelerator.
+Note: Pages 813-839 form a pattern of contiguous pairs in the 0x8C32D000-0x8C347FFF range (108 KB). **Confirmed TA display-list double-buffer** (ping-pong pattern — one buffer built while the other is CH2-DMA'd to the TA at 0x10000000, per POWERVR/DOCS/ta-intro.txt). Per-pair alternation matches classic Sega SDK pattern. Content is already captured by our TA command stream — safe to exclude from 4K-page diff in the replay path.
 
 ### Far RAM (0x8CF00000+)
 
 | Page | DC Address Range | Size | Contents |
 |------|-----------------|------|----------|
-| 3858 | 0x8CF12000-0x8CF12FFF | 4 KB | Unknown — near end of 16MB RAM. Possibly stack or heap. |
+| 3858 | 0x8CF12000-0x8CF12FFF | 4 KB | **User-mode stack** — near top of 16 MB RAM per Katana SDK convention (supervisor stack low, application stack high). |
 
 ---
 

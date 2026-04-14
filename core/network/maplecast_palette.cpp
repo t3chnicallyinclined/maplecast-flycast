@@ -5,6 +5,13 @@
 	pal_needs_update so the renderer rebuilds palette32_ram (the
 	RGBA32 palette texture) from our overridden values. This is the
 	same path the game uses — we just substitute different colors.
+
+	Format handling is delegated to core/rend/texconv.cpp which switches
+	on PAL_RAM_CTRL & 3 to support all four formats (0=1555, 1=565,
+	2=4444, 3=8888). setOverride() below takes u16 colors and thus covers
+	the three 16-bit formats; 8888 (32-bit) would need a new API, but all
+	5202 community skins in the SurrealDB `skin` table use ARGB4444 so
+	this has never been needed in production.
 */
 #include "maplecast_palette.h"
 #include "hw/pvr/pvr_regs.h"

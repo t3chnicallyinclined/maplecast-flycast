@@ -139,11 +139,14 @@ static std::atomic<LatchPolicy> _latchPolicy[2] = {
 	std::atomic<LatchPolicy>(LatchPolicy::LatencyFirst),
 };
 
-// Phase B — guard window for ConsistencyFirst policy. Default 500 us.
-// MAPLECAST_GUARD_US env var overrides at startup. The latch path reads
-// this once per call via std::memory_order_relaxed — it's effectively
-// constant after init.
-static std::atomic<int64_t> _guardUs{500};
+// Phase B — guard window for ConsistencyFirst policy. Default 300 us,
+// tightened from 500 us after Sega Maple SDK docs (CONTROLR/SRCS/maple/maple.c)
+// confirmed CMD9 request is ~80 us on a 2 Mbps wire, so a 300 us guard
+// reliably catches packets before DMA fetch while gaining 200 us of catch-up
+// budget over the old default. MAPLECAST_GUARD_US env var overrides at startup.
+// The latch path reads this once per call via std::memory_order_relaxed — it's
+// effectively constant after init.
+static std::atomic<int64_t> _guardUs{300};
 
 int64_t getGuardUs() {
 	return _guardUs.load(std::memory_order_relaxed);

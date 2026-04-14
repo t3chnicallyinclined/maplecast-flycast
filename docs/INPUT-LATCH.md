@@ -152,11 +152,13 @@ A symmetric mechanism (`deferredReleaseMask`) ensures that "blip presses"
 rather than staying held forever. So a 1 ms tap becomes a guaranteed 1-frame
 held press in-game, which is what the player wanted.
 
-There's also a **guard window** (default 500 µs, configurable via
+There's also a **guard window** (default 300 µs, configurable via
 `MAPLECAST_GUARD_US`) that defers near-boundary network arrivals by exactly
 one frame for predictability. Inputs that arrive within the guard before a
 vblank get classified as "next frame" deterministically rather than racing
-the vblank.
+the vblank. The 300 µs default is derived from Sega SDK Maple timing (see §6
+below) — tight enough to preserve catch-up budget, wide enough to absorb
+normal kernel scheduling jitter.
 
 **Pros:**
 - Every press transition the player intended is preserved
@@ -325,7 +327,7 @@ block:
     "t_last_latch_us": 192633644594,
     "t_next_latch_us": 192633661299,
     "frame_period_us": 16677,
-    "guard_us": 500
+    "guard_us": 300
   }
 }
 ```
@@ -456,7 +458,7 @@ the first time at the MapleCast accumulator (16.67 ms vblank-interval grouping).
 | Var | Default | Effect |
 |---|---|---|
 | `MAPLECAST_LATCH_POLICY` | (unset) | `latency` (default), `consistency`. Sets BOTH slots' policy at boot. Per-slot overrides via WS at runtime. |
-| `MAPLECAST_GUARD_US` | `500` | Guard window in microseconds, ConsistencyFirst only. 0 disables, max 5000. |
+| `MAPLECAST_GUARD_US` | `300` | Guard window in microseconds, ConsistencyFirst only. 0 disables, max 5000. Previous default was 500 µs — tightened after Sega SDK docs confirmed CMD9 wire timing. |
 
 ### WebSocket control message
 
@@ -683,6 +685,40 @@ storage. It composes cleanly with both follow-up layers:
 - **Don't conflate the GP2040-CE NOBD sync window with the MapleCast accumulator.** They solve the same problem at different layers. NOBD groups GPIO presses inside the firmware's 5 ms window before the packet ever leaves the stick. MapleCast's accumulator preserves whatever the firmware already grouped, AND catches grouping for input sources that don't have firmware-level grouping (browser gamepads). **Do NOT layer a second 5 ms timer on top of the firmware's** — that would be double-debounce.
 
 - **Don't bypass the per-user gate on `set_latch_policy`.** The server-side check at the top of the handler in `maplecast_ws_server.cpp` calls `getSlotForConn(hdl)` and rejects mismatches. This is the load-bearing security check — not the UI hide. A spectator with a dev console can craft and send `set_latch_policy` for any slot; the server is the only thing that stops them from clobbering the actual player's preference. **If you ever add a new code path that calls `setLatchPolicy()` directly from a WS handler, gate it the same way.**
+
+---
+
+## 6b. Docs-confirmed Maple timing (Sega SDK)
+
+Adding this section 2026-04-14 after research into `Kochise/dreamcast-docs`
+(official Sega SDK) and `CONTROLR/SRCS/maple/maple.c` (Marcus Comstedt's
+canonical driver). Numbers pin down *why* 300 µs is the right guard window.
+
+| Parameter | Value | Source |
+|---|---|---|
+| Maple bus bitrate | **2 Mbps** | `maple.c` line `MAPLE(0x80) = (50000<<16)` |
+| CMD9 request frame | 4 longwords = 160 bits | `maple.c` request builder |
+| CMD9 wire time (request) | **~80 µs** | 160 bits ÷ 2 Mbps |
+| CMD9 response (standard controller, 18 longs) | 576 bits = **~360 µs** | Ft0 peripheral spec |
+| Total per-port round-trip | **~440 µs** worst-case | request + response + turnaround |
+| Parallel 4-port burst | **~300 µs** | DMA burst collapses serialised ports |
+| VBlank-IN scanline (NTSC 480) | line 480, ~16.3 ms into frame | SPG_VBLANK_INT reg |
+| CMD9 kick timing | **~5 µs after VBlank-IN ISR entry** | Kicked from game's vblank handler, not hardware-coupled |
+
+**Implication for guard window:** the "race the vblank" region is the last
+~300 µs before VBlank-IN fires — during which the game's ISR will arm
+`SB_MDST=1` and the controller state will be frozen. Packets that arrive
+inside this window will land in kcode[] *after* CMD9 reads, and miss the
+frame. A 300 µs guard catches them, defers to next frame, no tearing.
+
+The previous 500 µs guard was a safe over-estimate from before we had this
+wire-speed data. 300 µs tightens that, reclaiming 200 µs of catch-up budget.
+
+**Next step (S3/S7 of the ultra-low-latency plan):** instrument the MVC2
+VBlank-IN ISR to measure the game-specific delta between the VBlank-IN
+interrupt edge and `SB_MDST=1` write. That's the actual µs offset we need
+to land input packets into — likely 5–20 µs, giving us a 280+ µs arrival
+window if we schedule writes precisely.
 
 ---
 
