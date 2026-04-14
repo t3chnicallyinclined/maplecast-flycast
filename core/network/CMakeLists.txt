@@ -58,6 +58,8 @@ target_sources(${PROJECT_NAME} PRIVATE
         hub_discovery.h
         replay_writer.cpp
         replay_writer.h
+        replay_reader.cpp
+        replay_reader.h
         maplecast_wasm_bridge.cpp)
 
 # maplecast_stream (H.264 / NVENC / CUDA GL interop) and maplecast_webrtc

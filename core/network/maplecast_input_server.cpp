@@ -17,6 +17,7 @@
 #include "maplecast_mirror.h"
 #include "maplecast_telemetry.h"
 #include "replay_writer.h"
+#include "replay_reader.h"
 #include "input/gamepad_device.h"
 
 #include <cstdio>
@@ -1250,6 +1251,21 @@ bool init(int udpPort)
 		if (const char* sid = std::getenv("MAPLECAST_REPLAY_SERVER_ID")) sp.server_id = sid;
 		if (const char* rh = std::getenv("MAPLECAST_REPLAY_ROM_HASH")) sp.rom_hash_hex = rh;
 		maplecast_replay::start(sp);
+	}
+
+	// Phase 4b: env-var-driven replay PLAYBACK. Set MAPLECAST_REPLAY_IN to
+	// a .mcrec file and we'll open it, restore its savestate, and inject
+	// the recorded inputs at their original frame numbers. Optional speed
+	// override via MAPLECAST_REPLAY_SPEED (float, default 1.0).
+	if (const char* inPath = std::getenv("MAPLECAST_REPLAY_IN")) {
+		if (maplecast_replay::openReplay(inPath)) {
+			if (maplecast_replay::loadStartSavestate()) {
+				double speed = 1.0;
+				if (const char* s = std::getenv("MAPLECAST_REPLAY_SPEED"))
+					speed = atof(s);
+				maplecast_replay::startPlayback(speed);
+			}
+		}
 	}
 
 	return true;

@@ -206,6 +206,16 @@ bool start(const StartParams& p) {
 
 	fflush(_file);
 	_active.store(true);
+
+	// Auto-finalize on process exit so SIGTERM/Ctrl-C still produces a
+	// valid file with footer + duration. atexit only registers once across
+	// many start() calls — guarded by a static flag.
+	static bool atexitRegistered = false;
+	if (!atexitRegistered) {
+		atexit([]() { stop(0xFF); });
+		atexitRegistered = true;
+	}
+
 	printf("[replay] recording started: %s\n", p.out_path.c_str());
 	return true;
 }
