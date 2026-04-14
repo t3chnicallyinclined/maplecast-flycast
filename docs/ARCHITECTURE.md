@@ -1791,10 +1791,111 @@ Documented in detail in `docs/COMPETITIVE-CLIENT.md`. Summary:
 | 2 | Multi-socket redundancy + failover + SCHED_FIFO | ✅ Shipped |
 | 3 | Always-on diagnostic HUD overlay | ✅ Shipped |
 | 4 | Deterministic replay recording + playback (.mcrec) | ✅ Shipped |
-| 5 | Replay sharing + browser playback (server on-demand TA gen) | 📋 Planned |
-| 6 | Spectator mode (single + multi-view grid at native res) | 📋 Planned |
-| 7 | ED25519 match signing + ROM hash verification | 📋 Planned |
-| 8 | DDR/Guitar Hero combo trainer (.mccombo files) | 📋 Planned |
+| 5 | Replay sharing (upload/download/list hub endpoints) | ✅ Shipped |
+| 6 | Spectator mode (single-match read-only; grid deferred) | ✅ Shipped |
+| 7 | ROM hash verification + operator surfacing (signing deferred) | ✅ Shipped (partial) |
+| 8 | DDR/Guitar Hero combo trainer note highway (MVP) | ✅ Shipped (MVP) |
+
+### Phase 5 details — replay sharing
+
+Hub endpoints in `hub/src/replays.rs`:
+```
+POST /hub/api/replays             — upload raw .mcrec bytes (body=file)
+GET  /hub/api/replays             — list all with metadata
+GET  /hub/api/replays/:id         — download raw .mcrec
+GET  /hub/api/replays/:id/info    — single metadata JSON
+```
+
+Storage: `/var/lib/maplecast/replays/<uuid>.mcrec` on the hub host.
+Metadata cache parses each .mcrec's 271-byte header, rebuilt on boot
++ every 60s. Hub systemd unit needs `ReadWritePaths=/var/lib/maplecast`
+via a drop-in (default `ProtectSystem=strict` blocks writes).
+
+nginx caveat: default `client_max_body_size 1m` → 413 on 7 MB uploads.
+The `/hub/api/` location block has `client_max_body_size 64M` added.
+
+Native client upload: `replay_writer::stop()` spawns a curl POST if
+`MAPLECAST_REPLAY_UPLOAD_URL` is set. Fire-and-forget, non-blocking.
+
+Browser page at `web/replays.html` — sortable list, auto-refresh 15s,
+"Download" button per row.
+
+### Phase 6 details — spectator mode
+
+`core/emulator.cpp`: input-sink init gated on `!std::getenv("MAPLECAST_SPECTATE")`.
+Everything else runs normally. Combined with hub-discovery:
+
+```bash
+MAPLECAST_MIRROR_CLIENT=1 \
+MAPLECAST_SPECTATE=1 \
+MAPLECAST_HUB_URL=https://nobd.net/hub/api \
+./flycast
+```
+Picks highest-quality active server, streams + renders read-only.
+
+Hub endpoint `GET /hub/api/matches/active` returns all input servers
+with `status="in_match"` OR `metrics.frames_received > 0` (fallback
+until proper match-begin signals land).
+
+Browser page at `web/spectate.html` — grid of active matches, click
+to watch in browser (routes via king.html with `?spectate=<id>`),
+or copy the native spectator command.
+
+Multi-view grid (`--spectate-grid 4` etc.) is deferred.
+
+### Phase 7 details — ROM verification
+
+Relay's `hub_client.rs::compute_rom_hash()` SHA-256s the file at
+`MAPLECAST_ROM` on startup, reports lowercase hex during
+registration. Falls back to `"unknown"` if env var missing or file
+unreadable.
+
+`NodePublic.rom_hash` + `version` surface in `/hub/api/input-servers`.
+
+Dashboard `web/network.html` has a hardcoded `KNOWN_MVC2_HASHES` set
+(currently just MVC2 US v1.001 = `396548fe53f9b3641896398be563795ff190f9b0d7cc61c331901bc68f4e5392`).
+Popup badge:
+- `✓ verified` — hash matches known-good
+- `⚠ custom` — non-empty hash, not in known-good set (legit ROM
+  hacks still OK, just flagged)
+- `unknown` — server didn't set MAPLECAST_ROM
+
+Deployment: relay systemd drop-in needs `Environment=MAPLECAST_ROM=`
+so the relay process can read the same ROM path flycast opens.
+
+**Deferred**: ED25519 match signing for tamper-evident .mcrec
+footers. The .mcrec footer already reserves a 32-byte HMAC slot;
+key generation + sign/verify pending.
+
+### Phase 8 details — combo trainer (MVP)
+
+`core/ui/note_highway.{h,cpp}` — DDR/Guitar Hero-style scrolling
+note widget. 6 lanes (LP/MP/HP/LK/MK/HK), hit zone line, score
+counters. F4 toggles.
+
+Scoring model (frame-proximity tiers):
+| Tier | Frame distance | Time equivalent |
+|------|---------------|-----------------|
+| PERFECT | ±2 frames | ±33ms |
+| GREAT   | ±5 frames | ±83ms |
+| GOOD    | ±10 frames | ±166ms |
+| MISS    | >10 frames or no press | — |
+
+Tracks streak + best_streak. Any miss resets streak.
+
+Hooked into `gui_competitive_hud::draw()` so it renders alongside the
+latency HUD. `onPlayerInput(buttons, lt, rt)` is the public API for
+the input_sink to forward player button-change events.
+
+**MVP gaps to close**:
+1. `replay_reader` needs a public `peekUpcoming(startFrame, nFrames)`
+   accessor so the highway widget can read scheduled notes and draw
+   them falling. Scoring scaffolding works today; notes don't render
+   until this accessor lands.
+2. Input-sink wire-up: `maplecast_input_sink::onButton` should call
+   `note_highway::onPlayerInput` on any button-change.
+3. Dedicated `.mccombo` file extension + hub library endpoint
+   (subset of /replays, differentiated by extension or metadata tag).
 
 ### Phase 2 details — input redundancy + failover
 
