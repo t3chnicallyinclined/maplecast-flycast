@@ -1,0 +1,35 @@
+=== DEPLOYED TO PRODUCTION ===
+Date:        2026-04-14
+Tag:         working-base-webgpu-idle-fix-20260414
+
+=== Deploy artifacts ===
+File md5:    c76655b245708cf75adb8c80a1924a37  /var/www/maplecast/js/renderer-bridge-webgpu.mjs
+Backup:      /var/www/maplecast/js/renderer-bridge-webgpu.mjs.backup-20260414-010753
+             (pre-fix, md5 078aac20ed39e60de237ffe4ce72ded2 — same as commit 20e2480d6)
+
+=== Visual verification ===
+User-confirmed: console logged "[webgpu-bridge] First frame rendered — idle screen dismissed"
+and the dark INSERT COIN overlay disappeared, revealing the live MvC2 stream.
+
+=== Rollback ===
+  ssh root@66.55.128.93 'mv /var/www/maplecast/js/renderer-bridge-webgpu.mjs.backup-20260414-010753 /var/www/maplecast/js/renderer-bridge-webgpu.mjs'
+  git checkout working-base-queue-heartbeat-20260414
+
+(No relay or schema changes in this commit — JS-only file swap, instant
+rollback with no service restart needed.)
+
+=== Diagnostic chain (for future debugging) ===
+The wrong theories I chased before reading the code:
+  1. "compressed-SYNC threshold misclassifying deltas as SYNC" — wrong;
+     dgram=0 was happening yesterday too (36 sessions), not today's regression
+  2. "gamepad poll interfering with stream" — wrong; pollOnce() returns early
+     when state.controlWs is null, doesn't fire for spectators
+  3. "browser cache stuck" — wrong; hard refresh + incognito both still failed
+
+The actual diagnosis only came from reading the WASM bridge side-by-side
+with the WebGPU bridge and noticing the idle-screen handoff was missing.
+User's verbal hint "I see KING OF MARVEL INSERT COIN" was the smoking gun
+— that text is the .idle-screen overlay (king.html:486).
+
+Lesson: when a renderer "doesn't seem to be trying," look for what's
+ON TOP of the canvas before assuming the renderer is broken.
