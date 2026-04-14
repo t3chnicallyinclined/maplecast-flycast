@@ -1,0 +1,36 @@
+# Docker context trim for Dockerfile.client.
+# Unlike Dockerfile.headless (which strips GPU-only submodules since they
+# aren't needed), the native mirror client build NEEDS SDL / Vulkan /
+# glslang / breakpad etc. Only strip build outputs, state, and ROMs.
+
+build/
+build-*/
+cmake-build-*/
+
+savestates/
+*.state
+core/dump.txt
+/tmp/
+*.log
+
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# ROMs never belong in the image.
+web/roms/
+roms/
+*.gdi
+*.chd
+*.bin
+*.raw
+*.iso
+*.cue
+
+# Web assets aren't used by the client binary.
+web/
+
+# Rust relay has its own target dir we don't need.
+relay/target/

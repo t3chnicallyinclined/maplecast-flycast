@@ -1,0 +1,91 @@
+# MapleCast native mirror client build.
+#
+# Produces a desktop flycast binary (with SDL2 + OpenGL) intended to be
+# run with MAPLECAST_MIRROR_CLIENT=1 pointed at a remote maplecast server.
+# Receives the TA stream + PCM audio and renders locally — no ROM or
+# SH4 emulation on the client side, just rendering.
+#
+# Build:   docker build -f Dockerfile.client -t maplecast-client:latest .
+# Extract: CID=$(docker create maplecast-client:latest); \
+#          docker cp "$CID:/usr/local/bin/flycast" ./flycast-client; \
+#          docker rm "$CID"
+#
+# Run on a machine with SDL2 + OpenGL installed:
+#   MAPLECAST_MIRROR_CLIENT=1 \
+#   MAPLECAST_SERVER_HOST=nobd.net \
+#   MAPLECAST_SERVER_PORT=7201 \
+#   ./flycast-client
+
+FROM debian:12-slim AS build
+
+RUN apt-get update && apt-get install --no-install-recommends -y \
+        build-essential \
+        cmake \
+        ninja-build \
+        git \
+        pkg-config \
+        libcurl4-openssl-dev \
+        libssl-dev \
+        libzip-dev \
+        zlib1g-dev \
+        libxdp-dev \
+        libbpf-dev \
+        libelf-dev \
+        libsdl2-dev \
+        libgl1-mesa-dev \
+        libegl1-mesa-dev \
+        libudev-dev \
+        libasound2-dev \
+        libpulse-dev \
+        libevdev-dev \
+        libx11-dev \
+        libxrandr-dev \
+        libxi-dev \
+        libxcursor-dev \
+        libglu1-mesa-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+# Non-headless build: default flycast target, links against SDL2/OpenGL.
+# Same SH4 JIT / network / rendering code as desktop flycast, plus the
+# maplecast_input_sink + maplecast_mirror_client code paths that activate
+# when MAPLECAST_MIRROR_CLIENT=1 at runtime.
+RUN cmake -B build-client -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DUSE_HOST_LIBZIP=ON \
+    && cmake --build build-client -- -j"$(nproc)" \
+    && strip build-client/flycast \
+    && ls -lh build-client/flycast
+
+FROM debian:12-slim
+
+# Runtime deps — user's system needs these (or compatible) installed.
+RUN apt-get update && apt-get install --no-install-recommends -y \
+        libcurl4 \
+        libssl3 \
+        libzip4 \
+        zlib1g \
+        libsdl2-2.0-0 \
+        libgl1 \
+        libegl1 \
+        libudev1 \
+        libasound2 \
+        libpulse0 \
+        libevdev2 \
+        libx11-6 \
+        libxrandr2 \
+        libxi6 \
+        libxcursor1 \
+        libgomp1 \
+        libxdp1 \
+        libbpf1 \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /src/build-client/flycast /usr/local/bin/flycast
+
+# This stage exists mainly so `docker cp` can extract the binary. The
+# client typically runs on a user's desktop, not inside a container.
+ENTRYPOINT ["/usr/local/bin/flycast"]

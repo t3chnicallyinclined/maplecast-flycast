@@ -1092,7 +1092,11 @@ void Emulator::start()
 		maplecast_audio::init();
 		maplecast_telemetry::init();
 
-#ifndef MAPLECAST_HEADLESS_BUILD
+// maplecast_stream (H.264 / NVENC / CUDA GL interop) only links when
+// CUDA+NVENC SDKs are present at configure time. On builds without
+// those (headless server, most client builds), skip the init call
+// entirely — the symbol doesn't exist.
+#if !defined(MAPLECAST_HEADLESS_BUILD) && defined(MAPLECAST_NVENC)
 		if (std::getenv("MAPLECAST_STREAM"))
 		{
 			int streamPort = 7200;

@@ -56,13 +56,27 @@ target_sources(${PROJECT_NAME} PRIVATE
         maplecast_palette.h
         maplecast_wasm_bridge.cpp)
 
-# maplecast_stream (H.264 / NVENC / CUDA GL interop) and maplecast_webrtc
-# (libdatachannel) are the GPU-dependent legacy streaming paths. Exclude
-# them from the headless build — the TA mirror on port 7200 replaces them.
+# maplecast_stream (H.264 / NVENC / CUDA GL interop) requires CUDA+NVENC
+# SDKs. Only include when those were detected (CMakeLists.txt:1714 sets
+# MAPLECAST_NVENC). Without NVENC the file won't even compile — it
+# unconditionally #include <cuda.h>.
+#
+# maplecast_webrtc (libdatachannel) is the P2P H.264 data-channel path;
+# only include when libdatachannel submodule is present + MAPLECAST_WEBRTC
+# compile define was set by the main CMakeLists.
+#
+# Both are GPU-dependent legacy streaming paths. Headless + most client
+# builds without an NVIDIA GPU skip them; the TA mirror on port 7200
+# (always compiled in) carries the render stream instead.
 if(NOT MAPLECAST_HEADLESS)
-    target_sources(${PROJECT_NAME} PRIVATE
-        maplecast_stream.cpp
-        maplecast_stream.h
-        maplecast_webrtc.cpp
-        maplecast_webrtc.h)
+    if(CUDA_INCLUDE AND CUDA_LIB AND NVENC_INCLUDE)
+        target_sources(${PROJECT_NAME} PRIVATE
+            maplecast_stream.cpp
+            maplecast_stream.h)
+    endif()
+    if(EXISTS "${CMAKE_SOURCE_DIR}/core/deps/libdatachannel/CMakeLists.txt")
+        target_sources(${PROJECT_NAME} PRIVATE
+            maplecast_webrtc.cpp
+            maplecast_webrtc.h)
+    endif()
 endif()
