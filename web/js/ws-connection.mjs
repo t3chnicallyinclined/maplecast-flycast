@@ -18,6 +18,7 @@
 // ============================================================================
 
 import { state } from './state.mjs';
+import { nodeState } from './node-router.mjs';
 // handleBinaryFrame import removed — binary frames are owned by render-worker.mjs
 // (spawned by renderer-bridge.mjs). The main-thread JSON connection below
 // drops any binary frames defensively in case the relay ever sends one here.
@@ -78,7 +79,13 @@ const WS_PORT = 7200;
 // Use the same origin as the page. /play is a same-host nginx location that
 // proxies directly to flycast:7210 (bypassing the relay). Dev (localhost:8000)
 // doesn't have an nginx in front, so we fall back to the relay port there.
+//
+// If a distributed node is assigned (via node-router.mjs), use that node's
+// /play endpoint instead of the page origin.
 function getControlWsUrl() {
+  // Distributed node assignment overrides origin
+  if (nodeState.assignedNode) return nodeState.assignedNode.control_url;
+
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const isProd = location.port === '' || location.port === '80' || location.port === '443';
   if (isProd) return `${proto}//${location.hostname}/play`;
@@ -86,7 +93,6 @@ function getControlWsUrl() {
   // single-player local testing since there's only one browser anyway.
   return `${proto}//${location.hostname}:${WS_PORT}`;
 }
-const CONTROL_WS_URL = getControlWsUrl();
 
 // 30 second idle timer — if the browser is no longer playing/queued/resuming
 // after this many ms, close the controlWs to free the flycast hdl.
@@ -96,6 +102,9 @@ const CONTROL_IDLE_CLOSE_MS = 30_000;
 // match the previous LAN-race signature (the worker awaits it), even though
 // the URL is now picked synchronously since the race is gone.
 export async function getRendererWsUrl() {
+  // If assigned to a distributed node, stream from that node's relay
+  if (nodeState.assignedNode) return nodeState.assignedNode.relay_url;
+
   // Frame downstream stays on whatever served the page (the VPS relay in
   // production, localhost:8000 in dev). Browsers connect to wss://nobd.net/ws
   // (relay) or ws://localhost:7200 (dev), depending on origin.
@@ -112,6 +121,9 @@ export async function getRendererWsUrl() {
 // /ws. In relay mode (wss://nobd.net/audio) it goes through an nginx
 // proxy block that forwards directly to 127.0.0.1:7213 on the VPS.
 export async function getRendererAudioWsUrl() {
+  // If assigned to a distributed node, audio from that node
+  if (nodeState.assignedNode) return nodeState.assignedNode.audio_url;
+
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const isRelay = location.port === '' || location.port === '80' || location.port === '443';
   if (isRelay) return `${proto}//${location.hostname}/audio`;
@@ -153,8 +165,8 @@ export function ensureControlWs() {
   if (_controlWsOpenPromise) return _controlWsOpenPromise;
 
   _controlWsOpenPromise = new Promise((resolve, reject) => {
-    console.log('[control-ws] Opening', CONTROL_WS_URL);
-    const ws = new WebSocket(CONTROL_WS_URL);
+    console.log('[control-ws] Opening', getControlWsUrl());
+    const ws = new WebSocket(getControlWsUrl());
     ws.binaryType = 'arraybuffer';
     state.controlWs = ws;
 

@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MapleCast Network — Distributed Game Servers</title>
+
+  <!-- Leaflet.js (lightweight map library, free, no API key) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #0a0a0f;
+      color: #e0e0e0;
+      font-family: 'Courier New', monospace;
+      min-height: 100vh;
+    }
+
+    /* ── Header ────────────────────────────────────────────────── */
+    .header {
+      background: linear-gradient(135deg, #1a0a2e 0%, #0d1b2a 100%);
+      border-bottom: 2px solid #00ff88;
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .header h1 {
+      font-size: 1.4rem;
+      color: #00ff88;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      text-shadow: 0 0 10px rgba(0,255,136,0.5);
+    }
+
+    .header a {
+      color: #888;
+      text-decoration: none;
+      font-size: 0.85rem;
+    }
+    .header a:hover { color: #00ff88; }
+
+    /* ── Stats bar ─────────────────────────────────────────────── */
+    .stats-bar {
+      background: #111118;
+      border-bottom: 1px solid #222;
+      padding: 12px 24px;
+      display: flex;
+      gap: 32px;
+      flex-wrap: wrap;
+    }
+
+    .stat-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .stat-value {
+      font-size: 2rem;
+      font-weight: bold;
+      color: #00ff88;
+      text-shadow: 0 0 8px rgba(0,255,136,0.3);
+    }
+
+    .stat-label {
+      font-size: 0.7rem;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-top: 2px;
+    }
+
+    /* ── Map ────────────────────────────────────────────────────── */
+    #map {
+      width: 100%;
+      height: 50vh;
+      min-height: 300px;
+      border-bottom: 2px solid #222;
+    }
+
+    /* Dark map tiles */
+    .leaflet-tile-pane { filter: brightness(0.6) invert(1) contrast(1.5) hue-rotate(200deg) saturate(0.3) brightness(0.8); }
+    .leaflet-container { background: #0a0a0f; }
+
+    /* Custom node markers */
+    .node-marker {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 2px solid #fff;
+      box-shadow: 0 0 8px rgba(0,255,136,0.6);
+    }
+    .node-marker.ready { background: #00ff88; }
+    .node-marker.in_match { background: #ffaa00; box-shadow: 0 0 8px rgba(255,170,0,0.6); }
+    .node-marker.stale { background: #888; box-shadow: none; }
+    .node-marker.offline { background: #ff4444; box-shadow: 0 0 8px rgba(255,68,68,0.4); }
+
+    /* Popup styling */
+    .leaflet-popup-content-wrapper {
+      background: #1a1a2e;
+      color: #e0e0e0;
+      border: 1px solid #00ff88;
+      border-radius: 4px;
+      font-family: 'Courier New', monospace;
+    }
+    .leaflet-popup-tip { background: #1a1a2e; border: 1px solid #00ff88; }
+    .popup-title { color: #00ff88; font-weight: bold; margin-bottom: 4px; }
+    .popup-detail { font-size: 0.8rem; color: #aaa; }
+    .popup-detail span { color: #e0e0e0; }
+
+    /* ── Node table ────────────────────────────────────────────── */
+    .table-container {
+      padding: 16px 24px;
+    }
+
+    .table-container h2 {
+      color: #00ff88;
+      font-size: 1rem;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 12px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+
+    th {
+      text-align: left;
+      color: #666;
+      text-transform: uppercase;
+      font-size: 0.7rem;
+      letter-spacing: 1px;
+      padding: 8px 12px;
+      border-bottom: 1px solid #333;
+      cursor: pointer;
+    }
+    th:hover { color: #00ff88; }
+
+    td {
+      padding: 8px 12px;
+      border-bottom: 1px solid #1a1a1a;
+    }
+
+    tr:hover td { background: #151520; }
+
+    .status-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 3px;
+      font-size: 0.75rem;
+      font-weight: bold;
+      text-transform: uppercase;
+    }
+    .status-badge.ready { background: #003322; color: #00ff88; }
+    .status-badge.in_match { background: #332200; color: #ffaa00; }
+    .status-badge.stale { background: #222; color: #888; }
+    .status-badge.offline { background: #330000; color: #ff4444; }
+
+    .ping-value { color: #00ff88; font-weight: bold; }
+    .ping-value.high { color: #ffaa00; }
+    .ping-value.bad { color: #ff4444; }
+
+    /* ── Your latency section ──────────────────────────────────── */
+    .latency-section {
+      padding: 16px 24px;
+      border-top: 1px solid #222;
+    }
+
+    .latency-section h2 {
+      color: #00ff88;
+      font-size: 1rem;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 12px;
+    }
+
+    .latency-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 12px;
+    }
+
+    .latency-card {
+      background: #111118;
+      border: 1px solid #222;
+      border-radius: 4px;
+      padding: 12px;
+    }
+    .latency-card.best { border-color: #00ff88; }
+    .latency-card .name { color: #e0e0e0; font-weight: bold; margin-bottom: 4px; }
+    .latency-card .region { color: #666; font-size: 0.8rem; }
+    .latency-card .rtt { font-size: 1.4rem; color: #00ff88; margin-top: 6px; }
+    .latency-card.probing .rtt { color: #666; }
+
+    /* ── Footer ────────────────────────────────────────────────── */
+    .footer {
+      text-align: center;
+      padding: 16px;
+      color: #333;
+      font-size: 0.75rem;
+      border-top: 1px solid #111;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <h1>MapleCast Network</h1>
+    <a href="/">Back to Arcade</a>
+  </div>
+
+  <div class="stats-bar">
+    <div class="stat-item">
+      <span class="stat-value" id="stat-nodes">--</span>
+      <span class="stat-label">Nodes Online</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-value" id="stat-matches">--</span>
+      <span class="stat-label">Active Matches</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-value" id="stat-spectators">--</span>
+      <span class="stat-label">Spectators</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-value" id="stat-total">--</span>
+      <span class="stat-label">Total Matches Played</span>
+    </div>
+  </div>
+
+  <div id="map"></div>
+
+  <div class="latency-section" id="latency-section" style="display:none">
+    <h2>Your Latency</h2>
+    <div class="latency-grid" id="latency-grid"></div>
+  </div>
+
+  <div class="table-container">
+    <h2>All Nodes</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Operator</th>
+          <th>Region</th>
+          <th>Status</th>
+          <th>Spectators</th>
+          <th>Matches Played</th>
+          <th>Uptime</th>
+          <th>Your Ping</th>
+        </tr>
+      </thead>
+      <tbody id="node-tbody"></tbody>
+    </table>
+  </div>
+
+  <div class="footer">
+    MAPLECAST DISTRIBUTED NETWORK &mdash; OVERKILL IS NECESSARY
+  </div>
+
+  <script type="module">
+    // ================================================================
+    // NETWORK DASHBOARD — Real-time node map + stats
+    // ================================================================
+
+    // Hub URL: defaults to same-origin /hub/api, override with ?hub=<url>
+    const _hubOverride = new URLSearchParams(location.search).get('hub');
+    const HUB_URL = _hubOverride || `${location.protocol}//${location.hostname}/hub/api`;
+    console.log('[dashboard] Hub:', HUB_URL);
+    const POLL_INTERVAL = 5000;
+
+    // Leaflet map
+    const map = L.map('map', {
+      center: [30, -40],
+      zoom: 2,
+      zoomControl: true,
+      attributionControl: false,
+    });
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 18,
+    }).addTo(map);
+
+    const markers = new Map(); // node_id → L.marker
+
+    // ── Ping probing (reuses node-router logic) ─────────────────
+    const pingResults = new Map(); // node_id → avg_rtt_ms
+
+    function probeNode(relayUrl, nodeId) {
+      return new Promise((resolve) => {
+        const samples = [];
+        let pending = null;
+        let idx = 0;
+        const COUNT = 5;
+        let ws;
+
+        const timeout = setTimeout(() => {
+          if (ws) ws.close();
+          resolve(finish());
+        }, 3000);
+
+        function finish() {
+          clearTimeout(timeout);
+          const warm = samples.length > 1 ? samples.slice(1) : samples;
+          return warm.length > 0
+            ? warm.reduce((a, b) => a + b, 0) / warm.length
+            : null;
+        }
+
+        try {
+          ws = new WebSocket(relayUrl);
+        } catch {
+          clearTimeout(timeout);
+          resolve(null);
+          return;
+        }
+
+        ws.onopen = () => sendPing();
+        ws.onmessage = (ev) => {
+          if (typeof ev.data !== 'string') return;
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg.type === 'pong' && pending !== null) {
+              samples.push(performance.now() - pending);
+              pending = null;
+              idx++;
+              if (idx < COUNT) setTimeout(sendPing, 150);
+              else { ws.close(); resolve(finish()); }
+            }
+          } catch {}
+        };
+        ws.onerror = () => { ws.close(); resolve(finish()); };
+        ws.onclose = () => { if (idx < COUNT) resolve(finish()); };
+
+        function sendPing() {
+          if (ws.readyState !== WebSocket.OPEN) return;
+          pending = performance.now();
+          ws.send(JSON.stringify({ type: 'ping', t: pending }));
+        }
+      });
+    }
+
+    // ── Fetch + render ──────────────────────────────────────────
+
+    async function fetchAndRender() {
+      try {
+        const [statsResp, nodesResp] = await Promise.all([
+          fetch(`${HUB_URL}/dashboard/stats`),
+          fetch(`${HUB_URL}/dashboard/nodes`),
+        ]);
+
+        if (statsResp.ok) {
+          const stats = await statsResp.json();
+          document.getElementById('stat-nodes').textContent = stats.total_nodes_online;
+          document.getElementById('stat-matches').textContent = stats.total_matches_active;
+          document.getElementById('stat-spectators').textContent = stats.total_spectators;
+          document.getElementById('stat-total').textContent = stats.total_matches_played;
+        }
+
+        if (nodesResp.ok) {
+          const data = await nodesResp.json();
+          const nodes = data.nodes || [];
+          renderMap(nodes);
+          renderTable(nodes);
+          probeAll(nodes);
+        }
+      } catch (e) {
+        console.warn('[dashboard] Fetch failed:', e.message);
+      }
+    }
+
+    function renderMap(nodes) {
+      // Remove markers for nodes no longer present
+      const currentIds = new Set(nodes.map(n => n.node_id));
+      for (const [id, marker] of markers) {
+        if (!currentIds.has(id)) {
+          map.removeLayer(marker);
+          markers.delete(id);
+        }
+      }
+
+      for (const n of nodes) {
+        if (!n.geo) continue;
+
+        const statusClass = n.status.replace(/\s/g, '_');
+        const icon = L.divIcon({
+          className: '',
+          html: `<div class="node-marker ${statusClass}"></div>`,
+          iconSize: [14, 14],
+          iconAnchor: [7, 7],
+        });
+
+        const ping = pingResults.get(n.node_id);
+        const pingStr = ping != null ? `${ping.toFixed(1)}ms` : 'probing...';
+
+        const popup = `
+          <div class="popup-title">${esc(n.name)}</div>
+          <div class="popup-detail">Operator: <span>${esc(n.operator)}</span></div>
+          <div class="popup-detail">Region: <span>${esc(n.region)}</span></div>
+          <div class="popup-detail">Status: <span>${n.status}</span></div>
+          <div class="popup-detail">Spectators: <span>${n.spectators}</span></div>
+          <div class="popup-detail">Matches: <span>${n.stats.total_matches}</span></div>
+          <div class="popup-detail">Your Ping: <span>${pingStr}</span></div>
+        `;
+
+        if (markers.has(n.node_id)) {
+          const m = markers.get(n.node_id);
+          m.setLatLng([n.geo.lat, n.geo.lng]);
+          m.setIcon(icon);
+          m.setPopupContent(popup);
+        } else {
+          const m = L.marker([n.geo.lat, n.geo.lng], { icon })
+            .bindPopup(popup)
+            .addTo(map);
+          markers.set(n.node_id, m);
+        }
+      }
+    }
+
+    function renderTable(nodes) {
+      const tbody = document.getElementById('node-tbody');
+      tbody.innerHTML = nodes.map(n => {
+        const ping = pingResults.get(n.node_id);
+        const pingStr = ping != null ? `${ping.toFixed(1)}ms` : '--';
+        const pingClass = ping == null ? '' : ping < 30 ? 'ping-value' : ping < 80 ? 'ping-value high' : 'ping-value bad';
+        const uptime = formatUptime(n.uptime_s);
+        const statusClass = n.status.replace(/\s/g, '_');
+
+        return `<tr>
+          <td>${esc(n.name)}</td>
+          <td>${esc(n.operator)}</td>
+          <td>${esc(n.region)}</td>
+          <td><span class="status-badge ${statusClass}">${n.status}</span></td>
+          <td>${n.spectators}</td>
+          <td>${n.stats.total_matches}</td>
+          <td>${uptime}</td>
+          <td class="${pingClass}">${pingStr}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // ── Probe all nodes for YOUR latency ────────────────────────
+
+    let probing = false;
+    async function probeAll(nodes) {
+      if (probing) return;
+      probing = true;
+
+      const section = document.getElementById('latency-section');
+      const grid = document.getElementById('latency-grid');
+
+      if (nodes.length === 0) {
+        section.style.display = 'none';
+        probing = false;
+        return;
+      }
+
+      section.style.display = 'block';
+
+      // Show probing state
+      grid.innerHTML = nodes.map(n =>
+        `<div class="latency-card probing" id="lat-${n.node_id}">
+          <div class="name">${esc(n.name)}</div>
+          <div class="region">${n.geo ? `${n.geo.city}, ${n.geo.country}` : n.region}</div>
+          <div class="rtt">probing...</div>
+        </div>`
+      ).join('');
+
+      // Probe in parallel
+      const results = await Promise.all(
+        nodes.map(async (n) => {
+          const rtt = await probeNode(n.relay_url, n.node_id);
+          if (rtt != null) pingResults.set(n.node_id, rtt);
+          return { node_id: n.node_id, name: n.name, rtt };
+        })
+      );
+
+      // Sort by RTT
+      results.sort((a, b) => (a.rtt ?? Infinity) - (b.rtt ?? Infinity));
+
+      // Re-render with results
+      grid.innerHTML = results.map((r, i) => {
+        const isBest = i === 0 && r.rtt != null;
+        const rttStr = r.rtt != null ? `${r.rtt.toFixed(1)}ms` : 'unreachable';
+        const n = nodes.find(n => n.node_id === r.node_id);
+        const loc = n?.geo ? `${n.geo.city}, ${n.geo.country}` : (n?.region || '');
+        return `<div class="latency-card ${isBest ? 'best' : ''}">
+          <div class="name">${esc(r.name)}${isBest ? ' (BEST)' : ''}</div>
+          <div class="region">${esc(loc)}</div>
+          <div class="rtt">${rttStr}</div>
+        </div>`;
+      }).join('');
+
+      probing = false;
+    }
+
+    // ── Utilities ───────────────────────────────────────────────
+
+    function esc(s) {
+      const d = document.createElement('div');
+      d.textContent = s || '';
+      return d.innerHTML;
+    }
+
+    function formatUptime(s) {
+      if (!s || s < 60) return `${s}s`;
+      if (s < 3600) return `${Math.floor(s / 60)}m`;
+      if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+      return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+    }
+
+    // ── Boot ────────────────────────────────────────────────────
+
+    fetchAndRender();
+    setInterval(fetchAndRender, POLL_INTERVAL);
+  </script>
+</body>
+</html>

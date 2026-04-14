@@ -23,6 +23,7 @@ mod auth_api;
 mod admin_api;
 mod client_telemetry;
 mod webtransport;
+mod hub_client;
 
 use clap::Parser;
 use std::net::SocketAddr;
@@ -74,6 +75,33 @@ struct Args {
     /// Disable WebTransport listener (run WS-only mode)
     #[arg(long)]
     no_webtransport: bool,
+
+    // ── Hub registration (distributed node network) ──────────────
+
+    /// Register this node with the MapleCast hub for distributed matchmaking
+    #[arg(long)]
+    hub_register: bool,
+
+    /// Hub API URL (e.g. https://nobd.net/hub/api). Setting this env var
+    /// auto-enables registration even without --hub-register.
+    #[arg(long, env = "MAPLECAST_HUB_URL")]
+    hub_url: Option<String>,
+
+    /// Operator token for hub authentication
+    #[arg(long, env = "MAPLECAST_HUB_TOKEN")]
+    hub_token: Option<String>,
+
+    /// Human-readable node name shown on the dashboard
+    #[arg(long, env = "MAPLECAST_NODE_NAME", default_value = "unnamed")]
+    node_name: String,
+
+    /// Region identifier (us-east, eu-west, ap-northeast, etc.)
+    #[arg(long, env = "MAPLECAST_NODE_REGION", default_value = "auto")]
+    node_region: String,
+
+    /// Public hostname or IP (auto-detected via ifconfig.me if omitted)
+    #[arg(long, env = "MAPLECAST_PUBLIC_HOST")]
+    public_host: Option<String>,
 }
 
 #[tokio::main]
@@ -140,6 +168,42 @@ async fn main() {
         }))
     } else {
         info!("WebTransport: disabled (--no-webtransport)");
+        None
+    };
+
+    // Spawn hub client if registration is enabled (flag or env var)
+    let _hub_task = if args.hub_register || args.hub_url.is_some() {
+        match (&args.hub_url, &args.hub_token) {
+            (Some(url), Some(token)) => {
+                let ws_port: u16 = args.ws_listen.split(':').last()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(7201);
+                let input_port: u16 = std::env::var("MAPLECAST_PORT")
+                    .ok()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(7100);
+
+                let config = hub_client::HubConfig {
+                    hub_url: url.clone(),
+                    hub_token: token.clone(),
+                    node_name: args.node_name.clone(),
+                    node_region: args.node_region.clone(),
+                    public_host: args.public_host.clone(),
+                    ws_listen_port: ws_port,
+                    input_port,
+                };
+                let hub_state = state.clone();
+                info!("Hub registration enabled → {}", url);
+                Some(tokio::spawn(async move {
+                    hub_client::run(config, hub_state).await;
+                }))
+            }
+            _ => {
+                error!("Hub registration requires both --hub-url and --hub-token");
+                None
+            }
+        }
+    } else {
         None
     };
 

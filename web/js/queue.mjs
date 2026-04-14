@@ -295,6 +295,22 @@ export async function initQueueLive() {
   }
 }
 
+// Persist a slot claim in SurrealDB via the relay's admin credentials.
+// The browser JWT cannot UPDATE slot directly (PERMISSIONS NONE for
+// browser access). This is the write counterpart to /api/leave.
+// Fire-and-forget: gameplay works via controlWs even if this fails.
+function claimSlotViaRelay(slotNum) {
+  if (!state.dbToken) return;
+  fetch('/api/join', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + state.dbToken,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ slot: slotNum }),
+  }).catch(e => console.warn('[queue] /api/join failed:', e.message));
+}
+
 // Called when MY queue row's status flips to 'promoted'. The collector did
 // this on slot-open. Open the direct flycast WS and claim the slot.
 async function handleMyPromotion(row) {
@@ -307,7 +323,33 @@ async function handleMyPromotion(row) {
   // promotion notification (e.g. P2 also empty) and open two controlWs.
   state.mySlot = row.promoted_to;
 
+  // Optimistic local cache update — same pattern as gotNext fast path.
+  // Prevents paintSlots "freed externally" while we await the controlWs.
+  const slotRow = Array.from(_slotRows.values()).find(r => r.slot_num === row.promoted_to);
+  if (slotRow) {
+    _slotRows.set(String(slotRow.id), {
+      ...slotRow,
+      occupant_name: state.myName,
+      session_id: state.sessionId,
+      claimed_at: new Date().toISOString(),
+    });
+    paintSlots();
+  }
+
   try {
+    // If the promotion includes a node assignment (distributed matchmaking),
+    // route the connection to that node instead of the origin server.
+    if (row.node_id && row.node_urls) {
+      const { assignNode } = await import('./node-router.mjs');
+      assignNode({
+        node_id: row.node_id,
+        relay_url: row.node_urls.relay_url,
+        control_url: row.node_urls.control_url,
+        audio_url: row.node_urls.audio_url,
+      });
+      console.log('[queue] match assigned to node', row.node_id);
+    }
+
     const { ensureControlWs } = await import('./ws-connection.mjs');
     const { getPreferredLatchPolicy } = await import('./diagnostics.mjs');
     const ws = await ensureControlWs();
@@ -324,7 +366,10 @@ async function handleMyPromotion(row) {
       // player left it at). Server applies this in its `join` handler.
       latch_policy: getPreferredLatchPolicy(),
     }));
-    // Optimistic local state — flycast's `assigned` reply will confirm
+
+    // Persist in SurrealDB via relay admin creds
+    claimSlotViaRelay(row.promoted_to);
+
     state.mySlot = row.promoted_to;
     state.wsInQueue = false;
     state.inQueue = false;
@@ -375,22 +420,30 @@ export async function gotNext() {
     return;
   }
   // FAST PATH: if a slot is OPEN, skip the queue and join flycast directly.
-  // Write to SurrealDB slot table FIRST (live query checks occupant_name),
-  // then open controlWs to flycast.
+  //
+  // The browser JWT CANNOT update the slot table (PERMISSIONS NONE for the
+  // `browser` record access — see auth_api.rs). Instead we:
+  //   1. Update the local _slotRows cache optimistically so paintSlots()
+  //      doesn't fire "freed externally" before the server confirms.
+  //   2. Open controlWs and send join to flycast.
+  //   3. Call /api/join (relay admin creds) to persist in SurrealDB.
   const openSlot = Array.from(_slotRows.values())
     .find(r => !r.occupant_name || r.occupant_name === '');
   if (openSlot) {
     console.log('[queue] slot', openSlot.slot_num, 'is open — joining directly (skip queue)');
     systemMessage(`${state.myName} — stepping up to P${openSlot.slot_num + 1}!`);
 
-    // Claim in SurrealDB FIRST so the live query sees our name
-    try {
-      await liveQuery('UPDATE $slot SET occupant_name = $name, session_id = $sid', {
-        slot: openSlot.id, name: state.myName, sid: state.sessionId
-      });
-    } catch (e) { console.warn('[queue] slot claim write failed:', e); }
+    // Optimistic local cache — prevents paintSlots "freed externally" race
+    const slotKey = String(openSlot.id);
+    const prevRow = { ...openSlot };
+    _slotRows.set(slotKey, {
+      ...openSlot,
+      occupant_name: state.myName,
+      session_id: state.sessionId,
+      claimed_at: new Date().toISOString(),
+    });
+    paintSlots();
 
-    // NOW set local state — live query will see our name and not free us
     state.mySlot = openSlot.slot_num;
     state.inQueue = false;
     state.wsInQueue = false;
@@ -405,11 +458,22 @@ export async function gotNext() {
         type: 'join', id: state.sessionId, name: state.myName,
         device, slot: openSlot.slot_num, latch_policy: getPreferredLatchPolicy(),
       }));
+
+      // Persist slot claim in SurrealDB via relay admin creds (non-blocking).
+      // Other browsers see our name in the slot once this lands.
+      claimSlotViaRelay(openSlot.slot_num);
+
       setTimeout(() => startGamepadPolling(), 200);
       updateCabinetControls();
       document.getElementById('leaveGameBtn').style.display = 'block';
       document.getElementById('gotNextBtn').style.display = 'none';
-    } catch (e) { console.warn('[queue] direct join failed:', e); }
+    } catch (e) {
+      // Rollback optimistic cache on connection failure
+      _slotRows.set(slotKey, prevRow);
+      paintSlots();
+      state.mySlot = -1;
+      console.warn('[queue] direct join failed:', e);
+    }
     return;
   }
 
@@ -435,6 +499,22 @@ export async function gotNext() {
   document.getElementById('leaveQueueBtn').style.display = 'block';
 
   systemMessage(`${state.myName} says I GOT NEXT!`);
+
+  // Probe distributed nodes in the background while we wait in queue.
+  // Non-blocking — queue insertion happens immediately below regardless.
+  import('./node-router.mjs').then(async ({ discoverNodes, probeNodes, reportPings }) => {
+    try {
+      const nodes = await discoverNodes();
+      if (nodes.length > 0) {
+        const results = await probeNodes(nodes);
+        if (results.length > 0) {
+          await reportPings(state.myName, state.sessionId);
+        }
+      }
+    } catch (e) {
+      console.warn('[queue] node probe failed (non-fatal):', e.message);
+    }
+  });
 
   // Insert into the queue table. The collector watches `slot` for
   // openings and will UPDATE my row to status='promoted' when my turn
@@ -553,6 +633,9 @@ export async function leaveGame() {
   state.inQueue = false;
   state.leaving = false;
   stopGamepadPolling();
+
+  // Clear distributed node assignment so next match re-probes
+  import('./node-router.mjs').then(({ clearAssignment }) => clearAssignment()).catch(() => {});
 
   document.getElementById('leaveGameBtn').style.display = 'none';
   document.getElementById('leaveQueueBtn').style.display = 'none';

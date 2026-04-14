@@ -1,0 +1,41 @@
+[Unit]
+Description=MapleCast Hub — Distributed Node Registry
+Documentation=https://github.com/nobd/maplecast
+After=network-online.target surrealdb.service
+Wants=network-online.target
+
+[Service]
+User=maplecast
+Group=maplecast
+Type=simple
+WorkingDirectory=/opt/maplecast
+
+# Hub listens on loopback — nginx proxies /hub/* to here
+Environment=RUST_LOG=maplecast_hub=info
+
+# Bootstrap operator for initial setup (override in env file for production)
+EnvironmentFile=-/etc/maplecast/hub.env
+
+ExecStart=/usr/local/bin/maplecast-hub \
+    --listen 127.0.0.1:7220
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+KillSignal=SIGTERM
+KillMode=mixed
+
+# Hardening
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+MemoryMax=256M
+TasksMax=32
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=maplecast-hub
+
+[Install]
+WantedBy=multi-user.target

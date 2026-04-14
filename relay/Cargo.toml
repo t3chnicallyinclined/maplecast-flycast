@@ -16,6 +16,7 @@ clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zstd = "0.13"
+uuid = { version = "1", features = ["v4"] }
 hmac = "0.12"
 sha1 = "0.10"
 base64 = "0.22"

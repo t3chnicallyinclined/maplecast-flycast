@@ -1,0 +1,106 @@
+# MapleCast Node — flycast headless + relay in one container
+#
+# Build:   docker build -f Dockerfile.node -t maplecast-node:latest .
+# Run:     docker run --rm -p 7100:7100/udp -p 7201:7201/tcp \
+#            -v /path/to/mvc2.gdi:/data/mvc2.gdi:ro \
+#            -e MAPLECAST_HUB_URL=https://nobd.net/hub/api \
+#            -e MAPLECAST_HUB_TOKEN=your-token \
+#            -e MAPLECAST_NODE_NAME="My-Node" \
+#            maplecast-node:latest
+#
+# OVERKILL IS NECESSARY.
+
+# ─────────────────────────────────────────────────────────────────
+# Stage 1: Build flycast headless
+# ─────────────────────────────────────────────────────────────────
+FROM debian:12-slim AS flycast-build
+
+RUN apt-get update && apt-get install --no-install-recommends -y \
+        build-essential \
+        cmake \
+        ninja-build \
+        git \
+        pkg-config \
+        libcurl4-openssl-dev \
+        libssl-dev \
+        libzip-dev \
+        zlib1g-dev \
+        libxdp-dev \
+        libbpf-dev \
+        libelf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+RUN cmake -B build-headless -G Ninja \
+        -DMAPLECAST_HEADLESS=ON \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DUSE_HOST_LIBZIP=ON \
+    && cmake --build build-headless -- -j"$(nproc)" \
+    && strip build-headless/flycast \
+    && ls -lh build-headless/flycast
+
+# ─────────────────────────────────────────────────────────────────
+# Stage 2: Build relay
+# ─────────────────────────────────────────────────────────────────
+FROM rust:1.88-slim AS relay-build
+
+RUN apt-get update && apt-get install --no-install-recommends -y \
+        pkg-config \
+        libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src/relay
+COPY relay/ .
+
+RUN cargo build --release \
+    && strip target/release/maplecast-relay \
+    && ls -lh target/release/maplecast-relay
+
+# ─────────────────────────────────────────────────────────────────
+# Stage 3: Runtime — minimal, no GPU/audio/window deps
+# ─────────────────────────────────────────────────────────────────
+FROM debian:12-slim
+
+RUN apt-get update && apt-get install --no-install-recommends -y \
+        libcurl4 \
+        libxdp1 \
+        libbpf1 \
+        libgomp1 \
+        libzip4 \
+        zlib1g \
+        ca-certificates \
+        netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --home-dir /opt/maplecast --shell /usr/sbin/nologin maplecast
+
+COPY --from=flycast-build /src/build-headless/flycast /usr/local/bin/flycast
+COPY --from=relay-build /src/relay/target/release/maplecast-relay /usr/local/bin/maplecast-relay
+COPY deploy/node-entrypoint.sh /usr/local/bin/node-entrypoint.sh
+
+RUN chmod +x /usr/local/bin/node-entrypoint.sh \
+    && mkdir -p /opt/maplecast/savestates \
+                /opt/maplecast/cfg \
+                /opt/maplecast/.local/share/flycast \
+                /opt/maplecast/.maplecast \
+                /data \
+    && chown -R maplecast:maplecast /opt/maplecast
+
+USER maplecast
+WORKDIR /opt/maplecast
+
+ENV MAPLECAST=1
+ENV MAPLECAST_MIRROR_SERVER=1
+ENV MAPLECAST_HEADLESS=1
+ENV MAPLECAST_PORT=7100
+ENV MAPLECAST_SERVER_PORT=7200
+ENV XDG_CONFIG_HOME=/opt/maplecast/cfg
+ENV HOME=/opt/maplecast
+
+# Flycast: UDP input (7100), WS mirror (7200)
+# Relay: WS downstream (7201), HTTP (7202)
+EXPOSE 7100/udp 7200/tcp 7201/tcp 7202/tcp
+
+ENTRYPOINT ["/usr/local/bin/node-entrypoint.sh"]
+CMD ["/data/mvc2.gdi"]
