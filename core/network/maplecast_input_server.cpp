@@ -16,6 +16,7 @@
 #include "maplecast_input_server.h"
 #include "maplecast_mirror.h"
 #include "maplecast_telemetry.h"
+#include "replay_writer.h"
 #include "input/gamepad_device.h"
 
 #include <cstdio>
@@ -490,6 +491,11 @@ static void pushTapeEntryAtFrame(int slot, uint64_t frame, uint16_t buttons,
 
 	ring.head.store(head + 1, std::memory_order_release);
 	_tapeEntriesPushed.fetch_add(1, std::memory_order_relaxed);
+
+	// Phase 4: replay recording. No-op when not active (single atomic
+	// load returns early). Captures EVERY input event the game sees,
+	// which is exactly what we need for deterministic playback.
+	maplecast_replay::append(frame, e.seqAndSlot, buttons, lt_, rt_);
 }
 
 void pushTapeEntry(int slot, uint16_t buttons, uint8_t lt_, uint8_t rt_, uint32_t seq)
@@ -1231,6 +1237,21 @@ bool init(int udpPort)
 		printf("[input-server] tape publisher ready on port %d\n", kTapePort);
 	printf("[input-server] waiting for players (NOBD UDP or browser WebSocket)\n");
 	maplecast_telemetry::send("[input-server] ready on port %d", udpPort);
+
+	// Phase 4: env-var-driven replay recording. Set MAPLECAST_REPLAY_OUT
+	// to a file path and we'll auto-record everything (savestate at boot
+	// + every input event) until the process shuts down. Useful for
+	// tournament archive mode + dev testing the replay format.
+	if (const char* outPath = std::getenv("MAPLECAST_REPLAY_OUT")) {
+		maplecast_replay::StartParams sp;
+		sp.out_path = outPath;
+		if (const char* p1 = std::getenv("MAPLECAST_REPLAY_P1_NAME")) sp.p1_name = p1;
+		if (const char* p2 = std::getenv("MAPLECAST_REPLAY_P2_NAME")) sp.p2_name = p2;
+		if (const char* sid = std::getenv("MAPLECAST_REPLAY_SERVER_ID")) sp.server_id = sid;
+		if (const char* rh = std::getenv("MAPLECAST_REPLAY_ROM_HASH")) sp.rom_hash_hex = rh;
+		maplecast_replay::start(sp);
+	}
+
 	return true;
 }
 
