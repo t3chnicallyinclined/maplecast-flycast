@@ -82,6 +82,23 @@ bool SDCKBOccupied;
 
 void maple_vblank()
 {
+	// S3 — stamp VBlank-IN entry with CLOCK_MONOTONIC µs. Consumed by
+	// maple_DoDma via exchange(0) right before ggpo::getInput, yielding
+	// the exact µs from vblank-in to "game input frozen" — both for
+	// hardware-triggered DMA (SB_MDTSEL=1, maple_DoDma called below)
+	// AND for software-kick DMA (SB_MDTSEL=0, game's ISR writes
+	// SB_MDST=1 from maple_SB_MDST_Write → maple_DoDma). MVC2 uses
+	// the software-kick path, so this measurement captures the game's
+	// ISR dispatch latency — exactly what S7 needs to schedule input
+	// writes into the last safe window before CMD9 reads kcode[].
+	//
+	// Latest-wins semantics: if two vblanks fire without a consuming
+	// maple_DoDma in between (shouldn't happen in normal operation),
+	// the second vblank's T0 overwrites the first. A maple_DoDma
+	// dispatched without a preceding stamped vblank skips the update
+	// (sees T0=0) instead of polluting the EMA with stale data.
+	_vblankKickT0.store(_nowMicros(), std::memory_order_relaxed);
+
 	if (SB_MDEN & 1)
 	{
 		if (SB_MDTSEL == 1)
@@ -92,15 +109,6 @@ void maple_vblank()
 			}
 			else
 			{
-				// S3 — stamp VBlank-IN entry RIGHT before the hardware
-				// Maple DMA kick. Only in the SB_MDTSEL=1 branch: the
-				// software-kick path (maple_SB_MDST_Write → maple_DoDma)
-				// also calls maple_DoDma but is decoupled from vblank —
-				// stamping unconditionally would let stale T0 values
-				// survive into software-kick frames and produce bogus
-				// multi-ms deltas. maple_DoDma zeroes T0 after reading
-				// so the next software kick cannot consume it.
-				_vblankKickT0.store(_nowMicros(), std::memory_order_relaxed);
 				//DEBUG_LOG(MAPLE, "DDT vblank");
 				SB_MDST = 1;
 				maple_DoDma();
@@ -194,17 +202,21 @@ static void maple_DoDma()
 	}
 #endif
 
-	// S3 — compute VBlank→CMD9-kick delta (µs). Only valid when this
-	// maple_DoDma is the HW-vblank-triggered kick (T0 != 0 and set
-	// moments ago in maple_vblank). Software-kick calls (via
-	// maple_SB_MDST_Write) see T0==0 and skip the measurement —
-	// they're decoupled from vblank, so the delta would be meaningless.
-	// Atomic exchange to zero: whoever reads wins, next caller gets 0.
+	// S3 — compute VBlank→CMD9-kick delta (µs). T0 is stamped by
+	// maple_vblank on every vblank-in; whichever maple_DoDma fires
+	// next (HW-trigger or SW-kick from game ISR) wins via exchange(0).
+	// T0==0 means this DMA isn't associated with a preceding vblank
+	// (shouldn't happen in normal operation — skip measurement).
+	//
+	// Clamp: 16000 µs (~1 frame). MVC2's ISR-to-DMA-kick latency is
+	// expected in the tens-to-hundreds of µs range. Anything ≥1 frame
+	// means we missed a vblank edge or the game re-kicked DMA manually
+	// between frames — reject so the EMA stays representative.
 	{
 		int64_t t0 = _vblankKickT0.exchange(0, std::memory_order_relaxed);
 		if (t0 > 0) {
 			int64_t delta = _nowMicros() - t0;
-			if (delta >= 0 && delta < 5000) {  // sanity clamp 5ms — expected range is µs
+			if (delta >= 0 && delta < 16000) {
 				_vblankKickOffsetLastUs.store(delta, std::memory_order_relaxed);
 				int64_t prev = _vblankKickOffsetEmaUs.load(std::memory_order_relaxed);
 				int64_t next = prev == 0 ? delta : prev + ((delta - prev) >> 4);
