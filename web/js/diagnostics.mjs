@@ -358,11 +358,18 @@ function renderLatencyTab() {
 
   // --- Frame phase block ---
   html += `<div class="diag-section">FRAME PHASE</div>`;
-  html += `<div class="diag-help">period = how long one game frame takes on the server (16.67 ms = 60 fps). guard = the window before each frame read where CONSISTENCY mode defers near-boundary inputs to the next frame.</div>`;
+  html += `<div class="diag-help">period = server frame interval (16.67 ms = 60 fps). guard = window before each frame read where CONSISTENCY mode defers near-boundary inputs. maple_kick = measured µs from server vblank-in to the game's Maple DMA kick (the moment the game reads kcode[]). MVC2's VBlank ISR is heavy — typical 7-12 ms. publish_work = time between STARTRENDER write (top of publish) and publish completion.</div>`;
   if (fp) {
     const period = (fp.frame_period_us / 1000).toFixed(2);
     const guard = (fp.guard_us / 1000).toFixed(2);
-    html += `<pre class="diag-data">period:    ${period} ms\nguard:     ${guard} ms\nframe:     ${fp.frame}</pre>`;
+    const kickEma = fp.maple_kick_offset_us_ema != null ? (fp.maple_kick_offset_us_ema / 1000).toFixed(2) + ' ms' : '-';
+    const kickLast = fp.maple_kick_offset_us_last != null ? (fp.maple_kick_offset_us_last / 1000).toFixed(2) + ' ms' : '-';
+    const kickMax = fp.maple_kick_offset_us_max != null ? (fp.maple_kick_offset_us_max / 1000).toFixed(2) + ' ms' : '-';
+    const startRender = fp.t_startrender_us != null ? fp.t_startrender_us : '-';
+    const publishWork = (fp.t_startrender_us != null && fp.t_last_latch_us != null)
+        ? (fp.t_last_latch_us - fp.t_startrender_us) + ' µs'
+        : '-';
+    html += `<pre class="diag-data">period:        ${period} ms\nguard:         ${guard} ms\nframe:         ${fp.frame}\nmaple_kick ema:  ${kickEma}\nmaple_kick last: ${kickLast}\nmaple_kick max:  ${kickMax}\npublish_work:  ${publishWork}\nt_startrender: ${startRender}</pre>`;
   } else {
     html += `<pre class="diag-data">(no data — server hasn't sent frame_phase yet)</pre>`;
   }
