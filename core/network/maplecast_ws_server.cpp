@@ -13,6 +13,7 @@
 #include "hw/sh4/sh4_mem.h"
 #include "hw/pvr/pvr_mem.h"
 #include "hw/pvr/pvr_regs.h"
+#include "hw/maple/maple_if.h"   // S3: VBlank→CMD9 kick offset accessors
 
 #include <websocketpp/config/asio_no_tls.hpp>
 #include <websocketpp/server.hpp>
@@ -323,6 +324,15 @@ static json getStatus()
 		// (avoiding the deferred-by-one-frame penalty under
 		// ConsistencyFirst).
 		fp["guard_us"] = (int64_t)maplecast_input::getGuardUs();
+		// S3 — VBlank→CMD9-kick offset (µs). Measured inside maple_if.cpp:
+		// _last is the most recent frame's observed delta, _ema is a
+		// smoothed moving average, _max is the running peak since the
+		// watermark was last reset. Browser diagnostics surface these
+		// alongside the guard window so operators can see the actual
+		// margin between "packet arrival" and "game reads buttons."
+		fp["maple_kick_offset_us_last"] = (int64_t)maple_getVblankKickOffsetUsLast();
+		fp["maple_kick_offset_us_ema"]  = (int64_t)maple_getVblankKickOffsetUsEma();
+		fp["maple_kick_offset_us_max"]  = (int64_t)maple_getVblankKickOffsetUsMax();
 		status["frame_phase"] = fp;
 	}
 

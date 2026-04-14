@@ -8,6 +8,8 @@
 #include "network/ggpo.h"
 #include "hw/naomi/card_reader.h"
 
+#include <atomic>
+#include <chrono>
 #include <memory>
 
 enum MaplePattern
@@ -41,12 +43,51 @@ static int maple_schd(int tag, int cycles, int jitter, void *arg);
 //ddt/etc are just hacked for wince to work
 //now with proper maple delayed DMA maybe its time to look into it ?
 bool maple_ddt_pending_reset;
+
+// S3 — VBlank→CMD9-kick timing instrumentation.
+//
+// _vblankKickT0 is set at the top of maple_vblank() to the
+// CLOCK_MONOTONIC timestamp (µs). When maple_DoDma reaches
+// ggpo::getInput() (the moment the game's input latch reads the
+// controller state) it computes delta = now - T0 and folds it into
+// an EMA + running max. Value is exposed via the accessors in
+// maple_if.h.
+//
+// On MVC2 this delta is expected to be ~5–20 µs (ISR entry + a
+// handful of register writes before the DMA kick). Capturing the
+// exact number unblocks S7: scheduling near-boundary packet writes
+// to land in the 100–200 µs window immediately before CMD9.
+//
+// Atomic with relaxed ordering — single producer (SH4 thread during
+// vblank), many consumers (WS status JSON, diagnostics). Reads can
+// race writes but we'll only be off by 1 frame.
+static std::atomic<int64_t> _vblankKickT0{0};
+static std::atomic<int64_t> _vblankKickOffsetLastUs{0};
+static std::atomic<int64_t> _vblankKickOffsetEmaUs{0};
+static std::atomic<int64_t> _vblankKickOffsetMaxUs{0};
+
+static inline int64_t _nowMicros() {
+	using namespace std::chrono;
+	return duration_cast<microseconds>(
+		steady_clock::now().time_since_epoch()).count();
+}
+
+int64_t maple_getVblankKickOffsetUsEma()  { return _vblankKickOffsetEmaUs.load(std::memory_order_relaxed); }
+int64_t maple_getVblankKickOffsetUsMax()  { return _vblankKickOffsetMaxUs.load(std::memory_order_relaxed); }
+int64_t maple_getVblankKickOffsetUsLast() { return _vblankKickOffsetLastUs.load(std::memory_order_relaxed); }
+void    maple_resetVblankKickOffsetPeak() { _vblankKickOffsetMaxUs.store(0, std::memory_order_relaxed); }
 // pending DMA xfers
 std::vector<std::pair<u32, std::vector<u32>>> mapleDmaOut;
 bool SDCKBOccupied;
 
 void maple_vblank()
 {
+	// S3 — stamp VBlank-IN entry. The corresponding read happens
+	// inside maple_DoDma right before ggpo::getInput(). Done
+	// unconditionally so SB_MDEN disable paths don't poison the
+	// next valid measurement with stale T0.
+	_vblankKickT0.store(_nowMicros(), std::memory_order_relaxed);
+
 	if (SB_MDEN & 1)
 	{
 		if (SB_MDTSEL == 1)
@@ -150,6 +191,25 @@ static void maple_DoDma()
 	}
 #endif
 
+	// S3 — compute VBlank→CMD9-kick delta (µs). This is the instant
+	// the game's input state is frozen into mapleInputState. Track EMA
+	// (alpha=1/16) and running max. T0==0 means the measurement window
+	// wasn't armed (shouldn't happen after first vblank) — skip.
+	{
+		int64_t t0 = _vblankKickT0.load(std::memory_order_relaxed);
+		if (t0 > 0) {
+			int64_t delta = _nowMicros() - t0;
+			if (delta >= 0 && delta < 50000) {  // sanity clamp 50ms
+				_vblankKickOffsetLastUs.store(delta, std::memory_order_relaxed);
+				int64_t prev = _vblankKickOffsetEmaUs.load(std::memory_order_relaxed);
+				int64_t next = prev == 0 ? delta : prev + ((delta - prev) >> 4);
+				_vblankKickOffsetEmaUs.store(next, std::memory_order_relaxed);
+				int64_t mx = _vblankKickOffsetMaxUs.load(std::memory_order_relaxed);
+				if (delta > mx)
+					_vblankKickOffsetMaxUs.store(delta, std::memory_order_relaxed);
+			}
+		}
+	}
 	ggpo::getInput(mapleInputState);
 	// TODO put this elsewhere and let the card readers handle being called multiple times
 	if (settings.platform.isNaomi())
