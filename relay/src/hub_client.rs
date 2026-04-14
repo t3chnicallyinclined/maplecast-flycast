@@ -10,6 +10,7 @@
 
 use crate::fanout::RelayState;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{info, warn, error};
@@ -60,6 +61,37 @@ fn load_or_create_node_id() -> String {
     }
     info!("Generated new node_id: {}", id);
     id
+}
+
+// ============================================================================
+// ROM hash — SHA-256 of the ROM file the headless flycast is serving.
+// Allows tournament operators + players to verify they're on the same
+// canonical ROM (no silent custom-hacks). Reads MAPLECAST_ROM env var
+// which is already used by the flycast systemd unit and Docker entrypoint.
+// Returns "unknown" if the file isn't set or can't be read.
+// ============================================================================
+
+fn compute_rom_hash() -> String {
+    let rom_path = match std::env::var("MAPLECAST_ROM") {
+        Ok(p) => p,
+        Err(_) => return "unknown".to_string(),
+    };
+    let data = match std::fs::read(&rom_path) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("ROM hash: could not read {}: {}", rom_path, e);
+            return "unknown".to_string();
+        }
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(&data);
+    let hash = hasher.finalize();
+    let mut hex = String::with_capacity(64);
+    for b in hash.iter() {
+        hex.push_str(&format!("{:02x}", b));
+    }
+    info!("ROM hash (SHA-256): {} ({} bytes)", hex, data.len());
+    hex
 }
 
 // ============================================================================
@@ -201,7 +233,7 @@ pub async fn run(config: HubConfig, state: RelayState) {
             max_matches: 1,
             max_spectators: 500,
         },
-        rom_hash: "unknown".to_string(), // TODO: read from flycast status
+        rom_hash: compute_rom_hash(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         public_relay_url: config.public_relay_url.clone(),
         public_control_url: config.public_control_url.clone(),

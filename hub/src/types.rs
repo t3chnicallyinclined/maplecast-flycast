@@ -187,6 +187,8 @@ pub struct NodePublic {
     pub spectators: u64,
     pub stats: NodeStats,
     pub uptime_s: u64,
+    pub rom_hash: String,
+    pub version: String,
     pub relay_url: String,
 }
 

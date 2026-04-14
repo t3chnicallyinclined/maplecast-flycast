@@ -484,6 +484,8 @@ fn node_to_public(n: &Node) -> NodePublic {
         spectators: n.metrics.as_ref().map(|m| m.clients).unwrap_or(0),
         stats: n.stats.clone(),
         uptime_s: n.stats.uptime_s,
+        rom_hash: n.rom_hash.clone(),
+        version: n.version.clone(),
         relay_url: n.relay_url(),
     }
 }

@@ -401,11 +401,28 @@
         const ping = pingResults.get(n.node_id);
         const pingStr = ping != null ? `${ping.toFixed(1)}ms` : 'probing...';
 
+        // Phase 7: ROM hash verification badge. Known-good MVC2 US v1.001
+        // GDI. If the server reports this hash, show a green "verified"
+        // tick. "unknown" / anything else → orange warning (could be
+        // legit custom ROM hack or a not-yet-whitelisted version).
+        const KNOWN_MVC2_HASHES = new Set([
+          '396548fe53f9b3641896398be563795ff190f9b0d7cc61c331901bc68f4e5392', // US v1.001
+        ]);
+        let romBadge = '';
+        if (n.rom_hash && KNOWN_MVC2_HASHES.has(n.rom_hash)) {
+          romBadge = '<span style="color:#00ff88">✓ verified</span>';
+        } else if (n.rom_hash && n.rom_hash !== 'unknown') {
+          romBadge = `<span style="color:#ffaa00" title="${esc(n.rom_hash)}">⚠ custom</span>`;
+        } else {
+          romBadge = '<span style="color:#666">unknown</span>';
+        }
+
         const popup = `
           <div class="popup-title">${esc(n.name)}</div>
           <div class="popup-detail">Operator: <span>${esc(n.operator)}</span></div>
           <div class="popup-detail">Region: <span>${esc(n.region)}</span></div>
           <div class="popup-detail">Status: <span>${n.status}</span></div>
+          <div class="popup-detail">ROM: ${romBadge}</div>
           <div class="popup-detail">Spectators: <span>${n.spectators}</span></div>
           <div class="popup-detail">Matches: <span>${n.stats.total_matches}</span></div>
           <div class="popup-detail">Your Ping: <span>${pingStr}</span></div>
