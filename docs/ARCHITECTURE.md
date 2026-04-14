@@ -1788,13 +1788,122 @@ Documented in detail in `docs/COMPETITIVE-CLIENT.md`. Summary:
 |-------|------|--------|
 | 0 | Rename `node` → `input server` in user-facing UI | ✅ Shipped |
 | 1 | Hub-aware discovery + UDP probing | ✅ Shipped |
-| 2 | Multi-socket redundancy + failover + SCHED_FIFO | 🔧 In progress |
-| 3 | Always-on diagnostic HUD overlay | 📋 Planned |
-| 4 | Deterministic replay recording (.mcrec — savestate + input log only) | 📋 Planned |
+| 2 | Multi-socket redundancy + failover + SCHED_FIFO | ✅ Shipped |
+| 3 | Always-on diagnostic HUD overlay | ✅ Shipped |
+| 4 | Deterministic replay recording + playback (.mcrec) | ✅ Shipped |
 | 5 | Replay sharing + browser playback (server on-demand TA gen) | 📋 Planned |
 | 6 | Spectator mode (single + multi-view grid at native res) | 📋 Planned |
 | 7 | ED25519 match signing + ROM hash verification | 📋 Planned |
 | 8 | DDR/Guitar Hero combo trainer (.mccombo files) | 📋 Planned |
+
+### Phase 2 details — input redundancy + failover
+
+**Wire format extension** (backward compatible — server detects length):
+```
+Old (7 bytes):  [P][C][slot][LT][RT][btn_hi][btn_lo]
+New (11 bytes): [P][C][slot][seq:u32_LE][LT][RT][btn_hi][btn_lo]
+```
+
+Every gamepad change sends TWICE: T+0 (immediate from button event)
++ T+1ms (from a deferred-send queue thread). Server dedups by per-source
+sequence number (`_lastSeenSeq` map in `maplecast_input_server.cpp`).
+Bandwidth: 264 KB/s peak — negligible.
+
+**Failover**: client opens UDP to TWO servers (primary + standby from
+hub `discoverAndRank(2)`). Trigger poll thread does `recv MSG_DONTWAIT`
+to detect heartbeat ACKs. If primary silent for >100ms (and we've been
+sending), atomic flag flips → all subsequent sends go to standby.
+
+**Probe-ACK heartbeat**: server replies `[0xFE, seq, ts:u48_LE]` (8 bytes)
+to EVERY input packet — same wire as the hub-discovery probe-ACK. Client
+treats this as the "primary alive" signal.
+
+**SCHED_FIFO graceful degrade**: trigger thread tries `pthread_setschedparam(SCHED_FIFO, prio=50)`.
+Falls back to SCHED_OTHER if no `CAP_SYS_NICE`. Doesn't crash on lack of
+permission — just logs and continues.
+
+### Phase 3 details — diagnostic HUD
+
+`core/ui/gui_competitive_hud.{cpp,h}` — read-only ImGui windows in the
+top-left corner during gameplay. Three sections:
+- **NETWORK**: server name, RTT, range, send rate, network grade S/A/B/C/F,
+  failover indicator
+- **LATENCY**: E2E (button-to-pixel), EMA, sent + redundant counts
+- **INPUT**: button/trigger change counts (placeholder for the future
+  DDR-style scrolling input display)
+
+Hooked into `gui_displayMirrorDebug()` (per-frame in mirror client mode).
+F1/F2/F3 toggle individual sections, F12 toggles all.
+`ImGuiWindowFlags_NoInputs` ensures the HUD never steals mouse from the
+gear icon or game.
+
+### Phase 4 details — deterministic replay
+
+**KEY INSIGHT** (already documented above): SH4 emulation is fully
+deterministic — same ROM + same flycast_version + same starting savestate
++ same inputs = byte-perfect identical TA frames. Replay = load
+savestate, inject inputs at recorded frames, emulator regenerates.
+
+**File format `.mcrec`** (271-byte header + savestate + input log + footer):
+```
+Offset  Size    Field
+0       8       magic "MCREC\0\0\0"
+8       4       version (u32 LE) = 1
+12      4       flycast_ver (placeholder, 0 for now)
+16      16      match_id (UUID)
+32      16      server_id (UUID)
+48      8       start_unix_us (u64 LE)
+56      8       duration_us (patched in stop())
+64      32      rom_hash (SHA-256)
+96      64      p1_name (null-padded)
+160     64      p2_name
+224     3       p1_chars
+227     3       p2_chars
+230     1       winner (0=p1, 1=p2, 0xFF=unknown)
+231     40      reserved
+271     ─       SAVESTATE: [raw_size:u32][cmp_size:u32][zstd data]
++       N×16    INPUT LOG: TapeEntry[N] (frame:u64, seqAndSlot:u32, buttons:u16, lt:u8, rt:u8)
+end-41  41      FOOTER: "MCEND" + entry_count:u32 + hmac:32B
+```
+
+**Writer** (`core/network/replay_writer.{cpp,h}`):
+- `start(StartParams)` opens the file, writes header, captures starting
+  savestate via `maplecast_mirror::buildFullSaveState()`, zstd compresses
+  it (level 3 — ~3.7× reduction, 26.5 MB → 7.2 MB for MVC2)
+- `append()` is hooked into `pushTapeEntryAtFrame()` in
+  `maplecast_input_server.cpp` — captures EVERY input event the game
+  sees. No-op when not recording (single atomic load returns early).
+- `stop()` writes footer with HMAC slot (Phase 7 fills it), patches
+  `duration_us` and `winner`. Auto-registered atexit handler so SIGTERM/
+  Ctrl-C still finalizes the file.
+
+**Reader** (`core/network/replay_reader.{cpp,h}`):
+- `openReplay(path)` parses header + slurps savestate + input log into
+  RAM. Tolerates missing footer (interrupted recording → uses file-end
+  with 16-byte alignment trim + warning).
+- `loadStartSavestate()` zstd decompresses + calls `dc_deserialize(buf)`
+  via the existing `Deserializer(const void*, size_t)` ctor.
+- `startPlayback(speed)` spawns a thread that walks input log entries,
+  blocks until `maplecast_mirror::currentFrame()` catches up to each
+  entry's recorded frame, then calls `maplecast_input::injectInput()`
+  (the public API — same path live gameplay uses for atomic + accumulator
+  observability).
+
+**Env-var triggers**:
+```
+MAPLECAST_REPLAY_OUT=path.mcrec       — start recording on boot
+MAPLECAST_REPLAY_P1_NAME=alice        — metadata
+MAPLECAST_REPLAY_P2_NAME=bob
+MAPLECAST_REPLAY_SERVER_ID=hex16
+MAPLECAST_REPLAY_ROM_HASH=hex64
+MAPLECAST_REPLAY_IN=path.mcrec        — load + auto-play
+MAPLECAST_REPLAY_SPEED=2.0            — playback speed (1.0 = real time)
+```
+
+**Storage**: ~7-10 MB per match (savestate dominates, input log is tiny).
+Compare to ~150 MB for TA-stream-based replay of a 5-min match.
+**~15-20× reduction**, growing with match length (savestate is one-time,
+input log scales linearly).
 
 ## The lossless spectating insight
 
