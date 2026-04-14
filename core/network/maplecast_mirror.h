@@ -117,6 +117,12 @@ void requestFullSaveStateBroadcast();
 uint64_t currentFrame();
 int64_t  lastLatchTimeUs();
 int64_t  framePeriodUs();
+// C4 prep — CLOCK_MONOTONIC µs at the moment serverPublish() began,
+// which under the S1 STARTRENDER hook is ~microseconds after the game
+// wrote STARTRENDER. Differs from lastLatchTimeUs() which stamps at
+// publish END. Used by browser client C4 pacing to schedule presents
+// relative to the true server frame boundary.
+int64_t  startRenderTimeUs();
 
 // Client-side telemetry snapshot for the ImGui debug overlay. All values
 // are atomic loads — the snapshot may mix a trailing and leading edge of

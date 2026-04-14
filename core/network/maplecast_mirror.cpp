@@ -185,6 +185,15 @@ static std::atomic<bool> _forceSyncBroadcast{false};
 static std::atomic<uint64_t> _atomicCurrentFrame{0};
 static std::atomic<int64_t> _atomicLastLatchTimeUs{0};
 
+// C4 prep — CLOCK_MONOTONIC µs at the moment the game wrote STARTRENDER
+// (captured at the top of serverPublish). Differs from _atomicLastLatchTimeUs
+// which is stamped at the BOTTOM (after PVR snapshot + delta encode +
+// shm write, ~0.5 ms later). Clients that want to pace their presentation
+// to the true server frame boundary use this field; the existing
+// latch-time field stays for input-latch consumers that want
+// "publish complete" semantics.
+static std::atomic<int64_t> _atomicStartRenderTimeUs{0};
+
 // Phase B — live frame period in microseconds, smoothed across the last
 // few publishes via an exponential moving average. PVR can run slightly
 // off 60 Hz; this gives the browser-side phase-aligner an accurate
@@ -959,6 +968,7 @@ void onStartRender(TA_context* ctx)
 // no shm header touching, safe from any thread.
 uint64_t currentFrame()      { return _atomicCurrentFrame.load(std::memory_order_acquire); }
 int64_t  lastLatchTimeUs()   { return _atomicLastLatchTimeUs.load(std::memory_order_acquire); }
+int64_t  startRenderTimeUs() { return _atomicStartRenderTimeUs.load(std::memory_order_acquire); }
 // Phase B — live frame period EMA, used by frame_phase in status JSON.
 int64_t  framePeriodUs()     { return _atomicFramePeriodUs.load(std::memory_order_relaxed); }
 
@@ -1061,8 +1071,15 @@ void serverPublish(TA_context* ctx)
 	// Atomic exchange with the current ctx pointer: returns the PREVIOUS
 	// value. If that matches ctx, we're the second caller for this frame
 	// and bail out. If it doesn't match, we've just claimed publish rights.
-	uintptr_t prev = _lastPublishedCtxAddr.exchange((uintptr_t)ctx, std::memory_order_acq_rel);
-	if (prev == (uintptr_t)ctx) return;
+	uintptr_t prevCtxAddr = _lastPublishedCtxAddr.exchange((uintptr_t)ctx, std::memory_order_acq_rel);
+	if (prevCtxAddr == (uintptr_t)ctx) return;
+
+	// C4 prep — stamp STARTRENDER time as early as possible. Under the S1
+	// path this is ~microseconds after the game's STARTRENDER register
+	// write; under the legacy render-thread fallback path it's ~ms later
+	// (still useful but noisier). Browser C4 pacing code uses this to
+	// schedule eglSwapBuffers relative to the true frame boundary.
+	_atomicStartRenderTimeUs.store(_publishNowUs(), std::memory_order_release);
 
 	auto publishStart = std::chrono::high_resolution_clock::now();
 	rend_context& rc = ctx->rend;

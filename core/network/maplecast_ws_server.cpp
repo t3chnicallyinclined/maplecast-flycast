@@ -333,6 +333,10 @@ static json getStatus()
 		fp["maple_kick_offset_us_last"] = (int64_t)maple_getVblankKickOffsetUsLast();
 		fp["maple_kick_offset_us_ema"]  = (int64_t)maple_getVblankKickOffsetUsEma();
 		fp["maple_kick_offset_us_max"]  = (int64_t)maple_getVblankKickOffsetUsMax();
+		// C4 prep — STARTRENDER wall-clock µs. Clients use this as the
+		// authoritative server-side frame boundary (earlier and more
+		// accurate than t_last_latch_us which stamps at publish-end).
+		fp["t_startrender_us"]          = (int64_t)maplecast_mirror::startRenderTimeUs();
 		status["frame_phase"] = fp;
 	}
 
