@@ -82,12 +82,6 @@ bool SDCKBOccupied;
 
 void maple_vblank()
 {
-	// S3 — stamp VBlank-IN entry. The corresponding read happens
-	// inside maple_DoDma right before ggpo::getInput(). Done
-	// unconditionally so SB_MDEN disable paths don't poison the
-	// next valid measurement with stale T0.
-	_vblankKickT0.store(_nowMicros(), std::memory_order_relaxed);
-
 	if (SB_MDEN & 1)
 	{
 		if (SB_MDTSEL == 1)
@@ -98,6 +92,15 @@ void maple_vblank()
 			}
 			else
 			{
+				// S3 — stamp VBlank-IN entry RIGHT before the hardware
+				// Maple DMA kick. Only in the SB_MDTSEL=1 branch: the
+				// software-kick path (maple_SB_MDST_Write → maple_DoDma)
+				// also calls maple_DoDma but is decoupled from vblank —
+				// stamping unconditionally would let stale T0 values
+				// survive into software-kick frames and produce bogus
+				// multi-ms deltas. maple_DoDma zeroes T0 after reading
+				// so the next software kick cannot consume it.
+				_vblankKickT0.store(_nowMicros(), std::memory_order_relaxed);
 				//DEBUG_LOG(MAPLE, "DDT vblank");
 				SB_MDST = 1;
 				maple_DoDma();
@@ -191,15 +194,17 @@ static void maple_DoDma()
 	}
 #endif
 
-	// S3 — compute VBlank→CMD9-kick delta (µs). This is the instant
-	// the game's input state is frozen into mapleInputState. Track EMA
-	// (alpha=1/16) and running max. T0==0 means the measurement window
-	// wasn't armed (shouldn't happen after first vblank) — skip.
+	// S3 — compute VBlank→CMD9-kick delta (µs). Only valid when this
+	// maple_DoDma is the HW-vblank-triggered kick (T0 != 0 and set
+	// moments ago in maple_vblank). Software-kick calls (via
+	// maple_SB_MDST_Write) see T0==0 and skip the measurement —
+	// they're decoupled from vblank, so the delta would be meaningless.
+	// Atomic exchange to zero: whoever reads wins, next caller gets 0.
 	{
-		int64_t t0 = _vblankKickT0.load(std::memory_order_relaxed);
+		int64_t t0 = _vblankKickT0.exchange(0, std::memory_order_relaxed);
 		if (t0 > 0) {
 			int64_t delta = _nowMicros() - t0;
-			if (delta >= 0 && delta < 50000) {  // sanity clamp 50ms
+			if (delta >= 0 && delta < 5000) {  // sanity clamp 5ms — expected range is µs
 				_vblankKickOffsetLastUs.store(delta, std::memory_order_relaxed);
 				int64_t prev = _vblankKickOffsetEmaUs.load(std::memory_order_relaxed);
 				int64_t next = prev == 0 ? delta : prev + ((delta - prev) >> 4);
