@@ -18,6 +18,7 @@
 #include "emulator.h"
 #include "stdclass.h"
 #include "imgui.h"
+#include "ui/gui_competitive_hud.h"
 #include "hw/naomi/card_reader.h"
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(__SWITCH__)
 #include "linux-dist/icon.h"
@@ -349,6 +350,17 @@ void input_sdl_handle()
 					};
 					if (event.type == SDL_KEYDOWN)
 					{
+						// Phase 3: Competitive HUD toggles. F1 = network,
+						// F2 = latency, F3 = input. F12 = toggle all.
+						// Only fire if no modifier — preserve flycast's
+						// existing F-key conventions (F11 = fullscreen, etc.)
+						if ((event.key.keysym.mod & (KMOD_ALT | KMOD_CTRL | KMOD_SHIFT | KMOD_GUI)) == 0)
+						{
+							if (event.key.keysym.sym == SDLK_F1) { gui_competitive_hud::toggleNetwork(); break; }
+							if (event.key.keysym.sym == SDLK_F2) { gui_competitive_hud::toggleLatency(); break; }
+							if (event.key.keysym.sym == SDLK_F3) { gui_competitive_hud::toggleInput();   break; }
+							if (event.key.keysym.sym == SDLK_F12){ gui_competitive_hud::toggleAll();     break; }
+						}
 						// Alt-Return and F11 toggle full screen
 						if ((event.key.keysym.sym == SDLK_RETURN && (event.key.keysym.mod & KMOD_ALT))
 								|| (event.key.keysym.sym == SDLK_F11 && (event.key.keysym.mod & (KMOD_ALT | KMOD_CTRL | KMOD_SHIFT | KMOD_GUI)) == 0))

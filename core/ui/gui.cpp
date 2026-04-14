@@ -1720,6 +1720,7 @@ void gui_display_osd() {
 // just owns the ImGui frame lifecycle and key handling, which need
 // access to gui.cpp's file-static imguiDriver/gui_newFrame/gui_endFrame.
 #include "gui_mirror_debug.h"
+#include "gui_competitive_hud.h"
 // Gear icon click zone — checked via raw SDL mouse state, not ImGui,
 // because ImGui's click handling conflicts with flycast's DC mouse input.
 static bool _gearWasPressed = false;
@@ -1740,6 +1741,10 @@ void gui_displayMirrorDebug()
 		ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
 	ImGui::TextColored(ImVec4(1, 1, 1, 0.7f), "\xe2\x9a\x99");
 	ImGui::End();
+
+	// Phase 3: always-on competitive HUD (NETWORK / LATENCY / INPUT).
+	// Cheap when sections are hidden — single atomic load returns early.
+	gui_competitive_hud::draw();
 
 	ImGui::Render();
 	gui_endFrame(true);

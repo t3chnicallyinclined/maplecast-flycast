@@ -8,6 +8,8 @@ if(NOT LIBRETRO)
             gui_achievements.cpp
             gui_mirror_debug.cpp
             gui_mirror_debug.h
+            gui_competitive_hud.cpp
+            gui_competitive_hud.h
             vgamepad.cpp
             vgamepad.h
             gui_chat.h
