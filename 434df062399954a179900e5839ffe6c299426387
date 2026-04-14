@@ -1,0 +1,42 @@
+=== DEPLOYED TO PRODUCTION ===
+Date:        2026-04-13
+Tag:         working-base-slot-join-20260413
+
+=== Deploy artifacts ===
+Relay binary md5: f1577243463d3e6a777c2b2cef42a9a3
+Web queue.mjs md5: 22fb50af52e997b4e3bd8978093c86e6 (same file landed in 1bde1045b)
+
+Production paths:
+  /opt/maplecast-relay                                    (active binary)
+  /opt/maplecast-relay.backup-20260413-195239             (rollback binary — pre-/api/join)
+  /var/www/maplecast/js/queue.mjs                         (active web)
+  /var/www/maplecast-backup-20260413-195456               (rollback web — full snapshot)
+
+=== Production data cleanup performed at deploy time ===
+Stale rows that triggered the "freed externally" loop:
+  DELETE queue WHERE status != 'waiting' OR (status='waiting' AND username='TEST');
+  UPDATE slot:p1 SET occupant_name=NONE, player_record=NONE, device=NONE,
+                     session_id=NONE, claimed_at=NONE, last_input_at=NONE,
+                     grace_expires_at=NONE;
+  systemctl restart maplecast-collector  -- to drop in-memory stale state
+
+These were one-time cleanups for accumulated cruft from days of testing.
+The d87e07728 commit (queue heartbeat) prevents this kind of accumulation
+going forward.
+
+=== What this commit added ===
+  POST /api/join { "slot": 0|1 }
+  Authorization: Bearer <browser JWT>
+
+  Relay-proxied slot claim. The browser JWT has PERMISSIONS NONE on the
+  slot table (collector-only writes), so this endpoint takes the JWT,
+  validates it via RETURN $auth, looks up the username with admin creds,
+  and UPDATE slot:p1|p2 with admin creds. Mirror of /api/leave.
+
+  Hardened: per-statement SQL ERR check (sql_query_as_admin only checks
+  HTTP status, but constraint violations come back as per-stmt ERR).
+
+=== Rollback to previous working base ===
+  ssh root@66.55.128.93 'mv /opt/maplecast-relay.backup-20260413-195239 /opt/maplecast-relay && systemctl restart maplecast-relay'
+  ssh root@66.55.128.93 'rm -rf /var/www/maplecast && mv /var/www/maplecast-backup-20260413-195456 /var/www/maplecast'
+  git checkout 907221ee7   # last commit before this fix
