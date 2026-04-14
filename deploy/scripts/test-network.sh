@@ -206,14 +206,24 @@ cmd_local_node() {
   say "Pulling latest image..."
   docker pull "$DOCKER_IMAGE"
 
+  # Mount the ROM's directory so .gdi can find its track*.bin sidecars
+  ROM_DIR="$(cd "$(dirname "$ROM")" && pwd)"
+  ROM_FILE="$(basename "$ROM")"
+
   say "Starting local node, registering with $VPS_HUB_URL..."
-  docker run -d --name "$NODE_CONTAINER" --net=host \
-    -v "$ROM:/data/mvc2.gdi:ro" \
+  say "  Mounting $ROM_DIR → /data (readonly)"
+  say "  ROM file: $ROM_FILE"
+  # --shm-size=256m: flycast needs ~168MB in /dev/shm for the TA mirror
+  # ring buffer (RingHeader + 32MB BRAIN + 128MB RING). Default 64MB
+  # SIGBUSes the SH4 process the moment it touches the mapping.
+  docker run -d --name "$NODE_CONTAINER" --net=host --shm-size=256m \
+    -v "$ROM_DIR:/data:ro" \
     -e MAPLECAST_HUB_URL="$VPS_HUB_URL" \
     -e MAPLECAST_HUB_TOKEN="$HUB_TOKEN" \
     -e MAPLECAST_NODE_NAME="$NODE_NAME" \
     -e MAPLECAST_NODE_REGION="local" \
-    "$DOCKER_IMAGE"
+    "$DOCKER_IMAGE" \
+    "/data/$ROM_FILE"
 
   ok "Local node started."
   echo "  Tail logs:    docker logs -f $NODE_CONTAINER"

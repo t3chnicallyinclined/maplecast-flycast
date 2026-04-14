@@ -24,6 +24,12 @@ pub struct HubConfig {
     pub public_host: Option<String>,
     pub ws_listen_port: u16,
     pub input_port: u16,
+    /// Optional override for the public wss:// URL the browser uses for the
+    /// TA stream. Set this when the relay sits behind nginx TLS termination
+    /// (e.g. wss://nobd.net/ws). Defaults to ws://{public_host}:{port}/ws.
+    pub public_relay_url: Option<String>,
+    pub public_control_url: Option<String>,
+    pub public_audio_url: Option<String>,
 }
 
 // ============================================================================
@@ -96,6 +102,12 @@ struct RegisterPayload {
     capacity: Capacity,
     rom_hash: String,
     version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    public_relay_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    public_control_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    public_audio_url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -191,16 +203,19 @@ pub async fn run(config: HubConfig, state: RelayState) {
         },
         rom_hash: "unknown".to_string(), // TODO: read from flycast status
         version: env!("CARGO_PKG_VERSION").to_string(),
+        public_relay_url: config.public_relay_url.clone(),
+        public_control_url: config.public_control_url.clone(),
+        public_audio_url: config.public_audio_url.clone(),
     };
 
-    info!("Registering with hub at {}", register_url);
+    info!("Registering input server with hub at {}", register_url);
 
     match client.post(&register_url).json(&payload).send().await {
         Ok(resp) => {
             let status = resp.status();
             match resp.json::<RegisterResponse>().await {
                 Ok(r) if r.ok => {
-                    info!("Hub registration successful — node {} is live", node_id);
+                    info!("Hub registration successful — input server {} is live", node_id);
                 }
                 Ok(r) => {
                     error!(
@@ -261,6 +276,12 @@ pub async fn run(config: HubConfig, state: RelayState) {
                     info!("Hub heartbeat recovered after {} failures", consecutive_failures);
                 }
                 consecutive_failures = 0;
+            }
+            Ok(resp) if resp.status().as_u16() == 404 => {
+                // Hub forgot us (likely restarted with empty in-memory store).
+                // Re-register without restarting the relay process.
+                warn!("Hub returned 404 — re-registering node {}", node_id);
+                let _ = client.post(&register_url).json(&payload).send().await;
             }
             Ok(resp) => {
                 consecutive_failures += 1;

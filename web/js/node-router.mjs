@@ -49,15 +49,15 @@ export async function discoverNodes(limit = 5) {
   try {
     const resp = await fetch(`${nodeState.hubUrl}/nodes/nearby?limit=${limit}`);
     if (!resp.ok) {
-      console.warn('[node-router] Hub /nodes/nearby failed:', resp.status);
+      console.warn('[input-server] Hub /nodes/nearby failed:', resp.status);
       return [];
     }
     const data = await resp.json();
     nodeState.nodes = data.nodes || [];
-    console.log(`[node-router] Discovered ${nodeState.nodes.length} nodes`);
+    console.log(`[input-server] Discovered ${nodeState.nodes.length} input servers`);
     return nodeState.nodes;
   } catch (e) {
-    console.warn('[node-router] Hub unreachable:', e.message);
+    console.warn('[input-server] Hub unreachable:', e.message);
     return [];
   }
 }
@@ -87,7 +87,7 @@ function probeNode(node) {
     };
 
     const timeout = setTimeout(() => {
-      console.warn(`[node-router] Probe timeout for ${node.node_id}`);
+      console.warn(`[input-server] Probe timeout for ${node.node_id}`);
       cleanup();
       resolve(buildResult());
     }, TIMEOUT_MS);
@@ -166,7 +166,7 @@ export async function probeNodes(nodes) {
   if (targets.length === 0) return [];
 
   nodeState.probing = true;
-  console.log(`[node-router] Probing ${targets.length} nodes...`);
+  console.log(`[input-server] Probing ${targets.length} input servers...`);
 
   const results = await Promise.all(targets.map(n => probeNode(n)));
 
@@ -177,7 +177,7 @@ export async function probeNodes(nodes) {
 
   for (const r of results) {
     console.log(
-      `[node-router]   ${r.node_id}: ${r.avg_rtt_ms.toFixed(1)}ms avg (${r.samples.length} samples)`
+      `[input-server]   ${r.node_id}: ${r.avg_rtt_ms.toFixed(1)}ms avg (${r.samples.length} samples)`
     );
   }
 
@@ -212,15 +212,15 @@ export async function reportPings(playerId, sessionId) {
     });
 
     if (!resp.ok) {
-      console.warn('[node-router] Matchmake report failed:', resp.status);
+      console.warn('[input-server] Matchmake report failed:', resp.status);
       return { status: 'error' };
     }
 
     const data = await resp.json();
-    console.log('[node-router] Matchmake response:', data.status);
+    console.log('[input-server] Matchmake response:', data.status);
     return data;
   } catch (e) {
-    console.warn('[node-router] Matchmake report error:', e.message);
+    console.warn('[input-server] Matchmake report error:', e.message);
     return { status: 'error' };
   }
 }
@@ -237,9 +237,9 @@ export async function reportPings(playerId, sessionId) {
 export function assignNode(node) {
   nodeState.assignedNode = node;
   if (node) {
-    console.log(`[node-router] Assigned to node ${node.node_id} → ${node.relay_url}`);
+    console.log(`[input-server] Assigned to input server ${node.node_id} → ${node.relay_url}`);
   } else {
-    console.log('[node-router] Cleared node assignment — using origin server');
+    console.log('[input-server] Cleared input server assignment — using origin server');
   }
 }
 
@@ -249,7 +249,7 @@ export function assignNode(node) {
 export function clearAssignment() {
   nodeState.assignedNode = null;
   nodeState.pingResults = [];
-  console.log('[node-router] Assignment cleared');
+  console.log('[input-server] Assignment cleared');
 }
 
 // ── Auto-discover on load (non-blocking) ────────────────────────────

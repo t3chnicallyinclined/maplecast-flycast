@@ -102,6 +102,19 @@ struct Args {
     /// Public hostname or IP (auto-detected via ifconfig.me if omitted)
     #[arg(long, env = "MAPLECAST_PUBLIC_HOST")]
     public_host: Option<String>,
+
+    /// Override the public relay WS URL (e.g. wss://nobd.net/ws when nginx
+    /// terminates TLS). Defaults to ws://{public_host}:{ws_port}/ws.
+    #[arg(long, env = "MAPLECAST_PUBLIC_RELAY_URL")]
+    public_relay_url: Option<String>,
+
+    /// Override the public control WS URL (e.g. wss://nobd.net/play)
+    #[arg(long, env = "MAPLECAST_PUBLIC_CONTROL_URL")]
+    public_control_url: Option<String>,
+
+    /// Override the public audio WS URL (e.g. wss://nobd.net/audio)
+    #[arg(long, env = "MAPLECAST_PUBLIC_AUDIO_URL")]
+    public_audio_url: Option<String>,
 }
 
 #[tokio::main]
@@ -112,6 +125,22 @@ async fn main() {
                 .unwrap_or_else(|_| "maplecast_relay=info".parse().unwrap()),
         )
         .init();
+
+    // Environment variable aliases: "input server" is the user-facing canonical
+    // name, but historically clap reads MAPLECAST_NODE_*. Promote the alias
+    // values to the canonical names BEFORE clap parses. Canonical wins if both
+    // are set.
+    for (alias, canonical) in [
+        ("MAPLECAST_INPUT_SERVER_NAME", "MAPLECAST_NODE_NAME"),
+        ("MAPLECAST_INPUT_SERVER_REGION", "MAPLECAST_NODE_REGION"),
+    ] {
+        if std::env::var_os(canonical).is_none() {
+            if let Ok(v) = std::env::var(alias) {
+                // SAFETY: single-threaded main, before any tasks spawn
+                unsafe { std::env::set_var(canonical, v); }
+            }
+        }
+    }
 
     let args = Args::parse();
 
@@ -213,6 +242,9 @@ async fn main() {
                     public_host: args.public_host.clone(),
                     ws_listen_port: ws_port,
                     input_port,
+                    public_relay_url: args.public_relay_url.clone(),
+                    public_control_url: args.public_control_url.clone(),
+                    public_audio_url: args.public_audio_url.clone(),
                 };
                 let hub_state = state.clone();
                 info!("Hub registration enabled → {}", url);

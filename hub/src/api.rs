@@ -101,6 +101,9 @@ pub async fn register_node(
         last_heartbeat: now,
         registered_at: now,
         stale_count: 0,
+        public_relay_url: req.public_relay_url,
+        public_control_url: req.public_control_url,
+        public_audio_url: req.public_audio_url,
     };
 
     info!(

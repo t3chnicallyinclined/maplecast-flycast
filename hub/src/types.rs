@@ -68,21 +68,29 @@ pub struct Node {
     pub last_heartbeat: DateTime<Utc>,
     pub registered_at: DateTime<Utc>,
     pub stale_count: u32,
+    /// Operator-supplied public URLs (e.g. behind nginx TLS termination).
+    /// If set, used as-is; otherwise we construct ws://{host}:{port}/ws.
+    pub public_relay_url: Option<String>,
+    pub public_control_url: Option<String>,
+    pub public_audio_url: Option<String>,
 }
 
 impl Node {
     /// Build the full WSS/WS URLs for browser connection
     pub fn relay_url(&self) -> String {
+        if let Some(u) = &self.public_relay_url { return u.clone(); }
         let proto = if self.tls { "wss" } else { "ws" };
         format!("{}://{}:{}/ws", proto, self.public_host, self.ports.relay_ws)
     }
 
     pub fn control_url(&self) -> String {
+        if let Some(u) = &self.public_control_url { return u.clone(); }
         let proto = if self.tls { "wss" } else { "ws" };
         format!("{}://{}:{}/play", proto, self.public_host, self.ports.control_ws)
     }
 
     pub fn audio_url(&self) -> String {
+        if let Some(u) = &self.public_audio_url { return u.clone(); }
         let proto = if self.tls { "wss" } else { "ws" };
         // Audio goes through relay port (nginx proxies /audio on the node)
         format!("{}://{}:{}/audio", proto, self.public_host, self.ports.relay_ws)
@@ -118,6 +126,12 @@ pub struct RegisterRequest {
     pub capacity: NodeCapacity,
     pub rom_hash: String,
     pub version: String,
+    #[serde(default)]
+    pub public_relay_url: Option<String>,
+    #[serde(default)]
+    pub public_control_url: Option<String>,
+    #[serde(default)]
+    pub public_audio_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

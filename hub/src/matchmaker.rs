@@ -89,6 +89,9 @@ mod tests {
             last_heartbeat: Utc::now(),
             registered_at: Utc::now(),
             stale_count: 0,
+            public_relay_url: None,
+            public_control_url: None,
+            public_audio_url: None,
         }
     }
 

@@ -89,20 +89,30 @@ async fn main() {
     });
 
     // Build router
+    //
+    // Two URL prefixes for everything: /nodes (legacy, internal-friendly)
+    // and /input-servers (user-friendly, the canonical name we tell operators).
+    // Both point at the same handlers — no routing logic difference.
     let app = Router::new()
-        // Node management
+        // Input server (node) management — legacy /nodes routes
         .route("/hub/api/nodes/register", post(api::register_node))
         .route("/hub/api/nodes/{id}/heartbeat", post(api::heartbeat))
         .route("/hub/api/nodes/{id}", delete(api::deregister_node))
-        // Public node listing
         .route("/hub/api/nodes", get(api::list_nodes))
         .route("/hub/api/nodes/nearby", get(api::nearby_nodes))
+        // /input-servers/* aliases (user-facing canonical name)
+        .route("/hub/api/input-servers/register", post(api::register_node))
+        .route("/hub/api/input-servers/{id}/heartbeat", post(api::heartbeat))
+        .route("/hub/api/input-servers/{id}", delete(api::deregister_node))
+        .route("/hub/api/input-servers", get(api::list_nodes))
+        .route("/hub/api/input-servers/nearby", get(api::nearby_nodes))
         // Matchmaking
         .route("/hub/api/matchmake", post(api::matchmake))
         .route("/hub/api/matchmake/select", post(api::matchmake_select))
         // Dashboard
         .route("/hub/api/dashboard/stats", get(api::dashboard_stats))
         .route("/hub/api/dashboard/nodes", get(api::dashboard_nodes))
+        .route("/hub/api/dashboard/input-servers", get(api::dashboard_nodes))
         // CORS — the dashboard and browser clients live on different origins
         .layer(CorsLayer::permissive())
         .with_state(store);

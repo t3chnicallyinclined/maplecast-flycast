@@ -101,8 +101,8 @@ for f in relay.js; do
     fi
 done
 
-# Sync skin picker and client settings if they exist
-for f in skin-picker.html client-settings.html; do
+# Sync skin picker, client settings, and network dashboard
+for f in skin-picker.html client-settings.html network.html; do
     if [ -f "$LOCAL_WEB/$f" ]; then
         scp "$LOCAL_WEB/$f" "$VPS_HOST:$REMOTE_DIR/$f"
         echo "  $f deployed"
