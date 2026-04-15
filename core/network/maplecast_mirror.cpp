@@ -452,8 +452,16 @@ void initClient()
 	// This happens when flycast GUI settings change triggers stop()+start().
 	if (_isClient) return;
 
-	// Use WebSocket if MAPLECAST_SERVER_HOST is set, or shm_open fails
-	if (std::getenv("MAPLECAST_SERVER_HOST") || !openShm(false)) {
+	// Use WebSocket if:
+	//   - MAPLECAST_SERVER_HOST is set (explicit host override), or
+	//   - MAPLECAST_HUB_URL is set (want hub-aware discovery), or
+	//   - shm_open fails (no local flycast-server on this machine)
+	// Hub discovery only runs inside the WS path, so if the user sets
+	// MAPLECAST_HUB_URL but there's stale SHM from a previous local run,
+	// we must skip SHM or discovery never triggers.
+	if (std::getenv("MAPLECAST_SERVER_HOST")
+	    || std::getenv("MAPLECAST_HUB_URL")
+	    || !openShm(false)) {
 		initClientWebSocket();
 		return;
 	}
