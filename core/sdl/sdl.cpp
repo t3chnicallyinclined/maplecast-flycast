@@ -18,6 +18,7 @@
 #include "emulator.h"
 #include "stdclass.h"
 #include "imgui.h"
+#include "ui/gui.h"
 #include "ui/gui_competitive_hud.h"
 #include "ui/note_highway.h"
 #include "hw/naomi/card_reader.h"
@@ -362,6 +363,13 @@ void input_sdl_handle()
 							if (event.key.keysym.sym == SDLK_F3) { gui_competitive_hud::toggleInput();   break; }
 							if (event.key.keysym.sym == SDLK_F4) { note_highway::toggle(); break; }
 							if (event.key.keysym.sym == SDLK_F12){ gui_competitive_hud::toggleAll();     break; }
+							// Tab opens the settings panel (same as the gear icon).
+							// In mirror-client mode this surfaces the debug overlay
+							// (gui_display_mirror_settings); in normal mode the
+							// regular settings panel. Matches the historical
+							// "Tab toggles debug" behavior documented in
+							// gui_mirror_debug.h.
+							if (event.key.keysym.sym == SDLK_TAB) { gui_open_settings(); break; }
 						}
 						// Alt-Return and F11 toggle full screen
 						if ((event.key.keysym.sym == SDLK_RETURN && (event.key.keysym.mod & KMOD_ALT))

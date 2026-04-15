@@ -87,9 +87,14 @@ std::vector<InputServer> discover(const std::string& hub_url, int limit) {
 	}
 
 	if (!doc.contains("nodes") || !doc["nodes"].is_array()) {
-		printf("[hub-discovery] Hub response missing 'nodes' array\n");
+		printf("[hub-discovery] Hub response missing 'nodes' array — body: %s\n",
+		       body.substr(0, 200).c_str());
 		return result;
 	}
+
+	size_t total = doc["nodes"].size();
+	size_t skipped_no_host = 0;
+	size_t skipped_not_ready = 0;
 
 	for (const auto& n : doc["nodes"]) {
 		InputServer s;
@@ -111,12 +116,25 @@ std::vector<InputServer> discover(const std::string& hub_url, int limit) {
 		}
 
 		// Skip nodes without a public_host (can't connect to them anyway)
-		if (s.public_host.empty()) continue;
+		if (s.public_host.empty()) {
+			skipped_no_host++;
+			continue;
+		}
 
 		// Only consider ready servers
-		if (s.status != "ready") continue;
+		if (s.status != "ready") {
+			skipped_not_ready++;
+			printf("[hub-discovery]   skipping %s: status='%s' (want 'ready')\n",
+			       s.name.c_str(), s.status.c_str());
+			continue;
+		}
 
 		result.push_back(std::move(s));
+	}
+
+	if (total > 0 && result.empty()) {
+		printf("[hub-discovery]   filter dumped all %zu: %zu no public_host, %zu not ready\n",
+		       total, skipped_no_host, skipped_not_ready);
 	}
 
 	printf("[hub-discovery] Discovered %zu input server(s) from %s\n",
