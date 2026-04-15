@@ -711,10 +711,27 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 		if (!settings.content.path.empty())
 		{
 #ifndef LIBRETRO
+			// Diagnostic: we want to know whether auto-load is actually firing in
+			// headless mode, since savestate auto-load is the workaround for the
+			// MVC2 attract-mode SH4 reset crash.
+			printf("[autoload-debug] path='%s' GGPO=%d AutoLoad=%d NaomiNet=%d multiboard=%d slot=%d\n",
+				settings.content.path.c_str(),
+				(int)config::GGPOEnable,
+				(int)config::AutoLoadState,
+				(int)NaomiNetworkSupported(),
+				(int)settings.naomi.multiboard,
+				(int)config::SavestateSlot);
 			if (config::GGPOEnable)
 				dc_loadstate(-1);
 			else if (config::AutoLoadState && !NaomiNetworkSupported() && !settings.naomi.multiboard)
 				dc_loadstate(config::SavestateSlot);
+			// Headless override: even if AutoLoadState is off, auto-load on
+			// MAPLECAST_HEADLESS_AUTOLOAD=1 so the operator can opt in via env
+			// without fighting the config file.
+			else if (std::getenv("MAPLECAST_HEADLESS_AUTOLOAD")) {
+				printf("[autoload-debug] MAPLECAST_HEADLESS_AUTOLOAD=1 — forcing load\n");
+				dc_loadstate(config::SavestateSlot);
+			}
 #endif
 		}
 
