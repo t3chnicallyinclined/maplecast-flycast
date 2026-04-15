@@ -9,6 +9,7 @@
 */
 
 #include "reios.h"
+#include <cstdlib>  // std::getenv
 
 #include "reios_elf.h"
 
@@ -360,6 +361,19 @@ static void reios_sys_misc()
 	case 1:	// Exit to BIOS menu
 		{
 			WARN_LOG(REIOS, "SYS_MISC 1");
+			// MapleCast: setting PC = 0xA0000000 here crashes the
+			// dynarec (null-deref in bm_GetCode for the reset vector
+			// lookup). For a long-running dedicated server, reboot-to-
+			// BIOS isn't useful anyway — MVC2's attract mode cycle
+			// would otherwise reset the emulator every ~75s. No-op
+			// the syscall: treat it as successful and continue. The
+			// game keeps running from its current PC.
+			if (std::getenv("MAPLECAST_HEADLESS_DISABLE_SYS_MISC_1")) {
+				WARN_LOG(REIOS, "SYS_MISC 1 suppressed (MAPLECAST_HEADLESS_DISABLE_SYS_MISC_1=1)");
+				// Return r0=0 as if the call completed
+				p_sh4rcb->cntx.r[0] = 0;
+				break;
+			}
 			if (gdr::isLoaded()) {
 				// just restart the game
 				p_sh4rcb->cntx.pc = 0xa0000000;

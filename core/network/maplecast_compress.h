@@ -50,12 +50,21 @@ static constexpr uint32_t MCST_MAGIC_COMPRESSED = 0x5453435A; // "ZCST" on the w
 #ifndef MAPLECAST_COMPRESS_ONLY_DECOMPRESS
 
 #include <chrono>
+#include <mutex>
 
 struct MirrorCompressor
 {
 	ZSTD_CCtx* cctx = nullptr;
 	uint8_t*   buf = nullptr;
 	size_t     bufSize = 0;
+	// ZSTD contexts are NOT thread-safe. Real production discovery:
+	// serverPublish() can be invoked from the render thread AND from
+	// other TA-publish paths (SYNC broadcast, forced-sync) — a concurrent
+	// ZSTD_compressCCtx reset-init on the shared cctx corrupts the
+	// workspace and crashes with a bogus-pointer free (e.g. customFree
+	// with ptr=0x3f800000 that's actually a float from the source buffer
+	// we were reading). Serialize all compress() calls here.
+	std::mutex mtx;
 
 	void init(size_t maxInputSize)
 	{
@@ -77,6 +86,7 @@ struct MirrorCompressor
 	const uint8_t* compress(const uint8_t* src, uint32_t srcSize,
 	                        size_t& outSize, uint64_t& compressUs, int level = 1)
 	{
+		std::lock_guard<std::mutex> lk(mtx);
 		auto t0 = std::chrono::high_resolution_clock::now();
 
 		// Header: magic + uncompressed size

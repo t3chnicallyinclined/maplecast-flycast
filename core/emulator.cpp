@@ -643,12 +643,21 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 					if (gdr::initDrive(settings.content.path))
 					{
 						loadGameSpecificSettings();
-						if (config::UseReios || !nvmem::loadFiles())
+						printf("[bios-debug] UseReios cfg=%d; trying nvmem::loadFiles()...\n",
+							(int)config::UseReios);
+						bool filesOk = nvmem::loadFiles();
+						printf("[bios-debug] loadFiles() returned %s\n", filesOk ? "true" : "false");
+						if (config::UseReios || !filesOk)
 						{
 							nvmem::loadHle();
+							printf("[bios-debug] ── LOADED REIOS HLE (no real BIOS active) ──\n");
 							NOTICE_LOG(BOOT, "Did not load BIOS, using reios");
 							if (!config::UseReios && config::UseReios.isReadOnly())
 								os_notify(i18n::T("This game requires a real BIOS"), 15000);
+						}
+						else
+						{
+							printf("[bios-debug] ── REAL DC BIOS LOADED (no REIOS hooks in RAM) ──\n");
 						}
 					}
 					else
