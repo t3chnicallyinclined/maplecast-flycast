@@ -491,6 +491,28 @@ journalctl -u maplecast-relay -n 20 --no-pager | grep -i "ROM hash\|Hub registra
     BEFORE you try to issue Let's Encrypt certs via certbot HTTP-01
     challenge. Otherwise the challenge fails.
 
+11. **MVC2 attract-mode SH4 reset crashes flycast at ~75 seconds**
+    (SIGSEGV in `bm_GetCode` at addr=`0xA0000000`). flycast's dynarec
+    can't handle the SH4 soft-reset MVC2 does at the end of its
+    attract loop. Works equally badly with `Dynarec.Enabled=yes`,
+    `Dynarec.SafeMode=yes`, and `Dynarec.Enabled=no` (interpreter
+    delays it by ~10s but still crashes). **Workaround:**
+    (a) Drop a savestate at `/opt/maplecast/.local/share/flycast/<rom-basename>.state`
+        — for `/opt/maplecast/roms/mvc2.gdi` that's `mvc2.state`
+    (b) Add `Environment=MAPLECAST_HEADLESS_AUTOLOAD=1` via a systemd
+        drop-in for `maplecast-headless.service`
+    The flycast-side config `Dreamcast.AutoLoadState = yes` in emu.cfg
+    is silently ignored by the headless build (separate flycast bug),
+    so the env-var escape hatch is required. Once the savestate loads,
+    the game boots straight to a stable screen (title/char-select) and
+    never reaches the reset code path — stable indefinitely.
+
+    Verification in journal:
+    ```
+    [autoload-debug] MAPLECAST_HEADLESS_AUTOLOAD=1 — forcing load
+    Loaded state ver 853 from /opt/maplecast/.local/share/flycast/mvc2.state size 27785327
+    ```
+
 ## Deploy scripts reference
 
 | Script | What it deploys |
