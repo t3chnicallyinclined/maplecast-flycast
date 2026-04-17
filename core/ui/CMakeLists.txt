@@ -14,6 +14,8 @@ if(NOT LIBRETRO)
             note_highway.h
             gui_maplecast_settings.cpp
             gui_maplecast_settings.h
+            gui_game_overlay.cpp
+            gui_game_overlay.h
             vgamepad.cpp
             vgamepad.h
             gui_chat.h

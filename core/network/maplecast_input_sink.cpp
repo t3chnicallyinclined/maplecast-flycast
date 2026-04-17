@@ -11,6 +11,7 @@
 #include "types.h"
 #include "maplecast_input_sink.h"
 #include "input/gamepad_device.h"
+#include "ui/gui_game_overlay.h"
 
 #include <atomic>
 #include <chrono>
@@ -217,6 +218,11 @@ static void onButton(int port, DreamcastKey key, bool pressed)
 		int64_t zero = 0;
 		_probeStartUs.compare_exchange_strong(zero, nowUs(), std::memory_order_relaxed);
 		sendState();
+		// Record for the input display overlay
+		int gp = _gamepadPort.load(std::memory_order_relaxed);
+		int tp = (gp >= 0 && gp < 4) ? gp : _slot;
+		gui_game_overlay::recordInput(_buttons,
+			(uint8_t)(lt[tp] >> 8), (uint8_t)(rt[tp] >> 8));
 	}
 }
 

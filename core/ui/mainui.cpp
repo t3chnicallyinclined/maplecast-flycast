@@ -30,6 +30,7 @@
 #include "network/maplecast_mirror.h"
 #include "network/maplecast_palette.h"
 #include "gui_maplecast_settings.h"
+#include "gui_game_overlay.h"
 
 #include <chrono>
 #include <thread>
@@ -139,6 +140,7 @@ bool mainui_rend_frame()
 				// on top of the TA frame in the same back buffer.
 				gui_displayMirrorDebug();
 				gui_maplecast_settings::draw();
+				gui_game_overlay::draw();
 				renderer->Present();
 			}
 		}
@@ -148,6 +150,7 @@ bool mainui_rend_frame()
 			// so the gear icon + settings panel stay responsive.
 			gui_displayMirrorDebug();
 			gui_maplecast_settings::draw();
+			gui_game_overlay::draw();
 		}
 	}
 	else
