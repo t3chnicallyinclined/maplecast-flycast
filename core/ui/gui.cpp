@@ -1743,48 +1743,18 @@ void gui_display_osd() {
 #include "gui_game_overlay.h"
 // Gear icon click zone — checked via raw SDL mouse state, not ImGui,
 // because ImGui's click handling conflicts with flycast's DC mouse input.
-static bool _gearWasPressed = false;
-
 void gui_displayMirrorDebug()
 {
 	gui_newFrame();
 	ImGui::NewFrame();
 
-	// Draw a small gear icon in the top-left corner.
-	// Visual only via ImGui; click detection via raw SDL below.
-	ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_Always);
-	ImGui::SetNextWindowBgAlpha(0.5f);
-	ImGui::Begin("##gear_visual", nullptr,
-		ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-		ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
-		ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
-		ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
-	ImGui::TextColored(ImVec4(1, 1, 1, 0.7f), "\xe2\x9a\x99");
-	ImGui::End();
-
-	// Phase 3: always-on competitive HUD (NETWORK / LATENCY / INPUT).
-	// Cheap when sections are hidden — single atomic load returns early.
+	// All overlays draw here, inside NewFrame/Render.
 	gui_competitive_hud::draw();
-
-	// MapleCast settings panel + game data overlay + input display.
-	// Must be inside the ImGui::NewFrame/Render block to actually render.
 	gui_maplecast_settings::draw();
 	gui_game_overlay::draw();
 
 	ImGui::Render();
 	gui_endFrame(true);
-
-	// Raw SDL click detection on the gear zone (top-left 40x40 px).
-	// This bypasses ImGui entirely — no WantCaptureMouse conflicts.
-#ifdef USE_SDL
-	int mx, my;
-	Uint32 mstate = SDL_GetMouseState(&mx, &my);
-	bool pressed = (mstate & SDL_BUTTON_LMASK) != 0;
-	if (pressed && !_gearWasPressed && mx < 40 && my < 40) {
-		gui_open_settings();
-	}
-	_gearWasPressed = pressed;
-#endif
 }
 
 void gui_display_profiler()

@@ -60,13 +60,11 @@ static std::mutex _historyMtx;
 static uint32_t _totalInputFrames = 0;
 
 // ── Layout ───────────────────────────────────────────────────────────
+// Draggable, no resize, auto-size. Title bar acts as drag handle.
 static const ImGuiWindowFlags OVL_FLAGS =
-	ImGuiWindowFlags_NoDecoration |
-	ImGuiWindowFlags_NoMove |
 	ImGuiWindowFlags_NoResize |
 	ImGuiWindowFlags_AlwaysAutoResize |
 	ImGuiWindowFlags_NoSavedSettings |
-	ImGuiWindowFlags_NoInputs |
 	ImGuiWindowFlags_NoFocusOnAppearing |
 	ImGuiWindowFlags_NoNav;
 
@@ -108,9 +106,11 @@ static void drawGameData()
 	if (!gs.in_match) return;
 
 	float dispW = ImGui::GetIO().DisplaySize.x;
-	ImGui::SetNextWindowPos(ImVec2(dispW / 2 - 200, 4), ImGuiCond_Always);
+	ImGui::SetNextWindowPos(ImVec2(dispW / 2 - 200, 4), ImGuiCond_FirstUseEver);
 	ImGui::SetNextWindowBgAlpha(0.7f);
-	ImGui::Begin("##game_data", nullptr, OVL_FLAGS);
+	bool showGD = true;
+	ImGui::Begin("Game Data", &showGD, OVL_FLAGS);
+	if (!showGD) { _showGameData.store(false); ImGui::End(); return; }
 
 	// Top bar: P1 chars | timer | P2 chars
 	auto& p1 = gs.chars[0]; // P1 point
@@ -156,18 +156,24 @@ static void drawGameData()
 
 // ── Input Display Section ────────────────────────────────────────────
 
-// Draw a single button cell — filled if pressed, outlined if not
-static void drawBtn(ImDrawList* dl, float x, float y, float sz,
-                     const char* label, bool pressed)
+// Draw a controller face button — circle that lights up on press
+static void drawBtn(ImDrawList* dl, float cx, float cy, float r,
+                     const char* label, bool pressed, ImU32 activeColor)
 {
-	ImU32 fill = pressed ? IM_COL32(80, 180, 255, 220) : IM_COL32(40, 40, 40, 120);
-	ImU32 border = pressed ? IM_COL32(200, 230, 255, 255) : IM_COL32(100, 100, 100, 150);
-	dl->AddRectFilled(ImVec2(x, y), ImVec2(x + sz, y + sz), fill, 3.0f);
-	dl->AddRect(ImVec2(x, y), ImVec2(x + sz, y + sz), border, 3.0f);
+	ImU32 fill = pressed ? activeColor : IM_COL32(50, 50, 55, 180);
+	ImU32 border = pressed ? IM_COL32(255, 255, 255, 240) : IM_COL32(90, 90, 100, 200);
+	// Outer ring
+	dl->AddCircleFilled(ImVec2(cx, cy), r, fill, 20);
+	dl->AddCircle(ImVec2(cx, cy), r, border, 20, pressed ? 2.5f : 1.5f);
+	// Inner highlight when pressed
+	if (pressed)
+		dl->AddCircleFilled(ImVec2(cx, cy - r * 0.15f), r * 0.6f,
+		                    IM_COL32(255, 255, 255, 60), 16);
+	// Label
 	if (label[0]) {
 		ImVec2 tsz = ImGui::CalcTextSize(label);
-		dl->AddText(ImVec2(x + (sz - tsz.x) * 0.5f, y + (sz - tsz.y) * 0.5f),
-		            pressed ? IM_COL32(255, 255, 255, 255) : IM_COL32(150, 150, 150, 180),
+		dl->AddText(ImVec2(cx - tsz.x * 0.5f, cy - tsz.y * 0.5f),
+		            pressed ? IM_COL32(255, 255, 255, 255) : IM_COL32(140, 140, 150, 200),
 		            label);
 	}
 }
@@ -210,9 +216,11 @@ static void drawInputDisplay()
 	}
 
 	float dispH = ImGui::GetIO().DisplaySize.y;
-	ImGui::SetNextWindowPos(ImVec2(8, dispH - 180), ImGuiCond_Always);
+	ImGui::SetNextWindowPos(ImVec2(8, dispH - 220), ImGuiCond_FirstUseEver);
 	ImGui::SetNextWindowBgAlpha(0.7f);
-	ImGui::Begin("##input_display", nullptr, OVL_FLAGS);
+	bool showInp = true;
+	ImGui::Begin("Input Display", &showInp, OVL_FLAGS);
+	if (!showInp) { _showInput.store(false); ImGui::End(); return; }
 
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	ImVec2 wp = ImGui::GetWindowPos();
@@ -229,34 +237,44 @@ static void drawInputDisplay()
 	bool y = !(cur.buttons & DC_BTN_Y);
 	bool z = !(cur.buttons & DC_BTN_Z);
 
-	float sz = 22.0f;
-	float pad = 3.0f;
-	float ox = wp.x + 8;
-	float oy = wp.y + 8;
+	float r = 14.0f;    // button radius
+	float gap = 6.0f;   // between buttons
+	float ox = wp.x + 30;
+	float oy = wp.y + 30;
 
-	// Stick
-	drawStick(dl, ox + 20, oy + 20, 18, up, down, left, right);
+	// Stick (left side)
+	drawStick(dl, ox, oy + 10, 20, up, down, left, right);
 
-	// MVC2 layout: LP MP HP / LK MK HK
-	float bx = ox + 50;
-	drawBtn(dl, bx,              oy,        sz, "LP", a);  // A = LP
-	drawBtn(dl, bx + sz + pad,   oy,        sz, "MP", b);  // B = MP
-	drawBtn(dl, bx + 2*(sz+pad), oy,        sz, "HP", c);  // C = HP
-	drawBtn(dl, bx,              oy+sz+pad, sz, "LK", x);  // X = LK
-	drawBtn(dl, bx + sz + pad,   oy+sz+pad, sz, "MK", y);  // Y = MK
-	drawBtn(dl, bx + 2*(sz+pad), oy+sz+pad, sz, "HK", z);  // Z = HK
+	// MVC2 button colors: punches = blue tones, kicks = red/orange tones
+	// Layout matches arcade panel:  LP  MP  HP
+	//                                LK  MK  HK
+	ImU32 colLP = IM_COL32(80, 160, 255, 230);   // light blue
+	ImU32 colMP = IM_COL32(60, 120, 220, 230);   // medium blue
+	ImU32 colHP = IM_COL32(40, 80, 200, 230);    // dark blue
+	ImU32 colLK = IM_COL32(255, 140, 60, 230);   // light orange
+	ImU32 colMK = IM_COL32(230, 100, 40, 230);   // medium orange
+	ImU32 colHK = IM_COL32(200, 60, 30, 230);    // dark red
 
-	// Triggers
-	ImGui::Dummy(ImVec2(bx + 3*(sz+pad) - ox + 8, 2*(sz+pad) + 8));
-	if (cur.lt > 10)
-		ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "A1:%d", cur.lt);
-	else
-		ImGui::TextColored(DIM, "A1");
-	ImGui::SameLine();
-	if (cur.rt > 10)
-		ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "A2:%d", cur.rt);
-	else
-		ImGui::TextColored(DIM, "A2");
+	float bx = ox + 55;
+	float by = oy - 4;
+	float sp = r * 2 + gap;
+	// Punch row (top)
+	drawBtn(dl, bx,        by,      r, "LP", a, colLP);
+	drawBtn(dl, bx + sp,   by,      r, "MP", b, colMP);
+	drawBtn(dl, bx + sp*2, by,      r, "HP", c, colHP);
+	// Kick row (bottom)
+	drawBtn(dl, bx,        by + sp, r, "LK", x, colLK);
+	drawBtn(dl, bx + sp,   by + sp, r, "MK", y, colMK);
+	drawBtn(dl, bx + sp*2, by + sp, r, "HK", z, colHK);
+
+	// Assist triggers (shoulder buttons)
+	float trigY = by + sp * 2 + 4;
+	ImU32 colTrig = IM_COL32(160, 100, 220, 230); // purple
+	drawBtn(dl, bx,      trigY, r * 0.8f, "A1", cur.lt > 30, colTrig);
+	drawBtn(dl, bx + sp, trigY, r * 0.8f, "A2", cur.rt > 30, colTrig);
+
+	// Reserve space for the button area
+	ImGui::Dummy(ImVec2(bx + sp * 2 + r - ox + 30, sp * 2 + r * 2 + 8));
 
 	// ── Scrolling input history ──────────────────────────────────
 	// Each column = 1 frame, each row = 1 button. 60 columns visible.
