@@ -636,10 +636,36 @@ void gui_plot_render_time(int width, int height)
 
 void gui_open_settings()
 {
-	// Mirror client: open the native flycast settings panel (same as normal mode).
-	// The HTML settings page was removed in favor of the built-in UI.
+	// Mirror client: open the HTML settings page in the default browser.
+	// Connects to the control WS on localhost:7211 for live config get/set.
+	// The page uses the source tree path, not PWD (which may be different).
 	if (maplecast_mirror::isClient()) {
-		gui_setState(GuiState::Settings);
+		int port = 7211;
+		if (const char* cp = std::getenv("MAPLECAST_CONTROL_PORT"))
+			port = std::atoi(cp);
+		// Use the compile-time source dir so it works regardless of CWD
+		char url[512];
+		snprintf(url, sizeof(url),
+			"file://" __FILE__ "/../../network/../../../web/client-settings.html?port=%d", port);
+		// Simpler: just use a known absolute path relative to the binary
+		// Try the source tree path first, then fall back
+		const char* paths[] = {
+			"/home/tris/projects/maplecast-flycast/web/client-settings.html",
+			"web/client-settings.html",
+			nullptr
+		};
+		for (int i = 0; paths[i]; i++) {
+			FILE* f = fopen(paths[i], "r");
+			if (f) {
+				fclose(f);
+				snprintf(url, sizeof(url), "file://%s?port=%d", paths[i], port);
+				break;
+			}
+		}
+		char cmd[600];
+		snprintf(cmd, sizeof(cmd), "xdg-open '%s' &", url);
+		printf("[MIRROR] Opening settings: %s\n", url);
+		(void)system(cmd);
 		return;
 	}
 

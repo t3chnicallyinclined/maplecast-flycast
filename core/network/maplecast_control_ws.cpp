@@ -57,6 +57,7 @@
 #include "input/gamepad.h"
 #include "input/mapping.h"
 #include "maplecast_input_sink.h"
+#include "maplecast_gamestate.h"
 #include "maplecast_palette.h"
 
 extern u32 kcode[4];
@@ -1056,6 +1057,34 @@ static void onMessage(ControlConnHdl hdl, ControlWsServer::message_ptr msg)
 			{"lt1", (unsigned)(lt[1] >> 8)},
 			{"rt1", (unsigned)(rt[1] >> 8)},
 		};
+
+		// Append game state if available (client receives GSTA from server)
+		maplecast_gamestate::GameState gs;
+		if (maplecast_mirror::getClientGameState(gs)) {
+			json game;
+			game["in_match"] = (bool)gs.in_match;
+			game["timer"] = gs.game_timer;
+			game["stage"] = gs.stage_id;
+			game["frame"] = gs.frame_counter;
+			game["p1_combo"] = gs.p1_combo;
+			game["p2_combo"] = gs.p2_combo;
+			game["p1_meter"] = gs.p1_meter_level;
+			game["p2_meter"] = gs.p2_meter_level;
+			json chars = json::array();
+			for (int i = 0; i < 6; i++) {
+				chars.push_back({
+					{"active", (bool)gs.chars[i].active},
+					{"id", gs.chars[i].character_id},
+					{"health", gs.chars[i].health},
+					{"red_health", gs.chars[i].red_health},
+					{"pos_x", gs.chars[i].pos_x},
+					{"pos_y", gs.chars[i].pos_y},
+					{"anim_state", gs.chars[i].animation_state},
+				});
+			}
+			game["chars"] = chars;
+			data["game"] = game;
+		}
 		sendJson(hdl, json{
 			{"ok", true}, {"cmd", "telemetry"}, {"reply_id", reply_id}, {"data", data},
 		});
