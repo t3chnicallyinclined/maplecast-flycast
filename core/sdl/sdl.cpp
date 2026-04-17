@@ -20,6 +20,7 @@
 #include "imgui.h"
 #include "ui/gui.h"
 #include "ui/gui_competitive_hud.h"
+#include "ui/gui_maplecast_settings.h"
 #include "ui/note_highway.h"
 #include "hw/naomi/card_reader.h"
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(__SWITCH__)
@@ -370,6 +371,7 @@ void input_sdl_handle()
 							// "Tab toggles debug" behavior documented in
 							// gui_mirror_debug.h.
 							if (event.key.keysym.sym == SDLK_TAB) { gui_open_settings(); break; }
+							if (event.key.keysym.sym == SDLK_BACKQUOTE) { gui_maplecast_settings::toggle(); break; }
 						}
 						// Alt-Return and F11 toggle full screen
 						if ((event.key.keysym.sym == SDLK_RETURN && (event.key.keysym.mod & KMOD_ALT))

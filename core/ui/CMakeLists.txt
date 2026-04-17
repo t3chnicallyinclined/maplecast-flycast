@@ -12,6 +12,8 @@ if(NOT LIBRETRO)
             gui_competitive_hud.h
             note_highway.cpp
             note_highway.h
+            gui_maplecast_settings.cpp
+            gui_maplecast_settings.h
             vgamepad.cpp
             vgamepad.h
             gui_chat.h

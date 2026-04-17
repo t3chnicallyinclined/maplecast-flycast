@@ -29,6 +29,7 @@
 #include "oslib/i18n.h"
 #include "network/maplecast_mirror.h"
 #include "network/maplecast_palette.h"
+#include "gui_maplecast_settings.h"
 
 #include <chrono>
 #include <thread>
@@ -137,6 +138,7 @@ bool mainui_rend_frame()
 				// Present swaps the buffer — so the overlay is composited
 				// on top of the TA frame in the same back buffer.
 				gui_displayMirrorDebug();
+				gui_maplecast_settings::draw();
 				renderer->Present();
 			}
 		}
@@ -145,6 +147,7 @@ bool mainui_rend_frame()
 			// No new server frame this iteration — still pump the overlay
 			// so the gear icon + settings panel stay responsive.
 			gui_displayMirrorDebug();
+			gui_maplecast_settings::draw();
 		}
 	}
 	else
