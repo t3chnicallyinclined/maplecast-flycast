@@ -417,6 +417,9 @@ void directUpdate(uint16_t buttons, uint8_t newLt, uint8_t newRt)
 	lt[tp] = (uint16_t)newLt << 8;
 	rt[tp] = (uint16_t)newRt << 8;
 	_buttonChanges.fetch_add(1, std::memory_order_relaxed);
+	// Arm E2E probe — same as onButton path
+	int64_t zero = 0;
+	_probeStartUs.compare_exchange_strong(zero, nowUs(), std::memory_order_relaxed);
 	sendState();
 }
 
