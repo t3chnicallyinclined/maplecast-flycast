@@ -46,6 +46,13 @@ struct GameState {
 	float    camera_y;
 	uint32_t frame_counter;
 	CharacterState chars[6];
+	// Raw input state from the server's kcode[]/lt[]/rt[] — the same
+	// values the game reads at vblank. NEVER hardcode button mappings
+	// on the client — always read from this authoritative source.
+	uint16_t p1_buttons;  // active-low DC button bits
+	uint16_t p2_buttons;
+	uint8_t  p1_lt, p1_rt;
+	uint8_t  p2_lt, p2_rt;
 };
 
 // Read current MVC2 game state from Flycast's emulated RAM
@@ -68,7 +75,9 @@ void deserialize(const uint8_t* buf, int len, GameState& state);
 // they sync naturally between server+client instances running the same ROM.
 // 253 bytes achieves 99.7%+ visual match rate. Remaining 0.3% is stage
 // background animation and sub-frame interpolation jitter.
-static constexpr int WIRE_SIZE = 5 + 2+2+2+2 + 4+4+4 + 6*38; // = 253 bytes
+// 253 legacy + 8 raw input = 261 bytes total
+// NEVER hardcode button mappings on the client — read p1_buttons/p2_buttons.
+static constexpr int WIRE_SIZE = 5 + 2+2+2+2 + 4+4+4 + 6*38 + 2+2+1+1+1+1; // = 261
 
 // Patch the in-game "PLAYER" + "1"/"2" text with custom names
 // slot: 0=P1, 1=P2. name: up to 10 chars (null-terminated)

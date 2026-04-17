@@ -5,6 +5,10 @@
 #include "maplecast_gamestate.h"
 #include "hw/sh4/sh4_mem.h"
 
+// Gamepad globals — authoritative input state read by the game at vblank
+extern u32 kcode[4];
+extern u16 lt[4], rt[4];
+
 namespace maplecast_gamestate
 {
 
@@ -114,6 +118,17 @@ void readGameState(GameState& state)
 		c.palette_id      = (uint8_t)addrspace::read8(base + OFF_PALETTE);
 		c.anim_pointer    = addrspace::read32(base + OFF_ANIM_POINTER);
 	}
+
+	// Raw input state — read from the SAME kcode[]/lt[]/rt[] globals the
+	// game reads at vblank. This is the authoritative input source.
+	// NEVER hardcode button-to-action mappings on the client — always
+	// read these values from the server's game state broadcast.
+	state.p1_buttons = (uint16_t)(kcode[0] & 0xFFFF);
+	state.p2_buttons = (uint16_t)(kcode[1] & 0xFFFF);
+	state.p1_lt = (uint8_t)(lt[0] >> 8);
+	state.p1_rt = (uint8_t)(rt[0] >> 8);
+	state.p2_lt = (uint8_t)(lt[1] >> 8);
+	state.p2_rt = (uint8_t)(rt[1] >> 8);
 }
 
 // Write float to DC memory
@@ -217,7 +232,15 @@ int serialize(const GameState& state, uint8_t* buf, int maxLen)
 		// total: 38 bytes per character
 	}
 
-	return off;  // should be WIRE_SIZE = 253
+	// Raw input state (8 bytes) — appended AFTER the 253-byte legacy block
+	writeU16(buf, off, state.p1_buttons);
+	writeU16(buf, off, state.p2_buttons);
+	writeU8(buf, off, state.p1_lt);
+	writeU8(buf, off, state.p1_rt);
+	writeU8(buf, off, state.p2_lt);
+	writeU8(buf, off, state.p2_rt);
+
+	return off;  // WIRE_SIZE = 253 + 8 = 261
 }
 
 // Deserialize from network bytes back to GameState — exact reverse of serialize
@@ -264,6 +287,20 @@ void deserialize(const uint8_t* buf, int len, GameState& state)
 		c.sprite_id       = readBufU16(buf, off);
 		c.animation_state = readBufU16(buf, off);
 		c.anim_timer      = readBufU16(buf, off);
+	}
+
+	// Raw input state (8 bytes) — read if present (new format)
+	if (len >= off + 8) {
+		state.p1_buttons = readBufU16(buf, off);
+		state.p2_buttons = readBufU16(buf, off);
+		state.p1_lt      = readBufU8(buf, off);
+		state.p1_rt      = readBufU8(buf, off);
+		state.p2_lt      = readBufU8(buf, off);
+		state.p2_rt      = readBufU8(buf, off);
+	} else {
+		state.p1_buttons = 0xFFFF;
+		state.p2_buttons = 0xFFFF;
+		state.p1_lt = state.p1_rt = state.p2_lt = state.p2_rt = 0;
 	}
 }
 

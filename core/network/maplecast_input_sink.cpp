@@ -218,11 +218,21 @@ static void onButton(int port, DreamcastKey key, bool pressed)
 		int64_t zero = 0;
 		_probeStartUs.compare_exchange_strong(zero, nowUs(), std::memory_order_relaxed);
 		sendState();
-		// Record for input display overlay — use _buttons which has full state
+		// Record for input display overlay
 		int gp = _gamepadPort.load(std::memory_order_relaxed);
 		int tp = (gp >= 0 && gp < 4) ? gp : _slot;
 		gui_game_overlay::recordInput(_buttons,
 			(uint8_t)(lt[tp] >> 8), (uint8_t)(rt[tp] >> 8));
+
+		// Debug: log which DC key bit is actually set
+		static uint16_t _prevDbg = 0xFFFF;
+		if (_buttons != _prevDbg) {
+			uint16_t changed = _prevDbg ^ _buttons;
+			printf("[input-dbg] buttons=0x%04x key=0x%x %s (changed=0x%04x)\n",
+			       _buttons, (unsigned)key, pressed ? "DOWN" : "UP", changed);
+			fflush(stdout);
+			_prevDbg = _buttons;
+		}
 	}
 }
 
