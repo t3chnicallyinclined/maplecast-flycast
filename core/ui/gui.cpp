@@ -1739,6 +1739,8 @@ void gui_display_osd() {
 // access to gui.cpp's file-static imguiDriver/gui_newFrame/gui_endFrame.
 #include "gui_mirror_debug.h"
 #include "gui_competitive_hud.h"
+#include "gui_maplecast_settings.h"
+#include "gui_game_overlay.h"
 // Gear icon click zone — checked via raw SDL mouse state, not ImGui,
 // because ImGui's click handling conflicts with flycast's DC mouse input.
 static bool _gearWasPressed = false;
@@ -1763,6 +1765,11 @@ void gui_displayMirrorDebug()
 	// Phase 3: always-on competitive HUD (NETWORK / LATENCY / INPUT).
 	// Cheap when sections are hidden — single atomic load returns early.
 	gui_competitive_hud::draw();
+
+	// MapleCast settings panel + game data overlay + input display.
+	// Must be inside the ImGui::NewFrame/Render block to actually render.
+	gui_maplecast_settings::draw();
+	gui_game_overlay::draw();
 
 	ImGui::Render();
 	gui_endFrame(true);
