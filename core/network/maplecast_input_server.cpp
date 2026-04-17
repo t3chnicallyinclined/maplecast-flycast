@@ -458,10 +458,14 @@ static std::atomic<uint64_t> _dedupCount{0};
 static std::atomic<uint64_t> _lastInputArrivalUs[2] = {0, 0};
 // Client-side CLOCK_MONOTONIC µs from the 19-byte packet (different clock domain).
 static std::atomic<uint64_t> _lastInputClientTs[2] = {0, 0};
+// Sequence number of the last arrival (so latch can detect "new since last check")
+static std::atomic<uint32_t> _lastInputArrivalSeq[2] = {0, 0};
 // Input age at vblank: how many µs old the input was when the game latched it.
 // Written at vblank, read by telemetry/HUD. EMA with α=1/16.
 static std::atomic<int64_t> _inputAgeAtLatchUs[2] = {0, 0};
 static std::atomic<int64_t> _inputAgeEmaUs[2] = {0, 0};
+// Last seq seen by measureInputAge, to detect new packets
+static uint32_t _latchLastSeq[2] = {0, 0};
 
 static inline int64_t nowUs()
 {
@@ -909,21 +913,22 @@ static void udpThreadLoop(int port)
 
 			// Extract client timestamp if present (19-byte format).
 			// Store the SERVER arrival time alongside it for vblank-age calc.
-			if (n == 19) {
-				uint64_t clientTs = (uint64_t)buf[11]
-				                  | ((uint64_t)buf[12] << 8)
-				                  | ((uint64_t)buf[13] << 16)
-				                  | ((uint64_t)buf[14] << 24)
-				                  | ((uint64_t)buf[15] << 32)
-				                  | ((uint64_t)buf[16] << 40)
-				                  | ((uint64_t)buf[17] << 48)
-				                  | ((uint64_t)buf[18] << 56);
+			{
 				uint64_t serverArrival = nowUs();
-				// Store for vblank-age measurement. Per-slot atomic so the
-				// latch code can read without locking.
 				_lastInputArrivalUs[claimedSlot].store(serverArrival, std::memory_order_relaxed);
-				_lastInputClientTs[claimedSlot].store(clientTs, std::memory_order_relaxed);
-				(void)clientTs; // used below for logging
+				_lastInputArrivalSeq[claimedSlot].store(seq, std::memory_order_relaxed);
+
+				if (n == 19) {
+					uint64_t clientTs = (uint64_t)buf[11]
+					                  | ((uint64_t)buf[12] << 8)
+					                  | ((uint64_t)buf[13] << 16)
+					                  | ((uint64_t)buf[14] << 24)
+					                  | ((uint64_t)buf[15] << 32)
+					                  | ((uint64_t)buf[16] << 40)
+					                  | ((uint64_t)buf[17] << 48)
+					                  | ((uint64_t)buf[18] << 56);
+					_lastInputClientTs[claimedSlot].store(clientTs, std::memory_order_relaxed);
+				}
 			}
 
 			// Per-source-IP dedup. Map: source-key → last seq seen.
@@ -1498,9 +1503,15 @@ bool active()
 int64_t measureInputAge(int slot)
 {
 	if (slot < 0 || slot > 1) return 0;
-	uint64_t arrival = _lastInputArrivalUs[slot].load(std::memory_order_relaxed);
-	if (arrival == 0) return 0;  // no timestamped packet yet
 
+	// Only measure when a NEW packet arrived since our last check.
+	// Otherwise we'd report stale age that grows unbounded during idle.
+	uint32_t curSeq = _lastInputArrivalSeq[slot].load(std::memory_order_relaxed);
+	if (curSeq == 0 || curSeq == _latchLastSeq[slot])
+		return _inputAgeAtLatchUs[slot].load(std::memory_order_relaxed);
+	_latchLastSeq[slot] = curSeq;
+
+	uint64_t arrival = _lastInputArrivalUs[slot].load(std::memory_order_relaxed);
 	uint64_t now = nowUs();
 	int64_t age = (int64_t)(now - arrival);
 
@@ -1510,6 +1521,15 @@ int64_t measureInputAge(int slot)
 	int64_t prev = _inputAgeEmaUs[slot].load(std::memory_order_relaxed);
 	int64_t ema = prev + ((age - prev) >> 4);
 	_inputAgeEmaUs[slot].store(ema, std::memory_order_relaxed);
+
+	// Log every 300 NEW samples (~5 seconds of active play)
+	static uint32_t _logCounter[2] = {0, 0};
+	if (++_logCounter[slot] >= 300) {
+		_logCounter[slot] = 0;
+		printf("[input-age] P%d: last=%.2fms ema=%.2fms (packet→latch)\n",
+		       slot + 1, age / 1000.0, ema / 1000.0);
+		fflush(stdout);
+	}
 
 	return age;
 }
