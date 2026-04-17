@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <string>
+#include "maplecast_gamestate.h"
 
 struct rend_context;
 struct TA_context;
@@ -126,6 +127,9 @@ ClientStats getClientStats();
 
 // Reset the arrivalMaxUs peak watermark. All other counters keep running.
 void resetClientStatsPeaks();
+
+// Game state from server (for overlay/HUD). Returns false if no state received yet.
+bool getClientGameState(maplecast_gamestate::GameState& out);
 
 // Force the video WS client to drop its current connection. The receive
 // thread sees the close and the existing reconnect loop picks it up.

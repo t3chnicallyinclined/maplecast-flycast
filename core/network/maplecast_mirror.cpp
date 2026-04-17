@@ -54,6 +54,7 @@ uint64_t g_activePalBanks = 0;
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include "maplecast_gamestate.h"
 #include <errno.h>
 
 
@@ -114,6 +115,11 @@ static std::atomic<int64_t>  _clientLastArrivalUs{0};
 static std::atomic<int64_t>  _clientArrivalEmaUs{0};
 static std::atomic<int64_t>  _clientArrivalMaxUs{0};
 static std::atomic<bool>     _clientWsConnected{false};
+
+// Game state received from server (for overlay/HUD)
+static maplecast_gamestate::GameState _clientGameState{};
+static std::mutex _clientGameStateMtx;
+static std::atomic<bool> _clientGameStateReady{false};
 
 // Fast hash for VRAM comparison (sample every 64th byte for speed)
 static uint64_t fastVramHash()
@@ -493,11 +499,13 @@ void initClient()
 		// (they're diffed per-frame anyway, but this gives us a clean start)
 
 		memwatch::unprotect();
-		renderer->resetTextureCache = true;
+		if (renderer) {
+			renderer->resetTextureCache = true;
+			renderer->updatePalette = true;
+		}
 		pal_needs_update = true;
 		palette_update();
-		renderer->updatePalette = true;
-		renderer->updateFogTable = true;
+		if (renderer) renderer->updateFogTable = true;
 
 		_clientFrameCount = hdr->frame_count;
 		printf("[MIRROR] === CLIENT MODE === synced at frame %lu (direct memory copy)\n", _clientFrameCount);
@@ -712,12 +720,25 @@ static void wsClientRun(std::string host, int port)
 			_clientWsConnected.store(false, std::memory_order_release);
 			break;
 		}
-		// Audio packet — skip. The native flycast mirror client now has its
-		// own dedicated audio WS (maplecast_audio_client) on port+3, so we
-		// should never see 0xAD 0x10 on the video pipe anymore. Keep the
-		// defensive skip in case a mis-configured server sends one.
+		// Audio packet — skip (native client has dedicated audio WS)
 		if (frame.size() >= 4 && frame[0] == 0xAD && frame[1] == 0x10)
 			continue;
+
+		// Game state packet — "GSTA" magic + 253-byte serialized MVC2 state.
+		// Deserialize into a shared GameState struct for the overlay/HUD.
+		if (frame.size() >= 4 && frame[0] == 'G' && frame[1] == 'S'
+		    && frame[2] == 'T' && frame[3] == 'A') {
+			if (frame.size() >= 4 + maplecast_gamestate::WIRE_SIZE) {
+				maplecast_gamestate::GameState gs;
+				maplecast_gamestate::deserialize(frame.data() + 4,
+				    (int)(frame.size() - 4), gs);
+				// Store atomically for the overlay thread
+				std::lock_guard<std::mutex> lk(_clientGameStateMtx);
+				_clientGameState = gs;
+				_clientGameStateReady.store(true, std::memory_order_release);
+			}
+			continue;
+		}
 
 		// ---- Client-side arrival telemetry (video WS) ----
 		{
@@ -1010,6 +1031,15 @@ ClientStats getClientStats()
 	s.arrivalEmaUs     = _clientArrivalEmaUs.load(std::memory_order_relaxed);
 	s.arrivalMaxUs     = _clientArrivalMaxUs.load(std::memory_order_relaxed);
 	return s;
+}
+
+bool getClientGameState(maplecast_gamestate::GameState& out)
+{
+	if (!_clientGameStateReady.load(std::memory_order_acquire))
+		return false;
+	std::lock_guard<std::mutex> lk(_clientGameStateMtx);
+	out = _clientGameState;
+	return true;
 }
 
 void resetClientStatsPeaks()
@@ -1462,6 +1492,20 @@ done_diff:
 		const uint8_t* compData = _compressor.compress(dstStart, totalSize, compSize, compressUs);
 		maplecast_ws::broadcastBinary(compData, compSize);
 		compressedSize = (uint32_t)compSize;
+
+		// Broadcast game state every 3 frames (~20Hz). "GSTA" magic +
+		// 253-byte serialized MVC2 state. Native client parses this for
+		// the hitbox/frame-data overlay. Negligible bandwidth (~1.7 KB/s).
+		static uint32_t _gsCounter = 0;
+		if (++_gsCounter >= 3) {
+			_gsCounter = 0;
+			maplecast_gamestate::GameState gs;
+			maplecast_gamestate::readGameState(gs);
+			uint8_t gsBuf[4 + maplecast_gamestate::WIRE_SIZE];
+			gsBuf[0] = 'G'; gsBuf[1] = 'S'; gsBuf[2] = 'T'; gsBuf[3] = 'A';
+			maplecast_gamestate::serialize(gs, gsBuf + 4, maplecast_gamestate::WIRE_SIZE);
+			maplecast_ws::broadcastBinary(gsBuf, 4 + maplecast_gamestate::WIRE_SIZE);
+		}
 	}
 
 	// Update telemetry
