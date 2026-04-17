@@ -324,6 +324,18 @@ else()
 	target_compile_options(${PROJECT_NAME} PRIVATE
 		$<$<COMPILE_LANGUAGE:CXX>:-fno-strict-aliasing>
 		$<$<COMPILE_LANGUAGE:CXX>:-Wall>)
+
+	# LTO + native tuning for release builds — 5-15% speedup
+	if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+		include(CheckIPOSupported)
+		check_ipo_supported(RESULT lto_supported)
+		if(lto_supported)
+			set_property(TARGET ${PROJECT_NAME} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+			message(STATUS "LTO enabled for ${PROJECT_NAME}")
+		endif()
+		target_compile_options(${PROJECT_NAME} PRIVATE -march=native)
+		message(STATUS "Native CPU tuning enabled (-march=native)")
+	endif()
 endif()
 
 if(APPLE AND NOT IOS)

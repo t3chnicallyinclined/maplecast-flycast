@@ -52,6 +52,7 @@ uint64_t g_activePalBanks = 0;
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include "maplecast_gamestate.h"
@@ -657,7 +658,9 @@ static void wsClientRun(std::string host, int port)
 		close(_wsFd); _wsFd = -1; freeaddrinfo(res); return;
 	}
 	freeaddrinfo(res);
-	printf("[MIRROR-WS] TCP connected\n"); fflush(stdout);
+	int one = 1;
+	setsockopt(_wsFd, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
+	printf("[MIRROR-WS] TCP connected (NODELAY)\n"); fflush(stdout);
 
 	if (!wsHandshake(_wsFd, host.c_str(), port)) {
 		printf("[MIRROR-WS] WebSocket handshake failed\n");
