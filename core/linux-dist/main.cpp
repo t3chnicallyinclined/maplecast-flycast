@@ -351,7 +351,9 @@ int main(int argc, char* argv[])
 	flycast_term();
 	os_UninstallFaultHandler();
 
-	return 0;
+	// Mirror client detaches WS threads that can outlive main().
+	// Force-exit to avoid hanging processes that steal server slots.
+	_exit(0);
 }
 
 [[noreturn]] void os_DebugBreak()

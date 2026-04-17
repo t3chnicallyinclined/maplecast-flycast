@@ -114,7 +114,7 @@ static int _pendingKickSlot = -1; // loser slot to evict if client doesn't self-
 // Idle-kick threshold: a connected player who hasn't sent a button-state
 // CHANGE in this many microseconds gets evicted from their slot. The clock
 // is seeded fresh on join/reconnect so a slow joiner has the full window.
-static constexpr int64_t IDLE_KICK_THRESHOLD_US = 30LL * 1000000LL;
+static constexpr int64_t IDLE_KICK_THRESHOLD_US = 300LL * 1000000LL; // 5 minutes
 
 // Forward declaration — defined further down, used by checkMatchEnd().
 static void broadcastStatus();

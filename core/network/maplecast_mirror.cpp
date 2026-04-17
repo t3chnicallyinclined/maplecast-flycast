@@ -949,10 +949,11 @@ static void initClientWebSocket()
 	_wsThread = std::thread(wsClientRun, hostStr, port);
 	_wsThread.detach();
 
-	// Also kick off the audio-only WS client on its dedicated port.
-	// Server-side default is videoPort + 3 (see the matching
-	// initServer() block above). MAPLECAST_AUDIO_WS_PORT overrides.
-	int audioPort = port + 3;
+	// Audio WS lives on flycast's direct port (7200+3=7203), NOT relay+3.
+	// The relay doesn't proxy audio. If the video port came from hub
+	// discovery (relay at 7201), audio still goes to the server's own
+	// audio port. Default: 7203. MAPLECAST_AUDIO_WS_PORT overrides.
+	int audioPort = 7203;
 	if (const char* audioPortStr = std::getenv("MAPLECAST_AUDIO_WS_PORT"))
 		audioPort = std::atoi(audioPortStr);
 	maplecast_audio_client::init(host, audioPort);

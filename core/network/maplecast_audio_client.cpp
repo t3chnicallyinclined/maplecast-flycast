@@ -45,6 +45,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <unistd.h>
 #include <errno.h>
 #include <cstring>
@@ -205,9 +206,21 @@ static void recvLoop()
 			continue;
 		}
 
-		// Open a fresh socket + handshake
-		int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+		// Resolve hostname (inet_pton only handles IP literals)
+		struct addrinfo hints = {}, *res = nullptr;
+		hints.ai_family = AF_INET;
+		hints.ai_socktype = SOCK_STREAM;
+		char portBuf[16];
+		snprintf(portBuf, sizeof(portBuf), "%d", _port);
+		if (getaddrinfo(_host.c_str(), portBuf, &hints, &res) != 0 || !res) {
+			printf("[audio-client] getaddrinfo %s:%d failed\n", _host.c_str(), _port);
+			std::this_thread::sleep_for(std::chrono::seconds(2));
+			continue;
+		}
+
+		int fd = (int)socket(res->ai_family, res->ai_socktype, res->ai_protocol);
 		if (fd < 0) {
+			freeaddrinfo(res);
 			std::this_thread::sleep_for(std::chrono::seconds(2));
 			continue;
 		}
@@ -217,14 +230,10 @@ static void recvLoop()
 		int one = 1;
 		setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
 
-		sockaddr_in addr{};
-		addr.sin_family = AF_INET;
-		addr.sin_port = htons(_port);
-		inet_pton(AF_INET, _host.c_str(), &addr.sin_addr);
-
-		if (connect(fd, (sockaddr*)&addr, sizeof(addr)) != 0) {
+		if (connect(fd, res->ai_addr, res->ai_addrlen) != 0) {
 			printf("[audio-client] connect %s:%d failed: %s\n",
 				_host.c_str(), _port, strerror(errno));
+			freeaddrinfo(res);
 #ifdef _WIN32
 			closesocket(fd);
 #else
@@ -233,6 +242,7 @@ static void recvLoop()
 			std::this_thread::sleep_for(std::chrono::seconds(2));
 			continue;
 		}
+		freeaddrinfo(res);
 
 		if (!wsHandshake(fd, _host.c_str(), _port)) {
 			printf("[audio-client] ws handshake failed\n");
