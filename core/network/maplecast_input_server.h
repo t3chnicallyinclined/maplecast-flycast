@@ -283,6 +283,13 @@ int64_t measureInputAge(int slot);
 // Read the EMA of input age at latch time (microseconds).
 int64_t getInputAgeEmaUs(int slot);
 
+// Latency parity — equalize input age across players.
+// When enabled, the faster player's inputs are artificially delayed
+// so both players experience the same input-to-latch latency.
+void setLatencyParity(bool enabled);
+bool getLatencyParity();
+int64_t getParityDelayUs(int slot);  // how much delay is applied to this slot
+
 // Stick registration — bind a NOBD stick to a username
 // Rhythm mode: tap any button 5x, pause, 5x again
 void startStickRegistration(const char* browserId);

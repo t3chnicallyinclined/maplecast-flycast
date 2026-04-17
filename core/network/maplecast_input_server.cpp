@@ -467,6 +467,108 @@ static std::atomic<int64_t> _inputAgeEmaUs[2] = {0, 0};
 // Last seq seen by measureInputAge, to detect new packets
 static uint32_t _latchLastSeq[2] = {0, 0};
 
+// Forward declarations for parity code (defined further down)
+static inline int64_t nowUs();
+static void updateSlot(int slot, uint8_t ltVal, uint8_t rtVal, uint16_t buttons);
+
+// ── Latency Parity ───────────────────────────────────────────────────
+//
+// When enabled, the faster player's inputs are held in a ring buffer
+// and released after a delay, so both players' inputs are equally old
+// at vblank latch time. The delay adapts every second based on the
+// EMA input age difference.
+//
+// Off by default. Toggle via MAPLECAST_LATENCY_PARITY=1 env var or
+// runtime API (settings panel).
+static std::atomic<bool> _parityEnabled{false};
+// Per-slot artificial delay in microseconds. Slot with higher natural
+// latency gets 0; the other gets (slow_ema - fast_ema).
+static std::atomic<int64_t> _parityDelayUs[2] = {0, 0};
+// Delayed input ring buffer per slot
+struct DelayedInput {
+	uint64_t releaseAtUs;   // server monotonic time to release
+	uint8_t  lt, rt;
+	uint16_t buttons;
+};
+static constexpr int PARITY_RING_SIZE = 128;
+static DelayedInput _parityRing[2][PARITY_RING_SIZE];
+static int _parityHead[2] = {0, 0};  // write position
+static int _parityTail[2] = {0, 0};  // read position
+static std::mutex _parityMtx[2];
+
+// Called from the UDP thread instead of updateSlot when parity is active.
+static void parityEnqueue(int slot, uint8_t lt, uint8_t rt, uint16_t buttons)
+{
+	int64_t delay = _parityDelayUs[slot].load(std::memory_order_relaxed);
+	if (delay <= 0) {
+		// This slot has no added delay — pass through immediately
+		updateSlot(slot, lt, rt, buttons);
+		return;
+	}
+	std::lock_guard<std::mutex> lk(_parityMtx[slot]);
+	int next = (_parityHead[slot] + 1) % PARITY_RING_SIZE;
+	if (next == _parityTail[slot]) {
+		// Ring full — drop oldest (shouldn't happen at normal rates)
+		_parityTail[slot] = (_parityTail[slot] + 1) % PARITY_RING_SIZE;
+	}
+	DelayedInput di;
+	di.releaseAtUs = (uint64_t)(nowUs() + delay);
+	di.lt = lt;
+	di.rt = rt;
+	di.buttons = buttons;
+	_parityRing[slot][_parityHead[slot]] = di;
+	_parityHead[slot] = next;
+}
+
+// Drain ready inputs from the delay buffer. Called from the UDP thread
+// on every packet (cheap no-op when parity is off or ring is empty).
+static void parityDrain(int slot)
+{
+	if (!_parityEnabled.load(std::memory_order_relaxed)) return;
+	std::lock_guard<std::mutex> lk(_parityMtx[slot]);
+	uint64_t now = nowUs();
+	while (_parityTail[slot] != _parityHead[slot]) {
+		auto& entry = _parityRing[slot][_parityTail[slot]];
+		if (entry.releaseAtUs > now) break;  // not ready yet
+		updateSlot(slot, entry.lt, entry.rt, entry.buttons);
+		_parityTail[slot] = (_parityTail[slot] + 1) % PARITY_RING_SIZE;
+	}
+}
+
+// Recompute parity delays. Called once per second from the periodic
+// stats logger (or vblank-driven timer).
+static void parityRecompute()
+{
+	if (!_parityEnabled.load(std::memory_order_relaxed)) {
+		_parityDelayUs[0].store(0, std::memory_order_relaxed);
+		_parityDelayUs[1].store(0, std::memory_order_relaxed);
+		return;
+	}
+	int64_t age0 = _inputAgeEmaUs[0].load(std::memory_order_relaxed);
+	int64_t age1 = _inputAgeEmaUs[1].load(std::memory_order_relaxed);
+	if (age0 <= 0 || age1 <= 0) return;  // not enough data yet
+
+	if (age0 < age1) {
+		// P1 is faster — delay P1 by the difference
+		_parityDelayUs[0].store(age1 - age0, std::memory_order_relaxed);
+		_parityDelayUs[1].store(0, std::memory_order_relaxed);
+	} else {
+		// P2 is faster — delay P2
+		_parityDelayUs[0].store(0, std::memory_order_relaxed);
+		_parityDelayUs[1].store(age0 - age1, std::memory_order_relaxed);
+	}
+
+	static uint32_t _logCount = 0;
+	if (++_logCount >= 5) {
+		_logCount = 0;
+		printf("[parity] P1 age=%.1fms P2 age=%.1fms → delay P%d +%.1fms\n",
+		       age0 / 1000.0, age1 / 1000.0,
+		       age0 < age1 ? 1 : 2,
+		       std::abs(age0 - age1) / 1000.0);
+		fflush(stdout);
+	}
+}
+
 static inline int64_t nowUs()
 {
 	struct timespec ts;
@@ -1198,7 +1300,14 @@ static void udpThreadLoop(int port)
 		if (slot < 0) continue;
 
 		uint16_t buttons = ((uint16_t)w3[2] << 8) | w3[3];
-		updateSlot(slot, w3[0], w3[1], buttons);
+		if (_parityEnabled.load(std::memory_order_relaxed))
+			parityEnqueue(slot, w3[0], w3[1], buttons);
+		else
+			updateSlot(slot, w3[0], w3[1], buttons);
+
+		// Drain any delayed inputs that are now ready
+		parityDrain(0);
+		parityDrain(1);
 	}
 
 	printf("[input-server] UDP thread stopped (%lu total packets)\n",
@@ -1246,6 +1355,10 @@ bool init(int udpPort)
 		_guardUs.store(val, std::memory_order_relaxed);
 		printf("[input-server] MAPLECAST_GUARD_US = %ld us\n", val);
 	}
+
+	// Latency parity — equalize input age between players
+	if (std::getenv("MAPLECAST_LATENCY_PARITY"))
+		setLatencyParity(true);
 
 	// Create UDP socket
 	_udpSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -1453,7 +1566,12 @@ void disconnectPlayer(int slot)
 
 void injectInput(int slot, uint8_t ltVal, uint8_t rtVal, uint16_t buttons)
 {
-	updateSlot(slot, ltVal, rtVal, buttons);
+	if (_parityEnabled.load(std::memory_order_relaxed))
+		parityEnqueue(slot, ltVal, rtVal, buttons);
+	else
+		updateSlot(slot, ltVal, rtVal, buttons);
+	parityDrain(0);
+	parityDrain(1);
 }
 
 void setPlayerRtt(int slot, int rttMs)
@@ -1523,12 +1641,14 @@ int64_t measureInputAge(int slot)
 	_inputAgeEmaUs[slot].store(ema, std::memory_order_relaxed);
 
 	// Log every 300 NEW samples (~5 seconds of active play)
+	// Also recompute parity delays periodically
 	static uint32_t _logCounter[2] = {0, 0};
 	if (++_logCounter[slot] >= 300) {
 		_logCounter[slot] = 0;
 		printf("[input-age] P%d: last=%.2fms ema=%.2fms (packet→latch)\n",
 		       slot + 1, age / 1000.0, ema / 1000.0);
 		fflush(stdout);
+		if (slot == 0) parityRecompute();  // once per cycle, not per slot
 	}
 
 	return age;
@@ -1538,6 +1658,28 @@ int64_t getInputAgeEmaUs(int slot)
 {
 	if (slot < 0 || slot > 1) return 0;
 	return _inputAgeEmaUs[slot].load(std::memory_order_relaxed);
+}
+
+void setLatencyParity(bool enabled)
+{
+	_parityEnabled.store(enabled, std::memory_order_relaxed);
+	if (!enabled) {
+		_parityDelayUs[0].store(0, std::memory_order_relaxed);
+		_parityDelayUs[1].store(0, std::memory_order_relaxed);
+	}
+	printf("[parity] Latency parity %s\n", enabled ? "ENABLED" : "DISABLED");
+	fflush(stdout);
+}
+
+bool getLatencyParity()
+{
+	return _parityEnabled.load(std::memory_order_relaxed);
+}
+
+int64_t getParityDelayUs(int slot)
+{
+	if (slot < 0 || slot > 1) return 0;
+	return _parityDelayUs[slot].load(std::memory_order_relaxed);
 }
 
 void startStickRegistration(const char* browserId)
