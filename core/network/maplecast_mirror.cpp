@@ -53,6 +53,7 @@ uint64_t g_activePalBanks = 0;
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <errno.h>
 
 
@@ -627,18 +628,27 @@ static void wsClientRun(std::string host, int port)
 {
 	printf("[MIRROR-WS] Connecting to %s:%d...\n", host.c_str(), port); fflush(stdout);
 
-	_wsFd = socket(AF_INET, SOCK_STREAM, 0);
-	if (_wsFd < 0) { printf("[MIRROR-WS] socket() failed\n"); return; }
-
-	struct sockaddr_in addr = {};
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(port);
-	inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
-
-	if (connect(_wsFd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-		printf("[MIRROR-WS] connect() failed: %s\n", strerror(errno));
-		close(_wsFd); _wsFd = -1; return;
+	// Resolve hostname (inet_pton only handles IP literals, not DNS names)
+	struct addrinfo hints = {}, *res = nullptr;
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
+	char portBuf[16];
+	snprintf(portBuf, sizeof(portBuf), "%d", port);
+	int gaiErr = getaddrinfo(host.c_str(), portBuf, &hints, &res);
+	if (gaiErr != 0 || !res) {
+		printf("[MIRROR-WS] getaddrinfo('%s:%d') failed: %s\n",
+		       host.c_str(), port, gai_strerror(gaiErr));
+		return;
 	}
+
+	_wsFd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+	if (_wsFd < 0) { printf("[MIRROR-WS] socket() failed\n"); freeaddrinfo(res); return; }
+
+	if (connect(_wsFd, res->ai_addr, res->ai_addrlen) != 0) {
+		printf("[MIRROR-WS] connect() failed: %s\n", strerror(errno));
+		close(_wsFd); _wsFd = -1; freeaddrinfo(res); return;
+	}
+	freeaddrinfo(res);
 	printf("[MIRROR-WS] TCP connected\n"); fflush(stdout);
 
 	if (!wsHandshake(_wsFd, host.c_str(), port)) {

@@ -43,6 +43,7 @@ static std::atomic<bool> _hasBackup{false};
 static std::atomic<bool> _onBackup{false}; // true → primary failed over
 
 static int            _slot = 0;
+static std::atomic<int> _gamepadPort{-1}; // actual SDL gamepad port (may differ from _slot)
 static bool           _active = false;
 static std::thread    _triggerThread;
 static std::atomic<bool> _triggerRun{false};
@@ -105,8 +106,10 @@ static std::queue<PendingSend> _pendingQ;
 // Build the 11-byte wire packet at *out using the current state.
 static void buildPacket(uint8_t* out, uint32_t seq)
 {
-	uint8_t ltVal = (uint8_t)(lt[_slot] >> 8);
-	uint8_t rtVal = (uint8_t)(rt[_slot] >> 8);
+	int gp = _gamepadPort.load(std::memory_order_relaxed);
+	int trigPort = (gp >= 0 && gp < 4) ? gp : _slot;
+	uint8_t ltVal = (uint8_t)(lt[trigPort] >> 8);
+	uint8_t rtVal = (uint8_t)(rt[trigPort] >> 8);
 	out[0] = 'P';
 	out[1] = 'C';
 	out[2] = (uint8_t)_slot;
@@ -184,7 +187,11 @@ static void redundantSendLoop()
 // ── SDL ButtonListener ────────────────────────────────────────────────
 static void onButton(int port, DreamcastKey key, bool pressed)
 {
-	if (port != _slot) return;
+	// Accept input from any port — mirror client only has one local player,
+	// but saved config may map the gamepad to a port != _slot.
+	// Track which port is actually sending so triggerPollLoop reads the
+	// right lt[]/rt[] slot.
+	_gamepadPort.store(port, std::memory_order_relaxed);
 
 	if (key <= DC_BTN_BITMAPPED_LAST) {
 		if (pressed)
@@ -227,9 +234,11 @@ static void triggerPollLoop()
 	uint8_t lastLt = 0, lastRt = 0;
 
 	while (_triggerRun.load(std::memory_order_relaxed)) {
-		// 1. Trigger change detection
-		uint8_t curLt = (uint8_t)(lt[_slot] >> 8);
-		uint8_t curRt = (uint8_t)(rt[_slot] >> 8);
+		// 1. Trigger change detection — read from actual gamepad port
+		int gp = _gamepadPort.load(std::memory_order_relaxed);
+		int trigPort = (gp >= 0 && gp < 4) ? gp : _slot;
+		uint8_t curLt = (uint8_t)(lt[trigPort] >> 8);
+		uint8_t curRt = (uint8_t)(rt[trigPort] >> 8);
 		if (curLt != lastLt || curRt != lastRt) {
 			lastLt = curLt;
 			lastRt = curRt;

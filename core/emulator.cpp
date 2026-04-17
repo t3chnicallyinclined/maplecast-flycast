@@ -589,6 +589,10 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 		nvmem::loadHle();
 		gdr::initDrive("");
 
+		// Fire Event::Start so gamepad mappings load (load_system_mappings).
+		// Without this, input_mapper stays null and all buttons are silently dropped.
+		EventManager::event(Event::Start);
+
 		// Go straight to start() — mirror client init happens there
 		state = Loaded;
 		start();
@@ -1173,14 +1177,11 @@ void Emulator::start()
 	// Mirror client: receives TA deltas, renders only (no CPU)
 	if (std::getenv("MAPLECAST_MIRROR_CLIENT"))
 	{
-		// Client-optimized defaults — renderer only, no CPU, no game logic
+		// Client-optimized defaults — renderer only, no CPU, no game logic.
+		// Do NOT override rendering features (fog, modifier volumes, mipmaps)
+		// — they must match the server's output for visual fidelity.
 		config::MaxThreads.override(std::max(1, (int)std::thread::hardware_concurrency() / 2));
-		config::PerPixelLayers.override(4);
-		config::UseMipmaps.override(false);
-		config::Fog.override(false);
-		config::ModifierVolumes.override(false);
 		config::DSPEnabled.override(false);
-		config::VSync.override(true);
 		config::ThreadedRendering.override(false);  // client render loop is single-threaded
 
 		// Force the PulseAudio backend on Linux mirror clients. SDL2's

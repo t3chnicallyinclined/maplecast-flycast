@@ -636,18 +636,10 @@ void gui_plot_render_time(int width, int height)
 
 void gui_open_settings()
 {
-	// Mirror client: open the HTML settings page in the browser.
+	// Mirror client: open the native flycast settings panel (same as normal mode).
+	// The HTML settings page was removed in favor of the built-in UI.
 	if (maplecast_mirror::isClient()) {
-		int port = 7211;
-		if (const char* cp = std::getenv("MAPLECAST_CONTROL_PORT"))
-			port = std::atoi(cp);
-		char url[256];
-		snprintf(url, sizeof(url),
-			"file://%s/web/client-settings.html?port=%d",
-			std::getenv("PWD") ? std::getenv("PWD") : ".", port);
-		char cmd[512];
-		snprintf(cmd, sizeof(cmd), "xdg-open '%s' &", url);
-		(void)system(cmd);
+		gui_setState(GuiState::Settings);
 		return;
 	}
 

@@ -780,6 +780,15 @@ void GamepadDevice::Register(const std::shared_ptr<GamepadDevice>& gamepad)
 
 	gamepad->_is_registered = true;
 	gamepad->registered();
+
+	// Hot-plug: if a game is already running, load mapping now.
+	// Normal boot calls load_system_mappings() via Event::Start, but
+	// that fires before SDL detects gamepads (they arrive via JOYDEVICEADDED
+	// events pumped by the render loop). Without this, hot-plugged gamepads
+	// — and ALL gamepads in mirror client mode — have no input_mapper and
+	// silently drop every button press.
+	if (!gamepad->find_mapping())
+		gamepad->resetMappingToDefault(settings.platform.isArcade(), true);
 }
 
 void GamepadDevice::Unregister(const std::shared_ptr<GamepadDevice>& gamepad)
