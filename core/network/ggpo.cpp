@@ -110,6 +110,10 @@ static void getLocalInput(MapleInputState inputState[4])
 			const maplecast_input::PlayerInfo& p = maplecast_input::getPlayer(player);
 			const int64_t deltaUs = tLatchUs - p.lastPacketUs;
 			maplecast_input::recordLatchSample(player, deltaUs, seq, latchFrame);
+
+			// Measure how old the input packet was when we latched it.
+			// Written to atomic EMA — telemetry/HUD reads it.
+			maplecast_input::measureInputAge(player);
 		}
 		else
 		{

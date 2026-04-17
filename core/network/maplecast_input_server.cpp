@@ -453,6 +453,16 @@ static std::unordered_map<uint64_t, uint32_t> _lastSeenSeq;
 static std::mutex _dedupMutex;
 static std::atomic<uint64_t> _dedupCount{0};
 
+// Per-slot input timing — written by UDP thread, read at vblank latch.
+// Server-side CLOCK_MONOTONIC µs when the most recent input packet arrived.
+static std::atomic<uint64_t> _lastInputArrivalUs[2] = {0, 0};
+// Client-side CLOCK_MONOTONIC µs from the 19-byte packet (different clock domain).
+static std::atomic<uint64_t> _lastInputClientTs[2] = {0, 0};
+// Input age at vblank: how many µs old the input was when the game latched it.
+// Written at vblank, read by telemetry/HUD. EMA with α=1/16.
+static std::atomic<int64_t> _inputAgeAtLatchUs[2] = {0, 0};
+static std::atomic<int64_t> _inputAgeEmaUs[2] = {0, 0};
+
 static inline int64_t nowUs()
 {
 	struct timespec ts;
@@ -882,13 +892,13 @@ static void udpThreadLoop(int port)
 			w3 = buf + 1;
 		}
 
-		// 11-byte Phase-2 player-client packet:
-		//   "PC"[slot][seq:u32_LE][LT][RT][btn_hi][btn_lo]
-		// Adds a sequence number for server-side dedup. The native client
-		// sends each input twice (T+0 + T+1ms) for loss tolerance —
-		// duplicates with seq <= last_seen_seq are silently dropped.
-		// Otherwise behaves identically to the 7-byte path.
-		else if (n == 11 && buf[0] == 'P' && buf[1] == 'C' && buf[2] <= 1)
+		// 11 or 19-byte player-client packet:
+		//   "PC"[slot][seq:u32_LE][LT][RT][btn_hi][btn_lo]           (11 bytes)
+		//   "PC"[slot][seq:u32_LE][LT][RT][btn_hi][btn_lo][ts:u64_LE] (19 bytes)
+		// The 19-byte variant includes a client CLOCK_MONOTONIC timestamp
+		// (microseconds) for input-age measurement at vblank latch time.
+		// Backward compatible: server accepts both sizes.
+		else if ((n == 11 || n == 19) && buf[0] == 'P' && buf[1] == 'C' && buf[2] <= 1)
 		{
 			int claimedSlot = buf[2];
 			uint32_t seq = (uint32_t)buf[3]
@@ -896,6 +906,25 @@ static void udpThreadLoop(int port)
 			             | ((uint32_t)buf[5] << 16)
 			             | ((uint32_t)buf[6] << 24);
 			w3 = buf + 7;  // [LT][RT][btn_hi][btn_lo]
+
+			// Extract client timestamp if present (19-byte format).
+			// Store the SERVER arrival time alongside it for vblank-age calc.
+			if (n == 19) {
+				uint64_t clientTs = (uint64_t)buf[11]
+				                  | ((uint64_t)buf[12] << 8)
+				                  | ((uint64_t)buf[13] << 16)
+				                  | ((uint64_t)buf[14] << 24)
+				                  | ((uint64_t)buf[15] << 32)
+				                  | ((uint64_t)buf[16] << 40)
+				                  | ((uint64_t)buf[17] << 48)
+				                  | ((uint64_t)buf[18] << 56);
+				uint64_t serverArrival = nowUs();
+				// Store for vblank-age measurement. Per-slot atomic so the
+				// latch code can read without locking.
+				_lastInputArrivalUs[claimedSlot].store(serverArrival, std::memory_order_relaxed);
+				_lastInputClientTs[claimedSlot].store(clientTs, std::memory_order_relaxed);
+				(void)clientTs; // used below for logging
+			}
 
 			// Per-source-IP dedup. Map: source-key → last seq seen.
 			// Skip if seq <= last (handles redundant T+1ms copies and
@@ -1464,6 +1493,31 @@ int findIdlePlayer(int64_t thresholdUs)
 bool active()
 {
 	return _active.load(std::memory_order_relaxed);
+}
+
+int64_t measureInputAge(int slot)
+{
+	if (slot < 0 || slot > 1) return 0;
+	uint64_t arrival = _lastInputArrivalUs[slot].load(std::memory_order_relaxed);
+	if (arrival == 0) return 0;  // no timestamped packet yet
+
+	uint64_t now = nowUs();
+	int64_t age = (int64_t)(now - arrival);
+
+	_inputAgeAtLatchUs[slot].store(age, std::memory_order_relaxed);
+
+	// EMA with α = 1/16
+	int64_t prev = _inputAgeEmaUs[slot].load(std::memory_order_relaxed);
+	int64_t ema = prev + ((age - prev) >> 4);
+	_inputAgeEmaUs[slot].store(ema, std::memory_order_relaxed);
+
+	return age;
+}
+
+int64_t getInputAgeEmaUs(int slot)
+{
+	if (slot < 0 || slot > 1) return 0;
+	return _inputAgeEmaUs[slot].load(std::memory_order_relaxed);
 }
 
 void startStickRegistration(const char* browserId)

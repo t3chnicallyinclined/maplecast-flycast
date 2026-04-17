@@ -275,6 +275,14 @@ void setPlayerRtt(int slot, int rttMs);
 // Is the input server running?
 bool active();
 
+// Called at vblank latch time. Records how old the most recent input
+// packet was when the game read it. Returns the age in microseconds
+// (0 if no timestamped packet has arrived for this slot yet).
+int64_t measureInputAge(int slot);
+
+// Read the EMA of input age at latch time (microseconds).
+int64_t getInputAgeEmaUs(int slot);
+
 // Stick registration — bind a NOBD stick to a username
 // Rhythm mode: tap any button 5x, pause, 5x again
 void startStickRegistration(const char* browserId);

@@ -93,7 +93,7 @@ static inline int64_t nowUs()
 // drops without adding artificial latency to the critical first send.
 
 struct PendingSend {
-	uint8_t pkt[11];
+	uint8_t pkt[19];
 	int64_t fireAtUs;
 };
 
@@ -103,7 +103,11 @@ static std::queue<PendingSend> _pendingQ;
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
-// Build the 11-byte wire packet at *out using the current state.
+// Build the 19-byte wire packet at *out using the current state.
+// Format: [P][C][slot][seq:u32_LE][LT][RT][btn_hi][btn_lo][client_ts:u64_LE]
+// The 8-byte client_ts is CLOCK_MONOTONIC microseconds at send time.
+// Server uses it to measure input age at vblank latch and phase-lock.
+// Backward compatible: server detects 11 vs 19 byte packets.
 static void buildPacket(uint8_t* out, uint32_t seq)
 {
 	int gp = _gamepadPort.load(std::memory_order_relaxed);
@@ -121,6 +125,16 @@ static void buildPacket(uint8_t* out, uint32_t seq)
 	out[8] = rtVal;
 	out[9] = (uint8_t)(_buttons >> 8);
 	out[10] = (uint8_t)(_buttons & 0xFF);
+	// Client monotonic timestamp (microseconds)
+	uint64_t ts = (uint64_t)nowUs();
+	out[11] = (uint8_t)(ts);
+	out[12] = (uint8_t)(ts >> 8);
+	out[13] = (uint8_t)(ts >> 16);
+	out[14] = (uint8_t)(ts >> 24);
+	out[15] = (uint8_t)(ts >> 32);
+	out[16] = (uint8_t)(ts >> 40);
+	out[17] = (uint8_t)(ts >> 48);
+	out[18] = (uint8_t)(ts >> 56);
 }
 
 // Send a pre-built packet to the currently-active server (primary or backup).
@@ -143,7 +157,7 @@ static void sendState()
 	if (_sock < 0) return;
 	uint32_t seq = _packetSeq.fetch_add(1, std::memory_order_relaxed) + 1;
 
-	uint8_t pkt[11];
+	uint8_t pkt[19];
 	buildPacket(pkt, seq);
 	sendPacket(pkt, sizeof(pkt));
 
@@ -332,7 +346,7 @@ bool init(const char* host, int slot)
 	_active = true;
 	char ipstr[INET_ADDRSTRLEN];
 	inet_ntop(AF_INET, &_addr.sin_addr, ipstr, sizeof(ipstr));
-	printf("[input-sink] ready → %s:7100 slot %d (11-byte seq + redundant send)\n",
+	printf("[input-sink] ready → %s:7100 slot %d (19-byte seq+ts + redundant send)\n",
 	       ipstr, _slot);
 	return true;
 }
