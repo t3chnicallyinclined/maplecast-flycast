@@ -35,10 +35,14 @@
 
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/mman.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
 #include <arpa/inet.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <pthread.h>
+#include <sched.h>
 #include <pwd.h>
 #include <time.h>
 #include <strings.h>
@@ -797,12 +801,44 @@ static void udpThreadLoop(int port)
 {
 	printf("[input-server] UDP thread started on port %d\n", port);
 
-	// SO_BUSY_POLL: spin-poll NIC for 10µs before sleeping
+	// ── Kernel tuning for 12KHz input ingress ─────────────────────────
+	//
+	// SO_BUSY_POLL: spin-poll NIC for 10µs before sleeping — avoids the
+	// ~50µs interrupt-to-userspace wakeup on most VPS kernels.
 	int busy_poll = 10;
 	setsockopt(_udpSock, SOL_SOCKET, SO_BUSY_POLL, &busy_poll, sizeof(busy_poll));
 
+	// SO_RCVBUF: 4MB receive buffer. At 12KHz × 11 bytes = 132 KB/s,
+	// this gives ~30s of buffering against scheduling jitter.
+	int rcvbuf = 4 * 1024 * 1024;
+	setsockopt(_udpSock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+
+	// IP_TOS: mark input traffic as EF (Expedited Forwarding, DSCP 46)
+	// so kernel QoS and NIC hardware prioritize these packets.
+	int tos = 0xB8;  // DSCP EF = 46 << 2
+	setsockopt(_udpSock, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
+
 	struct timeval tv = { .tv_sec = 0, .tv_usec = 1000 };  // 1ms recv timeout
 	setsockopt(_udpSock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+	// SCHED_FIFO: real-time priority for the input thread. Ensures we
+	// drain the UDP socket before the kernel drops packets. Graceful
+	// fallback if CAP_SYS_NICE is missing.
+	{
+		struct sched_param sp{};
+		sp.sched_priority = 55;  // above input-sink (50), below audio (70+)
+		if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) == 0)
+			printf("[input-server] UDP thread → SCHED_FIFO priority 55\n");
+		else
+			printf("[input-server] SCHED_FIFO not granted, staying SCHED_OTHER\n");
+	}
+
+	// mlockall: prevent page faults during gameplay. At 12KHz, a single
+	// page fault (~10-100µs) can drop 1-10 input packets.
+	if (mlockall(MCL_CURRENT | MCL_FUTURE) == 0)
+		printf("[input-server] mlockall() — memory locked\n");
+	else
+		printf("[input-server] mlockall() failed (need CAP_IPC_LOCK)\n");
 
 	uint8_t buf[64];
 	struct sockaddr_in from;

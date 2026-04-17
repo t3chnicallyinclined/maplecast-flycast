@@ -1268,6 +1268,20 @@ void Emulator::start()
 				ThreadName _("Flycast-emu");
 				printf("[emulator] Flycast-emu thread running, about to call InitAudio()\n");
 				fflush(stdout);
+
+				// SCHED_FIFO for the SH4 emulator thread — consistent frame
+				// timing is critical. Priority 40: below input (55) so input
+				// never starves, but above normal threads.
+				{
+					struct sched_param sp{};
+					sp.sched_priority = 40;
+					if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) == 0) {
+						printf("[emulator] Flycast-emu → SCHED_FIFO priority 40\n"); fflush(stdout);
+					} else {
+						printf("[emulator] SCHED_FIFO not granted for emu thread (errno=%d)\n", errno); fflush(stdout);
+					}
+				}
+
 				InitAudio();
 
 				try {

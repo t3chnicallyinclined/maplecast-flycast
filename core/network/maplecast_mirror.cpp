@@ -936,7 +936,15 @@ static void initClientWebSocket()
 	const char* host = hubHost.empty() ? std::getenv("MAPLECAST_SERVER_HOST") : hubHost.c_str();
 	if (!host) host = "127.0.0.1";
 	const char* portStr = std::getenv("MAPLECAST_SERVER_PORT");
-	int port = hubPort > 0 ? hubPort : (portStr ? std::atoi(portStr) : 7200);
+	// Native clients connect directly to flycast's WS (7200), NOT the relay
+	// (7201). The relay is a spectator fanout multiplexer — players who are
+	// sending input get lower latency by skipping it. Hub discovery returns
+	// the relay port; we subtract 1 to get the direct port. Override with
+	// MAPLECAST_SERVER_PORT or MAPLECAST_USE_RELAY=1 for spectator mode.
+	int directPort = hubPort > 0 ? (hubPort - 1) : 7200;
+	if (std::getenv("MAPLECAST_USE_RELAY") || std::getenv("MAPLECAST_SPECTATE"))
+		directPort = hubPort > 0 ? hubPort : 7201;  // spectators use relay
+	int port = portStr ? std::atoi(portStr) : directPort;
 
 	printf("[MIRROR] === CLIENT MODE (WebSocket) === ws://%s:%d/\n", host, port);
 
