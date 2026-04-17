@@ -407,6 +407,19 @@ void setBackupServer(const char* host)
 	printf("[input-sink] hot-standby ready → %s:7100\n", ipstr);
 }
 
+void directUpdate(uint16_t buttons, uint8_t newLt, uint8_t newRt)
+{
+	if (!_active || _sock < 0) return;
+	_buttons = buttons;
+	// Write triggers to the global lt[]/rt[] so buildPacket reads them
+	int gp = _gamepadPort.load(std::memory_order_relaxed);
+	int tp = (gp >= 0 && gp < 4) ? gp : _slot;
+	lt[tp] = (uint16_t)newLt << 8;
+	rt[tp] = (uint16_t)newRt << 8;
+	_buttonChanges.fetch_add(1, std::memory_order_relaxed);
+	sendState();
+}
+
 void shutdown()
 {
 	if (!_active) return;

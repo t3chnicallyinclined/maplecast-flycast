@@ -47,6 +47,7 @@
 #include "network/maplecast_player.h"
 #include "network/maplecast_replica.h"
 #include "network/maplecast_input_sink.h"
+#include "network/maplecast_evdev_input.h"
 #include "ui/settings_window.h"
 #include "hw/maple/maple_cfg.h"
 #include <cstdlib>
@@ -1234,6 +1235,11 @@ void Emulator::start()
 			if (const char* s = std::getenv("MAPLECAST_PLAYER_SLOT"))
 				sinkSlot = std::atoi(s);
 			maplecast_input_sink::init(sinkHost, sinkSlot);
+
+			// Direct evdev input — bypasses SDL's event queue for ~1-3ms
+			// lower latency. Grabs the device exclusively so SDL doesn't
+			// double-read. Enable with MAPLECAST_EVDEV_INPUT=1.
+			maplecast_evdev_input::init();
 
 			// Phase 2: if hub discovery picked a runner-up server, wire it
 			// up as the hot-standby for input failover. The input sink

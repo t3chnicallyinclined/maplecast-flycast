@@ -28,6 +28,8 @@ target_sources(${PROJECT_NAME} PRIVATE
         ifaddrs.c
         maplecast_xdp_input.cpp
         maplecast_xdp_input.h
+        maplecast_evdev_input.cpp
+        maplecast_evdev_input.h
         maplecast_input_server.cpp
         maplecast_input_server.h
         maplecast_audio.cpp

@@ -37,6 +37,10 @@ namespace maplecast_input_sink
 	void shutdown();
 	bool active();
 
+	// Direct update from evdev bypass — writes button/trigger state and
+	// immediately sends a UDP packet. Called from the evdev thread, not SDL.
+	void directUpdate(uint16_t buttons, uint8_t lt, uint8_t rt);
+
 	struct Stats {
 		uint64_t packetsSent;
 		uint64_t buttonChanges;
