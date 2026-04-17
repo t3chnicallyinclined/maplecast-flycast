@@ -373,7 +373,9 @@ void input_sdl_handle()
 							// regular settings panel. Matches the historical
 							// "Tab toggles debug" behavior documented in
 							// gui_mirror_debug.h.
-							if (event.key.keysym.sym == SDLK_TAB) { gui_open_settings(); break; }
+							// Tab disabled in mirror mode — HP button was triggering it.
+							// Settings accessible via on-screen gear or backtick key.
+							if (event.key.keysym.sym == SDLK_TAB && !std::getenv("MAPLECAST_MIRROR_CLIENT")) { gui_open_settings(); break; }
 							if (event.key.keysym.sym == SDLK_BACKQUOTE) { gui_maplecast_settings::toggle(); break; }
 						}
 						// Alt-Return and F11 toggle full screen

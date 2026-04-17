@@ -650,8 +650,8 @@ void gui_open_settings()
 		// Simpler: just use a known absolute path relative to the binary
 		// Try the source tree path first, then fall back
 		const char* paths[] = {
-			"/home/tris/projects/maplecast-flycast/web/client-settings.html",
-			"web/client-settings.html",
+			"/home/tris/projects/maplecast-flycast/web/overlay.html",
+			"web/overlay.html",
 			nullptr
 		};
 		for (int i = 0; paths[i]; i++) {
@@ -1748,13 +1748,8 @@ void gui_displayMirrorDebug()
 	gui_newFrame();
 	ImGui::NewFrame();
 
-	// All overlays draw here, inside NewFrame/Render.
-	gui_competitive_hud::draw();
-	gui_maplecast_settings::draw();
-	gui_game_overlay::draw();
-
 	ImGui::Render();
-	gui_endFrame(true);
+	gui_endFrame(false);
 }
 
 void gui_display_profiler()

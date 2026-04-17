@@ -26,6 +26,7 @@
 #include "mouse.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <mutex>
 #include <vector>
 
@@ -89,8 +90,9 @@ bool GamepadDevice::handleButtonInput(int port, DreamcastKey key, bool pressed)
 				dc_exit();
 			break;
 		case EMU_BTN_MENU:
-			if (pressed)
-				gui_open_settings();
+			// Disabled in mirror client — controller buttons should send
+			// game input, not open browser pages. Settings accessible via
+			// on-screen gear button or backtick key only.
 			break;
 		case EMU_BTN_FFORWARD:
 			if (pressed && !gui_is_open())

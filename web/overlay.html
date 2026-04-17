@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MapleCast Overlay</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Consolas', 'SF Mono', monospace;
+  background: transparent;
+  color: #e0e0e0;
+  font-size: 13px;
+  overflow: hidden;
+  user-select: none;
+}
+
+.panel {
+  background: rgba(10, 12, 28, 0.85);
+  border: 1px solid rgba(80, 160, 255, 0.3);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  backdrop-filter: blur(4px);
+}
+.panel h3 {
+  color: #4fc3f7;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid rgba(80, 160, 255, 0.2);
+  padding-bottom: 4px;
+}
+
+/* Layout: left column for HUD, right column for settings */
+.overlay-container {
+  display: flex;
+  height: 100vh;
+  pointer-events: none;
+}
+.left-col {
+  width: 280px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.right-col {
+  margin-left: auto;
+  width: 260px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.panel { pointer-events: auto; }
+.bottom-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 8px;
+  pointer-events: auto;
+}
+
+/* Input display */
+.input-area {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+.stick {
+  width: 50px; height: 50px;
+  border-radius: 50%;
+  background: rgba(30, 30, 40, 0.9);
+  border: 2px solid #555;
+  position: relative;
+}
+.stick-dot {
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: #555;
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  transition: all 0.05s;
+}
+.stick-dot.active { background: #4fc3f7; box-shadow: 0 0 8px #4fc3f7; }
+
+.buttons {
+  display: grid;
+  grid-template-columns: repeat(3, 32px);
+  gap: 4px;
+}
+.btn {
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: bold;
+  border: 2px solid transparent;
+  transition: all 0.05s;
+}
+.btn.punch { background: rgba(40, 60, 120, 0.6); border-color: #335; color: #88b; }
+.btn.kick  { background: rgba(120, 50, 20, 0.6); border-color: #532; color: #b85; }
+.btn.pressed.punch { background: #3070e0; border-color: #5090ff; color: #fff; box-shadow: 0 0 10px rgba(80,160,255,0.6); }
+.btn.pressed.kick  { background: #e06030; border-color: #ff8050; color: #fff; box-shadow: 0 0 10px rgba(255,120,60,0.6); }
+
+.trigger {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: rgba(60, 30, 90, 0.6); border: 2px solid #426;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9px; color: #a7a;
+}
+.trigger.pressed { background: #8040c0; border-color: #a060e0; color: #fff; box-shadow: 0 0 8px rgba(160,80,220,0.5); }
+
+/* History strip */
+.history {
+  display: flex;
+  gap: 1px;
+  overflow: hidden;
+  height: 56px;
+}
+.history-col {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.history-cell {
+  width: 3px; height: 4px;
+  background: rgba(20, 20, 30, 0.5);
+}
+.history-cell.on { background: #4fc3f7; }
+
+/* Health bars */
+.health-bar {
+  height: 8px;
+  background: rgba(30, 30, 40, 0.8);
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 2px 0;
+  position: relative;
+}
+.health-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.1s;
+}
+.p1-fill { background: linear-gradient(90deg, #2060c0, #3080e0); }
+.p2-fill { background: linear-gradient(90deg, #c02020, #e04040); }
+
+/* Stats */
+.stat { display: flex; justify-content: space-between; margin: 1px 0; }
+.stat .label { color: #888; }
+.stat .value { color: #e0e0e0; }
+.stat .value.good { color: #66bb6a; }
+.stat .value.warn { color: #ffa726; }
+.stat .value.bad  { color: #ef5350; }
+
+.grade { font-size: 28px; font-weight: bold; margin-right: 8px; }
+.grade.S { color: #40ff40; }
+.grade.A { color: #60ff60; }
+.grade.B { color: #e0e030; }
+.grade.C { color: #ff9030; }
+.grade.F { color: #ff3030; }
+
+.combo { color: #ffeb3b; font-size: 18px; font-weight: bold; }
+
+/* Connection status */
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  display: inline-block; margin-right: 4px;
+}
+.status-dot.on  { background: #66bb6a; }
+.status-dot.off { background: #ef5350; }
+
+/* Toggle buttons */
+.toggles { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+.toggle-btn {
+  padding: 3px 8px; border: 1px solid #335; border-radius: 4px;
+  background: rgba(20, 30, 60, 0.8); color: #88a; cursor: pointer;
+  font-size: 10px;
+}
+.toggle-btn.active { background: #1a3a6a; border-color: #4fc3f7; color: #4fc3f7; }
+</style>
+</head>
+<body>
+
+<div class="overlay-container">
+  <!-- Left column: HUD panels -->
+  <div class="left-col">
+    <!-- Network -->
+    <div class="panel" id="panel-network">
+      <h3><span class="status-dot" id="ws-dot"></span> Network</h3>
+      <div style="display:flex; align-items:center;">
+        <span class="grade" id="grade">-</span>
+        <div style="flex:1">
+          <div class="stat"><span class="label">RTT</span><span class="value" id="rtt">-</span></div>
+          <div class="stat"><span class="label">Jitter</span><span class="value" id="jitter">-</span></div>
+          <div class="stat"><span class="label">Send</span><span class="value" id="send-rate">-</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Pipeline -->
+    <div class="panel" id="panel-pipeline">
+      <h3>Pipeline</h3>
+      <div class="stat"><span class="label">FPS</span><span class="value" id="fps">-</span></div>
+      <div class="stat"><span class="label">Decode</span><span class="value" id="decode">-</span></div>
+      <div class="stat"><span class="label">Stream</span><span class="value" id="stream">-</span></div>
+      <div class="stat"><span class="label">E2E</span><span class="value" id="e2e">-</span></div>
+      <div class="stat"><span class="label">Dirty</span><span class="value" id="dirty">-</span></div>
+    </div>
+
+    <!-- Game Data -->
+    <div class="panel" id="panel-game" style="display:none">
+      <h3>Match</h3>
+      <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+        <span style="color:#4fc3f7" id="p1-char">-</span>
+        <span id="timer">-</span>
+        <span style="color:#ef5350" id="p2-char">-</span>
+      </div>
+      <div class="health-bar"><div class="health-fill p1-fill" id="p1-hp" style="width:100%"></div></div>
+      <div class="health-bar"><div class="health-fill p2-fill" id="p2-hp" style="width:100%"></div></div>
+      <div style="display:flex; justify-content:space-between; margin-top:4px; font-size:11px;">
+        <span>Meter: <span id="p1-meter">0</span></span>
+        <span>Meter: <span id="p2-meter">0</span></span>
+      </div>
+      <div style="display:flex; justify-content:space-between;">
+        <span class="combo" id="p1-combo"></span>
+        <span class="combo" id="p2-combo"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right column: Input display -->
+  <div class="right-col">
+    <div class="panel" id="panel-input">
+      <h3>Input</h3>
+      <div class="input-area">
+        <div class="stick">
+          <div class="stick-dot" id="stick-dot"></div>
+        </div>
+        <div class="buttons">
+          <div class="btn punch" id="btn-lp">LP</div>
+          <div class="btn punch" id="btn-mp">MP</div>
+          <div class="btn punch" id="btn-hp">HP</div>
+          <div class="btn kick"  id="btn-lk">LK</div>
+          <div class="btn kick"  id="btn-mk">MK</div>
+          <div class="btn kick"  id="btn-hk">HK</div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:4px;">
+          <div class="trigger" id="btn-a1">A1</div>
+          <div class="trigger" id="btn-a2">A2</div>
+        </div>
+      </div>
+      <div class="history" id="history"></div>
+    </div>
+
+    <!-- Panel toggles -->
+    <div class="panel">
+      <h3>Panels</h3>
+      <div class="toggles">
+        <div class="toggle-btn active" onclick="togglePanel('network',this)">Network</div>
+        <div class="toggle-btn active" onclick="togglePanel('pipeline',this)">Pipeline</div>
+        <div class="toggle-btn" onclick="togglePanel('game',this)">Game</div>
+        <div class="toggle-btn active" onclick="togglePanel('input',this)">Input</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const PORT = new URLSearchParams(location.search).get('port') || 7211;
+const CHARS = [
+  "Ryu","Zangief","Guile","Morrigan","Anakaris","Strider","Cyclops",
+  "Wolverine","Psylocke","Iceman","Rogue","Cap America","Spider-Man",
+  "Hulk","Venom","Dr Doom","Tron Bonne","Jill","Hayato","Ruby Heart",
+  "SonSon","Amingo","Marrow","Cable","Abyss1","Abyss2","Abyss3",
+  "Chun-Li","Megaman","Roll","Akuma","B.B.Hood","Felicia","Charlie",
+  "Sakura","Dan","Cammy","Dhalsim","M.Bison","Ken","Gambit",
+  "Juggernaut","Storm","Sabretooth","Magneto","Shuma","War Machine",
+  "Silver Samurai","Omega Red","Spiral","Colossus","Iron Man",
+  "Sentinel","Blackheart","Thanos","Jin"
+];
+
+// DC button bits (active-low)
+const BTN = { C:1, B:2, A:4, START:8, UP:16, DOWN:32, LEFT:64, RIGHT:128, Z:256, Y:512, X:1024 };
+
+let ws, rid = 0;
+let history = []; // ring of button states
+const HIST_LEN = 80;
+let prevBytes = 0, prevTime = Date.now();
+
+function $(id) { return document.getElementById(id); }
+
+function connect() {
+  ws = new WebSocket(`ws://localhost:${PORT}`);
+  ws.onopen = () => {
+    $('ws-dot').className = 'status-dot on';
+    poll();
+  };
+  ws.onclose = () => {
+    $('ws-dot').className = 'status-dot off';
+    setTimeout(connect, 2000);
+  };
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.cmd === 'telemetry' && m.ok) update(m.data);
+  };
+}
+
+function poll() {
+  if (!ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({ cmd: 'telemetry', reply_id: String(++rid) }));
+  setTimeout(poll, 100); // 10Hz updates
+}
+
+function grade(rtt) {
+  if (rtt < 8) return 'S';
+  if (rtt < 20) return 'A';
+  if (rtt < 40) return 'B';
+  if (rtt < 80) return 'C';
+  return 'F';
+}
+
+function update(d) {
+  // Network
+  const rtt = d.e2eEmaMs || 0;
+  const g = grade(rtt);
+  $('grade').textContent = g;
+  $('grade').className = 'grade ' + g;
+  $('rtt').textContent = rtt > 0 ? rtt.toFixed(1) + 'ms' : 'waiting...';
+  const arrMs = d.arrivalEmaMs || 0;
+  const jitter = arrMs > 0 ? Math.abs(arrMs - 16.667).toFixed(1) : '-';
+  $('jitter').textContent = jitter + 'ms';
+  $('send-rate').textContent = (d.inputSendRateHz || 0) + ' pps';
+
+  // Pipeline
+  const fps = arrMs > 0 ? (1000 / arrMs).toFixed(0) : '-';
+  $('fps').textContent = fps;
+  $('decode').textContent = (d.decodeEmaMs || 0).toFixed(2) + 'ms';
+  $('e2e').textContent = d.e2eProbes > 0 ? (d.e2eEmaMs || 0).toFixed(1) + 'ms' : '-';
+  $('dirty').textContent = (d.lastDirtyPages || 0) + ' pages';
+
+  // Stream bandwidth
+  const now = Date.now();
+  const dt = (now - prevTime) / 1000;
+  if (dt > 0.5) {
+    const bps = ((d.videoBytes - prevBytes) * 8) / dt / 1e6;
+    $('stream').textContent = bps.toFixed(1) + ' Mbps';
+    prevBytes = d.videoBytes;
+    prevTime = now;
+  }
+
+  // Buttons (active-low: bit=0 means pressed)
+  const k = d.kcode0 !== undefined ? d.kcode0 : 0xFFFF;
+  const lt0 = d.lt0 || 0;
+  const rt0 = d.rt0 || 0;
+
+  const pressed = (bit) => !(k & bit);
+  setBtn('btn-lp', pressed(BTN.A));
+  setBtn('btn-mp', pressed(BTN.B));
+  setBtn('btn-hp', pressed(BTN.C));
+  setBtn('btn-lk', pressed(BTN.X));
+  setBtn('btn-mk', pressed(BTN.Y));
+  setBtn('btn-hk', pressed(BTN.Z));
+  setBtn('btn-a1', lt0 > 30);
+  setBtn('btn-a2', rt0 > 30);
+
+  // Stick
+  const dot = $('stick-dot');
+  let dx = 0, dy = 0;
+  if (pressed(BTN.LEFT))  dx -= 1;
+  if (pressed(BTN.RIGHT)) dx += 1;
+  if (pressed(BTN.UP))    dy -= 1;
+  if (pressed(BTN.DOWN))  dy += 1;
+  const hasDir = dx !== 0 || dy !== 0;
+  dot.className = 'stick-dot' + (hasDir ? ' active' : '');
+  dot.style.left = `calc(50% + ${dx * 12}px)`;
+  dot.style.top  = `calc(50% + ${dy * 12}px)`;
+
+  // History
+  history.push(k);
+  if (history.length > HIST_LEN) history.shift();
+  renderHistory();
+
+  // Game state
+  if (d.game && d.game.in_match) {
+    $('panel-game').style.display = '';
+    const chars = d.game.chars || [];
+    $('p1-char').textContent = CHARS[chars[0]?.id] || '?';
+    $('p2-char').textContent = CHARS[chars[1]?.id] || '?';
+    $('timer').textContent = d.game.timer || '-';
+    const h1 = chars[0]?.health || 0;
+    const h2 = chars[1]?.health || 0;
+    $('p1-hp').style.width = (h1 / 144 * 100).toFixed(0) + '%';
+    $('p2-hp').style.width = (h2 / 144 * 100).toFixed(0) + '%';
+    $('p1-meter').textContent = d.game.p1_meter || 0;
+    $('p2-meter').textContent = d.game.p2_meter || 0;
+    $('p1-combo').textContent = d.game.p1_combo > 1 ? d.game.p1_combo + ' HITS!' : '';
+    $('p2-combo').textContent = d.game.p2_combo > 1 ? d.game.p2_combo + ' HITS!' : '';
+  }
+}
+
+function setBtn(id, on) {
+  const el = $(id);
+  if (on) el.classList.add('pressed');
+  else el.classList.remove('pressed');
+}
+
+function renderHistory() {
+  const container = $('history');
+  // Rebuild only if column count changed
+  while (container.children.length < history.length) {
+    const col = document.createElement('div');
+    col.className = 'history-col';
+    const bits = [BTN.UP, BTN.DOWN, BTN.LEFT, BTN.RIGHT, BTN.A, BTN.B, BTN.C, BTN.X, BTN.Y, BTN.Z];
+    for (let i = 0; i < bits.length; i++) {
+      const cell = document.createElement('div');
+      cell.className = 'history-cell';
+      col.appendChild(cell);
+    }
+    container.appendChild(col);
+  }
+  while (container.children.length > history.length) {
+    container.removeChild(container.lastChild);
+  }
+  const bits = [BTN.UP, BTN.DOWN, BTN.LEFT, BTN.RIGHT, BTN.A, BTN.B, BTN.C, BTN.X, BTN.Y, BTN.Z];
+  for (let ci = 0; ci < history.length; ci++) {
+    const col = container.children[ci];
+    const k = history[ci];
+    for (let ri = 0; ri < bits.length; ri++) {
+      const cell = col.children[ri];
+      cell.className = !(k & bits[ri]) ? 'history-cell on' : 'history-cell';
+    }
+  }
+}
+
+function togglePanel(name, btn) {
+  const p = $('panel-' + name);
+  const vis = p.style.display !== 'none';
+  p.style.display = vis ? 'none' : '';
+  btn.classList.toggle('active');
+}
+
+connect();
+</script>
+</body>
+</html>
