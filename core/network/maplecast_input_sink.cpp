@@ -218,7 +218,7 @@ static void onButton(int port, DreamcastKey key, bool pressed)
 		int64_t zero = 0;
 		_probeStartUs.compare_exchange_strong(zero, nowUs(), std::memory_order_relaxed);
 		sendState();
-		// Record for the input display overlay
+		// Record for input display overlay — use _buttons which has full state
 		int gp = _gamepadPort.load(std::memory_order_relaxed);
 		int tp = (gp >= 0 && gp < 4) ? gp : _slot;
 		gui_game_overlay::recordInput(_buttons,
@@ -264,6 +264,8 @@ static void triggerPollLoop()
 			lastRt = curRt;
 			_triggerChanges.fetch_add(1, std::memory_order_relaxed);
 			sendState();
+			// Record for input display overlay
+			gui_game_overlay::recordInput(_buttons, curLt, curRt);
 		}
 
 		// 2. Drain any probe-ACKs from the active socket (non-blocking).

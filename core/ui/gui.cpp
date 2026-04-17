@@ -1748,6 +1748,11 @@ void gui_displayMirrorDebug()
 	gui_newFrame();
 	ImGui::NewFrame();
 
+	// All mirror-client overlays render here, inside NewFrame/Render.
+	gui_competitive_hud::draw();
+	gui_maplecast_settings::draw();
+	gui_game_overlay::draw();
+
 	ImGui::Render();
 	gui_endFrame(false);
 }

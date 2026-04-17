@@ -1,16 +1,12 @@
 /*
-	Game Data Overlay — implementation.
+	Game Data Overlay — training-mode style input display.
 
-	MVC2 button mapping (Dreamcast active-low):
-	  LP=A(bit2) MP=B(bit1) HP=C(bit0)  — punch row
-	  LK=X(bit10) MK=Y(bit9) HK=Z(bit8) — kick row
-	  Directions: Up(4) Down(5) Left(6) Right(7)
-	  Start(3)
+	Vertical scrolling input log: newest input at bottom, scrolls upward.
+	Each row shows: [stick direction] [LP MP HP LK MK HK] [A1 A2]
+	Buttons light up as circles when pressed. Stick shown as numpad notation.
 
-	Input history: 120-frame ring buffer (~2 seconds at 60fps).
-	Each entry stores the full button state + triggers. Rendered as a
-	scrolling strip where each column is one frame, colored cells show
-	which buttons were pressed.
+	Style matches fighting game training mode overlays (like the screenshot
+	reference with inputs streaming upward).
 */
 #include "gui_game_overlay.h"
 #include "network/maplecast_mirror.h"
@@ -24,34 +20,16 @@
 #include <cstring>
 #include <mutex>
 
-// MVC2 character name table (indexed by character_id 0-55)
-static const char* MVC2_CHAR_NAMES[] = {
-	"Ryu","Zangief","Guile","Morrigan","Anakaris","Strider","Cyclops",
-	"Wolverine","Psylocke","Iceman","Rogue","Capt America","Spider-Man",
-	"Hulk","Venom","Dr Doom","Tron Bonne","Jill","Hayato","Ruby Heart",
-	"SonSon","Amingo","Marrow","Cable","Abyss1","Abyss2","Abyss3",
-	"Chun-Li","Megaman","Roll","Akuma","B.B.Hood","Felicia","Charlie",
-	"Sakura","Dan","Cammy","Dhalsim","M.Bison","Ken","Gambit",
-	"Juggernaut","Storm","Sabretooth","Magneto","Shuma","War Machine",
-	"Silver Samurai","Omega Red","Spiral","Colossus","Iron Man",
-	"Sentinel","Blackheart","Thanos","Jin"
-};
-static const int MVC2_CHAR_COUNT = sizeof(MVC2_CHAR_NAMES) / sizeof(MVC2_CHAR_NAMES[0]);
-
-static const char* charName(uint8_t id) {
-	return (id < MVC2_CHAR_COUNT) ? MVC2_CHAR_NAMES[id] : "???";
-}
-
 namespace gui_game_overlay
 {
 
 static std::atomic<bool> _showGameData{false};
-static std::atomic<bool> _showInput{false};
+static std::atomic<bool> _showInput{true};  // on by default
 
 // ── Input history ring buffer ────────────────────────────────────────
-static constexpr int HISTORY_SIZE = 120; // 2 seconds at 60fps
+static constexpr int HISTORY_SIZE = 120;
 struct InputFrame {
-	uint16_t buttons; // active-low
+	uint16_t buttons;
 	uint8_t  lt, rt;
 };
 static InputFrame _history[HISTORY_SIZE];
@@ -59,173 +37,62 @@ static int _historyHead = 0;
 static std::mutex _historyMtx;
 static uint32_t _totalInputFrames = 0;
 
-// ── Layout ───────────────────────────────────────────────────────────
-// Draggable, no resize, auto-size. Title bar acts as drag handle.
-static const ImGuiWindowFlags OVL_FLAGS =
-	ImGuiWindowFlags_NoResize |
-	ImGuiWindowFlags_AlwaysAutoResize |
-	ImGuiWindowFlags_NoSavedSettings |
-	ImGuiWindowFlags_NoFocusOnAppearing |
-	ImGuiWindowFlags_NoNav;
-
-static const ImVec4 P1_COLOR = ImVec4(0.3f, 0.6f, 1.0f, 1.0f);
-static const ImVec4 P2_COLOR = ImVec4(1.0f, 0.4f, 0.3f, 1.0f);
-static const ImVec4 HEADER   = ImVec4(0.6f, 0.85f, 1.0f, 1.0f);
-static const ImVec4 DIM      = ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
-
-// ── Game Data Section ────────────────────────────────────────────────
-
-static void drawHealthBar(float x, float y, float w, float h,
-                           uint8_t health, uint8_t redHealth, ImVec4 color)
+// ── Numpad stick notation ────────────────────────────────────────────
+// Fighting game standard: 5=neutral, 6=forward, 2=down, etc.
+// We show as arrow characters.
+static const char* stickNotation(uint16_t buttons)
 {
-	ImDrawList* dl = ImGui::GetWindowDrawList();
-	// Background
-	dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h),
-	                  IM_COL32(40, 40, 40, 200));
-	// Red health (recoverable damage)
-	if (redHealth > 0) {
-		float rw = w * (redHealth / 144.0f);
-		dl->AddRectFilled(ImVec2(x, y), ImVec2(x + rw, y + h),
-		                  IM_COL32(180, 40, 40, 200));
-	}
-	// Current health
-	if (health > 0) {
-		float hw = w * (health / 144.0f);
-		dl->AddRectFilled(ImVec2(x, y), ImVec2(x + hw, y + h),
-		                  ImGui::ColorConvertFloat4ToU32(color));
-	}
-	// Border
-	dl->AddRect(ImVec2(x, y), ImVec2(x + w, y + h),
-	            IM_COL32(200, 200, 200, 180));
+	bool up    = !(buttons & DC_DPAD_UP);
+	bool down  = !(buttons & DC_DPAD_DOWN);
+	bool left  = !(buttons & DC_DPAD_LEFT);
+	bool right = !(buttons & DC_DPAD_RIGHT);
+
+	if (up && left)    return "7";
+	if (up && right)   return "9";
+	if (up)            return "8";
+	if (down && left)  return "1";
+	if (down && right) return "3";
+	if (down)          return "2";
+	if (left)          return "4";
+	if (right)         return "6";
+	return "5";
 }
 
-static void drawGameData()
+// Arrow character for stick direction
+static const char* stickArrow(uint16_t buttons)
 {
-	maplecast_gamestate::GameState gs;
-	if (!maplecast_mirror::getClientGameState(gs)) return;
-	if (!gs.in_match) return;
+	bool up    = !(buttons & DC_DPAD_UP);
+	bool down  = !(buttons & DC_DPAD_DOWN);
+	bool left  = !(buttons & DC_DPAD_LEFT);
+	bool right = !(buttons & DC_DPAD_RIGHT);
 
-	float dispW = ImGui::GetIO().DisplaySize.x;
-	ImGui::SetNextWindowPos(ImVec2(dispW / 2 - 200, 4), ImGuiCond_FirstUseEver);
-	ImGui::SetNextWindowBgAlpha(0.7f);
-	bool showGD = true;
-	ImGui::Begin("Game Data", &showGD, OVL_FLAGS);
-	if (!showGD) { _showGameData.store(false); ImGui::End(); return; }
-
-	// Top bar: P1 chars | timer | P2 chars
-	auto& p1 = gs.chars[0]; // P1 point
-	auto& p2 = gs.chars[1]; // P2 point
-
-	ImGui::TextColored(P1_COLOR, "%-10s", charName(p1.character_id));
-	ImGui::SameLine(160);
-	ImGui::Text("%02d", gs.game_timer);
-	ImGui::SameLine(200);
-	ImGui::TextColored(P2_COLOR, "%10s", charName(p2.character_id));
-
-	// Health bars
-	ImVec2 wpos = ImGui::GetWindowPos();
-	float barY = ImGui::GetCursorScreenPos().y;
-	drawHealthBar(wpos.x + 8, barY, 150, 10, p1.health, p1.red_health, P1_COLOR);
-	drawHealthBar(wpos.x + 200, barY, 150, 10, p2.health, p2.red_health, P2_COLOR);
-	ImGui::Dummy(ImVec2(0, 14));
-
-	// Assists
-	ImGui::TextColored(DIM, " %s / %s",
-		charName(gs.chars[2].character_id),
-		charName(gs.chars[4].character_id));
-	ImGui::SameLine(200);
-	ImGui::TextColored(DIM, "%s / %s",
-		charName(gs.chars[3].character_id),
-		charName(gs.chars[5].character_id));
-
-	// Meter + combo
-	ImGui::Text("Meter: %d", gs.p1_meter_level);
-	ImGui::SameLine(200);
-	ImGui::Text("Meter: %d", gs.p2_meter_level);
-
-	if (gs.p1_combo > 1) {
-		ImGui::TextColored(ImVec4(1,1,0,1), "%d HITS!", gs.p1_combo);
-	}
-	if (gs.p2_combo > 1) {
-		ImGui::SameLine(200);
-		ImGui::TextColored(ImVec4(1,1,0,1), "%d HITS!", gs.p2_combo);
-	}
-
-	ImGui::End();
+	if (up && left)    return "\xe2\x86\x96"; // ↖
+	if (up && right)   return "\xe2\x86\x97"; // ↗
+	if (up)            return "\xe2\x86\x91"; // ↑
+	if (down && left)  return "\xe2\x86\x99"; // ↙
+	if (down && right) return "\xe2\x86\x98"; // ↘
+	if (down)          return "\xe2\x86\x93"; // ↓
+	if (left)          return "\xe2\x86\x90"; // ←
+	if (right)         return "\xe2\x86\x92"; // →
+	return "\xc2\xb7";  // · (neutral)
 }
 
-// ── Input Display Section ────────────────────────────────────────────
-
-// Draw a controller face button — circle that lights up on press
-static void drawBtn(ImDrawList* dl, float cx, float cy, float r,
-                     const char* label, bool pressed, ImU32 activeColor)
+// ── Small filled circle for button indicators ────────────────────────
+static void drawDot(ImDrawList* dl, float cx, float cy, float r,
+                     bool pressed, ImU32 activeColor)
 {
-	ImU32 fill = pressed ? activeColor : IM_COL32(50, 50, 55, 180);
-	ImU32 border = pressed ? IM_COL32(255, 255, 255, 240) : IM_COL32(90, 90, 100, 200);
-	// Outer ring
-	dl->AddCircleFilled(ImVec2(cx, cy), r, fill, 20);
-	dl->AddCircle(ImVec2(cx, cy), r, border, 20, pressed ? 2.5f : 1.5f);
-	// Inner highlight when pressed
-	if (pressed)
-		dl->AddCircleFilled(ImVec2(cx, cy - r * 0.15f), r * 0.6f,
-		                    IM_COL32(255, 255, 255, 60), 16);
-	// Label
-	if (label[0]) {
-		ImVec2 tsz = ImGui::CalcTextSize(label);
-		dl->AddText(ImVec2(cx - tsz.x * 0.5f, cy - tsz.y * 0.5f),
-		            pressed ? IM_COL32(255, 255, 255, 255) : IM_COL32(140, 140, 150, 200),
-		            label);
-	}
-}
-
-// Draw a direction indicator (stick/dpad)
-static void drawStick(ImDrawList* dl, float cx, float cy, float r,
-                       bool up, bool down, bool left, bool right)
-{
-	// Background circle
-	dl->AddCircleFilled(ImVec2(cx, cy), r, IM_COL32(40, 40, 40, 150), 16);
-	dl->AddCircle(ImVec2(cx, cy), r, IM_COL32(100, 100, 100, 180), 16);
-
-	// Direction dot
-	float dx = 0, dy = 0;
-	if (left)  dx -= 1;
-	if (right) dx += 1;
-	if (up)    dy -= 1;
-	if (down)  dy += 1;
-	if (dx != 0 || dy != 0) {
-		float len = sqrtf(dx * dx + dy * dy);
-		dx = dx / len * r * 0.6f;
-		dy = dy / len * r * 0.6f;
-		dl->AddCircleFilled(ImVec2(cx + dx, cy + dy), r * 0.35f,
-		                    IM_COL32(80, 180, 255, 255), 12);
+	if (pressed) {
+		dl->AddCircleFilled(ImVec2(cx, cy), r, activeColor, 12);
+		dl->AddCircle(ImVec2(cx, cy), r, IM_COL32(255, 255, 255, 200), 12, 1.5f);
 	} else {
-		// Neutral — small center dot
-		dl->AddCircleFilled(ImVec2(cx, cy), r * 0.15f,
-		                    IM_COL32(100, 100, 100, 150), 8);
+		dl->AddCircleFilled(ImVec2(cx, cy), r, IM_COL32(40, 40, 50, 100), 12);
 	}
 }
 
-static void drawInputDisplay()
+// ── Current input state (big, at bottom) ─────────────────────────────
+static void drawCurrentInput(ImDrawList* dl, ImVec2 wp, float winW,
+                              const InputFrame& cur)
 {
-	InputFrame cur;
-	{
-		std::lock_guard<std::mutex> lk(_historyMtx);
-		if (_totalInputFrames == 0) return;
-		int idx = (_historyHead - 1 + HISTORY_SIZE) % HISTORY_SIZE;
-		cur = _history[idx];
-	}
-
-	float dispH = ImGui::GetIO().DisplaySize.y;
-	ImGui::SetNextWindowPos(ImVec2(8, dispH - 220), ImGuiCond_FirstUseEver);
-	ImGui::SetNextWindowBgAlpha(0.7f);
-	bool showInp = true;
-	ImGui::Begin("Input Display", &showInp, OVL_FLAGS);
-	if (!showInp) { _showInput.store(false); ImGui::End(); return; }
-
-	ImDrawList* dl = ImGui::GetWindowDrawList();
-	ImVec2 wp = ImGui::GetWindowPos();
-
-	// Buttons are active-low: bit=0 means pressed
 	bool up    = !(cur.buttons & DC_DPAD_UP);
 	bool down  = !(cur.buttons & DC_DPAD_DOWN);
 	bool left  = !(cur.buttons & DC_DPAD_LEFT);
@@ -237,89 +104,176 @@ static void drawInputDisplay()
 	bool y = !(cur.buttons & DC_BTN_Y);
 	bool z = !(cur.buttons & DC_BTN_Z);
 
-	float r = 14.0f;    // button radius
-	float gap = 6.0f;   // between buttons
-	float ox = wp.x + 30;
-	float oy = wp.y + 30;
+	float r = 11.0f;
+	float gap = 5.0f;
+	float sp = r * 2 + gap;
 
 	// Stick (left side)
-	drawStick(dl, ox, oy + 10, 20, up, down, left, right);
+	float stickR = 16.0f;
+	float sx = wp.x + 28;
+	float sy = wp.y + 10;
+	dl->AddCircleFilled(ImVec2(sx, sy), stickR, IM_COL32(30, 30, 40, 180), 16);
+	dl->AddCircle(ImVec2(sx, sy), stickR, IM_COL32(80, 80, 100, 200), 16);
+	float dx = 0, dy = 0;
+	if (left)  dx -= 1;
+	if (right) dx += 1;
+	if (up)    dy -= 1;
+	if (down)  dy += 1;
+	if (dx != 0 || dy != 0) {
+		float len = sqrtf(dx * dx + dy * dy);
+		dx = dx / len * stickR * 0.6f;
+		dy = dy / len * stickR * 0.6f;
+		dl->AddCircleFilled(ImVec2(sx + dx, sy + dy), stickR * 0.4f,
+		                    IM_COL32(80, 180, 255, 255), 10);
+	}
 
-	// MVC2 button colors: punches = blue tones, kicks = red/orange tones
-	// Layout matches arcade panel:  LP  MP  HP
-	//                                LK  MK  HK
-	ImU32 colLP = IM_COL32(80, 160, 255, 230);   // light blue
-	ImU32 colMP = IM_COL32(60, 120, 220, 230);   // medium blue
-	ImU32 colHP = IM_COL32(40, 80, 200, 230);    // dark blue
-	ImU32 colLK = IM_COL32(255, 140, 60, 230);   // light orange
-	ImU32 colMK = IM_COL32(230, 100, 40, 230);   // medium orange
-	ImU32 colHK = IM_COL32(200, 60, 30, 230);    // dark red
+	// Buttons
+	ImU32 colLP = IM_COL32(80, 160, 255, 230);
+	ImU32 colMP = IM_COL32(60, 120, 220, 230);
+	ImU32 colHP = IM_COL32(40, 80, 200, 230);
+	ImU32 colLK = IM_COL32(255, 140, 60, 230);
+	ImU32 colMK = IM_COL32(230, 100, 40, 230);
+	ImU32 colHK = IM_COL32(200, 60, 30, 230);
+	ImU32 colA  = IM_COL32(160, 80, 220, 230);
 
-	float bx = ox + 55;
-	float by = oy - 4;
-	float sp = r * 2 + gap;
-	// Punch row (top)
-	drawBtn(dl, bx,        by,      r, "LP", a, colLP);
-	drawBtn(dl, bx + sp,   by,      r, "MP", b, colMP);
-	drawBtn(dl, bx + sp*2, by,      r, "HP", c, colHP);
-	// Kick row (bottom)
-	drawBtn(dl, bx,        by + sp, r, "LK", x, colLK);
-	drawBtn(dl, bx + sp,   by + sp, r, "MK", y, colMK);
-	drawBtn(dl, bx + sp*2, by + sp, r, "HK", z, colHK);
+	float bx = wp.x + 60;
+	float by = sy - r;
+	drawDot(dl, bx,        by,      r, a, colLP);
+	drawDot(dl, bx + sp,   by,      r, b, colMP);
+	drawDot(dl, bx + sp*2, by,      r, c, colHP);
+	drawDot(dl, bx,        by + sp, r, x, colLK);
+	drawDot(dl, bx + sp,   by + sp, r, y, colMK);
+	drawDot(dl, bx + sp*2, by + sp, r, z, colHK);
 
-	// Assist triggers (shoulder buttons)
-	float trigY = by + sp * 2 + 4;
-	ImU32 colTrig = IM_COL32(160, 100, 220, 230); // purple
-	drawBtn(dl, bx,      trigY, r * 0.8f, "A1", cur.lt > 30, colTrig);
-	drawBtn(dl, bx + sp, trigY, r * 0.8f, "A2", cur.rt > 30, colTrig);
+	// Assists
+	float ax = bx + sp * 3 + 8;
+	drawDot(dl, ax, by,      r * 0.8f, cur.lt > 30, colA);
+	drawDot(dl, ax, by + sp, r * 0.8f, cur.rt > 30, colA);
 
-	// Reserve space for the button area
-	ImGui::Dummy(ImVec2(bx + sp * 2 + r - ox + 30, sp * 2 + r * 2 + 8));
-
-	// ── Scrolling input history ──────────────────────────────────
-	// Each column = 1 frame, each row = 1 button. 60 columns visible.
-	// Pressed cells are filled, empty cells are dark.
-	ImGui::Separator();
-	ImGui::TextColored(HEADER, "INPUT HISTORY");
-
-	float histX = ImGui::GetCursorScreenPos().x;
-	float histY = ImGui::GetCursorScreenPos().y;
-	int visibleFrames = 60;
-	float cellW = 3.0f;
-	float cellH = 4.0f;
-	float rowGap = 1.0f;
-
-	// Button rows: Up Down Left Right LP MP HP LK MK HK
-	static const uint16_t ROW_BITS[] = {
-		DC_DPAD_UP, DC_DPAD_DOWN, DC_DPAD_LEFT, DC_DPAD_RIGHT,
-		DC_BTN_A, DC_BTN_B, DC_BTN_C,
-		DC_BTN_X, DC_BTN_Y, DC_BTN_Z
+	// Labels
+	ImU32 lblCol = IM_COL32(180, 180, 200, 200);
+	auto label = [&](float cx2, float cy2, const char* txt) {
+		ImVec2 ts = ImGui::CalcTextSize(txt);
+		dl->AddText(ImVec2(cx2 - ts.x/2, cy2 - ts.y/2), lblCol, txt);
 	};
-	static const int NUM_ROWS = 10;
+	label(bx,        by - r - 6, "LP");
+	label(bx + sp,   by - r - 6, "MP");
+	label(bx + sp*2, by - r - 6, "HP");
+	label(ax, by - r * 0.8f - 6, "A1");
+	label(ax, by + sp + r * 0.8f + 4, "A2");
+}
 
+// ── Scrolling input log (vertical, newest at bottom) ─────────────────
+static void drawInputLog(ImDrawList* dl, ImVec2 pos, float width, float height)
+{
+	float rowH = 14.0f;
+	int visibleRows = (int)(height / rowH);
+	float dotR = 4.0f;
+	float colW = 12.0f;
+
+	// Button column positions
+	float stickX = pos.x + 16;
+	float btnStartX = pos.x + 36;
+
+	// Colors for the log dots (smaller, dimmer than current state)
+	ImU32 colP = IM_COL32(80, 140, 255, 200);   // punch
+	ImU32 colK = IM_COL32(240, 120, 50, 200);    // kick
+	ImU32 colA = IM_COL32(140, 70, 200, 200);    // assist
+	ImU32 colDir = IM_COL32(80, 200, 255, 220);  // direction text
+
+	std::lock_guard<std::mutex> lk(_historyMtx);
+	int available = (_totalInputFrames < HISTORY_SIZE)
+	              ? _totalInputFrames : HISTORY_SIZE;
+	if (available == 0) return;
+
+	// Draw from bottom (newest) to top (oldest)
+	int drawn = 0;
+	for (int i = 0; i < visibleRows && i < available; i++) {
+		int ringIdx = (_historyHead - 1 - i + HISTORY_SIZE) % HISTORY_SIZE;
+		InputFrame& f = _history[ringIdx];
+
+		float rowY = pos.y + height - (i + 1) * rowH;
+		if (rowY < pos.y) break;
+
+		// Separator line (subtle)
+		if (i > 0)
+			dl->AddLine(ImVec2(pos.x + 4, rowY + rowH),
+			            ImVec2(pos.x + width - 4, rowY + rowH),
+			            IM_COL32(60, 60, 80, 60));
+
+		float cy = rowY + rowH * 0.5f;
+
+		// Stick direction (arrow character)
+		const char* arrow = stickArrow(f.buttons);
+		bool hasDir = strcmp(arrow, "\xc2\xb7") != 0;
+		dl->AddText(ImVec2(stickX - 4, cy - 6),
+		            hasDir ? colDir : IM_COL32(50, 50, 60, 100), arrow);
+
+		// Button dots: LP MP HP LK MK HK A1 A2
+		float bx = btnStartX;
+		drawDot(dl, bx,            cy, dotR, !(f.buttons & DC_BTN_A), colP);
+		drawDot(dl, bx + colW,     cy, dotR, !(f.buttons & DC_BTN_B), colP);
+		drawDot(dl, bx + colW * 2, cy, dotR, !(f.buttons & DC_BTN_C), colP);
+		drawDot(dl, bx + colW * 3, cy, dotR, !(f.buttons & DC_BTN_X), colK);
+		drawDot(dl, bx + colW * 4, cy, dotR, !(f.buttons & DC_BTN_Y), colK);
+		drawDot(dl, bx + colW * 5, cy, dotR, !(f.buttons & DC_BTN_Z), colK);
+		drawDot(dl, bx + colW * 6 + 4, cy, dotR * 0.8f, f.lt > 30, colA);
+		drawDot(dl, bx + colW * 7 + 4, cy, dotR * 0.8f, f.rt > 30, colA);
+
+		drawn++;
+	}
+}
+
+// ── Draw entry points ────────────────────────────────────────────────
+
+static void drawInputDisplay()
+{
+	InputFrame cur;
 	{
 		std::lock_guard<std::mutex> lk(_historyMtx);
-		int available = (_totalInputFrames < HISTORY_SIZE)
-		              ? _totalInputFrames : HISTORY_SIZE;
-		int start = (available < visibleFrames) ? 0 : available - visibleFrames;
-
-		for (int col = 0; col < visibleFrames && col < available; col++) {
-			int ringIdx = (_historyHead - available + start + col + HISTORY_SIZE) % HISTORY_SIZE;
-			InputFrame& f = _history[ringIdx];
-			float cx = histX + col * (cellW + 1);
-			for (int row = 0; row < NUM_ROWS; row++) {
-				float cy = histY + row * (cellH + rowGap);
-				bool pressed = !(f.buttons & ROW_BITS[row]);
-				ImU32 color = pressed
-					? IM_COL32(80, 200, 255, 220)
-					: IM_COL32(30, 30, 30, 80);
-				dl->AddRectFilled(ImVec2(cx, cy), ImVec2(cx + cellW, cy + cellH), color);
-			}
-		}
+		if (_totalInputFrames == 0) return;
+		int idx = (_historyHead - 1 + HISTORY_SIZE) % HISTORY_SIZE;
+		cur = _history[idx];
 	}
-	// Reserve space for the history strip
-	ImGui::Dummy(ImVec2(visibleFrames * (cellW + 1),
-	                     NUM_ROWS * (cellH + rowGap)));
+
+	float dispW = ImGui::GetIO().DisplaySize.x;
+	float dispH = ImGui::GetIO().DisplaySize.y;
+	float panelW = 180;
+	float panelH = dispH * 0.6f;
+
+	ImGui::SetNextWindowPos(ImVec2(dispW - panelW - 8, dispH - panelH - 8),
+	                        ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSize(ImVec2(panelW, panelH), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowBgAlpha(0.75f);
+
+	bool showInp = true;
+	ImGui::Begin("Input", &showInp,
+		ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoNav);
+	if (!showInp) { _showInput.store(false); ImGui::End(); return; }
+
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	ImVec2 wp = ImGui::GetWindowPos();
+	float ww = ImGui::GetWindowWidth();
+	float wh = ImGui::GetWindowHeight();
+
+	// Current state (bottom of window, big buttons)
+	float curAreaH = 40;
+	ImVec2 curPos(wp.x, wp.y + wh - curAreaH - 8);
+	drawCurrentInput(dl, curPos, ww, cur);
+
+	// Separator
+	dl->AddLine(ImVec2(wp.x + 8, wp.y + wh - curAreaH - 12),
+	            ImVec2(wp.x + ww - 8, wp.y + wh - curAreaH - 12),
+	            IM_COL32(80, 120, 200, 150));
+
+	// Scrolling log (above current state)
+	float logTop = wp.y + ImGui::GetFrameHeight() + 4;
+	float logH = wh - curAreaH - ImGui::GetFrameHeight() - 20;
+	drawInputLog(dl, ImVec2(wp.x, logTop), ww, logH);
+
+	// Column headers at top
+	ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.6f, 0.8f),
+		"  Dir LP MP HP LK MK HK");
 
 	ImGui::End();
 }
@@ -329,8 +283,7 @@ static void drawInputDisplay()
 void draw()
 {
 	if (!maplecast_mirror::isClient()) return;
-	if (_showGameData.load(std::memory_order_relaxed)) drawGameData();
-	if (_showInput.load(std::memory_order_relaxed))    drawInputDisplay();
+	if (_showInput.load(std::memory_order_relaxed)) drawInputDisplay();
 }
 
 void toggleGameData() { _showGameData.store(!_showGameData.load()); }
