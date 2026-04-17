@@ -1,14 +1,21 @@
 /*
 	Competitive HUD — implementation.
 
+	Matches the WebGPU test page diagnostics panel. Four sections:
+
+	  F1 — PIPELINE: decode, render, process, E2E, stream bandwidth
+	  F2 — NETWORK:  grade, RTT, jitter, send rate, failover status
+	  F3 — INPUT:    button/trigger changes, packets sent, redundancy
+	  F12 — toggle all
+
 	Reads telemetry from:
 	  • maplecast_input_sink::getStats()  — E2E latency, send rate,
 	     redundant sends, failover count, primary/backup status
 	  • maplecast_mirror::getClientStats() — TA frame arrival timing,
-	     decode cost, dirty page count
+	     decode cost, dirty page count, bandwidth
 
 	All reads are atomic loads — zero locking, safe to call every frame.
-	Renders into 3 small ImGui windows in the bottom-left corner.
+	Renders into small ImGui windows in the top-left corner.
 	Windows have NoInputs flag so they never steal mouse from the gear.
 */
 #include "gui_competitive_hud.h"
@@ -25,16 +32,12 @@
 namespace gui_competitive_hud
 {
 
-// Section visibility. Defaults: NETWORK + LATENCY on, INPUT off.
-// Atomic so the F-key toggle handler can flip them safely.
+// Section visibility. Defaults: all on so user sees diagnostics immediately.
+static std::atomic<bool> _showPipeline{true};
 static std::atomic<bool> _showNetwork{true};
-static std::atomic<bool> _showLatency{true};
 static std::atomic<bool> _showInput{false};
 
 // ── Network grading ───────────────────────────────────────────────────
-//
-// Quick visual indicator: S/A/B/C/F based on RTT + jitter + loss.
-// Thresholds match docs/COMPETITIVE-CLIENT.md "Network Grading" table.
 struct Grade {
 	const char* letter;
 	ImVec4 color;
@@ -42,15 +45,17 @@ struct Grade {
 
 static Grade computeGrade(double rtt_ms, double jitter_ms, double loss_pct)
 {
-	if (rtt_ms < 15.0  && jitter_ms < 0.5 && loss_pct < 0.001)
-		return {"S", ImVec4(0.40f, 1.00f, 0.40f, 1.0f)};  // bright green
-	if (rtt_ms < 30.0  && jitter_ms < 1.0 && loss_pct < 0.1)
-		return {"A", ImVec4(0.50f, 1.00f, 0.50f, 1.0f)};  // green
-	if (rtt_ms < 60.0  && jitter_ms < 2.0 && loss_pct < 0.5)
-		return {"B", ImVec4(0.90f, 0.90f, 0.30f, 1.0f)};  // yellow
-	if (rtt_ms < 100.0 && jitter_ms < 5.0 && loss_pct < 2.0)
-		return {"C", ImVec4(1.00f, 0.60f, 0.30f, 1.0f)};  // orange
-	return {"F", ImVec4(1.00f, 0.30f, 0.30f, 1.0f)};       // red
+	// Thresholds tuned for fighting games: 16.67ms = 1 frame @ 60fps.
+	// S = sub-frame, A = 1-frame, B = 2-frame, C = playable, F = unplayable.
+	if (rtt_ms < 8.0   && jitter_ms < 1.0 && loss_pct < 0.1)
+		return {"S", ImVec4(0.40f, 1.00f, 0.40f, 1.0f)};
+	if (rtt_ms < 20.0  && jitter_ms < 3.0 && loss_pct < 0.5)
+		return {"A", ImVec4(0.50f, 1.00f, 0.50f, 1.0f)};
+	if (rtt_ms < 40.0  && jitter_ms < 5.0 && loss_pct < 1.0)
+		return {"B", ImVec4(0.90f, 0.90f, 0.30f, 1.0f)};
+	if (rtt_ms < 80.0  && jitter_ms < 10.0 && loss_pct < 3.0)
+		return {"C", ImVec4(1.00f, 0.60f, 0.30f, 1.0f)};
+	return {"F", ImVec4(1.00f, 0.30f, 0.30f, 1.0f)};
 }
 
 // ── Layout helpers ────────────────────────────────────────────────────
@@ -61,24 +66,89 @@ static const ImGuiWindowFlags HUD_WINDOW_FLAGS =
 	ImGuiWindowFlags_NoResize |
 	ImGuiWindowFlags_AlwaysAutoResize |
 	ImGuiWindowFlags_NoSavedSettings |
-	ImGuiWindowFlags_NoInputs |        // critical: no mouse capture
+	ImGuiWindowFlags_NoInputs |
 	ImGuiWindowFlags_NoFocusOnAppearing |
 	ImGuiWindowFlags_NoNav;
 
+static const ImVec4 HEADER_COLOR  = ImVec4(0.6f, 0.85f, 1.0f, 1.0f);
+static const ImVec4 DIM_COLOR     = ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
+static const ImVec4 WARN_COLOR    = ImVec4(1.0f, 0.7f, 0.3f, 1.0f);
+
 // ── Sections ──────────────────────────────────────────────────────────
+
+static void drawPipelineSection(float& yCursor)
+{
+	auto mirror = maplecast_mirror::getClientStats();
+	auto input  = maplecast_input_sink::getStats();
+
+	ImGui::SetNextWindowPos(ImVec2(8, yCursor), ImGuiCond_Always);
+	ImGui::SetNextWindowBgAlpha(0.78f);
+	ImGui::Begin("##hud_pipeline", nullptr, HUD_WINDOW_FLAGS);
+
+	ImGui::TextColored(HEADER_COLOR, "PIPELINE");
+	ImGui::Separator();
+
+	// Decode time (zstd decompress + TA delta apply)
+	double decodeMs = mirror.decodeEmaUs / 1000.0;
+	ImGui::Text("Decode:  %.2fms", decodeMs);
+
+	// Frame arrival interval (should be ~16.67ms for 60fps)
+	double arrivalMs = mirror.arrivalEmaUs / 1000.0;
+	// Jitter = how far the EMA is from the ideal 16.67ms target
+	double jitterMs = arrivalMs > 0 ? arrivalMs - 16.667 : 0.0;
+	if (jitterMs < 0) jitterMs = -jitterMs;
+
+	// Render FPS from arrival interval
+	double renderFps = arrivalMs > 0 ? 1000.0 / arrivalMs : 0.0;
+	ImGui::Text("FPS:     %.0f (%.1fms/f, jitter %.1fms)", renderFps, arrivalMs, jitterMs);
+
+	// TA size + dirty pages
+	ImGui::Text("TA:      %u bytes", mirror.lastTaSize);
+	ImGui::Text("Dirty:   %u pages%s", mirror.lastDirtyPages,
+	            mirror.lastVramDirty ? " [VRAM]" : "");
+
+	// Stream bandwidth (bytes received → Mbps over ~1s window)
+	static uint64_t prevBytes = 0;
+	static uint64_t prevFrame = 0;
+	static double streamMbps = 0.0;
+	if (mirror.frameCount > prevFrame + 60) {
+		uint64_t deltaBytes = mirror.bytesReceived - prevBytes;
+		streamMbps = (deltaBytes * 8.0) / 1000000.0; // per ~1s
+		prevBytes = mirror.bytesReceived;
+		prevFrame = mirror.frameCount;
+	}
+	ImGui::Text("Stream:  %.1f Mbps", streamMbps);
+
+	// E2E latency (button press → visual change on screen)
+	if (input.e2eProbes > 0) {
+		ImGui::Text("E2E:     %.1fms (avg %.1fms)", input.e2eLastMs, input.e2eEmaMs);
+	} else {
+		ImGui::TextColored(DIM_COLOR, "E2E:     press a button...");
+	}
+
+	// Frames received
+	ImGui::TextColored(DIM_COLOR, "Frames:  %llu", (unsigned long long)mirror.frameCount);
+
+	// Connection status
+	if (!mirror.wsConnected)
+		ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "DISCONNECTED");
+
+	float h = ImGui::GetWindowHeight();
+	ImGui::End();
+	yCursor += h + 4;
+}
 
 static void drawNetworkSection(float& yCursor)
 {
 	auto stats = maplecast_input_sink::getStats();
 
-	// We don't have a direct RTT number from the input sink — use E2E EMA
-	// as a proxy (it's the round trip from button press to TA frame
-	// arrival, which IS the network RTT plus a small frame quantization).
 	double rtt = stats.e2eEmaMs;
-	double jitter = (stats.e2eMaxMs - stats.e2eMinMs) > 0
-	              ? (stats.e2eMaxMs - stats.e2eMinMs) / 4.0  // rough p95-p50
-	              : 0.0;
-	double loss = 0.0;  // TODO: compute from input ACK gaps
+	// Jitter from arrival EMA deviation, not E2E min/max (which are session peaks)
+	auto mirror = maplecast_mirror::getClientStats();
+	double arrivalMs = mirror.arrivalEmaUs / 1000.0;
+	double jitter = arrivalMs > 0 ? arrivalMs - 16.667 : 0.0;
+	if (jitter < 0) jitter = -jitter;
+	double loss = 0.0;
 
 	Grade g = computeGrade(rtt, jitter, loss);
 
@@ -86,64 +156,30 @@ static void drawNetworkSection(float& yCursor)
 	ImGui::SetNextWindowBgAlpha(0.78f);
 	ImGui::Begin("##hud_network", nullptr, HUD_WINDOW_FLAGS);
 
-	ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "NETWORK");
-	ImGui::Separator();
-
-	// Grade — big, color-coded
-	ImGui::Text("Grade:  ");
-	ImGui::SameLine();
+	ImGui::TextColored(HEADER_COLOR, "NETWORK");
+	ImGui::SameLine(0, 16);
 	ImGui::TextColored(g.color, "%s", g.letter);
-
-	// Server identity (primary + backup)
-	if (stats.onBackupServer) {
-		ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "[FAILOVER ACTIVE]");
-	}
-	if (stats.hasBackup) {
-		ImGui::Text("Standby: ready");
-	}
-
-	// Numerics
-	if (stats.e2eProbes > 0) {
-		ImGui::Text("RTT:    %.1fms (last %.1fms)", rtt, stats.e2eLastMs);
-		ImGui::Text("Range:  %.1f - %.1fms", stats.e2eMinMs, stats.e2eMaxMs);
-	} else {
-		ImGui::TextDisabled("RTT:    waiting for input...");
-	}
-	ImGui::Text("Send:   %u pps", stats.sendRateHz);
-	if (stats.failovers > 0) {
-		ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
-		                   "Failovers: %llu",
-		                   (unsigned long long)stats.failovers);
-	}
-
-	float h = ImGui::GetWindowHeight();
-	ImGui::End();
-	yCursor += h + 4;
-}
-
-static void drawLatencySection(float& yCursor)
-{
-	auto stats = maplecast_input_sink::getStats();
-
-	ImGui::SetNextWindowPos(ImVec2(8, yCursor), ImGuiCond_Always);
-	ImGui::SetNextWindowBgAlpha(0.78f);
-	ImGui::Begin("##hud_latency", nullptr, HUD_WINDOW_FLAGS);
-
-	ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "LATENCY");
 	ImGui::Separator();
 
 	if (stats.e2eProbes > 0) {
-		// E2E breakdown (we only know total — break it down by knowledge)
-		ImGui::Text("E2E:    %.1fms", stats.e2eLastMs);
-		ImGui::Text("EMA:    %.1fms", stats.e2eEmaMs);
-		ImGui::Text("Probes: %llu", (unsigned long long)stats.e2eProbes);
+		ImGui::Text("RTT:     %.1fms (last %.1fms)", rtt, stats.e2eLastMs);
+		ImGui::Text("Jitter:  %.1fms", jitter);
 	} else {
-		ImGui::TextDisabled("Press a button to start measuring...");
+		ImGui::TextColored(DIM_COLOR, "RTT:     waiting...");
 	}
 
-	ImGui::Text("Sent:   %llu (+%llu redundant)",
+	ImGui::Text("Send:    %u pps", stats.sendRateHz);
+	ImGui::Text("Sent:    %llu (+%llu dup)",
 		(unsigned long long)stats.packetsSent,
 		(unsigned long long)stats.redundantSends);
+
+	if (stats.onBackupServer)
+		ImGui::TextColored(WARN_COLOR, "[FAILOVER ACTIVE]");
+	if (stats.hasBackup)
+		ImGui::TextColored(DIM_COLOR, "Standby: ready");
+	if (stats.failovers > 0)
+		ImGui::TextColored(WARN_COLOR, "Failovers: %llu",
+		                   (unsigned long long)stats.failovers);
 
 	float h = ImGui::GetWindowHeight();
 	ImGui::End();
@@ -152,16 +188,13 @@ static void drawLatencySection(float& yCursor)
 
 static void drawInputSection(float& yCursor)
 {
-	// TODO: read kcode[] history (last 30 frames) and render a horizontal
-	// strip showing button presses over time. For now just show the bare
-	// counters.
 	auto stats = maplecast_input_sink::getStats();
 
 	ImGui::SetNextWindowPos(ImVec2(8, yCursor), ImGuiCond_Always);
 	ImGui::SetNextWindowBgAlpha(0.78f);
 	ImGui::Begin("##hud_input", nullptr, HUD_WINDOW_FLAGS);
 
-	ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "INPUT");
+	ImGui::TextColored(HEADER_COLOR, "INPUT");
 	ImGui::Separator();
 	ImGui::Text("Buttons: %llu changes", (unsigned long long)stats.buttonChanges);
 	ImGui::Text("Trigger: %llu changes", (unsigned long long)stats.triggerChanges);
@@ -175,31 +208,27 @@ static void drawInputSection(float& yCursor)
 
 void draw()
 {
-	// Only draw in client mode — no point in server mode (no display)
 	if (!maplecast_mirror::isClient()) return;
 
-	// Cursor in screen-space pixels, top-down placement
 	float y = 8.0f;
 
-	if (_showNetwork.load(std::memory_order_relaxed)) drawNetworkSection(y);
-	if (_showLatency.load(std::memory_order_relaxed)) drawLatencySection(y);
-	if (_showInput.load(std::memory_order_relaxed))   drawInputSection(y);
+	if (_showPipeline.load(std::memory_order_relaxed)) drawPipelineSection(y);
+	if (_showNetwork.load(std::memory_order_relaxed))  drawNetworkSection(y);
+	if (_showInput.load(std::memory_order_relaxed))    drawInputSection(y);
 
-	// Phase 8: Note highway (combo trainer). Draws at the bottom-center.
-	// Cheap no-op when no combo is active.
 	note_highway::draw();
 }
 
-void toggleNetwork() { _showNetwork.store(!_showNetwork.load()); }
-void toggleLatency() { _showLatency.store(!_showLatency.load()); }
+void toggleNetwork() { _showPipeline.store(!_showPipeline.load()); }
+void toggleLatency() { _showNetwork.store(!_showNetwork.load()); }
 void toggleInput()   { _showInput.store(!_showInput.load()); }
 
 void toggleAll()
 {
-	bool any = _showNetwork.load() || _showLatency.load() || _showInput.load();
+	bool any = _showPipeline.load() || _showNetwork.load() || _showInput.load();
 	bool newState = !any;
+	_showPipeline.store(newState);
 	_showNetwork.store(newState);
-	_showLatency.store(newState);
 	_showInput.store(newState);
 }
 
