@@ -1085,6 +1085,15 @@ void Emulator::start()
 	// Enable: MAPLECAST_EVDEV_INPUT=1
 	maplecast_evdev_input::init();
 
+	// Arcade mode: mimic the Naomi cabinet's zero-buffer display path.
+	// VSync OFF + SwapInterval(0) = immediate present, no frame buffering.
+	// Matches the CRT behavior where scanlines are visible as they're drawn.
+	if (std::getenv("MAPLECAST_ARCADE_MODE") || std::getenv("MAPLECAST_LOW_LATENCY")) {
+		config::VSync.override(false);
+		printf("[arcade-mode] VSync OFF, SwapInterval(0) — zero display buffer latency\n");
+		fflush(stdout);
+	}
+
 	// SH4Recomp: dump fully loaded SH4 memory to disk
 	if (const char* dump_dir = getenv("SH4RECOMP_DUMP"))
 	{
