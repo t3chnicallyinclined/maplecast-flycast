@@ -1447,6 +1447,11 @@ Telemetry getLastTelemetry()
 	return _telemetry;
 }
 
+int clientCount()
+{
+	return _clientCount.load(std::memory_order_relaxed);
+}
+
 // Stub: declared in the header, called by maplecast_mirror.cpp's
 // doForcedSaveStateBroadcast(). The full implementation existed as
 // uncommitted working-tree code earlier in the session and got reverted

@@ -1117,6 +1117,19 @@ bool isHeadless()
 void serverPublish(TA_context* ctx)
 {
 	if (!_isServer || !_shmPtr || !ctx) return;
+
+	// Skip heavy work (diff, compress, broadcast) when no clients connected.
+	// Still increment the frame counter so local overlays/telemetry work.
+	static uint32_t _localFrameNum = 0;
+	_localFrameNum++;
+	if (!maplecast_ws::active() || maplecast_ws::clientCount() == 0) {
+		// Update frame counter + basic telemetry for local overlays
+		_atomicCurrentFrame.store(_localFrameNum, std::memory_order_release);
+		maplecast_ws::updateTelemetry({_localFrameNum, 0, 0, 0, 0,
+			60, 0, 0}); // approximate 60fps
+		return;
+	}
+
 	auto publishStart = std::chrono::high_resolution_clock::now();
 	rend_context& rc = ctx->rend;
 	// DON'T skip RTT frames — MVC2 renders character sprites via render-to-texture!

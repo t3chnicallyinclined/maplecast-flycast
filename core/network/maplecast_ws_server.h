@@ -52,4 +52,5 @@ struct Telemetry {
 };
 void updateTelemetry(const Telemetry& t);
 Telemetry getLastTelemetry();
+int clientCount();
 }
