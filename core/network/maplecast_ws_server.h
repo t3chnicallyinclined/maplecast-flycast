@@ -51,4 +51,5 @@ struct Telemetry {
 	uint64_t compressUs;     // zstd compression time (microseconds)
 };
 void updateTelemetry(const Telemetry& t);
+Telemetry getLastTelemetry();
 }

@@ -1754,7 +1754,11 @@ void gui_displayMirrorDebug()
 	gui_game_overlay::draw();
 
 	ImGui::Render();
-	gui_endFrame(false);
+	// In mirror client mode: gui_endFrame(false) — game is already in framebuffer
+	// from renderer->Render(), we just overlay ImGui on top.
+	// In server/local mode: gui_endFrame(true) — re-renders the last game frame
+	// into the default framebuffer, then overlays ImGui on top. Same as profiler.
+	gui_endFrame(!maplecast_mirror::isClient());
 }
 
 void gui_display_profiler()

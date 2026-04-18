@@ -1441,6 +1441,12 @@ void updateTelemetry(const Telemetry& t)
 	_telemetry = t;
 }
 
+Telemetry getLastTelemetry()
+{
+	std::lock_guard<std::mutex> lock(_telemetryMutex);
+	return _telemetry;
+}
+
 // Stub: declared in the header, called by maplecast_mirror.cpp's
 // doForcedSaveStateBroadcast(). The full implementation existed as
 // uncommitted working-tree code earlier in the session and got reverted

@@ -28,6 +28,7 @@
 
 #include "network/maplecast_input_sink.h"
 #include "network/maplecast_mirror.h"
+#include "network/maplecast_ws_server.h"
 
 namespace gui_competitive_hud
 {
@@ -78,9 +79,6 @@ static const ImVec4 WARN_COLOR    = ImVec4(1.0f, 0.7f, 0.3f, 1.0f);
 
 static void drawPipelineSection(float& yCursor)
 {
-	auto mirror = maplecast_mirror::getClientStats();
-	auto input  = maplecast_input_sink::getStats();
-
 	ImGui::SetNextWindowPos(ImVec2(8, yCursor), ImGuiCond_Always);
 	ImGui::SetNextWindowBgAlpha(0.78f);
 	ImGui::Begin("##hud_pipeline", nullptr, HUD_WINDOW_FLAGS);
@@ -88,50 +86,56 @@ static void drawPipelineSection(float& yCursor)
 	ImGui::TextColored(HEADER_COLOR, "PIPELINE");
 	ImGui::Separator();
 
-	// Decode time (zstd decompress + TA delta apply)
-	double decodeMs = mirror.decodeEmaUs / 1000.0;
-	ImGui::Text("Decode:  %.2fms", decodeMs);
-
-	// Frame arrival interval (should be ~16.67ms for 60fps)
-	double arrivalMs = mirror.arrivalEmaUs / 1000.0;
-	// Jitter = how far the EMA is from the ideal 16.67ms target
-	double jitterMs = arrivalMs > 0 ? arrivalMs - 16.667 : 0.0;
-	if (jitterMs < 0) jitterMs = -jitterMs;
-
-	// Render FPS from arrival interval
-	double renderFps = arrivalMs > 0 ? 1000.0 / arrivalMs : 0.0;
-	ImGui::Text("FPS:     %.0f (%.1fms/f, jitter %.1fms)", renderFps, arrivalMs, jitterMs);
-
-	// TA size + dirty pages
-	ImGui::Text("TA:      %u bytes", mirror.lastTaSize);
-	ImGui::Text("Dirty:   %u pages%s", mirror.lastDirtyPages,
-	            mirror.lastVramDirty ? " [VRAM]" : "");
-
-	// Stream bandwidth (bytes received → Mbps over ~1s window)
-	static uint64_t prevBytes = 0;
-	static uint64_t prevFrame = 0;
-	static double streamMbps = 0.0;
-	if (mirror.frameCount > prevFrame + 60) {
-		uint64_t deltaBytes = mirror.bytesReceived - prevBytes;
-		streamMbps = (deltaBytes * 8.0) / 1000000.0; // per ~1s
-		prevBytes = mirror.bytesReceived;
-		prevFrame = mirror.frameCount;
-	}
-	ImGui::Text("Stream:  %.1f Mbps", streamMbps);
-
-	// E2E latency (button press → visual change on screen)
-	if (input.e2eProbes > 0) {
-		ImGui::Text("E2E:     %.1fms (avg %.1fms)", input.e2eLastMs, input.e2eEmaMs);
+	if (maplecast_mirror::isServer()) {
+		// Server/local mode: read from server telemetry directly
+		auto st = maplecast_ws::getLastTelemetry();
+		ImGui::Text("FPS:     %llu", (unsigned long long)st.fps);
+		ImGui::Text("TA:      %u bytes", st.taSize);
+		ImGui::Text("Dirty:   %u pages", st.dirtyPages);
+		ImGui::Text("Publish: %.2fms", st.publishUs / 1000.0);
+		ImGui::Text("Compress:%.2fms (%.1fx)",
+			st.compressUs / 1000.0,
+			st.deltaSize > 0 ? (double)st.deltaSize / st.compressedSize : 0.0);
+		ImGui::Text("Frame:   %u", st.frameNum);
 	} else {
-		ImGui::TextColored(DIM_COLOR, "E2E:     press a button...");
+		// Mirror client mode: read from client stats
+		auto mirror = maplecast_mirror::getClientStats();
+		auto input  = maplecast_input_sink::getStats();
+
+		double decodeMs = mirror.decodeEmaUs / 1000.0;
+		ImGui::Text("Decode:  %.2fms", decodeMs);
+
+		double arrivalMs = mirror.arrivalEmaUs / 1000.0;
+		double jitterMs = arrivalMs > 0 ? arrivalMs - 16.667 : 0.0;
+		if (jitterMs < 0) jitterMs = -jitterMs;
+		double renderFps = arrivalMs > 0 ? 1000.0 / arrivalMs : 0.0;
+		ImGui::Text("FPS:     %.0f (%.1fms/f, jitter %.1fms)", renderFps, arrivalMs, jitterMs);
+
+		ImGui::Text("TA:      %u bytes", mirror.lastTaSize);
+		ImGui::Text("Dirty:   %u pages%s", mirror.lastDirtyPages,
+		            mirror.lastVramDirty ? " [VRAM]" : "");
+
+		static uint64_t prevBytes = 0;
+		static uint64_t prevFrame = 0;
+		static double streamMbps = 0.0;
+		if (mirror.frameCount > prevFrame + 60) {
+			uint64_t deltaBytes = mirror.bytesReceived - prevBytes;
+			streamMbps = (deltaBytes * 8.0) / 1000000.0;
+			prevBytes = mirror.bytesReceived;
+			prevFrame = mirror.frameCount;
+		}
+		ImGui::Text("Stream:  %.1f Mbps", streamMbps);
+
+		if (input.e2eProbes > 0)
+			ImGui::Text("E2E:     %.1fms (avg %.1fms)", input.e2eLastMs, input.e2eEmaMs);
+		else
+			ImGui::TextColored(DIM_COLOR, "E2E:     press a button...");
+
+		ImGui::TextColored(DIM_COLOR, "Frames:  %llu", (unsigned long long)mirror.frameCount);
+
+		if (!mirror.wsConnected)
+			ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "DISCONNECTED");
 	}
-
-	// Frames received
-	ImGui::TextColored(DIM_COLOR, "Frames:  %llu", (unsigned long long)mirror.frameCount);
-
-	// Connection status
-	if (!mirror.wsConnected)
-		ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "DISCONNECTED");
 
 	float h = ImGui::GetWindowHeight();
 	ImGui::End();

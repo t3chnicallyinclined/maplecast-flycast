@@ -210,10 +210,19 @@ static void drawInputLog(ImDrawList* dl, ImVec2 pos, float width, float height)
 // ── Main draw ────────────────────────────────────────────────────────
 static void drawInputDisplay()
 {
-	// Read button state from SERVER's game state broadcast (GSTA).
-	// This is the authoritative source — same kcode[]/lt[]/rt[] the game reads.
+	// Read button state. In server/local mode, read directly from RAM.
+	// In client mode, read from GSTA broadcast.
+	// NEVER hardcode button mappings — always read from authoritative source.
 	maplecast_gamestate::GameState gs;
-	bool hasGS = maplecast_mirror::getClientGameState(gs);
+	bool hasGS;
+	if (maplecast_mirror::isServer()) {
+		// Local/server: read game state directly from DC RAM
+		maplecast_gamestate::readGameState(gs);
+		hasGS = true;
+	} else {
+		// Mirror client: read from GSTA broadcast
+		hasGS = maplecast_mirror::getClientGameState(gs);
+	}
 
 	uint16_t buttons = hasGS ? gs.p1_buttons : 0xFFFF;
 	uint8_t sLt = hasGS ? gs.p1_lt : 0;
