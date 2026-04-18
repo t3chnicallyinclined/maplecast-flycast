@@ -1079,6 +1079,12 @@ void Emulator::start()
 	state = Running;
 	SetMemoryHandlers();
 
+	// Evdev direct input bypass — works in ALL modes (local, server, client).
+	// Reads /dev/input/eventN directly, bypasses SDL's 16ms poll batching.
+	// SCHED_FIFO priority 60 for instant delivery.
+	// Enable: MAPLECAST_EVDEV_INPUT=1
+	maplecast_evdev_input::init();
+
 	// SH4Recomp: dump fully loaded SH4 memory to disk
 	if (const char* dump_dir = getenv("SH4RECOMP_DUMP"))
 	{

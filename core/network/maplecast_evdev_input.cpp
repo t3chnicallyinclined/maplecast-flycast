@@ -18,8 +18,14 @@
 #ifdef __linux__
 
 #include "maplecast_evdev_input.h"
+#include "types.h"
 #include "maplecast_input_sink.h"
+#include "maplecast_input_server.h"
 #include "input/gamepad.h"
+
+// Gamepad globals — same ones the SH4 reads at vblank
+extern u32 kcode[4];
+extern u16 lt[4], rt[4];
 
 #include <atomic>
 #include <cstdio>
@@ -307,8 +313,18 @@ static void inputLoop()
 			}
 		}
 		else if (ev.type == EV_SYN && ev.code == SYN_REPORT) {
-			// State consistent — send to server via input sink
-			maplecast_input_sink::directUpdate(_buttons, _lt, _rt);
+			// Write to kcode[]/lt[]/rt[] directly — works in ALL modes:
+			// local play, server mode, and mirror client mode.
+			// This is the fastest possible path: evdev read() → kcode[] write.
+			kcode[0] = (u32)_buttons | 0xFFFF0000u;
+			lt[0] = (u16)_lt << 8;
+			rt[0] = (u16)_rt << 8;
+
+			// Also feed the network paths if active
+			if (maplecast_input_sink::active())
+				maplecast_input_sink::directUpdate(_buttons, _lt, _rt);
+			if (maplecast_input::active())
+				maplecast_input::injectInput(0, _lt, _rt, _buttons);
 		}
 	}
 }
