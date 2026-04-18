@@ -208,7 +208,7 @@ static void drawInputSection(float& yCursor)
 
 void draw()
 {
-	if (!maplecast_mirror::isClient()) return;
+	if (!maplecast_mirror::isActive()) return;
 
 	float y = 8.0f;
 

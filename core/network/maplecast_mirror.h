@@ -31,6 +31,9 @@ void initClient();
 void startMirrorStream(const char* host, int port);
 bool isServer();
 bool isClient();
+// True if MapleCast is active in ANY mode (server, client, or local with MAPLECAST=1).
+// Use this instead of isClient() to gate features that should work everywhere.
+inline bool isActive() { return isServer() || isClient(); }
 
 // Phase 2: hub-discovery's runner-up server, used by the input-sink as a
 // hot-standby UDP target for failover. Empty string if no backup

@@ -156,6 +156,10 @@ bool mainui_rend_frame()
 				return false;
 			if (config::ProfilerEnabled && config::ProfilerDrawToGUI)
 				gui_display_profiler();
+			// MapleCast overlays in server/local mode — same overlays the
+			// mirror client shows, now available when running the game locally.
+			if (maplecast_mirror::isServer())
+				gui_displayMirrorDebug();
 		} catch (const RendererException& e) {
 			gui_error(i18n::Ts("Renderer error:") + "\n" + e.what() + "\n\n"
 					+ i18n::Ts("The game has been paused but it is recommended to restart Flycast"));

@@ -96,7 +96,7 @@ static void drawGearButton()
 
 void draw()
 {
-	if (!maplecast_mirror::isClient()) return;
+	if (!maplecast_mirror::isActive()) return;
 
 	// Always draw the settings button
 	drawGearButton();

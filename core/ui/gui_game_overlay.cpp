@@ -282,7 +282,7 @@ static void drawInputDisplay()
 
 void draw()
 {
-	if (!maplecast_mirror::isClient()) return;
+	if (!maplecast_mirror::isActive()) return;
 	if (_showInput.load(std::memory_order_relaxed)) drawInputDisplay();
 }
 
