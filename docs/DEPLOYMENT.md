@@ -8,6 +8,7 @@ This is the public-facing deployment overview. It tells you how to build and run
 |---|---|---|
 | **headless flycast** (recommended for servers) | `cmake -DMAPLECAST_HEADLESS=ON -B build-headless && cmake --build build-headless` | CPU-only mirror server. No GPU, no SDL, no X11, no audio. ~26 MB stripped binary. Runs MVC2 + TA mirror streaming on a $5/month VPS. See [ARCHITECTURE.md "Mode 3: Headless"](ARCHITECTURE.md) for the design rationale. |
 | **GPU flycast** (for local/cab play) | `cmake -B build && cmake --build build` | Standard flycast with full rendering. Used at a physical cab or for local LAN play with sub-millisecond input latency. |
+| **Windows mirror client** (native desktop spectator/player) | `cmake -DMAPLECAST_CLIENT_ONLY=ON -B build` (with vcpkg toolchain for libcurl) | Native Windows `flycast.exe` that connects to a remote MapleCast server (e.g. nobd.net) and renders the TA mirror stream pixel-perfect. No NVENC, no WebRTC, no DX9, no OpenSSL. See [WINDOWS-CLIENT-BUILD.md](WINDOWS-CLIENT-BUILD.md) for the full setup recipe. |
 | **WASM renderer** (browser viewer) | `cd packages/renderer && bash build.sh` | Standalone WebAssembly renderer that consumes the TA mirror stream and draws MVC2 in a browser canvas. See [WASM-BUILD-GUIDE.md](WASM-BUILD-GUIDE.md). |
 
 ## Architecture overview

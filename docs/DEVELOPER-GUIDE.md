@@ -16,6 +16,11 @@ Everything runs on your machine. No VPS, no cloud, no special hardware.
 - **Linux/Mac:** cmake, g++/clang, cargo
 - **Windows:** Visual Studio 2022 (or cmake + MinGW), cargo
 
+> **Just want to play on Windows against the live nobd.net server?** Skip
+> this whole local-stack quickstart and read [WINDOWS-CLIENT-BUILD.md](WINDOWS-CLIENT-BUILD.md)
+> instead. That's the dedicated guide for the Windows mirror-client build —
+> no Rust, no relay, no WASM, no ROM needed locally.
+
 ```bash
 # Clone
 git clone https://github.com/t3chnicallyinclined/maplecast-flycast
