@@ -10,6 +10,7 @@
 #pragma once
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace maplecast_input
@@ -200,12 +201,12 @@ static_assert(sizeof(AccumPacked) == 8, "AccumPacked must fit in a uint64_t");
 
 inline uint64_t packAccum(const AccumPacked& a) {
 	uint64_t packed;
-	__builtin_memcpy(&packed, &a, 8);
+	memcpy(&packed, &a, 8);
 	return packed;
 }
 inline AccumPacked unpackAccum(uint64_t packed) {
 	AccumPacked a;
-	__builtin_memcpy(&a, &packed, 8);
+	memcpy(&a, &packed, 8);
 	return a;
 }
 

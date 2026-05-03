@@ -26,10 +26,6 @@ target_sources(${PROJECT_NAME} PRIVATE
         ice.cpp
         ice.h
         ifaddrs.c
-        maplecast_xdp_input.cpp
-        maplecast_xdp_input.h
-        maplecast_evdev_input.cpp
-        maplecast_evdev_input.h
         maplecast_input_server.cpp
         maplecast_input_server.h
         maplecast_audio.cpp
@@ -67,10 +63,22 @@ target_sources(${PROJECT_NAME} PRIVATE
 # maplecast_stream (H.264 / NVENC / CUDA GL interop) and maplecast_webrtc
 # (libdatachannel) are the GPU-dependent legacy streaming paths. Exclude
 # them from the headless build — the TA mirror on port 7200 replaces them.
-if(NOT MAPLECAST_HEADLESS)
+if(NOT MAPLECAST_HEADLESS AND NOT MAPLECAST_CLIENT_ONLY)
     target_sources(${PROJECT_NAME} PRIVATE
         maplecast_stream.cpp
         maplecast_stream.h
         maplecast_webrtc.cpp
         maplecast_webrtc.h)
+endif()
+
+# Linux-only optimizations: AF_XDP zero-copy gamepad receive (Linux kernel BPF)
+# and direct evdev gamepad polling (Linux input subsystem). Both have non-Linux
+# fallback paths at runtime — SDL gamepad on Windows/macOS does the equivalent
+# job. Keep these out of non-Linux builds so they can't break the compile.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(${PROJECT_NAME} PRIVATE
+        maplecast_xdp_input.cpp
+        maplecast_xdp_input.h
+        maplecast_evdev_input.cpp
+        maplecast_evdev_input.h)
 endif()

@@ -1083,7 +1083,10 @@ void Emulator::start()
 	// Reads /dev/input/eventN directly, bypasses SDL's 16ms poll batching.
 	// SCHED_FIFO priority 60 for instant delivery.
 	// Enable: MAPLECAST_EVDEV_INPUT=1
+	// Linux-only — Windows uses SDL gamepad path.
+#ifdef __linux__
 	maplecast_evdev_input::init();
+#endif
 
 	// Arcade mode: mimic the Naomi cabinet's zero-buffer display path.
 	// VSync OFF + SwapInterval(0) = immediate present, no frame buffering.
@@ -1138,7 +1141,7 @@ void Emulator::start()
 		maplecast_audio::init();
 		maplecast_telemetry::init();
 
-#ifndef MAPLECAST_HEADLESS_BUILD
+#if !defined(MAPLECAST_HEADLESS_BUILD) && !defined(MAPLECAST_CLIENT_ONLY_BUILD)
 		if (std::getenv("MAPLECAST_STREAM"))
 		{
 			int streamPort = 7200;
@@ -1253,8 +1256,10 @@ void Emulator::start()
 
 			// Direct evdev input — bypasses SDL's event queue for ~1-3ms
 			// lower latency. Grabs the device exclusively so SDL doesn't
-			// double-read. Enable with MAPLECAST_EVDEV_INPUT=1.
+			// double-read. Enable with MAPLECAST_EVDEV_INPUT=1. Linux-only.
+#ifdef __linux__
 			maplecast_evdev_input::init();
+#endif
 
 			// Phase 2: if hub discovery picked a runner-up server, wire it
 			// up as the hot-standby for input failover. The input sink
@@ -1293,6 +1298,7 @@ void Emulator::start()
 				// SCHED_FIFO for the SH4 emulator thread — consistent frame
 				// timing is critical. Priority 40: below input (55) so input
 				// never starves, but above normal threads.
+#ifdef __linux__
 				{
 					struct sched_param sp{};
 					sp.sched_priority = 40;
@@ -1302,6 +1308,7 @@ void Emulator::start()
 						printf("[emulator] SCHED_FIFO not granted for emu thread (errno=%d)\n", errno); fflush(stdout);
 					}
 				}
+#endif
 
 				InitAudio();
 

@@ -108,6 +108,25 @@ option(USE_LIBCDIO "Use libcdio for CDROM access" OFF)
 # docs/WORKSTREAM-HEADLESS-SERVER.md for the full rationale.
 option(MAPLECAST_HEADLESS "Build a headless flycast server (no GL, no SDL, no window)" OFF)
 
+# MapleCast: client-only build. Flycast renderer + mirror client networking,
+# with the server-only streaming paths excluded:
+#   - maplecast_stream.cpp (NVENC H.264 server encoder, requires CUDA)
+#   - maplecast_webrtc.cpp (libdatachannel P2P, requires OpenSSL)
+# The mirror client only consumes the TA wire over WebSocket; it never needs
+# to encode or peer-stream. Ideal for Windows desktop clients connecting to a
+# remote nobd.net-style server.
+option(MAPLECAST_CLIENT_ONLY "Build the mirror-client-only flycast binary (no NVENC, no WebRTC)" OFF)
+if(MAPLECAST_CLIENT_ONLY AND MAPLECAST_HEADLESS)
+	message(FATAL_ERROR "MAPLECAST_CLIENT_ONLY and MAPLECAST_HEADLESS are mutually exclusive — pick one.")
+endif()
+if(MAPLECAST_CLIENT_ONLY)
+	add_compile_definitions(MAPLECAST_CLIENT_ONLY_BUILD)
+	# DX9 requires the deprecated June 2010 DirectX SDK (d3dx9shader.h).
+	# Modern Windows SDKs ship DX11; DX9 is not needed for the mirror client.
+	set(USE_DX9 OFF CACHE BOOL "Disabled by MAPLECAST_CLIENT_ONLY" FORCE)
+	message(STATUS "MapleCast: CLIENT-ONLY build — no NVENC, no WebRTC, no libdatachannel/OpenSSL/DX9 deps")
+endif()
+
 if(MAPLECAST_HEADLESS)
 	set(USE_OPENGL OFF CACHE BOOL "Disabled by MAPLECAST_HEADLESS" FORCE)
 	set(USE_VULKAN OFF CACHE BOOL "Disabled by MAPLECAST_HEADLESS" FORCE)
@@ -594,7 +613,9 @@ if(NOT LIBRETRO)
 		add_subdirectory(core/sdl)
 	endif() # NOT MAPLECAST_HEADLESS
 
-		if((UNIX AND NOT APPLE) OR NINTENDO_SWITCH)
+		# libcurl: Linux/Switch native, Windows via vcpkg.
+		# Used by hub_discovery (mirror client → nobd.net) and replay_writer (upload).
+		if((UNIX AND NOT APPLE) OR NINTENDO_SWITCH OR WIN32)
 			find_package(CURL REQUIRED)
 			target_link_libraries(${PROJECT_NAME} PRIVATE CURL::libcurl)
 		endif()
@@ -1706,7 +1727,8 @@ endif()
 # MapleCast: CUDA + NVENC direct API — true zero-copy GPU streaming
 # No FFmpeg dependency. GL texture → CUDA → NVENC → H.264, CPU never touches pixels.
 # Skipped entirely in headless builds (no GPU, no GL, no CUDA runtime).
-if(NOT MAPLECAST_HEADLESS)
+# Skipped in CLIENT_ONLY builds — the mirror client doesn't encode H.264.
+if(NOT MAPLECAST_HEADLESS AND NOT MAPLECAST_CLIENT_ONLY)
 find_path(CUDA_INCLUDE cuda.h PATHS
 	"$ENV{CUDA_PATH}/include"
 	"C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/include"
@@ -1752,7 +1774,7 @@ endif()
 # libdatachannel: lightweight C++ WebRTC data channels (MPL 2.0, GPL compatible)
 # Headless builds skip this: WebRTC is the H.264 client transport, and
 # headless ships TA mirror over WebSocket only.
-if(NOT MAPLECAST_HEADLESS AND EXISTS "${CMAKE_SOURCE_DIR}/core/deps/libdatachannel/CMakeLists.txt")
+if(NOT MAPLECAST_HEADLESS AND NOT MAPLECAST_CLIENT_ONLY AND EXISTS "${CMAKE_SOURCE_DIR}/core/deps/libdatachannel/CMakeLists.txt")
 	set(NO_MEDIA ON CACHE BOOL "Disable media in libdatachannel" FORCE)
 	set(NO_WEBSOCKET ON CACHE BOOL "Disable WebSocket in libdatachannel" FORCE)
 	set(NO_TESTS ON CACHE BOOL "Disable tests" FORCE)

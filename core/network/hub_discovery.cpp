@@ -1,7 +1,8 @@
-// ============================================================================
-// HUB_DISCOVERY — Implementation
+﻿// ============================================================================
+// HUB_DISCOVERY â€” Implementation
 // ============================================================================
 
+#include "types.h"   // u32 etc., needed before net_platform.h's is_local_address
 #include "hub_discovery.h"
 
 #include <atomic>
@@ -12,12 +13,9 @@
 #include <thread>
 #include <vector>
 
-#include <arpa/inet.h>
+#include "net_platform.h"
+#include "maplecast_compat.h"
 #include <curl/curl.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include "json/json.hpp"
 
@@ -25,7 +23,7 @@ using json = nlohmann::json;
 
 namespace maplecast_hub {
 
-// ── HTTP fetch via libcurl ──────────────────────────────────────────────
+// â”€â”€ HTTP fetch via libcurl â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static size_t curlWriteCallback(void* contents, size_t size, size_t nmemb, std::string* out) {
 	out->append((char*)contents, size * nmemb);
@@ -60,7 +58,7 @@ static std::string httpGet(const std::string& url, long timeout_sec = 5) {
 	return body;
 }
 
-// ── discover() ──────────────────────────────────────────────────────────
+// â”€â”€ discover() â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 std::vector<InputServer> discover(const std::string& hub_url, int limit) {
 	std::vector<InputServer> result;
@@ -87,7 +85,7 @@ std::vector<InputServer> discover(const std::string& hub_url, int limit) {
 	}
 
 	if (!doc.contains("nodes") || !doc["nodes"].is_array()) {
-		printf("[hub-discovery] Hub response missing 'nodes' array — body: %s\n",
+		printf("[hub-discovery] Hub response missing 'nodes' array â€” body: %s\n",
 		       body.substr(0, 200).c_str());
 		return result;
 	}
@@ -142,7 +140,7 @@ std::vector<InputServer> discover(const std::string& hub_url, int limit) {
 	return result;
 }
 
-// ── probeServer() ───────────────────────────────────────────────────────
+// â”€â”€ probeServer() â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 void probeServer(InputServer& server, int probe_count, int interval_ms) {
 	server.avg_rtt_ms = INFINITY;
@@ -166,10 +164,12 @@ void probeServer(InputServer& server, int probe_count, int interval_ms) {
 	int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 	if (sock < 0) return;
 
-	// 50ms recv timeout per probe — server should respond in <100ms even
+	// 50ms recv timeout per probe â€” server should respond in <100ms even
 	// across continents
-	struct timeval tv = { .tv_sec = 0, .tv_usec = 50 * 1000 };
-	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	struct timeval tv;
+	tv.tv_sec = 0;
+	tv.tv_usec = 50 * 1000;
+	mc_setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
 	std::vector<double> samples;
 	samples.reserve(probe_count);
@@ -177,7 +177,7 @@ void probeServer(InputServer& server, int probe_count, int interval_ms) {
 	for (int i = 0; i < probe_count; i++) {
 		uint8_t pkt[7] = { 0xFF, (uint8_t)i, 0, 0, 0, 0, 0 };
 		auto t0 = std::chrono::steady_clock::now();
-		int sent = sendto(sock, pkt, sizeof(pkt), 0,
+		int sent = mc_sendto(sock, pkt, sizeof(pkt), 0,
 		                  (struct sockaddr*)&addr, sizeof(addr));
 		if (sent < 0) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
@@ -187,7 +187,7 @@ void probeServer(InputServer& server, int probe_count, int interval_ms) {
 		uint8_t reply[16];
 		struct sockaddr_in from;
 		socklen_t fromLen = sizeof(from);
-		int n = recvfrom(sock, reply, sizeof(reply), 0,
+		int n = mc_recvfrom(sock, reply, sizeof(reply), 0,
 		                 (struct sockaddr*)&from, &fromLen);
 		auto t1 = std::chrono::steady_clock::now();
 
@@ -202,11 +202,11 @@ void probeServer(InputServer& server, int probe_count, int interval_ms) {
 		}
 	}
 
-	close(sock);
+	mc_closesocket(sock);
 
 	// Discard the first sample (cold path), average the rest
 	if (samples.size() < 2) {
-		// Not enough data — leave avg_rtt_ms as INFINITY
+		// Not enough data â€” leave avg_rtt_ms as INFINITY
 		printf("[hub-discovery] probe %s: only %zu sample(s), unreachable\n",
 		       server.name.c_str(), samples.size());
 		return;
@@ -227,12 +227,12 @@ void probeServer(InputServer& server, int probe_count, int interval_ms) {
 	       server.name.c_str(), server.avg_rtt_ms, server.samples);
 }
 
-// ── probeServers() — parallel probe ─────────────────────────────────────
+// â”€â”€ probeServers() â€” parallel probe â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 std::vector<InputServer> probeServers(std::vector<InputServer> servers) {
 	if (servers.empty()) return servers;
 
-	// Probe in parallel — each on its own thread (servers are typically
+	// Probe in parallel â€” each on its own thread (servers are typically
 	// 1-5, so spawning a thread each is cheap and we want all to finish
 	// at roughly the same time)
 	std::vector<std::thread> threads;
@@ -250,7 +250,7 @@ std::vector<InputServer> probeServers(std::vector<InputServer> servers) {
 	return servers;
 }
 
-// ── discoverAndSelect() — convenience ───────────────────────────────────
+// â”€â”€ discoverAndSelect() â€” convenience â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 InputServer discoverAndSelect(const std::string& hub_url) {
 	auto servers = discover(hub_url, 5);
@@ -262,18 +262,18 @@ InputServer discoverAndSelect(const std::string& hub_url) {
 	servers = probeServers(std::move(servers));
 
 	if (!std::isfinite(servers[0].avg_rtt_ms)) {
-		printf("[hub-discovery] No reachable input servers — all probes failed\n");
+		printf("[hub-discovery] No reachable input servers â€” all probes failed\n");
 		return {};
 	}
 
 	const auto& winner = servers[0];
-	printf("[hub-discovery] ═══ Selected: %s (%s) — %.1fms RTT ═══\n",
+	printf("[hub-discovery] â•â•â• Selected: %s (%s) â€” %.1fms RTT â•â•â•\n",
 	       winner.name.c_str(), winner.public_host.c_str(), winner.avg_rtt_ms);
 
 	// Show runner-ups for transparency
 	for (size_t i = 1; i < servers.size() && i < 5; i++) {
 		if (std::isfinite(servers[i].avg_rtt_ms)) {
-			printf("[hub-discovery]    runner-up #%zu: %s — %.1fms\n",
+			printf("[hub-discovery]    runner-up #%zu: %s â€” %.1fms\n",
 			       i, servers[i].name.c_str(), servers[i].avg_rtt_ms);
 		}
 	}

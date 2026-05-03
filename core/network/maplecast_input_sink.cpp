@@ -1,12 +1,12 @@
-/*
-	MapleCast Input Sink — implementation.
+﻿/*
+	MapleCast Input Sink â€” implementation.
 	See maplecast_input_sink.h for design.
 
-	── Phase 2 (2026-04-14) competitive features ─────────────────────
-	• Wire format: 11 bytes [P][C][slot][seq:u32_LE][LT][RT][btn_hi][btn_lo].
-	• Every packet sent twice (T+0 + T+1ms via deferred-send thread).
-	• Hot-standby socket to backup server, instant failover.
-	• SCHED_FIFO on the trigger poll thread (graceful degrade).
+	â”€â”€ Phase 2 (2026-04-14) competitive features â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	â€¢ Wire format: 11 bytes [P][C][slot][seq:u32_LE][LT][RT][btn_hi][btn_lo].
+	â€¢ Every packet sent twice (T+0 + T+1ms via deferred-send thread).
+	â€¢ Hot-standby socket to backup server, instant failover.
+	â€¢ SCHED_FIFO on the trigger poll thread (graceful degrade).
 */
 #include "types.h"
 #include "maplecast_input_sink.h"
@@ -22,26 +22,25 @@
 #include <queue>
 #include <thread>
 
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <netinet/in.h>
+#include "net_platform.h"
+#include "maplecast_compat.h"
+#ifndef _WIN32
 #include <pthread.h>
 #include <sched.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#endif
 
 extern u16 lt[4], rt[4];
 
 namespace maplecast_input_sink
 {
 
-// ── Primary + standby sockets ─────────────────────────────────────────
+// â”€â”€ Primary + standby sockets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 static int            _sock = -1;          // primary
 static sockaddr_in    _addr{};
 static int            _backupSock = -1;    // standby (always ready)
 static sockaddr_in    _backupAddr{};
 static std::atomic<bool> _hasBackup{false};
-static std::atomic<bool> _onBackup{false}; // true → primary failed over
+static std::atomic<bool> _onBackup{false}; // true â†’ primary failed over
 
 static int            _slot = 0;
 static std::atomic<int> _gamepadPort{-1}; // actual SDL gamepad port (may differ from _slot)
@@ -69,7 +68,7 @@ static std::atomic<uint64_t> _prevPackets{0};
 static std::atomic<int64_t>  _prevRateTime{0};
 static std::atomic<uint32_t> _sendRateHz{0};
 
-// E2E latency probe — see header for details.
+// E2E latency probe â€” see header for details.
 static std::atomic<int64_t>  _probeStartUs{0};
 static std::atomic<double>   _e2eLastMs{0.0};
 static std::atomic<double>   _e2eEmaMs{0.0};
@@ -84,13 +83,13 @@ static inline int64_t nowUs()
 	return (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
 }
 
-// ── Deferred-send queue for T+1ms redundant copies ────────────────────
+// â”€â”€ Deferred-send queue for T+1ms redundant copies â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // Each input change schedules TWO sends:
-//   1. Immediate (called inline from onButton/triggerPoll → sendStateOnce)
+//   1. Immediate (called inline from onButton/triggerPoll â†’ sendStateOnce)
 //   2. Deferred ~1ms later (queued here, drained by _redundantThread)
 //
-// Different network jitter window → improves recovery from single-packet
+// Different network jitter window â†’ improves recovery from single-packet
 // drops without adding artificial latency to the critical first send.
 
 struct PendingSend {
@@ -102,7 +101,7 @@ static std::mutex              _pendingMtx;
 static std::condition_variable _pendingCv;
 static std::queue<PendingSend> _pendingQ;
 
-// ── Helpers ───────────────────────────────────────────────────────────
+// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // Build the 19-byte wire packet at *out using the current state.
 // Format: [P][C][slot][seq:u32_LE][LT][RT][btn_hi][btn_lo][client_ts:u64_LE]
@@ -146,7 +145,7 @@ static void sendPacket(const uint8_t* pkt, size_t len)
 	int     sock = useBackup ? _backupSock : _sock;
 	const sockaddr_in& addr = useBackup ? _backupAddr : _addr;
 	if (sock < 0) return;
-	sendto(sock, pkt, len, 0, (const sockaddr*)&addr, sizeof(addr));
+	mc_sendto(sock, pkt, len, 0, (const sockaddr*)&addr, sizeof(addr));
 	_packetsSent.fetch_add(1, std::memory_order_relaxed);
 	_lastSendUs.store(nowUs(), std::memory_order_relaxed);
 }
@@ -175,7 +174,7 @@ static void sendState()
 
 // Background thread: drains the pending queue, sleeping until each
 // packet's fireAtUs. Each packet is the same bytes as the primary
-// send — server dedups by sequence number.
+// send â€” server dedups by sequence number.
 static void redundantSendLoop()
 {
 	std::unique_lock<std::mutex> lk(_pendingMtx);
@@ -199,10 +198,10 @@ static void redundantSendLoop()
 	}
 }
 
-// ── SDL ButtonListener ────────────────────────────────────────────────
+// â”€â”€ SDL ButtonListener â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 static void onButton(int port, DreamcastKey key, bool pressed)
 {
-	// Accept input from any port — mirror client only has one local player,
+	// Accept input from any port â€” mirror client only has one local player,
 	// but saved config may map the gamepad to a port != _slot.
 	// Track which port is actually sending so triggerPollLoop reads the
 	// right lt[]/rt[] slot.
@@ -214,7 +213,7 @@ static void onButton(int port, DreamcastKey key, bool pressed)
 		else
 			_buttons |= (uint16_t)key;
 		_buttonChanges.fetch_add(1, std::memory_order_relaxed);
-		// Arm E2E probe — only if no probe is already pending.
+		// Arm E2E probe â€” only if no probe is already pending.
 		int64_t zero = 0;
 		_probeStartUs.compare_exchange_strong(zero, nowUs(), std::memory_order_relaxed);
 		sendState();
@@ -236,35 +235,38 @@ static void onButton(int port, DreamcastKey key, bool pressed)
 	}
 }
 
-// Trigger polling thread — also doubles as the failover detector.
+// Trigger polling thread â€” also doubles as the failover detector.
 //
 // At ~120Hz (8ms), we:
 //   1. Poll lt/rt for changes, send if changed
 //   2. Check if primary has been silent (no probe-ACK) for 100ms+
-//      → if standby is healthy, swap to it
+//      â†’ if standby is healthy, swap to it
 //
 // Probe-ACK reception happens in the same thread via a non-blocking
 // recvfrom on the primary socket. The server sends a [0xFE, ...] reply
 // to every input packet (the same probe-ACK code path used by hub
-// discovery — server doesn't differentiate). We don't care about the
+// discovery â€” server doesn't differentiate). We don't care about the
 // payload, just the heartbeat.
 static void triggerPollLoop()
 {
 	// Try to bump priority for tighter timing on input. Graceful degrade
-	// if we don't have CAP_SYS_NICE.
+	// if we don't have CAP_SYS_NICE. Linux-only; Windows desktop client
+	// runs the trigger poll thread at default priority.
+#ifdef __linux__
 	struct sched_param sp{};
 	sp.sched_priority = 50;  // mid-FIFO; don't starve audio (typically 70+)
 	if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) == 0) {
-		printf("[input-sink] trigger thread → SCHED_FIFO priority 50\n");
+		printf("[input-sink] trigger thread -> SCHED_FIFO priority 50\n");
 	} else {
 		// Fallback: nice -10. Doesn't need root.
 		printf("[input-sink] SCHED_FIFO not granted (need CAP_SYS_NICE), staying SCHED_OTHER\n");
 	}
+#endif
 
 	uint8_t lastLt = 0, lastRt = 0;
 
 	while (_triggerRun.load(std::memory_order_relaxed)) {
-		// 1. Trigger change detection — read from actual gamepad port
+		// 1. Trigger change detection â€” read from actual gamepad port
 		int gp = _gamepadPort.load(std::memory_order_relaxed);
 		int trigPort = (gp >= 0 && gp < 4) ? gp : _slot;
 		uint8_t curLt = (uint8_t)(lt[trigPort] >> 8);
@@ -287,29 +289,29 @@ static void triggerPollLoop()
 		if (activeSock >= 0) {
 			uint8_t buf[16];
 			ssize_t n;
-			while ((n = recv(activeSock, buf, sizeof(buf), MSG_DONTWAIT)) > 0) {
+			while ((n = mc_recv(activeSock, buf, sizeof(buf), MSG_DONTWAIT)) > 0) {
 				if (n >= 2 && buf[0] == 0xFE) {
 					_lastAckFromPrimaryUs.store(nowUs(), std::memory_order_relaxed);
 				}
 			}
 		}
 
-		// 3. Failover check — if primary has been silent for >100ms AND
+		// 3. Failover check â€” if primary has been silent for >100ms AND
 		//    we have a healthy backup, swap. (Only swap if we've seen
-		//    at least one ACK from the primary at any point — else we
+		//    at least one ACK from the primary at any point â€” else we
 		//    might just have an idle player.)
 		if (_hasBackup.load(std::memory_order_relaxed)
 		    && !_onBackup.load(std::memory_order_relaxed)) {
 			int64_t lastAck = _lastAckFromPrimaryUs.load(std::memory_order_relaxed);
 			int64_t lastSent = _lastSendUs.load(std::memory_order_relaxed);
 			// Only consider failover if we've actually been sending recently
-			// (within last 500ms) — no point swapping for an idle player.
+			// (within last 500ms) â€” no point swapping for an idle player.
 			if (lastAck > 0 && lastSent > 0 && (nowUs() - lastSent) < 500000) {
 				int64_t gap = nowUs() - lastAck;
 				if (gap > 100000) {  // 100ms silence
 					_onBackup.store(true, std::memory_order_release);
 					_failovers.fetch_add(1, std::memory_order_relaxed);
-					printf("[input-sink] FAILOVER → backup server (primary silent %lldms)\n",
+					printf("[input-sink] FAILOVER â†’ backup server (primary silent %lldms)\n",
 					       (long long)(gap / 1000));
 				}
 			}
@@ -319,7 +321,7 @@ static void triggerPollLoop()
 	}
 }
 
-// ── Public API ────────────────────────────────────────────────────────
+// â”€â”€ Public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 bool init(const char* host, int slot)
 {
@@ -347,7 +349,7 @@ bool init(const char* host, int slot)
 		return false;
 	}
 
-	// Connect-style setup so recv() works without specifying remote
+	// Connect-style setup so mc_recv() works without specifying remote
 	// (so probe-ACK heartbeat detection is simple)
 	connect(_sock, (const sockaddr*)&_addr, sizeof(_addr));
 
@@ -364,7 +366,7 @@ bool init(const char* host, int slot)
 	_active = true;
 	char ipstr[INET_ADDRSTRLEN];
 	inet_ntop(AF_INET, &_addr.sin_addr, ipstr, sizeof(ipstr));
-	printf("[input-sink] ready → %s:7100 slot %d (19-byte seq+ts + redundant send)\n",
+	printf("[input-sink] ready â†’ %s:7100 slot %d (19-byte seq+ts + redundant send)\n",
 	       ipstr, _slot);
 	return true;
 }
@@ -374,7 +376,7 @@ void setBackupServer(const char* host)
 	if (!host || !*host) {
 		// Disable existing standby
 		if (_backupSock >= 0) {
-			close(_backupSock);
+			mc_closesocket(_backupSock);
 			_backupSock = -1;
 		}
 		_hasBackup.store(false, std::memory_order_release);
@@ -393,7 +395,7 @@ void setBackupServer(const char* host)
 	_backupAddr.sin_port = htons(7100);
 	freeaddrinfo(res);
 
-	if (_backupSock >= 0) close(_backupSock);
+	if (_backupSock >= 0) mc_closesocket(_backupSock);
 	_backupSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 	if (_backupSock < 0) {
 		printf("[input-sink] backup socket() failed\n");
@@ -404,7 +406,7 @@ void setBackupServer(const char* host)
 	_hasBackup.store(true, std::memory_order_release);
 	char ipstr[INET_ADDRSTRLEN];
 	inet_ntop(AF_INET, &_backupAddr.sin_addr, ipstr, sizeof(ipstr));
-	printf("[input-sink] hot-standby ready → %s:7100\n", ipstr);
+	printf("[input-sink] hot-standby ready â†’ %s:7100\n", ipstr);
 }
 
 void directUpdate(uint16_t buttons, uint8_t newLt, uint8_t newRt)
@@ -417,7 +419,7 @@ void directUpdate(uint16_t buttons, uint8_t newLt, uint8_t newRt)
 	lt[tp] = (uint16_t)newLt << 8;
 	rt[tp] = (uint16_t)newRt << 8;
 	_buttonChanges.fetch_add(1, std::memory_order_relaxed);
-	// Arm E2E probe — same as onButton path
+	// Arm E2E probe â€” same as onButton path
 	int64_t zero = 0;
 	_probeStartUs.compare_exchange_strong(zero, nowUs(), std::memory_order_relaxed);
 	sendState();
@@ -432,8 +434,8 @@ void shutdown()
 	GamepadDevice::unlistenButtonsGlobal(onButton);
 	if (_triggerThread.joinable()) _triggerThread.join();
 	if (_redundantThread.joinable()) _redundantThread.join();
-	if (_sock >= 0) { close(_sock); _sock = -1; }
-	if (_backupSock >= 0) { close(_backupSock); _backupSock = -1; }
+	if (_sock >= 0) { mc_closesocket(_sock); _sock = -1; }
+	if (_backupSock >= 0) { mc_closesocket(_backupSock); _backupSock = -1; }
 	_active = false;
 	printf("[input-sink] shutdown\n");
 }

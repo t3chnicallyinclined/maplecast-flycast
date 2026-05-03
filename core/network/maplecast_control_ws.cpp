@@ -43,6 +43,7 @@
 	  - Queue is bounded (16 entries). Overflow → reject with error.
 */
 #include "maplecast_control_ws.h"
+#include "maplecast_compat.h"
 #include "maplecast_mirror.h"
 #include "maplecast_audio_client.h"
 #include "maplecast_input_server.h"

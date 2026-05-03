@@ -1,6 +1,6 @@
-/*
+﻿/*
 	================================================================
-	SHELVED 2026-04-09 — superseded by GGPO peer mode
+	SHELVED 2026-04-09 â€” superseded by GGPO peer mode
 	================================================================
 	Companion to maplecast_player.cpp (see SHELVED block at the top
 	of that file for full rationale). This is the bespoke TCP state-
@@ -15,7 +15,7 @@
 	peer mode is proven end-to-end. Do not add features here.
 	================================================================
 
-	MapleCast State Sync — server + client implementations.
+	MapleCast State Sync â€” server + client implementations.
 
 	See maplecast_state_sync.h for the wire format and rationale. Both
 	endpoints live in this file because they share the STAT envelope
@@ -36,8 +36,8 @@
 	Client
 	  - Connects to <host>:7102 in a background thread (retries on failure)
 	  - Receive thread parses STAT envelopes into a single "pending slot"
-	    — if a newer state arrives before the old one is applied, it
-	    replaces it (latest-wins — we only ever want the freshest)
+	    â€” if a newer state arrives before the old one is applied, it
+	    replaces it (latest-wins â€” we only ever want the freshest)
 	  - clientApplyPending() is called from the emu thread (inside
 	    maplecast_player::frameGate) before tape inputs are applied. If
 	    there's a pending state and the client hasn't done the initial
@@ -49,7 +49,7 @@
 	  - All state-mutating work (buildFullSaveState on server,
 	    dc_deserialize on client) happens synchronously on the emu
 	    thread. Network threads only marshal bytes.
-	  - buildFullSaveState must NOT race with the SH4 — it's called from
+	  - buildFullSaveState must NOT race with the SH4 â€” it's called from
 	    inside serverPublish which itself runs on the emu thread between
 	    runInternal() calls, so this is naturally safe.
 */
@@ -73,14 +73,11 @@
 #include <ctime>
 #include <chrono>
 
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
+#include "net_platform.h"
+#include "maplecast_compat.h"
+#ifndef _WIN32
 #include <netinet/tcp.h>
-#include <netdb.h>
-#include <arpa/inet.h>
-#include <errno.h>
+#endif
 
 namespace maplecast_state_sync
 {
@@ -93,12 +90,12 @@ static inline int64_t nowUs()
 }
 
 // Read exactly `n` bytes into `buf` from `fd`. Returns true on success,
-// false on EOF / error. Loops over partial reads — TCP is a byte stream.
+// false on EOF / error. Loops over partial reads â€” TCP is a byte stream.
 static bool readExact(int fd, void* buf, size_t n)
 {
 	uint8_t* p = (uint8_t*)buf;
 	while (n > 0) {
-		ssize_t r = recv(fd, p, n, 0);
+		ssize_t r = mc_recv(fd, p, n, 0);
 		if (r == 0) return false;
 		if (r < 0) {
 			if (errno == EINTR) continue;
@@ -115,7 +112,7 @@ static bool writeExact(int fd, const void* buf, size_t n)
 {
 	const uint8_t* p = (const uint8_t*)buf;
 	while (n > 0) {
-		ssize_t w = send(fd, p, n, MSG_NOSIGNAL);
+		ssize_t w = mc_send(fd, p, n, MSG_NOSIGNAL);
 		if (w < 0) {
 			if (errno == EINTR) continue;
 			return false;
@@ -213,14 +210,14 @@ static void sendLoop(ClientConn* c)
 	printf("%s stopped\n", threadName);
 	c->alive.store(false, std::memory_order_relaxed);
 	::shutdown(c->fd, SHUT_RDWR);
-	close(c->fd);
+	mc_closesocket(c->fd);
 	c->fd = -1;
 }
 
 // Build+compress+enqueue a fresh state for every connected client.
 // Called on the emu thread from onServerFramePublished. The snapshot is
 // taken ONCE and the resulting payload is shared across all clients'
-// queues via vector copy (small — typically ~1 MB compressed).
+// queues via vector copy (small â€” typically ~1 MB compressed).
 static void broadcastFreshState(uint64_t frame, bool initialFlag)
 {
 	// 1. Build
@@ -247,7 +244,7 @@ static void broadcastFreshState(uint64_t frame, bool initialFlag)
 	                                         compSize, compressUs, /*level=*/1);
 
 	// 3. Decide compressed vs raw. MirrorCompressor falls back to raw
-	// if zstd errored — in that case compPtr == raw and the ZCST magic
+	// if zstd errored â€” in that case compPtr == raw and the ZCST magic
 	// isn't present.
 	bool isCompressed = (compPtr != raw);
 
@@ -266,7 +263,7 @@ static void broadcastFreshState(uint64_t frame, bool initialFlag)
 	s_lastRawSize.store(rawSize, std::memory_order_relaxed);
 	s_totalBytesBeforeComp.fetch_add(rawSize, std::memory_order_relaxed);
 
-	// 4. Fan out — ONLY to clients that still need an initial sync.
+	// 4. Fan out â€” ONLY to clients that still need an initial sync.
 	// Clients that already received their one-shot are skipped, and
 	// their `needsInitialSync` flag is cleared atomically here so the
 	// next onServerFramePublished call doesn't re-build for them.
@@ -294,7 +291,7 @@ static void acceptLoop()
 		if (cfd < 0) {
 			if (errno == EINTR) continue;
 			if (!s_running.load(std::memory_order_relaxed)) break;
-			// EBADF on close during shutdown — bail.
+			// EBADF on close during shutdown â€” bail.
 			if (errno == EBADF || errno == EINVAL) break;
 			printf("[state-sync] accept error: %s\n", strerror(errno));
 			std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -302,7 +299,7 @@ static void acceptLoop()
 		}
 
 		int one = 1;
-		setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+		mc_setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
 		char ipstr[INET_ADDRSTRLEN];
 		inet_ntop(AF_INET, &cli.sin_addr, ipstr, sizeof(ipstr));
@@ -336,7 +333,7 @@ bool serverStart()
 		return false;
 	}
 	int one = 1;
-	setsockopt(s_listenFd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+	mc_setsockopt(s_listenFd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 
 	sockaddr_in addr{};
 	addr.sin_family      = AF_INET;
@@ -344,13 +341,13 @@ bool serverStart()
 	addr.sin_port        = htons(STATE_PORT);
 	if (bind(s_listenFd, (sockaddr*)&addr, sizeof(addr)) < 0) {
 		printf("[state-sync] bind port %d failed: %s\n", STATE_PORT, strerror(errno));
-		close(s_listenFd);
+		mc_closesocket(s_listenFd);
 		s_listenFd = -1;
 		return false;
 	}
 	if (listen(s_listenFd, 8) < 0) {
 		printf("[state-sync] listen failed: %s\n", strerror(errno));
-		close(s_listenFd);
+		mc_closesocket(s_listenFd);
 		s_listenFd = -1;
 		return false;
 	}
@@ -369,7 +366,7 @@ void serverStop()
 
 	if (s_listenFd >= 0) {
 		::shutdown(s_listenFd, SHUT_RDWR);
-		close(s_listenFd);
+		mc_closesocket(s_listenFd);
 		s_listenFd = -1;
 	}
 	if (s_acceptThread.joinable()) s_acceptThread.join();
@@ -392,7 +389,7 @@ void onServerFramePublished(uint64_t frame)
 
 	// Phase 3 v2: only build a state when at least one connected client
 	// is still waiting for its initial sync. Steady-state sessions
-	// (everybody synced) cost ZERO buildFullSaveState calls per frame —
+	// (everybody synced) cost ZERO buildFullSaveState calls per frame â€”
 	// the input tape is the only thing keeping clients in sync. This
 	// completely eliminates the periodic-heartbeat thrashing that
 	// starved the emu thread in the previous design.
@@ -489,11 +486,11 @@ static int openTcpBlocking(const std::string& host, int port)
 	int fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (fd < 0) return -1;
 	if (connect(fd, (sockaddr*)&sa, sizeof(sa)) < 0) {
-		close(fd);
+		mc_closesocket(fd);
 		return -1;
 	}
 	int one = 1;
-	setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+	mc_setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 	return fd;
 }
 
@@ -559,7 +556,7 @@ static void rxLoop()
 
 		if (c_fd >= 0) {
 			::shutdown(c_fd, SHUT_RDWR);
-			close(c_fd);
+			mc_closesocket(c_fd);
 			c_fd = -1;
 		}
 		c_connected.store(false, std::memory_order_relaxed);
@@ -607,7 +604,7 @@ bool clientApplyPending()
 
 	// Decompress (or passthrough if the flag says it wasn't compressed).
 	// MirrorDecompressor auto-detects the ZCST header and passes-through
-	// otherwise — we don't actually need to check the flag here, but we
+	// otherwise â€” we don't actually need to check the flag here, but we
 	// assert consistency in debug.
 	if (!c_decompInit) {
 		c_decomp.init(32 * 1024 * 1024);   // max DC+Naomi save state comfortably
@@ -636,7 +633,7 @@ bool clientApplyPending()
 	// because everything is still cold; subsequent applies (or even SH4
 	// execution after the first apply) trip on stale JIT translation
 	// blocks pointing into now-bogus code, stale MMU TLB entries, or
-	// stale memwatch page protections — manifesting as random
+	// stale memwatch page protections â€” manifesting as random
 	// "SH4 exception when blocked" crashes seconds later.
 	//
 	// Emulator::loadstate (core/emulator.cpp:938) is the canonical
@@ -647,7 +644,7 @@ bool clientApplyPending()
 	// load_game_state callback does, but exposed as a public Emulator
 	// method so callers outside GGPO can use it.
 	//
-	// rollback=false MUST match the server's buildFullSaveState — see
+	// rollback=false MUST match the server's buildFullSaveState â€” see
 	// maplecast_mirror.cpp:buildFullSaveState for the explanation.
 	auto ta0 = std::chrono::high_resolution_clock::now();
 	try {

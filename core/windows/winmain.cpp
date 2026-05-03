@@ -357,6 +357,35 @@ int main(int argc, char* argv[])
 	if (flycast_init(argc, argv) != 0)
 		die("Flycast initialization failed");
 
+	// MapleCast mirror client auto-load — mirrors core/linux-dist/main.cpp:269-296.
+	// Two paths trigger romless mirror mode:
+	//   1. --server <host>[:<port>]  command-line flag
+	//   2. MAPLECAST_MIRROR_CLIENT=1 env var (with no positional ROM arg)
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--server") == 0 && i + 1 < argc) {
+			std::string addr = argv[i + 1];
+			std::string host = addr;
+			std::string port = "7200";
+			auto colon = addr.rfind(':');
+			if (colon != std::string::npos) {
+				host = addr.substr(0, colon);
+				port = addr.substr(colon + 1);
+			}
+			_putenv_s("MAPLECAST_MIRROR_CLIENT", "1");
+			_putenv_s("MAPLECAST_SERVER_HOST", host.c_str());
+			_putenv_s("MAPLECAST_SERVER_PORT", port.c_str());
+			printf("[MIRROR] --server %s:%s\n", host.c_str(), port.c_str());
+			fflush(stdout);
+			emu.loadGame(nullptr);
+			break;
+		}
+	}
+	if (nowide::getenv("MAPLECAST_MIRROR_CLIENT") && argc < 2) {
+		printf("[MIRROR] Auto-loading without ROM\n");
+		fflush(stdout);
+		emu.loadGame(nullptr);
+	}
+
 #ifdef USE_BREAKPAD
 	nowide::stackstring nws;
 	static std::string tempDir8;

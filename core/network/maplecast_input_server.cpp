@@ -1,14 +1,14 @@
-/*
-	MapleCast Input Server — single source of truth for all player input.
+﻿/*
+	MapleCast Input Server â€” single source of truth for all player input.
 
 	Architecture (inspired by NOBD firmware):
-	  NOBD: GPIO → cmd9ReadyW3 (always fresh, ISR just reads it)
-	  This: UDP thread → kcode[] atomics (always fresh, CMD9 just reads them)
+	  NOBD: GPIO â†’ cmd9ReadyW3 (always fresh, ISR just reads it)
+	  This: UDP thread â†’ kcode[] atomics (always fresh, CMD9 just reads them)
 
 	All input paths converge here:
-	  - NOBD stick UDP → recvfrom thread → updateSlot()
-	  - Browser gamepad → WebSocket → injectInput() → updateSlot()
-	  - XDP (future) → ring buffer → updateSlot()
+	  - NOBD stick UDP â†’ recvfrom thread â†’ updateSlot()
+	  - Browser gamepad â†’ WebSocket â†’ injectInput() â†’ updateSlot()
+	  - XDP (future) â†’ ring buffer â†’ updateSlot()
 
 	One registry. One set of globals. One latency tracker.
 */
@@ -33,23 +33,23 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include <unistd.h>
-#include <sys/socket.h>
+#include "net_platform.h"
+#include "maplecast_compat.h"
+#ifndef _WIN32
 #include <sys/mman.h>
-#include <netinet/in.h>
 #include <netinet/ip.h>
-#include <arpa/inet.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <pthread.h>
 #include <sched.h>
 #include <pwd.h>
+#include <strings.h>  // strcasecmp on Linux (compat.h provides it on Windows)
+#endif
 #include <time.h>
-#include <strings.h>
 #include <fstream>
 #include <sstream>
 
-// Gamepad globals — CMD9 reads these via ggpo::getLocalInput()
+// Gamepad globals â€” CMD9 reads these via ggpo::getLocalInput()
 extern u32 kcode[4];
 extern u16 rt[4], lt[4];
 
@@ -61,15 +61,15 @@ static std::thread _udpThread;
 static int _udpSock = -1;
 
 // ---------------------------------------------------------------------
-// Input tape — Phase 1 (lockstep-player-client branch)
+// Input tape â€” Phase 1 (lockstep-player-client branch)
 // ---------------------------------------------------------------------
 //
 // Per-slot bounded ring buffer. Single producer (the UDP/XDP input
-// thread writing via updateSlot → pushTapeEntry) and single consumer
+// thread writing via updateSlot â†’ pushTapeEntry) and single consumer
 // (the tape publisher thread draining). Power-of-two capacity so the
 // head/tail wrap is a cheap mask.
 //
-// Sizing: 1024 entries per slot → 16 KB per slot → 32 KB total. At a
+// Sizing: 1024 entries per slot â†’ 16 KB per slot â†’ 32 KB total. At a
 // 1 kHz NOBD input rate that's one second of headroom before the
 // publisher falls behind, which is far more than we'd ever want to
 // buffer (a wedged publisher is better detected than papered over).
@@ -106,11 +106,11 @@ static std::atomic<uint64_t> _tapePacketsSent{0};
 static std::atomic<uint64_t> _tapeBytesSent{0};
 static std::atomic<uint64_t> _tapeLastPublishedFrame{0};
 
-// Player registry — THE single source of truth
+// Player registry â€” THE single source of truth
 static PlayerInfo _players[2] = {};
 static std::mutex _registryMutex;
 
-// Phase A — tear-free packed input slot for the CMD9 latch path. Storage
+// Phase A â€” tear-free packed input slot for the CMD9 latch path. Storage
 // definition for the extern declared in the header. Initialized to "neutral
 // active-low buttons, zero triggers, seq 0" so a read before the first
 // write produces a sane default rather than UB.
@@ -119,14 +119,14 @@ std::atomic<uint64_t> _slotInputAtomic[2] = {
 	std::atomic<uint64_t>(packSlotInput(0xFFFF, 0, 0, 0)),
 };
 
-// Phase B — per-slot input accumulator for ConsistencyFirst policy.
+// Phase B â€” per-slot input accumulator for ConsistencyFirst policy.
 // Initialized to "neutral active-low (0xFFFF), no edges accumulated, zero
 // triggers". Storage for the extern in the header.
 static inline uint64_t _initialAccum() {
 	AccumPacked a{};
 	a.any_pressed = 0;
 	a.any_released = 0;
-	a.current = 0xFFFF;     // active-low neutral — no buttons pressed
+	a.current = 0xFFFF;     // active-low neutral â€” no buttons pressed
 	a.lt = 0;
 	a.rt = 0;
 	return packAccum(a);
@@ -136,7 +136,7 @@ std::atomic<uint64_t> _slotAccum[2] = {
 	std::atomic<uint64_t>(_initialAccum()),
 };
 
-// Phase B — per-slot latch policy. Default LatencyFirst. Set globally by
+// Phase B â€” per-slot latch policy. Default LatencyFirst. Set globally by
 // the MAPLECAST_LATCH_POLICY env var at module init; per-slot overrides at
 // runtime via setLatchPolicy() (called from the WS control message handler
 // in B.7). Stored as atomic so the read in getLocalInput() doesn't need a
@@ -146,9 +146,9 @@ static std::atomic<LatchPolicy> _latchPolicy[2] = {
 	std::atomic<LatchPolicy>(LatchPolicy::LatencyFirst),
 };
 
-// Phase B — guard window for ConsistencyFirst policy. Default 500 us.
+// Phase B â€” guard window for ConsistencyFirst policy. Default 500 us.
 // MAPLECAST_GUARD_US env var overrides at startup. The latch path reads
-// this once per call via std::memory_order_relaxed — it's effectively
+// this once per call via std::memory_order_relaxed â€” it's effectively
 // constant after init.
 static std::atomic<int64_t> _guardUs{500};
 
@@ -164,7 +164,7 @@ void setGuardUs(int64_t us) {
 	if (us < 0) us = 0;
 	if (us > 5000) us = 5000;
 	_guardUs.store(us, std::memory_order_relaxed);
-	printf("[input-server] guard window → %lld us\n", (long long)us);
+	printf("[input-server] guard window â†’ %lld us\n", (long long)us);
 }
 
 LatchPolicy getLatchPolicy(int slot) {
@@ -176,7 +176,7 @@ void setLatchPolicy(int slot, LatchPolicy policy) {
 	if (slot < 0 || slot > 1) return;
 	_latchPolicy[slot].store(policy, std::memory_order_release);
 	const char* name = (policy == LatchPolicy::ConsistencyFirst) ? "consistency" : "latency";
-	printf("[input-server] slot %d latch policy → %s\n", slot, name);
+	printf("[input-server] slot %d latch policy â†’ %s\n", slot, name);
 }
 
 AccumPacked drainAccumulator(int slot) {
@@ -200,7 +200,7 @@ AccumPacked drainAccumulator(int slot) {
 	return snap;
 }
 
-// Phase B — full ConsistencyFirst latch computation for one slot.
+// Phase B â€” full ConsistencyFirst latch computation for one slot.
 // Called from the latch path (ggpo::getLocalInput) when the slot's policy
 // is ConsistencyFirst. Drains the accumulator, applies edge preservation,
 // blip-press deferred releases, and the guard window. Mutates per-slot
@@ -217,7 +217,7 @@ ConsistencyLatchResult consistencyFirstLatch(int slot, int64_t tLatchUs)
 
 	// Drain accumulator FIRST. This atomically reads-and-clears the
 	// any_pressed/any_released bits while keeping current/lt/rt. Even when
-	// the guard fires, we still drain — the guard only freezes what THIS
+	// the guard fires, we still drain â€” the guard only freezes what THIS
 	// latch reports; the next latch needs a fresh accumulator state. If we
 	// didn't drain, the guarded events would re-fire on the next latch as
 	// "still pressed" instead of "newly pressed".
@@ -229,7 +229,7 @@ ConsistencyLatchResult consistencyFirstLatch(int slot, int64_t tLatchUs)
 	// Compute the latched buttons under edge preservation:
 	//   start from a.current (the most recent button state),
 	//   clear any bit that was pressed at any moment during the interval
-	//   (active-low: pressed = bit cleared) — this catches the case where
+	//   (active-low: pressed = bit cleared) â€” this catches the case where
 	//   a button was pressed AND released within the interval.
 	uint16_t latched = (uint16_t)(a.current & ~a.any_pressed);
 
@@ -264,11 +264,11 @@ ConsistencyLatchResult consistencyFirstLatch(int slot, int64_t tLatchUs)
 		// Only freeze if we actually saw activity worth deferring (i.e. the
 		// drained accumulator had at least one press or release event). If
 		// nothing happened this interval, freezing == passing through last
-		// frame's state, which is the same thing — but skipping the freeze
+		// frame's state, which is the same thing â€” but skipping the freeze
 		// keeps the telemetry counter honest about "real" guard fires.
 		if (a.any_pressed != 0 || a.any_released != 0) {
 			latched = p.lastLatchedButtons;
-			// Don't update deferredReleaseMask either — we're frozen.
+			// Don't update deferredReleaseMask either â€” we're frozen.
 			newDeferred = p.deferredReleaseMask;
 			p.guardHits++;
 			guardFired = true;
@@ -284,15 +284,15 @@ ConsistencyLatchResult consistencyFirstLatch(int slot, int64_t tLatchUs)
 	return r;
 }
 
-// Phase A — latch telemetry. Per-slot ring buffer of recent (delta_us)
+// Phase A â€” latch telemetry. Per-slot ring buffer of recent (delta_us)
 // samples + counters. The maple thread (single producer per slot) writes
 // via recordLatchSample(); the WS thread reads aggregate stats once per
 // second via getLatchStats(). The seq mismatch trick gives "did the
 // network thread touch this slot since the last latch" without locking.
 //
-// Ring size: 256 samples ≈ 4.3 seconds at 60 Hz — a meaningful
-// "recent input quality" window. 256 × 8 bytes × 2 slots = 4 KB total,
-// fits in L1. p99 is computed by copy + sort on the read path; ~10 µs
+// Ring size: 256 samples â‰ˆ 4.3 seconds at 60 Hz â€” a meaningful
+// "recent input quality" window. 256 Ã— 8 bytes Ã— 2 slots = 4 KB total,
+// fits in L1. p99 is computed by copy + sort on the read path; ~10 Âµs
 // per call, called once per second from the WS status broadcaster.
 constexpr int LATCH_RING_SIZE = 256;
 
@@ -307,7 +307,7 @@ struct LatchStatsAccum {
 	// producer (the maple thread) so a plain index + memory_order_release
 	// store is sufficient. Reader copies the whole ring under a snapshot.
 	int64_t  ring[LATCH_RING_SIZE] = {};
-	std::atomic<uint32_t> ringWriteIdx{0};       // monotonic — modulo gives ring slot
+	std::atomic<uint32_t> ringWriteIdx{0};       // monotonic â€” modulo gives ring slot
 };
 static LatchStatsAccum _latchStats[2];
 
@@ -317,11 +317,11 @@ void recordLatchSample(int slot, int64_t deltaUs, uint32_t packetSeq, uint64_t f
 	LatchStatsAccum& s = _latchStats[slot];
 
 	// Single producer (the maple thread on the headless server, or the SH4
-	// vblank handler in dev builds — same thread either way for a given run).
+	// vblank handler in dev builds â€” same thread either way for a given run).
 	// Multiple producer would require a CAS loop here; we don't need one.
 	s.totalLatches.fetch_add(1, std::memory_order_relaxed);
 
-	// Always record the most recent frame number — even on slots with no
+	// Always record the most recent frame number â€” even on slots with no
 	// connected input, this is a useful liveness signal ("the input system
 	// is ticking once per vblank").
 	s.lastFrameNum.store(frameNum, std::memory_order_relaxed);
@@ -343,7 +343,7 @@ void recordLatchSample(int slot, int64_t deltaUs, uint32_t packetSeq, uint64_t f
 
 	// Only write to the ring on vblanks where a FRESH packet arrived this
 	// interval. The metric we want to track is "when a packet arrives, how
-	// stale is it by latch time?" — meaningful only for active vblanks.
+	// stale is it by latch time?" â€” meaningful only for active vblanks.
 	// Idle vblanks (packetSeq == prev, player hasn't moved their stick) would
 	// otherwise pollute the histogram with "time since last packet" values
 	// that grow without bound during idle periods. The latches_with_data
@@ -370,7 +370,7 @@ LatchStats getLatchStats(int slot)
 
 	// Snapshot the ring. There's a benign race here: the maple thread might
 	// write a new sample mid-copy, in which case our snapshot includes one
-	// "in progress" frame. That's fine — we're computing aggregates over a
+	// "in progress" frame. That's fine â€” we're computing aggregates over a
 	// 256-sample window, one extra sample doesn't move the percentile.
 	uint32_t writeIdx = s.ringWriteIdx.load(std::memory_order_relaxed);
 	uint32_t validCount = (writeIdx < LATCH_RING_SIZE) ? writeIdx : LATCH_RING_SIZE;
@@ -395,7 +395,7 @@ LatchStats getLatchStats(int slot)
 // Telemetry
 static std::atomic<uint64_t> _totalPackets{0};
 
-// Stick registration — username-based.
+// Stick registration â€” username-based.
 // Persistence: WS server drains _pendingStickEvents and forwards to the
 // collector for SurrealDB writes; saveStickCache() also mirrors current
 // state to ~/.maplecast/sticks.json so flycast survives a restart even
@@ -406,7 +406,7 @@ struct StickBinding {
 	char username[16];       // 4-12 chars, [a-zA-Z0-9_]
 	char browserId[64];      // legacy compat (same as username for new registrations)
 	int64_t lastInputUs;     // for online detection
-	bool wasOnline;          // last reported online state — for edge detection
+	bool wasOnline;          // last reported online state â€” for edge detection
 };
 static std::vector<StickBinding> _stickBindings;
 static std::mutex _stickMutex;
@@ -416,7 +416,7 @@ static std::vector<StickEvent> _pendingStickEvents;
 static bool _registering = false;
 static char _registerBrowserId[64] = {};
 
-// Web registration — simpler "any press" mode
+// Web registration â€” simpler "any press" mode
 static bool _webRegistering = false;
 static char _webRegisterUsername[16] = {};
 static int64_t _webRegisterStartUs = 0;
@@ -435,7 +435,7 @@ static std::vector<RhythmTracker> _rhythmTrackers;
 // Forensics: every (srcIP, srcPort) we've ever received a UDP packet from,
 // hashed to a single uint64. First-appearance is logged so we can identify
 // rogue clients sending input. Lifetime = process lifetime; cleared on
-// flycast restart. Memory cost is ~24 bytes per unique source — bounded by
+// flycast restart. Memory cost is ~24 bytes per unique source â€” bounded by
 // the number of distinct IP:port pairs that ever talk to us.
 static std::unordered_set<uint64_t> _seenUdpSources;
 static std::mutex _seenUdpSourcesMutex;
@@ -448,20 +448,20 @@ static inline uint64_t makeSourceKey(uint32_t ip, uint16_t port)
 // 11-byte packets carry a u32 seq; client sends each packet twice (T+0
 // + T+1ms) for loss tolerance. Server skips packets whose seq <= the
 // last we saw for that source. Map grows with unique sources but each
-// entry is ~16 bytes — bounded by player population.
+// entry is ~16 bytes â€” bounded by player population.
 static std::unordered_map<uint64_t, uint32_t> _lastSeenSeq;
 static std::mutex _dedupMutex;
 static std::atomic<uint64_t> _dedupCount{0};
 
-// Per-slot input timing — written by UDP thread, read at vblank latch.
-// Server-side CLOCK_MONOTONIC µs when the most recent input packet arrived.
+// Per-slot input timing â€” written by UDP thread, read at vblank latch.
+// Server-side CLOCK_MONOTONIC Âµs when the most recent input packet arrived.
 static std::atomic<uint64_t> _lastInputArrivalUs[2] = {0, 0};
-// Client-side CLOCK_MONOTONIC µs from the 19-byte packet (different clock domain).
+// Client-side CLOCK_MONOTONIC Âµs from the 19-byte packet (different clock domain).
 static std::atomic<uint64_t> _lastInputClientTs[2] = {0, 0};
 // Sequence number of the last arrival (so latch can detect "new since last check")
 static std::atomic<uint32_t> _lastInputArrivalSeq[2] = {0, 0};
-// Input age at vblank: how many µs old the input was when the game latched it.
-// Written at vblank, read by telemetry/HUD. EMA with α=1/16.
+// Input age at vblank: how many Âµs old the input was when the game latched it.
+// Written at vblank, read by telemetry/HUD. EMA with Î±=1/16.
 static std::atomic<int64_t> _inputAgeAtLatchUs[2] = {0, 0};
 static std::atomic<int64_t> _inputAgeEmaUs[2] = {0, 0};
 // Last seq seen by measureInputAge, to detect new packets
@@ -471,7 +471,7 @@ static uint32_t _latchLastSeq[2] = {0, 0};
 static inline int64_t nowUs();
 static void updateSlot(int slot, uint8_t ltVal, uint8_t rtVal, uint16_t buttons);
 
-// ── Latency Parity ───────────────────────────────────────────────────
+// â”€â”€ Latency Parity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // When enabled, the faster player's inputs are held in a ring buffer
 // and released after a delay, so both players' inputs are equally old
@@ -501,14 +501,14 @@ static void parityEnqueue(int slot, uint8_t lt, uint8_t rt, uint16_t buttons)
 {
 	int64_t delay = _parityDelayUs[slot].load(std::memory_order_relaxed);
 	if (delay <= 0) {
-		// This slot has no added delay — pass through immediately
+		// This slot has no added delay â€” pass through immediately
 		updateSlot(slot, lt, rt, buttons);
 		return;
 	}
 	std::lock_guard<std::mutex> lk(_parityMtx[slot]);
 	int next = (_parityHead[slot] + 1) % PARITY_RING_SIZE;
 	if (next == _parityTail[slot]) {
-		// Ring full — drop oldest (shouldn't happen at normal rates)
+		// Ring full â€” drop oldest (shouldn't happen at normal rates)
 		_parityTail[slot] = (_parityTail[slot] + 1) % PARITY_RING_SIZE;
 	}
 	DelayedInput di;
@@ -549,11 +549,11 @@ static void parityRecompute()
 	if (age0 <= 0 || age1 <= 0) return;  // not enough data yet
 
 	if (age0 < age1) {
-		// P1 is faster — delay P1 by the difference
+		// P1 is faster â€” delay P1 by the difference
 		_parityDelayUs[0].store(age1 - age0, std::memory_order_relaxed);
 		_parityDelayUs[1].store(0, std::memory_order_relaxed);
 	} else {
-		// P2 is faster — delay P2
+		// P2 is faster â€” delay P2
 		_parityDelayUs[0].store(0, std::memory_order_relaxed);
 		_parityDelayUs[1].store(age0 - age1, std::memory_order_relaxed);
 	}
@@ -561,7 +561,7 @@ static void parityRecompute()
 	static uint32_t _logCount = 0;
 	if (++_logCount >= 5) {
 		_logCount = 0;
-		printf("[parity] P1 age=%.1fms P2 age=%.1fms → delay P%d +%.1fms\n",
+		printf("[parity] P1 age=%.1fms P2 age=%.1fms â†’ delay P%d +%.1fms\n",
 		       age0 / 1000.0, age1 / 1000.0,
 		       age0 < age1 ? 1 : 2,
 		       std::abs(age0 - age1) / 1000.0);
@@ -577,7 +577,7 @@ static inline int64_t nowUs()
 }
 
 // ---------------------------------------------------------------------
-// Input tape — push / publish / stats
+// Input tape â€” push / publish / stats
 // ---------------------------------------------------------------------
 
 // Internal worker: push a single entry with an explicit frame stamp.
@@ -596,7 +596,7 @@ static void pushTapeEntryAtFrame(int slot, uint64_t frame, uint16_t buttons,
 	// Ring full? Drop the OLDEST entry by advancing tail. We are the sole
 	// producer; the publisher is the sole consumer. Advancing tail from the
 	// producer is safe only because a dropped old entry is strictly
-	// preferable to losing the newest one — clients can re-sync from later
+	// preferable to losing the newest one â€” clients can re-sync from later
 	// entries since each entry is absolute state, not a delta.
 	if (head - tail >= kTapeRingSize) {
 		ring.tail.store(tail + 1, std::memory_order_release);
@@ -629,7 +629,7 @@ void pushTapeEntry(int slot, uint16_t buttons, uint8_t lt_, uint8_t rt_, uint32_
 // is bumped, with the frame number that's about to become current. We
 // snapshot the live packed-atomic for both slots and push one entry per
 // slot stamped with `frame`. This is what makes the client's blocking
-// frameGate work — every frame number from the server's perspective has
+// frameGate work â€” every frame number from the server's perspective has
 // at least one entry in the tape, even if no input changed.
 //
 // Bandwidth: 2 slots * 16 bytes * 60 Hz = ~2 KB/sec. Trivial.
@@ -662,7 +662,7 @@ TapeStats getTapeStats()
 }
 
 // Drain one slot's ring up to `maxEntries` into out[]. Returns how many
-// were copied. Consumer side — only called from _tapePubThread.
+// were copied. Consumer side â€” only called from _tapePubThread.
 static size_t drainTapeRing(int slot, TapeEntry* out, size_t maxEntries)
 {
 	TapeRing& ring = _tapeRings[slot];
@@ -685,10 +685,12 @@ static void tapePublisherLoop()
 	// in a tight loop. A 1 ms recv timeout gives us ~1 kHz publish cadence
 	// which is well below the tape ring's drop threshold under typical
 	// load (NOBD sticks are ~1 kHz *input*, tape publishing is whatever
-	// rate the publisher chooses — we batch up to kMaxEntriesPerPacket per
+	// rate the publisher chooses â€” we batch up to kMaxEntriesPerPacket per
 	// datagram).
-	struct timeval tv = { .tv_sec = 0, .tv_usec = 1000 };
-	setsockopt(_tapeSock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	struct timeval tv;
+	tv.tv_sec = 0;
+	tv.tv_usec = 1000;
+	mc_setsockopt(_tapeSock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
 	uint8_t rxBuf[64];
 	struct sockaddr_in from;
@@ -701,7 +703,7 @@ static void tapePublisherLoop()
 	{
 		// --- 1. handle one HELO if pending (non-blocking-ish with 1ms timeout) ---
 		fromLen = sizeof(from);
-		int n = recvfrom(_tapeSock, rxBuf, sizeof(rxBuf), 0,
+		int n = mc_recvfrom(_tapeSock, rxBuf, sizeof(rxBuf), 0,
 		                 (struct sockaddr *)&from, &fromLen);
 		if (n >= 4 && memcmp(rxBuf, "HELO", 4) == 0)
 		{
@@ -792,7 +794,7 @@ static void tapePublisherLoop()
 			to.sin_family      = AF_INET;
 			to.sin_addr.s_addr = s.ip;
 			to.sin_port        = s.port;
-			ssize_t sent = sendto(_tapeSock, pktBuf, pktLen, 0,
+			ssize_t sent = mc_sendto(_tapeSock, pktBuf, pktLen, 0,
 			                      (struct sockaddr *)&to, sizeof(to));
 			if (sent > 0) {
 				_tapePacketsSent.fetch_add(1, std::memory_order_relaxed);
@@ -809,7 +811,7 @@ static void updateSlot(int slot, uint8_t ltVal, uint8_t rtVal, uint16_t buttons)
 {
 	if (slot < 0 || slot > 1) return;
 
-	// Phase A — tear-free packed slot atomic FIRST. The CMD9 latch in
+	// Phase A â€” tear-free packed slot atomic FIRST. The CMD9 latch in
 	// ggpo::getLocalInput() reads from this single 64-bit word, so writers
 	// and readers can never see a torn buttons/lt/rt triple. Sequence number
 	// is incremented monotonically; the network thread is the only writer
@@ -822,22 +824,22 @@ static void updateSlot(int slot, uint8_t ltVal, uint8_t rtVal, uint16_t buttons)
 	// NOTE: tape entries used to be pushed from here on every input
 	// change. They are now pushed exclusively by publishFrameTick(),
 	// called once per server emu frame from maplecast_mirror::serverPublish.
-	// This is what makes the lockstep-player-client tape "dense" — every
+	// This is what makes the lockstep-player-client tape "dense" â€” every
 	// server frame produces exactly one entry per slot, so the client's
 	// blocking frameGate can use queue-has-entry-at-frame-N as a
 	// definitive signal. Pushing from updateSlot would race with the
 	// per-frame snapshot and create out-of-order entries.
 
-	// Phase B — input accumulator CAS loop. Always update, regardless of
+	// Phase B â€” input accumulator CAS loop. Always update, regardless of
 	// the per-slot LatchPolicy. The accumulator must be live so a runtime
-	// switch from LatencyFirst → ConsistencyFirst doesn't see stale data.
-	// The latch path (getLocalInput → drainAccumulator) reads it only when
+	// switch from LatencyFirst â†’ ConsistencyFirst doesn't see stale data.
+	// The latch path (getLocalInput â†’ drainAccumulator) reads it only when
 	// the policy is ConsistencyFirst, so it's free for LatencyFirst slots.
 	//
 	// Edge detection (active-low semantics):
 	//   newly_pressed  = bits that were 1 (released) and are now 0 (pressed)
 	//   newly_released = bits that were 0 (pressed)  and are now 1 (released)
-	// any_pressed/any_released are sticky-OR until the next drain — every
+	// any_pressed/any_released are sticky-OR until the next drain â€” every
 	// transition during a vblank interval is preserved.
 	{
 		uint64_t old = _slotAccum[slot].load(std::memory_order_acquire);
@@ -857,13 +859,13 @@ static void updateSlot(int slot, uint8_t ltVal, uint8_t rtVal, uint16_t buttons)
 			        std::memory_order_acq_rel, std::memory_order_acquire))
 				break;
 			// CAS failed: `old` was reloaded by compare_exchange_weak. Loop.
-			// In practice this almost never fails — single producer in the
+			// In practice this almost never fails â€” single producer in the
 			// hot path (UDP/XDP thread for a given slot), and the consumer
 			// (drainAccumulator) is a tiny CAS too.
 		}
 	}
 
-	// Legacy plain globals — kept in sync for non-MapleCast paths (SDL local
+	// Legacy plain globals â€” kept in sync for non-MapleCast paths (SDL local
 	// gamepads on the dev box still write these directly, and ggpo's
 	// getLocalInput() falls back to them for slots 2/3 and other input fields).
 	// CMD9 still reads these on slots that don't go through the maplecast atomic.
@@ -877,7 +879,7 @@ static void updateSlot(int slot, uint8_t ltVal, uint8_t rtVal, uint16_t buttons)
 	p.lt = ltVal;
 	p.rt = rtVal;
 
-	// Track state changes (also drives idle-kick — see ws_server checkIdleKick)
+	// Track state changes (also drives idle-kick â€” see ws_server checkIdleKick)
 	if (buttons != p._prevButtons)
 	{
 		p._chgAccum++;
@@ -910,51 +912,57 @@ static int findSlotByIP(uint32_t srcIP)
 	return -1;
 }
 
-// autoAssignUDP removed — NOBD sticks must register via browser first
+// autoAssignUDP removed â€” NOBD sticks must register via browser first
 
-// UDP listener thread — receives NOBD stick and WebSocket-forwarded packets
+// UDP listener thread â€” receives NOBD stick and WebSocket-forwarded packets
 static void udpThreadLoop(int port)
 {
 	printf("[input-server] UDP thread started on port %d\n", port);
 
-	// ── Kernel tuning for 12KHz input ingress ─────────────────────────
+	// â”€â”€ Kernel tuning for 12KHz input ingress â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	//
-	// SO_BUSY_POLL: spin-poll NIC for 10µs before sleeping — avoids the
-	// ~50µs interrupt-to-userspace wakeup on most VPS kernels.
+#ifdef __linux__
+	// SO_BUSY_POLL: spin-poll NIC for 10us before sleeping. Linux-only.
 	int busy_poll = 10;
-	setsockopt(_udpSock, SOL_SOCKET, SO_BUSY_POLL, &busy_poll, sizeof(busy_poll));
+	mc_setsockopt(_udpSock, SOL_SOCKET, SO_BUSY_POLL, &busy_poll, sizeof(busy_poll));
+#endif
 
-	// SO_RCVBUF: 4MB receive buffer. At 12KHz × 11 bytes = 132 KB/s,
+	// SO_RCVBUF: 4MB receive buffer. At 12KHz x 11 bytes = 132 KB/s,
 	// this gives ~30s of buffering against scheduling jitter.
 	int rcvbuf = 4 * 1024 * 1024;
-	setsockopt(_udpSock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+	mc_setsockopt(_udpSock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
 	// IP_TOS: mark input traffic as EF (Expedited Forwarding, DSCP 46)
 	// so kernel QoS and NIC hardware prioritize these packets.
 	int tos = 0xB8;  // DSCP EF = 46 << 2
-	setsockopt(_udpSock, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
+	mc_setsockopt(_udpSock, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
 
-	struct timeval tv = { .tv_sec = 0, .tv_usec = 1000 };  // 1ms recv timeout
-	setsockopt(_udpSock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	struct timeval tv;
+	tv.tv_sec = 0;
+	tv.tv_usec = 1000;  // 1ms recv timeout
+	mc_setsockopt(_udpSock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
 	// SCHED_FIFO: real-time priority for the input thread. Ensures we
 	// drain the UDP socket before the kernel drops packets. Graceful
-	// fallback if CAP_SYS_NICE is missing.
+	// fallback if CAP_SYS_NICE is missing. Linux-only â€” Windows clients
+	// don't run the input server in production.
+#ifdef __linux__
 	{
 		struct sched_param sp{};
 		sp.sched_priority = 55;  // above input-sink (50), below audio (70+)
 		if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) == 0)
-			printf("[input-server] UDP thread → SCHED_FIFO priority 55\n");
+			printf("[input-server] UDP thread â†’ SCHED_FIFO priority 55\n");
 		else
 			printf("[input-server] SCHED_FIFO not granted, staying SCHED_OTHER\n");
 	}
 
 	// mlockall: prevent page faults during gameplay. At 12KHz, a single
-	// page fault (~10-100µs) can drop 1-10 input packets.
+	// page fault (~10-100Âµs) can drop 1-10 input packets.
 	if (mlockall(MCL_CURRENT | MCL_FUTURE) == 0)
-		printf("[input-server] mlockall() — memory locked\n");
+		printf("[input-server] mlockall() â€” memory locked\n");
 	else
 		printf("[input-server] mlockall() failed (need CAP_IPC_LOCK)\n");
+#endif
 
 	uint8_t buf[64];
 	struct sockaddr_in from;
@@ -963,7 +971,7 @@ static void udpThreadLoop(int port)
 	while (_active.load(std::memory_order_relaxed))
 	{
 		fromLen = sizeof(from);
-		int n = recvfrom(_udpSock, buf, sizeof(buf), 0, (struct sockaddr *)&from, &fromLen);
+		int n = mc_recvfrom(_udpSock, buf, sizeof(buf), 0, (struct sockaddr *)&from, &fromLen);
 		if (n < 4) continue;
 
 		// PROBE-ACK responder for native client hub-discovery RTT measurement.
@@ -971,7 +979,7 @@ static void udpThreadLoop(int port)
 		// We echo back [0xFE, seq:u8, ts_lo:u32_LE, ts_hi:u16_LE] (8 bytes)
 		// where ts is server CLOCK_MONOTONIC microseconds (truncated low 48
 		// bits split LE). Client measures RTT as (now - send_time). Doesn't
-		// touch any input state — pure echo, takes ~2µs.
+		// touch any input state â€” pure echo, takes ~2Âµs.
 		if (n >= 4 && buf[0] == 0xFF) {
 			uint64_t ts = nowUs();
 			uint8_t reply[8];
@@ -983,7 +991,7 @@ static void udpThreadLoop(int port)
 			reply[5] = (uint8_t)(ts >> 24);
 			reply[6] = (uint8_t)(ts >> 32);
 			reply[7] = (uint8_t)(ts >> 40);
-			sendto(_udpSock, reply, sizeof(reply), 0,
+			mc_sendto(_udpSock, reply, sizeof(reply), 0,
 			       (struct sockaddr*)&from, fromLen);
 			continue;
 		}
@@ -1033,10 +1041,10 @@ static void udpThreadLoop(int port)
 				}
 			}
 
-			// Per-source-IP dedup. Map: source-key → last seq seen.
+			// Per-source-IP dedup. Map: source-key â†’ last seq seen.
 			// Skip if seq <= last (handles redundant T+1ms copies and
 			// stray reorderings). 32-bit seq wraps every ~4 billion packets
-			// — at 12 KHz that's >9 days of continuous play, plenty.
+			// â€” at 12 KHz that's >9 days of continuous play, plenty.
 			uint64_t srcKey = makeSourceKey(from.sin_addr.s_addr, from.sin_port);
 			{
 				std::lock_guard<std::mutex> lock(_dedupMutex);
@@ -1056,7 +1064,7 @@ static void udpThreadLoop(int port)
 							reply[2]=(uint8_t)ts; reply[3]=(uint8_t)(ts>>8);
 							reply[4]=(uint8_t)(ts>>16); reply[5]=(uint8_t)(ts>>24);
 							reply[6]=(uint8_t)(ts>>32); reply[7]=(uint8_t)(ts>>40);
-							sendto(_udpSock, reply, sizeof(reply), 0,
+							mc_sendto(_udpSock, reply, sizeof(reply), 0,
 							       (struct sockaddr*)&from, fromLen);
 						}
 						continue;
@@ -1073,7 +1081,7 @@ static void udpThreadLoop(int port)
 				reply[2]=(uint8_t)ts; reply[3]=(uint8_t)(ts>>8);
 				reply[4]=(uint8_t)(ts>>16); reply[5]=(uint8_t)(ts>>24);
 				reply[6]=(uint8_t)(ts>>32); reply[7]=(uint8_t)(ts>>40);
-				sendto(_udpSock, reply, sizeof(reply), 0,
+				mc_sendto(_udpSock, reply, sizeof(reply), 0,
 				       (struct sockaddr*)&from, fromLen);
 			}
 
@@ -1108,7 +1116,7 @@ static void udpThreadLoop(int port)
 		// flycast forward its local gamepad to the server without going
 		// through browser-WS registration. Auto-binds the source IP to the
 		// declared slot on the first packet. Intended for private/trusted
-		// deployments — there is no auth. Add AUTH before exposing to the
+		// deployments â€” there is no auth. Add AUTH before exposing to the
 		// public internet.
 		else if (n == 7 && buf[0] == 'P' && buf[1] == 'C' && buf[2] <= 1)
 		{
@@ -1117,7 +1125,7 @@ static void udpThreadLoop(int port)
 
 			// Auto-bind source IP to the claimed slot. Overrides any
 			// prior binding for that slot (last-writer-wins). The slot
-			// must be "connected" first — normally that happens via a
+			// must be "connected" first â€” normally that happens via a
 			// browser WS join. For the Phase 4-lite test, we force it
 			// connected here on first packet.
 			std::lock_guard<std::mutex> lock(_registryMutex);
@@ -1161,13 +1169,13 @@ static void udpThreadLoop(int port)
 			{
 				uint32_t ip = ntohl(from.sin_addr.s_addr);
 				uint16_t btnState = ((uint16_t)w3[2] << 8) | w3[3];
-				printf("[input-server] FORENSIC: new UDP source %u.%u.%u.%u:%u — first packet (buttons=0x%04X len=%d)\n",
+				printf("[input-server] FORENSIC: new UDP source %u.%u.%u.%u:%u â€” first packet (buttons=0x%04X len=%d)\n",
 					(ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF,
 					ntohs(from.sin_port), btnState, n);
 			}
 		}
 
-		// Web registration — any press from unregistered stick binds it
+		// Web registration â€” any press from unregistered stick binds it
 		if (_webRegistering && from.sin_addr.s_addr != htonl(INADDR_LOOPBACK))
 		{
 			uint16_t buttons = ((uint16_t)w3[2] << 8) | w3[3];
@@ -1212,7 +1220,7 @@ static void udpThreadLoop(int port)
 				rt = &_rhythmTrackers.back();
 			}
 
-			// Detect button press: any bit went from 1→0 (active-low)
+			// Detect button press: any bit went from 1â†’0 (active-low)
 			uint16_t newPresses = rt->prevButtons & ~buttons;
 			rt->prevButtons = buttons;
 
@@ -1238,13 +1246,13 @@ static void udpThreadLoop(int port)
 				{
 					int64_t sinceBurst = now - rt->burstEndUs;
 					if (sinceBurst < 500000) {
-						// Too fast after first burst — still part of burst 1, ignore
+						// Too fast after first burst â€” still part of burst 1, ignore
 					} else if (sinceBurst > 3000000) {
-						// Too slow — reset
+						// Too slow â€” reset
 						rt->burstCount = 0;
 						rt->tapCount = 1;
 					} else {
-						// In the pause window — count second burst
+						// In the pause window â€” count second burst
 						rt->tapCount++;
 						if (rt->tapCount >= 5) {
 							// Pattern complete!
@@ -1258,14 +1266,14 @@ static void udpThreadLoop(int port)
 			}
 		}
 
-		// NOBD stick input routing — only registered sticks with active slots
+		// NOBD stick input routing â€” only registered sticks with active slots
 		if (slot < 0 && from.sin_addr.s_addr != htonl(INADDR_LOOPBACK))
 		{
 			// First check if already assigned to a slot
 			slot = findSlotByIP(from.sin_addr.s_addr);
 
 			// If not assigned, check if this stick is registered to a browser user
-			// who has an active slot — if so, bind this stick to that slot
+			// who has an active slot â€” if so, bind this stick to that slot
 			if (slot < 0)
 			{
 				const char* browserId = getRegisteredBrowserId(from.sin_addr.s_addr, from.sin_port);
@@ -1328,10 +1336,10 @@ bool init(int udpPort)
 		_players[i]._lastRateTime = nowUs();
 	}
 
-	// Phase B — parse MAPLECAST_LATCH_POLICY env var. "consistency" enables
+	// Phase B â€” parse MAPLECAST_LATCH_POLICY env var. "consistency" enables
 	// the accumulator + edge preservation + guard window for both slots;
 	// any other value (or unset) leaves the LatencyFirst default. Per-slot
-	// overrides at runtime via setLatchPolicy() — set globally here as
+	// overrides at runtime via setLatchPolicy() â€” set globally here as
 	// the boot-time baseline.
 	if (const char* lp = std::getenv("MAPLECAST_LATCH_POLICY")) {
 		if (strcasecmp(lp, "consistency") == 0) {
@@ -1346,7 +1354,7 @@ bool init(int udpPort)
 		}
 	}
 
-	// Phase B — parse MAPLECAST_GUARD_US env var. Sane bounds: 0..5000 us.
+	// Phase B â€” parse MAPLECAST_GUARD_US env var. Sane bounds: 0..5000 us.
 	// 0 disables the guard window without disabling the accumulator path.
 	if (const char* g = std::getenv("MAPLECAST_GUARD_US")) {
 		long val = strtol(g, nullptr, 10);
@@ -1356,7 +1364,7 @@ bool init(int udpPort)
 		printf("[input-server] MAPLECAST_GUARD_US = %ld us\n", val);
 	}
 
-	// Latency parity — equalize input age between players
+	// Latency parity â€” equalize input age between players
 	if (std::getenv("MAPLECAST_LATENCY_PARITY"))
 		setLatencyParity(true);
 
@@ -1368,8 +1376,10 @@ bool init(int udpPort)
 		return false;
 	}
 
+#ifdef SO_REUSEPORT
 	int reuse = 1;
-	setsockopt(_udpSock, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse));
+	mc_setsockopt(_udpSock, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse));
+#endif
 
 	struct sockaddr_in addr = {};
 	addr.sin_family = AF_INET;
@@ -1379,7 +1389,7 @@ bool init(int udpPort)
 	if (bind(_udpSock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
 	{
 		printf("[input-server] bind port %d failed: %s\n", udpPort, strerror(errno));
-		close(_udpSock);
+		mc_closesocket(_udpSock);
 		_udpSock = -1;
 		return false;
 	}
@@ -1395,8 +1405,10 @@ bool init(int udpPort)
 	// the main input path still works, only the tape fan-out is lost.
 	_tapeSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 	if (_tapeSock >= 0) {
+#ifdef SO_REUSEPORT
 		int reuse1 = 1;
-		setsockopt(_tapeSock, SOL_SOCKET, SO_REUSEPORT, &reuse1, sizeof(reuse1));
+		mc_setsockopt(_tapeSock, SOL_SOCKET, SO_REUSEPORT, &reuse1, sizeof(reuse1));
+#endif
 		struct sockaddr_in taddr = {};
 		taddr.sin_family      = AF_INET;
 		taddr.sin_addr.s_addr = INADDR_ANY;
@@ -1404,7 +1416,7 @@ bool init(int udpPort)
 		if (bind(_tapeSock, (struct sockaddr *)&taddr, sizeof(taddr)) < 0) {
 			printf("[input-server] tape bind port %d failed: %s (tape disabled)\n",
 			       kTapePort, strerror(errno));
-			close(_tapeSock);
+			mc_closesocket(_tapeSock);
 			_tapeSock = -1;
 		}
 	} else {
@@ -1459,8 +1471,8 @@ void shutdown()
 	if (!_active) return;
 	_active = false;
 
-	if (_udpSock >= 0) { close(_udpSock); _udpSock = -1; }
-	if (_tapeSock >= 0) { close(_tapeSock); _tapeSock = -1; }
+	if (_udpSock >= 0) { mc_closesocket(_udpSock); _udpSock = -1; }
+	if (_tapeSock >= 0) { mc_closesocket(_tapeSock); _tapeSock = -1; }
 	if (_udpThread.joinable()) _udpThread.join();
 	if (_tapePubThread.joinable()) _tapePubThread.join();
 
@@ -1476,7 +1488,7 @@ int registerPlayer(const char* id, const char* name, const char* device, InputTy
 	{
 		if (_players[i].connected && strncmp(_players[i].id, id, sizeof(_players[i].id)) == 0)
 		{
-			// Reconnect — update info, keep slot
+			// Reconnect â€” update info, keep slot
 			strncpy(_players[i].name, name, sizeof(_players[i].name) - 1);
 			strncpy(_players[i].device, device, sizeof(_players[i].device) - 1);
 			_players[i].type = type;
@@ -1502,7 +1514,7 @@ int registerPlayer(const char* id, const char* name, const char* device, InputTy
 			// Seed lastChangeUs so the idle-kick clock starts from join time,
 			// not from whatever stale value the slot had previously.
 			_players[i].lastChangeUs = nowUs();
-			// Clear any leftover source binding from a prior tenant — the
+			// Clear any leftover source binding from a prior tenant â€” the
 			// new player must explicitly bind a stick (via NOBD rhythm or
 			// web-register) to get hardware input routed to this slot. This
 			// is the second half of the disconnect-clears-srcIP fix: a fresh
@@ -1521,7 +1533,7 @@ int registerPlayer(const char* id, const char* name, const char* device, InputTy
 		}
 	}
 
-	printf("[input-server] FULL — rejected %s (%s)\n", name, device);
+	printf("[input-server] FULL â€” rejected %s (%s)\n", name, device);
 	return -1;
 }
 
@@ -1546,7 +1558,7 @@ void disconnectPlayer(int slot)
 		// CRITICAL: clear the source binding so a NOBD stick that was routing
 		// to this slot via findSlotByIP() stops doing so the moment the
 		// owning WebSocket disconnects. Without this, a stale srcIP from a
-		// previous session keeps the stick → slot binding alive forever and
+		// previous session keeps the stick â†’ slot binding alive forever and
 		// any browser that re-joins under a matching id silently inherits
 		// the orphan. This is the root of the "drifter ghost" class of bugs.
 		_players[slot].srcIP = 0;
@@ -1635,7 +1647,7 @@ int64_t measureInputAge(int slot)
 
 	_inputAgeAtLatchUs[slot].store(age, std::memory_order_relaxed);
 
-	// EMA with α = 1/16
+	// EMA with Î± = 1/16
 	int64_t prev = _inputAgeEmaUs[slot].load(std::memory_order_relaxed);
 	int64_t ema = prev + ((age - prev) >> 4);
 	_inputAgeEmaUs[slot].store(ema, std::memory_order_relaxed);
@@ -1645,7 +1657,7 @@ int64_t measureInputAge(int slot)
 	static uint32_t _logCounter[2] = {0, 0};
 	if (++_logCounter[slot] >= 300) {
 		_logCounter[slot] = 0;
-		printf("[input-age] P%d: last=%.2fms ema=%.2fms (packet→latch)\n",
+		printf("[input-age] P%d: last=%.2fms ema=%.2fms (packetâ†’latch)\n",
 		       slot + 1, age / 1000.0, ema / 1000.0);
 		fflush(stdout);
 		if (slot == 0) parityRecompute();  // once per cycle, not per slot
@@ -1687,7 +1699,7 @@ void startStickRegistration(const char* browserId)
 	strncpy(_registerBrowserId, browserId, sizeof(_registerBrowserId) - 1);
 	_rhythmTrackers.clear();
 	_registering = true;
-	printf("[input-server] Registration started for %s — tap any button 5x, pause, 5x again\n", browserId);
+	printf("[input-server] Registration started for %s â€” tap any button 5x, pause, 5x again\n", browserId);
 }
 
 void cancelStickRegistration()
@@ -1835,7 +1847,7 @@ int registeredStickCount()
 	return (int)_stickBindings.size();
 }
 
-// ==================== Stick persistence — public API ====================
+// ==================== Stick persistence â€” public API ====================
 
 std::vector<StickEvent> drainStickEvents()
 {
@@ -1901,7 +1913,7 @@ void installStickBindings(const std::vector<StickSnapshot>& snapshots)
 				b.srcIP = s.srcIP;
 				b.srcPort = s.srcPort;
 				b.lastInputUs = s.lastInputUs;
-				b.wasOnline = false;   // remote install — wait for first packet to flip
+				b.wasOnline = false;   // remote install â€” wait for first packet to flip
 				_stickBindings.push_back(b);
 			}
 		}
@@ -1914,6 +1926,15 @@ void installStickBindings(const std::vector<StickSnapshot>& snapshots)
 
 static std::string stickCachePath()
 {
+#ifdef _WIN32
+	// Windows: use %USERPROFILE% (or %APPDATA%) instead of $HOME + getpwuid.
+	const char* home = getenv("USERPROFILE");
+	if (!home || !*home) home = getenv("APPDATA");
+	if (!home || !*home) return std::string();
+	std::string dir = std::string(home) + "\\.maplecast";
+	_mkdir(dir.c_str());   // EEXIST ignored
+	return dir + "\\sticks.json";
+#else
 	const char* home = getenv("HOME");
 	if (!home || !*home) {
 		struct passwd* pw = getpwuid(getuid());
@@ -1923,6 +1944,7 @@ static std::string stickCachePath()
 	std::string dir = std::string(home) + "/.maplecast";
 	mkdir(dir.c_str(), 0700);   // EEXIST ignored
 	return dir + "/sticks.json";
+#endif
 }
 
 bool saveStickCache()
@@ -1965,7 +1987,7 @@ bool loadStickCache()
 	if (path.empty()) return false;
 
 	std::ifstream f(path);
-	if (!f) return false;   // no cache yet — first run
+	if (!f) return false;   // no cache yet â€” first run
 
 	std::stringstream ss;
 	ss << f.rdbuf();
@@ -2029,7 +2051,7 @@ void startWebRegistration(const char* username)
 	strncpy(_webRegisterUsername, username, sizeof(_webRegisterUsername) - 1);
 	_webRegisterStartUs = nowUs();
 	_webRegistering = true;
-	printf("[input-server] Web registration started for '%s' — press any button\n", username);
+	printf("[input-server] Web registration started for '%s' â€” press any button\n", username);
 }
 
 void cancelWebRegistration()

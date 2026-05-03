@@ -27,6 +27,7 @@
 #include "oslib/i18n.h"
 #include "network/maplecast_input_server.h"
 #include "network/maplecast_mirror.h"
+#include "maplecast_compat.h"
 #include <algorithm>
 #include <ctime>
 

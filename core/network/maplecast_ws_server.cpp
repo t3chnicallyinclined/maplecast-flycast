@@ -1,5 +1,5 @@
-/*
-	MapleCast WebSocket Server — binary mirror broadcast + JSON lobby on port 7200.
+﻿/*
+	MapleCast WebSocket Server â€” binary mirror broadcast + JSON lobby on port 7200.
 
 	On new client connect: sends full VRAM + PVR regs as initial sync, plus lobby status.
 	Binary frames: delta TA commands broadcast to all clients.
@@ -41,6 +41,7 @@ void maplecast_palette_clear();
 #include <strings.h>   // strcasecmp
 #include <unistd.h>
 #endif
+#include "maplecast_compat.h"
 
 using WsServer = websocketpp::server<websocketpp::config::asio>;
 using ConnHdl = websocketpp::connection_hdl;
@@ -57,10 +58,10 @@ static std::mutex _connMutex;
 static std::atomic<int> _clientCount{0};
 static bool _active = false;
 
-// Lobby: connection → slot mapping, queue tracking
+// Lobby: connection â†’ slot mapping, queue tracking
 static std::map<void*, int> _connSlot;
 
-// Control-only connections — browsers that connect directly to flycast for
+// Control-only connections â€” browsers that connect directly to flycast for
 // JSON control + 4-byte gamepad input but get the heavy TA frame downstream
 // from the relay. These are flagged via a `{type:"control_only"}` JSON message
 // sent immediately after WS open by the browser. broadcastBinary() skips them
@@ -102,7 +103,7 @@ struct RelayNode {
 
 static std::map<std::string, RelayNode> _relayTree;
 static std::vector<std::string> _seedPeers;
-static std::map<void*, std::string> _connToPeerId;  // connKey → peerId
+static std::map<void*, std::string> _connToPeerId;  // connKey â†’ peerId
 static std::vector<QueueEntry> _queue;
 
 // Loss detection state
@@ -116,7 +117,7 @@ static int _pendingKickSlot = -1; // loser slot to evict if client doesn't self-
 // is seeded fresh on join/reconnect so a slow joiner has the full window.
 static constexpr int64_t IDLE_KICK_THRESHOLD_US = 300LL * 1000000LL; // 5 minutes
 
-// Forward declaration — defined further down, used by checkMatchEnd().
+// Forward declaration â€” defined further down, used by checkMatchEnd().
 static void broadcastStatus();
 
 // Server-side eviction primitive used by both the loser-kick path and the
@@ -124,15 +125,15 @@ static void broadcastStatus();
 // pushes {kicked, reason} + {assigned, slot:-1} to the evicted client so its
 // UI resets without waiting for an onClose. Returns true if a slot was kicked.
 //
-// `slot`   — which player slot to evict (0 or 1)
-// `reason` — short token sent to the client ("match_lost", "idle", ...)
+// `slot`   â€” which player slot to evict (0 or 1)
+// `reason` â€” short token sent to the client ("match_lost", "idle", ...)
 static bool kickSlot(int slot, const char* reason)
 {
 	if (slot < 0 || slot > 1) return false;
 	const auto& p = maplecast_input::getPlayer(slot);
 	if (!p.connected) return false;
 
-	printf("[maplecast-ws] SERVER KICK: P%d (%s) — reason=%s\n",
+	printf("[maplecast-ws] SERVER KICK: P%d (%s) â€” reason=%s\n",
 		slot + 1, p.name, reason);
 
 	// Walk _connSlot looking for the connection bound to this slot, drop the
@@ -263,19 +264,19 @@ static json getStatus()
 	status["relay_seeds"] = seedCount;
 	status["relay_nodes"] = treeSize;
 
-	// Phase A — per-slot input latch telemetry. Sourced from the
+	// Phase A â€” per-slot input latch telemetry. Sourced from the
 	// LatchStatsAccum ring buffer that ggpo::getLocalInput() writes to
 	// once per vblank for slots 0/1. Frontend renders these as a
 	// histogram + counter set in the diagnostics overlay (A.6) so
 	// players can see how their input timing relates to the latch
 	// boundary.
-	//   delta_us avg/p99/min/max — distribution of (t_latch - t_packet_arrival)
+	//   delta_us avg/p99/min/max â€” distribution of (t_latch - t_packet_arrival)
 	//                              over the last ~256 latches (~4.3 s @ 60 Hz)
-	//   total_latches             — every CMD9 vblank since boot
-	//   latches_with_data         — vblanks where the network thread had
+	//   total_latches             â€” every CMD9 vblank since boot
+	//   latches_with_data         â€” vblanks where the network thread had
 	//                              touched the slot since the previous latch
 	//                              (= the slot saw a fresh packet this frame)
-	//   last_seq, last_frame      — for live drift / diagnostics
+	//   last_seq, last_frame      â€” for live drift / diagnostics
 	auto latchInfoJson = [](int slot) -> json {
 		auto s = maplecast_input::getLatchStats(slot);
 		return {
@@ -294,7 +295,7 @@ static json getStatus()
 	latchStats["p2"] = latchInfoJson(1);
 	status["latch_stats"] = latchStats;
 
-	// Phase B — frame phase publication. Tells the browser-side gamepad
+	// Phase B â€” frame phase publication. Tells the browser-side gamepad
 	// scheduler when the most recent vblank latch fired and how long the
 	// vblank interval is, so it can phase-align its send pattern to land
 	// 2-4 ms before the next latch (instead of the random ~8 ms phase
@@ -318,7 +319,7 @@ static json getStatus()
 		const int64_t period = maplecast_mirror::framePeriodUs();
 		const int64_t lastLatch = maplecast_mirror::lastLatchTimeUs();
 		fp["t_next_latch_us"]  = lastLatch + period;
-		// Phase B guard window in microseconds — exposed so the browser
+		// Phase B guard window in microseconds â€” exposed so the browser
 		// can shift its sends to land just OUTSIDE the guard window
 		// (avoiding the deferred-by-one-frame penalty under
 		// ConsistencyFirst).
@@ -326,7 +327,7 @@ static json getStatus()
 		status["frame_phase"] = fp;
 	}
 
-	// Phase B — per-slot latch policy (latency / consistency). Lets the
+	// Phase B â€” per-slot latch policy (latency / consistency). Lets the
 	// browser show the current policy in the diagnostics overlay and offer
 	// the live A/B toggle button (B.9).
 	{
@@ -371,7 +372,7 @@ static json getStatus()
 	return status;
 }
 
-// Idle-kick — evict any player who hasn't pressed a button in 30 seconds.
+// Idle-kick â€” evict any player who hasn't pressed a button in 30 seconds.
 // Runs from the status thread at 1Hz alongside checkMatchEnd. Decision is
 // based on `lastChangeUs` (button-state changes), not raw packet rate, so a
 // player whose stick polls at 250Hz but never presses anything still counts
@@ -411,7 +412,7 @@ static void checkMatchEnd()
 	if (gs.in_match) {
 		// Latch _matchActive on the rising edge only. Resetting it every
 		// tick would also reset _matchEndHandled and re-fire match_end on
-		// every status broadcast — which is exactly the loop bug that
+		// every status broadcast â€” which is exactly the loop bug that
 		// produced 115 ghost match rows in 30 seconds on 2026-04-06.
 		if (!_matchActive) {
 			_matchActive = true;
@@ -453,7 +454,7 @@ static void checkMatchEnd()
 	else if (_matchActive && _matchEndHandled)
 	{
 		// Match ended and game returned to non-match state (character select, etc.)
-		// Client gets 3s grace via match_end → leaveGame() self-disconnect.
+		// Client gets 3s grace via match_end â†’ leaveGame() self-disconnect.
 		// Server kicks at 5s as a safety net (closed tab, killed JS, malicious client).
 		int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
 			std::chrono::high_resolution_clock::now().time_since_epoch()).count();
@@ -462,7 +463,7 @@ static void checkMatchEnd()
 			_matchActive = false;
 
 			// King-of-the-hill: only evict loser if someone is waiting in queue.
-			// Empty queue → winner stays on, loser keeps slot for rematch.
+			// Empty queue â†’ winner stays on, loser keeps slot for rematch.
 			bool kicked = false;
 			if (!_queue.empty() && _pendingKickSlot >= 0) {
 				kicked = kickSlot(_pendingKickSlot, "match_lost");
@@ -583,7 +584,7 @@ static void removeFromTree(const std::string& peerId)
 	if (it->second.isSeed)
 		_seedPeers.erase(std::remove(_seedPeers.begin(), _seedPeers.end(), peerId), _seedPeers.end());
 
-	// Orphan children — reassign them
+	// Orphan children â€” reassign them
 	std::vector<std::string> orphans = it->second.children;
 	_relayTree.erase(it);
 
@@ -671,7 +672,7 @@ static void onOpen(ConnHdl hdl)
 	}
 	printf("[maplecast-ws] client connected (%d total)\n", _clientCount.load());
 
-	// Always send SYNC on connect — backward compat for clients without relay.js
+	// Always send SYNC on connect â€” backward compat for clients without relay.js
 	// (test-renderer.html, standalone clients, etc.)
 	// The bandwidth savings come from delta frames (broadcastBinary), not SYNC.
 	// Non-seed relay clients will also get SYNC from their parent via WebRTC,
@@ -776,7 +777,7 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 			}
 			else
 			{
-				// Unassigned player — send raw 4-byte
+				// Unassigned player â€” send raw 4-byte
 				sendto(_udpSock, data.c_str(), 4, 0, (struct sockaddr*)&_udpDest, sizeof(_udpDest));
 			}
 		}
@@ -788,7 +789,7 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 			auto ctrl = json::parse(msg->get_payload());
 			if (ctrl["type"] == "control_only")
 			{
-				// Browser → flycast direct connection that does NOT want the
+				// Browser â†’ flycast direct connection that does NOT want the
 				// 4 Mbps TA frame downstream (it gets that from the relay).
 				// Add to the skip-binary set so broadcastBinary() leaves it
 				// alone. Idempotent.
@@ -799,7 +800,7 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 				} catch (...) {}
 				return;
 			}
-			// Skin system — palette_write, palette_clear, match_info use "cmd"
+			// Skin system â€” palette_write, palette_clear, match_info use "cmd"
 			// instead of "type". Handle them before the type-based chain so they
 			// work even when the message has no "type" field (e.g. from king.html
 			// skin picker).
@@ -884,7 +885,7 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 							printf("[maplecast-ws] Ghost-slot eviction: P%d (%s) freed for reconnect\n",
 								i + 1, p.name);
 							maplecast_input::disconnectPlayer(i);
-							// Drop the stale conn→slot mapping AND notify the
+							// Drop the stale connâ†’slot mapping AND notify the
 							// evicted hdl so its browser cleans up.
 							for (auto it = _connSlot.begin(); it != _connSlot.end(); ) {
 								if (it->second == i) {
@@ -916,7 +917,7 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 					playerId.c_str(), name.c_str(), device.c_str(),
 					maplecast_input::InputType::BrowserWS);
 
-				// Register connection → slot mapping
+				// Register connection â†’ slot mapping
 				if (slot >= 0) {
 					try {
 						void* key = (void*)_ws.get_con_from_hdl(hdl).get();
@@ -934,7 +935,7 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 					// Per-user latch policy: if the join handshake carries a
 					// latch_policy preference, push it to the slot the player
 					// just got assigned. This is what makes the policy follow
-					// the PLAYER across slot reassignments — the preference
+					// the PLAYER across slot reassignments â€” the preference
 					// lives in the browser's localStorage and is transmitted
 					// on every (re)join, so a returning player gets their
 					// chosen mode regardless of which slot opens up.
@@ -1042,10 +1043,10 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 			}
 			else if (ctrl["type"] == "set_latch_policy")
 			{
-				// Phase B + per-user gate — live per-slot latch policy switch.
+				// Phase B + per-user gate â€” live per-slot latch policy switch.
 				// Players choose between LatencyFirst (today's behavior) and
 				// ConsistencyFirst (accumulator + edge preservation + guard
-				// window). The policy follows the PLAYER, not the chair —
+				// window). The policy follows the PLAYER, not the chair â€”
 				// it's stored client-side in localStorage and re-pushed via
 				// the join handshake whenever they (re)take a slot.
 				//
@@ -1056,7 +1057,7 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 				int slot = ctrl.value("slot", -1);
 				std::string policyStr = ctrl.value("policy", "");
 
-				// Identity check — what slot does THIS connection actually own?
+				// Identity check â€” what slot does THIS connection actually own?
 				int ownerSlot = getSlotForConn(hdl);
 				if (slot != ownerSlot || ownerSlot < 0) {
 					json resp = {{"type", "set_latch_policy_error"},
@@ -1114,9 +1115,9 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 			else if (ctrl["type"] == "stick_load")
 			{
 				// Collector boot-time push: authoritative DB state replaces
-				// whatever we have in RAM (well — installs, doesn't wipe;
+				// whatever we have in RAM (well â€” installs, doesn't wipe;
 				// see installStickBindings). Trusted source, so no auth check
-				// here yet — relies on collector being on the same WS:7200
+				// here yet â€” relies on collector being on the same WS:7200
 				// link that already requires being on-host or going through
 				// our nginx auth.
 				if (ctrl.contains("bindings") && ctrl["bindings"].is_array()) {
@@ -1177,7 +1178,7 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 						if (!parentId.empty()) {
 							assignChild(peerId, parentId);
 						} else {
-							// No room in tree — make another seed
+							// No room in tree â€” make another seed
 							makeSeed(peerId);
 						}
 					}
@@ -1208,7 +1209,7 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 			}
 			else if (ctrl["type"] == "relay_parent_lost")
 			{
-				// Child reports parent DataChannel died — reassign
+				// Child reports parent DataChannel died â€” reassign
 				try {
 					void* key = (void*)_ws.get_con_from_hdl(hdl).get();
 					auto peerIt = _connToPeerId.find(key);
@@ -1234,7 +1235,7 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 			}
 			else if (ctrl["type"] == "relay_stats")
 			{
-				// Health report from relay node — log for now
+				// Health report from relay node â€” log for now
 			}
 			else if (ctrl["type"] == "cancel_register")
 			{
@@ -1274,7 +1275,7 @@ bool init(int port)
 		// Without this, TCP buffers small writes (status JSON, ping echoes,
 		// 4-byte input forwards) for up to 40ms hoping to coalesce them with
 		// the next write. With it, every send hits the wire immediately.
-		// The relay→home and browser→relay paths benefit by 0-40ms p99.
+		// The relayâ†’home and browserâ†’relay paths benefit by 0-40ms p99.
 		_ws.set_socket_init_handler([](websocketpp::connection_hdl,
 		                               websocketpp::lib::asio::ip::tcp::socket& s) {
 			websocketpp::lib::asio::error_code ec;
@@ -1326,7 +1327,7 @@ void shutdown()
 #ifdef _WIN32
 		closesocket(_udpSock);
 #else
-		close(_udpSock);
+		mc_closesocket(_udpSock);
 #endif
 		_udpSock = -1;
 	}
@@ -1343,7 +1344,7 @@ void broadcastBinary(const void* data, size_t size)
 
 	// Post the entire broadcast (snapshot + send loop) onto asio's
 	// io_service thread (_wsThread). Caller returns immediately after
-	// the post() — no locks held, no socket work, no contention with
+	// the post() â€” no locks held, no socket work, no contention with
 	// any other thread.
 	//
 	// Why this matters: the TA mirror publish runs on Flycast-rend, the
@@ -1406,17 +1407,17 @@ void broadcastFreshSync()
 	memcpy(dst, &ps, 4); dst += 4;
 	memcpy(dst, pvr_regs, pvr_RegSize);
 
-	// Compress with zstd (ZCST magic) — same path as onOpen
+	// Compress with zstd (ZCST magic) â€” same path as onOpen
 	MirrorCompressor syncComp;
 	syncComp.init(syncSize + 128);
 	size_t compSyncSize = 0;
 	uint64_t compUs = 0;
 	const uint8_t* compSync = syncComp.compress(syncBuf.data(), (uint32_t)syncSize, compSyncSize, compUs, 3);
 
-	// Broadcast to ALL clients — even relay children get this directly. The
+	// Broadcast to ALL clients â€” even relay children get this directly. The
 	// relay tree's delta-only path is fine for normal frames but a scene
 	// transition needs to invalidate everyone's state at once.
-	// EXCEPT control-only connections — they get SYNC via the VPS relay path,
+	// EXCEPT control-only connections â€” they get SYNC via the VPS relay path,
 	// not over the home upstream.
 	{
 		std::lock_guard<std::mutex> lock(_connMutex);
@@ -1460,7 +1461,7 @@ int clientCount()
 // operation. Restore the real impl if you need SAVE blob broadcasts.
 void broadcastSaveStateBytes(const void* /*data*/, size_t /*size*/)
 {
-	printf("[maplecast-ws] broadcastSaveStateBytes — STUB (not implemented)\n");
+	printf("[maplecast-ws] broadcastSaveStateBytes â€” STUB (not implemented)\n");
 }
 
 }  // namespace maplecast_ws

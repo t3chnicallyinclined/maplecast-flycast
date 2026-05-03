@@ -1,6 +1,6 @@
-/*
+﻿/*
 	================================================================
-	SHELVED 2026-04-10 — superseded by native TA stream viewer
+	SHELVED 2026-04-10 â€” superseded by native TA stream viewer
 	================================================================
 	The replica approach (local SH4 + tape inputs + TA correction)
 	worked for sync but the local SH4 is unnecessary when the TA
@@ -15,7 +15,7 @@
 	(onButtonEvent / sinkSend) may be reused in the native viewer.
 	================================================================
 
-	MapleCast Replica Client — deterministic SH4 replica of the headless server.
+	MapleCast Replica Client â€” deterministic SH4 replica of the headless server.
 
 	rx thread receives UDP tape packets from the server and writes
 	directly into kcode[]/lt[]/rt[]. The SH4 reads these at CMD9.
@@ -41,11 +41,8 @@
 #include <cstring>
 #include <cstdlib>
 
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netdb.h>
-#include <arpa/inet.h>
+#include "net_platform.h"
+#include "maplecast_compat.h"
 
 extern u32 kcode[4];
 extern u16 rt[4], lt[4];
@@ -63,10 +60,10 @@ static std::string            _serverHost;
 static std::atomic<uint64_t>  _packetsReceived{0};
 static std::atomic<uint64_t>  _syncsApplied{0};
 
-// Input sink — sends local SDL gamepad events directly to the server's
+// Input sink â€” sends local SDL gamepad events directly to the server's
 // input port (UDP:7100) via a ButtonListener callback. No polling, no
 // kcode[] races. SDL fires the callback synchronously on the main thread
-// the instant a button changes; we sendto() inline.
+// the instant a button changes; we mc_sendto() inline.
 static int                    _sinkSock = -1;
 static sockaddr_in            _sinkAddr{};
 static int                    _sinkSlot = 0;
@@ -118,11 +115,11 @@ static void sinkSend()
 	const uint8_t rtv  = _sinkRt.load(std::memory_order_relaxed);
 	uint8_t pkt[7] = { 'P', 'C', (uint8_t)_sinkSlot, ltv, rtv,
 	                   (uint8_t)(btn >> 8), (uint8_t)(btn & 0xFF) };
-	sendto(_sinkSock, pkt, sizeof(pkt), 0,
+	mc_sendto(_sinkSock, pkt, sizeof(pkt), 0,
 	       (const sockaddr*)&_sinkAddr, sizeof(_sinkAddr));
 }
 
-// SDL ButtonListener callback — fires synchronously on the main thread
+// SDL ButtonListener callback â€” fires synchronously on the main thread
 // the instant a button is pressed or released. We accumulate into our
 // own atomic button state and send immediately. No kcode[] involvement.
 static void onButtonEvent(int port, DreamcastKey key, bool pressed)
@@ -164,8 +161,10 @@ static void rxLoop()
 	bind(bsock, (sockaddr*)&local, sizeof(local));
 	connect(bsock, (sockaddr*)&_serverAddr, sizeof(_serverAddr));
 	_rxSock = bsock;
-	struct timeval tv = { .tv_sec = 0, .tv_usec = 100000 };
-	setsockopt(_rxSock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	struct timeval tv;
+	tv.tv_sec = 0;
+	tv.tv_usec = 100000;
+	mc_setsockopt(_rxSock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
 	int64_t lastHeloUs = 0;
 	int64_t lastSyncCheckUs = 0;
@@ -176,7 +175,7 @@ static void rxLoop()
 
 		// HELO keepalive
 		if (now - lastHeloUs > 900000) {
-			send(_rxSock, "HELO", 4, 0);
+			mc_send(_rxSock, "HELO", 4, 0);
 			lastHeloUs = now;
 		}
 
@@ -189,14 +188,14 @@ static void rxLoop()
 			auto stats = maplecast_state_sync::getClientStats();
 			if (stats.statesReceived > _syncsApplied.load(std::memory_order_relaxed)) {
 				_wantSync.store(true, std::memory_order_relaxed);
-				// Stop the SH4 — this makes runInternal() return,
+				// Stop the SH4 â€” this makes runInternal() return,
 				// the emu loop re-enters and calls frameGate() where
 				// we apply the state safely on the emu thread.
 				emu.getSh4Executor()->Stop();
 			}
 		}
 
-		ssize_t n = recv(_rxSock, buf, sizeof(buf), 0);
+		ssize_t n = mc_recv(_rxSock, buf, sizeof(buf), 0);
 		if (n < 0) {
 			if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
 			break;
@@ -209,9 +208,9 @@ static void rxLoop()
 
 		uint64_t pkts = _packetsReceived.fetch_add(1, std::memory_order_relaxed) + 1;
 
-		// TODO: local input forwarding disabled — sticky button bug.
+		// TODO: local input forwarding disabled â€” sticky button bug.
 		// The TA stream correction path works without it. Local input
-		// forwarding (native gamepad → server) is deferred to a future
+		// forwarding (native gamepad â†’ server) is deferred to a future
 		// session. The current architecture (TA stream + tape for opponent
 		// inputs) works on any device including Chromebooks.
 
@@ -232,7 +231,7 @@ static void rxLoop()
 			       (unsigned long long)_syncsApplied.load());
 		}
 	}
-	close(_rxSock); _rxSock = -1;
+	mc_closesocket(_rxSock); _rxSock = -1;
 	printf("[replica] rx thread stopped\n");
 }
 
@@ -283,7 +282,7 @@ bool init()
 		return false;
 	}
 
-	// Block until initial STAT arrives — applied on main thread, cold executor
+	// Block until initial STAT arrives â€” applied on main thread, cold executor
 	printf("[replica] waiting for state-sync...\n");
 	for (int i = 0; i < 1000; i++) {
 		if (maplecast_state_sync::clientApplyPending()) {
@@ -295,7 +294,7 @@ bool init()
 
 			// Start the TA mirror stream as a correction channel.
 			// startMirrorStream launches the WS receiver thread WITHOUT
-			// setting isClient mode — so the GUI and SH4 keep running.
+			// setting isClient mode â€” so the GUI and SH4 keep running.
 			char ipstr[INET_ADDRSTRLEN];
 			inet_ntop(AF_INET, &_serverAddr.sin_addr, ipstr, sizeof(ipstr));
 			printf("[replica] starting TA mirror stream from %s:7201\n", ipstr);

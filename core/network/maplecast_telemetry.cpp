@@ -1,22 +1,14 @@
-/*
-	MapleCast Telemetry — fire-and-forget UDP logging.
+﻿/*
+	MapleCast Telemetry â€” fire-and-forget UDP logging.
 	Sends to localhost:7300. If nothing is listening, packets are silently dropped.
-	Zero impact on game performance — non-blocking UDP sendto.
+	Zero impact on game performance â€” non-blocking UDP sendto.
 */
+#include "types.h"  // u32 etc., needed before net_platform.h
 #include "maplecast_telemetry.h"
-
+#include "net_platform.h"
+#include "maplecast_compat.h"
 #ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
-#else
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#define closesocket close
-typedef int SOCKET;
-#define INVALID_SOCKET -1
 #endif
 
 #include <cstdio>
@@ -51,7 +43,7 @@ void send(const char* fmt, ...)
 	va_end(args);
 
 	if (len > 0)
-		sendto(_sock, buf, len, 0, (struct sockaddr*)&_dest, sizeof(_dest));
+		mc_sendto(_sock, buf, len, 0, (struct sockaddr*)&_dest, sizeof(_dest));
 }
 
 }

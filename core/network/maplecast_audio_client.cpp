@@ -1,5 +1,5 @@
-/*
-	MapleCast Audio Client — see header for rationale.
+﻿/*
+	MapleCast Audio Client â€” see header for rationale.
 
 	Implementation notes:
 
@@ -14,7 +14,7 @@
 	    while (_run) {
 	        if (!connect()) { sleep 2s; continue; }
 	        if (!handshake()) { close; sleep 2s; continue; }
-	        drain loop: read frame → validate → push PCM
+	        drain loop: read frame â†’ validate â†’ push PCM
 	    }
 	  Identical shape to the video client loop, and very forgiving of
 	  transient server restarts.
@@ -37,18 +37,10 @@
 #include <string>
 #include <vector>
 
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#else
-#include <sys/socket.h>
-#include <netinet/in.h>
+#include "net_platform.h"
+#include "maplecast_compat.h"
+#ifndef _WIN32
 #include <netinet/tcp.h>
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <unistd.h>
-#include <errno.h>
-#include <cstring>
 #endif
 
 namespace maplecast_audio_client
@@ -72,14 +64,14 @@ static std::atomic<bool>  _reconnectRequested{false};
 // playback starts with an empty ring, the first SDL callback underruns
 // because we don't have 1024 frames queued yet. Even after steady state,
 // any network jitter >= 11.6 ms causes the ring to dip below the callback
-// threshold → underrun → audible click/chop.
+// threshold â†’ underrun â†’ audible click/chop.
 //
 // The browser's AudioWorklet solves this with a 5-chunk (~53 ms) pre-buffer
 // before enabling playback. We do the same here: accumulate N packets in
 // a local queue, then burst-push them once the queue fills. After that,
 // steady-state pushes go straight through.
 //
-// PREBUFFER_PACKETS = 6 × 11.6 ms = ~70 ms of headroom. Slightly more than
+// PREBUFFER_PACKETS = 6 Ã— 11.6 ms = ~70 ms of headroom. Slightly more than
 // the browser to cover Linux scheduler jitter (render thread can stall the
 // audio thread for up to ~18 ms while it runs TA Process).
 static constexpr int  PREBUFFER_PACKETS = 6;
@@ -113,13 +105,13 @@ static void closeSocket()
 #ifdef _WIN32
 		closesocket(fd);
 #else
-		close(fd);
+		mc_closesocket(fd);
 #endif
 	}
 	_connected.store(false, std::memory_order_release);
 }
 
-// Minimal WebSocket handshake — same implementation as
+// Minimal WebSocket handshake â€” same implementation as
 // maplecast_mirror.cpp's wsHandshake(). See the note at the top of this
 // file for why it's duplicated rather than shared.
 static bool wsHandshake(int fd, const char* host, int port)
@@ -133,12 +125,12 @@ static bool wsHandshake(int fd, const char* host, int port)
 		"Sec-WebSocket-Key: bWFwbGVjYXN0LWF1ZGlvLWM=\r\n"
 		"Sec-WebSocket-Version: 13\r\n"
 		"\r\n", host, port);
-	if (send(fd, req, len, 0) != len) return false;
+	if (mc_send(fd, req, len, 0) != len) return false;
 
 	char resp[1024];
 	int total = 0;
 	while (total < (int)sizeof(resp) - 1) {
-		int n = recv(fd, resp + total, 1, 0);
+		int n = mc_recv(fd, resp + total, 1, 0);
 		if (n <= 0) return false;
 		total += n;
 		if (total >= 4 && memcmp(resp + total - 4, "\r\n\r\n", 4) == 0) break;
@@ -147,13 +139,13 @@ static bool wsHandshake(int fd, const char* host, int port)
 	return strstr(resp, "101") != nullptr;
 }
 
-// Minimal WebSocket frame reader — same shape as maplecast_mirror's
+// Minimal WebSocket frame reader â€” same shape as maplecast_mirror's
 // wsReadFrame(). Returns true if a valid binary frame landed in `out`.
 // False on close / error. Ping/text frames are treated as "keep reading".
 static bool wsReadFrame(int fd, std::vector<uint8_t>& out)
 {
 	uint8_t hdr[2];
-	if (recv(fd, hdr, 2, MSG_WAITALL) != 2) return false;
+	if (mc_recv(fd, hdr, 2, MSG_WAITALL) != 2) return false;
 
 	int opcode = hdr[0] & 0x0F;
 	bool masked = (hdr[1] & 0x80) != 0;
@@ -161,24 +153,28 @@ static bool wsReadFrame(int fd, std::vector<uint8_t>& out)
 
 	if (payloadLen == 126) {
 		uint8_t ext[2];
-		if (recv(fd, ext, 2, MSG_WAITALL) != 2) return false;
+		if (mc_recv(fd, (char*)ext, 2, MSG_WAITALL) != 2) return false;
 		payloadLen = (ext[0] << 8) | ext[1];
 	} else if (payloadLen == 127) {
 		uint8_t ext[8];
-		if (recv(fd, ext, 8, MSG_WAITALL) != 8) return false;
+		if (mc_recv(fd, (char*)ext, 8, MSG_WAITALL) != 8) return false;
 		payloadLen = 0;
 		for (int i = 0; i < 8; i++) payloadLen = (payloadLen << 8) | ext[i];
 	}
 
 	if (masked) {
 		uint8_t mask[4];
-		if (recv(fd, mask, 4, MSG_WAITALL) != 4) return false;
+		if (mc_recv(fd, (char*)mask, 4, MSG_WAITALL) != 4) return false;
 	}
 
 	out.resize(payloadLen);
 	size_t rd = 0;
 	while (rd < payloadLen) {
-		ssize_t n = recv(fd, out.data() + rd, payloadLen - rd, 0);
+#ifdef _WIN32
+		ssize_t n = mc_recv(fd, (char*)(out.data() + rd), (int)(payloadLen - rd), 0);
+#else
+		ssize_t n = mc_recv(fd, out.data() + rd, payloadLen - rd, 0);
+#endif
 		if (n <= 0) return false;
 		rd += n;
 	}
@@ -225,10 +221,10 @@ static void recvLoop()
 			continue;
 		}
 
-		// Disable Nagle to match the server side — small frequent PCM
+		// Disable Nagle to match the server side â€” small frequent PCM
 		// chunks shouldn't wait for coalescing.
 		int one = 1;
-		setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
+		mc_setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
 
 		if (connect(fd, res->ai_addr, res->ai_addrlen) != 0) {
 			printf("[audio-client] connect %s:%d failed: %s\n",
@@ -237,7 +233,7 @@ static void recvLoop()
 #ifdef _WIN32
 			closesocket(fd);
 #else
-			close(fd);
+			mc_closesocket(fd);
 #endif
 			std::this_thread::sleep_for(std::chrono::seconds(2));
 			continue;
@@ -249,7 +245,7 @@ static void recvLoop()
 #ifdef _WIN32
 			closesocket(fd);
 #else
-			close(fd);
+			mc_closesocket(fd);
 #endif
 			std::this_thread::sleep_for(std::chrono::seconds(2));
 			continue;
@@ -257,7 +253,7 @@ static void recvLoop()
 
 		_sockFd.store(fd, std::memory_order_release);
 		_connected.store(true, std::memory_order_release);
-		// Fresh connection → fresh pre-buffer. Drop whatever was queued
+		// Fresh connection â†’ fresh pre-buffer. Drop whatever was queued
 		// before a disconnect and start accumulating anew so the very
 		// first audio the user hears after reconnect is glitch-free.
 		_preBuffer.clear();
@@ -265,15 +261,15 @@ static void recvLoop()
 		printf("[audio-client] connected, streaming PCM (pre-buffering %d packets)\n",
 			PREBUFFER_PACKETS);
 
-		// Drain loop — runs until the socket breaks or shutdown is requested.
+		// Drain loop â€” runs until the socket breaks or shutdown is requested.
 		while (_run.load(std::memory_order_relaxed)
 		    && _enabled.load(std::memory_order_relaxed)
 		    && !_reconnectRequested.exchange(false))
 		{
 			if (!wsReadFrame(fd, frame)) break;
-			if (frame.empty()) continue;  // ping / text — ignore
+			if (frame.empty()) continue;  // ping / text â€” ignore
 
-			// Audio packet format: [0xAD][0x10][seqHi][seqLo][512 × int16 stereo]
+			// Audio packet format: [0xAD][0x10][seqHi][seqLo][512 Ã— int16 stereo]
 			// = 4 + 2048 = 2052 bytes.
 			if (frame.size() != 2052) continue;
 			if (frame[0] != 0xAD || frame[1] != 0x10) continue;
@@ -283,7 +279,7 @@ static void recvLoop()
 			if (prev != 0xFFFFFFFF) {
 				const uint16_t expected = uint16_t(prev + 1);
 				if (seq != expected) {
-					// seq gap — count the skipped packets as drops
+					// seq gap â€” count the skipped packets as drops
 					const uint16_t gap = uint16_t(seq - expected);
 					_packetsDropped.fetch_add(gap, std::memory_order_relaxed);
 				}
@@ -295,7 +291,7 @@ static void recvLoop()
 			const int64_t prevArrival = _lastArrivalUs.exchange(now, std::memory_order_relaxed);
 			if (prevArrival != 0) {
 				const int64_t delta = now - prevArrival;
-				// EMA with alpha=1/16 — same shape as the server's frame period EMA
+				// EMA with alpha=1/16 â€” same shape as the server's frame period EMA
 				const int64_t emaPrev = _arrivalIntervalEmaUs.load(std::memory_order_relaxed);
 				const int64_t ema = emaPrev + ((delta - emaPrev) >> 4);
 				_arrivalIntervalEmaUs.store(ema, std::memory_order_relaxed);
@@ -338,7 +334,7 @@ static void recvLoop()
 			}
 		}
 
-		// Fell out of the drain loop — socket busted or told to reconnect.
+		// Fell out of the drain loop â€” socket busted or told to reconnect.
 		closeSocket();
 		if (_run.load(std::memory_order_relaxed)) {
 			printf("[audio-client] disconnected, retrying in 2s\n");
@@ -361,7 +357,7 @@ void init(const char* host, int audioPort)
 	_enabled.store(true, std::memory_order_release);
 
 	// Detach rather than keep the thread joinable. The recv thread has
-	// process-long lifetime — there is no orderly shutdown point where we
+	// process-long lifetime â€” there is no orderly shutdown point where we
 	// could join it. Without detach, the file-static std::thread destructor
 	// sees joinable()==true at process exit and calls std::terminate(),
 	// which is what caused the "terminate called without an active

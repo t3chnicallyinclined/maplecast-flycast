@@ -1,9 +1,9 @@
-/*
-	MapleCast Mirror v3 — stream TA command buffers + memory diffs.
+﻿/*
+	MapleCast Mirror v3 â€” stream TA command buffers + memory diffs.
 
 	Instead of streaming pre-parsed rend_context (which loses texture resolution),
 	stream the RAW TA command buffer. The client runs ta_parse() on it, which
-	builds rend_context AND resolves textures from VRAM — exactly like flycast
+	builds rend_context AND resolves textures from VRAM â€” exactly like flycast
 	normally works.
 
 	Server: each frame, captures the TA command buffer + PVR registers + memory diffs
@@ -46,15 +46,13 @@ uint64_t g_activePalBanks = 0;
 #include <thread>
 #include <deque>
 #include <chrono>
+#include "net_platform.h"
+#include "maplecast_compat.h"
+#ifndef _WIN32
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <arpa/inet.h>
-#include <netdb.h>
+#endif
 #include "maplecast_gamestate.h"
 #include <errno.h>
 
@@ -150,7 +148,7 @@ static int _numRegions = 0;
 // Those paths memcpy directly into vram[] without tripping the page-protect
 // SIGSEGV handler. The shadow copy gets updated to the new content too, so
 // when serverPublish() runs memcmp the next frame the page looks unchanged
-// and never streams to clients — they keep their stale texture.
+// and never streams to clients â€” they keep their stale texture.
 //
 // Fix: DMA write paths call markVramDirty(off, size) to set bits in this
 // bitmap. serverPublish() drains it in addition to running memcmp.
@@ -165,7 +163,7 @@ static std::atomic<uint64_t> _vramDirtyBitmap[VRAM_BITMAP_WORDS];
 
 void markVramDirty(uint32_t offset, uint32_t size)
 {
-	// Hot path — bail before any work when no mirror server is running.
+	// Hot path â€” bail before any work when no mirror server is running.
 	// `_isServer` becomes true once initServer() finishes; before that the
 	// bitmap is unallocated and DMA paths must not touch it.
 	if (!_isServer || size == 0) return;
@@ -183,7 +181,7 @@ void markVramDirty(uint32_t offset, uint32_t size)
 // touching vram[] mid-update from another thread.
 static std::atomic<bool> _forceSyncBroadcast{false};
 
-// Phase A — frame counter + monotonic-clock stamp of the most recent
+// Phase A â€” frame counter + monotonic-clock stamp of the most recent
 // serverPublish() call. Mirror the existing hdr->frame_count++ into a
 // std::atomic so the input latch path (ggpo::getLocalInput) can read the
 // current frame number cheaply without touching the shm header. Also stamp
@@ -194,10 +192,10 @@ static std::atomic<bool> _forceSyncBroadcast{false};
 static std::atomic<uint64_t> _atomicCurrentFrame{0};
 static std::atomic<int64_t> _atomicLastLatchTimeUs{0};
 
-// Phase B — live frame period in microseconds, smoothed across the last
+// Phase B â€” live frame period in microseconds, smoothed across the last
 // few publishes via an exponential moving average. PVR can run slightly
 // off 60 Hz; this gives the browser-side phase-aligner an accurate
-// "next vblank in N µs" estimate. Initialized to a sane default (16670 µs
+// "next vblank in N Âµs" estimate. Initialized to a sane default (16670 Âµs
 // = 60 fps) so the first few publishes have a reasonable starting value.
 static std::atomic<int64_t> _atomicFramePeriodUs{16670};
 
@@ -213,7 +211,7 @@ void requestSyncBroadcast()
 	_forceSyncBroadcast.store(true, std::memory_order_relaxed);
 }
 
-// Set by requestFullSaveStateBroadcast() — same drain pattern. The
+// Set by requestFullSaveStateBroadcast() â€” same drain pattern. The
 // serverPublish drain calls maplecast_ws::broadcastFullSaveState() which
 // builds the dc_serialize blob, compresses it, and ships it to all
 // connected clients as a "SAVE" envelope.
@@ -239,6 +237,13 @@ namespace maplecast_mirror
 
 static bool openShm(bool create)
 {
+#ifdef _WIN32
+	// Local-machine same-box serverâ†”client SHM optimization is Linux-only.
+	// On Windows the caller falls through to initClientWebSocket(), which is
+	// what every remote client (including connections to nobd.net) does anyway.
+	(void)create;
+	return false;
+#else
 	if (create) shm_unlink(SHM_NAME);
 	_shmFd = shm_open(SHM_NAME, create ? (O_CREAT | O_RDWR) : O_RDWR, 0666);
 	if (_shmFd < 0) { printf("[MIRROR] shm_open failed\n"); return false; }
@@ -247,21 +252,22 @@ static bool openShm(bool create)
 	if (_shmPtr == MAP_FAILED) { _shmPtr = nullptr; return false; }
 	if (create) memset(_shmPtr, 0, SHM_SIZE);
 	return true;
+#endif
 }
 
 static void initRegions()
 {
 	_numRegions = 0;
 
-	// SKIP RAM — renderer doesn't read from main RAM
-	// SKIP ARAM — audio RAM not needed for rendering
+	// SKIP RAM â€” renderer doesn't read from main RAM
+	// SKIP ARAM â€” audio RAM not needed for rendering
 	// ONLY diff VRAM (textures) and PVR regs (palette, fog, hardware state)
 
 	_shadowVRAM = (uint8_t*)malloc(VRAM_SIZE);
 	memcpy(_shadowVRAM, &vram[0], VRAM_SIZE);
 	_regions[_numRegions++] = { &vram[0], _shadowVRAM, VRAM_SIZE, 1, "VRAM" };
 
-	// PVR registers: 32KB — palette RAM, FOG_TABLE, ISP_FEED_CFG
+	// PVR registers: 32KB â€” palette RAM, FOG_TABLE, ISP_FEED_CFG
 	static uint8_t* _shadowPVR = nullptr;
 	_shadowPVR = (uint8_t*)malloc(pvr_RegSize);
 	memcpy(_shadowPVR, pvr_regs, pvr_RegSize);
@@ -324,7 +330,7 @@ void doForcedSaveStateBroadcast()
 
 // Public API: serialize the full DC state into a freshly malloc'd buffer.
 // Caller owns the returned pointer and must free() it. Returns nullptr on
-// failure. This is the SAME data serverSaveSync() writes to disk — useful
+// failure. This is the SAME data serverSaveSync() writes to disk â€” useful
 // for shipping the full save state over the wire to test theories about
 // what data the WASM client is missing.
 uint8_t* buildFullSaveState(size_t& outSize)
@@ -342,7 +348,7 @@ uint8_t* buildFullSaveState(size_t& outSize)
 	// core/network/ggpo.cpp:425, but in that mode several modules
 	// (AICA RAM, SH4 MMR cache, PVR, Elan) deliberately SKIP themselves
 	// on the assumption GGPO's memwatch::PageMap delta cache will
-	// restore them separately. We have no such cache — we ship a
+	// restore them separately. We have no such cache â€” we ship a
 	// standalone full state that must be self-contained on the wire.
 	// Setting rollback=true here would produce a ~500KB blob that
 	// looks valid to the Deserializer but leaves AICA/MMR/PVR stale,
@@ -409,7 +415,7 @@ void initServer()
 	// zstd compression for WebSocket broadcast
 	_compressor.init(256 * 1024);
 
-	// Start lightweight WebSocket server — no CUDA, no NVENC
+	// Start lightweight WebSocket server â€” no CUDA, no NVENC
 	int wsPort = 7200;
 	const char* portEnv = std::getenv("MAPLECAST_SERVER_PORT");
 	if (portEnv) wsPort = std::atoi(portEnv);
@@ -426,7 +432,7 @@ void initServer()
 
 	// Phase 3 of lockstep-player-client: start the state-sync TCP listener
 	// so native player clients can subscribe to periodic dc_serialize
-	// snapshots. Failure to start is non-fatal — the TA mirror still works.
+	// snapshots. Failure to start is non-fatal â€” the TA mirror still works.
 	maplecast_state_sync::serverStart();
 
 	printf("[MIRROR] === SERVER MODE === streaming TA + memory diffs\n");
@@ -447,7 +453,7 @@ static void clientLoadSync()
 	Deserializer deser(data, size);
 	emu.loadstate(deser);
 	free(data);
-	// loadstate re-protects VRAM — unprotect so our memcpy patches work
+	// loadstate re-protects VRAM â€” unprotect so our memcpy patches work
 	memwatch::unprotect();
 	printf("[MIRROR] Loaded server sync state: %.1f MB\n", size / (1024.0*1024.0));
 }
@@ -456,7 +462,7 @@ static void initClientWebSocket();  // forward declaration
 
 void initClient()
 {
-	// Idempotent — if already initialized, don't start a second WS thread.
+	// Idempotent â€” if already initialized, don't start a second WS thread.
 	// This happens when flycast GUI settings change triggers stop()+start().
 	if (_isClient) return;
 
@@ -490,7 +496,7 @@ void initClient()
 	}
 
 	if (hdr->sync_ready) {
-		// Direct memory copy instead of emu.loadstate — avoids corrupting scheduler/interrupt state
+		// Direct memory copy instead of emu.loadstate â€” avoids corrupting scheduler/interrupt state
 		uint8_t* snap = _shmPtr + HEADER_SIZE;
 		size_t off = 0;
 		memcpy(&mem_b[0], snap + off, 16 * 1024 * 1024); off += 16 * 1024 * 1024;
@@ -523,13 +529,13 @@ static std::mutex _frameMutex;
 static std::deque<std::vector<uint8_t>> _frameQueue;
 static std::atomic<uint32_t> _wsFramesReceived{0};
 
-// Double-buffered TA contexts — background decodes into one, render reads the other
+// Double-buffered TA contexts â€” background decodes into one, render reads the other
 static TA_context _decodeTaCtx[2];
 static bool _decodeTaAlloced = false;
 static int _decodeIdx = 0;  // which buffer background thread writes to
 static bool _decodeHasFullFrame = false;
 
-// Decoded frame metadata — written by background thread, read by render thread
+// Decoded frame metadata â€” written by background thread, read by render thread
 struct DecodedPage {
 	uint8_t  regionId;
 	uint32_t pageIdx;
@@ -556,7 +562,7 @@ static std::atomic<bool> _decodedReady{false};
 // trivial cost, eliminates the residual PVR phase noise.
 static std::mutex _decodedMtx;
 
-// Raw TCP WebSocket client — bypasses websocketpp/asio resolver entirely
+// Raw TCP WebSocket client â€” bypasses websocketpp/asio resolver entirely
 // Implements RFC 6455 WebSocket framing over a plain POSIX socket
 
 static int _wsFd = -1;
@@ -573,13 +579,13 @@ static bool wsHandshake(int fd, const char* host, int port)
 		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
 		"Sec-WebSocket-Version: 13\r\n"
 		"\r\n", host, port);
-	if (send(fd, req, len, 0) != len) return false;
+	if (mc_send(fd, req, len, 0) != len) return false;
 
 	// Read HTTP response
 	char resp[1024];
 	int total = 0;
 	while (total < (int)sizeof(resp) - 1) {
-		int n = recv(fd, resp + total, 1, 0);
+		int n = mc_recv(fd, resp + total, 1, 0);
 		if (n <= 0) return false;
 		total += n;
 		if (total >= 4 && memcmp(resp + total - 4, "\r\n\r\n", 4) == 0) break;
@@ -592,7 +598,7 @@ static bool wsReadFrame(int fd, std::vector<uint8_t>& out)
 {
 	// Read WebSocket frame header (2 bytes min)
 	uint8_t hdr[2];
-	if (recv(fd, hdr, 2, MSG_WAITALL) != 2) return false;
+	if (mc_recv(fd, hdr, 2, MSG_WAITALL) != 2) return false;
 
 	bool fin = (hdr[0] & 0x80) != 0;
 	int opcode = hdr[0] & 0x0F;
@@ -601,34 +607,34 @@ static bool wsReadFrame(int fd, std::vector<uint8_t>& out)
 
 	if (payloadLen == 126) {
 		uint8_t ext[2];
-		if (recv(fd, ext, 2, MSG_WAITALL) != 2) return false;
+		if (mc_recv(fd, ext, 2, MSG_WAITALL) != 2) return false;
 		payloadLen = (ext[0] << 8) | ext[1];
 	} else if (payloadLen == 127) {
 		uint8_t ext[8];
-		if (recv(fd, ext, 8, MSG_WAITALL) != 8) return false;
+		if (mc_recv(fd, ext, 8, MSG_WAITALL) != 8) return false;
 		payloadLen = 0;
 		for (int i = 0; i < 8; i++) payloadLen = (payloadLen << 8) | ext[i];
 	}
 
-	// Skip mask key if present (server→client should not be masked)
+	// Skip mask key if present (serverâ†’client should not be masked)
 	if (masked) {
 		uint8_t mask[4];
-		if (recv(fd, mask, 4, MSG_WAITALL) != 4) return false;
+		if (mc_recv(fd, mask, 4, MSG_WAITALL) != 4) return false;
 	}
 
 	// Read payload
 	out.resize(payloadLen);
 	size_t read = 0;
 	while (read < payloadLen) {
-		ssize_t n = recv(fd, out.data() + read, payloadLen - read, 0);
+		ssize_t n = mc_recv(fd, out.data() + read, payloadLen - read, 0);
 		if (n <= 0) return false;
 		read += n;
 	}
 
 	// Handle close/ping/text
 	if (opcode == 0x8) return false;  // close
-	if (opcode == 0x9) { out.clear(); return true; }  // ping — ignore
-	if (opcode == 0x1) { out.clear(); return true; }  // text (JSON status) — ignore
+	if (opcode == 0x9) { out.clear(); return true; }  // ping â€” ignore
+	if (opcode == 0x1) { out.clear(); return true; }  // text (JSON status) â€” ignore
 
 	return fin && opcode == 0x2;  // binary frame
 }
@@ -655,18 +661,18 @@ static void wsClientRun(std::string host, int port)
 
 	if (connect(_wsFd, res->ai_addr, res->ai_addrlen) != 0) {
 		printf("[MIRROR-WS] connect() failed: %s\n", strerror(errno));
-		close(_wsFd); _wsFd = -1; freeaddrinfo(res); return;
+		mc_closesocket(_wsFd); _wsFd = -1; freeaddrinfo(res); return;
 	}
 	freeaddrinfo(res);
 	int one = 1;
-	setsockopt(_wsFd, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
+	mc_setsockopt(_wsFd, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
 	printf("[MIRROR-WS] TCP connected (NODELAY)\n"); fflush(stdout);
 
 	if (!wsHandshake(_wsFd, host.c_str(), port)) {
 		printf("[MIRROR-WS] WebSocket handshake failed\n");
-		close(_wsFd); _wsFd = -1; return;
+		mc_closesocket(_wsFd); _wsFd = -1; return;
 	}
-	printf("[MIRROR-WS] WebSocket handshake OK — waiting for initial sync\n"); fflush(stdout);
+	printf("[MIRROR-WS] WebSocket handshake OK â€” waiting for initial sync\n"); fflush(stdout);
 	_clientWsConnected.store(true, std::memory_order_release);
 
 	if (!_decodeTaAlloced) {
@@ -676,7 +682,7 @@ static void wsClientRun(std::string host, int port)
 	}
 	_decodeIdx = 0;
 
-	// zstd decompressor — reused across all frames
+	// zstd decompressor â€” reused across all frames
 	MirrorDecompressor decomp;
 	decomp.init(16 * 1024 * 1024);  // 16MB covers SYNC + worst-case frames
 
@@ -686,9 +692,9 @@ static void wsClientRun(std::string host, int port)
 	while (!synced) {
 		if (!wsReadFrame(_wsFd, frame)) {
 			printf("[MIRROR-WS] Connection lost waiting for sync\n"); fflush(stdout);
-			close(_wsFd); _wsFd = -1; decomp.destroy(); return;
+			mc_closesocket(_wsFd); _wsFd = -1; decomp.destroy(); return;
 		}
-		// Audio packet — [0xAD][0x10][seqHi][seqLo][PCM] — ignore on the
+		// Audio packet â€” [0xAD][0x10][seqHi][seqLo][PCM] â€” ignore on the
 		// native client (no audio playback implemented here). Would be
 		// misparsed as a video frame otherwise.
 		if (frame.size() >= 4 && frame[0] == 0xAD && frame[1] == 0x10)
@@ -711,7 +717,7 @@ static void wsClientRun(std::string host, int port)
 			// NOTE: renderer cache/palette updates happen on render thread in clientReceive()
 
 			synced = true;
-			printf("[MIRROR-WS] Initial sync received: %.1f MB (%.1f MB compressed) — VRAM + PVR loaded\n",
+			printf("[MIRROR-WS] Initial sync received: %.1f MB (%.1f MB compressed) â€” VRAM + PVR loaded\n",
 				decompSize / (1024.0 * 1024.0), frame.size() / (1024.0 * 1024.0));
 			fflush(stdout);
 		}
@@ -723,11 +729,11 @@ static void wsClientRun(std::string host, int port)
 			_clientWsConnected.store(false, std::memory_order_release);
 			break;
 		}
-		// Audio packet — skip (native client has dedicated audio WS)
+		// Audio packet â€” skip (native client has dedicated audio WS)
 		if (frame.size() >= 4 && frame[0] == 0xAD && frame[1] == 0x10)
 			continue;
 
-		// Game state packet — "GSTA" magic + 253-byte serialized MVC2 state.
+		// Game state packet â€” "GSTA" magic + 253-byte serialized MVC2 state.
 		// Deserialize into a shared GameState struct for the overlay/HUD.
 		if (frame.size() >= 4 && frame[0] == 'G' && frame[1] == 'S'
 		    && frame[2] == 'T' && frame[3] == 'A') {
@@ -766,7 +772,7 @@ static void wsClientRun(std::string host, int port)
 		if (decompSize < 8) continue;
 
 		// Handle mid-stream SYNC frames (triggered by palette changes,
-		// soft resets, etc.) — re-apply VRAM + PVR snapshot.
+		// soft resets, etc.) â€” re-apply VRAM + PVR snapshot.
 		if (decompSize > 8 && memcmp(decompData, "SYNC", 4) == 0) {
 			const uint8_t* src = decompData + 4;
 			uint32_t vramSize; memcpy(&vramSize, src, 4); src += 4;
@@ -795,10 +801,10 @@ static void wsClientRun(std::string host, int port)
 		uint32_t taSize; memcpy(&taSize, src, 4); src += 4;
 		uint32_t deltaPayloadSize; memcpy(&deltaPayloadSize, src, 4); src += 4;
 
-		// Sanity check — TA buffers are ~50-300KB, never megabytes
+		// Sanity check â€” TA buffers are ~50-300KB, never megabytes
 		if (taSize > 512 * 1024 || deltaPayloadSize > 512 * 1024 ||
 		    frameSize > decompSize) {
-			printf("[MIRROR-WS] BAD FRAME: taSize=%u delta=%u frameSize=%u bufSize=%zu — skipping\n",
+			printf("[MIRROR-WS] BAD FRAME: taSize=%u delta=%u frameSize=%u bufSize=%zu â€” skipping\n",
 				taSize, deltaPayloadSize, frameSize, decompSize);
 			continue;
 		}
@@ -840,12 +846,12 @@ static void wsClientRun(std::string host, int port)
 			src += deltaPayloadSize;
 		}
 
-		// Skip checksum — TCP guarantees data integrity, checksum was for shm race detection
-		// (commented out, not deleted — can re-enable for debugging)
+		// Skip checksum â€” TCP guarantees data integrity, checksum was for shm race detection
+		// (commented out, not deleted â€” can re-enable for debugging)
 		// uint32_t serverChecksum; memcpy(&serverChecksum, src, 4);
 		src += 4;
 
-		// Stage dirty pages — copy page data so render thread can apply safely.
+		// Stage dirty pages â€” copy page data so render thread can apply safely.
 		// Allow up to a full VRAM+PVR resync (~2056 pages on scene change).
 		uint32_t dirtyCount; memcpy(&dirtyCount, src, 4); src += 4;
 		if (dirtyCount > 4096) dirtyCount = 4096;  // sanity bound
@@ -865,7 +871,7 @@ static void wsClientRun(std::string host, int port)
 			if (df.pages[d].regionId == 1) df.vramDirty = true;
 		}
 
-		// Publish — render thread picks it up.
+		// Publish â€” render thread picks it up.
 		//
 		// CRITICAL: if the consumer hasn't drained the previous frame yet
 		// (_decodedReady still set), we used to OVERWRITE _decoded and lose
@@ -901,7 +907,7 @@ static void wsClientRun(std::string host, int port)
 		if (n > 0 && n % 300 == 0) printf("[MIRROR-WS] %u frames decoded\n", n);
 	}
 
-	close(_wsFd); _wsFd = -1;
+	mc_closesocket(_wsFd); _wsFd = -1;
 	decomp.destroy();
 }
 
@@ -931,7 +937,7 @@ static void initClientWebSocket()
 		// Don't override an explicit host
 		const char* explicitHost = std::getenv("MAPLECAST_SERVER_HOST");
 		if (!explicitHost || strlen(explicitHost) == 0) {
-			printf("[MIRROR] Hub discovery enabled — querying %s\n", hubUrl);
+			printf("[MIRROR] Hub discovery enabled â€” querying %s\n", hubUrl);
 			auto ranked = maplecast_hub::discoverAndRank(hubUrl, 2);
 			if (!ranked.empty()) {
 				const auto& winner = ranked[0];
@@ -952,7 +958,7 @@ static void initClientWebSocket()
 					       ranked[1].avg_rtt_ms);
 				}
 			} else {
-				printf("[MIRROR] Hub discovery failed — falling back to MAPLECAST_SERVER_HOST\n");
+				printf("[MIRROR] Hub discovery failed â€” falling back to MAPLECAST_SERVER_HOST\n");
 			}
 		}
 	}
@@ -961,7 +967,7 @@ static void initClientWebSocket()
 	if (!host) host = "127.0.0.1";
 	const char* portStr = std::getenv("MAPLECAST_SERVER_PORT");
 	// Native clients connect directly to flycast's WS (7200), NOT the relay
-	// (7201). The relay is a spectator fanout multiplexer — players who are
+	// (7201). The relay is a spectator fanout multiplexer â€” players who are
 	// sending input get lower latency by skipping it. Hub discovery returns
 	// the relay port; we subtract 1 to get the direct port. Override with
 	// MAPLECAST_SERVER_PORT or MAPLECAST_USE_RELAY=1 for spectator mode.
@@ -972,7 +978,7 @@ static void initClientWebSocket()
 
 	printf("[MIRROR] === CLIENT MODE (WebSocket) === ws://%s:%d/\n", host, port);
 
-	// Unprotect VRAM BEFORE spawning WS thread — the thread will memcpy into
+	// Unprotect VRAM BEFORE spawning WS thread â€” the thread will memcpy into
 	// VRAM pages during SYNC and per-frame diffs. Without this, nvmem page
 	// protection causes SIGSEGV on the first VRAM write.
 	memwatch::unprotect();
@@ -1007,11 +1013,11 @@ void startMirrorStream(const char* host, int port)
 bool isServer() { return _isServer; }
 bool isClient() { return _isClient; }
 
-// Phase A — accessors for the input latch path. Cheap atomic loads,
+// Phase A â€” accessors for the input latch path. Cheap atomic loads,
 // no shm header touching, safe from any thread.
 uint64_t currentFrame()      { return _atomicCurrentFrame.load(std::memory_order_acquire); }
 int64_t  lastLatchTimeUs()   { return _atomicLastLatchTimeUs.load(std::memory_order_acquire); }
-// Phase B — live frame period EMA, used by frame_phase in status JSON.
+// Phase B â€” live frame period EMA, used by frame_phase in status JSON.
 int64_t  framePeriodUs()     { return _atomicFramePeriodUs.load(std::memory_order_relaxed); }
 
 // ==================== Client telemetry API ====================
@@ -1055,17 +1061,17 @@ void requestClientVideoReconnect()
 	// Closing the socket causes wsReadFrame() to return false on the next
 	// recv, which breaks the drain loop. wsClientRun() doesn't currently
 	// retry on its own (it falls out and exits), so a manual reconnect
-	// request here is primarily informational — the overlay shows the
+	// request here is primarily informational â€” the overlay shows the
 	// disconnected state and the user knows to restart the client.
 	// TODO: wrap wsClientRun() in an outer reconnect loop similar to the
 	// audio client. For now, just slam the fd so the ops-side UX matches
-	// user expectation: button click → "Disconnected" in the overlay.
+	// user expectation: button click â†’ "Disconnected" in the overlay.
 	int fd = _wsFd;
 	if (fd >= 0) {
 #ifdef _WIN32
 		closesocket(fd);
 #else
-		close(fd);
+		mc_closesocket(fd);
 #endif
 	}
 	_wsFd = -1;
@@ -1075,10 +1081,10 @@ void requestClientVideoReconnect()
 bool isHeadless()
 {
 #ifdef MAPLECAST_HEADLESS_BUILD
-	// Compile-out build — always headless, env var optional.
+	// Compile-out build â€” always headless, env var optional.
 	return true;
 #else
-	// GPU-capable build — headless mode is opt-in via env var.
+	// GPU-capable build â€” headless mode is opt-in via env var.
 	// Evaluated once on first call. Checked this way (rather than a static
 	// initializer) so we're resilient to early-boot call sites that might
 	// beat any namespace-scope ctor order.
@@ -1089,12 +1095,12 @@ bool isHeadless()
 
 // ==================== SERVER: publish TA commands + memory diffs ====================
 //
-// !!! FRAGILE — WIRE FORMAT IS A CONTRACT WITH FOUR CLIENTS !!!
+// !!! FRAGILE â€” WIRE FORMAT IS A CONTRACT WITH FOUR CLIENTS !!!
 //
 // Anything you write into the dst buffer here is decoded by:
-//   1. clientReceive() below — desktop flycast mirror client
-//   2. packages/renderer/src/wasm_bridge.cpp renderer_frame() — king.html WASM
-//   3. core/network/maplecast_wasm_bridge.cpp mirror_render_frame() — emulator.html WASM
+//   1. clientReceive() below â€” desktop flycast mirror client
+//   2. packages/renderer/src/wasm_bridge.cpp renderer_frame() â€” king.html WASM
+//   3. core/network/maplecast_wasm_bridge.cpp mirror_render_frame() â€” emulator.html WASM
 //   4. relay/src/fanout.rs in the Rust VPS relay (parses for SYNC cache + dirty pages)
 //
 // Change the format here without touching all four parsers and you will get
@@ -1109,10 +1115,10 @@ bool isHeadless()
 //
 // Region IDs: 0=mem_b (16MB SH4 RAM), 1=vram, 2=aica_ram, 3=pvr_regs.
 // Keyframe is forced every 60 frames (forceKeyframe). Browser clients waiting
-// for first keyframe will drop up to 60 deltas — DO NOT lengthen this interval
+// for first keyframe will drop up to 60 deltas â€” DO NOT lengthen this interval
 // without also updating the keyframe-wait logic in every client.
 //
-// See docs/ARCHITECTURE.md "Mirror Wire Format — Rules of the Road" for the
+// See docs/ARCHITECTURE.md "Mirror Wire Format â€” Rules of the Road" for the
 // canonical list of rules all four parsers must obey.
 void serverPublish(TA_context* ctx)
 {
@@ -1132,7 +1138,7 @@ void serverPublish(TA_context* ctx)
 
 	auto publishStart = std::chrono::high_resolution_clock::now();
 	rend_context& rc = ctx->rend;
-	// DON'T skip RTT frames — MVC2 renders character sprites via render-to-texture!
+	// DON'T skip RTT frames â€” MVC2 renders character sprites via render-to-texture!
 
 	// === PVR ATOMIC SNAPSHOT ===
 	// Snapshot the entire 32 KB pvr_regs block ONCE at the top of the
@@ -1172,8 +1178,8 @@ void serverPublish(TA_context* ctx)
 
 	// === PVR registers needed by rend_start_render ===
 	// These set up the rend_context hardware params. All values come from
-	// the atomic snapshot taken at the top of the function — NOT from live
-	// pvr_regs — so they're consistent with what the diff loop ships.
+	// the atomic snapshot taken at the top of the function â€” NOT from live
+	// pvr_regs â€” so they're consistent with what the diff loop ships.
 	#define _SNAP_U32(addr) (*(u32*)&_pvrAtomicSnap[(addr) & pvr_RegMask])
 	uint32_t pvr_snapshot[16];
 	pvr_snapshot[0] = _SNAP_U32(TA_GLOB_TILE_CLIP_addr);
@@ -1194,21 +1200,21 @@ void serverPublish(TA_context* ctx)
 	pvr_snapshot[13] = rc.isRTT ? 1 : 0;
 	memcpy(dst, pvr_snapshot, sizeof(pvr_snapshot)); dst += sizeof(pvr_snapshot);
 
-	// === Raw TA command buffer — double-buffered delta ===
+	// === Raw TA command buffer â€” double-buffered delta ===
 	uint32_t taSize = (uint32_t)(ctx->tad.thd_data - ctx->tad.thd_root);
 	uint8_t* taData = ctx->tad.thd_root;
 
 	// NOTE: Palette bank probe (dynamic targeting) was attempted but
-	// the TA buffer scan had alignment issues — TA commands are variable
+	// the TA buffer scan had alignment issues â€” TA commands are variable
 	// size (32B/64B) and a fixed 32B scan step misses polygon headers.
 	// For now, applyPaletteOverrides() blasts all specified entries.
-	// This is ~1µs overhead per frame — negligible. A correct probe
+	// This is ~1Âµs overhead per frame â€” negligible. A correct probe
 	// would need to hook into the actual TA parser (ta_vtx.cpp) or the
 	// renderer's texture processing (gldraw.cpp:176 PalSelect read).
 	// TODO: revisit when needed.
 
-	// === TA DUMP — determinism / decomposition test ===
-	// MAPLECAST_DUMP_TA=1 → write each frame's raw TA buffer to
+	// === TA DUMP â€” determinism / decomposition test ===
+	// MAPLECAST_DUMP_TA=1 â†’ write each frame's raw TA buffer to
 	// /tmp/ta-dumps/frame_NNNNNN.bin. Use to capture TA buffers from a
 	// reproducible save state, then byte-diff across runs (determinism)
 	// or across save state variants (per-character decomposition).
@@ -1220,7 +1226,7 @@ void serverPublish(TA_context* ctx)
 			_dumpEnabled = (e && *e && *e != '0');
 			if (_dumpEnabled) {
 				mkdir("/tmp/ta-dumps", 0755);
-				printf("[TA-DUMP] enabled — writing /tmp/ta-dumps/frame_NNNNNN.bin\n");
+				printf("[TA-DUMP] enabled â€” writing /tmp/ta-dumps/frame_NNNNNN.bin\n");
 			}
 			_dumpInit = true;
 		}
@@ -1280,9 +1286,9 @@ void serverPublish(TA_context* ctx)
 
 			// CRITICAL: clamp runLen to u16 max. The gap-merge above can push
 			// (i - runStart) up to 65535+8 = 65543, which would overflow u16
-			// and emit a tiny truncated run on the wire — the client then
+			// and emit a tiny truncated run on the wire â€” the client then
 			// mis-decodes the rest of the wire as garbage. Manifested as
-			// scene-change garble on buffer growth (prev=320 → cur=89120):
+			// scene-change garble on buffer growth (prev=320 â†’ cur=89120):
 			// the first run's wire length wrapped, all subsequent runs shifted.
 			uint32_t fullLen = i - runStart;
 			if (fullLen > 65535) {
@@ -1323,14 +1329,14 @@ void serverPublish(TA_context* ctx)
 	_taCur = prev;
 	_taHasPrev = true;
 
-	// Checksum disabled — client skips it, TCP guarantees integrity
+	// Checksum disabled â€” client skips it, TCP guarantees integrity
 	// uint32_t taChecksum = 0;
 	// for (uint32_t i = 0; i < taSize; i += 4)
 	// 	taChecksum ^= *(uint32_t*)(taData + i);
-	uint32_t taChecksum = 0;  // placeholder — client expects 4 bytes here
+	uint32_t taChecksum = 0;  // placeholder â€” client expects 4 bytes here
 	memcpy(dst, &taChecksum, 4); dst += 4;
 
-	// Persistent palette overrides — re-apply custom palette colors to
+	// Persistent palette overrides â€” re-apply custom palette colors to
 	// PVR palette RAM BEFORE the diff scan so the changes are captured
 	// in this frame's dirty pages and shipped to all viewers.
 	maplecast_control_ws::applyPaletteOverrides();
@@ -1350,7 +1356,7 @@ void serverPublish(TA_context* ctx)
 
 	// VRAM + PVR regs: memcmp against shadow copies, OR forced-dirty bitmap (VRAM only)
 	//
-	// Snapshot live → shadow ONCE per dirty page, then ship from shadow. The
+	// Snapshot live â†’ shadow ONCE per dirty page, then ship from shadow. The
 	// SH4 thread can race during the diff and write new bytes between the
 	// memcmp and the wire copy; reading via the shadow keeps wire and next
 	// frame's memcmp consistent.
@@ -1378,12 +1384,12 @@ done_diff:
 
 	// === Scene-change & forced SYNC broadcast ===
 	// Two trigger paths:
-	//   1. Forced flag (soft reset SB_SFRES, hard reset, explicit request) —
+	//   1. Forced flag (soft reset SB_SFRES, hard reset, explicit request) â€”
 	//      always fires regardless of rate limit. The caller knows the
 	//      renderer state is invalid.
 	//   2. Heuristic: lots of dirty pages in one frame = scene transition
-	//      (stage load, character select → match, intro cinematic, etc.).
-	//      ~512KB threshold — half what was guessed last time. The DMA
+	//      (stage load, character select â†’ match, intro cinematic, etc.).
+	//      ~512KB threshold â€” half what was guessed last time. The DMA
 	//      bitmap now catches more pages so the threshold can be lower
 	//      without losing precision. Rate-limited to 1 per 2 seconds so a
 	//      noisy game can't DoS us with constant fresh syncs.
@@ -1420,21 +1426,21 @@ done_diff:
 		const char* reason = manualSave ? "MANUAL SAVE STATE PUSH"
 			: forced ? "FORCED SYNC"
 			: "60s periodic resilience SYNC";
-		printf("[MIRROR] %s on frame %u (%u dirty pages) — broadcasting fresh SYNC\n",
+		printf("[MIRROR] %s on frame %u (%u dirty pages) â€” broadcasting fresh SYNC\n",
 			reason, frameNum, totalDirty);
 		// Ship a fresh SYNC envelope (full VRAM + PVR). The flycast wasm
 		// browser routes this through renderer_sync() which does the full
 		// _prevTA.clear() + cache reset ritual that the per-frame delta
 		// path doesn't. The flycast client's per-frame loop ignores SYNC
-		// magic mid-stream (sanity-skips), so this is a no-op for it —
+		// magic mid-stream (sanity-skips), so this is a no-op for it â€”
 		// safe to fire on both.
 		maplecast_ws::broadcastFreshSync();
-		// ARCHITECTURE.md "Mirror Wire Format — Rules of the Road" bug #7:
+		// ARCHITECTURE.md "Mirror Wire Format â€” Rules of the Road" bug #7:
 		// reset the TA delta encoder. The wasm's renderer_sync() clears its
 		// _prevTA on SYNC receipt. If the very next frame we ship is a delta
 		// (because _taHasPrev is still true here), the wasm hits the
 		// _prevTA.empty() branch in renderer_frame() and silently drops the
-		// delta payload — measured at ~23 dropped frames per scene transition.
+		// delta payload â€” measured at ~23 dropped frames per scene transition.
 		// Forcing the next frame to be a keyframe re-populates wasm's _prevTA.
 		_taHasPrev = false;
 		// ARCHITECTURE.md bug #8: also re-snapshot the per-region shadows to
@@ -1442,7 +1448,7 @@ done_diff:
 		// next frame's memcmp diff is computed against the pre-SYNC shadow
 		// (broadcastFreshSync reads live vram[]/pvr_regs but never touches
 		// _regions[].shadow), shipping wrong-base deltas grafted on top of
-		// the SYNC bytes — permanent vram divergence. Matches the existing
+		// the SYNC bytes â€” permanent vram divergence. Matches the existing
 		// client_request_sync handler pattern.
 		for (int i = 0; i < _numRegions; i++)
 			memcpy(_regions[i].shadow, _regions[i].ptr, _regions[i].size);
@@ -1461,17 +1467,17 @@ done_diff:
 
 	// Lockstep player-client tape: push one entry per slot per server
 	// frame, stamped with the brand-new frame number we just committed.
-	// This is the GGPO-equivalent dense input log — see publishFrameTick
+	// This is the GGPO-equivalent dense input log â€” see publishFrameTick
 	// in maplecast_input_server.cpp for the rationale.
 	maplecast_input::publishFrameTick(hdr->frame_count);
 
-	// Phase A — mirror the new frame number + publish wall-clock time into
+	// Phase A â€” mirror the new frame number + publish wall-clock time into
 	// the read-only atomics that ggpo::getLocalInput() / status JSON consume.
 	// Release ordering ensures the input latch sees the bumped frame counter
 	// and a fresh latch-time-stamp consistently.
 	//
-	// Phase B — compute live frame period as an exponential moving average of
-	// (this publish - prev publish). EMA factor 1/16 → ~16-frame smoothing,
+	// Phase B â€” compute live frame period as an exponential moving average of
+	// (this publish - prev publish). EMA factor 1/16 â†’ ~16-frame smoothing,
 	// converges in <0.3 s. Used by the frame_phase block in status JSON for
 	// browser-side phase-aligned send scheduling.
 	const int64_t nowPub = _publishNowUs();
@@ -1479,7 +1485,7 @@ done_diff:
 	if (prevPub > 0) {
 		const int64_t delta = nowPub - prevPub;
 		// Reject obvious outliers (paused emulator, savestate load, etc.)
-		// — anything more than 4 frames or less than 1 ms is not a normal
+		// â€” anything more than 4 frames or less than 1 ms is not a normal
 		// frame interval and would corrupt the EMA.
 		if (delta >= 1000 && delta <= 70000) {
 			const int64_t prevPeriod = _atomicFramePeriodUs.load(std::memory_order_relaxed);
@@ -1493,7 +1499,7 @@ done_diff:
 	// Phase 3 of lockstep-player-client: on a STATE_SYNC_INTERVAL
 	// schedule (default 60 frames), build a fresh dc_serialize snapshot
 	// and broadcast it to connected native player clients. Runs on the
-	// emu thread — the build+compress happens synchronously here, the
+	// emu thread â€” the build+compress happens synchronously here, the
 	// wire send is async on per-client send threads. A no-op unless
 	// the state-sync server is running AND at least one client is
 	// connected.
@@ -1552,10 +1558,10 @@ done_diff:
 		// Reset TA delta so next frame is sent as full
 		_taHasPrev = false;
 		hdr->sync_ready = 1;
-		printf("[MIRROR] Client requested sync — fresh state + TA reset\n");
+		printf("[MIRROR] Client requested sync â€” fresh state + TA reset\n");
 	}
 
-	// Brain snapshot disabled — was 26MB memcpy every 30 frames (~5ms stall)
+	// Brain snapshot disabled â€” was 26MB memcpy every 30 frames (~5ms stall)
 	// Only needed for shm client initial sync. WebSocket clients use save state instead.
 	// if (frameNum % 30 == 0)
 	// {
@@ -1566,10 +1572,10 @@ done_diff:
 	// 	memcpy(snap + off, &aica::aica_ram[0], 2 * 1024 * 1024);
 	// }
 
-	// VRAM hash disabled — only used by shm client for drift detection
+	// VRAM hash disabled â€” only used by shm client for drift detection
 	// hdr->server_vram_hash = fastVramHash();
 
-	// Audit disabled — reduced to VRAM+PVR only
+	// Audit disabled â€” reduced to VRAM+PVR only
 
 	if (frameNum % 600 == 0)
 		printf("[MIRROR] Server frame %u | TA=%u bytes | %u dirty pages | %u->%u bytes (%.1fx) zstd %luus\n",
@@ -1592,7 +1598,7 @@ static int64_t _clientNowUs() {
 	return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
-// !!! THIS FUNCTION IS THE GOLD STANDARD — KEEP IT THAT WAY !!!
+// !!! THIS FUNCTION IS THE GOLD STANDARD â€” KEEP IT THAT WAY !!!
 //
 // Three other implementations parse the same wire format and MUST stay aligned
 // with this one (which is the desktop flycast mirror client, the only one that
@@ -1600,22 +1606,22 @@ static int64_t _clientNowUs() {
 //
 //   1. packages/renderer/src/wasm_bridge.cpp renderer_frame()  (king.html WASM)
 //   2. core/network/maplecast_wasm_bridge.cpp mirror_render_frame()  (emulator.html WASM)
-//   3. relay/src/fanout.rs (the Rust VPS relay — parses dirty pages for its SYNC cache)
+//   3. relay/src/fanout.rs (the Rust VPS relay â€” parses dirty pages for its SYNC cache)
 //
 // When fixing a rendering bug in either browser client, the fix is almost
 // always "make it look like clientReceive()". Five bugs we already paid for:
 //
-//   (A) Decompressor sized too small — use 16MB shared between SYNC and frames.
-//   (B) Skipping dirty-pages walk while waiting for first keyframe — DON'T.
+//   (A) Decompressor sized too small â€” use 16MB shared between SYNC and frames.
+//   (B) Skipping dirty-pages walk while waiting for first keyframe â€” DON'T.
 //       Walk pages even when you can't render the TA buffer yet.
 //   (C) VramLockedWriteOffset MUST be called BEFORE memcpy into VRAM.
-//   (D) Don't truncate prevTA when taSize shrinks — only grow.
+//   (D) Don't truncate prevTA when taSize shrinks â€” only grow.
 //   (E) renderer->resetTextureCache MUST be set whenever any VRAM page is dirty.
 //
 // All five bugs manifest as broken character select / loading screens while
 // in-match looks fine. If you only test in-match, you will not catch them.
 //
-// See docs/ARCHITECTURE.md "Mirror Wire Format — Rules of the Road" for the
+// See docs/ARCHITECTURE.md "Mirror Wire Format â€” Rules of the Road" for the
 // canonical list of rules all four parsers must obey.
 bool clientReceive(rend_context& rc, bool& vramDirty)
 {
@@ -1641,8 +1647,8 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		TA_context& ctx = _decodeTaCtx[df.taBufferIdx];
 		uint8_t* taDst = ctx.tad.thd_root;
 
-		// === CLIENT-SIDE TA DUMP — pair with the server-side dump in serverPublish() ===
-		// MAPLECAST_DUMP_TA=1 → write the received TA buffer to
+		// === CLIENT-SIDE TA DUMP â€” pair with the server-side dump in serverPublish() ===
+		// MAPLECAST_DUMP_TA=1 â†’ write the received TA buffer to
 		// /tmp/ta-dumps-client/frame_NNNNNN.bin so we can byte-diff it against
 		// the server's /tmp/ta-dumps/frame_NNNNNN.bin for the same frame.
 		// Both should be byte-identical if the wire is faithful.
@@ -1654,7 +1660,7 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 				_dumpEnabled = (e && *e && *e != '0');
 				if (_dumpEnabled) {
 					mkdir("/tmp/ta-dumps-client", 0755);
-					printf("[TA-DUMP] client enabled — /tmp/ta-dumps-client/frame_NNNNNN.bin\n");
+					printf("[TA-DUMP] client enabled â€” /tmp/ta-dumps-client/frame_NNNNNN.bin\n");
 				}
 				_dumpInit = true;
 			}
@@ -1670,7 +1676,7 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		}
 
 		// Apply dirty pages to emulator memory (must happen on render thread).
-		// Also track whether ANY PVR-regs page was dirty this frame — used
+		// Also track whether ANY PVR-regs page was dirty this frame â€” used
 		// below to gate the palette/fog re-upload on actual state changes
 		// instead of doing it unconditionally every frame.
 		bool pvrRegsDirty = false;
@@ -1681,7 +1687,7 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 			if (rid == 0 && pageOff + MEM_PAGE_SIZE <= 16 * 1024 * 1024)
 				memcpy(&mem_b[pageOff], df.pages[d].data, MEM_PAGE_SIZE);
 			else if (rid == 1 && pageOff + MEM_PAGE_SIZE <= VRAM_SIZE) {
-				// Unprotect BEFORE writing — texture cache may have mprotect'd this page
+				// Unprotect BEFORE writing â€” texture cache may have mprotect'd this page
 				VramLockedWriteOffset(pageOff);
 				memcpy(&vram[pageOff], df.pages[d].data, MEM_PAGE_SIZE);
 				vramDirty = true;
@@ -1694,12 +1700,12 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 			}
 		}
 
-		// E2E latency probe — complete if visual change detected.
+		// E2E latency probe â€” complete if visual change detected.
 		// Zero-cost when no probe is pending (single atomic load).
 		if (vramDirty)
 			maplecast_input_sink::onVisualChange();
 
-		// Render — TA data already decoded in ctx.tad.thd_root by background thread
+		// Render â€” TA data already decoded in ctx.tad.thd_root by background thread
 		if (df.taSize > 0) {
 			ctx.rend.Clear();
 			ctx.tad.Clear();
@@ -1747,7 +1753,7 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 
 			// Gate palette + fog re-upload on actual PVR-regs changes
 			// instead of running unconditionally every frame. Profiling
-			// showed render=18100µs avg=15587µs per frame on a 3090 with
+			// showed render=18100Âµs avg=15587Âµs per frame on a 3090 with
 			// no vsync, which dropped the mirror client to ~30 fps. The
 			// overwhelming majority of that cost was palette_update() +
 			// renderer->updatePalette + renderer->updateFogTable running
@@ -1755,7 +1761,7 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 			//
 			// Palette RAM and fog LUT both live in the PVR regs region
 			// (rid=3). If no PVR-regs page was dirty this frame, the
-			// palette and fog are the same bytes as last frame — there
+			// palette and fog are the same bytes as last frame â€” there
 			// is nothing to re-upload. The browser WASM client has an
 			// analogous path but doesn't touch these flags every frame,
 			// which is why the browser runs smoothly on the same feed.
@@ -1777,7 +1783,7 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		totalUs += thisDecodeUs;
 		count++;
 		if (df.frameNum % 600 == 0)
-			printf("[MIRROR] Client frame %u | dirty=%u pages | render=%lldµs avg=%lldµs | WS-PIPELINE\n",
+			printf("[MIRROR] Client frame %u | dirty=%u pages | render=%lldÂµs avg=%lldÂµs | WS-PIPELINE\n",
 				df.frameNum, df.dirtyCount, (long long)thisDecodeUs, (long long)(totalUs / count));
 
 		// Publish debug-overlay telemetry atomics for the WS path.
@@ -1808,7 +1814,7 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		src = _shmPtr + RING_START + offset;
 	}
 
-	// === OPTIMIZED CLIENT DECODE — zero-copy into TA context, fused checksum ===
+	// === OPTIMIZED CLIENT DECODE â€” zero-copy into TA context, fused checksum ===
 	//
 	// Decode directly into flycast's TA buffer (clientCtx.tad.thd_root).
 	// No intermediate std::vector. Checksum computed during decode, not after.
@@ -1818,12 +1824,12 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 	static bool ctxAlloced = false;
 	if (!ctxAlloced) { clientCtx.Alloc(); ctxAlloced = true; }
 
-	uint8_t* taDst = clientCtx.tad.thd_root;  // decode target — flycast's own buffer
+	uint8_t* taDst = clientCtx.tad.thd_root;  // decode target â€” flycast's own buffer
 
 	uint32_t frameSize; memcpy(&frameSize, src, 4); src += 4;
 	uint32_t frameNum; memcpy(&frameNum, src, 4); src += 4;
 
-	// PVR registers — read directly into stack, write to hardware + rend_context later
+	// PVR registers â€” read directly into stack, write to hardware + rend_context later
 	uint32_t pvr_snapshot[16];
 	memcpy(pvr_snapshot, src, sizeof(pvr_snapshot)); src += sizeof(pvr_snapshot);
 
@@ -1888,7 +1894,7 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 				frameNum, checksumFails, checksumTotal);
 	}
 
-	// Memory diffs — apply dirty pages to emulator memory. Track whether
+	// Memory diffs â€” apply dirty pages to emulator memory. Track whether
 	// any PVR-regs page was dirty so we can gate palette/fog re-upload
 	// below (same optimization as the WS path above).
 	bool pvrRegsDirty = false;
@@ -1901,7 +1907,7 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		if (regionId == 0 && pageOff + MEM_PAGE_SIZE <= 16 * 1024 * 1024)
 			memcpy(&mem_b[pageOff], src, MEM_PAGE_SIZE);
 		else if (regionId == 1 && pageOff + MEM_PAGE_SIZE <= VRAM_SIZE) {
-			// Unprotect BEFORE writing — texture cache may have mprotect'd this page
+			// Unprotect BEFORE writing â€” texture cache may have mprotect'd this page
 			VramLockedWriteOffset(pageOff);
 			memcpy(&vram[pageOff], src, MEM_PAGE_SIZE);
 			vramDirty = true;
@@ -1915,11 +1921,11 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		src += MEM_PAGE_SIZE;
 	}
 
-	// Build TA context — data is already in taDst, no copy needed
+	// Build TA context â€” data is already in taDst, no copy needed
 	if (taSize > 0) {
 		clientCtx.rend.Clear();
 		clientCtx.tad.Clear();
-		// thd_root already has the data — just set the end pointer
+		// thd_root already has the data â€” just set the end pointer
 		clientCtx.tad.thd_data = taDst + taSize;
 
 		TA_GLOB_TILE_CLIP.full = pvr_snapshot[0];
@@ -1981,7 +1987,7 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		RingHeader* hdr = (RingHeader*)_shmPtr;
 		_clientFrameCount = hdr->frame_count;
 
-		// Check VRAM every 60 frames — reset texture cache if drifted
+		// Check VRAM every 60 frames â€” reset texture cache if drifted
 		if (frameNum % 60 == 0)
 		{
 			uint64_t clientHash = fastVramHash();
@@ -2012,7 +2018,7 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 	_clientLastVramDirty.store(vramDirty, std::memory_order_relaxed);
 
 	if (frameNum % 600 == 0)
-		printf("[MIRROR] Client frame %u | delta=%u bytes | dirty=%u pages | decode=%lldµs avg=%lldµs | %s\n",
+		printf("[MIRROR] Client frame %u | delta=%u bytes | dirty=%u pages | decode=%lldÂµs avg=%lldÂµs | %s\n",
 			frameNum, deltaPayloadSize, dirtyPages,
 			(long long)thisDecodeUs, (long long)(totalDecodeUs / decodeCount),
 			_useWebSocket ? "WS" : "SHM");
