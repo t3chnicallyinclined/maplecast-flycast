@@ -634,6 +634,44 @@ void gui_plot_render_time(int width, int height)
 }
 #endif
 
+// Native settings entry point — ALWAYS opens the in-game ImGui Commands
+// menu, regardless of mirror-client state. Lets keybinds like F10 reach
+// the Controls/button-mapping UI even when gui_open_settings() would
+// otherwise hijack the call to launch an external HTML overlay.
+void gui_open_settings_native()
+{
+	printf("[gui] F10 / open_settings_native: pre gui_state=%d ggpo=%d slave=%d\n",
+		(int)gui_state, (int)ggpo::active(), (int)settings.naomi.slave);
+	fflush(stdout);
+	const LockGuard lock(guiMutex);
+	if (gui_state == GuiState::Closed && !settings.naomi.slave) {
+		if (!ggpo::active()) {
+			vgamepad::hide();
+			try {
+				// Mirror client has no SH4 to stop. Calling emu.stop() is
+				// safe but unnecessary, and might trip an exception path.
+				if (!maplecast_mirror::isClient())
+					emu.stop();
+				gui_setState(GuiState::Commands);
+				printf("[gui] -> GuiState::Commands\n"); fflush(stdout);
+			} catch (const FlycastException& e) {
+				printf("[gui] gui_open_settings_native exception: %s\n", e.what());
+				gui_stop_game(e.what());
+			}
+		} else {
+			chat.toggle();
+		}
+	} else if (gui_state == GuiState::VJoyEdit) {
+		gui_setState(GuiState::VJoyEditCommands);
+		printf("[gui] -> GuiState::VJoyEditCommands\n"); fflush(stdout);
+	} else if (gui_state == GuiState::Commands) {
+		gui_setState(GuiState::Closed);
+		printf("[gui] -> GuiState::Closed (toggled off)\n"); fflush(stdout);
+	} else {
+		printf("[gui] no state transition (state=%d)\n", (int)gui_state); fflush(stdout);
+	}
+}
+
 void gui_open_settings()
 {
 	// Mirror client: open the HTML settings page in the default browser.

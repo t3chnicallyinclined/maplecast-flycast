@@ -208,12 +208,20 @@ static void onButton(int port, DreamcastKey key, bool pressed)
 	_gamepadPort.store(port, std::memory_order_relaxed);
 
 	if (key <= DC_BTN_BITMAPPED_LAST) {
+		// Dedupe across input sources. Both SDL and the XInput direct-poll
+		// bypass register as ButtonListeners, so each physical press fires
+		// onButton twice. Compute the new state and bail if nothing actually
+		// changed — saves an identical UDP packet that the server's seq
+		// dedup would discard anyway.
+		const uint16_t prevButtons = _buttons;
 		if (pressed)
 			_buttons &= ~(uint16_t)key;
 		else
 			_buttons |= (uint16_t)key;
+		if (_buttons == prevButtons)
+			return;   // duplicate fire from a second input source — drop
 		_buttonChanges.fetch_add(1, std::memory_order_relaxed);
-		// Arm E2E probe â€” only if no probe is already pending.
+		// Arm E2E probe - only if no probe is already pending.
 		int64_t zero = 0;
 		_probeStartUs.compare_exchange_strong(zero, nowUs(), std::memory_order_relaxed);
 		sendState();
@@ -250,8 +258,9 @@ static void onButton(int port, DreamcastKey key, bool pressed)
 static void triggerPollLoop()
 {
 	// Try to bump priority for tighter timing on input. Graceful degrade
-	// if we don't have CAP_SYS_NICE. Linux-only; Windows desktop client
-	// runs the trigger poll thread at default priority.
+	// if we don't have the privileges. Linux uses SCHED_FIFO via pthread;
+	// Windows uses THREAD_PRIORITY_TIME_CRITICAL (Pro Audio class would be
+	// even higher but is reserved for actual audio work).
 #ifdef __linux__
 	struct sched_param sp{};
 	sp.sched_priority = 50;  // mid-FIFO; don't starve audio (typically 70+)
@@ -261,16 +270,22 @@ static void triggerPollLoop()
 		// Fallback: nice -10. Doesn't need root.
 		printf("[input-sink] SCHED_FIFO not granted (need CAP_SYS_NICE), staying SCHED_OTHER\n");
 	}
+#elif defined(_WIN32)
+	if (SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL))
+		printf("[input-sink] trigger thread -> THREAD_PRIORITY_TIME_CRITICAL\n");
+	else
+		printf("[input-sink] SetThreadPriority(TIME_CRITICAL) failed (errno=%lu)\n", GetLastError());
 #endif
 
 	uint8_t lastLt = 0, lastRt = 0;
 
 	while (_triggerRun.load(std::memory_order_relaxed)) {
-		// 1. Trigger change detection â€” read from actual gamepad port
+		// 1. Trigger change detection — read from actual gamepad port
 		int gp = _gamepadPort.load(std::memory_order_relaxed);
 		int trigPort = (gp >= 0 && gp < 4) ? gp : _slot;
 		uint8_t curLt = (uint8_t)(lt[trigPort] >> 8);
 		uint8_t curRt = (uint8_t)(rt[trigPort] >> 8);
+
 		if (curLt != lastLt || curRt != lastRt) {
 			lastLt = curLt;
 			lastRt = curRt;
@@ -353,6 +368,13 @@ bool init(const char* host, int slot)
 	// (so probe-ACK heartbeat detection is simple)
 	connect(_sock, (const sockaddr*)&_addr, sizeof(_addr));
 
+	// Make the socket non-blocking. The trigger poll loop calls mc_recv()
+	// with MSG_DONTWAIT to drain probe-ACKs, but on Windows MSG_DONTWAIT
+	// is not supported and our compat shim defines it to 0 — meaning the
+	// recv() would BLOCK forever waiting for data. Using FIONBIO at the
+	// socket level gets the same "non-blocking" behavior cross-platform.
+	set_non_blocking(_sock);
+
 	GamepadDevice::listenButtonsGlobal(onButton);
 
 	// Start the trigger polling + failover detection thread
@@ -402,6 +424,7 @@ void setBackupServer(const char* host)
 		return;
 	}
 	connect(_backupSock, (const sockaddr*)&_backupAddr, sizeof(_backupAddr));
+	set_non_blocking(_backupSock);   // see init() above for why
 
 	_hasBackup.store(true, std::memory_order_release);
 	char ipstr[INET_ADDRSTRLEN];

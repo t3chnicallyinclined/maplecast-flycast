@@ -39,6 +39,7 @@
 #include "oslib/directory.h"
 #include "oslib/i18n.h"
 #include "dynlink.h"
+#include "rawinput_gamepad.h"
 #ifdef USE_BREAKPAD
 #include "breakpad/client/windows/handler/exception_handler.h"
 #include "version.h"
@@ -313,13 +314,28 @@ int main(int argc, char* argv[])
 {
 	nowide::args _(argc, argv);
 
-	// MapleCast: attach console so printf output is visible
-	if (std::getenv("MAPLECAST"))
+	// MapleCast: attach console so printf output is visible.
+	// Always attach for the wizard mode — it's a console-only experience.
+	if (std::getenv("MAPLECAST") || std::getenv("MAPLECAST_BUTTON_WIZARD"))
 	{
 		AllocConsole();
 		freopen("CONOUT$", "w", stdout);
 		freopen("CONOUT$", "w", stderr);
 		printf("[maplecast] console attached\n");
+		fflush(stdout);
+	}
+
+	// MapleCast button wizard — runs early, before flycast initializes.
+	// The user runs once with MAPLECAST_BUTTON_WIZARD=1 to set up their
+	// XInput button mapping. The wizard saves to xinput-map.cfg and
+	// exits cleanly; subsequent launches load the file automatically.
+	if (std::getenv("MAPLECAST_BUTTON_WIZARD")) {
+		maplecast_rawinput::runWizardStandalone();
+		printf("[wizard] Done. Relaunch without MAPLECAST_BUTTON_WIZARD to play.\n");
+		printf("Press Enter to close this window...\n");
+		fflush(stdout);
+		(void)getchar();
+		return 0;
 	}
 
 #ifdef USE_BREAKPAD
@@ -356,6 +372,17 @@ int main(int argc, char* argv[])
 
 	if (flycast_init(argc, argv) != 0)
 		die("Flycast initialization failed");
+
+	// MapleCast: bump entire process to HIGH_PRIORITY_CLASS so input/render
+	// threads win scheduling vs background OS work (search indexer, telemetry,
+	// AV scans, etc.). REALTIME_PRIORITY_CLASS is intentionally NOT used —
+	// a runaway spin would lock the machine. HIGH is safe and effective.
+	// Skipped on builds that don't run a foreground UI (none today, but the
+	// guard is there).
+	if (!SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS))
+		printf("[maplecast] SetPriorityClass(HIGH) failed: %lu\n", GetLastError());
+	else
+		printf("[maplecast] process priority class: HIGH\n");
 
 	// MapleCast mirror client auto-load — mirrors core/linux-dist/main.cpp:269-296.
 	// Two paths trigger romless mirror mode:

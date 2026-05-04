@@ -64,8 +64,9 @@ bool GamepadDevice::handleButtonInput(int port, DreamcastKey key, bool pressed)
 
 	if (buttonListener != nullptr)
 		buttonListener(port, key, pressed);
-	if (globalButtonListener != nullptr)
-		globalButtonListener(port, key, pressed);
+	ButtonListener gfn = globalButtonListener.load(std::memory_order_acquire);
+	if (gfn != nullptr)
+		gfn(port, key, pressed);
 	DEBUG_LOG(INPUT, "%d: BUTTON %s %d. kcode=%x", port, pressed ? "down" : "up", key, port >= 0 ? kcode[port] : 0);
 
 	if (key <= DC_BTN_BITMAPPED_LAST)
@@ -353,7 +354,6 @@ bool GamepadDevice::gamepad_axis_input(u32 code, int value)
 			else {
 				mv = std::min(std::abs(v) * 2, 0xffff);
 			}
-			//printf("T-AXIS %d Mapped to %d -> %d\n", key, v, mv);
 			if (key == DC_AXIS_LT)
 				lt[port] = mv;
 			else if (key == DC_AXIS_RT)

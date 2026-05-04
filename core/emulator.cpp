@@ -48,6 +48,9 @@
 #include "network/maplecast_replica.h"
 #include "network/maplecast_input_sink.h"
 #include "network/maplecast_evdev_input.h"
+#ifdef _WIN32
+#include "windows/rawinput_gamepad.h"
+#endif
 #include "ui/settings_window.h"
 #include "hw/maple/maple_cfg.h"
 #include <cstdlib>
@@ -1079,13 +1082,14 @@ void Emulator::start()
 	state = Running;
 	SetMemoryHandlers();
 
-	// Evdev direct input bypass — works in ALL modes (local, server, client).
-	// Reads /dev/input/eventN directly, bypasses SDL's 16ms poll batching.
-	// SCHED_FIFO priority 60 for instant delivery.
-	// Enable: MAPLECAST_EVDEV_INPUT=1
-	// Linux-only — Windows uses SDL gamepad path.
+	// Direct-input bypass: skip SDL's gamepad event queue (~1-3ms savings).
+	// Linux: evdev direct read on a SCHED_FIFO thread.
+	// Windows: XInput direct-poll on a TIME_CRITICAL thread.
+	// Both opt-in via env (MAPLECAST_EVDEV_INPUT / MAPLECAST_RAWINPUT).
 #ifdef __linux__
 	maplecast_evdev_input::init();
+#elif defined(_WIN32)
+	maplecast_rawinput::init();
 #endif
 
 	// Arcade mode: mimic the Naomi cabinet's zero-buffer display path.
@@ -1137,7 +1141,20 @@ void Emulator::start()
 		const char* portEnv = std::getenv("MAPLECAST_PORT");
 		if (portEnv) port = std::atoi(portEnv);
 
-		maplecast_input::init(port);
+		// Local input_server (UDP listener on 7100/7101 + browser-WS bridge).
+		// Required on the production server. Optional on a desktop mirror
+		// client — it's only useful if the user has a hardware NOBD stick
+		// on their LAN sending UDP, or wants browsers to connect to their
+		// machine. Most desktop clients don't need it; skipping saves a
+		// listener, a tape publisher, and the Windows Firewall prompt on
+		// first launch.
+		const bool skipLocalServer = std::getenv("MAPLECAST_CLIENT_NO_LOCAL_SERVER") != nullptr;
+		if (!skipLocalServer) {
+			maplecast_input::init(port);
+		} else {
+			printf("[maplecast] MAPLECAST_CLIENT_NO_LOCAL_SERVER=1 — skipping local input_server (no UDP:%d listener, no tape publisher)\n", port);
+			fflush(stdout);
+		}
 		maplecast_audio::init();
 		maplecast_telemetry::init();
 
@@ -1254,11 +1271,13 @@ void Emulator::start()
 				sinkSlot = std::atoi(s);
 			maplecast_input_sink::init(sinkHost, sinkSlot);
 
-			// Direct evdev input — bypasses SDL's event queue for ~1-3ms
-			// lower latency. Grabs the device exclusively so SDL doesn't
-			// double-read. Enable with MAPLECAST_EVDEV_INPUT=1. Linux-only.
+			// Direct gamepad bypass — Linux: evdev. Windows: XInput.
+			// ~1-3ms lower latency than SDL's poll thread + event queue.
+			// Enable via MAPLECAST_EVDEV_INPUT / MAPLECAST_RAWINPUT.
 #ifdef __linux__
 			maplecast_evdev_input::init();
+#elif defined(_WIN32)
+			maplecast_rawinput::init();
 #endif
 
 			// Phase 2: if hub discovery picked a runner-up server, wire it

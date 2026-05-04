@@ -17,6 +17,9 @@
 #include "wsi/context.h"
 #include "emulator.h"
 #include "stdclass.h"
+#ifdef _WIN32
+#include "windows/rawinput_gamepad.h"
+#endif
 #include "imgui.h"
 #include "ui/gui.h"
 #include "ui/gui_competitive_hud.h"
@@ -376,6 +379,16 @@ void input_sdl_handle()
 							// Tab disabled in mirror mode — HP button was triggering it.
 							// Settings accessible via on-screen gear or backtick key.
 							if (event.key.keysym.sym == SDLK_TAB && !std::getenv("MAPLECAST_MIRROR_CLIENT")) { gui_open_settings(); break; }
+							// F10 opens the native flycast settings (Controls,
+							// Audio, etc.) — including in mirror-client mode where
+							// gui_open_settings() would otherwise launch an HTML
+							// overlay (xdg-open + hardcoded Linux path, broken on
+							// Windows). gui_open_settings_native() always opens
+							// the in-game ImGui Commands menu so the user can
+							// reach Settings -> Controls and remap buttons. The
+							// maplecast input sink picks up the new mapping
+							// immediately, no restart needed.
+							if (event.key.keysym.sym == SDLK_F10) { gui_open_settings_native(); break; }
 							if (event.key.keysym.sym == SDLK_BACKQUOTE) { gui_maplecast_settings::toggle(); break; }
 						}
 						// Alt-Return and F11 toggle full screen
@@ -451,6 +464,15 @@ void input_sdl_handle()
 			case SDL_JOYBUTTONDOWN:
 			case SDL_JOYBUTTONUP:
 				{
+					// Suppress SDL gamepad input entirely when the XInput
+					// direct-poll bypass owns gamepad with a user-defined
+					// mapping. Otherwise SDL's (possibly-broken default)
+					// mapping double-fires DreamcastKeys against the user's
+					// chosen ones, polluting the wire. See
+					// rawinput_gamepad.cpp for the bypass + wizard.
+#ifdef _WIN32
+					if (maplecast_rawinput::userMappingActive()) break;
+#endif
 					std::shared_ptr<SDLGamepad> device = SDLGamepad::GetSDLGamepad((SDL_JoystickID)event.jbutton.which);
 					if (device != NULL)
 						device->gamepad_btn_input(event.jbutton.button, event.type == SDL_JOYBUTTONDOWN);
@@ -458,13 +480,20 @@ void input_sdl_handle()
 				break;
 			case SDL_JOYAXISMOTION:
 				{
+#ifdef _WIN32
+					if (maplecast_rawinput::userMappingActive()) break;
+#endif
 					std::shared_ptr<SDLGamepad> device = SDLGamepad::GetSDLGamepad((SDL_JoystickID)event.jaxis.which);
 					if (device != NULL)
 						device->gamepad_axis_input(event.jaxis.axis, event.jaxis.value);
 				}
 				break;
+				// (Old trigger-dbg printf removed — pipeline confirmed working.)
 			case SDL_JOYHATMOTION:
 				{
+#ifdef _WIN32
+					if (maplecast_rawinput::userMappingActive()) break;
+#endif
 					std::shared_ptr<SDLGamepad> device = SDLGamepad::GetSDLGamepad((SDL_JoystickID)event.jhat.which);
 					if (device != NULL)
 					{

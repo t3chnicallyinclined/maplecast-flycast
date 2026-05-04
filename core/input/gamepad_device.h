@@ -22,6 +22,7 @@
 #include "mapping.h"
 #include "stdclass.h"
 
+#include <atomic>
 #include <unordered_map>
 #include <memory>
 #include <mutex>
@@ -61,11 +62,21 @@ public:
 	}
 	// Global button listener — fires for ALL devices. Used by input sink.
 	static void listenButtonsGlobal(ButtonListener listener) {
-		globalButtonListener = listener;
+		globalButtonListener.store(listener, std::memory_order_release);
 	}
 	static void unlistenButtonsGlobal(ButtonListener listener) {
-		if (globalButtonListener == listener)
-			globalButtonListener = nullptr;
+		ButtonListener cur = globalButtonListener.load(std::memory_order_acquire);
+		if (cur == listener)
+			globalButtonListener.store(nullptr, std::memory_order_release);
+	}
+	// Fire the global button listener directly. For input sources outside
+	// the normal handle_button path — e.g. evdev direct (Linux) or
+	// XInput / Raw Input direct (Windows) — that bypass SDL but need to
+	// reach the same downstream listener (input_sink).
+	static void fireButtonGlobal(int port, DreamcastKey key, bool pressed) {
+		ButtonListener fn = globalButtonListener.load(std::memory_order_acquire);
+		if (fn != nullptr)
+			fn(port, key, pressed);
 	}
 
 	std::shared_ptr<InputMapping> get_input_mapping() { return input_mapper; }
@@ -278,7 +289,13 @@ private:
 	u64 _detection_start_time = 0;
 	input_detected_cb _input_detected = nullptr;
 	ButtonListener buttonListener = nullptr;
-	static inline ButtonListener globalButtonListener = nullptr;
+	// Atomic so high-priority gamepad bypass threads (Windows XInput,
+	// Linux evdev) can safely poll it while the input subsystem is
+	// initializing on the main thread. Plain pointer reads/writes ARE
+	// atomic on x64 in practice, but the language doesn't guarantee it,
+	// and we'd hate UB on a hot path. memory_order_relaxed is fine —
+	// we just need to read a complete pointer, not synchronize anything.
+	static inline std::atomic<ButtonListener> globalButtonListener{nullptr};
 	bool _remappable;
 	bool _is_registered = false;
 	u32 digitalToAnalogState[4];

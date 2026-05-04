@@ -25,6 +25,11 @@
 void gui_init();
 void gui_initFonts();
 void gui_open_settings();
+// Same as gui_open_settings() but skips the mirror-client HTML redirect,
+// always opening the native ImGui Commands menu (where the Settings ->
+// Controls button-mapping UI lives). Used by the F10 keybind in
+// mirror-client mode where the HTML overlay isn't a Windows-friendly path.
+void gui_open_settings_native();
 bool gui_want_capture_mouse();
 void gui_display_ui();
 void gui_draw_osd();

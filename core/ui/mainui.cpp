@@ -64,6 +64,17 @@ bool mainui_rend_frame()
 
 	if (gui_is_open())
 	{
+		// Debug: confirm we're entering the gui_display_ui branch when
+		// gui_state is non-Closed. Fires once per second max to avoid spam.
+		static int64_t _lastGuiDbg = 0;
+		int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count();
+		if (now_us - _lastGuiDbg > 1000000) {
+			_lastGuiDbg = now_us;
+			printf("[mainui] gui_is_open=true (state=%d) -> gui_display_ui()\n",
+				(int)gui_state);
+			fflush(stdout);
+		}
 		try {
 			gui_display_ui();
 		} catch (const FlycastException& e) {
@@ -109,11 +120,21 @@ bool mainui_rend_frame()
 			// One-shot: disable vsync for the mirror-client render loop.
 			// SDL_GL_SetSwapInterval returns -1 if the platform doesn't
 			// support it — we ignore that, it's best-effort.
+			//
+			// MAPLECAST_CLIENT_VSYNC=1 keeps vsync ON for A/B latency
+			// testing — present blocks for the next display refresh, adds
+			// 0-16ms of display latency, eliminates tearing.
+			const bool wantVsync = std::getenv("MAPLECAST_CLIENT_VSYNC") != nullptr;
+			const int swapInterval = wantVsync ? 1 : 0;
 #ifdef USE_SDL
-			SDL_GL_SetSwapInterval(0);
+			SDL_GL_SetSwapInterval(swapInterval);
 #endif
 			_swapIntervalOverridden = true;
-			printf("[MIRROR] render loop: SwapInterval=0 (vsync off) to let decode pace the loop\n");
+			printf("[MIRROR] render loop: SwapInterval=%d (vsync %s) %s\n",
+				swapInterval,
+				wantVsync ? "ON" : "OFF",
+				wantVsync ? "— blocks on display refresh"
+				          : "— decode paces the loop");
 		}
 
 		bool vramDirty = false;

@@ -643,6 +643,16 @@ static void wsClientRun(std::string host, int port)
 {
 	printf("[MIRROR-WS] Connecting to %s:%d...\n", host.c_str(), port); fflush(stdout);
 
+	// Bump priority — frame decode is on the critical path. Default
+	// priority lets background OS work (search indexer, AV scans, Windows
+	// Defender) preempt this thread, causing render stalls. THREAD_PRIORITY_
+	// HIGHEST is sufficient — TIME_CRITICAL would compete with input which
+	// is more latency-sensitive.
+#ifdef _WIN32
+	if (SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST))
+		printf("[MIRROR-WS] recv thread -> THREAD_PRIORITY_HIGHEST\n");
+#endif
+
 	// Resolve hostname (inet_pton only handles IP literals, not DNS names)
 	struct addrinfo hints = {}, *res = nullptr;
 	hints.ai_family = AF_INET;

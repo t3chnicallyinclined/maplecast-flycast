@@ -1625,7 +1625,15 @@ if(NOT LIBRETRO)
 	elseif(WIN32)
 		target_sources(${PROJECT_NAME} PRIVATE
 			core/windows/rawinput.cpp
-			core/windows/rawinput.h)
+			core/windows/rawinput.h
+			# MapleCast: XInput direct-poll bypass for Windows mirror clients.
+			# Mirrors maplecast_evdev_input.cpp on Linux. Optional, opt-in via
+			# MAPLECAST_RAWINPUT=1 at runtime; SDL gamepad path is the default.
+			core/windows/rawinput_gamepad.cpp
+			core/windows/rawinput_gamepad.h)
+		# Xinput.lib auto-linked by #pragma comment in rawinput_gamepad.cpp,
+		# but linking explicitly is more portable to non-MSVC toolchains.
+		target_link_libraries(${PROJECT_NAME} PRIVATE xinput)
 		if(NOT BUILD_TESTING)
 			target_sources(${PROJECT_NAME} PRIVATE core/windows/winmain.cpp)
 		endif()

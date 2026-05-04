@@ -191,6 +191,14 @@ static void recvLoop()
 {
 	printf("[audio-client] thread started, target ws://%s:%d/\n", _host.c_str(), _port);
 
+	// Bump priority — audio underruns are audible. Linux already runs
+	// SDL audio at high priority; this is the network-receive thread that
+	// feeds the audio backend, which runs separately.
+#ifdef _WIN32
+	if (SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL))
+		printf("[audio-client] recv thread -> THREAD_PRIORITY_TIME_CRITICAL\n");
+#endif
+
 	std::vector<uint8_t> frame;
 	frame.reserve(2100);
 
