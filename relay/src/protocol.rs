@@ -99,12 +99,22 @@ pub fn apply_dirty_pages(
     }
 
     // Parse header
-    let _ta_size = u32::from_le_bytes([frame[72], frame[73], frame[74], frame[75]]) as usize;
-    let delta_payload_size =
-        u32::from_le_bytes([frame[76], frame[77], frame[78], frame[79]]) as usize;
+    let ta_size = u32::from_le_bytes([frame[72], frame[73], frame[74], frame[75]]);
 
-    // Skip: header(80) + ta_data(delta_payload_size) + checksum(4)
-    let mut off = 80 + delta_payload_size + 4;
+    // Pivot A REUSE frames don't carry a TA delta — taSize = 0xFFFFFFFE,
+    // followed by reuseHash(4) + checksum(4) = 8 bytes total before dirty
+    // pages. The dirty-page section is unchanged so the relay's VRAM/PVR
+    // cache update still works on REUSE frames; we just need to skip the
+    // right number of bytes to find dirty_count.
+    let mut off = if ta_size == 0xFFFFFFFE_u32 {
+        // 80 (header) + 4 (reuseHash) + 4 (checksum)
+        88
+    } else {
+        let delta_payload_size =
+            u32::from_le_bytes([frame[76], frame[77], frame[78], frame[79]]) as usize;
+        // 80 (header through deltaPayloadSize) + ta_data + checksum(4)
+        80 + delta_payload_size + 4
+    };
 
     if off + 4 > frame.len() {
         return 0;

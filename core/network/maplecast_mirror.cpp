@@ -43,7 +43,10 @@ uint64_t g_activePalBanks = 0;
 #include <atomic>
 #include <string>
 #include <vector>
+#include <deque>
+#include <unordered_set>
 #include <mutex>
+#include <xxhash.h>
 #include <thread>
 #include <deque>
 #include <chrono>
@@ -63,6 +66,63 @@ extern bool pal_needs_update;
 
 namespace maplecast_mirror
 {
+
+// ── Pivot A: TA-buffer dedup ring (Option 6 master plan, May 2026) ──
+//
+// Server hashes each frame's TA buffer with xxhash32 and keeps a small ring
+// of recent (hash, bytes) pairs. When the live TA buffer's hash matches a
+// ring entry, instead of shipping the full TA delta we emit a REUSE marker:
+//   wire format: taSize = TA_REUSE_FLAG (0xFFFFFFFE) + reuseHash:u32
+// Clients maintain a parallel ring (same eviction policy, same hash space)
+// and look up the referenced TA buffer locally. The "checksum" field at the
+// end of the TA section is repurposed as the canonical taHash so receivers
+// can populate their ring on miss frames too.
+//
+// Determinism: REUSE only fires on a byte-identical TA buffer match, so the
+// rendered output is byte-identical to a non-deduped run. The MAPLECAST_DUMP_TA
+// rig will agree across runs whether dedup is on or off.
+//
+// Ring resets on every SYNC broadcast (bootstrap + scene-change) so a late
+// joiner who arrives via the relay's cached SYNC starts with the same empty
+// ring as a long-lived client at that moment.
+static constexpr uint32_t TA_REUSE_FLAG = 0xFFFFFFFEu;
+static constexpr int TA_DEDUP_RING_SIZE = 256;
+static bool _taDedupEnabled = false;
+static bool _taDedupInit = false;
+struct TaCacheEntry {
+	uint32_t hash;
+	std::vector<uint8_t> bytes;
+};
+static std::deque<TaCacheEntry> _taDedupRing;
+static std::unordered_set<uint32_t> _taDedupRingIndex;
+static uint64_t _taDedupHits = 0;
+static uint64_t _taDedupMisses = 0;
+static uint64_t _taDedupBytesSaved = 0;
+
+static void taDedupResetRing()
+{
+	_taDedupRing.clear();
+	_taDedupRingIndex.clear();
+}
+
+static bool taDedupHas(uint32_t hash)
+{
+	return _taDedupRingIndex.count(hash) > 0;
+}
+
+static void taDedupAdd(uint32_t hash, const uint8_t* data, uint32_t size)
+{
+	if (_taDedupRingIndex.count(hash)) return;
+	TaCacheEntry e;
+	e.hash = hash;
+	e.bytes.assign(data, data + size);
+	_taDedupRing.push_back(std::move(e));
+	_taDedupRingIndex.insert(hash);
+	while ((int)_taDedupRing.size() > TA_DEDUP_RING_SIZE) {
+		_taDedupRingIndex.erase(_taDedupRing.front().hash);
+		_taDedupRing.pop_front();
+	}
+}
 
 // Default shm name. Override at runtime via MAPLECAST_SHM_NAME so a parallel
 // flycast instance (e.g. the Option 6 lookup sandbox) on the same box does
@@ -812,7 +872,12 @@ static void wsClientRun(std::string host, int port)
 			}
 			memwatch::unprotect();
 			_decodeHasFullFrame = false;  // force next TA frame as keyframe
-			printf("[MIRROR-WS] Mid-stream SYNC applied (%.1f MB)\n",
+			// Pivot A: clear client TA dedup ring on SYNC. Server clears
+			// its ring at the same point, so subsequent REUSE references
+			// hash an entry generated post-SYNC — which we'll re-receive
+			// as a keyframe and ring-add on the next miss frame.
+			taDedupResetRing();
+			printf("[MIRROR-WS] Mid-stream SYNC applied (%.1f MB) — TA dedup ring cleared\n",
 				decompSize / (1024.0 * 1024.0));
 			continue;
 		}
@@ -827,57 +892,94 @@ static void wsClientRun(std::string host, int port)
 		memcpy(pvr_snap, src, sizeof(pvr_snap)); src += sizeof(pvr_snap);
 
 		uint32_t taSize; memcpy(&taSize, src, 4); src += 4;
-		uint32_t deltaPayloadSize; memcpy(&deltaPayloadSize, src, 4); src += 4;
 
-		// Sanity check â€” TA buffers are ~50-300KB, never megabytes
-		if (taSize > 512 * 1024 || deltaPayloadSize > 512 * 1024 ||
-		    frameSize > decompSize) {
-			printf("[MIRROR-WS] BAD FRAME: taSize=%u delta=%u frameSize=%u bufSize=%zu â€” skipping\n",
-				taSize, deltaPayloadSize, frameSize, decompSize);
-			continue;
-		}
-
-		// TA delta decode into double-buffered context
-		// _decodeIdx = buffer we write to NOW
-		// 1-_decodeIdx = buffer that has PREVIOUS frame (render thread may be reading it)
 		uint8_t* taDst = _decodeTaCtx[_decodeIdx].tad.thd_root;
 		uint8_t* taPrev = _decodeTaCtx[1 - _decodeIdx].tad.thd_root;
+		uint32_t reconstructedTaSize = 0;
 
-		if (deltaPayloadSize == taSize)
-		{
-			// Keyframe: straight memcpy into current buffer
-			memcpy(taDst, src, taSize);
-			src += taSize;
-			_decodeHasFullFrame = true;
-		}
-		else if (!_decodeHasFullFrame)
-		{
-			src += deltaPayloadSize + 4;
-			continue;
-		}
-		else
-		{
-			// Delta: copy previous frame into current buffer, then apply runs
-			// This is needed because the previous buffer might be in use by render thread
-			memcpy(taDst, taPrev, taSize);
-
-			const uint8_t* dd = src;
-			const uint8_t* de = src + deltaPayloadSize;
-			while (dd + 4 <= de) {
-				uint32_t off; memcpy(&off, dd, 4); dd += 4;
-				if (off == 0xFFFFFFFF) break;
-				uint16_t runLen; memcpy(&runLen, dd, 2); dd += 2;
-				if (off + runLen <= taSize && dd + runLen <= de)
-					memcpy(taDst + off, dd, runLen);
-				dd += runLen;
+		if (taSize == TA_REUSE_FLAG) {
+			// Pivot A REUSE: 4-byte reuseHash + 4-byte taChecksum.
+			// Look up hash in client dedup ring; on miss skip the frame
+			// (server's reset-on-SYNC discipline guarantees we should
+			// have it; a miss here is a protocol bug, log loudly).
+			uint32_t reuseHash; memcpy(&reuseHash, src, 4); src += 4;
+			uint32_t taChecksum; memcpy(&taChecksum, src, 4); src += 4;
+			(void)taChecksum;
+			auto it = _taDedupRingIndex.find(reuseHash);
+			if (it == _taDedupRingIndex.end()) {
+				static int warnCount = 0;
+				if (warnCount++ < 5)
+					printf("[MIRROR-WS] REUSE hash %08x not in client ring — drop frame %u\n",
+						reuseHash, frameNum);
+				// Fall through to dirty pages so we stay in sync; mark no full frame.
+				_decodeHasFullFrame = false;
+				goto pivotA_skip_ta_decode;
 			}
-			src += deltaPayloadSize;
+			// Find the matching ring entry (linear scan is fine — 256 entries)
+			for (const TaCacheEntry& e : _taDedupRing) {
+				if (e.hash == reuseHash) {
+					memcpy(taDst, e.bytes.data(), e.bytes.size());
+					reconstructedTaSize = (uint32_t)e.bytes.size();
+					_decodeHasFullFrame = true;
+					break;
+				}
+			}
+		}
+		else {
+			uint32_t deltaPayloadSize; memcpy(&deltaPayloadSize, src, 4); src += 4;
+
+			// Sanity check â€” TA buffers are ~50-300KB, never megabytes
+			if (taSize > 512 * 1024 || deltaPayloadSize > 512 * 1024 ||
+			    frameSize > decompSize) {
+				printf("[MIRROR-WS] BAD FRAME: taSize=%u delta=%u frameSize=%u bufSize=%zu â€” skipping\n",
+					taSize, deltaPayloadSize, frameSize, decompSize);
+				continue;
+			}
+
+			if (deltaPayloadSize == taSize)
+			{
+				// Keyframe: straight memcpy into current buffer
+				memcpy(taDst, src, taSize);
+				src += taSize;
+				_decodeHasFullFrame = true;
+			}
+			else if (!_decodeHasFullFrame)
+			{
+				src += deltaPayloadSize + 4;
+				continue;
+			}
+			else
+			{
+				// Delta: copy previous frame into current buffer, then apply runs
+				// This is needed because the previous buffer might be in use by render thread
+				memcpy(taDst, taPrev, taSize);
+
+				const uint8_t* dd = src;
+				const uint8_t* de = src + deltaPayloadSize;
+				while (dd + 4 <= de) {
+					uint32_t off; memcpy(&off, dd, 4); dd += 4;
+					if (off == 0xFFFFFFFF) break;
+					uint16_t runLen; memcpy(&runLen, dd, 2); dd += 2;
+					if (off + runLen <= taSize && dd + runLen <= de)
+						memcpy(taDst + off, dd, runLen);
+					dd += runLen;
+				}
+				src += deltaPayloadSize;
+			}
+			reconstructedTaSize = taSize;
+
+			// Pivot A: read the on-wire taHash (formerly placeholder checksum)
+			// and register the decoded TA in the client ring so future REUSE
+			// references resolve. Skip the dummy old-checksum path entirely.
+			uint32_t taHash; memcpy(&taHash, src, 4); src += 4;
+			if (_decodeHasFullFrame && reconstructedTaSize > 0)
+				taDedupAdd(taHash, taDst, reconstructedTaSize);
 		}
 
-		// Skip checksum â€” TCP guarantees data integrity, checksum was for shm race detection
-		// (commented out, not deleted â€” can re-enable for debugging)
-		// uint32_t serverChecksum; memcpy(&serverChecksum, src, 4);
-		src += 4;
+pivotA_skip_ta_decode:
+		// reconstructedTaSize is the effective TA buffer size for downstream
+		// (REUSE replays a stored buffer; normal path used taSize directly).
+		taSize = reconstructedTaSize;
 
 		// Stage dirty pages â€” copy page data so render thread can apply safely.
 		// Allow up to a full VRAM+PVR resync (~2056 pages on scene change).
@@ -1282,6 +1384,44 @@ void serverPublish(TA_context* ctx)
 	static uint64_t totalTABytes = 0;
 	static uint32_t deltaFrames = 0;
 
+	// === Pivot A: TA-buffer dedup ring ===
+	// Compute the canonical hash for this frame's TA buffer. Used both for
+	// the dedup ring lookup (to decide REUSE vs normal) and as the on-wire
+	// "taHash" field that lets clients populate their ring on receive.
+	if (!_taDedupInit) {
+		const char* env = std::getenv("MAPLECAST_TA_DEDUP");
+		_taDedupEnabled = (env && *env && *env != '0');
+		_taDedupInit = true;
+		if (_taDedupEnabled)
+			printf("[MIRROR] TA dedup ring enabled (size=%d entries)\n", TA_DEDUP_RING_SIZE);
+	}
+	uint32_t taHash = (taSize > 0) ? XXH32(taData, taSize, 0) : 0;
+	bool emitReuse = _taDedupEnabled && taSize > 0 && taDedupHas(taHash);
+
+	if (emitReuse) {
+		// REUSE path: skip delta encoding entirely, emit a fixed 12-byte TA
+		// section: taSize=REUSE_FLAG (4) + reuseHash (4) + checksum=taHash (4).
+		// Same trailing checksum byte count as the miss path so a uniform
+		// client parser doesn't have to special-case it.
+		uint32_t flag = TA_REUSE_FLAG;
+		memcpy(dst, &flag, 4); dst += 4;
+		memcpy(dst, &taHash, 4); dst += 4;
+		uint32_t taChecksumReuse = taHash;
+		memcpy(dst, &taChecksumReuse, 4); dst += 4;
+		_taDedupHits++;
+		if (taSize > 12) _taDedupBytesSaved += (taSize / 3) - 12;
+		// Swap double buffer (next frame's delta-encoding compares against
+		// _taBuf[cur], which we populated above with this frame's TA — so
+		// delta math stays correct after a REUSE).
+		_taCur = prev;
+		_taHasPrev = true;
+	}
+	else {
+	// MISS / TA-dedup-disabled path: existing delta-encoding flow. Wrapped
+	// in an else block so the local declarations below (forceKeyframe,
+	// canDelta, taChecksum) don't get jumped over by the REUSE branch.
+	if (_taDedupEnabled) _taDedupMisses++;
+
 	memcpy(dst, &taSize, 4); dst += 4;
 
 	bool forceKeyframe = (frameNum % 60 == 0);
@@ -1357,12 +1497,19 @@ void serverPublish(TA_context* ctx)
 	_taCur = prev;
 	_taHasPrev = true;
 
-	// Checksum disabled â€” client skips it, TCP guarantees integrity
-	// uint32_t taChecksum = 0;
-	// for (uint32_t i = 0; i < taSize; i += 4)
-	// 	taChecksum ^= *(uint32_t*)(taData + i);
-	uint32_t taChecksum = 0;  // placeholder â€” client expects 4 bytes here
+	// Pivot A: the field formerly holding a placeholder XOR checksum is now
+	// the canonical taHash so receivers can populate their dedup ring on
+	// miss frames. Backwards compatible with old clients that ignored the
+	// 4-byte field.
+	uint32_t taChecksum = taHash;
 	memcpy(dst, &taChecksum, 4); dst += 4;
+
+	// On a miss path, register this TA buffer in the server's ring so future
+	// frames with byte-identical TA can REUSE it. (Empty ring before this
+	// frame's add was the reason we missed; next time it'll hit.)
+	if (_taDedupEnabled && taSize > 0)
+		taDedupAdd(taHash, taData, taSize);
+	} // end MISS / TA-dedup-disabled else-block
 
 	// Persistent palette overrides â€” re-apply custom palette colors to
 	// PVR palette RAM BEFORE the diff scan so the changes are captured
@@ -1480,6 +1627,32 @@ done_diff:
 		// client_request_sync handler pattern.
 		for (int i = 0; i < _numRegions; i++)
 			memcpy(_regions[i].shadow, _regions[i].ptr, _regions[i].size);
+
+		// Pivot A: clear the TA dedup ring on every fresh SYNC broadcast.
+		// Late joiners arriving via the relay's cached SYNC start with an
+		// empty ring; the server must guarantee no REUSE references a
+		// pre-SYNC hash they won't have. Long-lived clients also clear
+		// their ring on SYNC receipt — same state as a fresh joiner.
+		if (_taDedupEnabled) {
+			taDedupResetRing();
+			printf("[MIRROR] TA dedup ring cleared on SYNC (frame %u, hits=%llu misses=%llu saved=%.1f KB)\n",
+				frameNum,
+				(unsigned long long)_taDedupHits,
+				(unsigned long long)_taDedupMisses,
+				_taDedupBytesSaved / 1024.0);
+		}
+	}
+
+	// Pivot A: periodic stats every 600 frames (~10s).
+	if (_taDedupEnabled && frameNum > 0 && frameNum % 600 == 0
+	    && (_taDedupHits + _taDedupMisses) > 0) {
+		double hitRate = 100.0 * _taDedupHits / (_taDedupHits + _taDedupMisses);
+		printf("[MIRROR] TA dedup: hits=%llu misses=%llu hitRate=%.1f%% bytesSaved=%.1f KB ringSize=%zu\n",
+			(unsigned long long)_taDedupHits,
+			(unsigned long long)_taDedupMisses,
+			hitRate,
+			_taDedupBytesSaved / 1024.0,
+			_taDedupRing.size());
 	}
 
 	// Patch frame size
