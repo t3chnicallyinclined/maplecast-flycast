@@ -338,6 +338,21 @@ static void triggerPollLoop()
 
 // â”€â”€ Public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+// Pick the UDP target port for the input sink. Default 7100 (production
+// flycast input server). Override with MAPLECAST_INPUT_TARGET_PORT for
+// parallel-instance deploys (e.g., the Option 6 lookup sandbox at 7150).
+// MAPLECAST_PORT is NOT reused here because that env var configures the
+// server's LISTEN port, not the client's TARGET port — different role,
+// different default, kept separate to avoid mode-dependent confusion.
+static int targetPort()
+{
+	if (const char* p = std::getenv("MAPLECAST_INPUT_TARGET_PORT")) {
+		int v = std::atoi(p);
+		if (v > 0 && v < 65536) return v;
+	}
+	return 7100;
+}
+
 bool init(const char* host, int slot)
 {
 	if (_active) return true;
@@ -355,7 +370,8 @@ bool init(const char* host, int slot)
 		return false;
 	}
 	memcpy(&_addr, res->ai_addr, sizeof(sockaddr_in));
-	_addr.sin_port = htons(7100);
+	int port = targetPort();
+	_addr.sin_port = htons((uint16_t)port);
 	freeaddrinfo(res);
 
 	_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -388,8 +404,8 @@ bool init(const char* host, int slot)
 	_active = true;
 	char ipstr[INET_ADDRSTRLEN];
 	inet_ntop(AF_INET, &_addr.sin_addr, ipstr, sizeof(ipstr));
-	printf("[input-sink] ready â†’ %s:7100 slot %d (19-byte seq+ts + redundant send)\n",
-	       ipstr, _slot);
+	printf("[input-sink] ready â†’ %s:%d slot %d (19-byte seq+ts + redundant send)\n",
+	       ipstr, port, _slot);
 	return true;
 }
 
@@ -414,7 +430,8 @@ void setBackupServer(const char* host)
 		return;
 	}
 	memcpy(&_backupAddr, res->ai_addr, sizeof(sockaddr_in));
-	_backupAddr.sin_port = htons(7100);
+	int backupPort = targetPort();
+	_backupAddr.sin_port = htons((uint16_t)backupPort);
 	freeaddrinfo(res);
 
 	if (_backupSock >= 0) mc_closesocket(_backupSock);
@@ -429,7 +446,7 @@ void setBackupServer(const char* host)
 	_hasBackup.store(true, std::memory_order_release);
 	char ipstr[INET_ADDRSTRLEN];
 	inet_ntop(AF_INET, &_backupAddr.sin_addr, ipstr, sizeof(ipstr));
-	printf("[input-sink] hot-standby ready â†’ %s:7100\n", ipstr);
+	printf("[input-sink] hot-standby ready â†’ %s:%d\n", ipstr, backupPort);
 }
 
 void directUpdate(uint16_t buttons, uint8_t newLt, uint8_t newRt)
