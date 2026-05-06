@@ -161,4 +161,13 @@ static inline int setenv(const char* name, const char* value, int overwrite) {
 #define mc_setsockopt setsockopt
 #define mc_getsockopt getsockopt
 #define mc_closesocket close
+
+// SOCKET — winsock typedef. Not in <sys/socket.h>. The 6c6e194d9 Windows-
+// client commit bulk-renamed sock_t → SOCKET across the maplecast TUs but
+// only the WIN32 branch of this header defines the typedef, so any Linux
+// build that compiles maplecast_telemetry.cpp / dns.cpp / etc. fails to
+// resolve `SOCKET`. Aliasing it here keeps the source tree single-typed
+// without re-renaming every call site. INVALID_SOCKET is already defined
+// in net_platform.h on Linux (#define INVALID_SOCKET (-1)).
+typedef int SOCKET;
 #endif
