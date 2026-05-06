@@ -51,6 +51,8 @@
 #ifdef MAPLECAST_LOOKUP
 #include "network/maplecast_visual_cache.h"
 #include "network/maplecast_scanner.h"
+#endif
+#ifdef MAPLECAST_LOOKUP_TEST
 #include "network/maplecast_lookup_test.h"
 #endif
 #ifdef _WIN32
@@ -1166,12 +1168,15 @@ void Emulator::start()
 #ifdef MAPLECAST_LOOKUP
 		// Option 6: visual cache. Off by default even when compiled in —
 		// MAPLECAST_VISUAL_CACHE=1 enables disk recording, MAPLECAST_SCAN=1
-		// drives the brute-force scanner, MAPLECAST_LOOKUP_TEST=1 runs the
-		// 600-frame record-and-replay rig. None touch hot paths until init().
+		// drives the brute-force scanner. None touch hot paths until init().
 		if (std::getenv("MAPLECAST_VISUAL_CACHE"))
 			maplecast_visual_cache::init("visual_cache");
 		if (std::getenv("MAPLECAST_SCAN"))
 			maplecast_scanner::start(maplecast_scanner::ScanMode::FullScan, 0);
+#endif
+#ifdef MAPLECAST_LOOKUP_TEST
+		// Option 6 verification rig — only available on non-headless builds
+		// since clientLookup() drives the renderer to replay TA buffers.
 		if (std::getenv("MAPLECAST_LOOKUP_TEST"))
 			maplecast_lookup_test::init();
 #endif

@@ -18,6 +18,8 @@
 #ifdef MAPLECAST_LOOKUP
 #include "network/maplecast_visual_cache.h"
 #include "network/maplecast_scanner.h"
+#endif
+#ifdef MAPLECAST_LOOKUP_TEST
 #include "network/maplecast_lookup_test.h"
 #endif
 
@@ -213,9 +215,10 @@ private:
 			// Mirror server: capture TA commands BEFORE Process consumes them
 			if (maplecast_mirror::isServer() && taContext)
 				maplecast_mirror::serverPublish(taContext);
-#ifdef MAPLECAST_LOOKUP
+#ifdef MAPLECAST_LOOKUP_TEST
 			// Option 6: lookup-test record path — captures (game state hash → TA buffer)
 			// pairs into RAM. Activates only when MAPLECAST_LOOKUP_TEST=1.
+			// Compiled in only on non-headless builds (the replay path needs a renderer).
 			if (taContext && maplecast_lookup_test::active())
 				maplecast_lookup_test::serverRecord(taContext);
 #endif
@@ -240,6 +243,12 @@ private:
 			// observe the parsed rend_context (visual_cache record) or
 			// override it (lookup_test replay path). Each is gated on its
 			// own active() probe — costs one branch when nothing is enabled.
+			if (maplecast_scanner::active())
+				maplecast_scanner::tick();
+			if (taContext)
+				maplecast_visual_cache::recordFrame(taContext->rend);
+#endif
+#ifdef MAPLECAST_LOOKUP_TEST
 			if (taContext && maplecast_lookup_test::isReplaying())
 			{
 				rend_context lookupRc;
@@ -248,10 +257,6 @@ private:
 					// gl.rendContext already set by clientLookup; fall through to Render.
 				}
 			}
-			if (maplecast_scanner::active())
-				maplecast_scanner::tick();
-			if (taContext)
-				maplecast_visual_cache::recordFrame(taContext->rend);
 #endif
 			try {
 				renderer->Render();

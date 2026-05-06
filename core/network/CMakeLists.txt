@@ -95,14 +95,25 @@ endif()
 # Option 6 and the c0621cbe7 strip commit for context.
 option(MAPLECAST_LOOKUP "Build the Option 6 lookup-renderer cache+scanner machinery (Linux only)" OFF)
 if(MAPLECAST_LOOKUP AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # visual_cache + scanner go into every Option-6 build — they're the
+    # recording/scanning side and have no GL dependency.
     target_sources(${PROJECT_NAME} PRIVATE
         maplecast_visual_cache.cpp
         maplecast_visual_cache.h
         maplecast_scanner.cpp
-        maplecast_scanner.h
-        maplecast_lookup_test.cpp
-        maplecast_lookup_test.h)
+        maplecast_scanner.h)
     target_compile_definitions(${PROJECT_NAME} PRIVATE MAPLECAST_LOOKUP)
+    # lookup_test is the replay-verification rig (Phase 2). It pulls in
+    # rend/gles/gles.h to call into the renderer for ta_parse + Render(),
+    # which doesn't exist in the headless build (NO_REND, no wsi backend).
+    # The headless sandbox only needs to RECORD; replay verification runs
+    # on a non-headless dev build. Gate this TU out for headless.
+    if(NOT MAPLECAST_HEADLESS)
+        target_sources(${PROJECT_NAME} PRIVATE
+            maplecast_lookup_test.cpp
+            maplecast_lookup_test.h)
+        target_compile_definitions(${PROJECT_NAME} PRIVATE MAPLECAST_LOOKUP_TEST)
+    endif()
 elseif(MAPLECAST_LOOKUP)
     message(WARNING "MAPLECAST_LOOKUP=ON ignored on non-Linux: visual_cache/scanner/lookup_test use POSIX file APIs")
 endif()
