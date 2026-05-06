@@ -40,9 +40,12 @@
 # PRE-REQS ON THE VPS
 #   apt-get install -y build-essential cmake git ninja-build pkg-config \
 #       libcurl4-openssl-dev libxdp-dev libbpf-dev libzstd-dev liblua5.4-dev \
-#       libomp-dev libzip-dev zlib1g-dev libsdl2-dev libvulkan-dev
+#       libomp-dev libzip-dev zlib1g-dev libsdl2-dev libvulkan-dev \
+#       libevdev-dev libminiupnpc-dev
 #   (libsdl2-dev/libvulkan-dev are needed by flycast's CMakeLists header
-#   probes even for headless builds; the actual binary won't link them.)
+#   probes even for headless builds; the actual binary won't link them.
+#   libevdev-dev/libminiupnpc-dev are pulled in by flycast's optional
+#   networking + input modules.)
 #
 # ROLLBACK
 #   systemctl stop maplecast-lookup
@@ -144,12 +147,18 @@ cd /opt/maplecast-lookup/src
 # to the unprivileged user — the source tree stays root-owned so an
 # escaped flycast process can't tamper with future builds.
 if [ ! -d maplecast-flycast/.git ]; then
-    git clone "$REPO_URL" maplecast-flycast
+    git clone --recurse-submodules "$REPO_URL" maplecast-flycast
 fi
 cd maplecast-flycast
 git fetch origin
 git checkout "$BRANCH"
 git reset --hard "origin/$BRANCH"
+# Bring submodules in line with the checked-out tree. Required after both
+# fresh clones (covers --recurse-submodules race) and existing-tree updates
+# where the parent commit moved a submodule SHA. flycast vendors libchdr,
+# libjuice, tinygettext, xbyak, zstd, etc. — none have a CMakeLists.txt
+# until they're checked out.
+git submodule update --init --recursive
 
 cmake -B build-lookup \
       -DMAPLECAST_HEADLESS=ON \
