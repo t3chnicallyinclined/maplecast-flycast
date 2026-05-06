@@ -118,6 +118,18 @@ usermod -a -G maplecast maplecast-lookup || true
 mkdir -p /opt/maplecast-lookup/{savestates,cfg,.local/share/flycast,.maplecast,visual_cache}
 mkdir -p /var/log/maplecast-lookup
 mkdir -p /etc/maplecast
+
+# Seed the sandbox savestate from prod (idempotent). Without this the
+# attract-mode SH4 reset crash hits at ~75s (DEPLOYMENT.md gotcha #11).
+# We copy rather than symlink so the sandbox can never write back into
+# production's tree. The env file's MAPLECAST_HEADLESS_AUTOLOAD=1 picks
+# this up at boot.
+PROD_STATE=/opt/maplecast/.local/share/flycast/mvc2.state
+SANDBOX_STATE=/opt/maplecast-lookup/.local/share/flycast/mvc2.state
+if [ -f "$PROD_STATE" ] && [ ! -f "$SANDBOX_STATE" ]; then
+    cp "$PROD_STATE" "$SANDBOX_STATE"
+    echo "  seeded sandbox savestate from prod ($(stat -c%s "$SANDBOX_STATE") bytes)"
+fi
 # Runtime data dirs are maplecast-lookup-owned. Source tree (/opt/maplecast-lookup/src)
 # is created at build time by root and stays root-owned so an escaped flycast process
 # can't tamper with future builds — matches the promise in this script's header.

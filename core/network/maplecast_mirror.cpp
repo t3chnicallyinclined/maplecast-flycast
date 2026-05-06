@@ -41,6 +41,7 @@ uint64_t g_activePalBanks = 0;
 #include <cstdio>
 #include <cstring>
 #include <atomic>
+#include <string>
 #include <vector>
 #include <mutex>
 #include <thread>
@@ -63,7 +64,24 @@ extern bool pal_needs_update;
 namespace maplecast_mirror
 {
 
-static const char* SHM_NAME = "/maplecast_mirror";
+// Default shm name. Override at runtime via MAPLECAST_SHM_NAME so a parallel
+// flycast instance (e.g. the Option 6 lookup sandbox) on the same box does
+// NOT shm_unlink() the production server's region. openShm() unconditionally
+// unlinks before open when create=true; a same-name collision between two
+// servers would silently destroy prod's shm namespace if the sandbox ever
+// got the perms. Different names means no collision.
+static std::string SHM_NAME_STORAGE;
+static const char* shmName()
+{
+	if (!SHM_NAME_STORAGE.empty()) return SHM_NAME_STORAGE.c_str();
+	const char* env = std::getenv("MAPLECAST_SHM_NAME");
+	if (env && *env)
+		SHM_NAME_STORAGE = (env[0] == '/') ? std::string(env) : (std::string("/") + env);
+	else
+		SHM_NAME_STORAGE = "/maplecast_mirror";
+	return SHM_NAME_STORAGE.c_str();
+}
+#define SHM_NAME (shmName())
 static const size_t HEADER_SIZE = 4096;
 static const size_t BRAIN_SIZE = 32 * 1024 * 1024;
 static const size_t RING_START = HEADER_SIZE + BRAIN_SIZE;
