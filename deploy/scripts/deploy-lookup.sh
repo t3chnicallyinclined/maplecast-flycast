@@ -112,10 +112,21 @@ id maplecast-lookup >/dev/null 2>&1 || \
 # there because we don't grant +w on the prod ROM dir.
 usermod -a -G maplecast maplecast-lookup || true
 
-mkdir -p /opt/maplecast-lookup/{src,savestates,cfg,.local/share/flycast,.maplecast,visual_cache}
+mkdir -p /opt/maplecast-lookup/{savestates,cfg,.local/share/flycast,.maplecast,visual_cache}
 mkdir -p /var/log/maplecast-lookup
 mkdir -p /etc/maplecast
-chown -R maplecast-lookup:maplecast-lookup /opt/maplecast-lookup /var/log/maplecast-lookup
+# Runtime data dirs are maplecast-lookup-owned. Source tree (/opt/maplecast-lookup/src)
+# is created at build time by root and stays root-owned so an escaped flycast process
+# can't tamper with future builds — matches the promise in this script's header.
+chown maplecast-lookup:maplecast-lookup /opt/maplecast-lookup
+chown -R maplecast-lookup:maplecast-lookup \
+    /opt/maplecast-lookup/savestates \
+    /opt/maplecast-lookup/cfg \
+    /opt/maplecast-lookup/.local \
+    /opt/maplecast-lookup/.maplecast \
+    /opt/maplecast-lookup/visual_cache \
+    /var/log/maplecast-lookup
+mkdir -p /opt/maplecast-lookup/src   # root-owned, populated in build step
 PROVISION_EOF
 echo "  user maplecast-lookup + /opt/maplecast-lookup ready."
 echo ""
