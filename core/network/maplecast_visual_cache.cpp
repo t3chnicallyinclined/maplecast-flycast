@@ -16,6 +16,7 @@
 #include "maplecast_gamestate.h"
 #include "hw/pvr/ta_ctx.h"
 #include "hw/sh4/sh4_mem.h"
+#include "hw/mem/addrspace.h"
 #include "rend/TexCache.h"
 
 #include <cstdio>
@@ -73,39 +74,114 @@ static bool _initialized = false;
 // captureTexture() and recordFrame() without plumbing arguments through.
 static thread_local std::vector<TexRef> _frameTextures;
 
-// Hash a visual state: character + animation + frame timer + facing + palette
-// One hash per CHARACTER, not per frame — 6 characters per frame
-static uint64_t hashCharState(uint8_t charId, uint16_t animState, uint16_t animTimer,
-	uint8_t facing, uint8_t palette)
+// CSV-informed visual key (Phase 2). Replaces the 5-field key the
+// 2026-04 prototype used. 11 bytes per character, decomposed from
+// PlayerMemoryAddresses.csv so each field is a single bounded enum:
+//
+//   char_id          +0x001 — 0..58 roster ID
+//   knockdown_state  +0x1D0 — 35-value state machine (was read as u16
+//                              previously, but the CSV shows the high
+//                              byte is unrelated; reading u8 cuts noise)
+//   anim_animID      +0x158 — animation within a state
+//   anim_groupID     +0x159 — animation sub-group (Is_Prox_Block)
+//   key_frame        +0x142 — keyframe count within the anim (was u16
+//                              anim_timer; the lo byte is the keyframe)
+//   attack_number    +0x1A1 — current attack ID (per-char enum)
+//   facing           +0x110 — direction
+//   palette_id       +0x52D — color slot
+//   sprite_id        +0x144 — current sprite frame (u16)
+//   airborne         +0x1F9 — 0/1/2 stand/crouch/air
+//
+// Per the Option 6 plan in the planning doc: this is the unblocker for
+// the visual_cache hit-rate problem the 2026-04 prototype hit (77%
+// unique rate from 600 frames). Finer key = better discrimination, but
+// correctness-wise it never collides — same engine state will produce
+// the same key whereas the old 5-field key could collapse visually
+// different frames into the same hash.
+struct VisualKey {
+	uint8_t  char_id;
+	uint8_t  knockdown_state;
+	uint8_t  anim_animID;
+	uint8_t  anim_groupID;
+	uint8_t  key_frame;
+	uint8_t  attack_number;
+	uint8_t  facing;
+	uint8_t  palette_id;
+	uint16_t sprite_id;
+	uint8_t  airborne;
+	uint8_t  _pad;
+};
+static_assert(sizeof(VisualKey) == 12, "VisualKey size must be stable for hashing");
+
+// Per-char base addresses (matches maplecast_gamestate.cpp exactly).
+// Stride 0x5A4, interleaved P1C1, P2C1, P1C2, P2C2, P1C3, P2C3.
+static const uint32_t VK_CHAR_BASE[] = {
+	0x8C268340, 0x8C2688E4, 0x8C268E88,
+	0x8C26942C, 0x8C2699D0, 0x8C269F74,
+};
+
+// Field offsets — ALL come from MvC2Data PlayerMemoryAddresses.csv.
+static const uint32_t VK_OFF_ACTIVE          = 0x000;
+static const uint32_t VK_OFF_CHAR_ID         = 0x001;
+static const uint32_t VK_OFF_KEYFRAME        = 0x142;  // u8 (csv: Anim_KeyFrame_FrameCount)
+static const uint32_t VK_OFF_SPRITE_ID       = 0x144;  // u16 (csv: Animation_Value)
+static const uint32_t VK_OFF_ANIM_ANIMID     = 0x158;
+static const uint32_t VK_OFF_ANIM_GROUPID    = 0x159;
+static const uint32_t VK_OFF_ATTACK_NUMBER   = 0x1A1;
+static const uint32_t VK_OFF_KNOCKDOWN_STATE = 0x1D0;  // u8 per csv
+static const uint32_t VK_OFF_AIRBORNE        = 0x1F9;
+static const uint32_t VK_OFF_FACING          = 0x110;
+static const uint32_t VK_OFF_PALETTE_ID      = 0x52D;
+
+static void readCharVisualKey(int slot, VisualKey& vk)
 {
-	uint64_t h = 0;
-	h = charId;
-	h = (h << 16) | animState;
-	h = (h << 16) | animTimer;
-	h = (h << 8) | facing;
-	h = (h << 8) | palette;
-	// Mix bits for better distribution
-	h ^= h >> 33;
-	h *= 0xff51afd7ed558ccd;
-	h ^= h >> 33;
-	h *= 0xc4ceb9fe1a85ec53;
-	h ^= h >> 33;
+	uint32_t base = VK_CHAR_BASE[slot];
+	vk.char_id         = (uint8_t)addrspace::read8(base + VK_OFF_CHAR_ID);
+	vk.knockdown_state = (uint8_t)addrspace::read8(base + VK_OFF_KNOCKDOWN_STATE);
+	vk.anim_animID     = (uint8_t)addrspace::read8(base + VK_OFF_ANIM_ANIMID);
+	vk.anim_groupID    = (uint8_t)addrspace::read8(base + VK_OFF_ANIM_GROUPID);
+	vk.key_frame       = (uint8_t)addrspace::read8(base + VK_OFF_KEYFRAME);
+	vk.attack_number   = (uint8_t)addrspace::read8(base + VK_OFF_ATTACK_NUMBER);
+	vk.facing          = (uint8_t)addrspace::read8(base + VK_OFF_FACING);
+	vk.palette_id      = (uint8_t)addrspace::read8(base + VK_OFF_PALETTE_ID);
+	vk.sprite_id       = (uint16_t)addrspace::read16(base + VK_OFF_SPRITE_ID);
+	vk.airborne        = (uint8_t)addrspace::read8(base + VK_OFF_AIRBORNE);
+	vk._pad            = 0;
+}
+
+// Stable 64-bit hash over the 12 raw bytes of a VisualKey. We use
+// FNV-1a — same as the 2026-04 lookup_test rig, which makes apples-
+// to-apples hit-rate comparisons against that test set straightforward.
+static uint64_t hashVisualKey(const VisualKey& vk)
+{
+	const uint8_t* p = reinterpret_cast<const uint8_t*>(&vk);
+	uint64_t h = 0xcbf29ce484222325ULL;
+	for (size_t i = 0; i < sizeof(VisualKey); i++) {
+		h ^= p[i];
+		h *= 0x100000001b3ULL;
+	}
 	return h;
 }
 
-// Hash the full frame state: all 6 characters combined
-static uint64_t hashFrameState(const maplecast_gamestate::GameState& gs)
+// Hash the full frame state: all 6 characters combined + minimal
+// global context. Only `active` characters contribute (assist that
+// hasn't tagged in is engine-internal-state with no on-screen sprite).
+// stage_id is included so the same fighter pose on Bridge1 vs Cave2
+// hashes differently — the cache's TA buffer has the stage geometry
+// baked in, so the key must too. in_match always == 1 here (recordFrame
+// returns early otherwise) but including it costs nothing and guards
+// against future code changes.
+static uint64_t hashFrameStateV2(const maplecast_gamestate::GameState& gs)
 {
 	uint64_t h = 0;
 	for (int i = 0; i < 6; i++)
 	{
-		const auto& c = gs.chars[i];
-		if (!c.active) continue;
-		uint64_t ch = hashCharState(c.character_id, c.animation_state,
-			c.anim_timer, c.facing_right, c.palette_id);
-		h ^= ch + 0x9e3779b9 + (h << 6) + (h >> 2);  // boost::hash_combine
+		if (!gs.chars[i].active) continue;
+		VisualKey vk;
+		readCharVisualKey(i, vk);
+		uint64_t ch = hashVisualKey(vk);
+		h ^= ch + 0x9e3779b9ULL + (h << 6) + (h >> 2);  // boost::hash_combine
 	}
-	// Include global state
 	h ^= (uint64_t)gs.stage_id << 40;
 	h ^= (uint64_t)gs.in_match << 48;
 	return h;
@@ -326,8 +402,8 @@ void recordFrame(const rend_context& rc)
 		return;
 	}
 
-	// Hash the visual state
-	uint64_t stateHash = hashFrameState(gs);
+	// Hash the visual state with the CSV-decomposed key (Phase 2).
+	uint64_t stateHash = hashFrameStateV2(gs);
 
 	// Check cache
 	{
