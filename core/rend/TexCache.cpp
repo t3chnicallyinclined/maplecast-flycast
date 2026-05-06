@@ -18,6 +18,9 @@
 #include "xbrz/xbrz.h"
 #include "hw/pvr/pvr_mem.h"
 #include "hw/mem/addrspace.h"
+#ifdef MAPLECAST_LOOKUP
+#include "network/maplecast_visual_cache.h"
+#endif
 
 #include <mutex>
 #include <xxhash.h>
@@ -680,6 +683,19 @@ bool BaseTextureCacheData::Update()
 	protectVRam();
 
 	UploadToGPU(upscaled_w, upscaled_h, (const u8 *)temp_tex_buffer, IsMipmapped(), mipmapped);
+#ifdef MAPLECAST_LOOKUP
+	// Option 6: capture decoded RGBA pixel buffer right here — this is the
+	// exact bitmap flycast just shipped to the GPU, post-VQ/paletted/twiddle
+	// decode and post-xBRZ upscale. Phase 1 redirects this into per-frame
+	// cache entries so replays don't depend on live VRAM.
+	{
+		bool is32 = (tex_type == TextureType::_8888);
+		uint32_t bpp = is32 ? 4u : 2u;
+		maplecast_visual_cache::captureTexture(
+			startAddress, tcw.full, upscaled_w, upscaled_h,
+			temp_tex_buffer, upscaled_w * upscaled_h * bpp, is32);
+	}
+#endif
 	if (config::DumpTextures)
 	{
 		ComputeHash();

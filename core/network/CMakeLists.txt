@@ -82,3 +82,27 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         maplecast_evdev_input.cpp
         maplecast_evdev_input.h)
 endif()
+
+# Option 6: lookup-table renderer infrastructure.
+# Visual cache (records game-state → TA-display-list mappings), brute-force
+# scanner (drives the emulator through every char/anim state), and lookup-test
+# rig (record-and-replay validator). All three use POSIX file APIs (mkdir,
+# popen, ls) so we gate to Linux for now. Default OFF so production headless
+# binaries don't carry the disk-writing code paths even on Linux unless the
+# operator explicitly opts in. Hooks in emulator.cpp / Renderer_if.cpp /
+# TexCache.cpp are guarded by MAPLECAST_LOOKUP so they vanish from the binary
+# when this flag is off — zero hot-path cost. See docs/STREAMING-OPTIONS.md
+# Option 6 and the c0621cbe7 strip commit for context.
+option(MAPLECAST_LOOKUP "Build the Option 6 lookup-renderer cache+scanner machinery (Linux only)" OFF)
+if(MAPLECAST_LOOKUP AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(${PROJECT_NAME} PRIVATE
+        maplecast_visual_cache.cpp
+        maplecast_visual_cache.h
+        maplecast_scanner.cpp
+        maplecast_scanner.h
+        maplecast_lookup_test.cpp
+        maplecast_lookup_test.h)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE MAPLECAST_LOOKUP)
+elseif(MAPLECAST_LOOKUP)
+    message(WARNING "MAPLECAST_LOOKUP=ON ignored on non-Linux: visual_cache/scanner/lookup_test use POSIX file APIs")
+endif()

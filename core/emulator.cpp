@@ -48,6 +48,11 @@
 #include "network/maplecast_replica.h"
 #include "network/maplecast_input_sink.h"
 #include "network/maplecast_evdev_input.h"
+#ifdef MAPLECAST_LOOKUP
+#include "network/maplecast_visual_cache.h"
+#include "network/maplecast_scanner.h"
+#include "network/maplecast_lookup_test.h"
+#endif
 #ifdef _WIN32
 #include "windows/rawinput_gamepad.h"
 #endif
@@ -1157,6 +1162,19 @@ void Emulator::start()
 		}
 		maplecast_audio::init();
 		maplecast_telemetry::init();
+
+#ifdef MAPLECAST_LOOKUP
+		// Option 6: visual cache. Off by default even when compiled in —
+		// MAPLECAST_VISUAL_CACHE=1 enables disk recording, MAPLECAST_SCAN=1
+		// drives the brute-force scanner, MAPLECAST_LOOKUP_TEST=1 runs the
+		// 600-frame record-and-replay rig. None touch hot paths until init().
+		if (std::getenv("MAPLECAST_VISUAL_CACHE"))
+			maplecast_visual_cache::init("visual_cache");
+		if (std::getenv("MAPLECAST_SCAN"))
+			maplecast_scanner::start(maplecast_scanner::ScanMode::FullScan, 0);
+		if (std::getenv("MAPLECAST_LOOKUP_TEST"))
+			maplecast_lookup_test::init();
+#endif
 
 #if !defined(MAPLECAST_HEADLESS_BUILD) && !defined(MAPLECAST_CLIENT_ONLY_BUILD)
 		if (std::getenv("MAPLECAST_STREAM"))
