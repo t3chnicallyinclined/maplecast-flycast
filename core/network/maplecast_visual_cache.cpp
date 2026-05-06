@@ -22,12 +22,34 @@
 #include <cstring>
 #include <string>
 #include <unordered_set>
+#include <vector>
 #include <mutex>
 #include <atomic>
 #include <sys/stat.h>
 
 namespace maplecast_visual_cache
 {
+
+// On-disk file format version. Bumped to 2 when per-frame texture refs were
+// added (Phase 1 of Option 6 — VRAM-rot fix). Older v1 files are still
+// readable via a header check, but won't have a TexRefs section.
+static constexpr uint32_t FILE_VERSION = 2;
+static constexpr uint32_t FILE_MAGIC = 0x56495343;  // "VISC"
+
+// Per-frame texture reference. The pool of decoded RGBA pixels lives in
+// separate tex_<addr>_<tcw>_<wxh>.bin files (written by captureTexture).
+// A cache entry stores a list of these refs so a replay client can fetch
+// exactly the texture set the frame needs without scanning the live VRAM.
+struct TexRef {
+    uint32_t startAddress;
+    uint32_t tcwFull;
+    uint16_t width;
+    uint16_t height;
+    bool operator==(const TexRef& o) const {
+        return startAddress == o.startAddress && tcwFull == o.tcwFull
+            && width == o.width && height == o.height;
+    }
+};
 
 static std::string _cacheDir;
 static std::unordered_set<uint64_t> _knownStates;
@@ -38,6 +60,18 @@ static std::atomic<uint64_t> _cacheMisses{0};
 static std::atomic<uint64_t> _totalBytes{0};
 static uint64_t _prevStateHash = 0;
 static uint32_t _transitionCount = 0;
+static bool _initialized = false;
+
+// Per-frame texture-ref accumulator. captureTexture() (called from
+// TexCache.cpp) appends here when flycast decodes a NEW texture this frame.
+// recordFrame() additionally walks the rend_context's poly lists to add
+// any textures already cached from prior frames (where captureTexture
+// didn't fire). Cleared at the start of each recordFrame() call.
+//
+// Render thread is the only producer/consumer, so no mutex needed — but
+// the storage is at file scope to make it accessible from both
+// captureTexture() and recordFrame() without plumbing arguments through.
+static thread_local std::vector<TexRef> _frameTextures;
 
 // Hash a visual state: character + animation + frame timer + facing + palette
 // One hash per CHARACTER, not per frame — 6 characters per frame
@@ -106,7 +140,8 @@ static void serializePoly(const PolyParam& pp, SerializedPoly& sp)
 }
 
 static bool writeFrameToDisk(uint64_t stateHash, const rend_context& rc,
-	const maplecast_gamestate::GameState& gs)
+	const maplecast_gamestate::GameState& gs,
+	const std::vector<TexRef>& texRefs)
 {
 	char filename[512];
 	snprintf(filename, sizeof(filename), "%s/%016llx.bin",
@@ -116,8 +151,8 @@ static bool writeFrameToDisk(uint64_t stateHash, const rend_context& rc,
 	if (!f) return false;
 
 	// Header
-	uint32_t magic = 0x56495343;  // "VISC" — visual cache
-	uint32_t version = 1;
+	uint32_t magic = FILE_MAGIC;
+	uint32_t version = FILE_VERSION;
 	fwrite(&magic, 4, 1, f);
 	fwrite(&version, 4, 1, f);
 	fwrite(&stateHash, 8, 1, f);
@@ -184,6 +219,18 @@ static bool writeFrameToDisk(uint64_t stateHash, const rend_context& rc,
 	fwrite(&rc.fog_clamp_min, sizeof(RGBAColor), 1, f);
 	fwrite(&rc.fog_clamp_max, sizeof(RGBAColor), 1, f);
 
+	// Texture references for this frame (Phase 1 — VRAM-rot fix).
+	// The pool of decoded RGBA pixels lives in separate tex_*.bin files;
+	// this list tells a replay client which entries from the pool to load
+	// before running ta_parse on the cached TA buffer. Without this, the
+	// replay path has to scan live VRAM (which the running game has
+	// already clobbered) to find textures, which is exactly the failure
+	// mode that killed the 2026-04 prototype.
+	uint32_t texRefCount = (uint32_t)texRefs.size();
+	fwrite(&texRefCount, 4, 1, f);
+	if (texRefCount > 0)
+		fwrite(texRefs.data(), sizeof(TexRef), texRefCount, f);
+
 	uint64_t fileSize = ftell(f);
 	fclose(f);
 
@@ -217,21 +264,67 @@ bool init(const char* cacheDir)
 	int existing = 0;
 	if (p) { fscanf(p, "%d", &existing); pclose(p); }
 
-	printf("[visual-cache] initialized at %s (%d existing states)\n", cacheDir, existing);
+	_initialized = true;
+	printf("[visual-cache] initialized at %s (%d existing states, file format v%u)\n",
+		cacheDir, existing, FILE_VERSION);
 	printf("[visual-cache] recording TA data for every new visual state\n");
 	printf("[visual-cache] the cache grows as you play — every match fills it\n");
 	return true;
+}
+
+// Append unique TexRef to the per-frame list. Linear scan is fine — frames
+// reference at most a few dozen distinct textures and we want to preserve
+// insertion order (the order ta_parse referenced them). Caller owns
+// thread safety; this runs only from the render thread.
+static void addTexRefIfMissing(uint32_t startAddress, uint32_t tcwFull,
+	uint16_t width, uint16_t height)
+{
+	TexRef ref{startAddress, tcwFull, width, height};
+	for (const auto& existing : _frameTextures)
+		if (existing == ref) return;
+	_frameTextures.push_back(ref);
+}
+
+// Walk the rend_context's poly lists and add every referenced texture to
+// the per-frame list. captureTexture() catches NEW textures decoded this
+// frame; this catches textures already cached in flycast's TexCache from
+// prior frames (where Update() fast-pathed without re-decoding).
+static void collectPolyTextures(const std::vector<PolyParam>& polys)
+{
+	for (const PolyParam& pp : polys)
+	{
+		if (pp.texture == nullptr) continue;
+		addTexRefIfMissing(pp.texture->startAddress, pp.tcw.full,
+			pp.texture->width, pp.texture->height);
+	}
 }
 
 void recordFrame(const rend_context& rc)
 {
 	_totalFrames.fetch_add(1, std::memory_order_relaxed);
 
+	// Skip the work entirely if init() wasn't called. The hook in
+	// Renderer_if.cpp fires unconditionally (it's compiled in whenever
+	// MAPLECAST_LOOKUP is on), but the caller only enables recording
+	// via the MAPLECAST_VISUAL_CACHE env var. Without init() we have no
+	// _cacheDir, so writeFrameToDisk would fopen("/<hash>.bin") and fail
+	// silently — wasteful, and pollutes _knownStates with hashes that
+	// never made it to disk.
+	if (!_initialized) {
+		_frameTextures.clear();
+		return;
+	}
+
 	// Read game state from RAM
 	maplecast_gamestate::GameState gs;
 	maplecast_gamestate::readGameState(gs);
 
-	if (!gs.in_match) return;  // only record during actual gameplay
+	if (!gs.in_match) {
+		// captureTexture may still have appended; clear so the next
+		// in-match frame starts with a clean texture set.
+		_frameTextures.clear();
+		return;
+	}
 
 	// Hash the visual state
 	uint64_t stateHash = hashFrameState(gs);
@@ -247,6 +340,7 @@ void recordFrame(const rend_context& rc)
 			if (_prevStateHash != 0 && _prevStateHash != stateHash)
 				writeTransition(_prevStateHash, stateHash);
 			_prevStateHash = stateHash;
+			_frameTextures.clear();
 			return;
 		}
 	}
@@ -254,7 +348,17 @@ void recordFrame(const rend_context& rc)
 	// Cache miss — new visual state! Record it.
 	_cacheMisses.fetch_add(1, std::memory_order_relaxed);
 
-	if (writeFrameToDisk(stateHash, rc, gs))
+	// Augment the per-frame texture list with any textures the polys
+	// reference but that weren't decoded this frame (cache hits in
+	// flycast's TexCache). Without this the cache entry could reference
+	// textures whose pool files exist (from a prior frame's decode) but
+	// never appear in the cache entry's TexRefs section, so a replay
+	// client would skip loading them.
+	collectPolyTextures(rc.global_param_op);
+	collectPolyTextures(rc.global_param_pt);
+	collectPolyTextures(rc.global_param_tr);
+
+	if (writeFrameToDisk(stateHash, rc, gs, _frameTextures))
 	{
 		std::lock_guard<std::mutex> lock(_cacheMutex);
 		_knownStates.insert(stateHash);
@@ -262,8 +366,8 @@ void recordFrame(const rend_context& rc)
 		uint64_t total = _knownStates.size();
 		if (total % 100 == 0)
 		{
-			printf("[visual-cache] %lu unique states recorded (%.1f MB on disk)\n",
-				total, _totalBytes.load() / (1024.0 * 1024.0));
+			printf("[visual-cache] %lu unique states recorded (%.1f MB on disk, %zu textures this frame)\n",
+				total, _totalBytes.load() / (1024.0 * 1024.0), _frameTextures.size());
 		}
 	}
 
@@ -271,6 +375,7 @@ void recordFrame(const rend_context& rc)
 	if (_prevStateHash != 0 && _prevStateHash != stateHash)
 		writeTransition(_prevStateHash, stateHash);
 	_prevStateHash = stateHash;
+	_frameTextures.clear();
 }
 
 bool hasState(uint64_t stateHash)
@@ -300,6 +405,15 @@ void captureTexture(uint32_t startAddress, uint32_t tcwFull,
 	uint16_t width, uint16_t height,
 	const void* pixels, uint32_t pixelSize, bool is32bit)
 {
+	// Always record the texture-ref for the current frame, even if we've
+	// already written the pool file. The cache entry needs a complete
+	// list of textures the frame USES, not just the ones decoded this
+	// frame. (The dedup against _knownTextures below is for the disk
+	// write only — saves us re-encoding the same RGBA bytes each time
+	// flycast reuploads after a palette change.)
+	if (_initialized)
+		addTexRefIfMissing(startAddress, tcwFull, width, height);
+
 	// Texture ID: combine VRAM address + format info
 	uint64_t texId = ((uint64_t)tcwFull << 32) | startAddress;
 
@@ -349,8 +463,10 @@ void shutdown()
 	printf("[visual-cache] shutdown — %lu unique states, %lu hits, %lu misses (%.1f%% hit rate)\n",
 		s.uniqueStates, s.cacheHits, s.cacheMisses,
 		s.totalFrames > 0 ? (100.0 * s.cacheHits / s.totalFrames) : 0.0);
-	printf("[visual-cache] %.1f MB on disk, %u transitions, %u textures\n",
-		s.totalBytes / (1024.0 * 1024.0), _transitionCount, _texCount.load());
+	printf("[visual-cache] %.1f MB on disk, %u transitions, %u textures (file format v%u)\n",
+		s.totalBytes / (1024.0 * 1024.0), _transitionCount, _texCount.load(),
+		FILE_VERSION);
+	_initialized = false;
 }
 
 } // namespace maplecast_visual_cache
