@@ -179,7 +179,11 @@ bool mainui_rend_frame()
 				gui_display_profiler();
 			// MapleCast overlays in server/local mode — same overlays the
 			// mirror client shows, now available when running the game locally.
-			if (maplecast_mirror::isServer())
+			// Skip in headless mode: there's no ImGui context / imguiDriver, so
+			// gui_displayMirrorDebug() → gui_newFrame() null-derefs ~380ms after
+			// emu thread spawn. The original 8ff71a9ca was for local-with-display
+			// play; the imguiDriver check restores headless safety.
+			if (maplecast_mirror::isServer() && imguiDriver != nullptr)
 				gui_displayMirrorDebug();
 		} catch (const RendererException& e) {
 			gui_error(i18n::Ts("Renderer error:") + "\n" + e.what() + "\n\n"
