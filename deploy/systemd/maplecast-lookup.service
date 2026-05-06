@@ -1,0 +1,84 @@
+[Unit]
+Description=MapleCast Option 6 Lookup-Renderer Sandbox (parallel to maplecast-headless)
+Documentation=file:///opt/maplecast-lookup/docs/STREAMING-OPTIONS.md
+After=network-online.target
+Wants=network-online.target
+# DELIBERATELY does NOT depend on maplecast-headless.service. Both can run
+# side-by-side; restarting one must never disturb the other. If they ever
+# collide on a port that's a misconfiguration to fix here — not by
+# serializing the units.
+
+[Service]
+Type=simple
+# Separate system user so neither flycast instance can stomp the other's
+# savestates / VMU saves / cache files. The lookup user only needs
+# read-only access to the prod ROM dir; everything writable lives under
+# /opt/maplecast-lookup which is owned by maplecast-lookup:maplecast-lookup.
+User=maplecast-lookup
+Group=maplecast-lookup
+WorkingDirectory=/opt/maplecast-lookup
+
+EnvironmentFile=-/etc/maplecast/lookup.env
+
+# Defaults — `lookup.env` overrides any of these. Ports are deliberately
+# offset by +50 from production (7100 → 7150, 7200 → 7250, 7211 → 7251)
+# so a typo or stale config in one instance can't reach the other.
+Environment=MAPLECAST=1
+Environment=MAPLECAST_MIRROR_SERVER=1
+Environment=MAPLECAST_HEADLESS=1
+Environment=MAPLECAST_PORT=7150
+Environment=MAPLECAST_SERVER_PORT=7250
+Environment=MAPLECAST_CONTROL_PORT=7251
+Environment=MAPLECAST_ROM=/opt/maplecast/roms/mvc2.gdi
+# Force XDG_DATA_HOME into the lookup tree so flycast's user_data_dir
+# (~/.local/share/flycast/) doesn't touch the production maplecast user's
+# savestates.
+Environment=XDG_DATA_HOME=/opt/maplecast-lookup/.local/share
+Environment=XDG_CONFIG_HOME=/opt/maplecast-lookup/cfg
+# Option 6 features. With MAPLECAST_LOOKUP compiled in, these env vars
+# control runtime behavior. Default: visual cache recording ON, scanner
+# OFF, lookup test OFF — operator opts in as testing progresses.
+Environment=MAPLECAST_VISUAL_CACHE=1
+# Environment=MAPLECAST_SCAN=1
+# Environment=MAPLECAST_LOOKUP_TEST=1
+
+ExecStart=/usr/local/bin/flycast-lookup ${MAPLECAST_ROM}
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+KillSignal=SIGTERM
+KillMode=mixed
+
+# Hardening — same posture as production headless plus the visual_cache
+# write directory.
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectHostname=yes
+ProtectClock=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+ReadWritePaths=/opt/maplecast-lookup/savestates /opt/maplecast-lookup/cfg /opt/maplecast-lookup/.local /opt/maplecast-lookup/.maplecast /opt/maplecast-lookup/visual_cache /var/log/maplecast-lookup
+
+# Resource caps — visual cache disk writes are bursty when scanner runs.
+# Disk quota is enforced at the directory level, not via systemd.
+MemoryMax=1G
+TasksMax=64
+# Lower than production's 200% so an out-of-control scanner can't starve
+# the prod headless flycast running on the same VPS.
+CPUQuota=100%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=maplecast-lookup
+
+[Install]
+WantedBy=multi-user.target
