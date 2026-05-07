@@ -191,7 +191,18 @@ Step 6 is the moonshot — what makes MapleCast genuinely best-in-class.
 - [ ] #3 NVIDIA Control Panel toggles + Windows power plan + Defender exclusion (manual user step — see "Tier 2 quick wins" section below)
 - [x] **#4 SCHED_FIFO verification** — confirmed working: the latency-critical network thread runs `SCHED_FIFO priority 55` on all community nodes (only the main flycast thread is intentionally `SCHED_OTHER`; the hot thread is correctly escalated via `xdp.conf` ambient capabilities).
 - [ ] #5 Tournament mode env var (Windows client) — see scope notes below
-- [ ] #6 Rollback prediction (multi-week)
+- [ ] #6 Rollback prediction
+  - [x] **Phase 0** — determinism rig (validated 2026-05-07, see ARCHITECTURE.md "Cross-machine + cross-OS SH4 determinism" section)
+    - Step A wire faithfulness 48/48 ✓
+    - Step B same-machine determinism 30/30 ✓
+    - Step C-Linux cross-Linux-machine 19/19 ✓
+    - Step C-Windows cross-OS Linux↔Windows 30/30 ✓
+  - [ ] Phase 0 Step D — recorded-input replay determinism (`.mcrec` replay produces identical TA to live recording)
+  - [ ] Phase 1 — shadow-mode SH4 thread in mirror client
+  - [ ] Phase 2 — naïve prediction (renderer reads from local SH4)
+  - [ ] Phase 3 — rollback ring + comparator
+  - [ ] Phase 4 — performance + observability HUD
+  - [ ] Phase 5 — polish, opt-in/opt-out, docs
 
 ---
 

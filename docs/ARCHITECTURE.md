@@ -445,6 +445,44 @@ done
 echo "TA byte: $match match, $differ differ"  # MUST be 0 differ
 ```
 
+### Cross-machine + cross-OS SH4 determinism (Phase 0, validated 2026-05-07)
+
+**The wire-faithfulness above is half of the determinism story.** The other half: the SH4 emulator itself produces **byte-identical** TA output across different machines and operating systems.
+
+| Test | Setup | Result |
+|---|---|---|
+| same-machine, run-to-run | flycast on EWR restarted twice with the same savestate | **30/30** byte-identical sample frames |
+| cross-Linux-machine | flycast on EWR (NJ) vs ORD (Chicago), same savestate | **19/19** byte-identical |
+| cross-OS (Linux ↔ Windows) | flycast on EWR (Linux/GCC) vs Windows client (MSVC), same savestate | **30/30** byte-identical |
+| wire faithfulness | live mirror session, server emit vs client receive | **48/48** byte-identical |
+
+**This is the foundation rollback prediction rests on** (see [docs/OPTIMIZATION-PLAN.md](OPTIMIZATION-PLAN.md) item #6). Because SH4 is byte-deterministic across hosts:
+- A local predictor on Windows produces the same TA as a Linux server, given matching inputs
+- Rollback comparator can compare **inputs only** — same input log = same TA, by construction
+- No WSL workaround needed — native MSVC build is sufficient
+- Periodic 253-byte gamestate sanity check is belt-and-suspenders, not load-bearing
+
+#### Prerequisites for the guarantee
+- Same starting savestate on both ends (SHA-256 verified)
+- Same ROM bytes (SHA-256 verified — both sides used `track03.bin` SHA `1e064abb...`)
+- Same DC BIOS files (`dc_boot.bin` + `dc_flash.bin`) — REIOS HLE produces **different** TA than real BIOS; both ends MUST use the same path. On Windows, BIOS lives in `<flycast.exe-dir>/data/`, NOT `%APPDATA%/flycast/data/` — flycast on Windows uses the exe-relative dir, not XDG
+- Same flycast binary commit (cross-version determinism is NOT validated and shouldn't be assumed)
+- No clock-of-day inputs to SH4 (audited; flycast has none)
+
+#### How to reproduce / regression-test
+1. Enable `MAPLECAST_DUMP_TA=1 MAPLECAST_DUMP_TA_DIR=<dir>` on both ends
+2. Use the renderer-level dump hook in [core/hw/pvr/Renderer_if.cpp](../core/hw/pvr/Renderer_if.cpp) (commit `8a76a9a31`) — works on any platform, in any mode (server/client/standalone). Distinct from the older `serverPublish`-side dump in `maplecast_mirror.cpp`, which is Linux-only because it gates on `/dev/shm`.
+3. Same starting savestate on both ends. No inputs (or recorded inputs via `.mcrec`).
+4. Linux server-side needs a synthetic WS keepalive (Python recipe in [docs/OPTIMIZATION-PLAN.md](OPTIMIZATION-PLAN.md)) to defeat the `serverPublish skips heavy work when no clients` optimization (commit `8140bfc94`, line ~1152), which otherwise suppresses dumps.
+5. Tar-fetch dumps, byte-compare `frame_NNNNNN.bin` pairs at matching frame numbers.
+
+#### What's NOT yet validated
+- **Recorded-input replay determinism** (`.mcrec` replay producing identical TA to live recording). Treat as deterministic-by-construction (same inputs + deterministic SH4 = same TA) until empirically tested.
+- **Cross-version determinism**. Always pair predictor and authoritative server at the same commit hash.
+- **Rendered-pixel determinism**. The renderer (GL/Vulkan/DX11) is NOT necessarily deterministic. The guarantee is on the TA buffer (the input to the renderer). Rollback prediction operates on TA, not on pixels.
+
+---
+
 ### Workarounds that were REMOVED — do not bring them back
 
 Each of these existed to mask a wire race that no longer exists. They are
