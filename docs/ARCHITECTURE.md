@@ -455,6 +455,7 @@ echo "TA byte: $match match, $differ differ"  # MUST be 0 differ
 | cross-Linux-machine | flycast on EWR (NJ) vs ORD (Chicago), same savestate | **19/19** byte-identical |
 | cross-OS (Linux ↔ Windows) | flycast on EWR (Linux/GCC) vs Windows client (MSVC), same savestate | **30/30** byte-identical |
 | wire faithfulness | live mirror session, server emit vs client receive | **48/48** byte-identical |
+| `.mcrec` input-replay determinism | live recording on Linux with real gameplay inputs, replayed on Windows via `replay_reader.cpp` | **16/16** byte-identical |
 
 **This is the foundation rollback prediction rests on** (see [docs/OPTIMIZATION-PLAN.md](OPTIMIZATION-PLAN.md) item #6). Because SH4 is byte-deterministic across hosts:
 - A local predictor on Windows produces the same TA as a Linux server, given matching inputs
@@ -477,7 +478,6 @@ echo "TA byte: $match match, $differ differ"  # MUST be 0 differ
 5. Tar-fetch dumps, byte-compare `frame_NNNNNN.bin` pairs at matching frame numbers.
 
 #### What's NOT yet validated
-- **Recorded-input replay determinism** (`.mcrec` replay producing identical TA to live recording). Treat as deterministic-by-construction (same inputs + deterministic SH4 = same TA) until empirically tested.
 - **Cross-version determinism**. Always pair predictor and authoritative server at the same commit hash.
 - **Rendered-pixel determinism**. The renderer (GL/Vulkan/DX11) is NOT necessarily deterministic. The guarantee is on the TA buffer (the input to the renderer). Rollback prediction operates on TA, not on pixels.
 
