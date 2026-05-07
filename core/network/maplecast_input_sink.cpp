@@ -231,14 +231,18 @@ static void onButton(int port, DreamcastKey key, bool pressed)
 		gui_game_overlay::recordInput(_buttons,
 			(uint8_t)(lt[tp] >> 8), (uint8_t)(rt[tp] >> 8));
 
-		// Debug: log which DC key bit is actually set
-		static uint16_t _prevDbg = 0xFFFF;
-		if (_buttons != _prevDbg) {
-			uint16_t changed = _prevDbg ^ _buttons;
-			printf("[input-dbg] buttons=0x%04x key=0x%x %s (changed=0x%04x)\n",
-			       _buttons, (unsigned)key, pressed ? "DOWN" : "UP", changed);
-			fflush(stdout);
-			_prevDbg = _buttons;
+		// Per-button debug log — verbose, off by default. Set MAPLECAST_INPUT_DBG=1
+		// to re-enable when diagnosing button mapping or wire-format issues.
+		static const bool _inputDbgEnabled = std::getenv("MAPLECAST_INPUT_DBG") != nullptr;
+		if (_inputDbgEnabled) {
+			static uint16_t _prevDbg = 0xFFFF;
+			if (_buttons != _prevDbg) {
+				uint16_t changed = _prevDbg ^ _buttons;
+				printf("[input-dbg] buttons=0x%04x key=0x%x %s (changed=0x%04x)\n",
+				       _buttons, (unsigned)key, pressed ? "DOWN" : "UP", changed);
+				fflush(stdout);
+				_prevDbg = _buttons;
+			}
 		}
 	}
 }
