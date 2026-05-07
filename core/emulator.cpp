@@ -43,6 +43,7 @@
 #include "network/maplecast_input_server.h"
 #include "network/maplecast_audio.h"
 #include "network/maplecast_mirror.h"
+#include "network/replay_reader.h"
 #include "network/maplecast_control_ws.h"
 #include "network/maplecast_player.h"
 #include "network/maplecast_replica.h"
@@ -748,6 +749,24 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 			else if (std::getenv("MAPLECAST_HEADLESS_AUTOLOAD")) {
 				printf("[autoload-debug] MAPLECAST_HEADLESS_AUTOLOAD=1 — forcing load\n");
 				dc_loadstate(config::SavestateSlot);
+			}
+
+			// MAPLECAST_REPLAY_IN replay-mode savestate restore. The .mcrec
+			// was opened earlier (in maplecast_input_server::init) so the
+			// in-memory buffers are staged. Restoring here — at the same
+			// emulator-init phase as the autoload paths above — is what
+			// the SH4 dynarec expects: dc_deserialize is called only after
+			// loadGame finishes JIT cache init. Restoring earlier (which
+			// the prior code did from input_server::init) crashed reliably
+			// with SIGSEGV at 0x5e6bb82b5f80 on the first SH4 frame.
+			if (std::getenv("MAPLECAST_REPLAY_IN")) {
+				printf("[autoload-debug] MAPLECAST_REPLAY_IN — restoring savestate from .mcrec at autoload point\n");
+				if (maplecast_replay::loadStartSavestate()) {
+					double speed = 1.0;
+					if (const char* s = std::getenv("MAPLECAST_REPLAY_SPEED"))
+						speed = atof(s);
+					maplecast_replay::startPlayback(speed);
+				}
 			}
 #endif
 		}

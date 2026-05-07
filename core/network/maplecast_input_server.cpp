@@ -1449,18 +1449,19 @@ bool init(int udpPort)
 	}
 
 	// Phase 4b: env-var-driven replay PLAYBACK. Set MAPLECAST_REPLAY_IN to
-	// a .mcrec file and we'll open it, restore its savestate, and inject
-	// the recorded inputs at their original frame numbers. Optional speed
-	// override via MAPLECAST_REPLAY_SPEED (float, default 1.0).
+	// a .mcrec file. Here we only OPEN the file (parse header, stage the
+	// compressed savestate + input log into RAM). The actual savestate
+	// restore + playback activation is deferred to emulator::loadGame's
+	// autoload point — restoring the savestate here (before flycast's
+	// dynarec / JIT cache is fully initialized) corrupts SH4 state and
+	// crashes with SIGSEGV at 0x5e6bb82b5f80 once the emu thread starts.
+	// The pull-model getInputAtFrame hook in ggpo::getLocalInput is
+	// independent of timing — it just needs the input log resident.
 	if (const char* inPath = std::getenv("MAPLECAST_REPLAY_IN")) {
-		if (maplecast_replay::openReplay(inPath)) {
-			if (maplecast_replay::loadStartSavestate()) {
-				double speed = 1.0;
-				if (const char* s = std::getenv("MAPLECAST_REPLAY_SPEED"))
-					speed = atof(s);
-				maplecast_replay::startPlayback(speed);
-			}
-		}
+		maplecast_replay::openReplay(inPath);
+		// loadStartSavestate() + startPlayback() now called from
+		// emulator.cpp at the autoload point — see the
+		// MAPLECAST_REPLAY_IN branch there.
 	}
 
 	return true;
