@@ -229,10 +229,42 @@ Net win: ~3-8ms reduction in jitter from removing background CPU/IO interference
 
 The "Tournament Mode" idea has three sub-pieces with very different effort levels:
 
-1. **Process-level tweaks** (small, 1 hr): `MAPLECAST_TOURNAMENT_MODE=1` env var → in-process: bump priority class to `HIGH` (already done, can try `REALTIME` carefully), `VirtualLock` working set pages, set thread characteristics to `Pro Audio` MMCSS for audio recv. ~1-3ms saving.
+1. **Process-level tweaks** ✅ done. `MAPLECAST_TOURNAMENT_MODE=1` env var → in-process: HIGH priority class, working-set lock 192-384 MB, disable priority boost.
 
-2. **Win32 RawInput gamepad bypass** (medium, 1-2 days): replace SDL gamepad polling with `RegisterRawInputDevices` + `WM_INPUT` handler. Mirror what evdev does on Linux. ~1-3ms saving.
+2. **Win32 RawInput gamepad bypass** ✅ done. `MAPLECAST_RAWINPUT=1` (already shipped on master via `03bec497b`) — XInput direct polling at 1 kHz on `THREAD_PRIORITY_TIME_CRITICAL`, with Raw Input fallback for non-XInput sticks. Wizard at `MAPLECAST_BUTTON_WIZARD=1` for one-time button mapping.
 
-3. **DXGI Independent Flip mode** (large, 2-4 days): replace SDL/OpenGL fullscreen presentation with DXGI flip-discard model. Requires either a DXGI-backed renderer or a flip-model wrapper. ~5-15ms saving (biggest single Windows-side win).
+3. **DXGI Independent Flip mode** — see #5.3 plan below.
 
-For "go through 1-5 quickly," only #1 above is in-scope. #2 and #3 are real engineering days.
+---
+
+### #5.3 — DXGI Independent Flip plan (Windows-only)
+
+DXGI is Windows-only. Linux equivalent (DRM/KMS direct mode + Wayland tearing-control) and macOS equivalent (`kCGDisplayCaptureFlags`) are independent ~2-day efforts each.
+
+**Discovery (2026-05-07)**: most plumbing is ALREADY in the codebase. The DX11 backend (`USE_DX11=ON`, `HAVE_D3D11`) is compiled into the client binary. [`core/rend/dx11/dx11context.cpp`](../core/rend/dx11/dx11context.cpp) already creates a DXGI swap chain with `DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL` and `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING`. We're tuning, not building. Revised estimate: **1.5-2 days**.
+
+**Knobs to flip:**
+| Knob | Current | Want | Win |
+|---|---|---|---|
+| Mirror-client renderer on Win | OpenGL (via SDL) | DX11 | enables the rest |
+| `IDXGIDevice1::SetMaximumFrameLatency` | not called (default 3) | **`(1)`** | up to **33ms** of queue latency removed — biggest single win |
+| `SwapEffect` | `FLIP_SEQUENTIAL` | `FLIP_DISCARD` | mailbox-style: present newest, drop stale |
+| Window state | bordered windowed | borderless fullscreen at native res | Independent Flip eligibility requirement |
+| Verification | none | PresentMon log + `DwmGetCompositionTimingInfo` | confirm hardware path |
+
+**Phases:**
+1. **(½ day) Switch mirror client to DX11** — `core/emulator.cpp` picks renderer based on env / build mode. Keep OpenGL as fallback if DX11 init fails.
+2. **(½ day) Tune swapchain in `dx11context.cpp`** — `SetMaximumFrameLatency(1)`, `FLIP_DISCARD` (gated on TOURNAMENT_MODE), verify ALLOW_TEARING fires.
+3. **(½ day) Borderless fullscreen at monitor's native res** — `core/sdl/sdl.cpp` window flags + `SDL_SetWindowBordered(SDL_FALSE)`. New env var `MAPLECAST_BORDERLESS=1` (auto under TOURNAMENT_MODE).
+4. **(½ day) Verification** — PresentMon trace + log line via `DwmGetCompositionTimingInfo` reporting compositor state every 5s.
+
+**Acceptance criteria:**
+1. Console: `[render] DX11 backend`, `MaxFrameLatency=1`, `FLIP_DISCARD`, `borderless fullscreen WxH`
+2. PresentMon shows `Hardware: Independent Flip` ≥95% of frames
+3. F2 HUD frame→pixel drops ≥5ms vs OpenGL
+4. No regression on char select / stage select / hyper flashes
+
+**Risks:**
+- DX11 backend was designed for full flycast pipeline; mirror-client mode (TA from wire) may hit untested code paths → OpenGL fallback
+- NVIDIA Optimus laptops sometimes refuse Independent Flip (dGPU/iGPU compositor switch) → detect via `DXGI_FRAME_STATISTICS_PRESENT_FAILURE`
+- VRR (G-Sync/FreeSync) + flip + tearing: actually a bonus — freerun, no tearing, no vsync wait
