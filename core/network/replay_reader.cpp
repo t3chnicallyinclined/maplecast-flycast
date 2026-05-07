@@ -5,9 +5,20 @@
 	a two-step dance:
 	  1. openReplay() — parse header, populate ReplayInfo
 	  2. loadStartSavestate() — decompress + dc_deserialize into RAM
-	Then startPlayback() spawns a thread that walks the input log and
-	calls updateSlot() at the right frame, giving us deterministic
-	regeneration of the original match.
+	Then startPlayback() activates pull-mode: subsequent calls to
+	getInputAtFrame(frame, slot) return the recorded input for that
+	frame. The SH4's input read path (ggpo::getLocalInput) calls this
+	in replay mode; the SH4's own frame loop drives playback rate.
+
+	Architecture note (2026-05-07 redesign): the previous implementation
+	spawned a background thread that polled maplecast_mirror::currentFrame()
+	and pushed inputs via injectInput() → updateSlot(). That model raced
+	the SH4's input read path and crashed with SIGSEGV at 0x5e6bb82b5f80
+	on both Linux and Windows. The pull model below is single-threaded
+	by construction — the SH4 reads recorded inputs inline during its
+	own getLocalInput call. Same approach as Fightcade/GGPO's
+	ggpo_synchronize_input. See docs/ROLLBACK-PREDICTION.md for the
+	full flow comparison.
 */
 #include "replay_reader.h"
 #include "maplecast_input_server.h"
@@ -20,7 +31,6 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
-#include <thread>
 #include <vector>
 
 #include <zstd.h>
@@ -35,13 +45,21 @@ static std::atomic<bool>     _open{false};
 static std::atomic<bool>     _playing{false};
 static FILE*                 _file = nullptr;
 static ReplayInfo            _info{};
-static std::thread           _playbackThread;
 
 // Loaded into memory from the file at openReplay(). The savestate buffer
 // is held until loadStartSavestate() consumes it; the input log is held
-// until startPlayback() drains it.
+// for getInputAtFrame() lookups during playback.
 static std::vector<uint8_t>  _savestateCompressed;
 static std::vector<uint8_t>  _inputLog;       // raw 16-byte entries
+
+// Per-slot lookup cursor for getInputAtFrame(). Each cursor advances
+// monotonically as the SH4's frame counter advances, giving O(1)
+// amortized lookup. Last-known input is kept so that frames between
+// recorded entries return the previous "still-pressed" state.
+static size_t   _cursor[2]      = {0, 0};
+static uint16_t _lastButtons[2] = {0xFFFF, 0xFFFF}; // active-low default = nothing pressed
+static uint8_t  _lastLt[2]      = {0, 0};
+static uint8_t  _lastRt[2]      = {0, 0};
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -252,75 +270,77 @@ bool loadStartSavestate() {
 	return true;
 }
 
-// ── playback thread ──────────────────────────────────────────────────
-
-static uint64_t nowUs() {
-	auto now = std::chrono::steady_clock::now();
-	return std::chrono::duration_cast<std::chrono::microseconds>(
-		now.time_since_epoch()).count();
-}
-
-static void playbackLoop(double speed) {
-	// Walk the input log entry by entry, blocking until each entry's
-	// recorded frame matches the emulator's current frame, then call
-	// updateSlot() to inject the input.
-	const size_t N = _inputLog.size() / 16;
-	size_t i = 0;
-
-	auto firstEntry = nowUs();  // not used until we know the first frame
-	uint64_t firstFrame = N > 0 ? readLE64(&_inputLog[0]) : 0;
-
-	while (_playing.load(std::memory_order_relaxed) && i < N) {
-		const uint8_t* e = &_inputLog[i * 16];
-		uint64_t frame      = readLE64(e);
-		uint32_t seqAndSlot = readLE32(e + 8);
-		uint16_t buttons    = (uint16_t)e[12] | ((uint16_t)e[13] << 8);
-		uint8_t  ltVal      = e[14];
-		uint8_t  rtVal      = e[15];
-		int slot = (int)((seqAndSlot >> 24) & 0x3);
-
-		// Wait until the emulator catches up to this frame number
-		// (scaled by speed — 0.5 = wait twice as long, 2.0 = half).
-		while (_playing.load(std::memory_order_relaxed)) {
-			uint64_t curFrame = maplecast_mirror::currentFrame();
-			// Scale frame target by speed (faster speed = "consume" more
-			// recorded frames per real frame)
-			uint64_t targetFrame = firstFrame +
-				(uint64_t)((frame - firstFrame) / speed);
-			if (curFrame >= targetFrame) break;
-			std::this_thread::sleep_for(std::chrono::microseconds(500));
-		}
-
-		// Inject the input event via the public injectInput() — same
-		// path live gameplay uses, guarantees identical observability
-		// for the SH4 (atomic update of _slotInputAtomic + accumulator).
-		maplecast_input::injectInput(slot, ltVal, rtVal, buttons);
-		i++;
-	}
-
-	_playing.store(false);
-	printf("[replay-reader] playback complete (%zu events injected)\n", i);
-}
+// ── pull-model playback API ──────────────────────────────────────────
+//
+// startPlayback() just flips the active flag. The SH4 input read path
+// (ggpo::getLocalInput) calls getInputAtFrame() once per frame per slot
+// to fetch recorded inputs inline. No background thread, no race with
+// SH4 startup, no injection into the live input atomic.
 
 void startPlayback(double speed) {
 	std::lock_guard<std::mutex> lk(_mtx);
 	if (!_open.load() || _playing.load()) return;
 	_playing.store(true);
-	_playbackThread = std::thread(playbackLoop, speed);
-	printf("[replay-reader] playback started @ %.2fx speed\n", speed);
+	_cursor[0] = _cursor[1] = 0;
+	_lastButtons[0] = _lastButtons[1] = 0xFFFF;
+	_lastLt[0] = _lastLt[1] = 0;
+	_lastRt[0] = _lastRt[1] = 0;
+	(void)speed;  // pull-model is paced by the SH4 frame loop; speed param ignored
+	printf("[replay-reader] pull-model playback active @ 1.00x (SH4-paced); %zu input entries\n",
+	       _inputLog.size() / 16);
+}
+
+bool getInputAtFrame(uint64_t frame, int slot,
+                     uint16_t& outButtons, uint8_t& outLt, uint8_t& outRt)
+{
+	if (slot < 0 || slot > 1) return false;
+	if (!_playing.load(std::memory_order_relaxed)) return false;
+
+	const size_t N = _inputLog.size() / 16;
+	size_t& cursor = _cursor[slot];
+
+	// Advance the per-slot cursor forward through the log, applying any
+	// entries for THIS slot whose recorded frame is <= the current emulator
+	// frame. Entries for the OTHER slot are skipped (the other slot's
+	// cursor will pick them up). Linear scan from cursor; O(1) amortized
+	// because the SH4 frame counter advances monotonically.
+	bool found = false;
+	while (cursor < N) {
+		const uint8_t* e = &_inputLog[cursor * 16];
+		uint64_t entryFrame = readLE64(e);
+		uint32_t seqAndSlot = readLE32(e + 8);
+		int      entrySlot  = (int)((seqAndSlot >> 24) & 0x3);
+
+		if (entryFrame > frame) break;  // entry is in the future; wait
+
+		if (entrySlot == slot) {
+			_lastButtons[slot] = (uint16_t)e[12] | ((uint16_t)e[13] << 8);
+			_lastLt[slot]      = e[14];
+			_lastRt[slot]      = e[15];
+			found = true;
+		}
+		cursor++;
+	}
+
+	// Always return the most-recent-seen input for this slot. If we
+	// haven't seen any entries yet for this slot, that's the neutral
+	// default (all buttons released, triggers at 0). MVC2's input
+	// semantics are sticky — buttons stay pressed until released —
+	// so returning last-known is the correct semantic between entries.
+	outButtons = _lastButtons[slot];
+	outLt      = _lastLt[slot];
+	outRt      = _lastRt[slot];
+	return found || cursor > 0;  // false only if we haven't yielded any entry yet
 }
 
 bool playbackActive() { return _playing.load(std::memory_order_relaxed); }
 
 void close() {
-	{
-		std::lock_guard<std::mutex> lk(_mtx);
-		_playing.store(false);
-	}
-	if (_playbackThread.joinable()) _playbackThread.join();
 	std::lock_guard<std::mutex> lk(_mtx);
+	_playing.store(false);
 	_savestateCompressed.clear();
 	_inputLog.clear();
+	_cursor[0] = _cursor[1] = 0;
 	_open.store(false);
 }
 

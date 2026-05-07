@@ -45,17 +45,34 @@ const ReplayInfo& info();
 // openReplay() and BEFORE the emulator is running. Returns false on error.
 bool loadStartSavestate();
 
-// Spawn a background thread that injects recorded inputs into the
-// running emulator at their recorded frame numbers. Frames are matched
-// against maplecast_mirror::currentFrame(). Stops when input log is
-// exhausted. Returns immediately.
+// Activate replay-mode input read. After this call, getInputAtFrame()
+// returns recorded inputs and the SH4's input read path (ggpo::
+// getLocalInput) routes through it.
 //
-// speed: 1.0 = real-time, 0.5 = half speed, 2.0 = double speed.
-//        (Implemented by scaling the frame-stamp comparison.)
+// 'speed' is preserved for API compatibility. 1.0 = real-time playback
+// at the emulator's natural frame rate. Other values are ignored under
+// the pull model — the SH4's frame loop drives playback rate.
+//
+// Pull-model (2026-05-07 redesign): replaces the previous push-model
+// playback thread that injected inputs into the live input atomic.
+// That model raced the SH4 input read path and crashed at SIGSEGV
+// 0x5e6bb82b5f80. Inspired by Fightcade/GGPO's approach where the
+// emulator's frame loop pulls recorded inputs at each frame instead
+// of a separate thread pushing.
 void startPlayback(double speed = 1.0);
 
-// True iff playback is active.
+// True iff replay-mode input read is active.
 bool playbackActive();
+
+// Pull-model input read. Called from ggpo::getLocalInput() once per
+// frame, per slot. Returns true and writes outputs if a recorded entry
+// exists for (frame, slot). Returns false otherwise — caller should
+// hold the last-known input or fall through to defaults.
+//
+// Implementation: linear scan with cached per-slot cursor; O(1)
+// amortized for monotonically-advancing frame numbers.
+bool getInputAtFrame(uint64_t frame, int slot,
+                     uint16_t& outButtons, uint8_t& outLt, uint8_t& outRt);
 
 // True iff a replay is open (regardless of playback state).
 bool isOpen();
