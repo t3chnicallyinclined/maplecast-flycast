@@ -384,6 +384,32 @@ int main(int argc, char* argv[])
 	else
 		printf("[maplecast] process priority class: HIGH\n");
 
+	// MAPLECAST_TOURNAMENT_MODE — opt-in latency tightening for competitive play.
+	// Process-level only; per-thread MMCSS / RawInput / DXGI Independent Flip are
+	// separate larger pieces tracked in docs/OPTIMIZATION-PLAN.md #5.2 and #5.3.
+	if (std::getenv("MAPLECAST_TOURNAMENT_MODE")) {
+		// Lock working-set bounds so the OS doesn't trim pages out from under
+		// us during a frame. ~1-2 page-fault stalls per minute otherwise; each
+		// is 100µs-1ms of jitter that shows up as dropped frames in the HUD.
+		// Bounds chosen for the ~14 MB binary + ~50 MB savestate + ~60 MB GL
+		// state + headroom. Process actually uses ~100 MB peak.
+		SIZE_T minWS = 192 * 1024 * 1024;
+		SIZE_T maxWS = 384 * 1024 * 1024;
+		if (SetProcessWorkingSetSize(GetCurrentProcess(), minWS, maxWS))
+			printf("[tournament-mode] working set locked %zu-%zu MB (no page-fault stalls)\n",
+			       minWS >> 20, maxWS >> 20);
+		else
+			printf("[tournament-mode] SetProcessWorkingSetSize failed: %lu (need SeIncreaseWorkingSetPrivilege)\n",
+			       GetLastError());
+
+		// Disable priority boost — the kernel's auto-boost on I/O can cause
+		// short bursts where threads run at unexpectedly high priority,
+		// followed by drops. Predictable scheduling > opportunistic boosts.
+		SetProcessPriorityBoost(GetCurrentProcess(), TRUE);  // TRUE = DISABLE boost
+
+		printf("[tournament-mode] enabled — recommend also: powercfg Ultimate Performance, NVIDIA Ultra Low Latency, Defender exclusion for flycast.exe\n");
+	}
+
 	// MapleCast mirror client auto-load — mirrors core/linux-dist/main.cpp:269-296.
 	// Two paths trigger romless mirror mode:
 	//   1. --server <host>[:<port>]  command-line flag
