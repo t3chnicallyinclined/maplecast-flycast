@@ -44,6 +44,7 @@
 #include "network/maplecast_audio.h"
 #include "network/maplecast_mirror.h"
 #include "network/replay_reader.h"
+#include "network/replay_writer.h"
 #include "network/maplecast_control_ws.h"
 #include "network/maplecast_player.h"
 #include "network/maplecast_replica.h"
@@ -767,6 +768,22 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 						speed = atof(s);
 					maplecast_replay::startPlayback(speed);
 				}
+			}
+
+			// MAPLECAST_REPLAY_OUT recording start. Capturing the savestate
+			// here — same lifecycle moment as MAPLECAST_REPLAY_IN restores
+			// it — guarantees record/replay state alignment. Capturing
+			// earlier (input_server::init) made frame 1 differ between
+			// record and replay due to intermediate init-state drift.
+			if (const char* outPath = std::getenv("MAPLECAST_REPLAY_OUT")) {
+				printf("[autoload-debug] MAPLECAST_REPLAY_OUT — starting recording at autoload point\n");
+				maplecast_replay::StartParams sp;
+				sp.out_path = outPath;
+				if (const char* p1 = std::getenv("MAPLECAST_REPLAY_P1_NAME"))    sp.p1_name = p1;
+				if (const char* p2 = std::getenv("MAPLECAST_REPLAY_P2_NAME"))    sp.p2_name = p2;
+				if (const char* sid = std::getenv("MAPLECAST_REPLAY_SERVER_ID")) sp.server_id = sid;
+				if (const char* rh = std::getenv("MAPLECAST_REPLAY_ROM_HASH"))   sp.rom_hash_hex = rh;
+				maplecast_replay::start(sp);
 			}
 #endif
 		}

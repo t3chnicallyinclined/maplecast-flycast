@@ -1434,19 +1434,13 @@ bool init(int udpPort)
 	printf("[input-server] waiting for players (NOBD UDP or browser WebSocket)\n");
 	maplecast_telemetry::send("[input-server] ready on port %d", udpPort);
 
-	// Phase 4: env-var-driven replay recording. Set MAPLECAST_REPLAY_OUT
-	// to a file path and we'll auto-record everything (savestate at boot
-	// + every input event) until the process shuts down. Useful for
-	// tournament archive mode + dev testing the replay format.
-	if (const char* outPath = std::getenv("MAPLECAST_REPLAY_OUT")) {
-		maplecast_replay::StartParams sp;
-		sp.out_path = outPath;
-		if (const char* p1 = std::getenv("MAPLECAST_REPLAY_P1_NAME")) sp.p1_name = p1;
-		if (const char* p2 = std::getenv("MAPLECAST_REPLAY_P2_NAME")) sp.p2_name = p2;
-		if (const char* sid = std::getenv("MAPLECAST_REPLAY_SERVER_ID")) sp.server_id = sid;
-		if (const char* rh = std::getenv("MAPLECAST_REPLAY_ROM_HASH")) sp.rom_hash_hex = rh;
-		maplecast_replay::start(sp);
-	}
+	// MAPLECAST_REPLAY_OUT recording — start() invocation moved to
+	// emulator.cpp's autoload point so the savestate is captured at the
+	// SAME lifecycle moment where MAPLECAST_REPLAY_IN restores it.
+	// Capturing here (early, before emulator::start) but restoring later
+	// (at autoload point) caused frame 1 to differ between record and
+	// replay due to intermediate init-state drift between the two
+	// phases. See emulator.cpp's MAPLECAST_REPLAY_OUT branch.
 
 	// Phase 4b: env-var-driven replay PLAYBACK. Set MAPLECAST_REPLAY_IN to
 	// a .mcrec file. Here we only OPEN the file (parse header, stage the
