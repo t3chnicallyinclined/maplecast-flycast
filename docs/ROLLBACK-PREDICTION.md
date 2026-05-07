@@ -215,6 +215,24 @@ Builds **use case G + I + K**. Bigger projects, ship after the foundation is pro
 
 ## Investigation log — known issues
 
+### ✅ DONE 2026-05-07: Phase 0 Step D — record + replay validated end-to-end
+
+The full record→replay loop works on prod with visual confirmation. Recorded a session on prod's headless server with the V2 .mcrec format (input log + on-disk .state bytes embedded verbatim, no dc_serialize round-trip). Replayed on the same prod server with mirror clients spectating — the recorded gameplay reproduced faithfully (Magneto tag-in confirmed in correct frame).
+
+The path that worked:
+1. **V2 .mcrec format** (commit `c928d144b`) — writer reads the `mvc2.state` bytes directly from `hostfs::getSavestatePath()` and embeds them; reader writes them back to the same slot; `dc_loadstate` does the actual restore via the canonical autoload path. No in-process serialization round-trip on either side.
+2. **Frame-counter alignment** (commit `4e4181677`) — replay's input-lookup pace clock now uses `maplecast_mirror::currentFrame()` (the same counter the recorder stamps entries with) when the mirror server is running. Standalone falls back to a synthetic counter that pre-increments to match the recorder's first-entry frame=1.
+3. **Replay-server topology** — running `MAPLECAST_REPLAY_IN` on a Linux headless server with mirror clients connecting as spectators. Same OS as recorder, native framerate, no Windows-specific divergence sources. The replay server is itself a useful product feature ("any node can host a replay").
+
+### ⚠️ Known remaining gap: input-atomic-vs-SH4-read race
+The recorder logs `_slotInputAtomic[slot]` at end-of-frame (in `serverPublish` via `publishFrameTick`), but the SH4 reads the atomic at start-of-frame (in `maple_DoDma`). Between those two reads (~14ms), input thread updates from UDP/WS clients can change the atomic. The recorded value is therefore "atomic at end-of-frame," not "atomic at SH4-read-time."
+
+For most gameplay this race never fires (input is steady within a frame). For frame-perfect tech (cancels, mash, tag-cancels) it *can* — recording captures input the SH4 didn't actually use, replay applies it where SH4 used something else.
+
+**Severity:** acceptable for watch-back replays (current scope). **Not acceptable for rollback re-emulation** where every frame must be byte-exact. Fix: hook `ggpo::getInput`'s tail and log what was just returned to the SH4 — by definition the value the SH4 actually consumed. Estimated 20-line change.
+
+**Decision:** defer until Phase 1 of rollback prediction, where it becomes load-bearing. For Phase 0 Step D it's intentionally tolerated.
+
 ### ✅ FIXED 2026-05-07: replay-mode SIGSEGV
 The original `0x5e6bb82b5f80` crash was a combination of two bugs:
 1. **Push-model playback thread race**: a separate thread was injecting inputs into the live atomic, racing the SH4 thread

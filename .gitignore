@@ -98,3 +98,8 @@ external/
 *.7z
 web/collector/target/
 maplecast.db/
+
+# Replay recordings — test artifacts, never commit
+*.mcrec
+xinput-trace.log
+replay-trace.log
