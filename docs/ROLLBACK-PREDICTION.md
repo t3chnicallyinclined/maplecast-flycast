@@ -213,24 +213,39 @@ Builds **use case G + I + K**. Bigger projects, ship after the foundation is pro
 
 ---
 
-## Known issues — CRITICAL BLOCKER for Phase 1
+## Investigation log — known issues
 
-- **Replay-mode SH4 crash** (discovered 2026-05-07): `flycast` with `MAPLECAST=1 MAPLECAST_REPLAY_IN=<.mcrec>` SIGSEGVs at `0x5e6bb82b5f80` (the fault address equals the access target — wild jump or stack corruption) within ~280ms of the Flycast-emu thread starting. Reproducible 100% on **both Linux and Windows** with the same fault address (rules out a Windows-GUI-specific cause). Sequence on both platforms:
-  1. `replay-reader` opens .mcrec successfully
-  2. Savestate restored (27.7 MB)
-  3. `replay-reader` spawns playback thread (which spins until SH4 frame catches up)
-  4. `MIRROR Sync state saved: 26.5 MB` (initServer's serverSaveSync)
-  5. `[emulator] Flycast-emu thread running`
-  6. `[emulator] Flycast-emu → SCHED_FIFO priority 40`
-  7. **SIGSEGV at `0x5e6bb82b5f80`** — same address every time, both OSes
-- **Implication**: this bug blocks rollback prediction Phase 1. Rollback re-emulation = "load saved state + replay inputs forward" which is the exact path that crashes. The bug must be fixed before Phase 1 can ship.
-- **Investigation hypotheses**:
-  1. Loaded savestate has SH4 PC pointing to invalid memory (PC corruption)
-  2. SH4 JIT cache state corrupted by serverSaveSync running between dc_deserialize and emulator::start
-  3. Race between replay-reader's playback thread spinning + SH4 emu thread starting
-  4. Replay-reader's `dc_deserialize` differs subtly from autoload's path (which works fine — Step C validated)
-- **Next debugging steps**: gdb on a core dump to see exact instruction at the fault, check if SH4 PC matches what was in the savestate, bisect by disabling components (no input injection / no playback thread / no MIRROR_SERVER) until crash stops.
-- **Workaround for now**: server-side replay + spectate via mirror client *also crashes* (we tried). For "watch your matches" feature, we'd need to fix this regardless.
+### ✅ FIXED 2026-05-07: replay-mode SIGSEGV
+The original `0x5e6bb82b5f80` crash was a combination of two bugs:
+1. **Push-model playback thread race**: a separate thread was injecting inputs into the live atomic, racing the SH4 thread
+2. **Lifecycle-phase mismatch**: replay-reader's `loadStartSavestate()` fired during `input_server::init` — way before flycast's dynarec/JIT cache was initialized. The SH4 PC in the loaded state referenced JIT addresses that didn't exist yet in this process
+
+Fixes (commits `87e9e758b`, `e7f2d52f6`, `0a1a62a53`):
+1. Replaced playback thread with pull-model `getInputAtFrame(frame, slot)` called inline by `ggpo::getLocalInput()` — single-threaded by construction
+2. Moved `replay_reader::loadStartSavestate()` from `input_server::init` to `emulator.cpp`'s autoload point (same place `MAPLECAST_HEADLESS_AUTOLOAD` fires) — JIT cache is fully initialized at this point
+3. Moved `replay_writer::start()` to the same autoload point so capture and restore use identical lifecycle timing
+
+Result: replay runs cleanly to completion, no SIGSEGV. Validated on Linux server with the new portable build.
+
+### ⚠️ OPEN: dc_serialize/dc_deserialize state-completeness
+After the crash fix, replay runs end-to-end but **frame 1's TA buffer still differs ~3900 bytes** (out of 217,536) between the live recording and the replay of the same `.mcrec`. Both runs:
+- Same flycast binary (just-built portable)
+- Same starting savestate (captured at autoload point, restored at autoload point)
+- No inputs (synthetic WS keepalive only on both ends)
+- Same Linux box (EWR)
+
+Same TA *size*, byte-different content. This means flycast's savestate round-trip isn't 100% complete — some state (renderer-side? PVR sub-registers? audio buffer pointers?) doesn't get captured by `dc_serialize` or doesn't survive `dc_deserialize` cleanly.
+
+Step C of Phase 0 worked because both runs loaded the same `mvc2.state` from disk (no round-trip through dc_serialize at runtime). The new test does a runtime `dc_serialize` → bytes → `dc_deserialize` cycle, which surfaces the gap.
+
+**Implications for Phase 1**:
+- Rollback re-emulation does NOT round-trip through dc_serialize — it copies SH4 RAM/regs/VRAM frame-by-frame in memory, then restores via direct memcpy. May sidestep this bug entirely.
+- Replay-from-file as a feature ("watch my saved match") DOES need it solved.
+- Worth time-boxing investigation: gdb a live recording immediately before/after `dc_serialize` and at frame 1 emit; diff to identify which bytes drift.
+
+**Workarounds**:
+- For replay-watching, server-side replay + mirror-client spectate *works* (no client-side replay path). The user sees the gameplay unfold; per-frame TA bytes won't match the original wire stream but it's playable and visually identical to the trained eye.
+- For Phase 1 rollback, proceed and verify if in-memory state copies sidestep this bug. If they do, ship rollback first and circle back to file-replay determinism later.
 
 ## Lessons from Fightcade — flow comparison
 
