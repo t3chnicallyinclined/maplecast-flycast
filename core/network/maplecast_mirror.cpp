@@ -1242,22 +1242,35 @@ void serverPublish(TA_context* ctx)
 	{
 		static bool _dumpInit = false;
 		static bool _dumpEnabled = false;
+		static std::string _dumpDir;
 		if (!_dumpInit) {
 			const char* e = std::getenv("MAPLECAST_DUMP_TA");
 			_dumpEnabled = (e && *e && *e != '0');
 			if (_dumpEnabled) {
-				mkdir("/tmp/ta-dumps", 0755);
-				printf("[TA-DUMP] enabled â€” writing /tmp/ta-dumps/frame_NNNNNN.bin\n");
+				const char* d = std::getenv("MAPLECAST_DUMP_TA_DIR");
+				_dumpDir = (d && *d) ? d : "/tmp/ta-dumps";
+#ifdef _WIN32
+				int rc = _mkdir(_dumpDir.c_str());
+#else
+				int rc = mkdir(_dumpDir.c_str(), 0755);
+#endif
+				printf("[TA-DUMP] server enabled — writing %s/frame_NNNNNN.bin (mkdir rc=%d, errno=%d)\n",
+				       _dumpDir.c_str(), rc, errno);
+				fflush(stdout);
 			}
 			_dumpInit = true;
 		}
 		if (_dumpEnabled && taSize > 0) {
-			char path[256];
-			snprintf(path, sizeof(path), "/tmp/ta-dumps/frame_%06u.bin", frameNum);
+			char path[512];
+			snprintf(path, sizeof(path), "%s/frame_%06u.bin", _dumpDir.c_str(), frameNum);
 			FILE* f = fopen(path, "wb");
 			if (f) {
 				fwrite(taData, 1, taSize, f);
 				fclose(f);
+			} else {
+				static int _warnedFopen = 0;
+				if (_warnedFopen++ < 3)
+					printf("[TA-DUMP] fopen(%s) failed: errno=%d\n", path, errno);
 			}
 		}
 	}
@@ -1676,22 +1689,35 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 		{
 			static bool _dumpInit = false;
 			static bool _dumpEnabled = false;
+			static std::string _dumpDir;
 			if (!_dumpInit) {
 				const char* e = std::getenv("MAPLECAST_DUMP_TA");
 				_dumpEnabled = (e && *e && *e != '0');
 				if (_dumpEnabled) {
-					mkdir("/tmp/ta-dumps-client", 0755);
-					printf("[TA-DUMP] client enabled â€” /tmp/ta-dumps-client/frame_NNNNNN.bin\n");
+					const char* d = std::getenv("MAPLECAST_DUMP_TA_DIR");
+					_dumpDir = (d && *d) ? d : "/tmp/ta-dumps-client";
+#ifdef _WIN32
+					int rc = _mkdir(_dumpDir.c_str());
+#else
+					int rc = mkdir(_dumpDir.c_str(), 0755);
+#endif
+					printf("[TA-DUMP] client enabled — writing %s/frame_NNNNNN.bin (mkdir rc=%d, errno=%d)\n",
+					       _dumpDir.c_str(), rc, errno);
+					fflush(stdout);
 				}
 				_dumpInit = true;
 			}
 			if (_dumpEnabled && df.taSize > 0) {
-				char path[256];
-				snprintf(path, sizeof(path), "/tmp/ta-dumps-client/frame_%06u.bin", df.frameNum);
+				char path[512];
+				snprintf(path, sizeof(path), "%s/frame_%06u.bin", _dumpDir.c_str(), df.frameNum);
 				FILE* f = fopen(path, "wb");
 				if (f) {
 					fwrite(taDst, 1, df.taSize, f);
 					fclose(f);
+				} else {
+					static int _warnedFopen = 0;
+					if (_warnedFopen++ < 3)
+						printf("[TA-DUMP] client fopen(%s) failed: errno=%d\n", path, errno);
 				}
 			}
 		}
