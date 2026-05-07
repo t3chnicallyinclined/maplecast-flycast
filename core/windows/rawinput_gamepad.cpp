@@ -558,6 +558,22 @@ static void xinputPollLoop()
 					rt[port] = pressed ? 0xffff : 0;
 					return;
 				}
+				// Update kcode[] for the LOCAL SH4 (active-low: pressed
+				// clears the bit, released sets it). Required for
+				// standalone mode where input_sink::init never fires
+				// (it's gated on MAPLECAST_MIRROR_CLIENT) and so the
+				// fireButtonGlobal listener is null — without this
+				// write, kcode[] stays neutral and the SH4 sees no
+				// inputs. Harmless in mirror-client mode where the
+				// CPU is stopped and nothing reads local kcode[].
+				// Bitmap-button range is < 0x20000 (axis keys above
+				// that route through different paths).
+				if (port >= 0 && port < 4 && (uint32_t)key < 0x20000) {
+					if (pressed)
+						kcode[port] &= ~(u32)key;
+					else
+						kcode[port] |= (u32)key;
+				}
 				GamepadDevice::fireButtonGlobal(port, key, pressed);
 			};
 
