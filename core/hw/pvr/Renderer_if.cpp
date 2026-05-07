@@ -19,6 +19,16 @@
 #include <mutex>
 #include <deque>
 
+// MAPLECAST_DUMP_TA — cross-platform support
+#include <cstdio>
+#include <cerrno>
+#include <string>
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
+
 #ifdef LIBRETRO
 void retro_rend_present();
 void retro_resize_renderer(int w, int h, float aspectRatio);
@@ -208,6 +218,57 @@ private:
 			// Mirror server: capture TA commands BEFORE Process consumes them
 			if (maplecast_mirror::isServer() && taContext)
 				maplecast_mirror::serverPublish(taContext);
+
+			// MAPLECAST_DUMP_TA=1 — TA-buffer dump for the determinism rig.
+			// Independent of mirror server (which is Linux-only via /dev/shm).
+			// Works on Windows too, so the same SH4 binary running on
+			// different OSes can be cross-checked for byte-identical output.
+			// Output: <MAPLECAST_DUMP_TA_DIR>/frame_NNNNNN.bin (one per TA pass).
+			if (taContext) {
+				static bool _ddInit = false;
+				static bool _ddEnabled = false;
+				static std::string _ddDir;
+				static uint32_t _ddFrameNum = 0;
+				if (!_ddInit) {
+					const char* e = std::getenv("MAPLECAST_DUMP_TA");
+					_ddEnabled = (e && *e && *e != '0');
+					if (_ddEnabled) {
+						const char* d = std::getenv("MAPLECAST_DUMP_TA_DIR");
+						_ddDir = (d && *d) ? d : "/tmp/ta-dumps-render";
+#ifdef _WIN32
+						int rc = _mkdir(_ddDir.c_str());
+#else
+						int rc = mkdir(_ddDir.c_str(), 0755);
+#endif
+						printf("[TA-DUMP-RENDER] enabled — writing %s/frame_NNNNNN.bin (mkdir rc=%d errno=%d)\n",
+						       _ddDir.c_str(), rc, errno);
+						fflush(stdout);
+					}
+					_ddInit = true;
+				}
+				if (_ddEnabled) {
+					// taContext->tad is the parsed TA accumulator. Raw bytes
+					// live in tad.thd_root, current end at tad.thd_data
+					// (mirrors how serverPublish computes taSize).
+					const uint8_t* taData = taContext->tad.thd_root;
+					size_t taSize = (size_t)(taContext->tad.thd_data - taContext->tad.thd_root);
+					if (taSize > 0) {
+						_ddFrameNum++;
+						char path[512];
+						snprintf(path, sizeof(path), "%s/frame_%06u.bin",
+						         _ddDir.c_str(), _ddFrameNum);
+						FILE* f = fopen(path, "wb");
+						if (f) {
+							fwrite(taData, 1, taSize, f);
+							fclose(f);
+						} else {
+							static int _warnedRender = 0;
+							if (_warnedRender++ < 3)
+								printf("[TA-DUMP-RENDER] fopen(%s) failed: errno=%d\n", path, errno);
+						}
+					}
+				}
+			}
 			try {
 				renderer->Process(taContext);
 			} catch (...) {
