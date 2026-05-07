@@ -197,7 +197,8 @@ Step 6 is the moonshot — what makes MapleCast genuinely best-in-class.
     - Step B same-machine determinism 30/30 ✓
     - Step C-Linux cross-Linux-machine 19/19 ✓
     - Step C-Windows cross-OS Linux↔Windows 30/30 ✓
-    - **Step D `.mcrec` replay-mode determinism 16/16 ✓** (live-recorded on Linux server with real gameplay inputs, replayed on Windows via `replay_reader.cpp`, byte-identical TA per frame)
+    - **Step D `.mcrec` replay-mode determinism NOT VALIDATED** (replay path crashes flycast on both Linux and Windows; SIGSEGV at `0x5e6bb82b5f80` shortly after `replay_reader::startPlayback`. Initial "16/16 ✓" claim was an experimental error — test was run without `MAPLECAST=1` set, so the replay code path never actually fired. Real validation requires the crash to be fixed first.)
+    - **CRITICAL BLOCKER**: this bug blocks Phase 1 implementation; rollback re-emulation uses the same load-savestate + replay-inputs path that's crashing. Must fix before any of Phase 1+ can ship.
   - [ ] Phase 1 — shadow-mode SH4 thread in mirror client
   - [ ] Phase 2 — naïve prediction (renderer reads from local SH4)
   - [ ] Phase 3 — rollback ring + comparator

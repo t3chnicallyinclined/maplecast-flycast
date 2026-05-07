@@ -455,7 +455,7 @@ echo "TA byte: $match match, $differ differ"  # MUST be 0 differ
 | cross-Linux-machine | flycast on EWR (NJ) vs ORD (Chicago), same savestate | **19/19** byte-identical |
 | cross-OS (Linux ↔ Windows) | flycast on EWR (Linux/GCC) vs Windows client (MSVC), same savestate | **30/30** byte-identical |
 | wire faithfulness | live mirror session, server emit vs client receive | **48/48** byte-identical |
-| `.mcrec` input-replay determinism | live recording on Linux with real gameplay inputs, replayed on Windows via `replay_reader.cpp` | **16/16** byte-identical |
+| `.mcrec` input-replay determinism | NOT VALIDATED as of 2026-05-07 — flycast crashes (SIGSEGV at `0x5e6bb82b5f80`) shortly after replay-reader's playback thread starts on BOTH Linux and Windows. Earlier "16/16" claim was an experimental error: I ran the test without `MAPLECAST=1` set, which gates `input_server::init()` and therefore the replay code path; the test was actually static-savestate-only. Real replay-mode determinism is unverified pending the crash fix | (pending) |
 
 **This is the foundation rollback prediction rests on** (see [docs/OPTIMIZATION-PLAN.md](OPTIMIZATION-PLAN.md) item #6). Because SH4 is byte-deterministic across hosts:
 - A local predictor on Windows produces the same TA as a Linux server, given matching inputs
@@ -478,6 +478,7 @@ echo "TA byte: $match match, $differ differ"  # MUST be 0 differ
 5. Tar-fetch dumps, byte-compare `frame_NNNNNN.bin` pairs at matching frame numbers.
 
 #### What's NOT yet validated
+- **Input-replay determinism (`.mcrec` replay)**. Blocked by a flycast bug that crashes the SH4 thread shortly after `replay_reader::startPlayback()`. Same SIGSEGV at `0x5e6bb82b5f80` on Linux and Windows, ~280ms after `[emulator] Flycast-emu → SCHED_FIFO priority 40`. Reproducible 100%. Must fix before rollback prediction (Phase 1 of [OPTIMIZATION-PLAN.md](OPTIMIZATION-PLAN.md) #6) can ship — rollback re-emulation depends on the same code path.
 - **Cross-version determinism**. Always pair predictor and authoritative server at the same commit hash.
 - **Rendered-pixel determinism**. The renderer (GL/Vulkan/DX11) is NOT necessarily deterministic. The guarantee is on the TA buffer (the input to the renderer). Rollback prediction operates on TA, not on pixels.
 

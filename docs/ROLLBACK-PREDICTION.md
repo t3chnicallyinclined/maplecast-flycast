@@ -18,7 +18,7 @@ We validated this five ways on 2026-05-07:
 | Same-machine determinism | 30/30 | Run-to-run reproducibility |
 | Cross-Linux-machine | 19/19 | EWR ↔ ORD same SH4 output |
 | Cross-OS Linux ↔ Windows | 30/30 | Linux/GCC ↔ Windows/MSVC byte-identical |
-| `.mcrec` replay determinism | 16/16 | Recorded inputs replay to identical TA |
+| `.mcrec` replay determinism | **PENDING — flycast crash blocks validation** | Recorded inputs replay to identical TA *(claim was previously stated as 16/16 — that was an experimental error: test ran without `MAPLECAST=1` so replay path never fired. Real validation requires the crash fix below)* |
 
 **Consequence**: the rollback comparator can compare **inputs only** (~16 bytes/frame), never TA buffers. Same input log = same TA, by construction. Trivial implementation.
 
@@ -213,9 +213,24 @@ Builds **use case G + I + K**. Bigger projects, ship after the foundation is pro
 
 ---
 
-## Known issues to address during Phase 1
+## Known issues — CRITICAL BLOCKER for Phase 1
 
-- **Windows replay-mode crash** (discovered 2026-05-07): `flycast.exe` with `MAPLECAST=1 MAPLECAST_REPLAY_IN=...` segfaults shortly after `[audiostream] selected audio backend: sdl2`. Crash dump shows access violation in unmapped memory. Workaround: replay on a Linux server, spectate via mirror client (works perfectly — that's the architecture's silver lining). Likely root cause: SDL gamepad polling thread racing the replay's `injectInput()` calls through `maplecast_input_server`'s atomic state. Phase 1's predictor will be injecting inputs from the same path, so this needs solving anyway. Fix candidates: (a) suppress SDL gamepad polling when replay is active; (b) serialize injections through a lock-free queue; (c) move replay injection to a different code path that doesn't touch the input-server's atomics.
+- **Replay-mode SH4 crash** (discovered 2026-05-07): `flycast` with `MAPLECAST=1 MAPLECAST_REPLAY_IN=<.mcrec>` SIGSEGVs at `0x5e6bb82b5f80` (the fault address equals the access target — wild jump or stack corruption) within ~280ms of the Flycast-emu thread starting. Reproducible 100% on **both Linux and Windows** with the same fault address (rules out a Windows-GUI-specific cause). Sequence on both platforms:
+  1. `replay-reader` opens .mcrec successfully
+  2. Savestate restored (27.7 MB)
+  3. `replay-reader` spawns playback thread (which spins until SH4 frame catches up)
+  4. `MIRROR Sync state saved: 26.5 MB` (initServer's serverSaveSync)
+  5. `[emulator] Flycast-emu thread running`
+  6. `[emulator] Flycast-emu → SCHED_FIFO priority 40`
+  7. **SIGSEGV at `0x5e6bb82b5f80`** — same address every time, both OSes
+- **Implication**: this bug blocks rollback prediction Phase 1. Rollback re-emulation = "load saved state + replay inputs forward" which is the exact path that crashes. The bug must be fixed before Phase 1 can ship.
+- **Investigation hypotheses**:
+  1. Loaded savestate has SH4 PC pointing to invalid memory (PC corruption)
+  2. SH4 JIT cache state corrupted by serverSaveSync running between dc_deserialize and emulator::start
+  3. Race between replay-reader's playback thread spinning + SH4 emu thread starting
+  4. Replay-reader's `dc_deserialize` differs subtly from autoload's path (which works fine — Step C validated)
+- **Next debugging steps**: gdb on a core dump to see exact instruction at the fault, check if SH4 PC matches what was in the savestate, bisect by disabling components (no input injection / no playback thread / no MIRROR_SERVER) until crash stops.
+- **Workaround for now**: server-side replay + spectate via mirror client *also crashes* (we tried). For "watch your matches" feature, we'd need to fix this regardless.
 
 ## Open design questions
 
