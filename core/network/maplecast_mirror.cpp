@@ -962,10 +962,21 @@ static void initClientWebSocket()
 				setenv("MAPLECAST_SERVER_HOST", hubHost.c_str(), 1);
 
 				if (ranked.size() >= 2) {
-					_hubBackupHost = ranked[1].public_host;
-					printf("[MIRROR] Hot-standby input server: '%s' at %s (%.1fms RTT)\n",
-					       ranked[1].name.c_str(), _hubBackupHost.c_str(),
-					       ranked[1].avg_rtt_ms);
+					// MAPLECAST_NO_FAILOVER=1 skips hot-standby setup. The Phase 2
+					// failover assumes both servers run synced game state; until
+					// cross-node state sync ships, swapping inputs to a different
+					// flycast instance breaks gameplay continuity. 100ms primary
+					// silence over public-internet WAN is also a normal jitter
+					// spike, not a real outage — easy to fire spuriously.
+					if (std::getenv("MAPLECAST_NO_FAILOVER")) {
+						printf("[MIRROR] Hot-standby SUPPRESSED (MAPLECAST_NO_FAILOVER=1) — would have used '%s' at %s\n",
+						       ranked[1].name.c_str(), ranked[1].public_host.c_str());
+					} else {
+						_hubBackupHost = ranked[1].public_host;
+						printf("[MIRROR] Hot-standby input server: '%s' at %s (%.1fms RTT)\n",
+						       ranked[1].name.c_str(), _hubBackupHost.c_str(),
+						       ranked[1].avg_rtt_ms);
+					}
 				}
 			} else {
 				printf("[MIRROR] Hub discovery failed â€” falling back to MAPLECAST_SERVER_HOST\n");
