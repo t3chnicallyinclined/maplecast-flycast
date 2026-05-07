@@ -63,12 +63,16 @@ static void getLocalInput(MapleInputState inputState[4])
 	const int64_t tLatchUs = maplecastActive ? _ggpoNowUs() : 0;
 	const uint64_t latchFrame = maplecastActive ? maplecast_mirror::currentFrame() : 0;
 
-	// Replay-mode per-slot pace counter. SH4 calls getLocalInput once per
-	// frame per slot; we advance this monotonically so the reader's cursor
-	// walks through the recorded entries at the SH4's natural rate.
-	// Independent of maplecast_mirror::currentFrame() (which is 0 in
-	// standalone mode where MIRROR_SERVER never runs).
+	// Replay-mode pace clock. The recorder stamps each entry with the
+	// mirror-server frame counter (incremented in serverPublish, see
+	// maplecast_mirror.cpp:1530). For replay determinism we want the SAME
+	// frame-counter source on the lookup side. On prod the mirror server
+	// is running and currentFrame() ticks per-frame; on Windows standalone
+	// it stays at 0, so we fall back to a synthetic counter that
+	// pre-increments once per getLocalInput call (first call → frame 1,
+	// matching the recorder's first-entry stamp).
 	static uint64_t _replayPaceFrame[2] = {0, 0};
+	const uint64_t mirrorFrame = maplecast_mirror::currentFrame();
 
 	for (int player = 0; player < 4; player++)
 	{
@@ -79,7 +83,16 @@ static void getLocalInput(MapleInputState inputState[4])
 		bool replayHandled = false;
 		if ((player == 0 || player == 1) && maplecast_replay::playbackActive())
 		{
-			const uint64_t paceFrame = _replayPaceFrame[player]++;
+			uint64_t paceFrame;
+			if (mirrorFrame > 0) {
+				// Prod path — authoritative mirror frame counter, same source
+				// the recorder used. Frame-exact alignment, no off-by-one.
+				paceFrame = mirrorFrame;
+			} else {
+				// Standalone fallback — pre-increment so first call passes
+				// frame=1 (matching recorder's first-entry stamp).
+				paceFrame = ++_replayPaceFrame[player];
+			}
 			uint16_t rBtn; uint8_t rLt; uint8_t rRt;
 			if (maplecast_replay::getInputAtFrame(paceFrame, player,
 			                                      rBtn, rLt, rRt))
