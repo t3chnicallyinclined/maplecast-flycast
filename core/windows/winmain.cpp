@@ -316,7 +316,12 @@ int main(int argc, char* argv[])
 
 	// MapleCast: attach console so printf output is visible.
 	// Always attach for the wizard mode — it's a console-only experience.
-	if (std::getenv("MAPLECAST") || std::getenv("MAPLECAST_BUTTON_WIZARD"))
+	// Replay record/playback also need it (heavy [replay-reader] / [replay]
+	// diagnostic output that's useless in the GUI but critical when iterating).
+	if (std::getenv("MAPLECAST")
+	    || std::getenv("MAPLECAST_BUTTON_WIZARD")
+	    || std::getenv("MAPLECAST_REPLAY_IN")
+	    || std::getenv("MAPLECAST_REPLAY_OUT"))
 	{
 		AllocConsole();
 		freopen("CONOUT$", "w", stdout);

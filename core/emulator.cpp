@@ -730,6 +730,22 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 		if (!settings.content.path.empty())
 		{
 #ifndef LIBRETRO
+			// MAPLECAST_REPLAY_IN — open the .mcrec FIRST so its embedded
+			// savestate is written to the slot's .state file BEFORE the
+			// autoload check below fires dc_loadstate. Force AutoLoadState=on
+			// so the state restore actually runs, regardless of cfg.
+			bool _replayOpened = false;
+			if (const char* inPath = std::getenv("MAPLECAST_REPLAY_IN")) {
+				printf("[autoload-debug] MAPLECAST_REPLAY_IN=%s — opening before autoload\n", inPath);
+				if (maplecast_replay::openReplay(inPath)
+				    && maplecast_replay::loadStartSavestate()) {
+					config::AutoLoadState.override(true);
+					_replayOpened = true;
+					printf("[autoload-debug] MAPLECAST_REPLAY_IN — savestate written to slot, AutoLoadState forced on\n");
+				} else {
+					printf("[autoload-debug] MAPLECAST_REPLAY_IN — open or savestate-write failed\n");
+				}
+			}
 			// Diagnostic: we want to know whether auto-load is actually firing in
 			// headless mode, since savestate auto-load is the workaround for the
 			// MVC2 attract-mode SH4 reset crash.
@@ -752,22 +768,15 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 				dc_loadstate(config::SavestateSlot);
 			}
 
-			// MAPLECAST_REPLAY_IN replay-mode savestate restore. The .mcrec
-			// was opened earlier (in maplecast_input_server::init) so the
-			// in-memory buffers are staged. Restoring here — at the same
-			// emulator-init phase as the autoload paths above — is what
-			// the SH4 dynarec expects: dc_deserialize is called only after
-			// loadGame finishes JIT cache init. Restoring earlier (which
-			// the prior code did from input_server::init) crashed reliably
-			// with SIGSEGV at 0x5e6bb82b5f80 on the first SH4 frame.
-			if (std::getenv("MAPLECAST_REPLAY_IN")) {
-				printf("[autoload-debug] MAPLECAST_REPLAY_IN — restoring savestate from .mcrec at autoload point\n");
-				if (maplecast_replay::loadStartSavestate()) {
-					double speed = 1.0;
-					if (const char* s = std::getenv("MAPLECAST_REPLAY_SPEED"))
-						speed = atof(s);
-					maplecast_replay::startPlayback(speed);
-				}
+			// MAPLECAST_REPLAY_IN — activate playback now that dc_loadstate
+			// above has restored the embedded savestate. The actual openReplay
+			// + loadStartSavestate ran BEFORE the autoload check above so the
+			// state file was on disk when dc_loadstate fired.
+			if (_replayOpened) {
+				double speed = 1.0;
+				if (const char* s = std::getenv("MAPLECAST_REPLAY_SPEED"))
+					speed = atof(s);
+				maplecast_replay::startPlayback(speed);
 			}
 
 			// MAPLECAST_REPLAY_OUT recording start. Capturing the savestate

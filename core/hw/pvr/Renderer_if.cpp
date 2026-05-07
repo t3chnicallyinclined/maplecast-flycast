@@ -271,19 +271,16 @@ private:
 				}
 			}
 
-			// Renderer-level recording hook. On platforms where MIRROR_SERVER
-			// doesn't run (Windows: gated on /dev/shm via openShm), the
-			// per-server-frame publishFrameTick() in serverPublish never
-			// fires — so MAPLECAST_REPLAY_OUT recordings would have no
-			// input log entries. Drive publishFrameTickFromGlobals here
-			// instead, using a renderer-driven frame counter, so Windows
-			// can record locally end-to-end. On Linux server isServer()
-			// is true and serverPublish handles it via the existing path —
-			// we skip to avoid double-recording.
+			// Renderer-level recording hook. Only fires when MAPLECAST_REPLAY_OUT
+			// is set — keeps standalone-without-recording as a zero-overhead path
+			// (no per-frame ring pushes, no replay::append mutex traffic).
 			if (taContext && !maplecast_mirror::isServer()) {
-				static uint64_t _renderRecordFrame = 0;
-				_renderRecordFrame++;
-				maplecast_input::publishFrameTickFromGlobals(_renderRecordFrame);
+				static const bool _recordHookEnabled = std::getenv("MAPLECAST_REPLAY_OUT") != nullptr;
+				if (_recordHookEnabled) {
+					static uint64_t _renderRecordFrame = 0;
+					_renderRecordFrame++;
+					maplecast_input::publishFrameTickFromGlobals(_renderRecordFrame);
+				}
 			}
 			try {
 				renderer->Process(taContext);

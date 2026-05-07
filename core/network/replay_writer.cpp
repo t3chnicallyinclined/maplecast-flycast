@@ -12,7 +12,8 @@
 	  picosha2 if present, or a tiny embedded impl (header-only).
 */
 #include "replay_writer.h"
-#include "maplecast_mirror.h"
+#include "cfg/option.h"
+#include "oslib/oslib.h"
 #include "types.h"
 
 #include <atomic>
@@ -26,8 +27,6 @@
 #include <vector>
 
 #include <curl/curl.h>
-
-#include <zstd.h>
 
 namespace maplecast_replay
 {
@@ -130,9 +129,11 @@ bool start(const StartParams& p) {
 	const char magic[8] = { 'M','C','R','E','C','\0','\0','\0' };
 	fwrite(magic, 1, 8, _file);
 
-	// version (4) + flycast_ver (4)
+	// version (4) + flycast_ver (4). V2 is the simplified format: no
+	// runtime dc_serialize round-trip — savestate is the on-disk .state
+	// file's bytes verbatim, restored via dc_loadstate at autoload.
 	uint8_t v[4];
-	writeLE32(v, 1);                    // version
+	writeLE32(v, 2);                    // version
 	fwrite(v, 1, 4, _file);
 	writeLE32(v, 0);                    // flycast_ver placeholder
 	fwrite(v, 1, 4, _file);
@@ -178,37 +179,35 @@ bool start(const StartParams& p) {
 	uint8_t reserved[40] = {0};
 	fwrite(reserved, 1, 40, _file);
 
-	// ── Write start savestate ──
-	size_t saveSize = 0;
-	uint8_t* saveData = maplecast_mirror::buildFullSaveState(saveSize);
-	if (!saveData || saveSize == 0) {
-		printf("[replay] start: buildFullSaveState() returned nothing — recording inputs only\n");
-		// Write zero-sized savestate header (replay must be supplied a
-		// fresh savestate at playback time)
-		uint8_t z[8] = {0};
-		fwrite(z, 1, 8, _file);
+	// ── Embed the on-disk savestate file verbatim ──
+	// V2 reads the .state file that flycast just autoloaded (or has on
+	// disk in the configured slot) and copies its bytes into the .mcrec.
+	// On replay, those bytes are written back to disk and dc_loadstate(slot)
+	// is what does the actual state restore — same code path as the
+	// autoload that's been working in production for years. No in-process
+	// dc_serialize round-trip = no completeness gap = no frame-1 desync.
+	// Layout: [state_size:u64][state_bytes:N]
+	std::string statePath = hostfs::getSavestatePath(config::SavestateSlot, false);
+	FILE* sf = fopen(statePath.c_str(), "rb");
+	if (!sf) {
+		printf("[replay] start: no savestate at %s — embedding empty (replay needs power-on boot)\n",
+		       statePath.c_str());
+		uint8_t zero[8] = {0};
+		fwrite(zero, 1, 8, _file);
 	} else {
-		// Compress with zstd level 3 (good ratio/speed balance for ~600KB)
-		size_t bound = ZSTD_compressBound(saveSize);
-		std::vector<uint8_t> compressed(bound);
-		size_t cSize = ZSTD_compress(compressed.data(), bound,
-		                              saveData, saveSize, 3);
-		if (ZSTD_isError(cSize)) {
-			printf("[replay] zstd compress failed: %s\n",
-			       ZSTD_getErrorName(cSize));
-			cSize = 0;
-		}
-
-		// Write [raw_size:u32][compressed_size:u32][data:N bytes]
+		fseek(sf, 0, SEEK_END);
+		long stateSize = ftell(sf);
+		fseek(sf, 0, SEEK_SET);
+		std::vector<uint8_t> stateBytes((size_t)stateSize);
+		size_t got = fread(stateBytes.data(), 1, (size_t)stateSize, sf);
+		fclose(sf);
 		uint8_t hdr[8];
-		writeLE32(hdr,     (uint32_t)saveSize);
-		writeLE32(hdr + 4, (uint32_t)cSize);
+		writeLE64(hdr, (uint64_t)got);
 		fwrite(hdr, 1, 8, _file);
-		if (cSize > 0)
-			fwrite(compressed.data(), 1, cSize, _file);
-		free(saveData);
-		printf("[replay] savestate: %zu raw → %zu compressed\n",
-		       saveSize, cSize);
+		if (got > 0)
+			fwrite(stateBytes.data(), 1, got, _file);
+		printf("[replay] embedded savestate: %zu bytes from %s\n",
+		       got, statePath.c_str());
 	}
 
 	fflush(_file);

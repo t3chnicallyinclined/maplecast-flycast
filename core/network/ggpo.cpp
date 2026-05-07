@@ -63,36 +63,36 @@ static void getLocalInput(MapleInputState inputState[4])
 	const int64_t tLatchUs = maplecastActive ? _ggpoNowUs() : 0;
 	const uint64_t latchFrame = maplecastActive ? maplecast_mirror::currentFrame() : 0;
 
+	// Replay-mode per-slot pace counter. SH4 calls getLocalInput once per
+	// frame per slot; we advance this monotonically so the reader's cursor
+	// walks through the recorded entries at the SH4's natural rate.
+	// Independent of maplecast_mirror::currentFrame() (which is 0 in
+	// standalone mode where MIRROR_SERVER never runs).
+	static uint64_t _replayPaceFrame[2] = {0, 0};
+
 	for (int player = 0; player < 4; player++)
 	{
 		MapleInputState& state = inputState[player];
 
+		// Replay hook (slots 0/1). Fires regardless of maplecastActive so
+		// standalone Windows replay works without MAPLECAST=1 / input_server.
+		bool replayHandled = false;
+		if ((player == 0 || player == 1) && maplecast_replay::playbackActive())
+		{
+			const uint64_t paceFrame = _replayPaceFrame[player]++;
+			uint16_t rBtn; uint8_t rLt; uint8_t rRt;
+			if (maplecast_replay::getInputAtFrame(paceFrame, player,
+			                                      rBtn, rLt, rRt))
+			{
+				state.kcode = (u32)rBtn | 0xFFFF0000u;
+				state.halfAxes[PJTI_L] = (u16)((u16)rLt << 8);
+				state.halfAxes[PJTI_R] = (u16)((u16)rRt << 8);
+				replayHandled = true;
+			}
+		}
+
 		if (maplecastActive && (player == 0 || player == 1))
 		{
-			// Replay-mode hook: when MAPLECAST_REPLAY_IN is active, the
-			// recorded input log replaces the live input atomic as the
-			// source of truth for slots 0/1. SH4 calls this getLocalInput
-			// once per frame; replay_reader::getInputAtFrame returns the
-			// recorded values for (latchFrame, player). Single-threaded
-			// by construction — no race with a separate playback thread.
-			// See docs/ROLLBACK-PREDICTION.md for the design rationale.
-			bool replayHandled = false;
-			if (maplecast_replay::playbackActive())
-			{
-				uint16_t rBtn; uint8_t rLt; uint8_t rRt;
-				if (maplecast_replay::getInputAtFrame(latchFrame, player,
-				                                      rBtn, rLt, rRt))
-				{
-					state.kcode = (u32)rBtn | 0xFFFF0000u;
-					state.halfAxes[PJTI_L] = (u16)((u16)rLt << 8);
-					state.halfAxes[PJTI_R] = (u16)((u16)rRt << 8);
-					replayHandled = true;
-				}
-				// false → log not yet open or no entries seen for this
-				// slot yet. Fall through to live atomics (returns neutral
-				// defaults during the brief pre-recording window).
-			}
-
 			if (replayHandled) {
 				// Skip the rest of the per-slot live-input plumbing.
 				// Analog/keyboard/mouse fields below still apply (they're
@@ -149,9 +149,10 @@ static void getLocalInput(MapleInputState inputState[4])
 
 			}  // end of else (live-input path; the replayHandled branch skipped this)
 		}
-		else
+		else if (!replayHandled)
 		{
 			// Slot 2/3, or maplecast inactive: original plain-globals path.
+			// Skipped when replay already populated state.kcode for this slot.
 			state.kcode = kcode[player];
 			state.halfAxes[PJTI_L] = lt[player];
 			state.halfAxes[PJTI_R] = rt[player];

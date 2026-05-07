@@ -21,9 +21,9 @@
 	full flow comparison.
 */
 #include "replay_reader.h"
+#include "cfg/option.h"
 #include "maplecast_input_server.h"
-#include "maplecast_mirror.h"
-#include "serialize.h"
+#include "oslib/oslib.h"
 #include "types.h"
 
 #include <atomic>
@@ -32,8 +32,6 @@
 #include <cstring>
 #include <mutex>
 #include <vector>
-
-#include <zstd.h>
 
 namespace maplecast_replay
 {
@@ -122,10 +120,13 @@ bool openReplay(const std::string& path) {
 		return false;
 	}
 
-	// Version check
+	// Version check. V2 is the simplified format: savestate is the on-disk
+	// .state file's bytes verbatim, restored via dc_loadstate. V1 used a
+	// runtime dc_serialize round-trip that suffered from a state-completeness
+	// gap (~3,900-byte frame-1 desync) and is no longer supported.
 	uint32_t version = readLE32(hdr + 8);
-	if (version != 1) {
-		printf("[replay-reader] unsupported version %u (expected 1)\n", version);
+	if (version != 2) {
+		printf("[replay-reader] unsupported version %u (this build expects v2 — re-record with current binary)\n", version);
 		fclose(_file); _file = nullptr;
 		return false;
 	}
@@ -142,20 +143,24 @@ bool openReplay(const std::string& path) {
 	memcpy(_info.p2_chars, hdr + 227, 3);
 	_info.winner        = hdr[230];
 
-	// ── Read savestate block ──
+	// ── Read savestate block ([state_size:u64][state_bytes:N]) ──
+	// The state_bytes are the on-disk .state file verbatim — same format
+	// flycast's dc_savestate writes. We extract those bytes and write them
+	// to the configured savestate slot path so dc_loadstate can pick them up.
 	uint8_t saveHdr[8];
 	if (fread(saveHdr, 1, 8, _file) != 8) {
 		printf("[replay-reader] savestate header truncated\n");
 		fclose(_file); _file = nullptr;
 		return false;
 	}
-	_info.savestate_raw_size        = readLE32(saveHdr);
-	_info.savestate_compressed_size = readLE32(saveHdr + 4);
+	uint64_t stateSize = readLE64(saveHdr);
+	_info.savestate_raw_size        = (uint32_t)stateSize;
+	_info.savestate_compressed_size = (uint32_t)stateSize;
 
-	if (_info.savestate_compressed_size > 0) {
-		_savestateCompressed.resize(_info.savestate_compressed_size);
-		if (fread(_savestateCompressed.data(), 1, _info.savestate_compressed_size, _file)
-		    != _info.savestate_compressed_size) {
+	if (stateSize > 0) {
+		_savestateCompressed.resize((size_t)stateSize);  // reuse buffer name
+		if (fread(_savestateCompressed.data(), 1, (size_t)stateSize, _file)
+		    != (size_t)stateSize) {
 			printf("[replay-reader] savestate data truncated\n");
 			fclose(_file); _file = nullptr;
 			return false;
@@ -237,36 +242,37 @@ bool isOpen() { return _open.load(std::memory_order_relaxed); }
 bool loadStartSavestate() {
 	std::lock_guard<std::mutex> lk(_mtx);
 	if (!_open.load()) return false;
-	if (_savestateCompressed.empty() || _info.savestate_raw_size == 0) {
-		printf("[replay-reader] no savestate in this replay (skipping)\n");
+	if (_savestateCompressed.empty()) {
+		printf("[replay-reader] no savestate embedded — replay relies on power-on boot\n");
 		return true;  // not fatal — caller can fall back to a fresh boot
 	}
 
-	// Decompress
-	std::vector<uint8_t> raw(_info.savestate_raw_size);
-	size_t actual = ZSTD_decompress(raw.data(), raw.size(),
-	                                _savestateCompressed.data(),
-	                                _savestateCompressed.size());
-	if (ZSTD_isError(actual)) {
-		printf("[replay-reader] zstd decompress failed: %s\n",
-		       ZSTD_getErrorName(actual));
+	// V2: write the embedded state bytes to the configured slot's .state
+	// file. The autoload-time dc_loadstate(slot) call in emulator.cpp will
+	// pick them up via the SAME code path the autoload feature has been
+	// using in production for years. No in-process dc_serialize round-trip.
+	std::string statePath = hostfs::getSavestatePath(config::SavestateSlot, true);
+	FILE* sf = fopen(statePath.c_str(), "wb");
+	if (!sf) {
+		printf("[replay-reader] cannot open %s for writing embedded savestate\n",
+		       statePath.c_str());
 		return false;
 	}
-	if (actual != _info.savestate_raw_size) {
-		printf("[replay-reader] decompressed size mismatch: %zu vs %u\n",
-		       actual, _info.savestate_raw_size);
+	size_t wrote = fwrite(_savestateCompressed.data(), 1,
+	                      _savestateCompressed.size(), sf);
+	fclose(sf);
+	if (wrote != _savestateCompressed.size()) {
+		printf("[replay-reader] short write of embedded savestate (%zu/%zu)\n",
+		       wrote, _savestateCompressed.size());
 		return false;
 	}
 
-	// Apply via dc_deserialize. The state object reads from our buffer.
-	Deserializer ctx(raw.data(), raw.size());
-	dc_deserialize(ctx);
+	printf("[replay-reader] embedded savestate (%zu bytes) → %s\n",
+	       _savestateCompressed.size(), statePath.c_str());
 
-	// Free the compressed buffer — we don't need it anymore
+	// Free buffer — we're done with it now that the bytes are on disk
 	_savestateCompressed.clear();
 	_savestateCompressed.shrink_to_fit();
-
-	printf("[replay-reader] savestate restored (%zu bytes)\n", actual);
 	return true;
 }
 

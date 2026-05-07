@@ -579,6 +579,18 @@ static void xinputPollLoop()
 
 			// Digital buttons — diff against previous poll.
 			WORD changed = gp.wButtons ^ prev.buttons;
+			// Diagnostic: log only on button transitions or trigger crossings
+			// (NOT analog stick noise — sticks jitter every poll = 1kHz spam).
+			if (std::getenv("MAPLECAST_RAWINPUT_DBG") != nullptr) {
+				bool ltCrossed = (prev.leftTrigger < 64) != (gp.bLeftTrigger < 64);
+				bool rtCrossed = (prev.rightTrigger < 64) != (gp.bRightTrigger < 64);
+				if (changed != 0 || ltCrossed || rtCrossed) {
+					printf("[xinput-dbg] slot=%lu wButtons=0x%04x changed=0x%04x lt=%u rt=%u\n",
+					       slot, gp.wButtons, (unsigned)changed,
+					       gp.bLeftTrigger, gp.bRightTrigger);
+					fflush(stdout);
+				}
+			}
 			if (_userMapLoaded) {
 				// User-mapping fast path: fire DreamcastKey directly per the
 				// wizard's saved bindings, bypassing flycast's InputMapping.
