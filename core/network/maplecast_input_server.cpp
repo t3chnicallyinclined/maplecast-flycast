@@ -646,6 +646,28 @@ void publishFrameTick(uint64_t frame)
 	}
 }
 
+void publishFrameTickFromGlobals(uint64_t frame)
+{
+	// Windows-side recording path. SDL/RawInput/XInput on Windows update
+	// kcode[]/lt[]/rt[] directly via fireButtonGlobal — they don't route
+	// through updateSlot(), so _slotInputAtomic stays at its zero-init
+	// state. Reading kcode[] is what the SH4 actually sees at CMD9 time,
+	// so capturing it for the tape gives us the user's real inputs.
+	// kcode[] format: low 16 bits are active-low button state (matches
+	// our wire format); upper 16 bits are reserved-set.
+	for (int slot = 0; slot < 2; slot++) {
+		uint16_t buttons = (uint16_t)(kcode[slot] & 0xFFFF);
+		// lt[]/rt[] are u16 (wide-axis); tape entries hold u8 high-byte.
+		uint8_t ltVal = (uint8_t)(lt[slot] >> 8);
+		uint8_t rtVal = (uint8_t)(rt[slot] >> 8);
+		// seq is meaningless here (no UDP packet boundary); use slot
+		// in the upper byte to preserve the slot encoding pushTapeEntry
+		// expects, but otherwise leave the rest at 0.
+		uint32_t seq = (uint32_t)slot << 24;
+		pushTapeEntryAtFrame(slot, frame, buttons, ltVal, rtVal, seq);
+	}
+}
+
 TapeStats getTapeStats()
 {
 	TapeStats s{};

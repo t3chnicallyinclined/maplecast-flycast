@@ -15,6 +15,7 @@
 #endif
 #include "network/maplecast_mirror.h"
 #include "network/maplecast_control_ws.h"
+#include "network/maplecast_input_server.h"
 
 #include <mutex>
 #include <deque>
@@ -268,6 +269,21 @@ private:
 						}
 					}
 				}
+			}
+
+			// Renderer-level recording hook. On platforms where MIRROR_SERVER
+			// doesn't run (Windows: gated on /dev/shm via openShm), the
+			// per-server-frame publishFrameTick() in serverPublish never
+			// fires — so MAPLECAST_REPLAY_OUT recordings would have no
+			// input log entries. Drive publishFrameTickFromGlobals here
+			// instead, using a renderer-driven frame counter, so Windows
+			// can record locally end-to-end. On Linux server isServer()
+			// is true and serverPublish handles it via the existing path —
+			// we skip to avoid double-recording.
+			if (taContext && !maplecast_mirror::isServer()) {
+				static uint64_t _renderRecordFrame = 0;
+				_renderRecordFrame++;
+				maplecast_input::publishFrameTickFromGlobals(_renderRecordFrame);
 			}
 			try {
 				renderer->Process(taContext);

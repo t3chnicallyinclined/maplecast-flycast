@@ -450,6 +450,15 @@ void pushTapeEntry(int slot, uint16_t buttons, uint8_t lt, uint8_t rt, uint32_t 
 // input changed since the previous frame.
 void publishFrameTick(uint64_t frame);
 
+// Same as publishFrameTick but reads input state from the live
+// kcode[]/lt[]/rt[] globals instead of from _slotInputAtomic.
+// Used on platforms where MIRROR_SERVER doesn't run (Windows) so
+// recording can still capture user inputs that came in via SDL/
+// RawInput/XInput → kcode[] directly (those paths don't go through
+// updateSlot, so _slotInputAtomic stays at its initial neutral state).
+// Called from the renderer-level hook in Renderer_if.cpp.
+void publishFrameTickFromGlobals(uint64_t frame);
+
 // Telemetry snapshot for the input tape publisher. All counters are
 // monotonic process-lifetime totals unless otherwise noted.
 struct TapeStats {
