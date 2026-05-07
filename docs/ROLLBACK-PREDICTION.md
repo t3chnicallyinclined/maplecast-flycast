@@ -232,6 +232,110 @@ Builds **use case G + I + K**. Bigger projects, ship after the foundation is pro
 - **Next debugging steps**: gdb on a core dump to see exact instruction at the fault, check if SH4 PC matches what was in the savestate, bisect by disabling components (no input injection / no playback thread / no MIRROR_SERVER) until crash stops.
 - **Workaround for now**: server-side replay + spectate via mirror client *also crashes* (we tried). For "watch your matches" feature, we'd need to fix this regardless.
 
+## Lessons from Fightcade — flow comparison
+
+Fightcade has shipped working record/replay for arcade fighting games for years (FBNeo + GGPO). They don't hit our bug. Researching how they do it surfaced a structural difference that explains our crash AND gives us a cleaner redesign.
+
+### Fightcade's flow (production)
+
+```
+1. Match starts: power-on (BIOS boot) — no savestate exchanged between players
+2. GGPO records the input stream as it relays between peers (server-side)
+3. Each frame: emulator's frame loop calls ggpo_synchronize_input(),
+   which returns the inputs for THIS frame (live or recorded)
+4. emulator advance_frame() runs SH4/M68k for one frame
+5. Renderer presents
+6. (rollback) On wire correction: ggpo calls save_game_state, load_game_state,
+   then re-runs advance_frame N times with corrected inputs.
+   The replay path uses the SAME save/load/advance triad.
+```
+
+Replay = spectator session = "ggpo_start_spectating against the recorded stream." The SAME code path that runs live matches. There is no "replay reader thread" — the emulator's frame loop pulls inputs from the recorded stream the same way it pulls from the live wire.
+
+### Our flow (current — broken)
+
+```
+1. Match starts: capture savestate (~27 MB raw / 7.5 MB compressed)
+2. .mcrec writer appends each input event server-side
+3. Replay (current implementation):
+   - replay_reader::openReplay() loads .mcrec into memory
+   - replay_reader::loadStartSavestate() calls dc_deserialize
+   - replay_reader::startPlayback() SPAWNS A SEPARATE THREAD
+   - That thread spins waiting for maplecast_mirror::currentFrame() to advance
+   - When current frame matches a recorded entry's frame, calls
+     maplecast_input::injectInput(slot, lt, rt, buttons)
+   - injectInput updates the live input atomic + accumulator
+   - SH4 reads inputs from the live input system on its next frame
+4. Crash: SIGSEGV at 0x5e6bb82b5f80 in the SH4 thread within ~280ms
+```
+
+### The structural difference
+
+| Concept | Fightcade | MapleCast (current, broken) |
+|---|---|---|
+| Input flow direction | **Pull** — emulator reads input from recording at each frame | **Push** — separate thread injects inputs into live input system |
+| Frame counter authority | Emulator's frame loop drives | Both emulator AND playback thread read it |
+| Replay vs rollback | Same code path | Separate paths (replay_reader, rollback TBD) |
+| Starting state | Power-on (deterministic boot) | Savestate snapshot |
+| Sync mechanism | save/load/advance callbacks | injection thread + atomic input state |
+
+**The Push-vs-Pull distinction is the one that breaks us.** A separate thread injecting inputs into a system that the SH4 thread is also reading from creates a race. The 0x5e6bb82b5f80 fault is almost certainly that race manifesting as use-after-free or wild jump in JIT code.
+
+### Why Fightcade dodges every problem we hit
+
+1. **Power-on start ⟹ no cross-version savestate compatibility issue.** ROM + BIOS + RNG seed reproduces deterministically without savestate format risk.
+2. **Pull-model input read ⟹ no race between injection thread and SH4 thread.** The emulator's own input-read function returns recorded data when in replay mode. Single-threaded by construction.
+3. **Replay = spectator = rollback ⟹ one code path, three uses.** Their save/load/advance triad services all three. Bug-fixing one fixes all.
+4. **Input format is per-frame, only-changes-encoded.** Compact (16-byte fixed in our format vs ~3-byte avg in theirs).
+5. **Server-side recording ⟹ integrity by construction.** Server saw every input live, the tape it stored IS the ground truth.
+
+## Where our 253-byte gamestate fits
+
+It is **NOT** a substitute for the savestate. The savestate has SH4 registers, RAM, VRAM, BIOS pointers — 27 MB of "everything the SH4 needs to resume." 253 bytes can't replace that for resume.
+
+The 253 bytes IS perfect for **divergence detection**. Fightcade uses GGPO's 4-byte checksum per frame; we have 253 bytes per frame which is more expressive. Concrete uses:
+- **Periodic resync check during rollback prediction**: every N frames, hash the 253-byte state and compare predictor's value against server's value over the wire. Mismatch ⟹ predictor desync ⟹ snap to authoritative savestate.
+- **Replay verification**: when watching a replay, compare per-frame 253-byte state against an expected hash log (if recorded with the .mcrec). Drift detection across flycast versions.
+- **Anti-cheat**: server checks that what client claims to be predicting matches what the canonical SH4 produces.
+
+So: savestate for resume, 253-byte state for verification. Both have a place.
+
+## Proposed redesign — Fightcade-inspired pull model
+
+Drop the `replay_reader::startPlayback()` thread. Instead:
+
+1. **Hook the input read path**. Find where SH4 reads input each frame (likely `maple_if.cpp` or `maplecast_input::getInput()`). When `MAPLECAST_REPLAY_IN` is active, that function returns the recorded input for the CURRENT frame — pulled from the in-memory log — instead of from the live input atomic.
+2. **No injection, no race.** The SH4 thread is the only thread reading input. The replay log is just a `vector<TapeEntry>` indexed by frame number.
+3. **Frame counter unified**. Whatever counter the input read function uses to look up "what was the input at frame N" must match the emulator's own frame count. Easy: pass `currentFrame()` as the lookup key.
+4. **Same path for rollback re-emulation later**. When rollback fires, predictor calls `dc_loadstate(savestate_at_frame_N)` then advances M frames with corrected inputs from the log. Reuses the exact same input-read hook.
+5. **Keep `MAPLECAST_REPLAY_IN` env var for replay mode**, add `MAPLECAST_PREDICT=1` for live rollback mode. They share the implementation underneath.
+
+### Code structure for the fix
+
+| File | Change |
+|---|---|
+| `core/network/replay_reader.cpp` | DELETE the `playbackLoop` thread + `startPlayback`. Keep `openReplay` + `loadStartSavestate` + the in-memory input log. Add `getInputAtFrame(frame, slot) → TapeEntry` accessor. |
+| `core/hw/maple/maple_if.cpp` (or wherever SH4 reads input) | When `_replayMode` is active, route input reads through `replay_reader::getInputAtFrame()` instead of the live input atomic. |
+| `core/network/maplecast_input.cpp` | Possibly rename/refactor `injectInput` since the new path doesn't need it. |
+| `core/network/replay_writer.cpp` | Add a footer-write sync flush (we saw "no footer (interrupted recording)" — atexit isn't reliably firing on systemctl-stop signals). |
+| Build + test | Re-record a clean .mcrec with verified footer, run replay, watch it work. |
+
+### What the fix UNBLOCKS
+- Phase 0 Step D validation (we'll be able to run replay end-to-end and diff)
+- Phase 1 rollback (the same input-read hook is what rollback re-emulation will use)
+- "Watch your matches" feature (real, useful, falls out for free once replay works)
+- Server-side replay-on-demand (hub serves a `.mcrec`, server boots up, replays, mirror clients spectate — actually a competitive product feature)
+
+### Implementation order
+1. Investigate why `atexit` didn't write the footer (might be a 1-line fix)
+2. Re-record a clean `.mcrec` to rule out the file being corrupt
+3. If the clean replay still crashes ⟹ confirmed bug in the push-model thread
+4. Implement the pull-model hook (delete the playback thread, route reads)
+5. Test replay locally (Linux first since we have determinism rig there)
+6. Test cross-OS replay (Linux record, Windows replay)
+7. Validate Step D properly: per-frame TA byte-compare between live and replayed
+8. Move to Phase 1 with a proven-deterministic foundation
+
 ## Open design questions
 
 1. **What frame is "match-start"?**
