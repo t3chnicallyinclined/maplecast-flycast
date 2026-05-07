@@ -213,6 +213,10 @@ Builds **use case G + I + K**. Bigger projects, ship after the foundation is pro
 
 ---
 
+## Known issues to address during Phase 1
+
+- **Windows replay-mode crash** (discovered 2026-05-07): `flycast.exe` with `MAPLECAST=1 MAPLECAST_REPLAY_IN=...` segfaults shortly after `[audiostream] selected audio backend: sdl2`. Crash dump shows access violation in unmapped memory. Workaround: replay on a Linux server, spectate via mirror client (works perfectly — that's the architecture's silver lining). Likely root cause: SDL gamepad polling thread racing the replay's `injectInput()` calls through `maplecast_input_server`'s atomic state. Phase 1's predictor will be injecting inputs from the same path, so this needs solving anyway. Fix candidates: (a) suppress SDL gamepad polling when replay is active; (b) serialize injections through a lock-free queue; (c) move replay injection to a different code path that doesn't touch the input-server's atomics.
+
 ## Open design questions
 
 1. **What frame is "match-start"?**
