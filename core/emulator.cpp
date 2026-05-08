@@ -1581,10 +1581,17 @@ void Emulator::vblank()
 		static uint64_t _rollbackFrameSeq = 0;
 		maplecast_rollback::saveFrame(++_rollbackFrameSeq);
 
-		// Stop-callback-restart trigger: if F.1 (or any caller) requested
-		// a rewind during this frame's saveFrame, signal the SH4 executor
-		// to stop. Run() will return at the next safe point and the emu
-		// loop will execute the queued rewind from a paused-SH4 context.
+		// DIAG — print every 60 vblanks to see if pendingRollback is
+		// somehow stuck true.
+		static int _vblDbg = 0;
+		if ((_vblDbg++ % 60) == 0) {
+			printf("[vblank-dbg] frame=%llu pendingRollback=%d\n",
+			       (unsigned long long)_rollbackFrameSeq,
+			       (int)maplecast_rollback::pendingRollback());
+			fflush(stdout);
+		}
+
+		// Stop-callback-restart trigger
 		if (maplecast_rollback::pendingRollback())
 			getSh4Executor()->Stop();
 	}
