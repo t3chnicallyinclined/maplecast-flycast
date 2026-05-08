@@ -1168,14 +1168,6 @@ void serverPublish(TA_context* ctx)
 		_atomicCurrentFrame.store(_localFrameNum, std::memory_order_release);
 		maplecast_ws::updateTelemetry({_localFrameNum, 0, 0, 0, 0,
 			60, 0, 0}); // approximate 60fps
-		// Phase 1 A.4 rollback ring still ticks even with no clients — the
-		// predictor needs the ring populated regardless of who's watching.
-		// The hook below the rest of serverPublish only fires when clients
-		// are connected, so we duplicate it here on the no-client path.
-		// Using _localFrameNum (the same counter the post-publish path uses
-		// as hdr->frame_count) keeps the ring's frame numbers aligned.
-		if (maplecast_rollback::active())
-			maplecast_rollback::saveFrame(_localFrameNum);
 		return;
 	}
 
@@ -1527,13 +1519,10 @@ done_diff:
 	// in maplecast_input_server.cpp for the rationale.
 	maplecast_input::publishFrameTick(hdr->frame_count);
 
-	// Phase 1 A.4 rollback ring — capture the just-completed frame's state
-	// into the in-memory ring. No-op when MAPLECAST_ROLLBACK_RING is unset
-	// (init() never ran, active() returns false). Hook lives here because
-	// serverPublish already fires once per emu frame on prod headless and
-	// gives us the authoritative frame number we need as the ring index.
-	if (maplecast_rollback::active())
-		maplecast_rollback::saveFrame(hdr->frame_count);
+	// Phase 1 A.4 rollback ring — hook moved to Emulator::start's emu-thread
+	// loop (right after runInternal() returns) so saveFrame runs on the SAME
+	// thread that produced the page-faults. serverPublish runs on the rend
+	// thread, which would race with the SH4's writes to memwatch state.
 
 	// Periodic state checkpoint for the replay sidecar — every N frames
 	// during recording, capture a fresh savestate so the reader can seek

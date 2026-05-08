@@ -1472,6 +1472,19 @@ void Emulator::start()
 						startTime = sh4_sched_now64();
 						renderTimeout = false;
 						runInternal();
+						// Phase 1 A.4 rollback ring — SH4-thread save hook.
+						// On this exact thread, runInternal() has just returned,
+						// which means the SH4 is paused at frame boundary
+						// (vblank handler called Stop()). This is GGPO's
+						// guarantee for save_game_state too — same threading
+						// model, same safety invariant. Page-fault state
+						// (memwatch::*Watcher.pages) is read-stable here
+						// because the only writer is the SH4 thread (this
+						// thread) and it's not running guest code right now.
+						if (maplecast_rollback::active()) {
+							static uint64_t _rollbackFrameSeq = 0;
+							maplecast_rollback::saveFrame(++_rollbackFrameSeq);
+						}
 						// In replica mode we're not using GGPO, and
 						// ggpo::nextFrame() returns false when no GGPO
 						// session is active (_endOfFrame is never set),
