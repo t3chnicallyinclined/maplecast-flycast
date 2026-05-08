@@ -33,6 +33,7 @@
 
 #include "rawinput_gamepad.h"
 #include "../network/maplecast_input_sink.h"
+#include "../network/maplecast_input_server.h"
 #include "../input/gamepad.h"
 #include "../input/gamepad_device.h"
 
@@ -648,6 +649,25 @@ static void xinputPollLoop()
 			prev.rightTrigger = gp.bRightTrigger;
 			prev.thumbLX     = gp.sThumbLX;
 			prev.thumbLY     = gp.sThumbLY;
+
+			// Local-predictor zero-IPC injection. After all the emitDcKey()
+			// calls above have updated kcode[port] / lt[port] / rt[port] for
+			// slots 0/1, mirror those values directly into the input
+			// server's per-slot atomic so ggpo::getLocalInput sees them on
+			// the next maple_DoDma without going through UDP loopback.
+			//
+			// The UDP path (input_sink → 127.0.0.1:7100 → input_server recv)
+			// adds ~10-20us per change due to syscalls + thread wakeup. This
+			// path is one atomic store, ~50ns. 400x faster end-to-end on the
+			// same-machine rollback-predictor topology. Harmless when the
+			// mirror server isn't running (atomic just gets written and not
+			// read by anything).
+			if (slot < 2) {
+				const uint16_t buttons = (uint16_t)(kcode[slot] & 0xFFFF);
+				const uint8_t  ltOut   = (uint8_t)(lt[slot] >> 8);
+				const uint8_t  rtOut   = (uint8_t)(rt[slot] >> 8);
+				maplecast_input::injectLocalSlotInput((int)slot, buttons, ltOut, rtOut);
+			}
 		}
 
 		// 1 kHz poll cadence — tighter than SDL's default. Use a steady

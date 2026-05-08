@@ -663,6 +663,26 @@ void publishFrameTick(uint64_t frame)
 	}
 }
 
+// Local-predictor zero-copy input injection. Same shape as updateSlot()
+// (the network thread's atomic write) but exposed publicly so the local
+// XInput poll thread on Windows can write directly without going through
+// UDP loopback. Saves ~10-20us per input change on the same-machine
+// rollback-predictor topology.
+void injectLocalSlotInput(int slot, uint16_t buttons, uint8_t lt_, uint8_t rt_)
+{
+	if (slot < 0 || slot > 1) return;
+	// One writer per slot in this code path (the XInput poll thread).
+	// lastPacketSeq is monotonic; the network thread doesn't write the
+	// same slot when injection is active (the local predictor's mirror
+	// server still binds UDP:7100 but the local user isn't sending UDP
+	// to themselves — they use this path instead).
+	PlayerInfo& p = _players[slot];
+	uint32_t seq = ++p.lastPacketSeq;
+	_slotInputAtomic[slot].store(packSlotInput(buttons, lt_, rt_, seq),
+	                             std::memory_order_release);
+	p.lastPacketUs = nowUs();  // for input-age telemetry parity with UDP path
+}
+
 void publishFrameTickFromGlobals(uint64_t frame)
 {
 	// Windows-side recording path. SDL/RawInput/XInput on Windows update

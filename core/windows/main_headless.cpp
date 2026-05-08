@@ -73,16 +73,14 @@ const char* getThreadName()
 
 // rawinput stubs — full impls are in core/windows/rawinput.cpp, excluded
 // from headless builds because they require getNativeHwnd().
+// (XInput direct-poll path lives in core/windows/rawinput_gamepad.cpp,
+// which IS compiled into headless builds — no GUI dependency. Headless
+// predictor uses it for sub-microsecond gamepad → kcode[] writes,
+// avoiding the UDP loopback round-trip the mirror client uses.)
 namespace rawinput
 {
 	void init() {}
 	void term() {}
-}
-
-// maplecast_rawinput stub — XInput direct-poll bypass for the GUI client.
-namespace maplecast_rawinput
-{
-	bool init() { return false; }
 }
 
 // setupPath — copied from winmain.cpp:58. Sets user_config_dir and

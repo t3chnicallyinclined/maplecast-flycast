@@ -465,6 +465,21 @@ void publishFrameTick(uint64_t frame);
 // Called from the renderer-level hook in Renderer_if.cpp.
 void publishFrameTickFromGlobals(uint64_t frame);
 
+// Inject a local input directly into the slot's atomic — for the
+// local rollback predictor, where the gamepad poll thread is in the
+// SAME process as the SH4 reader. Bypasses the UDP loopback the
+// network input path uses (sendto + recvfrom + thread wakeup, ~10-20us)
+// for a single atomic store + load (~50ns). 400x faster end-to-end.
+//
+// Wire format identical to updateSlot()'s atomic store: same active-low
+// buttons, same lt/rt, same packed layout. ggpo::getLocalInput reads
+// from _slotInputAtomic[slot] regardless of how it got there, so the
+// SH4 sees the input the same way it would from a UDP packet.
+//
+// Caller is the only writer per slot (one XInput poll thread per slot).
+// Sequence number is monotonic and process-lifetime.
+void injectLocalSlotInput(int slot, uint16_t buttons, uint8_t lt_, uint8_t rt_);
+
 // Telemetry snapshot for the input tape publisher. All counters are
 // monotonic process-lifetime totals unless otherwise noted.
 struct TapeStats {

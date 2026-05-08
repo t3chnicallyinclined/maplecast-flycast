@@ -1623,19 +1623,23 @@ if(NOT LIBRETRO)
 					core/linux-dist/main.cpp)
 		endif()
 	elseif(WIN32)
+		# Raw HID input depends on getNativeHwnd() — only for GUI builds.
 		if(NOT MAPLECAST_HEADLESS)
 			target_sources(${PROJECT_NAME} PRIVATE
 				core/windows/rawinput.cpp
-				core/windows/rawinput.h
-				# MapleCast: XInput direct-poll bypass for Windows mirror clients.
-				# Mirrors maplecast_evdev_input.cpp on Linux. Optional, opt-in via
-				# MAPLECAST_RAWINPUT=1 at runtime; SDL gamepad path is the default.
-				core/windows/rawinput_gamepad.cpp
-				core/windows/rawinput_gamepad.h)
-			# Xinput.lib auto-linked by #pragma comment in rawinput_gamepad.cpp,
-			# but linking explicitly is more portable to non-MSVC toolchains.
-			target_link_libraries(${PROJECT_NAME} PRIVATE xinput)
+				core/windows/rawinput.h)
 		endif()
+		# XInput direct-poll bypass — has NO window dependency, runs as a
+		# bare TIME_CRITICAL polling thread. Include in BOTH GUI and headless
+		# builds so the headless predictor can read the local gamepad directly
+		# (zero IPC vs UDP-loopback latency). Mirrors the Linux side's
+		# maplecast_evdev_input plumbing.
+		target_sources(${PROJECT_NAME} PRIVATE
+			core/windows/rawinput_gamepad.cpp
+			core/windows/rawinput_gamepad.h)
+		# Xinput.lib auto-linked by #pragma comment in rawinput_gamepad.cpp,
+		# but linking explicitly is more portable to non-MSVC toolchains.
+		target_link_libraries(${PROJECT_NAME} PRIVATE xinput)
 		if(NOT BUILD_TESTING)
 			if(MAPLECAST_HEADLESS)
 				# Headless Windows: console-mode entry point, no SDL/raw-input/window.
