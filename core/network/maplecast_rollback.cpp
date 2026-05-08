@@ -171,6 +171,15 @@ void saveFrame(uint64_t frame)
 {
 	if (!_active.load(std::memory_order_relaxed)) return;
 
+	// Diag — every 30 calls, very early in saveFrame so we know vblank is
+	// firing even if downstream code is slow or hangs.
+	static int _saveDbgCounter = 0;
+	if ((_saveDbgCounter++ % 30) == 0) {
+		printf("[rollback-dbg] saveFrame entered: frame=%llu count=%d\n",
+		       (unsigned long long)frame, _saveDbgCounter);
+		fflush(stdout);
+	}
+
 	const int idx = (int)(frame % RING_DEPTH);
 	RingSlot& slot = _ring[idx];
 
