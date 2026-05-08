@@ -1,10 +1,16 @@
 // Windows headless entry point — used only when MAPLECAST_HEADLESS=ON.
 //
-// Minimal console-mode main(). No SDL, no DirectSound, no rawinput, no
-// imguiDriver. Same shape as core/linux-dist/main.cpp's headless block:
-// flycast_init -> loadGame -> Running -> mainui_loop. The headless-aware
-// gates inside flycast already handle "no GUI" correctly; we just need a
-// non-WinMain entry that doesn't drag in the desktop dependencies.
+// Mirrors core/windows/winmain.cpp's main() init sequence step-for-step,
+// dropping only the GUI-specific pieces (breakpad, button-wizard, SDL,
+// keyboard layout, mirror-client autoload, MessageBox error popup). The
+// load-bearing pieces — setupPath, i18n::init, os_InstallFaultHandler,
+// SetPriorityClass — are kept identical so the SH4 dynarec sees the same
+// init state it does in the GUI client and on the Linux headless server.
+//
+// Without os_InstallFaultHandler the SH4 dynarec's first guest-memory
+// access raises STATUS_ACCESS_VIOLATION and Windows kills the process
+// silently — exactly the symptom we hit before this file mirrored the
+// fault-handler call.
 
 #include "types.h"
 #include "log/LogManager.h"
@@ -12,6 +18,10 @@
 #include "ui/mainui.h"
 #include "ui/gui.h"
 #include "stdclass.h"
+#include "cfg/cfg.h"
+#include "oslib/oslib.h"
+#include "oslib/i18n.h"
+#include "oslib/directory.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -20,14 +30,14 @@
 #include <thread>
 
 #include <windows.h>
+#include "nowide/args.hpp"
+#include "nowide/stackstring.hpp"
+#include "nowide/cstdlib.hpp"
 
 void os_DoEvents() {}
 
 void os_RunInstance(int argc, const char* argv[])
 {
-	// Multiboard (Naomi multi-cabinet) launches a child flycast on Linux via
-	// fork+exec. Headless Windows doesn't support multiboard for V1 — log and
-	// no-op so callers don't crash.
 	(void)argc; (void)argv;
 	WARN_LOG(BOOT, "[HEADLESS-WIN] os_RunInstance called but multiboard not supported on Windows");
 }
@@ -38,18 +48,13 @@ void os_RunInstance(int argc, const char* argv[])
 	std::abort();
 }
 
-// Thread-name utilities — used by stdclass.cpp / fault_handler.cpp / etc.
-// Normally provided by core/windows/winmain.cpp; we replicate the minimal
-// implementation here so the headless build links cleanly.
+// Thread-name utilities — identical to the GUI build's winmain.cpp impl.
 static thread_local std::string _threadName;
 
 void os_SetThreadName(const char* name)
 {
 	if (name == nullptr) return;
 	_threadName = name;
-	// SetThreadDescription is a Win10 1607+ API for thread names visible
-	// in debuggers and ETW traces. Resolve dynamically to remain compatible
-	// with older Windows builds.
 	using SetThreadDescriptionFn = HRESULT(WINAPI*)(HANDLE, PCWSTR);
 	static SetThreadDescriptionFn fn = []() -> SetThreadDescriptionFn {
 		HMODULE k = GetModuleHandleA("kernel32.dll");
@@ -66,10 +71,8 @@ const char* getThreadName()
 	return _threadName.empty() ? "?" : _threadName.c_str();
 }
 
-// rawinput stubs — full implementations live in core/windows/rawinput.cpp,
-// which is excluded from headless builds because it transitively depends
-// on the SDL window handle. Headless predictor doesn't need raw HID input
-// (gamepad arrives via UDP from the network sink).
+// rawinput stubs — full impls are in core/windows/rawinput.cpp, excluded
+// from headless builds because they require getNativeHwnd().
 namespace rawinput
 {
 	void init() {}
@@ -77,21 +80,70 @@ namespace rawinput
 }
 
 // maplecast_rawinput stub — XInput direct-poll bypass for the GUI client.
-// Not relevant to the headless predictor; gamepad routing is the input
-// server's responsibility.
 namespace maplecast_rawinput
 {
 	bool init() { return false; }
 }
 
+// setupPath — copied from winmain.cpp:58. Sets user_config_dir and
+// user_data_dir relative to the binary's location. Without this,
+// flycast can't find/write its config files (cfg/option lookups
+// silently fall through to defaults, which can leave critical state
+// fields like AutoLoadState unset and break headless boot).
+static void setupPath()
+{
+	wchar_t fname[512];
+	GetModuleFileNameW(0, fname, std::size(fname));
+
+	std::string fn;
+	nowide::stackstring path;
+	if (!path.convert(fname))
+		fn = ".\\";
+	else
+		fn = path.get();
+	size_t pos = get_last_slash_pos(fn);
+	if (pos != std::string::npos)
+		fn = fn.substr(0, pos) + "\\";
+	else
+		fn = ".\\";
+	set_user_config_dir(fn);
+	add_system_data_dir(fn);
+
+	std::string data_path = fn + "data\\";
+	set_user_data_dir(data_path);
+	flycast::mkdir(data_path.c_str(), 0755);
+}
+
 int main(int argc, char* argv[])
 {
+	nowide::args _(argc, argv);
+
+	// Console is already attached because /SUBSYSTEM:CONSOLE was set in
+	// CMakeLists for headless. No AllocConsole needed.
+
 	LogManager::Init();
+	i18n::init();
 
-	if (flycast_init(argc, argv))
-		die("Flycast initialization failed\n");
+	setupPath();
 
-	// MAPLECAST_HEADLESS_BUILD compile flag is always set in this binary.
+	if (flycast_init(argc, argv) != 0)
+		die("Flycast initialization failed");
+
+	// Boost process priority — same call as the GUI client.
+	if (!SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS))
+		printf("[maplecast-headless] SetPriorityClass(HIGH) failed: %lu\n", GetLastError());
+	else
+		printf("[maplecast-headless] process priority class: HIGH\n");
+	fflush(stdout);
+
+	// CRITICAL: install the fault handler. The SH4 dynarec relies on
+	// SEH-style fault handling for guest-memory accesses; without this,
+	// the first SH4 access violation kills the process silently.
+	os_InstallFaultHandler();
+
+	// Headless mode: load the ROM synchronously, transition to Running,
+	// drop the GUI state to Closed. Same shape as core/linux-dist/main.cpp's
+	// headless block.
 #ifdef MAPLECAST_HEADLESS_BUILD
 	const bool _headless_mode = true;
 #else
@@ -127,8 +179,7 @@ int main(int argc, char* argv[])
 	}
 
 	flycast_term();
+	os_UninstallFaultHandler();
 
-	// WS threads detached for performance can outlive main(); force-exit
-	// to avoid hanging the binary on shutdown. Same pattern as Linux.
-	_exit(0);
+	return 0;
 }
