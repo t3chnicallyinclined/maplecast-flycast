@@ -179,15 +179,22 @@ void saveFrame(uint64_t frame)
 		return;
 	}
 
-	// 2. Drain memwatch's page diffs into the slot. Captures every page
-	//    the SH4 wrote between the previous saveFrame() and this one.
+	// 2. Re-arm protection on pages-just-touched, BEFORE draining them.
+	//    Mirrors ggpo.cpp:507 ordering exactly. With started=true and the
+	//    watcher's pages map populated by THIS frame's writes, protect()
+	//    re-protects only those specific pages — not all of memory. Doing
+	//    reset() here would set started=false, causing the next protect()
+	//    to fault on every write to all 16+8+2 MB of guest RAM, which
+	//    stalls the SH4 thread out of forward progress.
+	memwatch::protect();
+
+	// 3. Drain memwatch's page diffs into the slot. capture() calls
+	//    getPages() which SWAPS the watcher's pages map out, leaving the
+	//    watcher empty but still started+protected. Next frame's first-
+	//    write to any of those pages will fault, get captured into the
+	//    (now empty) pages map, get unprotected, and the write completes.
 	slot.pages.clear();
 	slot.pages.capture();
-
-	// 3. Re-arm memwatch for the next frame's diff. mem_watch.h's reset()
-	//    clears the accumulator; protect() re-enables fault-on-write.
-	memwatch::reset();
-	memwatch::protect();
 
 	slot.frame = frame;
 
