@@ -206,6 +206,20 @@ void saveFrame(uint64_t frame)
 		_oldestFrame = frame >= (uint64_t)RING_DEPTH ? frame - (RING_DEPTH - 1) : 0;
 	}
 	_framesSaved++;
+
+	// Heartbeat log every 600 frames (~10s @ 60Hz) so we can see the ring
+	// is firing without needing a connected client. Keeps the same cadence
+	// as the existing [MIRROR] Server frame N log so they line up.
+	if ((_framesSaved % 600) == 0) {
+		size_t totalPages = slot.pages.ram.size() + slot.pages.vram.size()
+			+ slot.pages.aram.size() + slot.pages.elanram.size();
+		printf("[rollback] frames saved: %llu (latest @ frame %llu, %zu pages, %zu B serialized)\n",
+		       (unsigned long long)_framesSaved,
+		       (unsigned long long)frame,
+		       totalPages,
+		       slot.serialSize);
+		fflush(stdout);
+	}
 }
 
 bool rewindToFrame(uint64_t frame)
