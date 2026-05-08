@@ -37,6 +37,7 @@
 #include "maplecast_rollback.h"
 #include "types.h"
 #include "serialize.h"
+#include "emulator.h"
 #include "hw/mem/mem_watch.h"
 #include "hw/sh4/sh4_if.h"
 #include <xxhash.h>  // bundled at core/deps/xxHash/, on the include path
@@ -274,20 +275,41 @@ bool rewindToFrame(uint64_t frame)
 			memcpy(memwatch::elanWatcher.getMemPage(pair.first), &pair.second.data[0], PAGE_SIZE);
 	}
 
-	// Restore the SH4 + PVR scalar state (registers, scheduler, etc) from
-	// the dc_serialize blob at the target frame.
-	Deserializer deser(target.serialBlob.data(), target.serialSize, true);
-	uint32_t frame32;
-	deser >> frame32;
-	dc_deserialize(deser);
+	// Restore the SH4 + PVR scalar state from the dc_serialize blob at the
+	// target frame. CRITICAL: use emu.loadstate(deser) instead of calling
+	// dc_deserialize directly. loadstate does 8 additional critical things
+	// that dc_deserialize alone misses:
+	//   custom_texture.terminate()/init() — texture cache reset
+	//   aica::arm::recompiler::flush()   — AICA ARM recompiler flush
+	//   mmu_flush_table() / mmu_set_state — MMU page table flush
+	//   bm_Reset()                       — SH4 dynarec block manager reset
+	//   getSh4Executor()->ResetCache()    — SH4 executor cache reset
+	//   EventManager::event(Event::LoadState) — broadcast load-state event
+	// Without these, rolling-back into a state restored by dc_deserialize
+	// alone leaves stale dynarec blocks dispatching to wrong code, and the
+	// "frame" we resume at runs against subtly mismatched runtime state.
+	// Same wrappers V2 .mcrec replay relies on via the on-disk dc_loadstate
+	// path — same lesson, in-memory.
+	//
+	// Note: emu.loadstate also does memwatch::unprotect()+reset(). We
+	// already did unprotect at the top of rewindToFrame; the redundant
+	// calls inside loadstate are no-ops. The reset() call inside loadstate
+	// IS load-bearing — clears watcher state so our re-protect below
+	// arms correctly for the next frame.
+	{
+		Deserializer deser(target.serialBlob.data(), target.serialSize, true);
+		uint32_t frame32;
+		deser >> frame32;
+		emu.loadstate(deser);
 
-	if (deser.size() != target.serialSize) {
-		printf("[rollback] rewind: deserialize size mismatch (used %zu of %zu)\n",
-		       deser.size(), target.serialSize);
-		// Don't die here — V59 patches may have left some unreachable bytes
+		if (deser.size() != target.serialSize) {
+			printf("[rollback] rewind: deserialize size mismatch (used %zu of %zu)\n",
+			       deser.size(), target.serialSize);
+			// Don't die here — V60 patches may have left some unreachable bytes
+		}
 	}
 
-	memwatch::reset();
+	// memwatch::reset already done by emu.loadstate; just re-arm.
 	memwatch::protect();
 
 	_mostRecentFrame = frame;  // we've effectively undone everything past this
