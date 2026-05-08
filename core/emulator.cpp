@@ -1472,19 +1472,6 @@ void Emulator::start()
 						startTime = sh4_sched_now64();
 						renderTimeout = false;
 						runInternal();
-						// Phase 1 A.4 rollback ring — SH4-thread save hook.
-						// On this exact thread, runInternal() has just returned,
-						// which means the SH4 is paused at frame boundary
-						// (vblank handler called Stop()). This is GGPO's
-						// guarantee for save_game_state too — same threading
-						// model, same safety invariant. Page-fault state
-						// (memwatch::*Watcher.pages) is read-stable here
-						// because the only writer is the SH4 thread (this
-						// thread) and it's not running guest code right now.
-						if (maplecast_rollback::active()) {
-							static uint64_t _rollbackFrameSeq = 0;
-							maplecast_rollback::saveFrame(++_rollbackFrameSeq);
-						}
 						// In replica mode we're not using GGPO, and
 						// ggpo::nextFrame() returns false when no GGPO
 						// session is active (_endOfFrame is never set),
@@ -1568,6 +1555,21 @@ void Emulator::vblank()
 {
 	EventManager::event(Event::VBlank);
 	runner.execTasks();
+
+	// Phase 1 A.4 rollback ring — capture SH4 + page-delta state at the
+	// frame boundary. vblank() is called synchronously from SH4 execution
+	// (the dynarec hits the vblank interrupt), so this runs on the SAME
+	// thread that owns memwatch's PageMaps — no cross-thread race with the
+	// fault handler. GGPO uses this same hook (ggpo::endOfFrame() below)
+	// for the same reason. Done unconditionally on vblank, not gated on
+	// the renderTimeout/threaded checks below — those affect "should we
+	// signal end-of-frame to the rend thread", which is orthogonal to
+	// "should we capture rollback state."
+	if (maplecast_rollback::active()) {
+		static uint64_t _rollbackFrameSeq = 0;
+		maplecast_rollback::saveFrame(++_rollbackFrameSeq);
+	}
+
 	// Time out if a frame hasn't been rendered for 50 ms
 	if (sh4_sched_now64() - startTime <= 10000000)
 		return;
