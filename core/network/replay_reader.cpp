@@ -59,6 +59,12 @@ static uint16_t _lastButtons[2] = {0xFFFF, 0xFFFF}; // active-low default = noth
 static uint8_t  _lastLt[2]      = {0, 0};
 static uint8_t  _lastRt[2]      = {0, 0};
 
+// Sidecar checkpoint index. Populated in openReplay() if <path>.ckpt
+// exists. Each entry records the frame number a checkpoint was captured
+// at and the byte offset of its state_bytes within the .ckpt file.
+static std::string                    _ckptPath;
+static std::vector<CheckpointEntry>   _ckpts;
+
 // ── Helpers ───────────────────────────────────────────────────────────
 
 static inline uint32_t readLE32(const uint8_t* p) {
@@ -222,6 +228,34 @@ bool openReplay(const std::string& path) {
 	_file = nullptr;
 	_open.store(true);
 
+	// Probe for the sidecar checkpoint file. Optional — recordings made
+	// before checkpoints existed (or short ones that never crossed the
+	// checkpoint interval) won't have one.
+	_ckpts.clear();
+	_ckptPath = path + ".ckpt";
+	FILE* cf = fopen(_ckptPath.c_str(), "rb");
+	if (cf) {
+		uint8_t hdr[16];
+		if (fread(hdr, 1, 16, cf) == 16 && memcmp(hdr, "MCCKPT\0\0", 8) == 0) {
+			uint32_t ckptVersion = readLE32(hdr + 8);
+			if (ckptVersion == 1) {
+				while (true) {
+					uint8_t entryHdr[16];
+					if (fread(entryHdr, 1, 16, cf) != 16) break;
+					CheckpointEntry e{};
+					e.frame      = readLE64(entryHdr);
+					e.stateSize  = readLE64(entryHdr + 8);
+					e.fileOffset = (uint64_t)ftell(cf);
+					_ckpts.push_back(e);
+					fseek(cf, (long)e.stateSize, SEEK_CUR);
+				}
+			} else {
+				printf("[replay-reader] ckpt sidecar: unsupported version %u\n", ckptVersion);
+			}
+		}
+		fclose(cf);
+	}
+
 	printf("[replay-reader] opened %s\n", path.c_str());
 	printf("[replay-reader]   match: %s  duration: %.2fs\n",
 	       _info.match_id_hex.c_str(), _info.duration_us / 1000000.0);
@@ -231,6 +265,12 @@ bool openReplay(const std::string& path) {
 	       _info.savestate_raw_size, _info.savestate_compressed_size);
 	printf("[replay-reader]   inputs: %llu events (%ld bytes)\n",
 	       (unsigned long long)_info.entry_count, inputBytes);
+	if (!_ckpts.empty()) {
+		printf("[replay-reader]   checkpoints: %zu (frames %llu .. %llu)\n",
+		       _ckpts.size(),
+		       (unsigned long long)_ckpts.front().frame,
+		       (unsigned long long)_ckpts.back().frame);
+	}
 	return true;
 }
 
@@ -347,7 +387,96 @@ void close() {
 	_savestateCompressed.clear();
 	_inputLog.clear();
 	_cursor[0] = _cursor[1] = 0;
+	_ckpts.clear();
+	_ckptPath.clear();
 	_open.store(false);
+}
+
+uint32_t checkpointCount() {
+	return (uint32_t)_ckpts.size();
+}
+
+const std::vector<CheckpointEntry>& checkpoints() {
+	return _ckpts;
+}
+
+bool seekToFrame(uint64_t targetFrame) {
+	std::lock_guard<std::mutex> lk(_mtx);
+	if (!_open.load() || _ckpts.empty() || _ckptPath.empty()) {
+		printf("[replay-reader] seek: no checkpoint sidecar available\n");
+		return false;
+	}
+
+	// Find nearest checkpoint at or before targetFrame.
+	const CheckpointEntry* pick = nullptr;
+	for (const auto& e : _ckpts) {
+		if (e.frame <= targetFrame) pick = &e;
+		else break;
+	}
+	if (!pick) {
+		printf("[replay-reader] seek: no checkpoint at or before frame %llu (earliest is %llu)\n",
+		       (unsigned long long)targetFrame,
+		       (unsigned long long)_ckpts.front().frame);
+		return false;
+	}
+
+	// Read the checkpoint state bytes from the sidecar.
+	FILE* cf = fopen(_ckptPath.c_str(), "rb");
+	if (!cf) {
+		printf("[replay-reader] seek: cannot reopen sidecar %s\n", _ckptPath.c_str());
+		return false;
+	}
+	std::vector<uint8_t> bytes((size_t)pick->stateSize);
+	fseek(cf, (long)pick->fileOffset, SEEK_SET);
+	size_t got = fread(bytes.data(), 1, (size_t)pick->stateSize, cf);
+	fclose(cf);
+	if (got != pick->stateSize) {
+		printf("[replay-reader] seek: short read of checkpoint at offset %llu\n",
+		       (unsigned long long)pick->fileOffset);
+		return false;
+	}
+
+	// Write checkpoint bytes to the slot file. dc_loadstate at the autoload
+	// point will pick them up. Same plumbing as the embedded-savestate path.
+	std::string statePath = hostfs::getSavestatePath(config::SavestateSlot, true);
+	FILE* sf = fopen(statePath.c_str(), "wb");
+	if (!sf) {
+		printf("[replay-reader] seek: cannot open %s for write\n", statePath.c_str());
+		return false;
+	}
+	size_t wrote = fwrite(bytes.data(), 1, bytes.size(), sf);
+	fclose(sf);
+	if (wrote != bytes.size()) {
+		printf("[replay-reader] seek: short write to %s\n", statePath.c_str());
+		return false;
+	}
+
+	// Advance the input-log cursor past entries with frame < pick->frame
+	// so playback resumes from the seek point. Reset sticky-state to
+	// neutral (the checkpoint represents game state, not input state).
+	const size_t N = _inputLog.size() / 16;
+	for (int slot = 0; slot < 2; slot++) {
+		_cursor[slot] = 0;
+		_lastButtons[slot] = 0xFFFF;
+		_lastLt[slot] = 0;
+		_lastRt[slot] = 0;
+	}
+	for (size_t i = 0; i < N; i++) {
+		const uint8_t* e = &_inputLog[i * 16];
+		uint64_t entryFrame = readLE64(e);
+		if (entryFrame >= pick->frame) {
+			// Both slot cursors get the same starting point — slot dispatch
+			// happens inside getInputAtFrame's walk loop.
+			_cursor[0] = _cursor[1] = i;
+			break;
+		}
+	}
+
+	printf("[replay-reader] seek: jumped to checkpoint frame %llu (target %llu, %zu bytes)\n",
+	       (unsigned long long)pick->frame,
+	       (unsigned long long)targetFrame,
+	       bytes.size());
+	return true;
 }
 
 } // namespace maplecast_replay

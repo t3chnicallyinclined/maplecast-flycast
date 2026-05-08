@@ -742,6 +742,19 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 					config::AutoLoadState.override(true);
 					_replayOpened = true;
 					printf("[autoload-debug] MAPLECAST_REPLAY_IN — savestate written to slot, AutoLoadState forced on\n");
+
+					// Optional seek-to-frame: replaces the slot's .state with
+					// the nearest sidecar checkpoint at or before this frame.
+					// Lets long replays start mid-match instead of playing
+					// through leading idle. Falls through silently if the
+					// sidecar isn't present or the target is before the
+					// first checkpoint.
+					if (const char* seekStr = std::getenv("MAPLECAST_REPLAY_SEEK")) {
+						uint64_t seekFrame = (uint64_t)std::strtoull(seekStr, nullptr, 10);
+						printf("[autoload-debug] MAPLECAST_REPLAY_SEEK=%llu — attempting checkpoint seek\n",
+						       (unsigned long long)seekFrame);
+						maplecast_replay::seekToFrame(seekFrame);
+					}
 				} else {
 					printf("[autoload-debug] MAPLECAST_REPLAY_IN — open or savestate-write failed\n");
 				}

@@ -13,6 +13,7 @@
 */
 #include "replay_writer.h"
 #include "cfg/option.h"
+#include "emulator.h"
 #include "oslib/oslib.h"
 #include "types.h"
 
@@ -46,6 +47,15 @@ static constexpr size_t      FLUSH_AFTER_BYTES = 16 * 1024;
 // Header fields (some filled at finalize)
 static uint64_t              _startUnixUs = 0;
 static std::string           _lastOutPath;
+
+// Sidecar checkpoint file (<out_path>.ckpt). Opened lazily on the first
+// checkpoint() call; layout is "MCCKPT\0\0" magic + version + repeated
+// [frame:u64][size:u64][state_bytes:N] entries. Independent of the .mcrec
+// itself so users can ship the small input log without dragging hundreds
+// of MB of state snapshots along.
+static FILE*                 _ckptFile = nullptr;
+static int                   _ckptSlot = 99;        // alternate slot — never autoloaded
+static uint32_t              _ckptCount = 0;
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -250,6 +260,73 @@ void append(uint64_t frame, uint32_t seqAndSlot, uint16_t buttons,
 	maybeFlush(false);
 }
 
+// ── checkpoint() ──────────────────────────────────────────────────────
+//
+// Capture a fresh savestate to slot _ckptSlot (99 by default — chosen so
+// it never collides with the autoload slot 0) and append the bytes to the
+// sidecar file. Called from serverPublish at the caller's chosen cadence
+// (default ~every 10s). Lazy-opens the sidecar on first invocation so a
+// recording that never hits checkpoint() leaves no .ckpt file behind.
+
+void checkpoint(uint64_t frame) {
+	if (!_active.load(std::memory_order_relaxed)) return;
+
+	std::lock_guard<std::mutex> lk(_mtx);
+	if (_lastOutPath.empty()) return;
+
+	// Capture state. dc_savestate writes to slot _ckptSlot's .state file
+	// via the canonical path. Safe to call from the renderer thread at
+	// serverPublish time — flycast's threaded-rendering model has the SH4
+	// thread paused at frame boundary while we're here.
+	dc_savestate(_ckptSlot);
+
+	// Read the just-written state bytes back so we can embed them in
+	// the sidecar. (Reusing the file is safer than building bytes
+	// in-process via dc_serialize, which has a known completeness gap.)
+	std::string statePath = hostfs::getSavestatePath(_ckptSlot, false);
+	FILE* sf = fopen(statePath.c_str(), "rb");
+	if (!sf) {
+		printf("[replay-ckpt] cannot open %s after dc_savestate\n",
+		       statePath.c_str());
+		return;
+	}
+	fseek(sf, 0, SEEK_END);
+	long sz = ftell(sf);
+	fseek(sf, 0, SEEK_SET);
+	std::vector<uint8_t> bytes((size_t)sz);
+	size_t got = fread(bytes.data(), 1, (size_t)sz, sf);
+	fclose(sf);
+	if (got == 0) return;
+
+	// Lazy-open the sidecar on first checkpoint.
+	if (!_ckptFile) {
+		std::string ckptPath = _lastOutPath + ".ckpt";
+		_ckptFile = fopen(ckptPath.c_str(), "wb");
+		if (!_ckptFile) {
+			printf("[replay-ckpt] cannot open sidecar %s\n", ckptPath.c_str());
+			return;
+		}
+		const uint8_t magic[8] = {'M','C','C','K','P','T','\0','\0'};
+		fwrite(magic, 1, 8, _ckptFile);
+		uint8_t hdr[8];
+		writeLE32(hdr,     1);  // version
+		writeLE32(hdr + 4, 0);  // reserved
+		fwrite(hdr, 1, 8, _ckptFile);
+		printf("[replay-ckpt] sidecar opened: %s\n", ckptPath.c_str());
+	}
+
+	// Append [frame:u64][size:u64][state_bytes:got]
+	uint8_t entryHdr[16];
+	writeLE64(entryHdr,     frame);
+	writeLE64(entryHdr + 8, (uint64_t)got);
+	fwrite(entryHdr, 1, 16, _ckptFile);
+	fwrite(bytes.data(), 1, got, _ckptFile);
+	fflush(_ckptFile);
+	_ckptCount++;
+	printf("[replay-ckpt] frame=%llu size=%zu (#%u)\n",
+	       (unsigned long long)frame, got, _ckptCount);
+}
+
 // ── Upload (optional, triggered by MAPLECAST_REPLAY_UPLOAD_URL) ───────
 //
 // After stop() finalizes the file, if MAPLECAST_REPLAY_UPLOAD_URL is set
@@ -346,6 +423,13 @@ void stop(uint8_t winner) {
 	fclose(_file);
 	_file = nullptr;
 	_active.store(false);
+
+	// Close the checkpoint sidecar if one was opened.
+	if (_ckptFile) {
+		fclose(_ckptFile);
+		_ckptFile = nullptr;
+		printf("[replay-ckpt] sidecar closed (%u checkpoints)\n", _ckptCount);
+	}
 
 	printf("[replay] stopped: %llu input entries, %.2fs duration\n",
 	       (unsigned long long)_entryCount.load(),

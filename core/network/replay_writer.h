@@ -96,4 +96,18 @@ bool active();
 // How many input events appended this session.
 uint64_t entryCount();
 
+// Periodic state checkpoint. Captures a fresh savestate via dc_savestate
+// to a non-autoload slot (so we don't clobber the user's autoload baseline)
+// and appends the bytes to the sidecar file <out_path>.ckpt. Lets the
+// reader seek into long replays without playing through leading idle.
+//
+// Driven from the renderer thread (serverPublish) which holds the SH4
+// thread paused at frame boundaries, so dc_serialize is safe at this
+// point. No-op if recording isn't active or sidecar wasn't opened.
+//
+// Default cadence is once every 600 frames (~10s at 60Hz); the caller
+// is responsible for the throttle (we don't gate internally so the
+// caller can tune cadence per use case).
+void checkpoint(uint64_t frame);
+
 } // namespace maplecast_replay

@@ -29,6 +29,7 @@
 #include "maplecast_audio_ws.h"
 #include "maplecast_state_sync.h"
 #include "maplecast_input_server.h"
+#include "replay_writer.h"
 #include "maplecast_audio_client.h"
 #include "maplecast_input_sink.h"
 #include "maplecast_control_ws.h"
@@ -1504,6 +1505,24 @@ done_diff:
 	// This is the GGPO-equivalent dense input log â€” see publishFrameTick
 	// in maplecast_input_server.cpp for the rationale.
 	maplecast_input::publishFrameTick(hdr->frame_count);
+
+	// Periodic state checkpoint for the replay sidecar — every N frames
+	// during recording, capture a fresh savestate so the reader can seek
+	// into long replays without playing through leading idle. Default
+	// cadence is 600 frames (~10s @ 60Hz). Tunable via env. Only fires
+	// when recording is active; checkpoint() is a cheap no-op otherwise.
+	{
+		static const uint32_t _ckptInterval = []() {
+			const char* e = std::getenv("MAPLECAST_REPLAY_CKPT_INTERVAL");
+			if (e && *e) {
+				int n = std::atoi(e);
+				if (n > 0) return (uint32_t)n;
+			}
+			return (uint32_t)600;
+		}();
+		if (hdr->frame_count > 0 && (hdr->frame_count % _ckptInterval) == 0)
+			maplecast_replay::checkpoint(hdr->frame_count);
+	}
 
 	// Phase A â€” mirror the new frame number + publish wall-clock time into
 	// the read-only atomics that ggpo::getLocalInput() / status JSON consume.

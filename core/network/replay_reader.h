@@ -80,4 +80,29 @@ bool isOpen();
 // Stop playback + close the file.
 void close();
 
+// Sidecar checkpoint API.
+//
+// On openReplay(), the reader probes for <path>.ckpt and parses an index
+// of (frame, byte_offset) pairs if present. checkpointCount() / checkpoints()
+// expose that index; seekToFrame() rewrites the autoload slot's .state
+// file with the nearest-not-after checkpoint and advances the input cursor
+// to the matching frame. Caller must invoke seekToFrame() BEFORE the
+// emulator's autoload point fires (so dc_loadstate picks up the new state
+// file) — typically driven by env var MAPLECAST_REPLAY_SEEK at startup.
+struct CheckpointEntry {
+	uint64_t frame;
+	uint64_t fileOffset;   // offset in the sidecar .ckpt file
+	uint64_t stateSize;    // bytes of state at that offset
+};
+
+uint32_t                       checkpointCount();
+const std::vector<CheckpointEntry>& checkpoints();
+
+// Seek to nearest checkpoint at or before targetFrame. Writes its bytes
+// to hostfs::getSavestatePath(SavestateSlot, true) so dc_loadstate(slot)
+// picks them up. Also rewinds the input-log cursor to that frame so
+// playback resumes from the right point. Returns false if no checkpoint
+// exists at or before targetFrame, or if the sidecar isn't present.
+bool seekToFrame(uint64_t targetFrame);
+
 } // namespace maplecast_replay
