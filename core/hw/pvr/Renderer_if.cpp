@@ -651,6 +651,14 @@ void rend_serialize(Serializer& ser)
 	ser << fb_dirty;
 	ser << fb_watch_addr_start;
 	ser << fb_watch_addr_end;
+	// V59: renderer-side state that affects deterministic replay.
+	// docs/DC-SERIALIZE-AUDIT.md §2.2 + §3.7 — these were previously
+	// reset to sentinels on every load, causing first-post-load frame
+	// divergence (clearFramebuffer flag + tactx_Find LRU eviction).
+	ser << fbAddrHistory;     // 2× u32
+	ser << pend_rend;         // bool
+	ser << rendererEnabled;   // bool
+	ser << FrameCount;        // u32
 }
 void rend_deserialize(Deserializer& deser)
 {
@@ -662,7 +670,20 @@ void rend_deserialize(Deserializer& deser)
 		deser >> fb_watch_addr_start;
 		deser >> fb_watch_addr_end;
 	}
-	pend_rend = false;
-	fbAddrHistory[0] = 1;
-	fbAddrHistory[1] = 1;
+	if (deser.version() >= Deserializer::V59)
+	{
+		deser >> fbAddrHistory;
+		deser >> pend_rend;
+		deser >> rendererEnabled;
+		deser >> FrameCount;
+	}
+	else
+	{
+		// V<59 fallback: previous behaviour reset these to sentinels.
+		// Acceptable for one-shot loads of older states (.state files
+		// on disk); rollback ring depends on V59+ for byte-equality.
+		pend_rend = false;
+		fbAddrHistory[0] = 1;
+		fbAddrHistory[1] = 1;
+	}
 }

@@ -243,6 +243,11 @@ static void deserializeContext(Deserializer& deser, TA_context **pctx)
 	tad_context& tad = (*pctx)->tad;
 	deser.deserialize(tad.thd_root, size);
 	tad.thd_data = tad.thd_root + size;
+	// docs/DC-SERIALIZE-AUDIT.md §3.5 — defensive sync of thd_old_data
+	// after deserialize. tad.End() returns thd_old_data when thd_data ==
+	// thd_root (size == 0), and thd_old_data was never restored from the
+	// savestate, so it could read uninitialized memory in that corner case.
+	tad.thd_old_data = tad.thd_data;
 	if (deser.version() < Deserializer::V26)
 	{
 		u32 render_pass_count;

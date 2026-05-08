@@ -75,7 +75,9 @@ public:
 		V56,
 		V57,
 		V58,
-		Current = V58,
+		V59,    // adds fbAddrHistory[2], pend_rend, rendererEnabled, FrameCount
+		        // to rend_serialize (closes DC-SERIALIZE-AUDIT priority-1 gap)
+		Current = V59,
 
 		Next = Current + 1,
 	};
