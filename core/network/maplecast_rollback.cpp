@@ -395,13 +395,24 @@ void f1TickFromVblank(uint64_t saveSeq)
 			_f1Warmup--;
 			return;
 		}
-		// Warmup elapsed — begin the PRE pass.
+		// Warmup elapsed — record the anchor frame and ENTER PRE without
+		// capturing this frame's hash. The next saveFrame call captures
+		// pre[0] = state at end of frame anchor+1.
+		//
+		// Rationale: rewind to anchor restores "state at end of frame
+		// anchor"; SH4 resumes execution from frame anchor+1's start.
+		// First post-rewind hash captures "state at end of frame anchor+1"
+		// — which is what pre[0] needs to be for the comparison to make
+		// sense. If we captured pre[0] = "state at end of frame anchor"
+		// (the same frame we rewind TO), post[0] would be "state at end
+		// of frame anchor+1" and the comparison would always mismatch by
+		// definition (different frames produce different state).
 		_f1Anchor = saveSeq;
 		_f1Stage = F1_PRE;
 		_f1Counter = 0;
-		printf("[rollback-f1] warmup done @ saveSeq=%llu — beginning PRE pass (anchor frame %llu)\n",
-		       (unsigned long long)saveSeq, (unsigned long long)_f1Anchor);
-		// Fall through to F1_PRE handling below — capture this frame's hash.
+		printf("[rollback-f1] warmup done @ saveSeq=%llu — anchor recorded; pre[0] starts at saveSeq=%llu\n",
+		       (unsigned long long)saveSeq, (unsigned long long)(saveSeq + 1));
+		return;  // skip capture for the anchor frame
 	}
 
 	if (_f1Stage == F1_PRE) {
