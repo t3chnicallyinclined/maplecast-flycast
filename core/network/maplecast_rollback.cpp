@@ -39,9 +39,11 @@
 #include "serialize.h"
 #include "hw/mem/mem_watch.h"
 #include "hw/sh4/sh4_if.h"
+#include <xxhash.h>  // bundled at core/deps/xxHash/, on the include path
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -94,6 +96,9 @@ static uint64_t          _rollbacksDone   = 0;
 // allocator churn at this scale) — we allocate ONCE at init and reuse.
 constexpr size_t SLOT_BLOB_SIZE = 16 * 1024 * 1024;
 
+// Forward declarations for F.1 test plumbing (defined at end of file).
+static void f1TryConfigure();
+
 bool init()
 {
 	if (_active.load(std::memory_order_acquire)) return true;
@@ -135,6 +140,10 @@ bool init()
 
 	printf("[rollback] init: %d-slot ring, %zu MB total arena, memwatch armed\n",
 	       RING_DEPTH, (size_t)RING_DEPTH * SLOT_BLOB_SIZE / (1024 * 1024));
+
+	// Arm F.1 round-trip determinism test if MAPLECAST_ROLLBACK_F1_TEST is set.
+	// No-op otherwise.
+	f1TryConfigure();
 	return true;
 }
 
@@ -220,6 +229,10 @@ void saveFrame(uint64_t frame)
 		       slot.serialSize);
 		fflush(stdout);
 	}
+
+	// F.1 round-trip determinism test orchestration. No-op unless
+	// MAPLECAST_ROLLBACK_F1_TEST is set. Runs once and stops.
+	f1TickFromVblank(frame);
 }
 
 bool rewindToFrame(uint64_t frame)
@@ -302,5 +315,136 @@ Stats getStats()
 	s.rollbacksPerformed = _rollbacksDone;
 	return s;
 }
+
+// ── F.1 round-trip determinism test ──────────────────────────────────
+
+enum F1Stage { F1_IDLE, F1_WARMUP, F1_PRE, F1_POST, F1_DONE };
+static F1Stage              _f1Stage    = F1_IDLE;
+static bool                 _f1Configured = false;
+static uint32_t             _f1Warmup   = 0;   // frames before we start the test
+static uint32_t             _f1Depth    = 0;   // frames to compare on each side
+static uint32_t             _f1Counter  = 0;   // sub-counter within current stage
+static uint64_t             _f1Anchor   = 0;   // frame to rewind back to
+static std::vector<uint64_t> _f1PreHashes;
+static std::vector<uint64_t> _f1PostHashes;
+static bool                 _f1Pass     = false;
+
+static void f1TryConfigure()
+{
+	if (_f1Configured) return;
+	_f1Configured = true;
+	const char* env = std::getenv("MAPLECAST_ROLLBACK_F1_TEST");
+	if (!env || !*env) return;
+	uint32_t warmup = 0, depth = 0;
+	if (sscanf(env, "%u,%u", &warmup, &depth) != 2 || depth == 0) {
+		printf("[rollback-f1] env malformed (expected 'warmup,depth', got '%s') — test disabled\n", env);
+		return;
+	}
+	if (depth > (uint32_t)RING_DEPTH - 2) {
+		printf("[rollback-f1] depth=%u too deep for RING_DEPTH=%d — capping to %d\n",
+		       depth, RING_DEPTH, RING_DEPTH - 2);
+		depth = RING_DEPTH - 2;
+	}
+	_f1Warmup = warmup;
+	_f1Depth  = depth;
+	_f1PreHashes.assign(depth, 0);
+	_f1PostHashes.assign(depth, 0);
+	_f1Stage  = F1_WARMUP;
+	printf("[rollback-f1] armed: warmup=%u frames, depth=%u (will rewind %u frames, replay, compare hashes)\n",
+	       warmup, depth, depth);
+}
+
+void f1TickFromVblank(uint64_t saveSeq)
+{
+	if (_f1Stage == F1_IDLE)  return;
+	if (_f1Stage == F1_DONE)  return;
+
+	// Hash the just-saved slot's dc_serialize blob. xxh3 is the same hash
+	// GGPO uses for sync-test mode (ggpo.cpp:505) — fast (~10 GB/s on
+	// modern x86), zero collisions for our workload.
+	const int idx = (int)(saveSeq % RING_DEPTH);
+	const RingSlot& slot = _ring[idx];
+	auto blobHash = [&]() -> uint64_t {
+		return XXH3_64bits(slot.serialBlob.data(), slot.serialSize);
+	};
+
+	if (_f1Stage == F1_WARMUP) {
+		if (_f1Warmup > 0) {
+			_f1Warmup--;
+			return;
+		}
+		// Warmup elapsed — begin the PRE pass.
+		_f1Anchor = saveSeq;
+		_f1Stage = F1_PRE;
+		_f1Counter = 0;
+		printf("[rollback-f1] warmup done @ saveSeq=%llu — beginning PRE pass (anchor frame %llu)\n",
+		       (unsigned long long)saveSeq, (unsigned long long)_f1Anchor);
+		// Fall through to F1_PRE handling below — capture this frame's hash.
+	}
+
+	if (_f1Stage == F1_PRE) {
+		if (_f1Counter < _f1Depth) {
+			_f1PreHashes[_f1Counter] = blobHash();
+			printf("[rollback-f1] PRE  [%u/%u] saveSeq=%llu hash=%016llx\n",
+			       _f1Counter + 1, _f1Depth,
+			       (unsigned long long)saveSeq,
+			       (unsigned long long)_f1PreHashes[_f1Counter]);
+			_f1Counter++;
+		}
+		if (_f1Counter >= _f1Depth) {
+			// PRE complete — rewind. The post-rewind SH4 should reproduce
+			// the same hashes as PRE if our rollback is byte-deterministic.
+			printf("[rollback-f1] PRE complete — calling rewindToFrame(%llu)\n",
+			       (unsigned long long)_f1Anchor);
+			if (!rewindToFrame(_f1Anchor)) {
+				printf("[rollback-f1] FAIL — rewindToFrame returned false\n");
+				_f1Stage = F1_DONE;
+				_f1Pass = false;
+				return;
+			}
+			_f1Stage = F1_POST;
+			_f1Counter = 0;
+		}
+		return;
+	}
+
+	if (_f1Stage == F1_POST) {
+		if (_f1Counter < _f1Depth) {
+			_f1PostHashes[_f1Counter] = blobHash();
+			printf("[rollback-f1] POST [%u/%u] saveSeq=%llu hash=%016llx (pre was %016llx)\n",
+			       _f1Counter + 1, _f1Depth,
+			       (unsigned long long)saveSeq,
+			       (unsigned long long)_f1PostHashes[_f1Counter],
+			       (unsigned long long)_f1PreHashes[_f1Counter]);
+			_f1Counter++;
+		}
+		if (_f1Counter >= _f1Depth) {
+			// POST complete — compare hashes.
+			bool allMatch = true;
+			for (uint32_t i = 0; i < _f1Depth; i++) {
+				if (_f1PreHashes[i] != _f1PostHashes[i]) {
+					printf("[rollback-f1] MISMATCH frame %u: pre=%016llx post=%016llx\n",
+					       i + 1,
+					       (unsigned long long)_f1PreHashes[i],
+					       (unsigned long long)_f1PostHashes[i]);
+					allMatch = false;
+				}
+			}
+			_f1Pass = allMatch;
+			_f1Stage = F1_DONE;
+			printf("[rollback-f1] === %s === (%u/%u frames matched)\n",
+			       _f1Pass ? "PASS" : "FAIL",
+			       _f1Pass ? _f1Depth : 0,
+			       _f1Depth);
+		}
+		return;
+	}
+}
+
+bool f1Done()   { return _f1Stage == F1_DONE; }
+bool f1Passed() { return _f1Pass; }
+
+// Hook into init() so the test arms at startup if env is set.
+namespace { struct F1AutoArm { F1AutoArm() {} } _f1autoarm; }
 
 } // namespace maplecast_rollback

@@ -63,6 +63,24 @@ uint64_t mostRecentSaved();
 // True if the ring is initialized and recording.
 bool active();
 
+// F.1 round-trip determinism test. Activated via MAPLECAST_ROLLBACK_F1_TEST=
+// "warmup,depth" (e.g. "300,5" → wait 300 frames, then capture 5 frames'
+// worth of state hashes, rewind, recapture 5 frames, compare). Logs PASS
+// or FAIL with mismatching frame numbers. The test runs once and stops.
+//
+// Internals:
+//   1. Stage IDLE: count frames until warmup elapsed
+//   2. Stage PRE:  hash the dc_serialize blob each saveFrame, store [0..depth-1]
+//   3. After PRE final hash: rewindToFrame(anchor)
+//   4. Stage POST: hash on resumed frames, store [0..depth-1]
+//   5. After POST final hash: memcmp(pre, post) → log result
+void f1TickFromVblank(uint64_t saveSeq);
+
+// True if F.1 test has run to completion (regardless of pass/fail).
+bool f1Done();
+// True if F.1 test passed (only meaningful after f1Done()).
+bool f1Passed();
+
 // Telemetry snapshot for debug UIs.
 struct Stats {
 	uint64_t framesSaved;
