@@ -1623,19 +1623,30 @@ if(NOT LIBRETRO)
 					core/linux-dist/main.cpp)
 		endif()
 	elseif(WIN32)
-		target_sources(${PROJECT_NAME} PRIVATE
-			core/windows/rawinput.cpp
-			core/windows/rawinput.h
-			# MapleCast: XInput direct-poll bypass for Windows mirror clients.
-			# Mirrors maplecast_evdev_input.cpp on Linux. Optional, opt-in via
-			# MAPLECAST_RAWINPUT=1 at runtime; SDL gamepad path is the default.
-			core/windows/rawinput_gamepad.cpp
-			core/windows/rawinput_gamepad.h)
-		# Xinput.lib auto-linked by #pragma comment in rawinput_gamepad.cpp,
-		# but linking explicitly is more portable to non-MSVC toolchains.
-		target_link_libraries(${PROJECT_NAME} PRIVATE xinput)
+		if(NOT MAPLECAST_HEADLESS)
+			target_sources(${PROJECT_NAME} PRIVATE
+				core/windows/rawinput.cpp
+				core/windows/rawinput.h
+				# MapleCast: XInput direct-poll bypass for Windows mirror clients.
+				# Mirrors maplecast_evdev_input.cpp on Linux. Optional, opt-in via
+				# MAPLECAST_RAWINPUT=1 at runtime; SDL gamepad path is the default.
+				core/windows/rawinput_gamepad.cpp
+				core/windows/rawinput_gamepad.h)
+			# Xinput.lib auto-linked by #pragma comment in rawinput_gamepad.cpp,
+			# but linking explicitly is more portable to non-MSVC toolchains.
+			target_link_libraries(${PROJECT_NAME} PRIVATE xinput)
+		endif()
 		if(NOT BUILD_TESTING)
-			target_sources(${PROJECT_NAME} PRIVATE core/windows/winmain.cpp)
+			if(MAPLECAST_HEADLESS)
+				# Headless Windows: console-mode entry point, no SDL/raw-input/window.
+				# Uses the same flycast_init + os_RunInstance shape as the Linux
+				# headless server.
+				target_sources(${PROJECT_NAME} PRIVATE core/windows/main_headless.cpp)
+				set_target_properties(${PROJECT_NAME} PROPERTIES
+					LINK_FLAGS "/SUBSYSTEM:CONSOLE /ENTRY:mainCRTStartup")
+			else()
+				target_sources(${PROJECT_NAME} PRIVATE core/windows/winmain.cpp)
+			endif()
 		endif()
 		if(WINDOWS_STORE)
 			file(READ shell/uwp/Package.appxmanifest MANIFEST)

@@ -33,7 +33,9 @@
 #include "stdclass.h"
 #include "cfg/cfg.h"
 #include "log/LogManager.h"
+#ifndef MAPLECAST_HEADLESS_BUILD
 #include "sdl/sdl.h"
+#endif
 #include "emulator.h"
 #include "ui/mainui.h"
 #include "oslib/directory.h"
@@ -321,7 +323,8 @@ int main(int argc, char* argv[])
 	if (std::getenv("MAPLECAST")
 	    || std::getenv("MAPLECAST_BUTTON_WIZARD")
 	    || std::getenv("MAPLECAST_REPLAY_IN")
-	    || std::getenv("MAPLECAST_REPLAY_OUT"))
+	    || std::getenv("MAPLECAST_REPLAY_OUT")
+	    || std::getenv("MAPLECAST_REPLICA"))
 	{
 		AllocConsole();
 		freopen("CONOUT$", "w", stdout);

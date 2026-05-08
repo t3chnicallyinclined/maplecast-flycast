@@ -292,13 +292,21 @@ bool init()
 			printf("[replica] === REPLICA MODE === boot frame %llu\n",
 			       (unsigned long long)stats.lastAppliedFrame);
 
-			// Start the TA mirror stream as a correction channel.
-			// startMirrorStream launches the WS receiver thread WITHOUT
-			// setting isClient mode â€” so the GUI and SH4 keep running.
+			// Start the TA mirror stream as a correction channel — unless
+			// MAPLECAST_REPLICA_NO_CORRECTION=1 is set. The correction
+			// channel runs the WS receiver thread at THREAD_PRIORITY_HIGHEST
+			// which can starve the local SH4 during heavy scenes (MVC2
+			// match: ~1500 sprites). For rollback-prediction mode (where
+			// the input log already provides authoritative state agreement)
+			// the TA correction channel is redundant CPU work.
 			char ipstr[INET_ADDRSTRLEN];
 			inet_ntop(AF_INET, &_serverAddr.sin_addr, ipstr, sizeof(ipstr));
-			printf("[replica] starting TA mirror stream from %s:7201\n", ipstr);
-			maplecast_mirror::startMirrorStream(ipstr, 7201);
+			if (std::getenv("MAPLECAST_REPLICA_NO_CORRECTION")) {
+				printf("[replica] MAPLECAST_REPLICA_NO_CORRECTION=1 — skipping TA mirror correction stream\n");
+			} else {
+				printf("[replica] starting TA mirror stream from %s:7201\n", ipstr);
+				maplecast_mirror::startMirrorStream(ipstr, 7201);
+			}
 
 			return true;
 		}

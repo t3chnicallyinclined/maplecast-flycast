@@ -1260,6 +1260,44 @@ void Emulator::start()
 	// server's). Replica wins if both are set.
 	const bool replicaActive = maplecast_replica::init();
 
+	// Replica needs the gamepad → server input pipeline wired (the local
+	// SH4 doesn't read its own gamepad; inputs come from the server's
+	// authoritative tape after the round-trip). The MAPLECAST_MIRROR_CLIENT
+	// block below wires this, but replica intentionally skips that block
+	// (replica renders from local SH4, mirror-client renders from wire TA).
+	// So we wire input_sink + raw-input directly here for replica mode.
+	if (replicaActive)
+	{
+		// Perf overrides for replica mode. Local SH4 + renderer + audio is
+		// CPU-heavy, especially on Windows. DSP audio in particular runs
+		// on the AICA thread and competes with the SH4. Disable for replica
+		// (server's audio still streams via maplecast_audio if connected).
+		// MAPLECAST_REPLICA_KEEP_DSP=1 opt-in for users who want full DSP.
+		if (!std::getenv("MAPLECAST_REPLICA_KEEP_DSP")) {
+			config::DSPEnabled.override(false);
+			printf("[replica] perf: DSPEnabled=off (set MAPLECAST_REPLICA_KEEP_DSP=1 to keep)\n");
+		}
+
+		const char* sinkHost = std::getenv("MAPLECAST_REPLICA");
+		// Strip optional :port suffix — input sink wants bare host.
+		std::string hostOnly = sinkHost ? sinkHost : "127.0.0.1";
+		auto colon = hostOnly.find(':');
+		if (colon != std::string::npos) hostOnly.resize(colon);
+
+		int sinkSlot = 0;
+		if (const char* s = std::getenv("MAPLECAST_PLAYER_SLOT"))
+			sinkSlot = std::atoi(s);
+		maplecast_input_sink::init(hostOnly.c_str(), sinkSlot);
+
+#ifdef __linux__
+		maplecast_evdev_input::init();
+#elif defined(_WIN32)
+		maplecast_rawinput::init();
+#endif
+		printf("[replica] input pipeline wired: sink → %s slot=%d\n",
+		       hostOnly.c_str(), sinkSlot);
+	}
+
 	// SHELVED player client: runs full SH4 locally, but inputs are
 	// replayed from the server's frame-stamped tape via the bespoke
 	// frameGate path. Kept compiled for diagnostic comparison; do NOT
