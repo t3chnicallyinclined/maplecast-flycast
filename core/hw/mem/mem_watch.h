@@ -207,7 +207,11 @@ inline static bool writeAccess(void *p)
 
 inline static void protect()
 {
-	if (!config::GGPOEnable)
+	// Same gate as writeAccess() above — page protection is a no-op when
+	// nothing's tracking the deltas. config::GGPOEnable was the original
+	// trigger; mirrorActive is set by maplecast_rollback::init() so the
+	// non-GGPO predictor activates the watcher too.
+	if (!config::GGPOEnable && !mirrorActive)
 		return;
 	vramWatcher.protect();
 	ramWatcher.protect();
