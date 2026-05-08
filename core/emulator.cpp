@@ -1581,15 +1581,6 @@ void Emulator::vblank()
 	if (maplecast_rollback::active()) {
 		static uint64_t _rollbackFrameSeq = 0;
 		maplecast_rollback::saveFrame(++_rollbackFrameSeq);
-
-		// If a rewind was requested during this saveFrame's F.1 logic
-		// (or any other in-vblank caller), signal Stop() so Run() returns
-		// at the next safe point. The emu thread loop will then call
-		// executePendingRewind() before re-entering Run().
-		// Same mechanism GGPO uses — Stop() at frame boundary, run the
-		// callback while SH4 is paused, Start() to resume.
-		if (maplecast_rollback::pendingRollback())
-			getSh4Executor()->Stop();
 	}
 
 	// Time out if a frame hasn't been rendered for 50 ms

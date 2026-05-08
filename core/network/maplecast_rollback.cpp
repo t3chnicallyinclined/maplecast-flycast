@@ -421,6 +421,14 @@ void f1TickFromVblank(uint64_t saveSeq)
 	if (_f1Stage == F1_IDLE)  return;
 	if (_f1Stage == F1_DONE)  return;
 
+	// Diagnostic — every 60 calls so we can see f1Tick is firing
+	static int _f1DbgCounter = 0;
+	if ((_f1DbgCounter++ % 60) == 0) {
+		printf("[rollback-f1-dbg] tick saveSeq=%llu stage=%d warmupRem=%u counter=%u\n",
+		       (unsigned long long)saveSeq, (int)_f1Stage, _f1Warmup, _f1Counter);
+		fflush(stdout);
+	}
+
 	// Hash the just-saved slot's dc_serialize blob. xxh3 is the same hash
 	// GGPO uses for sync-test mode (ggpo.cpp:505) — fast (~10 GB/s on
 	// modern x86), zero collisions for our workload.
