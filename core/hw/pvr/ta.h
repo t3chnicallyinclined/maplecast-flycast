@@ -16,6 +16,15 @@ void ta_vtx_data(const SQBuffer *data, u32 size);
 
 void ta_parse(TA_context *ctx, bool primRestart);
 
+// V60 — serialize the BaseTAParser host-side statics that aren't otherwise
+// captured by dc_serialize. Closes the determinism gap documented in
+// docs/DC-SERIALIZE-AUDIT.md §2.1. Pointer fields are stored as raw
+// addresses (valid only for in-process round-trip).
+class Serializer;
+class Deserializer;
+void ta_vtx_serializeParserState(Serializer& ser);
+void ta_vtx_deserializeParserState(Deserializer& deser);
+
 class TaTypeLut
 {
 public:

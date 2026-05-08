@@ -20,6 +20,7 @@
 #include "spg.h"
 #include "pvr_regs.h"
 #include "Renderer_if.h"
+#include "ta.h"
 #include "ta_ctx.h"
 #include "serialize.h"
 #include "pvr_mem.h"
@@ -79,6 +80,11 @@ void serialize(Serializer& ser)
 
 	SerializeTAContext(ser);
 
+	// V60 — BaseTAParser host-side statics that dc_serialize previously
+	// missed. Closes DC-SERIALIZE-AUDIT.md §2.1 priority-2 gap. Required
+	// for the rollback ring's F.1 round-trip determinism test (A.4.b).
+	ta_vtx_serializeParserState(ser);
+
 	if (!ser.rollback())
 		vram.serialize(ser);
 	elan::serialize(ser);
@@ -102,6 +108,12 @@ void deserialize(Deserializer& deser)
 	else
 		taRenderPass = 0;
 	DeserializeTAContext(deser);
+
+	if (deser.version() >= Deserializer::V60)
+		ta_vtx_deserializeParserState(deser);
+	// V<60: BaseTAParser statics get reset to defaults (handled inside
+	// ta_vtx via reset() at boot / on softreset). Acceptable for old
+	// .state files but doesn't satisfy F.1 byte-equality.
 
 	if (!deser.rollback())
 		vram.deserialize(deser);

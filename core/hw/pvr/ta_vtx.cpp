@@ -9,6 +9,7 @@
 #include "pvr_mem.h"
 #include "Renderer_if.h"
 #include "cfg/option.h"
+#include "serialize.h"
 
 #include <algorithm>
 #include <utility>
@@ -136,6 +137,61 @@ protected:
 		CurrentPP = nullptr;
 		CurrentPPlist = nullptr;
 		VertexDataFP = NullVertexData;
+	}
+
+public:
+	// V60: serialize BaseTAParser statics to close the determinism gap.
+	// docs/DC-SERIALIZE-AUDIT.md §2.1 — these 14 statics carry parser state
+	// across frames but were never captured by dc_serialize. Pointer fields
+	// are saved as raw addresses (valid only for in-process round-trip; for
+	// file save/load they're restored by reset() via the V<60 fallback).
+	static void serializeStatics(Serializer& ser)
+	{
+		ser << tileclip_val;
+		ser << FaceBaseColor;
+		ser << FaceOffsColor;
+		ser << FaceBaseColor1;
+		ser << FaceOffsColor1;
+		ser << SFaceBaseColor;
+		ser << SFaceOffsColor;
+		ser << CurrentList;
+		ser << fetchTextures;
+		// Pointers — save raw bits. In-process rollback round-trip is byte-
+		// equal; for file-based saves the V<60 fallback handles them via
+		// reset() / re-init at load time.
+		uint64_t lmrBits         = (uint64_t)(uintptr_t)lmr;
+		uint64_t vertexDataFPBits= (uint64_t)(uintptr_t)VertexDataFP;
+		uint64_t currentPPlistBits = (uint64_t)(uintptr_t)CurrentPPlist;
+		uint64_t currentPPBits   = (uint64_t)(uintptr_t)CurrentPP;
+		uint64_t taCmdBits       = (uint64_t)(uintptr_t)TaCmd;
+		ser << lmrBits;
+		ser << vertexDataFPBits;
+		ser << currentPPlistBits;
+		ser << currentPPBits;
+		ser << taCmdBits;
+	}
+	static void deserializeStatics(Deserializer& deser)
+	{
+		deser >> tileclip_val;
+		deser >> FaceBaseColor;
+		deser >> FaceOffsColor;
+		deser >> FaceBaseColor1;
+		deser >> FaceOffsColor1;
+		deser >> SFaceBaseColor;
+		deser >> SFaceOffsColor;
+		deser >> CurrentList;
+		deser >> fetchTextures;
+		uint64_t lmrBits, vertexDataFPBits, currentPPlistBits, currentPPBits, taCmdBits;
+		deser >> lmrBits;
+		deser >> vertexDataFPBits;
+		deser >> currentPPlistBits;
+		deser >> currentPPBits;
+		deser >> taCmdBits;
+		lmr           = (ModTriangle*)(uintptr_t)lmrBits;
+		VertexDataFP  = (TaListFP*)(uintptr_t)vertexDataFPBits;
+		CurrentPPlist = (std::vector<PolyParam>*)(uintptr_t)currentPPlistBits;
+		CurrentPP     = (PolyParam*)(uintptr_t)currentPPBits;
+		TaCmd         = (TaListFP*)(uintptr_t)taCmdBits;
 	}
 
 	static const u32 *ta_type_lut;
@@ -1713,4 +1769,15 @@ void rend_context::newRenderPass()
 	pass.sorted_tr_count = 0;
 	getRegionSettings(render_passes.size(), pass);
 	render_passes.push_back(pass);
+}
+
+// V60 — free-function wrappers exposing BaseTAParser's static state to
+// dc_serialize. See class definition above for the gap rationale.
+void ta_vtx_serializeParserState(Serializer& ser)
+{
+	BaseTAParser::serializeStatics(ser);
+}
+void ta_vtx_deserializeParserState(Deserializer& deser)
+{
+	BaseTAParser::deserializeStatics(deser);
 }

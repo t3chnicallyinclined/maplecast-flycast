@@ -77,7 +77,10 @@ public:
 		V58,
 		V59,    // adds fbAddrHistory[2], pend_rend, rendererEnabled, FrameCount
 		        // to rend_serialize (closes DC-SERIALIZE-AUDIT priority-1 gap)
-		Current = V59,
+		V60,    // adds BaseTAParser statics (ta_vtx.cpp) — host-side TA parser
+		        // state. DC-SERIALIZE-AUDIT priority-2 gap. Required for the
+		        // rollback ring's F.1 round-trip determinism test.
+		Current = V60,
 
 		Next = Current + 1,
 	};
