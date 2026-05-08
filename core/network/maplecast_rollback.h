@@ -51,7 +51,29 @@ void saveFrame(uint64_t frame);
 // mostRecentSaved() down to frame, restoring page deltas + dc_deserialize.
 // Returns false if frame is older than oldestAvailable() or newer than
 // mostRecentSaved().
+//
+// SAFETY: this calls emu.loadstate() which does bm_Reset() / ResetCache()
+// — destructive ops on the SH4 dynarec. MUST be called from a context
+// where the SH4 is fully paused (executor->Stop() called and Run() has
+// returned). For async-safe usage from inside SH4 execution (vblank
+// handler), use requestRewindToFrame() instead.
 bool rewindToFrame(uint64_t frame);
+
+// Async-safe rewind request. Sets a pending flag; the actual loadstate
+// happens later when the SH4 thread is at a safe pause point. Caller can
+// fire this from inside vblank() — vblank will then signal the SH4
+// executor to Stop(), Run() will return, and the emu loop will execute
+// the queued rewind via executePendingRewind() before restarting the SH4.
+void requestRewindToFrame(uint64_t targetFrame);
+
+// True if a rewind has been requested but not yet executed.
+bool pendingRollback();
+
+// Execute the queued rewind. MUST be called from the emu thread loop
+// AFTER getSh4Executor()->Run() has returned (i.e., SH4 is paused).
+// Returns true on success, false if no rollback was pending or if the
+// rewind itself failed.
+bool executePendingRewind();
 
 // Oldest frame currently in the ring. Frames older than this have been
 // overwritten by newer saves. Returns UINT64_MAX if ring is empty.

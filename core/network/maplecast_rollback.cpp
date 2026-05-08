@@ -326,6 +326,46 @@ uint64_t oldestAvailable() { return _oldestFrame; }
 uint64_t mostRecentSaved() { return _mostRecentFrame; }
 bool active() { return _active.load(std::memory_order_relaxed); }
 
+// ── Async-safe rewind request (stop-callback-restart pattern) ────────
+//
+// rewindToFrame() calls emu.loadstate() which does bm_Reset() and
+// ResetCache() — destructive ops on the SH4 dynarec. Calling them from
+// inside vblank() corrupts in-flight dispatch (the very block we're
+// returning into is invalidated). To be safe, the rewind must happen
+// AFTER the SH4 has fully paused.
+//
+// Pattern (matches GGPO's session loop semantics):
+//   1. F.1 (or any caller in vblank context) calls requestRewindToFrame().
+//   2. vblank() checks pendingRollback() and calls Stop() if set.
+//   3. Stop() makes Run() return at the next safe point.
+//   4. Emu thread loop sees runInternal() returned. Calls
+//      executePendingRewind() — SH4 is fully paused here, safe.
+//   5. Loop calls Start() to restart SH4 from the rolled-back state.
+
+static std::atomic<bool>     _rollbackPending{false};
+static std::atomic<uint64_t> _rollbackTarget{0};
+
+void requestRewindToFrame(uint64_t targetFrame)
+{
+	_rollbackTarget.store(targetFrame, std::memory_order_release);
+	_rollbackPending.store(true, std::memory_order_release);
+}
+
+bool pendingRollback()
+{
+	return _rollbackPending.load(std::memory_order_acquire);
+}
+
+bool executePendingRewind()
+{
+	if (!_rollbackPending.load(std::memory_order_acquire))
+		return false;
+	const uint64_t target = _rollbackTarget.load(std::memory_order_acquire);
+	const bool ok = rewindToFrame(target);
+	_rollbackPending.store(false, std::memory_order_release);
+	return ok;
+}
+
 Stats getStats()
 {
 	Stats s{};
@@ -425,16 +465,13 @@ void f1TickFromVblank(uint64_t saveSeq)
 			_f1Counter++;
 		}
 		if (_f1Counter >= _f1Depth) {
-			// PRE complete — rewind. The post-rewind SH4 should reproduce
-			// the same hashes as PRE if our rollback is byte-deterministic.
-			printf("[rollback-f1] PRE complete — calling rewindToFrame(%llu)\n",
+			// PRE complete — REQUEST rewind (don't run it synchronously).
+			// We're inside vblank() right now → inside SH4 execution. The
+			// emu loop will see pendingRollback after Run() returns and
+			// execute the rewind from a safe context.
+			printf("[rollback-f1] PRE complete — requesting deferred rewind to anchor saveSeq=%llu\n",
 			       (unsigned long long)_f1Anchor);
-			if (!rewindToFrame(_f1Anchor)) {
-				printf("[rollback-f1] FAIL — rewindToFrame returned false\n");
-				_f1Stage = F1_DONE;
-				_f1Pass = false;
-				return;
-			}
+			requestRewindToFrame(_f1Anchor);
 			_f1Stage = F1_POST;
 			_f1Counter = 0;
 		}
