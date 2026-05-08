@@ -1472,19 +1472,6 @@ void Emulator::start()
 						startTime = sh4_sched_now64();
 						renderTimeout = false;
 						runInternal();
-						// Rollback ring: if vblank() called Stop() because
-						// of a pending rewind request, runInternal() just
-						// returned with SH4 paused. Now is the safe context
-						// to run emu.loadstate() — bm_Reset / ResetCache
-						// won't corrupt in-flight dispatch because there's
-						// no in-flight dispatch. Restart SH4 after.
-						// Same pattern GGPO uses for save_game_state /
-						// load_game_state callbacks.
-						if (maplecast_rollback::pendingRollback()) {
-							maplecast_rollback::executePendingRewind();
-							getSh4Executor()->Start();
-							continue;  // skip the ggpo::nextFrame break check
-						}
 						// In replica mode we're not using GGPO, and
 						// ggpo::nextFrame() returns false when no GGPO
 						// session is active (_endOfFrame is never set),
