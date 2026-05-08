@@ -812,6 +812,21 @@ relay on the same box — see "System Topology" above.
    compile-define is set; `isHeadless()` returns true at compile time, so
    the env var is optional.
 
+3. **Windows headless build** for the local-rollback-predictor topology
+   (Phase 1 of [rollback prediction](ROLLBACK-PREDICTION.md)):
+   ```powershell
+   cmake -B build-headless-win -G Ninja -DMAPLECAST_HEADLESS=ON `
+         -DCMAKE_TOOLCHAIN_FILE=$vcpkg/scripts/buildsystems/vcpkg.cmake `
+         -DVCPKG_TARGET_TRIPLET=x64-windows
+   cmake --build build-headless-win --target flycast
+   # Result: ~9 MB binary, /SUBSYSTEM:CONSOLE, no SDL/DirectSound/rawinput
+   ```
+   Same source code as the Linux headless build. Windows-specific entry
+   point at `core/windows/main_headless.cpp` mirrors `linux-dist/main.cpp`'s
+   structure. SHM falls back to `malloc(SHM_SIZE)` when `/dev/shm` is
+   unavailable so caller logic stays identical between platforms.
+   Full recipe: [WINDOWS-HEADLESS-BUILD.md](WINDOWS-HEADLESS-BUILD.md).
+
 **Why it works** (the invariant):
 
 The mirror wire is generated from CPU-side state only. The render message

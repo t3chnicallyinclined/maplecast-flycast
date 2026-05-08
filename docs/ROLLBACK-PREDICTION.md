@@ -215,6 +215,29 @@ Builds **use case G + I + K**. Bigger projects, ship after the foundation is pro
 
 ## Investigation log — known issues
 
+### ✅ DONE 2026-05-08: Phase 1 A.1 + A.2 — local headless predictor validated
+
+The "client-side SH4" component of Phase 1 (originally A.1) was solved by **reusing the existing Linux headless build pattern on Windows** instead of grafting full SH4 emulation onto the `MAPLECAST_CLIENT_ONLY` mirror-client build (which struggled to keep up with MVC2 match scenes — ~5-15 fps due to renderer-thread contention).
+
+Same architecture everywhere now:
+- **Server (prod VPS, Linux)**: `MAPLECAST_HEADLESS=ON` + same env vars
+- **Local rollback predictor (player's Windows machine)**: `MAPLECAST_HEADLESS=ON` + same env vars + binary at `build-headless-win/flycast.exe`
+- **Decentralized node (any operator)**: same headless build, advertises via the hub
+
+The mirror client (renderer-only) connects to `127.0.0.1:7200` instead of a remote host and otherwise runs identically — it has no idea whether the server is local or remote.
+
+Key surgery required (all small, contained `#ifdef _WIN32` islands; **no caller-logic divergence between Linux and Windows**):
+
+1. **`core/windows/main_headless.cpp`** (new) — console-mode entry point mirroring `core/linux-dist/main.cpp`'s headless block step-for-step. `LogManager::Init` → `i18n::init` → `setupPath` → `flycast_init` → `os_InstallFaultHandler` → `emu.loadGame` + `emu.start` → `mainui_loop` → `os_UninstallFaultHandler` + `flycast_term`.
+
+2. **`os_InstallFaultHandler()` was the load-bearing fix** — without it, the SH4 dynarec's first vmem-faulting guest-memory access raises `STATUS_ACCESS_VIOLATION` and Windows kills the process silently. Easy to miss because the symptom is "process exits cleanly right after `entering main loop`."
+
+3. **`openShm` Windows fallback** — Linux uses `mmap(/dev/shm)` for cross-process relay access; Windows allocates `malloc(SHM_SIZE)` private heap. Same `_shmPtr` / same `SHM_SIZE` / same caller logic; only the inside of `openShm` differs.
+
+4. **CMakeLists gates** — when `MAPLECAST_HEADLESS=ON` on Windows: `winmain.cpp` swapped for `main_headless.cpp`, `rawinput.cpp` + `rawinput_gamepad.cpp` excluded (need `getNativeHwnd()`), `audiobackend_directsound.cpp` excluded (same), `LINK_FLAGS = "/SUBSYSTEM:CONSOLE /ENTRY:mainCRTStartup"`.
+
+End-to-end validated 2026-05-08 with prod-savestate copy (all characters unlocked) playing back through local headless + local mirror client. Input-to-latch ~5.8 ms ema on localhost. **A.3-A.6 (rollback ring + comparator + prediction) now land on top of this foundation, in code paths shared between Linux and Windows.**
+
 ### ✅ DONE 2026-05-07: Phase 0 Step D — record + replay validated end-to-end
 
 The full record→replay loop works on prod with visual confirmation. Recorded a session on prod's headless server with the V2 .mcrec format (input log + on-disk .state bytes embedded verbatim, no dc_serialize round-trip). Replayed on the same prod server with mirror clients spectating — the recorded gameplay reproduced faithfully (Magneto tag-in confirmed in correct frame).

@@ -6,10 +6,44 @@ This is the public-facing deployment overview. It tells you how to build and run
 
 | Variant | Build target | What it is |
 |---|---|---|
-| **headless flycast** (recommended for servers) | `cmake -DMAPLECAST_HEADLESS=ON -B build-headless && cmake --build build-headless` | CPU-only mirror server. No GPU, no SDL, no X11, no audio. ~26 MB stripped binary. Runs MVC2 + TA mirror streaming on a $5/month VPS. See [ARCHITECTURE.md "Mode 3: Headless"](ARCHITECTURE.md) for the design rationale. |
+| **headless flycast** (recommended for servers) | `cmake -DMAPLECAST_HEADLESS=ON -B build-headless && cmake --build build-headless` | CPU-only mirror server. No GPU, no SDL, no X11, no audio. ~26 MB stripped binary on Linux, ~9 MB on Windows. Runs MVC2 + TA mirror streaming on a $5/month VPS. **Identical binary architecture on Linux and Windows** — Linux deploys to a VPS, Windows runs locally as the rollback predictor for sub-RTT input feel. See [ARCHITECTURE.md "Mode 3: Headless"](ARCHITECTURE.md) for the design rationale. |
 | **GPU flycast** (for local/cab play) | `cmake -B build && cmake --build build` | Standard flycast with full rendering. Used at a physical cab or for local LAN play with sub-millisecond input latency. |
 | **Windows mirror client** (native desktop spectator/player) | `cmake -DMAPLECAST_CLIENT_ONLY=ON -B build` (with vcpkg toolchain for libcurl) | Native Windows `flycast.exe` that connects to a remote MapleCast server (e.g. nobd.net) and renders the TA mirror stream pixel-perfect. No NVENC, no WebRTC, no DX9, no OpenSSL. See [WINDOWS-CLIENT-BUILD.md](WINDOWS-CLIENT-BUILD.md) for the full setup recipe. |
 | **WASM renderer** (browser viewer) | `cd packages/renderer && bash build.sh` | Standalone WebAssembly renderer that consumes the TA mirror stream and draws MVC2 in a browser canvas. See [WASM-BUILD-GUIDE.md](WASM-BUILD-GUIDE.md). |
+
+### Local rollback-predictor topology (Phase 1 of rollback prediction)
+
+For **competitive players** who want sub-RTT input latency, the headless flycast can also run **on the player's own machine** as a deterministic predictor. The architecture is identical to the server-side deployment — same binary, same WS protocol, same TA mirror format — only the network path is different (loopback instead of WAN):
+
+```
+┌──────────────────────────┐    ws://127.0.0.1:7200    ┌──────────────────────┐
+│ headless flycast         │  ─────── TA stream ──────► │ flycast mirror client│
+│ (MAPLECAST_HEADLESS=ON,  │   UDP :7100 input ◄──────  │ (renderer only)      │
+│  Windows or Linux)       │                            │                      │
+└──────────────────────────┘                            └──────────────────────┘
+```
+
+Launch on Windows:
+```powershell
+$env:MAPLECAST=1
+$env:MAPLECAST_MIRROR_SERVER=1
+$env:MAPLECAST_HEADLESS=1
+$env:MAPLECAST_PORT=7100
+$env:MAPLECAST_SERVER_PORT=7200
+$env:MAPLECAST_HEADLESS_AUTOLOAD=1   # if you have a savestate to autoload
+.\build-headless-win\flycast.exe "<rom-path>"
+
+# In a second terminal, connect the mirror client to localhost
+$env:MAPLECAST_MIRROR_CLIENT=1
+$env:MAPLECAST_SERVER_HOST="127.0.0.1"
+$env:MAPLECAST_SERVER_PORT="7200"
+.\build\flycast.exe
+```
+
+Same architecture supports three deployment modes:
+- **Hub-hosted server**: prod operator runs headless on a VPS, browsers + mirror clients connect remotely
+- **Decentralized node**: any operator runs headless on their own box, advertises via the hub
+- **Local rollback predictor**: player runs headless on their own machine, mirror client connects to localhost
 
 ## Architecture overview
 

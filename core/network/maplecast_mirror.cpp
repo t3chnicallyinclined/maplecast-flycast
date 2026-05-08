@@ -239,11 +239,23 @@ namespace maplecast_mirror
 static bool openShm(bool create)
 {
 #ifdef _WIN32
-	// Local-machine same-box serverâ†”client SHM optimization is Linux-only.
-	// On Windows the caller falls through to initClientWebSocket(), which is
-	// what every remote client (including connections to nobd.net) does anyway.
+	// Linux uses /dev/shm so a separate relay process can read the ring
+	// buffer without TCP. Windows has no relay process and no /dev/shm,
+	// but the rest of the mirror server (serverPublish ring writes, WS
+	// broadcast) still expects _shmPtr to be a valid buffer of SHM_SIZE.
+	// Allocate a private heap buffer instead. Same in-process layout, no
+	// cross-process sharing (which we don't need on Windows for V1).
 	(void)create;
-	return false;
+	if (_shmPtr == nullptr) {
+		_shmPtr = (uint8_t*)malloc(SHM_SIZE);
+		if (_shmPtr == nullptr) {
+			printf("[MIRROR] heap alloc for SHM_SIZE failed on Windows\n");
+			return false;
+		}
+		memset(_shmPtr, 0, SHM_SIZE);
+		printf("[MIRROR] Windows: SHM backed by private heap (no cross-process share)\n");
+	}
+	return true;
 #else
 	if (create) shm_unlink(SHM_NAME);
 	_shmFd = shm_open(SHM_NAME, create ? (O_CREAT | O_RDWR) : O_RDWR, 0666);
