@@ -119,6 +119,17 @@ std::atomic<uint64_t> _slotInputAtomic[2] = {
 	std::atomic<uint64_t>(packSlotInput(0xFFFF, 0, 0, 0)),
 };
 
+// Snapshot of what ggpo::getLocalInput just returned to the SH4 for the
+// current frame. publishFrameTick reads this for the input log so the
+// recording captures the EXACT value the SH4 consumed -- closing the
+// ~14ms race between SH4 maple-read and serverPublish where the live
+// _slotInputAtomic could be updated by an inbound UDP/WS packet. Same
+// pack layout as _slotInputAtomic.
+std::atomic<uint64_t> _consumedInputAtomic[2] = {
+	std::atomic<uint64_t>(packSlotInput(0xFFFF, 0, 0, 0)),
+	std::atomic<uint64_t>(packSlotInput(0xFFFF, 0, 0, 0)),
+};
+
 // Phase B â€” per-slot input accumulator for ConsistencyFirst policy.
 // Initialized to "neutral active-low (0xFFFF), no edges accumulated, zero
 // triggers". Storage for the extern in the header.
@@ -635,8 +646,14 @@ void pushTapeEntry(int slot, uint16_t buttons, uint8_t lt_, uint8_t rt_, uint32_
 // Bandwidth: 2 slots * 16 bytes * 60 Hz = ~2 KB/sec. Trivial.
 void publishFrameTick(uint64_t frame)
 {
+	// Read from _consumedInputAtomic, NOT _slotInputAtomic. The consumed
+	// atomic is updated by ggpo::getLocalInput at the moment the SH4 reads
+	// input; that's the value that actually drove the just-completed frame.
+	// Using _slotInputAtomic here would race with the input thread updating
+	// it between SH4-read and serverPublish (~14ms window) and the recording
+	// would capture an input the SH4 didn't actually see.
 	for (int slot = 0; slot < 2; slot++) {
-		const uint64_t packed = _slotInputAtomic[slot].load(std::memory_order_acquire);
+		const uint64_t packed = _consumedInputAtomic[slot].load(std::memory_order_acquire);
 		uint16_t buttons;
 		uint8_t  ltVal;
 		uint8_t  rtVal;

@@ -171,6 +171,23 @@ static void getLocalInput(MapleInputState inputState[4])
 			state.halfAxes[PJTI_R] = rt[player];
 		}
 
+		// Snapshot the SH4-consumed input into _consumedInputAtomic so that
+		// publishFrameTick logs the EXACT value just returned to the SH4
+		// (not whatever _slotInputAtomic happens to be at end-of-frame).
+		// Closes the maple-read vs serverPublish race for the recording
+		// path. Slots 0/1 only — same scope as the input log.
+		if (player == 0 || player == 1) {
+			const uint16_t buttons = (uint16_t)(state.kcode & 0xFFFF);
+			const uint8_t  ltOut   = (uint8_t)(state.halfAxes[PJTI_L] >> 8);
+			const uint8_t  rtOut   = (uint8_t)(state.halfAxes[PJTI_R] >> 8);
+			// Encode the slot in the seq's high byte (matches publishFrameTick
+			// expectations); low bits not load-bearing for the recording.
+			const uint32_t seq     = (uint32_t)player << 24;
+			maplecast_input::_consumedInputAtomic[player].store(
+				maplecast_input::packSlotInput(buttons, ltOut, rtOut, seq),
+				std::memory_order_release);
+		}
+
 		// Analog/mouse/keyboard fields aren't owned by the maplecast input
 		// server — these are SDL/keyboard/mouse globals, untouched by the
 		// network thread. Same path for all slots regardless of source.

@@ -78,6 +78,12 @@ struct PlayerInfo {
 // read across the buttons/lt/rt boundary.
 extern std::atomic<uint64_t> _slotInputAtomic[2];
 
+// Snapshot of what ggpo::getLocalInput just returned to the SH4 for slot
+// 0 / 1 on the current frame. publishFrameTick reads this for the input
+// log so recordings capture the EXACT value the SH4 consumed (closing
+// the maple-read vs serverPublish race on _slotInputAtomic).
+extern std::atomic<uint64_t> _consumedInputAtomic[2];
+
 inline uint64_t packSlotInput(uint16_t buttons, uint8_t ltVal, uint8_t rtVal, uint32_t seq) {
 	return (uint64_t)buttons
 	     | ((uint64_t)ltVal << 16)
