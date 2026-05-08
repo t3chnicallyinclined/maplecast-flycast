@@ -43,6 +43,7 @@
 #include "network/maplecast_input_server.h"
 #include "network/maplecast_audio.h"
 #include "network/maplecast_mirror.h"
+#include "network/maplecast_rollback.h"
 #include "network/replay_reader.h"
 #include "network/replay_writer.h"
 #include "network/maplecast_control_ws.h"
@@ -1235,6 +1236,16 @@ void Emulator::start()
 	if (std::getenv("MAPLECAST_MIRROR_SERVER"))
 	{
 		maplecast_mirror::initServer();
+
+		// Phase 1 A.4 rollback ring — opt-in. Activates the in-memory
+		// page-delta + dc_serialize ring that the predictor uses for
+		// rollback re-emulation. Off by default (no overhead when unset);
+		// enable with MAPLECAST_ROLLBACK_RING=1 on the predictor process.
+		// Spec: docs/ROLLBACK-RING-DESIGN.md
+		if (std::getenv("MAPLECAST_ROLLBACK_RING")) {
+			if (!maplecast_rollback::init())
+				printf("[rollback] init failed — ring disabled for this session\n");
+		}
 
 		// Control WebSocket — loopback-bound JSON command channel for
 		// /overlord admin operations (savestate hot-load, soft reset,

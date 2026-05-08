@@ -30,6 +30,7 @@
 #include "maplecast_state_sync.h"
 #include "maplecast_input_server.h"
 #include "replay_writer.h"
+#include "maplecast_rollback.h"
 #include "maplecast_audio_client.h"
 #include "maplecast_input_sink.h"
 #include "maplecast_control_ws.h"
@@ -1517,6 +1518,14 @@ done_diff:
 	// This is the GGPO-equivalent dense input log â€” see publishFrameTick
 	// in maplecast_input_server.cpp for the rationale.
 	maplecast_input::publishFrameTick(hdr->frame_count);
+
+	// Phase 1 A.4 rollback ring — capture the just-completed frame's state
+	// into the in-memory ring. No-op when MAPLECAST_ROLLBACK_RING is unset
+	// (init() never ran, active() returns false). Hook lives here because
+	// serverPublish already fires once per emu frame on prod headless and
+	// gives us the authoritative frame number we need as the ring index.
+	if (maplecast_rollback::active())
+		maplecast_rollback::saveFrame(hdr->frame_count);
 
 	// Periodic state checkpoint for the replay sidecar — every N frames
 	// during recording, capture a fresh savestate so the reader can seek

@@ -48,6 +48,8 @@ target_sources(${PROJECT_NAME} PRIVATE
         maplecast_state_sync.h
         maplecast_replica.cpp
         maplecast_replica.h
+        maplecast_rollback.cpp
+        maplecast_rollback.h
         maplecast_input_sink.cpp
         maplecast_input_sink.h
         maplecast_palette.cpp
