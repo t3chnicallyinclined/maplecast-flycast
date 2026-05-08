@@ -117,8 +117,15 @@ bool init()
 	// Activate the page-fault watcher. From here on, every write to RAM /
 	// VRAM / ARAM / ElanRAM is recorded by memwatch. We drain it per-frame
 	// in saveFrame().
+	//
+	// IMPORTANT: do NOT call memwatch::protect() here. GGPO's pattern is to
+	// arm protection at the END of save_game_state, AFTER the first frame
+	// has run unimpeded (ggpo.cpp:507). Calling protect() before the SH4
+	// thread starts would fault on every page-write during early SH4 boot
+	// — which works correctness-wise but stalls the emu thread for tens of
+	// seconds before any forward progress is visible. saveFrame() handles
+	// arming protection on subsequent frames after capturing each delta.
 	memwatch::mirrorActive = true;
-	memwatch::protect();
 
 	_mostRecentFrame = UINT64_MAX;
 	_oldestFrame     = UINT64_MAX;
