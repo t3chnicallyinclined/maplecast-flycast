@@ -1168,6 +1168,14 @@ void serverPublish(TA_context* ctx)
 		_atomicCurrentFrame.store(_localFrameNum, std::memory_order_release);
 		maplecast_ws::updateTelemetry({_localFrameNum, 0, 0, 0, 0,
 			60, 0, 0}); // approximate 60fps
+		// Phase 1 A.4 rollback ring still ticks even with no clients — the
+		// predictor needs the ring populated regardless of who's watching.
+		// The hook below the rest of serverPublish only fires when clients
+		// are connected, so we duplicate it here on the no-client path.
+		// Using _localFrameNum (the same counter the post-publish path uses
+		// as hdr->frame_count) keeps the ring's frame numbers aligned.
+		if (maplecast_rollback::active())
+			maplecast_rollback::saveFrame(_localFrameNum);
 		return;
 	}
 
