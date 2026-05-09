@@ -1,8 +1,14 @@
 /*
-	SHELVED 2026-04-09 — superseded by GGPO peer mode. See SHELVED
-	block at top of maplecast_player.cpp for full rationale. The
-	GGPO replacement uses save_game_state / load_game_state callbacks
-	in core/network/ggpo.cpp instead. Do not add features here.
+	UN-SHELVED 2026-05-09 — byte-perfect dc_serialize round-trip
+	(commit c79df1c97) makes this path provably equivalent to GGPO's
+	save_game_state / load_game_state callbacks. Pillar 4 (state-sync
+	replicas) now has a real foundation: server's dc_serialize blob
+	→ client's emu.loadstate produces byte-equal continuation.
+
+	The "shelved 2026-04-09" note is preserved in git history. This
+	module IS active in production (see [state-sync] === SERVER READY
+	=== port 7102 in headless boot logs) and now backed by a verified
+	byte-perfect determinism gate (scripts/audit-determinism.sh).
 
 	MapleCast State Sync — Phase 3 of lockstep-player-client.
 

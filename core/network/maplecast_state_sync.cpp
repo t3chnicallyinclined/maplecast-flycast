@@ -1,18 +1,30 @@
 ﻿/*
 	================================================================
-	SHELVED 2026-04-09 â€” superseded by GGPO peer mode
+	UN-SHELVED 2026-05-09 -- Pillar 4 foundation, now byte-perfect
 	================================================================
-	Companion to maplecast_player.cpp (see SHELVED block at the top
-	of that file for full rationale). This is the bespoke TCP state-
-	sync that hands a one-shot dc_serialize savestate to a connecting
-	player client. It is being replaced by GGPO's existing
-	save_game_state / load_game_state callbacks in
-	core/network/ggpo.cpp, which already use dc_serialize/
-	dc_deserialize and are integrated with GGPO's rollback ring.
+	The 2026-04-09 "shelved" note (preserved in git history) is no
+	longer accurate. This module IS in production -- running on every
+	headless server (see [state-sync] === SERVER READY === port 7102
+	in boot logs). What changed is the determinism guarantee: as of
+	commit c79df1c97 the dc_serialize -> dc_deserialize round-trip
+	is byte-perfect (0 bytes drift, verified via
+	scripts/audit-determinism.sh). That makes this path equivalent
+	to GGPO's save_game_state / load_game_state callbacks: the
+	replica's state after applying a snapshot is byte-equal to
+	what the server's state would be at that frame.
 
-	Still compiled and called from maplecast_player::init() and
-	maplecast_mirror::initServer(). Held as a fallback until GGPO
-	peer mode is proven end-to-end. Do not add features here.
+	Implications for Pillar 4 (state-sync replicas):
+	  * Replica failover: server A -> server B handoff produces
+	    byte-equal continuation. No audio glitches, no input phase
+	    shift, no observer-visible desync.
+	  * Late-join: client connecting mid-match catches up byte-equal.
+	  * Tournament integrity: any replica's recording is provably
+	    identical to the active server's recording.
+
+	Same emu.loadstate() path used by:
+	  * Rollback ring's rewindToFrame (A.4 / commit c79df1c97)
+	  * Replay's applyEmbeddedSavestateInMemory (commit 617a6181a)
+	  * GGPO's load_game_state callback (ggpo.cpp:481)
 	================================================================
 
 	MapleCast State Sync â€” server + client implementations.
