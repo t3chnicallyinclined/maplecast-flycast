@@ -40,6 +40,7 @@
 #include "emulator.h"
 #include "hw/mem/mem_watch.h"
 #include "hw/pvr/Renderer_if.h"
+#include "hw/pvr/spg.h"
 #include "hw/sh4/sh4_if.h"
 #include "hw/sh4/sh4_sched.h"
 extern int vblank_schid; // defined in core/hw/pvr/spg.cpp
@@ -360,13 +361,17 @@ bool rewindToFrame(uint64_t frame)
 		// stays inactive forever, no vblanks fire, SH4 dispatches blocks
 		// indefinitely with no progress.
 		//
-		// Fix: explicitly re-schedule vblank_schid for the next frame.
-		// Use a conservative value — 1 cycle ensures vblank fires ASAP,
-		// triggering its handler which will re-schedule itself naturally
-		// via getNextSpgInterrupt(). This is safe because vblank's
-		// callback is idempotent w.r.t. firing time (it processes
-		// scanlines based on clc_pvr_scanline which IS in the blob).
-		sh4_sched_request(vblank_schid, 1);
+		// Fix: re-schedule vblank_schid using rescheduleSPG() — same
+		// helper used at PVR register-write paths (pvr_regs.cpp:211).
+		// rescheduleSPG calls sh4_sched_request(vblank_schid,
+		// getNextSpgInterrupt()) which uses the deserialized
+		// clc_pvr_scanline / Line_Cycles to compute the EXACT next-
+		// scanline-cycle count — matching what LIVE's natural
+		// re-schedule would have done after the original anchor's
+		// scanline 0 block continuation. This closes the last 2-byte
+		// drift in interrupt_pend and sh4_sched_ffb low byte that
+		// the +1-cycle reschedule produced.
+		rescheduleSPG();
 
 		if (deser.size() != target.serialSize) {
 			printf("[rollback] rewind: deserialize size mismatch (used %zu of %zu)\n",

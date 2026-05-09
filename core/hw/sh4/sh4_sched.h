@@ -54,6 +54,13 @@ void sh4_sched_deserialize(Deserializer& deser);
 void sh4_sched_serialize(Serializer& ser, int id);
 void sh4_sched_deserialize(Deserializer& deser, int id);
 
+// Save/restore a single schid's (tag/start/end) timing without going
+// through serialize. Used by deserialize paths that call updateBaudRate-
+// style helpers which would otherwise overwrite the just-restored schid.
+struct Sh4SchedSlotSnapshot { int tag; int start; int end; };
+Sh4SchedSlotSnapshot sh4_sched_save_slot(int id);
+void sh4_sched_restore_slot(int id, const Sh4SchedSlotSnapshot& s);
+
 constexpr u32 sh4CyclesForXfer(u32 sizeUnit, u32 unitPerSecond) {
 	return (u64)SH4_MAIN_CLOCK * sizeUnit / unitPerSecond;
 }

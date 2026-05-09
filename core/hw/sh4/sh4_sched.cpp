@@ -232,6 +232,27 @@ extern int vblank_schid;
 // hw/sh4/modules/tmu.cpp
 extern int tmu_sched[3];
 
+Sh4SchedSlotSnapshot sh4_sched_save_slot(int id)
+{
+	Sh4SchedSlotSnapshot s{};
+	if (id >= 0 && id < (int)sch_list.size()) {
+		s.tag = sch_list[id].tag;
+		s.start = sch_list[id].start;
+		s.end = sch_list[id].end;
+	}
+	return s;
+}
+
+void sh4_sched_restore_slot(int id, const Sh4SchedSlotSnapshot& s)
+{
+	if (id >= 0 && id < (int)sch_list.size()) {
+		sch_list[id].tag = s.tag;
+		sch_list[id].start = s.start;
+		sch_list[id].end = s.end;
+	}
+	sh4_sched_ffts();
+}
+
 void sh4_sched_serialize(Serializer& ser)
 {
 	ser << sh4_sched_ffb;

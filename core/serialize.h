@@ -85,7 +85,10 @@ public:
 		        // cpu_time_idx, SH4FastEnough, fskip) — DC-SERIALIZE-AUDIT
 		        // §2.3 previously accepted as benign but harness shows them
 		        // cascading into ~448-cycle SH4 drift on rollback round-trip.
-		Current = V61,
+		V62,    // drops wall-clock real_times[] + SH4FastEnough from
+		        // spg serialize (non-deterministic for rollback). Keeps
+		        // cpu_cycles + cpu_time_idx + fskip (sh4-cycle-deterministic).
+		Current = V62,
 
 		Next = Current + 1,
 	};

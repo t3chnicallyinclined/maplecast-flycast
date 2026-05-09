@@ -154,8 +154,13 @@ static int spg_line_sched(int tag, int cycles, int jitter, void *arg)
 			else
 				SPG_STATUS.fieldnum = 0;
 
-			rend_vblank();
-
+			// Update SH4FastEnough stats BEFORE rend_vblank so that
+			// the rollback ring's saveFrame (called from rend_vblank →
+			// Emulator::vblank) captures POST-increment cpu_time_idx /
+			// cpu_cycles. Otherwise LIVE's anchor save captures pre-inc
+			// idx, then continues this block (does idx++), while REDO's
+			// post-rewind path skips this block continuation, producing
+			// an idx-by-1 drift in the rollback round-trip.
 			u64 now = getTimeMs();
 			cpu_time_idx = (cpu_time_idx + 1) % cpu_cycles.size();
 			if (cpu_cycles[cpu_time_idx] != 0)
@@ -170,6 +175,8 @@ static int spg_line_sched(int tag, int cycles, int jitter, void *arg)
 			}
 			cpu_cycles[cpu_time_idx] = sh4_sched_now64();
 			real_times[cpu_time_idx] = now;
+
+			rend_vblank();
 
 #ifdef TEST_AUTOMATION
 			replay_input();
@@ -311,14 +318,16 @@ void spg_Serialize(Serializer& ser)
 	ser << Frame_Cycles;
 	ser << lightgun_line;
 	ser << lightgun_hpos;
-	// V61 — SPG fast-path stats. DC-SERIALIZE-AUDIT §2.3 previously
-	// "accepted" these as benign because they only matter when
-	// AutoSkipFrame=1, but the byte-diff harness shows them cascading
-	// into 448-cycle drift via QueueRender's SH4FastEnough branch.
-	ser.serialize(real_times.data(), real_times.size());
+	// V61 — SPG fast-path stats. real_times is HOST WALL CLOCK
+	// (getTimeMs in spg_line_sched) so it's inherently non-deterministic
+	// for byte-perfect rollback round-trip. cpu_cycles + cpu_time_idx +
+	// fskip are derived from sh4_sched_now64 which IS deterministic.
+	// SH4FastEnough is computed from cpu_cycles/real_times ratio — only
+	// affects AutoSkipFrame=1 path (we use AutoSkipFrame=0 in headless),
+	// so its specific value is unused. We serialize the deterministic
+	// fields and zero/skip the wall-clock dependent ones on deserialize.
 	ser.serialize(cpu_cycles.data(), cpu_cycles.size());
 	ser << cpu_time_idx;
-	ser << SH4FastEnough;
 	ser << fskip;
 }
 void spg_Deserialize(Deserializer& deser)
@@ -333,11 +342,24 @@ void spg_Deserialize(Deserializer& deser)
 	deser >> Frame_Cycles;
 	deser >> lightgun_line;
 	deser >> lightgun_hpos;
-	if (deser.version() >= Deserializer::V61) {
-		deser.deserialize(real_times.data(), real_times.size());
+	if (deser.version() >= Deserializer::V61 && deser.version() < Deserializer::V62) {
+		// V61 also serialized real_times[4] (32B) and SH4FastEnough (1B),
+		// but those are wall-clock-derived and non-deterministic for
+		// rollback round-trips. V62 drops them. Skip when reading V61 blobs.
+		deser.skip(sizeof(double) * 4);
 		deser.deserialize(cpu_cycles.data(), cpu_cycles.size());
 		deser >> cpu_time_idx;
-		deser >> SH4FastEnough;
+		deser.skip<bool>(); // SH4FastEnough
 		deser >> fskip;
+		// Reset wall-clock state to neutral; SH4FastEnough recomputes
+		// naturally on next vblank.
+		real_times.fill(0.0);
+		SH4FastEnough = false;
+	} else if (deser.version() >= Deserializer::V62) {
+		deser.deserialize(cpu_cycles.data(), cpu_cycles.size());
+		deser >> cpu_time_idx;
+		deser >> fskip;
+		real_times.fill(0.0);
+		SH4FastEnough = false;
 	}
 }

@@ -441,7 +441,15 @@ void SCIFSerialPort::deserialize(Deserializer& deser)
 		transmitting = false;
 	}
 	SCIF_SCBRR2 &= 0xff;	// work around previous issues with dynarecs
+	// updateBaudRate() unconditionally calls sh4_sched_request(schedId, ...)
+	// which overwrites the schedId state we just deserialized. Save the
+	// schedId state, run updateBaudRate (we need its frameSize/cyclesPerBit
+	// recomputation), then restore the schedId state. Without this, rollback
+	// round-trip drifts because LIVE's SCIF state (often inactive end=-1)
+	// gets force-activated during deserialize.
+	auto anchorSched = sh4_sched_save_slot(schedId);
 	updateBaudRate();
+	sh4_sched_restore_slot(schedId, anchorSched);
 }
 
 struct PTYPipe : public SerialPort::Pipe
