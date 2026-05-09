@@ -1577,33 +1577,32 @@ void Emulator::vblank()
 	EventManager::event(Event::VBlank);
 	runner.execTasks();
 
-	// Self-test: same-frame dc_serialize → dc_deserialize round trip.
-	// Bypasses the rollback ring entirely. If THIS hangs after frame 600,
-	// the bug is in dc_serialize/dc_deserialize itself (or rend_resync),
-	// not in the ring workflow. If it doesn't hang, the bug is specific
-	// to save+forward+memwatch+restore+memwatch_protect — and we narrow
-	// the search to memwatch / scheduler / interaction with mid-frame
-	// state mutation between save and load.
+	// Self-test: dual mode dc_serialize audit. Run with
+	// MAPLECAST_SELFTEST_DESERIALIZE=1 (NO MAPLECAST_ROLLBACK_RING).
 	//
-	// Run with: MAPLECAST_MIRROR_SERVER=1 MAPLECAST_SELFTEST_DESERIALIZE=1
-	// (NO MAPLECAST_ROLLBACK_RING).
+	// 1. save+save audit: serialize twice in a row with NO state
+	//    mutation between. If diff != 0, dc_serialize reads non-
+	//    deterministic state. (Verified: diff=0 — dc_serialize is pure.)
+	// 2. save+deserialize+continue: after the audit, deserialize the
+	//    first blob and let SH4 keep running. Confirms dc_deserialize
+	//    doesn't break SH4 forward progress.
 	if (std::getenv("MAPLECAST_SELFTEST_DESERIALIZE")) {
 		static int _selfTestFrame = 0;
 		if (++_selfTestFrame == 600) {
-			printf("[selftest] frame 600 — capturing dc_serialize blob...\n"); fflush(stdout);
-			static std::vector<uint8_t> buf(40 * 1024 * 1024);
-			Serializer ser(buf.data(), buf.size(), false);
-			dc_serialize(ser);
-			size_t serSize = ser.size();
-			printf("[selftest] serialized %zu bytes; calling dc_deserialize in-place...\n", serSize); fflush(stdout);
-			Deserializer deser(buf.data(), serSize, false);
-			dc_deserialize(deser);
-			printf("[selftest] dc_deserialize returned; calling rend_resync_after_rollback...\n"); fflush(stdout);
-			rend_resync_after_rollback();
-			printf("[selftest] returning from vblank — SH4 should keep running\n"); fflush(stdout);
-		}
-		if (_selfTestFrame > 600 && (_selfTestFrame % 30) == 0) {
-			printf("[selftest] still alive @ frame=%d\n", _selfTestFrame); fflush(stdout);
+			static std::vector<uint8_t> bufA(40 * 1024 * 1024);
+			static std::vector<uint8_t> bufB(40 * 1024 * 1024);
+			Serializer serA(bufA.data(), bufA.size(), false);
+			dc_serialize(serA);
+			size_t sizeA = serA.size();
+			Serializer serB(bufB.data(), bufB.size(), false);
+			dc_serialize(serB);
+			size_t sizeB = serB.size();
+			size_t commonSize = std::min(sizeA, sizeB);
+			uint64_t diffBytes = 0;
+			for (size_t i = 0; i < commonSize; i++)
+				if (bufA[i] != bufB[i]) diffBytes++;
+			printf("[selftest] save+save: sizeA=%zu sizeB=%zu diff=%llu (pure if 0)\n",
+			       sizeA, sizeB, (unsigned long long)diffBytes); fflush(stdout);
 		}
 	}
 

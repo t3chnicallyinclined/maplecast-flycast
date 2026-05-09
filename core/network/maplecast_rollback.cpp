@@ -326,7 +326,10 @@ bool rewindToFrame(uint64_t frame)
 		// rollback=false: blob includes VRAM + mem_b. emu.loadstate does the
 		// load-bearing wrappers (bm_Reset, ResetCache, aica recompiler flush,
 		// mmu_flush_table, custom_texture init, EventManager LoadState
-		// broadcast) that plain dc_deserialize alone misses.
+		// broadcast) that plain dc_deserialize alone misses. Tested both
+		// paths — drift is identical (~155 bytes / 448-cycle skew), so
+		// bm_Reset/ResetCache aren't the cycle-drift source. We use
+		// emu.loadstate for the safer dynarec-aware path.
 		Deserializer deser(target.serialBlob.data(), target.serialSize, false);
 		uint32_t frame32;
 		deser >> frame32;
