@@ -1640,37 +1640,69 @@ void AICA_Sample()
 
 void serialize(Serializer& ser)
 {
+	dcs_mark(ser, "sgc.channels");
+	bool firstChan = true;
 	for (const ChannelEx& channel : Chans)
 	{
+		// Per-field marks for channel 0 only — lets the byte-diff audit
+		// pinpoint exactly which field within the 72-byte channel struct
+		// drifts in the AICA cascade. Other channels have the same layout
+		// so the offset within their block matches channel 0's.
+		if (firstChan) dcs_mark(ser, "sgc.ch0.SA");
 		u32 addr = channel.SA - &aica_ram[0];
 		ser << addr;
 
+		if (firstChan) dcs_mark(ser, "sgc.ch0.CA");
 		ser << channel.CA;
+		if (firstChan) dcs_mark(ser, "sgc.ch0.step");
 		ser << channel.step;
+		if (firstChan) dcs_mark(ser, "sgc.ch0.s0");
 		ser << channel.s0;
+		if (firstChan) dcs_mark(ser, "sgc.ch0.s1");
 		ser << channel.s1;
+		if (firstChan) dcs_mark(ser, "sgc.ch0.looped");
 		ser << channel.loop.looped;
+		if (firstChan) dcs_mark(ser, "sgc.ch0.adpcm.last_quant");
 		ser << channel.adpcm.last_quant;
+		if (firstChan) dcs_mark(ser, "sgc.ch0.adpcm.loopstart_quant");
 		ser << channel.adpcm.loopstart_quant;
+		if (firstChan) dcs_mark(ser, "sgc.ch0.adpcm.loopstart_prev");
 		ser << channel.adpcm.loopstart_prev_sample;
+		if (firstChan) dcs_mark(ser, "sgc.ch0.adpcm.in_loop");
 		ser << channel.adpcm.in_loop;
+		if (firstChan) dcs_mark(ser, "sgc.ch0.noise_state");
 		ser << channel.noise_state;
 
+		if (firstChan) dcs_mark(ser, "sgc.ch0.AEG.val");
 		ser << channel.AEG.val;
+		if (firstChan) dcs_mark(ser, "sgc.ch0.AEG.state");
 		ser << channel.AEG.state;
+		if (firstChan) dcs_mark(ser, "sgc.ch0.FEG.value");
 		ser << channel.FEG.value;
+		if (firstChan) dcs_mark(ser, "sgc.ch0.FEG.state");
 		ser << channel.FEG.state;
+		if (firstChan) dcs_mark(ser, "sgc.ch0.FEG.prev1");
 		ser << channel.FEG.prev1;
+		if (firstChan) dcs_mark(ser, "sgc.ch0.FEG.prev2");
 		ser << channel.FEG.prev2;
+		if (firstChan) dcs_mark(ser, "sgc.ch0.FEG.fractSave");
 		ser << channel.FEG.fractSave;
 
+		if (firstChan) dcs_mark(ser, "sgc.ch0.lfo.counter");
 		ser << channel.lfo.counter;
+		if (firstChan) dcs_mark(ser, "sgc.ch0.lfo.state");
 		ser << channel.lfo.state;
+		if (firstChan) dcs_mark(ser, "sgc.ch0.enabled");
 		ser << channel.enabled;
+		if (firstChan) dcs_mark(ser, "sgc.ch1.start");
+		firstChan = false;
 	}
+	dcs_mark(ser, "sgc.beep");
 	beep.serialize(ser);
+	dcs_mark(ser, "sgc.cdda");
 	ser << cdda_sector;
 	ser << cdda_index;
+	dcs_mark(ser, "sgc.midi");
 	ser << (u32)midiSendBuffer.size();
 	for (u8 b : midiSendBuffer)
 		ser << b;
@@ -1717,7 +1749,23 @@ void deserialize(Deserializer& deser)
 			channel.FEG.prev1 = 0;
 			channel.FEG.prev2 = 0;
 		}
-		channel.SetFegState(channel.FEG.state);
+		// SetFegState(EG_Attack) clobbers FEG.value/prev1/prev2/fractSave
+		// (sgc_if.cpp:734-740) — used to "reset to start of attack" when
+		// the SH4 triggers a new note. In deserialize we already have the
+		// true mid-flight values from the blob; calling SetFegState would
+		// overwrite them with FLV0 and break byte-perfect rollback round-
+		// trip. Save and restore around the StepFEG dispatch update.
+		{
+			s32 savedPrev1 = channel.FEG.prev1;
+			s32 savedPrev2 = channel.FEG.prev2;
+			s32 savedFract = channel.FEG.fractSave;
+			u32 savedValue = channel.FEG.value;
+			channel.SetFegState(channel.FEG.state);
+			channel.FEG.value = savedValue;
+			channel.FEG.prev1 = savedPrev1;
+			channel.FEG.prev2 = savedPrev2;
+			channel.FEG.fractSave = savedFract;
+		}
 		channel.UpdateFEG();
 		channel.UpdateStreamStep();
 
