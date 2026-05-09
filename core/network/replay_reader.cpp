@@ -126,13 +126,15 @@ bool openReplay(const std::string& path) {
 		return false;
 	}
 
-	// Version check. V2 is the simplified format: savestate is the on-disk
-	// .state file's bytes verbatim, restored via dc_loadstate. V1 used a
-	// runtime dc_serialize round-trip that suffered from a state-completeness
-	// gap (~3,900-byte frame-1 desync) and is no longer supported.
+	// Version check. V2 reads the on-disk .state file at write time; V3
+	// captures via in-memory dc_serialize at write time. Read path is
+	// identical for both (same byte format) — both write the embedded
+	// bytes to the slot file and let dc_loadstate(slot) restore. V1 used
+	// a runtime dc_serialize round-trip that suffered from a state-
+	// completeness gap (~3,900-byte frame-1 desync); no longer supported.
 	uint32_t version = readLE32(hdr + 8);
-	if (version != 2) {
-		printf("[replay-reader] unsupported version %u (this build expects v2 — re-record with current binary)\n", version);
+	if (version != 2 && version != 3) {
+		printf("[replay-reader] unsupported version %u (this build accepts v2 or v3 — re-record with current binary)\n", version);
 		fclose(_file); _file = nullptr;
 		return false;
 	}

@@ -15,6 +15,7 @@
 #include "cfg/option.h"
 #include "emulator.h"
 #include "oslib/oslib.h"
+#include "serialize.h"
 #include "types.h"
 
 #include <atomic>
@@ -139,11 +140,14 @@ bool start(const StartParams& p) {
 	const char magic[8] = { 'M','C','R','E','C','\0','\0','\0' };
 	fwrite(magic, 1, 8, _file);
 
-	// version (4) + flycast_ver (4). V2 is the simplified format: no
-	// runtime dc_serialize round-trip — savestate is the on-disk .state
-	// file's bytes verbatim, restored via dc_loadstate at autoload.
+	// version (4) + flycast_ver (4). V3 captures the savestate via
+	// in-memory dc_serialize (byte-perfect since commit c79df1c97 closed
+	// the rollback round-trip drift to 0). No prerequisite that the user
+	// has a .state file on disk. Reader writes bytes back to slot and
+	// uses the same dc_loadstate(slot) autoload path as V2 — bytes are
+	// identical so the read side doesn't need a new path.
 	uint8_t v[4];
-	writeLE32(v, 2);                    // version
+	writeLE32(v, 3);                    // version
 	fwrite(v, 1, 4, _file);
 	writeLE32(v, 0);                    // flycast_ver placeholder
 	fwrite(v, 1, 4, _file);
@@ -189,35 +193,34 @@ bool start(const StartParams& p) {
 	uint8_t reserved[40] = {0};
 	fwrite(reserved, 1, 40, _file);
 
-	// ── Embed the on-disk savestate file verbatim ──
-	// V2 reads the .state file that flycast just autoloaded (or has on
-	// disk in the configured slot) and copies its bytes into the .mcrec.
-	// On replay, those bytes are written back to disk and dc_loadstate(slot)
-	// is what does the actual state restore — same code path as the
-	// autoload that's been working in production for years. No in-process
-	// dc_serialize round-trip = no completeness gap = no frame-1 desync.
+	// ── Capture savestate via in-memory dc_serialize (V3) ──
+	// V2 read the on-disk .state file from the configured slot, requiring
+	// flycast to have run dc_savestate previously. V3 calls dc_serialize
+	// directly on the live emulator state — recording can start mid-match
+	// without a prerequisite save. Byte-format is identical to V2 (both
+	// produce dc_serialize output), so the reader path is unchanged.
 	// Layout: [state_size:u64][state_bytes:N]
-	std::string statePath = hostfs::getSavestatePath(config::SavestateSlot, false);
-	FILE* sf = fopen(statePath.c_str(), "rb");
-	if (!sf) {
-		printf("[replay] start: no savestate at %s — embedding empty (replay needs power-on boot)\n",
-		       statePath.c_str());
-		uint8_t zero[8] = {0};
-		fwrite(zero, 1, 8, _file);
-	} else {
-		fseek(sf, 0, SEEK_END);
-		long stateSize = ftell(sf);
-		fseek(sf, 0, SEEK_SET);
-		std::vector<uint8_t> stateBytes((size_t)stateSize);
-		size_t got = fread(stateBytes.data(), 1, (size_t)stateSize, sf);
-		fclose(sf);
+	{
+		// Pre-allocate generous buffer (DC state is ~28 MB with vram + mem_b).
+		// Two-pass with dryrun would be cleaner but this is simpler.
+		std::vector<uint8_t> stateBuf(40 * 1024 * 1024);
+		size_t stateSize = 0;
+		try {
+			Serializer ser(stateBuf.data(), stateBuf.size(), false);
+			dc_serialize(ser);
+			stateSize = ser.size();
+		} catch (const Serializer::Exception& e) {
+			printf("[replay] start: dc_serialize failed: %s\n", e.what());
+			fclose(_file);
+			_file = nullptr;
+			return false;
+		}
 		uint8_t hdr[8];
-		writeLE64(hdr, (uint64_t)got);
+		writeLE64(hdr, (uint64_t)stateSize);
 		fwrite(hdr, 1, 8, _file);
-		if (got > 0)
-			fwrite(stateBytes.data(), 1, got, _file);
-		printf("[replay] embedded savestate: %zu bytes from %s\n",
-		       got, statePath.c_str());
+		if (stateSize > 0)
+			fwrite(stateBuf.data(), 1, stateSize, _file);
+		printf("[replay] V3: in-memory dc_serialize embedded — %zu bytes\n", stateSize);
 	}
 
 	fflush(_file);
