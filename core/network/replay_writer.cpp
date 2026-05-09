@@ -84,6 +84,13 @@ static bool                  _armed = false;
 static StartParams           _pendingParams;
 static uint8_t               _prevInMatch = 0;
 
+// Hotkey-trigger flag. Set by control-WS record_start endpoint after
+// dc_savestate(REPLAY_SLOT) + emu.stop+start. Consumed by emulator.cpp's
+// autoload section to know it should dc_loadstate from REPLAY_SLOT
+// (mid-game state) rather than the user's slot 0.
+static std::string           _nextRecordPath;
+static std::mutex            _nextRecordMtx;
+
 // Sidecar checkpoint file (<out_path>.ckpt). Opened lazily on the first
 // checkpoint job processed by the worker. Layout: "MCCKPT\0\0" magic +
 // version(4) + reserved(4) + repeated [frame:u64][size:u64][state_bytes:N].
@@ -602,5 +609,25 @@ uint64_t entryCount() { return _entryCount.load(std::memory_order_relaxed); }
 // for ABI compatibility with control_ws.cpp's record_start handler.
 bool armed() { return false; }
 void onFrameInMatchFlag(uint8_t /*in_match*/) {}
+
+void setNextRecordPath(const std::string& path)
+{
+	std::lock_guard<std::mutex> lk(_nextRecordMtx);
+	_nextRecordPath = path;
+}
+
+std::string consumeNextRecordPath()
+{
+	std::lock_guard<std::mutex> lk(_nextRecordMtx);
+	std::string p = _nextRecordPath;
+	_nextRecordPath.clear();
+	return p;
+}
+
+bool hasNextRecordPath()
+{
+	std::lock_guard<std::mutex> lk(_nextRecordMtx);
+	return !_nextRecordPath.empty();
+}
 
 } // namespace maplecast_replay

@@ -382,10 +382,20 @@ static void executeOpenControls(const Command& cmd)
 
 static void executeRecordStart(const Command& cmd)
 {
-	// V3 .mcrec — captures state via in-memory dc_serialize. Recording
-	// can start mid-match without a prerequisite .state file. Driven from
-	// the render thread (here) so dc_serialize runs at a safe SH4 frame
-	// boundary.
+	// Hotkey-trigger record path. emu.stop()+emu.start() bracket the
+	// writer's start() so:
+	//  1. SH4 halts cleanly at an instruction boundary (no mid-pipeline
+	//     state captured — the same V2 invariant the autoload-time path
+	//     relies on).
+	//  2. writer::start() runs while SH4 is stopped: dc_savestate(99)
+	//     captures the user's exact mid-game state, embeds it in the
+	//     .mcrec, dc_loadstate(99) returns SH4 to that state.
+	//  3. emu.start() resumes SH4 from the post-dc_loadstate anchor with
+	//     recording active — first publishFrameTick after this becomes
+	//     the .mcrec's frame=0.
+	// Replay loads the same bytes via the same dc_loadstate(99) path at
+	// its own autoload boundary, so both processes reach an identical
+	// post-load anchor — the V2 byte-deterministic property.
 	if (cmd.path.empty()) {
 		sendJson(cmd.conn, errReply(cmd, "record_start", "missing 'path'"));
 		return;
@@ -394,25 +404,31 @@ static void executeRecordStart(const Command& cmd)
 		sendJson(cmd.conn, errReply(cmd, "record_start", "already recording — call record_stop first"));
 		return;
 	}
-	if (maplecast_replay::armed()) {
-		sendJson(cmd.conn, errReply(cmd, "record_start", "already armed — call record_stop to disarm first"));
-		return;
-	}
+
+	printf("[control-ws] record_start: emu.stop -> writer::start -> emu.start  ->  %s\n",
+	       cmd.path.c_str());
+	fflush(stdout);
+
+	emu.stop();
+
 	maplecast_replay::StartParams p;
 	p.out_path = cmd.path;
 	p.p1_name  = cmd.p1Name;
 	p.p2_name  = cmd.p2Name;
-	p.arm_at_match = cmd.atMatch;
-	if (!maplecast_replay::start(p)) {
-		sendJson(cmd.conn, errReply(cmd, "record_start", "replay writer rejected start (see flycast log)"));
+	bool ok = maplecast_replay::start(p);
+
+	emu.start();
+
+	if (!ok) {
+		sendJson(cmd.conn, errReply(cmd, "record_start", "writer::start rejected — see flycast log"));
 		return;
 	}
+
 	sendJson(cmd.conn, okReply(cmd, "record_start", json{
 		{"path", cmd.path},
 		{"p1_name", cmd.p1Name},
 		{"p2_name", cmd.p2Name},
-		{"at_match", cmd.atMatch},
-		{"state", cmd.atMatch ? "armed" : "recording"},
+		{"state", "recording"},
 	}));
 }
 

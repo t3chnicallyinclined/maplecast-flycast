@@ -99,16 +99,24 @@ void onFrameInMatchFlag(uint8_t in_match);
 // being logged).
 bool armed();
 
-// Deferred capture hook. Mirrors maplecast_rollback's executePendingRewind
-// pattern: start() / onFrameInMatchFlag set a "pending capture" flag,
-// THIS function is called from the SH4 emu thread between runInternal()
-// returns, and runs the actual dc_serialize there. Capturing on the
-// SH4 thread at a frame boundary (vs. on the render thread mid-frame
-// via drainCommandQueue) ensures vblank_schid + aica_schid + spg jitter
-// are all in a deterministic post-handle_cb state — same condition the
-// rollback ring relies on for byte-perfect rewind. No-op when nothing
-// pending. Returns true iff a capture fired.
+// V5-era no-op stub. V2 discipline does all the work inline in start()
+// at autoload, so there's nothing to defer. Kept for emulator.cpp's
+// vblank() hook ABI; safe to drop once that hook is removed.
 bool executePendingCapture();
+
+// ── Hotkey-trigger plumbing ──────────────────────────────────────────
+// Lets a runtime caller (control-WS endpoint, in-game hotkey) request
+// recording from the user's CURRENT playing position rather than from
+// the autoload state. The caller dc_savestate's the current state to
+// REPLAY_SLOT, calls setNextRecordPath(path), then emu.stop()+start().
+// emulator.cpp's autoload section consumes the path and dc_loadstate's
+// from REPLAY_SLOT (instead of slot 0), so the SH4 resumes at the
+// captured mid-game state. This preserves the V2 invariant that
+// dc_loadstate runs at autoload before the SH4 thread spawns.
+
+void setNextRecordPath(const std::string& path);
+std::string consumeNextRecordPath();
+bool hasNextRecordPath();
 
 // Append one input event. Called from the input server's tape publisher
 // loop (existing infrastructure in maplecast_input_server.cpp). No-op

@@ -807,8 +807,29 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 			// it — guarantees record/replay state alignment. Capturing
 			// earlier (input_server::init) made frame 1 differ between
 			// record and replay due to intermediate init-state drift.
-			if (const char* outPath = std::getenv("MAPLECAST_REPLAY_OUT")) {
+			//
+			// Hotkey-trigger path (control-WS record_start): the WS
+			// endpoint dc_savestate'd the user's mid-game state to slot
+			// REPLAY_SLOT, set NextRecordPath, then emu.stop+start. We
+			// consume the path here. The autoload's dc_loadstate above
+			// restored from slot 0 (the configured autoload slot), so we
+			// re-load from REPLAY_SLOT to put SH4 back at the user's
+			// mid-game position before recording activates. This
+			// preserves the V2 invariant: dc_loadstate fires before
+			// recording, at the autoload lifecycle boundary.
+			std::string outPath;
+			bool fromHotkey = false;
+			if (maplecast_replay::hasNextRecordPath()) {
+				outPath = maplecast_replay::consumeNextRecordPath();
+				fromHotkey = true;
+				printf("[autoload-debug] hotkey record start — restoring slot %d (mid-game state) before recording\n",
+				       99 /* MAPLECAST_REPLAY_SLOT */);
+				dc_loadstate(99);
+			} else if (const char* envPath = std::getenv("MAPLECAST_REPLAY_OUT")) {
+				outPath = envPath;
 				printf("[autoload-debug] MAPLECAST_REPLAY_OUT — starting recording at autoload point\n");
+			}
+			if (!outPath.empty()) {
 				maplecast_replay::StartParams sp;
 				sp.out_path = outPath;
 				if (const char* p1 = std::getenv("MAPLECAST_REPLAY_P1_NAME"))    sp.p1_name = p1;
@@ -816,6 +837,8 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 				if (const char* sid = std::getenv("MAPLECAST_REPLAY_SERVER_ID")) sp.server_id = sid;
 				if (const char* rh = std::getenv("MAPLECAST_REPLAY_ROM_HASH"))   sp.rom_hash_hex = rh;
 				maplecast_replay::start(sp);
+				if (fromHotkey)
+					printf("[replay] hotkey-triggered recording active — output: %s\n", outPath.c_str());
 			}
 #endif
 		}
