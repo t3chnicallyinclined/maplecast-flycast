@@ -26,6 +26,22 @@
 	    → {"ok":true,"cmd":"reset","reply_id":"X","data":{}}
 	    Soft-reset the emulator (dc_reset(true)). Triggers a fresh SYNC.
 
+	  {"cmd":"record_start","path":"/path/to/match.mcrec","reply_id":"X",
+	   "p1_name":"...","p2_name":"..."}      (p1_name/p2_name optional)
+	    → {"ok":true,"cmd":"record_start","reply_id":"X","data":{"path":"...","p1_name":"...","p2_name":"..."}}
+	    Begins a .mcrec V3 recording. dc_serialize captures live state at
+	    this exact frame, so recording can start anytime mid-match — no
+	    prerequisite .state file. Errors: already recording, replay writer
+	    rejected start, missing path.
+
+	  {"cmd":"record_stop","reply_id":"X"}
+	    → {"ok":true,"cmd":"record_stop","reply_id":"X","data":{"entries":N}}
+	    Finalizes the .mcrec file (writes footer, HMAC, duration).
+	    Errors: not recording.
+
+	  {"cmd":"record_status","reply_id":"X"}
+	    → {"ok":true,"cmd":"record_status","reply_id":"X","data":{"recording":bool,"entries":N}}
+
 	  {"cmd":"status","reply_id":"X"}
 	    → {"ok":true,"cmd":"status","reply_id":"X","data":{"frame":N,"slot":N,...}}
 	    Doesn't actually need to bounce to the render thread — the
@@ -47,6 +63,7 @@
 #include "maplecast_mirror.h"
 #include "maplecast_audio_client.h"
 #include "maplecast_input_server.h"
+#include "replay_writer.h"
 #include "emulator.h"
 #include "cfg/option.h"
 #include "ui/gui.h"
@@ -99,11 +116,16 @@ enum class CmdType {
 	SavestateLoad,
 	Reset,
 	OpenControls,
+	RecordStart,    // .mcrec V3 in-memory record (no prerequisite .state)
+	RecordStop,
+	RecordStatus,
 };
 
 struct Command {
 	CmdType type;
 	int slot = 0;                // savestate cmds
+	std::string path;            // record_start output path
+	std::string p1Name, p2Name;  // record_start metadata
 	std::string reply_id;        // client correlation
 	ControlConnHdl conn;         // who to reply to
 };
@@ -357,6 +379,56 @@ static void executeOpenControls(const Command& cmd)
 	sendJson(cmd.conn, okReply(cmd, "open_controls"));
 }
 
+static void executeRecordStart(const Command& cmd)
+{
+	// V3 .mcrec — captures state via in-memory dc_serialize. Recording
+	// can start mid-match without a prerequisite .state file. Driven from
+	// the render thread (here) so dc_serialize runs at a safe SH4 frame
+	// boundary.
+	if (cmd.path.empty()) {
+		sendJson(cmd.conn, errReply(cmd, "record_start", "missing 'path'"));
+		return;
+	}
+	if (maplecast_replay::active()) {
+		sendJson(cmd.conn, errReply(cmd, "record_start", "already recording — call record_stop first"));
+		return;
+	}
+	maplecast_replay::StartParams p;
+	p.out_path = cmd.path;
+	p.p1_name  = cmd.p1Name;
+	p.p2_name  = cmd.p2Name;
+	if (!maplecast_replay::start(p)) {
+		sendJson(cmd.conn, errReply(cmd, "record_start", "replay writer rejected start (see flycast log)"));
+		return;
+	}
+	sendJson(cmd.conn, okReply(cmd, "record_start", json{
+		{"path", cmd.path},
+		{"p1_name", cmd.p1Name},
+		{"p2_name", cmd.p2Name},
+	}));
+}
+
+static void executeRecordStop(const Command& cmd)
+{
+	if (!maplecast_replay::active()) {
+		sendJson(cmd.conn, errReply(cmd, "record_stop", "not recording"));
+		return;
+	}
+	uint64_t entries = maplecast_replay::entryCount();
+	maplecast_replay::stop(0xFF);
+	sendJson(cmd.conn, okReply(cmd, "record_stop", json{
+		{"entries", entries},
+	}));
+}
+
+static void executeRecordStatus(const Command& cmd)
+{
+	sendJson(cmd.conn, okReply(cmd, "record_status", json{
+		{"recording", maplecast_replay::active()},
+		{"entries",   maplecast_replay::entryCount()},
+	}));
+}
+
 void drainCommandQueue()
 {
 	if (!_active.load(std::memory_order_relaxed)) return;
@@ -378,6 +450,9 @@ void drainCommandQueue()
 			case CmdType::SavestateLoad:  executeSavestateLoad(cmd); break;
 			case CmdType::Reset:          executeReset(cmd); break;
 			case CmdType::OpenControls:   executeOpenControls(cmd); break;
+			case CmdType::RecordStart:    executeRecordStart(cmd); break;
+			case CmdType::RecordStop:     executeRecordStop(cmd); break;
+			case CmdType::RecordStatus:   executeRecordStatus(cmd); break;
 		}
 	}
 }
@@ -457,6 +532,21 @@ static void onMessage(ControlConnHdl hdl, ControlWsServer::message_ptr msg)
 		cmd.type = CmdType::Reset;
 	} else if (cmdName == "open_controls") {
 		cmd.type = CmdType::OpenControls;
+	} else if (cmdName == "record_start") {
+		cmd.type = CmdType::RecordStart;
+		if (!parsed.contains("path") || !parsed["path"].is_string()) {
+			sendJson(hdl, errReplyImmediate(reply_id, "record_start", "missing 'path' string"));
+			return;
+		}
+		cmd.path = parsed["path"].get<std::string>();
+		if (parsed.contains("p1_name") && parsed["p1_name"].is_string())
+			cmd.p1Name = parsed["p1_name"].get<std::string>();
+		if (parsed.contains("p2_name") && parsed["p2_name"].is_string())
+			cmd.p2Name = parsed["p2_name"].get<std::string>();
+	} else if (cmdName == "record_stop") {
+		cmd.type = CmdType::RecordStop;
+	} else if (cmdName == "record_status") {
+		cmd.type = CmdType::RecordStatus;
 	} else if (cmdName == "status") {
 		json data = {
 			{"slot", config::SavestateSlot.get()},
