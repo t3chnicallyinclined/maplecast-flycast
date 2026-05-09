@@ -22,8 +22,10 @@
 */
 #include "replay_reader.h"
 #include "cfg/option.h"
+#include "emulator.h"
 #include "maplecast_input_server.h"
 #include "oslib/oslib.h"
+#include "serialize.h"
 #include "types.h"
 
 #include <atomic>
@@ -313,6 +315,34 @@ bool loadStartSavestate() {
 	       _savestateCompressed.size(), statePath.c_str());
 
 	// Free buffer — we're done with it now that the bytes are on disk
+	_savestateCompressed.clear();
+	_savestateCompressed.shrink_to_fit();
+	return true;
+}
+
+// In-memory restore — same code path the rollback ring uses for rewind.
+// Skip the slot file write + autoload dance, call emu.loadstate() directly.
+bool applyEmbeddedSavestateInMemory() {
+	std::lock_guard<std::mutex> lk(_mtx);
+	if (!_open.load()) {
+		printf("[replay-reader] applyEmbeddedSavestateInMemory: no replay open\n");
+		return false;
+	}
+	if (_savestateCompressed.empty()) {
+		printf("[replay-reader] applyEmbeddedSavestateInMemory: no savestate embedded\n");
+		return false;
+	}
+	try {
+		Deserializer deser(_savestateCompressed.data(),
+		                   _savestateCompressed.size(), false);
+		emu.loadstate(deser);
+	} catch (const Deserializer::Exception& e) {
+		printf("[replay-reader] applyEmbeddedSavestateInMemory: deserialize failed: %s\n",
+		       e.what());
+		return false;
+	}
+	printf("[replay-reader] in-memory savestate applied (%zu bytes) — bypassed slot/autoload\n",
+	       _savestateCompressed.size());
 	_savestateCompressed.clear();
 	_savestateCompressed.shrink_to_fit();
 	return true;

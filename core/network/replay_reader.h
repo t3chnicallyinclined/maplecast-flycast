@@ -43,7 +43,23 @@ const ReplayInfo& info();
 
 // Load the starting savestate via dc_deserialize. Must be called after
 // openReplay() and BEFORE the emulator is running. Returns false on error.
+//
+// Default: writes the embedded bytes to the configured slot's .state
+// file so dc_loadstate(slot) at autoload time picks them up. Kept for
+// back-compat with V2 .mcrec files and the existing autoload pipeline.
 bool loadStartSavestate();
+
+// In-memory load — bypasses the disk-roundtrip + autoload dance. Builds
+// a Deserializer over the embedded state bytes and calls emu.loadstate()
+// directly. Safe now that dc_serialize round-trip is byte-perfect (commit
+// c79df1c97). Same code path the rollback ring uses for rewindToFrame.
+//
+// Use this in lieu of loadStartSavestate() when you don't want the disk
+// roundtrip — e.g., user clicks "play replay" mid-session, or the replay
+// is loaded from a network stream and not backed by a file. Caller must
+// ensure the SH4 is paused (typical: at startup before runInternal, or
+// after Stop() in the rollback's deferred-rewind context).
+bool applyEmbeddedSavestateInMemory();
 
 // Activate replay-mode input read. After this call, getInputAtFrame()
 // returns recorded inputs and the SH4's input read path (ggpo::
