@@ -142,7 +142,12 @@ bool init()
 	// — which works correctness-wise but stalls the emu thread for tens of
 	// seconds before any forward progress is visible. saveFrame() handles
 	// arming protection on subsequent frames after capturing each delta.
-	memwatch::mirrorActive = true;
+	if (std::getenv("MAPLECAST_DISABLE_MEMWATCH")) {
+		printf("[rollback] memwatch DISABLED for audit (no page-protection)\n");
+		memwatch::mirrorActive = false;
+	} else {
+		memwatch::mirrorActive = true;
+	}
 
 	_mostRecentFrame = UINT64_MAX;
 	_oldestFrame     = UINT64_MAX;
@@ -214,7 +219,12 @@ void saveFrame(uint64_t frame)
 	//    reset() here would set started=false, causing the next protect()
 	//    to fault on every write to all 16+8+2 MB of guest RAM, which
 	//    stalls the SH4 thread out of forward progress.
-	memwatch::protect();
+	//
+	// DIAG: gate on env var so we can disable memwatch during the audit
+	// to test the "page-fault timing causes 448-cycle drift" hypothesis.
+	static const bool _memwatchDisabled = std::getenv("MAPLECAST_DISABLE_MEMWATCH") != nullptr;
+	if (!_memwatchDisabled)
+		memwatch::protect();
 
 	// 3. Drain memwatch's page diffs into the slot. capture() calls
 	//    getPages() which SWAPS the watcher's pages map out, leaving the
@@ -222,7 +232,8 @@ void saveFrame(uint64_t frame)
 	//    write to any of those pages will fault, get captured into the
 	//    (now empty) pages map, get unprotected, and the write completes.
 	slot.pages.clear();
-	slot.pages.capture();
+	if (!_memwatchDisabled)
+		slot.pages.capture();
 
 	slot.frame = frame;
 
@@ -279,7 +290,9 @@ bool rewindToFrame(uint64_t frame)
 
 	const uint64_t prerewindNow = sh4_sched_now64();
 	const uint32_t prerewindPc  = (uint32_t)Sh4cntx.pc;
-	memwatch::unprotect();
+	static const bool _memwatchDisabledRewind = std::getenv("MAPLECAST_DISABLE_MEMWATCH") != nullptr;
+	if (!_memwatchDisabledRewind)
+		memwatch::unprotect();
 
 	// Walk backward from mostRecent down to target+1, applying each slot's
 	// pages back to live memory in REVERSE order. Mirrors ggpo.cpp:449-462
@@ -344,7 +357,8 @@ bool rewindToFrame(uint64_t frame)
 	}
 
 	// memwatch::reset already done by emu.loadstate; just re-arm.
-	memwatch::protect();
+	if (!_memwatchDisabledRewind)
+		memwatch::protect();
 
 	_mostRecentFrame = frame;  // we've effectively undone everything past this
 	_rollbacksDone++;
@@ -731,10 +745,21 @@ void dcAuditTickFromVblank(uint64_t saveSeq)
 	}
 
 	if (_f2Stage == F2_LIVE_CAPTURE) {
-		// We're at saveSeq = anchor + 1. Capture the live forward path's
-		// full serialized state. Then SYNCHRONOUSLY rewind in-place
-		// (matches the working self-test pattern exactly: serialize +
-		// deserialize inside vblank without Stop/Start cycle).
+		// SYNCHRONOUS rewind — runs inside vblank's saveFrame call. Works
+		// (no hang) but produces 155-byte / SH4_TIMESLICE drift because
+		// the host stack stays inside spg_line_sched's continuation,
+		// leaving stale local state.
+		//
+		// Deferred rewind (Stop → emu loop → executePendingRewind →
+		// Start → re-enter Run()) WOULD give byte-perfect determinism
+		// because it unwinds the host stack fully, but currently HANGS
+		// after dc_deserialize-while-SH4-stopped. Hang is NOT JIT-
+		// specific (interpreter also hangs), NOT renderer-specific
+		// (rend_resync didn't help), NOT memwatch-specific (disabling
+		// didn't help), NOT audio-pacing-specific (bypass didn't help).
+		// Pure Stop/Start round-trip without dc_deserialize works fine.
+		// Root cause appears to be in dc_deserialize's restoration of
+		// some state that's incompatible with SH4-currently-stopped.
 		_f2LiveSize = dcSerializeWithMarks(_f2LiveBlob, _f2LiveMarks);
 		printf("[dc-audit] LIVE captured @ saveSeq=%llu — %zu bytes, %zu marks "
 		       "(sched_now=%llu, sh4_pc=0x%08x)\n",
@@ -746,9 +771,8 @@ void dcAuditTickFromVblank(uint64_t saveSeq)
 			_f2Stage = F2_DONE;
 			return;
 		}
-		printf("[dc-audit] SYNCHRONOUS rewind to anchor saveSeq=%llu (no Stop/Start)\n",
+		printf("[dc-audit] SYNCHRONOUS rewind to anchor saveSeq=%llu\n",
 		       (unsigned long long)_f2Anchor);
-		// Synchronous rewind — INSIDE vblank, same as self-test.
 		bool ok = rewindToFrame(_f2Anchor);
 		printf("[dc-audit] synchronous rewindToFrame returned %s\n", ok ? "OK" : "FAILED");
 		fflush(stdout);

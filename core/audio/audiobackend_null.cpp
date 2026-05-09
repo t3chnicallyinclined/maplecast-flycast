@@ -19,6 +19,14 @@ public:
 
 	u32 push(const void* frame, u32 samples, bool wait) override
 	{
+		// MAPLECAST_DC_AUDIT bypasses wall-clock pacing — the audit needs
+		// deterministic SH4 forward execution, and sleep_for(now-last_time)
+		// is the prime suspect for the 448-cycle LIVE-vs-REDO drift.
+		static const bool _bypassPacing = std::getenv("MAPLECAST_DC_AUDIT") != nullptr
+			|| std::getenv("MAPLECAST_BYPASS_AUDIO_PACING") != nullptr;
+		if (_bypassPacing)
+			return 1;
+
 		if (wait && last_time.time_since_epoch() != the_clock::duration::zero())
 		{
 			auto fduration = std::chrono::nanoseconds(1'000'000'000LL * samples / 44100);

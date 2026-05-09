@@ -549,7 +549,8 @@ void Emulator::init()
 Sh4Executor *Emulator::getSh4Executor()
 {
 #if FEAT_SHREC != DYNAREC_NONE
-	if(config::DynarecEnabled)
+	static const bool _useInterpreter = std::getenv("MAPLECAST_USE_INTERPRETER") != nullptr;
+	if(config::DynarecEnabled && !_useInterpreter)
 		return recompiler;
 	else
 #endif
