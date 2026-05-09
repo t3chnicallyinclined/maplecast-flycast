@@ -67,26 +67,35 @@ void term()
 
 void serialize(Serializer& ser)
 {
+	dcs_mark(ser, "pvr.YUV");
 	YUV_serialize(ser);
 
+	dcs_mark(ser, "pvr.pvr_regs");
 	ser << pvr_regs;
 
+	dcs_mark(ser, "pvr.spg");
 	spg_Serialize(ser);
+	dcs_mark(ser, "pvr.rend");
 	rend_serialize(ser);
 
+	dcs_mark(ser, "pvr.ta_fsm");
 	ser << ta_fsm[2048];
 	ser << ta_fsm_cl;
 	ser << taRenderPass;
 
+	dcs_mark(ser, "pvr.taContext");
 	SerializeTAContext(ser);
 
 	// V60 — BaseTAParser host-side statics that dc_serialize previously
 	// missed. Closes DC-SERIALIZE-AUDIT.md §2.1 priority-2 gap. Required
 	// for the rollback ring's F.1 round-trip determinism test (A.4.b).
+	dcs_mark(ser, "pvr.taParser");
 	ta_vtx_serializeParserState(ser);
 
+	dcs_mark(ser, "pvr.vram");
 	if (!ser.rollback())
 		vram.serialize(ser);
+	dcs_mark(ser, "pvr.elan");
 	elan::serialize(ser);
 }
 

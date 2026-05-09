@@ -1473,23 +1473,32 @@ void Emulator::start()
 						renderTimeout = false;
 						runInternal();
 						// Rollback ring stop-callback-restart: if vblank
-						// called Stop() because of a pending rewind,
-						// runInternal just returned with SH4 paused. Now
-						// is the safe context for emu.loadstate() —
-						// bm_Reset / ResetCache won't corrupt in-flight
-						// dispatch because there's no in-flight dispatch.
-						// Restart SH4 after.
+						// called Stop() because a rewind is pending, runInternal
+						// returned with SH4 paused. Execute deferred rewind from
+						// safe context, then restart SH4 and skip the break check.
+						// NOTE: this path currently deadlocks for reasons not
+						// fully understood; F.2 audit uses synchronous in-vblank
+						// rewind instead. Kept wired for when A.5/A.6 needs it.
 						if (maplecast_rollback::pendingRollback()) {
 							maplecast_rollback::executePendingRewind();
 							getSh4Executor()->Start();
-							continue;  // skip the ggpo::nextFrame break check
+							continue;
 						}
 						// In replica mode we're not using GGPO, and
 						// ggpo::nextFrame() returns false when no GGPO
 						// session is active (_endOfFrame is never set),
 						// which would break out of the emu loop after
 						// one frame. Skip the check entirely.
-						if (!maplecast_replica::active() && !ggpo::nextFrame())
+						// Same gating applies when the rollback ring is
+						// active: vblank Stop() fires whenever a rewind is
+						// pending, making runInternal() return mid-loop.
+						// Without this guard the unconditional break would
+						// terminate the SH4 thread on the very first rewind.
+						// GGPO sidesteps this by setting _endOfFrame=true
+						// every vblank (ggpo.cpp:1076); we gate the break.
+						if (!maplecast_replica::active()
+								&& !maplecast_rollback::active()
+								&& !ggpo::nextFrame())
 							break;
 					}
 					TermAudio();
@@ -1568,6 +1577,36 @@ void Emulator::vblank()
 	EventManager::event(Event::VBlank);
 	runner.execTasks();
 
+	// Self-test: same-frame dc_serialize → dc_deserialize round trip.
+	// Bypasses the rollback ring entirely. If THIS hangs after frame 600,
+	// the bug is in dc_serialize/dc_deserialize itself (or rend_resync),
+	// not in the ring workflow. If it doesn't hang, the bug is specific
+	// to save+forward+memwatch+restore+memwatch_protect — and we narrow
+	// the search to memwatch / scheduler / interaction with mid-frame
+	// state mutation between save and load.
+	//
+	// Run with: MAPLECAST_MIRROR_SERVER=1 MAPLECAST_SELFTEST_DESERIALIZE=1
+	// (NO MAPLECAST_ROLLBACK_RING).
+	if (std::getenv("MAPLECAST_SELFTEST_DESERIALIZE")) {
+		static int _selfTestFrame = 0;
+		if (++_selfTestFrame == 600) {
+			printf("[selftest] frame 600 — capturing dc_serialize blob...\n"); fflush(stdout);
+			static std::vector<uint8_t> buf(40 * 1024 * 1024);
+			Serializer ser(buf.data(), buf.size(), false);
+			dc_serialize(ser);
+			size_t serSize = ser.size();
+			printf("[selftest] serialized %zu bytes; calling dc_deserialize in-place...\n", serSize); fflush(stdout);
+			Deserializer deser(buf.data(), serSize, false);
+			dc_deserialize(deser);
+			printf("[selftest] dc_deserialize returned; calling rend_resync_after_rollback...\n"); fflush(stdout);
+			rend_resync_after_rollback();
+			printf("[selftest] returning from vblank — SH4 should keep running\n"); fflush(stdout);
+		}
+		if (_selfTestFrame > 600 && (_selfTestFrame % 30) == 0) {
+			printf("[selftest] still alive @ frame=%d\n", _selfTestFrame); fflush(stdout);
+		}
+	}
+
 	// Phase 1 A.4 rollback ring — capture SH4 + page-delta state at the
 	// frame boundary. vblank() is called synchronously from SH4 execution
 	// (the dynarec hits the vblank interrupt), so this runs on the SAME
@@ -1581,17 +1620,15 @@ void Emulator::vblank()
 		static uint64_t _rollbackFrameSeq = 0;
 		maplecast_rollback::saveFrame(++_rollbackFrameSeq);
 
-		// DIAG — print every 60 vblanks to see if pendingRollback is
-		// somehow stuck true.
-		static int _vblDbg = 0;
-		if ((_vblDbg++ % 60) == 0) {
-			printf("[vblank-dbg] frame=%llu pendingRollback=%d\n",
-			       (unsigned long long)_rollbackFrameSeq,
-			       (int)maplecast_rollback::pendingRollback());
-			fflush(stdout);
-		}
-
-		// Stop-callback-restart trigger
+		// Stop-callback-restart trigger: if F.1/F.2 (or any caller)
+		// requested a rewind during this frame's saveFrame, signal the
+		// SH4 executor to Stop(). Run() returns at the next safe SH4
+		// instruction boundary; the emu loop checks pendingRollback()
+		// after runInternal() returns and executes the deferred rewind
+		// from a paused-SH4 context. The break check at the top of the
+		// emu loop is gated on maplecast_rollback::active() so the loop
+		// continues instead of breaking out the way it would for a
+		// non-rollback Stop() (e.g. user-initiated shutdown).
 		if (maplecast_rollback::pendingRollback())
 			getSh4Executor()->Stop();
 	}

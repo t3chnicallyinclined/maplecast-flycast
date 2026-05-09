@@ -18,41 +18,65 @@
 #include "imgread/common.h"
 #include "achievements/achievements.h"
 
+// DC-SERIALIZE-AUDIT byte-diff harness instrumentation. Null in production.
+// The harness sets this to a vector before calling dc_serialize, then reads
+// the vector to bucket diffs by region name. See core/serialize.h.
+thread_local std::vector<DcAuditMark>* dc_audit_marks = nullptr;
+
 void dc_serialize(Serializer& ser)
 {
+	dcs_mark(ser, "aica");
 	aica::serialize(ser);
 
+	dcs_mark(ser, "sb");
 	sb_serialize(ser);
 
+	dcs_mark(ser, "nvmem");
 	nvmem::serialize(ser);
 
+	dcs_mark(ser, "gdrom");
 	gdrom::serialize(ser);
 
+	dcs_mark(ser, "maple");
 	mcfg_SerializeDevices(ser);
 
+	dcs_mark(ser, "pvr");
 	pvr::serialize(ser);
 
+	dcs_mark(ser, "sh4");
 	sh4::serialize(ser);
 
+	dcs_mark(ser, "bba_flag");
 	ser << config::EmulateBBA.get();
-	if (config::EmulateBBA)
+	if (config::EmulateBBA) {
+		dcs_mark(ser, "bba");
 		bba_Serialize(ser);
+	}
+	dcs_mark(ser, "modem");
 	ModemSerialize(ser);
 
+	dcs_mark(ser, "sh4_2");
 	sh4::serialize2(ser);
 
+	dcs_mark(ser, "libGDR");
 	libGDR_serialize(ser);
 
+	dcs_mark(ser, "naomi");
 	naomi_Serialize(ser);
 
+	dcs_mark(ser, "config_3");
 	ser << config::Broadcast.get();
 	ser << config::Cable.get();
 	ser << config::Region.get();
 
+	dcs_mark(ser, "naomi_cart");
 	naomi_cart_serialize(ser);
+	dcs_mark(ser, "reios");
 	reios_serialize(ser);
+	dcs_mark(ser, "achievements");
 	achievements::serialize(ser);
 
+	dcs_mark(ser, "END");
 	DEBUG_LOG(SAVESTATE, "Saved %d bytes", (u32)ser.size());
 }
 

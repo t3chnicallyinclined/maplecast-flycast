@@ -103,6 +103,20 @@ bool f1Done();
 // True if F.1 test passed (only meaningful after f1Done()).
 bool f1Passed();
 
+// F.2 DC-SERIALIZE byte-diff harness. Activated via MAPLECAST_DC_AUDIT=
+// "warmup" (single integer, e.g. "300" → wait 300 frames, then run a
+// single round-trip and byte-diff the live vs post-rewind serialized blob).
+// Reuses the rollback ring's request/execute rewind plumbing. On
+// completion, dumps a bucketed diff report grouping bytes by subsystem
+// (named via dcs_mark() calls in dc_serialize). Test runs once and stops.
+void dcAuditTickFromVblank(uint64_t saveSeq);
+
+// True if F.2 audit completed (regardless of whether it found diffs).
+bool dcAuditDone();
+// Total bytes that differed between live and post-rewind blobs.
+// Meaningful only after dcAuditDone(). 0 = byte-perfect round-trip.
+uint64_t dcAuditDiffBytes();
+
 // Telemetry snapshot for debug UIs.
 struct Stats {
 	uint64_t framesSaved;

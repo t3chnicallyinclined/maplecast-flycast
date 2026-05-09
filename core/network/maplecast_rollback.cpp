@@ -39,9 +39,12 @@
 #include "serialize.h"
 #include "emulator.h"
 #include "hw/mem/mem_watch.h"
+#include "hw/pvr/Renderer_if.h"
 #include "hw/sh4/sh4_if.h"
+#include "hw/sh4/sh4_sched.h"
 #include <xxhash.h>  // bundled at core/deps/xxHash/, on the include path
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -91,14 +94,22 @@ static uint64_t          _oldestFrame     = UINT64_MAX;
 static uint64_t          _framesSaved     = 0;
 static uint64_t          _rollbacksDone   = 0;
 
-// dc_serialize blob size. MVC2/Naomi states fit within ~10 MB; reserve
-// 16 MB per slot for headroom. 10 slots × 16 MB = 160 MB — fine on
-// modern desktop. Compare GGPO vectorwar's malloc-per-save (480 MB/s
-// allocator churn at this scale) — we allocate ONCE at init and reuse.
-constexpr size_t SLOT_BLOB_SIZE = 16 * 1024 * 1024;
+// dc_serialize blob size. With rollback=false (full state including
+// VRAM + 16MB mem_b), MVC2 states are ~28 MB. Reserve 40 MB per slot
+// for headroom. 10 slots × 40 MB = 400 MB — fine on modern desktop.
+//
+// Why rollback=false: the page-delta replay path was leaving VRAM/mem_b
+// in a hybrid post-rewind state (partly anchor, partly forward) that
+// caused SH4 to hang in the next runInternal. Audit self-test confirmed
+// dc_serialize(rollback=false) → dc_deserialize(rollback=false)
+// round-trip works cleanly without page-deltas. Trade ~240 MB extra
+// arena for correctness; we still keep the page-delta map for diff
+// streaming to clients but no longer depend on it for state restore.
+constexpr size_t SLOT_BLOB_SIZE = 40 * 1024 * 1024;
 
-// Forward declarations for F.1 test plumbing (defined at end of file).
+// Forward declarations for F.1 / F.2 test plumbing (defined at end of file).
 static void f1TryConfigure();
+static void dcAuditTryConfigure();
 
 bool init()
 {
@@ -145,6 +156,8 @@ bool init()
 	// Arm F.1 round-trip determinism test if MAPLECAST_ROLLBACK_F1_TEST is set.
 	// No-op otherwise.
 	f1TryConfigure();
+	// Arm F.2 byte-diff audit if MAPLECAST_DC_AUDIT is set. No-op otherwise.
+	dcAuditTryConfigure();
 	return true;
 }
 
@@ -171,21 +184,17 @@ void saveFrame(uint64_t frame)
 {
 	if (!_active.load(std::memory_order_relaxed)) return;
 
-	// Diag — every 30 calls, very early in saveFrame so we know vblank is
-	// firing even if downstream code is slow or hangs.
-	static int _saveDbgCounter = 0;
-	if ((_saveDbgCounter++ % 30) == 0) {
-		printf("[rollback-dbg] saveFrame entered: frame=%llu count=%d\n",
-		       (unsigned long long)frame, _saveDbgCounter);
-		fflush(stdout);
-	}
-
 	const int idx = (int)(frame % RING_DEPTH);
 	RingSlot& slot = _ring[idx];
 
-	// 1. dc_serialize into the slot's pre-allocated blob. Mirrors ggpo.cpp:494
-	//    but writes to our reused buffer instead of malloc.
-	Serializer ser(slot.serialBlob.data(), SLOT_BLOB_SIZE, true);
+	// 1. dc_serialize into the slot's pre-allocated blob.
+	//    Use rollback=false (full state, includes VRAM + mem_b) — the
+	//    page-delta-only path was leaving post-rewind state hybrid and
+	//    deadlocking SH4. Audit self-test (vblank → dc_serialize →
+	//    dc_deserialize → continue) confirmed full-state round-trip is
+	//    clean. We still record page-deltas in slot.pages for diff
+	//    streaming to mirror clients (separate consumer).
+	Serializer ser(slot.serialBlob.data(), SLOT_BLOB_SIZE, false);
 	try {
 		uint32_t frame32 = (uint32_t)(frame & 0xFFFFFFFFu);
 		ser << frame32;
@@ -243,6 +252,10 @@ void saveFrame(uint64_t frame)
 	// F.1 round-trip determinism test orchestration. No-op unless
 	// MAPLECAST_ROLLBACK_F1_TEST is set. Runs once and stops.
 	f1TickFromVblank(frame);
+
+	// F.2 byte-diff audit orchestration. No-op unless MAPLECAST_DC_AUDIT
+	// is set. Runs once and stops.
+	dcAuditTickFromVblank(frame);
 }
 
 bool rewindToFrame(uint64_t frame)
@@ -264,12 +277,16 @@ bool rewindToFrame(uint64_t frame)
 		return false;
 	}
 
+	const uint64_t prerewindNow = sh4_sched_now64();
+	const uint32_t prerewindPc  = (uint32_t)Sh4cntx.pc;
 	memwatch::unprotect();
 
 	// Walk backward from mostRecent down to target+1, applying each slot's
 	// pages back to live memory in REVERSE order. Mirrors ggpo.cpp:449-462
 	// exactly — each pair.second.data is the PRE-WRITE contents of the page,
-	// so memcpy'ing it back undoes that frame's writes.
+	// so memcpy'ing it back undoes that frame's writes. With rollback=false
+	// blobs (full state), this is now belt-and-suspenders: the dc_deserialize
+	// also restores RAM/VRAM. Kept for safety + cheap.
 	for (uint64_t f = _mostRecentFrame; f > frame; f--)
 	{
 		const int idx = (int)(f % RING_DEPTH);
@@ -306,10 +323,15 @@ bool rewindToFrame(uint64_t frame)
 	// IS load-bearing — clears watcher state so our re-protect below
 	// arms correctly for the next frame.
 	{
-		Deserializer deser(target.serialBlob.data(), target.serialSize, true);
+		// rollback=false: blob includes VRAM + mem_b. emu.loadstate does the
+		// load-bearing wrappers (bm_Reset, ResetCache, aica recompiler flush,
+		// mmu_flush_table, custom_texture init, EventManager LoadState
+		// broadcast) that plain dc_deserialize alone misses.
+		Deserializer deser(target.serialBlob.data(), target.serialSize, false);
 		uint32_t frame32;
 		deser >> frame32;
 		emu.loadstate(deser);
+		rend_resync_after_rollback();
 
 		if (deser.size() != target.serialSize) {
 			printf("[rollback] rewind: deserialize size mismatch (used %zu of %zu)\n",
@@ -324,10 +346,13 @@ bool rewindToFrame(uint64_t frame)
 	_mostRecentFrame = frame;  // we've effectively undone everything past this
 	_rollbacksDone++;
 
-	printf("[rollback] rewound to frame %llu (was %llu, undid %llu frames)\n",
+	printf("[rollback] rewound to frame %llu — sched_now %llu→%llu, pc 0x%08x→0x%08x\n",
 	       (unsigned long long)frame,
-	       (unsigned long long)(_mostRecentFrame),
-	       (unsigned long long)(_mostRecentFrame > frame ? _mostRecentFrame - frame : 0));
+	       (unsigned long long)prerewindNow,
+	       (unsigned long long)sh4_sched_now64(),
+	       (unsigned)prerewindPc,
+	       (unsigned)Sh4cntx.pc);
+	fflush(stdout);
 	return true;
 }
 
@@ -533,5 +558,223 @@ bool f1Passed() { return _f1Pass; }
 
 // Hook into init() so the test arms at startup if env is set.
 namespace { struct F1AutoArm { F1AutoArm() {} } _f1autoarm; }
+
+// ── F.2 DC-SERIALIZE byte-diff audit ─────────────────────────────────
+//
+// Captures two FULL serialized blobs (rollback=false, includes VRAM +
+// mem_b) at the same logical frame: once on the live forward path, once
+// after rewind+re-emulate. Diffs them and buckets the diff bytes by
+// subsystem name (via dcs_mark() in dc_serialize). Tells us exactly
+// which subsystem owns the missing-field gap that drives the F.1 hash
+// mismatch.
+//
+// Only runs once; arms via MAPLECAST_DC_AUDIT=warmup_frames env var.
+
+enum F2Stage { F2_IDLE, F2_WARMUP, F2_LIVE_CAPTURE, F2_AFTER_REWIND, F2_DONE };
+
+// Full-blob audit needs more headroom than rollback=true. mem_b alone is
+// 16 MB, vram is 8 MB, plus all the rest. 40 MB per buffer is comfortable.
+constexpr size_t AUDIT_BLOB_SIZE = 40 * 1024 * 1024;
+
+static F2Stage                _f2Stage      = F2_IDLE;
+static bool                   _f2Configured = false;
+static uint32_t               _f2Warmup     = 0;
+static uint64_t               _f2Anchor     = 0;
+static std::vector<uint8_t>   _f2LiveBlob;
+static size_t                 _f2LiveSize   = 0;
+static std::vector<DcAuditMark> _f2LiveMarks;
+static std::vector<uint8_t>   _f2RedoBlob;
+static size_t                 _f2RedoSize   = 0;
+static std::vector<DcAuditMark> _f2RedoMarks;
+static uint64_t               _f2DiffBytes  = 0;
+
+static void dcAuditTryConfigure()
+{
+	if (_f2Configured) return;
+	_f2Configured = true;
+	const char* env = std::getenv("MAPLECAST_DC_AUDIT");
+	if (!env || !*env) return;
+	uint32_t warmup = 0;
+	if (sscanf(env, "%u", &warmup) != 1) {
+		printf("[dc-audit] env malformed (expected 'warmup', got '%s') — audit disabled\n", env);
+		return;
+	}
+	try {
+		_f2LiveBlob.resize(AUDIT_BLOB_SIZE);
+		_f2RedoBlob.resize(AUDIT_BLOB_SIZE);
+	} catch (const std::bad_alloc&) {
+		printf("[dc-audit] failed to allocate %zu MB audit buffers — audit disabled\n",
+		       2 * AUDIT_BLOB_SIZE / (1024 * 1024));
+		return;
+	}
+	_f2Warmup = warmup;
+	_f2Stage  = F2_WARMUP;
+	printf("[dc-audit] armed: warmup=%u frames; will rewind 1 frame and byte-diff full blobs\n",
+	       warmup);
+}
+
+// Run dc_serialize into the given buffer with mark recording enabled.
+// Returns the serialized size on success, 0 on overflow.
+static size_t dcSerializeWithMarks(std::vector<uint8_t>& buf,
+                                    std::vector<DcAuditMark>& marks)
+{
+	marks.clear();
+	dc_audit_marks = &marks;
+	size_t sz = 0;
+	try {
+		// rollback=false: include VRAM + mem_b. We want to see if missing
+		// fields cause SH4-visible writes to those regions to diverge.
+		Serializer ser(buf.data(), buf.size(), false);
+		dc_serialize(ser);
+		sz = ser.size();
+	} catch (const Serializer::Exception& e) {
+		printf("[dc-audit] dc_serialize overflowed audit buffer: %s\n", e.what());
+		sz = 0;
+	}
+	dc_audit_marks = nullptr;
+	return sz;
+}
+
+static void dcAuditCompareAndReport()
+{
+	const size_t commonSize = std::min(_f2LiveSize, _f2RedoSize);
+
+	// First pass: count total diff bytes.
+	uint64_t total = 0;
+	for (size_t i = 0; i < commonSize; i++)
+		if (_f2LiveBlob[i] != _f2RedoBlob[i])
+			total++;
+	if (_f2LiveSize != _f2RedoSize)
+		total += (_f2LiveSize > _f2RedoSize)
+			? (_f2LiveSize - _f2RedoSize)
+			: (_f2RedoSize - _f2LiveSize);
+	_f2DiffBytes = total;
+
+	printf("[dc-audit] === RESULT ===\n");
+	printf("[dc-audit] live blob: %zu bytes; redo blob: %zu bytes; common: %zu\n",
+	       _f2LiveSize, _f2RedoSize, commonSize);
+	printf("[dc-audit] total differing bytes: %llu (%.3f%%)\n",
+	       (unsigned long long)total,
+	       commonSize ? (100.0 * (double)total / (double)commonSize) : 0.0);
+
+	if (total == 0) {
+		printf("[dc-audit] BYTE-PERFECT round-trip. dc_serialize is complete.\n");
+		return;
+	}
+
+	// Second pass: bucket diffs by region (using live blob's marks; redo
+	// marks should match offsets if dc_serialize is structurally identical).
+	const auto& marks = _f2LiveMarks;
+	printf("[dc-audit] diffs by region (region | bytes_diff / region_size | first_diff_offset_within_region):\n");
+	for (size_t mi = 0; mi < marks.size(); mi++) {
+		const size_t start = marks[mi].offset;
+		const size_t end = (mi + 1 < marks.size()) ? marks[mi + 1].offset : commonSize;
+		if (end > commonSize) continue;
+		if (start >= end) continue;
+		uint64_t regionDiff = 0;
+		size_t firstDiffOffset = SIZE_MAX;
+		for (size_t j = start; j < end; j++) {
+			if (_f2LiveBlob[j] != _f2RedoBlob[j]) {
+				if (firstDiffOffset == SIZE_MAX) firstDiffOffset = j - start;
+				regionDiff++;
+			}
+		}
+		if (regionDiff > 0) {
+			printf("[dc-audit]   %-22s | %8llu / %8zu | first diff @ +%zu\n",
+			       marks[mi].name,
+			       (unsigned long long)regionDiff,
+			       end - start,
+			       firstDiffOffset);
+			// Dump up to first 16 differing offsets with their byte values
+			// so we can correlate to specific fields. live-byte / redo-byte
+			// at each offset (relative to region start).
+			int dumpedCount = 0;
+			printf("[dc-audit]     ");
+			for (size_t j = start; j < end && dumpedCount < 16; j++) {
+				if (_f2LiveBlob[j] != _f2RedoBlob[j]) {
+					printf("+%zu(%02x→%02x) ",
+					       j - start,
+					       (unsigned)_f2LiveBlob[j],
+					       (unsigned)_f2RedoBlob[j]);
+					dumpedCount++;
+				}
+			}
+			if (regionDiff > (uint64_t)dumpedCount)
+				printf("... +%llu more", (unsigned long long)(regionDiff - dumpedCount));
+			printf("\n");
+		}
+	}
+	printf("[dc-audit] ─── end of report ───\n");
+}
+
+void dcAuditTickFromVblank(uint64_t saveSeq)
+{
+	if (_f2Stage == F2_IDLE) return;
+	if (_f2Stage == F2_DONE) return;
+
+	if (_f2Stage == F2_WARMUP) {
+		if (_f2Warmup > 0) {
+			_f2Warmup--;
+			return;
+		}
+		_f2Anchor = saveSeq;
+		_f2Stage = F2_LIVE_CAPTURE;
+		printf("[dc-audit] warmup done @ saveSeq=%llu — anchor recorded; live capture next frame "
+		       "(anchor sched_now=%llu, sh4_pc=0x%08x)\n",
+		       (unsigned long long)saveSeq,
+		       (unsigned long long)sh4_sched_now64(),
+		       (unsigned)Sh4cntx.pc);
+		return;
+	}
+
+	if (_f2Stage == F2_LIVE_CAPTURE) {
+		// We're at saveSeq = anchor + 1. Capture the live forward path's
+		// full serialized state. Then SYNCHRONOUSLY rewind in-place
+		// (matches the working self-test pattern exactly: serialize +
+		// deserialize inside vblank without Stop/Start cycle).
+		_f2LiveSize = dcSerializeWithMarks(_f2LiveBlob, _f2LiveMarks);
+		printf("[dc-audit] LIVE captured @ saveSeq=%llu — %zu bytes, %zu marks "
+		       "(sched_now=%llu, sh4_pc=0x%08x)\n",
+		       (unsigned long long)saveSeq, _f2LiveSize, _f2LiveMarks.size(),
+		       (unsigned long long)sh4_sched_now64(),
+		       (unsigned)Sh4cntx.pc);
+		if (_f2LiveSize == 0) {
+			printf("[dc-audit] live capture failed — audit aborted\n");
+			_f2Stage = F2_DONE;
+			return;
+		}
+		printf("[dc-audit] SYNCHRONOUS rewind to anchor saveSeq=%llu (no Stop/Start)\n",
+		       (unsigned long long)_f2Anchor);
+		// Synchronous rewind — INSIDE vblank, same as self-test.
+		bool ok = rewindToFrame(_f2Anchor);
+		printf("[dc-audit] synchronous rewindToFrame returned %s\n", ok ? "OK" : "FAILED");
+		fflush(stdout);
+		_f2Stage = F2_AFTER_REWIND;
+		return;
+	}
+
+	if (_f2Stage == F2_AFTER_REWIND) {
+		// Post-rewind, post-re-execution. saveFrame fired again at the
+		// logical-equivalent of anchor+1 (one frame past the rewind anchor).
+		// Capture redo blob and compare.
+		_f2RedoSize = dcSerializeWithMarks(_f2RedoBlob, _f2RedoMarks);
+		printf("[dc-audit] REDO captured @ saveSeq=%llu — %zu bytes, %zu marks "
+		       "(sched_now=%llu, sh4_pc=0x%08x)\n",
+		       (unsigned long long)saveSeq, _f2RedoSize, _f2RedoMarks.size(),
+		       (unsigned long long)sh4_sched_now64(),
+		       (unsigned)Sh4cntx.pc);
+		if (_f2RedoSize == 0) {
+			printf("[dc-audit] redo capture failed — audit aborted\n");
+			_f2Stage = F2_DONE;
+			return;
+		}
+		dcAuditCompareAndReport();
+		_f2Stage = F2_DONE;
+		return;
+	}
+}
+
+bool     dcAuditDone()      { return _f2Stage == F2_DONE; }
+uint64_t dcAuditDiffBytes() { return _f2DiffBytes; }
 
 } // namespace maplecast_rollback

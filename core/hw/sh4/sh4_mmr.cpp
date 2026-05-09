@@ -663,8 +663,10 @@ namespace sh4
 
 void serialize(Serializer& ser)
 {
+	dcs_mark(ser, "sh4.OnChipRAM");
 	ser << OnChipRAM;
 
+	dcs_mark(ser, "sh4.regs");
 	ser << CCN;
 	ser << UBC;
 	ser << BSC;
@@ -675,17 +677,24 @@ void serialize(Serializer& ser)
 	ser << TMU;
 	ser << SCI;
 	ser << SCIF;
+	dcs_mark(ser, "sh4.SCIF_serial");
 	SCIFSerialPort::Instance().serialize(ser);
+	dcs_mark(ser, "sh4.icache");
 	icache.Serialize(ser);
+	dcs_mark(ser, "sh4.ocache");
 	ocache.Serialize(ser);
 
+	dcs_mark(ser, "sh4.mem_b");
 	if (!ser.rollback())
 		mem_b.serialize(ser);
 
+	dcs_mark(ser, "sh4.interrupts");
 	interrupts_serialize(ser);
 
+	dcs_mark(ser, "sh4.cntx");
 	ser << (*p_sh4rcb).cntx;
 
+	dcs_mark(ser, "sh4.sched");
 	sh4_sched_serialize(ser);
 }
 
@@ -729,7 +738,9 @@ void deserialize(Deserializer& deser)
 
 void serialize2(Serializer& ser)
 {
+	dcs_mark(ser, "sh4_2.tmu");
 	tmu.serialize(ser);
+	dcs_mark(ser, "sh4_2.mmu");
 	mmu_serialize(ser);
 }
 

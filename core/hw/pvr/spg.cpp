@@ -311,6 +311,15 @@ void spg_Serialize(Serializer& ser)
 	ser << Frame_Cycles;
 	ser << lightgun_line;
 	ser << lightgun_hpos;
+	// V61 — SPG fast-path stats. DC-SERIALIZE-AUDIT §2.3 previously
+	// "accepted" these as benign because they only matter when
+	// AutoSkipFrame=1, but the byte-diff harness shows them cascading
+	// into 448-cycle drift via QueueRender's SH4FastEnough branch.
+	ser.serialize(real_times.data(), real_times.size());
+	ser.serialize(cpu_cycles.data(), cpu_cycles.size());
+	ser << cpu_time_idx;
+	ser << SH4FastEnough;
+	ser << fskip;
 }
 void spg_Deserialize(Deserializer& deser)
 {
@@ -324,4 +333,11 @@ void spg_Deserialize(Deserializer& deser)
 	deser >> Frame_Cycles;
 	deser >> lightgun_line;
 	deser >> lightgun_hpos;
+	if (deser.version() >= Deserializer::V61) {
+		deser.deserialize(real_times.data(), real_times.size());
+		deser.deserialize(cpu_cycles.data(), cpu_cycles.size());
+		deser >> cpu_time_idx;
+		deser >> SH4FastEnough;
+		deser >> fskip;
+	}
 }

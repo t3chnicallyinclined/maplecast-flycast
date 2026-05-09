@@ -19,6 +19,11 @@ void rend_reset();
 void rend_disable_rollback();
 void rend_start_rollback();
 void rend_allow_rollback();
+// Clear renderer-thread sync primitives (renderEnd/vramRollback events,
+// pend_rend flag) so a rollback-ring rewind that lands on a mid-render
+// anchor doesn't deadlock the next SH4 dispatch on rend_end_render's Wait.
+// See implementation comment for details.
+void rend_resync_after_rollback();
 void rend_enable_renderer(bool enabled);
 bool rend_is_enabled();
 void rend_serialize(Serializer& ser);

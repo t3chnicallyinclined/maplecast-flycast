@@ -21,6 +21,7 @@
 
 #include <cstring>
 #include <limits>
+#include <vector>
 
 class SerializeBase
 {
@@ -80,7 +81,11 @@ public:
 		V60,    // adds BaseTAParser statics (ta_vtx.cpp) — host-side TA parser
 		        // state. DC-SERIALIZE-AUDIT priority-2 gap. Required for the
 		        // rollback ring's F.1 round-trip determinism test.
-		Current = V60,
+		V61,    // adds SPG fast-path stats (real_times, cpu_cycles,
+		        // cpu_time_idx, SH4FastEnough, fskip) — DC-SERIALIZE-AUDIT
+		        // §2.3 previously accepted as benign but harness shows them
+		        // cascading into ~448-cycle SH4 drift on rollback round-trip.
+		Current = V61,
 
 		Next = Current + 1,
 	};
@@ -215,3 +220,21 @@ Deserializer& operator>>(Deserializer& ctx, T& obj) {
 
 void dc_serialize(Serializer& ctx);
 void dc_deserialize(Deserializer& ctx);
+
+// ─── DC-SERIALIZE-AUDIT instrumentation ────────────────────────────────
+//
+// When `dc_audit_marks` is non-null, dc_serialize() (and its callees that
+// opt-in) push (offset_at_call_time, region_name) tuples into the vector.
+// This lets the byte-diff harness map raw blob offsets back to subsystem
+// names, which is the part that turns a 3.7 KB diff into "the gap is in
+// X." Zero cost when the pointer is null — a single `if (ptr)` check at
+// each top-level subsystem boundary in dc_serialize().
+struct DcAuditMark {
+	size_t offset;
+	const char* name;
+};
+extern thread_local std::vector<DcAuditMark>* dc_audit_marks;
+inline void dcs_mark(const Serializer& ser, const char* name) {
+	if (dc_audit_marks)
+		dc_audit_marks->push_back({ ser.size(), name });
+}

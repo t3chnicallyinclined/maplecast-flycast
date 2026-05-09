@@ -636,6 +636,47 @@ void rend_start_rollback()
 		vramRollback.Wait();
 }
 
+// Resync renderer-thread sync primitives after a rollback-ring rewind.
+//
+// Why: after `dc_deserialize` restores a mid-frame anchor where a render
+// was in progress (pend_rend=true) AND the saved scheduler still has
+// `render_end_schid` queued, the next SH4 dispatch will fire
+// `rend_end_render()` which checks `if (pend_rend && ThreadedRendering)
+// renderEnd.Wait()` (line ~561). The renderEnd cResetEvent is auto-reset
+// and was already consumed by the LIVE forward path before rewind, so the
+// Wait blocks forever — there's no rolled-back render in flight to set it.
+//
+// Fix: clear the sync state so the post-rewind SH4 doesn't wait on events
+// the renderer can't fulfill. We do this once per rewind, after deserialize.
+//
+// The expected behavior from MVC2's perspective: SH4 thinks a render is
+// in progress (queued at anchor), `rend_end_render` fires → sees
+// pend_rend=false → falls through to the asic interrupt path. Game logic
+// keeps making forward progress; the visible frame may differ from the
+// live forward path's frame for ~1 frame, but that's acceptable for the
+// rollback round-trip determinism test (we compare dc_serialize blobs,
+// not framebuffer pixels).
+void rend_resync_after_rollback()
+{
+	pend_rend = false;
+	renderEnd.Set();
+	vramRollback.Set();
+	// Also clear ta_ctx's rqueue/frame_finished so QueueRender doesn't
+	// block on a stale rqueue (the live forward path may have queued a
+	// render that the renderer thread never had a chance to drain — or
+	// would have drained, but headless+NO_REND has no real render thread).
+	// FinishRender(DequeueRender()) handles both: clears rqueue to null and
+	// Sets frame_finished. If rqueue was already null, FinishRender(nullptr)
+	// just Sets frame_finished — harmless.
+	FinishRender(DequeueRender());
+	// Drain pvrQueue's non-Render messages and Set dequeueEvent so any
+	// SH4 thread that's blocked in pvrQueue::enqueue() on a duplicate
+	// Render message wakes up. Live-forward path may have left stale
+	// Render entries in the queue that the post-rewind SH4 will see as
+	// "duplicate" → would block on dequeueEvent forever.
+	pvrQueue.cancelEnqueue();
+}
+
 void rend_enable_renderer(bool enabled) {
 	rendererEnabled = enabled;
 }
