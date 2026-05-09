@@ -1,4 +1,4 @@
-# scripts/replay-play.ps1 — open a .mcrec file and play it back in a
+# scripts/replay-play.ps1 -- open a .mcrec file and play it back in a
 # fresh flycast (headless server + mirror client window).
 #
 # Usage:
@@ -6,7 +6,7 @@
 #   .\scripts\replay-play.ps1                  # uses most-recent .mcrec in default dir
 #
 # Spawns its own flycast pair (headless server + windowed client). The
-# active flycast you might be playing in is unaffected — replay runs in
+# active flycast you might be playing in is unaffected -- replay runs in
 # a separate process.
 
 param(
@@ -22,7 +22,7 @@ $clientExe    = Join-Path $repoRoot "build\flycast.exe"
 if ([string]::IsNullOrWhiteSpace($McrecPath)) {
     $dir = Join-Path $env:USERPROFILE "Documents\MapleCastReplays"
     if (!(Test-Path -LiteralPath $dir)) {
-        Write-Host "No replay directory at $dir — pass -McrecPath to specify a file." -ForegroundColor Yellow
+        Write-Host "No replay directory at $dir -- pass -McrecPath to specify a file." -ForegroundColor Yellow
         exit 2
     }
     $latest = Get-ChildItem -Path $dir -Filter "*.mcrec" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -43,7 +43,7 @@ if (!(Test-Path -LiteralPath $McrecPath)) {
 Get-Process -Name "flycast" -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 500
 
-# ── Headless replay server ──
+# -- Headless replay server --
 $serverLog = Join-Path $env:TEMP "replay-play-server.log"
 if (Test-Path $serverLog) { Remove-Item $serverLog -Force }
 
@@ -61,7 +61,7 @@ Write-Host "[replay-play] server PID: $($server.Id)"
 
 Start-Sleep -Seconds 3   # let the headless server load the embedded savestate
 
-# ── Mirror client (windowed) ──
+# -- Mirror client (windowed) --
 $clientLog = Join-Path $env:TEMP "replay-play-client.log"
 Remove-Item env:MAPLECAST_MIRROR_SERVER -ErrorAction SilentlyContinue
 Remove-Item env:MAPLECAST              -ErrorAction SilentlyContinue
@@ -74,7 +74,7 @@ $client = Start-Process -FilePath $clientExe `
     -RedirectStandardOutput $clientLog `
     -RedirectStandardError ($clientLog + ".err") `
     -PassThru
-Write-Host "[replay-play] client PID: $($client.Id) — playing $McrecPath"
+Write-Host "[replay-play] client PID: $($client.Id) -- playing $McrecPath"
 
 if ($DurationSeconds -gt 0) {
     Start-Sleep -Seconds $DurationSeconds
