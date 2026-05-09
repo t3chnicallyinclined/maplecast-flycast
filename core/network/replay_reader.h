@@ -41,24 +41,15 @@ bool openReplay(const std::string& path);
 // Get metadata about the currently-open replay (after openReplay()).
 const ReplayInfo& info();
 
-// Load the starting savestate via dc_deserialize. Must be called after
-// openReplay() and BEFORE the emulator is running. Returns false on error.
-//
-// V2: writes the embedded bytes to the configured slot's .state file
-// so dc_loadstate(slot) at autoload time picks them up.
-// V3: routes to applyEmbeddedSavestateInMemory() automatically (the
-// in-memory dc_deserialize path) since V3 bytes are raw dc_serialize
-// output, not the SavestateHeader+RZipFile-wrapped on-disk format
-// that dc_loadstate expects.
-//
-// In V3 mode, the caller should SKIP the subsequent dc_loadstate(slot)
-// autoload call — formatVersion() returns 3 to signal this.
+// Load the starting savestate. Routes through the rollback ring's
+// restoreFromBlob (emu.loadstate + rend_resync_after_rollback +
+// jitter-aware vblank_schid re-arm), so playback resumes at the exact
+// cycle alignment the recorder had. Caller must ensure the SH4 is
+// paused — typical call site is the emulator's autoload section before
+// the SH4 thread starts.
 bool loadStartSavestate();
 
-// Format version of the currently-open .mcrec (2 or 3). 0 if no replay
-// is open. Used by emulator.cpp's autoload path to decide whether
-// dc_loadstate(slot) needs to fire (V2) or has already been bypassed
-// by an in-memory restore (V3).
+// Format version of the currently-open .mcrec. 0 if none open.
 uint32_t formatVersion();
 
 // In-memory load — bypasses the disk-roundtrip + autoload dance. Builds

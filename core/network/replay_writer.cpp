@@ -14,15 +14,19 @@
 #include "replay_writer.h"
 #include "cfg/option.h"
 #include "emulator.h"
+#include "hw/pvr/spg.h"  // spg_last_jitter
+#include "maplecast_rollback.h"
 #include "oslib/oslib.h"
 #include "serialize.h"
 #include "types.h"
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -49,14 +53,68 @@ static constexpr size_t      FLUSH_AFTER_BYTES = 16 * 1024;
 static uint64_t              _startUnixUs = 0;
 static std::string           _lastOutPath;
 
+// Frame-alignment: stamps in the input log + checkpoint sidecar are
+// relative to the first frame stamped after the deferred capture fires.
+// Without this rebase the .mcrec would carry the recorder process's
+// _localFrameNum (which is whatever it had ticked up to before recording
+// started), but the replay process's counter resets to 0 at boot —
+// entries would land N frames late in replay and the SH4 would run
+// uncontrolled until the absolute counters happen to coincide.
+static uint64_t              _firstFrame = UINT64_MAX;
+
+// Dedicated savestate slot for replay record/restore. Outside the user-
+// visible 0-9 range so manual saves are never clobbered.
+static constexpr int REPLAY_SLOT = 99;
+
+// Warmup frames: don't log inputs for the first N publishFrameTick calls
+// after recording activates. Lets the SH4 settle into a deterministic
+// post-loadstate groove before inputs start hitting, so any first-frame
+// state slip doesn't corrupt the very first input's effect (e.g., the
+// character-select cursor starting one position off).
+//
+// Configured via MAPLECAST_REPLAY_WARMUP env var (default 0). Stored in
+// the .mcrec header so the reader knows how many frames to free-run
+// before applying inputs.
+static uint32_t              _warmupFrames = 0;
+
+// V5-era arm_at_match plumbing — kept as no-op stubs for ABI compat with
+// control_ws.cpp's record_start handler. Recording now fires only at
+// autoload via MAPLECAST_REPLAY_OUT (V2 discipline), so these are dead.
+static bool                  _armed = false;
+static StartParams           _pendingParams;
+static uint8_t               _prevInMatch = 0;
+
 // Sidecar checkpoint file (<out_path>.ckpt). Opened lazily on the first
-// checkpoint() call; layout is "MCCKPT\0\0" magic + version + repeated
-// [frame:u64][size:u64][state_bytes:N] entries. Independent of the .mcrec
-// itself so users can ship the small input log without dragging hundreds
-// of MB of state snapshots along.
+// checkpoint job processed by the worker. Layout: "MCCKPT\0\0" magic +
+// version(4) + reserved(4) + repeated [frame:u64][size:u64][state_bytes:N].
+// Entries hold raw dc_serialize bytes (same format as the .mcrec
+// embedded savestate) so seekToFrame can apply via Deserializer +
+// emu.loadstate with no slot/file/RZipFile detour.
 static FILE*                 _ckptFile = nullptr;
-static int                   _ckptSlot = 99;        // alternate slot — never autoloaded
 static uint32_t              _ckptCount = 0;
+
+// B.3: async checkpoint write. Old design did dc_savestate (zlib
+// compress + slot file write) + readback + sidecar fwrite all on
+// the renderer thread, blocking the SH4 for 50-150 ms at every
+// checkpoint frame and producing a multi-frame stutter at 600/1200/...
+//
+// New design: emu thread captures dc_serialize (memcpy of DC state,
+// no compression, ~5-15 ms) into a heap buffer and pushes to the
+// queue. Worker thread fwrites to the sidecar.
+struct CkptJob {
+	uint64_t              frame;     // V4 relative
+	std::vector<uint8_t>  bytes;     // raw dc_serialize output
+};
+static std::deque<CkptJob>      _ckptQueue;
+static std::mutex               _ckptQueueMtx;
+static std::condition_variable  _ckptQueueCv;
+static std::atomic<bool>        _ckptWorkerRunning{false};
+static std::atomic<bool>        _ckptShutdown{false};
+static std::thread              _ckptWorker;
+
+// Forward declarations for the async checkpoint worker (defined below).
+static void startCkptWorker();
+static void stopCkptWorker();
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -115,6 +173,20 @@ static bool hexDecode(const std::string& hex, uint8_t* out, size_t out_len) {
 }
 
 // ── start() ───────────────────────────────────────────────────────────
+//
+// V2 discipline: called from emulator.cpp's autoload section, BEFORE
+// the SH4 thread spawns. Both record and replay reach the post-load
+// anchor via the SAME dc_loadstate(slot) code path at the SAME boot
+// lifecycle moment. This is what worked in production for the May 7
+// Magneto-tag-in validation (commit b732dfb6e) and what V5's mid-vblank
+// captureFrameToBlob lost.
+//
+// Steps (run inline, not deferred):
+//   1. Open .mcrec for write, write header
+//   2. dc_savestate(REPLAY_SLOT) — canonical save path, writes .state file
+//   3. Read .state bytes, embed in .mcrec
+//   4. dc_loadstate(REPLAY_SLOT) — reload (anchor point replay will reach)
+//   5. Activate writer
 
 bool start(const StartParams& p) {
 	std::lock_guard<std::mutex> lk(_mtx);
@@ -123,121 +195,119 @@ bool start(const StartParams& p) {
 		return false;
 	}
 
-	// Open output file
+	_firstFrame = UINT64_MAX;
+	_entryCount.store(0, std::memory_order_relaxed);
+
+	// Warmup: read once at start. Skip appends with frame < warmup, so
+	// SH4 free-runs that many frames from the post-loadstate anchor
+	// before any input is logged.
+	_warmupFrames = 0;
+	if (const char* w = std::getenv("MAPLECAST_REPLAY_WARMUP")) {
+		int n = std::atoi(w);
+		if (n > 0) _warmupFrames = (uint32_t)n;
+	}
+
+	startCkptWorker();
+
 	_file = fopen(p.out_path.c_str(), "wb");
 	if (!_file) {
 		printf("[replay] start: cannot open %s for writing\n", p.out_path.c_str());
 		return false;
 	}
-
 	_startUnixUs = nowUnixUs();
 	_lastOutPath = p.out_path;
-	_entryCount.store(0);
 	_inputBuf.clear();
 
-	// ── Write header ──
-	// magic (8)
+	// ── header ──
 	const char magic[8] = { 'M','C','R','E','C','\0','\0','\0' };
 	fwrite(magic, 1, 8, _file);
 
-	// version (4) + flycast_ver (4). V3 captures the savestate via
-	// in-memory dc_serialize (byte-perfect since commit c79df1c97 closed
-	// the rollback round-trip drift to 0). No prerequisite that the user
-	// has a .state file on disk. Reader writes bytes back to slot and
-	// uses the same dc_loadstate(slot) autoload path as V2 — bytes are
-	// identical so the read side doesn't need a new path.
 	uint8_t v[4];
-	writeLE32(v, 3);                    // version
-	fwrite(v, 1, 4, _file);
-	writeLE32(v, 0);                    // flycast_ver placeholder
-	fwrite(v, 1, 4, _file);
+	writeLE32(v, 5); fwrite(v, 1, 4, _file);   // version (kept at 5 for now)
+	writeLE32(v, 0); fwrite(v, 1, 4, _file);
 
-	// match_id (16) — generated on the fly, simple time-based for now.
-	// Real UUID-v4 can come later.
 	uint8_t match_id[16] = {0};
 	writeLE64(match_id, _startUnixUs);
 	fwrite(match_id, 1, 16, _file);
 
-	// server_id (16)
 	uint8_t server_id[16] = {0};
 	hexDecode(p.server_id, server_id, 16);
 	fwrite(server_id, 1, 16, _file);
 
-	// start_unix_us (8)
 	uint8_t buf[8];
-	writeLE64(buf, _startUnixUs);
-	fwrite(buf, 1, 8, _file);
+	writeLE64(buf, _startUnixUs); fwrite(buf, 1, 8, _file);
+	memset(buf, 0, 8);            fwrite(buf, 1, 8, _file);  // duration_us patched in stop()
 
-	// duration_us placeholder (8) — patched in stop()
-	memset(buf, 0, 8);
-	fwrite(buf, 1, 8, _file);
-
-	// rom_hash (32)
 	uint8_t rom_hash[32] = {0};
 	hexDecode(p.rom_hash_hex, rom_hash, 32);
 	fwrite(rom_hash, 1, 32, _file);
 
-	// p1_name, p2_name (64 each)
 	writePaddedString(_file, p.p1_name, 64);
 	writePaddedString(_file, p.p2_name, 64);
-
-	// p1_chars, p2_chars (3 each)
 	fwrite(p.p1_chars, 1, 3, _file);
 	fwrite(p.p2_chars, 1, 3, _file);
-
-	// winner placeholder
 	uint8_t winner = 0xFF;
 	fwrite(&winner, 1, 1, _file);
-
-	// reserved (40)
+	// reserved[40]: first 4 bytes carry warmup_frames (LE u32). Reader
+	// uses this to set its baseline so input lookup aligns with the
+	// recorder's first non-skipped publishFrameTick.
 	uint8_t reserved[40] = {0};
+	writeLE32(reserved, _warmupFrames);
 	fwrite(reserved, 1, 40, _file);
 
-	// ── Capture savestate via in-memory dc_serialize (V3) ──
-	// V2 read the on-disk .state file from the configured slot, requiring
-	// flycast to have run dc_savestate previously. V3 calls dc_serialize
-	// directly on the live emulator state — recording can start mid-match
-	// without a prerequisite save. Byte-format is identical to V2 (both
-	// produce dc_serialize output), so the reader path is unchanged.
-	// Layout: [state_size:u64][state_bytes:N]
-	{
-		// Pre-allocate generous buffer (DC state is ~28 MB with vram + mem_b).
-		// Two-pass with dryrun would be cleaner but this is simpler.
-		std::vector<uint8_t> stateBuf(40 * 1024 * 1024);
-		size_t stateSize = 0;
-		try {
-			Serializer ser(stateBuf.data(), stateBuf.size(), false);
-			dc_serialize(ser);
-			stateSize = ser.size();
-		} catch (const Serializer::Exception& e) {
-			printf("[replay] start: dc_serialize failed: %s\n", e.what());
-			fclose(_file);
-			_file = nullptr;
-			return false;
-		}
-		uint8_t hdr[8];
-		writeLE64(hdr, (uint64_t)stateSize);
-		fwrite(hdr, 1, 8, _file);
-		if (stateSize > 0)
-			fwrite(stateBuf.data(), 1, stateSize, _file);
-		printf("[replay] V3: in-memory dc_serialize embedded — %zu bytes\n", stateSize);
+	// ── savestate via canonical dc_savestate + dc_loadstate ──
+	dc_savestate(REPLAY_SLOT);
+
+	std::string statePath = hostfs::getSavestatePath(REPLAY_SLOT, false);
+	FILE* sf = fopen(statePath.c_str(), "rb");
+	if (!sf) {
+		printf("[replay] start: cannot open %s after dc_savestate\n", statePath.c_str());
+		fclose(_file); _file = nullptr;
+		return false;
 	}
+	fseek(sf, 0, SEEK_END);
+	long sz = ftell(sf);
+	fseek(sf, 0, SEEK_SET);
+	std::vector<uint8_t> stateBytes((size_t)sz);
+	size_t got = fread(stateBytes.data(), 1, (size_t)sz, sf);
+	fclose(sf);
+	if (got != (size_t)sz) {
+		printf("[replay] start: short read of %s\n", statePath.c_str());
+		fclose(_file); _file = nullptr;
+		return false;
+	}
+
+	uint8_t hdr[8];
+	writeLE64(hdr, (uint64_t)sz);
+	fwrite(hdr, 1, 8, _file);
+	fwrite(stateBytes.data(), 1, (size_t)sz, _file);
+
+	// Reload to set the post-load anchor — same state replay will reach.
+	dc_loadstate(REPLAY_SLOT);
+
+	// spg_jitter (kept for diagnostic compatibility with the file format).
+	uint8_t jBuf[4];
+	writeLE32(jBuf, (uint32_t)spg_last_jitter);
+	fwrite(jBuf, 1, 4, _file);
 
 	fflush(_file);
 	_active.store(true);
 
-	// Auto-finalize on process exit so SIGTERM/Ctrl-C still produces a
-	// valid file with footer + duration. atexit only registers once across
-	// many start() calls — guarded by a static flag.
 	static bool atexitRegistered = false;
 	if (!atexitRegistered) {
 		atexit([]() { stop(0xFF); });
 		atexitRegistered = true;
 	}
 
-	printf("[replay] recording started: %s\n", p.out_path.c_str());
+	printf("[replay] recording started: %s (%ld state bytes via dc_savestate slot %d)\n",
+	       p.out_path.c_str(), sz, REPLAY_SLOT);
 	return true;
 }
+
+// V5-era no-op stub. V2 discipline does all the work inline in start()
+// at autoload, so there's nothing to defer. Kept for emulator.cpp's
+// vblank() hook ABI; safe to drop once that hook is removed.
+bool executePendingCapture() { return false; }
 
 // ── append() ──────────────────────────────────────────────────────────
 
@@ -245,12 +315,27 @@ void append(uint64_t frame, uint32_t seqAndSlot, uint16_t buttons,
             uint8_t lt, uint8_t rt) {
 	if (!_active.load(std::memory_order_relaxed)) return;
 
+	// Warmup skip: don't log appends with frame <= warmup. Recording's
+	// first stored entry is at frame = warmup+1 (publishFrameTick fires
+	// at end-of-frame-N with frame=N, so this skips the first N frames'
+	// worth of inputs). The replayer's reader uses baseline=warmup to
+	// align: replay's paceFrame=warmup (i.e., SH4 at vblank-of-frame-
+	// warmup+1) hits entry rel=0, exactly when recording's SH4 first
+	// logged an input.
+	if (frame <= (uint64_t)_warmupFrames) return;
+
 	std::lock_guard<std::mutex> lk(_mtx);
 	if (!_file) return;
 
+	// Rebase to relative frames so the recorder's absolute _localFrameNum
+	// at record-start doesn't have to equal the replay's at restore-finish.
+	// Reader pairs this with a baseline-capture in startPlayback().
+	if (_firstFrame == UINT64_MAX) _firstFrame = frame;
+	const uint64_t relFrame = frame - _firstFrame;
+
 	// Tape entry layout: 16 bytes [frame:u64][seqAndSlot:u32][buttons:u16][lt:u8][rt:u8]
 	uint8_t entry[16];
-	writeLE64(entry,      frame);
+	writeLE64(entry,      relFrame);
 	writeLE32(entry + 8,  seqAndSlot);
 	entry[12] = (uint8_t)(buttons);
 	entry[13] = (uint8_t)(buttons >> 8);
@@ -265,69 +350,123 @@ void append(uint64_t frame, uint32_t seqAndSlot, uint16_t buttons,
 
 // ── checkpoint() ──────────────────────────────────────────────────────
 //
-// Capture a fresh savestate to slot _ckptSlot (99 by default — chosen so
-// it never collides with the autoload slot 0) and append the bytes to the
-// sidecar file. Called from serverPublish at the caller's chosen cadence
-// (default ~every 10s). Lazy-opens the sidecar on first invocation so a
-// recording that never hits checkpoint() leaves no .ckpt file behind.
+// B.3 split: the EMU THREAD (this function) just snapshots dc_serialize
+// into a heap buffer and queues it. The WORKER THREAD (ckptWorkerLoop
+// below) does the sidecar fwrite. DC state is only safe to read at
+// frame boundary, which is where serverPublish calls us — so the
+// snapshot must happen synchronously here, but the I/O can wait.
+
+static void ckptWorkerLoop() {
+	while (true) {
+		CkptJob job;
+		{
+			std::unique_lock<std::mutex> lk(_ckptQueueMtx);
+			_ckptQueueCv.wait(lk, []{
+				return _ckptShutdown.load() || !_ckptQueue.empty();
+			});
+			if (_ckptQueue.empty()) {
+				if (_ckptShutdown.load()) return;
+				continue;
+			}
+			job = std::move(_ckptQueue.front());
+			_ckptQueue.pop_front();
+		}
+
+		// Lazy-open sidecar on first job. _lastOutPath is set by start()
+		// before the worker is launched, so reading it without a lock is
+		// safe (no concurrent writer during the worker's lifetime).
+		if (!_ckptFile && !_lastOutPath.empty()) {
+			std::string ckptPath = _lastOutPath + ".ckpt";
+			_ckptFile = fopen(ckptPath.c_str(), "wb");
+			if (!_ckptFile) {
+				printf("[replay-ckpt] worker: cannot open sidecar %s\n",
+				       ckptPath.c_str());
+				continue;
+			}
+			const uint8_t magic[8] = {'M','C','C','K','P','T','\0','\0'};
+			fwrite(magic, 1, 8, _ckptFile);
+			uint8_t hdr[8];
+			writeLE32(hdr,     2);  // sidecar version
+			writeLE32(hdr + 4, 0);  // reserved
+			fwrite(hdr, 1, 8, _ckptFile);
+			printf("[replay-ckpt] sidecar opened: %s\n", ckptPath.c_str());
+		}
+
+		if (!_ckptFile) continue;
+
+		// Append [frame:u64][size:u64][state_bytes:N]
+		uint8_t entryHdr[16];
+		writeLE64(entryHdr,     job.frame);
+		writeLE64(entryHdr + 8, (uint64_t)job.bytes.size());
+		fwrite(entryHdr, 1, 16, _ckptFile);
+		fwrite(job.bytes.data(), 1, job.bytes.size(), _ckptFile);
+		fflush(_ckptFile);
+		_ckptCount++;
+		printf("[replay-ckpt] worker wrote frame=%llu size=%zu (#%u)\n",
+		       (unsigned long long)job.frame, job.bytes.size(), _ckptCount);
+	}
+}
+
+static void startCkptWorker() {
+	if (_ckptWorkerRunning.exchange(true)) return;
+	_ckptShutdown.store(false);
+	_ckptCount = 0;
+	_ckptWorker = std::thread(ckptWorkerLoop);
+}
+
+static void stopCkptWorker() {
+	if (!_ckptWorkerRunning.exchange(false)) return;
+	{
+		std::lock_guard<std::mutex> lk(_ckptQueueMtx);
+		_ckptShutdown.store(true);
+	}
+	_ckptQueueCv.notify_all();
+	if (_ckptWorker.joinable()) _ckptWorker.join();
+	if (_ckptFile) {
+		fclose(_ckptFile);
+		_ckptFile = nullptr;
+		printf("[replay-ckpt] sidecar closed (%u checkpoints)\n", _ckptCount);
+	}
+}
 
 void checkpoint(uint64_t frame) {
 	if (!_active.load(std::memory_order_relaxed)) return;
 
-	std::lock_guard<std::mutex> lk(_mtx);
-	if (_lastOutPath.empty()) return;
+	uint64_t relFrame;
+	{
+		std::lock_guard<std::mutex> lk(_mtx);
+		if (_lastOutPath.empty()) return;
+		// Rebase to relative frames so checkpoints stay aligned with
+		// input entries. If checkpoint() lands before any append() (won't
+		// happen in practice — append fires every published tick — but
+		// belt-and-suspenders), set the baseline here too.
+		if (_firstFrame == UINT64_MAX) _firstFrame = frame;
+		relFrame = frame - _firstFrame;
+	}
 
-	// Capture state. dc_savestate writes to slot _ckptSlot's .state file
-	// via the canonical path. Safe to call from the renderer thread at
-	// serverPublish time — flycast's threaded-rendering model has the SH4
-	// thread paused at frame boundary while we're here.
-	dc_savestate(_ckptSlot);
-
-	// Read the just-written state bytes back so we can embed them in
-	// the sidecar. (Reusing the file is safer than building bytes
-	// in-process via dc_serialize, which has a known completeness gap.)
-	std::string statePath = hostfs::getSavestatePath(_ckptSlot, false);
-	FILE* sf = fopen(statePath.c_str(), "rb");
-	if (!sf) {
-		printf("[replay-ckpt] cannot open %s after dc_savestate\n",
-		       statePath.c_str());
+	// EMU THREAD: dc_serialize into heap buffer (memcpy of DC state, no
+	// compression). Fast — typical 5-15 ms vs the 50-150 ms zlib path
+	// that used to live here. DC state is safe to read here because
+	// serverPublish has the SH4 paused at frame boundary.
+	std::vector<uint8_t> bytes(40 * 1024 * 1024);
+	size_t sz = 0;
+	try {
+		Serializer ser(bytes.data(), bytes.size(), false);
+		dc_serialize(ser);
+		sz = ser.size();
+	} catch (const Serializer::Exception& e) {
+		printf("[replay-ckpt] dc_serialize failed at frame %llu: %s\n",
+		       (unsigned long long)relFrame, e.what());
 		return;
 	}
-	fseek(sf, 0, SEEK_END);
-	long sz = ftell(sf);
-	fseek(sf, 0, SEEK_SET);
-	std::vector<uint8_t> bytes((size_t)sz);
-	size_t got = fread(bytes.data(), 1, (size_t)sz, sf);
-	fclose(sf);
-	if (got == 0) return;
+	bytes.resize(sz);
 
-	// Lazy-open the sidecar on first checkpoint.
-	if (!_ckptFile) {
-		std::string ckptPath = _lastOutPath + ".ckpt";
-		_ckptFile = fopen(ckptPath.c_str(), "wb");
-		if (!_ckptFile) {
-			printf("[replay-ckpt] cannot open sidecar %s\n", ckptPath.c_str());
-			return;
-		}
-		const uint8_t magic[8] = {'M','C','C','K','P','T','\0','\0'};
-		fwrite(magic, 1, 8, _ckptFile);
-		uint8_t hdr[8];
-		writeLE32(hdr,     1);  // version
-		writeLE32(hdr + 4, 0);  // reserved
-		fwrite(hdr, 1, 8, _ckptFile);
-		printf("[replay-ckpt] sidecar opened: %s\n", ckptPath.c_str());
+	// Hand off to the worker thread for fwrite. Returns immediately.
+	{
+		std::lock_guard<std::mutex> lk(_ckptQueueMtx);
+		_ckptQueue.push_back({relFrame, std::move(bytes)});
 	}
-
-	// Append [frame:u64][size:u64][state_bytes:got]
-	uint8_t entryHdr[16];
-	writeLE64(entryHdr,     frame);
-	writeLE64(entryHdr + 8, (uint64_t)got);
-	fwrite(entryHdr, 1, 16, _ckptFile);
-	fwrite(bytes.data(), 1, got, _ckptFile);
-	fflush(_ckptFile);
-	_ckptCount++;
-	printf("[replay-ckpt] frame=%llu size=%zu (#%u)\n",
-	       (unsigned long long)frame, got, _ckptCount);
+	_ckptQueueCv.notify_one();
 }
 
 // ── Upload (optional, triggered by MAPLECAST_REPLAY_UPLOAD_URL) ───────
@@ -398,6 +537,14 @@ static void uploadToHub(const std::string& filePath, const std::string& hubUrl) 
 
 void stop(uint8_t winner) {
 	std::lock_guard<std::mutex> lk(_mtx);
+	// If we were merely armed (no capture fired yet), treat stop() as a
+	// disarm. No file was opened, no inputs logged — nothing to finalize.
+	if (_armed && !_active.load()) {
+		_armed = false;
+		_pendingParams = {};
+		printf("[replay] stop: was armed but never fired — disarmed\n");
+		return;
+	}
 	if (!_active.load() || !_file) return;
 
 	// Final flush of any buffered input entries
@@ -427,12 +574,10 @@ void stop(uint8_t winner) {
 	_file = nullptr;
 	_active.store(false);
 
-	// Close the checkpoint sidecar if one was opened.
-	if (_ckptFile) {
-		fclose(_ckptFile);
-		_ckptFile = nullptr;
-		printf("[replay-ckpt] sidecar closed (%u checkpoints)\n", _ckptCount);
-	}
+	// Drain remaining checkpoint jobs and close the sidecar. stopCkptWorker
+	// blocks until the worker has flushed every queued job, so the .ckpt
+	// is always complete on the disk when we return.
+	stopCkptWorker();
 
 	printf("[replay] stopped: %llu input entries, %.2fs duration\n",
 	       (unsigned long long)_entryCount.load(),
@@ -451,5 +596,11 @@ void stop(uint8_t winner) {
 
 bool active() { return _active.load(std::memory_order_relaxed); }
 uint64_t entryCount() { return _entryCount.load(std::memory_order_relaxed); }
+
+// arm_at_match is no longer supported under V2 discipline (recording must
+// fire at autoload boundary, not mid-match). These remain as no-op stubs
+// for ABI compatibility with control_ws.cpp's record_start handler.
+bool armed() { return false; }
+void onFrameInMatchFlag(uint8_t /*in_match*/) {}
 
 } // namespace maplecast_replay

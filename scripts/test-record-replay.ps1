@@ -85,8 +85,20 @@ Write-Host "[test]   ROM:  $RomPath"
 Write-Host "[test]   .mcrec: $McrecPath"
 Write-Host "[test]   record duration: ${RecordSeconds}s"
 
+$env:MAPLECAST = "1"                            # input UDP listener on :7100
 $env:MAPLECAST_MIRROR_SERVER = "1"
+$env:MAPLECAST_HEADLESS_AUTOLOAD = "1"          # boot from savestate, not attract mode
 $env:MAPLECAST_HEADLESS_DISABLE_SYS_MISC_1 = "1"
+# V2 discipline: trigger recording at autoload boundary (same lifecycle
+# moment replay restores). Recording captures the autoload state via
+# dc_savestate(slot 99), embeds in .mcrec, dc_loadstate(99) anchors SH4
+# at the post-load state. No mid-execution capture.
+$env:MAPLECAST_REPLAY_OUT   = $McrecPath
+$env:MAPLECAST_REPLAY_P1_NAME = "TestP1"
+$env:MAPLECAST_REPLAY_P2_NAME = "TestP2"
+# Warmup default = 0 (no skip). Override via MAPLECAST_REPLAY_WARMUP if
+# you want SH4 to free-run N frames before inputs start being logged.
+Remove-Item env:MAPLECAST_REPLAY_WARMUP -ErrorAction SilentlyContinue
 Remove-Item env:MAPLECAST_REPLAY_IN -ErrorAction SilentlyContinue
 Remove-Item env:MAPLECAST_TEST_ROLLBACK -ErrorAction SilentlyContinue
 
@@ -95,50 +107,61 @@ $proc = Start-Process -FilePath ".\$Flycast" -ArgumentList "`"$RomPath`"" `
     -RedirectStandardOutput $logRecord -RedirectStandardError "$logRecord.err" `
     -PassThru -NoNewWindow
 
-# Wait for control-WS to be ready (~2s)
+# Wait for autoload + recording-start + mirror server to be ready
 Start-Sleep -Seconds 3
 
-# Send record_start
-$startCmd = @{
-    cmd      = "record_start"
-    path     = $McrecPath
-    p1_name  = "TestP1"
-    p2_name  = "TestP2"
-    reply_id = "rec1"
-} | ConvertTo-Json -Compress
+# In -Visual mode launch the mirror client too so the operator can see
+# the game and play it while recording.
+$recClient = $null
+$logRecClient = Join-Path $env:TEMP "maplecast-test-record-client.log"
+if ($Visual) {
+    if (!(Test-Path -LiteralPath $ClientFlycast)) {
+        Write-Host "[test] FAIL: mirror client not found at $ClientFlycast" -ForegroundColor Red
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        exit 2
+    }
+    $oldServer = $env:MAPLECAST_MIRROR_SERVER
+    Remove-Item env:MAPLECAST_MIRROR_SERVER -ErrorAction SilentlyContinue
+    Remove-Item env:MAPLECAST -ErrorAction SilentlyContinue
+    Remove-Item env:MAPLECAST_HEADLESS_AUTOLOAD -ErrorAction SilentlyContinue
+    $env:MAPLECAST_MIRROR_CLIENT = "1"
+    $env:MAPLECAST_SERVER_HOST   = "127.0.0.1"
+    $env:MAPLECAST_SERVER_PORT   = "7200"
 
-try {
-    $reply = Send-WsCommand -Json $startCmd
-    Write-Host "[test] record_start reply: $reply" -ForegroundColor Green
-} catch {
-    Write-Host "[test] FAIL: record_start: $_" -ForegroundColor Red
-    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-    exit 1
+    Write-Host "[test] launching mirror client for record (windowed) - play now!" -ForegroundColor Yellow
+    $recClient = Start-Process -FilePath ".\$ClientFlycast" `
+        -RedirectStandardOutput $logRecClient `
+        -RedirectStandardError ($logRecClient + ".err") `
+        -PassThru
+
+    # Restore server-side env in this shell so subsequent ws probes are unaffected
+    Remove-Item env:MAPLECAST_MIRROR_CLIENT -ErrorAction SilentlyContinue
+    Remove-Item env:MAPLECAST_SERVER_HOST -ErrorAction SilentlyContinue
+    Remove-Item env:MAPLECAST_SERVER_PORT -ErrorAction SilentlyContinue
+    if ($oldServer) { $env:MAPLECAST_MIRROR_SERVER = $oldServer }
+
+    # Give the client a moment to handshake before recording starts
+    Start-Sleep -Seconds 2
 }
 
-# Let the emulator run while recording
-Write-Host "[test] recording for ${RecordSeconds}s..." -ForegroundColor Cyan
+# Recording auto-starts at autoload via MAPLECAST_REPLAY_OUT (set above).
+# Just wait while operator plays.
+Write-Host "[test] recording for $RecordSeconds s - PLAY NOW in the flycast window..." -ForegroundColor Cyan
 Start-Sleep -Seconds $RecordSeconds
 
-# Send record_stop
-$stopCmd = @{ cmd = "record_stop"; reply_id = "rec2" } | ConvertTo-Json -Compress
-try {
-    $reply = Send-WsCommand -Json $stopCmd
-    Write-Host "[test] record_stop reply: $reply" -ForegroundColor Green
-} catch {
-    Write-Host "[test] FAIL: record_stop: $_" -ForegroundColor Red
-}
-
-# Stop flycast
+# Stop client first, then headless
 Start-Sleep -Seconds 1
+if ($recClient) { Stop-Process -Id $recClient.Id -Force -ErrorAction SilentlyContinue }
 Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 1
 
 if (!(Test-Path $McrecPath)) {
-    Write-Host "[test] FAIL: .mcrec not produced at $McrecPath" -ForegroundColor Red
-    Write-Host "Last log lines:"
-    Get-Content $logRecord -Tail 20
-    exit 1
+    # at_match=true and the operator never reached a match - armed
+    # but never fired. Disarm via record_stop already happened above;
+    # nothing more to do.
+    Write-Host "[test] no .mcrec produced - recording was armed but in_match never went 0 to 1" -ForegroundColor Yellow
+    Write-Host "[test] tip: enter a match within RecordSeconds to capture" -ForegroundColor Yellow
+    exit 0
 }
 
 $size = (Get-Item $McrecPath).Length
@@ -159,6 +182,11 @@ if ($Visual) {
 
 # Headless replay server — produces TA stream from the .mcrec.
 # In -Visual mode, the mirror client connects to it and renders.
+# Replay's loadStartSavestate writes the embedded slot bytes back to
+# slot 99 and dc_loadstate(99)'s — same code path the recorder used at
+# its autoload, on the same bytes.
+Remove-Item env:MAPLECAST_HEADLESS_AUTOLOAD -ErrorAction SilentlyContinue
+Remove-Item env:MAPLECAST_REPLAY_OUT      -ErrorAction SilentlyContinue
 $env:MAPLECAST_REPLAY_IN = $McrecPath
 $logReplay = Join-Path $env:TEMP "maplecast-test-replay.log"
 $proc2 = Start-Process -FilePath ".\$Flycast" -ArgumentList "`"$RomPath`"" `

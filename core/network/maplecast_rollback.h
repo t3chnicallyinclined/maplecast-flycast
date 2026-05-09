@@ -126,4 +126,32 @@ struct Stats {
 };
 Stats getStats();
 
+// ── External-blob capture/restore (used by .mcrec replay) ────────────
+//
+// Same byte-perfect capture/restore logic as saveFrame/rewindToFrame,
+// minus the in-memory ring storage. Lets the .mcrec writer/reader
+// produce/consume the SAME blob format the rollback ring uses, so a
+// recording made via these calls is byte-for-byte identical to a state
+// the rollback ring would have captured at the same SH4 frame.
+//
+// Crucially these do NOT require init()/active() — they're pure
+// stateless wrappers around dc_serialize/dc_deserialize + the
+// scheduler-jitter dance. Safe to call without MAPLECAST_ROLLBACK_RING
+// being set.
+
+// Capture current state (dc_serialize + spg_last_jitter) into outBuf.
+// Returns bytes written, 0 on failure. MUST be called from the SH4
+// emu thread at a frame boundary (after runInternal returns), so the
+// scheduler is post-handle_cb's reschedule and every schid has a valid
+// end value.
+size_t captureFrameToBlob(uint8_t* outBuf, size_t bufSize, int32_t& outSpgJitter);
+
+// Restore state from a blob produced by captureFrameToBlob. Mirrors
+// rewindToFrame's logic: emu.loadstate, rend_resync_after_rollback,
+// then sh4_sched_request(vblank_schid, max(0, spg_getNextInterrupt()
+// - savedJitter)) to reconstruct LIVE's post-callback vblank
+// reschedule. MUST be called when the SH4 is paused (autoload section
+// during boot, or post-Stop in the deferred-rewind context).
+bool restoreFromBlob(const uint8_t* blob, size_t size, int32_t spgJitter);
+
 } // namespace maplecast_rollback

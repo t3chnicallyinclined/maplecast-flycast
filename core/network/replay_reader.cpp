@@ -23,10 +23,14 @@
 #include "replay_reader.h"
 #include "cfg/option.h"
 #include "emulator.h"
+#include "hw/pvr/spg.h"          // spg_getNextInterrupt
+#include "hw/sh4/sh4_sched.h"    // sh4_sched_request, is_scheduled
 #include "maplecast_input_server.h"
+#include "maplecast_mirror.h"
 #include "oslib/oslib.h"
 #include "serialize.h"
 #include "types.h"
+extern int vblank_schid;          // defined in hw/pvr/spg.cpp
 
 #include <atomic>
 #include <chrono>
@@ -50,7 +54,7 @@ static ReplayInfo            _info{};
 // is held until loadStartSavestate() consumes it; the input log is held
 // for getInputAtFrame() lookups during playback.
 static std::vector<uint8_t>  _savestateCompressed;
-static uint32_t              _formatVersion = 0;  // 2 = file-copy, 3 = in-memory dc_serialize
+static uint32_t              _formatVersion = 0;  // current build only accepts 5
 static std::vector<uint8_t>  _inputLog;       // raw 16-byte entries
 
 // Per-slot lookup cursor for getInputAtFrame(). Each cursor advances
@@ -61,6 +65,26 @@ static size_t   _cursor[2]      = {0, 0};
 static uint16_t _lastButtons[2] = {0xFFFF, 0xFFFF}; // active-low default = nothing pressed
 static uint8_t  _lastLt[2]      = {0, 0};
 static uint8_t  _lastRt[2]      = {0, 0};
+
+// Frame-alignment: captured at startPlayback() and subtracted from the
+// SH4's currentFrame() at every getInputAtFrame() call so the lookup
+// matches the writer's relative-frame stamps.
+static uint64_t              _frameBaseline = 0;
+
+// spg_last_jitter at record time. Diagnostic only now that restore goes
+// through dc_loadstate (which restores all scheduler state directly).
+static int32_t               _spgJitter = 0;
+
+// Warmup frames: writer-side, the recorder skipped logging the first N
+// publishFrameTick rounds after recording activated, so SH4 had time to
+// settle into a deterministic post-loadstate groove before inputs were
+// captured. Reader replays the same N free-running frames before
+// applying entries — uses warmup as the baseline so currentFrame=N+1
+// in replay aligns with the writer's first logged entry (rel=0).
+static uint32_t              _warmupFrames = 0;
+
+// Same dedicated replay slot the writer uses (replay_writer.cpp).
+static constexpr int         REPLAY_SLOT = 99;
 
 // Sidecar checkpoint index. Populated in openReplay() if <path>.ckpt
 // exists. Each entry records the frame number a checkpoint was captured
@@ -129,15 +153,10 @@ bool openReplay(const std::string& path) {
 		return false;
 	}
 
-	// Version check. V2 reads the on-disk .state file at write time; V3
-	// captures via in-memory dc_serialize at write time. Read path is
-	// identical for both (same byte format) — both write the embedded
-	// bytes to the slot file and let dc_loadstate(slot) restore. V1 used
-	// a runtime dc_serialize round-trip that suffered from a state-
-	// completeness gap (~3,900-byte frame-1 desync); no longer supported.
+	// Only the current format is supported — re-record any older .mcrec.
 	uint32_t version = readLE32(hdr + 8);
-	if (version != 2 && version != 3) {
-		printf("[replay-reader] unsupported version %u (this build accepts v2 or v3 — re-record with current binary)\n", version);
+	if (version != 5) {
+		printf("[replay-reader] unsupported version %u (re-record with current binary)\n", version);
 		fclose(_file); _file = nullptr;
 		return false;
 	}
@@ -154,11 +173,13 @@ bool openReplay(const std::string& path) {
 	memcpy(_info.p1_chars, hdr + 224, 3);
 	memcpy(_info.p2_chars, hdr + 227, 3);
 	_info.winner        = hdr[230];
+	// reserved[40] starts at offset 231; first 4 bytes carry warmup_frames.
+	_warmupFrames = readLE32(hdr + 231);
 
-	// ── Read savestate block ([state_size:u64][state_bytes:N]) ──
-	// The state_bytes are the on-disk .state file verbatim — same format
-	// flycast's dc_savestate writes. We extract those bytes and write them
-	// to the configured savestate slot path so dc_loadstate can pick them up.
+	// ── Read savestate block ([state_size:u64][state_bytes:N][spg_jitter:i32]) ──
+	// state_bytes are raw dc_serialize output (rollback ring's
+	// captureFrameToBlob format). spg_jitter is captured alongside so
+	// restoreFromBlob can re-arm vblank_schid at the same cycle alignment.
 	uint8_t saveHdr[8];
 	if (fread(saveHdr, 1, 8, _file) != 8) {
 		printf("[replay-reader] savestate header truncated\n");
@@ -177,6 +198,19 @@ bool openReplay(const std::string& path) {
 			fclose(_file); _file = nullptr;
 			return false;
 		}
+	}
+
+	// V5: spg_last_jitter (i32 LE) immediately after savestate bytes.
+	// Used by restoreFromBlob to reconstruct vblank_schid's exact cycle
+	// alignment via the rollback ring's handle_cb math.
+	{
+		uint8_t jBuf[4];
+		if (fread(jBuf, 1, 4, _file) != 4) {
+			printf("[replay-reader] spg_jitter field truncated\n");
+			fclose(_file); _file = nullptr;
+			return false;
+		}
+		_spgJitter = (int32_t)readLE32(jBuf);
 	}
 
 	// ── Read input log ──
@@ -244,7 +278,10 @@ bool openReplay(const std::string& path) {
 		uint8_t hdr[16];
 		if (fread(hdr, 1, 16, cf) == 16 && memcmp(hdr, "MCCKPT\0\0", 8) == 0) {
 			uint32_t ckptVersion = readLE32(hdr + 8);
-			if (ckptVersion == 1) {
+			// V2: bytes are raw dc_serialize output (matches the V4 .mcrec
+			// embedded format) so seekToFrame can apply via the in-memory
+			// Deserializer path with no slot/file ping-pong.
+			if (ckptVersion == 2) {
 				while (true) {
 					uint8_t entryHdr[16];
 					if (fread(entryHdr, 1, 16, cf) != 16) break;
@@ -256,7 +293,7 @@ bool openReplay(const std::string& path) {
 					fseek(cf, (long)e.stateSize, SEEK_CUR);
 				}
 			} else {
-				printf("[replay-reader] ckpt sidecar: unsupported version %u\n", ckptVersion);
+				printf("[replay-reader] ckpt sidecar: unsupported version %u (V4 build expects V2 sidecar)\n", ckptVersion);
 			}
 		}
 		fclose(cf);
@@ -289,31 +326,26 @@ uint32_t formatVersion() { return _formatVersion; }
 
 bool loadStartSavestate() {
 	if (!_open.load()) return false;
+	return applyEmbeddedSavestateInMemory();
+}
 
-	// V3: bytes are raw dc_serialize output (in-memory captured at write
-	// time). The on-disk .state format expected by dc_loadstate is wrapped
-	// in a SavestateHeader + RZipFile, which raw dc_serialize bytes don't
-	// satisfy. So V3 must use the in-memory restore path that calls
-	// emu.loadstate(deser) directly — bypassing the slot file.
-	if (_formatVersion == 3) {
-		printf("[replay-reader] V3 detected — using in-memory restore path\n");
-		// Caller (emulator.cpp autoload section) expects loadStartSavestate
-		// to leave bytes ready for dc_loadstate(slot) to pick up. For V3,
-		// we restore in-memory here and the caller's subsequent dc_loadstate
-		// will be a no-op (the slot file isn't present). Force-disable
-		// AutoLoadState in the caller to avoid that no-op call.
-		return applyEmbeddedSavestateInMemory();
-	}
-
-	// V2 path: bytes are the .state file verbatim (already wrapped). Write
-	// to the slot file and let dc_loadstate(slot) parse them.
+// V2-style restore: write embedded .state bytes to the dedicated replay
+// slot file, then dc_loadstate(REPLAY_SLOT). Both record and replay reach
+// the post-load anchor via the SAME canonical dc_loadstate code path on
+// the SAME bytes — what V2 had in production (commit b732dfb6e), what V5
+// lost by capturing fresh dc_serialize mid-execution.
+bool applyEmbeddedSavestateInMemory() {
 	std::lock_guard<std::mutex> lk(_mtx);
+	if (!_open.load()) {
+		printf("[replay-reader] no replay open\n");
+		return false;
+	}
 	if (_savestateCompressed.empty()) {
-		printf("[replay-reader] no savestate embedded — replay relies on power-on boot\n");
-		return true;  // not fatal — caller can fall back to a fresh boot
+		printf("[replay-reader] no savestate embedded\n");
+		return false;
 	}
 
-	std::string statePath = hostfs::getSavestatePath(config::SavestateSlot, true);
+	std::string statePath = hostfs::getSavestatePath(REPLAY_SLOT, true);
 	FILE* sf = fopen(statePath.c_str(), "wb");
 	if (!sf) {
 		printf("[replay-reader] cannot open %s for writing embedded savestate\n",
@@ -329,38 +361,24 @@ bool loadStartSavestate() {
 		return false;
 	}
 
-	printf("[replay-reader] embedded savestate (%zu bytes) → %s\n",
-	       _savestateCompressed.size(), statePath.c_str());
+	dc_loadstate(REPLAY_SLOT);
 
-	// Free buffer — we're done with it now that the bytes are on disk
-	_savestateCompressed.clear();
-	_savestateCompressed.shrink_to_fit();
-	return true;
-}
+	// vblank_schid may have been saved with end=-1 if dc_savestate fired
+	// mid-vblank-handler in the writer (handle_cb sets sched.end=-1 before
+	// dispatching spg_line_sched). In the writer's process, handle_cb's
+	// post-callback re-schedule recovers vblank — but those saved bytes
+	// still encode end=-1. The replayer's autoload runs dc_loadstate from
+	// outside any vblank context, so no post-callback fixup runs and
+	// vblank_schid stays dead → SH4 dispatches blocks indefinitely with
+	// no vblank firing → black screen, no TA frames produced.
+	if (!sh4_sched_is_scheduled(vblank_schid)) {
+		const int re_sch = spg_getNextInterrupt();
+		sh4_sched_request(vblank_schid, re_sch);
+		printf("[replay-reader] re-armed vblank_schid (was inactive in savestate) at +%d cycles\n", re_sch);
+	}
 
-// In-memory restore — same code path the rollback ring uses for rewind.
-// Skip the slot file write + autoload dance, call emu.loadstate() directly.
-bool applyEmbeddedSavestateInMemory() {
-	std::lock_guard<std::mutex> lk(_mtx);
-	if (!_open.load()) {
-		printf("[replay-reader] applyEmbeddedSavestateInMemory: no replay open\n");
-		return false;
-	}
-	if (_savestateCompressed.empty()) {
-		printf("[replay-reader] applyEmbeddedSavestateInMemory: no savestate embedded\n");
-		return false;
-	}
-	try {
-		Deserializer deser(_savestateCompressed.data(),
-		                   _savestateCompressed.size(), false);
-		emu.loadstate(deser);
-	} catch (const Deserializer::Exception& e) {
-		printf("[replay-reader] applyEmbeddedSavestateInMemory: deserialize failed: %s\n",
-		       e.what());
-		return false;
-	}
-	printf("[replay-reader] in-memory savestate applied (%zu bytes) — bypassed slot/autoload\n",
-	       _savestateCompressed.size());
+	printf("[replay-reader] applied %zu bytes via dc_loadstate(slot %d)\n",
+	       _savestateCompressed.size(), REPLAY_SLOT);
 	_savestateCompressed.clear();
 	_savestateCompressed.shrink_to_fit();
 	return true;
@@ -381,9 +399,18 @@ void startPlayback(double speed) {
 	_lastButtons[0] = _lastButtons[1] = 0xFFFF;
 	_lastLt[0] = _lastLt[1] = 0;
 	_lastRt[0] = _lastRt[1] = 0;
+
+	// Baseline = mirror's currentFrame at startPlayback time PLUS the
+	// writer's warmup. Recording skipped logging for the first
+	// `_warmupFrames` rounds, so the first stored entry corresponds to
+	// recording's frame W+1. Replay must wait until its currentFrame
+	// reaches W+1 before applying entry rel=0 — achieved by setting
+	// baseline = currentFrame_at_startPlayback + W.
+	_frameBaseline = maplecast_mirror::currentFrame() + (uint64_t)_warmupFrames;
+
 	(void)speed;  // pull-model is paced by the SH4 frame loop; speed param ignored
-	printf("[replay-reader] pull-model playback active @ 1.00x (SH4-paced); %zu input entries\n",
-	       _inputLog.size() / 16);
+	printf("[replay-reader] pull-model playback active @ 1.00x (SH4-paced); %zu input entries; baseline=%llu (warmup=%u)\n",
+	       _inputLog.size() / 16, (unsigned long long)_frameBaseline, _warmupFrames);
 }
 
 bool getInputAtFrame(uint64_t frame, int slot,
@@ -391,6 +418,15 @@ bool getInputAtFrame(uint64_t frame, int slot,
 {
 	if (slot < 0 || slot > 1) return false;
 	if (!_playing.load(std::memory_order_relaxed)) return false;
+
+	// V4: rebase the SH4's absolute frame into the writer's relative
+	// space. _frameBaseline is currentFrame() at the moment startPlayback
+	// fired (right after the in-memory savestate restore, before the SH4
+	// resumed); recording's first entry was likewise stamped relative-0
+	// at the first publishFrameTick after record_start. Both sides count
+	// from "first frame of the recording context".
+	if (frame < _frameBaseline) return false;
+	frame -= _frameBaseline;
 
 	const size_t N = _inputLog.size() / 16;
 	size_t& cursor = _cursor[slot];
@@ -437,6 +473,7 @@ void close() {
 	_savestateCompressed.clear();
 	_inputLog.clear();
 	_cursor[0] = _cursor[1] = 0;
+	_frameBaseline = 0;
 	_ckpts.clear();
 	_ckptPath.clear();
 	_open.store(false);
@@ -486,18 +523,14 @@ bool seekToFrame(uint64_t targetFrame) {
 		return false;
 	}
 
-	// Write checkpoint bytes to the slot file. dc_loadstate at the autoload
-	// point will pick them up. Same plumbing as the embedded-savestate path.
-	std::string statePath = hostfs::getSavestatePath(config::SavestateSlot, true);
-	FILE* sf = fopen(statePath.c_str(), "wb");
-	if (!sf) {
-		printf("[replay-reader] seek: cannot open %s for write\n", statePath.c_str());
-		return false;
-	}
-	size_t wrote = fwrite(bytes.data(), 1, bytes.size(), sf);
-	fclose(sf);
-	if (wrote != bytes.size()) {
-		printf("[replay-reader] seek: short write to %s\n", statePath.c_str());
+	// V2 sidecar bytes are raw dc_serialize output (matching the .mcrec
+	// V4 embedded format). Apply via the in-memory Deserializer path —
+	// no slot file, no RZipFile, no autoload roundtrip.
+	try {
+		Deserializer deser(bytes.data(), bytes.size(), false);
+		emu.loadstate(deser);
+	} catch (const Deserializer::Exception& e) {
+		printf("[replay-reader] seek: deserialize failed: %s\n", e.what());
 		return false;
 	}
 

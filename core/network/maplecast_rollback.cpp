@@ -464,6 +464,80 @@ Stats getStats()
 	return s;
 }
 
+// ── External-blob capture/restore (used by .mcrec replay) ────────────
+//
+// Mirrors saveFrame/rewindToFrame minus the ring storage so the same
+// byte-perfect capture/restore logic can produce/consume .mcrec blobs.
+// No init()/active() check — these are stateless and safe to call
+// without MAPLECAST_ROLLBACK_RING being enabled.
+
+size_t captureFrameToBlob(uint8_t* outBuf, size_t bufSize, int32_t& outSpgJitter)
+{
+	// Same dc_serialize call saveFrame() uses (rollback=false → full
+	// state, includes VRAM + mem_b). Caller must invoke from SH4 emu
+	// thread at a frame boundary so handle_cb has finished its post-
+	// callback re-schedule for every fired schid.
+	try {
+		Serializer ser(outBuf, bufSize, false);
+		dc_serialize(ser);
+		outSpgJitter = (int32_t)spg_last_jitter;
+		return ser.size();
+	} catch (const Serializer::Exception& e) {
+		printf("[rollback] captureFrameToBlob: dc_serialize failed: %s\n", e.what());
+		outSpgJitter = 0;
+		return 0;
+	}
+}
+
+bool restoreFromBlob(const uint8_t* blob, size_t size, int32_t spgJitter)
+{
+	const uint64_t prerewindNow = sh4_sched_now64();
+	const uint32_t prerewindPc  = (uint32_t)Sh4cntx.pc;
+
+	// rewindToFrame's flow, minus the page-delta walk (we don't have
+	// prior-frame deltas in the .mcrec — the embedded blob is a full
+	// dc_serialize). emu.loadstate handles the full restore including
+	// memwatch::unprotect/reset, bm_Reset, ResetCache, custom_texture
+	// init, mmu flush, and EventManager LoadState broadcast.
+	try {
+		Deserializer deser(blob, size, false);
+		emu.loadstate(deser);
+	} catch (const Deserializer::Exception& e) {
+		printf("[rollback] restoreFromBlob: deserialize failed: %s\n", e.what());
+		return false;
+	}
+
+	// Drain stale Render queue entries the recording's live-forward
+	// path may have left behind. Without this, post-restore SH4 blocks
+	// in pvrQueue::enqueue on a "duplicate Render".
+	rend_resync_after_rollback();
+
+	// Reconstruct LIVE's post-callback vblank_schid reschedule using the
+	// captured jitter. handle_cb's math: sh4_sched_request(vblank_schid,
+	// max(0, re_sch - jitter)). Doing this with no jitter (or wrong
+	// jitter) leaves sched.end exactly `jitter` cycles late, which over
+	// many frames cascades into a frame-level input misalignment and
+	// state desync (a hit gets missed, etc.).
+	const int re_sch = spg_getNextInterrupt();
+	const int adj_cycles = std::max(0, re_sch - spgJitter);
+	sh4_sched_request(vblank_schid, adj_cycles);
+
+	// Re-arm memwatch protection (emu.loadstate did unprotect+reset; we
+	// need to re-arm before SH4 resumes so dirty-page tracking restarts).
+	static const bool _memwatchDisabledRestore = std::getenv("MAPLECAST_DISABLE_MEMWATCH") != nullptr;
+	if (!_memwatchDisabledRestore)
+		memwatch::protect();
+
+	printf("[rollback] restoreFromBlob: %zu bytes, jitter=%d, sched_now %llu→%llu, pc 0x%08x→0x%08x\n",
+	       size, spgJitter,
+	       (unsigned long long)prerewindNow,
+	       (unsigned long long)sh4_sched_now64(),
+	       (unsigned)prerewindPc,
+	       (unsigned)Sh4cntx.pc);
+	fflush(stdout);
+	return true;
+}
+
 // ── F.1 round-trip determinism test ──────────────────────────────────
 
 enum F1Stage { F1_IDLE, F1_WARMUP, F1_PRE, F1_POST, F1_DONE };

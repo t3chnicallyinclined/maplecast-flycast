@@ -76,9 +76,39 @@ struct StartParams {
 	uint8_t     p2_chars[3] = {0xFF, 0xFF, 0xFF};
 	std::string rom_hash_hex;  // optional, 64 hex chars
 	std::string server_id;     // optional, hex UUID
+
+	// When true, start() arms the recorder but does NOT capture the
+	// savestate or open the file yet. The mirror server polls the MVC2
+	// in_match flag every frame; on the first 0→1 transition while
+	// armed, the writer fires the actual capture. Lets the operator
+	// trigger record_start from a menu and have the .mcrec begin at
+	// the literal first match frame, skipping menu/character-select.
+	bool        arm_at_match = false;
 };
 
 bool start(const StartParams& p);
+
+// Called from mirror server's serverPublish each frame with the freshly-
+// read in_match flag from guest RAM. If the writer was armed (start()
+// with arm_at_match=true), watches for the 0→1 transition and fires
+// the deferred capture. No-op if not armed or transition hasn't happened.
+void onFrameInMatchFlag(uint8_t in_match);
+
+// Whether the writer is armed but not yet capturing. Distinct from
+// active() (which returns true once capture has fired and inputs are
+// being logged).
+bool armed();
+
+// Deferred capture hook. Mirrors maplecast_rollback's executePendingRewind
+// pattern: start() / onFrameInMatchFlag set a "pending capture" flag,
+// THIS function is called from the SH4 emu thread between runInternal()
+// returns, and runs the actual dc_serialize there. Capturing on the
+// SH4 thread at a frame boundary (vs. on the render thread mid-frame
+// via drainCommandQueue) ensures vblank_schid + aica_schid + spg jitter
+// are all in a deterministic post-handle_cb state — same condition the
+// rollback ring relies on for byte-perfect rewind. No-op when nothing
+// pending. Returns true iff a capture fired.
+bool executePendingCapture();
 
 // Append one input event. Called from the input server's tape publisher
 // loop (existing infrastructure in maplecast_input_server.cpp). No-op

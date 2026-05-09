@@ -744,16 +744,14 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 				if (maplecast_replay::openReplay(inPath)
 				    && maplecast_replay::loadStartSavestate()) {
 					_replayOpened = true;
-					if (maplecast_replay::formatVersion() == 3) {
-						// V3 already restored state in-memory via emu.loadstate();
-						// skip the subsequent autoload dc_loadstate(slot) below.
-						_replayRestoredInMemory = true;
-						config::AutoLoadState.override(false);
-						printf("[autoload-debug] MAPLECAST_REPLAY_IN — V3 in-memory restore done, AutoLoadState disabled\n");
-					} else {
-						config::AutoLoadState.override(true);
-						printf("[autoload-debug] MAPLECAST_REPLAY_IN — V2 savestate written to slot, AutoLoadState forced on\n");
-					}
+					const uint32_t fv = maplecast_replay::formatVersion();
+					// All currently-supported formats (V5+) restore via the
+					// rollback ring's in-memory path; the slot file is never
+					// touched. AutoLoadState forced off so a stale slot file
+					// can't overwrite the in-memory restore.
+					_replayRestoredInMemory = true;
+					config::AutoLoadState.override(false);
+					printf("[autoload-debug] MAPLECAST_REPLAY_IN — V%u in-memory restore done, AutoLoadState disabled\n", fv);
 
 					// Optional seek-to-frame: replaces the slot's .state with
 					// the nearest sidecar checkpoint at or before this frame.
@@ -1487,14 +1485,18 @@ void Emulator::start()
 						startTime = sh4_sched_now64();
 						renderTimeout = false;
 						runInternal();
+
 						// Rollback ring stop-callback-restart: if vblank
 						// called Stop() because a rewind is pending, runInternal
 						// returned with SH4 paused. Execute deferred rewind from
 						// safe context, then restart SH4 and skip the break check.
-						// NOTE: this path currently deadlocks for reasons not
-						// fully understood; F.2 audit uses synchronous in-vblank
-						// rewind instead. Kept wired for when A.5/A.6 needs it.
+						// vblank() called rend_cancel_emu_wait() right after
+						// Stop() to wake any pending render waits — but the
+						// in-flight slice may have enqueued more work between
+						// Stop and runInternal's actual return. Drain again
+						// here before loadstate touches dynarec caches.
 						if (maplecast_rollback::pendingRollback()) {
+							rend_cancel_emu_wait();
 							maplecast_rollback::executePendingRewind();
 							getSh4Executor()->Start();
 							continue;
@@ -1621,6 +1623,7 @@ void Emulator::vblank()
 		}
 	}
 
+
 	// Phase 1 A.4 rollback ring — capture SH4 + page-delta state at the
 	// frame boundary. vblank() is called synchronously from SH4 execution
 	// (the dynarec hits the vblank interrupt), so this runs on the SAME
@@ -1643,9 +1646,29 @@ void Emulator::vblank()
 		// emu loop is gated on maplecast_rollback::active() so the loop
 		// continues instead of breaking out the way it would for a
 		// non-rollback Stop() (e.g. user-initiated shutdown).
-		if (maplecast_rollback::pendingRollback())
+		if (maplecast_rollback::pendingRollback()) {
 			getSh4Executor()->Stop();
+			// Wake any in-flight render/pvrQueue waits so the SH4 thread
+			// can actually exit runInternal(). Without this, Stop() only
+			// flips a flag the dynarec polls between slices — but the SH4
+			// may already be parked on renderEnd.Wait() or pvrQueue's
+			// dequeueEvent.Wait(), neither of which Stop() touches. Result:
+			// SH4 thread never returns, emu loop never sees pendingRollback,
+			// deadlock. (Emulator::stop() uses this same call for the same
+			// reason; we mirror it here for the rewind fast-path.)
+			rend_cancel_emu_wait();
+			// Skip the rest of vblank's tail (executePendingCapture +
+			// renderTimeout block) so we don't re-enqueue render work that
+			// creates fresh waits between Stop() and runInternal()'s return.
+			return;
+		}
 	}
+
+	// Replay writer: deferred state capture. start() and onFrameInMatchFlag
+	// queue a pending capture; this hook fires it from the SH4 thread on
+	// vblank — same frame-boundary discipline maplecast_rollback::saveFrame
+	// uses just above for byte-perfect rollback. No-op when nothing pending.
+	maplecast_replay::executePendingCapture();
 
 	// Time out if a frame hasn't been rendered for 50 ms
 	if (sh4_sched_now64() - startTime <= 10000000)

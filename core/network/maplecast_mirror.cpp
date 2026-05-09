@@ -1606,6 +1606,21 @@ done_diff:
 		}
 	}
 
+	// Auto-fire the deferred recording capture on in_match 0→1. Lives
+	// OUTSIDE the maplecast_ws::active() block above because record_arm
+	// must work regardless of whether any mirror client is connected
+	// (operator might be solo-recording with no viewers). Cheap — one
+	// guest-RAM byte read + a uint8 compare.
+	{
+		static uint32_t _matchPollCounter = 0;
+		if (++_matchPollCounter >= 3) {
+			_matchPollCounter = 0;
+			maplecast_gamestate::GameState gs;
+			maplecast_gamestate::readGameState(gs);
+			maplecast_replay::onFrameInMatchFlag(gs.in_match);
+		}
+	}
+
 	// Update telemetry
 	{
 		auto publishEnd = std::chrono::high_resolution_clock::now();

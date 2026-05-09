@@ -63,15 +63,11 @@ static void getLocalInput(MapleInputState inputState[4])
 	const int64_t tLatchUs = maplecastActive ? _ggpoNowUs() : 0;
 	const uint64_t latchFrame = maplecastActive ? maplecast_mirror::currentFrame() : 0;
 
-	// Replay-mode pace clock. The recorder stamps each entry with the
-	// mirror-server frame counter (incremented in serverPublish, see
-	// maplecast_mirror.cpp:1530). For replay determinism we want the SAME
-	// frame-counter source on the lookup side. On prod the mirror server
-	// is running and currentFrame() ticks per-frame; on Windows standalone
-	// it stays at 0, so we fall back to a synthetic counter that
-	// pre-increments once per getLocalInput call (first call → frame 1,
-	// matching the recorder's first-entry stamp).
-	static uint64_t _replayPaceFrame[2] = {0, 0};
+	// Replay-mode pace clock. V4 entries are stamped relative to the
+	// recording's first publishFrameTick after capture; the reader
+	// subtracts its own baseline (captured at startPlayback while the
+	// SH4 is paused post-restore) so the lookup space lines up with
+	// the SH4's currentFrame() in the replay process.
 	const uint64_t mirrorFrame = maplecast_mirror::currentFrame();
 
 	for (int player = 0; player < 4; player++)
@@ -83,16 +79,19 @@ static void getLocalInput(MapleInputState inputState[4])
 		bool replayHandled = false;
 		if ((player == 0 || player == 1) && maplecast_replay::playbackActive())
 		{
-			uint64_t paceFrame;
-			if (mirrorFrame > 0) {
-				// Prod path — authoritative mirror frame counter, same source
-				// the recorder used. Frame-exact alignment, no off-by-one.
-				paceFrame = mirrorFrame;
-			} else {
-				// Standalone fallback — pre-increment so first call passes
-				// frame=1 (matching recorder's first-entry stamp).
-				paceFrame = ++_replayPaceFrame[player];
-			}
+			// V4 alignment: just hand the SH4's currentFrame() to the reader.
+			// The reader subtracts its baseline (captured at startPlayback,
+			// which fires after applyEmbeddedSavestateInMemory while the SH4
+			// is still paused — so currentFrame() at that moment is exactly
+			// the value the SH4 will report at its first post-restore vblank).
+			//
+			// Old code switched to a synthetic per-slot counter when
+			// mirrorFrame was 0 and pre-incremented it, which (a) skipped
+			// the first recorded entry and (b) raced once mirrorFrame went
+			// positive. V4 replays restore at frame_count=0 in the replay
+			// process and the reader handles the rebase, so the synthetic
+			// counter is no longer needed.
+			const uint64_t paceFrame = mirrorFrame;
 			uint16_t rBtn; uint8_t rLt; uint8_t rRt;
 			if (maplecast_replay::getInputAtFrame(paceFrame, player,
 			                                      rBtn, rLt, rRt))

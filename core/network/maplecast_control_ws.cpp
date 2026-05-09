@@ -126,6 +126,7 @@ struct Command {
 	int slot = 0;                // savestate cmds
 	std::string path;            // record_start output path
 	std::string p1Name, p2Name;  // record_start metadata
+	bool atMatch = false;        // record_start: arm + auto-fire at in_match 0→1
 	std::string reply_id;        // client correlation
 	ControlConnHdl conn;         // who to reply to
 };
@@ -393,10 +394,15 @@ static void executeRecordStart(const Command& cmd)
 		sendJson(cmd.conn, errReply(cmd, "record_start", "already recording — call record_stop first"));
 		return;
 	}
+	if (maplecast_replay::armed()) {
+		sendJson(cmd.conn, errReply(cmd, "record_start", "already armed — call record_stop to disarm first"));
+		return;
+	}
 	maplecast_replay::StartParams p;
 	p.out_path = cmd.path;
 	p.p1_name  = cmd.p1Name;
 	p.p2_name  = cmd.p2Name;
+	p.arm_at_match = cmd.atMatch;
 	if (!maplecast_replay::start(p)) {
 		sendJson(cmd.conn, errReply(cmd, "record_start", "replay writer rejected start (see flycast log)"));
 		return;
@@ -405,19 +411,23 @@ static void executeRecordStart(const Command& cmd)
 		{"path", cmd.path},
 		{"p1_name", cmd.p1Name},
 		{"p2_name", cmd.p2Name},
+		{"at_match", cmd.atMatch},
+		{"state", cmd.atMatch ? "armed" : "recording"},
 	}));
 }
 
 static void executeRecordStop(const Command& cmd)
 {
-	if (!maplecast_replay::active()) {
-		sendJson(cmd.conn, errReply(cmd, "record_stop", "not recording"));
+	const bool wasArmed = maplecast_replay::armed();
+	if (!maplecast_replay::active() && !wasArmed) {
+		sendJson(cmd.conn, errReply(cmd, "record_stop", "not recording or armed"));
 		return;
 	}
 	uint64_t entries = maplecast_replay::entryCount();
 	maplecast_replay::stop(0xFF);
 	sendJson(cmd.conn, okReply(cmd, "record_stop", json{
 		{"entries", entries},
+		{"was_armed_only", wasArmed && entries == 0},
 	}));
 }
 
@@ -425,6 +435,7 @@ static void executeRecordStatus(const Command& cmd)
 {
 	sendJson(cmd.conn, okReply(cmd, "record_status", json{
 		{"recording", maplecast_replay::active()},
+		{"armed",     maplecast_replay::armed()},
 		{"entries",   maplecast_replay::entryCount()},
 	}));
 }
@@ -543,6 +554,8 @@ static void onMessage(ControlConnHdl hdl, ControlWsServer::message_ptr msg)
 			cmd.p1Name = parsed["p1_name"].get<std::string>();
 		if (parsed.contains("p2_name") && parsed["p2_name"].is_string())
 			cmd.p2Name = parsed["p2_name"].get<std::string>();
+		if (parsed.contains("at_match") && parsed["at_match"].is_boolean())
+			cmd.atMatch = parsed["at_match"].get<bool>();
 	} else if (cmdName == "record_stop") {
 		cmd.type = CmdType::RecordStop;
 	} else if (cmdName == "record_status") {
