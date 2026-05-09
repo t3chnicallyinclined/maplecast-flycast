@@ -87,6 +87,13 @@ struct RingSlot
 	std::vector<uint8_t>  serialBlob;             // pre-sized to 16 MB on init
 	size_t                serialSize = 0;
 	MemPages              pages;
+	int                   spgJitter = 0;          // jitter passed to
+	                                              // spg_line_sched at this
+	                                              // saveFrame; used on rewind
+	                                              // to reconstruct the post-
+	                                              // callback vblank_schid
+	                                              // reschedule (closes 2 bytes
+	                                              // of byte-diff drift).
 };
 
 static RingSlot          _ring[RING_DEPTH];
@@ -238,6 +245,11 @@ void saveFrame(uint64_t frame)
 		slot.pages.capture();
 
 	slot.frame = frame;
+	// Capture spg_line_sched's most-recent jitter so rewindToFrame can
+	// reconstruct LIVE's post-callback vblank_schid reschedule
+	// (handle_cb does sh4_sched_request with re_sch - jitter; we need
+	// to mirror that on rewind to avoid a 1-byte ffb / interrupt_pend drift).
+	slot.spgJitter = spg_last_jitter;
 
 	// Update cursor — mostRecent advances, oldest tracks the ring's tail.
 	_mostRecentFrame = frame;
@@ -361,17 +373,16 @@ bool rewindToFrame(uint64_t frame)
 		// stays inactive forever, no vblanks fire, SH4 dispatches blocks
 		// indefinitely with no progress.
 		//
-		// Fix: re-schedule vblank_schid using rescheduleSPG() — same
-		// helper used at PVR register-write paths (pvr_regs.cpp:211).
-		// rescheduleSPG calls sh4_sched_request(vblank_schid,
-		// getNextSpgInterrupt()) which uses the deserialized
-		// clc_pvr_scanline / Line_Cycles to compute the EXACT next-
-		// scanline-cycle count — matching what LIVE's natural
-		// re-schedule would have done after the original anchor's
-		// scanline 0 block continuation. This closes the last 2-byte
-		// drift in interrupt_pend and sh4_sched_ffb low byte that
-		// the +1-cycle reschedule produced.
-		rescheduleSPG();
+		// Reconstruct LIVE's post-callback vblank_schid reschedule.
+		// In LIVE, handle_cb computed: sh4_sched_request(vblank_schid,
+		//   max(0, re_sch - jitter)) where jitter = anchor's spg_last_jitter.
+		// rescheduleSPG() alone uses re_sch with no jitter subtract,
+		// leaving sched.end exactly `jitter` cycles late vs LIVE.
+		// Mirror LIVE's exact math here using the jitter we captured
+		// alongside the anchor blob in saveFrame.
+		const int re_sch = spg_getNextInterrupt();
+		const int adj_cycles = std::max(0, re_sch - target.spgJitter);
+		sh4_sched_request(vblank_schid, adj_cycles);
 
 		if (deser.size() != target.serialSize) {
 			printf("[rollback] rewind: deserialize size mismatch (used %zu of %zu)\n",

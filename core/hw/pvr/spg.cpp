@@ -96,8 +96,19 @@ void rescheduleSPG()
 	sh4_sched_request(vblank_schid, getNextSpgInterrupt());
 }
 
+int spg_getNextInterrupt() { return getNextSpgInterrupt(); }
+
+// Most-recent jitter value passed to spg_line_sched. Read by the rollback
+// ring at saveFrame time so rewindToFrame can reconstruct the post-callback
+// reschedule that handle_cb would have done (sh4_sched_request with
+// re_sch - jitter). Without this, REDO's vblank_schid.end is exactly
+// `jitter` cycles later than LIVE's, producing a 1-byte sh4_sched_ffb /
+// 1-byte interrupt_pend drift in the F.2 byte-diff audit.
+thread_local int spg_last_jitter = 0;
+
 static int spg_line_sched(int tag, int cycles, int jitter, void *arg)
 {
+	spg_last_jitter = jitter;
 	clc_pvr_scanline += cycles + jitter;
 
 	while (clc_pvr_scanline >= Line_Cycles)
