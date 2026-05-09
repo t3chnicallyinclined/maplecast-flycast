@@ -700,40 +700,57 @@ void serialize(Serializer& ser)
 
 void deserialize(Deserializer& deser)
 {
-	deser >> OnChipRAM;
+	// Bisection helper for finding the SH4 sub-region that hangs the
+	// deferred-rewind path. Each named region can be skipped via
+	// MAPLECAST_SKIP_DESER_SUBSYS=sh4.OnChipRAM (etc).
+	#define MAYBE_SKIP_SH4(name, body) do { \
+		if (dcs_should_skip_subsys(name)) { \
+			size_t sz = dcs_lookup_subsys_size(name); \
+			if (sz > 0) { \
+				printf("[dc-deser] SKIPPING %s (%zu bytes)\n", name, sz); fflush(stdout); \
+				deser.skip(sz); \
+			} else { body; } \
+		} else { body; } \
+	} while (0)
 
-	deser >> CCN;
-	deser >> UBC;
-	deser >> BSC;
-	deser >> DMAC;
-	deser >> CPG;
-	deser >> RTC;
-	deser >> INTC;
-	deser >> TMU;
-	deser >> SCI;
-	deser >> SCIF;
+	MAYBE_SKIP_SH4("sh4.OnChipRAM", deser >> OnChipRAM);
+	MAYBE_SKIP_SH4("sh4.regs", {
+		deser >> CCN;
+		deser >> UBC;
+		deser >> BSC;
+		deser >> DMAC;
+		deser >> CPG;
+		deser >> RTC;
+		deser >> INTC;
+		deser >> TMU;
+		deser >> SCI;
+		deser >> SCIF;
+	});
 
-	SCIFSerialPort::Instance().deserialize(deser);
-	icache.Deserialize(deser);
-	ocache.Deserialize(deser);
+	MAYBE_SKIP_SH4("sh4.SCIF_serial", SCIFSerialPort::Instance().deserialize(deser));
+	MAYBE_SKIP_SH4("sh4.icache", icache.Deserialize(deser));
+	MAYBE_SKIP_SH4("sh4.ocache", ocache.Deserialize(deser));
 
-	if (!deser.rollback())
-		mem_b.deserialize(deser);
+	MAYBE_SKIP_SH4("sh4.mem_b", {
+		if (!deser.rollback())
+			mem_b.deserialize(deser);
+	});
 
-	interrupts_deserialize(deser);
+	MAYBE_SKIP_SH4("sh4.interrupts", interrupts_deserialize(deser));
 
 	if (deser.version() <= Deserializer::V31)
 		deser.skip<int>();		// do_sqw index
 	CCN_QACR_write<0>(0, CCN_QACR0.reg_data);
 	CCN_QACR_write<1>(0, CCN_QACR1.reg_data);
 
-	deser >> (*p_sh4rcb).cntx;
+	MAYBE_SKIP_SH4("sh4.cntx", deser >> (*p_sh4rcb).cntx);
 	if (deser.version() >= Deserializer::V19 && deser.version() < Deserializer::V21)
 		deser.skip<u32>(); // sh4InterpCycles
 	if (deser.version() < Deserializer::V21)
 		p_sh4rcb->cntx.cycle_counter = SH4_TIMESLICE;
 
-	sh4_sched_deserialize(deser);
+	MAYBE_SKIP_SH4("sh4.sched", sh4_sched_deserialize(deser));
+	#undef MAYBE_SKIP_SH4
 }
 
 void serialize2(Serializer& ser)

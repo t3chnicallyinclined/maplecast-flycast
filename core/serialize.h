@@ -238,3 +238,15 @@ inline void dcs_mark(const Serializer& ser, const char* name) {
 	if (dc_audit_marks)
 		dc_audit_marks->push_back({ ser.size(), name });
 }
+
+// Subsystem-skip table for the deferred-rewind hang bisection. When env
+// var MAPLECAST_SKIP_DESER_SUBSYS is set (e.g. "aica" or "aica,sh4"),
+// dc_deserialize calls deser.skip(size) instead of the subsystem's
+// deserialize function — letting us isolate which subsystem's restore
+// causes the SH4 hang. Sizes are populated by dc_serialize via the
+// most-recent dcs_mark sequence.
+struct SubsysSize { const char* name; size_t size; };
+extern thread_local std::vector<SubsysSize> dc_subsys_sizes;
+
+bool dcs_should_skip_subsys(const char* name);
+size_t dcs_lookup_subsys_size(const char* name);

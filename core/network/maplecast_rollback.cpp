@@ -42,6 +42,7 @@
 #include "hw/pvr/Renderer_if.h"
 #include "hw/sh4/sh4_if.h"
 #include "hw/sh4/sh4_sched.h"
+extern int vblank_schid; // defined in core/hw/pvr/spg.cpp
 #include <xxhash.h>  // bundled at core/deps/xxHash/, on the include path
 
 #include <algorithm>
@@ -348,6 +349,24 @@ bool rewindToFrame(uint64_t frame)
 		deser >> frame32;
 		emu.loadstate(deser);
 		rend_resync_after_rollback();
+
+		// CRITICAL: vblank_schid was saved with end=-1 (inactive) because
+		// saveFrame is called INSIDE vblank_schid's callback (handle_cb
+		// sets sched.end=-1 BEFORE calling the callback). In the SYNCHRONOUS
+		// rewind path, the live forward path's handle_cb re-schedules
+		// vblank_schid AFTER the callback returns, fixing it up. In the
+		// DEFERRED rewind path, that re-schedule never happens because we
+		// short-circuited via Stop()→executePendingRewind. So vblank_schid
+		// stays inactive forever, no vblanks fire, SH4 dispatches blocks
+		// indefinitely with no progress.
+		//
+		// Fix: explicitly re-schedule vblank_schid for the next frame.
+		// Use a conservative value — 1 cycle ensures vblank fires ASAP,
+		// triggering its handler which will re-schedule itself naturally
+		// via getNextSpgInterrupt(). This is safe because vblank's
+		// callback is idempotent w.r.t. firing time (it processes
+		// scanlines based on clc_pvr_scanline which IS in the blob).
+		sh4_sched_request(vblank_schid, 1);
 
 		if (deser.size() != target.serialSize) {
 			printf("[rollback] rewind: deserialize size mismatch (used %zu of %zu)\n",
@@ -771,11 +790,21 @@ void dcAuditTickFromVblank(uint64_t saveSeq)
 			_f2Stage = F2_DONE;
 			return;
 		}
-		printf("[dc-audit] SYNCHRONOUS rewind to anchor saveSeq=%llu\n",
-		       (unsigned long long)_f2Anchor);
-		bool ok = rewindToFrame(_f2Anchor);
-		printf("[dc-audit] synchronous rewindToFrame returned %s\n", ok ? "OK" : "FAILED");
-		fflush(stdout);
+		// Switch between sync rewind (works, 154-byte drift) and deferred
+		// (target byte-perfect, currently hangs after dc_deserialize).
+		// Deferred is the path we need for byte-perfect; sync is the
+		// fallback. MAPLECAST_DC_AUDIT_DEFERRED=1 selects deferred.
+		if (std::getenv("MAPLECAST_DC_AUDIT_DEFERRED")) {
+			printf("[dc-audit] requesting DEFERRED rewind to anchor saveSeq=%llu\n",
+			       (unsigned long long)_f2Anchor);
+			requestRewindToFrame(_f2Anchor);
+		} else {
+			printf("[dc-audit] SYNCHRONOUS rewind to anchor saveSeq=%llu\n",
+			       (unsigned long long)_f2Anchor);
+			bool ok = rewindToFrame(_f2Anchor);
+			printf("[dc-audit] synchronous rewindToFrame returned %s\n", ok ? "OK" : "FAILED");
+			fflush(stdout);
+		}
 		_f2Stage = F2_AFTER_REWIND;
 		return;
 	}
