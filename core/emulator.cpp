@@ -44,6 +44,7 @@
 #include "network/maplecast_audio.h"
 #include "network/maplecast_mirror.h"
 #include "network/maplecast_rollback.h"
+#include "network/maplecast_predictor.h"
 #include "network/replay_reader.h"
 #include "network/replay_writer.h"
 #include "network/maplecast_control_ws.h"
@@ -1246,6 +1247,10 @@ void Emulator::start()
 		if (std::getenv("MAPLECAST_ROLLBACK_RING")) {
 			if (!maplecast_rollback::init())
 				printf("[rollback] init failed — ring disabled for this session\n");
+			// A.5 — comparator + rollback trigger. Same gate: only
+			// initializes when the ring is available, since the
+			// predictor's mismatch path requires a working rollback.
+			maplecast_predictor::init();
 		}
 
 		// Control WebSocket — loopback-bound JSON command channel for

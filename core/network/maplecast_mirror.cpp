@@ -1168,6 +1168,11 @@ void serverPublish(TA_context* ctx)
 		_atomicCurrentFrame.store(_localFrameNum, std::memory_order_release);
 		maplecast_ws::updateTelemetry({_localFrameNum, 0, 0, 0, 0,
 			60, 0, 0}); // approximate 60fps
+		// A.5 — predictor needs to see authoritative input every frame
+		// even without clients. publishFrameTick is cheap (tape-ring push
+		// + predictor compare) so fire it regardless. Used for: rollback
+		// netcode predictor (A.5/A.6), .mcrec recording when active.
+		maplecast_input::publishFrameTick(_localFrameNum);
 		return;
 	}
 

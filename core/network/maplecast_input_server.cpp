@@ -18,6 +18,7 @@
 #include "maplecast_telemetry.h"
 #include "replay_writer.h"
 #include "replay_reader.h"
+#include "maplecast_predictor.h"
 #include "input/gamepad_device.h"
 
 #include <cstdio>
@@ -628,6 +629,11 @@ static void pushTapeEntryAtFrame(int slot, uint64_t frame, uint16_t buttons,
 	// load returns early). Captures EVERY input event the game sees,
 	// which is exactly what we need for deterministic playback.
 	maplecast_replay::append(frame, e.seqAndSlot, buttons, lt_, rt_);
+
+	// A.5: predictor comparator. Compares this authoritative input to
+	// any prediction recorded for (slot, frame). On mismatch, fires
+	// a deferred rewind to `frame`. No-op when predictor isn't active.
+	maplecast_predictor::onAuthoritativeInput(slot, frame, buttons, lt_, rt_);
 }
 
 void pushTapeEntry(int slot, uint16_t buttons, uint8_t lt_, uint8_t rt_, uint32_t seq)
