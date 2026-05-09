@@ -1,25 +1,42 @@
 # scripts/test-record-replay.ps1
 #
 # End-to-end test of the .mcrec V3 record/replay flow.
-# Demonstrates the full cycle: start headless flycast, send a
-# record_start command via the control-WS at ws://127.0.0.1:7211,
-# play for N seconds, stop, then optionally replay.
+#
+# Topology (matches the local rollback predictor architecture in
+# docs/ROLLBACK-PREDICTION.md and docs/WINDOWS-HEADLESS-BUILD.md):
+#   - SERVER:  build-headless-win/flycast.exe (MAPLECAST_HEADLESS=ON)
+#              Full SH4 + AICA + mirror-server :7200. No GUI by design.
+#   - CLIENT:  build/flycast.exe (MAPLECAST_CLIENT_ONLY=ON)
+#              Renderer only, connects to 127.0.0.1:7200, GUI window.
+#
+# Default mode (-Visual omitted): headless-only — useful for byte-level
+# testing where you don't need to *watch* the replay, just verify the
+# bytes round-trip.
+#
+# -Visual mode: launches BOTH processes — headless server replays the
+# .mcrec while mirror client renders the TA stream in a real window.
+# Same architecture as production (server on VPS, client on player's
+# machine), only with both endpoints on localhost.
 #
 # Usage:
-#   .\scripts\test-record-replay.ps1                       # record 10s, replay
-#   .\scripts\test-record-replay.ps1 -RecordSeconds 30     # record 30s
-#   .\scripts\test-record-replay.ps1 -SkipReplay           # only record
-#   .\scripts\test-record-replay.ps1 -RomPath "C:\roms\..." # custom ROM
+#   .\scripts\test-record-replay.ps1                  # record + headless replay
+#   .\scripts\test-record-replay.ps1 -Visual          # record + visual replay
+#   .\scripts\test-record-replay.ps1 -RecordSeconds 30
+#   .\scripts\test-record-replay.ps1 -SkipReplay
+#   .\scripts\test-record-replay.ps1 -RomPath "C:\..."
 #
-# Requires: build-headless-win/flycast.exe built (cmake --build ...).
-# Output:   .mcrec file written to %TEMP%\maplecast-test.mcrec
+# Requires:
+#   - build-headless-win/flycast.exe (cmake -DMAPLECAST_HEADLESS=ON)
+#   - build/flycast.exe              (cmake -DMAPLECAST_CLIENT_ONLY=ON)  [for -Visual]
 
 param(
     [int]$RecordSeconds = 10,
     [int]$ReplaySeconds = 8,
     [switch]$SkipReplay,
+    [switch]$Visual,
     [string]$RomPath = "C:\roms\mvc2_us\Marvel vs. Capcom 2 v1.001 (2000)(Capcom)(US)[!].gdi",
     [string]$Flycast = "build-headless-win\flycast.exe",
+    [string]$ClientFlycast = "build\flycast.exe",
     [string]$McrecPath = (Join-Path $env:TEMP "maplecast-test.mcrec")
 )
 
@@ -134,21 +151,67 @@ if ($SkipReplay) {
 
 # ── Phase 2: replay ──
 Write-Host ""
-Write-Host "[test] Phase 2: replaying $McrecPath for ${ReplaySeconds}s..." -ForegroundColor Cyan
+if ($Visual) {
+    Write-Host "[test] Phase 2 (Visual): headless replay server + mirror client (windowed)" -ForegroundColor Cyan
+} else {
+    Write-Host "[test] Phase 2: replaying $McrecPath for ${ReplaySeconds}s (headless, no window)..." -ForegroundColor Cyan
+}
 
+# Headless replay server — produces TA stream from the .mcrec.
+# In -Visual mode, the mirror client connects to it and renders.
 $env:MAPLECAST_REPLAY_IN = $McrecPath
 $logReplay = Join-Path $env:TEMP "maplecast-test-replay.log"
 $proc2 = Start-Process -FilePath ".\$Flycast" -ArgumentList "`"$RomPath`"" `
     -RedirectStandardOutput $logReplay -RedirectStandardError "$logReplay.err" `
     -PassThru -NoNewWindow
-Start-Sleep -Seconds $ReplaySeconds
+
+if ($Visual) {
+    if (!(Test-Path -LiteralPath $ClientFlycast)) {
+        Write-Host "[test] FAIL: mirror client not found at $ClientFlycast" -ForegroundColor Red
+        Write-Host "Build with cmake -B build -DMAPLECAST_CLIENT_ONLY=ON then cmake --build build --target flycast"
+        Stop-Process -Id $proc2.Id -Force -ErrorAction SilentlyContinue
+        Remove-Item env:MAPLECAST_REPLAY_IN
+        exit 2
+    }
+    # Give headless server time to autoload the embedded savestate
+    Start-Sleep -Seconds 3
+
+    Write-Host "[test] launching mirror client (windowed)..." -ForegroundColor Cyan
+    Write-Host "[test] close the flycast window or wait ${ReplaySeconds}s" -ForegroundColor Yellow
+    $logClient = Join-Path $env:TEMP "maplecast-test-client.log"
+
+    # Mirror client env: connects to local headless server
+    $oldServer = $env:MAPLECAST_MIRROR_SERVER
+    Remove-Item env:MAPLECAST_MIRROR_SERVER -ErrorAction SilentlyContinue
+    $env:MAPLECAST_MIRROR_CLIENT = "1"
+    $env:MAPLECAST_SERVER_HOST   = "127.0.0.1"
+    $env:MAPLECAST_SERVER_PORT   = "7200"
+
+    $client = Start-Process -FilePath ".\$ClientFlycast" `
+        -RedirectStandardOutput $logClient `
+        -RedirectStandardError ($logClient + ".err") `
+        -PassThru
+    $client.WaitForExit($ReplaySeconds * 1000) | Out-Null
+    if (!$client.HasExited) {
+        Write-Host "[test] reached ${ReplaySeconds}s, closing client..." -ForegroundColor Yellow
+        Stop-Process -Id $client.Id -Force -ErrorAction SilentlyContinue
+    }
+
+    Remove-Item env:MAPLECAST_MIRROR_CLIENT
+    Remove-Item env:MAPLECAST_SERVER_HOST
+    Remove-Item env:MAPLECAST_SERVER_PORT
+    if ($oldServer) { $env:MAPLECAST_MIRROR_SERVER = $oldServer }
+    Write-Host "[test] mirror client log: $logClient" -ForegroundColor Cyan
+} else {
+    Start-Sleep -Seconds $ReplaySeconds
+}
+
 Stop-Process -Id $proc2.Id -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 1
 Remove-Item env:MAPLECAST_REPLAY_IN
 
 $replayLog = Get-Content $logReplay -ErrorAction SilentlyContinue
-$opened   = $replayLog | Select-String "replay-reader.*embedded savestate"
-$started  = $replayLog | Select-String "MCREC|playback"
+$opened   = $replayLog | Select-String "embedded savestate|in-memory savestate applied"
 
 Write-Host "[test] replay log highlights:" -ForegroundColor Cyan
 $replayLog | Select-String "replay|embedded savestate|MCREC|autoload-debug" | ForEach-Object { Write-Host "  $($_.Line)" }
@@ -164,3 +227,4 @@ Write-Host "[test] full logs:"
 Write-Host "  record: $logRecord"
 Write-Host "  replay: $logReplay"
 Write-Host "  .mcrec: $McrecPath ($size bytes)"
+if ($Visual) { Write-Host "  client: $logClient" }

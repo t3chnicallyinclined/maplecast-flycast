@@ -44,10 +44,22 @@ const ReplayInfo& info();
 // Load the starting savestate via dc_deserialize. Must be called after
 // openReplay() and BEFORE the emulator is running. Returns false on error.
 //
-// Default: writes the embedded bytes to the configured slot's .state
-// file so dc_loadstate(slot) at autoload time picks them up. Kept for
-// back-compat with V2 .mcrec files and the existing autoload pipeline.
+// V2: writes the embedded bytes to the configured slot's .state file
+// so dc_loadstate(slot) at autoload time picks them up.
+// V3: routes to applyEmbeddedSavestateInMemory() automatically (the
+// in-memory dc_deserialize path) since V3 bytes are raw dc_serialize
+// output, not the SavestateHeader+RZipFile-wrapped on-disk format
+// that dc_loadstate expects.
+//
+// In V3 mode, the caller should SKIP the subsequent dc_loadstate(slot)
+// autoload call — formatVersion() returns 3 to signal this.
 bool loadStartSavestate();
+
+// Format version of the currently-open .mcrec (2 or 3). 0 if no replay
+// is open. Used by emulator.cpp's autoload path to decide whether
+// dc_loadstate(slot) needs to fire (V2) or has already been bypassed
+// by an in-memory restore (V3).
+uint32_t formatVersion();
 
 // In-memory load — bypasses the disk-roundtrip + autoload dance. Builds
 // a Deserializer over the embedded state bytes and calls emu.loadstate()

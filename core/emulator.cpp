@@ -738,13 +738,22 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 			// autoload check below fires dc_loadstate. Force AutoLoadState=on
 			// so the state restore actually runs, regardless of cfg.
 			bool _replayOpened = false;
+			bool _replayRestoredInMemory = false;
 			if (const char* inPath = std::getenv("MAPLECAST_REPLAY_IN")) {
 				printf("[autoload-debug] MAPLECAST_REPLAY_IN=%s — opening before autoload\n", inPath);
 				if (maplecast_replay::openReplay(inPath)
 				    && maplecast_replay::loadStartSavestate()) {
-					config::AutoLoadState.override(true);
 					_replayOpened = true;
-					printf("[autoload-debug] MAPLECAST_REPLAY_IN — savestate written to slot, AutoLoadState forced on\n");
+					if (maplecast_replay::formatVersion() == 3) {
+						// V3 already restored state in-memory via emu.loadstate();
+						// skip the subsequent autoload dc_loadstate(slot) below.
+						_replayRestoredInMemory = true;
+						config::AutoLoadState.override(false);
+						printf("[autoload-debug] MAPLECAST_REPLAY_IN — V3 in-memory restore done, AutoLoadState disabled\n");
+					} else {
+						config::AutoLoadState.override(true);
+						printf("[autoload-debug] MAPLECAST_REPLAY_IN — V2 savestate written to slot, AutoLoadState forced on\n");
+					}
 
 					// Optional seek-to-frame: replaces the slot's .state with
 					// the nearest sidecar checkpoint at or before this frame.

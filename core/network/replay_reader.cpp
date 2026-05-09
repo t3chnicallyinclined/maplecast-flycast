@@ -50,6 +50,7 @@ static ReplayInfo            _info{};
 // is held until loadStartSavestate() consumes it; the input log is held
 // for getInputAtFrame() lookups during playback.
 static std::vector<uint8_t>  _savestateCompressed;
+static uint32_t              _formatVersion = 0;  // 2 = file-copy, 3 = in-memory dc_serialize
 static std::vector<uint8_t>  _inputLog;       // raw 16-byte entries
 
 // Per-slot lookup cursor for getInputAtFrame(). Each cursor advances
@@ -140,6 +141,7 @@ bool openReplay(const std::string& path) {
 		fclose(_file); _file = nullptr;
 		return false;
 	}
+	_formatVersion = version;
 
 	// Populate ReplayInfo at the corrected offsets
 	_info.match_id_hex  = toHex(hdr + 16, 16);
@@ -283,18 +285,34 @@ bool isOpen() { return _open.load(std::memory_order_relaxed); }
 
 // ── loadStartSavestate() ──────────────────────────────────────────────
 
+uint32_t formatVersion() { return _formatVersion; }
+
 bool loadStartSavestate() {
-	std::lock_guard<std::mutex> lk(_mtx);
 	if (!_open.load()) return false;
+
+	// V3: bytes are raw dc_serialize output (in-memory captured at write
+	// time). The on-disk .state format expected by dc_loadstate is wrapped
+	// in a SavestateHeader + RZipFile, which raw dc_serialize bytes don't
+	// satisfy. So V3 must use the in-memory restore path that calls
+	// emu.loadstate(deser) directly — bypassing the slot file.
+	if (_formatVersion == 3) {
+		printf("[replay-reader] V3 detected — using in-memory restore path\n");
+		// Caller (emulator.cpp autoload section) expects loadStartSavestate
+		// to leave bytes ready for dc_loadstate(slot) to pick up. For V3,
+		// we restore in-memory here and the caller's subsequent dc_loadstate
+		// will be a no-op (the slot file isn't present). Force-disable
+		// AutoLoadState in the caller to avoid that no-op call.
+		return applyEmbeddedSavestateInMemory();
+	}
+
+	// V2 path: bytes are the .state file verbatim (already wrapped). Write
+	// to the slot file and let dc_loadstate(slot) parse them.
+	std::lock_guard<std::mutex> lk(_mtx);
 	if (_savestateCompressed.empty()) {
 		printf("[replay-reader] no savestate embedded — replay relies on power-on boot\n");
 		return true;  // not fatal — caller can fall back to a fresh boot
 	}
 
-	// V2: write the embedded state bytes to the configured slot's .state
-	// file. The autoload-time dc_loadstate(slot) call in emulator.cpp will
-	// pick them up via the SAME code path the autoload feature has been
-	// using in production for years. No in-process dc_serialize round-trip.
 	std::string statePath = hostfs::getSavestatePath(config::SavestateSlot, true);
 	FILE* sf = fopen(statePath.c_str(), "wb");
 	if (!sf) {
