@@ -1246,12 +1246,17 @@ void Emulator::start()
 	{
 		maplecast_mirror::initServer();
 
-		// Phase 1 A.4 rollback ring — opt-in. Activates the in-memory
-		// page-delta + dc_serialize ring that the predictor uses for
-		// rollback re-emulation. Off by default (no overhead when unset);
-		// enable with MAPLECAST_ROLLBACK_RING=1 on the predictor process.
-		// Spec: docs/ROLLBACK-RING-DESIGN.md
+		// Phase 1 A.4 rollback ring — SHELVED 2026-05-09. See
+		// docs/ROLLBACK-SHELVED.md for the architectural decision: GGPO-
+		// style rollback doesn't fit MapleCast's central-server model
+		// (single SH4 = no desync by design; 10ms E2E latency already
+		// below human-perception threshold). The code is kept intact
+		// and opt-in; the ring + predictor only init when the env var
+		// is set, which is reserved for: F.2 audit-determinism CI gate,
+		// future re-enablement if we pivot to client-side predictor.
 		if (std::getenv("MAPLECAST_ROLLBACK_RING")) {
+			printf("[rollback] WARNING: MAPLECAST_ROLLBACK_RING=1 set — this is SHELVED experimental work, not production. See docs/ROLLBACK-SHELVED.md.\n");
+			fflush(stdout);
 			if (!maplecast_rollback::init())
 				printf("[rollback] init failed — ring disabled for this session\n");
 			// A.5 — comparator + rollback trigger. Same gate: only

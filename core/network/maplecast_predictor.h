@@ -1,6 +1,11 @@
 /*
 	MapleCast Predictor — A.5 of the Phase 1 rollback prediction plan.
 
+	*** SHELVED 2026-05-09 *** — see docs/ROLLBACK-SHELVED.md.
+
+	Only init'd when MAPLECAST_ROLLBACK_RING=1. Code kept intact for
+	future un-shelving but not on the production path.
+
 	The predictor is the consumer of the rollback ring (A.4):
 	  • recordPrediction(slot, frame, ...) — A.6 will call this when it
 	    fills in opponent input speculatively. For now (A.5), the only

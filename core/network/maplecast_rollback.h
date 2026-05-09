@@ -1,6 +1,17 @@
 /*
 	MapleCast Rollback Ring — A.4 of the Phase 1 rollback prediction plan.
 
+	*** SHELVED 2026-05-09 *** — see docs/ROLLBACK-SHELVED.md.
+
+	The GGPO-style rollback netcode this ring was built for doesn't fit
+	MapleCast's central-server architecture (single authoritative SH4 =
+	zero desync by design; ~10ms E2E latency = below human perception).
+	Code kept intact and gated behind MAPLECAST_ROLLBACK_RING=1 so:
+	  (a) the F.2 byte-diff audit / determinism gate still works,
+	  (b) captureFrameToBlob/restoreFromBlob remain available as helpers,
+	  (c) we can un-shelf if we ever pivot to client-side prediction.
+	Default behavior is OFF: ring not init'd, no overhead.
+
 	Builds on flycast's existing page-delta + dc_serialize hybrid (the same
 	pattern ggpo.cpp:439-561 uses for P2P netplay rollback) but exposes it
 	as a non-GGPO API so MapleCast's predictor can use it without an active
