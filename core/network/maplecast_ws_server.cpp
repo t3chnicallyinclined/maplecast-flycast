@@ -41,6 +41,7 @@ void maplecast_palette_clear();
 #include <arpa/inet.h>
 #include <strings.h>   // strcasecmp
 #include <unistd.h>
+#include <sys/statvfs.h>  // disk usage (Tele-0.6)
 #endif
 #include "maplecast_compat.h"
 
@@ -100,6 +101,18 @@ struct QueueEntry {
 // Server feeds binary TA frames to 2-3 "seed" spectators.
 // Seeds relay to children via WebRTC DataChannels (browser-side JS).
 // Server manages topology, signals parent/child assignments via JSON.
+
+// Tele-0.6 forward-decls -- defined near getFrameWorkWindow at the
+// bottom of the file. Reads /proc on Linux, returns zeros on Windows
+// (the mirror-client build doesn't run a server).
+struct ServerOpStats {
+	int64_t  uptime_s;          // process uptime in seconds
+	int32_t  cpu_pct_x100;      // CPU % * 100 (e.g., 1234 = 12.34%) over the last sample interval
+	int64_t  rss_mb;            // resident set size, MB
+	int32_t  disk_used_pct;     // recordings dir filesystem used%
+	int64_t  recordings_bytes;  // total .mcrec bytes in recordings dir
+};
+static ServerOpStats getServerOpStats(const std::string& recordings_dir);
 
 // Tele-0.2 forward-decls -- ring + getter live near updateTelemetry().
 struct FrameWorkWindow {
@@ -317,6 +330,18 @@ static json getStatus()
 	// frame_budget_pct = max publish over the window relative to the
 	// 16.67ms 60Hz budget. >50% means we're at risk of stalling under
 	// load.
+	// Tele-0.6: server operational stats.
+	{
+		const char* recDir = std::getenv("MAPLECAST_RECORDINGS_DIR");
+		ServerOpStats op = getServerOpStats(recDir ? recDir : "recordings");
+		status["server_ops"] = {
+			{"uptime_s",         op.uptime_s},
+			{"cpu_pct_x100",     op.cpu_pct_x100},
+			{"rss_mb",           op.rss_mb},
+			{"disk_used_pct",    op.disk_used_pct},
+		};
+	}
+
 	auto fw1  = getFrameWorkWindow( 1'000'000);
 	auto fw30 = getFrameWorkWindow(30'000'000);
 	auto fwJson = [](const FrameWorkWindow& w) -> json {
@@ -1673,6 +1698,93 @@ static void recordFrameWork(uint32_t publishUs, uint32_t compressUs)
 	uint32_t idx = _frameWorkWriteIdx.fetch_add(1, std::memory_order_relaxed);
 	const uint32_t pos = idx % FRAMEWORK_RING_SIZE;
 	_frameWork[pos] = { nowUs, publishUs, compressUs };
+}
+
+// Tele-0.6: server operational stats (uptime, CPU%, RSS, disk%).
+// Linux only -- the mirror-client build compiles this file but never
+// calls getServerOpStats (broadcastStatus only runs on the headless
+// server). On Windows we return zeros.
+static std::chrono::steady_clock::time_point _opStartTime = std::chrono::steady_clock::now();
+
+static ServerOpStats getServerOpStats(const std::string& recordings_dir)
+{
+	ServerOpStats out{};
+	out.uptime_s = (int64_t)std::chrono::duration_cast<std::chrono::seconds>(
+		std::chrono::steady_clock::now() - _opStartTime).count();
+
+#ifdef __linux__
+	// CPU% from /proc/self/stat utime+stime jiffies, diffed against
+	// the previous sample. *100 for percent-with-2-decimal-places
+	// resolution (e.g., 1234 = 12.34%).
+	static int64_t lastJiffies = -1;
+	static auto lastSample = std::chrono::steady_clock::now();
+	int64_t curJiffies = 0;
+	if (FILE* f = fopen("/proc/self/stat", "r")) {
+		char buf[2048];
+		size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+		fclose(f);
+		buf[n] = 0;
+		// Skip past comm: it's wrapped in parens and may itself contain
+		// parens or spaces, so find the LAST ')'.
+		const char* p = strrchr(buf, ')');
+		if (p) {
+			p++;
+			int field = 2;  // just passed comm (field 2)
+			while (*p && field < 14) {
+				if (*p == ' ') field++;
+				p++;
+			}
+			char* endp = nullptr;
+			long long u = strtoll(p, &endp, 10);
+			long long s = strtoll(endp, nullptr, 10);
+			curJiffies = u + s;
+		}
+	}
+	auto now = std::chrono::steady_clock::now();
+	if (lastJiffies >= 0) {
+		const long ticksPerSec = sysconf(_SC_CLK_TCK);
+		if (ticksPerSec > 0) {
+			const int64_t deltaJiffies = curJiffies - lastJiffies;
+			const int64_t deltaUs = std::chrono::duration_cast<std::chrono::microseconds>(
+				now - lastSample).count();
+			if (deltaUs > 0) {
+				const double pct = (double)deltaJiffies * 1e6 * 100.0 /
+				                   ((double)ticksPerSec * (double)deltaUs);
+				out.cpu_pct_x100 = (int32_t)(pct * 100.0);
+			}
+		}
+	}
+	lastJiffies = curJiffies;
+	lastSample  = now;
+
+	// RSS in MB from /proc/self/status VmRSS (kB).
+	if (FILE* f = fopen("/proc/self/status", "r")) {
+		char line[256];
+		while (fgets(line, sizeof(line), f)) {
+			if (strncmp(line, "VmRSS:", 6) == 0) {
+				long kB = 0;
+				if (sscanf(line + 6, "%ld", &kB) == 1)
+					out.rss_mb = kB / 1024;
+				break;
+			}
+		}
+		fclose(f);
+	}
+
+	// Disk usage % on the recordings dir filesystem.
+	if (!recordings_dir.empty()) {
+		struct statvfs vfs;
+		if (statvfs(recordings_dir.c_str(), &vfs) == 0) {
+			const uint64_t total = (uint64_t)vfs.f_blocks * vfs.f_frsize;
+			const uint64_t free_  = (uint64_t)vfs.f_bavail * vfs.f_frsize;
+			if (total > 0)
+				out.disk_used_pct = (int32_t)(100 - (free_ * 100 / total));
+		}
+	}
+#else
+	(void)recordings_dir;
+#endif
+	return out;
 }
 
 static FrameWorkWindow getFrameWorkWindow(int64_t windowUs)
