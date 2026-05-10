@@ -1470,8 +1470,13 @@ bool init(int port)
 				if (_active && _clientCount.load() > 0) {
 					checkMatchEnd();
 					checkIdleKick();
-					pingAllForRtt();    // Tele-0.3: send pings; pong handler updates _connRttUs
-					broadcastStatus();   // emits last-known RTT per slot
+					// pingAllForRtt() disabled -- triggered black-screen on
+					// the native client (binary-frame read loop fell over
+					// somehow when WS PING control frames started flowing).
+					// Server-side PING infrastructure still compiles in case
+					// we want to re-enable for browser-only RTT later via a
+					// gate, but for now we leave RTT measurement to clients.
+					broadcastStatus();
 				}
 			}
 		});
