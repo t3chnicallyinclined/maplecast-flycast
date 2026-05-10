@@ -48,6 +48,8 @@ uint64_t g_activePalBanks = 0;
 #include <thread>
 #include <deque>
 #include <chrono>
+#include <random>          // Tele-0.10
+#include <curl/curl.h>     // Tele-0.10
 #include "net_platform.h"
 #include "maplecast_compat.h"
 #ifndef _WIN32
@@ -112,6 +114,10 @@ static std::atomic<int64_t>  _clientDecodeEmaUs{0};
 // Tele-0.5: max decode_us within the current reporting window. Reset
 // to 0 by the stats thread after each push to the server.
 static std::atomic<int64_t>  _clientDecodeMaxUs{0};
+// Tele-0.10: counters used by the HTTP-POST stats reporter to derive
+// fps + sync rate over each 1s window. Reset to 0 by the reporter.
+static std::atomic<uint64_t> _clientFramesDecoded{0};
+static std::atomic<uint64_t> _clientSyncCount{0};
 static std::atomic<uint32_t> _clientLastDirtyPages{0};
 static std::atomic<uint32_t> _clientLastTaSize{0};
 static std::atomic<bool>     _clientLastVramDirty{false};
@@ -664,71 +670,92 @@ static bool wsReadFrame(int fd, std::vector<uint8_t>& out)
 	return fin && opcode == 0x2;  // binary frame
 }
 
-// Tele-0.5: send a masked text frame on the mirror WS. Used exclusively
-// by the stats reporter thread (NOT the recv thread) so a brief blocking
-// send can't head-of-line-block TA-frame decode -- the lesson from the
-// reverted PONG-on-recv-thread bug.
-static bool wsSendMaskedText(int fd, const std::string& payload)
-{
-	const size_t n = payload.size();
-	std::vector<uint8_t> frame;
-	frame.reserve(n + 14);
-	frame.push_back(0x81); // FIN + text opcode
-	if (n < 126) {
-		frame.push_back(0x80 | (uint8_t)n);
-	} else if (n <= 0xFFFF) {
-		frame.push_back(0x80 | 126);
-		frame.push_back((uint8_t)((n >> 8) & 0xFF));
-		frame.push_back((uint8_t)(n & 0xFF));
-	} else {
-		frame.push_back(0x80 | 127);
-		for (int i = 7; i >= 0; --i)
-			frame.push_back((uint8_t)((n >> (i * 8)) & 0xFF));
-	}
-	uint8_t mask[4];
-	for (int i = 0; i < 4; i++) mask[i] = (uint8_t)(rand() & 0xFF);
-	for (int i = 0; i < 4; i++) frame.push_back(mask[i]);
-	for (size_t i = 0; i < n; i++)
-		frame.push_back((uint8_t)payload[i] ^ mask[i % 4]);
-	const ssize_t sent = mc_send(fd, frame.data(), frame.size(), 0);
-	return sent == (ssize_t)frame.size();
-}
-
-// Tele-0.5: dedicated 1Hz reporter thread. Snapshots the render-time
-// atomics and pushes a small JSON message to the server, which surfaces
-// it in the status broadcast as p1.client_render_*. Lives on its own
-// thread so the synchronous mc_send can't stall TA-frame decode (the
-// recv thread) or the renderer (its own thread) -- different lesson
-// than the PONG-on-recv-thread fix, same root cause.
+// Tele-0.10: dedicated stats reporter thread that POSTs to /api/telemetry
+// on the relay (or whatever the user's MAPLECAST_TELEMETRY_URL points
+// at). Different transport from the WS recv loop -- libcurl over a
+// fresh TCP/TLS connection per post -- so it can't head-of-line-block
+// TA-frame decode like the WS-text-on-same-fd attempt did.
+//
+// Schema matches the relay's existing ClientReport (client_telemetry.rs)
+// so browser + native + ops dashboards aggregate from the same source.
+// Native-only fields (render_us_avg/max) are silently dropped by serde
+// today -- they'll be wired in 0.13 when we extend the relay.
 static std::atomic<bool> _statsReporterRun{false};
 static std::thread       _statsReporterThread;
 
-static void statsReporterRun(int fd)
+static size_t _statsReporterCurlSink(void*, size_t size, size_t nmemb, void*) {
+	return size * nmemb;  // discard response body
+}
+
+static void statsReporterRun(std::string telemetryUrl, std::string clientId)
 {
+	auto wallNowUs = []() -> int64_t {
+		return (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count();
+	};
+	uint64_t prevPackets = _clientPacketsReceived.load(std::memory_order_relaxed);
+	uint64_t prevBytes   = _clientBytesReceived.load(std::memory_order_relaxed);
+	uint64_t prevFrames  = _clientFramesDecoded.load(std::memory_order_relaxed);
+	int64_t  prevUs      = wallNowUs();
+
 	while (_statsReporterRun.load(std::memory_order_relaxed)
 	    && _clientWsConnected.load(std::memory_order_relaxed))
 	{
 		std::this_thread::sleep_for(std::chrono::seconds(1));
 		if (!_statsReporterRun.load(std::memory_order_relaxed)) break;
-		if (!_clientWsConnected.load(std::memory_order_relaxed)) break;
 
-		// Snapshot + reset max for the next window.
-		const int64_t avgUs = _clientDecodeEmaUs.load(std::memory_order_relaxed);
-		const int64_t maxUs = _clientDecodeMaxUs.exchange(0, std::memory_order_relaxed);
-		const int64_t arrivalEmaUs = _clientArrivalEmaUs.load(std::memory_order_relaxed);
-		const uint64_t pkts = _clientPacketsReceived.load(std::memory_order_relaxed);
+		const int64_t  nowUs   = wallNowUs();
+		const uint64_t pkts    = _clientPacketsReceived.load(std::memory_order_relaxed);
+		const uint64_t bytes   = _clientBytesReceived.load(std::memory_order_relaxed);
+		const uint64_t frames  = _clientFramesDecoded.load(std::memory_order_relaxed);
+		const uint64_t syncs   = _clientSyncCount.load(std::memory_order_relaxed);
+		const int64_t  arrivalAvg = _clientArrivalEmaUs.load(std::memory_order_relaxed);
+		const int64_t  arrivalMax = _clientArrivalMaxUs.exchange(0, std::memory_order_relaxed);
+		const int64_t  decodeAvg = _clientDecodeEmaUs.load(std::memory_order_relaxed);
+		const int64_t  decodeMax = _clientDecodeMaxUs.exchange(0, std::memory_order_relaxed);
 
-		char buf[256];
-		int len = std::snprintf(buf, sizeof(buf),
-			"{\"type\":\"client_stats\","
-			"\"render_us_avg\":%lld,"
-			"\"render_us_max\":%lld,"
-			"\"arrival_ema_us\":%lld,"
-			"\"packets\":%llu}",
-			(long long)avgUs, (long long)maxUs,
-			(long long)arrivalEmaUs, (unsigned long long)pkts);
-		if (len > 0 && len < (int)sizeof(buf))
-			(void)wsSendMaskedText(fd, std::string(buf, (size_t)len));
+		const int64_t  intervalUs = std::max<int64_t>(1, nowUs - prevUs);
+		const double   intervalS  = (double)intervalUs / 1e6;
+		const double   fps        = (double)(frames - prevFrames) / intervalS;
+		const double   mbps       = (double)(bytes - prevBytes) * 8.0 / 1e6 / intervalS;
+		(void)pkts; (void)prevPackets;  // currently unused; kept for future packet-rate field
+		prevPackets = pkts;
+		prevBytes   = bytes;
+		prevFrames  = frames;
+		prevUs      = nowUs;
+
+		// ClientReport (existing schema in relay/src/client_telemetry.rs).
+		// Extra render_us fields piggyback for future relay extension.
+		char body[640];
+		int len = std::snprintf(body, sizeof(body),
+			"{\"client_id\":\"%s\",\"ua\":\"maplecast-native\","
+			"\"rtt_ms\":0,\"fps\":%.2f,\"mbps\":%.3f,"
+			"\"frame_jitter_avg_us\":%lld,\"frame_jitter_max_us\":%lld,"
+			"\"sync_count\":%llu,\"streaming\":1,"
+			"\"render_us_avg\":%lld,\"render_us_max\":%lld}",
+			clientId.c_str(), fps, mbps,
+			(long long)arrivalAvg, (long long)arrivalMax,
+			(unsigned long long)syncs,
+			(long long)decodeAvg, (long long)decodeMax);
+		if (len <= 0 || len >= (int)sizeof(body)) continue;
+
+		CURL* c = curl_easy_init();
+		if (!c) continue;
+		struct curl_slist* hdrs = nullptr;
+		hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+		curl_easy_setopt(c, CURLOPT_URL, telemetryUrl.c_str());
+		curl_easy_setopt(c, CURLOPT_POST, 1L);
+		curl_easy_setopt(c, CURLOPT_POSTFIELDS, body);
+		curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, (long)len);
+		curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdrs);
+		curl_easy_setopt(c, CURLOPT_TIMEOUT, 3L);
+		curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 2L);
+		curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+		curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, _statsReporterCurlSink);
+		curl_easy_setopt(c, CURLOPT_USERAGENT, "maplecast-native/1.0");
+		curl_easy_perform(c);
+		curl_slist_free_all(hdrs);
+		curl_easy_cleanup(c);
 	}
 }
 
@@ -778,13 +805,36 @@ static void wsClientRun(std::string host, int port)
 	printf("[MIRROR-WS] WebSocket handshake OK â€” waiting for initial sync\n"); fflush(stdout);
 	_clientWsConnected.store(true, std::memory_order_release);
 
-	// Tele-0.5 stats reporter thread DISABLED -- caused black-screen
-	// regression even though the send is on a dedicated thread. The
-	// concurrent mc_send + recv on the same fd appears to wedge the
-	// recv side somehow on Windows. Will re-enable with a different
-	// transport (separate UDP for telemetry, or piggyback on input UDP).
-	// _statsReporterRun.store(true, std::memory_order_relaxed);
-	// _statsReporterThread = std::thread(statsReporterRun, _wsFd);
+	// Tele-0.10: stats reporter via HTTP POST (separate transport from
+	// the mirror WS, so it can't head-of-line-block TA-frame decode
+	// like the WS-text-on-same-fd attempt did).
+	// URL: MAPLECAST_TELEMETRY_URL > derive from server host. nobd.net
+	// has the relay's /api/telemetry endpoint at https://nobd.net/api/
+	// telemetry; localhost dev would be http://127.0.0.1:7202/api/
+	// telemetry (relay HTTP port).
+	{
+		std::string telemetryUrl;
+		if (const char* env = std::getenv("MAPLECAST_TELEMETRY_URL")) telemetryUrl = env;
+		if (telemetryUrl.empty()) {
+			if (host == "127.0.0.1" || host == "localhost")
+				telemetryUrl = "http://127.0.0.1:7202/api/telemetry";
+			else
+				telemetryUrl = "https://" + host + "/api/telemetry";
+		}
+		// Random hex client_id for this session.
+		std::string clientId;
+		{
+			std::random_device rd;
+			char hex[17];
+			std::snprintf(hex, sizeof(hex), "%08x%08x", rd(), rd());
+			clientId = hex;
+		}
+		printf("[telemetry] reporter -> %s (client_id=%s)\n",
+		       telemetryUrl.c_str(), clientId.c_str());
+		fflush(stdout);
+		_statsReporterRun.store(true, std::memory_order_relaxed);
+		_statsReporterThread = std::thread(statsReporterRun, telemetryUrl, clientId);
+	}
 
 	if (!_decodeTaAlloced) {
 		_decodeTaCtx[0].Alloc();
@@ -838,7 +888,8 @@ static void wsClientRun(std::string host, int port)
 		if (!wsReadFrame(_wsFd, frame)) {
 			printf("[MIRROR-WS] Connection lost\n"); fflush(stdout);
 			_clientWsConnected.store(false, std::memory_order_release);
-			// Stats thread disabled -- no join needed.
+			_statsReporterRun.store(false, std::memory_order_relaxed);
+			if (_statsReporterThread.joinable()) _statsReporterThread.join();
 			break;
 		}
 		// Audio packet â€” skip (native client has dedicated audio WS)
@@ -896,6 +947,7 @@ static void wsClientRun(std::string host, int port)
 			}
 			memwatch::unprotect();
 			_decodeHasFullFrame = false;  // force next TA frame as keyframe
+			_clientSyncCount.fetch_add(1, std::memory_order_relaxed);  // Tele-0.10
 			printf("[MIRROR-WS] Mid-stream SYNC applied (%.1f MB)\n",
 				decompSize / (1024.0 * 1024.0));
 			continue;
@@ -2003,14 +2055,16 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 			_clientDecodeEmaUs.store(prev + ((thisDecodeUs - prev) >> 4),
 			                         std::memory_order_relaxed);
 		}
-		// Tele-0.5: max-since-last-report, used by the stats reporter
-		// thread that pushes client_stats to the server every 1s.
+		// Tele-0.5/0.10: max-since-last-report + frame counter, used by
+		// the HTTP-POST stats reporter that pushes to /api/telemetry
+		// every 1s.
 		{
 			int64_t cur = _clientDecodeMaxUs.load(std::memory_order_relaxed);
 			while (thisDecodeUs > cur
 			    && !_clientDecodeMaxUs.compare_exchange_weak(cur, thisDecodeUs,
 			        std::memory_order_relaxed)) {}
 		}
+		_clientFramesDecoded.fetch_add(1, std::memory_order_relaxed);
 		_clientLastDirtyPages.store(df.dirtyCount, std::memory_order_relaxed);
 		_clientLastTaSize.store(df.taSize, std::memory_order_relaxed);
 		_clientLastVramDirty.store(vramDirty, std::memory_order_relaxed);
