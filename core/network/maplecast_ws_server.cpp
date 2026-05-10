@@ -122,8 +122,24 @@ struct FrameWorkWindow {
 	uint32_t publish_max_us;
 	uint32_t compress_avg_us;
 	uint32_t compress_max_us;
+	// Tele-0.7: dirty pages distribution within the window.
+	uint32_t dirty_avg;
+	uint32_t dirty_p50;
+	uint32_t dirty_p99;
+	uint32_t dirty_max;
 };
 static FrameWorkWindow getFrameWorkWindow(int64_t windowUs);
+
+// Tele-0.8: SCENE-CHANGE SYNC counters. Incremented in serverPublish
+// when a full VRAM resnap is broadcast. Surfaced cumulative + rate.
+extern std::atomic<uint64_t> _sceneChangeSyncCount;
+extern std::atomic<uint64_t> _sceneChangeSyncBytes;
+
+// Tele-0.11: connection lifecycle counters. _connectsTotal /
+// _disconnectsTotal are monotonic since boot; the broadcast computes
+// per-minute rates by diffing against a previous snapshot.
+extern std::atomic<uint64_t> _connectsTotal;
+extern std::atomic<uint64_t> _disconnectsTotal;
 
 static const int MAX_SEEDS = 3;
 static const int MAX_CHILDREN = 3;
@@ -353,10 +369,52 @@ static json getStatus()
 			{"publish_max_pct",  (int64_t)((w.publish_max_us * 100) / 16667)},
 			{"compress_avg_us",  (int64_t)w.compress_avg_us},
 			{"compress_max_us",  (int64_t)w.compress_max_us},
+			// Tele-0.7 dirty page distribution within the same window
+			{"dirty_avg",        (int64_t)w.dirty_avg},
+			{"dirty_p50",        (int64_t)w.dirty_p50},
+			{"dirty_p99",        (int64_t)w.dirty_p99},
+			{"dirty_max",        (int64_t)w.dirty_max},
 		};
 	};
 	status["frame_work_1s"]  = fwJson(fw1);
 	status["frame_work_30s"] = fwJson(fw30);
+
+	// Tele-0.8: SCENE-CHANGE SYNC counters (cumulative since boot).
+	status["sync_bursts"] = {
+		{"count_total",        (int64_t)_sceneChangeSyncCount.load(std::memory_order_relaxed)},
+		{"bytes_total",        (int64_t)_sceneChangeSyncBytes.load(std::memory_order_relaxed)},
+	};
+
+	// Tele-0.11: connection lifecycle counters since boot.
+	status["conn_lifecycle"] = {
+		{"connects_total",     (int64_t)_connectsTotal.load(std::memory_order_relaxed)},
+		{"disconnects_total",  (int64_t)_disconnectsTotal.load(std::memory_order_relaxed)},
+		{"current",            _clientCount.load(std::memory_order_relaxed)},
+	};
+
+	// Tele-0.12: derived anomaly flags. Cheap booleans the dashboard
+	// can show as warning lights / log to a separate alerts stream.
+	{
+		json anomalies = json::array();
+		// Frame budget overrun: any publish_us in the last 30s window
+		// exceeded the 16.67ms 60Hz budget. Sustained = bad.
+		if (fw30.publish_max_us > 16667)
+			anomalies.push_back("frame_overrun_30s");
+		// Latch p99 over 2 frames in either slot's last-1s window.
+		if (auto p1ls = maplecast_input::getLatchStatsWindow(0, 1'000'000); p1ls.p99DeltaUs > 33333)
+			anomalies.push_back("p1_latch_spike_1s");
+		if (auto p2ls = maplecast_input::getLatchStatsWindow(1, 1'000'000); p2ls.p99DeltaUs > 33333)
+			anomalies.push_back("p2_latch_spike_1s");
+		// Compression ratio drop -- a TA-stream-shape regression looks
+		// like ratio plummeting because the new bytes don't compress.
+		// Threshold 4x is below typical 6-15x range; sustained <4x for
+		// the 30s window means something's wrong (would have flagged
+		// the Arcade-defaults bug).
+		if (t.compressedSize > 0 && t.deltaSize > 0
+		    && (double)t.deltaSize / (double)t.compressedSize < 4.0)
+			anomalies.push_back("low_compression_ratio");
+		status["anomalies"] = anomalies;
+	}
 	status["dirty"] = t.dirtyPages;
 	status["registering"] = maplecast_input::isRegistering();
 	status["web_registering"] = maplecast_input::isWebRegistering();
@@ -813,6 +871,7 @@ static void onOpen(ConnHdl hdl)
 		_connections.insert(hdl);
 		_clientCount++;
 	}
+	_connectsTotal.fetch_add(1, std::memory_order_relaxed);  // Tele-0.11
 	printf("[maplecast-ws] client connected (%d total)\n", _clientCount.load());
 
 	// Always send SYNC on connect â€” backward compat for clients without relay.js
@@ -876,6 +935,7 @@ static void onClose(ConnHdl hdl)
 		} catch (...) {}
 		_clientCount--;
 	}
+	_disconnectsTotal.fetch_add(1, std::memory_order_relaxed);  // Tele-0.11
 
 	// Remove from relay tree (handles orphan reassignment)
 	if (key) {
@@ -1671,6 +1731,11 @@ void broadcastFreshSync()
 	}
 	syncComp.destroy();
 
+	// Tele-0.8: SCENE-CHANGE SYNC counters.
+	_sceneChangeSyncCount.fetch_add(1, std::memory_order_relaxed);
+	_sceneChangeSyncBytes.fetch_add((uint64_t)compSyncSize * (uint64_t)_clientCount.load(),
+	                                 std::memory_order_relaxed);
+
 	printf("[maplecast-ws] SCENE-CHANGE SYNC: %.1f MB -> %.1f MB (%.1fx) in %lums to %d clients\n",
 		syncSize / (1024.0 * 1024.0), compSyncSize / (1024.0 * 1024.0),
 		(double)syncSize / compSyncSize, compUs / 1000, _clientCount.load());
@@ -1686,18 +1751,27 @@ struct FrameWorkSample {
 	int64_t  ts_us;
 	uint32_t publish_us;
 	uint32_t compress_us;
+	uint32_t dirty_pages;   // Tele-0.7
 };
+
+// Tele-0.8 storage
+std::atomic<uint64_t> _sceneChangeSyncCount{0};
+std::atomic<uint64_t> _sceneChangeSyncBytes{0};
+
+// Tele-0.11 storage
+std::atomic<uint64_t> _connectsTotal{0};
+std::atomic<uint64_t> _disconnectsTotal{0};
 static constexpr int FRAMEWORK_RING_SIZE = 2048;       // ~34s @ 60Hz
 static FrameWorkSample          _frameWork[FRAMEWORK_RING_SIZE];
 static std::atomic<uint32_t>    _frameWorkWriteIdx{0};
 
-static void recordFrameWork(uint32_t publishUs, uint32_t compressUs)
+static void recordFrameWork(uint32_t publishUs, uint32_t compressUs, uint32_t dirtyPages)
 {
 	const int64_t nowUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(
 		std::chrono::steady_clock::now().time_since_epoch()).count();
 	uint32_t idx = _frameWorkWriteIdx.fetch_add(1, std::memory_order_relaxed);
 	const uint32_t pos = idx % FRAMEWORK_RING_SIZE;
-	_frameWork[pos] = { nowUs, publishUs, compressUs };
+	_frameWork[pos] = { nowUs, publishUs, compressUs, dirtyPages };
 }
 
 // Tele-0.6: server operational stats (uptime, CPU%, RSS, disk%).
@@ -1799,14 +1873,18 @@ static FrameWorkWindow getFrameWorkWindow(int64_t windowUs)
 	if (validCount == 0) return out;
 
 	uint32_t pubSnap[FRAMEWORK_RING_SIZE];
-	uint64_t pubSum = 0, compSum = 0;
+	uint32_t dirtySnap[FRAMEWORK_RING_SIZE];
+	uint64_t pubSum = 0, compSum = 0, dirtySum = 0;
 	uint32_t compMax = 0;
 	uint32_t n = 0;
 	for (uint32_t i = 0; i < validCount; ++i) {
 		if (_frameWork[i].ts_us < cutoff) continue;
-		pubSnap[n++] = _frameWork[i].publish_us;
-		pubSum  += _frameWork[i].publish_us;
-		compSum += _frameWork[i].compress_us;
+		pubSnap[n]     = _frameWork[i].publish_us;
+		dirtySnap[n]   = _frameWork[i].dirty_pages;
+		n++;
+		pubSum   += _frameWork[i].publish_us;
+		compSum  += _frameWork[i].compress_us;
+		dirtySum += _frameWork[i].dirty_pages;
 		if (_frameWork[i].compress_us > compMax) compMax = _frameWork[i].compress_us;
 	}
 	if (n == 0) return out;
@@ -1818,6 +1896,12 @@ static FrameWorkWindow getFrameWorkWindow(int64_t windowUs)
 	out.publish_p99_us  = pubSnap[p99Idx];
 	out.compress_avg_us = (uint32_t)(compSum / n);
 	out.compress_max_us = compMax;
+	// Tele-0.7 dirty stats
+	std::sort(dirtySnap, dirtySnap + n);
+	out.dirty_avg = (uint32_t)(dirtySum / n);
+	out.dirty_p50 = dirtySnap[n / 2];
+	out.dirty_p99 = dirtySnap[p99Idx];
+	out.dirty_max = dirtySnap[n - 1];
 	return out;
 }
 
@@ -1825,7 +1909,7 @@ void updateTelemetry(const Telemetry& t)
 {
 	std::lock_guard<std::mutex> lock(_telemetryMutex);
 	_telemetry = t;
-	recordFrameWork((uint32_t)t.publishUs, (uint32_t)t.compressUs);
+	recordFrameWork((uint32_t)t.publishUs, (uint32_t)t.compressUs, (uint32_t)t.dirtyPages);
 }
 
 Telemetry getLastTelemetry()
