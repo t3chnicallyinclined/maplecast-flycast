@@ -1912,6 +1912,72 @@ void updateTelemetry(const Telemetry& t)
 	recordFrameWork((uint32_t)t.publishUs, (uint32_t)t.compressUs, (uint32_t)t.dirtyPages);
 }
 
+// Tele-0.9: match-end event broadcast. Triggered from
+// maplecast_mirror's in_match 1->0 hook. Sends a self-contained JSON
+// summary to all WS clients. Foundation for the match-data-platform
+// vision -- once we have NATS, the same payload publishes there.
+void broadcastMatchEnd(int64_t start_us, int64_t end_us,
+                       const maplecast_gamestate::GameState& start_gs,
+                       const maplecast_gamestate::GameState& end_gs)
+{
+	const int64_t duration_us = (end_us > start_us) ? (end_us - start_us) : 0;
+
+	auto charsJson = [](const maplecast_gamestate::GameState& gs, int base) -> json {
+		json arr = json::array();
+		for (int i = 0; i < 3; i++) {
+			arr.push_back({
+				{"char_id",    gs.chars[base + i].character_id},
+				{"hp",         gs.chars[base + i].health},
+				{"red_hp",     gs.chars[base + i].red_health},
+				{"palette",    gs.chars[base + i].palette_id},
+				{"active",     (bool)gs.chars[base + i].active},
+			});
+		}
+		return arr;
+	};
+
+	// Winner inferred from total HP across all 3 characters per side.
+	auto totalHp = [](const maplecast_gamestate::GameState& gs, int base) -> int {
+		return (int)gs.chars[base].health + (int)gs.chars[base + 1].health
+		     + (int)gs.chars[base + 2].health;
+	};
+	const int p1Final = totalHp(end_gs, 0);
+	const int p2Final = totalHp(end_gs, 3);
+	const char* winner = (p1Final == p2Final) ? "draw"
+	                   : (p1Final >  p2Final) ? "p1" : "p2";
+
+	json msg = {
+		{"type",        "match_end"},
+		{"start_us",    start_us},
+		{"end_us",      end_us},
+		{"duration_us", duration_us},
+		{"stage",       end_gs.stage_id},
+		{"timer",       end_gs.game_timer},
+		{"winner",      winner},
+		{"p1_final_hp", p1Final},
+		{"p2_final_hp", p2Final},
+		{"p1_chars",    charsJson(start_gs, 0)},
+		{"p2_chars",    charsJson(start_gs, 3)},
+		{"p1_combo_max", end_gs.p1_combo},   // current combo at end -- approximation
+		{"p2_combo_max", end_gs.p2_combo},
+		{"frame_counter_end", end_gs.frame_counter},
+	};
+	const std::string payload = msg.dump();
+
+	std::vector<ConnHdl> snapshot;
+	{
+		std::lock_guard<std::mutex> lock(_connMutex);
+		snapshot.assign(_connections.begin(), _connections.end());
+	}
+	for (auto& hdl : snapshot) {
+		try { _ws.send(hdl, payload, websocketpp::frame::opcode::text); } catch (...) {}
+	}
+
+	printf("[match-end] stage=%d duration=%lldus winner=%s p1_hp=%d p2_hp=%d (broadcast to %zu clients)\n",
+	       end_gs.stage_id, (long long)duration_us, winner, p1Final, p2Final, snapshot.size());
+	fflush(stdout);
+}
+
 Telemetry getLastTelemetry()
 {
 	std::lock_guard<std::mutex> lock(_telemetryMutex);

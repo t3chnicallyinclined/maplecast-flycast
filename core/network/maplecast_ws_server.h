@@ -51,6 +51,19 @@ struct Telemetry {
 	uint64_t compressUs;     // zstd compression time (microseconds)
 };
 void updateTelemetry(const Telemetry& t);
+
+// Tele-0.9: broadcast a match-end event JSON to all WS clients on
+// in_match 1->0. start_us / end_us are wall-clock microseconds since
+// epoch; start_gs / end_gs are the game-state snapshots at each
+// transition. Includes a winner inferred from final HP totals.
+// Forward-declared so maplecast_mirror.cpp can call without pulling
+// the gamestate header into the public ws_server interface.
+}
+namespace maplecast_gamestate { struct GameState; }
+namespace maplecast_ws {
+void broadcastMatchEnd(int64_t start_us, int64_t end_us,
+                       const maplecast_gamestate::GameState& start_gs,
+                       const maplecast_gamestate::GameState& end_gs);
 Telemetry getLastTelemetry();
 int clientCount();
 }

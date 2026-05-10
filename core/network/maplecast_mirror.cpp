@@ -1701,11 +1701,29 @@ done_diff:
 	// guest-RAM byte read + a uint8 compare.
 	{
 		static uint32_t _matchPollCounter = 0;
+		static uint8_t  _matchPrevInMatch = 0;
+		static int64_t  _matchStartUs = 0;
+		static maplecast_gamestate::GameState _matchStartGs{};
 		if (++_matchPollCounter >= 3) {
 			_matchPollCounter = 0;
 			maplecast_gamestate::GameState gs;
 			maplecast_gamestate::readGameState(gs);
 			maplecast_replay::onFrameInMatchFlag(gs.in_match);
+
+			// Tele-0.9: emit match_end event on in_match 1->0 transition.
+			// Snapshot start state on 0->1; on 1->0 broadcast a match
+			// summary the dashboard / match-data-platform can consume.
+			if (_matchPrevInMatch == 0 && gs.in_match == 1) {
+				_matchStartUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+					std::chrono::system_clock::now().time_since_epoch()).count();
+				_matchStartGs = gs;
+			} else if (_matchPrevInMatch == 1 && gs.in_match == 0 && _matchStartUs > 0) {
+				const int64_t endUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+					std::chrono::system_clock::now().time_since_epoch()).count();
+				maplecast_ws::broadcastMatchEnd(_matchStartUs, endUs, _matchStartGs, gs);
+				_matchStartUs = 0;
+			}
+			_matchPrevInMatch = gs.in_match;
 		}
 	}
 
