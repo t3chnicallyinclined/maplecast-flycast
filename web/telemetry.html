@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MapleCast Telemetry</title>
+<style>
+  :root {
+    --bg: #0a0c1c;
+    --panel: rgba(15, 18, 35, 0.9);
+    --border: rgba(80, 160, 255, 0.25);
+    --label: #4fc3f7;
+    --good: #65d68b;
+    --warn: #ffb74d;
+    --bad:  #ff6b6b;
+    --dim:  #7c8aa8;
+    --fg:   #e8edf5;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Consolas','SF Mono',monospace;
+    background: var(--bg);
+    color: var(--fg);
+    font-size: 13px;
+    line-height: 1.4;
+    padding: 16px;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 16px; margin-bottom: 16px;
+  }
+  header h1 { font-size: 18px; color: var(--label); }
+  header .conn {
+    padding: 2px 10px; border-radius: 12px; font-size: 11px;
+    background: rgba(101, 214, 139, 0.15); color: var(--good);
+    border: 1px solid var(--good);
+  }
+  header .conn.bad { background: rgba(255, 107, 107, 0.15); color: var(--bad); border-color: var(--bad); }
+  header .src { color: var(--dim); font-size: 12px; }
+  header input {
+    background: #0d1024; border: 1px solid var(--border); color: var(--fg);
+    padding: 4px 8px; border-radius: 4px; font: inherit; width: 320px;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 12px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .panel h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
+    color: var(--label); margin-bottom: 8px;
+    border-bottom: 1px solid var(--border); padding-bottom: 4px;
+  }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+  .row .k { color: var(--dim); }
+  .row .v { color: var(--fg); font-variant-numeric: tabular-nums; }
+  .v.good  { color: var(--good); }
+  .v.warn  { color: var(--warn); }
+  .v.bad   { color: var(--bad); }
+  .row.sub { font-size: 11px; padding-left: 12px; }
+
+  .spark {
+    display: block; width: 100%; height: 28px; margin-top: 6px;
+    background: rgba(0,0,0,0.25); border-radius: 4px;
+  }
+  .spark polyline { fill: none; stroke: var(--label); stroke-width: 1.5; }
+
+  .raw {
+    grid-column: 1 / -1;
+    max-height: 240px; overflow: auto;
+    background: #06070d; border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px; font-size: 11px; color: var(--dim); white-space: pre-wrap;
+  }
+  .footer {
+    margin-top: 12px; color: var(--dim); font-size: 11px; text-align: right;
+  }
+  .pill {
+    display: inline-block; padding: 1px 6px; border-radius: 4px;
+    font-size: 10px; background: rgba(80, 160, 255, 0.15); color: var(--label);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>MAPLECAST TELEMETRY</h1>
+  <span class="conn" id="conn">connecting…</span>
+  <span class="src" id="src"></span>
+  <span style="margin-left:auto"></span>
+  <label class="src">URL: <input id="urlInput" placeholder="wss://nobd.net/ws"></label>
+  <button id="reconnect" style="background:#1d2647;border:1px solid var(--border);color:var(--fg);padding:4px 12px;border-radius:4px;cursor:pointer;font:inherit">reconnect</button>
+  <label class="src"><input type="checkbox" id="rawToggle"> raw json</label>
+</header>
+
+<div class="grid">
+
+  <div class="panel">
+    <h2>Server SH4</h2>
+    <div class="row"><span class="k">FPS</span><span class="v" id="fps">–</span></div>
+    <div class="row"><span class="k">Frame</span><span class="v" id="frame">–</span></div>
+    <div class="row"><span class="k">Frame period</span><span class="v" id="framePeriod">–</span></div>
+    <div class="row"><span class="k">In match</span><span class="v" id="inMatch">–</span></div>
+    <div class="row"><span class="k">Stage / timer</span><span class="v" id="stage">–</span></div>
+    <svg class="spark" id="sparkFps" viewBox="0 0 200 28" preserveAspectRatio="none"><polyline /></svg>
+  </div>
+
+  <div class="panel">
+    <h2>Frame work — last 1s <span class="pill">Tele-0.2</span></h2>
+    <div class="row"><span class="k">Samples</span><span class="v" id="fw1n">–</span></div>
+    <div class="row"><span class="k">Publish avg / p99 / max</span><span class="v" id="fw1pub">–</span></div>
+    <div class="row"><span class="k">Publish % budget (max)</span><span class="v" id="fw1pct">–</span></div>
+    <div class="row"><span class="k">Compress avg / max</span><span class="v" id="fw1comp">–</span></div>
+    <svg class="spark" id="sparkPub" viewBox="0 0 200 28" preserveAspectRatio="none"><polyline /></svg>
+  </div>
+
+  <div class="panel">
+    <h2>Frame work — last 30s</h2>
+    <div class="row"><span class="k">Samples</span><span class="v" id="fw30n">–</span></div>
+    <div class="row"><span class="k">Publish avg / p99 / max</span><span class="v" id="fw30pub">–</span></div>
+    <div class="row"><span class="k">Publish % budget (max)</span><span class="v" id="fw30pct">–</span></div>
+    <div class="row"><span class="k">Compress avg / max</span><span class="v" id="fw30comp">–</span></div>
+  </div>
+
+  <div class="panel">
+    <h2>Bandwidth</h2>
+    <div class="row"><span class="k">Stream</span><span class="v" id="streamKbps">–</span></div>
+    <div class="row"><span class="k">Raw (pre-compress)</span><span class="v" id="rawKbps">–</span></div>
+    <div class="row"><span class="k">Compression ratio</span><span class="v" id="compRatio">–</span></div>
+    <div class="row"><span class="k">Dirty pages</span><span class="v" id="dirty">–</span></div>
+    <svg class="spark" id="sparkBw" viewBox="0 0 200 28" preserveAspectRatio="none"><polyline /></svg>
+  </div>
+
+  <div class="panel">
+    <h2>Player 1 input <span class="pill">Tele-0.1</span></h2>
+    <div class="row"><span class="k">Connected</span><span class="v" id="p1conn">–</span></div>
+    <div class="row"><span class="k">RTT (server↔client)</span><span class="v" id="p1rtt">–</span></div>
+    <div class="row"><span class="k">PPS / CPS</span><span class="v" id="p1ppscps">–</span></div>
+    <div class="row sub"><span class="k">Latch 1s   avg / p99 / max</span><span class="v" id="p1l1">–</span></div>
+    <div class="row sub"><span class="k">Latch 30s  avg / p99 / max</span><span class="v" id="p1l30">–</span></div>
+    <div class="row sub"><span class="k">Cumulative fresh / total</span><span class="v" id="p1cum">–</span></div>
+    <svg class="spark" id="sparkP1" viewBox="0 0 200 28" preserveAspectRatio="none"><polyline /></svg>
+  </div>
+
+  <div class="panel">
+    <h2>Player 2 input</h2>
+    <div class="row"><span class="k">Connected</span><span class="v" id="p2conn">–</span></div>
+    <div class="row"><span class="k">RTT</span><span class="v" id="p2rtt">–</span></div>
+    <div class="row"><span class="k">PPS / CPS</span><span class="v" id="p2ppscps">–</span></div>
+    <div class="row sub"><span class="k">Latch 1s</span><span class="v" id="p2l1">–</span></div>
+    <div class="row sub"><span class="k">Latch 30s</span><span class="v" id="p2l30">–</span></div>
+  </div>
+
+  <div class="panel">
+    <h2>Lobby / network</h2>
+    <div class="row"><span class="k">Spectators</span><span class="v" id="spectators">–</span></div>
+    <div class="row"><span class="k">Sticks</span><span class="v" id="sticks">–</span></div>
+    <div class="row"><span class="k">Queue</span><span class="v" id="queue">–</span></div>
+    <div class="row"><span class="k">Relay seeds / nodes</span><span class="v" id="relay">–</span></div>
+  </div>
+
+  <pre class="raw" id="raw" style="display:none"></pre>
+</div>
+
+<div class="footer">
+  Last update: <span id="lastUpdate">–</span> · samples: <span id="sampleCount">0</span>
+</div>
+
+<script>
+// Default URL: try the page's own host first; allow ?url=... override.
+const params = new URLSearchParams(location.search);
+function defaultUrl() {
+  if (params.has('url')) return params.get('url');
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  // Prefer the canonical /ws path that nginx proxies to the relay; fall
+  // back to direct flycast :7200 for localhost dev.
+  if (location.hostname === 'localhost' || location.hostname === '127.0.0.1' || !location.hostname)
+    return 'ws://' + (location.hostname || '127.0.0.1') + ':7200';
+  return proto + '//' + location.host + '/ws';
+}
+
+const $ = id => document.getElementById(id);
+$('urlInput').value = defaultUrl();
+
+let ws = null;
+let history = {
+  fps: [], pub: [], stream: [], p1latch: []
+};
+const HIST_LEN = 60;
+
+function fmtUs(v) {
+  if (v == null || v < 0) return '–';
+  if (v >= 1000) return (v / 1000).toFixed(1) + ' ms';
+  return v + ' µs';
+}
+function fmtKbps(v) {
+  if (v == null) return '–';
+  if (v >= 1000) return (v / 1000).toFixed(2) + ' Mbps';
+  return v + ' kbps';
+}
+function pushHist(arr, v) {
+  arr.push(v);
+  if (arr.length > HIST_LEN) arr.shift();
+}
+function drawSpark(svgId, arr, lo, hi) {
+  const svg = $(svgId);
+  if (!svg || arr.length < 2) return;
+  const poly = svg.querySelector('polyline');
+  const w = 200, h = 28;
+  const min = lo != null ? lo : Math.min(...arr);
+  const max = hi != null ? hi : Math.max(...arr);
+  const range = (max - min) || 1;
+  const pts = arr.map((v, i) => {
+    const x = (i / (HIST_LEN - 1)) * w;
+    const y = h - ((v - min) / range) * h;
+    return x.toFixed(1) + ',' + y.toFixed(1);
+  }).join(' ');
+  poly.setAttribute('points', pts);
+}
+function colorClass(v, warnAt, badAt) {
+  if (v == null) return '';
+  if (v >= badAt)  return 'bad';
+  if (v >= warnAt) return 'warn';
+  return 'good';
+}
+function setColor(id, v, warnAt, badAt) {
+  const el = $(id);
+  el.classList.remove('good','warn','bad');
+  const c = colorClass(v, warnAt, badAt);
+  if (c) el.classList.add(c);
+}
+
+function applyStatus(s) {
+  // ---- Server SH4 ----
+  $('fps').textContent          = s.fps;
+  $('frame').textContent        = s.frame;
+  const fpUs = s.frame_phase ? s.frame_phase.frame_period_us : null;
+  $('framePeriod').textContent  = fmtUs(fpUs);
+  $('inMatch').textContent      = s.game ? (s.game.in_match ? 'yes' : 'no') : '–';
+  $('stage').textContent        = s.game ? `${s.game.stage} / ${s.game.timer}` : '–';
+
+  pushHist(history.fps, s.fps);
+  drawSpark('sparkFps', history.fps, 0, 60);
+
+  // ---- Frame work 1s ----
+  const fw1 = s.frame_work_1s || {};
+  $('fw1n').textContent    = fw1.n != null ? fw1.n : '–';
+  $('fw1pub').textContent  = `${fmtUs(fw1.publish_avg_us)} / ${fmtUs(fw1.publish_p99_us)} / ${fmtUs(fw1.publish_max_us)}`;
+  $('fw1pct').textContent  = fw1.publish_max_pct != null ? fw1.publish_max_pct + ' %' : '–';
+  setColor('fw1pct', fw1.publish_max_pct, 50, 80);
+  $('fw1comp').textContent = `${fmtUs(fw1.compress_avg_us)} / ${fmtUs(fw1.compress_max_us)}`;
+  pushHist(history.pub, fw1.publish_max_us || 0);
+  drawSpark('sparkPub', history.pub, 0, 16667);
+
+  // ---- Frame work 30s ----
+  const fw30 = s.frame_work_30s || {};
+  $('fw30n').textContent    = fw30.n != null ? fw30.n : '–';
+  $('fw30pub').textContent  = `${fmtUs(fw30.publish_avg_us)} / ${fmtUs(fw30.publish_p99_us)} / ${fmtUs(fw30.publish_max_us)}`;
+  $('fw30pct').textContent  = fw30.publish_max_pct != null ? fw30.publish_max_pct + ' %' : '–';
+  setColor('fw30pct', fw30.publish_max_pct, 50, 80);
+  $('fw30comp').textContent = `${fmtUs(fw30.compress_avg_us)} / ${fmtUs(fw30.compress_max_us)}`;
+
+  // ---- Bandwidth ----
+  $('streamKbps').textContent = fmtKbps(s.stream_kbps);
+  $('rawKbps').textContent    = fmtKbps(s.raw_kbps);
+  $('compRatio').textContent  = s.compression_ratio ? s.compression_ratio.toFixed(2) + 'x' : '–';
+  $('dirty').textContent      = s.dirty + ' pages';
+  pushHist(history.stream, s.stream_kbps || 0);
+  drawSpark('sparkBw', history.stream, 0);
+
+  // ---- Players ----
+  const fmtPlayer = (suffix, p, latch) => {
+    if (!p) {
+      $('p' + suffix + 'conn').textContent = 'no';
+      $('p' + suffix + 'rtt').textContent = '–';
+      $('p' + suffix + 'ppscps').textContent = '–';
+    } else {
+      $('p' + suffix + 'conn').textContent = `yes  ${p.name || ''} (${p.device || '?'})`;
+      $('p' + suffix + 'rtt').textContent = p.rtt_us != null && p.rtt_us >= 0 ? fmtUs(p.rtt_us) : '— (waiting for pong)';
+      $('p' + suffix + 'ppscps').textContent = `${p.pps || 0} / ${p.cps || 0}`;
+      setColor('p' + suffix + 'rtt', p.rtt_us, 30000, 80000);
+    }
+    if (latch && latch.window_1s) {
+      const w1 = latch.window_1s, w30 = latch.window_30s;
+      $('p' + suffix + 'l1').textContent  = w1.n  > 0 ? `${fmtUs(w1.avg_delta_us)} / ${fmtUs(w1.p99_delta_us)} / ${fmtUs(w1.max_delta_us)}  (n=${w1.n})` : 'idle (no fresh inputs)';
+      $('p' + suffix + 'l30').textContent = w30.n > 0 ? `${fmtUs(w30.avg_delta_us)} / ${fmtUs(w30.p99_delta_us)} / ${fmtUs(w30.max_delta_us)}  (n=${w30.n})` : 'idle';
+      setColor('p' + suffix + 'l1', w1.p99_delta_us, 16667, 25000);
+    }
+  };
+  fmtPlayer('1', s.p1, s.latch_stats && s.latch_stats.p1);
+  fmtPlayer('2', s.p2, s.latch_stats && s.latch_stats.p2);
+
+  if (s.latch_stats && s.latch_stats.p1) {
+    const ls = s.latch_stats.p1;
+    $('p1cum').textContent = `${ls.latches_with_data} / ${ls.total_latches}`;
+    if (ls.window_1s) {
+      pushHist(history.p1latch, ls.window_1s.p99_delta_us || 0);
+      drawSpark('sparkP1', history.p1latch, 0, 25000);
+    }
+  }
+
+  // ---- Lobby ----
+  $('spectators').textContent = s.spectators;
+  $('sticks').textContent     = s.sticks;
+  $('queue').textContent      = (s.queue || []).length === 0 ? 'empty' : (s.queue || []).join(', ');
+  $('relay').textContent      = `${s.relay_seeds || 0} / ${s.relay_nodes || 0}`;
+
+  $('lastUpdate').textContent = new Date().toLocaleTimeString();
+  $('sampleCount').textContent = (parseInt($('sampleCount').textContent, 10) || 0) + 1;
+
+  if ($('rawToggle').checked) {
+    $('raw').style.display = 'block';
+    $('raw').textContent = JSON.stringify(s, null, 2);
+  } else {
+    $('raw').style.display = 'none';
+  }
+}
+
+function connect() {
+  if (ws) { try { ws.close(); } catch {} ws = null; }
+  const url = $('urlInput').value.trim() || defaultUrl();
+  $('src').textContent = url;
+  $('conn').textContent = 'connecting…';
+  $('conn').classList.remove('bad');
+  try {
+    ws = new WebSocket(url);
+  } catch (e) {
+    $('conn').textContent = 'error: ' + e.message;
+    $('conn').classList.add('bad');
+    return;
+  }
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    $('conn').textContent = 'connected';
+    $('conn').classList.remove('bad');
+    // Ask the server to skip binary TA frames -- we only want JSON status.
+    try { ws.send(JSON.stringify({ type: 'control_only' })); } catch {}
+  };
+  ws.onmessage = (ev) => {
+    if (typeof ev.data !== 'string') return; // ignore binary
+    try {
+      const obj = JSON.parse(ev.data);
+      if (obj.type === 'status') applyStatus(obj);
+    } catch {}
+  };
+  ws.onclose = () => {
+    $('conn').textContent = 'disconnected (auto-retry in 3s)';
+    $('conn').classList.add('bad');
+    setTimeout(connect, 3000);
+  };
+  ws.onerror = () => {
+    $('conn').textContent = 'error';
+    $('conn').classList.add('bad');
+  };
+}
+$('reconnect').addEventListener('click', connect);
+connect();
+</script>
+</body>
+</html>
