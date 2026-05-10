@@ -230,7 +230,7 @@ static json getStatus()
 		{
 			std::lock_guard<std::mutex> lock(_connMutex);
 			for (const auto& kv : _connSlot) {
-				if (kv.second == slot) {
+				if (kv.second == i) {
 					auto it = _connRttUs.find(kv.first);
 					if (it != _connRttUs.end()) rttUs = it->second;
 					break;
