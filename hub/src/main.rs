@@ -22,15 +22,19 @@
 mod api;
 mod geo;
 mod matchmaker;
+mod queue;
 mod replays;
 mod types;
 
 use axum::{Router, extract::FromRef, routing::{get, post, delete}};
 use clap::Parser;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::sync::Mutex as AsyncMutex;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
+use queue::{QueueStore, SharedQueue};
 use replays::SharedReplayCache;
 use types::{Operator, SharedStore};
 
@@ -39,6 +43,7 @@ use types::{Operator, SharedStore};
 struct AppState {
     store: SharedStore,
     replays: SharedReplayCache,
+    queue: SharedQueue,
 }
 
 impl FromRef<AppState> for SharedStore {
@@ -46,6 +51,9 @@ impl FromRef<AppState> for SharedStore {
 }
 impl FromRef<AppState> for SharedReplayCache {
     fn from_ref(app: &AppState) -> SharedReplayCache { app.replays.clone() }
+}
+impl FromRef<AppState> for SharedQueue {
+    fn from_ref(app: &AppState) -> SharedQueue { app.queue.clone() }
 }
 
 #[derive(Parser, Debug)]
@@ -113,7 +121,20 @@ async fn main() {
         replays::cache_refresher(refresher_cache).await;
     });
 
-    let app_state = AppState { store: store.clone(), replays: replay_cache };
+    // Matchmaking queue — Phase 1 FIFO pair-and-route. See
+    // docs/MATCHMAKING.md.
+    let queue_store: SharedQueue = Arc::new(AsyncMutex::new(QueueStore::new()));
+    let queue_pair  = queue_store.clone();
+    let store_pair  = store.clone();
+    tokio::spawn(async move {
+        queue::pair_and_notify(queue_pair, store_pair).await;
+    });
+
+    let app_state = AppState {
+        store: store.clone(),
+        replays: replay_cache,
+        queue: queue_store,
+    };
 
     // Build router
     //
@@ -146,6 +167,10 @@ async fn main() {
         .route("/hub/api/replays/{id}/info", get(replays::replay_info))
         // Active matches for spectator discovery (Phase 6)
         .route("/hub/api/matches/active", get(api::active_matches))
+        // Matchmaking queue (MM Phase 1) — see docs/MATCHMAKING.md
+        .route("/hub/api/queue/join",   post(queue::join))
+        .route("/hub/api/queue/status", get(queue::status))
+        .route("/hub/api/queue/leave",  post(queue::leave))
         // CORS — the dashboard and browser clients live on different origins
         .layer(CorsLayer::permissive())
         // Allow large .mcrec uploads (default axum limit is 2MB, replays
