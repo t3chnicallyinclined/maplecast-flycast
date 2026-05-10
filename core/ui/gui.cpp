@@ -1776,7 +1776,6 @@ void gui_display_osd() {
 // just owns the ImGui frame lifecycle and key handling, which need
 // access to gui.cpp's file-static imguiDriver/gui_newFrame/gui_endFrame.
 #include "gui_mirror_debug.h"
-#include "gui_competitive_hud.h"
 #include "gui_maplecast_settings.h"
 #include "gui_game_overlay.h"
 #include "gui_recording_indicator.h"
@@ -1788,7 +1787,8 @@ void gui_displayMirrorDebug()
 	ImGui::NewFrame();
 
 	// All mirror-client overlays render here, inside NewFrame/Render.
-	gui_competitive_hud::draw();
+	// gui_competitive_hud::draw removed -- telemetry moved to
+	// web/telemetry.html, no in-game HUD path.
 	gui_maplecast_settings::draw();
 	gui_game_overlay::draw();
 	gui_recording_indicator::draw();

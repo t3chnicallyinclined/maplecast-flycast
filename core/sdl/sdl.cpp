@@ -22,7 +22,6 @@
 #endif
 #include "imgui.h"
 #include "ui/gui.h"
-#include "ui/gui_competitive_hud.h"
 #include "ui/gui_maplecast_settings.h"
 #include "ui/gui_game_overlay.h"
 #include "ui/gui_recording_indicator.h"
@@ -364,14 +363,13 @@ void input_sdl_handle()
 						// existing F-key conventions (F11 = fullscreen, etc.)
 						if ((event.key.keysym.mod & (KMOD_ALT | KMOD_CTRL | KMOD_SHIFT | KMOD_GUI)) == 0)
 						{
-							if (event.key.keysym.sym == SDLK_F1) { gui_competitive_hud::toggleNetwork(); break; }
-							if (event.key.keysym.sym == SDLK_F2) { gui_competitive_hud::toggleLatency(); break; }
-							if (event.key.keysym.sym == SDLK_F3) { gui_competitive_hud::toggleInput();   break; }
+							// F1/F2/F3/F12 (competitive HUD telemetry) removed --
+							// telemetry now lives at web/telemetry.html. F4-F9
+							// remain as gameplay tools.
 							if (event.key.keysym.sym == SDLK_F4) { note_highway::toggle(); break; }
 							if (event.key.keysym.sym == SDLK_F5) { gui_game_overlay::toggleGameData(); break; }
 							if (event.key.keysym.sym == SDLK_F6) { gui_game_overlay::toggleInput(); break; }
 							if (event.key.keysym.sym == SDLK_F9) { gui_recording_indicator::toggle();   break; }
-							if (event.key.keysym.sym == SDLK_F12){ gui_competitive_hud::toggleAll();     break; }
 							// Tab opens the settings panel (same as the gear icon).
 							// In mirror-client mode this surfaces the debug overlay
 							// (gui_display_mirror_settings); in normal mode the
