@@ -165,6 +165,48 @@
     <div class="row"><span class="k">Relay seeds / nodes</span><span class="v" id="relay">–</span></div>
   </div>
 
+  <div class="panel">
+    <h2>Server SH4 ops <span class="pill">Tele-0.6</span></h2>
+    <div class="row"><span class="k">Uptime</span><span class="v" id="srvUptime">–</span></div>
+    <div class="row"><span class="k">CPU</span><span class="v" id="srvCpu">–</span></div>
+    <div class="row"><span class="k">RSS</span><span class="v" id="srvRss">–</span></div>
+    <div class="row"><span class="k">Recordings disk</span><span class="v" id="srvDisk">–</span></div>
+  </div>
+
+  <div class="panel">
+    <h2>SYNC bursts <span class="pill">Tele-0.8</span></h2>
+    <div class="row"><span class="k">Total</span><span class="v" id="syncCount">–</span></div>
+    <div class="row"><span class="k">Bytes broadcast</span><span class="v" id="syncBytes">–</span></div>
+  </div>
+
+  <div class="panel">
+    <h2>Connection lifecycle <span class="pill">Tele-0.11</span></h2>
+    <div class="row"><span class="k">Connects total</span><span class="v" id="connTotal">–</span></div>
+    <div class="row"><span class="k">Disconnects total</span><span class="v" id="disconnTotal">–</span></div>
+    <div class="row"><span class="k">Currently connected</span><span class="v" id="connCurrent">–</span></div>
+  </div>
+
+  <div class="panel">
+    <h2>Anomalies <span class="pill">Tele-0.12</span></h2>
+    <div class="row"><span class="v" id="anomalies" style="font-size:14px">–</span></div>
+  </div>
+
+  <div class="panel">
+    <h2>Relay (Prometheus) <span class="pill">Tele-0.13</span></h2>
+    <div class="row"><span class="k">Upstream connected</span><span class="v" id="relayUp">–</span></div>
+    <div class="row"><span class="k">Clients connected</span><span class="v" id="relayClients">–</span></div>
+    <div class="row"><span class="k">Frames received</span><span class="v" id="relayFramesIn">–</span></div>
+    <div class="row"><span class="k">Frames broadcast</span><span class="v" id="relayFramesOut">–</span></div>
+    <div class="row"><span class="k">Bytes broadcast</span><span class="v" id="relayBytesOut">–</span></div>
+    <div class="row"><span class="k">SYNC count</span><span class="v" id="relaySync">–</span></div>
+    <div class="row"><span class="k">Last frame size</span><span class="v" id="relayFrameSize">–</span></div>
+  </div>
+
+  <div class="panel" style="grid-column: 1 / -1;">
+    <h2>Recent matches <span class="pill">Tele-0.9</span></h2>
+    <div id="matchList" style="font-size:11px; line-height:1.6">no matches yet</div>
+  </div>
+
   <pre class="raw" id="raw" style="display:none"></pre>
 </div>
 
@@ -327,6 +369,44 @@ function applyStatus(s) {
   $('queue').textContent      = (s.queue || []).length === 0 ? 'empty' : (s.queue || []).join(', ');
   $('relay').textContent      = `${s.relay_seeds || 0} / ${s.relay_nodes || 0}`;
 
+  // ---- Tele-0.6 server_ops ----
+  const ops = s.server_ops || {};
+  if (ops.uptime_s != null) {
+    const u = ops.uptime_s;
+    const h = Math.floor(u / 3600), m = Math.floor((u % 3600) / 60), sec = u % 60;
+    $('srvUptime').textContent = `${h}h ${m}m ${sec}s`;
+  }
+  if (ops.cpu_pct_x100 != null) {
+    $('srvCpu').textContent = (ops.cpu_pct_x100 / 100).toFixed(2) + ' %';
+    setColor('srvCpu', ops.cpu_pct_x100, 7000, 9000); // 70%, 90%
+  }
+  if (ops.rss_mb != null) $('srvRss').textContent = ops.rss_mb + ' MB';
+  if (ops.disk_used_pct != null) {
+    $('srvDisk').textContent = ops.disk_used_pct + ' %';
+    setColor('srvDisk', ops.disk_used_pct, 80, 95);
+  }
+
+  // ---- Tele-0.8 sync bursts ----
+  const sb = s.sync_bursts || {};
+  if (sb.count_total != null) $('syncCount').textContent = sb.count_total.toLocaleString();
+  if (sb.bytes_total != null) $('syncBytes').textContent = (sb.bytes_total / (1024*1024)).toFixed(1) + ' MB';
+
+  // ---- Tele-0.11 conn lifecycle ----
+  const cl = s.conn_lifecycle || {};
+  if (cl.connects_total != null) $('connTotal').textContent = cl.connects_total;
+  if (cl.disconnects_total != null) $('disconnTotal').textContent = cl.disconnects_total;
+  if (cl.current != null) $('connCurrent').textContent = cl.current;
+
+  // ---- Tele-0.12 anomalies ----
+  const anomEl = $('anomalies');
+  if (Array.isArray(s.anomalies) && s.anomalies.length > 0) {
+    anomEl.innerHTML = s.anomalies.map(a =>
+      `<span style="background:rgba(255,107,107,0.2);color:var(--bad);padding:2px 8px;border-radius:4px;margin-right:6px">${a}</span>`
+    ).join('');
+  } else {
+    anomEl.innerHTML = '<span style="color:var(--good)">none</span>';
+  }
+
   $('lastUpdate').textContent = new Date().toLocaleTimeString();
   $('sampleCount').textContent = (parseInt($('sampleCount').textContent, 10) || 0) + 1;
 
@@ -362,7 +442,8 @@ function connect() {
     if (typeof ev.data !== 'string') return; // ignore binary
     try {
       const obj = JSON.parse(ev.data);
-      if (obj.type === 'status') applyStatus(obj);
+      if (obj.type === 'status')    applyStatus(obj);
+      if (obj.type === 'match_end') applyMatchEnd(obj);
     } catch {}
   };
   ws.onclose = () => {
@@ -377,6 +458,68 @@ function connect() {
 }
 $('reconnect').addEventListener('click', connect);
 connect();
+
+// Tele-0.13: relay-side metrics. Fetch the Prometheus snapshot every
+// 5s (rate-limited because the Prometheus endpoint is a paint-the-
+// world-snapshot and we don't need it as fresh as the WS status).
+async function pollRelayMetrics() {
+  try {
+    const proto = location.protocol === 'https:' ? 'https:' : 'http:';
+    const base = (location.hostname && location.hostname !== '')
+      ? `${proto}//${location.host}` : 'http://127.0.0.1:7202';
+    const r = await fetch(base + '/metrics', { cache: 'no-store' });
+    if (!r.ok) return;
+    const text = await r.text();
+    const m = {};
+    for (const line of text.split('\n')) {
+      if (!line || line.startsWith('#')) continue;
+      const sp = line.indexOf(' ');
+      if (sp < 0) continue;
+      m[line.slice(0, sp)] = parseFloat(line.slice(sp + 1));
+    }
+    const fmt = (v) => v == null || isNaN(v) ? '–' : Number(v).toLocaleString();
+    const fmtMB = (v) => v == null || isNaN(v) ? '–' : (v / (1024*1024)).toFixed(1) + ' MB';
+    const fmtGB = (v) => v == null || isNaN(v) ? '–' : (v / (1024*1024*1024)).toFixed(2) + ' GB';
+    $('relayUp').textContent       = m.nobd_relay_upstream_connected === 1 ? 'yes' : 'NO';
+    setColor('relayUp', m.nobd_relay_upstream_connected === 1 ? 0 : 999, 1, 1);
+    $('relayClients').textContent  = fmt(m.nobd_relay_clients);
+    $('relayFramesIn').textContent = fmt(m.nobd_relay_frames_received_total);
+    $('relayFramesOut').textContent= fmt(m.nobd_relay_frames_broadcast_total);
+    $('relayBytesOut').textContent = fmtGB(m.nobd_relay_bytes_broadcast_total);
+    $('relaySync').textContent     = fmt(m.nobd_relay_sync_count_total);
+    $('relayFrameSize').textContent= fmt(m.nobd_relay_last_frame_bytes) + ' B';
+  } catch {}
+}
+setInterval(pollRelayMetrics, 5000);
+pollRelayMetrics();
+
+// Tele-0.9: keep last 8 match-end events, render in #matchList.
+const _matches = [];
+function applyMatchEnd(m) {
+  _matches.unshift(m);
+  while (_matches.length > 8) _matches.pop();
+  const charNames = [
+    "Ryu","Zangief","Guile","Morrigan","Anakaris","Strider","Cyclops","Wolverine","Psylocke","Iceman","Rogue","Cap.America",
+    "Spider-Man","Hulk","Venom","Dr.Doom","Tron","Jill","Hayato","Ruby","SonSon","Amingo","Marrow","Cable",
+    "Abyss1","Abyss2","Abyss3","Chun-Li","MegaMan","Roll","Akuma","BBHood","Felicia","Charlie","Sakura","Dan",
+    "Cammy","Dhalsim","M.Bison","Ken","Gambit","Juggernaut","Storm","Sabretooth","Magneto","Shuma","WarMachine",
+    "S.Samurai","OmegaRed","Spiral","Colossus","IronMan","Sentinel","Blackheart","Thanos","Jin","CapCommando",
+    "BoneWolv","Servbot",
+  ];
+  const fmtChars = (cs) => (cs || []).map(c => charNames[c.char_id] || `?${c.char_id}`).join(' / ');
+  $('matchList').innerHTML = _matches.map(x => `
+    <div style="padding:6px;border-bottom:1px solid var(--border)">
+      <span style="color:var(--label)">${new Date(x.end_us / 1000).toLocaleTimeString()}</span>
+      &nbsp;stage ${x.stage}
+      &nbsp;${(x.duration_us/1e6).toFixed(1)}s
+      &nbsp;winner: <b style="color:${x.winner==='p1'?'var(--good)':x.winner==='p2'?'var(--warn)':'var(--dim)'}">${x.winner.toUpperCase()}</b>
+      &nbsp;<span style="color:var(--dim)">P1[</span>${fmtChars(x.p1_chars)}<span style="color:var(--dim)">]</span>
+      hp ${x.p1_final_hp}
+      &nbsp;<span style="color:var(--dim)">P2[</span>${fmtChars(x.p2_chars)}<span style="color:var(--dim)">]</span>
+      hp ${x.p2_final_hp}
+    </div>
+  `).join('');
+}
 </script>
 </body>
 </html>
