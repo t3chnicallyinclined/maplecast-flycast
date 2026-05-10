@@ -2261,6 +2261,39 @@ if (new URLSearchParams(window.location.search).get('embed') === '1') {
   // If body is already parsed by the time this script runs, apply now too.
   if (document.body) document.body.classList.add('embed-mode');
 }
+
+// MM-1: hand-off from match.html. URL params: name, slot, token, partner.
+// Phase 1 just stashes them in localStorage + shows a small banner so
+// the user knows they came from the matchmaker. The slot pre-claim with
+// token validation is a later phase -- for now both matched players
+// land on king.html and use the existing sign-in -> I GOT NEXT flow.
+(function readMatchmakerParams() {
+  const p = new URLSearchParams(window.location.search);
+  const name    = p.get('name');
+  const slot    = p.get('slot');
+  const token   = p.get('token');
+  const partner = p.get('partner');
+  if (!name && !token) return;
+  try {
+    if (name)    localStorage.setItem('maplecast.playerName', name);
+    if (token)   localStorage.setItem('maplecast.mmToken',    token);
+    if (slot)    localStorage.setItem('maplecast.mmSlot',     slot);
+    if (partner) localStorage.setItem('maplecast.mmPartner',  partner);
+    document.addEventListener('DOMContentLoaded', () => {
+      const banner = document.createElement('div');
+      banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;'
+        + 'background:linear-gradient(90deg,rgba(246,255,0,0.15),rgba(255,58,111,0.15));'
+        + 'border-bottom:1px solid rgba(246,255,0,0.4);color:#f6ff00;'
+        + 'padding:8px 16px;text-align:center;font:12px/1.4 Consolas,monospace;'
+        + 'letter-spacing:1px;';
+      const partnerHtml = partner ? ` vs <b>${partner}</b>` : '';
+      banner.innerHTML = `Matchmaker hand-off: <b>${name||'(no name)'}</b>${partnerHtml}. Sign in and click I GOT NEXT to claim your slot.`;
+      document.body.appendChild(banner);
+      setTimeout(() => banner.style.opacity = '0', 8000);
+      setTimeout(() => banner.remove(), 9500);
+    });
+  } catch {}
+})();
 </script>
 </head>
 <body>
@@ -2551,6 +2584,9 @@ if (new URLSearchParams(window.location.search).get('embed') === '1') {
       <button class="btn-skins" id="skinBtn" onclick="openSkinPicker()">
         &#x1F3A8; CHANGE SKINS
       </button>
+      <button class="btn-skins" id="launchNativeBtn" onclick="launchNativeClient()" title="Open in the desktop client (must be installed and registered)">
+        &#x1F5A5; PLAY ON DESKTOP
+      </button>
       <button class="btn-leave-queue" id="leaveGameBtn" onclick="leaveGame()" style="display:none;color:var(--hot-red);border-color:var(--hot-red);">
         &#x1F6AA; DISCONNECT
       </button>
@@ -2764,6 +2800,60 @@ window.switchTab = switchTab;
 window.gotNext = gotNext;
 window.leaveQueue = leaveQueue;
 window.leaveGame = leaveGame;
+
+// PLAY ON DESKTOP -- hand the user off to the native flycast client via
+// the maplecast:// protocol handler. The handler must be registered
+// once on the user's machine via scripts/register-protocol-handler.ps1
+// (see docs). If unregistered, the browser shows its standard "no app
+// is set up to handle this URL" prompt; we surface a hint after a
+// short timeout so people know what to do.
+function launchNativeClient() {
+  // Native client connects directly to the public mirror-WS port (7200
+  // for direct flycast, 7201 if proxied via the relay). For the lobby
+  // page on nobd.net the relay is canonical; localhost dev uses 7200.
+  // Tunable via window.MAPLECAST_NATIVE_PORT if a different deployment
+  // wants to override.
+  const host = location.hostname || '127.0.0.1';
+  const port = (window.MAPLECAST_NATIVE_PORT
+                || (host === 'localhost' || host === '127.0.0.1' ? 7200 : 7201));
+  const name = (window.playerName || '').trim();
+
+  const params = new URLSearchParams({ host, port: String(port) });
+  if (name) params.set('name', name);
+  const url = 'maplecast://join?' + params.toString();
+
+  console.log('[launch-native] dialing', url);
+
+  // Mark the time we kicked the URL so we can detect "the OS did
+  // nothing" -- meaning the protocol handler isn't registered.
+  const startedAt = Date.now();
+  let handled = false;
+  const onBlur = () => { handled = true; };
+  window.addEventListener('blur', onBlur, { once: true });
+
+  // Trigger the handoff. Browsers want a real <a>.click() rather than
+  // location.href for protocol URLs in some cases (Chrome at least).
+  const a = document.createElement('a');
+  a.href = url;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => a.remove(), 0);
+
+  setTimeout(() => {
+    window.removeEventListener('blur', onBlur);
+    if (!handled && Date.now() - startedAt < 4000) {
+      // Window never lost focus -> OS likely didn't find a handler.
+      alert(
+        "Couldn't launch the desktop client.\n\n" +
+        "If you have flycast installed, run this once in PowerShell to register the handler:\n\n" +
+        "  & \"<repo>\\scripts\\register-protocol-handler.ps1\"\n\n" +
+        "(Or just keep playing in the browser.)"
+      );
+    }
+  }, 1500);
+}
+window.launchNativeClient = launchNativeClient;
 window.sendChat = sendChat;
 window.sendReaction = sendReaction;
 window.toggleSettings = toggleSettings;

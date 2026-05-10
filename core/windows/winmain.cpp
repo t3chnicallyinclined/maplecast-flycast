@@ -316,6 +316,99 @@ int main(int argc, char* argv[])
 {
 	nowide::args _(argc, argv);
 
+	// MapleCast protocol-handler entry point.
+	//
+	// Browser sends `maplecast://join?host=nobd.net&port=7200&name=...`
+	// to the OS; OS-registered handler invokes flycast.exe with the URL
+	// as argv[1]. We parse the query string into env vars + flip on the
+	// mirror-client flags so the rest of flycast boots straight into
+	// the specified server.
+	//
+	// Recognised params:
+	//   host  -> MAPLECAST_SERVER_HOST
+	//   port  -> MAPLECAST_SERVER_PORT  (default 7200 if absent)
+	//   name  -> MAPLECAST_PLAYER_NAME  (informational, picked up by
+	//                                    the lobby join handshake)
+	//
+	// Unknown params are ignored. Parser is intentionally minimal -- no
+	// libc heap, no third-party URL crate -- so it works before any
+	// flycast subsystem is up.
+	auto urlDecodeInto = [](const char* p, size_t n, std::string& out) {
+		out.clear(); out.reserve(n);
+		for (size_t i = 0; i < n; i++) {
+			if (p[i] == '+') { out.push_back(' '); continue; }
+			if (p[i] == '%' && i + 2 < n) {
+				auto hv = [](char c) -> int {
+					if (c >= '0' && c <= '9') return c - '0';
+					if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+					if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+					return -1;
+				};
+				int hi = hv(p[i+1]), lo = hv(p[i+2]);
+				if (hi >= 0 && lo >= 0) {
+					out.push_back((char)((hi << 4) | lo));
+					i += 2; continue;
+				}
+			}
+			out.push_back(p[i]);
+		}
+	};
+	for (int ai = 1; ai < argc; ai++) {
+		const char* a = argv[ai];
+		const char* prefix = "maplecast://";
+		if (std::strncmp(a, prefix, 12) != 0) continue;
+
+		const char* rest = a + 12;
+		const char* qmark = std::strchr(rest, '?');
+		const char* qs = qmark ? qmark + 1 : "";
+		// (action `rest..qmark` -- e.g. "join" -- is unused for now;
+		//  every URL is treated as "connect to this server".)
+
+		// Iterate &-separated key=value pairs.
+		const char* p = qs;
+		while (*p) {
+			const char* amp = std::strchr(p, '&');
+			const char* eq  = std::strchr(p, '=');
+			const char* end = amp ? amp : (p + std::strlen(p));
+			if (eq && eq < end) {
+				std::string key, val;
+				urlDecodeInto(p, (size_t)(eq - p), key);
+				urlDecodeInto(eq + 1, (size_t)(end - (eq + 1)), val);
+
+				if (key == "host" && !val.empty())
+					_putenv_s("MAPLECAST_SERVER_HOST", val.c_str());
+				else if (key == "port" && !val.empty())
+					_putenv_s("MAPLECAST_SERVER_PORT", val.c_str());
+				else if (key == "name" && !val.empty())
+					_putenv_s("MAPLECAST_PLAYER_NAME", val.c_str());
+				// MM-1: matchmaker hand-off. slot is which player slot
+				// the hub assigned us; token is the queue UUID we can
+				// use to verify with the hub on the destination server
+				// in later phases. Phase 1 just propagates them as env
+				// vars for the input server to read during registration.
+				else if (key == "slot" && !val.empty())
+					_putenv_s("MAPLECAST_PRECLAIM_SLOT", val.c_str());
+				else if (key == "token" && !val.empty())
+					_putenv_s("MAPLECAST_QUEUE_TOKEN", val.c_str());
+			}
+			p = amp ? amp + 1 : end;
+		}
+
+		// Default port if the URL didn't carry one.
+		if (!std::getenv("MAPLECAST_SERVER_PORT"))
+			_putenv_s("MAPLECAST_SERVER_PORT", "7200");
+
+		// Implicit mirror-client launch.
+		_putenv_s("MAPLECAST",                "1");
+		_putenv_s("MAPLECAST_MIRROR_CLIENT",  "1");
+
+		// Drop the URL from argv so flycast's own arg parser doesn't
+		// trip on it (it expects file paths or `-config foo=bar`).
+		for (int j = ai; j + 1 < argc; j++) argv[j] = argv[j + 1];
+		argv[--argc] = nullptr;
+		break;
+	}
+
 	// MapleCast: attach console so printf output is visible.
 	// Always attach for the wizard mode — it's a console-only experience.
 	// Replay record/playback also need it (heavy [replay-reader] / [replay]
