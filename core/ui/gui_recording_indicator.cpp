@@ -42,6 +42,7 @@
   static const socket_t INVALID_SOCK = INVALID_SOCKET;
 #else
   #include <sys/socket.h>
+  #include <sys/stat.h>
   #include <sys/types.h>
   #include <netinet/in.h>
   #include <netinet/tcp.h>
