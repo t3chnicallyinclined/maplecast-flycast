@@ -140,6 +140,8 @@
     <div class="row"><span class="k">Connected</span><span class="v" id="p1conn">–</span></div>
     <div class="row"><span class="k">RTT (server↔client)</span><span class="v" id="p1rtt">–</span></div>
     <div class="row"><span class="k">PPS / CPS</span><span class="v" id="p1ppscps">–</span></div>
+    <div class="row"><span class="k">Client render avg / max</span><span class="v" id="p1render">–</span></div>
+    <div class="row"><span class="k">Client arrival ema</span><span class="v" id="p1arrival">–</span></div>
     <div class="row sub"><span class="k">Latch 1s   avg / p99 / max</span><span class="v" id="p1l1">–</span></div>
     <div class="row sub"><span class="k">Latch 30s  avg / p99 / max</span><span class="v" id="p1l30">–</span></div>
     <div class="row sub"><span class="k">Cumulative fresh / total</span><span class="v" id="p1cum">–</span></div>
@@ -283,6 +285,22 @@ function applyStatus(s) {
       $('p' + suffix + 'rtt').textContent = p.rtt_us != null && p.rtt_us >= 0 ? fmtUs(p.rtt_us) : '— (waiting for pong)';
       $('p' + suffix + 'ppscps').textContent = `${p.pps || 0} / ${p.cps || 0}`;
       setColor('p' + suffix + 'rtt', p.rtt_us, 30000, 80000);
+      // Tele-0.5: client-reported render time
+      const renderEl = $('p' + suffix + 'render');
+      const arrivalEl = $('p' + suffix + 'arrival');
+      if (renderEl) {
+        if (p.client_render_us_avg != null && p.client_render_us_avg >= 0) {
+          renderEl.textContent = `${fmtUs(p.client_render_us_avg)} / ${fmtUs(p.client_render_us_max)}`;
+          setColor('p' + suffix + 'render', p.client_render_us_max, 8000, 14000);
+        } else {
+          renderEl.textContent = '— (browser client or no report yet)';
+        }
+      }
+      if (arrivalEl) {
+        arrivalEl.textContent = p.client_arrival_ema_us != null && p.client_arrival_ema_us >= 0
+          ? fmtUs(p.client_arrival_ema_us)
+          : '—';
+      }
     }
     if (latch && latch.window_1s) {
       const w1 = latch.window_1s, w30 = latch.window_30s;

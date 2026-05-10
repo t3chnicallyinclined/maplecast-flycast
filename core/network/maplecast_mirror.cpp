@@ -109,6 +109,9 @@ static std::atomic<uint64_t> _clientPacketsReceived{0};
 static std::atomic<uint64_t> _clientBytesReceived{0};
 static std::atomic<int64_t>  _clientLastDecodeUs{0};
 static std::atomic<int64_t>  _clientDecodeEmaUs{0};
+// Tele-0.5: max decode_us within the current reporting window. Reset
+// to 0 by the stats thread after each push to the server.
+static std::atomic<int64_t>  _clientDecodeMaxUs{0};
 static std::atomic<uint32_t> _clientLastDirtyPages{0};
 static std::atomic<uint32_t> _clientLastTaSize{0};
 static std::atomic<bool>     _clientLastVramDirty{false};
@@ -661,6 +664,74 @@ static bool wsReadFrame(int fd, std::vector<uint8_t>& out)
 	return fin && opcode == 0x2;  // binary frame
 }
 
+// Tele-0.5: send a masked text frame on the mirror WS. Used exclusively
+// by the stats reporter thread (NOT the recv thread) so a brief blocking
+// send can't head-of-line-block TA-frame decode -- the lesson from the
+// reverted PONG-on-recv-thread bug.
+static bool wsSendMaskedText(int fd, const std::string& payload)
+{
+	const size_t n = payload.size();
+	std::vector<uint8_t> frame;
+	frame.reserve(n + 14);
+	frame.push_back(0x81); // FIN + text opcode
+	if (n < 126) {
+		frame.push_back(0x80 | (uint8_t)n);
+	} else if (n <= 0xFFFF) {
+		frame.push_back(0x80 | 126);
+		frame.push_back((uint8_t)((n >> 8) & 0xFF));
+		frame.push_back((uint8_t)(n & 0xFF));
+	} else {
+		frame.push_back(0x80 | 127);
+		for (int i = 7; i >= 0; --i)
+			frame.push_back((uint8_t)((n >> (i * 8)) & 0xFF));
+	}
+	uint8_t mask[4];
+	for (int i = 0; i < 4; i++) mask[i] = (uint8_t)(rand() & 0xFF);
+	for (int i = 0; i < 4; i++) frame.push_back(mask[i]);
+	for (size_t i = 0; i < n; i++)
+		frame.push_back((uint8_t)payload[i] ^ mask[i % 4]);
+	const ssize_t sent = mc_send(fd, frame.data(), frame.size(), 0);
+	return sent == (ssize_t)frame.size();
+}
+
+// Tele-0.5: dedicated 1Hz reporter thread. Snapshots the render-time
+// atomics and pushes a small JSON message to the server, which surfaces
+// it in the status broadcast as p1.client_render_*. Lives on its own
+// thread so the synchronous mc_send can't stall TA-frame decode (the
+// recv thread) or the renderer (its own thread) -- different lesson
+// than the PONG-on-recv-thread fix, same root cause.
+static std::atomic<bool> _statsReporterRun{false};
+static std::thread       _statsReporterThread;
+
+static void statsReporterRun(int fd)
+{
+	while (_statsReporterRun.load(std::memory_order_relaxed)
+	    && _clientWsConnected.load(std::memory_order_relaxed))
+	{
+		std::this_thread::sleep_for(std::chrono::seconds(1));
+		if (!_statsReporterRun.load(std::memory_order_relaxed)) break;
+		if (!_clientWsConnected.load(std::memory_order_relaxed)) break;
+
+		// Snapshot + reset max for the next window.
+		const int64_t avgUs = _clientDecodeEmaUs.load(std::memory_order_relaxed);
+		const int64_t maxUs = _clientDecodeMaxUs.exchange(0, std::memory_order_relaxed);
+		const int64_t arrivalEmaUs = _clientArrivalEmaUs.load(std::memory_order_relaxed);
+		const uint64_t pkts = _clientPacketsReceived.load(std::memory_order_relaxed);
+
+		char buf[256];
+		int len = std::snprintf(buf, sizeof(buf),
+			"{\"type\":\"client_stats\","
+			"\"render_us_avg\":%lld,"
+			"\"render_us_max\":%lld,"
+			"\"arrival_ema_us\":%lld,"
+			"\"packets\":%llu}",
+			(long long)avgUs, (long long)maxUs,
+			(long long)arrivalEmaUs, (unsigned long long)pkts);
+		if (len > 0 && len < (int)sizeof(buf))
+			(void)wsSendMaskedText(fd, std::string(buf, (size_t)len));
+	}
+}
+
 static void wsClientRun(std::string host, int port)
 {
 	printf("[MIRROR-WS] Connecting to %s:%d...\n", host.c_str(), port); fflush(stdout);
@@ -706,6 +777,12 @@ static void wsClientRun(std::string host, int port)
 	}
 	printf("[MIRROR-WS] WebSocket handshake OK â€” waiting for initial sync\n"); fflush(stdout);
 	_clientWsConnected.store(true, std::memory_order_release);
+
+	// Tele-0.5: spawn the stats reporter thread now that the WS is
+	// established. Snapshots client-side perf atomics and pushes a JSON
+	// message to the server every 1s so the dashboard can show E2E.
+	_statsReporterRun.store(true, std::memory_order_relaxed);
+	_statsReporterThread = std::thread(statsReporterRun, _wsFd);
 
 	if (!_decodeTaAlloced) {
 		_decodeTaCtx[0].Alloc();
@@ -759,6 +836,8 @@ static void wsClientRun(std::string host, int port)
 		if (!wsReadFrame(_wsFd, frame)) {
 			printf("[MIRROR-WS] Connection lost\n"); fflush(stdout);
 			_clientWsConnected.store(false, std::memory_order_release);
+			_statsReporterRun.store(false, std::memory_order_relaxed);
+			if (_statsReporterThread.joinable()) _statsReporterThread.join();
 			break;
 		}
 		// Audio packet â€” skip (native client has dedicated audio WS)
@@ -1904,6 +1983,14 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 			const int64_t prev = _clientDecodeEmaUs.load(std::memory_order_relaxed);
 			_clientDecodeEmaUs.store(prev + ((thisDecodeUs - prev) >> 4),
 			                         std::memory_order_relaxed);
+		}
+		// Tele-0.5: max-since-last-report, used by the stats reporter
+		// thread that pushes client_stats to the server every 1s.
+		{
+			int64_t cur = _clientDecodeMaxUs.load(std::memory_order_relaxed);
+			while (thisDecodeUs > cur
+			    && !_clientDecodeMaxUs.compare_exchange_weak(cur, thisDecodeUs,
+			        std::memory_order_relaxed)) {}
 		}
 		_clientLastDirtyPages.store(df.dirtyCount, std::memory_order_relaxed);
 		_clientLastTaSize.store(df.taSize, std::memory_order_relaxed);

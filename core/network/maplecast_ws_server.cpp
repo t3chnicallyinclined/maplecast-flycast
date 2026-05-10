@@ -67,6 +67,16 @@ static std::map<void*, int> _connSlot;
 // pong handler.
 static std::map<void*, int32_t> _connRttUs;
 
+// Tele-0.5: per-connection client-side render stats, populated by the
+// client's stats reporter thread (1Hz). Cleared on close.
+struct ClientStats {
+	int32_t render_us_avg;
+	int32_t render_us_max;
+	int32_t arrival_ema_us;
+	uint64_t packets;
+};
+static std::map<void*, ClientStats> _connClientStats;
+
 // Control-only connections â€” browsers that connect directly to flycast for
 // JSON control + 4-byte gamepad input but get the heavy TA frame downstream
 // from the relay. These are flagged via a `{type:"control_only"}` JSON message
@@ -226,13 +236,24 @@ static json getStatus()
 		}
 		// Tele-0.3: surface RTT for whichever connection is bound to this
 		// slot. -1 means "no pong received yet" (just-joined window).
+		// Tele-0.5: same lookup also gets the client's self-reported
+		// render stats. -1 means "no client_stats received yet".
 		int32_t rttUs = -1;
+		int32_t cliRenderAvg = -1;
+		int32_t cliRenderMax = -1;
+		int32_t cliArrivalEma = -1;
 		{
 			std::lock_guard<std::mutex> lock(_connMutex);
 			for (const auto& kv : _connSlot) {
 				if (kv.second == i) {
-					auto it = _connRttUs.find(kv.first);
-					if (it != _connRttUs.end()) rttUs = it->second;
+					auto rIt = _connRttUs.find(kv.first);
+					if (rIt != _connRttUs.end()) rttUs = rIt->second;
+					auto cIt = _connClientStats.find(kv.first);
+					if (cIt != _connClientStats.end()) {
+						cliRenderAvg  = cIt->second.render_us_avg;
+						cliRenderMax  = cIt->second.render_us_max;
+						cliArrivalEma = cIt->second.arrival_ema_us;
+					}
 					break;
 				}
 			}
@@ -248,6 +269,9 @@ static json getStatus()
 			{"src_ip", srcIpStr},
 			{"src_port", srcPortVal},
 			{"rtt_us", rttUs},
+			{"client_render_us_avg",  cliRenderAvg},
+			{"client_render_us_max",  cliRenderMax},
+			{"client_arrival_ema_us", cliArrivalEma},
 		};
 	};
 	int players = (maplecast_input::getPlayer(0).connected ? 1 : 0)
@@ -820,7 +844,8 @@ static void onClose(ConnHdl hdl)
 			key = (void*)_ws.get_con_from_hdl(hdl).get();
 			_connSlot.erase(key);
 			_controlOnlyConns.erase(key);
-			_connRttUs.erase(key);  // Tele-0.3
+			_connRttUs.erase(key);       // Tele-0.3
+			_connClientStats.erase(key); // Tele-0.5
 			_queue.erase(std::remove_if(_queue.begin(), _queue.end(),
 				[key](const QueueEntry& e) { return e.key == key; }), _queue.end());
 		} catch (...) {}
@@ -989,6 +1014,24 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 				try { _ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text); } catch(...) {}
 				return;
 			}
+			// Tele-0.5: client_stats reporter -- native client pushes
+			// its own render-time stats every 1s so we can surface E2E
+			// in the status broadcast.
+			if (ctrl.contains("type") && ctrl["type"] == "client_stats")
+			{
+				try {
+					void* key = (void*)_ws.get_con_from_hdl(hdl).get();
+					ClientStats cs{};
+					cs.render_us_avg  = ctrl.value("render_us_avg",  0);
+					cs.render_us_max  = ctrl.value("render_us_max",  0);
+					cs.arrival_ema_us = ctrl.value("arrival_ema_us", 0);
+					cs.packets        = (uint64_t)ctrl.value("packets", 0);
+					std::lock_guard<std::mutex> lock(_connMutex);
+					_connClientStats[key] = cs;
+				} catch (...) {}
+				return;
+			}
+
 			if (ctrl.contains("cmd") && ctrl["cmd"] == "record_stop")
 			{
 				std::string rid = ctrl.value("reply_id", "");
