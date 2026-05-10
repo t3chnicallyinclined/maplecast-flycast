@@ -86,6 +86,17 @@ struct QueueEntry {
 // Seeds relay to children via WebRTC DataChannels (browser-side JS).
 // Server manages topology, signals parent/child assignments via JSON.
 
+// Tele-0.2 forward-decls -- ring + getter live near updateTelemetry().
+struct FrameWorkWindow {
+	uint32_t n;
+	uint32_t publish_avg_us;
+	uint32_t publish_p99_us;
+	uint32_t publish_max_us;
+	uint32_t compress_avg_us;
+	uint32_t compress_max_us;
+};
+static FrameWorkWindow getFrameWorkWindow(int64_t windowUs);
+
 static const int MAX_SEEDS = 3;
 static const int MAX_CHILDREN = 3;
 static int _nextPeerId = 1;
@@ -256,6 +267,28 @@ static json getStatus()
 	status["compress_us"] = (int64_t)t.compressUs;
 	status["compression_ratio"] = t.compressedSize > 0 ? (double)t.deltaSize / t.compressedSize : 1.0;
 	status["fps"] = (int64_t)t.fps;
+
+	// Tele-0.2: server-side frame-work windows. publish_us / compress_us
+	// above are the most-recent sample only -- these expose the worst
+	// case + average over the last 1s and 30s so spikes are visible.
+	// frame_budget_pct = max publish over the window relative to the
+	// 16.67ms 60Hz budget. >50% means we're at risk of stalling under
+	// load.
+	auto fw1  = getFrameWorkWindow( 1'000'000);
+	auto fw30 = getFrameWorkWindow(30'000'000);
+	auto fwJson = [](const FrameWorkWindow& w) -> json {
+		return {
+			{"n",                (int64_t)w.n},
+			{"publish_avg_us",   (int64_t)w.publish_avg_us},
+			{"publish_p99_us",   (int64_t)w.publish_p99_us},
+			{"publish_max_us",   (int64_t)w.publish_max_us},
+			{"publish_max_pct",  (int64_t)((w.publish_max_us * 100) / 16667)},
+			{"compress_avg_us",  (int64_t)w.compress_avg_us},
+			{"compress_max_us",  (int64_t)w.compress_max_us},
+		};
+	};
+	status["frame_work_1s"]  = fwJson(fw1);
+	status["frame_work_30s"] = fwJson(fw30);
 	status["dirty"] = t.dirtyPages;
 	status["registering"] = maplecast_input::isRegistering();
 	status["web_registering"] = maplecast_input::isWebRegistering();
@@ -278,8 +311,14 @@ static json getStatus()
 	//                              touched the slot since the previous latch
 	//                              (= the slot saw a fresh packet this frame)
 	//   last_seq, last_frame      â€” for live drift / diagnostics
+	// Tele-0.1: surface time-windowed buckets (last 1s + last 30s)
+	// alongside the existing 256-sample window. The cumulative stats
+	// carry the long-term aggregate; the windowed ones expose recent
+	// spikes that get smoothed out during low-input periods.
 	auto latchInfoJson = [](int slot) -> json {
-		auto s = maplecast_input::getLatchStats(slot);
+		auto s   = maplecast_input::getLatchStats(slot);
+		auto w1  = maplecast_input::getLatchStatsWindow(slot,  1'000'000); // 1s
+		auto w30 = maplecast_input::getLatchStatsWindow(slot, 30'000'000); // 30s
 		return {
 			{"total_latches",     (int64_t)s.totalLatches},
 			{"latches_with_data", (int64_t)s.latchesWithData},
@@ -289,6 +328,18 @@ static json getStatus()
 			{"max_delta_us",      s.maxDeltaUs},
 			{"last_packet_seq",   (int64_t)s.lastPacketSeq},
 			{"last_frame",        (int64_t)s.lastFrameNum},
+			{"window_1s", {
+				{"n",            (int64_t)w1.nSamples},
+				{"avg_delta_us", w1.avgDeltaUs},
+				{"p99_delta_us", w1.p99DeltaUs},
+				{"max_delta_us", w1.maxDeltaUs},
+			}},
+			{"window_30s", {
+				{"n",            (int64_t)w30.nSamples},
+				{"avg_delta_us", w30.avgDeltaUs},
+				{"p99_delta_us", w30.p99DeltaUs},
+				{"max_delta_us", w30.maxDeltaUs},
+			}},
 		};
 	};
 	json latchStats;
@@ -1491,10 +1542,69 @@ void broadcastFreshSync()
 		(double)syncSize / compSyncSize, compUs / 1000, _clientCount.load());
 }
 
+// Tele-0.2: time-windowed ring of (ts_us, publish_us, compress_us)
+// triples so the status broadcast can surface "worst-case publish over
+// the last 1s / 30s" -- the most direct signal of "is the server
+// keeping up with frame budget?". 1024 entries @ 60Hz = ~17s of
+// history; combined with the 30s window the ring naturally caps the
+// upper-bound query.
+struct FrameWorkSample {
+	int64_t  ts_us;
+	uint32_t publish_us;
+	uint32_t compress_us;
+};
+static constexpr int FRAMEWORK_RING_SIZE = 2048;       // ~34s @ 60Hz
+static FrameWorkSample          _frameWork[FRAMEWORK_RING_SIZE];
+static std::atomic<uint32_t>    _frameWorkWriteIdx{0};
+
+static void recordFrameWork(uint32_t publishUs, uint32_t compressUs)
+{
+	const int64_t nowUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
+	uint32_t idx = _frameWorkWriteIdx.fetch_add(1, std::memory_order_relaxed);
+	const uint32_t pos = idx % FRAMEWORK_RING_SIZE;
+	_frameWork[pos] = { nowUs, publishUs, compressUs };
+}
+
+static FrameWorkWindow getFrameWorkWindow(int64_t windowUs)
+{
+	FrameWorkWindow out{};
+	const int64_t nowUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
+	const int64_t cutoff = nowUs - windowUs;
+
+	uint32_t writeIdx = _frameWorkWriteIdx.load(std::memory_order_relaxed);
+	uint32_t validCount = (writeIdx < FRAMEWORK_RING_SIZE) ? writeIdx : FRAMEWORK_RING_SIZE;
+	if (validCount == 0) return out;
+
+	uint32_t pubSnap[FRAMEWORK_RING_SIZE];
+	uint64_t pubSum = 0, compSum = 0;
+	uint32_t compMax = 0;
+	uint32_t n = 0;
+	for (uint32_t i = 0; i < validCount; ++i) {
+		if (_frameWork[i].ts_us < cutoff) continue;
+		pubSnap[n++] = _frameWork[i].publish_us;
+		pubSum  += _frameWork[i].publish_us;
+		compSum += _frameWork[i].compress_us;
+		if (_frameWork[i].compress_us > compMax) compMax = _frameWork[i].compress_us;
+	}
+	if (n == 0) return out;
+	std::sort(pubSnap, pubSnap + n);
+	out.n               = n;
+	out.publish_avg_us  = (uint32_t)(pubSum / n);
+	out.publish_max_us  = pubSnap[n - 1];
+	uint32_t p99Idx = (n * 99) / 100; if (p99Idx >= n) p99Idx = n - 1;
+	out.publish_p99_us  = pubSnap[p99Idx];
+	out.compress_avg_us = (uint32_t)(compSum / n);
+	out.compress_max_us = compMax;
+	return out;
+}
+
 void updateTelemetry(const Telemetry& t)
 {
 	std::lock_guard<std::mutex> lock(_telemetryMutex);
 	_telemetry = t;
+	recordFrameWork((uint32_t)t.publishUs, (uint32_t)t.compressUs);
 }
 
 Telemetry getLastTelemetry()

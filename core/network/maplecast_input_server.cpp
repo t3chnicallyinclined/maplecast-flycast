@@ -319,6 +319,10 @@ struct LatchStatsAccum {
 	// producer (the maple thread) so a plain index + memory_order_release
 	// store is sufficient. Reader copies the whole ring under a snapshot.
 	int64_t  ring[LATCH_RING_SIZE] = {};
+	// Tele-0.1: parallel ring of arrival timestamps (wall-clock us). Same
+	// write index. getLatchStatsWindow filters by these to compute
+	// time-bounded stats independent of the sample-count window.
+	int64_t  ringTs[LATCH_RING_SIZE] = {};
 	std::atomic<uint32_t> ringWriteIdx{0};       // monotonic â€” modulo gives ring slot
 };
 static LatchStatsAccum _latchStats[2];
@@ -363,7 +367,11 @@ void recordLatchSample(int slot, int64_t deltaUs, uint32_t packetSeq, uint64_t f
 	// regardless of histogram state.
 	if (freshArrival) {
 		uint32_t idx = s.ringWriteIdx.fetch_add(1, std::memory_order_relaxed);
-		s.ring[idx % LATCH_RING_SIZE] = deltaUs;
+		const uint32_t pos = idx % LATCH_RING_SIZE;
+		s.ring[pos]   = deltaUs;
+		// Tele-0.1: stamp arrival wall-clock for time-windowed stats.
+		s.ringTs[pos] = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count();
 	}
 
 	s.lastPacketSeq.store(packetSeq, std::memory_order_relaxed);
@@ -400,6 +408,42 @@ LatchStats getLatchStats(int slot)
 	out.maxDeltaUs = snap[validCount - 1];
 	uint32_t p99Idx = (validCount * 99) / 100;
 	if (p99Idx >= validCount) p99Idx = validCount - 1;
+	out.p99DeltaUs = snap[p99Idx];
+	return out;
+}
+
+LatchWindowStats getLatchStatsWindow(int slot, int64_t windowUs)
+{
+	LatchWindowStats out{};
+	if (slot < 0 || slot > 1) return out;
+	LatchStatsAccum& s = _latchStats[slot];
+
+	const int64_t nowUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
+	const int64_t cutoff = nowUs - windowUs;
+
+	uint32_t writeIdx = s.ringWriteIdx.load(std::memory_order_relaxed);
+	uint32_t validCount = (writeIdx < LATCH_RING_SIZE) ? writeIdx : LATCH_RING_SIZE;
+	if (validCount == 0) return out;
+
+	// Snapshot delta + ts pairs, filter by window. Same benign in-flight
+	// race as getLatchStats() -- one extra sample doesn't move stats.
+	int64_t snap[LATCH_RING_SIZE];
+	uint32_t n = 0;
+	for (uint32_t i = 0; i < validCount; ++i) {
+		if (s.ringTs[i] >= cutoff)
+			snap[n++] = s.ring[i];
+	}
+	if (n == 0) return out;
+
+	std::sort(snap, snap + n);
+	int64_t sum = 0;
+	for (uint32_t i = 0; i < n; ++i) sum += snap[i];
+	out.nSamples   = n;
+	out.avgDeltaUs = sum / (int64_t)n;
+	out.maxDeltaUs = snap[n - 1];
+	uint32_t p99Idx = (n * 99) / 100;
+	if (p99Idx >= n) p99Idx = n - 1;
 	out.p99DeltaUs = snap[p99Idx];
 	return out;
 }

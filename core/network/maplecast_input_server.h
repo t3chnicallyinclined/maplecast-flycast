@@ -126,6 +126,20 @@ struct LatchStats {
 };
 LatchStats getLatchStats(int slot);
 
+// Tele-0.1: time-windowed latch stats. Filters the same ring backing
+// getLatchStats() down to samples whose arrival timestamp is within the
+// last `windowUs` microseconds. Lets the status broadcast surface
+// "last 1s" vs "last 30s" buckets so spikes don't get smoothed out by
+// low-activity periods. n_samples in the result is the actual sample
+// count after filtering -- if it's 0, the slot was idle for the window.
+struct LatchWindowStats {
+	uint32_t nSamples;         // samples within the window
+	int64_t  avgDeltaUs;
+	int64_t  p99DeltaUs;
+	int64_t  maxDeltaUs;
+};
+LatchWindowStats getLatchStatsWindow(int slot, int64_t windowUs);
+
 // =====================================================================
 //                       PHASE B — DUAL-POLICY LATCH
 // =====================================================================
