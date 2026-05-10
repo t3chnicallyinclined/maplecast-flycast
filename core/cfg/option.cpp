@@ -71,7 +71,7 @@ Option<bool> SuperWidescreen("rend.SuperWideScreen");
 Option<bool> ShowFPS("rend.ShowFPS");
 Option<bool> RenderToTextureBuffer("rend.RenderToTextureBuffer");
 Option<bool> TranslucentPolygonDepthMask("rend.TranslucentPolygonDepthMask");
-Option<bool> ModifierVolumes("rend.ModifierVolumes", false);  // MapleCast default: Arcade preset (was true)
+Option<bool> ModifierVolumes("rend.ModifierVolumes", true);  // reverted Arcade-default flip — broke TA stream / client decode
 Option<int> TextureUpscale("rend.TextureUpscale2", 1);
 Option<int> MaxFilteredTextureSize("rend.MaxFilteredTextureSize", 256);
 Option<float> ExtraDepthScale("rend.ExtraDepthScale", 1.f);
@@ -109,7 +109,7 @@ Option<int> AnisotropicFiltering("rend.AnisotropicFiltering", 1);
 Option<int> TextureFiltering("rend.TextureFiltering", 0); // Default
 Option<bool> ThreadedRendering("rend.ThreadedRendering", true);
 Option<bool> DupeFrames("rend.DupeFrames", false);
-Option<int> PerPixelLayers("rend.PerPixelLayers", 8);  // MapleCast default: Arcade preset (was 32)
+Option<int> PerPixelLayers("rend.PerPixelLayers", 32);  // reverted Arcade-default flip — broke TA stream / client decode
 #ifdef TARGET_UWP
 Option<bool> NativeDepthInterpolation("rend.NativeDepthInterpolation", true);
 #else
