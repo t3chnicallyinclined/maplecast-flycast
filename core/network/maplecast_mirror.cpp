@@ -778,11 +778,13 @@ static void wsClientRun(std::string host, int port)
 	printf("[MIRROR-WS] WebSocket handshake OK â€” waiting for initial sync\n"); fflush(stdout);
 	_clientWsConnected.store(true, std::memory_order_release);
 
-	// Tele-0.5: spawn the stats reporter thread now that the WS is
-	// established. Snapshots client-side perf atomics and pushes a JSON
-	// message to the server every 1s so the dashboard can show E2E.
-	_statsReporterRun.store(true, std::memory_order_relaxed);
-	_statsReporterThread = std::thread(statsReporterRun, _wsFd);
+	// Tele-0.5 stats reporter thread DISABLED -- caused black-screen
+	// regression even though the send is on a dedicated thread. The
+	// concurrent mc_send + recv on the same fd appears to wedge the
+	// recv side somehow on Windows. Will re-enable with a different
+	// transport (separate UDP for telemetry, or piggyback on input UDP).
+	// _statsReporterRun.store(true, std::memory_order_relaxed);
+	// _statsReporterThread = std::thread(statsReporterRun, _wsFd);
 
 	if (!_decodeTaAlloced) {
 		_decodeTaCtx[0].Alloc();
@@ -836,8 +838,7 @@ static void wsClientRun(std::string host, int port)
 		if (!wsReadFrame(_wsFd, frame)) {
 			printf("[MIRROR-WS] Connection lost\n"); fflush(stdout);
 			_clientWsConnected.store(false, std::memory_order_release);
-			_statsReporterRun.store(false, std::memory_order_relaxed);
-			if (_statsReporterThread.joinable()) _statsReporterThread.join();
+			// Stats thread disabled -- no join needed.
 			break;
 		}
 		// Audio packet â€” skip (native client has dedicated audio WS)
