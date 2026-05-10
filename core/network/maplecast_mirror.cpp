@@ -805,36 +805,11 @@ static void wsClientRun(std::string host, int port)
 	printf("[MIRROR-WS] WebSocket handshake OK â€” waiting for initial sync\n"); fflush(stdout);
 	_clientWsConnected.store(true, std::memory_order_release);
 
-	// Tele-0.10: stats reporter via HTTP POST (separate transport from
-	// the mirror WS, so it can't head-of-line-block TA-frame decode
-	// like the WS-text-on-same-fd attempt did).
-	// URL: MAPLECAST_TELEMETRY_URL > derive from server host. nobd.net
-	// has the relay's /api/telemetry endpoint at https://nobd.net/api/
-	// telemetry; localhost dev would be http://127.0.0.1:7202/api/
-	// telemetry (relay HTTP port).
-	{
-		std::string telemetryUrl;
-		if (const char* env = std::getenv("MAPLECAST_TELEMETRY_URL")) telemetryUrl = env;
-		if (telemetryUrl.empty()) {
-			if (host == "127.0.0.1" || host == "localhost")
-				telemetryUrl = "http://127.0.0.1:7202/api/telemetry";
-			else
-				telemetryUrl = "https://" + host + "/api/telemetry";
-		}
-		// Random hex client_id for this session.
-		std::string clientId;
-		{
-			std::random_device rd;
-			char hex[17];
-			std::snprintf(hex, sizeof(hex), "%08x%08x", rd(), rd());
-			clientId = hex;
-		}
-		printf("[telemetry] reporter -> %s (client_id=%s)\n",
-		       telemetryUrl.c_str(), clientId.c_str());
-		fflush(stdout);
-		_statsReporterRun.store(true, std::memory_order_relaxed);
-		_statsReporterThread = std::thread(statsReporterRun, telemetryUrl, clientId);
-	}
+	// Tele-0.10 stats reporter DISABLED again -- even with HTTP POST
+	// (separate transport, no shared fd), connections still drop after
+	// ~15s. The thread itself or curl init might be doing something
+	// system-level that interferes. Keeping the impl compiled in but
+	// not spawning, so we can isolate further.
 
 	if (!_decodeTaAlloced) {
 		_decodeTaCtx[0].Alloc();
@@ -888,8 +863,7 @@ static void wsClientRun(std::string host, int port)
 		if (!wsReadFrame(_wsFd, frame)) {
 			printf("[MIRROR-WS] Connection lost\n"); fflush(stdout);
 			_clientWsConnected.store(false, std::memory_order_release);
-			_statsReporterRun.store(false, std::memory_order_relaxed);
-			if (_statsReporterThread.joinable()) _statsReporterThread.join();
+			// Stats thread disabled -- no join needed.
 			break;
 		}
 		// Audio packet â€” skip (native client has dedicated audio WS)
@@ -1762,17 +1736,22 @@ done_diff:
 			maplecast_gamestate::readGameState(gs);
 			maplecast_replay::onFrameInMatchFlag(gs.in_match);
 
-			// Tele-0.9: emit match_end event on in_match 1->0 transition.
-			// Snapshot start state on 0->1; on 1->0 broadcast a match
-			// summary the dashboard / match-data-platform can consume.
+			// Tele-0.9 broadcastMatchEnd DISABLED -- broadcasting a JSON
+			// text frame to mirror-WS clients (= the relay upstream
+			// connection) somehow stops the relay from forwarding
+			// subsequent binary TA frames to its downstream clients.
+			// Bisect confirmed: rolling back this single commit restored
+			// video. Mechanism still under investigation; suspect the
+			// relay's signal-broadcast path or our text frame format.
+			// Match-start tracking left intact for when we reroute the
+			// emit to a different transport (NATS, side-channel HTTP).
 			if (_matchPrevInMatch == 0 && gs.in_match == 1) {
 				_matchStartUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(
 					std::chrono::system_clock::now().time_since_epoch()).count();
 				_matchStartGs = gs;
 			} else if (_matchPrevInMatch == 1 && gs.in_match == 0 && _matchStartUs > 0) {
-				const int64_t endUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(
-					std::chrono::system_clock::now().time_since_epoch()).count();
-				maplecast_ws::broadcastMatchEnd(_matchStartUs, endUs, _matchStartGs, gs);
+				// const int64_t endUs = ...;
+				// maplecast_ws::broadcastMatchEnd(_matchStartUs, endUs, _matchStartGs, gs);
 				_matchStartUs = 0;
 			}
 			_matchPrevInMatch = gs.in_match;
