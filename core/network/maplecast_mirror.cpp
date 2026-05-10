@@ -608,6 +608,23 @@ static bool wsHandshake(int fd, const char* host, int port)
 	return strstr(resp, "101") != nullptr;
 }
 
+// Send a small masked control frame (used for PONG replies). Payload
+// up to 125 bytes -- WS spec caps control frames there anyway.
+// Client->server frames MUST be masked per RFC 6455.
+static void wsSendMaskedControl(int fd, uint8_t opcode, const uint8_t* payload, size_t len)
+{
+	if (len > 125) len = 125;
+	uint8_t buf[131];
+	buf[0] = 0x80 | (opcode & 0x0F);  // FIN + opcode
+	buf[1] = 0x80 | (uint8_t)len;     // MASK + len
+	uint8_t mask[4];
+	for (int i = 0; i < 4; i++) mask[i] = (uint8_t)(rand() & 0xFF);
+	memcpy(buf + 2, mask, 4);
+	for (size_t i = 0; i < len; i++)
+		buf[6 + i] = payload[i] ^ mask[i % 4];
+	(void)mc_send(fd, buf, 6 + len, 0);
+}
+
 static bool wsReadFrame(int fd, std::vector<uint8_t>& out)
 {
 	// Read WebSocket frame header (2 bytes min)
@@ -647,7 +664,14 @@ static bool wsReadFrame(int fd, std::vector<uint8_t>& out)
 
 	// Handle close/ping/text
 	if (opcode == 0x8) return false;  // close
-	if (opcode == 0x9) { out.clear(); return true; }  // ping â€” ignore
+	if (opcode == 0x9) {
+		// PING -- reply with PONG echoing the payload. Server uses this
+		// for RTT measurement (Tele-0.3): ping payload carries a server
+		// timestamp; pong returns it; server computes RTT = now - ts.
+		wsSendMaskedControl(fd, 0xA, out.data(), out.size());
+		out.clear();
+		return true;
+	}
 	if (opcode == 0x1) { out.clear(); return true; }  // text (JSON status) â€” ignore
 
 	return fin && opcode == 0x2;  // binary frame

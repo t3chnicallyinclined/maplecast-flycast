@@ -62,6 +62,11 @@ static bool _active = false;
 // Lobby: connection â†’ slot mapping, queue tracking
 static std::map<void*, int> _connSlot;
 
+// Tele-0.3: per-connection RTT, populated by the pong handler. Cleared
+// on close. Reader (broadcastStatus) holds _connMutex, same as the
+// pong handler.
+static std::map<void*, int32_t> _connRttUs;
+
 // Control-only connections â€” browsers that connect directly to flycast for
 // JSON control + 4-byte gamepad input but get the heavy TA frame downstream
 // from the relay. These are flagged via a `{type:"control_only"}` JSON message
@@ -219,6 +224,19 @@ static json getStatus()
 			srcIpStr = inet_ntoa(ia);
 			srcPortVal = ntohs(p.srcPort);
 		}
+		// Tele-0.3: surface RTT for whichever connection is bound to this
+		// slot. -1 means "no pong received yet" (just-joined window).
+		int32_t rttUs = -1;
+		{
+			std::lock_guard<std::mutex> lock(_connMutex);
+			for (const auto& kv : _connSlot) {
+				if (kv.second == slot) {
+					auto it = _connRttUs.find(kv.first);
+					if (it != _connRttUs.end()) rttUs = it->second;
+					break;
+				}
+			}
+		}
 		return {
 			{"id", std::string(p.id).substr(0, 8)},
 			{"name", std::string(p.name)},
@@ -228,7 +246,8 @@ static json getStatus()
 			{"pps", p.packetsPerSec},
 			{"cps", p.changesPerSec},
 			{"src_ip", srcIpStr},
-			{"src_port", srcPortVal}
+			{"src_port", srcPortVal},
+			{"rtt_us", rttUs},
 		};
 	};
 	int players = (maplecast_input::getPlayer(0).connected ? 1 : 0)
@@ -700,6 +719,29 @@ static void broadcastStickEvents()
 	}
 }
 
+// Tele-0.3: send a WS PING to each open connection with a microsecond
+// timestamp payload. Native + browser clients echo it back as PONG;
+// the pong_handler computes RTT = now - ts. Called once per status
+// broadcast (~1Hz). websocketpp::ping is non-blocking -- it queues the
+// frame on the connection's send strand.
+static void pingAllForRtt()
+{
+	const int64_t nowUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
+	const std::string payload = std::to_string(nowUs);
+	std::vector<ConnHdl> snapshot;
+	{
+		std::lock_guard<std::mutex> lock(_connMutex);
+		snapshot.assign(_connections.begin(), _connections.end());
+	}
+	for (auto& hdl : snapshot) {
+		try {
+			websocketpp::lib::error_code ec;
+			_ws.ping(hdl, payload, ec);
+		} catch (...) {}
+	}
+}
+
 static void broadcastStatus()
 {
 	// Drain stick events first so reload-detect / DB persistence reach
@@ -778,6 +820,7 @@ static void onClose(ConnHdl hdl)
 			key = (void*)_ws.get_con_from_hdl(hdl).get();
 			_connSlot.erase(key);
 			_controlOnlyConns.erase(key);
+			_connRttUs.erase(key);  // Tele-0.3
 			_queue.erase(std::remove_if(_queue.begin(), _queue.end(),
 				[key](const QueueEntry& e) { return e.key == key; }), _queue.end());
 		} catch (...) {}
@@ -1391,6 +1434,23 @@ bool init(int port)
 		_ws.set_open_handler(&onOpen);
 		_ws.set_close_handler(&onClose);
 		_ws.set_message_handler(&onMessage);
+		// Tele-0.3: PONG handler. We periodically ping each client with
+		// a microsecond timestamp as the payload; on pong arrival we
+		// decode the timestamp, compute RTT = now - ts_in_ping, and
+		// stash it in _connRttUs[conn-key] for the next status broadcast.
+		_ws.set_pong_handler([](ConnHdl hdl, std::string payload) {
+			try {
+				const int64_t nowUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+					std::chrono::steady_clock::now().time_since_epoch()).count();
+				const int64_t pingUs = std::stoll(payload);
+				const int64_t rttUs  = nowUs - pingUs;
+				if (rttUs > 0 && rttUs < 5'000'000) {
+					void* key = (void*)_ws.get_con_from_hdl(hdl).get();
+					std::lock_guard<std::mutex> lock(_connMutex);
+					_connRttUs[key] = (int32_t)rttUs;
+				}
+			} catch (...) {}
+		});
 
 		_ws.listen(port);
 		_ws.start_accept();
@@ -1410,7 +1470,8 @@ bool init(int port)
 				if (_active && _clientCount.load() > 0) {
 					checkMatchEnd();
 					checkIdleKick();
-					broadcastStatus();
+					pingAllForRtt();    // Tele-0.3: send pings; pong handler updates _connRttUs
+					broadcastStatus();   // emits last-known RTT per slot
 				}
 			}
 		});
