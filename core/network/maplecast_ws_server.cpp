@@ -10,6 +10,7 @@
 #include "maplecast_input_server.h"
 #include "maplecast_gamestate.h"
 #include "maplecast_mirror.h"
+#include "replay_writer.h"
 #include "hw/sh4/sh4_mem.h"
 #include "hw/pvr/pvr_mem.h"
 #include "hw/pvr/pvr_regs.h"
@@ -856,6 +857,60 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 				std::string rid = ctrl.value("reply_id", "");
 				json resp = {{"ok",true},{"cmd","match_info"},{"reply_id",rid},
 					{"data",{{"characters",chars}}}};
+				try { _ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text); } catch(...) {}
+				return;
+			}
+			// record_start / record_stop -- runtime trigger from F9 hotkey or
+			// any other client. Same logic as the legacy control-WS endpoint
+			// (port 7211); routed here so the mirror client can drive it
+			// over the same WS connection it already has open at port 7200.
+			if (ctrl.contains("cmd") && ctrl["cmd"] == "record_start")
+			{
+				std::string rid = ctrl.value("reply_id", "");
+				std::string path = ctrl.value("path", "");
+				if (path.empty()) {
+					json resp = {{"ok",false},{"cmd","record_start"},{"reply_id",rid},
+						{"error","missing 'path'"}};
+					try { _ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text); } catch(...) {}
+					return;
+				}
+				if (maplecast_replay::active()) {
+					json resp = {{"ok",false},{"cmd","record_start"},{"reply_id",rid},
+						{"error","already recording -- call record_stop first"}};
+					try { _ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text); } catch(...) {}
+					return;
+				}
+				printf("[mirror-ws] record_start: %s\n", path.c_str());
+				fflush(stdout);
+				maplecast_replay::StartParams p;
+				p.out_path = path;
+				p.p1_name  = ctrl.value("p1_name", "");
+				p.p2_name  = ctrl.value("p2_name", "");
+				const bool ok = maplecast_replay::startInteractive(p);
+				json resp = ok
+					? json{{"ok",true},{"cmd","record_start"},{"reply_id",rid},
+						{"data",{{"path",path},{"state","recording"}}}}
+					: json{{"ok",false},{"cmd","record_start"},{"reply_id",rid},
+						{"error","writer::start rejected -- see flycast log"}};
+				try { _ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text); } catch(...) {}
+				return;
+			}
+			if (ctrl.contains("cmd") && ctrl["cmd"] == "record_stop")
+			{
+				std::string rid = ctrl.value("reply_id", "");
+				if (!maplecast_replay::active()) {
+					json resp = {{"ok",false},{"cmd","record_stop"},{"reply_id",rid},
+						{"error","not recording"}};
+					try { _ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text); } catch(...) {}
+					return;
+				}
+				const uint64_t entries = maplecast_replay::entryCount();
+				maplecast_replay::stop(0xFF);
+				printf("[mirror-ws] record_stop: %llu entries\n",
+				       (unsigned long long)entries);
+				fflush(stdout);
+				json resp = {{"ok",true},{"cmd","record_stop"},{"reply_id",rid},
+					{"data",{{"entries",entries}}}};
 				try { _ws.send(hdl, resp.dump(), websocketpp::frame::opcode::text); } catch(...) {}
 				return;
 			}

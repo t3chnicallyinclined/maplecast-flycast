@@ -405,19 +405,14 @@ static void executeRecordStart(const Command& cmd)
 		return;
 	}
 
-	printf("[control-ws] record_start: emu.stop -> writer::start -> emu.start  ->  %s\n",
-	       cmd.path.c_str());
+	printf("[control-ws] record_start: %s\n", cmd.path.c_str());
 	fflush(stdout);
-
-	emu.stop();
 
 	maplecast_replay::StartParams p;
 	p.out_path = cmd.path;
 	p.p1_name  = cmd.p1Name;
 	p.p2_name  = cmd.p2Name;
-	bool ok = maplecast_replay::start(p);
-
-	emu.start();
+	const bool ok = maplecast_replay::startInteractive(p);
 
 	if (!ok) {
 		sendJson(cmd.conn, errReply(cmd, "record_start", "writer::start rejected — see flycast log"));

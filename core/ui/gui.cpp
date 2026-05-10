@@ -1779,6 +1779,7 @@ void gui_display_osd() {
 #include "gui_competitive_hud.h"
 #include "gui_maplecast_settings.h"
 #include "gui_game_overlay.h"
+#include "gui_recording_indicator.h"
 // Gear icon click zone — checked via raw SDL mouse state, not ImGui,
 // because ImGui's click handling conflicts with flycast's DC mouse input.
 void gui_displayMirrorDebug()
@@ -1790,6 +1791,7 @@ void gui_displayMirrorDebug()
 	gui_competitive_hud::draw();
 	gui_maplecast_settings::draw();
 	gui_game_overlay::draw();
+	gui_recording_indicator::draw();
 
 	ImGui::Render();
 	// In mirror client mode: gui_endFrame(false) — game is already in framebuffer

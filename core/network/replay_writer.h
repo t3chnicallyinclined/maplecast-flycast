@@ -88,6 +88,14 @@ struct StartParams {
 
 bool start(const StartParams& p);
 
+// Same as start(), but brackets the call with emu.stop()+emu.start() so
+// the SH4 is halted at an instruction boundary while dc_savestate runs
+// and resumed cleanly afterwards. Used by runtime triggers (control-WS,
+// mirror-WS, F9 hotkey) where the SH4 is mid-execution. Don't call this
+// from the autoload-time path -- the SH4 isn't running there yet, and
+// emu.stop() on a non-running emu is undefined.
+bool startInteractive(const StartParams& p);
+
 // Called from mirror server's serverPublish each frame with the freshly-
 // read in_match flag from guest RAM. If the writer was armed (start()
 // with arm_at_match=true), watches for the 0→1 transition and fires
@@ -117,6 +125,23 @@ bool executePendingCapture();
 void setNextRecordPath(const std::string& path);
 std::string consumeNextRecordPath();
 bool hasNextRecordPath();
+
+// ── Per-match continuous recording (MAPLECAST_RECORD_MATCHES) ─────────
+// Captures the autoload savestate ONCE per server boot, accumulates an
+// always-on input log starting at frame 0, and writes one .mcrec per
+// match (split on in_match 0->1->0 transitions). Each match file
+// embeds the SAME autoload savestate + the cumulative input log up to
+// that match's end + a start_frame header field. Replay loads the
+// savestate at autoload boundary, fast-forwards through inputs to
+// start_frame, then plays from there. Byte-perfect because every
+// dc_savestate happens once at the proven autoload moment.
+//
+// Init from emulator.cpp's autoload section after the SH4 has loaded
+// state but before the emu thread spawns. Returns false if the
+// recordings dir can't be created or the savestate capture fails.
+
+bool initMatchRecording(const std::string& recordings_dir, int retention_days);
+bool matchRecordingActive();
 
 // Append one input event. Called from the input server's tape publisher
 // loop (existing infrastructure in maplecast_input_server.cpp). No-op

@@ -840,6 +840,27 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 				if (fromHotkey)
 					printf("[replay] hotkey-triggered recording active — output: %s\n", outPath.c_str());
 			}
+
+			// Per-match continuous recording (server-side automatic
+			// capture with retention). Independent of MAPLECAST_REPLAY_OUT
+			// above — both can coexist if for some reason an operator
+			// wants both. See replay_writer.h::initMatchRecording.
+			if (std::getenv("MAPLECAST_RECORD_MATCHES")) {
+				std::string recDir;
+				if (const char* d = std::getenv("MAPLECAST_RECORDINGS_DIR"))
+					recDir = d;
+				if (recDir.empty()) {
+					// Dev default: <repo>/recordings/. The headless build's
+					// cwd is typically the repo root or the build dir, so
+					// fall back to a relative path that will resolve under
+					// the binary's working directory.
+					recDir = "recordings";
+				}
+				int retentionDays = 7;
+				if (const char* r = std::getenv("MAPLECAST_RECORD_RETENTION_DAYS"))
+					retentionDays = std::atoi(r);
+				maplecast_replay::initMatchRecording(recDir, retentionDays);
+			}
 #endif
 		}
 

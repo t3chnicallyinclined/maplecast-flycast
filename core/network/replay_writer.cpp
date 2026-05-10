@@ -34,6 +34,16 @@
 
 #include <curl/curl.h>
 
+#ifdef _WIN32
+  #include <windows.h>
+#else
+  #include <dirent.h>
+  #include <sys/stat.h>
+  #include <sys/types.h>
+  #include <unistd.h>
+  #include <errno.h>
+#endif
+
 namespace maplecast_replay
 {
 
@@ -122,6 +132,11 @@ static std::thread              _ckptWorker;
 // Forward declarations for the async checkpoint worker (defined below).
 static void startCkptWorker();
 static void stopCkptWorker();
+
+// Forward declaration for the per-match session input tap (defined at
+// the bottom of this file in an anonymous namespace).
+static void sessAppend(uint64_t frame, uint32_t seqAndSlot, uint16_t buttons,
+                       uint8_t lt, uint8_t rt);
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -320,6 +335,12 @@ bool executePendingCapture() { return false; }
 
 void append(uint64_t frame, uint32_t seqAndSlot, uint16_t buttons,
             uint8_t lt, uint8_t rt) {
+	// Per-match continuous recording: tap every input regardless of
+	// whether the legacy single-file recorder is active. Defined later
+	// in this file (visible via `using namespace` since we're in the
+	// same TU).
+	sessAppend(frame, seqAndSlot, buttons, lt, rt);
+
 	if (!_active.load(std::memory_order_relaxed)) return;
 
 	// Warmup skip: don't log appends with frame <= warmup. Recording's
@@ -604,11 +625,21 @@ void stop(uint8_t winner) {
 bool active() { return _active.load(std::memory_order_relaxed); }
 uint64_t entryCount() { return _entryCount.load(std::memory_order_relaxed); }
 
+bool startInteractive(const StartParams& p)
+{
+	// Halt SH4 at instruction boundary, run start() (which dc_savestate's
+	// + dc_loadstate's slot 99 internally), then resume. Same bracket
+	// pattern that control-WS and mirror-WS record_start handlers use.
+	emu.stop();
+	const bool ok = start(p);
+	emu.start();
+	return ok;
+}
+
 // arm_at_match is no longer supported under V2 discipline (recording must
-// fire at autoload boundary, not mid-match). These remain as no-op stubs
+// fire at autoload boundary, not mid-match). This remains as a no-op stub
 // for ABI compatibility with control_ws.cpp's record_start handler.
 bool armed() { return false; }
-void onFrameInMatchFlag(uint8_t /*in_match*/) {}
 
 void setNextRecordPath(const std::string& path)
 {
@@ -628,6 +659,344 @@ bool hasNextRecordPath()
 {
 	std::lock_guard<std::mutex> lk(_nextRecordMtx);
 	return !_nextRecordPath.empty();
+}
+
+// ── Per-match continuous recording ────────────────────────────────────
+// State + mechanics for MAPLECAST_RECORD_MATCHES. See replay_writer.h
+// for the design. Independent of the legacy single-file path above so
+// they can coexist without stepping on each other (e.g., a session
+// recorder running while a one-shot record_start fires for some other
+// reason).
+
+namespace {
+
+std::atomic<bool>            _sessActive{false};
+std::vector<uint8_t>         _sessSavestate;        // captured once at autoload
+std::vector<uint8_t>         _sessInputs;           // 16 bytes per TapeEntry, frame 0 onwards
+uint64_t                     _sessFirstFrame = UINT64_MAX;
+uint64_t                     _sessLastRelFrame = 0; // updated by sessAppend
+std::string                  _sessDir;
+uint64_t                     _sessStartUnixUs = 0;
+uint8_t                      _sessPrevInMatch = 0;
+uint64_t                     _sessMatchStartFrame = 0;
+bool                         _sessMatchInProgress = false;
+uint32_t                     _sessMatchSeq = 0;
+std::mutex                   _sessMtx;
+
+// Filesystem helpers ---------------------------------------------------
+
+bool ensureDir(const std::string& dir)
+{
+#ifdef _WIN32
+	if (CreateDirectoryA(dir.c_str(), nullptr) != 0) return true;
+	return GetLastError() == ERROR_ALREADY_EXISTS;
+#else
+	if (mkdir(dir.c_str(), 0755) == 0) return true;
+	return errno == EEXIST;
+#endif
+}
+
+// Delete .mcrec files in dir whose mtime is older than retentionDays.
+// Best-effort: failures are logged but don't abort.
+void cleanupOldRecordings(const std::string& dir, int retentionDays)
+{
+	if (retentionDays <= 0) return;
+	const std::time_t now = std::time(nullptr);
+	const std::time_t cutoff = now - (std::time_t)retentionDays * 86400;
+	int deleted = 0;
+
+#ifdef _WIN32
+	const std::string pat = dir + "\\*.mcrec";
+	WIN32_FIND_DATAA fd;
+	HANDLE h = FindFirstFileA(pat.c_str(), &fd);
+	if (h == INVALID_HANDLE_VALUE) return;
+	do {
+		ULARGE_INTEGER ull;
+		ull.LowPart  = fd.ftLastWriteTime.dwLowDateTime;
+		ull.HighPart = fd.ftLastWriteTime.dwHighDateTime;
+		// FILETIME: 100ns ticks since 1601. Convert to unix seconds.
+		const std::time_t mtime = (std::time_t)((ull.QuadPart - 116444736000000000ULL) / 10000000ULL);
+		if (mtime < cutoff) {
+			std::string p = dir + "\\" + fd.cFileName;
+			if (DeleteFileA(p.c_str())) deleted++;
+		}
+	} while (FindNextFileA(h, &fd));
+	FindClose(h);
+#else
+	DIR* d = opendir(dir.c_str());
+	if (!d) return;
+	struct dirent* e;
+	while ((e = readdir(d)) != nullptr) {
+		const char* name = e->d_name;
+		size_t n = strlen(name);
+		if (n < 7 || strcmp(name + n - 6, ".mcrec") != 0) continue;
+		std::string p = dir + "/" + name;
+		struct stat st;
+		if (stat(p.c_str(), &st) != 0) continue;
+		if (st.st_mtime < cutoff) {
+			if (unlink(p.c_str()) == 0) deleted++;
+		}
+	}
+	closedir(d);
+#endif
+	if (deleted > 0)
+		printf("[record-matches] retention: deleted %d file(s) older than %d days\n",
+		       deleted, retentionDays);
+}
+
+// Build a match file path: <dir>/match-<sessionStamp>-<seq>.mcrec
+std::string buildMatchPath(const std::string& dir, uint64_t sessionUnixUs, uint32_t seq)
+{
+	std::time_t t = (std::time_t)(sessionUnixUs / 1000000);
+	std::tm tm;
+#ifdef _WIN32
+	localtime_s(&tm, &t);
+#else
+	localtime_r(&t, &tm);
+#endif
+	char ts[32];
+	std::strftime(ts, sizeof(ts), "%Y%m%d-%H%M%S", &tm);
+	char tail[64];
+	std::snprintf(tail, sizeof(tail), "match-%s-%u.mcrec", ts, seq);
+#ifdef _WIN32
+	return dir + "\\" + tail;
+#else
+	return dir + "/" + tail;
+#endif
+}
+
+// Write a match file. Same on-disk layout as legacy single-file recordings
+// (magic + version 5 + metadata + START_SAVESTATE + input log + footer)
+// so the existing reader can consume it. The start_frame field is stored
+// in the reserved[40] block at offset 8 (after the warmup u32 already
+// kept there for back-compat, which we leave as 0).
+void writeMatchFile(const std::string& path,
+                    const std::vector<uint8_t>& savestate,
+                    const std::vector<uint8_t>& inputs,
+                    uint64_t startFrame,
+                    uint32_t entryCount,
+                    uint64_t sessionUnixUs)
+{
+	FILE* f = fopen(path.c_str(), "wb");
+	if (!f) {
+		printf("[record-matches] write FAIL: cannot open %s\n", path.c_str());
+		return;
+	}
+
+	const char magic[8] = { 'M','C','R','E','C','\0','\0','\0' };
+	fwrite(magic, 1, 8, f);
+
+	uint8_t v[4];
+	writeLE32(v, 5); fwrite(v, 1, 4, f);   // version
+	writeLE32(v, 0); fwrite(v, 1, 4, f);   // flycast_ver
+
+	uint8_t match_id[16] = {0};
+	writeLE64(match_id, sessionUnixUs);
+	fwrite(match_id, 1, 16, f);
+
+	uint8_t server_id[16] = {0};
+	fwrite(server_id, 1, 16, f);
+
+	uint8_t buf[8];
+	writeLE64(buf, sessionUnixUs); fwrite(buf, 1, 8, f);  // start_unix_us
+	memset(buf, 0, 8);             fwrite(buf, 1, 8, f);  // duration_us
+
+	uint8_t rom_hash[32] = {0};
+	fwrite(rom_hash, 1, 32, f);
+
+	writePaddedString(f, "", 64);  // p1_name
+	writePaddedString(f, "", 64);  // p2_name
+	uint8_t chars[3] = {0xFF, 0xFF, 0xFF};
+	fwrite(chars, 1, 3, f);
+	fwrite(chars, 1, 3, f);
+	uint8_t winner = 0xFF;
+	fwrite(&winner, 1, 1, f);
+
+	// reserved[40]: leave warmup at u32[0]=0, store start_frame at u64[1..2].
+	uint8_t reserved[40] = {0};
+	writeLE64(reserved + 8, startFrame);   // <-- the new field
+	fwrite(reserved, 1, 40, f);
+
+	// START_SAVESTATE block (raw_size:u64 + bytes). Same shape the writer
+	// uses for single-file mode.
+	uint8_t hdr[8];
+	writeLE64(hdr, (uint64_t)savestate.size());
+	fwrite(hdr, 1, 8, f);
+	fwrite(savestate.data(), 1, savestate.size(), f);
+
+	// spg_jitter trailer (kept for diagnostic compat; 0 here since the
+	// session savestate was captured at autoload, not at vblank).
+	uint8_t jBuf[4] = {0};
+	fwrite(jBuf, 1, 4, f);
+
+	// Input log.
+	if (!inputs.empty())
+		fwrite(inputs.data(), 1, inputs.size(), f);
+
+	// Footer: "MCEND" + entry_count(u32) + hmac(32, zeroed for now).
+	const char foot[5] = {'M','C','E','N','D'};
+	fwrite(foot, 1, 5, f);
+	writeLE32(v, entryCount);
+	fwrite(v, 1, 4, f);
+	uint8_t hmac[32] = {0};
+	fwrite(hmac, 1, 32, f);
+
+	fflush(f);
+	long sz = ftell(f);
+	fclose(f);
+
+	printf("[record-matches] wrote %s (%ld bytes, %u inputs, start_frame=%llu)\n",
+	       path.c_str(), sz, entryCount, (unsigned long long)startFrame);
+	fflush(stdout);
+}
+
+// Spawn a detached thread to write a match file. Snapshots inputs under
+// the session lock so the live ring keeps growing during the I/O.
+void spawnMatchWrite(uint64_t startFrame)
+{
+	std::vector<uint8_t> inputsCopy;
+	std::vector<uint8_t> savestateRef;
+	std::string path;
+	uint32_t entryCount;
+	uint64_t sessionUnixUs;
+	{
+		std::lock_guard<std::mutex> lk(_sessMtx);
+		inputsCopy   = _sessInputs;                  // copy
+		savestateRef = _sessSavestate;               // copy (~7 MB)
+		path         = buildMatchPath(_sessDir, _sessStartUnixUs, _sessMatchSeq);
+		entryCount   = (uint32_t)(inputsCopy.size() / 16);
+		sessionUnixUs = _sessStartUnixUs;
+	}
+	std::thread([path, savestateRef = std::move(savestateRef),
+	             inputsCopy = std::move(inputsCopy), startFrame,
+	             entryCount, sessionUnixUs]() {
+		writeMatchFile(path, savestateRef, inputsCopy,
+		               startFrame, entryCount, sessionUnixUs);
+	}).detach();
+}
+
+} // namespace (per-match)
+
+// Append one input entry to the always-on session log. Called from the
+// existing append() path so per-match recording piggybacks on the same
+// hot-path the legacy recorder already uses. Defined OUTSIDE the anon
+// namespace so the forward declaration at the top of the file links.
+static void sessAppend(uint64_t frame, uint32_t seqAndSlot, uint16_t buttons,
+                       uint8_t lt, uint8_t rt)
+{
+	if (!_sessActive.load(std::memory_order_relaxed)) return;
+	std::lock_guard<std::mutex> lk(_sessMtx);
+	if (_sessFirstFrame == UINT64_MAX) _sessFirstFrame = frame;
+	const uint64_t rel = frame - _sessFirstFrame;
+	_sessLastRelFrame = rel;
+
+	uint8_t entry[16];
+	writeLE64(entry,      rel);
+	writeLE32(entry + 8,  seqAndSlot);
+	entry[12] = (uint8_t)(buttons);
+	entry[13] = (uint8_t)(buttons >> 8);
+	entry[14] = lt;
+	entry[15] = rt;
+	_sessInputs.insert(_sessInputs.end(), entry, entry + 16);
+}
+
+bool initMatchRecording(const std::string& dir, int retentionDays)
+{
+	if (_sessActive.load()) {
+		printf("[record-matches] already initialized -- ignoring\n");
+		return true;
+	}
+	if (!ensureDir(dir)) {
+		printf("[record-matches] cannot create dir: %s\n", dir.c_str());
+		return false;
+	}
+	cleanupOldRecordings(dir, retentionDays);
+
+	// Capture the autoload savestate ONCE. Same dc_savestate +
+	// dc_loadstate dance the single-file recorder does, just keeping
+	// the bytes in memory instead of writing to a .mcrec.
+	dc_savestate(REPLAY_SLOT);
+	std::string statePath = hostfs::getSavestatePath(REPLAY_SLOT, false);
+	FILE* sf = fopen(statePath.c_str(), "rb");
+	if (!sf) {
+		printf("[record-matches] cannot open %s after dc_savestate\n", statePath.c_str());
+		return false;
+	}
+	fseek(sf, 0, SEEK_END);
+	long sz = ftell(sf);
+	fseek(sf, 0, SEEK_SET);
+	std::vector<uint8_t> bytes((size_t)sz);
+	size_t got = fread(bytes.data(), 1, (size_t)sz, sf);
+	fclose(sf);
+	if (got != (size_t)sz) {
+		printf("[record-matches] short read of %s\n", statePath.c_str());
+		return false;
+	}
+	dc_loadstate(REPLAY_SLOT);
+
+	{
+		std::lock_guard<std::mutex> lk(_sessMtx);
+		_sessSavestate       = std::move(bytes);
+		_sessInputs.clear();
+		_sessFirstFrame      = UINT64_MAX;
+		_sessLastRelFrame    = 0;
+		_sessDir             = dir;
+		_sessStartUnixUs     = nowUnixUs();
+		_sessPrevInMatch     = 0;
+		_sessMatchStartFrame = 0;
+		_sessMatchInProgress = false;
+		_sessMatchSeq        = 0;
+	}
+	_sessActive.store(true);
+
+	printf("[record-matches] active. dir=%s, savestate=%ld bytes, retention=%d days\n",
+	       dir.c_str(), sz, retentionDays);
+	fflush(stdout);
+	return true;
+}
+
+bool matchRecordingActive()
+{
+	return _sessActive.load(std::memory_order_relaxed);
+}
+
+void onFrameInMatchFlag(uint8_t in_match)
+{
+	if (!_sessActive.load(std::memory_order_relaxed)) return;
+
+	uint8_t prev;
+	uint64_t curRel;
+	{
+		std::lock_guard<std::mutex> lk(_sessMtx);
+		prev   = _sessPrevInMatch;
+		curRel = _sessLastRelFrame;
+		_sessPrevInMatch = in_match;
+	}
+
+	if (prev == 0 && in_match == 1) {
+		std::lock_guard<std::mutex> lk(_sessMtx);
+		_sessMatchStartFrame = curRel;
+		_sessMatchInProgress = true;
+		_sessMatchSeq++;
+		printf("[record-matches] match #%u start at relFrame=%llu\n",
+		       _sessMatchSeq, (unsigned long long)curRel);
+		fflush(stdout);
+	} else if (prev == 1 && in_match == 0) {
+		uint64_t startFrame = 0;
+		bool inProgress;
+		{
+			std::lock_guard<std::mutex> lk(_sessMtx);
+			startFrame = _sessMatchStartFrame;
+			inProgress = _sessMatchInProgress;
+			_sessMatchInProgress = false;
+		}
+		if (inProgress) {
+			printf("[record-matches] match #%u end at relFrame=%llu (writing async)\n",
+			       _sessMatchSeq, (unsigned long long)curRel);
+			fflush(stdout);
+			spawnMatchWrite(startFrame);
+		}
+	}
 }
 
 } // namespace maplecast_replay

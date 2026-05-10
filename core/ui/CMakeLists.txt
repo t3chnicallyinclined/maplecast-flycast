@@ -16,6 +16,8 @@ if(NOT LIBRETRO)
             gui_maplecast_settings.h
             gui_game_overlay.cpp
             gui_game_overlay.h
+            gui_recording_indicator.cpp
+            gui_recording_indicator.h
             vgamepad.cpp
             vgamepad.h
             gui_chat.h

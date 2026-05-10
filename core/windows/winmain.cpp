@@ -320,13 +320,19 @@ int main(int argc, char* argv[])
 	// Always attach for the wizard mode — it's a console-only experience.
 	// Replay record/playback also need it (heavy [replay-reader] / [replay]
 	// diagnostic output that's useless in the GUI but critical when iterating).
+	//
+	// AttachConsole(ATTACH_PARENT_PROCESS) first: if launched from a
+	// PowerShell / cmd.exe, our stdout flows back into that shell instead of
+	// popping a separate console window. AllocConsole is the fallback for
+	// Explorer-launched runs (no parent console).
 	if (std::getenv("MAPLECAST")
 	    || std::getenv("MAPLECAST_BUTTON_WIZARD")
 	    || std::getenv("MAPLECAST_REPLAY_IN")
 	    || std::getenv("MAPLECAST_REPLAY_OUT")
 	    || std::getenv("MAPLECAST_REPLICA"))
 	{
-		AllocConsole();
+		if (!AttachConsole(ATTACH_PARENT_PROCESS))
+			AllocConsole();
 		freopen("CONOUT$", "w", stdout);
 		freopen("CONOUT$", "w", stderr);
 		printf("[maplecast] console attached\n");
