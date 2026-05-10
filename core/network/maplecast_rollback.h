@@ -36,6 +36,7 @@
 	    would be 480 MB/s at our state size.
 */
 #pragma once
+#include <cstddef>
 #include <cstdint>
 
 namespace maplecast_rollback
