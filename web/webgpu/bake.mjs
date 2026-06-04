@@ -28,7 +28,13 @@ const MVC2_CHARS = [
   'Omega Red','Spiral','Colossus','Iron Man','Sentinel','Blackheart','Thanos','Jin'
 ];
 const charName = (id) => MVC2_CHARS[id] || `char${id}`;
-const SETTLE = 3;  // GSTA samples a sprite must hold before we trust the render
+// Capture only when the rendered crop has been byte-identical for this many
+// consecutive frames -> the character (and everything in the crop) is visually
+// HELD. This sidesteps GSTA<->render skew and any animating residual: if the
+// HUD/lines/character are moving, the crop changes and we simply don't capture.
+// One sample is recorded per held period (rising edge), so a sprite that recurs
+// across multiple holds gives a real cross-occurrence stability test.
+const STATIC_HOLD = 3;
 
 export class SpriteBake {
   constructor() {
@@ -47,7 +53,7 @@ export class SpriteBake {
     this._x2 = this._c2.getContext('2d', { willReadFrequently:true });
   }
   _blankSlot(){ return { active:0, char_id:0, sprite_id:-1, screen_x:0, screen_y:0,
-                         facing:0, settleId:-1, settleN:0 }; }
+                         facing:0, lastHash:'', staticRun:0 }; }
 
   // --- GSTA intake ------------------------------------------------------
   // d: Uint8Array, d[0..3]='GSTA', then 261-byte serialized GameState.
@@ -65,11 +71,7 @@ export class SpriteBake {
       sl.facing    = dv.getUint8(ci+2);
       sl.screen_x  = dv.getFloat32(ci+16, true);
       sl.screen_y  = dv.getFloat32(ci+20, true);
-      const sid    = dv.getUint16(ci+32, true);
-      // settle tracking
-      if (sid === sl.settleId) sl.settleN++;
-      else { sl.settleId = sid; sl.settleN = 1; }
-      sl.sprite_id = sid;
+      sl.sprite_id = dv.getUint16(ci+32, true);
     }
   }
 
@@ -93,8 +95,7 @@ export class SpriteBake {
 
     for (let s=0; s<2; s++){
       const sl = this.slot[s];
-      if (!sl.active) continue;
-      if (sl.settleN < SETTLE) continue;        // skew guard: only settled sprites
+      if (!sl.active){ sl.staticRun=0; sl.lastHash=''; continue; }
       // Search region: centered on the game-reported screen position
       // (X/Y_Position_Screen, offsets 0xE0/0xE4). The game screen space is
       // ~640x480; map to canvas. This excludes the frame-wide translucent
@@ -124,20 +125,30 @@ export class SpriteBake {
           }
         }
       }
-      if (maxx<minx) { this._diag=`slot${s}: NO pixels in region (sx=${sl.screen_x.toFixed(0)} sy=${sl.screen_y.toFixed(0)})`; continue; }
+      if (maxx<minx) { this._diag=`slot${s}: NO pixels in region (sx=${sl.screen_x.toFixed(0)} sy=${sl.screen_y.toFixed(0)})`; sl.staticRun=0; sl.lastHash=''; continue; }
       const cw=maxx-minx+1, ch=maxy-miny+1;
-      // diagnostic: did the bbox fill the whole search region? -> smear/opaque bg
-      const full = (minx<=hx0 && maxx>=hx1-1 && miny<=vy0 && maxy>=vy1-1);
-      this._diag = `slot${s} sx=${sl.screen_x.toFixed(0)} sy=${sl.screen_y.toFixed(0)} crop ${cw}x${ch}${full?' [FILLS REGION]':''}`;
-      if (cw<8 || ch<8) continue;                        // too small => noise
+      if (cw<8 || ch<8) { sl.staticRun=0; continue; }    // too small => noise
       let img; try { img = this._x2.getImageData(minx,miny,cw,ch); } catch(e){ this._lastErr=String(e); continue; }
       const hash = this._fnv(img.data);
-      const key = `${s}|${sl.char_id}|${sl.sprite_id}`;
-      let rec = this.caps.get(key);
-      if (!rec){ rec = { slot:s, char_id:sl.char_id, sprite_id:sl.sprite_id,
-                         hashes:new Map(), occ:0, firstImg:img, w:cw, h:ch }; this.caps.set(key, rec); }
-      rec.occ++;
-      rec.hashes.set(hash, (rec.hashes.get(hash)||0)+1);
+
+      // Rendered-static gate: only act when the crop is byte-identical to the
+      // previous frame (character + everything in the crop is HELD). Record one
+      // sample on the rising edge of a hold so recurring holds give a real
+      // cross-occurrence test.
+      if (hash === sl.lastHash) {
+        sl.staticRun++;
+        if (sl.staticRun === STATIC_HOLD) {
+          const key = `${s}|${sl.char_id}|${sl.sprite_id}`;
+          let rec = this.caps.get(key);
+          if (!rec){ rec = { slot:s, char_id:sl.char_id, sprite_id:sl.sprite_id,
+                             hashes:new Map(), occ:0, firstImg:img, w:cw, h:ch }; this.caps.set(key, rec); }
+          rec.occ++;
+          rec.hashes.set(hash, (rec.hashes.get(hash)||0)+1);
+        }
+      } else {
+        sl.lastHash = hash; sl.staticRun = 1;
+      }
+      this._diag = `slot${s} sx=${sl.screen_x.toFixed(0)} sy=${sl.screen_y.toFixed(0)} crop ${cw}x${ch} hold=${sl.staticRun}`;
     }
   }
 
@@ -166,8 +177,8 @@ export class SpriteBake {
   }
   statsText(){
     const s=this.stats();
-    const sl=(i)=>{const x=this.slot[i];return `S${i} ${x.active?'act':'---'} sid=0x${(x.sprite_id&0xffff).toString(16).padStart(4,'0')} settle=${x.settleN}`;};
-    let t = `BAKE ${this.on?'ON':'off'}  v4-pos\n`;
+    const sl=(i)=>{const x=this.slot[i];return `S${i} ${x.active?'act':'---'} sid=0x${(x.sprite_id&0xffff).toString(16).padStart(4,'0')} hold=${x.staticRun}`;};
+    let t = `BAKE ${this.on?'ON':'off'}  v5-static\n`;
     t += `${sl(0)}\n${sl(1)}\n`;
     t += `last: ${this._diag||'(no capture yet)'}\n`;
     t += `captured keys : ${s.keys}  (P1 ${s.p1}, P2 ${s.p2})\n`;
