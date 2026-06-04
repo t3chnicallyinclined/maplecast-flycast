@@ -46,7 +46,18 @@ codec. We capture what the game draws, keyed by the `sprite_id` it reports.
 | 3 | **ISOLATE** — separate the character from stage + HUD, with alpha | **The hard one.** See below. Deferred past P0. |
 | 4 | **DRIVE** — make the game display every `sprite_id` | organic play + scripted move inputs; training mode for clean backgrounds; `.mcrec` replays for repeatability. See below. |
 
-### Sub-problem 3 (ISOLATE) — options, ranked
+### Sub-problem 3 (ISOLATE) — ALREADY SOLVED in the WebGPU renderer
+
+**Update (2026-06-04):** the WebGPU renderer already isolates characters.
+`pvr2-renderer.mjs` `customBg` mode (UI: `gfx_customBg` + `floorZ` slider,
+default 0.003) skips opaque + translucent geometry below `floorZ` (the
+stage/floor), skips FillBGP, and excludes the HUD by screen-Y (avgY<=120).
+It also supports an **offscreen render target**. That is character-on-
+transparent isolation — done, tested, shipping. The bake should reuse this
+rather than reimplement GL render-pass skipping in C++. The options below are
+kept for reference / for a C++-only path if ever needed.
+
+### Sub-problem 3 (ISOLATE) — options, ranked (reference)
 
 Characters are translucent textured polygons over an opaque stage, plus a HUD
 (per docs/ARCHITECTURE.md). Candidate isolation methods:
