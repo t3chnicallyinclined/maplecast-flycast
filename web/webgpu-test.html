@@ -279,7 +279,15 @@ const BAKE=new SpriteBake(); window._bake=BAKE;
   panel.insertBefore(box, panel.firstChild);
   box.querySelector('#bk_on').onchange=e=>{
     BAKE.on=e.target.checked;
-    if(BAKE.on){ window.DBG.customBg=true; const cb=document.getElementById('gfx_customBg'); if(cb)cb.checked=true; }
+    if(BAKE.on){
+      // Isolate characters: render TRANSLUCENT ONLY. The stage floor is
+      // opaque/punch-through; characters are translucent. Dropping opaque +
+      // punch leaves just the characters on a transparent background, which
+      // the alpha-bbox capture then crops tight (position-independent).
+      window.DBG.drawOpaque=false; window.DBG.drawPunch=false; window.DBG.drawTrans=true;
+      const o=document.getElementById('dbg_opaque'), p=document.getElementById('dbg_punch'), t=document.getElementById('dbg_trans');
+      if(o)o.checked=false; if(p)p.checked=false; if(t)t.checked=true;
+    }
   };
   box.querySelector('#bk_dl').onclick=()=>BAKE.downloadMontage();
   box.querySelector('#bk_rst').onclick=()=>BAKE.reset();

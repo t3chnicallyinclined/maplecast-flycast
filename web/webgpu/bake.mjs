@@ -74,31 +74,48 @@ export class SpriteBake {
   }
 
   // --- capture ----------------------------------------------------------
+  // With the renderer isolating characters (translucent-only -> transparent
+  // background, no floor), we crop TIGHT to each character's alpha bounding
+  // box. That makes the capture position-independent: the same sprite_id
+  // yields the same tight crop no matter where the camera placed it, so a
+  // held pose hashes identically. Slot 0 searches the left half, slot 1 the
+  // right half, to keep the two characters apart.
   onRendered(webgpuCanvas){
     if (!this.on || !this.inMatch) return;
     const W = webgpuCanvas.width, H = webgpuCanvas.height;
     if (!W || !H) return;
-    // pull the isolated frame off the WebGPU canvas into a 2D canvas
     if (this._c2.width !== W || this._c2.height !== H){ this._c2.width=W; this._c2.height=H; }
     this._x2.clearRect(0,0,W,H);
     try { this._x2.drawImage(webgpuCanvas, 0, 0, W, H); }
     catch(e){ this._lastErr = String(e); return; }
+    let full; try { full = this._x2.getImageData(0,0,W,H); } catch(e){ this._lastErr=String(e); return; }
+    const px = full.data;
 
     for (let s=0; s<2; s++){
       const sl = this.slot[s];
       if (!sl.active) continue;
       if (sl.settleN < SETTLE) continue;        // skew guard: only settled sprites
-      const fx0 = (s===1) ? (1-this.box.x1) : this.box.x0;
-      const fx1 = (s===1) ? (1-this.box.x0) : this.box.x1;
-      let x0=(fx0*W)|0, x1=(fx1*W)|0, y0=(this.box.y0*H)|0, y1=(this.box.y1*H)|0;
-      x0=Math.max(0,x0); y0=Math.max(0,y0); x1=Math.min(W,x1); y1=Math.min(H,y1);
-      const cw=x1-x0, ch=y1-y0; if (cw<=0||ch<=0) continue;
-      let img; try { img = this._x2.getImageData(x0,y0,cw,ch); } catch(e){ this._lastErr=String(e); continue; }
+      // alpha bounding box within this slot's half of the frame
+      const hx0 = s===0 ? 0 : (W>>1), hx1 = s===0 ? (W>>1) : W;
+      let minx=W, miny=H, maxx=-1, maxy=-1;
+      for (let y=0; y<H; y++){
+        const ro = y*W*4;
+        for (let x=hx0; x<hx1; x++){
+          if (px[ro + x*4 + 3] > 16){          // alpha > 16 => character pixel
+            if (x<minx) minx=x; if (x>maxx) maxx=x;
+            if (y<miny) miny=y; if (y>maxy) maxy=y;
+          }
+        }
+      }
+      if (maxx<minx) { this._emptySlot=s; continue; }   // nothing visible (bg not transparent?)
+      const cw=maxx-minx+1, ch=maxy-miny+1;
+      if (cw<8 || ch<8) continue;                        // too small => noise
+      let img; try { img = this._x2.getImageData(minx,miny,cw,ch); } catch(e){ this._lastErr=String(e); continue; }
       const hash = this._fnv(img.data);
       const key = `${s}|${sl.char_id}|${sl.sprite_id}`;
       let rec = this.caps.get(key);
       if (!rec){ rec = { slot:s, char_id:sl.char_id, sprite_id:sl.sprite_id,
-                         hashes:new Map(), occ:0, firstImg:img }; this.caps.set(key, rec); }
+                         hashes:new Map(), occ:0, firstImg:img, w:cw, h:ch }; this.caps.set(key, rec); }
       rec.occ++;
       rec.hashes.set(hash, (rec.hashes.get(hash)||0)+1);
     }
@@ -145,7 +162,10 @@ export class SpriteBake {
   downloadMontage(){
     const recs=[...this.caps.values()];
     if(!recs.length){ alert('no captures yet'); return; }
-    const cw=recs[0].firstImg.width, ch=recs[0].firstImg.height;
+    // tight crops are variable-sized -> grid on the max cell size
+    const pad=4;
+    const cw=Math.max(...recs.map(r=>r.firstImg.width))+pad;
+    const ch=Math.max(...recs.map(r=>r.firstImg.height))+pad;
     const cols=Math.ceil(Math.sqrt(recs.length)), rows=Math.ceil(recs.length/cols);
     const cv=document.createElement('canvas'); cv.width=cols*cw; cv.height=rows*ch;
     const cx=cv.getContext('2d');
