@@ -277,18 +277,11 @@ const BAKE=new SpriteBake(); window._bake=BAKE;
     +'<pre id="bk_stats" style="font-size:10px;color:#0f8;background:#000;padding:4px;margin:4px 0;white-space:pre">off</pre>'
     +'<button id="bk_dl">Montage + CSV</button> <button id="bk_rst">Reset</button>';
   panel.insertBefore(box, panel.firstChild);
-  box.querySelector('#bk_on').onchange=e=>{
-    BAKE.on=e.target.checked;
-    if(BAKE.on){
-      // Isolate characters: render TRANSLUCENT ONLY. The stage floor is
-      // opaque/punch-through; characters are translucent. Dropping opaque +
-      // punch leaves just the characters on a transparent background, which
-      // the alpha-bbox capture then crops tight (position-independent).
-      window.DBG.drawOpaque=false; window.DBG.drawPunch=false; window.DBG.drawTrans=true;
-      const o=document.getElementById('dbg_opaque'), p=document.getElementById('dbg_punch'), t=document.getElementById('dbg_trans');
-      if(o)o.checked=false; if(p)p.checked=false; if(t)t.checked=true;
-    }
-  };
+  // Bake just toggles capture. Isolate the character however works for you
+  // FIRST: either Custom Background + raise Floor Z (e.g. 0.094) until only the
+  // character shows, OR uncheck Opaque + Punch (translucent-only). The
+  // alpha-bbox capture needs a transparent background, which both give.
+  box.querySelector('#bk_on').onchange=e=>{ BAKE.on=e.target.checked; };
   box.querySelector('#bk_dl').onclick=()=>BAKE.downloadMontage();
   box.querySelector('#bk_rst').onclick=()=>BAKE.reset();
   setInterval(()=>{ const el=document.getElementById('bk_stats'); if(el) el.textContent=BAKE.statsText(); },500);

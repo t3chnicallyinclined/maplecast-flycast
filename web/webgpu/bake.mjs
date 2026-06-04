@@ -95,8 +95,12 @@ export class SpriteBake {
       const sl = this.slot[s];
       if (!sl.active) continue;
       if (sl.settleN < SETTLE) continue;        // skew guard: only settled sprites
-      // alpha bounding box within this slot's half of the frame
-      const hx0 = s===0 ? 0 : (W>>1), hx1 = s===0 ? (W>>1) : W;
+      // alpha bounding box. If the other point char is on screen, restrict to
+      // this slot's half so we don't merge the two; if this char is alone,
+      // search the full width so a walking character is never clipped.
+      const other = this.slot[s^1].active;
+      const hx0 = !other ? 0 : (s===0 ? 0 : (W>>1));
+      const hx1 = !other ? W : (s===0 ? (W>>1) : W);
       let minx=W, miny=H, maxx=-1, maxy=-1;
       for (let y=0; y<H; y++){
         const ro = y*W*4;
