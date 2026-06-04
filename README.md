@@ -285,6 +285,8 @@ maplecast-flycast/
 | [MVC2-MEMORY-MAP.md](docs/MVC2-MEMORY-MAP.md) | 253-byte per-frame RAM extraction |
 | [WASM-BUILD-GUIDE.md](docs/WASM-BUILD-GUIDE.md) | Building the WASM renderer (Emscripten) |
 | [STREAMING-OPTIONS.md](docs/STREAMING-OPTIONS.md) | Why TA mirror streaming beats H.264 |
+| [ROM-ASSET-CLIENT.md](docs/ROM-ASSET-CLIENT.md) | Preloaded sprite-atlas streaming (Option 6) — research, pixel-level verification, next steps |
+| [BAKE-HARNESS-PLAN.md](docs/BAKE-HARNESS-PLAN.md) | Sprite bake harness — phased plan to build the atlas from the emulator |
 
 ---
 
