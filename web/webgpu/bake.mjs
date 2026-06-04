@@ -111,8 +111,11 @@ export class SpriteBake {
           }
         }
       }
-      if (maxx<minx) { this._emptySlot=s; continue; }   // nothing visible (bg not transparent?)
+      if (maxx<minx) { this._diag=`slot${s}: NO pixels (bg not transparent? enable Custom Background)`; continue; }
       const cw=maxx-minx+1, ch=maxy-miny+1;
+      // diagnostic: did the bbox fill the whole search region? -> bg not transparent
+      const full = (minx<=hx0 && maxx>=hx1-1 && miny<=0 && maxy>=H-1);
+      this._diag = `slot${s} crop ${cw}x${ch}${full?' [FULL-REGION! bg not transparent]':''}`;
       if (cw<8 || ch<8) continue;                        // too small => noise
       let img; try { img = this._x2.getImageData(minx,miny,cw,ch); } catch(e){ this._lastErr=String(e); continue; }
       const hash = this._fnv(img.data);
@@ -150,7 +153,10 @@ export class SpriteBake {
   }
   statsText(){
     const s=this.stats();
-    let t = `BAKE ${this.on?'ON':'off'} (settled sprites only)\n`;
+    const sl=(i)=>{const x=this.slot[i];return `S${i} ${x.active?'act':'---'} sid=0x${(x.sprite_id&0xffff).toString(16).padStart(4,'0')} settle=${x.settleN}`;};
+    let t = `BAKE ${this.on?'ON':'off'}  v3-bbox\n`;
+    t += `${sl(0)}\n${sl(1)}\n`;
+    t += `last: ${this._diag||'(no capture yet)'}\n`;
     t += `captured keys : ${s.keys}  (P1 ${s.p1}, P2 ${s.p2})\n`;
     t += `recurred(>=2) : ${s.recur}\n`;
     t += `pixel-STABLE  : ${s.stable}\n`;
