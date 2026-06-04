@@ -22,10 +22,19 @@ if len(sys.argv) < 2:
     print("usage: python scripts/analyze-statelog.py <statelog.csv>")
     sys.exit(1)
 
+REQUIRED = ("in_match", "char_id", "sprite_id", "anim_state", "anim_timer",
+            "palette", "screen_x", "screen_y", "facing")
 rows = []
+skipped = 0
 with open(sys.argv[1], newline="") as f:
     for r in csv.DictReader(f):
+        # A killed process can leave a truncated final line -> missing fields.
+        if any(r.get(k) in (None, "") for k in REQUIRED):
+            skipped += 1
+            continue
         rows.append(r)
+if skipped:
+    print(f"(skipped {skipped} malformed/truncated row(s))")
 
 # Only analyze in-match frames; menus/loading produce junk sprite ids.
 inmatch = [r for r in rows if r["in_match"] == "1"]

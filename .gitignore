@@ -103,3 +103,5 @@ maplecast.db/
 *.mcrec
 xinput-trace.log
 replay-trace.log
+statelog.csv
+smoke.csv
