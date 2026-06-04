@@ -1277,6 +1277,44 @@ void serverPublish(TA_context* ctx)
 	// Still increment the frame counter so local overlays/telemetry work.
 	static uint32_t _localFrameNum = 0;
 	_localFrameNum++;
+
+	// === MAPLECAST_STATELOG — per-frame RAM state probe (ROM-asset-client test)
+	// Read-only readGameState() + CSV append. Placed BEFORE the PVR snapshot
+	// and all wire/diff/compress work so it cannot perturb the deterministic
+	// mirror stream (see docs/ARCHITECTURE.md "THE WIRE IS DETERMINISTIC").
+	// Runs every frame regardless of client connection, so it works in
+	// -ServerOnly mode too. Completely inert unless MAPLECAST_STATELOG is set.
+	// This is the Tele-0 per-frame state read from docs/MATCH-DATA-PLATFORM.md.
+	{
+		static FILE* _stateLog = nullptr;
+		static bool  _stateLogInit = false;
+		if (!_stateLogInit) {
+			_stateLogInit = true;
+			if (const char* path = std::getenv("MAPLECAST_STATELOG")) {
+				_stateLog = fopen(path, "w");
+				if (_stateLog)
+					fprintf(_stateLog, "frame,in_match,slot,char_id,active,"
+						"sprite_id,anim_state,anim_timer,facing,screen_x,"
+						"screen_y,palette,anim_ptr\n");
+			}
+		}
+		if (_stateLog) {
+			maplecast_gamestate::GameState gs;
+			maplecast_gamestate::readGameState(gs);
+			for (int i = 0; i < 6; i++) {
+				const maplecast_gamestate::CharacterState& c = gs.chars[i];
+				if (!c.active) continue;
+				fprintf(_stateLog,
+					"%u,%u,%d,%u,%u,%u,%u,%u,%u,%.2f,%.2f,%u,0x%08X\n",
+					_localFrameNum, gs.in_match, i, c.character_id, c.active,
+					c.sprite_id, c.animation_state, c.anim_timer,
+					c.facing_right, c.screen_x, c.screen_y, c.palette_id,
+					c.anim_pointer);
+			}
+			if ((_localFrameNum % 60) == 0) fflush(_stateLog);
+		}
+	}
+
 	if (!maplecast_ws::active() || maplecast_ws::clientCount() == 0) {
 		// Update frame counter + basic telemetry for local overlays
 		_atomicCurrentFrame.store(_localFrameNum, std::memory_order_release);
