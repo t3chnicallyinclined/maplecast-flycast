@@ -263,8 +263,28 @@ import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs';
 import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
+import {SpriteBake} from './webgpu/bake.mjs';
 
 const canvas=document.getElementById('c'), ov=document.getElementById('ov'), st=document.getElementById('st');
+const BAKE=new SpriteBake(); window._bake=BAKE;
+// --- Bake harness UI (injected into the right panel) ---
+(function(){
+  const panel=document.getElementById('panel'); if(!panel) return;
+  const box=document.createElement('div');
+  box.style.cssText='border:1px solid #0a6;margin:6px 0;padding:6px;background:#021';
+  box.innerHTML='<b style="color:#0f8">SPRITE BAKE</b><br>'
+    +'<label><input type="checkbox" id="bk_on"> Bake mode (auto customBg)</label><br>'
+    +'<pre id="bk_stats" style="font-size:10px;color:#0f8;background:#000;padding:4px;margin:4px 0;white-space:pre">off</pre>'
+    +'<button id="bk_dl">Montage + CSV</button> <button id="bk_rst">Reset</button>';
+  panel.insertBefore(box, panel.firstChild);
+  box.querySelector('#bk_on').onchange=e=>{
+    BAKE.on=e.target.checked;
+    if(BAKE.on){ window.DBG.customBg=true; const cb=document.getElementById('gfx_customBg'); if(cb)cb.checked=true; }
+  };
+  box.querySelector('#bk_dl').onclick=()=>BAKE.downloadMontage();
+  box.querySelector('#bk_rst').onclick=()=>BAKE.reset();
+  setInterval(()=>{ const el=document.getElementById('bk_stats'); if(el) el.textContent=BAKE.statsText(); },500);
+})();
 let fc=0,lt=performance.now(),fps=0,dMs=0,pMs=0,rMs=0,wB=0;
 // Process latency tracking (WS arrival → render complete)
 let e2eSum=0,e2eCount=0,e2eMax=0,e2eMin=999,dropped=0,totalFrames=0,parsed_passes=1;
@@ -728,9 +748,12 @@ async function main(){
         ss('Connecting...');
         const host=location.hostname;
         const proto=location.protocol==='https:'?'wss':'ws';
+        // ?ws=ws://localhost:7200 connects straight to a local mirror server
+        // (bake mode) — skips the relay/nginx /ws path and WebTransport.
+        const _wsOverride=new URLSearchParams(location.search).get('ws');
         const transport=new AdaptiveTransport({
-            wsUrl: `${proto}://${host}/ws`,
-            wtUrl: `https://${host}/webtransport`,  // Will fail gracefully → WS fallback
+            wsUrl: _wsOverride || `${proto}://${host}/ws`,
+            wtUrl: _wsOverride ? null : `https://${host}/webtransport`,  // Will fail gracefully → WS fallback
             onstatus: (msg)=>ss(msg),
             onopen: ()=>ss(`Connected via ${transport.type} — waiting for SYNC`,'ok'),
             onclose: ()=>ss('Disconnected'),
@@ -744,6 +767,9 @@ async function main(){
                     }
                     return;
                 }
+                // GSTA state broadcast: 'GSTA' + serialized GameState (char_id,
+                // sprite_id, pos). Routed to the bake harness; never a TA frame.
+                if(SpriteBake.isGSTA(d)){ try{ BAKE.onGSTA(d); }catch(e){} return; }
                 try{
                     const wsArrival=performance.now();
                     if(lastFrameArrival>0){
@@ -775,6 +801,7 @@ async function main(){
                         const rt=DBG.resScale>1?PP.getRenderTarget():null;
                         R.renderFrame(g,T,fr.pvrSnapshot,D.vram,DBG,rt);
                         if(rt&&R._lastEncoder){PP.blit(R._lastEncoder,R.ctx.getCurrentTexture().createView(),canvas.width,canvas.height,DBG);R.dev.queue.submit([R._lastEncoder.finish()]);}
+                        BAKE.onRendered(canvas);
                         rMs=performance.now()-t2;
                         totalFrames++; renderFrames++;
                         const total=dMs+pMs+rMs;
@@ -872,6 +899,7 @@ async function main(){
             const rt=DBG.resScale>1?PP.getRenderTarget():null;
             R.renderFrame(g,T,snap,D.vram,DBG,rt);
             if(rt&&R._lastEncoder){PP.blit(R._lastEncoder,R.ctx.getCurrentTexture().createView(),canvas.width,canvas.height,DBG);R.dev.queue.submit([R._lastEncoder.finish()]);};
+            BAKE.onRendered(canvas);
             rMs=performance.now()-t2;
             totalFrames++; renderFrames++;
             const total=dMs+pMs+rMs;
