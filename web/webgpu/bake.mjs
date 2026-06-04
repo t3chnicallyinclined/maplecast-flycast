@@ -35,10 +35,25 @@ const charName = (id) => MVC2_CHARS[id] || `char${id}`;
 // One sample is recorded per held period (rising edge), so a sprite that recurs
 // across multiple holds gives a real cross-occurrence stability test.
 const STATIC_HOLD = 3;
+// Tolerance for the "held" test: the crop counts as unchanged if at most this
+// FRACTION of its pixels differ from the previous frame (per-channel noise
+// floor of 8/255). Exact byte-identity (0) was too strict on the live prod
+// stream — translucent shadow/super-meter shimmer + dither flipped a handful
+// of pixels every frame, so the hold counter never advanced and nothing was
+// captured. A tiny tolerance still requires the character to be visually held.
+const STATIC_TOL = 0.004;   // 0.4% of pixels
 
 export class SpriteBake {
   constructor() {
     this.on = false;
+    // Which render slot to bake: 0 = P1 only (default — your character),
+    // 1 = P2 only, -1 = both. Restricting to your own (idle) character keeps
+    // the moving opponent's unstable, mid-animation captures out of the atlas.
+    this.slotFilter = 0;
+    // Full-coverage capture: grab the first clean frame of every sprite_id
+    // (vs. the default 3-frame "held" gate). For building a complete atlas to
+    // mirror the animation. Furniture is poly-filtered out, so frames are clean.
+    this.captureAll = false;
     this.inMatch = 0;
     // per render-slot (0=P1 point, 1=P2 point) live + settle tracking
     this.slot = [ this._blankSlot(), this._blankSlot() ];
@@ -53,7 +68,7 @@ export class SpriteBake {
     this._x2 = this._c2.getContext('2d', { willReadFrequently:true });
   }
   _blankSlot(){ return { active:0, char_id:0, sprite_id:-1, screen_x:0, screen_y:0,
-                         facing:0, lastHash:'', staticRun:0 }; }
+                         facing:0, staticRun:0, prevPix:null, prevW:0, prevH:0, lastDiff:1 }; }
 
   // --- GSTA intake ------------------------------------------------------
   // d: Uint8Array, d[0..3]='GSTA', then 261-byte serialized GameState.
@@ -94,8 +109,9 @@ export class SpriteBake {
     const px = full.data;
 
     for (let s=0; s<2; s++){
+      if (this.slotFilter>=0 && s!==this.slotFilter) continue;  // skip the slot we're not baking
       const sl = this.slot[s];
-      if (!sl.active){ sl.staticRun=0; sl.lastHash=''; continue; }
+      if (!sl.active){ sl.staticRun=0; sl.prevPix=null; continue; }
       // Search region: centered on the game-reported screen position
       // (X/Y_Position_Screen, offsets 0xE0/0xE4). The game screen space is
       // ~640x480; map to canvas. This excludes the frame-wide translucent
@@ -106,7 +122,12 @@ export class SpriteBake {
       const posOK = (sl.screen_x>1 && sl.screen_x<640 && sl.screen_y>1 && sl.screen_y<480);
       let hx0, hx1, vy0, vy1;
       if (posOK) {
-        const RW = W*0.16, RU = H*0.62, RD = H*0.12;  // generous; up>down (feet origin)
+        // RD (downward extent) is tight on purpose: screen_y is ~the feet, and
+        // BELOW the feet live the perpetually-animated translucent HUD super-
+        // meter bar + the floor shadow. Letting the alpha-bbox reach them made
+        // the crop change every frame (hold stuck at 1) even when the character
+        // pose was held. Stop ~just below the feet so only the body is hashed.
+        const RW = W*0.16, RU = H*0.55, RD = H*0.02;  // up = head/jump room; down = feet only
         hx0 = Math.max(0, (cx-RW)|0); hx1 = Math.min(W, (cx+RW)|0);
         vy0 = Math.max(0, (cy-RU)|0); vy1 = Math.min(H, (cy+RD)|0);
       } else {
@@ -125,30 +146,59 @@ export class SpriteBake {
           }
         }
       }
-      if (maxx<minx) { this._diag=`slot${s}: NO pixels in region (sx=${sl.screen_x.toFixed(0)} sy=${sl.screen_y.toFixed(0)})`; sl.staticRun=0; sl.lastHash=''; continue; }
+      if (maxx<minx) { this._diag=`slot${s}: NO pixels in region (sx=${sl.screen_x.toFixed(0)} sy=${sl.screen_y.toFixed(0)})`; sl.staticRun=0; sl.prevPix=null; continue; }
       const cw=maxx-minx+1, ch=maxy-miny+1;
       if (cw<8 || ch<8) { sl.staticRun=0; continue; }    // too small => noise
       let img; try { img = this._x2.getImageData(minx,miny,cw,ch); } catch(e){ this._lastErr=String(e); continue; }
       const hash = this._fnv(img.data);
 
-      // Rendered-static gate: only act when the crop is byte-identical to the
-      // previous frame (character + everything in the crop is HELD). Record one
-      // sample on the rising edge of a hold so recurring holds give a real
-      // cross-occurrence test.
-      if (hash === sl.lastHash) {
-        sl.staticRun++;
-        if (sl.staticRun === STATIC_HOLD) {
-          const key = `${s}|${sl.char_id}|${sl.sprite_id}`;
-          let rec = this.caps.get(key);
-          if (!rec){ rec = { slot:s, char_id:sl.char_id, sprite_id:sl.sprite_id,
-                             hashes:new Map(), occ:0, firstImg:img, w:cw, h:ch }; this.caps.set(key, rec); }
-          rec.occ++;
-          rec.hashes.set(hash, (rec.hashes.get(hash)||0)+1);
+      // Rendered-"static" gate with tolerance. The crop counts as HELD when it
+      // matches the previous frame in size AND differs by <= STATIC_TOL of its
+      // pixels. (Exact byte-identity was too strict on the live stream — see
+      // STATIC_TOL.) A changed bbox size means the scene moved → reset.
+      const cur = img.data;
+      const dimsMatch = (sl.prevW===cw && sl.prevH===ch && sl.prevPix && sl.prevPix.length===cur.length);
+      let diffFrac = 1;
+      if (dimsMatch) {
+        let diff = 0; const npx = cur.length>>2; const pp = sl.prevPix;
+        for (let i=0;i<cur.length;i+=4){
+          if (Math.abs(cur[i]-pp[i])>8 || Math.abs(cur[i+1]-pp[i+1])>8 ||
+              Math.abs(cur[i+2]-pp[i+2])>8 || Math.abs(cur[i+3]-pp[i+3])>8) diff++;
         }
-      } else {
-        sl.lastHash = hash; sl.staticRun = 1;
+        diffFrac = diff / npx;
       }
-      this._diag = `slot${s} sx=${sl.screen_x.toFixed(0)} sy=${sl.screen_y.toFixed(0)} crop ${cw}x${ch} hold=${sl.staticRun}`;
+      sl.prevPix = cur.slice(); sl.prevW = cw; sl.prevH = ch; sl.lastDiff = diffFrac;
+
+      const held = (dimsMatch && diffFrac <= STATIC_TOL);
+      if (held) sl.staticRun++; else sl.staticRun = 1;
+      const key = `${s}|${sl.char_id}|${sl.sprite_id}`;
+      // Capture rule:
+      //  - static-hold (default): only a pose HELD for STATIC_HOLD frames →
+      //    verification-grade, byte-stable captures (idle).
+      //  - captureAll (full coverage): the FIRST clean frame of each new
+      //    sprite_id. Furniture is filtered at the poly level, so any frame's
+      //    crop is already the clean character — enough to build a complete
+      //    atlas for the animation-match test. At 20Hz state this matches the
+      //    poses the stream actually reports; 60Hz state makes motion smooth.
+      const doCapture = this.captureAll ? !this.caps.has(key)
+                                        : (held && sl.staticRun === STATIC_HOLD);
+      if (doCapture) {
+        let rec = this.caps.get(key);
+        if (!rec){
+          // Anchor: offset from the game-reported screen pos to the crop's
+          // top-left, in GAME space (640x480) so the atlas is resolution-
+          // independent. facing records which way the char faced at capture.
+          rec = { slot:s, char_id:sl.char_id, sprite_id:sl.sprite_id,
+                  hashes:new Map(), occ:0, firstImg:img, w:cw, h:ch,
+                  facing:sl.facing,
+                  dx:(minx*640/W - sl.screen_x), dy:(miny*480/H - sl.screen_y),
+                  wG:(cw*640/W), hG:(ch*480/H) };
+          this.caps.set(key, rec);
+        }
+        rec.occ++;
+        rec.hashes.set(hash, (rec.hashes.get(hash)||0)+1);
+      }
+      this._diag = `slot${s} sx=${sl.screen_x.toFixed(0)} sy=${sl.screen_y.toFixed(0)} crop ${cw}x${ch} hold=${sl.staticRun} diff=${(diffFrac*100).toFixed(1)}%`;
     }
   }
 
@@ -212,6 +262,40 @@ export class SpriteBake {
           +`${r.occ},${r.hashes.size},${r.hashes.size===1?1:0},${hs[0]}\n`; }
     const cu=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
     const ca=document.createElement('a'); ca.href=cu; ca.download='bake_manifest.csv'; ca.click(); URL.revokeObjectURL(cu);
+  }
+  // Client-usable atlas: a packed PNG + a JSON sprite table keyed by
+  // char_id -> sprite_id -> {x,y,w,h (atlas px), dx,dy,wG,hG (game space),
+  // facing}. This is what the Sprite Client (sprite-client.mjs) consumes to
+  // render characters from the 253-byte GSTA state with no TA stream.
+  // Distinct from downloadMontage() (a flat verification contact-sheet): this
+  // dedupes by (char_id,sprite_id) across render slots and carries the anchor
+  // geometry a renderer needs.
+  downloadAtlas(){
+    const recs=[...this.caps.values()];
+    if(!recs.length){ alert('no captures yet'); return; }
+    // Dedupe by char|sprite (merge P1/P2 slots; first capture wins). The game
+    // stores one sprite_id regardless of facing, so one canonical crop per key.
+    const byKey=new Map();
+    for(const r of recs){ const k=r.char_id+'|'+r.sprite_id; if(!byKey.has(k)) byKey.set(k,r); }
+    const uniq=[...byKey.values()];
+    const pad=2;
+    const cw=Math.max(...uniq.map(r=>r.firstImg.width))+pad;
+    const ch=Math.max(...uniq.map(r=>r.firstImg.height))+pad;
+    const cols=Math.ceil(Math.sqrt(uniq.length)), rows=Math.ceil(uniq.length/cols);
+    const cv=document.createElement('canvas'); cv.width=cols*cw; cv.height=rows*ch;
+    const cx=cv.getContext('2d');
+    const atlas={ screenW:640, screenH:480, image:'bake_atlas.png', chars:{} };
+    uniq.forEach((r,i)=>{ const col=i%cols, row=(i/cols)|0, px=col*cw, py=row*ch;
+      cx.putImageData(r.firstImg, px, py);
+      const c=atlas.chars[r.char_id]||(atlas.chars[r.char_id]={name:charName(r.char_id),sprites:{}});
+      c.sprites[r.sprite_id]={ x:px, y:py, w:r.firstImg.width, h:r.firstImg.height,
+                               dx:+r.dx.toFixed(2), dy:+r.dy.toFixed(2),
+                               wG:+r.wG.toFixed(2), hG:+r.hG.toFixed(2), facing:r.facing };
+    });
+    cv.toBlob(b=>{ const u=URL.createObjectURL(b); const a=document.createElement('a');
+      a.href=u; a.download='bake_atlas.png'; a.click(); URL.revokeObjectURL(u); });
+    const ju=URL.createObjectURL(new Blob([JSON.stringify(atlas)],{type:'application/json'}));
+    const ja=document.createElement('a'); ja.href=ju; ja.download='bake_atlas.json'; ja.click(); URL.revokeObjectURL(ju);
   }
   reset(){ this.caps.clear(); this.slot=[this._blankSlot(),this._blankSlot()]; this._lastErr=''; }
 }

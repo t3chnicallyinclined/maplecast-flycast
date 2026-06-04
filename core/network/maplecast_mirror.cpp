@@ -1743,11 +1743,13 @@ done_diff:
 		maplecast_ws::broadcastBinary(compData, compSize);
 		compressedSize = (uint32_t)compSize;
 
-		// Broadcast game state every 3 frames (~20Hz). "GSTA" magic +
+		// Broadcast game state every frame (~60Hz). "GSTA" magic +
 		// 253-byte serialized MVC2 state. Native client parses this for
-		// the hitbox/frame-data overlay. Negligible bandwidth (~1.7 KB/s).
+		// the hitbox/frame-data overlay; the ROM-asset/sprite client needs
+		// per-frame state so fast motion (dash/jump) tracks smoothly.
+		// Bandwidth ~5 KB/s (265 B * 60Hz) — still negligible.
 		static uint32_t _gsCounter = 0;
-		if (++_gsCounter >= 3) {
+		if (++_gsCounter >= 1) {
 			_gsCounter = 0;
 			maplecast_gamestate::GameState gs;
 			maplecast_gamestate::readGameState(gs);

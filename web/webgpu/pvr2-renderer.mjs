@@ -278,6 +278,7 @@ export class PVR2Renderer {
             for(let i=start;i<start+count;i++){
                 const pp=list[i]; if(!pp||pp.count<3||pp._s<0)continue;
                 const isp=pp.isp,tsp=pp.tsp,tcw=pp.tcw,pcw=pp.pcw;
+                if(dbg.excludeTex&&dbg.excludeTex.has(tcw>>>0))continue; // bake: drop shadow/meter/HUD textures → clean character only
                 let dm=(isp>>29)&7,cm=(isp>>27)&3,zw=(isp>>26)&1?0:1;
                 if(lt==='opaque'&&dbg.opDepthFunc>=0)dm=dbg.opDepthFunc;
                 if(lt==='opaque'&&dm===0)continue;
@@ -383,6 +384,7 @@ export class PVR2Renderer {
                         const polyIdx=tris[oi], idxStart=tris[oi+1];
                         const pp=translucent[polyIdx];
                         const isp=pp.isp,tsp=pp.tsp,tcw=pp.tcw,pcw=pp.pcw;
+                        if(dbg.excludeTex&&dbg.excludeTex.has(tcw>>>0))continue; // bake: drop furniture textures
                         let dm=6,zw=0,cm=(isp>>27)&3;
                         if(dbg.trDepthFunc!==undefined)dm=dbg.trDepthFunc;
                         if(dbg.trDepthWrite)zw=1;

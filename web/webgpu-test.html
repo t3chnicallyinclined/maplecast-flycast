@@ -259,11 +259,12 @@ canvas{display:block;background:transparent}
 import {FrameDecoder} from './webgpu/frame-decoder.mjs';
 import {TAParser} from './webgpu/ta-parser.mjs';
 import {TextureManager} from './webgpu/texture-manager.mjs';
-import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs';
+import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=2';
 import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
-import {SpriteBake} from './webgpu/bake.mjs?v=5';
+import {SpriteBake} from './webgpu/bake.mjs?v=9';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=2';
 
 const canvas=document.getElementById('c'), ov=document.getElementById('ov'), st=document.getElementById('st');
 const BAKE=new SpriteBake(); window._bake=BAKE;
@@ -274,8 +275,10 @@ const BAKE=new SpriteBake(); window._bake=BAKE;
   box.style.cssText='border:1px solid #0a6;margin:6px 0;padding:6px;background:#021';
   box.innerHTML='<b style="color:#0f8">SPRITE BAKE</b><br>'
     +'<label><input type="checkbox" id="bk_on"> Bake mode (auto-isolate)</label><br>'
+    +'<label>Bake slot: <select id="bk_slot"><option value="0">P1 only</option><option value="1">P2 only</option><option value="-1">Both</option></select></label><br>'
+    +'<label><input type="checkbox" id="bk_all"> Full coverage (capture every sprite_id)</label><br>'
     +'<pre id="bk_stats" style="font-size:10px;color:#0f8;background:#000;padding:4px;margin:4px 0;white-space:pre">off</pre>'
-    +'<button id="bk_dl">Montage + CSV</button> <button id="bk_rst">Reset</button>';
+    +'<button id="bk_dl">Montage + CSV</button> <button id="bk_atlas">Atlas (PNG+JSON)</button> <button id="bk_rst">Reset</button>';
   panel.insertBefore(box, panel.firstChild);
   // Enabling Bake auto-configures the clean isolation: TRANSLUCENT ONLY (drop
   // opaque + punch-through stage/HUD, no customBg floorZ slivers) -> characters
@@ -285,13 +288,62 @@ const BAKE=new SpriteBake(); window._bake=BAKE;
     if(BAKE.on){
       window.DBG.drawOpaque=false; window.DBG.drawPunch=false;
       window.DBG.drawTrans=true;  window.DBG.customBg=false;
+      // Bypass post-processing: resScale>1 routes through PP.blit, which feeds a
+      // per-frame `time` uniform (performance.now()) into the shader — that alone
+      // varies the canvas every frame and defeats the rendered-static gate.
+      // Raw 1x render is deterministic frame-to-frame for a still scene.
+      window.DBG.resScale=1;
+      window.DBG.fxaa=false; window.DBG.bloom=false; window.DBG.crtAdv=false; window.DBG.grain=false;
+      window.DBG.chromatic=0; window.DBG.pixelate=0; window.DBG.scanlines=0;
+      window.DBG.vignette=0; window.DBG.sharp=0; window.DBG.colorShift=0; window.DBG.sepia=0; window.DBG.edgeDetect=false;
       const set=(id,v)=>{const el=document.getElementById(id); if(el)el.checked=v;};
       set('dbg_opaque',false); set('dbg_punch',false); set('dbg_trans',true); set('gfx_customBg',false);
+      const resSel=document.getElementById('gfx_res'); if(resSel) resSel.value='1';
+      if(window._resizeRenderer) window._resizeRenderer();
+      // Drop the furniture textures (shadow, super-meter bar, HUD numbers) at the
+      // poly level so the bake captures ONLY the character's decoded sprite tiles —
+      // a clean sprite, not a screenshot crop. IDs from the live-frame poly
+      // dissection; if a session reloads VRAM these may shift (re-dissect).
+      window.DBG.excludeTex = new Set([0x5008f700, 0x0809be00, 0x1009ce00]);
+    } else {
+      delete window.DBG.excludeTex;
     }
   };
   box.querySelector('#bk_dl').onclick=()=>BAKE.downloadMontage();
+  box.querySelector('#bk_slot').onchange=e=>{ BAKE.slotFilter=+e.target.value; BAKE.reset(); };
+  box.querySelector('#bk_all').onchange=e=>{ BAKE.captureAll=e.target.checked; };
+  box.querySelector('#bk_atlas').onclick=()=>BAKE.downloadAtlas();
   box.querySelector('#bk_rst').onclick=()=>BAKE.reset();
   setInterval(()=>{ const el=document.getElementById('bk_stats'); if(el) el.textContent=BAKE.statsText(); },500);
+})();
+
+// --- Sprite Client (Option 6 proof): render chars from 253B GSTA + atlas, no TA ---
+const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
+(function(){
+  const panel=document.getElementById('panel'); if(!panel) return;
+  const box=document.createElement('div');
+  box.style.cssText='border:1px solid #06a;margin:6px 0;padding:6px;background:#012';
+  box.innerHTML='<b style="color:#0af">SPRITE CLIENT (Option 6)</b><br>'
+    +'<label><input type="checkbox" id="sc_on"> Render chars from 253B state (no TA)</label><br>'
+    +'atlas PNG <input type="file" id="sc_png" accept="image/png" style="font-size:10px"><br>'
+    +'atlas JSON <input type="file" id="sc_json" accept="application/json,.json" style="font-size:10px"><br>'
+    +'<pre id="sc_stats" style="font-size:10px;color:#0af;background:#000;padding:4px;margin:4px 0;white-space:pre">off</pre>';
+  panel.insertBefore(box, panel.firstChild);
+  // Sibling 640x480 canvas under the main WebGPU canvas, for side-by-side compare.
+  const scv=document.createElement('canvas'); scv.id='scc'; scv.width=640; scv.height=480;
+  scv.style.cssText='border:1px solid #06a;background:#111;display:none;margin-top:6px;max-width:100%';
+  (canvas.parentNode||document.body).appendChild(scv);
+  const scx=scv.getContext('2d');
+  let scOn=false;
+  box.querySelector('#sc_on').onchange=e=>{ scOn=e.target.checked; scv.style.display=scOn?'block':'none'; };
+  let pendingPng=null, pendingJson=null;
+  const tryLoad=async()=>{ if(pendingPng&&pendingJson){ try{ await SPRITECLIENT.loadAtlas(pendingJson,pendingPng); }catch(err){ console.error('atlas load',err); } } };
+  box.querySelector('#sc_png').onchange=async e=>{ pendingPng=e.target.files[0]||null; await tryLoad(); };
+  box.querySelector('#sc_json').onchange=async e=>{ const f=e.target.files[0]; if(f){ try{ pendingJson=JSON.parse(await f.text()); }catch(err){ console.error('atlas json',err); } } await tryLoad(); };
+  const tick=()=>{ if(scOn){ SPRITECLIENT.render(scx);
+      const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.statsText(); }
+    requestAnimationFrame(tick); };
+  requestAnimationFrame(tick);
 })();
 let fc=0,lt=performance.now(),fps=0,dMs=0,pMs=0,rMs=0,wB=0;
 // Process latency tracking (WS arrival → render complete)
@@ -777,7 +829,7 @@ async function main(){
                 }
                 // GSTA state broadcast: 'GSTA' + serialized GameState (char_id,
                 // sprite_id, pos). Routed to the bake harness; never a TA frame.
-                if(SpriteBake.isGSTA(d)){ try{ BAKE.onGSTA(d); }catch(e){} return; }
+                if(SpriteBake.isGSTA(d)){ try{ BAKE.onGSTA(d); SPRITECLIENT.onGSTA(d); }catch(e){} return; }
                 try{
                     const wsArrival=performance.now();
                     if(lastFrameArrival>0){
@@ -1062,6 +1114,68 @@ function doLeave(){
     if(gp.axes){const sx=19+(gp.axes[0]||0)*15,sy=19+(gp.axes[1]||0)*15;
         document.getElementById('pv_dot').style.left=sx+'px';document.getElementById('pv_dot').style.top=sy+'px';}
     if(joined)document.getElementById('padInfo').textContent='P'+(state.mySlot+1)+' LIVE | '+gp.id.substring(0,25);
+})();
+
+// ============================================================================
+// ON-SCREEN + KEYBOARD INPUT — drive the cab with no gamepad.
+// Sends the SAME 4-byte packet pollOnce() uses: [lt][rt][btn_hi][btn_lo], btn
+// active-low (0xFFFF = nothing pressed), via state.controlWs (wss://host/play
+// -> flycast:7200 unified WS). Independent of the relay/WebTransport frame path.
+// Click+HOLD an on-screen button to press it (a quick click = a tap). Toggle
+// Keyboard ON to use: arrows = D-pad, Enter = START, A/S/D = LP/HP/A1,
+// Z/X/C = LK/HK/A2. Requires JOIN P1/P2 first (sets state.mySlot + controlWs).
+// ============================================================================
+(function(){
+  const BIT={LP:0x0400,HP:0x0200,LK:0x0004,HK:0x0002,START:0x0008,UP:0x0010,DOWN:0x0020,LEFT:0x0040,RIGHT:0x0080};
+  const VIZ={UP:'pv_du',DOWN:'pv_dd',LEFT:'pv_dl',RIGHT:'pv_dr',START:'pv_st',LP:'pv_lp',HP:'pv_hp',LK:'pv_lk',HK:'pv_hk',A1:'pv_a1',A2:'pv_a2'};
+  let mask=0xFFFF, lt=0, rt=0;   // active-low buttons + analog A1/A2 triggers
+  function send(){
+    if(state.mySlot<0) return;                       // must JOIN first
+    const cws=state.controlWs;
+    if(!cws||cws.readyState!==WebSocket.OPEN) return;
+    const b=new Uint8Array(4); b[0]=lt; b[1]=rt; b[2]=(mask>>8)&0xFF; b[3]=mask&0xFF;
+    try{ cws.send(b); }catch(e){}
+  }
+  function setInput(name,on){
+    if(name==='A1') lt=on?255:0;
+    else if(name==='A2') rt=on?255:0;
+    else if(BIT[name]!==undefined){ if(on) mask&=~BIT[name]; else mask|=BIT[name]; }
+    else return;
+    const el=document.getElementById(VIZ[name]); if(el) el.style.background=on?'#0f0':'#222';
+    send();
+  }
+  window._tap=(name,ms=90)=>{ setInput(name,true); setTimeout(()=>setInput(name,false),ms); };
+
+  // Click + hold the pad-viz elements to press them.
+  for(const [name,id] of Object.entries(VIZ)){
+    const el=document.getElementById(id); if(!el) continue;
+    el.style.cursor='pointer'; el.style.userSelect='none'; el.title='click & hold = '+name;
+    el.addEventListener('pointerdown',e=>{e.preventDefault(); el.setPointerCapture?.(e.pointerId); setInput(name,true);});
+    const up=e=>{e.preventDefault(); setInput(name,false);};
+    el.addEventListener('pointerup',up); el.addEventListener('pointercancel',up);
+  }
+
+  // Keyboard (gated by a toggle so it doesn't hijack the page when not playing).
+  const KEYS={ArrowUp:'UP',ArrowDown:'DOWN',ArrowLeft:'LEFT',ArrowRight:'RIGHT',Enter:'START',KeyA:'LP',KeyS:'HP',KeyD:'A1',KeyZ:'LK',KeyX:'HK',KeyC:'A2'};
+  let kbOn=false;
+  addEventListener('keydown',e=>{ if(!kbOn) return; const n=KEYS[e.code]; if(!n) return; e.preventDefault(); if(!e.repeat) setInput(n,true); });
+  addEventListener('keyup',  e=>{ if(!kbOn) return; const n=KEYS[e.code]; if(!n) return; e.preventDefault(); setInput(n,false); });
+
+  // Heartbeat: re-send current state every 4s (flycast kicks idle slots after
+  // ~30s with no state change; a held/neutral pad needs periodic pings).
+  setInterval(()=>{ if(state.mySlot>=0) send(); }, 4000);
+
+  // Control row under the pad viz: keyboard toggle + a one-tap START.
+  const padInfo=document.getElementById('padInfo');
+  if(padInfo){
+    const row=document.createElement('div');
+    row.style.cssText='display:flex;gap:6px;justify-content:center;margin-top:4px;font-size:11px';
+    row.innerHTML='<button id="kb_toggle" style="padding:3px 8px;background:#024;color:#0af;border:1px solid #06a;cursor:pointer;font-family:inherit">⌨ Keyboard: OFF</button>'
+      +'<button id="tap_start" style="padding:3px 8px;background:#420;color:#fa0;border:1px solid #f80;cursor:pointer;font-family:inherit">TAP START</button>';
+    padInfo.parentNode.insertBefore(row, padInfo.nextSibling);
+    row.querySelector('#kb_toggle').onclick=e=>{ kbOn=!kbOn; e.target.textContent='⌨ Keyboard: '+(kbOn?'ON':'OFF'); e.target.style.background=kbOn?'#062':'#024'; };
+    row.querySelector('#tap_start').onclick=()=>window._tap('START',100);
+  }
 })();
 </script>
 </body>

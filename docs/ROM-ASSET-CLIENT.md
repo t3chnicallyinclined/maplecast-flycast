@@ -10,6 +10,46 @@
 
 ---
 
+## ⏩ Where we left off — 2026-06-04 (session 2) — READ THIS FIRST
+
+Recovered a disconnected session (it had run from `~/projects`, not the repo) and
+pushed the work forward. State now:
+
+- **Mapping verified by sight:** `char_id` (decimal) → `PL{char_id:02X}_DAT.BIN`
+  (HEX). 0=Ryu=PL00, **23/0x17=Cable=PL17**, 35/0x23=Dan=PL23. ⚠️ a prior note's
+  "Cable=PL23" was WRONG (PL23 is Dan).
+- **60Hz GSTA binary built** (`build-headless/flycast`; old one saved as
+  `flycast.bak-20hz`). NOT deployed. ⚠️ **prod is `149.28.44.118`** (hostname
+  `flycast-inputserver-nyc`), and its live binary is newer than our git baseline —
+  **prod is ahead of git**; back up the live binary before any headless deploy.
+  (CLAUDE.md still says 66.55.128.93 — topology drifted; reconcile.)
+- **PalMod investigated and RULED OUT** as the MVC2 ROM decoder (it ships
+  pre-extracted preview sheets in its own zlib `img2020.dat`; `RLEData` is its
+  storage codec, not MVC2's). See §3a of the PLAN doc.
+- **Original ROM-codec RE in progress** (decode sprites from the user's own ROM,
+  ship zero assets). Concrete findings: disc = `track03.bin` (GD-ROM, ISO9660,
+  2352-byte sectors, base LBA 45000); sprites in `PL{hex}_DAT.BIN`; each file =
+  16×u32 section header → GFX section (offset table of ~1533 PART entries) →
+  per-part blobs (small header + 4bpp data + 0xFF transparent runs). Parts
+  assemble into the 441 rip sprites via the EXTRAS list. **Remaining: crack the
+  exact pixel codec** (align one part-blob to its rip pixels — we have the rip as a
+  matched-pair oracle), then part→sprite assembly + palette. The
+  `reference-pldat-sprite-format` memory has the full reproduction details.
+
+**Decision pending (what's next):**
+- **Path A** — finish the codec RE → ship-from-user's-ROM (no assets). Contained
+  but multi-cycle.
+- **Path B (recommended)** — wire up the **sprite client** now using the community
+  rip as the atlas (it's a complete `sprite_id`-keyed source); prove the 253-byte
+  render end-to-end (PLAN §5 Phase 1→2). Codec RE resumes later as the shipping
+  path. The uncommitted `web/webgpu/sprite-client.mjs` is the start of this.
+
+NOTE: the ROM, the extracted `track03.bin`/`PL00_DAT.BIN`, and the RE scratch
+scripts live OUTSIDE the repo (`/tmp`, gitignored ROM in repo root) — they are not
+committed and must never be. Re-extract from the ROM per the memory notes.
+
+---
+
 ## TL;DR
 
 MapleCast currently streams **TA display-list commands + VRAM diffs** (~4 Mbps)
@@ -21,9 +61,15 @@ reported position. This is **[Option 6 in STREAMING-OPTIONS.md](STREAMING-OPTION
 now de-risked.
 
 - **Bandwidth:** ~4 Mbps → **~5 KB/s** (~800×), grounded in measured data.
-- **No GFX-codec RE needed.** The MVC2 sprite-graphics codec is *publicly
-  unsolved* (see [reference_pldat_sprite_format] memory). We sidestep it: **the
-  emulator decompresses the sprites for us**, and we bake its output.
+- **No GFX-codec RE needed.** We sidestep MVC2's sprite codec by having **the
+  emulator decompress the sprites for us** and baking the output (or by using a
+  community sprite rip, which is the same pixels pre-extracted). NOTE: a
+  2026-06-04 investigation briefly concluded "PalMod solves the codec" — that was
+  **wrong** (PalMod ships pre-extracted preview sheets in its own zlib `img2020.dat`;
+  it does not decode the MVC2 ROM). An open ROM-GFX decoder we can run on the
+  user's ROM is **still not confirmed**. See
+  [ROM-ASSET-CLIENT-PLAN.md](ROM-ASSET-CLIENT-PLAN.md) §3a and the
+  `reference-pldat-sprite-format` memory.
 - **Deterministic by construction:** the renderer is a pure function of the TA
   buffer (the [byte-perfect mirror](ARCHITECTURE.md#%EF%B8%8F-the-wire-is-deterministic-and-byte-perfect-commit-466d72d54)),
   and we proved `(char_id, sprite_id) → byte-identical pixels`.
@@ -47,10 +93,20 @@ Bonus finding: multiple `sprite_id`s sometimes share the **same** pixel hash
 The investigation started from `C:\Users\trist\Downloads\dasm_PLDAT\` (a
 community disassembler for MVC2's per-character `PLxx_DAT` files). We fully
 decoded the **sprite-assembly pipeline** (GFX offset table → EXTRAS part list →
-palette) but hit the wall that the **GFX pixel codec is RLE-compressed and not
-publicly cracked**. The pivot: don't decode the ROM bytes — let flycast render
-them and capture the output, keyed by `sprite_id`. Full PLDAT format notes live
-in the **`reference_pldat_sprite_format` memory**.
+palette). We initially believed the **GFX pixel codec was RLE-compressed and not
+publicly cracked**, so the pivot was: don't decode the ROM bytes — let flycast
+render them and capture the output, keyed by `sprite_id`.
+
+**Update (2026-06-04): the codec is NOT yet confirmed-solved-and-open.** A first
+pass thought PalMod's `RLEData` was the MVC2 decoder; a decode test disproved it
+— PalMod stores pre-extracted *preview sheets* in its own zlib `img2020.dat`
+(99.9% zlib, 8 images use RLE) keyed by PalMod unit/imgId, and does not touch the
+MVC2 ROM. dasm_PLDAT decodes PLxx_DAT *structure* (offset table, EXTRAS, palette)
+but not the pixel codec. So: community **rips** give us decoded pixels (good
+enough to build/test the client), but an open decoder we can run on the *user's
+ROM* is still an open item. How the rips were actually made (emulator VRAM dump
+vs. a custom decoder) is the thing to pin down. Full notes in the
+**`reference-pldat-sprite-format` memory**.
 
 ---
 
@@ -178,6 +234,7 @@ wanted. See the `reference_pldat_sprite_format` memory for the format split.
 iterations. (`git log master..HEAD --oneline`.)
 
 ## Related docs & context
+- [ROM-ASSET-CLIENT-PLAN.md](ROM-ASSET-CLIENT-PLAN.md) — **the forward build-out plan** (architecture decision, PVR2-transparency + ModNao findings, the bake-anchor gap, phased plan)
 - [STREAMING-OPTIONS.md](STREAMING-OPTIONS.md) — Option 6 (this), and why TA mirror beats H.264
 - [BAKE-HARNESS-PLAN.md](BAKE-HARNESS-PLAN.md) — the phased bake plan
 - [ARCHITECTURE.md](ARCHITECTURE.md) — wire format, the byte-perfect determinism guarantee, the four parsers

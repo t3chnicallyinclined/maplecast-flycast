@@ -109,6 +109,18 @@ for f in skin-picker.html client-settings.html network.html replays.html spectat
     fi
 done
 
+# Sync the WebGPU dev/test page + its pure-JS modules (sprite-bake + ROM-asset
+# client workbench). This is NOT king.html and not the production client.
+if [ -f "$LOCAL_WEB/webgpu-test.html" ]; then
+    scp "$LOCAL_WEB/webgpu-test.html" "$VPS_HOST:$REMOTE_DIR/webgpu-test.html"
+    echo "  webgpu-test.html deployed"
+fi
+if ls "$LOCAL_WEB/webgpu/"*.mjs >/dev/null 2>&1; then
+    ssh "$VPS_HOST" "mkdir -p $REMOTE_DIR/webgpu"
+    scp "$LOCAL_WEB/webgpu/"*.mjs "$VPS_HOST:$REMOTE_DIR/webgpu/"
+    echo "  webgpu/*.mjs deployed"
+fi
+
 # Step 5: Verify
 echo ""
 echo "[4/4] Verifying..."

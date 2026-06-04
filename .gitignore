@@ -41,6 +41,17 @@ savestates/
 *.mdf
 *.mds
 *.ccd
+*.img
+*.DCI
+*.dci
+*.VMI
+*.vmi
+# Dreamcast BIOS / flash firmware dumps (copyrighted)
+dc_boot.bin
+dc_flash.bin
+# Copyrighted ROM disc dumps sometimes dropped in the repo root during dev
+# (e.g. the MVC2 GD-ROM zip used for sprite-format RE on 2026-06-04).
+Marvel vs. Capcom 2*.zip
 roms/
 ROMs/
 rom/
