@@ -95,14 +95,27 @@ export class SpriteBake {
       const sl = this.slot[s];
       if (!sl.active) continue;
       if (sl.settleN < SETTLE) continue;        // skew guard: only settled sprites
-      // alpha bounding box. If the other point char is on screen, restrict to
-      // this slot's half so we don't merge the two; if this char is alone,
-      // search the full width so a walking character is never clipped.
-      const other = this.slot[s^1].active;
-      const hx0 = !other ? 0 : (s===0 ? 0 : (W>>1));
-      const hx1 = !other ? W : (s===0 ? (W>>1) : W);
+      // Search region: centered on the game-reported screen position
+      // (X/Y_Position_Screen, offsets 0xE0/0xE4). The game screen space is
+      // ~640x480; map to canvas. This excludes the frame-wide translucent
+      // smear and tracks the character as it moves. Alpha-bbox then tightens
+      // to the character WITHIN this region. Falls back to slot-half if the
+      // position looks unpopulated (0 / out of range).
+      let cx = sl.screen_x * (W/640), cy = sl.screen_y * (H/480);
+      const posOK = (sl.screen_x>1 && sl.screen_x<640 && sl.screen_y>1 && sl.screen_y<480);
+      let hx0, hx1, vy0, vy1;
+      if (posOK) {
+        const RW = W*0.16, RU = H*0.62, RD = H*0.12;  // generous; up>down (feet origin)
+        hx0 = Math.max(0, (cx-RW)|0); hx1 = Math.min(W, (cx+RW)|0);
+        vy0 = Math.max(0, (cy-RU)|0); vy1 = Math.min(H, (cy+RD)|0);
+      } else {
+        const other = this.slot[s^1].active;
+        hx0 = !other ? 0 : (s===0 ? 0 : (W>>1));
+        hx1 = !other ? W : (s===0 ? (W>>1) : W);
+        vy0 = 0; vy1 = H;
+      }
       let minx=W, miny=H, maxx=-1, maxy=-1;
-      for (let y=0; y<H; y++){
+      for (let y=vy0; y<vy1; y++){
         const ro = y*W*4;
         for (let x=hx0; x<hx1; x++){
           if (px[ro + x*4 + 3] > 16){          // alpha > 16 => character pixel
@@ -111,11 +124,11 @@ export class SpriteBake {
           }
         }
       }
-      if (maxx<minx) { this._diag=`slot${s}: NO pixels (bg not transparent? enable Custom Background)`; continue; }
+      if (maxx<minx) { this._diag=`slot${s}: NO pixels in region (sx=${sl.screen_x.toFixed(0)} sy=${sl.screen_y.toFixed(0)})`; continue; }
       const cw=maxx-minx+1, ch=maxy-miny+1;
-      // diagnostic: did the bbox fill the whole search region? -> bg not transparent
-      const full = (minx<=hx0 && maxx>=hx1-1 && miny<=0 && maxy>=H-1);
-      this._diag = `slot${s} crop ${cw}x${ch}${full?' [FULL-REGION! bg not transparent]':''}`;
+      // diagnostic: did the bbox fill the whole search region? -> smear/opaque bg
+      const full = (minx<=hx0 && maxx>=hx1-1 && miny<=vy0 && maxy>=vy1-1);
+      this._diag = `slot${s} sx=${sl.screen_x.toFixed(0)} sy=${sl.screen_y.toFixed(0)} crop ${cw}x${ch}${full?' [FILLS REGION]':''}`;
       if (cw<8 || ch<8) continue;                        // too small => noise
       let img; try { img = this._x2.getImageData(minx,miny,cw,ch); } catch(e){ this._lastErr=String(e); continue; }
       const hash = this._fnv(img.data);
@@ -154,7 +167,7 @@ export class SpriteBake {
   statsText(){
     const s=this.stats();
     const sl=(i)=>{const x=this.slot[i];return `S${i} ${x.active?'act':'---'} sid=0x${(x.sprite_id&0xffff).toString(16).padStart(4,'0')} settle=${x.settleN}`;};
-    let t = `BAKE ${this.on?'ON':'off'}  v3-bbox\n`;
+    let t = `BAKE ${this.on?'ON':'off'}  v4-pos\n`;
     t += `${sl(0)}\n${sl(1)}\n`;
     t += `last: ${this._diag||'(no capture yet)'}\n`;
     t += `captured keys : ${s.keys}  (P1 ${s.p1}, P2 ${s.p2})\n`;
