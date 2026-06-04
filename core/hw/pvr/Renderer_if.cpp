@@ -16,9 +16,13 @@
 #include "network/maplecast_mirror.h"
 #include "network/maplecast_control_ws.h"
 #include "network/maplecast_input_server.h"
+#include "network/maplecast_gamestate.h"   // MAPLECAST_BAKE sprite-stability probe
 
 #include <mutex>
 #include <deque>
+#include <vector>
+#include <set>
+#include <cstdlib>
 
 // MAPLECAST_DUMP_TA — cross-platform support
 #include <cstdio>
@@ -336,6 +340,98 @@ private:
 		if (renderer->Present())
 		{
 			presented = true;
+
+			// === MAPLECAST_BAKE — P0 sprite-stability probe ===
+			// docs/BAKE-HARNESS-PLAN.md. After the frame is presented, grab it
+			// via the backend-agnostic GetLastFrame(), crop a fixed per-slot box
+			// around each point character, FNV-1a hash the crop, and log it with
+			// sprite_id/position/camera. Verifies (char_id,sprite_id) -> stable
+			// pixels: the same sprite at the same position+camera MUST hash
+			// identically. Saves each sprite's first crop (raw RGB) for
+			// eyeballing. Inert unless MAPLECAST_BAKE is set; read-only w.r.t.
+			// emulation. Post-Present, so GetLastFrame's GL-state churn is
+			// harmless (the next frame re-establishes state).
+			{
+				static int   _bkInit = 0;
+				static bool  _bkOn   = false;
+				static std::string _bkDir;
+				static FILE* _bkCsv  = nullptr;
+				static float _bkX0=0.10f,_bkY0=0.28f,_bkX1=0.50f,_bkY1=0.96f;
+				static std::set<uint64_t> _bkSeen;
+				static uint32_t _bkFrame = 0;
+				if (!_bkInit) {
+					_bkInit = 1;
+					if (const char* d = std::getenv("MAPLECAST_BAKE")) {
+						_bkOn  = (*d != 0 && *d != '0');
+						_bkDir = d;
+						if (const char* b = std::getenv("MAPLECAST_BAKE_BOX"))
+							sscanf(b, "%f,%f,%f,%f", &_bkX0,&_bkY0,&_bkX1,&_bkY1);
+						if (_bkOn) {
+#ifdef _WIN32
+							_mkdir(_bkDir.c_str());
+#else
+							mkdir(_bkDir.c_str(), 0755);
+#endif
+							_bkCsv = fopen((_bkDir + "/bake.csv").c_str(), "w");
+							if (_bkCsv)
+								fprintf(_bkCsv, "frame,slot,char_id,sprite_id,"
+									"screen_x,screen_y,camera_x,camera_y,facing,"
+									"crop_w,crop_h,crop_hash\n");
+							printf("[BAKE] enabled -> %s (box %.2f,%.2f,%.2f,%.2f)\n",
+								_bkDir.c_str(), _bkX0,_bkY0,_bkX1,_bkY1);
+							fflush(stdout);
+						}
+					}
+				}
+				if (_bkOn && _bkCsv && renderer != nullptr) {
+					_bkFrame++;
+					std::vector<u8> fb; int fw=0, fh=0;
+					if (renderer->GetLastFrame(fb, fw, fh)
+					    && fw>0 && fh>0 && fb.size() >= (size_t)fw*fh*3) {
+						maplecast_gamestate::GameState gs;
+						maplecast_gamestate::readGameState(gs);
+						for (int slot = 0; slot < 2; slot++) {
+							const maplecast_gamestate::CharacterState& c = gs.chars[slot];
+							if (!c.active) continue;
+							float fx0 = (slot==1) ? (1.0f-_bkX1) : _bkX0;
+							float fx1 = (slot==1) ? (1.0f-_bkX0) : _bkX1;
+							int x0=(int)(fx0*fw), x1=(int)(fx1*fw);
+							int y0=(int)(_bkY0*fh), y1=(int)(_bkY1*fh);
+							if (x0<0) x0=0; if (y0<0) y0=0;
+							if (x1>fw) x1=fw; if (y1>fh) y1=fh;
+							int cw=x1-x0, ch=y1-y0;
+							if (cw<=0 || ch<=0) continue;
+							// FNV-1a 64 over the crop (RGB, top-down rows)
+							uint64_t hh = 1469598103934665603ULL;
+							for (int yy=y0; yy<y1; yy++) {
+								const u8* row = &fb[((size_t)yy*fw + x0)*3];
+								for (int i=0; i<cw*3; i++) { hh ^= row[i]; hh *= 1099511628211ULL; }
+							}
+							fprintf(_bkCsv,
+								"%u,%d,%u,%u,%.2f,%.2f,%.2f,%.2f,%u,%d,%d,0x%016llX\n",
+								_bkFrame, slot, c.character_id, c.sprite_id,
+								c.screen_x, c.screen_y, gs.camera_x, gs.camera_y,
+								c.facing_right, cw, ch, (unsigned long long)hh);
+							uint64_t key = ((uint64_t)slot<<48)
+								^ ((uint64_t)c.character_id<<32) ^ c.sprite_id;
+							if (_bkSeen.insert(key).second) {
+								char p[600];
+								snprintf(p, sizeof(p), "%s/crop_s%d_c%02u_sp%04X.bin",
+									_bkDir.c_str(), slot, c.character_id, c.sprite_id);
+								FILE* cf = fopen(p, "wb");
+								if (cf) {
+									uint32_t hdr[2] = {(uint32_t)cw,(uint32_t)ch};
+									fwrite(hdr, sizeof(hdr), 1, cf);
+									for (int yy=y0; yy<y1; yy++)
+										fwrite(&fb[((size_t)yy*fw + x0)*3], 1, (size_t)cw*3, cf);
+									fclose(cf);
+								}
+							}
+						}
+						if ((_bkFrame % 60)==0) fflush(_bkCsv);
+					}
+				}
+			}
 
 			// MapleCast H.264/JPEG stream — disabled when mirror mode is active
 			// Mirror uses maplecast_ws_server for WebSocket broadcast instead

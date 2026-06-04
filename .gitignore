@@ -105,3 +105,6 @@ xinput-trace.log
 replay-trace.log
 statelog.csv
 smoke.csv
+bake/
+bake_smoke/
+bake.csv
