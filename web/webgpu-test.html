@@ -944,9 +944,64 @@ async function main(){
           }
         };
 
+        // ===== TA↔pool correlation harness — "the stream as oracle" =====
+        // Isolate the NON-character textured quads (effects/projectiles) from the
+        // live TA frame, key each by its texture (tcw -> VRAM addr+fmt) + blend +
+        // the nearest character, and accumulate. This derives the map the state-only
+        // client needs: which effect texture a move spawns, owned by whom, and where.
+        window._taEffects = new Map();
+        let _taWatchC = 0;
+        window._taScanFrame = function(g, SC, accumulate){
+          const vf = new Float32Array(g.vertexData.buffer, g.vertexData.byteOffset, g.vertexCount*7);
+          const chars = [];
+          for(let s=0;s<6;s++){ const sl=SC.slot[s]; if(sl.active) chars.push({x:sl.screen_x,y:sl.screen_y,cid:sl.char_id}); }
+          const out = [];
+          const scan = (list)=>{ if(!list) return; for(const pp of list){ if(pp.count<3) continue;
+            let mnX=1e9,mxX=-1e9,mnY=1e9,mxY=-1e9;
+            for(let v=pp.first;v<pp.first+pp.count;v++){ const x=vf[v*7],y=vf[v*7+1];
+              if(x<mnX)mnX=x; if(x>mxX)mxX=x; if(y<mnY)mnY=y; if(y>mxY)mxY=y; }
+            const w=mxX-mnX,h=mxY-mnY,cx=(mnX+mxX)/2,cy=(mnY+mxY)/2;
+            const tcw=pp.tcw>>>0,tsp=pp.tsp>>>0,pcw=pp.pcw>>>0;
+            if(!((pcw>>3)&1)) continue;                 // untextured (flat shadow/meter)
+            if(w>400||h>340||cy<=40) continue;          // background / HUD
+            let bd=1e9,bc=null; for(const c of chars){ const d=Math.hypot(cx-c.x, cy-(c.y-50)); if(d<bd){bd=d;bc=c;} }
+            if(bc && Math.abs(cx-bc.x)<32 && h>45 && cy>120) continue;   // the character body quad itself
+            const addr=(tcw&0x1FFFFF)<<3, fmt=(tcw>>27)&7, texW=8<<((tsp>>3)&7), texH=8<<(tsp&7);
+            const bsrc=(tsp>>29)&7, bdst=(tsp>>26)&7;
+            const e={tcw,addr,fmt,texW,texH,bsrc,bdst,w,h,cx,cy,nearCid:bc?bc.cid:-1,nearDx:bc?(cx-bc.x):0,nearDy:bc?(cy-bc.y):0};
+            out.push(e);
+            if(accumulate){ let a=window._taEffects.get(tcw);
+              if(!a){ a={tcw,addr,fmt,texW,texH,bsrc,bdst,n:0,cids:{},dx:[1e9,-1e9],dy:[1e9,-1e9]}; window._taEffects.set(tcw,a); }
+              a.n++; a.cids[e.nearCid]=(a.cids[e.nearCid]||0)+1;
+              a.dx[0]=Math.min(a.dx[0],e.nearDx); a.dx[1]=Math.max(a.dx[1],e.nearDx);
+              a.dy[0]=Math.min(a.dy[0],e.nearDy); a.dy[1]=Math.max(a.dy[1],e.nearDy); }
+          }};
+          scan(g.punchThrough); scan(g.translucent);
+          return out;
+        };
+        window._taProbe = function(){
+          const g=window._lastParsed, SC=window._spriteclient;
+          if(!g||!SC){ console.log('no frame'); return; }
+          const fx=window._taScanFrame(g,SC,false);
+          console.log(`[taProbe] ${fx.length} effect quads this frame:`);
+          for(const e of fx){ const add=(e.bsrc===2&&e.bdst===1)||(e.bsrc===1&&e.bdst===1);
+            console.log(`  tcw=0x${e.tcw.toString(16)} fmt=${e.fmt} tex=${e.texW}x${e.texH} box=${e.w.toFixed(0)}x${e.h.toFixed(0)}@(${e.cx.toFixed(0)},${e.cy.toFixed(0)}) blend=${e.bsrc}/${e.bdst}${add?' ADD':''} nearCid=${e.nearCid} d=(${e.nearDx.toFixed(0)},${e.nearDy.toFixed(0)})`); }
+          return fx;
+        };
+        window._taDump = function(){
+          const rows=[...window._taEffects.values()].sort((a,b)=>b.n-a.n);
+          console.log(`[taDump] ${rows.length} distinct effect textures seen (set window._taWatch=true and play to fill):`);
+          for(const a of rows){ const add=(a.bsrc===2&&a.bdst===1)||(a.bsrc===1&&a.bdst===1);
+            const top=Object.entries(a.cids).sort((x,y)=>y[1]-x[1])[0];
+            console.log(`  tcw=0x${a.tcw.toString(16)} addr=0x${a.addr.toString(16)} fmt=${a.fmt} ${a.texW}x${a.texH} blend=${a.bsrc}/${a.bdst}${add?' ADD':''} seen=${a.n} topChar=cid${top?top[0]:'?'} dx=[${a.dx[0].toFixed(0)},${a.dx[1].toFixed(0)}]`); }
+          return rows;
+        };
+        window._taWatch = false;   // set true + play to accumulate; then window._taDump()
+
         // RAF render loop — vsync-locked, renders latest available frame or prediction
         function renderTick(){
             requestAnimationFrame(renderTick);
+            if(window._taWatch && lastParsed && window._spriteclient && (++_taWatchC & 3)===0) window._taScanFrame(lastParsed, window._spriteclient, true);
             if(!pendingFrame && DBG.predictive && FP.ready && lastParsed){
                 // NO new frame yet — render PREDICTED frame from extrapolated vertices
                 const pred = FP.predict(1.0);
