@@ -203,6 +203,33 @@ export class SpriteClient {
     return { drawn, missing, note:this._lastNote };
   }
 
+  // GPU path: emit [{charId, sx,sy,sw,sh (atlas px), dx,dy,dw,dh (canvas px), flip}]
+  // for the active characters — same extrapolation + held-pose logic as render().
+  buildDrawList(canvasW, canvasH) {
+    const scaleX = canvasW / (this.screenW || 640), scaleY = canvasH / (this.screenH || 480);
+    const now = (typeof performance !== 'undefined') ? performance.now() : 0;
+    if (!this._held) this._held = new Array(6).fill(null);
+    const out = []; let loading = 0, missing = 0, missKeys = [];
+    for (let s = 0; s < 6; s++) {
+      const sl = this.slot[s];
+      if (!sl.active) { this._held[s] = null; continue; }
+      const c = this.chars[sl.char_id];
+      if (!c) { loading++; continue; }
+      if (!c.img) continue;
+      let sp = c.sprites[sl.sprite_id];
+      if (sp) this._held[s] = { char_id: sl.char_id, sp };
+      else { missing++; if (missKeys.length<3) missKeys.push(`${sl.char_id}/0x${(sl.sprite_id&0xffff).toString(16)}`);
+             const h = this._held[s]; if (h && h.char_id === sl.char_id) sp = h.sp; else continue; }
+      let exx = sl.screen_x, eyy = sl.screen_y;
+      if (this.predict !== false) { const dt = Math.min(now - sl.t, 33); if (dt > 0) { exx += sl.vx*dt; eyy += sl.vy*dt; } }
+      out.push({ charId: sl.char_id, sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
+        dx: (exx+sp.dx)*scaleX, dy: (eyy+sp.dy)*scaleY, dw: sp.wG*scaleX, dh: sp.hG*scaleY,
+        flip: (sl.facing !== sp.facing) });
+    }
+    this._lastNote = loading ? `loading ${loading} char atlas…` : (missing ? `holding ${missing}: ${missKeys.join(' ')}` : 'all visible poses captured');
+    return out;
+  }
+
   statsText() {
     const loaded = Object.keys(this.chars);
     const names = loaded.map(c => this.chars[c].name + (this.chars[c].img?'':'!')).join(', ') || '(none yet)';
