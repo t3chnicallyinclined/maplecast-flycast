@@ -53,7 +53,7 @@ export class SpriteClient {
   }
   _blank() {
     return { active:0, char_id:0, sprite_id:-1, screen_x:0, screen_y:0, facing:0, palette:0,
-             health:0, _ph:-1,   // health + previous-health for hit detection
+             health:0, _ph:-1, _maxhp:144,   // health + previous-health (hits) + max seen (bar full)
              // prediction: previous screen pos + timestamps -> observed screen velocity
              px:0, py:0, t:0, pt:0, vx:0, vy:0 };
   }
@@ -123,6 +123,14 @@ export class SpriteClient {
     const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
     const B = 4;                       // payload starts after 'GSTA'
     this.inMatch = dv.getUint8(B + 0);
+    // Global HUD values — already in the state, so the HUD renders from data alone.
+    this.hud = {
+      timer:   dv.getUint8(B + 1),
+      p1lvl:   dv.getUint8(B + 3),  p2lvl:   dv.getUint8(B + 4),
+      p1combo: dv.getUint16(B + 5, true), p2combo: dv.getUint16(B + 7, true),
+      p1fill:  dv.getUint16(B + 9, true), p2fill:  dv.getUint16(B + 11, true),
+    };
+    this._maxfill = Math.max(this._maxfill || 1, this.hud.p1fill, this.hud.p2fill);
     const now = (typeof performance !== 'undefined') ? performance.now() : 0;
     // Velocity is timed on the GAME frame delta, NOT the jittery network arrival
     // gap — so a late/early packet doesn't wobble the extrapolation speed.
@@ -157,6 +165,7 @@ export class SpriteClient {
       }
       sl._ph = sl.active ? hp : -1;
       sl.health = hp;
+      if (sl.active && hp > sl._maxhp) sl._maxhp = hp;   // round-start full = bar max
     }
     // Exact size from state: camera zoom = |Δscreen_x / Δpos_x| between two
     // active characters (camera offset cancels). Tracks MVC2's live zoom.
@@ -274,6 +283,39 @@ export class SpriteClient {
                  alpha: Math.max(0, 1 - age*age), frame: sp.frame !== undefined ? sp.frame : (sp.type|0) });
     }
     return out;
+  }
+
+  // ===== HUD from state — health/meter/combo/timer are already in the GSTA =====
+  _pointHealth(slots) {
+    for (const s of slots) { const sl = this.slot[s]; if (sl.active) return Math.max(0, Math.min(1, sl.health / (sl._maxhp || 144))); }
+    return 0;
+  }
+  _bar(ctx, x, y, w, h, r, fill, bg, fromRight) {
+    r = Math.max(0, Math.min(1, r));
+    ctx.fillStyle = bg; ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = fill; const fw = w * r;
+    ctx.fillRect(fromRight ? x + w - fw : x, y, fw, h);
+    ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 1; ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  }
+  drawHUD(ctx) {
+    const W = ctx.canvas.width, H = ctx.canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    if (!this.inMatch) return;
+    ctx.save(); ctx.scale(W / 640, H / 480);
+    const hud = this.hud || {}, mf = this._maxfill || 1;
+    this._bar(ctx, 18, 16, 292, 14, this._pointHealth([0,2,4]), '#46e84a', '#15401a', false);  // P1 health
+    this._bar(ctx, 330, 16, 292, 14, this._pointHealth([1,3,5]), '#46e84a', '#15401a', true);   // P2 health
+    this._bar(ctx, 18, 456, 250, 9, (hud.p1fill||0)/mf, '#ffcc33', '#5a3a00', false);            // P1 meter
+    this._bar(ctx, 372, 456, 250, 9, (hud.p2fill||0)/mf, '#ffcc33', '#5a3a00', true);            // P2 meter
+    ctx.fillStyle = '#ffd24d';
+    for (let i = 0; i < (hud.p1lvl||0); i++) ctx.fillRect(18 + i*12, 446, 9, 6);
+    for (let i = 0; i < (hud.p2lvl||0); i++) ctx.fillRect(613 - i*12, 446, 9, 6);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 22px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.fillText(String(hud.timer||0).padStart(2,'0'), 320, 14);
+    ctx.font = 'bold 15px monospace';
+    if ((hud.p1combo||0) > 1) { ctx.fillStyle = '#ffe14d'; ctx.textAlign = 'left';  ctx.fillText(hud.p1combo + ' HIT', 24, 40); }
+    if ((hud.p2combo||0) > 1) { ctx.fillStyle = '#ffe14d'; ctx.textAlign = 'right'; ctx.fillText(hud.p2combo + ' HIT', 616, 40); }
+    ctx.restore();
   }
 
   statsText() {
