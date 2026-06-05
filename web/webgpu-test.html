@@ -882,7 +882,7 @@ async function main(){
                     const g=P.parse(fr.taBuffer,fr.taSize);
                     try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e2) {}
                     pMs=performance.now()-t1;
-                    lastParsed=g;
+                    lastParsed=g; window._lastParsed=g;
                     // Feed predictor with real frame vertex data
                     FP.feedFrame(g.vertexData, g.vertexCount);
                     g._snap = fr.pvrSnapshot; // save for predictive render
@@ -912,6 +912,30 @@ async function main(){
         });
         transport.connect();
         window._transport=transport; // Expose for diagnostics
+        // EXACT SCALE from the live TA frame: each on-screen character is a
+        // translucent quad in screen space; bbox-height / rip-height = the scale.
+        // Run window._measureScale() in console while in a match.
+        window._measureScale=function(){
+          const g=window._lastParsed, SC=window._spriteclient;
+          if(!g||!SC){console.log('no frame / sprite client');return;}
+          const vf=new Float32Array(g.vertexData.buffer,g.vertexData.byteOffset,g.vertexCount*7);
+          const groups=[];
+          for(const pp of g.translucent){ if(pp.count<6)continue;
+            let mnX=1e9,mxX=-1e9,mnY=1e9,mxY=-1e9;
+            for(let v=pp.first;v<pp.first+pp.count;v++){const x=vf[v*7],y=vf[v*7+1];
+              if(x<mnX)mnX=x;if(x>mxX)mxX=x;if(y<mnY)mnY=y;if(y>mxY)mxY=y;}
+            if((mnY+mxY)/2<=120)continue; // skip HUD
+            groups.push({cx:(mnX+mxX)/2,w:mxX-mnX,h:mxY-mnY}); }
+          console.log(`[measure] ${groups.length} char-candidate quads`);
+          for(let s=0;s<6;s++){ const sl=SC.slot[s]; if(!sl.active)continue;
+            const c=SC.chars[sl.char_id], sp=c&&c.sprites[sl.sprite_id];
+            if(!sp){console.log(`slot${s} cid${sl.char_id} sid${sl.sprite_id}: no rip sprite`);continue;}
+            let best=null,bd=1e9;
+            for(const gg of groups){const d=Math.abs(gg.cx-sl.screen_x); if(d<70&&gg.h>30&&d<bd){bd=d;best=gg;}}
+            if(!best){console.log(`slot${s} cid${sl.char_id}: no quad near scr_x=${sl.screen_x.toFixed(0)}`);continue;}
+            console.log(`slot${s} cid${sl.char_id} sid${sl.sprite_id}: rendered ${best.w.toFixed(0)}x${best.h.toFixed(0)} | rip ${sp.w}x${sp.h} | scale_w=${(best.w/sp.w).toFixed(3)} scale_h=${(best.h/sp.h).toFixed(3)}`);
+          }
+        };
 
         // RAF render loop — vsync-locked, renders latest available frame or prediction
         function renderTick(){
