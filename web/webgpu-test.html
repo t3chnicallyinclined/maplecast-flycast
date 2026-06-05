@@ -387,7 +387,9 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
         if(fxOn && window._lastParsed && window._T && window._D && window._D.vram){
           fxList=[];
           for(const ef of window._taScanFrame(window._lastParsed, SPRITECLIENT, false)){
-            if(ef.bdst!==1) continue;                                  // additive glow effects only
+            if(ef.bdst!==1) continue;                 // additive glow effects only
+            if(ef.w>170 || ef.h>170) continue;        // drop big persistent glows (super-BG/meter/aura); keep transient projectiles/sparks/lightning
+            if(ef.cy<40 || ef.cy>452) continue;       // drop HUD-row glows (top/bottom)
             const t=window._T.getTexture(ef.tsp, ef.tcw, window._D.vram);
             if(t&&t.texture) fxList.push({tex:t.texture, samp:t.sampler, x:ef.cx, y:ef.cy, w:ef.w, h:ef.h});
           }
