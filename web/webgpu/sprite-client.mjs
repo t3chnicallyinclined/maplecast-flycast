@@ -48,9 +48,12 @@ export class SpriteClient {
     // State-stream (GSTA) bandwidth — the whole point of Option 6. Rolling 1s window.
     this._bwBytes = 0; this._bwFrames = 0; this._bwT0 = 0;
     this._bwRate = 0; this._bwHz = 0; this._lastSize = 0;
+    this.sparks = [];          // active hit-sparks {x,y,t0,type}
+    this.sparksOn = true;
   }
   _blank() {
     return { active:0, char_id:0, sprite_id:-1, screen_x:0, screen_y:0, facing:0, palette:0,
+             health:0, _ph:-1,   // health + previous-health for hit detection
              // prediction: previous screen pos + timestamps -> observed screen velocity
              px:0, py:0, t:0, pt:0, vx:0, vy:0 };
   }
@@ -144,6 +147,16 @@ export class SpriteClient {
       sl.screen_x = nx;
       sl.screen_y = ny;
       sl.sprite_id= dv.getUint16(ci + 32, true);
+      // Hit-spark: a health drop = a hit landed -> spawn a spark on the defender's
+      // upper body. (Guard against round-reset jumps and the first frame.)
+      const hp = dv.getUint8(ci + 3);
+      if (this.sparksOn && this.inMatch && sl.active && sl._ph >= 0 && hp < sl._ph && (sl._ph - hp) <= 60) {
+        const jx = (Math.random()*22 - 11), jy = (Math.random()*16 - 8);
+        this.sparks.push({ x: nx + jx, y: ny - 55 + jy, t0: now, type: (sl._ph - hp) >= 14 ? 2 : 0 });
+        if (this.sparks.length > 24) this.sparks.shift();
+      }
+      sl._ph = sl.active ? hp : -1;
+      sl.health = hp;
     }
     // Exact size from state: camera zoom = |Δscreen_x / Δpos_x| between two
     // active characters (camera offset cancels). Tracks MVC2's live zoom.
@@ -243,6 +256,23 @@ export class SpriteClient {
         flip: (sl.facing !== sp.facing) });
     }
     this._lastNote = loading ? `loading ${loading} char atlas…` : (missing ? `holding ${missing}: ${missKeys.join(' ')}` : 'all visible poses captured');
+    return out;
+  }
+
+  // Active hit-sparks for the GPU additive pass — each grows + fades over ~280ms.
+  // Returns [{x,y,size,alpha,frame}] in canvas px; prunes expired sparks.
+  buildSparkList(canvasW, canvasH) {
+    const scaleX = canvasW / (this.screenW || 640), scaleY = canvasH / (this.screenH || 480);
+    const now = (typeof performance !== 'undefined') ? performance.now() : 0;
+    const DUR = 280, BASE = 50;                    // ms lifetime, base screen px
+    this.sparks = this.sparks.filter(sp => (now - sp.t0) < DUR);
+    const out = [];
+    for (const sp of this.sparks) {
+      const age = (now - sp.t0) / DUR;             // 0..1
+      const size = BASE * (0.55 + age * 0.9);      // grow
+      out.push({ x: sp.x*scaleX, y: sp.y*scaleY, size: size*scaleX,
+                 alpha: Math.max(0, 1 - age*age), frame: sp.frame !== undefined ? sp.frame : (sp.type|0) });
+    }
     return out;
   }
 

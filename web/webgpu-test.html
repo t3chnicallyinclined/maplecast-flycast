@@ -264,8 +264,8 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=9';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=12';
-import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=3';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=13';
+import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=4';
 
 const canvas=document.getElementById('c'), ov=document.getElementById('ov'), st=document.getElementById('st');
 const BAKE=new SpriteBake(); window._bake=BAKE;
@@ -365,10 +365,14 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
   const tick=()=>{
     // lazy-init the WebGPU sprite renderer once the shared device exists
     if(!SG.ok && !SG._tried && window._R && window._R.dev){ SG._tried=true; SG.init(window._R.dev, scg); showCanvas(); }
+    if(SG.ok && !SG._sparkTried){ SG._sparkTried=true;
+      fetch(CHAR_BASE.replace(/\/chars\/?$/,'/effects')+'/sparks.png?t='+Date.now())
+        .then(r=>r.blob()).then(b=>createImageBitmap(b)).then(img=>SG.setSparkAtlas(img,64))
+        .catch(e=>console.warn('[spark] atlas load failed',e)); }
     if(scOn){
       if(gpuOn && SG.ok){
         for(const cid in SPRITECLIENT.chars){ const c=SPRITECLIENT.chars[cid]; if(c&&c.img&&!SG.chars[cid]){ SG.setAtlas(cid, c.img); SG.setCharPalette(cid, c.pal16); } }
-        try{ SG.render(SPRITECLIENT.buildDrawList(640,480), window.DBG||{}, window._T); }
+        try{ SG.render(SPRITECLIENT.buildDrawList(640,480), window.DBG||{}, window._T, SPRITECLIENT.buildSparkList(640,480)); }
         catch(err){ console.error('[sprite-gpu] render error -> Canvas2D fallback', err); SG.ok=false; showCanvas(); }
       } else {
         SPRITECLIENT.render(scx);

@@ -55,6 +55,26 @@ fn fs(i: VSOut) -> @location(0) vec4f {
   var rgb = col.rgb;
   if (bi >= 0) { rgb = pal[i.palBase + 16u + u32(bi)].rgb; }
   return vec4f(rgb, col.a);
+}
+
+// ---- hit-spark pass (additive; black contributes nothing) ----
+struct SOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1) @interpolate(flat) a: f32 };
+@vertex
+fn vs_spark(@builtin(vertex_index) vi: u32,
+            @location(0) dest: vec4f,   // x,y = CENTER, z,w = size
+            @location(1) auv: vec4f, @location(2) alpha: f32) -> SOut {
+  var corners = array<vec2f,6>(vec2f(0.,0.),vec2f(1.,0.),vec2f(0.,1.),vec2f(0.,1.),vec2f(1.,0.),vec2f(1.,1.));
+  let c = corners[vi];
+  let px = dest.x + (c.x - 0.5) * dest.z;
+  let py = dest.y + (c.y - 0.5) * dest.w;
+  let clip = vec2f(px / u.canvas.x * 2. - 1., 1. - py / u.canvas.y * 2.);
+  let uv = vec2f(mix(auv.x, auv.z, c.x), mix(auv.y, auv.w, c.y));
+  var o: SOut; o.pos = vec4f(clip, 0., 1.); o.uv = uv; o.a = alpha; return o;
+}
+@fragment
+fn fs_spark(i: SOut) -> @location(0) vec4f {
+  let col = textureSample(atlasTex, samp, i.uv);
+  return vec4f(col.rgb * i.a, 1.0);
 }`;
 
 const INST_STRIDE = 10 * 4;   // dest(4) + auv(4) + flip(1) + palBase(1)
@@ -97,6 +117,27 @@ export class SpriteGPU {
         fragment: { module: mod, entryPoint: 'fs', targets: [{ format: this.fmt }] },
         primitive: { topology: 'triangle-list' },
       });
+      // hit-spark pipeline: additive blend, no palette (bindings 0,1,2)
+      this.sparkBgl = device.createBindGroupLayout({ entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+        { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
+      ]});
+      this.sparkPipe = device.createRenderPipeline({
+        layout: device.createPipelineLayout({ bindGroupLayouts: [this.sparkBgl] }),
+        vertex: { module: mod, entryPoint: 'vs_spark', buffers: [{
+          arrayStride: 36, stepMode: 'instance', attributes: [
+            { shaderLocation: 0, offset: 0,  format: 'float32x4' },
+            { shaderLocation: 1, offset: 16, format: 'float32x4' },
+            { shaderLocation: 2, offset: 32, format: 'float32' },
+          ]}]},
+        fragment: { module: mod, entryPoint: 'fs_spark', targets: [{ format: this.fmt,
+          blend: { color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+                   alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' } } }] },
+        primitive: { topology: 'triangle-list' },
+      });
+      this.sparkInst = device.createBuffer({ size: 32 * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+      this.sparkInstData = new Float32Array(32 * 9);
       this.ok = true;
     } catch (e) { console.error('[sprite-gpu] init failed, Canvas2D fallback:', e); this.ok = false; }
     return this.ok;
@@ -132,9 +173,26 @@ export class SpriteGPU {
     } catch (e) { console.error('[sprite-gpu] setAtlas failed', charId, e); this.chars[charId] = { skip: true }; }
   }
 
+  // The hit-spark strip (N frames of frameW wide, side by side).
+  setSparkAtlas(imageBitmap, frameW) {
+    if (!this.ok || !imageBitmap) return;
+    const w = imageBitmap.width, h = imageBitmap.height;
+    try {
+      const tex = this.dev.createTexture({ size: [w, h], format: 'rgba8unorm',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT });
+      this.dev.queue.copyExternalImageToTexture({ source: imageBitmap }, { texture: tex }, [w, h]);
+      this.sparkBg = this.dev.createBindGroup({ layout: this.sparkBgl, entries: [
+        { binding: 0, resource: tex.createView() },
+        { binding: 1, resource: this.sampler },
+        { binding: 2, resource: { buffer: this.ubuf } },
+      ]});
+      this.sparkW = w; this.sparkH = h; this.sparkFrame = frameW || 64;
+    } catch (e) { console.error('[sprite-gpu] setSparkAtlas failed', e); }
+  }
+
   // sprites: [{charId, slot, sx,sy,sw,sh (atlas px), dx,dy,dw,dh (canvas px), flip}]
   // T: TextureManager (T._pal = live PVR palette RAM, RGBA, 1024 entries).
-  render(sprites, dbg, T) {
+  render(sprites, dbg, T, sparks) {
     if (!this.ok) return;
     const cw = this.canvas.width, ch = this.canvas.height;
     this.dev.queue.writeBuffer(this.ubuf, 0, new Float32Array([cw, ch, 0, 0]));
@@ -181,6 +239,22 @@ export class SpriteGPU {
     if (gi) this.dev.queue.writeBuffer(this.palBuf, 0, this.palData, 0, gi * 32 * 4);
     if (n) this.dev.queue.writeBuffer(this.inst, 0, this.instData, 0, n * 10);
 
+    // hit-spark instances (additive): dest center+size, atlas frame UV, alpha
+    let sn = 0;
+    if (sparks && sparks.length && this.sparkBg) {
+      const nframes = Math.max(1, Math.floor(this.sparkW / this.sparkFrame));
+      for (const sp of sparks) {
+        if (sn >= 32) break;
+        const o = sn * 9, f = Math.min(nframes - 1, sp.frame | 0);
+        this.sparkInstData[o] = sp.x; this.sparkInstData[o+1] = sp.y; this.sparkInstData[o+2] = sp.size; this.sparkInstData[o+3] = sp.size;
+        this.sparkInstData[o+4] = f * this.sparkFrame / this.sparkW; this.sparkInstData[o+5] = 0;
+        this.sparkInstData[o+6] = (f + 1) * this.sparkFrame / this.sparkW; this.sparkInstData[o+7] = 1;
+        this.sparkInstData[o+8] = sp.alpha;
+        sn++;
+      }
+      if (sn) this.dev.queue.writeBuffer(this.sparkInst, 0, this.sparkInstData, 0, sn * 9);
+    }
+
     const enc = this.dev.createCommandEncoder();
     const pass = enc.beginRenderPass({
       colorAttachments: [{ view: rt.colorView, clearValue: { r:0,g:0,b:0,a:0 }, loadOp: 'clear', storeOp: 'store' }],
@@ -193,6 +267,12 @@ export class SpriteGPU {
         pass.setBindGroup(0, this.chars[g.cid].bg);
         pass.draw(6, g.count, 0, g.first);
       }
+    }
+    if (sn) {                                    // additive hit-spark pass, over the characters
+      pass.setPipeline(this.sparkPipe);
+      pass.setVertexBuffer(0, this.sparkInst);
+      pass.setBindGroup(0, this.sparkBg);
+      pass.draw(6, sn, 0, 0);
     }
     pass.end();
     this.PP.blit(enc, this.ctx.getCurrentTexture().createView(), cw, ch, dbg || {});
