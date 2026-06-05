@@ -46,14 +46,20 @@ fn vs(@builtin(vertex_index) vi: u32,
 fn fs(i: VSOut) -> @location(0) vec4f {
   let col = textureSample(atlasTex, samp, i.uv);
   if (col.a < 0.5) { discard; }
-  // match-replace: nearest default-palette body color -> live body color
+  // full-palette recolor: nearest default color -> live color, but ONLY where the
+  // live palette differs from default. So super-glow/auras tint everything, skins
+  // leave unchanged sub-palettes alone, and color collisions keep the original.
   var bi = -1; var bd = 0.02;
-  for (var k = 0u; k < 16u; k = k + 1u) {
+  for (var k = 0u; k < 128u; k = k + 1u) {
     let d = distance(col.rgb, pal[i.palBase + k].rgb);
     if (d < bd) { bd = d; bi = i32(k); }
   }
   var rgb = col.rgb;
-  if (bi >= 0) { rgb = pal[i.palBase + 16u + u32(bi)].rgb; }
+  if (bi >= 0) {
+    let dcol = pal[i.palBase + u32(bi)].rgb;
+    let lcol = pal[i.palBase + 128u + u32(bi)].rgb;
+    if (distance(dcol, lcol) > 0.012) { rgb = lcol; }
+  }
   return vec4f(rgb, col.a);
 }
 
@@ -96,8 +102,8 @@ export class SpriteGPU {
       this.ubuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       this.inst = device.createBuffer({ size: this.maxInst * INST_STRIDE, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
       this.instData = new Float32Array(this.maxInst * 10);
-      this.palBuf = device.createBuffer({ size: this.maxGroups * 32 * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-      this.palData = new Float32Array(this.maxGroups * 32 * 4);
+      this.palBuf = device.createBuffer({ size: this.maxGroups * 256 * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      this.palData = new Float32Array(this.maxGroups * 256 * 4);   // per group: 128 default + 128 live
       this.bgl = device.createBindGroupLayout({ entries: [
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
@@ -146,9 +152,9 @@ export class SpriteGPU {
   }
 
   // default body palette (rip palette[0..15]) for a char, [[r,g,b],...] 0-255
-  setCharPalette(charId, pal16) {
-    if (!pal16) return;
-    this.charPal[charId] = pal16.map(c => [c[0] / 255, c[1] / 255, c[2] / 255]);
+  setCharPalette(charId, pal128) {
+    if (!pal128) return;
+    this.charPal[charId] = pal128.map(c => [c[0] / 255, c[1] / 255, c[2] / 255]);
   }
 
   setAtlas(charId, imageBitmap) {
@@ -211,13 +217,13 @@ export class SpriteGPU {
     let n = 0, gi = 0; const groups = [];
     for (const [cid, list] of byChar) {
       if (gi >= this.maxGroups || n >= this.maxInst) break;
-      const palBase = gi * 32;
+      const palBase = gi * 256;
       const def = this.charPal[cid];
       const slot = (list[0].slot | 0);
-      const bankE = 256 + 128 * slot;     // PVR entry start for this slot's body palette
-      for (let k = 0; k < 16; k++) {
-        const od = (palBase + k) * 4, ol = (palBase + 16 + k) * 4;
-        const dr = def ? def[k][0] : 0, dg = def ? def[k][1] : 0, db = def ? def[k][2] : 0;
+      const bankE = 256 + 128 * slot;     // PVR entry start for this slot's palette region (128 entries)
+      for (let k = 0; k < 128; k++) {
+        const od = (palBase + k) * 4, ol = (palBase + 128 + k) * 4;
+        const dc = def && def[k]; const dr = dc ? dc[0] : 0, dg = dc ? dc[1] : 0, db = dc ? dc[2] : 0;
         this.palData[od] = dr; this.palData[od + 1] = dg; this.palData[od + 2] = db; this.palData[od + 3] = 1;
         if (livePal) {
           const pe = (bankE + k) * 4;
@@ -238,7 +244,7 @@ export class SpriteGPU {
       }
       groups.push({ cid, first, count: n - first }); gi++;
     }
-    if (gi) this.dev.queue.writeBuffer(this.palBuf, 0, this.palData, 0, gi * 32 * 4);
+    if (gi) this.dev.queue.writeBuffer(this.palBuf, 0, this.palData, 0, gi * 256 * 4);
     if (n) this.dev.queue.writeBuffer(this.inst, 0, this.instData, 0, n * 10);
 
     // hit-spark instances (additive): dest center+size, atlas frame UV, alpha

@@ -80,7 +80,7 @@ export class SpriteClient {
         const blob = await (await fetch(base + '.png' + bust)).blob();
         const img = await createImageBitmap(blob);
         this.screenW = json.screenW || this.screenW; this.screenH = json.screenH || this.screenH;
-        this.chars[cid] = { img, sprites: json.sprites, name: json.name || ('char' + cid), pal16: json.pal16 };
+        this.chars[cid] = { img, sprites: json.sprites, name: json.name || ('char' + cid), pal128: json.pal128 };
         console.log('[sprite-client] loaded char', cid, json.name, Object.keys(json.sprites).length, 'sprites');
       } catch (e) {
         this.chars[cid] = { img: null, sprites: {}, name: 'char' + cid, err: String(e) };

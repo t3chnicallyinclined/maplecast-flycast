@@ -264,8 +264,8 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=9';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=14';
-import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=5';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=15';
+import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=6';
 
 const canvas=document.getElementById('c'), ov=document.getElementById('ov'), st=document.getElementById('st');
 const BAKE=new SpriteBake(); window._bake=BAKE;
@@ -382,7 +382,7 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
         .catch(e=>console.warn('[spark] atlas load failed',e)); }
     if(scOn){
       if(gpuOn && SG.ok){
-        for(const cid in SPRITECLIENT.chars){ const c=SPRITECLIENT.chars[cid]; if(c&&c.img&&!SG.chars[cid]){ SG.setAtlas(cid, c.img); SG.setCharPalette(cid, c.pal16); } }
+        for(const cid in SPRITECLIENT.chars){ const c=SPRITECLIENT.chars[cid]; if(c&&c.img&&!SG.chars[cid]){ SG.setAtlas(cid, c.img); SG.setCharPalette(cid, c.pal128); } }
         let fxList=null;
         if(fxOn && window._lastParsed && window._T && window._D && window._D.vram){
           fxList=[];
