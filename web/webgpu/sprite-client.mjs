@@ -55,6 +55,16 @@ export class SpriteClient {
     this._lastNote = '';
   }
 
+  // Load the atlas straight from a server URL base (no file-picker): fetches
+  // <base>.json and <base>.png. Cache-busted so a re-pushed atlas shows on reload.
+  async loadAtlasFromUrl(base) {
+    const bust = '?t=' + Date.now();
+    const json = await (await fetch(base + '.json' + bust)).json();
+    const blob = await (await fetch(base + '.png' + bust)).blob();
+    await this.loadAtlas(json, blob);
+    return Object.keys(json.chars || {}).length;
+  }
+
   onGSTA(d) {
     // --- state-stream bandwidth (rolling 1s window) ---
     const _now = (typeof performance !== 'undefined') ? performance.now() : 0;

@@ -264,7 +264,7 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=9';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=3';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=4';
 
 const canvas=document.getElementById('c'), ov=document.getElementById('ov'), st=document.getElementById('st');
 const BAKE=new SpriteBake(); window._bake=BAKE;
@@ -324,7 +324,9 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
   const box=document.createElement('div');
   box.style.cssText='border:1px solid #06a;margin:6px 0;padding:6px;background:#012';
   box.innerHTML='<b style="color:#0af">SPRITE CLIENT (Option 6)</b><br>'
-    +'<label><input type="checkbox" id="sc_on"> Render chars from 253B state (no TA)</label><br>'
+    +'<label><input type="checkbox" id="sc_on" checked> Render chars from 253B state (no TA)</label><br>'
+    +'<button id="sc_srv">↻ Load atlas from server</button> '
+    +'<span style="font-size:9px;color:#888">(auto-loads; or pick files below)</span><br>'
     +'atlas PNG <input type="file" id="sc_png" accept="image/png" style="font-size:10px"><br>'
     +'atlas JSON <input type="file" id="sc_json" accept="application/json,.json" style="font-size:10px"><br>'
     +'<pre id="sc_stats" style="font-size:10px;color:#0af;background:#000;padding:4px;margin:4px 0;white-space:pre">off</pre>';
@@ -334,8 +336,17 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
   scv.style.cssText='border:1px solid #06a;background:#111;display:none;margin-top:6px;max-width:100%';
   (canvas.parentNode||document.body).appendChild(scv);
   const scx=scv.getContext('2d');
-  let scOn=false;
+  let scOn=true; scv.style.display='block';
   box.querySelector('#sc_on').onchange=e=>{ scOn=e.target.checked; scv.style.display=scOn?'block':'none'; };
+  // Server-side atlas auto-load (no file picker). Override base with ?atlas=<urlbase>.
+  const ATLAS_URL = new URLSearchParams(location.search).get('atlas') || './test-atlas/rip_atlas';
+  const loadFromServer = async ()=>{
+    const el=document.getElementById('sc_stats'); if(el) el.textContent='loading atlas from '+ATLAS_URL+' ...';
+    try{ const n=await SPRITECLIENT.loadAtlasFromUrl(ATLAS_URL); console.log('[sprite-client] atlas loaded from server:',n,'chars'); }
+    catch(err){ console.error('[sprite-client] server atlas load failed',err); if(el) el.textContent='server atlas load FAILED ('+ATLAS_URL+')\nuse the file pickers. '+err; }
+  };
+  box.querySelector('#sc_srv').onclick=loadFromServer;
+  loadFromServer();   // auto-load on page init
   let pendingPng=null, pendingJson=null;
   const tryLoad=async()=>{ if(pendingPng&&pendingJson){ try{ await SPRITECLIENT.loadAtlas(pendingJson,pendingPng); }catch(err){ console.error('atlas load',err); } } };
   box.querySelector('#sc_png').onchange=async e=>{ pendingPng=e.target.files[0]||null; await tryLoad(); };
