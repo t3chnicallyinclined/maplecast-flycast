@@ -264,8 +264,8 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=9';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=11';
-import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=2';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=12';
+import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=3';
 
 const canvas=document.getElementById('c'), ov=document.getElementById('ov'), st=document.getElementById('st');
 const BAKE=new SpriteBake(); window._bake=BAKE;
@@ -329,6 +329,7 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
     +'<label><input type="checkbox" id="sc_pred" checked> Predict (velocity extrapolation — lower latency)</label><br>'
     +'<label><input type="checkbox" id="sc_gpu" checked> GPU render + effects (WebGPU; off = Canvas2D)</label><br>'
     +'<label>Size <input type="range" id="sc_scale" min="0.5" max="3" step="0.05" value="1.75" style="width:110px;vertical-align:middle"> <span id="sc_scaleval">1.75</span>×</label><br>'
+    +'<label><input type="checkbox" id="sc_skin" checked> Live skins / hit-flash (palette recolor)</label><br>'
     +'<button id="sc_srv">↻ Reload atlases</button> '
     +'<span style="font-size:9px;color:#888">(per-char, lazy-loads who\'s picked)</span><br>'
     +'atlas PNG <input type="file" id="sc_png" accept="image/png" style="font-size:10px"><br>'
@@ -350,6 +351,7 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
   box.querySelector('#sc_pred').onchange=e=>{ SPRITECLIENT.predict=e.target.checked; };
   box.querySelector('#sc_gpu').onchange=e=>{ gpuOn=e.target.checked; showCanvas(); };
   box.querySelector('#sc_scale').oninput=e=>{ SPRITECLIENT.spriteScale=+e.target.value; const v=document.getElementById('sc_scaleval'); if(v)v.textContent=(+e.target.value).toFixed(2); };
+  box.querySelector('#sc_skin').onchange=e=>{ SG.recolor=e.target.checked; };
   // Per-character atlases lazy-load by char_id as characters appear in the state
   // (only the picked characters download). Override dir with ?atlas=<urlbase>.
   const CHAR_BASE = new URLSearchParams(location.search).get('atlas') || './test-atlas/chars';
@@ -365,8 +367,8 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
     if(!SG.ok && !SG._tried && window._R && window._R.dev){ SG._tried=true; SG.init(window._R.dev, scg); showCanvas(); }
     if(scOn){
       if(gpuOn && SG.ok){
-        for(const cid in SPRITECLIENT.chars){ const c=SPRITECLIENT.chars[cid]; if(c&&c.img&&!SG.chars[cid]) SG.setAtlas(cid, c.img); }
-        try{ SG.render(SPRITECLIENT.buildDrawList(640,480), window.DBG||{}); }
+        for(const cid in SPRITECLIENT.chars){ const c=SPRITECLIENT.chars[cid]; if(c&&c.img&&!SG.chars[cid]){ SG.setAtlas(cid, c.img); SG.setCharPalette(cid, c.pal16); } }
+        try{ SG.render(SPRITECLIENT.buildDrawList(640,480), window.DBG||{}, window._T); }
         catch(err){ console.error('[sprite-gpu] render error -> Canvas2D fallback', err); SG.ok=false; showCanvas(); }
       } else {
         SPRITECLIENT.render(scx);
@@ -807,6 +809,7 @@ async function main(){
     // Clean vanilla DC rendering by default — no background effects
     // Users enable custom backgrounds from the GRAPHICS ENHANCE panel
     const D=new FrameDecoder(),P=new TAParser(),T=new TextureManager(R.dev),FP=new FramePredictor();
+    window._T=T;  // expose live palette RAM (T._pal) for the sprite renderer's skin/hit-flash recolor
     const PP=new PostProcessor();
     PP.init(R.dev, R.fmt);
     window._resizeRenderer=()=>PP.ensureTargets(640, 480, DBG.resScale||1);

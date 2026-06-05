@@ -1,32 +1,35 @@
 // sprite-gpu.mjs — WebGPU 2D sprite renderer for the ROM-asset client (Option 6).
 //
-// Draws character sprites as textured quads into the PostProcessor's offscreen
-// target, then blits through the effect chain — so the sprite client gets the
-// SAME bloom/CRT/scanline/etc. effects as the live TA render, on the GPU.
-// Reuses the page's WebGPU device. Canvas2D remains the no-WebGPU fallback.
+// Draws character sprites as instanced textured quads into the PostProcessor's
+// offscreen target, then blits through the effect chain — so the sprite client
+// gets the SAME bloom/CRT/scanline/etc. effects as the live TA render.
 //
-// Per-char RGBA atlas textures (one per loaded character, lazy). Instanced
-// quads: one draw per character over its on-screen sprites. Positions come
-// pre-extrapolated from the SpriteClient (same velocity prediction as Canvas2D).
+// Skin / hit-flash recolor (reuses the renderer's palette technique): each
+// character's body-16 colors (the rip's default palette, per-char from the JSON)
+// are match-replaced in the fragment shader with the LIVE palette — T._pal at PVR
+// bank 256+128*slot, the very palette RAM pvr2-renderer reads. Default skin =>
+// live==default => no-op; community skin / hit-flash => recolor for free.
 //
-// (Skin/hit-flash recolor — swapping the live body-16 palette — is the next
-// layer; this first version samples the rip's baked palette, which is the
-// correct default color. The pipeline + atlas plumbing is the foundation for it.)
+// We still generate the quad geometry ourselves (the 253-byte state carries no
+// draw commands) — that's the only "from scratch" part; everything downstream
+// (effects, palette) reuses the renderer's machinery. Canvas2D is the fallback.
 
 import { PostProcessor } from './post-process.mjs?v=2';
 
 const SHADER = `
-struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
+struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1) @interpolate(flat) palBase: u32 };
 struct U { canvas: vec2f, pad: vec2f };
 @group(0) @binding(0) var atlasTex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var<uniform> u: U;
+@group(0) @binding(3) var<storage, read> pal: array<vec4f>;   // per group: [0..15]=default body, [16..31]=live body
 
 @vertex
 fn vs(@builtin(vertex_index) vi: u32,
-      @location(0) dest: vec4f,   // x,y,w,h in canvas pixels
-      @location(1) auv: vec4f,    // u0,v0,u1,v1 normalized atlas UV
-      @location(2) flip: f32) -> VSOut {
+      @location(0) dest: vec4f,    // x,y,w,h canvas px
+      @location(1) auv: vec4f,     // u0,v0,u1,v1 atlas UV
+      @location(2) flip: f32,
+      @location(3) palBase: f32) -> VSOut {
   var corners = array<vec2f,6>(
     vec2f(0.,0.), vec2f(1.,0.), vec2f(0.,1.),
     vec2f(0.,1.), vec2f(1.,0.), vec2f(1.,1.));
@@ -37,38 +40,49 @@ fn vs(@builtin(vertex_index) vi: u32,
   var ux = c.x;
   if (flip > 0.5) { ux = 1. - c.x; }
   let uv = vec2f(mix(auv.x, auv.z, ux), mix(auv.y, auv.w, c.y));
-  var o: VSOut; o.pos = vec4f(clip, 0., 1.); o.uv = uv; return o;
+  var o: VSOut; o.pos = vec4f(clip, 0., 1.); o.uv = uv; o.palBase = u32(palBase + 0.5); return o;
 }
 @fragment
 fn fs(i: VSOut) -> @location(0) vec4f {
   let col = textureSample(atlasTex, samp, i.uv);
   if (col.a < 0.5) { discard; }
-  return col;
+  // match-replace: nearest default-palette body color -> live body color
+  var bi = -1; var bd = 0.02;
+  for (var k = 0u; k < 16u; k = k + 1u) {
+    let d = distance(col.rgb, pal[i.palBase + k].rgb);
+    if (d < bd) { bd = d; bi = i32(k); }
+  }
+  var rgb = col.rgb;
+  if (bi >= 0) { rgb = pal[i.palBase + 16u + u32(bi)].rgb; }
+  return vec4f(rgb, col.a);
 }`;
 
-const INST_STRIDE = 9 * 4;   // dest(4) + auv(4) + flip(1), f32
+const INST_STRIDE = 10 * 4;   // dest(4) + auv(4) + flip(1) + palBase(1)
 
 export class SpriteGPU {
-  constructor() { this.ok = false; this.chars = {}; this.maxInst = 64; }
+  constructor() {
+    this.ok = false; this.chars = {}; this.charPal = {};
+    this.maxInst = 64; this.maxGroups = 8; this.recolor = true;
+  }
 
-  // canvas: the <canvas> to present to; device: shared WebGPU device.
   init(device, canvas) {
     try {
-      this.dev = device;
-      this.canvas = canvas;
+      this.dev = device; this.canvas = canvas;
       this.ctx = canvas.getContext('webgpu');
       this.fmt = navigator.gpu.getPreferredCanvasFormat();
       this.ctx.configure({ device, format: this.fmt, alphaMode: 'opaque' });
-      this.PP = new PostProcessor();
-      this.PP.init(device, this.fmt);
+      this.PP = new PostProcessor(); this.PP.init(device, this.fmt);
       this.sampler = device.createSampler({ minFilter: 'nearest', magFilter: 'nearest' });
       this.ubuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       this.inst = device.createBuffer({ size: this.maxInst * INST_STRIDE, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-      this.instData = new Float32Array(this.maxInst * 9);
+      this.instData = new Float32Array(this.maxInst * 10);
+      this.palBuf = device.createBuffer({ size: this.maxGroups * 32 * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      this.palData = new Float32Array(this.maxGroups * 32 * 4);
       this.bgl = device.createBindGroupLayout({ entries: [
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
         { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
+        { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
       ]});
       const mod = device.createShaderModule({ code: SHADER });
       this.pipe = device.createRenderPipeline({
@@ -78,6 +92,7 @@ export class SpriteGPU {
             { shaderLocation: 0, offset: 0,  format: 'float32x4' },
             { shaderLocation: 1, offset: 16, format: 'float32x4' },
             { shaderLocation: 2, offset: 32, format: 'float32' },
+            { shaderLocation: 3, offset: 36, format: 'float32' },
           ]}]},
         fragment: { module: mod, entryPoint: 'fs', targets: [{ format: this.fmt }] },
         primitive: { topology: 'triangle-list' },
@@ -87,17 +102,19 @@ export class SpriteGPU {
     return this.ok;
   }
 
-  // Upload (or replace) a character's atlas as a GPU texture + bind group.
+  // default body palette (rip palette[0..15]) for a char, [[r,g,b],...] 0-255
+  setCharPalette(charId, pal16) {
+    if (!pal16) return;
+    this.charPal[charId] = pal16.map(c => [c[0] / 255, c[1] / 255, c[2] / 255]);
+  }
+
   setAtlas(charId, imageBitmap) {
     if (!this.ok || !imageBitmap) return;
     const w = imageBitmap.width, h = imageBitmap.height;
-    // A texture taller/wider than the device limit (>=8192 guaranteed) fails to
-    // create — and since all chars share one encoder, a single bad atlas would
-    // poison the whole frame. Skip it instead (that char just won't GPU-render).
     const maxDim = (this.dev.limits && this.dev.limits.maxTextureDimension2D) || 8192;
     if (w > maxDim || h > maxDim) {
       console.warn('[sprite-gpu] atlas', charId, w + 'x' + h, '> maxTextureDimension2D', maxDim, '— skipped (needs a wider rebuild)');
-      this.chars[charId] = { skip: true }; return;
+      const prev = this.chars[charId]; this.chars[charId] = { skip: true, _pal: prev && prev._pal }; return;
     }
     try {
       const tex = this.dev.createTexture({
@@ -109,43 +126,60 @@ export class SpriteGPU {
         { binding: 0, resource: tex.createView() },
         { binding: 1, resource: this.sampler },
         { binding: 2, resource: { buffer: this.ubuf } },
+        { binding: 3, resource: { buffer: this.palBuf } },
       ]});
       this.chars[charId] = { tex, bg, w, h };
     } catch (e) { console.error('[sprite-gpu] setAtlas failed', charId, e); this.chars[charId] = { skip: true }; }
   }
 
-  // sprites: [{charId, sx,sy,sw,sh (atlas px), dx,dy,dw,dh (canvas px), flip}]
-  // Grouped by charId internally so each char's atlas binds once.
-  render(sprites, dbg) {
+  // sprites: [{charId, slot, sx,sy,sw,sh (atlas px), dx,dy,dw,dh (canvas px), flip}]
+  // T: TextureManager (T._pal = live PVR palette RAM, RGBA, 1024 entries).
+  render(sprites, dbg, T) {
     if (!this.ok) return;
     const cw = this.canvas.width, ch = this.canvas.height;
     this.dev.queue.writeBuffer(this.ubuf, 0, new Float32Array([cw, ch, 0, 0]));
     this.PP.ensureTargets(cw, ch, (dbg && dbg.resScale) || 1);
     const rt = this.PP.getRenderTarget();
+    const livePal = (this.recolor && T && T._pal) ? T._pal : null;
 
-    // group sprites by char (contiguous in the instance buffer)
     const byChar = new Map();
     for (const s of sprites) {
-      const c = this.chars[s.charId]; if (!c || !c.bg) continue;   // skip un-loaded / over-size-skipped
+      const c = this.chars[s.charId]; if (!c || !c.bg) continue;
       if (!byChar.has(s.charId)) byChar.set(s.charId, []);
       byChar.get(s.charId).push(s);
     }
-    let n = 0; const groups = [];
+    let n = 0, gi = 0; const groups = [];
     for (const [cid, list] of byChar) {
+      if (gi >= this.maxGroups || n >= this.maxInst) break;
+      const palBase = gi * 32;
+      const def = this.charPal[cid];
+      const slot = (list[0].slot | 0);
+      const bankE = 256 + 128 * slot;     // PVR entry start for this slot's body palette
+      for (let k = 0; k < 16; k++) {
+        const od = (palBase + k) * 4, ol = (palBase + 16 + k) * 4;
+        const dr = def ? def[k][0] : 0, dg = def ? def[k][1] : 0, db = def ? def[k][2] : 0;
+        this.palData[od] = dr; this.palData[od + 1] = dg; this.palData[od + 2] = db; this.palData[od + 3] = 1;
+        if (livePal) {
+          const pe = (bankE + k) * 4;
+          this.palData[ol] = livePal[pe] / 255; this.palData[ol + 1] = livePal[pe + 1] / 255; this.palData[ol + 2] = livePal[pe + 2] / 255; this.palData[ol + 3] = 1;
+        } else { // no live palette -> live = default (recolor is a no-op)
+          this.palData[ol] = dr; this.palData[ol + 1] = dg; this.palData[ol + 2] = db; this.palData[ol + 3] = 1;
+        }
+      }
       const first = n;
       for (const s of list) {
         if (n >= this.maxInst) break;
-        const c = this.chars[cid];
-        const o = n * 9;
-        this.instData[o]   = s.dx; this.instData[o+1] = s.dy; this.instData[o+2] = s.dw; this.instData[o+3] = s.dh;
-        this.instData[o+4] = s.sx / c.w; this.instData[o+5] = s.sy / c.h;
-        this.instData[o+6] = (s.sx + s.sw) / c.w; this.instData[o+7] = (s.sy + s.sh) / c.h;
-        this.instData[o+8] = s.flip ? 1 : 0;
+        const c = this.chars[cid], o = n * 10;
+        this.instData[o] = s.dx; this.instData[o + 1] = s.dy; this.instData[o + 2] = s.dw; this.instData[o + 3] = s.dh;
+        this.instData[o + 4] = s.sx / c.w; this.instData[o + 5] = s.sy / c.h;
+        this.instData[o + 6] = (s.sx + s.sw) / c.w; this.instData[o + 7] = (s.sy + s.sh) / c.h;
+        this.instData[o + 8] = s.flip ? 1 : 0; this.instData[o + 9] = palBase;
         n++;
       }
-      groups.push({ cid, first, count: n - first });
+      groups.push({ cid, first, count: n - first }); gi++;
     }
-    if (n) this.dev.queue.writeBuffer(this.inst, 0, this.instData, 0, n * 9);
+    if (gi) this.dev.queue.writeBuffer(this.palBuf, 0, this.palData, 0, gi * 32 * 4);
+    if (n) this.dev.queue.writeBuffer(this.inst, 0, this.instData, 0, n * 10);
 
     const enc = this.dev.createCommandEncoder();
     const pass = enc.beginRenderPass({
