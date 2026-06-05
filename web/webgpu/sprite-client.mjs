@@ -36,7 +36,9 @@ export class SpriteClient {
     this._loading = {};       // char_id -> Promise (de-dupe concurrent fetches)
     this.charBase = null;     // URL base for per-char atlases, e.g. './test-atlas/chars'
     this.screenW = 640; this.screenH = 480;
-    this.spriteScale = 1;     // global size multiplier (tune to match the game's render/zoom)
+    this.spriteScale = 1;     // calibration fine-tune; final size = camera zoom * this
+    this._zoom = 1;           // live camera zoom, derived from Δscreen_x/Δpos_x
+    this._lastFc = null;      // last game frame_counter (for frame-timed velocity)
     this.inMatch = 0;
     // All 6 character slots (P1C1,P2C1,P1C2,P2C2,P1C3,P2C3). The on-screen POINT
     // can be any of a side's 3 — and a called assist is a bench char briefly
@@ -119,32 +121,42 @@ export class SpriteClient {
     const B = 4;                       // payload starts after 'GSTA'
     this.inMatch = dv.getUint8(B + 0);
     const now = (typeof performance !== 'undefined') ? performance.now() : 0;
+    // Velocity is timed on the GAME frame delta, NOT the jittery network arrival
+    // gap — so a late/early packet doesn't wobble the extrapolation speed.
+    const fc = dv.getUint32(B + 21, true);
+    const dfr = (this._lastFc != null) ? (fc - this._lastFc) : 0; this._lastFc = fc;
+    const frameDt = (dfr >= 1 && dfr <= 8) ? dfr * 16.667 : 0;   // ms of game time since last state
     for (let s = 0; s < 6; s++) {
       const ci = B + 25 + s * 38;      // 25-byte global header + 38*slot
       const sl = this.slot[s];
       const nx = dv.getFloat32(ci + 16, true), ny = dv.getFloat32(ci + 20, true);
-      // observed screen velocity from the last two states (px/ms) — drives
-      // render-time extrapolation so motion tracks the present, hiding jitter.
-      const dt = now - sl.t;
-      if (sl.active && dt > 0 && dt < 200) {
-        sl.vx = (nx - sl.screen_x) / dt;
-        sl.vy = (ny - sl.screen_y) / dt;
-      } else { sl.vx = 0; sl.vy = 0; }
-      sl.px = sl.screen_x; sl.py = sl.screen_y; sl.pt = sl.t; sl.t = now;
+      if (sl.active && frameDt > 0) {
+        const ivx = (nx - sl.screen_x) / frameDt, ivy = (ny - sl.screen_y) / frameDt;
+        sl.vx = sl.vx * 0.4 + ivx * 0.6;   // EMA-smoothed px/ms (kills velocity noise)
+        sl.vy = sl.vy * 0.4 + ivy * 0.6;
+      } else if (!sl.active) { sl.vx = 0; sl.vy = 0; }
+      sl.t = now;
       sl.active   = dv.getUint8(ci + 0);
       sl.char_id  = dv.getUint8(ci + 1);
       sl.facing   = dv.getUint8(ci + 2);
       sl.palette  = dv.getUint8(ci + 7);
+      sl.pos_x    = dv.getFloat32(ci + 8,  true);   // arena/world X — for the zoom
       sl.screen_x = nx;
       sl.screen_y = ny;
       sl.sprite_id= dv.getUint16(ci + 32, true);
     }
-    // Lazy-load the atlas for any active character we don't have yet — the
-    // client downloads only the characters actually on screen in this match.
-    for (let s = 0; s < 6; s++) {
-      const sl = this.slot[s];
-      if (sl.active) this.loadChar(sl.char_id);
+    // Exact size from state: camera zoom = |Δscreen_x / Δpos_x| between two
+    // active characters (camera offset cancels). Tracks MVC2's live zoom.
+    let a = -1, b = -1;
+    for (let s = 0; s < 6; s++) if (this.slot[s].active) { if (a < 0) a = s; else { b = s; break; } }
+    if (a >= 0 && b >= 0) {
+      const dp = this.slot[a].pos_x - this.slot[b].pos_x;
+      if (Math.abs(dp) > 5) {
+        const z = Math.abs((this.slot[a].screen_x - this.slot[b].screen_x) / dp);
+        if (z > 0.1 && z < 10) this._zoom = z;
+      }
     }
+    for (let s = 0; s < 6; s++) { const sl = this.slot[s]; if (sl.active) this.loadChar(sl.char_id); }
   }
 
   // Draw the current state into a 2D context. Returns a small status object.
@@ -184,8 +196,8 @@ export class SpriteClient {
         if (dt > 0) { exx += sl.vx * dt; eyy += sl.vy * dt; }
       }
 
-      // Destination in game space, scaled to the canvas (sprite size × spriteScale).
-      const S = this.spriteScale || 1;
+      // Destination in game space (sprite size × live camera zoom × calibration).
+      const S = (this._zoom || 1) * (this.spriteScale || 1);
       const gx = exx + sp.dx*S, gy = eyy + sp.dy*S;
       const dx = gx * sx, dy = gy * sy, dw = sp.wG * S * sx, dh = sp.hG * S * sy;
       const flip = (sl.facing !== sp.facing);
@@ -225,7 +237,7 @@ export class SpriteClient {
              const h = this._held[s]; if (h && h.char_id === sl.char_id) sp = h.sp; else continue; }
       let exx = sl.screen_x, eyy = sl.screen_y;
       if (this.predict !== false) { const dt = Math.min(now - sl.t, 33); if (dt > 0) { exx += sl.vx*dt; eyy += sl.vy*dt; } }
-      const S = this.spriteScale || 1;   // scale about the feet/center (anchor offset scales too)
+      const S = (this._zoom || 1) * (this.spriteScale || 1);   // live zoom * calibration; scales about feet/center
       out.push({ charId: sl.char_id, sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
         dx: (exx+sp.dx*S)*scaleX, dy: (eyy+sp.dy*S)*scaleY, dw: sp.wG*S*scaleX, dh: sp.hG*S*scaleY,
         flip: (sl.facing !== sp.facing) });
@@ -246,6 +258,7 @@ export class SpriteClient {
     return `SPRITE CLIENT — ${loaded.length} char atlas loaded\n`
          + `loaded: ${names}\n`
          + `STATE STREAM: ${kbps} KB/s (${mbps} Mbps)\n`
+         + `zoom(derived)=${(this._zoom||1).toFixed(2)}  size=${((this._zoom||1)*(this.spriteScale||1)).toFixed(2)}x\n`
          + `  ${this._bwHz.toFixed(0)} Hz x ${this._lastSize} B/frame\n`
          + `inMatch=${this.inMatch}\n` + [0,1,2,3,4,5].map(sl).join('\n') + '\n'
          + (this._lastNote ? `note: ${this._lastNote}` : '');
