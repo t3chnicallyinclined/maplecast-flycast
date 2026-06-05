@@ -331,7 +331,7 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
     +'<label>Size <input type="range" id="sc_scale" min="0.5" max="3" step="0.05" value="1.75" style="width:110px;vertical-align:middle"> <span id="sc_scaleval">1.75</span>×</label><br>'
     +'<label><input type="checkbox" id="sc_skin" checked> Live skins / hit-flash (palette recolor)</label><br>'
     +'<label><input type="checkbox" id="sc_hud" checked> HUD (health/meter/combo/timer from state)</label><br>'
-    +'<label><input type="checkbox" id="sc_fx" checked> Effects (live beams/sparks/lightning from TA)</label><br>'
+    +'<label><input type="checkbox" id="sc_fx"> Effects (live, experimental — dev phase-skew; prod renders server-side)</label><br>'
     +'<button id="sc_srv">↻ Reload atlases</button> '
     +'<span style="font-size:9px;color:#888">(per-char, lazy-loads who\'s picked)</span><br>'
     +'atlas PNG <input type="file" id="sc_png" accept="image/png" style="font-size:10px"><br>'
@@ -354,7 +354,7 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
   const hctx=sch.getContext('2d');
   (canvas.parentNode||document.body).appendChild(wrap);
   const SG=new SpriteGPU(); window._spritegpu=SG;
-  let scOn=true, gpuOn=true, hudOn=true, fxOn=true;
+  let scOn=true, gpuOn=true, hudOn=true, fxOn=false;   // dev live-effects off by default (two-rAF VRAM phase skew shows wrong textures); production = server-side synced
   const showCanvas=()=>{ const g=gpuOn&&SG.ok; scg.style.display=(scOn&&g)?'block':'none'; scv.style.display=(scOn&&!g)?'block':'none'; };
   box.querySelector('#sc_on').onchange=e=>{ scOn=e.target.checked; showCanvas(); };
   box.querySelector('#sc_pred').onchange=e=>{ SPRITECLIENT.predict=e.target.checked; };
