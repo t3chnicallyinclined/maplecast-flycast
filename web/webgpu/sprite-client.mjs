@@ -36,6 +36,7 @@ export class SpriteClient {
     this._loading = {};       // char_id -> Promise (de-dupe concurrent fetches)
     this.charBase = null;     // URL base for per-char atlases, e.g. './test-atlas/chars'
     this.screenW = 640; this.screenH = 480;
+    this.spriteScale = 1;     // global size multiplier (tune to match the game's render/zoom)
     this.inMatch = 0;
     // All 6 character slots (P1C1,P2C1,P1C2,P2C2,P1C3,P2C3). The on-screen POINT
     // can be any of a side's 3 — and a called assist is a bench char briefly
@@ -67,10 +68,11 @@ export class SpriteClient {
     if (this.chars[cid] || this._loading[cid] || !this.charBase) return this._loading[cid];
     const hex = (cid & 0xff).toString(16).padStart(2, '0').toUpperCase();
     const base = `${this.charBase}/PL${hex}`;
+    const bust = '?t=' + Date.now();   // re-fetch fresh after an atlas rebuild
     const p = (async () => {
       try {
-        const json = await (await fetch(base + '.json')).json();
-        const blob = await (await fetch(base + '.png')).blob();
+        const json = await (await fetch(base + '.json' + bust)).json();
+        const blob = await (await fetch(base + '.png' + bust)).blob();
         const img = await createImageBitmap(blob);
         this.screenW = json.screenW || this.screenW; this.screenH = json.screenH || this.screenH;
         this.chars[cid] = { img, sprites: json.sprites, name: json.name || ('char' + cid) };
@@ -182,9 +184,10 @@ export class SpriteClient {
         if (dt > 0) { exx += sl.vx * dt; eyy += sl.vy * dt; }
       }
 
-      // Destination in game space, scaled to the canvas.
-      const gx = exx + sp.dx, gy = eyy + sp.dy;
-      const dx = gx * sx, dy = gy * sy, dw = sp.wG * sx, dh = sp.hG * sy;
+      // Destination in game space, scaled to the canvas (sprite size × spriteScale).
+      const S = this.spriteScale || 1;
+      const gx = exx + sp.dx*S, gy = eyy + sp.dy*S;
+      const dx = gx * sx, dy = gy * sy, dw = sp.wG * S * sx, dh = sp.hG * S * sy;
       const flip = (sl.facing !== sp.facing);
 
       ctx.save();
@@ -222,8 +225,9 @@ export class SpriteClient {
              const h = this._held[s]; if (h && h.char_id === sl.char_id) sp = h.sp; else continue; }
       let exx = sl.screen_x, eyy = sl.screen_y;
       if (this.predict !== false) { const dt = Math.min(now - sl.t, 33); if (dt > 0) { exx += sl.vx*dt; eyy += sl.vy*dt; } }
+      const S = this.spriteScale || 1;   // scale about the feet/center (anchor offset scales too)
       out.push({ charId: sl.char_id, sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
-        dx: (exx+sp.dx)*scaleX, dy: (eyy+sp.dy)*scaleY, dw: sp.wG*scaleX, dh: sp.hG*scaleY,
+        dx: (exx+sp.dx*S)*scaleX, dy: (eyy+sp.dy*S)*scaleY, dw: sp.wG*S*scaleX, dh: sp.hG*S*scaleY,
         flip: (sl.facing !== sp.facing) });
     }
     this._lastNote = loading ? `loading ${loading} char atlas…` : (missing ? `holding ${missing}: ${missKeys.join(' ')}` : 'all visible poses captured');

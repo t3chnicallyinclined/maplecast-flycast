@@ -91,17 +91,27 @@ export class SpriteGPU {
   setAtlas(charId, imageBitmap) {
     if (!this.ok || !imageBitmap) return;
     const w = imageBitmap.width, h = imageBitmap.height;
-    const tex = this.dev.createTexture({
-      size: [w, h], format: 'rgba8unorm',
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
-    });
-    this.dev.queue.copyExternalImageToTexture({ source: imageBitmap }, { texture: tex }, [w, h]);
-    const bg = this.dev.createBindGroup({ layout: this.bgl, entries: [
-      { binding: 0, resource: tex.createView() },
-      { binding: 1, resource: this.sampler },
-      { binding: 2, resource: { buffer: this.ubuf } },
-    ]});
-    this.chars[charId] = { tex, bg, w, h };
+    // A texture taller/wider than the device limit (>=8192 guaranteed) fails to
+    // create — and since all chars share one encoder, a single bad atlas would
+    // poison the whole frame. Skip it instead (that char just won't GPU-render).
+    const maxDim = (this.dev.limits && this.dev.limits.maxTextureDimension2D) || 8192;
+    if (w > maxDim || h > maxDim) {
+      console.warn('[sprite-gpu] atlas', charId, w + 'x' + h, '> maxTextureDimension2D', maxDim, '— skipped (needs a wider rebuild)');
+      this.chars[charId] = { skip: true }; return;
+    }
+    try {
+      const tex = this.dev.createTexture({
+        size: [w, h], format: 'rgba8unorm',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      this.dev.queue.copyExternalImageToTexture({ source: imageBitmap }, { texture: tex }, [w, h]);
+      const bg = this.dev.createBindGroup({ layout: this.bgl, entries: [
+        { binding: 0, resource: tex.createView() },
+        { binding: 1, resource: this.sampler },
+        { binding: 2, resource: { buffer: this.ubuf } },
+      ]});
+      this.chars[charId] = { tex, bg, w, h };
+    } catch (e) { console.error('[sprite-gpu] setAtlas failed', charId, e); this.chars[charId] = { skip: true }; }
   }
 
   // sprites: [{charId, sx,sy,sw,sh (atlas px), dx,dy,dw,dh (canvas px), flip}]
@@ -116,7 +126,7 @@ export class SpriteGPU {
     // group sprites by char (contiguous in the instance buffer)
     const byChar = new Map();
     for (const s of sprites) {
-      const c = this.chars[s.charId]; if (!c) continue;
+      const c = this.chars[s.charId]; if (!c || !c.bg) continue;   // skip un-loaded / over-size-skipped
       if (!byChar.has(s.charId)) byChar.set(s.charId, []);
       byChar.get(s.charId).push(s);
     }
