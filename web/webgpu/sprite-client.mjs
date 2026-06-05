@@ -47,7 +47,9 @@ export class SpriteClient {
     this._bwRate = 0; this._bwHz = 0; this._lastSize = 0;
   }
   _blank() {
-    return { active:0, char_id:0, sprite_id:-1, screen_x:0, screen_y:0, facing:0, palette:0 };
+    return { active:0, char_id:0, sprite_id:-1, screen_x:0, screen_y:0, facing:0, palette:0,
+             // prediction: previous screen pos + timestamps -> observed screen velocity
+             px:0, py:0, t:0, pt:0, vx:0, vy:0 };
   }
 
   static isGSTA(d) {
@@ -114,15 +116,25 @@ export class SpriteClient {
     const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
     const B = 4;                       // payload starts after 'GSTA'
     this.inMatch = dv.getUint8(B + 0);
+    const now = (typeof performance !== 'undefined') ? performance.now() : 0;
     for (let s = 0; s < 6; s++) {
       const ci = B + 25 + s * 38;      // 25-byte global header + 38*slot
       const sl = this.slot[s];
+      const nx = dv.getFloat32(ci + 16, true), ny = dv.getFloat32(ci + 20, true);
+      // observed screen velocity from the last two states (px/ms) — drives
+      // render-time extrapolation so motion tracks the present, hiding jitter.
+      const dt = now - sl.t;
+      if (sl.active && dt > 0 && dt < 200) {
+        sl.vx = (nx - sl.screen_x) / dt;
+        sl.vy = (ny - sl.screen_y) / dt;
+      } else { sl.vx = 0; sl.vy = 0; }
+      sl.px = sl.screen_x; sl.py = sl.screen_y; sl.pt = sl.t; sl.t = now;
       sl.active   = dv.getUint8(ci + 0);
       sl.char_id  = dv.getUint8(ci + 1);
       sl.facing   = dv.getUint8(ci + 2);
       sl.palette  = dv.getUint8(ci + 7);
-      sl.screen_x = dv.getFloat32(ci + 16, true);
-      sl.screen_y = dv.getFloat32(ci + 20, true);
+      sl.screen_x = nx;
+      sl.screen_y = ny;
       sl.sprite_id= dv.getUint16(ci + 32, true);
     }
     // Lazy-load the atlas for any active character we don't have yet — the
@@ -137,6 +149,7 @@ export class SpriteClient {
   render(ctx) {
     const W = ctx.canvas.width, H = ctx.canvas.height;
     ctx.clearRect(0, 0, W, H);
+    this._now0 = (typeof performance !== 'undefined') ? performance.now() : 0;
     const sx = W / (this.screenW || 640);
     const sy = H / (this.screenH || 480);
     let drawn = 0, missing = 0, loading = 0, missKeys = [];
@@ -160,15 +173,24 @@ export class SpriteClient {
         if (h && h.char_id === sl.char_id) sp = h.sp; else continue;
       }
 
+      // Render-time extrapolation: advance position by the observed screen
+      // velocity over the time since the last state, clamped to ~2 frames so a
+      // direction change can't overshoot. Hides network jitter / inter-state gap.
+      let exx = sl.screen_x, eyy = sl.screen_y;
+      if (this.predict !== false) {
+        const dt = Math.min(this._now0 - sl.t, 33);     // ms since last state, cap 33ms
+        if (dt > 0) { exx += sl.vx * dt; eyy += sl.vy * dt; }
+      }
+
       // Destination in game space, scaled to the canvas.
-      const gx = sl.screen_x + sp.dx, gy = sl.screen_y + sp.dy;
+      const gx = exx + sp.dx, gy = eyy + sp.dy;
       const dx = gx * sx, dy = gy * sy, dw = sp.wG * sx, dh = sp.hG * sy;
       const flip = (sl.facing !== sp.facing);
 
       ctx.save();
       if (flip) {
-        // Mirror horizontally about the character's screen_x.
-        const axis = sl.screen_x * sx;
+        // Mirror horizontally about the character's (extrapolated) screen_x.
+        const axis = exx * sx;
         ctx.translate(axis, 0); ctx.scale(-1, 1); ctx.translate(-axis, 0);
       }
       ctx.drawImage(c.img, sp.x, sp.y, sp.w, sp.h, dx, dy, dw, dh);

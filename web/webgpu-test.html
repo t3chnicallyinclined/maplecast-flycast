@@ -264,7 +264,7 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=9';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=6';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=7';
 
 const canvas=document.getElementById('c'), ov=document.getElementById('ov'), st=document.getElementById('st');
 const BAKE=new SpriteBake(); window._bake=BAKE;
@@ -325,6 +325,7 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
   box.style.cssText='border:1px solid #06a;margin:6px 0;padding:6px;background:#012';
   box.innerHTML='<b style="color:#0af">SPRITE CLIENT (Option 6)</b><br>'
     +'<label><input type="checkbox" id="sc_on" checked> Render chars from 253B state (no TA)</label><br>'
+    +'<label><input type="checkbox" id="sc_pred" checked> Predict (velocity extrapolation — lower latency)</label><br>'
     +'<button id="sc_srv">↻ Reload atlases</button> '
     +'<span style="font-size:9px;color:#888">(per-char, lazy-loads who\'s picked)</span><br>'
     +'atlas PNG <input type="file" id="sc_png" accept="image/png" style="font-size:10px"><br>'
@@ -338,6 +339,7 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
   const scx=scv.getContext('2d');
   let scOn=true; scv.style.display='block';
   box.querySelector('#sc_on').onchange=e=>{ scOn=e.target.checked; scv.style.display=scOn?'block':'none'; };
+  box.querySelector('#sc_pred').onchange=e=>{ SPRITECLIENT.predict=e.target.checked; };
   // Per-character atlases lazy-load by char_id as characters appear in the state
   // (only the picked characters download). Override dir with ?atlas=<urlbase>.
   const CHAR_BASE = new URLSearchParams(location.search).get('atlas') || './test-atlas/chars';
