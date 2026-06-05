@@ -813,7 +813,7 @@ async function main(){
     // Clean vanilla DC rendering by default — no background effects
     // Users enable custom backgrounds from the GRAPHICS ENHANCE panel
     const D=new FrameDecoder(),P=new TAParser(),T=new TextureManager(R.dev),FP=new FramePredictor();
-    window._T=T;  // expose live palette RAM (T._pal) for the sprite renderer's skin/hit-flash recolor
+    window._T=T; window._D=D;  // expose palette RAM + VRAM for the sprite renderer / effect-texture decode
     const PP=new PostProcessor();
     PP.init(R.dev, R.fmt);
     window._resizeRenderer=()=>PP.ensureTargets(640, 480, DBG.resScale||1);
@@ -978,7 +978,11 @@ async function main(){
               if(!a){ a={sig,fmt,texW,texH,bsrc,bdst,n:0,cids:{},dx:[1e9,-1e9],dy:[1e9,-1e9],tcws:new Set(),exAddr:addr}; window._taEffects.set(sig,a); }
               a.n++; a.tcws.add(tcw); a.cids[e.nearCid]=(a.cids[e.nearCid]||0)+1;
               a.dx[0]=Math.min(a.dx[0],e.nearDx); a.dx[1]=Math.max(a.dx[1],e.nearDx);
-              a.dy[0]=Math.min(a.dy[0],e.nearDy); a.dy[1]=Math.max(a.dy[1],e.nearDy); }
+              a.dy[0]=Math.min(a.dy[0],e.nearDy); a.dy[1]=Math.max(a.dy[1],e.nearDy);
+              if(!a.rgba && window._D && window._D.vram && window._T){   // grab the actual texture WHILE it's live in VRAM
+                try{ const texU=(tsp>>3)&7, palSel=(tcw>>21)&0x3F, scan=(tcw>>26)&1, vq=(tcw>>30)&1, mip=(tcw>>31)&1;
+                  const dec=window._T._decode(window._D.vram, addr, fmt, texW, texH, palSel, scan, vq, mip, texU);
+                  if(dec){ a.rgba=new Uint8Array(dec); a.iw=texW; a.ih=texH; } }catch(_e){} } }
           }};
           scan(g.punchThrough); scan(g.translucent);
           return out;
@@ -1000,6 +1004,25 @@ async function main(){
             const top=Object.entries(a.cids).sort((x,y)=>y[1]-x[1]).slice(0,2).map(e=>`cid${e[0]}:${e[1]}`).join(',');
             console.log(`  ${a.sig}${add?' ADD':''} seen=${a.n} slots=${a.tcws.size} exAddr=0x${a.exAddr.toString(16)} chars=[${top}] dx=[${a.dx[0].toFixed(0)},${a.dx[1].toFixed(0)}] dy=[${a.dy[0].toFixed(0)},${a.dy[1].toFixed(0)}]`); }
           return rows;
+        };
+        // Render the captured effect textures into a top-right overlay -> screenshot it.
+        window._taTex = function(){
+          let host=document.getElementById('taTexHost');
+          if(!host){ host=document.createElement('div'); host.id='taTexHost';
+            host.style.cssText='position:fixed;top:0;right:0;z-index:99999;background:#000;border:1px solid #0af;padding:6px;max-width:600px;max-height:96vh;overflow:auto'; document.body.appendChild(host); }
+          host.innerHTML='<b style="color:#0af;font:11px monospace">TA effect textures — screenshot this</b><br>';
+          let nshown=0;
+          for(const a of [...window._taEffects.values()].sort((x,y)=>y.n-x.n)){
+            if(!a.rgba) continue; nshown++;
+            const cv=document.createElement('canvas'); cv.width=a.iw; cv.height=a.ih;
+            cv.style.cssText='border:1px solid #444;background:#000;width:120px;height:120px;image-rendering:pixelated';
+            const ctx=cv.getContext('2d'); const id=ctx.createImageData(a.iw,a.ih); id.data.set(a.rgba); ctx.putImageData(id,0,0);
+            const box=document.createElement('div'); box.style.cssText='display:inline-block;text-align:center;font:9px monospace;color:#8cf;vertical-align:top;margin:2px';
+            box.appendChild(cv); box.appendChild(document.createElement('br'));
+            box.appendChild(document.createTextNode(`${a.sig}${a.bdst===1?' ADD':''}`));
+            host.appendChild(box);
+          }
+          console.log(`[taTex] ${nshown} effect textures rendered to top-right overlay — screenshot it (set _taWatch=true + play first to capture them)`);
         };
         window._taWatch = false;   // set true + play to accumulate; then window._taDump()
 
