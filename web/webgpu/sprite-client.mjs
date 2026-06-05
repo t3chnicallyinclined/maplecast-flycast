@@ -36,8 +36,8 @@ export class SpriteClient {
     this._loading = {};       // char_id -> Promise (de-dupe concurrent fetches)
     this.charBase = null;     // URL base for per-char atlases, e.g. './test-atlas/chars'
     this.screenW = 640; this.screenH = 480;
-    this.spriteScale = 1;     // calibration fine-tune; final size = camera zoom * this
-    this._zoom = 1;           // live camera zoom, derived from Δscreen_x/Δpos_x
+    this.spriteScale = 1.75;  // constant size factor (MVC2 pans, doesn't dynamic-zoom)
+    this._zoom = 1;           // derived camera zoom — INFO ONLY (shown, not applied)
     this._lastFc = null;      // last game frame_counter (for frame-timed velocity)
     this.inMatch = 0;
     // All 6 character slots (P1C1,P2C1,P1C2,P2C2,P1C3,P2C3). The on-screen POINT
@@ -196,8 +196,8 @@ export class SpriteClient {
         if (dt > 0) { exx += sl.vx * dt; eyy += sl.vy * dt; }
       }
 
-      // Destination in game space (sprite size × live camera zoom × calibration).
-      const S = (this._zoom || 1) * (this.spriteScale || 1);
+      // Destination in game space (sprite size × constant scale).
+      const S = this.spriteScale || 1;
       const gx = exx + sp.dx*S, gy = eyy + sp.dy*S;
       const dx = gx * sx, dy = gy * sy, dw = sp.wG * S * sx, dh = sp.hG * S * sy;
       const flip = (sl.facing !== sp.facing);
@@ -237,7 +237,7 @@ export class SpriteClient {
              const h = this._held[s]; if (h && h.char_id === sl.char_id) sp = h.sp; else continue; }
       let exx = sl.screen_x, eyy = sl.screen_y;
       if (this.predict !== false) { const dt = Math.min(now - sl.t, 33); if (dt > 0) { exx += sl.vx*dt; eyy += sl.vy*dt; } }
-      const S = (this._zoom || 1) * (this.spriteScale || 1);   // live zoom * calibration; scales about feet/center
+      const S = this.spriteScale || 1;   // constant scale; scales about feet/center
       out.push({ charId: sl.char_id, sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
         dx: (exx+sp.dx*S)*scaleX, dy: (eyy+sp.dy*S)*scaleY, dw: sp.wG*S*scaleX, dh: sp.hG*S*scaleY,
         flip: (sl.facing !== sp.facing) });
@@ -258,7 +258,7 @@ export class SpriteClient {
     return `SPRITE CLIENT — ${loaded.length} char atlas loaded\n`
          + `loaded: ${names}\n`
          + `STATE STREAM: ${kbps} KB/s (${mbps} Mbps)\n`
-         + `zoom(derived)=${(this._zoom||1).toFixed(2)}  size=${((this._zoom||1)*(this.spriteScale||1)).toFixed(2)}x\n`
+         + `size=${(this.spriteScale||1).toFixed(2)}x  zoom(info,not applied)=${(this._zoom||1).toFixed(2)}\n`
          + `  ${this._bwHz.toFixed(0)} Hz x ${this._lastSize} B/frame\n`
          + `inMatch=${this.inMatch}\n` + [0,1,2,3,4,5].map(sl).join('\n') + '\n'
          + (this._lastNote ? `note: ${this._lastNote}` : '');

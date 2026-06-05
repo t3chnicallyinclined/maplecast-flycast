@@ -264,7 +264,7 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=9';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=10';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=11';
 import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=2';
 
 const canvas=document.getElementById('c'), ov=document.getElementById('ov'), st=document.getElementById('st');
@@ -328,7 +328,7 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
     +'<label><input type="checkbox" id="sc_on" checked> Render chars from 253B state (no TA)</label><br>'
     +'<label><input type="checkbox" id="sc_pred" checked> Predict (velocity extrapolation — lower latency)</label><br>'
     +'<label><input type="checkbox" id="sc_gpu" checked> GPU render + effects (WebGPU; off = Canvas2D)</label><br>'
-    +'<label>Size <input type="range" id="sc_scale" min="0.5" max="2.5" step="0.05" value="1" style="width:110px;vertical-align:middle"> <span id="sc_scaleval">1.00</span>×</label><br>'
+    +'<label>Size <input type="range" id="sc_scale" min="0.5" max="3" step="0.05" value="1.75" style="width:110px;vertical-align:middle"> <span id="sc_scaleval">1.75</span>×</label><br>'
     +'<button id="sc_srv">↻ Reload atlases</button> '
     +'<span style="font-size:9px;color:#888">(per-char, lazy-loads who\'s picked)</span><br>'
     +'atlas PNG <input type="file" id="sc_png" accept="image/png" style="font-size:10px"><br>'
