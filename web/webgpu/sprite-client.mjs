@@ -35,6 +35,9 @@ export class SpriteClient {
     this.inMatch = 0;
     this.slot = [this._blank(), this._blank()];
     this._lastNote = 'no atlas loaded';
+    // State-stream (GSTA) bandwidth — the whole point of Option 6. Rolling 1s window.
+    this._bwBytes = 0; this._bwFrames = 0; this._bwT0 = 0;
+    this._bwRate = 0; this._bwHz = 0; this._lastSize = 0;
   }
   _blank() {
     return { active:0, char_id:0, sprite_id:-1, screen_x:0, screen_y:0, facing:0, palette:0 };
@@ -53,6 +56,16 @@ export class SpriteClient {
   }
 
   onGSTA(d) {
+    // --- state-stream bandwidth (rolling 1s window) ---
+    const _now = (typeof performance !== 'undefined') ? performance.now() : 0;
+    if (!this._bwT0) this._bwT0 = _now;
+    this._bwBytes += d.byteLength; this._bwFrames++; this._lastSize = d.byteLength;
+    const _dt = _now - this._bwT0;
+    if (_dt >= 1000) {
+      this._bwRate = this._bwBytes / (_dt / 1000);   // bytes/sec
+      this._bwHz   = this._bwFrames / (_dt / 1000);
+      this._bwBytes = 0; this._bwFrames = 0; this._bwT0 = _now;
+    }
     const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
     const B = 4;                       // payload starts after 'GSTA'
     this.inMatch = dv.getUint8(B + 0);
@@ -120,8 +133,12 @@ export class SpriteClient {
     let nSprites = 0; if (a) for (const k in a.chars) nSprites += Object.keys(a.chars[k].sprites).length;
     const sl = (i) => { const x = this.slot[i];
       return `S${i} ${x.active?'act':'---'} char=${x.char_id} sid=0x${(x.sprite_id&0xffff).toString(16).padStart(4,'0')} fac=${x.facing}`; };
+    const kbps = (this._bwRate/1024).toFixed(2);
+    const mbps = (this._bwRate*8/1e6).toFixed(3);
     return `SPRITE CLIENT ${this.img?'atlas loaded':'NO ATLAS'}\n`
          + `atlas: ${nChars} chars, ${nSprites} sprites\n`
+         + `STATE STREAM: ${kbps} KB/s (${mbps} Mbps)\n`
+         + `  ${this._bwHz.toFixed(0)} Hz x ${this._lastSize} B/frame\n`
          + `inMatch=${this.inMatch}\n${sl(0)}\n${sl(1)}\n`
          + (this._lastNote ? `note: ${this._lastNote}` : '');
   }
