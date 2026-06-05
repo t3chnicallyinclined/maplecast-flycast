@@ -30,8 +30,12 @@ const GSTA_MAGIC = [71, 83, 84, 65]; // 'G','S','T','A'
 
 export class SpriteClient {
   constructor() {
-    this.atlas = null;   // parsed bake_atlas.json
-    this.img = null;     // ImageBitmap of bake_atlas.png
+    // Per-character atlases, lazy-loaded by char_id as characters appear in the
+    // state. chars[char_id] = { img:ImageBitmap, sprites:{sid:{...}}, name }.
+    this.chars = {};
+    this._loading = {};       // char_id -> Promise (de-dupe concurrent fetches)
+    this.charBase = null;     // URL base for per-char atlases, e.g. './test-atlas/chars'
+    this.screenW = 640; this.screenH = 480;
     this.inMatch = 0;
     this.slot = [this._blank(), this._blank()];
     this._lastNote = 'no atlas loaded';
@@ -48,15 +52,43 @@ export class SpriteClient {
         && d[2]===GSTA_MAGIC[2] && d[3]===GSTA_MAGIC[3];
   }
 
-  // atlasJson: parsed object; pngBlob: a Blob/File of the atlas PNG.
-  async loadAtlas(atlasJson, pngBlob) {
-    this.atlas = atlasJson;
-    this.img = await createImageBitmap(pngBlob);
-    this._lastNote = '';
+  // Point the client at a server dir of per-character atlases
+  // (PL{cid:02X}.{json,png}). Characters are then fetched on demand as they
+  // appear in the streamed state — only what's picked gets downloaded.
+  setCharBase(base) { this.charBase = base; }
+
+  // Lazy-load ONE character's atlas: <charBase>/PL{cid:02X}.{json,png}.
+  loadChar(cid) {
+    if (this.chars[cid] || this._loading[cid] || !this.charBase) return this._loading[cid];
+    const hex = (cid & 0xff).toString(16).padStart(2, '0').toUpperCase();
+    const base = `${this.charBase}/PL${hex}`;
+    const p = (async () => {
+      try {
+        const json = await (await fetch(base + '.json')).json();
+        const blob = await (await fetch(base + '.png')).blob();
+        const img = await createImageBitmap(blob);
+        this.screenW = json.screenW || this.screenW; this.screenH = json.screenH || this.screenH;
+        this.chars[cid] = { img, sprites: json.sprites, name: json.name || ('char' + cid) };
+        console.log('[sprite-client] loaded char', cid, json.name, Object.keys(json.sprites).length, 'sprites');
+      } catch (e) {
+        this.chars[cid] = { img: null, sprites: {}, name: 'char' + cid, err: String(e) };
+        console.error('[sprite-client] char', cid, 'load failed', e);
+      } finally { delete this._loading[cid]; }
+    })();
+    this._loading[cid] = p; return p;
   }
 
-  // Load the atlas straight from a server URL base (no file-picker): fetches
-  // <base>.json and <base>.png. Cache-busted so a re-pushed atlas shows on reload.
+  // Combined-atlas load (file-picker / single-URL fallback): one JSON
+  // {chars:{cid:{sprites}}} + one shared PNG. Populates the same per-char map.
+  async loadAtlas(atlasJson, pngBlob) {
+    const img = await createImageBitmap(pngBlob);
+    this.screenW = atlasJson.screenW || 640; this.screenH = atlasJson.screenH || 480;
+    for (const cid in (atlasJson.chars || {})) {
+      const c = atlasJson.chars[cid];
+      this.chars[cid] = { img, sprites: c.sprites, name: c.name || ('char' + cid) };
+    }
+    this._lastNote = '';
+  }
   async loadAtlasFromUrl(base) {
     const bust = '?t=' + Date.now();
     const json = await (await fetch(base + '.json' + bust)).json();
@@ -90,28 +122,35 @@ export class SpriteClient {
       sl.screen_y = dv.getFloat32(ci + 20, true);
       sl.sprite_id= dv.getUint16(ci + 32, true);
     }
+    // Lazy-load the atlas for any active character we don't have yet — the
+    // client downloads only the characters actually picked in this match.
+    for (let s = 0; s < 2; s++) {
+      const sl = this.slot[s];
+      if (sl.active) this.loadChar(sl.char_id);
+    }
   }
 
   // Draw the current state into a 2D context. Returns a small status object.
   render(ctx) {
     const W = ctx.canvas.width, H = ctx.canvas.height;
     ctx.clearRect(0, 0, W, H);
-    if (!this.atlas || !this.img) return { drawn:0, missing:0, note:'no atlas loaded' };
-    const sx = W / (this.atlas.screenW || 640);
-    const sy = H / (this.atlas.screenH || 480);
-    let drawn = 0, missing = 0, missKeys = [];
+    const sx = W / (this.screenW || 640);
+    const sy = H / (this.screenH || 480);
+    let drawn = 0, missing = 0, loading = 0, missKeys = [];
 
     if (!this._held) this._held = [null, null];   // last drawn sprite per slot
     for (let s = 0; s < 2; s++) {
       const sl = this.slot[s];
       if (!sl.active) { this._held[s] = null; continue; }
-      const c = this.atlas.chars[sl.char_id];
-      let sp = c && c.sprites[sl.sprite_id];
+      const c = this.chars[sl.char_id];
+      if (!c) { loading++; continue; }            // this char's atlas still downloading
+      if (!c.img) continue;                        // load failed for this char
+      let sp = c.sprites[sl.sprite_id];
       if (sp) {
         this._held[s] = { char_id: sl.char_id, sp };
       } else {
-        // Sparse atlas: this sprite_id wasn't baked. Hold the last known pose
-        // for this character (same char_id) instead of blanking → no blink.
+        // Sparse atlas: this sprite_id wasn't in the rip. Hold the last known
+        // pose for this character (same char_id) instead of blanking → no blink.
         missing++;
         if (missKeys.length < 3) missKeys.push(`${sl.char_id}/0x${(sl.sprite_id&0xffff).toString(16)}`);
         const h = this._held[s];
@@ -129,24 +168,26 @@ export class SpriteClient {
         const axis = sl.screen_x * sx;
         ctx.translate(axis, 0); ctx.scale(-1, 1); ctx.translate(-axis, 0);
       }
-      ctx.drawImage(this.img, sp.x, sp.y, sp.w, sp.h, dx, dy, dw, dh);
+      ctx.drawImage(c.img, sp.x, sp.y, sp.w, sp.h, dx, dy, dw, dh);
       ctx.restore();
       drawn++;
     }
-    this._lastNote = missing ? `holding (uncaptured) ${missing}: ${missKeys.join(' ')}` : 'all visible poses captured';
+    this._lastNote = loading ? `loading ${loading} char atlas…`
+                   : missing ? `holding (uncaptured) ${missing}: ${missKeys.join(' ')}`
+                   : 'all visible poses captured';
     return { drawn, missing, note:this._lastNote };
   }
 
   statsText() {
-    const a = this.atlas;
-    const nChars = a ? Object.keys(a.chars).length : 0;
-    let nSprites = 0; if (a) for (const k in a.chars) nSprites += Object.keys(a.chars[k].sprites).length;
+    const loaded = Object.keys(this.chars);
+    const names = loaded.map(c => this.chars[c].name + (this.chars[c].img?'':'!')).join(', ') || '(none yet)';
+    const nm = (i) => { const c = this.chars[this.slot[i].char_id]; return c ? c.name : '…'; };
     const sl = (i) => { const x = this.slot[i];
-      return `S${i} ${x.active?'act':'---'} char=${x.char_id} sid=0x${(x.sprite_id&0xffff).toString(16).padStart(4,'0')} fac=${x.facing}`; };
+      return `S${i} ${x.active?'act':'---'} ${nm(i)}(${x.char_id}) sid=0x${(x.sprite_id&0xffff).toString(16).padStart(4,'0')} fac=${x.facing}`; };
     const kbps = (this._bwRate/1024).toFixed(2);
     const mbps = (this._bwRate*8/1e6).toFixed(3);
-    return `SPRITE CLIENT ${this.img?'atlas loaded':'NO ATLAS'}\n`
-         + `atlas: ${nChars} chars, ${nSprites} sprites\n`
+    return `SPRITE CLIENT — ${loaded.length} char atlas loaded\n`
+         + `loaded: ${names}\n`
          + `STATE STREAM: ${kbps} KB/s (${mbps} Mbps)\n`
          + `  ${this._bwHz.toFixed(0)} Hz x ${this._lastSize} B/frame\n`
          + `inMatch=${this.inMatch}\n${sl(0)}\n${sl(1)}\n`
