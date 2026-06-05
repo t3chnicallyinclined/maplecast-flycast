@@ -138,6 +138,8 @@ export class SpriteGPU {
       });
       this.sparkInst = device.createBuffer({ size: 32 * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
       this.sparkInstData = new Float32Array(32 * 9);
+      this.fxInst = device.createBuffer({ size: 48 * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+      this.fxInstData = new Float32Array(48 * 9);   // live TA effect quads (per-quad texture)
       this.ok = true;
     } catch (e) { console.error('[sprite-gpu] init failed, Canvas2D fallback:', e); this.ok = false; }
     return this.ok;
@@ -192,7 +194,7 @@ export class SpriteGPU {
 
   // sprites: [{charId, slot, sx,sy,sw,sh (atlas px), dx,dy,dw,dh (canvas px), flip}]
   // T: TextureManager (T._pal = live PVR palette RAM, RGBA, 1024 entries).
-  render(sprites, dbg, T, sparks) {
+  render(sprites, dbg, T, sparks, effects) {
     if (!this.ok) return;
     const cw = this.canvas.width, ch = this.canvas.height;
     this.dev.queue.writeBuffer(this.ubuf, 0, new Float32Array([cw, ch, 0, 0]));
@@ -273,6 +275,30 @@ export class SpriteGPU {
       pass.setVertexBuffer(0, this.sparkInst);
       pass.setBindGroup(0, this.sparkBg);
       pass.draw(6, sn, 0, 0);
+    }
+    // live TA effect quads (beams / energy / lightning) — additive, per-quad texture
+    if (effects && effects.length) {
+      let m = 0;
+      for (const ef of effects) { if (m >= 48) break; const o = m * 9;
+        this.fxInstData[o]=ef.x; this.fxInstData[o+1]=ef.y; this.fxInstData[o+2]=ef.w; this.fxInstData[o+3]=ef.h;
+        this.fxInstData[o+4]=0; this.fxInstData[o+5]=0; this.fxInstData[o+6]=1; this.fxInstData[o+7]=1;
+        this.fxInstData[o+8]=ef.alpha != null ? ef.alpha : 1; m++; }
+      if (m) {
+        this.dev.queue.writeBuffer(this.fxInst, 0, this.fxInstData, 0, m * 9);
+        pass.setPipeline(this.sparkPipe);
+        pass.setVertexBuffer(0, this.fxInst);
+        let i = 0;
+        for (const ef of effects) { if (i >= 48) break;
+          try {
+            const bg = this.dev.createBindGroup({ layout: this.sparkBgl, entries: [
+              { binding: 0, resource: ef.tex.createView() },
+              { binding: 1, resource: ef.samp || this.sampler },
+              { binding: 2, resource: { buffer: this.ubuf } } ]});
+            pass.setBindGroup(0, bg); pass.draw(6, 1, 0, i);
+          } catch (_e) {}
+          i++;
+        }
+      }
     }
     pass.end();
     this.PP.blit(enc, this.ctx.getCurrentTexture().createView(), cw, ch, dbg || {});

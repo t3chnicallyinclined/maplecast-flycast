@@ -265,7 +265,7 @@ import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=9';
 import {SpriteClient} from './webgpu/sprite-client.mjs?v=14';
-import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=4';
+import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=5';
 
 const canvas=document.getElementById('c'), ov=document.getElementById('ov'), st=document.getElementById('st');
 const BAKE=new SpriteBake(); window._bake=BAKE;
@@ -331,6 +331,7 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
     +'<label>Size <input type="range" id="sc_scale" min="0.5" max="3" step="0.05" value="1.75" style="width:110px;vertical-align:middle"> <span id="sc_scaleval">1.75</span>×</label><br>'
     +'<label><input type="checkbox" id="sc_skin" checked> Live skins / hit-flash (palette recolor)</label><br>'
     +'<label><input type="checkbox" id="sc_hud" checked> HUD (health/meter/combo/timer from state)</label><br>'
+    +'<label><input type="checkbox" id="sc_fx" checked> Effects (live beams/sparks/lightning from TA)</label><br>'
     +'<button id="sc_srv">↻ Reload atlases</button> '
     +'<span style="font-size:9px;color:#888">(per-char, lazy-loads who\'s picked)</span><br>'
     +'atlas PNG <input type="file" id="sc_png" accept="image/png" style="font-size:10px"><br>'
@@ -353,7 +354,7 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
   const hctx=sch.getContext('2d');
   (canvas.parentNode||document.body).appendChild(wrap);
   const SG=new SpriteGPU(); window._spritegpu=SG;
-  let scOn=true, gpuOn=true, hudOn=true;
+  let scOn=true, gpuOn=true, hudOn=true, fxOn=true;
   const showCanvas=()=>{ const g=gpuOn&&SG.ok; scg.style.display=(scOn&&g)?'block':'none'; scv.style.display=(scOn&&!g)?'block':'none'; };
   box.querySelector('#sc_on').onchange=e=>{ scOn=e.target.checked; showCanvas(); };
   box.querySelector('#sc_pred').onchange=e=>{ SPRITECLIENT.predict=e.target.checked; };
@@ -361,6 +362,7 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
   box.querySelector('#sc_scale').oninput=e=>{ SPRITECLIENT.spriteScale=+e.target.value; const v=document.getElementById('sc_scaleval'); if(v)v.textContent=(+e.target.value).toFixed(2); };
   box.querySelector('#sc_skin').onchange=e=>{ SG.recolor=e.target.checked; };
   box.querySelector('#sc_hud').onchange=e=>{ hudOn=e.target.checked; };
+  box.querySelector('#sc_fx').onchange=e=>{ fxOn=e.target.checked; };
   // Per-character atlases lazy-load by char_id as characters appear in the state
   // (only the picked characters download). Override dir with ?atlas=<urlbase>.
   const CHAR_BASE = new URLSearchParams(location.search).get('atlas') || './test-atlas/chars';
@@ -381,7 +383,16 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
     if(scOn){
       if(gpuOn && SG.ok){
         for(const cid in SPRITECLIENT.chars){ const c=SPRITECLIENT.chars[cid]; if(c&&c.img&&!SG.chars[cid]){ SG.setAtlas(cid, c.img); SG.setCharPalette(cid, c.pal16); } }
-        try{ SG.render(SPRITECLIENT.buildDrawList(640,480), window.DBG||{}, window._T, SPRITECLIENT.buildSparkList(640,480)); }
+        let fxList=null;
+        if(fxOn && window._lastParsed && window._T && window._D && window._D.vram){
+          fxList=[];
+          for(const ef of window._taScanFrame(window._lastParsed, SPRITECLIENT, false)){
+            if(ef.bdst!==1) continue;                                  // additive glow effects only
+            const t=window._T.getTexture(ef.tsp, ef.tcw, window._D.vram);
+            if(t&&t.texture) fxList.push({tex:t.texture, samp:t.sampler, x:ef.cx, y:ef.cy, w:ef.w, h:ef.h});
+          }
+        }
+        try{ SG.render(SPRITECLIENT.buildDrawList(640,480), window.DBG||{}, window._T, SPRITECLIENT.buildSparkList(640,480), fxList); }
         catch(err){ console.error('[sprite-gpu] render error -> Canvas2D fallback', err); SG.ok=false; showCanvas(); }
       } else {
         SPRITECLIENT.render(scx);
@@ -981,7 +992,7 @@ async function main(){
             // Drop character TILES (fmt5 32x32 normal-blend). Real effects are
             // additive (dst=ONE) or large non-paletted textures (beams/supers).
             if(!(bdst===1 || (texW>=64 && fmt!==5))) continue;
-            const e={tcw,addr,fmt,texW,texH,bsrc,bdst,w,h,cx,cy,nearCid:bc?bc.cid:-1,nearDx:bc?(cx-bc.x):0,nearDy:bc?(cy-bc.y):0};
+            const e={tcw,tsp,addr,fmt,texW,texH,bsrc,bdst,w,h,cx,cy,nearCid:bc?bc.cid:-1,nearDx:bc?(cx-bc.x):0,nearDy:bc?(cy-bc.y):0};
             out.push(e);
             if(accumulate){ const sig=`fmt${fmt}|${texW}x${texH}|bl${bsrc}/${bdst}`;   // VRAM addr is transient -> key by stable TYPE signature
               let a=window._taEffects.get(sig);
