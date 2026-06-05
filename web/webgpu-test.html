@@ -916,6 +916,10 @@ async function main(){
                     // Feed predictor with real frame vertex data
                     FP.feedFrame(g.vertexData, g.vertexCount);
                     g._snap = fr.pvrSnapshot; // save for predictive render
+                    // SYNCED effect-catalog accumulation: call HERE, where D.vram matches
+                    // THIS frame, so the decoded effect texture is from the right frame.
+                    // (The render-loop call had a multi-rAF VRAM skew -> stale/wrong textures.)
+                    if(window._taWatch && window._spriteclient){ try{ window._taScanFrame(g, window._spriteclient, true); }catch(e){} }
                     if(DBG.immediateRender){
                         // IMMEDIATE MODE: render NOW, skip RAF wait (~8ms savings)
                         const t2=performance.now();
@@ -977,7 +981,7 @@ async function main(){
         window._taScanFrame = function(g, SC, accumulate){
           const vf = new Float32Array(g.vertexData.buffer, g.vertexData.byteOffset, g.vertexCount*7);
           const chars = [];
-          for(let s=0;s<6;s++){ const sl=SC.slot[s]; if(sl.active) chars.push({x:sl.screen_x,y:sl.screen_y,cid:sl.char_id}); }
+          for(let s=0;s<6;s++){ const sl=SC.slot[s]; if(sl.active) chars.push({x:sl.screen_x,y:sl.screen_y,cid:sl.char_id,sid:sl.sprite_id}); }
           const out = [];
           const scan = (list)=>{ if(!list) return; for(const pp of list){ if(pp.count<3) continue;
             let mnX=1e9,mxX=-1e9,mnY=1e9,mxY=-1e9;
@@ -998,8 +1002,9 @@ async function main(){
             out.push(e);
             if(accumulate){ const sig=`fmt${fmt}|${texW}x${texH}|bl${bsrc}/${bdst}`;   // VRAM addr is transient -> key by stable TYPE signature
               let a=window._taEffects.get(sig);
-              if(!a){ a={sig,fmt,texW,texH,bsrc,bdst,n:0,cids:{},dx:[1e9,-1e9],dy:[1e9,-1e9],tcws:new Set(),exAddr:addr}; window._taEffects.set(sig,a); }
+              if(!a){ a={sig,fmt,texW,texH,bsrc,bdst,n:0,cids:{},sids:{},dx:[1e9,-1e9],dy:[1e9,-1e9],tcws:new Set(),exAddr:addr}; window._taEffects.set(sig,a); }
               a.n++; a.tcws.add(tcw); a.cids[e.nearCid]=(a.cids[e.nearCid]||0)+1;
+              if(bc){ const sk=bc.cid+':'+bc.sid; a.sids[sk]=(a.sids[sk]||0)+1; }
               a.dx[0]=Math.min(a.dx[0],e.nearDx); a.dx[1]=Math.max(a.dx[1],e.nearDx);
               a.dy[0]=Math.min(a.dy[0],e.nearDy); a.dy[1]=Math.max(a.dy[1],e.nearDy);
               if(!a.rgba && window._D && window._D.vram && window._T){   // grab the actual texture WHILE it's live in VRAM
@@ -1025,7 +1030,8 @@ async function main(){
           console.log(`[taDump] ${rows.length} effect TYPES (signature = fmt|size|blend; tcws = distinct VRAM slots seen for that type):`);
           for(const a of rows){ const add=a.bdst===1;
             const top=Object.entries(a.cids).sort((x,y)=>y[1]-x[1]).slice(0,2).map(e=>`cid${e[0]}:${e[1]}`).join(',');
-            console.log(`  ${a.sig}${add?' ADD':''} seen=${a.n} slots=${a.tcws.size} exAddr=0x${a.exAddr.toString(16)} chars=[${top}] dx=[${a.dx[0].toFixed(0)},${a.dx[1].toFixed(0)}] dy=[${a.dy[0].toFixed(0)},${a.dy[1].toFixed(0)}]`); }
+            const tops=Object.entries(a.sids||{}).sort((x,y)=>y[1]-x[1]).slice(0,4).map(e=>`${e[0]}×${e[1]}`).join(' ');
+            console.log(`  ${a.sig}${add?' ADD':''} seen=${a.n} slots=${a.tcws.size} chars=[${top}] | near char:sprite = [${tops}] | dx=[${a.dx[0].toFixed(0)},${a.dx[1].toFixed(0)}] dy=[${a.dy[0].toFixed(0)},${a.dy[1].toFixed(0)}]`); }
           return rows;
         };
         // Render the captured effect textures into a top-right overlay -> screenshot it.
@@ -1052,7 +1058,7 @@ async function main(){
         // RAF render loop — vsync-locked, renders latest available frame or prediction
         function renderTick(){
             requestAnimationFrame(renderTick);
-            if(window._taWatch && lastParsed && window._spriteclient && (++_taWatchC & 3)===0) window._taScanFrame(lastParsed, window._spriteclient, true);
+            // (effect-catalog accumulation moved to frame-apply for VRAM sync)
             if(!pendingFrame && DBG.predictive && FP.ready && lastParsed){
                 // NO new frame yet — render PREDICTED frame from extrapolated vertices
                 const pred = FP.predict(1.0);

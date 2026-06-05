@@ -47,6 +47,14 @@ static const uint32_t OFF_ANIM_POINTER    = 0x168;  // pointer to animation tabl
 // Hidden state discovered by RAM autopsy (rend_diff v2)
 static const uint32_t OFF_SUB_ANIM_PHASE  = 0x502;  // sub-animation phase counter
 static const uint32_t OFF_CHAR_LINK_PTR   = 0x00C;  // linked list pointer between chars
+// Runtime pointers into the engine's DECODED structures (runtime-derivation probe).
+// These are resolved by the engine when a character loads — following them reads
+// the already-decompressed palette / assembly the GPU is using, no ROM codec.
+static const uint32_t OFF_COLOR           = 0x025;  // live displayed palette idx (button + hit-flash)
+static const uint32_t OFF_GFX00_PTR       = 0x15C;  // -> decoded GFX
+static const uint32_t OFF_PAL_PTR         = 0x164;  // -> live ARGB4444 palette
+static const uint32_t OFF_HITBOX_PTR      = 0x170;  // -> live hitbox data
+static const uint32_t OFF_EXTRAS_PTR      = 0x178;  // -> sprite assembly / extras
 
 // Global state addresses
 static const uint32_t ADDR_IN_MATCH       = 0x8C289624;
@@ -75,6 +83,102 @@ static float readFloat(uint32_t addr)
 	float f;
 	memcpy(&f, &raw, 4);
 	return f;
+}
+
+// Read-only runtime-derivation probe (MAPLECAST_PTRDUMP=1). Follows the engine's
+// resolved pointers and dumps the DECODED palette + assembly the GPU is using —
+// proving we can build anchors/colors from the runtime without ROM-codec RE.
+static inline bool inRam(uint32_t a) { return a >= 0x0C000000 && a < 0x10000000; }
+static void ptrDump(const GameState& state)
+{
+	static bool en = (getenv("MAPLECAST_PTRDUMP") != nullptr);
+	if (!en) return;
+
+	// PER-FRAME object tracker -> /dev/shm file (journal rate-limits at 60Hz).
+	// Transient projectiles live only a few frames, so the 2s cadence below misses
+	// them. Dump every owner-pointer object's full struct each frame; grep the file
+	// for the projectile (e.g. Magneto disruptor sprite 802-814) to find its layout.
+	if (state.in_match) {
+		static FILE* of = nullptr; static long wrote = 0;
+		if (!of) of = fopen("/dev/shm/mc_obj.log", "w");
+		if (of && wrote < 8L*1024*1024) {
+			for (uint32_t a = 0x8C26A600; a < 0x8C278000; a += 4) {
+				uint32_t v = addrspace::read32(a);
+				int oslot = -1; for (int s = 0; s < 6; s++) if (v == CHAR_BASE[s]) oslot = s;
+				if (oslot < 0) continue;
+				uint8_t ocid = (uint8_t)addrspace::read8(v + OFF_CHAR_ID);
+				char b[800]; int n = snprintf(b, sizeof b, "f%u obj=%08x cid=%d:", state.frame_counter, a, ocid);
+				for (int o = -0x10; o < 0x140; o += 4)
+					n += snprintf(b + n, sizeof(b) - n, "%08x", (uint32_t)addrspace::read32(a + o));
+				n += snprintf(b + n, sizeof(b) - n, "\n");
+				fwrite(b, 1, n, of); wrote += n;
+			}
+			fflush(of);
+		}
+	}
+
+	static uint32_t fc = 0;
+	if (++fc % 120 != 0) return;                 // ~every 2s (char dump only)
+	printf("[PTRDUMP] ===== in_match=%d frame=%u =====\n", state.in_match, state.frame_counter);
+	for (int i = 0; i < 6; i++)
+	{
+		uint32_t base = CHAR_BASE[i];
+		if (!(uint8_t)addrspace::read8(base + OFF_ACTIVE)) continue;
+		uint8_t  cid   = (uint8_t)addrspace::read8(base + OFF_CHAR_ID);
+		uint16_t sid   = (uint16_t)addrspace::read16(base + OFF_SPRITE_ID);
+		float    sx    = readFloat(base + OFF_SCREEN_X), sy = readFloat(base + OFF_SCREEN_Y);
+		uint8_t  color = (uint8_t)addrspace::read8(base + OFF_COLOR);
+		uint8_t  palId = (uint8_t)addrspace::read8(base + OFF_PALETTE);
+		uint32_t gfx0  = addrspace::read32(base + OFF_GFX00_PTR);
+		uint32_t palP  = addrspace::read32(base + OFF_PAL_PTR);
+		uint32_t hbP   = addrspace::read32(base + OFF_HITBOX_PTR);
+		uint32_t exP   = addrspace::read32(base + OFF_EXTRAS_PTR);
+		printf("[PTRDUMP] slot%d cid=%2d sid=0x%04x scr=(%.0f,%.0f) color@0x25=%d palId@0x52D=%d\n",
+		       i, cid, sid, sx, sy, color, palId);
+		printf("[PTRDUMP]   ptrs GFX00=0x%08x PAL=0x%08x HITBOX=0x%08x EXTRAS=0x%08x\n", gfx0, palP, hbP, exP);
+		if (inRam(palP)) {
+			char b[300]; int n = snprintf(b, sizeof b, "[PTRDUMP]   PAL16:");
+			for (int c = 0; c < 16; c++) n += snprintf(b+n, sizeof(b)-n, " %04x", (uint16_t)addrspace::read16(palP + c*2));
+			printf("%s\n", b);
+		}
+		if (inRam(exP)) {
+			char b[300]; int n = snprintf(b, sizeof b, "[PTRDUMP]   EXTRAS[0..31]:");
+			for (int k = 0; k < 32; k++) n += snprintf(b+n, sizeof(b)-n, " %02x", (uint8_t)addrspace::read8(exP + k));
+			printf("%s\n", b);
+		}
+	}
+	// Object-pool RE v2: find object structs by their OWNER pointer (a value
+	// equal to one of the 6 char-struct bases), then dump the full struct around
+	// it, decoded — so screen_x/y (float in 0..640/0..480) and a sprite_id (u16)
+	// stand out. Also derive owner char_id + the gfx-offset (object gfx ptr minus
+	// the owner's GFX00 base) so we can later map it to our atlas. Reads only.
+	if (state.in_match) {
+		static uint32_t dc = 0;
+		if (++dc % 2) return;            // ~every 4s, cut log volume
+		int found = 0;
+		for (uint32_t a = 0x8C26A000; a < 0x8C278000 && found < 3; a += 4) {
+			uint32_t v = addrspace::read32(a);
+			int oslot = -1;
+			for (int s = 0; s < 6; s++) if (v == CHAR_BASE[s]) oslot = s;
+			if (oslot < 0) continue;
+			found++;
+			uint8_t  ocid    = (uint8_t)addrspace::read8(v + OFF_CHAR_ID);
+			uint32_t gfxbase = addrspace::read32(v + OFF_GFX00_PTR);
+			uint32_t objgfx  = addrspace::read32(a - 0x8);
+			printf("[OBJ] owner@0x%08x slot%d cid=%d gfx=0x%08x gfxbase=0x%08x gfxoff=0x%x\n",
+			       a, oslot, ocid, objgfx, gfxbase, objgfx - gfxbase);
+			for (int32_t d = -0x20; d < 0x160; d += 4) {
+				uint32_t fv = addrspace::read32(a + d);
+				char tb[48]; tb[0] = 0;
+				float f; memcpy(&f, &fv, 4);
+				if (0x8c000000 <= fv && fv < 0x8d000000) snprintf(tb, sizeof tb, "ptr");
+				else if (f > 1 && f < 640) snprintf(tb, sizeof tb, "f=%.1f", f);
+				else if (fv > 0 && fv < 4000) snprintf(tb, sizeof tb, "u=%u", fv);
+				if (tb[0]) printf("[OBJ]   owner%+05x: %08x %s\n", d, fv, tb);
+			}
+			printf("[OBJ] ----\n");
+		}
+	}
 }
 
 void readGameState(GameState& state)
@@ -129,6 +233,8 @@ void readGameState(GameState& state)
 	state.p1_rt = (uint8_t)(rt[0] >> 8);
 	state.p2_lt = (uint8_t)(lt[1] >> 8);
 	state.p2_rt = (uint8_t)(rt[1] >> 8);
+
+	ptrDump(state);   // read-only runtime-derivation probe (MAPLECAST_PTRDUMP=1)
 }
 
 // Write float to DC memory
