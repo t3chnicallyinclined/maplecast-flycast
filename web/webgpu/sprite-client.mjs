@@ -37,7 +37,10 @@ export class SpriteClient {
     this.charBase = null;     // URL base for per-char atlases, e.g. './test-atlas/chars'
     this.screenW = 640; this.screenH = 480;
     this.inMatch = 0;
-    this.slot = [this._blank(), this._blank()];
+    // All 6 character slots (P1C1,P2C1,P1C2,P2C2,P1C3,P2C3). The on-screen POINT
+    // can be any of a side's 3 — and a called assist is a bench char briefly
+    // active — so we read all 6 and render every active one.
+    this.slot = Array.from({ length: 6 }, () => this._blank());
     this._lastNote = 'no atlas loaded';
     // State-stream (GSTA) bandwidth — the whole point of Option 6. Rolling 1s window.
     this._bwBytes = 0; this._bwFrames = 0; this._bwT0 = 0;
@@ -111,7 +114,7 @@ export class SpriteClient {
     const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
     const B = 4;                       // payload starts after 'GSTA'
     this.inMatch = dv.getUint8(B + 0);
-    for (let s = 0; s < 2; s++) {
+    for (let s = 0; s < 6; s++) {
       const ci = B + 25 + s * 38;      // 25-byte global header + 38*slot
       const sl = this.slot[s];
       sl.active   = dv.getUint8(ci + 0);
@@ -123,8 +126,8 @@ export class SpriteClient {
       sl.sprite_id= dv.getUint16(ci + 32, true);
     }
     // Lazy-load the atlas for any active character we don't have yet — the
-    // client downloads only the characters actually picked in this match.
-    for (let s = 0; s < 2; s++) {
+    // client downloads only the characters actually on screen in this match.
+    for (let s = 0; s < 6; s++) {
       const sl = this.slot[s];
       if (sl.active) this.loadChar(sl.char_id);
     }
@@ -138,8 +141,8 @@ export class SpriteClient {
     const sy = H / (this.screenH || 480);
     let drawn = 0, missing = 0, loading = 0, missKeys = [];
 
-    if (!this._held) this._held = [null, null];   // last drawn sprite per slot
-    for (let s = 0; s < 2; s++) {
+    if (!this._held) this._held = new Array(6).fill(null);   // last drawn sprite per slot
+    for (let s = 0; s < 6; s++) {
       const sl = this.slot[s];
       if (!sl.active) { this._held[s] = null; continue; }
       const c = this.chars[sl.char_id];
@@ -182,15 +185,16 @@ export class SpriteClient {
     const loaded = Object.keys(this.chars);
     const names = loaded.map(c => this.chars[c].name + (this.chars[c].img?'':'!')).join(', ') || '(none yet)';
     const nm = (i) => { const c = this.chars[this.slot[i].char_id]; return c ? c.name : '…'; };
+    const LAB = ['P1a','P2a','P1b','P2b','P1c','P2c'];
     const sl = (i) => { const x = this.slot[i];
-      return `S${i} ${x.active?'act':'---'} ${nm(i)}(${x.char_id}) sid=0x${(x.sprite_id&0xffff).toString(16).padStart(4,'0')} fac=${x.facing}`; };
+      return `${LAB[i]} ${x.active?'ON ':'-- '} ${nm(i)}(${x.char_id}) sid=0x${(x.sprite_id&0xffff).toString(16).padStart(4,'0')} f${x.facing}`; };
     const kbps = (this._bwRate/1024).toFixed(2);
     const mbps = (this._bwRate*8/1e6).toFixed(3);
     return `SPRITE CLIENT — ${loaded.length} char atlas loaded\n`
          + `loaded: ${names}\n`
          + `STATE STREAM: ${kbps} KB/s (${mbps} Mbps)\n`
          + `  ${this._bwHz.toFixed(0)} Hz x ${this._lastSize} B/frame\n`
-         + `inMatch=${this.inMatch}\n${sl(0)}\n${sl(1)}\n`
+         + `inMatch=${this.inMatch}\n` + [0,1,2,3,4,5].map(sl).join('\n') + '\n'
          + (this._lastNote ? `note: ${this._lastNote}` : '');
   }
 }
