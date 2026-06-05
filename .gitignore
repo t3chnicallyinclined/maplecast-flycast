@@ -73,6 +73,16 @@ visual_cache/
 web/rend_textures/
 web/textures/
 web/sprites/
+
+# Community RE tools + extracted MVC2 dev/disc files (ROM-derived / copyrighted /
+# third-party tool code with unclear license) — used for sprite-format RE, never
+# committed. Added 2026-06-05.
+dasm_PLDAT/
+MVC2 Dev Files/
+sh4_asm/
+*_HITBOX_*.BIN
+PL[0-9A-Fa-f][0-9A-Fa-f]_*.BIN
+1ST_READ.BIN
 mvc2.webp
 *.webp
 
@@ -119,3 +129,9 @@ smoke.csv
 bake/
 bake_smoke/
 bake.csv
+
+# Local-only sprite atlas (rip-derived, never committed)
+/atlas/
+
+# Isolated TA effect textures (dumped from the live VRAM stream — ROM-derived)
+ta_effects.json

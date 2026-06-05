@@ -9,10 +9,12 @@
 	Server: each frame, captures the TA command buffer + PVR registers + memory diffs
 	Client: loads server sync state, then applies diffs + feeds TA commands to renderer
 */
+#include <map>
 #include "types.h"
 #include "maplecast_mirror.h"
 #include "hub_discovery.h"
 #include "hw/pvr/ta_ctx.h"
+#include "hw/pvr/ta.h"
 #include "hw/pvr/pvr_mem.h"
 #include "hw/pvr/pvr_regs.h"
 #include "hw/pvr/Renderer_if.h"
@@ -1757,6 +1759,100 @@ done_diff:
 			gsBuf[0] = 'G'; gsBuf[1] = 'S'; gsBuf[2] = 'T'; gsBuf[3] = 'A';
 			maplecast_gamestate::serialize(gs, gsBuf + 4, maplecast_gamestate::WIRE_SIZE);
 			maplecast_ws::broadcastBinary(gsBuf, 4 + maplecast_gamestate::WIRE_SIZE);
+		}
+
+		// === SERVER-SIDE EFFECT ISOLATION ("EFCT" packet) ===
+		// Iterate the parsed TA translucent + punch-through polys this frame and map
+		// each quad's (fmt|texW|texH|blend) signature to one of the 5 catalogued
+		// effect textures (fx_atlas). The signature map IS the filter: HUD and char-
+		// tile signatures don't match, so only real additive effects (+ the fmt0
+		// super star-sparks) pass. Emit (id,cx,cy,w,h) in screen space. Frame+texture
+		// are inherently synced here (this IS the TA the frame just rendered).
+		{
+			// ctx->rend is parsed by renderer->Process(), which runs AFTER
+			// serverPublish — so the tr/pt lists are empty here. Parse the TA now
+			// to fill them. Process re-parses later (harmless); the raw mirror wire
+			// bytes (streamed from ctx->tad) are untouched, so determinism holds.
+			ta_parse(ctx, true);
+			const int FX_MAX = 24;
+			uint8_t fxBuf[4 + 1 + FX_MAX * 9];
+			fxBuf[0] = 'E'; fxBuf[1] = 'F'; fxBuf[2] = 'C'; fxBuf[3] = 'T';
+			int off = 5; int nfx = 0;
+			auto sigId = [](int fmt, int tw, int th, int bd) -> int {
+				if (bd == 1) {
+					if (fmt == 1 && tw == 256 && th == 256) return 0;
+					if (fmt == 1 && tw == 128 && th == 128) return 1;
+					if (fmt == 2 && tw == 128 && th == 128) return 2;
+					if (fmt == 2 && tw == 256 && th == 256) return 3;
+				} else if (bd == 5 && fmt == 0 && tw == 256 && th == 256) {
+					return 4;
+				}
+				return -1;
+			};
+			auto scanList = [&](std::vector<PolyParam>& lst) {
+				for (PolyParam& pp : lst) {
+					if (nfx >= FX_MAX) return;
+					if (pp.count < 3) continue;
+					uint32_t tcw = pp.tcw.full, tsp = pp.tsp.full, pcw = pp.pcw.full;
+					if (!((pcw >> 3) & 1)) continue;
+					int fmt = (tcw >> 27) & 7;
+					int tw = 8 << ((tsp >> 3) & 7), th = 8 << (tsp & 7);
+					int bd = (tsp >> 26) & 7;
+					int id = sigId(fmt, tw, th, bd);
+					if (id < 0) continue;
+					float mnX = 1e9f, mxX = -1e9f, mnY = 1e9f, mxY = -1e9f;
+					uint32_t end = pp.first + pp.count;
+					if (end > rc.verts.size()) end = (uint32_t)rc.verts.size();
+					for (uint32_t v = pp.first; v < end; v++) {
+						float x = rc.verts[v].x, y = rc.verts[v].y;
+						if (x < mnX) mnX = x; if (x > mxX) mxX = x;
+						if (y < mnY) mnY = y; if (y > mxY) mxY = y;
+					}
+					float w = mxX - mnX, h = mxY - mnY;
+					float cx = (mnX + mxX) * 0.5f, cy = (mnY + mxY) * 0.5f;
+					if (cy <= 40.f || w < 2.f || h < 2.f) continue;
+					int16_t vals[4] = { (int16_t)cx, (int16_t)cy, (int16_t)w, (int16_t)h };
+					fxBuf[off++] = (uint8_t)id;
+					for (int k = 0; k < 4; k++) {
+						fxBuf[off++] = vals[k] & 0xff;
+						fxBuf[off++] = (vals[k] >> 8) & 0xff;
+					}
+					nfx++;
+				}
+			};
+			scanList(rc.global_param_tr);
+			scanList(rc.global_param_pt);
+			// [FXDBG] temporary: log distinct textured translucent/pt signatures every
+			// 2s so we can see what the TA actually contains when supers fire.
+			{
+				static uint32_t _fxdc = 0;
+				if ((++_fxdc % 120) == 0) {
+					std::map<std::string,int> sigs;
+					auto histo = [&](std::vector<PolyParam>& lst) {
+						for (PolyParam& pp : lst) {
+							if (pp.count < 3) continue;
+							uint32_t tsp = pp.tsp.full, tcw = pp.tcw.full, pcw = pp.pcw.full;
+							if (!((pcw >> 3) & 1)) continue;
+							int fmt = (tcw >> 27) & 7, tw = 8 << ((tsp >> 3) & 7), th = 8 << (tsp & 7);
+							int bd = (tsp >> 26) & 7, bs = (tsp >> 29) & 7;
+							char b[48]; snprintf(b, sizeof b, "f%d|%dx%d|%d/%d", fmt, tw, th, bs, bd);
+							sigs[b]++;
+						}
+					};
+					histo(rc.global_param_tr); histo(rc.global_param_pt);
+					std::string s;
+					for (auto& kv : sigs) { s += kv.first; s += ":"; s += std::to_string(kv.second); s += " "; }
+					printf("[FXDBG] tr=%zu pt=%zu nfx=%d | %s\\n", rc.global_param_tr.size(), rc.global_param_pt.size(), nfx, s.c_str());
+					fflush(stdout);
+				}
+			}
+			fxBuf[4] = (uint8_t)nfx;
+			// Gated OFF by default: EFCT rides the same broadcast as the TA frames,
+			// so the WebTransport client feeds it to applyFrame() and throws. Enable
+			// (MAPLECAST_EFCT=1) only once the client routes EFCT away from the TA
+			// decoder. The FXDBG log above still works for tuning.
+			static bool _efctOn = getenv("MAPLECAST_EFCT") != nullptr;
+			if (_efctOn && nfx > 0) maplecast_ws::broadcastBinary(fxBuf, off);
 		}
 	}
 
