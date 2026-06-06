@@ -136,6 +136,25 @@ bake.csv
 
 # Local-only sprite atlas (rip-derived, never committed)
 /atlas/
+# HD / rip-derived per-character atlases used by the sprite-client demo
+# (web/hd-cable-demo.html). Real-ESRGAN-upscaled MvC2 sprites = derivative art.
+web/test-atlas/chars/
+
+# Assembly-driven part-atlas capture outputs (ROM-derived, never committed)
+# Probe writes to /dev/shm; packer writes PL??_parts.png / PL??_asm.json / *_composite.png
+PL[0-9A-Fa-f][0-9A-Fa-f]_parts.png
+PL[0-9A-Fa-f][0-9A-Fa-f]_parts.json
+PL[0-9A-Fa-f][0-9A-Fa-f]_asm.json
+PL[0-9A-Fa-f][0-9A-Fa-f]_composite*.png
+PL[0-9A-Fa-f][0-9A-Fa-f]_part_*.ppm
+PL[0-9A-Fa-f][0-9A-Fa-f]_part_*.raw
+PL[0-9A-Fa-f][0-9A-Fa-f]_part_*.png
+PL[0-9A-Fa-f][0-9A-Fa-f]_extras.bin
+PL[0-9A-Fa-f][0-9A-Fa-f]_parts.manifest
+# Montage/preview PNGs of captured parts (ROM-derived) dropped during capture work
+parts_montage*.png
+part_*.ppm
+part_*.raw
 
 # Isolated TA effect textures (dumped from the live VRAM stream — ROM-derived)
 ta_effects.json
@@ -148,3 +167,6 @@ MvC2_SpriteFolders_Patched/
 
 # Sprite sheets (rip-derived) — never commit
 MvC2_Spritesheets_*/
+
+# state-replica local test kit — ROM-derived savestate + BIOS, never commit
+state-replica-kit/

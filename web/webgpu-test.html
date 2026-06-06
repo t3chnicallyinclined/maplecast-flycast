@@ -264,8 +264,9 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=9';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=26';
-import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=6';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=30';
+import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=8';
+import {StafGL} from './webgpu/sprite-staf-gl.mjs?v=2';
 
 const canvas=document.getElementById('c'), ov=document.getElementById('ov'), st=document.getElementById('st');
 const BAKE=new SpriteBake(); window._bake=BAKE;
@@ -326,6 +327,8 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
   box.style.cssText='border:1px solid #06a;margin:6px 0;padding:6px;background:#012';
   box.innerHTML='<b style="color:#0af">SPRITE CLIENT (Option 6)</b><br>'
     +'<label><input type="checkbox" id="sc_on" checked> Render chars from 253B state (no TA)</label><br>'
+    +'<label style="color:#fd6"><input type="checkbox" id="sc_asm"> ASSEMBLY path (parts+asm, A/B) — needs PL{hex}_parts/_asm</label><br>'
+    +'<label style="color:#6fd"><input type="checkbox" id="sc_staf"> STAF path (stripped-TA: full quad list + cached textures, pixel-exact) — needs MAPLECAST_STAF server</label><br>'
     +'<label><input type="checkbox" id="sc_pred" checked> Predict (velocity extrapolation — lower latency)</label><br>'
     +'<label><input type="checkbox" id="sc_gpu" checked> GPU render + effects (WebGPU; off = Canvas2D)</label><br>'
     +'<label>Size <input type="range" id="sc_scale" min="0.5" max="3" step="0.05" value="1.75" style="width:110px;vertical-align:middle"> <span id="sc_scaleval">1.75</span>×</label><br>'
@@ -348,6 +351,11 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
   const scg=document.createElement('canvas'); scg.id='sccg'; scg.width=640; scg.height=480;
   scg.style.cssText='border:1px solid #0a6;background:#111;display:none;max-width:100%;vertical-align:top';
   wrap.appendChild(scg);
+  // STAF stripped-TA WebGL surface (its own GL context, separate from the WebGPU one).
+  const scs=document.createElement('canvas'); scs.id='sccs'; scs.width=640; scs.height=480;
+  scs.style.cssText='border:1px solid #6fd;background:#111;display:none;max-width:100%;vertical-align:top';
+  wrap.appendChild(scs);
+  const STAFGL=new StafGL(); window._stafgl=STAFGL;
   const sch=document.createElement('canvas'); sch.id='sch'; sch.width=640; sch.height=480;
   sch.style.cssText='position:absolute;top:1px;left:1px;pointer-events:none;max-width:100%';
   wrap.appendChild(sch);
@@ -355,8 +363,24 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
   (canvas.parentNode||document.body).appendChild(wrap);
   const SG=new SpriteGPU(); window._spritegpu=SG;
   let scOn=true, gpuOn=true, hudOn=true, fxOn=false;   // dev live-effects off by default (two-rAF VRAM phase skew shows wrong textures); production = server-side synced
-  const showCanvas=()=>{ const g=gpuOn&&SG.ok; scg.style.display=(scOn&&g)?'block':'none'; scv.style.display=(scOn&&!g)?'block':'none'; };
+  let stafMode=false;   // STAF stripped-TA full-frame path (A/B vs whole-sprite/assembly)
+  // STAF renders on its own WebGL surface (scs); otherwise pick WebGPU (scg) vs Canvas2D fallback (scv).
+  const showCanvas=()=>{
+    const staf=scOn&&stafMode;
+    const g=gpuOn&&SG.ok&&!stafMode;
+    scs.style.display=staf?'block':'none';
+    scg.style.display=(scOn&&g)?'block':'none';
+    scv.style.display=(scOn&&!g&&!stafMode)?'block':'none';
+  };
   box.querySelector('#sc_on').onchange=e=>{ scOn=e.target.checked; showCanvas(); };
+  // A/B toggle: whole-sprite <-> assembly. Clears the GPU atlas cache so the
+  // correct image (whole-sprite atlas vs parts atlas) re-uploads for each path.
+  box.querySelector('#sc_asm').onchange=e=>{ SPRITECLIENT.assemblyMode=e.target.checked; SG.chars={};
+    console.log('[sprite-client] render path =', e.target.checked?'ASSEMBLY':'WHOLE-SPRITE'); };
+  // STAF A/B: when on, the stripped-TA full-frame path (cached textures + quad
+  // list) drives the Canvas2D output instead of the atlas/assembly draw.
+  box.querySelector('#sc_staf').onchange=e=>{ stafMode=e.target.checked; window._stafRoute=e.target.checked; SPRITECLIENT.stafOn=e.target.checked; showCanvas();
+    console.log('[sprite-client] render path =', e.target.checked?'STAF (stripped-TA)':'atlas'); };
   box.querySelector('#sc_pred').onchange=e=>{ SPRITECLIENT.predict=e.target.checked; };
   box.querySelector('#sc_gpu').onchange=e=>{ gpuOn=e.target.checked; showCanvas(); };
   box.querySelector('#sc_scale').oninput=e=>{ SPRITECLIENT.spriteScale=+e.target.value; const v=document.getElementById('sc_scaleval'); if(v)v.textContent=(+e.target.value).toFixed(2); };
@@ -367,6 +391,61 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
   // (only the picked characters download). Override dir with ?atlas=<urlbase>.
   const CHAR_BASE = new URLSearchParams(location.search).get('atlas') || './test-atlas/chars';
   SPRITECLIENT.setCharBase(CHAR_BASE);
+  // ?demo=<hex cid> — drive the sprite client from the LOCAL atlas with synthetic
+  // state (no mirror server). INTERACTIVE: move/scrub/flip via keyboard, so you can
+  // control the (HD) char through the real render path. e.g. ?demo=17 = Cable. Inert unless set.
+  (function(){
+    const dq = new URLSearchParams(location.search).get('demo');
+    if(!dq) return;
+    const CID = parseInt(dq, 16);
+    SPRITECLIENT.inMatch = 1;
+    SPRITECLIENT.hud = SPRITECLIENT.hud || {timer:99,p1lvl:0,p2lvl:0,p1combo:0,p2combo:0,p1fill:0,p2fill:0};
+    SPRITECLIENT.loadChar(CID);
+    const D = { i:0, fps:10, playing:true, flip:false, x:320, y:400, sids:[], last:0 };
+    const keys = {};
+    const hint = document.createElement('div');
+    hint.style.cssText='position:fixed;left:8px;bottom:8px;z-index:9999;background:#000c;color:#9fd;'
+      +'font:11px/1.55 monospace;padding:8px 10px;border:1px solid #06a;border-radius:6px;white-space:pre';
+    document.body.appendChild(hint);
+    addEventListener('keydown',e=>{
+      const k=e.key.toLowerCase();
+      if(k===' '){ D.playing=!D.playing; e.preventDefault(); }
+      else if(k==='f'){ D.flip=!D.flip; }
+      else if(k===']'){ D.playing=false; D.i++; }
+      else if(k==='['){ D.playing=false; D.i--; }
+      else if(k===','){ D.fps=Math.max(1,D.fps-1); }
+      else if(k==='.'){ D.fps=Math.min(60,D.fps+1); }
+      else keys[k]=true;
+      if(['arrowleft','arrowright','arrowup','arrowdown',' '].includes(e.key.toLowerCase())) e.preventDefault();
+    });
+    addEventListener('keyup',e=>{ keys[e.key.toLowerCase()]=false; });
+    function step(t){
+      const c=SPRITECLIENT.chars[CID];
+      if(c&&c.sprites){
+        D.sids=Object.keys(c.sprites).map(Number).sort((a,b)=>a-b);
+        const mv=keys['shift']?8:4;
+        if(keys['arrowleft']||keys['a']) D.x-=mv;
+        if(keys['arrowright']||keys['d']) D.x+=mv;
+        if(keys['arrowup']||keys['w']) D.y-=mv;
+        if(keys['arrowdown']||keys['s']) D.y+=mv;
+        D.x=Math.max(0,Math.min(640,D.x)); D.y=Math.max(40,Math.min(480,D.y));
+        if(D.playing && t-D.last>1000/D.fps){ D.i++; D.last=t; }
+        if(D.sids.length){
+          const idx=((D.i%D.sids.length)+D.sids.length)%D.sids.length, sid=D.sids[idx];
+          const sl=SPRITECLIENT.slot[0];
+          sl.active=1; sl.char_id=CID; sl.sprite_id=sid; sl.screen_x=D.x; sl.screen_y=D.y;
+          sl.facing=D.flip?1:0; sl.vx=0; sl.vy=0; sl.t=performance.now();
+          for(let s=1;s<6;s++) SPRITECLIENT.slot[s].active=0;
+          hint.textContent='DEMO 0x'+CID.toString(16)+'  sprite '+sid+'  ('+(idx+1)+'/'+D.sids.length+')\n'
+            +'pos ('+D.x+','+D.y+')  fps '+D.fps+'  '+(D.playing?'▶ play':'⏸ pause')+(D.flip?'  ⇄ flip':'')+'\n'
+            +'move arrows/WASD (shift=fast) · scrub [ ] · play space · speed , . · flip f';
+        } else hint.textContent='loading atlas…';
+      } else hint.textContent='loading atlas…';
+      requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+    console.log('[demo] interactive cid 0x'+CID.toString(16)+' from '+CHAR_BASE+' — arrows move, [ ] scrub, space, f flip');
+  })();
   // ↻ clears the loaded-char cache so they re-fetch (after I push an atlas update).
   box.querySelector('#sc_srv').onclick=()=>{ SPRITECLIENT.chars={}; SPRITECLIENT._loading={}; SG.chars={}; console.log('[sprite-client] cleared atlas cache; chars will re-fetch'); };
   let pendingPng=null, pendingJson=null;
@@ -381,17 +460,35 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
         .then(r=>r.blob()).then(b=>createImageBitmap(b)).then(img=>SG.setSparkAtlas(img,64))
         .catch(e=>console.warn('[spark] atlas load failed',e)); }
     if(scOn){
-      if(gpuOn && SG.ok){
-        for(const cid in SPRITECLIENT.chars){ const c=SPRITECLIENT.chars[cid]; if(c&&c.img&&!SG.chars[cid]){ SG.setAtlas(cid, c.img); SG.setCharPalette(cid, c.pal128); } }
+      const asm=SPRITECLIENT.assemblyMode;
+      if(stafMode){
+        // STAF stripped-TA path: rasterize the real per-vertex textured triangles
+        // on WebGL (flycast's own draw model), pixel-exact, no atlas. The whole
+        // frame comes from STAF triangles + TX64 cached textures.
+        if(!STAFGL.ok && !STAFGL._tried){ STAFGL._tried=true; STAFGL.init(scs); showCanvas(); }
+        try{ STAFGL.render(SPRITECLIENT, 640, 480); }
+        catch(err){ console.error('[staf-gl] render error', err); }
+        // STAF includes the HUD (it's just more quads), so the from-state HUD overlay
+        // is OFF in this path — toggle it back on if you want the synthesized HUD too.
+        if(hudOn) SPRITECLIENT.drawHUD(hctx); else hctx.clearRect(0,0,sch.width,sch.height);
+        const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.stafStatsText();
+      } else if(gpuOn && SG.ok){
+        // Upload the path's atlas image(s): parts atlas (assembly) or whole-sprite atlas.
+        const srcChars = asm ? SPRITECLIENT.asmChars : SPRITECLIENT.chars;
+        for(const cid in srcChars){ const c=srcChars[cid]; if(c&&c.img&&!SG.chars[cid]){ SG.setAtlas(cid, c.img); SG.setCharPalette(cid, c.pal128); } }
         const fxList=null;  // EFCT effects render via SPRITECLIENT.drawEffects() — server-isolated, frame-synced (no dev rAF skew)
-        try{ SG.render(SPRITECLIENT.buildDrawList(640,480), window.DBG||{}, window._T, SPRITECLIENT.buildSparkList(640,480), fxList); }
+        const drawList = asm ? SPRITECLIENT.buildAssemblyDrawList(640,480) : SPRITECLIENT.buildDrawList(640,480);
+        try{ SG.render(drawList, window.DBG||{}, window._T, SPRITECLIENT.buildSparkList(640,480), fxList); }
         catch(err){ console.error('[sprite-gpu] render error -> Canvas2D fallback', err); SG.ok=false; showCanvas(); }
+        if(hudOn) SPRITECLIENT.drawHUD(hctx); else hctx.clearRect(0,0,sch.width,sch.height);
+        if(fxOn) SPRITECLIENT.drawEffects(hctx);   // server-isolated TA effects, additive over the scene
+        const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.statsText();
       } else {
-        SPRITECLIENT.render(scx);
+        if(asm) SPRITECLIENT.renderAssembly(scx); else SPRITECLIENT.render(scx);
+        if(hudOn) SPRITECLIENT.drawHUD(hctx); else hctx.clearRect(0,0,sch.width,sch.height);
+        if(fxOn) SPRITECLIENT.drawEffects(hctx);   // server-isolated TA effects, additive over the scene
+        const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.statsText();
       }
-      if(hudOn) SPRITECLIENT.drawHUD(hctx); else hctx.clearRect(0,0,sch.width,sch.height);
-      if(fxOn) SPRITECLIENT.drawEffects(hctx);   // server-isolated TA effects, additive over the scene
-      const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.statsText();
     }
     requestAnimationFrame(tick);
   };
@@ -896,6 +993,24 @@ async function main(){
                 }catch(e){} return; }
                 // OBJS: pool satellite objects (cape/effects/projectiles) -> rip sprites. NOT a TA frame.
                 if(SpriteClient.isOBJS(d)){ try{ SPRITECLIENT.onOBJS(d); }catch(e){} return; }
+                // TX64: STAF texture upload (64-bit content id). 'TX64'(4)+texId(8)+w(2)+h(2)+rawSize(4)+zstd(RGBA).
+                // Raw packet (NOT ZCST-wrapped); decompress the RGBA payload at offset 20 and cache.
+                if(SpriteClient.isTX64(d)){ try{
+                  const dv=new DataView(d.buffer,d.byteOffset,d.byteLength);
+                  const key=SpriteClient.texKey(dv.getUint32(4,true), dv.getUint32(8,true));
+                  const tw=dv.getUint16(12,true), th=dv.getUint16(14,true);
+                  const rgba=D._decompress(d.subarray(20));
+                  SPRITECLIENT.onTX64(key, tw, th, rgba);
+                }catch(e){} return; }
+                // STAF: stripped-TA frame (full textured-quad list). ZCST-wrapped, so
+                // decompress first, then check the inner 'STAF' magic. If it's STAF,
+                // route to the sprite client and DO NOT feed applyFrame. Only peek when
+                // the STAF A/B path is active, so normal TA frames aren't double-decompressed.
+                if(window._stafRoute){
+                  let _dec=null;
+                  try{ _dec=D._decompress(d); }catch(e){}
+                  if(_dec && SpriteClient.isSTAF(_dec)){ try{ SPRITECLIENT.onSTAF(_dec); }catch(e){} return; }
+                }
                 try{
                     const wsArrival=performance.now();
                     if(lastFrameArrival>0){

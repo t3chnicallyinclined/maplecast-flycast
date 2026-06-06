@@ -123,6 +123,23 @@ export class SpriteGPU {
         fragment: { module: mod, entryPoint: 'fs', targets: [{ format: this.fmt }] },
         primitive: { topology: 'triangle-list' },
       });
+      // Additive variant of the SAME palette pipeline — for fx/super objects whose
+      // wire blend byte requests dst=ONE (glow/energy). Same shader, same bind
+      // group layout, additive blend so the part adds light instead of replacing.
+      this.pipeAdd = device.createRenderPipeline({
+        layout: device.createPipelineLayout({ bindGroupLayouts: [this.bgl] }),
+        vertex: { module: mod, entryPoint: 'vs', buffers: [{
+          arrayStride: INST_STRIDE, stepMode: 'instance', attributes: [
+            { shaderLocation: 0, offset: 0,  format: 'float32x4' },
+            { shaderLocation: 1, offset: 16, format: 'float32x4' },
+            { shaderLocation: 2, offset: 32, format: 'float32' },
+            { shaderLocation: 3, offset: 36, format: 'float32' },
+          ]}]},
+        fragment: { module: mod, entryPoint: 'fs', targets: [{ format: this.fmt,
+          blend: { color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
+                   alpha: { srcFactor: 'one',       dstFactor: 'one', operation: 'add' } } }] },
+        primitive: { topology: 'triangle-list' },
+      });
       // hit-spark pipeline: additive blend, no palette (bindings 0,1,2)
       this.sparkBgl = device.createBindGroupLayout({ entries: [
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
@@ -233,16 +250,23 @@ export class SpriteGPU {
         }
       }
       const first = n;
-      for (const s of list) {
+      // An object's fx blend byte requests additive when dst nibble == ONE(1).
+      // Order normal instances first, additive last, so each forms a contiguous
+      // firstInstance range we can draw with pipe / pipeAdd respectively.
+      const isAdd = (s) => s.blend != null && (s.blend & 0xf) === 1;
+      const ordered = list.slice().sort((a, b) => (isAdd(a) ? 1 : 0) - (isAdd(b) ? 1 : 0));
+      let normCount = 0;
+      for (const s of ordered) {
         if (n >= this.maxInst) break;
         const c = this.chars[cid], o = n * 10;
         this.instData[o] = s.dx; this.instData[o + 1] = s.dy; this.instData[o + 2] = s.dw; this.instData[o + 3] = s.dh;
         this.instData[o + 4] = s.sx / c.w; this.instData[o + 5] = s.sy / c.h;
         this.instData[o + 6] = (s.sx + s.sw) / c.w; this.instData[o + 7] = (s.sy + s.sh) / c.h;
         this.instData[o + 8] = s.flip ? 1 : 0; this.instData[o + 9] = palBase;
+        if (!isAdd(s)) normCount++;
         n++;
       }
-      groups.push({ cid, first, count: n - first }); gi++;
+      groups.push({ cid, first, count: n - first, normCount }); gi++;
     }
     if (gi) this.dev.queue.writeBuffer(this.palBuf, 0, this.palData, 0, gi * 256 * 4);
     if (n) this.dev.queue.writeBuffer(this.inst, 0, this.instData, 0, n * 10);
@@ -268,12 +292,26 @@ export class SpriteGPU {
       colorAttachments: [{ view: rt.colorView, clearValue: { r:0,g:0,b:0,a:0 }, loadOp: 'clear', storeOp: 'store' }],
     });
     if (n) {
-      pass.setPipeline(this.pipe);
       pass.setVertexBuffer(0, this.inst);
+      // Normal (alpha) draws first.
+      pass.setPipeline(this.pipe);
       for (const g of groups) {
-        if (!g.count) continue;
+        const nc = (g.normCount != null) ? g.normCount : g.count;
+        if (!nc) continue;
         pass.setBindGroup(0, this.chars[g.cid].bg);
-        pass.draw(6, g.count, 0, g.first);
+        pass.draw(6, nc, 0, g.first);
+      }
+      // Additive (fx-blend dst=ONE) draws over them, same palette bind group.
+      let anyAdd = false;
+      for (const g of groups) if ((g.normCount != null) && g.count > g.normCount) { anyAdd = true; break; }
+      if (anyAdd) {
+        pass.setPipeline(this.pipeAdd);
+        for (const g of groups) {
+          const addCount = (g.normCount != null) ? (g.count - g.normCount) : 0;
+          if (!addCount) continue;
+          pass.setBindGroup(0, this.chars[g.cid].bg);
+          pass.draw(6, addCount, 0, g.first + g.normCount);
+        }
       }
     }
     if (sn) {                                    // additive hit-spark pass, over the characters

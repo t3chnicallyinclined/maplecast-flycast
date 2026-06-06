@@ -434,3 +434,150 @@ New path in `web/webgpu/*` (parallel to `renderer_frame`):
 - **Paletted-format correctness:** the palette MUST be in the key, or skins/
   team-color swaps render stale. This is the one identity subtlety to get right
   and is called out in §3.1 and Phase 1.
+
+---
+
+## 8. IMPLEMENTED (correct-first build) — `MAPLECAST_STAF`
+
+This is what currently ships in-tree. The client renders like flycast's own
+renderer: it **rasterizes the exact per-vertex textured triangles** the game's TA
+produced (not a Canvas2D dest-rect approximation), with the PVR TSP blend/shade
+state mapped 1:1 to GL. Decode is flycast's canonical path (`decodeTexAny`); the
+geometry is the game's real triangles. Pixel-exact by construction.
+
+> **History:** the first pass shipped an axis-aligned dest-rect+UV-rect per quad
+> and rendered it on Canvas2D. That FUNDAMENTALLY can't render TA geometry —
+> Canvas2D only does axis-aligned image blits, so triangle strips smeared
+> (characters scattered, Ruby Heart collapsed to a vertical strip). The fix is
+> the real thing below: ship per-vertex geometry, rasterize textured triangles on
+> the GPU.
+
+### 8.1 Server (`core/network/maplecast_mirror.cpp`)
+
+Gated behind `MAPLECAST_STAF`, in `serverPublish()` inside the
+`maplecast_ws::active()` block, alongside the EFCT/STAF-MEASURE experiments.
+Reuses the existing `mcfx` decode/hash primitives, extended for STAF:
+
+- **`mcfx::texHash64(tcw, w, h)`** — 64-bit FNV-1a over fmt/w/h/vq + the raw
+  indexed/texel VRAM bytes, **and** (for paletted fmt 5/6) the selected live
+  palette window. Pure content id; same content at a new address hits the cache;
+  a skin/team-color swap changes the id (palette folded in). This is the §3.1 key.
+- **`mcfx::decodeTexAny(tcw, tsp, out)`** — decodes to RGBA8888 through flycast's
+  **own** canonical path keyed by the quad's real TCW/TSP. fmt 0/1/2 (+VQ)
+  delegate to `decodeTex16`; fmt 5/6 (PAL4/PAL8) de-twiddle the index then look up
+  `PALETTE_RAM` with `PAL_RAM_CTRL`-selected unpack and the `tcw.PalSelect`
+  `palette_index` **exactly as `TexCache.cpp:463–472`**. Mip/exotic return false →
+  the triangle draws untextured (vertex color) this phase. **No format guessing.**
+
+Per frame: **`ta_parse(ctx, false)`**, walk `global_param_op`/`_pt`/`_tr`
+(= z-order). For each poly: compute `texId`; if new, decode + ship a **`TX64`**
+packet once (process-global `_stafSent`, cleared every 600 frames to re-seed
+relay-hidden browser joins — Phase 1; per-connection is Phase 3). Then triangulate
+the poly through flycast's **own index buffer** and append one record per real
+triangle carrying its per-vertex `(x,y,u,v,col)`. Finally zstd the whole `STAF`
+envelope (`_compressor`, ZCST outer) and `broadcastBinary`.
+
+> **Triangulation — use `rc.idx`, never raw `rc.verts` (the geometry bug).**
+> `ta_parse` calls `makeIndex`/`makePrimRestartIndex` (`ta_util.cpp`), which
+> rewrites every `PolyParam.first/.count` to index into **`rc.idx`** (a triangle
+> *strip* with degenerate-triangle links), where `rc.idx[k]` indexes `rc.verts`.
+> Iterating `rc.verts[pp.first+i]` directly (the first cut) only happens to work
+> for isolated 4-vertex sprite quads; long stage strips and merged/tagged-in
+> character strips have restarts + alternating winding that ONLY the index buffer
+> encodes, so raw iteration smears them across the frame. We pass
+> **`primRestart=false`** so `makeIndex` produces a degenerate-linked strip (no
+> `0xFFFFFFFF` sentinels), then expand `(rc.idx[k], rc.idx[k+1], rc.idx[k+2])` for
+> `k` in `[first, first+count-2]`, **skipping link triangles** (a repeated index,
+> out-of-range index, or zero screen area). Winding is irrelevant — the client
+> draws a triangle list with no backface cull. A merged poly's `count==0`
+> (its tris folded into the previous poly's idx range) is skipped by the
+> `count<3` guard. This path is identical for op/pt/tr. `MAPLECAST_STAF_DBG`
+> dumps the first 4 triangles of each list (idx + coords) to
+> `/dev/shm/mc_staf_geom.log` to confirm sane spans.
+
+### 8.2 Wire format (as built)
+
+**`TX64`** texture upload (raw packet, its RGBA payload is independently zstd'd):
+
+```
+'TX64'(4)  texId(8 LE)  w(2 LE)  h(2 LE)  rawSize(4 LE)  zstd(RGBA8888)
+```
+
+**`STAF`** frame (whole envelope is ZCST/zstd-wrapped; below is post-decompress):
+
+```
+'STAF'(4)  frameNum(4 LE)  pvr_snapshot[16](64)  triCount(4 LE)
+  ── repeated triCount times (47 B/tri) ──
+  texId(8 LE)        // 0 = untextured triangle (use per-vertex col)
+  blend(1)           // (SrcInstr<<4)|DstInstr  (PVR TSP bits 29-31 / 26-28)
+  listType(1)        // 0=op(bg/opaque) 1=pt(char/punch-through) 2=tr(fx/translucent)
+  tspFlags(1)        // bit0-1 ShadInstr, bit2 IgnoreTexA, bit3 textured, bit4 punch-through
+  ── per vertex × 3 (12 B each) ──
+    x(i16 LE) y(i16 LE)    // 640×480 screen space (the TA's own projected coords)
+    u(u16) v(u16)          // UV, Q0.16 (val/65535)
+    col(4)                 // R,G,B,A vertex color
+```
+
+Triangles arrive in server z-order (op → pt → tr); the client draws straight
+through, which IS the z-order (no depth buffer). `blend` maps to `gl.blendFunc`
+via the same `SrcBlendGL`/`DstBlendGL` tables flycast uses
+(`gldraw.cpp:53-75`). `tspFlags.ShadInstr` selects the texture↔vertex-color
+combine (`gles.cpp`: 0 replace, 1 modulate-rgb/replace-a, 2 mix-by-texA, 3
+modulate); punch-through applies an alpha test (~0.5) like `cp_AlphaTestValue`.
+
+### 8.3 Client
+
+- **`web/webgpu/sprite-staf-gl.mjs` (`StafGL`)** — a minimal WebGL2 textured-
+  triangle renderer. Vertex shader maps screen `(x,y)` (640×480) to clip space
+  (Y-flipped); fragment shader replicates flycast's ShadInstr combine +
+  IgnoreTexA + punch-through alpha test. Per frame it uploads the flat vertex
+  array to a dynamic VBO and draws the triangle list **batched by GL state**
+  (blend/texture/shade), preserving order. Textures upload to GL textures once,
+  keyed by `tex_id`, from the client's decoded-RGBA cache.
+- **`web/webgpu/sprite-client.mjs`** — `texKey(lo,hi)` → `"hi:lo"` string key.
+  `onTX64` caches the decoded `{w,h,rgba}` by key. `onSTAF` parses the triangle
+  list into a flat `Float32Array` (`_stafV`, 8 floats/vert) + per-tri descriptors
+  (`stafQuads`) the GL renderer consumes directly. (The old Canvas2D `drawSTAF`
+  is gone.)
+- **`web/webgpu-test.html`** — routes `TX64` (raw) and `STAF` (decompress-then-
+  peek inner magic, gated by `window._stafRoute`) away from `applyFrame`; the
+  **STAF** checkbox drives a dedicated WebGL canvas (A/B against whole-sprite /
+  assembly / live mirror).
+
+### 8.4 Enable / build / test
+
+**Build the server:**
+```bash
+cmake --build build-headless --target flycast
+```
+
+**Run the server with STAF on** (additive — the normal mirror still runs, so
+existing clients are unaffected):
+```bash
+MAPLECAST_STAF=1 ./build-headless/flycast    # plus the usual ROM / headless env
+# optional geometry debug (first 8 tris/600 frames -> /dev/shm/mc_staf_geom.log):
+MAPLECAST_STAF=1 MAPLECAST_STAF_DBG=1 ./build-headless/flycast
+```
+
+**Test the client:** open `web/webgpu-test.html` against the stream, tick the
+**“STAF path”** checkbox in the SPRITE CLIENT panel. The WebGL surface renders the
+full frame from the triangle list + cached textures; `sc_stats` shows
+`frame / tris / texCache`. `texCache` grows during warmup then plateaus
+(ship-once). A/B by un-ticking to compare against the atlas path or the live TA
+mirror.
+
+`node --check` passes for `sprite-client.mjs`, `sprite-staf-gl.mjs`, and the
+inline module in `webgpu-test.html`.
+
+### 8.5 Known limits of this pass (correctness-first, optimize later)
+
+- One triangle per record (no strip/transform compression yet — ~47 B/tri before
+  zstd; strip-encode + per-vertex delta is the bandwidth optimization).
+- Process-global `_stafSent` + 600-frame re-seed (per-connection digest is
+  Phase 3); stage textures are re-shipped, not yet cached across the session.
+- fmt 0/1/2/5/6 + VQ covered; mip/exotic formats draw untextured (Phase 4
+  client-decode fallback).
+- No depth buffer — relies on list order (op→pt→tr) for draw order, which is how
+  2D fighters compose; per-list translucent sort is the server's emit order.
+- CLAMP_TO_EDGE sampling (MVC2 sprite quads don't tile); ClampU/V/FlipU/FlipV and
+  bilinear/nearest per-TSP are not yet honored (the UVs already encode flips).

@@ -56,6 +56,37 @@ export class SpriteClient {
     this._fxCache = new Map(); // texture hash -> canvas (decoded from TXTR packets)
     this._lastEfctN = 0;
     this.effectsOn = true;
+
+    // ===== STAF (stripped-TA frame) render path =====
+    // Pixel-exact: the server ships the full textured-quad list every frame
+    // (STAF) + each unique texture ONCE (TX64), content-addressed by a 64-bit id.
+    // We cache tex_id -> canvas and draw each quad's axis-aligned dest rect with
+    // its UV sub-rect + PVR blend. No atlas, no VRAM, no ta_parse — see
+    // docs/STRIPPED-TA-DESIGN.md. tex_id is a JS string ("hi:lo") so the 64-bit
+    // value survives Map keys without precision loss.
+    this.stafQuads = [];       // per-tri descriptors {key,blend,shadInstr,ignoreTexA,textured,punch,voff}
+    this._stafV = null;        // Float32Array: 8 floats/vert [x,y,u,v,r,g,b,a], 3 verts/tri
+    this._stafVCount = 0;
+    this._stafTex = new Map(); // tex_id(string) -> {w,h,rgba} decoded texture (from TX64)
+    this.stafFrame = 0;
+    this.stafOn = true;
+    this._stafQuadN = 0; this._stafTexN = 0;
+
+    // ===== Assembly-driven render path (parallel to whole-sprite) =====
+    // When true, buildAssemblyDrawList() is the GPU source instead of buildDrawList().
+    // Each object's sprite_id resolves to an assembly (a list of part placements);
+    // we draw each part rect from the per-char part atlas at its (dx,dy) offset.
+    // See docs/ASSEMBLY-DRIVEN-DESIGN.md §2.3.
+    this.assemblyMode = false;
+    // asm[cid] = { img:ImageBitmap, parts:{idx:{x,y,w,h}}, asm:{sid:[{part,dx,dy,flip,z}]},
+    //              palette:[...], pal128:[[r,g,b]...], screenW, screenH, name }
+    this.asmChars = {};
+    this._asmLoading = {};     // cid -> Promise (de-dupe)
+    // CpsX/CpsY game scale (work.asm) — part offsets/sizes are in game px; screen
+    // pos is already in 640x480 screen space, so apply this as the part->screen factor.
+    this.asmScaleX = 1.0; this.asmScaleY = 1.0;
+    this._asmNote = 'assembly: no atlas';
+    this._asmMiss = 0; this._asmDrawn = 0;
   }
   _blank() {
     return { active:0, char_id:0, sprite_id:-1, screen_x:0, screen_y:0, facing:0, palette:0,
@@ -107,18 +138,108 @@ export class SpriteClient {
     this._fxCache.set(hash, cv);
   }
 
-  // 'OBJS'(4) + count(1) + N×[cid(1), sprite_id(2 LE), x(i16 LE), y(i16 LE)] = 7B each.
-  // Pool satellite objects (cape/effects/projectiles) -> rip sprites. See re-catalog/.
+  // ===== STAF channel ========================================================
+  // 64-bit tex_id -> string key (so it can index a Map without float precision loss).
+  static texKey(lo, hi) { return (hi >>> 0).toString(16).padStart(8, '0') + ':' + (lo >>> 0).toString(16).padStart(8, '0'); }
+
+  // 'TX64'(4) texId(8) w(2) h(2) rawSize(4) zstd(RGBA). Caller decompresses the
+  // RGBA (offset 20) and passes it in — same shape as onTXTR but 64-bit keyed.
+  static isTX64(d) {
+    return d.length >= 20 && d[0]===84 && d[1]===88 && d[2]===54 && d[3]===52; // 'T','X','6','4'
+  }
+  // Cache the decoded RGBA (+dims) by 64-bit key. The GL renderer (StafGL) uploads
+  // it to a GPUtexture lazily on first use and tracks uploaded keys itself; we just
+  // hold the bytes so a re-decode is never needed. (rgba is copied — the source
+  // decompress buffer is reused by the next packet.)
+  onTX64(key, w, h, rgba) {
+    if (!rgba || rgba.length < w * h * 4 || w <= 0 || h <= 0) return;
+    this._stafTex.set(key, { w, h, rgba: new Uint8Array(rgba.subarray(0, w * h * 4)) });
+    this._stafTexN = this._stafTex.size;
+  }
+
+  // 'STAF'(4) frameNum(4) pvr_snapshot[16](64) triCount(u32), then per TRIANGLE:
+  //   texId(8) blend(1) listType(1) tspFlags(1)
+  //   3 × [ x(i16) y(i16) u(u16) v(u16) col(4 = R,G,B,A) ]      = 11 + 36 = 47 B/tri
+  // x,y are 640x480 screen space; u,v are Q0.16 (val/65535). texId 0 = untextured.
+  //   blend    = (SrcInstr<<4)|DstInstr  (PVR TSP) -> gl.blendFunc
+  //   tspFlags = bit0-1 ShadInstr, bit2 IgnoreTexA, bit3 textured, bit4 punch-through
+  // Each triangle carries its REAL per-vertex (x,y,u,v,col); the GPU rasterizes
+  // textured triangles (StafGL renderer), exact for any winding/flip/shear. The
+  // buffer is ALREADY zstd-decompressed (ZCST stripped by the caller).
+  static isSTAF(d) {
+    return d.length >= 10 && d[0]===83 && d[1]===84 && d[2]===65 && d[3]===70; // 'S','T','A','F'
+  }
+  // Parse STAF into flat typed arrays the GL renderer consumes directly:
+  //   _stafV:   Float32 [x,y,u,v, r,g,b,a] per vertex (3 verts/tri)   (pos in 640x480, col 0..1)
+  //   _stafTri: per-tri {key, blend, shadInstr, ignoreTexA, textured, punch, voff}
+  onSTAF(d) {
+    const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
+    this.stafFrame = dv.getUint32(4, true);
+    const triCount = dv.getUint32(72, true);
+    let o = 76;
+    const maxTri = Math.min(triCount, ((d.length - 76) / 47) | 0);
+    // 3 verts/tri × 8 floats/vert
+    if (!this._stafV || this._stafV.length < maxTri * 24) this._stafV = new Float32Array(maxTri * 24);
+    const V = this._stafV;
+    const tris = [];
+    let vi = 0;
+    for (let i = 0; i < triCount && o + 47 <= d.length; i++) {
+      const lo = dv.getUint32(o, true), hi = dv.getUint32(o + 4, true); o += 8;
+      const blend = d[o++], listType = d[o++], tsp = d[o++];
+      const textured = (lo !== 0 || hi !== 0);
+      const voff = vi / 8;                            // first vertex index of this tri
+      for (let k = 0; k < 3; k++) {
+        const x = dv.getInt16(o, true); o += 2;
+        const y = dv.getInt16(o, true); o += 2;
+        const u = dv.getUint16(o, true) / 65535; o += 2;
+        const v = dv.getUint16(o, true) / 65535; o += 2;
+        const r = d[o++] / 255, g = d[o++] / 255, b = d[o++] / 255, a = d[o++] / 255;
+        V[vi++] = x; V[vi++] = y; V[vi++] = u; V[vi++] = v;
+        V[vi++] = r; V[vi++] = g; V[vi++] = b; V[vi++] = a;
+      }
+      tris.push({ key: textured ? SpriteClient.texKey(lo, hi) : null,
+                  blend, shadInstr: tsp & 3, ignoreTexA: (tsp >> 2) & 1,
+                  textured: (tsp >> 3) & 1, punch: (tsp >> 4) & 1, voff });
+    }
+    this._stafVCount = vi / 8;
+    this.stafQuads = tris;          // array of per-tri draw descriptors (z-ordered op->pt->tr)
+    this._stafQuadN = tris.length;
+  }
+
+  stafStatsText() {
+    return `STAF: frame=${this.stafFrame} tris=${this._stafQuadN} texCache=${this._stafTexN}`;
+  }
+
+  // 'OBJS'(4) + count(1) + N×[cid(1), sprite_id(2 LE), type(1), x(i16 LE), y(i16 LE)] = 8B each.
+  //
+  // EFFECT-BLEND WIRE BYTE (assembly path): the stride may be 8B (legacy) or 9B
+  // (8B + blend(1)). The trailing byte is the PVR TSP src/dst blend nibble pair
+  // packed as (src<<4 | dst), letting fx/super objects request the matching
+  // canvas/WebGPU blend (additive glows). Stride is auto-detected from the packet
+  // length so the client consumes whichever the server ships. See "FX-BLEND WIRE
+  // BYTE" spec in docs/ASSEMBLY-DRIVEN-DESIGN.md notes (and the bottom of this file).
   static isOBJS(d) {
     return d.length >= 5 && d[0]===79 && d[1]===66 && d[2]===74 && d[3]===83; // 'O','B','J','S'
   }
   onOBJS(d) {
     const n = d[4]; const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
+    // Detect per-object stride: 9B if (len-5) == n*9, else 8B. Blend byte present iff 9B.
+    const body = d.length - 5;
+    const stride = (n > 0 && body === n * 9) ? 9 : 8;
+    const hasBlend = stride === 9;
     const objs = []; let o = 5;
-    for (let i = 0; i < n && o + 8 <= d.length; i++) {
+    for (let i = 0; i < n && o + stride <= d.length; i++) {
       const raw = dv.getUint16(o+1, true);   // sprite_id with 0x8000 hflip bit
-      objs.push({ cid: d[o], sid: raw & 0x7fff, type: d[o+3], x: dv.getInt16(o+4, true), y: dv.getInt16(o+6, true) });
-      o += 8;
+      const ob = { cid: d[o], sid: raw & 0x7fff, type: d[o+3],
+                   x: dv.getInt16(o+4, true), y: dv.getInt16(o+6, true) };
+      if (hasBlend) {
+        const b = d[o+8];
+        ob.blend = b;                         // raw packed (src<<4|dst)
+        ob.blendSrc = (b >> 4) & 0xf;
+        ob.blendDst = b & 0xf;
+      }
+      objs.push(ob);
+      o += stride;
     }
     this.objects = objs;
   }
@@ -165,6 +286,46 @@ export class SpriteClient {
       } finally { delete this._loading[cid]; }
     })();
     this._loading[cid] = p; return p;
+  }
+
+  // Lazy-load ONE character's PART atlas + assembly table for the assembly path:
+  //   <charBase>/PL{hex}_parts.png  — packed part rectangles
+  //   <charBase>/PL{hex}_parts.json — { <part_idx>: {x,y,w,h} }  (rect in the atlas)
+  //   <charBase>/PL{hex}_asm.json   — { sprite_id: [{part, dx, dy, flip, z?}], ... }
+  // The two JSONs are kept separate exactly as the sibling baker emits them. We
+  // also accept an optional palette/pal128 in the asm JSON (reuse the palette path).
+  loadAsmChar(cid) {
+    if (this.asmChars[cid] || this._asmLoading[cid] || !this.charBase) return this._asmLoading[cid];
+    const hex = (cid & 0xff).toString(16).padStart(2, '0').toUpperCase();
+    const base = `${this.charBase}/PL${hex}`;
+    const bust = '?t=' + Date.now();
+    const p = (async () => {
+      try {
+        const [partsJson, asmRaw, blob] = await Promise.all([
+          fetch(base + '_parts.json' + bust).then(r => { if (!r.ok) throw new Error('parts.json ' + r.status); return r.json(); }),
+          fetch(base + '_asm.json'   + bust).then(r => { if (!r.ok) throw new Error('asm.json '   + r.status); return r.json(); }),
+          fetch(base + '_parts.png'  + bust).then(r => { if (!r.ok) throw new Error('parts.png '  + r.status); return r.blob(); }),
+        ]);
+        const img = await createImageBitmap(blob);
+        // asm JSON may be the flat { sid:[...] } map, or wrapped { assemblies:{...}, parts:{...}, palette, pal128, screenW, screenH }.
+        const asm   = asmRaw.assemblies || asmRaw.asm || asmRaw;
+        const parts = asmRaw.parts || partsJson.parts || partsJson;
+        if (asmRaw.screenW) this.screenW = asmRaw.screenW;
+        if (asmRaw.screenH) this.screenH = asmRaw.screenH;
+        this.asmChars[cid] = {
+          img, parts, asm,
+          palette: asmRaw.palette || partsJson.palette || null,
+          pal128:  asmRaw.pal128  || partsJson.pal128  || null,
+          name: asmRaw.name || ('char' + cid),
+        };
+        console.log('[sprite-client] loaded ASM char', cid, this.asmChars[cid].name,
+          Object.keys(parts).length, 'parts,', Object.keys(asm).length, 'assemblies');
+      } catch (e) {
+        this.asmChars[cid] = { img: null, parts: {}, asm: {}, name: 'char' + cid, err: String(e) };
+        console.error('[sprite-client] ASM char', cid, 'load failed', e);
+      } finally { delete this._asmLoading[cid]; }
+    })();
+    this._asmLoading[cid] = p; return p;
   }
 
   // Combined-atlas load (file-picker / single-URL fallback): one JSON
@@ -255,7 +416,9 @@ export class SpriteClient {
         if (z > 0.1 && z < 10) this._zoom = z;
       }
     }
-    for (let s = 0; s < 6; s++) { const sl = this.slot[s]; if (sl.active) this.loadChar(sl.char_id); }
+    for (let s = 0; s < 6; s++) { const sl = this.slot[s]; if (sl.active) {
+      if (this.assemblyMode) this.loadAsmChar(sl.char_id); else this.loadChar(sl.char_id);
+    } }
   }
 
   // Draw the current state into a 2D context. Returns a small status object.
@@ -315,6 +478,27 @@ export class SpriteClient {
                    : missing ? `holding (uncaptured) ${missing}: ${missKeys.join(' ')}`
                    : 'all visible poses captured';
     return { drawn, missing, note:this._lastNote };
+  }
+
+  // Canvas2D assembly render (A/B fallback when WebGPU is off). Consumes the same
+  // draw list as the GPU path; maps the optional fx blend byte to a canvas
+  // compositing op (additive for glows). No palette recolor here (GPU path only).
+  renderAssembly(ctx) {
+    const W = ctx.canvas.width, H = ctx.canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    const list = this.buildAssemblyDrawList(W, H);
+    for (const it of list) {
+      const c = this.asmChars[it.charId];
+      if (!c || !c.img) continue;
+      ctx.save();
+      // Additive when the fx blend byte requests dst=ONE (1) — glows/energy.
+      if (it.blend != null && (it.blend & 0xf) === 1) ctx.globalCompositeOperation = 'lighter';
+      if (it.flip) { ctx.translate(it.dx + it.dw, it.dy); ctx.scale(-1, 1); }
+      else         { ctx.translate(it.dx, it.dy); }
+      ctx.drawImage(c.img, it.sx, it.sy, it.sw, it.sh, 0, 0, it.dw, it.dh);
+      ctx.restore();
+    }
+    return { drawn: this._asmDrawn, missing: this._asmMiss, note: this._asmNote };
   }
 
   // GPU path: emit [{charId, sx,sy,sw,sh (atlas px), dx,dy,dw,dh (canvas px), flip}]
@@ -380,6 +564,90 @@ export class SpriteClient {
     // bodies (z=0). (unshift broke this by scattering mixed-cid objects to the front.)
     out.sort((a, b) => (a.charId - b.charId) || ((a.z || 0) - (b.z || 0)));
     this._lastNote = loading ? `loading ${loading} char atlas…` : (missing ? `holding ${missing}: ${missKeys.join(' ')}` : 'all visible poses captured');
+    return out;
+  }
+
+  // ===== ASSEMBLY DRAW LIST (the parallel path) =====
+  // Same owners as buildDrawList (6 bodies + N pool objects), but each owner's
+  // sprite_id resolves to an ASSEMBLY (a list of part placements) and we emit one
+  // quad per part. Output items match buildDrawList's shape so sprite-gpu.mjs
+  // consumes them unchanged — plus an optional `blend` for fx objects:
+  //   { charId, slot, z, sx,sy,sw,sh (atlas px), dx,dy,dw,dh (canvas px), flip, blend? }
+  buildAssemblyDrawList(canvasW, canvasH) {
+    const scaleX = canvasW / (this.screenW || 640), scaleY = canvasH / (this.screenH || 480);
+    const now = (typeof performance !== 'undefined') ? performance.now() : 0;
+    const SX = this.asmScaleX || 1, SY = this.asmScaleY || 1;
+    const S  = this.spriteScale || 1;
+    const out = [];
+    let loading = 0, missing = 0, drawn = 0, missKeys = [];
+
+    // Emit every part of `sprite_id`'s assembly for one owner (body or pool obj).
+    // owner: { cid, exx, eyy, facing, slot, zBase, blend? }
+    const emitAssembly = (owner, sid) => {
+      const c = this.asmChars[owner.cid];
+      if (!c) { this.loadAsmChar(owner.cid); loading++; return; }
+      if (!c.img) return;                          // load failed
+      const recs = c.asm[sid] || c.asm[sid & 0xffff] || c.asm[String(sid)];
+      if (!recs || !recs.length) {
+        missing++; if (missKeys.length < 3) missKeys.push(`${owner.cid}/0x${(sid&0xffff).toString(16)}`);
+        return;
+      }
+      for (const r of recs) {
+        const part = c.parts[r.part] || c.parts[String(r.part)];
+        if (!part) continue;
+        // flip = owner facing XOR the record's own flip bit.
+        const flip = (!!owner.facing) !== (!!r.flip);
+        // Part offset is in game px relative to the owner's screen anchor. When
+        // mirrored, reflect the part's x-extent across the anchor (dx -> -(dx+w)).
+        const pdx = flip ? -(r.dx + part.w) : r.dx;
+        const dx = (owner.exx + pdx * SX * S) * scaleX;
+        const dy = (owner.eyy + r.dy * SY * S) * scaleY;
+        const dw = part.w * SX * S * scaleX;
+        const dh = part.h * SY * S * scaleY;
+        // z: owner base layer + the record's own intra-assembly z (back-to-front).
+        const z = (owner.zBase || 0) * 100 + (r.z || 0);
+        const item = { charId: owner.cid, slot: owner.slot, z,
+          sx: part.x, sy: part.y, sw: part.w, sh: part.h,
+          dx, dy, dw, dh, flip };
+        if (owner.blend != null) item.blend = owner.blend;
+        out.push(item);
+        drawn++;
+      }
+    };
+
+    // --- bodies (the 6 tracked slots) ---
+    for (let s = 0; s < 6; s++) {
+      const sl = this.slot[s];
+      if (!sl.active) continue;
+      let exx = sl.screen_x, eyy = sl.screen_y;
+      if (this.predict !== false) { const dt = Math.min(now - sl.t, 33); if (dt > 0) { exx += sl.vx*dt; eyy += sl.vy*dt; } }
+      emitAssembly({ cid: sl.char_id, exx, eyy, facing: sl.facing, slot: s, zBase: 0 }, sl.sprite_id);
+    }
+
+    // --- pool objects (cape / projectile / fx) — each its own assembly + blend ---
+    if (this.objectsOn !== false) for (const o of (this.objects || [])) {
+      // Find owner slot for the shared transform (same logic as buildDrawList).
+      let osl = null;
+      for (let s = 0; s < 6; s++) if (this.slot[s].active && this.slot[s].char_id === o.cid) { osl = this.slot[s]; break; }
+      if (!osl) continue;
+      let ox = osl.screen_x, oy = osl.screen_y;
+      if (this.predict !== false) { const dt = Math.min(now - osl.t, 33); if (dt > 0) { ox += osl.vx*dt; oy += osl.vy*dt; } }
+      if ((ox === 0 && oy === 0) || ox < -60 || ox > 700) continue;
+      // type 3 = cape: rides the owner. Others: distance decides attached vs spawned.
+      const far = (o.type !== 3) && ((Math.abs(o.x - ox) + Math.abs(o.y - oy)) > 130);
+      const px = far ? o.x : ox, py = far ? o.y : oy;
+      // z layer by category: cape (3) behind body, fx/lightning (1) in front, else just behind.
+      const zBase = (o.type === 1) ? 1 : (o.type === 3 ? -2 : -1);
+      emitAssembly({ cid: o.cid, exx: px, eyy: py, facing: osl.facing, slot: 0,
+                     zBase, blend: o.blend }, o.sid);
+    }
+
+    out.sort((a, b) => (a.charId - b.charId) || ((a.z || 0) - (b.z || 0)));
+    this._asmDrawn = drawn; this._asmMiss = missing;
+    this._asmNote = loading ? `assembly: loading ${loading} char atlas…`
+                  : missing ? `assembly: missing ${missing} asm: ${missKeys.join(' ')} (${drawn} parts)`
+                  : `assembly: ${drawn} parts drawn`;
+    this._lastNote = this._asmNote;
     return out;
   }
 
@@ -450,20 +718,65 @@ export class SpriteClient {
   }
 
   statsText() {
-    const loaded = Object.keys(this.chars);
-    const names = loaded.map(c => this.chars[c].name + (this.chars[c].img?'':'!')).join(', ') || '(none yet)';
+    const loaded = this.assemblyMode ? Object.keys(this.asmChars) : Object.keys(this.chars);
+    const src = this.assemblyMode ? this.asmChars : this.chars;
+    const names = loaded.map(c => src[c].name + (src[c].img?'':'!')).join(', ') || '(none yet)';
     const nm = (i) => { const c = this.chars[this.slot[i].char_id]; return c ? c.name : '…'; };
     const LAB = ['P1a','P2a','P1b','P2b','P1c','P2c'];
     const sl = (i) => { const x = this.slot[i];
       return `${LAB[i]} ${x.active?'ON ':'-- '} ${nm(i)}(${x.char_id}) sid=0x${(x.sprite_id&0xffff).toString(16).padStart(4,'0')} f${x.facing}`; };
-    const kbps = (this._bwRate/1024).toFixed(2);
+    const kbps = this._bwRate/1024;
     const mbps = (this._bwRate*8/1e6).toFixed(3);
-    return `SPRITE CLIENT — ${loaded.length} char atlas loaded\n`
+    if (kbps > (this._bwPeak||0)) this._bwPeak = kbps;       // track peak this session
+    const vsMirror = kbps > 0.01 ? (1700/kbps).toFixed(0)+'x cheaper than mirror' : '(waiting for GSTA…)';
+    const mode = this.assemblyMode ? 'ASSEMBLY (parts)' : 'WHOLE-SPRITE';
+    return `SPRITE CLIENT [${mode}] — ${loaded.length} char atlas loaded\n`
          + `loaded: ${names}\n`
-         + `STATE STREAM: ${kbps} KB/s (${mbps} Mbps)\n`
+         + `━━━ BANDWIDTH: ${kbps.toFixed(2)} KB/s (${mbps} Mbps) ━━━\n`
+         + `      peak ${(this._bwPeak||0).toFixed(2)} KB/s · ${vsMirror} (~1700 KB/s)\n`
          + `size=${(this.spriteScale||1).toFixed(2)}x  zoom(info,not applied)=${(this._zoom||1).toFixed(2)}\n`
          + `  ${this._bwHz.toFixed(0)} Hz x ${this._lastSize} B/frame\n`
          + `inMatch=${this.inMatch}\n` + [0,1,2,3,4,5].map(sl).join('\n') + '\n'
          + (this._lastNote ? `note: ${this._lastNote}` : '');
   }
 }
+
+// =============================================================================
+// FX-BLEND WIRE BYTE — spec (the "merge" for pixel-exact supers/energy)
+// =============================================================================
+//
+// The GSTA OBJS packet gains an OPTIONAL trailing byte per pool object, so fx /
+// super / energy objects can request the exact PVR blend the game used. The
+// client auto-detects the stride from the packet length — no version flag — so an
+// old 8B server and a new 9B server both work against the same client.
+//
+//   OBJS packet:  'OBJS'(4) + count(1) + count × OBJ
+//   OBJ (legacy): cid(1) + sprite_id(2 LE) + type(1) + x(i16 LE) + y(i16 LE)        = 8 B
+//   OBJ (blend):  cid(1) + sprite_id(2 LE) + type(1) + x(i16 LE) + y(i16 LE) + blend(1) = 9 B
+//
+//   Stride is 9 iff (packetLen - 5) == count*9, else 8. (count*8 and count*9 can
+//   only collide when count==0, which carries no objects — safe.)
+//
+// blend byte = (srcFactor << 4) | dstFactor, the PVR TSP instruction word's
+// SRC_ALPHA_INSTR (bits 29-31) and DST_ALPHA_INSTR (bits 26-28), each a 3-bit
+// PVR blend code packed into a nibble:
+//
+//   PVR code  meaning            WebGPU GPUBlendFactor   Canvas2D
+//   0  ZERO                      'zero'
+//   1  ONE                       'one'                   'lighter' (additive) when DST
+//   2  OTHER (dst/src color)     'src'/'dst' color
+//   3  INVERSE OTHER             'one-minus-…-color'
+//   4  SRC ALPHA                 'src-alpha'             'source-over' (default)
+//   5  INVERSE SRC ALPHA         'one-minus-src-alpha'
+//   6  DST ALPHA                 'dst-alpha'
+//   7  INVERSE DST ALPHA         'one-minus-dst-alpha'
+//
+// The common cases:
+//   0x45 = src=SRC_ALPHA(4), dst=INV_SRC_ALPHA(5)  -> normal alpha (default; omit byte)
+//   0x11 = src=ONE(1),       dst=ONE(1)            -> additive glow (supers/energy)
+//   0x41 = src=SRC_ALPHA(4), dst=ONE(1)            -> premultiplied additive
+//
+// Client mapping: sprite-gpu.mjs picks the additive pipeline when dst==ONE (the
+// glow case); Canvas2D uses globalCompositeOperation='lighter' for dst==ONE.
+// Everything else falls back to normal alpha. Default (no byte) == 0x45.
+// =============================================================================
