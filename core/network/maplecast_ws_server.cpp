@@ -11,6 +11,7 @@
 #include "maplecast_gamestate.h"
 #include "maplecast_mirror.h"
 #include "replay_writer.h"
+#include "emulator.h"
 #include "hw/sh4/sh4_mem.h"
 #include "hw/pvr/pvr_mem.h"
 #include "hw/pvr/pvr_regs.h"
@@ -595,6 +596,17 @@ static void checkMatchEnd()
 		if (!_matchActive) {
 			_matchActive = true;
 			_matchEndHandled = false;
+			// Auto-save match-start state so replica clients can download it
+			// and boot directly into this match without going through char select.
+			// Slot 98 = replica client sync slot (leaves slot 0 = user autoload).
+			try {
+				dc_savestate(98, nullptr, 0);
+				printf("[maplecast-ws] match-start savestate written to slot 98\n");
+			} catch (const std::exception& e) {
+				printf("[maplecast-ws] match-start savestate FAILED: %s\n", e.what());
+			} catch (...) {
+				printf("[maplecast-ws] match-start savestate FAILED (unknown)\n");
+			}
 		}
 
 		// Check if all 3 chars on one side are dead

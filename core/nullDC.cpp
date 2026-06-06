@@ -205,15 +205,20 @@ void dc_savestate(int index, const u8 *pngData, u32 pngSize)
 	Serializer ser;
 	dc_serialize(ser);
 
-	void *data = malloc(ser.size());
+	// Add headroom: between the dry-run above and the real serialize below,
+	// the SH4 JIT may compile new blocks (it's still running). Those blocks
+	// are part of the state, so pass 2 can be larger than pass 1 counted.
+	// 1 MB margin covers typical JIT growth during a live match.
+	const size_t margin = 1024 * 1024;
+	void *data = malloc(ser.size() + margin);
 	if (data == nullptr)
 	{
-		WARN_LOG(SAVESTATE, "Failed to save state - could not malloc %d bytes", (int)ser.size());
+		WARN_LOG(SAVESTATE, "Failed to save state - could not malloc %d bytes", (int)(ser.size() + margin));
 		os_notify(i18n::T("Save state failed - memory full"), 5000);
     	return;
 	}
 
-	ser = Serializer(data, ser.size());
+	ser = Serializer(data, ser.size() + margin);
 	dc_serialize(ser);
 
 	std::string filename = hostfs::getSavestatePath(index, true);

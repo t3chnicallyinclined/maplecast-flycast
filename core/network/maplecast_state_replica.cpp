@@ -8,6 +8,7 @@
 #include "maplecast_gamestate.h"
 #include "maplecast_mirror.h"
 #include "cfg/option.h"
+#include "hw/sh4/sh4_mem.h"
 
 #include <atomic>
 #include <string>
@@ -89,7 +90,7 @@ bool init()
 	printf("[state-replica] GSTA source: %s:%d  freeze=%d  inject_objects=%d  (in_match-gated)\n",
 	       _host.c_str(), _port, (int)_freeze, (int)_injectObjects);
 	printf("[state-replica] inject point: frame top, before runInternal()\n");
-	maplecast_mirror::startGstaStream(_host.c_str(), _port);
+	maplecast_mirror::startGstaStream(_host.c_str(), _port, /*vramSync=*/false);
 
 	_active.store(true);
 	return true;
@@ -120,16 +121,20 @@ bool frameInject()
 		return true;   // advance + render anyway
 	}
 
-	// Gate injection on the SERVER being in a match. The savestate boots into
-	// the game, but the first frames may be a load/transition where the char
-	// structs + object pool aren't coherent yet; writing into them then can
-	// corrupt SH4 state the JIT later executes (crash). in_match is the clean
-	// "the fight is live, the structs are valid" signal. Outside a match we
-	// still advance + render the local game (savestate baseline), just no inject.
-	if (!gs.in_match) {
+	// Gate injection on BOTH the server AND the local SH4 being in a match.
+	// Server gate: char structs + object pool aren't coherent before a match
+	// starts; injecting into them then corrupts SH4 JIT state → crash.
+	// Local gate: if the local SH4 is still in char select while the server is
+	// already mid-fight, injecting fight positions overwrites local char-select
+	// data at the same addresses → corrupted state → crash on local match start.
+	// Both must be true before any inject.
+	static const uint32_t ADDR_IN_MATCH = 0x8C289624;
+	const bool localInMatch = (addrspace::read8(ADDR_IN_MATCH) != 0);
+	if (!gs.in_match || !localInMatch) {
 		static uint64_t _preMatchN = 0;
 		if ((++_preMatchN % 120) == 1)
-			printf("[state-replica] server not in_match yet — rendering local frame, no inject\n");
+			printf("[state-replica] waiting for in_match: server=%d local=%d — rendering local frame, no inject\n",
+			       (int)gs.in_match, (int)localInMatch);
 		return true;
 	}
 

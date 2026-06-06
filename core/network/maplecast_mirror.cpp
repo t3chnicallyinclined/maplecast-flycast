@@ -138,9 +138,13 @@ static std::atomic<bool> _clientGameStateReady{false};
 // GSTA-ONLY mode (state-replica): the mirror WS is used purely as a transport
 // for GSTA/OBJF state packets. The local SH4 owns the render, so we must NOT
 // apply the server's TA delta or VRAM/PVR SYNC (they would clobber the local
-// game -> black screen). When set, wsClientRun skips the SYNC wait and every
-// TA/SYNC apply, parsing ONLY GSTA + OBJF.
+// game -> black screen). When set, wsClientRun skips every TA/SYNC/VRAM apply,
+// parsing ONLY GSTA + OBJF.
 static std::atomic<bool> _gstaOnly{false};
+// When true (state-replica with vramSync=true), wsClientRun still waits for and
+// applies the initial SYNC frame (VRAM + PVR) to seed local textures from prod,
+// then switches to GSTA-only for all subsequent frames.
+static std::atomic<bool> _gstaVramSync{false};
 
 // Full object pool received from server (OBJF) — for the state-replica inject.
 static maplecast_gamestate::ObjectState _clientObjects[48];
@@ -840,13 +844,18 @@ static void wsClientRun(std::string host, int port)
 	decomp.init(16 * 1024 * 1024);  // 16MB covers SYNC + worst-case frames
 
 	// Wait for initial SYNC message (VRAM + PVR regs).
-	// GSTA-ONLY (state-replica): skip the SYNC wait entirely — we never apply
-	// the server's VRAM/PVR (the local SH4 owns the framebuffer). Jump straight
-	// to the GSTA/OBJF parse loop below.
-	bool synced = _gstaOnly.load(std::memory_order_relaxed);
+	// GSTA-ONLY (state-replica): normally skip the SYNC wait entirely — we never
+	// apply the server's TA/VRAM (the local SH4 owns the framebuffer). But if
+	// _gstaVramSync is set (vramSync=true in startGstaStream), we DO wait for
+	// and apply the initial SYNC to seed local VRAM with prod's current textures,
+	// then fall through to GSTA-only for all subsequent frames.
+	const bool wantVramSync = _gstaVramSync.load(std::memory_order_relaxed);
+	bool synced = _gstaOnly.load(std::memory_order_relaxed) && !wantVramSync;
 	std::vector<uint8_t> frame;
-	if (_gstaOnly.load(std::memory_order_relaxed))
+	if (synced)
 		printf("[MIRROR-WS] GSTA-ONLY mode — skipping SYNC wait + TA/VRAM apply\n");
+	else if (_gstaOnly.load(std::memory_order_relaxed) && wantVramSync)
+		printf("[MIRROR-WS] GSTA+VRAM-SYNC mode — waiting for initial SYNC to seed local VRAM, then GSTA-only\n");
 	while (!synced) {
 		if (!wsReadFrame(_wsFd, frame)) {
 			printf("[MIRROR-WS] Connection lost waiting for sync\n"); fflush(stdout);
@@ -1225,13 +1234,18 @@ void startMirrorStream(const char* host, int port)
 }
 
 // State-replica transport: connect the mirror WS but consume ONLY GSTA/OBJF
-// state packets — never apply TA/VRAM/PVR (the local SH4 renders). Does NOT
-// unprotect VRAM (the local game keeps its memory-watch protection intact).
-void startGstaStream(const char* host, int port)
+// state packets — never apply TA delta frames (the local SH4 renders). If
+// vramSync=true, the initial SYNC frame (VRAM + PVR) IS applied once to seed
+// the local VRAM with prod's current textures, eliminating savestate parity issues.
+void startGstaStream(const char* host, int port, bool vramSync)
 {
 	_gstaOnly.store(true, std::memory_order_release);
+	_gstaVramSync.store(vramSync, std::memory_order_release);
 	_useWebSocket = true;
-	printf("[MIRROR] Starting GSTA-ONLY state stream ws://%s:%d/ (no TA/VRAM apply)\n", host, port);
+	if (vramSync)
+		printf("[MIRROR] Starting GSTA+VRAM-SYNC stream ws://%s:%d/ (one-time VRAM seed, then GSTA-only)\n", host, port);
+	else
+		printf("[MIRROR] Starting GSTA-ONLY state stream ws://%s:%d/ (no TA/VRAM apply)\n", host, port);
 	std::string hostStr(host);
 	_wsThread = std::thread(wsClientRun, hostStr, port);
 	_wsThread.detach();

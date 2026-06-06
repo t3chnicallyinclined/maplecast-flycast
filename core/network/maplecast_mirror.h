@@ -33,8 +33,10 @@ void startMirrorStream(const char* host, int port);
 // State-replica transport: connect the mirror WS but consume ONLY GSTA/OBJF
 // state packets — never apply the server's TA delta or VRAM/PVR SYNC (the local
 // SH4 owns the framebuffer). Use this instead of startMirrorStream for the
-// state-replica client so the local render isn't clobbered.
-void startGstaStream(const char* host, int port);
+// state-replica client so the local render isn't clobbered. If vramSync=true,
+// the initial SYNC frame is applied once to seed local VRAM from prod's current
+// textures, eliminating savestate parity issues.
+void startGstaStream(const char* host, int port, bool vramSync = false);
 
 bool isServer();
 bool isClient();
