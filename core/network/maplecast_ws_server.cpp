@@ -163,6 +163,9 @@ static std::vector<std::string> _seedPeers;
 static std::map<void*, std::string> _connToPeerId;  // connKey â†’ peerId
 static std::vector<QueueEntry> _queue;
 
+// Loss detection state (forward-declared so drainPendingSaveConns can read it).
+static bool _matchActive = false;
+
 // Mid-match join: when a client connects while a match is live, we queue the
 // connection handle here. drainPendingSaveConns() (called from checkMatchEnd
 // on the status thread) builds a full savestate once and ships it as an MCSV
@@ -213,8 +216,7 @@ static void drainPendingSaveConns()
 	}
 }
 
-// Loss detection state
-static bool _matchActive = false;
+// Loss detection state (continued — _matchActive forward-declared above)
 static bool _matchEndHandled = false;
 static int64_t _matchEndTime = 0; // when match ended (for delay before kick)
 static int _pendingKickSlot = -1; // loser slot to evict if client doesn't self-disconnect
