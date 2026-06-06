@@ -366,21 +366,13 @@ export class SpriteClient {
       const S = this.spriteScale || 1;
       const fl = (osl.facing !== sp.facing);
       const dxv = fl ? -(sp.dx + sp.wG) : sp.dx;   // mirror the anchor when flipped
-      // CAPE-ON-CROUCH (derived from the TA): attached parts ride the BODY's top, not
-      // the feet. The body sprite's anchor dy encodes pose height; shift the cape by
-      // (current body dy − the char's tallest/standing dy). Track the standing ref.
-      let cdy = sp.dy;
-      if (o.type === 3) {
-        const bsp = c.sprites[osl.sprite_id];
-        if (bsp) {
-          if (!this._refDy) this._refDy = {};
-          const r = this._refDy[o.cid];
-          this._refDy[o.cid] = (r === undefined) ? bsp.dy : Math.min(r, bsp.dy);
-          cdy = sp.dy + (bsp.dy - this._refDy[o.cid]);   // crouch/jump lowers/raises the cape with the body
-        }
-      }
-      out.push({ charId: o.cid, slot: oslot, z: -1, sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
-        dx: (px + dxv*S)*scaleX, dy: (py + cdy*S)*scaleY, dw: sp.wG*S*scaleX, dh: sp.hG*S*scaleY,
+      // PER-OBJECT RENDER MODEL (marvelous2 RE): each object is independent — its own
+      // sprite_id (whose animation already encodes crouch/jump) drawn at the OWNER's
+      // shared transform, layered by type. No cape-shift guess: the cape's sprite_id IS
+      // the crouch cape. z: cape/aura behind the body, lightning/effects in front.
+      const z = (o.type === 1) ? 1 : (o.type === 3 ? -2 : -1);
+      out.push({ charId: o.cid, slot: oslot, z, sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
+        dx: (px + dxv*S)*scaleX, dy: (py + sp.dy*S)*scaleY, dw: sp.wG*S*scaleX, dh: sp.hG*S*scaleY,
         flip: fl });
     }
     // The renderer groups CONSECUTIVE same-cid sprites and drops chars past maxGroups(8).
