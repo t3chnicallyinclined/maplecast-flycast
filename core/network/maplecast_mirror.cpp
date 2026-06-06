@@ -2018,6 +2018,44 @@ done_diff:
 			static bool _efctOn = getenv("MAPLECAST_EFCT") != nullptr;
 			if (_efctOn && nfx > 0) maplecast_ws::broadcastBinary(fxBuf, off);
 		}
+		// === STAF-MEASURE: stripped-TA bandwidth probe (read-only). Splits cost by list —
+		// opaque (stage) vs punch-through (characters) vs translucent (fx) — gated to
+		// in_match (so the menu's heavy ta_parse never runs). Shows whether caching the
+		// stage drops the wire to the character-only number. MAPLECAST_STAFMEASURE -> log/1s.
+		{
+			static bool _stafOn = getenv("MAPLECAST_STAFMEASURE") != nullptr;
+			if (_stafOn) {
+				maplecast_gamestate::GameState _sgs; maplecast_gamestate::readGameState(_sgs);
+				if (_sgs.in_match) {
+					ta_parse(ctx, true);
+					auto& rcS = ctx->rend;
+					static std::unordered_set<uint32_t> _uniqTex;
+					static uint64_t _qb[3] = {0, 0, 0}; static uint32_t _q[3] = {0, 0, 0};
+					static uint32_t _aF = 0, _aT = 0; static uint64_t _aTB = 0;
+					uint32_t fT = 0; uint64_t fTB = 0;
+					auto meas = [&](std::vector<PolyParam>& lst, int li) {
+						for (PolyParam& pp : lst) {
+							if (pp.count < 3) continue;
+							_q[li]++; _qb[li] += 11 + (uint64_t)pp.count * 10;
+							uint32_t tcw = pp.tcw.full, tsp = pp.tsp.full, pcw = pp.pcw.full;
+							if (!((pcw >> 3) & 1)) continue;
+							int fmt = (tcw >> 27) & 7, tw = 8 << ((tsp >> 3) & 7), th = 8 << (tsp & 7);
+							uint32_t hsh = mcfx::texHash((tcw & 0x1FFFFF) << 3, fmt, tw, th, (tcw >> 30) & 1);
+							if (_uniqTex.insert(hsh).second) { fT++; fTB += (uint64_t)tw * th * 4; }
+						}
+					};
+					meas(rcS.global_param_op, 0); meas(rcS.global_param_pt, 1); meas(rcS.global_param_tr, 2);
+					_aT += fT; _aTB += fTB;
+					if (++_aF >= 60) {
+						auto kb = [](uint64_t b) { return (b * 0.45) / 1024.0; };
+						FILE* lf = fopen("/dev/shm/mc_staf.log", "a");
+						if (lf) { fprintf(lf, "OP(stage) q=%u wire=%.0f | PT(char) q=%u wire=%.0f | TR(fx) q=%u wire=%.0f || CHAR-ONLY=%.0f KB/s | uniqTex=%zu (+%u, +%.0f KB)\n",
+							_q[0]/60, kb(_qb[0]), _q[1]/60, kb(_qb[1]), _q[2]/60, kb(_qb[2]), kb(_qb[1] + _qb[2]), _uniqTex.size(), _aT, _aTB / 1024.0); fclose(lf); }
+						_q[0] = _q[1] = _q[2] = 0; _qb[0] = _qb[1] = _qb[2] = 0; _aF = 0; _aT = 0; _aTB = 0;
+					}
+				}
+			}
+		}
 	}
 
 	// Auto-fire the deferred recording capture on in_match 0→1. Lives
