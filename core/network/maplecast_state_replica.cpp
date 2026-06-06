@@ -33,6 +33,7 @@ static std::atomic<bool>     _gotFirst{false};
 static bool                  _freeze = false;
 static bool                  _noRomMode = false;    // true when booting from MCSV (no local ROM)
 static bool                  _mcsvApplied = false;  // apply MCSV exactly once; ignore repeat 5s broadcasts
+static int                   _warmupFrames = 0;     // frames to skip after MCSV before injecting
 static bool                  _injectObjects = false;   // pool inject (writeObjects)
                                                         // OFF by default — isolate the
                                                         // crash; chars-only is this run's goal
@@ -103,6 +104,7 @@ bool init()
 	maplecast_mirror::setClientRendering(true);
 
 	_mcsvApplied = false;
+	_warmupFrames = 0;
 	_active.store(true);
 	return true;
 }
@@ -134,6 +136,10 @@ bool frameInject()
 			maplecast_mirror::reapplyLastSyncVram();
 			_noRomMode = false;
 			_mcsvApplied = true;
+			// Give the SH4 60 frames to exit any interrupt handler it was
+			// mid-executing when the savestate was taken (SR.BL=1 causes
+			// "SH4 exception when blocked" if we inject on frame 1).
+			_warmupFrames = 60;
 			_gotFirst.store(false, std::memory_order_release);
 			// Switch off mirror rendering and TA stream — SH4 now owns the framebuffer.
 			maplecast_mirror::setClientRendering(false);
@@ -149,6 +155,14 @@ bool frameInject()
 	// active-low: a released button is a 1 bit; neutral = all 1s.
 	if (_freeze) {
 		for (int i = 0; i < 4; i++) { kcode[i] = 0xFFFFFFFFu; lt[i] = 0; rt[i] = 0; }
+	}
+
+	// Post-MCSV warmup: let the SH4 run until it exits any interrupt handler
+	// it was mid-executing when the savestate was captured (SR.BL=1 would
+	// cause "SH4 exception when blocked" if we inject before it clears).
+	if (_warmupFrames > 0) {
+		--_warmupFrames;
+		return true;
 	}
 
 	maplecast_gamestate::GameState gs;

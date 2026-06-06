@@ -204,6 +204,8 @@ bool mainui_rend_frame()
 			gui_open_settings();
 			return false;
 		} catch (const FlycastException& e) {
+			printf("[state-replica] CRASH exception: %s\n", e.what());
+			fflush(stdout);
 			gui_stop_game(e.what());
 			return false;
 		}
