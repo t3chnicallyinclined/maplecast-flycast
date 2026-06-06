@@ -134,6 +134,10 @@ void resetClientStatsPeaks();
 // Game state from server (for overlay/HUD). Returns false if no state received yet.
 bool getClientGameState(maplecast_gamestate::GameState& out);
 
+// Full object pool from server (OBJF) for the state-replica inject. Copies up
+// to maxObjs into out, returns the count (0 if none received yet).
+int getClientObjects(maplecast_gamestate::ObjectState* out, int maxObjs);
+
 // Force the video WS client to drop its current connection. The receive
 // thread sees the close and the existing reconnect loop picks it up.
 // Used by the debug overlay's "Reconnect Video" button.

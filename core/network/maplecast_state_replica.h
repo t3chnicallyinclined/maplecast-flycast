@@ -74,6 +74,9 @@ struct Stats {
 	uint32_t lastFrameCounter;   // frame_counter from the last injected GSTA
 	uint64_t framesInjected;
 	uint64_t framesStalled;
+	int      lastObjsSeen;       // pool objects the server shipped last frame
+	int      lastObjsWritten;    // pool objects we found a local node for
+	                             // (seen-written = the node-synthesis gap)
 };
 Stats getStats();
 

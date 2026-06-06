@@ -135,6 +135,12 @@ static maplecast_gamestate::GameState _clientGameState{};
 static std::mutex _clientGameStateMtx;
 static std::atomic<bool> _clientGameStateReady{false};
 
+// Full object pool received from server (OBJF) — for the state-replica inject.
+static maplecast_gamestate::ObjectState _clientObjects[48];
+static int _clientObjectCount = 0;
+static std::mutex _clientObjectsMtx;
+static std::atomic<bool> _clientObjectsReady{false};
+
 // Fast hash for VRAM comparison (sample every 64th byte for speed)
 static uint64_t fastVramHash()
 {
@@ -890,6 +896,19 @@ static void wsClientRun(std::string host, int port)
 			continue;
 		}
 
+		// OBJF full-object packet — pool objects for the state-replica inject.
+		if (frame.size() >= 5 && frame[0] == 'O' && frame[1] == 'B'
+		    && frame[2] == 'J' && frame[3] == 'F') {
+			maplecast_gamestate::ObjectState tmp[48];
+			int got = maplecast_gamestate::deserializeObjects(
+			    frame.data() + 4, (int)(frame.size() - 4), tmp, 48);
+			std::lock_guard<std::mutex> lk(_clientObjectsMtx);
+			_clientObjectCount = got;
+			for (int i = 0; i < got; i++) _clientObjects[i] = tmp[i];
+			_clientObjectsReady.store(true, std::memory_order_release);
+			continue;
+		}
+
 		// ---- Client-side arrival telemetry (video WS) ----
 		{
 			const int64_t now = _clientNowUs();
@@ -1204,6 +1223,17 @@ bool getClientGameState(maplecast_gamestate::GameState& out)
 	return true;
 }
 
+int getClientObjects(maplecast_gamestate::ObjectState* out, int maxObjs)
+{
+	if (!_clientObjectsReady.load(std::memory_order_acquire))
+		return 0;
+	std::lock_guard<std::mutex> lk(_clientObjectsMtx);
+	int n = _clientObjectCount;
+	if (n > maxObjs) n = maxObjs;
+	for (int i = 0; i < n; i++) out[i] = _clientObjects[i];
+	return n;
+}
+
 void resetClientStatsPeaks()
 {
 	_clientArrivalMaxUs.store(0, std::memory_order_relaxed);
@@ -1273,6 +1303,39 @@ bool isHeadless()
 //
 // See docs/ARCHITECTURE.md "Mirror Wire Format â€” Rules of the Road" for the
 // canonical list of rules all four parsers must obey.
+// ============================================================================
+//
+// === VRAM CONTENT-CACHE (MAPLECAST_VCACHE) ===================================
+// Opt-in (env MAPLECAST_VCACHE) bandwidth optimisation that REUSES the existing
+// renderer untouched. The mirror re-ships the same 4KB VRAM/PVR dirty pages
+// over and over (a freshly-revisited menu re-uploads identical textures every
+// time it's drawn). VCACHE content-hashes each dirty page (FNV-1a) and keeps a
+// per-stream "already sent" set. A page whose hash was sent before ships as a
+// compact reference (NO 4096 bytes); a novel page ships once with its data and
+// is recorded. The client keeps a hash->page cache, fills references from it,
+// reconstructs a STANDARD delta frame, and feeds it to the unmodified
+// renderer_frame(). The renderer never sees the difference.
+//
+// Wire change (inside the same ZCST envelope, ONLY when VCACHE is active):
+// the dirtyPageCount u32 is replaced by the sentinel 0xFFFFFFFF followed by the
+// real count(4); then each page is:
+//     regionId(1) + pageIdx(4) + hash(8) + hasData(1) + [data(4096) if hasData]
+// A normal (non-VCACHE) frame never writes 0xFFFFFFFF as its page count, so the
+// client distinguishes the two by peeking that field. Plain mirror clients that
+// don't understand the sentinel simply must not be pointed at a VCACHE stream
+// (it is a separate, env-gated mode, off by default — production is unaffected).
+//
+// Periodic re-seed: the sent-set is cleared every VCACHE_RESEED_FRAMES (~600)
+// so a mid-stream joiner recovers full pages within ~10s, exactly like the EFCT
+// channel clears _stafSent every 600 frames.
+static inline uint64_t vcacheHashPage(const uint8_t* p)
+{
+	uint64_t h = 1469598103934665603ULL;      // FNV-1a 64 offset basis
+	for (size_t i = 0; i < MEM_PAGE_SIZE; i++) { h ^= p[i]; h *= 1099511628211ULL; }
+	return h;
+}
+static constexpr uint32_t VCACHE_PAGE_SENTINEL = 0xFFFFFFFFu;
+static constexpr uint64_t VCACHE_RESEED_FRAMES = 600;
 // ============================================================================
 // Effect-texture decode + content-addressed hashing (EFCT/TXTR path). Ported from
 // the client decoder (web/webgpu/texture-manager.mjs). Effects are 16-bit direct
@@ -1345,6 +1408,78 @@ static bool decodeTex16(uint32_t tcw, uint32_t tsp, uint8_t* out) {
 		uint32_t so = addr + idx * 2; uint8_t* d = &out[(y * w + x) * 4];
 		if (so + 1 >= VRAM_SIZE) { d[0] = d[1] = d[2] = d[3] = 0; continue; }
 		unpack16(fmt, (uint16_t)(vram[so] | (vram[so + 1] << 8)), d);
+	}
+	return true;
+}
+
+// --- STAF additions: 64-bit content id + paletted decode ---------------------
+// The STAF channel ships ALL textured quads, so the texture id must (a) be wide
+// enough for a few-thousand-entry working set and (b) fold the palette for
+// paletted formats (skins / team-color swaps reuse the same indexed pixels with
+// a different palette — same address+content but a DIFFERENT drawn texture).
+// Palette unpack mirrors flycast's canonical path (core/rend/texconv.h):
+// PAL_RAM_CTRL&3 selects 1555/565/4444/8888; palette_index from tcw.PalSelect
+// exactly as TexCache.cpp:463-472.
+static inline uint32_t palEntryRGBA(uint32_t pe) {
+	// PALETTE_RAM[pe] is a raw 16/32-bit palette word; unpack to RGBA8888 (R,G,B,A bytes).
+	if (pe >= 1024) return 0;
+	uint32_t w = PALETTE_RAM[pe];
+	uint8_t r, g, b, a;
+	switch (PAL_RAM_CTRL & 3) {
+	case 0: /* 1555 */ r = te5((w >> 10) & 31); g = te5((w >> 5) & 31); b = te5(w & 31); a = (w & 0x8000) ? 255 : 0; break;
+	case 1: /* 565 */  r = te5((w >> 11) & 31); g = te6((w >> 5) & 63); b = te5(w & 31); a = 255; break;
+	case 2: /* 4444 */ r = te4((w >> 8) & 15); g = te4((w >> 4) & 15); b = te4(w & 15); a = te4((w >> 12) & 15); break;
+	default: /* 8888 */ r = (w >> 16) & 0xff; g = (w >> 8) & 0xff; b = w & 0xff; a = (w >> 24) & 0xff; break;
+	}
+	return (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | ((uint32_t)a << 24);
+}
+// 64-bit FNV-1a over fmt/w/h/vq + raw indexed/texel VRAM bytes, AND (for paletted
+// formats) the live palette window the texture selects. Pure content id.
+static uint64_t texHash64(uint32_t tcw, int w, int h) {
+	int fmt = (tcw >> 27) & 7, vq = (tcw >> 30) & 1;
+	uint32_t addr = (tcw & 0x1FFFFF) << 3;
+	uint64_t hsh = 1469598103934665603ull;
+	auto mix = [&](uint32_t bbb) { hsh ^= (bbb & 0xff); hsh *= 1099511628211ull; };
+	mix(fmt); mix(w); mix(w >> 8); mix(h); mix(h >> 8); mix(vq);
+	uint32_t n;
+	if (fmt == 5)      n = (uint32_t)(w * h / 2);   // PAL4: 4bpp
+	else if (fmt == 6) n = (uint32_t)(w * h);       // PAL8: 8bpp
+	else if (vq)       n = (uint32_t)(2048 + w * h / 4);
+	else               n = (uint32_t)(w * h * 2);   // 16bpp direct
+	for (uint32_t i = 0; i < n; i++) { if (addr + i >= VRAM_SIZE) break; mix(vram[addr + i]); }
+	// Fold the selected palette window for paletted formats.
+	if (fmt == 5) { uint32_t pi = ((tcw >> 21) & 0x3F) << 4; for (int k = 0; k < 16; k++) { uint32_t e = palEntryRGBA(pi + k); mix(e); mix(e >> 8); mix(e >> 16); mix(e >> 24); } }
+	else if (fmt == 6) { uint32_t pi = (((tcw >> 21) & 0x3F) >> 4) << 8; for (int k = 0; k < 256; k++) { uint32_t e = palEntryRGBA(pi + k); mix(e); mix(e >> 8); mix(e >> 16); mix(e >> 24); } }
+	return hsh ? hsh : 1;
+}
+// Decode any STAF-supported format to RGBA8888. fmt 0/1/2 (and VQ) delegate to
+// decodeTex16; fmt 5/6 are paletted (de-twiddle the index, then palette lookup).
+// Returns false for unsupported (mip, exotic) — caller falls back / skips.
+static bool decodeTexAny(uint32_t tcw, uint32_t tsp, uint8_t* out) {
+	if (!s_twInit) initTwiddle();
+	int fmt = (tcw >> 27) & 7, mip = (tcw >> 31) & 1;
+	if (mip) return false;
+	if (fmt <= 2) return decodeTex16(tcw, tsp, out);
+	if (fmt != 5 && fmt != 6) return false;            // only PAL4/PAL8 paletted
+	int texU = (tsp >> 3) & 7, texV = tsp & 7;
+	int w = 8 << texU, h = 8 << texV, scan = (tcw >> 26) & 1;
+	uint32_t addr = (tcw & 0x1FFFFF) << 3;
+	int bx = texBsr(w), by = texBsr(h);
+	uint32_t palBase = (fmt == 5) ? (((tcw >> 21) & 0x3F) << 4) : ((((tcw >> 21) & 0x3F) >> 4) << 8);
+	for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+		uint32_t lin = scan ? (uint32_t)(y * w + x) : (s_twTab[0][by][x] + s_twTab[1][bx][y]);
+		uint32_t pidx;
+		if (fmt == 5) {           // 4bpp: two indices per byte
+			uint32_t so = addr + (lin >> 1);
+			if (so >= VRAM_SIZE) { pidx = 0; }
+			else pidx = (lin & 1) ? (vram[so] >> 4) : (vram[so] & 0xf);
+		} else {                  // 8bpp
+			uint32_t so = addr + lin;
+			pidx = (so < VRAM_SIZE) ? vram[so] : 0;
+		}
+		uint32_t rgba = palEntryRGBA(palBase + pidx);
+		uint8_t* d = &out[(y * w + x) * 4];
+		d[0] = rgba & 0xff; d[1] = (rgba >> 8) & 0xff; d[2] = (rgba >> 16) & 0xff; d[3] = (rgba >> 24) & 0xff;
 	}
 	return true;
 }
@@ -1629,8 +1764,26 @@ void serverPublish(TA_context* ctx)
 
 	// === Memory diffs ===
 	uint32_t totalDirty = 0;
-	uint8_t* dirtyCountPtr = dst;
-	dst += 4;
+
+	// VRAM content-cache mode (env MAPLECAST_VCACHE). See the VCACHE block near
+	// vcacheHashPage() above for the wire change. Per-stream sent-set of page
+	// content hashes, cleared every VCACHE_RESEED_FRAMES so mid-stream joiners
+	// recover. Resolved once; default OFF (production unaffected).
+	static const bool _vcacheOn = (std::getenv("MAPLECAST_VCACHE") != nullptr);
+	static std::unordered_set<uint64_t> _vcacheSent;
+	if (_vcacheOn && frameNum > 0 && (frameNum % VCACHE_RESEED_FRAMES) == 0)
+		_vcacheSent.clear();
+
+	// dirtyPageCount slot. In VCACHE mode we write the sentinel + a real-count
+	// slot so the client can tell the two encodings apart.
+	uint8_t* dirtyCountPtr;
+	if (_vcacheOn) {
+		uint32_t sentinel = VCACHE_PAGE_SENTINEL;
+		memcpy(dst, &sentinel, 4); dst += 4;   // marks this frame as VCACHE-encoded
+		dirtyCountPtr = dst; dst += 4;          // real count patched in below
+	} else {
+		dirtyCountPtr = dst; dst += 4;
+	}
 
 	// Drain the DMA force-dirty bitmap atomically. Any page bit set here
 	// is guaranteed to ship even if memcmp would say it's unchanged (e.g.
@@ -1646,6 +1799,7 @@ void serverPublish(TA_context* ctx)
 	// SH4 thread can race during the diff and write new bytes between the
 	// memcmp and the wire copy; reading via the shadow keeps wire and next
 	// frame's memcmp consistent.
+	uint32_t vcacheRefPages = 0;   // pages shipped as references (no 4096 bytes)
 	for (int r = 0; r < _numRegions; r++) {
 		MemRegion& reg = _regions[r];
 		size_t numPages = reg.size / MEM_PAGE_SIZE;
@@ -1654,19 +1808,46 @@ void serverPublish(TA_context* ctx)
 			size_t off = p * MEM_PAGE_SIZE;
 			bool forced = isVram && (forcedDirty[p >> 6] & (1ULL << (p & 63)));
 			if (forced || memcmp(reg.ptr + off, reg.shadow + off, MEM_PAGE_SIZE) != 0) {
-				if ((size_t)(dst - dstStart) + 5 + MEM_PAGE_SIZE > RING_SIZE / 3)
+				// Worst-case slot size: VCACHE header (1+4+8+1=14) + data, or
+				// standard header (1+4=5) + data. Use 14 to cover both.
+				if ((size_t)(dst - dstStart) + 14 + MEM_PAGE_SIZE > RING_SIZE / 3)
 					goto done_diff;
 				memcpy(reg.shadow + off, reg.ptr + off, MEM_PAGE_SIZE);
-				*dst++ = reg.id;
 				uint32_t pi = (uint32_t)p;
-				memcpy(dst, &pi, 4); dst += 4;
-				memcpy(dst, reg.shadow + off, MEM_PAGE_SIZE); dst += MEM_PAGE_SIZE;
+				if (_vcacheOn) {
+					uint64_t h = vcacheHashPage(reg.shadow + off);
+					bool seen = !_vcacheSent.insert(h).second;  // insert; seen if already present
+					*dst++ = reg.id;
+					memcpy(dst, &pi, 4); dst += 4;
+					memcpy(dst, &h, 8);  dst += 8;
+					*dst++ = seen ? 0 : 1;                       // hasData flag
+					if (seen) vcacheRefPages++;
+					else { memcpy(dst, reg.shadow + off, MEM_PAGE_SIZE); dst += MEM_PAGE_SIZE; }
+				} else {
+					*dst++ = reg.id;
+					memcpy(dst, &pi, 4); dst += 4;
+					memcpy(dst, reg.shadow + off, MEM_PAGE_SIZE); dst += MEM_PAGE_SIZE;
+				}
 				totalDirty++;
 			}
 		}
 	}
 done_diff:
 	memcpy(dirtyCountPtr, &totalDirty, 4);
+
+	// VCACHE byte accounting — pre-compression (uncompressed inner-frame) bytes
+	// saved by shipping references instead of full pages this frame, and a
+	// running total. Logged alongside the periodic server-frame line below.
+	if (_vcacheOn) {
+		static uint64_t _vcSavedTotal = 0;
+		const uint64_t savedThisFrame = (uint64_t)vcacheRefPages * MEM_PAGE_SIZE;
+		_vcSavedTotal += savedThisFrame;
+		if (frameNum % VCACHE_RESEED_FRAMES == 0)
+			printf("[VCACHE] frame %u | dirty=%u (%u refs, %u full) | saved %llu KB this frame, %llu MB total | sent-set=%zu\n",
+				frameNum, totalDirty, vcacheRefPages, totalDirty - vcacheRefPages,
+				(unsigned long long)(savedThisFrame / 1024),
+				(unsigned long long)(_vcSavedTotal / (1024 * 1024)), _vcacheSent.size());
+	}
 
 	// === Scene-change & forced SYNC broadcast ===
 	// Two trigger paths:
@@ -1861,6 +2042,15 @@ done_diff:
 						obuf[oo++]=objs[i].screen_y&0xff; obuf[oo++]=(objs[i].screen_y>>8)&0xff;
 					}
 					maplecast_ws::broadcastBinary(obuf, oo);
+
+					// OBJF — FULL object record for the state-replica inject
+					// (writeObjects). Carries category/xflip/owner_slot the 8B
+					// OBJS packet omits. Browser ignores OBJF; replica consumes it.
+					uint8_t fbuf[4 + 1 + 48 * maplecast_gamestate::OBJF_REC_SIZE];
+					fbuf[0]='O'; fbuf[1]='B'; fbuf[2]='J'; fbuf[3]='F';
+					int fn = maplecast_gamestate::serializeObjects(
+					    objs, no, fbuf + 4, (int)sizeof(fbuf) - 4);
+					if (fn > 0) maplecast_ws::broadcastBinary(fbuf, 4 + fn);
 				}
 			}
 
@@ -2018,6 +2208,162 @@ done_diff:
 			static bool _efctOn = getenv("MAPLECAST_EFCT") != nullptr;
 			if (_efctOn && nfx > 0) maplecast_ws::broadcastBinary(fxBuf, off);
 		}
+			// === STAF: stripped-TA frame channel (MAPLECAST_STAF) ====================
+			// Ships the FULL textured-quad list every frame + each unique texture ONCE
+			// (content-addressed, ship-once), so the client renders the exact frame
+			// from cached textures at low bandwidth. Every texture decoded through
+			// flycast's OWN canonical decode keyed by the quad's real TCW/TSP
+			// (mcfx::decodeTexAny / texHash64) -- NO per-texture format guessing.
+			// Parallel to the mirror wire; A/B-selectable on the client. Wire format
+			// in docs/STRIPPED-TA-DESIGN.md (SIMPLE variant: axis-aligned dest/UV rect
+			// per quad -- Canvas2D-renderable; per-vertex transform-encode is a later opt).
+			{
+				static bool _stafOnEmit = getenv("MAPLECAST_STAF") != nullptr;
+				if (_stafOnEmit) {
+					// primRestart=false -> makeIndex() builds rc.idx as a strip-with-
+					// degenerate-links (NOT 0xFFFFFFFF restart sentinels), and rewrites
+					// each PolyParam.first/.count to index into rc.idx (rc.idx[k] -> rc.verts).
+					// This is flycast's OWN triangulation: it handles strip restarts,
+					// alternating winding and inf/invalid verts that raw rc.verts iteration
+					// (the previous bug) could not. Applies uniformly to op/pt/tr below.
+					ta_parse(ctx, false);
+					auto& rcS = ctx->rend;
+					static std::unordered_set<uint64_t> _stafSent;     // tex_ids already shipped (TX64)
+					static uint8_t* _stafRgba = (uint8_t*)malloc(1024 * 1024 * 4);
+					static std::vector<uint8_t> _stafBuf;
+					// Relay hides browser joins; periodically clear so on-screen textures re-ship.
+					static uint32_t _stafClear = 0;
+					if ((++_stafClear % 600) == 0) _stafSent.clear();
+
+					_stafBuf.clear();
+					_stafBuf.resize(4 + 4 + 64 + 4);        // header + frameNum + pvr_snapshot + triCount(u32)
+					_stafBuf[0] = 'S'; _stafBuf[1] = 'T'; _stafBuf[2] = 'A'; _stafBuf[3] = 'F';
+					memcpy(&_stafBuf[4], &_localFrameNum, 4);
+					memcpy(&_stafBuf[8], pvr_snapshot, 64);
+					uint32_t quadCount = 0;       // now a TRIANGLE count (see per-triangle emit below)
+					auto put16 = [&](int16_t v) { _stafBuf.push_back(v & 0xff); _stafBuf.push_back((v >> 8) & 0xff); };
+					auto putU16 = [&](uint16_t v) { _stafBuf.push_back(v & 0xff); _stafBuf.push_back((v >> 8) & 0xff); };
+					auto put64 = [&](uint64_t v) { for (int i = 0; i < 8; i++) _stafBuf.push_back((v >> (i * 8)) & 0xff); };
+
+					// Per-list geometry debug: capture the first few real triangles of each
+					// list (rc.idx indices + screen coords) so we can confirm op/pt/tr all
+					// triangulate sanely. Gated; one dump per ~600 frames.
+					static bool _stafDbg = getenv("MAPLECAST_STAF_DBG") != nullptr;
+					static uint32_t _stafDbgCtr = 0;
+					bool dbgFrame = _stafDbg && (_stafDbgCtr % 600) == 0;
+					FILE* dgf = nullptr; int dbgShown[3] = { 0, 0, 0 };
+					if (dbgFrame) {
+						dgf = fopen("/dev/shm/mc_staf_geom.log", "a");
+						if (dgf) fprintf(dgf, "frame %u  verts=%zu idx=%zu  (op=%zu pt=%zu tr=%zu polys)\n",
+							_localFrameNum, rcS.verts.size(), rcS.idx.size(),
+							rcS.global_param_op.size(), rcS.global_param_pt.size(), rcS.global_param_tr.size());
+					}
+
+					// listType: 0=op(opaque/bg) 1=pt(punch-through/char) 2=tr(translucent/fx).
+					// Drawn in this order on the client (= z-order), preserving sent order within a list.
+					auto emitList = [&](std::vector<PolyParam>& lst, int listType) {
+						for (PolyParam& pp : lst) {
+							if (pp.count < 3) continue;
+							if (quadCount >= 16384) return;
+							uint32_t tcw = pp.tcw.full, tsp = pp.tsp.full, pcw = pp.pcw.full;
+							bool textured = ((pcw >> 3) & 1) != 0;
+							uint64_t texId = 0;
+							int tw = 0, th = 0;
+							if (textured) {
+								int fmt = (tcw >> 27) & 7, mip = (tcw >> 31) & 1;
+								if (mip || (fmt > 2 && fmt != 5 && fmt != 6)) continue; // unsupported fmt -> skip (fallback later)
+								tw = 8 << ((tsp >> 3) & 7); th = 8 << (tsp & 7);
+								texId = mcfx::texHash64(tcw, tw, th);
+								if (_stafRgba && _stafSent.find(texId) == _stafSent.end()) {
+									if (mcfx::decodeTexAny(tcw, tsp, _stafRgba)) {
+										_stafSent.insert(texId);
+										uint32_t rgbaSize = (uint32_t)(tw * th * 4);
+										size_t compSize = 0; uint64_t cus = 0;
+										const uint8_t* comp = _compressor.compress(_stafRgba, rgbaSize, compSize, cus);
+										// TX64: 'TX64'(4) texId(8) w(2) h(2) rawSize(4) zstd(RGBA)
+										std::vector<uint8_t> tb(20 + compSize);
+										tb[0] = 'T'; tb[1] = 'X'; tb[2] = '6'; tb[3] = '4';
+										memcpy(&tb[4], &texId, 8);
+										tb[12] = tw & 0xff; tb[13] = (tw >> 8) & 0xff; tb[14] = th & 0xff; tb[15] = (th >> 8) & 0xff;
+										memcpy(&tb[16], &rgbaSize, 4); memcpy(&tb[20], comp, compSize);
+										maplecast_ws::broadcastBinary(tb.data(), (uint32_t)tb.size());
+									} else {
+										texId = 0; textured = false;   // couldn't decode -> draw untextured
+									}
+								}
+							}
+							// Per-TRIANGLE emit through flycast's INDEX BUFFER (rc.idx), not raw
+							// verts. After ta_parse(ctx,false), pp.first/.count index into
+							// rc.idx, which is a triangle STRIP with degenerate links;
+							// rc.idx[k] indexes rc.verts. We walk the strip (k, k+1, k+2),
+							// skip degenerate/link triangles (repeated index or zero screen
+							// area), and emit each real triangle's per-vertex (x,y,u,v,col).
+							// Winding doesn't matter (the client doesn't backface-cull), so we
+							// don't reorder odd/even tris. A merged poly can have count==0
+							// (its tris fold into the previous poly's idx range) — skipped by
+							// the count<3 guard at the top. Same path for op/pt/tr.
+							uint32_t iend = pp.first + pp.count;
+							if (iend > rcS.idx.size()) iend = (uint32_t)rcS.idx.size();
+							if (pp.first + 3 > iend) continue;
+							// blend = (SrcInstr<<4)|DstInstr (PVR TSP) — client maps to gl.blendFunc
+							// via the same SrcBlendGL/DstBlendGL tables flycast uses.
+							uint8_t blend = (uint8_t)((((tsp >> 29) & 7) << 4) | ((tsp >> 26) & 7));
+							// tspFlags: bit0-1 ShadInstr, bit2 IgnoreTexA, bit3 textured, bit4 punch-through.
+							uint8_t tspFlags = (uint8_t)(((tsp >> 6) & 3)
+							                   | (((tsp >> 20) & 1) << 2)
+							                   | ((textured ? 1u : 0u) << 3)
+							                   | ((listType == 1) ? (1u << 4) : 0u));
+							auto q16 = [](float f) { if (f < 0) f = 0; if (f > 1) f = 1; return (uint16_t)lroundf(f * 65535.f); };
+							uint32_t nverts = (uint32_t)rcS.verts.size();
+							for (uint32_t k = pp.first; k + 2 < iend; k++) {
+								if (quadCount >= 16384) break;
+								uint32_t ia = rcS.idx[k], ib = rcS.idx[k + 1], ic = rcS.idx[k + 2];
+								// Skip restart/link triangles: repeated index or out-of-range.
+								if (ia == ib || ib == ic || ia == ic) continue;
+								if (ia >= nverts || ib >= nverts || ic >= nverts) continue;
+								Vertex& a = rcS.verts[ia];
+								Vertex& b = rcS.verts[ib];
+								Vertex& c = rcS.verts[ic];
+								// Skip degenerate triangles (zero screen area) — strip joints.
+								float ar = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
+								if (ar > -0.01f && ar < 0.01f) continue;
+								if (dgf && dbgShown[listType] < 4) {
+									fprintf(dgf, "  %s tri idx(%u,%u,%u) (%.0f,%.0f uv %.3f,%.3f)-(%.0f,%.0f)-(%.0f,%.0f) tex=%d\n",
+										listType==0?"OP":(listType==1?"PT":"TR"), ia, ib, ic,
+										a.x, a.y, a.u, a.v, b.x, b.y, c.x, c.y, textured?1:0);
+									dbgShown[listType]++;
+								}
+								put64(texId);
+								_stafBuf.push_back(blend);
+								_stafBuf.push_back((uint8_t)listType);
+								_stafBuf.push_back(tspFlags);
+								Vertex* vv[3] = { &a, &b, &c };
+								for (int kk = 0; kk < 3; kk++) {
+									put16((int16_t)lroundf(vv[kk]->x)); put16((int16_t)lroundf(vv[kk]->y));
+									putU16(q16(vv[kk]->u)); putU16(q16(vv[kk]->v));
+									// Vertex.col is [R,G,B,A] (ta_vtx.cpp Red=0,Green=1,Blue=2,Alpha=3).
+									_stafBuf.push_back(vv[kk]->col[0]); _stafBuf.push_back(vv[kk]->col[1]);
+									_stafBuf.push_back(vv[kk]->col[2]); _stafBuf.push_back(vv[kk]->col[3]);
+								}
+								quadCount++;
+							}
+						}
+					};
+					emitList(rcS.global_param_op, 0);
+					emitList(rcS.global_param_pt, 1);
+					emitList(rcS.global_param_tr, 2);
+					memcpy(&_stafBuf[72], &quadCount, 4);   // triCount (u32 LE) at offset 72
+
+					// Finalize the gated geometry dump (per-list samples captured during emit).
+					if (dgf) { fprintf(dgf, "  -> emitted tris=%u bytes=%zu\n", quadCount, _stafBuf.size()); fclose(dgf); }
+					if (_stafDbg) _stafDbgCtr++;
+					
+					// zstd the whole STAF envelope (ZCST outer); client routes 'STAF' after decompress.
+					size_t compSize = 0; uint64_t cus = 0;
+					const uint8_t* comp = _compressor.compress(_stafBuf.data(), (uint32_t)_stafBuf.size(), compSize, cus);
+					maplecast_ws::broadcastBinary(comp, (uint32_t)compSize);
+				}
+			}
 		// === STAF-MEASURE: stripped-TA bandwidth probe (read-only). Splits cost by list —
 		// opaque (stage) vs punch-through (characters) vs translucent (fx) — gated to
 		// in_match (so the menu's heavy ta_parse never runs). Shows whether caching the
@@ -2030,13 +2376,13 @@ done_diff:
 					ta_parse(ctx, true);
 					auto& rcS = ctx->rend;
 					static std::unordered_set<uint32_t> _uniqTex;
-					static uint64_t _qb[3] = {0, 0, 0}; static uint32_t _q[3] = {0, 0, 0};
+					static uint64_t _qb[3] = {0, 0, 0}, _tb[3] = {0, 0, 0}; static uint32_t _q[3] = {0, 0, 0};
 					static uint32_t _aF = 0, _aT = 0; static uint64_t _aTB = 0;
 					uint32_t fT = 0; uint64_t fTB = 0;
 					auto meas = [&](std::vector<PolyParam>& lst, int li) {
 						for (PolyParam& pp : lst) {
 							if (pp.count < 3) continue;
-							_q[li]++; _qb[li] += 11 + (uint64_t)pp.count * 10;
+							_q[li]++; _qb[li] += 11 + (uint64_t)pp.count * 10; _tb[li] += (uint64_t)(pp.count - 2) * 47;
 							uint32_t tcw = pp.tcw.full, tsp = pp.tsp.full, pcw = pp.pcw.full;
 							if (!((pcw >> 3) & 1)) continue;
 							int fmt = (tcw >> 27) & 7, tw = 8 << ((tsp >> 3) & 7), th = 8 << (tsp & 7);
@@ -2049,9 +2395,9 @@ done_diff:
 					if (++_aF >= 60) {
 						auto kb = [](uint64_t b) { return (b * 0.45) / 1024.0; };
 						FILE* lf = fopen("/dev/shm/mc_staf.log", "a");
-						if (lf) { fprintf(lf, "OP(stage) q=%u wire=%.0f | PT(char) q=%u wire=%.0f | TR(fx) q=%u wire=%.0f || CHAR-ONLY=%.0f KB/s | uniqTex=%zu (+%u, +%.0f KB)\n",
-							_q[0]/60, kb(_qb[0]), _q[1]/60, kb(_qb[1]), _q[2]/60, kb(_qb[2]), kb(_qb[1] + _qb[2]), _uniqTex.size(), _aT, _aTB / 1024.0); fclose(lf); }
-						_q[0] = _q[1] = _q[2] = 0; _qb[0] = _qb[1] = _qb[2] = 0; _aF = 0; _aT = 0; _aTB = 0;
+						if (lf) { fprintf(lf, "STRIP all=%.0f char-only=%.0f stage=%.0f | TRI all=%.0f char-only=%.0f KB/s | uniqTex=%zu (+%.0f KB/s warmup)\n",
+							kb(_qb[0]+_qb[1]+_qb[2]), kb(_qb[1]+_qb[2]), kb(_qb[0]), kb(_tb[0]+_tb[1]+_tb[2]), kb(_tb[1]+_tb[2]), _uniqTex.size(), _aTB / 1024.0); fclose(lf); }
+						_q[0] = _q[1] = _q[2] = 0; _qb[0] = _qb[1] = _qb[2] = 0; _tb[0] = _tb[1] = _tb[2] = 0; _aF = 0; _aT = 0; _aTB = 0;
 					}
 				}
 			}

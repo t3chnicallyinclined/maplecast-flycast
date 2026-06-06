@@ -32,6 +32,8 @@ static int                   _port = 7201;
 static std::atomic<uint32_t> _lastFrame{0};
 static std::atomic<uint64_t> _injected{0};
 static std::atomic<uint64_t> _stalled{0};
+static std::atomic<int>      _lastObjsSeen{0};      // objects the server shipped (OBJF)
+static std::atomic<int>      _lastObjsWritten{0};   // objects we found a local node for
 
 static bool parseSpec(const char* spec)
 {
@@ -57,7 +59,12 @@ bool init()
 		printf("[state-replica] bad MAPLECAST_STATE_REPLICA spec '%s'\n", spec);
 		return false;
 	}
-	_freeze = std::getenv("MAPLECAST_STATE_REPLICA_FREEZE") != nullptr;
+	// FREEZE is the ONLY supported path. The client must NOT simulate any
+	// visible thing — it renders the injected state PURELY. Input-replay /
+	// local-sim correction was rejected: any dropped input drifts whatever the
+	// inject doesn't cover. So we force freeze on; the env var is kept only as
+	// documentation of intent (and to allow a future opt-out experiment).
+	_freeze = (std::getenv("MAPLECAST_STATE_REPLICA_NO_FREEZE") == nullptr);
 
 	// The local SH4 is authoritative for nothing here — mute its audio so two
 	// instances side-by-side don't fight over the speakers. The server's audio
@@ -98,13 +105,36 @@ bool frameInject()
 		return false;
 	}
 
-	// Inject the server's truth into local RAM. The game's draw code (run by
-	// runInternal() right after this returns) reads these fields when it builds
-	// the TA list for this frame.
+	// 1) Inject the chars + globals + stage-anim timer. The game's draw code
+	//    (run by runInternal() right after this returns) reads these when it
+	//    builds the TA list for this frame.
 	maplecast_gamestate::writeGameState(gs);
 
+	// 2) Inject the OBJECT POOL (cape / effects / projectiles / supers). The
+	//    server ships the full record via OBJF; writeObjects overwrites the
+	//    matching already-linked local nodes so the game's pool render walker
+	//    draws the server's truth. Objects the local SH4 never spawned (under
+	//    FREEZE: input-driven projectiles/supers) have no node and stay missing
+	//    — that gap is the measured "needs node synthesis" region.
+	maplecast_gamestate::ObjectState objs[48];
+	int nobj = maplecast_mirror::getClientObjects(objs, 48);
+	int wrote = 0;
+	if (nobj > 0) wrote = maplecast_gamestate::writeObjects(objs, nobj);
+	_lastObjsSeen.store(nobj, std::memory_order_relaxed);
+	_lastObjsWritten.store(wrote, std::memory_order_relaxed);
+
 	if (!_gotFirst.exchange(true)) {
-		printf("[state-replica] first GSTA injected — frame_counter=%u\n", gs.frame_counter);
+		printf("[state-replica] first GSTA injected — frame_counter=%u stage_anim=%u objs=%d\n",
+		       gs.frame_counter, gs.stage_anim_timer, nobj);
+	}
+	// Periodic diagnostic: how many pool objects the server has vs. how many we
+	// could place. A persistent gap (seen > written) names the node-synthesis
+	// region precisely (projectiles/supers absent under FREEZE).
+	{
+		static uint32_t fc = 0;
+		if ((++fc % 120) == 0)
+			printf("[state-replica] frame=%u objs seen=%d written=%d (gap=%d -> node-synthesis region)\n",
+			       gs.frame_counter, nobj, wrote, nobj - wrote);
 	}
 	_lastFrame.store(gs.frame_counter, std::memory_order_relaxed);
 	_injected.fetch_add(1, std::memory_order_relaxed);
@@ -132,6 +162,8 @@ Stats getStats()
 	s.lastFrameCounter = _lastFrame.load(std::memory_order_relaxed);
 	s.framesInjected = _injected.load(std::memory_order_relaxed);
 	s.framesStalled = _stalled.load(std::memory_order_relaxed);
+	s.lastObjsSeen = _lastObjsSeen.load(std::memory_order_relaxed);
+	s.lastObjsWritten = _lastObjsWritten.load(std::memory_order_relaxed);
 	return s;
 }
 

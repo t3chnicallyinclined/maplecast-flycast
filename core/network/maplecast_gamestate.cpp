@@ -69,6 +69,8 @@ static const uint32_t ADDR_P2_METER_LVL   = 0x8C28964B;
 static const uint32_t ADDR_P1_COMBO       = 0x8C289670;  // u16
 static const uint32_t ADDR_P2_COMBO       = 0x8C289672;  // u16
 static const uint32_t ADDR_FRAME_CTR      = 0x8C3496B0;  // u32
+static const uint32_t ADDR_STAGE_ANIM     = 0x8C1F9D80;  // u8: monotonic stage-anim timer
+                                                          // (docs/MVC2-MEMORY-MAP.md page 505)
 // Hidden state discovered by RAM autopsy (rend_diff v2)
 // NOTE: stage_anim(0x8C1F9D80), render_interp/phase(0x8C1F9D8C-98) are frame-deterministic
 // and sync naturally between server+client — excluded from state
@@ -83,6 +85,15 @@ static float readFloat(uint32_t addr)
 	float f;
 	memcpy(&f, &raw, 4);
 	return f;
+}
+
+// Helper: write float to DC memory (defined here so the object-pool / stage
+// injectors below can use it; readGameState's writers reuse it too)
+static void writeFloat(uint32_t addr, float f)
+{
+	uint32_t raw;
+	memcpy(&raw, &f, 4);
+	addrspace::write32(addr, raw);
 }
 
 // Read-only runtime-derivation probe (MAPLECAST_PTRDUMP=1). Follows the engine's
@@ -264,6 +275,17 @@ int readObjects(ObjectState* out, int maxObjs)
 		out[n].screen_x  = (int16_t)sx;
 		out[n].screen_y  = (int16_t)sy;
 		out[n].type      = (uint8_t)addrspace::read8(a + 0x0E);
+		// All object offsets are kept relative to the SAME anchor `a` the read
+		// loop uses (the owner-ptr word), because those are the walk-test-
+		// validated offsets (sprite_id a+0x12C, screen a+0xC8). The marvelous2
+		// disasm names xflip at record+0x130, adjacent to sprite_id+0x12C — read
+		// it at a+0x130 (same anchor). The disasm record+0x3 category is NOT
+		// safely reachable from this anchor (the +0x80 vs absolute-base ambiguity
+		// is unresolved in re-catalog), so we carry `type`@a+0x0E (validated) and
+		// match on owner alone when injecting.
+		out[n].category  = (uint8_t)addrspace::read8(a + 0x0E);   // = type (render layer hint)
+		out[n].xflip     = (uint8_t)addrspace::read8(a + 0x130);
+		{ int os = 0; for (int s = 0; s < 6; s++) if (v == CHAR_BASE[s]) { os = s; break; } out[n].owner_slot = (uint8_t)os; }
 		n++;
 	}
 	static int _dbg = 0;
@@ -271,44 +293,639 @@ int readObjects(ObjectState* out, int maxObjs)
 	return n;
 }
 
-// PARTDUMP: Phase-0 test of assembly-driven runtime part-capture. Reads decoded part
-// textures from the DM00 Poly region (0x0CE80000, SH4 main RAM): dir base *(0x0CE80008),
-// 0x10 stride; entry+0x0 = (w,h) u16 px, +0x8 = 16bpp texel ptr. Dumps first parts as
-// PPM to /dev/shm. One-shot, read-only, gated MAPLECAST_PARTDUMP.
-static void partDump(const GameState& state) {
-	static bool on = getenv("MAPLECAST_PARTDUMP") != nullptr;
-	static bool done = false;
-	if (!on || done || !state.in_match) return;
-	auto valid = [](uint32_t a){ return (a >= 0x0C000000 && a < 0x0D000000) || (a >= 0x8C000000 && a < 0x8D000000); };
-	uint32_t dirBase = addrspace::read32(0x0CE80008);
-	if (!valid(dirBase)) { uint32_t alt = addrspace::read32(0x8CE80008); if (valid(alt)) dirBase = alt; }
-	FILE* lg = fopen("/dev/shm/mc_partdump.log", "w");
-	if (lg) fprintf(lg, "dirBase=0x%08x\n", dirBase);
-	int dumped = 0;
-	for (int i = 0; i < 256 && dumped < 48; i++) {
-		uint32_t e = dirBase + (uint32_t)i * 0x10;
-		uint32_t e0 = addrspace::read32(e), e4 = addrspace::read32(e + 4), e8 = addrspace::read32(e + 8);
-		if (!valid(e8)) continue;
-		uint16_t pw = e0 & 0xffff, ph = (e0 >> 16) & 0xffff;
-		if (pw == 0 || ph == 0 || pw > 512 || ph > 512) continue;
-		if (lg && dumped < 3) { fprintf(lg, "part[%d] tex=0x%08x %dx%d e4=%08x tex16:", i, e8, pw, ph, e4); for (int t = 0; t < 12; t++) fprintf(lg, " %04x", (uint16_t)addrspace::read16(e8 + t*2)); fprintf(lg, "\n"); }
-		char fn[80]; snprintf(fn, sizeof fn, "/dev/shm/part_%02d.ppm", dumped);
-		FILE* pf = fopen(fn, "wb");
-		if (pf) {
-			fprintf(pf, "P6\n%d %d\n255\n", pw, ph);
-			for (int y = 0; y < ph; y++) for (int x = 0; x < pw; x++) {
-				uint32_t tw = 0; for (int b = 0; b < 12; b++) { tw |= ((uint32_t)((x >> b) & 1)) << (2*b); tw |= ((uint32_t)((y >> b) & 1)) << (2*b + 1); }
-				uint16_t px = (uint16_t)addrspace::read16(e8 + tw * 2);   // PVR twiddle (Morton)
-				// ARGB1555 guess (a=15, r=14-10, g=9-5, b=4-0)
-				uint8_t rr = ((px >> 10) & 0x1f) << 3, gg = ((px >> 5) & 0x1f) << 3, bb = (px & 0x1f) << 3;
-				uint8_t rgb[3] = {rr, gg, bb}; fwrite(rgb, 1, 3, pf);
-			}
-			fclose(pf);
+// Inject the object pool back into RAM — INVERSE of readObjects (OVERWRITE
+// MODE). For each wire object we find an already-linked local pool node owned
+// by the same character (matched in wire order) and overwrite its visible
+// fields (sprite_id / screen_x/y / xflip) at the SAME `a`-relative offsets the
+// read uses. This makes the game's pool render walker draw the server's truth
+// for objects the local SH4 already keeps alive (cape, idle aura — animation-
+// spawned, present even under neutral input).
+//
+// LIMITATION (measured, not a bug): nodes the local SH4 never allocated
+// (input-driven projectiles / supers under FREEZE) have no slot to write into
+// and stay MISSING. Closing that gap needs node SYNTHESIS — allocate a free
+// node (marvelous2 free-list head 0x8C287A54, count 0x8C287AE8) and splice it
+// into the per-category render head-list (heads[] 0x8C287A5C, chained via +0xC;
+// walker loc_8c0301ce). That is the next region to add once this overwrite pass
+// is visually confirmed. Returns the number of nodes written.
+// Enumerate the local pool's PASSING nodes (exactly the set + order readObjects
+// produces) into an address array. Returns the count.
+static int enumLiveNodes(uint32_t* outAddr, uint8_t* outCid, int maxN)
+{
+	int n = 0;
+	for (uint32_t a = 0x8C26A600; a < 0x8C278000 && n < maxN; a += 4) {
+		uint32_t v = addrspace::read32(a);
+		bool owned = false;
+		for (int s = 0; s < 6; s++) if (v == CHAR_BASE[s]) { owned = true; break; }
+		if (!owned) continue;
+		uint16_t sid = (uint16_t)addrspace::read16(a + 0x12C);
+		if (sid == 0) continue;
+		if (addrspace::read8(a + 0x0C) == 0) continue;
+		{
+			uint32_t myRec = a - 0x18;
+			uint32_t nx = addrspace::read32(a - 0x10), pv = addrspace::read32(a - 0x0c);
+			bool linked = (nx >= 0x8C26A000 && nx < 0x8C278000 && addrspace::read32(nx + 0x0c) == myRec)
+			           || (pv >= 0x8C26A000 && pv < 0x8C278000 && addrspace::read32(pv + 0x08) == myRec);
+			if (!linked) continue;
 		}
-		dumped++;
+		float lsx = readFloat(a + 0xC8), lsy = readFloat(a + 0xCC);
+		if ((lsx == 0.f && lsy == 0.f) || lsx < -64.f || lsx > 704.f || lsy < -64.f || lsy > 544.f) continue;
+		outAddr[n] = a;
+		outCid[n]  = (uint8_t)addrspace::read8(v + OFF_CHAR_ID);
+		n++;
 	}
-	if (lg) { fprintf(lg, "dumped %d parts\n", dumped); fclose(lg); }
-	done = true;
+	return n;
+}
+
+int writeObjects(const ObjectState* objs, int n)
+{
+	if (n <= 0) return 0;
+
+	// Snapshot the SAME passing-node set readObjects sees, in the same order.
+	uint32_t nodeAddr[64]; uint8_t nodeCid[64];
+	int nNodes = enumLiveNodes(nodeAddr, nodeCid, 64);
+
+	bool used[64] = {false};
+	int written = 0;
+	for (int oi = 0; oi < n; oi++) {
+		const ObjectState& want = objs[oi];
+		// First-fit: claim the first unused live node owned by the same char.
+		for (int li = 0; li < nNodes; li++) {
+			if (used[li] || nodeCid[li] != want.owner_cid) continue;
+			uint32_t a = nodeAddr[li];
+			addrspace::write16(a + 0x12C, want.sprite_id);
+			writeFloat(a + 0xC8, (float)want.screen_x);
+			writeFloat(a + 0xCC, (float)want.screen_y);
+			addrspace::write8(a + 0x130, want.xflip);
+			used[li] = true;
+			written++;
+			break;
+		}
+	}
+	return written;
+}
+
+// Inject the animated-stage / background timing so the stage renders from the
+// server's truth rather than the local SH4's. frame_counter drives most stage
+// animation timing; stage_anim_timer is the dedicated monotonic counter.
+void writeStageState(uint32_t frame_counter, uint8_t stage_anim_timer)
+{
+	addrspace::write32(ADDR_FRAME_CTR, frame_counter);
+	addrspace::write8(ADDR_STAGE_ANIM, stage_anim_timer);
+}
+
+uint8_t readStageAnimTimer()
+{
+	return (uint8_t)addrspace::read8(ADDR_STAGE_ANIM);
+}
+
+// 'OBJF' full-object packet (state-replica inject). count(1) + N*10. No magic.
+int serializeObjects(const ObjectState* objs, int n, uint8_t* buf, int maxLen)
+{
+	if (n < 0) n = 0;
+	if (n > 255) n = 255;
+	if (maxLen < 1 + n * OBJF_REC_SIZE) return 0;
+	int o = 0;
+	buf[o++] = (uint8_t)n;
+	for (int i = 0; i < n; i++) {
+		const ObjectState& s = objs[i];
+		buf[o++] = s.owner_cid;
+		buf[o++] = (uint8_t)(s.sprite_id & 0xff);
+		buf[o++] = (uint8_t)((s.sprite_id >> 8) & 0xff);
+		buf[o++] = s.type;
+		buf[o++] = s.category;
+		buf[o++] = s.xflip;
+		buf[o++] = s.owner_slot;
+		buf[o++] = (uint8_t)(s.screen_x & 0xff);
+		buf[o++] = (uint8_t)((s.screen_x >> 8) & 0xff);
+		buf[o++] = (uint8_t)(s.screen_y & 0xff);
+		buf[o++] = (uint8_t)((s.screen_y >> 8) & 0xff);
+	}
+	return o;
+}
+
+int deserializeObjects(const uint8_t* buf, int len, ObjectState* out, int maxObjs)
+{
+	if (len < 1) return 0;
+	int n = buf[0];
+	int o = 1;
+	int got = 0;
+	for (int i = 0; i < n && got < maxObjs && o + OBJF_REC_SIZE <= len; i++) {
+		ObjectState& s = out[got];
+		s.owner_cid = buf[o++];
+		s.sprite_id = (uint16_t)(buf[o] | (buf[o+1] << 8)); o += 2;
+		s.type      = buf[o++];
+		s.category  = buf[o++];
+		s.xflip     = buf[o++];
+		s.owner_slot= buf[o++];
+		s.screen_x  = (int16_t)(buf[o] | (buf[o+1] << 8)); o += 2;
+		s.screen_y  = (int16_t)(buf[o] | (buf[o+1] << 8)); o += 2;
+		got++;
+	}
+	return got;
+}
+
+// =============================================================================
+// PARTDUMP — assembly-driven runtime part-atlas capture (gated MAPLECAST_PARTDUMP).
+//
+// Captures the CURRENT frame's decoded sprite parts for an active character from
+// the DM00 Poly directory in SH4 main RAM, resolving each EXTRAS part_idx to its
+// directory entry via the EXACT mapping read from the marvelous2 disassembly (NOT
+// the old dimension-match guess, which was structurally wrong — the directory is a
+// live working set, not a per-character contiguous array of all a char's parts).
+//
+// DM00 Poly directory (decoded part textures, PVR-format):
+//   dir_base = *(0x0CE80008)            ; header+8 (in mem_b, NOT VRAM)
+//   stride   = 0x10 bytes per entry
+//   entry+0x0 = (w,h) packed as two u16 PIXELS (w = low half, h = high half)
+//   entry+0x4 = u32  (format/key field — DUMPED RAW so we can confirm semantics)
+//   entry+0x8 = pointer to twiddled texels (in mem_b)
+//   entry+0xc = u32  (key/source field — DUMPED RAW so we can confirm semantics)
+//
+// THE part_idx -> directory-entry MAPPING (resolved from the disassembly).
+//   The per-part fetch wrapper bank03:loc_8c0322c0 computes, for a directory key
+//   `k` and the dir struct in r6:
+//       entry = *(r6 + 0x8) + (k << 4)        ; (k << 4) == k * 0x10 (the stride)
+//       dest  = *(entry + 0x8)                ; the part's decoded texel slot
+//   The body-parts loader bank03:loc_8c032ae0 calls it with the key = a SIMPLE
+//   INCREMENTING COUNTER `r11` (k = char_base, char_base+1, ... one per part), and
+//   char_base is chosen per character at loc_8c032a66 from the player struct byte
+//   at +0xad (a slot/side selector): default 9, or 13 (0x0D) when +0xad==1, etc.
+//   So:
+//       dir_entry(char, part_idx) = dir_base + (char_base + part_idx) * 0x10
+//   with char_base a SMALL FIXED CONSTANT (≈8/9/13) from the char's +0xad selector
+//   — NOT something to dimension-match. Each loaded entity gets its own contiguous
+//   key run; HUD/stage occupy other key ranges of the same directory.
+//
+//   This probe does NOT guess: it reads char+0xad to pick the candidate char_base,
+//   then VALIDATES it by checking that dir_entry(part 0..) dims are non-empty and in
+//   range (and logs a small ±window so the exact base is visible if +0xad mapping
+//   differs for assists). It then walks the CHARACTER'S CURRENT sprite_id assembly
+//   from the live EXTRAS (player+0x178), and for each record's part_idx dumps
+//   dir_entry(char_base+part_idx). First test = current frame's parts only; the full
+//   atlas accumulates these across frames (FOLLOW-UP — see docs/ASSEMBLY-DRIVEN-DESIGN).
+//
+//   The probe ALSO dumps the WHOLE directory with ALL FOUR u32 fields per entry, so
+//   the +0x4 / +0xc semantics (format vs source-key) are visible in the log and we
+//   can lock the mapping. Read-only; ROM-derived pixels -> /dev/shm only.
+// =============================================================================
+static inline bool _ramAddr(uint32_t a) {
+	return (a >= 0x0C000000 && a < 0x0D000000) || (a >= 0x8C000000 && a < 0x8D000000);
+}
+
+// Dump the RAW texels of a part straight from the texel pointer — w*h*2 bytes, NO
+// decode, NO twiddle. This lets the format/twiddle be locked OFFLINE (iterate
+// ARGB1555/RGB565/ARGB4444 x {twiddled,linear,non-square}) without a redeploy per guess.
+// Dump `nbytes` raw bytes straight from the texel pointer (no decode, no twiddle).
+// Byte count is format-dependent: 16-bit = w*h*2, PAL8 = w*h, PAL4 = w*h/2. The
+// offline locker / packer reads the format from the manifest e4 to interpret these.
+static void partDumpRawN(uint32_t texPtr, int nbytes, const char* fn) {
+	FILE* rf = fopen(fn, "wb");
+	if (!rf) return;
+	for (int i = 0; i < nbytes; i++)
+		fputc((uint8_t)addrspace::read8(texPtr + (uint32_t)i), rf);
+	fclose(rf);
+}
+
+// FOLLOW THE DESCRIPTOR — resolve a part's real PVR format/TCW the way the game does.
+// `e4` (DM00 entry+0x4) is a DESCRIPTOR INDEX, not the format. Traced clean-room from the
+// per-entry texture builder bank12:loc_8c123e00 (driven over the directory by
+// loc_8c1240a0). For directory key `k` (= charBase + part_idx, the loop counter):
+//   t1   = *(0x8C2DAD3C)              ; ptr to a u16 index table
+//   u16  = t1[k]                      ; mov.w @(table+k*2)  (k=r10, loc_8c123e56)
+//   t2   = *(0x8C2DAD4C)              ; ptr to a 0x20-stride descriptor table
+//   desc = t2 + u16*0x20             ; (r13 = r14<<5 + *(0x8C2DAD4C), loc_8c123eee)
+//   TCW  = *(desc + 0x0C)            ; mov.l @(0x0C,r13)
+//   fmt  = (TCW >> 27) & 7           ; mov 0xE5,r3; shld r3,r0; and 0x07  (PVR PixelFmt)
+//   scan = (TCW >> 26) & 1           ; ScanOrder: 1=linear/strided, 0=twiddled
+// PVR PixelFmt (ta_structs.h): 0=1555 1=565 2=4444 5=PAL4 6=PAL8. Also dumps the 0x20-byte
+// descriptor + the u16 + the resolved TCW so the format is verifiable offline. Returns the
+// resolved TCW (0 if any pointer was out of RAM — caller falls back to e4-byte1).
+static uint32_t partResolveTCW(int key, uint32_t* outDescAddr, uint16_t* outU16) {
+	const uint32_t P_T1 = 0x8C2DAD3C;   // -> u16 index table
+	const uint32_t P_T2 = 0x8C2DAD4C;   // -> 0x20-stride descriptor table
+	if (outDescAddr) *outDescAddr = 0;
+	if (outU16) *outU16 = 0xFFFF;
+	uint32_t t1 = addrspace::read32(P_T1);
+	uint32_t t2 = addrspace::read32(P_T2);
+	if (!_ramAddr(t1) || !_ramAddr(t2)) return 0;
+	uint16_t u16 = (uint16_t)addrspace::read16(t1 + (uint32_t)key * 2);
+	if (u16 == 0xFFFF) return 0;                      // 0xFF/unused slot
+	uint32_t desc = t2 + (uint32_t)u16 * 0x20;
+	if (!_ramAddr(desc)) return 0;
+	if (outDescAddr) *outDescAddr = desc;
+	if (outU16) *outU16 = u16;
+	return addrspace::read32(desc + 0x0C);            // the PVR TCW
+}
+// PVR-TCW -> our part fmt code (0/1/2/5/6) + scan order. Identical bit layout to the
+// VRAM path (mcfx) and flycast `union TCW`.
+static inline int  tcwFmt(uint32_t tcw)    { return (int)((tcw >> 27) & 7); }
+static inline bool tcwLinear(uint32_t tcw) { return ((tcw >> 26) & 1) != 0; }
+
+// The DM00 Poly directory entry (0x10 bytes) carries the part FORMAT at +0x4 (e4),
+// NOT +0xC (ec is 0 in the real data). Confirmed from the per-entry texture builder
+// bank12:loc_8c123e00 (driven over the 0x10-stride directory by bank12:loc_8c1240a0,
+// which terminates on entry+0x4 == 0xFF): it reads `idx = *(entry+0x4)` and uses it as
+// `descriptor = global_tex_table + idx*0x3C` (`mov.l @(0x04,r3),r13; mul.l 0x3C,r13`)
+// — so e4 is a small format/descriptor code, and the decode loop bank03:loc_8c032734
+// derives the same {1,2,3} code from a per-part descriptor byte. The texel pointer is
+// entry+0x8. (The earlier ec/TCW read was the VRAM-UPLOAD builder loc_8C122D00, a
+// different structure — ec on the DM00 directory is 0.)
+//
+// e4 ENCODING — the format selector is e4 BYTE 1 ((e4>>8)&0xff); byte 0 (0x01) is a
+// constant "present" flag. Empirically locked + consistent with the disasm classifier:
+//   0x0101 -> 32x32 parts decode clean as RGB565  (byte1 = 0x01)
+//   0x0301 -> 256x256 body is PALETTED, 8bpp PAL8 (byte1 = 0x03)  [operator-confirmed]
+// PVR PixelFormat codes (ta_structs.h): 0=ARGB1555 1=RGB565 2=ARGB4444 5=PAL4 6=PAL8.
+// The raw texel byte SIZE (dumped) disambiguates PAL4 (w*h/2) vs PAL8 (w*h) offline if
+// ever ambiguous. e4 is written to the manifest so the packer derives the same format.
+static int partFmtFromE4(uint32_t e4) {
+	uint8_t sel = (uint8_t)((e4 >> 8) & 0xff);
+	switch (sel) {
+		case 0x00: return 0;     // ARGB1555
+		case 0x01: return 1;     // RGB565   (32x32 parts — decoded clean)
+		case 0x02: return 2;     // ARGB4444
+		case 0x03: return 6;     // PAL8  (256x256 body — operator-confirmed paletted)
+		case 0x04: return 5;     // PAL4
+		default:   return 1;     // unknown -> RGB565 (preview best-effort)
+	}
+}
+
+// Twiddle (Morton) index — EXACT port of flycast's core/rend/texconv.cpp `detwiddle`+`twop`
+// (the same math mcfx uses to decode real VRAM in maplecast_mirror.cpp). The PVR
+// interleaves **y-bit first, then x** per pair:
+//   detwiddle[0][s][i] = twiddle_slow(i,0, 1024, 1<<s)   (x bits, depth gated by y size)
+//   detwiddle[1][s][i] = twiddle_slow(0,i, 1<<s, 1024)   (y bits, depth gated by x size)
+//   twop(x,y,bcx,bcy)  = detwiddle[0][bcy][x] + detwiddle[1][bcx][y]   (bc = bitscanrev)
+// `swapXY=true` selects the transposed (x-first) order — the previous hand-rolled
+// behaviour, which is a transpose of the canonical order for square textures. The small
+// parts decoded under the old order; this lets the probe emit BOTH so the 256x256 body
+// can be A/B'd offline against the oracle without a redeploy.
+static uint32_t s_detwiddle[2][11][1024];
+static bool s_detwInit = false;
+static uint32_t twiddle_slow(uint32_t x, uint32_t y, uint32_t x_sz, uint32_t y_sz) {
+	uint32_t rv = 0, sh = 0; x_sz >>= 1; y_sz >>= 1;
+	while (x_sz != 0 || y_sz != 0) {
+		if (y_sz != 0) { rv |= (y & 1) << sh; y_sz >>= 1; y >>= 1; sh++; }
+		if (x_sz != 0) { rv |= (x & 1) << sh; x_sz >>= 1; x >>= 1; sh++; }
+	}
+	return rv;
+}
+static void initDetwiddle() {
+	for (uint32_t s = 0; s < 11; s++) {
+		uint32_t y_sz = 1u << s;
+		for (uint32_t i = 0; i < 1024; i++) {
+			s_detwiddle[0][s][i] = twiddle_slow(i, 0, 1024, y_sz);
+			s_detwiddle[1][s][i] = twiddle_slow(0, i, y_sz, 1024);
+		}
+	}
+	s_detwInit = true;
+}
+static inline int bitscanrev(int v) { int r = 0; while ((1 << (r + 1)) <= v) r++; return r; }
+static inline uint32_t partTwiddleIdx2(int x, int y, int w, int h, bool swapXY) {
+	if (!s_detwInit) initDetwiddle();
+	int bcx = bitscanrev(w), bcy = bitscanrev(h);
+	if (swapXY) return s_detwiddle[0][bcx][y] + s_detwiddle[1][bcy][x];  // transposed (x-first)
+	return s_detwiddle[0][bcy][x] + s_detwiddle[1][bcx][y];              // flycast-canonical (y-first)
+}
+static inline uint32_t partTwiddleIdx(int x, int y, int w, int h, int /*sq*/, int /*sqBits*/) {
+	return partTwiddleIdx2(x, y, w, h, false);
+}
+
+// Decode one DM00 Poly part -> PPM preview, dispatching on the e4-derived PVR format.
+// fmt: 0/1/2 = 16-bit direct (texels at texPtr); 5/6 = paletted (4/8bpp index ->
+// palBase). palBase is the live Dat_Pal (player+0x164) ARGB4444 palette in mem_b for
+// the paletted path; index 0 = transparent. Transparent texels emit magenta (PPM has
+// no alpha; the packer keys magenta -> alpha 0). This is a best-effort PREVIEW — the
+// authoritative pixels come from the .raw dump + the offline packer's per-part decode.
+static void partDecodeToPPM(uint32_t texPtr, int w, int h, int fmt, bool linear, uint32_t palBase, const char* fn, bool swapXY = false) {
+	FILE* pf = fopen(fn, "wb");
+	if (!pf) return;
+	fprintf(pf, "P6\n%d %d\n255\n", w, h);
+	bool paletted = (fmt == 5 || fmt == 6);
+	for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+		// ScanOrder bit (TCW bit 26) -> linear (row-major) vs PVR twiddled (Morton).
+		uint32_t idx = linear ? (uint32_t)(y * w + x) : partTwiddleIdx2(x, y, w, h, swapXY);
+		uint8_t rr = 0, gg = 0, bb = 0, aa = 0;
+		if (!paletted) {
+			uint16_t px = (uint16_t)addrspace::read16(texPtr + idx * 2);
+			if (fmt == 1) {            // RGB565
+				rr = ((px >> 11) & 0x1f) << 3; gg = ((px >> 5) & 0x3f) << 2; bb = (px & 0x1f) << 3; aa = 255;
+			} else if (fmt == 2) {     // ARGB4444
+				aa = ((px >> 12) & 0xf) * 17; rr = ((px >> 8) & 0xf) * 17; gg = ((px >> 4) & 0xf) * 17; bb = (px & 0xf) * 17;
+			} else {                   // ARGB1555 (fmt 0)
+				aa = (px & 0x8000) ? 255 : 0;
+				rr = ((px >> 10) & 0x1f) << 3; gg = ((px >> 5) & 0x1f) << 3; bb = (px & 0x1f) << 3;
+			}
+		} else {
+			// Paletted: fetch the texel index, look it up in the live ARGB4444 palette.
+			uint32_t pidx;
+			if (fmt == 5) {            // PAL4: two indices/byte
+				uint8_t bytev = (uint8_t)addrspace::read8(texPtr + (idx >> 1));
+				pidx = (idx & 1) ? (bytev >> 4) : (bytev & 0xf);
+			} else {                   // PAL8
+				pidx = (uint8_t)addrspace::read8(texPtr + idx);
+			}
+			if (pidx == 0 || !_ramAddr(palBase)) { aa = 0; }    // index 0 = transparent
+			else {
+				uint16_t pe = (uint16_t)addrspace::read16(palBase + pidx * 2);  // ARGB4444 LE
+				aa = ((pe >> 12) & 0xf) * 17; rr = ((pe >> 8) & 0xf) * 17; gg = ((pe >> 4) & 0xf) * 17; bb = (pe & 0xf) * 17;
+			}
+		}
+		// PPM has no alpha; emit magenta for fully-transparent so the atlas tool can key it.
+		if (aa == 0) { rr = 0xff; gg = 0x00; bb = 0xff; }
+		uint8_t rgb[3] = {rr, gg, bb}; fwrite(rgb, 1, 3, pf);
+	}
+	fclose(pf);
+}
+
+static void partDump(const GameState& state) {
+	// MAPLECAST_PARTDUMP=1 -> single-frame capture; MAPLECAST_PARTDUMP=N -> capture
+	// every ~8th in-match frame for N fires (accumulates the full atlas across frames
+	// as the assembly changes). The manifest is APPENDED to, cleared once per process.
+	static const char* env = getenv("MAPLECAST_PARTDUMP");
+	static bool on = env != nullptr;
+	static int budget = (env && atoi(env) > 0) ? atoi(env) : 1;
+	static int fires = 0;
+	static uint32_t skip = 0;
+	static bool cleared = false;
+	if (!on || fires >= budget || !state.in_match) return;
+	if (budget > 1 && (++skip % 8) != 0) return;   // ~every 8 frames for multi-capture
+
+	uint32_t dirBase = addrspace::read32(0x0CE80008);
+	if (!_ramAddr(dirBase)) { uint32_t alt = addrspace::read32(0x8CE80008); if (_ramAddr(alt)) dirBase = alt; }
+	if (!_ramAddr(dirBase)) return;       // directory not built yet — wait for char load
+
+	// On first fire of this process, clear stale manifests + sid-trace so append starts fresh.
+	if (!cleared) {
+		for (int c = 0; c < 0x40; c++) {
+			char mn[96];
+			snprintf(mn, sizeof mn, "/dev/shm/PL%02X_parts.manifest", c); remove(mn);
+			snprintf(mn, sizeof mn, "/dev/shm/PL%02X_sidasm.txt", c);      remove(mn);
+		}
+		remove("/dev/shm/mc_partdump_sidtrace.log");
+		cleared = true;
+	}
+	fires++;
+
+	FILE* lg = fopen("/dev/shm/mc_partdump.log", "w");
+	if (lg) fprintf(lg, "# MapleCast PARTDUMP — disasm-derived part capture (fire %d/%d)\n"
+	                    "dirBase=0x%08x frame=%u\n", fires, budget, dirBase, state.frame_counter);
+
+	// ---- 1. Dump the WHOLE directory with ALL FOUR u32 fields per entry so the
+	//         +0x4 / +0xc semantics (format vs source-key) are visible. ----
+	const int MAXDIR = 2048;
+	if (lg) fprintf(lg, "\n[DIR] idx  wxh        e0:dims    e4         tex(e8)    ec\n");
+	int dirN = 0, dirBlanks = 0;
+	for (int i = 0; i < MAXDIR; i++) {
+		uint32_t e  = dirBase + (uint32_t)i * 0x10;
+		uint32_t e0 = addrspace::read32(e),     e4 = addrspace::read32(e + 4);
+		uint32_t e8 = addrspace::read32(e + 8), ec = addrspace::read32(e + 12);
+		uint16_t w = e0 & 0xffff, h = (e0 >> 16) & 0xffff;
+		bool blank = (w == 0 && h == 0 && !_ramAddr(e8));
+		if (blank) { if (++dirBlanks > 64) break; }   // stop after a long blank run
+		else dirBlanks = 0;
+		if (lg) fprintf(lg, "[DIR] %4d %4dx%-4d  %08x  %08x  %08x  %08x\n", i, w, h, e0, e4, e8, ec);
+		dirN = i + 1;
+	}
+	if (lg) fprintf(lg, "[DIR] scanned %d entries\n", dirN);
+
+	// ---- 2. Per active character: resolve char_base from the DISASSEMBLY mapping
+	//         (char struct byte +0xad selects a small fixed base; default 9, 13 when
+	//         +0xad==1). Validate by checking dir_entry(base+0) has non-empty dims;
+	//         log a ±8 base window so the exact base is visible if assists differ.
+	//         Then walk the CURRENT sprite_id assembly from the live EXTRAS and dump
+	//         each referenced part via dir_entry(char_base + part_idx). ----
+	const uint32_t OFF_SLOT_SEL = 0x0ad;     // disasm loc_8c032a66/loc_8c032ba2 selector
+	int dumpedTotal = 0;
+	for (int s = 0; s < 6; s++) {
+		uint32_t pbase = CHAR_BASE[s];
+		if (!(uint8_t)addrspace::read8(pbase + OFF_ACTIVE)) continue;
+		uint8_t  cid  = (uint8_t)addrspace::read8(pbase + OFF_CHAR_ID);
+		uint32_t gfx1 = addrspace::read32(pbase + OFF_GFX00_PTR);   // 0x15c
+		uint32_t exP  = addrspace::read32(pbase + OFF_EXTRAS_PTR);  // 0x178
+		uint32_t palP = addrspace::read32(pbase + OFF_PAL_PTR);     // 0x164 Dat_Pal (paletted parts)
+		uint16_t sid  = (uint16_t)addrspace::read16(pbase + OFF_SPRITE_ID);
+		uint8_t  sel  = (uint8_t)addrspace::read8(pbase + OFF_SLOT_SEL);
+		// disasm: base = (sel==1)?13 : 9 (loc_8c032a66). Assists/other selectors may
+		// shift it; we log a window so the true base is identifiable in the dump.
+		int charBase = (sel == 1) ? 13 : 9;
+		if (lg) fprintf(lg, "\n[CHAR] slot%d cid=%u(PL%02X) sid=%u sel@0xad=%u => charBase=%d "
+		                    "GFX1=0x%08x EXTRAS=0x%08x\n",
+		                s, cid, cid, sid, sel, charBase, gfx1, exP);
+
+		// Validation window: show dir entries around the candidate base (±8) with dims.
+		if (lg) {
+			fprintf(lg, "[CHAR] base window (key: dims tex):\n");
+			for (int b = charBase - 4; b <= charBase + 24; b++) {
+				if (b < 0) continue;
+				uint32_t e = dirBase + (uint32_t)b * 0x10;
+				uint32_t e0 = addrspace::read32(e), e8 = addrspace::read32(e + 8);
+				fprintf(lg, "[CHAR]   key %3d: %3dx%-3d tex=%08x%s\n",
+				        b, e0 & 0xffff, (e0 >> 16) & 0xffff, e8, b == charBase ? "  <= base" : "");
+			}
+		}
+
+		// Follow the live animation/assembly pointers FRESH this fire and log them with
+		// the current sprite_id so we can see the assembly track sid across frames.
+		//   0x144 sprite_id (already have `sid`), 0x154 current_cell_data (anim cursor),
+		//   0x178 EXTRAS base (whole assembly table; per-cell sub-assembly selected by sid).
+		uint32_t cellP = addrspace::read32(pbase + 0x154);
+		if (lg) fprintf(lg, "[CHAR] live sid=%u cell(0x154)=0x%08x extras(0x178)=0x%08x\n",
+		                sid, cellP, exP);
+
+		// Dump the live EXTRAS region (16KB) for offline assembly grouping.
+		if (_ramAddr(exP)) {
+			char en[96]; snprintf(en, sizeof en, "/dev/shm/PL%02X_extras.bin", cid);
+			FILE* ef = fopen(en, "wb");
+			if (ef) { for (int k = 0; k < 0x4000; k++) fputc((uint8_t)addrspace::read8(exP + k), ef); fclose(ef); }
+			if (lg) fprintf(lg, "[CHAR] EXTRAS -> %s (16KB)\n", en);
+		}
+
+		// Dump the live Dat_Pal palette (player+0x164) so the offline packer can decode
+		// PALETTED parts (fmt 5/6). ARGB4444 LE, 16 colors/bank; we dump 128 banks
+		// (0x1000 bytes) to cover every skin/sub-palette variant. Index 0 = transparent.
+		if (_ramAddr(palP)) {
+			char pn[96]; snprintf(pn, sizeof pn, "/dev/shm/PL%02X_palette.bin", cid);
+			FILE* pf2 = fopen(pn, "wb");
+			if (pf2) { for (int k = 0; k < 0x1000; k++) fputc((uint8_t)addrspace::read8(palP + k), pf2); fclose(pf2); }
+			if (lg) fprintf(lg, "[CHAR] PALETTE(0x164=%08x) -> %s (4KB, ARGB4444)\n", palP, pn);
+		}
+
+		// sprite_id -> ASSEMBLY RE-KEY (Gap 2, FROM THE LIVE CELL — the ground truth).
+		// LIVE LOG correction: `*(player+0x144) = 0x0000005d` is the plain sid 0x5d, NOT
+		// a pointer (so the earlier `*(0x144)+0x18` read garbage). But `cell` (player+0x154
+		// = current_cell_data) IS a valid pointer to the live 20-byte keyframe (log:
+		// cell=0x0c52ebfc). The anim tick (bank03:loc_8c034ed2) copies that keyframe into
+		// player+0x140.. via the Duff-copy bank12:loc_8c1294c8, so:
+		//   cell      = read32(player+0x154)          ; valid keyframe pointer (live)
+		//   live_sid  = read16(cell + 4)              ; == read16(player+0x144) (the client's key)
+		//   slot      = read16(cell + 0x12)           ; keyframe -> EXTRAS slot index
+		//   records   = EXTRAS + slot*0x400 + 0x08    ; assembly, 8-byte recs, mode==0xFF ends
+		// Reading from the LIVE cell guarantees live_sid == read16(player+0x144) — unlike
+		// (a) the offline ANIMATION-table scan (different namespace, never matched) and
+		// (b) *(0x144) (not a pointer). Across fires the live sid set accumulates.
+		//
+		// File PL{hex}_sidasm.txt: "<sid> <slot> <nrecs> dx,dy,part,flip;...". If the
+		// slot's assembly is empty, we dump the cell's 20 bytes so the real slot-field
+		// offset is verifiable from the log.
+		bool liveUsePart[256] = {false};   // part_idx referenced by the LIVE assembly (merged into usePart)
+		{
+			uint32_t animP = addrspace::read32(pbase + 0x168);   // ANIMATION base (dump for ref)
+			if (_ramAddr(animP)) {
+				char an[96]; snprintf(an, sizeof an, "/dev/shm/PL%02X_anim.bin", cid);
+				FILE* af = fopen(an, "wb");
+				if (af) { for (int k = 0; k < 0x8000; k++) fputc((uint8_t)addrspace::read8(animP + k), af); fclose(af); }
+			}
+
+			uint16_t sid144  = (uint16_t)addrspace::read16(pbase + 0x144);   // client's key (cross-check)
+			uint16_t liveSid = sid144;
+			uint16_t slot = 0xFFFF;
+			uint32_t recs = 0;
+			char kfbytes[64] = "-";
+			if (_ramAddr(cellP)) {
+				liveSid = (uint16_t)addrspace::read16(cellP + 4);            // keyframe[4] == sid144
+				slot    = (uint16_t)addrspace::read16(cellP + 0x12);         // keyframe[0x12] = slot
+				int n = 0; for (int b = 0; b < 20 && n < 60; b++) n += snprintf(kfbytes + n, sizeof(kfbytes) - n, "%02x", (uint8_t)addrspace::read8(cellP + b));
+				if (slot < 64 && _ramAddr(exP))
+					recs = exP + (uint32_t)slot * 0x400 + 0x08;
+			}
+
+			char km[96]; snprintf(km, sizeof km, "/dev/shm/PL%02X_sidasm.txt", cid);
+			FILE* kf = fopen(km, "a");
+			if (kf && ftell(kf) == 0)
+				fprintf(kf, "# sprite_id slot nrecs dx,dy,part,flip;...  (LIVE cell: sid=kf[4], slot=kf[0x12], asm=EXTRAS+slot*0x400+8)\n");
+
+			int nrec = 0;
+			if (kf && recs) {
+				char body[1900]; int bn = 0;
+				for (int r = 0; r < 128; r++) {
+					uint32_t rec = recs + (uint32_t)r * 8;
+					int16_t rdx = (int16_t)addrspace::read16(rec);
+					int16_t rdy = (int16_t)addrspace::read16(rec + 2);
+					uint8_t rpart = (uint8_t)addrspace::read8(rec + 4);
+					uint8_t rmode = (uint8_t)addrspace::read8(rec + 6);
+					uint8_t rflip = (uint8_t)addrspace::read8(rec + 7);
+					if (rmode == 0xFF) break;                       // assembly terminator
+					uint32_t lo = addrspace::read32(rec);
+					if (lo == 0 && rmode == 0 && rpart == 0 && rflip == 0) continue;   // pad
+					if (bn < (int)sizeof(body) - 32)
+						bn += snprintf(body + bn, sizeof(body) - bn, "%d,%d,%u,%u;",
+						               rdx, rdy, rpart, (rflip & 0x80) ? 1 : 0);
+					liveUsePart[rpart] = true;                      // ensure this part is dumped
+					nrec++;
+				}
+				if (nrec > 0) fprintf(kf, "%u %u %d %s\n", liveSid, slot, nrec, body);
+			}
+			if (kf) fclose(kf);
+			if (lg) {
+				fprintf(lg, "[CHAR] LIVE re-key: sid144=0x%04x cell=0x%08x kf[4]=0x%04x slot=kf[0x12]=%u recs@0x%08x nrec=%d\n",
+				        sid144, cellP, liveSid, slot, recs, nrec);
+				fprintf(lg, "[CHAR]   cell kf[0..19] = %s\n", kfbytes);
+				if (nrec == 0) fprintf(lg, "[CHAR]   *** empty assembly — verify slot field offset against the kf bytes above ***\n");
+			}
+		}
+
+		// Collect part_idx referenced by EVERY assembly slot in the EXTRAS table, not
+		// just the first — the EXTRAS table is 0x400-byte slots, each a 128-record (8B)
+		// assembly ending at mode==0xFF. Walking only slot 0 (the old bug) pinned the
+		// dump to one fixed assembly regardless of sid. Scanning all slots accumulates
+		// the character's FULL part set; the per-fire sid log lets us correlate which
+		// slot is live. (Header is 0x18 bytes before slot 0's records — GFX-NOTES §3.)
+		bool usePart[256] = {false};
+		int nUse = 0, nSlots = 0;
+		if (_ramAddr(exP)) {
+			const int SLOT = 0x400, NREC = SLOT / 8;
+			for (int slot = 0; slot < 64; slot++) {           // up to 64 slots (0x10000)
+				uint32_t sbase = exP + 0x18 + (uint32_t)slot * SLOT;
+				bool slotHasPart = false;
+				for (int r = 0; r < NREC; r++) {
+					uint32_t rec = sbase + (uint32_t)r * 8;
+					uint8_t part = (uint8_t)addrspace::read8(rec + 4);
+					uint8_t mode = (uint8_t)addrspace::read8(rec + 6);
+					if (mode == 0xFF) break;                   // assembly terminator
+					// skip all-zero pad records
+					uint32_t lo = addrspace::read32(rec);
+					if (lo == 0 && mode == 0 && part == 0) continue;
+					if (!usePart[part]) { usePart[part] = true; nUse++; }
+					slotHasPart = true;
+				}
+				if (slotHasPart) nSlots++;
+			}
+		}
+		// Merge the LIVE assembly's parts in (guarantees every part the on-screen sid
+		// references gets dumped, even if the slot-scan didn't reach it).
+		for (int p = 0; p < 256; p++) if (liveUsePart[p] && !usePart[p]) { usePart[p] = true; nUse++; }
+		if (lg) fprintf(lg, "[CHAR] EXTRAS scan: %d non-empty slots, %d distinct part_idx (incl live)\n",
+		                nSlots, nUse);
+
+		// Per-fire compact log: sid + the part_idx list (so we see it change across fires).
+		// Also appended to a sid-trace file that survives across fires (the main log is
+		// rewritten each fire because it carries the big directory dump).
+		{
+			char pl[512]; int pn = snprintf(pl, sizeof pl, "[FIRE %d] cid=%u(PL%02X) sid=%u cell=0x%08x parts=",
+			                                fires, cid, cid, sid, cellP);
+			for (int p = 0; p < 256 && pn < (int)sizeof(pl) - 6; p++) if (usePart[p]) pn += snprintf(pl + pn, sizeof(pl) - pn, "%d ", p);
+			if (lg) fprintf(lg, "%s\n", pl);
+			FILE* tf = fopen("/dev/shm/mc_partdump_sidtrace.log", "a");
+			if (tf) { fprintf(tf, "%s\n", pl); fclose(tf); }
+		}
+
+		// Dump each referenced part via dir_entry(charBase + part_idx): RAW texels (for
+		// offline format-locking) + a best-effort PPM preview. Manifest lines carry the
+		// resolved key + all fields so the packer can verify; deduped by part_idx.
+		char mn[96]; snprintf(mn, sizeof mn, "/dev/shm/PL%02X_parts.manifest", cid);
+		FILE* mf = fopen(mn, "a");   // append: full atlas accumulates across frames
+		if (mf && ftell(mf) == 0)
+			fprintf(mf, "# part_idx key raw ppm w h e4 texptr ec rawbytes tcw fmt twid descU16 desc[0x3Chex]\n");
+		for (int part = 0; part < 256; part++) {
+			if (!usePart[part]) continue;
+			int key = charBase + part;
+			uint32_t e  = dirBase + (uint32_t)key * 0x10;
+			uint32_t e0 = addrspace::read32(e),     e4 = addrspace::read32(e + 4);
+			uint32_t e8 = addrspace::read32(e + 8), ec = addrspace::read32(e + 12);
+			int w = e0 & 0xffff, h = (e0 >> 16) & 0xffff;
+			// FOLLOW THE DESCRIPTOR (the game's own resolution): e4 is a descriptor
+			// index, not the format. partResolveTCW walks key -> u16 -> 0x20-stride
+			// descriptor -> TCW@+0xC, and we read fmt/scan from that TCW. Fall back to
+			// the e4-byte1 heuristic only if the runtime tables aren't resolvable.
+			uint32_t descAddr = 0; uint16_t descU16 = 0xFFFF;
+			uint32_t tcw = partResolveTCW(key, &descAddr, &descU16);
+			int  fmt; bool linear;
+			if (tcw != 0) { fmt = tcwFmt(tcw); linear = tcwLinear(tcw); }
+			else          { fmt = partFmtFromE4(e4); linear = false; }   // fallback
+			if (w <= 0 || h <= 0 || w > 1024 || h > 1024 || !_ramAddr(e8)) {
+				if (mf) fprintf(mf, "%d %d - - %d %d %08x %08x %08x SKIP\n", part, key, w, h, e4, e8, ec);
+				continue;
+			}
+			char rfn[96]; snprintf(rfn, sizeof rfn, "/dev/shm/PL%02X_part_%03d.raw", cid, part);
+			char pfn[96]; snprintf(pfn, sizeof pfn, "/dev/shm/PL%02X_part_%03d.ppm", cid, part);
+			// RAW byte count tracks the format: 16-bit = w*h*2, PAL8 = w*h, PAL4 = w*h/2.
+			int rawBytes = (fmt == 5) ? (w * h / 2) : (fmt == 6) ? (w * h) : (w * h * 2);
+			partDumpRawN(e8, rawBytes, rfn);
+			partDecodeToPPM(e8, w, h, fmt, linear, palP, pfn, false);   // flycast-canonical
+			// For LARGE (>=64px) parts, also emit the transposed (x-first) twiddle so the
+			// 256x256 body can be A/B'd offline against the oracle (the small parts decoded
+			// under one order; this reveals if large parts need the other).
+			if (!linear && w >= 64 && h >= 64) {
+				char pfa[96]; snprintf(pfa, sizeof pfa, "/dev/shm/PL%02X_part_%03d.altTw.ppm", cid, part);
+				partDecodeToPPM(e8, w, h, fmt, linear, palP, pfa, true);
+			}
+			// Manifest: "...e4 texptr ec rawbytes tcw fmt twid descU16 desc[0x3C]".
+			// Full 0x3C descriptor (the e4-indexed table stride) is dumped so any sub-rect
+			// / stride / page-UV field for the 256x256 body is visible OFFLINE (to confirm
+			// whether a large part is one twiddled texture or a composite page).
+			char dh[140] = "-";
+			if (_ramAddr(descAddr)) { int n = 0; for (int b = 0; b < 0x3C && n < 132; b++) n += snprintf(dh + n, sizeof(dh) - n, "%02x", (uint8_t)addrspace::read8(descAddr + b)); }
+			if (mf) fprintf(mf, "%d %d PL%02X_part_%03d.raw PL%02X_part_%03d.ppm %d %d %08x %08x %08x %d %08x %d %s %04x %s\n",
+			                part, key, cid, part, cid, part, w, h, e4, e8, ec, rawBytes,
+			                tcw, fmt, linear ? "linear" : "twid", descU16, dh);
+			dumpedTotal++;
+		}
+		if (mf) fclose(mf);
+		if (lg) fprintf(lg, "[CHAR] manifest -> %s (append, raw+ppm)\n", mn);
+	}
+	if (lg) { fprintf(lg, "\ndumped %d parts this frame\n", dumpedTotal); fclose(lg); }
 }
 
 void readGameState(GameState& state)
@@ -326,6 +943,7 @@ void readGameState(GameState& state)
 	state.p1_combo      = (uint16_t)addrspace::read16(ADDR_P1_COMBO);
 	state.p2_combo      = (uint16_t)addrspace::read16(ADDR_P2_COMBO);
 	state.frame_counter = addrspace::read32(ADDR_FRAME_CTR);
+	state.stage_anim_timer = (uint8_t)addrspace::read8(ADDR_STAGE_ANIM);
 
 	// Character states
 	for (int i = 0; i < 6; i++)
@@ -365,15 +983,7 @@ void readGameState(GameState& state)
 	state.p2_rt = (uint8_t)(rt[1] >> 8);
 
 	ptrDump(state);
-	partDump(state);   // read-only runtime-derivation probe (MAPLECAST_PTRDUMP=1)
-}
-
-// Write float to DC memory
-static void writeFloat(uint32_t addr, float f)
-{
-	uint32_t raw;
-	memcpy(&raw, &f, 4);
-	addrspace::write32(addr, raw);
+	partDump(state);   // read-only part-atlas capture probe (MAPLECAST_PARTDUMP=1)
 }
 
 // Write game state INTO Flycast's emulated RAM — exact reverse of readGameState
@@ -392,6 +1002,7 @@ void writeGameState(const GameState& state)
 	addrspace::write16(ADDR_P1_COMBO, state.p1_combo);
 	addrspace::write16(ADDR_P2_COMBO, state.p2_combo);
 	addrspace::write32(ADDR_FRAME_CTR, state.frame_counter);
+	addrspace::write8(ADDR_STAGE_ANIM, state.stage_anim_timer);
 
 	// Character states
 	for (int i = 0; i < 6; i++)
@@ -477,7 +1088,11 @@ int serialize(const GameState& state, uint8_t* buf, int maxLen)
 	writeU8(buf, off, state.p2_lt);
 	writeU8(buf, off, state.p2_rt);
 
-	return off;  // WIRE_SIZE = 253 + 8 = 261
+	// Stage animation timer (1 byte) — appended last so older parsers that read
+	// only 261 bytes are unaffected.
+	writeU8(buf, off, state.stage_anim_timer);
+
+	return off;  // WIRE_SIZE = 253 + 8 + 1 = 262
 }
 
 // Deserialize from network bytes back to GameState — exact reverse of serialize
@@ -488,7 +1103,10 @@ static float readBufF32(const uint8_t* buf, int& off) { float v; memcpy(&v, buf 
 
 void deserialize(const uint8_t* buf, int len, GameState& state)
 {
-	if (len < WIRE_SIZE) return;
+	// 253 = the legacy char+global block. Raw input (+8) and stage_anim (+1)
+	// are optional trailers so older/newer packets both parse.
+	static const int LEGACY_SIZE = 5 + 2+2+2+2 + 4+4+4 + 6*38;  // 253
+	if (len < LEGACY_SIZE) return;
 	int off = 0;
 
 	state.in_match       = readBufU8(buf, off);
@@ -539,6 +1157,12 @@ void deserialize(const uint8_t* buf, int len, GameState& state)
 		state.p2_buttons = 0xFFFF;
 		state.p1_lt = state.p1_rt = state.p2_lt = state.p2_rt = 0;
 	}
+
+	// Stage animation timer (1 byte) — optional trailer.
+	if (len >= off + 1)
+		state.stage_anim_timer = readBufU8(buf, off);
+	else
+		state.stage_anim_timer = 0;
 }
 
 // === Player name patching ===
