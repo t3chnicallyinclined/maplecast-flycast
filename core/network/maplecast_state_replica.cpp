@@ -153,6 +153,22 @@ bool frameInject()
 		if ((++_preMatchN % 120) == 1)
 			printf("[state-replica] waiting for in_match: server=%d local=%d — rendering local frame, no inject\n",
 			       (int)gs.in_match, (int)localInMatch);
+
+		// If the server is in a match but local isn't, we missed the MCSV that
+		// was sent on connect (connected between matches, match started after).
+		// Reconnect — the server will send the cached MCSV immediately in onOpen
+		// so we land in the fight instead of waiting for local demo to align.
+		static uint32_t _serverAheadFrames = 0;
+		if (gs.in_match && !localInMatch) {
+			if (++_serverAheadFrames > 120) {  // 2s
+				_serverAheadFrames = 0;
+				printf("[state-replica] server in_match but local not — reconnecting for MCSV\n");
+				fflush(stdout);
+				maplecast_mirror::requestClientVideoReconnect();
+			}
+		} else {
+			_serverAheadFrames = 0;
+		}
 		return true;
 	}
 
