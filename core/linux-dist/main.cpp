@@ -343,21 +343,21 @@ int main(int argc, char* argv[])
 	// frameInject() never fires.
 	if (!_headless_mode && std::getenv("MAPLECAST_STATE_REPLICA"))
 	{
-		if (settings.content.path.empty()) {
-			ERROR_LOG(BOOT, "[state-replica] no ROM path — pass the ROM as an argument");
-			return 1;
-		}
-		printf("[state-replica] auto-start: loading ROM %s\n", settings.content.path.c_str());
+		const bool hasRom = !settings.content.path.empty();
+		if (hasRom)
+			printf("[state-replica] auto-start with ROM: %s\n", settings.content.path.c_str());
+		else
+			printf("[state-replica] auto-start: no ROM — will boot from server MCSV savestate\n");
 		fflush(stdout);
 		try {
-			emu.loadGame(settings.content.path.c_str());
+			emu.loadGame(hasRom ? settings.content.path.c_str() : nullptr);
 			emu.start();   // Loaded -> Running; also runs maplecast_state_replica::init()
 		} catch (const FlycastException& e) {
 			ERROR_LOG(BOOT, "[state-replica] loadGame failed: %s", e.what());
 			return 1;
 		}
 		gui_setState(GuiState::Closed);
-		printf("[state-replica] ROM loaded, GUI closed, renderer active, entering main loop\n");
+		printf("[state-replica] loaded, GUI closed, renderer active, entering main loop\n");
 		fflush(stdout);
 	}
 

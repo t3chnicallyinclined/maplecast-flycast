@@ -188,9 +188,11 @@ void flycast_term()
 }
 
 bool dc_savestateAllowed() {
-	// MapleCast: always allow save states — we NEED them for sync start
-	if (std::getenv("MAPLECAST_SERVER") || std::getenv("MAPLECAST_STATE_REPLICA"))
+	if (std::getenv("MAPLECAST_SERVER"))
 		return !settings.content.path.empty();
+	// State-replica: MCSV is the boot mechanism — allow even with no content path.
+	if (std::getenv("MAPLECAST_STATE_REPLICA"))
+		return true;
 	return !settings.content.path.empty() && !settings.network.online
 			&& !settings.naomi.multiboard && !MapleLink::StorageEnabled();
 }

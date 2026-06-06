@@ -584,13 +584,18 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 {
 	init();
 
-	// Mirror client: skip ROM/BIOS loading entirely. Server sends all state via WebSocket.
-	if (std::getenv("MAPLECAST_MIRROR_CLIENT") && (path == nullptr || strlen(path) == 0))
+	// Mirror client OR state-replica with no ROM: skip ROM/BIOS loading entirely.
+	// Hardware is initialized to a blank DC state; the server sends the real game
+	// state via WebSocket (SYNC for mirror, MCSV savestate for state-replica).
+	const bool isMirrorNoRom  = std::getenv("MAPLECAST_MIRROR_CLIENT")   && (path == nullptr || strlen(path) == 0);
+	const bool isReplicaNoRom = std::getenv("MAPLECAST_STATE_REPLICA")   && (path == nullptr || strlen(path) == 0);
+	if (isMirrorNoRom || isReplicaNoRom)
 	{
-		printf("[MIRROR] No ROM — initializing renderer only\n");
+		const char* tag = isMirrorNoRom ? "MIRROR" : "state-replica";
+		printf("[%s] No ROM — hardware init only, game state arrives from server\n", tag);
 		settings.content.path.clear();
 		settings.content.fileName.clear();
-		settings.content.title = "MapleCast Mirror";
+		settings.content.title = isMirrorNoRom ? "MapleCast Mirror" : "MapleCast Replica";
 		setPlatform(DC_PLATFORM_DREAMCAST);
 		mem_map_default();
 		config::Settings::instance().reset();
@@ -603,9 +608,11 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 		// Without this, input_mapper stays null and all buttons are silently dropped.
 		EventManager::event(Event::Start);
 
-		// Go straight to start() — mirror client init happens there
 		state = Loaded;
-		start();
+		if (isMirrorNoRom) {
+			// Mirror client calls start() here; state-replica lets main.cpp call it.
+			start();
+		}
 		return;
 	}
 
