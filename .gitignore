@@ -145,3 +145,6 @@ re-catalog/
 
 # Extracted sprite folders (rip-derived, from the .7z) — never commit
 MvC2_SpriteFolders_Patched/
+
+# Sprite sheets (rip-derived) — never commit
+MvC2_Spritesheets_*/
