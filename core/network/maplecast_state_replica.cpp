@@ -72,16 +72,15 @@ bool init()
 	// (if wanted) comes from its own stream.
 	settings.aica.muteAudio = true;
 
-	// Reuse the mirror WS client purely as the GSTA transport. wsClientRun()
-	// already deserializes 'GSTA' packets into _clientGameState, exposed via
-	// maplecast_mirror::getClientGameState(). We do NOT consume the TA video —
-	// the local SH4 builds its own TA list. (The WS still carries the heavy TA
-	// frames; for a bandwidth-pure test the server should be told to ship GSTA
-	// only, but for the fastest visual proof reusing this stream is fine.)
+	// Connect the mirror WS as a GSTA-ONLY transport. startGstaStream parses
+	// only GSTA/OBJF into _clientGameState/_clientObjects (read via
+	// getClientGameState/getClientObjects) and NEVER applies the server's TA
+	// delta or VRAM/PVR SYNC — the local SH4 owns the framebuffer. Using the
+	// full startMirrorStream here clobbered the local render (black screen).
 	printf("[state-replica] === STATE-REPLICA MODE ===\n");
 	printf("[state-replica] GSTA source: %s:%d  freeze=%d\n", _host.c_str(), _port, (int)_freeze);
 	printf("[state-replica] inject point: frame top, before runInternal()\n");
-	maplecast_mirror::startMirrorStream(_host.c_str(), _port);
+	maplecast_mirror::startGstaStream(_host.c_str(), _port);
 
 	_active.store(true);
 	return true;

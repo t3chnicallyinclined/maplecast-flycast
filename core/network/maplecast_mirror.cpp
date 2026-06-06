@@ -135,6 +135,13 @@ static maplecast_gamestate::GameState _clientGameState{};
 static std::mutex _clientGameStateMtx;
 static std::atomic<bool> _clientGameStateReady{false};
 
+// GSTA-ONLY mode (state-replica): the mirror WS is used purely as a transport
+// for GSTA/OBJF state packets. The local SH4 owns the render, so we must NOT
+// apply the server's TA delta or VRAM/PVR SYNC (they would clobber the local
+// game -> black screen). When set, wsClientRun skips the SYNC wait and every
+// TA/SYNC apply, parsing ONLY GSTA + OBJF.
+static std::atomic<bool> _gstaOnly{false};
+
 // Full object pool received from server (OBJF) — for the state-replica inject.
 static maplecast_gamestate::ObjectState _clientObjects[48];
 static int _clientObjectCount = 0;
@@ -832,9 +839,14 @@ static void wsClientRun(std::string host, int port)
 	MirrorDecompressor decomp;
 	decomp.init(16 * 1024 * 1024);  // 16MB covers SYNC + worst-case frames
 
-	// Wait for initial SYNC message (VRAM + PVR regs)
-	bool synced = false;
+	// Wait for initial SYNC message (VRAM + PVR regs).
+	// GSTA-ONLY (state-replica): skip the SYNC wait entirely — we never apply
+	// the server's VRAM/PVR (the local SH4 owns the framebuffer). Jump straight
+	// to the GSTA/OBJF parse loop below.
+	bool synced = _gstaOnly.load(std::memory_order_relaxed);
 	std::vector<uint8_t> frame;
+	if (_gstaOnly.load(std::memory_order_relaxed))
+		printf("[MIRROR-WS] GSTA-ONLY mode — skipping SYNC wait + TA/VRAM apply\n");
 	while (!synced) {
 		if (!wsReadFrame(_wsFd, frame)) {
 			printf("[MIRROR-WS] Connection lost waiting for sync\n"); fflush(stdout);
@@ -892,10 +904,15 @@ static void wsClientRun(std::string host, int port)
 				maplecast_gamestate::GameState gs;
 				maplecast_gamestate::deserialize(frame.data() + 4,
 				    (int)(frame.size() - 4), gs);
-				// Store atomically for the overlay thread
-				std::lock_guard<std::mutex> lk(_clientGameStateMtx);
-				_clientGameState = gs;
-				_clientGameStateReady.store(true, std::memory_order_release);
+				// Store atomically for the overlay thread / state-replica inject
+				{
+					std::lock_guard<std::mutex> lk(_clientGameStateMtx);
+					_clientGameState = gs;
+				}
+				bool firstStore = !_clientGameStateReady.exchange(true, std::memory_order_release);
+				if (firstStore)
+					printf("[MIRROR-WS] GSTA STORED (first) — frame_counter=%u, getClientGameState now true\n",
+					       gs.frame_counter);
 			} else {
 				printf("[MIRROR-WS] GSTA too short: %zu bytes (need %d)\n",
 				       frame.size(), 4 + LEGACY);
@@ -927,6 +944,12 @@ static void wsClientRun(std::string host, int port)
 			}
 			continue;
 		}
+
+		// GSTA-ONLY (state-replica): everything past here is the TA/VRAM/SYNC
+		// video path, which would clobber the locally-rendered game. Skip it —
+		// only GSTA/OBJF (handled above) are consumed in this mode.
+		if (_gstaOnly.load(std::memory_order_relaxed))
+			continue;
 
 		// ---- Client-side arrival telemetry (video WS) ----
 		{
@@ -1196,6 +1219,19 @@ void startMirrorStream(const char* host, int port)
 	_useWebSocket = true;
 	printf("[MIRROR] Starting TA correction stream ws://%s:%d/\n", host, port);
 	memwatch::unprotect();
+	std::string hostStr(host);
+	_wsThread = std::thread(wsClientRun, hostStr, port);
+	_wsThread.detach();
+}
+
+// State-replica transport: connect the mirror WS but consume ONLY GSTA/OBJF
+// state packets — never apply TA/VRAM/PVR (the local SH4 renders). Does NOT
+// unprotect VRAM (the local game keeps its memory-watch protection intact).
+void startGstaStream(const char* host, int port)
+{
+	_gstaOnly.store(true, std::memory_order_release);
+	_useWebSocket = true;
+	printf("[MIRROR] Starting GSTA-ONLY state stream ws://%s:%d/ (no TA/VRAM apply)\n", host, port);
 	std::string hostStr(host);
 	_wsThread = std::thread(wsClientRun, hostStr, port);
 	_wsThread.detach();

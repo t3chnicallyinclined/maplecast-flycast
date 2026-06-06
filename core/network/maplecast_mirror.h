@@ -29,6 +29,13 @@ void initClient();
 // setting isClient mode (which disables the GUI and SH4). Used by
 // maplecast_replica to get VRAM/PVR correction alongside a running SH4.
 void startMirrorStream(const char* host, int port);
+
+// State-replica transport: connect the mirror WS but consume ONLY GSTA/OBJF
+// state packets — never apply the server's TA delta or VRAM/PVR SYNC (the local
+// SH4 owns the framebuffer). Use this instead of startMirrorStream for the
+// state-replica client so the local render isn't clobbered.
+void startGstaStream(const char* host, int port);
+
 bool isServer();
 bool isClient();
 // True if MapleCast is active in ANY mode (server, client, or local with MAPLECAST=1).
