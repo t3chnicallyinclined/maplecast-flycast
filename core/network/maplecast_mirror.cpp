@@ -152,6 +152,14 @@ static int _clientObjectCount = 0;
 static std::mutex _clientObjectsMtx;
 static std::atomic<bool> _clientObjectsReady{false};
 
+// MCSV mid-match join: server ships the full dc_serialize blob when the client
+// connects while in_match is active. frameInject() drains this and calls
+// dc_loadstate_from_memory() so the local SH4 enters the fight from a known-good
+// state rather than waiting to reach in_match=1 on its own.
+static std::vector<uint8_t> _pendingSaveState;
+static std::mutex            _pendingSaveStateMtx;
+static std::atomic<bool>     _pendingSaveStateReady{false};
+
 // Fast hash for VRAM comparison (sample every 64th byte for speed)
 static uint64_t fastVramHash()
 {
@@ -954,11 +962,34 @@ static void wsClientRun(std::string host, int port)
 			continue;
 		}
 
-		// GSTA-ONLY (state-replica): everything past here is the TA/VRAM/SYNC
-		// video path, which would clobber the locally-rendered game. Skip it —
-		// only GSTA/OBJF (handled above) are consumed in this mode.
-		if (_gstaOnly.load(std::memory_order_relaxed))
+		// GSTA-ONLY (state-replica): everything past here is TA/VRAM/SYNC video
+		// data that would clobber the local SH4 render.  Skip all of it, but
+		// first check for MCSV (mid-match join savestate from server) — those
+		// frames start with 'M','C','S','V' so they're trivially distinguishable
+		// from both raw GSTA/OBJF packets and ZCST-wrapped TA frames.
+		if (_gstaOnly.load(std::memory_order_relaxed)) {
+			if (frame.size() > 12
+			    && frame[0] == 'M' && frame[1] == 'C'
+			    && frame[2] == 'S' && frame[3] == 'V') {
+				uint32_t uncompSize;
+				memcpy(&uncompSize, frame.data() + 4, 4);
+				// Inner payload is a ZCST-compressed blob starting at byte 8.
+				size_t dSize = 0;
+				const uint8_t* d = decomp.decompress(
+				    frame.data() + 8, frame.size() - 8, dSize);
+				if (d && dSize > 0) {
+					std::lock_guard<std::mutex> lk(_pendingSaveStateMtx);
+					_pendingSaveState.assign(d, d + dSize);
+					_pendingSaveStateReady.store(true, std::memory_order_release);
+					printf("[MIRROR-WS] MCSV savestate received: %.1f MB — queued for apply\n",
+					       dSize / (1024.0 * 1024.0));
+					fflush(stdout);
+				} else {
+					printf("[MIRROR-WS] MCSV: decompress failed (got %zu bytes)\n", dSize);
+				}
+			}
 			continue;
+		}
 
 		// ---- Client-side arrival telemetry (video WS) ----
 		{
@@ -1328,6 +1359,24 @@ void requestClientVideoReconnect()
 	}
 	_wsFd = -1;
 	_clientWsConnected.store(false, std::memory_order_release);
+}
+
+bool hasPendingSaveState()
+{
+	return _pendingSaveStateReady.load(std::memory_order_acquire);
+}
+
+bool takePendingSaveState(std::vector<uint8_t>& out)
+{
+	if (!_pendingSaveStateReady.load(std::memory_order_acquire))
+		return false;
+	std::lock_guard<std::mutex> lk(_pendingSaveStateMtx);
+	if (!_pendingSaveStateReady.load(std::memory_order_relaxed))
+		return false;
+	out = std::move(_pendingSaveState);
+	_pendingSaveState.clear();
+	_pendingSaveStateReady.store(false, std::memory_order_release);
+	return true;
 }
 
 bool isHeadless()

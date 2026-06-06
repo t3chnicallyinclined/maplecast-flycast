@@ -9,6 +9,7 @@
 #include "maplecast_mirror.h"
 #include "cfg/option.h"
 #include "hw/sh4/sh4_mem.h"
+#include "emulator.h"
 
 #include <atomic>
 #include <string>
@@ -99,6 +100,23 @@ bool init()
 bool frameInject()
 {
 	if (!_active.load(std::memory_order_relaxed)) return true;
+
+	// Mid-match join: server ships an MCSV savestate when we connect while
+	// in_match is active. Apply it immediately so local in_match becomes 1
+	// and GSTA injection starts this round — no waiting for char select.
+	{
+		std::vector<uint8_t> stateData;
+		if (maplecast_mirror::takePendingSaveState(stateData)) {
+			printf("[state-replica] applying MCSV savestate (%.1f MB) — mid-match join\n",
+			       stateData.size() / (1024.0 * 1024.0));
+			fflush(stdout);
+			dc_loadstate_from_memory(stateData.data(), stateData.size());
+			_gotFirst.store(false, std::memory_order_release);
+			printf("[state-replica] mid-match join complete — GSTA injection active next frame\n");
+			fflush(stdout);
+			return true;
+		}
+	}
 
 	// FREEZE: pin local inputs to neutral every frame so the local SH4 cannot
 	// advance the characters on its own — the injected GSTA is the only mover.

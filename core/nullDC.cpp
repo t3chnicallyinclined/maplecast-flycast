@@ -189,7 +189,7 @@ void flycast_term()
 
 bool dc_savestateAllowed() {
 	// MapleCast: always allow save states — we NEED them for sync start
-	if (std::getenv("MAPLECAST_SERVER"))
+	if (std::getenv("MAPLECAST_SERVER") || std::getenv("MAPLECAST_STATE_REPLICA"))
 		return !settings.content.path.empty();
 	return !settings.content.path.empty() && !settings.network.online
 			&& !settings.naomi.multiboard && !MapleLink::StorageEnabled();
@@ -266,6 +266,18 @@ fail:
 		std::fclose(f);
 	free(data);
 	// delete failed savestate?
+}
+
+void dc_loadstate_from_memory(const u8* data, size_t size)
+{
+	if (!dc_savestateAllowed()) return;
+	try {
+		Deserializer deser(data, size);
+		emu.loadstate(deser);
+		NOTICE_LOG(SAVESTATE, "Loaded in-memory state: %zu bytes", size);
+	} catch (const Deserializer::Exception& e) {
+		ERROR_LOG(SAVESTATE, "dc_loadstate_from_memory: %s", e.what());
+	}
 }
 
 void dc_loadstate(int index)

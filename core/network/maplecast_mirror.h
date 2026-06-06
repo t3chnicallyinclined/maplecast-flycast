@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <string>
+#include <vector>
 #include "maplecast_gamestate.h"
 
 struct rend_context;
@@ -142,6 +143,12 @@ void resetClientStatsPeaks();
 
 // Game state from server (for overlay/HUD). Returns false if no state received yet.
 bool getClientGameState(maplecast_gamestate::GameState& out);
+
+// Mid-match join: true when the server has sent an MCSV savestate blob that
+// hasn't been consumed yet. takePendingSaveState() moves the blob into `out`
+// and clears the flag; call it from the emu thread (frameInject).
+bool hasPendingSaveState();
+bool takePendingSaveState(std::vector<uint8_t>& out);
 
 // Full object pool from server (OBJF) for the state-replica inject. Copies up
 // to maxObjs into out, returns the count (0 if none received yet).

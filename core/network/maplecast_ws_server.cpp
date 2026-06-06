@@ -163,6 +163,54 @@ static std::vector<std::string> _seedPeers;
 static std::map<void*, std::string> _connToPeerId;  // connKey â†’ peerId
 static std::vector<QueueEntry> _queue;
 
+// Mid-match join: when a client connects while a match is live, we queue the
+// connection handle here. drainPendingSaveConns() (called from checkMatchEnd
+// on the status thread) builds a full savestate once and ships it as an MCSV
+// frame to every queued client so the state-replica can bootstrap immediately.
+static std::mutex _pendingSaveMtx;
+static std::vector<ConnHdl> _pendingSaveConns;
+
+static void drainPendingSaveConns()
+{
+	std::vector<ConnHdl> pending;
+	{
+		std::lock_guard<std::mutex> lk(_pendingSaveMtx);
+		if (_pendingSaveConns.empty()) return;
+		pending.swap(_pendingSaveConns);
+	}
+	size_t stateSize = 0;
+	uint8_t* stateData = maplecast_mirror::buildFullSaveState(stateSize);
+	if (!stateData || stateSize == 0) {
+		printf("[maplecast-ws] drainPendingSaveConns: buildFullSaveState failed\n");
+		free(stateData);
+		return;
+	}
+	// Compress: "MCSV"(4) + uint32_t(uncompSize) + ZCST_blob
+	MirrorCompressor comp;
+	comp.init(stateSize + 128);
+	size_t compSize = 0; uint64_t compUs = 0;
+	const uint8_t* compData = comp.compress(stateData, (uint32_t)stateSize, compSize, compUs, 3);
+	free(stateData);
+	std::vector<uint8_t> mcsvFrame(8 + compSize);
+	memcpy(mcsvFrame.data(), "MCSV", 4);
+	uint32_t ss = (uint32_t)stateSize;
+	memcpy(mcsvFrame.data() + 4, &ss, 4);
+	memcpy(mcsvFrame.data() + 8, compData, compSize);
+	comp.destroy();
+	printf("[maplecast-ws] MCSV: %.1f MB -> %.1f MB compressed for %zu client(s)\n",
+	       stateSize / (1024.0*1024.0), compSize / (1024.0*1024.0), pending.size());
+	std::lock_guard<std::mutex> connLock(_connMutex);
+	for (auto& hdl : pending) {
+		try {
+			_ws.send(hdl, mcsvFrame.data(), mcsvFrame.size(),
+			         websocketpp::frame::opcode::binary);
+			printf("[maplecast-ws] MCSV sent to client\n");
+		} catch (...) {
+			printf("[maplecast-ws] MCSV send failed (client disconnected?)\n");
+		}
+	}
+}
+
 // Loss detection state
 static bool _matchActive = false;
 static bool _matchEndHandled = false;
@@ -677,6 +725,8 @@ static void checkMatchEnd()
 				broadcastStatus();
 		}
 	}
+	// Ship savestate to any client that connected while in_match was true.
+	drainPendingSaveConns();
 }
 
 // ==================== Relay Topology Helpers ====================
@@ -916,6 +966,15 @@ static void onOpen(ConnHdl hdl)
 			(double)syncSize / compSyncSize, compUs / 1000);
 	} catch (...) {
 		printf("[maplecast-ws] failed to send initial sync\n");
+	}
+
+	// If a match is live, queue a full savestate send for this client.
+	// drainPendingSaveConns() fires on the status thread (~1s) and ships
+	// the state as an MCSV frame so the state-replica can join mid-fight.
+	if (_matchActive) {
+		std::lock_guard<std::mutex> lk(_pendingSaveMtx);
+		_pendingSaveConns.push_back(hdl);
+		printf("[maplecast-ws] match active — queued MCSV savestate for new client\n");
 	}
 
 	// Send lobby status
