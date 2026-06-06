@@ -28,6 +28,9 @@ namespace maplecast_state_replica
 static std::atomic<bool>     _active{false};
 static std::atomic<bool>     _gotFirst{false};
 static bool                  _freeze = false;
+static bool                  _injectObjects = false;   // pool inject (writeObjects)
+                                                        // OFF by default — isolate the
+                                                        // crash; chars-only is this run's goal
 static std::string           _host;
 static int                   _port = 7201;
 static std::atomic<uint32_t> _lastFrame{0};
@@ -66,6 +69,10 @@ bool init()
 	// inject doesn't cover. So we force freeze on; the env var is kept only as
 	// documentation of intent (and to allow a future opt-out experiment).
 	_freeze = (std::getenv("MAPLECAST_STATE_REPLICA_NO_FREEZE") == nullptr);
+	// Pool inject is OFF by default for this run: writing sprite_id into pool
+	// nodes is the riskier path, and prod doesn't ship OBJF yet. Opt in with
+	// MAPLECAST_STATE_REPLICA_OBJECTS=1 once chars-only is confirmed stable.
+	_injectObjects = (std::getenv("MAPLECAST_STATE_REPLICA_OBJECTS") != nullptr);
 
 	// The local SH4 is authoritative for nothing here — mute its audio so two
 	// instances side-by-side don't fight over the speakers. The server's audio
@@ -78,7 +85,8 @@ bool init()
 	// delta or VRAM/PVR SYNC — the local SH4 owns the framebuffer. Using the
 	// full startMirrorStream here clobbered the local render (black screen).
 	printf("[state-replica] === STATE-REPLICA MODE ===\n");
-	printf("[state-replica] GSTA source: %s:%d  freeze=%d\n", _host.c_str(), _port, (int)_freeze);
+	printf("[state-replica] GSTA source: %s:%d  freeze=%d  inject_objects=%d  (in_match-gated)\n",
+	       _host.c_str(), _port, (int)_freeze, (int)_injectObjects);
 	printf("[state-replica] inject point: frame top, before runInternal()\n");
 	maplecast_mirror::startGstaStream(_host.c_str(), _port);
 
@@ -111,6 +119,19 @@ bool frameInject()
 		return true;   // advance + render anyway
 	}
 
+	// Gate injection on the SERVER being in a match. The savestate boots into
+	// the game, but the first frames may be a load/transition where the char
+	// structs + object pool aren't coherent yet; writing into them then can
+	// corrupt SH4 state the JIT later executes (crash). in_match is the clean
+	// "the fight is live, the structs are valid" signal. Outside a match we
+	// still advance + render the local game (savestate baseline), just no inject.
+	if (!gs.in_match) {
+		static uint64_t _preMatchN = 0;
+		if ((++_preMatchN % 120) == 1)
+			printf("[state-replica] server not in_match yet — rendering local frame, no inject\n");
+		return true;
+	}
+
 	// 1) Inject the chars + globals + stage-anim timer. The game's draw code
 	//    (run by runInternal() right after this returns) reads these when it
 	//    builds the TA list for this frame.
@@ -123,7 +144,7 @@ bool frameInject()
 	//    FREEZE: input-driven projectiles/supers) have no node and stay missing
 	//    — that gap is the measured "needs node synthesis" region.
 	maplecast_gamestate::ObjectState objs[48];
-	int nobj = maplecast_mirror::getClientObjects(objs, 48);
+	int nobj = _injectObjects ? maplecast_mirror::getClientObjects(objs, 48) : 0;
 	int wrote = 0;
 	if (nobj > 0) wrote = maplecast_gamestate::writeObjects(objs, nobj);
 	_lastObjsSeen.store(nobj, std::memory_order_relaxed);

@@ -1486,9 +1486,15 @@ void Emulator::start()
 			(int)config::MaxThreads);
 	}
 
-	// Mirror client writes directly to VRAM/RAM — don't re-protect after unprotect
-	if (!maplecast_mirror::isClient())
+	// Mirror client writes directly to VRAM/RAM — don't re-protect after unprotect.
+	// State-replica: the local SH4 is the SOLE renderer and must read/write VRAM
+	// freely. The memwatch PROT_NONE is the mirror-SERVER's dirty-page-detection
+	// mechanism (fault -> record -> ship); a replica ships nothing, so installing
+	// it makes the local game's VRAM access segfault. Run like a normal flycast.
+	if (!maplecast_mirror::isClient() && !maplecast_state_replica::active())
 		memwatch::protect();
+	else if (maplecast_state_replica::active())
+		printf("[state-replica] memwatch VRAM protection NOT installed — local SH4 renders freely\n");
 
 	if (config::ThreadedRendering)
 	{
