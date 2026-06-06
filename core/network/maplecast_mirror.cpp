@@ -991,6 +991,13 @@ static void wsClientRun(std::string host, int port)
 			continue;
 		}
 
+		// MCSV frame (mid-match join savestate) — only consumed by GSTA-only
+		// clients above. Regular TA clients silently skip so periodic server
+		// broadcasts don't trigger BAD FRAME warnings.
+		if (frame.size() > 4 && frame[0] == 'M' && frame[1] == 'C'
+		    && frame[2] == 'S' && frame[3] == 'V')
+			continue;
+
 		// ---- Client-side arrival telemetry (video WS) ----
 		{
 			const int64_t now = _clientNowUs();

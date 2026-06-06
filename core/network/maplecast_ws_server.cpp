@@ -648,6 +648,29 @@ static void checkMatchEnd()
 			buildMcsvCache();
 		}
 
+		// Periodic MCSV broadcast: relay clients connect mid-match and miss
+		// the on-connect send (the relay's upstream connection is already open).
+		// Re-broadcast every 30s so state-replica clients joining via relay
+		// receive it within 30 seconds of connecting.
+		{
+			static int _mcsvBroadcastTick = 0;
+			if (++_mcsvBroadcastTick >= 30) {
+				_mcsvBroadcastTick = 0;
+				std::vector<uint8_t> mcsvCopy;
+				{ std::lock_guard<std::mutex> lk(_mcsvMtx); mcsvCopy = _cachedMcsvFrame; }
+				if (!mcsvCopy.empty()) {
+					std::lock_guard<std::mutex> lock(_connMutex);
+					for (auto& conn : _connections) {
+						try { _ws.send(conn, mcsvCopy.data(), mcsvCopy.size(),
+						               websocketpp::frame::opcode::binary); }
+						catch (...) {}
+					}
+					printf("[maplecast-ws] MCSV periodic broadcast: %.1f MB to %zu clients\n",
+					       mcsvCopy.size() / (1024.0*1024.0), _connections.size());
+				}
+			}
+		}
+
 		// Check if all 3 chars on one side are dead
 		bool p1dead = (gs.chars[0].health == 0 && gs.chars[2].health == 0 && gs.chars[4].health == 0);
 		bool p2dead = (gs.chars[1].health == 0 && gs.chars[3].health == 0 && gs.chars[5].health == 0);

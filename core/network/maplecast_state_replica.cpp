@@ -107,14 +107,16 @@ bool frameInject()
 {
 	if (!_active.load(std::memory_order_relaxed)) return true;
 
-	// No-ROM boot: hold the SH4 in reset until the server delivers MCSV.
-	// Returning false tells the emu loop to sleep 250µs and retry without
-	// calling runInternal() — SH4 never executes the blank post-reset state.
+	// No-ROM boot: wait for server to deliver MCSV before injecting anything.
+	// We return true (let the SH4 advance on blank DC hardware) so the render
+	// loop keeps ticking and the window stays responsive. The blank DC just
+	// shows BIOS boot animation. When MCSV arrives, dc_loadstate_from_memory
+	// replaces all state atomically.
 	if (_noRomMode && !maplecast_mirror::hasPendingSaveState()) {
 		static uint64_t _bootWaitN = 0;
 		if ((++_bootWaitN % 240) == 1)
 			printf("[state-replica] waiting for MCSV boot state from server...\n");
-		return false;
+		return true;
 	}
 
 	// Apply MCSV savestate: either the mid-match join case (ROM mode, server

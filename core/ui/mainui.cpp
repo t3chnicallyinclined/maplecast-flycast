@@ -28,6 +28,7 @@
 #include "profiler/fc_profiler.h"
 #include "oslib/i18n.h"
 #include "network/maplecast_mirror.h"
+#include "network/maplecast_state_replica.h"
 #include "network/maplecast_palette.h"
 #include "gui_maplecast_settings.h"
 #include "gui_game_overlay.h"
@@ -51,9 +52,9 @@ bool mainui_rend_frame()
 	os_DoEvents();
 	os_UpdateInputState();
 
-	// Mirror client: skip the ROM selection GUI on first frame, but
-	// allow the user to open settings (Back/Select button) afterwards.
-	if (maplecast_mirror::isClient())
+	// Mirror client + state-replica: skip the ROM selection GUI on first frame
+	// (game starts immediately), but allow settings to open later via Back button.
+	if (maplecast_mirror::isClient() || maplecast_state_replica::active())
 	{
 		static bool firstFrame = true;
 		if (firstFrame && gui_is_open()) {

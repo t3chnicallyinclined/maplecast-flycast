@@ -356,8 +356,8 @@ int main(int argc, char* argv[])
 			ERROR_LOG(BOOT, "[state-replica] loadGame failed: %s", e.what());
 			return 1;
 		}
-		gui_setState(GuiState::Closed);
-		printf("[state-replica] loaded, GUI closed, renderer active, entering main loop\n");
+		// GUI closes automatically on the first render frame via mainui_rend_frame.
+		printf("[state-replica] loaded, entering main loop\n");
 		fflush(stdout);
 	}
 

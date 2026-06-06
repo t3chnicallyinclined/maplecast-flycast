@@ -546,6 +546,27 @@ int main(int argc, char* argv[])
 		emu.loadGame(nullptr);
 	}
 
+	// State-replica auto-start — mirrors core/linux-dist/main.cpp:344-362.
+	if (nowide::getenv("MAPLECAST_STATE_REPLICA")) {
+		const bool hasRom = !settings.content.path.empty();
+		if (hasRom)
+			printf("[state-replica] auto-start with ROM: %s\n", settings.content.path.c_str());
+		else
+			printf("[state-replica] auto-start: no ROM -- booting from server MCSV savestate\n");
+		fflush(stdout);
+		try {
+			emu.loadGame(hasRom ? settings.content.path.c_str() : nullptr);
+			emu.start();
+		} catch (const FlycastException& e) {
+			ERROR_LOG(BOOT, "[state-replica] loadGame failed: %s", e.what());
+			return 1;
+		}
+		// GUI closes automatically on the first render frame via mainui_rend_frame
+		// (same mechanism as the mirror client — no gui_setState needed here).
+		printf("[state-replica] loaded, entering main loop\n");
+		fflush(stdout);
+	}
+
 #ifdef USE_BREAKPAD
 	nowide::stackstring nws;
 	static std::string tempDir8;
