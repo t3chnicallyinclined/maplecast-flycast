@@ -271,6 +271,46 @@ int readObjects(ObjectState* out, int maxObjs)
 	return n;
 }
 
+// PARTDUMP: Phase-0 test of assembly-driven runtime part-capture. Reads decoded part
+// textures from the DM00 Poly region (0x0CE80000, SH4 main RAM): dir base *(0x0CE80008),
+// 0x10 stride; entry+0x0 = (w,h) u16 px, +0x8 = 16bpp texel ptr. Dumps first parts as
+// PPM to /dev/shm. One-shot, read-only, gated MAPLECAST_PARTDUMP.
+static void partDump(const GameState& state) {
+	static bool on = getenv("MAPLECAST_PARTDUMP") != nullptr;
+	static bool done = false;
+	if (!on || done || !state.in_match) return;
+	auto valid = [](uint32_t a){ return (a >= 0x0C000000 && a < 0x0D000000) || (a >= 0x8C000000 && a < 0x8D000000); };
+	uint32_t dirBase = addrspace::read32(0x0CE80008);
+	if (!valid(dirBase)) { uint32_t alt = addrspace::read32(0x8CE80008); if (valid(alt)) dirBase = alt; }
+	FILE* lg = fopen("/dev/shm/mc_partdump.log", "w");
+	if (lg) fprintf(lg, "dirBase=0x%08x\n", dirBase);
+	int dumped = 0;
+	for (int i = 0; i < 256 && dumped < 48; i++) {
+		uint32_t e = dirBase + (uint32_t)i * 0x10;
+		uint32_t e0 = addrspace::read32(e), e4 = addrspace::read32(e + 4), e8 = addrspace::read32(e + 8);
+		if (!valid(e8)) continue;
+		uint16_t pw = e0 & 0xffff, ph = (e0 >> 16) & 0xffff;
+		if (pw == 0 || ph == 0 || pw > 512 || ph > 512) continue;
+		if (lg && dumped < 3) { fprintf(lg, "part[%d] tex=0x%08x %dx%d e4=%08x tex16:", i, e8, pw, ph, e4); for (int t = 0; t < 12; t++) fprintf(lg, " %04x", (uint16_t)addrspace::read16(e8 + t*2)); fprintf(lg, "\n"); }
+		char fn[80]; snprintf(fn, sizeof fn, "/dev/shm/part_%02d.ppm", dumped);
+		FILE* pf = fopen(fn, "wb");
+		if (pf) {
+			fprintf(pf, "P6\n%d %d\n255\n", pw, ph);
+			for (int y = 0; y < ph; y++) for (int x = 0; x < pw; x++) {
+				uint32_t tw = 0; for (int b = 0; b < 12; b++) { tw |= ((uint32_t)((x >> b) & 1)) << (2*b); tw |= ((uint32_t)((y >> b) & 1)) << (2*b + 1); }
+				uint16_t px = (uint16_t)addrspace::read16(e8 + tw * 2);   // PVR twiddle (Morton)
+				// ARGB1555 guess (a=15, r=14-10, g=9-5, b=4-0)
+				uint8_t rr = ((px >> 10) & 0x1f) << 3, gg = ((px >> 5) & 0x1f) << 3, bb = (px & 0x1f) << 3;
+				uint8_t rgb[3] = {rr, gg, bb}; fwrite(rgb, 1, 3, pf);
+			}
+			fclose(pf);
+		}
+		dumped++;
+	}
+	if (lg) { fprintf(lg, "dumped %d parts\n", dumped); fclose(lg); }
+	done = true;
+}
+
 void readGameState(GameState& state)
 {
 	// Global state
@@ -324,7 +364,8 @@ void readGameState(GameState& state)
 	state.p2_lt = (uint8_t)(lt[1] >> 8);
 	state.p2_rt = (uint8_t)(rt[1] >> 8);
 
-	ptrDump(state);   // read-only runtime-derivation probe (MAPLECAST_PTRDUMP=1)
+	ptrDump(state);
+	partDump(state);   // read-only runtime-derivation probe (MAPLECAST_PTRDUMP=1)
 }
 
 // Write float to DC memory
