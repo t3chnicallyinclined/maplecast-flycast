@@ -1349,6 +1349,19 @@ void Emulator::start()
 	// the game's own draw code renders the server's truth. NOT lockstep, NOT
 	// the tape-replay maplecast_replica above. See maplecast_state_replica.h.
 	const bool stateReplicaActive = maplecast_state_replica::init();
+	if (stateReplicaActive)
+	{
+		// Run SINGLE-THREADED, exactly like the mirror client (below). The
+		// threaded path spawns an async Flycast-emu thread inside start() that
+		// races the SH4 recompiler / addrspace (p_sh4rcb) init still completing
+		// on the main thread → bm_GetCode null-derefs p_sh4rcb on the very first
+		// frame. Single-threaded runs run() synchronously from mainui_loop's
+		// emu.render() AFTER all init + renderer setup is done — no race. (The
+		// full-mirror build accidentally avoided the crash only because its
+		// SYNC-wait stalled the first frame ~1s, letting init finish.)
+		config::ThreadedRendering.override(false);
+		printf("[state-replica] ThreadedRendering=off — single-threaded run loop (no emu-thread init race)\n");
+	}
 	(void)stateReplicaActive;
 
 	// Replica needs the gamepad → server input pipeline wired (the local
