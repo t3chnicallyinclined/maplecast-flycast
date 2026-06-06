@@ -336,6 +336,31 @@ int main(int argc, char* argv[])
 		fflush(stdout);
 	}
 
+	// State-replica mode (render build, NOT headless): same auto-start as
+	// headless — load the ROM synchronously, start the emu, close the GUI — but
+	// keep the renderer ACTIVE so the injected state is drawn. Without this the
+	// render build sits in GuiState::Main and never enters the run loop, so
+	// frameInject() never fires.
+	if (!_headless_mode && std::getenv("MAPLECAST_STATE_REPLICA"))
+	{
+		if (settings.content.path.empty()) {
+			ERROR_LOG(BOOT, "[state-replica] no ROM path — pass the ROM as an argument");
+			return 1;
+		}
+		printf("[state-replica] auto-start: loading ROM %s\n", settings.content.path.c_str());
+		fflush(stdout);
+		try {
+			emu.loadGame(settings.content.path.c_str());
+			emu.start();   // Loaded -> Running; also runs maplecast_state_replica::init()
+		} catch (const FlycastException& e) {
+			ERROR_LOG(BOOT, "[state-replica] loadGame failed: %s", e.what());
+			return 1;
+		}
+		gui_setState(GuiState::Closed);
+		printf("[state-replica] ROM loaded, GUI closed, renderer active, entering main loop\n");
+		fflush(stdout);
+	}
+
 #if defined(USE_BREAKPAD)
 	auto async = std::async(std::launch::async, uploadCrashes, "/tmp");
 #endif

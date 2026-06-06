@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 
 // The authoritative input globals the game reads at vblank. In FREEZE mode we
 // pin these to neutral (active-low: all bits set) so the local SH4 cannot move
@@ -98,11 +99,17 @@ bool frameInject()
 	}
 
 	maplecast_gamestate::GameState gs;
-	if (!maplecast_mirror::getClientGameState(gs)) {
-		// No authoritative state yet. Stall so we don't run the savestate
-		// forward un-corrected (which would show the savestate's frozen pose).
+	bool haveState = maplecast_mirror::getClientGameState(gs);
+	if (!haveState) {
+		// No authoritative state yet. Do NOT block — let the frame render the
+		// savestate-baseline pose so the operator at least sees the game. (The
+		// emu loop must keep advancing for the renderer to present.)
 		_stalled.fetch_add(1, std::memory_order_relaxed);
-		return false;
+		static uint64_t _waitN = 0;
+		if ((++_waitN % 60) == 1)
+			printf("[state-replica] waiting for first GSTA (rendering savestate frame) stalls=%llu\n",
+			       (unsigned long long)_stalled.load());
+		return true;   // advance + render anyway
 	}
 
 	// 1) Inject the chars + globals + stage-anim timer. The game's draw code
@@ -123,21 +130,29 @@ bool frameInject()
 	_lastObjsSeen.store(nobj, std::memory_order_relaxed);
 	_lastObjsWritten.store(wrote, std::memory_order_relaxed);
 
-	if (!_gotFirst.exchange(true)) {
-		printf("[state-replica] first GSTA injected — frame_counter=%u stage_anim=%u objs=%d\n",
-		       gs.frame_counter, gs.stage_anim_timer, nobj);
-	}
-	// Periodic diagnostic: how many pool objects the server has vs. how many we
-	// could place. A persistent gap (seen > written) names the node-synthesis
-	// region precisely (projectiles/supers absent under FREEZE).
-	{
-		static uint32_t fc = 0;
-		if ((++fc % 120) == 0)
-			printf("[state-replica] frame=%u objs seen=%d written=%d (gap=%d -> node-synthesis region)\n",
-			       gs.frame_counter, nobj, wrote, nobj - wrote);
-	}
+	uint64_t injected = _injected.fetch_add(1, std::memory_order_relaxed) + 1;
 	_lastFrame.store(gs.frame_counter, std::memory_order_relaxed);
-	_injected.fetch_add(1, std::memory_order_relaxed);
+
+	if (!_gotFirst.exchange(true)) {
+		printf("[state-replica] FIRST GSTA injected — frame_counter=%u stage_anim=%u objs=%d\n",
+		       gs.frame_counter, gs.stage_anim_timer, nobj);
+		fflush(stdout);
+	}
+
+	// Once-per-second heartbeat (wall clock, so it prints even at low FPS).
+	// frame = server frame_counter; injected = frames we've applied; objs gap =
+	// the node-synthesis region (server objects with no local node yet).
+	{
+		struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+		int64_t now = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+		static int64_t lastMs = 0;
+		if (now - lastMs >= 1000) {
+			lastMs = now;
+			printf("[state-replica] HEARTBEAT frame=%u injected=%llu objs seen=%d written=%d gap=%d\n",
+			       gs.frame_counter, (unsigned long long)injected, nobj, wrote, nobj - wrote);
+			fflush(stdout);
+		}
+	}
 	return true;
 }
 

@@ -880,11 +880,15 @@ static void wsClientRun(std::string host, int port)
 		if (frame.size() >= 4 && frame[0] == 0xAD && frame[1] == 0x10)
 			continue;
 
-		// Game state packet â€” "GSTA" magic + 253-byte serialized MVC2 state.
-		// Deserialize into a shared GameState struct for the overlay/HUD.
+		// Game state packet â€” "GSTA" magic + serialized MVC2 state.
+		// Deserialize into a shared GameState struct for the overlay/HUD and the
+		// state-replica inject. Accept any frame >= the legacy 253-byte block
+		// (deserialize tolerates the optional input/stage trailers) so a wire
+		// size bump on either side never silently drops the packet.
 		if (frame.size() >= 4 && frame[0] == 'G' && frame[1] == 'S'
 		    && frame[2] == 'T' && frame[3] == 'A') {
-			if (frame.size() >= 4 + maplecast_gamestate::WIRE_SIZE) {
+			static const int LEGACY = 5 + 2+2+2+2 + 4+4+4 + 6*38;   // 253
+			if ((int)frame.size() >= 4 + LEGACY) {
 				maplecast_gamestate::GameState gs;
 				maplecast_gamestate::deserialize(frame.data() + 4,
 				    (int)(frame.size() - 4), gs);
@@ -892,6 +896,15 @@ static void wsClientRun(std::string host, int port)
 				std::lock_guard<std::mutex> lk(_clientGameStateMtx);
 				_clientGameState = gs;
 				_clientGameStateReady.store(true, std::memory_order_release);
+			} else {
+				printf("[MIRROR-WS] GSTA too short: %zu bytes (need %d)\n",
+				       frame.size(), 4 + LEGACY);
+			}
+			static uint64_t _gstaN = 0;
+			if ((++_gstaN % 120) == 1) {
+				printf("[MIRROR-WS] GSTA rx #%llu (%zu bytes)\n",
+				       (unsigned long long)_gstaN, frame.size());
+				fflush(stdout);
 			}
 			continue;
 		}
@@ -906,6 +919,12 @@ static void wsClientRun(std::string host, int port)
 			_clientObjectCount = got;
 			for (int i = 0; i < got; i++) _clientObjects[i] = tmp[i];
 			_clientObjectsReady.store(true, std::memory_order_release);
+			static uint64_t _objfN = 0;
+			if ((++_objfN % 120) == 1) {
+				printf("[MIRROR-WS] OBJF rx #%llu (%d objs)\n",
+				       (unsigned long long)_objfN, got);
+				fflush(stdout);
+			}
 			continue;
 		}
 
