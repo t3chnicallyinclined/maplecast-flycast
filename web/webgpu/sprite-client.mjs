@@ -36,7 +36,7 @@ export class SpriteClient {
     this._loading = {};       // char_id -> Promise (de-dupe concurrent fetches)
     this.charBase = null;     // URL base for per-char atlases, e.g. './test-atlas/chars'
     this.screenW = 640; this.screenH = 480;
-    this.spriteScale = 1.75;  // constant size factor (MVC2 pans, doesn't dynamic-zoom)
+    this.spriteScale = 1.0;   // constant size factor — 1.0: baked offsets are already screen-space
     this._zoom = 1;           // derived camera zoom — INFO ONLY (shown, not applied)
     this._lastFc = null;      // last game frame_counter (for frame-timed velocity)
     this.inMatch = 0;
@@ -82,9 +82,11 @@ export class SpriteClient {
     //              palette:[...], pal128:[[r,g,b]...], screenW, screenH, name }
     this.asmChars = {};
     this._asmLoading = {};     // cid -> Promise (de-dupe)
-    // CpsX/CpsY game scale (work.asm) — part offsets/sizes are in game px; screen
-    // pos is already in 640x480 screen space, so apply this as the part->screen factor.
-    this.asmScaleX = 1.0; this.asmScaleY = 1.0;
+    // CpsX/CpsY game scale (work.asm, Preppy RE) — part dx/dy/w/h are in game px;
+    // screen_x/y is already in 640x480 screen space. These factors convert game px
+    // to screen px: CpsXScale=0x3FD55555=5/3, CpsYScale=0x40092492=15/7.
+    this.asmScaleX = 5/3;   // 1.6667 — CpsXScale from work.asm
+    this.asmScaleY = 15/7;  // 2.1429 — CpsYScale from work.asm
     this._asmNote = 'assembly: no atlas';
     this._asmMiss = 0; this._asmDrawn = 0;
   }

@@ -648,13 +648,14 @@ static void checkMatchEnd()
 			buildMcsvCache();
 		}
 
-		// Periodic MCSV broadcast: relay clients connect mid-match and miss
-		// the on-connect send (the relay's upstream connection is already open).
-		// Re-broadcast every 5s so state-replica clients joining via relay
-		// receive it within 5 seconds of connecting.
+		// Periodic MCSV broadcast: relay clients that connect mid-match miss the
+		// on-connect send (relay's upstream WS is already open). 60s interval:
+		// onOpen covers direct connections; direct-join replica clients get it
+		// immediately. Kept long to avoid ~5 MB interruptions on viewer streams
+		// every few seconds. Replica clients only apply the first MCSV anyway.
 		{
 			static int _mcsvBroadcastTick = 0;
-			if (++_mcsvBroadcastTick >= 5) {
+			if (++_mcsvBroadcastTick >= 60) {
 				_mcsvBroadcastTick = 0;
 				std::vector<uint8_t> mcsvCopy;
 				{ std::lock_guard<std::mutex> lk(_mcsvMtx); mcsvCopy = _cachedMcsvFrame; }
