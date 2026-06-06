@@ -58,6 +58,10 @@ bool init();
 // Is state-replica mode active?
 bool active();
 
+// True while in no-ROM mode waiting for the server's MCSV savestate.
+// During this phase, the SH4 is idle and the TA stream renders the picture.
+bool isNoRomWaiting();
+
 // Called at the TOP of each emu frame, before runInternal(). Injects the
 // latest server GSTA into local RAM via writeGameState(). Returns true when
 // the emu may advance (always true once bootstrapped; stalls until the first

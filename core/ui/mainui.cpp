@@ -52,14 +52,17 @@ bool mainui_rend_frame()
 	os_DoEvents();
 	os_UpdateInputState();
 
-	// Mirror client + state-replica: skip the ROM selection GUI on first frame
-	// (game starts immediately), but allow settings to open later via Back button.
+	// Mirror client + state-replica: suppress the startup ROM-selection GUI until
+	// it's actually closed, then stop interfering (so Back-button settings still work).
 	if (maplecast_mirror::isClient() || maplecast_state_replica::active())
 	{
-		static bool firstFrame = true;
-		if (firstFrame && gui_is_open()) {
-			gui_setState(GuiState::Closed);
-			firstFrame = false;
+		static bool startupGuiDismissed = false;
+		if (!startupGuiDismissed) {
+			if (gui_is_open()) {
+				gui_setState(GuiState::Closed);
+			} else {
+				startupGuiDismissed = true;
+			}
 		}
 	}
 
@@ -170,6 +173,12 @@ bool mainui_rend_frame()
 			// so the gear icon + settings panel stay responsive.
 			gui_displayMirrorDebug();
 		}
+		// State-replica phase-1: poll for MCSV each frame so the mode switch
+		// fires as soon as the server's savestate arrives. frameInject() is a
+		// no-op until MCSV is queued; when it applies it, setClientRendering(false)
+		// clears isClient() and the next iteration falls to the emu.render() branch.
+		if (maplecast_state_replica::isNoRomWaiting())
+			maplecast_state_replica::frameInject();
 	}
 	else
 	{

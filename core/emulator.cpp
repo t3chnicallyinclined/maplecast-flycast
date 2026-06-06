@@ -1177,9 +1177,14 @@ void Emulator::run()
 	// SH4 frame runs (non-threaded path). See the threaded path for details.
 	if (maplecast_state_replica::active())
 	{
-		while (state == Running && !maplecast_state_replica::frameInject())
-			std::this_thread::sleep_for(std::chrono::microseconds(250));
-		if (state != Running) return;
+		if (!maplecast_state_replica::frameInject()) {
+			// No-ROM MCSV wait: yield to the render loop for one frame so the
+			// window stays responsive while the SH4 is held idle. Return here
+			// so runInternal() is NOT called (SH4 would fire reios_boot without
+			// a GDI and throw "Failed to locate bootfile").
+			std::this_thread::sleep_for(std::chrono::milliseconds(16));
+			return;
+		}
 	}
 	startTime = sh4_sched_now64();
 	renderTimeout = false;

@@ -991,12 +991,28 @@ static void wsClientRun(std::string host, int port)
 			continue;
 		}
 
-		// MCSV frame (mid-match join savestate) — only consumed by GSTA-only
-		// clients above. Regular TA clients silently skip so periodic server
-		// broadcasts don't trigger BAD FRAME warnings.
+		// MCSV frame — also handled here for state-replica clients that started
+		// as a full mirror stream (not GSTA-only). Store the savestate so
+		// frameInject() can apply it and switch to SH4 mode.
 		if (frame.size() > 4 && frame[0] == 'M' && frame[1] == 'C'
-		    && frame[2] == 'S' && frame[3] == 'V')
+		    && frame[2] == 'S' && frame[3] == 'V') {
+			if (frame.size() > 12) {
+				uint32_t uncompSize = 0;
+				memcpy(&uncompSize, frame.data() + 4, 4);
+				size_t dSize = 0;
+				const uint8_t* d = decomp.decompress(
+				    frame.data() + 8, frame.size() - 8, dSize);
+				if (d && dSize > 0) {
+					std::lock_guard<std::mutex> lk(_pendingSaveStateMtx);
+					_pendingSaveState.assign(d, d + dSize);
+					_pendingSaveStateReady.store(true, std::memory_order_release);
+					printf("[MIRROR-WS] MCSV savestate received: %.1f MB — queued for apply\n",
+					       dSize / (1024.0 * 1024.0));
+					fflush(stdout);
+				}
+			}
 			continue;
+		}
 
 		// ---- Client-side arrival telemetry (video WS) ----
 		{
@@ -1366,6 +1382,18 @@ void requestClientVideoReconnect()
 	}
 	_wsFd = -1;
 	_clientWsConnected.store(false, std::memory_order_release);
+}
+
+void switchToGstaOnly()
+{
+	_gstaOnly.store(true, std::memory_order_release);
+	printf("[MIRROR] switched to GSTA-only mode — TA delta processing stopped\n");
+	fflush(stdout);
+}
+
+void setClientRendering(bool enabled)
+{
+	_isClient = enabled;
 }
 
 bool hasPendingSaveState()

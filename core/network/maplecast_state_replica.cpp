@@ -31,7 +31,8 @@ namespace maplecast_state_replica
 static std::atomic<bool>     _active{false};
 static std::atomic<bool>     _gotFirst{false};
 static bool                  _freeze = false;
-static bool                  _noRomMode = false;  // true when booting from MCSV (no local ROM)
+static bool                  _noRomMode = false;    // true when booting from MCSV (no local ROM)
+static bool                  _mcsvApplied = false;  // apply MCSV exactly once; ignore repeat 5s broadcasts
 static bool                  _injectObjects = false;   // pool inject (writeObjects)
                                                         // OFF by default — isolate the
                                                         // crash; chars-only is this run's goal
@@ -83,12 +84,11 @@ bool init()
 	// (if wanted) comes from its own stream.
 	settings.aica.muteAudio = true;
 
-	// Connect the mirror WS as a GSTA-ONLY transport. startGstaStream parses
-	// only GSTA/OBJF into _clientGameState/_clientObjects (read via
-	// getClientGameState/getClientObjects) and NEVER applies the server's TA
-	// delta or VRAM/PVR SYNC — the local SH4 owns the framebuffer. Using the
-	// full startMirrorStream here clobbered the local render (black screen).
-	// No-ROM boot: SH4 will be held in frameInject until server delivers MCSV.
+	// No-ROM boot: start as a FULL mirror stream (TA + VRAM) so the user sees
+	// the game immediately while we wait for the server's MCSV savestate.
+	// When MCSV arrives, frameInject() applies it, calls switchToGstaOnly(),
+	// and the SH4 takes over rendering. GSTA frames are processed on both
+	// paths (the receive loop handles them before the gstaOnly check).
 	_noRomMode = settings.content.path.empty();
 
 	printf("[state-replica] === STATE-REPLICA MODE ===\n");
@@ -96,9 +96,13 @@ bool init()
 	       _host.c_str(), _port, (int)_freeze, (int)_injectObjects);
 	printf("[state-replica] inject point: frame top, before runInternal()\n");
 	if (_noRomMode)
-		printf("[state-replica] no-ROM mode — SH4 blocked until MCSV arrives from server\n");
-	maplecast_mirror::startGstaStream(_host.c_str(), _port, /*vramSync=*/false);
+		printf("[state-replica] no-ROM mode — rendering TA stream until MCSV arrives from server\n");
+	maplecast_mirror::startMirrorStream(_host.c_str(), _port);
+	// Enable mirror rendering so clientReceive() works during phase 1.
+	// Reverted to false in frameInject() when MCSV is applied.
+	maplecast_mirror::setClientRendering(true);
 
+	_mcsvApplied = false;
 	_active.store(true);
 	return true;
 }
@@ -107,30 +111,28 @@ bool frameInject()
 {
 	if (!_active.load(std::memory_order_relaxed)) return true;
 
-	// No-ROM boot: wait for server to deliver MCSV before injecting anything.
-	// We return true (let the SH4 advance on blank DC hardware) so the render
-	// loop keeps ticking and the window stays responsive. The blank DC just
-	// shows BIOS boot animation. When MCSV arrives, dc_loadstate_from_memory
-	// replaces all state atomically.
-	if (_noRomMode && !maplecast_mirror::hasPendingSaveState()) {
-		static uint64_t _bootWaitN = 0;
-		if ((++_bootWaitN % 240) == 1)
-			printf("[state-replica] waiting for MCSV boot state from server...\n");
-		return true;
-	}
+	// No-ROM boot: SH4 stays idle (mainui renders TA stream) until MCSV arrives.
+	// Return false → Emulator::run() early-returns without calling runInternal().
+	if (_noRomMode && !maplecast_mirror::hasPendingSaveState())
+		return false;
 
-	// Apply MCSV savestate: either the mid-match join case (ROM mode, server
-	// already in_match when we connected) or the initial boot state (no-ROM mode).
+	// Apply MCSV exactly once (no-ROM cold boot or ROM mid-match join). Ignore
+	// every repeat broadcast after the first — the 5s server interval would
+	// otherwise reset the SH4 mid-fight every time a new frame arrives.
 	{
 		std::vector<uint8_t> stateData;
-		if (maplecast_mirror::takePendingSaveState(stateData)) {
+		if (!_mcsvApplied && maplecast_mirror::takePendingSaveState(stateData)) {
 			printf("[state-replica] applying MCSV savestate (%.1f MB)%s\n",
 			       stateData.size() / (1024.0 * 1024.0),
 			       _noRomMode ? " — cold boot from server state" : " — mid-match join");
 			fflush(stdout);
 			dc_loadstate_from_memory(stateData.data(), stateData.size());
 			_noRomMode = false;
+			_mcsvApplied = true;
 			_gotFirst.store(false, std::memory_order_release);
+			// Switch off mirror rendering and TA stream — SH4 now owns the framebuffer.
+			maplecast_mirror::setClientRendering(false);
+			maplecast_mirror::switchToGstaOnly();
 			printf("[state-replica] MCSV applied — GSTA injection active next frame\n");
 			fflush(stdout);
 			return true;
@@ -246,6 +248,8 @@ void shutdown()
 }
 
 bool active() { return _active.load(std::memory_order_relaxed); }
+
+bool isNoRomWaiting() { return _active.load(std::memory_order_relaxed) && _noRomMode; }
 
 Stats getStats()
 {

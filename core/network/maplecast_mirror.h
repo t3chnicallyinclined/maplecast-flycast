@@ -39,6 +39,16 @@ void startMirrorStream(const char* host, int port);
 // textures, eliminating savestate parity issues.
 void startGstaStream(const char* host, int port, bool vramSync = false);
 
+// Switch a running mirror stream from full TA mode to GSTA-only mid-stream.
+// Used by state-replica after MCSV is applied: the SH4 takes over rendering,
+// so TA delta frames should stop being applied.
+void switchToGstaOnly();
+
+// Enable or disable the _isClient flag at runtime.
+// State-replica sets true during phase-1 (no-ROM wait) so clientReceive()
+// renders the TA stream; sets false after MCSV is applied so the SH4 takes over.
+void setClientRendering(bool enabled);
+
 bool isServer();
 bool isClient();
 // True if MapleCast is active in ANY mode (server, client, or local with MAPLECAST=1).

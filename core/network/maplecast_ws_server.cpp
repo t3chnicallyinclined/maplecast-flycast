@@ -650,11 +650,11 @@ static void checkMatchEnd()
 
 		// Periodic MCSV broadcast: relay clients connect mid-match and miss
 		// the on-connect send (the relay's upstream connection is already open).
-		// Re-broadcast every 30s so state-replica clients joining via relay
-		// receive it within 30 seconds of connecting.
+		// Re-broadcast every 5s so state-replica clients joining via relay
+		// receive it within 5 seconds of connecting.
 		{
 			static int _mcsvBroadcastTick = 0;
-			if (++_mcsvBroadcastTick >= 30) {
+			if (++_mcsvBroadcastTick >= 5) {
 				_mcsvBroadcastTick = 0;
 				std::vector<uint8_t> mcsvCopy;
 				{ std::lock_guard<std::mutex> lk(_mcsvMtx); mcsvCopy = _cachedMcsvFrame; }
