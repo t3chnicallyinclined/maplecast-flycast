@@ -172,6 +172,8 @@ static std::vector<ConnHdl> _pendingSaveConns;
 
 static void drainPendingSaveConns()
 {
+	// Only send during an active match — char-select state is useless to ship.
+	if (!_matchActive) return;
 	std::vector<ConnHdl> pending;
 	{
 		std::lock_guard<std::mutex> lk(_pendingSaveMtx);
@@ -968,13 +970,14 @@ static void onOpen(ConnHdl hdl)
 		printf("[maplecast-ws] failed to send initial sync\n");
 	}
 
-	// If a match is live, queue a full savestate send for this client.
-	// drainPendingSaveConns() fires on the status thread (~1s) and ships
-	// the state as an MCSV frame so the state-replica can join mid-fight.
-	if (_matchActive) {
+	// Queue every new connection for MCSV. drainPendingSaveConns() fires on the
+	// status thread (~1s) and only sends when _matchActive — so clients that arrive
+	// between matches wait harmlessly until the next match-start rising edge.
+	{
 		std::lock_guard<std::mutex> lk(_pendingSaveMtx);
 		_pendingSaveConns.push_back(hdl);
-		printf("[maplecast-ws] match active — queued MCSV savestate for new client\n");
+		printf("[maplecast-ws] queued client for MCSV (match active: %s)\n",
+		       _matchActive ? "yes — will send within 1s" : "no — will send at next match-start");
 	}
 
 	// Send lobby status
@@ -1007,6 +1010,15 @@ static void onClose(ConnHdl hdl)
 		_clientCount--;
 	}
 	_disconnectsTotal.fetch_add(1, std::memory_order_relaxed);  // Tele-0.11
+
+	// Remove from pending MCSV queue so we don't try to send to a dead handle.
+	{
+		std::lock_guard<std::mutex> lk(_pendingSaveMtx);
+		_pendingSaveConns.erase(
+			std::remove_if(_pendingSaveConns.begin(), _pendingSaveConns.end(),
+				[&hdl](const ConnHdl& h) { return h.lock() == hdl.lock(); }),
+			_pendingSaveConns.end());
+	}
 
 	// Remove from relay tree (handles orphan reassignment)
 	if (key) {
