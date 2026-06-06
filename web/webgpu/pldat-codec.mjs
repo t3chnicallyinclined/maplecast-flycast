@@ -1,17 +1,30 @@
 // pldat-codec.mjs — clean-room decoder for the MVC2 PLxx_DAT GFX "part" pixel codec.
 //
 // =============================================================================
-// STATUS (2026-06-06): CODEC ALGORITHM CONFIRMED & VALIDATED.
+// STATUS (2026-06-06): CODEC ALGORITHM CONFIRMED & VALIDATED on self-contained
+// parts. FULL-CHARACTER decode is BLOCKED on the back-reference WINDOW SOURCE
+// (see "DECOMPRESSION ARCHITECTURE" below) — documented from a complete
+// disassembly trace; one piece of runtime state is not reconstructable from the
+// statically-extracted GFX_DATA_00 file alone.
 //   - Decoded self-contained sprite parts render as COHERENT 4bpp graphics
-//     (Ryu flesh/gi/glove fragments, recognizable shapes — NOT noise) when
-//     fed through this exact decoder + the PALETTE_DATA palette.
-//   - The 8x8 tile unit and ARGB4444 palette are confirmed.
-//   - REMAINING OPEN ITEM: large (multi-tile) body parts use LZSS back-
-//     references that reach BEFORE the start of their own blob — i.e. into a
-//     SHARED decode buffer that accumulates earlier parts. Decoding a single
-//     part in isolation only works for the ~14% of parts that are self-
-//     contained. Full-character decode requires running decodeSharedBuffer()
-//     over the whole part table in the game's decode order (see notes below).
+//     (Ryu flesh/gi/glove fragments, recognizable shapes — NOT noise) with this
+//     exact decoder + the PALETTE_DATA palette. The 8x8 tile unit and ARGB4444
+//     palette are confirmed.
+//   - ~14% of PL00's 1533 parts are self-contained (their back-refs stay within
+//     their own already-emitted output). The other ~86% (all multi-tile body
+//     parts) contain back-references with byte-offsets (up to operand<<1 =
+//     0x7FF<<1 = 4094 B) that exceed the part's own emitted output at that point
+//     — i.e. they index a buffer region BEFORE the part's start.
+//   - Also confirmed empirically: feeding those big parts through the asm-exact
+//     decoder makes the output explode, caused by tokens with top-5 count == 0
+//     triggering the extended-count path (next u16 read as a 14000+ word copy)
+//     in the middle of otherwise-clean pixel literals. Those words are clearly
+//     meant to be literals, which means the flag stream is being mis-applied to
+//     them. Combined with the back-ref-underflow, this is the SAME root cause:
+//     the data the asm decoder actually consumes at runtime is NOT byte-for-byte
+//     what sits in the extracted GFX_DATA_00 blob — there is a staging step (or
+//     a not-yet-identified per-part src/size that bounds output) that the static
+//     file does not capture.
 // =============================================================================
 //
 // The codec is a FLAG-BIT LZSS over 16-bit little-endian words. It was reverse
@@ -77,18 +90,46 @@
 //   16 colours, ARGB4444 little-endian, 2 bytes each. Index 0 is transparent.
 //   Each nibble expands *17 to 8-bit (0xF -> 0xFF).
 //
-// SHARED-BUFFER NOTE (open item)
-//   The SH4 caller stages the whole PLxx_DAT GFX into one work buffer and calls
-//   loc_8c03552a to decompress into one destination texture buffer; parts are
-//   emitted sequentially and later parts back-reference earlier parts' pixels.
-//   `decodePart` therefore takes an optional `priorOutput` (a Uint8Array of all
-//   bytes already emitted for this character) and resolves back-references that
-//   reach before the part's own start into it. To decode a full character,
-//   call decodeSharedBuffer() which feeds every part in table order through one
-//   growing buffer. The exact decode ORDER the game uses (table order vs
-//   assembly-driven on-demand) is not yet pinned; table order reproduces the
-//   self-contained parts but the cross-part window for full body parts needs
-//   the game's real ordering to line up. See docs/MARVELOUS2-RE-HANDOFF.md §2.
+// DECOMPRESSION ARCHITECTURE (full disassembly trace, 2026-06-06)
+//   The GFX-load path was traced end to end in marvelous2 (read-only, facts only):
+//     - loc_8c0322c0 (bank03:5069): per-part fetch wrapper. r4 = part index;
+//       r6+8 = a 16-byte-stride directory; entry+8 = that part's output dest.
+//       Tail-calls the decoder (loc_8c03552a) with r4 = compressed src,
+//       r5 = dest.
+//     - loc_8c032696 (bank03:5685): the per-part DECODE LOOP. For each part it
+//       loads the compressed src from the GFX offset table (src = table_base +
+//       table[idx]) and calls the decoder with the dest pinned to the CONSTANT
+//       scratch 0x0CE60000 (loc_8c032854). After decoding, it COPIES the result
+//       OUT of 0x0CE60000 into the part's own texture slot (the two `mov.l @r6+`
+//       copy loops). So: DECOMPRESSION IS PER-PART, every part decodes to the
+//       SAME fixed scratch (overwriting the previous), then is copied away.
+//     - loc_8c0323b2 (bank03:5221, file-load path) is the same decoder with
+//       r4 = 0x0CC00000 (staged GFX), r5 = a single dest — the whole-block stage.
+//
+//   So the answer to "one call vs per-part" is PER-PART; the offset table holds
+//   COMPRESSED-INPUT offsets (they match the blob boundaries in the file); the
+//   4-byte (w,h,sw,sh) headers live at the front of each compressed blob.
+//
+//   THE WALL: because every part decodes into the same scratch 0x0CE60000 and
+//   is then copied out, a part's back-references reach into whatever is at
+//   0x0CE60000 BEFORE/AROUND its write pointer — i.e. RESIDUE of the previously
+//   decoded part (or a pre-cleared region). That runtime scratch state is not
+//   reconstructable from the static GFX_DATA_00 file, and naive reconstructions
+//   (empty buffer, 0x0000-prefill, 0xffff-prefill, cumulative buffer in table
+//   order, assembly-reference order, sliding ring window) all either explode on
+//   the top-5==0 extended-count tokens or render as noise. The remaining work is
+//   to identify the scratch's initial contents and the exact per-part output
+//   SIZE bound (the decoder has no internal terminator; the caller must stop it
+//   at the part's pixel count), most reliably by single-stepping the real
+//   loc_8c032696 loop in an emulator against a known part, or by locating the
+//   per-part output-size field the copy-out loops use. See
+//   docs/MARVELOUS2-RE-HANDOFF.md §2.
+//
+//   API: decodePart() decodes one blob standalone (correct for self-contained
+//   parts; multi-tile parts' underflowing back-refs resolve to transparent).
+//   decodeSharedBuffer() runs all parts through one growing buffer in table
+//   order — provided for experimentation with the window source; NOT yet a
+//   correct full-character decode for the reasons above.
 
 const OPERAND_MASK = 0x07ff; // low 11 bits  (asm constant)
 const COUNT_SHIFT = 11;      // count = token >> 11  (top 5 bits)
