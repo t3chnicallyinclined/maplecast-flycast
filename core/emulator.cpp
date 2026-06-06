@@ -50,6 +50,7 @@
 #include "network/maplecast_control_ws.h"
 #include "network/maplecast_player.h"
 #include "network/maplecast_replica.h"
+#include "network/maplecast_state_replica.h"
 #include "network/maplecast_input_sink.h"
 #include "network/maplecast_evdev_input.h"
 #ifdef _WIN32
@@ -1165,6 +1166,14 @@ void Emulator::run()
 			std::this_thread::sleep_for(std::chrono::microseconds(250));
 		if (state != Running) return;
 	}
+	// State-replica injection: inject the server's GSTA into RAM before the
+	// SH4 frame runs (non-threaded path). See the threaded path for details.
+	if (maplecast_state_replica::active())
+	{
+		while (state == Running && !maplecast_state_replica::frameInject())
+			std::this_thread::sleep_for(std::chrono::microseconds(250));
+		if (state != Running) return;
+	}
 	startTime = sh4_sched_now64();
 	renderTimeout = false;
 	if (!singleStep && stepRangeTo == 0)
@@ -1332,6 +1341,15 @@ void Emulator::start()
 	// without running the SH4, which diverges the local state from the
 	// server's). Replica wins if both are set.
 	const bool replicaActive = maplecast_replica::init();
+
+	// State-replica client (MAPLECAST_STATE_REPLICA): server-authoritative
+	// state INJECTION. Runs the full local SH4 + renderer (this is a NORMAL
+	// render build, not MAPLECAST_HEADLESS), loads the same savestate, and each
+	// frame injects the server's GSTA into RAM before the SH4 frame runs — so
+	// the game's own draw code renders the server's truth. NOT lockstep, NOT
+	// the tape-replay maplecast_replica above. See maplecast_state_replica.h.
+	const bool stateReplicaActive = maplecast_state_replica::init();
+	(void)stateReplicaActive;
 
 	// Replica needs the gamepad → server input pipeline wired (the local
 	// SH4 doesn't read its own gamepad; inputs come from the server's
@@ -1529,6 +1547,16 @@ void Emulator::start()
 								// don't pin a core.
 								std::this_thread::sleep_for(std::chrono::microseconds(250));
 							}
+							if (state != Running) break;
+						}
+						// State-replica injection: write the server's GSTA into
+						// RAM at the TOP of the frame so the SH4's draw code (run
+						// by runInternal() below) renders the server's truth.
+						// Stalls until the first GSTA arrives.
+						if (maplecast_state_replica::active())
+						{
+							while (state == Running && !maplecast_state_replica::frameInject())
+								std::this_thread::sleep_for(std::chrono::microseconds(250));
 							if (state != Running) break;
 						}
 						startTime = sh4_sched_now64();
