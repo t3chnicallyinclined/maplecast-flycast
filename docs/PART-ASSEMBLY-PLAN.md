@@ -32,21 +32,38 @@
 3. **Result:** cape/crouch/jump, effects, projectiles, supers — all exact, because we
    replay the game's own assembly instead of guessing placement. Same ~30 KB/s.
 
-## Build steps
-- [ ] **GFX part format** — map `part_idx → (tile offset, width, height, pixels)` in
-  `GFX_DATA_00`. (Layout PNG shows the rects; need the part table / dims source.)
-- [ ] **EXTRAS grouping** — split the 8-byte records into per-assembly groups (separator = `mode=0xFF`?).
-- [ ] **ANIMATION → assembly** — map `sprite_id` (0x144 / pool +0x12C) → the assembly index.
-- [ ] **Prototype on PL00** — render one sprite's assembly, validate against the layout PNG / a live TA frame.
-- [ ] **Baker** — emit `PL{hex}_parts.png` + `PL{hex}_asm.json` per char (extend `bake.mjs`).
-- [ ] **Client render** — new `assembly-render` path: sprite_id → parts; replaces the
-  whole-sprite draw for bodies + pool objects. Flip/palette per the records.
-- [ ] **Roster** — extract all PLxx_DAT from the GDI, decode, bake.
+## Build steps + findings (2026-06-06 RE pass)
+- [x] **EXTRAS grouping — CRACKED.** 8192 records → **42 assemblies**, parts **0–21**,
+  each placement `(dx s16, dy s16, part_idx u8, flip u8)`; `mode=0xFF` record = separator.
+  e.g. assembly 0 = 24 placements of parts {0,3,5,12,13,14,15,16}. This is the frame recipe.
+- [~] **GFX part format — PARTIAL, needs the draw routine.** Both `GFX_00` (425KB) and
+  `GFX_01` (25KB) **begin with u32 offset tables** pointing to variable-size blobs
+  (GFX_00: 6132,6221,6895… → ~1533 entries; GFX_01: 1764,1774,1816… → ~441 entries).
+  Neither count matches the 22 part_idx, so there is an **indirection layer** between
+  `part_idx` and pixels — almost certainly the runtime sprite-draw routine resolves
+  `part_idx` against a per-assembly or animation-indexed GFX base. **The offset-table
+  structure alone is not enough; we need the SH4 draw routine as ground truth.**
+- [ ] **NEXT: read the SH4 sprite-draw routine in marvelous2** — find where it walks the
+  EXTRAS list and reads `Dat_GFX1@0x15c / Dat_GFX2@0x160` to fetch part pixels. That
+  routine *is* the exact `part_idx → (gfx base, offset, w, h, bpp)` mapping. Everything
+  downstream (decode, atlas, render) is mechanical once this is known.
+- [ ] **ANIMATION → assembly** — 20960 B / 20 = 1048 keyframes; sprite_id @ bytes 4–6.
+  Map `sprite_id` → assembly index (likely via the keyframe or an EXTRAS pointer table).
+- [ ] **Prototype on PL00** → **Baker** → **Client assembly-render** → **Roster** (unchanged from plan).
 
-## Open questions to resolve from the decoder/data (not guesses)
-- Part dimensions: per-part header in GFX, or derived from the EXTRAS rect? (layout PNG drew rects — find the source)
-- Does a body assembly include its cape parts, or is the cape a separate `sprite_id` assembly (pool object)? Determines whether cape "just works."
-- Palette: per-part or per-character bank? (ties into the existing skin/pal128 work)
+## Honest status
+The architecture is sound and the EXTRAS (the *recipe*) is fully cracked. The remaining
+blocker is the **GFX part-indexing**, which is a real multi-step RE — the on-disc format
+has an indirection layer we must read out of the **SH4 draw routine**, not guess. This is
+a focused RE project (a few passes), not a one-shot prototype. The whole-sprite branch
+stays as the working fallback while we land this.
+
+## Open questions
+- The indirection: does `part_idx` index a per-assembly GFX sub-table, or a global one
+  offset by an animation/assembly base? (the draw routine answers this)
+- Does a body assembly include its cape parts, or is the cape a separate `sprite_id`
+  assembly (pool object)? Determines whether cape "just works."
+- Palette: per-part or per-character bank? (ties into existing skin/pal128 work)
 
 ## Keep
 - The GSTA pipeline, prediction, HUD, palette-recolor — all unchanged, all reused.
