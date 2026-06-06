@@ -1,0 +1,6 @@
+# Install the CUDA build of torch FIRST (see README), e.g.:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# then:
+spandrel>=0.3.4
+pillow>=10.0
+numpy>=1.24
