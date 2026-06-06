@@ -51,12 +51,35 @@
   Map `sprite_id` → assembly index (likely via the keyframe or an EXTRAS pointer table).
 - [ ] **Prototype on PL00** → **Baker** → **Client assembly-render** → **Roster** (unchanged from plan).
 
-## Honest status
-The architecture is sound and the EXTRAS (the *recipe*) is fully cracked. The remaining
-blocker is the **GFX part-indexing**, which is a real multi-step RE — the on-disc format
-has an indirection layer we must read out of the **SH4 draw routine**, not guess. This is
-a focused RE project (a few passes), not a one-shot prototype. The whole-sprite branch
-stays as the working fallback while we land this.
+## STATUS: RE COMPLETE — implementation phase next (2026-06-06)
+Every layer is now reverse-engineered (see `docs/MARVELOUS2-GFX-NOTES.md` for the SH4
+render model). No more guessing remains; what's left is implementation + validation.
+
+**Decode chain (all known):**
+1. `PLxxPAK.BIN` (= the DAT, 59 chars in `MVC2 Dev Files/`) → header gfx1@0x20, gfx2, palette, extras.
+2. GFX block begins with a **u32 offset table** (part directory; ~1533 cells for PL00).
+3. Each part blob = **flag-bit LZSS over u16 LE** (`docs/MARVELOUS2-RE-HANDOFF.md` §2,
+   decoder `loc_8c03552a`): flag word; clear bit=literal u16; set bit=token (top5=count,
+   low11=operand; operand 0 = transparent fill, else back-ref `offset=operand<<1` words).
+   Two brute-forceable unknowns: copy-length off-by-one, offset direction.
+4. Decoded output = indexed 4bpp texels → part rectangle (dims from the blob header
+   `w,h` bytes — confirm: part0 `01 04…`, part1 `04 0a…`).
+5. `part_idx` indexes the per-character part set; `sprite_id → assembly` from EXTRAS+ANIM.
+6. **Oracle for validation:** `MvC2_Spritesheets_20260516/PL{hex}.png` (indexed whole-sprite
+   rips) — decode a part, composite an assembly, diff against the sheet's frame.
+
+## Implementation steps (the build)
+- [ ] **`web/webgpu/pldat-codec.mjs`** — port flag-bit LZSS (~40 lines); brute-force the 2
+  unknowns by decoding a part and matching the sprite-sheet oracle pixel-for-pixel.
+- [ ] **Part decoder** — GFX offset table + blob header (w,h) + codec → part rectangles (a part atlas).
+- [ ] **Assembly table** — EXTRAS grouping + ANIMATION → `sprite_id → [{part_idx,dx,dy,flip}]`.
+- [ ] **Validate on PL00** — composite assembly, diff vs `MvC2_Spritesheets/PL00.png`.
+- [ ] **Baker** — `PL{hex}_parts.png` + `PL{hex}_asm.json` for all 59 PAKs (ROM-derived, gitignored).
+- [ ] **Client assembly-render** — per-object: `sprite_id → assembly → parts`, z by priority byte;
+  replaces whole-sprite draw for body + each pool object. Palette per char (`Dat_Pal`).
+- [ ] **Confirm cape** = sibling object in the live object table (else check FAC, player+0x184).
+
+The whole-sprite branch (`feat/rom-asset-probe`) stays as the working fallback until this lands.
 
 ## Open questions
 - The indirection: does `part_idx` index a per-assembly GFX sub-table, or a global one
