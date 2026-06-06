@@ -76,6 +76,127 @@ Per character struct (+offset from base):
 +0x168  anim_pointer (u32)    — animation table in DC RAM
 ```
 
+#### Object Pool struct (pages 618-625, 0x8C26A000-0x8C278000) — RE 2026-06-05
+
+The "projectile/particle pool" holds each character's **satellite objects** — capes,
+effect overlays, projectiles, afterimages — as separate render objects. A character
+on screen = its body (char-struct `+0x144` sprite) **plus** N of these objects. Find
+them by scanning `0x8C26A600`–`0x8C278000` for a u32 equal to one of the 6 char-struct
+bases (the **owner pointer**); ~60 slots, most inactive (`sprite_id == 0`).
+
+Per object (offsets from `O` = the address holding the owner pointer):
+```
+O+0x000  owner char base ptr   — which character_id owns it (→ which sprite set)
+O-0x008  gfx/assembly ptr       — game-internal render ptr (NOT a sprite_id)
+O+0x0C8  screen_x (float)        — spawned objects (projectiles) update this live;
+O+0x0CC  screen_y (float)          attached parts (capes) can lag/stall here
+O+0x12C  sprite_id (u16 low)     — indexes the OWNER's sprite set; animates frame-to-frame
+```
+Used by `maplecast_gamestate::readObjects()` → "OBJS" wire packet → the state-only
+sprite client draws each object's sprite at its position. Per-character
+`sprite_id → cape/effect/projectile` mappings + true sprite anchors are rip-derived
+and live in the operator RE catalog (`re-catalog/`), not here.
+
+> **marvelous2 confirms & corrects this pool** (RE 2026-06-05, disasm-verified):
+> `work.asm` labels `0x8C26AC24` "Extra Sprite Render memory slot * 1d0", but the pool
+> **initializer** (`bank04.asm:11725-11756`, `loc_8c044dce`) proves: **base `0x8C26AA54`,
+> stride `0x1D0` (464 B), 256 nodes** — `0x8C26AC24` is node **#1**, not the array start.
+> Allocator = free-list pop `loc_8c044f12` (`bank04.asm:11793`); category byte written at
+> **record+0x3**. ⚠️ **Owner player-ptr is at record+0x80** (and copy +0x84), NOT at record
+> start — our empirical `O+0x000=owner` scan anchored on the +0x80 field, so re-verify the
+> within-record offsets (screen +0xC8/+0xCC, sprite_id +0x12C) against the **absolute** base
+> `0x8C26AA54 + slot*0x1D0` before trusting them. **Draw order = position in the doubly-linked
+> active list (next +0x8 / prev +0xC); there is NO z scalar** — infer layer from category+0x3
+> + sprite_id range. Per-frame update-fn ptr at record+0x10. All projectiles/capes/effects/
+> super-overlays come from this one pool (category-distinguished); assist *characters* are real
+> char slots, but their projectiles use the pool.
+
+---
+
+## CROSS-REFERENCE & MERGE — marvelous2 SH4 disassembly
+
+**Source:** [github.com/mountainmanjed/marvelous2](https://github.com/mountainmanjed/marvelous2) — a full
+SH4 disassembly of MVC2 NTSC-U Dreamcast. Its `memory/pl_mem.asm` and `memory/work.asm`
+are *labeled* symbol files whose addresses match every value we reverse-engineered
+empirically (`player_start 0x8C268340`, the 6 slot bases, `sprite_id 0x144`,
+`screen 0xE0/0xE4`, `health 0x420`, the `Dat_*` pointers, the object pool). They confirm
+our map and add the fields below. ⚠️ This is disassembled copyrighted code — read for
+*facts*, reimplement clean-room; **never** vendor it or its `build/` (it reassembles to the
+ROM). Labels are **strong cross-reference** until confirmed against our own live capture
+(✅ = we already verified independently).
+
+### Additional per-character struct fields (base `0x8C268340`, stride `0x5A4`)
+
+Fields beyond the core block above (the core block is all ✅-verified by us):
+```
++0x025 pl_palid_match (u8)   ; COLOR SELECTED IN MATCH — live skin/tint (re-catalog uses this)
++0x040 char_pal_effect (u16) ; super-glow / hit-flash palette effect  ← palette-recolor work
++0x050 x/y/z_sprite_scale    ; f32 ×3 — per-char sprite scale (see scale note below)
++0x110 xflip_copy_2 (u8)     ; what we read as "facing" — a COPY; authoritative xflip = 0x1D2
++0x14A anim_flags (u8)       ; 0x20=no cancel/super/assist  0x40=recovery  0x80=opp prox-block
++0x154 current_cell_data ptr +0x158 anim_id/anim_group (u8)
++0x15C Dat_GFX1 ✅  +0x160 Dat_GFX2  +0x164 Dat_Pal ✅  +0x168 animations ✅
++0x16C hitbox_pattern_table  +0x170 hitbox_data ✅  +0x174 attack_data  +0x178 Sprite_Extras ✅(EXTRAS)
++0x17C Dat_FilePointer       +0x184 FAC_ptr
++0x1D0 "controls what move to play" ✅(animation_state)  +0x1D2 xflip  +0x1D3 walk-dir(0fwd/1back/FF idle)
++0x1E8 chain_strength  +0x1E9 sp_move_id ✅(special_move)
++0x1F9 stance (0=stand 1=crouch 2=jump 3=otg)  ← shadow/crop-height fix for the bake
++0x200 Buff_Speed  +0x201 Flight_Flag  +0x202 HyperArmor  +0x205 Buff_Damage  +0x206 Buff_Defense
++0x20C EnemyPointer ptr  +0x525 is_cpu  +0x52D pal_id ✅  +0x540..543 wins/lose/draw/handicap (A&B only)
+```
+⚠️ Reconcile: we read **facing @0x110** (a copy); the real flip is **0x1D2**. And we map
+**palette @0x25** (re-catalog) vs **0x52D** (`pal_id`) — marvelous2 shows *both* exist
+(`0x25`=match color choice, `0x52D`=pal_id); keep `0x25` as the live-tint source.
+
+### DAT files & codec buffers (the open pixel-codec trail)
+
+On-disc `PLxx_DAT` is loaded to a fixed RAM window; the GFX codec decompresses into a
+scratch buffer. **To crack the still-open sprite codec, trace the routine that reads a
+`PLxx_DAT` window and writes `Texture_Decompress_Buffer`.**
+```
+pl_A_datfile 0x0C420000(P1C1) pl_C 0x0C570000(P1C2) pl_E 0x0C6C0000(P1C3)
+pl_B_datfile 0x0C810000(P2C1) pl_D 0x0C960000(P2C2) pl_F 0x0CAB0000(P2C3)   (+_FACfile sibling +0x148000)
+S_PLxx char-program code @ 0x0CE30000..0x0CE58000   Texture_Decompress_Buffer 0x0CE60000 ← codec OUTPUT
+DM00 Poly 0x0CE80000   Stage Poly 0x0CEA0000   Effect Poly 0x0CED0000
+```
+
+### Sprite scale constants (vs the sprite-client 1.75× lock)
+
+Sprite client locks constant `1.75×` (commit `b26dc86f9`). marvelous2 exposes:
+```
+CpsXScale 0x3FD55555 = 1.66666…   CpsYScale 0x40092492 = 2.14285…   (work.asm)
+per-char x/y/z_sprite_scale @ +0x50/+0x54/+0x58 (pl_mem.asm)
+```
+The non-square X/Y suggests an **anisotropic** rip→screen transform, not one 1.75 — test it.
+
+### Globals — corrections & additions
+
+| Address | marvelous2 label | vs our map |
+|---|---|---|
+| `0x8C16BC2C` | **RngVal** (RNG state) | new — determinism-relevant |
+| `0x8C2895F0` | **Battle State** | new |
+| `0x8C289620/621` | Frameskip Timer / **Counter** | ⚠️ we call `0x289621` `match_sub_state` — RECONCILE |
+| `0x8C289630` | Timer | ✅ |
+| `0x8C26A95C` | `STG_ID` | ⚠️ vs our `stage_id 0x8C289638` — two refs, verify live one |
+| `0x8C268270/278/28C/291` | Char/Color Unlocks, Game mode, Stage Unlocks | new |
+| `0x8C28C474` | `Charsel_Input` | new |
+| `0x8C26823C / 240` | GameGlobalPointer / Start | new |
+
+**Stage IDs (`STG_ID`):** `0 AirShip 1 Desert 2 Factory 3 Carnival 4 Swamp 5 BlueCave
+6 Clock 7 IceRiver 8 Abyss 9 AltAirShip A AltDesert B Training C AltCarnival D PinkSwamp
+E LavaCave F WinterClock 10 RiverRaft`.
+
+**Char IDs (hex, authoritative):** `00 Ryu … 17 Cable … 23 Dan … 2A Storm … 2C Magneto
+… 34 Sentinel … 3A Servbot` (file = `PL{id:02X}_DAT`; full table in `pl_mem.asm`). Confirms
+**Cable=0x17, Dan=0x23**.
+
+**SPL move-dispatch:** per-slot jump tables `0x8C289BD8 + slot*0x80`; entry index = move
+category (`Normal1/2, FwrdDsh, BackDsh, FgIntro, MtchWin, SpecPRG, DlyHypC, TmHypMn/As,
+Assists, AlphCnt`). Per-char `S_PLxx.asm` (raw SH4) implements these — future source for
+move→effect (RenderExtra) correlation.
+
+---
+
 **Page 649 (0x8C289000)** contains:
 - `0x8C289621` — match_sub_state
 - `0x8C289624` — in_match flag

@@ -70,6 +70,11 @@ export class FrameDecoder {
         if (data.length < 80) return null;
 
         const maybeMagic = view.getUint32(0, true);
+        // Non-TA frames ride the same broadcast: GSTA (game state) and EFCT (isolated
+        // effect quads). Each page dispatches these itself; reaching here they'd
+        // misparse as a delta frame and throw. Bail cleanly so EVERY client (incl.
+        // king.html via renderer-bridge) is safe. LE u32: 'GSTA'=0x41545347, 'EFCT'=0x54434645
+        if (maybeMagic === 0x41545347 || maybeMagic === 0x54434645 || maybeMagic === 0x52545854 || maybeMagic === 0x534A424F) return null; // GSTA/EFCT/TXTR/OBJS
         if (maybeMagic === MAGIC_SYNC || maybeMagic === MAGIC_FSYN || maybeMagic === MAGIC_SAVE) {
             this.applySync(rawData);
             return null;

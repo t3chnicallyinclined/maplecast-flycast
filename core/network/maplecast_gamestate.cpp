@@ -133,8 +133,17 @@ static void ptrDump(const GameState& state)
 		uint32_t palP  = addrspace::read32(base + OFF_PAL_PTR);
 		uint32_t hbP   = addrspace::read32(base + OFF_HITBOX_PTR);
 		uint32_t exP   = addrspace::read32(base + OFF_EXTRAS_PTR);
+		// marvelous2 reconcile: facing@0x110 is xflip_copy_2 (the COPY we currently ship);
+		// authoritative xflip=0x1D2, walk-dir=0x1D3. If 0x110 != 0x1D2 during a turn-around,
+		// 0x110 is the wrong wire source. paleffect@0x40 = super-glow/hit-flash tint.
+		uint8_t  f110  = (uint8_t)addrspace::read8(base + 0x110);
+		uint8_t  x1d2  = (uint8_t)addrspace::read8(base + 0x1D2);
+		uint8_t  w1d3  = (uint8_t)addrspace::read8(base + 0x1D3);
+		uint16_t peff  = (uint16_t)addrspace::read16(base + 0x40);
 		printf("[PTRDUMP] slot%d cid=%2d sid=0x%04x scr=(%.0f,%.0f) color@0x25=%d palId@0x52D=%d\n",
 		       i, cid, sid, sx, sy, color, palId);
+		printf("[PTRDUMP]   FACING fac@0x110=%d xflip@0x1D2=%d walk@0x1D3=%d  paleffect@0x40=%u\n",
+		       f110, x1d2, w1d3, peff);
 		printf("[PTRDUMP]   ptrs GFX00=0x%08x PAL=0x%08x HITBOX=0x%08x EXTRAS=0x%08x\n", gfx0, palP, hbP, exP);
 		if (inRam(palP)) {
 			char b[300]; int n = snprintf(b, sizeof b, "[PTRDUMP]   PAL16:");
@@ -179,6 +188,87 @@ static void ptrDump(const GameState& state)
 			printf("[OBJ] ----\n");
 		}
 	}
+
+	// marvelous2 POOL ANCHOR RESOLVER: our readObjects() treats the owner-pointer word
+	// address `a` as the record base (H1: sid@a+0x12C, scr@a+0xC8). The disasm says the
+	// owner ptr sits at record+0x80 (H2: record base = a-0x80). Dump BOTH so one live
+	// capture decides which yields the known Storm cape sid range (731-763) at the right
+	// screen pos. `ownerCopies` = every offset near `a` where the owner value repeats;
+	// the disasm predicts copies at +0x80/+0x84 of the record (so if `a` is the FIRST
+	// copy and the record base, we expect another at +4; if `a` is the +0x80 copy, the
+	// record starts 0x80 earlier). The cape sid range is the real tiebreaker.
+	{
+		printf("[POOLV] === anchor resolver: H1(a=base) vs H2(base=a-0x80); cape sid in 731-763 wins ===\n");
+		int shown = 0;
+		for (uint32_t a = 0x8C26A600; a < 0x8C278000 && shown < 12; a += 4) {
+			uint32_t v = addrspace::read32(a);
+			int oslot = -1; for (int c = 0; c < 6; c++) if (v == CHAR_BASE[c]) oslot = c;
+			if (oslot < 0) continue;
+			char rep[160]; int rn = 0;
+			for (int32_t d = -0x100; d <= 0x100 && rn < (int)sizeof(rep)-8; d += 4)
+				if ((uint32_t)addrspace::read32(a + d) == v) rn += snprintf(rep+rn, sizeof(rep)-rn, "%+d ", d);
+			uint16_t sidH1 = (uint16_t)addrspace::read16(a + 0x12C);
+			float    sxH1  = readFloat(a + 0xC8), syH1 = readFloat(a + 0xCC);
+			uint8_t  catH1 = (uint8_t)addrspace::read8(a + 0x03);
+			uint32_t rb    = a - 0x80;
+			uint16_t sidH2 = (uint16_t)addrspace::read16(rb + 0x12C);
+			float    sxH2  = readFloat(rb + 0xC8), syH2 = readFloat(rb + 0xCC);
+			uint8_t  catH2 = (uint8_t)addrspace::read8(rb + 0x03);
+			if (sidH1 == 0 && sidH2 == 0) continue;
+			shown++;
+			uint8_t  ocid = (uint8_t)addrspace::read8(v + OFF_CHAR_ID);
+			uint32_t nxt = addrspace::read32(a + 0x08), prv = addrspace::read32(a + 0x0C);
+			float owx = readFloat(v + 0x34), owy = readFloat(v + 0x38);
+			printf("[POOLV] a=%08x cid=%d ownW=(%.0f,%.0f) nx=%08x pv=%08x ownerCopies@{%s}\n",
+			       a, ocid, owx, owy, nxt, prv, rep);
+			printf("[POOLV]   H1(a=base):    sid=%-5u cat=%02x scr=(%.0f,%.0f)\n", sidH1, catH1, sxH1, syH1);
+			printf("[POOLV]   H2(base=a-80): sid=%-5u cat=%02x scr=(%.0f,%.0f)\n", sidH2, catH2, sxH2, syH2);
+		}
+	}
+}
+
+// Scan the object pool for active satellite objects (cape, effects, projectiles).
+// Each owner-pointer object carries sprite_id@+0x12C + screen_x@+0xC8 + screen_y@+0xCC.
+// Skips inactive (sid==0) and the body object (no own position, (0,0)).
+// See re-catalog/00-README.md + PL2A-storm.md. Reads only.
+int readObjects(ObjectState* out, int maxObjs)
+{
+	int n = 0, nOwner = 0, nSid = 0;
+	for (uint32_t a = 0x8C26A600; a < 0x8C278000 && n < maxObjs; a += 4) {
+		uint32_t v = addrspace::read32(a);
+		bool owned = false;
+		for (int s = 0; s < 6; s++) if (v == CHAR_BASE[s]) { owned = true; break; }
+		if (!owned) continue;
+		nOwner++;
+		uint16_t sid = (uint16_t)addrspace::read16(a + 0x12C);
+		if (sid == 0) continue;
+		nSid++;
+		// POOLV: state byte @a+0x0C — 0x00 = freed slot. Cheap first reject.
+		if (addrspace::read8(a + 0x0C) == 0) continue;
+		// ACTIVE-LIST membership = the real alive signal. The pool is a doubly-linked
+		// list: next@O-0x10, prev@O-0x0c, pointing to record bases (record = O-0x18).
+		// An object is DRAWN only if linked in — stale slots (the stuck sparks / the
+		// inactive idle-cape during crouch) are unlinked. Require next.prev==me OR
+		// prev.next==me (head/tail satisfy one side).
+		{
+			uint32_t myRec = a - 0x18;
+			uint32_t nx = addrspace::read32(a - 0x10), pv = addrspace::read32(a - 0x0c);
+			bool linked = (nx >= 0x8C26A000 && nx < 0x8C278000 && addrspace::read32(nx + 0x0c) == myRec)
+			           || (pv >= 0x8C26A000 && pv < 0x8C278000 && addrspace::read32(pv + 0x08) == myRec);
+			if (!linked) continue;
+		}
+		float sx = readFloat(a + 0xC8), sy = readFloat(a + 0xCC);
+		if ((sx == 0.f && sy == 0.f) || sx < -64.f || sx > 704.f || sy < -64.f || sy > 544.f) continue;
+		out[n].owner_cid = (uint8_t)addrspace::read8(v + OFF_CHAR_ID);
+		out[n].sprite_id = sid;
+		out[n].screen_x  = (int16_t)sx;
+		out[n].screen_y  = (int16_t)sy;
+		out[n].type      = (uint8_t)addrspace::read8(a + 0x0E);
+		n++;
+	}
+	static int _dbg = 0;
+	if (++_dbg % 120 == 0) fprintf(stderr, "[OBJS] owners=%d withSid=%d pass=%d\n", nOwner, nSid, n);
+	return n;
 }
 
 void readGameState(GameState& state)

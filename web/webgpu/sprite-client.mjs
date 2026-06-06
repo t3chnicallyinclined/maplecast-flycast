@@ -50,6 +50,12 @@ export class SpriteClient {
     this._bwRate = 0; this._bwHz = 0; this._lastSize = 0;
     this.sparks = [];          // active hit-sparks {x,y,t0,type}
     this.sparksOn = true;
+    this.effects = [];         // server-isolated TA effect quads {hash,cx,cy,w,h} (EFCT packet)
+    this.objects = [];         // pool satellite objects {cid,sid,x,y} (OBJS packet) — cape/effects/projectiles
+    this.objectsOn = true;
+    this._fxCache = new Map(); // texture hash -> canvas (decoded from TXTR packets)
+    this._lastEfctN = 0;
+    this.effectsOn = true;
   }
   _blank() {
     return { active:0, char_id:0, sprite_id:-1, screen_x:0, screen_y:0, facing:0, palette:0,
@@ -63,10 +69,81 @@ export class SpriteClient {
         && d[2]===GSTA_MAGIC[2] && d[3]===GSTA_MAGIC[3];
   }
 
+  // 'EFCT'(4) + count(1) + count*[id(1) cx(i16) cy(i16) w(i16) h(i16)] — the
+  // server-isolated TA effect quads (screen space). Routed away from the TA
+  // decoder by the page (same as GSTA) so applyFrame never sees it.
+  static isEFCT(d) {
+    return d.length >= 5 && d[0]===69 && d[1]===70 && d[2]===67 && d[3]===84; // 'E','F','C','T'
+  }
+  onEFCT(d) {
+    const n = d[4];
+    const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
+    const fx = [];
+    let o = 5;
+    for (let i = 0; i < n && o + 12 <= d.length; i++) {
+      fx.push({
+        hash: dv.getUint32(o, true),
+        cx: dv.getInt16(o + 4, true), cy: dv.getInt16(o + 6, true),
+        w:  dv.getInt16(o + 8, true), h:  dv.getInt16(o + 10, true),
+      });
+      o += 12;
+    }
+    this.effects = fx;
+    this._lastEfctN = n;
+  }
+
+  // 'TXTR'(4) + hash(4) + w(2) + h(2) + zstd(RGBA). The page decompresses and
+  // calls onTXTR with the raw RGBA; we cache hash -> canvas for additive draw.
+  static isTXTR(d) {
+    return d.length >= 12 && d[0]===84 && d[1]===88 && d[2]===84 && d[3]===82; // 'T','X','T','R'
+  }
+  onTXTR(hash, w, h, rgba) {
+    if (!rgba || rgba.length < w * h * 4 || w <= 0 || h <= 0) return;
+    let cv = this._fxCache.get(hash);
+    if (!cv) { cv = document.createElement('canvas'); cv.width = w; cv.height = h; }
+    const ctx = cv.getContext('2d');
+    const id = new ImageData(new Uint8ClampedArray(rgba.subarray(0, w * h * 4)), w, h);
+    ctx.putImageData(id, 0, 0);
+    this._fxCache.set(hash, cv);
+  }
+
+  // 'OBJS'(4) + count(1) + N×[cid(1), sprite_id(2 LE), x(i16 LE), y(i16 LE)] = 7B each.
+  // Pool satellite objects (cape/effects/projectiles) -> rip sprites. See re-catalog/.
+  static isOBJS(d) {
+    return d.length >= 5 && d[0]===79 && d[1]===66 && d[2]===74 && d[3]===83; // 'O','B','J','S'
+  }
+  onOBJS(d) {
+    const n = d[4]; const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
+    const objs = []; let o = 5;
+    for (let i = 0; i < n && o + 8 <= d.length; i++) {
+      const raw = dv.getUint16(o+1, true);   // sprite_id with 0x8000 hflip bit
+      objs.push({ cid: d[o], sid: raw & 0x7fff, type: d[o+3], x: dv.getInt16(o+4, true), y: dv.getInt16(o+6, true) });
+      o += 8;
+    }
+    this.objects = objs;
+  }
+
   // Point the client at a server dir of per-character atlases
   // (PL{cid:02X}.{json,png}). Characters are then fetched on demand as they
   // appear in the streamed state — only what's picked gets downloaded.
-  setCharBase(base) { this.charBase = base; }
+  setCharBase(base) { this.charBase = base; this.loadFxAtlas(); }
+
+  // Load the isolated-effect atlas (fx_atlas.{png,json}) — the 5 universal effect
+  // textures the server's EFCT isolation references by id (additive overlays).
+  async loadFxAtlas() {
+    if (this._fx || this._fxLoading || !this.charBase) return;
+    this._fxLoading = true;
+    const base = this.charBase.replace(/\/chars\/?$/, '/effects') + '/fx_atlas';
+    const bust = '?t=' + Date.now();
+    try {
+      const json = await (await fetch(base + '.json' + bust)).json();
+      const blob = await (await fetch(base + '.png' + bust)).blob();
+      this._fxImg = await createImageBitmap(blob);
+      this._fx = json;
+      console.log('[sprite-client] loaded fx_atlas:', (json.effects || []).length, 'effects');
+    } catch (e) { console.warn('[sprite-client] fx_atlas load failed', e); }
+    finally { this._fxLoading = false; }
+  }
 
   // Lazy-load ONE character's atlas: <charBase>/PL{cid:02X}.{json,png}.
   loadChar(cid) {
@@ -260,10 +337,56 @@ export class SpriteClient {
       let exx = sl.screen_x, eyy = sl.screen_y;
       if (this.predict !== false) { const dt = Math.min(now - sl.t, 33); if (dt > 0) { exx += sl.vx*dt; eyy += sl.vy*dt; } }
       const S = this.spriteScale || 1;   // constant scale; scales about feet/center
+      const cfl = (sl.facing !== sp.facing);
+      const cdx = cfl ? -(sp.dx + sp.wG) : sp.dx;   // mirror the (asymmetric) anchor when flipped
       out.push({ charId: sl.char_id, slot: s, sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
-        dx: (exx+sp.dx*S)*scaleX, dy: (eyy+sp.dy*S)*scaleY, dw: sp.wG*S*scaleX, dh: sp.hG*S*scaleY,
-        flip: (sl.facing !== sp.facing) });
+        dx: (exx+cdx*S)*scaleX, dy: (eyy+sp.dy*S)*scaleY, dw: sp.wG*S*scaleX, dh: sp.hG*S*scaleY,
+        flip: cfl });
     }
+    // Satellite objects (cape, lightning, projectiles) — each = the OWNER's rip
+    // sprite at its own screen pos. A character = body (0x144) + these. (re-catalog/)
+    if (this.objectsOn !== false) for (const o of (this.objects || [])) {
+      const c = this.chars[o.cid];
+      if (!c) { this.loadChar(o.cid); continue; }
+      if (!c.img) continue;
+      const sp = c.sprites[o.sid];
+      if (!sp) continue;
+      // Find the owner's slot + its LIVE (predicted) screen pos. Attached parts ride
+      // the owner; spawned objects (far from owner) keep their own pos.
+      let osl = null, oslot = 0;
+      for (let s = 0; s < 6; s++) if (this.slot[s].active && this.slot[s].char_id === o.cid) { osl = this.slot[s]; oslot = s; break; }
+      if (!osl) continue;
+      let ox = osl.screen_x, oy = osl.screen_y;
+      if (this.predict !== false) { const dt = Math.min(now - osl.t, 33); if (dt > 0) { ox += osl.vx*dt; oy += osl.vy*dt; } }
+      if ((ox === 0 && oy === 0) || ox < -60 || ox > 700) continue;   // off-screen assist -> its parts vanish
+      // type 3 = cape (always attached to the owner — no distance guess, fixes the
+      // floating second cape). other types: distance decides attached vs spawned.
+      const far = (o.type !== 3) && ((Math.abs(o.x - ox) + Math.abs(o.y - oy)) > 130);
+      const px = far ? o.x : ox, py = far ? o.y : oy;
+      const S = this.spriteScale || 1;
+      const fl = (osl.facing !== sp.facing);
+      const dxv = fl ? -(sp.dx + sp.wG) : sp.dx;   // mirror the anchor when flipped
+      // CAPE-ON-CROUCH (derived from the TA): attached parts ride the BODY's top, not
+      // the feet. The body sprite's anchor dy encodes pose height; shift the cape by
+      // (current body dy − the char's tallest/standing dy). Track the standing ref.
+      let cdy = sp.dy;
+      if (o.type === 3) {
+        const bsp = c.sprites[osl.sprite_id];
+        if (bsp) {
+          if (!this._refDy) this._refDy = {};
+          const r = this._refDy[o.cid];
+          this._refDy[o.cid] = (r === undefined) ? bsp.dy : Math.min(r, bsp.dy);
+          cdy = sp.dy + (bsp.dy - this._refDy[o.cid]);   // crouch/jump lowers/raises the cape with the body
+        }
+      }
+      out.push({ charId: o.cid, slot: oslot, z: -1, sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
+        dx: (px + dxv*S)*scaleX, dy: (py + cdy*S)*scaleY, dw: sp.wG*S*scaleX, dh: sp.hG*S*scaleY,
+        flip: fl });
+    }
+    // The renderer groups CONSECUTIVE same-cid sprites and drops chars past maxGroups(8).
+    // Sort by cid so each character's body+objects form ONE group, objects (z=-1) behind
+    // bodies (z=0). (unshift broke this by scattering mixed-cid objects to the front.)
+    out.sort((a, b) => (a.charId - b.charId) || ((a.z || 0) - (b.z || 0)));
     this._lastNote = loading ? `loading ${loading} char atlas…` : (missing ? `holding ${missing}: ${missKeys.join(' ')}` : 'all visible poses captured');
     return out;
   }
@@ -297,6 +420,22 @@ export class SpriteClient {
     ctx.fillRect(fromRight ? x + w - fw : x, y, fw, h);
     ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 1; ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
   }
+  // Draw the server-isolated TA effects additively over the scene. Each EFCT
+  // descriptor is {id,cx,cy,w,h} in 640x480 screen space; id indexes fx_atlas.
+  // (Drawn on the HUD overlay canvas AFTER drawHUD's clear, so call it after.)
+  drawEffects(ctx) {
+    if (!this.effectsOn || !this.effects.length) return;
+    const W = ctx.canvas.width, H = ctx.canvas.height, sx = W / 640, sy = H / 480;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';   // additive
+    for (const e of this.effects) {
+      const tex = this._fxCache.get(e.hash); if (!tex) continue;  // texture not received yet
+      const dw = Math.max(2, Math.abs(e.w)) * sx, dh = Math.max(2, Math.abs(e.h)) * sy;
+      ctx.drawImage(tex, e.cx * sx - dw / 2, e.cy * sy - dh / 2, dw, dh);
+    }
+    ctx.restore();
+  }
+
   drawHUD(ctx) {
     const W = ctx.canvas.width, H = ctx.canvas.height;
     ctx.clearRect(0, 0, W, H);

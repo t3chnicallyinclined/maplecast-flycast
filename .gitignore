@@ -80,6 +80,10 @@ web/sprites/
 dasm_PLDAT/
 MVC2 Dev Files/
 sh4_asm/
+# marvelous2 = full SH4 disassembly of MVC2 DC (github.com/mountainmanjed/marvelous2).
+# Its build/ reassembles to the ROM and the whole thing is disassembled copyrighted
+# code. Cloned locally as a reference only — NEVER commit. Added 2026-06-05.
+marvelous2/
 *_HITBOX_*.BIN
 PL[0-9A-Fa-f][0-9A-Fa-f]_*.BIN
 1ST_READ.BIN
@@ -135,3 +139,9 @@ bake.csv
 
 # Isolated TA effect textures (dumped from the live VRAM stream — ROM-derived)
 ta_effects.json
+
+# Operator RE catalog — MVC2 object-pool / sprite mappings (RE notes, operator-only)
+re-catalog/
+
+# Extracted sprite folders (rip-derived, from the .7z) — never commit
+MvC2_SpriteFolders_Patched/

@@ -256,7 +256,7 @@ canvas{display:block;background:transparent}
 </div>
 
 <script type="module">
-import {FrameDecoder} from './webgpu/frame-decoder.mjs';
+import {FrameDecoder} from './webgpu/frame-decoder.mjs?v=4';
 import {TAParser} from './webgpu/ta-parser.mjs';
 import {TextureManager} from './webgpu/texture-manager.mjs';
 import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=2';
@@ -264,7 +264,7 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=9';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=15';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=25';
 import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=6';
 
 const canvas=document.getElementById('c'), ov=document.getElementById('ov'), st=document.getElementById('st');
@@ -331,7 +331,7 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
     +'<label>Size <input type="range" id="sc_scale" min="0.5" max="3" step="0.05" value="1.75" style="width:110px;vertical-align:middle"> <span id="sc_scaleval">1.75</span>×</label><br>'
     +'<label><input type="checkbox" id="sc_skin" checked> Live skins / hit-flash (palette recolor)</label><br>'
     +'<label><input type="checkbox" id="sc_hud" checked> HUD (health/meter/combo/timer from state)</label><br>'
-    +'<label><input type="checkbox" id="sc_fx"> Effects (live, experimental — dev phase-skew; prod renders server-side)</label><br>'
+    +'<label><input type="checkbox" id="sc_fx" checked> Objects (cape / lightning / projectiles, from RAM)</label><br>'
     +'<button id="sc_srv">↻ Reload atlases</button> '
     +'<span style="font-size:9px;color:#888">(per-char, lazy-loads who\'s picked)</span><br>'
     +'atlas PNG <input type="file" id="sc_png" accept="image/png" style="font-size:10px"><br>'
@@ -362,7 +362,7 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
   box.querySelector('#sc_scale').oninput=e=>{ SPRITECLIENT.spriteScale=+e.target.value; const v=document.getElementById('sc_scaleval'); if(v)v.textContent=(+e.target.value).toFixed(2); };
   box.querySelector('#sc_skin').onchange=e=>{ SG.recolor=e.target.checked; };
   box.querySelector('#sc_hud').onchange=e=>{ hudOn=e.target.checked; };
-  box.querySelector('#sc_fx').onchange=e=>{ fxOn=e.target.checked; };
+  box.querySelector('#sc_fx').onchange=e=>{ fxOn=e.target.checked; SPRITECLIENT.objectsOn=e.target.checked; };
   // Per-character atlases lazy-load by char_id as characters appear in the state
   // (only the picked characters download). Override dir with ?atlas=<urlbase>.
   const CHAR_BASE = new URLSearchParams(location.search).get('atlas') || './test-atlas/chars';
@@ -383,23 +383,14 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
     if(scOn){
       if(gpuOn && SG.ok){
         for(const cid in SPRITECLIENT.chars){ const c=SPRITECLIENT.chars[cid]; if(c&&c.img&&!SG.chars[cid]){ SG.setAtlas(cid, c.img); SG.setCharPalette(cid, c.pal128); } }
-        let fxList=null;
-        if(fxOn && window._lastParsed && window._T && window._D && window._D.vram){
-          fxList=[];
-          for(const ef of window._taScanFrame(window._lastParsed, SPRITECLIENT, false)){
-            if(ef.bdst!==1) continue;                 // additive glow effects only
-            if(ef.w>170 || ef.h>170) continue;        // drop big persistent glows (super-BG/meter/aura); keep transient projectiles/sparks/lightning
-            if(ef.cy<40 || ef.cy>452) continue;       // drop HUD-row glows (top/bottom)
-            const t=window._T.getTexture(ef.tsp, ef.tcw, window._D.vram);
-            if(t&&t.texture) fxList.push({tex:t.texture, samp:t.sampler, x:ef.cx, y:ef.cy, w:ef.w, h:ef.h});
-          }
-        }
+        const fxList=null;  // EFCT effects render via SPRITECLIENT.drawEffects() — server-isolated, frame-synced (no dev rAF skew)
         try{ SG.render(SPRITECLIENT.buildDrawList(640,480), window.DBG||{}, window._T, SPRITECLIENT.buildSparkList(640,480), fxList); }
         catch(err){ console.error('[sprite-gpu] render error -> Canvas2D fallback', err); SG.ok=false; showCanvas(); }
       } else {
         SPRITECLIENT.render(scx);
       }
       if(hudOn) SPRITECLIENT.drawHUD(hctx); else hctx.clearRect(0,0,sch.width,sch.height);
+      if(fxOn) SPRITECLIENT.drawEffects(hctx);   // server-isolated TA effects, additive over the scene
       const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.statsText();
     }
     requestAnimationFrame(tick);
@@ -892,6 +883,19 @@ async function main(){
                 // GSTA state broadcast: 'GSTA' + serialized GameState (char_id,
                 // sprite_id, pos). Routed to the bake harness; never a TA frame.
                 if(SpriteBake.isGSTA(d)){ try{ BAKE.onGSTA(d); SPRITECLIENT.onGSTA(d); }catch(e){} return; }
+                // EFCT effect-quad packet — route to the sprite client; NOT a TA
+                // frame, so it must NOT reach applyFrame (that was the crash flood).
+                if(SpriteClient.isEFCT(d)){ try{ SPRITECLIENT.onEFCT(d); }catch(e){} return; }
+                // TXTR: 'TXTR'+hash(4)+w(2)+h(2)+rawSize(4)+zstd(RGBA). Decompress and
+                // cache the exact effect texture by hash. NOT a TA frame.
+                if(SpriteClient.isTXTR(d)){ try{
+                  const dv=new DataView(d.buffer,d.byteOffset,d.byteLength);
+                  const hash=dv.getUint32(4,true), tw=dv.getUint16(8,true), th=dv.getUint16(10,true);
+                  const rgba=D._decompress(d.subarray(16));
+                  SPRITECLIENT.onTXTR(hash, tw, th, rgba);
+                }catch(e){} return; }
+                // OBJS: pool satellite objects (cape/effects/projectiles) -> rip sprites. NOT a TA frame.
+                if(SpriteClient.isOBJS(d)){ try{ SPRITECLIENT.onOBJS(d); }catch(e){} return; }
                 try{
                     const wsArrival=performance.now();
                     if(lastFrameArrival>0){

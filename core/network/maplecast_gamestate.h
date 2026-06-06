@@ -86,4 +86,19 @@ void setPlayerName(int slot, const char* name);
 // Restore original "PLAYER" + "1"/"2" text
 void restorePlayerNames();
 
+// Live "satellite" objects from the pool (cape, effects, projectiles). Each is a
+// separate sprite the owner spawns; render PL{owner_cid}DAT/{sprite_id}.png at
+// (screen_x, screen_y). The character is assembled from body (0x144) + these.
+// See re-catalog/00-README.md + PL2A-storm.md.
+struct ObjectState {
+	uint8_t  owner_cid;   // owning character_id -> which rip atlas
+	uint16_t sprite_id;   // indexes the owner's atlas (+0x12C)
+	int16_t  screen_x;    // +0xC8
+	int16_t  screen_y;    // +0xCC
+	uint8_t  type;        // +0x0E : 1=lightning 2=aura 3=cape (attach/blend classifier)
+};
+// Scan the object pool; fill up to maxObjs, return count. Skips inactive
+// (sprite_id==0) and the position-less body object. Cheap RAM scan (~14k reads).
+int readObjects(ObjectState* out, int maxObjs);
+
 }

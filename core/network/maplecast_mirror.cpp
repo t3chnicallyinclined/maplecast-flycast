@@ -10,6 +10,8 @@
 	Client: loads server sync state, then applies diffs + feeds TA commands to renderer
 */
 #include <map>
+#include <unordered_set>
+#include <cstring>
 #include "types.h"
 #include "maplecast_mirror.h"
 #include "hub_discovery.h"
@@ -1271,6 +1273,83 @@ bool isHeadless()
 //
 // See docs/ARCHITECTURE.md "Mirror Wire Format â€” Rules of the Road" for the
 // canonical list of rules all four parsers must obey.
+// ============================================================================
+// Effect-texture decode + content-addressed hashing (EFCT/TXTR path). Ported from
+// the client decoder (web/webgpu/texture-manager.mjs). Effects are 16-bit direct
+// color (fmt 0/1/2), so we de-twiddle + unpack in software and ship each unique
+// texture once (keyed by content hash) — the state-only client draws the EXACT
+// game texture. fmt 5/6 (palette), VQ and mip are skipped here (added later).
+// ============================================================================
+namespace mcfx {
+static uint32_t s_twTab[2][11][1024];
+static bool s_twInit = false;
+static void initTwiddle() {
+	auto tw = [](int x, int y, int xs, int ys) {
+		int r = 0, s = 0; xs >>= 1; ys >>= 1;
+		while (xs || ys) { if (ys) { r |= (y & 1) << s; ys >>= 1; y >>= 1; s++; } if (xs) { r |= (x & 1) << s; xs >>= 1; x >>= 1; s++; } }
+		return r;
+	};
+	for (int s = 0; s < 11; s++) { int ys = 1 << s; for (int i = 0; i < 1024; i++) { s_twTab[0][s][i] = tw(i, 0, 1024, ys); s_twTab[1][s][i] = tw(0, i, ys, 1024); } }
+	s_twInit = true;
+}
+static inline int texBsr(int v) { int r = 0; while ((1 << r) < v) r++; return r; }
+static inline int te5(int v) { return (v << 3) | (v >> 2); }
+static inline int te6(int v) { return (v << 2) | (v >> 4); }
+static inline int te4(int v) { return (v << 4) | v; }
+static inline void unpack16(int fmt, uint16_t c, uint8_t* o) {
+	if (fmt == 0) { o[0] = te5((c >> 10) & 31); o[1] = te5((c >> 5) & 31); o[2] = te5(c & 31); o[3] = (c >> 15) ? 255 : 0; }
+	else if (fmt == 1) { o[0] = te5((c >> 11) & 31); o[1] = te6((c >> 5) & 63); o[2] = te5(c & 31); o[3] = 255; }
+	else { o[0] = te4((c >> 8) & 15); o[1] = te4((c >> 4) & 15); o[2] = te4(c & 15); o[3] = te4((c >> 12) & 15); }
+}
+// FNV-1a over fmt/w/h + the raw 16-bit VRAM region = the texture's content id.
+static uint32_t texHash(uint32_t addr, int fmt, int w, int h, int vq) {
+	uint32_t hsh = 2166136261u;
+	auto mix = [&](uint32_t b) { hsh ^= (b & 0xff); hsh *= 16777619u; };
+	mix(fmt); mix(w); mix(w >> 8); mix(h); mix(h >> 8); mix(vq);
+	uint32_t n = vq ? (uint32_t)(2048 + w * h / 4) : (uint32_t)(w * h * 2);
+	for (uint32_t i = 0; i < n; i += 2) { if (addr + i >= VRAM_SIZE) break; mix(vram[addr + i]); }
+	return hsh ? hsh : 1;
+}
+// Decode a non-VQ, non-mip fmt 0/1/2 texture to RGBA8888. Returns false if unsupported.
+static bool decodeTex16(uint32_t tcw, uint32_t tsp, uint8_t* out) {
+	if (!s_twInit) initTwiddle();
+	int fmt = (tcw >> 27) & 7, texU = (tsp >> 3) & 7, texV = tsp & 7;
+	int w = 8 << texU, h = 8 << texV, scan = (tcw >> 26) & 1, vq = (tcw >> 30) & 1, mip = (tcw >> 31) & 1;
+	if (fmt > 2 || mip) return false;
+	uint32_t addr = (tcw & 0x1FFFFF) << 3;
+	int bx = texBsr(w), by = texBsr(h);
+	if (vq) {
+		uint8_t cb[256 * 16];                        // codebook: 256 * (2x2 block of 16-bit texels)
+		for (int i = 0; i < 256; i++) {
+			uint32_t co = addr + i * 8;
+			for (int p = 0; p < 4; p++) {
+				uint32_t so = co + p * 2; uint8_t* cd = &cb[i * 16 + p * 4];
+				if (so + 1 >= VRAM_SIZE) { cd[0] = cd[1] = cd[2] = cd[3] = 0; continue; }
+				unpack16(fmt, (uint16_t)(vram[so] | (vram[so + 1] << 8)), cd);
+			}
+		}
+		uint32_t idxAddr = addr + 2048; int hw = w >> 1, hh = h >> 1, bcx = bx - 1, bcy = by - 1;
+		for (int y = 0; y < hh; y++) for (int x = 0; x < hw; x++) {
+			uint32_t io = idxAddr + s_twTab[0][bcy][x] + s_twTab[1][bcx][y];
+			if (io >= VRAM_SIZE) continue;
+			int ci = vram[io] * 16, px = x * 2, py = y * 2;
+			memcpy(&out[(py * w + px) * 4], &cb[ci], 4);
+			memcpy(&out[((py + 1) * w + px) * 4], &cb[ci + 4], 4);
+			memcpy(&out[(py * w + px + 1) * 4], &cb[ci + 8], 4);
+			memcpy(&out[((py + 1) * w + px + 1) * 4], &cb[ci + 12], 4);
+		}
+		return true;
+	}
+	for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+		uint32_t idx = scan ? (uint32_t)(y * w + x) : (s_twTab[0][by][x] + s_twTab[1][bx][y]);
+		uint32_t so = addr + idx * 2; uint8_t* d = &out[(y * w + x) * 4];
+		if (so + 1 >= VRAM_SIZE) { d[0] = d[1] = d[2] = d[3] = 0; continue; }
+		unpack16(fmt, (uint16_t)(vram[so] | (vram[so + 1] << 8)), d);
+	}
+	return true;
+}
+} // namespace mcfx
+
 void serverPublish(TA_context* ctx)
 {
 	if (!_isServer || !_shmPtr || !ctx) return;
@@ -1761,45 +1840,145 @@ done_diff:
 			maplecast_ws::broadcastBinary(gsBuf, 4 + maplecast_gamestate::WIRE_SIZE);
 		}
 
-		// === SERVER-SIDE EFFECT ISOLATION ("EFCT" packet) ===
-		// Iterate the parsed TA translucent + punch-through polys this frame and map
-		// each quad's (fmt|texW|texH|blend) signature to one of the 5 catalogued
-		// effect textures (fx_atlas). The signature map IS the filter: HUD and char-
-		// tile signatures don't match, so only real additive effects (+ the fmt0
-		// super star-sparks) pass. Emit (id,cx,cy,w,h) in screen space. Frame+texture
-		// are inherently synced here (this IS the TA the frame just rendered).
+			// === OBJS: pool satellite objects (cape/effects/projectiles) -> rip sprites ===
+			// Ship owner, sprite_id (with the 0x8000 hflip bit), and the object's nominal
+			// position (+0xC8/+0xCC). The CLIENT decides where to draw: attached parts (near
+			// the owner) snap to the owner's LIVE screen pos + the true anchor (no lag; an
+			// off-screen assist's parts vanish with it); spawned objects (far) use +0xC8/+0xCC.
+			{
+				maplecast_gamestate::ObjectState objs[48];
+				int no = maplecast_gamestate::readObjects(objs, 48);
+				if (no > 0) {
+					uint8_t obuf[4 + 1 + 48 * 8];   // per obj: cid(1)+sid(2)+type(1)+x(2)+y(2)
+					obuf[0]='O'; obuf[1]='B'; obuf[2]='J'; obuf[3]='S'; obuf[4]=(uint8_t)no;
+					int oo = 5;
+					for (int i = 0; i < no; i++) {
+						uint16_t sid = objs[i].sprite_id;
+						obuf[oo++]=objs[i].owner_cid;
+						obuf[oo++]=sid&0xff; obuf[oo++]=(sid>>8)&0xff;
+						obuf[oo++]=objs[i].type;
+						obuf[oo++]=objs[i].screen_x&0xff; obuf[oo++]=(objs[i].screen_x>>8)&0xff;
+						obuf[oo++]=objs[i].screen_y&0xff; obuf[oo++]=(objs[i].screen_y>>8)&0xff;
+					}
+					maplecast_ws::broadcastBinary(obuf, oo);
+				}
+			}
+
+			// === TAEFF: TA-analysis. For each effect quad, log it RELATIVE to the nearest
+			// character + that char's current sprite_id (pose). Lets us DERIVE the rules:
+			// cape offset per pose, projectile patterns, etc. Gated MAPLECAST_TAEFF -> file.
+			{
+				static bool _taeff = getenv("MAPLECAST_TAEFF") != nullptr;
+				static uint32_t _ec = 0; ++_ec;
+				if (_taeff) {
+					static FILE* ef = nullptr; static long ew = 0;
+					if (!ef) ef = fopen("/dev/shm/mc_taeff.log", "w");
+					if (ef && ew < 16L*1024*1024) {
+						ta_parse(ctx, true);
+						auto& rc = ctx->rend;
+						maplecast_gamestate::GameState egs; maplecast_gamestate::readGameState(egs);
+						auto logList = [&](std::vector<PolyParam>& lst, const char* tag) {
+							for (PolyParam& pp : lst) {
+								if (pp.count < 3 || !((pp.pcw.full >> 3) & 1)) continue;
+								uint32_t tsp = pp.tsp.full; int bs=(tsp>>29)&7, bd=(tsp>>26)&7;
+								float mnX=1e9f,mxX=-1e9f,mnY=1e9f,mxY=-1e9f;
+								uint32_t end=pp.first+pp.count; if(end>rc.verts.size()) end=(uint32_t)rc.verts.size();
+								for(uint32_t v=pp.first;v<end;v++){float x=rc.verts[v].x,y=rc.verts[v].y;if(x<mnX)mnX=x;if(x>mxX)mxX=x;if(y<mnY)mnY=y;if(y>mxY)mxY=y;}
+								float cx=(mnX+mxX)*0.5f,cy=(mnY+mxY)*0.5f,w=mxX-mnX,h=mxY-mnY;
+								if(cy<=20.f||w<2.f||h<2.f) continue;
+								int best=-1; float bd2=1e9f;
+								for(int i=0;i<6;i++){ if(!egs.chars[i].active) continue; float dx=cx-egs.chars[i].screen_x,dy=cy-egs.chars[i].screen_y,d=dx*dx+dy*dy; if(d<bd2){bd2=d;best=i;} }
+								if(best<0||bd2>40000.f) continue;
+								auto&c=egs.chars[best];
+								char b[220]; int n=snprintf(b,sizeof b,"f%u cid=%d csid=%d cscr=(%.0f,%.0f) %s off=(%.0f,%.0f) sz=%.0fx%.0f blend=%d/%d\n",
+									_ec, c.character_id, c.sprite_id, c.screen_x, c.screen_y, tag, cx-c.screen_x, cy-c.screen_y, w, h, bs, bd);
+								fwrite(b,1,n,ef); ew+=n;
+							}
+						};
+						logList(rc.global_param_tr,"tr");
+						logList(rc.global_param_pt,"pt");
+						fflush(ef);
+					}
+				}
+			}
+
+			// === TADBG: renderer-oracle. EVERY FRAME (short moves last a few frames), for each
+			// pool object find the nearest drawn quad -> its z-ORDER (draw index), BLEND, and
+			// whether it is drawn at all (NO-MATCH = dead/afterimage to filter). Writes
+			// /dev/shm/mc_tadbg.log (16MB cap). Gated MAPLECAST_TADBG.
+			{
+				static bool _tadbg = getenv("MAPLECAST_TADBG") != nullptr;
+				static uint32_t _tc = 0; ++_tc;
+				if (_tadbg) {
+					static FILE* tf = nullptr; static long tw = 0;
+					if (!tf) tf = fopen("/dev/shm/mc_tadbg.log", "w");
+					if (tf && tw < 16L*1024*1024) {
+						ta_parse(ctx, true);
+						auto& rc = ctx->rend;
+						struct OP { int idx; float cx, cy; int bs, bd; };
+						static OP polys[1024]; int np = 0, li = 0;
+						auto collect = [&](std::vector<PolyParam>& lst) {
+							for (PolyParam& pp : lst) {
+								int idx = li++;
+								if (np >= 1024 || pp.count < 3 || !((pp.pcw.full >> 3) & 1)) continue;
+								uint32_t tsp = pp.tsp.full;
+								float mnX=1e9f,mxX=-1e9f,mnY=1e9f,mxY=-1e9f;
+								uint32_t end = pp.first + pp.count; if (end > rc.verts.size()) end = (uint32_t)rc.verts.size();
+								for (uint32_t v = pp.first; v < end; v++) { float x=rc.verts[v].x,y=rc.verts[v].y; if(x<mnX)mnX=x;if(x>mxX)mxX=x;if(y<mnY)mnY=y;if(y>mxY)mxY=y; }
+								float cy=(mnY+mxY)*0.5f; if (cy<=20.f) continue;
+								polys[np++] = { idx, (mnX+mxX)*0.5f, cy, (int)((tsp>>29)&7), (int)((tsp>>26)&7) };
+							}
+						};
+						collect(rc.global_param_tr);
+						collect(rc.global_param_pt);
+						maplecast_gamestate::ObjectState dobjs[48];
+						int dno = maplecast_gamestate::readObjects(dobjs, 48);
+						char b[200];
+						for (int i = 0; i < dno; i++) {
+							int best=-1; float bdist=1e9f;
+							for (int j=0;j<np;j++){ float dx=polys[j].cx-dobjs[i].screen_x,dy=polys[j].cy-dobjs[i].screen_y,d=dx*dx+dy*dy; if(d<bdist){bdist=d;best=j;} }
+							int n;
+							if (best>=0 && bdist<1600.f)
+								n = snprintf(b, sizeof b, "f%u cid=%d sid=%d @(%d,%d) z=%d blend=%d/%d d2=%.0f\n", _tc, dobjs[i].owner_cid, dobjs[i].sprite_id, dobjs[i].screen_x, dobjs[i].screen_y, polys[best].idx, polys[best].bs, polys[best].bd, bdist);
+							else
+								n = snprintf(b, sizeof b, "f%u cid=%d sid=%d @(%d,%d) NO-MATCH\n", _tc, dobjs[i].owner_cid, dobjs[i].sprite_id, dobjs[i].screen_x, dobjs[i].screen_y);
+							fwrite(b, 1, n, tf); tw += n;
+						}
+						fflush(tf);
+					}
+				}
+			}
+
+		// === SERVER-SIDE EFFECT ISOLATION -> content-addressed "EFCT" + "TXTR" ===
+		// Per additive (DstInstr==ONE) effect quad: hash the texture's VRAM bytes
+		// (content id, stable across the transient VRAM address) and emit
+		// (hash,cx,cy,w,h) in screen space. When a hash is NEW, decode the 16-bit
+		// texture to RGBA and ship it ONCE as a zstd "TXTR" packet; the state-only
+		// client caches by hash and draws the EXACT game texture. ta_parse fills
+		// rc.tr/pt here (Process re-parses later; raw mirror wire untouched).
 		{
-			// ctx->rend is parsed by renderer->Process(), which runs AFTER
-			// serverPublish — so the tr/pt lists are empty here. Parse the TA now
-			// to fill them. Process re-parses later (harmless); the raw mirror wire
-			// bytes (streamed from ctx->tad) are untouched, so determinism holds.
 			ta_parse(ctx, true);
 			const int FX_MAX = 24;
-			uint8_t fxBuf[4 + 1 + FX_MAX * 9];
+			uint8_t fxBuf[4 + 1 + FX_MAX * 12];
 			fxBuf[0] = 'E'; fxBuf[1] = 'F'; fxBuf[2] = 'C'; fxBuf[3] = 'T';
 			int off = 5; int nfx = 0;
-			auto sigId = [](int fmt, int tw, int th, int bd) -> int {
-				if (bd == 1) {
-					if (fmt == 1 && tw == 256 && th == 256) return 0;
-					if (fmt == 1 && tw == 128 && th == 128) return 1;
-					if (fmt == 2 && tw == 128 && th == 128) return 2;
-					if (fmt == 2 && tw == 256 && th == 256) return 3;
-				} else if (bd == 5 && fmt == 0 && tw == 256 && th == 256) {
-					return 4;
-				}
-				return -1;
-			};
+			static std::unordered_set<uint32_t> _sentHashes;
+			static uint8_t* _rgbaBuf = (uint8_t*)malloc(1024 * 1024 * 4);
+			// The relay hides browser joins, so we can't detect a new client. Re-ship
+			// active textures ~every 3s: clearing the sent-set means only on-screen
+			// textures re-ship (cached ones stay quiet between).
+			static uint32_t _txClear = 0;
+			if ((++_txClear % 180) == 0) _sentHashes.clear();
 			auto scanList = [&](std::vector<PolyParam>& lst) {
 				for (PolyParam& pp : lst) {
 					if (nfx >= FX_MAX) return;
 					if (pp.count < 3) continue;
 					uint32_t tcw = pp.tcw.full, tsp = pp.tsp.full, pcw = pp.pcw.full;
-					if (!((pcw >> 3) & 1)) continue;
+					if (!((pcw >> 3) & 1)) continue;            // untextured
+					if (((tsp >> 26) & 7) != 1) continue;       // additive (DstInstr==ONE) only
 					int fmt = (tcw >> 27) & 7;
+					if (fmt > 2 || ((tcw >> 31) & 1)) continue; // 16-bit, non-mip (VQ now decoded)
 					int tw = 8 << ((tsp >> 3) & 7), th = 8 << (tsp & 7);
-					int bd = (tsp >> 26) & 7;
-					int id = sigId(fmt, tw, th, bd);
-					if (id < 0) continue;
 					float mnX = 1e9f, mxX = -1e9f, mnY = 1e9f, mxY = -1e9f;
 					uint32_t end = pp.first + pp.count;
 					if (end > rc.verts.size()) end = (uint32_t)rc.verts.size();
@@ -1811,46 +1990,31 @@ done_diff:
 					float w = mxX - mnX, h = mxY - mnY;
 					float cx = (mnX + mxX) * 0.5f, cy = (mnY + mxY) * 0.5f;
 					if (cy <= 40.f || w < 2.f || h < 2.f) continue;
-					int16_t vals[4] = { (int16_t)cx, (int16_t)cy, (int16_t)w, (int16_t)h };
-					fxBuf[off++] = (uint8_t)id;
-					for (int k = 0; k < 4; k++) {
-						fxBuf[off++] = vals[k] & 0xff;
-						fxBuf[off++] = (vals[k] >> 8) & 0xff;
+					uint32_t addr = (tcw & 0x1FFFFF) << 3;
+					uint32_t hsh = mcfx::texHash(addr, fmt, tw, th, (tcw >> 30) & 1);
+					if (_rgbaBuf && _sentHashes.find(hsh) == _sentHashes.end()) {
+						if (mcfx::decodeTex16(tcw, tsp, _rgbaBuf)) {
+							_sentHashes.insert(hsh);
+							uint32_t rgbaSize = (uint32_t)(tw * th * 4);
+							size_t compSize = 0; uint64_t cus = 0;
+							const uint8_t* comp = _compressor.compress(_rgbaBuf, rgbaSize, compSize, cus);
+							std::vector<uint8_t> tb(16 + compSize);
+							tb[0] = 'T'; tb[1] = 'X'; tb[2] = 'T'; tb[3] = 'R';
+							memcpy(&tb[4], &hsh, 4);
+							tb[8] = tw & 0xff; tb[9] = (tw >> 8) & 0xff; tb[10] = th & 0xff; tb[11] = (th >> 8) & 0xff;
+							memcpy(&tb[12], &rgbaSize, 4); memcpy(&tb[16], comp, compSize);
+							maplecast_ws::broadcastBinary(tb.data(), (uint32_t)tb.size());
+						}
 					}
+					int16_t v16[4] = { (int16_t)cx, (int16_t)cy, (int16_t)w, (int16_t)h };
+					memcpy(&fxBuf[off], &hsh, 4); off += 4;
+					for (int k = 0; k < 4; k++) { fxBuf[off++] = v16[k] & 0xff; fxBuf[off++] = (v16[k] >> 8) & 0xff; }
 					nfx++;
 				}
 			};
 			scanList(rc.global_param_tr);
 			scanList(rc.global_param_pt);
-			// [FXDBG] temporary: log distinct textured translucent/pt signatures every
-			// 2s so we can see what the TA actually contains when supers fire.
-			{
-				static uint32_t _fxdc = 0;
-				if ((++_fxdc % 120) == 0) {
-					std::map<std::string,int> sigs;
-					auto histo = [&](std::vector<PolyParam>& lst) {
-						for (PolyParam& pp : lst) {
-							if (pp.count < 3) continue;
-							uint32_t tsp = pp.tsp.full, tcw = pp.tcw.full, pcw = pp.pcw.full;
-							if (!((pcw >> 3) & 1)) continue;
-							int fmt = (tcw >> 27) & 7, tw = 8 << ((tsp >> 3) & 7), th = 8 << (tsp & 7);
-							int bd = (tsp >> 26) & 7, bs = (tsp >> 29) & 7;
-							char b[48]; snprintf(b, sizeof b, "f%d|%dx%d|%d/%d", fmt, tw, th, bs, bd);
-							sigs[b]++;
-						}
-					};
-					histo(rc.global_param_tr); histo(rc.global_param_pt);
-					std::string s;
-					for (auto& kv : sigs) { s += kv.first; s += ":"; s += std::to_string(kv.second); s += " "; }
-					printf("[FXDBG] tr=%zu pt=%zu nfx=%d | %s\\n", rc.global_param_tr.size(), rc.global_param_pt.size(), nfx, s.c_str());
-					fflush(stdout);
-				}
-			}
 			fxBuf[4] = (uint8_t)nfx;
-			// Gated OFF by default: EFCT rides the same broadcast as the TA frames,
-			// so the WebTransport client feeds it to applyFrame() and throws. Enable
-			// (MAPLECAST_EFCT=1) only once the client routes EFCT away from the TA
-			// decoder. The FXDBG log above still works for tuning.
 			static bool _efctOn = getenv("MAPLECAST_EFCT") != nullptr;
 			if (_efctOn && nfx > 0) maplecast_ws::broadcastBinary(fxBuf, off);
 		}
