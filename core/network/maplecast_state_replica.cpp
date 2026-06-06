@@ -127,6 +127,11 @@ bool frameInject()
 			       _noRomMode ? " — cold boot from server state" : " — mid-match join");
 			fflush(stdout);
 			dc_loadstate_from_memory(stateData.data(), stateData.size());
+			// The MCSV was built at match-start; its embedded VRAM may be
+			// missing character textures that loaded later in the match.
+			// Re-apply the SYNC VRAM (received during phase-1) to restore
+			// the server's current texture state before SH4 renders.
+			maplecast_mirror::reapplyLastSyncVram();
 			_noRomMode = false;
 			_mcsvApplied = true;
 			_gotFirst.store(false, std::memory_order_release);

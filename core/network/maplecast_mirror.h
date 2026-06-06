@@ -49,6 +49,12 @@ void switchToGstaOnly();
 // renders the TA stream; sets false after MCSV is applied so the SH4 takes over.
 void setClientRendering(bool enabled);
 
+// Re-apply the most recently received SYNC frame's VRAM + PVR registers.
+// Call this immediately after dc_loadstate_from_memory() — the loadstate
+// overwrites VRAM with match-start textures, which may be missing characters
+// loaded later. The saved SYNC has the server's current texture state.
+void reapplyLastSyncVram();
+
 bool isServer();
 bool isClient();
 // True if MapleCast is active in ANY mode (server, client, or local with MAPLECAST=1).
