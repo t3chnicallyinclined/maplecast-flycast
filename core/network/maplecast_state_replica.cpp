@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <chrono>
 
 // The authoritative input globals the game reads at vblank. In FREEZE mode we
 // pin these to neutral (active-low: all bits set) so the local SH4 cannot move
@@ -163,8 +164,8 @@ bool frameInject()
 	// frame = server frame_counter; injected = frames we've applied; objs gap =
 	// the node-synthesis region (server objects with no local node yet).
 	{
-		struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-		int64_t now = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+		int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+		    std::chrono::steady_clock::now().time_since_epoch()).count();
 		static int64_t lastMs = 0;
 		if (now - lastMs >= 1000) {
 			lastMs = now;

@@ -1361,6 +1361,23 @@ void Emulator::start()
 		// SYNC-wait stalled the first frame ~1s, letting init finish.)
 		config::ThreadedRendering.override(false);
 		printf("[state-replica] ThreadedRendering=off — single-threaded run loop (no emu-thread init race)\n");
+
+		// Wire input sink — send local gamepad to the server's input port (7100).
+		// FREEZE keeps the local SH4 from simulating (it only renders injected state),
+		// so inputs are only meaningful server-side. Host is embedded in
+		// MAPLECAST_STATE_REPLICA ("host:port"); strip the port suffix for the sink.
+		if (!std::getenv("MAPLECAST_SPECTATE")) {
+			std::string sinkHost = std::getenv("MAPLECAST_STATE_REPLICA");
+			if (auto c = sinkHost.find(':'); c != std::string::npos) sinkHost.resize(c);
+			int sinkSlot = std::getenv("MAPLECAST_PLAYER_SLOT") ? std::atoi(std::getenv("MAPLECAST_PLAYER_SLOT")) : 0;
+			maplecast_input_sink::init(sinkHost.c_str(), sinkSlot);
+#ifdef _WIN32
+			maplecast_rawinput::init();
+#elif defined(__linux__)
+			maplecast_evdev_input::init();
+#endif
+			printf("[state-replica] input pipeline wired: sink → %s slot=%d\n", sinkHost.c_str(), sinkSlot);
+		}
 	}
 	(void)stateReplicaActive;
 
