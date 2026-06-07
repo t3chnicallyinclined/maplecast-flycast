@@ -201,7 +201,24 @@ void Do_Exception(u32 epc, Sh4ExceptionCode expEvn)
 	assert((expEvn >= Sh4Ex_TlbMissRead && expEvn <= Sh4Ex_SlotIllegalInstr)
 			|| expEvn == Sh4Ex_FpuDisabled || expEvn == Sh4Ex_SlotFpuDisabled || expEvn == Sh4Ex_UserBreak);
 	if (Sh4cntx.sr.BL != 0)
+	{
+		// MAPLECAST diagnostic: dump the exact fault before throwing so we can
+		// correlate the faulting PC + data address against MVC2's RE'd memory
+		// map (marvelous2 / anotak) instead of guessing. expEvn is the EXPEVT
+		// code (0x40=TLBmissRead 0x60=TLBmissWrite 0xE0=DataAddrErrRead
+		// 0x100=DataAddrErrWrite 0x180=IllegalInstr 0x1A0=SlotIllegal
+		// 0x800/0x820=FPUDisabled). TEA = faulting virtual address (TLB/addr
+		// errors). PR = return addr of the routine that faulted.
+		printf("[SH4-FAULT] BLOCKED exception expEvn=0x%03X epc=%08X "
+		       "TEA=%08X PTEH=%08X spc=%08X pr=%08X gbr=%08X r15=%08X "
+		       "r0=%08X r1=%08X r4=%08X r5=%08X r6=%08X\n",
+		       (unsigned)expEvn, epc,
+		       CCN_TEA, CCN_PTEH, Sh4cntx.spc, Sh4cntx.pr, Sh4cntx.gbr,
+		       Sh4cntx.r[15], Sh4cntx.r[0], Sh4cntx.r[1],
+		       Sh4cntx.r[4], Sh4cntx.r[5], Sh4cntx.r[6]);
+		fflush(stdout);
 		throw FlycastException("Fatal: SH4 exception when blocked");
+	}
 	CCN_EXPEVT = expEvn;
 
 	Sh4cntx.ssr = Sh4cntx.sr.getFull();
