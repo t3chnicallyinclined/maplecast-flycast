@@ -177,6 +177,11 @@ static std::vector<uint8_t>   _cachedMcsvFrame;
 // a ROM file ("Failed to locate bootfile"). 300 frames = 5 s at 60 fps.
 static int _mcsvBuildCountdown = 0;
 
+// Set by checkMatchEnd (status thread) when the countdown fires; drained by
+// drainMcsvCapture() on the emu thread so dc_serialize runs at a clean SH4
+// frame boundary (SR.BL=0) instead of mid-interrupt.
+static std::atomic<bool> _mcsvCaptureRequested{false};
+
 static void buildMcsvCache()
 {
 	size_t stateSize = 0;
@@ -204,6 +209,18 @@ static void buildMcsvCache()
 	}
 	printf("[maplecast-ws] MCSV cached: %.1f MB raw -> %.1f MB compressed\n",
 	       stateSize / (1024.0*1024.0), compSize / (1024.0*1024.0));
+}
+
+// Emu-thread entry: called once per frame from serverPublish. Runs the actual
+// dc_serialize capture ONLY when checkMatchEnd has requested it — at this point
+// the SH4 is between frames (SR.BL=0), so the savestate is clean and replica
+// clients can resume it without "SH4 exception when blocked".
+void drainMcsvCapture()
+{
+	if (_mcsvCaptureRequested.exchange(false, std::memory_order_acquire)) {
+		buildMcsvCache();
+		printf("[maplecast-ws] MCSV built on emu thread (clean SH4 boundary, SR.BL=0)\n");
+	}
 }
 
 // Loss detection state (continued — _matchActive forward-declared above)
@@ -657,11 +674,16 @@ static void checkMatchEnd()
 			printf("[maplecast-ws] MCSV build scheduled in 300 frames (round-intro disc I/O guard)\n");
 		}
 
-		// Deferred MCSV build (counts down from match-start).
+		// Deferred MCSV build (counts down from match-start). We DON'T capture
+		// here — this runs on the 1Hz status thread, and dc_serialize reads live
+		// SH4 registers; capturing mid-execution can snapshot SR.BL=1 (the CPU
+		// inside the vblank interrupt handler), which crashes replica clients on
+		// load with "SH4 exception when blocked". Instead request the capture and
+		// let serverPublish (emu thread, between frames, SR.BL=0) run it.
 		if (_mcsvBuildCountdown > 0) {
 			if (--_mcsvBuildCountdown == 0) {
-				buildMcsvCache();
-				printf("[maplecast-ws] MCSV built (300-frame delay complete)\n");
+				_mcsvCaptureRequested.store(true, std::memory_order_release);
+				printf("[maplecast-ws] MCSV capture requested — emu thread will build at next frame boundary\n");
 			}
 		}
 

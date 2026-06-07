@@ -1786,6 +1786,13 @@ void serverPublish(TA_context* ctx)
 		}
 	}
 
+	// Emu-thread MCSV capture: dc_serialize must run here (between frames,
+	// SR.BL=0), NOT on the status thread that requests it — a mid-interrupt
+	// snapshot crashes replica clients on load ("SH4 exception when blocked").
+	// Cheap atomic check every frame; the heavy serialize fires once per match.
+	if (maplecast_ws::active())
+		maplecast_ws::drainMcsvCapture();
+
 	if (!maplecast_ws::active() || maplecast_ws::clientCount() == 0) {
 		// Update frame counter + basic telemetry for local overlays
 		_atomicCurrentFrame.store(_localFrameNum, std::memory_order_release);

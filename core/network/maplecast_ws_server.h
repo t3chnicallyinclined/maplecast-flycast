@@ -13,6 +13,14 @@ void shutdown();
 bool active();
 void broadcastBinary(const void* data, size_t size);
 
+// Drain a pending MCSV (mid-match savestate) capture request. MUST be called
+// from the EMU THREAD at a frame boundary (i.e. from serverPublish), because
+// dc_serialize captures live SH4 register state — taking it from the 1Hz
+// status thread mid-execution can snapshot SR.BL=1 (mid-interrupt), which
+// crashes replica clients on load with "SH4 exception when blocked". A no-op
+// unless checkMatchEnd has requested a capture.
+void drainMcsvCapture();
+
 // Build a fresh "SYNC" packet from current vram[]/pvr_regs, zstd-compress it
 // (ZCST magic), and broadcast to ALL connected clients. Called by the mirror
 // server on scene transitions so non-seed clients get a clean state instead
