@@ -1,0 +1,65 @@
+{
+ "field": "flags",
+ "source": "https://zachd.com/mvc2/data/anotak/possible_flags.html",
+ "title": "flags MVC2 DATA",
+ "tables": [
+  {
+   "headers": [
+    "Value",
+    "Hex",
+    "Characters",
+    "Entries"
+   ],
+   "rows": [
+    [
+     "NoYBoost",
+     "0x04",
+     "59",
+     "1558"
+    ],
+    [
+     "Launcher",
+     "0x40",
+     "58",
+     "147"
+    ],
+    [
+     "FlyingScreenTrigger",
+     "0x80",
+     "58",
+     "308"
+    ],
+    [
+     "Unknown02",
+     "0x02",
+     "59",
+     "302"
+    ],
+    [
+     "CantKill",
+     "0x20",
+     "34",
+     "166"
+    ],
+    [
+     "Unknown01",
+     "0x01",
+     "3",
+     "6"
+    ],
+    [
+     "NoComboCount",
+     "0x10",
+     "17",
+     "43"
+    ],
+    [
+     "IgnoresDamageScaling",
+     "0x08",
+     "19",
+     "35"
+    ]
+   ]
+  }
+ ]
+}

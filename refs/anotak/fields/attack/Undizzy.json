@@ -1,0 +1,59 @@
+{
+ "field": "Undizzy",
+ "source": "https://zachd.com/mvc2/data/anotak/possible_Undizzy.html",
+ "title": "Undizzy MVC2 DATA",
+ "tables": [
+  {
+   "headers": [
+    "Value",
+    "Hex",
+    "Characters",
+    "Entries"
+   ],
+   "rows": [
+    [
+     "4",
+     "0x04",
+     "58",
+     "399"
+    ],
+    [
+     "2",
+     "0x02",
+     "58",
+     "291"
+    ],
+    [
+     "1",
+     "0x01",
+     "58",
+     "798"
+    ],
+    [
+     "8",
+     "0x08",
+     "2",
+     "7"
+    ],
+    [
+     "12",
+     "0x0C",
+     "1",
+     "1"
+    ],
+    [
+     "10",
+     "0x0A",
+     "1",
+     "1"
+    ],
+    [
+     "6",
+     "0x06",
+     "1",
+     "1"
+    ]
+   ]
+  }
+ ]
+}

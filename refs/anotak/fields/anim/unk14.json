@@ -1,0 +1,16 @@
+{
+ "field": "unk14",
+ "source": "https://zachd.com/mvc2/data/anotak/possible_anim_unk14.html",
+ "title": "unk14 MVC2 DATA",
+ "tables": [
+  {
+   "headers": [
+    "Value",
+    "Hex",
+    "Characters",
+    "Entries"
+   ],
+   "rows": []
+  }
+ ]
+}

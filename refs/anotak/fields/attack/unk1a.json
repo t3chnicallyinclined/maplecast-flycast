@@ -1,0 +1,16 @@
+{
+ "field": "unk1a",
+ "source": "https://zachd.com/mvc2/data/anotak/possible_unk1a.html",
+ "title": "unk1a MVC2 DATA",
+ "tables": [
+  {
+   "headers": [
+    "Value",
+    "Hex",
+    "Characters",
+    "Entries"
+   ],
+   "rows": []
+  }
+ ]
+}

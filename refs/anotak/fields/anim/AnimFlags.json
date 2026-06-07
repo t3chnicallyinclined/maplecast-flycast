@@ -1,0 +1,65 @@
+{
+ "field": "AnimFlags",
+ "source": "https://zachd.com/mvc2/data/anotak/possible_anim_AnimFlags.html",
+ "title": "AnimFlags MVC2 DATA",
+ "tables": [
+  {
+   "headers": [
+    "Value",
+    "Hex",
+    "Characters",
+    "Entries"
+   ],
+   "rows": [
+    [
+     "ContinuesThroughHitstop",
+     "0x80",
+     "56",
+     "3197"
+    ],
+    [
+     "Unknown02",
+     "0x02",
+     "50",
+     "929"
+    ],
+    [
+     "Unknown01",
+     "0x01",
+     "51",
+     "1313"
+    ],
+    [
+     "Unknown10",
+     "0x10",
+     "22",
+     "237"
+    ],
+    [
+     "Unknown20",
+     "0x20",
+     "21",
+     "111"
+    ],
+    [
+     "Unknown04",
+     "0x04",
+     "37",
+     "581"
+    ],
+    [
+     "Unknown08",
+     "0x08",
+     "25",
+     "447"
+    ],
+    [
+     "Unknown40",
+     "0x40",
+     "13",
+     "108"
+    ]
+   ]
+  }
+ ]
+}

@@ -1,0 +1,59 @@
+{
+ "field": "BlockFlags",
+ "source": "https://zachd.com/mvc2/data/anotak/possible_BlockFlags.html",
+ "title": "BlockFlags MVC2 DATA",
+ "tables": [
+  {
+   "headers": [
+    "Value",
+    "Hex",
+    "Characters",
+    "Entries"
+   ],
+   "rows": [
+    [
+     "BlockLow",
+     "0x04",
+     "58",
+     "172"
+    ],
+    [
+     "BlockHigh",
+     "0x02",
+     "58",
+     "451"
+    ],
+    [
+     "ChipDamageA",
+     "0x10",
+     "59",
+     "1163"
+    ],
+    [
+     "UnknownThrowRelated",
+     "0x40",
+     "55",
+     "275"
+    ],
+    [
+     "ChipDamageBNoMeterGain",
+     "0x20",
+     "58",
+     "684"
+    ],
+    [
+     "ChipDamageC",
+     "0x80",
+     "22",
+     "393"
+    ],
+    [
+     "Unblockable",
+     "0x08",
+     "3",
+     "6"
+    ]
+   ]
+  }
+ ]
+}

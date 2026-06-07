@@ -1,0 +1,41 @@
+{
+ "field": "Ender",
+ "source": "https://zachd.com/mvc2/data/anotak/possible_anim_Ender.html",
+ "title": "Ender MVC2 DATA",
+ "tables": [
+  {
+   "headers": [
+    "Value",
+    "Hex",
+    "Characters",
+    "Entries"
+   ],
+   "rows": [
+    [
+     "128",
+     "0x80",
+     "56",
+     "14642"
+    ],
+    [
+     "255",
+     "0xFF",
+     "1",
+     "1"
+    ],
+    [
+     "143",
+     "0x8F",
+     "1",
+     "2"
+    ],
+    [
+     "129",
+     "0x81",
+     "1",
+     "2"
+    ]
+   ]
+  }
+ ]
+}

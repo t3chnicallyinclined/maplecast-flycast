@@ -1,0 +1,23 @@
+{
+ "field": "unk06",
+ "source": "https://zachd.com/mvc2/data/anotak/possible_anim_unk06.html",
+ "title": "unk06 MVC2 DATA",
+ "tables": [
+  {
+   "headers": [
+    "Value",
+    "Hex",
+    "Characters",
+    "Entries"
+   ],
+   "rows": [
+    [
+     "255",
+     "0xFF",
+     "27",
+     "396"
+    ]
+   ]
+  }
+ ]
+}
