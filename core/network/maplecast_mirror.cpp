@@ -2313,7 +2313,7 @@ done_diff:
 					obuf[0]='O'; obuf[1]='B'; obuf[2]='J'; obuf[3]='S'; obuf[4]=(uint8_t)no;
 					int oo = 5;
 					for (int i = 0; i < no; i++) {
-						uint16_t sid = objs[i].sprite_id;
+						uint16_t sid = (objs[i].sprite_id & 0x7fff) | (objs[i].xflip ? 0x8000 : 0);  // per-object flip (node+0x130) in the high bit
 						obuf[oo++]=objs[i].owner_cid;
 						obuf[oo++]=sid&0xff; obuf[oo++]=(sid>>8)&0xff;
 						obuf[oo++]=objs[i].type;

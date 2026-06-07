@@ -289,7 +289,7 @@ static int readObjectsWalk(ObjectState* out, int maxObjs)
 					out[n].screen_y   = (int16_t)sy;
 					out[n].type       = cat;                              // walk-order layer
 					out[n].category   = (uint8_t)addrspace::read8(node + 0x03);  // real render layer byte
-					out[n].xflip      = (uint8_t)addrspace::read8(node + 0x130);
+					out[n].xflip      = (uint8_t)(addrspace::read16(node + 0x130) ? 1 : 0);
 					out[n].owner_slot = (uint8_t)(slot < 0 ? 0 : slot);
 					n++;
 				}
@@ -355,7 +355,7 @@ static int readAllDrawn(ObjectState* out, int maxObjs)
 			out[n].screen_y   = (int16_t)sy;
 			out[n].type       = (uint8_t)layer;                       // z-order: slot-table layer
 			out[n].category   = (uint8_t)addrspace::read8(node + 0x03);
-			out[n].xflip      = (uint8_t)addrspace::read8(node + 0x130);
+			out[n].xflip      = (uint8_t)(addrspace::read16(node + 0x130) ? 1 : 0);
 			out[n].owner_slot = (uint8_t)(slot < 0 ? 0xFF : slot);
 			n++;
 		}
@@ -471,7 +471,7 @@ int readObjects(ObjectState* out, int maxObjs)
 		// is unresolved in re-catalog), so we carry `type`@a+0x0E (validated) and
 		// match on owner alone when injecting.
 		out[n].category  = (uint8_t)addrspace::read8(a + 0x0E);   // = type (render layer hint)
-		out[n].xflip     = (uint8_t)addrspace::read8(a + 0x130);
+		out[n].xflip     = (uint8_t)(addrspace::read16(a + 0x130) ? 1 : 0);
 		{ int os = 0; for (int s = 0; s < 6; s++) if (v == CHAR_BASE[s]) { os = s; break; } out[n].owner_slot = (uint8_t)os; }
 		n++;
 	}

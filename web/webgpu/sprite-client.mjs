@@ -245,6 +245,7 @@ export class SpriteClient {
     for (let i = 0; i < n && o + stride <= d.length; i++) {
       const raw = dv.getUint16(o+1, true);   // sprite_id with 0x8000 hflip bit
       const ob = { cid: d[o], sid: raw & 0x7fff, type: d[o+3],
+                   xflip: (raw & 0x8000) ? 1 : 0,   // object's OWN flip (node+0x130) — NOT owner facing
                    x: dv.getInt16(o+4, true), y: dv.getInt16(o+6, true) };
       if (hasBlend) {
         const b = d[o+8];
@@ -588,11 +589,13 @@ export class SpriteClient {
       const px = o.x, py = o.y;
       if (px < -64 || px > 704 || py < -64 || py > 544) continue;
       const SX = this.asmScaleX || 1, SY = this.asmScaleY || 1;   // anisotropic CPS scale (work.asm:44-45)
-      // Orientation: the object sprite lives in the owner's atlas space, so derive
-      // flip from the owner's facing (vs the sprite's baked facing).
-      let oslot = 0, ofacing = 0;
-      for (let s = 0; s < 6; s++) if (this.slot[s].active && this.slot[s].char_id === o.cid) { oslot = s; ofacing = this.slot[s].facing; break; }
-      const fl = (ofacing !== sp.facing);
+      // Orientation: use the object's OWN flip (node+0x130, shipped in the 0x8000
+      // bit) — NOT the owner's facing. The old cid-matched-owner-facing guess locked
+      // P2's cape onto P1's facing (mirror/slot-order), so the P2 cape faced the
+      // wrong way and looked "stuck". XOR the sprite's baked facing.
+      let oslot = 0;
+      for (let s = 0; s < 6; s++) if (this.slot[s].active && this.slot[s].char_id === o.cid) { oslot = s; break; }
+      const fl = (!!o.xflip) !== (!!sp.facing);
       const dxv = fl ? -(sp.dx + sp.wG) : sp.dx;   // mirror the anchor when flipped
       // z = the REAL render layer (o.type now carries the slot-table layer 0..15).
       // Bodies sit at the mid baseline (z=8), so low-layer satellites (capes) fall
