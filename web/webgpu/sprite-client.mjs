@@ -165,9 +165,15 @@ export class SpriteClient {
     for (const [k, v] of this._wChg) if (now - v.t > 90) this._wChg.delete(k);   // prune >~1.5s old
   }
   watchText() {
-    if (!this._wChg || !this._wChg.size) return `WATCH +0x${(this._wBase||0).toString(16)} ${(this._wLen||0)}B — no recent changes`;
-    const arr = [...this._wChg.values()].sort((a,b) => b.t - a.t).slice(0, 28);
-    return `WATCH +0x${(this._wBase||0).toString(16)} (${this._wLen||0}B) recent changes:\n` +
+    const po = (this._probeOff != null ? this._probeOff : 0x1a0);
+    const poff = po - (this._wBase || 0);
+    // current value of the PROBED field per active slot (this drives the flash)
+    let vals = [];
+    for (let s = 0; s < 6; s++) { const v = this._wPrev && this._wPrev[s]; if (v && poff >= 0 && poff < v.length && this.slot[s] && this.slot[s].active) vals.push(`s${s}=${v[poff]}`); }
+    const head = `>> FLASH FIELD = +0x${po.toString(16)}  [ / ] to step  (flashes when nonzero)\n   ${vals.join(' ') || '(no active slots)'}\n`;
+    if (!this._wChg || !this._wChg.size) return head + `WATCH +0x${(this._wBase||0).toString(16)} ${(this._wLen||0)}B — no recent changes`;
+    const arr = [...this._wChg.values()].sort((a,b) => b.t - a.t).slice(0, 24);
+    return head + `recent changes:\n` +
       arr.map(c => `s${c.slot}(c${c.cid}) +0x${c.off.toString(16)}: ${c.prev}->${c.val}`).join('\n');
   }
 
@@ -807,10 +813,13 @@ export class SpriteClient {
   // reusing the body draw-list geometry so it lands exactly on the sprite.
   drawFlash(ctx, drawList) {
     if (!drawList || !drawList.length) return;
-    const now = (typeof performance !== 'undefined') ? performance.now() : 0;
-    const lit = (sl) => sl && sl.active && (now < (sl._flashUntil || 0));   // hit-flash window (health drop)
+    // FIELD-STEPPER: flash a body when the PROBED RAM byte (this._probeOff, stepped
+    // with [ / ] in the UI) is nonzero for that slot. Step through the on-hit fields
+    // (0x1a0, 0x220…) and watch which one's flash matches the game — no hardcoding.
+    const poff = ((this._probeOff != null ? this._probeOff : 0x1a0) - (this._wBase || 0)) | 0;
+    const lit = (sl, s) => { if (!sl || !sl.active) return false; const v = this._wPrev && this._wPrev[s]; return !!(v && poff >= 0 && poff < v.length && v[poff] > 0); };
     let any = false;
-    for (let s = 0; s < 6; s++) if (lit(this.slot[s])) { any = true; break; }
+    for (let s = 0; s < 6; s++) if (lit(this.slot[s], s)) { any = true; break; }
     if (!any) return;
     if (!this._flashTmp) this._flashTmp = document.createElement('canvas');
     const tmp = this._flashTmp, tctx = tmp.getContext('2d');
@@ -819,7 +828,7 @@ export class SpriteClient {
     for (const it of drawList) {
       if (it.slot == null) continue;
       const sl = this.slot[it.slot];
-      if (!lit(sl)) continue;
+      if (!lit(sl, it.slot)) continue;
       const c = this.chars[it.charId]; if (!c || !c.img || it.sw <= 0 || it.sh <= 0) continue;
       // Build a solid-tint silhouette of the sprite's alpha (keeps the body shape).
       tmp.width = it.sw; tmp.height = it.sh;

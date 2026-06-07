@@ -264,7 +264,7 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=9';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=32';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=33';
 import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=8';
 import {StafGL} from './webgpu/sprite-staf-gl.mjs?v=2';
 
@@ -321,6 +321,14 @@ const BAKE=new SpriteBake(); window._bake=BAKE;
 
 // --- Sprite Client (Option 6 proof): render chars from 253B GSTA + atlas, no TA ---
 const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
+// FIELD-STEPPER: [ / ] step which RAM byte drives the body hit-flash (the probe range).
+addEventListener('keydown',e=>{
+  if(e.key!=='[' && e.key!==']') return;
+  const sc=SPRITECLIENT, base=sc._wBase||0x190, len=sc._wLen||0xa0;
+  let o=(sc._probeOff!=null?sc._probeOff:0x1a0)+(e.key===']'?1:-1);
+  if(o<base) o=base+len-1; if(o>=base+len) o=base;
+  sc._probeOff=o; console.log('[probe] FLASH FIELD -> +0x'+o.toString(16));
+});
 (function(){
   const panel=document.getElementById('panel'); if(!panel) return;
   const box=document.createElement('div');
