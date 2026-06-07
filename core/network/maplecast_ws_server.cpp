@@ -171,6 +171,11 @@ static bool _matchActive = false;
 // no 1Hz status-thread delay. Cleared when the match ends.
 static std::mutex              _mcsvMtx;
 static std::vector<uint8_t>   _cachedMcsvFrame;
+// Delay MCSV build by N frames after match-start so the round intro and
+// any disc-asset loads complete before the savestate is captured. A client
+// booting from a match-start savestate hits GD-ROM reads that fail without
+// a ROM file ("Failed to locate bootfile"). 300 frames = 5 s at 60 fps.
+static int _mcsvBuildCountdown = 0;
 
 static void buildMcsvCache()
 {
@@ -644,8 +649,20 @@ static void checkMatchEnd()
 			} catch (...) {
 				printf("[maplecast-ws] match-start savestate FAILED (unknown)\n");
 			}
-			// Pre-build MCSV so onOpen can send it immediately on connect.
-			buildMcsvCache();
+			// Delay MCSV build: round intro triggers GD-ROM disc reads for
+			// ~5s after in_match. A savestate captured mid-read causes
+			// "Failed to locate bootfile" on no-ROM replica clients.
+			// 300 frames = 5s -- by then all asset loads have completed.
+			_mcsvBuildCountdown = 300;
+			printf("[maplecast-ws] MCSV build scheduled in 300 frames (round-intro disc I/O guard)\n");
+		}
+
+		// Deferred MCSV build (counts down from match-start).
+		if (_mcsvBuildCountdown > 0) {
+			if (--_mcsvBuildCountdown == 0) {
+				buildMcsvCache();
+				printf("[maplecast-ws] MCSV built (300-frame delay complete)\n");
+			}
 		}
 
 		// Periodic MCSV broadcast: relay clients that connect mid-match miss the
@@ -714,6 +731,7 @@ static void checkMatchEnd()
 
 		if (now - _matchEndTime > 5000) {
 			_matchActive = false;
+			_mcsvBuildCountdown = 0;
 			// Clear MCSV cache — char-select state is useless to send to new clients.
 			{ std::lock_guard<std::mutex> lk(_mcsvMtx); _cachedMcsvFrame.clear(); }
 
