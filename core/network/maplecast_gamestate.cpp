@@ -322,18 +322,17 @@ int readObjects(ObjectState* out, int maxObjs)
 		nSid++;
 		// POOLV: state byte @a+0x0C — 0x00 = freed slot. Cheap first reject.
 		if (addrspace::read8(a + 0x0C) == 0) continue;
-		// ACTIVE-LIST membership = the real alive signal. The pool is a doubly-linked
-		// list: next@O-0x10, prev@O-0x0c, pointing to record bases (record = O-0x18).
-		// An object is DRAWN only if linked in — stale slots (the stuck sparks / the
-		// inactive idle-cape during crouch) are unlinked. Require next.prev==me OR
-		// prev.next==me (head/tail satisfy one side).
-		{
-			uint32_t myRec = a - 0x18;
-			uint32_t nx = addrspace::read32(a - 0x10), pv = addrspace::read32(a - 0x0c);
-			bool linked = (nx >= 0x8C26A000 && nx < 0x8C278000 && addrspace::read32(nx + 0x0c) == myRec)
-			           || (pv >= 0x8C26A000 && pv < 0x8C278000 && addrspace::read32(pv + 0x08) == myRec);
-			if (!linked) continue;
-		}
+		// NOTE: a doubly-linked "alive" test used to live here (next@a-0x10,
+		// prev@a-0x0c). The PTRDUMP capture proved it WRONG: Storm's live
+		// multi-segment cape objects read a-0x0c = 0x2a030005 (packed data —
+		// 0x2a is her cid — not a record pointer), so the test culled the real
+		// cape/hail/lightning objects (only 2 of 39 passed) while the user saw
+		// them on screen. These satellites have no clean forward link at that
+		// offset, so list-membership can't be cheaply verified from the scanned
+		// record. Rely on the validated signals instead: owner == a fighter
+		// base, sprite_id != 0, state byte @a+0x0C != 0, and an on-screen
+		// position. (Stale/stuck records are filtered by the state byte +
+		// off-screen reject below; if a few linger, that's a later refinement.)
 		float sx = readFloat(a + 0xC8), sy = readFloat(a + 0xCC);
 		if ((sx == 0.f && sy == 0.f) || sx < -64.f || sx > 704.f || sy < -64.f || sy > 544.f) continue;
 		out[n].owner_cid = (uint8_t)addrspace::read8(v + OFF_CHAR_ID);
