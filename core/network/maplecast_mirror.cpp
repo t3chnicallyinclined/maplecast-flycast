@@ -2428,7 +2428,7 @@ done_diff:
 		{
 			ta_parse(ctx, true);
 			const int FX_MAX = 24;
-			uint8_t fxBuf[4 + 1 + FX_MAX * 12];
+			uint8_t fxBuf[4 + 1 + FX_MAX * 20];
 			fxBuf[0] = 'E'; fxBuf[1] = 'F'; fxBuf[2] = 'C'; fxBuf[3] = 'T';
 			int off = 5; int nfx = 0;
 			static std::unordered_set<uint32_t> _sentHashes;
@@ -2449,16 +2449,28 @@ done_diff:
 					if (fmt > 2 || ((tcw >> 31) & 1)) continue; // 16-bit, non-mip (VQ now decoded)
 					int tw = 8 << ((tsp >> 3) & 7), th = 8 << (tsp & 7);
 					float mnX = 1e9f, mxX = -1e9f, mnY = 1e9f, mxY = -1e9f;
-					uint32_t end = pp.first + pp.count;
-					if (end > rc.verts.size()) end = (uint32_t)rc.verts.size();
-					for (uint32_t v = pp.first; v < end; v++) {
-						float x = rc.verts[v].x, y = rc.verts[v].y;
-						if (x < mnX) mnX = x; if (x > mxX) mxX = x;
-						if (y < mnY) mnY = y; if (y > mxY) mxY = y;
+					float uMn = 1e9f, uMx = -1e9f, vMn = 1e9f, vMx = -1e9f;
+					// REVIEWED FIX: after ta_parse(primRestart) pp.first/.count index rc.idx, NOT
+					// rc.verts (ta_util.cpp:435) -> the old raw rc.verts[v] read random verts (the
+					// scattered dots). Walk the index buffer (skip ~0 restart sentinels) for the
+					// screen bbox AND the UV sub-rect (EFKYTEX is a shared sheet; each poly samples
+					// a sub-rect, not the whole page).
+					uint32_t iend = pp.first + pp.count;
+					if (iend > rc.idx.size()) iend = (uint32_t)rc.idx.size();
+					uint32_t nverts = (uint32_t)rc.verts.size();
+					for (uint32_t k = pp.first; k < iend; k++) {
+						uint32_t vi = rc.idx[k]; if (vi >= nverts) continue;
+						const auto& vt = rc.verts[vi];
+						if (vt.x < mnX) mnX = vt.x; if (vt.x > mxX) mxX = vt.x;
+						if (vt.y < mnY) mnY = vt.y; if (vt.y > mxY) mxY = vt.y;
+						if (vt.u < uMn) uMn = vt.u; if (vt.u > uMx) uMx = vt.u;
+						if (vt.v < vMn) vMn = vt.v; if (vt.v > vMx) vMx = vt.v;
 					}
 					float w = mxX - mnX, h = mxY - mnY;
 					float cx = (mnX + mxX) * 0.5f, cy = (mnY + mxY) * 0.5f;
 					if (cy <= 40.f || w < 2.f || h < 2.f) continue;
+					auto q16 = [](float f){ if (f < 0) f = 0; if (f > 1) f = 1; return (uint16_t)(f * 65535.f + 0.5f); };
+					uint16_t uv16[4] = { q16(uMn), q16(vMn), q16(uMx), q16(vMx) };
 					uint32_t addr = (tcw & 0x1FFFFF) << 3;
 					uint32_t hsh = mcfx::texHash(addr, fmt, tw, th, (tcw >> 30) & 1);
 					if (_rgbaBuf && _sentHashes.find(hsh) == _sentHashes.end()) {
@@ -2478,6 +2490,7 @@ done_diff:
 					int16_t v16[4] = { (int16_t)cx, (int16_t)cy, (int16_t)w, (int16_t)h };
 					memcpy(&fxBuf[off], &hsh, 4); off += 4;
 					for (int k = 0; k < 4; k++) { fxBuf[off++] = v16[k] & 0xff; fxBuf[off++] = (v16[k] >> 8) & 0xff; }
+					for (int k = 0; k < 4; k++) { fxBuf[off++] = uv16[k] & 0xff; fxBuf[off++] = (uv16[k] >> 8) & 0xff; }  // UV sub-rect (u16 normalized)
 					nfx++;
 				}
 			};

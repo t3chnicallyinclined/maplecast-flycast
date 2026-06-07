@@ -113,13 +113,16 @@ export class SpriteClient {
     const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
     const fx = [];
     let o = 5;
-    for (let i = 0; i < n && o + 12 <= d.length; i++) {
+    for (let i = 0; i < n && o + 20 <= d.length; i++) {
       fx.push({
         hash: dv.getUint32(o, true),
         cx: dv.getInt16(o + 4, true), cy: dv.getInt16(o + 6, true),
         w:  dv.getInt16(o + 8, true), h:  dv.getInt16(o + 10, true),
+        // UV sub-rect of the shared EFKYTEX page (u16 normalized) — which frame to draw.
+        u0: dv.getUint16(o + 12, true) / 65535, v0: dv.getUint16(o + 14, true) / 65535,
+        u1: dv.getUint16(o + 16, true) / 65535, v1: dv.getUint16(o + 18, true) / 65535,
       });
-      o += 12;
+      o += 20;
     }
     this.effects = fx;
     this._lastEfctN = n;
@@ -743,7 +746,13 @@ export class SpriteClient {
     for (const e of this.effects) {
       const tex = this._fxCache.get(e.hash); if (!tex) continue;  // texture not received yet
       const dw = Math.max(2, Math.abs(e.w)) * sx, dh = Math.max(2, Math.abs(e.h)) * sy;
-      ctx.drawImage(tex, e.cx * sx - dw / 2, e.cy * sy - dh / 2, dw, dh);
+      // Draw only the quad's UV sub-rect of the shared EFKYTEX page (not the whole sheet).
+      const tw = tex.width, th = tex.height;
+      const swp = (e.u1 - e.u0) * tw, shp = (e.v1 - e.v0) * th;
+      if (e.u1 != null && swp > 0.5 && shp > 0.5)
+        ctx.drawImage(tex, e.u0 * tw, e.v0 * th, swp, shp, e.cx * sx - dw / 2, e.cy * sy - dh / 2, dw, dh);
+      else
+        ctx.drawImage(tex, e.cx * sx - dw / 2, e.cy * sy - dh / 2, dw, dh);  // fallback (no UV)
     }
     ctx.restore();
   }
