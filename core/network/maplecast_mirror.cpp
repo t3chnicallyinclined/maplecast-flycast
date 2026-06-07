@@ -2543,7 +2543,7 @@ done_diff:
 				// rendered client-side (lean sprite + client stage), never streamed. ~20 KB/s.
 				static bool _hudfOn = getenv("MAPLECAST_HUDF") != nullptr;
 				bool _inMatch = addrspace::read8(0x8C289624) != 0;
-				if (_stafOnEmit || (_hudfOn && _inMatch)) {  // HUDF only in-match: no out-of-match STAF flood (client routes STAF only when _skipTA, else it hits applyFrame -> RangeError + CPU burn = char-select 5fps)
+				if ((_stafOnEmit || _hudfOn) && _inMatch) {  // HUDF only in-match: no out-of-match STAF flood (client routes STAF only when _skipTA, else it hits applyFrame -> RangeError + CPU burn = char-select 5fps)
 					// primRestart=false -> makeIndex() builds rc.idx as a strip-with-
 					// degenerate-links (NOT 0xFFFFFFFF restart sentinels), and rewrites
 					// each PolyParam.first/.count to index into rc.idx (rc.idx[k] -> rc.verts).
