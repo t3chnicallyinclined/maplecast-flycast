@@ -268,17 +268,22 @@ static int readObjectsWalk(ObjectState* out, int maxObjs)
 		                    && guard < 256 && n < maxObjs; ++guard) {
 			visited++;
 			uint16_t sid = (uint16_t)addrspace::read16(node + 0x144);
-			uint8_t  vis = (uint8_t)addrspace::read8(node + 0x12C);   // unk_012c ~=1 when drawn
-			uint32_t opt = addrspace::read32(node + 0x84);            // data ptr (walker2 alive gate)
-			if (sid != 0 && vis != 0 && opt != 0) {
+			// Only emit fighter-OWNED satellites (cape/projectile/super). The
+			// head-lists also carry stage/UI nodes (the bulk of `visited`); the
+			// owner-word @node+0x18 == a fighter base is the capture-proven scope
+			// filter, and list membership is the alive signal. (Dropped the
+			// unverified vis@0x12C / opt@0x84 gates — the capture confirmed only
+			// sprite_id 0x144 and screen 0xE0/0xE4.)
+			if (sid != 0) {
+				uint32_t ownerWord = addrspace::read32(node + 0x18);
+				int slot = -1;
+				for (int s = 0; s < 6; s++) if (ownerWord == CHAR_BASE[s]) { slot = s; break; }
 				float sx = readFloat(node + 0xE0), sy = readFloat(node + 0xE4);
-				if (!(sx == 0.f && sy == 0.f)) {
-					uint32_t ownerWord = addrspace::read32(node + 0x18);
-					int slot = -1;
-					for (int s = 0; s < 6; s++) if (ownerWord == CHAR_BASE[s]) { slot = s; break; }
+				if (slot >= 0 && !(sx == 0.f && sy == 0.f)
+				    && sx >= -64.f && sx <= 704.f && sy >= -64.f && sy <= 544.f) {
 					// owner_cid drives the atlas (PL{cid}); use the OWNER's char id so
 					// e.g. Storm's cape (sid 735) resolves against PL2A.
-					out[n].owner_cid  = (uint8_t)addrspace::read8((slot >= 0 ? ownerWord : node) + OFF_CHAR_ID);
+					out[n].owner_cid  = (uint8_t)addrspace::read8(ownerWord + OFF_CHAR_ID);
 					out[n].sprite_id  = sid;
 					out[n].screen_x   = (int16_t)sx;
 					out[n].screen_y   = (int16_t)sy;
