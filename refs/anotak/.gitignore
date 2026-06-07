@@ -1,2 +1,7 @@
 # Raw HTML cache — regenerable by tools/scrape_anotak.py, not worth tracking.
 _raw/
+# Animation-cell crawl (~57MB across 59 chars) — regenerable via
+# `python tools/scrape_anotak.py animations`. Kept local; the lean, high-value
+# attack + field-dictionary reference is what we track. Remove this line to
+# version it if cross-machine durability is wanted.
+animations/
