@@ -643,6 +643,56 @@ static void partDumpRawN(uint32_t texPtr, int nbytes, const char* fn) {
 	fclose(rf);
 }
 
+// EFFECTS DUMP — capture the SHARED "Effect Poly" bank at 0x0CED0000 (gated
+// MAPLECAST_DUMP_EFFECTS). These are the global hitspark/electric/super sprites
+// that live OUTSIDE any PLxx_DAT (work.asm:39 "0ced0000 - Effect Poly"; loaded
+// by bank0e:loc_8C0EEFCC). Mirrors PARTDUMP/DM00: the directory base is assumed
+// at *(0x0CED0008) (region+8, exactly like DM00 at 0x0CE80008). This is an
+// EXPLORATORY probe — it logs whatever is at that directory so we can confirm
+// the layout, and dumps each entry's raw texels (format locked offline like
+// parts). Read-only; ROM-derived pixels -> /dev/shm only.
+static void effectsDump(const GameState& state) {
+	static const char* env = getenv("MAPLECAST_DUMP_EFFECTS");
+	static bool on = env != nullptr;
+	static int budget = (env && atoi(env) > 0) ? atoi(env) : 1;
+	static int fires = 0;
+	static uint32_t skip = 0;
+	if (!on || fires >= budget || !state.in_match) return;
+	if (budget > 1 && (++skip % 8) != 0) return;
+
+	// Probe the candidate directory bases (region+8, like DM00). Log both the
+	// 0x0C... (mem_b) and 0x8C... aliases so the real one is visible.
+	uint32_t dirBase = addrspace::read32(0x0CED0008);
+	if (!_ramAddr(dirBase)) { uint32_t alt = addrspace::read32(0x8CED0008); if (_ramAddr(alt)) dirBase = alt; }
+	fires++;
+	FILE* lg = fopen("/dev/shm/mc_effects.log", fires == 1 ? "w" : "a");
+	if (lg) fprintf(lg, "# MapleCast EFFECTS DUMP — Effect Poly 0x0CED0000 (fire %d/%d) frame=%u\n"
+	                    "raw@0x0CED0008=%08x raw@0x8CED0008=%08x  -> dirBase=%08x  ramOK=%d\n",
+	                fires, budget, state.frame_counter,
+	                addrspace::read32(0x0CED0008), addrspace::read32(0x8CED0008), dirBase, (int)_ramAddr(dirBase));
+	if (!_ramAddr(dirBase)) { if (lg) { fprintf(lg, "[EFX] directory not built yet\n"); fclose(lg); } return; }
+
+	const int MAXDIR = 512;
+	int dirN = 0, dirBlanks = 0;
+	if (lg) fprintf(lg, "\n[EFX] idx  wxh         e0        e4        tex(e8)   ec\n");
+	for (int i = 0; i < MAXDIR; i++) {
+		uint32_t e  = dirBase + (uint32_t)i * 0x10;
+		uint32_t e0 = addrspace::read32(e),     e4 = addrspace::read32(e + 4);
+		uint32_t e8 = addrspace::read32(e + 8), ec = addrspace::read32(e + 12);
+		uint16_t w = e0 & 0xffff, h = (e0 >> 16) & 0xffff;
+		bool blank = (w == 0 && h == 0 && !_ramAddr(e8));
+		if (blank) { if (++dirBlanks > 32) break; continue; }
+		dirBlanks = 0;
+		if (lg) fprintf(lg, "[EFX] %4d %4dx%-4d  %08x  %08x  %08x  %08x\n", i, w, h, e0, e4, e8, ec);
+		if (_ramAddr(e8) && w > 0 && h > 0 && w <= 512 && h <= 512) {
+			char fn[96]; snprintf(fn, sizeof fn, "/dev/shm/efx_%03d.raw", i);
+			partDumpRawN(e8, (int)w * (int)h * 2, fn);   // 16-bit assumed; format locked offline
+		}
+		dirN = i + 1;
+	}
+	if (lg) { fprintf(lg, "[EFX] scanned %d entries\n", dirN); fclose(lg); }
+}
+
 // FOLLOW THE DESCRIPTOR — resolve a part's real PVR format/TCW the way the game does.
 // `e4` (DM00 entry+0x4) is a DESCRIPTOR INDEX, not the format. Traced clean-room from the
 // per-entry texture builder bank12:loc_8c123e00 (driven over the directory by
@@ -1139,7 +1189,8 @@ void readGameState(GameState& state)
 	state.p2_rt = (uint8_t)(rt[1] >> 8);
 
 	ptrDump(state);
-	partDump(state);   // read-only part-atlas capture probe (MAPLECAST_PARTDUMP=1)
+	partDump(state);     // read-only part-atlas capture probe (MAPLECAST_PARTDUMP=1)
+	effectsDump(state);  // read-only Effect Poly capture probe (MAPLECAST_DUMP_EFFECTS=1)
 }
 
 // Write game state INTO Flycast's emulated RAM — exact reverse of readGameState
