@@ -264,7 +264,7 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=9';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=36';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=37';
 import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=8';
 import {StafGL} from './webgpu/sprite-staf-gl.mjs?v=2';
 
@@ -483,41 +483,37 @@ addEventListener('keydown',e=>{
       _lastShowSprite=showSprite;
       window._skipTA=showSprite;   // skip TA in-match (sprite renders); decode it out of match (show the menu)
       const gg=gpuOn&&SG.ok&&!stafMode;
-      scs.style.display=(showSprite&&stafMode)?'block':'none';
+      scs.style.display=(showSprite)?'block':'none';   // StafGL HUD/FX overlay always on (hybrid)
       scg.style.display=(showSprite&&gg)?'block':'none';
       scv.style.display=(showSprite&&!gg&&!stafMode)?'block':'none';
+      scs.style.zIndex='3'; scg.style.zIndex='2'; scv.style.zIndex='2';  // HUD/FX overlay above characters
     }
     if(showSprite){
       const asm=SPRITECLIENT.assemblyMode;
+      // HYBRID: the StafGL surface (scs) renders the server's FILTERED STAF stream
+      // (MAPLECAST_HUDF = effects + HUD only) — the REAL tinted HUD + real effects,
+      // TRANSPARENT, OVER the lean character render. Characters stay reconstructed
+      // (no STAF garble). Init once; used by hybrid + full-STAF-debug paths.
+      if(!STAFGL.ok && !STAFGL._tried){ STAFGL._tried=true; STAFGL.init(scs); showCanvas(); }
       if(stafMode){
-        // STAF stripped-TA path: rasterize the real per-vertex textured triangles
-        // on WebGL (flycast's own draw model), pixel-exact, no atlas. The whole
-        // frame comes from STAF triangles + TX64 cached textures.
-        if(!STAFGL.ok && !STAFGL._tried){ STAFGL._tried=true; STAFGL.init(scs); showCanvas(); }
-        try{ STAFGL.render(SPRITECLIENT, 640, 480); }
-        catch(err){ console.error('[staf-gl] render error', err); }
-        // STAF renders the REAL HUD (it's just more quads), so NEVER overlay the
-        // synthesized HUD here (no 99/green-bars/yellow-meters double-up).
+        // FULL STAF (debug): whole frame from STAF (needs unfiltered MAPLECAST_STAF).
+        try{ STAFGL.render(SPRITECLIENT, 640, 480); }catch(err){ console.error('[staf-gl]', err); }
         hctx.clearRect(0,0,sch.width,sch.height);
         const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.stafStatsText();
       } else if(gpuOn && SG.ok){
-        // Upload the path's atlas image(s): parts atlas (assembly) or whole-sprite atlas.
         const srcChars = asm ? SPRITECLIENT.asmChars : SPRITECLIENT.chars;
         for(const cid in srcChars){ const c=srcChars[cid]; if(c&&c.img&&!SG.chars[cid]){ SG.setAtlas(cid, c.img); SG.setCharPalette(cid, c.pal128); } }
-        const fxList=null;  // EFCT effects render via SPRITECLIENT.drawEffects() — server-isolated, frame-synced (no dev rAF skew)
         const drawList = asm ? SPRITECLIENT.buildAssemblyDrawList(640,480) : SPRITECLIENT.buildDrawList(640,480);
-        try{ SG.render(drawList, window.DBG||{}, window._T, SPRITECLIENT.buildSparkList(640,480), fxList); }
+        try{ SG.render(drawList, window.DBG||{}, window._T, SPRITECLIENT.buildSparkList(640,480), null); }
         catch(err){ console.error('[sprite-gpu] render error -> Canvas2D fallback', err); SG.ok=false; showCanvas(); }
-        if(hudOn) SPRITECLIENT.drawHUD(hctx); else hctx.clearRect(0,0,sch.width,sch.height);
-        if(fxOn) SPRITECLIENT.drawEffects(hctx);   // server-isolated TA effects, additive over the scene
-        SPRITECLIENT.drawHudReal(hctx);             // REAL game HUD (HUDQ): health/timer/hit-counter/meters
-        SPRITECLIENT.drawFlash(hctx, drawList);     // on-body hit-flash (PALF char+0x40), additive over the body
+        hctx.clearRect(0,0,sch.width,sch.height);                       // no synthesized HUD
+        try{ STAFGL.render(SPRITECLIENT, 640, 480); }catch(err){}        // REAL HUD + effects overlay
+        SPRITECLIENT.drawFlash(hctx, drawList);                          // field-stepper (dormant unless probing)
         const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.statsText();
       } else {
         if(asm) SPRITECLIENT.renderAssembly(scx); else SPRITECLIENT.render(scx);
-        if(hudOn) SPRITECLIENT.drawHUD(hctx); else hctx.clearRect(0,0,sch.width,sch.height);
-        if(fxOn) SPRITECLIENT.drawEffects(hctx);   // server-isolated TA effects, additive over the scene
-        SPRITECLIENT.drawHudReal(hctx);             // REAL game HUD (HUDQ): health/timer/hit-counter/meters
+        hctx.clearRect(0,0,sch.width,sch.height);                       // no synthesized HUD
+        try{ STAFGL.render(SPRITECLIENT, 640, 480); }catch(err){}        // REAL HUD + effects overlay
         const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.statsText();
       }
     }

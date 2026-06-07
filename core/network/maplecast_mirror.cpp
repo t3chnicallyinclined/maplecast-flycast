@@ -2538,7 +2538,11 @@ done_diff:
 			// per quad -- Canvas2D-renderable; per-vertex transform-encode is a later opt).
 			{
 				static bool _stafOnEmit = getenv("MAPLECAST_STAF") != nullptr;
-				if (_stafOnEmit) {
+				// HYBRID: MAPLECAST_HUDF ships the SAME STAF stream but FILTERED to just
+				// effects (additive) + HUD (top/bottom screen strips) — chars + stage are
+				// rendered client-side (lean sprite + client stage), never streamed. ~20 KB/s.
+				static bool _hudfOn = getenv("MAPLECAST_HUDF") != nullptr;
+				if (_stafOnEmit || _hudfOn) {
 					// primRestart=false -> makeIndex() builds rc.idx as a strip-with-
 					// degenerate-links (NOT 0xFFFFFFFF restart sentinels), and rewrites
 					// each PolyParam.first/.count to index into rc.idx (rc.idx[k] -> rc.verts).
@@ -2634,6 +2638,15 @@ done_diff:
 							                   | ((listType == 1) ? (1u << 4) : 0u));
 							auto q16 = [](float f) { if (f < 0) f = 0; if (f > 1) f = 1; return (uint16_t)lroundf(f * 65535.f); };
 							uint32_t nverts = (uint32_t)rcS.verts.size();
+							// HYBRID filter: keep only effects (additive DstInstr==ONE) + HUD (quad bbox
+							// centre in the top/bottom screen strips). Skip chars + full-screen stage quads.
+							if (_hudfOn) {
+								bool additive = ((tsp >> 26) & 7) == 1;
+								float mnY = 1e9f, mxY = -1e9f;
+								for (uint32_t kk = pp.first; kk < iend; kk++) { uint32_t vi = rcS.idx[kk]; if (vi < nverts) { float yy = rcS.verts[vi].y; if (yy < mnY) mnY = yy; if (yy > mxY) mxY = yy; } }
+								float cyq = (mnY + mxY) * 0.5f;
+								if (!additive && !(cyq < 56.f || cyq > 424.f)) continue;
+							}
 							for (uint32_t k = pp.first; k + 2 < iend; k++) {
 								if (quadCount >= 16384) break;
 								uint32_t ia = rcS.idx[k], ib = rcS.idx[k + 1], ic = rcS.idx[k + 2];
