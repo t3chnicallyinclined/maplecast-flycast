@@ -652,6 +652,34 @@ static bool wsHandshake(int fd, const char* host, int port)
 	return strstr(resp, "101") != nullptr;
 }
 
+// Send a masked WebSocket TEXT frame (RFC 6455 client framing). The native
+// client is otherwise receive-only; this is the one path that sends data back
+// to the relay — a short JSON subscription control message. Client→server
+// frames MUST be masked per spec; the mask value is arbitrary (the relay
+// unmasks with whatever we send). Single-byte length path only (msg <= 125
+// bytes), which covers every control message we send. Thread note: the recv
+// loop runs on _wsThread and only ever calls mc_recv; this is the sole sender,
+// so concurrent send+recv on the same fd is safe (POSIX + Winsock both allow it).
+static bool wsSendTextMasked(int fd, const char* msg)
+{
+	size_t mlen = strlen(msg);
+	if (fd < 0 || mlen > 125) return false;
+	uint8_t frame[2 + 4 + 125];
+	frame[0] = 0x81;                       // FIN + text opcode (0x1)
+	frame[1] = 0x80 | (uint8_t)mlen;       // MASK bit + payload length
+	const uint8_t mask[4] = { 0x37, 0xfa, 0x21, 0x3d };
+	frame[2] = mask[0]; frame[3] = mask[1]; frame[4] = mask[2]; frame[5] = mask[3];
+	for (size_t i = 0; i < mlen; i++)
+		frame[6 + i] = (uint8_t)msg[i] ^ mask[i & 3];
+	int total = (int)(6 + mlen);
+	return mc_send(fd, (const char*)frame, total, 0) == total;
+}
+
+// The relay-side subscription control message. Sending this tells the relay to
+// forward ONLY GSTA/OBJF/MCSV and drop all TA/VRAM/SYNC/audio video for this
+// socket — dropping per-client egress from ~510 KB/s to ~10-30 KB/s.
+static const char* kSubscribeStateMsg = "{\"type\":\"subscribe\",\"mode\":\"state\"}";
+
 static bool wsReadFrame(int fd, std::vector<uint8_t>& out)
 {
 	// Read WebSocket frame header (2 bytes min)
@@ -839,6 +867,17 @@ static void wsClientRun(std::string host, int port)
 	}
 	printf("[MIRROR-WS] WebSocket handshake OK  --  waiting for initial sync\n"); fflush(stdout);
 	_clientWsConnected.store(true, std::memory_order_release);
+
+	// If we're already in GSTA-only mode at connect time — a cold-start
+	// startGstaStream(), or a reconnect after switchToGstaOnly() — the relay
+	// defaults every new socket to full-mirror, so re-assert our state-only
+	// subscription now. (The mid-session live switch is sent by switchToGstaOnly
+	// on the existing socket.) Best-effort: failure just falls back to local drop.
+	if (_gstaOnly.load(std::memory_order_relaxed)) {
+		if (wsSendTextMasked(_wsFd, kSubscribeStateMsg))
+			printf("[MIRROR-WS] state-only subscribe sent to relay on connect (shedding TA/VRAM)\n");
+		fflush(stdout);
+	}
 
 	// Tele-0.10 stats reporter DISABLED again -- even with HTTP POST
 	// (separate transport, no shared fd), connections still drop after
@@ -1418,6 +1457,19 @@ void requestClientVideoReconnect()
 void switchToGstaOnly()
 {
 	_gstaOnly.store(true, std::memory_order_release);
+	// Live mid-session switch: tell the relay to stop sending TA/VRAM/SYNC/audio
+	// on the CURRENT socket. From here the local SH4 renders, so we only need
+	// GSTA/OBJF/MCSV. Drops per-client egress from ~510 KB/s to ~10-30 KB/s.
+	// Best-effort — if the send fails (or fd is mid-reconnect) we still drop the
+	// video locally as before, and the post-handshake re-assert covers reconnect.
+	int fd = _wsFd;
+	if (fd >= 0) {
+		if (wsSendTextMasked(fd, kSubscribeStateMsg))
+			printf("[MIRROR] sent state-only subscribe to relay (shedding TA/VRAM)\n");
+		else
+			printf("[MIRROR] WARN: state-only subscribe send failed — dropping video locally only\n");
+		fflush(stdout);
+	}
 	printf("[MIRROR] switched to GSTA-only mode — TA delta processing stopped\n");
 	fflush(stdout);
 }

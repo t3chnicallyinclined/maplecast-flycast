@@ -486,7 +486,16 @@ async fn handle_ws_client(
     // Stats for this client
     let mut frames_sent: u64 = 0;
     let mut frames_dropped: u64 = 0;
+    let mut frames_filtered: u64 = 0;
     let mut bytes_sent: u64 = 0;
+
+    // Subscription mode for this connection. Default Full = today's behavior
+    // (every frame forwarded). A state-replica client flips this to true by
+    // sending {"type":"subscribe","mode":"state"} once its local SH4 takes over
+    // rendering (post-MCSV) — from then on the relay forwards only GSTA/OBJF/MCSV
+    // and drops all TA/VRAM/SYNC/audio video for this socket. Lock-free: this
+    // task owns both the subscribe-message arm and the forward arm.
+    let mut state_only = false;
 
     loop {
         tokio::select! {
@@ -494,6 +503,12 @@ async fn handle_ws_client(
             frame = frame_rx.recv() => {
                 match frame {
                     Ok(data) => {
+                        // State-only subscribers receive ONLY the state keep-list.
+                        // Drop video frames before they touch the socket.
+                        if state_only && !protocol::is_state_frame(&data) {
+                            frames_filtered += 1;
+                            continue;
+                        }
                         let len = data.len();
                         match ws_tx.send(Message::Binary(data.to_vec().into())).await {
                             Ok(_) => {
@@ -550,6 +565,20 @@ async fn handle_ws_client(
                             }
                             continue;
                         }
+                        // Subscription control: a state-replica client switching
+                        // to SH4-rendered mode sends {"type":"subscribe","mode":"state"}
+                        // to shed the TA/VRAM firehose. Substring match keeps this
+                        // off the serde path, matching the ping/join fast checks above.
+                        // This message is relay-local — never forwarded upstream.
+                        if text.contains("\"type\":\"subscribe\"") {
+                            let want_state = text.contains("\"mode\":\"state\"");
+                            if want_state != state_only {
+                                state_only = want_state;
+                                info!("Client {} → subscribe mode: {}", peer,
+                                    if state_only { "state-only (GSTA/OBJF/MCSV)" } else { "full mirror" });
+                            }
+                            continue;
+                        }
                         // Do NOT forward join/leave — those go via direct /play connection.
                         // Forwarding them here causes slot conflicts because flycast maps
                         // the join to the relay's upstream hdl, not the browser's direct hdl.
@@ -584,8 +613,8 @@ async fn handle_ws_client(
 
     if frames_sent > 0 {
         info!(
-            "Client {} final stats: sent={} dropped={} bytes={:.1}MB",
-            peer, frames_sent, frames_dropped, bytes_sent as f64 / 1024.0 / 1024.0
+            "Client {} final stats: sent={} dropped={} filtered={} bytes={:.1}MB",
+            peer, frames_sent, frames_dropped, frames_filtered, bytes_sent as f64 / 1024.0 / 1024.0
         );
     }
 

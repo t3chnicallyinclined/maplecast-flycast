@@ -26,6 +26,27 @@ pub const PVR_SIZE: usize = 32 * 1024;         // 32KB
 pub const AUDIO_MAGIC_0: u8 = 0xAD;
 pub const AUDIO_MAGIC_1: u8 = 0x10;
 
+/// State-replica frame magics. A client in "state" subscription mode receives
+/// ONLY these — GSTA (per-frame game state), OBJF (full object pool), and MCSV
+/// (mid-match join savestate). Every TA/VRAM/SYNC/audio "video" frame is dropped
+/// at the relay for such clients, cutting per-client egress from ~510 KB/s to the
+/// ~10-30 KB/s these three packet types occupy.
+pub const GSTA_MAGIC: &[u8; 4] = b"GSTA";
+pub const OBJF_MAGIC: &[u8; 4] = b"OBJF";
+pub const MCSV_MAGIC: &[u8; 4] = b"MCSV";
+
+/// True for the state-replica keep-list (GSTA / OBJF / MCSV). Keep-list, not
+/// drop-list: anything we don't recognize is treated as video and dropped for
+/// state-only subscribers, so a future video packet type can't silently inflate
+/// their bandwidth. The state-replica client ignores everything else anyway.
+pub fn is_state_frame(data: &[u8]) -> bool {
+    if data.len() < 4 {
+        return false;
+    }
+    let m = &data[0..4];
+    m == GSTA_MAGIC || m == OBJF_MAGIC || m == MCSV_MAGIC
+}
+
 /// Check if a message is a SYNC frame (uncompressed only)
 pub fn is_sync(data: &[u8]) -> bool {
     data.len() >= 4 && &data[0..4] == SYNC_MAGIC
