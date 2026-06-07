@@ -264,7 +264,7 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=9';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=40';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=41';
 import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=8';
 // StafGL (sprite-staf-gl.mjs) RETIRED — the STAF/HUDF stream now renders through the
 // proven PVR2Renderer (see STAFR/renderStaf below). StafGL stays on disk for reference.
@@ -537,7 +537,7 @@ addEventListener('keydown',e=>{
       _lastShowSprite=showSprite;
       window._skipTA=showSprite;   // skip TA in-match (sprite renders); decode it out of match (show the menu)
       const gg=gpuOn&&SG.ok&&!stafMode;
-      scs.style.display=(showSprite)?'block':'none';   // PVR2Renderer HUD/FX overlay always on (hybrid)
+      scs.style.display=(showSprite&&stafMode)?'block':'none';   // STAF canvas only in full-STAF mode -> ONE box otherwise
       scg.style.display=(showSprite&&gg)?'block':'none';
       scv.style.display=(showSprite&&!gg&&!stafMode)?'block':'none';
       scs.style.zIndex='3'; scg.style.zIndex='2'; scv.style.zIndex='2';  // HUD/FX overlay above characters
