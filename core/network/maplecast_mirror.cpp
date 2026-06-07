@@ -2284,6 +2284,12 @@ done_diff:
 			gsBuf[0] = 'G'; gsBuf[1] = 'S'; gsBuf[2] = 'T'; gsBuf[3] = 'A';
 			maplecast_gamestate::serialize(gs, gsBuf + 4, maplecast_gamestate::WIRE_SIZE);
 			maplecast_ws::broadcastBinary(gsBuf, 4 + maplecast_gamestate::WIRE_SIZE);
+			// PALF — per-slot palette-effect (hit-flash) flag (char+0x40). The browser
+			// tints the flashing body toward white (electric -> blue-white). Own 16B
+			// packet; other parsers ignore it (no GSTA wire change).
+			uint8_t palfBuf[16];
+			int palfN = maplecast_gamestate::serializePalEffects(palfBuf, sizeof(palfBuf));
+			if (palfN > 0) maplecast_ws::broadcastBinary(palfBuf, palfN);
 		}
 
 			// === OBJS: pool satellite objects (cape/effects/projectiles) -> rip sprites ===

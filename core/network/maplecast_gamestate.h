@@ -110,6 +110,10 @@ struct ObjectState {
 // (sprite_id==0) and the position-less body object. Cheap RAM scan (~14k reads).
 int readObjects(ObjectState* out, int maxObjs);
 
+// PALF packet: per-slot palette-effect flag (char+0x40). Nonzero = body hit-flash
+// (palette swapped to hurt bank). Writes 'PALF'+6×u16 into out; returns length (16).
+int serializePalEffects(uint8_t* out, int maxLen);
+
 // Inject the object pool back into RAM (state-replica FREEZE — the INVERSE of
 // readObjects). OVERWRITE MODE: for each wire object, find a matching already-
 // linked local pool node (same owner + category, in wire order) and overwrite

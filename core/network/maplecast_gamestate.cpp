@@ -372,6 +372,23 @@ static int readAllDrawn(ObjectState* out, int maxObjs)
 	return n;
 }
 
+// PALF — per-slot palette-effect flag (char+0x40 = char_pal_effect, the hit-flash/
+// super-glow selector per the bank03:loc_8c035000 on-hit palette path). Nonzero =>
+// the body's palette is swapped to the hurt bank (Dat_Pal+0x300); the browser tints
+// the victim's body toward white (electric -> blue-white) while it's nonzero. Shipped
+// as its OWN packet (not GSTA) so no existing parser is touched. 16 bytes.
+int serializePalEffects(uint8_t* out, int maxLen)
+{
+	if (maxLen < 4 + 6 * 2) return 0;
+	out[0] = 'P'; out[1] = 'A'; out[2] = 'L'; out[3] = 'F';
+	int off = 4;
+	for (int i = 0; i < 6; i++) {
+		uint16_t pe = (uint16_t)addrspace::read16(CHAR_BASE[i] + 0x40);
+		out[off++] = pe & 0xff; out[off++] = (pe >> 8) & 0xff;
+	}
+	return off;  // 4 + 12 = 16
+}
+
 // Scan the object pool for active satellite objects (cape, effects, projectiles).
 // Each owner-pointer object carries sprite_id@+0x12C + screen_x@+0xC8 + screen_y@+0xCC.
 // Skips inactive (sid==0) and the body object (no own position, (0,0)).

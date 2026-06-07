@@ -125,6 +125,15 @@ export class SpriteClient {
     this._lastEfctN = n;
   }
 
+  // 'PALF'(4) + 6×u16 paleffect (char+0x40). Nonzero = that slot's body is hit-
+  // flashing (engine swaps it to the hurt palette bank). We tint the body.
+  static isPALF(d) { return d.length >= 16 && d[0]===80 && d[1]===65 && d[2]===76 && d[3]===70; } // 'P','A','L','F'
+  onPALF(d) {
+    const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
+    for (let s = 0; s < 6 && 4 + s * 2 + 1 < d.length; s++)
+      this.slot[s].paleffect = dv.getUint16(4 + s * 2, true);
+  }
+
   // 'TXTR'(4) + hash(4) + w(2) + h(2) + zstd(RGBA). The page decompresses and
   // calls onTXTR with the raw RGBA; we cache hash -> canvas for additive draw.
   static isTXTR(d) {
@@ -735,6 +744,39 @@ export class SpriteClient {
       const tex = this._fxCache.get(e.hash); if (!tex) continue;  // texture not received yet
       const dw = Math.max(2, Math.abs(e.w)) * sx, dh = Math.max(2, Math.abs(e.h)) * sy;
       ctx.drawImage(tex, e.cx * sx - dw / 2, e.cy * sy - dh / 2, dw, dh);
+    }
+    ctx.restore();
+  }
+
+  // Hit-flash: MVC2 swaps the VICTIM's body to a "hurt" palette bank (Dat_Pal+0x300,
+  // white; electric -> blue-white) for the hit-reaction frames — it's ON the body,
+  // not a separate sprite (per bank03:loc_8c035000). We approximate by drawing an
+  // ADDITIVE tinted silhouette of each flashing body (slot.paleffect != 0, via PALF),
+  // reusing the body draw-list geometry so it lands exactly on the sprite.
+  drawFlash(ctx, drawList) {
+    if (!drawList || !drawList.length) return;
+    let any = false;
+    for (let s = 0; s < 6; s++) { const sl = this.slot[s]; if (sl.active && sl.paleffect) { any = true; break; } }
+    if (!any) return;
+    if (!this._flashTmp) this._flashTmp = document.createElement('canvas');
+    const tmp = this._flashTmp, tctx = tmp.getContext('2d');
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';   // additive — brightens the body toward the flash color
+    for (const it of drawList) {
+      if (it.slot == null) continue;
+      const sl = this.slot[it.slot];
+      if (!sl || !sl.active || !sl.paleffect) continue;
+      const c = this.chars[it.charId]; if (!c || !c.img || it.sw <= 0 || it.sh <= 0) continue;
+      // Build a solid-tint silhouette of the sprite's alpha (keeps the body shape).
+      tmp.width = it.sw; tmp.height = it.sh;
+      tctx.globalCompositeOperation = 'source-over'; tctx.clearRect(0, 0, it.sw, it.sh);
+      tctx.drawImage(c.img, it.sx, it.sy, it.sw, it.sh, 0, 0, it.sw, it.sh);
+      tctx.globalCompositeOperation = 'source-in';
+      tctx.fillStyle = '#cfe0ff';                // electric/white hit-flash tint
+      tctx.fillRect(0, 0, it.sw, it.sh);
+      ctx.globalAlpha = 0.7;
+      if (it.flip) { ctx.save(); ctx.translate(it.dx + it.dw, it.dy); ctx.scale(-1, 1); ctx.drawImage(tmp, 0, 0, it.dw, it.dh); ctx.restore(); }
+      else ctx.drawImage(tmp, it.dx, it.dy, it.dw, it.dh);
     }
     ctx.restore();
   }

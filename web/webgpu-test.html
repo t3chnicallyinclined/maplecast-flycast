@@ -498,6 +498,7 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
         catch(err){ console.error('[sprite-gpu] render error -> Canvas2D fallback', err); SG.ok=false; showCanvas(); }
         if(hudOn) SPRITECLIENT.drawHUD(hctx); else hctx.clearRect(0,0,sch.width,sch.height);
         if(fxOn) SPRITECLIENT.drawEffects(hctx);   // server-isolated TA effects, additive over the scene
+        SPRITECLIENT.drawFlash(hctx, drawList);     // on-body hit-flash (PALF char+0x40), additive over the body
         const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.statsText();
       } else {
         if(asm) SPRITECLIENT.renderAssembly(scx); else SPRITECLIENT.render(scx);
@@ -999,6 +1000,9 @@ async function main(){
                 // EFCT effect-quad packet — route to the sprite client; NOT a TA
                 // frame, so it must NOT reach applyFrame (that was the crash flood).
                 if(SpriteClient.isEFCT(d)){ try{ SPRITECLIENT.onEFCT(d); }catch(e){} return; }
+                // PALF — per-slot hit-flash flag (char+0x40). Route to the sprite client
+                // (tints the flashing victim's body). NOT a TA frame.
+                if(SpriteClient.isPALF(d)){ try{ SPRITECLIENT.onPALF(d); }catch(e){} return; }
                 // TXTR: 'TXTR'+hash(4)+w(2)+h(2)+rawSize(4)+zstd(RGBA). Decompress and
                 // cache the exact effect texture by hash. NOT a TA frame.
                 if(SpriteClient.isTXTR(d)){ try{
