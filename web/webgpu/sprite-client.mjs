@@ -243,6 +243,7 @@ export class SpriteClient {
       objs.push(ob);
       o += stride;
     }
+    this._objsPrev = this.objects || [];   // keep last frame for the flicker bridge
     this.objects = objs;
   }
 
@@ -533,10 +534,28 @@ export class SpriteClient {
         dx: (exx+cdx*SX)*scaleX, dy: (eyy+sp.dy*SY)*scaleY, dw: sp.wG*SX*scaleX, dh: sp.hG*SY*scaleY,
         flip: cfl });
     }
+    // FLICKER-TRANSPARENCY BRIDGE: MVC2 draws some semi-transparent effects/
+    // projectiles on ALTERNATING frames to fake alpha. Rendered literally they
+    // blink. Bridge it: also draw last frame's objects that have NO match this
+    // frame (same cid+sid within ~40px) — so an every-other-frame object renders
+    // continuously. Objects still present this frame are skipped here (no trail
+    // on things that move every frame). Truly-gone objects drop after one frame.
+    let drawObjs = this.objects || [];
+    if (this.objectsOn !== false && this._objsPrev && this._objsPrev.length) {
+      const held = [];
+      for (const p of this._objsPrev) {
+        let matched = false;
+        for (const o of drawObjs) {
+          if (o.cid === p.cid && o.sid === p.sid && Math.abs(o.x - p.x) < 40 && Math.abs(o.y - p.y) < 40) { matched = true; break; }
+        }
+        if (!matched) held.push(p);
+      }
+      if (held.length) drawObjs = drawObjs.concat(held);
+    }
     // Satellite + global objects from the slot table (cape, projectiles, hail,
     // lightning, supers). The slot table gives each its OWN authoritative screen
     // pos and render layer, so we draw exactly there — no owner-relative guess.
-    if (this.objectsOn !== false) for (const o of (this.objects || [])) {
+    if (this.objectsOn !== false) for (const o of drawObjs) {
       const c = this.chars[o.cid];
       if (!c) { this.loadChar(o.cid); continue; }
       if (!c.img) continue;
