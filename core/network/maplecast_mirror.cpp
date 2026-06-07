@@ -2469,6 +2469,10 @@ done_diff:
 					float w = mxX - mnX, h = mxY - mnY;
 					float cx = (mnX + mxX) * 0.5f, cy = (mnY + mxY) * 0.5f;
 					if (cy <= 40.f || w < 2.f || h < 2.f) continue;
+					// MULTI-PART FILTER: a UV bbox spanning much of the sheet = a multi-strip effect
+					// (super field) whose single-rect draw garbles. Skip for now; the STAF per-triangle
+					// path renders these correctly. Single-frame effects (sparks/tornado) pass through.
+					if ((uMx - uMn) > 0.5f || (vMx - vMn) > 0.5f) continue;
 					auto q16 = [](float f){ if (f < 0) f = 0; if (f > 1) f = 1; return (uint16_t)(f * 65535.f + 0.5f); };
 					uint16_t uv16[4] = { q16(uMn), q16(1.f - vMx), q16(uMx), q16(1.f - vMn) };  // v flipped to match RGBA V-flip
 					uint32_t addr = (tcw & 0x1FFFFF) << 3;
