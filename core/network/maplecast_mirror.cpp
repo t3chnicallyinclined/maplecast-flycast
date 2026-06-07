@@ -2589,6 +2589,18 @@ done_diff:
 							if (pp.count < 3) continue;
 							if (quadCount >= 16384) return;
 							uint32_t tcw = pp.tcw.full, tsp = pp.tsp.full, pcw = pp.pcw.full;
+							// HUDF filter BEFORE the texture decode/ship — only pay for quads we keep
+							// (effects=additive, HUD=top/bottom strips). Fixes the char-select texture
+							// flood (was decoding the whole animated demo screen every frame).
+							if (_hudfOn) {
+								bool _add = ((tsp >> 26) & 7) == 1;
+								uint32_t _ie = pp.first + pp.count; if (_ie > rcS.idx.size()) _ie = (uint32_t)rcS.idx.size();
+								uint32_t _nv = (uint32_t)rcS.verts.size();
+								float _mnY = 1e9f, _mxY = -1e9f;
+								for (uint32_t kk = pp.first; kk < _ie; kk++) { uint32_t vi = rcS.idx[kk]; if (vi < _nv) { float yy = rcS.verts[vi].y; if (yy < _mnY) _mnY = yy; if (yy > _mxY) _mxY = yy; } }
+								float _cyq = (_mnY + _mxY) * 0.5f;
+								if (!_add && !(_cyq < 56.f || _cyq > 424.f)) continue;
+							}
 							bool textured = ((pcw >> 3) & 1) != 0;
 							uint64_t texId = 0;
 							int tw = 0, th = 0;
@@ -2638,15 +2650,6 @@ done_diff:
 							                   | ((listType == 1) ? (1u << 4) : 0u));
 							auto q16 = [](float f) { if (f < 0) f = 0; if (f > 1) f = 1; return (uint16_t)lroundf(f * 65535.f); };
 							uint32_t nverts = (uint32_t)rcS.verts.size();
-							// HYBRID filter: keep only effects (additive DstInstr==ONE) + HUD (quad bbox
-							// centre in the top/bottom screen strips). Skip chars + full-screen stage quads.
-							if (_hudfOn) {
-								bool additive = ((tsp >> 26) & 7) == 1;
-								float mnY = 1e9f, mxY = -1e9f;
-								for (uint32_t kk = pp.first; kk < iend; kk++) { uint32_t vi = rcS.idx[kk]; if (vi < nverts) { float yy = rcS.verts[vi].y; if (yy < mnY) mnY = yy; if (yy > mxY) mxY = yy; } }
-								float cyq = (mnY + mxY) * 0.5f;
-								if (!additive && !(cyq < 56.f || cyq > 424.f)) continue;
-							}
 							for (uint32_t k = pp.first; k + 2 < iend; k++) {
 								if (quadCount >= 16384) break;
 								uint32_t ia = rcS.idx[k], ib = rcS.idx[k + 1], ic = rcS.idx[k + 2];
