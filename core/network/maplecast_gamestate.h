@@ -114,6 +114,9 @@ int readObjects(ObjectState* out, int maxObjs);
 // (palette swapped to hurt bank). Writes 'PALF'+6×u16 into out; returns length (16).
 int serializePalEffects(uint8_t* out, int maxLen);
 
+// WTCH live bit-probe: configurable char-struct byte range x6 slots (debug).
+int serializeWatch(uint8_t* out, int maxLen);
+
 // Inject the object pool back into RAM (state-replica FREEZE — the INVERSE of
 // readObjects). OVERWRITE MODE: for each wire object, find a matching already-
 // linked local pool node (same owner + category, in wire order) and overwrite

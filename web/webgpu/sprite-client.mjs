@@ -137,6 +137,40 @@ export class SpriteClient {
       this.slot[s].paleffect = dv.getUint16(4 + s * 2, true);
   }
 
+  // 'WTCH'(4) base(u16) len(u16) then 6 x [active(1) char_id(1) bytes(len)] — the
+  // LIVE BIT-PROBE. We diff vs the previous frame and keep recently-changed bytes
+  // so the overlay shows which RAM field moved when (correlate to an on-screen
+  // visual). watchText() formats the recent changes.
+  static isWATCH(d) { return d.length >= 8 && d[0]===87 && d[1]===84 && d[2]===67 && d[3]===72; } // 'W','T','C','H'
+  onWATCH(d) {
+    const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
+    const base = dv.getUint16(4, true), len = dv.getUint16(6, true);
+    this._wBase = base; this._wLen = len;
+    if (!this._wPrev) this._wPrev = [];
+    if (!this._wChg)  this._wChg = new Map();   // "slot:off" -> {slot,cid,off,val,prev,t}
+    const now = (this._wFrame = (this._wFrame || 0) + 1);
+    let o = 8;
+    for (let s = 0; s < 6; s++) {
+      const active = d[o], cid = d[o+1]; o += 2;
+      const cur = d.subarray(o, o + len); o += len;
+      if (active) {
+        const prev = this._wPrev[s];
+        if (prev && prev.length === len) {
+          for (let b = 0; b < len; b++) if (cur[b] !== prev[b])
+            this._wChg.set(s + ':' + b, { slot:s, cid, off: base + b, val: cur[b], prev: prev[b], t: now });
+        }
+        this._wPrev[s] = cur.slice();
+      } else this._wPrev[s] = null;
+    }
+    for (const [k, v] of this._wChg) if (now - v.t > 90) this._wChg.delete(k);   // prune >~1.5s old
+  }
+  watchText() {
+    if (!this._wChg || !this._wChg.size) return `WATCH +0x${(this._wBase||0).toString(16)} ${(this._wLen||0)}B — no recent changes`;
+    const arr = [...this._wChg.values()].sort((a,b) => b.t - a.t).slice(0, 28);
+    return `WATCH +0x${(this._wBase||0).toString(16)} (${this._wLen||0}B) recent changes:\n` +
+      arr.map(c => `s${c.slot}(c${c.cid}) +0x${c.off.toString(16)}: ${c.prev}->${c.val}`).join('\n');
+  }
+
   // 'TXTR'(4) + hash(4) + w(2) + h(2) + zstd(RGBA). The page decompresses and
   // calls onTXTR with the raw RGBA; we cache hash -> canvas for additive draw.
   static isTXTR(d) {

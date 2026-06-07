@@ -413,6 +413,32 @@ int serializePalEffects(uint8_t* out, int maxLen)
 	return off;  // 4 + 12 = 16
 }
 
+// WTCH - LIVE BIT-PROBE. Ships a configurable char-struct byte range for all 6
+// slots so the browser overlay shows fields changing in real time (correlate a
+// RAM byte to an on-screen visual without a rebuild). Gated MAPLECAST_WATCH;
+// range from MAPLECAST_WATCH_BASE/_LEN (default 0x100/0x140). Read-only.
+int serializeWatch(uint8_t* out, int maxLen)
+{
+	static const bool on = getenv("MAPLECAST_WATCH") != nullptr;
+	if (!on) return 0;
+	static int base = getenv("MAPLECAST_WATCH_BASE") ? (int)strtol(getenv("MAPLECAST_WATCH_BASE"), nullptr, 0) : 0x100;
+	static int len  = getenv("MAPLECAST_WATCH_LEN")  ? (int)strtol(getenv("MAPLECAST_WATCH_LEN"),  nullptr, 0) : 0x140;
+	if (len < 1) len = 1; if (len > 512) len = 512;
+	int need = 8 + 6 * (2 + len);
+	if (maxLen < need) return 0;
+	int o = 0;
+	out[o++] = 'W'; out[o++] = 'T'; out[o++] = 'C'; out[o++] = 'H';
+	out[o++] = base & 0xff; out[o++] = (base >> 8) & 0xff;
+	out[o++] = len  & 0xff; out[o++] = (len  >> 8) & 0xff;
+	for (int s = 0; s < 6; s++) {
+		out[o++] = (uint8_t)addrspace::read8(CHAR_BASE[s] + 0x000);
+		out[o++] = (uint8_t)addrspace::read8(CHAR_BASE[s] + 0x001);
+		for (int b = 0; b < len; b++)
+			out[o++] = (uint8_t)addrspace::read8(CHAR_BASE[s] + (uint32_t)(base + b));
+	}
+	return o;
+}
+
 // Scan the object pool for active satellite objects (cape, effects, projectiles).
 // Each owner-pointer object carries sprite_id@+0x12C + screen_x@+0xC8 + screen_y@+0xCC.
 // Skips inactive (sid==0) and the body object (no own position, (0,0)).

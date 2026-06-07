@@ -1003,6 +1003,15 @@ async function main(){
                 // PALF — per-slot hit-flash flag (char+0x40). Route to the sprite client
                 // (tints the flashing victim's body). NOT a TA frame.
                 if(SpriteClient.isPALF(d)){ try{ SPRITECLIENT.onPALF(d); }catch(e){} return; }
+                // WTCH — live bit-probe: char-struct byte range; overlay shows which
+                // RAM byte changed (correlate to an on-screen visual in real time).
+                if(SpriteClient.isWATCH(d)){ try{ SPRITECLIENT.onWATCH(d);
+                  let wd=document.getElementById('sc_watch');
+                  if(!wd){ wd=document.createElement('pre'); wd.id='sc_watch';
+                    wd.style.cssText='position:fixed;top:90px;left:8px;z-index:99999;background:rgba(0,0,0,.82);color:#7f7;font:10px/1.25 monospace;padding:6px;white-space:pre;max-height:70vh;overflow:auto;pointer-events:none';
+                    document.body.appendChild(wd); }
+                  wd.textContent=SPRITECLIENT.watchText();
+                }catch(e){} return; }
                 // TXTR: 'TXTR'+hash(4)+w(2)+h(2)+rawSize(4)+zstd(RGBA). Decompress and
                 // cache the exact effect texture by hash. NOT a TA frame.
                 if(SpriteClient.isTXTR(d)){ try{

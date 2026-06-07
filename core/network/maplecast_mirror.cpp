@@ -2290,6 +2290,10 @@ done_diff:
 			uint8_t palfBuf[16];
 			int palfN = maplecast_gamestate::serializePalEffects(palfBuf, sizeof(palfBuf));
 			if (palfN > 0) maplecast_ws::broadcastBinary(palfBuf, palfN);
+			// WTCH live bit-probe (debug, MAPLECAST_WATCH).
+			static uint8_t wbuf[8 + 6 * (2 + 512)];
+			int wN = maplecast_gamestate::serializeWatch(wbuf, sizeof(wbuf));
+			if (wN > 0) maplecast_ws::broadcastBinary(wbuf, wN);
 		}
 
 			// === OBJS: pool satellite objects (cape/effects/projectiles) -> rip sprites ===
