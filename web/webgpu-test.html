@@ -363,6 +363,7 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
   (canvas.parentNode||document.body).appendChild(wrap);
   const SG=new SpriteGPU(); window._spritegpu=SG;
   let scOn=true, gpuOn=true, hudOn=true, fxOn=false;   // dev live-effects off by default (two-rAF VRAM phase skew shows wrong textures); production = server-side synced
+  window._skipTA = scOn;   // sprite mode renders from GSTA/OBJS — don't decode the TA video stream (overruns applyFrame on big super frames + burns CPU)
   let stafMode=false;   // STAF stripped-TA full-frame path (A/B vs whole-sprite/assembly)
   // STAF renders on its own WebGL surface (scs); otherwise pick WebGPU (scg) vs Canvas2D fallback (scv).
   const showCanvas=()=>{
@@ -372,7 +373,7 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
     scg.style.display=(scOn&&g)?'block':'none';
     scv.style.display=(scOn&&!g&&!stafMode)?'block':'none';
   };
-  box.querySelector('#sc_on').onchange=e=>{ scOn=e.target.checked; showCanvas(); };
+  box.querySelector('#sc_on').onchange=e=>{ scOn=e.target.checked; window._skipTA=scOn; showCanvas(); };
   // A/B toggle: whole-sprite <-> assembly. Clears the GPU atlas cache so the
   // correct image (whole-sprite atlas vs parts atlas) re-uploads for each path.
   box.querySelector('#sc_asm').onchange=e=>{ SPRITECLIENT.assemblyMode=e.target.checked; SG.chars={};
@@ -1011,6 +1012,11 @@ async function main(){
                   try{ _dec=D._decompress(d); }catch(e){}
                   if(_dec && SpriteClient.isSTAF(_dec)){ try{ SPRITECLIENT.onSTAF(_dec); }catch(e){} return; }
                 }
+                // Sprite mode (no-TA): audio/GSTA/OBJS/EFCT/TXTR/etc. were handled and
+                // returned above. Anything reaching here is a TA video frame the sprite
+                // client never uses — and decoding big super frames overruns applyFrame
+                // (the RangeError flood) and burns CPU (jank). Skip it in sprite mode.
+                if(window._skipTA) return;
                 try{
                     const wsArrival=performance.now();
                     if(lastFrameArrival>0){
