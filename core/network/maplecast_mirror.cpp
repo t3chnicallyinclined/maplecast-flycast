@@ -2482,8 +2482,7 @@ done_diff:
 							  if (_fxd && _fxn < _fxd) {
 							    char fn[112]; snprintf(fn, sizeof fn, "/dev/shm/fxtex_%03d_%dx%d_f%d_vq%d.rgba", _fxn, tw, th, fmt, (int)((tcw>>30)&1));
 							    FILE* ff = fopen(fn, "wb"); if (ff) { fwrite(_rgbaBuf, 1, (size_t)tw*(size_t)th*4, ff); fclose(ff); }
-							    fprintf(stderr, "[FXTEX] %s hash=%08x
-", fn, hsh); _fxn++; } }
+							    fprintf(stderr, "[FXTEX] %s hash=%08x\n", fn, hsh); _fxn++; } }
 							_sentHashes.insert(hsh);
 							uint32_t rgbaSize = (uint32_t)(tw * th * 4);
 							size_t compSize = 0; uint64_t cus = 0;
