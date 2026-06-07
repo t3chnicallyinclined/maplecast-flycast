@@ -264,7 +264,7 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=9';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=33';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=34';
 import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=8';
 import {StafGL} from './webgpu/sprite-staf-gl.mjs?v=2';
 
@@ -324,10 +324,14 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
 // FIELD-STEPPER: [ / ] step which RAM byte drives the body hit-flash (the probe range).
 addEventListener('keydown',e=>{
   if(e.key!=='[' && e.key!==']') return;
-  const sc=SPRITECLIENT, base=sc._wBase||0x190, len=sc._wLen||0xa0;
-  let o=(sc._probeOff!=null?sc._probeOff:0x1a0)+(e.key===']'?1:-1);
-  if(o<base) o=base+len-1; if(o>=base+len) o=base;
-  sc._probeOff=o; console.log('[probe] FLASH FIELD -> +0x'+o.toString(16));
+  const sc=SPRITECLIENT;
+  // step only through fields that CHANGED on hits (the candidates), not dead bytes
+  const cands=[...new Set([...(sc._wChg?sc._wChg.values():[])].map(c=>c.off))].sort((a,b)=>a-b);
+  if(!cands.length){ console.log('[probe] no changed fields yet — land a hit first'); return; }
+  let idx=cands.indexOf(sc._probeOff); if(idx<0) idx=0;
+  idx+=(e.key===']'?1:-1); if(idx<0) idx=cands.length-1; if(idx>=cands.length) idx=0;
+  sc._probeOff=cands[idx];
+  console.log('[probe] FLASH FIELD -> +0x'+cands[idx].toString(16)+'  ('+(idx+1)+'/'+cands.length+')');
 });
 (function(){
   const panel=document.getElementById('panel'); if(!panel) return;
