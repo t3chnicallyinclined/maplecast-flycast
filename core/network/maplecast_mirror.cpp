@@ -2470,11 +2470,16 @@ done_diff:
 					float cx = (mnX + mxX) * 0.5f, cy = (mnY + mxY) * 0.5f;
 					if (cy <= 40.f || w < 2.f || h < 2.f) continue;
 					auto q16 = [](float f){ if (f < 0) f = 0; if (f > 1) f = 1; return (uint16_t)(f * 65535.f + 0.5f); };
-					uint16_t uv16[4] = { q16(uMn), q16(vMn), q16(uMx), q16(vMx) };
+					uint16_t uv16[4] = { q16(uMn), q16(1.f - vMx), q16(uMx), q16(1.f - vMn) };  // v flipped to match RGBA V-flip
 					uint32_t addr = (tcw & 0x1FFFFF) << 3;
 					uint32_t hsh = mcfx::texHash(addr, fmt, tw, th, (tcw >> 30) & 1);
 					if (_rgbaBuf && _sentHashes.find(hsh) == _sentHashes.end()) {
 						if (mcfx::decodeTex16(tcw, tsp, _rgbaBuf)) {
+							// V-FLIP: mcfx decodes V-inverted (the select-screen text was upside-down). Flip the
+							// rows so the cached texture is right-side-up; the UV v is flipped to match (above).
+							{ int _rb = tw * 4; static std::vector<uint8_t> _vf; _vf.resize(_rb);
+							  for (int _y = 0; _y < th / 2; _y++) { uint8_t* _a = _rgbaBuf + (size_t)_y*_rb, *_b = _rgbaBuf + (size_t)(th-1-_y)*_rb;
+							    memcpy(_vf.data(), _a, _rb); memcpy(_a, _b, _rb); memcpy(_b, _vf.data(), _rb); } }
 							// DIAGNOSTIC: dump the mcfx-DECODED effect texture (the full sheet) so we can
 							// VIEW it offline and tell decode-vs-placement apart (gated MAPLECAST_DUMP_FX_TEX=N).
 							{ static int _fxd = getenv("MAPLECAST_DUMP_FX_TEX") ? atoi(getenv("MAPLECAST_DUMP_FX_TEX")) : 0;
@@ -2502,8 +2507,9 @@ done_diff:
 					nfx++;
 				}
 			};
-			scanList(rc.global_param_tr);
-			scanList(rc.global_param_pt);
+			// IN-MATCH FILTER: capture effects only during a live round (in_match @0x8C289624),
+			// so pre-match SELECT/VERSUS menu textures are never grabbed as effects.
+			if (addrspace::read8(0x8C289624)) { scanList(rc.global_param_tr); scanList(rc.global_param_pt); }
 			fxBuf[4] = (uint8_t)nfx;
 			static bool _efctOn = getenv("MAPLECAST_EFCT") != nullptr;
 			if (_efctOn && nfx > 0) maplecast_ws::broadcastBinary(fxBuf, off);
