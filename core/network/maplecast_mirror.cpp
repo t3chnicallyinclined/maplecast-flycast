@@ -2434,7 +2434,8 @@ done_diff:
 			const int FX_MAX = 24;
 			uint8_t fxBuf[4 + 1 + FX_MAX * 20];
 			fxBuf[0] = 'E'; fxBuf[1] = 'F'; fxBuf[2] = 'C'; fxBuf[3] = 'T';
-			int off = 5; int nfx = 0;
+			int off = 5; int nfx = 0; int hudOff = 5; int nhud = 0; const int HUD_MAX = 80;
+			static uint8_t hudBuf[4 + 1 + 80 * 20]; hudBuf[0]='H'; hudBuf[1]='U'; hudBuf[2]='D'; hudBuf[3]='Q';
 			static std::unordered_set<uint32_t> _sentHashes;
 			static uint8_t* _rgbaBuf = (uint8_t*)malloc(1024 * 1024 * 4);
 			// The relay hides browser joins, so we can't detect a new client. Re-ship
@@ -2442,13 +2443,13 @@ done_diff:
 			// textures re-ship (cached ones stay quiet between).
 			static uint32_t _txClear = 0;
 			if ((++_txClear % 180) == 0) _sentHashes.clear();
-			auto scanList = [&](std::vector<PolyParam>& lst) {
+			auto scanList = [&](std::vector<PolyParam>& lst, bool isHud) {
 				for (PolyParam& pp : lst) {
-					if (nfx >= FX_MAX) return;
+					if ((isHud ? nhud : nfx) >= (isHud ? HUD_MAX : FX_MAX)) return;
 					if (pp.count < 3) continue;
 					uint32_t tcw = pp.tcw.full, tsp = pp.tsp.full, pcw = pp.pcw.full;
 					if (!((pcw >> 3) & 1)) continue;            // untextured
-					if (((tsp >> 26) & 7) != 1) continue;       // additive (DstInstr==ONE) only
+					if (!isHud && ((tsp >> 26) & 7) != 1) continue;  // fx: additive only; HUD: any blend
 					int fmt = (tcw >> 27) & 7;
 					if (fmt > 2 || ((tcw >> 31) & 1)) continue; // 16-bit, non-mip (VQ now decoded)
 					int tw = 8 << ((tsp >> 3) & 7), th = 8 << (tsp & 7);
@@ -2472,7 +2473,7 @@ done_diff:
 					}
 					float w = mxX - mnX, h = mxY - mnY;
 					float cx = (mnX + mxX) * 0.5f, cy = (mnY + mxY) * 0.5f;
-					if (cy <= 40.f || w < 2.f || h < 2.f) continue;
+					if (w < 2.f || h < 2.f) continue; if (isHud ? (cy > 56.f && cy < 424.f) : (cy <= 40.f)) continue;
 					// MULTI-PART FILTER: a UV bbox spanning much of the sheet = a multi-strip effect
 					// (super field) whose single-rect draw garbles. Skip for now; the STAF per-triangle
 					// path renders these correctly. Single-frame effects (sparks/tornado) pass through.
@@ -2509,18 +2510,22 @@ done_diff:
 						}
 					}
 					int16_t v16[4] = { (int16_t)cx, (int16_t)cy, (int16_t)w, (int16_t)h };
-					memcpy(&fxBuf[off], &hsh, 4); off += 4;
-					for (int k = 0; k < 4; k++) { fxBuf[off++] = v16[k] & 0xff; fxBuf[off++] = (v16[k] >> 8) & 0xff; }
-					for (int k = 0; k < 4; k++) { fxBuf[off++] = uv16[k] & 0xff; fxBuf[off++] = (uv16[k] >> 8) & 0xff; }  // UV sub-rect (u16 normalized)
-					nfx++;
+					uint8_t* BUF = isHud ? hudBuf : fxBuf; int& O = isHud ? hudOff : off; memcpy(&BUF[O], &hsh, 4); O += 4;
+					for (int k = 0; k < 4; k++) { BUF[O++] = v16[k] & 0xff; BUF[O++] = (v16[k] >> 8) & 0xff; }
+					for (int k = 0; k < 4; k++) { BUF[O++] = uv16[k] & 0xff; BUF[O++] = (uv16[k] >> 8) & 0xff; }
+					if (isHud) nhud++; else nfx++;
 				}
 			};
 			// IN-MATCH FILTER: capture effects only during a live round (in_match @0x8C289624),
 			// so pre-match SELECT/VERSUS menu textures are never grabbed as effects.
-			if (addrspace::read8(0x8C289624)) { scanList(rc.global_param_tr); scanList(rc.global_param_pt); }
+			if (addrspace::read8(0x8C289624)) { scanList(rc.global_param_tr, false); scanList(rc.global_param_pt, false); }
+			// HUD: top/bottom strip textured quads (health/timer/hit-counter/meters), any blend.
+			scanList(rc.global_param_op, true); scanList(rc.global_param_pt, true); scanList(rc.global_param_tr, true);
 			fxBuf[4] = (uint8_t)nfx;
 			static bool _efctOn = getenv("MAPLECAST_EFCT") != nullptr;
 			if (_efctOn && nfx > 0) maplecast_ws::broadcastBinary(fxBuf, off);
+			hudBuf[4] = (uint8_t)nhud; static bool _hudOn = getenv("MAPLECAST_HUDQ") != nullptr;
+			if (_hudOn && nhud > 0) maplecast_ws::broadcastBinary(hudBuf, hudOff);
 		}
 			// === STAF: stripped-TA frame channel (MAPLECAST_STAF) ====================
 			// Ships the FULL textured-quad list every frame + each unique texture ONCE

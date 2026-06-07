@@ -264,7 +264,7 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=9';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=34';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=35';
 import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=8';
 import {StafGL} from './webgpu/sprite-staf-gl.mjs?v=2';
 
@@ -510,12 +510,14 @@ addEventListener('keydown',e=>{
         catch(err){ console.error('[sprite-gpu] render error -> Canvas2D fallback', err); SG.ok=false; showCanvas(); }
         if(hudOn) SPRITECLIENT.drawHUD(hctx); else hctx.clearRect(0,0,sch.width,sch.height);
         if(fxOn) SPRITECLIENT.drawEffects(hctx);   // server-isolated TA effects, additive over the scene
+        SPRITECLIENT.drawHudReal(hctx);             // REAL game HUD (HUDQ): health/timer/hit-counter/meters
         SPRITECLIENT.drawFlash(hctx, drawList);     // on-body hit-flash (PALF char+0x40), additive over the body
         const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.statsText();
       } else {
         if(asm) SPRITECLIENT.renderAssembly(scx); else SPRITECLIENT.render(scx);
         if(hudOn) SPRITECLIENT.drawHUD(hctx); else hctx.clearRect(0,0,sch.width,sch.height);
         if(fxOn) SPRITECLIENT.drawEffects(hctx);   // server-isolated TA effects, additive over the scene
+        SPRITECLIENT.drawHudReal(hctx);             // REAL game HUD (HUDQ): health/timer/hit-counter/meters
         const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.statsText();
       }
     }
@@ -1012,6 +1014,8 @@ async function main(){
                 // EFCT effect-quad packet — route to the sprite client; NOT a TA
                 // frame, so it must NOT reach applyFrame (that was the crash flood).
                 if(SpriteClient.isEFCT(d)){ try{ SPRITECLIENT.onEFCT(d); }catch(e){} return; }
+                // HUDQ — real game HUD textured quads (health/timer/hit-counter/meters)
+                if(SpriteClient.isHUDQ(d)){ try{ SPRITECLIENT.onHUDQ(d); }catch(e){} return; }
                 // PALF — per-slot hit-flash flag (char+0x40). Route to the sprite client
                 // (tints the flashing victim's body). NOT a TA frame.
                 if(SpriteClient.isPALF(d)){ try{ SPRITECLIENT.onPALF(d); }catch(e){} return; }

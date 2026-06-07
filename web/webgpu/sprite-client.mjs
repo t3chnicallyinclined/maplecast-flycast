@@ -128,6 +128,26 @@ export class SpriteClient {
     this._lastEfctN = n;
   }
 
+  // 'HUDQ'(4) + count(1) + count*[hash(4) cx,cy,w,h(i16) u0,v0,u1,v1(u16)] — the SAME
+  // 20B record as EFCT, but these are the HUD's textured quads (health bars / timer /
+  // hit-counter / super meters) captured from the top+bottom screen strips. Drawn with
+  // REGULAR alpha blend (not additive) — the real game HUD, not a synthesized one.
+  static isHUDQ(d) { return d.length >= 5 && d[0]===72 && d[1]===85 && d[2]===68 && d[3]===81; } // 'H','U','D','Q'
+  onHUDQ(d) {
+    const n = d[4];
+    const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
+    const q = []; let o = 5;
+    for (let i = 0; i < n && o + 20 <= d.length; i++) {
+      q.push({ hash: dv.getUint32(o, true),
+        cx: dv.getInt16(o+4,true), cy: dv.getInt16(o+6,true), w: dv.getInt16(o+8,true), h: dv.getInt16(o+10,true),
+        u0: dv.getUint16(o+12,true)/65535, v0: dv.getUint16(o+14,true)/65535,
+        u1: dv.getUint16(o+16,true)/65535, v1: dv.getUint16(o+18,true)/65535 });
+      o += 20;
+    }
+    this.hudQuads = q;
+    this._lastHudN = n;
+  }
+
   // 'PALF'(4) + 6×u16 paleffect (char+0x40). Nonzero = that slot's body is hit-
   // flashing (engine swaps it to the hurt palette bank). We tint the body.
   static isPALF(d) { return d.length >= 16 && d[0]===80 && d[1]===65 && d[2]===76 && d[3]===70; } // 'P','A','L','F'
@@ -806,6 +826,27 @@ export class SpriteClient {
     ctx.restore();
   }
 
+  // Draw the REAL game HUD from captured textured quads (health/timer/hit-counter/
+  // meters). Identical UV-sub-rect draw to drawEffects, but REGULAR alpha blend so it
+  // composites like the game. Call after drawHUD so it lands over the synthesized one.
+  drawHudReal(ctx) {
+    if (!this.hudQuads || !this.hudQuads.length) return;
+    const W = ctx.canvas.width, H = ctx.canvas.height, sx = W / 640, sy = H / 480;
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+    for (const e of this.hudQuads) {
+      const tex = this._fxCache.get(e.hash); if (!tex) continue;   // texture not received yet
+      const dw = Math.max(2, Math.abs(e.w)) * sx, dh = Math.max(2, Math.abs(e.h)) * sy;
+      const tw = tex.width, th = tex.height;
+      const swp = (e.u1 - e.u0) * tw, shp = (e.v1 - e.v0) * th;
+      if (e.u1 != null && swp > 0.5 && shp > 0.5)
+        ctx.drawImage(tex, e.u0 * tw, e.v0 * th, swp, shp, e.cx * sx - dw / 2, e.cy * sy - dh / 2, dw, dh);
+      else
+        ctx.drawImage(tex, e.cx * sx - dw / 2, e.cy * sy - dh / 2, dw, dh);
+    }
+    ctx.restore();
+  }
+
   // Hit-flash: MVC2 swaps the VICTIM's body to a "hurt" palette bank (Dat_Pal+0x300,
   // white; electric -> blue-white) for the hit-reaction frames — it's ON the body,
   // not a separate sprite (per bank03:loc_8c035000). We approximate by drawing an
@@ -813,6 +854,7 @@ export class SpriteClient {
   // reusing the body draw-list geometry so it lands exactly on the sprite.
   drawFlash(ctx, drawList) {
     if (!drawList || !drawList.length) return;
+    if (this._probeOff == null) return;   // dormant unless actively field-stepping ([ / ])
     // FIELD-STEPPER: flash a body when the PROBED RAM byte (this._probeOff, stepped
     // with [ / ] in the UI) is nonzero for that slot. Step through the on-hit fields
     // (0x1a0, 0x220…) and watch which one's flash matches the game — no hardcoding.
