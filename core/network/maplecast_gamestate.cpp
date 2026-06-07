@@ -382,9 +382,25 @@ int serializePalEffects(uint8_t* out, int maxLen)
 	if (maxLen < 4 + 6 * 2) return 0;
 	out[0] = 'P'; out[1] = 'A'; out[2] = 'L'; out[3] = 'F';
 	int off = 4;
+	uint16_t pe[6];
 	for (int i = 0; i < 6; i++) {
-		uint16_t pe = (uint16_t)addrspace::read16(CHAR_BASE[i] + 0x40);
-		out[off++] = pe & 0xff; out[off++] = (pe >> 8) & 0xff;
+		pe[i] = (uint16_t)addrspace::read16(CHAR_BASE[i] + 0x40);
+		out[off++] = pe[i] & 0xff; out[off++] = (pe[i] >> 8) & 0xff;
+	}
+	// DIAGNOSTIC: find the real "being hit / flashing" field — log candidates when any
+	// is nonzero (paleffect@0x40, reaction-state @0x230/0x231/0x233, reaction-pal @0x1a4,
+	// health@0x420/red@0x424). Throttled. Tells us which to flash on.
+	static int _d = 0;
+	if (++_d % 12 == 0) {
+		for (int i = 0; i < 6; i++) {
+			if (addrspace::read8(CHAR_BASE[i] + 0x000) == 0) continue;  // inactive slot
+			uint8_t r230 = addrspace::read8(CHAR_BASE[i] + 0x230), r231 = addrspace::read8(CHAR_BASE[i] + 0x231);
+			uint8_t r233 = addrspace::read8(CHAR_BASE[i] + 0x233), a1a4 = addrspace::read8(CHAR_BASE[i] + 0x1a4);
+			uint8_t hp = addrspace::read8(CHAR_BASE[i] + 0x420), rh = addrspace::read8(CHAR_BASE[i] + 0x424);
+			if (pe[i] || r230 || r231 || r233 || a1a4)
+				fprintf(stderr, "[PALF] slot%d pe40=%u r230=%u r231=%u r233=%u a1a4=%u hp=%u red=%u\n",
+				        i, pe[i], r230, r231, r233, a1a4, hp, rh);
+		}
 	}
 	return off;  // 4 + 12 = 16
 }
