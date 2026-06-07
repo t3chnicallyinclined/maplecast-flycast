@@ -1128,15 +1128,18 @@ static void wsClientRun(std::string host, int port)
 		    frameSize > decompSize) {
 			// Skip silently if this is a known non-TA packet type that was
 			// ZCST-wrapped (STAF stripped frames, TXTR/TX64 texture atlases,
-			// EFCT/EFKY effect packets). These share the WS channel but are
-			// not TA deltas; their first 4 bytes parse as a garbage frameSize.
+			// EFCT/EFKY effect packets, OBJS compact object lists). These share
+			// the WS channel but are not TA deltas; their first 4 bytes parse as
+			// a garbage frameSize. OBJS in particular bursts during supers (the
+			// "frameSize=1397375567" spam == 'O','B','J','S' little-endian).
 			if (decompSize >= 4) {
 				const uint8_t* m = decompData;
 				if ((m[0]=='S'&&m[1]=='T'&&m[2]=='A'&&m[3]=='F') ||
 				    (m[0]=='T'&&m[1]=='X'&&m[2]=='T'&&m[3]=='R') ||
 				    (m[0]=='T'&&m[1]=='X'&&m[2]=='6'&&m[3]=='4') ||
 				    (m[0]=='E'&&m[1]=='F'&&m[2]=='C'&&m[3]=='T') ||
-				    (m[0]=='E'&&m[1]=='F'&&m[2]=='K'&&m[3]=='Y')) {
+				    (m[0]=='E'&&m[1]=='F'&&m[2]=='K'&&m[3]=='Y') ||
+				    (m[0]=='O'&&m[1]=='B'&&m[2]=='J'&&m[3]=='S')) {
 					continue;
 				}
 			}

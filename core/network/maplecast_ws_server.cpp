@@ -666,12 +666,16 @@ static void checkMatchEnd()
 			} catch (...) {
 				printf("[maplecast-ws] match-start savestate FAILED (unknown)\n");
 			}
-			// Delay MCSV build: round intro triggers GD-ROM disc reads for
+			// Delay MCSV build: the round intro triggers GD-ROM disc reads for
 			// ~5s after in_match. A savestate captured mid-read causes
 			// "Failed to locate bootfile" on no-ROM replica clients.
-			// 300 frames = 5s -- by then all asset loads have completed.
-			_mcsvBuildCountdown = 300;
-			printf("[maplecast-ws] MCSV build scheduled in 300 frames (round-intro disc I/O guard)\n");
+			// NOTE: this countdown is decremented in checkMatchEnd, which runs on
+			// the 1 Hz status thread — so the unit is SECONDS, not frames. The old
+			// value of 300 meant 5 MINUTES (the "300 frames = 5s" comment assumed a
+			// 60 Hz tick that doesn't exist here), so the MCSV never built in a
+			// fresh match. 6 = ~6 s, clearing the intro disc I/O.
+			_mcsvBuildCountdown = 6;
+			printf("[maplecast-ws] MCSV build scheduled in 6s (round-intro disc I/O guard)\n");
 		}
 
 		// Deferred MCSV build (counts down from match-start). We DON'T capture
