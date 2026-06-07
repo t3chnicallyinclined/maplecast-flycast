@@ -256,7 +256,7 @@ canvas{display:block;background:transparent}
 </div>
 
 <script type="module">
-import {FrameDecoder} from './webgpu/frame-decoder.mjs?v=4';
+import {FrameDecoder} from './webgpu/frame-decoder.mjs?v=5';
 import {TAParser} from './webgpu/ta-parser.mjs';
 import {TextureManager} from './webgpu/texture-manager.mjs';
 import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=3';
@@ -1128,6 +1128,7 @@ async function main(){
                     if(DBG.freeze)return;
                     const t0=performance.now();
                     const fr=D.applyFrame(d);
+                    if(D.syncPending){ T.invalidateAll(); D.syncPending=false; }  // SYNC replaced VRAM -> refresh stale textures ONCE (fixes the out-of-match MENU background w/o per-frame force-invalidate)
                     dMs=performance.now()-t0;
                     if(!fr)return;
                     if(DBG.texForceInvalidate) T.invalidateAll();

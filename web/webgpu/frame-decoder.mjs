@@ -77,6 +77,12 @@ export class FrameDecoder {
         if (maybeMagic === 0x41545347 || maybeMagic === 0x54434645 || maybeMagic === 0x52545854 || maybeMagic === 0x534A424F) return null; // GSTA/EFCT/TXTR/OBJS
         if (maybeMagic === MAGIC_SYNC || maybeMagic === MAGIC_FSYN || maybeMagic === MAGIC_SAVE) {
             this.applySync(rawData);
+            // A SYNC replaces the ENTIRE VRAM, but carries no dirty-page list — so any
+            // texture decoded earlier (from pre-SYNC / partial VRAM, e.g. the stage
+            // background) is now stale and would never refresh. Signal the caller to
+            // invalidate the texture cache ONCE (the proper fix for the missing
+            // background, instead of texForceInvalidate re-decoding every frame).
+            this.syncPending = true;
             return null;
         }
 
