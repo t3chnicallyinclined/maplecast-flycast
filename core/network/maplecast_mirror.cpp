@@ -2555,6 +2555,13 @@ done_diff:
 					static std::unordered_set<uint64_t> _stafSent;     // tex_ids already shipped (TX64)
 					static uint8_t* _stafRgba = (uint8_t*)malloc(1024 * 1024 * 4);
 					static std::vector<uint8_t> _stafBuf;
+					// REAL wire-bandwidth probe (MAPLECAST_STAFMEASURE): the modeled probe
+					// below (ta_parse(ctx,true)) estimates cost; THIS counts the ACTUAL bytes
+					// this STAF emit broadcasts — the zstd'd STAF envelope + every TX64 packet —
+					// and flushes total KB/s to /dev/shm/mc_staf.log once per second (60 frames).
+					static bool _stafMeasureReal = getenv("MAPLECAST_STAFMEASURE") != nullptr;
+					static uint64_t _stafBytesAcc = 0, _tx64BytesAcc = 0;
+					static uint32_t _stafMeasFrames = 0;
 					// Relay hides browser joins; periodically clear so on-screen textures re-ship.
 					static uint32_t _stafClear = 0;
 					if ((++_stafClear % 600) == 0) _stafSent.clear();
@@ -2655,6 +2662,7 @@ done_diff:
 											tb[12] = tw & 0xff; tb[13] = (tw >> 8) & 0xff; tb[14] = th & 0xff; tb[15] = (th >> 8) & 0xff;
 											memcpy(&tb[16], &rgbaSize, 4); memcpy(&tb[20], comp, compSize);
 											maplecast_ws::broadcastBinary(tb.data(), (uint32_t)tb.size());
+											if (_stafMeasureReal) _tx64BytesAcc += tb.size();
 										} else {
 											texId = 0; textured = false;   // couldn't decode -> draw untextured
 										}
@@ -2706,6 +2714,90 @@ done_diff:
 							}
 						}
 					};
+
+					// === ISP_BACKGND opaque backdrop poly (RENDER-TIER1-PLAN §5.1.3 / step 3) ===
+					// ta_parse(ctx,false) emits the three display lists but NOT flycast's
+					// synthesized FillBGP background (the implicit full-screen backdrop drawn
+					// from the PVR ISP_BACKGND_T/D regs + a VRAM strip). Without it the full
+					// frame renders on a transparent base -> black bleed. We port the client's
+					// ta-parser.fillBGP (web/webgpu/ta-parser.mjs:252-392) server-side and emit
+					// ONE opaque poly as the FIRST op record (the client draws op->pt->tr in
+					// sent order, so the backdrop sits behind everything). HUDF is an effects/
+					// HUD overlay and must stay transparent, so the BG poly is full-frame ONLY.
+					if (_stafOnEmit && !_hudfOn) {
+						uint32_t paramBase = PARAM_BASE & 0xF00000;
+						uint32_t ispBgT = ISP_BACKGND_T.full;
+						float    ispBgD = ISP_BACKGND_D.f;
+						uint32_t tagOffset  = ispBgT & 7;
+						uint32_t tagAddress = (ispBgT >> 3) & 0x1FFFFF;
+						uint32_t skip       = (ispBgT >> 24) & 7;
+						uint32_t stripBase  = (paramBase + tagAddress * 4) & (VRAM_SIZE - 1);
+						uint32_t stripVs    = (3 + skip) * 4;            // bytes per strip vertex entry
+						uint32_t vptr0      = tagOffset * stripVs + stripBase + 12; // +12 skips ISP/TSP/TCW
+						auto vrU32 = [&](uint32_t a) -> uint32_t {
+							if (a + 4 > VRAM_SIZE) return 0;
+							return vram[a] | (vram[a+1]<<8) | (vram[a+2]<<16) | ((uint32_t)vram[a+3]<<24);
+						};
+						auto vrF32 = [&](uint32_t a) -> float { uint32_t u = vrU32(a); float f; memcpy(&f,&u,4); return f; };
+						if (stripBase + 12 <= VRAM_SIZE) {
+							uint32_t bgISP = vrU32(stripBase);
+							int isTexture = (bgISP >> 25) & 1;
+							int isOffset  = (bgISP >> 24) & 1;
+							int isUV16    = (bgISP >> 22) & 1;
+							// Read the 3 strip verts (colors only; we build a full-screen quad).
+							struct BV { float x,y,z; uint32_t col, spc; } bv[3];
+							uint32_t vptr = vptr0; bool ok = true;
+							for (int i = 0; i < 3; i++) {
+								if (vptr + 12 > VRAM_SIZE) { ok = false; break; }
+								bv[i].x = vrF32(vptr); bv[i].y = vrF32(vptr+4); bv[i].z = vrF32(vptr+8);
+								uint32_t cptr = vptr + 12;
+								if (isTexture) cptr += isUV16 ? 4 : 8;
+								bv[i].col = (cptr + 4 <= VRAM_SIZE) ? vrU32(cptr) : 0xFFFFFFFFu;
+								bv[i].spc = (isOffset && cptr + 8 <= VRAM_SIZE) ? vrU32(cptr + 4) : 0u;
+								vptr += stripVs;
+							}
+							if (ok) {
+								// Background depth (FillBGP nudges it just behind everything).
+								float bgDepth = ispBgD - 1e-6f; if (bgDepth < 1e-11f) bgDepth = 1e-11f;
+								// Full-screen opaque quad covering the guardband viewport (-256..896, 0..480),
+								// matching ta-parser.fillBGP's non-textured branch. We draw it untextured
+								// (vertex color) — MVC2's backdrop is a flat/gouraud color; any textured
+								// stage art already ships as ordinary op polys.
+								struct QV { float x,y; uint32_t col,spc; } q[4] = {
+									{ -256.f,   0.f, bv[0].col, bv[0].spc },
+									{  896.f,   0.f, bv[1].col, bv[1].spc },
+									{ -256.f, 480.f, bv[2].col, bv[2].spc },
+									{  896.f, 480.f, bv[2].col, bv[2].spc },
+								};
+								uint32_t firstVert = vertCount;
+								for (int i = 0; i < 4; i++) {
+									putF(q[i].x); putF(q[i].y); putF(bgDepth);
+									putF(0.f); putF(0.f);
+									// col/spc are packed ARGB u32 -> push R,G,B,A (emitList's order).
+									_stafBuf.push_back((q[i].col>>16)&0xff); _stafBuf.push_back((q[i].col>>8)&0xff);
+									_stafBuf.push_back(q[i].col&0xff);       _stafBuf.push_back((q[i].col>>24)&0xff);
+									_stafBuf.push_back((q[i].spc>>16)&0xff); _stafBuf.push_back((q[i].spc>>8)&0xff);
+									_stafBuf.push_back(q[i].spc&0xff);       _stafBuf.push_back((q[i].spc>>24)&0xff);
+									vertCount++;
+								}
+								// isp: force CullMode=0, DepthMode=7 (always pass) like fillBGP.
+								uint32_t bgIspOut = (bgISP & 0x1FFFFFFF);
+								bgIspOut = (bgIspOut & ~(7u << 27)) | (0u << 27); // CullMode=0
+								bgIspOut = (bgIspOut & ~(7u << 29)) | (7u << 29); // DepthMode=7
+								// Poly record (untextured): firstVert vertCount texId=0 tcw=0 tsp pcw=0 isp listType=0(op).
+								polyPut32(firstVert);
+								polyPut32(4);
+								polyPut64(0ull);            // texId 0 = untextured
+								polyPut32(0u);              // tcw 0
+								polyPut32(vrU32(stripBase + 4)); // bgTSP (blend/shading state)
+								polyPut32(0u);              // pcw 0 -> client draws untextured
+								polyPut32(bgIspOut);
+								_stafPoly.push_back((uint8_t)0); // op list
+								polyCount++;
+							}
+						}
+					}
+
 					emitList(rcS.global_param_op, 0);
 					emitList(rcS.global_param_pt, 1);
 					emitList(rcS.global_param_tr, 2);
@@ -2722,6 +2814,21 @@ done_diff:
 					size_t compSize = 0; uint64_t cus = 0;
 					const uint8_t* comp = _compressor.compress(_stafBuf.data(), (uint32_t)_stafBuf.size(), compSize, cus);
 					maplecast_ws::broadcastBinary(comp, (uint32_t)compSize);
+
+					// Real wire bandwidth: total STAF+TX64 bytes/s actually broadcast.
+					if (_stafMeasureReal) {
+						_stafBytesAcc += compSize;
+						if (++_stafMeasFrames >= 60) {
+							double stafKBs = _stafBytesAcc / 1024.0, tx64KBs = _tx64BytesAcc / 1024.0;
+							FILE* lf = fopen("/dev/shm/mc_staf.log", "a");
+							if (lf) {
+								fprintf(lf, "WIRE total=%.1f KB/s (STAF geom=%.1f + TX64 tex=%.1f) | polys=%u verts=%u\n",
+									stafKBs + tx64KBs, stafKBs, tx64KBs, polyCount, vertCount);
+								fclose(lf);
+							}
+							_stafBytesAcc = 0; _tx64BytesAcc = 0; _stafMeasFrames = 0;
+						}
+					}
 				}
 			}
 		// === STAF-MEASURE: stripped-TA bandwidth probe (read-only). Splits cost by list —

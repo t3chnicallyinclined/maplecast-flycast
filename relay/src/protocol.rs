@@ -35,6 +35,28 @@ pub const GSTA_MAGIC: &[u8; 4] = b"GSTA";
 pub const OBJF_MAGIC: &[u8; 4] = b"OBJF";
 pub const MCSV_MAGIC: &[u8; 4] = b"MCSV";
 
+/// STAF (stripped-TA full-frame geometry) + TX64 (ship-once decoded texture)
+/// magics. These are a PARALLEL render channel (docs/STRIPPED-TA-DESIGN.md §6),
+/// NOT the dirty-page delta wire. STAF rides ZCST compression (so its outer
+/// wire magic is ZCST and its decompressed payload starts with "STAF"); TX64 is
+/// shipped raw (outer magic "TX64"). Neither carries a dirty-page list, so the
+/// relay must forward them VERBATIM and never feed them to apply_dirty_pages —
+/// doing so reads frame[76] (which is STAF's polyCount, not delta_payload_size)
+/// and corrupts the cached SYNC VRAM.
+pub const STAF_MAGIC: &[u8; 4] = b"STAF";
+pub const TX64_MAGIC: &[u8; 4] = b"TX64";
+
+/// True if the payload (decompressed if needed) is a STAF geometry frame.
+/// `inspect` is the decompressed view when the wire was ZCST-compressed.
+pub fn is_staf(inspect: &[u8]) -> bool {
+    inspect.len() >= 4 && &inspect[0..4] == STAF_MAGIC
+}
+
+/// True if the RAW wire bytes are a TX64 ship-once texture packet (uncompressed).
+pub fn is_tx64(data: &[u8]) -> bool {
+    data.len() >= 4 && &data[0..4] == TX64_MAGIC
+}
+
 /// True for the state-replica keep-list (GSTA / OBJF / MCSV). Keep-list, not
 /// drop-list: anything we don't recognize is treated as video and dropped for
 /// state-only subscribers, so a future video packet type can't silently inflate

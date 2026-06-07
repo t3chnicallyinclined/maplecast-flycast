@@ -189,6 +189,22 @@ impl RelayState {
             return;
         }
 
+        // TX64 ship-once texture packet — RAW (uncompressed) wire. It is a
+        // parallel render-channel packet, NOT a dirty-page delta. Forward
+        // verbatim and short-circuit BEFORE the apply_dirty_pages path, which
+        // would otherwise mis-read frame[76] and corrupt the cached SYNC VRAM.
+        if protocol::is_tx64(&data) {
+            let len = data.len();
+            let receivers = self.inner.frame_tx.receiver_count();
+            let _ = self.inner.frame_tx.send(data);
+            let mut stats = self.inner.stats.lock().await;
+            stats.frames_received += 1;
+            stats.bytes_received += len as u64;
+            stats.frames_broadcast += receivers as u64;
+            stats.bytes_broadcast += (len * receivers) as u64;
+            return;
+        }
+
         // Decompress for inspection if needed (held only as long as we need it)
         let inspect_buf: Option<Vec<u8>> = if protocol::is_compressed(&data) {
             protocol::decompress(&data)
@@ -197,6 +213,24 @@ impl RelayState {
         };
         // Inspect view: either the decompressed payload, or the original
         let inspect: &[u8] = inspect_buf.as_deref().unwrap_or(&data);
+
+        // STAF stripped-TA full-frame geometry — ZCST-wrapped, so its decompressed
+        // payload starts with "STAF". It is a parallel render channel that carries
+        // NO dirty-page list; running apply_dirty_pages on it reads frame[76]
+        // (STAF's polyCount, not delta_payload_size) and corrupts the cached SYNC
+        // VRAM. Forward the ORIGINAL (compressed) wire bytes verbatim, short-circuit
+        // before the SYNC/apply_dirty_pages branching below.
+        if protocol::is_staf(inspect) {
+            let len = data.len();
+            let receivers = self.inner.frame_tx.receiver_count();
+            let _ = self.inner.frame_tx.send(data);
+            let mut stats = self.inner.stats.lock().await;
+            stats.frames_received += 1;
+            stats.bytes_received += len as u64;
+            stats.frames_broadcast += receivers as u64;
+            stats.bytes_broadcast += (len * receivers) as u64;
+            return;
+        }
 
         if protocol::is_sync(inspect) {
             // SYNC frame — cache the decompressed state
