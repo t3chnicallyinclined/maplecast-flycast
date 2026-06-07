@@ -20,6 +20,13 @@ export class FrameDecoder {
         this.hasPrevTA = false;
         this.frameNum = 0;
         this.stats = { syncs: 0, keyframes: 0, deltas: 0, dropped: 0 };
+        // VCACHE (content-addressed VRAM, env MAPLECAST_VCACHE): persistent
+        // hash->page cache. Keyed by the u64 content hash as a "lo:hi" hex string
+        // (avoids BigInt churn). A reference page (hasData==0) is filled from here.
+        // Cleared on every SYNC/FSYN — a SYNC replaces the entire VRAM, so any
+        // cached page identity from the prior scene is invalid.
+        this._vcache = new Map();
+        this._vcacheMissLogged = false;
     }
 
     _decompress(data) {
@@ -48,6 +55,7 @@ export class FrameDecoder {
                 off += recSize;
             }
             this.prevTA = new Uint8Array(0); this.prevTASize = 0; this.hasPrevTA = false;
+            if (this._vcache) this._vcache.clear();   // full VRAM replace -> cached page identities invalid
             this.stats.syncs++;
             return true;
         }
@@ -60,6 +68,7 @@ export class FrameDecoder {
         const pvrSize = Math.min(view.getUint32(off, true), PVR_REG_SIZE); off += 4;
         this.pvrRegs.set(data.subarray(off, off + pvrSize));
         this.prevTA = new Uint8Array(0); this.prevTASize = 0; this.hasPrevTA = false;
+        if (this._vcache) this._vcache.clear();   // full VRAM replace -> cached page identities invalid
         this.stats.syncs++;
         return true;
     }
@@ -122,22 +131,61 @@ export class FrameDecoder {
 
         off += 4; // skip checksum
 
-        const dirtyPages = view.getUint32(off, true); off += 4;
+        let dirtyPages = view.getUint32(off, true); off += 4;
         let vramDirty = false, pvrDirty = false;
         const dirtyPageList = [];
-        for (let d = 0; d < dirtyPages; d++) {
-            const regionId = data[off]; off += 1;
-            const pageIdx = view.getUint32(off, true); off += 4;
-            const pageOff = pageIdx * PAGE_SIZE;
-            if (regionId === 1 && pageOff + PAGE_SIZE <= VRAM_SIZE) {
-                this.vram.set(data.subarray(off, off + PAGE_SIZE), pageOff);
-                vramDirty = true;
-                dirtyPageList.push(pageIdx);
-            } else if (regionId === 3 && pageOff + PAGE_SIZE <= PVR_REG_SIZE) {
-                this.pvrRegs.set(data.subarray(off, off + PAGE_SIZE), pageOff);
-                pvrDirty = true;
+
+        // VCACHE branch (env MAPLECAST_VCACHE): the count slot is the sentinel
+        // 0xFFFFFFFF, followed by the real count, and each page carries a u64
+        // content hash + a hasData flag. hasData==1 => 4096 bytes follow (apply +
+        // cache by hash); hasData==0 => reference, fill from this._vcache[hash].
+        // The result is byte-identical to a standard delta frame, so everything
+        // downstream (texture-manager invalidation via dirtyPageList, pvr2-renderer)
+        // is untouched. See maplecast_mirror.cpp:2045-2102, sentinel :1595.
+        if (dirtyPages === 0xFFFFFFFF) {
+            dirtyPages = view.getUint32(off, true); off += 4;
+            for (let d = 0; d < dirtyPages; d++) {
+                const regionId = data[off]; off += 1;
+                const pageIdx = view.getUint32(off, true); off += 4;
+                const hLo = view.getUint32(off, true), hHi = view.getUint32(off + 4, true); off += 8;
+                const hasData = data[off]; off += 1;
+                const key = hLo.toString(16) + ':' + hHi.toString(16);
+                let pageBytes;
+                if (hasData) {
+                    pageBytes = data.subarray(off, off + PAGE_SIZE); off += PAGE_SIZE;
+                    this._vcache.set(key, pageBytes.slice());   // copy: data buffer is reused
+                } else {
+                    pageBytes = this._vcache.get(key);          // reference: fill from cache
+                    if (!pageBytes) {                            // miss (shouldn't happen post-SYNC)
+                        if (!this._vcacheMissLogged) { console.warn('[VCACHE] cache miss for ref page', key, '- skipping'); this._vcacheMissLogged = true; }
+                        continue;
+                    }
+                }
+                const pageOff = pageIdx * PAGE_SIZE;
+                if (regionId === 1 && pageOff + PAGE_SIZE <= VRAM_SIZE) {
+                    this.vram.set(pageBytes, pageOff);
+                    vramDirty = true;
+                    dirtyPageList.push(pageIdx);
+                } else if (regionId === 3 && pageOff + PAGE_SIZE <= PVR_REG_SIZE) {
+                    this.pvrRegs.set(pageBytes, pageOff);
+                    pvrDirty = true;
+                }
             }
-            off += PAGE_SIZE;
+        } else {
+            for (let d = 0; d < dirtyPages; d++) {
+                const regionId = data[off]; off += 1;
+                const pageIdx = view.getUint32(off, true); off += 4;
+                const pageOff = pageIdx * PAGE_SIZE;
+                if (regionId === 1 && pageOff + PAGE_SIZE <= VRAM_SIZE) {
+                    this.vram.set(data.subarray(off, off + PAGE_SIZE), pageOff);
+                    vramDirty = true;
+                    dirtyPageList.push(pageIdx);
+                } else if (regionId === 3 && pageOff + PAGE_SIZE <= PVR_REG_SIZE) {
+                    this.pvrRegs.set(data.subarray(off, off + PAGE_SIZE), pageOff);
+                    pvrDirty = true;
+                }
+                off += PAGE_SIZE;
+            }
         }
 
         if (skipRender) return null;
