@@ -302,12 +302,74 @@ static int readObjectsWalk(ObjectState* out, int maxObjs)
 	return n;
 }
 
+// FULL draw-list enumeration — reads MVC2's OWN per-frame slot table, the exact
+// structure the renderer walks (marvelous2 loc_8c0308c2 "Render_sprites"). This
+// captures EVERYTHING on screen — bodies, capes, projectiles, AND the owner-less
+// global super overlays (Hailstorm / Lightning Storm) that the owner-scan can't
+// see because it keys on a fighter-base owner word. Slot table:
+//   per-layer count = u8 @ 0x8C2895E0[layer]   (16 layers)
+//   node-ptr array  = u32 @ 0x8C287DE0 + layer*0x180 + i*4   (<=0x60/layer)
+// The slot-table pointer IS the node record base R, so fields are ABSOLUTE
+// (no +0x18 skew): sprite_id R+0x144, screen R+0xE0/0xE4, visible R+0x12C,
+// category R+0x03, owner R+0x18 OR R+0x80 (two conventions; may be neither =
+// global effect). z-order falls out of the layer index. Per the mvc2-sh4-re-expert
+// disassembly trace (bank03:1200, bank04 slot insert, bank0e Storm super spawns).
+static int readAllDrawn(ObjectState* out, int maxObjs)
+{
+	static const uint32_t SLOT_COUNT_BASE = 0x8C2895E0;
+	static const uint32_t SLOT_PTR_BASE   = 0x8C287DE0;
+	static const uint32_t SLOT_ROW_STRIDE = 0x180;
+	static const int      SLOT_LAYERS     = 16;
+	static const int      SLOT_MAX_ROW    = 0x60;
+	int n = 0, nPass = 0;
+	for (int layer = 0; layer < SLOT_LAYERS; layer++) {
+		int count = (int)addrspace::read8(SLOT_COUNT_BASE + layer);
+		if (count <= 0 || count > SLOT_MAX_ROW) continue;
+		uint32_t row = SLOT_PTR_BASE + (uint32_t)layer * SLOT_ROW_STRIDE;
+		for (int i = 0; i < count; i++) {
+			uint32_t node = addrspace::read32(row + i * 4);
+			if (node < 0x8C000000 || node >= 0x8D000000) continue;
+			// Skip the 6 fighter bodies — they're shipped via GSTA already; the
+			// slot table holds them too (avoid double-draw).
+			bool isBody = false;
+			for (int s = 0; s < 6; s++) if (node == CHAR_BASE[s]) { isBody = true; break; }
+			if (isBody) continue;
+			if (addrspace::read8(node + 0x12C) == 0) continue;     // renderer's visibility gate
+			uint16_t sid = (uint16_t)addrspace::read16(node + 0x144);
+			if (sid == 0) continue;
+			float sx = readFloat(node + 0xE0), sy = readFloat(node + 0xE4);
+			if (sx < -64.f || sx > 704.f || sy < -64.f || sy > 544.f) continue;
+			// Owner is OPTIONAL (global effects have none). Check both conventions.
+			int slot = -1;
+			uint32_t oA = addrspace::read32(node + 0x18), oB = addrspace::read32(node + 0x80);
+			for (int s = 0; s < 6; s++) if (oA == CHAR_BASE[s] || oB == CHAR_BASE[s]) { slot = s; break; }
+			nPass++;
+			if (n >= maxObjs) continue;
+			out[n].owner_cid  = (uint8_t)(slot >= 0 ? addrspace::read8(CHAR_BASE[slot] + OFF_CHAR_ID) : 0);
+			out[n].sprite_id  = sid;
+			out[n].screen_x   = (int16_t)sx;
+			out[n].screen_y   = (int16_t)sy;
+			out[n].type       = (uint8_t)layer;                       // z-order: slot-table layer
+			out[n].category   = (uint8_t)addrspace::read8(node + 0x03);
+			out[n].xflip      = (uint8_t)addrspace::read8(node + 0x130);
+			out[n].owner_slot = (uint8_t)(slot < 0 ? 0xFF : slot);
+			n++;
+		}
+	}
+	if (nPass > n)
+		fprintf(stderr, "[OBJS-SLOT] CAP HIT: %d drawn, cap=%d -> DROPPED %d\n", nPass, maxObjs, nPass - n);
+	else { static int _d = 0; if (++_d % 120 == 0) fprintf(stderr, "[OBJS-SLOT] drawn=%d (cap=%d)\n", n, maxObjs); }
+	return n;
+}
+
 // Scan the object pool for active satellite objects (cape, effects, projectiles).
 // Each owner-pointer object carries sprite_id@+0x12C + screen_x@+0xC8 + screen_y@+0xCC.
 // Skips inactive (sid==0) and the body object (no own position, (0,0)).
 // See re-catalog/00-README.md + PL2A-storm.md. Reads only.
 int readObjects(ObjectState* out, int maxObjs)
 {
+	static const bool _slot = getenv("MAPLECAST_OBJS_SLOTTABLE") != nullptr;
+	if (_slot) return readAllDrawn(out, maxObjs);
 	static const bool _walk = getenv("MAPLECAST_OBJS_WALK") != nullptr;
 	if (_walk) return readObjectsWalk(out, maxObjs);
 	int n = 0, nOwner = 0, nSid = 0, nPass = 0;
