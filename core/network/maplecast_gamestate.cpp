@@ -238,12 +238,73 @@ static void ptrDump(const GameState& state)
 	}
 }
 
+// Faithful render-list enumeration — ports MVC2's per-category head-list walk
+// (marvelous2 `loc_8c0301ce`, bank03). The game draws satellite objects (cape /
+// projectiles / supers) by walking, per category, the linked list whose head is
+// heads[cat] = *(0x8C287A5C + cat*4); each list is SINGLY-linked forward via
+// node+0x0C. Node base = the old scan anchor `a` minus 0x18, so the canonical
+// pl_mem.asm offsets apply directly (sprite_id 0x144, screen 0xE0/0xE4,
+// visible 0x12C, xflip 0x130, category 0x03, owner-word 0x18).
+//
+// Membership in heads[cat] IS the alive signal — there is no doubly-linked
+// back-link. Our legacy scan's "alive" test read next@a-0x10 / prev@a-0x0c,
+// which are the WRONG fields (the real `next` is node+0x0C == a-0x0c, which the
+// old code misnamed "prev"); that test culled live objects (capture: only 2 of
+// 39 valid-sid objects passed) and let stale cape frames linger. Walking the
+// head-lists yields EXACTLY the drawn objects, in z-order, no ghost frames.
+// Gated by MAPLECAST_OBJS_WALK until visually A/B-confirmed against the legacy
+// path (prod browser clients keep the legacy reader until then).
+static int readObjectsWalk(ObjectState* out, int maxObjs)
+{
+	static const uint32_t HEAD_ARRAY = 0x8C287A5C;          // heads[cat], stride 4
+	// Category draw order back->front (master dispatch loc_8c0305d8): cape/body
+	// class {0x0B,0x05,0x06} behind, projectile/effect class {0x07,0x08,0x09},
+	// then {0x0C,0x0D,0x01} in front.
+	static const uint8_t DRAW_ORDER[] = {0x0B,0x05,0x06,0x07,0x08,0x09,0x0C,0x0D,0x01};
+	int n = 0, visited = 0;
+	for (uint8_t cat : DRAW_ORDER) {
+		uint32_t node = addrspace::read32(HEAD_ARRAY + cat * 4);
+		for (int guard = 0; node >= 0x8C000000 && node < 0x8D000000
+		                    && guard < 256 && n < maxObjs; ++guard) {
+			visited++;
+			uint16_t sid = (uint16_t)addrspace::read16(node + 0x144);
+			uint8_t  vis = (uint8_t)addrspace::read8(node + 0x12C);   // unk_012c ~=1 when drawn
+			uint32_t opt = addrspace::read32(node + 0x84);            // data ptr (walker2 alive gate)
+			if (sid != 0 && vis != 0 && opt != 0) {
+				float sx = readFloat(node + 0xE0), sy = readFloat(node + 0xE4);
+				if (!(sx == 0.f && sy == 0.f)) {
+					uint32_t ownerWord = addrspace::read32(node + 0x18);
+					int slot = -1;
+					for (int s = 0; s < 6; s++) if (ownerWord == CHAR_BASE[s]) { slot = s; break; }
+					// owner_cid drives the atlas (PL{cid}); use the OWNER's char id so
+					// e.g. Storm's cape (sid 735) resolves against PL2A.
+					out[n].owner_cid  = (uint8_t)addrspace::read8((slot >= 0 ? ownerWord : node) + OFF_CHAR_ID);
+					out[n].sprite_id  = sid;
+					out[n].screen_x   = (int16_t)sx;
+					out[n].screen_y   = (int16_t)sy;
+					out[n].type       = cat;                              // walk-order layer
+					out[n].category   = (uint8_t)addrspace::read8(node + 0x03);  // real render layer byte
+					out[n].xflip      = (uint8_t)addrspace::read8(node + 0x130);
+					out[n].owner_slot = (uint8_t)(slot < 0 ? 0 : slot);
+					n++;
+				}
+			}
+			node = addrspace::read32(node + 0x0C);                    // forward link
+		}
+	}
+	static int _dbg = 0;
+	if (++_dbg % 120 == 0) fprintf(stderr, "[OBJS-WALK] visited=%d emitted=%d\n", visited, n);
+	return n;
+}
+
 // Scan the object pool for active satellite objects (cape, effects, projectiles).
 // Each owner-pointer object carries sprite_id@+0x12C + screen_x@+0xC8 + screen_y@+0xCC.
 // Skips inactive (sid==0) and the body object (no own position, (0,0)).
 // See re-catalog/00-README.md + PL2A-storm.md. Reads only.
 int readObjects(ObjectState* out, int maxObjs)
 {
+	static const bool _walk = getenv("MAPLECAST_OBJS_WALK") != nullptr;
+	if (_walk) return readObjectsWalk(out, maxObjs);
 	int n = 0, nOwner = 0, nSid = 0;
 	for (uint32_t a = 0x8C26A600; a < 0x8C278000 && n < maxObjs; a += 4) {
 		uint32_t v = addrspace::read32(a);
