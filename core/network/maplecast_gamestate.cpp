@@ -322,23 +322,27 @@ static int readAllDrawn(ObjectState* out, int maxObjs)
 	static const int      SLOT_LAYERS     = 16;
 	static const int      SLOT_MAX_ROW    = 0x60;
 	int n = 0, nPass = 0;
+	int nRaw = 0, nInvalid = 0, nVis0 = 0, nSid0 = 0, nOOB = 0;   // diagnostic: where objects are lost
+	uint8_t lcounts[16];
 	for (int layer = 0; layer < SLOT_LAYERS; layer++) {
 		int count = (int)addrspace::read8(SLOT_COUNT_BASE + layer);
+		lcounts[layer] = (uint8_t)(count & 0xFF);
 		if (count <= 0 || count > SLOT_MAX_ROW) continue;
 		uint32_t row = SLOT_PTR_BASE + (uint32_t)layer * SLOT_ROW_STRIDE;
 		for (int i = 0; i < count; i++) {
+			nRaw++;
 			uint32_t node = addrspace::read32(row + i * 4);
-			if (node < 0x8C000000 || node >= 0x8D000000) continue;
+			if (node < 0x8C000000 || node >= 0x8D000000) { nInvalid++; continue; }
 			// Skip the 6 fighter bodies — they're shipped via GSTA already; the
 			// slot table holds them too (avoid double-draw).
 			bool isBody = false;
 			for (int s = 0; s < 6; s++) if (node == CHAR_BASE[s]) { isBody = true; break; }
 			if (isBody) continue;
-			if (addrspace::read8(node + 0x12C) == 0) continue;     // renderer's visibility gate
+			if (addrspace::read8(node + 0x12C) == 0) { nVis0++; continue; }     // renderer's visibility gate
 			uint16_t sid = (uint16_t)addrspace::read16(node + 0x144);
-			if (sid == 0) continue;
+			if (sid == 0) { nSid0++; continue; }
 			float sx = readFloat(node + 0xE0), sy = readFloat(node + 0xE4);
-			if (sx < -64.f || sx > 704.f || sy < -64.f || sy > 544.f) continue;
+			if (sx < -64.f || sx > 704.f || sy < -64.f || sy > 544.f) { nOOB++; continue; }
 			// Owner is OPTIONAL (global effects have none). Check both conventions.
 			int slot = -1;
 			uint32_t oA = addrspace::read32(node + 0x18), oB = addrspace::read32(node + 0x80);
@@ -356,9 +360,15 @@ static int readAllDrawn(ObjectState* out, int maxObjs)
 			n++;
 		}
 	}
-	if (nPass > n)
-		fprintf(stderr, "[OBJS-SLOT] CAP HIT: %d drawn, cap=%d -> DROPPED %d\n", nPass, maxObjs, nPass - n);
-	else { static int _d = 0; if (++_d % 120 == 0) fprintf(stderr, "[OBJS-SLOT] drawn=%d (cap=%d)\n", n, maxObjs); }
+	{
+		static int _d = 0;
+		if (++_d % 60 == 0) {
+			char lb[96]; int p = 0;
+			for (int L = 0; L < 16; L++) p += snprintf(lb + p, sizeof(lb) - p, "%d,", lcounts[L]);
+			fprintf(stderr, "[OBJS-SLOT] drawn=%d raw=%d inval=%d vis0=%d sid0=%d oob=%d layers=[%s]\n",
+			        n, nRaw, nInvalid, nVis0, nSid0, nOOB, lb);
+		}
+	}
 	return n;
 }
 
