@@ -541,7 +541,15 @@ export class SpriteClient {
       if (!c) { this.loadChar(o.cid); continue; }
       if (!c.img) continue;
       const sp = c.sprites[o.sid];
-      if (!sp) continue;
+      if (!sp) {
+        // DIAGNOSTIC: this object's sprite_id isn't in the owner's per-character
+        // atlas — it's a SHARED effect sprite (hitspark/etc.) we don't have yet.
+        // Tally it; the set is the exact extraction list for the effects atlas.
+        const k = `PL${o.cid.toString(16).padStart(2,'0').toUpperCase()}/0x${(o.sid&0xffff).toString(16)}`;
+        this._objMiss = this._objMiss || new Map();
+        this._objMiss.set(k, (this._objMiss.get(k) || 0) + 1);
+        continue;
+      }
       // AUTHORITATIVE position: the object's own slot-table screen pos (node+0xE0/E4
       // -> o.x/o.y). The old far>130 heuristic flip-flopped between this and the
       // owner's pos as the object crossed the threshold — that was the 'jumpy/skip'
@@ -567,7 +575,19 @@ export class SpriteClient {
     // Sort by cid so each character's body+objects form ONE group, objects (z=-1) behind
     // bodies (z=0). (unshift broke this by scattering mixed-cid objects to the front.)
     out.sort((a, b) => (a.charId - b.charId) || ((a.z || 0) - (b.z || 0)));
-    this._lastNote = loading ? `loading ${loading} char atlas…` : (missing ? `holding ${missing}: ${missKeys.join(' ')}` : 'all visible poses captured');
+    // Periodically dump the shared-effect miss tally to the console — this is the
+    // exact list of effect sprite_ids to put in the effects atlas. (window._objMiss
+    // also holds it live for inspection.)
+    if ((this._dlc = (this._dlc || 0) + 1) % 180 === 0 && this._objMiss && this._objMiss.size) {
+      const top = [...this._objMiss.entries()].sort((a,b)=>b[1]-a[1]).slice(0,40);
+      console.warn('[effects-miss] sprite_ids not in any per-char atlas (cid/sid x frames):',
+        top.map(([k,v])=>`${k}×${v}`).join('  '));
+      if (typeof window !== 'undefined') window._objMiss = this._objMiss;
+    }
+    const missEff = this._objMiss ? this._objMiss.size : 0;
+    this._lastNote = loading ? `loading ${loading} char atlas…`
+      : (missing ? `holding ${missing}: ${missKeys.join(' ')}`
+      : (missEff ? `all poses ok · ${missEff} effect sids missing (see console)` : 'all visible poses captured'));
     return out;
   }
 
