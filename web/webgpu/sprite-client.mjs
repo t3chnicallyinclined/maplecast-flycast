@@ -522,11 +522,15 @@ export class SpriteClient {
              const h = this._held[s]; if (h && h.char_id === sl.char_id) sp = h.sp; else continue; }
       let exx = sl.screen_x, eyy = sl.screen_y;
       if (this.predict !== false) { const dt = Math.min(now - sl.t, 33); if (dt > 0) { exx += sl.vx*dt; eyy += sl.vy*dt; } }
-      const S = this.spriteScale || 1;   // constant scale; scales about feet/center
+      // Anisotropic CPS scale (CpsXScale=5/3, CpsYScale=15/7 — work.asm:44-45):
+      // rip sprites are CPS-native px, MVC2 stretches Y MORE than X. Apply SX to
+      // every X (anchor offset + width), SY to every Y (offset + height). This is
+      // the fixed game scale — NOT the derived "sliding" camera zoom (_zoom, info-only).
+      const SX = this.asmScaleX || 1, SY = this.asmScaleY || 1;
       const cfl = (sl.facing !== sp.facing);
       const cdx = cfl ? -(sp.dx + sp.wG) : sp.dx;   // mirror the (asymmetric) anchor when flipped
       out.push({ charId: sl.char_id, slot: s, sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
-        dx: (exx+cdx*S)*scaleX, dy: (eyy+sp.dy*S)*scaleY, dw: sp.wG*S*scaleX, dh: sp.hG*S*scaleY,
+        dx: (exx+cdx*SX)*scaleX, dy: (eyy+sp.dy*SY)*scaleY, dw: sp.wG*SX*scaleX, dh: sp.hG*SY*scaleY,
         flip: cfl });
     }
     // Satellite objects (cape, lightning, projectiles) — each = the OWNER's rip
@@ -549,7 +553,7 @@ export class SpriteClient {
       // floating second cape). other types: distance decides attached vs spawned.
       const far = (o.type !== 3) && ((Math.abs(o.x - ox) + Math.abs(o.y - oy)) > 130);
       const px = far ? o.x : ox, py = far ? o.y : oy;
-      const S = this.spriteScale || 1;
+      const SX = this.asmScaleX || 1, SY = this.asmScaleY || 1;   // anisotropic CPS scale (work.asm:44-45)
       const fl = (osl.facing !== sp.facing);
       const dxv = fl ? -(sp.dx + sp.wG) : sp.dx;   // mirror the anchor when flipped
       // PER-OBJECT RENDER MODEL (marvelous2 RE): each object is independent — its own
@@ -558,7 +562,7 @@ export class SpriteClient {
       // the crouch cape. z: cape/aura behind the body, lightning/effects in front.
       const z = (o.type === 1) ? 1 : (o.type === 3 ? -2 : -1);
       out.push({ charId: o.cid, slot: oslot, z, sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
-        dx: (px + dxv*S)*scaleX, dy: (py + sp.dy*S)*scaleY, dw: sp.wG*S*scaleX, dh: sp.hG*S*scaleY,
+        dx: (px + dxv*SX)*scaleX, dy: (py + sp.dy*SY)*scaleY, dw: sp.wG*SX*scaleX, dh: sp.hG*SY*scaleY,
         flip: fl });
     }
     // The renderer groups CONSECUTIVE same-cid sprites and drops chars past maxGroups(8).
