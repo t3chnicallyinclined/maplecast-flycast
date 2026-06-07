@@ -92,7 +92,7 @@ export class SpriteClient {
   }
   _blank() {
     return { active:0, char_id:0, sprite_id:-1, screen_x:0, screen_y:0, facing:0, palette:0,
-             health:0, _ph:-1, _maxhp:144,   // health + previous-health (hits) + max seen (bar full)
+             health:0, red_health:0, _ph:-1, _maxhp:144,   // health + red(trailing) + prev-health (hits) + max seen (bar full)
              // prediction: previous screen pos + timestamps -> observed screen velocity
              px:0, py:0, t:0, pt:0, vx:0, vy:0 };
   }
@@ -386,7 +386,25 @@ export class SpriteClient {
   // Point the client at a server dir of per-character atlases
   // (PL{cid:02X}.{json,png}). Characters are then fetched on demand as they
   // appear in the streamed state — only what's picked gets downloaded.
-  setCharBase(base) { this.charBase = base; this.loadFxAtlas(); }
+  setCharBase(base) { this.charBase = base; this.loadFxAtlas(); this.loadHudAtlas(); }
+
+  // Load the ripped HUD atlas (hud/hud_atlas.{png,json}) — FONT.BIN digits + the
+  // white bar swatch. Served beside chars (e.g. <base>/../hud/hud_atlas), the same
+  // convention loadFxAtlas uses for effects. Built by tools/rip_hud_atlas.py.
+  async loadHudAtlas() {
+    if (this._hud || this._hudLoading || !this.charBase) return;
+    this._hudLoading = true;
+    const base = this.charBase.replace(/\/chars\/?$/, '/hud') + '/hud_atlas';
+    const bust = '?t=' + Date.now();
+    try {
+      const json = await (await fetch(base + '.json' + bust)).json();
+      const blob = await (await fetch(base + '.png' + bust)).blob();
+      this._hudImg = await createImageBitmap(blob);
+      this._hud = json;
+      console.log('[sprite-client] loaded hud_atlas:', Object.keys(json.rects || {}).length, 'rects');
+    } catch (e) { console.warn('[sprite-client] hud_atlas load failed', e); }
+    finally { this._hudLoading = false; }
+  }
 
   // Load the isolated-effect atlas (fx_atlas.{png,json}) — the 5 universal effect
   // textures the server's EFCT isolation references by id (additive overlays).
@@ -548,6 +566,7 @@ export class SpriteClient {
       }
       sl._ph = sl.active ? hp : -1;
       sl.health = hp;
+      sl.red_health = dv.getUint8(ci + 4);    // trailing/chip layer (GSTA char +4)
       if (sl.active && hp > sl._maxhp) sl._maxhp = hp;   // round-start full = bar max
     }
     // Exact size from state: camera zoom = |Δscreen_x / Δpos_x| between two
@@ -856,16 +875,51 @@ export class SpriteClient {
   }
 
   // ===== HUD from state — health/meter/combo/timer are already in the GSTA =====
-  _pointHealth(slots) {
-    for (const s of slots) { const sl = this.slot[s]; if (sl.active) return Math.max(0, Math.min(1, sl.health / (sl._maxhp || 144))); }
-    return 0;
+  // The on-screen POINT character is whichever of a side's 3 slots is active; its
+  // health/red_health drive the life bar. (slots arg = that side's 3 slot indices.)
+  _pointSlot(slots) {
+    for (const s of slots) { const sl = this.slot[s]; if (sl.active) return sl; }
+    return null;
   }
-  _bar(ctx, x, y, w, h, r, fill, bg, fromRight) {
-    r = Math.max(0, Math.min(1, r));
-    ctx.fillStyle = bg; ctx.fillRect(x, y, w, h);
-    ctx.fillStyle = fill; const fw = w * r;
-    ctx.fillRect(fromRight ? x + w - fw : x, y, fw, h);
-    ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 1; ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  // Draw a horizontal slice of the ripped white bar swatch, tinted with a
+  // left->right gradient (the per-team modulate of loc_8c15FFB0). This is the
+  // faithful Canvas2D equivalent of MVC2's "white FONT tex modulated by the
+  // per-slot vertex color" — drawImage the swatch, then multiply the team tint.
+  _drawBar(ctx, x, y, w, h, frac, colA, colB, fromRight) {
+    frac = Math.max(0, Math.min(1, frac));
+    const fw = Math.round(w * frac);
+    if (fw <= 0) return;
+    const fx = fromRight ? (x + w - fw) : x;
+    const r = this._hud && this._hud.rects && this._hud.rects.bar_white;
+    if (r && this._hudImg) {
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(this._hudImg, r.x, r.y, r.w, r.h, fx, y, fw, h);  // stretch ripped white texel
+      ctx.save();
+      ctx.globalCompositeOperation = 'multiply';                      // modulate -> team tint
+      const g = ctx.createLinearGradient(x, 0, x + w, 0);
+      g.addColorStop(0, colA); g.addColorStop(1, colB);
+      ctx.fillStyle = g; ctx.fillRect(fx, y, fw, h);
+      ctx.restore();
+    } else {
+      // atlas not loaded yet: flat tint (still correct geometry)
+      ctx.fillStyle = colB; ctx.fillRect(fx, y, fw, h);
+    }
+  }
+  // Draw the round timer / hit counter from the ripped FONT digit glyphs.
+  _drawDigits(ctx, str, x, y, dh, align) {
+    if (!this._hud || !this._hudImg) return 0;
+    const R = this._hud.rects;
+    const d0 = R.digit_0; if (!d0) return 0;
+    const scale = dh / d0.h, dw = Math.round(d0.w * scale), adv = dw + 1;
+    const total = str.length * adv - 1;
+    let cx = (align === 'right') ? x - total : (align === 'center' ? x - total / 2 : x);
+    ctx.imageSmoothingEnabled = false;
+    for (const ch of str) {
+      const r = R['digit_' + ch];
+      if (r) ctx.drawImage(this._hudImg, r.x, r.y, r.w, r.h, Math.round(cx), y, dw, dh);
+      cx += adv;
+    }
+    return total;
   }
   // Draw the server-isolated TA effects additively over the scene. Each EFCT
   // descriptor is {id,cx,cy,w,h} in 640x480 screen space; id indexes fx_atlas.
@@ -949,24 +1003,67 @@ export class SpriteClient {
     ctx.restore();
   }
 
+  // Pick the per-team-slot life-bar gradient (loc_8c15FFB0): which of a side's 3
+  // chars (C1/C2/C3) is the active point -> magenta/green/cyan -> yellow.
+  _barCols(sideSlots) {
+    const bc = (this._hud && this._hud.barColors) || {
+      C1: ['#FF40FF', '#FFFF00'], C2: ['#00FF00', '#FFFF00'], C3: ['#00C0FF', '#FFFF00'] };
+    for (let i = 0; i < sideSlots.length; i++) if (this.slot[sideSlots[i]].active) return bc['C' + (i + 1)];
+    return bc.C1;
+  }
+
+  // MVC2 HUD, drawn PIXEL-SOURCED from the ripped FONT.BIN atlas (hud_atlas):
+  //   - two life bars: white bar swatch stretched to width=HP/maxHP, tinted by the
+  //     per-team gradient, with the red_health/maxHP trailing chip behind it.
+  //   - super-meter bars: width = meter_fill / 144 (loc_8C0F0FDC max const 144.0).
+  //   - meter-level pips (0..5).
+  //   - round timer: two FONT digits (BCD-ish, game_timer 0..99).
+  //   - hit counter: FONT digits + (font_sheet) — combo>1 per side.
   drawHUD(ctx) {
     const W = ctx.canvas.width, H = ctx.canvas.height;
     ctx.clearRect(0, 0, W, H);
     if (!this.inMatch) return;
     ctx.save(); ctx.scale(W / 640, H / 480);
-    const hud = this.hud || {}, mf = this._maxfill || 1;
-    this._bar(ctx, 18, 16, 292, 14, this._pointHealth([0,2,4]), '#46e84a', '#15401a', false);  // P1 health
-    this._bar(ctx, 330, 16, 292, 14, this._pointHealth([1,3,5]), '#46e84a', '#15401a', true);   // P2 health
-    this._bar(ctx, 18, 456, 250, 9, (hud.p1fill||0)/mf, '#ffcc33', '#5a3a00', false);            // P1 meter
-    this._bar(ctx, 372, 456, 250, 9, (hud.p2fill||0)/mf, '#ffcc33', '#5a3a00', true);            // P2 meter
+    ctx.imageSmoothingEnabled = false;
+    const hud = this.hud || {};
+    const P1 = [0, 2, 4], P2 = [1, 3, 5];
+    const METER_MAX = 144;                          // loc_8C0F0FDC: meter_fill / 144.0
+    const c1 = this._barCols(P1), c2 = this._barCols(P2);
+    const p1 = this._pointSlot(P1), p2 = this._pointSlot(P2);
+    const hpFrac = (sl) => sl ? Math.max(0, Math.min(1, sl.health / (sl._maxhp || 144))) : 0;
+    const redFrac = (sl) => sl ? Math.max(0, Math.min(1, sl.red_health / (sl._maxhp || 144))) : 0;
+
+    // --- life bars (red chip behind, current HP in front), tinted ripped swatch ---
+    const LB = { x1: 18, x2: 330, y: 16, w: 292, h: 14 };
+    // P1 (left-anchored): red trailing layer first, then HP on top.
+    this._drawBar(ctx, LB.x1, LB.y, LB.w, LB.h, redFrac(p1), '#b01010', '#601010', false);
+    this._drawBar(ctx, LB.x1, LB.y, LB.w, LB.h, hpFrac(p1),  c1[0], c1[1], false);
+    // P2 (right-anchored mirror).
+    this._drawBar(ctx, LB.x2, LB.y, LB.w, LB.h, redFrac(p2), '#b01010', '#601010', true);
+    this._drawBar(ctx, LB.x2, LB.y, LB.w, LB.h, hpFrac(p2),  c2[0], c2[1], true);
+
+    // --- super meters (width = fill/144), team-tinted ripped swatch ---
+    this._drawBar(ctx, 18,  456, 250, 9, (hud.p1fill || 0) / METER_MAX, c1[0], c1[1], false);
+    this._drawBar(ctx, 372, 456, 250, 9, (hud.p2fill || 0) / METER_MAX, c2[0], c2[1], true);
+
+    // --- meter-level pips (0..5) ---
     ctx.fillStyle = '#ffd24d';
-    for (let i = 0; i < (hud.p1lvl||0); i++) ctx.fillRect(18 + i*12, 446, 9, 6);
-    for (let i = 0; i < (hud.p2lvl||0); i++) ctx.fillRect(613 - i*12, 446, 9, 6);
-    ctx.fillStyle = '#fff'; ctx.font = 'bold 22px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-    ctx.fillText(String(hud.timer||0).padStart(2,'0'), 320, 14);
-    ctx.font = 'bold 15px monospace';
-    if ((hud.p1combo||0) > 1) { ctx.fillStyle = '#ffe14d'; ctx.textAlign = 'left';  ctx.fillText(hud.p1combo + ' HIT', 24, 40); }
-    if ((hud.p2combo||0) > 1) { ctx.fillStyle = '#ffe14d'; ctx.textAlign = 'right'; ctx.fillText(hud.p2combo + ' HIT', 616, 40); }
+    for (let i = 0; i < (hud.p1lvl || 0); i++) ctx.fillRect(18 + i * 12, 446, 9, 6);
+    for (let i = 0; i < (hud.p2lvl || 0); i++) ctx.fillRect(613 - i * 12, 446, 9, 6);
+
+    // --- round timer: two ripped FONT digits, centered ---
+    const tstr = String(Math.max(0, Math.min(99, hud.timer | 0))).padStart(2, '0');
+    if (this._hud && this._hudImg) this._drawDigits(ctx, tstr, 320, 12, 22, 'center');
+    else { ctx.fillStyle = '#fff'; ctx.font = 'bold 22px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillText(tstr, 320, 14); }
+
+    // --- hit counters: ripped FONT digits, combo>1 per side ---
+    const drawCombo = (n, x, align) => {
+      if (!(n > 1)) return;
+      if (this._hud && this._hudImg) this._drawDigits(ctx, String(n), x, 38, 15, align);
+      else { ctx.fillStyle = '#ffe14d'; ctx.font = 'bold 15px monospace'; ctx.textAlign = align; ctx.textBaseline = 'top'; ctx.fillText(n + ' HIT', x, 40); }
+    };
+    drawCombo(hud.p1combo | 0, 24, 'left');
+    drawCombo(hud.p2combo | 0, 616, 'right');
     ctx.restore();
   }
 

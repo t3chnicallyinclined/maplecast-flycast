@@ -264,7 +264,7 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=9';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=39';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=40';
 import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=8';
 // StafGL (sprite-staf-gl.mjs) RETIRED — the STAF/HUDF stream now renders through the
 // proven PVR2Renderer (see STAFR/renderStaf below). StafGL stays on disk for reference.
@@ -563,14 +563,14 @@ addEventListener('keydown',e=>{
         const drawList = asm ? SPRITECLIENT.buildAssemblyDrawList(640,480) : SPRITECLIENT.buildDrawList(640,480);
         try{ SG.render(drawList, window.DBG||{}, window._T, SPRITECLIENT.buildSparkList(640,480), null); }
         catch(err){ console.error('[sprite-gpu] render error -> Canvas2D fallback', err); SG.ok=false; showCanvas(); }
-        hctx.clearRect(0,0,sch.width,sch.height);                       // no synthesized HUD
-        try{ renderStaf(); }catch(err){}                                // REAL HUD + effects overlay (PVR2Renderer)
+        try{ renderStaf(); }catch(err){}                                // effects overlay (PVR2Renderer) — STAF only when streaming
+        if(hudOn) SPRITECLIENT.drawHUD(hctx); else hctx.clearRect(0,0,sch.width,sch.height);  // ripped FONT.BIN HUD (no STAF)
         SPRITECLIENT.drawFlash(hctx, drawList);                          // field-stepper (dormant unless probing)
         const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.statsText();
       } else {
         if(asm) SPRITECLIENT.renderAssembly(scx); else SPRITECLIENT.render(scx);
-        hctx.clearRect(0,0,sch.width,sch.height);                       // no synthesized HUD
-        try{ renderStaf(); }catch(err){}                                // REAL HUD + effects overlay (PVR2Renderer)
+        try{ renderStaf(); }catch(err){}                                // effects overlay (PVR2Renderer) — STAF only when streaming
+        if(hudOn) SPRITECLIENT.drawHUD(hctx); else hctx.clearRect(0,0,sch.width,sch.height);  // ripped FONT.BIN HUD (no STAF)
         const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.statsText();
       }
     }
