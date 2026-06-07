@@ -529,38 +529,36 @@ export class SpriteClient {
       const SX = this.asmScaleX || 1, SY = this.asmScaleY || 1;
       const cfl = (sl.facing !== sp.facing);
       const cdx = cfl ? -(sp.dx + sp.wG) : sp.dx;   // mirror the (asymmetric) anchor when flipped
-      out.push({ charId: sl.char_id, slot: s, sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
+      out.push({ charId: sl.char_id, slot: s, z: 8, sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
         dx: (exx+cdx*SX)*scaleX, dy: (eyy+sp.dy*SY)*scaleY, dw: sp.wG*SX*scaleX, dh: sp.hG*SY*scaleY,
         flip: cfl });
     }
-    // Satellite objects (cape, lightning, projectiles) — each = the OWNER's rip
-    // sprite at its own screen pos. A character = body (0x144) + these. (re-catalog/)
+    // Satellite + global objects from the slot table (cape, projectiles, hail,
+    // lightning, supers). The slot table gives each its OWN authoritative screen
+    // pos and render layer, so we draw exactly there — no owner-relative guess.
     if (this.objectsOn !== false) for (const o of (this.objects || [])) {
       const c = this.chars[o.cid];
       if (!c) { this.loadChar(o.cid); continue; }
       if (!c.img) continue;
       const sp = c.sprites[o.sid];
       if (!sp) continue;
-      // Find the owner's slot + its LIVE (predicted) screen pos. Attached parts ride
-      // the owner; spawned objects (far from owner) keep their own pos.
-      let osl = null, oslot = 0;
-      for (let s = 0; s < 6; s++) if (this.slot[s].active && this.slot[s].char_id === o.cid) { osl = this.slot[s]; oslot = s; break; }
-      if (!osl) continue;
-      let ox = osl.screen_x, oy = osl.screen_y;
-      if (this.predict !== false) { const dt = Math.min(now - osl.t, 33); if (dt > 0) { ox += osl.vx*dt; oy += osl.vy*dt; } }
-      if ((ox === 0 && oy === 0) || ox < -60 || ox > 700) continue;   // off-screen assist -> its parts vanish
-      // type 3 = cape (always attached to the owner — no distance guess, fixes the
-      // floating second cape). other types: distance decides attached vs spawned.
-      const far = (o.type !== 3) && ((Math.abs(o.x - ox) + Math.abs(o.y - oy)) > 130);
-      const px = far ? o.x : ox, py = far ? o.y : oy;
+      // AUTHORITATIVE position: the object's own slot-table screen pos (node+0xE0/E4
+      // -> o.x/o.y). The old far>130 heuristic flip-flopped between this and the
+      // owner's pos as the object crossed the threshold — that was the 'jumpy/skip'
+      // look. Drawing at the true pos is both correct and stable.
+      const px = o.x, py = o.y;
+      if (px < -64 || px > 704 || py < -64 || py > 544) continue;
       const SX = this.asmScaleX || 1, SY = this.asmScaleY || 1;   // anisotropic CPS scale (work.asm:44-45)
-      const fl = (osl.facing !== sp.facing);
+      // Orientation: the object sprite lives in the owner's atlas space, so derive
+      // flip from the owner's facing (vs the sprite's baked facing).
+      let oslot = 0, ofacing = 0;
+      for (let s = 0; s < 6; s++) if (this.slot[s].active && this.slot[s].char_id === o.cid) { oslot = s; ofacing = this.slot[s].facing; break; }
+      const fl = (ofacing !== sp.facing);
       const dxv = fl ? -(sp.dx + sp.wG) : sp.dx;   // mirror the anchor when flipped
-      // PER-OBJECT RENDER MODEL (marvelous2 RE): each object is independent — its own
-      // sprite_id (whose animation already encodes crouch/jump) drawn at the OWNER's
-      // shared transform, layered by type. No cape-shift guess: the cape's sprite_id IS
-      // the crouch cape. z: cape/aura behind the body, lightning/effects in front.
-      const z = (o.type === 1) ? 1 : (o.type === 3 ? -2 : -1);
+      // z = the REAL render layer (o.type now carries the slot-table layer 0..15).
+      // Bodies sit at the mid baseline (z=8), so low-layer satellites (capes) fall
+      // behind their owner and high-layer ones (effects/supers) draw in front.
+      const z = o.type;
       out.push({ charId: o.cid, slot: oslot, z, sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
         dx: (px + dxv*SX)*scaleX, dy: (py + sp.dy*SY)*scaleY, dw: sp.wG*SX*scaleX, dh: sp.hG*SY*scaleY,
         flip: fl });
