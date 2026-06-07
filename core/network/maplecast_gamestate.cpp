@@ -392,23 +392,31 @@ int serializePalEffects(uint8_t* out, int maxLen)
 	// Logs every frame for 14 frames after each hp-drop. Cross-checked vs marvelous2's
 	// damage routine loc_8c056454 (writes the reaction state) + loc_8c035162 (reads the
 	// palette mode). Also log anim_state@0x1d0 (the palette-mode source) + flash@0x150.
+	// HITDIFF: on a real hit (hp drop) log which bytes in 0x100..0x240 change for
+	// the victim each frame -> read journalctl + cross-ref to find the flash field
+	// (team says char+0x12e). fputc(10) for newline to dodge format-string escapes.
 	static uint8_t _prevHp[6] = {0};
 	static int     _hitLog[6] = {0};
+	static uint8_t _prevR[6][0x140];
+	static bool    _prevRok[6] = {false};
+	const int RB = 0x100, RL = 0x140;
 	for (int i = 0; i < 6; i++) {
-		if (addrspace::read8(CHAR_BASE[i] + 0x000) == 0) { _prevHp[i] = 0; continue; }
+		if (addrspace::read8(CHAR_BASE[i] + 0x000) == 0) { _prevHp[i] = 0; _prevRok[i] = false; continue; }
+		uint8_t cur[RL];
+		for (int b = 0; b < RL; b++) cur[b] = (uint8_t)addrspace::read8(CHAR_BASE[i] + (uint32_t)(RB + b));
 		uint8_t hp = addrspace::read8(CHAR_BASE[i] + 0x420);
-		if (_prevHp[i] != 0 && hp < _prevHp[i]) _hitLog[i] = 14;   // hp dropped = confirmed hit
+		if (_prevHp[i] != 0 && hp < _prevHp[i]) _hitLog[i] = 12;
 		_prevHp[i] = hp;
-		if (_hitLog[i] > 0) {
+		if (_hitLog[i] > 0 && _prevRok[i]) {
 			_hitLog[i]--;
-			fprintf(stderr, "[PALF-HIT] slot%d pe40=%u 0x1a4=%u 0x230=%u 0x231=%u 0x233=%u "
-			        "0x1d0=%u 0x150=%u 0x151=%u 0x14a=%u hp=%u red=%u\n", i, pe[i],
-			        addrspace::read8(CHAR_BASE[i] + 0x1a4), addrspace::read8(CHAR_BASE[i] + 0x230),
-			        addrspace::read8(CHAR_BASE[i] + 0x231), addrspace::read8(CHAR_BASE[i] + 0x233),
-			        addrspace::read16(CHAR_BASE[i] + 0x1d0), addrspace::read8(CHAR_BASE[i] + 0x150),
-			        addrspace::read8(CHAR_BASE[i] + 0x151), addrspace::read8(CHAR_BASE[i] + 0x14a),
-			        hp, addrspace::read8(CHAR_BASE[i] + 0x424));
+			char buf[700]; int q = 0;
+			q += snprintf(buf + q, sizeof buf - q, "[HITDIFF] s%d hp=%u chg:", i, hp);
+			for (int b = 0; b < RL && q < (int)sizeof buf - 24; b++)
+				if (cur[b] != _prevR[i][b])
+					q += snprintf(buf + q, sizeof buf - q, " 0x%x:%u>%u", RB + b, _prevR[i][b], cur[b]);
+			fprintf(stderr, "%s", buf); fputc(10, stderr);
 		}
+		memcpy(_prevR[i], cur, RL); _prevRok[i] = true;
 	}
 	return off;  // 4 + 12 = 16
 }

@@ -264,7 +264,7 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=9';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=30';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=31';
 import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=8';
 import {StafGL} from './webgpu/sprite-staf-gl.mjs?v=2';
 
@@ -1008,7 +1008,7 @@ async function main(){
                 if(SpriteClient.isWATCH(d)){ try{ SPRITECLIENT.onWATCH(d);
                   let wd=document.getElementById('sc_watch');
                   if(!wd){ wd=document.createElement('pre'); wd.id='sc_watch';
-                    wd.style.cssText='position:fixed;top:90px;left:8px;z-index:99999;background:rgba(0,0,0,.82);color:#7f7;font:10px/1.25 monospace;padding:6px;white-space:pre;max-height:70vh;overflow:auto;pointer-events:none';
+                    wd.style.cssText='position:fixed;top:120px;right:8px;z-index:99999;background:rgba(0,0,0,.82);color:#ff0;font:10px/1.25 monospace;padding:6px;white-space:pre;max-height:70vh;overflow:auto;pointer-events:none';
                     document.body.appendChild(wd); }
                   wd.textContent=SPRITECLIENT.watchText();
                 }catch(e){} return; }
