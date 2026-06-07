@@ -453,6 +453,7 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
   const tryLoad=async()=>{ if(pendingPng&&pendingJson){ try{ await SPRITECLIENT.loadAtlas(pendingJson,pendingPng); }catch(err){ console.error('atlas load',err); } } };
   box.querySelector('#sc_png').onchange=async e=>{ pendingPng=e.target.files[0]||null; await tryLoad(); };
   box.querySelector('#sc_json').onchange=async e=>{ const f=e.target.files[0]; if(f){ try{ pendingJson=JSON.parse(await f.text()); }catch(err){ console.error('atlas json',err); } } await tryLoad(); };
+  let _lastShowSprite=null;
   const tick=()=>{
     // lazy-init the WebGPU sprite renderer once the shared device exists
     if(!SG.ok && !SG._tried && window._R && window._R.dev){ SG._tried=true; SG.init(window._R.dev, scg); showCanvas(); }
@@ -460,7 +461,20 @@ const SPRITECLIENT=new SpriteClient(); window._spriteclient=SPRITECLIENT;
       fetch(CHAR_BASE.replace(/\/chars\/?$/,'/effects')+'/sparks.png?t='+Date.now())
         .then(r=>r.blob()).then(b=>createImageBitmap(b)).then(img=>SG.setSparkAtlas(img,64))
         .catch(e=>console.warn('[spark] atlas load failed',e)); }
-    if(scOn){
+    // Auto-switch: render the sprite client IN a match; OUT of match (menus,
+    // character select) fall back to the TA video — those frames are small, so
+    // no applyFrame overrun, and the user can see the menu the atlas can't draw.
+    const inMatch=(SPRITECLIENT.inMatch===1);
+    const showSprite=scOn&&inMatch;
+    if(showSprite!==_lastShowSprite){
+      _lastShowSprite=showSprite;
+      window._skipTA=showSprite;   // skip TA in-match (sprite renders); decode it out of match (show the menu)
+      const gg=gpuOn&&SG.ok&&!stafMode;
+      scs.style.display=(showSprite&&stafMode)?'block':'none';
+      scg.style.display=(showSprite&&gg)?'block':'none';
+      scv.style.display=(showSprite&&!gg&&!stafMode)?'block':'none';
+    }
+    if(showSprite){
       const asm=SPRITECLIENT.assemblyMode;
       if(stafMode){
         // STAF stripped-TA path: rasterize the real per-vertex textured triangles
