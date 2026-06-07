@@ -53,6 +53,7 @@ export class SpriteClient {
     this.effects = [];         // server-isolated TA effect quads {hash,cx,cy,w,h} (EFCT packet)
     this.objects = [];         // pool satellite objects {cid,sid,x,y} (OBJS packet) — cape/effects/projectiles
     this.objectsOn = true;
+    this._objBridge = false;   // flicker-bridge: re-draw last frame's missing objects (lingers removed objs 1 frame) — OFF by default
     this._fxCache = new Map(); // texture hash -> canvas (decoded from TXTR packets)
     this._lastEfctN = 0;
     this.effectsOn = true;
@@ -702,7 +703,10 @@ export class SpriteClient {
     // continuously. Objects still present this frame are skipped here (no trail
     // on things that move every frame). Truly-gone objects drop after one frame.
     let drawObjs = this.objects || [];
-    if (this.objectsOn !== false && this._objsPrev && this._objsPrev.length) {
+    // Flicker-bridge OFF by default: it re-draws last frame's missing objects to mask
+    // blink, but lingers REMOVED objects one extra frame (the "stuck sprites"). Toggle
+    // window._spriteclient._objBridge=true if real blink returns.
+    if (this.objectsOn !== false && this._objBridge && this._objsPrev && this._objsPrev.length) {
       const held = [];
       for (const p of this._objsPrev) {
         let matched = false;
