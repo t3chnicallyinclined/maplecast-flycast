@@ -2035,8 +2035,11 @@ void serverPublish(TA_context* ctx)
 	// content hashes, cleared every VCACHE_RESEED_FRAMES so mid-stream joiners
 	// recover. Resolved once; default OFF (production unaffected).
 	static const bool _vcacheOn = (std::getenv("MAPLECAST_VCACHE") != nullptr);
+	// MEASURE-ONLY: ship the NORMAL wire (render unbroken) but count would-be-saved
+	// pages, so we can read the real dedup savings while the game runs a real match.
+	static const bool _vcacheMeasure = (std::getenv("MAPLECAST_VCACHE_MEASURE") != nullptr);
 	static std::unordered_set<uint64_t> _vcacheSent;
-	if (_vcacheOn && frameNum > 0 && (frameNum % VCACHE_RESEED_FRAMES) == 0)
+	if ((_vcacheOn || _vcacheMeasure) && frameNum > 0 && (frameNum % VCACHE_RESEED_FRAMES) == 0)
 		_vcacheSent.clear();
 
 	// dirtyPageCount slot. In VCACHE mode we write the sentinel + a real-count
@@ -2089,6 +2092,10 @@ void serverPublish(TA_context* ctx)
 					if (seen) vcacheRefPages++;
 					else { memcpy(dst, reg.shadow + off, MEM_PAGE_SIZE); dst += MEM_PAGE_SIZE; }
 				} else {
+					if (_vcacheMeasure) {  // count would-be-deduped pages; ship normal wire
+						uint64_t h = vcacheHashPage(reg.shadow + off);
+						if (!_vcacheSent.insert(h).second) vcacheRefPages++;
+					}
 					*dst++ = reg.id;
 					memcpy(dst, &pi, 4); dst += 4;
 					memcpy(dst, reg.shadow + off, MEM_PAGE_SIZE); dst += MEM_PAGE_SIZE;
@@ -2103,15 +2110,20 @@ done_diff:
 	// VCACHE byte accounting — pre-compression (uncompressed inner-frame) bytes
 	// saved by shipping references instead of full pages this frame, and a
 	// running total. Logged alongside the periodic server-frame line below.
-	if (_vcacheOn) {
+	if (_vcacheOn || _vcacheMeasure) {
 		static uint64_t _vcSavedTotal = 0;
 		const uint64_t savedThisFrame = (uint64_t)vcacheRefPages * MEM_PAGE_SIZE;
 		_vcSavedTotal += savedThisFrame;
-		if (frameNum % VCACHE_RESEED_FRAMES == 0)
-			printf("[VCACHE] frame %u | dirty=%u (%u refs, %u full) | saved %llu KB this frame, %llu MB total | sent-set=%zu\n",
+		// Log at the LAST frame before reseed (sent-set fullest = steady-state dedup),
+		// NOT frame 0 where the set was just cleared (would always read 0 refs).
+		if (frameNum % VCACHE_RESEED_FRAMES == VCACHE_RESEED_FRAMES - 1) {
+			printf("[VCACHE] frame %u | dirty=%u (%u refs, %u full) | full*60=%.0f KB/s new-VRAM | saved %llu KB this frame, %llu MB total | sent-set=%zu\n",
 				frameNum, totalDirty, vcacheRefPages, totalDirty - vcacheRefPages,
+				(totalDirty - vcacheRefPages) * (double)MEM_PAGE_SIZE * 60.0 / 1024.0,
 				(unsigned long long)(savedThisFrame / 1024),
 				(unsigned long long)(_vcSavedTotal / (1024 * 1024)), _vcacheSent.size());
+			fflush(stdout);
+		}
 	}
 
 	// === Scene-change & forced SYNC broadcast ===
