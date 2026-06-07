@@ -231,29 +231,35 @@ export class SpriteClient {
     this._stafTexN = this._stafTex.size;
   }
 
-  // 'STAF'(4) frameNum(4) pvr_snapshot[16](64) triCount(u32), then per TRIANGLE (63 B):
-  //   texId(8) blend(1) listType(1) tspFlags(1) tcw(4) tsp(4) pcw(4) isp(4)     = 27 B hdr
-  //   3 × [ x(i16) y(i16) u(u16) v(u16) col(4 = R,G,B,A) ]                       = 36 B verts
-  // x,y are 640x480 screen space; u,v are Q0.16 (val/65535). texId 0 = untextured.
-  //   blend/tspFlags are LEGACY (StafGL); the PVR2Renderer path uses the RAW
-  //   tcw/tsp/pcw/isp PVR poly state instead and derives blend/shad/depth/cull
-  //   itself (faithful to flycast — no hand-rolled re-derivation).
-  // Each triangle carries its REAL per-vertex (x,y,u,v,col); PVR2Renderer rasterizes
-  // textured triangles correctly for any winding/flip/shear. The buffer is ALREADY
-  // zstd-decompressed (ZCST stripped by the caller).
+  // === STAF wire (DE-INDEXED STRIP) — post-zstd (ZCST stripped by the caller) ====
+  // 'STAF'(4) frameNum(4) pvr_snapshot[16](64) vertCount(u32)@72 polyCount(u32)@76
+  //   vertCount × vertex (28 B): x,y,z(f32) u,v(f32) col(4 = R,G,B,A) spc(4 = R,G,B,A)
+  //   polyCount × poly  (33 B): firstVert(u32) vertCount(u32) texId(8)
+  //                             tcw(4) tsp(4) pcw(4) isp(4) listType(1)
+  // x,y,z and u,v are the TA's OWN projected coords (640x480 screen space, real
+  // 1/w depth). firstVert/vertCount span a CONSECUTIVE run in the vertex buffer =
+  // a degenerate-linked triangle STRIP — IDENTICAL in shape to ta-parser.mjs's
+  // output (PolyParam.first/count over the strip vertex buffer). PVR2Renderer's
+  // _buildIndexBuffer does the winding-correct strip->triangle-list conversion
+  // (and the GPU drops the zero-area link triangles), so the STAF path feeds
+  // PVR2Renderer the EXACT same way as the working out-of-match TA video. tcw 0 =
+  // untextured (use per-vertex col). The server already content-cached each texture
+  // once (TX64); the client overrides tcw with a per-frame surrogate for the texMgr
+  // shim to resolve the cached RGBA without a VRAM decode.
   static isSTAF(d) {
     return d.length >= 10 && d[0]===83 && d[1]===84 && d[2]===65 && d[3]===70; // 'S','T','A','F'
   }
   // Parse STAF into the PVR2Renderer input contract (web/webgpu/pvr2-renderer.mjs):
   //   _stafParsed = { vertexData, vertexCount, opaque[], punchThrough[], translucent[] }
-  // vertexData is the 28-byte/vertex layout PVR2Renderer/TAParser use:
-  //   x,y,z(f32) col(u8x4 RGBA) spc(u8x4) u,v(f32).  Each STAF triangle becomes a
-  //   3-vertex PolyParam (count=3) in its list; _buildIndexBuffer turns count=3 into
-  //   one triangle. PolyParam = { first, count, tsp, tcw, pcw, isp, tileclip, _tex }
-  //   where tcw is OVERRIDDEN with a per-frame texture SURROGATE (a small int that
-  //   maps 1:1 to the 64-bit texId) so the STAF texMgr shim can resolve the cached
-  //   GPUTexture by tcw without a VRAM decode. pcw keeps the real textured bit
-  //   ((pcw>>3)&1); pcw paraType bits are forced to 4 so PVR2Renderer treats it as a poly.
+  // vertexData is the SAME 28-byte/vertex layout TAParser produces:
+  //   x,y,z(f32) col(u8x4 RGBA) spc(u8x4 RGBA) u,v(f32).  Each STAF poly becomes a
+  //   PolyParam { first, count, tsp, tcw, pcw, isp, tileclip } whose first/count are
+  //   consecutive vertex indices (a strip); _buildIndexBuffer turns count into
+  //   (count-2) triangles with alternating winding. tcw is OVERRIDDEN with a
+  //   per-frame texture SURROGATE (1:1 with the 64-bit texId the server hashed from
+  //   the raw tcw) so the STAF texMgr shim resolves the cached GPUTexture by tcw
+  //   without a VRAM decode; pcw paraType is forced to 4 so PVR2Renderer treats it
+  //   as a poly while keeping the real textured/gouraud/offset bits.
   onSTAF(d) {
     const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
     this.stafFrame = dv.getUint32(4, true);
@@ -262,11 +268,13 @@ export class SpriteClient {
     // to the real 640x480 (not the 32x32 default of an all-zero snapshot).
     if (!this._stafSnap) this._stafSnap = new Uint32Array(16);
     for (let i = 0; i < 16; i++) this._stafSnap[i] = dv.getUint32(8 + i * 4, true);
-    const triCount = dv.getUint32(72, true);
-    const STRIDE = 63;
-    let o = 76;
-    const maxTri = Math.min(triCount, ((d.length - 76) / STRIDE) | 0);
-    const nVerts = maxTri * 3;
+    const vertCount = dv.getUint32(72, true);
+    const polyCount = dv.getUint32(76, true);
+    const VSTRIDE = 28, PSTRIDE = 33;
+    let o = 80;
+    // Bound vertCount/polyCount against the actual buffer length (defensive).
+    const vBytes = vertCount * VSTRIDE;
+    const nVerts = Math.min(vertCount, ((d.length - 80) / VSTRIDE) | 0);
     // 28-byte/vertex interleaved buffer (matches TAParser/PVR2Renderer VBL stride 28).
     if (!this._stafVB || this._stafVB.byteLength < nVerts * 28) {
       this._stafVB = new ArrayBuffer(Math.max(nVerts * 28, 1 << 16));
@@ -274,56 +282,65 @@ export class SpriteClient {
       this._stafVBu = new Uint8Array(this._stafVB);
     }
     const f32 = this._stafVBf, u8 = this._stafVBu;
+    // Copy/repack the vertex region: wire (x,y,z,u,v,col,spc) -> VBL (x,y,z,col,spc,u,v).
+    for (let i = 0; i < nVerts; i++) {
+      const x = dv.getFloat32(o, true);
+      const y = dv.getFloat32(o + 4, true);
+      const z = dv.getFloat32(o + 8, true);
+      const u = dv.getFloat32(o + 12, true);
+      const v = dv.getFloat32(o + 16, true);
+      const cr = d[o + 20], cg = d[o + 21], cb = d[o + 22], ca = d[o + 23];
+      const sr = d[o + 24], sg = d[o + 25], sb = d[o + 26], sa = d[o + 27];
+      o += VSTRIDE;
+      const fi = i * 7, bi = i * 28;
+      f32[fi] = x; f32[fi + 1] = y; f32[fi + 2] = z;
+      u8[bi + 12] = cr; u8[bi + 13] = cg; u8[bi + 14] = cb; u8[bi + 15] = ca;  // col RGBA
+      u8[bi + 16] = sr; u8[bi + 17] = sg; u8[bi + 18] = sb; u8[bi + 19] = sa;  // spc (offset) RGBA
+      f32[fi + 5] = u; f32[fi + 6] = v;
+    }
+    // Poly records begin after the FULL declared vertex region (the server appends
+    // poly records after all verts), so seek by vertCount, not the clamped nVerts.
+    let po = 80 + vBytes;
+    const maxPoly = Math.min(polyCount, ((d.length - po) / PSTRIDE) | 0);
     const op = [], pt = [], tr = [];
     // Per-frame texId -> surrogate int (1:1). Surrogate 0 reserved for "no texture".
     if (!this._stafSurr) this._stafSurr = new Map();
     const surrMap = this._stafSurr; surrMap.clear();
     this._stafSurrTex = this._stafSurrTex || [];      // surrogate -> texKey string
     let surrNext = 1;
-    let vtx = 0;
-    for (let i = 0; i < maxTri; i++) {
-      const lo = dv.getUint32(o, true), hi = dv.getUint32(o + 4, true); o += 8;
-      o += 1;                                          // skip legacy blend
-      const lt = d[o++];                               // listType: 0=op 1=pt 2=tr (explicit byte)
-      o += 1;                                          // skip legacy tspFlags
-      const tcwRaw = dv.getUint32(o, true); o += 4;    // (kept for reference; tcw overridden below)
-      const tsp = dv.getUint32(o, true); o += 4;
-      const pcwRaw = dv.getUint32(o, true); o += 4;
-      const isp = dv.getUint32(o, true); o += 4;
-      const textured = ((pcwRaw >> 3) & 1) !== 0 && (lo !== 0 || hi !== 0);
-      // Resolve a texture surrogate (1:1 with the 64-bit texId).
+    for (let i = 0; i < maxPoly; i++) {
+      const first = dv.getUint32(po, true); po += 4;
+      const count = dv.getUint32(po, true); po += 4;
+      const texLo = dv.getUint32(po, true); po += 4;   // texId low 32
+      const texHi = dv.getUint32(po, true); po += 4;   // texId high 32
+      const tcwRaw = dv.getUint32(po, true); po += 4;  // (kept for reference)
+      const tsp = dv.getUint32(po, true); po += 4;
+      const pcwRaw = dv.getUint32(po, true); po += 4;
+      const isp = dv.getUint32(po, true); po += 4;
+      const lt = d[po++];                              // listType: 0=op 1=pt 2=tr
+      if (count < 3 || first + count > nVerts) continue;
+      const textured = ((pcwRaw >> 3) & 1) !== 0 && (texLo !== 0 || texHi !== 0);
+      // Resolve a texture surrogate (1:1 with the 64-bit texId). The poly's texId
+      // matches the TX64 cache key exactly (onTX64 stores by texKey(lo,hi)), so the
+      // texMgr shim resolves surrogate -> texKey -> cached decoded RGBA with no VRAM.
       let surr = 0;
       if (textured) {
-        const key = SpriteClient.texKey(lo, hi);
+        const key = SpriteClient.texKey(texLo, texHi);
         surr = surrMap.get(key);
         if (surr === undefined) { surr = surrNext++; surrMap.set(key, surr); this._stafSurrTex[surr] = key; }
       }
       // pcw: keep real textured/gouraud/offset bits but force paraType=4 (poly).
       const pcw = (4 << 29) | (pcwRaw & 0x1FFFFFFF);
-      const first = vtx;
-      for (let k = 0; k < 3; k++) {
-        const x = dv.getInt16(o, true); o += 2;
-        const y = dv.getInt16(o, true); o += 2;
-        const u = dv.getUint16(o, true) / 65535; o += 2;
-        const v = dv.getUint16(o, true) / 65535; o += 2;
-        const r = d[o++], g = d[o++], b = d[o++], a = d[o++];
-        const fi = vtx * 7, bi = vtx * 28;
-        f32[fi] = x; f32[fi + 1] = y; f32[fi + 2] = 0.5;     // z fixed (no depth; list order = z-order)
-        u8[bi + 12] = r; u8[bi + 13] = g; u8[bi + 14] = b; u8[bi + 15] = a;   // col RGBA
-        u8[bi + 16] = 0; u8[bi + 17] = 0; u8[bi + 18] = 0; u8[bi + 19] = 0;   // spc (offset color) = 0
-        f32[fi + 5] = u; f32[fi + 6] = v;
-        vtx++;
-      }
       // tcw OVERRIDDEN with the surrogate (the STAF texMgr shim keys on it).
-      const pp = { first, count: 3, tsp, tcw: surr, pcw, isp, tileclip: 0 };
+      const pp = { first, count, tsp, tcw: surr, pcw, isp, tileclip: 0 };
       (lt === 1 ? pt : lt === 2 ? tr : op).push(pp);
     }
     this._stafParsed = {
-      vertexData: u8.subarray(0, vtx * 28),
-      vertexCount: vtx,
+      vertexData: u8.subarray(0, nVerts * 28),
+      vertexCount: nVerts,
       opaque: op, punchThrough: pt, translucent: tr,
     };
-    this._stafQuadN = maxTri;
+    this._stafQuadN = op.length + pt.length + tr.length;
   }
 
   stafStatsText() {

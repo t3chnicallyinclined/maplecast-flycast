@@ -503,54 +503,70 @@ envelope (`_compressor`, ZCST outer) and `broadcastBinary`.
 'TX64'(4)  texId(8 LE)  w(2 LE)  h(2 LE)  rawSize(4 LE)  zstd(RGBA8888)
 ```
 
-**`STAF`** frame (whole envelope is ZCST/zstd-wrapped; below is post-decompress):
+**`STAF`** frame — **DE-INDEXED STRIP** (whole envelope is ZCST/zstd-wrapped;
+below is post-decompress). Supersedes the old per-triangle layout, which shipped
+3 explicit verts/triangle and let the server's hand-rolled strip walk (degenerate
+skipping, no winding alternation) garble effects/supers. We now ship the strip
+**verbatim** and let the client's `PVR2Renderer._buildIndexBuffer` do the
+winding-correct strip→triangle-list conversion (GPU drops zero-area links) — the
+EXACT path the working out-of-match TA video uses, so STAF renders pixel-identical:
 
 ```
-'STAF'(4)  frameNum(4 LE)  pvr_snapshot[16](64)  triCount(4 LE)
-  ── repeated triCount times (63 B/tri) ──
-  texId(8 LE)        // 0 = untextured triangle (use per-vertex col)
-  blend(1)           // LEGACY (StafGL): (SrcInstr<<4)|DstInstr
-  listType(1)        // 0=op(bg/opaque) 1=pt(char/punch-through) 2=tr(fx/translucent)
-  tspFlags(1)        // LEGACY (StafGL): bit0-1 ShadInstr, bit2 IgnoreTexA, bit3 textured, bit4 punch-through
-  tcw(4 LE)          // RAW PVR TCW (texture control word)
-  tsp(4 LE)          // RAW PVR TSP (texture/shade params — blend, ShadInstr, wrap, filter)
-  pcw(4 LE)          // RAW PVR PCW (textured/gouraud/offset bits, list type)
-  isp(4 LE)          // RAW PVR ISP (depth mode, cull mode, z-write)
-  ── per vertex × 3 (12 B each) ──
-    x(i16 LE) y(i16 LE)    // 640×480 screen space (the TA's own projected coords)
-    u(u16) v(u16)          // UV, Q0.16 (val/65535)
-    col(4)                 // R,G,B,A vertex color
+'STAF'(4)  frameNum(4 LE)  pvr_snapshot[16](64)
+vertCount(4 LE)@72  polyCount(4 LE)@76
+  ── vertex region: vertCount × 28 B (the TA's own projected verts) ──
+    x(f32) y(f32) z(f32)   // 640×480 screen space + real 1/w depth
+    u(f32) v(f32)          // UV (full float — wrap/tiling-faithful, not clamped)
+    col(4)                 // R,G,B,A vertex color  (flycast Vertex.col order)
+    spc(4)                 // R,G,B,A offset/specular color (Vertex.spc)
+  ── poly region: polyCount × 33 B ──
+    firstVert(4 LE)  vertCount(4 LE)   // CONSECUTIVE indices into the vertex
+                                       //   region = a degenerate-linked STRIP
+    texId(8 LE)        // 64-bit content hash = TX64 cache key (0 = untextured)
+    tcw(4 LE)          // RAW PVR TCW (kept for reference/filter)
+    tsp(4 LE)          // RAW PVR TSP (blend, ShadInstr, wrap, filter)
+    pcw(4 LE)          // RAW PVR PCW (textured/gouraud/offset bits, list type)
+    isp(4 LE)          // RAW PVR ISP (depth mode, cull mode, z-write)
+    listType(1)        // 0=op(bg/opaque) 1=pt(char/punch-through) 2=tr(fx/translucent)
 ```
 
-Triangles arrive in server z-order (op → pt → tr); the client draws straight
-through, which IS the z-order (no depth buffer). **The renderer is the proven
-`PVR2Renderer` (`web/webgpu/pvr2-renderer.mjs`), not the retired StafGL.** The
-client (`SpriteClient.onSTAF`) reshapes each triangle into PVR2Renderer's exact
-input — a 28-byte/vertex buffer (x,y,z f32 · col u8×4 · spc u8×4 · u,v f32) plus
-op/pt/tr `PolyParam` lists `{first,count,tsp,tcw,pcw,isp,tileclip}` where each
-triangle is a 3-vertex poly. PVR2Renderer derives blend (`tsp` 29-31/26-28),
-the ShadInstr texture↔vertex-color combine (`tsp` 6-7), punch-through alpha
-test, depth/cull (`isp`), and the texture flag (`pcw>>3`) **itself**, exactly as
-flycast — so `blend`/`tspFlags` above are legacy and unused on this path. The
-`tcw` field is OVERRIDDEN client-side with a per-frame surrogate that maps 1:1
-to the 64-bit `texId`; a STAF `texMgr` shim resolves it to the TX64-cached
-decoded RGBA `GPUTexture` (no VRAM, no `getTexture` VRAM decode). The overlay is
-composited (transparent clear) over the lean character canvas.
+The server de-indexes each kept `PolyParam` by walking
+`rc.idx[pp.first .. pp.first+pp.count]` and appending `rc.verts[idx]` CONTIGUOUSLY
+to the vertex region (NO triangulation, NO degenerate skip), then emits one poly
+record whose `firstVert/vertCount` span that run. Polys arrive in server z-order
+(op → pt → tr); the client draws straight through, which IS the z-order.
+
+The client (`SpriteClient.onSTAF`) repacks the vertex region into PVR2Renderer's
+exact input — a 28-byte/vertex buffer (x,y,z f32 · col u8×4 · spc u8×4 · u,v f32)
+plus op/pt/tr `PolyParam` lists `{first,count,tsp,tcw,pcw,isp,tileclip}` whose
+`first/count` are the CONSECUTIVE strip indices. This is **byte-for-byte the same
+object shape `ta-parser.mjs` produces**, so PVR2Renderer feeds it identically to
+the working video: `_buildIndexBuffer` expands `(count-2)` triangles with
+alternating winding, and PVR2Renderer derives blend (`tsp` 29-31/26-28), the
+ShadInstr texture↔vertex-color combine (`tsp` 6-7), punch-through alpha test,
+depth/cull (`isp`), and the texture flag (`pcw>>3`) **itself**, exactly as flycast.
+The `tcw` field is OVERRIDDEN client-side with a per-frame surrogate that maps 1:1
+to the `texId`; a STAF `texMgr` shim resolves it to the TX64-cached decoded RGBA
+`GPUTexture` (no VRAM, no `getTexture` VRAM decode). The overlay is composited
+(transparent clear) over the lean character canvas.
 
 ### 8.3 Client
 
-- **`web/webgpu/sprite-staf-gl.mjs` (`StafGL`)** — a minimal WebGL2 textured-
-  triangle renderer. Vertex shader maps screen `(x,y)` (640×480) to clip space
-  (Y-flipped); fragment shader replicates flycast's ShadInstr combine +
-  IgnoreTexA + punch-through alpha test. Per frame it uploads the flat vertex
-  array to a dynamic VBO and draws the triangle list **batched by GL state**
-  (blend/texture/shade), preserving order. Textures upload to GL textures once,
-  keyed by `tex_id`, from the client's decoded-RGBA cache.
+- **Renderer: `web/webgpu/pvr2-renderer.mjs` (`PVR2Renderer`)** — the proven
+  WebGPU PVR2 renderer that also draws the out-of-match TA video. STAF is rendered
+  on a shared-device transparent-overlay canvas (`STAFR`/`renderStaf` in
+  `webgpu-test.html`). The retired `sprite-staf-gl.mjs` (`StafGL`) hand-rolled a
+  per-triangle GL renderer and is NOT used on this path. **The whole point of the
+  de-indexed-strip format is that the client hands PVR2Renderer the same object
+  shape `ta-parser.mjs` does — so `_buildIndexBuffer` (strip→list winding fix)
+  engages identically and there is no garble.**
 - **`web/webgpu/sprite-client.mjs`** — `texKey(lo,hi)` → `"hi:lo"` string key.
-  `onTX64` caches the decoded `{w,h,rgba}` by key. `onSTAF` parses the triangle
-  list into a flat `Float32Array` (`_stafV`, 8 floats/vert) + per-tri descriptors
-  (`stafQuads`) the GL renderer consumes directly. (The old Canvas2D `drawSTAF`
-  is gone.)
+  `onTX64` caches the decoded `{w,h,rgba}` by key. `onSTAF` repacks the wire's
+  vertex region into the 28-B/vertex VBL buffer and builds op/pt/tr `PolyParam`
+  lists `{first,count,tsp,tcw,pcw,isp,tileclip}` (each poly's `first/count` =
+  consecutive strip indices), exposed as `_stafParsed` for `PVR2Renderer.renderFrame`.
+  `tcw` is overridden with a per-frame surrogate; the surrogate resolves to the
+  poly's `texId` (= TX64 cache key) via the `texMgr` shim.
 - **`web/webgpu-test.html`** — routes `TX64` (raw) and `STAF` (decompress-then-
   peek inner magic, gated by `window._stafRoute`) away from `applyFrame`; the
   **STAF** checkbox drives a dedicated WebGL canvas (A/B against whole-sprite /
@@ -583,8 +599,10 @@ inline module in `webgpu-test.html`.
 
 ### 8.5 Known limits of this pass (correctness-first, optimize later)
 
-- One triangle per record (no strip/transform compression yet — ~47 B/tri before
-  zstd; strip-encode + per-vertex delta is the bandwidth optimization).
+- De-indexed strip: one vertex per strip step (incl. degenerate link verts) +
+  one 33-B poly record per poly. No per-vertex delta/quantization yet (verts ship
+  as full f32 x,y,z,u,v + 8 B color) — strip-share + delta is the bandwidth
+  optimization. Correctness-first: byte-faithful to ta-parser's geometry.
 - Process-global `_stafSent` + 600-frame re-seed (per-connection digest is
   Phase 3); stage textures are re-shipped, not yet cached across the session.
 - fmt 0/1/2/5/6 + VQ covered; mip/exotic formats draw untextured (Phase 4

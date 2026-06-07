@@ -2559,20 +2559,47 @@ done_diff:
 					static uint32_t _stafClear = 0;
 					if ((++_stafClear % 600) == 0) _stafSent.clear();
 
+					// === DE-INDEXED STRIP emit (was per-triangle; that bypassed the
+					// client's strip->list winding fix and garbled effects/supers). ====
+					// For each kept PolyParam we walk rc.idx[pp.first .. pp.first+pp.count]
+					// (the degenerate-linked STRIP produced by ta_parse(ctx,false)) and
+					// append rc.verts[idx] CONTIGUOUSLY to one output VERTEX buffer, then
+					// emit ONE poly record {firstVert,vertCount,tcw,tsp,pcw,isp,listType}.
+					// We do NOT triangulate and do NOT skip degenerate links: the client
+					// rebuilds the SAME object shape as ta-parser.mjs (a 28-B/vertex buffer
+					// + op/pt/tr PolyParams whose first/count are CONSECUTIVE vertex indices
+					// = a strip), so PVR2Renderer._buildIndexBuffer does the winding-correct
+					// strip->triangle-list conversion exactly like the working out-of-match
+					// TA video. Pixel-identical by construction.
+					//
+					// Wire (post-zstd), see docs/STRIPPED-TA-DESIGN.md §8.2:
+					//   'STAF'(4) frameNum(4) pvr_snapshot[16](64) vertCount(u32) polyCount(u32)
+					//   vertCount × vertex (28 B): x,y,z(f32) u,v(f32) col(4 RGBA) spc(4 RGBA)
+					//   polyCount × poly  (33 B): firstVert(u32) vertCount(u32) texId(8)
+					//                             tcw(4) tsp(4) pcw(4) isp(4) listType(1)
+					//   texId is the 64-bit content hash matching the TX64 cache key (0 =
+					//   untextured); tcw is the raw PVR TCW (kept for reference/filter).
 					_stafBuf.clear();
-					_stafBuf.resize(4 + 4 + 64 + 4);        // header + frameNum + pvr_snapshot + triCount(u32)
+					_stafBuf.resize(4 + 4 + 64 + 4 + 4);    // header + frameNum + pvr_snapshot + vertCount + polyCount
 					_stafBuf[0] = 'S'; _stafBuf[1] = 'T'; _stafBuf[2] = 'A'; _stafBuf[3] = 'F';
 					memcpy(&_stafBuf[4], &_localFrameNum, 4);
 					memcpy(&_stafBuf[8], pvr_snapshot, 64);
-					uint32_t quadCount = 0;       // now a TRIANGLE count (see per-triangle emit below)
-					auto put16 = [&](int16_t v) { _stafBuf.push_back(v & 0xff); _stafBuf.push_back((v >> 8) & 0xff); };
+					uint32_t vertCount = 0, polyCount = 0;
+					auto putF = [&](float f) { uint32_t u; memcpy(&u, &f, 4); for (int i = 0; i < 4; i++) _stafBuf.push_back((u >> (i * 8)) & 0xff); };
 					auto putU16 = [&](uint16_t v) { _stafBuf.push_back(v & 0xff); _stafBuf.push_back((v >> 8) & 0xff); };
 					auto put32 = [&](uint32_t v) { for (int i = 0; i < 4; i++) _stafBuf.push_back((v >> (i * 8)) & 0xff); };
-					auto put64 = [&](uint64_t v) { for (int i = 0; i < 8; i++) _stafBuf.push_back((v >> (i * 8)) & 0xff); };
+					(void)putU16;
 
-					// Per-list geometry debug: capture the first few real triangles of each
-					// list (rc.idx indices + screen coords) so we can confirm op/pt/tr all
-					// triangulate sanely. Gated; one dump per ~600 frames.
+					// The poly records reference firstVert into the SAME _stafBuf grown
+					// above; but verts and poly records interleave on the wire region-wise
+					// (all verts first, then all polys). We stage poly records in a side
+					// buffer and append after the vertex region is finalized.
+					static std::vector<uint8_t> _stafPoly;
+					_stafPoly.clear();
+					auto polyPut32 = [&](uint32_t v) { for (int i = 0; i < 4; i++) _stafPoly.push_back((v >> (i * 8)) & 0xff); };
+					auto polyPut64 = [&](uint64_t v) { for (int i = 0; i < 8; i++) _stafPoly.push_back((v >> (i * 8)) & 0xff); };
+
+					// Per-list geometry debug: capture the first few polys of each list.
 					static bool _stafDbg = getenv("MAPLECAST_STAF_DBG") != nullptr;
 					static uint32_t _stafDbgCtr = 0;
 					bool dbgFrame = _stafDbg && (_stafDbgCtr % 600) == 0;
@@ -2589,17 +2616,19 @@ done_diff:
 					auto emitList = [&](std::vector<PolyParam>& lst, int listType) {
 						for (PolyParam& pp : lst) {
 							if (pp.count < 3) continue;
-							if (quadCount >= 16384) return;
+							if (polyCount >= 16384) return;
 							uint32_t tcw = pp.tcw.full, tsp = pp.tsp.full, pcw = pp.pcw.full;
+							uint32_t iend = pp.first + pp.count;
+							if (iend > rcS.idx.size()) iend = (uint32_t)rcS.idx.size();
+							if (pp.first + 3 > iend) continue;
 							// HUDF filter BEFORE the texture decode/ship — only pay for quads we keep
 							// (effects=additive, HUD=top/bottom strips). Fixes the char-select texture
 							// flood (was decoding the whole animated demo screen every frame).
 							if (_hudfOn) {
 								bool _add = ((tsp >> 26) & 7) == 1;
-								uint32_t _ie = pp.first + pp.count; if (_ie > rcS.idx.size()) _ie = (uint32_t)rcS.idx.size();
 								uint32_t _nv = (uint32_t)rcS.verts.size();
 								float _mnY = 1e9f, _mxY = -1e9f;
-								for (uint32_t kk = pp.first; kk < _ie; kk++) { uint32_t vi = rcS.idx[kk]; if (vi < _nv) { float yy = rcS.verts[vi].y; if (yy < _mnY) _mnY = yy; if (yy > _mxY) _mxY = yy; } }
+								for (uint32_t kk = pp.first; kk < iend; kk++) { uint32_t vi = rcS.idx[kk]; if (vi < _nv) { float yy = rcS.verts[vi].y; if (yy < _mnY) _mnY = yy; if (yy > _mxY) _mxY = yy; } }
 								float _cyq = (_mnY + _mxY) * 0.5f;
 								if (!_add && !(_cyq < 56.f || _cyq > 424.f)) continue;
 							}
@@ -2608,101 +2637,87 @@ done_diff:
 							int tw = 0, th = 0;
 							if (textured) {
 								int fmt = (tcw >> 27) & 7, mip = (tcw >> 31) & 1;
-								if (mip || (fmt > 2 && fmt != 5 && fmt != 6)) continue; // unsupported fmt -> skip (fallback later)
-								tw = 8 << ((tsp >> 3) & 7); th = 8 << (tsp & 7);
-								texId = mcfx::texHash64(tcw, tw, th);
-								if (_stafRgba && _stafSent.find(texId) == _stafSent.end()) {
-									if (mcfx::decodeTexAny(tcw, tsp, _stafRgba)) {
-										_stafSent.insert(texId);
-										uint32_t rgbaSize = (uint32_t)(tw * th * 4);
-										size_t compSize = 0; uint64_t cus = 0;
-										const uint8_t* comp = _compressor.compress(_stafRgba, rgbaSize, compSize, cus);
-										// TX64: 'TX64'(4) texId(8) w(2) h(2) rawSize(4) zstd(RGBA)
-										std::vector<uint8_t> tb(20 + compSize);
-										tb[0] = 'T'; tb[1] = 'X'; tb[2] = '6'; tb[3] = '4';
-										memcpy(&tb[4], &texId, 8);
-										tb[12] = tw & 0xff; tb[13] = (tw >> 8) & 0xff; tb[14] = th & 0xff; tb[15] = (th >> 8) & 0xff;
-										memcpy(&tb[16], &rgbaSize, 4); memcpy(&tb[20], comp, compSize);
-										maplecast_ws::broadcastBinary(tb.data(), (uint32_t)tb.size());
-									} else {
-										texId = 0; textured = false;   // couldn't decode -> draw untextured
+								if (mip || (fmt > 2 && fmt != 5 && fmt != 6)) {
+									textured = false; // unsupported fmt -> draw untextured (vertex color)
+								} else {
+									tw = 8 << ((tsp >> 3) & 7); th = 8 << (tsp & 7);
+									texId = mcfx::texHash64(tcw, tw, th);
+									if (_stafRgba && _stafSent.find(texId) == _stafSent.end()) {
+										if (mcfx::decodeTexAny(tcw, tsp, _stafRgba)) {
+											_stafSent.insert(texId);
+											uint32_t rgbaSize = (uint32_t)(tw * th * 4);
+											size_t compSize = 0; uint64_t cus = 0;
+											const uint8_t* comp = _compressor.compress(_stafRgba, rgbaSize, compSize, cus);
+											// TX64: 'TX64'(4) texId(8) w(2) h(2) rawSize(4) zstd(RGBA)
+											std::vector<uint8_t> tb(20 + compSize);
+											tb[0] = 'T'; tb[1] = 'X'; tb[2] = '6'; tb[3] = '4';
+											memcpy(&tb[4], &texId, 8);
+											tb[12] = tw & 0xff; tb[13] = (tw >> 8) & 0xff; tb[14] = th & 0xff; tb[15] = (th >> 8) & 0xff;
+											memcpy(&tb[16], &rgbaSize, 4); memcpy(&tb[20], comp, compSize);
+											maplecast_ws::broadcastBinary(tb.data(), (uint32_t)tb.size());
+										} else {
+											texId = 0; textured = false;   // couldn't decode -> draw untextured
+										}
 									}
 								}
 							}
-							// Per-TRIANGLE emit through flycast's INDEX BUFFER (rc.idx), not raw
-							// verts. After ta_parse(ctx,false), pp.first/.count index into
-							// rc.idx, which is a triangle STRIP with degenerate links;
-							// rc.idx[k] indexes rc.verts. We walk the strip (k, k+1, k+2),
-							// skip degenerate/link triangles (repeated index or zero screen
-							// area), and emit each real triangle's per-vertex (x,y,u,v,col).
-							// Winding doesn't matter (the client doesn't backface-cull), so we
-							// don't reorder odd/even tris. A merged poly can have count==0
-							// (its tris fold into the previous poly's idx range) — skipped by
-							// the count<3 guard at the top. Same path for op/pt/tr.
-							uint32_t iend = pp.first + pp.count;
-							if (iend > rcS.idx.size()) iend = (uint32_t)rcS.idx.size();
-							if (pp.first + 3 > iend) continue;
-							// blend = (SrcInstr<<4)|DstInstr (PVR TSP) — client maps to gl.blendFunc
-							// via the same SrcBlendGL/DstBlendGL tables flycast uses.
-							uint8_t blend = (uint8_t)((((tsp >> 29) & 7) << 4) | ((tsp >> 26) & 7));
-							// tspFlags: bit0-1 ShadInstr, bit2 IgnoreTexA, bit3 textured, bit4 punch-through.
-							uint8_t tspFlags = (uint8_t)(((tsp >> 6) & 3)
-							                   | (((tsp >> 20) & 1) << 2)
-							                   | ((textured ? 1u : 0u) << 3)
-							                   | ((listType == 1) ? (1u << 4) : 0u));
-							auto q16 = [](float f) { if (f < 0) f = 0; if (f > 1) f = 1; return (uint16_t)lroundf(f * 65535.f); };
+							// DE-INDEX: append rc.verts[rc.idx[k]] for k in [pp.first, iend),
+							// CONTIGUOUSLY. The result is a degenerate-linked strip in the
+							// output vertex buffer; firstVert/vertCount span it 1:1. The
+							// client feeds it to PVR2Renderer exactly like ta-parser output.
 							uint32_t nverts = (uint32_t)rcS.verts.size();
-							for (uint32_t k = pp.first; k + 2 < iend; k++) {
-								if (quadCount >= 16384) break;
-								uint32_t ia = rcS.idx[k], ib = rcS.idx[k + 1], ic = rcS.idx[k + 2];
-								// Skip restart/link triangles: repeated index or out-of-range.
-								if (ia == ib || ib == ic || ia == ic) continue;
-								if (ia >= nverts || ib >= nverts || ic >= nverts) continue;
-								Vertex& a = rcS.verts[ia];
-								Vertex& b = rcS.verts[ib];
-								Vertex& c = rcS.verts[ic];
-								// Skip degenerate triangles (zero screen area) — strip joints.
-								float ar = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
-								if (ar > -0.01f && ar < 0.01f) continue;
-								if (dgf && dbgShown[listType] < 4) {
-									fprintf(dgf, "  %s tri idx(%u,%u,%u) (%.0f,%.0f uv %.3f,%.3f)-(%.0f,%.0f)-(%.0f,%.0f) tex=%d\n",
-										listType==0?"OP":(listType==1?"PT":"TR"), ia, ib, ic,
-										a.x, a.y, a.u, a.v, b.x, b.y, c.x, c.y, textured?1:0);
-									dbgShown[listType]++;
-								}
-								put64(texId);
-								_stafBuf.push_back(blend);
-								_stafBuf.push_back((uint8_t)listType);
-								_stafBuf.push_back(tspFlags);
-								// Raw PVR poly state — the PVR2Renderer (web/webgpu/pvr2-renderer.mjs)
-								// consumes these verbatim and derives blend/shad/depth/cull itself
-								// (NO client-side re-derivation). tcw/tsp/pcw drive texture+blend+combine;
-								// isp drives depth-mode/cull/z-write. listType still routes op/pt/tr.
-								put32(tcw);
-								put32(tsp);
-								put32(pcw);
-								put32(pp.isp.full);
-								Vertex* vv[3] = { &a, &b, &c };
-								for (int kk = 0; kk < 3; kk++) {
-									put16((int16_t)lroundf(vv[kk]->x)); put16((int16_t)lroundf(vv[kk]->y));
-									putU16(q16(vv[kk]->u)); putU16(q16(vv[kk]->v));
-									// Vertex.col is [R,G,B,A] (ta_vtx.cpp Red=0,Green=1,Blue=2,Alpha=3).
-									_stafBuf.push_back(vv[kk]->col[0]); _stafBuf.push_back(vv[kk]->col[1]);
-									_stafBuf.push_back(vv[kk]->col[2]); _stafBuf.push_back(vv[kk]->col[3]);
-								}
-								quadCount++;
+							uint32_t firstVert = vertCount;
+							uint32_t emitted = 0;
+							for (uint32_t k = pp.first; k < iend; k++) {
+								uint32_t vi = rcS.idx[k];
+								if (vi >= nverts) vi = 0;   // guard; PVR2Renderer drops zero-area links
+								Vertex& v = rcS.verts[vi];
+								putF(v.x); putF(v.y); putF(v.z);
+								putF(v.u); putF(v.v);
+								// Vertex.col is [R,G,B,A]; spc is the offset color (same order).
+								_stafBuf.push_back(v.col[0]); _stafBuf.push_back(v.col[1]);
+								_stafBuf.push_back(v.col[2]); _stafBuf.push_back(v.col[3]);
+								_stafBuf.push_back(v.spc[0]); _stafBuf.push_back(v.spc[1]);
+								_stafBuf.push_back(v.spc[2]); _stafBuf.push_back(v.spc[3]);
+								vertCount++; emitted++;
+							}
+							if (emitted < 3) {  // nothing usable — roll back the verts we appended
+								_stafBuf.resize(_stafBuf.size() - (size_t)emitted * 28);
+								vertCount -= emitted;
+								continue;
+							}
+							// Poly record: firstVert vertCount texId tcw tsp pcw isp listType.
+							// !textured -> texId/tcw forced 0 so the client/texMgr draws untextured.
+							polyPut32(firstVert);
+							polyPut32(emitted);
+							polyPut64(textured ? texId : 0ull);
+							polyPut32(textured ? tcw : 0u);
+							polyPut32(tsp);
+							polyPut32(pcw);
+							polyPut32(pp.isp.full);
+							_stafPoly.push_back((uint8_t)listType);
+							polyCount++;
+							if (dgf && dbgShown[listType] < 4) {
+								Vertex& a = rcS.verts[rcS.idx[pp.first] < nverts ? rcS.idx[pp.first] : 0];
+								fprintf(dgf, "  %s poly firstVert=%u vc=%u (%.0f,%.0f uv %.3f,%.3f) tex=%d tcw=%08x\n",
+									listType==0?"OP":(listType==1?"PT":"TR"), firstVert, emitted,
+									a.x, a.y, a.u, a.v, textured?1:0, textured ? tcw : 0u);
+								dbgShown[listType]++;
 							}
 						}
 					};
 					emitList(rcS.global_param_op, 0);
 					emitList(rcS.global_param_pt, 1);
 					emitList(rcS.global_param_tr, 2);
-					memcpy(&_stafBuf[72], &quadCount, 4);   // triCount (u32 LE) at offset 72
+					// Append the staged poly records after the vertex region.
+					_stafBuf.insert(_stafBuf.end(), _stafPoly.begin(), _stafPoly.end());
+					memcpy(&_stafBuf[72], &vertCount, 4);   // vertCount (u32 LE) at offset 72
+					memcpy(&_stafBuf[76], &polyCount, 4);   // polyCount (u32 LE) at offset 76
 
 					// Finalize the gated geometry dump (per-list samples captured during emit).
-					if (dgf) { fprintf(dgf, "  -> emitted tris=%u bytes=%zu\n", quadCount, _stafBuf.size()); fclose(dgf); }
+					if (dgf) { fprintf(dgf, "  -> verts=%u polys=%u bytes=%zu\n", vertCount, polyCount, _stafBuf.size()); fclose(dgf); }
 					if (_stafDbg) _stafDbgCtr++;
-					
+
 					// zstd the whole STAF envelope (ZCST outer); client routes 'STAF' after decompress.
 					size_t compSize = 0; uint64_t cus = 0;
 					const uint8_t* comp = _compressor.compress(_stafBuf.data(), (uint32_t)_stafBuf.size(), compSize, cus);
