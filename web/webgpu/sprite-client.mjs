@@ -446,7 +446,13 @@ export class SpriteClient {
       // Hit-spark: a health drop = a hit landed -> spawn a spark on the defender's
       // upper body. (Guard against round-reset jumps and the first frame.)
       const hp = dv.getUint8(ci + 3);
-      if (this.sparksOn && this.inMatch && sl.active && sl._ph >= 0 && hp < sl._ph && (sl._ph - hp) <= 60) {
+      const hitNow = (this.inMatch && sl.active && sl._ph >= 0 && hp < sl._ph && (sl._ph - hp) <= 60);
+      // Hit-flash: a health drop = a hit landed. The on-body flash has no clean RAM
+      // field (live data: 0x12e/0x40 flat; the per-hit changes are undocumented), so
+      // we drive it off the health drop already on the wire — flash the victim's body
+      // for ~60ms on each hit. (Electric vs white would need the attacker's DamageType.)
+      if (hitNow) sl._flashUntil = now + 60;
+      if (this.sparksOn && hitNow) {
         const jx = (Math.random()*22 - 11), jy = (Math.random()*16 - 8);
         this.sparks.push({ x: nx + jx, y: ny - 55 + jy, t0: now, type: (sl._ph - hp) >= 14 ? 2 : 0 });
         if (this.sparks.length > 24) this.sparks.shift();
@@ -801,8 +807,10 @@ export class SpriteClient {
   // reusing the body draw-list geometry so it lands exactly on the sprite.
   drawFlash(ctx, drawList) {
     if (!drawList || !drawList.length) return;
+    const now = (typeof performance !== 'undefined') ? performance.now() : 0;
+    const lit = (sl) => sl && sl.active && (now < (sl._flashUntil || 0));   // hit-flash window (health drop)
     let any = false;
-    for (let s = 0; s < 6; s++) { const sl = this.slot[s]; if (sl.active && sl.paleffect) { any = true; break; } }
+    for (let s = 0; s < 6; s++) if (lit(this.slot[s])) { any = true; break; }
     if (!any) return;
     if (!this._flashTmp) this._flashTmp = document.createElement('canvas');
     const tmp = this._flashTmp, tctx = tmp.getContext('2d');
@@ -811,7 +819,7 @@ export class SpriteClient {
     for (const it of drawList) {
       if (it.slot == null) continue;
       const sl = this.slot[it.slot];
-      if (!sl || !sl.active || !sl.paleffect) continue;
+      if (!lit(sl)) continue;
       const c = this.chars[it.charId]; if (!c || !c.img || it.sw <= 0 || it.sh <= 0) continue;
       // Build a solid-tint silhouette of the sprite's alpha (keeps the body shape).
       tmp.width = it.sw; tmp.height = it.sh;
