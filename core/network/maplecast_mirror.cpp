@@ -967,7 +967,7 @@ static void wsClientRun(std::string host, int port)
 		// size bump on either side never silently drops the packet.
 		if (frame.size() >= 4 && frame[0] == 'G' && frame[1] == 'S'
 		    && frame[2] == 'T' && frame[3] == 'A') {
-			static const int LEGACY = 5 + 2+2+2+2 + 4+4+4 + 6*38;   // 253
+			static const int LEGACY = 5 + 2+2+2+2 + 4+4+4 + 6*49;   // 319 (GSTA enrich: per-char stride 38->49)
 			if ((int)frame.size() >= 4 + LEGACY) {
 				maplecast_gamestate::GameState gs;
 				maplecast_gamestate::deserialize(frame.data() + 4,
@@ -2325,7 +2325,12 @@ done_diff:
 				maplecast_gamestate::ObjectState objs[255];
 				int no = maplecast_gamestate::readObjects(objs, 255);
 				if (no > 0) {
-					uint8_t obuf[4 + 1 + 255 * 8];   // per obj: cid(1)+sid(2)+type(1)+x(2)+y(2)
+					// 9-byte stride: the trailing byte is an OBJS flags byte.
+					//   bit0 = is_effect (node+0x15c points into Effect Poly 0x0CED0000 ->
+					//          client routes to the effects atlas, not PL{cid}). bits1-7 reserved.
+					// The client auto-detects 9B vs the legacy 8B from the packet length, so
+					// an old client harmlessly ignores the trailing byte. (GSTA enrich step 1.)
+					uint8_t obuf[4 + 1 + 255 * 9];   // per obj: cid(1)+sid(2)+type(1)+x(2)+y(2)+flags(1)
 					obuf[0]='O'; obuf[1]='B'; obuf[2]='J'; obuf[3]='S'; obuf[4]=(uint8_t)no;
 					int oo = 5;
 					for (int i = 0; i < no; i++) {
@@ -2335,6 +2340,7 @@ done_diff:
 						obuf[oo++]=objs[i].type;
 						obuf[oo++]=objs[i].screen_x&0xff; obuf[oo++]=(objs[i].screen_x>>8)&0xff;
 						obuf[oo++]=objs[i].screen_y&0xff; obuf[oo++]=(objs[i].screen_y>>8)&0xff;
+						obuf[oo++]=(uint8_t)(objs[i].is_effect ? 0x01 : 0x00);   // OBJS flags
 					}
 					maplecast_ws::broadcastBinary(obuf, oo);
 

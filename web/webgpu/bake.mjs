@@ -79,7 +79,7 @@ export class SpriteBake {
     const B = 4;                       // payload starts after 'GSTA'
     this.inMatch = dv.getUint8(B+0);
     for (let s=0; s<2; s++){
-      const ci = B + 25 + s*38;        // char block: 25-byte global header + 38*slot
+      const ci = B + 25 + s*49;        // char block: 25-byte global header + 49*slot (GSTA enrich)
       const sl = this.slot[s];
       sl.active    = dv.getUint8(ci+0);
       sl.char_id   = dv.getUint8(ci+1);

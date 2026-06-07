@@ -8,9 +8,10 @@
 //
 // Input is the same GSTA broadcast the bake harness consumes:
 //   'GSTA'(4) + serialized GameState (wire layout = gamestate.cpp serialize()):
-//   25-byte global header, then 6 * 38-byte character blocks. We read the two
-//   point characters (render slots 0,1) — active, char_id, facing, palette,
-//   screen_x/y, sprite_id.
+//   25-byte global header, then 6 * 49-byte character blocks (stride bumped 38->49
+//   by the GSTA enrich: +38 scaleX(f32) +42 scaleY(f32) +46 pal12d +47 pal12e
+//   +48 overlay1a4). We read the two point characters (render slots 0,1) — active,
+//   char_id, facing, palette, screen_x/y, sprite_id, plus the enrich fields.
 //
 // Canvas2D on purpose: fastest path to a visible side-by-side test, fully
 // decoupled from the WebGPU TA renderer. A WebGPU port comes later for the
@@ -361,21 +362,24 @@ export class SpriteClient {
   }
   onOBJS(d) {
     const n = d[4]; const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
-    // Detect per-object stride: 9B if (len-5) == n*9, else 8B. Blend byte present iff 9B.
+    // Detect per-object stride: 9B if (len-5) == n*9, else legacy 8B. The 9th byte is
+    // the OBJS flags byte (GSTA enrich step 1): bit0 = is_effect (route to the effects
+    // atlas, not PL{cid}); bits1-7 reserved (formerly spec'd as a blend nibble — never
+    // emitted, superseded by this flags byte). Old 8B servers omit it -> isEffect 0.
     const body = d.length - 5;
     const stride = (n > 0 && body === n * 9) ? 9 : 8;
-    const hasBlend = stride === 9;
+    const hasFlags = stride === 9;
     const objs = []; let o = 5;
     for (let i = 0; i < n && o + stride <= d.length; i++) {
       const raw = dv.getUint16(o+1, true);   // sprite_id with 0x8000 hflip bit
       const ob = { cid: d[o], sid: raw & 0x7fff, type: d[o+3],
                    xflip: (raw & 0x8000) ? 1 : 0,   // object's OWN flip (node+0x130) — NOT owner facing
-                   x: dv.getInt16(o+4, true), y: dv.getInt16(o+6, true) };
-      if (hasBlend) {
-        const b = d[o+8];
-        ob.blend = b;                         // raw packed (src<<4|dst)
-        ob.blendSrc = (b >> 4) & 0xf;
-        ob.blendDst = b & 0xf;
+                   x: dv.getInt16(o+4, true), y: dv.getInt16(o+6, true),
+                   isEffect: 0 };
+      if (hasFlags) {
+        const f = d[o+8];
+        ob.flags = f;
+        ob.isEffect = (f & 0x01) ? 1 : 0;     // node+0x15c in Effect Poly 0x0CED0000
       }
       objs.push(ob);
       o += stride;
@@ -534,7 +538,7 @@ export class SpriteClient {
     const dfr = (this._lastFc != null) ? (fc - this._lastFc) : 0; this._lastFc = fc;
     const frameDt = (dfr >= 1 && dfr <= 8) ? dfr * 16.667 : 0;   // ms of game time since last state
     for (let s = 0; s < 6; s++) {
-      const ci = B + 25 + s * 38;      // 25-byte global header + 38*slot
+      const ci = B + 25 + s * 49;      // 25-byte global header + 49*slot (GSTA enrich)
       const sl = this.slot[s];
       const nx = dv.getFloat32(ci + 16, true), ny = dv.getFloat32(ci + 20, true);
       if (sl.active && frameDt > 0) {
@@ -568,6 +572,15 @@ export class SpriteClient {
       sl._ph = sl.active ? hp : -1;
       sl.health = hp;
       sl.red_health = dv.getUint8(ci + 4);    // trailing/chip layer (GSTA char +4)
+      // GSTA enrich (step 1) — made AVAILABLE here; buildAssemblyDrawList consumes
+      // them in step 2. scaleX/Y = per-char/super dynamic zoom (char+0x50/0x54);
+      // pal12d/pal12e = per-part palette row + live hit-flash (char+0x12d/0x12e);
+      // overlay1a4 = super/aura overlay class (char+0x1a4).
+      sl.scaleX     = dv.getFloat32(ci + 38, true);
+      sl.scaleY     = dv.getFloat32(ci + 42, true);
+      sl.pal12d     = dv.getUint8(ci + 46);
+      sl.pal12e     = dv.getUint8(ci + 47);
+      sl.overlay1a4 = dv.getUint8(ci + 48);
       if (sl.active && hp > sl._maxhp) sl._maxhp = hp;   // round-start full = bar max
     }
     // Exact size from state: camera zoom = |Δscreen_x / Δpos_x| between two
@@ -1099,17 +1112,25 @@ export class SpriteClient {
 // FX-BLEND WIRE BYTE — spec (the "merge" for pixel-exact supers/energy)
 // =============================================================================
 //
-// The GSTA OBJS packet gains an OPTIONAL trailing byte per pool object, so fx /
-// super / energy objects can request the exact PVR blend the game used. The
+// The GSTA OBJS packet gains an OPTIONAL trailing flags byte per pool object. The
 // client auto-detects the stride from the packet length — no version flag — so an
 // old 8B server and a new 9B server both work against the same client.
 //
 //   OBJS packet:  'OBJS'(4) + count(1) + count × OBJ
 //   OBJ (legacy): cid(1) + sprite_id(2 LE) + type(1) + x(i16 LE) + y(i16 LE)        = 8 B
-//   OBJ (blend):  cid(1) + sprite_id(2 LE) + type(1) + x(i16 LE) + y(i16 LE) + blend(1) = 9 B
+//   OBJ (flags):  cid(1) + sprite_id(2 LE) + type(1) + x(i16 LE) + y(i16 LE) + flags(1) = 9 B
 //
 //   Stride is 9 iff (packetLen - 5) == count*9, else 8. (count*8 and count*9 can
 //   only collide when count==0, which carries no objects — safe.)
+//
+// flags byte (GSTA enrich step 1):
+//   bit0 = is_effect — the node's GFX base (node+0x15c) points into the shared
+//          "Effect Poly" bank 0x0CED0000; the client routes this object to the
+//          effects atlas, NOT the PL{cid} character atlas. bits1-7 reserved.
+//
+// (Historically this 9th byte was spec'd as a PVR blend nibble (src<<4|dst); that
+// was never emitted by the server. The reference table below is retained for the
+// eventual blend path, which would move to a 10th byte.)
 //
 // blend byte = (srcFactor << 4) | dstFactor, the PVR TSP instruction word's
 // SRC_ALPHA_INSTR (bits 29-31) and DST_ALPHA_INSTR (bits 26-28), each a 3-bit

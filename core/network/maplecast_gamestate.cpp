@@ -4,6 +4,13 @@
 */
 #include "maplecast_gamestate.h"
 #include "hw/sh4/sh4_mem.h"
+#include "types.h"          // RAM_SIZE (settings.platform.ram_size)
+#include <vector>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cstdarg>
+#include <algorithm>
 
 // Gamepad globals — authoritative input state read by the game at vblank
 extern u32 kcode[4];
@@ -44,6 +51,12 @@ static const uint32_t OFF_SPECIAL_MOVE    = 0x1E9;
 static const uint32_t OFF_ASSIST_TYPE     = 0x4C9;
 static const uint32_t OFF_PALETTE         = 0x52D;
 static const uint32_t OFF_ANIM_POINTER    = 0x168;  // pointer to animation table
+// GSTA enrich (reconstruct-from-state, step 1) — quad-emitter / palette-handler inputs
+static const uint32_t OFF_SPRITE_SCALE_X  = 0x050;  // float (CONFIRMED spec §2,§6 #1)
+static const uint32_t OFF_SPRITE_SCALE_Y  = 0x054;  // float
+static const uint32_t OFF_PAL_12D         = 0x12D;  // u8: per-part palette row (CONFIRMED §2)
+static const uint32_t OFF_PAL_12E         = 0x12E;  // u8: live hit-flash / palette-effect (CONFIRMED §2,§3)
+static const uint32_t OFF_OVERLAY_1A4     = 0x1A4;  // u8: super/aura overlay class (CONFIRMED §3 loc_8c035162)
 // Hidden state discovered by RAM autopsy (rend_diff v2)
 static const uint32_t OFF_SUB_ANIM_PHASE  = 0x502;  // sub-animation phase counter
 static const uint32_t OFF_CHAR_LINK_PTR   = 0x00C;  // linked list pointer between chars
@@ -291,6 +304,8 @@ static int readObjectsWalk(ObjectState* out, int maxObjs)
 					out[n].category   = (uint8_t)addrspace::read8(node + 0x03);  // real render layer byte
 					out[n].xflip      = (uint8_t)(addrspace::read16(node + 0x130) ? 1 : 0);
 					out[n].owner_slot = (uint8_t)(slot < 0 ? 0 : slot);
+					{ uint32_t gb = addrspace::read32(node + OFF_GFX00_PTR) & 0x0FFFFFFF;
+					  out[n].is_effect = (gb >= 0x0CED0000 && gb < 0x0CEE0000) ? 1 : 0; }
 					n++;
 				}
 			}
@@ -347,6 +362,12 @@ static int readAllDrawn(ObjectState* out, int maxObjs)
 			int slot = -1;
 			uint32_t oA = addrspace::read32(node + 0x18), oB = addrspace::read32(node + 0x80);
 			for (int s = 0; s < 6; s++) if (oA == CHAR_BASE[s] || oB == CHAR_BASE[s]) { slot = s; break; }
+			// Effect-routing flag (GSTA enrich): the node's GFX base (node+0x15c) points
+			// into the shared "Effect Poly" bank [0x0CED0000,0x0CEE0000) => route to the
+			// effects atlas, not PL{cid}. Both the 0x0C.. (mem_b) and 0x8C.. aliases match.
+			uint32_t gfxBase = addrspace::read32(node + OFF_GFX00_PTR);
+			uint32_t gfxLow  = gfxBase & 0x0FFFFFFF;   // strip cached/uncached region nibble
+			uint8_t  isEfx   = (gfxLow >= 0x0CED0000 && gfxLow < 0x0CEE0000) ? 1 : 0;
 			nPass++;
 			if (n >= maxObjs) continue;
 			out[n].owner_cid  = (uint8_t)(slot >= 0 ? addrspace::read8(CHAR_BASE[slot] + OFF_CHAR_ID) : 0);
@@ -357,6 +378,7 @@ static int readAllDrawn(ObjectState* out, int maxObjs)
 			out[n].category   = (uint8_t)addrspace::read8(node + 0x03);
 			out[n].xflip      = (uint8_t)(addrspace::read16(node + 0x130) ? 1 : 0);
 			out[n].owner_slot = (uint8_t)(slot < 0 ? 0xFF : slot);
+			out[n].is_effect  = isEfx;
 			n++;
 		}
 	}
@@ -507,6 +529,8 @@ int readObjects(ObjectState* out, int maxObjs)
 		out[n].category  = (uint8_t)addrspace::read8(a + 0x0E);   // = type (render layer hint)
 		out[n].xflip     = (uint8_t)(addrspace::read16(a + 0x130) ? 1 : 0);
 		{ int os = 0; for (int s = 0; s < 6; s++) if (v == CHAR_BASE[s]) { os = s; break; } out[n].owner_slot = (uint8_t)os; }
+		{ uint32_t gb = addrspace::read32(a + OFF_GFX00_PTR) & 0x0FFFFFFF;
+		  out[n].is_effect = (gb >= 0x0CED0000 && gb < 0x0CEE0000) ? 1 : 0; }
 		n++;
 	}
 	// Truncation guard — NEVER silent. The pool is finite, so a cap >= the pool's
@@ -631,6 +655,7 @@ int serializeObjects(const ObjectState* objs, int n, uint8_t* buf, int maxLen)
 		buf[o++] = (uint8_t)((s.screen_x >> 8) & 0xff);
 		buf[o++] = (uint8_t)(s.screen_y & 0xff);
 		buf[o++] = (uint8_t)((s.screen_y >> 8) & 0xff);
+		buf[o++] = s.is_effect;
 	}
 	return o;
 }
@@ -651,6 +676,7 @@ int deserializeObjects(const uint8_t* buf, int len, ObjectState* out, int maxObj
 		s.owner_slot= buf[o++];
 		s.screen_x  = (int16_t)(buf[o] | (buf[o+1] << 8)); o += 2;
 		s.screen_y  = (int16_t)(buf[o] | (buf[o+1] << 8)); o += 2;
+		s.is_effect = buf[o++];
 		got++;
 	}
 	return got;
@@ -1209,6 +1235,297 @@ static void partDump(const GameState& state) {
 	if (lg) { fprintf(lg, "\ndumped %d parts this frame\n", dumpedTotal); fclose(lg); }
 }
 
+// =============================================================================
+// CHURN INSTRUMENT (gated MAPLECAST_CHURN). Answers: after the SH4 computes a
+// frame, how many bytes / which fields of SH4 main RAM actually change per
+// frame in-match? This is the information-content floor for a reconstruct-from-
+// state renderer (vs shipping pixels). Read-only; prod-safe (default OFF).
+//
+// Approach: keep a shadow copy of the full 16 MB SH4 main RAM (mem_b, the
+// 0x0C000000 / 0x8C000000 region; direct pointer via GetMemPtr). Each frame
+// byte-diff live vs shadow. Aggregate over 60 frames (1 s) and report to
+// /dev/shm/mc_churn.log + stdout:
+//   1. total changed bytes/frame (avg/min/max) across all 16 MB
+//   2. histogram by 64 KB region — top changed regions, LABELED via the memory
+//      map (char structs @0x8C268000 pg616, globals @0x8C289000 pg649, object
+//      pool @0x8C26A000, frame_ctr @0x8C3496B0, TA/render scratch, audio, …)
+//   3. per-OFFSET change-frequency map within the 6 char structs (base 0x..340,
+//      stride 0x5A4): which struct offsets the SH4 updates, how often; flag
+//      HIGH-churn offsets NOT already on the 262-byte GSTA wire (the gaps)
+//   4. split "logical game-state" churn (char structs + globals — ship-worthy)
+//      from "render-list / TA-build / scratch" churn (the rest — reconstructed)
+// =============================================================================
+namespace {
+
+// DC main-RAM offset (from 0x0C000000) of a 0x8C... address.
+static inline uint32_t ramOff(uint32_t dcAddr) { return dcAddr & 0x00FFFFFF; }
+
+// Label a 64 KB region index (region = byteOffset >> 16) per the MVC2 memory map.
+// dcBase of region r = 0x8C000000 + (r << 16).
+static const char* regionLabel(int region)
+{
+	uint32_t base = 0x8C000000u + ((uint32_t)region << 16);
+	uint32_t end  = base + 0x10000u;
+	// Char structs span 0x8C268340..~0x8C26A518 (6 * 0x5A4 interleaved) -> page 0x26
+	if (base <= 0x8C268000u && 0x8C268000u < end) return "char-structs(pg616 0x..268000)";
+	if (base <= 0x8C26A000u && 0x8C26A000u < end) return "object-pool(0x..26A000)";
+	if (region == 0x28)                           return "globals+pool(pg649 0x..289000 in_match/meter/combo)";
+	if (region == 0x34)                           return "frame_ctr-region(0x..3496B0)";
+	if (region == 0x1F)                           return "camera/stage-anim(0x..1F9xxx)";
+	// Heuristic bands (labels are best-effort; the numbers are authoritative).
+	if (region <= 0x01)                           return "boot/IP.BIN/sys-lowram";
+	if (region >= 0x02 && region <= 0x0F)         return "code(EntryPoint 0x..010000+)";
+	if (region >= 0x10 && region <= 0x25)         return "engine-data/heaps";
+	if (region >= 0x26 && region <= 0x2A)         return "game-state(structs+globals+pool)";
+	if (region >= 0x2B && region <= 0x5F)         return "decoded-assets/work";
+	if (region >= 0xC0 && region <= 0xCF)         return "render-scratch/poly-build";
+	if (region >= 0xD0 && region <= 0xDF)         return "audio/AICA-work";
+	return "other/scratch";
+}
+
+struct ChurnAgg {
+	bool     en = false;
+	bool     init = false;
+	uint8_t* live = nullptr;          // direct mem_b pointer (0x0C000000)
+	uint32_t ramSize = 0;
+	std::vector<uint8_t> shadow;
+	// per-frame totals over the window
+	int      frames = 0;
+	uint64_t totalChanged = 0;        // sum of changed bytes across window
+	uint32_t minFrame = 0xFFFFFFFFu, maxFrame = 0;
+	// per-64KB-region: changed bytes accumulated over the window
+	std::vector<uint64_t> regionBytes; // 256 entries
+	// per-char-struct OFFSET change frequency: union across the 6 slots, counted
+	// per-frame (a byte that changed in ANY active slot at that offset counts once).
+	// stride 0x5A4 = 1444 offsets.
+	std::vector<uint32_t> offChanged;  // [0x5A4] frame-count where offset changed
+	uint64_t logicalChanged = 0;       // bytes in char-structs+globals regions
+	uint64_t restChanged = 0;          // everything else
+};
+
+static ChurnAgg g_churn;
+
+// The 262-byte GSTA wire offsets within a char struct (for gap-flagging).
+// Source: readGameState() above. byte = true if that struct offset is shipped.
+static void buildGstaMask(bool* m /*[0x5A4]*/)
+{
+	memset(m, 0, 0x5A4);
+	auto mark = [&](uint32_t off, int len){ for (int i=0;i<len && off+i<0x5A4;i++) m[off+i]=true; };
+	mark(0x000,1); mark(0x001,1);              // active, char_id
+	mark(0x034,4); mark(0x038,4);              // pos_x, pos_y
+	mark(0x0E0,4); mark(0x0E4,4);              // screen_x, screen_y
+	mark(0x05C,4); mark(0x060,4);              // vel_x, vel_y
+	mark(0x110,1);                             // facing
+	mark(0x144,2);                             // sprite_id
+	mark(0x1D0,2);                             // animation_state
+	mark(0x142,2);                             // anim_timer
+	mark(0x420,1); mark(0x424,1);              // health, red_health
+	mark(0x1E9,1);                             // special_move_id
+	mark(0x4C9,1);                             // assist_type
+	mark(0x52D,1);                             // palette_id
+	mark(0x168,4);                             // anim_pointer
+}
+
+// Name a char-struct offset for the report (best-effort; from gamestate.h +
+// pl_mem.asm / mvc2-sh4-re-expert KB). Only the notable ones are named.
+static const char* offName(uint32_t off)
+{
+	switch (off) {
+		case 0x000: return "active";          case 0x001: return "character_id";
+		case 0x00C: return "char_link_ptr";
+		case 0x025: return "color/pl_palid_match";
+		case 0x034: return "pos_x";           case 0x038: return "pos_y";
+		case 0x040: return "paleffect";
+		case 0x050: return "x_sprite_scale";  case 0x054: return "y_sprite_scale";
+		case 0x05C: return "vel_x";           case 0x060: return "vel_y";
+		case 0x0E0: return "screen_x";        case 0x0E4: return "screen_y";
+		case 0x110: return "facing";
+		case 0x12C: return "visible_gate";
+		case 0x12E: return "palette-effect-sel(hit-flash)";
+		case 0x130: return "xflip_copy";      case 0x134: return "xflip_copy2";
+		case 0x142: return "anim_timer";      case 0x144: return "sprite_id";
+		case 0x151: return "RenderExtra";
+		case 0x154: return "current_cell_data(ptr)";
+		case 0x158: return "anim_group";
+		case 0x15C: return "Dat_GFX1(ptr)";   case 0x160: return "Dat_GFX2(ptr)";
+		case 0x164: return "Dat_Pal(ptr)";    case 0x168: return "animations(ptr)";
+		case 0x1D0: return "animation_state";
+		case 0x1D2: return "xflip";           case 0x1D3: return "walk_dir";
+		case 0x1E9: return "special_move_id";
+		case 0x1F9: return "stance";
+		case 0x275: return "hitstun_flash(0xff in hitstun)";
+		case 0x420: return "health";          case 0x424: return "red_health";
+		case 0x4C9: return "assist_type";
+		case 0x502: return "sub_anim_phase";
+		case 0x52D: return "palette";
+		default:    return "";
+	}
+}
+
+static void churnReport(const GameState& state)
+{
+	ChurnAgg& C = g_churn;
+	FILE* lg = fopen("/dev/shm/mc_churn.log", "a");
+	auto out = [&](const char* fmt, ...) {
+		va_list ap; va_start(ap, fmt);
+		va_list ap2; va_copy(ap2, ap);
+		vprintf(fmt, ap);
+		if (lg) vfprintf(lg, fmt, ap2);
+		va_end(ap2); va_end(ap);
+	};
+	double favg = C.frames ? (double)C.totalChanged / C.frames : 0.0;
+	out("\n==================== MAPLECAST_CHURN  (in_match=%d frame=%u, window=%d frames) ====================\n",
+	    state.in_match, state.frame_counter, C.frames);
+	out("[1] TOTAL changed bytes/frame over 16MB:  avg=%.0f  min=%u  max=%u\n",
+	    favg, (C.minFrame==0xFFFFFFFFu?0:C.minFrame), C.maxFrame);
+	out("    -> reconstruct-from-state FLOOR (if we shipped EVERY changed byte raw): %.0f B/frame * 60 = %.1f KB/s = %.2f Mbps\n",
+	    favg, favg*60.0/1024.0, favg*60.0*8.0/1e6);
+
+	// [4] logical vs rest split
+	double logAvg  = C.frames ? (double)C.logicalChanged / C.frames : 0.0;
+	double restAvg = C.frames ? (double)C.restChanged    / C.frames : 0.0;
+	out("[4] LOGICAL game-state churn (char-structs pg616 + globals/pool pg649): avg=%.0f B/frame  (%.2f KB/s, %.3f Mbps)\n",
+	    logAvg, logAvg*60.0/1024.0, logAvg*60.0*8.0/1e6);
+	out("    RENDER-LIST/SCRATCH churn (everything else — reconstructed, NOT shipped): avg=%.0f B/frame  (%.2f KB/s)\n",
+	    restAvg, restAvg*60.0/1024.0);
+
+	// [2] region histogram — top 12 by changed bytes
+	out("[2] TOP CHANGED 64KB REGIONS (avg bytes/frame):\n");
+	std::vector<int> idx(C.regionBytes.size());
+	for (size_t i = 0; i < idx.size(); i++) idx[i] = (int)i;
+	std::sort(idx.begin(), idx.end(), [&](int a, int b){ return C.regionBytes[a] > C.regionBytes[b]; });
+	for (int k = 0; k < 12 && k < (int)idx.size(); k++) {
+		int r = idx[k];
+		if (C.regionBytes[r] == 0) break;
+		double avg = (double)C.regionBytes[r] / (C.frames ? C.frames : 1);
+		out("    region 0x%02X  base=0x%08X  avg=%8.1f B/frame  %s\n",
+		    r, 0x8C000000u + ((uint32_t)r << 16), avg, regionLabel(r));
+	}
+
+	// [3] char-struct per-offset change-frequency map + GSTA gap flags
+	bool gsta[0x5A4]; buildGstaMask(gsta);
+	out("[3] CHAR-STRUCT changed offsets (union over 6 slots; %% = frames-changed/%d). "
+	    "[*]=on GSTA wire, [GAP]=NOT shipped:\n", C.frames);
+	// collect offsets that changed at least once
+	std::vector<int> chOff;
+	for (uint32_t o = 0; o < 0x5A4; o++) if (C.offChanged[o]) chOff.push_back((int)o);
+	std::sort(chOff.begin(), chOff.end(), [&](int a, int b){ return C.offChanged[a] > C.offChanged[b]; });
+	int gapHi = 0;
+	for (int o : chOff) {
+		double pct = C.frames ? 100.0 * C.offChanged[o] / C.frames : 0.0;
+		bool shipped = gsta[o];
+		const char* nm = offName((uint32_t)o);
+		bool gap = !shipped && pct >= 25.0;   // HIGH-churn & not shipped
+		if (gap) gapHi++;
+		out("    +0x%03X  %5.1f%%  %s  %s%s\n", o, pct,
+		    shipped ? "[*]  " : "[GAP]",
+		    nm[0] ? nm : "(unknown)",
+		    gap ? "   <== HIGH-CHURN GAP" : "");
+	}
+	out("    -> %d HIGH-churn (>=25%%) char-struct offsets are NOT on the 262B GSTA wire.\n", gapHi);
+	out("================================================================================================\n");
+	if (lg) fclose(lg);
+	fflush(stdout);
+}
+
+} // anonymous namespace
+
+// Per-frame churn hook. Cheap when disabled. Diffs full 16MB mem_b vs a shadow.
+static void churnDump(const GameState& state)
+{
+	ChurnAgg& C = g_churn;
+	if (!C.init) {
+		C.en = (getenv("MAPLECAST_CHURN") != nullptr);
+		C.init = true;
+		if (C.en) {
+			C.ramSize = RAM_SIZE;                      // 16 MB on Dreamcast
+			C.live = GetMemPtr(0x0C000000, C.ramSize); // contiguous mem_b base
+			if (!C.live || C.ramSize == 0) { C.en = false; }
+			else {
+				C.shadow.assign(C.live, C.live + C.ramSize);
+				C.regionBytes.assign((C.ramSize >> 16) + 1, 0);
+				C.offChanged.assign(0x5A4, 0);
+				// truncate the log on first init
+				FILE* lg = fopen("/dev/shm/mc_churn.log", "w");
+				if (lg) { fprintf(lg, "# MapleCast churn instrument — full 16MB mem_b per-frame diff\n"); fclose(lg); }
+				printf("[CHURN] enabled: ramSize=%u live=%p — diffing full main RAM each frame\n",
+				       C.ramSize, (void*)C.live);
+				fflush(stdout);
+			}
+		}
+	}
+	if (!C.en) return;
+
+	// Only measure in-match (the question is "in-match per-frame churn"). When
+	// out of match we still resync the shadow so the first in-match frame isn't
+	// a giant spurious delta.
+	uint8_t* live = C.live;
+	const uint32_t N = C.ramSize;
+
+	if (!state.in_match) {
+		memcpy(C.shadow.data(), live, N);
+		return;
+	}
+
+	// --- byte diff: full RAM, region histogram, logical/rest split ---
+	uint32_t frameChanged = 0;
+	uint8_t* shadow = C.shadow.data();
+	for (uint32_t r = 0; r < N; r += 0x10000) {
+		uint32_t end = std::min(r + 0x10000u, N);
+		uint32_t regChanged = 0;
+		for (uint32_t i = r; i < end; i++) {
+			if (live[i] != shadow[i]) { regChanged++; shadow[i] = live[i]; }
+		}
+		if (regChanged) {
+			int region = (int)(r >> 16);
+			C.regionBytes[region] += regChanged;
+			frameChanged += regChanged;
+			// logical = char-structs (region 0x26) + globals/pool (region 0x28).
+			// 0x27 is the object-pool tail (0x..27xxxx) — engine-owned, treat as rest.
+			if (region == 0x26 || region == 0x28) C.logicalChanged += regChanged;
+			else                                  C.restChanged    += regChanged;
+		}
+	}
+
+	// --- char-struct per-offset change map (union over the 6 active slots) ---
+	// We already advanced the shadow above, so recompute the per-offset signal
+	// from the GSTA-read live bytes vs a small dedicated per-slot shadow.
+	{
+		static uint8_t slotShadow[6][0x5A4];
+		static bool    slotOk = false;
+		for (int s = 0; s < 6; s++) {
+			uint32_t baseOff = ramOff(CHAR_BASE[s]);
+			if (baseOff + 0x5A4 > N) continue;
+			uint8_t active = live[baseOff + 0x000];
+			for (uint32_t o = 0; o < 0x5A4; o++) {
+				uint8_t cur = live[baseOff + o];
+				if (slotOk && active && cur != slotShadow[s][o])
+					C.offChanged[o]++;   // counted once per frame per offset per slot
+				slotShadow[s][o] = cur;
+			}
+		}
+		slotOk = true;
+		// NOTE: offChanged counts per-slot frame-changes; to keep %<=100 in the
+		// report we normalize by (frames) which over-counts if >1 slot changes the
+		// same offset in a frame. Acceptable: it ranks WHICH offsets are hot.
+	}
+
+	uint32_t fc = frameChanged;
+	C.totalChanged += fc;
+	if (fc < C.minFrame) C.minFrame = fc;
+	if (fc > C.maxFrame) C.maxFrame = fc;
+	C.frames++;
+
+	if (C.frames >= 60) {
+		churnReport(state);
+		// reset the window accumulators (keep the shadow warm)
+		C.frames = 0; C.totalChanged = 0; C.minFrame = 0xFFFFFFFFu; C.maxFrame = 0;
+		C.logicalChanged = 0; C.restChanged = 0;
+		std::fill(C.regionBytes.begin(), C.regionBytes.end(), 0);
+		std::fill(C.offChanged.begin(), C.offChanged.end(), 0);
+	}
+}
+
 void readGameState(GameState& state)
 {
 	// Global state
@@ -1250,6 +1567,12 @@ void readGameState(GameState& state)
 		c.assist_type     = (uint8_t)addrspace::read8(base + OFF_ASSIST_TYPE);
 		c.palette_id      = (uint8_t)addrspace::read8(base + OFF_PALETTE);
 		c.anim_pointer    = addrspace::read32(base + OFF_ANIM_POINTER);
+		// GSTA enrich (step 1): quad-emitter / palette-handler inputs
+		c.sprite_scale_x  = readFloat(base + OFF_SPRITE_SCALE_X);
+		c.sprite_scale_y  = readFloat(base + OFF_SPRITE_SCALE_Y);
+		c.pal_12d         = (uint8_t)addrspace::read8(base + OFF_PAL_12D);
+		c.pal_12e         = (uint8_t)addrspace::read8(base + OFF_PAL_12E);
+		c.overlay_1a4     = (uint8_t)addrspace::read8(base + OFF_OVERLAY_1A4);
 	}
 
 	// Raw input state — read from the SAME kcode[]/lt[]/rt[] globals the
@@ -1266,6 +1589,7 @@ void readGameState(GameState& state)
 	ptrDump(state);
 	partDump(state);     // read-only part-atlas capture probe (MAPLECAST_PARTDUMP=1)
 	effectsDump(state);  // read-only Effect Poly capture probe (MAPLECAST_DUMP_EFFECTS=1)
+	churnDump(state);    // read-only full-RAM per-frame churn instrument (MAPLECAST_CHURN=1)
 }
 
 // Write game state INTO Flycast's emulated RAM — exact reverse of readGameState
@@ -1309,6 +1633,12 @@ void writeGameState(const GameState& state)
 		addrspace::write8(base + OFF_SPECIAL_MOVE, c.special_move_id);
 		addrspace::write8(base + OFF_ASSIST_TYPE, c.assist_type);
 		addrspace::write8(base + OFF_PALETTE, c.palette_id);
+		// GSTA enrich (step 1): write back the same RAM offsets readGameState reads.
+		writeFloat(base + OFF_SPRITE_SCALE_X, c.sprite_scale_x);
+		writeFloat(base + OFF_SPRITE_SCALE_Y, c.sprite_scale_y);
+		addrspace::write8(base + OFF_PAL_12D, c.pal_12d);
+		addrspace::write8(base + OFF_PAL_12E, c.pal_12e);
+		addrspace::write8(base + OFF_OVERLAY_1A4, c.overlay_1a4);
 	}
 }
 
@@ -1338,7 +1668,7 @@ int serialize(const GameState& state, uint8_t* buf, int maxLen)
 	writeF32(buf, off, state.camera_y);      // 17
 	writeU32(buf, off, state.frame_counter); // 21
 
-	// 6 characters × 38 bytes each (228 bytes) starting at offset 25
+	// 6 characters × 49 bytes each (294 bytes) starting at offset 25
 	for (int i = 0; i < 6; i++)
 	{
 		const CharacterState& c = state.chars[i];
@@ -1359,7 +1689,13 @@ int serialize(const GameState& state, uint8_t* buf, int maxLen)
 		writeU16(buf, off, c.sprite_id);       // +32
 		writeU16(buf, off, c.animation_state); // +34
 		writeU16(buf, off, c.anim_timer);      // +36
-		// total: 38 bytes per character
+		// GSTA enrich (step 1) — appended so existing offsets +0..+37 are unchanged
+		writeF32(buf, off, c.sprite_scale_x);  // +38
+		writeF32(buf, off, c.sprite_scale_y);  // +42
+		writeU8(buf, off, c.pal_12d);          // +46
+		writeU8(buf, off, c.pal_12e);          // +47
+		writeU8(buf, off, c.overlay_1a4);      // +48
+		// total: 49 bytes per character
 	}
 
 	// Raw input state (8 bytes) — appended AFTER the 253-byte legacy block
@@ -1385,9 +1721,9 @@ static float readBufF32(const uint8_t* buf, int& off) { float v; memcpy(&v, buf 
 
 void deserialize(const uint8_t* buf, int len, GameState& state)
 {
-	// 253 = the legacy char+global block. Raw input (+8) and stage_anim (+1)
-	// are optional trailers so older/newer packets both parse.
-	static const int LEGACY_SIZE = 5 + 2+2+2+2 + 4+4+4 + 6*38;  // 253
+	// 319 = the char+global block (per-char stride 49 after GSTA enrich). Raw input
+	// (+8) and stage_anim (+1) are optional trailers so the trailer parse stays robust.
+	static const int LEGACY_SIZE = 5 + 2+2+2+2 + 4+4+4 + 6*49;  // 319
 	if (len < LEGACY_SIZE) return;
 	int off = 0;
 
@@ -1424,6 +1760,12 @@ void deserialize(const uint8_t* buf, int len, GameState& state)
 		c.sprite_id       = readBufU16(buf, off);
 		c.animation_state = readBufU16(buf, off);
 		c.anim_timer      = readBufU16(buf, off);
+		// GSTA enrich (step 1) — exact reverse of serialize's appended block
+		c.sprite_scale_x  = readBufF32(buf, off);
+		c.sprite_scale_y  = readBufF32(buf, off);
+		c.pal_12d         = readBufU8(buf, off);
+		c.pal_12e         = readBufU8(buf, off);
+		c.overlay_1a4     = readBufU8(buf, off);
 	}
 
 	// Raw input state (8 bytes) — read if present (new format)

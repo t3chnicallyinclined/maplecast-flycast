@@ -30,6 +30,13 @@ struct CharacterState {
 	uint32_t anim_pointer;      // pointer to animation table in DC RAM
 	// RAM autopsy found +0x502 (sub_anim_phase) and +0x00C (char_link_ptr)
 	// but both are frame-deterministic — they sync naturally between instances
+	// --- GSTA enrich (reconstruct-from-state, step 1; docs/MVC2-RECONSTRUCTION-SPEC.md §6) ---
+	// The fields the ported quad emitter loc_8c033e90 + palette handler loc_8c035162 fold in.
+	float    sprite_scale_x;    // char+0x50 (f32) — per-char/super dynamic zoom (CONFIRMED §6 #1)
+	float    sprite_scale_y;    // char+0x54 (f32)
+	uint8_t  pal_12d;           // char+0x12d (u8) — per-part palette row select (CONFIRMED §2)
+	uint8_t  pal_12e;           // char+0x12e (u8) — live hit-flash / palette-effect (CONFIRMED §2,§3)
+	uint8_t  overlay_1a4;       // char+0x1a4 (u8) — super/aura overlay class (CONFIRMED §3 loc_8c035162)
 };
 
 struct GameState {
@@ -72,15 +79,16 @@ int serialize(const GameState& state, uint8_t* buf, int maxLen);
 // Deserialize from network bytes back to GameState
 void deserialize(const uint8_t* buf, int len, GameState& state);
 
-// Wire format size: 5 + 20 + 6*38 = 253 bytes
+// Wire format size: 5 + 20 + 6*49 = 319 bytes (per-char stride bumped 38 -> 49 by the
+// GSTA enrich: +0x50/0x54 scale (8) + 0x12d/0x12e palette (2) + 0x1a4 overlay (1) = 11).
 // RAM autopsy (rend_diff v2) found all correlated hidden addresses are
 // frame-deterministic (counters/pointers that increment every frame) —
 // they sync naturally between server+client instances running the same ROM.
 // 253 bytes achieves 99.7%+ visual match rate. Remaining 0.3% is stage
 // background animation and sub-frame interpolation jitter.
-// 253 legacy + 8 raw input + 1 stage_anim = 262 bytes total
+// 319 legacy + 8 raw input + 1 stage_anim = 328 bytes total
 // NEVER hardcode button mappings on the client — read p1_buttons/p2_buttons.
-static constexpr int WIRE_SIZE = 5 + 2+2+2+2 + 4+4+4 + 6*38 + 2+2+1+1+1+1 + 1; // = 262
+static constexpr int WIRE_SIZE = 5 + 2+2+2+2 + 4+4+4 + 6*49 + 2+2+1+1+1+1 + 1; // = 328
 
 // Patch the in-game "PLAYER" + "1"/"2" text with custom names
 // slot: 0=P1, 1=P2. name: up to 10 chars (null-terminated)
@@ -105,6 +113,11 @@ struct ObjectState {
 	uint8_t  category;    // +0x03 (marvelous2: render head-list selector, 0..13)
 	uint8_t  xflip;       // +0x130
 	uint8_t  owner_slot;  // which CHAR_BASE[] slot owns it (0..5); for owner-ptr re-inject
+	// Effect-routing flag (GSTA enrich step 1): 1 iff the node's GFX base (node+0x15c)
+	// points into the shared "Effect Poly" bank 0x0CED0000 (loc_8c032be0). The client
+	// routes is_effect==1 objects to the effects atlas, the rest to the PL{cid} char
+	// atlas. Derived in readAllDrawn where node+0x15c is already read.
+	uint8_t  is_effect;   // node+0x15c in [0x0CED0000, 0x0CEE0000)
 };
 // Scan the object pool; fill up to maxObjs, return count. Skips inactive
 // (sprite_id==0) and the position-less body object. Cheap RAM scan (~14k reads).
@@ -136,9 +149,9 @@ uint8_t readStageAnimTimer();
 // from the browser-facing 'OBJS' packet (8/9B, position-only) so neither parser
 // disturbs the other. Layout: per object owner_cid(1) sprite_id(2 LE)
 // type(1) category(1) xflip(1) owner_slot(1) screen_x(i16 LE) screen_y(i16 LE)
-// = 10 bytes. serialize writes count(1) + N*10 into buf (NO magic — caller
-// prepends 'OBJF'); returns bytes written. deserialize reads it back.
-static constexpr int OBJF_REC_SIZE = 10;
+// is_effect(1) = 11 bytes. serialize writes count(1) + N*11 into buf (NO magic —
+// caller prepends 'OBJF'); returns bytes written. deserialize reads it back.
+static constexpr int OBJF_REC_SIZE = 11;
 int  serializeObjects(const ObjectState* objs, int n, uint8_t* buf, int maxLen);
 int  deserializeObjects(const uint8_t* buf, int len, ObjectState* out, int maxObjs);
 
