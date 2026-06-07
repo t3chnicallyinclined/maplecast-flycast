@@ -2542,7 +2542,8 @@ done_diff:
 				// effects (additive) + HUD (top/bottom screen strips) — chars + stage are
 				// rendered client-side (lean sprite + client stage), never streamed. ~20 KB/s.
 				static bool _hudfOn = getenv("MAPLECAST_HUDF") != nullptr;
-				if (_stafOnEmit || _hudfOn) {
+				bool _inMatch = addrspace::read8(0x8C289624) != 0;
+				if (_stafOnEmit || (_hudfOn && _inMatch)) {  // HUDF only in-match: no out-of-match STAF flood (client routes STAF only when _skipTA, else it hits applyFrame -> RangeError + CPU burn = char-select 5fps)
 					// primRestart=false -> makeIndex() builds rc.idx as a strip-with-
 					// degenerate-links (NOT 0xFFFFFFFF restart sentinels), and rewrites
 					// each PolyParam.first/.count to index into rc.idx (rc.idx[k] -> rc.verts).
@@ -2566,6 +2567,7 @@ done_diff:
 					uint32_t quadCount = 0;       // now a TRIANGLE count (see per-triangle emit below)
 					auto put16 = [&](int16_t v) { _stafBuf.push_back(v & 0xff); _stafBuf.push_back((v >> 8) & 0xff); };
 					auto putU16 = [&](uint16_t v) { _stafBuf.push_back(v & 0xff); _stafBuf.push_back((v >> 8) & 0xff); };
+					auto put32 = [&](uint32_t v) { for (int i = 0; i < 4; i++) _stafBuf.push_back((v >> (i * 8)) & 0xff); };
 					auto put64 = [&](uint64_t v) { for (int i = 0; i < 8; i++) _stafBuf.push_back((v >> (i * 8)) & 0xff); };
 
 					// Per-list geometry debug: capture the first few real triangles of each
@@ -2672,6 +2674,14 @@ done_diff:
 								_stafBuf.push_back(blend);
 								_stafBuf.push_back((uint8_t)listType);
 								_stafBuf.push_back(tspFlags);
+								// Raw PVR poly state — the PVR2Renderer (web/webgpu/pvr2-renderer.mjs)
+								// consumes these verbatim and derives blend/shad/depth/cull itself
+								// (NO client-side re-derivation). tcw/tsp/pcw drive texture+blend+combine;
+								// isp drives depth-mode/cull/z-write. listType still routes op/pt/tr.
+								put32(tcw);
+								put32(tsp);
+								put32(pcw);
+								put32(pp.isp.full);
 								Vertex* vv[3] = { &a, &b, &c };
 								for (int kk = 0; kk < 3; kk++) {
 									put16((int16_t)lroundf(vv[kk]->x)); put16((int16_t)lroundf(vv[kk]->y));

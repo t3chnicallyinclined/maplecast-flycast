@@ -507,11 +507,15 @@ envelope (`_compressor`, ZCST outer) and `broadcastBinary`.
 
 ```
 'STAF'(4)  frameNum(4 LE)  pvr_snapshot[16](64)  triCount(4 LE)
-  ── repeated triCount times (47 B/tri) ──
+  ── repeated triCount times (63 B/tri) ──
   texId(8 LE)        // 0 = untextured triangle (use per-vertex col)
-  blend(1)           // (SrcInstr<<4)|DstInstr  (PVR TSP bits 29-31 / 26-28)
+  blend(1)           // LEGACY (StafGL): (SrcInstr<<4)|DstInstr
   listType(1)        // 0=op(bg/opaque) 1=pt(char/punch-through) 2=tr(fx/translucent)
-  tspFlags(1)        // bit0-1 ShadInstr, bit2 IgnoreTexA, bit3 textured, bit4 punch-through
+  tspFlags(1)        // LEGACY (StafGL): bit0-1 ShadInstr, bit2 IgnoreTexA, bit3 textured, bit4 punch-through
+  tcw(4 LE)          // RAW PVR TCW (texture control word)
+  tsp(4 LE)          // RAW PVR TSP (texture/shade params — blend, ShadInstr, wrap, filter)
+  pcw(4 LE)          // RAW PVR PCW (textured/gouraud/offset bits, list type)
+  isp(4 LE)          // RAW PVR ISP (depth mode, cull mode, z-write)
   ── per vertex × 3 (12 B each) ──
     x(i16 LE) y(i16 LE)    // 640×480 screen space (the TA's own projected coords)
     u(u16) v(u16)          // UV, Q0.16 (val/65535)
@@ -519,11 +523,19 @@ envelope (`_compressor`, ZCST outer) and `broadcastBinary`.
 ```
 
 Triangles arrive in server z-order (op → pt → tr); the client draws straight
-through, which IS the z-order (no depth buffer). `blend` maps to `gl.blendFunc`
-via the same `SrcBlendGL`/`DstBlendGL` tables flycast uses
-(`gldraw.cpp:53-75`). `tspFlags.ShadInstr` selects the texture↔vertex-color
-combine (`gles.cpp`: 0 replace, 1 modulate-rgb/replace-a, 2 mix-by-texA, 3
-modulate); punch-through applies an alpha test (~0.5) like `cp_AlphaTestValue`.
+through, which IS the z-order (no depth buffer). **The renderer is the proven
+`PVR2Renderer` (`web/webgpu/pvr2-renderer.mjs`), not the retired StafGL.** The
+client (`SpriteClient.onSTAF`) reshapes each triangle into PVR2Renderer's exact
+input — a 28-byte/vertex buffer (x,y,z f32 · col u8×4 · spc u8×4 · u,v f32) plus
+op/pt/tr `PolyParam` lists `{first,count,tsp,tcw,pcw,isp,tileclip}` where each
+triangle is a 3-vertex poly. PVR2Renderer derives blend (`tsp` 29-31/26-28),
+the ShadInstr texture↔vertex-color combine (`tsp` 6-7), punch-through alpha
+test, depth/cull (`isp`), and the texture flag (`pcw>>3`) **itself**, exactly as
+flycast — so `blend`/`tspFlags` above are legacy and unused on this path. The
+`tcw` field is OVERRIDDEN client-side with a per-frame surrogate that maps 1:1
+to the 64-bit `texId`; a STAF `texMgr` shim resolves it to the TX64-cached
+decoded RGBA `GPUTexture` (no VRAM, no `getTexture` VRAM decode). The overlay is
+composited (transparent clear) over the lean character canvas.
 
 ### 8.3 Client
 

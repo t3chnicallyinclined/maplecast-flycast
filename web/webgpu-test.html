@@ -259,14 +259,15 @@ canvas{display:block;background:transparent}
 import {FrameDecoder} from './webgpu/frame-decoder.mjs?v=4';
 import {TAParser} from './webgpu/ta-parser.mjs';
 import {TextureManager} from './webgpu/texture-manager.mjs';
-import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=2';
+import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=3';
 import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=9';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=37';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=38';
 import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=8';
-import {StafGL} from './webgpu/sprite-staf-gl.mjs?v=2';
+// StafGL (sprite-staf-gl.mjs) RETIRED — the STAF/HUDF stream now renders through the
+// proven PVR2Renderer (see STAFR/renderStaf below). StafGL stays on disk for reference.
 
 const canvas=document.getElementById('c'), ov=document.getElementById('ov'), st=document.getElementById('st');
 const BAKE=new SpriteBake(); window._bake=BAKE;
@@ -363,11 +364,64 @@ addEventListener('keydown',e=>{
   const scg=document.createElement('canvas'); scg.id='sccg'; scg.width=640; scg.height=480;
   scg.style.cssText='border:1px solid #0a6;background:#111;display:none;max-width:100%;vertical-align:top';
   wrap.appendChild(scg);
-  // STAF stripped-TA WebGL surface (its own GL context, separate from the WebGPU one).
+  // STAF stripped-TA WebGPU surface — rendered by the PROVEN PVR2Renderer
+  // (web/webgpu/pvr2-renderer.mjs), the SAME renderer that draws the out-of-match
+  // TA video. The filtered STAF/HUDF stream (HUD + effects) is reshaped into
+  // PVR2Renderer's exact input (28-byte verts + op/pt/tr PolyParam lists) in
+  // SpriteClient.onSTAF(); textures come from the STAF texMgr shim below (keyed by
+  // the per-frame texId surrogate). This replaces the hand-rolled StafGL, which
+  // got the texture<->vertex-color modulate wrong (white HUD bars) and garbled the
+  // strip walk (stretched triangles).
   const scs=document.createElement('canvas'); scs.id='sccs'; scs.width=640; scs.height=480;
   scs.style.cssText='border:1px solid #6fd;background:#111;display:none;max-width:100%;vertical-align:top';
   wrap.appendChild(scs);
-  const STAFGL=new StafGL(); window._stafgl=STAFGL;
+  // STAF renderer + texture shim — lazily inited once the shared WebGPU device exists.
+  const STAFR=new PVR2Renderer(); window._stafR=STAFR;
+  // texMgr shim: PVR2Renderer calls getTexture(tsp, tcw, vram); for STAF the `tcw`
+  // it receives is a per-frame texId SURROGATE (set in onSTAF). We resolve the
+  // surrogate -> texKey -> cached decoded RGBA (from TX64) and upload it to a
+  // GPUTexture once, with a sampler derived from the real TSP wrap/filter bits.
+  function makeStafTexMgr(dev, client){
+    const texByKey=new Map();     // texKey -> {texture, sampler, w, h}
+    let fb=null;
+    return {
+      getFallbackTexture(){ if(fb)return fb;
+        const t=dev.createTexture({size:[1,1],format:'rgba8unorm',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
+        dev.queue.writeTexture({texture:t},new Uint8Array([255,255,255,255]),{bytesPerRow:4},[1,1]);
+        fb={texture:t,sampler:dev.createSampler({minFilter:'nearest',magFilter:'nearest'})}; return fb; },
+      getTexture(tsp, surr/*=tcw override*/){
+        if(!surr) return null;
+        const key=client._stafSurrTex && client._stafSurrTex[surr];
+        if(!key) return null;
+        let e=texByKey.get(key);
+        const src=client._stafTex.get(key);
+        if(!src) return e||null;                      // texture not yet received (TX64) -> fallback
+        if(!e || e.w!==src.w || e.h!==src.h){
+          if(e) e.texture.destroy();
+          const texture=dev.createTexture({size:[src.w,src.h],format:'rgba8unorm',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
+          dev.queue.writeTexture({texture},src.rgba,{bytesPerRow:src.w*4},[src.w,src.h]);
+          const fm=(tsp>>13)&3, cu=(tsp>>16)&1, cv=(tsp>>15)&1, fu=(tsp>>18)&1, fv=(tsp>>17)&1;
+          const sampler=dev.createSampler({minFilter:fm?'linear':'nearest',magFilter:fm?'linear':'nearest',
+            addressModeU:cu?'clamp-to-edge':fu?'mirror-repeat':'repeat',addressModeV:cv?'clamp-to-edge':fv?'mirror-repeat':'repeat'});
+          e={texture,sampler,w:src.w,h:src.h}; texByKey.set(key,e);
+        }
+        return e;
+      },
+    };
+  }
+  let STAFTM=null;   // STAF texMgr shim (created at init, after device exists)
+  // Render the parsed STAF frame via PVR2Renderer onto the scs canvas (transparent
+  // overlay). singlePass + noSort: STAF triangles arrive in server z-order (op->pt->tr)
+  // and there's no depth — draw straight through like the server emit order.
+  function renderStaf(){
+    if(!STAFR._inited || !STAFTM) return;
+    const g=SPRITECLIENT._stafParsed;
+    if(!g || !g.vertexCount) return;
+    const snap=SPRITECLIENT._stafSnap || new Uint32Array(16);
+    STAFR.renderFrame(g, STAFTM, snap, null,
+      { singlePass:true, noSort:true, transparentClear:true, drawOpaque:true, drawPunch:true, drawTrans:true });
+  }
+  window._renderStaf=renderStaf;
   const sch=document.createElement('canvas'); sch.id='sch'; sch.width=640; sch.height=480;
   sch.style.cssText='position:absolute;top:1px;left:1px;pointer-events:none;max-width:100%';
   wrap.appendChild(sch);
@@ -483,21 +537,24 @@ addEventListener('keydown',e=>{
       _lastShowSprite=showSprite;
       window._skipTA=showSprite;   // skip TA in-match (sprite renders); decode it out of match (show the menu)
       const gg=gpuOn&&SG.ok&&!stafMode;
-      scs.style.display=(showSprite)?'block':'none';   // StafGL HUD/FX overlay always on (hybrid)
+      scs.style.display=(showSprite)?'block':'none';   // PVR2Renderer HUD/FX overlay always on (hybrid)
       scg.style.display=(showSprite&&gg)?'block':'none';
       scv.style.display=(showSprite&&!gg&&!stafMode)?'block':'none';
       scs.style.zIndex='3'; scg.style.zIndex='2'; scv.style.zIndex='2';  // HUD/FX overlay above characters
     }
     if(showSprite){
       const asm=SPRITECLIENT.assemblyMode;
-      // HYBRID: the StafGL surface (scs) renders the server's FILTERED STAF stream
-      // (MAPLECAST_HUDF = effects + HUD only) — the REAL tinted HUD + real effects,
-      // TRANSPARENT, OVER the lean character render. Characters stay reconstructed
-      // (no STAF garble). Init once; used by hybrid + full-STAF-debug paths.
-      if(!STAFGL.ok && !STAFGL._tried){ STAFGL._tried=true; STAFGL.init(scs); showCanvas(); }
+      // HYBRID: the PVR2Renderer surface (scs) renders the server's FILTERED STAF
+      // stream (MAPLECAST_HUDF = effects + HUD only) — the REAL tinted HUD + real
+      // effects, TRANSPARENT, OVER the lean character render. Characters stay
+      // reconstructed (no STAF garble). Init once (shares the main WebGPU device).
+      if(!STAFR._inited && !STAFR._tried && window._R && window._R.dev){ STAFR._tried=true;
+        try{ STAFR.initShared(scs, window._R.dev); STAFR._inited=true; STAFTM=makeStafTexMgr(window._R.dev, SPRITECLIENT); showCanvas(); }
+        catch(err){ console.error('[staf-pvr2] init', err); }
+      }
       if(stafMode){
         // FULL STAF (debug): whole frame from STAF (needs unfiltered MAPLECAST_STAF).
-        try{ STAFGL.render(SPRITECLIENT, 640, 480); }catch(err){ console.error('[staf-gl]', err); }
+        try{ renderStaf(); }catch(err){ console.error('[staf-pvr2]', err); }
         hctx.clearRect(0,0,sch.width,sch.height);
         const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.stafStatsText();
       } else if(gpuOn && SG.ok){
@@ -507,13 +564,13 @@ addEventListener('keydown',e=>{
         try{ SG.render(drawList, window.DBG||{}, window._T, SPRITECLIENT.buildSparkList(640,480), null); }
         catch(err){ console.error('[sprite-gpu] render error -> Canvas2D fallback', err); SG.ok=false; showCanvas(); }
         hctx.clearRect(0,0,sch.width,sch.height);                       // no synthesized HUD
-        try{ STAFGL.render(SPRITECLIENT, 640, 480); }catch(err){}        // REAL HUD + effects overlay
+        try{ renderStaf(); }catch(err){}                                // REAL HUD + effects overlay (PVR2Renderer)
         SPRITECLIENT.drawFlash(hctx, drawList);                          // field-stepper (dormant unless probing)
         const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.statsText();
       } else {
         if(asm) SPRITECLIENT.renderAssembly(scx); else SPRITECLIENT.render(scx);
         hctx.clearRect(0,0,sch.width,sch.height);                       // no synthesized HUD
-        try{ STAFGL.render(SPRITECLIENT, 640, 480); }catch(err){}        // REAL HUD + effects overlay
+        try{ renderStaf(); }catch(err){}                                // REAL HUD + effects overlay (PVR2Renderer)
         const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.statsText();
       }
     }
@@ -1045,9 +1102,12 @@ async function main(){
                 }catch(e){} return; }
                 // STAF: stripped-TA frame (full textured-quad list). ZCST-wrapped, so
                 // decompress first, then check the inner 'STAF' magic. If it's STAF,
-                // route to the sprite client and DO NOT feed applyFrame. Only peek when
-                // the STAF A/B path is active, so normal TA frames aren't double-decompressed.
-                if(window._stafRoute){
+                // route to the sprite client and DO NOT feed applyFrame.
+                // Peek when EITHER the STAF A/B debug path is active (_stafRoute) OR the
+                // sprite client is rendering in-match (_skipTA) — the HYBRID HUDF overlay
+                // (PVR2Renderer on scs) needs the parsed STAF every frame. Normal full-TA
+                // video frames aren't STAF, so isSTAF() rejects them after one decompress.
+                if(window._stafRoute || window._skipTA){
                   let _dec=null;
                   try{ _dec=D._decompress(d); }catch(e){}
                   if(_dec && SpriteClient.isSTAF(_dec)){ try{ SPRITECLIENT.onSTAF(_dec); }catch(e){} return; }

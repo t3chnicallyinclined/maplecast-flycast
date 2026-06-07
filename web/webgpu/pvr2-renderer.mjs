@@ -72,6 +72,19 @@ export class PVR2Renderer {
         return this.dev;
     }
 
+    // Bind a SECOND renderer to another canvas reusing an existing device (the
+    // STAF HUD/effects overlay shares the main renderer's device so textures and
+    // buffers are interoperable). alphaMode 'premultiplied' lets the canvas be a
+    // transparent overlay composited over the lean character canvas.
+    initShared(canvas, device) {
+        this.dev = device;
+        this.ctx = canvas.getContext('webgpu');
+        this.fmt = navigator.gpu.getPreferredCanvasFormat();
+        this.ctx.configure({device:this.dev,format:this.fmt,alphaMode:'premultiplied'});
+        this._init(canvas.width, canvas.height);
+        return this.dev;
+    }
+
     _init(w,h) {
         const d = this.dev;
         this.uBuf = d.createBuffer({size:64,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
@@ -324,7 +337,7 @@ export class PVR2Renderer {
             // Each render pass gets its own depth clear (color preserved from previous pass)
             // If custom BG was pre-rendered, load instead of clear on first pass
             const firstLoadOp = (isFirst && !dbg._bgPreRendered) ? 'clear' : 'load';
-            const clearAlpha = dbg.customBg ? 0 : 1;  // transparent clear when custom BG
+            const clearAlpha = (dbg.customBg || dbg.transparentClear) ? 0 : 1;  // transparent clear when custom BG / overlay
             const rp=enc.beginRenderPass({
                 colorAttachments:[{view:texView,clearValue:{r:0,g:0,b:0,a:clearAlpha},loadOp:firstLoadOp,storeOp:'store'}],
                 depthStencilAttachment:{view:depthView,depthClearValue:0.0,depthLoadOp:'clear',depthStoreOp:'store'},
