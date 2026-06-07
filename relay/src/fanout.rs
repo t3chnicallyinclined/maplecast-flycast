@@ -46,6 +46,13 @@ struct RelayInner {
     /// Cached SYNC state — rebuilt from initial SYNC + incremental dirty pages
     sync_cache: RwLock<Option<SyncCache>>,
 
+    /// Cached last MCSV (mid-match savestate) wire frame. The upstream server
+    /// only re-broadcasts MCSV every ~60s; without caching, a client that joins
+    /// between broadcasts waits up to a minute for one — and the state-replica
+    /// reconnect loop drops the socket every ~2s, so it never survives long
+    /// enough to receive it. Cache the last one and replay it on connect.
+    mcsv_cache: RwLock<Option<Bytes>>,
+
     /// Connected client count
     client_count: Mutex<usize>,
     max_clients: usize,
@@ -136,6 +143,7 @@ impl RelayState {
             inner: Arc::new(RelayInner {
                 frame_tx,
                 sync_cache: RwLock::new(None),
+                mcsv_cache: RwLock::new(None),
                 client_count: Mutex::new(0),
                 max_clients,
                 stats: Mutex::new(RelayStats::default()),
@@ -167,6 +175,17 @@ impl RelayState {
             stats.audio_bytes_received += len as u64;
             stats.audio_packets_broadcast += receivers as u64;
             stats.audio_bytes_broadcast += (len * receivers) as u64;
+            return;
+        }
+
+        // MCSV mid-match savestate — cache it (so joining clients get it on
+        // connect, not up to 60s later) and forward it real-time. The MCSV frame
+        // is "MCSV"(4) + size(4) + inner ZCST blob; its outer magic is NOT ZCST,
+        // so it never matches is_compressed/is_sync and would otherwise be
+        // mis-handled as a delta. Detect + short-circuit here.
+        if data.len() >= 4 && &data[0..4] == b"MCSV" {
+            *self.inner.mcsv_cache.write().await = Some(data.clone());
+            let _ = self.inner.frame_tx.send(data);
             return;
         }
 
@@ -261,6 +280,11 @@ impl RelayState {
     pub(crate) async fn get_sync(&self) -> Option<Bytes> {
         let cache = self.inner.sync_cache.read().await;
         cache.as_ref().map(|c| c.raw.clone())
+    }
+
+    /// Cached last MCSV wire frame for mid-match joiners, if any.
+    pub(crate) async fn get_mcsv(&self) -> Option<Bytes> {
+        self.inner.mcsv_cache.read().await.clone()
     }
 
     /// Snapshot all metrics for /metrics endpoint (called by HTTP listener).
@@ -477,6 +501,14 @@ async fn handle_ws_client(
         ws_tx.send(Message::Binary(sync_data.to_vec().into())).await?;
     } else {
         info!("No SYNC cached yet — {} will wait for first SYNC", peer);
+    }
+
+    // Step 1b: Send cached MCSV (mid-match savestate) if a match is live, so a
+    // state-replica client joining mid-match applies it immediately instead of
+    // waiting for the next ~60s broadcast (and reconnect-looping in the gap).
+    if let Some(mcsv_data) = state.get_mcsv().await {
+        info!("Sending cached MCSV to {} ({:.1}MB)", peer, mcsv_data.len() as f64 / 1024.0 / 1024.0);
+        ws_tx.send(Message::Binary(mcsv_data.to_vec().into())).await?;
     }
 
     // Step 2: Subscribe to frame broadcast
