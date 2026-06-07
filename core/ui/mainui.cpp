@@ -177,7 +177,11 @@ bool mainui_rend_frame()
 		// fires as soon as the server's savestate arrives. frameInject() is a
 		// no-op until MCSV is queued; when it applies it, setClientRendering(false)
 		// clears isClient() and the next iteration falls to the emu.render() branch.
-		if (maplecast_state_replica::isNoRomWaiting())
+		// Pump for ANY active replica (not just no-ROM): with a ROM loaded we're
+		// still isClient() during phase 1, but the run() loop that would otherwise
+		// call frameInject() is bypassed by this mirror-render branch — so without
+		// this the queued MCSV never applies and we're stuck rendering the mirror.
+		if (maplecast_state_replica::active())
 			maplecast_state_replica::frameInject();
 	}
 	else
