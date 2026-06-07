@@ -387,19 +387,27 @@ int serializePalEffects(uint8_t* out, int maxLen)
 		pe[i] = (uint16_t)addrspace::read16(CHAR_BASE[i] + 0x40);
 		out[off++] = pe[i] & 0xff; out[off++] = (pe[i] >> 8) & 0xff;
 	}
-	// DIAGNOSTIC: find the real "being hit / flashing" field — log candidates when any
-	// is nonzero (paleffect@0x40, reaction-state @0x230/0x231/0x233, reaction-pal @0x1a4,
-	// health@0x420/red@0x424). Throttled. Tells us which to flash on.
-	static int _d = 0;
-	if (++_d % 12 == 0) {
-		for (int i = 0; i < 6; i++) {
-			if (addrspace::read8(CHAR_BASE[i] + 0x000) == 0) continue;  // inactive slot
-			uint8_t r230 = addrspace::read8(CHAR_BASE[i] + 0x230), r231 = addrspace::read8(CHAR_BASE[i] + 0x231);
-			uint8_t r233 = addrspace::read8(CHAR_BASE[i] + 0x233), a1a4 = addrspace::read8(CHAR_BASE[i] + 0x1a4);
-			uint8_t hp = addrspace::read8(CHAR_BASE[i] + 0x420), rh = addrspace::read8(CHAR_BASE[i] + 0x424);
-			if (pe[i] || r230 || r231 || r233 || a1a4)
-				fprintf(stderr, "[PALF] slot%d pe40=%u r230=%u r231=%u r233=%u a1a4=%u hp=%u red=%u\n",
-				        i, pe[i], r230, r231, r233, a1a4, hp, rh);
+	// DIAGNOSTIC: log candidate hit-flash fields ONLY in the window right after a real
+	// hit (health@0x420 drops) — captures exactly which field changes during the flash.
+	// Logs every frame for 14 frames after each hp-drop. Cross-checked vs marvelous2's
+	// damage routine loc_8c056454 (writes the reaction state) + loc_8c035162 (reads the
+	// palette mode). Also log anim_state@0x1d0 (the palette-mode source) + flash@0x150.
+	static uint8_t _prevHp[6] = {0};
+	static int     _hitLog[6] = {0};
+	for (int i = 0; i < 6; i++) {
+		if (addrspace::read8(CHAR_BASE[i] + 0x000) == 0) { _prevHp[i] = 0; continue; }
+		uint8_t hp = addrspace::read8(CHAR_BASE[i] + 0x420);
+		if (_prevHp[i] != 0 && hp < _prevHp[i]) _hitLog[i] = 14;   // hp dropped = confirmed hit
+		_prevHp[i] = hp;
+		if (_hitLog[i] > 0) {
+			_hitLog[i]--;
+			fprintf(stderr, "[PALF-HIT] slot%d pe40=%u 0x1a4=%u 0x230=%u 0x231=%u 0x233=%u "
+			        "0x1d0=%u 0x150=%u 0x151=%u 0x14a=%u hp=%u red=%u\n", i, pe[i],
+			        addrspace::read8(CHAR_BASE[i] + 0x1a4), addrspace::read8(CHAR_BASE[i] + 0x230),
+			        addrspace::read8(CHAR_BASE[i] + 0x231), addrspace::read8(CHAR_BASE[i] + 0x233),
+			        addrspace::read16(CHAR_BASE[i] + 0x1d0), addrspace::read8(CHAR_BASE[i] + 0x150),
+			        addrspace::read8(CHAR_BASE[i] + 0x151), addrspace::read8(CHAR_BASE[i] + 0x14a),
+			        hp, addrspace::read8(CHAR_BASE[i] + 0x424));
 		}
 	}
 	return off;  // 4 + 12 = 16
