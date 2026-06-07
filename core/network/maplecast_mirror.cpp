@@ -2292,17 +2292,18 @@ done_diff:
 			// the owner) snap to the owner's LIVE screen pos + the true anchor (no lag; an
 			// off-screen assist's parts vanish with it); spawned objects (far) use +0xC8/+0xCC.
 			{
-				// Cap raised 48 -> 200: with the cape now shipping ALL its
-				// segments (~20/char), two Storms' capes alone filled the old 48
-				// and the address-ordered scan never reached the higher-address
-				// super objects (hail / lightning storm spawn late) -> supers
-				// silently dropped. 200 covers two full capes + a screen super +
-				// projectiles, and stays under the 1-byte count cap (255).
-				// ~1.6KB/frame worst case, negligible after the TA shed.
-				maplecast_gamestate::ObjectState objs[200];
-				int no = maplecast_gamestate::readObjects(objs, 200);
+				// Cap = 255, the 1-byte OBJS count field's hard maximum, which is
+				// well above MVC2's finite drawable-object ceiling (the pool is a
+				// fixed-stride region; a heavy 3v3-super frame is ~120 owner'd
+				// objects). So the array is never the limiter — readObjects scans
+				// the WHOLE pool and LOGS "[OBJS] CAP HIT ... DROPPED K" if it ever
+				// can't fit everything (it shouldn't). If that log fires, widen the
+				// count field to 2 bytes (touches the OBJS parsers). ~2KB/frame
+				// worst case, negligible after the TA shed.
+				maplecast_gamestate::ObjectState objs[255];
+				int no = maplecast_gamestate::readObjects(objs, 255);
 				if (no > 0) {
-					uint8_t obuf[4 + 1 + 200 * 8];   // per obj: cid(1)+sid(2)+type(1)+x(2)+y(2)
+					uint8_t obuf[4 + 1 + 255 * 8];   // per obj: cid(1)+sid(2)+type(1)+x(2)+y(2)
 					obuf[0]='O'; obuf[1]='B'; obuf[2]='J'; obuf[3]='S'; obuf[4]=(uint8_t)no;
 					int oo = 5;
 					for (int i = 0; i < no; i++) {
@@ -2318,7 +2319,7 @@ done_diff:
 					// OBJF — FULL object record for the state-replica inject
 					// (writeObjects). Carries category/xflip/owner_slot the 8B
 					// OBJS packet omits. Browser ignores OBJF; replica consumes it.
-					uint8_t fbuf[4 + 1 + 200 * maplecast_gamestate::OBJF_REC_SIZE];
+					uint8_t fbuf[4 + 1 + 255 * maplecast_gamestate::OBJF_REC_SIZE];
 					fbuf[0]='O'; fbuf[1]='B'; fbuf[2]='J'; fbuf[3]='F';
 					int fn = maplecast_gamestate::serializeObjects(
 					    objs, no, fbuf + 4, (int)sizeof(fbuf) - 4);

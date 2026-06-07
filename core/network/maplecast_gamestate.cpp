@@ -310,8 +310,15 @@ int readObjects(ObjectState* out, int maxObjs)
 {
 	static const bool _walk = getenv("MAPLECAST_OBJS_WALK") != nullptr;
 	if (_walk) return readObjectsWalk(out, maxObjs);
-	int n = 0, nOwner = 0, nSid = 0;
-	for (uint32_t a = 0x8C26A600; a < 0x8C278000 && n < maxObjs; a += 4) {
+	int n = 0, nOwner = 0, nSid = 0, nPass = 0;
+	// Scan the ENTIRE pool region — do NOT stop at maxObjs. The MVC2 object pool
+	// is itself a finite, fixed-stride region, so the count of drawable objects
+	// has a hard ceiling; scanning all of it lets us COUNT every drawable object
+	// (nPass) vs how many we can store (n <= maxObjs) and LOG any shortfall.
+	// Truncation is then never silent — that was the bug that dropped the supers
+	// when both capes filled a too-small cap and the address-ordered scan never
+	// reached the higher-address super objects.
+	for (uint32_t a = 0x8C26A600; a < 0x8C278000; a += 4) {
 		uint32_t v = addrspace::read32(a);
 		bool owned = false;
 		for (int s = 0; s < 6; s++) if (v == CHAR_BASE[s]) { owned = true; break; }
@@ -335,6 +342,8 @@ int readObjects(ObjectState* out, int maxObjs)
 		// off-screen reject below; if a few linger, that's a later refinement.)
 		float sx = readFloat(a + 0xC8), sy = readFloat(a + 0xCC);
 		if ((sx == 0.f && sy == 0.f) || sx < -64.f || sx > 704.f || sy < -64.f || sy > 544.f) continue;
+		nPass++;                     // a real on-screen drawable object — counted even past the cap
+		if (n >= maxObjs) continue;  // no slot to store it; the drop guard below makes this visible
 		out[n].owner_cid = (uint8_t)addrspace::read8(v + OFF_CHAR_ID);
 		out[n].sprite_id = sid;
 		out[n].screen_x  = (int16_t)sx;
@@ -353,8 +362,18 @@ int readObjects(ObjectState* out, int maxObjs)
 		{ int os = 0; for (int s = 0; s < 6; s++) if (v == CHAR_BASE[s]) { os = s; break; } out[n].owner_slot = (uint8_t)os; }
 		n++;
 	}
-	static int _dbg = 0;
-	if (++_dbg % 120 == 0) fprintf(stderr, "[OBJS] owners=%d withSid=%d pass=%d\n", nOwner, nSid, n);
+	// Truncation guard — NEVER silent. The pool is finite, so a cap >= the pool's
+	// drawable maximum means nPass == n on every frame. If this line ever prints,
+	// the cap is genuinely too small (or the 255 wire-count limit was hit) and an
+	// effect is being dropped — raise the cap / widen the OBJS count field.
+	if (nPass > n) {
+		fprintf(stderr, "[OBJS] CAP HIT: %d drawable objects, cap=%d -> DROPPED %d (raise the readObjects cap)\n",
+		        nPass, maxObjs, nPass - n);
+	} else {
+		static int _dbg = 0;
+		if (++_dbg % 120 == 0)
+			fprintf(stderr, "[OBJS] owners=%d withSid=%d shipped=%d (cap=%d)\n", nOwner, nSid, n, maxObjs);
+	}
 	return n;
 }
 
