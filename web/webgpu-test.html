@@ -264,7 +264,7 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=9';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=35';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=36';
 import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=8';
 import {StafGL} from './webgpu/sprite-staf-gl.mjs?v=2';
 
@@ -496,9 +496,9 @@ addEventListener('keydown',e=>{
         if(!STAFGL.ok && !STAFGL._tried){ STAFGL._tried=true; STAFGL.init(scs); showCanvas(); }
         try{ STAFGL.render(SPRITECLIENT, 640, 480); }
         catch(err){ console.error('[staf-gl] render error', err); }
-        // STAF includes the HUD (it's just more quads), so the from-state HUD overlay
-        // is OFF in this path — toggle it back on if you want the synthesized HUD too.
-        if(hudOn) SPRITECLIENT.drawHUD(hctx); else hctx.clearRect(0,0,sch.width,sch.height);
+        // STAF renders the REAL HUD (it's just more quads), so NEVER overlay the
+        // synthesized HUD here (no 99/green-bars/yellow-meters double-up).
+        hctx.clearRect(0,0,sch.width,sch.height);
         const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.stafStatsText();
       } else if(gpuOn && SG.ok){
         // Upload the path's atlas image(s): parts atlas (assembly) or whole-sprite atlas.
