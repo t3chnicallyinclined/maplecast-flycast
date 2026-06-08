@@ -872,8 +872,18 @@ export class SpriteClient {
       // sp.dx/sp.dy: satellites (projectiles/capes/effects) have their OWN origin,
       // so the body-relative bake drifts. _objCfg stays a residual user nudge.
       // hasHot=false (server found no extras, or an old server) => baked anchor.
-      const anchorX = o.hasHot ? o.hotDx : sp.dx;
-      const anchorY = o.hasHot ? o.hotDy : sp.dy;
+      // OBJECT ANCHOR MODE (window._objAnchor). PATH A's node+0x178 hotspot proved
+      // DEGENERATE (OBJDIAG: hot is a CONSTANT per char = the body's value, identical
+      // across all of a char's objects; or hasHot=false). So it can't place a
+      // projectile. Default to CENTER (object screen pos = sprite center, the common
+      // projectile/effect convention). Live A/B via window._objAnchor:
+      //   'center' (default) | 'bottom' | 'baked' (body-foot crop) | 'hot' (PATH A)
+      const _am = (typeof window !== 'undefined' && window._objAnchor) || 'center';
+      let anchorX, anchorY;
+      if (_am === 'hot' && o.hasHot) { anchorX = o.hotDx; anchorY = o.hotDy; }
+      else if (_am === 'baked') { anchorX = sp.dx; anchorY = sp.dy; }
+      else if (_am === 'bottom') { anchorX = -sp.wG / 2; anchorY = -sp.hG; }
+      else { anchorX = -sp.wG / 2; anchorY = -sp.hG / 2; }   // center (default)
       // TEMP DIAG (projectile drift): log each distinct object's anchor data once/load.
       { const _k = `${o.cid}:${(o.sid&0xffff).toString(16)}`; (this._od = this._od || new Set());
         if (!this._od.has(_k)) { this._od.add(_k);
