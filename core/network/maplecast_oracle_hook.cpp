@@ -118,6 +118,13 @@ bool mc_isHookedPC(u32 pc)
 	return m == PC_OBJ_BEGIN_M || m == PC_QUAD_EMIT_M;
 }
 
+// Per-PC fire counters (DIAGNOSTIC, gated). The previous proof-of-life used a
+// SINGLE shared one-shot flag, so once QUAD_EMIT fired first it consumed the log
+// and we could NOT tell whether OBJ_BEGIN ever fires. These split counters answer
+// task item #1 directly: OBJ_BEGIN fire count vs QUAD_EMIT fire count.
+static unsigned long s_fireObjBegin = 0;
+static unsigned long s_fireQuad     = 0;
+
 void DYNACALL mc_oracle_blockEntry(u32 pc)
 {
 	// Read-only. All guest regs coherent in Sh4cntx.r[] at this injection point.
@@ -127,17 +134,10 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 	// passed the cached (0x8C..) or physical (0x0C..) alias of the PC.
 	u32 mpc = pc & SH4_AREA_MASK;
 
-	// One-shot proof-of-life: confirms the GenCall actually executes (vs merely
-	// being emitted) the very first time a hooked block runs. Gated by enable.
-	static bool firstFireLogged = false;
-	if (!firstFireLogged) {
-		firstFireLogged = true;
-		fprintf(stderr, "[ORACLE-HOOK] first block-entry at pc=0x%08X (masked 0x%08X) — "
-		                "%s; capturing object/quad\n",
-		        pc, mpc, mpc == PC_OBJ_BEGIN_M ? "OBJ_BEGIN" : "QUAD_EMIT");
-	}
-
 	if (mpc == PC_OBJ_BEGIN_M) {
+		if (s_fireObjBegin++ == 0)
+			fprintf(stderr, "[ORACLE-HOOK] OBJ_BEGIN first fired (pc=0x%08X masked 0x%08X)\n",
+			        pc, mpc);
 		// node = r4 (the object/character struct being rendered).
 		u32 node = r[4];
 		if (!inRam(node)) { s_curObj = -1; return; }
@@ -164,7 +164,32 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 
 	// mpc == PC_QUAD_EMIT_M — one 16-byte quad attributed to the current object.
 	if (mpc != PC_QUAD_EMIT_M) return;
+	if (s_fireQuad++ == 0)
+		fprintf(stderr, "[ORACLE-HOOK] QUAD_EMIT first fired (pc=0x%08X masked 0x%08X)\n",
+		        pc, mpc);
 	if (s_nquad >= MAX_QUADS) return;
+
+	// ROBUST CAPTURE (task item #3): never discard a quad just because no OBJ_BEGIN
+	// has opened a current object this frame. If QUAD_EMIT fires before/without an
+	// OBJ_BEGIN (which is exactly what the prod logs show — QUAD fires, OBJ_BEGIN may
+	// not), synthesize an "orphan" object bucket so the raw quads still reach the
+	// jsonl. Without this, s_nobj stays 0 and the flush drops the whole frame.
+	if (s_curObj < 0 || s_curObj >= s_nobj) {
+		if (s_nobj < MAX_OBJS) {
+			Obj& po = s_objs[s_nobj];
+			memset(&po, 0, sizeof po);
+			po.node      = 0;            // 0 node == orphan / no OBJ_BEGIN context
+			po.sprite_id = -1;
+			po.category  = -1;
+			po.facing    = -1;
+			po.nquads    = 0;
+			s_curObj = s_nobj;
+			s_nobj++;
+		} else {
+			return;  // object table full; cannot attribute
+		}
+	}
+
 	u32 texptr = r[8];
 	u32 palptr = r[12];
 	u32 cursor = r[14];
@@ -182,8 +207,7 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 	q.h    = (u16)addrspace::read16(cursor + 0x2);
 	q.attr = addrspace::read32(cursor + 0x4);
 	s_nquad++;
-	if (s_curObj >= 0 && s_curObj < s_nobj)
-		s_objs[s_curObj].nquads++;
+	s_objs[s_curObj].nquads++;
 }
 
 void mc_oracle_frameFlush(u32 frame)
@@ -196,8 +220,20 @@ void mc_oracle_frameFlush(u32 frame)
 	static long  ow = 0;
 	static bool  full = false;
 
-	// Only emit a line for frames that actually drew something via the hook.
-	if (s_nobj == 0) { s_nquad = 0; s_curObj = -1; return; }
+	// DIAGNOSTIC (task item #2): prove the flush is actually called and show what it
+	// found. Periodic so we see the OBJ_BEGIN/QUAD fire totals climb across the run.
+	static unsigned long s_flushCalls = 0;
+	long owBefore = ow;
+	if ((s_flushCalls++ % 120) == 0)
+		fprintf(stderr, "[ORACLE-HOOK] flush #%lu frame=%u bufferedObjs=%d bufferedQuads=%d "
+		                "fired{OBJ_BEGIN=%lu QUAD=%lu} totalWritten=%ld\n",
+		        s_flushCalls, frame, s_nobj, s_nquad,
+		        s_fireObjBegin, s_fireQuad, ow);
+
+	// Emit a line for any frame that captured an object OR a quad. (Quads-without-
+	// OBJ_BEGIN are bucketed into an orphan object by the capture path, so a nonzero
+	// quad count implies a nonzero object count — but guard on both to be safe.)
+	if (s_nobj == 0 && s_nquad == 0) { s_curObj = -1; return; }
 
 	if (!full) {
 		if (!of) {
@@ -247,6 +283,10 @@ void mc_oracle_frameFlush(u32 frame)
 			n = snprintf(b, sizeof b, "]}\n");
 			ow += fwrite(b, 1, n, of);
 			fflush(of);
+			// Per-flush wrote-bytes (sampled with the periodic flush log above).
+			if ((s_flushCalls % 120) == 1)
+				fprintf(stderr, "[ORACLE-HOOK] flush wrote=%ld bytes (frame=%u objs=%d quads=%d)\n",
+				        ow - owBefore, frame, s_nobj, s_nquad);
 		} else if (of && ow >= ORACLE_CAP) {
 			full = true;
 			fprintf(stderr, "[ORACLE-HOOK] /dev/shm cap reached (%ld bytes) — stopping capture\n", ow);
