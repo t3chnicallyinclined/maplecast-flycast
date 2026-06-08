@@ -874,6 +874,10 @@ export class SpriteClient {
       // hasHot=false (server found no extras, or an old server) => baked anchor.
       const anchorX = o.hasHot ? o.hotDx : sp.dx;
       const anchorY = o.hasHot ? o.hotDy : sp.dy;
+      // TEMP DIAG (projectile drift): log each distinct object's anchor data once/load.
+      { const _k = `${o.cid}:${(o.sid&0xffff).toString(16)}`; (this._od = this._od || new Set());
+        if (!this._od.has(_k)) { this._od.add(_k);
+          console.log(`[OBJDIAG] PL${o.cid.toString(16).padStart(2,'0').toUpperCase()} sid=0x${(o.sid&0xffff).toString(16)} hasHot=${!!o.hasHot} hot=(${o.hotDx},${o.hotDy}) baked=(${sp.dx|0},${sp.dy|0}) scr=(${o.x|0},${o.y|0}) wh=(${sp.w}x${sp.h}) z=${o.type}`); } }
       const dxv = fl ? -(anchorX + sp.wG) : anchorX;   // mirror the anchor when flipped
       // z = the REAL render layer (o.type now carries the slot-table layer 0..15).
       // Bodies sit at the mid baseline (z=8), so low-layer satellites (capes) fall
