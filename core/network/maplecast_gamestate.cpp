@@ -1188,59 +1188,99 @@ static void partDump(const GameState& state) {
 			if (tf) { fprintf(tf, "%s\n", pl); fclose(tf); }
 		}
 
-		// Dump each referenced part via dir_entry(charBase + part_idx): RAW texels (for
-		// offline format-locking) + a best-effort PPM preview. Manifest lines carry the
-		// resolved key + all fields so the packer can verify; deduped by part_idx.
+		// =====================================================================
+		// PIXEL RESOLUTION — the QUAD EMITTER path (bank03 loc_8c033e90), NOT the
+		// broken DM00 `charBase + part_idx` directory walk. Exactly per the disasm
+		// (MVC2-RECONSTRUCTION-SPEC.md §2, bank03.asm:9258-9305):
+		//
+		//   gfx_base = *(node + 0x15c)                    ; Dat_GFX1 (loc_8c033f72=0x15c)
+		//   ; the running texel pointer is seeded ONCE per node at routine entry:
+		//   texPtr   = 0x0CE60000                          ; (loc_8c033e28 literal)
+		//   ; then per EXTRAS record, IN ORDER:
+		//   part_idx = u16 @(rec + 0x06)
+		//   off      = u32 @(gfx_base + part_idx*4)        ; offset-table lookup
+		//   blob     = gfx_base + off ; blob += 0x02       ; skip 2-byte piece header
+		//   w        = (u8 @ blob++) << 3                  ; ×8  (shll2;shll)
+		//   h        = (u8 @ blob++) << 3                  ; ×8
+		//   ; texels are 4bpp paletted in main RAM starting at texPtr, then:
+		//   texPtr  += (w*h) >> 1                          ; 4bpp byte advance per part
+		//
+		// The texels are NOT inside the GFX1 blob (that holds only the part header /
+		// dims). They are a CONTIGUOUS run consumed in EXTRAS-walk order from
+		// 0x0CE60000, so the per-part texptr is only defined within the live walk —
+		// hence we re-walk the live assembly here (same recs as the sidasm block) and
+		// dump each distinct part_idx the first time it's encountered with its correct
+		// running texptr. mask &0x0FFFFFFF normalises the 0x8C/0x0C RAM alias.
+		// =====================================================================
 		char mn[96]; snprintf(mn, sizeof mn, "/dev/shm/PL%02X_parts.manifest", cid);
 		FILE* mf = fopen(mn, "a");   // append: full atlas accumulates across frames
 		if (mf && ftell(mf) == 0)
-			fprintf(mf, "# part_idx key raw ppm w h e4 texptr ec rawbytes tcw fmt twid descU16 desc[0x3Chex]\n");
-		for (int part = 0; part < 512; part++) {
-			if (!usePart[part]) continue;
-			int key = charBase + part;
-			uint32_t e  = dirBase + (uint32_t)key * 0x10;
-			uint32_t e0 = addrspace::read32(e),     e4 = addrspace::read32(e + 4);
-			uint32_t e8 = addrspace::read32(e + 8), ec = addrspace::read32(e + 12);
-			int w = e0 & 0xffff, h = (e0 >> 16) & 0xffff;
-			// FOLLOW THE DESCRIPTOR (the game's own resolution): e4 is a descriptor
-			// index, not the format. partResolveTCW walks key -> u16 -> 0x20-stride
-			// descriptor -> TCW@+0xC, and we read fmt/scan from that TCW. Fall back to
-			// the e4-byte1 heuristic only if the runtime tables aren't resolvable.
-			uint32_t descAddr = 0; uint16_t descU16 = 0xFFFF;
-			uint32_t tcw = partResolveTCW(key, &descAddr, &descU16);
-			int  fmt; bool linear;
-			if (tcw != 0) { fmt = tcwFmt(tcw); linear = tcwLinear(tcw); }
-			else          { fmt = partFmtFromE4(e4); linear = false; }   // fallback
-			if (w <= 0 || h <= 0 || w > 1024 || h > 1024 || !_ramAddr(e8)) {
-				if (mf) fprintf(mf, "%d %d - - %d %d %08x %08x %08x SKIP\n", part, key, w, h, e4, e8, ec);
-				continue;
+			fprintf(mf, "# part_idx off w h texptr rawbytes fmt raw ppm\n");
+
+		const uint32_t TEXEL_BASE = 0x0CE60000;       // bank03.asm:9118 loc_8c033e28
+		uint32_t gfxBase = gfx1 & 0x0FFFFFFFu;        // *(node+0x15c), 0x0C alias
+
+		// Re-derive the live assembly start exactly as the sidasm block:
+		//   cell = *(player+0x154); slot = u16 @(cell+0x12); recs = EXTRAS + slot*0x400 + 8
+		uint32_t pdCell = addrspace::read32(pbase + 0x154);
+		uint32_t pdRecs = 0;
+		if (_ramAddr(pdCell)) {
+			uint16_t pdSlot = (uint16_t)addrspace::read16(pdCell + 0x12);
+			if (pdSlot < 64 && _ramAddr(exP)) pdRecs = exP + (uint32_t)pdSlot * 0x400 + 0x08;
+		}
+
+		bool dumped[512] = {false};
+		uint32_t texPtr = TEXEL_BASE;    // running pointer, seeded once per node (disasm)
+		if (_ramAddr(gfxBase | 0x0C000000u) && pdRecs) {
+			for (int r = 0; r < 256; r++) {
+				uint32_t rec   = pdRecs + (uint32_t)r * 8;
+				uint16_t rpart = (uint16_t)addrspace::read16(rec + 4);
+				uint16_t rattr = (uint16_t)addrspace::read16(rec + 6);
+				if (rattr == 0x00FF) break;                       // assembly terminator
+				uint32_t lo = addrspace::read32(rec);
+				if (lo == 0 && rpart == 0 && rattr == 0) continue; // pad/separator
+
+				// Resolve dims via the GFX1 offset table (per disasm).
+				uint32_t off  = addrspace::read32(gfxBase + (uint32_t)rpart * 4);
+				uint32_t blob = (gfxBase + off) & 0x0FFFFFFFu;
+				uint32_t bAlias = blob | 0x0C000000u;
+				int w = 0, h = 0;
+				if (_ramAddr(bAlias)) {
+					// blob += 2 (skip header), then read w,h (each <<3).
+					w = (int)((uint8_t)addrspace::read8(bAlias + 0x02)) << 3;
+					h = (int)((uint8_t)addrspace::read8(bAlias + 0x03)) << 3;
+				}
+				int rawBytes = (w * h) >> 1;                      // 4bpp byte size
+
+				if (w <= 0 || h <= 0 || w > 1024 || h > 1024) {
+					if (mf && rpart < 512 && !dumped[rpart]) {
+						fprintf(mf, "%u %08x %d %d %08x %d SKIP -\n", rpart, off, w, h, texPtr, rawBytes);
+						dumped[rpart] = true;
+					}
+					texPtr += (rawBytes > 0) ? (uint32_t)rawBytes : 0;   // still advance the run
+					continue;
+				}
+
+				if (rpart < 512 && !dumped[rpart]) {
+					dumped[rpart] = true;
+					char rfn[96]; snprintf(rfn, sizeof rfn, "/dev/shm/PL%02X_part_%03u.raw", cid, rpart);
+					char pfn[96]; snprintf(pfn, sizeof pfn, "/dev/shm/PL%02X_part_%03u.ppm", cid, rpart);
+					// 4bpp paletted (fmt 5), LINEAR — 0x0CE60000 is a decoded main-RAM
+					// working buffer (LZSS-expanded planar 4bpp), not a twiddled VRAM
+					// upload. Raw dump lets the offline packer relock if a twiddle is
+					// needed. Palette = live Dat_Pal (player+0x164).
+					partDumpRawN(texPtr, rawBytes, rfn);
+					partDecodeToPPM(texPtr, w, h, /*fmt=*/5, /*linear=*/true, palP, pfn, false);
+					if (mf) fprintf(mf, "%u %08x %d %d %08x %d PL%02X_part_%03u.raw PL%02X_part_%03u.ppm\n",
+					                rpart, off, w, h, texPtr, rawBytes, cid, rpart, cid, rpart);
+					dumpedTotal++;
+				}
+				texPtr += (uint32_t)rawBytes;                     // advance the running pointer
 			}
-			char rfn[96]; snprintf(rfn, sizeof rfn, "/dev/shm/PL%02X_part_%03d.raw", cid, part);
-			char pfn[96]; snprintf(pfn, sizeof pfn, "/dev/shm/PL%02X_part_%03d.ppm", cid, part);
-			// RAW byte count tracks the format: 16-bit = w*h*2, PAL8 = w*h, PAL4 = w*h/2.
-			int rawBytes = (fmt == 5) ? (w * h / 2) : (fmt == 6) ? (w * h) : (w * h * 2);
-			partDumpRawN(e8, rawBytes, rfn);
-			partDecodeToPPM(e8, w, h, fmt, linear, palP, pfn, false);   // flycast-canonical
-			// For LARGE (>=64px) parts, also emit the transposed (x-first) twiddle so the
-			// 256x256 body can be A/B'd offline against the oracle (the small parts decoded
-			// under one order; this reveals if large parts need the other).
-			if (!linear && w >= 64 && h >= 64) {
-				char pfa[96]; snprintf(pfa, sizeof pfa, "/dev/shm/PL%02X_part_%03d.altTw.ppm", cid, part);
-				partDecodeToPPM(e8, w, h, fmt, linear, palP, pfa, true);
-			}
-			// Manifest: "...e4 texptr ec rawbytes tcw fmt twid descU16 desc[0x3C]".
-			// Full 0x3C descriptor (the e4-indexed table stride) is dumped so any sub-rect
-			// / stride / page-UV field for the 256x256 body is visible OFFLINE (to confirm
-			// whether a large part is one twiddled texture or a composite page).
-			char dh[140] = "-";
-			if (_ramAddr(descAddr)) { int n = 0; for (int b = 0; b < 0x3C && n < 132; b++) n += snprintf(dh + n, sizeof(dh) - n, "%02x", (uint8_t)addrspace::read8(descAddr + b)); }
-			if (mf) fprintf(mf, "%d %d PL%02X_part_%03d.raw PL%02X_part_%03d.ppm %d %d %08x %08x %08x %d %08x %d %s %04x %s\n",
-			                part, key, cid, part, cid, part, w, h, e4, e8, ec, rawBytes,
-			                tcw, fmt, linear ? "linear" : "twid", descU16, dh);
-			dumpedTotal++;
 		}
 		if (mf) fclose(mf);
-		if (lg) fprintf(lg, "[CHAR] manifest -> %s (append, raw+ppm)\n", mn);
+		if (lg) fprintf(lg, "[CHAR] GFX1-emitter dump: gfxBase=0x%08x recs=0x%08x texBase=0x%08x -> %s\n",
+		                gfxBase, pdRecs, TEXEL_BASE, mn);
 	}
 	if (lg) { fprintf(lg, "\ndumped %d parts this frame\n", dumpedTotal); fclose(lg); }
 }
