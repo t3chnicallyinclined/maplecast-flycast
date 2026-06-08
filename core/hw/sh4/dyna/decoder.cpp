@@ -18,6 +18,7 @@
 #include "hw/sh4/modules/mmu.h"
 #include "decoder_opcodes.h"
 #include "cfg/option.h"
+#include "network/maplecast_oracle_hook.h"
 
 #define BLOCK_MAX_SH_OPS_SOFT 500
 #define BLOCK_MAX_SH_OPS_HARD 511
@@ -971,7 +972,24 @@ bool dec_DecodeBlock(RuntimeBlockInfo* rbi,u32 max_cycles)
 			//there is no break here by design
 		case NDO_NextOp:
 			{
-				if ((blk->oplist.size() >= BLOCK_MAX_SH_OPS_SOFT || blk->guest_cycles >= max_cycles || state.cpu.rpc >= max_pc)
+				// MapleCast Frame Oracle hook: force a block boundary at the hooked
+				// PCs so a block STARTS there (block-entry injection only fires for a
+				// block's vaddr). 0x8C03093C is a bsr target (already a block start);
+				// 0x8C033E90 is NOT a bsr target (it falls inside the body-parts loop),
+				// so without this split the recompiler never emits a block beginning at
+				// it and the quad-emit hook would never fire. End the current block as a
+				// StaticJump to rpc (same pattern as the BLOCK_MAX_SH_OPS cutoff), so the
+				// next compiled block begins exactly at the hooked PC. Skipped at block
+				// start (rpc==vaddr) and in delay slots so we never split a branch/delay
+				// pair. Gated by the env flag -> stock blocks when the oracle is OFF.
+				if (!state.cpu.is_delayslot
+						&& state.cpu.rpc != blk->vaddr
+						&& maplecast_oracle_hook::mc_oracleHookEnabled
+						&& maplecast_oracle_hook::mc_isHookedPC(state.cpu.rpc))
+				{
+					dec_End(state.cpu.rpc, BET_StaticJump, false);
+				}
+				else if ((blk->oplist.size() >= BLOCK_MAX_SH_OPS_SOFT || blk->guest_cycles >= max_cycles || state.cpu.rpc >= max_pc)
 						&& !state.cpu.is_delayslot)
 				{
 					dec_End(state.cpu.rpc,BET_StaticJump,false);

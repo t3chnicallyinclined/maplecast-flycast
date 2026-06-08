@@ -63,6 +63,7 @@ uint64_t g_activePalBanks = 0;
 #include <netinet/tcp.h>
 #endif
 #include "maplecast_gamestate.h"
+#include "maplecast_oracle_hook.h"
 #include <errno.h>
 
 
@@ -1752,6 +1753,13 @@ void serverPublish(TA_context* ctx)
 	// Still increment the frame counter so local overlays/telemetry work.
 	static uint32_t _localFrameNum = 0;
 	_localFrameNum++;
+
+	// === MAPLECAST_FRAME_ORACLE_HOOK — flush the LIVE block-entry attribution that
+	// the recompiler hook (0x8C03093C begin / 0x8C033E90 quad) buffered during this
+	// frame's SH4 draw walk. serverPublish runs once per frame AFTER that walk
+	// completes, so it is the natural frame boundary. No-op when the hook is OFF.
+	maplecast_oracle_hook::mc_oracleInit();   // one-time stderr log if enabled
+	maplecast_oracle_hook::mc_oracle_frameFlush(_localFrameNum);
 
 	// === MAPLECAST_STATELOG — per-frame RAM state probe (ROM-asset-client test)
 	// Read-only readGameState() + CSV append. Placed BEFORE the PVR snapshot

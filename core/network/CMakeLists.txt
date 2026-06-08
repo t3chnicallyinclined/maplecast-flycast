@@ -38,6 +38,8 @@ target_sources(${PROJECT_NAME} PRIVATE
         maplecast_gamestate.h
         maplecast_mirror.cpp
         maplecast_mirror.h
+        maplecast_oracle_hook.cpp
+        maplecast_oracle_hook.h
         maplecast_ws_server.cpp
         maplecast_ws_server.h
         maplecast_control_ws.cpp

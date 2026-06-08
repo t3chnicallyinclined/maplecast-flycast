@@ -21,6 +21,7 @@ using namespace Xbyak::util;
 #include "oslib/unwind_info.h"
 #include "oslib/virtmem.h"
 #include "cfg/option.h"
+#include "network/maplecast_oracle_hook.h"
 
 static void (*mainloop)();
 static void (*handleException)();
@@ -132,6 +133,19 @@ public:
 		CheckBlock(force_checks, block);
 
 		sub(rsp, STACK_ALIGN);
+
+		// MapleCast Frame Oracle — LIVE compile-time block-entry hook. Default OFF
+		// (mc_oracleHookEnabled set from MAPLECAST_FRAME_ORACLE_HOOK at init); when
+		// unset this is a single bool test at COMPILE time, so prod blocks are stock.
+		// At this point all guest regs are coherent in Sh4cntx.r[] (not yet hoisted
+		// to host regs by regalloc.DoAlloc below). Read-only handler -> determinism-
+		// safe. Same GenCall/call_regs[0] convention as the Do_Exception call below.
+		if (maplecast_oracle_hook::mc_oracleHookEnabled
+		    && maplecast_oracle_hook::mc_isHookedPC(block->vaddr))
+		{
+			mov(call_regs[0], block->vaddr);	// pc
+			GenCall((void (*)())maplecast_oracle_hook::mc_oracle_blockEntry);
+		}
 
 		if (mmu_enabled() && block->has_fpu_op)
 		{
