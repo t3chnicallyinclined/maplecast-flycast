@@ -264,7 +264,7 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=11';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=48';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=49';
 import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=9';
 // StafGL (sprite-staf-gl.mjs) RETIRED — the STAF/HUDF stream now renders through the
 // proven PVR2Renderer (see STAFR/renderStaf below). StafGL stays on disk for reference.
@@ -348,9 +348,13 @@ addEventListener('keydown',e=>{
   box.style.cssText='border:1px solid #06a;margin:6px 0;padding:6px;background:#012';
   box.innerHTML='<b style="color:#0af">SPRITE CLIENT (Option 6)</b><br>'
     +'<label><input type="checkbox" id="sc_on" checked> Render chars from 253B state (no TA)</label><br>'
+    // PARKED paths (assembly/emitter/STAF garble the character) — hidden so the user
+    // works with ONE path. Wrapped in #sc_parked which is display:none'd below.
+    +'<span id="sc_parked" style="display:none">'
     +'<label style="color:#fd6"><input type="checkbox" id="sc_asm"> ASSEMBLY path (parts+asm, A/B) — needs PL{hex}_parts/_asm</label><br>'
     +'<label style="color:#fa6"><input type="checkbox" id="sc_emit"> &nbsp;↳ emitter PORT (game-logic loc_8c033e90; off = hand-roll)</label><br>'
     +'<label style="color:#6fd"><input type="checkbox" id="sc_staf"> STAF path (stripped-TA: full quad list + cached textures, pixel-exact) — needs MAPLECAST_STAF server</label><br>'
+    +'</span>'
     +'<label><input type="checkbox" id="sc_pred" checked> Predict (velocity extrapolation — lower latency)</label><br>'
     +'<label><input type="checkbox" id="sc_gpu" checked> GPU render + effects (WebGPU; off = Canvas2D)</label><br>'
     +'<label>Size <input type="range" id="sc_scale" min="0.5" max="3" step="0.05" value="1.75" style="width:110px;vertical-align:middle"> <span id="sc_scaleval">1.75</span>×</label><br>'
@@ -483,6 +487,7 @@ addEventListener('keydown',e=>{
     const mk=(t,fn)=>{const b=document.createElement('button');b.textContent=t;b.style.marginTop='6px';b.onclick=fn;return b;};
     p.appendChild(mk('DUMP CONFIG',()=>console.log('[asmCfg]',JSON.stringify(window._asmCfg))));
     p.appendChild(mk('RESET',()=>{KN.forEach((k,i)=>{window._asmCfg[k[0]]=k[5];slides[i].value=k[5];spans[i].textContent=k[5];});}));
+    p.style.display='none';   // PARKED: this calibrates the emitter/assembly path which is hidden. window._asmCfg still defined for code that reads it.
     document.body.appendChild(p);
   })();
   // === Satellite/object fine-calibration (window._objCfg) — dial in projectile/
@@ -609,7 +614,11 @@ addEventListener('keydown',e=>{
       scs.style.zIndex='3'; scg.style.zIndex='2'; scv.style.zIndex='2';  // HUD/FX overlay above characters
     }
     if(showSprite){
-      const asm=SPRITECLIENT.assemblyMode;
+      // FORCED WHOLE-SPRITE: the assembly (parts/emitter) and STAF paths are PARKED
+      // (garble the character). Their controls are hidden; pin the tick to the proven
+      // whole-sprite path (buildDrawList) so a stale hidden toggle can't route here.
+      const asm=false;
+      const stafRoute=false;
       // HYBRID: the PVR2Renderer surface (scs) renders the server's FILTERED STAF
       // stream (MAPLECAST_HUDF = effects + HUD only) — the REAL tinted HUD + real
       // effects, TRANSPARENT, OVER the lean character render. Characters stay
@@ -618,8 +627,8 @@ addEventListener('keydown',e=>{
         try{ STAFR.initShared(scs, window._R.dev); STAFR._inited=true; STAFTM=makeStafTexMgr(window._R.dev, SPRITECLIENT); showCanvas(); }
         catch(err){ console.error('[staf-pvr2] init', err); }
       }
-      if(stafMode){
-        // FULL STAF (debug): whole frame from STAF (needs unfiltered MAPLECAST_STAF).
+      if(stafRoute){
+        // FULL STAF (debug, PARKED): whole frame from STAF (needs unfiltered MAPLECAST_STAF).
         try{ renderStaf(); }catch(err){ console.error('[staf-pvr2]', err); }
         hctx.clearRect(0,0,sch.width,sch.height);
         const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.stafStatsText();
