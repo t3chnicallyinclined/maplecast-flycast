@@ -2636,15 +2636,26 @@ done_diff:
 							}
 						}
 
-						// ---- 3) Attribute each quad to the nearest object (bbox-center vs
-						// object screen_xy, bdist<1600 == 40px radius), group quads per object.
+						// ---- 3) Attribute each quad to the nearest object, grouping quads per
+						// object. A sprite's quad bbox does NOT sit on the node's screen_xy: the
+						// part is offset by its assembly hotspot (e.g. hotspot_dx=-76), and big
+						// sprites span >40px, so the old bbox-center<40px radius left almost
+						// everything unattributed. Accept a quad for an object if (a) the object's
+						// screen point falls INSIDE the quad bbox (precise), else (b) it is the
+						// nearest object within a wider 96px radius. Containment wins so a quad
+						// goes to the object it actually covers, not a distant one.
 						static int objQuad[2048];          // quad -> object index (-1 = unattributed)
 						int matched = 0;
+						const float RAD2 = 96.f*96.f;      // fallback radius^2 (~ half a 1.0-scale char)
 						for (int j=0;j<nq;j++) {
-							int best=-1; float bd=1600.f;
+							OQuad& q = qs[j];
+							int best=-1; float bd=RAD2; bool bestInside=false;
 							for (int k=0;k<no;k++) {
-								float dx=qs[j].cx-objs[k].sx, dy=qs[j].cy-objs[k].sy, d=dx*dx+dy*dy;
-								if (d<bd) { bd=d; best=k; }
+								float ox=objs[k].sx, oy=objs[k].sy;
+								bool inside = (ox>=q.x && ox<=q.x+q.w && oy>=q.y && oy<=q.y+q.h);
+								float dx=q.cx-ox, dy=q.cy-oy, d=dx*dx+dy*dy;
+								if (inside) { if (!bestInside || d<bd) { bd=d; best=k; bestInside=true; } }
+								else if (!bestInside && d<bd) { bd=d; best=k; }
 							}
 							objQuad[j]=best;
 							if (best>=0) matched++;
