@@ -45,8 +45,15 @@ bool mc_isHookedPC(u32 pc);
 void DYNACALL mc_oracle_blockEntry(u32 pc);
 
 // Called once per frame from serverPublish() to flush the buffered per-object
-// quad attribution to /dev/shm/mc_oracle_hook.jsonl and reset the buffer.
-// No-op when the hook is disabled.
-void mc_oracle_frameFlush(u32 frame);
+// state to /dev/shm/mc_oracle_hook.jsonl and reset the buffer.
+//
+// `ctx` is the just-completed frame's TA_context (the same one serverPublish is
+// publishing). frameFlush runs ta_parse(ctx) here to recover the per-frame SCREEN
+// quads (verts with real screen x,y) and attributes each to the OBJ_BEGIN object
+// nearest its on-screen position — the per-object SCREEN-quad anchor.
+//
+// Forward-declared as void* to avoid pulling ta_ctx.h into this header; the .cpp
+// casts it back to TA_context*. No-op when the hook is disabled / ctx is null.
+void mc_oracle_frameFlush(void* ctx, u32 frame);
 
 }

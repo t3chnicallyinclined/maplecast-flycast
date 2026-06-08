@@ -1,13 +1,41 @@
 /*
-	MapleCast Frame Oracle — LIVE block-entry hook (EXACT per-quad attribution).
-	See maplecast_oracle_hook.h for the mechanism + provenance.
+	MapleCast Frame Oracle — per-frame per-object SCREEN quads.
+
+	GOAL: every in-match frame, for every drawn object, its sprite_id + live
+	screen_xy + the SCREEN quads (real on-screen x,y/w,h, UV, VRAM tex src) it drew.
+
+	MECHANISM (two cooperating parts):
+	  1. SH4 block-entry hook on 0x8C03093C "Render Main Sprite" (loc_8c03093c).
+	     Fires PER-OBJECT PER-FRAME during gameplay (confirmed live: 2 objects/frame
+	     with real post-transform screen_xy). It reads each object node (r4): node
+	     base, sprite_id@+0x144, screen_xy@+0xE0/E4 (the value THIS routine just
+	     wrote = exactly what the GPU placed), scale, facing, the asm-ptr cluster.
+	     This is the AUTHORITATIVE per-object anchor list.
+	  2. mc_oracle_frameFlush(ctx) runs once/frame in serverPublish AFTER the SH4
+	     draw walk. It ta_parse()'s the completed TA list to recover the per-frame
+	     SCREEN quads (rc.verts x,y), classifies sprite quads (reusing the proven
+	     serverPublish de-index + filter), and attributes each to the nearest
+	     OBJ_BEGIN object by on-screen position. Unmatched quads -> "unassigned".
+
+	WHY NOT the loc_8c033e90 quad emitter: that routine is the LOAD-TIME part-atlas
+	decode — it fires ONCE at match start (proven: 1 of 22197 frames), dumping ~1190
+	parts into the 0x0CE60000 decode buffer with NO screen coords. It's the wrong
+	routine for placement. Its 16-byte decode records are still capturable under the
+	MAPLECAST_FRAME_ORACLE_DECODE sub-flag (off by default).
+
+	Read-only: reads Sh4cntx.r[] + guest RAM; ta_parse builds ctx->rend (re-parsed
+	later for the wire) -> determinism-safe, perf-trivial, gated MAPLECAST_FRAME_ORACLE_HOOK.
+	See maplecast_oracle_hook.h for the recompiler injection point.
 */
 #include "maplecast_oracle_hook.h"
 #include "hw/sh4/sh4_if.h"      // Sh4cntx (p_sh4rcb->cntx.r[16])
 #include "hw/sh4/sh4_mem.h"     // addrspace::read*
+#include "hw/pvr/ta_ctx.h"      // TA_context, rend_context, PolyParam, Vertex
+#include "hw/pvr/ta.h"          // ta_parse
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 
 namespace maplecast_oracle_hook
 {
@@ -17,6 +45,15 @@ namespace maplecast_oracle_hook
 // MVC2 draw blocks at 0x8C033E90 only compile once the game reaches that code,
 // well after static init, so there is no ordering hazard.
 bool mc_oracleHookEnabled = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr);
+
+// Sub-flag: also capture the LOAD-TIME part-atlas decode quads at loc_8c033e90
+// (0x8C033EC0 post-write). PROVEN (live prod capture 2026-06-08): that routine
+// only fires at MATCH LOAD (~frame 2568) and dumps all ~1190 parts into the
+// 0x0CE60000 decode buffer with NO screen coords — it is the part-ATLAS decode,
+// NOT the per-frame render. So the quad hook is OFF by default now; the PRIMARY
+// per-frame SCREEN quads come from ta_parse in mc_oracle_frameFlush(). Set
+// MAPLECAST_FRAME_ORACLE_DECODE=1 to additionally log the one-shot atlas decode.
+static bool mc_decodeQuadsEnabled = (getenv("MAPLECAST_FRAME_ORACLE_DECODE") != nullptr);
 
 // The two hooked guest PCs (CONFIRMED, marvelous2 bank03; FRAME-ORACLE-SPEC §Draw chain):
 //   0x8C03093C loc_8c03093c "Render Main Sprite" — node=r4 (object begin)
@@ -103,16 +140,34 @@ struct Obj {
 	int category;
 	int facing;
 	u32 gfx1, pal, extras, file, fac;
-	int nquads;
-	bool enriched;  // true once OBJ_BEGIN (0x8C03093C) or a quad read the node fields
+	int nquads;       // LOAD-decode quads (sub-flag) attributed to this object
+	int nscreen;      // SCREEN quads (ta_parse) attributed to this object this frame
+	bool enriched;    // true once OBJ_BEGIN (0x8C03093C) read the node fields
+	bool fromBegin;   // captured by OBJ_BEGIN this frame (vs. quad-only)
 };
 
-static const int MAX_OBJS  = 256;
-static const int MAX_QUADS = 4096;
+// A per-frame SCREEN quad recovered from ta_parse(ctx) in mc_oracle_frameFlush:
+// real on-screen x/y/w/h, UV sub-rect, depth range, and the VRAM texture source.
+// These are the quads the GPU actually drew — the per-object placement anchor.
+struct ScreenQuad {
+	float x, y, w, h;       // screen-space bbox
+	float cx, cy;           // bbox center (attribution anchor)
+	float uMn, uMx, vMn, vMx;
+	float zMn, zMx;
+	u32 tcw, tsp, pcw, vramAddr;
+	int  fmt, tw, th, vq, srcBlend, dstBlend;
+	int  obj;               // attributed object index (-1 = unassigned)
+};
+
+static const int MAX_OBJS   = 256;
+static const int MAX_QUADS  = 4096;
+static const int MAX_SCREEN = 4096;
 static Obj  s_objs[MAX_OBJS];
 static int  s_nobj = 0;
-static Quad s_quads[MAX_QUADS];
+static Quad s_quads[MAX_QUADS];     // load-decode quads (sub-flag)
 static int  s_nquad = 0;
+static ScreenQuad s_screen[MAX_SCREEN]; // per-frame SCREEN quads (ta_parse)
+static int  s_nscreen = 0;
 // (s_curObj removed: quad attribution is now by node addr (r10), not by the last
 //  OBJ_BEGIN — see findOrCreateObj. No "current object" state to track.)
 
@@ -135,6 +190,10 @@ static void enrichObj(Obj& o, u32 node)
 	o.fac      = addrspace::read32(node + OFF_FAC_PTR);
 	o.enriched = true;
 }
+
+// GFX1-region tag a screen quad would correlate to, for the attribution refine.
+// (Not used as the primary key — position is — but disambiguates two objects at
+//  nearly the same screen point by their decode-region class.)
 
 // Find the object for this node, or create one. Attribution is by NODE ADDRESS
 // (r10 at the quad-done PC), NOT by "the last OBJ_BEGIN" — the quad emitter
@@ -160,9 +219,11 @@ void mc_oracleInit()
 	if (logged) return;
 	logged = true;
 	if (mc_oracleHookEnabled)
-		fprintf(stderr, "[ORACLE-HOOK] ENABLED — live block-entry attribution "
-		                "(0x%08X begin, 0x%08X quad-done) -> /dev/shm/mc_oracle_hook.jsonl\n",
-		        PC_OBJ_BEGIN, PC_QUAD_DONE);
+		fprintf(stderr, "[ORACLE-HOOK] ENABLED — per-frame per-object SCREEN quads: "
+		                "OBJ_BEGIN 0x%08X (live screen_xy) + ta_parse screen quads attributed "
+		                "by position%s -> /dev/shm/mc_oracle_hook.jsonl\n",
+		        PC_OBJ_BEGIN,
+		        mc_decodeQuadsEnabled ? " (+DECODE quad sub-flag at 0x8C033EC0)" : "");
 }
 
 bool mc_isHookedPC(u32 pc)
@@ -172,7 +233,12 @@ bool mc_isHookedPC(u32 pc)
 	// other alias). This is the FIX for the never-fires bug: block->vaddr is 0x0C..,
 	// the literals are 0x8C.., and an exact == never matched.
 	u32 m = pc & SH4_AREA_MASK;
-	return m == PC_OBJ_BEGIN_M || m == PC_QUAD_DONE_M;
+	if (m == PC_OBJ_BEGIN_M) return true;
+	// The quad-done PC is the LOAD-TIME atlas decode (fires once at match start, no
+	// screen coords) — only hook it when the decode sub-flag is set so normal runs
+	// don't inject a call into a block that never carries useful per-frame data.
+	if (m == PC_QUAD_DONE_M) return mc_decodeQuadsEnabled;
+	return false;
 }
 
 // Per-PC fire counters (DIAGNOSTIC, gated). The previous proof-of-life used a
@@ -201,9 +267,14 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 		u32 node = norm(r[4]);
 		if (!inRam(node)) return;
 		int oi = findOrCreateObj(node);
-		if (oi >= 0) enrichObj(s_objs[oi], node);  // refresh post-transform screen_xy
+		if (oi >= 0) { enrichObj(s_objs[oi], node); s_objs[oi].fromBegin = true; }  // refresh post-transform screen_xy
 		return;
 	}
+
+	// Below this point only the optional LOAD-decode quad capture runs. When the
+	// decode sub-flag is OFF, the quad PC isn't hooked at all (mc_isHookedPC) so we
+	// never reach here for it — but guard anyway.
+	if (!mc_decodeQuadsEnabled) return;
 
 	// mpc == PC_QUAD_DONE_M — the POST-WRITE capture point (0x8C033EC0). The 16-byte
 	// quad at r14 is now FULLY written and r14 has NOT yet advanced. r10 = node base.
@@ -248,9 +319,123 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 	s_objs[oi].nquads++;
 }
 
-void mc_oracle_frameFlush(u32 frame)
+// ---- Per-frame SCREEN-quad recovery from ta_parse(ctx) ---------------------
+// loc_8c033e90 (the LOAD-decode quad emitter) does NOT fire per frame during
+// gameplay (proven: it ran once at match load, frame 2568). The per-frame SCREEN
+// quads the GPU actually draws are in the TA list — recovered by ta_parse here.
+// This reuses the EXACT de-index + sprite-classifier proven in serverPublish's
+// MAPLECAST_FRAME_ORACLE block (maplecast_mirror.cpp ~2494-2588): try rc.idx
+// de-index, fall back to direct rc.verts (autosort-tr sprites), filter out
+// clears / page-tiled bg / oversized stage layers / opaque fills.
+static void collectScreenQuads(rend_context& rc)
 {
-	if (!mc_oracleHookEnabled) { s_nobj = 0; s_nquad = 0; return; }
+	s_nscreen = 0;
+	const u32 nverts = (u32)rc.verts.size();
+	auto collect = [&](std::vector<PolyParam>& lst) {
+		for (PolyParam& pp : lst) {
+			if (s_nscreen >= MAX_SCREEN) return;
+			if (pp.count < 3) continue;
+			u32 pcw = pp.pcw.full, tcw = pp.tcw.full, tsp = pp.tsp.full;
+			bool textured = ((pcw >> 3) & 1) != 0;
+			float mnX=1e9f,mxX=-1e9f,mnY=1e9f,mxY=-1e9f;
+			float uMn=1e9f,uMx=-1e9f,vMn=1e9f,vMx=-1e9f;
+			float zMn=1e30f,zMx=-1e30f;
+			int seen = 0;
+			{   // primary: pp.first/.count index rc.idx (op/pt + non-autosort tr)
+				u32 iend = pp.first + pp.count; if (iend > rc.idx.size()) iend = (u32)rc.idx.size();
+				for (u32 k = pp.first; k < iend; k++) {
+					u32 vi = rc.idx[k]; if (vi >= nverts) continue;
+					const Vertex& vt = rc.verts[vi];
+					if (vt.x<mnX)mnX=vt.x; if (vt.x>mxX)mxX=vt.x;
+					if (vt.y<mnY)mnY=vt.y; if (vt.y>mxY)mxY=vt.y;
+					if (vt.u<uMn)uMn=vt.u; if (vt.u>uMx)uMx=vt.u;
+					if (vt.v<vMn)vMn=vt.v; if (vt.v>vMx)vMx=vt.v;
+					if (vt.z<zMn)zMn=vt.z; if (vt.z>zMx)zMx=vt.z;
+					seen++;
+				}
+			}
+			if (seen == 0) {   // autosort tr: pp.first/.count index rc.verts directly
+				u32 vend = pp.first + pp.count; if (vend > nverts) vend = nverts;
+				for (u32 v = pp.first; v < vend; v++) {
+					const Vertex& vt = rc.verts[v];
+					if (std::isnan(vt.x) || fabsf(vt.x) > 1e25f || std::isnan(vt.y) || fabsf(vt.y) > 1e25f) continue;
+					if (vt.x<mnX)mnX=vt.x; if (vt.x>mxX)mxX=vt.x;
+					if (vt.y<mnY)mnY=vt.y; if (vt.y>mxY)mxY=vt.y;
+					if (vt.u<uMn)uMn=vt.u; if (vt.u>uMx)uMx=vt.u;
+					if (vt.v<vMn)vMn=vt.v; if (vt.v>vMx)vMx=vt.v;
+					if (vt.z<zMn)zMn=vt.z; if (vt.z>zMx)zMx=vt.z;
+					seen++;
+				}
+			}
+			if (seen == 0) continue;
+			float w = mxX-mnX, h = mxY-mnY;
+			if (w < 2.f || h < 2.f) continue;
+			float cy = (mnY+mxY)*0.5f; if (cy <= 20.f) continue;   // strip top HUD row
+			int srcB = (int)((tsp>>29)&7), dstB = (int)((tsp>>26)&7);
+			bool tiled = (uMn < -0.05f || uMx > 1.05f || vMn < -0.05f || vMx > 1.05f);
+			bool opaque = (srcB == 1 && dstB == 0);
+			bool oversized = (w > 200.f || h > 200.f);
+			bool isSprite = textured && !tiled && !opaque && !oversized && tcw != 0;
+			if (!isSprite) continue;
+			ScreenQuad& q = s_screen[s_nscreen++];
+			q.x=mnX; q.y=mnY; q.w=w; q.h=h; q.cx=(mnX+mxX)*0.5f; q.cy=cy;
+			q.uMn=uMn; q.uMx=uMx; q.vMn=vMn; q.vMx=vMx;
+			q.zMn=(zMn> 1e29f)?0.f:zMn; q.zMx=(zMx<-1e29f)?0.f:zMx;
+			q.tcw=tcw; q.tsp=tsp; q.pcw=pcw; q.srcBlend=srcB; q.dstBlend=dstB;
+			q.fmt = (int)((tcw>>27)&7); q.vq = (int)((tcw>>30)&1);
+			q.tw = 8 << ((tsp>>3)&7); q.th = 8 << (tsp&7);
+			q.vramAddr = (tcw & 0x1FFFFF) << 3;
+			q.obj = -1;
+		}
+	};
+	collect(rc.global_param_op);
+	collect(rc.global_param_pt);
+	collect(rc.global_param_tr);
+}
+
+// Attribute each SCREEN quad to the nearest OBJ_BEGIN object by on-screen
+// distance (the OBJ_BEGIN screen_xy is the AUTHORITATIVE post-transform position
+// the renderer wrote — exactly what the GPU placed the object at). A quad with no
+// object within ATTR_RADIUS stays obj=-1 (emitted in the frame "unassigned"
+// bucket so nothing is lost / the offline differ can still see it). Position is
+// the only per-frame per-object signal available (loc_8c033e90 doesn't fire per
+// frame), so this is a clean nearest-anchor over the LIVE screen_xy list — much
+// tighter than the slot-table re-read because anchors are the routine's own output.
+static void attributeScreenQuads()
+{
+	for (int i = 0; i < s_nobj; i++) s_objs[i].nscreen = 0;
+	const float ATTR_RADIUS = 160.f;   // px; tunable. Parts cluster <120px from screen_xy.
+	for (int k = 0; k < s_nscreen; k++) {
+		ScreenQuad& q = s_screen[k];
+		int best = -1; float bestD2 = ATTR_RADIUS * ATTR_RADIUS;
+		for (int i = 0; i < s_nobj; i++) {
+			const Obj& o = s_objs[i];
+			if (!o.fromBegin) continue;          // only anchor on routine-confirmed objects
+			if (o.sx == 0.f && o.sy == 0.f) continue;
+			float dx = q.cx - o.sx, dy = q.cy - o.sy;
+			float d2 = dx*dx + dy*dy;
+			if (d2 < bestD2) { bestD2 = d2; best = i; }
+		}
+		q.obj = best;
+		if (best >= 0) s_objs[best].nscreen++;
+	}
+}
+
+void mc_oracle_frameFlush(void* ctxv, u32 frame)
+{
+	if (!mc_oracleHookEnabled) { s_nobj = 0; s_nquad = 0; s_nscreen = 0; return; }
+
+	// Recover this frame's SCREEN quads from the completed TA list and attribute
+	// them to the OBJ_BEGIN objects. ta_parse here is read-only w.r.t. guest state
+	// (it builds ctx->rend; the mirror re-parses later for the wire) -> no
+	// determinism risk, same call the serverPublish oracle/EFCT paths already make.
+	s_nscreen = 0;
+	TA_context* ctx = (TA_context*)ctxv;
+	if (ctx) {
+		ta_parse(ctx, true);
+		collectScreenQuads(ctx->rend);
+		attributeScreenQuads();
+	}
 
 	// Capacity guard so a long session can't fill /dev/shm.
 	static const long ORACLE_CAP = 64L * 1024 * 1024;
@@ -258,20 +443,19 @@ void mc_oracle_frameFlush(u32 frame)
 	static long  ow = 0;
 	static bool  full = false;
 
-	// DIAGNOSTIC (task item #2): prove the flush is actually called and show what it
-	// found. Periodic so we see the OBJ_BEGIN/QUAD fire totals climb across the run.
+	// DIAGNOSTIC: prove the flush is called + show fire totals AND the new
+	// per-frame screen-quad recovery (objs / screenQuads / attributed).
 	static unsigned long s_flushCalls = 0;
 	long owBefore = ow;
+	int attributed = 0; for (int k=0;k<s_nscreen;k++) if (s_screen[k].obj>=0) attributed++;
 	if ((s_flushCalls++ % 120) == 0)
-		fprintf(stderr, "[ORACLE-HOOK] flush #%lu frame=%u bufferedObjs=%d bufferedQuads=%d "
-		                "fired{OBJ_BEGIN=%lu QUAD=%lu} totalWritten=%ld\n",
-		        s_flushCalls, frame, s_nobj, s_nquad,
+		fprintf(stderr, "[ORACLE-HOOK] flush #%lu frame=%u objs=%d screenQuads=%d attributed=%d "
+		                "decodeQuads=%d fired{OBJ_BEGIN=%lu QUAD=%lu} totalWritten=%ld\n",
+		        s_flushCalls, frame, s_nobj, s_nscreen, attributed, s_nquad,
 		        s_fireObjBegin, s_fireQuad, ow);
 
-	// Emit a line for any frame that captured an object OR a quad. (Quads-without-
-	// OBJ_BEGIN are bucketed into an orphan object by the capture path, so a nonzero
-	// quad count implies a nonzero object count — but guard on both to be safe.)
-	if (s_nobj == 0 && s_nquad == 0) return;
+	// Emit a line for any frame that captured an object, a screen quad, or a decode quad.
+	if (s_nobj == 0 && s_nquad == 0 && s_nscreen == 0) { s_nobj = 0; s_nquad = 0; s_nscreen = 0; return; }
 
 	if (!full) {
 		if (!of) {
@@ -287,9 +471,6 @@ void mc_oracle_frameFlush(u32 frame)
 			char b[2048]; int n = 0;
 			n  = snprintf(b, sizeof b, "{\"frame\":%u,\"objects\":[", frame);
 			ow += fwrite(b, 1, n, of);
-			// Quads are attributed to objects by node addr (q.obj), which may
-			// interleave in stream order, so select per-object by q.obj == i
-			// (not by a contiguous slice).
 			for (int i = 0; i < s_nobj; i++) {
 				const Obj& o = s_objs[i];
 				n = snprintf(b, sizeof b,
@@ -299,41 +480,82 @@ void mc_oracle_frameFlush(u32 frame)
 					"\"tex_src\":{\"gfx1_ptr\":\"0x%08X\",\"pal_ptr\":\"0x%08X\","
 					"\"region\":\"%s\"},"
 					"\"asm_src\":{\"extras_ptr\":\"0x%08X\",\"file_ptr\":\"0x%08X\","
-					"\"fac_ptr\":\"0x%08X\"},\"quads\":[",
+					"\"fac_ptr\":\"0x%08X\"},\"screen_quads\":[",
 					i ? "," : "", o.node, o.sprite_id, o.sx, o.sy,
 					o.scaleX, o.scaleY, o.category, o.facing,
 					o.gfx1, o.pal, classifyRegion(o.gfx1),
 					o.extras, o.file, o.fac);
 				ow += fwrite(b, 1, n, of);
+				// PRIMARY: the per-frame SCREEN quads attributed to this object.
+				// Each carries the real on-screen x,y (near screen_xy), w/h, UV
+				// sub-rect, depth range, VRAM texture source + blend.
 				bool firstQ = true;
+				for (int k = 0; k < s_nscreen; k++) {
+					const ScreenQuad& q = s_screen[k];
+					if (q.obj != i) continue;
+					n = snprintf(b, sizeof b,
+						"%s{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,"
+						"\"u\":[%.4f,%.4f],\"v\":[%.4f,%.4f],\"z\":[%.6g,%.6g],"
+						"\"vram_addr\":\"0x%08X\",\"tcw\":\"0x%08X\",\"fmt\":%d,"
+						"\"tex_wh\":[%d,%d],\"vq\":%d,\"blend\":[%d,%d]}",
+						firstQ ? "" : ",",
+						(int)q.x,(int)q.y,(int)q.w,(int)q.h,
+						q.uMn,q.uMx,q.vMn,q.vMx, q.zMn,q.zMx,
+						q.vramAddr, q.tcw, q.fmt, q.tw, q.th, q.vq,
+						q.srcBlend, q.dstBlend);
+					ow += fwrite(b, 1, n, of);
+					firstQ = false;
+				}
+				n = snprintf(b, sizeof b, "],\"decode_quads\":[");
+				ow += fwrite(b, 1, n, of);
+				// OPTIONAL (sub-flag): the LOAD-time part-atlas decode 16-byte
+				// records attributed to this object by node (mostly empty per-frame).
+				bool firstD = true;
 				for (int k = 0; k < s_nquad; k++) {
 					const Quad& q = s_quads[k];
 					if (q.obj != i) continue;
 					n = snprintf(b, sizeof b,
 						"%s{\"w\":%u,\"h\":%u,\"attr\":\"0x%08X\","
-						"\"texptr\":\"0x%08X\",\"palptr\":\"0x%08X\","
-						"\"cursor\":\"0x%08X\"}",
-						firstQ ? "" : ",", q.w, q.h, q.attr, q.texptr, q.palptr, q.cursor);
+						"\"texptr\":\"0x%08X\",\"palptr\":\"0x%08X\"}",
+						firstD ? "" : ",", q.w, q.h, q.attr, q.texptr, q.palptr);
 					ow += fwrite(b, 1, n, of);
-					firstQ = false;
+					firstD = false;
 				}
 				n = snprintf(b, sizeof b, "]}");
 				ow += fwrite(b, 1, n, of);
+			}
+			// Frame-level "unassigned" bucket: screen quads with no object within
+			// the attribution radius (overlap-ambiguous / owner-less global supers
+			// off the OBJ_BEGIN list). Emitted so nothing is lost and the offline
+			// differ can reason about coverage.
+			n = snprintf(b, sizeof b, "],\"unassigned\":[");
+			ow += fwrite(b, 1, n, of);
+			bool firstU = true;
+			for (int k = 0; k < s_nscreen; k++) {
+				const ScreenQuad& q = s_screen[k];
+				if (q.obj != -1) continue;
+				n = snprintf(b, sizeof b,
+					"%s{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,"
+					"\"vram_addr\":\"0x%08X\",\"tcw\":\"0x%08X\",\"blend\":[%d,%d]}",
+					firstU ? "" : ",", (int)q.x,(int)q.y,(int)q.w,(int)q.h,
+					q.vramAddr, q.tcw, q.srcBlend, q.dstBlend);
+				ow += fwrite(b, 1, n, of);
+				firstU = false;
 			}
 			n = snprintf(b, sizeof b, "]}\n");
 			ow += fwrite(b, 1, n, of);
 			fflush(of);
 			// Per-flush wrote-bytes (sampled with the periodic flush log above).
 			if ((s_flushCalls % 120) == 1)
-				fprintf(stderr, "[ORACLE-HOOK] flush wrote=%ld bytes (frame=%u objs=%d quads=%d)\n",
-				        ow - owBefore, frame, s_nobj, s_nquad);
+				fprintf(stderr, "[ORACLE-HOOK] flush wrote=%ld bytes (frame=%u objs=%d screenQuads=%d)\n",
+				        ow - owBefore, frame, s_nobj, s_nscreen);
 		} else if (of && ow >= ORACLE_CAP) {
 			full = true;
 			fprintf(stderr, "[ORACLE-HOOK] /dev/shm cap reached (%ld bytes) — stopping capture\n", ow);
 		}
 	}
 
-	s_nobj = 0; s_nquad = 0;
+	s_nobj = 0; s_nquad = 0; s_nscreen = 0;
 }
 
 }

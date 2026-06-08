@@ -1759,7 +1759,9 @@ void serverPublish(TA_context* ctx)
 	// frame's SH4 draw walk. serverPublish runs once per frame AFTER that walk
 	// completes, so it is the natural frame boundary. No-op when the hook is OFF.
 	maplecast_oracle_hook::mc_oracleInit();   // one-time stderr log if enabled
-	maplecast_oracle_hook::mc_oracle_frameFlush(_localFrameNum);
+	// Pass the live ctx so the flush can ta_parse() the completed frame and recover
+	// the per-frame SCREEN quads (real screen x,y) to attribute per OBJ_BEGIN object.
+	maplecast_oracle_hook::mc_oracle_frameFlush(ctx, _localFrameNum);
 
 	// === MAPLECAST_STATELOG — per-frame RAM state probe (ROM-asset-client test)
 	// Read-only readGameState() + CSV append. Placed BEFORE the PVR snapshot
