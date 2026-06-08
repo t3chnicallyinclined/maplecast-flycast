@@ -264,7 +264,7 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=11';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=47';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=48';
 import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=9';
 // StafGL (sprite-staf-gl.mjs) RETIRED — the STAF/HUDF stream now renders through the
 // proven PVR2Renderer (see STAFR/renderStaf below). StafGL stays on disk for reference.
@@ -349,7 +349,7 @@ addEventListener('keydown',e=>{
   box.innerHTML='<b style="color:#0af">SPRITE CLIENT (Option 6)</b><br>'
     +'<label><input type="checkbox" id="sc_on" checked> Render chars from 253B state (no TA)</label><br>'
     +'<label style="color:#fd6"><input type="checkbox" id="sc_asm"> ASSEMBLY path (parts+asm, A/B) — needs PL{hex}_parts/_asm</label><br>'
-    +'<label style="color:#fa6"><input type="checkbox" id="sc_emit" checked> &nbsp;↳ emitter PORT (game-logic loc_8c033e90; off = hand-roll)</label><br>'
+    +'<label style="color:#fa6"><input type="checkbox" id="sc_emit"> &nbsp;↳ emitter PORT (game-logic loc_8c033e90; off = hand-roll)</label><br>'
     +'<label style="color:#6fd"><input type="checkbox" id="sc_staf"> STAF path (stripped-TA: full quad list + cached textures, pixel-exact) — needs MAPLECAST_STAF server</label><br>'
     +'<label><input type="checkbox" id="sc_pred" checked> Predict (velocity extrapolation — lower latency)</label><br>'
     +'<label><input type="checkbox" id="sc_gpu" checked> GPU render + effects (WebGPU; off = Canvas2D)</label><br>'
@@ -455,8 +455,8 @@ addEventListener('keydown',e=>{
     console.log('[sprite-client] render path =', e.target.checked?'ASSEMBLY':'WHOLE-SPRITE'); };
   // Emitter-port A/B: window._emitterPort gates the faithful loc_8c033e90 port vs the
   // original hand-rolled builder inside buildAssemblyDrawList. Default ON.
-  window._emitterPort = true;
-  SPRITECLIENT.assemblyMode = true;   // sc_emit checked by default -> START in reconstruct-from-parts
+  window._emitterPort = false;
+  SPRITECLIENT.assemblyMode = false;   // default = WHOLE-SPRITE (emitter/parts path parked; avoids PLxx_parts.png 404 spam on 54 chars w/o part atlases)
   // ONE foolproof toggle: ON = reconstruct from PARTS (emitter loc_8c033e90), OFF = whole BAKED sprite (ground truth).
   box.querySelector('#sc_emit').onchange=e=>{ window._emitterPort=e.target.checked;
     SPRITECLIENT.assemblyMode=e.target.checked; SG.chars={};

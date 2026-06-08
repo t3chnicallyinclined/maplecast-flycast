@@ -795,6 +795,10 @@ export class SpriteClient {
     // lightning, supers). The slot table gives each its OWN authoritative screen
     // pos and render layer, so we draw exactly there — no owner-relative guess.
     if (this.objectsOn !== false) for (const o of drawObjs) {
+      // Skip sentinel/placeholder object ids (0x7fff & 0xffff are empty-slot
+      // markers, 0 is an inactive node) BEFORE the atlas lookup — otherwise they
+      // flood the effects-miss tally with bogus PLxx/0x7fff entries.
+      if (o.sid === 0x7fff || o.sid === 0xffff || o.sid === 0) continue;
       // EFFECT ROUTING (OBJS flags bit0 = is_effect, node+0x15c in Effect Poly
       // 0x0CED0000): resolve the sprite from the shared EFFECTS atlas (this.chars
       // [FX_CID], populated by loadFxAtlas when it carries a `sprites` map), NOT the
@@ -874,9 +878,15 @@ export class SpriteClient {
     // exact list of effect sprite_ids to put in the effects atlas. (window._objMiss
     // also holds it live for inspection.)
     if ((this._dlc = (this._dlc || 0) + 1) % 180 === 0 && this._objMiss && this._objMiss.size) {
-      const top = [...this._objMiss.entries()].sort((a,b)=>b[1]-a[1]).slice(0,40);
-      console.warn('[effects-miss] sprite_ids not in any per-char atlas (cid/sid x frames):',
-        top.map(([k,v])=>`${k}×${v}`).join('  '));
+      // Keep accumulating the tally every frame, but rate-limit the console output
+      // to once per ~5s so the rAF stack trace doesn't flood the console.
+      const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      if (!this._lastEffMissLog || (now - this._lastEffMissLog) >= 5000) {
+        this._lastEffMissLog = now;
+        const top = [...this._objMiss.entries()].sort((a,b)=>b[1]-a[1]).slice(0,40);
+        console.warn('[effects-miss] sprite_ids not in any per-char atlas (cid/sid x frames):',
+          top.map(([k,v])=>`${k}×${v}`).join('  '));
+      }
       if (typeof window !== 'undefined') window._objMiss = this._objMiss;
     }
     const missEff = this._objMiss ? this._objMiss.size : 0;
