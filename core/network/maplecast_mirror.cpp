@@ -12,6 +12,7 @@
 #include <map>
 #include <unordered_set>
 #include <cstring>
+#include <cmath>
 #include "types.h"
 #include "maplecast_mirror.h"
 #include "hub_discovery.h"
@@ -2486,16 +2487,45 @@ done_diff:
 								bool textured = ((pcw >> 3) & 1) != 0;
 								float mnX=1e9f,mxX=-1e9f,mnY=1e9f,mxY=-1e9f;
 								float uMn=1e9f,uMx=-1e9f,vMn=1e9f,vMx=-1e9f;
-								uint32_t iend = pp.first + pp.count;
-								if (iend > rc.idx.size()) iend = (uint32_t)rc.idx.size();
-								for (uint32_t k = pp.first; k < iend; k++) {
-									uint32_t vi = rc.idx[k]; if (vi >= nverts) continue;
-									const auto& vt = rc.verts[vi];
-									if (vt.x<mnX)mnX=vt.x; if (vt.x>mxX)mxX=vt.x;
-									if (vt.y<mnY)mnY=vt.y; if (vt.y>mxY)mxY=vt.y;
-									if (vt.u<uMn)uMn=vt.u; if (vt.u>uMx)uMx=vt.u;
-									if (vt.v<vMn)vMn=vt.v; if (vt.v>vMx)vMx=vt.v;
+								// ROOT-CAUSE FIX: pp.first/.count are NOT always rc.idx offsets.
+								// makePrimRestartIndex/makeIndex (op/pt and non-autosort tr) rewrite
+								// them to index rc.idx; but sortTriangles (autosort translucent — the
+								// MVC2 character/projectile sprites) leaves them indexing rc.verts
+								// DIRECTLY (ta_util.cpp:88). The old rc.idx-only de-index therefore
+								// read garbage for every autosort-tr sprite -> empty quads. Detect
+								// the convention per poly: try rc.idx de-index first; if it yields no
+								// valid verts (degenerate), fall back to the direct rc.verts read
+								// (the proven TADBG/TAEFF pattern, ta_vtx.cpp ~2382).
+								int seen = 0;
+								{
+									uint32_t iend = pp.first + pp.count;
+									if (iend > rc.idx.size()) iend = (uint32_t)rc.idx.size();
+									for (uint32_t k = pp.first; k < iend; k++) {
+										uint32_t vi = rc.idx[k]; if (vi >= nverts) continue;
+										const auto& vt = rc.verts[vi];
+										if (vt.x<mnX)mnX=vt.x; if (vt.x>mxX)mxX=vt.x;
+										if (vt.y<mnY)mnY=vt.y; if (vt.y>mxY)mxY=vt.y;
+										if (vt.u<uMn)uMn=vt.u; if (vt.u>uMx)uMx=vt.u;
+										if (vt.v<vMn)vMn=vt.v; if (vt.v>vMx)vMx=vt.v;
+										seen++;
+									}
 								}
+								if (seen == 0) {
+									// vert-addressed (autosort tr / sortTriangles): pp.first/.count index rc.verts
+									uint32_t vend = pp.first + pp.count;
+									if (vend > nverts) vend = nverts;
+									for (uint32_t v = pp.first; v < vend; v++) {
+										const auto& vt = rc.verts[v];
+										// skip flycast's inf/NaN strip-restart sentinels (ta_util is_vertex_inf, inlined)
+										if (std::isnan(vt.x) || fabsf(vt.x) > 1e25f || std::isnan(vt.y) || fabsf(vt.y) > 1e25f) continue;
+										if (vt.x<mnX)mnX=vt.x; if (vt.x>mxX)mxX=vt.x;
+										if (vt.y<mnY)mnY=vt.y; if (vt.y>mxY)mxY=vt.y;
+										if (vt.u<uMn)uMn=vt.u; if (vt.u>uMx)uMx=vt.u;
+										if (vt.v<vMn)vMn=vt.v; if (vt.v>vMx)vMx=vt.v;
+										seen++;
+									}
+								}
+								if (seen == 0) continue;
 								float w = mxX-mnX, h = mxY-mnY;
 								if (w < 2.f || h < 2.f) continue;
 								float cy = (mnY+mxY)*0.5f; if (cy <= 20.f) continue;  // strip top HUD row
@@ -2519,6 +2549,20 @@ done_diff:
 						collect(rc.global_param_op);
 						collect(rc.global_param_pt);
 						collect(rc.global_param_tr);
+
+						// ---- DIAGNOSTIC (hint #1/#3): does the TA poly list exist here, and
+						// how many quads survive the de-index? Logged to stderr every 60 frames
+						// so a stale capture self-explains. If op/pt/tr or verts are 0 the parse
+						// isn't populating at this call site; if nq>0 but matched==0 the bbox
+						// coords don't align with object screen_xy (RTT/native space).
+						static int _oDiag = 0;
+						bool _oDiagNow = (++_oDiag % 60) == 0;
+						if (_oDiagNow)
+							fprintf(stderr,
+								"[ORACLE] f%u rtt=%d op=%zu pt=%zu tr=%zu verts=%zu idx=%zu -> nq=%d\n",
+								ofc, (int)rc.isRTT,
+								rc.global_param_op.size(), rc.global_param_pt.size(),
+								rc.global_param_tr.size(), rc.verts.size(), rc.idx.size(), nq);
 
 						// ---- 2) Enumerate drawn objects from MVC2's OWN slot table (mirrors
 						// readAllDrawn) but keep node_addr + the asm pointer cluster.
@@ -2595,6 +2639,7 @@ done_diff:
 						// ---- 3) Attribute each quad to the nearest object (bbox-center vs
 						// object screen_xy, bdist<1600 == 40px radius), group quads per object.
 						static int objQuad[2048];          // quad -> object index (-1 = unattributed)
+						int matched = 0;
 						for (int j=0;j<nq;j++) {
 							int best=-1; float bd=1600.f;
 							for (int k=0;k<no;k++) {
@@ -2602,12 +2647,15 @@ done_diff:
 								if (d<bd) { bd=d; best=k; }
 							}
 							objQuad[j]=best;
+							if (best>=0) matched++;
 						}
+						if (_oDiagNow)
+							fprintf(stderr, "[ORACLE]   no=%d nq=%d matched=%d\n", no, nq, matched);
 
 						// ---- 4) Emit one JSON line for this frame.
 						std::string line; line.reserve(4096);
 						char nb[512];
-						snprintf(nb,sizeof nb,"{\"frame\":%u,\"in_match\":1,\"objects\":[", ofc);
+						snprintf(nb,sizeof nb,"{\"frame\":%u,\"in_match\":1,\"nq\":%d,\"matched\":%d,\"rtt\":%d,\"objects\":[", ofc, nq, matched, (int)rc.isRTT);
 						line += nb;
 						bool firstObj=true;
 						for (int k=0;k<no;k++) {
