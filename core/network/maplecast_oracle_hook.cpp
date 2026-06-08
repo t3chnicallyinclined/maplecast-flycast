@@ -425,13 +425,21 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 {
 	if (!mc_oracleHookEnabled) { s_nobj = 0; s_nquad = 0; s_nscreen = 0; return; }
 
+	// IN-MATCH GATE (in_match flag @0x8C289624, same as the serverPublish oracle).
+	// The per-object draw routine (loc_8c03093c) only fires during gameplay, and
+	// the menu/attract screens emit ~700 textured quads/frame with no characters —
+	// running ta_parse + emitting them just burns CPU and fills the /dev/shm cap
+	// with unattributable noise. Skip everything (incl. the heavy ta_parse) when
+	// not in a match. This keeps the instrument cheap AND focused on real frames.
+	bool inMatch = addrspace::read8(0x8C289624) != 0;
+
 	// Recover this frame's SCREEN quads from the completed TA list and attribute
 	// them to the OBJ_BEGIN objects. ta_parse here is read-only w.r.t. guest state
 	// (it builds ctx->rend; the mirror re-parses later for the wire) -> no
 	// determinism risk, same call the serverPublish oracle/EFCT paths already make.
 	s_nscreen = 0;
 	TA_context* ctx = (TA_context*)ctxv;
-	if (ctx) {
+	if (ctx && inMatch) {
 		ta_parse(ctx, true);
 		collectScreenQuads(ctx->rend);
 		attributeScreenQuads();
@@ -454,8 +462,12 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 		        s_flushCalls, frame, s_nobj, s_nscreen, attributed, s_nquad,
 		        s_fireObjBegin, s_fireQuad, ow);
 
-	// Emit a line for any frame that captured an object, a screen quad, or a decode quad.
-	if (s_nobj == 0 && s_nquad == 0 && s_nscreen == 0) { s_nobj = 0; s_nquad = 0; s_nscreen = 0; return; }
+	// Only emit for in-match frames (the gate above already skipped the heavy
+	// recovery off-match, so s_nscreen is 0 there) AND only when something was
+	// captured. This keeps the jsonl to real gameplay frames.
+	if (!inMatch || (s_nobj == 0 && s_nquad == 0 && s_nscreen == 0)) {
+		s_nobj = 0; s_nquad = 0; s_nscreen = 0; return;
+	}
 
 	if (!full) {
 		if (!of) {
