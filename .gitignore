@@ -136,9 +136,16 @@ bake.csv
 
 # Local-only sprite atlas (rip-derived, never committed)
 /atlas/
+
+# Vendored third-party repos cloned for RE reference (e.g. ModNao NaomiLib/PVR
+# decoder, github.com/rob2d/modnao). Never commit a vendored repo.
+_vendor/
 # HD / rip-derived per-character atlases used by the sprite-client demo
 # (web/hd-cable-demo.html). Real-ESRGAN-upscaled MvC2 sprites = derivative art.
 web/test-atlas/chars/
+# Ripped stage backgrounds (STGxxPOL/TEX disc-derived geometry + textures) served
+# to web/stage-test.html. Disc-derived — never committed.
+web/test-atlas/stages/
 
 # Assembly-driven part-atlas capture outputs (ROM-derived, never committed)
 # Probe writes to /dev/shm; packer writes PL??_parts.png / PL??_asm.json / *_composite.png
@@ -170,3 +177,9 @@ MvC2_Spritesheets_*/
 
 # state-replica local test kit — ROM-derived savestate + BIOS, never commit
 state-replica-kit/
+
+# Frame Oracle ground-truth captures (per-frame TA quads pulled from prod).
+# ROM-derived (real game draw lists) — never commit. The analysis tool in
+# _oracle/ (the .py) IS committable; the .jsonl captures are NOT.
+_oracle/*.jsonl
+_oracle/*.ndjson

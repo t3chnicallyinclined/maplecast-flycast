@@ -2476,6 +2476,7 @@ done_diff:
 							float uMn, uMx, vMn, vMx;
 							uint32_t tcw, tsp, pcw, vramAddr, texId;
 							int fmt, srcBlend, dstBlend, tw, th, vq;
+							bool isSprite;   // survives the non-sprite filter (see classify below)
 						};
 						static OQuad qs[2048]; int nq = 0;
 						uint32_t nverts = (uint32_t)rc.verts.size();
@@ -2543,6 +2544,32 @@ done_diff:
 								} else {
 									q.fmt=-1; q.vq=0; q.tw=0; q.th=0; q.vramAddr=0; q.texId=0;
 								}
+								// ---- SPRITE CLASSIFIER (thresholds derived from the prod capture
+								// _oracle/mc_oracle.jsonl, 13420 frames; see commit msg / analysis).
+								// A character/effect part-quad is: TEXTURED, NOT page-tiled, MODEST
+								// size, and translucent/additive (autosort-tr) — never an opaque
+								// screen-clear or a recurring opaque stage backdrop. Filtering these
+								// out BEFORE attribution is what lets a quad reach the character it
+								// covers instead of the 1152x480 clear / 613x411 backdrop that merely
+								// contains the same screen point.
+								//   (1) untextured       -> screen clear / flat fill (texId 0)
+								//   (2) page-tiled       -> scrolling bg (u or v outside ~[0,1])
+								//   (3) oversized >200px  -> stage backdrop / parallax layer. Capture:
+								//       real parts cluster med 30-64px, p90 H=70; the big recurring
+								//       translucent stage layers sit at 137-209px and the opaque
+								//       backdrop at 613px. 200 keeps parts (incl. larger super body
+								//       parts) while dropping every recurring stage layer.
+								//   (4) opaque [src=1,dst=0] -> stage/HUD fill. Char sprites are
+								//       autosort-translucent [4,5] or additive effects [4,1]. In the
+								//       capture, dropping [1,0] removes the backdrop fragments with
+								//       zero loss of [4,5]/[4,1] parts.
+								// After (1)-(4) the survivors' centers sit a median 50px (p90 86px,
+								// all <120px) from their object's screen_xy -> clean proximity match.
+								bool tiled = (uMn < -0.05f || uMx > 1.05f || vMn < -0.05f || vMx > 1.05f);
+								bool opaque = (q.srcBlend == 1 && q.dstBlend == 0);
+								bool oversized = (w > 200.f || h > 200.f);
+								q.isSprite = textured && !tiled && !opaque && !oversized
+								             && q.texId != 0 && tcw != 0;
 								nq++;
 							}
 						};
@@ -2636,37 +2663,42 @@ done_diff:
 							}
 						}
 
-						// ---- 3) Attribute each quad to the nearest object, grouping quads per
-						// object. A sprite's quad bbox does NOT sit on the node's screen_xy: the
-						// part is offset by its assembly hotspot (e.g. hotspot_dx=-76), and big
-						// sprites span >40px, so the old bbox-center<40px radius left almost
-						// everything unattributed. Accept a quad for an object if (a) the object's
-						// screen point falls INSIDE the quad bbox (precise), else (b) it is the
-						// nearest object within a wider 96px radius. Containment wins so a quad
-						// goes to the object it actually covers, not a distant one.
-						static int objQuad[2048];          // quad -> object index (-1 = unattributed)
-						int matched = 0;
-						const float RAD2 = 96.f*96.f;      // fallback radius^2 (~ half a 1.0-scale char)
+						// ---- 3) Attribute each SPRITE quad (q.isSprite) to the nearest object by
+						// proximity of the quad CENTER to the object's anchor (screen_xy + assembly
+						// hotspot). The non-sprite quads (clears, tiled bg, oversized stage/parallax,
+						// opaque backdrop) were already excluded by the classifier above — that is the
+						// fix for "huge background quads got attributed". With only character/effect
+						// parts left, plain nearest-center wins; NO bbox-containment (containment was
+						// what handed the 1152x480 clear & 613x411 backdrop to whatever they covered).
+						// Capture-derived radius: survivor centers sit <120px from screen_xy (p90 86).
+						static int objQuad[2048];          // quad -> object index (-1 = unattributed / non-sprite)
+						int matched = 0, nSprite = 0, nFiltered = 0;
+						const float RAD2 = 120.f*120.f;    // proximity radius^2 (p90 dist=86px, all <120)
 						for (int j=0;j<nq;j++) {
 							OQuad& q = qs[j];
-							int best=-1; float bd=RAD2; bool bestInside=false;
+							objQuad[j] = -1;
+							if (!q.isSprite) { nFiltered++; continue; }
+							nSprite++;
+							int best=-1; float bd=RAD2;
 							for (int k=0;k<no;k++) {
-								float ox=objs[k].sx, oy=objs[k].sy;
-								bool inside = (ox>=q.x && ox<=q.x+q.w && oy>=q.y && oy<=q.y+q.h);
+								// anchor = object screen_xy + its assembly hotspot (part offset)
+								float ox=objs[k].sx + (float)objs[k].hotDx;
+								float oy=objs[k].sy + (float)objs[k].hotDy;
 								float dx=q.cx-ox, dy=q.cy-oy, d=dx*dx+dy*dy;
-								if (inside) { if (!bestInside || d<bd) { bd=d; best=k; bestInside=true; } }
-								else if (!bestInside && d<bd) { bd=d; best=k; }
+								if (d<bd) { bd=d; best=k; }
 							}
 							objQuad[j]=best;
 							if (best>=0) matched++;
 						}
 						if (_oDiagNow)
-							fprintf(stderr, "[ORACLE]   no=%d nq=%d matched=%d\n", no, nq, matched);
+							fprintf(stderr, "[ORACLE]   no=%d nq=%d sprite=%d filtered=%d matched=%d\n",
+							        no, nq, nSprite, nFiltered, matched);
 
 						// ---- 4) Emit one JSON line for this frame.
 						std::string line; line.reserve(4096);
 						char nb[512];
-						snprintf(nb,sizeof nb,"{\"frame\":%u,\"in_match\":1,\"nq\":%d,\"matched\":%d,\"rtt\":%d,\"objects\":[", ofc, nq, matched, (int)rc.isRTT);
+						snprintf(nb,sizeof nb,"{\"frame\":%u,\"in_match\":1,\"nq\":%d,\"sprite\":%d,\"filtered\":%d,\"matched\":%d,\"rtt\":%d,\"objects\":[",
+						         ofc, nq, nSprite, nFiltered, matched, (int)rc.isRTT);
 						line += nb;
 						bool firstObj=true;
 						for (int k=0;k<no;k++) {
