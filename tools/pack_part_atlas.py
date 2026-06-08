@@ -36,26 +36,27 @@ import argparse, json, os, struct, sys
 MAGENTA = (0xFF, 0x00, 0xFF)   # the probe's transparent key (PPM has no alpha)
 
 # ---- EXTRAS assembly parsing -------------------------------------------------
-# REAL 8-byte record layout (proven 2026-06-07 against PL00_DAT_EXTRAS_DATA.BIN and
-# the quad emitter loc_8c033e90, bank03.asm:9258):
-#   [dx:s16 @+0][dy:s16 @+2][part_idx:u16 @+4][attr:u16 @+6]
-#   terminator = attr == 0x00FF          (the file's leading 8-byte rec is one such)
-#   flip       = attr & 0x8000  (bit15)
-#   pal_row    = attr & 0x00FF  (low byte, fed into the per-part palette combine)
+# REAL 8-byte record layout (CONFIRMED against the quad emitter loc_8c033d78/e90,
+# marvelous2 build/bank03.asm:9092-9305):
+#   [dx:s16 @+0][dy:s16 @+2][palette:u16 @+4][GFX_SELECTOR:u16 @+6]
+#   terminator   = GFX_SELECTOR(@+6) == 0x00FF   (sentinel quad, loc_8c033f14)
+#   GFX_SELECTOR = index into the GFX1 offset table (in-range 29..65) — the part KEY
+#   palette row  = (rec[+0x4] & 0x3ff) >> 4      (static form)
 #
-# OLD (wrong) model read part_idx as u8@+4 and treated the +6 low byte as a "mode"
-# terminator — that collapsed every part_idx to 0/1/2 (the 256x256 fallback) and is
-# why the baked PL2A_asm.json had bogus giant single-part frames. part_idx is a u16
-# index into the GFX1 offset table (PL00 spans 0..277).
+# THE PRIOR BUG: read the GFX index from +4 (= palette, a near-constant ~16) and
+# treated +6 as a terminator-only attr — collapsing every key to a palette constant,
+# so the assembly part-keys never matched any captured part. The texture SELECTOR is
+# +6 (range 29-65); +4 is the palette.
 #
 # The EXTRAS region is a flat stream of assemblies; an assembly is a run of records
-# ending at the attr==0x00FF terminator (an all-zero 8-byte record also separates).
+# ending at the +6==0x00FF terminator (an all-zero 8-byte record also separates).
 # Assemblies are keyed here by their ordinal index; the sprite_id -> assembly map
 # comes from the runtime PARTDUMP (live cell gives the real sprite_id).
 REC = 8
 
 def parse_extras(buf):
-    """Return {assembly_index: [ {dx,dy,part,flip,pal} ... ]} for every assembly."""
+    """Return {assembly_index: [ {dx,dy,part,flip,pal} ... ]} for every assembly.
+    `part` is the +6 GFX_SELECTOR (the atlas key)."""
     asms = {}
     cur = []
     idx = 0
@@ -63,16 +64,16 @@ def parse_extras(buf):
     n = len(buf)
     while pos + REC <= n:
         dx, dy = struct.unpack_from('<hh', buf, pos)
-        part = struct.unpack_from('<H', buf, pos + 4)[0]
-        attr = struct.unpack_from('<H', buf, pos + 6)[0]
+        palw = struct.unpack_from('<H', buf, pos + 4)[0]   # palette word
+        sel  = struct.unpack_from('<H', buf, pos + 6)[0]   # GFX_SELECTOR (key)
         lo = struct.unpack_from('<I', buf, pos)[0]
         pos += REC
-        if attr == 0x00FF or (lo == 0 and part == 0 and attr == 0):
+        if sel == 0x00FF or (lo == 0 and sel == 0 and palw == 0):
             if cur:
                 asms[idx] = cur; idx += 1; cur = []
             continue
-        cur.append({"dx": dx, "dy": dy, "part": part,
-                    "flip": 1 if (attr & 0x8000) else 0, "pal": attr & 0xFF})
+        cur.append({"dx": dx, "dy": dy, "part": sel,
+                    "flip": 0, "pal": (palw & 0x3ff) >> 4})
     if cur:
         asms[idx] = cur
     return asms
@@ -256,7 +257,15 @@ def main():
             if args.twid_large and twid != "linear" and w >= 64 and h >= 64:
                 twid = args.twid_large
             nfmt[fname] = nfmt.get(fname, 0) + 1
-            if os.path.exists(rpath):
+            # PREFER the PPM preview: the probe bakes it with the part's CORRECT live
+            # palette row (Dat_Pal + palRow*32). The .raw + decode_paletted() path uses
+            # pal_base=0 (palette bank 0) which loses the per-part palette row, so it is
+            # only a fallback when no PPM exists. (The .raw stays the authoritative source
+            # for offline format-locking via tools/decode_raw_part.py.)
+            if os.path.exists(ppath):
+                pw, ph, px = read_ppm(ppath)
+                parts_px[idx] = (pw, ph, ppm_to_rgba(pw, ph, px))
+            elif os.path.exists(rpath):
                 if fname in ('pal4', 'pal8'):
                     if palette is None:
                         # paletted part but no palette dump -> skip (logged below)
@@ -267,9 +276,6 @@ def main():
                     data = drp.read_raw(rpath, w, h, bpp)
                     img = drp.decode(data, w, h, fname, twid)
                 parts_px[idx] = (w, h, img.convert('RGBA').tobytes())
-            elif os.path.exists(ppath):
-                pw, ph, px = read_ppm(ppath)
-                parts_px[idx] = (pw, ph, ppm_to_rgba(pw, ph, px))
         elif use_raw:
             if not os.path.exists(rpath):
                 continue

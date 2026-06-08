@@ -66,6 +66,15 @@ bool mainui_rend_frame()
 		}
 	}
 
+	// Headless safety: there is NO imgui context / imguiDriver in a headless server
+	// build, so gui_display_ui() dereferences a null driver and SIGSEGVs. If anything
+	// ever opens the GUI (e.g. a savestate load that lands on the Main menu, or an
+	// error dialog), force it Closed so the SH4 keeps running instead of crashing.
+	// In normal prod the GUI is already Closed, so this is a no-op there.
+	if (maplecast_mirror::isHeadless() && gui_is_open()) {
+		gui_setState(GuiState::Closed);
+	}
+
 	if (gui_is_open())
 	{
 		// Debug: confirm we're entering the gui_display_ui branch when

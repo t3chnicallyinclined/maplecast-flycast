@@ -1110,13 +1110,17 @@ static void partDump(const GameState& state) {
 			if (kf && ftell(kf) == 0)
 				fprintf(kf, "# sprite_id slot nrecs dx,dy,part,flip;...  (LIVE cell: sid=kf[4], slot=kf[0x12], asm=EXTRAS+slot*0x400+8)\n");
 
-			// REAL record layout (proven against PL00 EXTRAS + bank03 loc_8c033e90):
-			//   [dx:s16 @+0][dy:s16 @+2][part_idx:u16 @+4][attr:u16 @+6]
-			//   terminator  = attr == 0x00FF (the file's leading 8-byte rec is one such)
-			//   flip        = attr & 0x8000   ;  pal_row = attr & 0x00FF (low byte)
-			// The OLD decode read part_idx as u8@+4 and treated +6's LOW byte as a
-			// "mode" terminator — that collapsed every part_idx to 0/1/2 (the 256x256
-			// fallback). part_idx is a u16 GFX-offset-table index (PL00 spans 0..277).
+			// REAL record layout (CONFIRMED against bank03 loc_8c033d78/e90, marvelous2
+			// build/bank03.asm:9092-9305 — the quad emitter):
+			//   [dx:s16 @+0][dy:s16 @+2][palette:u16 @+4][GFX_SELECTOR:u16 @+6]
+			//   terminator   = GFX_SELECTOR (@+6) == 0x00FF (sentinel quad, loc_8c033f14)
+			//   GFX_SELECTOR = the GFX1 offset-table index (in-range 29..65)
+			//   palette row  = (rec[+0x4] & 0x3ff) >> 4   (static form; ignore +0x12d/12e overlay)
+			//   flip         = facing XOR record bit (mirrored via screen transform; not in attr)
+			// THE PRIOR BUG: the GFX index was read from +4 (= palette, a constant ~16)
+			// and the selector at +6 was treated as a terminator-only attr. The texture
+			// SELECTOR is +6 (range 29-65); +4 is the palette. Reading the index from +4
+			// keyed every part to the same palette constant -> empty/garbage atlas.
 			int nrec = 0;
 			if (kf && recs) {
 				char body[1900]; int bn = 0;
@@ -1124,15 +1128,17 @@ static void partDump(const GameState& state) {
 					uint32_t rec = recs + (uint32_t)r * 8;
 					int16_t  rdx   = (int16_t) addrspace::read16(rec);
 					int16_t  rdy   = (int16_t) addrspace::read16(rec + 2);
-					uint16_t rpart = (uint16_t)addrspace::read16(rec + 4);
-					uint16_t rattr = (uint16_t)addrspace::read16(rec + 6);
-					if (rattr == 0x00FF) break;                     // assembly terminator
+					uint16_t rpalw = (uint16_t)addrspace::read16(rec + 4);   // palette word
+					uint16_t rsel  = (uint16_t)addrspace::read16(rec + 6);   // GFX_SELECTOR (the key)
+					if (rsel == 0x00FF) break;                      // assembly terminator (sentinel)
 					uint32_t lo = addrspace::read32(rec);
-					if (lo == 0 && rpart == 0 && rattr == 0) continue;   // all-zero pad / separator
+					if (lo == 0 && rsel == 0 && rpalw == 0) continue;    // all-zero pad / separator
+					unsigned palRow = (unsigned)((rpalw & 0x03ff) >> 4);   // static palette row
 					if (bn < (int)sizeof(body) - 40)
+						// "<dx>,<dy>,<selector>,<flip>,<palRow>;"  — `part` field == +6 selector
 						bn += snprintf(body + bn, sizeof(body) - bn, "%d,%d,%u,%u,%u;",
-						               rdx, rdy, rpart, (rattr & 0x8000) ? 1 : 0, (rattr & 0xFF));
-					if (rpart < 512) liveUsePart[rpart] = true;     // ensure this part is dumped (u16 idx reaches ~277)
+						               rdx, rdy, rsel, 0u, palRow);
+					if (rsel < 512) liveUsePart[rsel] = true;       // dump this selector's pixels
 					nrec++;
 				}
 				if (nrec > 0) fprintf(kf, "%u %u %d %s\n", liveSid, slot, nrec, body);
@@ -1146,26 +1152,26 @@ static void partDump(const GameState& state) {
 			}
 		}
 
-		// Collect every part_idx referenced anywhere in the EXTRAS region so the pixel
-		// dump below covers the character's FULL part set. The region is a flat stream
-		// of assemblies, each a run of 8-byte records terminated by attr==0x00FF (or an
-		// all-zero separator). Real layout (proven): part_idx=u16@+4, attr=u16@+6.
-		// (The old 0x400-fixed-slot + part-u8@+4 model was wrong — see sidasm note.)
+		// Collect every GFX_SELECTOR referenced anywhere in the EXTRAS region so the
+		// pixel dump below covers the character's FULL part set. The region is a flat
+		// stream of assemblies, each a run of 8-byte records terminated by selector(@+6)
+		// ==0x00FF (or an all-zero separator). CONFIRMED layout: palette=u16@+4,
+		// GFX_SELECTOR=u16@+6 (the key). (The old part-u8@+4 model was wrong.)
 		bool usePart[512] = {false};
 		int nUse = 0, nSlots = 0;
 		if (_ramAddr(exP)) {
 			const int NREC = 0x10000 / 8;                     // scan up to 64KB region
 			bool inAsm = false;
 			for (int r = 0; r < NREC; r++) {
-				uint32_t rec = exP + (uint32_t)r * 8;
-				uint16_t part = (uint16_t)addrspace::read16(rec + 4);
-				uint16_t attr = (uint16_t)addrspace::read16(rec + 6);
+				uint32_t rec  = exP + (uint32_t)r * 8;
+				uint16_t palw = (uint16_t)addrspace::read16(rec + 4);   // palette word
+				uint16_t sel  = (uint16_t)addrspace::read16(rec + 6);   // GFX_SELECTOR (key)
 				uint32_t lo   = addrspace::read32(rec);
-				if (attr == 0x00FF || (lo == 0 && part == 0 && attr == 0)) {
+				if (sel == 0x00FF || (lo == 0 && sel == 0 && palw == 0)) {
 					if (inAsm) { nSlots++; inAsm = false; }   // assembly boundary
 					continue;
 				}
-				if (part < 512 && !usePart[part]) { usePart[part] = true; nUse++; }
+				if (sel < 512 && !usePart[sel]) { usePart[sel] = true; nUse++; }
 				inAsm = true;
 			}
 			if (inAsm) nSlots++;
@@ -1189,36 +1195,46 @@ static void partDump(const GameState& state) {
 		}
 
 		// =====================================================================
-		// PIXEL RESOLUTION — the QUAD EMITTER path (bank03 loc_8c033e90), NOT the
-		// broken DM00 `charBase + part_idx` directory walk. Exactly per the disasm
-		// (MVC2-RECONSTRUCTION-SPEC.md §2, bank03.asm:9258-9305):
+		// PIXEL RESOLUTION — the QUAD EMITTER path (bank03 loc_8c033d78/e90), CONFIRMED
+		// against marvelous2 build/bank03.asm:9092-9305:
 		//
-		//   gfx_base = *(node + 0x15c)                    ; Dat_GFX1 (loc_8c033f72=0x15c)
+		//   gfx1     = *(node + 0x15c)                     ; Dat_GFX1 (loc_8c033f72=0x15c)
 		//   ; the running texel pointer is seeded ONCE per node at routine entry:
 		//   texPtr   = 0x0CE60000                          ; (loc_8c033e28 literal)
 		//   ; then per EXTRAS record, IN ORDER:
-		//   part_idx = u16 @(rec + 0x06)
-		//   off      = u32 @(gfx_base + part_idx*4)        ; offset-table lookup
-		//   blob     = gfx_base + off ; blob += 0x02       ; skip 2-byte piece header
-		//   w        = (u8 @ blob++) << 3                  ; ×8  (shll2;shll)
-		//   h        = (u8 @ blob++) << 3                  ; ×8
+		//   GFX_SELECTOR = u16 @(rec + 0x06)               ; THE FIX: +6 (NOT +4=palette)
+		//   off          = u32 @(gfx1 + GFX_SELECTOR*4)    ; offset-table lookup
+		//   blob         = gfx1 + off ; blob += 0x02       ; skip 2-byte piece header
+		//   w            = (u8 @ blob++) << 3              ; ×8  (shll2;shll)
+		//   h            = (u8 @ blob++) << 3              ; ×8
 		//   ; texels are 4bpp paletted in main RAM starting at texPtr, then:
-		//   texPtr  += (w*h) >> 1                          ; 4bpp byte advance per part
+		//   texPtr      += (w*h) >> 1                      ; 4bpp byte advance per part
 		//
-		// The texels are NOT inside the GFX1 blob (that holds only the part header /
-		// dims). They are a CONTIGUOUS run consumed in EXTRAS-walk order from
-		// 0x0CE60000, so the per-part texptr is only defined within the live walk —
-		// hence we re-walk the live assembly here (same recs as the sidasm block) and
-		// dump each distinct part_idx the first time it's encountered with its correct
-		// running texptr. mask &0x0FFFFFFF normalises the 0x8C/0x0C RAM alias.
+		// THE FIX: the index source is the +6 GFX_SELECTOR (range 29-65), NOT +4 (which
+		// is the palette word, a near-constant ~16). NO FAC (+0x184), NO per-char base,
+		// NO shift beyond sel*4. The texels are NOT inside the GFX1 blob (that holds the
+		// part header/dims); they are a CONTIGUOUS run consumed in EXTRAS-walk order from
+		// 0x0CE60000, so the per-part texptr is only defined within the live walk — hence
+		// we re-walk the live assembly here (same recs as the sidasm block) and dump each
+		// distinct selector the first time it's encountered with its running texptr.
+		//
+		// KEY CONSISTENCY (gate c): the manifest is keyed by the +6 selector — the SAME
+		// key the sidasm assembly records carry (their `part` field == +6 selector). So
+		// assembly part-keys are a subset of manifest/parts keys; no dangling lookups.
 		// =====================================================================
 		char mn[96]; snprintf(mn, sizeof mn, "/dev/shm/PL%02X_parts.manifest", cid);
 		FILE* mf = fopen(mn, "a");   // append: full atlas accumulates across frames
 		if (mf && ftell(mf) == 0)
-			fprintf(mf, "# part_idx off w h texptr rawbytes fmt raw ppm\n");
+			// Columns read by tools/pack_part_atlas.py read_manifest():
+			//   <selector> <key> <raw> <ppm> <w> <h> <e4> <texptr> <ec> <rawbytes> <tcw>
+			fprintf(mf, "# selector key raw ppm w h e4 texptr ec rawbytes tcw\n");
 
 		const uint32_t TEXEL_BASE = 0x0CE60000;       // bank03.asm:9118 loc_8c033e28
 		uint32_t gfxBase = gfx1 & 0x0FFFFFFFu;        // *(node+0x15c), 0x0C alias
+		// 4bpp PAL4, LINEAR (0x0CE60000 is the LZSS-expanded planar working buffer, NOT a
+		// twiddled VRAM upload). Synthesise a TCW so the offline packer's tcw_format()
+		// resolves PAL4/linear directly: fmt(bits27-29)=5, scan-order(bit26)=1=linear.
+		const uint32_t TCW_PAL4_LINEAR = (5u << 27) | (1u << 26);   // 0x2C000000
 
 		// Re-derive the live assembly start exactly as the sidasm block:
 		//   cell = *(player+0x154); slot = u16 @(cell+0x12); recs = EXTRAS + slot*0x400 + 8
@@ -1234,14 +1250,15 @@ static void partDump(const GameState& state) {
 		if (_ramAddr(gfxBase | 0x0C000000u) && pdRecs) {
 			for (int r = 0; r < 256; r++) {
 				uint32_t rec   = pdRecs + (uint32_t)r * 8;
-				uint16_t rpart = (uint16_t)addrspace::read16(rec + 4);
-				uint16_t rattr = (uint16_t)addrspace::read16(rec + 6);
-				if (rattr == 0x00FF) break;                       // assembly terminator
+				uint16_t rpalw = (uint16_t)addrspace::read16(rec + 4);   // palette word
+				uint16_t rsel  = (uint16_t)addrspace::read16(rec + 6);   // GFX_SELECTOR (key)
+				if (rsel == 0x00FF) break;                        // assembly terminator (sentinel)
 				uint32_t lo = addrspace::read32(rec);
-				if (lo == 0 && rpart == 0 && rattr == 0) continue; // pad/separator
+				if (lo == 0 && rsel == 0 && rpalw == 0) continue; // pad/separator
+				unsigned palRow = (unsigned)((rpalw & 0x03ff) >> 4);   // static palette row
 
-				// Resolve dims via the GFX1 offset table (per disasm).
-				uint32_t off  = addrspace::read32(gfxBase + (uint32_t)rpart * 4);
+				// Resolve dims via the GFX1 offset table at gfx1 + selector*4 (per disasm).
+				uint32_t off  = addrspace::read32(gfxBase + (uint32_t)rsel * 4);
 				uint32_t blob = (gfxBase + off) & 0x0FFFFFFFu;
 				uint32_t bAlias = blob | 0x0C000000u;
 				int w = 0, h = 0;
@@ -1253,26 +1270,31 @@ static void partDump(const GameState& state) {
 				int rawBytes = (w * h) >> 1;                      // 4bpp byte size
 
 				if (w <= 0 || h <= 0 || w > 1024 || h > 1024) {
-					if (mf && rpart < 512 && !dumped[rpart]) {
-						fprintf(mf, "%u %08x %d %d %08x %d SKIP -\n", rpart, off, w, h, texPtr, rawBytes);
-						dumped[rpart] = true;
+					if (mf && rsel < 512 && !dumped[rsel]) {
+						fprintf(mf, "%u %u - - %d %d 0401 %08x 0 %d %08x SKIP\n",
+						        rsel, palRow, w, h, texPtr, rawBytes, TCW_PAL4_LINEAR);
+						dumped[rsel] = true;
 					}
 					texPtr += (rawBytes > 0) ? (uint32_t)rawBytes : 0;   // still advance the run
 					continue;
 				}
 
-				if (rpart < 512 && !dumped[rpart]) {
-					dumped[rpart] = true;
-					char rfn[96]; snprintf(rfn, sizeof rfn, "/dev/shm/PL%02X_part_%03u.raw", cid, rpart);
-					char pfn[96]; snprintf(pfn, sizeof pfn, "/dev/shm/PL%02X_part_%03u.ppm", cid, rpart);
-					// 4bpp paletted (fmt 5), LINEAR — 0x0CE60000 is a decoded main-RAM
-					// working buffer (LZSS-expanded planar 4bpp), not a twiddled VRAM
-					// upload. Raw dump lets the offline packer relock if a twiddle is
-					// needed. Palette = live Dat_Pal (player+0x164).
-					partDumpRawN(texPtr, rawBytes, rfn);
-					partDecodeToPPM(texPtr, w, h, /*fmt=*/5, /*linear=*/true, palP, pfn, false);
-					if (mf) fprintf(mf, "%u %08x %d %d %08x %d PL%02X_part_%03u.raw PL%02X_part_%03u.ppm\n",
-					                rpart, off, w, h, texPtr, rawBytes, cid, rpart, cid, rpart);
+				if (rsel < 512 && !dumped[rsel]) {
+					dumped[rsel] = true;
+					char rfn[96]; snprintf(rfn, sizeof rfn, "PL%02X_part_%03u.raw", cid, rsel);
+					char pfn[96]; snprintf(pfn, sizeof pfn, "PL%02X_part_%03u.ppm", cid, rsel);
+					char rfp[112], pfp[112];
+					snprintf(rfp, sizeof rfp, "/dev/shm/%s", rfn);
+					snprintf(pfp, sizeof pfp, "/dev/shm/%s", pfn);
+					// 4bpp paletted (fmt 5), LINEAR. Palette = live Dat_Pal (player+0x164)
+					// at the part's static palette row. Raw dump lets the offline packer
+					// relock if needed; PPM is the proven correct preview.
+					partDumpRawN(texPtr, rawBytes, rfp);
+					partDecodeToPPM(texPtr, w, h, /*fmt=*/5, /*linear=*/true,
+					                palP + (uint32_t)palRow * 32, pfp, false);
+					// Columns: selector key raw ppm w h e4 texptr ec rawbytes tcw
+					if (mf) fprintf(mf, "%u %u %s %s %d %d 0401 %08x 0 %d %08x\n",
+					                rsel, palRow, rfn, pfn, w, h, texPtr, rawBytes, TCW_PAL4_LINEAR);
 					dumpedTotal++;
 				}
 				texPtr += (uint32_t)rawBytes;                     // advance the running pointer
