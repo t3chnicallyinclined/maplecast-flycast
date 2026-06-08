@@ -118,6 +118,15 @@ struct ObjectState {
 	// routes is_effect==1 objects to the effects atlas, the rest to the PL{cid} char
 	// atlas. Derived in readAllDrawn where node+0x15c is already read.
 	uint8_t  is_effect;   // node+0x15c in [0x0CED0000, 0x0CEE0000)
+	// PATH A — TRUE ANCHOR (sprite-assembly hotspot). Each drawn node carries its
+	// LIVE assembly at node+0x178 (Sprite_Extras); the 8B records {dx:s16@+0,
+	// dy:s16@+2,...} define the part placement, and the true hotspot = (min dx,
+	// min dy) over the records. We ship this so the client anchors satellites
+	// (projectiles/capes/effects) at their OWN origin instead of the body-relative
+	// baked sp.dx (which is wrong for satellites). 0,0 => no valid extras (client
+	// falls back to the baked anchor). See re-catalog/00-README.md.
+	int8_t   hot_dx;      // clamped min dx over node+0x178 extras records
+	int8_t   hot_dy;      // clamped min dy over node+0x178 extras records
 };
 // Scan the object pool; fill up to maxObjs, return count. Skips inactive
 // (sprite_id==0) and the position-less body object. Cheap RAM scan (~14k reads).
@@ -149,9 +158,10 @@ uint8_t readStageAnimTimer();
 // from the browser-facing 'OBJS' packet (8/9B, position-only) so neither parser
 // disturbs the other. Layout: per object owner_cid(1) sprite_id(2 LE)
 // type(1) category(1) xflip(1) owner_slot(1) screen_x(i16 LE) screen_y(i16 LE)
-// is_effect(1) = 11 bytes. serialize writes count(1) + N*11 into buf (NO magic —
-// caller prepends 'OBJF'); returns bytes written. deserialize reads it back.
-static constexpr int OBJF_REC_SIZE = 11;
+// is_effect(1) hot_dx(s8) hot_dy(s8) = 13 bytes. serialize writes count(1) + N*13
+// into buf (NO magic — caller prepends 'OBJF'); returns bytes written. deserialize
+// reads it back.
+static constexpr int OBJF_REC_SIZE = 13;
 int  serializeObjects(const ObjectState* objs, int n, uint8_t* buf, int maxLen);
 int  deserializeObjects(const uint8_t* buf, int len, ObjectState* out, int maxObjs);
 

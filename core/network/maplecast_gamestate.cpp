@@ -113,6 +113,41 @@ static void writeFloat(uint32_t addr, float f)
 // resolved pointers and dumps the DECODED palette + assembly the GPU is using —
 // proving we can build anchors/colors from the runtime without ROM-codec RE.
 static inline bool inRam(uint32_t a) { return a >= 0x0C000000 && a < 0x10000000; }
+
+// PATH A — TRUE ANCHOR. Walk a drawn node's LIVE sprite-assembly (node+0x178,
+// Sprite_Extras) and return the hotspot = (min dx, min dy) over the 8-byte
+// records. Binding confirmed marvelous2 bank10:loc_8C1075EA; the iterator
+// loc_8C108060 starts the walk at extras+0x18; per-record layout (8B):
+//   dx:s16@+0, dy:s16@+2, part:u8@+4, b5@+5, mode:u8@+6 (0xFF = end), flip@+7
+// The satellite's own origin != the body's, so the baked body-relative sp.dx is
+// wrong for it; the assembly hotspot is the object's true origin. Returns true
+// and sets hotDx/hotDy (clamped to int8) if valid extras were found; false =>
+// degenerate / no extras (client keeps the baked anchor).
+static bool readHotspot(uint32_t node, int8_t& hotDx, int8_t& hotDy)
+{
+	uint32_t e = addrspace::read32(node + OFF_EXTRAS_PTR);   // +0x178
+	if (!inRam(e)) return false;
+	int minDx = 0x7fffffff, minDy = 0x7fffffff;
+	bool any = false;
+	uint32_t rec = e + 0x18;                                 // iterator start (loc_8C108060)
+	for (int guard = 0; guard < 64; ++guard, rec += 8) {
+		uint8_t mode = (uint8_t)addrspace::read8(rec + 6);
+		if (mode == 0xFF) break;                             // end sentinel
+		int dx = (int16_t)addrspace::read16(rec + 0);
+		int dy = (int16_t)addrspace::read16(rec + 2);
+		if (dx < minDx) minDx = dx;
+		if (dy < minDy) minDy = dy;
+		any = true;
+	}
+	if (!any) return false;
+	auto clampS8 = [](int v) -> int8_t {
+		if (v < -128) v = -128; else if (v > 127) v = 127; return (int8_t)v;
+	};
+	hotDx = clampS8(minDx);
+	hotDy = clampS8(minDy);
+	return true;
+}
+
 static void ptrDump(const GameState& state)
 {
 	static bool en = (getenv("MAPLECAST_PTRDUMP") != nullptr);
@@ -306,6 +341,9 @@ static int readObjectsWalk(ObjectState* out, int maxObjs)
 					out[n].owner_slot = (uint8_t)(slot < 0 ? 0 : slot);
 					{ uint32_t gb = addrspace::read32(node + OFF_GFX00_PTR) & 0x0FFFFFFF;
 					  out[n].is_effect = (gb >= 0x0CED0000 && gb < 0x0CEE0000) ? 1 : 0; }
+					// PATH A: true assembly hotspot from node+0x178 (parity w/ readAllDrawn).
+					out[n].hot_dx = 0; out[n].hot_dy = 0;
+					readHotspot(node, out[n].hot_dx, out[n].hot_dy);
 					n++;
 				}
 			}
@@ -379,6 +417,10 @@ static int readAllDrawn(ObjectState* out, int maxObjs)
 			out[n].xflip      = (uint8_t)(addrspace::read16(node + 0x130) ? 1 : 0);
 			out[n].owner_slot = (uint8_t)(slot < 0 ? 0xFF : slot);
 			out[n].is_effect  = isEfx;
+			// PATH A: true assembly hotspot from node+0x178 (0,0 = no extras => client
+			// falls back to the baked anchor).
+			out[n].hot_dx = 0; out[n].hot_dy = 0;
+			readHotspot(node, out[n].hot_dx, out[n].hot_dy);
 			n++;
 		}
 	}
@@ -531,6 +573,10 @@ int readObjects(ObjectState* out, int maxObjs)
 		{ int os = 0; for (int s = 0; s < 6; s++) if (v == CHAR_BASE[s]) { os = s; break; } out[n].owner_slot = (uint8_t)os; }
 		{ uint32_t gb = addrspace::read32(a + OFF_GFX00_PTR) & 0x0FFFFFFF;
 		  out[n].is_effect = (gb >= 0x0CED0000 && gb < 0x0CEE0000) ? 1 : 0; }
+		// PATH A: legacy owner-anchored scan reads the record at a-0x18; the extras ptr
+		// is then (a-0x18)+0x178. Walk it for the hotspot (0,0 = none).
+		out[n].hot_dx = 0; out[n].hot_dy = 0;
+		readHotspot(a - 0x18, out[n].hot_dx, out[n].hot_dy);
 		n++;
 	}
 	// Truncation guard — NEVER silent. The pool is finite, so a cap >= the pool's
@@ -656,6 +702,8 @@ int serializeObjects(const ObjectState* objs, int n, uint8_t* buf, int maxLen)
 		buf[o++] = (uint8_t)(s.screen_y & 0xff);
 		buf[o++] = (uint8_t)((s.screen_y >> 8) & 0xff);
 		buf[o++] = s.is_effect;
+		buf[o++] = (uint8_t)s.hot_dx;
+		buf[o++] = (uint8_t)s.hot_dy;
 	}
 	return o;
 }
@@ -677,6 +725,8 @@ int deserializeObjects(const uint8_t* buf, int len, ObjectState* out, int maxObj
 		s.screen_x  = (int16_t)(buf[o] | (buf[o+1] << 8)); o += 2;
 		s.screen_y  = (int16_t)(buf[o] | (buf[o+1] << 8)); o += 2;
 		s.is_effect = buf[o++];
+		s.hot_dx    = (int8_t)buf[o++];
+		s.hot_dy    = (int8_t)buf[o++];
 		got++;
 	}
 	return got;

@@ -366,37 +366,47 @@ export class SpriteClient {
     return `STAF: frame=${this.stafFrame} tris=${this._stafQuadN} texCache=${this._stafTexN}`;
   }
 
-  // 'OBJS'(4) + count(1) + N×[cid(1), sprite_id(2 LE), type(1), x(i16 LE), y(i16 LE)] = 8B each.
+  // 'OBJS'(4) + count(1) + N×[cid(1), sprite_id(2 LE), type(1), x(i16 LE), y(i16 LE),
+  //   flags(1), hot_dx(s8), hot_dy(s8)] = 11B each (auto-detected; 9B/8B legacy).
   //
-  // EFFECT-BLEND WIRE BYTE (assembly path): the stride may be 8B (legacy) or 9B
-  // (8B + blend(1)). The trailing byte is the PVR TSP src/dst blend nibble pair
-  // packed as (src<<4 | dst), letting fx/super objects request the matching
-  // canvas/WebGPU blend (additive glows). Stride is auto-detected from the packet
-  // length so the client consumes whichever the server ships. See "FX-BLEND WIRE
-  // BYTE" spec in docs/ASSEMBLY-DRIVEN-DESIGN.md notes (and the bottom of this file).
+  // flags bit0 = is_effect (route to the effects atlas, not PL{cid}).
+  // hot_dx/hot_dy (PATH A) = the object's TRUE assembly hotspot (min dx,dy over the
+  // node+0x178 extras records) — the satellite's own origin, which the body-relative
+  // baked sp.dx does not match. Stride is auto-detected from the packet length so the
+  // client consumes whichever the server ships (old 8B/9B servers -> hot 0,0 = baked).
   static isOBJS(d) {
     return d.length >= 5 && d[0]===79 && d[1]===66 && d[2]===74 && d[3]===83; // 'O','B','J','S'
   }
   onOBJS(d) {
     const n = d[4]; const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
-    // Detect per-object stride: 9B if (len-5) == n*9, else legacy 8B. The 9th byte is
-    // the OBJS flags byte (GSTA enrich step 1): bit0 = is_effect (route to the effects
-    // atlas, not PL{cid}); bits1-7 reserved (formerly spec'd as a blend nibble — never
-    // emitted, superseded by this flags byte). Old 8B servers omit it -> isEffect 0.
+    // Detect per-object stride: 11B (flags + hot_dx + hot_dy), 9B (flags only), or
+    // legacy 8B. The flags byte (GSTA enrich step 1): bit0 = is_effect (route to the
+    // effects atlas, not PL{cid}); bits1-7 reserved. hot_dx/hot_dy (PATH A) = the
+    // object's TRUE assembly hotspot (min dx,dy over node+0x178 extras), 2×int8; the
+    // object draw anchors satellites here instead of the baked body-relative sp.dx
+    // (0,0 => no extras, keep the baked anchor). Old servers omit the trailing bytes.
     const body = d.length - 5;
-    const stride = (n > 0 && body === n * 9) ? 9 : 8;
-    const hasFlags = stride === 9;
+    const stride = (n > 0 && body === n * 11) ? 11
+                 : (n > 0 && body === n * 9)  ? 9
+                 : 8;
+    const hasFlags = stride >= 9;
+    const hasHot   = stride === 11;
     const objs = []; let o = 5;
     for (let i = 0; i < n && o + stride <= d.length; i++) {
       const raw = dv.getUint16(o+1, true);   // sprite_id with 0x8000 hflip bit
       const ob = { cid: d[o], sid: raw & 0x7fff, type: d[o+3],
                    xflip: (raw & 0x8000) ? 1 : 0,   // object's OWN flip (node+0x130) — NOT owner facing
                    x: dv.getInt16(o+4, true), y: dv.getInt16(o+6, true),
-                   isEffect: 0 };
+                   isEffect: 0, hotDx: 0, hotDy: 0, hasHot: false };
       if (hasFlags) {
         const f = d[o+8];
         ob.flags = f;
         ob.isEffect = (f & 0x01) ? 1 : 0;     // node+0x15c in Effect Poly 0x0CED0000
+      }
+      if (hasHot) {
+        ob.hotDx = dv.getInt8(o+9);
+        ob.hotDy = dv.getInt8(o+10);
+        ob.hasHot = !(ob.hotDx === 0 && ob.hotDy === 0);  // 0,0 => server found no extras
       }
       objs.push(ob);
       o += stride;
@@ -854,7 +864,14 @@ export class SpriteClient {
       // P2's cape onto P1's facing (mirror/slot-order), so the P2 cape faced the
       // wrong way and looked "stuck". XOR the sprite's baked facing.
       const fl = (!!o.xflip) !== (!!sp.facing);
-      const dxv = fl ? -(sp.dx + sp.wG) : sp.dx;   // mirror the anchor when flipped
+      // PATH A — TRUE ANCHOR. When the server shipped the object's own assembly
+      // hotspot (node+0x178 min dx,dy), use it INSTEAD of the baked body-relative
+      // sp.dx/sp.dy: satellites (projectiles/capes/effects) have their OWN origin,
+      // so the body-relative bake drifts. _objCfg stays a residual user nudge.
+      // hasHot=false (server found no extras, or an old server) => baked anchor.
+      const anchorX = o.hasHot ? o.hotDx : sp.dx;
+      const anchorY = o.hasHot ? o.hotDy : sp.dy;
+      const dxv = fl ? -(anchorX + sp.wG) : anchorX;   // mirror the anchor when flipped
       // z = the REAL render layer (o.type now carries the slot-table layer 0..15).
       // Bodies sit at the mid baseline (z=8), so low-layer satellites (capes) fall
       // behind their owner and high-layer ones (effects/supers) draw in front.
@@ -874,7 +891,7 @@ export class SpriteClient {
       const ocDy = oc ? (oc.dy || 0) : 0;
       const oSX = SX * ocSc, oSY = SY * ocSc;
       const item = { charId: atlasCid, slot: oslot, z, sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
-        dx: (px + dxv*oSX + ocDx)*scaleX, dy: (py + sp.dy*oSY + ocDy)*scaleY,
+        dx: (px + dxv*oSX + ocDx)*scaleX, dy: (py + anchorY*oSY + ocDy)*scaleY,
         dw: sp.wG*oSX*scaleX, dh: sp.hG*oSY*scaleY,
         flip: fl };
       // Effect objects draw additive (glow), matching the sparks/EFCT passes — and

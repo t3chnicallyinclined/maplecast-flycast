@@ -2325,12 +2325,15 @@ done_diff:
 				maplecast_gamestate::ObjectState objs[255];
 				int no = maplecast_gamestate::readObjects(objs, 255);
 				if (no > 0) {
-					// 9-byte stride: the trailing byte is an OBJS flags byte.
-					//   bit0 = is_effect (node+0x15c points into Effect Poly 0x0CED0000 ->
+					// 11-byte stride: trailing 3 bytes are flags(1) + hot_dx(s8) + hot_dy(s8).
+					//   flags bit0 = is_effect (node+0x15c points into Effect Poly 0x0CED0000 ->
 					//          client routes to the effects atlas, not PL{cid}). bits1-7 reserved.
-					// The client auto-detects 9B vs the legacy 8B from the packet length, so
-					// an old client harmlessly ignores the trailing byte. (GSTA enrich step 1.)
-					uint8_t obuf[4 + 1 + 255 * 9];   // per obj: cid(1)+sid(2)+type(1)+x(2)+y(2)+flags(1)
+					//   hot_dx/hot_dy (PATH A) = the object's TRUE assembly hotspot (min dx,dy over
+					//          node+0x178 extras); the client anchors satellites here instead of the
+					//          baked body-relative sp.dx (0,0 => no extras, client keeps baked anchor).
+					// The client auto-detects 11B vs the older 9B vs legacy 8B from the packet
+					// length, so an old client harmlessly ignores the trailing bytes.
+					uint8_t obuf[4 + 1 + 255 * 11];   // per obj: cid(1)+sid(2)+type(1)+x(2)+y(2)+flags(1)+hotdx(1)+hotdy(1)
 					obuf[0]='O'; obuf[1]='B'; obuf[2]='J'; obuf[3]='S'; obuf[4]=(uint8_t)no;
 					int oo = 5;
 					for (int i = 0; i < no; i++) {
@@ -2341,6 +2344,8 @@ done_diff:
 						obuf[oo++]=objs[i].screen_x&0xff; obuf[oo++]=(objs[i].screen_x>>8)&0xff;
 						obuf[oo++]=objs[i].screen_y&0xff; obuf[oo++]=(objs[i].screen_y>>8)&0xff;
 						obuf[oo++]=(uint8_t)(objs[i].is_effect ? 0x01 : 0x00);   // OBJS flags
+						obuf[oo++]=(uint8_t)objs[i].hot_dx;                       // PATH A true anchor dx
+						obuf[oo++]=(uint8_t)objs[i].hot_dy;                       // PATH A true anchor dy
 					}
 					maplecast_ws::broadcastBinary(obuf, oo);
 
