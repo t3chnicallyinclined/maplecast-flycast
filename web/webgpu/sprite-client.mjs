@@ -468,6 +468,19 @@ export class SpriteClient {
         const img = await createImageBitmap(blob);
         this.screenW = json.screenW || this.screenW; this.screenH = json.screenH || this.screenH;
         this.chars[cid] = { img, sprites: json.sprites, name: json.name || ('char' + cid), pal128: json.pal128 };
+        // EXACT palette-LUT atlas (optional, out-of-band): PL{hex}_idx.png + _lut.json
+        // (tools/rgb_to_indexed.py). Best-effort — absence keeps the RGB path.
+        try {
+          const [lutR, idxR] = await Promise.all([
+            fetch(base + '_lut.json' + bust), fetch(base + '_idx.png' + bust) ]);
+          if (lutR.ok && idxR.ok) {
+            const lut = await lutR.json();
+            const idxImg = await createImageBitmap(await idxR.blob());
+            this.chars[cid].idxImg = idxImg; this.chars[cid].lut = lut;
+            console.log('[sprite-client] loaded EXACT palette LUT for char', cid,
+              'banks', lut.bankList, idxImg.width + 'x' + idxImg.height);
+          }
+        } catch (_e) { /* no indexed atlas for this char — RGB path */ }
         console.log('[sprite-client] loaded char', cid, json.name, Object.keys(json.sprites).length, 'sprites');
       } catch (e) {
         this.chars[cid] = { img: null, sprites: {}, name: 'char' + cid, err: String(e) };

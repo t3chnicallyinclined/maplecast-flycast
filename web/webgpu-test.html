@@ -264,8 +264,8 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=11';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=49';
-import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=9';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=50';
+import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=10';
 // StafGL (sprite-staf-gl.mjs) RETIRED — the STAF/HUDF stream now renders through the
 // proven PVR2Renderer (see STAFR/renderStaf below). StafGL stays on disk for reference.
 
@@ -634,7 +634,9 @@ addEventListener('keydown',e=>{
         const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.stafStatsText();
       } else if(gpuOn && SG.ok){
         const srcChars = asm ? SPRITECLIENT.asmChars : SPRITECLIENT.chars;
-        for(const cid in srcChars){ const c=srcChars[cid]; if(c&&c.img&&!SG.chars[cid]){ SG.setAtlas(cid, c.img); SG.setCharPalette(cid, c.pal128); } }
+        for(const cid in srcChars){ const c=srcChars[cid]; if(c&&c.img&&!SG.chars[cid]){ SG.setAtlas(cid, c.img); SG.setCharPalette(cid, c.pal128);
+          // EXACT palette-LUT atlas (if present): drives hit-flash + skins exactly.
+          if(c.idxImg && c.lut && !SG.idxChars[cid]){ SG.setIndexedAtlas(cid, c.idxImg); SG.setCharLUT(cid, c.lut); } } }
         const drawList = asm ? SPRITECLIENT.buildAssemblyDrawList(640,480) : SPRITECLIENT.buildDrawList(640,480);
         try{ SG.render(drawList, window.DBG||{}, window._T, SPRITECLIENT.buildSparkList(640,480), null); }
         catch(err){ console.error('[sprite-gpu] render error -> Canvas2D fallback', err); SG.ok=false; showCanvas(); }
