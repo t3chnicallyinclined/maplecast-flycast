@@ -2445,6 +2445,214 @@ done_diff:
 				}
 			}
 
+			// === FRAME ORACLE — per-frame, per-drawn-object capture of {sprite_id, state,
+			// the EXACT TA quads it emits, and the texture SOURCE addr/region}. MVP per
+			// docs/FRAME-ORACLE-SPEC.md: NO SH4 PC-hook — runs on the live dynarec after
+			// ta_parse, attributing parsed polys to objects by nearest screen bbox-center
+			// (the TADBG bdist<1600 correlator generalized + the EFCT bbox/UV de-index loop
+			// at ~line 2486-2496). Read-only instrument; no wire-format / client change.
+			// Writes JSON lines to /dev/shm/mc_oracle.jsonl, in_match only, frame-capped.
+			// Gated MAPLECAST_FRAME_ORACLE. (Object walk mirrors readAllDrawn (gamestate.cpp
+			// :370) but is self-contained here so it can expose node_addr + the full asm
+			// pointer cluster (pal/file/fac/scale/flip) that ObjectState doesn't carry.)
+			{
+				static bool _oracle = getenv("MAPLECAST_FRAME_ORACLE") != nullptr;
+				// Capacity guard: stop appending once the file passes the size cap so a long
+				// session can't fill /dev/shm. ~64 MB holds a few thousand frames of objects.
+				static const long ORACLE_CAP = 64L * 1024 * 1024;
+				static FILE* of = nullptr; static long ow = 0; static bool oFull = false;
+				static uint32_t ofc = 0; ++ofc;
+				if (_oracle && !oFull && addrspace::read8(0x8C289624)) {  // in_match @0x8C289624
+					if (!of) { of = fopen("/dev/shm/mc_oracle.jsonl", "a"); }
+					if (of && ow < ORACLE_CAP) {
+						ta_parse(ctx, true);
+						auto& rc = ctx->rend;
+
+						// ---- 1) Parse TA polys: screen bbox + UV sub-rect + tex source, via the
+						// EXACT index-buffer de-index loop used by the EFCT scan (rc.idx, not raw verts).
+						struct OQuad {
+							float cx, cy, x, y, w, h;
+							float uMn, uMx, vMn, vMx;
+							uint32_t tcw, tsp, pcw, vramAddr, texId;
+							int fmt, srcBlend, dstBlend, tw, th, vq;
+						};
+						static OQuad qs[2048]; int nq = 0;
+						uint32_t nverts = (uint32_t)rc.verts.size();
+						auto collect = [&](std::vector<PolyParam>& lst) {
+							for (PolyParam& pp : lst) {
+								if (nq >= 2048) return;
+								if (pp.count < 3) continue;
+								uint32_t pcw = pp.pcw.full, tcw = pp.tcw.full, tsp = pp.tsp.full;
+								bool textured = ((pcw >> 3) & 1) != 0;
+								float mnX=1e9f,mxX=-1e9f,mnY=1e9f,mxY=-1e9f;
+								float uMn=1e9f,uMx=-1e9f,vMn=1e9f,vMx=-1e9f;
+								uint32_t iend = pp.first + pp.count;
+								if (iend > rc.idx.size()) iend = (uint32_t)rc.idx.size();
+								for (uint32_t k = pp.first; k < iend; k++) {
+									uint32_t vi = rc.idx[k]; if (vi >= nverts) continue;
+									const auto& vt = rc.verts[vi];
+									if (vt.x<mnX)mnX=vt.x; if (vt.x>mxX)mxX=vt.x;
+									if (vt.y<mnY)mnY=vt.y; if (vt.y>mxY)mxY=vt.y;
+									if (vt.u<uMn)uMn=vt.u; if (vt.u>uMx)uMx=vt.u;
+									if (vt.v<vMn)vMn=vt.v; if (vt.v>vMx)vMx=vt.v;
+								}
+								float w = mxX-mnX, h = mxY-mnY;
+								if (w < 2.f || h < 2.f) continue;
+								float cy = (mnY+mxY)*0.5f; if (cy <= 20.f) continue;  // strip top HUD row
+								OQuad& q = qs[nq];
+								q.cx = (mnX+mxX)*0.5f; q.cy = cy; q.x = mnX; q.y = mnY; q.w = w; q.h = h;
+								q.uMn=uMn; q.uMx=uMx; q.vMn=vMn; q.vMx=vMx;
+								q.tcw=tcw; q.tsp=tsp; q.pcw=pcw;
+								q.srcBlend = (int)((tsp>>29)&7); q.dstBlend = (int)((tsp>>26)&7);
+								if (textured) {
+									q.fmt = (int)((tcw>>27)&7);
+									q.vq  = (int)((tcw>>30)&1);
+									q.tw  = 8 << ((tsp>>3)&7); q.th = 8 << (tsp&7);
+									q.vramAddr = (tcw & 0x1FFFFF) << 3;
+									q.texId = mcfx::texHash(q.vramAddr, q.fmt, q.tw, q.th, q.vq);
+								} else {
+									q.fmt=-1; q.vq=0; q.tw=0; q.th=0; q.vramAddr=0; q.texId=0;
+								}
+								nq++;
+							}
+						};
+						collect(rc.global_param_op);
+						collect(rc.global_param_pt);
+						collect(rc.global_param_tr);
+
+						// ---- 2) Enumerate drawn objects from MVC2's OWN slot table (mirrors
+						// readAllDrawn) but keep node_addr + the asm pointer cluster.
+						static const uint32_t SLOT_COUNT_BASE = 0x8C2895E0;
+						static const uint32_t SLOT_PTR_BASE   = 0x8C287DE0;
+						static const uint32_t SLOT_ROW_STRIDE = 0x180;
+						static const uint32_t CB[6] = { 0x8C268340,0x8C2688E4,0x8C268E88,
+						                                0x8C26942C,0x8C2699D0,0x8C269F74 };
+						auto rdF = [](uint32_t a){ uint32_t r=addrspace::read32(a); float f; memcpy(&f,&r,4); return f; };
+						auto inRam = [](uint32_t a){ return a>=0x0C000000 && a<0x10000000; };
+
+						struct OObj {
+							uint32_t node; int slot; int owner_cid; int category;
+							int sprite_id; float sx, sy; float scaleX, scaleY; int flip;
+							uint32_t gfx1, pal, extras, file, fac;
+							const char* region;
+							int hotDx, hotDy;
+						};
+						static OObj objs[128]; int no = 0;
+
+						for (int layer = 0; layer < 16 && no < 128; layer++) {
+							int count = (int)addrspace::read8(SLOT_COUNT_BASE + layer);
+							if (count <= 0 || count > 0x60) continue;
+							uint32_t row = SLOT_PTR_BASE + (uint32_t)layer * SLOT_ROW_STRIDE;
+							for (int i = 0; i < count && no < 128; i++) {
+								uint32_t node = addrspace::read32(row + i*4);
+								if (node < 0x8C000000 || node >= 0x8D000000) continue;
+								bool isBody = false;
+								for (int s=0;s<6;s++) if (node==CB[s]) { isBody=true; break; }
+								if (isBody) continue;
+								if (addrspace::read8(node + 0x12C) == 0) continue;       // visibility gate
+								int sid = (int)(uint16_t)addrspace::read16(node + 0x144);
+								if (sid == 0) continue;
+								float sx = rdF(node + 0xE0), sy = rdF(node + 0xE4);
+								if (sx<-64.f||sx>704.f||sy<-64.f||sy>544.f) continue;
+								int slot = -1;
+								uint32_t oA = addrspace::read32(node+0x18), oB = addrspace::read32(node+0x80);
+								for (int s=0;s<6;s++) if (oA==CB[s]||oB==CB[s]) { slot=s; break; }
+								OObj& o = objs[no];
+								o.node = node; o.slot = slot;
+								o.owner_cid = slot>=0 ? (int)(uint8_t)addrspace::read8(CB[slot]+0x001) : 0;
+								o.category  = (int)(uint8_t)addrspace::read8(node + 0x03);
+								o.sprite_id = sid; o.sx = sx; o.sy = sy;
+								o.scaleX = rdF(node + 0x50); o.scaleY = rdF(node + 0x54);
+								o.flip   = addrspace::read16(node + 0x130) ? 1 : 0;
+								o.gfx1   = addrspace::read32(node + 0x15C);
+								o.pal    = addrspace::read32(node + 0x164);
+								o.extras = addrspace::read32(node + 0x178);
+								o.file   = addrspace::read32(node + 0x17C);
+								o.fac    = addrspace::read32(node + 0x184);
+								uint32_t gl = o.gfx1 & 0x0FFFFFFF;
+								o.region = (gl>=0x0CED0000 && gl<0x0CEE0000) ? "EFFECTS_BANK"
+								         : (gl>=0x0CE60000 && gl<0x0CE70000) ? "DECOMP_BUF" : "CHAR_GFX";
+								// true assembly hotspot (min dx,min dy over extras records @+0x18, 8B stride)
+								o.hotDx = 0; o.hotDy = 0;
+								if (inRam(o.extras)) {
+									int mnDx=0x7fffffff, mnDy=0x7fffffff; bool any=false;
+									uint32_t rec = o.extras + 0x18;
+									for (int g=0; g<64; ++g, rec+=8) {
+										uint8_t mode = (uint8_t)addrspace::read8(rec+6);
+										if (mode==0xFF) break;
+										int dx=(int16_t)addrspace::read16(rec+0), dy=(int16_t)addrspace::read16(rec+2);
+										if (dx<mnDx)mnDx=dx; if (dy<mnDy)mnDy=dy; any=true;
+									}
+									if (any) {
+										auto cl=[](int v){ if(v<-32768)v=-32768; else if(v>32767)v=32767; return v; };
+										o.hotDx=cl(mnDx); o.hotDy=cl(mnDy);
+									}
+								}
+								no++;
+							}
+						}
+
+						// ---- 3) Attribute each quad to the nearest object (bbox-center vs
+						// object screen_xy, bdist<1600 == 40px radius), group quads per object.
+						static int objQuad[2048];          // quad -> object index (-1 = unattributed)
+						for (int j=0;j<nq;j++) {
+							int best=-1; float bd=1600.f;
+							for (int k=0;k<no;k++) {
+								float dx=qs[j].cx-objs[k].sx, dy=qs[j].cy-objs[k].sy, d=dx*dx+dy*dy;
+								if (d<bd) { bd=d; best=k; }
+							}
+							objQuad[j]=best;
+						}
+
+						// ---- 4) Emit one JSON line for this frame.
+						std::string line; line.reserve(4096);
+						char nb[512];
+						snprintf(nb,sizeof nb,"{\"frame\":%u,\"in_match\":1,\"objects\":[", ofc);
+						line += nb;
+						bool firstObj=true;
+						for (int k=0;k<no;k++) {
+							OObj& o = objs[k];
+							if (!firstObj) line += ","; firstObj=false;
+							snprintf(nb,sizeof nb,
+								"{\"slot\":%d,\"owner_cid\":%d,\"category\":%d,\"sprite_id\":%d,"
+								"\"screen_xy\":[%d,%d],\"scale\":[%.3f,%.3f],\"flip\":%d,\"node_addr\":\"0x%08X\",\"quads\":[",
+								o.slot, o.owner_cid, o.category, o.sprite_id,
+								(int)o.sx, (int)o.sy, o.scaleX, o.scaleY, o.flip, o.node);
+							line += nb;
+							// tex source from the FIRST attributed textured quad (the body part)
+							uint32_t tsVram=0, tsTcw=0, tsTexId=0; int tsFmt=-1; bool haveTex=false;
+							bool firstQ=true;
+							for (int j=0;j<nq;j++) {
+								if (objQuad[j]!=k) continue;
+								OQuad& q = qs[j];
+								if (!firstQ) line += ","; firstQ=false;
+								snprintf(nb,sizeof nb,
+									"{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"u\":[%.4f,%.4f],\"v\":[%.4f,%.4f],"
+									"\"texId\":\"%08X\",\"tcw\":\"0x%08X\",\"blend\":[%d,%d]}",
+									(int)q.x,(int)q.y,(int)q.w,(int)q.h, q.uMn,q.uMx,q.vMn,q.vMx,
+									q.texId, q.tcw, q.srcBlend, q.dstBlend);
+								line += nb;
+								if (!haveTex && q.fmt>=0) { haveTex=true; tsVram=q.vramAddr; tsTcw=q.tcw; tsTexId=q.texId; tsFmt=q.fmt; }
+							}
+							(void)tsTcw; (void)tsTexId; (void)tsFmt;
+							snprintf(nb,sizeof nb,
+								"],\"tex_src\":{\"vram_addr\":\"0x%08X\",\"region\":\"%s\",\"gfx1_ptr\":\"0x%08X\","
+								"\"pal_ptr\":\"0x%08X\",\"part_idx\":-1},"
+								"\"asm_src\":{\"extras_ptr\":\"0x%08X\",\"file_ptr\":\"0x%08X\",\"fac_ptr\":\"0x%08X\","
+								"\"hotspot_dx\":%d,\"hotspot_dy\":%d}}",
+								tsVram, o.region, o.gfx1, o.pal,
+								o.extras, o.file, o.fac, o.hotDx, o.hotDy);
+							line += nb;
+						}
+						line += "]}\n";
+						fwrite(line.data(), 1, line.size(), of);
+						ow += (long)line.size();
+						fflush(of);
+						if (ow >= ORACLE_CAP) oFull = true;
+					}
+				}
+			}
+
 		// === SERVER-SIDE EFFECT ISOLATION -> content-addressed "EFCT" + "TXTR" ===
 		// Per additive (DstInstr==ONE) effect quad: hash the texture's VRAM bytes
 		// (content id, stable across the transient VRAM address) and emit
