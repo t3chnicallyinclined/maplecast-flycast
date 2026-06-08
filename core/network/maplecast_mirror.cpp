@@ -2476,6 +2476,7 @@ done_diff:
 						struct OQuad {
 							float cx, cy, x, y, w, h;
 							float uMn, uMx, vMn, vMx;
+							float zMn, zMx;  // depth (Vertex.z = 1/w) range over the quad; near=char, far=stage
 							uint32_t tcw, tsp, pcw, vramAddr, texId;
 							int fmt, srcBlend, dstBlend, tw, th, vq;
 							bool isSprite;   // survives the non-sprite filter (see classify below)
@@ -2490,6 +2491,7 @@ done_diff:
 								bool textured = ((pcw >> 3) & 1) != 0;
 								float mnX=1e9f,mxX=-1e9f,mnY=1e9f,mxY=-1e9f;
 								float uMn=1e9f,uMx=-1e9f,vMn=1e9f,vMx=-1e9f;
+								float zMn=1e30f,zMx=-1e30f;   // Vertex.z = 1/w depth (WebGPU floor-cutoff value)
 								// ROOT-CAUSE FIX: pp.first/.count are NOT always rc.idx offsets.
 								// makePrimRestartIndex/makeIndex (op/pt and non-autosort tr) rewrite
 								// them to index rc.idx; but sortTriangles (autosort translucent — the
@@ -2510,6 +2512,7 @@ done_diff:
 										if (vt.y<mnY)mnY=vt.y; if (vt.y>mxY)mxY=vt.y;
 										if (vt.u<uMn)uMn=vt.u; if (vt.u>uMx)uMx=vt.u;
 										if (vt.v<vMn)vMn=vt.v; if (vt.v>vMx)vMx=vt.v;
+										if (vt.z<zMn)zMn=vt.z; if (vt.z>zMx)zMx=vt.z;
 										seen++;
 									}
 								}
@@ -2525,6 +2528,7 @@ done_diff:
 										if (vt.y<mnY)mnY=vt.y; if (vt.y>mxY)mxY=vt.y;
 										if (vt.u<uMn)uMn=vt.u; if (vt.u>uMx)uMx=vt.u;
 										if (vt.v<vMn)vMn=vt.v; if (vt.v>vMx)vMx=vt.v;
+										if (vt.z<zMn)zMn=vt.z; if (vt.z>zMx)zMx=vt.z;
 										seen++;
 									}
 								}
@@ -2535,6 +2539,7 @@ done_diff:
 								OQuad& q = qs[nq];
 								q.cx = (mnX+mxX)*0.5f; q.cy = cy; q.x = mnX; q.y = mnY; q.w = w; q.h = h;
 								q.uMn=uMn; q.uMx=uMx; q.vMn=vMn; q.vMx=vMx;
+								q.zMn=(zMn> 1e29f)?0.f:zMn; q.zMx=(zMx<-1e29f)?0.f:zMx;
 								q.tcw=tcw; q.tsp=tsp; q.pcw=pcw;
 								q.srcBlend = (int)((tsp>>29)&7); q.dstBlend = (int)((tsp>>26)&7);
 								if (textured) {
@@ -2755,8 +2760,10 @@ done_diff:
 							if (!firstQ) line += ","; firstQ=false;
 							snprintf(nb,sizeof nb,
 								"{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"u\":[%.4f,%.4f],\"v\":[%.4f,%.4f],"
+								"\"z\":[%.6g,%.6g],"
 								"\"texId\":\"%08X\",\"tcw\":\"0x%08X\",\"blend\":[%d,%d]}",
 								(int)q.x,(int)q.y,(int)q.w,(int)q.h, q.uMn,q.uMx,q.vMn,q.vMx,
+								q.zMn, q.zMx,
 								q.texId, q.tcw, q.srcBlend, q.dstBlend);
 							line += nb;
 						}
