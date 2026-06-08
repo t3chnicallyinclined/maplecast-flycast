@@ -908,6 +908,16 @@ export class SpriteClient {
     const CPSX = this.asmScaleX || 1, CPSY = this.asmScaleY || 1;   // global CPS aspect (work.asm:44-45)
     const S    = this.spriteScale || 1;
     const out  = [];
+    // LIVE TUNING (window._asmCfg, driven by the calibration panel). Defaults = no change.
+    const cfg    = (typeof window !== 'undefined' && window._asmCfg) || {};
+    const cpsX   = cfg.cpsX     != null ? cfg.cpsX     : CPSX;   // X scale (def ~1.667)
+    const cpsY   = cfg.cpsY     != null ? cfg.cpsY     : CPSY;   // Y scale (def ~2.143)
+    const offMul = cfg.offScale != null ? cfg.offScale : 1;      // multiplier on per-part dx/dy (CPS-on-offsets test)
+    const sizeMul= cfg.partScale!= null ? cfg.partScale: 1;      // part w/h multiplier
+    const ax     = cfg.anchorX  != null ? cfg.anchorX  : 0;      // part anchor X (0=left .5=center, in part-w units)
+    const ay     = cfg.anchorY  != null ? cfg.anchorY  : 0;      // part anchor Y
+    const gdx    = cfg.dx0       != null ? cfg.dx0      : 0;      // global px offset X
+    const gdy    = cfg.dy0       != null ? cfg.dy0      : 0;      // global px offset Y
     let loading = 0, missing = 0, drawn = 0, missKeys = [];
 
     // Per-char dynamic zoom (char+0x50/0x54), clamped to a sane band; raw field
@@ -934,7 +944,7 @@ export class SpriteClient {
         missing++; if (missKeys.length < 3) missKeys.push(`${owner.cid}/0x${(sid&0xffff).toString(16)}`);
         return;
       }
-      const sX = CPSX * sane(owner.sclX) * S, sY = CPSY * sane(owner.sclY) * S;
+      const sX = cpsX * sane(owner.sclX) * S, sY = cpsY * sane(owner.sclY) * S;
       for (const r of recs) {
         const part = c.parts[r.part] || c.parts[String(r.part)];
         if (!part) continue;
@@ -942,10 +952,10 @@ export class SpriteClient {
         const flip = (!!owner.facing) !== (!!r.flip);
         // mirror reflects the part's x-extent across the owner anchor: dx -> -(dx+w).
         const pdx = flip ? -(r.dx + part.w) : r.dx;
-        const dx = (owner.exx + pdx * sX) * scaleX;
-        const dy = (owner.eyy + r.dy * sY) * scaleY;
-        const dw = part.w * sX * scaleX;
-        const dh = part.h * sY * scaleY;
+        const dx = (owner.exx + gdx + (pdx * offMul - part.w * ax) * sX) * scaleX;
+        const dy = (owner.eyy + gdy + (r.dy * offMul - part.h * ay) * sY) * scaleY;
+        const dw = part.w * sX * sizeMul * scaleX;
+        const dh = part.h * sY * sizeMul * scaleY;
         const z  = (owner.zBase || 0) * 100 + (r.z || 0);
         const palRow = palRowOf(r.pal || 0, owner.pal12d || 0, owner.pal12e || 0);
         const item = { charId: owner.fx ? -1 : owner.cid, slot: owner.slot, z,

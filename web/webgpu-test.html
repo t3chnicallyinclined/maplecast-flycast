@@ -264,7 +264,7 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=10';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=44';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=45';
 import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=8';
 // StafGL (sprite-staf-gl.mjs) RETIRED — the STAF/HUDF stream now renders through the
 // proven PVR2Renderer (see STAFR/renderStaf below). StafGL stays on disk for reference.
@@ -448,8 +448,35 @@ addEventListener('keydown',e=>{
   // Emitter-port A/B: window._emitterPort gates the faithful loc_8c033e90 port vs the
   // original hand-rolled builder inside buildAssemblyDrawList. Default ON.
   window._emitterPort = true;
+  SPRITECLIENT.assemblyMode = true;   // sc_emit checked by default -> START in reconstruct-from-parts
+  // ONE foolproof toggle: ON = reconstruct from PARTS (emitter loc_8c033e90), OFF = whole BAKED sprite (ground truth).
   box.querySelector('#sc_emit').onchange=e=>{ window._emitterPort=e.target.checked;
-    console.log('[sprite-client] assembly builder =', e.target.checked?'EMITTER PORT (loc_8c033e90)':'hand-roll'); };
+    SPRITECLIENT.assemblyMode=e.target.checked; SG.chars={};
+    console.log('[sprite-client]', e.target.checked?'RECONSTRUCT FROM PARTS (emitter)':'WHOLE-SPRITE (baked ground truth)'); };
+  // === Live assembly calibration panel (window._asmCfg) — tune sliders until Ryu assembles, then DUMP ===
+  (function(){
+    const KN = [['offScale','dx/dy ×',0.3,2,0.01,1],['partScale','size ×',0.5,2,0.01,1],
+      ['anchorX','anchor X',-1,1,0.02,0],['anchorY','anchor Y',-1,1,0.02,0],
+      ['dx0','global dx',-150,150,1,0],['dy0','global dy',-150,150,1,0],
+      ['cpsX','cpsX',1,3,0.01,1.6667],['cpsY','cpsY',1,3,0.01,2.1429]];
+    window._asmCfg = {}; KN.forEach(k=> window._asmCfg[k[0]]=k[5]);
+    const p=document.createElement('div');
+    p.style.cssText='position:fixed;right:8px;top:8px;z-index:9999;background:rgba(17,17,17,.92);border:1px solid #555;padding:8px;font:11px monospace;color:#ccc;width:210px';
+    p.innerHTML='<b style="color:#fa6">ASM CALIBRATION</b> <small>(tune→DUMP)</small>';
+    const spans=[], slides=[];
+    KN.forEach(k=>{
+      const [key,lab,min,max,step,def]=k;
+      const row=document.createElement('div'); row.style.marginTop='4px';
+      const v=document.createElement('span'); v.textContent=def; v.style.cssText='color:#6f6;float:right'; spans.push(v);
+      const sl=document.createElement('input'); sl.type='range'; sl.min=min;sl.max=max;sl.step=step;sl.value=def;sl.style.width='100%'; slides.push(sl);
+      sl.oninput=()=>{ window._asmCfg[key]=parseFloat(sl.value); v.textContent=sl.value; };
+      row.append(lab+' ', v, sl); p.appendChild(row);
+    });
+    const mk=(t,fn)=>{const b=document.createElement('button');b.textContent=t;b.style.marginTop='6px';b.onclick=fn;return b;};
+    p.appendChild(mk('DUMP CONFIG',()=>console.log('[asmCfg]',JSON.stringify(window._asmCfg))));
+    p.appendChild(mk('RESET',()=>{KN.forEach((k,i)=>{window._asmCfg[k[0]]=k[5];slides[i].value=k[5];spans[i].textContent=k[5];});}));
+    document.body.appendChild(p);
+  })();
   // STAF A/B: when on, the stripped-TA full-frame path (cached textures + quad
   // list) drives the Canvas2D output instead of the atlas/assembly draw.
   box.querySelector('#sc_staf').onchange=e=>{ stafMode=e.target.checked; window._stafRoute=e.target.checked; SPRITECLIENT.stafOn=e.target.checked; showCanvas();
