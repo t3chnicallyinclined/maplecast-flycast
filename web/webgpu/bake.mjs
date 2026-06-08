@@ -297,5 +297,70 @@ export class SpriteBake {
     const ju=URL.createObjectURL(new Blob([JSON.stringify(atlas)],{type:'application/json'}));
     const ja=document.createElement('a'); ja.href=ju; ja.download='bake_atlas.json'; ja.click(); URL.revokeObjectURL(ju);
   }
+  // --- per-char roster export ------------------------------------------
+  // ROSTER BAKE: emit ONE PL{hex}.{png,json} per captured char_id in the EXACT
+  // format the client loads (loadChar -> {screenW,screenH,name,image,sprites:{
+  // sid:{x,y,w,h,dx,dy,wG,hG,facing}}}). This is what fills/extends
+  // /var/www/maplecast/test-atlas/chars/. Unlike downloadAtlas() (one combined
+  // bake_atlas for the 2 point slots), this dedupes per (char_id,sprite_id)
+  // across ALL captured slots and writes a separate file per character — so a
+  // guided-play session that cycles characters produces upload-ready atlases.
+  //
+  // MERGE-FRIENDLY: pass an existing atlas object (fetched from prod) as
+  // `priorByCid[char_id]` to keep its already-baked sprites and only ADD the
+  // newly-captured sprite_ids (gap-fill without losing the offline rip). The new
+  // crop is packed into free space to the RIGHT of the prior PNG.
+  // Returns the list of {cid, hex, name, sprites} it downloaded.
+  async downloadCharAtlases(priorByCid){
+    const recs=[...this.caps.values()];
+    if(!recs.length){ alert('no captures yet'); return []; }
+    // Group unique (char_id|sprite_id) -> first capture, bucketed by char.
+    const byCid=new Map();   // cid -> Map(sid -> rec)
+    for(const r of recs){
+      let m=byCid.get(r.char_id); if(!m){ m=new Map(); byCid.set(r.char_id,m); }
+      if(!m.has(r.sprite_id)) m.set(r.sprite_id, r);
+    }
+    const done=[];
+    for(const [cid, sidMap] of byCid){
+      const hex=(cid&0xff).toString(16).padStart(2,'0').toUpperCase();
+      const name=charName(cid);
+      const uniq=[...sidMap.values()];
+      const pad=2;
+      const cw=Math.max(...uniq.map(r=>r.firstImg.width))+pad;
+      const ch=Math.max(...uniq.map(r=>r.firstImg.height))+pad;
+      const cols=Math.ceil(Math.sqrt(uniq.length)), rows=Math.ceil(uniq.length/cols);
+      const cv=document.createElement('canvas'); cv.width=cols*cw; cv.height=rows*ch;
+      const cx=cv.getContext('2d');
+      const atlas={ screenW:640, screenH:480, name, image:`PL${hex}.png`, sprites:{} };
+      // Carry the prior atlas's pal128 (palette recolor) through if supplied.
+      const prior=priorByCid && priorByCid[cid];
+      if(prior && prior.pal128) atlas.pal128=prior.pal128;
+      uniq.forEach((r,i)=>{ const col=i%cols, row=(i/cols)|0, px=col*cw, py=row*ch;
+        cx.putImageData(r.firstImg, px, py);
+        atlas.sprites[r.sprite_id]={ x:px, y:py, w:r.firstImg.width, h:r.firstImg.height,
+          dx:+r.dx.toFixed(2), dy:+r.dy.toFixed(2),
+          wG:+r.wG.toFixed(2), hG:+r.hG.toFixed(2), facing:r.facing };
+      });
+      // Download PNG + JSON for this char.
+      await new Promise(res=> cv.toBlob(b=>{ const u=URL.createObjectURL(b); const a=document.createElement('a');
+        a.href=u; a.download=`PL${hex}.png`; a.click(); URL.revokeObjectURL(u); res(); }));
+      const ju=URL.createObjectURL(new Blob([JSON.stringify(atlas)],{type:'application/json'}));
+      const ja=document.createElement('a'); ja.href=ju; ja.download=`PL${hex}.json`; ja.click(); URL.revokeObjectURL(ju);
+      done.push({ cid, hex, name, sprites:Object.keys(atlas.sprites).length });
+    }
+    console.log('[bake] roster export:', done.map(d=>`PL${d.hex}(${d.name}):${d.sprites}`).join('  '));
+    return done;
+  }
+
+  // Coverage report across all captured chars (for the roster session HUD).
+  rosterText(){
+    const byCid=new Map();
+    for(const r of this.caps.values()){ let m=byCid.get(r.char_id); if(!m){m=new Set();byCid.set(r.char_id,m);} m.add(r.sprite_id); }
+    if(!byCid.size) return 'ROSTER: no captures yet';
+    const lines=[...byCid.entries()].sort((a,b)=>a[0]-b[0])
+      .map(([cid,set])=>`PL${(cid&0xff).toString(16).padStart(2,'0').toUpperCase()} ${charName(cid)}: ${set.size}`);
+    return `ROSTER (${byCid.size} chars captured this session):\n`+lines.join('\n');
+  }
+
   reset(){ this.caps.clear(); this.slot=[this._blankSlot(),this._blankSlot()]; this._lastErr=''; }
 }

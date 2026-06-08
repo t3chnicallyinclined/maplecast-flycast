@@ -263,8 +263,8 @@ import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=3';
 import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
-import {SpriteBake} from './webgpu/bake.mjs?v=10';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=46';
+import {SpriteBake} from './webgpu/bake.mjs?v=11';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=47';
 import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=9';
 // StafGL (sprite-staf-gl.mjs) RETIRED — the STAF/HUDF stream now renders through the
 // proven PVR2Renderer (see STAFR/renderStaf below). StafGL stays on disk for reference.
@@ -281,7 +281,9 @@ const BAKE=new SpriteBake(); window._bake=BAKE;
     +'<label>Bake slot: <select id="bk_slot"><option value="0">P1 only</option><option value="1">P2 only</option><option value="-1">Both</option></select></label><br>'
     +'<label><input type="checkbox" id="bk_all"> Full coverage (capture every sprite_id)</label><br>'
     +'<pre id="bk_stats" style="font-size:10px;color:#0f8;background:#000;padding:4px;margin:4px 0;white-space:pre">off</pre>'
-    +'<button id="bk_dl">Montage + CSV</button> <button id="bk_atlas">Atlas (PNG+JSON)</button> <button id="bk_rst">Reset</button>';
+    +'<button id="bk_dl">Montage + CSV</button> <button id="bk_atlas">Atlas (PNG+JSON)</button> <button id="bk_rst">Reset</button><br>'
+    +'<button id="bk_roster">Roster export (PL&lt;hex&gt; per-char)</button>'
+    +'<pre id="bk_roster_stats" style="font-size:10px;color:#6cf;background:#000;padding:4px;margin:4px 0;white-space:pre;max-height:120px;overflow:auto">roster: -</pre>';
   panel.insertBefore(box, panel.firstChild);
   // Enabling Bake auto-configures the clean isolation: TRANSLUCENT ONLY (drop
   // opaque + punch-through stage/HUD, no customBg floorZ slivers) -> characters
@@ -316,8 +318,14 @@ const BAKE=new SpriteBake(); window._bake=BAKE;
   box.querySelector('#bk_slot').onchange=e=>{ BAKE.slotFilter=+e.target.value; BAKE.reset(); };
   box.querySelector('#bk_all').onchange=e=>{ BAKE.captureAll=e.target.checked; };
   box.querySelector('#bk_atlas').onclick=()=>BAKE.downloadAtlas();
+  // ROSTER EXPORT: write one PL{hex}.{png,json} per captured char_id in the
+  // production atlas format (drops straight into test-atlas/chars/). For a
+  // guided-play roster session: turn Bake ON + Both slots + Full coverage,
+  // play each character, then click this to download upload-ready atlases.
+  box.querySelector('#bk_roster').onclick=async()=>{ await BAKE.downloadCharAtlases(); };
   box.querySelector('#bk_rst').onclick=()=>BAKE.reset();
-  setInterval(()=>{ const el=document.getElementById('bk_stats'); if(el) el.textContent=BAKE.statsText(); },500);
+  setInterval(()=>{ const el=document.getElementById('bk_stats'); if(el) el.textContent=BAKE.statsText();
+    const rel=document.getElementById('bk_roster_stats'); if(rel) rel.textContent=BAKE.rosterText(); },500);
 })();
 
 // --- Sprite Client (Option 6 proof): render chars from 253B GSTA + atlas, no TA ---
@@ -475,6 +483,31 @@ addEventListener('keydown',e=>{
     const mk=(t,fn)=>{const b=document.createElement('button');b.textContent=t;b.style.marginTop='6px';b.onclick=fn;return b;};
     p.appendChild(mk('DUMP CONFIG',()=>console.log('[asmCfg]',JSON.stringify(window._asmCfg))));
     p.appendChild(mk('RESET',()=>{KN.forEach((k,i)=>{window._asmCfg[k[0]]=k[5];slides[i].value=k[5];spans[i].textContent=k[5];});}));
+    document.body.appendChild(p);
+  })();
+  // === Satellite/object fine-calibration (window._objCfg) — dial in projectile/
+  // cape/effect alignment in the WHOLE-SPRITE path, the same way the body CPS scale
+  // was calibrated. Applied in sprite-client.mjs buildDrawList() object draw. dx/dy
+  // are a global screen-px nudge (game 640x480 space); scale multiplies the owner's
+  // CPS×dynamic-zoom on the satellite anchor+size. Defaults 0/0/1 = no change. ===
+  (function(){
+    const KN = [['dx','obj dx',-60,60,0.5,0],['dy','obj dy',-60,60,0.5,0],['scale','obj scale',0.5,1.5,0.005,1]];
+    window._objCfg = {}; KN.forEach(k=> window._objCfg[k[0]]=k[5]);
+    const p=document.createElement('div');
+    p.style.cssText='position:fixed;right:8px;top:330px;z-index:9999;background:rgba(17,17,17,.92);border:1px solid #555;padding:8px;font:11px monospace;color:#ccc;width:210px';
+    p.innerHTML='<b style="color:#6cf">OBJ CALIBRATION</b> <small>(projectiles/fx)</small>';
+    const spans=[], slides=[];
+    KN.forEach(k=>{
+      const [key,lab,min,max,step,def]=k;
+      const row=document.createElement('div'); row.style.marginTop='4px';
+      const v=document.createElement('span'); v.textContent=def; v.style.cssText='color:#6f6;float:right'; spans.push(v);
+      const sl=document.createElement('input'); sl.type='range'; sl.min=min;sl.max=max;sl.step=step;sl.value=def;sl.style.width='100%'; slides.push(sl);
+      sl.oninput=()=>{ window._objCfg[key]=parseFloat(sl.value); v.textContent=sl.value; };
+      row.append(lab+' ', v, sl); p.appendChild(row);
+    });
+    const mk=(t,fn)=>{const b=document.createElement('button');b.textContent=t;b.style.marginTop='6px';b.onclick=fn;return b;};
+    p.appendChild(mk('DUMP CONFIG',()=>console.log('[objCfg]',JSON.stringify(window._objCfg))));
+    p.appendChild(mk('RESET',()=>{KN.forEach((k,i)=>{window._objCfg[k[0]]=k[5];slides[i].value=k[5];spans[i].textContent=k[5];});}));
     document.body.appendChild(p);
   })();
   // STAF A/B: when on, the stripped-TA full-frame path (cached textures + quad

@@ -842,8 +842,23 @@ export class SpriteClient {
       // Bodies sit at the mid baseline (z=8), so low-layer satellites (capes) fall
       // behind their owner and high-layer ones (effects/supers) draw in front.
       const z = o.type;
+      // SATELLITE FINE-CALIBRATION (window._objCfg = {dx, dy, scale}). The body and
+      // the object use the IDENTICAL formula (base + anchor*SX) and the SAME screen
+      // field (+0xE0/E4 — prod runs MAPLECAST_OBJS_SLOTTABLE so readAllDrawn reads
+      // +0xE0 like the body). The residual object drift is a convention difference
+      // between the body's foot-origin anchor (baked: dx = cropLeft - body.screen_x)
+      // and an object node's own +0xE0 transform origin for the SAME sprite_id.
+      // It's a small systematic offset/scale, so expose it as a user-dialed tunable
+      // (mirrors how the body CPS scale was calibrated) instead of guessing a swap.
+      // Defaults {dx:0,dy:0,scale:1} => byte-identical to the pre-tunable draw.
+      const oc = (typeof window !== 'undefined' && window._objCfg) || null;
+      const ocSc = oc ? (oc.scale || 1) : 1;
+      const ocDx = oc ? (oc.dx || 0) : 0;
+      const ocDy = oc ? (oc.dy || 0) : 0;
+      const oSX = SX * ocSc, oSY = SY * ocSc;
       const item = { charId: atlasCid, slot: oslot, z, sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
-        dx: (px + dxv*SX)*scaleX, dy: (py + sp.dy*SY)*scaleY, dw: sp.wG*SX*scaleX, dh: sp.hG*SY*scaleY,
+        dx: (px + dxv*oSX + ocDx)*scaleX, dy: (py + sp.dy*oSY + ocDy)*scaleY,
+        dw: sp.wG*oSX*scaleX, dh: sp.hG*oSY*scaleY,
         flip: fl };
       // Effect objects draw additive (glow), matching the sparks/EFCT passes — and
       // any per-object blend nibble the server shipped still wins.
