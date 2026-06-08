@@ -29,6 +29,18 @@
 
 const GSTA_MAGIC = [71, 83, 84, 65]; // 'G','S','T','A'
 
+// Per-char dynamic-zoom guard (char+0x50/0x54). Same band the emitter path uses
+// (sprite-client.mjs:926): out-of-band / zero / garbage -> 1.0 (no zoom), so a char
+// WITHOUT the step-1 scale field renders byte-identical to the pre-field build.
+const _sane = (v) => (v > 0.05 && v < 16) ? v : 1.0;
+
+// Reserved pseudo-char id for the shared EFFECTS atlas in the whole-sprite path.
+// Effect satellite objects (OBJS flags bit0 / node+0x15c, Effect Poly 0x0CED0000)
+// resolve their sprite from this atlas instead of the owner's PL{cid}. Registered
+// into this.chars[FX_CID] so the GPU's existing per-cid atlas/grouping picks it up
+// with no HTML change. 0xFE0 is far outside the 0..0x39 real char_id range.
+const FX_CID = 0xFE0;
+
 export class SpriteClient {
   constructor() {
     // Per-character atlases, lazy-loaded by char_id as characters appear in the
@@ -55,6 +67,11 @@ export class SpriteClient {
     this.objects = [];         // pool satellite objects {cid,sid,x,y} (OBJS packet) — cape/effects/projectiles
     this.objectsOn = true;
     this._objBridge = false;   // flicker-bridge: re-draw last frame's missing objects (lingers removed objs 1 frame) — OFF by default
+    // STEP-1 WIRE fx flags (whole-sprite path). APPROXIMATE — baked sprites are RGB,
+    // so these are TINT approximations, NOT the exact hurt/overlay palette-bank swap.
+    // Default ON; subtle. Toggle window._spriteclient.hitFlashOn/overlayOn = false.
+    this.hitFlashOn = true;    // char+0x12d/0x12e nonzero -> white/red flash tint on the body
+    this.overlayOn  = true;    // char+0x1a4 nonzero -> super/aura additive tint on the body
     this._fxCache = new Map(); // texture hash -> canvas (decoded from TXTR packets)
     this._lastEfctN = 0;
     this.effectsOn = true;
@@ -423,7 +440,17 @@ export class SpriteClient {
       const blob = await (await fetch(base + '.png' + bust)).blob();
       this._fxImg = await createImageBitmap(blob);
       this._fx = json;
-      console.log('[sprite-client] loaded fx_atlas:', (json.effects || []).length, 'effects');
+      // WHOLE-SPRITE effect routing: expose the fx atlas as a pseudo-char so
+      // buildDrawList()'s effect objects (ob.isEffect) resolve sprites from it and
+      // the GPU registers/binds its texture via the same per-cid path. Only when the
+      // atlas carries a sprite-keyed `sprites` map (the whole-sprite bake format);
+      // an assembly-only fx atlas (parts/asm) stays on the emitter path's _fxAsmChar.
+      if (json.sprites) {
+        this.chars[FX_CID] = { img: this._fxImg, sprites: json.sprites,
+                               name: json.name || 'effects', pal128: json.pal128 };
+      }
+      console.log('[sprite-client] loaded fx_atlas:',
+        (json.effects || []).length, 'effects,', Object.keys(json.sprites || {}).length, 'sprites');
     } catch (e) { console.warn('[sprite-client] fx_atlas load failed', e); }
     finally { this._fxLoading = false; }
   }
@@ -679,11 +706,37 @@ export class SpriteClient {
     return { drawn: this._asmDrawn, missing: this._asmMiss, note: this._asmNote };
   }
 
+  // Apply the STEP-1 body fx (hit-flash + super/aura overlay) to a body draw item.
+  // APPROXIMATE: the baked sprites are RGB, so we add an additive `tint` (rgb 0..1
+  // the GPU adds to the body's color, see sprite-gpu.mjs `tint`) — NOT the exact
+  // hurt/overlay palette-bank swap the engine does (loc_8c035162). Subtle by design.
+  //   - hit-flash: char+0x12d/0x12e (sl.pal12d/pal12e). +0x12e is the live
+  //     palette-effect word; +0x12d the per-part select. We can't pick the exact
+  //     hurt bank from a baked RGB crop, so we flash a white-ish boost on any hit
+  //     edge. We ALSO honor the existing health-drop flash window (sl._flashUntil).
+  //   - overlay: char+0x1a4 (sl.overlay1a4) = RenderExtra class; nonzero -> an
+  //     additive aura tint (cool/blue for a generic super glow). Coarse: the class
+  //     -> exact overlay-palette table (bank03) isn't reproduced from baked sprites.
+  _applyBodyFx(item, sl) {
+    let tr = 0, tg = 0, tb = 0;
+    if (this.hitFlashOn) {
+      const now = this._now0 || ((typeof performance !== 'undefined') ? performance.now() : 0);
+      const flashing = (sl.pal12d && sl.pal12d !== 0) || (sl.pal12e && sl.pal12e !== 0)
+                    || (sl._flashUntil && now < sl._flashUntil);
+      if (flashing) { tr += 0.35; tg += 0.30; tb += 0.30; }   // near-white additive flash
+    }
+    if (this.overlayOn && sl.overlay1a4 && sl.overlay1a4 !== 0) {
+      tr += 0.05; tg += 0.10; tb += 0.22;                     // cool/blue super-aura tint
+    }
+    if (tr || tg || tb) item.tint = [tr, tg, tb];
+  }
+
   // GPU path: emit [{charId, sx,sy,sw,sh (atlas px), dx,dy,dw,dh (canvas px), flip}]
   // for the active characters — same extrapolation + held-pose logic as render().
   buildDrawList(canvasW, canvasH) {
     const scaleX = canvasW / (this.screenW || 640), scaleY = canvasH / (this.screenH || 480);
     const now = (typeof performance !== 'undefined') ? performance.now() : 0;
+    this._now0 = now;   // for _applyBodyFx's flash-window check
     if (!this._held) this._held = new Array(6).fill(null);
     const out = []; let loading = 0, missing = 0, missKeys = [];
     for (let s = 0; s < 6; s++) {
@@ -702,12 +755,20 @@ export class SpriteClient {
       // rip sprites are CPS-native px, MVC2 stretches Y MORE than X. Apply SX to
       // every X (anchor offset + width), SY to every Y (offset + height). This is
       // the fixed game scale — NOT the derived "sliding" camera zoom (_zoom, info-only).
-      const SX = this.asmScaleX || 1, SY = this.asmScaleY || 1;
+      // STEP-1 WIRE (exact): compose the fixed CPS scale with the per-char dynamic
+      // zoom char+0x50/0x54 (sl.scaleX/scaleY). sane() guards garbage/zero so a char
+      // WITHOUT the field (scaleX≈1) is byte-identical to the pre-field behavior.
+      const SX = (this.asmScaleX || 1) * _sane(sl.scaleX), SY = (this.asmScaleY || 1) * _sane(sl.scaleY);
       const cfl = (sl.facing !== sp.facing);
       const cdx = cfl ? -(sp.dx + sp.wG) : sp.dx;   // mirror the (asymmetric) anchor when flipped
-      out.push({ charId: sl.char_id, slot: s, z: 8, sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
+      // STEP-1 WIRE (approx, flagged): hit-flash (char+0x12d/0x12e) -> body TINT, and
+      // super/aura overlay (char+0x1a4) -> additive aura. Baked sprites are RGB so
+      // these are tint approximations, NOT the exact hurt/overlay palette-bank swap.
+      const item = { charId: sl.char_id, slot: s, z: 8, sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
         dx: (exx+cdx*SX)*scaleX, dy: (eyy+sp.dy*SY)*scaleY, dw: sp.wG*SX*scaleX, dh: sp.hG*SY*scaleY,
-        flip: cfl });
+        flip: cfl };
+      this._applyBodyFx(item, sl);
+      out.push(item);
     }
     // FLICKER-TRANSPARENCY BRIDGE: MVC2 draws some semi-transparent effects/
     // projectiles on ALTERNATING frames to fake alpha. Rendered literally they
@@ -734,15 +795,24 @@ export class SpriteClient {
     // lightning, supers). The slot table gives each its OWN authoritative screen
     // pos and render layer, so we draw exactly there — no owner-relative guess.
     if (this.objectsOn !== false) for (const o of drawObjs) {
-      const c = this.chars[o.cid];
-      if (!c) { this.loadChar(o.cid); continue; }
+      // EFFECT ROUTING (OBJS flags bit0 = is_effect, node+0x15c in Effect Poly
+      // 0x0CED0000): resolve the sprite from the shared EFFECTS atlas (this.chars
+      // [FX_CID], populated by loadFxAtlas when it carries a `sprites` map), NOT the
+      // owner's PL{cid}. Non-effect objects (cape/projectile body) stay on the char
+      // atlas. The fx atlas is registered as a pseudo-char so the GPU binds its own
+      // texture/group; if it isn't loaded yet the effect object just waits (no draw).
+      const atlasCid = o.isEffect ? FX_CID : o.cid;
+      const c = this.chars[atlasCid];
+      if (!c) { if (!o.isEffect) this.loadChar(o.cid); continue; }   // fx atlas loads via loadFxAtlas()
       if (!c.img) continue;
       const sp = c.sprites[o.sid];
       if (!sp) {
-        // DIAGNOSTIC: this object's sprite_id isn't in the owner's per-character
-        // atlas — it's a SHARED effect sprite (hitspark/etc.) we don't have yet.
-        // Tally it; the set is the exact extraction list for the effects atlas.
-        const k = `PL${o.cid.toString(16).padStart(2,'0').toUpperCase()}/0x${(o.sid&0xffff).toString(16)}`;
+        // DIAGNOSTIC: this object's sprite_id isn't in the resolved atlas. For a
+        // non-effect object it's a SHARED effect sprite (hitspark/etc.) not yet
+        // routed/baked; tally it — the set is the exact effects-atlas extraction
+        // list. (Effect-routed misses are also tallied, prefixed FX.)
+        const tag = o.isEffect ? 'FX' : `PL${o.cid.toString(16).padStart(2,'0').toUpperCase()}`;
+        const k = `${tag}/0x${(o.sid&0xffff).toString(16)}`;
         this._objMiss = this._objMiss || new Map();
         this._objMiss.set(k, (this._objMiss.get(k) || 0) + 1);
         continue;
@@ -753,22 +823,33 @@ export class SpriteClient {
       // look. Drawing at the true pos is both correct and stable.
       const px = o.x, py = o.y;
       if (px < -64 || px > 704 || py < -64 || py > 544) continue;
-      const SX = this.asmScaleX || 1, SY = this.asmScaleY || 1;   // anisotropic CPS scale (work.asm:44-45)
+      // Owner slot: the active char that owns this object (drives palette group + the
+      // per-char dynamic zoom that satellites inherit).
+      let oslot = 0, osl = null;
+      for (let s = 0; s < 6; s++) if (this.slot[s].active && this.slot[s].char_id === o.cid) { oslot = s; osl = this.slot[s]; break; }
+      // STEP-1 WIRE (exact): anisotropic CPS scale composed with the OWNER's dynamic
+      // zoom char+0x50/0x54 — so a growing/shrinking super's projectiles/effects
+      // scale WITH the caster. Owner without the field (scaleX≈1) = unchanged.
+      const SX = (this.asmScaleX || 1) * _sane(osl ? osl.scaleX : 1);
+      const SY = (this.asmScaleY || 1) * _sane(osl ? osl.scaleY : 1);
       // Orientation: use the object's OWN flip (node+0x130, shipped in the 0x8000
       // bit) — NOT the owner's facing. The old cid-matched-owner-facing guess locked
       // P2's cape onto P1's facing (mirror/slot-order), so the P2 cape faced the
       // wrong way and looked "stuck". XOR the sprite's baked facing.
-      let oslot = 0;
-      for (let s = 0; s < 6; s++) if (this.slot[s].active && this.slot[s].char_id === o.cid) { oslot = s; break; }
       const fl = (!!o.xflip) !== (!!sp.facing);
       const dxv = fl ? -(sp.dx + sp.wG) : sp.dx;   // mirror the anchor when flipped
       // z = the REAL render layer (o.type now carries the slot-table layer 0..15).
       // Bodies sit at the mid baseline (z=8), so low-layer satellites (capes) fall
       // behind their owner and high-layer ones (effects/supers) draw in front.
       const z = o.type;
-      out.push({ charId: o.cid, slot: oslot, z, sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
+      const item = { charId: atlasCid, slot: oslot, z, sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
         dx: (px + dxv*SX)*scaleX, dy: (py + sp.dy*SY)*scaleY, dw: sp.wG*SX*scaleX, dh: sp.hG*SY*scaleY,
-        flip: fl });
+        flip: fl };
+      // Effect objects draw additive (glow), matching the sparks/EFCT passes — and
+      // any per-object blend nibble the server shipped still wins.
+      if (o.isEffect) item.blend = (o.blend != null) ? o.blend : 0x01;
+      else if (o.blend != null) item.blend = o.blend;
+      out.push(item);
     }
     // The renderer groups CONSECUTIVE same-cid sprites and drops chars past maxGroups(8).
     // Sort by cid so each character's body+objects form ONE group, objects (z=-1) behind

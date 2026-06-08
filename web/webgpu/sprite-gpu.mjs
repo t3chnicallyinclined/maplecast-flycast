@@ -17,7 +17,7 @@
 import { PostProcessor } from './post-process.mjs?v=2';
 
 const SHADER = `
-struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1) @interpolate(flat) palBase: u32 };
+struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1) @interpolate(flat) palBase: u32, @location(2) @interpolate(flat) tint: vec3f };
 struct U { canvas: vec2f, pad: vec2f };
 @group(0) @binding(0) var atlasTex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
@@ -29,7 +29,8 @@ fn vs(@builtin(vertex_index) vi: u32,
       @location(0) dest: vec4f,    // x,y,w,h canvas px
       @location(1) auv: vec4f,     // u0,v0,u1,v1 atlas UV
       @location(2) flip: f32,
-      @location(3) palBase: f32) -> VSOut {
+      @location(3) palBase: f32,
+      @location(4) tint: vec3f) -> VSOut {  // additive fx tint (hit-flash / super-aura), 0 = none
   var corners = array<vec2f,6>(
     vec2f(0.,0.), vec2f(1.,0.), vec2f(0.,1.),
     vec2f(0.,1.), vec2f(1.,0.), vec2f(1.,1.));
@@ -40,7 +41,7 @@ fn vs(@builtin(vertex_index) vi: u32,
   var ux = c.x;
   if (flip > 0.5) { ux = 1. - c.x; }
   let uv = vec2f(mix(auv.x, auv.z, ux), mix(auv.y, auv.w, c.y));
-  var o: VSOut; o.pos = vec4f(clip, 0., 1.); o.uv = uv; o.palBase = u32(palBase + 0.5); return o;
+  var o: VSOut; o.pos = vec4f(clip, 0., 1.); o.uv = uv; o.palBase = u32(palBase + 0.5); o.tint = tint; return o;
 }
 @fragment
 fn fs(i: VSOut) -> @location(0) vec4f {
@@ -60,6 +61,9 @@ fn fs(i: VSOut) -> @location(0) vec4f {
     let lcol = pal[i.palBase + 128u + u32(bi)].rgb;
     if (distance(dcol, lcol) > 0.012) { rgb = lcol; }
   }
+  // STEP-1 fx tint (approximate): additive boost from buildDrawList's hit-flash /
+  // super-aura. 0 vector = no change, so chars without the field are untouched.
+  rgb = clamp(rgb + i.tint, vec3f(0.), vec3f(1.));
   return vec4f(rgb, col.a);
 }
 
@@ -83,7 +87,8 @@ fn fs_spark(i: SOut) -> @location(0) vec4f {
   return vec4f(col.rgb * i.a, 1.0);
 }`;
 
-const INST_STRIDE = 10 * 4;   // dest(4) + auv(4) + flip(1) + palBase(1)
+const INST_FLOATS = 13;       // dest(4) + auv(4) + flip(1) + palBase(1) + tint(3)
+const INST_STRIDE = INST_FLOATS * 4;
 
 export class SpriteGPU {
   constructor() {
@@ -101,7 +106,7 @@ export class SpriteGPU {
       this.sampler = device.createSampler({ minFilter: 'nearest', magFilter: 'nearest' });
       this.ubuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       this.inst = device.createBuffer({ size: this.maxInst * INST_STRIDE, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-      this.instData = new Float32Array(this.maxInst * 10);
+      this.instData = new Float32Array(this.maxInst * INST_FLOATS);
       this.palBuf = device.createBuffer({ size: this.maxGroups * 256 * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       this.palData = new Float32Array(this.maxGroups * 256 * 4);   // per group: 128 default + 128 live
       this.bgl = device.createBindGroupLayout({ entries: [
@@ -119,6 +124,7 @@ export class SpriteGPU {
             { shaderLocation: 1, offset: 16, format: 'float32x4' },
             { shaderLocation: 2, offset: 32, format: 'float32' },
             { shaderLocation: 3, offset: 36, format: 'float32' },
+            { shaderLocation: 4, offset: 40, format: 'float32x3' },
           ]}]},
         fragment: { module: mod, entryPoint: 'fs', targets: [{ format: this.fmt }] },
         primitive: { topology: 'triangle-list' },
@@ -134,6 +140,7 @@ export class SpriteGPU {
             { shaderLocation: 1, offset: 16, format: 'float32x4' },
             { shaderLocation: 2, offset: 32, format: 'float32' },
             { shaderLocation: 3, offset: 36, format: 'float32' },
+            { shaderLocation: 4, offset: 40, format: 'float32x3' },
           ]}]},
         fragment: { module: mod, entryPoint: 'fs', targets: [{ format: this.fmt,
           blend: { color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
@@ -258,18 +265,21 @@ export class SpriteGPU {
       let normCount = 0;
       for (const s of ordered) {
         if (n >= this.maxInst) break;
-        const c = this.chars[cid], o = n * 10;
+        const c = this.chars[cid], o = n * INST_FLOATS;
         this.instData[o] = s.dx; this.instData[o + 1] = s.dy; this.instData[o + 2] = s.dw; this.instData[o + 3] = s.dh;
         this.instData[o + 4] = s.sx / c.w; this.instData[o + 5] = s.sy / c.h;
         this.instData[o + 6] = (s.sx + s.sw) / c.w; this.instData[o + 7] = (s.sy + s.sh) / c.h;
         this.instData[o + 8] = s.flip ? 1 : 0; this.instData[o + 9] = palBase;
+        // STEP-1 fx tint (rgb, additive). Absent -> 0,0,0 = no change.
+        const t = s.tint;
+        this.instData[o + 10] = t ? t[0] : 0; this.instData[o + 11] = t ? t[1] : 0; this.instData[o + 12] = t ? t[2] : 0;
         if (!isAdd(s)) normCount++;
         n++;
       }
       groups.push({ cid, first, count: n - first, normCount }); gi++;
     }
     if (gi) this.dev.queue.writeBuffer(this.palBuf, 0, this.palData, 0, gi * 256 * 4);
-    if (n) this.dev.queue.writeBuffer(this.inst, 0, this.instData, 0, n * 10);
+    if (n) this.dev.queue.writeBuffer(this.inst, 0, this.instData, 0, n * INST_FLOATS);
 
     // hit-spark instances (additive): dest center+size, atlas frame UV, alpha
     let sn = 0;
