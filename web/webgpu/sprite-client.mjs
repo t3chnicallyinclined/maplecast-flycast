@@ -71,7 +71,7 @@ export class SpriteClient {
     // so these are TINT approximations, NOT the exact hurt/overlay palette-bank swap.
     // Default ON; subtle. Toggle window._spriteclient.hitFlashOn/overlayOn = false.
     this.hitFlashOn = true;    // char+0x12d/0x12e nonzero -> white/red flash tint on the body
-    this.overlayOn  = true;    // char+0x1a4 nonzero -> super/aura additive tint on the body
+    this.overlayOn  = false;   // OFF: char+0x1a4 is nonzero for NORMAL render classes (it washed every body blue); re-enable only with the exact overlay-bank swap, not a blanket tint
     this._fxCache = new Map(); // texture hash -> canvas (decoded from TXTR packets)
     this._lastEfctN = 0;
     this.effectsOn = true;
@@ -744,8 +744,11 @@ export class SpriteClient {
     let tr = 0, tg = 0, tb = 0;
     if (this.hitFlashOn) {
       const now = this._now0 || ((typeof performance !== 'undefined') ? performance.now() : 0);
-      const flashing = (sl.pal12d && sl.pal12d !== 0) || (sl.pal12e && sl.pal12e !== 0)
-                    || (sl._flashUntil && now < sl._flashUntil);
+      // ONLY the validated health-drop edge. pal12d/pal12e are nonzero during NORMAL
+      // play (they're palette-effect selectors, not hit booleans — RE notes confirm
+      // +0x12e probes flat on hits), so keying off them washed every body white every
+      // frame. The real generic hit trigger is the hp-drop window (sl._flashUntil).
+      const flashing = (sl._flashUntil && now < sl._flashUntil);
       if (flashing) { tr += 0.35; tg += 0.30; tb += 0.30; }   // near-white additive flash
     }
     if (this.overlayOn && sl.overlay1a4 && sl.overlay1a4 !== 0) {
