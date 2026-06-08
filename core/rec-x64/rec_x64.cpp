@@ -140,11 +140,27 @@ public:
 		// At this point all guest regs are coherent in Sh4cntx.r[] (not yet hoisted
 		// to host regs by regalloc.DoAlloc below). Read-only handler -> determinism-
 		// safe. Same GenCall/call_regs[0] convention as the Do_Exception call below.
-		if (maplecast_oracle_hook::mc_oracleHookEnabled
-		    && maplecast_oracle_hook::mc_isHookedPC(block->vaddr))
+		if (maplecast_oracle_hook::mc_oracleHookEnabled)
 		{
-			mov(call_regs[0], block->vaddr);	// pc
-			GenCall((void (*)())maplecast_oracle_hook::mc_oracle_blockEntry);
+			// DIAG: log the FULL vaddr of any block whose low 28 bits alias a hooked
+			// PC — proves whether the recompiler sees 0x8C.. or 0x0C.. (the never-fires
+			// root cause). One-shot per distinct vaddr to avoid log spam. Gated.
+			u32 lo = block->vaddr & 0x1FFFFFFF;
+			if (lo == 0x0C03093C || lo == 0x0C033E90) {
+				static u32 lastLogged = 0;
+				if (block->vaddr != lastLogged) {
+					lastLogged = block->vaddr;
+					fprintf(stderr, "[ORACLE-HOOK] compile() block->vaddr=0x%08X (low28=0x%08X) "
+					                "aliases hooked PC; isHookedPC=%d\n",
+					        block->vaddr, lo,
+					        (int)maplecast_oracle_hook::mc_isHookedPC(block->vaddr));
+				}
+			}
+			if (maplecast_oracle_hook::mc_isHookedPC(block->vaddr))
+			{
+				mov(call_regs[0], block->vaddr);	// pc
+				GenCall((void (*)())maplecast_oracle_hook::mc_oracle_blockEntry);
+			}
 		}
 
 		if (mmu_enabled() && block->has_fpu_op)

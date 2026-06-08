@@ -21,8 +21,19 @@ bool mc_oracleHookEnabled = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr);
 // The two hooked guest PCs (CONFIRMED, marvelous2 bank03; FRAME-ORACLE-SPEC §Draw chain):
 //   0x8C03093C loc_8c03093c "Render Main Sprite" — node=r4 (object begin)
 //   0x8C033E90 loc_8c033e90 "reading sprite data" — quad emit (r8=texptr, r12=palptr, r14=cursor)
+// NOTE: the disassembly labels are P1 (cached, 0x8C..) addresses, but MVC2 actually
+// EXECUTES this code from the P0 region — the recompiler's block->vaddr for these
+// routines is 0x0C03093C / 0x0C033E90 (same low 28 bits, high nibble differs). So we
+// compare on the SH4 area-masked PC (& 0x1FFFFFFF) which normalizes every cached/
+// uncached alias (P0/P1/P2) of the same RAM line to 0x0C.. — see mc_isHookedPC.
+// (Root cause of the "hook never fires" bug fixed 2026-06-08.)
 static const u32 PC_OBJ_BEGIN = 0x8C03093C;
 static const u32 PC_QUAD_EMIT  = 0x8C033E90;
+// SH4 external-area mask: drops the P0/P1/P2/U0 cache/region bits so any alias of a
+// RAM line compares equal. 0x8C03093C & MASK == 0x0C03093C == 0x0C03093C & MASK.
+static const u32 SH4_AREA_MASK = 0x1FFFFFFF;
+static const u32 PC_OBJ_BEGIN_M = PC_OBJ_BEGIN & SH4_AREA_MASK;  // 0x0C03093C
+static const u32 PC_QUAD_EMIT_M = PC_QUAD_EMIT & SH4_AREA_MASK;  // 0x0C033E90
 // Slot-walk restart (loc_8c0308c2 Render_sprites) — an alternate frame boundary.
 // We flush on serverPublish() instead (simplest robust), but keep the PC here for
 // reference; not hooked.
@@ -99,7 +110,12 @@ void mc_oracleInit()
 
 bool mc_isHookedPC(u32 pc)
 {
-	return pc == PC_OBJ_BEGIN || pc == PC_QUAD_EMIT;
+	// Compare on the area-masked PC so the cached (0x8C..) disasm label matches the
+	// physical/P0 (0x0C..) address the recompiler actually compiles from (and any
+	// other alias). This is the FIX for the never-fires bug: block->vaddr is 0x0C..,
+	// the literals are 0x8C.., and an exact == never matched.
+	u32 m = pc & SH4_AREA_MASK;
+	return m == PC_OBJ_BEGIN_M || m == PC_QUAD_EMIT_M;
 }
 
 void DYNACALL mc_oracle_blockEntry(u32 pc)
@@ -107,7 +123,21 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 	// Read-only. All guest regs coherent in Sh4cntx.r[] at this injection point.
 	const u32* r = Sh4cntx.r;
 
-	if (pc == PC_OBJ_BEGIN) {
+	// Mask to the SH4 external area so we route correctly whether the recompiler
+	// passed the cached (0x8C..) or physical (0x0C..) alias of the PC.
+	u32 mpc = pc & SH4_AREA_MASK;
+
+	// One-shot proof-of-life: confirms the GenCall actually executes (vs merely
+	// being emitted) the very first time a hooked block runs. Gated by enable.
+	static bool firstFireLogged = false;
+	if (!firstFireLogged) {
+		firstFireLogged = true;
+		fprintf(stderr, "[ORACLE-HOOK] first block-entry at pc=0x%08X (masked 0x%08X) — "
+		                "%s; capturing object/quad\n",
+		        pc, mpc, mpc == PC_OBJ_BEGIN_M ? "OBJ_BEGIN" : "QUAD_EMIT");
+	}
+
+	if (mpc == PC_OBJ_BEGIN_M) {
 		// node = r4 (the object/character struct being rendered).
 		u32 node = r[4];
 		if (!inRam(node)) { s_curObj = -1; return; }
@@ -132,7 +162,8 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 		return;
 	}
 
-	// pc == PC_QUAD_EMIT — one 16-byte quad attributed to the current object.
+	// mpc == PC_QUAD_EMIT_M — one 16-byte quad attributed to the current object.
+	if (mpc != PC_QUAD_EMIT_M) return;
 	if (s_nquad >= MAX_QUADS) return;
 	u32 texptr = r[8];
 	u32 palptr = r[12];
@@ -169,7 +200,15 @@ void mc_oracle_frameFlush(u32 frame)
 	if (s_nobj == 0) { s_nquad = 0; s_curObj = -1; return; }
 
 	if (!full) {
-		if (!of) of = fopen("/dev/shm/mc_oracle_hook.jsonl", "a");
+		if (!of) {
+			of = fopen("/dev/shm/mc_oracle_hook.jsonl", "a");
+			if (of)
+				fprintf(stderr, "[ORACLE-HOOK] first jsonl flush — frame=%u objs=%d quads=%d "
+				                "-> /dev/shm/mc_oracle_hook.jsonl\n", frame, s_nobj, s_nquad);
+			else
+				fprintf(stderr, "[ORACLE-HOOK] FAILED to open /dev/shm/mc_oracle_hook.jsonl "
+				                "(errno path) — captured objs=%d but cannot write\n", s_nobj);
+		}
 		if (of && ow < ORACLE_CAP) {
 			char b[2048]; int n = 0;
 			n  = snprintf(b, sizeof b, "{\"frame\":%u,\"objects\":[", frame);
