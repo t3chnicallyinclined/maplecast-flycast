@@ -1068,7 +1068,14 @@ static void partDump(const GameState& state) {
 		//   cell      = read32(player+0x154)          ; valid keyframe pointer (live)
 		//   live_sid  = read16(cell + 4)              ; == read16(player+0x144) (the client's key)
 		//   slot      = read16(cell + 0x12)           ; keyframe -> EXTRAS slot index
-		//   records   = EXTRAS + slot*0x400 + 0x08    ; assembly, 8-byte recs, mode==0xFF ends
+		//   records   = EXTRAS + slot*0x400 + 0x08    ; assembly start (see UNCONFIRMED note)
+		// *** UNCONFIRMED slot->byte-offset: the `slot*0x400` stride is NOT verified against
+		// the disasm. The quad emitter (loc_8c033d78/e90) walks a records directory at
+		// node+0x160, not a 0x400-strided EXTRAS slot table — and the static PL00 EXTRAS is
+		// a flat stream of variable-length assemblies (terminator attr==0x00FF), NOT 0x400
+		// slots. The RECORD layout below IS proven; the slot ADDRESSING is best-effort.
+		// Cross-check the emitted sidasm against the raw PL{hex}_extras.bin dump (which the
+		// offline parse_extras re-splits by terminator independent of any slot stride).
 		// Reading from the LIVE cell guarantees live_sid == read16(player+0x144) — unlike
 		// (a) the offline ANIMATION-table scan (different namespace, never matched) and
 		// (b) *(0x144) (not a pointer). Across fires the live sid set accumulates.
@@ -1076,7 +1083,7 @@ static void partDump(const GameState& state) {
 		// File PL{hex}_sidasm.txt: "<sid> <slot> <nrecs> dx,dy,part,flip;...". If the
 		// slot's assembly is empty, we dump the cell's 20 bytes so the real slot-field
 		// offset is verifiable from the log.
-		bool liveUsePart[256] = {false};   // part_idx referenced by the LIVE assembly (merged into usePart)
+		bool liveUsePart[512] = {false};   // part_idx referenced by the LIVE assembly (merged into usePart); u16 indices reach ~277
 		{
 			uint32_t animP = addrspace::read32(pbase + 0x168);   // ANIMATION base (dump for ref)
 			if (_ramAddr(animP)) {
@@ -1103,23 +1110,29 @@ static void partDump(const GameState& state) {
 			if (kf && ftell(kf) == 0)
 				fprintf(kf, "# sprite_id slot nrecs dx,dy,part,flip;...  (LIVE cell: sid=kf[4], slot=kf[0x12], asm=EXTRAS+slot*0x400+8)\n");
 
+			// REAL record layout (proven against PL00 EXTRAS + bank03 loc_8c033e90):
+			//   [dx:s16 @+0][dy:s16 @+2][part_idx:u16 @+4][attr:u16 @+6]
+			//   terminator  = attr == 0x00FF (the file's leading 8-byte rec is one such)
+			//   flip        = attr & 0x8000   ;  pal_row = attr & 0x00FF (low byte)
+			// The OLD decode read part_idx as u8@+4 and treated +6's LOW byte as a
+			// "mode" terminator — that collapsed every part_idx to 0/1/2 (the 256x256
+			// fallback). part_idx is a u16 GFX-offset-table index (PL00 spans 0..277).
 			int nrec = 0;
 			if (kf && recs) {
 				char body[1900]; int bn = 0;
 				for (int r = 0; r < 128; r++) {
 					uint32_t rec = recs + (uint32_t)r * 8;
-					int16_t rdx = (int16_t)addrspace::read16(rec);
-					int16_t rdy = (int16_t)addrspace::read16(rec + 2);
-					uint8_t rpart = (uint8_t)addrspace::read8(rec + 4);
-					uint8_t rmode = (uint8_t)addrspace::read8(rec + 6);
-					uint8_t rflip = (uint8_t)addrspace::read8(rec + 7);
-					if (rmode == 0xFF) break;                       // assembly terminator
+					int16_t  rdx   = (int16_t) addrspace::read16(rec);
+					int16_t  rdy   = (int16_t) addrspace::read16(rec + 2);
+					uint16_t rpart = (uint16_t)addrspace::read16(rec + 4);
+					uint16_t rattr = (uint16_t)addrspace::read16(rec + 6);
+					if (rattr == 0x00FF) break;                     // assembly terminator
 					uint32_t lo = addrspace::read32(rec);
-					if (lo == 0 && rmode == 0 && rpart == 0 && rflip == 0) continue;   // pad
-					if (bn < (int)sizeof(body) - 32)
-						bn += snprintf(body + bn, sizeof(body) - bn, "%d,%d,%u,%u;",
-						               rdx, rdy, rpart, (rflip & 0x80) ? 1 : 0);
-					liveUsePart[rpart] = true;                      // ensure this part is dumped
+					if (lo == 0 && rpart == 0 && rattr == 0) continue;   // all-zero pad / separator
+					if (bn < (int)sizeof(body) - 40)
+						bn += snprintf(body + bn, sizeof(body) - bn, "%d,%d,%u,%u,%u;",
+						               rdx, rdy, rpart, (rattr & 0x8000) ? 1 : 0, (rattr & 0xFF));
+					if (rpart < 512) liveUsePart[rpart] = true;     // ensure this part is dumped (u16 idx reaches ~277)
 					nrec++;
 				}
 				if (nrec > 0) fprintf(kf, "%u %u %d %s\n", liveSid, slot, nrec, body);
@@ -1133,36 +1146,33 @@ static void partDump(const GameState& state) {
 			}
 		}
 
-		// Collect part_idx referenced by EVERY assembly slot in the EXTRAS table, not
-		// just the first — the EXTRAS table is 0x400-byte slots, each a 128-record (8B)
-		// assembly ending at mode==0xFF. Walking only slot 0 (the old bug) pinned the
-		// dump to one fixed assembly regardless of sid. Scanning all slots accumulates
-		// the character's FULL part set; the per-fire sid log lets us correlate which
-		// slot is live. (Header is 0x18 bytes before slot 0's records — GFX-NOTES §3.)
-		bool usePart[256] = {false};
+		// Collect every part_idx referenced anywhere in the EXTRAS region so the pixel
+		// dump below covers the character's FULL part set. The region is a flat stream
+		// of assemblies, each a run of 8-byte records terminated by attr==0x00FF (or an
+		// all-zero separator). Real layout (proven): part_idx=u16@+4, attr=u16@+6.
+		// (The old 0x400-fixed-slot + part-u8@+4 model was wrong — see sidasm note.)
+		bool usePart[512] = {false};
 		int nUse = 0, nSlots = 0;
 		if (_ramAddr(exP)) {
-			const int SLOT = 0x400, NREC = SLOT / 8;
-			for (int slot = 0; slot < 64; slot++) {           // up to 64 slots (0x10000)
-				uint32_t sbase = exP + 0x18 + (uint32_t)slot * SLOT;
-				bool slotHasPart = false;
-				for (int r = 0; r < NREC; r++) {
-					uint32_t rec = sbase + (uint32_t)r * 8;
-					uint8_t part = (uint8_t)addrspace::read8(rec + 4);
-					uint8_t mode = (uint8_t)addrspace::read8(rec + 6);
-					if (mode == 0xFF) break;                   // assembly terminator
-					// skip all-zero pad records
-					uint32_t lo = addrspace::read32(rec);
-					if (lo == 0 && mode == 0 && part == 0) continue;
-					if (!usePart[part]) { usePart[part] = true; nUse++; }
-					slotHasPart = true;
+			const int NREC = 0x10000 / 8;                     // scan up to 64KB region
+			bool inAsm = false;
+			for (int r = 0; r < NREC; r++) {
+				uint32_t rec = exP + (uint32_t)r * 8;
+				uint16_t part = (uint16_t)addrspace::read16(rec + 4);
+				uint16_t attr = (uint16_t)addrspace::read16(rec + 6);
+				uint32_t lo   = addrspace::read32(rec);
+				if (attr == 0x00FF || (lo == 0 && part == 0 && attr == 0)) {
+					if (inAsm) { nSlots++; inAsm = false; }   // assembly boundary
+					continue;
 				}
-				if (slotHasPart) nSlots++;
+				if (part < 512 && !usePart[part]) { usePart[part] = true; nUse++; }
+				inAsm = true;
 			}
+			if (inAsm) nSlots++;
 		}
 		// Merge the LIVE assembly's parts in (guarantees every part the on-screen sid
 		// references gets dumped, even if the slot-scan didn't reach it).
-		for (int p = 0; p < 256; p++) if (liveUsePart[p] && !usePart[p]) { usePart[p] = true; nUse++; }
+		for (int p = 0; p < 512; p++) if (liveUsePart[p] && !usePart[p]) { usePart[p] = true; nUse++; }
 		if (lg) fprintf(lg, "[CHAR] EXTRAS scan: %d non-empty slots, %d distinct part_idx (incl live)\n",
 		                nSlots, nUse);
 
@@ -1172,7 +1182,7 @@ static void partDump(const GameState& state) {
 		{
 			char pl[512]; int pn = snprintf(pl, sizeof pl, "[FIRE %d] cid=%u(PL%02X) sid=%u cell=0x%08x parts=",
 			                                fires, cid, cid, sid, cellP);
-			for (int p = 0; p < 256 && pn < (int)sizeof(pl) - 6; p++) if (usePart[p]) pn += snprintf(pl + pn, sizeof(pl) - pn, "%d ", p);
+			for (int p = 0; p < 512 && pn < (int)sizeof(pl) - 6; p++) if (usePart[p]) pn += snprintf(pl + pn, sizeof(pl) - pn, "%d ", p);
 			if (lg) fprintf(lg, "%s\n", pl);
 			FILE* tf = fopen("/dev/shm/mc_partdump_sidtrace.log", "a");
 			if (tf) { fprintf(tf, "%s\n", pl); fclose(tf); }
@@ -1185,7 +1195,7 @@ static void partDump(const GameState& state) {
 		FILE* mf = fopen(mn, "a");   // append: full atlas accumulates across frames
 		if (mf && ftell(mf) == 0)
 			fprintf(mf, "# part_idx key raw ppm w h e4 texptr ec rawbytes tcw fmt twid descU16 desc[0x3Chex]\n");
-		for (int part = 0; part < 256; part++) {
+		for (int part = 0; part < 512; part++) {
 			if (!usePart[part]) continue;
 			int key = charBase + part;
 			uint32_t e  = dirBase + (uint32_t)key * 0x10;

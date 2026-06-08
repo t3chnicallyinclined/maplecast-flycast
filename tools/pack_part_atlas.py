@@ -36,41 +36,45 @@ import argparse, json, os, struct, sys
 MAGENTA = (0xFF, 0x00, 0xFF)   # the probe's transparent key (PPM has no alpha)
 
 # ---- EXTRAS assembly parsing -------------------------------------------------
-# 8-byte records: {dx:s16, dy:s16, part_idx:u8, b5:u8, mode:u8, flip:u8}
-# mode==0xFF terminates an assembly. The region is organized in 0x400-byte slots
-# (128 records); per the disasm (bank03 keyframe resolver + static PL00 confirm),
-# the assembly for slot `s` starts at s*0x400 + 0x08 (the first 8 bytes are a slot
-# header). The ANIMATION keyframe's byte-0x12 field IS this slot index, so the slot
-# key here matches the sprite_id->slot map directly.
-EXTRAS_SLOT = 0x400
-EXTRAS_HDR  = 0x08          # per-slot header before the assembly records
+# REAL 8-byte record layout (proven 2026-06-07 against PL00_DAT_EXTRAS_DATA.BIN and
+# the quad emitter loc_8c033e90, bank03.asm:9258):
+#   [dx:s16 @+0][dy:s16 @+2][part_idx:u16 @+4][attr:u16 @+6]
+#   terminator = attr == 0x00FF          (the file's leading 8-byte rec is one such)
+#   flip       = attr & 0x8000  (bit15)
+#   pal_row    = attr & 0x00FF  (low byte, fed into the per-part palette combine)
+#
+# OLD (wrong) model read part_idx as u8@+4 and treated the +6 low byte as a "mode"
+# terminator — that collapsed every part_idx to 0/1/2 (the 256x256 fallback) and is
+# why the baked PL2A_asm.json had bogus giant single-part frames. part_idx is a u16
+# index into the GFX1 offset table (PL00 spans 0..277).
+#
+# The EXTRAS region is a flat stream of assemblies; an assembly is a run of records
+# ending at the attr==0x00FF terminator (an all-zero 8-byte record also separates).
+# Assemblies are keyed here by their ordinal index; the sprite_id -> assembly map
+# comes from the runtime PARTDUMP (live cell gives the real sprite_id).
 REC = 8
 
 def parse_extras(buf):
-    """Return {slot_index: [ {dx,dy,part,flip} ... ]} for every non-empty slot."""
+    """Return {assembly_index: [ {dx,dy,part,flip,pal} ... ]} for every assembly."""
     asms = {}
-    nslots = len(buf) // EXTRAS_SLOT
-    for s in range(nslots):
-        base = s * EXTRAS_SLOT + EXTRAS_HDR
-        recs = []
-        for r in range((EXTRAS_SLOT - EXTRAS_HDR) // REC):
-            o = base + r * REC
-            if o + REC > len(buf):
-                break
-            dx, dy = struct.unpack_from('<hh', buf, o)
-            part, b5, mode, flip = buf[o+4], buf[o+5], buf[o+6], buf[o+7]
-            if mode == 0xFF:
-                break                      # assembly terminator
-            if dx == 0 and dy == 0 and part == 0 and b5 == 0 and mode == 0 and flip == 0:
-                # leading/trailing zero pad — stop at first all-zero after we have recs,
-                # skip if before any real record
-                if recs:
-                    break
-                continue
-            recs.append({"dx": dx, "dy": dy, "part": part,
-                         "flip": 1 if (flip & 0x80) else 0, "b5": b5, "mode": mode})
-        if recs:
-            asms[s] = recs
+    cur = []
+    idx = 0
+    pos = 0
+    n = len(buf)
+    while pos + REC <= n:
+        dx, dy = struct.unpack_from('<hh', buf, pos)
+        part = struct.unpack_from('<H', buf, pos + 4)[0]
+        attr = struct.unpack_from('<H', buf, pos + 6)[0]
+        lo = struct.unpack_from('<I', buf, pos)[0]
+        pos += REC
+        if attr == 0x00FF or (lo == 0 and part == 0 and attr == 0):
+            if cur:
+                asms[idx] = cur; idx += 1; cur = []
+            continue
+        cur.append({"dx": dx, "dy": dy, "part": part,
+                    "flip": 1 if (attr & 0x8000) else 0, "pal": attr & 0xFF})
+    if cur:
+        asms[idx] = cur
     return asms
 
 # ---- PPM reader --------------------------------------------------------------
@@ -125,7 +129,8 @@ def read_sidasm(path):
                 if len(f4) < 4:
                     continue
                 dx, dy, part, flip = int(f4[0]), int(f4[1]), int(f4[2]), int(f4[3])
-                recs.append({"dx": dx, "dy": dy, "part": part, "flip": flip})
+                pal = int(f4[4]) if len(f4) >= 5 else 0     # new probe also emits pal_row (attr low byte)
+                recs.append({"dx": dx, "dy": dy, "part": part, "flip": flip, "pal": pal})
             if recs:
                 m[sid] = recs                      # last write per sid wins
     return m

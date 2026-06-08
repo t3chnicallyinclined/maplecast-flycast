@@ -796,7 +796,16 @@ export class SpriteClient {
   // quad per part. Output items match buildDrawList's shape so sprite-gpu.mjs
   // consumes them unchanged — plus an optional `blend` for fx objects:
   //   { charId, slot, z, sx,sy,sw,sh (atlas px), dx,dy,dw,dh (canvas px), flip, blend? }
+  // Dispatch: the faithful game-logic emitter port (loc_8c033e90) is default ON;
+  // window._emitterPort === false falls back to the original hand-rolled builder for
+  // A/B comparison. Both return the identical quad-list shape sprite-gpu.mjs expects.
   buildAssemblyDrawList(canvasW, canvasH) {
+    const usePort = (typeof window === 'undefined') ? true : (window._emitterPort !== false);
+    return usePort ? this.buildEmitterDrawList(canvasW, canvasH)
+                   : this._buildAssemblyDrawListLegacy(canvasW, canvasH);
+  }
+
+  _buildAssemblyDrawListLegacy(canvasW, canvasH) {
     const scaleX = canvasW / (this.screenW || 640), scaleY = canvasH / (this.screenH || 480);
     const now = (typeof performance !== 'undefined') ? performance.now() : 0;
     const SX = this.asmScaleX || 1, SY = this.asmScaleY || 1;
@@ -872,6 +881,129 @@ export class SpriteClient {
                   : `assembly: ${drawn} parts drawn`;
     this._lastNote = this._asmNote;
     return out;
+  }
+
+  // ===== EMITTER PORT — faithful loc_8c033e90 (bank03.asm:9258) =====
+  // Reimplements MVC2's quad emitter over the REAL per-sprite EXTRAS records.
+  //
+  // EXTRAS record (8 bytes, proven against PL00_DAT_EXTRAS_DATA.BIN + the disasm):
+  //   [dx:s16][dy:s16][part_idx:u16][attr:u16]   terminator attr==0x00FF
+  //   flip    = attr & 0x8000        (bit15)
+  //   pal_row = attr & 0x00FF        (low byte, fed into the palette-row combine)
+  // The atlas bakes each record as { dx, dy, part, flip, pal } (pal = attr low byte).
+  //
+  // Per record (loc_8c033e90):
+  //   - part rect  = c.parts[part_idx]            (GFX1 offset-table lookup, offline)
+  //   - quad w/h   = part.w/.h                     (= w_dim<<3 / h_dim<<3, baked)
+  //   - placement  = owner screen (+0xe0/+0xe4) + (dx,dy), scaled
+  //   - flip       = owner.facing XOR record flip; mirror x = -(dx+w)   (line ~812 rule)
+  //   - SCALE      = global CpsX/CpsY  *  per-char sl.scaleX/scaleY (char+0x50/0x54)   [NEW]
+  //   - PALETTE row= ((pal + (pal12d? pal12e<<4 : 0)) & 0x03ff) >> 4                   [NEW]
+  //                  (loc_8c033e3e path A / loc_8c033e76 path B; masks 0x03ff, shad -4)
+  // Output quad shape is unchanged; `palRow` is an extra field (shader wiring is a
+  // follow-up — the RGB-recolor pipeline already handles the common single-row case).
+  buildEmitterDrawList(canvasW, canvasH) {
+    const scaleX = canvasW / (this.screenW || 640), scaleY = canvasH / (this.screenH || 480);
+    const now = (typeof performance !== 'undefined') ? performance.now() : 0;
+    const CPSX = this.asmScaleX || 1, CPSY = this.asmScaleY || 1;   // global CPS aspect (work.asm:44-45)
+    const S    = this.spriteScale || 1;
+    const out  = [];
+    let loading = 0, missing = 0, drawn = 0, missKeys = [];
+
+    // Per-char dynamic zoom (char+0x50/0x54), clamped to a sane band; raw field
+    // semantics are step-1 wire (f32). Out-of-band => fall back to 1.0 (no zoom),
+    // so a mis-scaled/garbage field can never blow a character up off-screen.
+    const sane = (v) => (v > 0.05 && v < 16) ? v : 1.0;
+
+    // Palette-row combine, ported from bank03.asm:9232-9256:
+    //   path A (pal12d==0):  row = (recPal & 0x03ff) >> 4
+    //   path B (pal12d!=0):  row = ((pal12e<<4) + recPal) & 0x03ff) >> 4
+    const palRowOf = (recPal, pal12d, pal12e) => {
+      const base = (pal12d ? ((pal12e & 0xffff) << 4) : 0) + (recPal & 0xffff);
+      return (base & 0x03ff) >> 4;
+    };
+
+    // owner: { cid, exx, eyy, facing, slot, zBase, sclX, sclY, pal12d, pal12e, blend?, fx? }
+    const emitAssembly = (owner, sid) => {
+      // fx objects resolve from the effects atlas, not the per-char atlas.
+      const c = owner.fx ? this._fxAsmChar() : this.asmChars[owner.cid];
+      if (!c) { if (!owner.fx) { this.loadAsmChar(owner.cid); loading++; } return; }
+      if (!c.img) return;                                  // load failed
+      const recs = c.asm[sid] || c.asm[sid & 0xffff] || c.asm[String(sid)];
+      if (!recs || !recs.length) {
+        missing++; if (missKeys.length < 3) missKeys.push(`${owner.cid}/0x${(sid&0xffff).toString(16)}`);
+        return;
+      }
+      const sX = CPSX * sane(owner.sclX) * S, sY = CPSY * sane(owner.sclY) * S;
+      for (const r of recs) {
+        const part = c.parts[r.part] || c.parts[String(r.part)];
+        if (!part) continue;
+        // flip = owner facing XOR the record's own bit15.
+        const flip = (!!owner.facing) !== (!!r.flip);
+        // mirror reflects the part's x-extent across the owner anchor: dx -> -(dx+w).
+        const pdx = flip ? -(r.dx + part.w) : r.dx;
+        const dx = (owner.exx + pdx * sX) * scaleX;
+        const dy = (owner.eyy + r.dy * sY) * scaleY;
+        const dw = part.w * sX * scaleX;
+        const dh = part.h * sY * scaleY;
+        const z  = (owner.zBase || 0) * 100 + (r.z || 0);
+        const palRow = palRowOf(r.pal || 0, owner.pal12d || 0, owner.pal12e || 0);
+        const item = { charId: owner.fx ? -1 : owner.cid, slot: owner.slot, z,
+          sx: part.x, sy: part.y, sw: part.w, sh: part.h,
+          dx, dy, dw, dh, flip, palRow };
+        if (owner.blend != null) item.blend = owner.blend;
+        out.push(item);
+        drawn++;
+      }
+    };
+
+    // --- bodies (the 6 tracked slots) ---
+    for (let s = 0; s < 6; s++) {
+      const sl = this.slot[s];
+      if (!sl.active) continue;
+      let exx = sl.screen_x, eyy = sl.screen_y;
+      if (this.predict !== false) { const dt = Math.min(now - sl.t, 33); if (dt > 0) { exx += sl.vx*dt; eyy += sl.vy*dt; } }
+      emitAssembly({ cid: sl.char_id, exx, eyy, facing: sl.facing, slot: s, zBase: 0,
+                     sclX: sl.scaleX, sclY: sl.scaleY, pal12d: sl.pal12d, pal12e: sl.pal12e },
+                   sl.sprite_id);
+    }
+
+    // --- pool objects (cape / projectile / fx) ---
+    if (this.objectsOn !== false) for (const o of (this.objects || [])) {
+      let osl = null;
+      for (let s = 0; s < 6; s++) if (this.slot[s].active && this.slot[s].char_id === o.cid) { osl = this.slot[s]; break; }
+      if (!osl) continue;
+      let ox = osl.screen_x, oy = osl.screen_y;
+      if (this.predict !== false) { const dt = Math.min(now - osl.t, 33); if (dt > 0) { ox += osl.vx*dt; oy += osl.vy*dt; } }
+      if ((ox === 0 && oy === 0) || ox < -60 || ox > 700) continue;
+      const far = (o.type !== 3) && ((Math.abs(o.x - ox) + Math.abs(o.y - oy)) > 130);
+      const px = far ? o.x : ox, py = far ? o.y : oy;
+      const zBase = (o.type === 1) ? 1 : (o.type === 3 ? -2 : -1);
+      // Effect nodes (is_effect / GFX base in Effect Poly 0x0CED0000) -> effects atlas.
+      const isFx = !!o.isEffect;
+      emitAssembly({ cid: o.cid, exx: px, eyy: py, facing: osl.facing, slot: 0, zBase,
+                     sclX: osl.scaleX, sclY: osl.scaleY, pal12d: osl.pal12d, pal12e: osl.pal12e,
+                     blend: o.blend, fx: isFx }, o.sid);
+    }
+
+    out.sort((a, b) => (a.charId - b.charId) || ((a.z || 0) - (b.z || 0)));
+    this._asmDrawn = drawn; this._asmMiss = missing;
+    this._asmNote = loading ? `emitter: loading ${loading} char atlas…`
+                  : missing ? `emitter: missing ${missing} asm: ${missKeys.join(' ')} (${drawn} parts)`
+                  : `emitter: ${drawn} parts (port)`;
+    this._lastNote = this._asmNote;
+    return out;
+  }
+
+  // The effects atlas exposed in the same {img, parts, asm} shape emitAssembly uses.
+  // loadFxAtlas() populates this._fx (a sprite-keyed atlas); if it also carries an
+  // assembly table we use it, else fx objects fall through as missing (logged).
+  _fxAsmChar() {
+    const fx = this._fx;
+    if (!fx || !this._fxImg) return null;
+    const asm = fx.assemblies || fx.asm;
+    if (!asm) return null;          // effects atlas has no assembly table yet
+    return { img: this._fxImg, parts: fx.parts || {}, asm };
   }
 
   // Active hit-sparks for the GPU additive pass — each grows + fades over ~280ms.

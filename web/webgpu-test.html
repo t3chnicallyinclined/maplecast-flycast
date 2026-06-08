@@ -264,7 +264,7 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=10';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=43';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=44';
 import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=8';
 // StafGL (sprite-staf-gl.mjs) RETIRED — the STAF/HUDF stream now renders through the
 // proven PVR2Renderer (see STAFR/renderStaf below). StafGL stays on disk for reference.
@@ -341,6 +341,7 @@ addEventListener('keydown',e=>{
   box.innerHTML='<b style="color:#0af">SPRITE CLIENT (Option 6)</b><br>'
     +'<label><input type="checkbox" id="sc_on" checked> Render chars from 253B state (no TA)</label><br>'
     +'<label style="color:#fd6"><input type="checkbox" id="sc_asm"> ASSEMBLY path (parts+asm, A/B) — needs PL{hex}_parts/_asm</label><br>'
+    +'<label style="color:#fa6"><input type="checkbox" id="sc_emit" checked> &nbsp;↳ emitter PORT (game-logic loc_8c033e90; off = hand-roll)</label><br>'
     +'<label style="color:#6fd"><input type="checkbox" id="sc_staf"> STAF path (stripped-TA: full quad list + cached textures, pixel-exact) — needs MAPLECAST_STAF server</label><br>'
     +'<label><input type="checkbox" id="sc_pred" checked> Predict (velocity extrapolation — lower latency)</label><br>'
     +'<label><input type="checkbox" id="sc_gpu" checked> GPU render + effects (WebGPU; off = Canvas2D)</label><br>'
@@ -444,6 +445,11 @@ addEventListener('keydown',e=>{
   // correct image (whole-sprite atlas vs parts atlas) re-uploads for each path.
   box.querySelector('#sc_asm').onchange=e=>{ SPRITECLIENT.assemblyMode=e.target.checked; SG.chars={};
     console.log('[sprite-client] render path =', e.target.checked?'ASSEMBLY':'WHOLE-SPRITE'); };
+  // Emitter-port A/B: window._emitterPort gates the faithful loc_8c033e90 port vs the
+  // original hand-rolled builder inside buildAssemblyDrawList. Default ON.
+  window._emitterPort = true;
+  box.querySelector('#sc_emit').onchange=e=>{ window._emitterPort=e.target.checked;
+    console.log('[sprite-client] assembly builder =', e.target.checked?'EMITTER PORT (loc_8c033e90)':'hand-roll'); };
   // STAF A/B: when on, the stripped-TA full-frame path (cached textures + quad
   // list) drives the Canvas2D output instead of the atlas/assembly draw.
   box.querySelector('#sc_staf').onchange=e=>{ stafMode=e.target.checked; window._stafRoute=e.target.checked; SPRITECLIENT.stafOn=e.target.checked; showCanvas();
