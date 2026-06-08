@@ -2446,16 +2446,18 @@ done_diff:
 				}
 			}
 
-			// === FRAME ORACLE — per-frame, per-drawn-object capture of {sprite_id, state,
-			// the EXACT TA quads it emits, and the texture SOURCE addr/region}. MVP per
-			// docs/FRAME-ORACLE-SPEC.md: NO SH4 PC-hook — runs on the live dynarec after
-			// ta_parse, attributing parsed polys to objects by nearest screen bbox-center
-			// (the TADBG bdist<1600 correlator generalized + the EFCT bbox/UV de-index loop
-			// at ~line 2486-2496). Read-only instrument; no wire-format / client change.
-			// Writes JSON lines to /dev/shm/mc_oracle.jsonl, in_match only, frame-capped.
-			// Gated MAPLECAST_FRAME_ORACLE. (Object walk mirrors readAllDrawn (gamestate.cpp
-			// :370) but is self-contained here so it can expose node_addr + the full asm
-			// pointer cluster (pal/file/fac/scale/flip) that ObjectState doesn't carry.)
+			// === FRAME ORACLE — per-frame RAW capture of {drawn objects + their source
+			// pointers} and {every classified sprite quad}. PIVOT 2026-06-08: the prior
+			// server-side nearest-anchor attribution matched ~0 character quads (and emitted
+			// only the matched quads, so we debugged blind). The server now DUMPS RAW — two
+			// flat, unattributed lists — and attribution + analysis run OFFLINE in
+			// _oracle/oracle_attribute.py for fast iteration with no rebuild/redeploy.
+			// Runs on the live dynarec after ta_parse (NO SH4 PC-hook). Read-only
+			// instrument; no wire-format / client change. Writes JSON lines to
+			// /dev/shm/mc_oracle.jsonl, in_match only, frame-capped. Gated
+			// MAPLECAST_FRAME_ORACLE. (Object walk mirrors readAllDrawn (gamestate.cpp:370)
+			// but is self-contained here to expose node_addr + the full asm pointer cluster
+			// (pal/file/fac/scale/flip/hotspot) that ObjectState doesn't carry.)
 			{
 				static bool _oracle = getenv("MAPLECAST_FRAME_ORACLE") != nullptr;
 				// Capacity guard: stop appending once the file passes the size cap so a long
@@ -2580,8 +2582,8 @@ done_diff:
 						// ---- DIAGNOSTIC (hint #1/#3): does the TA poly list exist here, and
 						// how many quads survive the de-index? Logged to stderr every 60 frames
 						// so a stale capture self-explains. If op/pt/tr or verts are 0 the parse
-						// isn't populating at this call site; if nq>0 but matched==0 the bbox
-						// coords don't align with object screen_xy (RTT/native space).
+						// isn't populating at this call site; nq>0 with sprite==0 means the
+						// classifier filtered everything (RTT/native-space coords, all oversized).
 						static int _oDiag = 0;
 						bool _oDiagNow = (++_oDiag % 60) == 0;
 						if (_oDiagNow)
@@ -2606,7 +2608,8 @@ done_diff:
 							int sprite_id; float sx, sy; float scaleX, scaleY; int flip;
 							uint32_t gfx1, pal, extras, file, fac;
 							const char* region;
-							int hotDx, hotDy;
+							int hotDx, hotDy;                  // legacy +0x178 walk (body-constant)
+							int hotCellDx, hotCellDy, hotCellSlot;  // cell-slot walk (slot=read16(cell+0x12))
 						};
 						static OObj objs[128]; int no = 0;
 
@@ -2643,7 +2646,28 @@ done_diff:
 								uint32_t gl = o.gfx1 & 0x0FFFFFFF;
 								o.region = (gl>=0x0CED0000 && gl<0x0CEE0000) ? "EFFECTS_BANK"
 								         : (gl>=0x0CE60000 && gl<0x0CE70000) ? "DECOMP_BUF" : "CHAR_GFX";
-								// true assembly hotspot (min dx,min dy over extras records @+0x18, 8B stride)
+								// ---- HOTSPOT — RAW, BOTH READINGS (the "always 0" investigation).
+								// WHY the old field was 0: it walked node+0x178 (Sprite_Extras) at a FIXED
+								// +0x18. node+0x178 is the EXTRAS *table base*, not this object's assembly,
+								// so +0x18 lands in the table header -> sentinel on record 0 -> 0,0 for the
+								// whole 13420-frame capture.
+								// WHY a single "true" read is NOT available here (do-not-repeat, per
+								// docs/HANDOFF-2026-06-08 #2/#3):
+								//   - The cell-slot walk (cell=read32(node+0x154); slot=read16(cell+0x12);
+								//     recs=EXTRAS+slot*0x400+8) was tried: keyframe+0x12 turned out to be
+								//     HitboxGroup, NOT the assembly slot, so the slot index is wrong for
+								//     satellites; AND the offline sid->assembly map was never solved.
+								//   - The direct +0x178 walk (readHotspot) is DEGENERATE: it returns a
+								//     per-CHARACTER constant = the body's hotspot (Storm every object
+								//     (-76,8)), so it can't separate a projectile from its body.
+								// DECISION: this is raw instrumentation -> emit BOTH candidate readings
+								// unmodified (hotspot_dx/dy = the legacy +0x178 walk, for continuity with
+								// readHotspot; hot_cell_dx/dy = the cell-slot walk) and let the OFFLINE tool
+								// judge whether either anchors satellites correctly. No server-side "fix" is
+								// claimed; the honest answer is the per-object hotspot is not cleanly
+								// readable at this hook (both candidates are known-degenerate).
+								auto cl=[](int v){ if(v<-32768)v=-32768; else if(v>32767)v=32767; return v; };
+								// (a) legacy direct +0x178 walk (8B records, mode@+6 0xFF end)
 								o.hotDx = 0; o.hotDy = 0;
 								if (inRam(o.extras)) {
 									int mnDx=0x7fffffff, mnDy=0x7fffffff; bool any=false;
@@ -2654,51 +2678,55 @@ done_diff:
 										int dx=(int16_t)addrspace::read16(rec+0), dy=(int16_t)addrspace::read16(rec+2);
 										if (dx<mnDx)mnDx=dx; if (dy<mnDy)mnDy=dy; any=true;
 									}
-									if (any) {
-										auto cl=[](int v){ if(v<-32768)v=-32768; else if(v>32767)v=32767; return v; };
-										o.hotDx=cl(mnDx); o.hotDy=cl(mnDy);
+									if (any) { o.hotDx=cl(mnDx); o.hotDy=cl(mnDy); }
+								}
+								// (b) cell-slot walk (EXTRAS+slot*0x400+8; slot=read16(cell+0x12))
+								o.hotCellDx = 0; o.hotCellDy = 0; o.hotCellSlot = -1;
+								{
+									uint32_t cell = addrspace::read32(node + 0x154);
+									if (inRam(cell) && inRam(o.extras)) {
+										int slot = (uint16_t)addrspace::read16(cell + 0x12);
+										o.hotCellSlot = slot;
+										if (slot < 64) {
+											uint32_t recs = o.extras + (uint32_t)slot*0x400 + 0x08;
+											int mnDx=0x7fffffff, mnDy=0x7fffffff; bool any=false;
+											for (int r=0; r<128; ++r) {
+												uint32_t rec = recs + (uint32_t)r*8;
+												uint16_t sel = (uint16_t)addrspace::read16(rec + 6);
+												if (sel == 0x00FF) break;
+												int16_t rdx=(int16_t)addrspace::read16(rec+0), rdy=(int16_t)addrspace::read16(rec+2);
+												uint16_t pw = (uint16_t)addrspace::read16(rec+4);
+												if (rdx==0 && rdy==0 && sel==0 && pw==0) continue;
+												if (rdx<mnDx)mnDx=rdx; if (rdy<mnDy)mnDy=rdy; any=true;
+											}
+											if (any) { o.hotCellDx=cl(mnDx); o.hotCellDy=cl(mnDy); }
+										}
 									}
 								}
 								no++;
 							}
 						}
 
-						// ---- 3) Attribute each SPRITE quad (q.isSprite) to the nearest object by
-						// proximity of the quad CENTER to the object's anchor (screen_xy + assembly
-						// hotspot). The non-sprite quads (clears, tiled bg, oversized stage/parallax,
-						// opaque backdrop) were already excluded by the classifier above — that is the
-						// fix for "huge background quads got attributed". With only character/effect
-						// parts left, plain nearest-center wins; NO bbox-containment (containment was
-						// what handed the 1152x480 clear & 613x411 backdrop to whatever they covered).
-						// Capture-derived radius: survivor centers sit <120px from screen_xy (p90 86).
-						static int objQuad[2048];          // quad -> object index (-1 = unattributed / non-sprite)
-						int matched = 0, nSprite = 0, nFiltered = 0;
-						const float RAD2 = 120.f*120.f;    // proximity radius^2 (p90 dist=86px, all <120)
-						for (int j=0;j<nq;j++) {
-							OQuad& q = qs[j];
-							objQuad[j] = -1;
-							if (!q.isSprite) { nFiltered++; continue; }
-							nSprite++;
-							int best=-1; float bd=RAD2;
-							for (int k=0;k<no;k++) {
-								// anchor = object screen_xy + its assembly hotspot (part offset)
-								float ox=objs[k].sx + (float)objs[k].hotDx;
-								float oy=objs[k].sy + (float)objs[k].hotDy;
-								float dx=q.cx-ox, dy=q.cy-oy, d=dx*dx+dy*dy;
-								if (d<bd) { bd=d; best=k; }
-							}
-							objQuad[j]=best;
-							if (best>=0) matched++;
-						}
+						// ---- 3) RAW DUMP (PIVOT 2026-06-08). The server-side nearest-anchor
+						// attribution matched ~0 character quads and was debugging-blind, so it
+						// is REMOVED. The server now emits two FLAT, UNATTRIBUTED lists and all
+						// attribution + analysis moves OFFLINE (_oracle/oracle_attribute.py),
+						// where it can iterate on radius/anchor without a rebuild+redeploy:
+						//   objects[]      = object metadata + source pointers (NO per-object quads)
+						//   sprite_quads[] = every quad that passed isSprite, raw positions, no owner
+						// Header keeps frame/in_match/nq/sprite/filtered/rtt. We still COUNT
+						// sprite/filtered here (cheap, mirrors the classifier) for at-a-glance health.
+						int nSprite = 0, nFiltered = 0;
+						for (int j=0;j<nq;j++) { if (qs[j].isSprite) nSprite++; else nFiltered++; }
 						if (_oDiagNow)
-							fprintf(stderr, "[ORACLE]   no=%d nq=%d sprite=%d filtered=%d matched=%d\n",
-							        no, nq, nSprite, nFiltered, matched);
+							fprintf(stderr, "[ORACLE]   no=%d nq=%d sprite=%d filtered=%d (raw-dump, attribution offline)\n",
+							        no, nq, nSprite, nFiltered);
 
-						// ---- 4) Emit one JSON line for this frame.
-						std::string line; line.reserve(4096);
-						char nb[512];
-						snprintf(nb,sizeof nb,"{\"frame\":%u,\"in_match\":1,\"nq\":%d,\"sprite\":%d,\"filtered\":%d,\"matched\":%d,\"rtt\":%d,\"objects\":[",
-						         ofc, nq, nSprite, nFiltered, matched, (int)rc.isRTT);
+						// ---- 4) Emit one JSON line for this frame: header + objects[] + sprite_quads[].
+						std::string line; line.reserve(8192);
+						char nb[640];   // object line with both hotspot readings ~410B; headroom vs truncation
+						snprintf(nb,sizeof nb,"{\"frame\":%u,\"in_match\":1,\"nq\":%d,\"sprite\":%d,\"filtered\":%d,\"rtt\":%d,\"objects\":[",
+						         ofc, nq, nSprite, nFiltered, (int)rc.isRTT);
 						line += nb;
 						bool firstObj=true;
 						for (int k=0;k<no;k++) {
@@ -2706,33 +2734,30 @@ done_diff:
 							if (!firstObj) line += ","; firstObj=false;
 							snprintf(nb,sizeof nb,
 								"{\"slot\":%d,\"owner_cid\":%d,\"category\":%d,\"sprite_id\":%d,"
-								"\"screen_xy\":[%d,%d],\"scale\":[%.3f,%.3f],\"flip\":%d,\"node_addr\":\"0x%08X\",\"quads\":[",
-								o.slot, o.owner_cid, o.category, o.sprite_id,
-								(int)o.sx, (int)o.sy, o.scaleX, o.scaleY, o.flip, o.node);
-							line += nb;
-							// tex source from the FIRST attributed textured quad (the body part)
-							uint32_t tsVram=0, tsTcw=0, tsTexId=0; int tsFmt=-1; bool haveTex=false;
-							bool firstQ=true;
-							for (int j=0;j<nq;j++) {
-								if (objQuad[j]!=k) continue;
-								OQuad& q = qs[j];
-								if (!firstQ) line += ","; firstQ=false;
-								snprintf(nb,sizeof nb,
-									"{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"u\":[%.4f,%.4f],\"v\":[%.4f,%.4f],"
-									"\"texId\":\"%08X\",\"tcw\":\"0x%08X\",\"blend\":[%d,%d]}",
-									(int)q.x,(int)q.y,(int)q.w,(int)q.h, q.uMn,q.uMx,q.vMn,q.vMx,
-									q.texId, q.tcw, q.srcBlend, q.dstBlend);
-								line += nb;
-								if (!haveTex && q.fmt>=0) { haveTex=true; tsVram=q.vramAddr; tsTcw=q.tcw; tsTexId=q.texId; tsFmt=q.fmt; }
-							}
-							(void)tsTcw; (void)tsTexId; (void)tsFmt;
-							snprintf(nb,sizeof nb,
-								"],\"tex_src\":{\"vram_addr\":\"0x%08X\",\"region\":\"%s\",\"gfx1_ptr\":\"0x%08X\","
+								"\"screen_xy\":[%d,%d],\"scale\":[%.3f,%.3f],\"flip\":%d,\"node_addr\":\"0x%08X\","
+								"\"tex_src\":{\"vram_addr\":\"0x00000000\",\"region\":\"%s\",\"gfx1_ptr\":\"0x%08X\","
 								"\"pal_ptr\":\"0x%08X\",\"part_idx\":-1},"
 								"\"asm_src\":{\"extras_ptr\":\"0x%08X\",\"file_ptr\":\"0x%08X\",\"fac_ptr\":\"0x%08X\","
-								"\"hotspot_dx\":%d,\"hotspot_dy\":%d}}",
-								tsVram, o.region, o.gfx1, o.pal,
-								o.extras, o.file, o.fac, o.hotDx, o.hotDy);
+								"\"hotspot_dx\":%d,\"hotspot_dy\":%d,"
+								"\"hot_cell_dx\":%d,\"hot_cell_dy\":%d,\"hot_cell_slot\":%d}}",
+								o.slot, o.owner_cid, o.category, o.sprite_id,
+								(int)o.sx, (int)o.sy, o.scaleX, o.scaleY, o.flip, o.node,
+								o.region, o.gfx1, o.pal,
+								o.extras, o.file, o.fac, o.hotDx, o.hotDy,
+								o.hotCellDx, o.hotCellDy, o.hotCellSlot);
+							line += nb;
+						}
+						line += "],\"sprite_quads\":[";
+						bool firstQ=true;
+						for (int j=0;j<nq;j++) {
+							OQuad& q = qs[j];
+							if (!q.isSprite) continue;
+							if (!firstQ) line += ","; firstQ=false;
+							snprintf(nb,sizeof nb,
+								"{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"u\":[%.4f,%.4f],\"v\":[%.4f,%.4f],"
+								"\"texId\":\"%08X\",\"tcw\":\"0x%08X\",\"blend\":[%d,%d]}",
+								(int)q.x,(int)q.y,(int)q.w,(int)q.h, q.uMn,q.uMx,q.vMn,q.vMx,
+								q.texId, q.tcw, q.srcBlend, q.dstBlend);
 							line += nb;
 						}
 						line += "]}\n";
