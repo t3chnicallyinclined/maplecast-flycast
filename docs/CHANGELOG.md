@@ -2,7 +2,29 @@
 
 Chronological log of the whole-sprite reconstruction client. `?v=` = the `sprite-client.mjs` cache-bust in `webgpu-test.html`. Newest first.
 
-## 2026-06-08 (session: whole-sprite render, palettes, projectiles)
+## 2026-06-08 (session: Frame Oracle, RE cockpit, palettes-all-chars, Storm electric)
+
+### THE FRAME ORACLE — live JIT hook on the production dynarec (the breakthrough)
+- Proved the exact PC-hook can run **live** WITHOUT a GDB trap (which patches a trap opcode → recompile/trap/SMC = expensive + determinism-risky). Instead: a **compile-time block-entry `GenCall`** in `core/rec-x64/rec_x64.cpp` `BlockCompiler::compile()` (after `sub(rsp,STACK_ALIGN)`, before `regalloc.DoAlloc`) — one cheap native call per hooked block entry, **READ-ONLY** (reads `Sh4cntx.r[]` + `addrspace::read*`), determinism-safe, perf-trivial. `core/hw/sh4/dyna/decoder.cpp` forces a block boundary at hooked PCs mid-block. Gated `MAPLECAST_FRAME_ORACLE_HOOK` (default OFF → byte-stock).
+- **PC-ALIAS:** MVC2 renders from P0 (`0x0C03093C`); marvelous2 labels are P1 (`0x8C03093C`); same low 28 bits. `mc_isHookedPC` masks `pc & 0x1FFFFFFF`.
+- **`loc_8c03093c` confirmed = per-object PER-FRAME render** (150,541 fires / 22197-frame match). Reads `r4=node` → writes world→screen transform to **screen_x/y @+0xE0/+0xE4** (authoritative GPU-placement anchor) = OBJ_BEGIN.
+- **`loc_8c033e90` confirmed = LOAD-TIME part-atlas DECODE**, NOT per-frame. Fires once at match load (frame ~2568); dumps ~1190 parts/char into decomp buffer `0x0CE60000` (texptr walks it, palptr=0, no screen coords). Dispatched from cell-processor jump table `loc_8c033d78`. Gated separately `MAPLECAST_FRAME_ORACLE_DECODE` (off). Useful as the part-atlas catalog, NOT placement. 16-byte internal quad: `w<<3@+0,h<<3@+2,attr@+4,texptr(r8)@+8,palptr(r12)@+C` (bank03 9275–9284, cursor r14). Display list lands in RAM ~`0x0C56xxxx` then bulk-DMA'd to TA — NOT the TA FIFO.
+- **Per-frame SCREEN quads (the working capture):** recovered POST-walk from the parsed TA in `serverPublish` (`ta_parse`→`rc.verts`), attributed to the nearest OBJ_BEGIN object's authoritative `screen_xy` (160px). Output `/dev/shm/mc_oracle_hook.jsonl` per object: `node, sprite_id, screen_xy, scale, facing, tex_src, screen_quads[{x,y,w,h,u,v,z,vram_addr,tcw,fmt,tex_wh,blend}]`. In-match gated (`0x8C289624`). Validated: 1105 frames, 2173 objects, ~8.4 quads/obj, real x/y at object positions. (Attract demo = 2 bodies → ~18% attribution; full match populates more; unmatched → frame `unassigned[]`.)
+- **Files:** `core/network/maplecast_oracle_hook.cpp/.h`, `core/rec-x64/rec_x64.cpp`, `core/hw/sh4/dyna/decoder.cpp`, `core/network/maplecast_mirror.cpp` (flush ~1762). Analyzers `_oracle/oracle_layers.py` (Z-cutoff), `oracle_live.py`, `oracle_attribute.py` (ROM-derived jsonl gitignored). Commits on `feat/state-replica-client`, latest `3899a16ac`. Prod binary md5 `b3a0eca914583d07e879c4582f3cc393`; stock backup `flycast.bak-20260608-193357` md5 `25cbc8aa…`. ENABLED on prod (gated OFF).
+
+### RE COCKPIT — client-side ETL layer tool (`?v=4`, `pvr2-renderer.mjs ?v=4`)
+- Toggle-able `window._reMode` panel. The browser already parses the TA (`FrameDecoder`/`PVR2Renderer`; `rc.verts {x,y,z,u,v}`, `PolyParam tcw`/blend) AND has GSTA objects. Classifies each TA poly by **Z-cutoff** (operator-validated ~0.0091 floor isolates chars from stage/bg — `pvr2-renderer.mjs` floor-cut; depth separates char from stage where size/blend/texture can't), **blend** (additive=EFFECT, `[4,5]`=CHARACTER), and **proximity** to GSTA objects.
+- Shows layer breakdown, **Z-histogram** (drag the cutoff), per-object parts, **MISSES worklist**, layer-isolation toggles (`DBG.reHide` bitmask on the render).
+
+### Storm electric effect now RENDERS (the long chase)
+- Fixed by the effects-atlas reshape (`tools/reshape_fx_atlas.py` → `fx_atlas.json` `sprites{}` map, 17 effect sids) + OBJS effect-routing (`o.isEffect` → `FX_CID`, additive blend). Validates the EFFECT layer (additive `[4,1]`).
+
+### UI — forced whole-sprite + hide OBJ-CALIBRATION (`?v=49`)
+- asm/emitter/STAF toggles hidden; render hard-pinned to whole-sprite. **OBJ CALIBRATION panel hidden** (it covered the RE COCKPIT panel).
+
+---
+
+## 2026-06-08 (earlier: whole-sprite render, palettes, projectiles)
 
 ### `?v=54` — Object center-anchor + live mode switch
 - PATH A's `node+0x178` hotspot proven **degenerate** via `[OBJDIAG]` (constant per-char = body value, or `hasHot=false`). Switched satellite objects to a **center** anchor (`-wG/2,-hG/2`) by default.
