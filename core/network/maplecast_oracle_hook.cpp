@@ -65,6 +65,23 @@ static bool mc_decodeQuadsEnabled = (getenv("MAPLECAST_FRAME_ORACLE_DECODE") != 
 // uncached alias (P0/P1/P2) of the same RAM line to 0x0C.. — see mc_isHookedPC.
 // (Root cause of the "hook never fires" bug fixed 2026-06-08.)
 static const u32 PC_OBJ_BEGIN = 0x8C03093C;
+// SATELLITE / EFFECT render path (CONFIRMED, marvelous2 bank03 loc_8c030af8 @ line 1526):
+// The slot-table walk loc_8c0308c2 (Render_sprites, bank03:1200) reads the category
+// byte @node+0x3 per slot (loc_8c0308e6, lines 1226-1228) and DISPATCHES:
+//   category == 0  -> bsr loc_8c03093c   (Render Main Sprite — the 6 char BODIES)
+//   category != 0  -> bsr loc_8c030af8   (the EFFECT/SATELLITE path — line 1236)
+// loc_8c030af8 is where projectiles, capes, drones, supers (categories 1..4, the
+// cmp/pl + cmp/ge 5 range gate at lines 1539-1553) render. It takes r4 = node base
+// (mov r4,r14 @1531), reads the SAME cull byte @node+0x12C (loc_8c030c66, line 1532),
+// reads world pos @node+0x34/0x38/0x3C, runs the world->screen transform
+// (bank12.loc_8c122560 @1570), and WRITES the result to screen_x@node+0xE0
+// (loc_8c030c68, line 1572-1575) and screen_y@node+0xE4 (loc_8c030c6a, line 1578-1579)
+// — exactly like Render Main Sprite. The satellite record is char-struct-shaped, so
+// sprite_id@+0x144, category@+0x3, owner@+0x80, xflip@+0x130 all apply (matching
+// readAllDrawn in maplecast_gamestate.cpp). This is the routine the Oracle was BLIND
+// to: a Sentinel-drones capture showed 4 nodes, ALL char bases, ZERO satellites,
+// because drones render here, not at loc_8c03093c.
+static const u32 PC_SAT_BEGIN = 0x8C030AF8;
 // PC_QUAD_DONE is the POST-WRITE capture point. loc_8c033e90 (block entry) is
 // BEFORE the routine writes the 16-byte quad, so reading the quad there returns
 // not-yet-written garbage (the prod symptom: w=58572 h=60718). Tracing the emit
@@ -83,6 +100,7 @@ static const u32 PC_QUAD_DONE  = 0x8C033EC0;
 // RAM line compares equal. 0x8C03093C & MASK == 0x0C03093C == 0x0C03093C & MASK.
 static const u32 SH4_AREA_MASK = 0x1FFFFFFF;
 static const u32 PC_OBJ_BEGIN_M = PC_OBJ_BEGIN & SH4_AREA_MASK;  // 0x0C03093C
+static const u32 PC_SAT_BEGIN_M = PC_SAT_BEGIN & SH4_AREA_MASK;  // 0x0C030AF8
 static const u32 PC_QUAD_DONE_M = PC_QUAD_DONE & SH4_AREA_MASK;  // 0x0C033EC0
 // Slot-walk restart (loc_8c0308c2 Render_sprites) — an alternate frame boundary.
 // We flush on serverPublish() instead (simplest robust), but keep the PC here for
@@ -101,6 +119,16 @@ static const u32 OFF_EXTRAS     = 0x178;   // ptr -> sprite assembly / extras
 static const u32 OFF_FILE_PTR   = 0x17C;   // ptr -> Dat_FilePointer
 static const u32 OFF_FAC_PTR    = 0x184;   // ptr -> FAC
 static const u32 OFF_FACING     = 0x1D2;   // u8 authoritative xflip
+static const u32 OFF_OWNER_80   = 0x080;   // ptr -> owner char base (satellite pool node)
+static const u32 OFF_OWNER_18   = 0x018;   // ptr -> owner char base (alt convention)
+static const u32 OFF_CHAR_ID    = 0x001;   // u8 character_id (in the owner char struct)
+
+// The 6 fighter body char-struct bases (P1C1,P2C1,P1C2,P2C2,P1C3,P2C3; base
+// 0x8C268340, stride 0x5A4). Used to (a) resolve a satellite's owner_cid from its
+// owner pointer and (b) tell a body node from a satellite node.
+static const u32 CHAR_BASE[6] = {
+	0x8C268340, 0x8C2688E4, 0x8C268E88, 0x8C26942C, 0x8C2699D0, 0x8C269F74
+};
 
 // Normalize any P0/P1/P2 alias of a guest pointer to the external-area form so
 // the same RAM line keys identically regardless of which alias a register holds
@@ -144,6 +172,11 @@ struct Obj {
 	int nscreen;      // SCREEN quads (ta_parse) attributed to this object this frame
 	bool enriched;    // true once OBJ_BEGIN (0x8C03093C) read the node fields
 	bool fromBegin;   // captured by OBJ_BEGIN this frame (vs. quad-only)
+	// SATELLITE enrichment (objects rendered by loc_8c030af8, not loc_8c03093c).
+	bool isSat;       // true => this node came through the effect/satellite path
+	u32  ownerPtr;    // raw owner char-base ptr (+0x80 or +0x18); 0 = global effect
+	int  ownerSlot;   // 0..5 = which of the 6 bodies owns it; -1 = none/global
+	int  ownerCid;    // owner's character_id (CHAR_BASE[slot]+0x1); -1 = unknown
 };
 
 // A per-frame SCREEN quad recovered from ta_parse(ctx) in mc_oracle_frameFlush:
@@ -191,6 +224,29 @@ static void enrichObj(Obj& o, u32 node)
 	o.enriched = true;
 }
 
+// Resolve a satellite node's owner (which fighter spawned this projectile/cape/drone).
+// The slot-table record keeps the owner char-base ptr at +0x80 (primary) or +0x18
+// (alt convention) — same as readAllDrawn in maplecast_gamestate.cpp. Match it
+// against the 6 body bases (area-masked so a P0/P1 alias still matches) to get the
+// owner SLOT, then read character_id from that body. Global effects (owner-less
+// supers) leave ownerSlot=-1 / ownerCid=-1.
+static void resolveOwner(Obj& o, u32 node)
+{
+	u32 oA = addrspace::read32(node + OFF_OWNER_18);
+	u32 oB = addrspace::read32(node + OFF_OWNER_80);
+	u32 oAm = norm(oA), oBm = norm(oB);
+	o.ownerPtr = oB ? oB : oA;
+	o.ownerSlot = -1; o.ownerCid = -1;
+	for (int s = 0; s < 6; s++) {
+		u32 cbm = CHAR_BASE[s] & 0x1FFFFFFF;
+		if (oAm == cbm || oBm == cbm) {
+			o.ownerSlot = s;
+			o.ownerCid  = (int)(u8)addrspace::read8(CHAR_BASE[s] + OFF_CHAR_ID);
+			break;
+		}
+	}
+}
+
 // GFX1-region tag a screen quad would correlate to, for the attribution refine.
 // (Not used as the primary key — position is — but disambiguates two objects at
 //  nearly the same screen point by their decode-region class.)
@@ -209,6 +265,7 @@ static int findOrCreateObj(u32 node)
 	Obj& o = s_objs[s_nobj];
 	memset(&o, 0, sizeof o);
 	o.sprite_id = -1; o.category = -1; o.facing = -1;
+	o.ownerSlot = -1; o.ownerCid = -1;
 	enrichObj(o, node);
 	return s_nobj++;
 }
@@ -234,6 +291,12 @@ bool mc_isHookedPC(u32 pc)
 	// the literals are 0x8C.., and an exact == never matched.
 	u32 m = pc & SH4_AREA_MASK;
 	if (m == PC_OBJ_BEGIN_M) return true;
+	// The satellite/effect render path (loc_8c030af8). Same block-entry treatment as
+	// OBJ_BEGIN: r4 = node, writes screen_xy to +0xE0/+0xE4. This is what makes
+	// projectiles/capes/drones first-class Oracle objects. 0x8C030AF8 is a bsr target
+	// (bank03:1236) so it's already a block start; the decoder force-split is a no-op
+	// guarded by rpc!=vaddr, but mc_isHookedPC must return true so the GenCall injects.
+	if (m == PC_SAT_BEGIN_M) return true;
 	// The quad-done PC is the LOAD-TIME atlas decode (fires once at match start, no
 	// screen coords) — only hook it when the decode sub-flag is set so normal runs
 	// don't inject a call into a block that never carries useful per-frame data.
@@ -246,6 +309,7 @@ bool mc_isHookedPC(u32 pc)
 // and we could NOT tell whether OBJ_BEGIN ever fires. These split counters answer
 // task item #1 directly: OBJ_BEGIN fire count vs QUAD_EMIT fire count.
 static unsigned long s_fireObjBegin = 0;
+static unsigned long s_fireSatBegin = 0;
 static unsigned long s_fireQuad     = 0;
 
 void DYNACALL mc_oracle_blockEntry(u32 pc)
@@ -268,6 +332,31 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 		if (!inRam(node)) return;
 		int oi = findOrCreateObj(node);
 		if (oi >= 0) { enrichObj(s_objs[oi], node); s_objs[oi].fromBegin = true; }  // refresh post-transform screen_xy
+		return;
+	}
+
+	if (mpc == PC_SAT_BEGIN_M) {
+		// SATELLITE / EFFECT object (loc_8c030af8). r4 = node base, exactly as
+		// OBJ_BEGIN. Register it as a first-class object with its OWN anchor so the
+		// post-walk TA screen-quad attribution gives each satellite its own clean
+		// quads. Also resolve owner (which fighter spawned it) so the client can pick
+		// the right atlas/palette bank. NOTE: loc_8c030af8 runs BEFORE it writes the
+		// transform to +0xE0/+0xE4 (block entry); so the screen_xy read here is the
+		// PREVIOUS frame's value. That's fine for attribution this frame (the object
+		// barely moves in 16ms) and the next frame's read is exact — same one-frame
+		// property the OBJ_BEGIN read has (it reads at entry too, before the write).
+		if (s_fireSatBegin++ == 0)
+			fprintf(stderr, "[ORACLE-HOOK] SAT_BEGIN first fired (pc=0x%08X masked 0x%08X) "
+			                "node=0x%08X\n", pc, mpc, r[4]);
+		u32 node = norm(r[4]);
+		if (!inRam(node)) return;
+		int oi = findOrCreateObj(node);
+		if (oi >= 0) {
+			enrichObj(s_objs[oi], node);
+			resolveOwner(s_objs[oi], node);
+			s_objs[oi].isSat     = true;
+			s_objs[oi].fromBegin = true;   // anchor on it like a body (own screen_xy)
+		}
 		return;
 	}
 
@@ -457,10 +546,13 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 	long owBefore = ow;
 	int attributed = 0; for (int k=0;k<s_nscreen;k++) if (s_screen[k].obj>=0) attributed++;
 	if ((s_flushCalls++ % 120) == 0)
-		fprintf(stderr, "[ORACLE-HOOK] flush #%lu frame=%u objs=%d screenQuads=%d attributed=%d "
-		                "decodeQuads=%d fired{OBJ_BEGIN=%lu QUAD=%lu} totalWritten=%ld\n",
-		        s_flushCalls, frame, s_nobj, s_nscreen, attributed, s_nquad,
-		        s_fireObjBegin, s_fireQuad, ow);
+	{
+		int nSat = 0; for (int i = 0; i < s_nobj; i++) if (s_objs[i].isSat) nSat++;
+		fprintf(stderr, "[ORACLE-HOOK] flush #%lu frame=%u objs=%d sats=%d screenQuads=%d attributed=%d "
+		                "decodeQuads=%d fired{OBJ_BEGIN=%lu SAT_BEGIN=%lu QUAD=%lu} totalWritten=%ld\n",
+		        s_flushCalls, frame, s_nobj, nSat, s_nscreen, attributed, s_nquad,
+		        s_fireObjBegin, s_fireSatBegin, s_fireQuad, ow);
+	}
 
 	// Only emit for in-match frames (the gate above already skipped the heavy
 	// recovery off-match, so s_nscreen is 0 there) AND only when something was
@@ -487,13 +579,18 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 				const Obj& o = s_objs[i];
 				n = snprintf(b, sizeof b,
 					"%s{\"node\":\"0x%08X\",\"sprite_id\":%d,"
+					"\"kind\":\"%s\",\"owner_slot\":%d,\"owner_cid\":%d,"
+					"\"owner_ptr\":\"0x%08X\","
 					"\"screen_xy\":[%.1f,%.1f],\"scale\":[%.3f,%.3f],"
 					"\"category\":%d,\"facing\":%d,"
 					"\"tex_src\":{\"gfx1_ptr\":\"0x%08X\",\"pal_ptr\":\"0x%08X\","
 					"\"region\":\"%s\"},"
 					"\"asm_src\":{\"extras_ptr\":\"0x%08X\",\"file_ptr\":\"0x%08X\","
 					"\"fac_ptr\":\"0x%08X\"},\"screen_quads\":[",
-					i ? "," : "", o.node, o.sprite_id, o.sx, o.sy,
+					i ? "," : "", o.node, o.sprite_id,
+					o.isSat ? "satellite" : "body", o.ownerSlot, o.ownerCid,
+					o.ownerPtr,
+					o.sx, o.sy,
 					o.scaleX, o.scaleY, o.category, o.facing,
 					o.gfx1, o.pal, classifyRegion(o.gfx1),
 					o.extras, o.file, o.fac);
