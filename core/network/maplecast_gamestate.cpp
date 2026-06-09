@@ -1458,24 +1458,24 @@ static void partDump(const GameState& state) {
 //   * But that buffer is a TRANSIENT scratch. With two chars loaded and a match in
 //     flight, nothing re-decodes the full character there each frame; mid-match the
 //     contiguous offsets read stale residue -> the magenta/stripe NOISE we saw.
-//   * The DM00 directory (*(0x0CE80008)) IS persistent + clean, but its key is
-//     `char_base + part_ordinal` (a sequential counter; bank03:loc_8c0322c0
-//     `entry=*(r6+8)+(k<<4)`, loc_8c032a66 char_base=9/13 from player+0xad), which
-//     is NOT the +6 GFX selector the emitter/assembly use. So DM00 cannot be keyed
-//     by selector (it gave the UI/portrait set + the 256x256 body, not the per-pose
-//     selector parts).
+//   * The DM00 directory (*(0x0CE80008)) IS persistent + clean. The EARLIER attempt
+//     keyed it by `char_base + part_ordinal` (a sequential counter, charBase=9/13 from
+//     player+0xad) — the WRONG offset; that run is the portrait/UI set + the 256x256
+//     body, not the per-pose +6-selector gameplay parts.
 //
-// THE FIX (2026-06-09, OPTION a — persistent source): the transient 0x0CE60000 walk
-// was wrong on BOTH counts (stale buffer mid-match AND a dims read that returned 0, so
-// every part was skipped -> dumpedThisFire=0). Read the CLEAN, PERSISTENT pixels from
-// the DM00 directory (*(0x0CE80008)) instead — the per-part decoded-texel store MVC2
-// fills ONCE at load (loc_8c0322c0 entry=*(r6+8)+(k<<4), texels *(entry+8); loc_8c032ae0
-// fills it in incrementing-counter order). It survives the whole match (it gave the
-// clean PAL4 portraits). We still walk the per-pose GFX2 cell to recover the +6 SELECTOR
-// per record, and map record r -> DM00 key charBase+r (same fill order) to fetch that
-// part's persistent texels + the directory's OWN dims (e0)/format (e4). Output is keyed
-// by the +6 selector so tools/rip_gfx2_assembly.py --realparts (PL{HEX}_part_NNN.ppm)
-// consumes it. Reuses the PROVEN partDecodeToPPM (twiddled, format from partFmtFromE4).
+// THE FIX (2026-06-09, DISASM-CONFIRMED): the persistent per-part texels store is
+// SELECTOR-INDEXED at +0xA0, read EXACTLY as the gameplay-part decoder loc_8c032696's
+// copy-out (the only LOOPING LZSS caller; bank03:5807-5853) writes it:
+//   DM00base = *(0x0CE80008)                              ; prologue r8=*(0x0ce80008)
+//   entry    = DM00base + (sel<<4) + 0xA0                 ; sel=*r9 (+6 selector), +0xA0=loc_8c03283c
+//   e0 = dims (w=lo16, h=hi16)   e4 byte1 = PVR fmt   e8 = persistent texels ptr
+// This is the SAME store the per-frame render loc_8c0344d4 reads via its texptr — it
+// persists the WHOLE match, so we can read it ANY in-match frame (palette loaded). We
+// walk the live per-pose GFX2 cell to recover the +6 SELECTOR per record, then read the
+// DM00 entry at dirBase + sel*0x10 + 0xA0 for that part's persistent texels + dims/fmt.
+// Output is keyed by the +6 selector so tools/rip_gfx2_assembly.py --realparts
+// (PL{HEX}_part_NNN.ppm) consumes it. Reuses the PROVEN partDecodeToPPM (twiddled,
+// format from partFmtFromE4). READ-ONLY.
 //
 // Output (operator-local, ROM-derived -> /dev/shm only):
 //   /dev/shm/PL{HEX}_gfx1_NNNN.ppm   one clean part per +6 selector (P6, magenta=transp)
@@ -1553,8 +1553,9 @@ static void gfx1Dump(const GameState& state) {
 		uint8_t  bsel = (uint8_t)addrspace::read8(pbase + OFF_SLOT_SEL);
 		uint32_t gfx2Base = gfx2 & 0x0FFFFFFFu;
 		if (!_ramAddr(gfx2Base | 0x0C000000u)) continue;
-		// disasm loc_8c032a66: base = (sel==1)?13 : 9. The char's DM00 parts form a
-		// contiguous run from charBase, filled in cell-record order at load decode.
+		// disasm loc_8c032a66: base = (sel==1)?13 : 9. (Kept only for the diagnostic
+		// log — the CORRECT DM00 entry is selector-indexed at +0xA0, see below; the old
+		// charBase+ordinal cursor was the WRONG offset.)
 		int charBase = (bsel == 1) ? 13 : 9;
 
 		// Resolve THIS pose's GFX2 cell (record ORDER == DM00 fill order == load decode).
@@ -1571,8 +1572,24 @@ static void gfx1Dump(const GameState& state) {
 		if (mf && ftell(mf) == 0)
 			fprintf(mf, "# selector palRow w h fmt texptr ppm  (clean DM00 persistent parts, keyed by +6 selector)\n");
 
+		// === CORRECT DM00 entry addressing (DISASM-CONFIRMED 2026-06-09) ===========
+		// The persistent per-part texels store is SELECTOR-INDEXED at +0xA0, NOT keyed
+		// by charBase+ordinal (that was the wrong offset, giving the portrait/UI run).
+		// Confirmed from the gameplay-part decoder loc_8c032696's copy-out (the only
+		// LOOPING LZSS caller; bank03 lines 5807-5853):
+		//   r8 = *(0x0CE80008)                 ; DM00base   (prologue @5683: mov.l @(0x8,r4),r8, r4=0x0ce80000)
+		//   r7 = *r9 (u8 +6 selector)          ; @5811 mov.b @r9,r7
+		//   r7 <<= 4  (= sel * 0x10 stride)    ; @5813/5817 two shll2 after extu.b
+		//   r7 += r8                           ; @5819 add r8,r7   -> DM00base + sel*0x10
+		//   r7 += 0xA0  (const loc_8c03283c)   ; @5821 add r4,r7   (r4 = mov.w @(loc_8c03283c) = 0x00a0)
+		//   texels = *(r7 + 0x8)               ; @5825 mov.l @(0x8,r7),r7 = copy-out DEST (e8)
+		// So entry = DM00base + sel*0x10 + 0xA0; e0=dims(w=lo16,h=hi16), e4 byte1=fmt,
+		// e8=persistent texels. This is the SAME store the per-frame render loc_8c0344d4
+		// reads via its texptr — it persists the whole match. (The +0x100/r10 sibling
+		// table @5841-5853 is the paired high-half; the +6 gameplay selector is r9/+0xA0.)
+		static const uint32_t DM00_BIAS   = 0xA0;   // bank03:5853 const loc_8c03283c
+		static const uint32_t DM00_STRIDE = 0x10;
 		int dumpedThis = 0;
-		int dmIdx = charBase;                    // DM00 directory cursor (advances per real part)
 		for (int r = 0; r < cnt; r++) {
 			uint32_t rec   = recs + (uint32_t)r * 8;
 			uint16_t rpalw = (uint16_t)addrspace::read16(rec + 4);   // palette word
@@ -1582,24 +1599,24 @@ static void gfx1Dump(const GameState& state) {
 			if (lo == 0 && rsel == 0 && rpalw == 0) continue;        // pad/separator
 			unsigned palRow = (unsigned)((rpalw & 0x03ff) >> 4);
 
-			// CLEAN PERSISTENT pixels: this record's part is DM00 entry `dmIdx` (the run
-			// charBase.., same order the load decoder filled it). Use the DIRECTORY's own
-			// dims (e0) + format (e4) + decoded twiddled texel ptr (e8) — NOT the stale
-			// GFX1 offset-table guess. (loc_8c0322c0/loc_8c032ae0.)
-			uint32_t e   = dirBase + (uint32_t)dmIdx * 0x10;
+			// CLEAN PERSISTENT pixels: the DM00 entry is SELECTOR-INDEXED at +0xA0
+			// (disasm trace above). The directory carries this part's OWN dims (e0),
+			// format (e4) + the decoded persistent texel ptr (e8) the game's renderer reads.
+			uint32_t e   = dirBase + (uint32_t)rsel * DM00_STRIDE + DM00_BIAS;
 			uint32_t e0  = addrspace::read32(e);
 			uint32_t e4d = addrspace::read32(e + 4);
 			uint32_t e8d = addrspace::read32(e + 8);
 			int w = (int)(e0 & 0xffff), h = (int)((e0 >> 16) & 0xffff);
 			if (w <= 0 || h <= 0 || w > 512 || h > 512 || !_ramAddr(e8d)) {
-				// Directory entry empty/invalid — don't advance dmIdx past a real slot.
-				if (lg) fprintf(lg, "[GFX1] cid=%u sel=%u dmIdx=%d EMPTY (e0=%08x e8=%08x) skip\n",
-				                cid, rsel, dmIdx, e0, e8d);
-				dmIdx++;
+				// Directory entry empty/invalid for this selector (part not loaded /
+				// out of this char's set). The per-part addr in the log exposes a bad
+				// +0xA0/stride immediately if the layout were off.
+				if (lg) fprintf(lg, "[GFX1] cid=%u sel=%u entry=%08x EMPTY (e0=%08x e8=%08x) skip\n",
+				                cid, rsel, e, e0, e8d);
 				continue;
 			}
 			int dfmt = partFmtFromE4(e4d);           // e4 byte1 -> PVR PixelFmt (proven map)
-			bool dlinear = false;                    // DM00 slots are twiddled
+			bool dlinear = false;                    // DM00 slots are twiddled (proven path)
 
 			if (rsel < 512 && cid < 0x40 && !seen[cid][rsel]) {
 				// FIRST-SEEN gate: dump this selector's clean persistent part. Write BOTH
@@ -1615,11 +1632,10 @@ static void gfx1Dump(const GameState& state) {
 				                palP + (uint32_t)palRow * 32, gfp, /*swapXY=*/false);
 				seen[cid][rsel] = true;
 				if (mf) fprintf(mf, "%u %u %d %d %d %08x %s\n", rsel, palRow, w, h, dfmt, e8d, pfn);
-				if (lg)  fprintf(lg, "[GFX1] cid=%u(PL%02X) sel=%u dmIdx=%d %dx%d fmt=%d palRow=%u tex=%08x -> %s\n",
-				                 cid, cid, rsel, dmIdx, w, h, dfmt, palRow, e8d, pfn);
+				if (lg)  fprintf(lg, "[GFX1] cid=%u(PL%02X) sel=%u entry=%08x %dx%d fmt=%d palRow=%u tex=%08x -> %s\n",
+				                 cid, cid, rsel, e, w, h, dfmt, palRow, e8d, pfn);
 				dumpedThis++;
 			}
-			dmIdx++;                                 // advance to the next persistent slot
 		}
 		if (mf) fclose(mf);
 		if (lg) fprintf(lg, "[GFX1] slot%d cid=%u(PL%02X) sid=%u cnt=%d charBase=%d gfx2=%08x dirBase=%08x dumpedThisFire=%d -> %s\n",
