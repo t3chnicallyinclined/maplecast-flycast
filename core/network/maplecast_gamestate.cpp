@@ -64,7 +64,8 @@ static const uint32_t OFF_CHAR_LINK_PTR   = 0x00C;  // linked list pointer betwe
 // These are resolved by the engine when a character loads — following them reads
 // the already-decompressed palette / assembly the GPU is using, no ROM codec.
 static const uint32_t OFF_COLOR           = 0x025;  // live displayed palette idx (button + hit-flash)
-static const uint32_t OFF_GFX00_PTR       = 0x15C;  // -> decoded GFX
+static const uint32_t OFF_GFX00_PTR       = 0x15C;  // -> decoded GFX (GFX1 part pixels)
+static const uint32_t OFF_GFX01_PTR       = 0x160;  // -> GFX2 cell table (sid -> part list)
 static const uint32_t OFF_PAL_PTR         = 0x164;  // -> live ARGB4444 palette
 static const uint32_t OFF_HITBOX_PTR      = 0x170;  // -> live hitbox data
 static const uint32_t OFF_EXTRAS_PTR      = 0x178;  // -> sprite assembly / extras
@@ -1109,30 +1110,22 @@ static void partDump(const GameState& state) {
 			if (lg) fprintf(lg, "[CHAR] PALETTE(0x164=%08x) -> %s (4KB, ARGB4444)\n", palP, pn);
 		}
 
-		// sprite_id -> ASSEMBLY RE-KEY (Gap 2, FROM THE LIVE CELL — the ground truth).
-		// LIVE LOG correction: `*(player+0x144) = 0x0000005d` is the plain sid 0x5d, NOT
-		// a pointer (so the earlier `*(0x144)+0x18` read garbage). But `cell` (player+0x154
-		// = current_cell_data) IS a valid pointer to the live 20-byte keyframe (log:
-		// cell=0x0c52ebfc). The anim tick (bank03:loc_8c034ed2) copies that keyframe into
-		// player+0x140.. via the Duff-copy bank12:loc_8c1294c8, so:
-		//   cell      = read32(player+0x154)          ; valid keyframe pointer (live)
-		//   live_sid  = read16(cell + 4)              ; == read16(player+0x144) (the client's key)
-		//   slot      = read16(cell + 0x12)           ; keyframe -> EXTRAS slot index
-		//   records   = EXTRAS + slot*0x400 + 0x08    ; assembly start (see UNCONFIRMED note)
-		// *** UNCONFIRMED slot->byte-offset: the `slot*0x400` stride is NOT verified against
-		// the disasm. The quad emitter (loc_8c033d78/e90) walks a records directory at
-		// node+0x160, not a 0x400-strided EXTRAS slot table — and the static PL00 EXTRAS is
-		// a flat stream of variable-length assemblies (terminator attr==0x00FF), NOT 0x400
-		// slots. The RECORD layout below IS proven; the slot ADDRESSING is best-effort.
-		// Cross-check the emitted sidasm against the raw PL{hex}_extras.bin dump (which the
-		// offline parse_extras re-splits by terminator independent of any slot stride).
-		// Reading from the LIVE cell guarantees live_sid == read16(player+0x144) — unlike
-		// (a) the offline ANIMATION-table scan (different namespace, never matched) and
-		// (b) *(0x144) (not a pointer). Across fires the live sid set accumulates.
+		// sprite_id -> ASSEMBLY RE-KEY (Gap 2) — THE CRACKED GFX2 CELL-TABLE WALK.
+		// FIXED 2026-06-09: the per-pose part list is GFX2[sid] (node+0x160), NOT the old
+		// degenerate EXTRAS slot table (exP + slot*0x400 + 8). The old `slot*0x400` stride
+		// was UNCONFIRMED and returned only the body's 1-2 EXTRAS records, so every fire
+		// logged `parts=0 1` and the offline tool got 6-19. The GFX2 read (matching
+		// tools/rip_gfx2_assembly.py read_cells() and bank03 loc_8c0344d4, §3a) is:
+		//   gfx2  = read32(player+0x160)                       ; GFX2 base (Dat_GFX2)
+		//   cell  = gfx2 + read32(gfx2 + (sid & 0x7FFF)*4)     ; per-sid cell record
+		//   count = read16(cell)                               ; record COUNT (6-19 for a body pose)
+		//   recs  = cell + 2                                   ; COUNT * 8-byte records
+		// `cell` (player+0x154) is still read for the live keyframe trace (kf[4]==sid), but
+		// it is NO LONGER the source of the assembly records.
 		//
-		// File PL{hex}_sidasm.txt: "<sid> <slot> <nrecs> dx,dy,part,flip;...". If the
-		// slot's assembly is empty, we dump the cell's 20 bytes so the real slot-field
-		// offset is verifiable from the log.
+		// File PL{hex}_sidasm.txt: "<sid> <cnt> <nrecs> penX,penY,part,flip,palRow;...".
+		// dx/dy are accumulated into a running pen (§3a). If the count is 0 the GFX2 cell
+		// was unresolved (logged so the gfx2 pointer is verifiable).
 		bool liveUsePart[512] = {false};   // part_idx referenced by the LIVE assembly (merged into usePart); u16 indices reach ~277
 		{
 			uint32_t animP = addrspace::read32(pbase + 0x168);   // ANIMATION base (dump for ref)
@@ -1144,61 +1137,71 @@ static void partDump(const GameState& state) {
 
 			uint16_t sid144  = (uint16_t)addrspace::read16(pbase + 0x144);   // client's key (cross-check)
 			uint16_t liveSid = sid144;
-			uint16_t slot = 0xFFFF;
-			uint32_t recs = 0;
 			char kfbytes[64] = "-";
 			if (_ramAddr(cellP)) {
 				liveSid = (uint16_t)addrspace::read16(cellP + 4);            // keyframe[4] == sid144
-				slot    = (uint16_t)addrspace::read16(cellP + 0x12);         // keyframe[0x12] = slot
 				int n = 0; for (int b = 0; b < 20 && n < 60; b++) n += snprintf(kfbytes + n, sizeof(kfbytes) - n, "%02x", (uint8_t)addrspace::read8(cellP + b));
-				if (slot < 64 && _ramAddr(exP))
-					recs = exP + (uint32_t)slot * 0x400 + 0x08;
+			}
+
+			// THE PER-POSE PART LIST = the CRACKED GFX2 CELL-TABLE walk (node+0x160),
+			// indexed by sid144. Supersedes the degenerate EXTRAS slot table
+			// (exP + slot*0x400 + 8) which returned only the body's 1-2 records.
+			//   gfx2  = *(node+0x160) ; cell = gfx2 + *(u32)(gfx2 + (sid&0x7FFF)*4)
+			//   count = u16 @ cell    ; COUNT * 8-byte records follow at cell+2
+			// Matches tools/rip_gfx2_assembly.py read_cells() and bank03 loc_8c0344d4
+			// (MARVELOUS2-GFX-NOTES §3a).
+			uint32_t kfGfx2  = addrspace::read32(pbase + OFF_GFX01_PTR) & 0x0FFFFFFFu;
+			uint32_t recs    = 0;
+			int      recCnt  = 0;
+			if (_ramAddr(kfGfx2 | 0x0C000000u)) {
+				uint32_t off  = addrspace::read32(kfGfx2 + (uint32_t)(sid144 & 0x7FFF) * 4) & 0x0FFFFFFFu;
+				uint32_t cell = (kfGfx2 + off) & 0x0FFFFFFFu;
+				if (_ramAddr(cell | 0x0C000000u)) {
+					int cnt = (int)(uint16_t)addrspace::read16(cell);
+					if (cnt > 0 && cnt <= 64) { recCnt = cnt; recs = cell + 2; }
+				}
 			}
 
 			char km[96]; snprintf(km, sizeof km, "/dev/shm/PL%02X_sidasm.txt", cid);
 			FILE* kf = fopen(km, "a");
 			if (kf && ftell(kf) == 0)
-				fprintf(kf, "# sprite_id slot nrecs dx,dy,part,flip;...  (LIVE cell: sid=kf[4], slot=kf[0x12], asm=EXTRAS+slot*0x400+8)\n");
+				fprintf(kf, "# sprite_id cnt nrecs dx,dy,part,flip;...  (GFX2 cell: cell=gfx2+*(gfx2+sid*4), cnt=u16@cell, recs@cell+2)\n");
 
-			// REAL record layout (CONFIRMED against bank03 loc_8c033d78/e90, marvelous2
-			// build/bank03.asm:9092-9305 — the quad emitter):
+			// 8-byte GFX2 cell record (CONFIRMED bank03 loc_8c0344d4, rip_gfx2_assembly.py):
 			//   [dx:s16 @+0][dy:s16 @+2][palette:u16 @+4][GFX_SELECTOR:u16 @+6]
-			//   terminator   = GFX_SELECTOR (@+6) == 0x00FF (sentinel quad, loc_8c033f14)
-			//   GFX_SELECTOR = the GFX1 offset-table index (in-range 29..65)
-			//   palette row  = (rec[+0x4] & 0x3ff) >> 4   (static form; ignore +0x12d/12e overlay)
-			//   flip         = facing XOR record bit (mirrored via screen transform; not in attr)
-			// THE PRIOR BUG: the GFX index was read from +4 (= palette, a constant ~16)
-			// and the selector at +6 was treated as a terminator-only attr. The texture
-			// SELECTOR is +6 (range 29-65); +4 is the palette. Reading the index from +4
-			// keyed every part to the same palette constant -> empty/garbage atlas.
+			//   GFX_SELECTOR = the GFX1 offset-table index (the +6 field, range ~29-65)
+			//   palette row  = (rec[+0x4] & 0x3ff) >> 4 ; flip = rec[+4] bit 0x10
+			// dx/dy are accumulated into a RUNNING PEN (facing-neutral) per §3a so the
+			// emitted assembly stores absolute-in-cell-space placement.
 			int nrec = 0;
 			if (kf && recs) {
 				char body[1900]; int bn = 0;
-				for (int r = 0; r < 128; r++) {
+				int px = 0, py = 0;   // cumulative pen (running accumulator)
+				for (int r = 0; r < recCnt; r++) {
 					uint32_t rec = recs + (uint32_t)r * 8;
 					int16_t  rdx   = (int16_t) addrspace::read16(rec);
 					int16_t  rdy   = (int16_t) addrspace::read16(rec + 2);
 					uint16_t rpalw = (uint16_t)addrspace::read16(rec + 4);   // palette word
 					uint16_t rsel  = (uint16_t)addrspace::read16(rec + 6);   // GFX_SELECTOR (the key)
 					if (rsel == 0x00FF) break;                      // assembly terminator (sentinel)
-					uint32_t lo = addrspace::read32(rec);
-					if (lo == 0 && rsel == 0 && rpalw == 0) continue;    // all-zero pad / separator
+					px += rdx; py += rdy;                           // advance the pen BEFORE emit
 					unsigned palRow = (unsigned)((rpalw & 0x03ff) >> 4);   // static palette row
+					unsigned flip   = (rpalw & 0x10) ? 1u : 0u;            // +4 bit 0x10 = X-mirror
 					if (bn < (int)sizeof(body) - 40)
-						// "<dx>,<dy>,<selector>,<flip>,<palRow>;"  — `part` field == +6 selector
+						// "<penX>,<penY>,<selector>,<flip>,<palRow>;"  — `part` field == +6 selector
 						bn += snprintf(body + bn, sizeof(body) - bn, "%d,%d,%u,%u,%u;",
-						               rdx, rdy, rsel, 0u, palRow);
+						               px, py, rsel, flip, palRow);
 					if (rsel < 512) liveUsePart[rsel] = true;       // dump this selector's pixels
 					nrec++;
 				}
-				if (nrec > 0) fprintf(kf, "%u %u %d %s\n", liveSid, slot, nrec, body);
+				if (nrec > 0) fprintf(kf, "%u %u %d %s\n", liveSid, recCnt, nrec, body);
 			}
 			if (kf) fclose(kf);
 			if (lg) {
-				fprintf(lg, "[CHAR] LIVE re-key: sid144=0x%04x cell=0x%08x kf[4]=0x%04x slot=kf[0x12]=%u recs@0x%08x nrec=%d\n",
-				        sid144, cellP, liveSid, slot, recs, nrec);
+				fprintf(lg, "[CHAR] LIVE re-key (GFX2): sid144=0x%04x cell=0x%08x kf[4]=0x%04x gfx2=0x%08x cnt=%d recs@0x%08x nrec=%d\n",
+				        sid144, cellP, liveSid, kfGfx2, recCnt, recs, nrec);
 				fprintf(lg, "[CHAR]   cell kf[0..19] = %s\n", kfbytes);
-				if (nrec == 0) fprintf(lg, "[CHAR]   *** empty assembly — verify slot field offset against the kf bytes above ***\n");
+				if (nrec == 0) fprintf(lg, "[CHAR]   *** empty assembly — GFX2 cell unresolved or count==0 (gfx2=0x%08x) ***\n", kfGfx2);
 			}
 		}
 
@@ -1232,13 +1235,16 @@ static void partDump(const GameState& state) {
 		if (lg) fprintf(lg, "[CHAR] EXTRAS scan: %d non-empty slots, %d distinct part_idx (incl live)\n",
 		                nSlots, nUse);
 
-		// Per-fire compact log: sid + the part_idx list (so we see it change across fires).
-		// Also appended to a sid-trace file that survives across fires (the main log is
-		// rewritten each fire because it carries the big directory dump).
+		// Per-fire compact log: sid + the CURRENT-POSE part list (the GFX2 cell-walk
+		// selectors = liveUsePart), so we see it change across fires. A correct body pose
+		// shows 6-19 selectors here (NOT `0 1`, which was the degenerate EXTRAS path).
+		// The EXTRAS-region superset (usePart) is reported separately for reference.
 		{
-			char pl[512]; int pn = snprintf(pl, sizeof pl, "[FIRE %d] cid=%u(PL%02X) sid=%u cell=0x%08x parts=",
-			                                fires, cid, cid, sid, cellP);
-			for (int p = 0; p < 512 && pn < (int)sizeof(pl) - 6; p++) if (usePart[p]) pn += snprintf(pl + pn, sizeof(pl) - pn, "%d ", p);
+			int poseN = 0; for (int p = 0; p < 512; p++) if (liveUsePart[p]) poseN++;
+			char pl[512]; int pn = snprintf(pl, sizeof pl, "[FIRE %d] cid=%u(PL%02X) sid=%u cell=0x%08x poseParts=%d parts=",
+			                                fires, cid, cid, sid, cellP, poseN);
+			for (int p = 0; p < 512 && pn < (int)sizeof(pl) - 6; p++) if (liveUsePart[p]) pn += snprintf(pl + pn, sizeof(pl) - pn, "%d ", p);
+			if (pn < (int)sizeof(pl) - 24) pn += snprintf(pl + pn, sizeof(pl) - pn, " (extrasScan=%d)", nUse);
 			if (lg) fprintf(lg, "%s\n", pl);
 			FILE* tf = fopen("/dev/shm/mc_partdump_sidtrace.log", "a");
 			if (tf) { fprintf(tf, "%s\n", pl); fclose(tf); }
@@ -1251,7 +1257,7 @@ static void partDump(const GameState& state) {
 		//   gfx1     = *(node + 0x15c)                     ; Dat_GFX1 (loc_8c033f72=0x15c)
 		//   ; the running texel pointer is seeded ONCE per node at routine entry:
 		//   texPtr   = 0x0CE60000                          ; (loc_8c033e28 literal)
-		//   ; then per EXTRAS record, IN ORDER:
+		//   ; then per GFX2-cell record, IN ORDER (records from GFX2[sid], see above):
 		//   GFX_SELECTOR = u16 @(rec + 0x06)               ; THE FIX: +6 (NOT +4=palette)
 		//   off          = u32 @(gfx1 + GFX_SELECTOR*4)    ; offset-table lookup
 		//   blob         = gfx1 + off ; blob += 0x02       ; skip 2-byte piece header
@@ -1263,9 +1269,9 @@ static void partDump(const GameState& state) {
 		// THE FIX: the index source is the +6 GFX_SELECTOR (range 29-65), NOT +4 (which
 		// is the palette word, a near-constant ~16). NO FAC (+0x184), NO per-char base,
 		// NO shift beyond sel*4. The texels are NOT inside the GFX1 blob (that holds the
-		// part header/dims); they are a CONTIGUOUS run consumed in EXTRAS-walk order from
+		// part header/dims); they are a CONTIGUOUS run consumed in cell-walk order from
 		// 0x0CE60000, so the per-part texptr is only defined within the live walk — hence
-		// we re-walk the live assembly here (same recs as the sidasm block) and dump each
+		// we re-walk the GFX2 cell here (same records as the sidasm block) and dump each
 		// distinct selector the first time it's encountered with its running texptr.
 		//
 		// KEY CONSISTENCY (gate c): the manifest is keyed by the +6 selector — the SAME
@@ -1286,19 +1292,36 @@ static void partDump(const GameState& state) {
 		// resolves PAL4/linear directly: fmt(bits27-29)=5, scan-order(bit26)=1=linear.
 		const uint32_t TCW_PAL4_LINEAR = (5u << 27) | (1u << 26);   // 0x2C000000
 
-		// Re-derive the live assembly start exactly as the sidasm block:
-		//   cell = *(player+0x154); slot = u16 @(cell+0x12); recs = EXTRAS + slot*0x400 + 8
-		uint32_t pdCell = addrspace::read32(pbase + 0x154);
-		uint32_t pdRecs = 0;
-		if (_ramAddr(pdCell)) {
-			uint16_t pdSlot = (uint16_t)addrspace::read16(pdCell + 0x12);
-			if (pdSlot < 64 && _ramAddr(exP)) pdRecs = exP + (uint32_t)pdSlot * 0x400 + 0x08;
+		// THE FIX (2026-06-09): resolve the live per-pose part list via the CRACKED GFX2
+		// CELL-TABLE walk (node+0x160), NOT the degenerate EXTRAS slot table
+		// (exP + slot*0x400 + 8 — an UNCONFIRMED stride that returned only the body's
+		// 1-2 EXTRAS records). This is the exact read tools/rip_gfx2_assembly.py uses and
+		// matches bank03 loc_8c0344d4 (MARVELOUS2-GFX-NOTES §3a):
+		//   gfx2  = *(node+0x160)                              ; GFX2 base
+		//   cell  = gfx2 + *(u32)(gfx2 + (sid & 0x7FFF)*4)     ; per-sid cell record
+		//   count = u16 @ cell                                 ; record COUNT (6-19 for a body pose)
+		//   recs  = cell + 2                                   ; COUNT * 8-byte records follow
+		// Each 8-byte record: [dx s16 @+0][dy s16 @+2][pal u16 @+4][SEL u16 @+6].
+		// The pixel walk below (rec+4=palette, rec+6=GFX1 selector, texPtr advance) is
+		// unchanged — only the RECORD SOURCE changed from the EXTRAS slot table to GFX2.
+		uint32_t gfx2     = addrspace::read32(pbase + OFF_GFX01_PTR);   // *(node+0x160)
+		uint32_t gfx2Base = gfx2 & 0x0FFFFFFFu;
+		uint32_t pdRecs   = 0;
+		int      pdCount  = 0;
+		if (_ramAddr(gfx2Base | 0x0C000000u)) {
+			uint32_t sidIdx  = (uint32_t)(sid & 0x7FFF);
+			uint32_t cellOff = addrspace::read32(gfx2Base + sidIdx * 4) & 0x0FFFFFFFu;
+			uint32_t cell    = (gfx2Base + cellOff) & 0x0FFFFFFFu;
+			if (_ramAddr(cell | 0x0C000000u)) {
+				int cnt = (int)(uint16_t)addrspace::read16(cell);
+				if (cnt > 0 && cnt <= 64) { pdCount = cnt; pdRecs = cell + 2; }
+			}
 		}
 
 		bool dumped[512] = {false};
 		uint32_t texPtr = TEXEL_BASE;    // running pointer, seeded once per node (disasm)
 		if (_ramAddr(gfxBase | 0x0C000000u) && pdRecs) {
-			for (int r = 0; r < 256; r++) {
+			for (int r = 0; r < pdCount; r++) {       // bounded by the GFX2 cell COUNT
 				uint32_t rec   = pdRecs + (uint32_t)r * 8;
 				uint16_t rpalw = (uint16_t)addrspace::read16(rec + 4);   // palette word
 				uint16_t rsel  = (uint16_t)addrspace::read16(rec + 6);   // GFX_SELECTOR (key)
@@ -1351,8 +1374,8 @@ static void partDump(const GameState& state) {
 			}
 		}
 		if (mf) fclose(mf);
-		if (lg) fprintf(lg, "[CHAR] GFX1-emitter dump: gfxBase=0x%08x recs=0x%08x texBase=0x%08x -> %s\n",
-		                gfxBase, pdRecs, TEXEL_BASE, mn);
+		if (lg) fprintf(lg, "[CHAR] GFX1-emitter dump: gfxBase=0x%08x gfx2Base=0x%08x cellRecs=0x%08x cnt=%d texBase=0x%08x -> %s\n",
+		                gfxBase, gfx2Base, pdRecs, pdCount, TEXEL_BASE, mn);
 	}
 	if (lg) { fprintf(lg, "\ndumped %d parts this frame\n", dumpedTotal); fclose(lg); }
 }
