@@ -44,7 +44,14 @@ namespace maplecast_oracle_hook
 // the recompiler's compile-time gate is correct from the very first block. The
 // MVC2 draw blocks at 0x8C033E90 only compile once the game reaches that code,
 // well after static init, so there is no ordering hazard.
-bool mc_oracleHookEnabled = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr);
+// DECODE-TIME PART HOOK (MAPLECAST_DECODEHOOK) — see mc_decodeHookEnabled below.
+// Declared first because the master compile-time gate (mc_oracleHookEnabled) must be
+// true whenever EITHER the frame oracle OR the decode-hook is requested, so the
+// recompiler injects the GenCall + the decoder force-splits at our hooked PCs.
+static bool mc_decodeHookEnabled = (getenv("MAPLECAST_DECODEHOOK") != nullptr);
+
+bool mc_oracleHookEnabled = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr)
+                         || mc_decodeHookEnabled;
 
 // Sub-flag: also capture the LOAD-TIME part-atlas decode quads at loc_8c033e90
 // (0x8C033EC0 post-write). PROVEN (live prod capture 2026-06-08): that routine
@@ -133,6 +140,43 @@ static const u32 SH4_AREA_MASK = 0x1FFFFFFF;
 static const u32 PC_OBJ_BEGIN_M = PC_OBJ_BEGIN & SH4_AREA_MASK;  // 0x0C03093C
 static const u32 PC_SAT_BEGIN_M = PC_SAT_BEGIN & SH4_AREA_MASK;  // 0x0C030AF8
 static const u32 PC_QUAD_DONE_M = PC_QUAD_DONE & SH4_AREA_MASK;  // 0x0C033EC0
+
+// === DECODE-TIME PART HOOK (MAPLECAST_DECODEHOOK) ===========================
+// THE LOAD-DECODE INSTANT. The character-load part driver loc_8c032696 (bank03:5668)
+// decodes EACH gameplay part with the LZSS word decoder loc_8c03552a (bank03:12740,
+// r5 = "Decompress Buffer location") into the scratch buffer 0x0CE60000, then COPIES
+// the result OUT to the part's persistent DM00 slot (the two `mov.l @r6+`/`mov.l r3,@r7`
+// loops at bank03:5828/5849). 0x0CE60000 is a TRANSIENT scratch reused for every part,
+// so the ONLY instant a given part exists cleanly there is BETWEEN the decoder return
+// and the copy-out.
+//
+// THE HOOK PC = the LZSS decoder's return target, just before copy-out:
+//   loc_8c03276e (0x8C03276E)  mov.l @(..),r3        ; r3 = loc_8c03552a (decoder)
+//   0x8C032770                 mov.l @(..),r11        ; r11 = 0x0CE60000 (dest, loc_8c032854)
+//   0x8C032772                 jsr  @r3               ; DECODE part -> 0x0CE60000
+//   0x8C032774                 mov  r11,r5            ; (delay slot: r5 = 0x0CE60000)
+//   0x8C032776                 mov.b @r9,r7           ; <== PC_DECODE_DONE — decoder RETURNED,
+//                                                     ;     copy-out NOT yet started.
+// At 0x8C032776 (the jsr return address, a natural block start):
+//   - 0x0CE60000 holds the FRESH single decoded part (4bpp PAL4 index data, linear).
+//   - r9  = the selector-byte cursor; *r9 (u8) = this part's GFX1 +6 SELECTOR
+//           (the key rip_gfx2_assembly.py --realparts matches; r9 advances +1/part @5859).
+//   - r8  = the DM00 directory base (= *(0x0CE80008), set `r8=@(0x8,r4)` @5682) — its
+//           entry for this part (e = r8 + sel*0x10 + 0xA0; texels@+8 are the copy-out
+//           DEST) gives the part DIMS (e0: w=lo16,h=hi16) + PVR format (e4).
+//   - r14 = the CURRENT character struct base (mov r12,r14 @5700, never reclobbered to
+//           the hook) -> character_id @r14+0x1, live ARGB4444 palette @r14+0x164.
+// So at this one PC we have: fresh pixels (0x0CE60000) + selector (*r9) + dims/fmt (DM00
+// entry via r8) + char_id/palette (r14). That is the complete CLEAN part source.
+static const u32 PC_DECODE_DONE  = 0x8C032776;
+static const u32 PC_DECODE_DONE_M = PC_DECODE_DONE & SH4_AREA_MASK;  // 0x0C032776
+// The DM00 directory entry stride + the selector->entry bias the driver applies
+// (bank03:5811-5816: r7 = r8 + (sel<<4) + 0xA0).
+static const u32 DM00_ENTRY_STRIDE = 0x10;
+static const u32 DM00_ENTRY_BIAS   = 0xA0;
+// The LZSS decompress scratch buffer (bank03:5949 loc_8c032854 = 0x0ce60000).
+static const u32 DECODE_BUF        = 0x0CE60000;
+
 // Slot-walk restart (loc_8c0308c2 Render_sprites) — an alternate frame boundary.
 // We flush on serverPublish() instead (simplest robust), but keep the PC here for
 // reference; not hooked.
@@ -445,12 +489,153 @@ static int findOrCreateObj(u32 node)
 	return s_nobj++;
 }
 
+// ===========================================================================
+// DECODE-TIME PART DUMP (MAPLECAST_DECODEHOOK) — READ-ONLY.
+//
+// Fires at PC_DECODE_DONE (0x8C032776) per part, the instant 0x0CE60000 holds the
+// freshly LZSS-decoded part (before the driver copies it out + reuses the buffer).
+// Reads the fresh pixels + selector + dims/fmt + char_id/palette from the live regs
+// (see PC_DECODE_DONE comment) and writes one clean PPM per (char_id,selector):
+//   /dev/shm/PL%02X_gfx1_%04u.ppm     P6, magenta = transparent (index 0)
+//   /dev/shm/PL%02X_part_%03u.ppm     same pixels, the --realparts contract name
+//   /dev/shm/PL%02X_gfx1.manifest     "<selector> <palRow> <w> <h> <fmt> <texptr> <ppm>"
+//   /dev/shm/mc_decodehook.log        per-fire trace (dumpedThisFire visibility)
+// First-seen gate per (char_id,selector) so a re-decode (next load) doesn't churn.
+// PVR PixelFmt (ta_structs.h): 0=ARGB1555 1=RGB565 2=ARGB4444 5=PAL4 6=PAL8. The
+// LZSS output at 0x0CE60000 is LINEAR (row-major), NOT twiddled.
+
+static const u32 DH_OFF_CHAR_ID = 0x001;   // u8 character_id (in the char struct r14)
+static const u32 DH_OFF_PAL_PTR = 0x164;   // ptr Dat_Pal (live ARGB4444 palette)
+
+static unsigned long s_fireDecode   = 0;
+static bool          s_dhCleared    = false;
+static bool          s_dhSeen[0x40][512] = {{false}};   // [char_id][selector] first-seen
+
+// e4 byte1 -> PVR PixelFmt (same proven map as maplecast_gamestate.cpp partFmtFromE4).
+static inline int dhFmtFromE4(u32 e4) {
+	switch ((u8)((e4 >> 8) & 0xff)) {
+		case 0x00: return 0;   // ARGB1555
+		case 0x01: return 1;   // RGB565
+		case 0x02: return 2;   // ARGB4444
+		case 0x03: return 6;   // PAL8
+		case 0x04: return 5;   // PAL4
+		default:   return 5;   // unknown -> PAL4 (the gameplay-part norm)
+	}
+}
+
+// Decode w*h texels at texPtr (LINEAR) -> PPM (P6, magenta=transparent). Mirrors
+// the proven partDecodeToPPM paletted/16-bit logic; linear order only (0x0CE60000).
+static void dhWritePPM(u32 texPtr, int w, int h, int fmt, u32 palBase, const char* fn)
+{
+	FILE* pf = fopen(fn, "wb");
+	if (!pf) return;
+	fprintf(pf, "P6\n%d %d\n255\n", w, h);
+	bool paletted = (fmt == 5 || fmt == 6);
+	for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+		u32 idx = (u32)(y * w + x);            // LINEAR (LZSS scratch is row-major)
+		u8 rr = 0, gg = 0, bb = 0, aa = 0;
+		if (!paletted) {
+			u16 px = (u16)addrspace::read16(texPtr + idx * 2);
+			if (fmt == 1) { rr = ((px>>11)&0x1f)<<3; gg = ((px>>5)&0x3f)<<2; bb = (px&0x1f)<<3; aa = 255; }
+			else if (fmt == 2) { aa = ((px>>12)&0xf)*17; rr = ((px>>8)&0xf)*17; gg = ((px>>4)&0xf)*17; bb = (px&0xf)*17; }
+			else { aa = (px&0x8000)?255:0; rr = ((px>>10)&0x1f)<<3; gg = ((px>>5)&0x1f)<<3; bb = (px&0x1f)<<3; }
+		} else {
+			u32 pidx;
+			if (fmt == 5) { u8 b = (u8)addrspace::read8(texPtr + (idx >> 1)); pidx = (idx & 1) ? (b >> 4) : (b & 0xf); }
+			else          { pidx = (u8)addrspace::read8(texPtr + idx); }
+			if (pidx == 0 || !inRam(palBase)) { aa = 0; }
+			else { u16 pe = (u16)addrspace::read16(palBase + pidx * 2);
+			       aa = ((pe>>12)&0xf)*17; rr = ((pe>>8)&0xf)*17; gg = ((pe>>4)&0xf)*17; bb = (pe&0xf)*17; }
+		}
+		if (aa == 0) { rr = 0xff; gg = 0x00; bb = 0xff; }   // magenta = transparent
+		u8 rgb[3] = {rr, gg, bb}; fwrite(rgb, 1, 3, pf);
+	}
+	fclose(pf);
+}
+
+// The decode-time handler. r = Sh4cntx.r[] at 0x8C032776 (READ-ONLY).
+static void mc_decodeHandler(const u32* r)
+{
+	if (s_fireDecode++ == 0)
+		fprintf(stderr, "[DECODEHOOK] first fired (pc=0x%08X) — clean LOAD-decode parts "
+		                "from 0x0CE60000 -> /dev/shm/PL*_gfx1_*.ppm\n", PC_DECODE_DONE);
+
+	// One-time stale-dump clear (as the maplecast user; /dev/shm is maplecast-owned).
+	if (!s_dhCleared) {
+		for (int c = 0; c < 0x40; c++) {
+			char mn[96];
+			snprintf(mn, sizeof mn, "/dev/shm/PL%02X_gfx1.manifest", c); remove(mn);
+		}
+		s_dhCleared = true;
+	}
+
+	u32 charBase = norm(r[14]) | 0x0C000000u;     // r14 = current char struct base
+	u32 selPtr   = r[9];                          // r9  = selector-byte cursor
+	u32 dirBase  = r[8];                          // r8  = DM00 directory base
+	if (!inRam(selPtr) || !inRam(dirBase)) return;
+
+	u8  cid    = (u8)addrspace::read8(charBase + DH_OFF_CHAR_ID);
+	u32 palP   = addrspace::read32(charBase + DH_OFF_PAL_PTR);
+	u16 sel    = (u16)addrspace::read8(selPtr);   // this part's +6 GFX selector (u8)
+	if (cid >= 0x40 || sel >= 512) return;
+
+	// DM00 directory entry for this part: e = dirBase + sel*0x10 + 0xA0 (bank03:5811-5816).
+	u32 e   = dirBase + (u32)sel * DM00_ENTRY_STRIDE + DM00_ENTRY_BIAS;
+	if (!inRam(e)) return;
+	u32 e0  = addrspace::read32(e);
+	u32 e4  = addrspace::read32(e + 4);
+	int w   = (int)(e0 & 0xffff), h = (int)((e0 >> 16) & 0xffff);
+	if (w <= 0 || h <= 0 || w > 256 || h > 256) return;   // gameplay parts 8x8..64x128
+
+	int  fmt    = dhFmtFromE4(e4);
+	// palRow: paletted parts pick a 16-color row of Dat_Pal; the per-pose row lives in
+	// the assembly record, not available at decode time. Row 0 is the load-time default
+	// (the char's base skin) — correct for the at-load capture; offline can re-row.
+	u32  palRow = 0;
+	u32  palBase = inRam(palP) ? (palP + palRow * 32) : 0;
+
+	if (cid < 0x40 && sel < 512 && s_dhSeen[cid][sel]) return;   // first-seen gate
+	if (cid < 0x40 && sel < 512) s_dhSeen[cid][sel] = true;
+
+	char pfn[96];  snprintf(pfn, sizeof pfn, "PL%02X_part_%03u.ppm", cid, (unsigned)sel);
+	char pfp[112]; snprintf(pfp, sizeof pfp, "/dev/shm/%s", pfn);
+	dhWritePPM(DECODE_BUF, w, h, fmt, palBase, pfp);
+	char gfn[112]; snprintf(gfn, sizeof gfn, "/dev/shm/PL%02X_gfx1_%04u.ppm", cid, (unsigned)sel);
+	dhWritePPM(DECODE_BUF, w, h, fmt, palBase, gfn);
+
+	char mn[96]; snprintf(mn, sizeof mn, "/dev/shm/PL%02X_gfx1.manifest", cid);
+	FILE* mf = fopen(mn, "a");
+	if (mf) {
+		if (ftell(mf) == 0)
+			fprintf(mf, "# selector palRow w h fmt texptr ppm  (clean LOAD-decode parts from 0x0CE60000, keyed by +6 selector)\n");
+		fprintf(mf, "%u %u %d %d %d %08x %s\n", (unsigned)sel, (unsigned)palRow, w, h, fmt, DECODE_BUF, pfn);
+		fclose(mf);
+	}
+
+	static unsigned long s_dhLog = 0;
+	if ((s_dhLog++ % 64) == 0) {
+		FILE* lg = fopen("/dev/shm/mc_decodehook.log", s_dhLog == 1 ? "w" : "a");
+		if (lg) {
+			fprintf(lg, "[DECODE] fire#%lu cid=%u(PL%02X) sel=%u %dx%d fmt=%d palP=%08x dir=%08x -> %s\n",
+			        s_fireDecode, cid, cid, (unsigned)sel, w, h, fmt, palP, dirBase, pfn);
+			fclose(lg);
+		}
+	}
+}
+
 void mc_oracleInit()
 {
 	static bool logged = false;
 	if (logged) return;
 	logged = true;
-	if (mc_oracleHookEnabled)
+	if (mc_decodeHookEnabled)
+		fprintf(stderr, "[DECODEHOOK] ENABLED — LOAD-decode part capture at 0x%08X "
+		                "(loc_8c032696 LZSS return, pre-copy-out): fresh 0x0CE60000 part "
+		                "-> /dev/shm/PL*_gfx1_*.ppm (keyed by +6 selector)\n",
+		        PC_DECODE_DONE);
+	// The frame-oracle line only when the frame-oracle is what was asked for (the
+	// decode flag also forces mc_oracleHookEnabled, but that path stays dormant).
+	if (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr)
 		fprintf(stderr, "[ORACLE-HOOK] ENABLED — per-frame per-object SCREEN quads: "
 		                "OBJ_BEGIN 0x%08X (live screen_xy) + ta_parse screen quads attributed "
 		                "by position%s -> /dev/shm/mc_oracle_hook.jsonl\n",
@@ -481,6 +666,11 @@ bool mc_isHookedPC(u32 pc)
 	// screen coords) — only hook it when the decode sub-flag is set so normal runs
 	// don't inject a call into a block that never carries useful per-frame data.
 	if (m == PC_QUAD_DONE_M) return mc_decodeQuadsEnabled;
+	// The LOAD-DECODE part hook (loc_8c032696 / 0x8C032776). Only hooked when the
+	// decode-hook flag is set. 0x8C032776 is the jsr return target (a natural block
+	// start), so the decoder force-split in decoder.cpp is a no-op for it (rpc==vaddr)
+	// — but mc_isHookedPC must return true so rec_x64 injects the GenCall.
+	if (m == PC_DECODE_DONE_M) return mc_decodeHookEnabled;
 	return false;
 }
 
@@ -500,6 +690,13 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 	// Mask to the SH4 external area so we route correctly whether the recompiler
 	// passed the cached (0x8C..) or physical (0x0C..) alias of the PC.
 	u32 mpc = pc & SH4_AREA_MASK;
+
+	// DECODE-TIME part hook (fires PRE-match at character load, independent of the
+	// frame-oracle paths). Handle first + return: it shares no per-frame buffer.
+	if (mpc == PC_DECODE_DONE_M) {
+		if (mc_decodeHookEnabled) mc_decodeHandler(r);
+		return;
+	}
 
 	if (mpc == PC_OBJ_BEGIN_M) {
 		if (s_fireObjBegin++ == 0)
@@ -837,7 +1034,12 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 	// only needs ta_parse + the table reads (no block-entry buffer), so it can run
 	// standalone (MAPLECAST_FRAME_ORACLE_PROBE=1 with the master hook off) — useful
 	// for a minimal de-risk pass with zero recompiler GenCall injection.
-	if (!mc_oracleHookEnabled && !mc_probeEnabled) { s_nobj = 0; s_nquad = 0; s_nscreen = 0; s_nr2 = 0; return; }
+	// NOTE: the decode-hook (MAPLECAST_DECODEHOOK) forces mc_oracleHookEnabled true so
+	// the recompiler injects/force-splits, but its capture is entirely in the block-entry
+	// handler (pre-match) — it needs NOTHING from frameFlush. So the per-frame ta_parse /
+	// jsonl work runs only for the REAL frame oracle or the probe.
+	bool frameOracleActive = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr) || mc_probeEnabled;
+	if (!frameOracleActive) { s_nobj = 0; s_nquad = 0; s_nscreen = 0; s_nr2 = 0; return; }
 
 	// IN-MATCH GATE (in_match flag @0x8C289624, same as the serverPublish oracle).
 	// The per-object draw routine (loc_8c03093c) only fires during gameplay, and
