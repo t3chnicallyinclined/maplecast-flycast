@@ -122,11 +122,49 @@ static bool mc_quadCaptureEnabled = (getenv("MAPLECAST_QUADCAPTURE") != nullptr)
 // /dev/shm append). Forces the master gate so the recompiler injects + force-splits.
 static bool mc_asmTraceEnabled = (getenv("MAPLECAST_ASMTRACE") != nullptr);
 
+// BODYCAP (MAPLECAST_BODYCAP) — capture the BODY part DECODED PIXELS keyed by the
+// RENDER selector (the 533-541 namespace), NOT the load-time effect-atlas namespace.
+//
+// SELECTOR-SPACE RECONCILIATION (marvelous2 bank03, CONFIRMED + live-verified):
+//   * loc_8c0344d4 (the per-frame BODY render, ASMTRACE PC 0x8C034864): per part the
+//     GFX1 index = read_u16(r11+6). r11 is the body's per-part record cursor seeded
+//     from the GLOBAL cell-output table 0x8C1F9F9C (bank03:10410 #data 0x8c1f9f9c,
+//     loaded `add r2,r13`/the r11 walk) — NOT node+0x160. For PL00 (Ryu) this field
+//     ranges 252-771 (live mc_assembly.log: cid=0 sel 252..771; standing pose = the
+//     530-541 cluster). This is the GROUND-TRUTH GFX1 part index.
+//   * loc_8c033e90 (QUADCAPTURE, r13+6 -> 0-251): the LOAD-TIME effect/UI atlas
+//     builder (driver loc_8c033d78). It reads the SAME GFX1 base (node+0x15c) and the
+//     SAME read_u16(<rec>+6)*4 -> *(GFX1+sel*4) formula, but its <rec> cursor walks a
+//     DIFFERENT record stream (the effect-sheet assembly), so its +6 fields are a
+//     different (small, 0-251) part set. SAME table mechanism, DIFFERENT record source
+//     -> different selector population. The directory 0x8C26AA24/0x8C26AA34 is NOT a
+//     per-selector decode-offset table (live mc_partdir.log = the 6-entry body
+//     quad-count/dl-ptr tables + adjacent RAM, all 0 or garbage); it does NOT hold
+//     533-541 NOR 0-251. So neither directory keys the body pixels.
+//
+// WHERE THE BODY (533-541) PIXELS LIVE: loc_8c0344d4 itself calls NO decoder; the
+// pixels are pre-decoded once at character load into PERSISTENT slots. Two candidate
+// sources, both dumped + logged so the first capture is self-diagnosing:
+//   (A) GFX1 blob: gfx1=*(node+0x15c); off=read_u32(gfx1+sel*4); blob=gfx1+off;
+//       dims w=read_u8(blob+2)<<3, h=read_u8(blob+3)<<3; texels follow the header.
+//       The blob may carry the 4bpp texels inline (linear) OR a pointer.
+//   (B) DM00 persistent directory: dirBase=*(0x0CE80008), stride 0x10; entry+0 = (w,h)
+//       u16 pixels, entry+4 = fmt word, entry+8 = ptr to DECODED TWIDDLED texels
+//       (the proven-clean source the offline partDump uses). Keyed by a small DM00 key,
+//       not the render selector — so we resolve the render selector's DIMS from the
+//       GFX1 blob and MATCH them against the DM00 run to find the right key.
+// Decode = the proven partDecodeToPPM PAL4 path (flycast TWIDDLE for DM00, linear for
+// the GFX1 blob), palette = node+0x164 at row (rec_pal>>4)&7. READ-ONLY (addrspace
+// reads + /dev/shm writes). Forces the master gate so the recompiler injects +
+// force-splits at the ASMTRACE PC (0x8C034864) — shared, no extra hook needed.
+static bool mc_bodyCapEnabled = (getenv("MAPLECAST_BODYCAP") != nullptr);
+
 bool mc_oracleHookEnabled = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr)
                          || mc_decodeHookEnabled
                          || mc_decodeTraceEnabled
                          || mc_quadCaptureEnabled
-                         || mc_asmTraceEnabled;
+                         || mc_asmTraceEnabled
+                         || mc_bodyCapEnabled;
 
 // Sub-flag: also capture the LOAD-TIME part-atlas decode quads at loc_8c033e90
 // (0x8C033EC0 post-write). PROVEN (live prod capture 2026-06-08): that routine
@@ -401,7 +439,7 @@ struct ScreenQuad {
 	float cx, cy;           // bbox center (attribution anchor)
 	float uMn, uMx, vMn, vMx;
 	float zMn, zMx;
-	u32 tcw, tsp, pcw, vramAddr;
+	u32 tcw, tsp, pcw, isp, vramAddr;   // isp = pp.isp.full (depth/culling/shade-mode word)
 	int  fmt, tw, th, vq, srcBlend, dstBlend;
 	int  obj;               // attributed object index (-1 = unassigned)
 };
@@ -549,6 +587,17 @@ static Quad s_quads[MAX_QUADS];     // load-decode quads (sub-flag)
 static int  s_nquad = 0;
 static ScreenQuad s_screen[MAX_SCREEN]; // per-frame SCREEN quads (ta_parse)
 static int  s_nscreen = 0;
+
+// CHARQ accessor snapshot — published at the END of frameFlush (before the per-frame
+// statics reset) so the CHARQ emit block in serverPublish can read this frame's
+// object identities + the kept-sprite-quad -> object map. s_screen index == the
+// kept-sprite-quad ordinal (collectScreenQuads pushes one ScreenQuad per kept sprite
+// quad in op->pt->tr order), so s_charqMap[ordinal] = s_screen[ordinal].obj.
+static CharqObj s_charqObjs[MAX_OBJS];
+static int      s_charqNobj = 0;
+static int      s_charqMap[MAX_SCREEN];
+static int      s_charqNmap = 0;
+static void publishCharqSnapshot();   // defined after frameFlush
 // (s_curObj removed: quad attribution is now by node addr (r10), not by the last
 //  OBJ_BEGIN — see findOrCreateObj. No "current object" state to track.)
 
@@ -1138,6 +1187,159 @@ static void mc_asmTraceHandler(const u32* r)
 	fclose(lg);
 }
 
+// ===========================================================================
+// BODYCAP (MAPLECAST_BODYCAP) — body part DECODED pixels keyed by the RENDER selector.
+// Fires at the SAME PC as ASMTRACE (0x8C034864, loc_8c0344d4 per-part convergence).
+// See mc_bodyCapEnabled for the full selector-space reconciliation. READ-ONLY.
+//
+// Standard flycast twiddle (Morton) index — same math as core/rend/texconv.cpp and
+// the proven gamestate.cpp partDecodeToPPM (flycast-canonical, y-first), self-contained
+// here so this file links without the gamestate file-statics.
+static inline u32 bc_twiddle(u32 x, u32 y, u32 x_sz, u32 y_sz) {
+	u32 rv = 0, sh = 0; x_sz >>= 1; y_sz >>= 1;
+	while (x_sz != 0 || y_sz != 0) {
+		if (y_sz != 0) { rv |= (y & 1) << sh; y_sz >>= 1; y >>= 1; sh++; }
+		if (x_sz != 0) { rv |= (x & 1) << sh; x_sz >>= 1; x >>= 1; sh++; }
+	}
+	return rv;
+}
+// Write w*h PAL4 texels at texPtr -> PPM (P6, magenta = transparent). `twid`=true uses
+// the flycast TWIDDLE order (DM00 persistent slots); false = LINEAR (the GFX1 blob /
+// 0x0CE60000 scratch are row-major). PAL4: 2 indices/byte, index 0 = transparent.
+static void bcWritePPM(u32 texPtr, int w, int h, u32 palBase, bool twid, const char* fn) {
+	FILE* pf = fopen(fn, "wb"); if (!pf) return;
+	fprintf(pf, "P6\n%d %d\n255\n", w, h);
+	bool palOk = inRam(palBase);
+	for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+		u32 idx = twid ? bc_twiddle((u32)x, (u32)y, (u32)w, (u32)h) : (u32)(y * w + x);
+		u8  b   = (u8)addrspace::read8(texPtr + (idx >> 1));
+		u32 pidx = (idx & 1) ? (b >> 4) : (b & 0xf);
+		u8 rr = 0xff, gg = 0x00, bb = 0xff;            // magenta = transparent default
+		if (pidx != 0 && palOk) {
+			u16 pe = (u16)addrspace::read16(palBase + pidx * 2);   // ARGB4444 LE
+			u8 aa = ((pe >> 12) & 0xf) * 17;
+			if (aa != 0) { rr = ((pe>>8)&0xf)*17; gg = ((pe>>4)&0xf)*17; bb = (pe&0xf)*17; }
+		}
+		u8 rgb[3] = {rr, gg, bb}; fwrite(rgb, 1, 3, pf);
+	}
+	fclose(pf);
+}
+static void bcWriteRaw(u32 texPtr, int nbytes, const char* fn) {
+	FILE* rf = fopen(fn, "wb"); if (!rf) return;
+	for (int i = 0; i < nbytes; i++) fputc((u8)addrspace::read8(texPtr + (u32)i), rf);
+	fclose(rf);
+}
+
+static unsigned long s_fireBody = 0;
+static bool          s_bcCleared = false;
+static bool          s_bcSeen[0x40][1024] = {{false}};   // [char_id][render selector] first-seen
+
+static void mc_bodyCapHandler(const u32* r)
+{
+	if (s_fireBody++ == 0)
+		fprintf(stderr, "[BODYCAP] first fired (pc=0x%08X loc_8c0344d4 per-part) — BODY part "
+		                "pixels keyed by RENDER selector (read_u16(r11+6)) -> /dev/shm/PL*_body_*.ppm\n",
+		        PC_ASM_PART);
+
+	// One-time stale clear (the body manifest + log); /dev/shm is maplecast-owned.
+	if (!s_bcCleared) {
+		for (int c = 0; c < 0x40; c++) {
+			char mn[96]; snprintf(mn, sizeof mn, "/dev/shm/PL%02X_body.manifest", c); remove(mn);
+		}
+		remove("/dev/shm/mc_bodycap.log");
+		s_bcCleared = true;
+	}
+
+	u32 node = norm(r[14]) | 0x0C000000u;   // r14 = char/render struct base
+	u32 r11  = r[11];                       // per-part record cursor (+6 = render selector)
+	if (!inRam(node) || !inRam(r11)) return;
+
+	u16 sel = (u16)addrspace::read16(r11 + 0x6);     // RENDER selector — THE KEY (533-541 for Ryu)
+	if (sel == 0x00FF || sel >= 1024) return;        // terminator / out of range
+	u16 recpal = (u16)addrspace::read16(r11 + 0x2);  // the +2 palette word (dy field doubles as pal)
+	unsigned palRow = (recpal >> 4) & 0x7;           // 3-bit palette row (PalMod-confirmed)
+
+	u8 cid = (u8)addrspace::read8(node + OFF_CHAR_ID);
+	if (cid >= 0x40) return;
+	if (s_bcSeen[cid][sel]) return;                  // first-seen per (char,render-selector)
+
+	// (A) GFX1 blob — authoritative DIMS for this render selector (disasm loc_8c0345c4):
+	//   gfx1=*(node+0x15c); off=read_u32(gfx1+sel*4); blob=gfx1+off; w=blob[2]<<3,h=blob[3]<<3.
+	u32 gfx1 = addrspace::read32(node + OFF_GFX1);
+	if (!inRam(gfx1)) return;
+	u32 blob = (gfx1 + addrspace::read32(gfx1 + (u32)sel * 4)) & 0x0FFFFFFFu; blob |= 0x0C000000u;
+	if (!inRam(blob)) return;
+	int w = ((int)(u8)addrspace::read8(blob + 2)) << 3;
+	int h = ((int)(u8)addrspace::read8(blob + 3)) << 3;
+	if (w <= 0 || h <= 0 || w > 512 || h > 512) return;
+	int bytes = (w * h) / 2;                          // 4bpp
+
+	u32 palP = addrspace::read32(node + OFF_PAL_PTR); // node+0x164 (ARGB4444)
+	u32 palBase = inRam(palP) ? (palP + palRow * 32) : 0;
+
+	s_bcSeen[cid][sel] = true;
+
+	// (B) DM00 persistent decoded twiddled slots — the proven-CLEAN source. dirBase =
+	// *(0x0CE80008), stride 0x10: entry+0=(w,h) u16 px, entry+4=fmt word, entry+8=texels.
+	// Render selector != DM00 key, so MATCH this selector's GFX1 dims (w,h) against the
+	// DM00 run to find the right key (the body's parts are a contiguous run from a small
+	// base). We scan keys 0..255 and take the first PAL4/PAL8 entry whose dims equal w,h.
+	u32 dirBase = addrspace::read32(0x0CE80008);
+	if (!inRam(dirBase)) { u32 alt = addrspace::read32(0x8CE80008); if (inRam(alt)) dirBase = alt; }
+	int   dmKey = -1; u32 dmTex = 0; int dmFmt = 5;
+	if (inRam(dirBase)) {
+		for (int k = 0; k < 256; k++) {
+			u32 e  = dirBase + (u32)k * DM00_ENTRY_STRIDE;
+			u32 e0 = addrspace::read32(e), e4 = addrspace::read32(e + 4), e8 = addrspace::read32(e + 8);
+			int dw = (int)(e0 & 0xffff), dh = (int)((e0 >> 16) & 0xffff);
+			if (dw == w && dh == h && inRam(e8)) {
+				dmKey = k; dmTex = e8 | 0x0C000000u;
+				dmFmt = ((u8)((e4 >> 8) & 0xff) == 0x03) ? 6 : 5;   // 0x03=PAL8 else PAL4
+				break;
+			}
+		}
+	}
+
+	// Primary CLEAN dump = DM00 twiddled if a dims-match was found; the file is keyed by
+	// the RENDER selector so it matches the ASMTRACE assembly (sel field).
+	char ppmA[112]; snprintf(ppmA, sizeof ppmA, "/dev/shm/PL%02X_body_%04u.ppm", cid, (unsigned)sel);
+	if (dmKey >= 0 && dmFmt == 5) bcWritePPM(dmTex, w, h, palBase, /*twid=*/true, ppmA);
+	else                          bcWritePPM(blob + 4, w, h, palBase, /*twid=*/false, ppmA);  // GFX1-blob fallback
+
+	// Cross-dump BOTH candidate sources + RAW so the first capture is self-diagnosing:
+	//   _gfx1lin  = GFX1 blob texels (blob+4), LINEAR  (tests source A)
+	//   _dm00twid = DM00 slot texels, TWIDDLE          (tests source B)
+	char ppmL[112]; snprintf(ppmL, sizeof ppmL, "/dev/shm/PL%02X_body_%04u_gfx1lin.ppm", cid, (unsigned)sel);
+	bcWritePPM(blob + 4, w, h, palBase, /*twid=*/false, ppmL);
+	if (dmKey >= 0) {
+		char ppmT[112]; snprintf(ppmT, sizeof ppmT, "/dev/shm/PL%02X_body_%04u_dm00twid.ppm", cid, (unsigned)sel);
+		bcWritePPM(dmTex, w, h, palBase, /*twid=*/true, ppmT);
+	}
+	char rfp[112]; snprintf(rfp, sizeof rfp, "/dev/shm/PL%02X_body_%04u.raw", cid, (unsigned)sel);
+	bcWriteRaw(blob + 4, bytes, rfp);   // GFX1-blob raw 4bpp (offline-palette fallback)
+
+	char mn[96]; snprintf(mn, sizeof mn, "/dev/shm/PL%02X_body.manifest", cid);
+	FILE* mf = fopen(mn, "a");
+	if (mf) {
+		if (ftell(mf) == 0)
+			fprintf(mf, "# rsel palRow w h gfx1 blob dmKey dmTex dmFmt palBase ppm  "
+			            "(body parts keyed by RENDER selector read_u16(r11+6))\n");
+		fprintf(mf, "%u %u %d %d %08x %08x %d %08x %d %08x PL%02X_body_%04u.ppm\n",
+		        (unsigned)sel, palRow, w, h, gfx1, blob, dmKey, dmTex, dmFmt, palBase, cid, (unsigned)sel);
+		fclose(mf);
+	}
+
+	if ((s_fireBody % 32) == 1) {
+		FILE* dl = fopen("/dev/shm/mc_bodycap.log", "a");
+		if (dl) {
+			fprintf(dl, "[BODY] fire#%lu cid=%u(PL%02X) rsel=%u %dx%d gfx1=%08x blob=%08x "
+			            "dmKey=%d dmTex=%08x dmFmt=%d palBase=%08x\n",
+			        s_fireBody, cid, cid, (unsigned)sel, w, h, gfx1, blob, dmKey, dmTex, dmFmt, palBase);
+			fclose(dl);
+		}
+	}
+}
+
 void mc_oracleInit()
 {
 	static bool logged = false;
@@ -1148,6 +1350,12 @@ void mc_oracleInit()
 		                "(loc_8c0344d4 per-part convergence): sel=read_u16(r11+6), dx/dy=r11+0/+2, "
 		                "accX=r10, screenX/Y=f32@(r15+0x30/0x34) -> /dev/shm/mc_assembly.log. "
 		                "Hold a clean STANDING pose to capture the standing part-list.\n", PC_ASM_PART);
+	if (mc_bodyCapEnabled)
+		fprintf(stderr, "[BODYCAP] ENABLED — BODY part DECODED pixels keyed by the RENDER selector "
+		                "(read_u16(r11+6), the 533-541 namespace) at 0x%08X (loc_8c0344d4 per-part). "
+		                "Primary = DM00 twiddled slot (dims-matched), fallbacks = GFX1-blob linear + "
+		                "DM00 twiddle + RAW 4bpp -> /dev/shm/PL*_body_*.ppm + PL*_body.manifest. "
+		                "Hold a clean STANDING Ryu (PL00) to fill the body part-list.\n", PC_ASM_PART);
 	if (mc_decodeTraceEnabled)
 		fprintf(stderr, "[DECODETRACE] ENABLED — BOTH LZSS decoders traced: WORD loc_8c03552a "
 		                "@0x%08X + BYTE loc_8c0354c0 @0x%08X (caller=pr, src=r4, dest=r5/r6) "
@@ -1220,7 +1428,7 @@ bool mc_isHookedPC(u32 pc)
 	// ASMTRACE: the per-part convergence PC inside loc_8c0344d4 (0x8C034864). Only hooked
 	// when the asm-trace flag is set. Mid-block -> the decoder force-split makes it a block
 	// start; this returns true so rec_x64 injects the GenCall there.
-	if (m == PC_ASM_PART_M) return mc_asmTraceEnabled;
+	if (m == PC_ASM_PART_M) return mc_asmTraceEnabled || mc_bodyCapEnabled;
 	return false;
 }
 
@@ -1273,6 +1481,7 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 	// Independent of the per-frame oracle buffer; appends one line per part. Handle + return.
 	if (mpc == PC_ASM_PART_M) {
 		if (mc_asmTraceEnabled) mc_asmTraceHandler(r);
+		if (mc_bodyCapEnabled)  mc_bodyCapHandler(r);
 		return;
 	}
 
@@ -1369,6 +1578,22 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 	s_objs[oi].nquads++;
 }
 
+// ---- Per-pass classification (CHARQ Phase-1 fix) ---------------------------
+// MVC2 renders MULTIPLE TA passes per VIDEO frame, each its own serverPublish ->
+// DequeueRender -> _localFrameNum++. The CHARACTER pass carries the bodies (the
+// large tr list + body-band y coords); a separate HUD/composite pass carries only
+// a tiny op/tr list of top-of-screen sprites + the stage backdrop. The Oracle was
+// latching whichever pass ran the flush LAST (the HUD pass) -> bodies got 0 quads.
+// This struct lets collectScreenQuads report what it saw so frameFlush can pick the
+// character pass. PROVEN by the live STAF parse on this build (mc_staf_geom.log):
+// the body pass = op~265 tr~2024 with 281 body-band (y 240-439) coords.
+struct PassStats {
+	int op, pt, tr;       // PolyParam list sizes (raw, pre-filter)
+	int sprite;           // kept sprite quads (s_nscreen)
+	int bodyBand;         // kept sprite quads with center y in [120,440] (body region)
+	int isRTT;            // ctx->rend.isRTT (FB_W_SOF1 & 0x1000000) — logged to CONFIRM
+};
+
 // ---- Per-frame SCREEN-quad recovery from ta_parse(ctx) ---------------------
 // loc_8c033e90 (the LOAD-decode quad emitter) does NOT fire per frame during
 // gameplay (proven: it ran once at match load, frame 2568). The per-frame SCREEN
@@ -1377,11 +1602,35 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 // MAPLECAST_FRAME_ORACLE block (maplecast_mirror.cpp ~2494-2588): try rc.idx
 // de-index, fall back to direct rc.verts (autosort-tr sprites), filter out
 // clears / page-tiled bg / oversized stage layers / opaque fills.
-static void collectScreenQuads(rend_context& rc)
+static void collectScreenQuads(rend_context& rc, PassStats* ps = nullptr)
 {
 	s_nscreen = 0;
 	const u32 nverts = (u32)rc.verts.size();
-	auto collect = [&](std::vector<PolyParam>& lst) {
+	// MAPLECAST_QDIAG — pre-filter dump of EVERY parsed TA poly to /dev/shm/mc_qdiag.log:
+	// listType, screen Y range, tcw/tsp/pcw, textured, w/h, and the computed cull flags.
+	// Answers: ARE there body-region (y~240-433) textured polys in rc.global_param_*,
+	// and which flag drops them? READ-ONLY.
+	// CHARQ Phase-1 FIX: the old code opened "w" once on the FIRST in-match flush, so the
+	// dump only ever captured the FIRST pass of the FIRST frame (usually the HUD/composite
+	// pass) and never the character pass. Now we APPEND and tag each poly with the pass's
+	// op/tr counts + a sequential pass index, dumping the first few in-match passes so the
+	// CHARACTER pass (op~265 tr~2024) is guaranteed present. Bounded by s_qdiagPasses.
+	static int   s_qdiag = getenv("MAPLECAST_QDIAG") ? 1 : 0;  // 0=off, 1=arm, 2=running, 3=done
+	static FILE* s_qf = nullptr;
+	static int   s_qdiagPasses = 0;
+	static const int QDIAG_MAX_PASSES = 8;     // capture the first 8 in-match passes
+	if (s_qdiag == 1) {                        // first armed call: truncate + start
+		s_qf = fopen("/dev/shm/mc_qdiag.log", "w");
+		s_qdiag = s_qf ? 2 : 0;
+	}
+	int s_qdiagPassIdx = s_qdiag == 2 ? s_qdiagPasses : -1;
+	if (s_qf && s_qdiag == 2) {
+		bool bodyBandPass = (rc.global_param_tr.size() > 200);  // heuristic: the big tr list
+		fprintf(s_qf, "=== PASS %d  op=%zu pt=%zu tr=%zu  (%s) ===\n",
+		        s_qdiagPassIdx, rc.global_param_op.size(), rc.global_param_pt.size(),
+		        rc.global_param_tr.size(), bodyBandPass ? "LIKELY-CHARACTER" : "likely-hud");
+	}
+	auto collect = [&](std::vector<PolyParam>& lst, int listType) {
 		for (PolyParam& pp : lst) {
 			if (s_nscreen >= MAX_SCREEN) return;
 			if (pp.count < 3) continue;
@@ -1419,28 +1668,78 @@ static void collectScreenQuads(rend_context& rc)
 			}
 			if (seen == 0) continue;
 			float w = mxX-mnX, h = mxY-mnY;
-			if (w < 2.f || h < 2.f) continue;
-			float cy = (mnY+mxY)*0.5f; if (cy <= 20.f) continue;   // strip top HUD row
+			float cy = (mnY+mxY)*0.5f;
 			int srcB = (int)((tsp>>29)&7), dstB = (int)((tsp>>26)&7);
 			bool tiled = (uMn < -0.05f || uMx > 1.05f || vMn < -0.05f || vMx > 1.05f);
 			bool opaque = (srcB == 1 && dstB == 0);
 			bool oversized = (w > 200.f || h > 200.f);
-			bool isSprite = textured && !tiled && !opaque && !oversized && tcw != 0;
+			int fmt = (int)((tcw>>27)&7);
+			if (s_qf) {
+				static const char* LN[3] = {"op","pt","tr"};
+				fprintf(s_qf, "%s tex=%d yMin=%.1f yMax=%.1f cy=%.1f w=%.1f h=%.1f "
+				              "tcw=%08X tsp=%08X pcw=%08X fmt=%d src=%d dst=%d "
+				              "tiled=%d opaque=%d oversized=%d uv[%.2f,%.2f,%.2f,%.2f]\n",
+				        LN[listType], (int)textured, mnY, mxY, cy, w, h,
+				        tcw, tsp, pcw, fmt, srcB, dstB, (int)tiled, (int)opaque, (int)oversized,
+				        uMn, uMx, vMn, vMx);
+			}
+			if (w < 2.f || h < 2.f) continue;
+			if (cy <= 20.f) continue;   // strip top HUD row
+			// FIX (CHARQ Phase-1): the BODY renders as TEXTURED quads that flycast places
+			// in the OPAQUE list (global_param_op); ta_parse FORCES SrcInstr=1/DstInstr=0 on
+			// EVERY op-list poly (ta_vtx.cpp:1285-1288), so the old `!opaque` term flagged
+			// every textured body part as opaque and dropped it -> bodies got 0 quads. Opaque
+			// blend is therefore NOT a valid sprite-vs-clear discriminator for TEXTURED polys.
+			// The real non-sprite cases (screen clears / full-page backdrops) are already
+			// rejected by `oversized` (>200px) + `tiled` (UV outside ~[0,1]) + the untextured
+			// gate. So: keep a TEXTURED, non-tiled, modest-size quad with a real texture even
+			// when its (forced) blend is opaque. `opaque` is retained ONLY to reject UNtextured
+			// solid fills (redundant with `textured`, kept for clarity). fmt 7 = reserved/bumpmap
+			// -> not a sprite. This keeps HUD (pt/tr, non-opaque) + effects + bodies (op, opaque).
+			bool isSprite = textured && !tiled && !oversized && tcw != 0 && fmt != 7;
 			if (!isSprite) continue;
 			ScreenQuad& q = s_screen[s_nscreen++];
 			q.x=mnX; q.y=mnY; q.w=w; q.h=h; q.cx=(mnX+mxX)*0.5f; q.cy=cy;
 			q.uMn=uMn; q.uMx=uMx; q.vMn=vMn; q.vMx=vMx;
 			q.zMn=(zMn> 1e29f)?0.f:zMn; q.zMx=(zMx<-1e29f)?0.f:zMx;
-			q.tcw=tcw; q.tsp=tsp; q.pcw=pcw; q.srcBlend=srcB; q.dstBlend=dstB;
-			q.fmt = (int)((tcw>>27)&7); q.vq = (int)((tcw>>30)&1);
+			q.tcw=tcw; q.tsp=tsp; q.pcw=pcw; q.isp=pp.isp.full; q.srcBlend=srcB; q.dstBlend=dstB;
+			q.fmt = fmt; q.vq = (int)((tcw>>30)&1);
 			q.tw = 8 << ((tsp>>3)&7); q.th = 8 << (tsp&7);
 			q.vramAddr = (tcw & 0x1FFFFF) << 3;
 			q.obj = -1;
 		}
 	};
-	collect(rc.global_param_op);
-	collect(rc.global_param_pt);
-	collect(rc.global_param_tr);
+	collect(rc.global_param_op, 0);
+	collect(rc.global_param_pt, 1);
+	collect(rc.global_param_tr, 2);
+
+	// Count body-band sprite quads (center y in [60,440], the playfield region; the
+	// HUD lives above and the on-screen character parts span ~y65..360 per the live
+	// STAF parse) — the discriminator frameFlush uses to pick the character pass
+	// without depending on isRTT alone.
+	int bodyBand = 0;
+	for (int k = 0; k < s_nscreen; k++)
+		if (s_screen[k].cy >= 60.f && s_screen[k].cy <= 440.f) bodyBand++;
+	if (ps) {
+		ps->op = (int)rc.global_param_op.size();
+		ps->pt = (int)rc.global_param_pt.size();
+		ps->tr = (int)rc.global_param_tr.size();
+		ps->sprite = s_nscreen;
+		ps->bodyBand = bodyBand;
+		// isRTT filled by caller (it owns ctx->rend).
+	}
+
+	// QDIAG: advance per pass; close after capturing the first QDIAG_MAX_PASSES
+	// in-match passes (so the character pass is guaranteed in the file).
+	if (s_qf && s_qdiag == 2) {
+		fprintf(s_qf, "--- pass %d kept=%d bodyBand=%d ---\n",
+		        s_qdiagPassIdx, s_nscreen, bodyBand);
+		if (++s_qdiagPasses >= QDIAG_MAX_PASSES) {
+			fclose(s_qf); s_qf = nullptr; s_qdiag = 3;
+			fprintf(stderr, "[QDIAG] %d-pass dump written -> /dev/shm/mc_qdiag.log\n",
+			        QDIAG_MAX_PASSES);
+		}
+	}
 }
 
 // Attribute each SCREEN quad to the nearest OBJ_BEGIN object by on-screen
@@ -1454,17 +1753,55 @@ static void collectScreenQuads(rend_context& rc)
 static void attributeScreenQuads()
 {
 	for (int i = 0; i < s_nobj; i++) s_objs[i].nscreen = 0;
-	const float ATTR_RADIUS = 160.f;   // px; tunable. Parts cluster <120px from screen_xy.
+
+	// (3b) RE-READ the authoritative screen_xy from the node NOW. attributeScreenQuads
+	// runs in frameFlush AFTER the full draw walk completed, so node+0xE0/+0xE4 hold
+	// the CURRENT frame's post-transform position (Render Main Sprite, loc_8c03093c,
+	// writes them DURING the walk). The o.sx/o.sy captured at OBJ_BEGIN entry are the
+	// PREVIOUS frame's values (the write lags entry — see ~:1499). Using the stale
+	// anchor mis-keyed body quads into the unassigned bucket. Refresh in place.
+	for (int i = 0; i < s_nobj; i++) {
+		Obj& o = s_objs[i];
+		if (!o.fromBegin) continue;
+		float nsx = rdF(o.node + OFF_SCREEN_X);
+		float nsy = rdF(o.node + OFF_SCREEN_Y);
+		if (!(std::isnan(nsx) || std::isnan(nsy) || fabsf(nsx) > 1e6f || fabsf(nsy) > 1e6f)) {
+			o.sx = nsx; o.sy = nsy;
+		}
+	}
+
+	// (3b) BBOX-OVERLAP attribution. The old centroid-distance test (ATTR_RADIUS=160)
+	// dropped tall body quads: a torso/leg part can have its bbox center >160px from
+	// the object's screen_xy (the foot/pivot anchor). Instead, expand an anchor BOX
+	// around each object's screen_xy and attribute a quad to the object whose expanded
+	// box contains the quad's bbox center, breaking ties by center distance. The box is
+	// asymmetric-tall (chars are tall+narrow) and falls back to the centroid radius for
+	// objects whose box doesn't reach the quad (small satellites). nearest-anchor wins.
+	const float HALF_W   = 110.f;   // px horizontal half-extent of the anchor box
+	const float UP       = 200.f;   // px above screen_xy (bodies extend UP from the foot anchor)
+	const float DOWN     = 110.f;   // px below
+	const float FALLBACK = 160.f;   // px centroid radius fallback (was ATTR_RADIUS)
 	for (int k = 0; k < s_nscreen; k++) {
 		ScreenQuad& q = s_screen[k];
-		int best = -1; float bestD2 = ATTR_RADIUS * ATTR_RADIUS;
+		int   best = -1;
+		bool  bestInBox = false;
+		float bestD2 = FALLBACK * FALLBACK;
 		for (int i = 0; i < s_nobj; i++) {
 			const Obj& o = s_objs[i];
 			if (!o.fromBegin) continue;          // only anchor on routine-confirmed objects
 			if (o.sx == 0.f && o.sy == 0.f) continue;
 			float dx = q.cx - o.sx, dy = q.cy - o.sy;
+			bool inBox = (dx >= -HALF_W && dx <= HALF_W && dy >= -UP && dy <= DOWN);
 			float d2 = dx*dx + dy*dy;
-			if (d2 < bestD2) { bestD2 = d2; best = i; }
+			// Prefer any in-box object over any out-of-box; within the same class pick
+			// the nearest center. This makes tall body parts attribute (their center is
+			// inside the tall box even when >160px from the foot anchor) while keeping a
+			// nearest-anchor fallback for small satellites outside every box.
+			if (inBox) {
+				if (!bestInBox || d2 < bestD2) { bestInBox = true; bestD2 = d2; best = i; }
+			} else if (!bestInBox && d2 < bestD2) {
+				bestD2 = d2; best = i;
+			}
 		}
 		q.obj = best;
 		if (best >= 0) s_objs[best].nscreen++;
@@ -1606,6 +1943,84 @@ static void mc_r2Log(u32 frame, int tappOp, int tappPt, int tappTr, int tspr)
 		tappOp, tappPt, tappTr, tspr, dTr, dSpr, verdict, seq);
 }
 
+// ===========================================================================
+// CHARPASS CAPTURE (MAPLECAST_CHARQ) — the DEFINITIVE per-part body-quad capture.
+//
+// THE PROBLEM (confirmed by the QDIAG/ORACLE-PASS investigation): MVC2 emits
+// MULTIPLE STARTRENDER passes per video frame. flycast's QueueRender is SINGLE-SLOT
+// (ta_ctx.cpp:67-73): once `rqueue` holds one context, every subsequent STARTRENDER
+// context that frame is `tactx_Recycle`'d (DROPPED) and QueueRender returns false.
+// So only ONE context per video frame survives to DequeueRender -> render() ->
+// serverPublish(). On MVC2 the surviving pass is the HUD/composite pass
+// (isRTT=0, op~573/tr~42, the character layer flattened to ONE composite quad). The
+// CHARACTER pass (the per-part body quads, op~265/tr~2024, body-band y240-433) is the
+// one QueueRender DROPS — so serverPublish/mc_oracle_frameFlush NEVER sees it.
+//
+// THE FIX (option (a)): capture UPSTREAM at rend_start_render — for EVERY STARTRENDER
+// context, BEFORE QueueRender can drop it. This is the ONLY point in the pipeline where
+// the per-part character quads exist. We ta_parse the about-to-be-(maybe-)dropped ctx
+// READ-ONLY (the exact call norend::Process makes — ctx is fully valid here; ta_parse
+// only builds ctx->rend, never touches guest state) and route the CHARACTER pass into
+// the existing Oracle capture path (collectScreenQuads + attributeScreenQuads + JSONL +
+// the CHARQ accessor). The per-vframe dedup in mc_oracle_frameFlush makes this safe to
+// call for BOTH the character and HUD passes (only the character pass emits).
+//
+// READ-ONLY + determinism-safe: ta_parse(ctx,true) builds ctx->rend just like norend;
+// the real render path re-parses for the wire. We never enqueue, never recycle, never
+// touch rqueue, never write guest RAM. Gated MAPLECAST_CHARQ + in-match (0x8C289624).
+static bool mc_charqEnabled = (getenv("MAPLECAST_CHARQ") != nullptr);
+
+void mc_oracle_charPassCapture(void* ctxv)
+{
+	if (!mc_charqEnabled || ctxv == nullptr) return;
+
+	// IN-MATCH GATE (in_match @0x8C289624) — same gate the frame oracle uses. Outside a
+	// match the character routine isn't drawing bodies; skip the ta_parse entirely so the
+	// instrument is free on menus/attract.
+	if (addrspace::read8(0x8C289624) == 0) return;
+
+	TA_context* ctx = (TA_context*)ctxv;
+
+	// STEP 2 — the [CHARPASS] CONFIRMATION LOG. Per STARTRENDER: ta_parse the ctx
+	// (read-only) and report isRTT + raw op/pt/tr PolyParam counts + sprite-filtered
+	// count + body-band(y200-460) count + the video-frame counter (0x8C3496B0). This
+	// PROVES (a) two STARTRENDERs/frame and (b) that the DROPPED one carries the body
+	// quads (op~265/tr~2024, bodyBand>0) while the surviving one is HUD (op~573/tr~42,
+	// bodyBand==0). We must SEE this before trusting the capture. Throttled lightly.
+	ta_parse(ctx, true);                       // read-only: builds ctx->rend (norend's call)
+	PassStats ps; memset(&ps, 0, sizeof ps);
+	collectScreenQuads(ctx->rend, &ps);
+	ps.isRTT = ctx->rend.isRTT ? 1 : 0;
+	bool isCharacterPass = (ps.tr >= 500 && ps.bodyBand > 0);
+	u32  vframe = addrspace::read32(0x8C3496B0);
+
+	static unsigned long s_charpassN = 0;
+	if ((s_charpassN++ % 30) == 0) {
+		fprintf(stderr,
+			"[CHARPASS] vframe=%u isRTT=%d op=%d pt=%d tr=%d sprite=%d bodyBand=%d -> %s "
+			"(STARTRENDER, pre-QueueRender)\n",
+			vframe, ps.isRTT, ps.op, ps.pt, ps.tr, ps.sprite, ps.bodyBand,
+			isCharacterPass ? "CHARACTER(would-be-DROPPED body pass)" : "hud/composite");
+	}
+
+	// STEP 3 — route the CHARACTER pass's quads into the Oracle capture path. We call
+	// mc_oracle_frameFlush, which re-ta_parses (cheap, idempotent), runs the SAME
+	// discriminator, attributeScreenQuads (the bbox/screen_xy fix + opaque-filter fix),
+	// populates s_objs[]/s_screen[] + the CHARQ accessor (mc_oracle_objects/quadObjMap),
+	// and emits the JSONL keyed on vframe. It is per-vframe deduped (s_lastEmittedVframe),
+	// so calling it for both the HUD pass and the character pass emits exactly once — on
+	// the character pass. We pass vframe as the frame id; frameFlush overwrites it with
+	// 0x8C3496B0 internally anyway, so passing it here is purely informative.
+	//
+	// OBJECT-TABLE TIMING: the OBJ_BEGIN/SAT_BEGIN screen_xy enrich happens in the SH4
+	// block-entry hooks during the SH4 frame (loc_8c03093c writes node+0xE0/+0xE4 DURING
+	// the draw walk). rend_start_render fires AFTER the SH4 draw walk completes for this
+	// frame's TA list, so node screen_xy is the CURRENT frame's post-transform position —
+	// attributeScreenQuads re-reads it fresh (oracle_hook.cpp:1763-1771). The object table
+	// is therefore current and available here, same as it is at serverPublish.
+	mc_oracle_frameFlush(ctxv, vframe);
+}
+
 void mc_oracle_frameFlush(void* ctxv, u32 frame)
 {
 	// Run when EITHER the master hook OR the Phase-0 probe is enabled. The probe
@@ -1616,8 +2031,12 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 	// the recompiler injects/force-splits, but its capture is entirely in the block-entry
 	// handler (pre-match) — it needs NOTHING from frameFlush. So the per-frame ta_parse /
 	// jsonl work runs only for the REAL frame oracle or the probe.
-	bool frameOracleActive = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr) || mc_probeEnabled;
-	if (!frameOracleActive) { s_nobj = 0; s_nquad = 0; s_nscreen = 0; s_nr2 = 0; return; }
+	// CHARQ: when MAPLECAST_CHARQ is set the flush is driven from rend_start_render's
+	// pre-QueueRender hook (mc_oracle_charPassCapture) for the CHARACTER pass, so it must
+	// be active even if MAPLECAST_FRAME_ORACLE_HOOK is unset. (In practice both are set per
+	// the deploy spec, but make CHARQ self-sufficient.)
+	bool frameOracleActive = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr) || mc_probeEnabled || mc_charqEnabled;
+	if (!frameOracleActive) { s_nobj = 0; s_nquad = 0; s_nscreen = 0; s_nr2 = 0; s_charqNobj = 0; s_charqNmap = 0; return; }
 
 	// IN-MATCH GATE (in_match flag @0x8C289624, same as the serverPublish oracle).
 	// The per-object draw routine (loc_8c03093c) only fires during gameplay, and
@@ -1633,9 +2052,43 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 	// determinism risk, same call the serverPublish oracle/EFCT paths already make.
 	s_nscreen = 0;
 	TA_context* ctx = (TA_context*)ctxv;
+	PassStats ps; memset(&ps, 0, sizeof ps);
+	bool isCharacterPass = false;
 	if (ctx && inMatch) {
 		ta_parse(ctx, true);
-		collectScreenQuads(ctx->rend);
+		collectScreenQuads(ctx->rend, &ps);
+		ps.isRTT = ctx->rend.isRTT ? 1 : 0;
+
+		// === CHARQ Phase-1 FIX (1): discriminate the CHARACTER pass from the
+		// HUD/composite pass. MVC2 ships multiple TA passes per video frame; only the
+		// character pass carries the bodies (the large tr list + body-band coords). The
+		// HUD/composite pass is a tiny op/tr list of top-of-screen sprites + the stage
+		// backdrop with ZERO body. We key on the parsed-poly shape (proven by the live
+		// STAF parse: character pass = op~265 tr~2024, ~281 body-band y240-439 coords):
+		//   character pass  <=>  large tr list AND at least one kept body-band sprite quad.
+		// isRTT is LOGGED (below) to CONFIRM which pass the body lives in before we trust
+		// the heuristic; the heuristic itself does NOT depend on isRTT (MVC2's character
+		// sprites are screen-space TR quads in the on-screen pass, not an RTT composite —
+		// the prior expert verified this is NOT an RTT/ta_parse-arg issue).
+		// Threshold: the character pass tr list is ~2000 polys (STAF: op~265 tr~2024);
+		// every other pass (HUD/composite/transition) has tr <= ~204. tr>=500 cleanly
+		// separates them. AND require at least one kept body-band sprite quad so a
+		// large non-character tr list (e.g. an effects-heavy super) still needs the
+		// body region populated. Both must hold.
+		isCharacterPass = (ps.tr >= 500 && ps.bodyBand > 0);
+
+		// === CHARQ Phase-1 FIX (1, verify): per-pass log of isRTT + op/pt/tr + bodyBand,
+		// throttled, so the operator can CONFIRM exactly which pass carries the body
+		// before we key on it. (The expert flagged this as the one thing to verify.)
+		static unsigned long s_passLogN = 0;
+		if (inMatch && (s_passLogN++ % 30) == 0) {
+			fprintf(stderr,
+				"[ORACLE-PASS] vframe=%u localFrame=%u isRTT=%d op=%d pt=%d tr=%d "
+				"sprite=%d bodyBand=%d -> %s\n",
+				addrspace::read32(0x8C3496B0), frame, ps.isRTT, ps.op, ps.pt, ps.tr,
+				ps.sprite, ps.bodyBand, isCharacterPass ? "CHARACTER" : "hud/composite");
+		}
+
 		attributeScreenQuads();
 
 		// PHASE-0 PROBE (R1 + R6) — read the game's per-object body quad-count/ptr
@@ -1680,12 +2133,38 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 		        s_fireObjBegin, s_fireSatBegin, s_fireQuad, ow);
 	}
 
-	// Only emit for in-match frames (the gate above already skipped the heavy
-	// recovery off-match, so s_nscreen is 0 there) AND only when something was
-	// captured. This keeps the jsonl to real gameplay frames.
-	if (!inMatch || (s_nobj == 0 && s_nquad == 0 && s_nscreen == 0)) {
+	// === CHARQ Phase-1 FIX (2): key the emit on the SH4 VIDEO-frame counter
+	// (0x8C3496B0, work.asm) — NOT _localFrameNum, which ticks per TA PASS. We emit
+	// the JSONL/CHARQ snapshot ONCE per video frame, on the CHARACTER pass (the pass
+	// that actually carries the bodies). The HUD/composite pass that also fires a
+	// serverPublish for the same video frame is skipped for emit (it has zero body),
+	// but its publishCharqSnapshot keeps the accessor coherent. This stops the Oracle
+	// from latching the HUD pass and overwriting the body capture with an empty frame.
+	u32 vframe = addrspace::read32(0x8C3496B0);
+	static u32  s_lastEmittedVframe = 0xFFFFFFFFu;
+	bool        alreadyEmittedThisVframe = (vframe == s_lastEmittedVframe);
+
+	// Emit ONLY on the character pass (bodies present), once per video frame, in-match,
+	// when something was captured. Non-character passes (HUD/composite) and duplicate
+	// character passes for the same video frame fall through to the snapshot-only path.
+	bool doEmit = inMatch && isCharacterPass && !alreadyEmittedThisVframe
+	           && !(s_nobj == 0 && s_nquad == 0 && s_nscreen == 0);
+
+	// Use the VIDEO-frame counter as the JSONL "frame" id so a downstream reader can
+	// dedup/align per video frame regardless of how many TA passes a frame had.
+	frame = vframe;
+
+	if (!doEmit) {
+		// Not the body pass (or already emitted this video frame, or off-match/empty):
+		// keep the CHARQ accessor coherent but DON'T write JSONL / DON'T clobber the
+		// body capture. Publish the snapshot only if this pass actually has objects
+		// (the character pass), else leave the last good snapshot in place so the HUD
+		// pass doesn't zero out the body snapshot the character pass just published.
+		if (isCharacterPass || s_nobj > 0)
+			publishCharqSnapshot();
 		s_nobj = 0; s_nquad = 0; s_nscreen = 0; s_nr2 = 0; return;
 	}
+	s_lastEmittedVframe = vframe;
 
 	if (!full) {
 		if (!of) {
@@ -1731,12 +2210,13 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 					n = snprintf(b, sizeof b,
 						"%s{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,"
 						"\"u\":[%.4f,%.4f],\"v\":[%.4f,%.4f],\"z\":[%.6g,%.6g],"
-						"\"vram_addr\":\"0x%08X\",\"tcw\":\"0x%08X\",\"fmt\":%d,"
+						"\"vram_addr\":\"0x%08X\",\"tcw\":\"0x%08X\",\"tsp\":\"0x%08X\","
+						"\"pcw\":\"0x%08X\",\"isp\":\"0x%08X\",\"fmt\":%d,"
 						"\"tex_wh\":[%d,%d],\"vq\":%d,\"blend\":[%d,%d]}",
 						firstQ ? "" : ",",
 						(int)q.x,(int)q.y,(int)q.w,(int)q.h,
 						q.uMn,q.uMx,q.vMn,q.vMx, q.zMn,q.zMx,
-						q.vramAddr, q.tcw, q.fmt, q.tw, q.th, q.vq,
+						q.vramAddr, q.tcw, q.tsp, q.pcw, q.isp, q.fmt, q.tw, q.th, q.vq,
 						q.srcBlend, q.dstBlend);
 					ow += fwrite(b, 1, n, of);
 					firstQ = false;
@@ -1790,7 +2270,54 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 		}
 	}
 
+	// CHARQ snapshot — publish THIS frame's object identities + the kept-sprite-quad
+	// -> object map for the CHARQ emit block (serverPublish, after this flush). Built
+	// here, just before the per-frame statics reset, so the accessors return valid
+	// data for the same serverPublish call. s_screen[] index == kept-sprite-quad
+	// ordinal (collectScreenQuads order), so the map is a direct copy of .obj.
+	publishCharqSnapshot();
+
 	s_nobj = 0; s_nquad = 0; s_nscreen = 0; s_nr2 = 0;
+}
+
+// Copy the per-frame s_objs[] identities + the s_screen[] ordinal->obj map into the
+// CHARQ snapshot statics. Cheap: a flat copy of <=256 objs + <=4096 ints. Called at
+// the end of frameFlush (snapshot survives the per-frame reset). Mask sprite_id to
+// 0x7FFF here; resolve cid (body=node+0x1, satellite=ownerCid) so CHARQ reads it raw.
+static void publishCharqSnapshot()
+{
+	int n = s_nobj; if (n > MAX_OBJS) n = MAX_OBJS;
+	for (int i = 0; i < n; i++) {
+		const Obj& o = s_objs[i];
+		CharqObj& c = s_charqObjs[i];
+		c.node        = o.node;
+		c.sprite_id   = (o.sprite_id >= 0) ? (o.sprite_id & 0x7FFF) : o.sprite_id;
+		c.isSatellite = o.isSat;
+		c.ownerSlot   = o.ownerSlot;
+		c.ownerCid    = o.ownerCid;
+		c.screen_x    = o.sx;
+		c.screen_y    = o.sy;
+		// cid: bodies carry character_id at node+0x1; satellites have none on the node
+		// (it's the OWNER's), so report the owner cid for sats.
+		c.cid = o.isSat ? o.ownerCid : (int)(u8)addrspace::read8(o.node + OFF_CHAR_ID);
+	}
+	s_charqNobj = n;
+
+	int m = s_nscreen; if (m > MAX_SCREEN) m = MAX_SCREEN;
+	for (int k = 0; k < m; k++) s_charqMap[k] = s_screen[k].obj;
+	s_charqNmap = m;
+}
+
+const CharqObj* mc_oracle_objects(int* outCount)
+{
+	if (outCount) *outCount = s_charqNobj;
+	return s_charqNobj ? s_charqObjs : nullptr;
+}
+
+const int* mc_oracle_quadObjMap(int* outCount)
+{
+	if (outCount) *outCount = s_charqNmap;
+	return s_charqNmap ? s_charqMap : nullptr;
 }
 
 }

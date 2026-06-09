@@ -17,6 +17,7 @@
 #include "network/maplecast_control_ws.h"
 #include "network/maplecast_input_server.h"
 #include "network/maplecast_gamestate.h"   // MAPLECAST_BAKE sprite-stability probe
+#include "network/maplecast_oracle_hook.h" // MAPLECAST_CHARQ pre-QueueRender body-quad capture
 
 #include <mutex>
 #include <deque>
@@ -629,6 +630,23 @@ void rend_start_render()
 		}
 		ggpo::endOfFrame();
 	}
+
+	// === MAPLECAST_CHARQ — DEFINITIVE per-part body-quad capture ===============
+	// QueueRender below is SINGLE-SLOT (ta_ctx.cpp:67-73): when rqueue is already busy
+	// it DROPS this context (tactx_Recycle + returns false). MVC2 emits multiple
+	// STARTRENDER passes per video frame; the CHARACTER pass (per-part body quads,
+	// op~265/tr~2024, body-band y240-433) is the one QueueRender drops on MVC2 — only the
+	// HUD/composite pass survives to DequeueRender -> render() -> serverPublish. So this,
+	// right HERE (after the isRTT/rend stamp, BEFORE QueueRender can drop it), is the ONLY
+	// point in the pipeline where the per-part character quads exist. Capture them.
+	//
+	// READ-ONLY + determinism-safe: mc_oracle_charPassCapture ta_parse(ctx,true)'s the ctx
+	// exactly like norend::Process — it builds ctx->rend, never writes guest state, never
+	// enqueues/recycles, never touches rqueue. The real render path re-parses for the wire.
+	// Gated MAPLECAST_CHARQ + in-match (0x8C289624); a no-op otherwise -> prod unaffected.
+	// Called for EVERY STARTRENDER ctx (the dropped character pass AND the surviving HUD
+	// pass); the capture path is per-vframe deduped and emits only on the character pass.
+	maplecast_oracle_hook::mc_oracle_charPassCapture(ctx);
 
 	if (QueueRender(ctx))
 	{

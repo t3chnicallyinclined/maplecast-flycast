@@ -1761,7 +1761,17 @@ void serverPublish(TA_context* ctx)
 	maplecast_oracle_hook::mc_oracleInit();   // one-time stderr log if enabled
 	// Pass the live ctx so the flush can ta_parse() the completed frame and recover
 	// the per-frame SCREEN quads (real screen x,y) to attribute per OBJ_BEGIN object.
-	maplecast_oracle_hook::mc_oracle_frameFlush(ctx, _localFrameNum);
+	//
+	// CHARQ: when MAPLECAST_CHARQ is set, the per-part CHARACTER body quads come from the
+	// pre-QueueRender hook (mc_oracle_charPassCapture, called in rend_start_render for
+	// EVERY STARTRENDER context BEFORE QueueRender drops the dropped character pass). The
+	// `ctx` serverPublish holds here is the SURVIVING pass — on MVC2 the HUD/composite pass
+	// with ZERO body quads. Re-flushing it would clobber the character snapshot the
+	// pre-QueueRender hook just published. So SKIP the serverPublish flush in CHARQ mode;
+	// the body capture is authoritative from the upstream hook. (Without CHARQ this is the
+	// only flush, unchanged.)
+	if (std::getenv("MAPLECAST_CHARQ") == nullptr)
+		maplecast_oracle_hook::mc_oracle_frameFlush(ctx, _localFrameNum);
 
 	// === MAPLECAST_STATELOG — per-frame RAM state probe (ROM-asset-client test)
 	// Read-only readGameState() + CSV append. Placed BEFORE the PVR snapshot
