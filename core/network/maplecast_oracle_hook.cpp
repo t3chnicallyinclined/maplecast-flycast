@@ -1578,6 +1578,22 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 	s_objs[oi].nquads++;
 }
 
+// ---- Per-pass classification (CHARQ Phase-1 fix) ---------------------------
+// MVC2 renders MULTIPLE TA passes per VIDEO frame, each its own serverPublish ->
+// DequeueRender -> _localFrameNum++. The CHARACTER pass carries the bodies (the
+// large tr list + body-band y coords); a separate HUD/composite pass carries only
+// a tiny op/tr list of top-of-screen sprites + the stage backdrop. The Oracle was
+// latching whichever pass ran the flush LAST (the HUD pass) -> bodies got 0 quads.
+// This struct lets collectScreenQuads report what it saw so frameFlush can pick the
+// character pass. PROVEN by the live STAF parse on this build (mc_staf_geom.log):
+// the body pass = op~265 tr~2024 with 281 body-band (y 240-439) coords.
+struct PassStats {
+	int op, pt, tr;       // PolyParam list sizes (raw, pre-filter)
+	int sprite;           // kept sprite quads (s_nscreen)
+	int bodyBand;         // kept sprite quads with center y in [120,440] (body region)
+	int isRTT;            // ctx->rend.isRTT (FB_W_SOF1 & 0x1000000) — logged to CONFIRM
+};
+
 // ---- Per-frame SCREEN-quad recovery from ta_parse(ctx) ---------------------
 // loc_8c033e90 (the LOAD-decode quad emitter) does NOT fire per frame during
 // gameplay (proven: it ran once at match load, frame 2568). The per-frame SCREEN
@@ -1586,17 +1602,34 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 // MAPLECAST_FRAME_ORACLE block (maplecast_mirror.cpp ~2494-2588): try rc.idx
 // de-index, fall back to direct rc.verts (autosort-tr sprites), filter out
 // clears / page-tiled bg / oversized stage layers / opaque fills.
-static void collectScreenQuads(rend_context& rc)
+static void collectScreenQuads(rend_context& rc, PassStats* ps = nullptr)
 {
 	s_nscreen = 0;
 	const u32 nverts = (u32)rc.verts.size();
-	// MAPLECAST_QDIAG — one-shot (one in-match frame) pre-filter dump of EVERY parsed
-	// TA poly to /dev/shm/mc_qdiag.log: listType, screen Y range, tcw/tsp/pcw, textured,
-	// w/h, and the computed cull flags. Answers: ARE there body-region (y~240-433)
-	// textured polys in rc.global_param_*, and which flag drops them? READ-ONLY.
-	static int s_qdiag = getenv("MAPLECAST_QDIAG") ? 1 : 0;
+	// MAPLECAST_QDIAG — pre-filter dump of EVERY parsed TA poly to /dev/shm/mc_qdiag.log:
+	// listType, screen Y range, tcw/tsp/pcw, textured, w/h, and the computed cull flags.
+	// Answers: ARE there body-region (y~240-433) textured polys in rc.global_param_*,
+	// and which flag drops them? READ-ONLY.
+	// CHARQ Phase-1 FIX: the old code opened "w" once on the FIRST in-match flush, so the
+	// dump only ever captured the FIRST pass of the FIRST frame (usually the HUD/composite
+	// pass) and never the character pass. Now we APPEND and tag each poly with the pass's
+	// op/tr counts + a sequential pass index, dumping the first few in-match passes so the
+	// CHARACTER pass (op~265 tr~2024) is guaranteed present. Bounded by s_qdiagPasses.
+	static int   s_qdiag = getenv("MAPLECAST_QDIAG") ? 1 : 0;  // 0=off, 1=arm, 2=running, 3=done
 	static FILE* s_qf = nullptr;
-	if (s_qdiag == 1) { s_qf = fopen("/dev/shm/mc_qdiag.log", "w"); s_qdiag = s_qf ? 2 : 0; }
+	static int   s_qdiagPasses = 0;
+	static const int QDIAG_MAX_PASSES = 8;     // capture the first 8 in-match passes
+	if (s_qdiag == 1) {                        // first armed call: truncate + start
+		s_qf = fopen("/dev/shm/mc_qdiag.log", "w");
+		s_qdiag = s_qf ? 2 : 0;
+	}
+	int s_qdiagPassIdx = s_qdiag == 2 ? s_qdiagPasses : -1;
+	if (s_qf && s_qdiag == 2) {
+		bool bodyBandPass = (rc.global_param_tr.size() > 200);  // heuristic: the big tr list
+		fprintf(s_qf, "=== PASS %d  op=%zu pt=%zu tr=%zu  (%s) ===\n",
+		        s_qdiagPassIdx, rc.global_param_op.size(), rc.global_param_pt.size(),
+		        rc.global_param_tr.size(), bodyBandPass ? "LIKELY-CHARACTER" : "likely-hud");
+	}
 	auto collect = [&](std::vector<PolyParam>& lst, int listType) {
 		for (PolyParam& pp : lst) {
 			if (s_nscreen >= MAX_SCREEN) return;
@@ -1679,11 +1712,34 @@ static void collectScreenQuads(rend_context& rc)
 	collect(rc.global_param_op, 0);
 	collect(rc.global_param_pt, 1);
 	collect(rc.global_param_tr, 2);
-	if (s_qf) { fclose(s_qf); s_qf = nullptr; s_qdiag = 0;
-		fprintf(stderr, "[QDIAG] one-shot dump written -> /dev/shm/mc_qdiag.log "
-		                "(op=%zu pt=%zu tr=%zu polys, %d kept)\n",
-		        rc.global_param_op.size(), rc.global_param_pt.size(),
-		        rc.global_param_tr.size(), s_nscreen); }
+
+	// Count body-band sprite quads (center y in [60,440], the playfield region; the
+	// HUD lives above and the on-screen character parts span ~y65..360 per the live
+	// STAF parse) — the discriminator frameFlush uses to pick the character pass
+	// without depending on isRTT alone.
+	int bodyBand = 0;
+	for (int k = 0; k < s_nscreen; k++)
+		if (s_screen[k].cy >= 60.f && s_screen[k].cy <= 440.f) bodyBand++;
+	if (ps) {
+		ps->op = (int)rc.global_param_op.size();
+		ps->pt = (int)rc.global_param_pt.size();
+		ps->tr = (int)rc.global_param_tr.size();
+		ps->sprite = s_nscreen;
+		ps->bodyBand = bodyBand;
+		// isRTT filled by caller (it owns ctx->rend).
+	}
+
+	// QDIAG: advance per pass; close after capturing the first QDIAG_MAX_PASSES
+	// in-match passes (so the character pass is guaranteed in the file).
+	if (s_qf && s_qdiag == 2) {
+		fprintf(s_qf, "--- pass %d kept=%d bodyBand=%d ---\n",
+		        s_qdiagPassIdx, s_nscreen, bodyBand);
+		if (++s_qdiagPasses >= QDIAG_MAX_PASSES) {
+			fclose(s_qf); s_qf = nullptr; s_qdiag = 3;
+			fprintf(stderr, "[QDIAG] %d-pass dump written -> /dev/shm/mc_qdiag.log\n",
+			        QDIAG_MAX_PASSES);
+		}
+	}
 }
 
 // Attribute each SCREEN quad to the nearest OBJ_BEGIN object by on-screen
@@ -1914,9 +1970,43 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 	// determinism risk, same call the serverPublish oracle/EFCT paths already make.
 	s_nscreen = 0;
 	TA_context* ctx = (TA_context*)ctxv;
+	PassStats ps; memset(&ps, 0, sizeof ps);
+	bool isCharacterPass = false;
 	if (ctx && inMatch) {
 		ta_parse(ctx, true);
-		collectScreenQuads(ctx->rend);
+		collectScreenQuads(ctx->rend, &ps);
+		ps.isRTT = ctx->rend.isRTT ? 1 : 0;
+
+		// === CHARQ Phase-1 FIX (1): discriminate the CHARACTER pass from the
+		// HUD/composite pass. MVC2 ships multiple TA passes per video frame; only the
+		// character pass carries the bodies (the large tr list + body-band coords). The
+		// HUD/composite pass is a tiny op/tr list of top-of-screen sprites + the stage
+		// backdrop with ZERO body. We key on the parsed-poly shape (proven by the live
+		// STAF parse: character pass = op~265 tr~2024, ~281 body-band y240-439 coords):
+		//   character pass  <=>  large tr list AND at least one kept body-band sprite quad.
+		// isRTT is LOGGED (below) to CONFIRM which pass the body lives in before we trust
+		// the heuristic; the heuristic itself does NOT depend on isRTT (MVC2's character
+		// sprites are screen-space TR quads in the on-screen pass, not an RTT composite —
+		// the prior expert verified this is NOT an RTT/ta_parse-arg issue).
+		// Threshold: the character pass tr list is ~2000 polys (STAF: op~265 tr~2024);
+		// every other pass (HUD/composite/transition) has tr <= ~204. tr>=500 cleanly
+		// separates them. AND require at least one kept body-band sprite quad so a
+		// large non-character tr list (e.g. an effects-heavy super) still needs the
+		// body region populated. Both must hold.
+		isCharacterPass = (ps.tr >= 500 && ps.bodyBand > 0);
+
+		// === CHARQ Phase-1 FIX (1, verify): per-pass log of isRTT + op/pt/tr + bodyBand,
+		// throttled, so the operator can CONFIRM exactly which pass carries the body
+		// before we key on it. (The expert flagged this as the one thing to verify.)
+		static unsigned long s_passLogN = 0;
+		if (inMatch && (s_passLogN++ % 30) == 0) {
+			fprintf(stderr,
+				"[ORACLE-PASS] vframe=%u localFrame=%u isRTT=%d op=%d pt=%d tr=%d "
+				"sprite=%d bodyBand=%d -> %s\n",
+				addrspace::read32(0x8C3496B0), frame, ps.isRTT, ps.op, ps.pt, ps.tr,
+				ps.sprite, ps.bodyBand, isCharacterPass ? "CHARACTER" : "hud/composite");
+		}
+
 		attributeScreenQuads();
 
 		// PHASE-0 PROBE (R1 + R6) — read the game's per-object body quad-count/ptr
@@ -1961,15 +2051,38 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 		        s_fireObjBegin, s_fireSatBegin, s_fireQuad, ow);
 	}
 
-	// Only emit for in-match frames (the gate above already skipped the heavy
-	// recovery off-match, so s_nscreen is 0 there) AND only when something was
-	// captured. This keeps the jsonl to real gameplay frames.
-	if (!inMatch || (s_nobj == 0 && s_nquad == 0 && s_nscreen == 0)) {
-		// Still publish the (possibly empty/off-match) snapshot so the CHARQ accessor
-		// is coherent for every frame: in-match-but-empty frames yield 0 objs/0 map.
-		publishCharqSnapshot();
+	// === CHARQ Phase-1 FIX (2): key the emit on the SH4 VIDEO-frame counter
+	// (0x8C3496B0, work.asm) — NOT _localFrameNum, which ticks per TA PASS. We emit
+	// the JSONL/CHARQ snapshot ONCE per video frame, on the CHARACTER pass (the pass
+	// that actually carries the bodies). The HUD/composite pass that also fires a
+	// serverPublish for the same video frame is skipped for emit (it has zero body),
+	// but its publishCharqSnapshot keeps the accessor coherent. This stops the Oracle
+	// from latching the HUD pass and overwriting the body capture with an empty frame.
+	u32 vframe = addrspace::read32(0x8C3496B0);
+	static u32  s_lastEmittedVframe = 0xFFFFFFFFu;
+	bool        alreadyEmittedThisVframe = (vframe == s_lastEmittedVframe);
+
+	// Emit ONLY on the character pass (bodies present), once per video frame, in-match,
+	// when something was captured. Non-character passes (HUD/composite) and duplicate
+	// character passes for the same video frame fall through to the snapshot-only path.
+	bool doEmit = inMatch && isCharacterPass && !alreadyEmittedThisVframe
+	           && !(s_nobj == 0 && s_nquad == 0 && s_nscreen == 0);
+
+	// Use the VIDEO-frame counter as the JSONL "frame" id so a downstream reader can
+	// dedup/align per video frame regardless of how many TA passes a frame had.
+	frame = vframe;
+
+	if (!doEmit) {
+		// Not the body pass (or already emitted this video frame, or off-match/empty):
+		// keep the CHARQ accessor coherent but DON'T write JSONL / DON'T clobber the
+		// body capture. Publish the snapshot only if this pass actually has objects
+		// (the character pass), else leave the last good snapshot in place so the HUD
+		// pass doesn't zero out the body snapshot the character pass just published.
+		if (isCharacterPass || s_nobj > 0)
+			publishCharqSnapshot();
 		s_nobj = 0; s_nquad = 0; s_nscreen = 0; s_nr2 = 0; return;
 	}
+	s_lastEmittedVframe = vframe;
 
 	if (!full) {
 		if (!of) {
