@@ -50,8 +50,25 @@ namespace maplecast_oracle_hook
 // recompiler injects the GenCall + the decoder force-splits at our hooked PCs.
 static bool mc_decodeHookEnabled = (getenv("MAPLECAST_DECODEHOOK") != nullptr);
 
+// DECODE-TRACE (MAPLECAST_DECODETRACE) — the DEFINITIVE caller-attribution trace.
+// Hooks the WORD LZSS texture decoder loc_8c03552a (bank03:12740, self-labeled
+// ";Texture_compression") at its ENTRY and logs, per call during a match load:
+//   - caller   = Sh4cntx.pr  (the jsr return address -> name via the disasm). For
+//                the TAIL-CALL callers (jmp @r3, where pr is the grandcaller), the
+//                src/dest pair still uniquely identifies the routine via the static
+//                catalog, so we log BOTH pr and src/dest.
+//   - dest     = r5  (the decoder header's documented "Decompress Buffer location")
+//   - source   = r4  (the decoder header's documented "Texture Location" = compressed)
+//   - a window of the source header (first 16 bytes) for dims/format inference
+//   - a per-caller call counter
+// READ-ONLY. The trace disambiguates portrait/UI decodes (few calls, fixed dest)
+// from the per-char gameplay-atlas decode (the looping caller that walks ~1190 +6
+// selectors into 0x0CE60000). Forces the master gate so the recompiler injects.
+static bool mc_decodeTraceEnabled = (getenv("MAPLECAST_DECODETRACE") != nullptr);
+
 bool mc_oracleHookEnabled = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr)
-                         || mc_decodeHookEnabled;
+                         || mc_decodeHookEnabled
+                         || mc_decodeTraceEnabled;
 
 // Sub-flag: also capture the LOAD-TIME part-atlas decode quads at loc_8c033e90
 // (0x8C033EC0 post-write). PROVEN (live prod capture 2026-06-08): that routine
@@ -170,6 +187,13 @@ static const u32 PC_QUAD_DONE_M = PC_QUAD_DONE & SH4_AREA_MASK;  // 0x0C033EC0
 // entry via r8) + char_id/palette (r14). That is the complete CLEAN part source.
 static const u32 PC_DECODE_DONE  = 0x8C032776;
 static const u32 PC_DECODE_DONE_M = PC_DECODE_DONE & SH4_AREA_MASK;  // 0x0C032776
+// DECODE-TRACE: the word LZSS texture decoder ENTRY (loc_8c03552a, bank03:12740,
+// ";Texture_compression"). Block start (it's a jsr/jmp target) so the decoder
+// force-split is a no-op (rpc==vaddr) but mc_isHookedPC must return true so the
+// GenCall injects. At entry: r4=source(compressed "Texture Location"),
+// r5=dest("Decompress Buffer location"), Sh4cntx.pr=caller return addr.
+static const u32 PC_DECODE_ENTRY  = 0x8C03552A;
+static const u32 PC_DECODE_ENTRY_M = PC_DECODE_ENTRY & SH4_AREA_MASK;  // 0x0C03552A
 // The DM00 directory entry stride + the selector->entry bias the driver applies
 // (bank03:5811-5816: r7 = r8 + (sel<<4) + 0xA0).
 static const u32 DM00_ENTRY_STRIDE = 0x10;
@@ -623,11 +647,132 @@ static void mc_decodeHandler(const u32* r)
 	}
 }
 
+// ===========================================================================
+// DECODE-TRACE (MAPLECAST_DECODETRACE) — READ-ONLY caller attribution at the
+// LZSS texture decoder ENTRY (loc_8c03552a). Logs every call during a match load
+// so the operator can SEE, unambiguously, which caller routine decodes the
+// gameplay part-atlas vs the portrait/UI decodes.
+//
+// STATIC CALLER CATALOG (from marvelous2 bank03; the 10 sites that load
+// #data loc_8c03552a and jsr/jmp through it). The trace names the caller by the
+// nearest catalog routine to Sh4cntx.pr, AND by the (src,dest) literal pair (the
+// reliable id for the tail-call sites where pr is the grandcaller). The names
+// below are the routine prologues that own each decode call.
+struct DtCaller { u32 pcLo, pcHi; const char* name; };
+static const DtCaller DT_CALLERS[] = {
+	// pcLo..pcHi = the routine body range; name = role inferred from src/dest literals.
+	{ 0x0C0320CE, 0x0C032183, "loc_8c0320ce dec:0x0cd00000<-0x0cc00000 (UI/HUD blob)" },
+	{ 0x0C032184, 0x0C0321DB, "loc_8c032184 dec:0x0ce2ea00<-0x0ce60000 (small/portrait)" },
+	{ 0x0C0321DC, 0x0C03223D, "loc_8c0321dc dec:0x0cc00000<-0x0ce60000 (small/portrait)" },
+	{ 0x0C03223E, 0x0C032363, "loc_8c03223e dec (table-driven blob)" },
+	{ 0x0C032364, 0x0C03246B, "loc_8c032364 dec:0x0cc00000 (datfile A blob)" },
+	{ 0x0C03246C, 0x0C032525, "loc_8c03246c dec:0x0cd85000<-0x0cc00000 (big blob 0x1f000)" },
+	{ 0x0C032526, 0x0C032695, "loc_8c032526 dec:0x0cc00000 (datfile A blob)" },
+	{ 0x0C032696, 0x0C03281B, "loc_8c032696 dec->0x0CE60000 LOOP (GAMEPLAY PART ATLAS, +6 sel walk)" },
+	{ 0x0C03281C, 0x0C0328ED, "loc_8c03281c dec:0x0ce60000 (single big char blob)" },
+	{ 0x0C0328EE, 0x0C0399FF, "loc_8c0328ee dec:0x0cc60000 (effects/shared blob)" },
+	{ 0x0C03990C, 0x0C039F99, "loc_8c03990c dec:0x0c520000/0x0c720000 (stage/bg blob)" },
+	{ 0x0C039F9A, 0x0C03A003, "loc_8c039f9a dec:0x0ce60000 (datfile-driven blob)" },
+};
+static const char* dtNameForPr(u32 pr)
+{
+	u32 m = pr & SH4_AREA_MASK;
+	for (const DtCaller& c : DT_CALLERS)
+		if (m >= c.pcLo && m <= c.pcHi) return c.name;
+	return "(pr outside catalog — TAIL-CALL grandcaller; id by src/dest)";
+}
+
+static unsigned long s_fireTrace = 0;
+static bool          s_dtCleared = false;
+// Per-(caller-route) aggregate so the summary at the tail is compact: index by the
+// catalog slot; track count + last src/dest/dims.
+static const int DT_NCAT = (int)(sizeof(DT_CALLERS)/sizeof(DT_CALLERS[0]));
+static struct { unsigned long n; u32 src, dst; u16 w, h; u32 prLast; } s_dtAgg[DT_NCAT + 1] = {};
+
+static int dtCatIndex(u32 pr)
+{
+	u32 m = pr & SH4_AREA_MASK;
+	for (int i = 0; i < DT_NCAT; i++)
+		if (m >= DT_CALLERS[i].pcLo && m <= DT_CALLERS[i].pcHi) return i;
+	return DT_NCAT;   // "outside catalog" bucket
+}
+
+// The decode-trace handler. r = Sh4cntx.r[] at loc_8c03552a ENTRY (READ-ONLY).
+// r4 = source (compressed "Texture Location"), r5 = dest ("Decompress Buffer").
+static void mc_decodeTraceHandler(const u32* r)
+{
+	u32 pr  = Sh4cntx.pr;        // caller return address (jsr) / grandcaller (jmp tail-call)
+	u32 src = r[4];
+	u32 dst = r[5];
+
+	if (s_fireTrace++ == 0)
+		fprintf(stderr, "[DECODETRACE] first fired (pc=0x%08X loc_8c03552a entry) — per-call "
+		                "caller/src/dest -> /dev/shm/mc_decodetrace.log\n", PC_DECODE_ENTRY);
+
+	if (!s_dtCleared) { remove("/dev/shm/mc_decodetrace.log"); s_dtCleared = true; }
+
+	// Source header window: the decoder reads 16-bit words from r4; the first words
+	// are the per-part header. We log the first 8 bytes raw so dims/format can be
+	// inferred offline / correlated with the DM00 entry. Best-effort (guarded reads).
+	u32 h0 = inRam(src) ? addrspace::read32(src)     : 0;
+	u32 h1 = inRam(src) ? addrspace::read32(src + 4) : 0;
+	// The decoder's documented r5=dest. For the gameplay loop caller (loc_8c032696)
+	// dest is the 0x0CE60000 scratch and the dims live in the DM00 entry, not the
+	// source header — so we don't try to over-interpret w/h here; offline correlates.
+	u16 w = (u16)(h0 & 0xffff), hgt = (u16)((h0 >> 16) & 0xffff);
+
+	int ci = dtCatIndex(pr);
+	s_dtAgg[ci].n++;
+	s_dtAgg[ci].src = src; s_dtAgg[ci].dst = dst;
+	s_dtAgg[ci].w = w; s_dtAgg[ci].h = hgt; s_dtAgg[ci].prLast = pr;
+
+	// Per-call line. Throttle the verbose per-call log so a 1000+-part atlas walk
+	// doesn't flood /dev/shm, but ALWAYS log the first 8 calls of each caller bucket
+	// (so the first portrait + first gameplay-part are both captured verbatim), then
+	// every 64th. The aggregate summary (written every call, overwriting) carries the
+	// full per-caller totals regardless.
+	static unsigned long s_perCat[DT_NCAT + 1] = {};
+	unsigned long cn = ++s_perCat[ci];
+	bool verbose = (cn <= 8) || (cn % 64 == 0);
+
+	FILE* lg = fopen("/dev/shm/mc_decodetrace.log", "a");
+	if (lg) {
+		if (s_fireTrace == 1)
+			fprintf(lg, "# call# pr caller=<route> src dst srcHdr[h0 h1] (w h from h0)\n");
+		if (verbose)
+			fprintf(lg, "[%lu] pr=0x%08X dst=0x%08X src=0x%08X hdr=%08X %08X (w=%u h=%u) | %s\n",
+			        s_fireTrace, pr, dst, src, h0, h1, (unsigned)w, (unsigned)hgt, dtNameForPr(pr));
+		fclose(lg);
+	}
+
+	// Rewrite the compact per-caller SUMMARY every 32 calls (and on call 1) so the
+	// operator can read totals at a glance without scanning the whole log.
+	if (s_fireTrace == 1 || (s_fireTrace % 32) == 0) {
+		FILE* sf = fopen("/dev/shm/mc_decodetrace.summary", "w");
+		if (sf) {
+			fprintf(sf, "# DECODETRACE summary — calls into loc_8c03552a per caller route (total fires=%lu)\n",
+			        s_fireTrace);
+			for (int i = 0; i <= DT_NCAT; i++) {
+				if (s_dtAgg[i].n == 0) continue;
+				const char* nm = (i < DT_NCAT) ? DT_CALLERS[i].name : "(outside catalog / tail-call)";
+				fprintf(sf, "calls=%-6lu lastSrc=0x%08X lastDst=0x%08X lastPr=0x%08X | %s\n",
+				        s_dtAgg[i].n, s_dtAgg[i].src, s_dtAgg[i].dst, s_dtAgg[i].prLast, nm);
+			}
+			fclose(sf);
+		}
+	}
+}
+
 void mc_oracleInit()
 {
 	static bool logged = false;
 	if (logged) return;
 	logged = true;
+	if (mc_decodeTraceEnabled)
+		fprintf(stderr, "[DECODETRACE] ENABLED — LZSS decoder loc_8c03552a entry trace at 0x%08X "
+		                "(caller=pr, src=r4, dest=r5) -> /dev/shm/mc_decodetrace.log "
+		                "(+summary). Play a fresh match to capture the load decode.\n",
+		        PC_DECODE_ENTRY);
 	if (mc_decodeHookEnabled)
 		fprintf(stderr, "[DECODEHOOK] ENABLED — LOAD-decode part capture at 0x%08X "
 		                "(loc_8c032696 LZSS return, pre-copy-out): fresh 0x0CE60000 part "
@@ -671,6 +816,11 @@ bool mc_isHookedPC(u32 pc)
 	// start), so the decoder force-split in decoder.cpp is a no-op for it (rpc==vaddr)
 	// — but mc_isHookedPC must return true so rec_x64 injects the GenCall.
 	if (m == PC_DECODE_DONE_M) return mc_decodeHookEnabled;
+	// DECODE-TRACE: the LZSS decoder ENTRY (loc_8c03552a / 0x8C03552A). Only hooked
+	// when the trace flag is set. It's a jsr/jmp target (block start) so the decoder
+	// force-split is a no-op (rpc==vaddr) — mc_isHookedPC just has to return true so
+	// rec_x64 injects the GenCall.
+	if (m == PC_DECODE_ENTRY_M) return mc_decodeTraceEnabled;
 	return false;
 }
 
@@ -695,6 +845,14 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 	// frame-oracle paths). Handle first + return: it shares no per-frame buffer.
 	if (mpc == PC_DECODE_DONE_M) {
 		if (mc_decodeHookEnabled) mc_decodeHandler(r);
+		return;
+	}
+
+	// DECODE-TRACE: the LZSS decoder ENTRY. Logs caller(pr)/src(r4)/dest(r5) per
+	// call so the gameplay-atlas decoder is named CONCRETELY. Independent of the
+	// frame-oracle paths; shares no per-frame buffer. Handle first + return.
+	if (mpc == PC_DECODE_ENTRY_M) {
+		if (mc_decodeTraceEnabled) mc_decodeTraceHandler(r);
 		return;
 	}
 
