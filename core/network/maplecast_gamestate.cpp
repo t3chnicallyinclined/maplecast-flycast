@@ -1465,14 +1465,17 @@ static void partDump(const GameState& state) {
 //     by selector (it gave the UI/portrait set + the 256x256 body, not the per-pose
 //     selector parts).
 //
-// THE FIX: run the SAME contiguous GFX1 walk, but AT LOAD-DECODE TIME (the ONLY
-// window the 0x0CE60000 buffer holds the fresh, valid contiguous decode). The load
-// decode fires ONCE at match/char load; capturing the EARLY in-match frames after a
-// fresh `in_match` transition catches the freshly-decoded buffer. We dump each +6
-// SELECTOR the FIRST time we see it with a real (alpha-bearing) decode (freshest
-// buffer), keyed by the selector so the output matches tools/rip_gfx2_assembly.py
-// --realparts (PL{HEX}_part_NNN.ppm). Reuses the PROVEN PAL4 detwiddle/palette/
-// magenta path (partDecodeToPPM, fmt=5 linear) that produced clean DM00 portraits.
+// THE FIX (2026-06-09, OPTION a — persistent source): the transient 0x0CE60000 walk
+// was wrong on BOTH counts (stale buffer mid-match AND a dims read that returned 0, so
+// every part was skipped -> dumpedThisFire=0). Read the CLEAN, PERSISTENT pixels from
+// the DM00 directory (*(0x0CE80008)) instead — the per-part decoded-texel store MVC2
+// fills ONCE at load (loc_8c0322c0 entry=*(r6+8)+(k<<4), texels *(entry+8); loc_8c032ae0
+// fills it in incrementing-counter order). It survives the whole match (it gave the
+// clean PAL4 portraits). We still walk the per-pose GFX2 cell to recover the +6 SELECTOR
+// per record, and map record r -> DM00 key charBase+r (same fill order) to fetch that
+// part's persistent texels + the directory's OWN dims (e0)/format (e4). Output is keyed
+// by the +6 selector so tools/rip_gfx2_assembly.py --realparts (PL{HEX}_part_NNN.ppm)
+// consumes it. Reuses the PROVEN partDecodeToPPM (twiddled, format from partFmtFromE4).
 //
 // Output (operator-local, ROM-derived -> /dev/shm only):
 //   /dev/shm/PL{HEX}_gfx1_NNNN.ppm   one clean part per +6 selector (P6, magenta=transp)
@@ -1518,23 +1521,43 @@ static void gfx1Dump(const GameState& state) {
 	if (lg) fprintf(lg, "# GFX1DUMP fire (framesIn=%d/%d) frame=%u — clean LOAD-decode parts by +6 selector\n",
 	                framesIn, WINDOW, state.frame_counter);
 
-	const uint32_t TEXEL_BASE = 0x0CE60000;     // bank03.asm:9118 loc_8c033e28 (decode dest)
+	// ROOT CAUSE of dumpedThisFire=0 (fixed 2026-06-09): the old gfx1Dump read pixels
+	// from the TRANSIENT scratch 0x0CE60000 with the contiguous `texPtr += (w*h)>>1`
+	// walk AND took its dims from the GFX1 offset table (gfxBase + sel*4 -> blob+2/+3).
+	// Mid-match that offset table / scratch is stale (the load decode ran on the VS /
+	// char-load screen, BEFORE in_match flipped true). Worse than noise: the dims read
+	// came back 0, so `w<=0||h<=0` skipped EVERY part -> zero PPMs. The clean, PERSISTENT
+	// source is the DM00 directory (*(0x0CE80008)): MVC2 decodes every part ONCE at load
+	// into a per-part slot recorded there (loc_8c0322c0: entry=*(r6+8)+(k<<4), texels at
+	// *(entry+8); loc_8c032ae0 fills entries in an incrementing r11 order). It SURVIVES
+	// the match — it's the same store that gave the clean PAL4/portrait dumps. We map the
+	// per-pose GFX2 cell records to the DM00 run (record r -> dir key charBase+r, same
+	// decode order) and key the output by the +6 selector so rip_gfx2_assembly.py
+	// --realparts consumes it directly. Reuses the proven partDecodeToPPM (DM00 fmt/dims,
+	// twiddled).  OPTION (a): persistent per-part address, NOT the transient 0x0CE60000.
+	const uint32_t OFF_SLOT_SEL = 0x0ad;   // disasm loc_8c032a66/loc_8c032ba2 (base selector)
+	uint32_t dirBase = addrspace::read32(0x0CE80008);
+	if (!_ramAddr(dirBase)) { uint32_t alt = addrspace::read32(0x8CE80008); if (_ramAddr(alt)) dirBase = alt; }
+	if (!_ramAddr(dirBase)) {              // directory not built yet — wait for char load
+		if (lg) { fprintf(lg, "[GFX1] DM00 directory not built yet (dirBase=%08x) — skip fire\n", dirBase); fclose(lg); }
+		return;
+	}
 
 	for (int s = 0; s < 6; s++) {
 		uint32_t pbase = CHAR_BASE[s];
 		if (!(uint8_t)addrspace::read8(pbase + OFF_ACTIVE)) continue;
 		uint8_t  cid  = (uint8_t)addrspace::read8(pbase + OFF_CHAR_ID);
-		uint32_t gfx1 = addrspace::read32(pbase + OFF_GFX00_PTR);   // 0x15c Dat_GFX1
 		uint32_t gfx2 = addrspace::read32(pbase + OFF_GFX01_PTR);   // 0x160 Dat_GFX2 (cell tbl)
 		uint32_t palP = addrspace::read32(pbase + OFF_PAL_PTR);     // 0x164 Dat_Pal
 		uint16_t sid  = (uint16_t)addrspace::read16(pbase + OFF_SPRITE_ID);
-		uint32_t gfxBase = gfx1 & 0x0FFFFFFFu;
+		uint8_t  bsel = (uint8_t)addrspace::read8(pbase + OFF_SLOT_SEL);
 		uint32_t gfx2Base = gfx2 & 0x0FFFFFFFu;
-		if (!_ramAddr(gfxBase | 0x0C000000u) || !_ramAddr(gfx2Base | 0x0C000000u)) continue;
+		if (!_ramAddr(gfx2Base | 0x0C000000u)) continue;
+		// disasm loc_8c032a66: base = (sel==1)?13 : 9. The char's DM00 parts form a
+		// contiguous run from charBase, filled in cell-record order at load decode.
+		int charBase = (bsel == 1) ? 13 : 9;
 
-		// Resolve THIS pose's GFX2 cell (the contiguous decode walk follows the
-		// cell record order, seeding texPtr once at 0x0CE60000 and advancing it by
-		// each part's 4bpp byte size — exactly the load decoder's r12 advance).
+		// Resolve THIS pose's GFX2 cell (record ORDER == DM00 fill order == load decode).
 		uint32_t sidIdx  = (uint32_t)(sid & 0x7FFF);
 		uint32_t cellOff = addrspace::read32(gfx2Base + sidIdx * 4) & 0x0FFFFFFFu;
 		uint32_t cell    = (gfx2Base + cellOff) & 0x0FFFFFFFu;
@@ -1546,11 +1569,10 @@ static void gfx1Dump(const GameState& state) {
 		char mn[96]; snprintf(mn, sizeof mn, "/dev/shm/PL%02X_gfx1.manifest", cid);
 		FILE* mf = fopen(mn, "a");
 		if (mf && ftell(mf) == 0)
-			fprintf(mf, "# selector palRow w h fmt texptr ppm  (clean LOAD-decode GFX1 parts, PAL4 linear)\n");
+			fprintf(mf, "# selector palRow w h fmt texptr ppm  (clean DM00 persistent parts, keyed by +6 selector)\n");
 
-		const uint32_t TCW_PAL4_LINEAR = (5u << 27) | (1u << 26);   // 0x2C000000 (fmt5 PAL4, linear)
-		uint32_t texPtr = TEXEL_BASE;            // seeded once per node (disasm loc_8c033e28)
 		int dumpedThis = 0;
+		int dmIdx = charBase;                    // DM00 directory cursor (advances per real part)
 		for (int r = 0; r < cnt; r++) {
 			uint32_t rec   = recs + (uint32_t)r * 8;
 			uint16_t rpalw = (uint16_t)addrspace::read16(rec + 4);   // palette word
@@ -1560,46 +1582,48 @@ static void gfx1Dump(const GameState& state) {
 			if (lo == 0 && rsel == 0 && rpalw == 0) continue;        // pad/separator
 			unsigned palRow = (unsigned)((rpalw & 0x03ff) >> 4);
 
-			// Dims via the GFX1 offset table: blob = gfx1 + *(gfx1 + sel*4); skip the
-			// 2-byte piece header; w/h = next two bytes << 3 (bank03 loc_8c033e90).
-			uint32_t off  = addrspace::read32(gfxBase + (uint32_t)rsel * 4);
-			uint32_t blob = (gfxBase + off) & 0x0FFFFFFFu;
-			uint32_t bAlias = blob | 0x0C000000u;
-			int w = 0, h = 0;
-			if (_ramAddr(bAlias)) {
-				w = (int)((uint8_t)addrspace::read8(bAlias + 0x02)) << 3;
-				h = (int)((uint8_t)addrspace::read8(bAlias + 0x03)) << 3;
-			}
-			int rawBytes = (w * h) >> 1;                             // 4bpp byte size
-			if (w <= 0 || h <= 0 || w > 1024 || h > 1024) {
-				texPtr += (rawBytes > 0) ? (uint32_t)rawBytes : 0;   // still advance the run
+			// CLEAN PERSISTENT pixels: this record's part is DM00 entry `dmIdx` (the run
+			// charBase.., same order the load decoder filled it). Use the DIRECTORY's own
+			// dims (e0) + format (e4) + decoded twiddled texel ptr (e8) — NOT the stale
+			// GFX1 offset-table guess. (loc_8c0322c0/loc_8c032ae0.)
+			uint32_t e   = dirBase + (uint32_t)dmIdx * 0x10;
+			uint32_t e0  = addrspace::read32(e);
+			uint32_t e4d = addrspace::read32(e + 4);
+			uint32_t e8d = addrspace::read32(e + 8);
+			int w = (int)(e0 & 0xffff), h = (int)((e0 >> 16) & 0xffff);
+			if (w <= 0 || h <= 0 || w > 512 || h > 512 || !_ramAddr(e8d)) {
+				// Directory entry empty/invalid — don't advance dmIdx past a real slot.
+				if (lg) fprintf(lg, "[GFX1] cid=%u sel=%u dmIdx=%d EMPTY (e0=%08x e8=%08x) skip\n",
+				                cid, rsel, dmIdx, e0, e8d);
+				dmIdx++;
 				continue;
 			}
+			int dfmt = partFmtFromE4(e4d);           // e4 byte1 -> PVR PixelFmt (proven map)
+			bool dlinear = false;                    // DM00 slots are twiddled
 
 			if (rsel < 512 && cid < 0x40 && !seen[cid][rsel]) {
-				// FIRST-SEEN gate: dump this selector's clean part now (freshest buffer).
-				// Write BOTH the --realparts contract name (PLxx_part_NNN.ppm, the name
-				// tools/rip_gfx2_assembly.py load_real_parts() reads) AND the brief's
+				// FIRST-SEEN gate: dump this selector's clean persistent part. Write BOTH
+				// the --realparts contract name (PLxx_part_NNN.ppm) AND the brief's
 				// PLxx_gfx1_NNNN.ppm alias, keyed by the +6 selector.
 				char pfn[96]; snprintf(pfn, sizeof pfn, "PL%02X_part_%03u.ppm", cid, rsel);
 				char pfp[112]; snprintf(pfp, sizeof pfp, "/dev/shm/%s", pfn);
-				partDecodeToPPM(texPtr, w, h, /*fmt=*/5, /*linear=*/true,
+				partDecodeToPPM(e8d, w, h, dfmt, dlinear,
 				                palP + (uint32_t)palRow * 32, pfp, /*swapXY=*/false);
 				char gfn[96]; snprintf(gfn, sizeof gfn, "PL%02X_gfx1_%04u.ppm", cid, rsel);
 				char gfp[112]; snprintf(gfp, sizeof gfp, "/dev/shm/%s", gfn);
-				partDecodeToPPM(texPtr, w, h, /*fmt=*/5, /*linear=*/true,
+				partDecodeToPPM(e8d, w, h, dfmt, dlinear,
 				                palP + (uint32_t)palRow * 32, gfp, /*swapXY=*/false);
 				seen[cid][rsel] = true;
-				if (mf) fprintf(mf, "%u %u %d %d 5 %08x %s\n", rsel, palRow, w, h, texPtr, pfn);
-				if (lg)  fprintf(lg, "[GFX1] cid=%u(PL%02X) sel=%u %dx%d palRow=%u tex=%08x -> %s\n",
-				                 cid, cid, rsel, w, h, palRow, texPtr, pfn);
+				if (mf) fprintf(mf, "%u %u %d %d %d %08x %s\n", rsel, palRow, w, h, dfmt, e8d, pfn);
+				if (lg)  fprintf(lg, "[GFX1] cid=%u(PL%02X) sel=%u dmIdx=%d %dx%d fmt=%d palRow=%u tex=%08x -> %s\n",
+				                 cid, cid, rsel, dmIdx, w, h, dfmt, palRow, e8d, pfn);
 				dumpedThis++;
 			}
-			texPtr += (uint32_t)rawBytes;                            // advance contiguous walk
+			dmIdx++;                                 // advance to the next persistent slot
 		}
 		if (mf) fclose(mf);
-		if (lg) fprintf(lg, "[GFX1] slot%d cid=%u(PL%02X) sid=%u cnt=%d gfx1=%08x gfx2=%08x dumpedThisFire=%d -> %s\n",
-		                s, cid, cid, sid, cnt, gfxBase, gfx2Base, dumpedThis, mn);
+		if (lg) fprintf(lg, "[GFX1] slot%d cid=%u(PL%02X) sid=%u cnt=%d charBase=%d gfx2=%08x dirBase=%08x dumpedThisFire=%d -> %s\n",
+		                s, cid, cid, sid, cnt, charBase, gfx2Base, dirBase, dumpedThis, mn);
 	}
 	if (lg) fclose(lg);
 }
