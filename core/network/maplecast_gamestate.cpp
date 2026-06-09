@@ -1376,6 +1376,71 @@ static void partDump(const GameState& state) {
 		if (mf) fclose(mf);
 		if (lg) fprintf(lg, "[CHAR] GFX1-emitter dump: gfxBase=0x%08x gfx2Base=0x%08x cellRecs=0x%08x cnt=%d texBase=0x%08x -> %s\n",
 		                gfxBase, gfx2Base, pdRecs, pdCount, TEXEL_BASE, mn);
+
+		// =====================================================================
+		// CLEAN PIXEL SOURCE — the DM00 directory (FIX 2026-06-09).
+		//
+		// ROOT CAUSE of the magenta/stripe NOISE: the GFX1-emitter dump above reads
+		// each part from the TRANSIENT scratch 0x0CE60000 with a CONTIGUOUS
+		// `texPtr += (w*h)>>1` walk. That layout is only valid DURING the one-shot
+		// load-decode (loc_8c03281c/loc_8c032696 decode parts into the tiny
+		// 0x0CE60000/0x0CE61000 ping-pong scratch and upload each to its persistent
+		// slot). The per-frame emitter (loc_8c033e90) ALSO reads 0x0CE60000, but
+		// nothing re-decodes the FULL character there each frame — with two chars
+		// loaded the scratch holds whichever decoded LAST, so contiguous offsets read
+		// stale residue (garbage / the other char's bytes). Confirmed by montage.
+		//
+		// THE CLEAN SOURCE: MVC2 decodes EVERY part ONCE at character load into a
+		// PERSISTENT per-part slot and records it in the DM00 directory at
+		// *(0x0CE80008) (this `dirBase`), stride 0x10:
+		//   entry+0x0 = (w,h) packed as two u16 PIXELS
+		//   entry+0x4 = format word (e4); byte1 ((e4>>8)&0xff) = PVR PixelFmt code:
+		//               0x01->RGB565(1)  0x02->ARGB4444(2)  0x03->PAL8(6)  0x00->1555
+		//   entry+0x8 = pointer to the DECODED TWIDDLED texels (persistent, in mem_b)
+		// These slots survive the whole match (loc_8c0322c0: dir_entry = *(r6+8)+(k<<4),
+		// dest = *(entry+8)). The body lands at key `charBase` (256x256 PAL8), the
+		// sub-parts at charBase+1.. (per loc_8c032ae0's incrementing counter `r11`).
+		//
+		// We dump the active char's directory run (charBase..charBase+run) as CLEAN
+		// PPMs keyed by directory key. The PPM format (P6, magenta=transparent) and
+		// the GFX2 selector walk above are UNCHANGED — this only adds the correct
+		// pixel source. Each part is twiddled (ScanOrder=0 for these slots) → use the
+		// existing detwiddle path. Palette = live Dat_Pal (player+0x164) for PAL8.
+		// =====================================================================
+		{
+			char dmn[96]; snprintf(dmn, sizeof dmn, "/dev/shm/PL%02X_dm00.manifest", cid);
+			FILE* dmf = fopen(dmn, "a");
+			if (dmf && ftell(dmf) == 0)
+				fprintf(dmf, "# key w h fmt texptr e4 ppm  (DM00 directory — clean persistent decoded parts)\n");
+			int dmDumped = 0;
+			// Walk the directory from charBase; the char's parts form a contiguous run.
+			// Stop after a short blank run (the run for one entity is small, ~16-24).
+			int blanks = 0;
+			for (int k = charBase; k < charBase + 64; k++) {
+				if (k < 0) continue;
+				uint32_t e   = dirBase + (uint32_t)k * 0x10;
+				uint32_t e0  = addrspace::read32(e);
+				uint32_t e4d = addrspace::read32(e + 4);
+				uint32_t e8d = addrspace::read32(e + 8);
+				int dw = (int)(e0 & 0xffff), dh = (int)((e0 >> 16) & 0xffff);
+				if (dw <= 0 || dh <= 0 || dw > 512 || dh > 512 || !_ramAddr(e8d)) {
+					if (++blanks > 2) break;     // end of this entity's contiguous run
+					continue;
+				}
+				blanks = 0;
+				int dfmt = partFmtFromE4(e4d);                 // e4 byte1 -> PVR PixelFmt
+				bool dlinear = false;                          // DM00 slots are twiddled
+				// PAL8/PAL4 use the live Dat_Pal; 16-bit formats ignore palBase.
+				char dpfn[96]; snprintf(dpfn, sizeof dpfn, "PL%02X_dm00_%03d.ppm", cid, k);
+				char dpfp[112]; snprintf(dpfp, sizeof dpfp, "/dev/shm/%s", dpfn);
+				partDecodeToPPM(e8d, dw, dh, dfmt, dlinear, palP, dpfp, false);
+				if (dmf) fprintf(dmf, "%d %d %d %d %08x %08x %s\n", k, dw, dh, dfmt, e8d, e4d, dpfn);
+				dmDumped++;
+			}
+			if (dmf) fclose(dmf);
+			if (lg) fprintf(lg, "[CHAR] DM00 CLEAN dump: charBase=%d dumped %d entries (key range %d..) -> %s\n",
+			                charBase, dmDumped, charBase, dmn);
+		}
 	}
 	if (lg) { fprintf(lg, "\ndumped %d parts this frame\n", dumpedTotal); fclose(lg); }
 }
