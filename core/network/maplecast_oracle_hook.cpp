@@ -1590,7 +1590,8 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 struct PassStats {
 	int op, pt, tr;       // PolyParam list sizes (raw, pre-filter)
 	int sprite;           // kept sprite quads (s_nscreen)
-	int bodyBand;         // kept sprite quads with center y in [120,440] (body region)
+	int bodyBand;         // kept sprite quads with center y in [60,440] (playfield incl HUD)
+	int realBody;         // kept sprite quads with center y in [200,460] (TRUE body, excl HUD)
 	int isRTT;            // ctx->rend.isRTT (FB_W_SOF1 & 0x1000000) — logged to CONFIRM
 };
 
@@ -1718,14 +1719,26 @@ static void collectScreenQuads(rend_context& rc, PassStats* ps = nullptr)
 	// STAF parse) — the discriminator frameFlush uses to pick the character pass
 	// without depending on isRTT alone.
 	int bodyBand = 0;
-	for (int k = 0; k < s_nscreen; k++)
-		if (s_screen[k].cy >= 60.f && s_screen[k].cy <= 440.f) bodyBand++;
+	// realBody: TRUE body region only (center y in [200,460]) — EXCLUDES the HUD band
+	// (life bars / meters / portraits / timer live at y<~120). The live evidence on this
+	// build/state shows the HUD/composite pass carries tr=40-52 with bodyBand>0 because
+	// bodyBand[60,440] still counts HUD sprites; tightening to [200,460] isolates the real
+	// on-screen body parts (the captured body objects were at y 231-439). This is the
+	// character-pass discriminator (>=N realBody) — see frameFlush. The stale "tr>=500"
+	// figure was never real on this build; realBody is the robust gate.
+	int realBody = 0;
+	for (int k = 0; k < s_nscreen; k++) {
+		float cy = s_screen[k].cy;
+		if (cy >= 60.f  && cy <= 440.f) bodyBand++;
+		if (cy >= 200.f && cy <= 460.f) realBody++;
+	}
 	if (ps) {
 		ps->op = (int)rc.global_param_op.size();
 		ps->pt = (int)rc.global_param_pt.size();
 		ps->tr = (int)rc.global_param_tr.size();
 		ps->sprite = s_nscreen;
 		ps->bodyBand = bodyBand;
+		ps->realBody = realBody;
 		// isRTT filled by caller (it owns ctx->rend).
 	}
 
@@ -1970,6 +1983,17 @@ static void mc_r2Log(u32 frame, int tappOp, int tappPt, int tappTr, int tspr)
 // touch rqueue, never write guest RAM. Gated MAPLECAST_CHARQ + in-match (0x8C289624).
 static bool mc_charqEnabled = (getenv("MAPLECAST_CHARQ") != nullptr);
 
+// CHARQ character-pass discriminator threshold: the minimum number of kept sprite quads
+// whose center y falls in the TRUE body region [200,460] (excludes the HUD band y<~120)
+// required to treat a STARTRENDER pass as the CHARACTER pass and emit the JSONL. The live
+// body capture on this build had 34 body-region screen quads at y 231-439, so any modest
+// floor isolates a real on-screen body. Env-overridable (MAPLECAST_CHARQ_REALBODY_MIN).
+static const int CHARQ_REALBODY_MIN = []{
+	const char* e = getenv("MAPLECAST_CHARQ_REALBODY_MIN");
+	int v = e ? atoi(e) : 5;
+	return (v > 0) ? v : 5;
+}();
+
 void mc_oracle_charPassCapture(void* ctxv)
 {
 	if (!mc_charqEnabled || ctxv == nullptr) return;
@@ -1991,15 +2015,19 @@ void mc_oracle_charPassCapture(void* ctxv)
 	PassStats ps; memset(&ps, 0, sizeof ps);
 	collectScreenQuads(ctx->rend, &ps);
 	ps.isRTT = ctx->rend.isRTT ? 1 : 0;
-	bool isCharacterPass = (ps.tr >= 500 && ps.bodyBand > 0);
+	// CHARQ FIX (2026-06-09): the character pass is the one whose kept sprite quads include
+	// REAL body-region quads (center y in [200,460], excludes HUD). The old `tr>=500` gate
+	// NEVER passed on this build/state (the real pass has tr=40-52; the tr=2024 figure was
+	// stale). Gate on realBody instead so the JSONL writes whenever the body is on screen.
+	bool isCharacterPass = (ps.realBody >= CHARQ_REALBODY_MIN);
 	u32  vframe = addrspace::read32(0x8C3496B0);
 
 	static unsigned long s_charpassN = 0;
 	if ((s_charpassN++ % 30) == 0) {
 		fprintf(stderr,
-			"[CHARPASS] vframe=%u isRTT=%d op=%d pt=%d tr=%d sprite=%d bodyBand=%d -> %s "
+			"[CHARPASS] vframe=%u isRTT=%d op=%d pt=%d tr=%d sprite=%d bodyBand=%d realBody=%d -> %s "
 			"(STARTRENDER, pre-QueueRender)\n",
-			vframe, ps.isRTT, ps.op, ps.pt, ps.tr, ps.sprite, ps.bodyBand,
+			vframe, ps.isRTT, ps.op, ps.pt, ps.tr, ps.sprite, ps.bodyBand, ps.realBody,
 			isCharacterPass ? "CHARACTER(would-be-DROPPED body pass)" : "hud/composite");
 	}
 
@@ -2075,18 +2103,21 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 		// separates them. AND require at least one kept body-band sprite quad so a
 		// large non-character tr list (e.g. an effects-heavy super) still needs the
 		// body region populated. Both must hold.
-		isCharacterPass = (ps.tr >= 500 && ps.bodyBand > 0);
+		// CHARQ FIX (2026-06-09): gate on REAL body-region quads (center y in [200,460],
+		// excludes HUD), NOT `tr>=500` (which NEVER passed on this build — the real pass
+		// has tr=40-52). The JSONL now writes whenever the body is actually on screen.
+		isCharacterPass = (ps.realBody >= CHARQ_REALBODY_MIN);
 
-		// === CHARQ Phase-1 FIX (1, verify): per-pass log of isRTT + op/pt/tr + bodyBand,
-		// throttled, so the operator can CONFIRM exactly which pass carries the body
-		// before we key on it. (The expert flagged this as the one thing to verify.)
+		// === CHARQ Phase-1 FIX (1, verify): per-pass log of isRTT + op/pt/tr + bodyBand +
+		// realBody, throttled, so the operator can CONFIRM exactly which pass carries the
+		// body before we key on it. (The expert flagged this as the one thing to verify.)
 		static unsigned long s_passLogN = 0;
 		if (inMatch && (s_passLogN++ % 30) == 0) {
 			fprintf(stderr,
 				"[ORACLE-PASS] vframe=%u localFrame=%u isRTT=%d op=%d pt=%d tr=%d "
-				"sprite=%d bodyBand=%d -> %s\n",
+				"sprite=%d bodyBand=%d realBody=%d -> %s\n",
 				addrspace::read32(0x8C3496B0), frame, ps.isRTT, ps.op, ps.pt, ps.tr,
-				ps.sprite, ps.bodyBand, isCharacterPass ? "CHARACTER" : "hud/composite");
+				ps.sprite, ps.bodyBand, ps.realBody, isCharacterPass ? "CHARACTER" : "hud/composite");
 		}
 
 		attributeScreenQuads();
