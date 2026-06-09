@@ -44,6 +44,11 @@ void mc_oracleInit();
 // synchronously inside an SH4 block in non-threaded mode). No-op when the probe
 // is disabled.
 void mc_probeCheckReload();
+// mc_probeReloadPending(): peek the pending flag (does NOT consume it). Call from
+// Emulator::vblank() (emu thread, per-frame): when true, Stop() the SH4 so Run()
+// returns to the emu-loop boundary where mc_probeApplyReload()+ResetCache() run —
+// the SAME Stop()->boundary->Start() dance the rollback deferred-rewind uses.
+bool mc_probeReloadPending();
 // mc_probeApplyReload(): SH4-THREAD reload. Call at the emu-loop boundary right
 // AFTER runInternal() returns (SH4 fully paused — the same context the rollback
 // deferred-rewind uses for bm_Reset/ResetCache). If a reload is pending it

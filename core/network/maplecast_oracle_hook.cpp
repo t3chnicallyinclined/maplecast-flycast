@@ -2106,6 +2106,20 @@ static int mc_probeWatchPeriod() {
 	return P;
 }
 
+// Diagnostic toggle: MAPLECAST_ORACLE_PROBE_DEBUG=1 prints watcher/apply traces.
+static bool mc_probeDebug() {
+	static const bool D = getenv("MAPLECAST_ORACLE_PROBE_DEBUG") != nullptr;
+	return D;
+}
+
+// Peek the pending flag WITHOUT consuming it. Called from Emulator::vblank()
+// (emu thread, per-frame) to decide whether to Stop() the SH4 so the emu-loop
+// boundary can apply+flush. mc_probeApplyReload() does the consuming exchange.
+bool mc_probeReloadPending() {
+	if (!mc_probeEnabledStatic) return false;
+	return s_probeReloadPending.load(std::memory_order_acquire);
+}
+
 void mc_probeCheckReload() {
 	if (!mc_probeEnabledStatic) return;                 // probe OFF -> never watch/flush
 	if (s_probeReloadPending.load(std::memory_order_relaxed)) return;  // apply still owes us a flush
@@ -2115,12 +2129,19 @@ void mc_probeCheckReload() {
 	// m==0 means the file vanished. Treat a vanish as a change too (apply will
 	// clear all probes). Only act when the value actually differs from what we
 	// last applied, so a steady file is a pure stat() with no flush.
+	if (mc_probeDebug())
+		fprintf(stderr, "[ORACLE-PROBE-DBG] watch: stat=%lld stored=%lld %s\n",
+		        m, s_probeConfMtime, (m != s_probeConfMtime) ? "CHANGED->pending" : "same");
 	if (m != s_probeConfMtime)
 		s_probeReloadPending.store(true, std::memory_order_release);
 }
 
 bool mc_probeApplyReload() {
 	if (!mc_probeEnabledStatic) return false;
+	static unsigned long s_applyTicks = 0;
+	if (mc_probeDebug() && (++s_applyTicks % 120 == 0))
+		fprintf(stderr, "[ORACLE-PROBE-DBG] apply: alive (tick=%lu, pending=%d)\n",
+		        s_applyTicks, (int)s_probeReloadPending.load(std::memory_order_relaxed));
 	if (!s_probeReloadPending.exchange(false, std::memory_order_acq_rel)) return false;
 
 	const char* path = mc_probeConfPath();
