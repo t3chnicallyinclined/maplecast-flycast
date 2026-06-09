@@ -2144,11 +2144,20 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 		}
 	}
 
-	// Capacity guard so a long session can't fill /dev/shm.
-	static const long ORACLE_CAP = 64L * 1024 * 1024;
+	// Capacity guard so a long session can't fill /dev/shm. TRUNCATE-AND-REWIND:
+	// when the file crosses the cap we re-open it with O_TRUNC ("w") and continue
+	// appending fresh frames from byte 0. This keeps the JSONL small AND always
+	// current (recent frames only) — exactly what an aligned (quads+VRAM) tail grab
+	// needs. The previous behavior (set full=true, stop forever at 64 MiB) froze the
+	// on-disk tail ~96s stale while the live hook kept advancing. Default cap 16 MiB,
+	// env-overridable via MAPLECAST_ORACLE_JSONL_CAP (bytes).
+	static const long ORACLE_CAP = []{
+		const char* v = getenv("MAPLECAST_ORACLE_JSONL_CAP");
+		if (v) { long c = atol(v); if (c >= (1L << 20)) return c; }   // floor 1 MiB
+		return 16L * 1024 * 1024;
+	}();
 	static FILE* of = nullptr;
 	static long  ow = 0;
-	static bool  full = false;
 
 	// DIAGNOSTIC: prove the flush is called + show fire totals AND the new
 	// per-frame screen-quad recovery (objs / screenQuads / attributed).
@@ -2197,17 +2206,36 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 	}
 	s_lastEmittedVframe = vframe;
 
-	if (!full) {
+	{
 		if (!of) {
-			of = fopen("/dev/shm/mc_oracle_hook.jsonl", "a");
-			if (of)
+			// First open: O_TRUNC ("w") so a stale 64 MiB file from a previous run is
+			// discarded — the tail must reflect THIS run's live frames immediately.
+			of = fopen("/dev/shm/mc_oracle_hook.jsonl", "w");
+			ow = 0;
+			if (of) {
+				setvbuf(of, nullptr, _IOFBF, 1 << 16);   // big buffer; we fflush per emit
 				fprintf(stderr, "[ORACLE-HOOK] first jsonl flush — frame=%u objs=%d quads=%d "
-				                "-> /dev/shm/mc_oracle_hook.jsonl\n", frame, s_nobj, s_nquad);
-			else
+				                "cap=%ldMiB (truncate-and-rewind) -> /dev/shm/mc_oracle_hook.jsonl\n",
+				        frame, s_nobj, s_nquad, ORACLE_CAP >> 20);
+			} else
 				fprintf(stderr, "[ORACLE-HOOK] FAILED to open /dev/shm/mc_oracle_hook.jsonl "
 				                "(errno path) — captured objs=%d but cannot write\n", s_nobj);
 		}
-		if (of && ow < ORACLE_CAP) {
+		// TRUNCATE-AND-REWIND at the cap: rewind to byte 0 and overwrite. freopen("w")
+		// re-opens the SAME path with O_TRUNC; the on-disk file shrinks to 0 then
+		// regrows with fresh frames, so the tail is never more than ~cap bytes stale
+		// and NEVER freezes.
+		if (of && ow >= ORACLE_CAP) {
+			of = freopen("/dev/shm/mc_oracle_hook.jsonl", "w", of);
+			ow = 0;
+			if (of) {
+				setvbuf(of, nullptr, _IOFBF, 1 << 16);
+				fprintf(stderr, "[ORACLE-HOOK] jsonl cap %ldMiB reached — rewound "
+				                "(truncate) to keep the tail live (frame=%u)\n",
+				        ORACLE_CAP >> 20, frame);
+			}
+		}
+		if (of) {
 			char b[2048]; int n = 0;
 			n  = snprintf(b, sizeof b, "{\"frame\":%u,\"objects\":[", frame);
 			ow += fwrite(b, 1, n, of);
@@ -2290,14 +2318,11 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 			}
 			n = snprintf(b, sizeof b, "]}\n");
 			ow += fwrite(b, 1, n, of);
-			fflush(of);
+			fflush(of);   // per-emit flush: the on-disk tail tracks the live frame
 			// Per-flush wrote-bytes (sampled with the periodic flush log above).
 			if ((s_flushCalls % 120) == 1)
-				fprintf(stderr, "[ORACLE-HOOK] flush wrote=%ld bytes (frame=%u objs=%d screenQuads=%d)\n",
-				        ow - owBefore, frame, s_nobj, s_nscreen);
-		} else if (of && ow >= ORACLE_CAP) {
-			full = true;
-			fprintf(stderr, "[ORACLE-HOOK] /dev/shm cap reached (%ld bytes) — stopping capture\n", ow);
+				fprintf(stderr, "[ORACLE-HOOK] flush wrote=%ld bytes total=%ld (frame=%u objs=%d screenQuads=%d)\n",
+				        ow - owBefore, ow, frame, s_nobj, s_nscreen);
 		}
 	}
 
