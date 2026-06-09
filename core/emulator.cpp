@@ -44,6 +44,7 @@
 #include "network/maplecast_audio.h"
 #include "network/maplecast_mirror.h"
 #include "network/maplecast_rollback.h"
+#include "network/maplecast_oracle_hook.h"   // generic-probe v2 no-restart live reload
 #include "network/maplecast_predictor.h"
 #include "network/replay_reader.h"
 #include "network/replay_writer.h"
@@ -1626,6 +1627,21 @@ void Emulator::start()
 							getSh4Executor()->Start();
 							continue;
 						}
+						// GENERIC PROBE v2 — no-restart live reload (SH4-THREAD apply
+						// half). runInternal() has returned, so the SH4 is fully PAUSED
+						// here on the emu thread — the SAME proven-safe context the
+						// rollback deferred-rewind above uses for bm_Reset/ResetCache.
+						// The render-thread watcher (mc_probeCheckReload in serverPublish)
+						// only sets a pending flag on a config-mtime change; THIS is where
+						// the config is re-parsed and, if the armed-PC set may have changed,
+						// the SH4 block cache is flushed so the recompiler re-runs
+						// mc_isHookedPC against the new probe set on subsequently-compiled
+						// blocks (re-injecting the block-entry GenCall at the new PCs).
+						// ResetCache() must NOT run inside a compiled block nor race the
+						// emu thread — both satisfied here. No-op (no flush) when nothing
+						// changed or the probe is disabled, so prod is unaffected.
+						if (maplecast_oracle_hook::mc_probeApplyReload())
+							getSh4Executor()->ResetCache();
 						// In replica mode we're not using GGPO, and
 						// ggpo::nextFrame() returns false when no GGPO
 						// session is active (_endOfFrame is never set),

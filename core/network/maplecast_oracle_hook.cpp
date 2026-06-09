@@ -36,6 +36,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <atomic>
+#ifndef _WIN32
+#include <sys/stat.h>   // stat() for config-mtime live-reload (v2)
+#endif
 
 namespace maplecast_oracle_hook
 {
@@ -159,20 +163,44 @@ static bool mc_asmTraceEnabled = (getenv("MAPLECAST_ASMTRACE") != nullptr);
 // force-splits at the ASMTRACE PC (0x8C034864) — shared, no extra hook needed.
 static bool mc_bodyCapEnabled = (getenv("MAPLECAST_BODYCAP") != nullptr);
 
-// CHARQ-RENDER (MAPLECAST_CHARQ_RENDER) — THE SOURCE-OF-TRUTH per-part body quad:
-// the SH4 render's OWN final PVR list entries, NOT the flaky post-hoc ta_parse (which
-// depends on which TA pass flycast's single-slot rqueue keeps). Captures at the point
-// the per-character BODY geometry routine loc_8c0344d4 (bank03:10218) submits each
-// part to the bank12 PVR-list builder loc_8C1244B0 (bank12:9795), AFTER that builder
-// has fully resolved + written the final PVR poly record (PCW/ISP/TSP/TCW + the 4
-// transformed verts x,y,u,v) into the display list. CAPTURE PC = 0x8C1248CC
-// (bank12 `pref @r14`, right after the LAST record write and BEFORE the cursor
-// advances): r14 = recordBase+0x20, record at base..base+0x3F is COMPLETE
-// (base+0x08 = RESOLVED TCW = *(r12+8) | template[*(0x8C2AA508)[idx]+4]). Body-vs-HUD
-// filter: Sh4cntx.pr == 0x0C03487A (the loc_8c0344d4 submit-jsr return; the other ~7
-// callers of loc_8C1244B0 are HUD/effects with different pr). READ-ONLY (addrspace
-// reads + /dev/shm append). Forces the master gate so rec_x64 injects + the decoder
-// force-splits at 0x8C1248CC.
+// CHARQ-RENDER (MAPLECAST_CHARQ_RENDER) — THE DEFINITIVE source-of-truth per-part
+// body quad capture: the SH4 render's OWN final PVR list entries, NOT the flaky
+// post-hoc ta_parse (which depends on which TA pass flycast's single-slot rqueue
+// keeps). Captures at the point the per-character BODY geometry routine loc_8c0344d4
+// (bank03:10218) submits each part to the bank12 PVR-list builder loc_8C1244B0
+// (bank12:9795), AFTER that builder has fully resolved + written the final PVR poly
+// record (PCW/ISP/TSP/TCW + the 4 transformed verts x,y,u,v) into the display list.
+//
+// THE CAPTURE PC = 0x8C1248CC (bank12, instruction #60 after loc_8c124856, the
+// `pref @r14` right after the LAST record write `mov.l r1,@(0x3C,r14)` @bank12 and
+// BEFORE the three `add 0x20,r14` cursor advances). At this PC:
+//   r14   = recordBase + 0x20  (ONE `add 0x20,r14` @0x8C12487E has run; record base
+//           = r14 - 0x20). The record at base..base+0x3F (0x40 bytes) is COMPLETE:
+//             base+0x00 = PCW   (*(r12+0) | template_pcw)
+//             base+0x04 = ISP   (*(r12+4))
+//             base+0x08 = TCW   (*(r12+8) | template_tcw[*(0x8C2AA508)[idx]+4]) <-- RESOLVED
+//                         low bits = VRAM texel address, fmt bits, palette bank
+//             base+0x0C/+0x10  = *(r12+0xC)/*(r12+0x10)
+//             base+0x14 = TSP/pal extra ((transform<<24) | *(r13+0x3C))
+//             base+0x20.. = vertex block: 4 verts (x,y,u,v) from the world->screen
+//                         transform (bsr loc_8c124d80), sourced from r10/r11.
+//   r13   = the per-part quad/geometry record (= caller's r15+0x2C, untouched).
+//   Sh4cntx.pr = the JSR RETURN address of the caller's submit jsr. For the BODY
+//           render (loc_8c0344d4) that jsr is @0x8C034876 -> pr = 0x8C03487A. THAT
+//           value is the body-vs-HUD discriminator: loc_8C1244B0 is also called from
+//           ~7 other sites (HUD/effects) with DIFFERENT return addresses, so we only
+//           capture when pr (area-masked) == 0x0C03487A.
+//
+// Per body part we read the 0x40-byte PVR record straight from guest RAM (no need to
+// re-derive the PVR sprite encoding — the consumer decodes it with flycast's own TA
+// sprite parser), plus pcw/isp/tcw/tsp split out, keyed by the owning character
+// (node base via the caller's r14 — but at THIS PC the caller's node isn't in a reg;
+// we recover it from r13's owning slot via the SAME 6-base match the rest of the file
+// uses, falling back to the active P1/P2 bodies). Accumulated per (cid, vframe); a
+// JSON object per character per video frame is flushed to
+// /dev/shm/mc_charq_render.jsonl (truncate-and-rewind at the cap). READ-ONLY
+// (addrspace reads + /dev/shm append) -> determinism-safe. Forces the master gate so
+// rec_x64 injects the GenCall + the decoder force-splits at 0x8C1248CC.
 static bool mc_charqRenderEnabled = (getenv("MAPLECAST_CHARQ_RENDER") != nullptr);
 
 // ===========================================================================
@@ -187,13 +215,26 @@ static bool mc_charqRenderEnabled = (getenv("MAPLECAST_CHARQ_RENDER") != nullptr
 // existing JIT-hook infrastructure: mc_isHookedPC (so rec_x64 injects the GenCall and
 // decoder.cpp force-splits mid-block PCs) + the masked-PC (& 0x1FFFFFFF) convention.
 //
-// v1 (this) parses the config ONCE at static-init (before any block compiles), so the
-// recompiler's compile-time mc_isHookedPC gate is correct from the first block — no
-// runtime block-flush needed. To RECONFIGURE you restart the process (the standard
-// "edit config + restart" loop). [v2, NOT built: a SIGHUP handler could re-parse the
-// config and call bm_Reset() to flush all compiled blocks so the recompiler re-runs
-// mc_isHookedPC against the new PC set — enabling no-restart reconfig. Deliberately
-// out of scope here to keep v1 small and determinism-trivially-safe.]
+// v1 parses the config ONCE at static-init (before any block compiles), so the
+// recompiler's compile-time mc_isHookedPC gate is correct from the first block.
+//
+// v2 (BUILT) adds NO-RESTART live reload: edit the config and the armed-PC set updates
+// within ~1s with no service restart. Two cooperating halves, split for safety:
+//   * mc_probeCheckReload() — RENDER-THREAD watcher (called from serverPublish): a
+//     throttled stat() of the config; on a changed mtime it sets a pending flag ONLY.
+//     It never parses the table nor touches the block cache, so it is safe even when
+//     serverPublish runs synchronously inside an SH4 block (non-threaded mode).
+//   * mc_probeApplyReload() — SH4-THREAD apply (called from the emu loop right AFTER
+//     runInternal() returns, where the SH4 is fully paused — the SAME context the
+//     rollback deferred-rewind uses for bm_Reset/ResetCache). It re-parses into a temp
+//     buffer (parse-error-safe), swaps the live set, and returns true so the caller
+//     flushes the block cache (getSh4Executor()->ResetCache()), forcing the recompiler
+//     to re-run mc_isHookedPC against the new PC set on subsequently-compiled blocks.
+// The flush is DEFERRED to the SH4-paused boundary precisely because ResetCache() frees
+// compiled blocks: running it inside a hooked block (the GenCall) or on the render
+// thread would free the executing block / race the SH4 -> crash. Determinism-safe
+// (the handler stays READ-ONLY w.r.t. guest; the flush is the same one a guest-
+// triggered loadstate/reset performs).
 //
 // READ-ONLY w.r.t. guest: the handler only reads Sh4cntx.r[] + addrspace::read* and
 // appends to /dev/shm/mc_probe.log. Gated MAPLECAST_ORACLE_PROBE; default OFF -> the
@@ -314,22 +355,27 @@ static bool mc_probeParseTok(const char* t, int len, ProbeTok* tk) {
 	return false;
 }
 
-// Parse the whole config file into s_probes[]. Run ONCE at static init (below) so the
-// recompiler's mc_isHookedPC sees the probe PCs before the first block compiles. Pure
-// stdio (no guest state) -> safe at static-init time. Silent (a stderr summary is
-// printed once from mc_oracleInit when the operator's serverPublish loop starts).
-static int s_probeParsed = 0;     // 0=not yet, 1=done (0 probes ok)
-static void mc_probeParseConfig() {
-	if (s_probeParsed) return;
-	s_probeParsed = 1;
-	s_nprobe = 0;
-	if (getenv("MAPLECAST_ORACLE_PROBE") == nullptr) return;   // gated OFF -> empty table
+// Resolve the config path (env override or the /dev/shm default). Shared by the
+// initial parse, the v2 mtime watch, and the v2 reload.
+static const char* mc_probeConfPath() {
 	const char* path = getenv("MAPLECAST_ORACLE_PROBE_CONF");
-	if (!path) path = "/dev/shm/mc_oracle_probe.conf";
+	return path ? path : "/dev/shm/mc_oracle_probe.conf";
+}
+
+// Parse the config file at `path` into the caller-supplied probe array `out`
+// (capacity MC_PROBE_MAX), writing the count to *outN. Returns:
+//    1  = parsed OK (>=0 probes; 0 = file present but armed nothing)
+//    0  = file could not be opened (missing) — caller decides (clear vs keep)
+//   -1  = (reserved; this parser never hard-fails: bad lines are skipped)
+// PURE stdio + the caller's buffer — NO guest state, NO shared s_probes[] write —
+// so it is safe to run at static-init time AND from the SH4-thread reload point.
+// `verbose` controls the per-probe stderr arming summary (on for init + reload).
+static int mc_probeParseInto(const char* path, Probe* out, int* outN, bool verbose) {
+	int n = 0;
 	FILE* f = fopen(path, "r");
-	if (!f) { fprintf(stderr, "[ORACLE-PROBE] config not found: %s (no probes armed)\n", path); return; }
+	if (!f) { *outN = 0; return 0; }
 	char line[512];
-	while (fgets(line, sizeof line, f) && s_nprobe < MC_PROBE_MAX) {
+	while (fgets(line, sizeof line, f) && n < MC_PROBE_MAX) {
 		// strip trailing newline/cr
 		int ln = (int)strlen(line);
 		while (ln > 0 && (line[ln-1]=='\n' || line[ln-1]=='\r')) line[--ln] = 0;
@@ -338,7 +384,7 @@ static void mc_probeParseConfig() {
 		if (*p == 0 || *p == '#') continue;
 		// field 1: pc_hex
 		char* sp = p; while (*sp && *sp!=' ' && *sp!='\t') sp++;
-		u32 pc; if (!mc_probeParseNum(p, (int)(sp-p), &pc)) { fprintf(stderr, "[ORACLE-PROBE] bad pc: %s\n", p); continue; }
+		u32 pc; if (!mc_probeParseNum(p, (int)(sp-p), &pc)) { if (verbose) fprintf(stderr, "[ORACLE-PROBE] bad pc: %s\n", p); continue; }
 		while (*sp==' '||*sp=='\t') sp++;
 		// field 2: label
 		char* lp = sp; while (*sp && *sp!=' ' && *sp!='\t') sp++;
@@ -347,7 +393,7 @@ static void mc_probeParseConfig() {
 		// field 3: dumpspec (comma list, no spaces)
 		char* dp = sp; while (*sp && *sp!=' ' && *sp!='\t') sp++;
 		int dsLen = (int)(sp-dp); if (dsLen <= 0) continue;
-		Probe& pr = s_probes[s_nprobe];
+		Probe& pr = out[n];
 		pr.pcMasked = pc & 0x1FFFFFFF;
 		int cpy = lblLen < (int)sizeof(pr.label)-1 ? lblLen : (int)sizeof(pr.label)-1;
 		memcpy(pr.label, lp, cpy); pr.label[cpy] = 0;
@@ -360,19 +406,66 @@ static void mc_probeParseConfig() {
 			if (te > tok) {
 				ProbeTok tk; memset(&tk, 0, sizeof tk);
 				if (mc_probeParseTok(tok, (int)(te-tok), &tk)) pr.toks[pr.ntok++] = tk;
-				else fprintf(stderr, "[ORACLE-PROBE] bad dumpspec token '%.*s' (pc=0x%08X) skipped\n",
+				else if (verbose) fprintf(stderr, "[ORACLE-PROBE] bad dumpspec token '%.*s' (pc=0x%08X) skipped\n",
 				             (int)(te-tok), tok, pc);
 			}
 			if (!comma) break; tok = comma + 1;
 		}
 		if (pr.ntok > 0) {
-			fprintf(stderr, "[ORACLE-PROBE] armed pc=0x%08X (masked 0x%08X) label=%s tokens=%d\n",
+			if (verbose) fprintf(stderr, "[ORACLE-PROBE] armed pc=0x%08X (masked 0x%08X) label=%s tokens=%d\n",
 			        pc, pr.pcMasked, pr.label, pr.ntok);
-			s_nprobe++;
+			n++;
 		}
 	}
 	fclose(f);
-	fprintf(stderr, "[ORACLE-PROBE] %d probe(s) armed from %s\n", s_nprobe, path);
+	*outN = n;
+	return 1;
+}
+
+// === v2 LIVE-RELOAD STATE ===================================================
+// Last config mtime we acted on. The render-thread watcher (mc_probeCheckReload)
+// stat()s the file and, on a CHANGED mtime, sets s_probeReloadPending. The
+// SH4-thread boundary (mc_probeApplyReload, called right after runInternal()
+// returns) re-parses + signals the caller to flush the block cache. Splitting
+// detection (render thread) from the parse+flush (SH4 thread, SH4 paused) is the
+// CRITICAL safety property: bm/ResetCache must NEVER run inside a compiled block
+// nor race the SH4 thread.
+static std::atomic<bool> s_probeReloadPending{false};   // set by watcher, cleared by apply
+static long long          s_probeConfMtime = 0;          // last acted-on mtime (ns or s)
+static int                s_probeWatchTick = 0;          // frame throttle for the stat()
+
+// Record the current config mtime so the first watcher tick after init doesn't
+// immediately re-trigger a (redundant) reload. Returns the mtime (0 if no file).
+static long long mc_probeStatMtime(const char* path) {
+#ifndef _WIN32
+	struct stat st;
+	if (stat(path, &st) != 0) return 0;
+#if defined(__APPLE__)
+	return (long long)st.st_mtimespec.tv_sec * 1000000000LL + st.st_mtimespec.tv_nsec;
+#else
+	return (long long)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec;
+#endif
+#else
+	(void)path; return 0;
+#endif
+}
+
+// Parse the config ONCE at static init (below) so the recompiler's mc_isHookedPC
+// sees the probe PCs before the first block compiles. Pure stdio (no guest state)
+// -> safe at static-init time. Also seeds s_probeConfMtime so the watcher only
+// fires on a SUBSEQUENT edit.
+static int s_probeParsed = 0;     // 0=not yet, 1=done (0 probes ok)
+static void mc_probeParseConfig() {
+	if (s_probeParsed) return;
+	s_probeParsed = 1;
+	s_nprobe = 0;
+	if (getenv("MAPLECAST_ORACLE_PROBE") == nullptr) return;   // gated OFF -> empty table
+	const char* path = mc_probeConfPath();
+	int n = 0;
+	int rc = mc_probeParseInto(path, s_probes, &n, /*verbose=*/true);
+	if (rc == 0) { fprintf(stderr, "[ORACLE-PROBE] config not found: %s (no probes armed)\n", path); }
+	else         { s_nprobe = n; fprintf(stderr, "[ORACLE-PROBE] %d probe(s) armed from %s\n", s_nprobe, path); }
+	s_probeConfMtime = mc_probeStatMtime(path);   // seed so the watcher only fires on a later edit
 }
 
 // Static-init trigger: parse the config before any guest block compiles so the
@@ -557,13 +650,16 @@ static const u32 PC_ASM_PART_M = PC_ASM_PART & SH4_AREA_MASK;  // 0x0C034864
 // CHARQ-RENDER: the per-part PVR-list-record completion PC inside loc_8C1244B0
 // (bank12). At 0x8C1248CC (`pref @r14`, right after the final record write and before
 // the cursor advances) the 0x40-byte PVR poly record at r14-0x20 is fully resolved.
+// Mid-block -> the decoder force-split makes it a block start; mc_isHookedPC returns
+// true so rec_x64 injects the GenCall.
 static const u32 PC_CHARQ_SUBMIT   = 0x8C1248CC;
 static const u32 PC_CHARQ_SUBMIT_M = PC_CHARQ_SUBMIT & SH4_AREA_MASK;  // 0x0C1248CC
 // The body render's submit-jsr return address (loc_8c0344d4: jsr @0x8C034876 ->
-// pr = 0x8C03487A). This pr at PC_CHARQ_SUBMIT identifies the BODY caller (vs the ~7
-// HUD/effect callers of loc_8C1244B0, which have other pr's).
+// pr = 0x8C034876 + 4 = 0x8C03487A). This pr value at PC_CHARQ_SUBMIT identifies the
+// BODY caller (vs the ~7 HUD/effect callers of loc_8C1244B0, which have other pr's).
 static const u32 PC_BODY_SUBMIT_RET   = 0x8C03487A;
 static const u32 PC_BODY_SUBMIT_RET_M = PC_BODY_SUBMIT_RET & SH4_AREA_MASK;  // 0x0C03487A
+// Record geometry inside the PVR display list written by loc_8C1244B0.
 static const u32 CHARQ_REC_OFF   = 0x20;   // r14 at PC_CHARQ_SUBMIT = base + 0x20
 static const u32 CHARQ_REC_BYTES = 0x40;   // poly header 0x20 + one vertex block 0x20
 // loc_8c0344d4 body-routine stack slots (relative to the ADJUSTED r15 after the
@@ -1563,7 +1659,7 @@ static void charqFlushFrame(u32 vframe)
 static void mc_charqRenderHandler(const u32* r)
 {
 	// DIAG (one-shot): prove the handler is REACHED + reveal the actual caller pr's, so
-	// we can confirm/adjust the body-vs-HUD filter on live. Logs the first 16 distinct pr
+	// we can confirm/adjust the body-vs-HUD filter on live. Logs the first 8 distinct pr
 	// values seen (area-masked + raw) regardless of the filter below.
 	{
 		static u32  s_prSeen[16]; static int s_prN = 0; static unsigned long s_reach = 0;
@@ -1620,7 +1716,6 @@ static void mc_charqRenderHandler(const u32* r)
 	q.tsp = q.rec[5];      // base+0x14  (TSP/pal extra)
 	o->nparts++;
 }
-
 
 // ===========================================================================
 // BODYCAP (MAPLECAST_BODYCAP) — body part DECODED pixels keyed by the RENDER selector.
@@ -1818,7 +1913,8 @@ void mc_oracleInit()
 		        mc_decodeQuadsEnabled ? " (+DECODE quad sub-flag at 0x8C033EC0)" : "");
 	if (mc_probeEnabledStatic)
 		fprintf(stderr, "[ORACLE-PROBE] GENERIC probe ENABLED (READ-ONLY) — %d PC(s) armed from config; "
-		                "dumps -> /dev/shm/mc_probe.log. Edit config + restart to reconfigure (no recompile).\n",
+		                "dumps -> /dev/shm/mc_probe.log. v2 LIVE RELOAD: edit the config -> the probe set "
+		                "updates within ~1s, NO restart (block cache auto-flushed at the SH4 frame boundary).\n",
 		        s_nprobe);
 	if (mc_probeEnabled)
 		fprintf(stderr, "[ORACLE-PROBE] ENABLED (Phase 0, READ-ONLY) — body quad-count tbl "
@@ -1975,6 +2071,90 @@ static bool mc_probeHandler(const u32* r, u32 mpc)
 	return true;
 }
 
+// === v2 LIVE-RELOAD — watcher + apply (THE no-restart reconfig) =============
+//
+// WATCHER (mc_probeCheckReload): runs on the RENDER thread from serverPublish
+// (a frame boundary, but NOT a guaranteed SH4-paused point — in non-threaded
+// mode serverPublish executes synchronously inside the SH4's STARTRENDER write,
+// i.e. a dynarec block can be on the C++ stack). So the watcher ONLY does the
+// cheap stat() + sets the atomic pending flag. It NEVER parses into s_probes[]
+// and NEVER touches the block cache. Throttled to every Nth frame.
+//
+// APPLY (mc_probeApplyReload): runs on the SH4 thread at the emu-loop boundary,
+// right AFTER runInternal() returns (emulator.cpp) — the SAME proven-safe context
+// the rollback deferred-rewind uses to call emu.loadstate()->bm_Reset/ResetCache.
+// The SH4 is fully paused there (no block on the stack, not racing the emu thread).
+// It re-parses into a TEMP buffer (so a parse miss / empty file keeps or clears
+// deliberately, never corrupts the live set), swaps it into s_probes[] under the
+// understanding that the cache flush the caller then performs re-runs the
+// compile-time mc_isHookedPC gate against the NEW set. Returns true IFF the caller
+// should flush the block cache (i.e. the armed PC set may have changed).
+//
+// Gated: when MAPLECAST_ORACLE_PROBE is unset, mc_probeEnabledStatic is false and
+// BOTH functions are no-ops (the watcher returns immediately, apply returns false),
+// so prod (probe OFF) pays nothing and never flushes.
+
+// How often (in frames) the render-thread watcher stat()s the config. ~30 frames
+// @60fps = ~0.5s detect latency; apply lands the next SH4 frame -> ~1s end-to-end,
+// well inside the ~1-2s no-restart target. Override via env (>=1).
+static int mc_probeWatchPeriod() {
+	static const int P = []{
+		const char* v = getenv("MAPLECAST_ORACLE_PROBE_WATCH");
+		if (v) { int n = atoi(v); if (n >= 1) return n; }
+		return 30;
+	}();
+	return P;
+}
+
+void mc_probeCheckReload() {
+	if (!mc_probeEnabledStatic) return;                 // probe OFF -> never watch/flush
+	if (s_probeReloadPending.load(std::memory_order_relaxed)) return;  // apply still owes us a flush
+	if (++s_probeWatchTick < mc_probeWatchPeriod()) return;
+	s_probeWatchTick = 0;
+	long long m = mc_probeStatMtime(mc_probeConfPath());
+	// m==0 means the file vanished. Treat a vanish as a change too (apply will
+	// clear all probes). Only act when the value actually differs from what we
+	// last applied, so a steady file is a pure stat() with no flush.
+	if (m != s_probeConfMtime)
+		s_probeReloadPending.store(true, std::memory_order_release);
+}
+
+bool mc_probeApplyReload() {
+	if (!mc_probeEnabledStatic) return false;
+	if (!s_probeReloadPending.exchange(false, std::memory_order_acq_rel)) return false;
+
+	const char* path = mc_probeConfPath();
+	// Re-stat HERE so we record the mtime we actually parsed (the file may have
+	// been edited again between the watcher's stat and now); this also prevents a
+	// rapid second edit from being missed (if it changed again, the next watcher
+	// tick will see a new mtime and re-arm).
+	long long m = mc_probeStatMtime(path);
+
+	Probe tmp[MC_PROBE_MAX];
+	int tmpN = 0;
+	int rc = mc_probeParseInto(path, tmp, &tmpN, /*verbose=*/true);
+
+	if (rc == 0) {
+		// File missing/unreadable: clear all probes (per the edge-case spec) and
+		// still flush once so the GenCall stops being injected at the old PCs.
+		fprintf(stderr, "[ORACLE-PROBE] reload: config gone (%s) -> clearing all probes + flush\n", path);
+		s_nprobe = 0;
+		s_probeConfMtime = m;   // 0; a re-create bumps it -> re-arm
+		return true;
+	}
+
+	// Successful parse (tmpN may be 0 = an intentionally empty/all-comment file).
+	// Swap the temp set in. The caller's cache flush re-runs mc_isHookedPC against
+	// this new set on every subsequently-compiled block, re-injecting (or removing)
+	// the block-entry GenCall at the new (or old) PCs.
+	memcpy(s_probes, tmp, sizeof(Probe) * (tmpN < 0 ? 0 : tmpN));
+	s_nprobe = tmpN;
+	s_probeConfMtime = m;
+	fprintf(stderr, "[ORACLE-PROBE] LIVE RELOAD applied: %d probe(s) from %s -> flushing block cache "
+	                "(no restart)\n", s_nprobe, path);
+	return true;
+}
+
 // Per-PC fire counters (DIAGNOSTIC, gated). The previous proof-of-life used a
 // SINGLE shared one-shot flag, so once QUAD_EMIT fired first it consumed the log
 // and we could NOT tell whether OBJ_BEGIN ever fires. These split counters answer
@@ -1988,8 +2168,6 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 	// Read-only. All guest regs coherent in Sh4cntx.r[] at this injection point.
 	const u32* r = Sh4cntx.r;
 
-	// Mask to the SH4 external area so we route correctly whether the recompiler
-	// passed the cached (0x8C..) or physical (0x0C..) alias of the PC.
 	// Mask to the SH4 external area so we route correctly whether the recompiler
 	// passed the cached (0x8C..) or physical (0x0C..) alias of the PC.
 	u32 mpc = pc & SH4_AREA_MASK;
@@ -2037,8 +2215,8 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 	}
 
 	// CHARQ-RENDER per-part PVR-record capture — loc_8C1244B0 completion PC (0x8C1248CC).
-	// Filters to the BODY caller by Sh4cntx.pr inside the handler. Accumulates per
-	// (cid, vframe) -> /dev/shm/mc_charq_render.jsonl.
+	// Filters to the BODY caller by Sh4cntx.pr inside the handler. Independent of the
+	// per-frame oracle buffer; accumulates per (cid, vframe) -> /dev/shm/mc_charq_render.jsonl.
 	if (mpc == PC_CHARQ_SUBMIT_M) {
 		if (mc_charqRenderEnabled) mc_charqRenderHandler(r);
 		return;
@@ -2084,10 +2262,10 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 			                "node=0x%08X\n", pc, mpc, r[4]);
 		u32 node = norm(r[4]);
 		if (!inRam(node)) return;
-		// CHARQ-RENDER run segmentation (satellite path). Satellites render via
-		// loc_8c030af8 + a DIFFERENT submit jsr, so the pr filter rejects satellite
-		// parts — but we still update the begin node so a body run after a satellite
-		// re-opens correctly.
+		// CHARQ-RENDER run segmentation (satellite path). NOTE: satellites render via
+		// loc_8c030af8 + a DIFFERENT submit jsr, so the pr filter (0x0C03487A) in the
+		// charq handler will reject satellite parts — but we still update the begin node
+		// so a body run that follows a satellite is correctly re-opened.
 		if (mc_charqRenderEnabled) {
 			u32 cnode = node | 0x0C000000u;
 			s_charqBeginNode = cnode;

@@ -36,6 +36,23 @@ extern bool mc_oracleHookEnabled;
 // One-time init from env. Safe to call multiple times.
 void mc_oracleInit();
 
+// === GENERIC PROBE v2 — no-restart live reload =============================
+// mc_probeCheckReload(): RENDER-THREAD watcher. Call once/frame from a frame
+// boundary (serverPublish). Cheap: throttled stat() of the probe config; on a
+// changed mtime it sets an internal pending flag. NEVER parses the probe table
+// and NEVER touches the block cache (so it is safe even when serverPublish runs
+// synchronously inside an SH4 block in non-threaded mode). No-op when the probe
+// is disabled.
+void mc_probeCheckReload();
+// mc_probeApplyReload(): SH4-THREAD reload. Call at the emu-loop boundary right
+// AFTER runInternal() returns (SH4 fully paused — the same context the rollback
+// deferred-rewind uses for bm_Reset/ResetCache). If a reload is pending it
+// re-parses the config into the live probe table and returns TRUE, meaning the
+// caller MUST flush the SH4 block cache (getSh4Executor()->ResetCache()) so the
+// recompiler re-runs mc_isHookedPC against the new probe-PC set. Returns false
+// (no flush needed) when nothing changed or the probe is disabled.
+bool mc_probeApplyReload();
+
 // Fast membership test used by the recompiler at COMPILE time (once per block
 // compile, not per execution) to decide whether to inject the hook call.
 bool mc_isHookedPC(u32 pc);

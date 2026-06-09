@@ -1759,6 +1759,14 @@ void serverPublish(TA_context* ctx)
 	// frame's SH4 draw walk. serverPublish runs once per frame AFTER that walk
 	// completes, so it is the natural frame boundary. No-op when the hook is OFF.
 	maplecast_oracle_hook::mc_oracleInit();   // one-time stderr log if enabled
+	// GENERIC PROBE v2 — no-restart live reload (RENDER-THREAD watcher half). Cheap
+	// throttled stat() of /dev/shm/mc_oracle_probe.conf; on a changed mtime it sets
+	// an internal pending flag ONLY. The actual re-parse + block-cache flush runs on
+	// the SH4 thread at the emu-loop boundary (mc_probeApplyReload, emulator.cpp) —
+	// NEVER here, because in non-threaded mode serverPublish runs synchronously inside
+	// the SH4's STARTRENDER write (a dynarec block can be on the stack). No-op when
+	// the probe is disabled.
+	maplecast_oracle_hook::mc_probeCheckReload();
 	// Pass the live ctx so the flush can ta_parse() the completed frame and recover
 	// the per-frame SCREEN quads (real screen x,y) to attribute per OBJ_BEGIN object.
 	//
