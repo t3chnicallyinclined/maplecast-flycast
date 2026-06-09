@@ -146,7 +146,7 @@ public:
 			// PC — proves whether the recompiler sees 0x8C.. or 0x0C.. (the never-fires
 			// root cause). One-shot per distinct vaddr to avoid log spam. Gated.
 			u32 lo = block->vaddr & 0x1FFFFFFF;
-			if (lo == 0x0C03093C || lo == 0x0C033EC0) {
+			if (lo == 0x0C03093C || lo == 0x0C033EC0 || lo == 0x0C033ED0) {
 				static u32 lastLogged = 0;
 				if (block->vaddr != lastLogged) {
 					lastLogged = block->vaddr;

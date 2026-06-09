@@ -66,23 +66,28 @@ static bool mc_decodeHookEnabled = (getenv("MAPLECAST_DECODEHOOK") != nullptr);
 // selectors into 0x0CE60000). Forces the master gate so the recompiler injects.
 static bool mc_decodeTraceEnabled = (getenv("MAPLECAST_DECODETRACE") != nullptr);
 
-// QUADCAPTURE (MAPLECAST_QUADCAPTURE) — THE EXPERT-CONFIRMED LOAD-DECODE CAPTURE.
-// Hooks the quad-store inside loc_8c033e90 at its POST-WRITE PC 0x8C033EC0 (the same
-// PC the decode-quad sub-flag uses) and, per fire (once/part at character LOAD),
-// reads the part's freshly-decoded 4bpp PAL4 pixels out of the persistent
-// Texture_Decompress_Buffer 0x0CE60000 (work.asm:36) at r8=texptr and writes:
+// QUADCAPTURE (MAPLECAST_QUADCAPTURE) — THE EXPERT-CONFIRMED CLEAN-PIXEL CAPTURE.
+// Hooks the jsr-RETURN PC 0x8C033ED0 in loc_8c033e90 — the instruction right AFTER the
+// BYTE-LZSS decoder loc_8c0354c0 (jsr @r2 @bank03:9291) fills the part pixels. The emit
+// loop stores texptr=r8 to the quad at 0x8C033EBC, but the decoder doesn't run until the
+// jsr at 0x8C033ECC; it writes to r6 (= r8's value, `mov r8,r6` @9260) and r8 is NOT
+// advanced until 0x8C033ED4 — so at 0x8C033ED0 r8 points at the FRESHLY DECODED part.
+// (The earlier 0x8C033EC0 hook read r8 BEFORE the decode -> stripe-noise; this is the fix.)
+// DECODETRACE proved loc_8c0354c0 fires ~84k×/match: 0x0CE60000 is a PER-FRAME transient
+// scratch, so parts decode continuously DURING the match (not only at load) — capture
+// fires live in-match as poses change. Per fire (first-seen per char_id+selector) writes:
 //   /dev/shm/PL%02X_gfx1_%04u.ppm   P6, magenta = transparent (index 0)  [+6 selector]
 //   /dev/shm/PL%02X_raw_%04u.bin    RAW 4bpp indices (w*h/2 bytes) — offline-palette fallback
 //   /dev/shm/PL%02X_gfx1.manifest   "<selector> <palRow> <w> <h> <texptr> <node> <char_id> <palettePtr> <ppm> <raw>"
 //   /dev/shm/mc_quadcapture.log     per-fire trace
-// Per the RE expert (marvelous2 bank03 loc_8c033e90 quad emit, reconcile-against-live):
-//   node=r10, sel=read_u16(r13+6), texptr=r8 (absolute into 0x0CE60000),
+// At 0x8C033ED0 (decoder saves/restores r14,r12,r11,r10,r9; never touches r8/r13):
+//   node=r10, sel=read_u16(r13+6), texptr=r8 (absolute into 0x0CE60000, now decoded),
 //   gfx1=read_u32(node+0x15c), blob=gfx1+read_u32(gfx1+sel*4),
 //   w=read_u8(blob+2)<<3, h=read_u8(blob+3)<<3, bytes=w*h/2, palette=read_u32(node+0x164).
 // First-seen per (char_id, selector). CRITICAL: the RAW 4bpp dump means a null
 // node+0x164 (the earlier 0x8C032776 hook saw palP=0) is recoverable OFFLINE from
 // PALETTE_DATA.BIN — we log the palettePtr value either way. READ-ONLY; forces the
-// master gate AND the PC_QUAD_DONE hook so the recompiler injects + force-splits.
+// master gate AND the PC_QUAD_DEC hook so the recompiler injects + force-splits.
 static bool mc_quadCaptureEnabled = (getenv("MAPLECAST_QUADCAPTURE") != nullptr);
 
 bool mc_oracleHookEnabled = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr)
@@ -171,12 +176,36 @@ static const u32 PC_SAT_BEGIN = 0x8C030AF8;
 //     prologue, never clobbered through the loop) -> attribute the quad to its
 //     REAL object directly (no dependence on OBJ_BEGIN ordering -> no orphans).
 static const u32 PC_QUAD_DONE  = 0x8C033EC0;
+// PC_QUAD_DEC is the POST-DECODE clean-pixel capture point for QUADCAPTURE. The
+// quad-store at 0x8C033EC0 writes texptr=r8 @+8 BEFORE the pixels at r8 are decoded:
+// the emit loop (marvelous2/build/bank03.asm, loc_8c033e90 lines 9258-9301) goes
+//   0x8C033EBC  mov.l r8,@(0x8,r14)   ; quad+0x8 = texptr (r8)            @9283
+//   0x8C033EBE  mov.l r12,@(0xC,r14)  ; quad+0xC = palptr (r12)           @9284
+//   0x8C033EC0  mov.w @r14,r3         ; <- PC_QUAD_DONE (pixels NOT decoded yet) @9285
+//   ...         (compute byte count r9 = w*h/2 @9287-9290)
+//   0x8C033ECC  jsr  @r2              ; r2 = loc_8c0354c0 BYTE-LZSS decoder @9291
+//   0x8C033ECE  mov  r9,r5            ; delay slot: r5 = byte count        @9292
+//   0x8C033ED0  mov.l @(0xC,r15),r3   ; <- PC_QUAD_DEC (jsr RETURN target) @9293
+//   0x8C033ED2  add  0x10,r14         ; advance display cursor             @9294
+//   0x8C033ED4  add  r9,r8            ; advance r8 PAST this part          @9295
+// The decoder writes its output to r6 (set `mov r8,r6` @9260), i.e. to the address r8
+// HOLDS; it advances r6 (the copy) and SAVES/RESTORES r14,r12,r11,r10,r9 (push @12662-
+// 12668, pop @12719-12724) and never touches r8/r13. So at the jsr RETURN PC 0x8C033ED0:
+//   - r8  = STILL the texptr (NOT advanced until 0x8C033ED4) -> the FRESHLY DECODED part.
+//   - r10 = node base (restored by decoder; set `mov r4,r10` @9103, kept through loop).
+//   - r13 = cell-record cursor (untouched by decoder) -> sel = read_u16(r13+6).
+//   - r12 = palptr (restored by decoder).
+//   - r14 = STILL this quad (advanced at 0x8C033ED2, AFTER this PC) -> w@+0,h@+2 readable.
+// All five live together here -> selector + dims + decoded pixels + palette in one read.
+// (The old 0x8C033EC0 capture read r8 BEFORE the decode -> stripe-noise. This is the fix.)
+static const u32 PC_QUAD_DEC   = 0x8C033ED0;
 // SH4 external-area mask: drops the P0/P1/P2/U0 cache/region bits so any alias of a
 // RAM line compares equal. 0x8C03093C & MASK == 0x0C03093C == 0x0C03093C & MASK.
 static const u32 SH4_AREA_MASK = 0x1FFFFFFF;
 static const u32 PC_OBJ_BEGIN_M = PC_OBJ_BEGIN & SH4_AREA_MASK;  // 0x0C03093C
 static const u32 PC_SAT_BEGIN_M = PC_SAT_BEGIN & SH4_AREA_MASK;  // 0x0C030AF8
 static const u32 PC_QUAD_DONE_M = PC_QUAD_DONE & SH4_AREA_MASK;  // 0x0C033EC0
+static const u32 PC_QUAD_DEC_M  = PC_QUAD_DEC  & SH4_AREA_MASK;  // 0x0C033ED0
 
 // === DECODE-TIME PART HOOK (MAPLECAST_DECODEHOOK) ===========================
 // THE LOAD-DECODE INSTANT. The character-load part driver loc_8c032696 (bank03:5668)
@@ -681,13 +710,16 @@ static void mc_decodeHandler(const u32* r)
 }
 
 // ===========================================================================
-// QUADCAPTURE (MAPLECAST_QUADCAPTURE) — THE EXPERT-CONFIRMED LOAD-DECODE CAPTURE.
-// Fires at PC_QUAD_DONE (0x8C033EC0, the post-write quad-store in loc_8c033e90),
-// once per part at character LOAD. Reads the part's freshly-decoded 4bpp PAL4 pixels
-// out of the persistent Texture_Decompress_Buffer 0x0CE60000 at r8=texptr and writes
-// a clean PPM + a RAW 4bpp dump + a manifest line, keyed by the +6 selector.
+// QUADCAPTURE (MAPLECAST_QUADCAPTURE) — THE EXPERT-CONFIRMED CLEAN-PIXEL CAPTURE.
+// Fires at PC_QUAD_DEC (0x8C033ED0, the jsr-RETURN target right AFTER the BYTE-LZSS
+// decoder loc_8c0354c0 fills the part pixels), once per emitted part. The decoder
+// writes its output to r6 (= r8's value, set `mov r8,r6` @bank03:9260) into the
+// per-frame scratch 0x0CE60000, then returns; r8 is NOT advanced until 0x8C033ED4,
+// so at 0x8C033ED0 r8 still points at the FRESHLY DECODED part. Reads the 4bpp PAL4
+// pixels at r8=texptr and writes a clean PPM + a RAW 4bpp dump + a manifest line,
+// keyed by the +6 selector. (The old 0x8C033EC0 read r8 BEFORE the decode -> stripes.)
 //
-// Per the RE expert (marvelous2 bank03; reconcile against live):
+// Per the RE expert (marvelous2 bank03; CONFIRMED via bank03 9258-9301 + 12661-12724):
 //   node    = r10                                  (object/char struct base)
 //   sel     = read_u16(r13+6)                      (the +6 GFX selector — the part key)
 //   texptr  = r8                                   (absolute addr into 0x0CE60000)
@@ -785,13 +817,13 @@ static void qcWriteRaw(u32 texPtr, int nbytes, const char* fn)
 	fclose(rf);
 }
 
-// The quad-capture handler. r = Sh4cntx.r[] at 0x8C033EC0 (post-write). READ-ONLY.
+// The quad-capture handler. r = Sh4cntx.r[] at 0x8C033ED0 (post-decode). READ-ONLY.
 static void mc_quadCaptureHandler(const u32* r)
 {
 	if (s_fireQuadCap++ == 0)
-		fprintf(stderr, "[QUADCAPTURE] first fired (pc=0x%08X loc_8c033e90 quad-store) — clean "
-		                "LOAD-decode parts from 0x0CE60000 -> /dev/shm/PL*_gfx1_*.ppm (+raw,+manifest)\n",
-		        PC_QUAD_DONE);
+		fprintf(stderr, "[QUADCAPTURE] first fired (pc=0x%08X post-decode jsr-return) — clean "
+		                "decoded parts from 0x0CE60000 -> /dev/shm/PL*_gfx1_*.ppm (+raw,+manifest)\n",
+		        PC_QUAD_DEC);
 
 	// One-time stale-dump clear (as the maplecast user; /dev/shm is maplecast-owned).
 	if (!s_qcCleared) {
@@ -1014,11 +1046,11 @@ void mc_oracleInit()
 		                "loc_8c033d78 at match load. Play a fresh match to capture the load decode.\n",
 		        PC_DECODE_ENTRY, PC_DECODE_ENTRY2);
 	if (mc_quadCaptureEnabled)
-		fprintf(stderr, "[QUADCAPTURE] ENABLED — clean LOAD-decode part pixels at 0x%08X "
-		                "(loc_8c033e90 quad-store): 4bpp from 0x0CE60000 (r8) + palette (node+0x164) "
-		                "-> /dev/shm/PL*_gfx1_*.ppm + PL*_raw_*.bin + PL*_gfx1.manifest, keyed by "
-		                "+6 selector (read_u16(r13+6)). Cross-check -> /dev/shm/mc_partdir.log.\n",
-		        PC_QUAD_DONE);
+		fprintf(stderr, "[QUADCAPTURE] ENABLED — clean DECODED part pixels at 0x%08X "
+		                "(loc_8c0354c0 jsr-return, post-decode): 4bpp from 0x0CE60000 (r8) + palette "
+		                "(node+0x164) -> /dev/shm/PL*_gfx1_*.ppm + PL*_raw_*.bin + PL*_gfx1.manifest, "
+		                "keyed by +6 selector (read_u16(r13+6)). Cross-check -> /dev/shm/mc_partdir.log.\n",
+		        PC_QUAD_DEC);
 	if (mc_decodeHookEnabled)
 		fprintf(stderr, "[DECODEHOOK] ENABLED — LOAD-decode part capture at 0x%08X "
 		                "(loc_8c032696 LZSS return, pre-copy-out): fresh 0x0CE60000 part "
@@ -1053,11 +1085,16 @@ bool mc_isHookedPC(u32 pc)
 	// (bank03:1236) so it's already a block start; the decoder force-split is a no-op
 	// guarded by rpc!=vaddr, but mc_isHookedPC must return true so the GenCall injects.
 	if (m == PC_SAT_BEGIN_M) return true;
-	// The quad-done PC is the LOAD-TIME atlas decode (fires once at match start, no
-	// screen coords) — hook it when EITHER the decode-quad sub-flag (header capture) OR
-	// the QUADCAPTURE flag (clean-pixel capture) is set. The force-split makes it a block
-	// start so the GenCall injects (it's mid-block in loc_8c033e90).
-	if (m == PC_QUAD_DONE_M) return mc_decodeQuadsEnabled || mc_quadCaptureEnabled;
+	// The quad-DONE PC (0x8C033EC0) is the post-WRITE quad-store: the 16-byte quad header
+	// {w,h,attr,texptr,palptr} is fully written but the part PIXELS at r8 are NOT decoded
+	// yet. Hook it only for the decode-quad sub-flag (the HEADER buffer capture). The
+	// force-split makes it a block start so the GenCall injects (it's mid-block).
+	if (m == PC_QUAD_DONE_M) return mc_decodeQuadsEnabled;
+	// The quad-DEC PC (0x8C033ED0) is the jsr-RETURN target right AFTER the BYTE-LZSS
+	// decoder loc_8c0354c0 filled the pixels at r8 — the CLEAN-pixel capture point for
+	// QUADCAPTURE (r8=decoded part, r10=node, r13=cell cursor sel@+6, r12=palptr). The
+	// force-split makes it a block start so the GenCall injects (it's mid-block).
+	if (m == PC_QUAD_DEC_M) return mc_quadCaptureEnabled;
 	// The LOAD-DECODE part hook (loc_8c032696 / 0x8C032776). Only hooked when the
 	// decode-hook flag is set. 0x8C032776 is the jsr return target (a natural block
 	// start), so the decoder force-split in decoder.cpp is a no-op for it (rpc==vaddr)
@@ -1111,6 +1148,14 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 		return;
 	}
 
+	// QUADCAPTURE clean-pixel capture — the jsr-RETURN PC 0x8C033ED0, right AFTER the
+	// BYTE-LZSS decoder loc_8c0354c0 filled the pixels at r8. Independent of the
+	// per-frame paths; shares no per-frame buffer. Handle + return.
+	if (mpc == PC_QUAD_DEC_M) {
+		if (mc_quadCaptureEnabled) mc_quadCaptureHandler(r);
+		return;
+	}
+
 	if (mpc == PC_OBJ_BEGIN_M) {
 		if (s_fireObjBegin++ == 0)
 			fprintf(stderr, "[ORACLE-HOOK] OBJ_BEGIN first fired (pc=0x%08X masked 0x%08X)\n",
@@ -1156,19 +1201,10 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 		return;
 	}
 
-	// Only the PC_QUAD_DONE capture runs below. If neither the decode-quad sub-flag nor
-	// QUADCAPTURE is set, this PC isn't hooked (mc_isHookedPC) so we never reach here —
-	// but guard anyway.
+	// Only the PC_QUAD_DONE header capture runs below (QUADCAPTURE clean-pixel capture
+	// now fires at PC_QUAD_DEC_M / 0x8C033ED0, handled above). If the decode-quad sub-flag
+	// is not set this PC isn't hooked (mc_isHookedPC) so we never reach here — guard anyway.
 	if (mpc != PC_QUAD_DONE_M) return;
-	if (!mc_decodeQuadsEnabled && !mc_quadCaptureEnabled) return;
-
-	// QUADCAPTURE — the EXPERT-CONFIRMED clean-pixel capture (independent of the
-	// per-frame quad-header buffer below). Read the part's freshly-decoded 4bpp pixels
-	// from r8 + palette from node+0x164 and dump a clean PPM + raw + manifest keyed by
-	// the +6 selector (read_u16(r13+6)). READ-ONLY.
-	if (mc_quadCaptureEnabled) mc_quadCaptureHandler(r);
-
-	// The remaining quad-HEADER buffer capture only runs under the decode-quad sub-flag.
 	if (!mc_decodeQuadsEnabled) return;
 
 	// mpc == PC_QUAD_DONE_M — the POST-WRITE capture point (0x8C033EC0). The 16-byte
