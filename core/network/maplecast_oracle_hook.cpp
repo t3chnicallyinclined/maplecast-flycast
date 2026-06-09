@@ -144,6 +144,16 @@ static const u32 OFF_SCALE_Y    = 0x054;   // f32
 static const u32 OFF_SCREEN_X   = 0x0E0;   // f32 (post-transform; written by this routine)
 static const u32 OFF_SCREEN_Y   = 0x0E4;   // f32
 static const u32 OFF_SPRITE_ID  = 0x144;   // u16
+// R2 fallback candidate (per-object current-cell part count). The per-frame quad
+// emitter loc_8c033d78 (bank03:9092) reads the per-character CELL TABLE head at
+// node+0x160 (loc_8c033e18=0x0160), indexes a cell-data record, and reads the
+// cell's PART COUNT as the first u16 of that record (`mov.w @r13+,r3; extu.w`,
+// bank03 loc_8c033dd4:9147-9148). The "current cell" anim field the spec names
+// lives at node+0x154 (loc_8c0342ac=0x0154, the anim/cell-step routine). We read
+// BOTH per object so the next match shows which (if either) tracks the per-frame
+// translucent render count. READ-ONLY.
+static const u32 OFF_CELL_TBL   = 0x160;   // ptr -> per-char cell table (emitter head)
+static const u32 OFF_CUR_CELL   = 0x154;   // u32 current-cell field (anim/cell-step)
 static const u32 OFF_GFX1       = 0x15C;   // ptr -> decoded GFX
 static const u32 OFF_PAL_PTR    = 0x164;   // ptr -> live ARGB4444 palette
 static const u32 OFF_EXTRAS     = 0x178;   // ptr -> sprite assembly / extras
@@ -222,6 +232,88 @@ struct ScreenQuad {
 	int  fmt, tw, th, vq, srcBlend, dstBlend;
 	int  obj;               // attributed object index (-1 = unassigned)
 };
+
+// ---- R2 PROBE (per-object-quad-capture spec §6 R2) -------------------------
+// QUESTION: does MVC2 submit TA polys PER-OBJECT (so the running TA poly count
+// STEPS UP at each per-object render-call entry → we can mark+segment), or does
+// it BULK-DMA the whole frame at once (running count flat/zero through the walk,
+// only the final frame total non-zero → bulk/end-of-frame → segmentation by TA
+// position is impossible)?
+//
+// THE SIGNAL WE CAN READ MID-FRAME: flycast's Dreamcast (non-Naomi2) TA path does
+// NOT materialize rc.verts/global_param_* incrementally. ta_thd_data32_i
+// (core/hw/pvr/ta.cpp:527) only COPIES raw 32-byte TA records into the per-context
+// raw buffer ta_tad (thd_data cursor += 32) and ticks a state machine; the parsed
+// PolyParam vectors are built ONLY at end-of-frame by ta_parse_vdrc
+// (core/hw/pvr/ta_vtx.cpp:1255, walks getTADataBegin()..getTADataEnd() in one shot
+// at render time). So rc.global_param_*.size() is 0 mid-frame and there is NO
+// incremental parsed-poly count to read at a per-object render-call entry.
+//
+// The ONLY mid-frame-growing TA signal is the RAW TA byte cursor
+//   ta_tad.thd_data - ta_tad.thd_root   (= bytes of TA submitted so far this frame)
+// declared extern in ta_ctx.h. We sample THAT at each PC_OBJ_BEGIN/PC_SAT_BEGIN.
+//   - If it STEPS UP per object → per-object TA submission (R2 PASS-ish on the byte
+//     cursor; the parsed count would step the same way).
+//   - If it's FLAT/0 through every per-object entry and only jumps after the whole
+//     walk → bulk-DMA (R2 FAIL) → no per-object TA-position marking.
+// Per the spec, MVC2's emitter loc_8c033d78 writes a RAM display list during the
+// walk and a SEPARATE bulk pass DMAs it to the TA FIFO afterward — so we EXPECT
+// the byte cursor to be flat across the slot walk (R2 FAIL). The probe PROVES it
+// live rather than asserting it statically, and ALSO records the per-object
+// current-cell part count (node+0x154 / cell-table head) as the fallback candidate.
+struct R2Rec {
+	int   slot;          // s_objs index this frame
+	u32   node;          // object node base
+	u32   taBytes;       // ta_tad.thd_data - thd_root AT this object's render entry
+	u16   cellParts;     // cell-data part count (first u16 @ *(node+0x160) head)
+	u32   curCell;       // node+0x154 raw (anim/cell-step candidate)
+	float sx, sy;        // screen_xy (placement anchor)
+	bool  isSat;
+};
+static const int MAX_R2 = 512;
+static R2Rec s_r2[MAX_R2];
+static int   s_nr2 = 0;
+
+// Read the raw TA byte cursor (bytes of TA data submitted so far THIS frame). This
+// is the per-context raw-buffer write head minus its root; it advances 32 bytes per
+// TA record as ta_thd_data32_i ingests the FIFO. Guarded so a null/unreset context
+// can't fault. Returns 0 if the buffer pointers aren't usable.
+static inline u32 mc_taBytesSoFar()
+{
+	if (ta_tad.thd_root == nullptr || ta_tad.thd_data == nullptr) return 0;
+	ptrdiff_t d = ta_tad.thd_data - ta_tad.thd_root;
+	if (d < 0 || d > (ptrdiff_t)(64u * 1024 * 1024)) return 0;   // sanity clamp
+	return (u32)d;
+}
+
+// Read the per-object current-cell part count candidate. cell table head =
+// *(node+0x160); its first dword points at a cell-data record whose FIRST u16 is
+// the part count (bank03 loc_8c033dd4:9147). We read it best-effort (any unreadable
+// pointer → 0). Pure addrspace reads.
+static inline u16 mc_cellPartCount(u32 node)
+{
+	u32 cellTbl = addrspace::read32(node + OFF_CELL_TBL);
+	if (!cellTbl || !inRam(cellTbl)) return 0;
+	u32 cellData = addrspace::read32(cellTbl);      // first cell-data record ptr
+	if (!cellData || !inRam(cellData)) return 0;
+	return (u16)addrspace::read16(cellData);        // part count = first u16
+}
+
+// Append an R2 record for the object whose render-call just entered. Called from
+// the OBJ_BEGIN / SAT_BEGIN handlers. READ-ONLY.
+static void mc_r2Record(int slot, u32 node, bool isSat)
+{
+	if (s_nr2 >= MAX_R2 || slot < 0) return;
+	R2Rec& r = s_r2[s_nr2++];
+	r.slot      = slot;
+	r.node      = node;
+	r.taBytes   = mc_taBytesSoFar();
+	r.cellParts = mc_cellPartCount(node);
+	r.curCell   = addrspace::read32(node + OFF_CUR_CELL);
+	r.sx        = rdF(node + OFF_SCREEN_X);
+	r.sy        = rdF(node + OFF_SCREEN_Y);
+	r.isSat     = isSat;
+}
 
 static const int MAX_OBJS   = 256;
 static const int MAX_QUADS  = 4096;
@@ -368,6 +460,9 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 		if (!inRam(node)) return;
 		int oi = findOrCreateObj(node);
 		if (oi >= 0) { enrichObj(s_objs[oi], node); s_objs[oi].fromBegin = true; }  // refresh post-transform screen_xy
+		// R2: record the running TA byte cursor + cell part count AT this per-object
+		// render-call entry, in walk order. (READ-ONLY.)
+		if (mc_probeEnabled) mc_r2Record(oi, node, /*isSat=*/false);
 		return;
 	}
 
@@ -393,6 +488,9 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 			s_objs[oi].isSat     = true;
 			s_objs[oi].fromBegin = true;   // anchor on it like a body (own screen_xy)
 		}
+		// R2: same running-TA-cursor capture for satellite/effect render entries, in
+		// walk order, so a projectile/cape/super shows up in the per-object sequence.
+		if (mc_probeEnabled && oi >= 0) mc_r2Record(oi, node, /*isSat=*/true);
 		return;
 	}
 
@@ -607,13 +705,66 @@ static void mc_phase0Probe(u32 frame, int tappOp, int tappPt, int tappTr, int ts
 	}
 }
 
+// ---- R2 PROBE LOG (READ-ONLY) ----------------------------------------------
+// Emit the per-object SEQUENCE of running-TA byte cursors captured this frame, in
+// walk order, plus each object's current-cell part count, plus the FINAL parsed TA
+// poly counts (op/pt/tr). PASS/FAIL is then obvious from one line:
+//
+//   R2 PASS (per-object TA submission): the taBytes column STEPS UP monotonically
+//   across objects (o0 < o1 < o2 ...) → the game submits each object's polys as it
+//   renders it → we can mark + segment the frame's quads by these boundaries.
+//
+//   R2 FAIL (bulk-DMA / end-of-frame): taBytes is 0 (or flat — same value) through
+//   EVERY per-object entry, and only finalTA(op,pt,tr) is non-zero (materialized by
+//   ta_parse AFTER the walk) → per-object TA-position marking is IMPOSSIBLE → pivot
+//   to the per-object current-cell part count (the cellParts column) for segmentation.
+//
+// EXPECTED for MVC2 (per the disasm): FAIL — loc_8c033d78 writes a RAM display list
+// during the walk and a separate bulk pass DMAs it to the TA FIFO afterward, so the
+// raw TA byte cursor does NOT advance per object during the slot walk. The cellParts
+// column is the fallback candidate the next test will use.
+static void mc_r2Log(u32 frame, int tappOp, int tappPt, int tappTr, int tspr)
+{
+	static unsigned long s_r2Calls = 0;
+	if ((s_r2Calls++ % 60) != 0) return;
+
+	// Header line + the per-object sequence (taBytes per object, walk order).
+	char seq[1600]; int p = 0;
+	for (int i = 0; i < s_nr2 && p < (int)sizeof(seq) - 64; i++) {
+		const R2Rec& r = s_r2[i];
+		p += snprintf(seq + p, sizeof(seq) - p,
+			"%so%d%s@ta=%u(cells=%u,cur=0x%X,xy=%.0f,%.0f)",
+			i ? " " : "", i, r.isSat ? "S" : "", r.taBytes,
+			(unsigned)r.cellParts, r.curCell, r.sx, r.sy);
+	}
+
+	// Monotonic-step verdict on the taBytes column (the PASS test): is the running
+	// cursor strictly increasing across the per-object entries?
+	bool stepsUp = (s_nr2 >= 2);
+	bool anyNonZero = false;
+	for (int i = 0; i < s_nr2; i++) {
+		if (s_r2[i].taBytes != 0) anyNonZero = true;
+		if (i > 0 && s_r2[i].taBytes <= s_r2[i - 1].taBytes) stepsUp = false;
+	}
+	const char* verdict = (s_nr2 < 2) ? "INCONCLUSIVE(<2 objs)"
+	                      : (stepsUp && anyNonZero) ? "PASS(per-object TA steps up)"
+	                      : (!anyNonZero) ? "FAIL(taBytes flat/0 -> bulk-DMA; use cellParts)"
+	                      : "FAIL(taBytes not monotonic -> bulk-DMA; use cellParts)";
+
+	fprintf(stderr,
+		"[ORACLE-R2] frame=%u nObj=%d objSeq: %s | finalTA(op=%d,pt=%d,tr=%d,sprite=%d) "
+		"taBytesNow=%u verdict=%s\n",
+		frame, s_nr2, seq, tappOp, tappPt, tappTr, tspr,
+		mc_taBytesSoFar(), verdict);
+}
+
 void mc_oracle_frameFlush(void* ctxv, u32 frame)
 {
 	// Run when EITHER the master hook OR the Phase-0 probe is enabled. The probe
 	// only needs ta_parse + the table reads (no block-entry buffer), so it can run
 	// standalone (MAPLECAST_FRAME_ORACLE_PROBE=1 with the master hook off) — useful
 	// for a minimal de-risk pass with zero recompiler GenCall injection.
-	if (!mc_oracleHookEnabled && !mc_probeEnabled) { s_nobj = 0; s_nquad = 0; s_nscreen = 0; return; }
+	if (!mc_oracleHookEnabled && !mc_probeEnabled) { s_nobj = 0; s_nquad = 0; s_nscreen = 0; s_nr2 = 0; return; }
 
 	// IN-MATCH GATE (in_match flag @0x8C289624, same as the serverPublish oracle).
 	// The per-object draw routine (loc_8c03093c) only fires during gameplay, and
@@ -638,12 +789,22 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 		// tables and dump the surrounding count region. Runs here so it can report
 		// the SAME frame's parsed TA quad counts (op/pt/tr PolyParam list sizes +
 		// the sprite-filtered s_nscreen). READ-ONLY; throttled inside.
-		if (mc_probeEnabled)
+		if (mc_probeEnabled) {
 			mc_phase0Probe(frame,
 				(int)ctx->rend.global_param_op.size(),
 				(int)ctx->rend.global_param_pt.size(),
 				(int)ctx->rend.global_param_tr.size(),
 				s_nscreen);
+			// R2: per-object running-TA-cursor sequence captured during THIS frame's
+			// draw walk (the OBJ_BEGIN/SAT_BEGIN block-entry handlers appended to
+			// s_r2). Logged here so it can report the SAME frame's final parsed TA
+			// poly counts. PASS = taBytes steps up per object; FAIL = flat/0 (bulk).
+			mc_r2Log(frame,
+				(int)ctx->rend.global_param_op.size(),
+				(int)ctx->rend.global_param_pt.size(),
+				(int)ctx->rend.global_param_tr.size(),
+				s_nscreen);
+		}
 	}
 
 	// Capacity guard so a long session can't fill /dev/shm.
@@ -670,7 +831,7 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 	// recovery off-match, so s_nscreen is 0 there) AND only when something was
 	// captured. This keeps the jsonl to real gameplay frames.
 	if (!inMatch || (s_nobj == 0 && s_nquad == 0 && s_nscreen == 0)) {
-		s_nobj = 0; s_nquad = 0; s_nscreen = 0; return;
+		s_nobj = 0; s_nquad = 0; s_nscreen = 0; s_nr2 = 0; return;
 	}
 
 	if (!full) {
@@ -776,7 +937,7 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 		}
 	}
 
-	s_nobj = 0; s_nquad = 0; s_nscreen = 0;
+	s_nobj = 0; s_nquad = 0; s_nscreen = 0; s_nr2 = 0;
 }
 
 }
