@@ -175,13 +175,222 @@ static bool mc_bodyCapEnabled = (getenv("MAPLECAST_BODYCAP") != nullptr);
 // force-splits at 0x8C1248CC.
 static bool mc_charqRenderEnabled = (getenv("MAPLECAST_CHARQ_RENDER") != nullptr);
 
+// ===========================================================================
+// GENERIC RUNTIME-CONFIGURABLE PROBE (MAPLECAST_ORACLE_PROBE) — THE REBUILD KILLER.
+//
+// The problem this solves: every prior hook above is a COMPILED-IN PC + handler, so
+// each new "where does X get called / what's in this register" hypothesis = a new
+// constant + a new handler + a full rebuild + a redeploy. This probe makes the hook
+// table DATA: a config file lists up to MC_PROBE_MAX PCs and, per PC, a dumpspec of
+// what to read (regs / a single reg / pr / absolute memory / register-relative memory
+// / a stack window). Edit the config + restart — NO recompile. It reuses the EXACT
+// existing JIT-hook infrastructure: mc_isHookedPC (so rec_x64 injects the GenCall and
+// decoder.cpp force-splits mid-block PCs) + the masked-PC (& 0x1FFFFFFF) convention.
+//
+// v1 (this) parses the config ONCE at static-init (before any block compiles), so the
+// recompiler's compile-time mc_isHookedPC gate is correct from the first block — no
+// runtime block-flush needed. To RECONFIGURE you restart the process (the standard
+// "edit config + restart" loop). [v2, NOT built: a SIGHUP handler could re-parse the
+// config and call bm_Reset() to flush all compiled blocks so the recompiler re-runs
+// mc_isHookedPC against the new PC set — enabling no-restart reconfig. Deliberately
+// out of scope here to keep v1 small and determinism-trivially-safe.]
+//
+// READ-ONLY w.r.t. guest: the handler only reads Sh4cntx.r[] + addrspace::read* and
+// appends to /dev/shm/mc_probe.log. Gated MAPLECAST_ORACLE_PROBE; default OFF -> the
+// probe table is empty, mc_isHookedPC returns false for every probe PC, and prod is
+// byte-stock. (Note: distinct from the older MAPLECAST_FRAME_ORACLE_PROBE Phase-0
+// stderr probe above — different env var, different mechanism.)
+//
+// CONFIG FILE: /dev/shm/mc_oracle_probe.conf (override path via env
+// MAPLECAST_ORACLE_PROBE_CONF). One probe per line:
+//     <pc_hex> <label> <dumpspec>
+//   - pc_hex   : the guest PC, e.g. 0x8C1248CC or 8c1248cc (matched area-masked).
+//   - label    : a no-space tag echoed on every dump line.
+//   - dumpspec : a COMMA-separated list of tokens (no spaces), any mix of:
+//       regs                 dump r0..r15 + pr + gbr + macl + mach
+//       r<N>                 a single reg, N = 0..15 decimal (e.g. r12)
+//       pr                   the procedure-return reg (Sh4cntx.pr; the JSR caller)
+//       gbr / macl / mach    those control regs
+//       mem:<addr_hex>:<len> hexdump <len> bytes at absolute guest addr <addr_hex>
+//       rmem:r<N>[+<off_hex>]:<len>
+//                            hexdump <len> bytes at r[N] (+ optional hex offset).
+//                            e.g. rmem:r11+0x6:2  or  rmem:r14:0x40
+//       stack:<n>            dump <n> 32-bit words from r15 (the SH4 call stack) —
+//                            recovers grand-callers / spilled return addresses.
+//     Lines starting with '#' and blank lines are ignored. len/n are decimal unless
+//     0x-prefixed; len is clamped to MC_PROBE_MEM_MAX, n to MC_PROBE_STACK_MAX.
+//   EXAMPLE (the first validation use-case — read the real bank12 PVR-builder caller
+//   chain so we can see body vs HUD/stage callers instead of guessing):
+//       0x8C1248CC stack8 stack:8,pr,r12,r13,r14
+//       0x8C034864 asmtrace regs,rmem:r11+0x6:2
+//
+// OUTPUT: /dev/shm/mc_probe.log (override via env MAPLECAST_ORACLE_PROBE_LOG). Append
+// with per-line fflush so `tail -f` is live; truncate-and-rewind at the cap (default
+// 16 MiB, env MAPLECAST_ORACLE_PROBE_CAP) so a long session can't fill /dev/shm. Each
+// dump is prefixed `[PROBE pc=0x0CXXXXXX label vframe=N]` (vframe = the SH4 video-frame
+// counter @0x8C3496B0) so dumps interleave readably and align to a frame.
+struct ProbeTok {
+	enum Kind { REGS, REG, PR, GBR, MACL, MACH, MEM, RMEM, STACK } kind;
+	int   reg;     // REG / RMEM base register index (0..15)
+	u32   addr;    // MEM absolute address
+	u32   off;     // RMEM register offset
+	u32   len;     // MEM/RMEM byte length, or STACK word count
+};
+struct Probe {
+	u32      pcMasked;          // pc & 0x1FFFFFFF
+	char     label[40];
+	ProbeTok toks[12];
+	int      ntok;
+	unsigned long fires;        // per-probe fire counter (diagnostic)
+};
+static const int MC_PROBE_MAX       = 16;     // max probe PCs
+static const int MC_PROBE_MEM_MAX   = 256;    // max bytes per mem/rmem token
+static const int MC_PROBE_STACK_MAX = 64;     // max words per stack token
+static Probe s_probes[MC_PROBE_MAX];
+static int   s_nprobe = 0;
+
+// Parse "r<N>" -> 0..15, else -1.
+static int mc_probeParseReg(const char* s, int len) {
+	if (len < 2 || (s[0] != 'r' && s[0] != 'R')) return -1;
+	int n = 0; for (int i = 1; i < len; i++) { if (s[i] < '0' || s[i] > '9') return -1; n = n*10 + (s[i]-'0'); }
+	return (n >= 0 && n <= 15) ? n : -1;
+}
+// Parse a numeric token (0x-prefixed hex, else decimal). Returns false on garbage.
+static bool mc_probeParseNum(const char* s, int len, u32* out) {
+	if (len <= 0) return false;
+	u32 v = 0; int i = 0; bool hex = false;
+	if (len >= 2 && s[0]=='0' && (s[1]=='x'||s[1]=='X')) { hex = true; i = 2; if (i>=len) return false; }
+	for (; i < len; i++) {
+		char c = s[i]; int d;
+		if (c>='0'&&c<='9') d = c-'0';
+		else if (hex && c>='a'&&c<='f') d = c-'a'+10;
+		else if (hex && c>='A'&&c<='F') d = c-'A'+10;
+		else return false;
+		v = hex ? (v<<4)+d : v*10+d;
+	}
+	*out = v; return true;
+}
+// Parse one comma token of a dumpspec into a ProbeTok. Returns false to skip it.
+static bool mc_probeParseTok(const char* t, int len, ProbeTok* tk) {
+	auto eq = [&](const char* lit){ int n=(int)strlen(lit); return n==len && strncmp(t,lit,n)==0; };
+	if (eq("regs")) { tk->kind = ProbeTok::REGS; return true; }
+	if (eq("pr"))   { tk->kind = ProbeTok::PR;   return true; }
+	if (eq("gbr"))  { tk->kind = ProbeTok::GBR;  return true; }
+	if (eq("macl")) { tk->kind = ProbeTok::MACL; return true; }
+	if (eq("mach")) { tk->kind = ProbeTok::MACH; return true; }
+	// stack:<n>
+	if (len > 6 && strncmp(t, "stack:", 6) == 0) {
+		u32 n; if (!mc_probeParseNum(t+6, len-6, &n)) return false;
+		if (n == 0) return false; if (n > (u32)MC_PROBE_STACK_MAX) n = MC_PROBE_STACK_MAX;
+		tk->kind = ProbeTok::STACK; tk->len = n; return true;
+	}
+	// mem:<addr_hex>:<len>
+	if (len > 4 && strncmp(t, "mem:", 4) == 0) {
+		const char* p = t + 4; int rem = len - 4;
+		const char* colon = (const char*)memchr(p, ':', rem); if (!colon) return false;
+		u32 addr, l;
+		if (!mc_probeParseNum(p, (int)(colon-p), &addr)) return false;
+		if (!mc_probeParseNum(colon+1, (int)(t+len-(colon+1)), &l)) return false;
+		if (l == 0) return false; if (l > (u32)MC_PROBE_MEM_MAX) l = MC_PROBE_MEM_MAX;
+		tk->kind = ProbeTok::MEM; tk->addr = addr; tk->len = l; return true;
+	}
+	// rmem:r<N>[+<off_hex>]:<len>
+	if (len > 5 && strncmp(t, "rmem:", 5) == 0) {
+		const char* p = t + 5; int rem = len - 5;
+		const char* colon = (const char*)memchr(p, ':', rem); if (!colon) return false;
+		u32 l; if (!mc_probeParseNum(colon+1, (int)(t+len-(colon+1)), &l)) return false;
+		if (l == 0) return false; if (l > (u32)MC_PROBE_MEM_MAX) l = MC_PROBE_MEM_MAX;
+		// reg part is p..colon, optionally "r<N>+<off>"
+		const char* plus = (const char*)memchr(p, '+', (int)(colon-p));
+		int regLen = plus ? (int)(plus-p) : (int)(colon-p);
+		int reg = mc_probeParseReg(p, regLen); if (reg < 0) return false;
+		u32 off = 0;
+		if (plus) { if (!mc_probeParseNum(plus+1, (int)(colon-(plus+1)), &off)) return false; }
+		tk->kind = ProbeTok::RMEM; tk->reg = reg; tk->off = off; tk->len = l; return true;
+	}
+	// r<N>
+	int reg = mc_probeParseReg(t, len);
+	if (reg >= 0) { tk->kind = ProbeTok::REG; tk->reg = reg; return true; }
+	return false;
+}
+
+// Parse the whole config file into s_probes[]. Run ONCE at static init (below) so the
+// recompiler's mc_isHookedPC sees the probe PCs before the first block compiles. Pure
+// stdio (no guest state) -> safe at static-init time. Silent (a stderr summary is
+// printed once from mc_oracleInit when the operator's serverPublish loop starts).
+static int s_probeParsed = 0;     // 0=not yet, 1=done (0 probes ok)
+static void mc_probeParseConfig() {
+	if (s_probeParsed) return;
+	s_probeParsed = 1;
+	s_nprobe = 0;
+	if (getenv("MAPLECAST_ORACLE_PROBE") == nullptr) return;   // gated OFF -> empty table
+	const char* path = getenv("MAPLECAST_ORACLE_PROBE_CONF");
+	if (!path) path = "/dev/shm/mc_oracle_probe.conf";
+	FILE* f = fopen(path, "r");
+	if (!f) { fprintf(stderr, "[ORACLE-PROBE] config not found: %s (no probes armed)\n", path); return; }
+	char line[512];
+	while (fgets(line, sizeof line, f) && s_nprobe < MC_PROBE_MAX) {
+		// strip trailing newline/cr
+		int ln = (int)strlen(line);
+		while (ln > 0 && (line[ln-1]=='\n' || line[ln-1]=='\r')) line[--ln] = 0;
+		// skip leading whitespace
+		char* p = line; while (*p==' '||*p=='\t') p++;
+		if (*p == 0 || *p == '#') continue;
+		// field 1: pc_hex
+		char* sp = p; while (*sp && *sp!=' ' && *sp!='\t') sp++;
+		u32 pc; if (!mc_probeParseNum(p, (int)(sp-p), &pc)) { fprintf(stderr, "[ORACLE-PROBE] bad pc: %s\n", p); continue; }
+		while (*sp==' '||*sp=='\t') sp++;
+		// field 2: label
+		char* lp = sp; while (*sp && *sp!=' ' && *sp!='\t') sp++;
+		int lblLen = (int)(sp-lp); if (lblLen <= 0) continue;
+		while (*sp==' '||*sp=='\t') sp++;
+		// field 3: dumpspec (comma list, no spaces)
+		char* dp = sp; while (*sp && *sp!=' ' && *sp!='\t') sp++;
+		int dsLen = (int)(sp-dp); if (dsLen <= 0) continue;
+		Probe& pr = s_probes[s_nprobe];
+		pr.pcMasked = pc & 0x1FFFFFFF;
+		int cpy = lblLen < (int)sizeof(pr.label)-1 ? lblLen : (int)sizeof(pr.label)-1;
+		memcpy(pr.label, lp, cpy); pr.label[cpy] = 0;
+		pr.ntok = 0; pr.fires = 0;
+		// split dumpspec on commas
+		const char* tok = dp; const char* end = dp + dsLen;
+		while (tok < end && pr.ntok < (int)(sizeof(pr.toks)/sizeof(pr.toks[0]))) {
+			const char* comma = (const char*)memchr(tok, ',', (int)(end-tok));
+			const char* te = comma ? comma : end;
+			if (te > tok) {
+				ProbeTok tk; memset(&tk, 0, sizeof tk);
+				if (mc_probeParseTok(tok, (int)(te-tok), &tk)) pr.toks[pr.ntok++] = tk;
+				else fprintf(stderr, "[ORACLE-PROBE] bad dumpspec token '%.*s' (pc=0x%08X) skipped\n",
+				             (int)(te-tok), tok, pc);
+			}
+			if (!comma) break; tok = comma + 1;
+		}
+		if (pr.ntok > 0) {
+			fprintf(stderr, "[ORACLE-PROBE] armed pc=0x%08X (masked 0x%08X) label=%s tokens=%d\n",
+			        pc, pr.pcMasked, pr.label, pr.ntok);
+			s_nprobe++;
+		}
+	}
+	fclose(f);
+	fprintf(stderr, "[ORACLE-PROBE] %d probe(s) armed from %s\n", s_nprobe, path);
+}
+
+// Static-init trigger: parse the config before any guest block compiles so the
+// compile-time mc_isHookedPC gate includes the probe PCs from the very first block.
+static bool mc_probeEnabledStatic = []{
+	if (getenv("MAPLECAST_ORACLE_PROBE") == nullptr) return false;
+	mc_probeParseConfig();
+	return true;
+}();
+
 bool mc_oracleHookEnabled = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr)
                          || mc_decodeHookEnabled
                          || mc_decodeTraceEnabled
                          || mc_quadCaptureEnabled
                          || mc_asmTraceEnabled
                          || mc_bodyCapEnabled
-                         || mc_charqRenderEnabled;
+                         || mc_charqRenderEnabled
+                         || mc_probeEnabledStatic;   // generic probe forces the master gate
 
 // Sub-flag: also capture the LOAD-TIME part-atlas decode quads at loc_8c033e90
 // (0x8C033EC0 post-write). PROVEN (live prod capture 2026-06-08): that routine
@@ -1607,6 +1816,10 @@ void mc_oracleInit()
 		                "by position%s -> /dev/shm/mc_oracle_hook.jsonl\n",
 		        PC_OBJ_BEGIN,
 		        mc_decodeQuadsEnabled ? " (+DECODE quad sub-flag at 0x8C033EC0)" : "");
+	if (mc_probeEnabledStatic)
+		fprintf(stderr, "[ORACLE-PROBE] GENERIC probe ENABLED (READ-ONLY) — %d PC(s) armed from config; "
+		                "dumps -> /dev/shm/mc_probe.log. Edit config + restart to reconfigure (no recompile).\n",
+		        s_nprobe);
 	if (mc_probeEnabled)
 		fprintf(stderr, "[ORACLE-PROBE] ENABLED (Phase 0, READ-ONLY) — body quad-count tbl "
 		                "0x%08X[6×u16] + dlPtr 0x%08X[6×u32]; R6 dump 0x%08X..0x%08X. "
@@ -1659,7 +1872,107 @@ bool mc_isHookedPC(u32 pc)
 	// (0x8C1248CC). Only hooked when the charq-render flag is set. Mid-block -> the
 	// decoder force-split makes it a block start; return true so rec_x64 injects.
 	if (m == PC_CHARQ_SUBMIT_M) return mc_charqRenderEnabled;
+	// GENERIC PROBE: any PC configured in /dev/shm/mc_oracle_probe.conf (parsed once at
+	// static init). Masked compare so the disasm 0x8C.. label matches the executed 0x0C..
+	// alias. The probe PCs may be mid-block (e.g. 0x8C1248CC) -> the decoder force-split
+	// in decoder.cpp makes them block starts so the GenCall injects.
+	if (mc_probeEnabledStatic) {
+		for (int i = 0; i < s_nprobe; i++)
+			if (s_probes[i].pcMasked == m) return true;
+	}
 	return false;
+}
+
+// GENERIC PROBE handler — dump the matched probe's spec to /dev/shm/mc_probe.log.
+// READ-ONLY (Sh4cntx.r[] + addrspace::read* only). Append-with-flush + truncate-and-
+// rewind at the cap so the tail is live and /dev/shm can't fill. Returns true if `mpc`
+// matched a probe (so the caller can return early).
+static bool mc_probeHandler(const u32* r, u32 mpc)
+{
+	int hit = -1;
+	for (int i = 0; i < s_nprobe; i++) if (s_probes[i].pcMasked == mpc) { hit = i; break; }
+	if (hit < 0) return false;
+	Probe& p = s_probes[hit];
+	p.fires++;
+
+	static const long PROBE_CAP = []{
+		const char* v = getenv("MAPLECAST_ORACLE_PROBE_CAP");
+		if (v) { long c = atol(v); if (c >= (1L << 20)) return c; }   // floor 1 MiB
+		return 16L * 1024 * 1024;
+	}();
+	static const char* s_logPath = []{
+		const char* v = getenv("MAPLECAST_ORACLE_PROBE_LOG");
+		return v ? v : "/dev/shm/mc_probe.log";
+	}();
+	static FILE* lf = nullptr;
+	static long  lw = 0;
+	if (!lf) { lf = fopen(s_logPath, "w"); lw = 0;            // O_TRUNC: drop a stale prior-run file
+		if (lf) fprintf(stderr, "[ORACLE-PROBE] logging -> %s (cap %ldMiB)\n", s_logPath, PROBE_CAP >> 20); }
+	if (!lf) return true;
+	if (lw >= PROBE_CAP) { lf = freopen(s_logPath, "w", lf); lw = 0; if (!lf) return true; }
+
+	u32 vframe = addrspace::read32(0x8C3496B0);   // SH4 video-frame counter (work.asm)
+	char b[1024]; int n;
+	n = snprintf(b, sizeof b, "[PROBE pc=0x%08X %s vframe=%u fire=%lu]\n",
+	             mpc | 0x0C000000u, p.label, vframe, p.fires);
+	lw += fwrite(b, 1, n, lf);
+
+	for (int t = 0; t < p.ntok; t++) {
+		ProbeTok& tk = p.toks[t];
+		switch (tk.kind) {
+		case ProbeTok::REGS:
+			for (int g = 0; g < 16; g += 4) {
+				n = snprintf(b, sizeof b, "  r%-2d=%08X r%-2d=%08X r%-2d=%08X r%-2d=%08X\n",
+				             g, r[g], g+1, r[g+1], g+2, r[g+2], g+3, r[g+3]);
+				lw += fwrite(b, 1, n, lf);
+			}
+			n = snprintf(b, sizeof b, "  pr=%08X gbr=%08X macl=%08X mach=%08X\n",
+			             Sh4cntx.pr, Sh4cntx.gbr, Sh4cntx.mac.l, Sh4cntx.mac.h);
+			lw += fwrite(b, 1, n, lf);
+			break;
+		case ProbeTok::REG:
+			n = snprintf(b, sizeof b, "  r%d=%08X\n", tk.reg, r[tk.reg]); lw += fwrite(b, 1, n, lf); break;
+		case ProbeTok::PR:
+			n = snprintf(b, sizeof b, "  pr=%08X\n", Sh4cntx.pr); lw += fwrite(b, 1, n, lf); break;
+		case ProbeTok::GBR:
+			n = snprintf(b, sizeof b, "  gbr=%08X\n", Sh4cntx.gbr); lw += fwrite(b, 1, n, lf); break;
+		case ProbeTok::MACL:
+			n = snprintf(b, sizeof b, "  macl=%08X\n", Sh4cntx.mac.l); lw += fwrite(b, 1, n, lf); break;
+		case ProbeTok::MACH:
+			n = snprintf(b, sizeof b, "  mach=%08X\n", Sh4cntx.mac.h); lw += fwrite(b, 1, n, lf); break;
+		case ProbeTok::MEM: {
+			n = snprintf(b, sizeof b, "  mem[0x%08X..+%u]:\n", tk.addr, tk.len); lw += fwrite(b, 1, n, lf);
+			for (u32 o = 0; o < tk.len; o += 16) {
+				n = snprintf(b, sizeof b, "    %08X:", tk.addr + o);
+				for (u32 j = 0; j < 16 && o + j < tk.len; j++)
+					n += snprintf(b + n, sizeof b - n, " %02X", (u8)addrspace::read8(tk.addr + o + j));
+				n += snprintf(b + n, sizeof b - n, "\n"); lw += fwrite(b, 1, n, lf);
+			}
+			break; }
+		case ProbeTok::RMEM: {
+			u32 base = r[tk.reg] + tk.off;
+			n = snprintf(b, sizeof b, "  rmem[r%d+0x%X=0x%08X..+%u]:\n", tk.reg, tk.off, base, tk.len);
+			lw += fwrite(b, 1, n, lf);
+			for (u32 o = 0; o < tk.len; o += 16) {
+				n = snprintf(b, sizeof b, "    %08X:", base + o);
+				for (u32 j = 0; j < 16 && o + j < tk.len; j++)
+					n += snprintf(b + n, sizeof b - n, " %02X", (u8)addrspace::read8(base + o + j));
+				n += snprintf(b + n, sizeof b - n, "\n"); lw += fwrite(b, 1, n, lf);
+			}
+			break; }
+		case ProbeTok::STACK: {
+			u32 sp = r[15];
+			n = snprintf(b, sizeof b, "  stack[r15=0x%08X, %u words]:\n", sp, tk.len); lw += fwrite(b, 1, n, lf);
+			for (u32 w = 0; w < tk.len; w++) {
+				u32 v = addrspace::read32(sp + w * 4);
+				n = snprintf(b, sizeof b, "    [sp+%02X] %08X = %08X\n", w * 4, sp + w * 4, v);
+				lw += fwrite(b, 1, n, lf);
+			}
+			break; }
+		}
+	}
+	fflush(lf);
+	return true;
 }
 
 // Per-PC fire counters (DIAGNOSTIC, gated). The previous proof-of-life used a
@@ -1677,7 +1990,15 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 
 	// Mask to the SH4 external area so we route correctly whether the recompiler
 	// passed the cached (0x8C..) or physical (0x0C..) alias of the PC.
+	// Mask to the SH4 external area so we route correctly whether the recompiler
+	// passed the cached (0x8C..) or physical (0x0C..) alias of the PC.
 	u32 mpc = pc & SH4_AREA_MASK;
+
+	// GENERIC RUNTIME-CONFIGURABLE PROBE (MAPLECAST_ORACLE_PROBE) — checked FIRST so a
+	// config-armed PC always dumps its spec, even if it coincides with a built-in hook.
+	// Pure read-only dump; returns true (and we return) when this PC is a configured
+	// probe. When the probe is OFF, s_nprobe==0 so this is a single int compare.
+	if (mc_probeEnabledStatic && mc_probeHandler(r, mpc)) return;
 
 	// DECODE-TIME part hook (fires PRE-match at character load, independent of the
 	// frame-oracle paths). Handle first + return: it shares no per-frame buffer.
