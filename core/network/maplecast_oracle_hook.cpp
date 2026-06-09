@@ -122,11 +122,49 @@ static bool mc_quadCaptureEnabled = (getenv("MAPLECAST_QUADCAPTURE") != nullptr)
 // /dev/shm append). Forces the master gate so the recompiler injects + force-splits.
 static bool mc_asmTraceEnabled = (getenv("MAPLECAST_ASMTRACE") != nullptr);
 
+// BODYCAP (MAPLECAST_BODYCAP) — capture the BODY part DECODED PIXELS keyed by the
+// RENDER selector (the 533-541 namespace), NOT the load-time effect-atlas namespace.
+//
+// SELECTOR-SPACE RECONCILIATION (marvelous2 bank03, CONFIRMED + live-verified):
+//   * loc_8c0344d4 (the per-frame BODY render, ASMTRACE PC 0x8C034864): per part the
+//     GFX1 index = read_u16(r11+6). r11 is the body's per-part record cursor seeded
+//     from the GLOBAL cell-output table 0x8C1F9F9C (bank03:10410 #data 0x8c1f9f9c,
+//     loaded `add r2,r13`/the r11 walk) — NOT node+0x160. For PL00 (Ryu) this field
+//     ranges 252-771 (live mc_assembly.log: cid=0 sel 252..771; standing pose = the
+//     530-541 cluster). This is the GROUND-TRUTH GFX1 part index.
+//   * loc_8c033e90 (QUADCAPTURE, r13+6 -> 0-251): the LOAD-TIME effect/UI atlas
+//     builder (driver loc_8c033d78). It reads the SAME GFX1 base (node+0x15c) and the
+//     SAME read_u16(<rec>+6)*4 -> *(GFX1+sel*4) formula, but its <rec> cursor walks a
+//     DIFFERENT record stream (the effect-sheet assembly), so its +6 fields are a
+//     different (small, 0-251) part set. SAME table mechanism, DIFFERENT record source
+//     -> different selector population. The directory 0x8C26AA24/0x8C26AA34 is NOT a
+//     per-selector decode-offset table (live mc_partdir.log = the 6-entry body
+//     quad-count/dl-ptr tables + adjacent RAM, all 0 or garbage); it does NOT hold
+//     533-541 NOR 0-251. So neither directory keys the body pixels.
+//
+// WHERE THE BODY (533-541) PIXELS LIVE: loc_8c0344d4 itself calls NO decoder; the
+// pixels are pre-decoded once at character load into PERSISTENT slots. Two candidate
+// sources, both dumped + logged so the first capture is self-diagnosing:
+//   (A) GFX1 blob: gfx1=*(node+0x15c); off=read_u32(gfx1+sel*4); blob=gfx1+off;
+//       dims w=read_u8(blob+2)<<3, h=read_u8(blob+3)<<3; texels follow the header.
+//       The blob may carry the 4bpp texels inline (linear) OR a pointer.
+//   (B) DM00 persistent directory: dirBase=*(0x0CE80008), stride 0x10; entry+0 = (w,h)
+//       u16 pixels, entry+4 = fmt word, entry+8 = ptr to DECODED TWIDDLED texels
+//       (the proven-clean source the offline partDump uses). Keyed by a small DM00 key,
+//       not the render selector — so we resolve the render selector's DIMS from the
+//       GFX1 blob and MATCH them against the DM00 run to find the right key.
+// Decode = the proven partDecodeToPPM PAL4 path (flycast TWIDDLE for DM00, linear for
+// the GFX1 blob), palette = node+0x164 at row (rec_pal>>4)&7. READ-ONLY (addrspace
+// reads + /dev/shm writes). Forces the master gate so the recompiler injects +
+// force-splits at the ASMTRACE PC (0x8C034864) — shared, no extra hook needed.
+static bool mc_bodyCapEnabled = (getenv("MAPLECAST_BODYCAP") != nullptr);
+
 bool mc_oracleHookEnabled = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr)
                          || mc_decodeHookEnabled
                          || mc_decodeTraceEnabled
                          || mc_quadCaptureEnabled
-                         || mc_asmTraceEnabled;
+                         || mc_asmTraceEnabled
+                         || mc_bodyCapEnabled;
 
 // Sub-flag: also capture the LOAD-TIME part-atlas decode quads at loc_8c033e90
 // (0x8C033EC0 post-write). PROVEN (live prod capture 2026-06-08): that routine
@@ -1138,6 +1176,159 @@ static void mc_asmTraceHandler(const u32* r)
 	fclose(lg);
 }
 
+// ===========================================================================
+// BODYCAP (MAPLECAST_BODYCAP) — body part DECODED pixels keyed by the RENDER selector.
+// Fires at the SAME PC as ASMTRACE (0x8C034864, loc_8c0344d4 per-part convergence).
+// See mc_bodyCapEnabled for the full selector-space reconciliation. READ-ONLY.
+//
+// Standard flycast twiddle (Morton) index — same math as core/rend/texconv.cpp and
+// the proven gamestate.cpp partDecodeToPPM (flycast-canonical, y-first), self-contained
+// here so this file links without the gamestate file-statics.
+static inline u32 bc_twiddle(u32 x, u32 y, u32 x_sz, u32 y_sz) {
+	u32 rv = 0, sh = 0; x_sz >>= 1; y_sz >>= 1;
+	while (x_sz != 0 || y_sz != 0) {
+		if (y_sz != 0) { rv |= (y & 1) << sh; y_sz >>= 1; y >>= 1; sh++; }
+		if (x_sz != 0) { rv |= (x & 1) << sh; x_sz >>= 1; x >>= 1; sh++; }
+	}
+	return rv;
+}
+// Write w*h PAL4 texels at texPtr -> PPM (P6, magenta = transparent). `twid`=true uses
+// the flycast TWIDDLE order (DM00 persistent slots); false = LINEAR (the GFX1 blob /
+// 0x0CE60000 scratch are row-major). PAL4: 2 indices/byte, index 0 = transparent.
+static void bcWritePPM(u32 texPtr, int w, int h, u32 palBase, bool twid, const char* fn) {
+	FILE* pf = fopen(fn, "wb"); if (!pf) return;
+	fprintf(pf, "P6\n%d %d\n255\n", w, h);
+	bool palOk = inRam(palBase);
+	for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+		u32 idx = twid ? bc_twiddle((u32)x, (u32)y, (u32)w, (u32)h) : (u32)(y * w + x);
+		u8  b   = (u8)addrspace::read8(texPtr + (idx >> 1));
+		u32 pidx = (idx & 1) ? (b >> 4) : (b & 0xf);
+		u8 rr = 0xff, gg = 0x00, bb = 0xff;            // magenta = transparent default
+		if (pidx != 0 && palOk) {
+			u16 pe = (u16)addrspace::read16(palBase + pidx * 2);   // ARGB4444 LE
+			u8 aa = ((pe >> 12) & 0xf) * 17;
+			if (aa != 0) { rr = ((pe>>8)&0xf)*17; gg = ((pe>>4)&0xf)*17; bb = (pe&0xf)*17; }
+		}
+		u8 rgb[3] = {rr, gg, bb}; fwrite(rgb, 1, 3, pf);
+	}
+	fclose(pf);
+}
+static void bcWriteRaw(u32 texPtr, int nbytes, const char* fn) {
+	FILE* rf = fopen(fn, "wb"); if (!rf) return;
+	for (int i = 0; i < nbytes; i++) fputc((u8)addrspace::read8(texPtr + (u32)i), rf);
+	fclose(rf);
+}
+
+static unsigned long s_fireBody = 0;
+static bool          s_bcCleared = false;
+static bool          s_bcSeen[0x40][1024] = {{false}};   // [char_id][render selector] first-seen
+
+static void mc_bodyCapHandler(const u32* r)
+{
+	if (s_fireBody++ == 0)
+		fprintf(stderr, "[BODYCAP] first fired (pc=0x%08X loc_8c0344d4 per-part) — BODY part "
+		                "pixels keyed by RENDER selector (read_u16(r11+6)) -> /dev/shm/PL*_body_*.ppm\n",
+		        PC_ASM_PART);
+
+	// One-time stale clear (the body manifest + log); /dev/shm is maplecast-owned.
+	if (!s_bcCleared) {
+		for (int c = 0; c < 0x40; c++) {
+			char mn[96]; snprintf(mn, sizeof mn, "/dev/shm/PL%02X_body.manifest", c); remove(mn);
+		}
+		remove("/dev/shm/mc_bodycap.log");
+		s_bcCleared = true;
+	}
+
+	u32 node = norm(r[14]) | 0x0C000000u;   // r14 = char/render struct base
+	u32 r11  = r[11];                       // per-part record cursor (+6 = render selector)
+	if (!inRam(node) || !inRam(r11)) return;
+
+	u16 sel = (u16)addrspace::read16(r11 + 0x6);     // RENDER selector — THE KEY (533-541 for Ryu)
+	if (sel == 0x00FF || sel >= 1024) return;        // terminator / out of range
+	u16 recpal = (u16)addrspace::read16(r11 + 0x2);  // the +2 palette word (dy field doubles as pal)
+	unsigned palRow = (recpal >> 4) & 0x7;           // 3-bit palette row (PalMod-confirmed)
+
+	u8 cid = (u8)addrspace::read8(node + OFF_CHAR_ID);
+	if (cid >= 0x40) return;
+	if (s_bcSeen[cid][sel]) return;                  // first-seen per (char,render-selector)
+
+	// (A) GFX1 blob — authoritative DIMS for this render selector (disasm loc_8c0345c4):
+	//   gfx1=*(node+0x15c); off=read_u32(gfx1+sel*4); blob=gfx1+off; w=blob[2]<<3,h=blob[3]<<3.
+	u32 gfx1 = addrspace::read32(node + OFF_GFX1);
+	if (!inRam(gfx1)) return;
+	u32 blob = (gfx1 + addrspace::read32(gfx1 + (u32)sel * 4)) & 0x0FFFFFFFu; blob |= 0x0C000000u;
+	if (!inRam(blob)) return;
+	int w = ((int)(u8)addrspace::read8(blob + 2)) << 3;
+	int h = ((int)(u8)addrspace::read8(blob + 3)) << 3;
+	if (w <= 0 || h <= 0 || w > 512 || h > 512) return;
+	int bytes = (w * h) / 2;                          // 4bpp
+
+	u32 palP = addrspace::read32(node + OFF_PAL_PTR); // node+0x164 (ARGB4444)
+	u32 palBase = inRam(palP) ? (palP + palRow * 32) : 0;
+
+	s_bcSeen[cid][sel] = true;
+
+	// (B) DM00 persistent decoded twiddled slots — the proven-CLEAN source. dirBase =
+	// *(0x0CE80008), stride 0x10: entry+0=(w,h) u16 px, entry+4=fmt word, entry+8=texels.
+	// Render selector != DM00 key, so MATCH this selector's GFX1 dims (w,h) against the
+	// DM00 run to find the right key (the body's parts are a contiguous run from a small
+	// base). We scan keys 0..255 and take the first PAL4/PAL8 entry whose dims equal w,h.
+	u32 dirBase = addrspace::read32(0x0CE80008);
+	if (!inRam(dirBase)) { u32 alt = addrspace::read32(0x8CE80008); if (inRam(alt)) dirBase = alt; }
+	int   dmKey = -1; u32 dmTex = 0; int dmFmt = 5;
+	if (inRam(dirBase)) {
+		for (int k = 0; k < 256; k++) {
+			u32 e  = dirBase + (u32)k * DM00_ENTRY_STRIDE;
+			u32 e0 = addrspace::read32(e), e4 = addrspace::read32(e + 4), e8 = addrspace::read32(e + 8);
+			int dw = (int)(e0 & 0xffff), dh = (int)((e0 >> 16) & 0xffff);
+			if (dw == w && dh == h && inRam(e8)) {
+				dmKey = k; dmTex = e8 | 0x0C000000u;
+				dmFmt = ((u8)((e4 >> 8) & 0xff) == 0x03) ? 6 : 5;   // 0x03=PAL8 else PAL4
+				break;
+			}
+		}
+	}
+
+	// Primary CLEAN dump = DM00 twiddled if a dims-match was found; the file is keyed by
+	// the RENDER selector so it matches the ASMTRACE assembly (sel field).
+	char ppmA[112]; snprintf(ppmA, sizeof ppmA, "/dev/shm/PL%02X_body_%04u.ppm", cid, (unsigned)sel);
+	if (dmKey >= 0 && dmFmt == 5) bcWritePPM(dmTex, w, h, palBase, /*twid=*/true, ppmA);
+	else                          bcWritePPM(blob + 4, w, h, palBase, /*twid=*/false, ppmA);  // GFX1-blob fallback
+
+	// Cross-dump BOTH candidate sources + RAW so the first capture is self-diagnosing:
+	//   _gfx1lin  = GFX1 blob texels (blob+4), LINEAR  (tests source A)
+	//   _dm00twid = DM00 slot texels, TWIDDLE          (tests source B)
+	char ppmL[112]; snprintf(ppmL, sizeof ppmL, "/dev/shm/PL%02X_body_%04u_gfx1lin.ppm", cid, (unsigned)sel);
+	bcWritePPM(blob + 4, w, h, palBase, /*twid=*/false, ppmL);
+	if (dmKey >= 0) {
+		char ppmT[112]; snprintf(ppmT, sizeof ppmT, "/dev/shm/PL%02X_body_%04u_dm00twid.ppm", cid, (unsigned)sel);
+		bcWritePPM(dmTex, w, h, palBase, /*twid=*/true, ppmT);
+	}
+	char rfp[112]; snprintf(rfp, sizeof rfp, "/dev/shm/PL%02X_body_%04u.raw", cid, (unsigned)sel);
+	bcWriteRaw(blob + 4, bytes, rfp);   // GFX1-blob raw 4bpp (offline-palette fallback)
+
+	char mn[96]; snprintf(mn, sizeof mn, "/dev/shm/PL%02X_body.manifest", cid);
+	FILE* mf = fopen(mn, "a");
+	if (mf) {
+		if (ftell(mf) == 0)
+			fprintf(mf, "# rsel palRow w h gfx1 blob dmKey dmTex dmFmt palBase ppm  "
+			            "(body parts keyed by RENDER selector read_u16(r11+6))\n");
+		fprintf(mf, "%u %u %d %d %08x %08x %d %08x %d %08x PL%02X_body_%04u.ppm\n",
+		        (unsigned)sel, palRow, w, h, gfx1, blob, dmKey, dmTex, dmFmt, palBase, cid, (unsigned)sel);
+		fclose(mf);
+	}
+
+	if ((s_fireBody % 32) == 1) {
+		FILE* dl = fopen("/dev/shm/mc_bodycap.log", "a");
+		if (dl) {
+			fprintf(dl, "[BODY] fire#%lu cid=%u(PL%02X) rsel=%u %dx%d gfx1=%08x blob=%08x "
+			            "dmKey=%d dmTex=%08x dmFmt=%d palBase=%08x\n",
+			        s_fireBody, cid, cid, (unsigned)sel, w, h, gfx1, blob, dmKey, dmTex, dmFmt, palBase);
+			fclose(dl);
+		}
+	}
+}
+
 void mc_oracleInit()
 {
 	static bool logged = false;
@@ -1148,6 +1339,12 @@ void mc_oracleInit()
 		                "(loc_8c0344d4 per-part convergence): sel=read_u16(r11+6), dx/dy=r11+0/+2, "
 		                "accX=r10, screenX/Y=f32@(r15+0x30/0x34) -> /dev/shm/mc_assembly.log. "
 		                "Hold a clean STANDING pose to capture the standing part-list.\n", PC_ASM_PART);
+	if (mc_bodyCapEnabled)
+		fprintf(stderr, "[BODYCAP] ENABLED — BODY part DECODED pixels keyed by the RENDER selector "
+		                "(read_u16(r11+6), the 533-541 namespace) at 0x%08X (loc_8c0344d4 per-part). "
+		                "Primary = DM00 twiddled slot (dims-matched), fallbacks = GFX1-blob linear + "
+		                "DM00 twiddle + RAW 4bpp -> /dev/shm/PL*_body_*.ppm + PL*_body.manifest. "
+		                "Hold a clean STANDING Ryu (PL00) to fill the body part-list.\n", PC_ASM_PART);
 	if (mc_decodeTraceEnabled)
 		fprintf(stderr, "[DECODETRACE] ENABLED — BOTH LZSS decoders traced: WORD loc_8c03552a "
 		                "@0x%08X + BYTE loc_8c0354c0 @0x%08X (caller=pr, src=r4, dest=r5/r6) "
@@ -1220,7 +1417,7 @@ bool mc_isHookedPC(u32 pc)
 	// ASMTRACE: the per-part convergence PC inside loc_8c0344d4 (0x8C034864). Only hooked
 	// when the asm-trace flag is set. Mid-block -> the decoder force-split makes it a block
 	// start; this returns true so rec_x64 injects the GenCall there.
-	if (m == PC_ASM_PART_M) return mc_asmTraceEnabled;
+	if (m == PC_ASM_PART_M) return mc_asmTraceEnabled || mc_bodyCapEnabled;
 	return false;
 }
 
@@ -1273,6 +1470,7 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 	// Independent of the per-frame oracle buffer; appends one line per part. Handle + return.
 	if (mpc == PC_ASM_PART_M) {
 		if (mc_asmTraceEnabled) mc_asmTraceHandler(r);
+		if (mc_bodyCapEnabled)  mc_bodyCapHandler(r);
 		return;
 	}
 
