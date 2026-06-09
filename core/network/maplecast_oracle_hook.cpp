@@ -159,12 +159,29 @@ static bool mc_asmTraceEnabled = (getenv("MAPLECAST_ASMTRACE") != nullptr);
 // force-splits at the ASMTRACE PC (0x8C034864) — shared, no extra hook needed.
 static bool mc_bodyCapEnabled = (getenv("MAPLECAST_BODYCAP") != nullptr);
 
+// CHARQ-RENDER (MAPLECAST_CHARQ_RENDER) — THE SOURCE-OF-TRUTH per-part body quad:
+// the SH4 render's OWN final PVR list entries, NOT the flaky post-hoc ta_parse (which
+// depends on which TA pass flycast's single-slot rqueue keeps). Captures at the point
+// the per-character BODY geometry routine loc_8c0344d4 (bank03:10218) submits each
+// part to the bank12 PVR-list builder loc_8C1244B0 (bank12:9795), AFTER that builder
+// has fully resolved + written the final PVR poly record (PCW/ISP/TSP/TCW + the 4
+// transformed verts x,y,u,v) into the display list. CAPTURE PC = 0x8C1248CC
+// (bank12 `pref @r14`, right after the LAST record write and BEFORE the cursor
+// advances): r14 = recordBase+0x20, record at base..base+0x3F is COMPLETE
+// (base+0x08 = RESOLVED TCW = *(r12+8) | template[*(0x8C2AA508)[idx]+4]). Body-vs-HUD
+// filter: Sh4cntx.pr == 0x0C03487A (the loc_8c0344d4 submit-jsr return; the other ~7
+// callers of loc_8C1244B0 are HUD/effects with different pr). READ-ONLY (addrspace
+// reads + /dev/shm append). Forces the master gate so rec_x64 injects + the decoder
+// force-splits at 0x8C1248CC.
+static bool mc_charqRenderEnabled = (getenv("MAPLECAST_CHARQ_RENDER") != nullptr);
+
 bool mc_oracleHookEnabled = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr)
                          || mc_decodeHookEnabled
                          || mc_decodeTraceEnabled
                          || mc_quadCaptureEnabled
                          || mc_asmTraceEnabled
-                         || mc_bodyCapEnabled;
+                         || mc_bodyCapEnabled
+                         || mc_charqRenderEnabled;
 
 // Sub-flag: also capture the LOAD-TIME part-atlas decode quads at loc_8c033e90
 // (0x8C033EC0 post-write). PROVEN (live prod capture 2026-06-08): that routine
@@ -328,6 +345,18 @@ static const u32 PC_DECODE_ENTRY2_M = PC_DECODE_ENTRY2 & SH4_AREA_MASK; // 0x0C0
 // start; mc_isHookedPC must return true so rec_x64 injects the GenCall.
 static const u32 PC_ASM_PART   = 0x8C034864;
 static const u32 PC_ASM_PART_M = PC_ASM_PART & SH4_AREA_MASK;  // 0x0C034864
+// CHARQ-RENDER: the per-part PVR-list-record completion PC inside loc_8C1244B0
+// (bank12). At 0x8C1248CC (`pref @r14`, right after the final record write and before
+// the cursor advances) the 0x40-byte PVR poly record at r14-0x20 is fully resolved.
+static const u32 PC_CHARQ_SUBMIT   = 0x8C1248CC;
+static const u32 PC_CHARQ_SUBMIT_M = PC_CHARQ_SUBMIT & SH4_AREA_MASK;  // 0x0C1248CC
+// The body render's submit-jsr return address (loc_8c0344d4: jsr @0x8C034876 ->
+// pr = 0x8C03487A). This pr at PC_CHARQ_SUBMIT identifies the BODY caller (vs the ~7
+// HUD/effect callers of loc_8C1244B0, which have other pr's).
+static const u32 PC_BODY_SUBMIT_RET   = 0x8C03487A;
+static const u32 PC_BODY_SUBMIT_RET_M = PC_BODY_SUBMIT_RET & SH4_AREA_MASK;  // 0x0C03487A
+static const u32 CHARQ_REC_OFF   = 0x20;   // r14 at PC_CHARQ_SUBMIT = base + 0x20
+static const u32 CHARQ_REC_BYTES = 0x40;   // poly header 0x20 + one vertex block 0x20
 // loc_8c0344d4 body-routine stack slots (relative to the ADJUSTED r15 after the
 // prologue's `add 0x84,r15`; the same frame the body uses at the hook PC).
 static const u32 ASM_S_SCREENX = 0x30;   // f32 final screen X (fadd of pen*scale to anchor)
@@ -1188,6 +1217,186 @@ static void mc_asmTraceHandler(const u32* r)
 }
 
 // ===========================================================================
+// CHARQ-RENDER (MAPLECAST_CHARQ_RENDER) — THE SOURCE-OF-TRUTH per-part body quad.
+// Fires at PC_CHARQ_SUBMIT (0x8C1248CC) inside loc_8C1244B0 once per emitted body
+// part, AFTER the PVR poly record is fully written. We filter to the BODY caller via
+// Sh4cntx.pr == 0x0C03487A (the loc_8c0344d4 submit jsr return), then read the
+// 0x40-byte PVR record from r14-0x20 and accumulate it under (cid, vframe). When the
+// video frame (0x8C3496B0) advances we flush the accumulated per-character quad lists
+// to /dev/shm/mc_charq_render.jsonl. READ-ONLY (addrspace reads + /dev/shm).
+//
+// We do NOT have the caller's node base in a register at this PC, but the BODY render
+// only runs for the (up to 6) active fighter bodies, and the record's TCW + verts are
+// what the consumer needs. We resolve the owning character by reading sprite_id/cid
+// off the currently-rendering node, which loc_8c0344d4 stashes nowhere reachable here
+// — so we attribute by render ORDER within the video frame: each contiguous run of
+// body parts (between video-frame boundaries) belongs to the body whose loc_8c0344d4
+// pass is executing. To give a STABLE cid we read the active fighter bodies' sprite_id
+// and match the record's resolved TCW VRAM region; simplest+robust: tag every part of
+// the current run with the nearest preceding ASMTRACE node identity if available, else
+// emit under a synthetic per-run object. Here we keep it minimal + deterministic: tag
+// by the SH4 r13 record + the resolved TCW; the run-segmentation/cid join is done by
+// the ASMTRACE log (same PC family, same per-part cadence) or downstream. We additionally
+// stamp the cid we can read cheaply: the 6 body bases' active+sprite_id, choosing the
+// active body whose pass index matches this run (s_charqRun).
+
+struct CharqPart {
+	u32  pcw, isp, tcw, tsp;      // PVR header words (resolved)
+	u32  rec[CHARQ_REC_BYTES/4];  // the full 0x40-byte PVR record (verts decode downstream)
+	u32  recBase;                 // guest addr of the record (debug)
+};
+static const int CHARQ_MAX_PARTS = 256;
+struct CharqRunObj {
+	u32 node; int cid; int sprite_id;        // owning body identity (best-effort)
+	CharqPart parts[CHARQ_MAX_PARTS];
+	int nparts;
+};
+static const int CHARQ_MAX_OBJS = 8;         // <= 6 bodies + slack
+static CharqRunObj s_charqRun[CHARQ_MAX_OBJS];
+static int         s_charqRunN   = 0;
+static u32         s_charqVframe  = 0xFFFFFFFFu;
+static unsigned long s_fireCharq  = 0;
+static FILE*       s_charqFile    = nullptr;
+static long        s_charqWritten = 0;
+// Run-segmentation signal: the node base of the most recent OBJ_BEGIN/SAT_BEGIN
+// (loc_8c03093c / loc_8c030af8). loc_8c0344d4 renders that node's body parts right
+// after, so a CHANGE in this value marks a new per-body run. Set by the begin
+// handlers; consumed (and its "consumed" generation tracked) by charqOpenRun.
+static u32 s_charqBeginNode = 0;
+static u32 s_charqBeginCid  = 0xFFFFFFFFu;
+static u32 s_charqBeginSid  = 0xFFFFFFFFu;
+static u32 s_charqRunNode   = 0;   // node the current run is bound to
+
+// Return the run object the current body part belongs to. Run = the contiguous
+// stream of body parts following one OBJ_BEGIN/SAT_BEGIN. We bind a run to the
+// most-recent begin node (s_charqBeginNode). If the begin node changed since the
+// current run was opened, OR no run exists this frame, we open a new run.
+static CharqRunObj* charqGetRun()
+{
+	u32 begin = s_charqBeginNode;
+	// Same node as the current run -> keep appending to it.
+	if (s_charqRunN > 0 && s_charqRunNode == begin && begin != 0)
+		return &s_charqRun[s_charqRunN - 1];
+	// New body run (or first run of the frame): open one bound to the begin node.
+	if (s_charqRunN >= CHARQ_MAX_OBJS) {
+		// Cap: keep folding into the last run rather than dropping parts.
+		return &s_charqRun[CHARQ_MAX_OBJS - 1];
+	}
+	CharqRunObj* o = &s_charqRun[s_charqRunN];
+	memset(o, 0, sizeof *o);
+	o->node = begin;
+	// Identity from the begin handler (already read off the node), with a fallback to
+	// reading the node directly if the begin handler hasn't populated it yet.
+	if (begin && inRam(begin)) {
+		o->cid       = (s_charqBeginCid != 0xFFFFFFFFu) ? (int)s_charqBeginCid
+		                                                : (int)(u8)addrspace::read8(begin + OFF_CHAR_ID);
+		o->sprite_id = (s_charqBeginSid != 0xFFFFFFFFu) ? (int)s_charqBeginSid
+		                                                : (int)(u16)addrspace::read16(begin + OFF_SPRITE_ID);
+	} else {
+		o->cid = -1; o->sprite_id = -1;
+	}
+	s_charqRunNode = begin;
+	s_charqRunN++;
+	return o;
+}
+
+// Flush the accumulated per-character runs for the just-finished video frame.
+static void charqFlushFrame(u32 vframe)
+{
+	if (s_charqRunN == 0) return;
+	static const long CHARQ_CAP = []{
+		const char* v = getenv("MAPLECAST_CHARQ_JSONL_CAP");
+		if (v) { long c = atol(v); if (c >= (1L << 20)) return c; }
+		return 16L * 1024 * 1024;
+	}();
+	if (!s_charqFile) {
+		s_charqFile = fopen("/dev/shm/mc_charq_render.jsonl", "w");
+		s_charqWritten = 0;
+		if (s_charqFile) setvbuf(s_charqFile, nullptr, _IOFBF, 1 << 16);
+	}
+	if (s_charqFile && s_charqWritten >= CHARQ_CAP) {
+		s_charqFile = freopen("/dev/shm/mc_charq_render.jsonl", "w", s_charqFile);
+		s_charqWritten = 0;
+		if (s_charqFile) setvbuf(s_charqFile, nullptr, _IOFBF, 1 << 16);
+	}
+	if (!s_charqFile) { s_charqRunN = 0; return; }
+
+	char b[4096]; int n;
+	for (int i = 0; i < s_charqRunN; i++) {
+		CharqRunObj& o = s_charqRun[i];
+		if (o.nparts == 0) continue;
+		n = snprintf(b, sizeof b,
+			"{\"frame\":%u,\"node\":\"0x%08X\",\"cid\":%d,\"sprite_id\":%d,\"nquads\":%d,\"quads\":[",
+			vframe, o.node, o.cid, o.sprite_id, o.nparts);
+		s_charqWritten += fwrite(b, 1, n, s_charqFile);
+		for (int p = 0; p < o.nparts; p++) {
+			const CharqPart& q = o.parts[p];
+			n = snprintf(b, sizeof b,
+				"%s{\"pcw\":\"0x%08X\",\"isp\":\"0x%08X\",\"tcw\":\"0x%08X\",\"tsp\":\"0x%08X\","
+				"\"vram\":\"0x%08X\",\"rec_base\":\"0x%08X\",\"rec\":[",
+				p ? "," : "", q.pcw, q.isp, q.tcw, q.tsp,
+				(q.tcw & 0x1FFFFF) << 3, q.recBase);     // TCW texel addr = (tcw&0x1FFFFF)<<3
+			s_charqWritten += fwrite(b, 1, n, s_charqFile);
+			for (int w = 0; w < (int)(CHARQ_REC_BYTES/4); w++) {
+				n = snprintf(b, sizeof b, "%s\"0x%08X\"", w ? "," : "", q.rec[w]);
+				s_charqWritten += fwrite(b, 1, n, s_charqFile);
+			}
+			n = snprintf(b, sizeof b, "]}");
+			s_charqWritten += fwrite(b, 1, n, s_charqFile);
+		}
+		n = snprintf(b, sizeof b, "]}\n");
+		s_charqWritten += fwrite(b, 1, n, s_charqFile);
+	}
+	fflush(s_charqFile);
+	s_charqRunN = 0;
+}
+
+static void mc_charqRenderHandler(const u32* r)
+{
+	// BODY-vs-HUD filter: only capture when this loc_8C1244B0 invocation came from the
+	// body render (loc_8c0344d4) submit jsr. pr (caller return) must be 0x0C03487A.
+	u32 pr = Sh4cntx.pr & SH4_AREA_MASK;
+	if (pr != PC_BODY_SUBMIT_RET_M) return;
+
+	if (s_fireCharq++ == 0)
+		fprintf(stderr, "[CHARQ-RENDER] first fired (pc=0x%08X loc_8C1244B0 per body part, "
+		                "pr=0x%08X) -> /dev/shm/mc_charq_render.jsonl\n",
+		        PC_CHARQ_SUBMIT, Sh4cntx.pr);
+
+	u32 vframe = addrspace::read32(0x8C3496B0);
+
+	// Video-frame boundary: flush the previous frame's accumulated runs, reset.
+	if (vframe != s_charqVframe) {
+		if (s_charqVframe != 0xFFFFFFFFu) charqFlushFrame(s_charqVframe);
+		s_charqVframe = vframe;
+		s_charqRunN   = 0;
+	}
+
+	// The PVR record base: r14 at this PC = base + 0x20 (one `add 0x20,r14` executed).
+	u32 recBase = (norm(r[14]) | 0x0C000000u) - CHARQ_REC_OFF;
+	if (!inRam(recBase)) return;
+
+	// Per-part run attribution: bind this part to the body whose OBJ_BEGIN/SAT_BEGIN
+	// (s_charqBeginNode) most recently fired. loc_8c0344d4 renders one body's full
+	// part list contiguously right after its begin, so a change in s_charqBeginNode
+	// segments the runs. (The begin hooks already fire under the master gate.)
+	CharqRunObj* o = charqGetRun();
+	if (!o) return;
+	if (o->nparts >= CHARQ_MAX_PARTS) return;
+
+	CharqPart& q = o->parts[o->nparts];
+	q.recBase = recBase;
+	for (int w = 0; w < (int)(CHARQ_REC_BYTES/4); w++)
+		q.rec[w] = addrspace::read32(recBase + (u32)w * 4);
+	q.pcw = q.rec[0];      // base+0x00
+	q.isp = q.rec[1];      // base+0x04
+	q.tcw = q.rec[2];      // base+0x08  (RESOLVED: VRAM texel addr + fmt + pal bank)
+	q.tsp = q.rec[5];      // base+0x14  (TSP/pal extra)
+	o->nparts++;
+}
+
+
+// ===========================================================================
 // BODYCAP (MAPLECAST_BODYCAP) — body part DECODED pixels keyed by the RENDER selector.
 // Fires at the SAME PC as ASMTRACE (0x8C034864, loc_8c0344d4 per-part convergence).
 // See mc_bodyCapEnabled for the full selector-space reconciliation. READ-ONLY.
@@ -1429,6 +1638,10 @@ bool mc_isHookedPC(u32 pc)
 	// when the asm-trace flag is set. Mid-block -> the decoder force-split makes it a block
 	// start; this returns true so rec_x64 injects the GenCall there.
 	if (m == PC_ASM_PART_M) return mc_asmTraceEnabled || mc_bodyCapEnabled;
+	// CHARQ-RENDER: the per-part PVR-record completion PC inside loc_8C1244B0
+	// (0x8C1248CC). Only hooked when the charq-render flag is set. Mid-block -> the
+	// decoder force-split makes it a block start; return true so rec_x64 injects.
+	if (m == PC_CHARQ_SUBMIT_M) return mc_charqRenderEnabled;
 	return false;
 }
 
@@ -1485,6 +1698,14 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 		return;
 	}
 
+	// CHARQ-RENDER per-part PVR-record capture — loc_8C1244B0 completion PC (0x8C1248CC).
+	// Filters to the BODY caller by Sh4cntx.pr inside the handler. Accumulates per
+	// (cid, vframe) -> /dev/shm/mc_charq_render.jsonl.
+	if (mpc == PC_CHARQ_SUBMIT_M) {
+		if (mc_charqRenderEnabled) mc_charqRenderHandler(r);
+		return;
+	}
+
 	if (mpc == PC_OBJ_BEGIN_M) {
 		if (s_fireObjBegin++ == 0)
 			fprintf(stderr, "[ORACLE-HOOK] OBJ_BEGIN first fired (pc=0x%08X masked 0x%08X)\n",
@@ -1494,6 +1715,14 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 		// quad attribution at the quad-done PC keys on the node addr independently.
 		u32 node = norm(r[4]);
 		if (!inRam(node)) return;
+		// CHARQ-RENDER run segmentation: this body's parts (emitted next by loc_8c0344d4)
+		// belong to THIS node. Record its identity for charqGetRun.
+		if (mc_charqRenderEnabled) {
+			u32 cnode = node | 0x0C000000u;
+			s_charqBeginNode = cnode;
+			s_charqBeginCid  = (u32)(u8)addrspace::read8(cnode + OFF_CHAR_ID);
+			s_charqBeginSid  = (u32)(u16)addrspace::read16(cnode + OFF_SPRITE_ID);
+		}
 		int oi = findOrCreateObj(node);
 		if (oi >= 0) { enrichObj(s_objs[oi], node); s_objs[oi].fromBegin = true; }  // refresh post-transform screen_xy
 		// R2: record the running TA byte cursor + cell part count AT this per-object
@@ -1517,6 +1746,16 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 			                "node=0x%08X\n", pc, mpc, r[4]);
 		u32 node = norm(r[4]);
 		if (!inRam(node)) return;
+		// CHARQ-RENDER run segmentation (satellite path). Satellites render via
+		// loc_8c030af8 + a DIFFERENT submit jsr, so the pr filter rejects satellite
+		// parts — but we still update the begin node so a body run after a satellite
+		// re-opens correctly.
+		if (mc_charqRenderEnabled) {
+			u32 cnode = node | 0x0C000000u;
+			s_charqBeginNode = cnode;
+			s_charqBeginCid  = (u32)(u8)addrspace::read8(cnode + OFF_CHAR_ID);
+			s_charqBeginSid  = (u32)(u16)addrspace::read16(cnode + OFF_SPRITE_ID);
+		}
 		int oi = findOrCreateObj(node);
 		if (oi >= 0) {
 			enrichObj(s_objs[oi], node);
