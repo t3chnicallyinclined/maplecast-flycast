@@ -439,7 +439,7 @@ struct ScreenQuad {
 	float cx, cy;           // bbox center (attribution anchor)
 	float uMn, uMx, vMn, vMx;
 	float zMn, zMx;
-	u32 tcw, tsp, pcw, vramAddr;
+	u32 tcw, tsp, pcw, isp, vramAddr;   // isp = pp.isp.full (depth/culling/shade-mode word)
 	int  fmt, tw, th, vq, srcBlend, dstBlend;
 	int  obj;               // attributed object index (-1 = unassigned)
 };
@@ -587,6 +587,17 @@ static Quad s_quads[MAX_QUADS];     // load-decode quads (sub-flag)
 static int  s_nquad = 0;
 static ScreenQuad s_screen[MAX_SCREEN]; // per-frame SCREEN quads (ta_parse)
 static int  s_nscreen = 0;
+
+// CHARQ accessor snapshot — published at the END of frameFlush (before the per-frame
+// statics reset) so the CHARQ emit block in serverPublish can read this frame's
+// object identities + the kept-sprite-quad -> object map. s_screen index == the
+// kept-sprite-quad ordinal (collectScreenQuads pushes one ScreenQuad per kept sprite
+// quad in op->pt->tr order), so s_charqMap[ordinal] = s_screen[ordinal].obj.
+static CharqObj s_charqObjs[MAX_OBJS];
+static int      s_charqNobj = 0;
+static int      s_charqMap[MAX_SCREEN];
+static int      s_charqNmap = 0;
+static void publishCharqSnapshot();   // defined after frameFlush
 // (s_curObj removed: quad attribution is now by node addr (r10), not by the last
 //  OBJ_BEGIN — see findOrCreateObj. No "current object" state to track.)
 
@@ -1629,7 +1640,7 @@ static void collectScreenQuads(rend_context& rc)
 			q.x=mnX; q.y=mnY; q.w=w; q.h=h; q.cx=(mnX+mxX)*0.5f; q.cy=cy;
 			q.uMn=uMn; q.uMx=uMx; q.vMn=vMn; q.vMx=vMx;
 			q.zMn=(zMn> 1e29f)?0.f:zMn; q.zMx=(zMx<-1e29f)?0.f:zMx;
-			q.tcw=tcw; q.tsp=tsp; q.pcw=pcw; q.srcBlend=srcB; q.dstBlend=dstB;
+			q.tcw=tcw; q.tsp=tsp; q.pcw=pcw; q.isp=pp.isp.full; q.srcBlend=srcB; q.dstBlend=dstB;
 			q.fmt = (int)((tcw>>27)&7); q.vq = (int)((tcw>>30)&1);
 			q.tw = 8 << ((tsp>>3)&7); q.th = 8 << (tsp&7);
 			q.vramAddr = (tcw & 0x1FFFFF) << 3;
@@ -1652,17 +1663,55 @@ static void collectScreenQuads(rend_context& rc)
 static void attributeScreenQuads()
 {
 	for (int i = 0; i < s_nobj; i++) s_objs[i].nscreen = 0;
-	const float ATTR_RADIUS = 160.f;   // px; tunable. Parts cluster <120px from screen_xy.
+
+	// (3b) RE-READ the authoritative screen_xy from the node NOW. attributeScreenQuads
+	// runs in frameFlush AFTER the full draw walk completed, so node+0xE0/+0xE4 hold
+	// the CURRENT frame's post-transform position (Render Main Sprite, loc_8c03093c,
+	// writes them DURING the walk). The o.sx/o.sy captured at OBJ_BEGIN entry are the
+	// PREVIOUS frame's values (the write lags entry — see ~:1499). Using the stale
+	// anchor mis-keyed body quads into the unassigned bucket. Refresh in place.
+	for (int i = 0; i < s_nobj; i++) {
+		Obj& o = s_objs[i];
+		if (!o.fromBegin) continue;
+		float nsx = rdF(o.node + OFF_SCREEN_X);
+		float nsy = rdF(o.node + OFF_SCREEN_Y);
+		if (!(std::isnan(nsx) || std::isnan(nsy) || fabsf(nsx) > 1e6f || fabsf(nsy) > 1e6f)) {
+			o.sx = nsx; o.sy = nsy;
+		}
+	}
+
+	// (3b) BBOX-OVERLAP attribution. The old centroid-distance test (ATTR_RADIUS=160)
+	// dropped tall body quads: a torso/leg part can have its bbox center >160px from
+	// the object's screen_xy (the foot/pivot anchor). Instead, expand an anchor BOX
+	// around each object's screen_xy and attribute a quad to the object whose expanded
+	// box contains the quad's bbox center, breaking ties by center distance. The box is
+	// asymmetric-tall (chars are tall+narrow) and falls back to the centroid radius for
+	// objects whose box doesn't reach the quad (small satellites). nearest-anchor wins.
+	const float HALF_W   = 110.f;   // px horizontal half-extent of the anchor box
+	const float UP       = 200.f;   // px above screen_xy (bodies extend UP from the foot anchor)
+	const float DOWN     = 110.f;   // px below
+	const float FALLBACK = 160.f;   // px centroid radius fallback (was ATTR_RADIUS)
 	for (int k = 0; k < s_nscreen; k++) {
 		ScreenQuad& q = s_screen[k];
-		int best = -1; float bestD2 = ATTR_RADIUS * ATTR_RADIUS;
+		int   best = -1;
+		bool  bestInBox = false;
+		float bestD2 = FALLBACK * FALLBACK;
 		for (int i = 0; i < s_nobj; i++) {
 			const Obj& o = s_objs[i];
 			if (!o.fromBegin) continue;          // only anchor on routine-confirmed objects
 			if (o.sx == 0.f && o.sy == 0.f) continue;
 			float dx = q.cx - o.sx, dy = q.cy - o.sy;
+			bool inBox = (dx >= -HALF_W && dx <= HALF_W && dy >= -UP && dy <= DOWN);
 			float d2 = dx*dx + dy*dy;
-			if (d2 < bestD2) { bestD2 = d2; best = i; }
+			// Prefer any in-box object over any out-of-box; within the same class pick
+			// the nearest center. This makes tall body parts attribute (their center is
+			// inside the tall box even when >160px from the foot anchor) while keeping a
+			// nearest-anchor fallback for small satellites outside every box.
+			if (inBox) {
+				if (!bestInBox || d2 < bestD2) { bestInBox = true; bestD2 = d2; best = i; }
+			} else if (!bestInBox && d2 < bestD2) {
+				bestD2 = d2; best = i;
+			}
 		}
 		q.obj = best;
 		if (best >= 0) s_objs[best].nscreen++;
@@ -1815,7 +1864,7 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 	// handler (pre-match) — it needs NOTHING from frameFlush. So the per-frame ta_parse /
 	// jsonl work runs only for the REAL frame oracle or the probe.
 	bool frameOracleActive = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr) || mc_probeEnabled;
-	if (!frameOracleActive) { s_nobj = 0; s_nquad = 0; s_nscreen = 0; s_nr2 = 0; return; }
+	if (!frameOracleActive) { s_nobj = 0; s_nquad = 0; s_nscreen = 0; s_nr2 = 0; s_charqNobj = 0; s_charqNmap = 0; return; }
 
 	// IN-MATCH GATE (in_match flag @0x8C289624, same as the serverPublish oracle).
 	// The per-object draw routine (loc_8c03093c) only fires during gameplay, and
@@ -1882,6 +1931,9 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 	// recovery off-match, so s_nscreen is 0 there) AND only when something was
 	// captured. This keeps the jsonl to real gameplay frames.
 	if (!inMatch || (s_nobj == 0 && s_nquad == 0 && s_nscreen == 0)) {
+		// Still publish the (possibly empty/off-match) snapshot so the CHARQ accessor
+		// is coherent for every frame: in-match-but-empty frames yield 0 objs/0 map.
+		publishCharqSnapshot();
 		s_nobj = 0; s_nquad = 0; s_nscreen = 0; s_nr2 = 0; return;
 	}
 
@@ -1929,12 +1981,13 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 					n = snprintf(b, sizeof b,
 						"%s{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,"
 						"\"u\":[%.4f,%.4f],\"v\":[%.4f,%.4f],\"z\":[%.6g,%.6g],"
-						"\"vram_addr\":\"0x%08X\",\"tcw\":\"0x%08X\",\"fmt\":%d,"
+						"\"vram_addr\":\"0x%08X\",\"tcw\":\"0x%08X\",\"tsp\":\"0x%08X\","
+						"\"pcw\":\"0x%08X\",\"isp\":\"0x%08X\",\"fmt\":%d,"
 						"\"tex_wh\":[%d,%d],\"vq\":%d,\"blend\":[%d,%d]}",
 						firstQ ? "" : ",",
 						(int)q.x,(int)q.y,(int)q.w,(int)q.h,
 						q.uMn,q.uMx,q.vMn,q.vMx, q.zMn,q.zMx,
-						q.vramAddr, q.tcw, q.fmt, q.tw, q.th, q.vq,
+						q.vramAddr, q.tcw, q.tsp, q.pcw, q.isp, q.fmt, q.tw, q.th, q.vq,
 						q.srcBlend, q.dstBlend);
 					ow += fwrite(b, 1, n, of);
 					firstQ = false;
@@ -1988,7 +2041,54 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 		}
 	}
 
+	// CHARQ snapshot — publish THIS frame's object identities + the kept-sprite-quad
+	// -> object map for the CHARQ emit block (serverPublish, after this flush). Built
+	// here, just before the per-frame statics reset, so the accessors return valid
+	// data for the same serverPublish call. s_screen[] index == kept-sprite-quad
+	// ordinal (collectScreenQuads order), so the map is a direct copy of .obj.
+	publishCharqSnapshot();
+
 	s_nobj = 0; s_nquad = 0; s_nscreen = 0; s_nr2 = 0;
+}
+
+// Copy the per-frame s_objs[] identities + the s_screen[] ordinal->obj map into the
+// CHARQ snapshot statics. Cheap: a flat copy of <=256 objs + <=4096 ints. Called at
+// the end of frameFlush (snapshot survives the per-frame reset). Mask sprite_id to
+// 0x7FFF here; resolve cid (body=node+0x1, satellite=ownerCid) so CHARQ reads it raw.
+static void publishCharqSnapshot()
+{
+	int n = s_nobj; if (n > MAX_OBJS) n = MAX_OBJS;
+	for (int i = 0; i < n; i++) {
+		const Obj& o = s_objs[i];
+		CharqObj& c = s_charqObjs[i];
+		c.node        = o.node;
+		c.sprite_id   = (o.sprite_id >= 0) ? (o.sprite_id & 0x7FFF) : o.sprite_id;
+		c.isSatellite = o.isSat;
+		c.ownerSlot   = o.ownerSlot;
+		c.ownerCid    = o.ownerCid;
+		c.screen_x    = o.sx;
+		c.screen_y    = o.sy;
+		// cid: bodies carry character_id at node+0x1; satellites have none on the node
+		// (it's the OWNER's), so report the owner cid for sats.
+		c.cid = o.isSat ? o.ownerCid : (int)(u8)addrspace::read8(o.node + OFF_CHAR_ID);
+	}
+	s_charqNobj = n;
+
+	int m = s_nscreen; if (m > MAX_SCREEN) m = MAX_SCREEN;
+	for (int k = 0; k < m; k++) s_charqMap[k] = s_screen[k].obj;
+	s_charqNmap = m;
+}
+
+const CharqObj* mc_oracle_objects(int* outCount)
+{
+	if (outCount) *outCount = s_charqNobj;
+	return s_charqNobj ? s_charqObjs : nullptr;
+}
+
+const int* mc_oracle_quadObjMap(int* outCount)
+{
+	if (outCount) *outCount = s_charqNmap;
+	return s_charqNmap ? s_charqMap : nullptr;
 }
 
 }

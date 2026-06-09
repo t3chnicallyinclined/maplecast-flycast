@@ -56,4 +56,42 @@ void DYNACALL mc_oracle_blockEntry(u32 pc);
 // casts it back to TA_context*. No-op when the hook is disabled / ctx is null.
 void mc_oracle_frameFlush(void* ctx, u32 frame);
 
+// ===========================================================================
+// CHARQ accessor (Phase 2 consumer — maplecast_mirror.cpp serverPublish).
+//
+// After mc_oracle_frameFlush() runs for a frame, the per-object identity table
+// and the kept-sprite-quad -> object mapping for THAT frame are available via
+// these accessors. CALL ORDERING: serverPublish() invokes mc_oracle_frameFlush()
+// (which runs ta_parse + collectScreenQuads + attributeScreenQuads and populates
+// the statics) BEFORE the CHARQ emit block, so the statics are ready when CHARQ
+// reads them. The statics are reset at the END of frameFlush, so CHARQ must read
+// them within the SAME serverPublish call, after the flush.
+//
+// The "kept-sprite-quad ordinal" is the index into the sprite-filtered quad list
+// that collectScreenQuads builds — same isSprite predicate, same op->pt->tr walk
+// order. CHARQ filters the live ta_parse PolyParam lists with the IDENTICAL
+// predicate/order, so its Nth kept sprite poly == ordinal N here.
+
+// Per-object identity (a flattened view of the internal Obj for the CHARQ wire).
+struct CharqObj {
+	u32   node;            // object node base
+	int   sprite_id;       // node+0x144 & 0x7FFF (mask applied here)
+	int   cid;             // character_id: body = node+0x1; satellite = ownerCid
+	float screen_x;        // node+0xE0 (refreshed to current-frame value in frameFlush)
+	float screen_y;        // node+0xE4
+	bool  isSatellite;     // came through the effect/satellite path (loc_8c030af8)
+	int   ownerSlot;       // 0..5 owning body slot; -1 = none/global
+	int   ownerCid;        // owner's character_id; -1 = unknown
+};
+
+// Returns the per-frame object table (count via out param). Pointer is to the
+// internal static — valid only until the next frameFlush. NULL/0 if hook inactive.
+const CharqObj* mc_oracle_objects(int* outCount);
+
+// Returns the kept-sprite-quad ordinal -> object-index map (count via out param).
+// map[ordinal] = index into mc_oracle_objects()[] for that sprite quad, or -1 if
+// the quad was not attributed to any object (unassigned bucket). The ordinal is
+// the Nth quad passing collectScreenQuads' isSprite filter in op->pt->tr order.
+const int* mc_oracle_quadObjMap(int* outCount);
+
 }
