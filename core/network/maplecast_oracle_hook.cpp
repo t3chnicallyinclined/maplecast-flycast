@@ -55,6 +55,37 @@ bool mc_oracleHookEnabled = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr);
 // MAPLECAST_FRAME_ORACLE_DECODE=1 to additionally log the one-shot atlas decode.
 static bool mc_decodeQuadsEnabled = (getenv("MAPLECAST_FRAME_ORACLE_DECODE") != nullptr);
 
+// PHASE-0 PROBE (per-object-quad-capture spec §7 Phase 0 + R1/R6). READ-ONLY.
+// Confirms the game's per-object quad-COUNT table is populated PER-FRAME (R1) and
+// helps LOCATE the satellite/pool count table (R6). Pure instrumentation: reads the
+// game's two result tables (count + display-list ptr) plus a window of the
+// surrounding count region, and logs to stderr. NO hooks, NO force-splits, NO
+// attribution change, NO writes. Default-ON when the master hook is enabled so the
+// operator gets the probe for free; set MAPLECAST_FRAME_ORACLE_PROBE=0 to disable,
+// or =1 to enable independently of the master hook.
+static bool mc_probeEnabled = []{
+	const char* v = getenv("MAPLECAST_FRAME_ORACLE_PROBE");
+	if (v) return v[0] != '0';                       // explicit override
+	return getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr;  // default = follow master
+}();
+
+// --- The game's per-object quad-emit result tables (CONFIRMED addresses,
+// marvelous2 bank03 loc_8c033f44 finalize @9403-9409; per-object-quad-capture
+// spec §1c). The per-frame display-list builder loc_8c033d78, driven 6× (one per
+// fighter body, stride 0x5A4 from 0x8C268340) by loc_8c03dcba, finalizes:
+//   *(u16)(QUAD_COUNT_TBL + i*2) = r11        ; quads object i emitted this frame
+//   *(u32)(QUAD_PTR_TBL   + i*4) = displaylist ; ptr to object i's 16-byte-quad list
+// COUNT is u16 (mov.w store @ finalize), stride 2; PTR is u32 (mov.l), stride 4.
+static const u32 QUAD_COUNT_TBL = 0x8C26AA24;   // 6 × u16 body quad counts
+static const u32 QUAD_PTR_TBL   = 0x8C26AA34;   // 6 × u32 display-list ptrs
+// Sibling cluster — object-pool base (re-catalog/00-README.md, bank04:11748). The
+// SATELLITE/pool quad counts are UNRESOLVED (spec R6). The probe hexdumps the whole
+// 0x8C26AA00..0x8C26AAF0 window so the operator can SEE which adjacent slot lights
+// up when a cape/projectile char is on screen.
+static const u32 POOL_BASE      = 0x8C26AA54;   // [INFERRED] satellite/pool region
+static const u32 PROBE_DUMP_LO  = 0x8C26AA00;   // hexdump window start
+static const u32 PROBE_DUMP_HI  = 0x8C26AAF0;   // hexdump window end (exclusive top row)
+
 // The two hooked guest PCs (CONFIRMED, marvelous2 bank03; FRAME-ORACLE-SPEC §Draw chain):
 //   0x8C03093C loc_8c03093c "Render Main Sprite" — node=r4 (object begin)
 //   0x8C033E90 loc_8c033e90 "reading sprite data" — quad emit (r8=texptr, r12=palptr, r14=cursor)
@@ -281,6 +312,11 @@ void mc_oracleInit()
 		                "by position%s -> /dev/shm/mc_oracle_hook.jsonl\n",
 		        PC_OBJ_BEGIN,
 		        mc_decodeQuadsEnabled ? " (+DECODE quad sub-flag at 0x8C033EC0)" : "");
+	if (mc_probeEnabled)
+		fprintf(stderr, "[ORACLE-PROBE] ENABLED (Phase 0, READ-ONLY) — body quad-count tbl "
+		                "0x%08X[6×u16] + dlPtr 0x%08X[6×u32]; R6 dump 0x%08X..0x%08X. "
+		                "Set MAPLECAST_FRAME_ORACLE_PROBE=0 to disable.\n",
+		        QUAD_COUNT_TBL, QUAD_PTR_TBL, PROBE_DUMP_LO, PROBE_DUMP_HI);
 }
 
 bool mc_isHookedPC(u32 pc)
@@ -510,9 +546,74 @@ static void attributeScreenQuads()
 	}
 }
 
+// ---- PHASE-0 PROBE (READ-ONLY) ---------------------------------------------
+// Confirms R1 (the per-object quad-COUNT table is populated EVERY in-match frame,
+// refuting the old "fires once at frame 2568" note) and gathers data for R6 (where
+// satellite/pool counts live). Called once/frame from frameFlush, in-match, AFTER
+// ta_parse + collectScreenQuads so it can also report the total parsed TA sprite
+// quad count for the SAME frame. Pure addrspace reads + stderr logging — no writes,
+// no hooks, no force-splits. Throttled so it doesn't flood the journal.
+//
+//   tapp = raw PolyParam counts in the parsed TA (op/pt/tr list sizes)
+//   tspr = sprite-filtered screen quads (s_nscreen) — the count we'd segment
+static void mc_phase0Probe(u32 frame, int tappOp, int tappPt, int tappTr, int tspr)
+{
+	// Read the 6 body quad COUNTS (u16) + display-list PTRS (u32). addrspace::read*
+	// takes the cached (P1, 0x8C..) guest address directly — the same alias these
+	// tables are labelled with in the disasm and the same form the existing hook
+	// reads CHAR_BASE[] / 0x8C289624 through, so no P0/P1 masking is needed for a
+	// fixed RAM data address (the mask only matters for executable PCs).
+	u16 cnt[6]; u32 ptr[6]; int sum = 0;
+	for (int i = 0; i < 6; i++) {
+		cnt[i] = (u16)addrspace::read16(QUAD_COUNT_TBL + i * 2);
+		ptr[i] = addrspace::read32(QUAD_PTR_TBL   + i * 4);
+		sum += cnt[i];
+	}
+
+	// PASS line (throttled every 60 frames). PASS for R1 = the 6 body counts are
+	// NON-ZERO every in-match frame. Format so the operator can eyeball it:
+	//   counts[...] sum=N  ta{op,pt,tr,sprite}  ptrs[...]
+	static unsigned long s_probeCalls = 0;
+	if ((s_probeCalls++ % 60) == 0) {
+		fprintf(stderr,
+			"[ORACLE-PROBE] frame=%u R1 bodyCounts[%u,%u,%u,%u,%u,%u] sum=%d "
+			"ta{op=%d pt=%d tr=%d sprite=%d} "
+			"dlPtr[0x%08X,0x%08X,0x%08X,0x%08X,0x%08X,0x%08X]\n",
+			frame,
+			cnt[0],cnt[1],cnt[2],cnt[3],cnt[4],cnt[5], sum,
+			tappOp, tappPt, tappTr, tspr,
+			ptr[0],ptr[1],ptr[2],ptr[3],ptr[4],ptr[5]);
+
+		// R6 — find the satellite/pool count table. Hexdump the whole count region
+		// 0x8C26AA00..0x8C26AAF0 as u32 words (4 per row), with the addr at row head,
+		// so when the operator plays a projectile/cape char we can SEE which adjacent
+		// table goes non-zero for satellites. The known POOL_BASE 0x8C26AA54 row is
+		// tagged inline. NOTE: the body COUNT table at +0xAA24 reads as packed u16
+		// pairs inside these u32 words (low+high halfword = two object counts).
+		fprintf(stderr, "[ORACLE-PROBE] R6 dump 0x%08X..0x%08X (u32 words):\n",
+			PROBE_DUMP_LO, PROBE_DUMP_HI);
+		for (u32 a = PROBE_DUMP_LO; a < PROBE_DUMP_HI; a += 16) {
+			u32 w0 = addrspace::read32(a + 0);
+			u32 w1 = addrspace::read32(a + 4);
+			u32 w2 = addrspace::read32(a + 8);
+			u32 w3 = addrspace::read32(a + 12);
+			const char* tag = "";
+			if (a <= QUAD_COUNT_TBL && QUAD_COUNT_TBL < a + 16) tag = "  <-COUNT_TBL";
+			else if (a <= QUAD_PTR_TBL && QUAD_PTR_TBL < a + 16) tag = "  <-PTR_TBL";
+			else if (a <= POOL_BASE   && POOL_BASE   < a + 16) tag = "  <-POOL_BASE?";
+			fprintf(stderr, "[ORACLE-PROBE]   0x%08X: %08X %08X %08X %08X%s\n",
+				a, w0, w1, w2, w3, tag);
+		}
+	}
+}
+
 void mc_oracle_frameFlush(void* ctxv, u32 frame)
 {
-	if (!mc_oracleHookEnabled) { s_nobj = 0; s_nquad = 0; s_nscreen = 0; return; }
+	// Run when EITHER the master hook OR the Phase-0 probe is enabled. The probe
+	// only needs ta_parse + the table reads (no block-entry buffer), so it can run
+	// standalone (MAPLECAST_FRAME_ORACLE_PROBE=1 with the master hook off) — useful
+	// for a minimal de-risk pass with zero recompiler GenCall injection.
+	if (!mc_oracleHookEnabled && !mc_probeEnabled) { s_nobj = 0; s_nquad = 0; s_nscreen = 0; return; }
 
 	// IN-MATCH GATE (in_match flag @0x8C289624, same as the serverPublish oracle).
 	// The per-object draw routine (loc_8c03093c) only fires during gameplay, and
@@ -532,6 +633,17 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 		ta_parse(ctx, true);
 		collectScreenQuads(ctx->rend);
 		attributeScreenQuads();
+
+		// PHASE-0 PROBE (R1 + R6) — read the game's per-object body quad-count/ptr
+		// tables and dump the surrounding count region. Runs here so it can report
+		// the SAME frame's parsed TA quad counts (op/pt/tr PolyParam list sizes +
+		// the sprite-filtered s_nscreen). READ-ONLY; throttled inside.
+		if (mc_probeEnabled)
+			mc_phase0Probe(frame,
+				(int)ctx->rend.global_param_op.size(),
+				(int)ctx->rend.global_param_pt.size(),
+				(int)ctx->rend.global_param_tr.size(),
+				s_nscreen);
 	}
 
 	// Capacity guard so a long session can't fill /dev/shm.
