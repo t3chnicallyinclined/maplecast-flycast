@@ -1446,6 +1446,165 @@ static void partDump(const GameState& state) {
 }
 
 // =============================================================================
+// GFX1DUMP — CLEAN gameplay-part pixels from the LOAD-TIME GFX1 decode buffer
+// (gated MAPLECAST_GFX1DUMP). READ-ONLY.
+//
+// THE PROBLEM (why partDump's GFX1 path was noise, why DM00 was the wrong set):
+//   * The per-frame partDump's contiguous GFX1 walk (texPtr=0x0CE60000; texPtr +=
+//     (w*h)>>1 per part) is the STRUCTURALLY CORRECT algorithm — confirmed against
+//     the load decoder bank03:loc_8c032ae0/loc_8c0327d4, where the decode DEST
+//     pointer (r12) ADVANCES by each part's byte size (`add r4,r12`), i.e. the
+//     character's parts are laid out CONTIGUOUSLY in 0x0CE60000 as they decode.
+//   * But that buffer is a TRANSIENT scratch. With two chars loaded and a match in
+//     flight, nothing re-decodes the full character there each frame; mid-match the
+//     contiguous offsets read stale residue -> the magenta/stripe NOISE we saw.
+//   * The DM00 directory (*(0x0CE80008)) IS persistent + clean, but its key is
+//     `char_base + part_ordinal` (a sequential counter; bank03:loc_8c0322c0
+//     `entry=*(r6+8)+(k<<4)`, loc_8c032a66 char_base=9/13 from player+0xad), which
+//     is NOT the +6 GFX selector the emitter/assembly use. So DM00 cannot be keyed
+//     by selector (it gave the UI/portrait set + the 256x256 body, not the per-pose
+//     selector parts).
+//
+// THE FIX: run the SAME contiguous GFX1 walk, but AT LOAD-DECODE TIME (the ONLY
+// window the 0x0CE60000 buffer holds the fresh, valid contiguous decode). The load
+// decode fires ONCE at match/char load; capturing the EARLY in-match frames after a
+// fresh `in_match` transition catches the freshly-decoded buffer. We dump each +6
+// SELECTOR the FIRST time we see it with a real (alpha-bearing) decode (freshest
+// buffer), keyed by the selector so the output matches tools/rip_gfx2_assembly.py
+// --realparts (PL{HEX}_part_NNN.ppm). Reuses the PROVEN PAL4 detwiddle/palette/
+// magenta path (partDecodeToPPM, fmt=5 linear) that produced clean DM00 portraits.
+//
+// Output (operator-local, ROM-derived -> /dev/shm only):
+//   /dev/shm/PL{HEX}_gfx1_NNNN.ppm   one clean part per +6 selector (P6, magenta=transp)
+//   /dev/shm/PL{HEX}_gfx1.manifest   "<selector> <palRow> <w> <h> <fmt> <texptr> <ppm>"
+//   /dev/shm/mc_gfx1dump.log         per-fire trace
+// The --realparts contract wants PL{HEX}_part_NNN.ppm; we ALSO write that filename
+// (symlink-free copy) so the tool consumes it directly. Manifest selector column ==
+// the +6 GFX selector == the `part` field in the sidasm assembly (no dangling keys).
+// =============================================================================
+static void gfx1Dump(const GameState& state) {
+	static const char* env = getenv("MAPLECAST_GFX1DUMP");
+	static bool on = env != nullptr;
+	if (!on) return;
+	// Capture the first WINDOW in-match frames after EACH fresh match start. The
+	// one-shot load decode runs at match load, so the buffer is freshest in the
+	// opening frames; we re-scan each of these frames and keep first-seen-per-selector
+	// (a later frame only fills selectors a poses-this-frame missed).
+	static const int WINDOW = (env && atoi(env) > 1) ? atoi(env) : 20;
+	static bool prevInMatch = false;
+	static int  framesIn = 0;
+	static bool cleared = false;
+	static bool seen[0x40][512] = {{false}};   // [char_id][selector] first-seen gate
+
+	if (!state.in_match) { prevInMatch = false; framesIn = 0; return; }
+	if (!prevInMatch) {                         // fresh match start -> reset window + gates
+		prevInMatch = true; framesIn = 0;
+		for (int c = 0; c < 0x40; c++) for (int s = 0; s < 512; s++) seen[c][s] = false;
+		cleared = false;
+	}
+	if (framesIn++ >= WINDOW) return;           // only the opening (fresh-buffer) window
+
+	// On first fire of this window, clear stale dumps + manifests (as the maplecast
+	// user; /dev/shm is maplecast-owned).
+	if (!cleared) {
+		for (int c = 0; c < 0x40; c++) {
+			char mn[96];
+			snprintf(mn, sizeof mn, "/dev/shm/PL%02X_gfx1.manifest", c); remove(mn);
+		}
+		cleared = true;
+	}
+
+	FILE* lg = fopen("/dev/shm/mc_gfx1dump.log", framesIn == 1 ? "w" : "a");
+	if (lg) fprintf(lg, "# GFX1DUMP fire (framesIn=%d/%d) frame=%u — clean LOAD-decode parts by +6 selector\n",
+	                framesIn, WINDOW, state.frame_counter);
+
+	const uint32_t TEXEL_BASE = 0x0CE60000;     // bank03.asm:9118 loc_8c033e28 (decode dest)
+
+	for (int s = 0; s < 6; s++) {
+		uint32_t pbase = CHAR_BASE[s];
+		if (!(uint8_t)addrspace::read8(pbase + OFF_ACTIVE)) continue;
+		uint8_t  cid  = (uint8_t)addrspace::read8(pbase + OFF_CHAR_ID);
+		uint32_t gfx1 = addrspace::read32(pbase + OFF_GFX00_PTR);   // 0x15c Dat_GFX1
+		uint32_t gfx2 = addrspace::read32(pbase + OFF_GFX01_PTR);   // 0x160 Dat_GFX2 (cell tbl)
+		uint32_t palP = addrspace::read32(pbase + OFF_PAL_PTR);     // 0x164 Dat_Pal
+		uint16_t sid  = (uint16_t)addrspace::read16(pbase + OFF_SPRITE_ID);
+		uint32_t gfxBase = gfx1 & 0x0FFFFFFFu;
+		uint32_t gfx2Base = gfx2 & 0x0FFFFFFFu;
+		if (!_ramAddr(gfxBase | 0x0C000000u) || !_ramAddr(gfx2Base | 0x0C000000u)) continue;
+
+		// Resolve THIS pose's GFX2 cell (the contiguous decode walk follows the
+		// cell record order, seeding texPtr once at 0x0CE60000 and advancing it by
+		// each part's 4bpp byte size — exactly the load decoder's r12 advance).
+		uint32_t sidIdx  = (uint32_t)(sid & 0x7FFF);
+		uint32_t cellOff = addrspace::read32(gfx2Base + sidIdx * 4) & 0x0FFFFFFFu;
+		uint32_t cell    = (gfx2Base + cellOff) & 0x0FFFFFFFu;
+		if (!_ramAddr(cell | 0x0C000000u)) continue;
+		int cnt = (int)(uint16_t)addrspace::read16(cell);
+		if (cnt <= 0 || cnt > 64) continue;
+		uint32_t recs = cell + 2;
+
+		char mn[96]; snprintf(mn, sizeof mn, "/dev/shm/PL%02X_gfx1.manifest", cid);
+		FILE* mf = fopen(mn, "a");
+		if (mf && ftell(mf) == 0)
+			fprintf(mf, "# selector palRow w h fmt texptr ppm  (clean LOAD-decode GFX1 parts, PAL4 linear)\n");
+
+		const uint32_t TCW_PAL4_LINEAR = (5u << 27) | (1u << 26);   // 0x2C000000 (fmt5 PAL4, linear)
+		uint32_t texPtr = TEXEL_BASE;            // seeded once per node (disasm loc_8c033e28)
+		int dumpedThis = 0;
+		for (int r = 0; r < cnt; r++) {
+			uint32_t rec   = recs + (uint32_t)r * 8;
+			uint16_t rpalw = (uint16_t)addrspace::read16(rec + 4);   // palette word
+			uint16_t rsel  = (uint16_t)addrspace::read16(rec + 6);   // +6 GFX SELECTOR (the key)
+			if (rsel == 0x00FF) break;                               // assembly terminator
+			uint32_t lo = addrspace::read32(rec);
+			if (lo == 0 && rsel == 0 && rpalw == 0) continue;        // pad/separator
+			unsigned palRow = (unsigned)((rpalw & 0x03ff) >> 4);
+
+			// Dims via the GFX1 offset table: blob = gfx1 + *(gfx1 + sel*4); skip the
+			// 2-byte piece header; w/h = next two bytes << 3 (bank03 loc_8c033e90).
+			uint32_t off  = addrspace::read32(gfxBase + (uint32_t)rsel * 4);
+			uint32_t blob = (gfxBase + off) & 0x0FFFFFFFu;
+			uint32_t bAlias = blob | 0x0C000000u;
+			int w = 0, h = 0;
+			if (_ramAddr(bAlias)) {
+				w = (int)((uint8_t)addrspace::read8(bAlias + 0x02)) << 3;
+				h = (int)((uint8_t)addrspace::read8(bAlias + 0x03)) << 3;
+			}
+			int rawBytes = (w * h) >> 1;                             // 4bpp byte size
+			if (w <= 0 || h <= 0 || w > 1024 || h > 1024) {
+				texPtr += (rawBytes > 0) ? (uint32_t)rawBytes : 0;   // still advance the run
+				continue;
+			}
+
+			if (rsel < 512 && cid < 0x40 && !seen[cid][rsel]) {
+				// FIRST-SEEN gate: dump this selector's clean part now (freshest buffer).
+				// Write BOTH the --realparts contract name (PLxx_part_NNN.ppm, the name
+				// tools/rip_gfx2_assembly.py load_real_parts() reads) AND the brief's
+				// PLxx_gfx1_NNNN.ppm alias, keyed by the +6 selector.
+				char pfn[96]; snprintf(pfn, sizeof pfn, "PL%02X_part_%03u.ppm", cid, rsel);
+				char pfp[112]; snprintf(pfp, sizeof pfp, "/dev/shm/%s", pfn);
+				partDecodeToPPM(texPtr, w, h, /*fmt=*/5, /*linear=*/true,
+				                palP + (uint32_t)palRow * 32, pfp, /*swapXY=*/false);
+				char gfn[96]; snprintf(gfn, sizeof gfn, "PL%02X_gfx1_%04u.ppm", cid, rsel);
+				char gfp[112]; snprintf(gfp, sizeof gfp, "/dev/shm/%s", gfn);
+				partDecodeToPPM(texPtr, w, h, /*fmt=*/5, /*linear=*/true,
+				                palP + (uint32_t)palRow * 32, gfp, /*swapXY=*/false);
+				seen[cid][rsel] = true;
+				if (mf) fprintf(mf, "%u %u %d %d 5 %08x %s\n", rsel, palRow, w, h, texPtr, pfn);
+				if (lg)  fprintf(lg, "[GFX1] cid=%u(PL%02X) sel=%u %dx%d palRow=%u tex=%08x -> %s\n",
+				                 cid, cid, rsel, w, h, palRow, texPtr, pfn);
+				dumpedThis++;
+			}
+			texPtr += (uint32_t)rawBytes;                            // advance contiguous walk
+		}
+		if (mf) fclose(mf);
+		if (lg) fprintf(lg, "[GFX1] slot%d cid=%u(PL%02X) sid=%u cnt=%d gfx1=%08x gfx2=%08x dumpedThisFire=%d -> %s\n",
+		                s, cid, cid, sid, cnt, gfxBase, gfx2Base, dumpedThis, mn);
+	}
+	if (lg) fclose(lg);
+}
+
+// =============================================================================
 // CHURN INSTRUMENT (gated MAPLECAST_CHURN). Answers: after the SH4 computes a
 // frame, how many bytes / which fields of SH4 main RAM actually change per
 // frame in-match? This is the information-content floor for a reconstruct-from-
@@ -1798,6 +1957,7 @@ void readGameState(GameState& state)
 
 	ptrDump(state);
 	partDump(state);     // read-only part-atlas capture probe (MAPLECAST_PARTDUMP=1)
+	gfx1Dump(state);     // read-only CLEAN load-decode GFX1 parts by +6 selector (MAPLECAST_GFX1DUMP=1)
 	effectsDump(state);  // read-only Effect Poly capture probe (MAPLECAST_DUMP_EFFECTS=1)
 	churnDump(state);    // read-only full-RAM per-frame churn instrument (MAPLECAST_CHURN=1)
 }
