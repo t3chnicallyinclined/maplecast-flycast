@@ -90,10 +90,43 @@ static bool mc_decodeTraceEnabled = (getenv("MAPLECAST_DECODETRACE") != nullptr)
 // master gate AND the PC_QUAD_DEC hook so the recompiler injects + force-splits.
 static bool mc_quadCaptureEnabled = (getenv("MAPLECAST_QUADCAPTURE") != nullptr);
 
+// ASMTRACE (MAPLECAST_ASMTRACE) — THE GROUND-TRUTH SPRITE-ASSEMBLY RECIPE.
+// Hooks the per-PART point inside the per-frame BODY geometry routine loc_8c0344d4
+// (bank03:10218, the routine loc_8c034bea dispatches every in-match frame from
+// loc_8c03093c — see mc_cellPartCount2's RE note). loc_8c0344d4 walks the current
+// pose's cell record: an OUTER loop over 8-byte EXTRAS groups (cursor r11, +=8 at
+// loc_8c03488e) and an INNER loop over the parts of each group (cursor r13, +=4 at
+// the end of loc_8c034864). Per part it accumulates a facing-gated cumulative PEN
+// (X-acc in r10: `sub r5,r10` @bank03:10479 for facing-left / `add r5,r10` @10570
+// for facing-right; the per-record dx=read_u16(r11+0)@10443, dy=read_u16(r11+2)@10442),
+// then composes the FINAL screen position = node screen anchor (seeded at
+// loc_8c034588 from node+0xE0/+0xE4) + (acc + tile) * scale (node+0xEC/+0xF0):
+//   screenX = f32 @ (r15+0x30)   (written @10677 simple path / @10719 rotated path)
+//   screenY = f32 @ (r15+0x34)   (written @10683 simple path / @10737 rotated path)
+// THE HOOK PC = loc_8c034864 (0x8C034864) — the convergence label where BOTH paths
+// have finished writing the final screen X/Y to (r15+0x30)/(r15+0x34), JUST BEFORE the
+// per-part submit jsr. It's a `bra` target (from the simple path @10682) AND a
+// fall-through (from the rotated path @10737) -> mid-block -> the decoder force-split
+// makes it a block start so the GenCall injects. At 0x8C034864 ALL of these are live:
+//   node = r14 (mov r4,r14 @prologue, never reclobbered)
+//   r11  = outer EXTRAS-group cursor: sel=read_u16(r11+6)@10353, dx=read_u16(r11+0),
+//          dy=read_u16(r11+2), flags/select=read_u16(r11+4) (0x4000 facing, 0x8000 dispatch)
+//   r13  = inner part cursor (4-byte stride); read_u8(r13+0)=tile/dim byte
+//   r10  = live cumulative pen X-acc (sign-extended word)
+//   screenX/Y = f32 @ (r15+0x30)/(r15+0x34)  (final, post-transform)
+// Per fire appends ONE line to /dev/shm/mc_assembly.log:
+//   frame sid slot cid sel dx dy accX accY screenX screenY pal row flip
+// where sid=node+0x144, slot=which of the 6 bodies (-1 if none), cid=node+0x1,
+// accX=r10, accY=stack@0x14 (the Y pen, mov.w r0,@(0x14,r15)@10466), pal=read_u16(r11+2),
+// row=(pal>>4)&7, flip=(read_u16(r11+4)&0x10)?1:0. READ-ONLY (addrspace reads +
+// /dev/shm append). Forces the master gate so the recompiler injects + force-splits.
+static bool mc_asmTraceEnabled = (getenv("MAPLECAST_ASMTRACE") != nullptr);
+
 bool mc_oracleHookEnabled = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr)
                          || mc_decodeHookEnabled
                          || mc_decodeTraceEnabled
-                         || mc_quadCaptureEnabled;
+                         || mc_quadCaptureEnabled
+                         || mc_asmTraceEnabled;
 
 // Sub-flag: also capture the LOAD-TIME part-atlas decode quads at loc_8c033e90
 // (0x8C033EC0 post-write). PROVEN (live prod capture 2026-06-08): that routine
@@ -252,6 +285,16 @@ static const u32 PC_DECODE_ENTRY_M = PC_DECODE_ENTRY & SH4_AREA_MASK;  // 0x0C03
 // decoder convention is the same: r4=source(compressed), r5/r6=dest, pr=caller.
 static const u32 PC_DECODE_ENTRY2  = 0x8C0354C0;
 static const u32 PC_DECODE_ENTRY2_M = PC_DECODE_ENTRY2 & SH4_AREA_MASK; // 0x0C0354C0
+// ASMTRACE: the per-part convergence PC inside loc_8c0344d4 (see mc_asmTraceEnabled).
+// Mid-block (bra target + fall-through) so the decoder force-split makes it a block
+// start; mc_isHookedPC must return true so rec_x64 injects the GenCall.
+static const u32 PC_ASM_PART   = 0x8C034864;
+static const u32 PC_ASM_PART_M = PC_ASM_PART & SH4_AREA_MASK;  // 0x0C034864
+// loc_8c0344d4 body-routine stack slots (relative to the ADJUSTED r15 after the
+// prologue's `add 0x84,r15`; the same frame the body uses at the hook PC).
+static const u32 ASM_S_SCREENX = 0x30;   // f32 final screen X (fadd of pen*scale to anchor)
+static const u32 ASM_S_SCREENY = 0x34;   // f32 final screen Y
+static const u32 ASM_S_ACCY    = 0x14;   // u16 Y pen accumulator (mov.w r0,@(0x14,r15))
 // The load-time atlas builder return target. After loc_8c033d78 (bank03:9092) runs,
 // the per-part directory at QUAD_COUNT_TBL/QUAD_PTR_TBL is finalized — we dump it as a
 // cross-check (mc_partDirDump). We don't hook this PC for a block-entry call; the dump
@@ -1034,11 +1077,77 @@ static void mc_decodeTraceHandler(const u32* r, int which)
 	}
 }
 
+// ===========================================================================
+// ASMTRACE (MAPLECAST_ASMTRACE) — GROUND-TRUTH per-part sprite-assembly recipe.
+// Fires at PC_ASM_PART (0x8C034864) once per emitted body part. See mc_asmTraceEnabled
+// for the full register/stack map. READ-ONLY: addrspace reads + a /dev/shm append.
+static unsigned long s_fireAsm   = 0;
+static bool          s_asmCleared = false;
+
+static void mc_asmTraceHandler(const u32* r)
+{
+	// Global MVC2 frame counter (CLAUDE.md / work.asm: 0x8C3496B0, u32).
+	u32 frame = addrspace::read32(0x8C3496B0);
+	if (s_fireAsm++ == 0)
+		fprintf(stderr, "[ASMTRACE] first fired (pc=0x%08X loc_8c0344d4 per-part) — "
+		                "ground-truth body assembly -> /dev/shm/mc_assembly.log\n", PC_ASM_PART);
+
+	// One-time stale-log clear (truncate). /dev/shm is maplecast-owned.
+	if (!s_asmCleared) { remove("/dev/shm/mc_assembly.log"); s_asmCleared = true; }
+
+	u32 node = norm(r[14]) | 0x0C000000u;   // r14 = char/render struct base
+	u32 r11  = r[11];                       // outer EXTRAS-group cursor
+	u32 r13  = r[13];                       // inner part cursor
+	u32 sp   = r[15];                       // SH4 stack pointer (the body frame)
+	if (!inRam(node) || !inRam(r11) || !inRam(sp)) return;
+
+	// Record fields off the outer cursor r11 (the 8-byte EXTRAS group).
+	int  dx    = (s16)addrspace::read16(r11 + 0x0);   // X component (->r5 @bank03:10443)
+	int  dy    = (s16)addrspace::read16(r11 + 0x2);   // Y component (->stack@0x8 @10442)
+	u16  flags = (u16)addrspace::read16(r11 + 0x4);   // 0x4000 facing-select, 0x8000 dispatch
+	u16  sel   = (u16)addrspace::read16(r11 + 0x6);   // +6 GFX selector (the part key)
+	if (sel == 0x00FF) return;                        // assembly terminator
+
+	// Pen accumulators + final screen position from the live regs / body stack frame.
+	int   accX    = (s16)(r[10] & 0xffff);                  // r10 = X pen acc (word)
+	int   accY    = (s16)addrspace::read16(sp + ASM_S_ACCY);// Y pen acc (stack@0x14)
+	float screenX = rdF(sp + ASM_S_SCREENX);                // final screen X (stack@0x30)
+	float screenY = rdF(sp + ASM_S_SCREENY);                // final screen Y (stack@0x34)
+
+	// Identity: sprite_id @ node+0x144, character_id @ node+0x1, owner slot 0..5.
+	u16 sid = (u16)addrspace::read16(node + OFF_SPRITE_ID);
+	u8  cid = (u8)addrspace::read8(node + OFF_CHAR_ID);
+	int slot = -1;
+	for (int s = 0; s < 6; s++) if ((node & 0x1FFFFFFF) == (CHAR_BASE[s] & 0x1FFFFFFF)) { slot = s; break; }
+
+	// pal/row/flip as the spec requests: pal = the +2 record word (the prompt's "pal field"),
+	// row = the 3-bit palette row (pal>>4)&7 (PalMod-confirmed), flip = (flags & 0x10)?1:0.
+	u16 pal  = (u16)dy & 0xffff;
+	int row  = (pal >> 4) & 0x7;
+	int flip = (flags & 0x10) ? 1 : 0;
+
+	FILE* lg = fopen("/dev/shm/mc_assembly.log", "a");
+	if (!lg) return;
+	if (ftell(lg) == 0)
+		fprintf(lg, "# frame sid slot cid sel dx dy accX accY screenX screenY pal row flip "
+		            "flags r11 r13 node  (loc_8c0344d4 @0x%08X, per body part)\n", PC_ASM_PART);
+	fprintf(lg, "%u %u %d %u %u %d %d %d %d %.2f %.2f %u %d %d %04x %08x %08x %08x\n",
+	        frame, (unsigned)sid, slot, (unsigned)cid, (unsigned)sel,
+	        dx, dy, accX, accY, screenX, screenY, (unsigned)pal, row, flip,
+	        (unsigned)flags, r11, r13, node);
+	fclose(lg);
+}
+
 void mc_oracleInit()
 {
 	static bool logged = false;
 	if (logged) return;
 	logged = true;
+	if (mc_asmTraceEnabled)
+		fprintf(stderr, "[ASMTRACE] ENABLED — ground-truth per-part body assembly at 0x%08X "
+		                "(loc_8c0344d4 per-part convergence): sel=read_u16(r11+6), dx/dy=r11+0/+2, "
+		                "accX=r10, screenX/Y=f32@(r15+0x30/0x34) -> /dev/shm/mc_assembly.log. "
+		                "Hold a clean STANDING pose to capture the standing part-list.\n", PC_ASM_PART);
 	if (mc_decodeTraceEnabled)
 		fprintf(stderr, "[DECODETRACE] ENABLED — BOTH LZSS decoders traced: WORD loc_8c03552a "
 		                "@0x%08X + BYTE loc_8c0354c0 @0x%08X (caller=pr, src=r4, dest=r5/r6) "
@@ -1108,6 +1217,10 @@ bool mc_isHookedPC(u32 pc)
 	// DECODE-TRACE (BYTE-LZSS): the second decoder ENTRY (loc_8c0354c0 / 0x8C0354C0).
 	// Block start (jsr/jmp target) so the force-split is a no-op; the GenCall injects.
 	if (m == PC_DECODE_ENTRY2_M) return mc_decodeTraceEnabled;
+	// ASMTRACE: the per-part convergence PC inside loc_8c0344d4 (0x8C034864). Only hooked
+	// when the asm-trace flag is set. Mid-block -> the decoder force-split makes it a block
+	// start; this returns true so rec_x64 injects the GenCall there.
+	if (m == PC_ASM_PART_M) return mc_asmTraceEnabled;
 	return false;
 }
 
@@ -1153,6 +1266,13 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 	// per-frame paths; shares no per-frame buffer. Handle + return.
 	if (mpc == PC_QUAD_DEC_M) {
 		if (mc_quadCaptureEnabled) mc_quadCaptureHandler(r);
+		return;
+	}
+
+	// ASMTRACE per-part body assembly — loc_8c0344d4 convergence PC (0x8C034864).
+	// Independent of the per-frame oracle buffer; appends one line per part. Handle + return.
+	if (mpc == PC_ASM_PART_M) {
+		if (mc_asmTraceEnabled) mc_asmTraceHandler(r);
 		return;
 	}
 
