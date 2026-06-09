@@ -183,3 +183,7 @@ state-replica-kit/
 # _oracle/ (the .py) IS committable; the .jsonl captures are NOT.
 _oracle/*.jsonl
 _oracle/*.ndjson
+# Disassembly dumps of the game code (marvelous2 raw .asm) are ROM-derived — never commit.
+_oracle/*.asm
+# Per-(char,sprite_id) anchor sidecars are ROM-derived (computed from ROM exec).
+_oracle/anchors_*.json

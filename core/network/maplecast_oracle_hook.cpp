@@ -265,8 +265,12 @@ struct R2Rec {
 	int   slot;          // s_objs index this frame
 	u32   node;          // object node base
 	u32   taBytes;       // ta_tad.thd_data - thd_root AT this object's render entry
-	u16   cellParts;     // cell-data part count (first u16 @ *(node+0x160) head)
-	u32   curCell;       // node+0x154 raw (anim/cell-step candidate)
+	u16   cellParts;     // OLD candidate: first u16 @ *(*(node+0x160)) (cell index 0) — was 0
+	u16   cellParts2;    // NEW (CORRECT): per-frame current-pose count =
+	                     //   first u16 of GFX2[sprite_id&0x7FFF] cell record (mc_cellPartCount2)
+	u16   cellIdx;       // sprite_id & 0x7FFF (the GFX2 index used)
+	u32   cellRec;       // resolved cell record ptr (debug)
+	u32   curCell;       // node+0x154 raw (anim/cell-step candidate, the 20-byte anim keyframe)
 	float sx, sy;        // screen_xy (placement anchor)
 	bool  isSat;
 };
@@ -299,20 +303,68 @@ static inline u16 mc_cellPartCount(u32 node)
 	return (u16)addrspace::read16(cellData);        // part count = first u16
 }
 
+// --- mc_cellPartCount2: the CORRECT per-frame current-pose part count ---------
+// RE FINDING (marvelous2 bank03, the per-frame sprite emitters loc_8c0344d4 @10218
+// and loc_8c0348c8 @10800 — the two routines loc_8c034bea dispatches every in-match
+// frame from loc_8c03093c). Both open with the IDENTICAL current-cell read:
+//
+//   loc_8c0344d4 / loc_8c0348c8 prologue:
+//     r0  = 0x0160                       ; loc_8c0345fc / loc_8c03492a
+//     r4  = *(node + 0x160)              ; Dat_GFX2  (the per-char CELL TABLE base)
+//     add 0xE4,r0                        ; 0xE4 is a SIGNED imm = -0x1C
+//                                        ; r0 = 0x0160 - 0x1C = 0x0144  (sprite_id offset!)
+//     r0  = *(node + 0x144)              ; sprite_id (32-bit load; low 15 bits = the cell id)
+//     and 0x7FFF,r0                      ; mask off the 0x8000 dispatcher-select bit
+//     shll2 r0                           ; index*4
+//     r11 = *(Dat_GFX2 + index*4)        ; offset (relative to Dat_GFX2) of THIS pose's cell record
+//     add r4,r11                         ; r11 = Dat_GFX2 + offset = the current cell record ptr
+//     mov.w @r11+,r2 ; extu.w            ; r2 = FIRST u16 of the cell record = the loop bound
+//     mov.l r2,@(0x28,r15)               ; -> the OUTER loop count the emitter walks
+//
+// That first u16 is the number of 8-byte EXTRAS/OAM groups (r11 advances +8 per group
+// at loc_8c03488e; group sub-fields @+0x2/+0x4/+0x6 match the documented 8-byte OAM
+// record) that the emitter draws for THIS pose. It is the per-frame, current-pose
+// count — NOT the 228-constant full-atlas decode (loc_8c033d78, indexed by an
+// iterating cell counter over the whole table) and NOT the empty cell-0 the old
+// mc_cellPartCount read (it deref'd *(cellTbl) = index 0, not index sprite_id&0x7FFF).
+//
+// DISTINCTION vs +0x154: +0x154 (current_cell_data, used by the hitbox builder
+// loc_8c034174 @9692: r13=*(node+0x154); idx=@(0x12,r13); hitbox=*(node+0x16c)+idx*16)
+// points at the live 20-byte ANIM keyframe (anotak duration/sprite/hitbox-group). The
+// SPRITE part count lives one level out: GFX2[sprite_id&0x7FFF] -> cell record -> first
+// u16. We log BOTH so the match reveals which sums to the translucent TA count.
+//
+// READ-ONLY. Returns 0 on any unreadable pointer. `outIdx`/`outRec` optional debug.
+static inline u16 mc_cellPartCount2(u32 node, u16* outId = nullptr, u32* outRec = nullptr)
+{
+	u32 gfx2 = addrspace::read32(node + OFF_CELL_TBL);          // *(node+0x160) Dat_GFX2
+	if (!gfx2 || !inRam(gfx2)) return 0;
+	u16 sid = (u16)addrspace::read16(node + OFF_SPRITE_ID);     // *(node+0x144)
+	u16 idx = sid & 0x7FFF;                                     // mask 0x8000 select bit
+	if (outId) *outId = idx;
+	u32 off = addrspace::read32(gfx2 + (u32)idx * 4);           // *(GFX2 + idx*4) = rel offset
+	u32 rec = gfx2 + off;                                       // cell record ptr
+	if (outRec) *outRec = rec;
+	if (!inRam(rec)) return 0;
+	return (u16)addrspace::read16(rec);                         // first u16 = EXTRAS group count
+}
+
 // Append an R2 record for the object whose render-call just entered. Called from
 // the OBJ_BEGIN / SAT_BEGIN handlers. READ-ONLY.
 static void mc_r2Record(int slot, u32 node, bool isSat)
 {
 	if (s_nr2 >= MAX_R2 || slot < 0) return;
 	R2Rec& r = s_r2[s_nr2++];
-	r.slot      = slot;
-	r.node      = node;
-	r.taBytes   = mc_taBytesSoFar();
-	r.cellParts = mc_cellPartCount(node);
-	r.curCell   = addrspace::read32(node + OFF_CUR_CELL);
-	r.sx        = rdF(node + OFF_SCREEN_X);
-	r.sy        = rdF(node + OFF_SCREEN_Y);
-	r.isSat     = isSat;
+	r.slot       = slot;
+	r.node       = node;
+	r.taBytes    = mc_taBytesSoFar();
+	r.cellParts  = mc_cellPartCount(node);                  // OLD (index-0) candidate
+	r.cellIdx    = 0; r.cellRec = 0;
+	r.cellParts2 = mc_cellPartCount2(node, &r.cellIdx, &r.cellRec);  // NEW current-pose count
+	r.curCell    = addrspace::read32(node + OFF_CUR_CELL);
+	r.sx         = rdF(node + OFF_SCREEN_X);
+	r.sy         = rdF(node + OFF_SCREEN_Y);
+	r.isSat      = isSat;
 }
 
 static const int MAX_OBJS   = 256;
@@ -705,57 +757,78 @@ static void mc_phase0Probe(u32 frame, int tappOp, int tappPt, int tappTr, int ts
 	}
 }
 
-// ---- R2 PROBE LOG (READ-ONLY) ----------------------------------------------
-// Emit the per-object SEQUENCE of running-TA byte cursors captured this frame, in
-// walk order, plus each object's current-cell part count, plus the FINAL parsed TA
-// poly counts (op/pt/tr). PASS/FAIL is then obvious from one line:
+// ---- R2 / KEYSTONE PROBE LOG (READ-ONLY) -----------------------------------
+// We already PROVED R2 = bulk-DMA (taBytes flat across the per-object walk -> the raw
+// TA cursor cannot mark per-object boundaries). So the segmentation MUST come from a
+// per-object COUNT. This log now drives the KEYSTONE GATE for that count:
 //
-//   R2 PASS (per-object TA submission): the taBytes column STEPS UP monotonically
-//   across objects (o0 < o1 < o2 ...) → the game submits each object's polys as it
-//   renders it → we can mark + segment the frame's quads by these boundaries.
+//   mc_cellPartCount2(node) = first u16 of the current-pose cell record
+//     = first u16 of *( GFX2[sprite_id&0x7FFF] ), GFX2 = *(node+0x160)
+//   (CONFIRMED: the exact read both per-frame emitters loc_8c0344d4 / loc_8c0348c8
+//    do at entry, dispatched every in-match frame by loc_8c03093c -> loc_8c034bea.)
 //
-//   R2 FAIL (bulk-DMA / end-of-frame): taBytes is 0 (or flat — same value) through
-//   EVERY per-object entry, and only finalTA(op,pt,tr) is non-zero (materialized by
-//   ta_parse AFTER the walk) → per-object TA-position marking is IMPOSSIBLE → pivot
-//   to the per-object current-cell part count (the cellParts column) for segmentation.
+//   PASS  = sum over all rendered objects of cellParts2 ≈ the frame's TRANSLUCENT TA
+//           count (tr ≈ 72-90; op=573 is stage/HUD). That sum being the per-frame
+//           translucent quad total proves cellParts2 IS the per-object rendered-quad
+//           count -> the keystone can segment the bulk-DMA'd TA, and the SAME cell
+//           record is the sprite_id->assembly part list for step C.
+//   FAIL  = cellParts2 all 0 (wrong field) -> fall back to +0x154 (the 20-byte anim
+//           keyframe) or a sub-offset of the cell header.
+//   CHECK = non-zero but not ≈ tr -> the first u16 is the EXTRAS-group count and a
+//           group expands to >1 quad; report the delta so we know the expansion factor.
 //
-// EXPECTED for MVC2 (per the disasm): FAIL — loc_8c033d78 writes a RAM display list
-// during the walk and a separate bulk pass DMAs it to the TA FIFO afterward, so the
-// raw TA byte cursor does NOT advance per object during the slot walk. The cellParts
-// column is the fallback candidate the next test will use.
+// The taBytes column is kept (now folded into the per-object seq) only as the standing
+// proof that the bulk-DMA conclusion still holds frame to frame.
 static void mc_r2Log(u32 frame, int tappOp, int tappPt, int tappTr, int tspr)
 {
 	static unsigned long s_r2Calls = 0;
 	if ((s_r2Calls++ % 60) != 0) return;
 
-	// Header line + the per-object sequence (taBytes per object, walk order).
-	char seq[1600]; int p = 0;
-	for (int i = 0; i < s_nr2 && p < (int)sizeof(seq) - 64; i++) {
+	// Header line + the per-object sequence. Now shows BOTH cell candidates per object:
+	//   cp1 = OLD mc_cellPartCount (cell index 0; expected 0/wrong)
+	//   cp2 = NEW mc_cellPartCount2 (current-pose count = first u16 of
+	//         GFX2[sprite_id&0x7FFF] cell record) — the KEYSTONE candidate
+	// plus the GFX2 index (sid&0x7FFF) and resolved cell record ptr for debugging.
+	int sumCp1 = 0, sumCp2 = 0;
+	char seq[1800]; int p = 0;
+	for (int i = 0; i < s_nr2 && p < (int)sizeof(seq) - 96; i++) {
 		const R2Rec& r = s_r2[i];
+		sumCp1 += (int)r.cellParts;
+		sumCp2 += (int)r.cellParts2;
 		p += snprintf(seq + p, sizeof(seq) - p,
-			"%so%d%s@ta=%u(cells=%u,cur=0x%X,xy=%.0f,%.0f)",
-			i ? " " : "", i, r.isSat ? "S" : "", r.taBytes,
-			(unsigned)r.cellParts, r.curCell, r.sx, r.sy);
+			"%so%d%s[cp2=%u idx=%u rec=0x%X cp1=%u cur=0x%X xy=%.0f,%.0f ta=%u]",
+			i ? " " : "", i, r.isSat ? "S" : "",
+			(unsigned)r.cellParts2, (unsigned)r.cellIdx, r.cellRec,
+			(unsigned)r.cellParts, r.curCell, r.sx, r.sy, r.taBytes);
 	}
 
-	// Monotonic-step verdict on the taBytes column (the PASS test): is the running
-	// cursor strictly increasing across the per-object entries?
-	bool stepsUp = (s_nr2 >= 2);
-	bool anyNonZero = false;
-	for (int i = 0; i < s_nr2; i++) {
-		if (s_r2[i].taBytes != 0) anyNonZero = true;
-		if (i > 0 && s_r2[i].taBytes <= s_r2[i - 1].taBytes) stepsUp = false;
-	}
-	const char* verdict = (s_nr2 < 2) ? "INCONCLUSIVE(<2 objs)"
-	                      : (stepsUp && anyNonZero) ? "PASS(per-object TA steps up)"
-	                      : (!anyNonZero) ? "FAIL(taBytes flat/0 -> bulk-DMA; use cellParts)"
-	                      : "FAIL(taBytes not monotonic -> bulk-DMA; use cellParts)";
+	// THE KEYSTONE GATE. PASS = sum(cellParts2) ≈ translucent TA count (tappTr).
+	// The per-frame translucent quads (tr ≈ 72-90 in a real match; op=573 is stage/HUD)
+	// are the ~88 character/effect sprite quads. If the per-object current-pose counts
+	// sum to that, the cell read gives the per-object rendered quad count -> the keystone
+	// can segment the bulk-DMA'd TA, AND the same cell record IS the sid->assembly for C.
+	// "≈" tolerance: within 25% or ±12 quads (the emitter's EXTRAS groups can each expand
+	// to a few quads, and the sprite filter / HUD strip add slop). We report the raw delta
+	// so the operator judges; the verdict is a guide.
+	int dTr = sumCp2 - tappTr;
+	int adTr = dTr < 0 ? -dTr : dTr;
+	bool passTr = (tappTr > 0) && (adTr <= 12 || adTr * 4 <= tappTr);
+	int dSpr = sumCp2 - tspr;
+	int adSpr = dSpr < 0 ? -dSpr : dSpr;
+	bool passSpr = (tspr > 0) && (adSpr <= 12 || adSpr * 4 <= tspr);
+	const char* verdict =
+		(s_nr2 < 1)        ? "NO-OBJS(not in match / no render entries)"
+		: (sumCp2 == 0)    ? "FAIL(cellParts2 all 0 -> wrong field, try +0x154 cur or sub-offset)"
+		: passTr           ? "PASS(sum cellParts2 ~= tr -> per-object render count CONFIRMED)"
+		: passSpr          ? "PASS-spr(sum cellParts2 ~= sprite-filtered count)"
+		                   : "CHECK(cellParts2 non-zero but != tr; inspect delta vs tr/sprite)";
 
 	fprintf(stderr,
-		"[ORACLE-R2] frame=%u nObj=%d objSeq: %s | finalTA(op=%d,pt=%d,tr=%d,sprite=%d) "
-		"taBytesNow=%u verdict=%s\n",
-		frame, s_nr2, seq, tappOp, tappPt, tappTr, tspr,
-		mc_taBytesSoFar(), verdict);
+		"[ORACLE-R2] frame=%u nObj=%d sumCellParts2=%d (cp1sum=%d) "
+		"vs TA{op=%d pt=%d tr=%d sprite=%d}  dTr=%+d dSpr=%+d  verdict=%s\n"
+		"[ORACLE-R2]   objSeq: %s\n",
+		frame, s_nr2, sumCp2, sumCp1,
+		tappOp, tappPt, tappTr, tspr, dTr, dSpr, verdict, seq);
 }
 
 void mc_oracle_frameFlush(void* ctxv, u32 frame)
