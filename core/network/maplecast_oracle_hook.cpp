@@ -66,9 +66,29 @@ static bool mc_decodeHookEnabled = (getenv("MAPLECAST_DECODEHOOK") != nullptr);
 // selectors into 0x0CE60000). Forces the master gate so the recompiler injects.
 static bool mc_decodeTraceEnabled = (getenv("MAPLECAST_DECODETRACE") != nullptr);
 
+// QUADCAPTURE (MAPLECAST_QUADCAPTURE) — THE EXPERT-CONFIRMED LOAD-DECODE CAPTURE.
+// Hooks the quad-store inside loc_8c033e90 at its POST-WRITE PC 0x8C033EC0 (the same
+// PC the decode-quad sub-flag uses) and, per fire (once/part at character LOAD),
+// reads the part's freshly-decoded 4bpp PAL4 pixels out of the persistent
+// Texture_Decompress_Buffer 0x0CE60000 (work.asm:36) at r8=texptr and writes:
+//   /dev/shm/PL%02X_gfx1_%04u.ppm   P6, magenta = transparent (index 0)  [+6 selector]
+//   /dev/shm/PL%02X_raw_%04u.bin    RAW 4bpp indices (w*h/2 bytes) — offline-palette fallback
+//   /dev/shm/PL%02X_gfx1.manifest   "<selector> <palRow> <w> <h> <texptr> <node> <char_id> <palettePtr> <ppm> <raw>"
+//   /dev/shm/mc_quadcapture.log     per-fire trace
+// Per the RE expert (marvelous2 bank03 loc_8c033e90 quad emit, reconcile-against-live):
+//   node=r10, sel=read_u16(r13+6), texptr=r8 (absolute into 0x0CE60000),
+//   gfx1=read_u32(node+0x15c), blob=gfx1+read_u32(gfx1+sel*4),
+//   w=read_u8(blob+2)<<3, h=read_u8(blob+3)<<3, bytes=w*h/2, palette=read_u32(node+0x164).
+// First-seen per (char_id, selector). CRITICAL: the RAW 4bpp dump means a null
+// node+0x164 (the earlier 0x8C032776 hook saw palP=0) is recoverable OFFLINE from
+// PALETTE_DATA.BIN — we log the palettePtr value either way. READ-ONLY; forces the
+// master gate AND the PC_QUAD_DONE hook so the recompiler injects + force-splits.
+static bool mc_quadCaptureEnabled = (getenv("MAPLECAST_QUADCAPTURE") != nullptr);
+
 bool mc_oracleHookEnabled = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr)
                          || mc_decodeHookEnabled
-                         || mc_decodeTraceEnabled;
+                         || mc_decodeTraceEnabled
+                         || mc_quadCaptureEnabled;
 
 // Sub-flag: also capture the LOAD-TIME part-atlas decode quads at loc_8c033e90
 // (0x8C033EC0 post-write). PROVEN (live prod capture 2026-06-08): that routine
@@ -194,6 +214,19 @@ static const u32 PC_DECODE_DONE_M = PC_DECODE_DONE & SH4_AREA_MASK;  // 0x0C0327
 // r5=dest("Decompress Buffer location"), Sh4cntx.pr=caller return addr.
 static const u32 PC_DECODE_ENTRY  = 0x8C03552A;
 static const u32 PC_DECODE_ENTRY_M = PC_DECODE_ENTRY & SH4_AREA_MASK;  // 0x0C03552A
+// DECODE-TRACE (BYTE-LZSS) — the SECOND texture decoder loc_8c0354c0 (bank03), the
+// one the RE expert says actually decodes the ~1190 GAMEPLAY parts (driven by the
+// load-time atlas builder loc_8c033d78, bank03:9092). The prior DECODETRACE only
+// hooked the WORD-LZSS loc_8c03552a and thus only caught effects — this is the
+// "one unverified-on-live edge". Block start (jsr/jmp target) so the force-split is
+// a no-op; mc_isHookedPC must return true so the GenCall injects. At entry the
+// decoder convention is the same: r4=source(compressed), r5/r6=dest, pr=caller.
+static const u32 PC_DECODE_ENTRY2  = 0x8C0354C0;
+static const u32 PC_DECODE_ENTRY2_M = PC_DECODE_ENTRY2 & SH4_AREA_MASK; // 0x0C0354C0
+// The load-time atlas builder return target. After loc_8c033d78 (bank03:9092) runs,
+// the per-part directory at QUAD_COUNT_TBL/QUAD_PTR_TBL is finalized — we dump it as a
+// cross-check (mc_partDirDump). We don't hook this PC for a block-entry call; the dump
+// runs opportunistically from the quad-capture handler (it has node+char context).
 // The DM00 directory entry stride + the selector->entry bias the driver applies
 // (bank03:5811-5816: r7 = r8 + (sel<<4) + 0xA0).
 static const u32 DM00_ENTRY_STRIDE = 0x10;
@@ -648,6 +681,197 @@ static void mc_decodeHandler(const u32* r)
 }
 
 // ===========================================================================
+// QUADCAPTURE (MAPLECAST_QUADCAPTURE) — THE EXPERT-CONFIRMED LOAD-DECODE CAPTURE.
+// Fires at PC_QUAD_DONE (0x8C033EC0, the post-write quad-store in loc_8c033e90),
+// once per part at character LOAD. Reads the part's freshly-decoded 4bpp PAL4 pixels
+// out of the persistent Texture_Decompress_Buffer 0x0CE60000 at r8=texptr and writes
+// a clean PPM + a RAW 4bpp dump + a manifest line, keyed by the +6 selector.
+//
+// Per the RE expert (marvelous2 bank03; reconcile against live):
+//   node    = r10                                  (object/char struct base)
+//   sel     = read_u16(r13+6)                      (the +6 GFX selector — the part key)
+//   texptr  = r8                                   (absolute addr into 0x0CE60000)
+//   gfx1    = read_u32(node+0x15c)                 (GFX_DATA_00 base)
+//   blob    = gfx1 + read_u32(gfx1 + sel*4)        (this part's GFX1 blob)
+//   w       = read_u8(blob+2) << 3                 (8-px granular width)
+//   h       = read_u8(blob+3) << 3                 (8-px granular height)
+//   bytes   = w*h/2                                (4bpp)
+//   palette = read_u32(node+0x164)                 (ARGB4444, 16-color PAL4 — may be null)
+// First-seen per (char_id, selector). READ-ONLY (addrspace reads + /dev/shm writes).
+static const u32 QC_OFF_CHAR_ID = 0x001;   // u8 character_id (in the char struct r10)
+static const u32 QC_R13_SEL_OFF = 0x006;   // u16 +6 GFX selector, relative to r13
+
+static unsigned long s_fireQuadCap = 0;
+static bool          s_qcCleared   = false;
+static bool          s_qcSeen[0x40][512] = {{false}};   // [char_id][selector] first-seen
+static bool          s_qcDirDumped = false;             // one-shot directory cross-check
+
+// Dump the part directory cross-check (mc_partdir.log). The RE expert says the per-part
+// directory is parallel arrays: QUAD_COUNT_TBL (0x8C26AA24) = u16 selector per part,
+// QUAD_PTR_TBL (0x8C26AA34) = u32 cumulative byte-offset into 0x0CE60000 per part. The
+// SAME addresses are documented in the Phase-0 probe as the 6-entry body quad-count /
+// dl-ptr tables — a conflict. So we dump BOTH interpretations: (a) a wide hexdump of the
+// 0x8C26AA00..0x8C26AB00 region as u16 and u32, and (b) the prompt's parallel-array read
+// for the first 1536 parts, so the operator can SEE live which layout holds and confirm
+// the captured selectors match the directory. READ-ONLY. One-shot per match load.
+static void mc_partDirDump()
+{
+	if (s_qcDirDumped) return;
+	s_qcDirDumped = true;
+	FILE* f = fopen("/dev/shm/mc_partdir.log", "w");
+	if (!f) return;
+	fprintf(f, "# QUADCAPTURE part-directory cross-check (one-shot at load).\n"
+	           "# Expert layout: SEL[i]=u16 @ 0x%08X+i*2 ; OFF[i]=u32 @ 0x%08X+i*4 into 0x0CE60000.\n"
+	           "# (NOTE: same addrs are documented elsewhere as 6-entry body quad-count/dl-ptr tables.)\n",
+	        QUAD_COUNT_TBL, QUAD_PTR_TBL);
+
+	// (a) Wide region hexdump so the real layout is unambiguous live.
+	fprintf(f, "\n[REGION] 0x8C26AA00..0x8C26AB00 (u32 words, 4/row):\n");
+	for (u32 a = 0x8C26AA00; a < 0x8C26AB00; a += 16) {
+		fprintf(f, "  0x%08X: %08X %08X %08X %08X\n",
+		        a,
+		        addrspace::read32(a), addrspace::read32(a + 4),
+		        addrspace::read32(a + 8), addrspace::read32(a + 12));
+	}
+
+	// (b) Parallel-array read per the expert layout. Walk until a long run of
+	// zero-selector entries (likely the table end). Cap at 1536 parts.
+	fprintf(f, "\n[PARTDIR] i selector(u16@+0xAA24) byteOffset(u32@+0xAA34)\n");
+	int zeros = 0, shown = 0;
+	for (int i = 0; i < 1536; i++) {
+		u16 sel = (u16)addrspace::read16(QUAD_COUNT_TBL + (u32)i * 2);
+		u32 off = addrspace::read32(QUAD_PTR_TBL + (u32)i * 4);
+		if (sel == 0 && off == 0) { if (++zeros > 32) break; continue; }
+		zeros = 0; shown++;
+		fprintf(f, "  %4d sel=%-5u off=0x%08X (texptr=0x%08X)\n",
+		        i, (unsigned)sel, off, DECODE_BUF + off);
+	}
+	fprintf(f, "[PARTDIR] non-empty entries shown=%d\n", shown);
+	fclose(f);
+}
+
+// Write w*h 4bpp texels at texPtr (LINEAR; the LZSS scratch 0x0CE60000 is row-major)
+// -> PPM (P6, magenta=transparent). PAL4: 2 indices/byte, index 0 = transparent. If
+// palBase is unusable, every texel reads as transparent (magenta) — the RAW .bin still
+// carries the indices for offline palette application.
+static void qcWritePPM(u32 texPtr, int w, int h, u32 palBase, const char* fn)
+{
+	FILE* pf = fopen(fn, "wb");
+	if (!pf) return;
+	fprintf(pf, "P6\n%d %d\n255\n", w, h);
+	bool palOk = inRam(palBase);
+	for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+		u32 idx = (u32)(y * w + x);                       // LINEAR (row-major scratch)
+		u8  b   = (u8)addrspace::read8(texPtr + (idx >> 1));
+		u32 pidx = (idx & 1) ? (b >> 4) : (b & 0xf);      // PAL4: low nibble first
+		u8 rr = 0xff, gg = 0x00, bb = 0xff;               // magenta = transparent default
+		if (pidx != 0 && palOk) {
+			u16 pe = (u16)addrspace::read16(palBase + pidx * 2);   // ARGB4444 LE
+			u8 aa = ((pe >> 12) & 0xf) * 17;
+			if (aa != 0) { rr = ((pe>>8)&0xf)*17; gg = ((pe>>4)&0xf)*17; bb = (pe&0xf)*17; }
+		}
+		u8 rgb[3] = {rr, gg, bb}; fwrite(rgb, 1, 3, pf);
+	}
+	fclose(pf);
+}
+
+// Write the RAW 4bpp index bytes (w*h/2) straight from the scratch — NO decode, NO
+// palette. This is the offline-fallback when node+0x164 is null/unset at this PC.
+static void qcWriteRaw(u32 texPtr, int nbytes, const char* fn)
+{
+	FILE* rf = fopen(fn, "wb");
+	if (!rf) return;
+	for (int i = 0; i < nbytes; i++) fputc((u8)addrspace::read8(texPtr + (u32)i), rf);
+	fclose(rf);
+}
+
+// The quad-capture handler. r = Sh4cntx.r[] at 0x8C033EC0 (post-write). READ-ONLY.
+static void mc_quadCaptureHandler(const u32* r)
+{
+	if (s_fireQuadCap++ == 0)
+		fprintf(stderr, "[QUADCAPTURE] first fired (pc=0x%08X loc_8c033e90 quad-store) — clean "
+		                "LOAD-decode parts from 0x0CE60000 -> /dev/shm/PL*_gfx1_*.ppm (+raw,+manifest)\n",
+		        PC_QUAD_DONE);
+
+	// One-time stale-dump clear (as the maplecast user; /dev/shm is maplecast-owned).
+	if (!s_qcCleared) {
+		for (int c = 0; c < 0x40; c++) {
+			char mn[96];
+			snprintf(mn, sizeof mn, "/dev/shm/PL%02X_gfx1.manifest", c); remove(mn);
+		}
+		remove("/dev/shm/mc_quadcapture.log");
+		s_qcCleared = true;
+	}
+
+	u32 node   = norm(r[10]) | 0x0C000000u;       // r10 = object/char struct base
+	u32 r13    = r[13];                           // r13 = 16-byte cell-record cursor (+6 = selector)
+	u32 texptr = r[8];                            // r8  = absolute texel ptr into 0x0CE60000
+	if (!inRam(node) || !inRam(r13) || !inRam(texptr)) return;
+
+	u16 sel  = (u16)addrspace::read16(r13 + QC_R13_SEL_OFF);   // +6 GFX selector (the key)
+	if (sel == 0x00FF || sel >= 512) return;                   // assembly terminator / out of range
+	u8  cid  = (u8)addrspace::read8(node + QC_OFF_CHAR_ID);
+	if (cid >= 0x40) return;
+
+	// Dims from the GFX1 blob header (expert: w=blob+2<<3, h=blob+3<<3, 8-px granular).
+	u32 gfx1 = addrspace::read32(node + OFF_GFX1);             // node+0x15c
+	if (!inRam(gfx1)) return;
+	u32 blob = gfx1 + addrspace::read32(gfx1 + (u32)sel * 4);
+	if (!inRam(blob)) return;
+	int w = ((int)(u8)addrspace::read8(blob + 2)) << 3;
+	int h = ((int)(u8)addrspace::read8(blob + 3)) << 3;
+	if (w <= 0 || h <= 0 || w > 256 || h > 256) return;        // gameplay parts 8x8..64x128
+
+	u32 palP = addrspace::read32(node + OFF_PAL_PTR);          // node+0x164 (may be null)
+	int bytes = (w * h) / 2;                                   // 4bpp
+
+	// First-seen gate per (char_id, selector).
+	if (s_qcSeen[cid][sel]) return;
+	s_qcSeen[cid][sel] = true;
+
+	// Clean PPM (palette applied if available) — keyed by the +6 selector.
+	char gfn[112]; snprintf(gfn, sizeof gfn, "/dev/shm/PL%02X_gfx1_%04u.ppm", cid, (unsigned)sel);
+	qcWritePPM(texptr, w, h, palP, gfn);
+	// --realparts contract alias (PLxx_part_NNN.ppm).
+	char pfn[96];  snprintf(pfn, sizeof pfn, "PL%02X_part_%03u.ppm", cid, (unsigned)sel);
+	char pfp[112]; snprintf(pfp, sizeof pfp, "/dev/shm/%s", pfn);
+	qcWritePPM(texptr, w, h, palP, pfp);
+	// RAW 4bpp indices — offline-palette fallback if palP is null/unset.
+	char rfn[96];  snprintf(rfn, sizeof rfn, "PL%02X_raw_%04u.bin", cid, (unsigned)sel);
+	char rfp[112]; snprintf(rfp, sizeof rfp, "/dev/shm/%s", rfn);
+	qcWriteRaw(texptr, bytes, rfp);
+
+	// Manifest line (keyed by selector). palRow 0 = the load-time default skin row.
+	char mn[96]; snprintf(mn, sizeof mn, "/dev/shm/PL%02X_gfx1.manifest", cid);
+	FILE* mf = fopen(mn, "a");
+	if (mf) {
+		if (ftell(mf) == 0)
+			fprintf(mf, "# selector palRow w h texptr node char_id palettePtr ppm raw  "
+			            "(clean LOAD-decode parts from 0x0CE60000 quad-store, keyed by +6 selector)\n");
+		fprintf(mf, "%u 0 %d %d %08x %08x %u %08x %s %s\n",
+		        (unsigned)sel, w, h, texptr, node, cid, palP, pfn, rfn);
+		fclose(mf);
+	}
+
+	// Per-fire trace (first 8 verbatim, then every 64th) — and the palettePtr ALWAYS so
+	// we know whether node+0x164 was live at this PC.
+	if (s_fireQuadCap <= 8 || (s_fireQuadCap % 64) == 0) {
+		FILE* lg = fopen("/dev/shm/mc_quadcapture.log", s_fireQuadCap == 1 ? "w" : "a");
+		if (lg) {
+			fprintf(lg, "[QC] fire#%lu cid=%u(PL%02X) sel=%u %dx%d bytes=%d texptr=%08x "
+			            "node=%08x gfx1=%08x blob=%08x palettePtr=%08x%s -> %s (+%s)\n",
+			        s_fireQuadCap, cid, cid, (unsigned)sel, w, h, bytes, texptr,
+			        node, gfx1, blob, palP, inRam(palP) ? "" : " [PAL-NULL: use offline]",
+			        pfn, rfn);
+			fclose(lg);
+		}
+	}
+
+	// Cross-check: dump the part directory once (after enough parts to be populated).
+	if (s_fireQuadCap == 64) mc_partDirDump();
+}
+
+// ===========================================================================
 // DECODE-TRACE (MAPLECAST_DECODETRACE) — READ-ONLY caller attribution at the
 // LZSS texture decoder ENTRY (loc_8c03552a). Logs every call during a match load
 // so the operator can SEE, unambiguously, which caller routine decodes the
@@ -697,17 +921,29 @@ static int dtCatIndex(u32 pr)
 	return DT_NCAT;   // "outside catalog" bucket
 }
 
-// The decode-trace handler. r = Sh4cntx.r[] at loc_8c03552a ENTRY (READ-ONLY).
-// r4 = source (compressed "Texture Location"), r5 = dest ("Decompress Buffer").
-static void mc_decodeTraceHandler(const u32* r)
+// Per-decoder fire counts (word-LZSS loc_8c03552a vs byte-LZSS loc_8c0354c0). The
+// byte-LZSS is the one the RE expert flags as the GAMEPLAY-part decoder expected to
+// fire ~1190× from caller loc_8c033d78 — kept SEPARATE so the operator can confirm.
+static unsigned long s_fireTraceWord = 0;
+static unsigned long s_fireTraceByte = 0;
+
+// The decode-trace handler. r = Sh4cntx.r[] at the decoder ENTRY (READ-ONLY).
+//   which 0 = WORD-LZSS loc_8c03552a (r4=src, r5=dest)
+//   which 1 = BYTE-LZSS loc_8c0354c0 (r4=src, dest in r5 or r6 — both logged)
+// Both: Sh4cntx.pr = caller (jsr return) / grandcaller (jmp tail-call).
+static void mc_decodeTraceHandler(const u32* r, int which)
 {
 	u32 pr  = Sh4cntx.pr;        // caller return address (jsr) / grandcaller (jmp tail-call)
 	u32 src = r[4];
 	u32 dst = r[5];
+	u32 dst6 = r[6];             // byte-LZSS may pass dest in r6
+	const char* dec = which ? "BYTE-LZSS(loc_8c0354c0)" : "WORD-LZSS(loc_8c03552a)";
 
-	if (s_fireTrace++ == 0)
-		fprintf(stderr, "[DECODETRACE] first fired (pc=0x%08X loc_8c03552a entry) — per-call "
-		                "caller/src/dest -> /dev/shm/mc_decodetrace.log\n", PC_DECODE_ENTRY);
+	s_fireTrace++;
+	if (which) s_fireTraceByte++; else s_fireTraceWord++;
+	if (s_fireTrace == 1)
+		fprintf(stderr, "[DECODETRACE] first fired (%s) — per-call caller/src/dest "
+		                "-> /dev/shm/mc_decodetrace.log\n", dec);
 
 	if (!s_dtCleared) { remove("/dev/shm/mc_decodetrace.log"); s_dtCleared = true; }
 
@@ -738,20 +974,23 @@ static void mc_decodeTraceHandler(const u32* r)
 	FILE* lg = fopen("/dev/shm/mc_decodetrace.log", "a");
 	if (lg) {
 		if (s_fireTrace == 1)
-			fprintf(lg, "# call# pr caller=<route> src dst srcHdr[h0 h1] (w h from h0)\n");
+			fprintf(lg, "# call# decoder pr caller=<route> src dst[r5] dst[r6] srcHdr[h0 h1] (w h from h0)\n");
 		if (verbose)
-			fprintf(lg, "[%lu] pr=0x%08X dst=0x%08X src=0x%08X hdr=%08X %08X (w=%u h=%u) | %s\n",
-			        s_fireTrace, pr, dst, src, h0, h1, (unsigned)w, (unsigned)hgt, dtNameForPr(pr));
+			fprintf(lg, "[%lu] %s pr=0x%08X dst5=0x%08X dst6=0x%08X src=0x%08X hdr=%08X %08X (w=%u h=%u) | %s\n",
+			        s_fireTrace, dec, pr, dst, dst6, src, h0, h1, (unsigned)w, (unsigned)hgt, dtNameForPr(pr));
 		fclose(lg);
 	}
 
 	// Rewrite the compact per-caller SUMMARY every 32 calls (and on call 1) so the
-	// operator can read totals at a glance without scanning the whole log.
+	// operator can read totals at a glance without scanning the whole log. Leads with
+	// the per-decoder totals (the headline: byte-LZSS ~1190× = the gameplay atlas).
 	if (s_fireTrace == 1 || (s_fireTrace % 32) == 0) {
 		FILE* sf = fopen("/dev/shm/mc_decodetrace.summary", "w");
 		if (sf) {
-			fprintf(sf, "# DECODETRACE summary — calls into loc_8c03552a per caller route (total fires=%lu)\n",
-			        s_fireTrace);
+			fprintf(sf, "# DECODETRACE summary — total fires=%lu  [WORD-LZSS loc_8c03552a=%lu, "
+			            "BYTE-LZSS loc_8c0354c0=%lu]\n"
+			            "# (expect BYTE-LZSS ~1190 from caller loc_8c033d78 at match load = the gameplay atlas)\n",
+			        s_fireTrace, s_fireTraceWord, s_fireTraceByte);
 			for (int i = 0; i <= DT_NCAT; i++) {
 				if (s_dtAgg[i].n == 0) continue;
 				const char* nm = (i < DT_NCAT) ? DT_CALLERS[i].name : "(outside catalog / tail-call)";
@@ -769,10 +1008,17 @@ void mc_oracleInit()
 	if (logged) return;
 	logged = true;
 	if (mc_decodeTraceEnabled)
-		fprintf(stderr, "[DECODETRACE] ENABLED — LZSS decoder loc_8c03552a entry trace at 0x%08X "
-		                "(caller=pr, src=r4, dest=r5) -> /dev/shm/mc_decodetrace.log "
-		                "(+summary). Play a fresh match to capture the load decode.\n",
-		        PC_DECODE_ENTRY);
+		fprintf(stderr, "[DECODETRACE] ENABLED — BOTH LZSS decoders traced: WORD loc_8c03552a "
+		                "@0x%08X + BYTE loc_8c0354c0 @0x%08X (caller=pr, src=r4, dest=r5/r6) "
+		                "-> /dev/shm/mc_decodetrace.log (+summary). Expect BYTE-LZSS ~1190x from "
+		                "loc_8c033d78 at match load. Play a fresh match to capture the load decode.\n",
+		        PC_DECODE_ENTRY, PC_DECODE_ENTRY2);
+	if (mc_quadCaptureEnabled)
+		fprintf(stderr, "[QUADCAPTURE] ENABLED — clean LOAD-decode part pixels at 0x%08X "
+		                "(loc_8c033e90 quad-store): 4bpp from 0x0CE60000 (r8) + palette (node+0x164) "
+		                "-> /dev/shm/PL*_gfx1_*.ppm + PL*_raw_*.bin + PL*_gfx1.manifest, keyed by "
+		                "+6 selector (read_u16(r13+6)). Cross-check -> /dev/shm/mc_partdir.log.\n",
+		        PC_QUAD_DONE);
 	if (mc_decodeHookEnabled)
 		fprintf(stderr, "[DECODEHOOK] ENABLED — LOAD-decode part capture at 0x%08X "
 		                "(loc_8c032696 LZSS return, pre-copy-out): fresh 0x0CE60000 part "
@@ -808,9 +1054,10 @@ bool mc_isHookedPC(u32 pc)
 	// guarded by rpc!=vaddr, but mc_isHookedPC must return true so the GenCall injects.
 	if (m == PC_SAT_BEGIN_M) return true;
 	// The quad-done PC is the LOAD-TIME atlas decode (fires once at match start, no
-	// screen coords) — only hook it when the decode sub-flag is set so normal runs
-	// don't inject a call into a block that never carries useful per-frame data.
-	if (m == PC_QUAD_DONE_M) return mc_decodeQuadsEnabled;
+	// screen coords) — hook it when EITHER the decode-quad sub-flag (header capture) OR
+	// the QUADCAPTURE flag (clean-pixel capture) is set. The force-split makes it a block
+	// start so the GenCall injects (it's mid-block in loc_8c033e90).
+	if (m == PC_QUAD_DONE_M) return mc_decodeQuadsEnabled || mc_quadCaptureEnabled;
 	// The LOAD-DECODE part hook (loc_8c032696 / 0x8C032776). Only hooked when the
 	// decode-hook flag is set. 0x8C032776 is the jsr return target (a natural block
 	// start), so the decoder force-split in decoder.cpp is a no-op for it (rpc==vaddr)
@@ -821,6 +1068,9 @@ bool mc_isHookedPC(u32 pc)
 	// force-split is a no-op (rpc==vaddr) — mc_isHookedPC just has to return true so
 	// rec_x64 injects the GenCall.
 	if (m == PC_DECODE_ENTRY_M) return mc_decodeTraceEnabled;
+	// DECODE-TRACE (BYTE-LZSS): the second decoder ENTRY (loc_8c0354c0 / 0x8C0354C0).
+	// Block start (jsr/jmp target) so the force-split is a no-op; the GenCall injects.
+	if (m == PC_DECODE_ENTRY2_M) return mc_decodeTraceEnabled;
 	return false;
 }
 
@@ -848,11 +1098,16 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 		return;
 	}
 
-	// DECODE-TRACE: the LZSS decoder ENTRY. Logs caller(pr)/src(r4)/dest(r5) per
-	// call so the gameplay-atlas decoder is named CONCRETELY. Independent of the
-	// frame-oracle paths; shares no per-frame buffer. Handle first + return.
+	// DECODE-TRACE: the LZSS decoder ENTRY (BOTH decoders). Logs caller(pr)/src(r4)/
+	// dest(r5/r6) per call so the gameplay-atlas decoder is named CONCRETELY.
+	// which 0 = WORD-LZSS loc_8c03552a, 1 = BYTE-LZSS loc_8c0354c0 (the ~1190× one).
+	// Independent of the frame-oracle paths; shares no per-frame buffer. Handle + return.
 	if (mpc == PC_DECODE_ENTRY_M) {
-		if (mc_decodeTraceEnabled) mc_decodeTraceHandler(r);
+		if (mc_decodeTraceEnabled) mc_decodeTraceHandler(r, /*which=*/0);
+		return;
+	}
+	if (mpc == PC_DECODE_ENTRY2_M) {
+		if (mc_decodeTraceEnabled) mc_decodeTraceHandler(r, /*which=*/1);
 		return;
 	}
 
@@ -901,14 +1156,23 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 		return;
 	}
 
-	// Below this point only the optional LOAD-decode quad capture runs. When the
-	// decode sub-flag is OFF, the quad PC isn't hooked at all (mc_isHookedPC) so we
-	// never reach here for it — but guard anyway.
+	// Only the PC_QUAD_DONE capture runs below. If neither the decode-quad sub-flag nor
+	// QUADCAPTURE is set, this PC isn't hooked (mc_isHookedPC) so we never reach here —
+	// but guard anyway.
+	if (mpc != PC_QUAD_DONE_M) return;
+	if (!mc_decodeQuadsEnabled && !mc_quadCaptureEnabled) return;
+
+	// QUADCAPTURE — the EXPERT-CONFIRMED clean-pixel capture (independent of the
+	// per-frame quad-header buffer below). Read the part's freshly-decoded 4bpp pixels
+	// from r8 + palette from node+0x164 and dump a clean PPM + raw + manifest keyed by
+	// the +6 selector (read_u16(r13+6)). READ-ONLY.
+	if (mc_quadCaptureEnabled) mc_quadCaptureHandler(r);
+
+	// The remaining quad-HEADER buffer capture only runs under the decode-quad sub-flag.
 	if (!mc_decodeQuadsEnabled) return;
 
 	// mpc == PC_QUAD_DONE_M — the POST-WRITE capture point (0x8C033EC0). The 16-byte
 	// quad at r14 is now FULLY written and r14 has NOT yet advanced. r10 = node base.
-	if (mpc != PC_QUAD_DONE_M) return;
 	if (s_fireQuad++ == 0)
 		fprintf(stderr, "[ORACLE-HOOK] QUAD_DONE first fired (pc=0x%08X masked 0x%08X)\n",
 		        pc, mpc);
