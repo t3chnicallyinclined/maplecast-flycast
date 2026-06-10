@@ -1497,12 +1497,12 @@ static void gfx1Dump(const GameState& state) {
 	static bool prevInMatch = false;
 	static int  framesIn = 0;
 	static bool cleared = false;
-	static bool seen[0x40][512] = {{false}};   // [char_id][selector] first-seen gate
+	static bool seen[0x40][2048] = {{false}};  // [char_id][selector] first-seen gate (Ryu has 1533 unique sels)
 
 	if (!state.in_match) { prevInMatch = false; framesIn = 0; return; }
 	if (!prevInMatch) {                         // fresh match start -> reset window + gates
 		prevInMatch = true; framesIn = 0;
-		for (int c = 0; c < 0x40; c++) for (int s = 0; s < 512; s++) seen[c][s] = false;
+		for (int c = 0; c < 0x40; c++) for (int s = 0; s < 2048; s++) seen[c][s] = false;
 		cleared = false;
 	}
 	if (framesIn++ >= WINDOW) return;           // only the opening (fresh-buffer) window
@@ -1618,7 +1618,7 @@ static void gfx1Dump(const GameState& state) {
 			int dfmt = partFmtFromE4(e4d);           // e4 byte1 -> PVR PixelFmt (proven map)
 			bool dlinear = false;                    // DM00 slots are twiddled (proven path)
 
-			if (rsel < 512 && cid < 0x40 && !seen[cid][rsel]) {
+			if (rsel < 2048 && cid < 0x40 && !seen[cid][rsel]) {
 				// FIRST-SEEN gate: dump this selector's clean persistent part. Write BOTH
 				// the --realparts contract name (PLxx_part_NNN.ppm) AND the brief's
 				// PLxx_gfx1_NNNN.ppm alias, keyed by the +6 selector.
@@ -1638,6 +1638,36 @@ static void gfx1Dump(const GameState& state) {
 			}
 		}
 		if (mf) fclose(mf);
+		// === FULL DM00 DIRECTORY SWEEP (additive) ===============================
+		// The per-pose loop only sees selectors used by the 6 chars CURRENT poses.
+		// The DM00 directory is selector-indexed +0xA0 and PERSISTENT - it holds
+		// EVERY part decoded for this char at load. Sweep all selectors so one
+		// match-start capture covers the whole reachable set (~1533 for Ryu).
+		{
+			FILE* sf = fopen(mn, "a");
+			int sweptThis = 0;
+			for (uint32_t sel = 0; sel < 2048; sel++) {
+				if (cid < 0x40 && seen[cid][sel]) continue;
+				uint32_t e   = dirBase + sel * DM00_STRIDE + DM00_BIAS;
+				uint32_t e0  = addrspace::read32(e);
+				uint32_t e4d = addrspace::read32(e + 4);
+				uint32_t e8d = addrspace::read32(e + 8);
+				int w = (int)(e0 & 0xffff), h = (int)((e0 >> 16) & 0xffff);
+				if (w <= 0 || h <= 0 || w > 512 || h > 512 || !_ramAddr(e8d)) continue;
+				int dfmt = partFmtFromE4(e4d);
+				char pfn[96]; snprintf(pfn, sizeof pfn, "PL%02X_part_%03u.ppm", cid, sel);
+				char pfp[112]; snprintf(pfp, sizeof pfp, "/dev/shm/%s", pfn);
+				partDecodeToPPM(e8d, w, h, dfmt, false, palP, pfp, false);
+				char gfn[96]; snprintf(gfn, sizeof gfn, "PL%02X_gfx1_%04u.ppm", cid, sel);
+				char gfp[112]; snprintf(gfp, sizeof gfp, "/dev/shm/%s", gfn);
+				partDecodeToPPM(e8d, w, h, dfmt, false, palP, gfp, false);
+				if (cid < 0x40) seen[cid][sel] = true;
+				if (sf) fprintf(sf, "%u %u %d %d %d %08x %s\n", sel, 0u, w, h, dfmt, e8d, pfn);
+				sweptThis++;
+			}
+			if (sf) fclose(sf);
+			if (lg) fprintf(lg, "[GFX1] slot%d cid=%u(PL%02X) DM00 sweep dumped %d more selectors\n", s, cid, cid, sweptThis);
+		}
 		if (lg) fprintf(lg, "[GFX1] slot%d cid=%u(PL%02X) sid=%u cnt=%d charBase=%d gfx2=%08x dirBase=%08x dumpedThisFire=%d -> %s\n",
 		                s, cid, cid, sid, cnt, charBase, gfx2Base, dirBase, dumpedThis, mn);
 	}
