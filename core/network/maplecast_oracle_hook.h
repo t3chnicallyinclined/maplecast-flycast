@@ -135,4 +135,55 @@ const CharqObj* mc_oracle_objects(int* outCount);
 // the Nth quad passing collectScreenQuads' isSprite filter in op->pt->tr order.
 const int* mc_oracle_quadObjMap(int* outCount);
 
+// ===========================================================================
+// CHARQ-EMIT — the PRODUCTION per-character PVR sprite-quad accumulator (Phase A).
+//
+// Distinct from the JSONL diagnostic MAPLECAST_CHARQ_RENDER above: this is a
+// STRUCTURED in-RAM accumulator the wire emitter (maplecast_mirror.cpp
+// serverPublish) reads once per video frame to build the 'CHRQ' binary frame.
+//
+// Two cooperating block-entry hooks (both already proven to fire/pair, see
+// project_charq_breakthrough):
+//   0x8C034864 (body-part convergence, loc_8c0344d4): set the CURRENT char
+//              identity for the run — node=r14, cid=read_u8(node+1),
+//              sprite_id=read_u16(node+0x144)&0x7FFF, selector=read_u16(r11+6).
+//   0x8C1248CC (bank12 PVR submit, paired 1:1 right after): read the DEST sprite
+//              -para record (r14): 4 screen corners + 6 UVs + tcw(r12+0xC)/tsp/pcw,
+//              append a quad to the current char's run.
+// Accumulated per char (keyed by node), per video frame (0x8C3496B0). Gated
+// MAPLECAST_CHARQ_EMIT + in-match (the emitter applies the 0x8C289624 gate).
+// READ-ONLY w.r.t. guest.
+extern bool mc_charqEmitEnabled;
+
+// One screen-space sprite quad as read from the bank12 DEST sprite-para record.
+// Corners are f32 screen pixels; UVs are f32 (the 16-bit-truncated record floats
+// expanded to full f32 = (u16<<16) reinterpreted, done at capture time).
+struct CharqEmitQuad {
+	float Ax, Ay, Bx, By, Cx, Cy, Dx, Dy;   // 4 screen corners
+	float AU, AV, BU, BV, CU, CV;            // 3 UVs (D's UV = parallelogram closure)
+	u32   tcw, tsp, pcw;                     // PVR texture/blend/control words
+};
+struct CharqEmitObj {
+	u32 node;
+	int cid;
+	int sprite_id;
+	u8  flags;            // b0 = satellite (reserved; bodies = 0)
+	int nquads;
+};
+
+// Begin reading the CHARQ accumulator for the just-completed video frame.
+// Returns the object count and the frame number the accumulator holds; fills
+// *outObjs with a pointer to the internal object array (valid until the next
+// mc_charqEmit_endFrame). Call from serverPublish AFTER the SH4 draw walk.
+// Returns 0 (and *outObjs=nullptr) when CHARQ-EMIT is disabled or empty.
+int mc_charqEmit_beginFrame(const CharqEmitObj** outObjs, u32* outFrameNum);
+
+// Returns the quad array for object index `objIdx` (0..count-1 from beginFrame),
+// with *outN set to its quad count. NULL/0 if out of range.
+const CharqEmitQuad* mc_charqEmit_objQuads(int objIdx, int* outN);
+
+// Release the accumulator after the emitter has serialized it. Resets it for the
+// next frame. MUST be called after a successful beginFrame.
+void mc_charqEmit_endFrame();
+
 }

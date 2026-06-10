@@ -46,10 +46,26 @@ pub const MCSV_MAGIC: &[u8; 4] = b"MCSV";
 pub const STAF_MAGIC: &[u8; 4] = b"STAF";
 pub const TX64_MAGIC: &[u8; 4] = b"TX64";
 
+/// CHRQ (per-character PVR sprite-quad geometry) magic. Like STAF, CHRQ is a
+/// PARALLEL render channel that rides ZCST compression (outer wire magic ZCST,
+/// decompressed payload starts with "CHRQ"). It carries the per-character screen
+/// sprite quads (4 corners + UVs + tcw/tsp/pcw refs) and NO pixels (textures ride
+/// the existing VRAM dirty-page channel). It has NO dirty-page list, so the relay
+/// must forward it VERBATIM and never feed it to apply_dirty_pages (offset 76+ are
+/// counts, not page data — doing so would corrupt the cached SYNC VRAM).
+pub const CHRQ_MAGIC: &[u8; 4] = b"CHRQ";
+
 /// True if the payload (decompressed if needed) is a STAF geometry frame.
 /// `inspect` is the decompressed view when the wire was ZCST-compressed.
 pub fn is_staf(inspect: &[u8]) -> bool {
     inspect.len() >= 4 && &inspect[0..4] == STAF_MAGIC
+}
+
+/// True if the payload (decompressed if needed) is a CHRQ char-quad frame.
+/// `inspect` is the decompressed view when the wire was ZCST-compressed. Mirrors
+/// is_staf — same pass-through, never-apply-dirty handling in fanout.
+pub fn is_charq(inspect: &[u8]) -> bool {
+    inspect.len() >= 4 && &inspect[0..4] == CHRQ_MAGIC
 }
 
 /// True if the RAW wire bytes are a TX64 ship-once texture packet (uncompressed).

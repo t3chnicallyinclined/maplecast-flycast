@@ -232,6 +232,24 @@ impl RelayState {
             return;
         }
 
+        // CHRQ per-character PVR sprite-quad geometry — ZCST-wrapped (decompressed
+        // payload starts with "CHRQ"). Identical handling to STAF: a parallel render
+        // channel with NO dirty-page list. Forward the ORIGINAL (compressed) wire
+        // bytes verbatim and short-circuit BEFORE the SYNC/apply_dirty_pages branch
+        // (apply_dirty_pages would read CHRQ's objCount@76 as delta_payload_size and
+        // corrupt the cached SYNC VRAM). The relay does NOT parse CHRQ contents.
+        if protocol::is_charq(inspect) {
+            let len = data.len();
+            let receivers = self.inner.frame_tx.receiver_count();
+            let _ = self.inner.frame_tx.send(data);
+            let mut stats = self.inner.stats.lock().await;
+            stats.frames_received += 1;
+            stats.bytes_received += len as u64;
+            stats.frames_broadcast += receivers as u64;
+            stats.bytes_broadcast += (len * receivers) as u64;
+            return;
+        }
+
         if protocol::is_sync(inspect) {
             // SYNC frame — cache the decompressed state
             if let Some((vram, pvr)) = protocol::parse_sync(inspect) {

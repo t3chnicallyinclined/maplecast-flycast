@@ -203,6 +203,17 @@ static bool mc_bodyCapEnabled = (getenv("MAPLECAST_BODYCAP") != nullptr);
 // rec_x64 injects the GenCall + the decoder force-splits at 0x8C1248CC.
 static bool mc_charqRenderEnabled = (getenv("MAPLECAST_CHARQ_RENDER") != nullptr);
 
+// CHARQ-EMIT (MAPLECAST_CHARQ_EMIT) — THE PRODUCTION wire accumulator (Phase A).
+// Same two PCs as CHARQ_RENDER's diagnostic path, but instead of writing JSONL it
+// fills a STRUCTURED in-RAM per-(node,vframe) accumulator that maplecast_mirror.cpp
+// serverPublish drains into the 'CHRQ' binary frame. Identity is set at the body-part
+// PC 0x8C034864 (node=r14); each paired bank12 submit 0x8C1248CC appends one screen
+// sprite quad (4 corners + 6 UVs + tcw/tsp/pcw) read from the DEST para record. Gated
+// here; the in-match (0x8C289624) gate is applied by the emitter. READ-ONLY. Forces
+// the master gate so rec_x64 injects the GenCall + the decoder force-splits at BOTH
+// 0x8C034864 (ASM part) and 0x8C1248CC (bank12 submit).
+bool mc_charqEmitEnabled = (getenv("MAPLECAST_CHARQ_EMIT") != nullptr);
+
 // ===========================================================================
 // GENERIC RUNTIME-CONFIGURABLE PROBE (MAPLECAST_ORACLE_PROBE) — THE REBUILD KILLER.
 //
@@ -483,6 +494,7 @@ bool mc_oracleHookEnabled = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr)
                          || mc_asmTraceEnabled
                          || mc_bodyCapEnabled
                          || mc_charqRenderEnabled
+                         || mc_charqEmitEnabled
                          || mc_probeEnabledStatic;   // generic probe forces the master gate
 
 // Sub-flag: also capture the LOAD-TIME part-atlas decode quads at loc_8c033e90
@@ -1718,6 +1730,199 @@ static void mc_charqRenderHandler(const u32* r)
 }
 
 // ===========================================================================
+// CHARQ-EMIT (MAPLECAST_CHARQ_EMIT) — THE PRODUCTION wire accumulator (Phase A).
+//
+// Structured, READ-ONLY, in-RAM. Two cooperating hooks:
+//   * mc_charqEmitBodyPart(r) @ PC_ASM_PART (0x8C034864): the per-part convergence
+//     PC of the BODY render loc_8c0344d4. node = r14 (mov r4,r14 @prologue, never
+//     reclobbered). Sets the CURRENT character identity for the run:
+//       cid       = read_u8(node+0x1)
+//       sprite_id = read_u16(node+0x144) & 0x7FFF
+//       selector  = read_u16(r11+6)   (diagnostic only; not on the wire)
+//     A change in `node` starts a new per-character run for THIS video frame.
+//   * mc_charqEmitSubmit(r) @ PC_CHARQ_SUBMIT (0x8C1248CC): the bank12 PVR submit,
+//     paired 1:1 right after each body part. r14 = the DEST sprite-para record
+//     (ctrl 0xF0000000 @ +0x00). Reads the 4 screen corners + 6 UVs + tcw/tsp/pcw
+//     and appends ONE quad to the current char's run.
+//
+// Record layout (project_charq_breakthrough, DEST sprite-para at r14):
+//   +0x00 PCW (= 0xF0000000 sprite control)
+//   +0x04 Ax,Ay,Az (f32)   +0x10 Bx,By,Bz   +0x1C Cx,Cy,Cz   +0x28 Dx,Dy
+//   +0x34 AU (u16-trunc f32) +0x36 AV  +0x38 BU +0x3A BV  +0x3C CU +0x3E CV
+//   TCW = read_u32(r12+0x0C). TSP = the sprite-para TSP word (record +0x14 hi/word;
+//   the bank12 builder writes (transform<<24)|*(r13+0x3C) there). We also keep r12's
+//   raw words so the client has the full source para if TSP placement shifts.
+//
+// The 16-bit-truncated UV floats: the para stores only the HIGH 16 bits of each
+// f32 UV; expand to full f32 by (u16 << 16) reinterpreted as float.
+//
+// Accumulated per (node, vframe). The emitter (serverPublish) calls
+// mc_charqEmit_beginFrame/_objQuads/_endFrame once per video frame.
+
+static const int CHARQE_MAX_OBJS    = 12;   // <= 6 bodies + satellites/slack
+static const int CHARQE_MAX_QUADS   = 256;  // parts per object
+
+struct CharqEObjInt {
+	u32 node;
+	int cid;
+	int sprite_id;
+	u8  flags;
+	int nquads;
+	CharqEmitQuad quads[CHARQE_MAX_QUADS];
+};
+static CharqEObjInt   s_cqeObjs[CHARQE_MAX_OBJS];
+static int            s_cqeObjN     = 0;
+static u32            s_cqeVframe   = 0xFFFFFFFFu;
+// "ready" snapshot: when the video frame advances we freeze the just-finished
+// frame's objects into the ready set so the emitter reads a stable list while the
+// next frame accumulates. (Single-threaded SH4+publish; the freeze is a count swap.)
+static CharqEObjInt   s_cqeReady[CHARQE_MAX_OBJS];
+static int            s_cqeReadyN   = 0;
+static u32            s_cqeReadyVf  = 0xFFFFFFFFu;
+// current-run identity (set by the body-part hook, consumed by the submit hook)
+static u32            s_cqeCurNode  = 0;
+static int            s_cqeCurCid   = -1;
+static int            s_cqeCurSid   = -1;
+static unsigned long  s_cqeFireBody = 0;
+static unsigned long  s_cqeFireSub  = 0;
+
+// Flatten-public mirror (CharqEmitObj is layout-identical to CharqEObjInt's head;
+// we expose a separate compact array so the header struct need not embed quads).
+static CharqEmitObj   s_cqePub[CHARQE_MAX_OBJS];
+
+static inline float cqeExpandUV(u16 hi) { u32 u = (u32)hi << 16; float f; memcpy(&f, &u, 4); return f; }
+
+// Freeze the accumulating set into the ready set at a video-frame boundary.
+static void cqeFreezeFrame()
+{
+	s_cqeReadyN  = s_cqeObjN;
+	s_cqeReadyVf = s_cqeVframe;
+	for (int i = 0; i < s_cqeObjN; i++) s_cqeReady[i] = s_cqeObjs[i];
+	s_cqeObjN = 0;
+	s_cqeCurNode = 0; s_cqeCurCid = -1; s_cqeCurSid = -1;
+}
+
+// Return the accumulator object for the current run's node, opening a new one on a
+// node change / first run of the frame.
+static CharqEObjInt* cqeGetObj()
+{
+	u32 node = s_cqeCurNode;
+	if (s_cqeObjN > 0 && s_cqeObjs[s_cqeObjN - 1].node == node && node != 0)
+		return &s_cqeObjs[s_cqeObjN - 1];
+	if (s_cqeObjN >= CHARQE_MAX_OBJS)
+		return &s_cqeObjs[CHARQE_MAX_OBJS - 1];   // cap: fold into the last run
+	CharqEObjInt* o = &s_cqeObjs[s_cqeObjN++];
+	o->node      = node;
+	o->cid       = s_cqeCurCid;
+	o->sprite_id = s_cqeCurSid;
+	o->flags     = 0;
+	o->nquads    = 0;
+	return o;
+}
+
+// Hook A — body-part convergence (0x8C034864). Set current run identity.
+static void mc_charqEmitBodyPart(const u32* r)
+{
+	if (s_cqeFireBody++ == 0)
+		fprintf(stderr, "[CHARQ-EMIT] body-part hook first fired (pc=0x%08X) node=r14=0x%08X\n",
+		        PC_ASM_PART, r[14]);
+	u32 node = norm(r[14]);
+	if (!inRam(node)) return;
+	u32 cnode = node | 0x0C000000u;
+
+	// Video-frame boundary: freeze the prior frame's runs.
+	u32 vframe = addrspace::read32(0x8C3496B0);
+	if (vframe != s_cqeVframe) {
+		if (s_cqeVframe != 0xFFFFFFFFu) cqeFreezeFrame();
+		s_cqeVframe = vframe;
+		s_cqeObjN = 0;
+		s_cqeCurNode = 0; s_cqeCurCid = -1; s_cqeCurSid = -1;
+	}
+
+	s_cqeCurNode = cnode;
+	s_cqeCurCid  = (int)(u8)addrspace::read8(cnode + OFF_CHAR_ID);
+	s_cqeCurSid  = (int)((u16)addrspace::read16(cnode + OFF_SPRITE_ID) & 0x7FFF);
+}
+
+// Hook B — bank12 PVR submit (0x8C1248CC), paired right after each body part.
+// r14 = DEST sprite-para record (ctrl 0xF0000000 @ +0x00). r12 = source quad record
+// (TCW @ r12+0x0C). Append one screen sprite quad to the current run.
+static void mc_charqEmitSubmit(const u32* r)
+{
+	// BODY-vs-HUD filter: only the body render's submit jsr (pr == 0x0C03487A).
+	if ((Sh4cntx.pr & SH4_AREA_MASK) != PC_BODY_SUBMIT_RET_M) return;
+	if (s_cqeCurNode == 0) return;   // no identity established yet this run
+
+	u32 rec = (norm(r[14]) | 0x0C000000u);   // DEST sprite-para record base
+	u32 r12 = (norm(r[12]) | 0x0C000000u);   // source quad record
+	if (!inRam(rec)) return;
+
+	if (s_cqeFireSub++ == 0)
+		fprintf(stderr, "[CHARQ-EMIT] submit hook first fired (pc=0x%08X) rec(r14)=0x%08X r12=0x%08X pr=0x%08X\n",
+		        PC_CHARQ_SUBMIT, rec, r12, Sh4cntx.pr);
+
+	CharqEObjInt* o = cqeGetObj();
+	if (!o || o->nquads >= CHARQE_MAX_QUADS) return;
+	CharqEmitQuad& q = o->quads[o->nquads];
+
+	// 4 screen corners (f32). Az/Bz/Cz (depth) are not needed for the 2D placement.
+	q.Ax = rdF(rec + 0x04); q.Ay = rdF(rec + 0x08);
+	q.Bx = rdF(rec + 0x10); q.By = rdF(rec + 0x14);
+	q.Cx = rdF(rec + 0x1C); q.Cy = rdF(rec + 0x20);
+	q.Dx = rdF(rec + 0x28); q.Dy = rdF(rec + 0x2C);
+
+	// 6 UVs: 16-bit-truncated floats at +0x34..+0x3E -> expand to full f32.
+	q.AU = cqeExpandUV((u16)addrspace::read16(rec + 0x34));
+	q.AV = cqeExpandUV((u16)addrspace::read16(rec + 0x36));
+	q.BU = cqeExpandUV((u16)addrspace::read16(rec + 0x38));
+	q.BV = cqeExpandUV((u16)addrspace::read16(rec + 0x3A));
+	q.CU = cqeExpandUV((u16)addrspace::read16(rec + 0x3C));
+	q.CV = cqeExpandUV((u16)addrspace::read16(rec + 0x3E));
+
+	// TCW from the SOURCE quad record (r12+0x0C) — the RESOLVED texel addr/fmt/pal.
+	// PCW = the DEST para control word (record +0x00, the 0xF0000000 sprite ctrl).
+	// TSP = the DEST para TSP word: the bank12 builder writes the blend/filter word at
+	// record +0x14 ((transform<<24)|*(r13+0x3C)). Carry it so the client has the full
+	// per-quad PVR state (blend mode, filtering) for PVR2Renderer.
+	q.tcw = inRam(r12) ? addrspace::read32(r12 + 0x0C) : 0;
+	q.pcw = addrspace::read32(rec + 0x00);
+	q.tsp = addrspace::read32(rec + 0x14);
+	o->nquads++;
+}
+
+// === CHARQ-EMIT accessor API (consumed by maplecast_mirror.cpp serverPublish) ===
+int mc_charqEmit_beginFrame(const CharqEmitObj** outObjs, u32* outFrameNum)
+{
+	if (!mc_charqEmitEnabled) { if (outObjs) *outObjs = nullptr; return 0; }
+	// At serverPublish time the current accumulating frame is the one just walked, but
+	// it has not yet hit a body-part boundary to freeze. Freeze it now so the emitter
+	// reads THIS frame's quads (the freeze on the next body-part hook would lag a frame).
+	if (s_cqeObjN > 0) cqeFreezeFrame();
+	if (s_cqeReadyN == 0) { if (outObjs) *outObjs = nullptr; return 0; }
+	for (int i = 0; i < s_cqeReadyN; i++) {
+		s_cqePub[i].node      = s_cqeReady[i].node;
+		s_cqePub[i].cid       = s_cqeReady[i].cid;
+		s_cqePub[i].sprite_id = s_cqeReady[i].sprite_id;
+		s_cqePub[i].flags     = s_cqeReady[i].flags;
+		s_cqePub[i].nquads    = s_cqeReady[i].nquads;
+	}
+	if (outObjs)     *outObjs     = s_cqePub;
+	if (outFrameNum) *outFrameNum = s_cqeReadyVf;
+	return s_cqeReadyN;
+}
+const CharqEmitQuad* mc_charqEmit_objQuads(int objIdx, int* outN)
+{
+	if (objIdx < 0 || objIdx >= s_cqeReadyN) { if (outN) *outN = 0; return nullptr; }
+	if (outN) *outN = s_cqeReady[objIdx].nquads;
+	return s_cqeReady[objIdx].quads;
+}
+void mc_charqEmit_endFrame()
+{
+	s_cqeReadyN  = 0;
+	s_cqeReadyVf = 0xFFFFFFFFu;
+}
+
+// ===========================================================================
 // BODYCAP (MAPLECAST_BODYCAP) — body part DECODED pixels keyed by the RENDER selector.
 // Fires at the SAME PC as ASMTRACE (0x8C034864, loc_8c0344d4 per-part convergence).
 // See mc_bodyCapEnabled for the full selector-space reconciliation. READ-ONLY.
@@ -1963,11 +2168,11 @@ bool mc_isHookedPC(u32 pc)
 	// ASMTRACE: the per-part convergence PC inside loc_8c0344d4 (0x8C034864). Only hooked
 	// when the asm-trace flag is set. Mid-block -> the decoder force-split makes it a block
 	// start; this returns true so rec_x64 injects the GenCall there.
-	if (m == PC_ASM_PART_M) return mc_asmTraceEnabled || mc_bodyCapEnabled;
+	if (m == PC_ASM_PART_M) return mc_asmTraceEnabled || mc_bodyCapEnabled || mc_charqEmitEnabled;
 	// CHARQ-RENDER: the per-part PVR-record completion PC inside loc_8C1244B0
 	// (0x8C1248CC). Only hooked when the charq-render flag is set. Mid-block -> the
 	// decoder force-split makes it a block start; return true so rec_x64 injects.
-	if (m == PC_CHARQ_SUBMIT_M) return mc_charqRenderEnabled;
+	if (m == PC_CHARQ_SUBMIT_M) return mc_charqRenderEnabled || mc_charqEmitEnabled;
 	// GENERIC PROBE: any PC configured in /dev/shm/mc_oracle_probe.conf (parsed once at
 	// static init). Masked compare so the disasm 0x8C.. label matches the executed 0x0C..
 	// alias. The probe PCs may be mid-block (e.g. 0x8C1248CC) -> the decoder force-split
@@ -2232,6 +2437,7 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 	if (mpc == PC_ASM_PART_M) {
 		if (mc_asmTraceEnabled) mc_asmTraceHandler(r);
 		if (mc_bodyCapEnabled)  mc_bodyCapHandler(r);
+		if (mc_charqEmitEnabled) mc_charqEmitBodyPart(r);   // set current run identity
 		return;
 	}
 
@@ -2240,6 +2446,7 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 	// per-frame oracle buffer; accumulates per (cid, vframe) -> /dev/shm/mc_charq_render.jsonl.
 	if (mpc == PC_CHARQ_SUBMIT_M) {
 		if (mc_charqRenderEnabled) mc_charqRenderHandler(r);
+		if (mc_charqEmitEnabled)   mc_charqEmitSubmit(r);   // append a screen sprite quad
 		return;
 	}
 
