@@ -1749,9 +1749,10 @@ static void mc_charqRenderHandler(const u32* r)
 //   +0x00 PCW (= 0xF0000000 sprite control)
 //   +0x04 Ax,Ay,Az (f32)   +0x10 Bx,By,Bz   +0x1C Cx,Cy,Cz   +0x28 Dx,Dy
 //   +0x34 AU (u16-trunc f32) +0x36 AV  +0x38 BU +0x3A BV  +0x3C CU +0x3E CV
-//   TCW = read_u32(r12+0x0C). TSP = the sprite-para TSP word (record +0x14 hi/word;
-//   the bank12 builder writes (transform<<24)|*(r13+0x3C) there). We also keep r12's
-//   raw words so the client has the full source para if TSP placement shifts.
+//   PCW/TCW/TSP come from RECORD 1 (rec - 0x20), the global ISP/TSP/TCW/PCW para:
+//     PCW = read_u32(recBase+0x00) (bit3 texture-enable), TCW = read_u32(recBase+0x08)
+//     (resolved texel addr + fmt + palette-bank template), TSP = read_u32(recBase+0x14)
+//     ((transform<<24)|*(r13+0x3C)). Same source as mc_charqRenderHandler.
 //
 // The 16-bit-truncated UV floats: the para stores only the HIGH 16 bits of each
 // f32 UV; expand to full f32 by (u16 << 16) reinterpreted as float.
@@ -1857,8 +1858,8 @@ static void mc_charqEmitBodyPart(const u32* r)
 }
 
 // Hook B — bank12 PVR submit (0x8C1248CC), paired right after each body part.
-// r14 = DEST sprite-para record (ctrl 0xF0000000 @ +0x00). r12 = source quad record
-// (TCW @ r12+0x0C). Append one screen sprite quad to the current run.
+// r14 = DEST sprite-para record 2 (corners/UVs; ctrl 0xF0000000 @ +0x00). The PVR para
+// words (PCW/TCW/TSP) live in RECORD 1 at r14-0x20. Append one screen sprite quad.
 static void mc_charqEmitSubmit(const u32* r)
 {
 	// BODY-vs-HUD discrimination by PAIRING (NOT pr). This submit is a BODY quad ONLY
@@ -1869,13 +1870,13 @@ static void mc_charqEmitSubmit(const u32* r)
 	s_cqeBodyPending = false;         // consume the pairing
 	if (s_cqeCurNode == 0) return;    // no identity established yet this run
 
-	u32 rec = (norm(r[14]) | 0x0C000000u);   // DEST sprite-para record base
-	u32 r12 = (norm(r[12]) | 0x0C000000u);   // source quad record
-	if (!inRam(rec)) return;
+	u32 rec     = (norm(r[14]) | 0x0C000000u);   // DEST sprite-para record (RECORD 2): corners+UVs
+	u32 recBase = rec - CHARQ_REC_OFF;           // RECORD 1: the global ISP/TSP/TCW/PCW para
+	if (!inRam(rec) || !inRam(recBase)) return;
 
 	if (s_cqeFireSub++ == 0)
-		fprintf(stderr, "[CHARQ-EMIT] submit hook first fired (pc=0x%08X PAIRED) rec(r14)=0x%08X r12=0x%08X pr=0x%08X\n",
-		        PC_CHARQ_SUBMIT, rec, r12, Sh4cntx.pr);
+		fprintf(stderr, "[CHARQ-EMIT] submit hook first fired (pc=0x%08X PAIRED) rec(r14)=0x%08X recBase=0x%08X pr=0x%08X\n",
+		        PC_CHARQ_SUBMIT, rec, recBase, Sh4cntx.pr);
 
 	CharqEObjInt* o = cqeGetObj();
 	if (!o || o->nquads >= CHARQE_MAX_QUADS) return;
@@ -1895,14 +1896,17 @@ static void mc_charqEmitSubmit(const u32* r)
 	q.CU = cqeExpandUV((u16)addrspace::read16(rec + 0x3C));
 	q.CV = cqeExpandUV((u16)addrspace::read16(rec + 0x3E));
 
-	// TCW from the SOURCE quad record (r12+0x0C) — the RESOLVED texel addr/fmt/pal.
-	// PCW = the DEST para control word (record +0x00, the 0xF0000000 sprite ctrl).
-	// TSP = the DEST para TSP word: the bank12 builder writes the blend/filter word at
-	// record +0x14 ((transform<<24)|*(r13+0x3C)). Carry it so the client has the full
-	// per-quad PVR state (blend mode, filtering) for PVR2Renderer.
-	q.tcw = inRam(r12) ? addrspace::read32(r12 + 0x0C) : 0;
-	q.pcw = addrspace::read32(rec + 0x00);
-	q.tsp = addrspace::read32(rec + 0x14);
+	// PVR para words come from RECORD 1 (recBase = rec - 0x20), the global ISP/TSP/TCW/PCW
+	// para — EXACTLY as mc_charqRenderHandler reads them. The DEST sprite-para (record 2,
+	// `rec`) holds only corners/UVs; its +0x00 is the 0xF0000000 sprite-ctrl (bit3 texture-
+	// enable CLEAR -> PVR2Renderer renders UNTEXTURED) and its +0x14 is a vertex Y float.
+	//   q.pcw = recBase+0x00  real global PCW (bit3 texture-enable set)
+	//   q.tcw = recBase+0x08  RESOLVED TCW (VRAM texel addr + fmt + palette-bank template)
+	//   q.tsp = recBase+0x14  real TSP ((transform<<24)|*(r13+0x3C); blend/filter)
+	// (bank12 loc_8c1244b0 record layout; cited in mc_charqRenderHandler.)
+	q.pcw = addrspace::read32(recBase + 0x00);
+	q.tcw = addrspace::read32(recBase + 0x08);
+	q.tsp = addrspace::read32(recBase + 0x14);
 	o->nquads++;
 }
 
