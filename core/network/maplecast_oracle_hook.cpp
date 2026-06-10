@@ -1896,16 +1896,18 @@ static void mc_charqEmitSubmit(const u32* r)
 	q.CU = cqeExpandUV((u16)addrspace::read16(rec + 0x3C));
 	q.CV = cqeExpandUV((u16)addrspace::read16(rec + 0x3E));
 
-	// PVR para words come from RECORD 1 (recBase = rec - 0x20), the global ISP/TSP/TCW/PCW
-	// para — EXACTLY as mc_charqRenderHandler reads them. The DEST sprite-para (record 2,
-	// `rec`) holds only corners/UVs; its +0x00 is the 0xF0000000 sprite-ctrl (bit3 texture-
-	// enable CLEAR -> PVR2Renderer renders UNTEXTURED) and its +0x14 is a vertex Y float.
-	//   q.pcw = recBase+0x00  real global PCW (bit3 texture-enable set)
-	//   q.tcw = recBase+0x08  RESOLVED TCW (VRAM texel addr + fmt + palette-bank template)
-	//   q.tsp = recBase+0x14  real TSP ((transform<<24)|*(r13+0x3C); blend/filter)
-	// (bank12 loc_8c1244b0 record layout; cited in mc_charqRenderHandler.)
+	// PVR para words.
+	//   q.pcw = recBase+0x00  real global PCW (bit3 texture-enable set) — RECORD 1.
+	//   q.tcw = r12+0x0C      RESOLVED body TCW (PROVEN source). The breakthrough offline
+	//           composite (clean textured Ryu/Cable) decoded the body texture from r12+0x0C:
+	//           PAL4 fmt5, palette bank bits 25-21, vram=(tcw&0x1FFFFF)<<3 (~0x419800 in
+	//           CHAR_GFX). recBase+0x08 is the WRONG record (0x949004d2 = fmt2 ARGB4444 8x8
+	//           @ 0x2690) -> the C3 fix produced SOLID-COLOR render. Reverted.
+	//   q.tsp = recBase+0x14  real TSP ((transform<<24)|*(r13+0x3C); blend/filter).
 	q.pcw = addrspace::read32(recBase + 0x00);
-	q.tcw = addrspace::read32(recBase + 0x08);
+	u32 r12 = (norm(r[12]) | 0x0C000000u);
+	q.tcw = inRam(r12 + 0x0C) ? addrspace::read32(r12 + 0x0C)
+	                          : addrspace::read32(recBase + 0x08);
 	q.tsp = addrspace::read32(recBase + 0x14);
 	o->nquads++;
 }
