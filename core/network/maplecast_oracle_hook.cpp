@@ -1785,6 +1785,14 @@ static int            s_cqeCurCid   = -1;
 static int            s_cqeCurSid   = -1;
 static unsigned long  s_cqeFireBody = 0;
 static unsigned long  s_cqeFireSub  = 0;
+// BODY-vs-HUD discrimination by PAIRING (NOT pr). The body-part hook (0x8C034864,
+// loc_8c0344d4) fires ONLY for body parts and is immediately followed 1:1 by the
+// bank12 submit (0x8C1248CC). We set this pending flag in the body-part hook; the
+// submit hook consumes it (=> this submit is a BODY quad) and clears it. A submit
+// with no pending set is a HUD/stage submit (not preceded by a body part) -> skipped.
+// The live probe PROVED pr at the submit PC is 0x8C124870 (bank12-internal), NOT
+// 0x0C03487A, so the old pr filter NEVER matched -> zero body quads captured.
+static bool           s_cqeBodyPending = false;
 
 // Flatten-public mirror (CharqEmitObj is layout-identical to CharqEObjInt's head;
 // we expose a separate compact array so the header struct need not embed quads).
@@ -1800,6 +1808,7 @@ static void cqeFreezeFrame()
 	for (int i = 0; i < s_cqeObjN; i++) s_cqeReady[i] = s_cqeObjs[i];
 	s_cqeObjN = 0;
 	s_cqeCurNode = 0; s_cqeCurCid = -1; s_cqeCurSid = -1;
+	s_cqeBodyPending = false;
 }
 
 // Return the accumulator object for the current run's node, opening a new one on a
@@ -1837,11 +1846,14 @@ static void mc_charqEmitBodyPart(const u32* r)
 		s_cqeVframe = vframe;
 		s_cqeObjN = 0;
 		s_cqeCurNode = 0; s_cqeCurCid = -1; s_cqeCurSid = -1;
+		s_cqeBodyPending = false;
 	}
 
 	s_cqeCurNode = cnode;
 	s_cqeCurCid  = (int)(u8)addrspace::read8(cnode + OFF_CHAR_ID);
 	s_cqeCurSid  = (int)((u16)addrspace::read16(cnode + OFF_SPRITE_ID) & 0x7FFF);
+	// Arm the pairing: the very next submit (0x8C1248CC) is THIS body part's quad.
+	s_cqeBodyPending = true;
 }
 
 // Hook B — bank12 PVR submit (0x8C1248CC), paired right after each body part.
@@ -1849,16 +1861,20 @@ static void mc_charqEmitBodyPart(const u32* r)
 // (TCW @ r12+0x0C). Append one screen sprite quad to the current run.
 static void mc_charqEmitSubmit(const u32* r)
 {
-	// BODY-vs-HUD filter: only the body render's submit jsr (pr == 0x0C03487A).
-	if ((Sh4cntx.pr & SH4_AREA_MASK) != PC_BODY_SUBMIT_RET_M) return;
-	if (s_cqeCurNode == 0) return;   // no identity established yet this run
+	// BODY-vs-HUD discrimination by PAIRING (NOT pr). This submit is a BODY quad ONLY
+	// if it immediately follows a body-part hook (0x8C034864) that armed the pending
+	// flag. HUD/stage submits reach this PC without a preceding body part -> skip.
+	// (The old `pr == 0x0C03487A` filter NEVER matched: live pr here is 0x8C124870.)
+	if (!s_cqeBodyPending) return;
+	s_cqeBodyPending = false;         // consume the pairing
+	if (s_cqeCurNode == 0) return;    // no identity established yet this run
 
 	u32 rec = (norm(r[14]) | 0x0C000000u);   // DEST sprite-para record base
 	u32 r12 = (norm(r[12]) | 0x0C000000u);   // source quad record
 	if (!inRam(rec)) return;
 
 	if (s_cqeFireSub++ == 0)
-		fprintf(stderr, "[CHARQ-EMIT] submit hook first fired (pc=0x%08X) rec(r14)=0x%08X r12=0x%08X pr=0x%08X\n",
+		fprintf(stderr, "[CHARQ-EMIT] submit hook first fired (pc=0x%08X PAIRED) rec(r14)=0x%08X r12=0x%08X pr=0x%08X\n",
 		        PC_CHARQ_SUBMIT, rec, r12, Sh4cntx.pr);
 
 	CharqEObjInt* o = cqeGetObj();
