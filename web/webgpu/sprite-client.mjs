@@ -821,7 +821,9 @@ export class SpriteClient {
       sl.pos_x    = dv.getFloat32(ci + 8,  true);   // arena/world X — for the zoom
       sl.screen_x = nx;
       sl.screen_y = ny;
-      sl.sprite_id= dv.getUint16(ci + 32, true);
+      const _rawSid = dv.getUint16(ci + 32, true);
+      sl.sprite_id = _rawSid & 0x7fff;          // engine indexes GFX2[sid & 0x7FFF] (loc_8c0344d4); strip bit15
+      sl.sid_xform = (_rawSid & 0x8000) ? 1 : 0; // bit15 = alt world-transform variant (loc_8c0348c8), not facing
       // Hit-spark: a health drop = a hit landed -> spawn a spark on the defender's
       // upper body. (Guard against round-reset jumps and the first frame.)
       const hp = dv.getUint8(ci + 3);
@@ -1246,6 +1248,10 @@ export class SpriteClient {
       if (!sl.active) continue;
       let exx = sl.screen_x, eyy = sl.screen_y;
       if (this.predict !== false) { const dt = Math.min(now - sl.t, 33); if (dt > 0) { exx += sl.vx*dt; eyy += sl.vy*dt; } }
+      // ANCHOR-FLOOR 2026-06-11: the engine places per-part PVR quads against the INTEGER-
+      // truncated screen anchor (node+0xE0/E4), not the float. Flooring drives the per-part
+      // residual 0.70px -> 0.00 vs flycast truth (tools/emitter_truth_gate.py: 0.001px/100%).
+      exx = Math.floor(exx); eyy = Math.floor(eyy);
       emitAssembly({ cid: sl.char_id, exx, eyy, facing: sl.facing, slot: s, zBase: 0 }, sl.sprite_id);
     }
 
@@ -1260,7 +1266,7 @@ export class SpriteClient {
       if ((ox === 0 && oy === 0) || ox < -60 || ox > 700) continue;
       // type 3 = cape: rides the owner. Others: distance decides attached vs spawned.
       const far = (o.type !== 3) && ((Math.abs(o.x - ox) + Math.abs(o.y - oy)) > 130);
-      const px = far ? o.x : ox, py = far ? o.y : oy;
+      const px = Math.floor(far ? o.x : ox), py = Math.floor(far ? o.y : oy);  // anchor-floor: match engine integer anchor
       // z layer by category: cape (3) behind body, fx/lightning (1) in front, else just behind.
       const zBase = (o.type === 1) ? 1 : (o.type === 3 ? -2 : -1);
       emitAssembly({ cid: o.cid, exx: px, eyy: py, facing: osl.facing, slot: 0,
@@ -1621,7 +1627,21 @@ export class SpriteClient {
           const bodyFace = (faceInv ? !owner.facing : !!owner.facing) !== faceFlip;  // ROM single sense (default !facing)
           const F = bodyFace;
           const posReflect = F;                          // POSITION reflect (neg r10) — gated on F
-          const flip  = F !== (!!r.flip);                // TEXTURE U-mirror (neg r8) = F XOR 0x4000 — SAME F
+          // TEXTURE U-mirror (neg r8) — FACING FIX 2026-06-11. The POSITION model above is a
+          // CALIBRATED form: the pen baked in PL00_asm.json is facing-neutral and the validated
+          // `pen − w` (facing=1) / `2A − pen` (facing=0) branch absorbs the ROM's `neg r10` into
+          // the baked pen + the −w convention — so `posReflect` reads as the INVERSE of the raw
+          // facing bit (faceInv default). The texture-U mirror, by contrast, is a literal pixel
+          // op on the atlas, whose parts are stored in the OPPOSITE orientation to the facing=1
+          // display (offline-baked Ryu faces LEFT; facing=1 must face RIGHT). So the U-mirror must
+          // NOT lockstep with posReflect — it must follow the RAW ROM rule `texU = facing XOR 0x4000`.
+          // With F = !facing (faceInv default), !F = facing, so `(!F) XOR r.flip` == `facing XOR 0x4000`
+          // — a LITERAL port of the ROM (bank03 neg r8 @ loc_8c0344d4), restoring phase with the
+          // calibrated position. The OLD `F XOR r.flip` (= !facing XOR 0x4000) was the INVERSE: it
+          // left the body un-mirrored at facing=1 → Ryu faced LEFT by default AND the +dx limbs
+          // (un-mirrored) reassembled on the wrong side of the −dx torso → "half the body swaps"
+          // as the pose's +dx/−dx mix changed frame to frame. Decoupling fixes BOTH symptoms.
+          const flip  = (!F) !== (!!r.flip);             // TEXTURE U-mirror = facing XOR 0x4000 (RAW ROM rule)
           const flipY = !!r.flipy;                       // Y-mirror geometry (no facing XOR)
           const ax0 = (part.ax || 0), ay0 = (part.ay || 0);
           // SIZE FIX (2026-06-10, CHARQ-GROUND-TRUTH calibrated): the OFFLINE atlas (the

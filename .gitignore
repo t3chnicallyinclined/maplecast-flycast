@@ -165,6 +165,9 @@ PL[0-9A-Fa-f][0-9A-Fa-f]_parts.manifest
 # Offline GFX2/GFX1 assembly-extractor scratch (ROM-derived part pixels + composites:
 # _ryu_offline/, render_*.png, geom_*.png). rip_gfx2_assembly.py writes here.
 _ryu_offline/
+# Live CHARQ/Frame-Oracle Ryu captures + emitter_truth_gate.py artifacts (ROM-derived
+# probe quads, PPMs, gate truth/ours/diff PNGs). Never committed.
+_ryu_capture/
 render_cell*.png
 geomcum_cell*.png
 geom_cell*.png

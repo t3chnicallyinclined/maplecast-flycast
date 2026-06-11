@@ -70,6 +70,14 @@ def emitter_predict(sid, asm, parts_dims, anchor, facing, scale, cfg):
     size = part.w*tsX x part.h*tsY straight from the atlas — NO dim override. With the
     full-span baker the multi-tile sels now carry sw*8 x sh*8, so this is exact."""
     exx, eyy = anchor
+    # ANCHOR-FLOOR FIX (2026-06-11, tools/emitter_truth_gate.py): flycast places the
+    # per-part PVR quads against the INTEGER-TRUNCATED screen anchor (floor of node
+    # +0xE0/+0xE4), not the float. The old constant dX=0.70/dY=0.40 residual was
+    # EXACTLY frac(106.7)/frac(433.4). Flooring drives the residual to 0.000 px.
+    # Pass anchorFloor=false to reproduce the legacy 0.70px.
+    if cfg.get("anchorFloor", True):
+        import math
+        exx = math.floor(exx); eyy = math.floor(eyy)
     zoomX = scale[0]; zoomY = scale[1]
     tileScale = cfg.get("tileScale", 1.0)
     S = cfg.get("S", 1.0)
@@ -107,7 +115,12 @@ def emitter_predict(sid, asm, parts_dims, anchor, facing, scale, cfg):
             tlx = 2 * axisX - tlx if not reflEdge else (2 * axisX - tlx + w)
         if flipY:
             tly = 2 * (eyy + gdy) - (tly + h)
-        flip = bodyFace != bool(r.get("flip"))
+        # TEXTURE U-mirror (facing fix 2026-06-11): the U-mirror follows the RAW ROM rule
+        # `texU = facing XOR 0x4000`, DECOUPLED from posReflect (the calibrated position form
+        # absorbs facing into the baked pen). With bodyFace = !facing, (not bodyFace) == facing,
+        # so this == facing XOR r.flip — a literal port of bank03 neg r8. The geometry residual
+        # (the gate) is independent of this; it is reported for documentation.
+        flip = (not bodyFace) != bool(r.get("flip"))
         pred.setdefault(r["part"], []).append(
             {"x": tlx, "y": tly, "w": w, "h": h, "flip": flip, "flipY": flipY})
     return pred
