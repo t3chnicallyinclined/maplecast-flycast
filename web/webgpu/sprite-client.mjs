@@ -150,6 +150,43 @@ export class SpriteClient {
              hyper_armor:0, flight_flag:0, stance:0 };
   }
 
+  // VELOCITY EXTRAPOLATION — BUG 1 FIX (Storm dash body separation) 2026-06-11.
+  // Returns the extrapolated [x,y] for a tracked slot, applying the per-frame screen
+  // velocity (px/game-ms, EMA-smoothed in onGSTA) forward by the render-vs-packet phase.
+  //
+  // WHY THE OLD INLINE FORM SEPARATED FROM TRUTH DURING A DASH:
+  //   The DIFF truth canvas (CHARQ/TA -> pvr2-renderer) draws each body at its
+  //   AUTHORITATIVE, UN-predicted screen_x of the latest GSTA frame. Our reconstruction
+  //   added `screen + vx*dt`, so during fast motion ours leads the truth by exactly the
+  //   predicted displacement. Idle (vx~0) matched (storm_dash2 = all-yellow); a dash
+  //   (vx large) separated (storm_dash = red/green split). Two amplifiers made it WORSE
+  //   than a clean lead: (a) dt clamped to 33ms = TWO frames of extrapolation, and (b) the
+  //   EMA-lagged vx over/under-shoots when the dash starts/stops, so the offset oscillated
+  //   left/right frame-to-frame (measured: red centroid swinging -150..+80px vs green).
+  //
+  // THE FIX (general, NOT Storm-specific):
+  //   * dt clamp -> ONE frame (16.7ms). Hides the typical render/packet phase without
+  //     extrapolating a full extra frame ahead of the un-predicted truth.
+  //   * CAP the predicted displacement magnitude (default 12 game-px). A spurious EMA
+  //     velocity spike (dash start/stop, or a screen_x jump from a camera/zoom snap that
+  //     is NOT real character motion) can never fling the body far from truth — the body
+  //     still tracks smoothly for normal walk/jump speeds (well under the cap) but a dash
+  //     no longer separates because the cap bounds the worst-case lead to ~12px.
+  //   Both bounds are A/B-tunable live: window._predictDt (ms), window._predictMax (px).
+  //   window._spriteclient.predict=false disables prediction entirely (= truth-aligned).
+  _predict(sl, now) {
+    if (this.predict === false) return [sl.screen_x, sl.screen_y];
+    const W = (typeof window !== 'undefined') ? window : null;
+    const dtMax  = (W && W._predictDt  != null) ? W._predictDt  : 16.7;   // 1 frame, not 33ms (2 frames)
+    const maxDisp= (W && W._predictMax != null) ? W._predictMax : 12;     // game-px cap on the lead
+    const dt = Math.min(now - sl.t, dtMax);
+    if (!(dt > 0)) return [sl.screen_x, sl.screen_y];
+    let dx = sl.vx * dt, dy = sl.vy * dt;
+    const m = Math.hypot(dx, dy);
+    if (m > maxDisp && m > 0) { const k = maxDisp / m; dx *= k; dy *= k; }
+    return [sl.screen_x + dx, sl.screen_y + dy];
+  }
+
   static isGSTA(d) {
     return d.length >= 4 && d[0]===GSTA_MAGIC[0] && d[1]===GSTA_MAGIC[1]
         && d[2]===GSTA_MAGIC[2] && d[3]===GSTA_MAGIC[3];
@@ -1974,8 +2011,7 @@ export class SpriteClient {
     if (!force) for (let s = 0; s < 6; s++) {
       const sl = this.slot[s];
       if (!sl.active) { this._heldEmit[s] = null; continue; }
-      let exx = sl.screen_x, eyy = sl.screen_y;
-      if (this.predict !== false) { const dt = Math.min(now - sl.t, 33); if (dt > 0) { exx += sl.vx*dt; eyy += sl.vy*dt; } }
+      let exx, eyy; [exx, eyy] = this._predict(sl, now);   // BUG 1 FIX: capped 1-frame extrapolation (was inline 33ms uncapped)
       const before = out.length;
       emitAssembly({ cid: sl.char_id, exx, eyy, facing: sl.facing, slot: s, zBase: 0,
                      sclX: sl.scaleX, sclY: sl.scaleY, pal12d: sl.pal12d, pal12e: sl.pal12e },
@@ -2010,15 +2046,30 @@ export class SpriteClient {
       let osl = null;
       for (let s = 0; s < 6; s++) if (this.slot[s].active && this.slot[s].char_id === o.cid) { osl = this.slot[s]; break; }
       if (!osl) continue;
-      let ox = osl.screen_x, oy = osl.screen_y;
-      if (this.predict !== false) { const dt = Math.min(now - osl.t, 33); if (dt > 0) { ox += osl.vx*dt; oy += osl.vy*dt; } }
+      let ox, oy; [ox, oy] = this._predict(osl, now);   // BUG 1 FIX: capped prediction (owner anchor for attached objects)
       if ((ox === 0 && oy === 0) || ox < -60 || ox > 700) continue;
       const far = (o.type !== 3) && ((Math.abs(o.x - ox) + Math.abs(o.y - oy)) > 130);
       const px = far ? o.x : ox, py = far ? o.y : oy;
       const zBase = (o.type === 1) ? 1 : (o.type === 3 ? -2 : -1);
       // Effect nodes (is_effect / GFX base in Effect Poly 0x0CED0000) -> effects atlas.
       const isFx = !!o.isEffect;
-      emitAssembly({ cid: o.cid, exx: px, eyy: py, facing: osl.facing, slot: 0, zBase,
+      // OBJECT FACING — BUG 2 FIX (Sentinel LP rocket punch rendered horizontal/mirrored)
+      // 2026-06-11. The selKeyed emitter reflects each part's screen rect across the anchor
+      // by `owner.facing` (bodyFace = !facing). A `far` pool object (a SPAWNED projectile /
+      // free satellite) has its OWN orientation in node+0x130 (shipped as o.xflip), NOT the
+      // caster's facing — exactly as the whole-sprite path already uses (sprite-client.mjs
+      // buildDrawList: `fl = o.xflip !== sp.facing`). Passing osl.facing here mirrored the
+      // whole projectile assembly across its own anchor: Sentinel's rocket (sid 0x111/0x11d/
+      // 0x11f spans dx -133..+117 at CPS = a ~500px-wide assembly) landed ~130px off-axis,
+      // so the diagonal-down arc read as a horizontal red beam offset from the green truth.
+      //   far (spawned) -> use o.xflip (the object's own node+0x130 flip).
+      //   near/attached (cape type 3, or close enough to ride the body) -> owner facing, the
+      //     proven cape behavior (a cape inherits the body's facing).
+      // window._objOwnFlip=false restores the old owner-facing sense for A/B against a capture.
+      const ownFlip = (typeof window === 'undefined') ? true
+                    : (window._objOwnFlip !== undefined ? !!window._objOwnFlip : true);
+      const objFacing = (far && ownFlip) ? (o.xflip ? 1 : 0) : osl.facing;
+      emitAssembly({ cid: o.cid, exx: px, eyy: py, facing: objFacing, slot: 0, zBase,
                      sclX: osl.scaleX, sclY: osl.scaleY, pal12d: osl.pal12d, pal12e: osl.pal12e,
                      blend: o.blend, fx: isFx }, o.sid);
     }
