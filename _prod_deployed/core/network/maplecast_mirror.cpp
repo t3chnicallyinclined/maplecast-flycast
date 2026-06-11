@@ -1,0 +1,3793 @@
+﻿/*
+	MapleCast Mirror v3  --  stream TA command buffers + memory diffs.
+
+	Instead of streaming pre-parsed rend_context (which loses texture resolution),
+	stream the RAW TA command buffer. The client runs ta_parse() on it, which
+	builds rend_context AND resolves textures from VRAM  --  exactly like flycast
+	normally works.
+
+	Server: each frame, captures the TA command buffer + PVR registers + memory diffs
+	Client: loads server sync state, then applies diffs + feeds TA commands to renderer
+*/
+#include <map>
+#include <unordered_set>
+#include <cstring>
+#include <cmath>
+#include "types.h"
+#include "maplecast_mirror.h"
+#include "hub_discovery.h"
+#include "hw/pvr/ta_ctx.h"
+#include "hw/pvr/ta.h"
+#include "hw/pvr/pvr_mem.h"
+#include "hw/pvr/pvr_regs.h"
+#include "hw/pvr/Renderer_if.h"
+#include "hw/sh4/sh4_mem.h"
+#include "hw/aica/aica_if.h"
+#ifndef MAPLECAST_HEADLESS_BUILD
+#include "rend/gles/gles.h"
+#endif
+#include "rend/TexCache.h"
+#include "serialize.h"
+#include "emulator.h"
+#include "hw/mem/mem_watch.h"
+#include "maplecast_ws_server.h"
+#include "maplecast_audio_ws.h"
+#include "maplecast_state_sync.h"
+#include "maplecast_input_server.h"
+#include "replay_writer.h"
+#include "maplecast_rollback.h"
+#include "maplecast_audio_client.h"
+#include "maplecast_input_sink.h"
+#include "maplecast_control_ws.h"
+#include "maplecast_compress.h"
+
+// Reserved for future palette bank probe (see NOTE in serverPublish).
+uint64_t g_activePalBanks = 0;
+#include "rend/texconv.h"
+
+#include <cstdio>
+#include <cstring>
+#include <atomic>
+#include <vector>
+#include <mutex>
+#include <thread>
+#include <deque>
+#include <chrono>
+#include <random>          // Tele-0.10
+#include <curl/curl.h>     // Tele-0.10
+#include "net_platform.h"
+#include "maplecast_compat.h"
+#ifndef _WIN32
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <netinet/tcp.h>
+#endif
+#include "maplecast_gamestate.h"
+#include "maplecast_oracle_hook.h"
+#include <errno.h>
+
+
+extern Renderer* renderer;
+extern bool pal_needs_update;
+
+namespace maplecast_mirror
+{
+
+static const char* SHM_NAME = "/maplecast_mirror";
+static const size_t HEADER_SIZE = 4096;
+static const size_t BRAIN_SIZE = 32 * 1024 * 1024;
+static const size_t RING_START = HEADER_SIZE + BRAIN_SIZE;
+static const size_t SHM_SIZE = RING_START + 128 * 1024 * 1024;
+static const size_t RING_SIZE = SHM_SIZE - RING_START;
+static const size_t MEM_PAGE_SIZE = 4096;
+
+static bool _isServer = false;
+static bool _isClient = false;
+static uint8_t* _shmPtr = nullptr;
+static int _shmFd = -1;
+
+// Shadow copies for diff
+static uint8_t* _shadowRAM = nullptr;
+static uint8_t* _shadowVRAM = nullptr;
+static uint8_t* _shadowARAM = nullptr;
+
+struct RingHeader {
+	volatile uint64_t write_pos;
+	volatile uint64_t frame_count;
+	volatile uint64_t latest_offset;
+	volatile uint32_t latest_size;
+	volatile uint32_t client_request_sync;
+	volatile uint32_t sync_ready;
+	volatile uint64_t server_vram_hash;     // server's VRAM hash for client to verify
+	uint8_t pad[4096 - 44];
+};
+
+static uint64_t _clientFrameCount = 0;
+static bool _clientNeedsFullSync = true;
+
+// Forward-declared helper used by client telemetry updates further up
+// in the file; defined next to the render-path client code below.
+static int64_t _clientNowUs();
+
+// ---- Client telemetry (consumed by the ImGui debug overlay) ----
+// All atomic so the overlay can snapshot them lock-free. Updated once per
+// frame from clientReceive() below (video path) and from wsClientRun() /
+// wsReadFrame (arrival timing).
+static std::atomic<uint64_t> _clientPacketsReceived{0};
+static std::atomic<uint64_t> _clientBytesReceived{0};
+static std::atomic<int64_t>  _clientLastDecodeUs{0};
+static std::atomic<int64_t>  _clientDecodeEmaUs{0};
+// Tele-0.5: max decode_us within the current reporting window. Reset
+// to 0 by the stats thread after each push to the server.
+static std::atomic<int64_t>  _clientDecodeMaxUs{0};
+// Tele-0.10: counters used by the HTTP-POST stats reporter to derive
+// fps + sync rate over each 1s window. Reset to 0 by the reporter.
+static std::atomic<uint64_t> _clientFramesDecoded{0};
+static std::atomic<uint64_t> _clientSyncCount{0};
+static std::atomic<uint32_t> _clientLastDirtyPages{0};
+static std::atomic<uint32_t> _clientLastTaSize{0};
+static std::atomic<bool>     _clientLastVramDirty{false};
+static std::atomic<int64_t>  _clientLastArrivalUs{0};
+static std::atomic<int64_t>  _clientArrivalEmaUs{0};
+static std::atomic<int64_t>  _clientArrivalMaxUs{0};
+static std::atomic<bool>     _clientWsConnected{false};
+
+// Game state received from server (for overlay/HUD)
+static maplecast_gamestate::GameState _clientGameState{};
+static std::mutex _clientGameStateMtx;
+static std::atomic<bool> _clientGameStateReady{false};
+
+// GSTA-ONLY mode (state-replica): the mirror WS is used purely as a transport
+// for GSTA/OBJF state packets. The local SH4 owns the render, so we must NOT
+// apply the server's TA delta or VRAM/PVR SYNC (they would clobber the local
+// game -> black screen). When set, wsClientRun skips every TA/SYNC/VRAM apply,
+// parsing ONLY GSTA + OBJF.
+static std::atomic<bool> _gstaOnly{false};
+// When true (state-replica with vramSync=true), wsClientRun still waits for and
+// applies the initial SYNC frame (VRAM + PVR) to seed local textures from prod,
+// then switches to GSTA-only for all subsequent frames.
+static std::atomic<bool> _gstaVramSync{false};
+
+// Full object pool received from server (OBJF) — for the state-replica inject.
+static maplecast_gamestate::ObjectState _clientObjects[48];
+static int _clientObjectCount = 0;
+static std::mutex _clientObjectsMtx;
+static std::atomic<bool> _clientObjectsReady{false};
+
+// MCSV mid-match join: server ships the full dc_serialize blob when the client
+// connects while in_match is active. frameInject() drains this and calls
+// dc_loadstate_from_memory() so the local SH4 enters the fight from a known-good
+// state rather than waiting to reach in_match=1 on its own.
+static std::vector<uint8_t> _pendingSaveState;
+static std::mutex            _pendingSaveStateMtx;
+static std::atomic<bool>     _pendingSaveStateReady{false};
+
+// Most-recently-received SYNC frame VRAM + PVR snapshot. Re-applied by
+// reapplyLastSyncVram() after dc_loadstate_from_memory() so the MCSV's
+// match-start VRAM doesn't clobber the server's current texture state.
+static std::vector<uint8_t> _lastSyncVram;
+static std::vector<uint8_t> _lastSyncPvr;
+
+// Fast hash for VRAM comparison (sample every 64th byte for speed)
+static uint64_t fastVramHash()
+{
+	uint64_t h = 0xcbf29ce484222325ULL;
+	for (size_t i = 0; i < VRAM_SIZE; i += 64) {
+		h ^= vram[i];
+		h *= 0x100000001b3ULL;
+	}
+	return h;
+}
+
+struct MemRegion {
+	uint8_t* ptr;
+	uint8_t* shadow;
+	size_t size;
+	uint8_t id;
+	const char* name;
+};
+static MemRegion _regions[4];
+static int _numRegions = 0;
+
+// ==================== DMA-write force-dirty bitmap ====================
+//
+// memcmp against a shadow copy misses VRAM writes that arrive via DMA paths
+// (Ch2 DMA, PVR DMA, TAWriteSQ 64-bit, ELAN texture DMA, YUV converter).
+// Those paths memcpy directly into vram[] without tripping the page-protect
+// SIGSEGV handler. The shadow copy gets updated to the new content too, so
+// when serverPublish() runs memcmp the next frame the page looks unchanged
+// and never streams to clients  --  they keep their stale texture.
+//
+// Fix: DMA write paths call markVramDirty(off, size) to set bits in this
+// bitmap. serverPublish() drains it in addition to running memcmp.
+//
+// Max VRAM is 8MB on Dreamcast (Naomi has the same). 8MB / 4KB pages =
+// 2048 pages = 32 uint64 words. We size for the maximum because VRAM_SIZE
+// is a runtime value (settings.platform.vram_size), not constexpr.
+// Lock-free atomic word fetch_or; serverPublish swaps with 0.
+static constexpr size_t VRAM_MAX_BYTES   = 8 * 1024 * 1024;
+static constexpr size_t VRAM_BITMAP_WORDS = (VRAM_MAX_BYTES / MEM_PAGE_SIZE + 63) / 64;
+static std::atomic<uint64_t> _vramDirtyBitmap[VRAM_BITMAP_WORDS];
+
+void markVramDirty(uint32_t offset, uint32_t size)
+{
+	// Hot path  --  bail before any work when no mirror server is running.
+	// `_isServer` becomes true once initServer() finishes; before that the
+	// bitmap is unallocated and DMA paths must not touch it.
+	if (!_isServer || size == 0) return;
+	if (offset >= VRAM_SIZE) return;
+	uint32_t startPage = offset / MEM_PAGE_SIZE;
+	uint32_t endPage   = (offset + size - 1) / MEM_PAGE_SIZE;
+	if (endPage >= VRAM_SIZE / MEM_PAGE_SIZE) endPage = VRAM_SIZE / MEM_PAGE_SIZE - 1;
+	for (uint32_t p = startPage; p <= endPage; p++) {
+		_vramDirtyBitmap[p >> 6].fetch_or(1ULL << (p & 63), std::memory_order_relaxed);
+	}
+}
+
+// Set by requestSyncBroadcast() (any thread). Drained by serverPublish() on
+// the render thread, which builds & broadcasts the SYNC there to avoid
+// touching vram[] mid-update from another thread.
+static std::atomic<bool> _forceSyncBroadcast{false};
+
+// Phase A  --  frame counter + monotonic-clock stamp of the most recent
+// serverPublish() call. Mirror the existing hdr->frame_count++ into a
+// std::atomic so the input latch path (ggpo::getLocalInput) can read the
+// current frame number cheaply without touching the shm header. Also stamp
+// the wall-clock time of the latest publish so the latch can compute
+// "frames-since-now" and "ms-since-last-frame-published" for telemetry +
+// the frame_phase block in status JSON. Both updated under the same
+// memory_order_release at the bottom of serverPublish().
+static std::atomic<uint64_t> _atomicCurrentFrame{0};
+static std::atomic<int64_t> _atomicLastLatchTimeUs{0};
+
+// Phase B  --  live frame period in microseconds, smoothed across the last
+// few publishes via an exponential moving average. PVR can run slightly
+// off 60 Hz; this gives the browser-side phase-aligner an accurate
+// "next vblank in N Âµs" estimate. Initialized to a sane default (16670 Âµs
+// = 60 fps) so the first few publishes have a reasonable starting value.
+static std::atomic<int64_t> _atomicFramePeriodUs{16670};
+
+static inline int64_t _publishNowUs() {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+void requestSyncBroadcast()
+{
+	if (!_isServer) return;
+	_forceSyncBroadcast.store(true, std::memory_order_relaxed);
+}
+
+// Set by requestFullSaveStateBroadcast()  --  same drain pattern. The
+// serverPublish drain calls maplecast_ws::broadcastFullSaveState() which
+// builds the dc_serialize blob, compresses it, and ships it to all
+// connected clients as a "SAVE" envelope.
+static std::atomic<bool> _forceFullSaveStateBroadcast{false};
+
+void requestFullSaveStateBroadcast()
+{
+	if (!_isServer) return;
+	_forceFullSaveStateBroadcast.store(true, std::memory_order_relaxed);
+}
+
+}  // namespace maplecast_mirror
+
+// C wrapper so the SIGUSR1 handler in core/linux/common.cpp can call this
+// without dragging in the C++ namespace declaration via the mirror header.
+extern "C" void maplecast_mirror_request_full_save_state()
+{
+	maplecast_mirror::requestFullSaveStateBroadcast();
+}
+
+namespace maplecast_mirror
+{
+
+static bool openShm(bool create)
+{
+#ifdef _WIN32
+	// Linux uses /dev/shm so a separate relay process can read the ring
+	// buffer without TCP. Windows has no relay process and no /dev/shm,
+	// but the rest of the mirror server (serverPublish ring writes, WS
+	// broadcast) still expects _shmPtr to be a valid buffer of SHM_SIZE.
+	// Allocate a private heap buffer instead. Same in-process layout, no
+	// cross-process sharing (which we don't need on Windows for V1).
+	(void)create;
+	if (_shmPtr == nullptr) {
+		_shmPtr = (uint8_t*)malloc(SHM_SIZE);
+		if (_shmPtr == nullptr) {
+			printf("[MIRROR] heap alloc for SHM_SIZE failed on Windows\n");
+			return false;
+		}
+		memset(_shmPtr, 0, SHM_SIZE);
+		printf("[MIRROR] Windows: SHM backed by private heap (no cross-process share)\n");
+	}
+	return true;
+#else
+	if (create) shm_unlink(SHM_NAME);
+	_shmFd = shm_open(SHM_NAME, create ? (O_CREAT | O_RDWR) : O_RDWR, 0666);
+	if (_shmFd < 0) { printf("[MIRROR] shm_open failed\n"); return false; }
+	if (create) ftruncate(_shmFd, SHM_SIZE);
+	_shmPtr = (uint8_t*)mmap(nullptr, SHM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, _shmFd, 0);
+	if (_shmPtr == MAP_FAILED) { _shmPtr = nullptr; return false; }
+	if (create) memset(_shmPtr, 0, SHM_SIZE);
+	return true;
+#endif
+}
+
+static void initRegions()
+{
+	_numRegions = 0;
+
+	// SKIP RAM  --  renderer doesn't read from main RAM
+	// SKIP ARAM  --  audio RAM not needed for rendering
+	// ONLY diff VRAM (textures) and PVR regs (palette, fog, hardware state)
+
+	_shadowVRAM = (uint8_t*)malloc(VRAM_SIZE);
+	memcpy(_shadowVRAM, &vram[0], VRAM_SIZE);
+	_regions[_numRegions++] = { &vram[0], _shadowVRAM, VRAM_SIZE, 1, "VRAM" };
+
+	// PVR registers: 32KB  --  palette RAM, FOG_TABLE, ISP_FEED_CFG
+	static uint8_t* _shadowPVR = nullptr;
+	_shadowPVR = (uint8_t*)malloc(pvr_RegSize);
+	memcpy(_shadowPVR, pvr_regs, pvr_RegSize);
+	_regions[_numRegions++] = { pvr_regs, _shadowPVR, (size_t)pvr_RegSize, 3, "PVR" };
+
+	// Only 2 regions: VRAM + PVR (no RAM, no ARAM)
+}
+
+static void serverSaveSync()
+{
+	const char* syncPath = "/dev/shm/maplecast_sync.state";
+	Serializer ser;
+	dc_serialize(ser);
+	void* data = malloc(ser.size());
+	if (!data) return;
+	ser = Serializer(data, ser.size());
+	dc_serialize(ser);
+	FILE* f = fopen(syncPath, "wb");
+	if (f) { fwrite(data, 1, ser.size(), f); fclose(f); }
+	free(data);
+	printf("[MIRROR] Sync state saved: %.1f MB\n", ser.size() / (1024.0*1024.0));
+}
+
+// Public wrapper: call serverSaveSync() then broadcast the resulting file
+// to all WS clients wrapped in a "SAVE" envelope. Trigger via SIGUSR1.
+void doForcedSaveStateBroadcast()
+{
+	if (!_isServer) return;
+
+	// 1. Run the same function that produces the on-disk save state
+	serverSaveSync();
+
+	// 2. Read the file back
+	FILE* f = fopen("/dev/shm/maplecast_sync.state", "rb");
+	if (!f) { printf("[MIRROR] forced sync: failed to read save state\n"); return; }
+	fseek(f, 0, SEEK_END);
+	size_t fileSize = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	std::vector<uint8_t> fileBuf(fileSize);
+	if (fread(fileBuf.data(), 1, fileSize, f) != fileSize) {
+		printf("[MIRROR] forced sync: short read\n");
+		fclose(f);
+		return;
+	}
+	fclose(f);
+
+	// 3. Wrap in "SAVE" envelope: "SAVE"(4) + uncompSize(4) + bytes
+	std::vector<uint8_t> wrapped(8 + fileSize);
+	memcpy(wrapped.data(), "SAVE", 4);
+	uint32_t fs = (uint32_t)fileSize;
+	memcpy(wrapped.data() + 4, &fs, 4);
+	memcpy(wrapped.data() + 8, fileBuf.data(), fileSize);
+
+	// 4. Broadcast via WS server
+	maplecast_ws::broadcastSaveStateBytes(wrapped.data(), wrapped.size());
+
+	printf("[MIRROR] forced save state broadcast: %.1f MB raw\n",
+		fileSize / (1024.0 * 1024.0));
+}
+
+// Public API: serialize the full DC state into a freshly malloc'd buffer.
+// Caller owns the returned pointer and must free() it. Returns nullptr on
+// failure. This is the SAME data serverSaveSync() writes to disk  --  useful
+// for shipping the full save state over the wire to test theories about
+// what data the WASM client is missing.
+uint8_t* buildFullSaveState(size_t& outSize)
+{
+	// Fixed-allocation pattern. The earlier dry-run-then-real-run
+	// approach was racy: `dc_serialize` size differs between back-to-
+	// back calls on a live emu (length-prefixed dynamic arrays and
+	// `Serializer::skip()` reservations don't match between dry and
+	// real runs), which made the old code hit "size mismatch" on
+	// every frame. We solve it by allocating generously, serializing
+	// once, catching any overflow, and trusting `ser.size()` as the
+	// authoritative used length.
+	//
+	// IMPORTANT: rollback=false. GGPO uses rollback=true at
+	// core/network/ggpo.cpp:425, but in that mode several modules
+	// (AICA RAM, SH4 MMR cache, PVR, Elan) deliberately SKIP themselves
+	// on the assumption GGPO's memwatch::PageMap delta cache will
+	// restore them separately. We have no such cache  --  we ship a
+	// standalone full state that must be self-contained on the wire.
+	// Setting rollback=true here would produce a ~500KB blob that
+	// looks valid to the Deserializer but leaves AICA/MMR/PVR stale,
+	// then crashes the SH4 a few seconds after load with
+	// "SH4 exception when blocked".
+	//
+	// 40 MB covers both DC (real ~28 MB) and Naomi (~28-32 MB) with
+	// headroom. The wasted tail is touched only by the downstream
+	// compressor and elides to ~nothing in the wire payload.
+	outSize = 0;
+	constexpr size_t kAllocSize = 40 * 1024 * 1024;
+	uint8_t* data = (uint8_t*)malloc(kAllocSize);
+	if (!data) {
+		printf("[MIRROR] buildFullSaveState malloc(%zu) failed\n", kAllocSize);
+		return nullptr;
+	}
+	try {
+		Serializer ser(data, kAllocSize, /*rollback=*/false);
+		dc_serialize(ser);
+		outSize = ser.size();
+		return data;
+	} catch (const Serializer::Exception& e) {
+		printf("[MIRROR] buildFullSaveState serializer overflow (%zu-byte buffer): %s\n",
+		       kAllocSize, e.what());
+		free(data);
+		return nullptr;
+	} catch (const std::exception& e) {
+		printf("[MIRROR] buildFullSaveState exception: %s\n", e.what());
+		free(data);
+		return nullptr;
+	}
+}
+
+// Double-buffered TA for zero-copy delta (replaces std::vector prevTA)
+static uint8_t* _taBuf[2] = { nullptr, nullptr };
+static uint32_t _taBufSize[2] = { 0, 0 };
+static int _taCur = 0;
+static bool _taHasPrev = false;
+static MirrorCompressor _compressor;
+
+void initServer()
+{
+	if (!openShm(true)) return;
+	_isServer = true;
+	initRegions();
+	RingHeader* hdr = (RingHeader*)_shmPtr;
+	hdr->write_pos = 0;
+	hdr->frame_count = 0;
+	hdr->latest_offset = 0;
+	hdr->latest_size = 0;
+	serverSaveSync();
+
+	for (int i = 0; i < _numRegions; i++)
+		memcpy(_regions[i].shadow, _regions[i].ptr, _regions[i].size);
+
+	// Allocate TA double buffers
+	for (int i = 0; i < 2; i++) {
+		_taBuf[i] = (uint8_t*)malloc(256 * 1024);
+		_taBufSize[i] = 0;
+	}
+	_taCur = 0;
+	_taHasPrev = false;
+
+	// zstd compression for WebSocket broadcast
+	_compressor.init(256 * 1024);
+
+	// Start lightweight WebSocket server  --  no CUDA, no NVENC
+	int wsPort = 7200;
+	const char* portEnv = std::getenv("MAPLECAST_SERVER_PORT");
+	if (portEnv) wsPort = std::atoi(portEnv);
+	maplecast_ws::init(wsPort);
+
+	// Dedicated audio-only WebSocket server on its own port + io_service
+	// thread. Keeps PCM audio packets off the TA mirror socket entirely so
+	// video frames never contend for TCP ordering or asio event-loop time.
+	// See maplecast_audio_ws.h for the full rationale.
+	int audioWsPort = wsPort + 3;  // default: 7203 alongside 7200, 7213 alongside 7210
+	const char* audioPortEnv = std::getenv("MAPLECAST_AUDIO_WS_PORT");
+	if (audioPortEnv) audioWsPort = std::atoi(audioPortEnv);
+	maplecast_audio_ws::init(audioWsPort);
+
+	// Phase 3 of lockstep-player-client: start the state-sync TCP listener
+	// so native player clients can subscribe to periodic dc_serialize
+	// snapshots. Failure to start is non-fatal  --  the TA mirror still works.
+	maplecast_state_sync::serverStart();
+
+	printf("[MIRROR] === SERVER MODE === streaming TA + memory diffs\n");
+}
+
+static void clientLoadSync()
+{
+	const char* syncPath = "/dev/shm/maplecast_sync.state";
+	FILE* f = fopen(syncPath, "rb");
+	if (!f) { printf("[MIRROR] No sync state\n"); return; }
+	fseek(f, 0, SEEK_END);
+	size_t size = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	void* data = malloc(size);
+	if (!data) { fclose(f); return; }
+	fread(data, 1, size, f);
+	fclose(f);
+	Deserializer deser(data, size);
+	emu.loadstate(deser);
+	free(data);
+	// loadstate re-protects VRAM  --  unprotect so our memcpy patches work
+	memwatch::unprotect();
+	printf("[MIRROR] Loaded server sync state: %.1f MB\n", size / (1024.0*1024.0));
+}
+
+static void initClientWebSocket();  // forward declaration
+
+void initClient()
+{
+	// Idempotent  --  if already initialized, don't start a second WS thread.
+	// This happens when flycast GUI settings change triggers stop()+start().
+	if (_isClient) return;
+
+	// Use WebSocket if:
+	//   - MAPLECAST_SERVER_HOST is set (explicit host override), or
+	//   - MAPLECAST_HUB_URL is set (want hub-aware discovery), or
+	//   - shm_open fails (no local flycast-server on this machine)
+	// Hub discovery only runs inside the WS path, so if the user sets
+	// MAPLECAST_HUB_URL but there's stale SHM from a previous local run,
+	// we must skip SHM or discovery never triggers.
+	if (std::getenv("MAPLECAST_SERVER_HOST")
+	    || std::getenv("MAPLECAST_HUB_URL")
+	    || !openShm(false)) {
+		initClientWebSocket();
+		return;
+	}
+	_isClient = true;
+	_clientFrameCount = 0;
+	_clientNeedsFullSync = false;
+
+	// Request server to save a FRESH sync state right now
+	RingHeader* hdr = (RingHeader*)_shmPtr;
+	hdr->sync_ready = 0;
+	hdr->client_request_sync = 1;
+	printf("[MIRROR] Requesting fresh sync state from server...\n");
+
+	// Wait for server to save it (up to 5 seconds)
+	for (int i = 0; i < 500; i++) {
+		if (hdr->sync_ready) break;
+		usleep(10000);  // 10ms
+	}
+
+	if (hdr->sync_ready) {
+		// Direct memory copy instead of emu.loadstate  --  avoids corrupting scheduler/interrupt state
+		uint8_t* snap = _shmPtr + HEADER_SIZE;
+		size_t off = 0;
+		memcpy(&mem_b[0], snap + off, 16 * 1024 * 1024); off += 16 * 1024 * 1024;
+		memcpy(&vram[0], snap + off, VRAM_SIZE); off += VRAM_SIZE;
+		memcpy(&aica::aica_ram[0], snap + off, 2 * 1024 * 1024);
+		// Also copy PVR regs from the server's current state
+		// (they're diffed per-frame anyway, but this gives us a clean start)
+
+		memwatch::unprotect();
+		if (renderer) {
+			renderer->resetTextureCache = true;
+			renderer->updatePalette = true;
+		}
+		pal_needs_update = true;
+		palette_update();
+		if (renderer) renderer->updateFogTable = true;
+
+		_clientFrameCount = hdr->frame_count;
+		printf("[MIRROR] === CLIENT MODE === synced at frame %lu (direct memory copy)\n", _clientFrameCount);
+	} else {
+		printf("[MIRROR] WARNING: server didn't respond\n");
+	}
+}
+
+// ==================== WebSocket client transport ====================
+
+static bool _useWebSocket = false;
+static std::thread _wsThread;
+static std::mutex _frameMutex;
+static std::deque<std::vector<uint8_t>> _frameQueue;
+static std::atomic<uint32_t> _wsFramesReceived{0};
+
+// Double-buffered TA contexts  --  background decodes into one, render reads the other
+static TA_context _decodeTaCtx[2];
+static bool _decodeTaAlloced = false;
+static int _decodeIdx = 0;  // which buffer background thread writes to
+static bool _decodeHasFullFrame = false;
+
+// Decoded frame metadata  --  written by background thread, read by render thread
+struct DecodedPage {
+	uint8_t  regionId;
+	uint32_t pageIdx;
+	uint8_t  data[4096];
+};
+struct DecodedFrame {
+	uint32_t frameNum;
+	uint32_t pvr_snapshot[16];
+	uint32_t taSize;
+	int taBufferIdx;  // which _decodeTaCtx[] has the TA data
+	uint32_t dirtyCount;
+	// Heap-allocated to support full VRAM+PVR resync (2048 VRAM + 8 PVR = 2056
+	// pages on a scene change). The previous fixed pages[128] silently
+	// truncated and lost the bulk of new-scene textures. 4096 entries =
+	// ~16.8MB per DecodedFrame, fine on the heap.
+	std::vector<DecodedPage> pages;
+	bool vramDirty;
+};
+static DecodedFrame _decoded;
+static std::atomic<bool> _decodedReady{false};
+// Guards _decoded.pages and the merge/move operations on it. Without this,
+// the producer can std::move() a new vector into _decoded while the consumer
+// is iterating the previous vector, corrupting both. ~60Hz contention,
+// trivial cost, eliminates the residual PVR phase noise.
+static std::mutex _decodedMtx;
+
+// Raw TCP WebSocket client  --  bypasses websocketpp/asio resolver entirely
+// Implements RFC 6455 WebSocket framing over a plain POSIX socket
+
+static int _wsFd = -1;
+
+static bool wsHandshake(int fd, const char* host, int port)
+{
+	// Send HTTP upgrade request
+	char req[512];
+	int len = snprintf(req, sizeof(req),
+		"GET / HTTP/1.1\r\n"
+		"Host: %s:%d\r\n"
+		"Upgrade: websocket\r\n"
+		"Connection: Upgrade\r\n"
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+		"Sec-WebSocket-Version: 13\r\n"
+		"\r\n", host, port);
+	if (mc_send(fd, req, len, 0) != len) return false;
+
+	// Read HTTP response
+	char resp[1024];
+	int total = 0;
+	while (total < (int)sizeof(resp) - 1) {
+		int n = mc_recv(fd, resp + total, 1, 0);
+		if (n <= 0) return false;
+		total += n;
+		if (total >= 4 && memcmp(resp + total - 4, "\r\n\r\n", 4) == 0) break;
+	}
+	resp[total] = 0;
+	return strstr(resp, "101") != nullptr;
+}
+
+// Send a masked WebSocket TEXT frame (RFC 6455 client framing). The native
+// client is otherwise receive-only; this is the one path that sends data back
+// to the relay — a short JSON subscription control message. Client→server
+// frames MUST be masked per spec; the mask value is arbitrary (the relay
+// unmasks with whatever we send). Single-byte length path only (msg <= 125
+// bytes), which covers every control message we send. Thread note: the recv
+// loop runs on _wsThread and only ever calls mc_recv; this is the sole sender,
+// so concurrent send+recv on the same fd is safe (POSIX + Winsock both allow it).
+static bool wsSendTextMasked(int fd, const char* msg)
+{
+	size_t mlen = strlen(msg);
+	if (fd < 0 || mlen > 125) return false;
+	uint8_t frame[2 + 4 + 125];
+	frame[0] = 0x81;                       // FIN + text opcode (0x1)
+	frame[1] = 0x80 | (uint8_t)mlen;       // MASK bit + payload length
+	const uint8_t mask[4] = { 0x37, 0xfa, 0x21, 0x3d };
+	frame[2] = mask[0]; frame[3] = mask[1]; frame[4] = mask[2]; frame[5] = mask[3];
+	for (size_t i = 0; i < mlen; i++)
+		frame[6 + i] = (uint8_t)msg[i] ^ mask[i & 3];
+	int total = (int)(6 + mlen);
+	return mc_send(fd, (const char*)frame, total, 0) == total;
+}
+
+// The relay-side subscription control message. Sending this tells the relay to
+// forward ONLY GSTA/OBJF/MCSV and drop all TA/VRAM/SYNC/audio video for this
+// socket — dropping per-client egress from ~510 KB/s to ~10-30 KB/s.
+static const char* kSubscribeStateMsg = "{\"type\":\"subscribe\",\"mode\":\"state\"}";
+
+static bool wsReadFrame(int fd, std::vector<uint8_t>& out)
+{
+	// Read WebSocket frame header (2 bytes min)
+	uint8_t hdr[2];
+	if (mc_recv(fd, hdr, 2, MSG_WAITALL) != 2) return false;
+
+	bool fin = (hdr[0] & 0x80) != 0;
+	int opcode = hdr[0] & 0x0F;
+	bool masked = (hdr[1] & 0x80) != 0;
+	uint64_t payloadLen = hdr[1] & 0x7F;
+
+	if (payloadLen == 126) {
+		uint8_t ext[2];
+		if (mc_recv(fd, ext, 2, MSG_WAITALL) != 2) return false;
+		payloadLen = (ext[0] << 8) | ext[1];
+	} else if (payloadLen == 127) {
+		uint8_t ext[8];
+		if (mc_recv(fd, ext, 8, MSG_WAITALL) != 8) return false;
+		payloadLen = 0;
+		for (int i = 0; i < 8; i++) payloadLen = (payloadLen << 8) | ext[i];
+	}
+
+	// Skip mask key if present (serverâ†’client should not be masked)
+	if (masked) {
+		uint8_t mask[4];
+		if (mc_recv(fd, mask, 4, MSG_WAITALL) != 4) return false;
+	}
+
+	// Read payload
+	out.resize(payloadLen);
+	size_t read = 0;
+	while (read < payloadLen) {
+		ssize_t n = mc_recv(fd, out.data() + read, payloadLen - read, 0);
+		if (n <= 0) return false;
+		read += n;
+	}
+
+	// Handle close/ping/text
+	if (opcode == 0x8) return false;  // close
+	// PING -- ignore on the native client. Earlier we tried to send a
+	// PONG inline here for Tele-0.3 RTT measurement, but the synchronous
+	// mc_send on the recv thread head-of-line-blocked the next TA-frame
+	// read and added perceptible play lag. Browser clients still respond
+	// automatically (the WS spec mandates it), so server-side RTT
+	// telemetry continues to work for them; native clients just stay at
+	// rtt_us=-1 in the status JSON. A non-blocking PONG via a queue is
+	// the proper fix; deferring until we need it.
+	if (opcode == 0x9) { out.clear(); return true; }
+	if (opcode == 0x1) { out.clear(); return true; }  // text (JSON status)  --  ignore
+
+	return fin && opcode == 0x2;  // binary frame
+}
+
+// Tele-0.10: dedicated stats reporter thread that POSTs to /api/telemetry
+// on the relay (or whatever the user's MAPLECAST_TELEMETRY_URL points
+// at). Different transport from the WS recv loop -- libcurl over a
+// fresh TCP/TLS connection per post -- so it can't head-of-line-block
+// TA-frame decode like the WS-text-on-same-fd attempt did.
+//
+// Schema matches the relay's existing ClientReport (client_telemetry.rs)
+// so browser + native + ops dashboards aggregate from the same source.
+// Native-only fields (render_us_avg/max) are silently dropped by serde
+// today -- they'll be wired in 0.13 when we extend the relay.
+static std::atomic<bool> _statsReporterRun{false};
+static std::thread       _statsReporterThread;
+
+static size_t _statsReporterCurlSink(void*, size_t size, size_t nmemb, void*) {
+	return size * nmemb;  // discard response body
+}
+
+static void statsReporterRun(std::string telemetryUrl, std::string clientId)
+{
+	auto wallNowUs = []() -> int64_t {
+		return (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count();
+	};
+	uint64_t prevPackets = _clientPacketsReceived.load(std::memory_order_relaxed);
+	uint64_t prevBytes   = _clientBytesReceived.load(std::memory_order_relaxed);
+	uint64_t prevFrames  = _clientFramesDecoded.load(std::memory_order_relaxed);
+	int64_t  prevUs      = wallNowUs();
+
+	while (_statsReporterRun.load(std::memory_order_relaxed)
+	    && _clientWsConnected.load(std::memory_order_relaxed))
+	{
+		std::this_thread::sleep_for(std::chrono::seconds(1));
+		if (!_statsReporterRun.load(std::memory_order_relaxed)) break;
+
+		const int64_t  nowUs   = wallNowUs();
+		const uint64_t pkts    = _clientPacketsReceived.load(std::memory_order_relaxed);
+		const uint64_t bytes   = _clientBytesReceived.load(std::memory_order_relaxed);
+		const uint64_t frames  = _clientFramesDecoded.load(std::memory_order_relaxed);
+		const uint64_t syncs   = _clientSyncCount.load(std::memory_order_relaxed);
+		const int64_t  arrivalAvg = _clientArrivalEmaUs.load(std::memory_order_relaxed);
+		const int64_t  arrivalMax = _clientArrivalMaxUs.exchange(0, std::memory_order_relaxed);
+		const int64_t  decodeAvg = _clientDecodeEmaUs.load(std::memory_order_relaxed);
+		const int64_t  decodeMax = _clientDecodeMaxUs.exchange(0, std::memory_order_relaxed);
+
+		const int64_t  intervalUs = std::max<int64_t>(1, nowUs - prevUs);
+		const double   intervalS  = (double)intervalUs / 1e6;
+		const double   fps        = (double)(frames - prevFrames) / intervalS;
+		const double   mbps       = (double)(bytes - prevBytes) * 8.0 / 1e6 / intervalS;
+		(void)pkts; (void)prevPackets;  // currently unused; kept for future packet-rate field
+		prevPackets = pkts;
+		prevBytes   = bytes;
+		prevFrames  = frames;
+		prevUs      = nowUs;
+
+		// ClientReport (existing schema in relay/src/client_telemetry.rs).
+		// Extra render_us fields piggyback for future relay extension.
+		char body[640];
+		int len = std::snprintf(body, sizeof(body),
+			"{\"client_id\":\"%s\",\"ua\":\"maplecast-native\","
+			"\"rtt_ms\":0,\"fps\":%.2f,\"mbps\":%.3f,"
+			"\"frame_jitter_avg_us\":%lld,\"frame_jitter_max_us\":%lld,"
+			"\"sync_count\":%llu,\"streaming\":1,"
+			"\"render_us_avg\":%lld,\"render_us_max\":%lld}",
+			clientId.c_str(), fps, mbps,
+			(long long)arrivalAvg, (long long)arrivalMax,
+			(unsigned long long)syncs,
+			(long long)decodeAvg, (long long)decodeMax);
+		if (len <= 0 || len >= (int)sizeof(body)) continue;
+
+		CURL* c = curl_easy_init();
+		if (!c) continue;
+		struct curl_slist* hdrs = nullptr;
+		hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+		curl_easy_setopt(c, CURLOPT_URL, telemetryUrl.c_str());
+		curl_easy_setopt(c, CURLOPT_POST, 1L);
+		curl_easy_setopt(c, CURLOPT_POSTFIELDS, body);
+		curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, (long)len);
+		curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdrs);
+		curl_easy_setopt(c, CURLOPT_TIMEOUT, 3L);
+		curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 2L);
+		curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+		curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, _statsReporterCurlSink);
+		curl_easy_setopt(c, CURLOPT_USERAGENT, "maplecast-native/1.0");
+		curl_easy_perform(c);
+		curl_slist_free_all(hdrs);
+		curl_easy_cleanup(c);
+	}
+}
+
+static void wsClientRun(std::string host, int port)
+{
+	printf("[MIRROR-WS] Connecting to %s:%d...\n", host.c_str(), port); fflush(stdout);
+
+	// Bump priority — frame decode is on the critical path. Default
+	// priority lets background OS work (search indexer, AV scans, Windows
+	// Defender) preempt this thread, causing render stalls. THREAD_PRIORITY_
+	// HIGHEST is sufficient — TIME_CRITICAL would compete with input which
+	// is more latency-sensitive.
+#ifdef _WIN32
+	if (SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST))
+		printf("[MIRROR-WS] recv thread -> THREAD_PRIORITY_HIGHEST\n");
+#endif
+
+	// Resolve hostname (inet_pton only handles IP literals, not DNS names)
+	struct addrinfo hints = {}, *res = nullptr;
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
+	char portBuf[16];
+	snprintf(portBuf, sizeof(portBuf), "%d", port);
+	int gaiErr = getaddrinfo(host.c_str(), portBuf, &hints, &res);
+	if (gaiErr != 0 || !res) {
+		printf("[MIRROR-WS] getaddrinfo('%s:%d') failed: %s\n",
+		       host.c_str(), port, gai_strerror(gaiErr));
+		return;
+	}
+
+	_wsFd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+	if (_wsFd < 0) { printf("[MIRROR-WS] socket() failed\n"); freeaddrinfo(res); return; }
+
+	if (connect(_wsFd, res->ai_addr, res->ai_addrlen) != 0) {
+		printf("[MIRROR-WS] connect() failed: %s\n", strerror(errno));
+		mc_closesocket(_wsFd); _wsFd = -1; freeaddrinfo(res); return;
+	}
+	freeaddrinfo(res);
+	int one = 1;
+	mc_setsockopt(_wsFd, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
+	printf("[MIRROR-WS] TCP connected (NODELAY)\n"); fflush(stdout);
+
+	if (!wsHandshake(_wsFd, host.c_str(), port)) {
+		printf("[MIRROR-WS] WebSocket handshake failed\n");
+		mc_closesocket(_wsFd); _wsFd = -1; return;
+	}
+	printf("[MIRROR-WS] WebSocket handshake OK  --  waiting for initial sync\n"); fflush(stdout);
+	_clientWsConnected.store(true, std::memory_order_release);
+
+	// If we're already in GSTA-only mode at connect time — a cold-start
+	// startGstaStream(), or a reconnect after switchToGstaOnly() — the relay
+	// defaults every new socket to full-mirror, so re-assert our state-only
+	// subscription now. (The mid-session live switch is sent by switchToGstaOnly
+	// on the existing socket.) Best-effort: failure just falls back to local drop.
+	if (_gstaOnly.load(std::memory_order_relaxed)) {
+		if (wsSendTextMasked(_wsFd, kSubscribeStateMsg))
+			printf("[MIRROR-WS] state-only subscribe sent to relay on connect (shedding TA/VRAM)\n");
+		fflush(stdout);
+	}
+
+	// Tele-0.10 stats reporter DISABLED again -- even with HTTP POST
+	// (separate transport, no shared fd), connections still drop after
+	// ~15s. The thread itself or curl init might be doing something
+	// system-level that interferes. Keeping the impl compiled in but
+	// not spawning, so we can isolate further.
+
+	if (!_decodeTaAlloced) {
+		_decodeTaCtx[0].Alloc();
+		_decodeTaCtx[1].Alloc();
+		_decodeTaAlloced = true;
+	}
+	_decodeIdx = 0;
+
+	// zstd decompressor  --  reused across all frames
+	MirrorDecompressor decomp;
+	decomp.init(16 * 1024 * 1024);  // 16MB covers SYNC + worst-case frames
+
+	// Wait for initial SYNC message (VRAM + PVR regs).
+	// GSTA-ONLY (state-replica): normally skip the SYNC wait entirely — we never
+	// apply the server's TA/VRAM (the local SH4 owns the framebuffer). But if
+	// _gstaVramSync is set (vramSync=true in startGstaStream), we DO wait for
+	// and apply the initial SYNC to seed local VRAM with prod's current textures,
+	// then fall through to GSTA-only for all subsequent frames.
+	const bool wantVramSync = _gstaVramSync.load(std::memory_order_relaxed);
+	bool synced = _gstaOnly.load(std::memory_order_relaxed) && !wantVramSync;
+	std::vector<uint8_t> frame;
+	if (synced)
+		printf("[MIRROR-WS] GSTA-ONLY mode — skipping SYNC wait + TA/VRAM apply\n");
+	else if (_gstaOnly.load(std::memory_order_relaxed) && wantVramSync)
+		printf("[MIRROR-WS] GSTA+VRAM-SYNC mode — waiting for initial SYNC to seed local VRAM, then GSTA-only\n");
+	while (!synced) {
+		if (!wsReadFrame(_wsFd, frame)) {
+			printf("[MIRROR-WS] Connection lost waiting for sync\n"); fflush(stdout);
+			mc_closesocket(_wsFd); _wsFd = -1; decomp.destroy(); return;
+		}
+		// Audio packet  --  [0xAD][0x10][seqHi][seqLo][PCM]  --  ignore on the
+		// native client (no audio playback implemented here). Would be
+		// misparsed as a video frame otherwise.
+		if (frame.size() >= 4 && frame[0] == 0xAD && frame[1] == 0x10)
+			continue;
+		// Decompress if needed
+		size_t decompSize = 0;
+		const uint8_t* decompData = decomp.decompress(frame.data(), frame.size(), decompSize);
+
+		if (decompSize > 8 && memcmp(decompData, "SYNC", 4) == 0) {
+			const uint8_t* src = decompData + 4;
+			uint32_t vramSize; memcpy(&vramSize, src, 4); src += 4;
+			if (vramSize <= VRAM_SIZE) {
+				memcpy(&vram[0], src, vramSize); src += vramSize;
+				uint32_t pvrSize; memcpy(&pvrSize, src, 4); src += 4;
+				if (pvrSize <= (uint32_t)pvr_RegSize)
+					memcpy(pvr_regs, src, pvrSize);
+				// Save for post-MCSV re-apply: dc_loadstate overwrites VRAM with
+				// match-start textures; reapplyLastSyncVram() restores current state.
+				_lastSyncVram.assign(&vram[0], &vram[0] + vramSize);
+				if (pvrSize <= (uint32_t)pvr_RegSize)
+					_lastSyncPvr.assign((const uint8_t*)pvr_regs,
+					                    (const uint8_t*)pvr_regs + pvrSize);
+			}
+			// Unprotect VRAM so per-frame memcpy patches work (nvmem page protection)
+			memwatch::unprotect();
+			// NOTE: renderer cache/palette updates happen on render thread in clientReceive()
+
+			synced = true;
+			printf("[MIRROR-WS] Initial sync received: %.1f MB (%.1f MB compressed)  --  VRAM + PVR loaded\n",
+				decompSize / (1024.0 * 1024.0), frame.size() / (1024.0 * 1024.0));
+			fflush(stdout);
+		}
+	}
+
+	while (true) {
+		if (!wsReadFrame(_wsFd, frame)) {
+			printf("[MIRROR-WS] Connection lost\n"); fflush(stdout);
+			_clientWsConnected.store(false, std::memory_order_release);
+			// Stats thread disabled -- no join needed.
+			break;
+		}
+		// Audio packet  --  skip (native client has dedicated audio WS)
+		if (frame.size() >= 4 && frame[0] == 0xAD && frame[1] == 0x10)
+			continue;
+
+		// Game state packet  --  "GSTA" magic + serialized MVC2 state.
+		// Deserialize into a shared GameState struct for the overlay/HUD and the
+		// state-replica inject. Accept any frame >= the legacy 253-byte block
+		// (deserialize tolerates the optional input/stage trailers) so a wire
+		// size bump on either side never silently drops the packet.
+		if (frame.size() >= 4 && frame[0] == 'G' && frame[1] == 'S'
+		    && frame[2] == 'T' && frame[3] == 'A') {
+			static const int LEGACY = 5 + 2+2+2+2 + 4+4+4 + 6*49;   // 319 (GSTA enrich: per-char stride 38->49)
+			if ((int)frame.size() >= 4 + LEGACY) {
+				maplecast_gamestate::GameState gs;
+				maplecast_gamestate::deserialize(frame.data() + 4,
+				    (int)(frame.size() - 4), gs);
+				// Store atomically for the overlay thread / state-replica inject
+				{
+					std::lock_guard<std::mutex> lk(_clientGameStateMtx);
+					_clientGameState = gs;
+				}
+				bool firstStore = !_clientGameStateReady.exchange(true, std::memory_order_release);
+				if (firstStore)
+					printf("[MIRROR-WS] GSTA STORED (first) — frame_counter=%u, getClientGameState now true\n",
+					       gs.frame_counter);
+			} else {
+				printf("[MIRROR-WS] GSTA too short: %zu bytes (need %d)\n",
+				       frame.size(), 4 + LEGACY);
+			}
+			static uint64_t _gstaN = 0;
+			if ((++_gstaN % 120) == 1) {
+				printf("[MIRROR-WS] GSTA rx #%llu (%zu bytes)\n",
+				       (unsigned long long)_gstaN, frame.size());
+				fflush(stdout);
+			}
+			continue;
+		}
+
+		// OBJF full-object packet — pool objects for the state-replica inject.
+		if (frame.size() >= 5 && frame[0] == 'O' && frame[1] == 'B'
+		    && frame[2] == 'J' && frame[3] == 'F') {
+			maplecast_gamestate::ObjectState tmp[48];
+			int got = maplecast_gamestate::deserializeObjects(
+			    frame.data() + 4, (int)(frame.size() - 4), tmp, 48);
+			std::lock_guard<std::mutex> lk(_clientObjectsMtx);
+			_clientObjectCount = got;
+			for (int i = 0; i < got; i++) _clientObjects[i] = tmp[i];
+			_clientObjectsReady.store(true, std::memory_order_release);
+			static uint64_t _objfN = 0;
+			if ((++_objfN % 120) == 1) {
+				printf("[MIRROR-WS] OBJF rx #%llu (%d objs)\n",
+				       (unsigned long long)_objfN, got);
+				fflush(stdout);
+			}
+			continue;
+		}
+
+		// GSTA-ONLY (state-replica): everything past here is TA/VRAM/SYNC video
+		// data that would clobber the local SH4 render.  Skip all of it, but
+		// first check for MCSV (mid-match join savestate from server) — those
+		// frames start with 'M','C','S','V' so they're trivially distinguishable
+		// from both raw GSTA/OBJF packets and ZCST-wrapped TA frames.
+		if (_gstaOnly.load(std::memory_order_relaxed)) {
+			if (frame.size() > 12
+			    && frame[0] == 'M' && frame[1] == 'C'
+			    && frame[2] == 'S' && frame[3] == 'V') {
+				uint32_t uncompSize;
+				memcpy(&uncompSize, frame.data() + 4, 4);
+				// Inner payload is a ZCST-compressed blob starting at byte 8.
+				size_t dSize = 0;
+				const uint8_t* d = decomp.decompress(
+				    frame.data() + 8, frame.size() - 8, dSize);
+				if (d && dSize > 0) {
+					std::lock_guard<std::mutex> lk(_pendingSaveStateMtx);
+					_pendingSaveState.assign(d, d + dSize);
+					_pendingSaveStateReady.store(true, std::memory_order_release);
+					printf("[MIRROR-WS] MCSV savestate received: %.1f MB — queued for apply\n",
+					       dSize / (1024.0 * 1024.0));
+					fflush(stdout);
+				} else {
+					printf("[MIRROR-WS] MCSV: decompress failed (got %zu bytes)\n", dSize);
+				}
+			}
+			continue;
+		}
+
+		// MCSV frame — also handled here for state-replica clients that started
+		// as a full mirror stream (not GSTA-only). Store the savestate so
+		// frameInject() can apply it and switch to SH4 mode.
+		if (frame.size() > 4 && frame[0] == 'M' && frame[1] == 'C'
+		    && frame[2] == 'S' && frame[3] == 'V') {
+			if (frame.size() > 12) {
+				uint32_t uncompSize = 0;
+				memcpy(&uncompSize, frame.data() + 4, 4);
+				size_t dSize = 0;
+				const uint8_t* d = decomp.decompress(
+				    frame.data() + 8, frame.size() - 8, dSize);
+				if (d && dSize > 0) {
+					std::lock_guard<std::mutex> lk(_pendingSaveStateMtx);
+					_pendingSaveState.assign(d, d + dSize);
+					_pendingSaveStateReady.store(true, std::memory_order_release);
+					printf("[MIRROR-WS] MCSV savestate received: %.1f MB — queued for apply\n",
+					       dSize / (1024.0 * 1024.0));
+					fflush(stdout);
+				}
+			}
+			continue;
+		}
+
+		// ---- Client-side arrival telemetry (video WS) ----
+		{
+			const int64_t now = _clientNowUs();
+			const int64_t prev = _clientLastArrivalUs.exchange(now, std::memory_order_relaxed);
+			if (prev != 0) {
+				const int64_t delta = now - prev;
+				const int64_t emaPrev = _clientArrivalEmaUs.load(std::memory_order_relaxed);
+				const int64_t ema = emaPrev + ((delta - emaPrev) >> 4);
+				_clientArrivalEmaUs.store(ema, std::memory_order_relaxed);
+				int64_t mx = _clientArrivalMaxUs.load(std::memory_order_relaxed);
+				while (delta > mx
+				    && !_clientArrivalMaxUs.compare_exchange_weak(mx, delta,
+				        std::memory_order_relaxed)) {}
+			}
+			_clientPacketsReceived.fetch_add(1, std::memory_order_relaxed);
+			_clientBytesReceived.fetch_add(frame.size(), std::memory_order_relaxed);
+		}
+		// Decompress if needed
+		size_t decompSize = 0;
+		const uint8_t* decompData = decomp.decompress(frame.data(), frame.size(), decompSize);
+		if (decompSize < 8) continue;
+
+		// Handle mid-stream SYNC frames (triggered by palette changes,
+		// soft resets, etc.)  --  re-apply VRAM + PVR snapshot.
+		if (decompSize > 8 && memcmp(decompData, "SYNC", 4) == 0) {
+			const uint8_t* src = decompData + 4;
+			uint32_t vramSize; memcpy(&vramSize, src, 4); src += 4;
+			if (vramSize <= VRAM_SIZE) {
+				memcpy(&vram[0], src, vramSize); src += vramSize;
+				uint32_t pvrSize; memcpy(&pvrSize, src, 4); src += 4;
+				if (pvrSize <= (uint32_t)pvr_RegSize)
+					memcpy(pvr_regs, src, pvrSize);
+				// Update saved snapshot for post-MCSV re-apply
+				_lastSyncVram.assign(&vram[0], &vram[0] + vramSize);
+				if (pvrSize <= (uint32_t)pvr_RegSize)
+					_lastSyncPvr.assign((const uint8_t*)pvr_regs,
+					                    (const uint8_t*)pvr_regs + pvrSize);
+			}
+			memwatch::unprotect();
+			_decodeHasFullFrame = false;  // force next TA frame as keyframe
+			_clientSyncCount.fetch_add(1, std::memory_order_relaxed);  // Tele-0.10
+			printf("[MIRROR-WS] Mid-stream SYNC applied (%.1f MB)\n",
+				decompSize / (1024.0 * 1024.0));
+			continue;
+		}
+
+		if (decompSize < 80) continue;
+
+		const uint8_t* src = decompData;
+		uint32_t frameSize; memcpy(&frameSize, src, 4); src += 4;
+		uint32_t frameNum; memcpy(&frameNum, src, 4); src += 4;
+
+		uint32_t pvr_snap[16];
+		memcpy(pvr_snap, src, sizeof(pvr_snap)); src += sizeof(pvr_snap);
+
+		uint32_t taSize; memcpy(&taSize, src, 4); src += 4;
+		uint32_t deltaPayloadSize; memcpy(&deltaPayloadSize, src, 4); src += 4;
+
+		// Sanity check  --  TA buffers are ~50-300KB, never megabytes
+		if (taSize > 512 * 1024 || deltaPayloadSize > 512 * 1024 ||
+		    frameSize > decompSize) {
+			// Skip silently if this is a known non-TA packet type that was
+			// ZCST-wrapped (STAF stripped frames, TXTR/TX64 texture atlases,
+			// EFCT/EFKY effect packets, OBJS compact object lists). These share
+			// the WS channel but are not TA deltas; their first 4 bytes parse as
+			// a garbage frameSize. OBJS in particular bursts during supers (the
+			// "frameSize=1397375567" spam == 'O','B','J','S' little-endian).
+			if (decompSize >= 4) {
+				const uint8_t* m = decompData;
+				if ((m[0]=='S'&&m[1]=='T'&&m[2]=='A'&&m[3]=='F') ||
+				    (m[0]=='T'&&m[1]=='X'&&m[2]=='T'&&m[3]=='R') ||
+				    (m[0]=='T'&&m[1]=='X'&&m[2]=='6'&&m[3]=='4') ||
+				    (m[0]=='E'&&m[1]=='F'&&m[2]=='C'&&m[3]=='T') ||
+				    (m[0]=='E'&&m[1]=='F'&&m[2]=='K'&&m[3]=='Y') ||
+				    (m[0]=='O'&&m[1]=='B'&&m[2]=='J'&&m[3]=='S')) {
+					continue;
+				}
+			}
+			printf("[MIRROR-WS] BAD FRAME: taSize=%u delta=%u frameSize=%u bufSize=%zu -- skipping\n",
+				taSize, deltaPayloadSize, frameSize, decompSize);
+			continue;
+		}
+
+		// TA delta decode into double-buffered context
+		// _decodeIdx = buffer we write to NOW
+		// 1-_decodeIdx = buffer that has PREVIOUS frame (render thread may be reading it)
+		uint8_t* taDst = _decodeTaCtx[_decodeIdx].tad.thd_root;
+		uint8_t* taPrev = _decodeTaCtx[1 - _decodeIdx].tad.thd_root;
+
+		if (deltaPayloadSize == taSize)
+		{
+			// Keyframe: straight memcpy into current buffer
+			memcpy(taDst, src, taSize);
+			src += taSize;
+			_decodeHasFullFrame = true;
+		}
+		else if (!_decodeHasFullFrame)
+		{
+			src += deltaPayloadSize + 4;
+			continue;
+		}
+		else
+		{
+			// Delta: copy previous frame into current buffer, then apply runs
+			// This is needed because the previous buffer might be in use by render thread
+			memcpy(taDst, taPrev, taSize);
+
+			const uint8_t* dd = src;
+			const uint8_t* de = src + deltaPayloadSize;
+			while (dd + 4 <= de) {
+				uint32_t off; memcpy(&off, dd, 4); dd += 4;
+				if (off == 0xFFFFFFFF) break;
+				uint16_t runLen; memcpy(&runLen, dd, 2); dd += 2;
+				if (off + runLen <= taSize && dd + runLen <= de)
+					memcpy(taDst + off, dd, runLen);
+				dd += runLen;
+			}
+			src += deltaPayloadSize;
+		}
+
+		// Skip checksum  --  TCP guarantees data integrity, checksum was for shm race detection
+		// (commented out, not deleted  --  can re-enable for debugging)
+		// uint32_t serverChecksum; memcpy(&serverChecksum, src, 4);
+		src += 4;
+
+		// Stage dirty pages  --  copy page data so render thread can apply safely.
+		// Allow up to a full VRAM+PVR resync (~2056 pages on scene change).
+		uint32_t dirtyCount; memcpy(&dirtyCount, src, 4); src += 4;
+		if (dirtyCount > 4096) dirtyCount = 4096;  // sanity bound
+
+		DecodedFrame df;
+		df.frameNum = frameNum;
+		memcpy(df.pvr_snapshot, pvr_snap, sizeof(pvr_snap));
+		df.taSize = taSize;
+		df.dirtyCount = dirtyCount;
+		df.vramDirty = false;
+		df.pages.resize(dirtyCount);
+
+		for (uint32_t d = 0; d < dirtyCount; d++) {
+			df.pages[d].regionId = *src++;
+			memcpy(&df.pages[d].pageIdx, src, 4); src += 4;
+			memcpy(df.pages[d].data, src, MEM_PAGE_SIZE); src += MEM_PAGE_SIZE;
+			if (df.pages[d].regionId == 1) df.vramDirty = true;
+		}
+
+		// Publish  --  render thread picks it up.
+		//
+		// CRITICAL: if the consumer hasn't drained the previous frame yet
+		// (_decodedReady still set), we used to OVERWRITE _decoded and lose
+		// the previous frame's dirty pages permanently. Permanently because
+		// the next memcmp on the server side sees `shadow == ptr` for those
+		// pages and never re-ships them.
+		//
+		// Now: prepend the previous frame's dirty pages to the new frame's
+		// pages so the consumer sees the union. The TA buffer is always the
+		// newest (the consumer is going to render whatever's current anyway,
+		// so an older TA is moot), but EVERY dirty page record from every
+		// dropped frame is preserved and applied.
+		df.taBufferIdx = _decodeIdx;
+		{
+			std::lock_guard<std::mutex> lock(_decodedMtx);
+			if (_decodedReady.load(std::memory_order_relaxed)) {
+				// Carry forward unconsumed pages from the previous frame.
+				df.pages.insert(df.pages.begin(),
+					_decoded.pages.begin(), _decoded.pages.end());
+				df.dirtyCount += _decoded.dirtyCount;
+				df.vramDirty = df.vramDirty || _decoded.vramDirty;
+			}
+			_decoded = std::move(df);
+			_decodedReady.store(true, std::memory_order_release);
+		}
+
+		// Swap to other buffer for next frame's decode
+		// Render thread reads buffer [df.taBufferIdx], we write to the other one
+		_decodeIdx = 1 - _decodeIdx;
+
+		uint32_t n = _wsFramesReceived.fetch_add(1, std::memory_order_relaxed);
+		if (n == 0) printf("[MIRROR-WS] First frame decoded\n");
+		if (n > 0 && n % 300 == 0) printf("[MIRROR-WS] %u frames decoded\n", n);
+	}
+
+	mc_closesocket(_wsFd); _wsFd = -1;
+	decomp.destroy();
+}
+
+// Phase 2: when hub-discovery picks a winner, we ALSO learn the runner-up
+// from the ranked probe list. Stash both so the input-sink (initialized
+// later in emulator.cpp) can configure a hot-standby UDP socket.
+static std::string _hubBackupHost;  // empty = no backup available
+
+const std::string& clientBackupServerHost() { return _hubBackupHost; }
+
+static void initClientWebSocket()
+{
+	_isClient = true;
+	_useWebSocket = true;
+
+	// Hub-aware discovery (Phase 1): if MAPLECAST_HUB_URL is set, fetch the
+	// list of nearby input servers, UDP-probe each, pick the lowest-RTT one.
+	// Falls back to MAPLECAST_SERVER_HOST/PORT if hub unreachable or no
+	// servers found. Explicit host/port override the hub if both are set.
+	//
+	// Phase 2 extension: discoverAndRank returns top-N. winner = primary,
+	// runner-up = hot-standby for input failover (input-sink reads
+	// clientBackupServerHost()).
+	std::string hubHost;
+	int hubPort = 0;
+	if (const char* hubUrl = std::getenv("MAPLECAST_HUB_URL")) {
+		// Don't override an explicit host
+		const char* explicitHost = std::getenv("MAPLECAST_SERVER_HOST");
+		if (!explicitHost || strlen(explicitHost) == 0) {
+			printf("[MIRROR] Hub discovery enabled  --  querying %s\n", hubUrl);
+			auto ranked = maplecast_hub::discoverAndRank(hubUrl, 2);
+			if (!ranked.empty()) {
+				const auto& winner = ranked[0];
+				hubHost = winner.public_host;
+				hubPort = winner.relay_ws_port;
+				printf("[MIRROR] Hub picked input server '%s' at %s:%d (%.1fms RTT)\n",
+				       winner.name.c_str(), hubHost.c_str(), hubPort,
+				       winner.avg_rtt_ms);
+
+				// Cascade to input sink via env var (input sink is init'd
+				// later in emulator.cpp from MAPLECAST_SERVER_HOST)
+				setenv("MAPLECAST_SERVER_HOST", hubHost.c_str(), 1);
+
+				if (ranked.size() >= 2) {
+					// MAPLECAST_NO_FAILOVER=1 skips hot-standby setup. The Phase 2
+					// failover assumes both servers run synced game state; until
+					// cross-node state sync ships, swapping inputs to a different
+					// flycast instance breaks gameplay continuity. 100ms primary
+					// silence over public-internet WAN is also a normal jitter
+					// spike, not a real outage — easy to fire spuriously.
+					if (std::getenv("MAPLECAST_NO_FAILOVER")) {
+						printf("[MIRROR] Hot-standby SUPPRESSED (MAPLECAST_NO_FAILOVER=1) — would have used '%s' at %s\n",
+						       ranked[1].name.c_str(), ranked[1].public_host.c_str());
+					} else {
+						_hubBackupHost = ranked[1].public_host;
+						printf("[MIRROR] Hot-standby input server: '%s' at %s (%.1fms RTT)\n",
+						       ranked[1].name.c_str(), _hubBackupHost.c_str(),
+						       ranked[1].avg_rtt_ms);
+					}
+				}
+			} else {
+				printf("[MIRROR] Hub discovery failed  --  falling back to MAPLECAST_SERVER_HOST\n");
+			}
+		}
+	}
+
+	const char* host = hubHost.empty() ? std::getenv("MAPLECAST_SERVER_HOST") : hubHost.c_str();
+	if (!host) host = "127.0.0.1";
+	const char* portStr = std::getenv("MAPLECAST_SERVER_PORT");
+	// Native clients connect directly to flycast's WS (7200), NOT the relay
+	// (7201). The relay is a spectator fanout multiplexer  --  players who are
+	// sending input get lower latency by skipping it. Hub discovery returns
+	// the relay port; we subtract 1 to get the direct port. Override with
+	// MAPLECAST_SERVER_PORT or MAPLECAST_USE_RELAY=1 for spectator mode.
+	int directPort = hubPort > 0 ? (hubPort - 1) : 7200;
+	if (std::getenv("MAPLECAST_USE_RELAY") || std::getenv("MAPLECAST_SPECTATE"))
+		directPort = hubPort > 0 ? hubPort : 7201;  // spectators use relay
+	int port = portStr ? std::atoi(portStr) : directPort;
+
+	printf("[MIRROR] === CLIENT MODE (WebSocket) === ws://%s:%d/\n", host, port);
+
+	// Unprotect VRAM BEFORE spawning WS thread  --  the thread will memcpy into
+	// VRAM pages during SYNC and per-frame diffs. Without this, nvmem page
+	// protection causes SIGSEGV on the first VRAM write.
+	memwatch::unprotect();
+
+	std::string hostStr(host);
+	_wsThread = std::thread(wsClientRun, hostStr, port);
+	_wsThread.detach();
+
+	// Audio WS lives on flycast's direct port (7200+3=7203), NOT relay+3.
+	// The relay doesn't proxy audio. If the video port came from hub
+	// discovery (relay at 7201), audio still goes to the server's own
+	// audio port. Default: 7203. MAPLECAST_AUDIO_WS_PORT overrides.
+	int audioPort = 7203;
+	if (const char* audioPortStr = std::getenv("MAPLECAST_AUDIO_WS_PORT"))
+		audioPort = std::atoi(audioPortStr);
+	maplecast_audio_client::init(host, audioPort);
+}
+
+void startMirrorStream(const char* host, int port)
+{
+	// Same as initClientWebSocket but does NOT set _isClient, so the GUI
+	// and SH4 keep running normally. Used by maplecast_replica for TA
+	// correction alongside a live local SH4.
+	_useWebSocket = true;
+	printf("[MIRROR] Starting TA correction stream ws://%s:%d/\n", host, port);
+	memwatch::unprotect();
+	std::string hostStr(host);
+	_wsThread = std::thread(wsClientRun, hostStr, port);
+	_wsThread.detach();
+}
+
+// State-replica transport: connect the mirror WS but consume ONLY GSTA/OBJF
+// state packets — never apply TA delta frames (the local SH4 renders). If
+// vramSync=true, the initial SYNC frame (VRAM + PVR) IS applied once to seed
+// the local VRAM with prod's current textures, eliminating savestate parity issues.
+void startGstaStream(const char* host, int port, bool vramSync)
+{
+	_gstaOnly.store(true, std::memory_order_release);
+	_gstaVramSync.store(vramSync, std::memory_order_release);
+	_useWebSocket = true;
+	if (vramSync)
+		printf("[MIRROR] Starting GSTA+VRAM-SYNC stream ws://%s:%d/ (one-time VRAM seed, then GSTA-only)\n", host, port);
+	else
+		printf("[MIRROR] Starting GSTA-ONLY state stream ws://%s:%d/ (no TA/VRAM apply)\n", host, port);
+	std::string hostStr(host);
+	_wsThread = std::thread(wsClientRun, hostStr, port);
+	_wsThread.detach();
+}
+
+bool isServer() { return _isServer; }
+bool isClient() { return _isClient; }
+
+// Phase A  --  accessors for the input latch path. Cheap atomic loads,
+// no shm header touching, safe from any thread.
+uint64_t currentFrame()      { return _atomicCurrentFrame.load(std::memory_order_acquire); }
+int64_t  lastLatchTimeUs()   { return _atomicLastLatchTimeUs.load(std::memory_order_acquire); }
+// Phase B  --  live frame period EMA, used by frame_phase in status JSON.
+int64_t  framePeriodUs()     { return _atomicFramePeriodUs.load(std::memory_order_relaxed); }
+
+// ==================== Client telemetry API ====================
+// All lock-free atomic reads. The ImGui debug overlay calls getClientStats()
+// once per frame to refresh its tables and graphs.
+
+ClientStats getClientStats()
+{
+	ClientStats s;
+	s.wsConnected      = _clientWsConnected.load(std::memory_order_relaxed);
+	s.frameCount       = _clientFrameCount;  // updated from render thread, best-effort read
+	s.packetsReceived  = _clientPacketsReceived.load(std::memory_order_relaxed);
+	s.bytesReceived    = _clientBytesReceived.load(std::memory_order_relaxed);
+	s.lastDecodeUs     = _clientLastDecodeUs.load(std::memory_order_relaxed);
+	s.decodeEmaUs      = _clientDecodeEmaUs.load(std::memory_order_relaxed);
+	s.lastDirtyPages   = _clientLastDirtyPages.load(std::memory_order_relaxed);
+	s.lastTaSize       = _clientLastTaSize.load(std::memory_order_relaxed);
+	s.lastVramDirty    = _clientLastVramDirty.load(std::memory_order_relaxed);
+	s.lastArrivalUs    = _clientLastArrivalUs.load(std::memory_order_relaxed);
+	s.arrivalEmaUs     = _clientArrivalEmaUs.load(std::memory_order_relaxed);
+	s.arrivalMaxUs     = _clientArrivalMaxUs.load(std::memory_order_relaxed);
+	return s;
+}
+
+bool getClientGameState(maplecast_gamestate::GameState& out)
+{
+	if (!_clientGameStateReady.load(std::memory_order_acquire))
+		return false;
+	std::lock_guard<std::mutex> lk(_clientGameStateMtx);
+	out = _clientGameState;
+	return true;
+}
+
+int getClientObjects(maplecast_gamestate::ObjectState* out, int maxObjs)
+{
+	if (!_clientObjectsReady.load(std::memory_order_acquire))
+		return 0;
+	std::lock_guard<std::mutex> lk(_clientObjectsMtx);
+	int n = _clientObjectCount;
+	if (n > maxObjs) n = maxObjs;
+	for (int i = 0; i < n; i++) out[i] = _clientObjects[i];
+	return n;
+}
+
+void resetClientStatsPeaks()
+{
+	_clientArrivalMaxUs.store(0, std::memory_order_relaxed);
+}
+
+void requestClientVideoReconnect()
+{
+	// Closing the socket causes wsReadFrame() to return false on the next
+	// recv, which breaks the drain loop. wsClientRun() doesn't currently
+	// retry on its own (it falls out and exits), so a manual reconnect
+	// request here is primarily informational  --  the overlay shows the
+	// disconnected state and the user knows to restart the client.
+	// TODO: wrap wsClientRun() in an outer reconnect loop similar to the
+	// audio client. For now, just slam the fd so the ops-side UX matches
+	// user expectation: button click â†’ "Disconnected" in the overlay.
+	int fd = _wsFd;
+	if (fd >= 0) {
+#ifdef _WIN32
+		closesocket(fd);
+#else
+		mc_closesocket(fd);
+#endif
+	}
+	_wsFd = -1;
+	_clientWsConnected.store(false, std::memory_order_release);
+}
+
+void switchToGstaOnly()
+{
+	_gstaOnly.store(true, std::memory_order_release);
+	// Live mid-session switch: tell the relay to stop sending TA/VRAM/SYNC/audio
+	// on the CURRENT socket. From here the local SH4 renders, so we only need
+	// GSTA/OBJF/MCSV. Drops per-client egress from ~510 KB/s to ~10-30 KB/s.
+	// Best-effort — if the send fails (or fd is mid-reconnect) we still drop the
+	// video locally as before, and the post-handshake re-assert covers reconnect.
+	int fd = _wsFd;
+	if (fd >= 0) {
+		if (wsSendTextMasked(fd, kSubscribeStateMsg))
+			printf("[MIRROR] sent state-only subscribe to relay (shedding TA/VRAM)\n");
+		else
+			printf("[MIRROR] WARN: state-only subscribe send failed — dropping video locally only\n");
+		fflush(stdout);
+	}
+	printf("[MIRROR] switched to GSTA-only mode — TA delta processing stopped\n");
+	fflush(stdout);
+}
+
+void setClientRendering(bool enabled)
+{
+	_isClient = enabled;
+}
+
+void reapplyLastSyncVram()
+{
+	if (_lastSyncVram.empty()) {
+		printf("[MIRROR] reapplyLastSyncVram: no saved SYNC VRAM — skipping\n");
+		fflush(stdout);
+		return;
+	}
+	const size_t vramSz = _lastSyncVram.size();
+	if (vramSz <= VRAM_SIZE)
+		memcpy(&vram[0], _lastSyncVram.data(), vramSz);
+	if (!_lastSyncPvr.empty() && _lastSyncPvr.size() <= (size_t)pvr_RegSize)
+		memcpy(pvr_regs, _lastSyncPvr.data(), _lastSyncPvr.size());
+	// Unprotect so the renderer sees updated VRAM pages on next render.
+	memwatch::unprotect();
+	printf("[MIRROR] reapplyLastSyncVram: restored %.1f MB VRAM from saved SYNC — char textures current\n",
+	       vramSz / (1024.0 * 1024.0));
+	fflush(stdout);
+}
+
+bool hasPendingSaveState()
+{
+	return _pendingSaveStateReady.load(std::memory_order_acquire);
+}
+
+bool takePendingSaveState(std::vector<uint8_t>& out)
+{
+	if (!_pendingSaveStateReady.load(std::memory_order_acquire))
+		return false;
+	std::lock_guard<std::mutex> lk(_pendingSaveStateMtx);
+	if (!_pendingSaveStateReady.load(std::memory_order_relaxed))
+		return false;
+	out = std::move(_pendingSaveState);
+	_pendingSaveState.clear();
+	_pendingSaveStateReady.store(false, std::memory_order_release);
+	return true;
+}
+
+bool isHeadless()
+{
+#ifdef MAPLECAST_HEADLESS_BUILD
+	// Compile-out build  --  always headless, env var optional.
+	return true;
+#else
+	// GPU-capable build  --  headless mode is opt-in via env var.
+	// Evaluated once on first call. Checked this way (rather than a static
+	// initializer) so we're resilient to early-boot call sites that might
+	// beat any namespace-scope ctor order.
+	static const bool _headless = (std::getenv("MAPLECAST_HEADLESS") != nullptr);
+	return _headless;
+#endif
+}
+
+// ==================== SERVER: publish TA commands + memory diffs ====================
+//
+// !!! FRAGILE  --  WIRE FORMAT IS A CONTRACT WITH FOUR CLIENTS !!!
+//
+// Anything you write into the dst buffer here is decoded by:
+//   1. clientReceive() below  --  desktop flycast mirror client
+//   2. packages/renderer/src/wasm_bridge.cpp renderer_frame()  --  king.html WASM
+//   3. core/network/maplecast_wasm_bridge.cpp mirror_render_frame()  --  emulator.html WASM
+//   4. relay/src/fanout.rs in the Rust VPS relay (parses for SYNC cache + dirty pages)
+//
+// Change the format here without touching all four parsers and you will get
+// silently corrupted frames. The breakage will look LIKE the renderer is buggy
+// (broken character select, missing textures on scene transition) because
+// in-match scenes are stable enough that small format errors don't show.
+//
+// Wire format produced below (after zstd "ZCST" envelope, in clear bytes):
+//   frameSize(4) + frameNum(4) + pvr_snapshot[16](64) +
+//   taOrigSize(4) + deltaPayloadSize(4) + (TA bytes OR delta runs + 0xFFFFFFFF) +
+//   checksum(4) + dirtyPageCount(4) + [regionId(1) + pageIdx(4) + data(4096)] * N
+//
+// Region IDs: 0=mem_b (16MB SH4 RAM), 1=vram, 2=aica_ram, 3=pvr_regs.
+// Keyframe is forced every 60 frames (forceKeyframe). Browser clients waiting
+// for first keyframe will drop up to 60 deltas  --  DO NOT lengthen this interval
+// without also updating the keyframe-wait logic in every client.
+//
+// See docs/ARCHITECTURE.md "Mirror Wire Format  --  Rules of the Road" for the
+// canonical list of rules all four parsers must obey.
+// ============================================================================
+//
+// === VRAM CONTENT-CACHE (MAPLECAST_VCACHE) ===================================
+// Opt-in (env MAPLECAST_VCACHE) bandwidth optimisation that REUSES the existing
+// renderer untouched. The mirror re-ships the same 4KB VRAM/PVR dirty pages
+// over and over (a freshly-revisited menu re-uploads identical textures every
+// time it's drawn). VCACHE content-hashes each dirty page (FNV-1a) and keeps a
+// per-stream "already sent" set. A page whose hash was sent before ships as a
+// compact reference (NO 4096 bytes); a novel page ships once with its data and
+// is recorded. The client keeps a hash->page cache, fills references from it,
+// reconstructs a STANDARD delta frame, and feeds it to the unmodified
+// renderer_frame(). The renderer never sees the difference.
+//
+// Wire change (inside the same ZCST envelope, ONLY when VCACHE is active):
+// the dirtyPageCount u32 is replaced by the sentinel 0xFFFFFFFF followed by the
+// real count(4); then each page is:
+//     regionId(1) + pageIdx(4) + hash(8) + hasData(1) + [data(4096) if hasData]
+// A normal (non-VCACHE) frame never writes 0xFFFFFFFF as its page count, so the
+// client distinguishes the two by peeking that field. Plain mirror clients that
+// don't understand the sentinel simply must not be pointed at a VCACHE stream
+// (it is a separate, env-gated mode, off by default — production is unaffected).
+//
+// Periodic re-seed: the sent-set is cleared every VCACHE_RESEED_FRAMES (~600)
+// so a mid-stream joiner recovers full pages within ~10s, exactly like the EFCT
+// channel clears _stafSent every 600 frames.
+static inline uint64_t vcacheHashPage(const uint8_t* p)
+{
+	uint64_t h = 1469598103934665603ULL;      // FNV-1a 64 offset basis
+	for (size_t i = 0; i < MEM_PAGE_SIZE; i++) { h ^= p[i]; h *= 1099511628211ULL; }
+	return h;
+}
+static constexpr uint32_t VCACHE_PAGE_SENTINEL = 0xFFFFFFFFu;
+static constexpr uint64_t VCACHE_RESEED_FRAMES = 600;
+// ============================================================================
+// Effect-texture decode + content-addressed hashing (EFCT/TXTR path). Ported from
+// the client decoder (web/webgpu/texture-manager.mjs). Effects are 16-bit direct
+// color (fmt 0/1/2), so we de-twiddle + unpack in software and ship each unique
+// texture once (keyed by content hash) — the state-only client draws the EXACT
+// game texture. fmt 5/6 (palette), VQ and mip are skipped here (added later).
+// ============================================================================
+namespace mcfx {
+static uint32_t s_twTab[2][11][1024];
+static bool s_twInit = false;
+static void initTwiddle() {
+	auto tw = [](int x, int y, int xs, int ys) {
+		int r = 0, s = 0; xs >>= 1; ys >>= 1;
+		while (xs || ys) { if (ys) { r |= (y & 1) << s; ys >>= 1; y >>= 1; s++; } if (xs) { r |= (x & 1) << s; xs >>= 1; x >>= 1; s++; } }
+		return r;
+	};
+	for (int s = 0; s < 11; s++) { int ys = 1 << s; for (int i = 0; i < 1024; i++) { s_twTab[0][s][i] = tw(i, 0, 1024, ys); s_twTab[1][s][i] = tw(0, i, ys, 1024); } }
+	s_twInit = true;
+}
+static inline int texBsr(int v) { int r = 0; while ((1 << r) < v) r++; return r; }
+static inline int te5(int v) { return (v << 3) | (v >> 2); }
+static inline int te6(int v) { return (v << 2) | (v >> 4); }
+static inline int te4(int v) { return (v << 4) | v; }
+static inline void unpack16(int fmt, uint16_t c, uint8_t* o) {
+	if (fmt == 0) { o[0] = te5((c >> 10) & 31); o[1] = te5((c >> 5) & 31); o[2] = te5(c & 31); o[3] = (c >> 15) ? 255 : 0; }
+	else if (fmt == 1) { o[0] = te5((c >> 11) & 31); o[1] = te6((c >> 5) & 63); o[2] = te5(c & 31); o[3] = 255; }
+	else { o[0] = te4((c >> 8) & 15); o[1] = te4((c >> 4) & 15); o[2] = te4(c & 15); o[3] = te4((c >> 12) & 15); }
+}
+// FNV-1a over fmt/w/h + the raw 16-bit VRAM region = the texture's content id.
+static uint32_t texHash(uint32_t addr, int fmt, int w, int h, int vq) {
+	uint32_t hsh = 2166136261u;
+	auto mix = [&](uint32_t b) { hsh ^= (b & 0xff); hsh *= 16777619u; };
+	mix(fmt); mix(w); mix(w >> 8); mix(h); mix(h >> 8); mix(vq);
+	uint32_t n = vq ? (uint32_t)(2048 + w * h / 4) : (uint32_t)(w * h * 2);
+	for (uint32_t i = 0; i < n; i += 2) { if (addr + i >= VRAM_SIZE) break; mix(vram[addr + i]); }
+	return hsh ? hsh : 1;
+}
+// Decode a non-VQ, non-mip fmt 0/1/2 texture to RGBA8888. Returns false if unsupported.
+static bool decodeTex16(uint32_t tcw, uint32_t tsp, uint8_t* out) {
+	if (!s_twInit) initTwiddle();
+	int fmt = (tcw >> 27) & 7, texU = (tsp >> 3) & 7, texV = tsp & 7;
+	int w = 8 << texU, h = 8 << texV, scan = (tcw >> 26) & 1, vq = (tcw >> 30) & 1, mip = (tcw >> 31) & 1;
+	if (fmt > 2 || mip) return false;
+	uint32_t addr = (tcw & 0x1FFFFF) << 3;
+	int bx = texBsr(w), by = texBsr(h);
+	if (vq) {
+		uint8_t cb[256 * 16];                        // codebook: 256 * (2x2 block of 16-bit texels)
+		for (int i = 0; i < 256; i++) {
+			uint32_t co = addr + i * 8;
+			for (int p = 0; p < 4; p++) {
+				uint32_t so = co + p * 2; uint8_t* cd = &cb[i * 16 + p * 4];
+				if (so + 1 >= VRAM_SIZE) { cd[0] = cd[1] = cd[2] = cd[3] = 0; continue; }
+				unpack16(fmt, (uint16_t)(vram[so] | (vram[so + 1] << 8)), cd);
+			}
+		}
+		uint32_t idxAddr = addr + 2048; int hw = w >> 1, hh = h >> 1, bcx = bx - 1, bcy = by - 1;
+		for (int y = 0; y < hh; y++) for (int x = 0; x < hw; x++) {
+			uint32_t io = idxAddr + s_twTab[0][bcy][x] + s_twTab[1][bcx][y];
+			if (io >= VRAM_SIZE) continue;
+			int ci = vram[io] * 16, px = x * 2, py = y * 2;
+			memcpy(&out[(py * w + px) * 4], &cb[ci], 4);
+			memcpy(&out[((py + 1) * w + px) * 4], &cb[ci + 4], 4);
+			memcpy(&out[(py * w + px + 1) * 4], &cb[ci + 8], 4);
+			memcpy(&out[((py + 1) * w + px + 1) * 4], &cb[ci + 12], 4);
+		}
+		return true;
+	}
+	for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+		uint32_t idx = scan ? (uint32_t)(y * w + x) : (s_twTab[0][by][x] + s_twTab[1][bx][y]);
+		uint32_t so = addr + idx * 2; uint8_t* d = &out[(y * w + x) * 4];
+		if (so + 1 >= VRAM_SIZE) { d[0] = d[1] = d[2] = d[3] = 0; continue; }
+		unpack16(fmt, (uint16_t)(vram[so] | (vram[so + 1] << 8)), d);
+	}
+	return true;
+}
+
+// --- STAF additions: 64-bit content id + paletted decode ---------------------
+// The STAF channel ships ALL textured quads, so the texture id must (a) be wide
+// enough for a few-thousand-entry working set and (b) fold the palette for
+// paletted formats (skins / team-color swaps reuse the same indexed pixels with
+// a different palette — same address+content but a DIFFERENT drawn texture).
+// Palette unpack mirrors flycast's canonical path (core/rend/texconv.h):
+// PAL_RAM_CTRL&3 selects 1555/565/4444/8888; palette_index from tcw.PalSelect
+// exactly as TexCache.cpp:463-472.
+static inline uint32_t palEntryRGBA(uint32_t pe) {
+	// PALETTE_RAM[pe] is a raw 16/32-bit palette word; unpack to RGBA8888 (R,G,B,A bytes).
+	if (pe >= 1024) return 0;
+	uint32_t w = PALETTE_RAM[pe];
+	uint8_t r, g, b, a;
+	switch (PAL_RAM_CTRL & 3) {
+	case 0: /* 1555 */ r = te5((w >> 10) & 31); g = te5((w >> 5) & 31); b = te5(w & 31); a = (w & 0x8000) ? 255 : 0; break;
+	case 1: /* 565 */  r = te5((w >> 11) & 31); g = te6((w >> 5) & 63); b = te5(w & 31); a = 255; break;
+	case 2: /* 4444 */ r = te4((w >> 8) & 15); g = te4((w >> 4) & 15); b = te4(w & 15); a = te4((w >> 12) & 15); break;
+	default: /* 8888 */ r = (w >> 16) & 0xff; g = (w >> 8) & 0xff; b = w & 0xff; a = (w >> 24) & 0xff; break;
+	}
+	return (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | ((uint32_t)a << 24);
+}
+// 64-bit FNV-1a over fmt/w/h/vq + raw indexed/texel VRAM bytes, AND (for paletted
+// formats) the live palette window the texture selects. Pure content id.
+static uint64_t texHash64(uint32_t tcw, int w, int h) {
+	int fmt = (tcw >> 27) & 7, vq = (tcw >> 30) & 1;
+	uint32_t addr = (tcw & 0x1FFFFF) << 3;
+	uint64_t hsh = 1469598103934665603ull;
+	auto mix = [&](uint32_t bbb) { hsh ^= (bbb & 0xff); hsh *= 1099511628211ull; };
+	mix(fmt); mix(w); mix(w >> 8); mix(h); mix(h >> 8); mix(vq);
+	uint32_t n;
+	if (fmt == 5)      n = (uint32_t)(w * h / 2);   // PAL4: 4bpp
+	else if (fmt == 6) n = (uint32_t)(w * h);       // PAL8: 8bpp
+	else if (vq)       n = (uint32_t)(2048 + w * h / 4);
+	else               n = (uint32_t)(w * h * 2);   // 16bpp direct
+	for (uint32_t i = 0; i < n; i++) { if (addr + i >= VRAM_SIZE) break; mix(vram[addr + i]); }
+	// Fold the selected palette window for paletted formats.
+	if (fmt == 5) { uint32_t pi = ((tcw >> 21) & 0x3F) << 4; for (int k = 0; k < 16; k++) { uint32_t e = palEntryRGBA(pi + k); mix(e); mix(e >> 8); mix(e >> 16); mix(e >> 24); } }
+	else if (fmt == 6) { uint32_t pi = (((tcw >> 21) & 0x3F) >> 4) << 8; for (int k = 0; k < 256; k++) { uint32_t e = palEntryRGBA(pi + k); mix(e); mix(e >> 8); mix(e >> 16); mix(e >> 24); } }
+	return hsh ? hsh : 1;
+}
+// Decode any STAF-supported format to RGBA8888. fmt 0/1/2 (and VQ) delegate to
+// decodeTex16; fmt 5/6 are paletted (de-twiddle the index, then palette lookup).
+// Returns false for unsupported (mip, exotic) — caller falls back / skips.
+static bool decodeTexAny(uint32_t tcw, uint32_t tsp, uint8_t* out) {
+	if (!s_twInit) initTwiddle();
+	int fmt = (tcw >> 27) & 7, mip = (tcw >> 31) & 1;
+	if (mip) return false;
+	if (fmt <= 2) return decodeTex16(tcw, tsp, out);
+	if (fmt != 5 && fmt != 6) return false;            // only PAL4/PAL8 paletted
+	int texU = (tsp >> 3) & 7, texV = tsp & 7;
+	int w = 8 << texU, h = 8 << texV, scan = (tcw >> 26) & 1;
+	uint32_t addr = (tcw & 0x1FFFFF) << 3;
+	int bx = texBsr(w), by = texBsr(h);
+	uint32_t palBase = (fmt == 5) ? (((tcw >> 21) & 0x3F) << 4) : ((((tcw >> 21) & 0x3F) >> 4) << 8);
+	for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+		uint32_t lin = scan ? (uint32_t)(y * w + x) : (s_twTab[0][by][x] + s_twTab[1][bx][y]);
+		uint32_t pidx;
+		if (fmt == 5) {           // 4bpp: two indices per byte
+			uint32_t so = addr + (lin >> 1);
+			if (so >= VRAM_SIZE) { pidx = 0; }
+			else pidx = (lin & 1) ? (vram[so] >> 4) : (vram[so] & 0xf);
+		} else {                  // 8bpp
+			uint32_t so = addr + lin;
+			pidx = (so < VRAM_SIZE) ? vram[so] : 0;
+		}
+		uint32_t rgba = palEntryRGBA(palBase + pidx);
+		uint8_t* d = &out[(y * w + x) * 4];
+		d[0] = rgba & 0xff; d[1] = (rgba >> 8) & 0xff; d[2] = (rgba >> 16) & 0xff; d[3] = (rgba >> 24) & 0xff;
+	}
+	return true;
+}
+} // namespace mcfx
+
+void serverPublish(TA_context* ctx)
+{
+	if (!_isServer || !_shmPtr || !ctx) return;
+
+	// Skip heavy work (diff, compress, broadcast) when no clients connected.
+	// Still increment the frame counter so local overlays/telemetry work.
+	static uint32_t _localFrameNum = 0;
+	_localFrameNum++;
+
+	// === MAPLECAST_FRAME_ORACLE_HOOK — flush the LIVE block-entry attribution that
+	// the recompiler hook (0x8C03093C begin / 0x8C033E90 quad) buffered during this
+	// frame's SH4 draw walk. serverPublish runs once per frame AFTER that walk
+	// completes, so it is the natural frame boundary. No-op when the hook is OFF.
+	maplecast_oracle_hook::mc_oracleInit();   // one-time stderr log if enabled
+	maplecast_oracle_hook::mc_oracle_frameFlush(_localFrameNum);
+
+	// === MAPLECAST_STATELOG — per-frame RAM state probe (ROM-asset-client test)
+	// Read-only readGameState() + CSV append. Placed BEFORE the PVR snapshot
+	// and all wire/diff/compress work so it cannot perturb the deterministic
+	// mirror stream (see docs/ARCHITECTURE.md "THE WIRE IS DETERMINISTIC").
+	// Runs every frame regardless of client connection, so it works in
+	// -ServerOnly mode too. Completely inert unless MAPLECAST_STATELOG is set.
+	// This is the Tele-0 per-frame state read from docs/MATCH-DATA-PLATFORM.md.
+	{
+		static FILE* _stateLog = nullptr;
+		static bool  _stateLogInit = false;
+		if (!_stateLogInit) {
+			_stateLogInit = true;
+			if (const char* path = std::getenv("MAPLECAST_STATELOG")) {
+				_stateLog = fopen(path, "w");
+				if (_stateLog)
+					fprintf(_stateLog, "frame,in_match,slot,char_id,active,"
+						"sprite_id,anim_state,anim_timer,facing,screen_x,"
+						"screen_y,palette,anim_ptr\n");
+			}
+		}
+		if (_stateLog) {
+			maplecast_gamestate::GameState gs;
+			maplecast_gamestate::readGameState(gs);
+			for (int i = 0; i < 6; i++) {
+				const maplecast_gamestate::CharacterState& c = gs.chars[i];
+				if (!c.active) continue;
+				fprintf(_stateLog,
+					"%u,%u,%d,%u,%u,%u,%u,%u,%u,%.2f,%.2f,%u,0x%08X\n",
+					_localFrameNum, gs.in_match, i, c.character_id, c.active,
+					c.sprite_id, c.animation_state, c.anim_timer,
+					c.facing_right, c.screen_x, c.screen_y, c.palette_id,
+					c.anim_pointer);
+			}
+			if ((_localFrameNum % 60) == 0) fflush(_stateLog);
+		}
+	}
+
+	// Emu-thread MCSV capture: dc_serialize must run here (between frames,
+	// SR.BL=0), NOT on the status thread that requests it — a mid-interrupt
+	// snapshot crashes replica clients on load ("SH4 exception when blocked").
+	// Cheap atomic check every frame; the heavy serialize fires once per match.
+	if (maplecast_ws::active())
+		maplecast_ws::drainMcsvCapture();
+
+	if (!maplecast_ws::active() || maplecast_ws::clientCount() == 0) {
+		// Update frame counter + basic telemetry for local overlays
+		_atomicCurrentFrame.store(_localFrameNum, std::memory_order_release);
+		maplecast_ws::updateTelemetry({_localFrameNum, 0, 0, 0, 0,
+			60, 0, 0}); // approximate 60fps
+		// A.5 — predictor needs to see authoritative input every frame
+		// even without clients. publishFrameTick is cheap (tape-ring push
+		// + predictor compare) so fire it regardless. Used for: rollback
+		// netcode predictor (A.5/A.6), .mcrec recording when active.
+		maplecast_input::publishFrameTick(_localFrameNum);
+		return;
+	}
+
+	auto publishStart = std::chrono::high_resolution_clock::now();
+	rend_context& rc = ctx->rend;
+	// DON'T skip RTT frames  --  MVC2 renders character sprites via render-to-texture!
+
+	// === PVR ATOMIC SNAPSHOT ===
+	// Snapshot the entire 32 KB pvr_regs block ONCE at the top of the
+	// function, into a thread-local buffer. Then everything downstream in
+	// this function (the inline pvr_snapshot[16], the diff loop's PVR
+	// region scan, and the hash log) reads from this snapshot, NOT live
+	// pvr_regs. This eliminates the SPG-vs-diff race where SPG_STATUS
+	// (and other hardware-driven PVR registers) tick mid-function and
+	// cause server-vs-client hash divergence (the "PVR phase noise").
+	//
+	// We point _regions[].ptr for the PVR region at the snapshot for the
+	// duration of this function and restore it before returning.
+	static uint8_t _pvrAtomicSnap[pvr_RegSize];
+	memcpy(_pvrAtomicSnap, pvr_regs, pvr_RegSize);
+	uint8_t* _origPvrPtr = nullptr;
+	for (int r = 0; r < _numRegions; r++) {
+		if (_regions[r].id == 3) {
+			_origPvrPtr = _regions[r].ptr;
+			_regions[r].ptr = _pvrAtomicSnap;
+			break;
+		}
+	}
+
+	RingHeader* hdr = (RingHeader*)_shmPtr;
+	uint8_t* ring = _shmPtr + RING_START;
+
+	uint64_t writePos = hdr->write_pos;
+	if (writePos + RING_SIZE / 3 > RING_SIZE) writePos = 0;
+
+	uint8_t* dst = ring + writePos;
+	uint8_t* dstStart = dst;
+
+	// Frame header
+	dst += 4;  // placeholder for size
+	uint32_t frameNum = (uint32_t)(hdr->frame_count + 1);
+	memcpy(dst, &frameNum, 4); dst += 4;
+
+	// === PVR registers needed by rend_start_render ===
+	// These set up the rend_context hardware params. All values come from
+	// the atomic snapshot taken at the top of the function  --  NOT from live
+	// pvr_regs  --  so they're consistent with what the diff loop ships.
+	#define _SNAP_U32(addr) (*(u32*)&_pvrAtomicSnap[(addr) & pvr_RegMask])
+	uint32_t pvr_snapshot[16];
+	pvr_snapshot[0] = _SNAP_U32(TA_GLOB_TILE_CLIP_addr);
+	pvr_snapshot[1] = _SNAP_U32(SCALER_CTL_addr);
+	pvr_snapshot[2] = _SNAP_U32(FB_X_CLIP_addr);
+	pvr_snapshot[3] = _SNAP_U32(FB_Y_CLIP_addr);
+	pvr_snapshot[4] = _SNAP_U32(FB_W_LINESTRIDE_addr);
+	pvr_snapshot[5] = _SNAP_U32(FB_W_SOF1_addr);
+	pvr_snapshot[6] = _SNAP_U32(FB_W_CTRL_addr);
+	pvr_snapshot[7] = _SNAP_U32(FOG_CLAMP_MIN_addr);
+	pvr_snapshot[8] = _SNAP_U32(FOG_CLAMP_MAX_addr);
+	#undef _SNAP_U32
+	pvr_snapshot[9] = rc.framebufferWidth;
+	pvr_snapshot[10] = rc.framebufferHeight;
+	pvr_snapshot[11] = rc.clearFramebuffer ? 1 : 0;
+	float fz = rc.fZ_max;
+	memcpy(&pvr_snapshot[12], &fz, 4);
+	pvr_snapshot[13] = rc.isRTT ? 1 : 0;
+	memcpy(dst, pvr_snapshot, sizeof(pvr_snapshot)); dst += sizeof(pvr_snapshot);
+
+	// === Raw TA command buffer  --  double-buffered delta ===
+	uint32_t taSize = (uint32_t)(ctx->tad.thd_data - ctx->tad.thd_root);
+	uint8_t* taData = ctx->tad.thd_root;
+
+	// NOTE: Palette bank probe (dynamic targeting) was attempted but
+	// the TA buffer scan had alignment issues  --  TA commands are variable
+	// size (32B/64B) and a fixed 32B scan step misses polygon headers.
+	// For now, applyPaletteOverrides() blasts all specified entries.
+	// This is ~1Âµs overhead per frame  --  negligible. A correct probe
+	// would need to hook into the actual TA parser (ta_vtx.cpp) or the
+	// renderer's texture processing (gldraw.cpp:176 PalSelect read).
+	// TODO: revisit when needed.
+
+	// === TA DUMP  --  determinism / decomposition test ===
+	// MAPLECAST_DUMP_TA=1 â†’ write each frame's raw TA buffer to
+	// /tmp/ta-dumps/frame_NNNNNN.bin. Use to capture TA buffers from a
+	// reproducible save state, then byte-diff across runs (determinism)
+	// or across save state variants (per-character decomposition).
+	{
+		static bool _dumpInit = false;
+		static bool _dumpEnabled = false;
+		static std::string _dumpDir;
+		if (!_dumpInit) {
+			const char* e = std::getenv("MAPLECAST_DUMP_TA");
+			_dumpEnabled = (e && *e && *e != '0');
+			if (_dumpEnabled) {
+				const char* d = std::getenv("MAPLECAST_DUMP_TA_DIR");
+				_dumpDir = (d && *d) ? d : "/tmp/ta-dumps";
+#ifdef _WIN32
+				int rc = _mkdir(_dumpDir.c_str());
+#else
+				int rc = mkdir(_dumpDir.c_str(), 0755);
+#endif
+				printf("[TA-DUMP] server enabled — writing %s/frame_NNNNNN.bin (mkdir rc=%d, errno=%d)\n",
+				       _dumpDir.c_str(), rc, errno);
+				fflush(stdout);
+			}
+			_dumpInit = true;
+		}
+		if (_dumpEnabled && taSize > 0) {
+			char path[512];
+			snprintf(path, sizeof(path), "%s/frame_%06u.bin", _dumpDir.c_str(), frameNum);
+			FILE* f = fopen(path, "wb");
+			if (f) {
+				fwrite(taData, 1, taSize, f);
+				fclose(f);
+			} else {
+				static int _warnedFopen = 0;
+				if (_warnedFopen++ < 3)
+					printf("[TA-DUMP] fopen(%s) failed: errno=%d\n", path, errno);
+			}
+		}
+	}
+
+	int cur = _taCur;
+	int prev = 1 - cur;
+	uint8_t* prevData = _taBuf[prev];
+	uint32_t prevSize = _taBufSize[prev];
+
+	// Copy current TA into double buffer
+	memcpy(_taBuf[cur], taData, taSize);
+	_taBufSize[cur] = taSize;
+
+	static uint64_t totalDeltaPayload = 0;
+	static uint64_t totalTABytes = 0;
+	static uint32_t deltaFrames = 0;
+
+	memcpy(dst, &taSize, 4); dst += 4;
+
+	bool forceKeyframe = (frameNum % 60 == 0);
+	bool canDelta = _taHasPrev && taSize > 0 && !forceKeyframe;
+
+	if (canDelta)
+	{
+		uint8_t* deltaStart = dst;
+		dst += 4;
+
+		uint32_t commonSize = std::min(taSize, prevSize);
+
+		uint32_t i = 0;
+		while (i < taSize)
+		{
+			while (i < commonSize && taData[i] == prevData[i]) i++;
+			if (i >= taSize) break;
+
+			uint32_t runStart = i;
+			while (i < taSize && (i - runStart) < 65535 &&
+				   (i >= commonSize || taData[i] != prevData[i])) i++;
+			if (i < taSize) {
+				uint32_t gapEnd = std::min(i + 8, taSize);
+				bool moreChanges = false;
+				for (uint32_t j = i; j < gapEnd; j++)
+					if (j >= commonSize || taData[j] != prevData[j]) { moreChanges = true; break; }
+				if (moreChanges)
+					while (i < gapEnd) i++;
+			}
+
+			// CRITICAL: clamp runLen to u16 max. The gap-merge above can push
+			// (i - runStart) up to 65535+8 = 65543, which would overflow u16
+			// and emit a tiny truncated run on the wire  --  the client then
+			// mis-decodes the rest of the wire as garbage. Manifested as
+			// scene-change garble on buffer growth (prev=320 â†’ cur=89120):
+			// the first run's wire length wrapped, all subsequent runs shifted.
+			uint32_t fullLen = i - runStart;
+			if (fullLen > 65535) {
+				i = runStart + 65535;
+				fullLen = 65535;
+			}
+			uint16_t runLen = (uint16_t)fullLen;
+			memcpy(dst, &runStart, 4); dst += 4;
+			memcpy(dst, &runLen, 2); dst += 2;
+			memcpy(dst, taData + runStart, runLen); dst += runLen;
+		}
+		uint32_t term = 0xFFFFFFFF;
+		memcpy(dst, &term, 4); dst += 4;
+
+		uint32_t deltaPayloadSize = (uint32_t)(dst - deltaStart - 4);
+		memcpy(deltaStart, &deltaPayloadSize, 4);
+
+		totalDeltaPayload += deltaPayloadSize;
+		totalTABytes += taSize;
+		deltaFrames++;
+
+		if (frameNum % 600 == 0 && deltaFrames > 0) {
+			float avgDelta = (float)totalDeltaPayload / deltaFrames;
+			float avgTA = (float)totalTABytes / deltaFrames;
+			printf("[MIRROR] TA DELTA: %.1f KB / %.1f KB (%.1f%%) | stream: %.1f MB/s\n",
+				avgDelta / 1024.0, avgTA / 1024.0,
+				avgDelta * 100.0 / avgTA, avgDelta * 60.0 / 1024.0 / 1024.0);
+		}
+	}
+	else
+	{
+		uint32_t deltaPayloadSize = taSize;
+		memcpy(dst, &deltaPayloadSize, 4); dst += 4;
+		if (taSize > 0) { memcpy(dst, taData, taSize); dst += taSize; }
+	}
+
+	// Swap double buffer
+	_taCur = prev;
+	_taHasPrev = true;
+
+	// Checksum disabled  --  client skips it, TCP guarantees integrity
+	// uint32_t taChecksum = 0;
+	// for (uint32_t i = 0; i < taSize; i += 4)
+	// 	taChecksum ^= *(uint32_t*)(taData + i);
+	uint32_t taChecksum = 0;  // placeholder  --  client expects 4 bytes here
+	memcpy(dst, &taChecksum, 4); dst += 4;
+
+	// Persistent palette overrides  --  re-apply custom palette colors to
+	// PVR palette RAM BEFORE the diff scan so the changes are captured
+	// in this frame's dirty pages and shipped to all viewers.
+	maplecast_control_ws::applyPaletteOverrides();
+
+	// === Memory diffs ===
+	uint32_t totalDirty = 0;
+
+	// VRAM content-cache mode (env MAPLECAST_VCACHE). See the VCACHE block near
+	// vcacheHashPage() above for the wire change. Per-stream sent-set of page
+	// content hashes, cleared every VCACHE_RESEED_FRAMES so mid-stream joiners
+	// recover. Resolved once; default OFF (production unaffected).
+	static const bool _vcacheOn = (std::getenv("MAPLECAST_VCACHE") != nullptr);
+	// MEASURE-ONLY: ship the NORMAL wire (render unbroken) but count would-be-saved
+	// pages, so we can read the real dedup savings while the game runs a real match.
+	static const bool _vcacheMeasure = (std::getenv("MAPLECAST_VCACHE_MEASURE") != nullptr);
+	static std::unordered_set<uint64_t> _vcacheSent;
+	if ((_vcacheOn || _vcacheMeasure) && frameNum > 0 && (frameNum % VCACHE_RESEED_FRAMES) == 0)
+		_vcacheSent.clear();
+
+	// dirtyPageCount slot. In VCACHE mode we write the sentinel + a real-count
+	// slot so the client can tell the two encodings apart.
+	uint8_t* dirtyCountPtr;
+	if (_vcacheOn) {
+		uint32_t sentinel = VCACHE_PAGE_SENTINEL;
+		memcpy(dst, &sentinel, 4); dst += 4;   // marks this frame as VCACHE-encoded
+		dirtyCountPtr = dst; dst += 4;          // real count patched in below
+	} else {
+		dirtyCountPtr = dst; dst += 4;
+	}
+
+	// Drain the DMA force-dirty bitmap atomically. Any page bit set here
+	// is guaranteed to ship even if memcmp would say it's unchanged (e.g.
+	// when DMA wrote new texture data and shadow already matches because
+	// the previous frame already saw it but never sent it).
+	uint64_t forcedDirty[VRAM_BITMAP_WORDS];
+	for (size_t i = 0; i < VRAM_BITMAP_WORDS; i++)
+		forcedDirty[i] = _vramDirtyBitmap[i].exchange(0, std::memory_order_acquire);
+
+	// VRAM + PVR regs: memcmp against shadow copies, OR forced-dirty bitmap (VRAM only)
+	//
+	// Snapshot live â†’ shadow ONCE per dirty page, then ship from shadow. The
+	// SH4 thread can race during the diff and write new bytes between the
+	// memcmp and the wire copy; reading via the shadow keeps wire and next
+	// frame's memcmp consistent.
+	uint32_t vcacheRefPages = 0;   // pages shipped as references (no 4096 bytes)
+	for (int r = 0; r < _numRegions; r++) {
+		MemRegion& reg = _regions[r];
+		size_t numPages = reg.size / MEM_PAGE_SIZE;
+		bool isVram = (reg.id == 1);
+		for (size_t p = 0; p < numPages; p++) {
+			size_t off = p * MEM_PAGE_SIZE;
+			bool forced = isVram && (forcedDirty[p >> 6] & (1ULL << (p & 63)));
+			if (forced || memcmp(reg.ptr + off, reg.shadow + off, MEM_PAGE_SIZE) != 0) {
+				// Worst-case slot size: VCACHE header (1+4+8+1=14) + data, or
+				// standard header (1+4=5) + data. Use 14 to cover both.
+				if ((size_t)(dst - dstStart) + 14 + MEM_PAGE_SIZE > RING_SIZE / 3)
+					goto done_diff;
+				memcpy(reg.shadow + off, reg.ptr + off, MEM_PAGE_SIZE);
+				uint32_t pi = (uint32_t)p;
+				if (_vcacheOn) {
+					uint64_t h = vcacheHashPage(reg.shadow + off);
+					bool seen = !_vcacheSent.insert(h).second;  // insert; seen if already present
+					*dst++ = reg.id;
+					memcpy(dst, &pi, 4); dst += 4;
+					memcpy(dst, &h, 8);  dst += 8;
+					*dst++ = seen ? 0 : 1;                       // hasData flag
+					if (seen) vcacheRefPages++;
+					else { memcpy(dst, reg.shadow + off, MEM_PAGE_SIZE); dst += MEM_PAGE_SIZE; }
+				} else {
+					if (_vcacheMeasure) {  // count would-be-deduped pages; ship normal wire
+						uint64_t h = vcacheHashPage(reg.shadow + off);
+						if (!_vcacheSent.insert(h).second) vcacheRefPages++;
+					}
+					*dst++ = reg.id;
+					memcpy(dst, &pi, 4); dst += 4;
+					memcpy(dst, reg.shadow + off, MEM_PAGE_SIZE); dst += MEM_PAGE_SIZE;
+				}
+				totalDirty++;
+			}
+		}
+	}
+done_diff:
+	memcpy(dirtyCountPtr, &totalDirty, 4);
+
+	// VCACHE byte accounting — pre-compression (uncompressed inner-frame) bytes
+	// saved by shipping references instead of full pages this frame, and a
+	// running total. Logged alongside the periodic server-frame line below.
+	if (_vcacheOn || _vcacheMeasure) {
+		static uint64_t _vcSavedTotal = 0;
+		const uint64_t savedThisFrame = (uint64_t)vcacheRefPages * MEM_PAGE_SIZE;
+		_vcSavedTotal += savedThisFrame;
+		// Log at the LAST frame before reseed (sent-set fullest = steady-state dedup),
+		// NOT frame 0 where the set was just cleared (would always read 0 refs).
+		if (frameNum % VCACHE_RESEED_FRAMES == VCACHE_RESEED_FRAMES - 1) {
+			printf("[VCACHE] frame %u | dirty=%u (%u refs, %u full) | full*60=%.0f KB/s new-VRAM | saved %llu KB this frame, %llu MB total | sent-set=%zu\n",
+				frameNum, totalDirty, vcacheRefPages, totalDirty - vcacheRefPages,
+				(totalDirty - vcacheRefPages) * (double)MEM_PAGE_SIZE * 60.0 / 1024.0,
+				(unsigned long long)(savedThisFrame / 1024),
+				(unsigned long long)(_vcSavedTotal / (1024 * 1024)), _vcacheSent.size());
+			fflush(stdout);
+		}
+	}
+
+	// === Scene-change & forced SYNC broadcast ===
+	// Two trigger paths:
+	//   1. Forced flag (soft reset SB_SFRES, hard reset, explicit request)  -- 
+	//      always fires regardless of rate limit. The caller knows the
+	//      renderer state is invalid.
+	//   2. Heuristic: lots of dirty pages in one frame = scene transition
+	//      (stage load, character select â†’ match, intro cinematic, etc.).
+	//      ~512KB threshold  --  half what was guessed last time. The DMA
+	//      bitmap now catches more pages so the threshold can be lower
+	//      without losing precision. Rate-limited to 1 per 2 seconds so a
+	//      noisy game can't DoS us with constant fresh syncs.
+	//
+	// Scene-change heuristic SYNC was REMOVED. With ARCHITECTURE.md bugs
+	// #6/#7/#8 fixed, the per-frame delta path ships scene transitions
+	// (300-540 dirty pages in one envelope) byte-perfect to the wasm via
+	// the MAX_FRAME oversized fallback. The heuristic SYNC is redundant
+	// for correctness.
+	//
+	// HOWEVER: a low-frequency (60s) periodic SYNC remains, NOT as a
+	// correctness band-aid but as a NETWORK RESILIENCE measure. Real-world
+	// failure modes the periodic SYNC catches:
+	//   - Browser tab throttling causing the WS worker to fall behind and
+	//     miss frames; when the tab regains focus the per-frame deltas are
+	//     all that's coming and there's no recovery mechanism otherwise.
+	//   - Diff-loop torn page: SH4 thread mutates a VRAM page mid-memcpy.
+	//     The wasm renders garbage for that page until the page is touched
+	//     again. Over a long match this can manifest as persistent corner
+	//     glitches that scene-change SYNCs used to clear up.
+	//   - Relay restarts / brief disconnects.
+	// At ~600 KB compressed every 60s = 10 KB/s overhead, this is free.
+	// Crank the interval lower if you observe more frequent drift.
+	static constexpr uint64_t PERIODIC_SYNC_FRAMES = 60 * 60;  // 60s @ 60fps
+	static uint64_t _lastSceneSyncFrame = 0;
+
+	bool forced = _forceSyncBroadcast.exchange(false, std::memory_order_relaxed);
+	bool manualSave = _forceFullSaveStateBroadcast.exchange(false, std::memory_order_relaxed);
+	bool periodic = (frameNum > 60 && frameNum - _lastSceneSyncFrame >= PERIODIC_SYNC_FRAMES);
+
+	if ((forced || manualSave || periodic) && maplecast_ws::active())
+	{
+		_lastSceneSyncFrame = frameNum;
+		const char* reason = manualSave ? "MANUAL SAVE STATE PUSH"
+			: forced ? "FORCED SYNC"
+			: "60s periodic resilience SYNC";
+		printf("[MIRROR] %s on frame %u (%u dirty pages)  --  broadcasting fresh SYNC\n",
+			reason, frameNum, totalDirty);
+		// Ship a fresh SYNC envelope (full VRAM + PVR). The flycast wasm
+		// browser routes this through renderer_sync() which does the full
+		// _prevTA.clear() + cache reset ritual that the per-frame delta
+		// path doesn't. The flycast client's per-frame loop ignores SYNC
+		// magic mid-stream (sanity-skips), so this is a no-op for it  -- 
+		// safe to fire on both.
+		maplecast_ws::broadcastFreshSync();
+		// ARCHITECTURE.md "Mirror Wire Format  --  Rules of the Road" bug #7:
+		// reset the TA delta encoder. The wasm's renderer_sync() clears its
+		// _prevTA on SYNC receipt. If the very next frame we ship is a delta
+		// (because _taHasPrev is still true here), the wasm hits the
+		// _prevTA.empty() branch in renderer_frame() and silently drops the
+		// delta payload  --  measured at ~23 dropped frames per scene transition.
+		// Forcing the next frame to be a keyframe re-populates wasm's _prevTA.
+		_taHasPrev = false;
+		// ARCHITECTURE.md bug #8: also re-snapshot the per-region shadows to
+		// match what broadcastFreshSync() just shipped. Without this, the
+		// next frame's memcmp diff is computed against the pre-SYNC shadow
+		// (broadcastFreshSync reads live vram[]/pvr_regs but never touches
+		// _regions[].shadow), shipping wrong-base deltas grafted on top of
+		// the SYNC bytes  --  permanent vram divergence. Matches the existing
+		// client_request_sync handler pattern.
+		for (int i = 0; i < _numRegions; i++)
+			memcpy(_regions[i].shadow, _regions[i].ptr, _regions[i].size);
+	}
+
+	// Patch frame size
+	uint32_t totalSize = (uint32_t)(dst - dstStart);
+	uint32_t frameSizeVal = totalSize - 4;
+	memcpy(dstStart, &frameSizeVal, 4);
+
+	__sync_synchronize();
+	hdr->latest_offset = writePos;
+	hdr->latest_size = totalSize;
+	hdr->write_pos = writePos + totalSize;
+	hdr->frame_count++;
+
+	// Lockstep player-client tape: push one entry per slot per server
+	// frame, stamped with the brand-new frame number we just committed.
+	// This is the GGPO-equivalent dense input log  --  see publishFrameTick
+	// in maplecast_input_server.cpp for the rationale.
+	maplecast_input::publishFrameTick(hdr->frame_count);
+
+	// Phase 1 A.4 rollback ring — hook moved to Emulator::start's emu-thread
+	// loop (right after runInternal() returns) so saveFrame runs on the SAME
+	// thread that produced the page-faults. serverPublish runs on the rend
+	// thread, which would race with the SH4's writes to memwatch state.
+
+	// Periodic state checkpoint for the replay sidecar — every N frames
+	// during recording, capture a fresh savestate so the reader can seek
+	// into long replays without playing through leading idle. Default
+	// cadence is 600 frames (~10s @ 60Hz). Tunable via env. Only fires
+	// when recording is active; checkpoint() is a cheap no-op otherwise.
+	{
+		static const uint32_t _ckptInterval = []() {
+			const char* e = std::getenv("MAPLECAST_REPLAY_CKPT_INTERVAL");
+			if (e && *e) {
+				int n = std::atoi(e);
+				if (n > 0) return (uint32_t)n;
+			}
+			return (uint32_t)600;
+		}();
+		if (hdr->frame_count > 0 && (hdr->frame_count % _ckptInterval) == 0)
+			maplecast_replay::checkpoint(hdr->frame_count);
+	}
+
+	// Phase A  --  mirror the new frame number + publish wall-clock time into
+	// the read-only atomics that ggpo::getLocalInput() / status JSON consume.
+	// Release ordering ensures the input latch sees the bumped frame counter
+	// and a fresh latch-time-stamp consistently.
+	//
+	// Phase B  --  compute live frame period as an exponential moving average of
+	// (this publish - prev publish). EMA factor 1/16 â†’ ~16-frame smoothing,
+	// converges in <0.3 s. Used by the frame_phase block in status JSON for
+	// browser-side phase-aligned send scheduling.
+	const int64_t nowPub = _publishNowUs();
+	const int64_t prevPub = _atomicLastLatchTimeUs.load(std::memory_order_relaxed);
+	if (prevPub > 0) {
+		const int64_t delta = nowPub - prevPub;
+		// Reject obvious outliers (paused emulator, savestate load, etc.)
+		//  --  anything more than 4 frames or less than 1 ms is not a normal
+		// frame interval and would corrupt the EMA.
+		if (delta >= 1000 && delta <= 70000) {
+			const int64_t prevPeriod = _atomicFramePeriodUs.load(std::memory_order_relaxed);
+			const int64_t newPeriod = prevPeriod + ((delta - prevPeriod) >> 4);  // EMA, 1/16
+			_atomicFramePeriodUs.store(newPeriod, std::memory_order_relaxed);
+		}
+	}
+	_atomicCurrentFrame.store(hdr->frame_count, std::memory_order_release);
+	_atomicLastLatchTimeUs.store(nowPub, std::memory_order_release);
+
+	// Phase 3 of lockstep-player-client: on a STATE_SYNC_INTERVAL
+	// schedule (default 60 frames), build a fresh dc_serialize snapshot
+	// and broadcast it to connected native player clients. Runs on the
+	// emu thread  --  the build+compress happens synchronously here, the
+	// wire send is async on per-client send threads. A no-op unless
+	// the state-sync server is running AND at least one client is
+	// connected.
+	maplecast_state_sync::onServerFramePublished(hdr->frame_count);
+
+	// Compress + broadcast over WebSocket to browser clients
+	uint64_t compressUs = 0;
+	uint32_t compressedSize = totalSize;
+	if (maplecast_ws::active())
+	{
+		size_t compSize = 0;
+		const uint8_t* compData = _compressor.compress(dstStart, totalSize, compSize, compressUs);
+		maplecast_ws::broadcastBinary(compData, compSize);
+		compressedSize = (uint32_t)compSize;
+
+		// Broadcast game state every frame (~60Hz). "GSTA" magic +
+		// 253-byte serialized MVC2 state. Native client parses this for
+		// the hitbox/frame-data overlay; the ROM-asset/sprite client needs
+		// per-frame state so fast motion (dash/jump) tracks smoothly.
+		// Bandwidth ~5 KB/s (265 B * 60Hz) — still negligible.
+		static uint32_t _gsCounter = 0;
+		if (++_gsCounter >= 1) {
+			_gsCounter = 0;
+			maplecast_gamestate::GameState gs;
+			maplecast_gamestate::readGameState(gs);
+			uint8_t gsBuf[4 + maplecast_gamestate::WIRE_SIZE];
+			gsBuf[0] = 'G'; gsBuf[1] = 'S'; gsBuf[2] = 'T'; gsBuf[3] = 'A';
+			maplecast_gamestate::serialize(gs, gsBuf + 4, maplecast_gamestate::WIRE_SIZE);
+			maplecast_ws::broadcastBinary(gsBuf, 4 + maplecast_gamestate::WIRE_SIZE);
+			// PALF — per-slot palette-effect (hit-flash) flag (char+0x40). The browser
+			// tints the flashing body toward white (electric -> blue-white). Own 16B
+			// packet; other parsers ignore it (no GSTA wire change).
+			uint8_t palfBuf[16];
+			int palfN = maplecast_gamestate::serializePalEffects(palfBuf, sizeof(palfBuf));
+			if (palfN > 0) maplecast_ws::broadcastBinary(palfBuf, palfN);
+			// WTCH live bit-probe (debug, MAPLECAST_WATCH).
+			static uint8_t wbuf[8 + 6 * (2 + 512)];
+			int wN = maplecast_gamestate::serializeWatch(wbuf, sizeof(wbuf));
+			if (wN > 0) maplecast_ws::broadcastBinary(wbuf, wN);
+		}
+
+			// === OBJS: pool satellite objects (cape/effects/projectiles) -> rip sprites ===
+			// Ship owner, sprite_id (with the 0x8000 hflip bit), and the object's nominal
+			// position (+0xC8/+0xCC). The CLIENT decides where to draw: attached parts (near
+			// the owner) snap to the owner's LIVE screen pos + the true anchor (no lag; an
+			// off-screen assist's parts vanish with it); spawned objects (far) use +0xC8/+0xCC.
+			{
+				// Cap = 255, the 1-byte OBJS count field's hard maximum, which is
+				// well above MVC2's finite drawable-object ceiling (the pool is a
+				// fixed-stride region; a heavy 3v3-super frame is ~120 owner'd
+				// objects). So the array is never the limiter — readObjects scans
+				// the WHOLE pool and LOGS "[OBJS] CAP HIT ... DROPPED K" if it ever
+				// can't fit everything (it shouldn't). If that log fires, widen the
+				// count field to 2 bytes (touches the OBJS parsers). ~2KB/frame
+				// worst case, negligible after the TA shed.
+				maplecast_gamestate::ObjectState objs[255];
+				int no = maplecast_gamestate::readObjects(objs, 255);
+				if (no > 0) {
+					// 11-byte stride: trailing 3 bytes are flags(1) + hot_dx(s8) + hot_dy(s8).
+					//   flags bit0 = is_effect (node+0x15c points into Effect Poly 0x0CED0000 ->
+					//          client routes to the effects atlas, not PL{cid}). bits1-7 reserved.
+					//   hot_dx/hot_dy (PATH A) = the object's TRUE assembly hotspot (min dx,dy over
+					//          node+0x178 extras); the client anchors satellites here instead of the
+					//          baked body-relative sp.dx (0,0 => no extras, client keeps baked anchor).
+					// The client auto-detects 11B vs the older 9B vs legacy 8B from the packet
+					// length, so an old client harmlessly ignores the trailing bytes.
+					uint8_t obuf[4 + 1 + 255 * 11];   // per obj: cid(1)+sid(2)+type(1)+x(2)+y(2)+flags(1)+hotdx(1)+hotdy(1)
+					obuf[0]='O'; obuf[1]='B'; obuf[2]='J'; obuf[3]='S'; obuf[4]=(uint8_t)no;
+					int oo = 5;
+					for (int i = 0; i < no; i++) {
+						uint16_t sid = (objs[i].sprite_id & 0x7fff) | (objs[i].xflip ? 0x8000 : 0);  // per-object flip (node+0x130) in the high bit
+						obuf[oo++]=objs[i].owner_cid;
+						obuf[oo++]=sid&0xff; obuf[oo++]=(sid>>8)&0xff;
+						obuf[oo++]=objs[i].type;
+						obuf[oo++]=objs[i].screen_x&0xff; obuf[oo++]=(objs[i].screen_x>>8)&0xff;
+						obuf[oo++]=objs[i].screen_y&0xff; obuf[oo++]=(objs[i].screen_y>>8)&0xff;
+						obuf[oo++]=(uint8_t)(objs[i].is_effect ? 0x01 : 0x00);   // OBJS flags
+						obuf[oo++]=(uint8_t)objs[i].hot_dx;                       // PATH A true anchor dx
+						obuf[oo++]=(uint8_t)objs[i].hot_dy;                       // PATH A true anchor dy
+					}
+					maplecast_ws::broadcastBinary(obuf, oo);
+
+					// OBJF — FULL object record for the state-replica inject
+					// (writeObjects). Carries category/xflip/owner_slot the 8B
+					// OBJS packet omits. Browser ignores OBJF; replica consumes it.
+					uint8_t fbuf[4 + 1 + 255 * maplecast_gamestate::OBJF_REC_SIZE];
+					fbuf[0]='O'; fbuf[1]='B'; fbuf[2]='J'; fbuf[3]='F';
+					int fn = maplecast_gamestate::serializeObjects(
+					    objs, no, fbuf + 4, (int)sizeof(fbuf) - 4);
+					if (fn > 0) maplecast_ws::broadcastBinary(fbuf, 4 + fn);
+				}
+			}
+
+			// === TAEFF: TA-analysis. For each effect quad, log it RELATIVE to the nearest
+			// character + that char's current sprite_id (pose). Lets us DERIVE the rules:
+			// cape offset per pose, projectile patterns, etc. Gated MAPLECAST_TAEFF -> file.
+			{
+				static bool _taeff = getenv("MAPLECAST_TAEFF") != nullptr;
+				static uint32_t _ec = 0; ++_ec;
+				if (_taeff) {
+					static FILE* ef = nullptr; static long ew = 0;
+					if (!ef) ef = fopen("/dev/shm/mc_taeff.log", "w");
+					if (ef && ew < 16L*1024*1024) {
+						ta_parse(ctx, true);
+						auto& rc = ctx->rend;
+						maplecast_gamestate::GameState egs; maplecast_gamestate::readGameState(egs);
+						auto logList = [&](std::vector<PolyParam>& lst, const char* tag) {
+							for (PolyParam& pp : lst) {
+								if (pp.count < 3 || !((pp.pcw.full >> 3) & 1)) continue;
+								uint32_t tsp = pp.tsp.full; int bs=(tsp>>29)&7, bd=(tsp>>26)&7;
+								float mnX=1e9f,mxX=-1e9f,mnY=1e9f,mxY=-1e9f;
+								uint32_t end=pp.first+pp.count; if(end>rc.verts.size()) end=(uint32_t)rc.verts.size();
+								for(uint32_t v=pp.first;v<end;v++){float x=rc.verts[v].x,y=rc.verts[v].y;if(x<mnX)mnX=x;if(x>mxX)mxX=x;if(y<mnY)mnY=y;if(y>mxY)mxY=y;}
+								float cx=(mnX+mxX)*0.5f,cy=(mnY+mxY)*0.5f,w=mxX-mnX,h=mxY-mnY;
+								if(cy<=20.f||w<2.f||h<2.f) continue;
+								int best=-1; float bd2=1e9f;
+								for(int i=0;i<6;i++){ if(!egs.chars[i].active) continue; float dx=cx-egs.chars[i].screen_x,dy=cy-egs.chars[i].screen_y,d=dx*dx+dy*dy; if(d<bd2){bd2=d;best=i;} }
+								if(best<0||bd2>40000.f) continue;
+								auto&c=egs.chars[best];
+								char b[220]; int n=snprintf(b,sizeof b,"f%u cid=%d csid=%d cscr=(%.0f,%.0f) %s off=(%.0f,%.0f) sz=%.0fx%.0f blend=%d/%d\n",
+									_ec, c.character_id, c.sprite_id, c.screen_x, c.screen_y, tag, cx-c.screen_x, cy-c.screen_y, w, h, bs, bd);
+								fwrite(b,1,n,ef); ew+=n;
+							}
+						};
+						logList(rc.global_param_tr,"tr");
+						logList(rc.global_param_pt,"pt");
+						fflush(ef);
+					}
+				}
+			}
+
+			// === TADBG: renderer-oracle. EVERY FRAME (short moves last a few frames), for each
+			// pool object find the nearest drawn quad -> its z-ORDER (draw index), BLEND, and
+			// whether it is drawn at all (NO-MATCH = dead/afterimage to filter). Writes
+			// /dev/shm/mc_tadbg.log (16MB cap). Gated MAPLECAST_TADBG.
+			{
+				static bool _tadbg = getenv("MAPLECAST_TADBG") != nullptr;
+				static uint32_t _tc = 0; ++_tc;
+				if (_tadbg) {
+					static FILE* tf = nullptr; static long tw = 0;
+					if (!tf) tf = fopen("/dev/shm/mc_tadbg.log", "w");
+					if (tf && tw < 16L*1024*1024) {
+						ta_parse(ctx, true);
+						auto& rc = ctx->rend;
+						struct OP { int idx; float cx, cy; int bs, bd; };
+						static OP polys[1024]; int np = 0, li = 0;
+						auto collect = [&](std::vector<PolyParam>& lst) {
+							for (PolyParam& pp : lst) {
+								int idx = li++;
+								if (np >= 1024 || pp.count < 3 || !((pp.pcw.full >> 3) & 1)) continue;
+								uint32_t tsp = pp.tsp.full;
+								float mnX=1e9f,mxX=-1e9f,mnY=1e9f,mxY=-1e9f;
+								uint32_t end = pp.first + pp.count; if (end > rc.verts.size()) end = (uint32_t)rc.verts.size();
+								for (uint32_t v = pp.first; v < end; v++) { float x=rc.verts[v].x,y=rc.verts[v].y; if(x<mnX)mnX=x;if(x>mxX)mxX=x;if(y<mnY)mnY=y;if(y>mxY)mxY=y; }
+								float cy=(mnY+mxY)*0.5f; if (cy<=20.f) continue;
+								polys[np++] = { idx, (mnX+mxX)*0.5f, cy, (int)((tsp>>29)&7), (int)((tsp>>26)&7) };
+							}
+						};
+						collect(rc.global_param_tr);
+						collect(rc.global_param_pt);
+						maplecast_gamestate::ObjectState dobjs[48];
+						int dno = maplecast_gamestate::readObjects(dobjs, 48);
+						char b[200];
+						for (int i = 0; i < dno; i++) {
+							int best=-1; float bdist=1e9f;
+							for (int j=0;j<np;j++){ float dx=polys[j].cx-dobjs[i].screen_x,dy=polys[j].cy-dobjs[i].screen_y,d=dx*dx+dy*dy; if(d<bdist){bdist=d;best=j;} }
+							int n;
+							if (best>=0 && bdist<1600.f)
+								n = snprintf(b, sizeof b, "f%u cid=%d sid=%d @(%d,%d) z=%d blend=%d/%d d2=%.0f\n", _tc, dobjs[i].owner_cid, dobjs[i].sprite_id, dobjs[i].screen_x, dobjs[i].screen_y, polys[best].idx, polys[best].bs, polys[best].bd, bdist);
+							else
+								n = snprintf(b, sizeof b, "f%u cid=%d sid=%d @(%d,%d) NO-MATCH\n", _tc, dobjs[i].owner_cid, dobjs[i].sprite_id, dobjs[i].screen_x, dobjs[i].screen_y);
+							fwrite(b, 1, n, tf); tw += n;
+						}
+						fflush(tf);
+					}
+				}
+			}
+
+			// === FRAME ORACLE — per-frame RAW capture of {drawn objects + their source
+			// pointers} and {every classified sprite quad}. PIVOT 2026-06-08: the prior
+			// server-side nearest-anchor attribution matched ~0 character quads (and emitted
+			// only the matched quads, so we debugged blind). The server now DUMPS RAW — two
+			// flat, unattributed lists — and attribution + analysis run OFFLINE in
+			// _oracle/oracle_attribute.py for fast iteration with no rebuild/redeploy.
+			// Runs on the live dynarec after ta_parse (NO SH4 PC-hook). Read-only
+			// instrument; no wire-format / client change. Writes JSON lines to
+			// /dev/shm/mc_oracle.jsonl, in_match only, frame-capped. Gated
+			// MAPLECAST_FRAME_ORACLE. (Object walk mirrors readAllDrawn (gamestate.cpp:370)
+			// but is self-contained here to expose node_addr + the full asm pointer cluster
+			// (pal/file/fac/scale/flip/hotspot) that ObjectState doesn't carry.)
+			{
+				static bool _oracle = getenv("MAPLECAST_FRAME_ORACLE") != nullptr;
+				// Capacity guard: stop appending once the file passes the size cap so a long
+				// session can't fill /dev/shm. ~64 MB holds a few thousand frames of objects.
+				static const long ORACLE_CAP = 64L * 1024 * 1024;
+				static FILE* of = nullptr; static long ow = 0; static bool oFull = false;
+				static uint32_t ofc = 0; ++ofc;
+				if (_oracle && !oFull && addrspace::read8(0x8C289624)) {  // in_match @0x8C289624
+					if (!of) { of = fopen("/dev/shm/mc_oracle.jsonl", "a"); }
+					if (of && ow < ORACLE_CAP) {
+						ta_parse(ctx, true);
+						auto& rc = ctx->rend;
+
+						// ---- 1) Parse TA polys: screen bbox + UV sub-rect + tex source, via the
+						// EXACT index-buffer de-index loop used by the EFCT scan (rc.idx, not raw verts).
+						struct OQuad {
+							float cx, cy, x, y, w, h;
+							float uMn, uMx, vMn, vMx;
+							float zMn, zMx;  // depth (Vertex.z = 1/w) range over the quad; near=char, far=stage
+							uint32_t tcw, tsp, pcw, vramAddr, texId;
+							int fmt, srcBlend, dstBlend, tw, th, vq;
+							bool isSprite;   // survives the non-sprite filter (see classify below)
+						};
+						static OQuad qs[2048]; int nq = 0;
+						uint32_t nverts = (uint32_t)rc.verts.size();
+						auto collect = [&](std::vector<PolyParam>& lst) {
+							for (PolyParam& pp : lst) {
+								if (nq >= 2048) return;
+								if (pp.count < 3) continue;
+								uint32_t pcw = pp.pcw.full, tcw = pp.tcw.full, tsp = pp.tsp.full;
+								bool textured = ((pcw >> 3) & 1) != 0;
+								float mnX=1e9f,mxX=-1e9f,mnY=1e9f,mxY=-1e9f;
+								float uMn=1e9f,uMx=-1e9f,vMn=1e9f,vMx=-1e9f;
+								float zMn=1e30f,zMx=-1e30f;   // Vertex.z = 1/w depth (WebGPU floor-cutoff value)
+								// ROOT-CAUSE FIX: pp.first/.count are NOT always rc.idx offsets.
+								// makePrimRestartIndex/makeIndex (op/pt and non-autosort tr) rewrite
+								// them to index rc.idx; but sortTriangles (autosort translucent — the
+								// MVC2 character/projectile sprites) leaves them indexing rc.verts
+								// DIRECTLY (ta_util.cpp:88). The old rc.idx-only de-index therefore
+								// read garbage for every autosort-tr sprite -> empty quads. Detect
+								// the convention per poly: try rc.idx de-index first; if it yields no
+								// valid verts (degenerate), fall back to the direct rc.verts read
+								// (the proven TADBG/TAEFF pattern, ta_vtx.cpp ~2382).
+								int seen = 0;
+								{
+									uint32_t iend = pp.first + pp.count;
+									if (iend > rc.idx.size()) iend = (uint32_t)rc.idx.size();
+									for (uint32_t k = pp.first; k < iend; k++) {
+										uint32_t vi = rc.idx[k]; if (vi >= nverts) continue;
+										const auto& vt = rc.verts[vi];
+										if (vt.x<mnX)mnX=vt.x; if (vt.x>mxX)mxX=vt.x;
+										if (vt.y<mnY)mnY=vt.y; if (vt.y>mxY)mxY=vt.y;
+										if (vt.u<uMn)uMn=vt.u; if (vt.u>uMx)uMx=vt.u;
+										if (vt.v<vMn)vMn=vt.v; if (vt.v>vMx)vMx=vt.v;
+										if (vt.z<zMn)zMn=vt.z; if (vt.z>zMx)zMx=vt.z;
+										seen++;
+									}
+								}
+								if (seen == 0) {
+									// vert-addressed (autosort tr / sortTriangles): pp.first/.count index rc.verts
+									uint32_t vend = pp.first + pp.count;
+									if (vend > nverts) vend = nverts;
+									for (uint32_t v = pp.first; v < vend; v++) {
+										const auto& vt = rc.verts[v];
+										// skip flycast's inf/NaN strip-restart sentinels (ta_util is_vertex_inf, inlined)
+										if (std::isnan(vt.x) || fabsf(vt.x) > 1e25f || std::isnan(vt.y) || fabsf(vt.y) > 1e25f) continue;
+										if (vt.x<mnX)mnX=vt.x; if (vt.x>mxX)mxX=vt.x;
+										if (vt.y<mnY)mnY=vt.y; if (vt.y>mxY)mxY=vt.y;
+										if (vt.u<uMn)uMn=vt.u; if (vt.u>uMx)uMx=vt.u;
+										if (vt.v<vMn)vMn=vt.v; if (vt.v>vMx)vMx=vt.v;
+										if (vt.z<zMn)zMn=vt.z; if (vt.z>zMx)zMx=vt.z;
+										seen++;
+									}
+								}
+								if (seen == 0) continue;
+								float w = mxX-mnX, h = mxY-mnY;
+								if (w < 2.f || h < 2.f) continue;
+								float cy = (mnY+mxY)*0.5f; if (cy <= 20.f) continue;  // strip top HUD row
+								OQuad& q = qs[nq];
+								q.cx = (mnX+mxX)*0.5f; q.cy = cy; q.x = mnX; q.y = mnY; q.w = w; q.h = h;
+								q.uMn=uMn; q.uMx=uMx; q.vMn=vMn; q.vMx=vMx;
+								q.zMn=(zMn> 1e29f)?0.f:zMn; q.zMx=(zMx<-1e29f)?0.f:zMx;
+								q.tcw=tcw; q.tsp=tsp; q.pcw=pcw;
+								q.srcBlend = (int)((tsp>>29)&7); q.dstBlend = (int)((tsp>>26)&7);
+								if (textured) {
+									q.fmt = (int)((tcw>>27)&7);
+									q.vq  = (int)((tcw>>30)&1);
+									q.tw  = 8 << ((tsp>>3)&7); q.th = 8 << (tsp&7);
+									q.vramAddr = (tcw & 0x1FFFFF) << 3;
+									q.texId = mcfx::texHash(q.vramAddr, q.fmt, q.tw, q.th, q.vq);
+								} else {
+									q.fmt=-1; q.vq=0; q.tw=0; q.th=0; q.vramAddr=0; q.texId=0;
+								}
+								// ---- SPRITE CLASSIFIER (thresholds derived from the prod capture
+								// _oracle/mc_oracle.jsonl, 13420 frames; see commit msg / analysis).
+								// A character/effect part-quad is: TEXTURED, NOT page-tiled, MODEST
+								// size, and translucent/additive (autosort-tr) — never an opaque
+								// screen-clear or a recurring opaque stage backdrop. Filtering these
+								// out BEFORE attribution is what lets a quad reach the character it
+								// covers instead of the 1152x480 clear / 613x411 backdrop that merely
+								// contains the same screen point.
+								//   (1) untextured       -> screen clear / flat fill (texId 0)
+								//   (2) page-tiled       -> scrolling bg (u or v outside ~[0,1])
+								//   (3) oversized >200px  -> stage backdrop / parallax layer. Capture:
+								//       real parts cluster med 30-64px, p90 H=70; the big recurring
+								//       translucent stage layers sit at 137-209px and the opaque
+								//       backdrop at 613px. 200 keeps parts (incl. larger super body
+								//       parts) while dropping every recurring stage layer.
+								//   (4) opaque [src=1,dst=0] -> stage/HUD fill. Char sprites are
+								//       autosort-translucent [4,5] or additive effects [4,1]. In the
+								//       capture, dropping [1,0] removes the backdrop fragments with
+								//       zero loss of [4,5]/[4,1] parts.
+								// After (1)-(4) the survivors' centers sit a median 50px (p90 86px,
+								// all <120px) from their object's screen_xy -> clean proximity match.
+								bool tiled = (uMn < -0.05f || uMx > 1.05f || vMn < -0.05f || vMx > 1.05f);
+								bool opaque = (q.srcBlend == 1 && q.dstBlend == 0);
+								bool oversized = (w > 200.f || h > 200.f);
+								q.isSprite = textured && !tiled && !opaque && !oversized
+								             && q.texId != 0 && tcw != 0;
+								nq++;
+							}
+						};
+						collect(rc.global_param_op);
+						collect(rc.global_param_pt);
+						collect(rc.global_param_tr);
+
+						// ---- DIAGNOSTIC (hint #1/#3): does the TA poly list exist here, and
+						// how many quads survive the de-index? Logged to stderr every 60 frames
+						// so a stale capture self-explains. If op/pt/tr or verts are 0 the parse
+						// isn't populating at this call site; nq>0 with sprite==0 means the
+						// classifier filtered everything (RTT/native-space coords, all oversized).
+						static int _oDiag = 0;
+						bool _oDiagNow = (++_oDiag % 60) == 0;
+						if (_oDiagNow)
+							fprintf(stderr,
+								"[ORACLE] f%u rtt=%d op=%zu pt=%zu tr=%zu verts=%zu idx=%zu -> nq=%d\n",
+								ofc, (int)rc.isRTT,
+								rc.global_param_op.size(), rc.global_param_pt.size(),
+								rc.global_param_tr.size(), rc.verts.size(), rc.idx.size(), nq);
+
+						// ---- 2) Enumerate drawn objects from MVC2's OWN slot table (mirrors
+						// readAllDrawn) but keep node_addr + the asm pointer cluster.
+						static const uint32_t SLOT_COUNT_BASE = 0x8C2895E0;
+						static const uint32_t SLOT_PTR_BASE   = 0x8C287DE0;
+						static const uint32_t SLOT_ROW_STRIDE = 0x180;
+						static const uint32_t CB[6] = { 0x8C268340,0x8C2688E4,0x8C268E88,
+						                                0x8C26942C,0x8C2699D0,0x8C269F74 };
+						auto rdF = [](uint32_t a){ uint32_t r=addrspace::read32(a); float f; memcpy(&f,&r,4); return f; };
+						auto inRam = [](uint32_t a){ return a>=0x0C000000 && a<0x10000000; };
+
+						struct OObj {
+							uint32_t node; int slot; int owner_cid; int category;
+							int sprite_id; float sx, sy; float scaleX, scaleY; int flip;
+							uint32_t gfx1, pal, extras, file, fac;
+							const char* region;
+							int hotDx, hotDy;                  // legacy +0x178 walk (body-constant)
+							int hotCellDx, hotCellDy, hotCellSlot;  // cell-slot walk (slot=read16(cell+0x12))
+						};
+						static OObj objs[128]; int no = 0;
+
+						for (int layer = 0; layer < 16 && no < 128; layer++) {
+							int count = (int)addrspace::read8(SLOT_COUNT_BASE + layer);
+							if (count <= 0 || count > 0x60) continue;
+							uint32_t row = SLOT_PTR_BASE + (uint32_t)layer * SLOT_ROW_STRIDE;
+							for (int i = 0; i < count && no < 128; i++) {
+								uint32_t node = addrspace::read32(row + i*4);
+								if (node < 0x8C000000 || node >= 0x8D000000) continue;
+								bool isBody = false;
+								for (int s=0;s<6;s++) if (node==CB[s]) { isBody=true; break; }
+								if (isBody) continue;
+								if (addrspace::read8(node + 0x12C) == 0) continue;       // visibility gate
+								int sid = (int)(uint16_t)addrspace::read16(node + 0x144);
+								if (sid == 0) continue;
+								float sx = rdF(node + 0xE0), sy = rdF(node + 0xE4);
+								if (sx<-64.f||sx>704.f||sy<-64.f||sy>544.f) continue;
+								int slot = -1;
+								uint32_t oA = addrspace::read32(node+0x18), oB = addrspace::read32(node+0x80);
+								for (int s=0;s<6;s++) if (oA==CB[s]||oB==CB[s]) { slot=s; break; }
+								OObj& o = objs[no];
+								o.node = node; o.slot = slot;
+								o.owner_cid = slot>=0 ? (int)(uint8_t)addrspace::read8(CB[slot]+0x001) : 0;
+								o.category  = (int)(uint8_t)addrspace::read8(node + 0x03);
+								o.sprite_id = sid; o.sx = sx; o.sy = sy;
+								o.scaleX = rdF(node + 0x50); o.scaleY = rdF(node + 0x54);
+								o.flip   = addrspace::read16(node + 0x130) ? 1 : 0;
+								o.gfx1   = addrspace::read32(node + 0x15C);
+								o.pal    = addrspace::read32(node + 0x164);
+								o.extras = addrspace::read32(node + 0x178);
+								o.file   = addrspace::read32(node + 0x17C);
+								o.fac    = addrspace::read32(node + 0x184);
+								uint32_t gl = o.gfx1 & 0x0FFFFFFF;
+								o.region = (gl>=0x0CED0000 && gl<0x0CEE0000) ? "EFFECTS_BANK"
+								         : (gl>=0x0CE60000 && gl<0x0CE70000) ? "DECOMP_BUF" : "CHAR_GFX";
+								// ---- HOTSPOT — RAW, BOTH READINGS (the "always 0" investigation).
+								// WHY the old field was 0: it walked node+0x178 (Sprite_Extras) at a FIXED
+								// +0x18. node+0x178 is the EXTRAS *table base*, not this object's assembly,
+								// so +0x18 lands in the table header -> sentinel on record 0 -> 0,0 for the
+								// whole 13420-frame capture.
+								// WHY a single "true" read is NOT available here (do-not-repeat, per
+								// docs/HANDOFF-2026-06-08 #2/#3):
+								//   - The cell-slot walk (cell=read32(node+0x154); slot=read16(cell+0x12);
+								//     recs=EXTRAS+slot*0x400+8) was tried: keyframe+0x12 turned out to be
+								//     HitboxGroup, NOT the assembly slot, so the slot index is wrong for
+								//     satellites; AND the offline sid->assembly map was never solved.
+								//   - The direct +0x178 walk (readHotspot) is DEGENERATE: it returns a
+								//     per-CHARACTER constant = the body's hotspot (Storm every object
+								//     (-76,8)), so it can't separate a projectile from its body.
+								// DECISION: this is raw instrumentation -> emit BOTH candidate readings
+								// unmodified (hotspot_dx/dy = the legacy +0x178 walk, for continuity with
+								// readHotspot; hot_cell_dx/dy = the cell-slot walk) and let the OFFLINE tool
+								// judge whether either anchors satellites correctly. No server-side "fix" is
+								// claimed; the honest answer is the per-object hotspot is not cleanly
+								// readable at this hook (both candidates are known-degenerate).
+								auto cl=[](int v){ if(v<-32768)v=-32768; else if(v>32767)v=32767; return v; };
+								// (a) legacy direct +0x178 walk (8B records, mode@+6 0xFF end)
+								o.hotDx = 0; o.hotDy = 0;
+								if (inRam(o.extras)) {
+									int mnDx=0x7fffffff, mnDy=0x7fffffff; bool any=false;
+									uint32_t rec = o.extras + 0x18;
+									for (int g=0; g<64; ++g, rec+=8) {
+										uint8_t mode = (uint8_t)addrspace::read8(rec+6);
+										if (mode==0xFF) break;
+										int dx=(int16_t)addrspace::read16(rec+0), dy=(int16_t)addrspace::read16(rec+2);
+										if (dx<mnDx)mnDx=dx; if (dy<mnDy)mnDy=dy; any=true;
+									}
+									if (any) { o.hotDx=cl(mnDx); o.hotDy=cl(mnDy); }
+								}
+								// (b) cell-slot walk (EXTRAS+slot*0x400+8; slot=read16(cell+0x12))
+								o.hotCellDx = 0; o.hotCellDy = 0; o.hotCellSlot = -1;
+								{
+									uint32_t cell = addrspace::read32(node + 0x154);
+									if (inRam(cell) && inRam(o.extras)) {
+										int slot = (uint16_t)addrspace::read16(cell + 0x12);
+										o.hotCellSlot = slot;
+										if (slot < 64) {
+											uint32_t recs = o.extras + (uint32_t)slot*0x400 + 0x08;
+											int mnDx=0x7fffffff, mnDy=0x7fffffff; bool any=false;
+											for (int r=0; r<128; ++r) {
+												uint32_t rec = recs + (uint32_t)r*8;
+												uint16_t sel = (uint16_t)addrspace::read16(rec + 6);
+												if (sel == 0x00FF) break;
+												int16_t rdx=(int16_t)addrspace::read16(rec+0), rdy=(int16_t)addrspace::read16(rec+2);
+												uint16_t pw = (uint16_t)addrspace::read16(rec+4);
+												if (rdx==0 && rdy==0 && sel==0 && pw==0) continue;
+												if (rdx<mnDx)mnDx=rdx; if (rdy<mnDy)mnDy=rdy; any=true;
+											}
+											if (any) { o.hotCellDx=cl(mnDx); o.hotCellDy=cl(mnDy); }
+										}
+									}
+								}
+								no++;
+							}
+						}
+
+						// ---- 3) RAW DUMP (PIVOT 2026-06-08). The server-side nearest-anchor
+						// attribution matched ~0 character quads and was debugging-blind, so it
+						// is REMOVED. The server now emits two FLAT, UNATTRIBUTED lists and all
+						// attribution + analysis moves OFFLINE (_oracle/oracle_attribute.py),
+						// where it can iterate on radius/anchor without a rebuild+redeploy:
+						//   objects[]      = object metadata + source pointers (NO per-object quads)
+						//   sprite_quads[] = every quad that passed isSprite, raw positions, no owner
+						// Header keeps frame/in_match/nq/sprite/filtered/rtt. We still COUNT
+						// sprite/filtered here (cheap, mirrors the classifier) for at-a-glance health.
+						int nSprite = 0, nFiltered = 0;
+						for (int j=0;j<nq;j++) { if (qs[j].isSprite) nSprite++; else nFiltered++; }
+						if (_oDiagNow)
+							fprintf(stderr, "[ORACLE]   no=%d nq=%d sprite=%d filtered=%d (raw-dump, attribution offline)\n",
+							        no, nq, nSprite, nFiltered);
+
+						// ---- 4) Emit one JSON line for this frame: header + objects[] + sprite_quads[].
+						std::string line; line.reserve(8192);
+						char nb[640];   // object line with both hotspot readings ~410B; headroom vs truncation
+						snprintf(nb,sizeof nb,"{\"frame\":%u,\"in_match\":1,\"nq\":%d,\"sprite\":%d,\"filtered\":%d,\"rtt\":%d,\"objects\":[",
+						         ofc, nq, nSprite, nFiltered, (int)rc.isRTT);
+						line += nb;
+						bool firstObj=true;
+						for (int k=0;k<no;k++) {
+							OObj& o = objs[k];
+							if (!firstObj) line += ","; firstObj=false;
+							snprintf(nb,sizeof nb,
+								"{\"slot\":%d,\"owner_cid\":%d,\"category\":%d,\"sprite_id\":%d,"
+								"\"screen_xy\":[%d,%d],\"scale\":[%.3f,%.3f],\"flip\":%d,\"node_addr\":\"0x%08X\","
+								"\"tex_src\":{\"vram_addr\":\"0x00000000\",\"region\":\"%s\",\"gfx1_ptr\":\"0x%08X\","
+								"\"pal_ptr\":\"0x%08X\",\"part_idx\":-1},"
+								"\"asm_src\":{\"extras_ptr\":\"0x%08X\",\"file_ptr\":\"0x%08X\",\"fac_ptr\":\"0x%08X\","
+								"\"hotspot_dx\":%d,\"hotspot_dy\":%d,"
+								"\"hot_cell_dx\":%d,\"hot_cell_dy\":%d,\"hot_cell_slot\":%d}}",
+								o.slot, o.owner_cid, o.category, o.sprite_id,
+								(int)o.sx, (int)o.sy, o.scaleX, o.scaleY, o.flip, o.node,
+								o.region, o.gfx1, o.pal,
+								o.extras, o.file, o.fac, o.hotDx, o.hotDy,
+								o.hotCellDx, o.hotCellDy, o.hotCellSlot);
+							line += nb;
+						}
+						line += "],\"sprite_quads\":[";
+						bool firstQ=true;
+						for (int j=0;j<nq;j++) {
+							OQuad& q = qs[j];
+							if (!q.isSprite) continue;
+							if (!firstQ) line += ","; firstQ=false;
+							snprintf(nb,sizeof nb,
+								"{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"u\":[%.4f,%.4f],\"v\":[%.4f,%.4f],"
+								"\"z\":[%.6g,%.6g],"
+								"\"texId\":\"%08X\",\"tcw\":\"0x%08X\",\"blend\":[%d,%d]}",
+								(int)q.x,(int)q.y,(int)q.w,(int)q.h, q.uMn,q.uMx,q.vMn,q.vMx,
+								q.zMn, q.zMx,
+								q.texId, q.tcw, q.srcBlend, q.dstBlend);
+							line += nb;
+						}
+						line += "]}\n";
+						fwrite(line.data(), 1, line.size(), of);
+						ow += (long)line.size();
+						fflush(of);
+						if (ow >= ORACLE_CAP) oFull = true;
+					}
+				}
+			}
+
+		// === SERVER-SIDE EFFECT ISOLATION -> content-addressed "EFCT" + "TXTR" ===
+		// Per additive (DstInstr==ONE) effect quad: hash the texture's VRAM bytes
+		// (content id, stable across the transient VRAM address) and emit
+		// (hash,cx,cy,w,h) in screen space. When a hash is NEW, decode the 16-bit
+		// texture to RGBA and ship it ONCE as a zstd "TXTR" packet; the state-only
+		// client caches by hash and draws the EXACT game texture. ta_parse fills
+		// rc.tr/pt here (Process re-parses later; raw mirror wire untouched).
+		{
+			ta_parse(ctx, true);
+			const int FX_MAX = 24;
+			uint8_t fxBuf[4 + 1 + FX_MAX * 20];
+			fxBuf[0] = 'E'; fxBuf[1] = 'F'; fxBuf[2] = 'C'; fxBuf[3] = 'T';
+			int off = 5; int nfx = 0; int hudOff = 5; int nhud = 0; const int HUD_MAX = 80;
+			static uint8_t hudBuf[4 + 1 + 80 * 20]; hudBuf[0]='H'; hudBuf[1]='U'; hudBuf[2]='D'; hudBuf[3]='Q';
+			static std::unordered_set<uint32_t> _sentHashes;
+			static uint8_t* _rgbaBuf = (uint8_t*)malloc(1024 * 1024 * 4);
+			// The relay hides browser joins, so we can't detect a new client. Re-ship
+			// active textures ~every 3s: clearing the sent-set means only on-screen
+			// textures re-ship (cached ones stay quiet between).
+			static uint32_t _txClear = 0;
+			if ((++_txClear % 180) == 0) _sentHashes.clear();
+			auto scanList = [&](std::vector<PolyParam>& lst, bool isHud) {
+				for (PolyParam& pp : lst) {
+					if ((isHud ? nhud : nfx) >= (isHud ? HUD_MAX : FX_MAX)) return;
+					if (pp.count < 3) continue;
+					uint32_t tcw = pp.tcw.full, tsp = pp.tsp.full, pcw = pp.pcw.full;
+					if (!((pcw >> 3) & 1)) continue;            // untextured
+					if (!isHud && ((tsp >> 26) & 7) != 1) continue;  // fx: additive only; HUD: any blend
+					int fmt = (tcw >> 27) & 7;
+					if (fmt > 2 || ((tcw >> 31) & 1)) continue; // 16-bit, non-mip (VQ now decoded)
+					int tw = 8 << ((tsp >> 3) & 7), th = 8 << (tsp & 7);
+					float mnX = 1e9f, mxX = -1e9f, mnY = 1e9f, mxY = -1e9f;
+					float uMn = 1e9f, uMx = -1e9f, vMn = 1e9f, vMx = -1e9f;
+					// REVIEWED FIX: after ta_parse(primRestart) pp.first/.count index rc.idx, NOT
+					// rc.verts (ta_util.cpp:435) -> the old raw rc.verts[v] read random verts (the
+					// scattered dots). Walk the index buffer (skip ~0 restart sentinels) for the
+					// screen bbox AND the UV sub-rect (EFKYTEX is a shared sheet; each poly samples
+					// a sub-rect, not the whole page).
+					uint32_t iend = pp.first + pp.count;
+					if (iend > rc.idx.size()) iend = (uint32_t)rc.idx.size();
+					uint32_t nverts = (uint32_t)rc.verts.size();
+					for (uint32_t k = pp.first; k < iend; k++) {
+						uint32_t vi = rc.idx[k]; if (vi >= nverts) continue;
+						const auto& vt = rc.verts[vi];
+						if (vt.x < mnX) mnX = vt.x; if (vt.x > mxX) mxX = vt.x;
+						if (vt.y < mnY) mnY = vt.y; if (vt.y > mxY) mxY = vt.y;
+						if (vt.u < uMn) uMn = vt.u; if (vt.u > uMx) uMx = vt.u;
+						if (vt.v < vMn) vMn = vt.v; if (vt.v > vMx) vMx = vt.v;
+					}
+					float w = mxX - mnX, h = mxY - mnY;
+					float cx = (mnX + mxX) * 0.5f, cy = (mnY + mxY) * 0.5f;
+					if (w < 2.f || h < 2.f) continue; if (isHud ? (cy > 56.f && cy < 424.f) : (cy <= 40.f)) continue;
+					// MULTI-PART FILTER: a UV bbox spanning much of the sheet = a multi-strip effect
+					// (super field) whose single-rect draw garbles. Skip for now; the STAF per-triangle
+					// path renders these correctly. Single-frame effects (sparks/tornado) pass through.
+					if ((uMx - uMn) > 0.5f || (vMx - vMn) > 0.5f) continue;
+					auto q16 = [](float f){ if (f < 0) f = 0; if (f > 1) f = 1; return (uint16_t)(f * 65535.f + 0.5f); };
+					uint16_t uv16[4] = { q16(uMn), q16(1.f - vMx), q16(uMx), q16(1.f - vMn) };  // v flipped to match RGBA V-flip
+					uint32_t addr = (tcw & 0x1FFFFF) << 3;
+					uint32_t hsh = mcfx::texHash(addr, fmt, tw, th, (tcw >> 30) & 1);
+					if (_rgbaBuf && _sentHashes.find(hsh) == _sentHashes.end()) {
+						if (mcfx::decodeTex16(tcw, tsp, _rgbaBuf)) {
+							// V-FLIP: mcfx decodes V-inverted (the select-screen text was upside-down). Flip the
+							// rows so the cached texture is right-side-up; the UV v is flipped to match (above).
+							{ int _rb = tw * 4; static std::vector<uint8_t> _vf; _vf.resize(_rb);
+							  for (int _y = 0; _y < th / 2; _y++) { uint8_t* _a = _rgbaBuf + (size_t)_y*_rb, *_b = _rgbaBuf + (size_t)(th-1-_y)*_rb;
+							    memcpy(_vf.data(), _a, _rb); memcpy(_a, _b, _rb); memcpy(_b, _vf.data(), _rb); } }
+							// DIAGNOSTIC: dump the mcfx-DECODED effect texture (the full sheet) so we can
+							// VIEW it offline and tell decode-vs-placement apart (gated MAPLECAST_DUMP_FX_TEX=N).
+							{ static int _fxd = getenv("MAPLECAST_DUMP_FX_TEX") ? atoi(getenv("MAPLECAST_DUMP_FX_TEX")) : 0;
+							  static int _fxn = 0;
+							  if (_fxd && _fxn < _fxd) {
+							    char fn[112]; snprintf(fn, sizeof fn, "/dev/shm/fxtex_%03d_%dx%d_f%d_vq%d.rgba", _fxn, tw, th, fmt, (int)((tcw>>30)&1));
+							    FILE* ff = fopen(fn, "wb"); if (ff) { fwrite(_rgbaBuf, 1, (size_t)tw*(size_t)th*4, ff); fclose(ff); }
+							    fprintf(stderr, "[FXTEX] %s hash=%08x\n", fn, hsh); _fxn++; } }
+							_sentHashes.insert(hsh);
+							uint32_t rgbaSize = (uint32_t)(tw * th * 4);
+							size_t compSize = 0; uint64_t cus = 0;
+							const uint8_t* comp = _compressor.compress(_rgbaBuf, rgbaSize, compSize, cus);
+							std::vector<uint8_t> tb(16 + compSize);
+							tb[0] = 'T'; tb[1] = 'X'; tb[2] = 'T'; tb[3] = 'R';
+							memcpy(&tb[4], &hsh, 4);
+							tb[8] = tw & 0xff; tb[9] = (tw >> 8) & 0xff; tb[10] = th & 0xff; tb[11] = (th >> 8) & 0xff;
+							memcpy(&tb[12], &rgbaSize, 4); memcpy(&tb[16], comp, compSize);
+							maplecast_ws::broadcastBinary(tb.data(), (uint32_t)tb.size());
+						}
+					}
+					int16_t v16[4] = { (int16_t)cx, (int16_t)cy, (int16_t)w, (int16_t)h };
+					uint8_t* BUF = isHud ? hudBuf : fxBuf; int& O = isHud ? hudOff : off; memcpy(&BUF[O], &hsh, 4); O += 4;
+					for (int k = 0; k < 4; k++) { BUF[O++] = v16[k] & 0xff; BUF[O++] = (v16[k] >> 8) & 0xff; }
+					for (int k = 0; k < 4; k++) { BUF[O++] = uv16[k] & 0xff; BUF[O++] = (uv16[k] >> 8) & 0xff; }
+					if (isHud) nhud++; else nfx++;
+				}
+			};
+			// IN-MATCH FILTER: capture effects only during a live round (in_match @0x8C289624),
+			// so pre-match SELECT/VERSUS menu textures are never grabbed as effects.
+			if (addrspace::read8(0x8C289624)) { scanList(rc.global_param_tr, false); scanList(rc.global_param_pt, false); }
+			// HUD: top/bottom strip textured quads (health/timer/hit-counter/meters), any blend.
+			scanList(rc.global_param_op, true); scanList(rc.global_param_pt, true); scanList(rc.global_param_tr, true);
+			fxBuf[4] = (uint8_t)nfx;
+			static bool _efctOn = getenv("MAPLECAST_EFCT") != nullptr;
+			if (_efctOn && nfx > 0) maplecast_ws::broadcastBinary(fxBuf, off);
+			hudBuf[4] = (uint8_t)nhud; static bool _hudOn = getenv("MAPLECAST_HUDQ") != nullptr;
+			if (_hudOn && nhud > 0) maplecast_ws::broadcastBinary(hudBuf, hudOff);
+		}
+			// === STAF: stripped-TA frame channel (MAPLECAST_STAF) ====================
+			// Ships the FULL textured-quad list every frame + each unique texture ONCE
+			// (content-addressed, ship-once), so the client renders the exact frame
+			// from cached textures at low bandwidth. Every texture decoded through
+			// flycast's OWN canonical decode keyed by the quad's real TCW/TSP
+			// (mcfx::decodeTexAny / texHash64) -- NO per-texture format guessing.
+			// Parallel to the mirror wire; A/B-selectable on the client. Wire format
+			// in docs/STRIPPED-TA-DESIGN.md (SIMPLE variant: axis-aligned dest/UV rect
+			// per quad -- Canvas2D-renderable; per-vertex transform-encode is a later opt).
+			{
+				static bool _stafOnEmit = getenv("MAPLECAST_STAF") != nullptr;
+				// HYBRID: MAPLECAST_HUDF ships the SAME STAF stream but FILTERED to just
+				// effects (additive) + HUD (top/bottom screen strips) — chars + stage are
+				// rendered client-side (lean sprite + client stage), never streamed. ~20 KB/s.
+				static bool _hudfOn = getenv("MAPLECAST_HUDF") != nullptr;
+				bool _inMatch = addrspace::read8(0x8C289624) != 0;
+				if ((_stafOnEmit || _hudfOn) && _inMatch) {  // HUDF only in-match: no out-of-match STAF flood (client routes STAF only when _skipTA, else it hits applyFrame -> RangeError + CPU burn = char-select 5fps)
+					// primRestart=false -> makeIndex() builds rc.idx as a strip-with-
+					// degenerate-links (NOT 0xFFFFFFFF restart sentinels), and rewrites
+					// each PolyParam.first/.count to index into rc.idx (rc.idx[k] -> rc.verts).
+					// This is flycast's OWN triangulation: it handles strip restarts,
+					// alternating winding and inf/invalid verts that raw rc.verts iteration
+					// (the previous bug) could not. Applies uniformly to op/pt/tr below.
+					ta_parse(ctx, false);
+					auto& rcS = ctx->rend;
+					static std::unordered_set<uint64_t> _stafSent;     // tex_ids already shipped (TX64)
+					static uint8_t* _stafRgba = (uint8_t*)malloc(1024 * 1024 * 4);
+					static std::vector<uint8_t> _stafBuf;
+					// REAL wire-bandwidth probe (MAPLECAST_STAFMEASURE): the modeled probe
+					// below (ta_parse(ctx,true)) estimates cost; THIS counts the ACTUAL bytes
+					// this STAF emit broadcasts — the zstd'd STAF envelope + every TX64 packet —
+					// and flushes total KB/s to /dev/shm/mc_staf.log once per second (60 frames).
+					static bool _stafMeasureReal = getenv("MAPLECAST_STAFMEASURE") != nullptr;
+					static uint64_t _stafBytesAcc = 0, _tx64BytesAcc = 0;
+					static uint32_t _stafMeasFrames = 0;
+					// Relay hides browser joins; periodically clear so on-screen textures re-ship.
+					static uint32_t _stafClear = 0;
+					if ((++_stafClear % 600) == 0) _stafSent.clear();
+
+					// === DE-INDEXED STRIP emit (was per-triangle; that bypassed the
+					// client's strip->list winding fix and garbled effects/supers). ====
+					// For each kept PolyParam we walk rc.idx[pp.first .. pp.first+pp.count]
+					// (the degenerate-linked STRIP produced by ta_parse(ctx,false)) and
+					// append rc.verts[idx] CONTIGUOUSLY to one output VERTEX buffer, then
+					// emit ONE poly record {firstVert,vertCount,tcw,tsp,pcw,isp,listType}.
+					// We do NOT triangulate and do NOT skip degenerate links: the client
+					// rebuilds the SAME object shape as ta-parser.mjs (a 28-B/vertex buffer
+					// + op/pt/tr PolyParams whose first/count are CONSECUTIVE vertex indices
+					// = a strip), so PVR2Renderer._buildIndexBuffer does the winding-correct
+					// strip->triangle-list conversion exactly like the working out-of-match
+					// TA video. Pixel-identical by construction.
+					//
+					// Wire (post-zstd), see docs/STRIPPED-TA-DESIGN.md §8.2:
+					//   'STAF'(4) frameNum(4) pvr_snapshot[16](64) vertCount(u32) polyCount(u32)
+					//   vertCount × vertex (28 B): x,y,z(f32) u,v(f32) col(4 RGBA) spc(4 RGBA)
+					//   polyCount × poly  (33 B): firstVert(u32) vertCount(u32) texId(8)
+					//                             tcw(4) tsp(4) pcw(4) isp(4) listType(1)
+					//   texId is the 64-bit content hash matching the TX64 cache key (0 =
+					//   untextured); tcw is the raw PVR TCW (kept for reference/filter).
+					_stafBuf.clear();
+					_stafBuf.resize(4 + 4 + 64 + 4 + 4);    // header + frameNum + pvr_snapshot + vertCount + polyCount
+					_stafBuf[0] = 'S'; _stafBuf[1] = 'T'; _stafBuf[2] = 'A'; _stafBuf[3] = 'F';
+					memcpy(&_stafBuf[4], &_localFrameNum, 4);
+					memcpy(&_stafBuf[8], pvr_snapshot, 64);
+					uint32_t vertCount = 0, polyCount = 0;
+					auto putF = [&](float f) { uint32_t u; memcpy(&u, &f, 4); for (int i = 0; i < 4; i++) _stafBuf.push_back((u >> (i * 8)) & 0xff); };
+					auto putU16 = [&](uint16_t v) { _stafBuf.push_back(v & 0xff); _stafBuf.push_back((v >> 8) & 0xff); };
+					auto put32 = [&](uint32_t v) { for (int i = 0; i < 4; i++) _stafBuf.push_back((v >> (i * 8)) & 0xff); };
+					(void)putU16;
+
+					// The poly records reference firstVert into the SAME _stafBuf grown
+					// above; but verts and poly records interleave on the wire region-wise
+					// (all verts first, then all polys). We stage poly records in a side
+					// buffer and append after the vertex region is finalized.
+					static std::vector<uint8_t> _stafPoly;
+					_stafPoly.clear();
+					auto polyPut32 = [&](uint32_t v) { for (int i = 0; i < 4; i++) _stafPoly.push_back((v >> (i * 8)) & 0xff); };
+					auto polyPut64 = [&](uint64_t v) { for (int i = 0; i < 8; i++) _stafPoly.push_back((v >> (i * 8)) & 0xff); };
+
+					// Per-list geometry debug: capture the first few polys of each list.
+					static bool _stafDbg = getenv("MAPLECAST_STAF_DBG") != nullptr;
+					static uint32_t _stafDbgCtr = 0;
+					bool dbgFrame = _stafDbg && (_stafDbgCtr % 600) == 0;
+					FILE* dgf = nullptr; int dbgShown[3] = { 0, 0, 0 };
+					if (dbgFrame) {
+						dgf = fopen("/dev/shm/mc_staf_geom.log", "a");
+						if (dgf) fprintf(dgf, "frame %u  verts=%zu idx=%zu  (op=%zu pt=%zu tr=%zu polys)\n",
+							_localFrameNum, rcS.verts.size(), rcS.idx.size(),
+							rcS.global_param_op.size(), rcS.global_param_pt.size(), rcS.global_param_tr.size());
+					}
+
+					// listType: 0=op(opaque/bg) 1=pt(punch-through/char) 2=tr(translucent/fx).
+					// Drawn in this order on the client (= z-order), preserving sent order within a list.
+					auto emitList = [&](std::vector<PolyParam>& lst, int listType) {
+						for (PolyParam& pp : lst) {
+							if (pp.count < 3) continue;
+							if (polyCount >= 16384) return;
+							uint32_t tcw = pp.tcw.full, tsp = pp.tsp.full, pcw = pp.pcw.full;
+							uint32_t iend = pp.first + pp.count;
+							if (iend > rcS.idx.size()) iend = (uint32_t)rcS.idx.size();
+							if (pp.first + 3 > iend) continue;
+							// HUDF filter BEFORE the texture decode/ship — only pay for quads we keep
+							// (effects=additive, HUD=top/bottom strips). Fixes the char-select texture
+							// flood (was decoding the whole animated demo screen every frame).
+							if (_hudfOn) {
+								bool _add = ((tsp >> 26) & 7) == 1;
+								uint32_t _nv = (uint32_t)rcS.verts.size();
+								float _mnY = 1e9f, _mxY = -1e9f;
+								for (uint32_t kk = pp.first; kk < iend; kk++) { uint32_t vi = rcS.idx[kk]; if (vi < _nv) { float yy = rcS.verts[vi].y; if (yy < _mnY) _mnY = yy; if (yy > _mxY) _mxY = yy; } }
+								float _cyq = (_mnY + _mxY) * 0.5f;
+								if (!_add && !(_cyq < 56.f || _cyq > 424.f)) continue;
+							}
+							bool textured = ((pcw >> 3) & 1) != 0;
+							uint64_t texId = 0;
+							int tw = 0, th = 0;
+							if (textured) {
+								int fmt = (tcw >> 27) & 7, mip = (tcw >> 31) & 1;
+								if (mip || (fmt > 2 && fmt != 5 && fmt != 6)) {
+									textured = false; // unsupported fmt -> draw untextured (vertex color)
+								} else {
+									tw = 8 << ((tsp >> 3) & 7); th = 8 << (tsp & 7);
+									texId = mcfx::texHash64(tcw, tw, th);
+									if (_stafRgba && _stafSent.find(texId) == _stafSent.end()) {
+										if (mcfx::decodeTexAny(tcw, tsp, _stafRgba)) {
+											_stafSent.insert(texId);
+											uint32_t rgbaSize = (uint32_t)(tw * th * 4);
+											size_t compSize = 0; uint64_t cus = 0;
+											const uint8_t* comp = _compressor.compress(_stafRgba, rgbaSize, compSize, cus);
+											// TX64: 'TX64'(4) texId(8) w(2) h(2) rawSize(4) zstd(RGBA)
+											std::vector<uint8_t> tb(20 + compSize);
+											tb[0] = 'T'; tb[1] = 'X'; tb[2] = '6'; tb[3] = '4';
+											memcpy(&tb[4], &texId, 8);
+											tb[12] = tw & 0xff; tb[13] = (tw >> 8) & 0xff; tb[14] = th & 0xff; tb[15] = (th >> 8) & 0xff;
+											memcpy(&tb[16], &rgbaSize, 4); memcpy(&tb[20], comp, compSize);
+											maplecast_ws::broadcastBinary(tb.data(), (uint32_t)tb.size());
+											if (_stafMeasureReal) _tx64BytesAcc += tb.size();
+										} else {
+											texId = 0; textured = false;   // couldn't decode -> draw untextured
+										}
+									}
+								}
+							}
+							// DE-INDEX: append rc.verts[rc.idx[k]] for k in [pp.first, iend),
+							// CONTIGUOUSLY. The result is a degenerate-linked strip in the
+							// output vertex buffer; firstVert/vertCount span it 1:1. The
+							// client feeds it to PVR2Renderer exactly like ta-parser output.
+							uint32_t nverts = (uint32_t)rcS.verts.size();
+							uint32_t firstVert = vertCount;
+							uint32_t emitted = 0;
+							for (uint32_t k = pp.first; k < iend; k++) {
+								uint32_t vi = rcS.idx[k];
+								if (vi >= nverts) vi = 0;   // guard; PVR2Renderer drops zero-area links
+								Vertex& v = rcS.verts[vi];
+								putF(v.x); putF(v.y); putF(v.z);
+								putF(v.u); putF(v.v);
+								// Vertex.col is [R,G,B,A]; spc is the offset color (same order).
+								_stafBuf.push_back(v.col[0]); _stafBuf.push_back(v.col[1]);
+								_stafBuf.push_back(v.col[2]); _stafBuf.push_back(v.col[3]);
+								_stafBuf.push_back(v.spc[0]); _stafBuf.push_back(v.spc[1]);
+								_stafBuf.push_back(v.spc[2]); _stafBuf.push_back(v.spc[3]);
+								vertCount++; emitted++;
+							}
+							if (emitted < 3) {  // nothing usable — roll back the verts we appended
+								_stafBuf.resize(_stafBuf.size() - (size_t)emitted * 28);
+								vertCount -= emitted;
+								continue;
+							}
+							// Poly record: firstVert vertCount texId tcw tsp pcw isp listType.
+							// !textured -> texId/tcw forced 0 so the client/texMgr draws untextured.
+							polyPut32(firstVert);
+							polyPut32(emitted);
+							polyPut64(textured ? texId : 0ull);
+							polyPut32(textured ? tcw : 0u);
+							polyPut32(tsp);
+							polyPut32(pcw);
+							polyPut32(pp.isp.full);
+							_stafPoly.push_back((uint8_t)listType);
+							polyCount++;
+							if (dgf && dbgShown[listType] < 4) {
+								Vertex& a = rcS.verts[rcS.idx[pp.first] < nverts ? rcS.idx[pp.first] : 0];
+								fprintf(dgf, "  %s poly firstVert=%u vc=%u (%.0f,%.0f uv %.3f,%.3f) tex=%d tcw=%08x\n",
+									listType==0?"OP":(listType==1?"PT":"TR"), firstVert, emitted,
+									a.x, a.y, a.u, a.v, textured?1:0, textured ? tcw : 0u);
+								dbgShown[listType]++;
+							}
+						}
+					};
+
+					// === ISP_BACKGND opaque backdrop poly (RENDER-TIER1-PLAN §5.1.3 / step 3) ===
+					// ta_parse(ctx,false) emits the three display lists but NOT flycast's
+					// synthesized FillBGP background (the implicit full-screen backdrop drawn
+					// from the PVR ISP_BACKGND_T/D regs + a VRAM strip). Without it the full
+					// frame renders on a transparent base -> black bleed. We port the client's
+					// ta-parser.fillBGP (web/webgpu/ta-parser.mjs:252-392) server-side and emit
+					// ONE opaque poly as the FIRST op record (the client draws op->pt->tr in
+					// sent order, so the backdrop sits behind everything). HUDF is an effects/
+					// HUD overlay and must stay transparent, so the BG poly is full-frame ONLY.
+					if (_stafOnEmit && !_hudfOn) {
+						uint32_t paramBase = PARAM_BASE & 0xF00000;
+						uint32_t ispBgT = ISP_BACKGND_T.full;
+						float    ispBgD = ISP_BACKGND_D.f;
+						uint32_t tagOffset  = ispBgT & 7;
+						uint32_t tagAddress = (ispBgT >> 3) & 0x1FFFFF;
+						uint32_t skip       = (ispBgT >> 24) & 7;
+						uint32_t stripBase  = (paramBase + tagAddress * 4) & (VRAM_SIZE - 1);
+						uint32_t stripVs    = (3 + skip) * 4;            // bytes per strip vertex entry
+						uint32_t vptr0      = tagOffset * stripVs + stripBase + 12; // +12 skips ISP/TSP/TCW
+						auto vrU32 = [&](uint32_t a) -> uint32_t {
+							if (a + 4 > VRAM_SIZE) return 0;
+							return vram[a] | (vram[a+1]<<8) | (vram[a+2]<<16) | ((uint32_t)vram[a+3]<<24);
+						};
+						auto vrF32 = [&](uint32_t a) -> float { uint32_t u = vrU32(a); float f; memcpy(&f,&u,4); return f; };
+						if (stripBase + 12 <= VRAM_SIZE) {
+							uint32_t bgISP = vrU32(stripBase);
+							int isTexture = (bgISP >> 25) & 1;
+							int isOffset  = (bgISP >> 24) & 1;
+							int isUV16    = (bgISP >> 22) & 1;
+							// Read the 3 strip verts (colors only; we build a full-screen quad).
+							struct BV { float x,y,z; uint32_t col, spc; } bv[3];
+							uint32_t vptr = vptr0; bool ok = true;
+							for (int i = 0; i < 3; i++) {
+								if (vptr + 12 > VRAM_SIZE) { ok = false; break; }
+								bv[i].x = vrF32(vptr); bv[i].y = vrF32(vptr+4); bv[i].z = vrF32(vptr+8);
+								uint32_t cptr = vptr + 12;
+								if (isTexture) cptr += isUV16 ? 4 : 8;
+								bv[i].col = (cptr + 4 <= VRAM_SIZE) ? vrU32(cptr) : 0xFFFFFFFFu;
+								bv[i].spc = (isOffset && cptr + 8 <= VRAM_SIZE) ? vrU32(cptr + 4) : 0u;
+								vptr += stripVs;
+							}
+							if (ok) {
+								// Background depth (FillBGP nudges it just behind everything).
+								float bgDepth = ispBgD - 1e-6f; if (bgDepth < 1e-11f) bgDepth = 1e-11f;
+								// Full-screen opaque quad covering the guardband viewport (-256..896, 0..480),
+								// matching ta-parser.fillBGP's non-textured branch. We draw it untextured
+								// (vertex color) — MVC2's backdrop is a flat/gouraud color; any textured
+								// stage art already ships as ordinary op polys.
+								struct QV { float x,y; uint32_t col,spc; } q[4] = {
+									{ -256.f,   0.f, bv[0].col, bv[0].spc },
+									{  896.f,   0.f, bv[1].col, bv[1].spc },
+									{ -256.f, 480.f, bv[2].col, bv[2].spc },
+									{  896.f, 480.f, bv[2].col, bv[2].spc },
+								};
+								uint32_t firstVert = vertCount;
+								for (int i = 0; i < 4; i++) {
+									putF(q[i].x); putF(q[i].y); putF(bgDepth);
+									putF(0.f); putF(0.f);
+									// col/spc are packed ARGB u32 -> push R,G,B,A (emitList's order).
+									_stafBuf.push_back((q[i].col>>16)&0xff); _stafBuf.push_back((q[i].col>>8)&0xff);
+									_stafBuf.push_back(q[i].col&0xff);       _stafBuf.push_back((q[i].col>>24)&0xff);
+									_stafBuf.push_back((q[i].spc>>16)&0xff); _stafBuf.push_back((q[i].spc>>8)&0xff);
+									_stafBuf.push_back(q[i].spc&0xff);       _stafBuf.push_back((q[i].spc>>24)&0xff);
+									vertCount++;
+								}
+								// isp: force CullMode=0, DepthMode=7 (always pass) like fillBGP.
+								uint32_t bgIspOut = (bgISP & 0x1FFFFFFF);
+								bgIspOut = (bgIspOut & ~(7u << 27)) | (0u << 27); // CullMode=0
+								bgIspOut = (bgIspOut & ~(7u << 29)) | (7u << 29); // DepthMode=7
+								// Poly record (untextured): firstVert vertCount texId=0 tcw=0 tsp pcw=0 isp listType=0(op).
+								polyPut32(firstVert);
+								polyPut32(4);
+								polyPut64(0ull);            // texId 0 = untextured
+								polyPut32(0u);              // tcw 0
+								polyPut32(vrU32(stripBase + 4)); // bgTSP (blend/shading state)
+								polyPut32(0u);              // pcw 0 -> client draws untextured
+								polyPut32(bgIspOut);
+								_stafPoly.push_back((uint8_t)0); // op list
+								polyCount++;
+							}
+						}
+					}
+
+					emitList(rcS.global_param_op, 0);
+					emitList(rcS.global_param_pt, 1);
+					emitList(rcS.global_param_tr, 2);
+					// Append the staged poly records after the vertex region.
+					_stafBuf.insert(_stafBuf.end(), _stafPoly.begin(), _stafPoly.end());
+					memcpy(&_stafBuf[72], &vertCount, 4);   // vertCount (u32 LE) at offset 72
+					memcpy(&_stafBuf[76], &polyCount, 4);   // polyCount (u32 LE) at offset 76
+
+					// Finalize the gated geometry dump (per-list samples captured during emit).
+					if (dgf) { fprintf(dgf, "  -> verts=%u polys=%u bytes=%zu\n", vertCount, polyCount, _stafBuf.size()); fclose(dgf); }
+					if (_stafDbg) _stafDbgCtr++;
+
+					// zstd the whole STAF envelope (ZCST outer); client routes 'STAF' after decompress.
+					size_t compSize = 0; uint64_t cus = 0;
+					const uint8_t* comp = _compressor.compress(_stafBuf.data(), (uint32_t)_stafBuf.size(), compSize, cus);
+					maplecast_ws::broadcastBinary(comp, (uint32_t)compSize);
+
+					// Real wire bandwidth: total STAF+TX64 bytes/s actually broadcast.
+					if (_stafMeasureReal) {
+						_stafBytesAcc += compSize;
+						if (++_stafMeasFrames >= 60) {
+							double stafKBs = _stafBytesAcc / 1024.0, tx64KBs = _tx64BytesAcc / 1024.0;
+							FILE* lf = fopen("/dev/shm/mc_staf.log", "a");
+							if (lf) {
+								fprintf(lf, "WIRE total=%.1f KB/s (STAF geom=%.1f + TX64 tex=%.1f) | polys=%u verts=%u\n",
+									stafKBs + tx64KBs, stafKBs, tx64KBs, polyCount, vertCount);
+								fclose(lf);
+							}
+							_stafBytesAcc = 0; _tx64BytesAcc = 0; _stafMeasFrames = 0;
+						}
+					}
+				}
+			}
+		// === STAF-MEASURE: stripped-TA bandwidth probe (read-only). Splits cost by list —
+		// opaque (stage) vs punch-through (characters) vs translucent (fx) — gated to
+		// in_match (so the menu's heavy ta_parse never runs). Shows whether caching the
+		// stage drops the wire to the character-only number. MAPLECAST_STAFMEASURE -> log/1s.
+		{
+			static bool _stafOn = getenv("MAPLECAST_STAFMEASURE") != nullptr;
+			if (_stafOn) {
+				maplecast_gamestate::GameState _sgs; maplecast_gamestate::readGameState(_sgs);
+				if (_sgs.in_match) {
+					ta_parse(ctx, true);
+					auto& rcS = ctx->rend;
+					static std::unordered_set<uint32_t> _uniqTex;
+					static uint64_t _qb[3] = {0, 0, 0}, _tb[3] = {0, 0, 0}; static uint32_t _q[3] = {0, 0, 0};
+					static uint32_t _aF = 0, _aT = 0; static uint64_t _aTB = 0;
+					uint32_t fT = 0; uint64_t fTB = 0;
+					auto meas = [&](std::vector<PolyParam>& lst, int li) {
+						for (PolyParam& pp : lst) {
+							if (pp.count < 3) continue;
+							_q[li]++; _qb[li] += 11 + (uint64_t)pp.count * 10; _tb[li] += (uint64_t)(pp.count - 2) * 47;
+							uint32_t tcw = pp.tcw.full, tsp = pp.tsp.full, pcw = pp.pcw.full;
+							if (!((pcw >> 3) & 1)) continue;
+							int fmt = (tcw >> 27) & 7, tw = 8 << ((tsp >> 3) & 7), th = 8 << (tsp & 7);
+							uint32_t hsh = mcfx::texHash((tcw & 0x1FFFFF) << 3, fmt, tw, th, (tcw >> 30) & 1);
+							if (_uniqTex.insert(hsh).second) { fT++; fTB += (uint64_t)tw * th * 4; }
+						}
+					};
+					meas(rcS.global_param_op, 0); meas(rcS.global_param_pt, 1); meas(rcS.global_param_tr, 2);
+					_aT += fT; _aTB += fTB;
+					if (++_aF >= 60) {
+						auto kb = [](uint64_t b) { return (b * 0.45) / 1024.0; };
+						FILE* lf = fopen("/dev/shm/mc_staf.log", "a");
+						if (lf) { fprintf(lf, "STRIP all=%.0f char-only=%.0f stage=%.0f | TRI all=%.0f char-only=%.0f KB/s | uniqTex=%zu (+%.0f KB/s warmup)\n",
+							kb(_qb[0]+_qb[1]+_qb[2]), kb(_qb[1]+_qb[2]), kb(_qb[0]), kb(_tb[0]+_tb[1]+_tb[2]), kb(_tb[1]+_tb[2]), _uniqTex.size(), _aTB / 1024.0); fclose(lf); }
+						_q[0] = _q[1] = _q[2] = 0; _qb[0] = _qb[1] = _qb[2] = 0; _tb[0] = _tb[1] = _tb[2] = 0; _aF = 0; _aT = 0; _aTB = 0;
+					}
+				}
+			}
+		}
+	}
+
+	// Auto-fire the deferred recording capture on in_match 0→1. Lives
+	// OUTSIDE the maplecast_ws::active() block above because record_arm
+	// must work regardless of whether any mirror client is connected
+	// (operator might be solo-recording with no viewers). Cheap — one
+	// guest-RAM byte read + a uint8 compare.
+	{
+		static uint32_t _matchPollCounter = 0;
+		static uint8_t  _matchPrevInMatch = 0;
+		static int64_t  _matchStartUs = 0;
+		static maplecast_gamestate::GameState _matchStartGs{};
+		if (++_matchPollCounter >= 3) {
+			_matchPollCounter = 0;
+			maplecast_gamestate::GameState gs;
+			maplecast_gamestate::readGameState(gs);
+			maplecast_replay::onFrameInMatchFlag(gs.in_match);
+
+			// Tele-0.9 broadcastMatchEnd DISABLED -- broadcasting a JSON
+			// text frame to mirror-WS clients (= the relay upstream
+			// connection) somehow stops the relay from forwarding
+			// subsequent binary TA frames to its downstream clients.
+			// Bisect confirmed: rolling back this single commit restored
+			// video. Mechanism still under investigation; suspect the
+			// relay's signal-broadcast path or our text frame format.
+			// Match-start tracking left intact for when we reroute the
+			// emit to a different transport (NATS, side-channel HTTP).
+			if (_matchPrevInMatch == 0 && gs.in_match == 1) {
+				_matchStartUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+					std::chrono::system_clock::now().time_since_epoch()).count();
+				_matchStartGs = gs;
+			} else if (_matchPrevInMatch == 1 && gs.in_match == 0 && _matchStartUs > 0) {
+				// const int64_t endUs = ...;
+				// maplecast_ws::broadcastMatchEnd(_matchStartUs, endUs, _matchStartGs, gs);
+				_matchStartUs = 0;
+			}
+			_matchPrevInMatch = gs.in_match;
+		}
+	}
+
+	// Update telemetry
+	{
+		auto publishEnd = std::chrono::high_resolution_clock::now();
+		uint64_t publishUs = std::chrono::duration_cast<std::chrono::microseconds>(publishEnd - publishStart).count();
+		static uint32_t _fpsCounter = 0;
+		static auto _fpsStart = std::chrono::high_resolution_clock::now();
+		static uint64_t _lastFps = 0;
+		_fpsCounter++;
+		auto fpsElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(publishEnd - _fpsStart).count();
+		if (fpsElapsed >= 1000) {
+			_lastFps = _fpsCounter * 1000 / fpsElapsed;
+			_fpsCounter = 0;
+			_fpsStart = publishEnd;
+		}
+		maplecast_ws::updateTelemetry({frameNum, taSize, totalDirty, totalSize, publishUs, _lastFps, compressedSize, compressUs});
+	}
+
+	// Check if a client is requesting a fresh sync state
+	if (hdr->client_request_sync)
+	{
+		hdr->client_request_sync = 0;
+		serverSaveSync();
+		// Reset shadows so diffs start from this new sync point
+		for (int i = 0; i < _numRegions; i++)
+			memcpy(_regions[i].shadow, _regions[i].ptr, _regions[i].size);
+		// Reset TA delta so next frame is sent as full
+		_taHasPrev = false;
+		hdr->sync_ready = 1;
+		printf("[MIRROR] Client requested sync  --  fresh state + TA reset\n");
+	}
+
+	// Brain snapshot disabled  --  was 26MB memcpy every 30 frames (~5ms stall)
+	// Only needed for shm client initial sync. WebSocket clients use save state instead.
+	// if (frameNum % 30 == 0)
+	// {
+	// 	uint8_t* snap = _shmPtr + HEADER_SIZE;
+	// 	size_t off = 0;
+	// 	memcpy(snap + off, &mem_b[0], 16 * 1024 * 1024); off += 16 * 1024 * 1024;
+	// 	memcpy(snap + off, &vram[0], VRAM_SIZE); off += VRAM_SIZE;
+	// 	memcpy(snap + off, &aica::aica_ram[0], 2 * 1024 * 1024);
+	// }
+
+	// VRAM hash disabled  --  only used by shm client for drift detection
+	// hdr->server_vram_hash = fastVramHash();
+
+	// Audit disabled  --  reduced to VRAM+PVR only
+
+	if (frameNum % 600 == 0)
+		printf("[MIRROR] Server frame %u | TA=%u bytes | %u dirty pages | %u->%u bytes (%.1fx) zstd %luus\n",
+			frameNum, taSize, totalDirty, totalSize, compressedSize,
+			compressedSize > 0 ? (double)totalSize / compressedSize : 0.0, compressUs);
+
+	// Restore PVR region pointer (paired with the atomic snapshot at the top)
+	if (_origPvrPtr) {
+		for (int r = 0; r < _numRegions; r++) {
+			if (_regions[r].id == 3) { _regions[r].ptr = _origPvrPtr; break; }
+		}
+	}
+}
+
+// ==================== CLIENT: receive TA commands + diffs, run ta_parse ====================
+
+static int64_t _clientNowUs() {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+// !!! THIS FUNCTION IS THE GOLD STANDARD  --  KEEP IT THAT WAY !!!
+//
+// Three other implementations parse the same wire format and MUST stay aligned
+// with this one (which is the desktop flycast mirror client, the only one that
+// has been correct end-to-end since day one):
+//
+//   1. packages/renderer/src/wasm_bridge.cpp renderer_frame()  (king.html WASM)
+//   2. core/network/maplecast_wasm_bridge.cpp mirror_render_frame()  (emulator.html WASM)
+//   3. relay/src/fanout.rs (the Rust VPS relay  --  parses dirty pages for its SYNC cache)
+//
+// When fixing a rendering bug in either browser client, the fix is almost
+// always "make it look like clientReceive()". Five bugs we already paid for:
+//
+//   (A) Decompressor sized too small  --  use 16MB shared between SYNC and frames.
+//   (B) Skipping dirty-pages walk while waiting for first keyframe  --  DON'T.
+//       Walk pages even when you can't render the TA buffer yet.
+//   (C) VramLockedWriteOffset MUST be called BEFORE memcpy into VRAM.
+//   (D) Don't truncate prevTA when taSize shrinks  --  only grow.
+//   (E) renderer->resetTextureCache MUST be set whenever any VRAM page is dirty.
+//
+// All five bugs manifest as broken character select / loading screens while
+// in-match looks fine. If you only test in-match, you will not catch them.
+//
+// See docs/ARCHITECTURE.md "Mirror Wire Format  --  Rules of the Road" for the
+// canonical list of rules all four parsers must obey.
+bool clientReceive(rend_context& rc, bool& vramDirty)
+{
+	vramDirty = false;
+	if (!_isClient) return false;
+	int64_t t0 = _clientNowUs();
+
+	if (_useWebSocket)
+	{
+		// Pipelined: background thread already decoded TA + staged dirty pages.
+		// Take a local snapshot of _decoded under the mutex so the producer
+		// can't std::move() a new vector into it while we're iterating pages.
+		static DecodedFrame df_local;
+		{
+			std::lock_guard<std::mutex> lock(_decodedMtx);
+			if (!_decodedReady.load(std::memory_order_relaxed)) return false;
+			df_local = std::move(_decoded);
+			_decoded = DecodedFrame{};  // reset so producer's next merge starts empty
+			_decodedReady.store(false, std::memory_order_relaxed);
+		}
+
+		DecodedFrame& df = df_local;
+		TA_context& ctx = _decodeTaCtx[df.taBufferIdx];
+		uint8_t* taDst = ctx.tad.thd_root;
+
+		// === CLIENT-SIDE TA DUMP  --  pair with the server-side dump in serverPublish() ===
+		// MAPLECAST_DUMP_TA=1 â†’ write the received TA buffer to
+		// /tmp/ta-dumps-client/frame_NNNNNN.bin so we can byte-diff it against
+		// the server's /tmp/ta-dumps/frame_NNNNNN.bin for the same frame.
+		// Both should be byte-identical if the wire is faithful.
+		{
+			static bool _dumpInit = false;
+			static bool _dumpEnabled = false;
+			static std::string _dumpDir;
+			if (!_dumpInit) {
+				const char* e = std::getenv("MAPLECAST_DUMP_TA");
+				_dumpEnabled = (e && *e && *e != '0');
+				if (_dumpEnabled) {
+					const char* d = std::getenv("MAPLECAST_DUMP_TA_DIR");
+					_dumpDir = (d && *d) ? d : "/tmp/ta-dumps-client";
+#ifdef _WIN32
+					int rc = _mkdir(_dumpDir.c_str());
+#else
+					int rc = mkdir(_dumpDir.c_str(), 0755);
+#endif
+					printf("[TA-DUMP] client enabled — writing %s/frame_NNNNNN.bin (mkdir rc=%d, errno=%d)\n",
+					       _dumpDir.c_str(), rc, errno);
+					fflush(stdout);
+				}
+				_dumpInit = true;
+			}
+			if (_dumpEnabled && df.taSize > 0) {
+				char path[512];
+				snprintf(path, sizeof(path), "%s/frame_%06u.bin", _dumpDir.c_str(), df.frameNum);
+				FILE* f = fopen(path, "wb");
+				if (f) {
+					fwrite(taDst, 1, df.taSize, f);
+					fclose(f);
+				} else {
+					static int _warnedFopen = 0;
+					if (_warnedFopen++ < 3)
+						printf("[TA-DUMP] client fopen(%s) failed: errno=%d\n", path, errno);
+				}
+			}
+		}
+
+		// Apply dirty pages to emulator memory (must happen on render thread).
+		// Also track whether ANY PVR-regs page was dirty this frame  --  used
+		// below to gate the palette/fog re-upload on actual state changes
+		// instead of doing it unconditionally every frame.
+		bool pvrRegsDirty = false;
+		for (uint32_t d = 0; d < df.dirtyCount; d++) {
+			size_t pageOff = df.pages[d].pageIdx * MEM_PAGE_SIZE;
+			uint8_t rid = df.pages[d].regionId;
+
+			if (rid == 0 && pageOff + MEM_PAGE_SIZE <= 16 * 1024 * 1024)
+				memcpy(&mem_b[pageOff], df.pages[d].data, MEM_PAGE_SIZE);
+			else if (rid == 1 && pageOff + MEM_PAGE_SIZE <= VRAM_SIZE) {
+				// Unprotect BEFORE writing  --  texture cache may have mprotect'd this page
+				VramLockedWriteOffset(pageOff);
+				memcpy(&vram[pageOff], df.pages[d].data, MEM_PAGE_SIZE);
+				vramDirty = true;
+			}
+			else if (rid == 2 && pageOff + MEM_PAGE_SIZE <= 2 * 1024 * 1024)
+				memcpy(&aica::aica_ram[pageOff], df.pages[d].data, MEM_PAGE_SIZE);
+			else if (rid == 3 && pageOff + MEM_PAGE_SIZE <= (size_t)pvr_RegSize) {
+				memcpy(pvr_regs + pageOff, df.pages[d].data, MEM_PAGE_SIZE);
+				pvrRegsDirty = true;
+			}
+		}
+
+		// E2E latency probe  --  complete if visual change detected.
+		// Zero-cost when no probe is pending (single atomic load).
+		if (vramDirty)
+			maplecast_input_sink::onVisualChange();
+
+		// Render  --  TA data already decoded in ctx.tad.thd_root by background thread
+		if (df.taSize > 0) {
+			ctx.rend.Clear();
+			ctx.tad.Clear();
+			ctx.tad.thd_data = taDst + df.taSize;
+
+			TA_GLOB_TILE_CLIP.full = df.pvr_snapshot[0];
+			SCALER_CTL.full = df.pvr_snapshot[1];
+			FB_X_CLIP.full = df.pvr_snapshot[2];
+			FB_Y_CLIP.full = df.pvr_snapshot[3];
+			FB_W_LINESTRIDE.full = df.pvr_snapshot[4];
+			FB_W_SOF1 = df.pvr_snapshot[5];
+			FB_W_CTRL.full = df.pvr_snapshot[6];
+			FOG_CLAMP_MIN.full = df.pvr_snapshot[7];
+			FOG_CLAMP_MAX.full = df.pvr_snapshot[8];
+
+			ctx.rend.isRTT = df.pvr_snapshot[13] != 0;
+			ctx.rend.fb_W_SOF1 = df.pvr_snapshot[5];
+			ctx.rend.fb_W_CTRL.full = df.pvr_snapshot[6];
+			ctx.rend.ta_GLOB_TILE_CLIP.full = df.pvr_snapshot[0];
+			ctx.rend.scaler_ctl.full = df.pvr_snapshot[1];
+			ctx.rend.fb_X_CLIP.full = df.pvr_snapshot[2];
+			ctx.rend.fb_Y_CLIP.full = df.pvr_snapshot[3];
+			ctx.rend.fb_W_LINESTRIDE = df.pvr_snapshot[4];
+			ctx.rend.fog_clamp_min.full = df.pvr_snapshot[7];
+			ctx.rend.fog_clamp_max.full = df.pvr_snapshot[8];
+			{
+				// Server sends its native framebuffer dimensions. Scale
+				// by the client's RenderResolution so the local renderer
+				// draws at the client's chosen upscale factor.
+				u32 serverW = df.pvr_snapshot[9];
+				u32 serverH = df.pvr_snapshot[10];
+				if (config::RenderResolution > 480 && serverH > 0) {
+					float scale = config::RenderResolution / 480.f;
+					serverW = (u32)(serverW * scale);
+					serverH = (u32)(serverH * scale);
+				}
+				ctx.rend.framebufferWidth = serverW;
+				ctx.rend.framebufferHeight = serverH;
+			}
+			ctx.rend.clearFramebuffer = df.pvr_snapshot[11] != 0;
+			float fz; memcpy(&fz, &df.pvr_snapshot[12], 4);
+			ctx.rend.fZ_max = fz;
+
+			if (vramDirty) renderer->resetTextureCache = true;
+
+			// Gate palette + fog re-upload on actual PVR-regs changes
+			// instead of running unconditionally every frame. Profiling
+			// showed render=18100Âµs avg=15587Âµs per frame on a 3090 with
+			// no vsync, which dropped the mirror client to ~30 fps. The
+			// overwhelming majority of that cost was palette_update() +
+			// renderer->updatePalette + renderer->updateFogTable running
+			// EVERY frame when the palette/fog had not actually changed.
+			//
+			// Palette RAM and fog LUT both live in the PVR regs region
+			// (rid=3). If no PVR-regs page was dirty this frame, the
+			// palette and fog are the same bytes as last frame  --  there
+			// is nothing to re-upload. The browser WASM client has an
+			// analogous path but doesn't touch these flags every frame,
+			// which is why the browser runs smoothly on the same feed.
+			if (pvrRegsDirty) {
+				::pal_needs_update = true;
+				palette_update();
+				renderer->updatePalette = true;
+				renderer->updateFogTable = true;
+			}
+
+			renderer->Process(&ctx);
+			rc = ctx.rend;
+		}
+
+		int64_t t1 = _clientNowUs();
+		static int64_t totalUs = 0;
+		static uint32_t count = 0;
+		const int64_t thisDecodeUs = t1 - t0;
+		totalUs += thisDecodeUs;
+		count++;
+		if (df.frameNum % 600 == 0)
+			printf("[MIRROR] Client frame %u | dirty=%u pages | render=%lldÂµs avg=%lldÂµs | WS-PIPELINE\n",
+				df.frameNum, df.dirtyCount, (long long)thisDecodeUs, (long long)(totalUs / count));
+
+		// Publish debug-overlay telemetry atomics for the WS path.
+		_clientLastDecodeUs.store(thisDecodeUs, std::memory_order_relaxed);
+		{
+			const int64_t prev = _clientDecodeEmaUs.load(std::memory_order_relaxed);
+			_clientDecodeEmaUs.store(prev + ((thisDecodeUs - prev) >> 4),
+			                         std::memory_order_relaxed);
+		}
+		// Tele-0.5/0.10: max-since-last-report + frame counter, used by
+		// the HTTP-POST stats reporter that pushes to /api/telemetry
+		// every 1s.
+		{
+			int64_t cur = _clientDecodeMaxUs.load(std::memory_order_relaxed);
+			while (thisDecodeUs > cur
+			    && !_clientDecodeMaxUs.compare_exchange_weak(cur, thisDecodeUs,
+			        std::memory_order_relaxed)) {}
+		}
+		_clientFramesDecoded.fetch_add(1, std::memory_order_relaxed);
+		_clientLastDirtyPages.store(df.dirtyCount, std::memory_order_relaxed);
+		_clientLastTaSize.store(df.taSize, std::memory_order_relaxed);
+		_clientLastVramDirty.store(vramDirty, std::memory_order_relaxed);
+
+		return df.taSize > 0;
+	}
+
+	// === SHM path ===
+	uint8_t* src = nullptr;
+	{
+		if (!_shmPtr) return false;
+		RingHeader* hdr = (RingHeader*)_shmPtr;
+		uint64_t serverFrames = hdr->frame_count;
+		if (serverFrames == _clientFrameCount) return false;
+		__sync_synchronize();
+		uint64_t offset = hdr->latest_offset;
+		uint32_t totalSize = hdr->latest_size;
+		if (totalSize == 0 || offset + totalSize > RING_SIZE) return false;
+		src = _shmPtr + RING_START + offset;
+	}
+
+	// === OPTIMIZED CLIENT DECODE  --  zero-copy into TA context, fused checksum ===
+	//
+	// Decode directly into flycast's TA buffer (clientCtx.tad.thd_root).
+	// No intermediate std::vector. Checksum computed during decode, not after.
+	// One read of the network data, one write to the TA buffer. Done.
+
+	static TA_context clientCtx;
+	static bool ctxAlloced = false;
+	if (!ctxAlloced) { clientCtx.Alloc(); ctxAlloced = true; }
+
+	uint8_t* taDst = clientCtx.tad.thd_root;  // decode target  --  flycast's own buffer
+
+	uint32_t frameSize; memcpy(&frameSize, src, 4); src += 4;
+	uint32_t frameNum; memcpy(&frameNum, src, 4); src += 4;
+
+	// PVR registers  --  read directly into stack, write to hardware + rend_context later
+	uint32_t pvr_snapshot[16];
+	memcpy(pvr_snapshot, src, sizeof(pvr_snapshot)); src += sizeof(pvr_snapshot);
+
+	uint32_t taSize; memcpy(&taSize, src, 4); src += 4;
+	uint32_t deltaPayloadSize; memcpy(&deltaPayloadSize, src, 4); src += 4;
+
+	static bool clientHasFullFrame = false;
+	uint32_t clientChecksum = 0;
+
+	if (deltaPayloadSize == taSize)
+	{
+		// Keyframe: copy directly into TA buffer + compute checksum in one pass
+		uint32_t i = 0;
+		for (; i + 3 < taSize; i += 4) {
+			memcpy(taDst + i, src + i, 4);
+			uint32_t w; memcpy(&w, src + i, 4);
+			clientChecksum ^= w;
+		}
+		for (; i < taSize; i++) taDst[i] = src[i];
+		src += taSize;
+		clientHasFullFrame = true;
+	}
+	else if (!clientHasFullFrame)
+	{
+		src += deltaPayloadSize;
+		src += 4;  // skip checksum
+		return false;
+	}
+	else
+	{
+		// Delta decode: apply runs directly into TA buffer
+		// taDst already holds previous frame's data (we decode in-place)
+		uint8_t* dd = src;
+		uint8_t* de = src + deltaPayloadSize;
+
+		while (dd + 4 <= de) {
+			uint32_t off; memcpy(&off, dd, 4); dd += 4;
+			if (off == 0xFFFFFFFF) break;
+			uint16_t runLen; memcpy(&runLen, dd, 2); dd += 2;
+			if (off + runLen <= taSize && dd + runLen <= de)
+				memcpy(taDst + off, dd, runLen);
+			dd += runLen;
+		}
+		src += deltaPayloadSize;
+
+		// Checksum the full TA buffer after delta apply
+		for (uint32_t i = 0; i + 3 < taSize; i += 4) {
+			uint32_t w; memcpy(&w, taDst + i, 4);
+			clientChecksum ^= w;
+		}
+	}
+
+	// Verify checksum
+	uint32_t serverChecksum; memcpy(&serverChecksum, src, 4); src += 4;
+	static uint32_t checksumFails = 0;
+	static uint32_t checksumTotal = 0;
+	checksumTotal++;
+	if (clientChecksum != serverChecksum) {
+		checksumFails++;
+		if (checksumFails <= 10 || checksumFails % 100 == 0)
+			printf("[DELTA] CHECKSUM MISMATCH frame %u (fail %u/%u)\n",
+				frameNum, checksumFails, checksumTotal);
+	}
+
+	// Memory diffs  --  apply dirty pages to emulator memory. Track whether
+	// any PVR-regs page was dirty so we can gate palette/fog re-upload
+	// below (same optimization as the WS path above).
+	bool pvrRegsDirty = false;
+	uint32_t dirtyPages; memcpy(&dirtyPages, src, 4); src += 4;
+	for (uint32_t d = 0; d < dirtyPages; d++) {
+		uint8_t regionId = *src++;
+		uint32_t pageIdx; memcpy(&pageIdx, src, 4); src += 4;
+		size_t pageOff = pageIdx * MEM_PAGE_SIZE;
+
+		if (regionId == 0 && pageOff + MEM_PAGE_SIZE <= 16 * 1024 * 1024)
+			memcpy(&mem_b[pageOff], src, MEM_PAGE_SIZE);
+		else if (regionId == 1 && pageOff + MEM_PAGE_SIZE <= VRAM_SIZE) {
+			// Unprotect BEFORE writing  --  texture cache may have mprotect'd this page
+			VramLockedWriteOffset(pageOff);
+			memcpy(&vram[pageOff], src, MEM_PAGE_SIZE);
+			vramDirty = true;
+		}
+		else if (regionId == 2 && pageOff + MEM_PAGE_SIZE <= 2 * 1024 * 1024)
+			memcpy(&aica::aica_ram[pageOff], src, MEM_PAGE_SIZE);
+		else if (regionId == 3 && pageOff + MEM_PAGE_SIZE <= (size_t)pvr_RegSize) {
+			memcpy(pvr_regs + pageOff, src, MEM_PAGE_SIZE);
+			pvrRegsDirty = true;
+		}
+		src += MEM_PAGE_SIZE;
+	}
+
+	// Build TA context  --  data is already in taDst, no copy needed
+	if (taSize > 0) {
+		clientCtx.rend.Clear();
+		clientCtx.tad.Clear();
+		// thd_root already has the data  --  just set the end pointer
+		clientCtx.tad.thd_data = taDst + taSize;
+
+		TA_GLOB_TILE_CLIP.full = pvr_snapshot[0];
+		SCALER_CTL.full = pvr_snapshot[1];
+		FB_X_CLIP.full = pvr_snapshot[2];
+		FB_Y_CLIP.full = pvr_snapshot[3];
+		FB_W_LINESTRIDE.full = pvr_snapshot[4];
+		FB_W_SOF1 = pvr_snapshot[5];
+		FB_W_CTRL.full = pvr_snapshot[6];
+		FOG_CLAMP_MIN.full = pvr_snapshot[7];
+		FOG_CLAMP_MAX.full = pvr_snapshot[8];
+
+		clientCtx.rend.isRTT = pvr_snapshot[13] != 0;
+		clientCtx.rend.fb_W_SOF1 = pvr_snapshot[5];
+		clientCtx.rend.fb_W_CTRL.full = pvr_snapshot[6];
+		clientCtx.rend.ta_GLOB_TILE_CLIP.full = pvr_snapshot[0];
+		clientCtx.rend.scaler_ctl.full = pvr_snapshot[1];
+		clientCtx.rend.fb_X_CLIP.full = pvr_snapshot[2];
+		clientCtx.rend.fb_Y_CLIP.full = pvr_snapshot[3];
+		clientCtx.rend.fb_W_LINESTRIDE = pvr_snapshot[4];
+		clientCtx.rend.fog_clamp_min.full = pvr_snapshot[7];
+		clientCtx.rend.fog_clamp_max.full = pvr_snapshot[8];
+		{
+			u32 serverW = pvr_snapshot[9];
+			u32 serverH = pvr_snapshot[10];
+			if (config::RenderResolution > 480 && serverH > 0) {
+				float scale = config::RenderResolution / 480.f;
+				serverW = (u32)(serverW * scale);
+				serverH = (u32)(serverH * scale);
+			}
+			clientCtx.rend.framebufferWidth = serverW;
+			clientCtx.rend.framebufferHeight = serverH;
+		}
+		clientCtx.rend.clearFramebuffer = pvr_snapshot[11] != 0;
+		float fz; memcpy(&fz, &pvr_snapshot[12], 4);
+		clientCtx.rend.fZ_max = fz;
+
+		if (vramDirty)
+			renderer->resetTextureCache = true;
+
+		// Gate palette + fog re-upload on actual PVR-regs changes
+		// (same fix as the WS path above). Palette RAM and fog LUT
+		// both live in PVR regs; if none of those pages changed this
+		// frame, there is nothing to re-upload. Running these every
+		// frame unconditionally was the root cause of the ~18 ms decode
+		// budget on the client render thread.
+		if (pvrRegsDirty) {
+			::pal_needs_update = true;
+			palette_update();
+			renderer->updatePalette = true;
+			renderer->updateFogTable = true;
+		}
+
+		renderer->Process(&clientCtx);
+		rc = clientCtx.rend;
+	}
+
+	if (!_useWebSocket) {
+		RingHeader* hdr = (RingHeader*)_shmPtr;
+		_clientFrameCount = hdr->frame_count;
+
+		// Check VRAM every 60 frames  --  reset texture cache if drifted
+		if (frameNum % 60 == 0)
+		{
+			uint64_t clientHash = fastVramHash();
+			uint64_t serverHash = hdr->server_vram_hash;
+			if (clientHash != serverHash)
+				renderer->resetTextureCache = true;
+		}
+	}
+
+	int64_t t1 = _clientNowUs();
+
+	static int64_t totalDecodeUs = 0;
+	static uint32_t decodeCount = 0;
+	const int64_t thisDecodeUs = t1 - t0;
+	totalDecodeUs += thisDecodeUs;
+	decodeCount++;
+
+	// Publish to the debug-overlay telemetry atomics. EMA on decode time
+	// uses the same 1/16 alpha shape as the arrival interval EMA.
+	_clientLastDecodeUs.store(thisDecodeUs, std::memory_order_relaxed);
+	{
+		const int64_t prev = _clientDecodeEmaUs.load(std::memory_order_relaxed);
+		_clientDecodeEmaUs.store(prev + ((thisDecodeUs - prev) >> 4),
+		                         std::memory_order_relaxed);
+	}
+	_clientLastDirtyPages.store(dirtyPages, std::memory_order_relaxed);
+	_clientLastTaSize.store(taSize, std::memory_order_relaxed);
+	_clientLastVramDirty.store(vramDirty, std::memory_order_relaxed);
+
+	if (frameNum % 600 == 0)
+		printf("[MIRROR] Client frame %u | delta=%u bytes | dirty=%u pages | decode=%lldÂµs avg=%lldÂµs | %s\n",
+			frameNum, deltaPayloadSize, dirtyPages,
+			(long long)thisDecodeUs, (long long)(totalDecodeUs / decodeCount),
+			_useWebSocket ? "WS" : "SHM");
+
+	return taSize > 0;
+}
+
+}  // namespace maplecast_mirror
