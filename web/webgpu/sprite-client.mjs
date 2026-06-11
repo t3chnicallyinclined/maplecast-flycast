@@ -2251,6 +2251,13 @@ export class SpriteClient {
     for (let i = 0; i < sideSlots.length; i++) if (this.slot[sideSlots[i]].active) return bc['C' + (i + 1)];
     return bc.C1;
   }
+  // Gradient for a specific team character INDEX (0=C1,1=C2,2=C3) — used for the
+  // assist/bench mini-bars (each bench char keeps its own C-slot color).
+  _barColsAt(i) {
+    const bc = (this._hud && this._hud.barColors) || {
+      C1: ['#FF40FF', '#FFFF00'], C2: ['#00FF00', '#FFFF00'], C3: ['#00C0FF', '#FFFF00'] };
+    return bc['C' + ((i % 3) + 1)] || bc.C1;
+  }
 
   // MVC2 HUD, drawn PIXEL-SOURCED from the ripped FONT.BIN atlas (hud_atlas):
   //   - two life bars: white bar swatch stretched to width=HP/maxHP, tinted by the
@@ -2274,13 +2281,47 @@ export class SpriteClient {
     const redFrac = (sl) => sl ? Math.max(0, Math.min(1, sl.red_health / (sl._maxhp || 144))) : 0;
 
     // --- life bars (red chip behind, current HP in front), tinted ripped swatch ---
+    // MVC2 layout: the two point life-gauges hug the TOP corners, P1 left / P2 right,
+    // each behind a dark bezel; P1 drains from its RIGHT edge inward (filled portion
+    // anchored LEFT), P2 mirrored. Below each point bar, the team's 2 BENCH/assist
+    // chars get thin secondary gauges (the assist health the GSTA carries for every
+    // slot regardless of `active`).
     const LB = { x1: 18, x2: 330, y: 16, w: 292, h: 14 };
-    // P1 (left-anchored): red trailing layer first, then HP on top.
+    const bez = '#101014';                          // dark bezel behind each gauge
+    // P1 (left-anchored): bezel, red trailing layer, then HP on top.
+    ctx.fillStyle = bez; ctx.fillRect(LB.x1 - 2, LB.y - 2, LB.w + 4, LB.h + 4);
     this._drawBar(ctx, LB.x1, LB.y, LB.w, LB.h, redFrac(p1), '#b01010', '#601010', false);
     this._drawBar(ctx, LB.x1, LB.y, LB.w, LB.h, hpFrac(p1),  c1[0], c1[1], false);
     // P2 (right-anchored mirror).
+    ctx.fillStyle = bez; ctx.fillRect(LB.x2 - 2, LB.y - 2, LB.w + 4, LB.h + 4);
     this._drawBar(ctx, LB.x2, LB.y, LB.w, LB.h, redFrac(p2), '#b01010', '#601010', true);
     this._drawBar(ctx, LB.x2, LB.y, LB.w, LB.h, hpFrac(p2),  c2[0], c2[1], true);
+
+    // --- assist / bench life gauges: the two NON-point chars of each team get a thin
+    // bar stacked under the main one, in their own C-slot color. Drained the same
+    // direction as the point bar (P1 left-anchored, P2 right-anchored). Skipped for a
+    // slot whose char_id is unset/garbage (out of match the bench is stale).
+    const ASSIST = { h: 4, gap: 2, w: 180 };        // shorter + thinner than the point bar
+    const pointSl = (s) => (s === p1 || s === p2);
+    const drawAssists = (sideSlots, baseX, fromRight, mirror) => {
+      let row = 0;
+      for (let i = 0; i < sideSlots.length; i++) {
+        const sl = this.slot[sideSlots[i]];
+        if (pointSl(sl)) continue;                            // skip the point char (its big bar is above)
+        // Only a bench char with LIVE health data gets a gauge — hides uninitialized /
+        // not-yet-streamed slots (char_id defaults to 0, so health/red is the real signal).
+        if (!sl || (!sl.active && sl.health <= 0 && sl.red_health <= 0)) continue;
+        const ay = LB.y + LB.h + 4 + row * (ASSIST.h + ASSIST.gap);
+        const ax = mirror ? (baseX + LB.w - ASSIST.w) : baseX;
+        const cols = this._barColsAt(i);
+        ctx.fillStyle = bez; ctx.fillRect(ax - 1, ay - 1, ASSIST.w + 2, ASSIST.h + 2);
+        this._drawBar(ctx, ax, ay, ASSIST.w, ASSIST.h, redFrac(sl), '#b01010', '#601010', fromRight);
+        this._drawBar(ctx, ax, ay, ASSIST.w, ASSIST.h, hpFrac(sl),  cols[0], cols[1], fromRight);
+        row++;
+      }
+    };
+    drawAssists(P1, LB.x1, false, false);
+    drawAssists(P2, LB.x2, true,  true);
 
     // --- super meters (width = fill/144), team-tinted ripped swatch ---
     this._drawBar(ctx, 18,  456, 250, 9, (hud.p1fill || 0) / METER_MAX, c1[0], c1[1], false);
@@ -2296,14 +2337,27 @@ export class SpriteClient {
     if (this._hud && this._hudImg) this._drawDigits(ctx, tstr, 320, 12, 22, 'center');
     else { ctx.fillStyle = '#fff'; ctx.font = 'bold 22px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillText(tstr, 320, 14); }
 
-    // --- hit counters: ripped FONT digits, combo>1 per side ---
+    // --- hit counters: ripped FONT digits + " HITS" label, combo>1 per side ---
+    // Placed BELOW the assist-gauge stack (y≈54) and inboard under the life gauge so it
+    // never collides with the bench bars — MVC2 shows "N HITS" tucked under the gauge.
+    const COMBO_Y = LB.y + LB.h + 4 + 2 * (ASSIST.h + ASSIST.gap) + 4;   // under both assist rows
     const drawCombo = (n, x, align) => {
       if (!(n > 1)) return;
-      if (this._hud && this._hudImg) this._drawDigits(ctx, String(n), x, 38, 15, align);
-      else { ctx.fillStyle = '#ffe14d'; ctx.font = 'bold 15px monospace'; ctx.textAlign = align; ctx.textBaseline = 'top'; ctx.fillText(n + ' HIT', x, 40); }
+      if (this._hud && this._hudImg) {
+        const w = this._drawDigits(ctx, String(n), x, COMBO_Y, 15, align);
+        // " HITS" suffix in the FONT (monospace fallback if not pixel-perfect) just right of the count
+        ctx.fillStyle = '#ffe14d'; ctx.font = 'bold 12px monospace';
+        ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+        const lx = (align === 'right') ? (x + 4) : (x + (w || 0) + 4);
+        if (align === 'right') { ctx.textAlign = 'left'; ctx.fillText('HITS', x + 4, COMBO_Y + 1); }
+        else ctx.fillText('HITS', lx, COMBO_Y + 1);
+      } else {
+        ctx.fillStyle = '#ffe14d'; ctx.font = 'bold 15px monospace'; ctx.textAlign = align; ctx.textBaseline = 'top';
+        ctx.fillText(n + ' HITS', x, COMBO_Y);
+      }
     };
-    drawCombo(hud.p1combo | 0, 24, 'left');
-    drawCombo(hud.p2combo | 0, 616, 'right');
+    drawCombo(hud.p1combo | 0, 70, 'left');
+    drawCombo(hud.p2combo | 0, 570, 'right');
     ctx.restore();
   }
 

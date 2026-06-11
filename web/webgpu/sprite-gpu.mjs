@@ -14,7 +14,7 @@
 // draw commands) — that's the only "from scratch" part; everything downstream
 // (effects, palette) reuses the renderer's machinery. Canvas2D is the fallback.
 
-import { PostProcessor } from './post-process.mjs?v=2';
+import { PostProcessor } from './post-process.mjs?v=3';
 
 const SHADER = `
 struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1) @interpolate(flat) palBase: u32, @location(2) @interpolate(flat) tint: vec3f };
@@ -145,6 +145,35 @@ export class SpriteGPU {
     // on a skipped frame, so the browser preserves the prior present. Set
     // window._spritePersistEmpty=false (or sg.persistEmpty=false) to disable.
     this.persistEmpty = true;
+    // PERSIST-ON-COLLAPSE (tag-OUT anti-blank, 2026-06-11). The v12 persistEmpty
+    // above only holds when the WHOLE frame is empty (n+ni+sn+effects==0). During a
+    // TAG-OUT the outgoing point char's body drops to 0 quads (slot inactive, or the
+    // incoming char's atlas not yet loaded) while a hit-spark / effect from the
+    // tag-in attack is STILL alive — so willDraw>0, persistEmpty does NOT fire,
+    // render() clears the offscreen and draws only the spark over black → the bodies
+    // vanish for those frames (the reported tag-out blank). Fix: keep a HELD copy of
+    // the last frame that actually drew character bodies, and when a frame has ZERO
+    // body instances (n+ni==0) but still has sparks/effects, SEED the offscreen from
+    // the held texture (loadOp:'load') instead of clearing — so the bodies persist
+    // under the sparks until the incoming char produces quads. holdTex is (re)sized
+    // with the offscreen target; null until the first body frame. Live override:
+    // window._spritePersistCollapse=false disables (raw clear-on-collapse).
+    this.persistCollapse = true;
+    this.holdTex = null; this._holdW = 0; this._holdH = 0; this._holdValid = false;
+  }
+
+  // Ensure the last-good-frame hold texture exists at the current offscreen size,
+  // matching the offscreen target's format. Recreated (invalidating the held frame)
+  // whenever the offscreen size changes — the resize caveat: a fresh-sized hold has
+  // no prior content, so we fall back to clear until the next body frame fills it.
+  _ensureHoldTex(w, h) {
+    if (this.holdTex && this._holdW === w && this._holdH === h) return;
+    if (this.holdTex) { try { this.holdTex.destroy(); } catch (_e) {} }
+    this.holdTex = this.dev.createTexture({
+      size: [w, h], format: this.fmt,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
+    });
+    this._holdW = w; this._holdH = h; this._holdValid = false;   // new size => no held content yet
   }
 
   init(device, canvas) {
@@ -500,12 +529,34 @@ export class SpriteGPU {
     // override (window._spritePersistEmpty) for debugging without redeploy.
     const persist = (typeof window !== 'undefined' && window._spritePersistEmpty != null)
       ? !!window._spritePersistEmpty : this.persistEmpty;
-    const willDraw = n + ni + sn + ((effects && effects.length) ? effects.length : 0);
+    const fxCount = (effects && effects.length) ? effects.length : 0;
+    const willDraw = n + ni + sn + fxCount;
     if (persist && !willDraw) { this._skippedEmpty = (this._skippedEmpty | 0) + 1; return; }
 
+    // TAG-OUT anti-blank: charContent = the character BODY instances this frame (the
+    // RGB + indexed-LUT bodies/parts). Sparks/effects are NOT scene content — they
+    // glow OVER the bodies. If bodies collapse to 0 while sparks/effects keep willDraw
+    // alive, seed the offscreen from the held last-good-body frame so the figures don't
+    // disappear under the spark. Otherwise (bodies present, or no valid hold yet) clear.
+    const charContent = n + ni;
+    const collapse = (typeof window !== 'undefined' && window._spritePersistCollapse != null)
+      ? !!window._spritePersistCollapse : this.persistCollapse;
+    // Hold texture matches the OFFSCREEN render-target dims (base × resScale), not the
+    // canvas dims — the copy extent must equal both textures' size.
+    const ow = this.PP._w | 0, oh = this.PP._h | 0;
+    this._ensureHoldTex(ow, oh);
+    const seedFromHold = collapse && charContent === 0 && willDraw > 0 && this._holdValid && this.holdTex;
+
     const enc = this.dev.createCommandEncoder();
+    if (seedFromHold) {
+      // Restore the held bodies into the offscreen so the spark/effect pass composites
+      // over them (loadOp:'load' below keeps these pixels).
+      enc.copyTextureToTexture({ texture: this.holdTex }, { texture: this.PP.offscreenTex }, [ow, oh]);
+      this._heldFrames = (this._heldFrames | 0) + 1;
+    }
     const pass = enc.beginRenderPass({
-      colorAttachments: [{ view: rt.colorView, clearValue: { r:0,g:0,b:0,a:0 }, loadOp: 'clear', storeOp: 'store' }],
+      colorAttachments: [{ view: rt.colorView, clearValue: { r:0,g:0,b:0,a:0 },
+        loadOp: seedFromHold ? 'load' : 'clear', storeOp: 'store' }],
     });
     if (n) {
       pass.setVertexBuffer(0, this.inst);
@@ -582,6 +633,16 @@ export class SpriteGPU {
       }
     }
     pass.end();
+    // Snapshot the offscreen into the hold texture WHENEVER this frame drew real
+    // character bodies (n+ni>0). That makes holdTex the "last good body frame" used to
+    // seed a later collapse (tag-out). We snapshot the pre-blit offscreen (game-space,
+    // post-process not yet applied) so the seed re-enters the SAME pipeline stage.
+    // Skipped on seed-from-hold frames (the offscreen already IS the held bodies + a
+    // spark; re-holding would bake transient sparks into the persisted frame).
+    if (charContent > 0) {
+      enc.copyTextureToTexture({ texture: this.PP.offscreenTex }, { texture: this.holdTex }, [ow, oh]);
+      this._holdValid = true;
+    }
     this.PP.blit(enc, this.ctx.getCurrentTexture().createView(), cw, ch, dbg || {});
     this.dev.queue.submit([enc.finish()]);
   }

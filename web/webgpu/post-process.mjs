@@ -259,7 +259,11 @@ export class PostProcessor {
         // Must match the renderer's pipeline target format (canvas format)
         this.offscreenTex = this.dev.createTexture({
             size: [w, h], format: this.canvasFmt,
-            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+            // COPY_SRC/COPY_DST: SpriteGPU's tag-out last-good-frame hold snapshots this
+            // offscreen into a hold texture (SRC) and seeds it back on a body-collapse
+            // frame (DST). RENDER_ATTACHMENT|TEXTURE_BINDING are the original PP usages.
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+                 | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
         });
         this.offscreenDepth = this.dev.createTexture({
             size: [w, h], format: 'depth32float',
