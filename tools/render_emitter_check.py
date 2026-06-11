@@ -27,7 +27,7 @@ def load():
 
 def render(sid, facing, anchor=(106.7, 433.4), scale=(1.0, 1.0),
            faceInv=True, faceFlip=False, emitFlipY=True, tileScale=1.0, S=1.0,
-           reflEdge=False):
+           reflEdge=False, partFlipX=True):
     asm, parts, png = load()
     exx, eyy = anchor
     pcX = CPSX * scale[0] * S
@@ -63,6 +63,12 @@ def render(sid, facing, anchor=(106.7, 433.4), scale=(1.0, 1.0),
         else:
             axisX = exx
             tlx = (2 * axisX - tlx + w) if reflEdge else (2 * axisX - tlx)
+        # PER-PART X-MIRROR GEOMETRY (0x4000) — BUG 2 FIX 2026-06-11. Mirror the rect
+        # across the owner anchor when r.flip is set, in symmetry with flipY (Y-mirror)
+        # below. No-op when r.flip=0 (idle sids unchanged). partFlipX=False = pre-fix
+        # (texture-only) for A/B.
+        if partFlipX and r.get("flip"):
+            tlx = 2 * exx - (tlx + w)
         if flipY:
             tly = 2 * eyy - (tly + h)
         flipYTex = (flipY != emitFlipY)

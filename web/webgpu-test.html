@@ -264,7 +264,7 @@ import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=11';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=82';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=83';
 import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=11';
 // StafGL (sprite-staf-gl.mjs) RETIRED — the STAF/HUDF stream now renders through the
 // proven PVR2Renderer (see STAFR/renderStaf below). StafGL stays on disk for reference.
@@ -744,6 +744,8 @@ addEventListener('keydown',e=>{
       +'<label title="EMITTER DEBUG trace (window._emitDbg): per ~60 frames trace Ryu cid0 body — live sid, atlas hit/miss, parts emitted."><input type="checkbox" id="emd_emitDbg"> emitDbg — Ryu trace (~1/sec)</label>'
       +'<label title="FORCE-STATIC demo pose (window._emitForce). Default OFF = live pose. ON = static GFX2 assembly demo pose."><input type="checkbox" id="emd_emitForce"> emitForce — force static demo pose</label>'
       +'<label title="On-the-fly all-poses emitter (window._emitterLive). Default OFF (proven shipping path). ON = build CHARQ-shaped live assembly."><input type="checkbox" id="emd_emitterLive"> emitterLive — all-poses live build</label>'
+      +'<label title="BUG 2 FIX (window._emitPartFlipX). Default ON: a per-part X-mirror part (0x4000/r.flip) also REFLECTS its screen rect across the owner anchor (like flipY does for Y) — fixes symmetric limbs (knock-up/launcher poses) stacking on the same side. OFF = pre-fix texture-only flip (A/B). NO-OP on idle (flip=0) poses."><input type="checkbox" id="emd_partFlipX"> partFlipX — per-part X-mirror geometry (BUG2)</label>'
+      +'<label title="BUG 3 STOPGAP (window._emitZByDepth). Default ON: order the char draw GROUPS by screen DEPTH (lower foot screen_y = nearer = drawn on top) instead of by char_id, so P1 is no longer permanently behind P2 when they overlap. OFF = legacy char_id order. EXACT fix needs a wire LAYER field (see report)."><input type="checkbox" id="emd_zByDepth"> zByDepth — depth Z-order stopgap (BUG3)</label>'
       +'<label title="Reflection mode. Default OFF = reflect the pen ORIGIN (2*A - tlx), faithful to neg r10 (disasm negates the pen accumulator, not the rect). ON = old edge reflect (2*A - (tlx+w)) which injects a spurious part-width offset."><input type="checkbox" id="emd_reflectEdge"> reflectEdge — old edge reflect (+w bug, A/B)</label>'
       +'<label>reflectDx <input type="range" id="emd_reflectDx" min="-40" max="40" step="0.5" value="0" style="width:120px;vertical-align:middle"> <span id="emd_reflectDxV" style="color:#0f0">0.0</span> <span style="color:#888">(game-px axis nudge)</span></label>'
       +'<label>tileScale <input type="range" id="emd_tileScale" min="0.25" max="2" step="0.05" value="1" style="width:120px;vertical-align:middle"> <span id="emd_tileScaleV" style="color:#0f0">1.00</span></label>'
@@ -805,6 +807,8 @@ addEventListener('keydown',e=>{
         ['_emitDbg','emd_emitDbg',false],
         ['_emitForce','emd_emitForce',false],
         ['_emitterLive','emd_emitterLive',false],
+        ['_emitPartFlipX','emd_partFlipX',true],  // BUG2 default ON (per-part X-mirror geometry)
+        ['_emitZByDepth','emd_zByDepth',true],    // BUG3 default ON (depth Z-order stopgap)
       ];
       BOOLS.forEach(([g,id,def])=>{
         const cb=document.getElementById(id); if(!cb) return;

@@ -863,9 +863,23 @@ export class SpriteClient {
         if (z > 0.1 && z < 10) this._zoom = z;
       }
     }
-    for (let s = 0; s < 6; s++) { const sl = this.slot[s]; if (sl.active) {
+    // ATLAS PRELOAD — BUG 1 FIX (tag-in blank) 2026-06-11. Previously we only kicked the
+    // atlas load for ACTIVE slots, so when a bench partner TAGGED IN its slot went active
+    // with a char_id whose atlas was never fetched → the async load gap drew nothing for a
+    // few frames → the character vanished ("client closes temporarily"). MVC2 populates all
+    // six character structs (P1C1..P2C3) with their char_id at match start (the bench/assist
+    // chars are loaded), and the GSTA block carries char_id for every slot regardless of
+    // `active`. So while IN MATCH we eagerly preload EVERY slot's char atlas — the incoming
+    // partner's atlas is already resident before it goes active → zero tag-in gap. Out of
+    // match we keep the active-only load (inactive char_id is stale/garbage between matches).
+    // The emitter body flicker-bridge (buildEmitterDrawList _heldEmit) is the second-line
+    // defense for any residual gap (a brand-new char_id seen mid-match before its fetch lands).
+    for (let s = 0; s < 6; s++) {
+      const sl = this.slot[s];
+      const want = this.inMatch ? (sl.char_id != null) : sl.active;
+      if (!want) continue;
       if (this.assemblyMode) this.loadAsmChar(sl.char_id); else this.loadChar(sl.char_id);
-    } }
+    }
   }
 
   // Draw the current state into a 2D context. Returns a small status object.
@@ -1706,6 +1720,29 @@ export class SpriteClient {
             // OPPOSITE facing: pen point mirrors across axisX, part extends RIGHT (no ±w).
             tlx = reflEdge ? (2 * axisX - tlx + w) : (2 * axisX - tlx);
           }
+          // PER-PART X-MIRROR GEOMETRY (0x4000) — BUG 2 FIX 2026-06-11. Until now the per-
+          // part 0x4000 bit (r.flip) drove ONLY the texture-U mirror (the `flip` attr below);
+          // it did NOT move the quad. That is WRONG: the selKeyed atlas bakes each part as ONE
+          // upright bitmap, so an X-mirrored part must REFLECT its screen rect (not just its
+          // pixels) — exactly as flipY (0x8000) reflects the rect below. Proof the texture-only
+          // path was wrong: PL00 sid 1 lists part 4 TWICE — {dx:93,flip:0} and {dx:93,flip:1}
+          // (a symmetric limb, e.g. both forearms). With the same pen and no geometry reflect,
+          // both copies landed on the IDENTICAL screen rect (just opposite U) → one limb drew
+          // on top of the other instead of on opposite sides. 112 PL00 parts carry flip=1; idle
+          // sids 61-68 (the only ones previously validated) carry NONE, so this never showed in
+          // the gate. ROM ground: bank03 loc_8c0344d4 processes 0x4000 X-mirror by the SAME
+          // mechanism as 0x8000 Y-mirror; the accepted flipY precedent (next line) reflects the
+          // rect across the owner anchor, so the X-mirror reflects across axisX in symmetry.
+          // Reduces to the validated form when r.flip=0 (no-op) — the truth gate + idle sids
+          // 62/68 stay byte-identical. window._emitPartFlipX=false restores the texture-only
+          // (pre-fix) behavior for A/B against a flycast-truth capture of a flip-heavy pose.
+          // ⚠ UNVALIDATED vs live truth: no flip=1 capture exists yet (the gate's sid 68 has
+          // none). The texture-U sense `(!F) XOR r.flip` is the ROM-literal port; this geometry
+          // mirror is its position counterpart, derived (not pixel-confirmed). See report for
+          // the precise sid/pose the parent must CHARQ-capture to gate it.
+          const partFlipX = (typeof window === 'undefined') ? true
+                          : (window._emitPartFlipX !== undefined ? !!window._emitPartFlipX : true);
+          if (partFlipX && r.flip) tlx = 2 * axisX - (tlx + w);   // mirror the rect like flipY does for Y
           if (flipY)    tly = 2 * (owner.eyy + gdy) - (tly + h);
           // READOUT: track the lead (max |pen-dx|) part — the jab/extended limb — and its
           // FINAL screen X (post-reflection), so the log shows which side the fist lands.
@@ -1876,14 +1913,49 @@ export class SpriteClient {
     }
 
     // --- bodies (the 6 tracked slots) ---  (skipped while force-demo is on)
+    // BODY FLICKER-BRIDGE — BUG 1 FIX (tag-in blank) 2026-06-11. Mirrors buildDrawList's
+    // `_held` (sprite-client.mjs:880) for the emitter. When a partner TAGS IN, that slot
+    // goes active with a char_id whose ASM atlas may still be loading (loadAsmChar is async)
+    // OR whose live sprite_id isn't yet in the atlas → emitAssembly returns 0 quads → the
+    // character blanks for a few frames. We KEEP the last good per-slot emit and, on a gap
+    // (active slot that produced nothing this frame because its atlas isn't loaded), re-push
+    // the held quads RE-ANCHORED to the slot's current screen pos so the held pose tracks the
+    // moving character through the gap. As soon as the atlas/pose lands the live emit takes
+    // over (it produced quads, so we don't replay). Cleared when the slot goes inactive.
+    // The preload above usually closes the gap entirely; this covers the residual frames.
+    if (!this._heldEmit) this._heldEmit = new Array(6).fill(null);
     if (!force) for (let s = 0; s < 6; s++) {
       const sl = this.slot[s];
-      if (!sl.active) continue;
+      if (!sl.active) { this._heldEmit[s] = null; continue; }
       let exx = sl.screen_x, eyy = sl.screen_y;
       if (this.predict !== false) { const dt = Math.min(now - sl.t, 33); if (dt > 0) { exx += sl.vx*dt; eyy += sl.vy*dt; } }
+      const before = out.length;
       emitAssembly({ cid: sl.char_id, exx, eyy, facing: sl.facing, slot: s, zBase: 0,
                      sclX: sl.scaleX, sclY: sl.scaleY, pal12d: sl.pal12d, pal12e: sl.pal12e },
                    sl.sprite_id);
+      if (out.length > before) {
+        // Live emit succeeded — snapshot it (deep-ish copy of the items + the anchor they
+        // were drawn at) so a later gap can replay it re-anchored. Only the same char_id is
+        // ever replayed (cleared on inactive / char change below).
+        const items = out.slice(before).map(it => ({ ...it }));
+        this._heldEmit[s] = { cid: sl.char_id, exx, eyy, items };
+      } else {
+        // Gap: this active slot drew nothing. Replay the last good emit IFF it's the SAME
+        // char (don't show the outgoing partner's pose for the incoming one) AND its atlas
+        // genuinely isn't ready yet (a not-loaded atlas, the tag-in case — not a permanent
+        // missing-pose, which the live path already handles by skipping). Re-anchor to the
+        // current screen pos so the held figure follows the live movement.
+        const h = this._heldEmit[s];
+        const c = this.asmChars[sl.char_id];
+        const atlasNotReady = !c || !c.img;   // still downloading (or kicked just now)
+        if (h && h.cid === sl.char_id && atlasNotReady) {
+          const ddx = (exx - h.exx) * scaleX, ddy = (eyy - h.eyy) * scaleY;
+          for (const it of h.items) {
+            out.push({ ...it, dx: it.dx + ddx, dy: it.dy + ddy });
+            drawn++;
+          }
+        }
+      }
     }
 
     // --- pool objects (cape / projectile / fx) ---  (skipped while force-demo is on)
@@ -1904,7 +1976,43 @@ export class SpriteClient {
                      blend: o.blend, fx: isFx }, o.sid);
     }
 
-    out.sort((a, b) => (a.charId - b.charId) || ((a.z || 0) - (b.z || 0)));
+    // Z-ORDER — BUG 3 STOPGAP 2026-06-11. The OLD sort `(a.charId - b.charId)` ordered the
+    // char GROUPS by ASCENDING char_id, so the lower char_id (typically P1) always rendered
+    // FIRST = BEHIND. When P1 and P2 overlap, P1 was permanently occluded by P2. MVC2's TRUE
+    // draw order is the slot/LAYER table (the slot table IS the draw list — see memory
+    // reference_mvc2_slot_table_drawlist), which is NOT in the GSTA wire today (the per-slot
+    // block carries active/char_id/sprite_id/screen_xy/facing/palette — NO layer/z byte). So
+    // an EXACT fix needs a wire field; see the report. STOPGAP (best stable client-side rule):
+    // order the char GROUPS by SCREEN DEPTH — the body whose foot (screen_y) is LOWER on
+    // screen is NEARER the camera and draws ON TOP. This fixes the constant P1-behind-P2 case
+    // (whoever stepped forward/jumped-in is drawn in front) and is stable frame-to-frame
+    // (no attack-flag flicker). The renderer groups CONSECUTIVE same-cid quads (sprite-gpu.mjs
+    // byChar Map = first-appearance order; later groups draw atop), so we MUST keep each cid's
+    // quads contiguous: we sort by a PER-CID depth key first, char_id as the deterministic
+    // tiebreak (stable grouping), then the intra-assembly z. Objects/fx inherit their owner
+    // cid's depth (fx cid=-1 keeps its existing front/back z). Ties (equal screen_y) fall back
+    // to char_id = the old behavior. window._emitZByDepth=false restores the pure char_id sort.
+    const zByDepth = (typeof window === 'undefined') ? true
+                   : (window._emitZByDepth !== undefined ? !!window._emitZByDepth : true);
+    let depthOf;
+    if (zByDepth) {
+      // Per-cid foot depth from the active body slots (larger screen_y = nearer = on top).
+      // Built once per draw list. A cid not on a body slot (pure effect cid) -> -Infinity so
+      // it sorts to the back of the group order unless it shares a body's cid.
+      const dmap = new Map();
+      for (let s = 0; s < 6; s++) { const sl = this.slot[s];
+        if (sl.active && sl.char_id != null) {
+          const d = sl.screen_y;
+          if (!dmap.has(sl.char_id) || d > dmap.get(sl.char_id)) dmap.set(sl.char_id, d);
+        } }
+      depthOf = (cid) => dmap.has(cid) ? dmap.get(cid) : -Infinity;
+    } else {
+      depthOf = () => 0;   // disabled -> pure char_id order (legacy)
+    }
+    out.sort((a, b) =>
+      (depthOf(a.charId) - depthOf(b.charId))      // nearer (larger screen_y) sorts LATER = on top
+      || (a.charId - b.charId)                     // deterministic, keeps each cid contiguous
+      || ((a.z || 0) - (b.z || 0)));               // intra-assembly back-to-front
     this._asmDrawn = drawn; this._asmMiss = missing; this._asmSkipSel = skipSel;
     this._asmNote = loading ? `emitter: loading ${loading} char atlas…`
                   : missing ? `emitter: missing ${missing} asm: ${missKeys.join(' ')} (${drawn} parts)`
