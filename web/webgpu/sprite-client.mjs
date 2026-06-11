@@ -2100,9 +2100,23 @@ export class SpriteClient {
       } }
     let groupKey;
     if (useLayer && anyLayer) {
-      // ASCENDING draw_layer: lower layer sorts FIRST = behind. cids with no layer (0xFF /
-      // pure-effect cids) sort to the BACK of the group order (key = -1 < any real layer).
-      groupKey = (cid) => lmap.has(cid) ? lmap.get(cid) : -1;
+      // Z-ORDER HYSTERESIS (2026-06-11): the engine re-slots bodies between layers
+      // frame-to-frame, so the raw per-frame draw_layer flips the P1/P2 group order =
+      // visible flicker ("some frames on top, some aren't"). Debounce each cid's layer:
+      // adopt a NEW layer only after it persists `_zHyst` frames (default 4); a transient
+      // 1-3 frame change keeps the prior layer. window._zHyst tunes it (1 = near-raw).
+      const ZHYST = (typeof window !== 'undefined' && window._zHyst != null) ? window._zHyst : 4;
+      this._zSticky = this._zSticky || new Map();
+      for (const [cid, L] of lmap) {
+        let st = this._zSticky.get(cid);
+        if (!st) { st = { layer: L, cand: L, n: 0 }; this._zSticky.set(cid, st); }
+        else if (L === st.layer) { st.cand = L; st.n = 0; }              // unchanged -> reset candidate
+        else if (L === st.cand) { if (++st.n >= ZHYST) { st.layer = L; st.n = 0; } } // persisted -> commit
+        else { st.cand = L; st.n = 1; }                                  // new candidate
+      }
+      // ASCENDING (sticky) draw_layer: lower layer sorts FIRST = behind. cids with no layer
+      // (0xFF / pure-effect cids) sort to the BACK of the group order (key = -1 < any real layer).
+      groupKey = (cid) => { const st = this._zSticky.get(cid); return st ? st.layer : -1; };
     } else if (zByDepth) {
       // FALLBACK: per-cid foot depth (larger screen_y = nearer = on top). Sort DESCENDING by
       // depth -> we negate so the comparator below stays "ascending key". A cid not on a body
