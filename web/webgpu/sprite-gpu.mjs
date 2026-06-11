@@ -137,6 +137,14 @@ export class SpriteGPU {
   constructor() {
     this.ok = false; this.chars = {}; this.charPal = {};
     this.maxInst = 64; this.maxGroups = 8; this.recolor = true;
+    // PERSIST-ON-EMPTY (tag-in anti-blank): when a frame would draw NOTHING
+    // (empty draw list, or a draw list that only references not-yet-loaded
+    // atlases — the transient tag-in gap), skip the whole GPU pass so the
+    // swap-chain keeps its LAST presented frame instead of clearing to black.
+    // The canvas is alphaMode:'opaque' and we never call getCurrentTexture()
+    // on a skipped frame, so the browser preserves the prior present. Set
+    // window._spritePersistEmpty=false (or sg.persistEmpty=false) to disable.
+    this.persistEmpty = true;
   }
 
   init(device, canvas) {
@@ -482,6 +490,18 @@ export class SpriteGPU {
       }
       if (sn) this.dev.queue.writeBuffer(this.sparkInst, 0, this.sparkInstData, 0, sn * 9);
     }
+
+    // PERSIST-ON-EMPTY: nothing to draw this frame (no body/idx instances, no
+    // sparks, no effect quads). Bail BEFORE the encoder/blit so we never touch
+    // getCurrentTexture() — the opaque swap-chain then re-presents the last
+    // good frame instead of a cleared (black) one. This is the tag-in fix:
+    // the brief drawn==0 gap between the old pose closing and the new pose's
+    // atlas/sprite_id arriving no longer blanks the canvas. Honors a live
+    // override (window._spritePersistEmpty) for debugging without redeploy.
+    const persist = (typeof window !== 'undefined' && window._spritePersistEmpty != null)
+      ? !!window._spritePersistEmpty : this.persistEmpty;
+    const willDraw = n + ni + sn + ((effects && effects.length) ? effects.length : 0);
+    if (persist && !willDraw) { this._skippedEmpty = (this._skippedEmpty | 0) + 1; return; }
 
     const enc = this.dev.createCommandEncoder();
     const pass = enc.beginRenderPass({
