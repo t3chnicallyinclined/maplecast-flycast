@@ -10,16 +10,17 @@ GFX2 cell table indexed by sprite_id, per the 2026-06-08/09 cell-data RE:
   cell_rec = GFX2_base + *(u32)(GFX2_base + (sid & 0x7FFF)*4)
     first u16 of cell_rec = group/part COUNT
     then COUNT * 8-byte records:
-       [dx s16 @+0] [dy s16 @+2] [palette u16 @+4] [GFX-selector u16 @+6]
-    (the OLD emitter read the selector from +4 = the constant palette; the REAL
-     texture selector is +6.)
+       [dx s16 @+0] [dy s16 @+2] [FLAGS u16 @+4] [GFX-selector u16 @+6]
+    The +4 field is the FLAGS word (NOT palette): X-mirror=0x4000, Y-mirror=0x8000
+    (CONFIRMED 2026-06-10, bank03 loc_8c0344d4 lines 10477/10503/10568/10594). The
+    texture selector is +6.
 
   part texture for a selector:
     gfx1 = *(node+0x15c)  (= GFX_DATA_00.BIN)
     blob = gfx1 + *(u32)(gfx1 + selector*4)
     w = blob[2]<<3, h = blob[3]<<3 ; texels at blob+4, LZSS-decoded (loc_8c0354c0),
     4bpp / PAL4.
-    palette row = (rec[+4] & 0x3ff) >> 4
+    palette = PER-CHARACTER (Dat_Pal node+0x164) — NOT a per-record row.
 
 GFX2 = the gfx2 segment (header slot +0x04 = GFX_DATA_01.BIN).
 GFX1 = the gfx1 segment (header slot +0x00 = GFX_DATA_00.BIN).
@@ -77,29 +78,60 @@ def read_ppm(path):
     return w, h, data[idx:idx + w * h * 3]
 
 
+def _detwiddle_rgb(px, w, h):
+    """The GFX1DUMP PPMs carry palette-correct RGB but in PVR-TWIDDLED storage order
+    (partDecodeToPPM emits them un-detwiddled for these slots). Reorder via the same
+    flycast PAL4 square-aware twop block-walk tile_to_indices uses. Magenta=transparent."""
+    out = bytearray(w * h * 4)
+    sq = min(w, h)
+    si = 0
+    for by0 in range(0, h, sq):
+        for bx0 in range(0, w, sq):
+            for y in range(0, sq, 4):
+                for x in range(0, sq, 4):
+                    blk = _twop(x, y, sq) >> 4
+                    base = blk * 16
+                    for i, (cx, cy) in enumerate(_PAL4_ORDER):
+                        j = (si + base + i) * 3
+                        if j + 2 >= len(px):
+                            continue
+                        r, g, b = px[j], px[j + 1], px[j + 2]
+                        if (r, g, b) == MAGENTA:
+                            continue
+                        d = ((by0 + y + cy) * w + (bx0 + x + cx)) * 4
+                        out[d:d + 4] = bytes((r, g, b, 255))
+            si += sq * sq
+    return bytes(out)
+
+
 def load_real_parts(realdir, hexname, selectors):
+    """Source clean part pixels from the GFX1DUMP. Prefers PL{HEX}_gfx1_NNNN.ppm (the
+    selector-indexed clean DM00 dump, twiddled -> detwiddle here); falls back to the older
+    PL{HEX}_part_NNN.ppm (linear). Both are MAPLECAST_GFX1DUMP/PARTDUMP output."""
     parts = {}
     miss = []
     for sel in selectors:
-        ppm = os.path.join(realdir, f"{hexname}_part_{sel:03d}.ppm")
-        if not os.path.exists(ppm):
-            miss.append(sel)
-            continue
-        got = read_ppm(ppm)
-        if not got:
-            miss.append(sel)
-            continue
-        w, h, px = got
-        rgba = bytearray(w * h * 4)
-        for i in range(w * h):
-            r, g, b = px[i * 3], px[i * 3 + 1], px[i * 3 + 2]
-            if (r, g, b) == MAGENTA:
-                continue  # transparent
-            rgba[i * 4 + 0] = r
-            rgba[i * 4 + 1] = g
-            rgba[i * 4 + 2] = b
-            rgba[i * 4 + 3] = 255
-        parts[sel] = (bytes(rgba), w, h)
+        g1 = os.path.join(realdir, f"{hexname}_gfx1_{sel:04d}.ppm")
+        legacy = os.path.join(realdir, f"{hexname}_part_{sel:03d}.ppm")
+        if os.path.exists(g1):
+            got = read_ppm(g1)
+            if got:
+                w, h, px = got
+                parts[sel] = (_detwiddle_rgb(px, w, h), w, h)
+                continue
+        if os.path.exists(legacy):
+            got = read_ppm(legacy)
+            if got:
+                w, h, px = got
+                rgba = bytearray(w * h * 4)
+                for i in range(w * h):
+                    r, g, b = px[i * 3], px[i * 3 + 1], px[i * 3 + 2]
+                    if (r, g, b) == MAGENTA:
+                        continue
+                    rgba[i * 4:i * 4 + 4] = bytes((r, g, b, 255))
+                parts[sel] = (bytes(rgba), w, h)
+                continue
+        miss.append(sel)
     return parts, miss
 
 
@@ -126,17 +158,26 @@ def read_cells(gfx2):
         #     X_acc += dx ;  Y_acc += dy   (facing-neutral; global flip is applied
         #     downstream in the emitter via owner.facing).  Each part is then drawn
         #     at  screen_xy(node+0xE0/E4) + (X_acc,Y_acc)*scale.
-        # Per-record +4 bit 0x10 = the part's own X-mirror (tile flip); we carry it
-        # as `flip` so the emitter can XOR it with global facing.
-        # See docs/MARVELOUS2-GFX-NOTES.md §3a (cumulative pen).
+        # CONFIRMED 2026-06-10 (SH4 expert, marvelous2 bank03 loc_8c0344d4 +
+        # bank12 loc_8c1244b0): the 8-byte record is
+        #     [dx s16 @+0] [dy s16 @+2] [FLAGS u16 @+4] [sel u16 @+6]
+        # The +4 field we historically read as "pal" is the FLAGS word, NOT palette.
+        #   X-mirror = FLAGS & 0x4000  (bank03:10477/10568)  — XORs with facing
+        #   Y-mirror = FLAGS & 0x8000  (bank03:10503/10594)  — does NOT XOR with facing
+        # "Rotation" is not a separate field — it's these mirror bits re-expressed as
+        # UV-corner flips in bank12; flipX/flipY at the part level reproduce orientation.
+        # Palette is PER-CHARACTER (Dat_Pal node+0x164), NOT per-record — there is no
+        # per-record palette-row. (The old (pal>>4)&7 / 0x10 / 0x20 reads were WRONG.)
         px = py = 0
         for _ in range(cnt):
-            dx, dy, pal, sel = struct.unpack_from("<hhHH", gfx2, p)
+            dx, dy, flags, sel = struct.unpack_from("<hhHH", gfx2, p)
             p += 8
+            # DISASM (bank03:10454/10470, MARVELOUS2-GFX-NOTES §3a): X-acc += dx (facing-
+            # neutral), Y-acc -= dy. (The old code did py += dy — inverted vertical layout.)
             px += dx
-            py += dy
+            py -= dy
             recs.append({"dx": px, "dy": py, "ddx": dx, "ddy": dy,
-                         "pal_raw": pal, "sel": sel})
+                         "flags": flags, "sel": sel})
         cells[idx] = recs
     return cells, n
 
@@ -249,21 +290,57 @@ def build_part_pixels(gfx1, selectors):
     return parts
 
 
+# ----- PVR PAL4 TWIDDLE (flycast texconv.cpp port; proven on PL00 sel 1/34) -----
+# CONFIRMED 2026-06-09: PAL4 is ALWAYS twiddled (texconv.cpp format table: linear PAL4
+# = nullptr). The old row-major `tile_to_indices` produced stripe NOISE. Port of
+# twiddle_slow (texconv.cpp:37) + twop (169) + ConvertTwiddlePal4 (289). Non-square
+# textures are a run of min(w,h) squares, each twiddled internally (texture_TW loop).
+# Validated against _ryu_capture/decode_flycast.py / HC_0001_twiddle.png (clean torso).
+_TW_X = [0] * 1024
+_TW_Y = [[0] * 1024 for _ in range(11)]
+def _init_twiddle():
+    def tw(x, y, x_sz, y_sz):
+        rv = 0; sh = 0; x_sz >>= 1; y_sz >>= 1
+        while x_sz or y_sz:
+            if y_sz: rv |= (y & 1) << sh; y_sz >>= 1; y >>= 1; sh += 1
+            if x_sz: rv |= (x & 1) << sh; x_sz >>= 1; x >>= 1; sh += 1
+        return rv
+    for s in range(11):
+        ysz = 1 << s
+        for i in range(1024):
+            _TW_Y[s][i] = tw(0, i, ysz, 1024)
+        if s == 0:
+            for i in range(1024):
+                _TW_X[i] = tw(i, 0, 1024, 1)  # depth gated by y; only y bits matter for X table base
+_init_twiddle()
+# detwiddle[0][bcy][x] (x bits, y-size gated) — recompute properly per call via tw
+def _twiddle_slow(x, y, x_sz, y_sz):
+    rv = 0; sh = 0; x_sz >>= 1; y_sz >>= 1
+    while x_sz or y_sz:
+        if y_sz: rv |= (y & 1) << sh; y_sz >>= 1; y >>= 1; sh += 1
+        if x_sz: rv |= (x & 1) << sh; x_sz >>= 1; x >>= 1; sh += 1
+    return rv
+def _twop(x, y, sq):                       # square block, sq = side (pow2)
+    return _twiddle_slow(x, 0, sq, sq) + _twiddle_slow(0, y, sq, sq)
+_PAL4_ORDER = [(0,0),(0,1),(1,0),(1,1),(0,2),(0,3),(1,2),(1,3),
+               (2,0),(2,1),(3,0),(3,1),(2,2),(2,3),(3,2),(3,3)]
 def tile_to_indices(texels, sw, sh):
-    """8x8 storage-row-major 4bpp -> linear index buffer (W*H bytes)."""
-    W = sw * TILE
-    H = sh * TILE
+    """4bpp PAL4 TWIDDLED texels -> linear index buffer (W*H). sw/sh = tile dims (×8)."""
+    W = sw * TILE; H = sh * TILE
     idx = bytearray(W * H)
-    for ty in range(sh):
-        for tx in range(sw):
-            base = (ty * sw + tx) * 64
-            for py in range(TILE):
-                row = base + py * TILE
-                ob = (ty * TILE + py) * W + tx * TILE
-                for px in range(TILE):
-                    t = row + px
-                    b = texels[t >> 1] if (t >> 1) < len(texels) else 0
-                    idx[ob + px] = (b >> 4) & 0xf if (t & 1) else b & 0xf
+    sq = min(W, H)
+    pos = 0
+    for by0 in range(0, H, sq):
+        for bx0 in range(0, W, sq):
+            sub = texels[pos:pos + (sq * sq >> 1)]; pos += (sq * sq >> 1)
+            for y in range(0, sq, 4):
+                for x in range(0, sq, 4):
+                    blk = _twop(x, y, sq) >> 4   # block number (16 px/block)
+                    base = blk * 8
+                    for i, (cx, cy) in enumerate(_PAL4_ORDER):
+                        b = sub[base + (i >> 1)] if base + (i >> 1) < len(sub) else 0
+                        nib = (b & 0xF) if (i & 1) == 0 else ((b >> 4) & 0xF)
+                        idx[(by0 + y + cy) * W + (bx0 + x + cx)] = nib
     return idx
 
 
@@ -373,8 +450,12 @@ def main():
             out_recs.append({
                 "dx": r["dx"], "dy": r["dy"],          # CUMULATIVE pen (absolute in cell space)
                 "part": r["sel"],
-                "pal": (r["pal_raw"] & 0x3ff) >> 4,
-                "flip": 1 if (r["pal_raw"] & 0x10) else 0,   # +4 bit 0x10 = part X-mirror
+                # CONFIRMED 2026-06-10 (bank03 loc_8c0344d4): +4 is the FLAGS word.
+                #   X-mirror = FLAGS & 0x4000 (XORs with facing in the emitter)
+                #   Y-mirror = FLAGS & 0x8000 (does NOT XOR with facing)
+                # Palette is per-CHARACTER (Dat_Pal node+0x164), not per-record — dropped.
+                "flip":  1 if (r["flags"] & 0x4000) else 0,
+                "flipy": 1 if (r["flags"] & 0x8000) else 0,
             })
         if out_recs:
             assemblies[str(idx)] = out_recs
@@ -388,11 +469,14 @@ def main():
         "parts": parts_json,
         "assemblies": assemblies,
         "_note": "CRACKED GFX2 cell table: assemblies keyed by cell-index==sprite_id; "
-                 "rec part=+6 selector (GFX1 offset-table idx), pal=(rec+4 & 0x3ff)>>4, "
-                 "flip=(rec+4 & 0x10). dx/dy are CUMULATIVE (running pen): the geometry "
-                 "emitter loc_8c0344d4/loc_8c0345c4 advances a pen by each record's raw "
-                 "(dx,dy) and draws the part at screen_xy+(pen)*scale, so the JSON stores "
-                 "the accumulated absolute pen per record. rip_gfx2_assembly.py.",
+                 "rec part=+6 selector (GFX1 offset-table idx); +4 is the FLAGS word: "
+                 "flip=(flags & 0x4000) X-mirror (XORs facing), flipy=(flags & 0x8000) "
+                 "Y-mirror (no facing XOR). Palette is per-CHARACTER (Dat_Pal node+0x164), "
+                 "NOT per-record. dx/dy "
+                 "are CUMULATIVE (running pen): emitter loc_8c0344d4 advances X-acc += dx, "
+                 "Y-acc -= dy per record and draws at screen_xy+(pen)*scale; JSON stores the "
+                 "accumulated absolute pen. Part pixels = PAL4 TWIDDLED (flycast texconv "
+                 "port, tile_to_indices). rip_gfx2_assembly.py (fixes 2026-06-09).",
     }
     with open(os.path.join(args.out, f"{hexname}_asm.json"), "w") as f:
         json.dump(asm_json, f)

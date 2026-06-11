@@ -47,7 +47,8 @@ Apply in order, then dedup edges (RELATE is **not** idempotent — see below):
 
 ```bash
 for f in schema_seed 01_schema 02_char_struct 03_routines 04_memory_data \
-         05_characters 06_findings_sources; do
+         05_characters 06_findings_sources 08_emitter_render_model \
+         09_facing_subgraph; do
   tools/re_kb/rekb.sh @tools/re_kb/$f.surql
 done
 tools/re_kb/rekb.sh @tools/re_kb/07_dedup_edges.surql
@@ -193,4 +194,6 @@ Always `cites` the source class so a reader can tell CONFIRMED from INFERRED.
 | `05_characters.surql` | full 59-char roster (char_id↔name↔S_PLxx) + Ryu anim groups |
 | `06_findings_sources.surql` | sources + key findings (status/confidence) + about/cites |
 | `07_dedup_edges.surql` | collapse duplicate edges (run after any reseed) |
+| `09_facing_subgraph.surql` | the FACING subgraph: setter `loc_8c0d97ee` (Facing_Update) --writes--> `field:facing` --reads--> render-gate (`loc_8c03453a`/`034548` neg r10, `0346c4` neg r8) + emitter + spawn cross-check; the `field_semantics_from_setter` PRINCIPLE finding (read the SET-site for a field's meaning); `contribution_candidate` tags for upstream marvelous2 |
+| `08_emitter_render_model.surql` | off-SH4 emitter render model: MASTER `emitter_render_model` finding + all session sub-findings + validation gate + OPEN items, fully cross-linked |
 | `rekb.sh` / `rekb.cmd` | query/apply helpers |

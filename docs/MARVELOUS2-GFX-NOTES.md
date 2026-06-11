@@ -146,7 +146,70 @@ and is the natural home for cell-geometry metadata. Look there next.
 
 ---
 
+## 3a. CONFIRMED (2026-06-09): the GFX2 cell walk + the dx/dy CHAINING RULE
+
+This is the authoritative geometry path (supersedes the §6 "dx/dy are added to the
+character screen position" claim, which was an *absolute*-per-record guess). Traced
+instruction-by-instruction from `bank03.asm`:
+
+- **Per-frame BODY emitter `loc_8c033d78`** (bank03:9092; driver `loc_8c03dcba`→
+  `loc_8c03dd6c`, 6× stride 0x5A4 from 0x8C268340) builds the **16-byte
+  `{w,h,attr,texptr,palptr}`** part list — it reads only `@(0x4,r13)`/`@(0x6,r13)` of
+  each 8-byte record and **carries NO screen coordinates** (texptr only). Placement is a
+  *separate* pass.
+- **Geometry/screen-quad emitter `loc_8c0344d4`** (bank03:10218; reached via
+  `bsr loc_8c0344d4` at bank03:11281). This is where dx/dy become screen pixels:
+  - `r4 = *(node+0x160)` = GFX2 base; `sid = @(node+0x144) & 0x7FFF`;
+    `cell = GFX2 + *(u32)(GFX2 + sid*4)`; **first u16 `@r11+` = record COUNT**
+    (bank03:10241-10246). ← confirms the extractor's `GFX2[tbl[sid]]`, count, 8-byte stride.
+  - **The pen is a RUNNING ACCUMULATOR, not absolute.** `r10` = X-acc,
+    `@(0x14,r15)` = Y-acc, initialized to the cell hotspot (`node+0x134/0x136`, ~0 for the
+    body) in the head; each outer record advances it: `sub r5,r10` / `add r5,r10`
+    (X ± dx, gated by facing) and `@(0x14,r15) -= dy` (bank03:10454/10545/10470). Record
+    stride `add 0x08,r11` at `loc_8c03488e`.
+  - Final per-tile vertex (`loc_8c0347c8`): `screen_x = node+0xE0 + (X_acc + tileX)*xscale(0xEC)`,
+    `screen_y = node+0xE4 + (Y_acc + tileY)*yscale(0xF0)` (bank03:10718-10736).
+- **Each record expands via an INNER tile table** `loc_8c0345c4` (`r13 = @(node+0xDC)`,
+  4-byte stride `add 0x04,r13`, count `@(0x1,r13)+1`): a part of `lw×lh` LOGICAL tiles emits
+  one quad per tile at `pen + (col*scale, row*scale)` (bank03:10672-10684 `muls.w` col/row by
+  `@r13`). **This is the keystone ~2:1 group→quad expansion.** For the lean client the
+  whole-part-quad shortcut is a no-op **ONLY when storage == logical**. ⚠️ **CORRECTED
+  2026-06-10 (finding:emitter_limb_placement):** the GFX1 header is `[lw][lh][sw][sh]` =
+  LOGICAL vs STORAGE tile dims, and the engine draws ONLY the `lw·8 × lh·8` logical region —
+  NOT the full `sw·8 × sh·8` storage. The real pixels live in the **BOTTOM-LEFT** `lw·8 × lh·8`
+  window of storage (parts are bottom-up; 148/148 padded PL00 body sels confirm 100% pixel
+  residency), whose top-left == the cumulative-pen part origin. Ground truth: `chosen_body.json`
+  torso `tex_wh` 128 storage → 106×137 screen = **64 LOGICAL · full CPS** (exact); storage
+  `128·CPS` = 213×274 = 2× too big. So the offline extractor MUST crop to the logical
+  bottom-left rectangle (`tools/extract_gfx1_atlas.py decode_part`) before packing — packing full
+  storage put padded limbs up to 2× oversized and pen-offset (the limb-placement bug). The
+  whole-part quad at `pen·CPS` with the logical-cropped part and `tileScale=1.0` (full CPS) is
+  then geometrically equivalent to the game's per-tile re-tiling.
+- **Per-record flip bits live in `@(0x4,r11)`** (the +4 FLAGS word). **CORRECTED
+  2026-06-10** (SH4 expert, bank03 `loc_8c0344d4` + bank12 `loc_8c1244b0`): the masks are
+  **0x4000 = part X-mirror** (bank03:10477/10568) and **0x8000 = part Y-mirror**
+  (bank03:10503/10594) — *not* 0x10/0x20 (that earlier read was wrong). **X-mirror XORs
+  with `facing` (node+0x110); Y-mirror does NOT.** "Rotation" is not a separate field — it
+  is these two mirror bits re-expressed as UV-corner flips in bank12, so applying flipX/flipY
+  at the part level reproduces the orientation (there is no rotation field to rip). The GLOBAL
+  left/right flip is `facing` at the routine head, which the client applies via `owner.facing`
+  and XORs with the per-record X-mirror.
+- **The +4 field is FLAGS, not palette.** Palette is **per-CHARACTER** (`Dat_Pal` node+0x164),
+  not per-record — there is no per-record palette row. (The old `(pal>>4)&7` / `&0x10` / `&0x20`
+  reads conflated FLAGS with a palette field and are dropped.)
+
+**Net rule for the extractor/emitter:** accumulate raw (dx,dy) per cell into an absolute
+pen (facing-neutral) and store that; the client adds `screen_xy + pen*scale` and applies
+global facing on top. Empirically the cumulative pen yields body-sized layouts (PL00 cell
+span median ~94px, legitimately wider for beam/projectile cells e.g. cell 57 dx=256), where
+the absolute model piled parts at the origin (the prior 158px scatter). Implemented in
+`tools/rip_gfx2_assembly.py` `read_cells()`.
+
 ## 3. EXTRAS walk (the assembly iterator)
+
+> ⚠️ The 8-byte record below was the OLD `EXTRAS_DATA`-based guess. The LIVE pose geometry
+> comes from the **GFX2 cell table** (§3a): record = `[dx s16][dy s16][pal u16][SEL u16]`,
+> dx/dy are CUMULATIVE, SEL(+6) indexes GFX1. Keep §3a as the source of truth.
 
 Confirmed 8-byte record layout (matches `docs/PART-ASSEMBLY-PLAN.md`):
 ```

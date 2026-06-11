@@ -30,7 +30,8 @@ fn vs(@builtin(vertex_index) vi: u32,
       @location(1) auv: vec4f,     // u0,v0,u1,v1 atlas UV
       @location(2) flip: f32,
       @location(3) palBase: f32,
-      @location(4) tint: vec3f) -> VSOut {  // additive fx tint (hit-flash / super-aura), 0 = none
+      @location(4) tint: vec3f,     // additive fx tint (hit-flash / super-aura), 0 = none
+      @location(5) flipY: f32) -> VSOut {
   var corners = array<vec2f,6>(
     vec2f(0.,0.), vec2f(1.,0.), vec2f(0.,1.),
     vec2f(0.,1.), vec2f(1.,0.), vec2f(1.,1.));
@@ -38,9 +39,9 @@ fn vs(@builtin(vertex_index) vi: u32,
   let px = dest.x + c.x * dest.z;
   let py = dest.y + c.y * dest.w;
   let clip = vec2f(px / u.canvas.x * 2. - 1., 1. - py / u.canvas.y * 2.);
-  var ux = c.x;
-  if (flip > 0.5) { ux = 1. - c.x; }
-  let uv = vec2f(mix(auv.x, auv.z, ux), mix(auv.y, auv.w, c.y));
+  var ux = c.x; if (flip  > 0.5) { ux = 1. - c.x; }
+  var vy = c.y; if (flipY > 0.5) { vy = 1. - c.y; }
+  let uv = vec2f(mix(auv.x, auv.z, ux), mix(auv.y, auv.w, vy));
   var o: VSOut; o.pos = vec4f(clip, 0., 1.); o.uv = uv; o.palBase = u32(palBase + 0.5); o.tint = tint; return o;
 }
 @fragment
@@ -104,13 +105,15 @@ const MAXB: u32 = 8u;   // worst-case char needs 8 palette banks (e.g. PL13/PL1C
 @vertex
 fn vs_lut(@builtin(vertex_index) vi: u32,
           @location(0) dest: vec4f, @location(1) auv: vec4f,
-          @location(2) flip: f32, @location(3) grp: f32, @location(4) tint: vec3f) -> VSOut {
+          @location(2) flip: f32, @location(3) grp: f32, @location(4) tint: vec3f,
+          @location(5) flipY: f32) -> VSOut {
   var corners = array<vec2f,6>(vec2f(0.,0.),vec2f(1.,0.),vec2f(0.,1.),vec2f(0.,1.),vec2f(1.,0.),vec2f(1.,1.));
   let c = corners[vi];
   let px = dest.x + c.x * dest.z; let py = dest.y + c.y * dest.w;
   let clip = vec2f(px / u.canvas.x * 2. - 1., 1. - py / u.canvas.y * 2.);
-  var ux = c.x; if (flip > 0.5) { ux = 1. - c.x; }
-  let uv = vec2f(mix(auv.x, auv.z, ux), mix(auv.y, auv.w, c.y));
+  var ux = c.x; if (flip  > 0.5) { ux = 1. - c.x; }
+  var vy = c.y; if (flipY > 0.5) { vy = 1. - c.y; }
+  let uv = vec2f(mix(auv.x, auv.z, ux), mix(auv.y, auv.w, vy));
   var o: VSOut; o.pos = vec4f(clip,0.,1.); o.uv = uv; o.g = u32(grp + 0.5); o.tint = tint; return o;
 }
 @fragment
@@ -127,7 +130,7 @@ fn fs_lut(i: VSOut) -> @location(0) vec4f {
   return vec4f(rgb, 1.0);
 }`;
 
-const INST_FLOATS = 13;       // dest(4) + auv(4) + flip(1) + palBase(1) + tint(3)
+const INST_FLOATS = 14;       // dest(4) + auv(4) + flip(1) + palBase(1) + tint(3) + flipY(1)
 const INST_STRIDE = INST_FLOATS * 4;
 
 export class SpriteGPU {
@@ -165,6 +168,7 @@ export class SpriteGPU {
             { shaderLocation: 2, offset: 32, format: 'float32' },
             { shaderLocation: 3, offset: 36, format: 'float32' },
             { shaderLocation: 4, offset: 40, format: 'float32x3' },
+            { shaderLocation: 5, offset: 52, format: 'float32' },
           ]}]},
         fragment: { module: mod, entryPoint: 'fs', targets: [{ format: this.fmt }] },
         primitive: { topology: 'triangle-list' },
@@ -181,6 +185,7 @@ export class SpriteGPU {
             { shaderLocation: 2, offset: 32, format: 'float32' },
             { shaderLocation: 3, offset: 36, format: 'float32' },
             { shaderLocation: 4, offset: 40, format: 'float32x3' },
+            { shaderLocation: 5, offset: 52, format: 'float32' },
           ]}]},
         fragment: { module: mod, entryPoint: 'fs', targets: [{ format: this.fmt,
           blend: { color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
@@ -226,6 +231,7 @@ export class SpriteGPU {
         { shaderLocation: 2, offset: 32, format: 'float32' },
         { shaderLocation: 3, offset: 36, format: 'float32' },
         { shaderLocation: 4, offset: 40, format: 'float32x3' },
+        { shaderLocation: 5, offset: 52, format: 'float32' },
       ]};
       this.lutPipe = device.createRenderPipeline({
         layout: device.createPipelineLayout({ bindGroupLayouts: [this.lutBgl] }),
@@ -397,6 +403,7 @@ export class SpriteGPU {
         // STEP-1 fx tint (rgb, additive). Absent -> 0,0,0 = no change.
         const t = s.tint;
         this.instData[o + 10] = t ? t[0] : 0; this.instData[o + 11] = t ? t[1] : 0; this.instData[o + 12] = t ? t[2] : 0;
+        this.instData[o + 13] = s.flipY ? 1 : 0;   // part Y-mirror (flags & 0x8000)
         if (!isAdd(s)) normCount++;
         n++;
       }
@@ -451,6 +458,7 @@ export class SpriteGPU {
         this.idxInstData[o+8] = s.flip ? 1 : 0; this.idxInstData[o+9] = gj;   // LUT group index
         const t = s.tint;
         this.idxInstData[o+10] = t ? t[0] : 0; this.idxInstData[o+11] = t ? t[1] : 0; this.idxInstData[o+12] = t ? t[2] : 0;
+        this.idxInstData[o+13] = s.flipY ? 1 : 0;   // part Y-mirror (flags & 0x8000)
         if (!isAdd(s)) normCount++;
         ni++;
       }

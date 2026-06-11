@@ -1,0 +1,107 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>MVC2 Stage Rip — PVR2Renderer test</title>
+<style>
+  body { margin:0; background:#111; color:#ccc; font:13px monospace; }
+  #wrap { position:relative; width:640px; height:480px; margin:10px auto; }
+  canvas { position:absolute; left:0; top:0; width:640px; height:480px;
+           image-rendering:pixelated; background:#000; }
+  #panel { width:660px; margin:0 auto; padding:8px; }
+  label { display:inline-block; width:90px; }
+  input[type=range] { width:200px; vertical-align:middle; }
+  .row { margin:2px 0; }
+  select, button { font:13px monospace; }
+</style>
+<div id="wrap">
+  <canvas id="cv" width="640" height="480"></canvas>
+</div>
+<div id="panel">
+  <div class="row">
+    Stage: <select id="stage"></select>
+    <button id="reload">reload</button>
+    <span id="status">…</span>
+  </div>
+  <div class="row"><label>fov</label><input type="range" id="fov" min="10" max="90" value="35"><span id="fovv"></span></div>
+  <div class="row"><label>eyeY</label><input type="range" id="eyeY" min="-2000" max="3000" value="600"><span id="eyeYv"></span></div>
+  <div class="row"><label>eyeZ</label><input type="range" id="eyeZ" min="500" max="20000" value="4200"><span id="eyeZv"></span></div>
+  <div class="row"><label>targetY</label><input type="range" id="targetY" min="-2000" max="3000" value="600"><span id="targetYv"></span></div>
+  <div class="row"><label>targetZ</label><input type="range" id="targetZ" min="-20000" max="2000" value="-2000"><span id="targetZv"></span></div>
+  <div class="row"><small>3D NAOMI stage geometry projected by a configurable fight camera (the camera is the calibration gap — see stage-client.mjs). Sliders tune it live.</small></div>
+</div>
+
+<script type="module">
+import { PVR2Renderer } from './webgpu/pvr2-renderer.mjs';
+import { StageClient } from './webgpu/stage-client.mjs';
+
+const statusEl = document.getElementById('status');
+const cv = document.getElementById('cv');
+
+// populate stage dropdown 00..10
+const sel = document.getElementById('stage');
+for (let i = 0; i <= 0x10; i++) {
+  const o = document.createElement('option');
+  o.value = i; o.textContent = 'STG' + i.toString(16).toUpperCase().padStart(2, '0');
+  sel.appendChild(o);
+}
+
+const renderer = new PVR2Renderer();
+const stageBase = new URLSearchParams(location.search).get('stages') || './test-atlas/stages';
+const stage = new StageClient(stageBase);
+let dev = null;
+
+async function boot() {
+  try {
+    dev = await renderer.init(cv);
+    stage.attachDevice(dev);
+    bindCam();
+    loadStage(0);
+    requestAnimationFrame(loop);
+  } catch (e) {
+    statusEl.textContent = 'WebGPU init failed: ' + e.message;
+    console.error(e);
+  }
+}
+
+function camFromUI() {
+  const g = id => parseFloat(document.getElementById(id).value);
+  stage.cam.fovDeg = g('fov');
+  stage.cam.eyeY = g('eyeY');
+  stage.cam.eyeZ = g('eyeZ');
+  stage.cam.targetY = g('targetY');
+  stage.cam.targetZ = g('targetZ');
+  for (const id of ['fov','eyeY','eyeZ','targetY','targetZ'])
+    document.getElementById(id+'v').textContent = document.getElementById(id).value;
+  stage.rebuild();
+}
+
+function bindCam() {
+  for (const id of ['fov','eyeY','eyeZ','targetY','targetZ'])
+    document.getElementById(id).addEventListener('input', camFromUI);
+  camFromUI();
+}
+
+function loadStage(id) {
+  statusEl.textContent = 'loading…';
+  stage.stageId = -1; stage.wantId = -1;
+  stage.setState(id, 0);
+  const t = setInterval(() => {
+    if (stage.stageId === id) {
+      clearInterval(t);
+      camFromUI();
+      const d = stage._data;
+      statusEl.textContent = `meshes=${d.meshes.length} tris=${stage.parsed.vertexCount/3|0} tex=${d.textures.length}`;
+    }
+  }, 100);
+}
+
+sel.addEventListener('change', () => loadStage(parseInt(sel.value)));
+document.getElementById('reload').addEventListener('click', () => loadStage(parseInt(sel.value)));
+
+function loop() {
+  // clear to a mid-grey so we can see the stage silhouette against background
+  stage.render(renderer);
+  requestAnimationFrame(loop);
+}
+
+boot();
+</script>

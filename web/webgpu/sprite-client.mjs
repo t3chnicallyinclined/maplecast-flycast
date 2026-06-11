@@ -91,6 +91,16 @@ export class SpriteClient {
     this.stafOn = true;
     this._stafQuadN = 0; this._stafTexN = 0;
 
+    // ===== CHARQ (CHRQ per-part PVR sprite-quad character render) =====
+    // _charqParsed is the PVR2Renderer input contract (same shape as _stafParsed),
+    // built in onCHARQ from the Oracle-read per-part screen quads. Textures resolve
+    // from LIVE VRAM via the global TextureManager (real tcw/tsp/pcw) — no surrogate.
+    this.charqFrame = 0;
+    this.charqOn = false;
+    this._charqFrame = null;   // {frameNum, objs:[{cid,sprite_id,node,quads:[...]}]}
+    this._charqParsed = null;  // {vertexData,vertexCount,opaque,punchThrough,translucent}
+    this._charqQuadN = 0;
+
     // ===== Assembly-driven render path (parallel to whole-sprite) =====
     // When true, buildAssemblyDrawList() is the GPU source instead of buildDrawList().
     // Each object's sprite_id resolves to an assembly (a list of part placements);
@@ -101,6 +111,23 @@ export class SpriteClient {
     //              palette:[...], pal128:[[r,g,b]...], screenW, screenH, name }
     this.asmChars = {};
     this._asmLoading = {};     // cid -> Promise (de-dupe)
+    // Negative cache: char_ids whose emitter-atlas fetch already 404'd (or otherwise
+    // failed). loadAsmChar attempts ONCE per char; on failure the cid lands here and
+    // every subsequent frame skips the fetch silently. Without this a genuinely-missing
+    // char's parts.png/asm.json 404 re-fires every frame (the ?t=Date.now() bust defeats
+    // the HTTP cache) -> a 404 storm that stalls the main render. resetAsmMissing()
+    // clears it after a deploy so newly-shipped atlases get a fresh attempt.
+    this._asmMissing = new Set();
+    // sel -> {tcw,tsp,pcw} resolver for the ON-THE-FLY live-VRAM emitter
+    // (buildEmitterLiveCharq). THE OPEN PIECE: maps a static GFX1 selector to the VRAM
+    // tile the engine loaded it to. Null by default — the live path is gated OFF until
+    // this is populated from an Oracle probe (0x8C0345C4: rmem r11:8 + resulting TCW)
+    // or the contiguous GFX1 load layout. A heuristic stub an operator can wire up:
+    //   this._selToTcw = SpriteClient.heuristicSelToTcw(vramBase /*per-char GFX base*/);
+    // It encodes the CHARQ-confirmed shape (PAL4 fmt5, 32x32 tiles, stride 0x200, pal
+    // bank = player slot) but the per-char vramBase + exact sel ordering are UNKNOWN,
+    // so it WILL mis-resolve until the probe confirms them. Do NOT ship it on by default.
+    this._selToTcw = null;
     // CpsX/CpsY game scale (work.asm, Preppy RE) — part dx/dy/w/h are in game px;
     // screen_x/y is already in 640x480 screen space. These factors convert game px
     // to screen px: CpsXScale=0x3FD55555=5/3, CpsYScale=0x40092492=15/7.
@@ -366,6 +393,168 @@ export class SpriteClient {
     return `STAF: frame=${this.stafFrame} tris=${this._stafQuadN} texCache=${this._stafTexN}`;
   }
 
+  // ===== CHARQ channel (CHRQ — per-part PVR sprite-quad character render) =====
+  // The Oracle-read character data (project_charq_breakthrough): each character
+  // part is a PVR SPRITE QUAD — 4 screen corners + per-corner UV + the real
+  // tcw/tsp/pcw — so it feeds web/webgpu/pvr2-renderer.mjs (TA-truth rasterizer)
+  // natively, with ZERO raster guessing. Unlike STAF (which ships textures via
+  // the TX64 surrogate channel), CHARQ references textures ALREADY in live VRAM
+  // (the mirror dirty-page channel maintains D.vram + the palette), so the real
+  // tcw resolves through texMgr.getTexture(tsp,tcw,vram) — the SAME decode the TA
+  // path and the offline composite used. This is also the Phase-2 offline-GSTA
+  // emitter target: only the quad SOURCE changes, the render path stays identical.
+  //
+  // Wire (post-ZCST-decompress; caller strips the ZCST envelope):
+  //   'CHRQ'(4) frameNum(u32) objCount(u32)
+  //   per object:  cid(u8) flags(u8) sprite_id(u16) node(u32) quadCount(u16) pad(u16)
+  //     per quad (68 B): Ax,Ay,Bx,By,Cx,Cy,Dx,Dy : 8×f32 (screen corners, px)
+  //                      AU,AV,BU,BV,CU,CV         : 6×f32 (UVs; D derived by
+  //                        parallelogram closure DU=AU+CU-BU, DV=AV+CV-BV)
+  //                      tcw,tsp,pcw               : 3×u32  (real PVR sprite paras)
+  static isCHARQ(d) {
+    return d.length >= 12 && d[0]===67 && d[1]===72 && d[2]===82 && d[3]===81; // 'C','H','R','Q'
+  }
+  // Parse CHRQ into BOTH a structured frame (for labels / inspection) and the
+  // PVR2Renderer input contract (_charqParsed = {vertexData,vertexCount,opaque[],
+  // punchThrough[],translucent[]}). Each quad becomes a 4-vertex triangle STRIP
+  // in order A,B,D,C — _buildIndexBuffer turns that into the two parallelogram
+  // triangles (A,B,D)+(B,C,D), winding-correct. The PVR2Renderer VBL stride is 28:
+  //   x,y,z(f32) col(u8x4 RGBA) spc(u8x4 RGBA) u,v(f32).
+  // tcw/tsp/pcw are passed THROUGH unchanged (real PVR paras): the renderer's
+  // op/pt/tr classification, blend (tsp bits), and texture decode (texMgr) all use
+  // them directly. listType is derived from the PVR blend (additive => translucent,
+  // else opaque) since the wire ships the raw paras, not a pre-sorted list index.
+  onCHARQ(d) {
+    const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
+    this.charqFrame = dv.getUint32(4, true);
+    const objCount = dv.getUint32(8, true);
+    let o = 12;
+    const objs = [];
+    // First pass: count quads so the vertex buffer can be sized exactly.
+    let totalQuads = 0;
+    const objHdrs = [];
+    for (let i = 0; i < objCount && o + 12 <= d.length; i++) {
+      const cid = d[o], flags = d[o + 1];
+      const sprite_id = dv.getUint16(o + 2, true);
+      const node = dv.getUint32(o + 4, true);
+      const quadCount = dv.getUint16(o + 8, true);
+      o += 12;
+      const qStart = o;
+      const nq = Math.min(quadCount, ((d.length - o) / 68) | 0);
+      objHdrs.push({ cid, flags, sprite_id, node, quadCount: nq, qStart });
+      o += nq * 68;
+      totalQuads += nq;
+    }
+    // 4 verts per quad. PVR2Renderer VBL = 28 bytes/vertex.
+    const nVerts = totalQuads * 4;
+    if (!this._charqVB || this._charqVB.byteLength < nVerts * 28) {
+      this._charqVB = new ArrayBuffer(Math.max(nVerts * 28, 1 << 16));
+      this._charqVBf = new Float32Array(this._charqVB);
+      this._charqVBu = new Uint8Array(this._charqVB);
+    }
+    const f32 = this._charqVBf, u8 = this._charqVBu;
+    const op = [], pt = [], tr = [];
+    let vi = 0; // vertex index cursor
+    // DEGENERATE-QUAD GUARD (2026-06-10): a few quads arrive with a wild corner
+    // (a bad/garbage corner read on the server side, or a leaked non-body submit),
+    // producing big spanning "garbage triangles" across the canvas. _buildIndexBuffer
+    // is per-poly correct (no strip bridging — each quad is its own count=4 run
+    // anchored at pp.first), so the artifacts are these wild quads, not stitching.
+    // Filter any quad whose bbox span exceeds QSPAN_MAX px or whose corners fall far
+    // outside the 640x480 frame. Tunable via window._charqQSpan / _charqMargin.
+    const QSPAN_MAX = (typeof window !== 'undefined' && window._charqQSpan) || 384;
+    const MARGIN    = (typeof window !== 'undefined' && window._charqMargin) || 512;
+    let qDropped = 0, qKept = 0;
+    for (const h of objHdrs) {
+      let q = h.qStart;
+      const objQuads = [];
+      for (let k = 0; k < h.quadCount; k++) {
+        const Ax = dv.getFloat32(q, true),     Ay = dv.getFloat32(q + 4, true);
+        const Bx = dv.getFloat32(q + 8, true), By = dv.getFloat32(q + 12, true);
+        const Cx = dv.getFloat32(q + 16, true),Cy = dv.getFloat32(q + 20, true);
+        const Dx = dv.getFloat32(q + 24, true),Dy = dv.getFloat32(q + 28, true);
+        const AU = dv.getFloat32(q + 32, true),AV = dv.getFloat32(q + 36, true);
+        const BU = dv.getFloat32(q + 40, true),BV = dv.getFloat32(q + 44, true);
+        const CU = dv.getFloat32(q + 48, true),CV = dv.getFloat32(q + 52, true);
+        const tcw = dv.getUint32(q + 56, true);
+        const tsp = dv.getUint32(q + 60, true);
+        const pcw = dv.getUint32(q + 64, true);
+        q += 68;
+        // Degenerate guard: bbox span + off-frame test over all 4 corners.
+        const minX = Math.min(Ax, Bx, Cx, Dx), maxX = Math.max(Ax, Bx, Cx, Dx);
+        const minY = Math.min(Ay, By, Cy, Dy), maxY = Math.max(Ay, By, Cy, Dy);
+        const bad =
+          !(Number.isFinite(minX) && Number.isFinite(minY) &&
+            Number.isFinite(maxX) && Number.isFinite(maxY)) ||
+          (maxX - minX) > QSPAN_MAX || (maxY - minY) > QSPAN_MAX ||
+          maxX < -MARGIN || minX > 640 + MARGIN ||
+          maxY < -MARGIN || minY > 480 + MARGIN;
+        if (bad) {
+          qDropped++;
+          if (typeof window !== 'undefined' && window._charqDbg && qDropped <= 8) {
+            console.warn(`[onCHARQ] DROP degenerate quad cid=${h.cid} sid=${h.sprite_id} ` +
+              `span=${(maxX-minX).toFixed(0)}x${(maxY-minY).toFixed(0)} ` +
+              `A(${Ax.toFixed(0)},${Ay.toFixed(0)}) B(${Bx.toFixed(0)},${By.toFixed(0)}) ` +
+              `C(${Cx.toFixed(0)},${Cy.toFixed(0)}) D(${Dx.toFixed(0)},${Dy.toFixed(0)})`);
+          }
+          continue;
+        }
+        qKept++;
+        // D's UV by parallelogram closure (matches the wire's corner derivation).
+        const DU = AU + CU - BU, DV = AV + CV - BV;
+        // Emit the 4 verts in STRIP order A,B,D,C so _buildIndexBuffer yields the
+        // two parallelogram triangles (A,B,D)+(B,C,D), winding-correct. White
+        // vertex colour (texture-modulate; shadInstr from tsp decides replace/mod).
+        const first = vi;
+        const put = (x, y, u, v) => {
+          const fi = vi * 7, bi = vi * 28;
+          f32[fi] = x; f32[fi + 1] = y; f32[fi + 2] = 0.5; // z mid (sprite para, no real depth)
+          u8[bi + 12] = 255; u8[bi + 13] = 255; u8[bi + 14] = 255; u8[bi + 15] = 255; // col
+          u8[bi + 16] = 0; u8[bi + 17] = 0; u8[bi + 18] = 0; u8[bi + 19] = 0;         // spc (offset)
+          f32[fi + 5] = u; f32[fi + 6] = v;
+          vi++;
+        };
+        put(Ax, Ay, AU, AV);
+        put(Bx, By, BU, BV);
+        put(Dx, Dy, DU, DV);
+        put(Cx, Cy, CU, CV);
+        const pp = { first, count: 4, tsp, tcw, pcw, isp: 0, tileclip: 0 };
+        // Classify by PVR blend: additive (src=ONE/SrcA & dst=ONE) => translucent
+        // (drawn in the blended pass); everything else as punch-through so the
+        // character draws with alpha-test (index-0 transparent) like the TA path.
+        const sb = (tsp >> 29) & 7, db = (tsp >> 26) & 7;
+        if (db === 1 && (sb === 1 || sb === 4)) tr.push(pp);
+        else pt.push(pp);
+        objQuads.push({ corners: [Ax, Ay, Bx, By, Cx, Cy, Dx, Dy], uv: [AU, AV, BU, BV, CU, CV], tcw, tsp, pcw });
+      }
+      objs.push({ cid: h.cid, flags: h.flags, sprite_id: h.sprite_id, node: h.node, quads: objQuads });
+    }
+    // vi is the count of verts ACTUALLY emitted (dropped quads never advance it),
+    // so size the parsed buffer to vi — not nVerts (the pre-drop upper bound).
+    const emittedVerts = vi;
+    this._charqFrame = { frameNum: this.charqFrame, objs };
+    this._charqParsed = {
+      vertexData: u8.subarray(0, emittedVerts * 28),
+      vertexCount: emittedVerts,
+      opaque: op, punchThrough: pt, translucent: tr,
+    };
+    this._charqQuadN = qKept;
+    this._charqQuadDropped = qDropped;
+    // Throttled diagnostic: confirm onCHARQ fires + parses non-empty geometry.
+    // Enable with window._charqDbg=1 in the console.
+    if (typeof window !== 'undefined' && window._charqDbg) {
+      if (!this._charqDbgN) this._charqDbgN = 0;
+      if ((this._charqDbgN++ % 60) === 0) {
+        console.log(`[onCHARQ] frame=${this.charqFrame} objs=${objCount} quads=${qKept}/${totalQuads} (dropped ${qDropped}) verts=${emittedVerts} op=${op.length} pt=${pt.length} tr=${tr.length} bytes=${d.length}`);
+      }
+    }
+  }
+
+  charqStatsText() {
+    const n = this._charqFrame ? this._charqFrame.objs.length : 0;
+    return `CHARQ: frame=${this.charqFrame||0} objs=${n} quads=${this._charqQuadN||0}`;
+  }
+
   // 'OBJS'(4) + count(1) + N×[cid(1), sprite_id(2 LE), type(1), x(i16 LE), y(i16 LE),
   //   flags(1), hot_dx(s8), hot_dy(s8)] = 11B each (auto-detected; 9B/8B legacy).
   //
@@ -506,8 +695,19 @@ export class SpriteClient {
   //   <charBase>/PL{hex}_asm.json   — { sprite_id: [{part, dx, dy, flip, z?}], ... }
   // The two JSONs are kept separate exactly as the sibling baker emits them. We
   // also accept an optional palette/pal128 in the asm JSON (reuse the palette path).
+  // Clear the negative cache so a freshly-deployed atlas gets re-attempted without a
+  // page reload. Call from the console after scp'ing new PLxx_*.{png,json}.
+  resetAsmMissing(cid) {
+    if (cid == null) this._asmMissing.clear();
+    else this._asmMissing.delete(cid & 0xff);
+  }
+
   loadAsmChar(cid) {
-    if (this.asmChars[cid] || this._asmLoading[cid] || !this.charBase) return this._asmLoading[cid];
+    // Already loaded, in-flight, no charBase yet, or a prior attempt already 404'd:
+    // do nothing. The _asmMissing guard is what stops the per-frame 404 retry-storm —
+    // a genuinely-missing char is fetched ONCE, then skipped silently thereafter.
+    if (this.asmChars[cid] || this._asmLoading[cid] || !this.charBase
+        || this._asmMissing.has(cid & 0xff)) return this._asmLoading[cid];
     const hex = (cid & 0xff).toString(16).padStart(2, '0').toUpperCase();
     const base = `${this.charBase}/PL${hex}`;
     const bust = '?t=' + Date.now();
@@ -528,13 +728,30 @@ export class SpriteClient {
           img, parts, asm,
           palette: asmRaw.palette || partsJson.palette || null,
           pal128:  asmRaw.pal128  || partsJson.pal128  || null,
+          // screenSpace: parts are baked at native SCREEN-pixel resolution and their
+          // dx/dy are game-px offsets from the anchor (bake_emitter_uv.mjs tight bake).
+          // The emitter must blit them 1:1 — NO CPS (cpsX/cpsY) re-multiply.
+          screenSpace: !!asmRaw.screenSpace,
+          // selKeyed: the LEAN emitter atlas — FULL static GFX2 assembly (all poses)
+          // keyed by +6 selector; parts placed at owner+pen·CPS+(ax,ay), blit native.
+          // Lights up the sel-keyed branch in buildEmitterDrawList (live animating pose).
+          selKeyed: !!asmRaw.selKeyed,
           name: asmRaw.name || ('char' + cid),
         };
         console.log('[sprite-client] loaded ASM char', cid, this.asmChars[cid].name,
           Object.keys(parts).length, 'parts,', Object.keys(asm).length, 'assemblies');
       } catch (e) {
-        this.asmChars[cid] = { img: null, parts: {}, asm: {}, name: 'char' + cid, err: String(e) };
-        console.error('[sprite-client] ASM char', cid, 'load failed', e);
+        // Missing emitter atlas (e.g. PL09 Iceman has no _parts.png — only PL00/Ryu is
+        // baked). Cache the failure as a SKIP marker so (a) this fetch never re-fires —
+        // loadAsmChar early-returns once asmChars[cid] is set — and (b) emitAssembly sees
+        // !c.img and quietly returns for THAT char, never aborting the whole draw pass.
+        // One warn per char (not per frame); not console.error (this is expected, not a bug).
+        this.asmChars[cid] = { img: null, parts: {}, asm: {}, name: 'char' + cid, err: String(e), missing: true };
+        // Negative-cache the char so loadAsmChar never re-fetches it (stops the per-frame
+        // 404 storm). resetAsmMissing(cid) re-arms it after a deploy.
+        this._asmMissing.add(cid & 0xff);
+        console.warn('[sprite-client] no emitter atlas for char', cid,
+          '(' + String(e) + ') — skipping its parts render; other chars unaffected');
       } finally { delete this._asmLoading[cid]; }
     })();
     this._asmLoading[cid] = p; return p;
@@ -872,20 +1089,42 @@ export class SpriteClient {
       // sp.dx/sp.dy: satellites (projectiles/capes/effects) have their OWN origin,
       // so the body-relative bake drifts. _objCfg stays a residual user nudge.
       // hasHot=false (server found no extras, or an old server) => baked anchor.
-      // OBJECT ANCHOR MODE (window._objAnchor). PATH A's node+0x178 hotspot proved
-      // DEGENERATE (OBJDIAG: hot is a CONSTANT per char = the body's value, identical
-      // across all of a char's objects; or hasHot=false). So it can't place a
-      // projectile. Default to CENTER (object screen pos = sprite center, the common
-      // projectile/effect convention). Live A/B via window._objAnchor:
-      //   'center' (default) | 'bottom' | 'baked' (body-foot crop) | 'hot' (PATH A)
-      const _am = (typeof window !== 'undefined' && window._objAnchor) || 'center';
+      // OBJECT ANCHOR — DATA-DRIVEN OWN-ORIGIN (default 'own'). NO per-char guessing,
+      // NO proximity heuristic. The proven model (marvelous2 loc_8c030af8 + Frame
+      // Oracle 2026-06-08): a satellite places its parts at its OWN node origin, not the
+      // owner's body foot:  satellite_screen_quad = node(+0xE0/E4) + intrinsic_part_off.
+      //   * node(+0xE0/E4) = the satellite's OWN authoritative screen pos. The Oracle
+      //     confirmed loc_8c030af8 (the EFFECT/SATELLITE render path the slot-table walk
+      //     dispatches for category!=0) writes screen_x/y to +0xE0/+0xE4 exactly like the
+      //     body's loc_8c03093c. readAllDrawn ships it as o.x/o.y (prod runs
+      //     MAPLECAST_OBJS_SLOTTABLE so the OBJS wire reads +0xE0). So `px,py` above IS
+      //     each satellite's own origin — no owner-relative reconstruction needed.
+      //   * intrinsic_part_off = the rip atlas's baked sp.dx/sp.dy. For the offline ROM
+      //     rip (atlas/chars/PLxx.json) these are OWN-ORIGIN-relative: dx = -wG/2 (the
+      //     sprite's own horizontal center — verified PL2C dev 0.0px, PL2A 0.5px), dy =
+      //     the sprite's own top. IDENTICAL in nature for body, cape AND projectile, so
+      //     one rule places all of them — Storm's cape on her body AND Magneto's cape/
+      //     projectile, from the SAME data, with no cid branch.
+      // Why NOT the old defaults:
+      //   - PATH A (node+0x178 EXTRAS hotspot / offline EXTRAS table): DEGENERATE — the
+      //     satellite sid isn't in the body's ANIMATION keyframe table (capes are spawned
+      //     objects), and where sids resolve the min(dx,dy) is a CONSTANT body-extent per
+      //     char. Rejected (?v=54, server hotDx/hotDy ignored).
+      //   - 'auto' proximity: a heuristic (attached→baked, free→center) — exactly what
+      //     this task removes. The own-origin rule supersedes it: a cape near the body
+      //     and a projectile across the screen BOTH have a correct o.x/o.y, so both use
+      //     the same baked own-origin offset. No threshold to flip-flop on.
+      // window._objAnchor still forces a manual override for A/B:
+      //   'own' (default = baked at own origin) | 'center' | 'bottom' | 'baked' (alias of
+      //   'own') | 'hot' (PATH A, only if the server shipped a non-degenerate hotspot).
+      const _am = (typeof window !== 'undefined' && window._objAnchor) || 'own';
       let anchorX, anchorY;
       if (_am === 'hot' && o.hasHot) { anchorX = o.hotDx; anchorY = o.hotDy; }
-      else if (_am === 'baked') { anchorX = sp.dx; anchorY = sp.dy; }
+      else if (_am === 'center') { anchorX = -sp.wG / 2; anchorY = -sp.hG / 2; }
       else if (_am === 'bottom') { anchorX = -sp.wG / 2; anchorY = -sp.hG; }
-      else { anchorX = -sp.wG / 2; anchorY = -sp.hG / 2; }   // center (default)
-      // TEMP DIAG (projectile drift): log each distinct object's anchor data once/load.
-      { const _k = `${o.cid}:${(o.sid&0xffff).toString(16)}`; (this._od = this._od || new Set());
+      else { anchorX = sp.dx; anchorY = sp.dy; }   // 'own'/'baked' (default): intrinsic own-origin offset
+      // DIAG (gated): window._objDiag=true logs each distinct object's anchor data once.
+      if (typeof window !== 'undefined' && window._objDiag) { const _k = `${o.cid}:${(o.sid&0xffff).toString(16)}`; (this._od = this._od || new Set());
         if (!this._od.has(_k)) { this._od.add(_k);
           console.log(`[OBJDIAG] PL${o.cid.toString(16).padStart(2,'0').toUpperCase()} sid=0x${(o.sid&0xffff).toString(16)} hasHot=${!!o.hasHot} hot=(${o.hotDx},${o.hotDy}) baked=(${sp.dx|0},${sp.dy|0}) scr=(${o.x|0},${o.y|0}) wh=(${sp.w}x${sp.h}) z=${o.type}`); } }
       const dxv = fl ? -(anchorX + sp.wG) : anchorX;   // mirror the anchor when flipped
@@ -980,20 +1219,21 @@ export class SpriteClient {
       for (const r of recs) {
         const part = c.parts[r.part] || c.parts[String(r.part)];
         if (!part) continue;
-        // flip = owner facing XOR the record's own flip bit.
-        const flip = (!!owner.facing) !== (!!r.flip);
-        // Part offset is in game px relative to the owner's screen anchor. When
-        // mirrored, reflect the part's x-extent across the anchor (dx -> -(dx+w)).
-        const pdx = flip ? -(r.dx + part.w) : r.dx;
+        // X-mirror (flags & 0x4000) XORs facing; Y-mirror (flags & 0x8000) does not.
+        const flip  = (!!owner.facing) !== (!!r.flip);
+        const flipY = !!r.flipy;
+        // Reflect the part extent across the anchor: X -> -(dx+w), Y -> -(dy+h).
+        const pdx = flip  ? -(r.dx + part.w) : r.dx;
+        const pdy = flipY ? -(r.dy + part.h) : r.dy;
         const dx = (owner.exx + pdx * SX * S) * scaleX;
-        const dy = (owner.eyy + r.dy * SY * S) * scaleY;
+        const dy = (owner.eyy + pdy * SY * S) * scaleY;
         const dw = part.w * SX * S * scaleX;
         const dh = part.h * SY * S * scaleY;
         // z: owner base layer + the record's own intra-assembly z (back-to-front).
         const z = (owner.zBase || 0) * 100 + (r.z || 0);
         const item = { charId: owner.cid, slot: owner.slot, z,
           sx: part.x, sy: part.y, sw: part.w, sh: part.h,
-          dx, dy, dw, dh, flip };
+          dx, dy, dw, dh, flip, flipY };
         if (owner.blend != null) item.blend = owner.blend;
         out.push(item);
         drawn++;
@@ -1036,6 +1276,147 @@ export class SpriteClient {
     return out;
   }
 
+  // ===== ON-THE-FLY ALL-POSES EMITTER (live-VRAM part pixels, NO bake) =========
+  // The synthesis of the two operator insights:
+  //   (1) correct per-part transforms (the 0x4000/0x8000 mirror fix above), and
+  //   (2) NO pre-baked PLxx_parts.png — decode each part's tile LIVE from the VRAM
+  //       the mirror already ships (window._D.vram), the SAME PAL4 decode the TA path
+  //       and CHARQ use (texMgr.getTexture(tsp,tcw,vram)).
+  //
+  // It produces the EXACT same _charqParsed contract onCHARQ builds, so it renders
+  // through web/webgpu/pvr2-renderer.mjs (TA-truth rasterizer) with ZERO raster
+  // guessing — and animates the LIVE sprite_id every frame (any pose), because the
+  // geometry comes from the static GFX2 cell table (cached per char) indexed by the
+  // live sprite_id, not from one baked pose.
+  //
+  // Geometry per part (CONFIRMED): cumulative pen (dx,dy already accumulated in the
+  // asm JSON) + owner screen_x/y, X-mirror = facing XOR (flags&0x4000), Y-mirror =
+  // (flags&0x8000). The quad is a screen-space axis-aligned rect (4 corners) with UVs
+  // 0..1 over the tile (flipped per mirror bit).
+  //
+  // ── THE ONE OPEN PIECE: sel → TCW (the VRAM tile address) ───────────────────────
+  // The static cell record gives a GFX1 SELECTOR, not a TCW. To decode live we need
+  // the VRAM address (+ PAL4 fmt + palette bank) the engine loaded that selector to.
+  // The CHARQ breakthrough (project_charq_breakthrough) READ this live: each body part
+  // is PAL4 fmt5, contiguous 32x32 tiles, stride 0x200, palette bank in TCW bits 25-21
+  // = the player slot. But the static sel→VRAM_base is NOT yet known offline; it must
+  // come from an Oracle probe at 0x8C0345C4 dumping rmem:r11:8 + the resulting TCW to
+  // tie sel→TCW (per the SH4 expert), OR be derived from the contiguous GFX1 load
+  // layout. Until that mapping is captured, this path CANNOT resolve real pixels and is
+  // gated OFF (window._emitterLive, default false). The proven, shipping path stays
+  // buildEmitterDrawList (atlas) / CHARQ (server Oracle quads). Set this._selToTcw =
+  // (cid, sel, slot, part) => ({tcw,tsp,pcw}) once the mapping lands to light it up.
+  // A HEURISTIC sel->TCW resolver (NOT confirmed — see _selToTcw doc). Encodes the
+  // CHARQ-read tile shape: PAL4 (fmt5), contiguous 32x32 tiles, VRAM stride 0x200,
+  // palette bank = player slot (TCW bits 25-21). vramBase is the per-char GFX base
+  // (UNKNOWN offline — must come from the Oracle). tsp packs texU/texV = 32px tiles
+  // (8<<2). Returns {tcw,tsp,pcw}. Use only to experiment until the probe lands.
+  static heuristicSelToTcw(vramBase, tileStride = 0x200, fmt = 5) {
+    const TEX_32 = 2;                               // 8<<2 = 32px
+    const tsp = (TEX_32 << 3) | TEX_32;             // texU/texV nibbles (other bits 0 = nearest, repeat)
+    return (cid, sel, slot, part) => {
+      const addr = (vramBase + sel * tileStride) >>> 0;
+      const tcwAddr = (addr >>> 3) & 0x1FFFFF;       // (tcw & 0x1FFFFF) << 3 == addr
+      const palBank = (slot & 0x3F);                 // PAL4 palette selector = player slot
+      const tcw = ((fmt & 7) << 27) | (palBank << 21) | tcwAddr;
+      return { tcw: tcw >>> 0, tsp: tsp >>> 0, pcw: 0 };
+    };
+  }
+
+  buildEmitterLiveCharq() {
+    if (typeof window === 'undefined' || !window._emitterLive) return null;
+    const now = (typeof performance !== 'undefined') ? performance.now() : 0;
+    const resolver = this._selToTcw;                       // the OPEN sel->TCW mapping
+    if (!resolver) { this._asmNote = 'emitter-live: no sel->TCW resolver (set this._selToTcw)'; this._lastNote = this._asmNote; return null; }
+
+    // Collect every active body's parts into CHARQ objects (one quad per part).
+    const objs = [];
+    let totalQuads = 0;
+    const addOwner = (cid, sx, sy, facing, slot, sid) => {
+      const c = this.asmChars[cid];
+      if (!c) { this.loadAsmChar(cid); return; }
+      const recs = c.asm[sid] || c.asm[sid & 0xffff] || c.asm[String(sid)];
+      if (!recs || !recs.length) return;
+      const quads = [];
+      for (const r of recs) {
+        const part = c.parts[r.part] || c.parts[String(r.part)];
+        if (!part) continue;
+        const res = resolver(cid, r.part, slot, part);     // {tcw,tsp,pcw}
+        if (!res) continue;
+        const flip  = (!!facing) !== (!!r.flip);            // X-mirror XOR facing
+        const flipY = !!r.flipy;                            // Y-mirror (no facing XOR)
+        const w = part.w, h = part.h;
+        // Screen rect: pen (already cumulative) + owner anchor; mirror reflects extent.
+        const x0 = sx + (flip  ? -(r.dx + w) : r.dx);
+        const y0 = sy + (flipY ? -(r.dy + h) : r.dy);
+        const x1 = x0 + w, y1 = y0 + h;
+        // UVs 0..1 over the tile, flipped per mirror bit (matches the shader's ux/vy).
+        const u0 = flip ? 1 : 0, u1 = flip ? 0 : 1;
+        const v0 = flipY ? 1 : 0, v1 = flipY ? 0 : 1;
+        // CHARQ corner order A(TL) B(TR) C(BR) D(BL); UV per corner.
+        quads.push({
+          corners: [x0, y0, x1, y0, x1, y1, x0, y1],
+          uv:      [u0, v0, u1, v0, u1, v1],               // D's UV derived by closure
+          tcw: res.tcw, tsp: res.tsp, pcw: res.pcw || 0,
+        });
+        totalQuads++;
+      }
+      if (quads.length) objs.push({ cid, flags: 0, sprite_id: sid, node: 0, quads });
+    };
+
+    for (let s = 0; s < 6; s++) {
+      const sl = this.slot[s];
+      if (!sl.active) continue;
+      let ex = sl.screen_x, ey = sl.screen_y;
+      if (this.predict !== false) { const dt = Math.min(now - sl.t, 33); if (dt > 0) { ex += sl.vx*dt; ey += sl.vy*dt; } }
+      addOwner(sl.char_id, ex, ey, sl.facing, s, sl.sprite_id);
+    }
+
+    // Pack into the PVR2Renderer vertex contract (28-byte verts, A,B,D,C strip order),
+    // identical to onCHARQ so renderCharq() consumes it unchanged.
+    const nVerts = totalQuads * 4;
+    if (!this._elVB || this._elVB.byteLength < nVerts * 28) {
+      this._elVB = new ArrayBuffer(Math.max(nVerts * 28, 1 << 16));
+      this._elVBf = new Float32Array(this._elVB);
+      this._elVBu = new Uint8Array(this._elVB);
+    }
+    const f32 = this._elVBf, u8 = this._elVBu;
+    const op = [], pt = [], tr = [];
+    let vi = 0;
+    const outObjs = [];
+    for (const ob of objs) {
+      const oq = [];
+      for (const q of ob.quads) {
+        const [Ax, Ay, Bx, By, Cx, Cy, Dx, Dy] = q.corners;
+        const [AU, AV, BU, BV, CU, CV] = q.uv;
+        const DU = AU + CU - BU, DV = AV + CV - BV;
+        const first = vi;
+        const put = (x, y, u, v) => {
+          const fi = vi * 7, bi = vi * 28;
+          f32[fi] = x; f32[fi+1] = y; f32[fi+2] = 0.5;
+          u8[bi+12] = 255; u8[bi+13] = 255; u8[bi+14] = 255; u8[bi+15] = 255;
+          u8[bi+16] = 0; u8[bi+17] = 0; u8[bi+18] = 0; u8[bi+19] = 0;
+          f32[fi+5] = u; f32[fi+6] = v; vi++;
+        };
+        put(Ax, Ay, AU, AV); put(Bx, By, BU, BV); put(Dx, Dy, DU, DV); put(Cx, Cy, CU, CV);
+        const pp = { first, count: 4, tsp: q.tsp, tcw: q.tcw, pcw: q.pcw, isp: 0, tileclip: 0 };
+        const sb = (q.tsp >> 29) & 7, db = (q.tsp >> 26) & 7;
+        if (db === 1 && (sb === 1 || sb === 4)) tr.push(pp); else pt.push(pp);
+        oq.push(q);
+      }
+      outObjs.push({ cid: ob.cid, flags: 0, sprite_id: ob.sprite_id, node: 0, quads: oq });
+    }
+    this._charqFrame = { frameNum: this.charqFrame, objs: outObjs };
+    this._charqParsed = {
+      vertexData: u8.subarray(0, vi * 28), vertexCount: vi,
+      opaque: op, punchThrough: pt, translucent: tr,
+    };
+    this._charqQuadN = totalQuads;
+    this._asmNote = `emitter-live: ${totalQuads} parts (VRAM-decode, live pose)`;
+    this._lastNote = this._asmNote;
+    return this._charqParsed;
+  }
+
   // ===== EMITTER PORT — faithful loc_8c033e90 (bank03.asm:9258) =====
   // Reimplements MVC2's quad emitter over the REAL per-sprite EXTRAS records.
   //
@@ -1071,7 +1452,84 @@ export class SpriteClient {
     const ay     = cfg.anchorY  != null ? cfg.anchorY  : 0;      // part anchor Y
     const gdx    = cfg.dx0       != null ? cfg.dx0      : 0;      // global px offset X
     const gdy    = cfg.dy0       != null ? cfg.dy0      : 0;      // global px offset Y
-    let loading = 0, missing = 0, drawn = 0, missKeys = [];
+    // tileScale: native-px → screen factor multiplied onto CPS for the OFFLINE atlas
+    // (selKeyed). DERIVED 2026-06-10 from CHARQ ground truth (KB emitter_scale_derived):
+    // the offline atlas (PL00_parts.png) AND its pen are at the SAME native resolution as
+    // the live PVR cells, so native→screen = FULL CPS (tileScale = 1.0). Proof: every
+    // captured PVR cell renders screen_w=native·CPSX, screen_h=native·CPSY EXACTLY
+    // (probe_body_uv.json: 8/16/32px cells → 13.3/26.7/53.3 × 17.1/34.3/68.6, <0.01px);
+    // and the full offline sid64 assembly (native bbox 80×128) reconstructs to screen
+    // 133×274 at tileScale=1.0 == the CHARQ probe's TRUE drawn body bbox 137×274 (residual
+    // X 3.0%, Y 0.0%). The OLD default 0.5 halved this → the body rendered exactly 2× too
+    // SMALL (the ~1.6× / ~CPS the operator saw). Exposed so the cockpit can A/B w/o redeploy.
+    const tileScale = cfg.tileScale != null ? cfg.tileScale : 1.0;
+    let loading = 0, missing = 0, drawn = 0, missKeys = [], skipSel = 0;
+
+    // FACING POLARITY (2026-06-11, ROM-DERIVED — NOT eyeballed. The byte→direction
+    // semantic is read from the game's facing-UPDATE setter, not toggled):
+    //
+    //   SETTER (where the ROM WRITES facing) — bank0d.asm loc_8c0d97ee :23266-23272:
+    //     fr2 = SELF.pos_x(+0x34) ; fr3 = OPP.pos_x(+0x34) ; fcmp/gt fr2,fr3 (T = opp>self)
+    //     bf.s ...; mov r5(=0),r4 ; mov 0x01,r4   →   facing = (opp.x > self.x) ? 1 : 0
+    //   So facing=1 ⇔ opponent is to the RIGHT ⇔ character FACES RIGHT (P1 default);
+    //      facing=0 ⇔ opponent is to the LEFT  ⇔ character FACES LEFT  (P2 default).
+    //
+    //   USE — render gate bank03.asm loc_8c03453a :10271-10314: `tst facing@+0x110; bf neg`:
+    //     facing!=0 → loc_8c034548 `neg r10,r10` (pen seed @+0x134 NEGATED) AND `neg r8`
+    //     (texture-U). facing==0 → pen seed used as-is. ONE byte gates BOTH (lockstep).
+    //   CROSS-CHECK — spawn helper bank08.asm :30550-30583: facing!=0 → spawn at owner.x
+    //     +offset (in front, +X=right); facing==0 → owner.x −offset. ✓ facing=1=faces-right.
+    //
+    //   The validated 0.00px placement (tools/validate_emitter_geom.py vs the facing=1
+    //   CHARQ capture chosen_body.json/probe_body_uv.json) uses `tlx = pen − w` and was
+    //   proven with bodyFace = !facing (faceInv=TRUE) → bodyFace=FALSE at facing=1 →
+    //   posReflect=FALSE → `pen − w`. i.e. the engine's `neg r10` for the right-facing pen
+    //   seed is ALREADY BAKED INTO the validated `pen − w` form. So the ROM-faithful sense
+    //   is bodyFace = !owner.facing, driving BOTH posReflect (neg r10) and the texture-U
+    //   mirror (neg r8) from the SAME bit. PRIOR BUG: the shipped client used the RAW byte
+    //   (faceInv default FALSE) → at facing=1 it took the MIRROR branch, the exact OPPOSITE
+    //   of the 0.00px-validated config (validator default faceInv=TRUE). That is the single
+    //   inverted transform the operator kept fighting; it is corrected here by defaulting
+    //   faceInv=TRUE so the default == the validator's proven config.
+    //   window._emitFaceInv=false restores the raw-byte sense for A/B. r.flip (per-part
+    //   0x4000) XORs on top of bodyFace (texture-U only).
+    const faceInv = (typeof window === 'undefined') ? true
+                  : (window._emitFaceInv !== undefined ? !!window._emitFaceInv : true);
+
+    // Y-AXIS POLARITY (2026-06-10): the selKeyed part atlas (PL00_parts.png, the
+    // Oracle live-VRAM / GFX1-detwiddle build) stores each part's PIXELS BOTTOM-UP
+    // (row 0 = bottom of the part), so a part sampled with the normal top→top V reads
+    // UPSIDE-DOWN. The cumulative-pen PLACEMENT is already correct (KB finding
+    // cumulative_pen_geometry: baked dy is negative = builds UP from the foot-anchor,
+    // bank03 loc_8c0344d4 Y-acc -= dy; verified: sid126 spans screen-Y 328..439 with
+    // the foot at 433 = feet at bottom). So the body was placed right but every tile
+    // rendered head-down — the WHOLE figure read inverted. Fix = invert the per-part
+    // texture V ONLY (the shader's flipY attr does vy=1-c.y, sampling-only, the quad
+    // does NOT move), so the upright placement keeps standing on the foot-anchor while
+    // each tile flips upright. Offline-validated against PL00_parts.png: V-flip renders
+    // red-headband-top / feet-bottom Ryu; un-flipped renders him head-down. This is
+    // ORTHOGONAL to faceInv (X) and to tileScale/CPS (scale) — Y direction only.
+    // Default ON (the corrected, upright value); window._emitFlipY=false = raw A/B.
+    const emitFlipY = (typeof window === 'undefined') ? true
+                    : (window._emitFlipY !== undefined ? !!window._emitFlipY : true);
+
+    // LIVE INSTRUMENTATION (2026-06-10) — break the offline-guess loop. All default OFF,
+    // so default = byte-identical to ?v=71. These are A/B knobs for the operator to tune
+    // against the green TA-truth in the DIFF, in real time, no redeploy.
+    //   _emitFaceFlip : WHOLESALE invert the single facing sense F — flips BOTH the position
+    //                   reflection (neg r10) AND the texture-U mirror (neg r8) together, so
+    //                   they can never decouple. Default false = operator-confirmed-correct
+    //                   polarity (F = owner.facing). (Was position-only; that decoupling was
+    //                   the left↔right part-jumping bug, fixed 2026-06-11.)
+    //   _emitFaceLog  : ~1/sec per-char console readout (facingRaw, anchorX, reflected,
+    //                   leadPartScreenX = the jab/lead limb's final screen X).
+    //   _emitAnchorDbg: draw a 1px vertical magenta line at the owner anchorX (foot pen
+    //                   origin) so the operator can see anchor-offset vs reflection.
+    const faceFlip = (typeof window !== 'undefined' && !!window._emitFaceFlip);
+    const faceLog  = (typeof window !== 'undefined' && !!window._emitFaceLog);
+    const anchorDbg= (typeof window !== 'undefined' && !!window._emitAnchorDbg);
+    // throttle the readout to ~once/sec per char (keyed by cid in _emitFaceLogT).
+    this._emitFaceLogT = this._emitFaceLogT || {};
 
     // Per-char dynamic zoom (char+0x50/0x54), clamped to a sane band; raw field
     // semantics are step-1 wire (f32). Out-of-band => fall back to 1.0 (no zoom),
@@ -1086,42 +1544,319 @@ export class SpriteClient {
       return (base & 0x03ff) >> 4;
     };
 
+    // EMITTER DEBUG (window._emitDbg=1): per ~60 frames, trace the Ryu (cid 0) body —
+    // its LIVE sprite_id, whether it equals the only baked pose (126 = standing), and how
+    // many parts emitted. Answers "is Ryu actually hitting sprite_id 126?" at the source.
+    const _eDbg = (typeof window !== 'undefined' && window._emitDbg);
+    this._emitDbgN = (this._emitDbgN || 0) + 1;
+    const _eTrace = _eDbg && (this._emitDbgN % 60 === 1);
+
     // owner: { cid, exx, eyy, facing, slot, zBase, sclX, sclY, pal12d, pal12e, blend?, fx? }
     const emitAssembly = (owner, sid) => {
+      const isRyuBody = (_eTrace && !owner.fx && owner.cid === 0 && owner.slot != null && owner.zBase === 0);
       // fx objects resolve from the effects atlas, not the per-char atlas.
       const c = owner.fx ? this._fxAsmChar() : this.asmChars[owner.cid];
       if (!c) { if (!owner.fx) { this.loadAsmChar(owner.cid); loading++; } return; }
-      if (!c.img) return;                                  // load failed
+      if (!c.img) {                                        // load failed / no atlas (skip)
+        if (isRyuBody) console.log(`[emit] Ryu cid0 sid=${sid&0xffff} -> NO ATLAS (c.img null) — no draw`);
+        return;
+      }
       const recs = c.asm[sid] || c.asm[sid & 0xffff] || c.asm[String(sid)];
       if (!recs || !recs.length) {
+        if (isRyuBody) console.log(`[emit] Ryu cid0 LIVE sid=${sid&0xffff} (0x${(sid&0xffff).toString(16)}) NOT in atlas. Baked poses: [${Object.keys(c.asm).join(',')}] (126=standing is the only demo pose)`);
         missing++; if (missKeys.length < 3) missKeys.push(`${owner.cid}/0x${(sid&0xffff).toString(16)}`);
         return;
       }
-      const sX = cpsX * sane(owner.sclX) * S, sY = cpsY * sane(owner.sclY) * S;
+      if (isRyuBody) console.log(`[emit] Ryu cid0 sid=${sid&0xffff} HIT atlas: ${recs.length} records, anchor=(${owner.exx.toFixed(0)},${owner.eyy.toFixed(0)}) facing=${owner.facing} — emitting parts`);
+      // screenSpace atlas: parts already baked at screen-pixel size with game-px dx/dy,
+      // so DON'T re-apply the CPS aspect (cpsX/cpsY) — only the live per-char zoom + S.
+      // (Pre-CPS/logical atlases keep the cpsX/cpsY multiply.) This is what makes the
+      // tight bake render edge-to-edge instead of the old 8x8-tile fragmentation.
+      const ss = !!c.screenSpace;
+      const sX = (ss ? 1 : cpsX) * sane(owner.sclX) * S, sY = (ss ? 1 : cpsY) * sane(owner.sclY) * S;
+      // LEAN SEL-KEYED PATH (c.selKeyed): the FULL static GFX2 assembly (all 441 poses)
+      // drives placement; part PIXELS come from a sel-keyed atlas (Oracle live-VRAM
+      // decode, keyed by the +6 selector). A part is a multi-tile group baked to ONE
+      // upright native-screen bitmap with its own anchor residual {ax,ay}:
+      //   screen_top_left = owner_screen + pen·CPS + (ax, ay)         (proven offline,
+      //   sub-pixel vs char_tight.png; pen = the cumulative running pen r.dx/r.dy in
+      //   cell units, CPS = 5/3, 15/7).  Sels not yet in the atlas are SKIPPED (counted
+      //   in skipSel) so an uncaptured pose renders its captured parts and no garbage.
+      if (c.selKeyed) {
+        // ONE-TIME PATH MARKER — prove the selKeyed body path (the ?v=71/72 logic) is the
+        // branch actually rendering the body, not whole-sprite/CHARQ. Logs once per page load.
+        if (typeof window !== 'undefined' && !window.__emitPathLogged && !owner.fx && owner.zBase === 0) {
+          window.__emitPathLogged = 1;
+          console.log('[emitter] selKeyed BODY path active (v72)', { cid: owner.cid, sid: sid & 0xffff,
+            faceInv, faceFlip, facingRaw: owner.facing, anchorX: owner.exx });
+        }
+        const cpsx = sane(owner.sclX) * S, cpsy = sane(owner.sclY) * S;   // live per-char zoom
+        const pcX = cpsX * cpsx, pcY = cpsY * cpsy;                       // pen scale (CPS×zoom)
+        // Per-char readout state: track the lead (max-|pen-dx|) part's final screen X so the
+        // operator sees WHICH side the jab lands. Reset per emitAssembly call.
+        let _leadAbsDx = -1, _leadScreenX = null, _anyReflected = false;
+        // FRAME DUMP (window._emitDumpReq): when set, collect this char's per-part
+        // emitter quads (sel + FINAL screen rect + flip/posReflect) into a parallel
+        // array, stashed to window._emitDumpResult below. Gated, read-only, no render
+        // change. Lets the EMITTER DEBUG "DUMP FRAME" button export ground-truth-vs-
+        // emitter geometry so facing is DERIVED from numbers, not eyeballed.
+        const _dumpOn = (typeof window !== 'undefined' && window._emitDumpReq && !owner.fx && owner.zBase === 0);
+        const _dumpParts = _dumpOn ? [] : null;
+        for (const r of recs) {
+          const part = c.parts[r.part] || c.parts[String(r.part)];
+          if (!part) { skipSel++; continue; }            // sel pixels not captured yet
+          // FACING — ROM-DERIVED single sense (2026-06-11). The byte→direction comes from
+          // the SETTER bank0d loc_8c0d97ee :23266-23272 (facing = opp.x>self.x ? 1 : 0,
+          // facing=1=faces-right) and the USE gate bank03 loc_8c03453a :10271-10314 (`tst
+          // facing; bf neg` → facing!=0 negates BOTH the position pen `neg r10` @loc_8c034548
+          // AND the texture-U `neg r8`). ONE byte gates BOTH, so the client derives BOTH from
+          // ONE sense — they can never decouple.
+          //   bodyFace = !owner.facing  (== the validator's faceInv=TRUE config that proved
+          //   0.00px vs the facing=1 capture). At facing=1: bodyFace=FALSE → posReflect=FALSE
+          //   → `tlx = pen − w` (the engine's neg-r10 for the right-facing pen seed is ALREADY
+          //   baked into this validated form) and texture-U = r.flip only (un-mirrored). At
+          //   facing=0: bodyFace=TRUE → posReflect=TRUE → mirror `2*axisX − pen` + texture-U
+          //   mirror. faceFlip (_emitFaceFlip) WHOLESALE-inverts bodyFace (both transforms
+          //   together). r.flip (per-part 0x4000) XORs onto the texture-U mirror only.
+          const bodyFace = (faceInv ? !owner.facing : !!owner.facing) !== faceFlip;  // ROM single sense (default !facing)
+          const F = bodyFace;
+          const posReflect = F;                          // POSITION reflect (neg r10) — gated on F
+          const flip  = F !== (!!r.flip);                // TEXTURE U-mirror (neg r8) = F XOR 0x4000 — SAME F
+          const flipY = !!r.flipy;                       // Y-mirror geometry (no facing XOR)
+          const ax0 = (part.ax || 0), ay0 = (part.ay || 0);
+          // SIZE FIX (2026-06-10, CHARQ-GROUND-TRUTH calibrated): the OFFLINE atlas (the
+          // GFX1-detwiddle build, PL00_asm.json _note "OFFLINE-COMPLETE") emits BOTH the
+          // accumulated pen (r.dx/r.dy) AND the part pixels at the SAME 2×-cell native
+          // resolution (1 pen cell-unit = 2 native px). So the whole assembly — pen offset
+          // AND tile extent — shares ONE scale: native → screen = CPS/2.
+          //   Proof (CHARQ chosen_body.json, scale[1,1]): a 128×128 body tile renders to
+          // 106×137 screen px → (0.833, 1.071) = EXACTLY CPS/2 (1.667/2, 2.143/2), <0.3%
+          // error; and the full sid64 assembly bbox at CPS/2 = 67×137 ≈ the GT ~146 tall.
+          //   The OLD bug: pen used full CPS (pcX/pcY) but the tile used only the live zoom
+          // (cpsx≈1) — TWO different scales. The skeleton spread 2× wider than the tiles, so
+          // the body was fragmented and the solid mass looked small (the operator's ~1.75×
+          // Size slider was hand-undoing the mismatch). Now pen AND tile both use tsX/tsY =
+          // (CPS/2)·zoom → one consistent transform, body lands on the green TA-truth at the
+          // DEFAULT Size (1.0×). NB: the per-part Y vs CHARQ uses CPSY (the cumulative pen's
+          // proven aspect), so halving keeps the disasm-proven 5/3,15/7 RATIO intact.
+          // NB (2026-06-11): tileScale DEFAULTS 1.0 (line ~1465) — i.e. FULL CPS, NOT the
+          // CPS/2 the older block above describes. That CPS/2 era predated the full-span
+          // atlas: it used the LOGICAL-crop dims and halved CPS to compensate. With the
+          // 2026-06-11 full-span baker (extract_gfx1_atlas.py) part.w/h = sw*8 x sh*8 (the
+          // true tile span) and tileScale=1.0 gives dW=dH=0.00px vs the live CHARQ capture
+          // (tools/validate_emitter_geom.py, all 6 sels). part.w/h are read STRAIGHT from the
+          // atlas — no client-side dim override — so the re-baked atlas needs no ?v= bump.
+          const tsX = pcX * tileScale, tsY = pcY * tileScale;  // unified assembly scale = CPS·tileScale·zoom (tileScale=1.0 default)
+          const w = part.w * tsX * sizeMul, h = part.h * tsY * sizeMul;
+          // base (un-flipped) top-left in screen px — pen AND tile residual at the SAME tsX/tsY
+          let tlx = owner.exx + gdx + r.dx * tsX + ax0 * tsX;
+          let tly = owner.eyy + gdy + r.dy * tsY + ay0 * tsY;
+          // X PLACEMENT — NUMERICALLY VALIDATED 2026-06-11 (tools/validate_emitter_geom.py
+          // vs _ryu_capture/probe_body_uv.json, the live CHARQ per-part screen quads of
+          // node 0x8C268340 Ryu sprite_id 68, facing=1). The disasm (loc_8c0344d4) negates
+          // the pen accumulator on facing (loc_8c034548 `neg r10,r10`) and lays each tile at
+          // node+0xE0 + (Xacc+tileX)·scale; with the pen negated the part's pen point becomes
+          // its RIGHT edge and the tile columns run LEFTWARD. PROVEN: for facing=1 the
+          // captured part RIGHT edge == exx + dx·tsX to <0.7px (= pure anchor quantization,
+          // 106.7 capture vs 106.0 true; relative geometry residual = 0.00px over all 6 parts).
+          // So the part extends LEFT of the pen: tlx = exx + dx·tsX − w.
+          //   bodyFace=false (the validated facing-1 sense): pen point = RIGHT edge, extend left
+          //     → tlx = pen − w.
+          //   bodyFace=true (the OPPOSITE facing): DISASM-DERIVED & ALGEBRAICALLY PROVEN
+          //     (2026-06-11, finding:emitter_flip_unvalidated → RESOLVED). loc_8c034548
+          //     `neg r10,r10` negates the cumulative pen ORIGIN ONLY; the part WIDTH enters the
+          //     screen-X composition via the tile span r4 (bank03 :10652 `add r4,r3`)
+          //     IDENTICALLY in both branches — there is NO ±w introduced by the reflection
+          //     (the texture-U mirror neg r8/neg r5 is a SEPARATE, internal-pixel flip). So the
+          //     pen point mirrors across axisX and the part now extends RIGHT, its LEFT edge AT
+          //     the mirrored pen:  tlx = 2·axisX − pen  (NO +w). `tlx` here IS the pen point.
+          //     The exact mirror of the validated form: a part at +dx (left edge pen−w) maps to
+          //     left edge 2·axisX−pen (synthetic facing=0 mirror = 0.70px dX / 0.00px dW vs the
+          //     facing=1 capture mirrored across exx — tools/validate_emitter_geom.py).
+          //     The OLD default `2·axisX − pen + w` injected a spurious +w = one full part-width
+          //     (≈13–107 screen-px, the operator's offset). _asmCfg.reflectEdge=true keeps that
+          //     old +w form ONLY as an A/B knob. axisX = the owner foot-anchor X.
+          const reflEdge = (cfg.reflectEdge === true);
+          const reflDx   = (cfg.reflectDx != null ? cfg.reflectDx : 0);
+          const axisX = owner.exx + gdx + reflDx;
+          if (!posReflect) {
+            // VALIDATED facing (bodyFace=false): part extends LEFT of the pen point.
+            tlx = tlx - w;
+          } else {
+            // OPPOSITE facing: pen point mirrors across axisX, part extends RIGHT (no ±w).
+            tlx = reflEdge ? (2 * axisX - tlx + w) : (2 * axisX - tlx);
+          }
+          if (flipY)    tly = 2 * (owner.eyy + gdy) - (tly + h);
+          // READOUT: track the lead (max |pen-dx|) part — the jab/extended limb — and its
+          // FINAL screen X (post-reflection), so the log shows which side the fist lands.
+          // Unconditional (two comparisons/part, negligible) so the structured readout
+          // global below always has jabX live for the on-screen EMITTER DEBUG table —
+          // does NOT change any rendered output (read-only of tlx/w/posReflect).
+          {
+            const absDx = Math.abs(r.dx);
+            if (absDx > _leadAbsDx) { _leadAbsDx = absDx; _leadScreenX = tlx + w / 2; }
+            if (posReflect) _anyReflected = true;
+          }
+          const z  = (owner.zBase || 0) * 100 + (r.z || 0);
+          // SHADER V-FLIP: the atlas stores parts bottom-up, so correct the texture V
+          // for EVERY part (emitFlipY, default ON) XOR the per-record geometry Y-mirror
+          // (flipY, the 0x8000 bit). The geometry reflection above (line ~1561) already
+          // moved the quad for r.flipy; this only controls which way the texture samples.
+          const flipYTex = flipY !== emitFlipY;   // V-only correction XOR per-record Y-mirror
+          const item = { charId: owner.fx ? -1 : owner.cid, slot: owner.slot, z,
+            sx: part.x, sy: part.y, sw: part.w, sh: part.h,
+            dx: tlx * scaleX, dy: tly * scaleY, dw: w * scaleX, dh: h * scaleY,
+            flip, flipY: flipYTex, palRow: 0 };
+          if (owner.blend != null) item.blend = owner.blend;
+          out.push(item);
+          drawn++;
+          // FRAME DUMP: record this part's FINAL game-space (640x480) rect — the same
+          // space the TA-truth verts live in — plus sel + the two facing-derived bits.
+          if (_dumpParts) _dumpParts.push({ sel: r.part, x: +tlx.toFixed(2), y: +tly.toFixed(2),
+            w: +w.toFixed(2), h: +h.toFixed(2), flip, posReflect, rdx: r.dx, rdy: r.dy });
+        }
+        // FRAME DUMP: stash this char's collected emitter parts + its facing/anchor state.
+        if (_dumpParts) {
+          const dr = (window._emitDumpResult = window._emitDumpResult || { chars: [] });
+          dr.chars.push({ cid: owner.cid, slot: owner.slot, sid: sid & 0xffff,
+            facing: owner.facing, anchorX: +(owner.exx + gdx).toFixed(2),
+            anchorY: +(owner.eyy + gdy).toFixed(2),
+            faceInv, faceFlip, tileScale,
+            F: (faceInv ? !owner.facing : !!owner.facing) !== faceFlip,
+            leadScreenX: _leadScreenX != null ? +_leadScreenX.toFixed(2) : null,
+            parts: _dumpParts });
+        }
+        // LIVE READOUT (window._emitFaceLog) — ~once/sec per char. Shows the LIVE facing
+        // byte, the pen anchor X (owner.exx), whether the position gate fired, and the lead
+        // (jab) limb's FINAL screen X. Compare leadPartScreenX vs the green TA-truth jab:
+        // if the red fist is LEFT of green while green leads RIGHT, flip _emitFaceFlip.
+        if (faceLog && !owner.fx && owner.zBase === 0) {
+          const tkey = `${owner.cid}:${owner.slot}`;
+          if ((this._emitFaceLogT[tkey] || 0) + 1000 <= now) {
+            this._emitFaceLogT[tkey] = now;
+            console.log('[emitFace]', { cid: owner.cid, slot: owner.slot, sid: sid & 0xffff,
+              facingRaw: owner.facing, faceFlip, faceInv,
+              anchorX: +(owner.exx).toFixed(1), reflected: _anyReflected,
+              leadPartScreenX: _leadScreenX != null ? +_leadScreenX.toFixed(1) : null });
+          }
+        }
+        // STRUCTURED READOUT (window._emitFaceReadout) — same values as the [emitFace]
+        // console log, but written EVERY frame to a structured global so the EMITTER
+        // DEBUG cockpit panel can render a live on-screen per-char table without the
+        // console. No new computation: reuses owner.facing / owner.exx / the lead-part
+        // tracking already done above (gated on faceLog). When faceLog is OFF we still
+        // emit the cheap fields (facing/anchor/side); leadPartScreenX needs faceLog.
+        if (!owner.fx && owner.zBase === 0) {
+          if (typeof window !== 'undefined') {
+            const ro = (window._emitFaceReadout = window._emitFaceReadout || { perChar: {} });
+            const side = (_leadScreenX != null)
+              ? (_leadScreenX >= (owner.exx + gdx) ? 'R' : 'L')
+              : ((((faceInv ? !owner.facing : !!owner.facing) !== faceFlip)) ? 'R' : 'L');  // F-derived sense
+            ro.perChar[`${owner.cid}:${owner.slot}`] = {
+              cid: owner.cid, slot: owner.slot, sid: sid & 0xffff,
+              facingRaw: owner.facing,
+              anchorX: +(owner.exx + gdx).toFixed(1),
+              jabX: _leadScreenX != null ? +_leadScreenX.toFixed(1) : null,
+              reflected: _anyReflected, side, t: now };
+          }
+        }
+        // ANCHOR LINE (window._emitAnchorDbg) — a 1px-wide magenta vertical bar at the owner
+        // pen-anchor X spanning the canvas, pushed as a degenerate part-less quad the GPU
+        // tints. Lets the operator SEE the anchor (vs the reflection): if red is offset from
+        // green but the magenta line sits ON green's foot, the bug is the reflection, not the
+        // anchor; if the line itself is off, it's the anchor (owner.exx). DEFAULT OFF.
+        if (anchorDbg && !owner.fx && owner.zBase === 0) {
+          const ax2 = (owner.exx + gdx) * scaleX;
+          out.push({ charId: owner.cid, slot: owner.slot, z: 9999,
+            sx: 0, sy: 0, sw: 1, sh: 1,
+            dx: ax2 - 0.5, dy: 0, dw: 1 * scaleX, dh: canvasH,
+            flip: false, flipY: false, palRow: 0, tint: [1, 0, 1], blend: 0x01 });
+        }
+        return;
+      }
       for (const r of recs) {
         const part = c.parts[r.part] || c.parts[String(r.part)];
         if (!part) continue;
-        // flip = owner facing XOR the record's own bit15.
-        const flip = (!!owner.facing) !== (!!r.flip);
-        // mirror reflects the part's x-extent across the owner anchor: dx -> -(dx+w).
-        const pdx = flip ? -(r.dx + part.w) : r.dx;
+        // CONFIRMED 2026-06-10 (bank03 loc_8c0344d4): the record carries TWO mirror
+        // bits — r.flip = X-mirror (flags & 0x4000), r.flipy = Y-mirror (flags &
+        // 0x8000). X-mirror XORs with the owner's facing; Y-mirror does NOT.
+        const flip  = (!!owner.facing) !== (!!r.flip);   // X
+        const flipY = !!r.flipy;                         // Y (no facing XOR)
+        // Mirror reflects the part extent across the owner anchor:
+        //   X flip: dx -> -(dx + w)   Y flip: dy -> -(dy + h)
+        const pdx = flip  ? -(r.dx + part.w) : r.dx;
+        const pdy = flipY ? -(r.dy + part.h) : r.dy;
         const dx = (owner.exx + gdx + (pdx * offMul - part.w * ax) * sX) * scaleX;
-        const dy = (owner.eyy + gdy + (r.dy * offMul - part.h * ay) * sY) * scaleY;
+        const dy = (owner.eyy + gdy + (pdy * offMul - part.h * ay) * sY) * scaleY;
         const dw = part.w * sX * sizeMul * scaleX;
         const dh = part.h * sY * sizeMul * scaleY;
         const z  = (owner.zBase || 0) * 100 + (r.z || 0);
         const palRow = palRowOf(r.pal || 0, owner.pal12d || 0, owner.pal12e || 0);
         const item = { charId: owner.fx ? -1 : owner.cid, slot: owner.slot, z,
           sx: part.x, sy: part.y, sw: part.w, sh: part.h,
-          dx, dy, dw, dh, flip, palRow };
+          dx, dy, dw, dh, flip, flipY, palRow };
         if (owner.blend != null) item.blend = owner.blend;
         out.push(item);
         drawn++;
       }
     };
 
-    // --- bodies (the 6 tracked slots) ---
-    for (let s = 0; s < 6; s++) {
+    // --- FORCE-STATIC DEMO (window._emitForce, default ON) ---------------------
+    // The emitter only has ONE baked pose so far: Ryu (cid 0) sprite_id 126 (standing
+    // idle). The live body slot rarely sits on exactly 126, so the body loop almost
+    // always pose-MISSES → 0 quads → opaque black canvas (post-process.mjs:318 clears
+    // to black, then blits a transparent scene). That makes the emitter look "broken"
+    // even though geometry+decode are PROVEN (offline _ryu_capture/emitter_uv_zoom.png).
+    //
+    // This mode draws Ryu's baked assembly at a FIXED anchor EVERY frame, ignoring the
+    // live sprite_id entirely — the operator sees the fragmented-but-recognizable Ryu
+    // immediately (white gi, red headband, black belt), decoupled from any live pose.
+    // window._emitForce=false restores the pure live path.
+    // DEFAULT OFF (lean emitter): render the LIVE sprite_id every frame from the full
+    // static GFX2 assembly + the sel-keyed atlas (animating pose). window._emitForce=true
+    // restores the single-pose (sid 126) demo for A/B.
+    const force = (typeof window === 'undefined') ? false
+                : (window._emitForce !== undefined ? window._emitForce : false);
+    const fc = (typeof window !== 'undefined' && window._emitForceCfg) || {};
+    if (force) {
+      const fcid = fc.cid != null ? fc.cid : 0;            // Ryu
+      const fsid = fc.sid != null ? fc.sid : 126;          // standing idle (the one baked pose)
+      // POSITION TRACKING: anchor the baked idle pose on the LIVE character so the
+      // reconstructed Ryu walks/jumps with the real one. We only have ONE baked pose,
+      // so the live sprite_id is IGNORED for pose selection — but the live screen_x/y
+      // (+velocity extrapolation) and facing drive WHERE + which way the idle is drawn.
+      //
+      // Find the first active body slot whose char_id == fcid (the on-screen Ryu). If
+      // none is live yet, fall back to the fixed lower-middle anchor so Ryu is ALWAYS
+      // visible. The bake's part dx/dy are offsets from the captured FOOT anchor
+      // (AX,AY in bake_emitter_uv.mjs); the body slot's screen_x/y is that same MVC2
+      // +0xE0/+0xE4 foot point, so passing exx=live screen_x places the figure foot-on
+      // the live position and the baked dx/dy register directly (no anchor subtraction).
+      let live = null;
+      for (let s = 0; s < 6; s++) { const sl = this.slot[s]; if (sl.active && sl.char_id === fcid) { live = sl; break; } }
+      let fx, fy, ffac, fsx, fsy;
+      if (live) {
+        fx = live.screen_x; fy = live.screen_y;
+        if (this.predict !== false) { const dt = Math.min(now - live.t, 33); if (dt > 0) { fx += live.vx*dt; fy += live.vy*dt; } }
+        ffac = live.facing; fsx = sane(live.scaleX); fsy = sane(live.scaleY);
+      } else {
+        // fallback: no live Ryu — pin the idle at the captured foot anchor so he stays drawn.
+        fx = fc.x != null ? fc.x : 106.7; fy = fc.y != null ? fc.y : 433.4;
+        ffac = 0; fsx = 1; fsy = 1;
+      }
+      const c0 = this.asmChars[fcid];
+      if (!c0) { this.loadAsmChar(fcid); }                 // kick the lazy load if not yet present
+      emitAssembly({ cid: fcid, exx: fx, eyy: fy, facing: ffac, slot: 0, zBase: 0,
+                     sclX: fsx, sclY: fsy, pal12d: 0, pal12e: 0 }, fsid);
+      // One-line gated diagnostic (window._emitDbg=1): parts emitted + atlas state.
+      if (typeof window !== 'undefined' && window._emitDbg && (this._emitDbgN % 60 === 1)) {
+        const has = c0 && c0.img ? `recs=${(c0.asm[fsid]||[]).length}` : (c0 ? 'NO IMG' : 'NOT LOADED');
+        console.log(`[emit-force] cid${fcid} sid${fsid} @(${fx},${fy}) drawn=${drawn} ${has}`);
+      }
+    }
+
+    // --- bodies (the 6 tracked slots) ---  (skipped while force-demo is on)
+    if (!force) for (let s = 0; s < 6; s++) {
       const sl = this.slot[s];
       if (!sl.active) continue;
       let exx = sl.screen_x, eyy = sl.screen_y;
@@ -1131,8 +1866,8 @@ export class SpriteClient {
                    sl.sprite_id);
     }
 
-    // --- pool objects (cape / projectile / fx) ---
-    if (this.objectsOn !== false) for (const o of (this.objects || [])) {
+    // --- pool objects (cape / projectile / fx) ---  (skipped while force-demo is on)
+    if (!force && this.objectsOn !== false) for (const o of (this.objects || [])) {
       let osl = null;
       for (let s = 0; s < 6; s++) if (this.slot[s].active && this.slot[s].char_id === o.cid) { osl = this.slot[s]; break; }
       if (!osl) continue;
@@ -1150,11 +1885,19 @@ export class SpriteClient {
     }
 
     out.sort((a, b) => (a.charId - b.charId) || ((a.z || 0) - (b.z || 0)));
-    this._asmDrawn = drawn; this._asmMiss = missing;
+    this._asmDrawn = drawn; this._asmMiss = missing; this._asmSkipSel = skipSel;
     this._asmNote = loading ? `emitter: loading ${loading} char atlas…`
                   : missing ? `emitter: missing ${missing} asm: ${missKeys.join(' ')} (${drawn} parts)`
+                  : skipSel ? `emitter(lean): ${drawn} parts drawn · ${skipSel} sels uncaptured (skipped)`
                   : `emitter: ${drawn} parts (port)`;
     this._lastNote = this._asmNote;
+    if (_eTrace) {
+      // On-screen bound: how many emitted quads land inside the 0..canvasW/0..canvasH frame
+      // (a quad emitted off-canvas draws nothing). If drawn>0 but onScreen==0, it's an anchor/scale
+      // bug, not a missing-atlas bug.
+      const onScreen = out.filter(q => q.dx + q.dw > 0 && q.dx < canvasW && q.dy + q.dh > 0 && q.dy < canvasH).length;
+      console.log(`[emit] SUMMARY drawn=${drawn} quads (onScreen=${onScreen}/${out.length}) missing=${missing} loading=${loading} :: ${this._asmNote}`);
+    }
     return out;
   }
 

@@ -256,16 +256,16 @@ canvas{display:block;background:transparent}
 </div>
 
 <script type="module">
-import {FrameDecoder} from './webgpu/frame-decoder.mjs?v=6';
+import {FrameDecoder} from './webgpu/frame-decoder.mjs?v=7';
 import {TAParser} from './webgpu/ta-parser.mjs';
 import {TextureManager} from './webgpu/texture-manager.mjs';
-import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=3';
+import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=5';
 import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=11';
-import {SpriteClient} from './webgpu/sprite-client.mjs?v=54';
-import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=10';
+import {SpriteClient} from './webgpu/sprite-client.mjs?v=79';
+import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=11';
 // StafGL (sprite-staf-gl.mjs) RETIRED — the STAF/HUDF stream now renders through the
 // proven PVR2Renderer (see STAFR/renderStaf below). StafGL stays on disk for reference.
 
@@ -350,11 +350,13 @@ addEventListener('keydown',e=>{
     +'<label><input type="checkbox" id="sc_on" checked> Render chars from 253B state (no TA)</label><br>'
     // PARKED paths (assembly/emitter/STAF garble the character) — hidden so the user
     // works with ONE path. Wrapped in #sc_parked which is display:none'd below.
+    // EMITTER (reconstruct-from-sprite_id via PL{hex}_parts/_asm) — now LIVE for PL00.
+    +'<label style="color:#fa6"><input type="checkbox" id="sc_emit"> EMITTER (reconstruct from PARTS, loc_8c033e90) — needs PL{hex}_parts/_asm</label><br>'
     +'<span id="sc_parked" style="display:none">'
     +'<label style="color:#fd6"><input type="checkbox" id="sc_asm"> ASSEMBLY path (parts+asm, A/B) — needs PL{hex}_parts/_asm</label><br>'
-    +'<label style="color:#fa6"><input type="checkbox" id="sc_emit"> &nbsp;↳ emitter PORT (game-logic loc_8c033e90; off = hand-roll)</label><br>'
     +'<label style="color:#6fd"><input type="checkbox" id="sc_staf"> STAF path (stripped-TA: full quad list + cached textures, pixel-exact) — needs MAPLECAST_STAF server</label><br>'
     +'</span>'
+    +'<label style="color:#f6a"><input type="checkbox" id="sc_charq"> CHARQ path (per-part PVR sprite-quads → pvr2-renderer, pixel-perfect) — needs MAPLECAST_CHARQ server</label><br>'
     +'<label><input type="checkbox" id="sc_pred" checked> Predict (velocity extrapolation — lower latency)</label><br>'
     +'<label><input type="checkbox" id="sc_gpu" checked> GPU render + effects (WebGPU; off = Canvas2D)</label><br>'
     +'<label>Size <input type="range" id="sc_scale" min="0.5" max="3" step="0.05" value="1.75" style="width:110px;vertical-align:middle"> <span id="sc_scaleval">1.75</span>×</label><br>'
@@ -374,8 +376,12 @@ addEventListener('keydown',e=>{
   scv.style.cssText='border:1px solid #06a;background:#111;display:none;max-width:100%;vertical-align:top';
   wrap.appendChild(scv);
   const scx=scv.getContext('2d');
+  // EMITTER surface (sccg) — the WebGPU sprite render (buildEmitterDrawList output draws
+  // here via SG.render). VISIBILITY (2026-06-10): contrasting dark-teal bg + bold border so
+  // the reconstructed Ryu parts stand out unmistakably against empty space (same treatment
+  // as the CHARQ magenta surface). Anything drawn = parts emitting; bare teal = nothing drew.
   const scg=document.createElement('canvas'); scg.id='sccg'; scg.width=640; scg.height=480;
-  scg.style.cssText='border:1px solid #0a6;background:#111;display:none;max-width:100%;vertical-align:top';
+  scg.style.cssText='border:2px solid #0fc;background:#002028;display:none;max-width:100%;vertical-align:top';
   wrap.appendChild(scg);
   // STAF stripped-TA WebGPU surface — rendered by the PROVEN PVR2Renderer
   // (web/webgpu/pvr2-renderer.mjs), the SAME renderer that draws the out-of-match
@@ -435,6 +441,71 @@ addEventListener('keydown',e=>{
       { singlePass:true, noSort:true, transparentClear:true, drawOpaque:true, drawPunch:true, drawTrans:true });
   }
   window._renderStaf=renderStaf;
+  // ── CHARQ surface (sccq) — per-part PVR sprite-quad character render ─────────
+  // The Oracle-read character (project_charq_breakthrough): each part is a PVR
+  // sprite quad (4 corners + UV + real tcw/tsp/pcw). It renders through the SAME
+  // proven PVR2Renderer as the TA video, but — unlike STAF — its textures come
+  // from LIVE VRAM (the mirror dirty-page channel maintains window._D.vram + the
+  // palette), resolved by the GLOBAL TextureManager (window._T) with the real tcw.
+  // So renderCharq feeds (window._T, window._D.vram) directly: zero raster guessing,
+  // the identical decode the TA path and the offline composite used. This is also
+  // the Phase-2 offline-GSTA emitter target (only the quad source changes).
+  // VISIBILITY FIX (2026-06-10): CHARQ is a DEDICATED, STANDALONE on-screen canvas —
+  // a separate labeled surface inside the sprite-client #wrap (a sibling of scv/scg/scs,
+  // NOT a transparent overlay on the main mirror #c). The operator must see ONLY the
+  // reconstructed character on its own surface to confirm it renders. CHARQ clears to
+  // transparent (alphaMode premultiplied + transparentClear), so the canvas element's
+  // CSS background (dark magenta #200020) shows through everywhere there's no character;
+  // the reconstructed sprite draws opaque (punch-through/opaque quads) on top of it, so
+  // it stands out unmistakably against empty space. Labeled below the canvas.
+  const scqWrap=document.createElement('div'); scqWrap.id='sccqwrap';
+  scqWrap.style.cssText='display:none;vertical-align:top;text-align:center;margin:0';
+  const scq=document.createElement('canvas'); scq.id='sccq'; scq.width=640; scq.height=480;
+  scq.style.cssText='border:1px solid #f6a;background:#200020;display:block;max-width:100%;vertical-align:top';
+  const scqLbl=document.createElement('div'); scqLbl.id='sccqlbl';
+  scqLbl.textContent='CHARQ (reconstructed character — pvr2-renderer)';
+  scqLbl.style.cssText='font:11px monospace;color:#f6a;background:#200020;padding:2px 0;max-width:100%';
+  scqWrap.appendChild(scq); scqWrap.appendChild(scqLbl);
+  wrap.appendChild(scqWrap);
+  const CHARQR=new PVR2Renderer(); window._charqR=CHARQR;
+  function renderCharq(){
+    const _dbg=window._charqDbg; window._charqDrawN=(window._charqDrawN||0)+1;
+    const _trace=_dbg && (window._charqDrawN%60===1);
+    if(!CHARQR._inited){ if(_trace) console.log('[renderCharq] BAIL: CHARQR not inited (window._R.dev='+!!(window._R&&window._R.dev)+')'); return; }
+    const g=SPRITECLIENT._charqParsed;
+    if(!g || !g.vertexCount){ if(_trace) console.log('[renderCharq] BAIL: no _charqParsed/vertexCount ('+(g?g.vertexCount:'null')+')'); return; }
+    const T=window._T, D=window._D;
+    if(!T || !D || !D.vram){ if(_trace) console.log('[renderCharq] BAIL: no T/D/vram (T='+!!T+' D='+!!D+' vram='+!!(D&&D.vram)+')'); return; }
+    if(_trace) console.log('[renderCharq] DRAW verts='+g.vertexCount+' op='+g.opaque.length+' pt='+g.punchThrough.length+' tr='+g.translucent.length);
+    // TEXTURE-RESOLVE PROBE: for the first punch-through quad, confirm the live-VRAM
+    // texture actually resolves (else every pt quad alpha-tests to fully transparent
+    // = invisible draw). Logs tcw/tsp, resolved w/h, and the quad's 4 corners so an
+    // off-screen/degenerate quad is also caught. Enable with window._charqDbg=1.
+    if(_trace){
+      const q0=(g.punchThrough[0]||g.translucent[0]||g.opaque[0]);
+      if(q0){
+        let res='no-tex-bit';
+        if((q0.pcw>>3)&1){ const t=T.getTexture(q0.tsp,q0.tcw,D.vram);
+          res=t?('OK '+t.w+'x'+t.h+(t.texture?' tex✓':' tex✗')):'NULL(fallback/blank)'; }
+        const vf=new Float32Array(g.vertexData.buffer,g.vertexData.byteOffset,g.vertexCount*7);
+        const cx=[0,1,2,3].map(i=>'('+vf[(q0.first+i)*7].toFixed(0)+','+vf[(q0.first+i)*7+1].toFixed(0)+')').join(' ');
+        console.log('[renderCharq] q0 tcw=0x'+(q0.tcw>>>0).toString(16)+' tsp=0x'+(q0.tsp>>>0).toString(16)+' tex='+res+' corners='+cx);
+      }
+    }
+    // CHARQ corners are already 640x480 screen-space px. PVR2Renderer._ndcMat reads
+    // snap[0] for the render size: w=(tx+1)*32, h=(ty+1)*32. 640x480 => tx=19,ty=14
+    // => snap[0]=19|(14<<16)=0x000E0013. (Use the live STAF snap if it's populated,
+    // else this fixed 640x480 snap so a standalone CHARQ stream isn't shrunk to 32x32.)
+    if(!CHARQR._snap){ CHARQR._snap=new Uint32Array(16); CHARQR._snap[0]=19|(14<<16); }
+    const sSnap=SPRITECLIENT._stafSnap;
+    const snap=(sSnap && sSnap[0]) ? sSnap : CHARQR._snap;
+    // singlePass + noSort: parts arrive in submission order, no real depth (z=0.5).
+    // transparentClear: CHARQ owns the character layer as a transparent overlay.
+    CHARQR.renderFrame(g, T, snap, D.vram,
+      { singlePass:true, noSort:true, transparentClear:true, drawOpaque:true, drawPunch:true, drawTrans:true });
+    if(window._diffMode && window._diffMirrorOurs) window._diffMirrorOurs(scq);  // DIFF v7: red=CHARQ-ours
+  }
+  window._renderCharq=renderCharq;
   const sch=document.createElement('canvas'); sch.id='sch'; sch.width=640; sch.height=480;
   sch.style.cssText='position:absolute;top:1px;left:1px;pointer-events:none;max-width:100%';
   wrap.appendChild(sch);
@@ -444,13 +515,29 @@ addEventListener('keydown',e=>{
   let scOn=true, gpuOn=true, hudOn=true, fxOn=true;   // EFCT additive effects (electric/hitsparks/supers) ON: server-isolated + frame-synced via mcfx->TXTR, no rAF skew
   window._skipTA = scOn;   // sprite mode renders from GSTA/OBJS — don't decode the TA video stream (overruns applyFrame on big super frames + burns CPU)
   let stafMode=false;   // STAF stripped-TA full-frame path (A/B vs whole-sprite/assembly)
-  // STAF renders on its own WebGL surface (scs); otherwise pick WebGPU (scg) vs Canvas2D fallback (scv).
+  // CHARQ DISABLED (2026-06-10): the CHARQ per-part PVR-quad path is OFF by default and
+  // takes precedence over (short-circuits) the emitter draw + steals the visible WebGPU
+  // surface (scg) whenever it's on. The live demo is now the EMITTER path. CHARQ can be
+  // re-enabled via the #sc_charq checkbox for A/B, but it must NOT default-on.
+  //   - charqMode=false      => tick reaches the emitter draw (line ~1071) and scg shows
+  //   - _charqRoute=false     => no per-frame CHRQ wire peek/decompress
+  //   - charqOn=false         => client isn't marked as a CHARQ consumer
+  //   - _charqDbg=0           => no 'renderCharq BAIL' / q0-probe spam
+  let charqMode=false;
+  window._charqRoute=false; SPRITECLIENT.charqOn=false;
+  // Debug probe OFF by default — the 'renderCharq BAIL' spam was from this being on while
+  // CHARQ had nothing to draw. Flip window._charqDbg=1 in the console only when A/B'ing CHARQ.
+  if(window._charqDbg===undefined) window._charqDbg=0;
+  // STAF renders on its own surface (scs); CHARQ on its own (sccq); otherwise pick
+  // WebGPU (scg) vs Canvas2D fallback (scv). CHARQ takes precedence when on.
   const showCanvas=()=>{
-    const staf=scOn&&stafMode;
-    const g=gpuOn&&SG.ok&&!stafMode;
+    const staf=scOn&&stafMode&&!charqMode;
+    const charq=scOn&&charqMode;
+    const g=gpuOn&&SG.ok&&!stafMode&&!charqMode;
+    scqWrap.style.display=charq?'inline-block':'none';
     scs.style.display=staf?'block':'none';
     scg.style.display=(scOn&&g)?'block':'none';
-    scv.style.display=(scOn&&!g&&!stafMode)?'block':'none';
+    scv.style.display=(scOn&&!g&&!stafMode&&!charqMode)?'block':'none';
   };
   box.querySelector('#sc_on').onchange=e=>{ scOn=e.target.checked; window._skipTA=scOn; showCanvas(); };
   // A/B toggle: whole-sprite <-> assembly. Clears the GPU atlas cache so the
@@ -458,13 +545,19 @@ addEventListener('keydown',e=>{
   box.querySelector('#sc_asm').onchange=e=>{ SPRITECLIENT.assemblyMode=e.target.checked; SG.chars={};
     console.log('[sprite-client] render path =', e.target.checked?'ASSEMBLY':'WHOLE-SPRITE'); };
   // Emitter-port A/B: window._emitterPort gates the faithful loc_8c033e90 port vs the
-  // original hand-rolled builder inside buildAssemblyDrawList. Default ON.
-  window._emitterPort = false;
-  SPRITECLIENT.assemblyMode = false;   // default = WHOLE-SPRITE (emitter/parts path parked; avoids PLxx_parts.png 404 spam on 54 chars w/o part atlases)
+  // original hand-rolled builder inside buildAssemblyDrawList.
+  // EMITTER DEFAULT-ON (2026-06-10): this IS the live demo. The emitter draws through the
+  // WebGPU sprite surface (scg). Chars without a parts atlas (PL09 Iceman, the 53 others)
+  // skip gracefully — loadAsmChar caches the 404 and emitAssembly returns for that char,
+  // so Ryu (PL00, baked) still renders. No PLxx_parts.png 404 spam (one warn per char).
+  window._emitterPort = true;
+  SPRITECLIENT.assemblyMode = true;
   // ONE foolproof toggle: ON = reconstruct from PARTS (emitter loc_8c033e90), OFF = whole BAKED sprite (ground truth).
   box.querySelector('#sc_emit').onchange=e=>{ window._emitterPort=e.target.checked;
     SPRITECLIENT.assemblyMode=e.target.checked; SG.chars={};
     console.log('[sprite-client]', e.target.checked?'RECONSTRUCT FROM PARTS (emitter)':'WHOLE-SPRITE (baked ground truth)'); };
+  // Reflect the emitter default-on in the checkbox so the UI matches the live path.
+  { const cb=box.querySelector('#sc_emit'); if(cb) cb.checked=true; }
   // === Live assembly calibration panel (window._asmCfg) — tune sliders until Ryu assembles, then DUMP ===
   (function(){
     const KN = [['offScale','dx/dy ×',0.3,2,0.01,1],['partScale','size ×',0.5,2,0.01,1],
@@ -513,12 +606,21 @@ addEventListener('keydown',e=>{
     const mk=(t,fn)=>{const b=document.createElement('button');b.textContent=t;b.style.marginTop='6px';b.onclick=fn;return b;};
     p.appendChild(mk('DUMP CONFIG',()=>console.log('[objCfg]',JSON.stringify(window._objCfg))));
     p.appendChild(mk('RESET',()=>{KN.forEach((k,i)=>{window._objCfg[k[0]]=k[5];slides[i].value=k[5];spans[i].textContent=k[5];});}));
+    p.style.display='none';   // HIDDEN: was covering the RE COCKPIT panel; _objCfg stays defined for the object draw (defaults 0/0/1 = no change)
     document.body.appendChild(p);
   })();
   // STAF A/B: when on, the stripped-TA full-frame path (cached textures + quad
   // list) drives the Canvas2D output instead of the atlas/assembly draw.
   box.querySelector('#sc_staf').onchange=e=>{ stafMode=e.target.checked; window._stafRoute=e.target.checked; SPRITECLIENT.stafOn=e.target.checked; showCanvas();
     console.log('[sprite-client] render path =', e.target.checked?'STAF (stripped-TA)':'atlas'); };
+  // CHARQ A/B: per-part PVR sprite-quad character render through pvr2-renderer.
+  // window._charqRoute gates the wire peek (like _stafRoute), so the CHRQ packet is
+  // decompressed + parsed each frame even while in-match.
+  box.querySelector('#sc_charq').onchange=e=>{ charqMode=e.target.checked; window._charqRoute=e.target.checked; SPRITECLIENT.charqOn=e.target.checked; showCanvas();
+    console.log('[sprite-client] render path =', e.target.checked?'CHARQ (per-part PVR quads)':'atlas'); };
+  // DEFAULT-OFF: CHARQ is disabled — uncheck the box so the UI matches (emitter is live).
+  { const cb=box.querySelector('#sc_charq'); if(cb) cb.checked=false; }
+  showCanvas();   // apply the default visibility (scg/emitter shown) immediately on load
   box.querySelector('#sc_pred').onchange=e=>{ SPRITECLIENT.predict=e.target.checked; };
   box.querySelector('#sc_gpu').onchange=e=>{ gpuOn=e.target.checked; showCanvas(); };
   box.querySelector('#sc_scale').oninput=e=>{ SPRITECLIENT.spriteScale=+e.target.value; const v=document.getElementById('sc_scaleval'); if(v)v.textContent=(+e.target.value).toFixed(2); };
@@ -590,7 +692,500 @@ addEventListener('keydown',e=>{
   const tryLoad=async()=>{ if(pendingPng&&pendingJson){ try{ await SPRITECLIENT.loadAtlas(pendingJson,pendingPng); }catch(err){ console.error('atlas load',err); } } };
   box.querySelector('#sc_png').onchange=async e=>{ pendingPng=e.target.files[0]||null; await tryLoad(); };
   box.querySelector('#sc_json').onchange=async e=>{ const f=e.target.files[0]; if(f){ try{ pendingJson=JSON.parse(await f.text()); }catch(err){ console.error('atlas json',err); } } await tryLoad(); };
-  let _lastShowSprite=null, _outFrames=0;
+  // ═══════════════════════════════════════════════════════════════
+  //   RE COCKPIT — client-side ETL + Z-layer panel (the cockpit core)
+  // ═══════════════════════════════════════════════════════════════
+  // Reads the TA ground-truth the browser already decoded (window._lastParsed:
+  // parsed polys with verts {x,y,z,...} + PolyParam {blend,tcw}), layers each poly
+  // by depth (Z) + blend, attributes it to the nearest GSTA object (SPRITECLIENT.slot),
+  // and shows it live. Toggling RE mode forces the TA decode alive (window._reMode,
+  // honored in tick() above) so the polys exist even while sprites render.
+  window._reMode = false;
+  (function(){
+    const panel=document.getElementById('panel'); if(!panel) return;
+    const box=document.createElement('div');
+    box.style.cssText='border:1px solid #fa0;margin:6px 0;padding:6px;background:#210';
+    box.innerHTML=
+       '<b style="color:#fa0;cursor:pointer" id="re_hdr">▸ RE COCKPIT (Z-layer ETL + DIFF v7)</b>'
+      +'<div id="re_body" style="display:none">'
+      +'<label style="color:#fd6"><input type="checkbox" id="re_on"> RE mode (decode + classify TA live)</label><br>'
+      +'<label>Z cutoff <input type="range" id="re_cut" min="0" max="500" step="1" value="91" style="width:120px;vertical-align:middle"> <span id="re_cutv" style="color:#0f0">0.00910</span></label><br>'
+      +'<div style="margin:4px 0;font-size:10px;color:#888">Isolate layers on the TA render:</div>'
+      +'<label><input type="checkbox" id="re_hStage"> hide STAGE/BG</label> '
+      +'<label><input type="checkbox" id="re_hChar"> hide CHAR/HUD</label> '
+      +'<label><input type="checkbox" id="re_hFx"> hide EFFECT</label><br>'
+      // ── DIFF OVERLAY: composite TA truth (PVR2Renderer) over our reconstruction ──
+      +'<div style="margin:6px 0 2px;border-top:1px solid #555;padding-top:4px;color:#fa0;font-weight:bold">DIFF OVERLAY (truth vs ours)</div>'
+      +'<label style="color:#fd6"><input type="checkbox" id="diff_on"> DIFF mode (overlay TA truth + reconstruction)</label><br>'
+      +'<label>View <select id="diff_view" style="width:140px">'
+        +'<option value="overlay" selected>Overlay (difference)</option>'
+        +'<option value="tint">Tint (TA=green / ours=red)</option>'
+        +'<option value="ta">TA truth only</option>'
+        +'<option value="ours">Reconstruction only</option>'
+      +'</select></label><br>'
+      +'<label>Ours opacity <input type="range" id="diff_op" min="0" max="100" value="100" style="width:110px;vertical-align:middle"> <span id="diff_opv" style="color:#0f0">100%</span></label><br>'
+      +'<label><input type="checkbox" id="diff_lbl" checked> Object labels (slot/cid/sid + body/sat)</label><br>'
+      +'<pre id="diff_delta" style="font-size:10px;color:#fd6;background:#000;padding:4px;margin:2px 0;white-space:pre;max-height:160px;overflow:auto">diff: off</pre>'
+      +'<canvas id="re_hist" width="256" height="60" style="width:100%;height:60px;background:#000;border:1px solid #333;margin:4px 0;image-rendering:pixelated"></canvas>'
+      +'<pre id="re_break" style="font-size:10px;color:#fd6;background:#000;padding:4px;margin:2px 0;white-space:pre">RE off</pre>'
+      +'<pre id="re_obj" style="font-size:10px;color:#6cf;background:#000;padding:4px;margin:2px 0;white-space:pre;max-height:160px;overflow:auto">objects: -</pre>'
+      +'<pre id="re_miss" style="font-size:10px;color:#f88;background:#000;padding:4px;margin:2px 0;white-space:pre">misses: -</pre>'
+      // ── EMITTER DEBUG: click-driven control of every window._emit* / _asmCfg knob ──
+      // Collapsible. Binds to the EXISTING globals read per-frame by buildEmitterDrawList
+      // (sprite-client.mjs). NO default behavior changes — every control is initialized
+      // from the global's current value, so the render is byte-identical until toggled.
+      +'<div style="margin:6px 0 2px;border-top:1px solid #555;padding-top:4px"><b style="color:#fc6;cursor:pointer" id="emd_hdr">▸ EMITTER DEBUG (facing / anchor / scale)</b></div>'
+      +'<div id="emd_body" style="display:none">'
+      +'<label title="Body facing sense. Default ON (LOCKED 2026-06-11 = inverted owner.facing byte; both posReflect AND texture-U derive from it so neg r10/neg r8 agree). OFF = raw byte (A/B)."><input type="checkbox" id="emd_faceInv"> faceInv — LOCKED body facing sense</label>'
+      +'<label title="INVERT only the POSITION reflection gate (orthogonal to the texture-U mirror). Isolates wrong-side (position) from wrong-texture."><input type="checkbox" id="emd_faceFlip"> faceFlip — invert position-reflect gate</label>'
+      +'<label title="Texture V-flip correction (atlas stores parts bottom-up). Default ON = upright. OFF = raw A/B (renders head-down)."><input type="checkbox" id="emd_flipY"> flipY — texture V-flip (upright)</label>'
+      +'<label title="~1/sec per-char [emitFace] console readout (facingRaw, anchorX, reflected, leadPartScreenX). The on-screen table below works regardless."><input type="checkbox" id="emd_faceLog"> faceLog — console [emitFace] log</label>'
+      +'<label title="Draw a 1px magenta vertical line at the owner pen-anchor X so anchor offset vs reflection is visible."><input type="checkbox" id="emd_anchorDbg"> anchorDbg — magenta anchor line</label>'
+      +'<label title="EMITTER DEBUG trace (window._emitDbg): per ~60 frames trace Ryu cid0 body — live sid, atlas hit/miss, parts emitted."><input type="checkbox" id="emd_emitDbg"> emitDbg — Ryu trace (~1/sec)</label>'
+      +'<label title="FORCE-STATIC demo pose (window._emitForce). Default OFF = live pose. ON = static GFX2 assembly demo pose."><input type="checkbox" id="emd_emitForce"> emitForce — force static demo pose</label>'
+      +'<label title="On-the-fly all-poses emitter (window._emitterLive). Default OFF (proven shipping path). ON = build CHARQ-shaped live assembly."><input type="checkbox" id="emd_emitterLive"> emitterLive — all-poses live build</label>'
+      +'<label title="Reflection mode. Default OFF = reflect the pen ORIGIN (2*A - tlx), faithful to neg r10 (disasm negates the pen accumulator, not the rect). ON = old edge reflect (2*A - (tlx+w)) which injects a spurious part-width offset."><input type="checkbox" id="emd_reflectEdge"> reflectEdge — old edge reflect (+w bug, A/B)</label>'
+      +'<label>reflectDx <input type="range" id="emd_reflectDx" min="-40" max="40" step="0.5" value="0" style="width:120px;vertical-align:middle"> <span id="emd_reflectDxV" style="color:#0f0">0.0</span> <span style="color:#888">(game-px axis nudge)</span></label>'
+      +'<label>tileScale <input type="range" id="emd_tileScale" min="0.25" max="2" step="0.05" value="1" style="width:120px;vertical-align:middle"> <span id="emd_tileScaleV" style="color:#0f0">1.00</span></label>'
+      +'<div style="margin:4px 0 2px;color:#fc6;font-weight:bold">LIVE FACING / ANCHOR READOUT</div>'
+      +'<pre id="emd_readout" style="font-size:10px;color:#6f6;background:#000;padding:4px;margin:2px 0;white-space:pre;max-height:140px;overflow:auto">(emitter readout — waiting for chars)</pre>'
+      +'<button id="emd_copy" style="font-size:10px">copy readout</button>'
+      +' <button id="emd_dump" style="font-size:10px;color:#000;background:#fc6;font-weight:bold" title="Export this frame: GSTA facing/anchor + TA-truth per-part quads (green ground truth) + emitter per-part quads, both on-screen chars. Click mid-match with both players visible, ideally mid-attack (asymmetric pose). Downloads emitter_dump_<frame>.json.">DUMP FRAME</button>'
+      +'</div>'
+      +'</div>';
+    panel.insertBefore(box, panel.firstChild);
+    document.getElementById('re_hdr').onclick=()=>{ const b=document.getElementById('re_body');
+      const open=b.style.display==='none'; b.style.display=open?'block':'none';
+      document.getElementById('re_hdr').textContent=(open?'▾':'▸')+' RE COCKPIT (Z-layer ETL + DIFF v7)'; };
+    const cutV=document.getElementById('re_cutv');
+    // slider 0..500 -> z 0..0.05 (default 91 -> 0.0091, the validated floor cut)
+    const sliderToZ=v=>v/10000;
+    // window.DBG is created later in module evaluation; ensure it exists so these
+    // RE fields survive (the {} is overwritten by the real DBG init, which spreads
+    // onto the same object only if present — so seed onto window and let init merge).
+    window.DBG = window.DBG || {};
+    document.getElementById('re_on').onchange=e=>{ window._reMode=e.target.checked;
+      window.DBG.reLayerFilter=e.target.checked;
+      document.getElementById('re_break').textContent=e.target.checked?'classifying…':'RE off'; };
+    document.getElementById('re_cut').oninput=e=>{ const z=sliderToZ(+e.target.value);
+      window.DBG.reCut=z; cutV.textContent=z.toFixed(5); };
+    window.DBG.reCut=0.0091; window.DBG.reHide=0; window.DBG.reLayerFilter=false;
+    const setHide=()=>{ let m=0;
+      if(document.getElementById('re_hStage').checked) m|=1;
+      if(document.getElementById('re_hChar').checked)  m|=2;
+      if(document.getElementById('re_hFx').checked)    m|=4;
+      window.DBG.reHide=m;
+      // Layer-isolation only shows on the TA render (#c). In sprite mode the TA
+      // decode/render is SKIPPED (window._skipTA) unless _reMode is on, so a hide
+      // toggle would do nothing. Force the TA alive while any layer is hidden;
+      // release it when all are cleared (unless RE-mode checkbox is keeping it on).
+      if(m){ window._reMode=true; }
+      else if(!document.getElementById('re_on').checked){ window._reMode=false; } };
+    ['re_hStage','re_hChar','re_hFx'].forEach(id=>document.getElementById(id).onchange=setHide);
+    // ═══════════════════════════════════════════════════════════════
+    //   EMITTER DEBUG — click-bind every window._emit* / _asmCfg.tileScale knob
+    //   read per-frame by buildEmitterDrawList (sprite-client.mjs). Pure UI: each
+    //   control is INITIALIZED from the global's current value and writes the global
+    //   live on change. No default behavior changes — render is byte-identical until
+    //   the operator flips a control (the facing-bug hunt, just clickable).
+    // ═══════════════════════════════════════════════════════════════
+    (function(){
+      const hdr=document.getElementById('emd_hdr'), body=document.getElementById('emd_body');
+      if(!hdr||!body) return;
+      hdr.onclick=()=>{ const open=body.style.display==='none'; body.style.display=open?'block':'none';
+        hdr.textContent=(open?'▾':'▸')+' EMITTER DEBUG (facing / anchor / scale)'; };
+      // Boolean knobs: [global, checkbox-id, default-when-undefined]. The default mirrors
+      // the read in sprite-client.mjs so the checkbox shows the EFFECTIVE current value.
+      const BOOLS=[
+        ['_emitFaceInv','emd_faceInv',true],   // default TRUE (locked inverted-byte body sense, 2026-06-11)
+        ['_emitFaceFlip','emd_faceFlip',false],
+        ['_emitFlipY','emd_flipY',true],     // default ON (upright) — matches sprite-client read
+        ['_emitFaceLog','emd_faceLog',false],
+        ['_emitAnchorDbg','emd_anchorDbg',false],
+        ['_emitDbg','emd_emitDbg',false],
+        ['_emitForce','emd_emitForce',false],
+        ['_emitterLive','emd_emitterLive',false],
+      ];
+      BOOLS.forEach(([g,id,def])=>{
+        const cb=document.getElementById(id); if(!cb) return;
+        const cur=(window[g]!==undefined)?!!window[g]:def;
+        window[g]=cur; cb.checked=cur;            // seed the global so reads are consistent
+        cb.onchange=e=>{ window[g]=e.target.checked;
+          console.log('[emitterDebug]',g,'=',e.target.checked); };
+      });
+      // tileScale slider (window._asmCfg.tileScale). _asmCfg is created earlier in module
+      // eval; default tileScale (when unset) is 1.0 per the sprite-client read.
+      window._asmCfg = window._asmCfg || {};
+      const ts=document.getElementById('emd_tileScale'), tsv=document.getElementById('emd_tileScaleV');
+      if(ts){
+        const cur=(window._asmCfg.tileScale!=null)?window._asmCfg.tileScale:1.0;
+        ts.value=cur; if(tsv) tsv.textContent=(+cur).toFixed(2);
+        ts.oninput=e=>{ const v=parseFloat(e.target.value); window._asmCfg.tileScale=v;
+          if(tsv) tsv.textContent=v.toFixed(2); };
+      }
+      // reflectEdge (_asmCfg.reflectEdge): default OFF = the corrected origin reflect.
+      const re=document.getElementById('emd_reflectEdge');
+      if(re){ const cur=(window._asmCfg.reflectEdge===true); window._asmCfg.reflectEdge=cur; re.checked=cur;
+        re.onchange=e=>{ window._asmCfg.reflectEdge=e.target.checked;
+          console.log('[emitterDebug] _asmCfg.reflectEdge =',e.target.checked); }; }
+      // reflectDx (_asmCfg.reflectDx): game-px nudge on the reflection axis (residual seed).
+      const rdx=document.getElementById('emd_reflectDx'), rdxv=document.getElementById('emd_reflectDxV');
+      if(rdx){ const cur=(window._asmCfg.reflectDx!=null)?window._asmCfg.reflectDx:0;
+        rdx.value=cur; if(rdxv) rdxv.textContent=(+cur).toFixed(1);
+        rdx.oninput=e=>{ const v=parseFloat(e.target.value); window._asmCfg.reflectDx=v;
+          if(rdxv) rdxv.textContent=v.toFixed(1); }; }
+      // LIVE READOUT — render window._emitFaceReadout.perChar (emitted every frame by
+      // buildEmitterDrawList) as a compact per-char table at ~4 Hz. SEEs the live facing
+      // value + which side the jab lands without the console.
+      const ro=document.getElementById('emd_readout');
+      const fmt=()=>{
+        const r=window._emitFaceReadout;
+        if(!r||!r.perChar||!Object.keys(r.perChar).length) return '(no emitter chars on screen)';
+        const now=(typeof performance!=='undefined')?performance.now():0;
+        const rows=Object.values(r.perChar)
+          .filter(c=>!c.t||(now-c.t)<1500)      // drop chars not seen in ~1.5s
+          .sort((a,b)=>(a.slot-b.slot)||(a.cid-b.cid))
+          .map(c=>{
+            const jab=(c.jabX!=null)?String(c.jabX).padStart(6):'   -- ';
+            return `s${c.slot} sid${String(c.sid).padStart(3)} | face=${c.facingRaw}`
+              +` anchorX=${String(c.anchorX).padStart(6)} jabX=${jab} side=${c.side}`
+              +(c.reflected?' [refl]':'');
+          });
+        return rows.length?rows.join('\n'):'(emitter chars stale)';
+      };
+      setInterval(()=>{ if(body.style.display==='none')return; try{ ro.textContent=fmt(); }catch(_e){} }, 250);
+      // ── DUMP FRAME — the DEFINITIVE facing-derivation tool ────────────────────
+      // Exports, for the CURRENT frame and BOTH on-screen chars: GSTA facing/anchor +
+      // the TA-TRUTH per-part quads (the green ground truth from window._lastParsed,
+      // the SAME data objDeltas/the DIFF green layer rasterize) + the EMITTER per-part
+      // quads (from buildEmitterDrawList via window._emitDumpResult). Facing is then
+      // DERIVED numerically (lead-part X vs anchor on both sides), not eyeballed.
+      const dmp=document.getElementById('emd_dump');
+      if(dmp) dmp.onclick=()=>{
+        const SC=SPRITECLIENT, g=window._lastParsed;
+        if(!g||!g.vertexCount){ alert('DUMP FRAME: no TA frame yet — join + play a match (both players visible).'); return; }
+        // 1) Request emitter per-part capture, wait ONE rendered frame for
+        //    buildEmitterDrawList to populate window._emitDumpResult, then snapshot.
+        window._emitDumpResult={chars:[]};
+        window._emitDumpReq=1;
+        requestAnimationFrame(()=>requestAnimationFrame(()=>{
+          window._emitDumpReq=0;
+          const emit=window._emitDumpResult||{chars:[]};
+          // 2) Snapshot GSTA owner anchors for the active body slots.
+          const owners=[];
+          for(let s=0;s<6;s++){ const sl=SC.slot[s];
+            if(sl&&sl.active) owners.push({slot:s,cid:sl.char_id,sid:sl.sprite_id&0xffff,
+              facing:sl.facing,screen_x:+(sl.screen_x).toFixed(2),screen_y:+(sl.screen_y).toFixed(2)}); }
+          // 3) Collect TA-TRUTH foreground poly quads (z>=cut => char/fx, not stage/BG),
+          //    same walk as objDeltas(). 7 floats/vert: x,y,z,(u,v,?,col).
+          const vf=new Float32Array(g.vertexData.buffer,g.vertexData.byteOffset,g.vertexCount*7);
+          const cut=(window.DBG&&window.DBG.reCut!==undefined)?window.DBG.reCut:0.0091;
+          const taPolys=[]; const scan=(list,kind)=>{ if(!list)return;
+            for(const pp of list){ if(!pp||pp.count<3)continue;
+              const z0=vf[pp.first*7+2]; if(z0<cut)continue;
+              let mnX=1e9,mxX=-1e9,mnY=1e9,mxY=-1e9;
+              for(let v=pp.first;v<pp.first+pp.count;v++){ const x=vf[v*7],y=vf[v*7+1];
+                if(x<mnX)mnX=x; if(x>mxX)mxX=x; if(y<mnY)mnY=y; if(y>mxY)mxY=y; }
+              taPolys.push({kind,x:+mnX.toFixed(2),y:+mnY.toFixed(2),
+                w:+(mxX-mnX).toFixed(2),h:+(mxY-mnY).toFixed(2),
+                cx:+((mnX+mxX)/2).toFixed(2),cy:+((mnY+mxY)/2).toFixed(2),z:+z0.toFixed(5)}); } };
+          scan(g.opaque,'op'); scan(g.punchThrough,'pt'); scan(g.translucent,'tr');
+          // 4) Per-player split: group each TA poly to the NEAREST owner anchorX, so the
+          //    derivation has each char's truth quads separated. Also compute that char's
+          //    TA lead-extent (min/max X) = the actual facing direction ground truth.
+          const players=owners.map(o=>{
+            const em=(emit.chars||[]).find(c=>c.cid===o.cid&&c.slot===o.slot)||null;
+            const ta=taPolys.filter(p=>{ let best=1e9,who=-1;
+              owners.forEach((oo,i)=>{ const d=Math.abs(p.cx-oo.screen_x); if(d<best){best=d;who=i;} });
+              return owners[who]===o; });
+            // TA ground-truth horizontal extent relative to the anchor (which way the body reaches).
+            let taMinX=1e9,taMaxX=-1e9; ta.forEach(p=>{ if(p.x<taMinX)taMinX=p.x; if(p.x+p.w>taMaxX)taMaxX=p.x+p.w; });
+            const taExt=ta.length?{minX:+taMinX.toFixed(2),maxX:+taMaxX.toFixed(2),
+              leftReach:+(o.screen_x-taMinX).toFixed(2),rightReach:+(taMaxX-o.screen_x).toFixed(2)}:null;
+            // EMITTER lead-extent the same way (which way OUR red body reaches).
+            let emMinX=1e9,emMaxX=-1e9; if(em&&em.parts) em.parts.forEach(p=>{ if(p.x<emMinX)emMinX=p.x; if(p.x+p.w>emMaxX)emMaxX=p.x+p.w; });
+            const emExt=(em&&em.parts&&em.parts.length)?{minX:+emMinX.toFixed(2),maxX:+emMaxX.toFixed(2),
+              leftReach:+(o.screen_x-emMinX).toFixed(2),rightReach:+(emMaxX-o.screen_x).toFixed(2)}:null;
+            return {gsta:o, emitter:em, taExtent:taExt, emitterExtent:emExt,
+              taPolyCount:ta.length, taPolys:ta};
+          });
+          const dump={ tool:'emitter_dump', ts:Date.now(),
+            frame:(window._lastFrameNum!=null?window._lastFrameNum:(g.frameNum!=null?g.frameNum:0)),
+            note:'TA-truth quads = ground truth (green DIFF layer). taExtent.{left,right}Reach > the other = which way the body ACTUALLY reaches from anchor. Compare to emitterExtent + gsta.facing to derive facing-byte->screen-dir and whether position/texture need independent polarity.',
+            toggles:{ faceInv:!!window._emitFaceInv, faceFlip:!!window._emitFaceFlip,
+              flipY:(window._emitFlipY!==undefined?window._emitFlipY:true),
+              tileScale:(window._asmCfg&&window._asmCfg.tileScale!=null?window._asmCfg.tileScale:1) },
+            reCut:cut, taPolyTotal:taPolys.length, players };
+          const fn=`emitter_dump_${dump.frame}.json`;
+          const blob=new Blob([JSON.stringify(dump,null,2)],{type:'application/json'});
+          const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fn;
+          document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },1000);
+          console.log('[emitterDump]',fn,'players=',players.length,'taPolys=',taPolys.length,dump);
+          dmp.textContent='DUMPED ✓ '+fn; setTimeout(()=>dmp.textContent='DUMP FRAME',2500);
+        }));
+      };
+      const cp=document.getElementById('emd_copy');
+      if(cp) cp.onclick=()=>{ const j=JSON.stringify(window._emitFaceReadout||{perChar:{}},null,2);
+        if(navigator.clipboard) navigator.clipboard.writeText(j).then(
+          ()=>{ cp.textContent='copied ✓'; setTimeout(()=>cp.textContent='copy readout',1200); },
+          ()=>{ console.log('[emitterDebug] readout:',j); });
+        else console.log('[emitterDebug] readout:',j); };
+    })();
+    // ═══════════════════════════════════════════════════════════════
+    //   DIFF OVERLAY — composite the TA TRUTH (PVR2Renderer, #c) over our
+    //   whole-sprite RECONSTRUCTION (sprite-gpu, sccg/scc), pixel-aligned, so
+    //   the operator SEES every miss/extra/drift. Purely additive: it reads the
+    //   already-rendered canvases by drawImage (1:1 640x480 copy) — never touches
+    //   the TA or sprite render paths. Both renders are in 640x480 game space
+    //   (TA verts x,y == GSTA screen_xy), so a straight 0,0->640,480 copy aligns.
+    // ═══════════════════════════════════════════════════════════════
+    window._diffMode = false;
+    (function(){
+      const wrapEl=document.getElementById('wrap'); if(!wrapEl) return;
+      // Overlay container sits exactly over the TA canvas #c (640x480, same 1px
+      // border box). Three stacked canvases: TA truth, our reconstruction, labels.
+      const host=document.createElement('div'); host.id='diffHost';
+      host.style.cssText='position:absolute;top:0;left:0;width:640px;height:480px;display:none;pointer-events:none;z-index:50';
+      // #c (the TA canvas) has NO border and sits at #wrap's content-box top-left,
+      // so the overlay canvases align at top:0/left:0 (1:1 with #c's 640x480 pixels).
+      // Children fill the host (100%); alignHost() sizes the host to the VISIBLE
+      // canvas's box each frame, so the overlay scales with sc_scale / max-width.
+      const mk=(id,blend)=>{ const cv=document.createElement('canvas'); cv.id=id; cv.width=640; cv.height=480;
+        cv.style.cssText='position:absolute;top:0;left:0;width:100%;height:100%'+(blend?(';mix-blend-mode:'+blend):''); return cv; };
+      const cvTA=mk('diffTA',null);        // TA truth (base)
+      const cvOurs=mk('diffOurs',null);    // reconstruction (blended over TA per view)
+      const cvLbl=mk('diffLbl',null);      // GSTA object labels
+      host.appendChild(cvTA); host.appendChild(cvOurs); host.appendChild(cvLbl);
+      wrapEl.style.position='relative'; wrapEl.appendChild(host);
+      const xTA=cvTA.getContext('2d'), xOurs=cvOurs.getContext('2d'), xLbl=cvLbl.getContext('2d');
+      let view='overlay', opacity=1, labelsOn=true;
+      // ── WEBGPU READBACK FIX (DIFF v7) ──────────────────────────────────────
+      // #c (PVR2Renderer) and #sccg (SpriteGPU) are WebGPU canvases. A WebGPU
+      // swap-chain texture is CONSUMED on present: by the time this decoupled
+      // diff rAF runs, getCurrentTexture() has expired the buffer, so a later
+      // drawImage(webgpuCanvas)/getImageData reads BLANK -> every view showed
+      // nothing ("options do nothing"). drawImage of a WebGPU canvas only returns
+      // live pixels when called in the SAME task right after submit(), before the
+      // next getCurrentTexture(). So we mirror each render into a persistent 2D
+      // canvas AT ITS PRESENT SITE (where the buffer is still valid); the diff
+      // then reads these always-valid 2D mirrors instead of the WebGPU canvases.
+      const mirTA=document.createElement('canvas');  mirTA.width=640;  mirTA.height=480;
+      const mirOurs=document.createElement('canvas');mirOurs.width=640;mirOurs.height=480;
+      const mTA=mirTA.getContext('2d',{willReadFrequently:true});
+      const mOurs=mirOurs.getContext('2d',{willReadFrequently:true});
+      let taFresh=0, oursFresh=0;   // perf.now() of last successful mirror
+      // Called from the TA renderTick right after R.renderFrame()+submit (#c valid now).
+      window._diffMirrorTA=(src)=>{ if(!window._diffMode) return;
+        try{ mTA.clearRect(0,0,640,480); mTA.drawImage(src,0,0,640,480); taFresh=performance.now(); }catch(_e){} };
+      // Called from the sprite tick right after SG.render()+submit (sccg/scc valid now).
+      window._diffMirrorOurs=(src)=>{ if(!window._diffMode||!src) return;
+        try{ mOurs.clearRect(0,0,640,480); mOurs.drawImage(src,0,0,640,480); oursFresh=performance.now(); }catch(_e){} };
+      document.getElementById('diff_on').onchange=e=>{ window._diffMode=e.target.checked;
+        host.style.display=e.target.checked?'block':'none';
+        // DIFF needs BOTH renders alive: keep the TA decoding (like RE mode) so #c
+        // has the truth, and keep the sprite reconstruction rendering (it already does).
+        if(e.target.checked){ window._reMode=true; window.DBG.reLayerFilter=false; }
+        document.getElementById('diff_delta').textContent=e.target.checked?'diff: measuring…':'diff: off'; };
+      document.getElementById('diff_view').onchange=e=>{ view=e.target.value; };
+      document.getElementById('diff_op').oninput=e=>{ opacity=+e.target.value/100;
+        document.getElementById('diff_opv').textContent=e.target.value+'%'; };
+      document.getElementById('diff_lbl').onchange=e=>{ labelsOn=e.target.checked; };
+      // Pick the live reconstruction surface (CHARQ sccq if up, else WebGPU sccg,
+      // else Canvas2D scc). CHARQ feeds _diffMirrorOurs(scq) directly at its present
+      // site, so the tint view (red=ours) reflects CHARQ when its surface is visible.
+      const oursCanvas=()=>{ const q=document.getElementById('sccq'), g=document.getElementById('sccg'), v=document.getElementById('scc');
+        if(q && q.style.display!=='none') return q;
+        if(g && g.style.display!=='none') return g;
+        if(v && v.style.display!=='none') return v;
+        return (window._spritegpu&&window._spritegpu.ok)?g:v; };
+      // Per-object delta: for each GSTA object, find the centroid of TA truth
+      // foreground polys near it and report the px offset to where WE draw it.
+      function objDeltas(){
+        const g=window._lastParsed, SC=SPRITECLIENT;
+        if(!g||!g.vertexCount) return 'diff: no TA frame (join + play a match)';
+        const vf=new Float32Array(g.vertexData.buffer,g.vertexData.byteOffset,g.vertexCount*7);
+        const cut=(window.DBG.reCut!==undefined)?window.DBG.reCut:0.0091;
+        // collect TA foreground poly centroids (z>=cut => not stage/BG)
+        const fg=[]; const scan=list=>{ if(!list)return; for(const pp of list){ if(!pp||pp.count<3)continue;
+          const z0=vf[pp.first*7+2]; if(z0<cut)continue;
+          let mnX=1e9,mxX=-1e9,mnY=1e9,mxY=-1e9;
+          for(let v=pp.first;v<pp.first+pp.count;v++){ const x=vf[v*7],y=vf[v*7+1];
+            if(x<mnX)mnX=x; if(x>mxX)mxX=x; if(y<mnY)mnY=y; if(y>mxY)mxY=y; }
+          fg.push({cx:(mnX+mxX)/2,cy:(mnY+mxY)/2}); } };
+        scan(g.opaque); scan(g.punchThrough); scan(g.translucent);
+        const objs=[];
+        for(let s=0;s<6;s++){ const sl=SC.slot[s]; if(sl&&sl.active)
+          objs.push({k:'body',lbl:`s${s}`,cid:sl.char_id,sid:sl.sprite_id&0xffff,x:sl.screen_x,y:sl.screen_y}); }
+        for(const ob of (SC.objects||[]))
+          objs.push({k:ob.isEffect?'fx':'sat',lbl:'obj',cid:ob.cid,sid:ob.sid&0xffff,x:ob.x,y:ob.y});
+        if(!objs.length) return 'diff: no GSTA objects active';
+        let out='kind  cid  sid     ours_xy    TA-nearest  Δpx\n';
+        for(const o of objs){
+          let bd=1e9,bx=0,by=0;
+          for(const f of fg){ const d=Math.hypot(f.cx-o.x,f.cy-o.y); if(d<bd){bd=d;bx=f.cx;by=f.cy;} }
+          const dx=(bx-o.x), dy=(by-o.y), dist=(bd<1e9)?Math.hypot(dx,dy):-1;
+          out+=`${o.k.padEnd(4)} c0x${o.cid.toString(16).padStart(2,'0')} 0x${o.sid.toString(16).padStart(4,'0')} `
+            +`(${o.x.toFixed(0).padStart(3)},${o.y.toFixed(0).padStart(3)}) `
+            +(dist<0?'  (no TA poly)  ---'
+              :`(${bx.toFixed(0).padStart(3)},${by.toFixed(0).padStart(3)}) ${('Δ'+dist.toFixed(0)).padStart(5)} [${dx>=0?'+':''}${dx.toFixed(0)},${dy>=0?'+':''}${dy.toFixed(0)}]`)
+            +'\n';
+        }
+        return out.trimEnd();
+      }
+      // Keep the overlay host aligned with whatever canvas is actually VISIBLE.
+      // In sprite mode #c (TA) may be hidden/below and the live surface is the
+      // sprite canvas inside the inner wrap (a block BELOW #c). Measure its box
+      // relative to #wrap each frame and move the host there, so the composite
+      // lands ON the visible render instead of an empty/offset region.
+      function alignHost(){
+        const oc=oursCanvas();
+        const showSprite=oc && oc.offsetParent!==null && oc.style.display!=='none';
+        // Prefer the visible reconstruction surface; fall back to #c (TA video).
+        const target=showSprite?oc:canvas;
+        if(!target) return;
+        const wr=wrapEl.getBoundingClientRect(), tr=target.getBoundingClientRect();
+        host.style.left=(tr.left-wr.left)+'px';
+        host.style.top=(tr.top-wr.top)+'px';
+        host.style.width=tr.width+'px';
+        host.style.height=tr.height+'px';
+      }
+      // DIFF compositing — its own rAF loop so it's decoupled from the render paths.
+      function diffTick(){
+        requestAnimationFrame(diffTick);
+        if(!window._diffMode) return;
+        alignHost();
+        // READ FROM THE 2D MIRRORS (always valid). The WebGPU canvases (#c, sccg)
+        // were mirrored at their present sites in _diffMirrorTA/_diffMirrorOurs.
+        const haveOurs=(performance.now()-oursFresh)<500;   // mirror is recent
+        // 1) base layer: TA truth (PVR2Renderer ground truth, mirrored)
+        xTA.clearRect(0,0,640,480);
+        try{ if(view!=='ours') xTA.drawImage(mirTA,0,0,640,480); }catch(_e){}
+        // 2) ours layer: reconstruction, composited per the chosen view
+        xOurs.clearRect(0,0,640,480);
+        cvOurs.style.mixBlendMode='normal'; cvOurs.style.opacity='1';
+        if(view==='ta'){ /* ours hidden */ }
+        else if(view==='ours'){ if(haveOurs){ try{ xOurs.drawImage(mirOurs,0,0,640,480); }catch(_e){} } }
+        else if(view==='overlay'){
+          // difference blend: matched pixels cancel to black, mismatches light up
+          cvOurs.style.mixBlendMode='difference'; cvOurs.style.opacity=String(opacity);
+          if(haveOurs){ try{ xOurs.drawImage(mirOurs,0,0,640,480); }catch(_e){} }
+        } else if(view==='tint'){
+          // Luminance-MASK tint (colour-INDEPENDENT): any TA-truth content -> GREEN,
+          // any reconstruction content -> RED, both -> YELLOW. The old version
+          // multiplied by the green/red CHANNEL, so it only kept that colour
+          // component of the real sprite — Storm (not green) went black => "tint did
+          // nothing". A luminance mask lights up content of ANY colour.
+          // TIP: enable "hide STAGE/BG" or the TA truth's bright stage shows all-green.
+          let ta=null, ours=null;
+          try{ ta=xTA.getImageData(0,0,640,480); }catch(_e){}   // xTA already holds the TA truth
+          if(haveOurs){ try{ ours=mOurs.getImageData(0,0,640,480); }catch(_e){} }
+          if(ta){ const out=xTA.createImageData(640,480), od=out.data, td=ta.data,
+                  rd=(ours&&ours.data)||null, T=22;
+            for(let i=0;i<td.length;i+=4){
+              const tl=td[i]*0.30+td[i+1]*0.59+td[i+2]*0.11;        // TA luminance
+              const ol=rd?(rd[i]*0.30+rd[i+1]*0.59+rd[i+2]*0.11):0; // ours luminance
+              od[i]=ol>T?255:0; od[i+1]=tl>T?255:0; od[i+2]=0; od[i+3]=255; // R=ours G=truth
+            }
+            xTA.putImageData(out,0,0); }
+          xOurs.clearRect(0,0,640,480);
+          cvOurs.style.mixBlendMode='normal'; cvOurs.style.opacity='1';
+        }
+        // 3) labels: GSTA bodies + satellites at their screen_xy (game space == canvas px)
+        xLbl.clearRect(0,0,640,480);
+        if(labelsOn){
+          const SC=SPRITECLIENT;
+          xLbl.font='9px monospace'; xLbl.textBaseline='top';
+          const tag=(x,y,txt,col)=>{ const w=xLbl.measureText(txt).width;
+            xLbl.fillStyle='rgba(0,0,0,0.7)'; xLbl.fillRect(x+5,y-5,w+4,12);
+            xLbl.fillStyle=col; xLbl.fillRect(x-2,y-2,4,4);
+            xLbl.fillStyle=col; xLbl.fillText(txt,x+7,y-4); };
+          for(let s=0;s<6;s++){ const sl=SC.slot[s]; if(sl&&sl.active)
+            tag(sl.screen_x,sl.screen_y,`s${s} c${sl.char_id.toString(16)} 0x${(sl.sprite_id&0xffff).toString(16)} body`,'#0f8'); }
+          for(const ob of (SC.objects||[]))
+            tag(ob.x,ob.y,`c${ob.cid.toString(16)} 0x${(ob.sid&0xffff).toString(16)} ${ob.isEffect?'fx':'sat'}`,ob.isEffect?'#f80':'#0af');
+        }
+      }
+      requestAnimationFrame(diffTick);
+      // delta panel ~6 Hz (independent of the 8 Hz classify())
+      setInterval(()=>{ if(!window._diffMode) return;
+        try{ document.getElementById('diff_delta').textContent=objDeltas(); }catch(_e){} }, 160);
+    })();
+    // ----- the ETL: classify every TA poly of the latest decoded frame -----
+    const histC=document.getElementById('re_hist'), hx=histC.getContext('2d');
+    function classify(){
+      const g=window._lastParsed, SC=SPRITECLIENT;
+      const brk=document.getElementById('re_break');
+      if(!window._reMode){ return; }
+      if(!g || !g.vertexCount){ brk.textContent='no TA frame yet (in a match? join + play)'; return; }
+      const cut=(DBG.reCut!==undefined)?DBG.reCut:0.0091;
+      const vf=new Float32Array(g.vertexData.buffer, g.vertexData.byteOffset, g.vertexCount*7);
+      // GSTA objects on screen (screen_xy in 640x480 game space == vertex x,y space)
+      const objs=[];
+      for(let s=0;s<6;s++){ const sl=SC.slot[s]; if(sl&&sl.active)
+        objs.push({slot:s,cid:sl.char_id,sid:sl.sprite_id&0xffff,x:sl.screen_x,y:sl.screen_y,fg:0}); }
+      const cnt={stage:0,character:0,effect:0,hud:0};
+      const zs=[]; let zmin=1e9,zmax=-1e9;
+      const scan=(list)=>{ if(!list) return; for(const pp of list){
+        if(!pp||pp.count<3) continue;
+        const fi=pp.first*7;
+        // bbox + representative z (first vertex z drives the floor-cut, as in the renderer)
+        const z0=vf[fi+2];
+        zs.push(z0); if(z0<zmin)zmin=z0; if(z0>zmax)zmax=z0;
+        let mnX=1e9,mxX=-1e9,mnY=1e9,mxY=-1e9;
+        for(let v=pp.first;v<pp.first+pp.count;v++){ const x=vf[v*7],y=vf[v*7+1];
+          if(x<mnX)mnX=x; if(x>mxX)mxX=x; if(y<mnY)mnY=y; if(y>mxY)mxY=y; }
+        const cx=(mnX+mxX)/2, cy=(mnY+mxY)/2;
+        const dstB=(pp.tsp>>26)&7;
+        // Z LAYER: z<cut => STAGE/BG (the validated floor cut); z>=cut => foreground.
+        let cls;
+        if(z0<cut) cls='stage';
+        else if(dstB===1) cls='effect';            // additive => EFFECT / SPARK
+        else { cls = (cy<=120)?'hud':'character'; } // high-screen blend [4,5] near top => HUD
+        cnt[cls]++;
+        // proximity attribution: nearest GSTA object within ~120px gets the fg poly
+        if(cls==='character'||cls==='effect'){
+          let bd=120,bo=null;
+          for(const o of objs){ const d=Math.hypot(cx-o.x, cy-o.y); if(d<bd){bd=d;bo=o;} }
+          if(bo) bo.fg++;
+        }
+      }};
+      scan(g.opaque); scan(g.punchThrough); scan(g.translucent);
+      const tot=cnt.stage+cnt.character+cnt.effect+cnt.hud || 1;
+      const pct=n=>(100*n/tot).toFixed(0).padStart(3)+'%';
+      brk.textContent=
+         `polys ${tot}   cut z=${cut.toFixed(5)}  (z range ${zmin.toFixed(4)}..${zmax.toFixed(4)})\n`
+        +`STAGE/BG   ${String(cnt.stage).padStart(4)}  ${pct(cnt.stage)}\n`
+        +`CHARACTER  ${String(cnt.character).padStart(4)}  ${pct(cnt.character)}\n`
+        +`EFFECT/SPK ${String(cnt.effect).padStart(4)}  ${pct(cnt.effect)}\n`
+        +`HUD        ${String(cnt.hud).padStart(4)}  ${pct(cnt.hud)}`;
+      // ----- Z histogram (log-ish bins over actual z range) so the bimodal split shows -----
+      hx.clearRect(0,0,256,60); const NB=128, bins=new Uint32Array(NB);
+      const lo=zmin, hi=(zmax>zmin)?zmax:zmin+1e-6, span=hi-lo;
+      for(const z of zs){ let b=Math.floor((z-lo)/span*(NB-1)); if(b<0)b=0; if(b>NB-1)b=NB-1; bins[b]++; }
+      let bmax=1; for(const b of bins) if(b>bmax)bmax=b;
+      for(let i=0;i<NB;i++){ const h=Math.round(Math.log(1+bins[i])/Math.log(1+bmax)*58);
+        hx.fillStyle='#0a6'; hx.fillRect(i*2,60-h,2,h); }
+      // cutoff marker line
+      let cb=Math.floor((cut-lo)/span*(NB-1)); if(cb<0)cb=0; if(cb>NB-1)cb=NB-1;
+      hx.fillStyle='#fa0'; hx.fillRect(cb*2,0,2,60);
+      // ----- per-object attribution + misses -----
+      const ol=document.getElementById('re_obj'), ml=document.getElementById('re_miss');
+      if(!objs.length){ ol.textContent='objects: none active'; ml.textContent='misses: -'; return; }
+      let ot='GSTA obj  cid  sid     scr_xy     #fg\n', misses=[];
+      for(const o of objs){
+        ot+=`s${o.slot} c0x${o.cid.toString(16).padStart(2,'0')} 0x${o.sid.toString(16).padStart(4,'0')} (${o.x.toFixed(0).padStart(3)},${o.y.toFixed(0).padStart(3)}) ${String(o.fg).padStart(4)}\n`;
+        if(o.fg===0) misses.push(`c0x${o.cid.toString(16)}/0x${o.sid.toString(16)}@(${o.x.toFixed(0)},${o.y.toFixed(0)})`);
+      }
+      ol.textContent=ot.trimEnd();
+      ml.textContent = misses.length
+        ? 'MISSES (on-screen, no fg poly — rip worklist):\n  '+misses.join('\n  ')
+        : 'misses: none (every GSTA obj has fg polys)';
+    }
+    // lightweight: ~8 Hz, not per-frame, to avoid jank
+    setInterval(()=>{ try{ classify(); }catch(e){ /* RE panel must never break render */ } }, 125);
+  })();
+
+  let _lastShowSprite=null, _lastCharqMode=false, _outFrames=0;
   const tick=()=>{
     // lazy-init the WebGPU sprite renderer once the shared device exists
     if(!SG.ok && !SG._tried && window._R && window._R.dev){ SG._tried=true; SG.init(window._R.dev, scg); showCanvas(); }
@@ -603,21 +1198,37 @@ addEventListener('keydown',e=>{
     // no applyFrame overrun, and the user can see the menu the atlas can't draw.
     const inMatch=(SPRITECLIENT.inMatch===1);
     _outFrames = inMatch ? 0 : (_outFrames+1);   // debounce: brief in_match drops (tag-in) shouldn't flash TA
-    const showSprite=scOn&&(_outFrames<20);       // ~0.33s of sustained no-match before falling back to TA
-    if(showSprite!==_lastShowSprite){
-      _lastShowSprite=showSprite;
-      window._skipTA=showSprite;   // skip TA in-match (sprite renders); decode it out of match (show the menu)
-      const gg=gpuOn&&SG.ok&&!stafMode;
-      scs.style.display=(showSprite&&stafMode)?'block':'none';   // STAF canvas only in full-STAF mode -> ONE box otherwise
+    // FORCE-STATIC EMITTER DEMO: when the emitter is on AND _emitForce (default true),
+    // keep the sprite surface shown EVEN OUT OF MATCH — the emitter draws Ryu's baked
+    // pose at a fixed anchor every frame (sprite-client buildEmitterDrawList), so the
+    // operator sees a recognizable Ryu without catching a live in-match standing pose.
+    const emitForceShow = scOn && !!SPRITECLIENT.assemblyMode
+                          && (typeof window==='undefined' || window._emitForce===undefined || window._emitForce);
+    const showSprite=scOn&&((_outFrames<20)||emitForceShow); // ~0.33s no-match before TA fallback (bypassed by force-demo)
+    // RE COCKPIT: when _reMode is on, the ETL needs the parsed TA polys every frame,
+    // so force the TA decode alive (don't skip) regardless of sprite mode. The sprite
+    // canvases still render normally; the TA just additionally decodes into _lastParsed.
+    // CHARQ references textures in LIVE VRAM; the TA delta frames carry the VRAM
+    // dirty pages, so applyFrame MUST keep running (don't skip) to keep D.vram +
+    // the palette current. (The TA VIDEO still isn't drawn — renderCharq draws the
+    // character; the TA decode only maintains VRAM, same as _reMode/DIFF.)
+    const wantSkip = showSprite && !window._reMode && !charqMode;
+    if(window._skipTA!==wantSkip) window._skipTA=wantSkip;
+    if(showSprite!==_lastShowSprite || charqMode!==_lastCharqMode){
+      _lastShowSprite=showSprite; _lastCharqMode=charqMode;
+      const gg=gpuOn&&SG.ok&&!stafMode&&!charqMode;
+      // CHARQ is a DEDICATED standalone surface (wrapper holds canvas + label) — show
+      // the whole wrapper as an inline-block sibling, NOT an overlay on #c.
+      scqWrap.style.display=(showSprite&&charqMode)?'inline-block':'none';   // CHARQ surface (takes precedence)
+      scs.style.display=(showSprite&&stafMode&&!charqMode)?'block':'none';   // STAF canvas only in full-STAF mode -> ONE box otherwise
       scg.style.display=(showSprite&&gg)?'block':'none';
-      scv.style.display=(showSprite&&!gg&&!stafMode)?'block':'none';
-      scs.style.zIndex='3'; scg.style.zIndex='2'; scv.style.zIndex='2';  // HUD/FX overlay above characters
+      scv.style.display=(showSprite&&!gg&&!stafMode&&!charqMode)?'block':'none';
     }
     if(showSprite){
-      // FORCED WHOLE-SPRITE: the assembly (parts/emitter) and STAF paths are PARKED
-      // (garble the character). Their controls are hidden; pin the tick to the proven
-      // whole-sprite path (buildDrawList) so a stale hidden toggle can't route here.
-      const asm=false;
+      // WHOLE-SPRITE is the proven default. The EMITTER (parts/loc_8c033e90) path is
+      // now wired to the #sc_emit toggle (SPRITECLIENT.assemblyMode): tick it to
+      // reconstruct-from-sprite_id via PL{cid}_parts.png + _asm.json. STAF stays parked.
+      const asm = !!SPRITECLIENT.assemblyMode;
       const stafRoute=false;
       // HYBRID: the PVR2Renderer surface (scs) renders the server's FILTERED STAF
       // stream (MAPLECAST_HUDF = effects + HUD only) — the REAL tinted HUD + real
@@ -626,6 +1237,28 @@ addEventListener('keydown',e=>{
       if(!STAFR._inited && !STAFR._tried && window._R && window._R.dev){ STAFR._tried=true;
         try{ STAFR.initShared(scs, window._R.dev); STAFR._inited=true; STAFTM=makeStafTexMgr(window._R.dev, SPRITECLIENT); showCanvas(); }
         catch(err){ console.error('[staf-pvr2] init', err); }
+      }
+      // CHARQ shares the same WebGPU device (so it reuses the GLOBAL TextureManager
+      // window._T, which decodes live VRAM — no separate texMgr shim needed).
+      if(!CHARQR._inited && !CHARQR._tried && window._R && window._R.dev){ CHARQR._tried=true;
+        try{ CHARQR.initShared(scq, window._R.dev); CHARQR._inited=true; showCanvas(); }
+        catch(err){ console.error('[charq-pvr2] init', err); }
+      }
+      // CHARQ A/B: render the per-part PVR sprite-quads onto the dedicated sccq surface
+      // (its own labeled canvas on a dark-magenta bg). Takes precedence over whole-sprite/STAF.
+      if(charqMode){
+        // ON-THE-FLY ALL-POSES EMITTER (window._emitterLive): build the CHARQ-shaped
+        // parsed buffer from the STATIC GFX2 assembly indexed by the LIVE sprite_id +
+        // a sel->TCW resolver, then render it through the SAME pvr2-renderer surface
+        // (live-VRAM PAL4 decode via window._T). No server CHARQ, no baked atlas. The
+        // sel->TCW mapping is the one open piece (see buildEmitterLiveCharq) — until it
+        // is set, this returns null and we fall through to the server CHARQ stream.
+        if(window._emitterLive){ try{ SPRITECLIENT.buildEmitterLiveCharq(); }catch(err){ console.error('[emitter-live]', err); } }
+        try{ renderCharq(); }catch(err){ console.error('[charq-pvr2]', err); }
+        hctx.clearRect(0,0,sch.width,sch.height);
+        if(hudOn) SPRITECLIENT.drawHUD(hctx);
+        const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.charqStatsText();
+        requestAnimationFrame(tick); return;
       }
       if(stafRoute){
         // FULL STAF (debug, PARKED): whole frame from STAF (needs unfiltered MAPLECAST_STAF).
@@ -640,12 +1273,14 @@ addEventListener('keydown',e=>{
         const drawList = asm ? SPRITECLIENT.buildAssemblyDrawList(640,480) : SPRITECLIENT.buildDrawList(640,480);
         try{ SG.render(drawList, window.DBG||{}, window._T, SPRITECLIENT.buildSparkList(640,480), null); }
         catch(err){ console.error('[sprite-gpu] render error -> Canvas2D fallback', err); SG.ok=false; showCanvas(); }
+        if(window._diffMirrorOurs) window._diffMirrorOurs(scg);          // mirror sccg (WebGPU) while valid (DIFF v7)
         try{ renderStaf(); }catch(err){}                                // effects overlay (PVR2Renderer) — STAF only when streaming
         if(hudOn) SPRITECLIENT.drawHUD(hctx); else hctx.clearRect(0,0,sch.width,sch.height);  // ripped FONT.BIN HUD (no STAF)
         SPRITECLIENT.drawFlash(hctx, drawList);                          // field-stepper (dormant unless probing)
         const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.statsText();
       } else {
         if(asm) SPRITECLIENT.renderAssembly(scx); else SPRITECLIENT.render(scx);
+        if(window._diffMirrorOurs) window._diffMirrorOurs(scv);          // mirror scc (Canvas2D fallback) (DIFF v7)
         try{ renderStaf(); }catch(err){}                                // effects overlay (PVR2Renderer) — STAF only when streaming
         if(hudOn) SPRITECLIENT.drawHUD(hctx); else hctx.clearRect(0,0,sch.width,sch.height);  // ripped FONT.BIN HUD (no STAF)
         const el=document.getElementById('sc_stats'); if(el) el.textContent=SPRITECLIENT.statsText();
@@ -668,8 +1303,9 @@ let skippedFrames=0, renderFrames=0, predFrames=0;
 let audioCtx=null, audioWorkletPort=null, audioPackets=0, audioPacketsTotal=0, audioPlaying=false;
 const ss=(m,c='')=>{st.textContent=m;st.className=c};
 
-// Debug state — read by renderer
-window.DBG = {
+// Debug state — read by renderer. MERGE onto any pre-seeded window.DBG (the RE
+// COCKPIT panel runs earlier in module eval and seeds reCut/reHide/reLayerFilter).
+window.DBG = Object.assign(window.DBG || {}, {
     drawOpaque: true, drawPunch: true, drawTrans: true,
     shaderMode: 'normal',
     trDepthFunc: 6, trDepthWrite: false,
@@ -677,7 +1313,7 @@ window.DBG = {
     blendOverride: false, blendSrc: 4, blendDst: 5,
     cullOverride: 'auto',
     texForceInvalidate: false,
-};
+});
 
 // Wire up controls
 document.getElementById('dbg_opaque').onchange = e => DBG.drawOpaque = e.target.checked;
@@ -1177,16 +1813,54 @@ async function main(){
                   const rgba=D._decompress(d.subarray(20));
                   SPRITECLIENT.onTX64(key, tw, th, rgba);
                 }catch(e){} return; }
-                // STAF: stripped-TA frame (full textured-quad list). ZCST-wrapped, so
-                // decompress first, then check the inner 'STAF' magic. If it's STAF,
-                // route to the sprite client and DO NOT feed applyFrame.
-                // Peek when EITHER the STAF A/B debug path is active (_stafRoute) OR the
-                // sprite client is rendering in-match (_skipTA) — the HYBRID HUDF overlay
-                // (PVR2Renderer on scs) needs the parsed STAF every frame. Normal full-TA
-                // video frames aren't STAF, so isSTAF() rejects them after one decompress.
-                if(window._stafRoute || window._skipTA){
+                // CHARQ: per-part PVR sprite-quad character frame ('CHRQ' inner magic),
+                // ZCST-wrapped, rides the SAME mirror stream as the TA delta frames.
+                // It MUST divert BEFORE applyFrame: applyFrame would read CHRQ's header
+                // bytes as a delta-frame taSize (a huge number) and `new Uint8Array(taSize)`
+                // throws RangeError (Array buffer allocation failed), stalling the stream.
+                // Gate on the ACTUAL inner magic (not a checkbox flag) so the diversion is
+                // immune to _charqRoute timing — peek the decompressed magic unconditionally.
+                // The character TEXTURES it references live in VRAM, which the TA delta
+                // frames below keep current (in CHARQ mode _skipTA is OFF, so D.vram stays live).
+                {
                   let _dec=null;
-                  try{ _dec=D._decompress(d); }catch(e){}
+                  // Cheap inner-magic peek: a ZCST envelope is 'ZCST'+u32 size + zstd blob.
+                  // Only decompress when this could be CHRQ/STAF — i.e. the frame is
+                  // ZCST-wrapped (every CHRQ/STAF frame is). Plain non-ZCST frames skip
+                  // the decompress entirely. This runs every frame, but the cost is one
+                  // zstd inflate the applyFrame path would have paid anyway.
+                  const _isZCST = d.length>=8 && d[0]===0x5A && d[1]===0x43 && d[2]===0x53 && d[3]===0x54; // 'ZCST'
+                  if(_isZCST || window._stafRoute || window._skipTA || window._charqRoute){
+                    try{ _dec=D._decompress(d); }catch(e){ if(window._charqDbg) console.error('[onframe] _decompress threw', e); }
+                  }
+                  // DIAGNOSTIC (window._charqDbg): log the inner magic of EVERY frame
+                  // (throttled), separating "relay not forwarding CHRQ" from "peek not
+                  // detecting". _innerMagic = decompressed first-4 ASCII when ZCST, else
+                  // the raw frame's first-4 ASCII. Tally per-magic so a single glance
+                  // shows whether 'CHRQ' ever arrives.
+                  if(window._charqDbg){
+                    const _src = _dec || d;
+                    const _m = (_src && _src.length>=4)
+                      ? String.fromCharCode(_src[0],_src[1],_src[2],_src[3]).replace(/[^\x20-\x7e]/g,'.')
+                      : '(short '+(_src?_src.length:0)+')';
+                    window._magicTally = window._magicTally || {};
+                    window._magicTally[_m] = (window._magicTally[_m]||0)+1;
+                    window._magicSeen = (window._magicSeen||0)+1;
+                    if((window._magicSeen%60)===1){
+                      console.log('[onframe] magic tally '+JSON.stringify(window._magicTally)
+                        +' | this='+_m+' zcst='+_isZCST+' decLen='+(_dec?_dec.length:'null')+' rawLen='+d.length);
+                    }
+                  }
+                  // Robustness: if the frame is NOT ZCST-wrapped but its RAW bytes already
+                  // start with 'CHRQ' (server emitted it uncompressed), detect on raw too.
+                  if(!_dec && d.length>=4 && d[0]===0x43 && d[1]===0x48 && d[2]===0x52 && d[3]===0x51){ _dec = d; }
+                  // CHARQ — divert ALWAYS when the inner magic is 'CHRQ' (independent of flags).
+                  if(_dec && SpriteClient.isCHARQ(_dec)){
+                    if(window._charqDbg){ window._charqRx=(window._charqRx||0)+1; if((window._charqRx%60)===1) console.log('[onframe] CHRQ arrived, len='+_dec.length+' rx#'+window._charqRx+' charqMode='+charqMode+' charqRoute='+window._charqRoute); }
+                    try{ SPRITECLIENT.onCHARQ(_dec); }catch(e){ if(window._charqDbg) console.error('[onCHARQ] threw', e); } return; }
+                  // STAF: stripped-TA frame (full textured-quad list); inner 'STAF' magic.
+                  // The HYBRID HUDF overlay needs the parsed STAF every frame. Normal full-TA
+                  // video frames aren't STAF, so isSTAF() rejects them after the one decompress.
                   if(_dec && SpriteClient.isSTAF(_dec)){ try{ SPRITECLIENT.onSTAF(_dec); }catch(e){} return; }
                 }
                 // Sprite mode (no-TA): audio/GSTA/OBJS/EFCT/TXTR/etc. were handled and
@@ -1215,7 +1889,7 @@ async function main(){
                     const g=P.parse(fr.taBuffer,fr.taSize);
                     try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e2) {}
                     pMs=performance.now()-t1;
-                    lastParsed=g; window._lastParsed=g;
+                    lastParsed=g; window._lastParsed=g; window._lastFrameNum=D.frameNum;
                     // Feed predictor with real frame vertex data
                     FP.feedFrame(g.vertexData, g.vertexCount);
                     g._snap = fr.pvrSnapshot; // save for predictive render
@@ -1230,6 +1904,7 @@ async function main(){
                         const rt=DBG.resScale>1?PP.getRenderTarget():null;
                         R.renderFrame(g,T,fr.pvrSnapshot,D.vram,DBG,rt);
                         if(rt&&R._lastEncoder){PP.blit(R._lastEncoder,R.ctx.getCurrentTexture().createView(),canvas.width,canvas.height,DBG);R.dev.queue.submit([R._lastEncoder.finish()]);}
+                        if(window._diffMirrorTA) window._diffMirrorTA(canvas);  // mirror #c while valid (DIFF v7)
                         BAKE.onRendered(canvas);
                         rMs=performance.now()-t2;
                         totalFrames++; renderFrames++;
@@ -1437,6 +2112,7 @@ async function main(){
             const rt=DBG.resScale>1?PP.getRenderTarget():null;
             R.renderFrame(g,T,snap,D.vram,DBG,rt);
             if(rt&&R._lastEncoder){PP.blit(R._lastEncoder,R.ctx.getCurrentTexture().createView(),canvas.width,canvas.height,DBG);R.dev.queue.submit([R._lastEncoder.finish()]);};
+            if(window._diffMirrorTA) window._diffMirrorTA(canvas);  // mirror #c while the swap-chain image is still valid (DIFF v7)
             BAKE.onRendered(canvas);
             rMs=performance.now()-t2;
             totalFrames++; renderFrames++;

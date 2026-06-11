@@ -305,6 +305,25 @@ export class PVR2Renderer {
                     if(lt==='opaque'&&z0<floorZ)continue;
                     if(lt==='translucent'&&z0<floorZ)continue;
                 }
+                // RE COCKPIT layer isolation: hide whole Z/blend-classified layers so
+                // the operator can see STAGE / CHARACTER / EFFECT in isolation (same
+                // idea as the floor-cut, but per-layer). dbg.reHide = bitmask:
+                //   1=stage(bg)  2=character/HUD  4=effect/spark(additive)
+                // NOTE: gate on reHide ALONE (the bitmask is the intent to isolate).
+                // It used to also require dbg.reLayerFilter, but that flag is the
+                // histogram/classify-ETL toggle and is FORCED OFF in DIFF mode — so the
+                // hide checkboxes set reHide yet nothing was skipped. (BUG 1 fix.)
+                if(dbg.reHide){
+                    const vf2=new Float32Array(vertexData.buffer,vertexData.byteOffset,vertexCount*7);
+                    const z0=vf2[pp.first*7+2];
+                    const reCut=(dbg.reCut!==undefined)?dbg.reCut:0.0091;
+                    const dstB=(tsp>>26)&7;
+                    let layerBit;
+                    if(z0<reCut) layerBit=1;                 // STAGE / BG
+                    else if(dstB===1) layerBit=4;            // additive => EFFECT / SPARK
+                    else layerBit=2;                         // CHARACTER / HUD
+                    if(dbg.reHide & layerBit) continue;
+                }
                 if(lt==='punch_through'||lt==='translucent')dm=6;
                 if(lt==='translucent')zw=1; if(lt==='punch_through')zw=1;
                 if(lt==='translucent'&&dbg.trDepthFunc!==undefined)dm=dbg.trDepthFunc;

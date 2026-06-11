@@ -84,6 +84,12 @@ export class FrameDecoder {
         // misparse as a delta frame and throw. Bail cleanly so EVERY client (incl.
         // king.html via renderer-bridge) is safe. LE u32: 'GSTA'=0x41545347, 'EFCT'=0x54434645
         if (maybeMagic === 0x41545347 || maybeMagic === 0x54434645 || maybeMagic === 0x52545854 || maybeMagic === 0x534A424F) return null; // GSTA/EFCT/TXTR/OBJS
+        // CHRQ (per-part PVR sprite quads) and STAF (stripped-TA quad list) ride the SAME
+        // mirror stream as TA deltas. If one reaches here (e.g. the caller's magic-peek
+        // diversion was bypassed), reading its header as a delta frame yields a bogus
+        // multi-GB taSize -> `new Uint8Array(taSize)` throws RangeError and stalls the
+        // stream. Bail cleanly instead. LE u32: 'CHRQ'=0x51524843, 'STAF'=0x46415453.
+        if (maybeMagic === 0x51524843 || maybeMagic === 0x46415453) return null; // CHRQ/STAF
         if (maybeMagic === MAGIC_SYNC || maybeMagic === MAGIC_FSYN || maybeMagic === MAGIC_SAVE) {
             this.applySync(rawData);
             // A SYNC replaces the ENTIRE VRAM, but carries no dirty-page list — so any
