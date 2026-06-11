@@ -1208,7 +1208,7 @@ addEventListener('keydown',e=>{
     // operator sees a recognizable Ryu without catching a live in-match standing pose.
     const emitForceShow = scOn && !!SPRITECLIENT.assemblyMode
                           && (typeof window==='undefined' || window._emitForce===undefined || window._emitForce);
-    const showSprite=scOn&&((_outFrames<20)||emitForceShow); // ~0.33s no-match before TA fallback (bypassed by force-demo)
+    const showSprite=scOn; // ALWAYS ON when sprite mode is on — no auto-hide on empty/swap/out-of-match (user request 2026-06-11)
     // RE COCKPIT: when _reMode is on, the ETL needs the parsed TA polys every frame,
     // so force the TA decode alive (don't skip) regardless of sprite mode. The sprite
     // canvases still render normally; the TA just additionally decodes into _lastParsed.
