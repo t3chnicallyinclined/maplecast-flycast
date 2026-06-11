@@ -969,7 +969,7 @@ static void wsClientRun(std::string host, int port)
 		// size bump on either side never silently drops the packet.
 		if (frame.size() >= 4 && frame[0] == 'G' && frame[1] == 'S'
 		    && frame[2] == 'T' && frame[3] == 'A') {
-			static const int LEGACY = 5 + 2+2+2+2 + 4+4+4 + 6*49;   // 319 (GSTA enrich: per-char stride 38->49)
+			static const int LEGACY = 5 + 2+2+2+2 + 4+4+4 + 6*57;   // 367 (GSTA wire ext: per-char stride 49->57)
 			if ((int)frame.size() >= 4 + LEGACY) {
 				maplecast_gamestate::GameState gs;
 				maplecast_gamestate::deserialize(frame.data() + 4,
@@ -1759,9 +1759,27 @@ void serverPublish(TA_context* ctx)
 	// frame's SH4 draw walk. serverPublish runs once per frame AFTER that walk
 	// completes, so it is the natural frame boundary. No-op when the hook is OFF.
 	maplecast_oracle_hook::mc_oracleInit();   // one-time stderr log if enabled
+	// GENERIC PROBE v2 — no-restart live reload (RENDER-THREAD watcher half). Cheap
+	// throttled stat() of /dev/shm/mc_oracle_probe.conf; on a changed mtime it sets
+	// an internal pending flag ONLY. The actual re-parse + block-cache flush runs on
+	// the SH4 thread at the emu-loop boundary (mc_probeApplyReload, emulator.cpp) —
+	// NEVER here, because in non-threaded mode serverPublish runs synchronously inside
+	// the SH4's STARTRENDER write (a dynarec block can be on the stack). No-op when
+	// the probe is disabled.
+	maplecast_oracle_hook::mc_probeCheckReload();
 	// Pass the live ctx so the flush can ta_parse() the completed frame and recover
 	// the per-frame SCREEN quads (real screen x,y) to attribute per OBJ_BEGIN object.
-	maplecast_oracle_hook::mc_oracle_frameFlush(ctx, _localFrameNum);
+	//
+	// CHARQ: when MAPLECAST_CHARQ is set, the per-part CHARACTER body quads come from the
+	// pre-QueueRender hook (mc_oracle_charPassCapture, called in rend_start_render for
+	// EVERY STARTRENDER context BEFORE QueueRender drops the dropped character pass). The
+	// `ctx` serverPublish holds here is the SURVIVING pass — on MVC2 the HUD/composite pass
+	// with ZERO body quads. Re-flushing it would clobber the character snapshot the
+	// pre-QueueRender hook just published. So SKIP the serverPublish flush in CHARQ mode;
+	// the body capture is authoritative from the upstream hook. (Without CHARQ this is the
+	// only flush, unchanged.)
+	if (std::getenv("MAPLECAST_CHARQ") == nullptr)
+		maplecast_oracle_hook::mc_oracle_frameFlush(ctx, _localFrameNum);
 
 	// === MAPLECAST_STATELOG — per-frame RAM state probe (ROM-asset-client test)
 	// Read-only readGameState() + CSV append. Placed BEFORE the PVR snapshot
@@ -2336,15 +2354,23 @@ done_diff:
 				maplecast_gamestate::ObjectState objs[255];
 				int no = maplecast_gamestate::readObjects(objs, 255);
 				if (no > 0) {
-					// 11-byte stride: trailing 3 bytes are flags(1) + hot_dx(s8) + hot_dy(s8).
+					// 14-byte stride: trailing 6 bytes are flags(1) + hot_dx(s8) + hot_dy(s8)
+					//   + effect_key(u16 LE) + blend(u8). (Was 13B; blend appended 2026-06-11
+					//   with the GSTA/OBJF wire extension so the browser OBJS path gets it too;
+					//   13B added effect_key earlier the same day; 11B was the pre-effect_key form.)
 					//   flags bit0 = is_effect (node+0x15c points into Effect Poly 0x0CED0000 ->
 					//          client routes to the effects atlas, not PL{cid}). bits1-7 reserved.
 					//   hot_dx/hot_dy (PATH A) = the object's TRUE assembly hotspot (min dx,dy over
 					//          node+0x178 extras); the client anchors satellites here instead of the
 					//          baked body-relative sp.dx (0,0 => no extras, client keeps baked anchor).
-					// The client auto-detects 11B vs the older 9B vs legacy 8B from the packet
+					//   effect_key = low 16 bits of the node's GFX base (node+0x15c) — stable
+					//          per-effect content key (parsed-but-unused on the client for now).
+					//   blend = per-object PVR blend/list-type (0=PT/opaque 1=alpha 2=additive),
+					//          RAM-derived (computeObjectBlend): effects render additively. Lets the
+					//          lean client transparency-match sparks/supers/auras (G2 wire gap).
+					// The client auto-detects 14B vs the older 13B/11B/9B/legacy 8B from the packet
 					// length, so an old client harmlessly ignores the trailing bytes.
-					uint8_t obuf[4 + 1 + 255 * 11];   // per obj: cid(1)+sid(2)+type(1)+x(2)+y(2)+flags(1)+hotdx(1)+hotdy(1)
+					uint8_t obuf[4 + 1 + 255 * 14];   // per obj: cid(1)+sid(2)+type(1)+x(2)+y(2)+flags(1)+hotdx(1)+hotdy(1)+effkey(2)+blend(1)
 					obuf[0]='O'; obuf[1]='B'; obuf[2]='J'; obuf[3]='S'; obuf[4]=(uint8_t)no;
 					int oo = 5;
 					for (int i = 0; i < no; i++) {
@@ -2357,6 +2383,9 @@ done_diff:
 						obuf[oo++]=(uint8_t)(objs[i].is_effect ? 0x01 : 0x00);   // OBJS flags
 						obuf[oo++]=(uint8_t)objs[i].hot_dx;                       // PATH A true anchor dx
 						obuf[oo++]=(uint8_t)objs[i].hot_dy;                       // PATH A true anchor dy
+						obuf[oo++]=(uint8_t)(objs[i].effect_key & 0xff);          // GSTA wire ext: effect_key u16 LE
+						obuf[oo++]=(uint8_t)((objs[i].effect_key >> 8) & 0xff);
+						obuf[oo++]=objs[i].blend;                                 // GSTA wire ext: blend/list-type u8
 					}
 					maplecast_ws::broadcastBinary(obuf, oo);
 
@@ -3195,6 +3224,92 @@ done_diff:
 					}
 				}
 			}
+		// === CHRQ: production per-character PVR sprite-quad channel (MAPLECAST_CHARQ_EMIT) ==
+		// Drains the Oracle's structured CHARQ-EMIT accumulator (filled by the two block-entry
+		// hooks 0x8C034864 body-part + 0x8C1248CC bank12 submit during this frame's SH4 draw
+		// walk) into a binary 'CHRQ' frame and broadcasts it over the SAME ZCST/WS path STAF
+		// uses. Carries NO pixels — only tcw refs; textures ride the existing VRAM dirty-page
+		// channel. Gated MAPLECAST_CHARQ_EMIT + in-match (0x8C289624). READ-ONLY w.r.t. guest.
+		//
+		// Wire (uncompressed inner payload, all integers LE; floats IEEE754 LE):
+		//   'CHRQ'(4) frameNum(u32) objCount(u32)
+		//   per object:
+		//     cid(u8) flags(u8) sprite_id(u16) node(u32) quadCount(u16) pad(u16)
+		//   per quad:
+		//     Ax,Ay,Bx,By,Cx,Cy,Dx,Dy : 8×f32   (screen corners)
+		//     AU,AV,BU,BV,CU,CV        : 6×f32   (UVs, already expanded from u16-trunc)
+		//     tcw,tsp,pcw              : 3×u32
+		{
+			static bool _charqOn = getenv("MAPLECAST_CHARQ_EMIT") != nullptr;
+			bool _inMatchCq = addrspace::read8(0x8C289624) != 0;
+			if (_charqOn && _inMatchCq) {
+				const maplecast_oracle_hook::CharqEmitObj* objs = nullptr;
+				uint32_t cqFrame = 0;
+				int nObj = maplecast_oracle_hook::mc_charqEmit_beginFrame(&objs, &cqFrame);
+				if (nObj > 0 && objs) {
+					static std::vector<uint8_t> _charqBuf;
+					_charqBuf.clear();
+					auto cqPutU16 = [&](uint16_t v){ _charqBuf.push_back(v & 0xff); _charqBuf.push_back((v >> 8) & 0xff); };
+					auto cqPut32  = [&](uint32_t v){ for (int i = 0; i < 4; i++) _charqBuf.push_back((v >> (i * 8)) & 0xff); };
+					auto cqPutF   = [&](float f){ uint32_t u; memcpy(&u, &f, 4); for (int i = 0; i < 4; i++) _charqBuf.push_back((u >> (i * 8)) & 0xff); };
+					// header
+					_charqBuf.push_back('C'); _charqBuf.push_back('H'); _charqBuf.push_back('R'); _charqBuf.push_back('Q');
+					cqPut32(cqFrame);
+					cqPut32((uint32_t)nObj);
+					uint32_t totalQuads = 0;
+					for (int oi = 0; oi < nObj; oi++) {
+						int nq = 0;
+						const maplecast_oracle_hook::CharqEmitQuad* qs =
+							maplecast_oracle_hook::mc_charqEmit_objQuads(oi, &nq);
+						if (nq > 0xFFFF) nq = 0xFFFF;
+						// object header: cid(u8) flags(u8) sprite_id(u16) node(u32) quadCount(u16) pad(u16)
+						_charqBuf.push_back((uint8_t)(objs[oi].cid & 0xff));
+						_charqBuf.push_back(objs[oi].flags);
+						cqPutU16((uint16_t)(objs[oi].sprite_id & 0xFFFF));
+						cqPut32(objs[oi].node);
+						cqPutU16((uint16_t)nq);
+						cqPutU16(0);   // pad
+						for (int qi = 0; qi < nq && qs; qi++) {
+							const maplecast_oracle_hook::CharqEmitQuad& q = qs[qi];
+							cqPutF(q.Ax); cqPutF(q.Ay); cqPutF(q.Bx); cqPutF(q.By);
+							cqPutF(q.Cx); cqPutF(q.Cy); cqPutF(q.Dx); cqPutF(q.Dy);
+							cqPutF(q.AU); cqPutF(q.AV); cqPutF(q.BU); cqPutF(q.BV);
+							cqPutF(q.CU); cqPutF(q.CV);
+							cqPut32(q.tcw); cqPut32(q.tsp); cqPut32(q.pcw);
+						}
+						totalQuads += (uint32_t)nq;
+					}
+					maplecast_oracle_hook::mc_charqEmit_endFrame();
+
+					// zstd the whole CHRQ payload (ZCST outer); client routes 'CHRQ' after decompress.
+					size_t compSize = 0; uint64_t cus = 0;
+					const uint8_t* comp = _compressor.compress(_charqBuf.data(), (uint32_t)_charqBuf.size(), compSize, cus);
+					maplecast_ws::broadcastBinary(comp, (uint32_t)compSize);
+
+					// DBG (MAPLECAST_CHARQ_EMIT_DBG): objs/quads/bytes/frame -> /dev/shm/mc_charq.log,
+					// flushed once per second (60 frames), reusing the STAFMEASURE cadence.
+					static bool _charqDbg = getenv("MAPLECAST_CHARQ_EMIT_DBG") != nullptr;
+					if (_charqDbg) {
+						static uint64_t _cqBytesAcc = 0, _cqQuadAcc = 0, _cqObjAcc = 0;
+						static uint32_t _cqFrames = 0;
+						_cqBytesAcc += compSize; _cqQuadAcc += totalQuads; _cqObjAcc += (uint32_t)nObj;
+						if (++_cqFrames >= 60) {
+							FILE* lf = fopen("/dev/shm/mc_charq.log", "a");
+							if (lf) {
+								fprintf(lf, "CHRQ frame=%u objs/f=%.1f quads/f=%.1f raw=%zu KB/s=%.1f (last polys=%u verts4=%u)\n",
+									cqFrame, _cqObjAcc / 60.0, _cqQuadAcc / 60.0, _charqBuf.size(),
+									_cqBytesAcc / 1024.0, totalQuads, totalQuads * 4);
+								fclose(lf);
+							}
+							_cqBytesAcc = 0; _cqQuadAcc = 0; _cqObjAcc = 0; _cqFrames = 0;
+						}
+					}
+				} else {
+					// nothing accumulated this frame — still release the (empty) ready set.
+					maplecast_oracle_hook::mc_charqEmit_endFrame();
+				}
+			}
+		}
 		// === STAF-MEASURE: stripped-TA bandwidth probe (read-only). Splits cost by list —
 		// opaque (stage) vs punch-through (characters) vs translucent (fx) — gated to
 		// in_match (so the menu's heavy ta_parse never runs). Shows whether caching the

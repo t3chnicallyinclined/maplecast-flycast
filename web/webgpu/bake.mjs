@@ -71,7 +71,8 @@ export class SpriteBake {
                          facing:0, staticRun:0, prevPix:null, prevW:0, prevH:0, lastDiff:1 }; }
 
   // --- GSTA intake ------------------------------------------------------
-  // d: Uint8Array, d[0..3]='GSTA', then 261-byte serialized GameState.
+  // d: Uint8Array, d[0..3]='GSTA', then the 376-byte serialized GameState
+  // (per-char stride 57). Reads only prefix fields (+0..+33), so unchanged by the ext.
   static isGSTA(d){ return d.length>=4 && d[0]===71 && d[1]===83 && d[2]===84 && d[3]===65; }
 
   onGSTA(d){
@@ -79,7 +80,7 @@ export class SpriteBake {
     const B = 4;                       // payload starts after 'GSTA'
     this.inMatch = dv.getUint8(B+0);
     for (let s=0; s<2; s++){
-      const ci = B + 25 + s*49;        // char block: 25-byte global header + 49*slot (GSTA enrich)
+      const ci = B + 25 + s*57;        // char block: 25-byte global header + 57*slot (GSTA wire ext 49->57)
       const sl = this.slot[s];
       sl.active    = dv.getUint8(ci+0);
       sl.char_id   = dv.getUint8(ci+1);

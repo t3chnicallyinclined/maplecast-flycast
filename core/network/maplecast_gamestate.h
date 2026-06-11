@@ -37,6 +37,18 @@ struct CharacterState {
 	uint8_t  pal_12d;           // char+0x12d (u8) — per-part palette row select (CONFIRMED §2)
 	uint8_t  pal_12e;           // char+0x12e (u8) — live hit-flash / palette-effect (CONFIRMED §2,§3)
 	uint8_t  overlay_1a4;       // char+0x1a4 (u8) — super/aura overlay class (CONFIRMED §3 loc_8c035162)
+	// --- GSTA wire extension (append-only +49..+56; existing offsets unchanged) ---
+	// All read by readGameState; parsed by every consumer. draw_layer is the slot-table
+	// layer (the TRUE draw order, mirrors readAllDrawn); the rest are ENGINE fields the
+	// emitter/overlay/palette work will fold in. 0xFF draw_layer = not in any layer.
+	uint8_t  draw_layer;        // slot-table walk (0x8C2895E0/0x8C287DE0); 0xFF=not drawn (CONFIRMED reference_mvc2_slot_table_drawlist)
+	uint8_t  render_extra;      // char+0x151 (u8) — RenderExtra (super/aura overlay driver)
+	uint8_t  facing_1d2;        // char+0x1d2 (u8) — authoritative xflip (pl_mem.asm: xflip 0x01d2)
+	uint8_t  pal_color_25;      // char+0x025 (u8) — live displayed palette idx (pl_mem.asm: pl_palid_match 0x25)
+	uint8_t  hyper_armor;       // char+0x202 (u8) — Buff_HyperArmor (pl_mem.asm 0x0202)
+	uint8_t  flight_flag;       // char+0x201 (u8) — Flight_Flag (pl_mem.asm 0x0201)
+	uint8_t  stance;            // char+0x1f9 (u8) — stance: 0 stand/1 crouch/2 jump/3 otg (pl_mem.asm 0x01f9)
+	uint8_t  _pad;              // +56: 0 — alignment/reserve for a future per-char byte
 };
 
 struct GameState {
@@ -86,9 +98,12 @@ void deserialize(const uint8_t* buf, int len, GameState& state);
 // they sync naturally between server+client instances running the same ROM.
 // 253 bytes achieves 99.7%+ visual match rate. Remaining 0.3% is stage
 // background animation and sub-frame interpolation jitter.
-// 319 legacy + 8 raw input + 1 stage_anim = 328 bytes total
+// 319 legacy + 8 raw input + 1 stage_anim = 328 bytes total (pre-extension).
+// GSTA wire EXTENSION (append-only): per-char block 49 -> 57 (+8: draw_layer,
+// render_extra, facing_1d2, pal_color_25, hyper_armor, flight_flag, stance, _pad).
+// New total: 25 header + 6*57 (342) + 9 tail (8 input + 1 stage) = 376.
 // NEVER hardcode button mappings on the client — read p1_buttons/p2_buttons.
-static constexpr int WIRE_SIZE = 5 + 2+2+2+2 + 4+4+4 + 6*49 + 2+2+1+1+1+1 + 1; // = 328
+static constexpr int WIRE_SIZE = 5 + 2+2+2+2 + 4+4+4 + 6*57 + 2+2+1+1+1+1 + 1; // = 376
 
 // Patch the in-game "PLAYER" + "1"/"2" text with custom names
 // slot: 0=P1, 1=P2. name: up to 10 chars (null-terminated)
@@ -127,7 +142,43 @@ struct ObjectState {
 	// falls back to the baked anchor). See re-catalog/00-README.md.
 	int8_t   hot_dx;      // clamped min dx over node+0x178 extras records
 	int8_t   hot_dy;      // clamped min dy over node+0x178 extras records
+	// GSTA wire extension (append-only): low 16 bits of the node's GFX base pointer
+	// (node+0x15c) — a stable per-effect content key for routing/dedup. Same source as
+	// is_effect's gfxLow in readAllDrawn. LE on the wire.
+	uint16_t effect_key;  // (node+0x15c) & 0xFFFF
+	// GSTA wire extension (append-only, 2026-06-11): per-object PVR BLEND / list-type so
+	// the lean off-SH4 client renders sparks/supers/auras with correct transparency
+	// (additive vs alpha vs opaque) instead of flat opaque. The engine selects blend deep
+	// in the bank12 PVR submit from the cell's TSP word (src=(tsp>>29)&7 dst=(tsp>>26)&7,
+	// CHARQ-captured @ recBase+0x14); that submit does NOT run on the RAM-walk OBJS path,
+	// and there is NO per-object blend byte in the pool node (the readAllDrawn fields
+	// +0x03/0x130/0x15C/0x178 hold no list-type). So derive it RAM-side from the engine's
+	// own render-path selector: the per-category draw dispatch loc_8c0301f6 (bank03:191-226)
+	// splits category {0x05,0x06,0x0B,0x0C,0x0D,0x01}=body/cape (opaque/punch-through) vs
+	// {0x07,0x08,0x09}=projectile/effect; and is_effect (GFX in Effect Poly 0x0CED0000) is
+	// the proven additive-blend signal (reference_mvc2_effects_bank: effects = additive).
+	// Encoding: 0=punch-through/opaque, 1=alpha/translucent, 2=additive.
+	uint8_t  blend;       // derived: 0=PT/opaque 1=alpha 2=additive (computeBlend, this file)
 };
+
+// Derive the PVR blend/list-type for a pool object from its RAM-walkable fields.
+// is_effect (GFX in Effect Poly 0x0CED0000) => 2=additive (sparks/supers/auras render
+// additively, reference_mvc2_effects_bank). Body/cape categories {0x05,0x06,0x0B,0x0C,
+// 0x0D,0x01} => 0=opaque/punch-through (audit: bodies are uniformly Dat_Pal + PT). Other
+// (non-effect projectile-class {0x07,0x08,0x09}) => 1=alpha as the conservative middle.
+// Per the engine's per-category render dispatch loc_8c0301f6 (bank03:191-226) + the master
+// back-to-front order loc_8c0305d8 (bank03:733). RAM-derived; the TSP submit isn't run here.
+static inline uint8_t computeObjectBlend(uint8_t is_effect, uint8_t category)
+{
+	if (is_effect) return 2;                 // additive
+	switch (category) {
+		case 0x05: case 0x06: case 0x0B:     // body/cape behind-group
+		case 0x0C: case 0x0D: case 0x01:     // body/cape front-group
+			return 0;                        // opaque / punch-through
+		default:
+			return 1;                        // alpha (projectile-class 0x07/0x08/0x09 etc.)
+	}
+}
 // Scan the object pool; fill up to maxObjs, return count. Skips inactive
 // (sprite_id==0) and the position-less body object. Cheap RAM scan (~14k reads).
 int readObjects(ObjectState* out, int maxObjs);
@@ -158,10 +209,11 @@ uint8_t readStageAnimTimer();
 // from the browser-facing 'OBJS' packet (8/9B, position-only) so neither parser
 // disturbs the other. Layout: per object owner_cid(1) sprite_id(2 LE)
 // type(1) category(1) xflip(1) owner_slot(1) screen_x(i16 LE) screen_y(i16 LE)
-// is_effect(1) hot_dx(s8) hot_dy(s8) = 13 bytes. serialize writes count(1) + N*13
-// into buf (NO magic — caller prepends 'OBJF'); returns bytes written. deserialize
-// reads it back.
-static constexpr int OBJF_REC_SIZE = 13;
+// is_effect(1) hot_dx(s8) hot_dy(s8) effect_key(u16 LE) blend(u8) = 16 bytes. serialize writes
+// count(1) + N*16 into buf (NO magic — caller prepends 'OBJF'); returns bytes written.
+// deserialize reads it back. (effect_key appended 2026-06-11, append-only.)
+// blend(u8) appended 2026-06-11 (append-only) after effect_key => 16 bytes.
+static constexpr int OBJF_REC_SIZE = 16;
 int  serializeObjects(const ObjectState* objs, int n, uint8_t* buf, int maxLen);
 int  deserializeObjects(const uint8_t* buf, int len, ObjectState* out, int maxObjs);
 

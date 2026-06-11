@@ -8,10 +8,13 @@
 //
 // Input is the same GSTA broadcast the bake harness consumes:
 //   'GSTA'(4) + serialized GameState (wire layout = gamestate.cpp serialize()):
-//   25-byte global header, then 6 * 49-byte character blocks (stride bumped 38->49
+//   25-byte global header, then 6 * 57-byte character blocks (stride bumped 38->49
 //   by the GSTA enrich: +38 scaleX(f32) +42 scaleY(f32) +46 pal12d +47 pal12e
-//   +48 overlay1a4). We read the two point characters (render slots 0,1) — active,
-//   char_id, facing, palette, screen_x/y, sprite_id, plus the enrich fields.
+//   +48 overlay1a4; then 49->57 by the GSTA wire ext: +49 draw_layer +50 render_extra
+//   +51 facing_1d2 +52 pal_color_25 +53 hyper_armor +54 flight_flag +55 stance +56 _pad).
+//   We read the two point characters (render slots 0,1) — active, char_id, facing,
+//   palette, screen_x/y, sprite_id, plus the enrich + wire-ext fields. draw_layer
+//   drives the emitter z-order; the rest are parsed-but-unused for now.
 //
 // Canvas2D on purpose: fastest path to a visible side-by-side test, fully
 // decoupled from the WebGPU TA renderer. A WebGPU port comes later for the
@@ -140,7 +143,11 @@ export class SpriteClient {
     return { active:0, char_id:0, sprite_id:-1, screen_x:0, screen_y:0, facing:0, palette:0,
              health:0, red_health:0, _ph:-1, _maxhp:144,   // health + red(trailing) + prev-health (hits) + max seen (bar full)
              // prediction: previous screen pos + timestamps -> observed screen velocity
-             px:0, py:0, t:0, pt:0, vx:0, vy:0 };
+             px:0, py:0, t:0, pt:0, vx:0, vy:0,
+             // GSTA wire extension (parsed in onGSTA; draw_layer drives z-order, the rest
+             // are parsed-but-unused for now — future overlay/facing/palette work).
+             draw_layer:0xFF, render_extra:0, facing_1d2:0, pal_color_25:0,
+             hyper_armor:0, flight_flag:0, stance:0 };
   }
 
   static isGSTA(d) {
@@ -556,13 +563,16 @@ export class SpriteClient {
   }
 
   // 'OBJS'(4) + count(1) + N×[cid(1), sprite_id(2 LE), type(1), x(i16 LE), y(i16 LE),
-  //   flags(1), hot_dx(s8), hot_dy(s8)] = 11B each (auto-detected; 9B/8B legacy).
+  //   flags(1), hot_dx(s8), hot_dy(s8), effect_key(u16 LE)] = 13B each
+  //   (auto-detected; 11B/9B/8B legacy).
   //
   // flags bit0 = is_effect (route to the effects atlas, not PL{cid}).
   // hot_dx/hot_dy (PATH A) = the object's TRUE assembly hotspot (min dx,dy over the
   // node+0x178 extras records) — the satellite's own origin, which the body-relative
-  // baked sp.dx does not match. Stride is auto-detected from the packet length so the
-  // client consumes whichever the server ships (old 8B/9B servers -> hot 0,0 = baked).
+  // baked sp.dx does not match. effect_key = low 16 bits of the GFX base (node+0x15c),
+  // a stable per-effect content key (parsed-but-unused for now). Stride is auto-detected
+  // from the packet length so the client consumes whichever the server ships (old
+  // 8B/9B/11B servers -> trailing fields default to 0/baked).
   static isOBJS(d) {
     return d.length >= 5 && d[0]===79 && d[1]===66 && d[2]===74 && d[3]===83; // 'O','B','J','S'
   }
@@ -575,18 +585,23 @@ export class SpriteClient {
     // object draw anchors satellites here instead of the baked body-relative sp.dx
     // (0,0 => no extras, keep the baked anchor). Old servers omit the trailing bytes.
     const body = d.length - 5;
-    const stride = (n > 0 && body === n * 11) ? 11
+    const stride = (n > 0 && body === n * 14) ? 14   // GSTA wire ext: +blend u8
+                 : (n > 0 && body === n * 13) ? 13   // GSTA wire ext: +effect_key u16
+                 : (n > 0 && body === n * 11) ? 11
                  : (n > 0 && body === n * 9)  ? 9
                  : 8;
     const hasFlags = stride >= 9;
-    const hasHot   = stride === 11;
+    const hasHot   = stride >= 11;
+    const hasKey   = stride >= 13;
+    const hasBlend = stride === 14;
     const objs = []; let o = 5;
     for (let i = 0; i < n && o + stride <= d.length; i++) {
       const raw = dv.getUint16(o+1, true);   // sprite_id with 0x8000 hflip bit
       const ob = { cid: d[o], sid: raw & 0x7fff, type: d[o+3],
                    xflip: (raw & 0x8000) ? 1 : 0,   // object's OWN flip (node+0x130) — NOT owner facing
                    x: dv.getInt16(o+4, true), y: dv.getInt16(o+6, true),
-                   isEffect: 0, hotDx: 0, hotDy: 0, hasHot: false };
+                   isEffect: 0, hotDx: 0, hotDy: 0, hasHot: false, effect_key: 0,
+                   listType: null, blend: null };
       if (hasFlags) {
         const f = d[o+8];
         ob.flags = f;
@@ -596,6 +611,21 @@ export class SpriteClient {
         ob.hotDx = dv.getInt8(o+9);
         ob.hotDy = dv.getInt8(o+10);
         ob.hasHot = !(ob.hotDx === 0 && ob.hotDy === 0);  // 0,0 => server found no extras
+      }
+      // GSTA wire ext: low 16 bits of the GFX base (node+0x15c) — stable per-effect content
+      // key. PARSED-BUT-UNUSED for now (future effect routing/dedup).
+      if (hasKey) ob.effect_key = dv.getUint16(o+11, true);
+      // GSTA wire ext (G2): per-object PVR blend / list-type, RAM-derived server-side
+      // (computeObjectBlend): 0=PT/opaque, 1=alpha, 2=additive (effects render additively;
+      // ref reference_mvc2_effects_bank + per-category dispatch loc_8c0301f6). The
+      // downstream draw list (buildAssemblyDrawList / drawEffects) already keys additive
+      // off o.blend in the PVR (src<<4)|dst NIBBLE convention where dst==ONE(1) => additive
+      // ('lighter'). So MAP the list-type code -> that nibble so additive effects actually
+      // blend through the existing pool-draw path: 2->0x11 (src=ONE,dst=ONE additive),
+      // 1->0x45 (normal alpha), 0->0x00 (opaque). Keep the raw code in ob.listType too.
+      if (hasBlend) {
+        ob.listType = d[o+13];
+        ob.blend = (ob.listType === 2) ? 0x11 : (ob.listType === 1) ? 0x45 : 0x00;
       }
       objs.push(ob);
       o += stride;
@@ -805,7 +835,7 @@ export class SpriteClient {
     const dfr = (this._lastFc != null) ? (fc - this._lastFc) : 0; this._lastFc = fc;
     const frameDt = (dfr >= 1 && dfr <= 8) ? dfr * 16.667 : 0;   // ms of game time since last state
     for (let s = 0; s < 6; s++) {
-      const ci = B + 25 + s * 49;      // 25-byte global header + 49*slot (GSTA enrich)
+      const ci = B + 25 + s * 57;      // 25-byte global header + 57*slot (GSTA wire ext: 49->57)
       const sl = this.slot[s];
       const nx = dv.getFloat32(ci + 16, true), ny = dv.getFloat32(ci + 20, true);
       if (sl.active && frameDt > 0) {
@@ -850,6 +880,23 @@ export class SpriteClient {
       sl.pal12d     = dv.getUint8(ci + 46);
       sl.pal12e     = dv.getUint8(ci + 47);
       sl.overlay1a4 = dv.getUint8(ci + 48);
+      // GSTA wire extension (+49..+56). draw_layer drives the emitter z-order (below);
+      // the rest are PARSED-BUT-UNUSED for now (future overlay/facing/palette work).
+      sl.draw_layer   = dv.getUint8(ci + 49);   // slot-table layer (0xFF = not drawn); z-order
+      sl.render_extra = dv.getUint8(ci + 50);   // char+0x151 RenderExtra (super/aura) — unused
+      // A2 nuance (audit finding:gsta_wire_ext_completeness): the RENDER-authoritative
+      // facing is char+0x110 (= sl.facing @wire+2), the field the body walker loc_8c0344d4
+      // gates on (literal 0x0110 @loc_8c034606) and which the ROM setter loc_8c0d97ee writes
+      // (facing=1 => faces right). The body draw flips on sl.facing — do NOT switch it to
+      // 0x1d2 (geometry is 0.00px-validated against that field). char+0x1d2 (below) is the
+      // COPY; use it ONLY to pre-empt 1-frame turn-around lag (it can lead 0x110 by a frame),
+      // never as the render gate.
+      sl.facing_1d2   = dv.getUint8(ci + 51);   // char+0x1d2 xflip copy — turn-lag hint only, NOT the render gate
+      sl.pal_color_25 = dv.getUint8(ci + 52);   // char+0x025 live palette idx — unused (see report)
+      sl.hyper_armor  = dv.getUint8(ci + 53);   // char+0x202 Buff_HyperArmor — unused
+      sl.flight_flag  = dv.getUint8(ci + 54);   // char+0x201 Flight_Flag — unused
+      sl.stance       = dv.getUint8(ci + 55);   // char+0x1f9 stance — unused
+      // ci + 56 = _pad (reserved)
       if (sl.active && hp > sl._maxhp) sl._maxhp = hp;   // round-start full = bar max
     }
     // Exact size from state: camera zoom = |Δscreen_x / Δpos_x| between two
@@ -1976,41 +2023,51 @@ export class SpriteClient {
                      blend: o.blend, fx: isFx }, o.sid);
     }
 
-    // Z-ORDER — BUG 3 STOPGAP 2026-06-11. The OLD sort `(a.charId - b.charId)` ordered the
-    // char GROUPS by ASCENDING char_id, so the lower char_id (typically P1) always rendered
-    // FIRST = BEHIND. When P1 and P2 overlap, P1 was permanently occluded by P2. MVC2's TRUE
-    // draw order is the slot/LAYER table (the slot table IS the draw list — see memory
-    // reference_mvc2_slot_table_drawlist), which is NOT in the GSTA wire today (the per-slot
-    // block carries active/char_id/sprite_id/screen_xy/facing/palette — NO layer/z byte). So
-    // an EXACT fix needs a wire field; see the report. STOPGAP (best stable client-side rule):
-    // order the char GROUPS by SCREEN DEPTH — the body whose foot (screen_y) is LOWER on
-    // screen is NEARER the camera and draws ON TOP. This fixes the constant P1-behind-P2 case
-    // (whoever stepped forward/jumped-in is drawn in front) and is stable frame-to-frame
-    // (no attack-flag flicker). The renderer groups CONSECUTIVE same-cid quads (sprite-gpu.mjs
-    // byChar Map = first-appearance order; later groups draw atop), so we MUST keep each cid's
-    // quads contiguous: we sort by a PER-CID depth key first, char_id as the deterministic
-    // tiebreak (stable grouping), then the intra-assembly z. Objects/fx inherit their owner
-    // cid's depth (fx cid=-1 keeps its existing front/back z). Ties (equal screen_y) fall back
-    // to char_id = the old behavior. window._emitZByDepth=false restores the pure char_id sort.
+    // Z-ORDER — GSTA wire ext 2026-06-11. MVC2's TRUE draw order is the slot/LAYER table
+    // (the slot table IS the draw list — memory reference_mvc2_slot_table_drawlist). That
+    // layer is now ON THE WIRE: each char block carries draw_layer (+49 = the slot-table
+    // layer index, 0xFF = not in any layer this frame). LOWER layer = drawn FIRST = BEHIND,
+    // so we sort char GROUPS by draw_layer ASCENDING, with char_id as the deterministic
+    // tiebreak (the renderer groups CONSECUTIVE same-cid quads — sprite-gpu.mjs byChar Map,
+    // first-appearance order — so each cid's quads MUST stay contiguous). Intra-assembly z
+    // is the final key.
+    //   FALLBACK: when NO active slot reports a real layer (all draw_layer==0xFF — e.g. an
+    //   older server or a pre-match frame), fall back to the previous SCREEN-DEPTH heuristic
+    //   (lower foot/larger screen_y = nearer = on top). window._emitZByDepth=false forces the
+    //   pure char_id order (legacy). window._emitZByLayer=false forces the depth fallback.
+    const useLayer = (typeof window === 'undefined') ? true
+                   : (window._emitZByLayer !== undefined ? !!window._emitZByLayer : true);
     const zByDepth = (typeof window === 'undefined') ? true
                    : (window._emitZByDepth !== undefined ? !!window._emitZByDepth : true);
-    let depthOf;
-    if (zByDepth) {
-      // Per-cid foot depth from the active body slots (larger screen_y = nearer = on top).
-      // Built once per draw list. A cid not on a body slot (pure effect cid) -> -Infinity so
-      // it sorts to the back of the group order unless it shares a body's cid.
+    // Per-cid draw_layer from the active body slots; track whether ANY real layer was seen.
+    const lmap = new Map(); let anyLayer = false;
+    for (let s = 0; s < 6; s++) { const sl = this.slot[s];
+      if (sl.active && sl.char_id != null && sl.draw_layer !== undefined && sl.draw_layer !== 0xFF) {
+        anyLayer = true;
+        // Use the MIN layer per cid (earliest = furthest back) for a stable group key.
+        if (!lmap.has(sl.char_id) || sl.draw_layer < lmap.get(sl.char_id)) lmap.set(sl.char_id, sl.draw_layer);
+      } }
+    let groupKey;
+    if (useLayer && anyLayer) {
+      // ASCENDING draw_layer: lower layer sorts FIRST = behind. cids with no layer (0xFF /
+      // pure-effect cids) sort to the BACK of the group order (key = -1 < any real layer).
+      groupKey = (cid) => lmap.has(cid) ? lmap.get(cid) : -1;
+    } else if (zByDepth) {
+      // FALLBACK: per-cid foot depth (larger screen_y = nearer = on top). Sort DESCENDING by
+      // depth -> we negate so the comparator below stays "ascending key". A cid not on a body
+      // slot -> +Infinity key so it sorts to the back (drawn first).
       const dmap = new Map();
       for (let s = 0; s < 6; s++) { const sl = this.slot[s];
         if (sl.active && sl.char_id != null) {
           const d = sl.screen_y;
           if (!dmap.has(sl.char_id) || d > dmap.get(sl.char_id)) dmap.set(sl.char_id, d);
         } }
-      depthOf = (cid) => dmap.has(cid) ? dmap.get(cid) : -Infinity;
+      groupKey = (cid) => dmap.has(cid) ? -dmap.get(cid) : Infinity;  // negate: larger screen_y -> later
     } else {
-      depthOf = () => 0;   // disabled -> pure char_id order (legacy)
+      groupKey = () => 0;   // disabled -> pure char_id order (legacy)
     }
     out.sort((a, b) =>
-      (depthOf(a.charId) - depthOf(b.charId))      // nearer (larger screen_y) sorts LATER = on top
+      (groupKey(a.charId) - groupKey(b.charId))    // ascending group key: lower layer / further = first = behind
       || (a.charId - b.charId)                     // deterministic, keeps each cid contiguous
       || ((a.z || 0) - (b.z || 0)));               // intra-assembly back-to-front
     this._asmDrawn = drawn; this._asmMiss = missing; this._asmSkipSel = skipSel;

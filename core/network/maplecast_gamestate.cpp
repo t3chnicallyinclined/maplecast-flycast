@@ -57,6 +57,12 @@ static const uint32_t OFF_SPRITE_SCALE_Y  = 0x054;  // float
 static const uint32_t OFF_PAL_12D         = 0x12D;  // u8: per-part palette row (CONFIRMED §2)
 static const uint32_t OFF_PAL_12E         = 0x12E;  // u8: live hit-flash / palette-effect (CONFIRMED §2,§3)
 static const uint32_t OFF_OVERLAY_1A4     = 0x1A4;  // u8: super/aura overlay class (CONFIRMED §3 loc_8c035162)
+// GSTA wire extension (append-only +49..+55). OFF_COLOR (0x025) below is pal_color_25.
+static const uint32_t OFF_RENDER_EXTRA     = 0x151;  // u8: RenderExtra (super/aura overlay driver; gamestate ramFieldName)
+static const uint32_t OFF_FACING_1D2       = 0x1D2;  // u8: authoritative xflip (pl_mem.asm: xflip 0x01d2)
+static const uint32_t OFF_HYPER_ARMOR      = 0x202;  // u8: Buff_HyperArmor (pl_mem.asm 0x0202)
+static const uint32_t OFF_FLIGHT           = 0x201;  // u8: Flight_Flag (pl_mem.asm 0x0201)
+static const uint32_t OFF_STANCE           = 0x1F9;  // u8: stance 0 stand/1 crouch/2 jump/3 otg (pl_mem.asm 0x01f9)
 // Hidden state discovered by RAM autopsy (rend_diff v2)
 static const uint32_t OFF_SUB_ANIM_PHASE  = 0x502;  // sub-animation phase counter
 static const uint32_t OFF_CHAR_LINK_PTR   = 0x00C;  // linked list pointer between chars
@@ -340,8 +346,12 @@ static int readObjectsWalk(ObjectState* out, int maxObjs)
 					out[n].category   = (uint8_t)addrspace::read8(node + 0x03);  // real render layer byte
 					out[n].xflip      = (uint8_t)(addrspace::read16(node + 0x130) ? 1 : 0);
 					out[n].owner_slot = (uint8_t)(slot < 0 ? 0 : slot);
-					{ uint32_t gb = addrspace::read32(node + OFF_GFX00_PTR) & 0x0FFFFFFF;
-					  out[n].is_effect = (gb >= 0x0CED0000 && gb < 0x0CEE0000) ? 1 : 0; }
+					{ uint32_t gbRaw = addrspace::read32(node + OFF_GFX00_PTR);
+					  uint32_t gb = gbRaw & 0x0FFFFFFF;
+					  out[n].is_effect = (gb >= 0x0CED0000 && gb < 0x0CEE0000) ? 1 : 0;
+					  out[n].effect_key = (uint16_t)(gbRaw & 0xFFFF); }   // GSTA wire ext
+					// GSTA wire ext: per-object PVR blend/list-type (computeObjectBlend).
+					out[n].blend = computeObjectBlend(out[n].is_effect, out[n].category);
 					// PATH A: true assembly hotspot from node+0x178 (parity w/ readAllDrawn).
 					out[n].hot_dx = 0; out[n].hot_dy = 0;
 					readHotspot(node, out[n].hot_dx, out[n].hot_dy);
@@ -418,6 +428,11 @@ static int readAllDrawn(ObjectState* out, int maxObjs)
 			out[n].xflip      = (uint8_t)(addrspace::read16(node + 0x130) ? 1 : 0);
 			out[n].owner_slot = (uint8_t)(slot < 0 ? 0xFF : slot);
 			out[n].is_effect  = isEfx;
+			// GSTA wire extension: low 16 bits of the GFX base (node+0x15c) — a stable
+			// per-effect content key (same gfxBase already read for is_effect).
+			out[n].effect_key = (uint16_t)(gfxBase & 0xFFFF);
+			// GSTA wire ext: per-object PVR blend/list-type (computeObjectBlend).
+			out[n].blend = computeObjectBlend(out[n].is_effect, out[n].category);
 			// PATH A: true assembly hotspot from node+0x178 (0,0 = no extras => client
 			// falls back to the baked anchor).
 			out[n].hot_dx = 0; out[n].hot_dy = 0;
@@ -572,8 +587,15 @@ int readObjects(ObjectState* out, int maxObjs)
 		out[n].category  = (uint8_t)addrspace::read8(a + 0x0E);   // = type (render layer hint)
 		out[n].xflip     = (uint8_t)(addrspace::read16(a + 0x130) ? 1 : 0);
 		{ int os = 0; for (int s = 0; s < 6; s++) if (v == CHAR_BASE[s]) { os = s; break; } out[n].owner_slot = (uint8_t)os; }
-		{ uint32_t gb = addrspace::read32(a + OFF_GFX00_PTR) & 0x0FFFFFFF;
-		  out[n].is_effect = (gb >= 0x0CED0000 && gb < 0x0CEE0000) ? 1 : 0; }
+		{ uint32_t gbRaw = addrspace::read32(a + OFF_GFX00_PTR);
+		  uint32_t gb = gbRaw & 0x0FFFFFFF;
+		  out[n].is_effect = (gb >= 0x0CED0000 && gb < 0x0CEE0000) ? 1 : 0;
+		  out[n].effect_key = (uint16_t)(gbRaw & 0xFFFF); }   // GSTA wire ext: low 16 of GFX base
+		// GSTA wire ext: per-object PVR blend/list-type (computeObjectBlend). NOTE: this
+		// legacy path ships category=type@a+0x0E (the disasm +0x03 category is unreachable
+		// from this anchor — see above), so the category-set test is approximate here; the
+		// dominant is_effect=>additive signal is correct regardless.
+		out[n].blend = computeObjectBlend(out[n].is_effect, out[n].category);
 		// PATH A: legacy owner-anchored scan reads the record at a-0x18; the extras ptr
 		// is then (a-0x18)+0x178. Walk it for the hotspot (0,0 = none).
 		out[n].hot_dx = 0; out[n].hot_dy = 0;
@@ -705,6 +727,9 @@ int serializeObjects(const ObjectState* objs, int n, uint8_t* buf, int maxLen)
 		buf[o++] = s.is_effect;
 		buf[o++] = (uint8_t)s.hot_dx;
 		buf[o++] = (uint8_t)s.hot_dy;
+		buf[o++] = (uint8_t)(s.effect_key & 0xff);          // GSTA wire ext: effect_key u16 LE
+		buf[o++] = (uint8_t)((s.effect_key >> 8) & 0xff);
+		buf[o++] = s.blend;                                 // GSTA wire ext: blend/list-type u8
 	}
 	return o;
 }
@@ -728,6 +753,8 @@ int deserializeObjects(const uint8_t* buf, int len, ObjectState* out, int maxObj
 		s.is_effect = buf[o++];
 		s.hot_dx    = (int8_t)buf[o++];
 		s.hot_dy    = (int8_t)buf[o++];
+		s.effect_key = (uint16_t)(buf[o] | (buf[o+1] << 8)); o += 2;   // GSTA wire ext
+		s.blend = buf[o++];                                            // GSTA wire ext: blend/list-type u8
 		got++;
 	}
 	return got;
@@ -1982,6 +2009,31 @@ void readGameState(GameState& state)
 		c.pal_12d         = (uint8_t)addrspace::read8(base + OFF_PAL_12D);
 		c.pal_12e         = (uint8_t)addrspace::read8(base + OFF_PAL_12E);
 		c.overlay_1a4     = (uint8_t)addrspace::read8(base + OFF_OVERLAY_1A4);
+		// GSTA wire extension (append-only +49..+56) — engine render/state bytes.
+		c.render_extra    = (uint8_t)addrspace::read8(base + OFF_RENDER_EXTRA);
+		c.facing_1d2      = (uint8_t)addrspace::read8(base + OFF_FACING_1D2);
+		c.pal_color_25    = (uint8_t)addrspace::read8(base + OFF_COLOR);
+		c.hyper_armor     = (uint8_t)addrspace::read8(base + OFF_HYPER_ARMOR);
+		c.flight_flag     = (uint8_t)addrspace::read8(base + OFF_FLIGHT);
+		c.stance          = (uint8_t)addrspace::read8(base + OFF_STANCE);
+		c._pad            = 0;
+		// draw_layer: find which slot-table layer holds this character's struct
+		// (the slot table IS the draw list; mirrors readAllDrawn's walk). 0xFF = not
+		// in any layer this frame. CONFIRMED reference_mvc2_slot_table_drawlist.
+		{
+			static const uint32_t SLOT_COUNT_BASE = 0x8C2895E0;
+			static const uint32_t SLOT_PTR_BASE   = 0x8C287DE0;
+			static const uint32_t SLOT_ROW_STRIDE = 0x180;
+			uint8_t layer = 0xFF;
+			for (int L = 0; L < 16 && layer == 0xFF; L++) {
+				int cnt = (int)addrspace::read8(SLOT_COUNT_BASE + L);
+				if (cnt <= 0 || cnt > 0x60) continue;
+				uint32_t row = SLOT_PTR_BASE + (uint32_t)L * SLOT_ROW_STRIDE;
+				for (int k = 0; k < cnt; k++)
+					if (addrspace::read32(row + k * 4) == base) { layer = (uint8_t)L; break; }
+			}
+			c.draw_layer = layer;
+		}
 	}
 
 	// Raw input state — read from the SAME kcode[]/lt[]/rt[] globals the
@@ -2105,7 +2157,16 @@ int serialize(const GameState& state, uint8_t* buf, int maxLen)
 		writeU8(buf, off, c.pal_12d);          // +46
 		writeU8(buf, off, c.pal_12e);          // +47
 		writeU8(buf, off, c.overlay_1a4);      // +48
-		// total: 49 bytes per character
+		// GSTA wire extension (append-only) — struct order, +49..+56
+		writeU8(buf, off, c.draw_layer);       // +49
+		writeU8(buf, off, c.render_extra);     // +50
+		writeU8(buf, off, c.facing_1d2);       // +51
+		writeU8(buf, off, c.pal_color_25);     // +52
+		writeU8(buf, off, c.hyper_armor);      // +53
+		writeU8(buf, off, c.flight_flag);      // +54
+		writeU8(buf, off, c.stance);           // +55
+		writeU8(buf, off, c._pad);             // +56
+		// total: 57 bytes per character
 	}
 
 	// Raw input state (8 bytes) — appended AFTER the 253-byte legacy block
@@ -2120,7 +2181,7 @@ int serialize(const GameState& state, uint8_t* buf, int maxLen)
 	// only 261 bytes are unaffected.
 	writeU8(buf, off, state.stage_anim_timer);
 
-	return off;  // WIRE_SIZE = 253 + 8 + 1 = 262
+	return off;  // WIRE_SIZE = 25 + 6*57 + 8 + 1 = 376
 }
 
 // Deserialize from network bytes back to GameState — exact reverse of serialize
@@ -2131,9 +2192,10 @@ static float readBufF32(const uint8_t* buf, int& off) { float v; memcpy(&v, buf 
 
 void deserialize(const uint8_t* buf, int len, GameState& state)
 {
-	// 319 = the char+global block (per-char stride 49 after GSTA enrich). Raw input
-	// (+8) and stage_anim (+1) are optional trailers so the trailer parse stays robust.
-	static const int LEGACY_SIZE = 5 + 2+2+2+2 + 4+4+4 + 6*49;  // 319
+	// 367 = the char+global block (per-char stride 57 after the GSTA wire extension).
+	// Raw input (+8) and stage_anim (+1) are optional trailers so the trailer parse
+	// stays robust. (25 header + 6*57 = 367; full WIRE_SIZE = 376.)
+	static const int LEGACY_SIZE = 5 + 2+2+2+2 + 4+4+4 + 6*57;  // 367
 	if (len < LEGACY_SIZE) return;
 	int off = 0;
 
@@ -2176,6 +2238,15 @@ void deserialize(const uint8_t* buf, int len, GameState& state)
 		c.pal_12d         = readBufU8(buf, off);
 		c.pal_12e         = readBufU8(buf, off);
 		c.overlay_1a4     = readBufU8(buf, off);
+		// GSTA wire extension (append-only) — exact reverse of serialize, +49..+56
+		c.draw_layer      = readBufU8(buf, off);
+		c.render_extra    = readBufU8(buf, off);
+		c.facing_1d2      = readBufU8(buf, off);
+		c.pal_color_25    = readBufU8(buf, off);
+		c.hyper_armor     = readBufU8(buf, off);
+		c.flight_flag     = readBufU8(buf, off);
+		c.stance          = readBufU8(buf, off);
+		c._pad            = readBufU8(buf, off);
 	}
 
 	// Raw input state (8 bytes) — read if present (new format)
