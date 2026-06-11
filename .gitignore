@@ -2,6 +2,10 @@ build/
 build-*/
 artifact/
 
+# Python tooling bytecode cache (tools/*.py)
+__pycache__/
+*.pyc
+
 # Claude Code agent memory + projects state — operator-only context that
 # accumulates per-session notes about the codebase. Should never be in
 # the public repo. The local copy at ~/.claude/projects/... is unaffected.
@@ -158,6 +162,13 @@ PL[0-9A-Fa-f][0-9A-Fa-f]_part_*.raw
 PL[0-9A-Fa-f][0-9A-Fa-f]_part_*.png
 PL[0-9A-Fa-f][0-9A-Fa-f]_extras.bin
 PL[0-9A-Fa-f][0-9A-Fa-f]_parts.manifest
+# Offline GFX2/GFX1 assembly-extractor scratch (ROM-derived part pixels + composites:
+# _ryu_offline/, render_*.png, geom_*.png). rip_gfx2_assembly.py writes here.
+_ryu_offline/
+render_cell*.png
+geomcum_cell*.png
+geom_cell*.png
+part_gray_*.png
 # Montage/preview PNGs of captured parts (ROM-derived) dropped during capture work
 parts_montage*.png
 part_*.ppm
@@ -187,3 +198,15 @@ _oracle/*.ndjson
 _oracle/*.asm
 # Per-(char,sprite_id) anchor sidecars are ROM-derived (computed from ROM exec).
 _oracle/anchors_*.json
+
+# Local RE knowledge-graph SurrealDB data
+re_kb_data/
+
+# RE-KB ingestion pipeline artifacts (the .py/.surql in tools/re_kb/ingest/ ARE
+# committable; these are rebuildable caches + generated output).
+#   cache/     = polite crawler page cache (re-fetched from network only if absent)
+#   data/      = extracted JSON (rebuilt by the crawler/parser)
+#   generated/ = generated .surql applied to the KB (rebuilt by ingest.py)
+tools/re_kb/ingest/cache/
+tools/re_kb/ingest/data/
+tools/re_kb/ingest/generated/
