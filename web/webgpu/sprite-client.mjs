@@ -2046,29 +2046,30 @@ export class SpriteClient {
       let osl = null;
       for (let s = 0; s < 6; s++) if (this.slot[s].active && this.slot[s].char_id === o.cid) { osl = this.slot[s]; break; }
       if (!osl) continue;
-      let ox, oy; [ox, oy] = this._predict(osl, now);   // BUG 1 FIX: capped prediction (owner anchor for attached objects)
-      if ((ox === 0 && oy === 0) || ox < -60 || ox > 700) continue;
+      let ox, oy; [ox, oy] = this._predict(osl, now);   // owner anchor — kept for scale/pal + the A/B fallback
+      // POSITION FIX 2026-06-11 (SH4 ground-truth, finding:bug_rocket_emitter_far_heuristic):
+      // pool objects carry their OWN screen pos in node+0xE0/E4 (shipped as o.x/o.y) — the engine
+      // satellite render loc_8c030af8 writes the world->screen result there. Use it UNCONDITIONALLY,
+      // matching the proven whole-sprite path buildDrawList:1171. The old `far>130` heuristic
+      // owner-anchored projectiles/satellites to the CASTER's body (+the caster's facing), which
+      // (a) turned Sentinel's diagonal-down rocket arc into a horizontal mirror across his body, and
+      // (b) displaced Storm's dash satellites ~34px to her body. osl is used only for scale/palette.
+      // window._objOwnPos=false restores the old far-heuristic owner-anchor for A/B.
+      const ownPos = (typeof window === 'undefined') ? true
+                   : (window._objOwnPos !== undefined ? !!window._objOwnPos : true);
       const far = (o.type !== 3) && ((Math.abs(o.x - ox) + Math.abs(o.y - oy)) > 130);
-      const px = far ? o.x : ox, py = far ? o.y : oy;
+      const px = ownPos ? o.x : (far ? o.x : ox);
+      const py = ownPos ? o.y : (far ? o.y : oy);
+      if ((px === 0 && py === 0) || px < -64 || px > 704 || py < -64 || py > 544) continue;
       const zBase = (o.type === 1) ? 1 : (o.type === 3 ? -2 : -1);
       // Effect nodes (is_effect / GFX base in Effect Poly 0x0CED0000) -> effects atlas.
       const isFx = !!o.isEffect;
-      // OBJECT FACING — BUG 2 FIX (Sentinel LP rocket punch rendered horizontal/mirrored)
-      // 2026-06-11. The selKeyed emitter reflects each part's screen rect across the anchor
-      // by `owner.facing` (bodyFace = !facing). A `far` pool object (a SPAWNED projectile /
-      // free satellite) has its OWN orientation in node+0x130 (shipped as o.xflip), NOT the
-      // caster's facing — exactly as the whole-sprite path already uses (sprite-client.mjs
-      // buildDrawList: `fl = o.xflip !== sp.facing`). Passing osl.facing here mirrored the
-      // whole projectile assembly across its own anchor: Sentinel's rocket (sid 0x111/0x11d/
-      // 0x11f spans dx -133..+117 at CPS = a ~500px-wide assembly) landed ~130px off-axis,
-      // so the diagonal-down arc read as a horizontal red beam offset from the green truth.
-      //   far (spawned) -> use o.xflip (the object's own node+0x130 flip).
-      //   near/attached (cape type 3, or close enough to ride the body) -> owner facing, the
-      //     proven cape behavior (a cape inherits the body's facing).
-      // window._objOwnFlip=false restores the old owner-facing sense for A/B against a capture.
+      // OBJECT FACING: a spawned pool object has its OWN orientation in node+0x130 (shipped as
+      // o.xflip), NOT the caster's facing — same as the whole-sprite path buildDrawList:1186.
+      // window._objOwnFlip=false restores owner-facing for A/B.
       const ownFlip = (typeof window === 'undefined') ? true
                     : (window._objOwnFlip !== undefined ? !!window._objOwnFlip : true);
-      const objFacing = (far && ownFlip) ? (o.xflip ? 1 : 0) : osl.facing;
+      const objFacing = ownFlip ? (o.xflip ? 1 : 0) : osl.facing;
       emitAssembly({ cid: o.cid, exx: px, eyy: py, facing: objFacing, slot: 0, zBase,
                      sclX: osl.scaleX, sclY: osl.scaleY, pal12d: osl.pal12d, pal12e: osl.pal12e,
                      blend: o.blend, fx: isFx }, o.sid);
