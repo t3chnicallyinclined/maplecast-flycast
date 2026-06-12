@@ -151,6 +151,16 @@ int main(int argc, char**argv){
          * loc_8c124a82 logic (no-op here: pal already baked == bit-exact identity). */
         u32 pcw_t = EXP_PCW_T[i];                 /* template PCW (resident) */
         u32 isp   = EXP_ISP_T[i];                 /* ISP/TSP word 0 (resident) */
+        /* ISP depth-mode finalize. The resident rectab+0x04 ISP field is 0x00000000 in
+         * this dump instant (the per-frame submit had not yet written the on-screen
+         * depth word into the template). The engine's OWN TA for these 9 body sprites
+         * carries ISP=0x80000000 (DepthMode=4 = "Greater/Always", ZWrite enabled) — read
+         * DIRECTLY out of mc_engine_ta.bin's matching pal-bank body sprite params. The
+         * PVR2 renderer (pvr2-renderer.mjs:234) SKIPS opaque polys whose DepthMode==0, so
+         * a zero ISP draws nothing. We finalize the depth bits to the engine's observed
+         * value so the transpiled quad is rendered with the same depth test the engine
+         * used. (Geometry + TCW + TSP remain bit-exact-from-walker/resident.) */
+        if (((isp >> 29) & 7) == 0) isp = (isp & 0x1FFFFFFFu) | (4u << 29);
         u32 tsp   = EXP_TSP[i];                   /* TSP (resident: TexU/V, ShadInstr, blend) */
         u32 tcw_r = EXP_TCW[i];                   /* TCW (resident: fmt + live texaddr + pal) */
         /* slot palette bank = the resident TCW's PalSelect (cid23/P2C1 skin -> bank 28). */

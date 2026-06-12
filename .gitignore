@@ -213,3 +213,4 @@ re_kb_data/
 tools/re_kb/ingest/cache/
 tools/re_kb/ingest/data/
 tools/re_kb/ingest/generated/
+_effects_capture/

@@ -16,6 +16,18 @@
 extern u32 kcode[4];
 extern u16 lt[4], rt[4];
 
+// Render-phase sprite_id/anim_timer latch — populated at STARTRENDER in oracle_hook.cpp
+// (mc_oracle_charPassCapture, the phase loc_8c0344d4 renders). Read below so the wire ships
+// the RENDERED-frame sid, not serverPublish's 1-frame-later read (finding:gsta_sprite_id_sampling_phase).
+namespace maplecast_oracle_hook {
+	extern uint16_t mc_sidLatch[6];
+	extern uint16_t mc_timerLatch[6];
+	extern uint8_t  mc_sidLatchValid[6];
+	// REAL per-object PVR blend captured at the bank12 submit (MAPLECAST_FRAME_ORACLE_HOOK).
+	// 0=opaque/PT, 1=alpha, 2=additive, 0xFF = no capture this frame (use computeObjectBlend).
+	uint8_t mc_oracle_nodeBlend(uint32_t node);
+}
+
 namespace maplecast_gamestate
 {
 
@@ -350,8 +362,12 @@ static int readObjectsWalk(ObjectState* out, int maxObjs)
 					  uint32_t gb = gbRaw & 0x0FFFFFFF;
 					  out[n].is_effect = (gb >= 0x0CED0000 && gb < 0x0CEE0000) ? 1 : 0;
 					  out[n].effect_key = (uint16_t)(gbRaw & 0xFFFF); }   // GSTA wire ext
-					// GSTA wire ext: per-object PVR blend/list-type (computeObjectBlend).
-					out[n].blend = computeObjectBlend(out[n].is_effect, out[n].category);
+					// GSTA wire ext: per-object PVR blend/list-type. PREFER the engine's REAL
+					// TSP blend (captured at the bank12 submit when MAPLECAST_FRAME_ORACLE_HOOK is
+					// on) keyed by this node; fall back to the category heuristic if not captured.
+					{ uint8_t rb = maplecast_oracle_hook::mc_oracle_nodeBlend(node);
+					  out[n].blend = (rb != 0xFF) ? rb
+					               : computeObjectBlend(out[n].is_effect, out[n].category); }
 					// PATH A: true assembly hotspot from node+0x178 (parity w/ readAllDrawn).
 					out[n].hot_dx = 0; out[n].hot_dy = 0;
 					readHotspot(node, out[n].hot_dx, out[n].hot_dy);
@@ -431,8 +447,14 @@ static int readAllDrawn(ObjectState* out, int maxObjs)
 			// GSTA wire extension: low 16 bits of the GFX base (node+0x15c) — a stable
 			// per-effect content key (same gfxBase already read for is_effect).
 			out[n].effect_key = (uint16_t)(gfxBase & 0xFFFF);
-			// GSTA wire ext: per-object PVR blend/list-type (computeObjectBlend).
-			out[n].blend = computeObjectBlend(out[n].is_effect, out[n].category);
+			// GSTA wire ext: per-object PVR blend/list-type. PREFER the engine's REAL TSP
+			// blend (captured at the bank12 submit when MAPLECAST_FRAME_ORACLE_HOOK is on)
+			// keyed by this node; fall back to the category heuristic when not captured.
+			// THIS is the fix for the Sentinel rocket-TRAIL blob: its category 0x01 maps to
+			// "opaque" via computeObjectBlend, but its real TSP blend is additive.
+			{ uint8_t rb = maplecast_oracle_hook::mc_oracle_nodeBlend(node);
+			  out[n].blend = (rb != 0xFF) ? rb
+			               : computeObjectBlend(out[n].is_effect, out[n].category); }
 			// PATH A: true assembly hotspot from node+0x178 (0,0 = no extras => client
 			// falls back to the baked anchor).
 			out[n].hot_dx = 0; out[n].hot_dy = 0;
@@ -591,11 +613,15 @@ int readObjects(ObjectState* out, int maxObjs)
 		  uint32_t gb = gbRaw & 0x0FFFFFFF;
 		  out[n].is_effect = (gb >= 0x0CED0000 && gb < 0x0CEE0000) ? 1 : 0;
 		  out[n].effect_key = (uint16_t)(gbRaw & 0xFFFF); }   // GSTA wire ext: low 16 of GFX base
-		// GSTA wire ext: per-object PVR blend/list-type (computeObjectBlend). NOTE: this
-		// legacy path ships category=type@a+0x0E (the disasm +0x03 category is unreachable
-		// from this anchor — see above), so the category-set test is approximate here; the
-		// dominant is_effect=>additive signal is correct regardless.
-		out[n].blend = computeObjectBlend(out[n].is_effect, out[n].category);
+		// GSTA wire ext: per-object PVR blend/list-type. PREFER the engine's REAL TSP blend
+		// (captured at the bank12 submit when MAPLECAST_FRAME_ORACLE_HOOK is on); the node
+		// base for this legacy owner-anchored scan is a-0x18 (the record anchor used for the
+		// hotspot below). Fall back to the category heuristic when not captured. NOTE: the
+		// category=type@a+0x0E here is approximate (the disasm +0x03 category is unreachable
+		// from this anchor); the captured real blend is exact when present.
+		{ uint8_t rb = maplecast_oracle_hook::mc_oracle_nodeBlend(a - 0x18);
+		  out[n].blend = (rb != 0xFF) ? rb
+		               : computeObjectBlend(out[n].is_effect, out[n].category); }
 		// PATH A: legacy owner-anchored scan reads the record at a-0x18; the extras ptr
 		// is then (a-0x18)+0x178. Walk it for the hotspot (0,0 = none).
 		out[n].hot_dx = 0; out[n].hot_dy = 0;
@@ -1994,9 +2020,13 @@ void readGameState(GameState& state)
 		c.vel_x           = readFloat(base + OFF_VEL_X);
 		c.vel_y           = readFloat(base + OFF_VEL_Y);
 		c.facing_right    = (uint8_t)addrspace::read8(base + OFF_FACING);
-		c.sprite_id       = (uint16_t)addrspace::read16(base + OFF_SPRITE_ID);
+		// Prefer the STARTRENDER-phase latch (the sid actually rendered this frame); fall back
+		// to the live read if no in-match STARTRENDER latched yet (finding:gsta_sprite_id_sampling_phase).
+		c.sprite_id       = maplecast_oracle_hook::mc_sidLatchValid[i] ? maplecast_oracle_hook::mc_sidLatch[i]
+		                                                              : (uint16_t)addrspace::read16(base + OFF_SPRITE_ID);
 		c.animation_state = (uint16_t)addrspace::read16(base + OFF_ANIM_STATE);
-		c.anim_timer      = (uint16_t)addrspace::read16(base + OFF_ANIM_TIMER);
+		c.anim_timer      = maplecast_oracle_hook::mc_sidLatchValid[i] ? maplecast_oracle_hook::mc_timerLatch[i]
+		                                                              : (uint16_t)addrspace::read16(base + OFF_ANIM_TIMER);
 		c.health          = (uint8_t)addrspace::read8(base + OFF_HEALTH);
 		c.red_health      = (uint8_t)addrspace::read8(base + OFF_RED_HEALTH);
 		c.special_move_id = (uint8_t)addrspace::read8(base + OFF_SPECIAL_MOVE);

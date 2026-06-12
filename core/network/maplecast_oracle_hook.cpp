@@ -32,10 +32,16 @@
 #include "hw/sh4/sh4_mem.h"     // addrspace::read*
 #include "hw/pvr/ta_ctx.h"      // TA_context, rend_context, PolyParam, Vertex
 #include "hw/pvr/ta.h"          // ta_parse
+#include "hw/pvr/pvr_mem.h"     // vram (RamRegion) — render-replica VRAM dump
+#include "hw/pvr/pvr_regs.h"    // pvr_regs[] — render-replica PVR-reg dump
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <atomic>
+#ifndef _WIN32
+#include <sys/stat.h>   // stat() for config-mtime live-reload (v2)
+#endif
 
 namespace maplecast_oracle_hook
 {
@@ -159,12 +165,346 @@ static bool mc_asmTraceEnabled = (getenv("MAPLECAST_ASMTRACE") != nullptr);
 // force-splits at the ASMTRACE PC (0x8C034864) — shared, no extra hook needed.
 static bool mc_bodyCapEnabled = (getenv("MAPLECAST_BODYCAP") != nullptr);
 
+// CHARQ-RENDER (MAPLECAST_CHARQ_RENDER) — THE DEFINITIVE source-of-truth per-part
+// body quad capture: the SH4 render's OWN final PVR list entries, NOT the flaky
+// post-hoc ta_parse (which depends on which TA pass flycast's single-slot rqueue
+// keeps). Captures at the point the per-character BODY geometry routine loc_8c0344d4
+// (bank03:10218) submits each part to the bank12 PVR-list builder loc_8C1244B0
+// (bank12:9795), AFTER that builder has fully resolved + written the final PVR poly
+// record (PCW/ISP/TSP/TCW + the 4 transformed verts x,y,u,v) into the display list.
+//
+// THE CAPTURE PC = 0x8C1248CC (bank12, instruction #60 after loc_8c124856, the
+// `pref @r14` right after the LAST record write `mov.l r1,@(0x3C,r14)` @bank12 and
+// BEFORE the three `add 0x20,r14` cursor advances). At this PC:
+//   r14   = recordBase + 0x20  (ONE `add 0x20,r14` @0x8C12487E has run; record base
+//           = r14 - 0x20). The record at base..base+0x3F (0x40 bytes) is COMPLETE:
+//             base+0x00 = PCW   (*(r12+0) | template_pcw)
+//             base+0x04 = ISP   (*(r12+4))
+//             base+0x08 = TCW   (*(r12+8) | template_tcw[*(0x8C2AA508)[idx]+4]) <-- RESOLVED
+//                         low bits = VRAM texel address, fmt bits, palette bank
+//             base+0x0C/+0x10  = *(r12+0xC)/*(r12+0x10)
+//             base+0x14 = TSP/pal extra ((transform<<24) | *(r13+0x3C))
+//             base+0x20.. = vertex block: 4 verts (x,y,u,v) from the world->screen
+//                         transform (bsr loc_8c124d80), sourced from r10/r11.
+//   r13   = the per-part quad/geometry record (= caller's r15+0x2C, untouched).
+//   Sh4cntx.pr = the JSR RETURN address of the caller's submit jsr. For the BODY
+//           render (loc_8c0344d4) that jsr is @0x8C034876 -> pr = 0x8C03487A. THAT
+//           value is the body-vs-HUD discriminator: loc_8C1244B0 is also called from
+//           ~7 other sites (HUD/effects) with DIFFERENT return addresses, so we only
+//           capture when pr (area-masked) == 0x0C03487A.
+//
+// Per body part we read the 0x40-byte PVR record straight from guest RAM (no need to
+// re-derive the PVR sprite encoding — the consumer decodes it with flycast's own TA
+// sprite parser), plus pcw/isp/tcw/tsp split out, keyed by the owning character
+// (node base via the caller's r14 — but at THIS PC the caller's node isn't in a reg;
+// we recover it from r13's owning slot via the SAME 6-base match the rest of the file
+// uses, falling back to the active P1/P2 bodies). Accumulated per (cid, vframe); a
+// JSON object per character per video frame is flushed to
+// /dev/shm/mc_charq_render.jsonl (truncate-and-rewind at the cap). READ-ONLY
+// (addrspace reads + /dev/shm append) -> determinism-safe. Forces the master gate so
+// rec_x64 injects the GenCall + the decoder force-splits at 0x8C1248CC.
+static bool mc_charqRenderEnabled = (getenv("MAPLECAST_CHARQ_RENDER") != nullptr);
+
+// CHARQ-EMIT (MAPLECAST_CHARQ_EMIT) — THE PRODUCTION wire accumulator (Phase A).
+// Same two PCs as CHARQ_RENDER's diagnostic path, but instead of writing JSONL it
+// fills a STRUCTURED in-RAM per-(node,vframe) accumulator that maplecast_mirror.cpp
+// serverPublish drains into the 'CHRQ' binary frame. Identity is set at the body-part
+// PC 0x8C034864 (node=r14); each paired bank12 submit 0x8C1248CC appends one screen
+// sprite quad (4 corners + 6 UVs + tcw/tsp/pcw) read from the DEST para record. Gated
+// here; the in-match (0x8C289624) gate is applied by the emitter. READ-ONLY. Forces
+// the master gate so rec_x64 injects the GenCall + the decoder force-splits at BOTH
+// 0x8C034864 (ASM part) and 0x8C1248CC (bank12 submit).
+bool mc_charqEmitEnabled = (getenv("MAPLECAST_CHARQ_EMIT") != nullptr);
+
+// ===========================================================================
+// GENERIC RUNTIME-CONFIGURABLE PROBE (MAPLECAST_ORACLE_PROBE) — THE REBUILD KILLER.
+//
+// The problem this solves: every prior hook above is a COMPILED-IN PC + handler, so
+// each new "where does X get called / what's in this register" hypothesis = a new
+// constant + a new handler + a full rebuild + a redeploy. This probe makes the hook
+// table DATA: a config file lists up to MC_PROBE_MAX PCs and, per PC, a dumpspec of
+// what to read (regs / a single reg / pr / absolute memory / register-relative memory
+// / a stack window). Edit the config + restart — NO recompile. It reuses the EXACT
+// existing JIT-hook infrastructure: mc_isHookedPC (so rec_x64 injects the GenCall and
+// decoder.cpp force-splits mid-block PCs) + the masked-PC (& 0x1FFFFFFF) convention.
+//
+// v1 parses the config ONCE at static-init (before any block compiles), so the
+// recompiler's compile-time mc_isHookedPC gate is correct from the first block.
+//
+// v2 (BUILT) adds NO-RESTART live reload: edit the config and the armed-PC set updates
+// within ~1s with no service restart. Two cooperating halves, split for safety:
+//   * mc_probeCheckReload() — RENDER-THREAD watcher (called from serverPublish): a
+//     throttled stat() of the config; on a changed mtime it sets a pending flag ONLY.
+//     It never parses the table nor touches the block cache, so it is safe even when
+//     serverPublish runs synchronously inside an SH4 block (non-threaded mode).
+//   * mc_probeApplyReload() — SH4-THREAD apply (called from the emu loop right AFTER
+//     runInternal() returns, where the SH4 is fully paused — the SAME context the
+//     rollback deferred-rewind uses for bm_Reset/ResetCache). It re-parses into a temp
+//     buffer (parse-error-safe), swaps the live set, and returns true so the caller
+//     flushes the block cache (getSh4Executor()->ResetCache()), forcing the recompiler
+//     to re-run mc_isHookedPC against the new PC set on subsequently-compiled blocks.
+// The flush is DEFERRED to the SH4-paused boundary precisely because ResetCache() frees
+// compiled blocks: running it inside a hooked block (the GenCall) or on the render
+// thread would free the executing block / race the SH4 -> crash. Determinism-safe
+// (the handler stays READ-ONLY w.r.t. guest; the flush is the same one a guest-
+// triggered loadstate/reset performs).
+//
+// READ-ONLY w.r.t. guest: the handler only reads Sh4cntx.r[] + addrspace::read* and
+// appends to /dev/shm/mc_probe.log. Gated MAPLECAST_ORACLE_PROBE; default OFF -> the
+// probe table is empty, mc_isHookedPC returns false for every probe PC, and prod is
+// byte-stock. (Note: distinct from the older MAPLECAST_FRAME_ORACLE_PROBE Phase-0
+// stderr probe above — different env var, different mechanism.)
+//
+// CONFIG FILE: /dev/shm/mc_oracle_probe.conf (override path via env
+// MAPLECAST_ORACLE_PROBE_CONF). One probe per line:
+//     <pc_hex> <label> <dumpspec>
+//   - pc_hex   : the guest PC, e.g. 0x8C1248CC or 8c1248cc (matched area-masked).
+//   - label    : a no-space tag echoed on every dump line.
+//   - dumpspec : a COMMA-separated list of tokens (no spaces), any mix of:
+//       regs                 dump r0..r15 + pr + gbr + macl + mach
+//       r<N>                 a single reg, N = 0..15 decimal (e.g. r12)
+//       pr                   the procedure-return reg (Sh4cntx.pr; the JSR caller)
+//       gbr / macl / mach    those control regs
+//       mem:<addr_hex>:<len> hexdump <len> bytes at absolute guest addr <addr_hex>
+//       rmem:r<N>[+<off_hex>]:<len>
+//                            hexdump <len> bytes at r[N] (+ optional hex offset).
+//                            e.g. rmem:r11+0x6:2  or  rmem:r14:0x40
+//       stack:<n>            dump <n> 32-bit words from r15 (the SH4 call stack) —
+//                            recovers grand-callers / spilled return addresses.
+//     Lines starting with '#' and blank lines are ignored. len/n are decimal unless
+//     0x-prefixed; len is clamped to MC_PROBE_MEM_MAX, n to MC_PROBE_STACK_MAX.
+//   EXAMPLE (the first validation use-case — read the real bank12 PVR-builder caller
+//   chain so we can see body vs HUD/stage callers instead of guessing):
+//       0x8C1248CC stack8 stack:8,pr,r12,r13,r14
+//       0x8C034864 asmtrace regs,rmem:r11+0x6:2
+//
+// OUTPUT: /dev/shm/mc_probe.log (override via env MAPLECAST_ORACLE_PROBE_LOG). Append
+// with per-line fflush so `tail -f` is live; truncate-and-rewind at the cap (default
+// 16 MiB, env MAPLECAST_ORACLE_PROBE_CAP) so a long session can't fill /dev/shm. Each
+// dump is prefixed `[PROBE pc=0x0CXXXXXX label vframe=N]` (vframe = the SH4 video-frame
+// counter @0x8C3496B0) so dumps interleave readably and align to a frame.
+struct ProbeTok {
+	enum Kind { REGS, REG, PR, GBR, MACL, MACH, MEM, RMEM, STACK } kind;
+	int   reg;     // REG / RMEM base register index (0..15)
+	u32   addr;    // MEM absolute address
+	u32   off;     // RMEM register offset
+	u32   len;     // MEM/RMEM byte length, or STACK word count
+};
+struct Probe {
+	u32      pcMasked;          // pc & 0x1FFFFFFF
+	char     label[40];
+	ProbeTok toks[12];
+	int      ntok;
+	unsigned long fires;        // per-probe fire counter (diagnostic)
+};
+static const int MC_PROBE_MAX       = 16;     // max probe PCs
+static const int MC_PROBE_MEM_MAX   = 256;    // max bytes per mem/rmem token
+static const int MC_PROBE_STACK_MAX = 64;     // max words per stack token
+static Probe s_probes[MC_PROBE_MAX];
+static int   s_nprobe = 0;
+
+// Parse "r<N>" -> 0..15, else -1.
+static int mc_probeParseReg(const char* s, int len) {
+	if (len < 2 || (s[0] != 'r' && s[0] != 'R')) return -1;
+	int n = 0; for (int i = 1; i < len; i++) { if (s[i] < '0' || s[i] > '9') return -1; n = n*10 + (s[i]-'0'); }
+	return (n >= 0 && n <= 15) ? n : -1;
+}
+// Parse a numeric token (0x-prefixed hex, else decimal). Returns false on garbage.
+static bool mc_probeParseNum(const char* s, int len, u32* out) {
+	if (len <= 0) return false;
+	u32 v = 0; int i = 0; bool hex = false;
+	if (len >= 2 && s[0]=='0' && (s[1]=='x'||s[1]=='X')) { hex = true; i = 2; if (i>=len) return false; }
+	for (; i < len; i++) {
+		char c = s[i]; int d;
+		if (c>='0'&&c<='9') d = c-'0';
+		else if (hex && c>='a'&&c<='f') d = c-'a'+10;
+		else if (hex && c>='A'&&c<='F') d = c-'A'+10;
+		else return false;
+		v = hex ? (v<<4)+d : v*10+d;
+	}
+	*out = v; return true;
+}
+// Parse one comma token of a dumpspec into a ProbeTok. Returns false to skip it.
+static bool mc_probeParseTok(const char* t, int len, ProbeTok* tk) {
+	auto eq = [&](const char* lit){ int n=(int)strlen(lit); return n==len && strncmp(t,lit,n)==0; };
+	if (eq("regs")) { tk->kind = ProbeTok::REGS; return true; }
+	if (eq("pr"))   { tk->kind = ProbeTok::PR;   return true; }
+	if (eq("gbr"))  { tk->kind = ProbeTok::GBR;  return true; }
+	if (eq("macl")) { tk->kind = ProbeTok::MACL; return true; }
+	if (eq("mach")) { tk->kind = ProbeTok::MACH; return true; }
+	// stack:<n>
+	if (len > 6 && strncmp(t, "stack:", 6) == 0) {
+		u32 n; if (!mc_probeParseNum(t+6, len-6, &n)) return false;
+		if (n == 0) return false; if (n > (u32)MC_PROBE_STACK_MAX) n = MC_PROBE_STACK_MAX;
+		tk->kind = ProbeTok::STACK; tk->len = n; return true;
+	}
+	// mem:<addr_hex>:<len>
+	if (len > 4 && strncmp(t, "mem:", 4) == 0) {
+		const char* p = t + 4; int rem = len - 4;
+		const char* colon = (const char*)memchr(p, ':', rem); if (!colon) return false;
+		u32 addr, l;
+		if (!mc_probeParseNum(p, (int)(colon-p), &addr)) return false;
+		if (!mc_probeParseNum(colon+1, (int)(t+len-(colon+1)), &l)) return false;
+		if (l == 0) return false; if (l > (u32)MC_PROBE_MEM_MAX) l = MC_PROBE_MEM_MAX;
+		tk->kind = ProbeTok::MEM; tk->addr = addr; tk->len = l; return true;
+	}
+	// rmem:r<N>[+<off_hex>]:<len>
+	if (len > 5 && strncmp(t, "rmem:", 5) == 0) {
+		const char* p = t + 5; int rem = len - 5;
+		const char* colon = (const char*)memchr(p, ':', rem); if (!colon) return false;
+		u32 l; if (!mc_probeParseNum(colon+1, (int)(t+len-(colon+1)), &l)) return false;
+		if (l == 0) return false; if (l > (u32)MC_PROBE_MEM_MAX) l = MC_PROBE_MEM_MAX;
+		// reg part is p..colon, optionally "r<N>+<off>"
+		const char* plus = (const char*)memchr(p, '+', (int)(colon-p));
+		int regLen = plus ? (int)(plus-p) : (int)(colon-p);
+		int reg = mc_probeParseReg(p, regLen); if (reg < 0) return false;
+		u32 off = 0;
+		if (plus) { if (!mc_probeParseNum(plus+1, (int)(colon-(plus+1)), &off)) return false; }
+		tk->kind = ProbeTok::RMEM; tk->reg = reg; tk->off = off; tk->len = l; return true;
+	}
+	// r<N>
+	int reg = mc_probeParseReg(t, len);
+	if (reg >= 0) { tk->kind = ProbeTok::REG; tk->reg = reg; return true; }
+	return false;
+}
+
+// Resolve the config path (env override or the /dev/shm default). Shared by the
+// initial parse, the v2 mtime watch, and the v2 reload.
+static const char* mc_probeConfPath() {
+	const char* path = getenv("MAPLECAST_ORACLE_PROBE_CONF");
+	return path ? path : "/dev/shm/mc_oracle_probe.conf";
+}
+
+// Parse the config file at `path` into the caller-supplied probe array `out`
+// (capacity MC_PROBE_MAX), writing the count to *outN. Returns:
+//    1  = parsed OK (>=0 probes; 0 = file present but armed nothing)
+//    0  = file could not be opened (missing) — caller decides (clear vs keep)
+//   -1  = (reserved; this parser never hard-fails: bad lines are skipped)
+// PURE stdio + the caller's buffer — NO guest state, NO shared s_probes[] write —
+// so it is safe to run at static-init time AND from the SH4-thread reload point.
+// `verbose` controls the per-probe stderr arming summary (on for init + reload).
+static int mc_probeParseInto(const char* path, Probe* out, int* outN, bool verbose) {
+	int n = 0;
+	FILE* f = fopen(path, "r");
+	if (!f) { *outN = 0; return 0; }
+	char line[512];
+	while (fgets(line, sizeof line, f) && n < MC_PROBE_MAX) {
+		// strip trailing newline/cr
+		int ln = (int)strlen(line);
+		while (ln > 0 && (line[ln-1]=='\n' || line[ln-1]=='\r')) line[--ln] = 0;
+		// skip leading whitespace
+		char* p = line; while (*p==' '||*p=='\t') p++;
+		if (*p == 0 || *p == '#') continue;
+		// field 1: pc_hex
+		char* sp = p; while (*sp && *sp!=' ' && *sp!='\t') sp++;
+		u32 pc; if (!mc_probeParseNum(p, (int)(sp-p), &pc)) { if (verbose) fprintf(stderr, "[ORACLE-PROBE] bad pc: %s\n", p); continue; }
+		while (*sp==' '||*sp=='\t') sp++;
+		// field 2: label
+		char* lp = sp; while (*sp && *sp!=' ' && *sp!='\t') sp++;
+		int lblLen = (int)(sp-lp); if (lblLen <= 0) continue;
+		while (*sp==' '||*sp=='\t') sp++;
+		// field 3: dumpspec (comma list, no spaces)
+		char* dp = sp; while (*sp && *sp!=' ' && *sp!='\t') sp++;
+		int dsLen = (int)(sp-dp); if (dsLen <= 0) continue;
+		Probe& pr = out[n];
+		pr.pcMasked = pc & 0x1FFFFFFF;
+		int cpy = lblLen < (int)sizeof(pr.label)-1 ? lblLen : (int)sizeof(pr.label)-1;
+		memcpy(pr.label, lp, cpy); pr.label[cpy] = 0;
+		pr.ntok = 0; pr.fires = 0;
+		// split dumpspec on commas
+		const char* tok = dp; const char* end = dp + dsLen;
+		while (tok < end && pr.ntok < (int)(sizeof(pr.toks)/sizeof(pr.toks[0]))) {
+			const char* comma = (const char*)memchr(tok, ',', (int)(end-tok));
+			const char* te = comma ? comma : end;
+			if (te > tok) {
+				ProbeTok tk; memset(&tk, 0, sizeof tk);
+				if (mc_probeParseTok(tok, (int)(te-tok), &tk)) pr.toks[pr.ntok++] = tk;
+				else if (verbose) fprintf(stderr, "[ORACLE-PROBE] bad dumpspec token '%.*s' (pc=0x%08X) skipped\n",
+				             (int)(te-tok), tok, pc);
+			}
+			if (!comma) break; tok = comma + 1;
+		}
+		if (pr.ntok > 0) {
+			if (verbose) fprintf(stderr, "[ORACLE-PROBE] armed pc=0x%08X (masked 0x%08X) label=%s tokens=%d\n",
+			        pc, pr.pcMasked, pr.label, pr.ntok);
+			n++;
+		}
+	}
+	fclose(f);
+	*outN = n;
+	return 1;
+}
+
+// === v2 LIVE-RELOAD STATE ===================================================
+// Last config mtime we acted on. The render-thread watcher (mc_probeCheckReload)
+// stat()s the file and, on a CHANGED mtime, sets s_probeReloadPending. The
+// SH4-thread boundary (mc_probeApplyReload, called right after runInternal()
+// returns) re-parses + signals the caller to flush the block cache. Splitting
+// detection (render thread) from the parse+flush (SH4 thread, SH4 paused) is the
+// CRITICAL safety property: bm/ResetCache must NEVER run inside a compiled block
+// nor race the SH4 thread.
+static std::atomic<bool> s_probeReloadPending{false};   // set by watcher, cleared by apply
+static long long          s_probeConfMtime = 0;          // last acted-on mtime (ns or s)
+static int                s_probeWatchTick = 0;          // frame throttle for the stat()
+
+// Record the current config mtime so the first watcher tick after init doesn't
+// immediately re-trigger a (redundant) reload. Returns the mtime (0 if no file).
+static long long mc_probeStatMtime(const char* path) {
+#ifndef _WIN32
+	struct stat st;
+	if (stat(path, &st) != 0) return 0;
+#if defined(__APPLE__)
+	return (long long)st.st_mtimespec.tv_sec * 1000000000LL + st.st_mtimespec.tv_nsec;
+#else
+	return (long long)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec;
+#endif
+#else
+	(void)path; return 0;
+#endif
+}
+
+// Parse the config ONCE at static init (below) so the recompiler's mc_isHookedPC
+// sees the probe PCs before the first block compiles. Pure stdio (no guest state)
+// -> safe at static-init time. Also seeds s_probeConfMtime so the watcher only
+// fires on a SUBSEQUENT edit.
+static int s_probeParsed = 0;     // 0=not yet, 1=done (0 probes ok)
+static void mc_probeParseConfig() {
+	if (s_probeParsed) return;
+	s_probeParsed = 1;
+	s_nprobe = 0;
+	if (getenv("MAPLECAST_ORACLE_PROBE") == nullptr) return;   // gated OFF -> empty table
+	const char* path = mc_probeConfPath();
+	int n = 0;
+	int rc = mc_probeParseInto(path, s_probes, &n, /*verbose=*/true);
+	if (rc == 0) { fprintf(stderr, "[ORACLE-PROBE] config not found: %s (no probes armed)\n", path); }
+	else         { s_nprobe = n; fprintf(stderr, "[ORACLE-PROBE] %d probe(s) armed from %s\n", s_nprobe, path); }
+	s_probeConfMtime = mc_probeStatMtime(path);   // seed so the watcher only fires on a later edit
+}
+
+// Static-init trigger: parse the config before any guest block compiles so the
+// compile-time mc_isHookedPC gate includes the probe PCs from the very first block.
+static bool mc_probeEnabledStatic = []{
+	if (getenv("MAPLECAST_ORACLE_PROBE") == nullptr) return false;
+	mc_probeParseConfig();
+	return true;
+}();
+
+// FRAME-ORACLE-HOOK master flag, captured on its OWN (distinct from mc_oracleHookEnabled,
+// which is the OR of every sub-hook). This is the gate for the per-node REAL-BLEND capture
+// (mc_nodeBlend below): it must run whenever the prod-armed MAPLECAST_FRAME_ORACLE_HOOK is
+// set, INDEPENDENT of MAPLECAST_CHARQ_EMIT. So the producer (readObjects) gets the engine's
+// real per-object TSP blend in production with no extra env var.
+static bool mc_frameOracleHookOn = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr);
+
 bool mc_oracleHookEnabled = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr)
                          || mc_decodeHookEnabled
                          || mc_decodeTraceEnabled
                          || mc_quadCaptureEnabled
                          || mc_asmTraceEnabled
-                         || mc_bodyCapEnabled;
+                         || mc_bodyCapEnabled
+                         || mc_charqRenderEnabled
+                         || mc_charqEmitEnabled
+                         || mc_probeEnabledStatic;   // generic probe forces the master gate
 
 // Sub-flag: also capture the LOAD-TIME part-atlas decode quads at loc_8c033e90
 // (0x8C033EC0 post-write). PROVEN (live prod capture 2026-06-08): that routine
@@ -328,6 +668,21 @@ static const u32 PC_DECODE_ENTRY2_M = PC_DECODE_ENTRY2 & SH4_AREA_MASK; // 0x0C0
 // start; mc_isHookedPC must return true so rec_x64 injects the GenCall.
 static const u32 PC_ASM_PART   = 0x8C034864;
 static const u32 PC_ASM_PART_M = PC_ASM_PART & SH4_AREA_MASK;  // 0x0C034864
+// CHARQ-RENDER: the per-part PVR-list-record completion PC inside loc_8C1244B0
+// (bank12). At 0x8C1248CC (`pref @r14`, right after the final record write and before
+// the cursor advances) the 0x40-byte PVR poly record at r14-0x20 is fully resolved.
+// Mid-block -> the decoder force-split makes it a block start; mc_isHookedPC returns
+// true so rec_x64 injects the GenCall.
+static const u32 PC_CHARQ_SUBMIT   = 0x8C1248CC;
+static const u32 PC_CHARQ_SUBMIT_M = PC_CHARQ_SUBMIT & SH4_AREA_MASK;  // 0x0C1248CC
+// The body render's submit-jsr return address (loc_8c0344d4: jsr @0x8C034876 ->
+// pr = 0x8C034876 + 4 = 0x8C03487A). This pr value at PC_CHARQ_SUBMIT identifies the
+// BODY caller (vs the ~7 HUD/effect callers of loc_8C1244B0, which have other pr's).
+static const u32 PC_BODY_SUBMIT_RET   = 0x8C03487A;
+static const u32 PC_BODY_SUBMIT_RET_M = PC_BODY_SUBMIT_RET & SH4_AREA_MASK;  // 0x0C03487A
+// Record geometry inside the PVR display list written by loc_8C1244B0.
+static const u32 CHARQ_REC_OFF   = 0x20;   // r14 at PC_CHARQ_SUBMIT = base + 0x20
+static const u32 CHARQ_REC_BYTES = 0x40;   // poly header 0x20 + one vertex block 0x20
 // loc_8c0344d4 body-routine stack slots (relative to the ADJUSTED r15 after the
 // prologue's `add 0x84,r15`; the same frame the body uses at the hook PC).
 static const u32 ASM_S_SCREENX = 0x30;   // f32 final screen X (fadd of pen*scale to anchor)
@@ -1188,6 +1543,525 @@ static void mc_asmTraceHandler(const u32* r)
 }
 
 // ===========================================================================
+// CHARQ-RENDER (MAPLECAST_CHARQ_RENDER) — THE SOURCE-OF-TRUTH per-part body quad.
+// Fires at PC_CHARQ_SUBMIT (0x8C1248CC) inside loc_8C1244B0 once per emitted body
+// part, AFTER the PVR poly record is fully written. We filter to the BODY caller via
+// Sh4cntx.pr == 0x0C03487A (the loc_8c0344d4 submit jsr return), then read the
+// 0x40-byte PVR record from r14-0x20 and accumulate it under (cid, vframe). When the
+// video frame (0x8C3496B0) advances we flush the accumulated per-character quad lists
+// to /dev/shm/mc_charq_render.jsonl. READ-ONLY (addrspace reads + /dev/shm).
+//
+// We do NOT have the caller's node base in a register at this PC, but the BODY render
+// only runs for the (up to 6) active fighter bodies, and the record's TCW + verts are
+// what the consumer needs. We resolve the owning character by reading sprite_id/cid
+// off the currently-rendering node, which loc_8c0344d4 stashes nowhere reachable here
+// — so we attribute by render ORDER within the video frame: each contiguous run of
+// body parts (between video-frame boundaries) belongs to the body whose loc_8c0344d4
+// pass is executing. To give a STABLE cid we read the active fighter bodies' sprite_id
+// and match the record's resolved TCW VRAM region; simplest+robust: tag every part of
+// the current run with the nearest preceding ASMTRACE node identity if available, else
+// emit under a synthetic per-run object. Here we keep it minimal + deterministic: tag
+// by the SH4 r13 record + the resolved TCW; the run-segmentation/cid join is done by
+// the ASMTRACE log (same PC family, same per-part cadence) or downstream. We additionally
+// stamp the cid we can read cheaply: the 6 body bases' active+sprite_id, choosing the
+// active body whose pass index matches this run (s_charqRun).
+
+struct CharqPart {
+	u32  pcw, isp, tcw, tsp;      // PVR header words (resolved)
+	u32  rec[CHARQ_REC_BYTES/4];  // the full 0x40-byte PVR record (verts decode downstream)
+	u32  recBase;                 // guest addr of the record (debug)
+};
+static const int CHARQ_MAX_PARTS = 256;
+struct CharqRunObj {
+	u32 node; int cid; int sprite_id;        // owning body identity (best-effort)
+	CharqPart parts[CHARQ_MAX_PARTS];
+	int nparts;
+};
+static const int CHARQ_MAX_OBJS = 8;         // <= 6 bodies + slack
+static CharqRunObj s_charqRun[CHARQ_MAX_OBJS];
+static int         s_charqRunN   = 0;
+static u32         s_charqVframe  = 0xFFFFFFFFu;
+static unsigned long s_fireCharq  = 0;
+static FILE*       s_charqFile    = nullptr;
+static long        s_charqWritten = 0;
+// Run-segmentation signal: the node base of the most recent OBJ_BEGIN/SAT_BEGIN
+// (loc_8c03093c / loc_8c030af8). loc_8c0344d4 renders that node's body parts right
+// after, so a CHANGE in this value marks a new per-body run. Set by the begin
+// handlers; consumed (and its "consumed" generation tracked) by charqOpenRun.
+static u32 s_charqBeginNode = 0;
+static u32 s_charqBeginCid  = 0xFFFFFFFFu;
+static u32 s_charqBeginSid  = 0xFFFFFFFFu;
+static u32 s_charqRunNode   = 0;   // node the current run is bound to
+
+// Return the run object the current body part belongs to. Run = the contiguous
+// stream of body parts following one OBJ_BEGIN/SAT_BEGIN. We bind a run to the
+// most-recent begin node (s_charqBeginNode). If the begin node changed since the
+// current run was opened, OR no run exists this frame, we open a new run.
+static CharqRunObj* charqGetRun()
+{
+	u32 begin = s_charqBeginNode;
+	// Same node as the current run -> keep appending to it.
+	if (s_charqRunN > 0 && s_charqRunNode == begin && begin != 0)
+		return &s_charqRun[s_charqRunN - 1];
+	// New body run (or first run of the frame): open one bound to the begin node.
+	if (s_charqRunN >= CHARQ_MAX_OBJS) {
+		// Cap: keep folding into the last run rather than dropping parts.
+		return &s_charqRun[CHARQ_MAX_OBJS - 1];
+	}
+	CharqRunObj* o = &s_charqRun[s_charqRunN];
+	memset(o, 0, sizeof *o);
+	o->node = begin;
+	// Identity from the begin handler (already read off the node), with a fallback to
+	// reading the node directly if the begin handler hasn't populated it yet.
+	if (begin && inRam(begin)) {
+		o->cid       = (s_charqBeginCid != 0xFFFFFFFFu) ? (int)s_charqBeginCid
+		                                                : (int)(u8)addrspace::read8(begin + OFF_CHAR_ID);
+		o->sprite_id = (s_charqBeginSid != 0xFFFFFFFFu) ? (int)s_charqBeginSid
+		                                                : (int)(u16)addrspace::read16(begin + OFF_SPRITE_ID);
+	} else {
+		o->cid = -1; o->sprite_id = -1;
+	}
+	s_charqRunNode = begin;
+	s_charqRunN++;
+	return o;
+}
+
+// Flush the accumulated per-character runs for the just-finished video frame.
+static void charqFlushFrame(u32 vframe)
+{
+	if (s_charqRunN == 0) return;
+	static const long CHARQ_CAP = []{
+		const char* v = getenv("MAPLECAST_CHARQ_JSONL_CAP");
+		if (v) { long c = atol(v); if (c >= (1L << 20)) return c; }
+		return 16L * 1024 * 1024;
+	}();
+	if (!s_charqFile) {
+		s_charqFile = fopen("/dev/shm/mc_charq_render.jsonl", "w");
+		s_charqWritten = 0;
+		if (s_charqFile) setvbuf(s_charqFile, nullptr, _IOFBF, 1 << 16);
+	}
+	if (s_charqFile && s_charqWritten >= CHARQ_CAP) {
+		s_charqFile = freopen("/dev/shm/mc_charq_render.jsonl", "w", s_charqFile);
+		s_charqWritten = 0;
+		if (s_charqFile) setvbuf(s_charqFile, nullptr, _IOFBF, 1 << 16);
+	}
+	if (!s_charqFile) { s_charqRunN = 0; return; }
+
+	char b[4096]; int n;
+	for (int i = 0; i < s_charqRunN; i++) {
+		CharqRunObj& o = s_charqRun[i];
+		if (o.nparts == 0) continue;
+		n = snprintf(b, sizeof b,
+			"{\"frame\":%u,\"node\":\"0x%08X\",\"cid\":%d,\"sprite_id\":%d,\"nquads\":%d,\"quads\":[",
+			vframe, o.node, o.cid, o.sprite_id, o.nparts);
+		s_charqWritten += fwrite(b, 1, n, s_charqFile);
+		for (int p = 0; p < o.nparts; p++) {
+			const CharqPart& q = o.parts[p];
+			n = snprintf(b, sizeof b,
+				"%s{\"pcw\":\"0x%08X\",\"isp\":\"0x%08X\",\"tcw\":\"0x%08X\",\"tsp\":\"0x%08X\","
+				"\"vram\":\"0x%08X\",\"rec_base\":\"0x%08X\",\"rec\":[",
+				p ? "," : "", q.pcw, q.isp, q.tcw, q.tsp,
+				(q.tcw & 0x1FFFFF) << 3, q.recBase);     // TCW texel addr = (tcw&0x1FFFFF)<<3
+			s_charqWritten += fwrite(b, 1, n, s_charqFile);
+			for (int w = 0; w < (int)(CHARQ_REC_BYTES/4); w++) {
+				n = snprintf(b, sizeof b, "%s\"0x%08X\"", w ? "," : "", q.rec[w]);
+				s_charqWritten += fwrite(b, 1, n, s_charqFile);
+			}
+			n = snprintf(b, sizeof b, "]}");
+			s_charqWritten += fwrite(b, 1, n, s_charqFile);
+		}
+		n = snprintf(b, sizeof b, "]}\n");
+		s_charqWritten += fwrite(b, 1, n, s_charqFile);
+	}
+	fflush(s_charqFile);
+	s_charqRunN = 0;
+}
+
+static void mc_charqRenderHandler(const u32* r)
+{
+	// DIAG (one-shot): prove the handler is REACHED + reveal the actual caller pr's, so
+	// we can confirm/adjust the body-vs-HUD filter on live. Logs the first 8 distinct pr
+	// values seen (area-masked + raw) regardless of the filter below.
+	{
+		static u32  s_prSeen[16]; static int s_prN = 0; static unsigned long s_reach = 0;
+		u32 prm = Sh4cntx.pr & SH4_AREA_MASK;
+		if (s_reach++ == 0)
+			fprintf(stderr, "[CHARQ-RENDER] handler REACHED (pc=0x%08X) — collecting caller pr's\n",
+			        PC_CHARQ_SUBMIT);
+		bool known = false; for (int i=0;i<s_prN;i++) if (s_prSeen[i]==prm) { known=true; break; }
+		if (!known && s_prN < 16) {
+			s_prSeen[s_prN++] = prm;
+			fprintf(stderr, "[CHARQ-RENDER] caller pr=0x%08X (masked 0x%08X) %s\n",
+			        Sh4cntx.pr, prm, (prm==PC_BODY_SUBMIT_RET_M) ? "<== BODY (loc_8c0344d4)" : "");
+		}
+	}
+
+	// BODY-vs-HUD filter: only capture when this loc_8C1244B0 invocation came from the
+	// body render (loc_8c0344d4) submit jsr. pr (caller return) must be 0x0C03487A.
+	u32 pr = Sh4cntx.pr & SH4_AREA_MASK;
+	if (pr != PC_BODY_SUBMIT_RET_M) return;
+
+	if (s_fireCharq++ == 0)
+		fprintf(stderr, "[CHARQ-RENDER] first fired (pc=0x%08X loc_8C1244B0 per body part, "
+		                "pr=0x%08X) -> /dev/shm/mc_charq_render.jsonl\n",
+		        PC_CHARQ_SUBMIT, Sh4cntx.pr);
+
+	u32 vframe = addrspace::read32(0x8C3496B0);
+
+	// Video-frame boundary: flush the previous frame's accumulated runs, reset.
+	if (vframe != s_charqVframe) {
+		if (s_charqVframe != 0xFFFFFFFFu) charqFlushFrame(s_charqVframe);
+		s_charqVframe = vframe;
+		s_charqRunN   = 0;
+	}
+
+	// The PVR record base: r14 at this PC = base + 0x20 (one `add 0x20,r14` executed).
+	u32 recBase = (norm(r[14]) | 0x0C000000u) - CHARQ_REC_OFF;
+	if (!inRam(recBase)) return;
+
+	// Per-part run attribution: bind this part to the body whose OBJ_BEGIN/SAT_BEGIN
+	// (s_charqBeginNode) most recently fired. loc_8c0344d4 renders one body's full
+	// part list contiguously right after its begin, so a change in s_charqBeginNode
+	// segments the runs. (The begin hooks already fire under the master gate.)
+	CharqRunObj* o = charqGetRun();
+	if (!o) return;
+	if (o->nparts >= CHARQ_MAX_PARTS) return;
+
+	CharqPart& q = o->parts[o->nparts];
+	q.recBase = recBase;
+	for (int w = 0; w < (int)(CHARQ_REC_BYTES/4); w++)
+		q.rec[w] = addrspace::read32(recBase + (u32)w * 4);
+	q.pcw = q.rec[0];      // base+0x00
+	q.isp = q.rec[1];      // base+0x04
+	q.tcw = q.rec[2];      // base+0x08  (RESOLVED: VRAM texel addr + fmt + pal bank)
+	q.tsp = q.rec[5];      // base+0x14  (TSP/pal extra)
+	o->nparts++;
+}
+
+// ===========================================================================
+// CHARQ-EMIT (MAPLECAST_CHARQ_EMIT) — THE PRODUCTION wire accumulator (Phase A).
+//
+// Structured, READ-ONLY, in-RAM. Two cooperating hooks:
+//   * mc_charqEmitBodyPart(r) @ PC_ASM_PART (0x8C034864): the per-part convergence
+//     PC of the BODY render loc_8c0344d4. node = r14 (mov r4,r14 @prologue, never
+//     reclobbered). Sets the CURRENT character identity for the run:
+//       cid       = read_u8(node+0x1)
+//       sprite_id = read_u16(node+0x144) & 0x7FFF
+//       selector  = read_u16(r11+6)   (diagnostic only; not on the wire)
+//     A change in `node` starts a new per-character run for THIS video frame.
+//   * mc_charqEmitSubmit(r) @ PC_CHARQ_SUBMIT (0x8C1248CC): the bank12 PVR submit,
+//     paired 1:1 right after each body part. r14 = the DEST sprite-para record
+//     (ctrl 0xF0000000 @ +0x00). Reads the 4 screen corners + 6 UVs + tcw/tsp/pcw
+//     and appends ONE quad to the current char's run.
+//
+// Record layout (project_charq_breakthrough, DEST sprite-para at r14):
+//   +0x00 PCW (= 0xF0000000 sprite control)
+//   +0x04 Ax,Ay,Az (f32)   +0x10 Bx,By,Bz   +0x1C Cx,Cy,Cz   +0x28 Dx,Dy
+//   +0x34 AU (u16-trunc f32) +0x36 AV  +0x38 BU +0x3A BV  +0x3C CU +0x3E CV
+//   PCW/TCW/TSP come from RECORD 1 (rec - 0x20), the global ISP/TSP/TCW/PCW para:
+//     PCW = read_u32(recBase+0x00) (bit3 texture-enable), TCW = read_u32(recBase+0x08)
+//     (resolved texel addr + fmt + palette-bank template), TSP = read_u32(recBase+0x14)
+//     ((transform<<24)|*(r13+0x3C)). Same source as mc_charqRenderHandler.
+//
+// The 16-bit-truncated UV floats: the para stores only the HIGH 16 bits of each
+// f32 UV; expand to full f32 by (u16 << 16) reinterpreted as float.
+//
+// Accumulated per (node, vframe). The emitter (serverPublish) calls
+// mc_charqEmit_beginFrame/_objQuads/_endFrame once per video frame.
+
+static const int CHARQE_MAX_OBJS    = 12;   // <= 6 bodies + satellites/slack
+static const int CHARQE_MAX_QUADS   = 256;  // parts per object
+
+struct CharqEObjInt {
+	u32 node;
+	int cid;
+	int sprite_id;
+	u8  flags;
+	int nquads;
+	CharqEmitQuad quads[CHARQE_MAX_QUADS];
+};
+static CharqEObjInt   s_cqeObjs[CHARQE_MAX_OBJS];
+static int            s_cqeObjN     = 0;
+static u32            s_cqeVframe   = 0xFFFFFFFFu;
+// "ready" snapshot: when the video frame advances we freeze the just-finished
+// frame's objects into the ready set so the emitter reads a stable list while the
+// next frame accumulates. (Single-threaded SH4+publish; the freeze is a count swap.)
+static CharqEObjInt   s_cqeReady[CHARQE_MAX_OBJS];
+static int            s_cqeReadyN   = 0;
+static u32            s_cqeReadyVf  = 0xFFFFFFFFu;
+// current-run identity (set by the body-part hook, consumed by the submit hook)
+static u32            s_cqeCurNode  = 0;
+static int            s_cqeCurCid   = -1;
+static int            s_cqeCurSid   = -1;
+static unsigned long  s_cqeFireBody = 0;
+static unsigned long  s_cqeFireSub  = 0;
+// BODY-vs-HUD discrimination by PAIRING (NOT pr). The body-part hook (0x8C034864,
+// loc_8c0344d4) fires ONLY for body parts and is immediately followed 1:1 by the
+// bank12 submit (0x8C1248CC). We set this pending flag in the body-part hook; the
+// submit hook consumes it (=> this submit is a BODY quad) and clears it. A submit
+// with no pending set is a HUD/stage submit (not preceded by a body part) -> skipped.
+// The live probe PROVED pr at the submit PC is 0x8C124870 (bank12-internal), NOT
+// 0x0C03487A, so the old pr filter NEVER matched -> zero body quads captured.
+static bool           s_cqeBodyPending = false;
+
+// Flatten-public mirror (CharqEmitObj is layout-identical to CharqEObjInt's head;
+// we expose a separate compact array so the header struct need not embed quads).
+static CharqEmitObj   s_cqePub[CHARQE_MAX_OBJS];
+
+static inline float cqeExpandUV(u16 hi) { u32 u = (u32)hi << 16; float f; memcpy(&f, &u, 4); return f; }
+
+// Freeze the accumulating set into the ready set at a video-frame boundary.
+static void cqeFreezeFrame()
+{
+	s_cqeReadyN  = s_cqeObjN;
+	s_cqeReadyVf = s_cqeVframe;
+	for (int i = 0; i < s_cqeObjN; i++) s_cqeReady[i] = s_cqeObjs[i];
+	s_cqeObjN = 0;
+	s_cqeCurNode = 0; s_cqeCurCid = -1; s_cqeCurSid = -1;
+	s_cqeBodyPending = false;
+}
+
+// Return the accumulator object for the current run's node, opening a new one on a
+// node change / first run of the frame.
+static CharqEObjInt* cqeGetObj()
+{
+	u32 node = s_cqeCurNode;
+	if (s_cqeObjN > 0 && s_cqeObjs[s_cqeObjN - 1].node == node && node != 0)
+		return &s_cqeObjs[s_cqeObjN - 1];
+	if (s_cqeObjN >= CHARQE_MAX_OBJS)
+		return &s_cqeObjs[CHARQE_MAX_OBJS - 1];   // cap: fold into the last run
+	CharqEObjInt* o = &s_cqeObjs[s_cqeObjN++];
+	o->node      = node;
+	o->cid       = s_cqeCurCid;
+	o->sprite_id = s_cqeCurSid;
+	o->flags     = 0;
+	o->nquads    = 0;
+	return o;
+}
+
+// Hook A — body-part convergence (0x8C034864). Set current run identity.
+static void mc_charqEmitBodyPart(const u32* r)
+{
+	if (s_cqeFireBody++ == 0)
+		fprintf(stderr, "[CHARQ-EMIT] body-part hook first fired (pc=0x%08X) node=r14=0x%08X\n",
+		        PC_ASM_PART, r[14]);
+	u32 node = norm(r[14]);
+	if (!inRam(node)) return;
+	u32 cnode = node | 0x0C000000u;
+
+	// Video-frame boundary: freeze the prior frame's runs.
+	u32 vframe = addrspace::read32(0x8C3496B0);
+	if (vframe != s_cqeVframe) {
+		if (s_cqeVframe != 0xFFFFFFFFu) cqeFreezeFrame();
+		s_cqeVframe = vframe;
+		s_cqeObjN = 0;
+		s_cqeCurNode = 0; s_cqeCurCid = -1; s_cqeCurSid = -1;
+		s_cqeBodyPending = false;
+	}
+
+	s_cqeCurNode = cnode;
+	s_cqeCurCid  = (int)(u8)addrspace::read8(cnode + OFF_CHAR_ID);
+	s_cqeCurSid  = (int)((u16)addrspace::read16(cnode + OFF_SPRITE_ID) & 0x7FFF);
+	// Arm the pairing: the very next submit (0x8C1248CC) is THIS body part's quad.
+	s_cqeBodyPending = true;
+}
+
+// Hook B — bank12 PVR submit (0x8C1248CC), paired right after each body part.
+// r14 = DEST sprite-para record 2 (corners/UVs; ctrl 0xF0000000 @ +0x00). The PVR para
+// words (PCW/TCW/TSP) live in RECORD 1 at r14-0x20. Append one screen sprite quad.
+static void mc_charqEmitSubmit(const u32* r)
+{
+	// BODY-vs-HUD discrimination by PAIRING (NOT pr). This submit is a BODY quad ONLY
+	// if it immediately follows a body-part hook (0x8C034864) that armed the pending
+	// flag. HUD/stage submits reach this PC without a preceding body part -> skip.
+	// (The old `pr == 0x0C03487A` filter NEVER matched: live pr here is 0x8C124870.)
+	if (!s_cqeBodyPending) return;
+	s_cqeBodyPending = false;         // consume the pairing
+	if (s_cqeCurNode == 0) return;    // no identity established yet this run
+
+	u32 rec     = (norm(r[14]) | 0x0C000000u);   // DEST sprite-para record (RECORD 2): corners+UVs
+	u32 recBase = rec - CHARQ_REC_OFF;           // RECORD 1: the global ISP/TSP/TCW/PCW para
+	if (!inRam(rec) || !inRam(recBase)) return;
+
+	if (s_cqeFireSub++ == 0)
+		fprintf(stderr, "[CHARQ-EMIT] submit hook first fired (pc=0x%08X PAIRED) rec(r14)=0x%08X recBase=0x%08X pr=0x%08X\n",
+		        PC_CHARQ_SUBMIT, rec, recBase, Sh4cntx.pr);
+
+	CharqEObjInt* o = cqeGetObj();
+	if (!o || o->nquads >= CHARQE_MAX_QUADS) return;
+	CharqEmitQuad& q = o->quads[o->nquads];
+
+	// 4 screen corners (f32). Az/Bz/Cz (depth) are not needed for the 2D placement.
+	q.Ax = rdF(rec + 0x04); q.Ay = rdF(rec + 0x08);
+	q.Bx = rdF(rec + 0x10); q.By = rdF(rec + 0x14);
+	q.Cx = rdF(rec + 0x1C); q.Cy = rdF(rec + 0x20);
+	q.Dx = rdF(rec + 0x28); q.Dy = rdF(rec + 0x2C);
+
+	// 6 UVs: 16-bit-truncated floats at +0x34..+0x3E -> expand to full f32.
+	q.AU = cqeExpandUV((u16)addrspace::read16(rec + 0x34));
+	q.AV = cqeExpandUV((u16)addrspace::read16(rec + 0x36));
+	q.BU = cqeExpandUV((u16)addrspace::read16(rec + 0x38));
+	q.BV = cqeExpandUV((u16)addrspace::read16(rec + 0x3A));
+	q.CU = cqeExpandUV((u16)addrspace::read16(rec + 0x3C));
+	q.CV = cqeExpandUV((u16)addrspace::read16(rec + 0x3E));
+
+	// PVR para words.
+	//   q.pcw = recBase+0x00  real global PCW (bit3 texture-enable set) — RECORD 1.
+	//   q.tcw = r12+0x0C      RESOLVED body TCW (PROVEN source). The breakthrough's
+	//           offline composite (clean textured Ryu/Cable) decoded the body texture
+	//           from r12+0x0C: PAL4 fmt5, palette bank in bits 25-21, vram=(tcw&0x1FFFFF)<<3
+	//           (~0x419800 in CHAR_GFX). recBase+0x08 (= r14-0x20 record) is the WRONG
+	//           record (yielded 0x949004d2 = fmt2 ARGB4444 8x8 @ 0x2690, NOT a body tex)
+	//           -> the C3 "fix" produced SOLID-COLOR render. Reverted here. (r12 is the
+	//           32-byte source quad record; project_charq_breakthrough.)
+	//   q.tsp = recBase+0x14  real TSP ((transform<<24)|*(r13+0x3C); blend/filter).
+	q.pcw = addrspace::read32(recBase + 0x00);
+	u32 r12 = (norm(r[12]) | 0x0C000000u);
+	q.tcw = inRam(r12 + 0x0C) ? addrspace::read32(r12 + 0x0C)
+	                          : addrspace::read32(recBase + 0x08);
+	q.tsp = addrspace::read32(recBase + 0x14);
+	o->nquads++;
+}
+
+// === CHARQ-EMIT accessor API (consumed by maplecast_mirror.cpp serverPublish) ===
+int mc_charqEmit_beginFrame(const CharqEmitObj** outObjs, u32* outFrameNum)
+{
+	if (!mc_charqEmitEnabled) { if (outObjs) *outObjs = nullptr; return 0; }
+	// At serverPublish time the current accumulating frame is the one just walked, but
+	// it has not yet hit a body-part boundary to freeze. Freeze it now so the emitter
+	// reads THIS frame's quads (the freeze on the next body-part hook would lag a frame).
+	if (s_cqeObjN > 0) cqeFreezeFrame();
+	if (s_cqeReadyN == 0) { if (outObjs) *outObjs = nullptr; return 0; }
+	for (int i = 0; i < s_cqeReadyN; i++) {
+		s_cqePub[i].node      = s_cqeReady[i].node;
+		s_cqePub[i].cid       = s_cqeReady[i].cid;
+		s_cqePub[i].sprite_id = s_cqeReady[i].sprite_id;
+		s_cqePub[i].flags     = s_cqeReady[i].flags;
+		s_cqePub[i].nquads    = s_cqeReady[i].nquads;
+	}
+	if (outObjs)     *outObjs     = s_cqePub;
+	if (outFrameNum) *outFrameNum = s_cqeReadyVf;
+	return s_cqeReadyN;
+}
+const CharqEmitQuad* mc_charqEmit_objQuads(int objIdx, int* outN)
+{
+	if (objIdx < 0 || objIdx >= s_cqeReadyN) { if (outN) *outN = 0; return nullptr; }
+	if (outN) *outN = s_cqeReady[objIdx].nquads;
+	return s_cqeReady[objIdx].quads;
+}
+void mc_charqEmit_endFrame()
+{
+	s_cqeReadyN  = 0;
+	s_cqeReadyVf = 0xFFFFFFFFu;
+}
+
+// ===========================================================================
+// REAL PER-OBJECT PVR BLEND (MAPLECAST_FRAME_ORACLE_HOOK) — the producer-facing
+// node->blend lookup. Replaces the WRONG category heuristic (computeObjectBlend) in
+// readObjects/readAllDrawn with the engine's ACTUAL TSP blend, finalized at the bank12
+// submit. The bug: category gates LAYER/dispatch, NOT blend — Sentinel's rocket TRAIL
+// (owner 0x8C268340, sprite_id 0x8001->idx1, parts sel 22/23, category 0x01) maps to
+// "opaque" by category yet is genuinely ADDITIVE, so it ships as a blob not a glow.
+//
+// MECHANISM (piggybacks on the proven CHARQ-EMIT pairing, but gated on the prod-armed
+// FRAME-ORACLE-HOOK so it runs WITHOUT MAPLECAST_CHARQ_EMIT):
+//   * body-part hook  0x8C034864 (loc_8c0344d4 per-part convergence): node=r14
+//     (mov r4,r14 @prologue; at THIS mid-block PC the prologue has run, so r14 holds the
+//     node — same read CHARQ-EMIT's mc_charqEmitBodyPart uses). Set the current node +
+//     arm the 1:1 pairing flag. The block-entry hook at the routine ENTRY 0x8C0344D4 has
+//     r4=node (prologue not yet run) — we do NOT hook the entry; 0x8C034864 already gives
+//     a clean node read and is the SAME PC CHARQ-EMIT pairs with the submit.
+//   * submit hook     0x8C1248CC (bank12 PVR submit): the paired body part's PVR para
+//     record is complete. TSP = read_u32(recBase+0x14), recBase = (r14 - 0x20). Decode
+//     src=(tsp>>29)&7, dst=(tsp>>26)&7: src==1&&dst==1 => additive(2); src==1&&dst==0 =>
+//     opaque(0); else => alpha(1). Store the STRONGEST blend seen for this node THIS frame
+//     (additive > alpha > opaque) so a multi-part body whose TRAIL parts are additive
+//     reports additive. A submit with no armed pairing (HUD/stage) is skipped.
+//
+// Per-frame open-addressed node->blend map, cleared at the video-frame boundary
+// (0x8C3496B0). READ-ONLY w.r.t. guest (addrspace reads only; no writes into Sh4cntx).
+static const int MC_NB_SLOTS = 64;          // power of two; >> the ~ dozen drawn nodes/frame
+struct McNodeBlend { u32 node; u8 blend; };  // node = norm()'d (& 0x1FFFFFFF) base; blend 0/1/2
+static McNodeBlend s_nodeBlend[MC_NB_SLOTS];
+static u32         s_nbVframe   = 0xFFFFFFFFu;
+static u32         s_nbCurNode  = 0;          // current run node (set by body-part hook)
+static bool        s_nbPending  = false;      // 1:1 pairing arm (body part -> next submit)
+static unsigned long s_nbFireBody = 0, s_nbFireSub = 0;
+
+static inline u32 nbHash(u32 node) { return (node >> 4) & (MC_NB_SLOTS - 1); }
+
+// Clear the per-frame map (open addressing: node==0 means empty slot).
+static void nbClearFrame() { for (int i = 0; i < MC_NB_SLOTS; i++) { s_nodeBlend[i].node = 0; s_nodeBlend[i].blend = 0; } }
+
+// Record/strengthen the blend for `node` (already norm()'d, nonzero). additive(2) wins
+// over alpha(1) wins over opaque(0).
+static void nbStore(u32 node, u8 blend) {
+	if (node == 0) return;
+	u32 h = nbHash(node);
+	for (int i = 0; i < MC_NB_SLOTS; i++) {
+		McNodeBlend& e = s_nodeBlend[(h + i) & (MC_NB_SLOTS - 1)];
+		if (e.node == 0)    { e.node = node; e.blend = blend; return; }
+		if (e.node == node) { if (blend > e.blend) e.blend = blend; return; }
+	}
+	// table full (shouldn't happen with 64 slots) -> drop silently.
+}
+
+// Body-part convergence (0x8C034864): set current node + arm the pairing. node = r14
+// (same read CHARQ-EMIT uses at this PC; prologue's `mov r4,r14` has executed).
+static void mc_nbBodyPart(const u32* r)
+{
+	if (s_nbFireBody++ == 0)
+		fprintf(stderr, "[NODEBLEND] body-part hook first fired (pc=0x%08X) node=r14=0x%08X\n",
+		        PC_ASM_PART, r[14]);
+	u32 node = norm(r[14]);
+	if (!inRam(node)) { s_nbPending = false; return; }
+	// Video-frame boundary: clear the map for the new frame.
+	u32 vframe = addrspace::read32(0x8C3496B0);
+	if (vframe != s_nbVframe) { nbClearFrame(); s_nbVframe = vframe; s_nbCurNode = 0; s_nbPending = false; }
+	s_nbCurNode = node;        // store the area-masked base (matches readObjects' norm key)
+	s_nbPending = true;        // the very next submit is THIS part's quad
+}
+
+// bank12 submit (0x8C1248CC): read the paired part's TSP -> blend, store per node.
+static void mc_nbSubmit(const u32* r)
+{
+	if (!s_nbPending) return;          // HUD/stage submit (no preceding body part) -> skip
+	s_nbPending = false;               // consume the pairing
+	if (s_nbCurNode == 0) return;
+	u32 rec     = (norm(r[14]) | 0x0C000000u);   // DEST sprite-para record (RECORD 2)
+	u32 recBase = rec - CHARQ_REC_OFF;           // RECORD 1: global ISP/TSP/TCW/PCW para
+	if (!inRam(rec) || !inRam(recBase)) return;
+	u32 tsp = addrspace::read32(recBase + 0x14); // TSP/blend word (same source as CHARQ)
+	u32 src = (tsp >> 29) & 7, dst = (tsp >> 26) & 7;
+	u8  blend = (src == 1 && dst == 1) ? 2          // additive (src=ONE,dst=ONE)
+	          : (src == 1 && dst == 0) ? 0          // opaque (src=ONE,dst=ZERO)
+	          : 1;                                  // alpha / translucent (everything else)
+	if (s_nbFireSub++ == 0)
+		fprintf(stderr, "[NODEBLEND] submit hook first fired (pc=0x%08X) node=0x%08X tsp=0x%08X "
+		                "src=%u dst=%u -> blend=%u\n", PC_CHARQ_SUBMIT, s_nbCurNode, tsp, src, dst, blend);
+	nbStore(s_nbCurNode, blend);
+}
+
+// Producer accessor (maplecast_gamestate.cpp readObjects/readAllDrawn). Returns the real
+// per-object blend captured for `node` THIS frame: 0=opaque/PT, 1=alpha, 2=additive, or
+// 0xFF if no capture exists for that node (caller falls back to computeObjectBlend). The
+// node argument may be any P0/P1/P2 alias of the struct base; it is normalized to match
+// the area-masked key the capture stores.
+uint8_t mc_oracle_nodeBlend(u32 node)
+{
+	if (!mc_frameOracleHookOn) return 0xFF;
+	u32 key = norm(node);
+	if (key == 0) return 0xFF;
+	u32 h = nbHash(key);
+	for (int i = 0; i < MC_NB_SLOTS; i++) {
+		const McNodeBlend& e = s_nodeBlend[(h + i) & (MC_NB_SLOTS - 1)];
+		if (e.node == 0)   return 0xFF;     // empty slot in the probe chain -> not present
+		if (e.node == key) return e.blend;
+	}
+	return 0xFF;
+}
+
+// ===========================================================================
 // BODYCAP (MAPLECAST_BODYCAP) — body part DECODED pixels keyed by the RENDER selector.
 // Fires at the SAME PC as ASMTRACE (0x8C034864, loc_8c0344d4 per-part convergence).
 // See mc_bodyCapEnabled for the full selector-space reconciliation. READ-ONLY.
@@ -1381,6 +2255,11 @@ void mc_oracleInit()
 		                "by position%s -> /dev/shm/mc_oracle_hook.jsonl\n",
 		        PC_OBJ_BEGIN,
 		        mc_decodeQuadsEnabled ? " (+DECODE quad sub-flag at 0x8C033EC0)" : "");
+	if (mc_probeEnabledStatic)
+		fprintf(stderr, "[ORACLE-PROBE] GENERIC probe ENABLED (READ-ONLY) — %d PC(s) armed from config; "
+		                "dumps -> /dev/shm/mc_probe.log. v2 LIVE RELOAD: edit the config -> the probe set "
+		                "updates within ~1s, NO restart (block cache auto-flushed at the SH4 frame boundary).\n",
+		        s_nprobe);
 	if (mc_probeEnabled)
 		fprintf(stderr, "[ORACLE-PROBE] ENABLED (Phase 0, READ-ONLY) — body quad-count tbl "
 		                "0x%08X[6×u16] + dlPtr 0x%08X[6×u32]; R6 dump 0x%08X..0x%08X. "
@@ -1428,8 +2307,223 @@ bool mc_isHookedPC(u32 pc)
 	// ASMTRACE: the per-part convergence PC inside loc_8c0344d4 (0x8C034864). Only hooked
 	// when the asm-trace flag is set. Mid-block -> the decoder force-split makes it a block
 	// start; this returns true so rec_x64 injects the GenCall there.
-	if (m == PC_ASM_PART_M) return mc_asmTraceEnabled || mc_bodyCapEnabled;
+	// Also hooked under the prod FRAME-ORACLE-HOOK for the per-node REAL-BLEND capture
+	// (mc_nbBodyPart sets the current node here). Mid-block -> the decoder force-split
+	// makes it a block start; return true so rec_x64 injects the GenCall.
+	if (m == PC_ASM_PART_M) return mc_asmTraceEnabled || mc_bodyCapEnabled || mc_charqEmitEnabled || mc_frameOracleHookOn;
+	// CHARQ-RENDER: the per-part PVR-record completion PC inside loc_8C1244B0
+	// (0x8C1248CC). Only hooked when the charq-render flag is set. Mid-block -> the
+	// decoder force-split makes it a block start; return true so rec_x64 injects.
+	// Also hooked under the prod FRAME-ORACLE-HOOK for the per-node REAL-BLEND capture
+	// (mc_nbSubmit reads the paired part's TSP here). Mid-block -> the decoder force-split
+	// makes it a block start; return true so rec_x64 injects the GenCall.
+	if (m == PC_CHARQ_SUBMIT_M) return mc_charqRenderEnabled || mc_charqEmitEnabled || mc_frameOracleHookOn;
+	// GENERIC PROBE: any PC configured in /dev/shm/mc_oracle_probe.conf (parsed once at
+	// static init). Masked compare so the disasm 0x8C.. label matches the executed 0x0C..
+	// alias. The probe PCs may be mid-block (e.g. 0x8C1248CC) -> the decoder force-split
+	// in decoder.cpp makes them block starts so the GenCall injects.
+	if (mc_probeEnabledStatic) {
+		for (int i = 0; i < s_nprobe; i++)
+			if (s_probes[i].pcMasked == m) return true;
+	}
 	return false;
+}
+
+// GENERIC PROBE handler — dump the matched probe's spec to /dev/shm/mc_probe.log.
+// READ-ONLY (Sh4cntx.r[] + addrspace::read* only). Append-with-flush + truncate-and-
+// rewind at the cap so the tail is live and /dev/shm can't fill. Returns true if `mpc`
+// matched a probe (so the caller can return early).
+static bool mc_probeHandler(const u32* r, u32 mpc)
+{
+	int hit = -1;
+	for (int i = 0; i < s_nprobe; i++) if (s_probes[i].pcMasked == mpc) { hit = i; break; }
+	if (hit < 0) return false;
+	Probe& p = s_probes[hit];
+	p.fires++;
+
+	static const long PROBE_CAP = []{
+		const char* v = getenv("MAPLECAST_ORACLE_PROBE_CAP");
+		if (v) { long c = atol(v); if (c >= (1L << 20)) return c; }   // floor 1 MiB
+		return 16L * 1024 * 1024;
+	}();
+	static const char* s_logPath = []{
+		const char* v = getenv("MAPLECAST_ORACLE_PROBE_LOG");
+		return v ? v : "/dev/shm/mc_probe.log";
+	}();
+	static FILE* lf = nullptr;
+	static long  lw = 0;
+	if (!lf) { lf = fopen(s_logPath, "w"); lw = 0;            // O_TRUNC: drop a stale prior-run file
+		if (lf) fprintf(stderr, "[ORACLE-PROBE] logging -> %s (cap %ldMiB)\n", s_logPath, PROBE_CAP >> 20); }
+	if (!lf) return true;
+	if (lw >= PROBE_CAP) { lf = freopen(s_logPath, "w", lf); lw = 0; if (!lf) return true; }
+
+	u32 vframe = addrspace::read32(0x8C3496B0);   // SH4 video-frame counter (work.asm)
+	char b[1024]; int n;
+	n = snprintf(b, sizeof b, "[PROBE pc=0x%08X %s vframe=%u fire=%lu]\n",
+	             mpc | 0x0C000000u, p.label, vframe, p.fires);
+	lw += fwrite(b, 1, n, lf);
+
+	for (int t = 0; t < p.ntok; t++) {
+		ProbeTok& tk = p.toks[t];
+		switch (tk.kind) {
+		case ProbeTok::REGS:
+			for (int g = 0; g < 16; g += 4) {
+				n = snprintf(b, sizeof b, "  r%-2d=%08X r%-2d=%08X r%-2d=%08X r%-2d=%08X\n",
+				             g, r[g], g+1, r[g+1], g+2, r[g+2], g+3, r[g+3]);
+				lw += fwrite(b, 1, n, lf);
+			}
+			n = snprintf(b, sizeof b, "  pr=%08X gbr=%08X macl=%08X mach=%08X\n",
+			             Sh4cntx.pr, Sh4cntx.gbr, Sh4cntx.mac.l, Sh4cntx.mac.h);
+			lw += fwrite(b, 1, n, lf);
+			break;
+		case ProbeTok::REG:
+			n = snprintf(b, sizeof b, "  r%d=%08X\n", tk.reg, r[tk.reg]); lw += fwrite(b, 1, n, lf); break;
+		case ProbeTok::PR:
+			n = snprintf(b, sizeof b, "  pr=%08X\n", Sh4cntx.pr); lw += fwrite(b, 1, n, lf); break;
+		case ProbeTok::GBR:
+			n = snprintf(b, sizeof b, "  gbr=%08X\n", Sh4cntx.gbr); lw += fwrite(b, 1, n, lf); break;
+		case ProbeTok::MACL:
+			n = snprintf(b, sizeof b, "  macl=%08X\n", Sh4cntx.mac.l); lw += fwrite(b, 1, n, lf); break;
+		case ProbeTok::MACH:
+			n = snprintf(b, sizeof b, "  mach=%08X\n", Sh4cntx.mac.h); lw += fwrite(b, 1, n, lf); break;
+		case ProbeTok::MEM: {
+			n = snprintf(b, sizeof b, "  mem[0x%08X..+%u]:\n", tk.addr, tk.len); lw += fwrite(b, 1, n, lf);
+			for (u32 o = 0; o < tk.len; o += 16) {
+				n = snprintf(b, sizeof b, "    %08X:", tk.addr + o);
+				for (u32 j = 0; j < 16 && o + j < tk.len; j++)
+					n += snprintf(b + n, sizeof b - n, " %02X", (u8)addrspace::read8(tk.addr + o + j));
+				n += snprintf(b + n, sizeof b - n, "\n"); lw += fwrite(b, 1, n, lf);
+			}
+			break; }
+		case ProbeTok::RMEM: {
+			u32 base = r[tk.reg] + tk.off;
+			n = snprintf(b, sizeof b, "  rmem[r%d+0x%X=0x%08X..+%u]:\n", tk.reg, tk.off, base, tk.len);
+			lw += fwrite(b, 1, n, lf);
+			for (u32 o = 0; o < tk.len; o += 16) {
+				n = snprintf(b, sizeof b, "    %08X:", base + o);
+				for (u32 j = 0; j < 16 && o + j < tk.len; j++)
+					n += snprintf(b + n, sizeof b - n, " %02X", (u8)addrspace::read8(base + o + j));
+				n += snprintf(b + n, sizeof b - n, "\n"); lw += fwrite(b, 1, n, lf);
+			}
+			break; }
+		case ProbeTok::STACK: {
+			u32 sp = r[15];
+			n = snprintf(b, sizeof b, "  stack[r15=0x%08X, %u words]:\n", sp, tk.len); lw += fwrite(b, 1, n, lf);
+			for (u32 w = 0; w < tk.len; w++) {
+				u32 v = addrspace::read32(sp + w * 4);
+				n = snprintf(b, sizeof b, "    [sp+%02X] %08X = %08X\n", w * 4, sp + w * 4, v);
+				lw += fwrite(b, 1, n, lf);
+			}
+			break; }
+		}
+	}
+	fflush(lf);
+	return true;
+}
+
+// === v2 LIVE-RELOAD — watcher + apply (THE no-restart reconfig) =============
+//
+// WATCHER (mc_probeCheckReload): runs on the RENDER thread from serverPublish
+// (a frame boundary, but NOT a guaranteed SH4-paused point — in non-threaded
+// mode serverPublish executes synchronously inside the SH4's STARTRENDER write,
+// i.e. a dynarec block can be on the C++ stack). So the watcher ONLY does the
+// cheap stat() + sets the atomic pending flag. It NEVER parses into s_probes[]
+// and NEVER touches the block cache. Throttled to every Nth frame.
+//
+// APPLY (mc_probeApplyReload): runs on the SH4 thread at the emu-loop boundary,
+// right AFTER runInternal() returns (emulator.cpp) — the SAME proven-safe context
+// the rollback deferred-rewind uses to call emu.loadstate()->bm_Reset/ResetCache.
+// The SH4 is fully paused there (no block on the stack, not racing the emu thread).
+// It re-parses into a TEMP buffer (so a parse miss / empty file keeps or clears
+// deliberately, never corrupts the live set), swaps it into s_probes[] under the
+// understanding that the cache flush the caller then performs re-runs the
+// compile-time mc_isHookedPC gate against the NEW set. Returns true IFF the caller
+// should flush the block cache (i.e. the armed PC set may have changed).
+//
+// Gated: when MAPLECAST_ORACLE_PROBE is unset, mc_probeEnabledStatic is false and
+// BOTH functions are no-ops (the watcher returns immediately, apply returns false),
+// so prod (probe OFF) pays nothing and never flushes.
+
+// How often (in frames) the render-thread watcher stat()s the config. ~30 frames
+// @60fps = ~0.5s detect latency; apply lands the next SH4 frame -> ~1s end-to-end,
+// well inside the ~1-2s no-restart target. Override via env (>=1).
+static int mc_probeWatchPeriod() {
+	static const int P = []{
+		const char* v = getenv("MAPLECAST_ORACLE_PROBE_WATCH");
+		if (v) { int n = atoi(v); if (n >= 1) return n; }
+		return 30;
+	}();
+	return P;
+}
+
+// Diagnostic toggle: MAPLECAST_ORACLE_PROBE_DEBUG=1 prints watcher/apply traces.
+static bool mc_probeDebug() {
+	static const bool D = getenv("MAPLECAST_ORACLE_PROBE_DEBUG") != nullptr;
+	return D;
+}
+
+// Peek the pending flag WITHOUT consuming it. Called from Emulator::vblank()
+// (emu thread, per-frame) to decide whether to Stop() the SH4 so the emu-loop
+// boundary can apply+flush. mc_probeApplyReload() does the consuming exchange.
+bool mc_probeReloadPending() {
+	if (!mc_probeEnabledStatic) return false;
+	return s_probeReloadPending.load(std::memory_order_acquire);
+}
+
+void mc_probeCheckReload() {
+	if (!mc_probeEnabledStatic) return;                 // probe OFF -> never watch/flush
+	if (s_probeReloadPending.load(std::memory_order_relaxed)) return;  // apply still owes us a flush
+	if (++s_probeWatchTick < mc_probeWatchPeriod()) return;
+	s_probeWatchTick = 0;
+	long long m = mc_probeStatMtime(mc_probeConfPath());
+	// m==0 means the file vanished. Treat a vanish as a change too (apply will
+	// clear all probes). Only act when the value actually differs from what we
+	// last applied, so a steady file is a pure stat() with no flush.
+	if (mc_probeDebug())
+		fprintf(stderr, "[ORACLE-PROBE-DBG] watch: stat=%lld stored=%lld %s\n",
+		        m, s_probeConfMtime, (m != s_probeConfMtime) ? "CHANGED->pending" : "same");
+	if (m != s_probeConfMtime)
+		s_probeReloadPending.store(true, std::memory_order_release);
+}
+
+bool mc_probeApplyReload() {
+	if (!mc_probeEnabledStatic) return false;
+	static unsigned long s_applyTicks = 0;
+	if (mc_probeDebug() && (++s_applyTicks % 120 == 0))
+		fprintf(stderr, "[ORACLE-PROBE-DBG] apply: alive (tick=%lu, pending=%d)\n",
+		        s_applyTicks, (int)s_probeReloadPending.load(std::memory_order_relaxed));
+	if (!s_probeReloadPending.exchange(false, std::memory_order_acq_rel)) return false;
+
+	const char* path = mc_probeConfPath();
+	// Re-stat HERE so we record the mtime we actually parsed (the file may have
+	// been edited again between the watcher's stat and now); this also prevents a
+	// rapid second edit from being missed (if it changed again, the next watcher
+	// tick will see a new mtime and re-arm).
+	long long m = mc_probeStatMtime(path);
+
+	Probe tmp[MC_PROBE_MAX];
+	int tmpN = 0;
+	int rc = mc_probeParseInto(path, tmp, &tmpN, /*verbose=*/true);
+
+	if (rc == 0) {
+		// File missing/unreadable: clear all probes (per the edge-case spec) and
+		// still flush once so the GenCall stops being injected at the old PCs.
+		fprintf(stderr, "[ORACLE-PROBE] reload: config gone (%s) -> clearing all probes + flush\n", path);
+		s_nprobe = 0;
+		s_probeConfMtime = m;   // 0; a re-create bumps it -> re-arm
+		return true;
+	}
+
+	// Successful parse (tmpN may be 0 = an intentionally empty/all-comment file).
+	// Swap the temp set in. The caller's cache flush re-runs mc_isHookedPC against
+	// this new set on every subsequently-compiled block, re-injecting (or removing)
+	// the block-entry GenCall at the new (or old) PCs.
+	memcpy(s_probes, tmp, sizeof(Probe) * (tmpN < 0 ? 0 : tmpN));
+	s_nprobe = tmpN;
+	s_probeConfMtime = m;
+	fprintf(stderr, "[ORACLE-PROBE] LIVE RELOAD applied: %d probe(s) from %s -> flushing block cache "
+	                "(no restart)\n", s_nprobe, path);
+	return true;
 }
 
 // Per-PC fire counters (DIAGNOSTIC, gated). The previous proof-of-life used a
@@ -1448,6 +2542,12 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 	// Mask to the SH4 external area so we route correctly whether the recompiler
 	// passed the cached (0x8C..) or physical (0x0C..) alias of the PC.
 	u32 mpc = pc & SH4_AREA_MASK;
+
+	// GENERIC RUNTIME-CONFIGURABLE PROBE (MAPLECAST_ORACLE_PROBE) — checked FIRST so a
+	// config-armed PC always dumps its spec, even if it coincides with a built-in hook.
+	// Pure read-only dump; returns true (and we return) when this PC is a configured
+	// probe. When the probe is OFF, s_nprobe==0 so this is a single int compare.
+	if (mc_probeEnabledStatic && mc_probeHandler(r, mpc)) return;
 
 	// DECODE-TIME part hook (fires PRE-match at character load, independent of the
 	// frame-oracle paths). Handle first + return: it shares no per-frame buffer.
@@ -1482,6 +2582,18 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 	if (mpc == PC_ASM_PART_M) {
 		if (mc_asmTraceEnabled) mc_asmTraceHandler(r);
 		if (mc_bodyCapEnabled)  mc_bodyCapHandler(r);
+		if (mc_charqEmitEnabled) mc_charqEmitBodyPart(r);   // set current run identity
+		if (mc_frameOracleHookOn) mc_nbBodyPart(r);         // REAL-BLEND: set current node + arm pairing
+		return;
+	}
+
+	// CHARQ-RENDER per-part PVR-record capture — loc_8C1244B0 completion PC (0x8C1248CC).
+	// Filters to the BODY caller by Sh4cntx.pr inside the handler. Independent of the
+	// per-frame oracle buffer; accumulates per (cid, vframe) -> /dev/shm/mc_charq_render.jsonl.
+	if (mpc == PC_CHARQ_SUBMIT_M) {
+		if (mc_charqRenderEnabled) mc_charqRenderHandler(r);
+		if (mc_charqEmitEnabled)   mc_charqEmitSubmit(r);   // append a screen sprite quad
+		if (mc_frameOracleHookOn)  mc_nbSubmit(r);          // REAL-BLEND: read paired part's TSP -> per-node blend
 		return;
 	}
 
@@ -1494,6 +2606,14 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 		// quad attribution at the quad-done PC keys on the node addr independently.
 		u32 node = norm(r[4]);
 		if (!inRam(node)) return;
+		// CHARQ-RENDER run segmentation: this body's parts (emitted next by loc_8c0344d4)
+		// belong to THIS node. Record its identity for charqGetRun.
+		if (mc_charqRenderEnabled) {
+			u32 cnode = node | 0x0C000000u;
+			s_charqBeginNode = cnode;
+			s_charqBeginCid  = (u32)(u8)addrspace::read8(cnode + OFF_CHAR_ID);
+			s_charqBeginSid  = (u32)(u16)addrspace::read16(cnode + OFF_SPRITE_ID);
+		}
 		int oi = findOrCreateObj(node);
 		if (oi >= 0) { enrichObj(s_objs[oi], node); s_objs[oi].fromBegin = true; }  // refresh post-transform screen_xy
 		// R2: record the running TA byte cursor + cell part count AT this per-object
@@ -1517,6 +2637,16 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 			                "node=0x%08X\n", pc, mpc, r[4]);
 		u32 node = norm(r[4]);
 		if (!inRam(node)) return;
+		// CHARQ-RENDER run segmentation (satellite path). NOTE: satellites render via
+		// loc_8c030af8 + a DIFFERENT submit jsr, so the pr filter (0x0C03487A) in the
+		// charq handler will reject satellite parts — but we still update the begin node
+		// so a body run that follows a satellite is correctly re-opened.
+		if (mc_charqRenderEnabled) {
+			u32 cnode = node | 0x0C000000u;
+			s_charqBeginNode = cnode;
+			s_charqBeginCid  = (u32)(u8)addrspace::read8(cnode + OFF_CHAR_ID);
+			s_charqBeginSid  = (u32)(u16)addrspace::read16(cnode + OFF_SPRITE_ID);
+		}
 		int oi = findOrCreateObj(node);
 		if (oi >= 0) {
 			enrichObj(s_objs[oi], node);
@@ -1590,7 +2720,8 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 struct PassStats {
 	int op, pt, tr;       // PolyParam list sizes (raw, pre-filter)
 	int sprite;           // kept sprite quads (s_nscreen)
-	int bodyBand;         // kept sprite quads with center y in [120,440] (body region)
+	int bodyBand;         // kept sprite quads with center y in [60,440] (playfield incl HUD)
+	int realBody;         // kept sprite quads with center y in [200,460] (TRUE body, excl HUD)
 	int isRTT;            // ctx->rend.isRTT (FB_W_SOF1 & 0x1000000) — logged to CONFIRM
 };
 
@@ -1718,14 +2849,26 @@ static void collectScreenQuads(rend_context& rc, PassStats* ps = nullptr)
 	// STAF parse) — the discriminator frameFlush uses to pick the character pass
 	// without depending on isRTT alone.
 	int bodyBand = 0;
-	for (int k = 0; k < s_nscreen; k++)
-		if (s_screen[k].cy >= 60.f && s_screen[k].cy <= 440.f) bodyBand++;
+	// realBody: TRUE body region only (center y in [200,460]) — EXCLUDES the HUD band
+	// (life bars / meters / portraits / timer live at y<~120). The live evidence on this
+	// build/state shows the HUD/composite pass carries tr=40-52 with bodyBand>0 because
+	// bodyBand[60,440] still counts HUD sprites; tightening to [200,460] isolates the real
+	// on-screen body parts (the captured body objects were at y 231-439). This is the
+	// character-pass discriminator (>=N realBody) — see frameFlush. The stale "tr>=500"
+	// figure was never real on this build; realBody is the robust gate.
+	int realBody = 0;
+	for (int k = 0; k < s_nscreen; k++) {
+		float cy = s_screen[k].cy;
+		if (cy >= 60.f  && cy <= 440.f) bodyBand++;
+		if (cy >= 200.f && cy <= 460.f) realBody++;
+	}
 	if (ps) {
 		ps->op = (int)rc.global_param_op.size();
 		ps->pt = (int)rc.global_param_pt.size();
 		ps->tr = (int)rc.global_param_tr.size();
 		ps->sprite = s_nscreen;
 		ps->bodyBand = bodyBand;
+		ps->realBody = realBody;
 		// isRTT filled by caller (it owns ctx->rend).
 	}
 
@@ -1943,6 +3086,159 @@ static void mc_r2Log(u32 frame, int tappOp, int tappPt, int tappTr, int tspr)
 		tappOp, tappPt, tappTr, tspr, dTr, dSpr, verdict, seq);
 }
 
+// ===========================================================================
+// CHARPASS CAPTURE (MAPLECAST_CHARQ) — the DEFINITIVE per-part body-quad capture.
+//
+// THE PROBLEM (confirmed by the QDIAG/ORACLE-PASS investigation): MVC2 emits
+// MULTIPLE STARTRENDER passes per video frame. flycast's QueueRender is SINGLE-SLOT
+// (ta_ctx.cpp:67-73): once `rqueue` holds one context, every subsequent STARTRENDER
+// context that frame is `tactx_Recycle`'d (DROPPED) and QueueRender returns false.
+// So only ONE context per video frame survives to DequeueRender -> render() ->
+// serverPublish(). On MVC2 the surviving pass is the HUD/composite pass
+// (isRTT=0, op~573/tr~42, the character layer flattened to ONE composite quad). The
+// CHARACTER pass (the per-part body quads, op~265/tr~2024, body-band y240-433) is the
+// one QueueRender DROPS — so serverPublish/mc_oracle_frameFlush NEVER sees it.
+//
+// THE FIX (option (a)): capture UPSTREAM at rend_start_render — for EVERY STARTRENDER
+// context, BEFORE QueueRender can drop it. This is the ONLY point in the pipeline where
+// the per-part character quads exist. We ta_parse the about-to-be-(maybe-)dropped ctx
+// READ-ONLY (the exact call norend::Process makes — ctx is fully valid here; ta_parse
+// only builds ctx->rend, never touches guest state) and route the CHARACTER pass into
+// the existing Oracle capture path (collectScreenQuads + attributeScreenQuads + JSONL +
+// the CHARQ accessor). The per-vframe dedup in mc_oracle_frameFlush makes this safe to
+// call for BOTH the character and HUD passes (only the character pass emits).
+//
+// READ-ONLY + determinism-safe: ta_parse(ctx,true) builds ctx->rend just like norend;
+// the real render path re-parses for the wire. We never enqueue, never recycle, never
+// touch rqueue, never write guest RAM. Gated MAPLECAST_CHARQ + in-match (0x8C289624).
+static bool mc_charqEnabled = (getenv("MAPLECAST_CHARQ") != nullptr);
+
+// CHARQ character-pass discriminator threshold: the minimum number of kept sprite quads
+// whose center y falls in the TRUE body region [200,460] (excludes the HUD band y<~120)
+// required to treat a STARTRENDER pass as the CHARACTER pass and emit the JSONL. The live
+// body capture on this build had 34 body-region screen quads at y 231-439, so any modest
+// floor isolates a real on-screen body. Env-overridable (MAPLECAST_CHARQ_REALBODY_MIN).
+static const int CHARQ_REALBODY_MIN = []{
+	const char* e = getenv("MAPLECAST_CHARQ_REALBODY_MIN");
+	int v = e ? atoi(e) : 5;
+	return (v > 0) ? v : 5;
+}();
+
+// Render-phase sprite_id/anim_timer latch (finding:gsta_sprite_id_sampling_phase, 2026-06-12).
+// These are populated HERE — at STARTRENDER, the SAME SH4 phase loc_8c0344d4 reads +0x144 to
+// render the character pass. readGameState/serverPublish runs a phase LATER (after QueueRender
+// drops the char pass), so its live +0x144 read is 1 frame out of phase with the rendered pose
+// (Sentinel's fast rocket 428-430 shipped as the horizontal wind-up 213/214). readGameState +
+// readAllDrawn prefer this latch. READ-ONLY (addrspace::read* only) -> determinism-safe.
+uint16_t mc_sidLatch[6]      = {0};
+uint16_t mc_timerLatch[6]    = {0};
+uint8_t  mc_sidLatchValid[6] = {0};
+
+void mc_oracle_charPassCapture(void* ctxv)
+{
+	// ALWAYS-ON body sid/timer latch (NOT gated on CHARQ — runs every STARTRENDER). In-match
+	// only (0x8C289624). Captures THIS frame's render-phase sprite_id for all 6 bodies so the
+	// wire ships the pose that's actually on screen, not serverPublish's 1-frame-later read.
+	if (addrspace::read8(0x8C289624) != 0) {
+		for (int i = 0; i < 6; i++) {
+			mc_sidLatch[i]      = (uint16_t)addrspace::read16(CHAR_BASE[i] + 0x144);
+			mc_timerLatch[i]    = (uint16_t)addrspace::read16(CHAR_BASE[i] + 0x142);
+			mc_sidLatchValid[i] = 1;
+		}
+	}
+
+	// ONE-SHOT full-RAM dump for the render-replica Option-C PoC (gated MAPLECAST_DUMP_RAM,
+	// READ-ONLY, determinism-safe). Writes the 16MB main RAM (mem_b) once, in-match, so the
+	// offline lift-to-C harness can read the load-time-built 0x8C1F9F9C tile-descriptor table
+	// + GFX1/GFX2 + char structs it cannot get from disc. Fires once then latches off.
+	{
+		static const bool s_dumpRam = getenv("MAPLECAST_DUMP_RAM") != nullptr;
+		static bool s_ramDumped = false;
+		if (s_dumpRam && !s_ramDumped && addrspace::read8(0x8C289624) != 0) {
+			const char* p = getenv("MAPLECAST_DUMP_RAM_PATH");
+			if (!p) p = "/dev/shm/mc_ram_dump.bin";
+			FILE* f = fopen(p, "wb");
+			if (f) {
+				size_t n = fwrite(&mem_b[0], 1, (size_t)RAM_SIZE, f);
+				fclose(f);
+				s_ramDumped = true;
+				fprintf(stderr, "[RAMDUMP] wrote %zu/%u bytes to %s\n", n, (unsigned)RAM_SIZE, p);
+				// Companion VRAM (8MB, the part-pixel textures TA quads sample) + PVR regs
+				// (palette/state) for the render-replica TA->pvr2-renderer harness.
+				FILE* fv = fopen("/dev/shm/mc_vram_dump.bin", "wb");
+				if (fv) { size_t nv = fwrite(&vram[0], 1, (size_t)VRAM_SIZE, fv); fclose(fv);
+					fprintf(stderr, "[VRAMDUMP] wrote %zu/%u bytes\n", nv, (unsigned)VRAM_SIZE); }
+				FILE* fp = fopen("/dev/shm/mc_pvr_regs.bin", "wb");
+				if (fp) { size_t np = fwrite(pvr_regs, 1, (size_t)pvr_RegSize, fp); fclose(fp);
+					fprintf(stderr, "[PVRREGS] wrote %zu bytes\n", np); }
+				// Companion ENGINE TA: the raw PowerVR param stream for THIS frame (ctx->tad),
+				// so the converge step diffs transpiled-TA vs engine-TA byte-exact — all four
+				// (RAM/VRAM/PVR/TA) captured at the SAME frame for a true single-frame reference.
+				if (ctxv) {
+					TA_context* tctx = (TA_context*)ctxv;
+					uint8_t* taData = tctx->tad.thd_root;
+					size_t   taSize = (size_t)(tctx->tad.thd_data - tctx->tad.thd_root);
+					FILE* ft = fopen("/dev/shm/mc_engine_ta.bin", "wb");
+					if (ft) { fwrite(taData, 1, taSize, ft); fclose(ft);
+						fprintf(stderr, "[ENGINETA] wrote %zu bytes (thd)\n", taSize); }
+				}
+			}
+		}
+	}
+
+	if (!mc_charqEnabled || ctxv == nullptr) return;
+
+	// IN-MATCH GATE (in_match @0x8C289624) — same gate the frame oracle uses. Outside a
+	// match the character routine isn't drawing bodies; skip the ta_parse entirely so the
+	// instrument is free on menus/attract.
+	if (addrspace::read8(0x8C289624) == 0) return;
+
+	TA_context* ctx = (TA_context*)ctxv;
+
+	// STEP 2 — the [CHARPASS] CONFIRMATION LOG. Per STARTRENDER: ta_parse the ctx
+	// (read-only) and report isRTT + raw op/pt/tr PolyParam counts + sprite-filtered
+	// count + body-band(y200-460) count + the video-frame counter (0x8C3496B0). This
+	// PROVES (a) two STARTRENDERs/frame and (b) that the DROPPED one carries the body
+	// quads (op~265/tr~2024, bodyBand>0) while the surviving one is HUD (op~573/tr~42,
+	// bodyBand==0). We must SEE this before trusting the capture. Throttled lightly.
+	ta_parse(ctx, true);                       // read-only: builds ctx->rend (norend's call)
+	PassStats ps; memset(&ps, 0, sizeof ps);
+	collectScreenQuads(ctx->rend, &ps);
+	ps.isRTT = ctx->rend.isRTT ? 1 : 0;
+	// CHARQ FIX (2026-06-09): the character pass is the one whose kept sprite quads include
+	// REAL body-region quads (center y in [200,460], excludes HUD). The old `tr>=500` gate
+	// NEVER passed on this build/state (the real pass has tr=40-52; the tr=2024 figure was
+	// stale). Gate on realBody instead so the JSONL writes whenever the body is on screen.
+	bool isCharacterPass = (ps.realBody >= CHARQ_REALBODY_MIN);
+	u32  vframe = addrspace::read32(0x8C3496B0);
+
+	static unsigned long s_charpassN = 0;
+	if ((s_charpassN++ % 30) == 0) {
+		fprintf(stderr,
+			"[CHARPASS] vframe=%u isRTT=%d op=%d pt=%d tr=%d sprite=%d bodyBand=%d realBody=%d -> %s "
+			"(STARTRENDER, pre-QueueRender)\n",
+			vframe, ps.isRTT, ps.op, ps.pt, ps.tr, ps.sprite, ps.bodyBand, ps.realBody,
+			isCharacterPass ? "CHARACTER(would-be-DROPPED body pass)" : "hud/composite");
+	}
+
+	// STEP 3 — route the CHARACTER pass's quads into the Oracle capture path. We call
+	// mc_oracle_frameFlush, which re-ta_parses (cheap, idempotent), runs the SAME
+	// discriminator, attributeScreenQuads (the bbox/screen_xy fix + opaque-filter fix),
+	// populates s_objs[]/s_screen[] + the CHARQ accessor (mc_oracle_objects/quadObjMap),
+	// and emits the JSONL keyed on vframe. It is per-vframe deduped (s_lastEmittedVframe),
+	// so calling it for both the HUD pass and the character pass emits exactly once — on
+	// the character pass. We pass vframe as the frame id; frameFlush overwrites it with
+	// 0x8C3496B0 internally anyway, so passing it here is purely informative.
+	//
+	// OBJECT-TABLE TIMING: the OBJ_BEGIN/SAT_BEGIN screen_xy enrich happens in the SH4
+	// block-entry hooks during the SH4 frame (loc_8c03093c writes node+0xE0/+0xE4 DURING
+	// the draw walk). rend_start_render fires AFTER the SH4 draw walk completes for this
+	// frame's TA list, so node screen_xy is the CURRENT frame's post-transform position —
+	// attributeScreenQuads re-reads it fresh (oracle_hook.cpp:1763-1771). The object table
+	// is therefore current and available here, same as it is at serverPublish.
+	mc_oracle_frameFlush(ctxv, vframe);
+}
+
 void mc_oracle_frameFlush(void* ctxv, u32 frame)
 {
 	// Run when EITHER the master hook OR the Phase-0 probe is enabled. The probe
@@ -1953,7 +3249,11 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 	// the recompiler injects/force-splits, but its capture is entirely in the block-entry
 	// handler (pre-match) — it needs NOTHING from frameFlush. So the per-frame ta_parse /
 	// jsonl work runs only for the REAL frame oracle or the probe.
-	bool frameOracleActive = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr) || mc_probeEnabled;
+	// CHARQ: when MAPLECAST_CHARQ is set the flush is driven from rend_start_render's
+	// pre-QueueRender hook (mc_oracle_charPassCapture) for the CHARACTER pass, so it must
+	// be active even if MAPLECAST_FRAME_ORACLE_HOOK is unset. (In practice both are set per
+	// the deploy spec, but make CHARQ self-sufficient.)
+	bool frameOracleActive = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr) || mc_probeEnabled || mc_charqEnabled;
 	if (!frameOracleActive) { s_nobj = 0; s_nquad = 0; s_nscreen = 0; s_nr2 = 0; s_charqNobj = 0; s_charqNmap = 0; return; }
 
 	// IN-MATCH GATE (in_match flag @0x8C289624, same as the serverPublish oracle).
@@ -1993,18 +3293,21 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 		// separates them. AND require at least one kept body-band sprite quad so a
 		// large non-character tr list (e.g. an effects-heavy super) still needs the
 		// body region populated. Both must hold.
-		isCharacterPass = (ps.tr >= 500 && ps.bodyBand > 0);
+		// CHARQ FIX (2026-06-09): gate on REAL body-region quads (center y in [200,460],
+		// excludes HUD), NOT `tr>=500` (which NEVER passed on this build — the real pass
+		// has tr=40-52). The JSONL now writes whenever the body is actually on screen.
+		isCharacterPass = (ps.realBody >= CHARQ_REALBODY_MIN);
 
-		// === CHARQ Phase-1 FIX (1, verify): per-pass log of isRTT + op/pt/tr + bodyBand,
-		// throttled, so the operator can CONFIRM exactly which pass carries the body
-		// before we key on it. (The expert flagged this as the one thing to verify.)
+		// === CHARQ Phase-1 FIX (1, verify): per-pass log of isRTT + op/pt/tr + bodyBand +
+		// realBody, throttled, so the operator can CONFIRM exactly which pass carries the
+		// body before we key on it. (The expert flagged this as the one thing to verify.)
 		static unsigned long s_passLogN = 0;
 		if (inMatch && (s_passLogN++ % 30) == 0) {
 			fprintf(stderr,
 				"[ORACLE-PASS] vframe=%u localFrame=%u isRTT=%d op=%d pt=%d tr=%d "
-				"sprite=%d bodyBand=%d -> %s\n",
+				"sprite=%d bodyBand=%d realBody=%d -> %s\n",
 				addrspace::read32(0x8C3496B0), frame, ps.isRTT, ps.op, ps.pt, ps.tr,
-				ps.sprite, ps.bodyBand, isCharacterPass ? "CHARACTER" : "hud/composite");
+				ps.sprite, ps.bodyBand, ps.realBody, isCharacterPass ? "CHARACTER" : "hud/composite");
 		}
 
 		attributeScreenQuads();
@@ -2031,11 +3334,20 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 		}
 	}
 
-	// Capacity guard so a long session can't fill /dev/shm.
-	static const long ORACLE_CAP = 64L * 1024 * 1024;
+	// Capacity guard so a long session can't fill /dev/shm. TRUNCATE-AND-REWIND:
+	// when the file crosses the cap we re-open it with O_TRUNC ("w") and continue
+	// appending fresh frames from byte 0. This keeps the JSONL small AND always
+	// current (recent frames only) — exactly what an aligned (quads+VRAM) tail grab
+	// needs. The previous behavior (set full=true, stop forever at 64 MiB) froze the
+	// on-disk tail ~96s stale while the live hook kept advancing. Default cap 16 MiB,
+	// env-overridable via MAPLECAST_ORACLE_JSONL_CAP (bytes).
+	static const long ORACLE_CAP = []{
+		const char* v = getenv("MAPLECAST_ORACLE_JSONL_CAP");
+		if (v) { long c = atol(v); if (c >= (1L << 20)) return c; }   // floor 1 MiB
+		return 16L * 1024 * 1024;
+	}();
 	static FILE* of = nullptr;
 	static long  ow = 0;
-	static bool  full = false;
 
 	// DIAGNOSTIC: prove the flush is called + show fire totals AND the new
 	// per-frame screen-quad recovery (objs / screenQuads / attributed).
@@ -2084,17 +3396,36 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 	}
 	s_lastEmittedVframe = vframe;
 
-	if (!full) {
+	{
 		if (!of) {
-			of = fopen("/dev/shm/mc_oracle_hook.jsonl", "a");
-			if (of)
+			// First open: O_TRUNC ("w") so a stale 64 MiB file from a previous run is
+			// discarded — the tail must reflect THIS run's live frames immediately.
+			of = fopen("/dev/shm/mc_oracle_hook.jsonl", "w");
+			ow = 0;
+			if (of) {
+				setvbuf(of, nullptr, _IOFBF, 1 << 16);   // big buffer; we fflush per emit
 				fprintf(stderr, "[ORACLE-HOOK] first jsonl flush — frame=%u objs=%d quads=%d "
-				                "-> /dev/shm/mc_oracle_hook.jsonl\n", frame, s_nobj, s_nquad);
-			else
+				                "cap=%ldMiB (truncate-and-rewind) -> /dev/shm/mc_oracle_hook.jsonl\n",
+				        frame, s_nobj, s_nquad, ORACLE_CAP >> 20);
+			} else
 				fprintf(stderr, "[ORACLE-HOOK] FAILED to open /dev/shm/mc_oracle_hook.jsonl "
 				                "(errno path) — captured objs=%d but cannot write\n", s_nobj);
 		}
-		if (of && ow < ORACLE_CAP) {
+		// TRUNCATE-AND-REWIND at the cap: rewind to byte 0 and overwrite. freopen("w")
+		// re-opens the SAME path with O_TRUNC; the on-disk file shrinks to 0 then
+		// regrows with fresh frames, so the tail is never more than ~cap bytes stale
+		// and NEVER freezes.
+		if (of && ow >= ORACLE_CAP) {
+			of = freopen("/dev/shm/mc_oracle_hook.jsonl", "w", of);
+			ow = 0;
+			if (of) {
+				setvbuf(of, nullptr, _IOFBF, 1 << 16);
+				fprintf(stderr, "[ORACLE-HOOK] jsonl cap %ldMiB reached — rewound "
+				                "(truncate) to keep the tail live (frame=%u)\n",
+				        ORACLE_CAP >> 20, frame);
+			}
+		}
+		if (of) {
 			char b[2048]; int n = 0;
 			n  = snprintf(b, sizeof b, "{\"frame\":%u,\"objects\":[", frame);
 			ow += fwrite(b, 1, n, of);
@@ -2177,14 +3508,11 @@ void mc_oracle_frameFlush(void* ctxv, u32 frame)
 			}
 			n = snprintf(b, sizeof b, "]}\n");
 			ow += fwrite(b, 1, n, of);
-			fflush(of);
+			fflush(of);   // per-emit flush: the on-disk tail tracks the live frame
 			// Per-flush wrote-bytes (sampled with the periodic flush log above).
 			if ((s_flushCalls % 120) == 1)
-				fprintf(stderr, "[ORACLE-HOOK] flush wrote=%ld bytes (frame=%u objs=%d screenQuads=%d)\n",
-				        ow - owBefore, frame, s_nobj, s_nscreen);
-		} else if (of && ow >= ORACLE_CAP) {
-			full = true;
-			fprintf(stderr, "[ORACLE-HOOK] /dev/shm cap reached (%ld bytes) — stopping capture\n", ow);
+				fprintf(stderr, "[ORACLE-HOOK] flush wrote=%ld bytes total=%ld (frame=%u objs=%d screenQuads=%d)\n",
+				        ow - owBefore, ow, frame, s_nobj, s_nscreen);
 		}
 	}
 

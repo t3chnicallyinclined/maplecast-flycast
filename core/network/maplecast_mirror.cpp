@@ -64,6 +64,7 @@ uint64_t g_activePalBanks = 0;
 #endif
 #include "maplecast_gamestate.h"
 #include "maplecast_oracle_hook.h"
+#include "maplecast_replica_phase0.h"
 #include <errno.h>
 
 
@@ -1780,6 +1781,15 @@ void serverPublish(TA_context* ctx)
 	// only flush, unchanged.)
 	if (std::getenv("MAPLECAST_CHARQ") == nullptr)
 		maplecast_oracle_hook::mc_oracle_frameFlush(ctx, _localFrameNum);
+
+	// === MAPLECAST_REPLICA_PHASE0 — render-replica go/no-go validation (render-thread
+	// watcher half). docs/RENDER-REPLICA-PLAN.md §4. When in-match and gated on, this
+	// latches the just-completed frame's GSTA char-struct fields (READ-ONLY) and sets a
+	// pending flag; the actual snapshot→patch→re-render→diff→restore cycle runs on the
+	// SH4 thread at the emu-loop boundary (maplecast_replica_phase0::runAtBoundary,
+	// emulator.cpp) — NEVER here, because serverPublish can run synchronously inside the
+	// SH4's STARTRENDER write. Literal no-op when MAPLECAST_REPLICA_PHASE0 is unset.
+	maplecast_replica_phase0::onServerPublish(ctx, _localFrameNum);
 
 	// === MAPLECAST_STATELOG — per-frame RAM state probe (ROM-asset-client test)
 	// Read-only readGameState() + CSV append. Placed BEFORE the PVR snapshot

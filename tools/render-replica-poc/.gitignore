@@ -14,6 +14,11 @@ image_dump.h
 runout.txt
 # emitted TA command stream — reproducible via run.cmd step [6/6]
 ta_buffer.bin
+# ROM-derived TA streams (engine corners / texels): the byte-exact converge
+# artifacts. Reproducible from mc_engine_ta.bin + ta_buffer.bin via the converge
+# scripts. NEVER commit (carry MVC2 screen geometry + reference engine TA).
+ta_*.bin
+ta_*.ta
 # convergence TA streams (real tcw/corners => ROM-derived). Reproducible via
 # converge_first_pixels.mjs from probe_body_uv.json + ta_buffer.bin.
 ta_*.ta
