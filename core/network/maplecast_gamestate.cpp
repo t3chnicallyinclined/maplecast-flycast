@@ -16,6 +16,15 @@
 extern u32 kcode[4];
 extern u16 lt[4], rt[4];
 
+// Render-phase sprite_id/anim_timer latch — populated at STARTRENDER in oracle_hook.cpp
+// (mc_oracle_charPassCapture, the phase loc_8c0344d4 renders). Read below so the wire ships
+// the RENDERED-frame sid, not serverPublish's 1-frame-later read (finding:gsta_sprite_id_sampling_phase).
+namespace maplecast_oracle_hook {
+	extern uint16_t mc_sidLatch[6];
+	extern uint16_t mc_timerLatch[6];
+	extern uint8_t  mc_sidLatchValid[6];
+}
+
 namespace maplecast_gamestate
 {
 
@@ -1994,9 +2003,13 @@ void readGameState(GameState& state)
 		c.vel_x           = readFloat(base + OFF_VEL_X);
 		c.vel_y           = readFloat(base + OFF_VEL_Y);
 		c.facing_right    = (uint8_t)addrspace::read8(base + OFF_FACING);
-		c.sprite_id       = (uint16_t)addrspace::read16(base + OFF_SPRITE_ID);
+		// Prefer the STARTRENDER-phase latch (the sid actually rendered this frame); fall back
+		// to the live read if no in-match STARTRENDER latched yet (finding:gsta_sprite_id_sampling_phase).
+		c.sprite_id       = maplecast_oracle_hook::mc_sidLatchValid[i] ? maplecast_oracle_hook::mc_sidLatch[i]
+		                                                              : (uint16_t)addrspace::read16(base + OFF_SPRITE_ID);
 		c.animation_state = (uint16_t)addrspace::read16(base + OFF_ANIM_STATE);
-		c.anim_timer      = (uint16_t)addrspace::read16(base + OFF_ANIM_TIMER);
+		c.anim_timer      = maplecast_oracle_hook::mc_sidLatchValid[i] ? maplecast_oracle_hook::mc_timerLatch[i]
+		                                                              : (uint16_t)addrspace::read16(base + OFF_ANIM_TIMER);
 		c.health          = (uint8_t)addrspace::read8(base + OFF_HEALTH);
 		c.red_health      = (uint8_t)addrspace::read8(base + OFF_RED_HEALTH);
 		c.special_move_id = (uint8_t)addrspace::read8(base + OFF_SPECIAL_MOVE);
