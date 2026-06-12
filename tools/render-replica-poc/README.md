@@ -122,6 +122,80 @@ descriptors aren't present); cid23 frame 10766 is the test whose REAL descriptor
 dump, and it closes the full-walker thesis: **pen + REAL tiling + FP transform reproduced
 end-to-end through mechanically-transpiled C with fully independent input.**
 
+## STAGE 2 — walker → submit-corners → NATIVE PVR TA QUADS (CLOSED 2026-06-12)
+
+`run.cmd` step **[6/6]** (`test_ta_emit.c` + `gen_submit.py`) extends the proven walker
+into the game's **native TA command stream** — the artifact the WebGPU renderer consumes.
+
+**The chain, and the key architectural reconciliation (5-source):**
+```
+(1) WALKER  loc_8c0344d4   -> per-tile top-left screenX/screenY   [PROVEN 9/9 @0.00px]
+(2) TRANSFORM loc_8c1216c0 -> RESIDENT: its world->screen result is already a node field
+(3) SUBMIT  loc_8C1244B0 -> loc_8C124AB0 -> 4 screen corners -> TA polygon quads
+```
+
+- **The world→screen matrix transform (`loc_8c1216c0`, bank12, the ftrv/fsca tree) runs
+  ONCE PER OBJECT upstream and deposits its result into `node+0xE0/E4` (screen anchor)
+  and `node+0xEC/F0` (per-axis scale).** CONFIRMED by reading the RAM dump directly:
+  `node+0xE0 = 533.86`, `node+0xEC = 1.66667 (=5/3)`, `node+0xF0 = 2.142857 (=15/7)` —
+  these are **byte-exact** the `baseX=533 / scaleX=5/3 / scaleY=15/7` the PoC previously
+  recovered by regression. So the 9,850-insn ftrv matrix tree need **not** be re-run to
+  reproduce a resident object's quads; its product is a node field the walker reads
+  (`@(0xEC,r14)`/`@(0xF0,r14)`, bank03 loc_8c0347c8). (Cross-checked vs KB
+  `finding:render_calltree_scope` which places the ftrv transform in bank12
+  loc_8c1216c0/loc_8c1219b0. Transpiling that tree is still required for objects whose
+  `node+0xE0/E4` is NOT resident in a dump — see "Honest scope" below.)
+
+- **The body submit path is AXIS-ALIGNED.** `loc_8C1244B0` calls `loc_8C124AB0` (transpiled
+  to `gen_submit.c`) which builds 4 corners as `out = anchor + R(angle).(scale·unit_offset)`.
+  For the body, the billboard angle is 0 ⇒ `R = I` ⇒ `corner = (sx,sy)..(sx+m·scaleX, sy+m·scaleY)`.
+  CONFIRMED axis-aligned directly from `_ryu_capture/probe_body_uv.json` (every CHARQ quad has
+  `A.y==B.y` and `B.x==C.x`). The tile pixel size `m` is the **ROM descriptor byte[0]** read
+  from the dump (m=32 for sel1264, m=8 for sel1267) — not hard-coded.
+
+**RESULT — `test_ta_emit.exe`:** walker→corners→TA emits a real PVR TA stream for cid23
+frame 10766 → **9 quads, corner extent ROM-exact (maxerr=0.0000)**; written to `ta_buffer.bin`
+(1472 bytes / 46 TA params) and **round-tripped through the real `web/webgpu/ta-parser.mjs`**
+(`verify_ta.mjs`): decodes to **9 opaque textured polys / 36 vertices**, corners byte-exact
+(TL 463.00/228.00 .. BR 516.33/296.57). Within-record tiling is exact (tile 2's top-left ==
+tile 0's right edge).
+
+### New opcodes added to `codegen.py` (the matrix/submit core the §8 plan flagged)
+- **`ftrv XMTRX,FVn`** — 4×4 (XF bank) × FV, column-major (`out_i = Σ_k xf[i+4k]·v_k`), single
+  rounding. Models the **XF bank** (`xf[16]`) separate from `fr[16]`.
+- **`frchg`** — swap FR↔XF banks + toggle `FPSCR.FR` (bit 21). **`fschg`** — toggle `FPSCR.SZ`
+  (bit 20, single/pair fmov size). Both modeled as explicit state on `Sh4Ctx`.
+- **`fsca FPUL,DRn`** — sin/cos from the 16-bit angle: `ang = (fpul&0xFFFF)·2π/65536`,
+  `fr[n]=sin`, `fr[n+1]=cos` (flycast `sh4_fpu.cpp`).
+- **`shad`/`shar`/`shll16`/`shll8`/`shlr16`/`shlr8`/`shlr2`/`shlr`** — the PVR control-word
+  (tcw/tsp/pcw) bit-assembly the submit does. `shad` = dynamic L/arith-R; `shar` sets T=bit0.
+- **`xor`/`not`/`cmp/hs`/`cmp/hi`/`pref`** + sign-extended **`cmp/eq #imm`** — submit integer glue.
+- **`fcnvsd/fcnvds`** modeled identity (single-precision scope, 1 isolated site per §8).
+
+**FP/bank subtlety:** the matrix transform uses `frchg` to make the constructed projection
+matrix the **secondary (XF) bank** that `ftrv` then multiplies — so `ftrv` reads `xf[]`, and
+any `fmov` between the banks must respect the current `FPSCR.FR`. The PoC models FR/SZ as
+toggled state; the body path itself never flips them (axis-aligned, single precision), so the
+walker+corner chain needs no bank routing — but the opcodes are in place for the full tree.
+
+### The emitted TA buffer format (for the render harness — `ta_buffer.bin`)
+A standard little-endian **PowerVR2 TA command stream** of 32-byte parameters (exactly what
+`ta-parser.mjs` / `pvr2-renderer.mjs` already parse). Per body tile, one textured-polygon quad:
+```
+Polygon param  (paraType=4): [PCW u32][ISP u32][TSP u32][TCW u32][16 bytes pad]
+   PCW = 0x80000000 | tex(1<<3) | gouraud(1<<1)   (opaque list, packed color, uv32)
+Vertex param   (paraType=7) x4, strip order TL,TR,BL,BR (last has EndOfStrip bit 28):
+   [PCW u32][x f32][y f32][z f32][u f32][v f32][baseColor u32][0]
+...one EndOfList param (paraType=0, all-zero 32B) terminates the stream.
+```
+- `x,y` = final screen pixels (the walker's transformed corners). `z=1.0`.
+- `tcw` is a documented **placeholder** here (`0x2A000000 | sel`): this dump has no GFX1 pixel
+  region, so the renderer pairs `sel`→atlas/VRAM separately (the body sels' pixels come from
+  CHARQ/BODYCAP capture, per `project_charq_breakthrough` / `project_emitter_status`). `u,v`
+  are unit `[0,1]` across the tile (the harness applies the real per-sel UV sub-rect from
+  `probe_body_uv.json`). Geometry (x/y) is the exact, validated output; tex binding is the
+  documented seam.
+
 ## Opcode notes (FP-exactness — the plan's flagged risk)
 
 - **`fmac` → `std::fmaf`** is the ONE opcode requiring special handling: flycast uses

@@ -6,11 +6,14 @@
 gen_leaf.c
 gen_walker.c
 gen_transform.c
+gen_submit.c
 transform_cases.h
 image.h
 image_dump.h
 *.log
 runout.txt
+# emitted TA command stream — reproducible via run.cmd step [6/6]
+ta_buffer.bin
 
 # ── render harness (render_ta.mjs) ──
 # Node deps for the headless-WebGPU harness (reinstalled via `npm install`).

@@ -182,11 +182,79 @@ class Emitter:
             self.emit(f"c->sr_t = ((s32){R(a[0])} > 0);")
         elif m=='cmp/eq':
             if is_reg(a[0]): self.emit(f"c->sr_t = ({R(a[1])}=={R(a[0])});")
-            else: self.emit(f"c->sr_t = ({R(a[1])}==0x{imm(a[0]):x}u);")
+            else:
+                v=imm(a[0])
+                if v & 0x80: v=v-0x100  # cmp/eq #imm,R0 sign-extends 8-bit imm
+                self.emit(f"c->sr_t = ({R(a[1])}==(u32)(s32)({v}));")
         elif m=='fcmp/gt':
             self.emit(f"c->sr_t = ({FR(a[1])} > {FR(a[0])});")
         elif m=='fcmp/eq':
             self.emit(f"c->sr_t = ({FR(a[1])} == {FR(a[0])});")
+        # ---------------- matrix / fp-bank state (bank12 transform+submit) ---
+        elif m=='ftrv':
+            # ftrv XMTRX, FVn : FVn = XMTRX (4x4) * FVn  (column-major, single round)
+            # FVn = fr[n], fr[n+1], fr[n+2], fr[n+3]. XMTRX = the XF bank (xf[16]),
+            # laid out column-major: result_i = sum_k xf[i + 4*k] * fv[k].
+            # flycast sh4_fpu.cpp ftrv: uses the *secondary* (XF) bank as the matrix.
+            n=int(a[1][2:])  # FVn -> base fr index (0,4,8,12)
+            self.emit("{")
+            self.emit(f"  float _v0={FR('fr'+str(n))}, _v1={FR('fr'+str(n+1))}, _v2={FR('fr'+str(n+2))}, _v3={FR('fr'+str(n+3))};")
+            for i in range(4):
+                # column-major: out_i = M[i+0]*v0 + M[i+4]*v1 + M[i+8]*v2 + M[i+12]*v3
+                terms=" + ".join(f"c->xf[{i+4*k}]*_v{k}" for k in range(4))
+                self.emit(f"  {FR('fr'+str(n+i))} = {terms};")
+            self.emit("}")
+        elif m=='frchg':
+            # swap FR <-> XF banks (and toggle FPSCR.FR)
+            self.emit("{ float _t; for(int _i=0;_i<16;_i++){ _t=c->fr[_i]; c->fr[_i]=c->xf[_i]; c->xf[_i]=_t; } c->fpscr ^= 0x00200000u; }")
+        elif m=='fschg':
+            # toggle FPSCR.SZ (single/pair transfer size). We model SZ for fmov pair mode.
+            self.emit("c->fpscr ^= 0x00100000u;")
+        elif m=='fsca':
+            # fsca FPUL, DRn : fr[n]=sin(2pi*fpul/65536), fr[n+1]=cos(...)
+            # flycast sh4_fpu.cpp: angle = (fpul & 0xFFFF) / 65536 * 2pi (single precision)
+            n=int(a[1][2:]) if a[1].startswith('fr') else int(a[1][2:])
+            self.emit("{")
+            self.emit("  float _ang = (float)( (double)(c->fpul & 0xFFFFu) * (3.14159265358979323846/32768.0) );")
+            self.emit(f"  {FR('fr'+str(n))}   = sinf(_ang);")
+            self.emit(f"  {FR('fr'+str(n+1))} = cosf(_ang);")
+            self.emit("}")
+        elif m=='fcnvsd' or m=='fcnvds':
+            # single<->double convert (1 isolated site per render scope). Model as no-op
+            # on the single value since the tree is single-precision throughout.
+            self.emit("; /* fcnvsd/ds: single-precision scope, modeled identity */")
+        # ---------------- shifts (submit PVR control-word assembly) ----------
+        elif m=='shll16':
+            self.emit(f"{R(a[0])} <<= 16;")
+        elif m=='shll8':
+            self.emit(f"{R(a[0])} <<= 8;")
+        elif m=='shlr16':
+            self.emit(f"{R(a[0])} >>= 16;")
+        elif m=='shlr8':
+            self.emit(f"{R(a[0])} >>= 8;")
+        elif m=='shlr2':
+            self.emit(f"{R(a[0])} >>= 2;")
+        elif m=='shlr':
+            self.emit(f"{R(a[0])} >>= 1;")
+        elif m=='shar':
+            # arithmetic right shift by 1; bit0 -> T
+            self.emit(f"c->sr_t = ({R(a[0])} & 1u); {R(a[0])} = (u32)((s32){R(a[0])} >> 1);")
+        elif m=='shad':
+            # shad Rm,Rn : if Rm>=0 logical-left by Rm; else arithmetic-right by -Rm
+            self.emit(f"{{ s32 _s=(s32){R(a[0])}; if(_s>=0) {R(a[1])} <<= (_s&0x1F); else {{ int _n=((~_s)&0x1F)+1; {R(a[1])} = (u32)((s32){R(a[1])} >> _n); }} }}")
+        elif m=='xor':
+            if is_reg(a[0]): self.emit(f"{R(a[1])} ^= {R(a[0])};")
+            else:
+                dst=a[1] if len(a)>1 and is_reg(a[1]) else 'r0'
+                self.emit(f"{R(dst)} ^= 0x{imm(a[0]):x}u;")
+        elif m=='not':
+            self.emit(f"{R(a[1])} = ~{R(a[0])};")
+        elif m=='pref':
+            self.emit("; /* pref @rN: cache prefetch, no-op in flat model */")
+        elif m=='cmp/hs':
+            self.emit(f"c->sr_t = ({R(a[1])} >= {R(a[0])});")  # unsigned
+        elif m=='cmp/hi':
+            self.emit(f"c->sr_t = ({R(a[1])} > {R(a[0])});")   # unsigned
         # ---------------- nops/branches handled by control layer ------------
         elif m in ('nop',):
             self.emit(";")

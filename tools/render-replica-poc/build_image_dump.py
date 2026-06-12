@@ -149,10 +149,14 @@ def main():
         v=struct.unpack_from("<I",dump,doff(g))[0]
         ram.w32(g, v)
 
-    # expected per-tile output from trace
+    # expected per-tile output from trace + the REAL descriptor m (tile pixel size)
+    # per tile, read from the dump descriptor for that record's r13 (idx).  The screen
+    # quad extent is m*scaleX by m*scaleY (ROM-derived: m = descriptor byte[0]).
     exp=[]
     for (_,ts) in rec_list:
-        for t in ts: exp.append((t['sx'],t['sy'],t['accX'],t['accY'],t['sel'],t['r13']))
+        r13_0=ts[0]['r13']; idx0=(r13_0-DESC)//4
+        m_byte=DESC_BYTES[idx0*4]            # the descriptor tile size in source px
+        for t in ts: exp.append((t['sx'],t['sy'],t['accX'],t['accY'],t['sel'],t['r13'],m_byte))
 
     # also dump the real descriptor values we used, for the report / independence proof
     print("\nREAL descriptors used (read from dump @0x8C1F9F9C, NOT reconstructed):")
@@ -179,6 +183,9 @@ def main():
         f.write("static const float EXP_SX[]={%s};\n"%(",".join("%.6ff"%e[0] for e in exp)))
         f.write("static const float EXP_SY[]={%s};\n"%(",".join("%.6ff"%e[1] for e in exp)))
         f.write("static const int   EXP_SEL[]={%s};\n"%(",".join(str(e[4]) for e in exp)))
+        f.write("static const int   EXP_M[]={%s};\n"%(",".join(str(e[6]) for e in exp)))
+        f.write("static const float SCALEX=%.8ff;\n"%scaleX)
+        f.write("static const float SCALEY=%.8ff;\n"%scaleY)
         f.write("static const int EXP_N=%d;\n"%len(exp))
         f.write("#endif\n")
     print("\nwrote image_dump.h: nrec=%d ntiles=%d"%(nrec,ntiles))
