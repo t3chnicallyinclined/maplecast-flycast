@@ -66,6 +66,10 @@ _probe.cjs
 # engine TA + VRAM/PVR). Captured via the headless MAPLECAST_REPLICA_RECORD hook to
 # /dev/shm/mc_render_rec.bin; transferred manually. NEVER commit.
 mc_render_rec.bin
+# Phase-4b SYNTHETIC + GT-demo recordings (ROM-derived: built from the _ryu_capture dump
+# by make_synthetic_rec.mjs). Reproducible; NEVER commit.
+mc_render_rec_synth.bin
+mc_render_rec_gt.bin
 *.mcrr
 # Phase-4a read-set trace harness build/output (reproducible via trace_readset.c).
 trace_readset.exe
