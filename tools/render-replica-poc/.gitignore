@@ -62,3 +62,11 @@ mc_vram_dump.bin
 mc_pvr_regs.bin
 _mcsv_body.bin
 _probe.cjs
+# Phase-4a render-replica RECORDING (ROM-derived: per-frame char/camera/alloc state +
+# engine TA + VRAM/PVR). Captured via the headless MAPLECAST_REPLICA_RECORD hook to
+# /dev/shm/mc_render_rec.bin; transferred manually. NEVER commit.
+mc_render_rec.bin
+*.mcrr
+# Phase-4a read-set trace harness build/output (reproducible via trace_readset.c).
+trace_readset.exe
+_rec_syntax.cpp

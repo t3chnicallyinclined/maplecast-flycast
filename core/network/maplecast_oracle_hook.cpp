@@ -3186,6 +3186,126 @@ void mc_oracle_charPassCapture(void* ctxv)
 		}
 	}
 
+	// ============================================================================
+	// RENDER-REPLICA RECORDING (gated MAPLECAST_REPLICA_RECORD=<N frames>, READ-ONLY,
+	// determinism-safe). Records the LIVE-WIRE render-replica feed: the STATIC regions
+	// once + per recorded in-match STARTRENDER frame the DYNAMIC read-set regions + the
+	// engine's TA (ground truth). render_frame(static@f0 + dynamic@fK) must reproduce the
+	// engine's frame-K TA byte-exact — the read-set was derived COMPLETE (UNCLASS=0) by
+	// tools/render-replica-poc/trace_readset.c over the matched dump. This loops the same
+	// mem_b/vram/pvr/thd plumbing as MAPLECAST_DUMP_RAM, N frames, into one file.
+	// Output: /dev/shm/mc_render_rec.bin (ROM-derived -> gitignored, transferred manually).
+	// Format spec: docs/RENDER-REPLICA-RECORDING-FORMAT.md.
+	{
+		static const char* s_recEnv = getenv("MAPLECAST_REPLICA_RECORD");
+		static const int   s_recFrames = s_recEnv ? atoi(s_recEnv) : 0;
+		static FILE*       s_recFile = nullptr;
+		static int         s_recDone = 0;
+		static int         s_recWritten = 0;
+
+		if (s_recFrames > 0 && !s_recDone && addrspace::read8(0x8C289624) != 0) {
+			// ---- the DYNAMIC region table (guest_addr, len) — the per-frame read-set.
+			// Sized to ship WHOLE regions (multi-character-safe), not just the bytes a
+			// single body happens to touch. Mirrors trace_readset.c's classification
+			// (UNCLASS=0). idxtab/rectab base ptrs are resolved at record-open from RAM. ----
+			struct Reg { u32 addr; u32 len; const char* what; };
+			static Reg s_dyn[24]; static int s_ndyn = 0;
+			static Reg s_sta[12]; static int s_nsta = 0;
+
+			auto rd32 = [](u32 g)->u32 { return addrspace::read32(g); };
+			auto rd8  = [](u32 g)->u8  { return addrspace::read8(g); };
+			auto isRam= [](u32 g)->bool{ return (((g>>24)&0x7F)==0x0C) && g!=0; };
+
+			if (s_recFile == nullptr) {
+				const char* path = getenv("MAPLECAST_REPLICA_RECORD_PATH");
+				if (!path) path = "/dev/shm/mc_render_rec.bin";
+				s_recFile = fopen(path, "wb");
+				if (!s_recFile) { s_recDone = 1; }
+				else {
+					// ---- build the DYNAMIC region table (whole regions) ----
+					auto AddD = [&](u32 a, u32 l, const char* w){ if(s_ndyn<24){ s_dyn[s_ndyn]={a,l,w}; s_ndyn++; } };
+					AddD(0x8C2895E0, 0x10,        "slot_count");      // slot-table count array (16 layers)
+					AddD(0x8C287DE0, 16u*0x180u,  "slot_ptrs");       // slot-table ptr arrays
+					AddD(0x8C268340, 6u*0x5A4u,   "char_structs");    // P1C1..P2C3
+					AddD(0x8C1F9D80, 0x20,        "arena_ctrl");      // arena-control globals 0x9D80..9DA0
+					AddD(0x8C1F9F9C, 0x200,       "tile_desc");       // per-frame tile-descriptor scratch
+					AddD(0x8C2D6AD8, 0xC0,        "camera_mats");     // M2/M1 + 0x6B58
+					AddD(0x8C26A510, 0x40,        "camZ_block");      // camera-Z scale (0x26A518 base)
+					AddD(0x8C26823C, 0x04,        "ggp_ptr");         // GameGlobalPointer
+					AddD(0x8C268240, 0x40,        "ggp_accum");       // *(GGP) global-accum struct (+0x24)
+					AddD(0x8C26A974, 0x100,       "render_param");    // per-char render-param table
+					AddD(0x8C2DAD30, 0x40,        "tab_ptrs");        // rectab/idxtab pointer pair window
+					AddD(0x8C2AA4C0, 0x10,        "render_mode");     // 0x8C2AA4C4 TSP filter source
+					{   u32 idxtab = rd32(0x8C2DAD3C), rectab = rd32(0x8C2DAD4C);
+						if (isRam(idxtab)) AddD(idxtab, 0x2000, "idxtab");
+						if (isRam(rectab)) AddD(rectab, 0x8000, "rectab");
+					}
+					// ---- build the STATIC region table (GFX1/GFX2 per active body) ----
+					auto AddS = [&](u32 a, u32 l, const char* w){
+						for(int i=0;i<s_nsta;i++) if(s_sta[i].addr==a) return;   // dedup
+						if(s_nsta<12){ s_sta[s_nsta]={a,l,w}; s_nsta++; } };
+					for (int L=0; L<16; L++){
+						u32 cnt = rd8(0x8C2895E0 + L); if (cnt==0 || cnt>0x60) continue;
+						u32 base = 0x8C287DE0 + L*0x180;
+						for (u32 i=0;i<cnt;i++){
+							u32 node = rd32(base + i*4); if (!isRam(node)) continue;
+							if (rd8(node+0x3)!=0) continue;     // body only (cat==0)
+							u32 GFX2 = rd32(node+0x160), GFX1 = rd32(node+0x15C);
+							if (isRam(GFX2)) AddS(GFX2 & ~0xFFFu, 0x20000, "GFX2");
+							if (isRam(GFX1)) AddS(GFX1 & ~0xFFFu, 0x20000, "GFX1");
+						}
+					}
+
+					// ---- HEADER (versioned) ----
+					//  magic "MCRR" | ver(u32=1) | nStatic(u32) | nDynamic(u32) | nFrames(u32) |
+					//  vramBytes(u32) | pvrBytes(u32) | reserved(u32)
+					u32 hdr[8] = { 0x5252434Du /*"MCRR"*/, 1u,
+						(u32)s_nsta, (u32)s_ndyn, (u32)s_recFrames,
+						(u32)VRAM_SIZE, (u32)pvr_RegSize, 0u };
+					fwrite(hdr, 4, 8, s_recFile);
+					// ---- STATIC region table: nStatic * (addr u32, len u32, tag[8]) ----
+					for (int i=0;i<s_nsta;i++){ u32 e[2]={s_sta[i].addr,s_sta[i].len}; char tag[8]={0};
+						strncpy(tag,s_sta[i].what,7); fwrite(e,4,2,s_recFile); fwrite(tag,1,8,s_recFile); }
+					// ---- DYNAMIC region table: nDynamic * (addr u32, len u32, tag[8]) ----
+					for (int i=0;i<s_ndyn;i++){ u32 e[2]={s_dyn[i].addr,s_dyn[i].len}; char tag[8]={0};
+						strncpy(tag,s_dyn[i].what,7); fwrite(e,4,2,s_recFile); fwrite(tag,1,8,s_recFile); }
+					// ---- STATIC payload (once): VRAM, PVR regs, then each static region's bytes ----
+					fwrite(&vram[0], 1, (size_t)VRAM_SIZE, s_recFile);
+					fwrite(pvr_regs, 1, (size_t)pvr_RegSize, s_recFile);
+					for (int i=0;i<s_nsta;i++){
+						u32 a = s_sta[i].addr, l = s_sta[i].len;
+						for (u32 b=0;b<l;b++) fputc(rd8(a+b), s_recFile);   // addrspace read (alias-safe)
+					}
+					fprintf(stderr, "[REPLICA-REC] open: %d static + %d dynamic regions, %d frames -> %s\n",
+						s_nsta, s_ndyn, s_recFrames, path);
+				}
+			}
+
+			// ---- per-frame DYNAMIC payload ----
+			//  FRAME RECORD: "FRMx"(u32) | vframe(u32) | taSize(u32) | [dynamic regions in table
+			//  order, raw bytes] | [engine TA bytes (ground truth)]
+			if (s_recFile && s_recWritten < s_recFrames) {
+				u32 vframe = rd32(0x8C3496B0);
+				u32 taSize = 0; uint8_t* taData = nullptr;
+				if (ctxv) { TA_context* tctx = (TA_context*)ctxv;
+					taData = tctx->tad.thd_root;
+					taSize = (u32)(tctx->tad.thd_data - tctx->tad.thd_root); }
+				u32 fhdr[3] = { 0x784D5246u /*"FRMx"*/, vframe, taSize };
+				fwrite(fhdr, 4, 3, s_recFile);
+				for (int i=0;i<s_ndyn;i++){
+					u32 a = s_dyn[i].addr, l = s_dyn[i].len;
+					for (u32 b=0;b<l;b++) fputc(rd8(a+b), s_recFile);   // addrspace read
+				}
+				if (taData && taSize) fwrite(taData, 1, taSize, s_recFile);
+				s_recWritten++;
+				if (s_recWritten >= s_recFrames){
+					fclose(s_recFile); s_recFile=nullptr; s_recDone=1;
+					fprintf(stderr, "[REPLICA-REC] done: wrote %d frames\n", s_recWritten);
+				}
+			}
+		}
+	}
+
 	if (!mc_charqEnabled || ctxv == nullptr) return;
 
 	// IN-MATCH GATE (in_match @0x8C289624) — same gate the frame oracle uses. Outside a
