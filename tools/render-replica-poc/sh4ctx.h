@@ -33,18 +33,22 @@ typedef struct {
 /* translate guest virtual -> ram[] index (area-3 only for this PoC) */
 static inline u32 mc_idx(u32 a){ return a & 0x00FFFFFFu; }
 
-/* big-endian guest loads */
+/* LITTLE-ENDIAN guest loads. MVC2 runs the SH4 in LE mode (flycast stores guest RAM
+ * in host LE order); the prod RAM dump is verbatim LE. Earlier the PoC used BE
+ * accessors + a byteswapped image — a double-inversion that cancelled for word/half
+ * reads but CORRUPTED sub-word BYTE reads (node+0x12c guard, node+0x5d, descriptor
+ * bytes). LE everywhere + a verbatim dump copy is the correct, consistent model. */
 static inline u32 r32(Sh4Ctx*c, u32 a){
     u32 i=mc_idx(a); u8*p=c->ram+i;
-    return ((u32)p[0]<<24)|((u32)p[1]<<16)|((u32)p[2]<<8)|p[3];
+    return (u32)p[0]|((u32)p[1]<<8)|((u32)p[2]<<16)|((u32)p[3]<<24);
 }
 static inline u32 r16s(Sh4Ctx*c, u32 a){
     u32 i=mc_idx(a); u8*p=c->ram+i;
-    u16 v=((u16)p[0]<<8)|p[1];
+    u16 v=(u16)p[0]|((u16)p[1]<<8);
     return (u32)(s32)(s16)v;       /* mov.w sign-extends */
 }
 static inline u32 r16u(Sh4Ctx*c, u32 a){
-    u32 i=mc_idx(a); u8*p=c->ram+i; return ((u16)p[0]<<8)|p[1];
+    u32 i=mc_idx(a); u8*p=c->ram+i; return (u16)p[0]|((u16)p[1]<<8);
 }
 static inline u32 r8s(Sh4Ctx*c, u32 a){
     u32 i=mc_idx(a); return (u32)(s32)(s8)c->ram[i];  /* mov.b sign-extends */
@@ -53,10 +57,10 @@ static inline u32 r8u(Sh4Ctx*c, u32 a){ return c->ram[mc_idx(a)]; }
 
 static inline void w32(Sh4Ctx*c, u32 a, u32 v){
     u32 i=mc_idx(a); u8*p=c->ram+i;
-    p[0]=v>>24; p[1]=v>>16; p[2]=v>>8; p[3]=v;
+    p[0]=v; p[1]=v>>8; p[2]=v>>16; p[3]=v>>24;
 }
 static inline void w16(Sh4Ctx*c, u32 a, u32 v){
-    u32 i=mc_idx(a); u8*p=c->ram+i; p[0]=v>>8; p[1]=v;
+    u32 i=mc_idx(a); u8*p=c->ram+i; p[0]=v; p[1]=v>>8;
 }
 static inline void w8(Sh4Ctx*c, u32 a, u32 v){ c->ram[mc_idx(a)]=(u8)v; }
 

@@ -36,10 +36,12 @@ def doff(g): return g & 0x00FFFFFF
 # cid23 walks r13 = 0x8C1F9F9C .. 0x8C1F9FBC inclusive (idx 0..8) = 9*4 = 36 bytes.
 DESC_BYTES = dump[doff(DESC):doff(DESC)+0x80]   # plenty (idx 0..31)
 
-def be32(x): return struct.pack(">I", x & 0xFFFFFFFF)
-def be16(x): return struct.pack(">H", x & 0xFFFF)
+# sh4ctx.h accessors are now LITTLE-ENDIAN (MVC2's SH4 LE mode; verbatim dump copy).
+# Emit all image words LE so byte/half/word reads round-trip correctly.
+def be32(x): return struct.pack("<I", x & 0xFFFFFFFF)
+def be16(x): return struct.pack("<H", x & 0xFFFF)
 def bef32(x):
-    return bytes(reversed(struct.pack("<f", x)))
+    return struct.pack("<f", x)
 
 class Ram:
     def __init__(self): self.m = bytearray(16*1024*1024)

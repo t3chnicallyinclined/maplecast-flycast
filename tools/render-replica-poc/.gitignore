@@ -11,9 +11,16 @@ gen_leaf.c
 gen_walker.c
 gen_transform.c
 gen_submit.c
+gen_render_object.c
 transform_cases.h
 image.h
 image_dump.h
+# Phase-1 generated image (ROM-derived: carries MVC2 char-struct + camera matrices +
+# resident rectab/GFX bytes) — reproducible via build_image_full.py from the dump.
+image_full.h
+# Phase-1 computed sprite list (ROM-derived screen geometry) — reproducible via
+# test_render_object_full.exe from image_full.h.
+computed_sprites.json
 *.log
 runout.txt
 # emitted TA command stream — reproducible via run.cmd step [6/6]

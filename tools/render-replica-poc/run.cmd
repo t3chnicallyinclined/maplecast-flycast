@@ -46,6 +46,23 @@ cl /nologo /O2 /fp:precise /Fe:test_ta_emit.exe gen_walker.c gen_leaf.c gen_subm
 .\test_ta_emit.exe | findstr /C:"TA-EMIT" /C:"CORNER-CHECK" /C:"RESULT"
 echo   -- verify the emitted ta_buffer.bin parses through the REAL web ta-parser.mjs:
 where node >nul 2>&1 && node verify_ta.mjs | findstr /C:"ta-parser" /C:"VERIFY"
+echo   [NOTE] step [6]'s TCW/TSP-BITEXACT uses build_image_dump.py's idxtab[sel] indexing
+echo          which is STALE (pal28); the UN-PINNED Phase-1 path below (step [7]) supersedes it.
+
+echo.
+echo === [7/7] PHASE-1: render_object_full -- FULLY CODE-DERIVED per-object (NO pinning) ===
+echo     loc_8c03093c transform(+0xE0/E4) + scale(+0xEC/F0) + submit-params(PCW/ISP/TSP/TCW)
+echo     ALL computed from resident RAM; ZERO engine-TA reads.
+python gen_render_object.py >nul 2>&1 || goto :err
+python build_image_full.py | findstr /C:"discovered base" /C:"node+0xE0"
+del *.obj >nul 2>&1
+cl /nologo /O2 /fp:precise /Fe:test_render_object_full.exe gen_render_object.c gen_transform_obj.c gen_submit_params.c gen_walker.c gen_leaf.c test_render_object_full.c >nul 2>&1
+.\test_render_object_full.exe | findstr /C:"ANCHOR" /C:"SCALE" /C:"byte-exact vs engine" /C:"WALKER produced" /C:"RESULT"
+echo   -- pixel converge: fully-computed TA vs engine GT through the gold-standard renderer:
+where node >nul 2>&1 && node converge_full_computed.mjs | findstr /C:"PARAM byte-exact"
+where node >nul 2>&1 && node render_ta.mjs --ta ta_computed.bin --vram ..\..\_ryu_capture\mc_vram_dump.bin --pvr ..\..\_ryu_capture\mc_pvr_regs.bin --out PNG_computed.png >nul 2>&1
+where node >nul 2>&1 && node render_ta.mjs --ta ta_engine_corners.bin --vram ..\..\_ryu_capture\mc_vram_dump.bin --pvr ..\..\_ryu_capture\mc_pvr_regs.bin --out PNG_gt_full.png >nul 2>&1
+where node >nul 2>&1 && node diff_png.mjs PNG_gt_full.png PNG_computed.png --tol 0 | findstr /C:"match" /C:"diff pixels" /C:"max"
 goto :eof
 :err
 echo GEN FAILED
