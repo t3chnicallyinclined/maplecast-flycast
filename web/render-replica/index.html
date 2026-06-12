@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MapleCast — Transpiled Render LIVE (PVR2)</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0c0e12; color:#cdd6e0; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; }
+  header { padding:10px 16px; background:#11141b; border-bottom:1px solid #222; }
+  header h1 { margin:0; font-size:15px; color:#7fd1ff; }
+  header .sub { color:#7a8694; font-size:11px; margin-top:2px; }
+  main { display:flex; gap:24px; padding:18px; flex-wrap:wrap; align-items:flex-start; }
+  .panel { background:#11141b; border:1px solid #222; border-radius:6px; padding:12px; }
+  .panel h2 { margin:0 0 8px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#9fb0c0; }
+  canvas { display:block; image-rendering:pixelated; background:#000; border:1px solid #2a3340; }
+  .toolbar { padding:0 18px 12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  button { background:#1c2330; color:#cdd6e0; border:1px solid #33425a; border-radius:4px; padding:6px 12px; cursor:pointer; font:inherit; }
+  button:hover { background:#243049; }
+  button.active { background:#1f5d8c; border-color:#3a8fd0; color:#fff; }
+  #log { white-space:pre-wrap; padding:10px 18px; color:#8aa0b4; max-height:240px; overflow:auto; border-top:1px solid #1b2129; }
+  .ok { color:#7CFC9A; } .err { color:#ff8a8a; } .hl { color:#7fd1ff; }
+  label { color:#9fb0c0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Transpiled MVC2 render — LIVE in the browser via the real pvr2-renderer</h1>
+  <div class="sub">walker(loc_8c0344d4) &rarr; corners &rarr; TA &rarr; ta-parser.mjs &rarr; <span class="hl">pvr2-renderer.mjs</span> (GOLD STANDARD) &rarr; WebGPU canvas &nbsp;|&nbsp; static-snapshot frame (cid23 / P2C1 Cable)</div>
+</header>
+
+<div class="toolbar">
+  <button id="btnTranspiled" class="active">Show TRANSPILED</button>
+  <button id="btnEngine">Show ENGINE</button>
+  <button id="btnBoth">Show BOTH</button>
+  <label><input type="checkbox" id="bg"> draw background (fillBGP)</label>
+</div>
+
+<main id="stage">
+  <div class="panel" id="pTranspiled">
+    <h2>Transpiled (render_replica.wasm &rarr; pvr2)</h2>
+    <canvas id="cTranspiled" width="640" height="480"></canvas>
+  </div>
+  <div class="panel" id="pEngine">
+    <h2>Engine TA (mc_engine_ta.bin &rarr; pvr2)</h2>
+    <canvas id="cEngine" width="640" height="480"></canvas>
+  </div>
+</main>
+
+<div id="log"></div>
+
+<script type="module">
+// ============================================================================
+// Transpiled-render LIVE page.
+//   1. instantiate render_replica.wasm (the transpiled walker->corners->TA emit)
+//   2. copy the 16MB RAM snapshot into its heap, call render_object() -> TA buffer
+//   3. feed that TA through ta-parser.mjs -> pvr2-renderer.mjs (REUSED VERBATIM)
+//      with the snapshot VRAM + pvr_regs -> draw on a WebGPU <canvas>
+//   4. side-by-side: render the engine's OWN TA (mc_engine_ta.bin) the same way.
+//
+// ROM-DERIVED inputs (LOCAL ONLY, gitignored): served from ./snap/ next to this
+// page (symlink/copy the _ryu_capture .bin files there, or run from the repo root
+// http server and they resolve via ../../_ryu_capture/). See loadSnap() below.
+// ============================================================================
+import createRenderReplica from './render_replica.mjs';
+
+const W_DIR = new URL('../webgpu/', import.meta.url);
+const { PVR2Renderer }   = await import(new URL('pvr2-renderer.mjs', W_DIR));
+const { TAParser }       = await import(new URL('ta-parser.mjs', W_DIR));
+const { TextureManager } = await import(new URL('texture-manager.mjs', W_DIR));
+
+const VRAM_SIZE = 8 * 1024 * 1024;
+const PVR_REG_SIZE = 32 * 1024;
+const RAM_SIZE = 16 * 1024 * 1024;
+const NODE_GUEST = 0x8C2688E4 >>> 0;   // P2C1 / Cable resident body node (+0xDC=0)
+
+const logEl = document.getElementById('log');
+const log = (m, cls) => { const s = document.createElement('span'); if (cls) s.className = cls; s.textContent = m + '\n'; logEl.appendChild(s); logEl.scrollTop = logEl.scrollHeight; console.log(m); };
+
+// Resolve a ROM-derived snapshot file. Try ./snap/<name> first (a local copy
+// placed next to this page), then ../../_ryu_capture/<name> (repo-root server).
+async function fetchBin(name, expect) {
+    const candidates = [new URL('snap/' + name, import.meta.url), new URL('../../_ryu_capture/' + name, import.meta.url)];
+    let lastErr;
+    for (const u of candidates) {
+        try {
+            const r = await fetch(u);
+            if (!r.ok) { lastErr = new Error(r.status + ' ' + u); continue; }
+            const b = new Uint8Array(await r.arrayBuffer());
+            log(`  loaded ${name} (${b.length} bytes) from ${u.pathname}`);
+            if (expect && b.length !== expect) {
+                const fixed = new Uint8Array(expect); fixed.set(b.subarray(0, expect));
+                log(`  [warn] ${name}: ${b.length} != ${expect}, padded/truncated`, 'err');
+                return fixed;
+            }
+            return b;
+        } catch (e) { lastErr = e; }
+    }
+    throw lastErr || new Error('not found: ' + name);
+}
+
+let snap;
+async function loadSnap() {
+    if (snap) return snap;
+    log('Loading ROM-derived snapshot (LOCAL ONLY)…');
+    const [ram, vram, pvr, engTa] = await Promise.all([
+        fetchBin('mc_ram_dump.bin', RAM_SIZE),
+        fetchBin('mc_vram_dump.bin', VRAM_SIZE),
+        fetchBin('mc_pvr_regs.bin', PVR_REG_SIZE),
+        fetchBin('mc_engine_ta.bin'),
+    ]);
+    snap = { ram, vram, pvr, engTa };
+    return snap;
+}
+
+// Synthesize pvrSnapshot[0] for a 640x480 framebuffer (_ndcMat reads tx/ty).
+function synthSnap(w, h) {
+    const s = new Uint32Array(16);
+    const tx = Math.max(0, Math.round(w / 32) - 1) & 0x3F;
+    const ty = Math.max(0, Math.round(h / 32) - 1) & 0x3F;
+    s[0] = (tx & 0x3F) | ((ty & 0x3F) << 16);
+    return s;
+}
+
+// Run the transpiled WASM render -> TA buffer (Uint8Array).
+let wasmMod;
+async function transpiledTA(ram) {
+    if (!wasmMod) { log('Instantiating render_replica.wasm…'); wasmMod = await createRenderReplica(); }
+    const M = wasmMod;
+    const ramPtr = M._malloc(ram.length);
+    M.HEAPU8.set(ram, ramPtr);
+    const cap = 64 * 1024;
+    const outPtr = M._malloc(cap);
+    const len = M._render_object(ramPtr, NODE_GUEST, outPtr, cap);
+    const quads = M._render_object_quad_count();
+    const caps = M._render_object_capture_count();
+    const ta = M.HEAPU8.slice(outPtr, outPtr + len);
+    M._free(ramPtr); M._free(outPtr);
+    log(`render_object(): ${len} TA bytes, ${quads} quads (walker captured ${caps} tiles)`, 'ok');
+    return ta;
+}
+
+// A renderer + its canvas + texMgr, set up once.
+class Pane {
+    constructor(canvas) { this.canvas = canvas; this.R = new PVR2Renderer(); this.ready = null; }
+    async ensure() {
+        if (this.ready) return this.ready;
+        this.ready = (async () => {
+            await this.R.init(this.canvas);            // configures the WebGPU context on the canvas
+            this.T = new TextureManager(this.R.dev);
+            log(`  WebGPU device ready for #${this.canvas.id}`);
+        })();
+        return this.ready;
+    }
+    // Render a raw TA buffer through the gold-standard path onto the canvas.
+    render(taBuf, vram, pvrRegs, drawBg) {
+        const P = new TAParser();
+        this.T.setDirtyPages(null, true);   // first frame: decode all textures + palette
+        this.T.updatePalette(pvrRegs);
+        const parsed = P.parse(taBuf, taBuf.length);
+        if (drawBg) { try { P.fillBGP(parsed, pvrRegs, vram); } catch (e) { log('[fillBGP] ' + e.message, 'err'); } }
+        const sn = synthSnap(this.canvas.width, this.canvas.height);
+        // DBG = cockpit GOLD-STANDARD defaults (per-triangle Z-sort like flycast).
+        this.R.renderFrame(parsed, this.T, sn, vram, {});
+        return parsed;
+    }
+}
+
+const paneT = new Pane(document.getElementById('cTranspiled'));
+const paneE = new Pane(document.getElementById('cEngine'));
+const drawBg = () => document.getElementById('bg').checked;
+
+let lastSnap;
+async function renderAll() {
+    const s = await loadSnap(); lastSnap = s;
+    await paneT.ensure(); await paneE.ensure();
+    const ta = await transpiledTA(s.ram);
+    const pt = paneT.render(ta, s.vram, s.pvr, drawBg());
+    log(`  TRANSPILED parsed: ${pt.vertexCount} verts | op=${pt.opaque.length} pt=${pt.punchThrough.length} tr=${pt.translucent.length}`, 'hl');
+    const pe = paneE.render(s.engTa, s.vram, s.pvr, drawBg());
+    log(`  ENGINE     parsed: ${pe.vertexCount} verts | op=${pe.opaque.length} pt=${pe.punchThrough.length} tr=${pe.translucent.length}`, 'hl');
+    log('Rendered both panes. ✔', 'ok');
+}
+
+// View toggle.
+function setView(which) {
+    document.getElementById('pTranspiled').style.display = (which === 'engine') ? 'none' : '';
+    document.getElementById('pEngine').style.display = (which === 'transpiled') ? 'none' : '';
+    for (const [id, v] of [['btnTranspiled', 'transpiled'], ['btnEngine', 'engine'], ['btnBoth', 'both']])
+        document.getElementById(id).classList.toggle('active', v === which);
+}
+document.getElementById('btnTranspiled').onclick = () => setView('transpiled');
+document.getElementById('btnEngine').onclick = () => setView('engine');
+document.getElementById('btnBoth').onclick = () => setView('both');
+document.getElementById('bg').onchange = () => { if (lastSnap) renderAll().catch(e => log(e.stack || e.message, 'err')); };
+setView('both');
+
+renderAll().catch(e => { log('FATAL: ' + (e.stack || e.message), 'err'); });
+// expose for puppeteer / headless verification
+window.__renderAll = renderAll;
+window.__paneT = paneT; window.__paneE = paneE;
+</script>
+</body>
+</html>

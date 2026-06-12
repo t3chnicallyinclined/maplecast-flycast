@@ -2,6 +2,10 @@
 *.obj
 *.ilk
 *.pdb
+# emcc node-environment verification build (reproducible via build_wasm.sh + verify_wasm.mjs)
+render_replica_node.mjs
+render_replica_node.wasm
+verify_wasm_node.mjs
 # generated C is reproducible via run.cmd; keep it out of git
 gen_leaf.c
 gen_walker.c
