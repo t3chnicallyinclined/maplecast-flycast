@@ -149,6 +149,31 @@ def main():
         v=struct.unpack_from("<I",dump,doff(g))[0]
         ram.w32(g, v)
 
+    # ---- RESIDENT PVR control-word records (the SUBMIT loc_8C1244B0 source fields) ----
+    # marvelous2 bank12 loc_8C124520: cell idx -> r8 = idxtab[idx]; loc_8C124534:
+    #   r12 = rectab + r8*0x20  (the 0x20-byte poly-param template per tile).
+    #   @r12+0x00=PCW  @r12+0x04=ISP/TSP  @r12+0x08=TSP  @r12+0x0C=TCW   (PVR poly param)
+    #   idxtab=*(0x8C2DAD3c), rectab=*(0x8C2DAD4c).  TCW carries the LIVE texaddr (DM00
+    #   moving) + the resident PalSelect; we READ them (deposited fields), per task scope.
+    IDXTAB = struct.unpack_from("<I", dump, doff(0x8C2DAD3c))[0]
+    RECTAB = struct.unpack_from("<I", dump, doff(0x8C2DAD4c))[0]
+    def u32(g): return struct.unpack_from("<I", dump, doff(g))[0]
+    def u16(g): return struct.unpack_from("<H", dump, doff(g))[0]
+    def rec_for_sel(sel):
+        r8 = u16(IDXTAB + sel*2)
+        base = RECTAB + r8*0x20
+        return r8, u32(base+0x00), u32(base+0x04), u32(base+0x08), u32(base+0x0C)
+    print("\nRESIDENT PVR records (read from rectab @0x%08X via idxtab @0x%08X):" % (RECTAB, IDXTAB))
+    seen_sel=set()
+    for (_,ts) in rec_list:
+        sel=ts[0]['sel']
+        if sel in seen_sel: continue
+        seen_sel.add(sel)
+        r8,pcw,isp,tsp,tcw=rec_for_sel(sel)
+        texu=(tsp>>3)&7; texv=tsp&7
+        print("  sel%-4d r8=%-4d PCW=0x%08X ISP=0x%08X TSP=0x%08X (Tex %dx%d) TCW=0x%08X (fmt=%d pal=%d addr=0x%06X)"
+              % (sel,r8,pcw,isp,tsp,tcw,8<<texu,8<<texv,(tcw>>27)&7,(tcw>>21)&0x3F,(tcw&0x1FFFFF)*8))
+
     # expected per-tile output from trace + the REAL descriptor m (tile pixel size)
     # per tile, read from the dump descriptor for that record's r13 (idx).  The screen
     # quad extent is m*scaleX by m*scaleY (ROM-derived: m = descriptor byte[0]).
@@ -156,7 +181,8 @@ def main():
     for (_,ts) in rec_list:
         r13_0=ts[0]['r13']; idx0=(r13_0-DESC)//4
         m_byte=DESC_BYTES[idx0*4]            # the descriptor tile size in source px
-        for t in ts: exp.append((t['sx'],t['sy'],t['accX'],t['accY'],t['sel'],t['r13'],m_byte))
+        _,pcw,isp,tsp,tcw=rec_for_sel(ts[0]['sel'])
+        for t in ts: exp.append((t['sx'],t['sy'],t['accX'],t['accY'],t['sel'],t['r13'],m_byte,pcw,isp,tsp,tcw))
 
     # also dump the real descriptor values we used, for the report / independence proof
     print("\nREAL descriptors used (read from dump @0x8C1F9F9C, NOT reconstructed):")
@@ -184,6 +210,11 @@ def main():
         f.write("static const float EXP_SY[]={%s};\n"%(",".join("%.6ff"%e[1] for e in exp)))
         f.write("static const int   EXP_SEL[]={%s};\n"%(",".join(str(e[4]) for e in exp)))
         f.write("static const int   EXP_M[]={%s};\n"%(",".join(str(e[6]) for e in exp)))
+        # RESIDENT PVR control words per emitted tile (read from rectab; SUBMIT source fields)
+        f.write("static const unsigned EXP_PCW_T[]={%s};\n"%(",".join("0x%08xu"%e[7] for e in exp)))
+        f.write("static const unsigned EXP_ISP_T[]={%s};\n"%(",".join("0x%08xu"%e[8] for e in exp)))
+        f.write("static const unsigned EXP_TSP[]={%s};\n"%(",".join("0x%08xu"%e[9] for e in exp)))
+        f.write("static const unsigned EXP_TCW[]={%s};\n"%(",".join("0x%08xu"%e[10] for e in exp)))
         f.write("static const float SCALEX=%.8ff;\n"%scaleX)
         f.write("static const float SCALEY=%.8ff;\n"%scaleY)
         f.write("static const int EXP_N=%d;\n"%len(exp))

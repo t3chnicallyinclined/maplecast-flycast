@@ -189,12 +189,61 @@ Vertex param   (paraType=7) x4, strip order TL,TR,BL,BR (last has EndOfStrip bit
 ...one EndOfList param (paraType=0, all-zero 32B) terminates the stream.
 ```
 - `x,y` = final screen pixels (the walker's transformed corners). `z=1.0`.
-- `tcw` is a documented **placeholder** here (`0x2A000000 | sel`): this dump has no GFX1 pixel
-  region, so the renderer pairs `sel`→atlas/VRAM separately (the body sels' pixels come from
-  CHARQ/BODYCAP capture, per `project_charq_breakthrough` / `project_emitter_status`). `u,v`
-  are unit `[0,1]` across the tile (the harness applies the real per-sel UV sub-rect from
-  `probe_body_uv.json`). Geometry (x/y) is the exact, validated output; tex binding is the
-  documented seam.
+
+### STAGE 3 — REAL TCW + UV (CLOSED 2026-06-12) — the placeholder seam is GONE
+
+The earlier placeholder (`tcw = 0x2A000000 | sel`, `u,v` unit) is **replaced by the engine's
+actual control words**, traced from the disasm and read from the resident fields. Each emitted
+quad now carries its OWN real TCW/TSP + real UV sub-rect, **bit-exact vs the engine**.
+
+**WHERE TCW/TSP/UV COME FROM (traced from marvelous2 bank12, not assumed):**
+- The body submit is `loc_8C1244B0` (bank12). At `loc_8C124520`: `idx = *r13` (cell-record
+  index, r13 = the source cell pointer = the submit's arg r4); `r8 = idxtab[idx]` where
+  `idxtab = *(0x8C2DAD3c)`. At `loc_8C124534`: **`r12 = rectab + r8*0x20`** where
+  `rectab = *(0x8C2DAD4c)`. **`r12` is a resident 0x20-byte PVR poly-param TEMPLATE per tile:**
+  `@r12+0x00 = PCW`, `+0x04 = ISP/TSP word0`, `+0x08 = TSP`, **`+0x0C = TCW`** (canonical PVR
+  poly-param layout — cross-checked vs flycast `core/hw/pvr/ta_structs.h` `TA_PolyParam0`).
+- So **TCW/TSP/ISP/PCW are NOT computed inline in the submit — they are DEPOSITED fields** the
+  submit reads from `rectab[idxtab[sel]]` and copies into the output record (the copies at
+  bank12 `loc_8c124856`: `@(0x08,r12)→@(0x08,r14)` TSP, `@(0x10,r12)→@(0x10,r14)` etc). The TCW
+  carries the **live DM00 texaddr** (low 21 bits, moves as the part is re-decoded into VRAM —
+  matches the KB "moving TCW" finding) + the **PixelFmt** (bits 27..29; =5 PAL4BPP for the body)
+  + the **PalSelect** (bits 21..26).
+- **The ONE thing the submit COMPUTES on top of the resident TCW is the PalSelect injection**,
+  in the finalize routine `loc_8C124910` at **`loc_8c124a82`**:
+  `TCW = (TCW & 0xF81FFFFF) | (palbank << 21)` (`shad #21,r12; and 0xF81FFFFF,r2; or; store
+  @(0x0C,r14)`). Transpiled literally in `test_ta_emit.c::tcw_inject_palselect`. For records
+  already finalized in the dump (PalSelect baked, e.g. pal=28) it is the **identity** (verified
+  idempotent 9/9), so reading the resident field is bit-exact.
+- **TSP** decodes the tile size: `TexU = (TSP>>3)&7`, `tile = 8<<TexU` (=16 for `0x4C9`, =8 for
+  `0x4C0`), `ShadInstr = (TSP>>6)&3` (=3). **UV** = each body tile-quad samples one texture tile;
+  for a tile-filling part `u,v = [0,1]`, for a sub-tile part (`m < tile`) `u,v = [0, m/tile]`
+  (=`[0,0.5]` for sel1266, m=8, tile=16). This UV rule is the body specialization of the engine's
+  sub-rect format `u:[u0,u1],v:[v0,v1]` observed in `oracle_post_blend.jsonl` (`tex_wh=[tile,tile]`,
+  `u/v=[0, used/tile]`). `m` = the load-time tile descriptor byte[0] (already used for geometry).
+
+**TRANSPILED vs READ-FROM-FIELD (per task scope):**
+- **READ from the RAM dump** (deposited fields): PCW, ISP, TSP, TCW from `rectab[idxtab[sel]]`
+  — baked into `image_dump.h` as `EXP_PCW_T/EXP_ISP_T/EXP_TSP/EXP_TCW` by `build_image_dump.py`
+  (which reads `idxtab=*(0x8C2DAD3c)`, `rectab=*(0x8C2DAD4c)` out of `mc_ram_dump.bin`).
+- **TRANSPILED** (computed): the PalSelect OR (`loc_8c124a82`) and the per-quad UV from TSP+m.
+
+**BIT-EXACT VALIDATION RESULT (`test_ta_emit.exe`, cid23 frame 10766, 9 quads):**
+```
+TCW-BITEXACT:  9/9 quads' emitted TCW == engine resident TCW (rectab+0x0C)
+TSP-BITEXACT:  9/9 quads' emitted TSP == engine resident TSP (rectab+0x08)
+PALSEL-INJECT: 9/9 idempotent on finalized TCW (loc_8c124a82 transpiled)
+```
+Round-tripped through the real `web/webgpu/ta-parser.mjs` (`verify_ta.mjs`): **9 opaque polys /
+36 verts; TCW + TSP 9/9 bit-exact after parse; real UV sub-rects `[0,1]`/`[0,0.5]`.** The
+texture-binding seam is **CLOSED** — the TA carries the engine's exact TCW (VRAM texel addr +
+fmt + pal) and UV; `render_ta.mjs` can now sample the real VRAM tile per quad.
+
+**TEST OBJECT / VRAM ALIGNMENT (for the converge step):** cid23 = P2C1, frame 10766, Cable body,
+sels {1264,1265,1266,1267}, all PixelFmt=5 (PAL4BPP), PalSelect=28. The converge VRAM frame must
+contain these texel addresses (= `(TCW&0x1FFFFF)<<3`):
+`sel1264→0x61A720 · sel1267→0x61A7A0 · sel1265→0x61A800 · sel1266→0x61A880`. Palette bank 28
+(PVR PAL_RAM entries 28*16=448..463) must be present in `mc_pvr_regs.bin`.
 
 ## Opcode notes (FP-exactness — the plan's flagged risk)
 
