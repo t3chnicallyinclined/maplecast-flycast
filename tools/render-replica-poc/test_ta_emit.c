@@ -99,6 +99,26 @@ int main(int argc, char**argv){
     ctx.r[4]=NODE_ADDR; ctx.r[15]=STACK_ADDR; ctx.pr=0xDEADBEEFu;
     walker_0344d4(&ctx);
 
+    /* ===== DELIVERABLE GATE: raw transpiled walker per-tile screenX/Y == ASMTRACE =====
+     * ZERO ground-truth pinning: the walker derived the Y origin from the live node fields
+     * (leaf_e460 floor of node+0xE4 + scaleY*node[0x136]) + the per-tile m*pitchY tile term.
+     * EXP_SX/EXP_SY are the engine's own screenX/Y logged at PC 0x8C034864 (asm_angled_fist.log).
+     * The trace prints to 2 decimals -> tolerance 0.01px (its own quantization). */
+    {
+        int nchk = (ncap<EXP_N)?ncap:EXP_N;
+        double mxX=0, mxY=0; int yfail=0;
+        printf("RAW-WALKER vs ASMTRACE (no Y-fix, code-derived origin):\n");
+        for(int i=0;i<nchk;i++){
+            double ex=fabs((double)capX[i]-(double)EXP_SX[i]);
+            double ey=fabs((double)capY[i]-(double)EXP_SY[i]);
+            if(ex>mxX)mxX=ex; if(ey>mxY)mxY=ey; if(ey>0.01)yfail++;
+            printf("  tile%2d sel%-4d  walkerY=%8.3f  traceY=%8.3f  dY=%.4f   (walkerX=%8.3f traceX=%8.3f dX=%.4f)\n",
+                   i,EXP_SEL[i],capY[i],EXP_SY[i],ey,capX[i],EXP_SX[i],ex);
+        }
+        printf("  => MAX dX=%.4fpx  MAX dY=%.4fpx  (Y-fails>0.01: %d)  %s\n\n",
+               mxX,mxY,yfail,(mxX<=0.01&&mxY<=0.01)?"BYTE-EXACT":"MISMATCH");
+    }
+
     /* ---- self-test the transpiled corner-transform (axis-aligned: angle=0) ----
      * Set fr8=scaleX (scaleX*cos with cos=1), fr5=0 (scaleX*sin), fr4=0, fr9=scaleY,
      * pivot fr6=fr7=0, anchor fr1=inX (@r5), fr14=inY (@r6), unit-offset table @r7.
@@ -124,11 +144,15 @@ int main(int argc, char**argv){
         float sx=capX[i], sy=capY[i];
         float m=(float)EXP_M[i];
         float W=m*SCALEX, H=m*SCALEY;          /* screen extent (ROM m * resident scale) */
-        /* 4 corners, axis-aligned (A=TL, B=TR, C=BR, D=BL) */
-        float Ax=sx,   Ay=sy;
-        float Bx=sx+W, By=sy;
-        float Cx=sx+W, Cy=sy+H;
-        float Dx=sx,   Dy=sy+H;
+        /* 4 corners, axis-aligned. The walker's screenY (capY) is the part's BOTTOM-left
+         * anchor (MVC2 bottom-up tile anchoring, finding:body_walker_y_anchor): the engine
+         * submit (loc_8c1244b0) lays the quad UPWARD from it -> top-left A.Y = screenY - H,
+         * bottom-left D.Y = screenY. Confirmed: engine TA vertex maxY == ASMTRACE screenY
+         * (0.004px). So lay corners upward, NOT downward. (A=TL,B=TR,C=BR,D=BL.) */
+        float Ax=sx,   Ay=sy-H;
+        float Bx=sx+W, By=sy-H;
+        float Cx=sx+W, Cy=sy;
+        float Dx=sx,   Dy=sy;
         /* engine-truth check: corner spacing must equal the per-record tile pitch.
          * Within a record tiles step by exactly W in X / H in Y (verified vs ASMTRACE
          * sel1264: 516.33-463.00=53.33=32*5/3=W). We check W==m*scaleX is consistent

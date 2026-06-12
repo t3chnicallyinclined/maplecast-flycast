@@ -68,51 +68,50 @@ def main():
     nrec=len(rec_list)
     ntiles=sum(len(ts) for _,ts in rec_list)
 
-    # ---- recover scaleX/baseX, scaleY/baseY from the trace (X clean, Y joint-solve) ----
-    # first-tile-of-record regression: screenX = baseX + scaleX*accX  (per the disasm
-    # the per-record base uses accX as the integer pen). Use numpy-free least squares.
-    ax=[ts[0]['accX'] for _,ts in rec_list]
-    fx=[ts[0]['sx']   for _,ts in rec_list]
-    n=len(ax); sx=sum(ax); sy=sum(fx); sxx=sum(a*a for a in ax); sxy=sum(a*b for a,b in zip(ax,fx))
-    scaleX=(n*sxy - sx*sy)/(n*sxx - sx*sx); baseX=(sy - scaleX*sx)/n
-    # scaleY = 15/7 (known exact from the transform constants); baseY recovered by the
-    # joint solve that forces EVERY per-tile Iy=(sY-baseY)/scaleY to an integer (the
-    # README's method). A naive accY-regression mis-estimates baseY because the Y pen is
-    # absolute-per-tile, not a single accY intercept. baseY = floor(node+0xE4).
-    # scaleY = 15/7 (exact transform constant). baseY = floor(node+0xE4): the additive Y
-    # anchor. The integer-index joint-solve only pins baseY mod scaleY (alias period
-    # ~2.143px), so we pin the unique value by the same anchor magnitude as X and by
-    # matching the walker's descriptor-fixed Y term (empirically 333.0 for this object;
-    # the 108 alias is rejected). We solve mod-scaleY then snap into the [300,360] window
-    # consistent with baseX=533 and the trace's on-screen Y range.
-    scaleY=15.0/7.0
-    allY=[t['sy'] for _,ts in rec_list for t in ts]
-    # base residue (mod scaleY) that integerizes all Iy:
-    base_res=None; bestf=9
-    for bi in range(0, int(scaleY*1000)+1):
-        bY=bi/1000.0
-        err=max(abs((sY-bY)/scaleY - round((sY-bY)/scaleY)) for sY in allY)
-        if err<bestf: bestf=err; base_res=bY
-    # snap base_res into the physical window [300,360] (k*scaleY + base_res closest to 333)
+    # ---- CODE-DERIVED node anchor/scale/hotspot (NO regression, ZERO ground-truth pinning) ----
+    # The transpiled walker computes the Y (and X) origin ITSELF from the live node fields:
+    #   slot10 (baseY) = leaf_e460(node+0xE4)  +  scaleY * (s16)node[0x136]
+    #   slot0C (baseX) = leaf_e460(node+0xE0)  +  scaleX * (s16)node[0x134]
+    # where leaf_e460 (bank11 loc_8C11E460, the ftrc-magic leaf called at loc_8c0344d4 entry
+    # on the node+0x104==0 path) is floor-toward-negative-infinity of the anchor coord.
+    # The per-tile TILE-HEIGHT term enters Y as r5 = m*pitchY (= A*desc[3] - slot20) inside
+    # loc_8c03478e, and X as r4 = m*pitchX (cite: bank03 loc_8c0344d4 lines 10271-10314 set
+    # the hotspot fmac; 10616-10683 the per-tile m*pitch; leaf floor = gen_leaf.c/loc_8C11E460).
+    # => We READ the REAL node fields from the dump and feed them as-is. The walker derives the
+    #    origin; we do NOT recover baseX/baseY by regression and we do NOT zero the hotspot.
+    NODE_LIVE = 0x8C2688E4                    # cid23 (P2C1) node base in the dump
+    def df32(g): return struct.unpack_from("<f", dump, doff(g))[0]
+    def ds16(g): return struct.unpack_from("<h", dump, doff(g))[0]
+    e0   = df32(NODE_LIVE+0x0E0); e4   = df32(NODE_LIVE+0x0E4)
+    scaleX = df32(NODE_LIVE+0x0EC); scaleY = df32(NODE_LIVE+0x0F0)
+    hsX  = ds16(NODE_LIVE+0x134); hsY  = ds16(NODE_LIVE+0x136)
+    facing = struct.unpack_from("<H", dump, doff(NODE_LIVE+0x110))[0]
+    p104   = struct.unpack_from("<I", dump, doff(NODE_LIVE+0x104))[0]
     import math as _m
-    k=round((333.0-base_res)/scaleY); baseY=round(base_res + k*scaleY)
-    print(f"recovered scaleX={scaleX:.6f} baseX={baseX:.4f} scaleY={scaleY:.6f} baseY={baseY:.4f} (res={base_res:.4f} maxfrac={bestf:.4f})")
-    print(f"  (5/3={5/3:.6f}  15/7={15/7:.6f})")
+    baseX = _m.floor(e0) + scaleX*float(hsX)   # closed form, for the printout/independence proof
+    baseY = _m.floor(e4) + scaleY*float(hsY)   # = the walker's slot10 ; NO regression
+    print(f"CODE-DERIVED (read from dump node 0x{NODE_LIVE:08X}, NO regression):")
+    print(f"  node+0xE0={e0:.5f} -> floor={_m.floor(e0)}   node+0xE4={e4:.5f} -> floor={_m.floor(e4)}")
+    print(f"  scaleX={scaleX:.6f} (5/3={5/3:.6f})  scaleY={scaleY:.6f} (15/7={15/7:.6f})")
+    print(f"  hotspot node+0x134={hsX} node+0x136={hsY}  facing={facing} node+0x104={p104}")
+    print(f"  => closed-form baseX={baseX:.4f}  baseY={baseY:.4f}  (= walker slot0C/slot10)")
 
     ram=Ram()
-    # node fields
+    # node fields — REAL dump values; the walker floors the anchor (leaf_e460) + applies the
+    # node+0x136 hotspot fmac to derive the Y origin. Feed the true f32, NOT a snapped int.
     ram.w32(NODE+0x160, GFX2)
     ram.w32(NODE+0x15c, GFX1)
     ram.w16(NODE+0x144, 0x0000)            # sid 0 -> GFX2[0]
-    ram.wf (NODE+0x0e0, round(baseX))      # anchorX (leaf floors it)
-    ram.wf (NODE+0x0e4, round(baseY))      # anchorY
+    ram.wf (NODE+0x0e0, e0)                # anchorX f32 (walker floors via leaf_e460)
+    ram.wf (NODE+0x0e4, e4)                # anchorY f32 (walker floors via leaf_e460)
     ram.wf (NODE+0x0e8, 0.0)
     ram.wf (NODE+0x0ec, scaleX)            # scaleX (node+0xEC)
     ram.wf (NODE+0x0f0, scaleY)            # scaleY (node+0xF0)
     ram.w32(NODE+0x0dc, 0)                 # tile-table index 0 -> r13 = DESC base
-    ram.w16(NODE+0x110, 0)                 # facing 0 (flip col = 0; not negated)
-    ram.w32(NODE+0x104, 0)                 # ==0 -> simple path (gives clean X here)
-    ram.w16(NODE+0x134, 0); ram.w16(NODE+0x136, 0)  # initial X/Y pen = 0 (accX(rec0)=-dx)
+    ram.w16(NODE+0x110, facing)            # real facing (0 here -> not negated)
+    ram.w32(NODE+0x104, p104)              # real (0 here -> simple path)
+    ram.w16(NODE+0x134, hsX & 0xFFFF)      # real X hotspot (drives slot0C fmac)
+    ram.w16(NODE+0x136, hsY & 0xFFFF)      # real Y hotspot (drives slot10 fmac)
     ram.wf (NODE+0x108, 0.0)
     ram.w32(NODE+0x180, 0)
 
