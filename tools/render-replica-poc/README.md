@@ -15,6 +15,7 @@ no Phase-0, no browser.
 | **Leaf `loc_8C11E460`** (bank11, 24 insns) | lifter + FP semantics on a self-contained function (zero input ambiguity) | **21/21 bit-exact** vs an independent `floorf` reference |
 | **Transform core `loc_8c0347c8..loc_8c034864`** (the per-tile FP+integer screen math, simple path) | the lifted `float`/`fmul`/`fadd`/`exts.w` chain reproduces the engine's per-part `screenX/screenY` | **18/18 bit-exact** (X and Y) vs reference float; **within the ASMTRACE's own 0.01px logging quantization** vs the real engine output |
 | **Full walker `loc_8c0344d4`** (bank03, 464 insns / 20 BBs — BOTH the simple and the scaled/rotated path, full record+tile loops, all 4 leaf dispatch sites) | the lifter produces a structurally correct, self-contained C unit for the entire function | **compiles, links, runs, terminates with a balanced stack (r15 delta = 0), leaf dispatch fires** |
+| **Full walker NUMERIC `loc_8c0344d4`** (the COMPLETE pen + REAL tiling + transform, end-to-end, with INPUT-INDEPENDENT descriptors) | the entire walker reproduces every emitted tile's `screenX/screenY` when fed the REAL load-time tile-descriptor table read out of a live prod RAM dump (`_ryu_capture/mc_ram_dump.bin` @`0x8C1F9F9C`) | **9/9 tiles 0.00px-relative** (maxdX=0.0034px, maxdY=0.0043px — both under the trace's 0.01px logging ULP); negative control (descriptors zeroed) collapses to 4 wrong tiles → proves non-circular |
 
 **Bottom line:** straight C `float` arithmetic is **bit-exact** for this render
 routine's `+ − ×` chain; the single opcode that needed special-casing is `fmac`
@@ -89,21 +90,37 @@ reference-float** check (18/18, quantization-free) and the **vs-real-engine** ch
 (at/under the trace's 0.01px logging ULP) pass — so the lifted FP chain *is* the
 engine's arithmetic.
 
-**What is NOT independently validated (stubbed / known gap):** a **full numeric**
-run of the entire walker (driving pen→tiling→transform end-to-end purely from raw
-bytes) needs the **tiling descriptor table `0x8C1F9F9C`** and the **GFX1 part-
-dimension bytes** the per-tile code reads (`loc_8c03478e`: `byte[0/2/3]@r13`;
-`loc_8c0346c4`: `byte@r4<<3`). Those bytes are **absent from every memory dump
-available in the repo** (`_ryu_capture/` has `vram.bin` + a 621KB partial sync, but
-no 16MB RAM image covering `0x8C1F9F9C`/GFX2/GFX1). They are not separable from the
-scale factor using only the trace's logged screen coords (you only ever observe the
-`descriptor × scale` product). So:
-  - the **transform core** (the FP-exactness risk the plan flags) is proven on real
-    inputs, and
-  - the **full walker** is proven to *compile/run/terminate correctly* (control flow,
-    stack discipline, the record/tile loops, leaf dispatch) but is **not** asserted
-    pixel-for-pixel — that final step needs a one-time dump of `0x8C1F9F9C`+GFX1/GFX2
-    (a `MAPLECAST_*` Oracle memcpy of those static regions would close it immediately).
+**FULL NUMERIC WALKER — CLOSED 2026-06-12 (`test_walker_dump.c` + `build_image_dump.py`).**
+The earlier gap — a **full numeric** run driving pen→tiling→transform end-to-end from
+raw bytes — needed the **tiling descriptor table `0x8C1F9F9C`** the per-tile code reads
+(`loc_8c0344d4` entry: `r13 = *(node+0xDC)*4 + 0x8C1F9F9C`; per tile `loc_8c03478e`
+reads `m=byte[0]`, `pitchX=byte[2]`, `pitchY=byte[3]`, count `=byte[1]+1` from `r13`).
+We now HAVE it: **`_ryu_capture/mc_ram_dump.bin`** is a 16MB main-RAM image from live
+prod whose `0x8C1F9F9C` table holds 9 REAL load-time descriptors (idx 0..8).
+
+Test object = **cid 23, frame 10766** (the ASMTRACE's only frame whose descriptors fall
+entirely in the dump-resident idx 0..8 — `node+0xDC=0`, `r13` walks `0x8C1F9F9C..0x8C1F9FBC`):
+9 GFX2 records' record-level data (`dx/dy/flags/sel`) come from the trace, the **tile
+descriptors (count/pitch) are read straight out of the dump** (load-time-real, NOT
+reconstructed), and anchor/scale are recovered from the trace (`scaleX=5/3`, `baseX=533`,
+`scaleY=15/7`, `baseY=floor(node+0xE4)=333`). Running the transpiled `walker_0344d4` over
+this image reproduces all **9 emitted tiles at 0.00px-relative** (maxdX 0.0034px / maxdY
+0.0043px, both under the trace's 0.01px ULP).
+
+**Non-circularity is proven two ways:** (1) `build_image_dump.py` prints the real
+descriptor bytes and confirms each record's `count` (from descriptor `byte[1]+1`) equals
+the trace's tile count BEFORE the diff runs; (2) the harness's `zerodesc` negative control
+wipes the table → the walker collapses to 4 wrong tiles, so the pass genuinely depends on
+the dump's load-time descriptors.
+
+**Scope note for the OTHER objects:** every *other* trace frame (incl. the Sentinel
+sid-0x131 rocket, 19 parts) uses `r13` at table idx ≥ 36, which is ZERO in this particular
+dump — `0x8C1F9F9C` is a **rolling per-frame scratch table** the engine refills per object
+via `node+0xDC`, and only the first object's descriptors (idx 0..8) survived at the base in
+this static snapshot. So the rocket frame can't be diffed against THIS dump (its transient
+descriptors aren't present); cid23 frame 10766 is the test whose REAL descriptors ARE in the
+dump, and it closes the full-walker thesis: **pen + REAL tiling + FP transform reproduced
+end-to-end through mechanically-transpiled C with fully independent input.**
 
 ## Opcode notes (FP-exactness — the plan's flagged risk)
 

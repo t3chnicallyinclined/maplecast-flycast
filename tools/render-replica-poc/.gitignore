@@ -8,3 +8,6 @@ gen_walker.c
 gen_transform.c
 transform_cases.h
 image.h
+image_dump.h
+*.log
+runout.txt

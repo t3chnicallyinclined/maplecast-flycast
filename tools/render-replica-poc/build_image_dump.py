@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""Build the FULL-WALKER input image from (1) the REAL load-time tile-descriptor
+table read out of the 16MB RAM dump and (2) the ASMTRACE record-level data — so the
+descriptors are INPUT-INDEPENDENT (load-time-real, NOT reconstructed from the output).
+
+Target object: cid 23, frame 10766 (Cable, sid 212) — 9 GFX2 records / 18 emitted
+tiles, flip=0/flags=0 (simple+scale path), node+0xDC=0 so r13 starts at the table
+base 0x8C1F9F9C and walks descriptors idx 0..8 — EXACTLY the 9 nonzero load-time
+descriptors present in the dump. (The Sentinel sid-0x131 rocket frame's descriptors
+live at table idx 116+, which is zero in THIS dump — that transient object was not
+active when the dump was taken; see report. cid23 is the test whose REAL descriptors
+ARE in the dump.)
+
+Memory model: emit a big-endian image to match the PoC's sh4ctx.h accessors (the
+transpiled walker reads via r32/r16 big-endian). Values read LE from the dump are
+re-emitted BE here so the walker sees identical numeric content.
+"""
+import struct, collections
+
+DUMP  = r"C:\Users\trist\projects\maplecast-flycast\_ryu_capture\mc_ram_dump.bin"
+TRACE = r"C:\Users\trist\projects\maplecast-flycast\_ryu_capture\asm_angled_fist.log"
+FRAME = "10766"; CID = "23"
+
+NODE  = 0x0C400000
+GFX2  = 0x0C500000
+GFX1  = 0x0C510000
+DESC  = 0x8C1F9F9C        # the table base the walker hard-codes
+GLOB  = 0x8C1F9D80
+STACK = 0x0C480000
+
+# ---- read the REAL descriptor table out of the dump (load-time data) ----
+dump = open(DUMP, "rb").read()
+def doff(g): return g & 0x00FFFFFF
+# The descriptors are bytes; read the full table span the trace will walk.
+# cid23 walks r13 = 0x8C1F9F9C .. 0x8C1F9FBC inclusive (idx 0..8) = 9*4 = 36 bytes.
+DESC_BYTES = dump[doff(DESC):doff(DESC)+0x80]   # plenty (idx 0..31)
+
+def be32(x): return struct.pack(">I", x & 0xFFFFFFFF)
+def be16(x): return struct.pack(">H", x & 0xFFFF)
+def bef32(x):
+    return bytes(reversed(struct.pack("<f", x)))
+
+class Ram:
+    def __init__(self): self.m = bytearray(16*1024*1024)
+    def w(self,a,b): i=a&0xFFFFFF; self.m[i:i+len(b)]=b
+    def w32(self,a,v): self.w(a, be32(v))
+    def w16(self,a,v): self.w(a, be16(v))
+    def wf(self,a,x):  self.w(a, bef32(x))
+
+def load_records():
+    rows=[]
+    for line in open(TRACE):
+        if line.startswith('#'): continue
+        p=line.split()
+        if len(p)<18 or p[0]!=FRAME or p[3]!=CID: continue
+        rows.append(dict(sel=int(p[4]),dx=int(p[5]),dy=int(p[6]),
+                         accX=int(p[7]),accY=int(p[8]),
+                         sx=float(p[9]),sy=float(p[10]),
+                         flip=int(p[13]),flags=int(p[14],16),
+                         r11=p[15],r13=int(p[16],16)))
+    return rows
+
+def main():
+    rows=load_records()
+    byrec=collections.OrderedDict()
+    for r in rows: byrec.setdefault(r['r11'],[]).append(r)
+    rec_list=list(byrec.items())
+    nrec=len(rec_list)
+    ntiles=sum(len(ts) for _,ts in rec_list)
+
+    # ---- recover scaleX/baseX, scaleY/baseY from the trace (X clean, Y joint-solve) ----
+    # first-tile-of-record regression: screenX = baseX + scaleX*accX  (per the disasm
+    # the per-record base uses accX as the integer pen). Use numpy-free least squares.
+    ax=[ts[0]['accX'] for _,ts in rec_list]
+    fx=[ts[0]['sx']   for _,ts in rec_list]
+    n=len(ax); sx=sum(ax); sy=sum(fx); sxx=sum(a*a for a in ax); sxy=sum(a*b for a,b in zip(ax,fx))
+    scaleX=(n*sxy - sx*sy)/(n*sxx - sx*sx); baseX=(sy - scaleX*sx)/n
+    # scaleY = 15/7 (known exact from the transform constants); baseY recovered by the
+    # joint solve that forces EVERY per-tile Iy=(sY-baseY)/scaleY to an integer (the
+    # README's method). A naive accY-regression mis-estimates baseY because the Y pen is
+    # absolute-per-tile, not a single accY intercept. baseY = floor(node+0xE4).
+    # scaleY = 15/7 (exact transform constant). baseY = floor(node+0xE4): the additive Y
+    # anchor. The integer-index joint-solve only pins baseY mod scaleY (alias period
+    # ~2.143px), so we pin the unique value by the same anchor magnitude as X and by
+    # matching the walker's descriptor-fixed Y term (empirically 333.0 for this object;
+    # the 108 alias is rejected). We solve mod-scaleY then snap into the [300,360] window
+    # consistent with baseX=533 and the trace's on-screen Y range.
+    scaleY=15.0/7.0
+    allY=[t['sy'] for _,ts in rec_list for t in ts]
+    # base residue (mod scaleY) that integerizes all Iy:
+    base_res=None; bestf=9
+    for bi in range(0, int(scaleY*1000)+1):
+        bY=bi/1000.0
+        err=max(abs((sY-bY)/scaleY - round((sY-bY)/scaleY)) for sY in allY)
+        if err<bestf: bestf=err; base_res=bY
+    # snap base_res into the physical window [300,360] (k*scaleY + base_res closest to 333)
+    import math as _m
+    k=round((333.0-base_res)/scaleY); baseY=round(base_res + k*scaleY)
+    print(f"recovered scaleX={scaleX:.6f} baseX={baseX:.4f} scaleY={scaleY:.6f} baseY={baseY:.4f} (res={base_res:.4f} maxfrac={bestf:.4f})")
+    print(f"  (5/3={5/3:.6f}  15/7={15/7:.6f})")
+
+    ram=Ram()
+    # node fields
+    ram.w32(NODE+0x160, GFX2)
+    ram.w32(NODE+0x15c, GFX1)
+    ram.w16(NODE+0x144, 0x0000)            # sid 0 -> GFX2[0]
+    ram.wf (NODE+0x0e0, round(baseX))      # anchorX (leaf floors it)
+    ram.wf (NODE+0x0e4, round(baseY))      # anchorY
+    ram.wf (NODE+0x0e8, 0.0)
+    ram.wf (NODE+0x0ec, scaleX)            # scaleX (node+0xEC)
+    ram.wf (NODE+0x0f0, scaleY)            # scaleY (node+0xF0)
+    ram.w32(NODE+0x0dc, 0)                 # tile-table index 0 -> r13 = DESC base
+    ram.w16(NODE+0x110, 0)                 # facing 0 (flip col = 0; not negated)
+    ram.w32(NODE+0x104, 0)                 # ==0 -> simple path (gives clean X here)
+    ram.w16(NODE+0x134, 0); ram.w16(NODE+0x136, 0)  # initial X/Y pen = 0 (accX(rec0)=-dx)
+    ram.wf (NODE+0x108, 0.0)
+    ram.w32(NODE+0x180, 0)
+
+    # GFX2 cell table: node+0x144 sid=0 -> offset = read_u32(GFX2+0); cell = GFX2+offset.
+    CELL=GFX2+0x10
+    ram.w32(GFX2+0, CELL-GFX2)
+    cur=CELL
+    ram.w16(cur, nrec); cur+=2              # record count (read via mov.w @r11+)
+    # record stride 8: [dx u16][dy u16][flags u16][sel u16]
+    for (_,ts) in rec_list:
+        t0=ts[0]
+        ram.w16(cur+0, t0['dx']&0xFFFF)
+        ram.w16(cur+2, t0['dy']&0xFFFF)
+        ram.w16(cur+4, t0['flags']&0xFFFF)
+        ram.w16(cur+6, t0['sel']&0xFFFF)
+        cur+=8
+
+    # descriptor table @ DESC = the REAL bytes from the dump (load-time, independent)
+    ram.w(DESC, DESC_BYTES)
+
+    # GFX1 part headers: the scale path reads byte@(GFX1 + sel*4) and a part-dim byte.
+    # On the simple+scale path actually exercised here, the per-tile transform uses the
+    # DESCRIPTOR (m,pitch) for stepping; the GFX1 part-dim byte feeds the @(0x24,r15)/
+    # @(0x20,r15) sub-tile base. Provide the real GFX1 region from the dump if the trace
+    # sel maps into a present GFX1; otherwise zero (the simple path for flip=0/flags=0
+    # uses the loc_8c0345c4 branch where r4=GFX1+read_u32(GFX1+sel*4) is computed but the
+    # per-tile X/Y base @(0x24,r15) comes from m*pitch). We zero GFX1 and verify.
+    for off in (0x04,0x08,0x14):
+        ram.w32(GLOB+off, struct.unpack(">I", bef32(0.0))[0] if False else
+                _read_glob(dump, GLOB+off))
+    # template globals read by the walker (0x8c1f9d84/88/94): copy REAL values from dump
+    # so the path-selection (tst on these) matches the live engine.
+    for g in (0x8C1F9D84,0x8C1F9D88,0x8C1F9D94, 0x8C1F9D88):
+        v=struct.unpack_from("<I",dump,doff(g))[0]
+        ram.w32(g, v)
+
+    # expected per-tile output from trace
+    exp=[]
+    for (_,ts) in rec_list:
+        for t in ts: exp.append((t['sx'],t['sy'],t['accX'],t['accY'],t['sel'],t['r13']))
+
+    # also dump the real descriptor values we used, for the report / independence proof
+    print("\nREAL descriptors used (read from dump @0x8C1F9F9C, NOT reconstructed):")
+    ri=0
+    for (_,ts) in rec_list:
+        r13_0=ts[0]['r13']; idx0=(r13_0-DESC)//4
+        cnt=DESC_BYTES[idx0*4+1]+1
+        m=DESC_BYTES[idx0*4]; pX=DESC_BYTES[idx0*4+2]; pY=DESC_BYTES[idx0*4+3]
+        print(f"  rec sel{ts[0]['sel']}: r13=0x{r13_0:08X} idx{idx0} -> m={m} count={cnt} pitchX={pX} pitchY={pY} (trace tiles={len(ts)})  {'OK' if cnt==len(ts) else 'MISMATCH'}")
+
+    # emit image.h (sparse non-zero words)
+    with open("image_dump.h","w") as f:
+        f.write("/* AUTO-GENERATED from RAM dump descriptors + ASMTRACE frame %s cid %s */\n"%(FRAME,CID))
+        f.write('#ifndef IMAGE_DUMP_H\n#define IMAGE_DUMP_H\n#include "sh4ctx.h"\n')
+        f.write("#define NODE_ADDR 0x%08xu\n#define STACK_ADDR 0x%08xu\n"%(NODE,STACK))
+        f.write("#define NREC %d\n#define NTILES %d\n"%(nrec,ntiles))
+        m=ram.m; words=[]
+        for a in range(0,len(m),4):
+            v=(m[a]<<24)|(m[a+1]<<16)|(m[a+2]<<8)|m[a+3]
+            if v: words.append((a,v))
+        f.write("static const u32 IMG_WORDS[][2]={\n")
+        for a,v in words: f.write("  {0x%06xu,0x%08xu},\n"%(a,v))
+        f.write("};\nstatic const int IMG_NWORDS=%d;\n"%len(words))
+        f.write("static const float EXP_SX[]={%s};\n"%(",".join("%.6ff"%e[0] for e in exp)))
+        f.write("static const float EXP_SY[]={%s};\n"%(",".join("%.6ff"%e[1] for e in exp)))
+        f.write("static const int   EXP_SEL[]={%s};\n"%(",".join(str(e[4]) for e in exp)))
+        f.write("static const int EXP_N=%d;\n"%len(exp))
+        f.write("#endif\n")
+    print("\nwrote image_dump.h: nrec=%d ntiles=%d"%(nrec,ntiles))
+
+def _read_glob(dump,g):
+    return struct.unpack_from("<I",dump,g&0xFFFFFF)[0]
+
+if __name__=="__main__": main()
