@@ -1,0 +1,10 @@
+*.exe
+*.obj
+*.ilk
+*.pdb
+# generated C is reproducible via run.cmd; keep it out of git
+gen_leaf.c
+gen_walker.c
+gen_transform.c
+transform_cases.h
+image.h
