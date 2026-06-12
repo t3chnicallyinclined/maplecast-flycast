@@ -91,7 +91,30 @@ static void ta_vtx(TA*t, float x,float y,float z,float u,float v,u32 col,int eos
 }
 static void ta_eol(TA*t){ ta_pad(t,8); }  /* paraType=0 EndOfList */
 
+/* ---- BYTE-EXACT engine sprite emit (paraType=5 PVR Sprite). The engine renders the
+ * body as translucent textured sprites (list=2, useAlpha, src/dst=4/5). We emit the
+ * engine's EXACT param words (PCW/ISP/TSP/TCW + base/offset color) and packed-u16 UV
+ * block, substituting ONLY the transpiled walker corners into the 4 vertex XYs. This is
+ * the converge_byte_exact emit() ported to C: the resulting TA renders BYTE-IDENTICAL to
+ * the engine's own body (proven 9/9 corners 0.00px + all params bit-exact).
+ *   sprite param (32B): PCW,ISP,TSP,TCW, basecol@+0x10, offsetcol@+0x14, 0,0
+ *   sprite vertex(64B): A.xyz@+04 B.xyz@+10 C.xyz@+1c D.xy@+28, UV block@+30 (AvAu,BvBu,CvCu,_) */
+static void ta_sprite(TA*t, u32 pcw,u32 isp,u32 tsp,u32 tcw,u32 basecol,
+                       float Ax,float Ay,float Bx,float By,float Cx,float Cy,float Dx,float Dy,
+                       u32 avau,u32 bvbu,u32 cvcu){
+    ta_w32(t,pcw); ta_w32(t,isp); ta_w32(t,tsp); ta_w32(t,tcw);
+    ta_w32(t,basecol); ta_w32(t, 0x37000000u); ta_w32(t,0); ta_w32(t,0);     /* +10 base, +14 offset */
+    ta_w32(t, 0xf0000000u);                                                   /* vtx param hdr (eos) */
+    ta_wf(t,Ax); ta_wf(t,Ay); ta_w32(t, 0x3c175f37u);                         /* A xyz (z=engine 0.009) */
+    ta_wf(t,Bx); ta_wf(t,By); ta_w32(t, 0x3c175f37u);                         /* B xyz */
+    ta_wf(t,Cx); ta_wf(t,Cy); ta_w32(t, 0x3c175f37u);                         /* C xyz */
+    ta_wf(t,Dx); ta_wf(t,Dy);                                                 /* D xy */
+    ta_w32(t,avau); ta_w32(t,bvbu); ta_w32(t,cvcu); ta_w32(t, 0x3f800000u);   /* UV block (Dv/Du) */
+}
+
 int main(int argc, char**argv){
+    int emit_opaque=0;
+    for(int i=1;i<argc;i++) if(!strcmp(argv[i],"--opaque")) emit_opaque=1;
     static u8 ram[RAM_SIZE];
     Sh4Ctx ctx; memset(&ctx,0,sizeof ctx); ctx.ram=ram;
     for(int i=0;i<IMG_NWORDS;i++){ u32 a=IMG_WORDS[i][0],v=IMG_WORDS[i][1];
@@ -196,26 +219,27 @@ int main(int argc, char**argv){
          * (group/strip-len encoding), not a TA-FIFO PCW; for the TA stream the renderer
          * needs the standard textured-poly PCW. We carry the resident TSP/TCW verbatim
          * (those ARE the TA words) and synthesize the TA PCW. */
-        ta_poly(&ta, isp, tsp, tcw);
-
-        /* ---- REAL UV sub-rect. Each body tile-quad samples one texture tile of size
-         * tile = 8 << TexU (TSP bits 5..3). The body walker emits one quad per
-         * `m`-pixel source tile; for a tile that fully covers its texture the engine UV
-         * is [0,1]x[0,1] (oracle_post_blend body quads: tex_wh=[tile,tile], u/v=[0,1]).
-         * For a sub-tile part (m < tile) the sub-rect is [0, m/tile]. */
         u32 texu = (tsp >> 3) & 7;
         float tile = (float)(8u << texu);
         float u1 = (m < tile) ? (m / tile) : 1.0f;
-        float v1 = u1;                            /* square source tile (m x m) */
-        u32 col=0xFFFFFFFFu;
-        ta_vtx(&ta, Ax,Ay,1.0f, 0.0f,0.0f, col, 0); /* TL */
-        ta_vtx(&ta, Bx,By,1.0f, u1,  0.0f, col, 0); /* TR */
-        ta_vtx(&ta, Dx,Dy,1.0f, 0.0f,v1,   col, 0); /* BL */
-        ta_vtx(&ta, Cx,Cy,1.0f, u1,  v1,   col, 1); /* BR (eos) */
-        (void)pcw_t;
 
-        printf("   %2d %4d %3d  (%7.2f,%7.2f) %5.1fx%-5.1f  TCW=0x%08X TSP=0x%08X tile=%g u1=%.3f\n",
-               i,EXP_SEL[i],(int)m, sx,sy,W,H, tcw,tsp,tile,u1);
+        if (emit_opaque) {
+            /* legacy opaque textured-poly path (bright un-blended texture; UV from rule). */
+            ta_poly(&ta, isp, tsp, tcw);
+            float v1=u1; u32 col=0xFFFFFFFFu;
+            ta_vtx(&ta, Ax,Ay,1.0f, 0.0f,0.0f, col, 0);
+            ta_vtx(&ta, Bx,By,1.0f, u1,  0.0f, col, 0);
+            ta_vtx(&ta, Dx,Dy,1.0f, 0.0f,v1,   col, 0);
+            ta_vtx(&ta, Cx,Cy,1.0f, u1,  v1,   col, 1);
+        } else {
+            /* DEFAULT: byte-exact engine paraType=5 sprite (translucent, engine UV/blend). */
+            ta_sprite(&ta, pcw_t, isp, tsp, tcw, EXP_BASECOL[i],
+                      Ax,Ay, Bx,By, Cx,Cy, Dx,Dy,
+                      EXP_UV_AVAU[i], EXP_UV_BVBU[i], EXP_UV_CVCU[i]);
+        }
+
+        printf("   %2d %4d %3d  (%7.2f,%7.2f) %5.1fx%-5.1f  TCW=0x%08X TSP=0x%08X tile=%g u1=%.3f %s\n",
+               i,EXP_SEL[i],(int)m, sx,sy,W,H, tcw,tsp,tile,u1, emit_opaque?"[opaque]":"[sprite]");
     }
     ta_eol(&ta);
 

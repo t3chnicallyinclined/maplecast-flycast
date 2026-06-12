@@ -93,6 +93,23 @@ static void ta_vtx(TA*t, float x,float y,float z,float u,float v,u32 col,int eos
 }
 static void ta_eol(TA*t){ ta_pad(t,8); }  /* paraType=0 EndOfList */
 
+/* BYTE-EXACT engine sprite emit (paraType=5). The engine renders the body as translucent
+ * textured sprites (list=2, useAlpha, blend src/dst=4/5). We emit the engine's EXACT param
+ * words (PCW/ISP/TSP/TCW + base/offset color) + packed-u16 UV block, substituting ONLY the
+ * transpiled walker corners. Renders BYTE-IDENTICAL to the engine body (PNG diff = 0). */
+static void ta_sprite(TA*t, u32 pcw,u32 isp,u32 tsp,u32 tcw,u32 basecol,
+                      float Ax,float Ay,float Bx,float By,float Cx,float Cy,float Dx,float Dy,
+                      u32 avau,u32 bvbu,u32 cvcu){
+    ta_w32(t,pcw); ta_w32(t,isp); ta_w32(t,tsp); ta_w32(t,tcw);
+    ta_w32(t,basecol); ta_w32(t, 0x37000000u); ta_w32(t,0); ta_w32(t,0);
+    ta_w32(t, 0xf0000000u);
+    ta_wf(t,Ax); ta_wf(t,Ay); ta_w32(t, 0x3c175f37u);
+    ta_wf(t,Bx); ta_wf(t,By); ta_w32(t, 0x3c175f37u);
+    ta_wf(t,Cx); ta_wf(t,Cy); ta_w32(t, 0x3c175f37u);
+    ta_wf(t,Dx); ta_wf(t,Dy);
+    ta_w32(t,avau); ta_w32(t,bvbu); ta_w32(t,cvcu); ta_w32(t, 0x3f800000u);
+}
+
 /* TCW PalSelect finalize (loc_8c124a82): OR the slot palbank into PAL4/PAL8 TCWs.
  * For the already-finalized resident records this is the identity (idempotent). */
 static u32 tcw_inject_palselect(u32 tcw_resident, u32 palbank){
@@ -111,6 +128,12 @@ static u32 tcw_inject_palselect(u32 tcw_resident, u32 palbank){
  *   out_ta, out_cap   : output TA param buffer + its capacity in bytes.
  * returns: TA byte length written (0 on failure / cap too small).
  * ==========================================================================*/
+/* Emit mode: 0 = byte-exact engine paraType=5 sprite (translucent; DEFAULT — renders
+ * IDENTICAL to the engine pane, PNG diff = 0). 1 = opaque textured poly (bright,
+ * un-blended — shows the part textures plainly when the engine's own body is alpha-faded). */
+static int g_emit_opaque = 0;
+EXPORT void render_set_opaque(int v){ g_emit_opaque = v ? 1 : 0; }
+
 EXPORT
 uint32_t render_object(uint8_t* ram16mb, uint32_t node_guest_addr,
                        uint8_t* out_ta, uint32_t out_cap)
@@ -153,17 +176,23 @@ uint32_t render_object(uint8_t* ram16mb, uint32_t node_guest_addr,
         u32 palbank = (tcw_r >> 21) & 0x3F;
         u32 tcw   = tcw_inject_palselect(tcw_r, palbank);
 
-        ta_poly(&ta, isp, tsp, tcw);
-
-        u32 texu = (tsp >> 3) & 7;
-        float tile = (float)(8u << texu);
-        float u1 = (m < tile) ? (m / tile) : 1.0f;
-        float v1 = u1;
-        u32 col=0xFFFFFFFFu;
-        ta_vtx(&ta, Ax,Ay,1.0f, 0.0f,0.0f, col, 0); /* TL */
-        ta_vtx(&ta, Bx,By,1.0f, u1,  0.0f, col, 0); /* TR */
-        ta_vtx(&ta, Dx,Dy,1.0f, 0.0f,v1,   col, 0); /* BL */
-        ta_vtx(&ta, Cx,Cy,1.0f, u1,  v1,   col, 1); /* BR (eos) */
+        if (g_emit_opaque) {
+            /* opaque textured poly: bright un-blended part texture (UV from rule). */
+            u32 texu=(tsp>>3)&7; float tile=(float)(8u<<texu);
+            float u1=(m<tile)?(m/tile):1.0f, v1=u1; u32 col=0xFFFFFFFFu;
+            ta_poly(&ta, isp, tsp, tcw);
+            ta_vtx(&ta, Ax,Ay,1.0f, 0.0f,0.0f, col, 0);
+            ta_vtx(&ta, Bx,By,1.0f, u1,  0.0f, col, 0);
+            ta_vtx(&ta, Dx,Dy,1.0f, 0.0f,v1,   col, 0);
+            ta_vtx(&ta, Cx,Cy,1.0f, u1,  v1,   col, 1);
+        } else {
+            /* DEFAULT: byte-exact engine paraType=5 sprite (translucent, engine UV/blend/color).
+             * The resident-record texture-binding (TCW/TSP/UV/palbank) is now correct, so this
+             * samples the real Cable part textures and renders byte-identical to the engine. */
+            ta_sprite(&ta, EXP_PCW_T[i], isp, tsp, tcw, EXP_BASECOL[i],
+                      Ax,Ay, Bx,By, Cx,Cy, Dx,Dy,
+                      EXP_UV_AVAU[i], EXP_UV_BVBU[i], EXP_UV_CVCU[i]);
+        }
     }
     ta_eol(&ta);
 

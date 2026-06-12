@@ -33,6 +33,7 @@
   <button id="btnEngine">Show ENGINE</button>
   <button id="btnBoth">Show BOTH</button>
   <label><input type="checkbox" id="bg"> draw background (fillBGP)</label>
+  <label><input type="checkbox" id="opaque"> opaque (bright textured, un-blended)</label>
 </div>
 
 <main id="stage">
@@ -130,6 +131,10 @@ async function transpiledTA(ram) {
     M.HEAPU8.set(ram, ramPtr);
     const cap = 64 * 1024;
     const outPtr = M._malloc(cap);
+    // Emit mode: byte-exact engine sprite (translucent, PNG diff=0 vs engine) by default;
+    // opaque bright textured poly when the checkbox is set (shows the part textures plainly
+    // even when the engine's own body is alpha-faded in this captured frame).
+    if (M._render_set_opaque) M._render_set_opaque(document.getElementById('opaque').checked ? 1 : 0);
     const len = M._render_object(ramPtr, NODE_GUEST, outPtr, cap);
     const quads = M._render_object_quad_count();
     const caps = M._render_object_capture_count();
@@ -192,6 +197,7 @@ document.getElementById('btnTranspiled').onclick = () => setView('transpiled');
 document.getElementById('btnEngine').onclick = () => setView('engine');
 document.getElementById('btnBoth').onclick = () => setView('both');
 document.getElementById('bg').onchange = () => { if (lastSnap) renderAll().catch(e => log(e.stack || e.message, 'err')); };
+document.getElementById('opaque').onchange = () => { if (lastSnap) renderAll().catch(e => log(e.stack || e.message, 'err')); };
 setView('both');
 
 renderAll().catch(e => { log('FATAL: ' + (e.stack || e.message), 'err'); });

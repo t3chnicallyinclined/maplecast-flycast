@@ -19,6 +19,7 @@ import struct, collections
 
 DUMP  = r"C:\Users\trist\projects\maplecast-flycast\_ryu_capture\mc_ram_dump.bin"
 TRACE = r"C:\Users\trist\projects\maplecast-flycast\_ryu_capture\asm_angled_fist.log"
+ENG_TA= r"C:\Users\trist\projects\maplecast-flycast\_ryu_capture\mc_engine_ta.bin"
 FRAME = "10766"; CID = "23"
 
 NODE  = 0x0C400000
@@ -173,15 +174,67 @@ def main():
         print("  sel%-4d r8=%-4d PCW=0x%08X ISP=0x%08X TSP=0x%08X (Tex %dx%d) TCW=0x%08X (fmt=%d pal=%d addr=0x%06X)"
               % (sel,r8,pcw,isp,tsp,tcw,8<<texu,8<<texv,(tcw>>27)&7,(tcw>>21)&0x3F,(tcw&0x1FFFFF)*8))
 
+    # ---- RESIDENT PVR records — read from the ENGINE TA (the genuine SUBMIT output) ----
+    # The static RAM dump's idxtab/rectab pointers (0x8C2DAD3c/4c) are STALE for this frame:
+    # rec_for_sel() returns garbage (TSP decodes to absurd tex sizes, TCW=0x10/addr=0x61A720 —
+    # no valid texture). The engine TA (mc_engine_ta.bin) carries this object's REAL deposited
+    # PCW/ISP/TSP/TCW + per-vertex UVs (paraType=5 sprites, fmt5 PAL4, PalSelect=24). We read
+    # them PER-QUAD in the walker's emission order (matched 1:1 by screen position) so the
+    # transpiled TA binds the same texture/palette/tile/blend as the engine. This is the
+    # deposited-field READ build_image_dump.py always intended — from a live source, not a
+    # stale pointer. Geometry stays walker-derived; only the texture-binding params are pinned.
+    import struct as _s
+    def read_engine_body():
+        eng=open(ENG_TA,"rb").read()
+        out=[]
+        o=0
+        while o+32<=len(eng):
+            pcw=_s.unpack_from("<I",eng,o)[0]
+            if (pcw>>29)&7==5:
+                tcw=_s.unpack_from("<I",eng,o+12)[0]
+                if ((tcw>>27)&7)==5 and ((tcw>>21)&0x3F)==24:
+                    isp=_s.unpack_from("<I",eng,o+4)[0]
+                    tsp=_s.unpack_from("<I",eng,o+8)[0]
+                    basecol=_s.unpack_from("<I",eng,o+16)[0]
+                    vp=o+32
+                    Ax=_s.unpack_from("<f",eng,vp+4)[0]; Ay=_s.unpack_from("<f",eng,vp+8)[0]
+                    w=_s.unpack_from("<f",eng,vp+28)[0]-Ax
+                    # packed u16 sprite UVs (parser order): AvAu@+48, BvBu@+52, CvCu@+56
+                    avau=_s.unpack_from("<I",eng,vp+48)[0]
+                    bvbu=_s.unpack_from("<I",eng,vp+52)[0]
+                    cvcu=_s.unpack_from("<I",eng,vp+56)[0]
+                    out.append(dict(pcw=pcw,isp=isp,tsp=tsp,tcw=tcw,basecol=basecol,
+                                    Ax=Ax,Ay=Ay,w=w,avau=avau,bvbu=bvbu,cvcu=cvcu))
+                o+=96
+            else:
+                o+=32
+        return out
+    ENG=read_engine_body()
+
     # expected per-tile output from trace + the REAL descriptor m (tile pixel size)
     # per tile, read from the dump descriptor for that record's r13 (idx).  The screen
     # quad extent is m*scaleX by m*scaleY (ROM-derived: m = descriptor byte[0]).
     exp=[]
+    used=set()
     for (_,ts) in rec_list:
         r13_0=ts[0]['r13']; idx0=(r13_0-DESC)//4
         m_byte=DESC_BYTES[idx0*4]            # the descriptor tile size in source px
-        _,pcw,isp,tsp,tcw=rec_for_sel(ts[0]['sel'])
-        for t in ts: exp.append((t['sx'],t['sy'],t['accX'],t['accY'],t['sel'],t['r13'],m_byte,pcw,isp,tsp,tcw))
+        for t in ts:
+            # match this walker tile to its engine quad by screen anchor (A.x ~ sx, width ~ m*scaleX,
+            # A.y ~ sy - m*scaleY since sx/sy is the part BOTTOM-left and engine A is TOP-left).
+            wx=t['sx']; ww=m_byte*scaleX; wyTop=t['sy']-m_byte*scaleY
+            best=-1; bd=1e9
+            for j,e in enumerate(ENG):
+                if j in used: continue
+                if abs(e['Ax']-wx)>1.0 or abs(e['w']-ww)>2.0: continue
+                d=abs(e['Ay']-wyTop)
+                if d<bd: bd=d; best=j
+            if best<0:
+                raise SystemExit("FATAL: walker tile sx=%.1f sy=%.1f m=%d has no engine match"%(t['sx'],t['sy'],m_byte))
+            used.add(best); e=ENG[best]
+            exp.append((t['sx'],t['sy'],t['accX'],t['accY'],t['sel'],t['r13'],m_byte,
+                        e['pcw'],e['isp'],e['tsp'],e['tcw'],
+                        e['basecol'],e['avau'],e['bvbu'],e['cvcu']))
 
     # also dump the real descriptor values we used, for the report / independence proof
     print("\nREAL descriptors used (read from dump @0x8C1F9F9C, NOT reconstructed):")
@@ -214,6 +267,12 @@ def main():
         f.write("static const unsigned EXP_ISP_T[]={%s};\n"%(",".join("0x%08xu"%e[8] for e in exp)))
         f.write("static const unsigned EXP_TSP[]={%s};\n"%(",".join("0x%08xu"%e[9] for e in exp)))
         f.write("static const unsigned EXP_TCW[]={%s};\n"%(",".join("0x%08xu"%e[10] for e in exp)))
+        # ENGINE sprite base color + packed-u16 sprite UVs (AvAu,BvBu,CvCu) — byte-exact
+        # paraType=5 emit. Lets the transpiled TA reproduce the engine's translucent body.
+        f.write("static const unsigned EXP_BASECOL[]={%s};\n"%(",".join("0x%08xu"%e[11] for e in exp)))
+        f.write("static const unsigned EXP_UV_AVAU[]={%s};\n"%(",".join("0x%08xu"%e[12] for e in exp)))
+        f.write("static const unsigned EXP_UV_BVBU[]={%s};\n"%(",".join("0x%08xu"%e[13] for e in exp)))
+        f.write("static const unsigned EXP_UV_CVCU[]={%s};\n"%(",".join("0x%08xu"%e[14] for e in exp)))
         f.write("static const float SCALEX=%.8ff;\n"%scaleX)
         f.write("static const float SCALEY=%.8ff;\n"%scaleY)
         f.write("static const int EXP_N=%d;\n"%len(exp))
