@@ -14,6 +14,9 @@ image_dump.h
 runout.txt
 # emitted TA command stream — reproducible via run.cmd step [6/6]
 ta_buffer.bin
+# convergence TA streams (real tcw/corners => ROM-derived). Reproducible via
+# converge_first_pixels.mjs from probe_body_uv.json + ta_buffer.bin.
+ta_*.ta
 
 # ── render harness (render_ta.mjs) ──
 # Node deps for the headless-WebGPU harness (reinstalled via `npm install`).
