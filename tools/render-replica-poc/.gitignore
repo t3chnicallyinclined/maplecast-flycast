@@ -6,15 +6,25 @@
 render_replica_node.mjs
 render_replica_node.wasm
 verify_wasm_node.mjs
+# Phase-2 emcc node verification build (reproducible via build_wasm_frame.sh + verify_frame_wasm.mjs)
+render_frame_node.mjs
+render_frame_node.wasm
 # generated C is reproducible via run.cmd; keep it out of git
 gen_leaf.c
 gen_walker.c
 gen_transform.c
 gen_submit.c
 gen_render_object.c
+gen_walker_root.c
 transform_cases.h
 image.h
 image_dump.h
+# Phase-2 generated whole-frame image (ROM-derived: slot table + 6 char structs +
+# camera matrices + resident rectab/GFX bytes) — reproducible via build_image_frame.py.
+image_frame.h
+# Phase-2 computed whole-scene sprite list (ROM-derived screen geometry) — reproducible
+# via render_frame_test.exe from image_frame.h.
+frame_sprites.json
 # Phase-1 generated image (ROM-derived: carries MVC2 char-struct + camera matrices +
 # resident rectab/GFX bytes) — reproducible via build_image_full.py from the dump.
 image_full.h

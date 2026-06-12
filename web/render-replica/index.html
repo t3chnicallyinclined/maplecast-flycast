@@ -25,7 +25,7 @@
 <body>
 <header>
   <h1>Transpiled MVC2 render — LIVE in the browser via the real pvr2-renderer</h1>
-  <div class="sub">walker(loc_8c0344d4) &rarr; corners &rarr; TA &rarr; ta-parser.mjs &rarr; <span class="hl">pvr2-renderer.mjs</span> (GOLD STANDARD) &rarr; WebGPU canvas &nbsp;|&nbsp; static-snapshot frame (cid23 / P2C1 Cable)</div>
+  <div class="sub">slot-walk(loc_8c0308c2) &rarr; per-body render_object_full &rarr; scene TA &rarr; ta-parser.mjs &rarr; <span class="hl">pvr2-renderer.mjs</span> (GOLD STANDARD) &rarr; WebGPU canvas &nbsp;|&nbsp; PHASE 2: ALL on-screen BODY objects (cursor-derived bases)</div>
 </header>
 
 <div class="toolbar">
@@ -38,7 +38,7 @@
 
 <main id="stage">
   <div class="panel" id="pTranspiled">
-    <h2>Transpiled (render_replica.wasm &rarr; pvr2)</h2>
+    <h2>Transpiled (render_frame.wasm slot-walk &rarr; pvr2)</h2>
     <canvas id="cTranspiled" width="640" height="480"></canvas>
   </div>
   <div class="panel" id="pEngine">
@@ -62,6 +62,11 @@
 // page (symlink/copy the _ryu_capture .bin files there, or run from the repo root
 // http server and they resolve via ../../_ryu_capture/). See loadSnap() below.
 // ============================================================================
+// PHASE 2: render_frame.wasm walks the WHOLE slot table (loc_8c0308c2) and renders EVERY
+// on-screen BODY object (not just the one resident node). It consumes the live 16MB RAM
+// and derives each object's submit-allocation base from the running cursor (= node+0xDC
+// prefix-sum). The single-object render_replica.wasm is kept for the diagnostic toggle.
+import createRenderFrame   from './render_frame.mjs';
 import createRenderReplica from './render_replica.mjs';
 
 const W_DIR = new URL('../webgpu/', import.meta.url);
@@ -122,25 +127,22 @@ function synthSnap(w, h) {
     return s;
 }
 
-// Run the transpiled WASM render -> TA buffer (Uint8Array).
-let wasmMod;
+// Run the transpiled WHOLE-FRAME render -> scene TA buffer (Uint8Array).
+// render_frame.wasm walks the slot table and emits every BODY object's tiles.
+let frameMod;
 async function transpiledTA(ram) {
-    if (!wasmMod) { log('Instantiating render_replica.wasm…'); wasmMod = await createRenderReplica(); }
-    const M = wasmMod;
+    if (!frameMod) { log('Instantiating render_frame.wasm (whole-frame slot-walk)…'); frameMod = await createRenderFrame(); }
+    const M = frameMod;
     const ramPtr = M._malloc(ram.length);
     M.HEAPU8.set(ram, ramPtr);
-    const cap = 64 * 1024;
+    const cap = 256 * 1024;                 // room for all bodies' tiles
     const outPtr = M._malloc(cap);
-    // Emit mode: byte-exact engine sprite (translucent, PNG diff=0 vs engine) by default;
-    // opaque bright textured poly when the checkbox is set (shows the part textures plainly
-    // even when the engine's own body is alpha-faded in this captured frame).
-    if (M._render_set_opaque) M._render_set_opaque(document.getElementById('opaque').checked ? 1 : 0);
-    const len = M._render_object(ramPtr, NODE_GUEST, outPtr, cap);
-    const quads = M._render_object_quad_count();
-    const caps = M._render_object_capture_count();
+    const len = M._render_frame_ta(ramPtr, outPtr, cap);
+    const bodies = M._render_frame_body_count();
+    const quads  = M._render_frame_quad_count();
     const ta = M.HEAPU8.slice(outPtr, outPtr + len);
     M._free(ramPtr); M._free(outPtr);
-    log(`render_object(): ${len} TA bytes, ${quads} quads (walker captured ${caps} tiles)`, 'ok');
+    log(`render_frame(): ${len} TA bytes, ${bodies} BODY object(s), ${quads} body tiles (cursor-derived bases)`, 'ok');
     return ta;
 }
 

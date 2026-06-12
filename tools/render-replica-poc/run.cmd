@@ -63,6 +63,20 @@ where node >nul 2>&1 && node converge_full_computed.mjs | findstr /C:"PARAM byte
 where node >nul 2>&1 && node render_ta.mjs --ta ta_computed.bin --vram ..\..\_ryu_capture\mc_vram_dump.bin --pvr ..\..\_ryu_capture\mc_pvr_regs.bin --out PNG_computed.png >nul 2>&1
 where node >nul 2>&1 && node render_ta.mjs --ta ta_engine_corners.bin --vram ..\..\_ryu_capture\mc_vram_dump.bin --pvr ..\..\_ryu_capture\mc_pvr_regs.bin --out PNG_gt_full.png >nul 2>&1
 where node >nul 2>&1 && node diff_png.mjs PNG_gt_full.png PNG_computed.png --tol 0 | findstr /C:"match" /C:"diff pixels" /C:"max"
+
+echo.
+echo === [8/8] PHASE-2: render_frame -- WHOLE-FRAME slot-walk (loc_8c0308c2), ALL bodies ===
+echo     transpiled root walk + CURSOR-DERIVED per-object rectab base (node+0xDC prefix-sum).
+python gen_walker_root.py >nul 2>&1 || goto :err
+python build_image_frame.py | findstr /C:"body object" /C:"body L"
+del *.obj >nul 2>&1
+cl /nologo /O2 /fp:precise /Fe:render_frame_test.exe gen_walker_root.c render_frame.c gen_render_object.c gen_transform_obj.c gen_submit_params.c gen_walker.c gen_leaf.c render_frame_test.c >nul 2>&1
+.\render_frame_test.exe | findstr /C:"render_frame:" /C:"CURSOR PROOF" /C:"byte-exact" /C:"SYNTH" /C:"RESULT"
+echo   -- pixel converge: whole-scene BODY TA vs engine bodies through the gold renderer:
+where node >nul 2>&1 && node converge_frame.mjs | findstr /C:"PARAM byte-exact"
+where node >nul 2>&1 && node render_ta.mjs --ta ta_frame_render.bin --vram ..\..\_ryu_capture\mc_vram_dump.bin --pvr ..\..\_ryu_capture\mc_pvr_regs.bin --out PNG_frame_render.png >nul 2>&1
+where node >nul 2>&1 && node render_ta.mjs --ta ta_frame_engine.bin --vram ..\..\_ryu_capture\mc_vram_dump.bin --pvr ..\..\_ryu_capture\mc_pvr_regs.bin --out PNG_frame_engine.png >nul 2>&1
+where node >nul 2>&1 && node diff_png.mjs PNG_frame_engine.png PNG_frame_render.png --tol 0 | findstr /C:"match" /C:"diff pixels"
 goto :eof
 :err
 echo GEN FAILED
