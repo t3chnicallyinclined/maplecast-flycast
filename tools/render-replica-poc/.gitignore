@@ -11,3 +11,22 @@ image.h
 image_dump.h
 *.log
 runout.txt
+
+# ── render harness (render_ta.mjs) ──
+# Node deps for the headless-WebGPU harness (reinstalled via `npm install`).
+node_modules/
+__pycache__/
+# ROM-DERIVED capture/render artifacts — NEVER commit (CLAUDE.md). Captured
+# mirror streams contain MVC2 VRAM/TA; rendered PNGs are game frames; the
+# VRAM/PVR/RAM dumps are ROM-derived. All reproducible via capture_mirror.mjs
+# / the MAPLECAST_DUMP_RAM server hook.
+*.zcst
+*.png
+*.vram
+*.pvr
+*.snap
+mc_ram_dump.bin
+mc_vram_dump.bin
+mc_pvr_regs.bin
+_mcsv_body.bin
+_probe.cjs

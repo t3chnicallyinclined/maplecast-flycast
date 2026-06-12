@@ -147,3 +147,105 @@ tables + the 1 RAM vtable as `switch`es, and transpile the trig leaves
 (`loc_8c11e2e0`/`loc_8c11e860`, present in bank11 — sin/cos via the 2π/π-2 constants)
 and the bank12 submit. No general indirect-jump resolver is required (§8 confirmed
 ~96% statically resolved).
+
+---
+
+# Render harness — `render_ta.mjs` (Phase 4 back-half: TA → PIXELS, headless)
+
+The transpiler above is the **front half** (SH4 render code → emitted TA quads). This
+is the **back half** (`docs/RENDER-REPLICA-PLAN.md` §Phase 4): run the project's
+gold-standard rasterizer **headless, on a file**, so the transpiled TA can be pixel-tested
+offline and diffed vs ground truth.
+
+```
+TA buffer  +  VRAM (8MB)  +  pvr_regs (32KB)  +  pvrSnapshot (16×u32)
+   └─► ta-parser.mjs    (TAParser.parse [+ fillBGP])     [REUSED VERBATIM]
+   └─► pvr2-renderer.mjs (PVR2Renderer.renderFrame, GOLD STANDARD CONFIG) [VERBATIM]
+   └─► offscreen WebGPU render target → readback → PNG
+```
+
+It is the **same pipeline the live cockpit** (`web/webgpu-test.html`) runs (FrameDecoder →
+TextureManager → TAParser → PVR2Renderer.renderFrame), just driven headless from a file
+instead of a WebSocket + `<canvas>`. **`ta-parser.mjs`, `pvr2-renderer.mjs`,
+`texture-manager.mjs`, `frame-decoder.mjs` are imported UNCHANGED** — zero edits to the
+render modules (the harness reaches `renderFrame`'s existing offscreen `renderTarget`
+path and calls `PVR2Renderer._init()` directly to skip the canvas-only `init()`).
+
+## Headless WebGPU backend
+
+**`webgpu` npm package (Dawn N-API bindings)** — picked over Deno (not installed on the
+box) and headless-Chrome/puppeteer (heavier, flakier readback). It exposes a real
+WebGPU on the GPU with no canvas/swap-chain. `webgpu-headless.mjs` installs its `globals`
+(`GPUBufferUsage`/`GPUTextureUsage`/`GPUShaderStage`/`GPUColorWrite` + all `GPU*` classes)
+onto `globalThis` and provides `navigator.gpu`, so the unchanged modules resolve their
+WebGPU symbols. Verified on an RTX 3090 (Dawn → Vulkan); the WGSL in `shaders.mjs`
+compiles and runs unmodified.
+
+```
+npm install                    # webgpu (Dawn) + pngjs
+node render_ta.mjs --self-test --out selftest.png         # proves WebGPU+readback+PNG
+node render_ta.mjs --mirror <file.zcst> --out frame.png   # render a captured live frame
+node render_ta.mjs --ta ta.bin --vram vram.bin --pvr pvr.bin --out f.png   # the triple
+node diff_png.mjs a.png b.png --out diff.png [--tol N]     # pixel diff + heatmap
+```
+
+## INPUT INTERFACE — what the converge step plugs in
+
+Two equivalent ways to feed the harness; **the raw triple is the converge contract.**
+
+### (A) The raw triple — what the transpiler + a prod dump produce
+| Flag | File | Size | Meaning | Consumed by |
+|---|---|---|---|---|
+| `--ta`   | TA command stream | var | the game's native PVR2 TA buffer. **`MAPLECAST_DUMP_TA=1`** server already writes this exact format to `<dir>/frame_NNNNNN.bin` (`maplecast_mirror.cpp:1954`). The transpiled `submit` emits the *same* byte format. | `TAParser.parse(buf, buf.length)` |
+| `--vram` | VRAM image | **8 MiB** | the part-pixel textures the TA samples by `tcw`. **`MAPLECAST_DUMP_RAM` server hook writes `/dev/shm/mc_vram_dump.bin`** (`maplecast_oracle_hook.cpp:3168`) — byte-for-byte this file. | `texMgr.getTexture(tsp,tcw,vram)` + `fillBGP` |
+| `--pvr`  | PVR register block | **32 KiB** (`pvr_RegSize=0x8000`) | palette RAM @ `+0x1000`, `PAL_RAM_CTRL` @ `+0x108`, `ISP_BACKGND_*` for `fillBGP`. **Same hook writes `/dev/shm/mc_pvr_regs.bin`** (`:3171`). | `texMgr.updatePalette` + `fillBGP` |
+| `--snap` | pvrSnapshot | 64 B = 16×u32 LE | only `snap[0]` is read (`_ndcMat`: framebuffer tile dims `tx=g&0x3F, ty=(g>>16)&0x3F`). **Optional** — omitted ⇒ synthesized for `--width × --height` (640×480 default), which is correct for MVC2's FB. | `renderFrame`'s NDC matrix |
+
+The three server dumps (`mc_vram_dump.bin`, `mc_pvr_regs.bin`, plus a `MAPLECAST_DUMP_TA`
+frame OR a transpiler-emitted TA) drop straight in with **no transform** — the dump sizes
+already match the harness's expected sizes.
+
+### (B) A captured ZCST mirror stream — easiest, self-contained
+`--mirror <file.zcst>` replays a captured live stream through `FrameDecoder`
+(reused verbatim — the same decoder the cockpit runs), which yields exactly the
+renderFrame inputs (TA + VRAM + pvr_regs + pvrSnapshot + dirty-page list). Capture with:
+
+```
+node capture_mirror.mjs --url wss://nobd.net/ws --out frame.zcst --frames 400
+```
+
+Container framing: `[u32 LE len][message]…` per WS message (one ZCST envelope each).
+A `SYNC`/`FSYN` seeds full VRAM+PVR; a TA **keyframe** (`deltaPayloadSize==taSize`)
+establishes `prevTA`; subsequent **deltas** patch it. `--frame N` selects which decoded
+frame to render (default: last). The in-match prod stream also carries an `MCSV` savestate
+blob (full `dc_serialize`, nested `ZCST`); the harness skips it (FrameDecoder only consumes
+SYNC/FSYN for VRAM) — VRAM comes from the SYNC, or supply `--vram` from the dump.
+
+## Validation — DONE, end-to-end, against a real known-good frame
+
+| Test | Result |
+|---|---|
+| **`--self-test`** (synthetic gouraud quad) | renders the expected R/G/B/Y-corner quad; proves Dawn WebGPU + WGSL compile + offscreen render-target + texture readback + PNG write all work headless. |
+| **`--mirror live.zcst`** — a **captured live prod frame** (SYNC + TA keyframe + deltas off `wss://nobd.net/ws`) | renders the **MVC2 character-select screen pixel-correctly** (rotating portrait globe, neon grid, side art) — textures sampled from the SYNC's VRAM, palette from pvr_regs, translucency + `fillBGP` background all correct. This is the gold-standard rasterizer producing the actual game screen **headless**, identical in pipeline to the cockpit. |
+| **Determinism** (`diff_png.mjs` same frame ×2) | **100.0000% match, max Δ=0** — byte-identical render run-to-run. |
+
+So: **the known-TA → correct-pixels claim is proven** with a live frame, not just a
+synthetic one. The harness is a clean, reusable, deterministic loop ready for the
+transpiled TA: emit a TA buffer, pass `--ta` (+ the `mc_vram_dump.bin` / `mc_pvr_regs.bin`),
+render, and `diff_png.mjs` against the cockpit screenshot or the `MAPLECAST_DUMP_TA`
+frame rendered through this same harness.
+
+### Files (render harness)
+- `render_ta.mjs` — the harness (args, FrameDecoder/`--mirror` path, raw-triple path,
+  self-test, offscreen render target + readback + PNG).
+- `webgpu-headless.mjs` — Dawn bootstrap (installs GPU globals + `navigator.gpu`).
+- `capture_mirror.mjs` — capture a live ZCST stream to a replayable `.zcst` file.
+- `diff_png.mjs` — PNG-vs-PNG pixel diff (match %, max/mean Δ, heatmap, CI exit code).
+- `package.json` — deps: `webgpu` (Dawn), `pngjs`.
+
+### If a render module ever needs touching (flag it)
+None were touched. The only non-obvious coupling: `PVR2Renderer._pipe` builds pipelines
+for `this.fmt`, so the harness sets `R.fmt='rgba8unorm'` (the offscreen color format) and
+calls `_init()` directly. If a future change makes `renderFrame` assume a live canvas
+(`this.ctx`) on the `renderTarget` path, the harness would need a stub — currently it does
+not, because the `renderTarget` branch never touches `this.ctx`.

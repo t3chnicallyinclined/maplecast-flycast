@@ -1,0 +1,15 @@
+{
+  "name": "render-replica-poc",
+  "version": "0.1.0",
+  "description": "Headless WebGPU harness: TA buffer + VRAM + pvr_regs -> ta-parser.mjs + pvr2-renderer.mjs -> PNG",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "render": "node render_ta.mjs",
+    "diff": "node diff_png.mjs"
+  },
+  "dependencies": {
+    "webgpu": "^0.4.0",
+    "pngjs": "^7.0.0"
+  }
+}
