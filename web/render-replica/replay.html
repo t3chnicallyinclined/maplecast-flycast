@@ -434,8 +434,10 @@ async function connectLive(url) {
                 els.gt.className = 'badge synth'; els.gt.textContent = 'live';
                 log('[live] seeded. Streaming frames…', 'ok');
             } else if (liveSeeded) {
-                // msg N = raw FRMx record (drop frames that race ahead of seed completion)
-                liveApplyFrame(u8);
+                // msg N = a FRMx record, possibly ZCST-wrapped (prod server compresses every
+                // message; the mock sends raw). zcstDecompress() handles BOTH (raw passthrough).
+                // (drop frames that race ahead of seed completion)
+                liveApplyFrame(zcstDecompress(u8));
             }
         } catch (e) {
             log('[live] frame error: ' + (e.stack || e.message), 'err');

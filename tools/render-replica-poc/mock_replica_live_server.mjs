@@ -34,7 +34,8 @@ import { zstdCompressSync } from 'node:zlib';
 import { WebSocketServer } from 'ws';
 
 const HERE = new URL('.', import.meta.url);
-const argv = process.argv.slice(2);
+const argv = process.argv.slice(2).filter(a => a !== '--zstd');
+const ZSTD_FRAMES = process.argv.includes('--zstd');   // ZCST-wrap each frame (match the prod server exactly)
 const REC_PATH = argv[0] || new URL('../../_ryu_capture/mc_render_rec_synth.bin', HERE).pathname;
 const PORT     = Number(argv[1] || 7212);
 const FPS      = Number(argv[2] || 60);
@@ -91,7 +92,12 @@ env.writeUInt32LE(0x5453435A, 0);        // "ZCST" little-endian bytes (Z,C,S,T)
 env.writeUInt32LE(prefix.length, 4);     // uncompressed size
 comp.copy(env, 8);
 
-console.log(`[mock-replica-live] ${REC_PATH}`);
+// Optionally ZCST-wrap each FRMx frame to EXACTLY mirror the prod server (which compresses
+// every message). Precompute so the per-tick path stays cheap.
+const zcstWrap = (u8) => { const c = zstdCompressSync(Buffer.from(u8)); const e = Buffer.alloc(8 + c.length); e.writeUInt32LE(0x5453435A, 0); e.writeUInt32LE(u8.length, 4); c.copy(e, 8); return e; };
+const wireFrames = ZSTD_FRAMES ? frames.map(zcstWrap) : frames;
+
+console.log(`[mock-replica-live] ${REC_PATH}${ZSTD_FRAMES ? '  [ZCST frames -> exact prod protocol]' : '  [raw frames]'}`);
 console.log(`  MCRR v${version}: ${nStatic} static, ${nDynamic} dynamic, ${nFrames} frames; vram=${vramBytes} pvr=${pvrBytes}`);
 console.log(`  prefix ${(prefix.length/1048576).toFixed(1)} MB -> ZCST ${(env.length/1048576).toFixed(2)} MB  | dynamic ${dynPerFrame}B/frame`);
 console.log(`  serving ws://127.0.0.1:${PORT}  @ ${FPS} fps (${FRAME_MS.toFixed(2)} ms/frame), looping ${nFrames} frames`);
@@ -111,8 +117,8 @@ wss.on('connection', (ws, req) => {
         if (ws.readyState !== ws.OPEN) { clearInterval(timer); return; }
         // bufferedAmount backpressure: skip a tick if the socket is congested
         if (ws.bufferedAmount > 4 * 1024 * 1024) return;
-        ws.send(frames[i]);
-        i = (i + 1) % frames.length;
+        ws.send(wireFrames[i]);
+        i = (i + 1) % wireFrames.length;
     }, FRAME_MS);
 
     ws.on('close', () => { clearInterval(timer); console.log(`[mock-replica-live] - client ${who}`); });
