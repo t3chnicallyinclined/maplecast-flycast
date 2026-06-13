@@ -1,0 +1,15 @@
+# Build outputs — reproducible via tools/render-replica-poc/build_wasm{,_frame}.sh.
+# render_replica/render_frame .wasm/.mjs are emcc artifacts; keep them OUT of git (rebuild).
+render_replica.wasm
+render_replica.mjs
+render_replica_node.mjs
+render_frame.wasm
+render_frame.mjs
+
+# ROM-DERIVED snapshot (NEVER commit — CLAUDE.md): a local copy of the
+# _ryu_capture .bin files placed here for the page to fetch from ./snap/.
+snap/
+*.bin
+
+# headless-render verification screenshots (game pixels => ROM-derived)
+*.png

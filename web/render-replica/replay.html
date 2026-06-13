@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF)</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0c0e12; color:#cdd6e0; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; }
+  header { padding:10px 16px; background:#11141b; border-bottom:1px solid #222; }
+  header h1 { margin:0; font-size:15px; color:#7fd1ff; }
+  header .sub { color:#7a8694; font-size:11px; margin-top:2px; }
+  main { display:flex; gap:24px; padding:18px; flex-wrap:wrap; align-items:flex-start; }
+  .panel { background:#11141b; border:1px solid #222; border-radius:6px; padding:12px; }
+  .panel h2 { margin:0 0 8px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#9fb0c0; }
+  canvas { display:block; image-rendering:pixelated; background:#000; border:1px solid #2a3340; }
+  .toolbar { padding:0 18px 12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  button { background:#1c2330; color:#cdd6e0; border:1px solid #33425a; border-radius:4px; padding:6px 12px; cursor:pointer; font:inherit; }
+  button:hover { background:#243049; }
+  button:disabled { opacity:.45; cursor:default; }
+  button.active { background:#1f5d8c; border-color:#3a8fd0; color:#fff; }
+  #scrub { width:380px; vertical-align:middle; }
+  #log { white-space:pre-wrap; padding:10px 18px; color:#8aa0b4; max-height:220px; overflow:auto; border-top:1px solid #1b2129; }
+  .ok { color:#7CFC9A; } .err { color:#ff8a8a; } .hl { color:#7fd1ff; } .warn { color:#ffd27f; }
+  label { color:#9fb0c0; }
+  .stat { display:inline-block; min-width:64px; }
+  .badge { padding:2px 8px; border-radius:4px; font-weight:bold; }
+  .badge.pass { background:#14422a; color:#7CFC9A; border:1px solid #2a6e46; }
+  .badge.fail { background:#4a1c1c; color:#ff8a8a; border:1px solid #7e3030; }
+  .badge.synth{ background:#3a3320; color:#ffd27f; border:1px solid #6e6030; }
+  #drop { border:1px dashed #33425a; border-radius:6px; padding:6px 12px; color:#7a8694; }
+  #drop.hot { border-color:#3a8fd0; color:#cdd6e0; background:#142033; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Render-Replica — MOTION playback (MCRR &rarr; render_frame.wasm &rarr; pvr2-renderer, SH4 OFF)</h1>
+  <div class="sub">parse MCRR &rarr; seed 16MB RAM (static once) &rarr; per-frame apply DYNAMIC regions &rarr; <span class="hl">render_frame()</span> slot-walk &rarr; ta-parser.mjs &rarr; pvr2-renderer.mjs &rarr; animate &nbsp;|&nbsp; per-frame engine-TA validator</div>
+</header>
+
+<div class="toolbar">
+  <button id="btnPlay" disabled>▶ Play</button>
+  <button id="btnStep" disabled>Step ▸</button>
+  <input type="range" id="scrub" min="0" max="0" value="0" step="1" disabled>
+  <span class="stat">frame <b id="fcur">–</b>/<b id="ftot">–</b></span>
+  <span class="stat">fps <b id="fps">–</b></span>
+  <span>GT <span id="gt" class="badge synth">–</span></span>
+  <label id="drop">drop an .mcrr/.bin here · <input type="file" id="file" accept=".bin,.mcrr"></label>
+  <span class="sub">?rec=&lt;url&gt; to auto-load</span>
+</div>
+
+<main>
+  <div class="panel">
+    <h2>render_frame.wasm slot-walk &rarr; pvr2 (the animated body)</h2>
+    <canvas id="cReplay" width="640" height="480"></canvas>
+  </div>
+</main>
+
+<div id="log"></div>
+
+<script type="module">
+// ============================================================================
+// Render-Replica MOTION page (Live-Wire Phase 4b).
+//   - parseMCRR(ArrayBuffer): header + region tables + static payload + frame table.
+//   - seed a 16MB RAM image ONCE from the static block; VRAM/PVR -> pvr2 texture/palette.
+//   - per frame: apply DYNAMIC regions to the RAM image, render_frame() -> TA -> pvr2 -> draw.
+//   - validate: if the frame carries engine_ta (taSize>0), byte-compare it to render_frame's TA.
+// Reuses ta-parser/pvr2-renderer/texture-manager VERBATIM, and render_frame.wasm UNMODIFIED
+// (Phases 1/2 frozen byte-exact). MCRR spec: docs/RENDER-REPLICA-RECORDING-FORMAT.md.
+// ============================================================================
+import createRenderFrame from './render_frame.mjs';
+
+const W_DIR = new URL('../webgpu/', import.meta.url);
+const { PVR2Renderer }   = await import(new URL('pvr2-renderer.mjs', W_DIR));
+const { TAParser }       = await import(new URL('ta-parser.mjs', W_DIR));
+const { TextureManager } = await import(new URL('texture-manager.mjs', W_DIR));
+
+const RAM_SIZE = 16 * 1024 * 1024;
+const logEl = document.getElementById('log');
+const log = (m, cls) => { const s = document.createElement('span'); if (cls) s.className = cls; s.textContent = m + '\n'; logEl.appendChild(s); logEl.scrollTop = logEl.scrollHeight; console.log(m); };
+
+// ---------------------------------------------------------------- MCRR parser
+function parseMCRR(ab) {
+    const buf = new Uint8Array(ab);
+    const dv  = new DataView(ab);
+    let p = 0;
+    const u32 = () => { const v = dv.getUint32(p, true); p += 4; return v >>> 0; };
+    if (u32() !== 0x5252434D) throw new Error('bad MCRR magic (not "MCRR")');
+    const version  = u32();
+    const nStatic  = u32();
+    const nDynamic = u32();
+    const nFrames  = u32();
+    const vramBytes= u32();
+    const pvrBytes = u32();
+    u32();  // reserved
+    const region = () => { const addr = u32(); const len = u32(); let tag=''; for (let i=0;i<8;i++){const c=buf[p+i]; if(c)tag+=String.fromCharCode(c);} p+=8; return {addr,len,tag}; };
+    const staticRegs  = Array.from({length:nStatic },  region);
+    const dynamicRegs = Array.from({length:nDynamic}, region);
+
+    // static payload
+    const vram = buf.subarray(p, p + vramBytes); p += vramBytes;
+    const pvr  = buf.subarray(p, p + pvrBytes);  p += pvrBytes;
+    const staticData = staticRegs.map(r => { const b = buf.subarray(p, p + r.len); p += r.len; return b; });
+
+    // index the frame records (don't copy — store offsets into buf)
+    const frames = [];
+    for (let f = 0; f < nFrames; f++) {
+        const fmagic = u32();
+        if (fmagic !== 0x784D5246) throw new Error(`frame ${f}: bad "FRMx" magic`);
+        const vframe = u32();
+        const taSize = u32();
+        const dynOff = p;                          // dynamic region bytes start here
+        for (const r of dynamicRegs) p += r.len;    // skip dynamic payload
+        const taOff = p; p += taSize;               // engine_ta
+        frames.push({ vframe, taSize, dynOff, taOff });
+    }
+    return { version, nStatic, nDynamic, nFrames, vramBytes, pvrBytes,
+             staticRegs, dynamicRegs, vram, pvr, staticData, frames, buf };
+}
+
+const guestOff = a => (a >>> 0) & 0xFFFFFF;
+
+// ---------------------------------------------------------------- pvr2 pane
+class Pane {
+    constructor(canvas) { this.canvas = canvas; this.R = new PVR2Renderer(); this.ready = null; }
+    async ensure() {
+        if (this.ready) return this.ready;
+        this.ready = (async () => { await this.R.init(this.canvas); this.T = new TextureManager(this.R.dev); })();
+        return this.ready;
+    }
+    setStatic(vram, pvr) {            // load VRAM textures + palette ONCE
+        this.vram = vram; this.pvr = pvr;
+        this.T.setDirtyPages(null, true);
+        this.T.updatePalette(pvr);
+    }
+    render(taBuf) {
+        const P = new TAParser();
+        const parsed = P.parse(taBuf, taBuf.length);
+        const sn = synthSnap(this.canvas.width, this.canvas.height);
+        this.R.renderFrame(parsed, this.T, sn, this.vram, {});
+        return parsed;
+    }
+}
+function synthSnap(w, h) {
+    const s = new Uint32Array(16);
+    const tx = Math.max(0, Math.round(w/32)-1) & 0x3F, ty = Math.max(0, Math.round(h/32)-1) & 0x3F;
+    s[0] = (tx & 0x3F) | ((ty & 0x3F) << 16);
+    return s;
+}
+
+// ---------------------------------------------------------------- render_frame.wasm
+let frameMod;
+async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame(); } return frameMod; }
+function transpiledTA(ram) {
+    const M = frameMod;
+    const ramPtr = M._malloc(ram.length); M.HEAPU8.set(ram, ramPtr);
+    const cap = 256 * 1024, outPtr = M._malloc(cap);
+    const len = M._render_frame_ta(ramPtr, outPtr, cap);
+    const quads = M._render_frame_quad_count();
+    const ta = M.HEAPU8.slice(outPtr, outPtr + len);
+    M._free(ramPtr); M._free(outPtr);
+    return { ta, quads, len };
+}
+
+// ---------------------------------------------------------------- player state
+const pane = new Pane(document.getElementById('cReplay'));
+let REC = null, ram = null, cur = 0, playing = false, rafId = 0, gpuOK = false;
+let fpsT = performance.now(), fpsN = 0;
+
+const els = {
+    play: document.getElementById('btnPlay'), step: document.getElementById('btnStep'),
+    scrub: document.getElementById('scrub'), fcur: document.getElementById('fcur'),
+    ftot: document.getElementById('ftot'), fps: document.getElementById('fps'),
+    gt: document.getElementById('gt'),
+};
+
+async function loadMCRR(ab, label) {
+    log(`Parsing MCRR (${(ab.byteLength/1048576).toFixed(1)} MB)${label?' — '+label:''}…`);
+    REC = parseMCRR(ab);
+    log(`  v${REC.version}: ${REC.nStatic} static, ${REC.nDynamic} dynamic, ${REC.nFrames} frames; vram=${REC.vramBytes} pvr=${REC.pvrBytes}`, 'hl');
+    log(`  dynamic regions: ${REC.dynamicRegs.map(r=>r.tag).join(', ')}`);
+
+    await ensureWasm();
+
+    // seed the 16MB RAM image ONCE from the static block (BEFORE the GPU, so the TA-level
+    // playback/validator works even if WebGPU init fails — e.g. headless w/o an adapter).
+    ram = new Uint8Array(RAM_SIZE);
+    REC.staticRegs.forEach((r, i) => {
+        if (r.tag === 'ram16') ram.set(REC.staticData[i], 0);
+        else ram.set(REC.staticData[i], guestOff(r.addr));
+    });
+
+    // VRAM + palette -> pvr2 (once). If no WebGPU adapter, fall back to TA-only (no canvas).
+    try {
+        await pane.ensure();
+        pane.setStatic(REC.vram, REC.pvr);
+        gpuOK = true;
+    } catch (e) {
+        gpuOK = false;
+        log('  [warn] WebGPU unavailable (' + e.message + ') — TA playback + validator only, no canvas draw.', 'warn');
+    }
+
+    els.ftot.textContent = REC.nFrames;
+    els.scrub.max = REC.nFrames - 1; els.scrub.value = 0;
+    els.play.disabled = els.step.disabled = els.scrub.disabled = false;
+    cur = 0;
+    showFrame(0);
+    log('Ready. Press ▶ Play or scrub.', 'ok');
+}
+
+// Apply DYNAMIC regions for frame f into the RAM image (in table order, addr&0xFFFFFF).
+function applyDynamic(f) {
+    const fr = REC.frames[f];
+    let off = fr.dynOff;
+    for (const r of REC.dynamicRegs) {
+        ram.set(REC.buf.subarray(off, off + r.len), guestOff(r.addr));
+        off += r.len;
+    }
+    return fr;
+}
+
+// Per-frame ground-truth check. The embedded engine_ta and render_frame's TA are both 96B
+// PVR sprite blocks. The LOAD-BEARING fields are the first 16B param words (PCW/ISP/TSP/TCW)
+// per block — those are the byte-exact proof (converge_frame.mjs: 9/9). The corner/UV floats
+// differ from the raw engine stream by sub-bit encoding, so we report BOTH: param-block match
+// (the headline, must be 100%) and whole-byte match (informational).
+function validate(fr, ta, len) {
+    if (!fr.taSize) { els.gt.className = 'badge synth'; els.gt.textContent = 'synthetic'; return; }
+    const eng = REC.buf.subarray(fr.taOff, fr.taOff + fr.taSize);
+    const tot = Math.min(fr.taSize, len);
+    let whole = 0; for (let i = 0; i < tot; i++) if (eng[i] === ta[i]) whole++;
+    // param-block compare: first 16B of every 96B block (skip the EndOfList 32B tail)
+    let pOK = 0, pN = 0;
+    for (let o = 0; o + 96 <= tot; o += 96) { pN++; let ok = 1; for (let i = 0; i < 16; i++) if (eng[o+i] !== ta[o+i]) { ok = 0; break; } pOK += ok; }
+    const paramPct = pN ? (100*pOK/pN) : 0, wholePct = tot ? (100*whole/tot) : 0;
+    const pass = pN > 0 && pOK === pN;
+    els.gt.className = 'badge ' + (pass ? 'pass' : 'fail');
+    els.gt.textContent = `${pass ? 'PASS' : 'FAIL'} params ${pOK}/${pN} · bytes ${wholePct.toFixed(0)}%`;
+}
+
+function showFrame(f) {
+    cur = f;
+    const fr = applyDynamic(f);
+    const { ta, quads, len } = transpiledTA(ram);
+    window.__lastTA = ta;      // expose for headless verification (TA-level motion probe)
+    if (gpuOK) pane.render(ta);
+    validate(fr, ta, len);
+    els.fcur.textContent = f; els.scrub.value = f;
+    // first quad Ax (motion telltale) into the log occasionally
+    if (f % 15 === 0 || f === REC.nFrames - 1) {
+        const dv = new DataView(ta.buffer, ta.byteOffset, ta.byteLength);
+        const Ax = quads > 0 ? dv.getFloat32(36, true).toFixed(0) : '–';
+        log(`frame ${f} vframe=${fr.vframe} quads=${quads} ta=${len}B Ax=${Ax}${fr.taSize?` GT=${els.gt.textContent}`:''}`);
+    }
+}
+
+function tick() {
+    if (!playing) return;
+    showFrame(cur);
+    fpsN++; const now = performance.now();
+    if (now - fpsT >= 500) { els.fps.textContent = (fpsN * 1000 / (now - fpsT)).toFixed(0); fpsN = 0; fpsT = now; }
+    cur = (cur + 1) % REC.nFrames;
+    rafId = requestAnimationFrame(tick);
+}
+function setPlaying(v) {
+    playing = v; els.play.textContent = v ? '⏸ Pause' : '▶ Play';
+    els.play.classList.toggle('active', v);
+    if (v) { fpsT = performance.now(); fpsN = 0; rafId = requestAnimationFrame(tick); }
+    else cancelAnimationFrame(rafId);
+}
+
+els.play.onclick = () => setPlaying(!playing);
+els.step.onclick = () => { if (playing) setPlaying(false); showFrame((cur + 1) % REC.nFrames); };
+els.scrub.oninput = () => { if (playing) setPlaying(false); showFrame(+els.scrub.value); };
+
+// file picker + drag/drop
+document.getElementById('file').onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    setPlaying(false);
+    await loadMCRR(await f.arrayBuffer(), f.name).catch(err => log('LOAD FAIL: ' + (err.stack||err.message), 'err'));
+};
+const drop = document.getElementById('drop');
+['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('hot'); }));
+['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('hot'); }));
+drop.addEventListener('drop', async e => {
+    const f = e.dataTransfer.files[0]; if (!f) return;
+    setPlaying(false);
+    await loadMCRR(await f.arrayBuffer(), f.name).catch(err => log('LOAD FAIL: ' + (err.stack||err.message), 'err'));
+});
+
+// ?rec=<url> auto-load
+const recUrl = new URLSearchParams(location.search).get('rec');
+if (recUrl) {
+    log(`Fetching ?rec=${recUrl}…`);
+    try {
+        const r = await fetch(recUrl);
+        if (!r.ok) throw new Error(r.status + ' ' + recUrl);
+        await loadMCRR(await r.arrayBuffer(), recUrl);
+    } catch (e) { log('?rec fetch failed: ' + (e.stack||e.message), 'err'); }
+} else {
+    log('No ?rec= given. Drop an MCRR file or use the file picker.', 'warn');
+    log('Build a synthetic one: node tools/render-replica-poc/make_synthetic_rec.mjs', 'warn');
+}
+
+// expose for headless verification
+window.__loadMCRR = loadMCRR;
+window.__showFrame = (f) => showFrame(f);
+window.__setPlaying = setPlaying;
+window.__state = () => ({ cur, nFrames: REC?.nFrames, playing });
+</script>
+</body>
+</html>
