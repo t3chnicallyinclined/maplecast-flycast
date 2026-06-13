@@ -64,14 +64,23 @@ static int g_ncap = 0;
 
 void submit_1244b0(Sh4Ctx *c){
     u32 r4 = c->r[4];                 /* = r15+0x2C, the per-tile stack record */
+    /* ROBUSTNESS (live multi-object): g_cap holds at most MAXQ tiles. On a normal body
+     * the walker emits ~9-40 tiles; a STALE/corrupt GFX2 (e.g. a body whose art was not
+     * resident at the streamed prefix-build, or a per-frame region the read-set under-ships)
+     * can drive the walker's in-RAM record loop into a runaway, emitting thousands of tiles.
+     * We must NOT count past MAXQ — render_object_full() reads g_cap[k] for k<ntiles, so an
+     * unbounded g_ncap caused OOB reads of g_cap[] AND filled g_scene to its 1024 cap with
+     * garbage quads (the "quads=1024 Ax=0" frames). Clamping the COUNT here bounds both. */
     if(g_ncap < MAXQ){
         u32 bx = r32(c, r4 + 0x04);
         u32 by = r32(c, r4 + 0x08);
         g_cap[g_ncap].bx = *(float*)&bx;
         g_cap[g_ncap].by = *(float*)&by;
         g_cap[g_ncap].alloc_index = r32(c, r4 + 0x00);  /* *r13 = stack[r15+0x2C] */
+        g_ncap++;                       /* only advance while in-bounds: ntiles<=MAXQ */
     }
-    g_ncap++;
+    /* else: drop the tile (over-read guard). A real body never exceeds MAXQ; reaching it
+     * means this object's geometry source is corrupt — emitting it would garble the scene. */
 }
 
 /* ---- arena-control globals (traced) ---- */
@@ -128,6 +137,17 @@ int render_object_full(Sh4Ctx *c, u32 node){
     g_ncap=0;
     walker_0344d4(&wc);
     int ntiles = g_ncap;
+
+    /* ---- CORRUPTION GATE (live multi-object robustness) ----
+     * submit_1244b0 now clamps g_ncap at MAXQ. If the walker SATURATED that clamp, this
+     * object's geometry source (its GFX2 cell stream / descriptor table) is corrupt or
+     * stale — almost certainly a body whose art was not resident at the streamed prefix
+     * snapshot, or a per-frame region the read-set under-ships. A real MVC2 body never
+     * emits MAXQ tiles. Emitting these would paint a wall of garbage quads (the "quads=1024"
+     * frames). DROP the object's tiles entirely; the rest of the scene renders clean. */
+    if(ntiles >= MAXQ){
+        return 0;   /* report 0 tiles: cursor advance unaffected (engine still owns +0xDC) */
+    }
 
     /* ---- per-tile: compute params from resident rectab[idxtab[alloc_index]] + UV ---- */
     float sxs = rf(c, node+0xEC), sys = rf(c, node+0xF0);

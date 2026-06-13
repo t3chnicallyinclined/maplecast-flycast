@@ -71,6 +71,11 @@ mc_render_rec.bin
 mc_render_rec_synth.bin
 mc_render_rec_gt.bin
 *.mcrr
+# Live-capture RAM dumps (ROM-derived 16MB SH4 RAM images via livecap/dump_ram). NEVER commit.
+live_ram.bin
+*_ram.bin
+maxq_*.mcrr
+hot_*.mcrr
 # Phase-4a read-set trace harness build/output (reproducible via trace_readset.c).
 trace_readset.exe
 _rec_syntax.cpp
