@@ -52,6 +52,10 @@ static int emit_ta(const SceneQuad*S,int n,u8*out){
          * We mirror the format the project's converge step uses (96B sprite incl UVs). */
         u8*p=out+o; memset(p,0,96);
         put32(p,0,q->pcw); put32(p,4,q->isp); put32(p,8,q->tsp); put32(p,12,q->tcw);
+        /* Sprite base color (+16): opaque white = modulate identity. Without it the
+         * shadInstr=MODULATE shader multiplies the texture by 0 and discards every
+         * fragment (see wasm_entry_frame.c for the full diagnosis). */
+        put32(p,16,0xFFFFFFFFu);
         /* Sprite1A: x0@36,y0@40,z0@44, x1@48,y1@52,z1@56, x2@60 ; Sprite1B: y2@64..x3@72,y3@76 */
         put32(p,32,0xE0000000u); /* vtx PCW (sprite vertex param, EOS set later if needed) */
         putf(p,36,q->Ax); putf(p,40,q->Ay); putf(p,44,1.0f);

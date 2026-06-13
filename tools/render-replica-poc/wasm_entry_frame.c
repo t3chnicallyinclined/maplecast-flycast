@@ -59,6 +59,12 @@ uint32_t render_frame_ta(uint8_t* ram16mb, uint8_t* out_ta, uint32_t out_cap){
         #define W32(off,v) do{ u32 _v=(v); p[off]=_v; p[off+1]=_v>>8; p[off+2]=_v>>16; p[off+3]=_v>>24; }while(0)
         #define WF(off,f)  do{ float _f=(f); u32 _u; memcpy(&_u,&_f,4); W32(off,_u); }while(0)
         W32(0,q->pcw); W32(4,q->isp); W32(8,q->tsp); W32(12,q->tcw);
+        /* Sprite BASE COLOR (TA_Sprite global param +16, "sprite_base_color"). MUST be
+         * opaque white: MVC2 body sprites use shadInstr=MODULATE (TSP bits6-7=3) so the
+         * shader does c = faceColor * texColor. A zero base color (the memset default)
+         * zeroes every fragment -> c.a<0.004 -> discard -> NOTHING DRAWS. 0xFFFFFFFF is the
+         * modulate identity (the engine's own sprite base color for these tiles). */
+        W32(16,0xFFFFFFFFu);                         /* sprite base color (opaque white) */
         W32(32,0xE0000000u);                         /* sprite vtx PCW */
         WF(36,q->Ax); WF(40,q->Ay); WF(44,1.0f);
         WF(48,q->Bx); WF(52,q->By); WF(56,1.0f);

@@ -160,6 +160,11 @@ class Pane {
     }
     render(taBuf) {
         const P = new TAParser();
+        // Decode textures + palette at DRAW time, exactly like index.html's working path.
+        // (VRAM/PVR are static in the read-set, but the TextureManager decode/upload must run
+        // through renderFrame; doing it only once in setStatic left every quad untextured.)
+        this.T.setDirtyPages(null, true);
+        this.T.updatePalette(this.pvr);
         const parsed = P.parse(taBuf, taBuf.length);
         const sn = synthSnap(this.canvas.width, this.canvas.height);
         this.R.renderFrame(parsed, this.T, sn, this.vram, {});
@@ -495,6 +500,7 @@ window.__connectLive = connectLive;
 window.__stopLive = stopLive;
 window.__liveState = () => ({ seeded: liveSeeded, link: els.linkState.textContent, lastFrame: els.liveframe.textContent });
 window.__state = () => ({ cur, nFrames: REC?.nFrames, playing });
+window.__pane = pane;   // headless diag: offscreen-readback probe of the live render path
 </script>
 </body>
 </html>
