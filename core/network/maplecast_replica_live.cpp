@@ -95,6 +95,8 @@ static std::mutex           _prefixMutex;          // guards build of _prefixZcs
 struct GfxBase { u32 base; u32 sig; };                 // base addr (page-aligned) + content sig
 static std::vector<GfxBase> _gfxShipped;               // bases+sigs already sent to all clients
 static std::atomic<bool>    _gfxResendAll{false};      // set on new-connect: re-ship all GFX once
+static inline u32 rd32(u32 g);                         // fwd-decl (defined below) — used by gfxSig
+static inline u8  rd8 (u32 g);
 static u32 gfxSig(u32 base)                            // fold the 0x20000 region to a u32 sig
 {
 	u32 h = 2166136261u;
