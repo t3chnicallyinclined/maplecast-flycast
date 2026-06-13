@@ -31,6 +31,8 @@ void render_frame(Sh4Ctx *c);
 typedef struct {
     u32 pcw, isp, tsp, tcw, recidx;
     float Ax,Ay,Bx,By,Cx,Cy,Dx,Dy, u1;
+    u32 sel;                 /* SOURCE GFX1 cell sel for this tile (per-quad, tiling-safe) */
+    u32 gfx1;                /* owning node's GFX1 base (node+0x15C) — decode key with sel */
 } SceneQuad;
 int  render_frame_nscene(void);
 const SceneQuad* render_frame_scene(void);
@@ -86,3 +88,30 @@ uint32_t render_frame_ta(uint8_t* ram16mb, uint8_t* out_ta, uint32_t out_cap){
 
 EXPORT uint32_t render_frame_body_count(void){ return (uint32_t)g_body_count; }
 EXPORT uint32_t render_frame_quad_count(void){ return (uint32_t)render_frame_nscene(); }
+
+/* PER-QUAD SOURCE SEL (tiling-safe texture pairing). The body walker expands ONE GFX2 cell
+ * record into N tiles (N = desc tile count), all sharing the cell's GFX1 sel. The emitted TA
+ * therefore has MORE quads than cell records, so the client must NOT pair quad[i]<->sel[i] 1:1
+ * (that slips after the first tiled cell -> right colors, wrong quad = the scramble). This
+ * fills out_sels[k] = the GFX1 sel the walker actually used for TA quad k (k in render order,
+ * == ensureBodyTextures' qcur). The client decodes THAT sel's sprite to quad k's TCW. The sels
+ * are u16 in MVC2's namespace; we write them as u16 LE. Returns the number written. */
+EXPORT uint32_t render_frame_quad_sels(uint16_t* out_sels, uint32_t cap){
+    int n = render_frame_nscene();
+    const SceneQuad* S = render_frame_scene();
+    uint32_t w = 0;
+    for(int k=0;k<n && w<cap;k++,w++) out_sels[w] = (uint16_t)S[k].sel;
+    return w;
+}
+
+/* PER-QUAD OWNING-BODY GFX1 BASE. So the client decodes each quad's sel against the RIGHT
+ * character's GFX1 (no slot-attribution / run-length re-derivation needed — fully tiling-proof:
+ * a tiled cell's N tiles carry the SAME (sel,gfx1), so they decode the same sprite to N TCWs).
+ * out_gfx1[k] = the GFX1 base (a P1/P0 RAM pointer) the walker's body node used for TA quad k. */
+EXPORT uint32_t render_frame_quad_gfx1s(uint32_t* out_gfx1, uint32_t cap){
+    int n = render_frame_nscene();
+    const SceneQuad* S = render_frame_scene();
+    uint32_t w = 0;
+    for(int k=0;k<n && w<cap;k++,w++) out_gfx1[w] = S[k].gfx1;
+    return w;
+}

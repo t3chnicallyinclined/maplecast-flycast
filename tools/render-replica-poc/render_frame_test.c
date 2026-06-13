@@ -20,6 +20,8 @@ void render_frame(Sh4Ctx *c);
 typedef struct {
     u32 pcw, isp, tsp, tcw, recidx;
     float Ax,Ay,Bx,By,Cx,Cy,Dx,Dy, u1;
+    u32 sel;                 /* SOURCE GFX1 cell sel for this tile (per-quad, tiling-safe) */
+    u32 gfx1;                /* owning node's GFX1 base (node+0x15C) — decode key with sel */
 } SceneQuad;
 int  render_frame_nscene(void);
 const SceneQuad* render_frame_scene(void);

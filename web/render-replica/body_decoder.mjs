@@ -23,9 +23,18 @@
 //     records [dx s16][dy s16][flags u16][sel u16 @+6]. sel @+6 = the GFX1 part selector.
 //   * Per-part VRAM addr = the render param TCW: byteAddr = (TCW & 0x1FFFFF) << 3 (fmt5 PAL4).
 //     render_frame's emitted TA carries that TCW per quad, BYTE-EXACT vs engine (test_ta_emit.c
-//     "TCW-BITEXACT"), and the walker emits ONE quad per cell record IN ORDER -> TA quad order ==
-//     cell-record order per char (verified vs mc_render_rec_gt.bin). So we read TCWs straight from
-//     the emitted TA and pair quad[i] <-> the char's cell-sel[i] with NO search and NO heuristic.
+//     "TCW-BITEXACT").
+//   * TILING (the fix, 2026-06-13): the body walker (loc_8c0344d4) expands ONE GFX2 cell record
+//     into N TILES (N = desc[r13+1]+1 from the 0x8C1F9F9C tile-descriptor table), each tile a
+//     separate emitted quad, ALL SHARING that cell's GFX1 sel (r11+6 is read once per cell, not
+//     per tile). So quad-count > cell-count whenever any cell tiles, and the OLD 1:1 pairing
+//     quad[i]<->cell-sel[i] SLIPPED after the first tiled cell -> right colors, wrong quad =
+//     the scramble. PROVED on a live frame (maxq_86.mcrr): Cable sid 0x47 = 19 cells -> 71 quads,
+//     slip onset quad 2. THE FIX: render_frame now exposes render_frame_quad_sels() = the SOURCE
+//     sel per emitted quad (the sel the walker actually used, captured at submit time from r11+6).
+//     We decode EACH quad's OWN sel to EACH quad's OWN TCW (a tiled cell's N tiles all decode the
+//     same sel to N different TCWs). NO 1:1 sel walk, NO slip. (The single-char _ryu_capture passed
+//     before only because that pose had no tiled cells; live tiled limbs expose it.)
 //
 // COST: decode runs ONLY when a char slot's sprite_id changes (cache by slot|sprite_id). A pose
 // is 4-19 parts, ~64..8192 decode bytes each; a full pose decode is sub-millisecond in JS. Static
@@ -109,25 +118,34 @@ function decodePart(ram, gfx1, G, sel) {
 }
 
 // ----------------------------------------------------------------------------
-// PUBLIC: ensureBodyTextures(ram, vram, ta, quadCount, cache)
-//   ram       : seeded 16MB RAM image (Uint8Array) — GFX1/GFX2/char structs.
+// PUBLIC: ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, quadGfx1s)
+//   ram       : seeded 16MB RAM image (Uint8Array) — GFX1 part streams.
 //   vram      : pane.vram (Uint8Array, 8MB) — where TextureManager re-decodes textures from.
 //   ta        : the TA render_frame just emitted (Uint8Array) — authoritative per-quad TCW.
 //   quadCount : render_frame_quad_count() — number of 96B textured-sprite quads in `ta`.
-//   cache     : a persistent object {} the caller keeps across frames (decode-on-change memo).
-// For each active char (slot order), pairs its cell sels with the matching run of TA quad TCWs
-// (quad order == cell order per char) and writes each decoded part VERBATIM into vram at the
-// TCW addr. Decode runs only when a slot's sprite_id changes; the write (cheap memcpy) runs each
-// call so a freshly-applied VRAM frame stays correct. Returns {decoded,bytes,slots,written}.
+//   cache     : a persistent object {} the caller keeps across frames (decode memo).
+//   quadSels  : Uint16Array[quadCount] from render_frame_quad_sels() — the SOURCE GFX1 sel the
+//               walker actually used for quad k (TILING-SAFE: a tiled cell's N tiles share one sel).
+//   quadGfx1s : Uint32Array[quadCount] from render_frame_quad_gfx1s() — the owning body's GFX1 base
+//               for quad k (so each sel decodes against the RIGHT character's art).
+//
+// TILING-SAFE PAIRING (2026-06-13 fix): we iterate the EMITTED QUADS (not the cell records) and
+// decode each quad's OWN (gfx1,sel) to its OWN TCW. The body walker expands one GFX2 cell into N
+// tiles, all carrying the same (gfx1,sel) but distinct TCWs — so this writes the SAME sprite to
+// each of that cell's tiles, with NO slip. (The old quad[i]<->cell-sel[i] 1:1 walk slipped after
+// the first tiled cell -> right colors, wrong quad = the scramble; proven on maxq_86.mcrr.)
+//
+// DECODE MEMO: keyed by (gfx1,sel) so a tiled cell decodes ONCE and re-writes to each tile; a
+// static pose re-uses last frame's decode. Returns {decoded,bytes,written,quads}.
 // ----------------------------------------------------------------------------
 const QUAD = 96;                                  // textured-sprite TA block size (paraType 5)
 const TCW_OFF = 0x0C;                             // TCW is word 3 of the 16B param header
 
-export function ensureBodyTextures(ram, vram, ta, quadCount, cache) {
-    if (!cache._sid)  cache._sid = new Int32Array(SLOTS.length).fill(-1);
+export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, quadGfx1s) {
     if (!cache._gfx)  cache._gfx = new Map();     // gfx1 base -> {n,offs,srt}
-    if (!cache._pose) cache._pose = new Array(SLOTS.length).fill(null); // cached decoded parts/slot
-    let decoded = 0, bytes = 0, slots = 0, written = 0;
+    if (!cache._dec)  cache._dec = new Map();     // "gfx1:sel" -> {bytes,destLen} (decode memo)
+    if (cache._dec.size > 4096) cache._dec.clear();  // bound the memo across many distinct poses
+    let decoded = 0, bytes = 0, written = 0, quads = 0;
 
     const dv = new DataView(ta.buffer, ta.byteOffset, ta.byteLength);
     const tcwAddrOf = (q) => {
@@ -137,41 +155,27 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache) {
         return ((tcw & 0x1FFFFF) << 3) >>> 0;
     };
 
-    // Walk active chars in slot order; the TA quads are emitted in the same slot order, one run
-    // of `cnt` quads per char (cnt == that char's cell record count). qcur advances across runs.
-    let qcur = 0;
-    for (let s = 0; s < SLOTS.length && qcur < quadCount; s++) {
-        const base = SLOTS[s];
-        if (u8(ram, base + OFF_ACTIVE) === 0) continue;
-        const sid = u16(ram, base + OFF_SID);
-        const gfx1 = u32(ram, base + OFF_GFX1), gfx2 = u32(ram, base + OFF_GFX2);
-        if (!(gfx1 & 0x0C000000) && !(gfx1 & 0x8C000000)) continue;
-        const sels = cellSels(ram, gfx2, sid);
-        if (!sels) continue;
+    for (let q = 0; q < quadCount; q++) {
+        const sel  = quadSels[q];
+        const gfx1 = quadGfx1s[q] >>> 0;
+        if (!(gfx1 & 0x0C000000) && !(gfx1 & 0x8C000000)) continue;  // no valid body art
+        quads++;
 
-        // Decode-on-change: rebuild this slot's decoded part list only when sprite_id changed.
-        let pose = cache._pose[s];
-        if (cache._sid[s] !== sid || !pose) {
+        // decode-on-(gfx1,sel): a tiled cell's repeated sel hits this memo after the first tile.
+        const key = (gfx1 >>> 0).toString(16) + ':' + sel;
+        let p = cache._dec.get(key);
+        if (p === undefined) {
             const G = gfx1Offsets(ram, gfx1, cache._gfx);
-            pose = [];
-            for (const sel of sels) pose.push(decodePart(ram, gfx1, G, sel));
-            cache._pose[s] = pose;
-            cache._sid[s] = sid;
-            slots++;
-            for (const p of pose) if (p) { decoded++; bytes += p.destLen; }
+            p = decodePart(ram, gfx1, G, sel);    // {bytes,destLen} or null
+            cache._dec.set(key, p);
+            if (p) { decoded++; bytes += p.destLen; }
         }
+        if (!p) continue;
 
-        // Pair this char's cell sels with its run of TA quad TCWs (quad order == cell order) and
-        // write each decoded part VERBATIM to the TCW VRAM addr. We consume `sels.length` quads.
-        const run = sels.length;
-        for (let i = 0; i < run && qcur < quadCount; i++, qcur++) {
-            const p = pose[i];
-            if (!p) continue;
-            const addr = tcwAddrOf(qcur);
-            if (addr < 0 || addr + p.destLen > vram.length) continue;
-            vram.set(p.bytes, addr);              // VERBATIM (twiddled storage) — render samples this
-            written++;
-        }
+        const addr = tcwAddrOf(q);                // THIS quad's own TCW (distinct per tile)
+        if (addr < 0 || addr + p.destLen > vram.length) continue;
+        vram.set(p.bytes, addr);                  // VERBATIM (twiddled storage) — render samples this
+        written++;
     }
-    return { decoded, bytes, slots, written };
+    return { decoded, bytes, written, quads };
 }

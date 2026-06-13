@@ -58,12 +58,20 @@ void helper_1294bc(Sh4Ctx*c){ (void)c; }
  * captured here so render_frame can map tile k -> rectab without re-deriving it.
  * ==========================================================================*/
 #define MAXQ 256
-typedef struct { float bx, by; u32 alloc_index; } TileCap;
+typedef struct { float bx, by; u32 alloc_index; u32 sel; } TileCap;
 static TileCap g_cap[MAXQ];
 static int g_ncap = 0;
 
 void submit_1244b0(Sh4Ctx *c){
     u32 r4 = c->r[4];                 /* = r15+0x2C, the per-tile stack record */
+    /* SOURCE CELL SEL for this tile. The walker (gen_walker.c loc_8c0344d4) reads the
+     * GFX1 part selector ONCE per GFX2 cell record at `mov.w @(0x6,r11),r0` and then emits
+     * `count = u8(desc[r13+1])+1` tiles for that ONE cell via this submit — r11 is NOT
+     * advanced inside the inner tile loop (r11+=8 happens only after the inner loop, at
+     * loc_8c03488e). So at EVERY submit call c->r[11]+6 == the current cell's sel, shared
+     * by all of that cell's tiles. Capturing it here lets the client decode the RIGHT
+     * sprite per quad instead of walking sels 1:1 with quads (which slips under tiling). */
+    u32 cell_sel = r16u(c, c->r[11] + 0x6);
     /* ROBUSTNESS (live multi-object): g_cap holds at most MAXQ tiles. On a normal body
      * the walker emits ~9-40 tiles; a STALE/corrupt GFX2 (e.g. a body whose art was not
      * resident at the streamed prefix-build, or a per-frame region the read-set under-ships)
@@ -77,6 +85,7 @@ void submit_1244b0(Sh4Ctx *c){
         g_cap[g_ncap].bx = *(float*)&bx;
         g_cap[g_ncap].by = *(float*)&by;
         g_cap[g_ncap].alloc_index = r32(c, r4 + 0x00);  /* *r13 = stack[r15+0x2C] */
+        g_cap[g_ncap].sel = cell_sel;                    /* the cell's GFX1 sel (per-quad) */
         g_ncap++;                       /* only advance while in-bounds: ntiles<=MAXQ */
     }
     /* else: drop the tile (over-read guard). A real body never exceeds MAXQ; reaching it
@@ -102,6 +111,8 @@ static float rf(Sh4Ctx*c, u32 a){ u32 w=r32(c,a); return *(float*)&w; }
 typedef struct {
     u32 pcw, isp, tsp, tcw, recidx;
     float Ax,Ay,Bx,By,Cx,Cy,Dx,Dy, u1;
+    u32 sel;                 /* SOURCE GFX1 cell sel for this tile (per-quad, tiling-safe) */
+    u32 gfx1;                /* owning node's GFX1 base (node+0x15C) — decode key with sel */
 } SceneQuad;
 #define MAXSCENE 1024
 static SceneQuad g_scene[MAXSCENE];
@@ -152,6 +163,7 @@ int render_object_full(Sh4Ctx *c, u32 node){
     /* ---- per-tile: compute params from resident rectab[idxtab[alloc_index]] + UV ---- */
     float sxs = rf(c, node+0xEC), sys = rf(c, node+0xF0);
     u32 palbank = palbank_for(node);
+    u32 node_gfx1 = r32(c, node+0x15C);   /* this body's GFX1 base (per-quad decode key) */
     /* the walker's per-tile alloc_index already = node+0xDC + arena_base + k (it read the
      * resident node+0xDC and *(0x8C1F9D94)); we use it directly — that IS the cursor-
      * derived base in action. (render_frame separately ASSERTS node+0xDC == prefix-sum.) */
@@ -174,6 +186,8 @@ int render_object_full(Sh4Ctx *c, u32 node){
         SceneQuad *q = &g_scene[g_nscene++];
         q->pcw=pp.pcw; q->isp=pp.isp; q->tsp=pp.tsp; q->tcw=pp.tcw;
         q->recidx=g_cap[k].alloc_index;
+        q->sel=g_cap[k].sel;          /* per-quad source sel (tiling-safe pairing key) */
+        q->gfx1=node_gfx1;            /* per-quad owning-body GFX1 base (decode with sel) */
         q->Ax=bx;     q->Ay=by-H;     /* lay the quad UPWARD from the bottom-left */
         q->Bx=bx+W;   q->By=by-H;
         q->Cx=bx+W;   q->Cy=by;

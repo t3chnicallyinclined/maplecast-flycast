@@ -49,7 +49,7 @@ emcc -O2 -fno-strict-aliasing \
     -s ENVIRONMENT=web \
     -s ALLOW_MEMORY_GROWTH=1 \
     -s INITIAL_MEMORY=67108864 \
-    -s EXPORTED_FUNCTIONS='["_render_frame_ta","_render_frame_body_count","_render_frame_quad_count","_malloc","_free"]' \
+    -s EXPORTED_FUNCTIONS='["_render_frame_ta","_render_frame_body_count","_render_frame_quad_count","_render_frame_quad_sels","_render_frame_quad_gfx1s","_malloc","_free"]' \
     -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","HEAPU8","HEAPU32"]'
 
 echo ""
