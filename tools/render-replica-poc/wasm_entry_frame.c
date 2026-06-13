@@ -33,6 +33,8 @@ typedef struct {
     float Ax,Ay,Bx,By,Cx,Cy,Dx,Dy, u1;
     u32 sel;                 /* SOURCE GFX1 cell sel for this tile (per-quad, tiling-safe) */
     u32 gfx1;                /* owning node's GFX1 base (node+0x15C) — decode key with sel */
+    u32 mirror;              /* texU mirror bit = facing XOR per-part 0x4000 (loc_8c0346c4) */
+    u32 facing;             /* owning body facing (node+0x110) */
 } SceneQuad;
 int  render_frame_nscene(void);
 const SceneQuad* render_frame_scene(void);
@@ -74,7 +76,13 @@ uint32_t render_frame_ta(uint8_t* ram16mb, uint8_t* out_ta, uint32_t out_cap){
         WF(64,q->Cy); WF(68,1.0f);
         WF(72,q->Dx); WF(76,q->Dy);
         { float U=q->u1, V=q->u1;
-          u16 v0=h16(V),u0=h16(0.0f),v1=h16(V),u1=h16(U),v2=h16(0.0f),u2=h16(U);
+          /* texU MIRROR (engine loc_8c0346c4 neg-r8): when facing XOR per-part 0x4000, swap
+           * the left/right U so the tile draws horizontally mirrored. uLo/uHi default 0..U;
+           * mirrored -> U..0. The carve writes STORAGE-order pixels (facing-independent); this
+           * mirror is the ONLY place the L/R flip is applied — exactly like the engine. */
+          float uLo = q->mirror ? U : 0.0f;
+          float uHi = q->mirror ? 0.0f : U;
+          u16 v0=h16(V),u0=h16(uLo),v1=h16(V),u1=h16(uHi),v2=h16(0.0f),u2=h16(uHi);
           p[84]=v0;p[85]=v0>>8; p[86]=u0;p[87]=u0>>8;
           p[88]=v1;p[89]=v1>>8; p[90]=u1;p[91]=u1>>8;
           p[92]=v2;p[93]=v2>>8; p[94]=u2;p[95]=u2>>8; }
@@ -120,12 +128,21 @@ EXPORT uint32_t render_frame_quad_gfx1s(uint32_t* out_gfx1, uint32_t cap){
 }
 
 /* PER-QUAD INTRA-PART TILE (col,row) — wide-part carve key (re_kb
- * finding:wide_part_tile_storage_order). out_cr[2*q]=col, out_cr[2*q+1]=row: the tile's
- * cell in the part's (W/32)x(H/32) grid, derived by ranking the per-tile descriptor
- * SCREEN ANCHOR within each (gfx1,sel) run (col=Ax-desc rank, row=Ay-desc rank). The
- * client carves full-blob chunk twop(col,row,log2(W/32),log2(H/32)) into that tile's
- * TCW. Per-object, pre-merge, robust under facing. NOT a fragile post-merge screen read. */
+ * finding:wide_part_tile_storage_order_v2 + finding:per_side_facing_fix). out_cr[2*q]=col
+ * (FACING-INDEPENDENT STORAGE column), out_cr[2*q+1]=row. col = rank of the per-tile screen
+ * Ax DESCENDING for facing==0 / ASCENDING for facing==1 (the storage-col->screenX direction
+ * REVERSES with facing — finding:per_side_storage_col_reverses), so the carve always slices
+ * the same fixed storage chunk; the L/R flip is the texU mirror alone (render_frame_quad_mirror).
+ * row = Ay-desc (facing only reflects X). */
 uint32_t render_frame_quad_colrow_impl(int* out_cr, uint32_t cap);
 EXPORT uint32_t render_frame_quad_colrow(int* out_cr, uint32_t cap){
     return render_frame_quad_colrow_impl(out_cr, cap);
+}
+
+/* PER-QUAD texU MIRROR (facing XOR per-part 0x4000). out_m[k]=0/1. The client carve writes
+ * storage-order pixels; this bit tells the renderer to mirror U so the L/R flip matches the
+ * engine (loc_8c0346c4). Exposed so replay.html can A/B the mirror live. */
+uint32_t render_frame_quad_mirror_impl(uint8_t* out_m, uint32_t cap);
+EXPORT uint32_t render_frame_quad_mirror(uint8_t* out_m, uint32_t cap){
+    return render_frame_quad_mirror_impl(out_m, cap);
 }

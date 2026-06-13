@@ -59,7 +59,12 @@ void helper_1294bc(Sh4Ctx*c){ (void)c; }
  * captured here so render_frame can map tile k -> rectab without re-deriving it.
  * ==========================================================================*/
 #define MAXQ 256
-typedef struct { float bx, by; u32 alloc_index; u32 sel; } TileCap;
+/* per-tile capture. `flip4000` = the GFX2 cell record's per-part 0x4000 X-mirror flag (read
+ * from the cell flags u16 @ r11+0x4). The body's facing (node+0x110) is attached per-object
+ * in render_object_full_ex (one facing per object). texU mirror = facing XOR (flip4000!=0),
+ * the engine's loc_8c0346c4 `neg r8` gate (re_kb finding:field_semantics_from_setter /
+ * routine:loc_8c0346c4). */
+typedef struct { float bx, by; u32 alloc_index; u32 sel; u32 flip4000; } TileCap;
 static TileCap g_cap[MAXQ];
 static int g_ncap = 0;
 
@@ -73,6 +78,9 @@ void submit_1244b0(Sh4Ctx *c){
      * by all of that cell's tiles. Capturing it here lets the client decode the RIGHT
      * sprite per quad instead of walking sels 1:1 with quads (which slips under tiling). */
     u32 cell_sel = r16u(c, c->r[11] + 0x6);
+    /* per-part X-mirror flag: GFX2 cell record flags u16 @ r11+0x4, bit 0x4000 (the per-part
+     * texture-U mirror authored into the cell). XORed with the body facing at draw time. */
+    u32 cell_flip = (r16u(c, c->r[11] + 0x4) & 0x4000u) ? 1u : 0u;
     /* ROBUSTNESS (live multi-object): g_cap holds at most MAXQ tiles. On a normal body
      * the walker emits ~9-40 tiles; a STALE/corrupt GFX2 (e.g. a body whose art was not
      * resident at the streamed prefix-build, or a per-frame region the read-set under-ships)
@@ -87,6 +95,7 @@ void submit_1244b0(Sh4Ctx *c){
         g_cap[g_ncap].by = *(float*)&by;
         g_cap[g_ncap].alloc_index = r32(c, r4 + 0x00);  /* *r13 = stack[r15+0x2C] */
         g_cap[g_ncap].sel = cell_sel;                    /* the cell's GFX1 sel (per-quad) */
+        g_cap[g_ncap].flip4000 = cell_flip;              /* per-part 0x4000 X-mirror flag */
         g_ncap++;                       /* only advance while in-bounds: ntiles<=MAXQ */
     }
     /* else: drop the tile (over-read guard). A real body never exceeds MAXQ; reaching it
@@ -114,6 +123,8 @@ typedef struct {
     float Ax,Ay,Bx,By,Cx,Cy,Dx,Dy, u1;
     u32 sel;                 /* SOURCE GFX1 cell sel for this tile (per-quad, tiling-safe) */
     u32 gfx1;                /* owning node's GFX1 base (node+0x15C) — decode key with sel */
+    u32 mirror;              /* texU mirror bit = facing XOR per-part 0x4000 (loc_8c0346c4) */
+    u32 facing;             /* owning body facing (node+0x110); carve storage-col key */
 } SceneQuad;
 #define MAXSCENE 1024
 static SceneQuad g_scene[MAXSCENE];
@@ -177,6 +188,10 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
     float sxs = rf(c, node+0xEC), sys = rf(c, node+0xF0);
     u32 palbank = palbank_for(node);
     u32 node_gfx1 = r32(c, node+0x15C);   /* this body's GFX1 base (per-quad decode key) */
+    /* body facing (node+0x110) — drives the texU mirror in lockstep with the position pen
+     * the walker already reflected (re_kb routine:loc_8c0346c4 / loc_8c034548): one byte,
+     * texture and position can never decouple. facing!=0 <=> faces RIGHT (P1 default). */
+    u32 node_facing = r32(c, node+0x110) ? 1u : 0u;
     /* the walker's per-tile alloc_index already = node+0xDC + arena_base + k (it read the
      * resident node+0xDC and *(0x8C1F9D94)); we use it directly — that IS the cursor-
      * derived base in action. (render_frame separately ASSERTS node+0xDC == prefix-sum.) */
@@ -201,6 +216,9 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
         q->recidx=g_cap[k].alloc_index;
         q->sel=g_cap[k].sel;          /* per-quad source sel (tiling-safe pairing key) */
         q->gfx1=node_gfx1;            /* per-quad owning-body GFX1 base (decode with sel) */
+        q->facing=node_facing;        /* owning body facing (carve storage-col disambiguation) */
+        /* texU mirror = facing XOR per-part 0x4000 (loc_8c0346c4 neg r8 gate). One bit. */
+        q->mirror = node_facing ^ (g_cap[k].flip4000 & 1u);
         q->Ax=bx;     q->Ay=by-H;     /* lay the quad UPWARD from the bottom-left */
         q->Bx=bx+W;   q->By=by-H;
         q->Cx=bx+W;   q->Cy=by;
@@ -295,35 +313,40 @@ void render_frame_reset(void){
 int  render_frame_nscene(void){ return g_nscene; }
 const SceneQuad* render_frame_scene(void){ return g_scene; }
 
-/* PER-QUAD INTRA-PART TILE (col,row) — the WIDE-PART carve key (re_kb
- * finding:wide_part_tile_storage_order). For a WxH body part the walker emits a
- * (W/32)x(H/32) screen grid of 32x32 tiles; the renderer pastes each tile at its
- * screen cell. The full-WxH-twiddle STORAGE chunk that holds part-tile (col,row) is
- * twop(col,row,log2Tw,log2Th), and for W>32 && H>32 that storage order DIVERGES from
- * the walker per-tile vaddr (+0x200) emission order. The client therefore needs the
- * (col,row) each emitted tile occupies, to carve the correct 32x32 chunk.
+/* PER-QUAD INTRA-PART TILE (col,row) — the WIDE-PART carve key. col MUST be the part's
+ * STORAGE column (facing-INDEPENDENT), so the carve always slices the same fixed storage
+ * chunk; the visual L/R flip is then applied SEPARATELY via the texU mirror (q->mirror,
+ * matching the engine loc_8c0346c4 neg-r8 gate). The part is stored ONCE in VRAM in
+ * storage order; facing mirrors at DRAW time, never re-stores.
  *
- * We compute (col,row) from the per-tile SCREEN ANCHOR g_scene[].Ax/Ay (the descriptor-
- * derived corner the walker produced) by RANKING anchors within each (gfx1,sel) run:
- * col = rank of Ax DESCENDING (engine lays columns right->left in part space), row =
- * rank of Ay DESCENDING (bottom-up). This is the engine's OWN per-tile grid placement
- * (the walker stepped these anchors by the descriptor dx/dy units) — it is per-OBJECT,
- * pre-merge, and robust under facing (facing flips the whole part's anchors uniformly,
- * preserving the within-part rank order). out_cr[2*q]=col, out_cr[2*q+1]=row. */
-/* count DISTINCT values (within +-0.5px) strictly greater than `v` among the run's
- * anchors on one axis -> the 0-based descending rank of `v` = its (col|row). */
-static int distinct_rank_desc(u32 kg, u32 ks, int axis /*0=Ax,1=Ay*/, float v){
+ * THE FACING FIX (2026-06-13, traced to the ASMTRACE per-tile screenX vs r13 emission order
+ * on prod /dev/shm/mc_assembly.log): for the SAME multi-column part the storage column ->
+ * screen-X direction REVERSES with facing —
+ *   facing=0 (faces LEFT, e.g. Sentinel cid52 sel124): storage-col-0 lands at the HIGHEST
+ *     screenX (emission r13-ascending = screenX DESCENDING). So storage col = rank Ax DESC.
+ *   facing=1 (faces RIGHT, e.g. Cable cid23 sel232/231): storage-col-0 lands at the LOWEST
+ *     screenX (emission r13-ascending = screenX ASCENDING). So storage col = rank Ax ASC.
+ * The OLD code always ranked Ax DESC -> for facing=1 it carved the COLUMN-MIRRORED storage
+ * chunk -> the per-side scramble the user saw (garbled on the facing=1 side). The walker's
+ * position pen already reflects under facing (0.00px), so col is the ONLY remaining facing-
+ * coupled decode term besides the texU mirror. Row (Y) is unaffected by facing (the pen only
+ * reflects X) -> row stays rank Ay DESC. CITE: ASMTRACE col5/col10/col17; re_kb
+ * routine:loc_8c0346c4 / loc_8c034548 / field:facing. */
+/* count DISTINCT values (within +-0.5px) strictly on the `gt` side of `v` among the run's
+ * anchors on one axis -> the 0-based rank of `v`. gt=1 -> descending rank (count strictly
+ * greater), gt=0 -> ascending rank (count strictly less). */
+static int distinct_rank(u32 kg, u32 ks, int axis /*0=Ax,1=Ay*/, float v, int gt){
     int rank = 0;
     for(int r=0;r<g_nscene;r++){
         if(g_scene[r].gfx1!=kg || g_scene[r].sel!=ks) continue;
         float rv = axis ? g_scene[r].Ay : g_scene[r].Ax;
-        if(rv <= v + 0.5f) continue;            /* not strictly greater */
+        if(gt ? (rv <= v + 0.5f) : (rv >= v - 0.5f)) continue;  /* not strictly on the gt side */
         /* count rv only the first time it appears (distinct) */
         int first = 1;
         for(int t=0;t<r;t++){
             if(g_scene[t].gfx1!=kg||g_scene[t].sel!=ks) continue;
             float tv = axis ? g_scene[t].Ay : g_scene[t].Ax;
-            if(tv > v + 0.5f && fabsf(tv-rv) < 0.5f){ first = 0; break; }
+            if((gt ? (tv > v + 0.5f) : (tv < v - 0.5f)) && fabsf(tv-rv) < 0.5f){ first = 0; break; }
         }
         if(first) rank++;
     }
@@ -333,9 +356,21 @@ u32 render_frame_quad_colrow_impl(int* out_cr, u32 cap){
     u32 w = 0;
     for(int q=0; q<g_nscene && w<cap; q++,w++){
         u32 kg = g_scene[q].gfx1, ks = g_scene[q].sel;
-        out_cr[2*w]   = distinct_rank_desc(kg, ks, 0, g_scene[q].Ax);  /* col: Ax desc */
-        out_cr[2*w+1] = distinct_rank_desc(kg, ks, 1, g_scene[q].Ay);  /* row: Ay desc */
+        /* STORAGE column: facing!=0 (faces right) ranks Ax ASCENDING (col-0 at lowest X);
+         * facing==0 ranks Ax DESCENDING (col-0 at highest X). Facing-independent storage idx. */
+        int facing = g_scene[q].facing ? 1 : 0;
+        out_cr[2*w]   = distinct_rank(kg, ks, 0, g_scene[q].Ax, facing ? 0 : 1); /* col: storage */
+        out_cr[2*w+1] = distinct_rank(kg, ks, 1, g_scene[q].Ay, 1);              /* row: Ay desc */
     }
+    return w;
+}
+
+/* PER-QUAD texU MIRROR bit (facing XOR per-part 0x4000). The client swaps the quad U coords
+ * when set, mirroring each tile horizontally (the engine loc_8c0346c4 neg-r8 texture-U flip).
+ * out_m[k] = 0/1. Decoupled from col (storage) so a wide part is stored ONCE and flipped here. */
+u32 render_frame_quad_mirror_impl(uint8_t* out_m, u32 cap){
+    u32 w = 0;
+    for(int q=0; q<g_nscene && w<cap; q++,w++) out_m[w] = (uint8_t)(g_scene[q].mirror & 1u);
     return w;
 }
 

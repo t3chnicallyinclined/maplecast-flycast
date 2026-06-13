@@ -201,10 +201,12 @@ function detwiddleImage(bytes, W, H) {
 }
 // Build one 32x32 PAL4 LOCAL-twiddle tile (512B) holding image cell (col,row) of pixel size m in
 // its top-left m x m. Returns a Uint8Array(0x200). Matches exactly what the renderer's _pal4 reads.
-function carveTile(img, W, H, col, row, m) {
+function carveTile(img, W, H, col, row, m, inTileMir) {
     const tile = new Uint8Array(TILE_BYTES);
     for (let y = 0; y < m; y++) for (let x = 0; x < m; x++) {
-        const sx = col * m + x, sy = row * m + y;
+        // inTileMir (cockpit A/B): mirror the cell horizontally within its m×m footprint.
+        const ix = inTileMir ? (m - 1 - x) : x;
+        const sx = col * m + ix, sy = row * m + y;
         if (sx >= W || sy >= H) continue;
         const v = img[sy * W + sx];
         const ti = twop(x, y, 5, 5);                 // 32x32 local twiddle
@@ -214,7 +216,8 @@ function carveTile(img, W, H, col, row, m) {
     return tile;
 }
 
-export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, quadGfx1s, quadColRow) {
+export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, quadGfx1s, quadColRow, opts) {
+    const inTileMir = !!(opts && opts.inTileMir);   // cockpit within-tile mirror A/B
     if (!cache._gfx)  cache._gfx = new Map();     // gfx1 base -> {n,offs,srt}
     if (!cache._dec)  cache._dec = new Map();     // "gfx1:sel" -> {bytes,destLen} (decode memo)
     if (cache._dec.size > 4096) cache._dec.clear();  // bound the memo across many distinct poses
@@ -276,7 +279,7 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
             for (const { addr, col, row } of tiles) {
                 if (col < 0 || col >= cols || row < 0 || row >= rows) continue;
                 if (addr + TILE_BYTES > vram.length) continue;
-                vram.set(carveTile(img, p.W, p.H, col, row, m), addr);
+                vram.set(carveTile(img, p.W, p.H, col, row, m, inTileMir), addr);
                 written++;
             }
         } else {
