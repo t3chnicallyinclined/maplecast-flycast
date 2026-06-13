@@ -42,17 +42,24 @@ first thing render_object_setup_03093c does), so the root walk does NOT re-gate;
 faithfully calls the body routine for every cat==0 node and lets the body routine cull.
 
 This generator EMITS gen_walker_root.c: a single C function render_sprites_0308c2(c)
-that walks the slot table and, per BODY node, calls render_object_full(c, node) (the
-Phase-1 per-object render, which now consumes the cursor-derived allocation base). The
-EFFECT path (loc_8c030af8) is a Phase-3 stub.
+that walks the slot table and dispatches each node by category:
+  cat==0  -> render_frame_body_hook      (loc_8c03093c body)
+  cat 1..4-> render_frame_satellite_hook (loc_8c030af8 satellite; bank03:1526)
+Both run the SAME body walker loc_8c0344d4 and advance the SAME submit cursor; the only
+per-cat difference is which setup deposits the walker fields (gen_render_satellite.py
+proves loc_8c030af8's deposits are byte-identical to loc_8c03093c for the non-zoom path,
+with the only deltas being the gated-off owner-char zoom table + skipped proj-setup). So a
+body-sprite satellite (Cable drone/projectile, assist, cape, extra limb) now RENDERS; only
+the pure-effect path (aura/hitspark, no body GFX) remains Phase-3 (it emits 0 tiles here).
 """
 
 C = r'''#include "sh4ctx.h"
-/* Per-body hook: runs render_object_full AND advances the submit-allocation cursor +
- * records the per-object prefix-sum proof. Defined in render_frame.c. */
+/* Per-body hook (cat==0): runs render_object_full AND advances the submit-allocation cursor
+ * + records the per-object prefix-sum proof. Defined in render_frame.c. */
 void render_frame_body_hook(Sh4Ctx *c, u32 node);
-/* Phase-3: the effect/satellite renderer loc_8c030af8 (cat 1..4). Stub for now. */
-void render_effect_030af8(Sh4Ctx *c, u32 node);
+/* Satellite hook (cat 1..4): the transpiled loc_8c030af8 dispatch — runs the satellite
+ * setup then the SAME body walker, advancing the SAME cursor. Defined in render_frame.c. */
+void render_frame_satellite_hook(Sh4Ctx *c, u32 node);
 
 /* AUTO-GENERATED (faithful hand-port) from bank03.asm loc_8c0308c2 "Render_sprites".
  * Entry: walks the on-screen slot table; per body node -> render_object_full. */
@@ -90,8 +97,8 @@ void render_sprites_0308c2(Sh4Ctx *c){
             s32 cat  = r8s(c, node + 0x3);    /* [1227] mov.b @(0x3,r4) category byte */
             if(cat == 0){                     /* [1228-1230] tst;bf -> cat==0 = BODY */
                 render_frame_body_hook(c, node); /* bsr loc_8c03093c (Render Main Sprite) */
-            } else {                          /* [1236] cat!=0 = EFFECT */
-                render_effect_030af8(c, node);/* bsr loc_8c030af8 (Phase-3 stub) */
+            } else {                          /* [1236] cat!=0 = SATELLITE (cat 1..4) */
+                render_frame_satellite_hook(c, node);/* bsr loc_8c030af8 (bank03:1526) */
             }
             r14++;                            /* [1240] loc_8c030900: add 0x01,r14 */
         }

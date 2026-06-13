@@ -40,6 +40,7 @@
 
 /* ---- Phase-1 pieces (reused verbatim) ---- */
 void render_object_setup_03093c(Sh4Ctx *c);          /* gen_render_object.c   */
+void render_object_setup_030af8(Sh4Ctx *c);          /* gen_render_satellite.c (cat 1..4) */
 void transform_object_122560(Sh4Ctx *c, u32 node);   /* gen_transform_obj.c   */
 void walker_0344d4(Sh4Ctx *c);                       /* gen_walker.c          */
 typedef struct { u32 pcw, isp, tsp, tcw; } PolyParam;
@@ -137,10 +138,22 @@ static u32 palbank_for(u32 node){
  * that here so the screen tile extent W=m*scaleX, H=m*scaleY matches the walker. */
 #define DESC_TABLE 0x8C1F9F9Cu
 
-int render_object_full(Sh4Ctx *c, u32 node){
-    /* ---- run the Phase-1 setup: computes node+0xE0/E4 (anchor) + 0xEC/F0 (scale) ---- */
+/* render_object_full_ex: the shared per-object body render. `is_sat` selects which engine
+ * setup routine deposits the per-frame walker fields:
+ *   cat==0 BODY      -> render_object_setup_03093c (loc_8c03093c "Render Main Sprite")
+ *   cat 1..4 SATELLITE -> render_object_setup_030af8 (loc_8c030af8, bank03:1526)
+ * EVERYTHING after the setup is IDENTICAL: the satellite emits its sprite through the SAME
+ * body walker loc_8c0344d4 reading the SAME deposited node fields (+0xE0/E4 anchor, +0xEC/F0
+ * scale, +0xDC cursor, +0x104/0x130/0x134/0x136), per the field-by-field disasm comparison
+ * (gen_render_satellite.py). So we run the matching setup, then the one shared walker/submit/
+ * scene path. (loc_8c030af8 deposits are byte-identical to loc_8c03093c for the non-zoom
+ * path the validated Cable drone node 0x8C271E54 takes; the only deltas are the gated-off
+ * owner-char zoom table and the skipped frame-global proj-setup calls — both faithful here.) */
+static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
+    /* ---- run the per-cat setup: computes node+0xE0/E4 (anchor) + 0xEC/F0 (scale) ---- */
     c->r[4]=node; c->r[14]=node; c->r[15]=0x0C480000u; c->pr=0xDEADBEEFu;
-    render_object_setup_03093c(c);   /* honors +0x12C gate internally */
+    if(is_sat) render_object_setup_030af8(c);   /* loc_8c030af8 (cat 1..4), honors +0x12C gate */
+    else       render_object_setup_03093c(c);   /* loc_8c03093c (cat==0), honors +0x12C gate  */
 
     /* ---- run the proven walker to emit this object's body tiles (corners) ---- */
     Sh4Ctx wc; memcpy(&wc, c, sizeof wc); wc.ram=c->ram;
@@ -197,14 +210,36 @@ int render_object_full(Sh4Ctx *c, u32 node){
     return ntiles;
 }
 
+/* PUBLIC body render (cat==0): the slot-walk body hook calls this. */
+int render_object_full(Sh4Ctx *c, u32 node){ return render_object_full_ex(c, node, 0); }
+
+/* PUBLIC satellite render (cat 1..4): runs loc_8c030af8's setup then the SHARED body
+ * walker/submit/scene path. This is the client half of the missing-sprites fix — a
+ * body-sprite satellite (Cable drone/projectile, an assist, a cape, an extra limb)
+ * now renders through render_object_full_ex with the satellite's exact field reads. */
+int render_object_full_satellite(Sh4Ctx *c, u32 node){ return render_object_full_ex(c, node, 1); }
+
 /* ============================================================================
- * The transpiled root slot-walk (gen_walker_root.c) calls render_object_full for
- * each BODY node and render_effect_030af8 for each effect node.
+ * The transpiled root slot-walk (gen_walker_root.c) calls render_frame_body_hook for
+ * each cat==0 node and render_effect_030af8 for each cat 1..4 node.
  * ==========================================================================*/
 void render_sprites_0308c2(Sh4Ctx *c);   /* gen_walker_root.c */
 
-/* Phase-3 stub: the effect/satellite renderer loc_8c030af8 (cat 1..4). */
-void render_effect_030af8(Sh4Ctx *c, u32 node){ (void)c; (void)node; /* DEFER to Phase 3 */ }
+/* CAT 1..4 dispatch (loc_8c030af8). The slot-walk routes node+0x3 in [1,5) here. The
+ * routine itself (bank03:1538-1552) re-gates 0 < cat < 5 and reads node+0x12C; a body-
+ * sprite satellite then deposits the walker fields and emits through loc_8c0344d4. We run
+ * the transpiled setup + the shared walker via render_object_full_satellite, and advance
+ * the SAME submit cursor (node+0xDC prefix-sum) the body path uses — satellites consume
+ * idxtab/rectab slots from the very same arena as bodies (the walker loc_8c0344d4 reads
+ * node+0xDC + arena_base regardless of cat), so the running cursor must include them.
+ * Pure-effect cat 1..4 nodes (aura/hitspark with NO body GFX2) emit 0 tiles here
+ * naturally: render_object_setup_030af8 culls on +0x12C and the walker finds no records,
+ * so ntiles==0 and nothing is drawn — the real Phase-3 effect path (loc_8c1294c8 cell
+ * processor for non-body effects) stays unimplemented, but body satellites now render. */
+void render_effect_030af8(Sh4Ctx *c, u32 node){
+    extern void render_frame_satellite_hook(Sh4Ctx *c, u32 node);
+    render_frame_satellite_hook(c, node);
+}
 
 /* ---- the cursor-advance bookkeeping the slot-walk needs ----
  * render_object_full uses the walker's resident-read alloc_index directly, but Phase 2's
@@ -212,6 +247,7 @@ void render_effect_030af8(Sh4Ctx *c, u32 node){ (void)c; (void)node; /* DEFER to
  * therefore ALSO maintain render_frame's own running_cursor and verify it tracks the
  * engine's resident node+0xDC for every body object. These are exposed for the harness. */
 int   g_body_count = 0;          /* how many body objects render_frame rendered      */
+int   g_sat_count  = 0;          /* how many cat 1..4 satellites render_frame rendered */
 u32   g_obj_dc_resident[64];     /* resident node+0xDC per body (engine prefix-sum)   */
 u32   g_obj_dc_computed[64];     /* render_frame's running-cursor prefix-sum          */
 int   g_obj_ntiles[64];          /* tiles each body emitted                           */
@@ -233,10 +269,28 @@ void render_frame_body_hook(Sh4Ctx *c, u32 node){
     g_body_count++;
 }
 
+/* render_frame_satellite_hook: called by the slot-walk for each cat 1..4 node (the
+ * loc_8c030af8 dispatch). Runs the satellite render through the SAME shared walker/submit
+ * path and advances the SAME submit cursor — satellites and bodies draw from one arena
+ * (the walker reads node+0xDC + arena_base for every cat). Recorded under g_obj_* with the
+ * bodies for the per-object proof; counted separately in g_sat_count for the harness. */
+void render_frame_satellite_hook(Sh4Ctx *c, u32 node){
+    if(g_body_count < 64){
+        g_obj_node[g_body_count]       = node;
+        g_obj_dc_resident[g_body_count]= r16u(c, node+0xDC);   /* engine's prefix-sum */
+        g_obj_dc_computed[g_body_count]= s_running_cursor;     /* our running prefix  */
+    }
+    int nt = render_object_full_satellite(c, node);
+    if(g_body_count < 64) g_obj_ntiles[g_body_count] = nt;
+    s_running_cursor += (u32)nt;
+    g_body_count++;
+    if(nt > 0) g_sat_count++;         /* a body-sprite satellite that actually emitted */
+}
+
 /* PUBLIC ENTRY: render_frame(ram) — reset cursor, walk all slots, render all bodies into
  * the scene TA accumulator. Caller reads g_scene[0..g_nscene) and the per-object proof. */
 void render_frame_reset(void){
-    g_nscene=0; g_body_count=0; s_running_cursor=0;
+    g_nscene=0; g_body_count=0; g_sat_count=0; s_running_cursor=0;
 }
 int  render_frame_nscene(void){ return g_nscene; }
 const SceneQuad* render_frame_scene(void){ return g_scene; }

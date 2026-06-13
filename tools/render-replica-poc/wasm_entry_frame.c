@@ -87,6 +87,9 @@ uint32_t render_frame_ta(uint8_t* ram16mb, uint8_t* out_ta, uint32_t out_cap){
 }
 
 EXPORT uint32_t render_frame_body_count(void){ return (uint32_t)g_body_count; }
+extern int g_sat_count;
+/* cat 1..4 satellites that actually emitted body tiles this frame (the missing-sprites fix). */
+EXPORT uint32_t render_frame_sat_count(void){ return (uint32_t)g_sat_count; }
 EXPORT uint32_t render_frame_quad_count(void){ return (uint32_t)render_frame_nscene(); }
 
 /* PER-QUAD SOURCE SEL (tiling-safe texture pairing). The body walker expands ONE GFX2 cell

@@ -31,18 +31,21 @@ if ! command -v emcc &>/dev/null; then
 fi
 echo "[build_wasm_frame] emcc: $(emcc --version | head -1)"
 
-# Regenerate the transpiled C (deterministic, from the disasm) if missing.
+# Regenerate the transpiled C (deterministic, from the disasm). ALWAYS regenerate the
+# auto-gen units so a generator/disasm change (e.g. the loc_8c030af8 satellite dispatch)
+# is picked up — these are pure functions of the marvelous2 .asm, cheap and reproducible.
 cd "$SCRIPT_DIR"
-[ -f gen_walker_root.c ]   || python gen_walker_root.py
-[ -f gen_render_object.c ] || python gen_render_object.py
+python gen_walker_root.py
+python gen_render_object.py
+python gen_render_satellite.py
 [ -f gen_walker.c ]        || python gen_walker.py
 [ -f gen_leaf.c ]          || python gen_leaf.py
 
 mkdir -p "$OUT_DIR"
 
-SRCS="gen_walker_root.c render_frame.c gen_render_object.c gen_transform_obj.c \
-    gen_submit_params.c gen_walker.c gen_leaf.c wasm_entry_frame.c"
-EXPORTS='["_render_frame_ta","_render_frame_body_count","_render_frame_quad_count","_render_frame_quad_sels","_render_frame_quad_gfx1s","_render_frame_quad_colrow","_malloc","_free"]'
+SRCS="gen_walker_root.c render_frame.c gen_render_object.c gen_render_satellite.c \
+    gen_transform_obj.c gen_submit_params.c gen_walker.c gen_leaf.c wasm_entry_frame.c"
+EXPORTS='["_render_frame_ta","_render_frame_body_count","_render_frame_sat_count","_render_frame_quad_count","_render_frame_quad_sels","_render_frame_quad_gfx1s","_render_frame_quad_colrow","_malloc","_free"]'
 
 # WEB target (the live client uses web/render-replica/render_frame.{mjs,wasm}).
 emcc -O2 -fno-strict-aliasing $SRCS \

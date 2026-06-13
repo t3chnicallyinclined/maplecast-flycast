@@ -170,6 +170,8 @@ class Emitter:
             self.emit(f"{R(a[1])} = (u32)(s32)(s8){R(a[0])};")
         elif m=='muls.w':
             self.emit(f"c->macl = (u32)((s32)(s16){R(a[0])} * (s32)(s16){R(a[1])});")
+        elif m=='mulu.w':
+            self.emit(f"c->macl = (u32)(((u32)((u16){R(a[0])})) * ((u32)((u16){R(a[1])})));")
         # ---------------- compares (set T) ----------------
         elif m=='tst':
             if is_reg(a[0]): self.emit(f"c->sr_t = (({R(a[0])} & {R(a[1])})==0);")

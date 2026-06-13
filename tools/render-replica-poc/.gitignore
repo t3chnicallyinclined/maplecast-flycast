@@ -15,6 +15,7 @@ gen_walker.c
 gen_transform.c
 gen_submit.c
 gen_render_object.c
+gen_render_satellite.c
 gen_walker_root.c
 transform_cases.h
 image.h
