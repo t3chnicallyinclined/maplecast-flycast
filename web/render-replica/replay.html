@@ -84,6 +84,10 @@ import createRenderFrame from './render_frame.mjs?v=quadsel3';
 // shipped-once compressed GFX (in the RAM image) + the live sprite_id, writes it to pane.vram
 // at the TCW addr render_frame carries. Replaces the per-frame "bodytex" VRAM band (removed).
 import { ensureBodyTextures } from './body_decoder.mjs';
+// Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
+// truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
+// /gfx/PL{NN}_gfx{1,2}.bin (cached by char_id). Fixes the scramble + is the local-ROM cache.
+import { applyLocalGfx } from './local_gfx_overlay.mjs';
 const bodyCache = {};   // decode-on-change memo, persists across frames
 
 const W_DIR = new URL('../webgpu/', import.meta.url);
@@ -337,6 +341,9 @@ function validate(fr, ta, len) {
 function showFrame(f) {
     cur = f;
     const fr = applyDynamic(f);
+    // Phase A: override the shipped GFX with the COMPLETE local disc art at node+0x15C/0x160
+    // (cached by char_id) BEFORE the walker/decoder read it — fixes the scramble.
+    applyLocalGfx(ram, log);
     const { ta, quads, len, quadSels, quadGfx1s } = transpiledTA(ram);
     window.__lastTA = ta;      // expose for headless verification (TA-level motion probe)
     // PURE-STATE TEXTURES: ensure the active body parts are decoded into pane.vram at the TCW
@@ -444,6 +451,9 @@ function liveApplyFrame(u8) {
     p = applyGfxTail(u8, p);
     const engTa = taSize ? u8.subarray(p, p + taSize) : null;
 
+    // Phase A: override the shipped/streamed GFX with the COMPLETE local disc art at
+    // node+0x15C/0x160 (cached by char_id) BEFORE the walker/decoder read — fixes the scramble.
+    applyLocalGfx(ram, log);
     const { ta, quads, len, quadSels, quadGfx1s } = transpiledTA(ram);
     window.__lastTA = ta;
     // PURE-STATE TEXTURES (live): decode each body part into pane.vram @ its OWN TCW, keyed by
