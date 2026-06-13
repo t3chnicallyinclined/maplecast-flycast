@@ -32,7 +32,8 @@ That zero is the completeness proof: nothing is read that isn't shipped.
 | `*(0x8C2DAD4C)` (0x8000) | **rectab** PVR poly-param records | **DYNAMIC** | per-frame finalized 0x20-byte templates |
 | `node+0x15C → GFX1` (0x20000) | GFX1 tile-dim/header table | **STATIC** | load-time character art, frame-invariant |
 | `node+0x160 → GFX2` (0x20000) | GFX2 cell-record table | **STATIC** | load-time character art, frame-invariant |
-| VRAM (8 MB) | part-pixel textures the TA samples | **STATIC** | decoded into VRAM; ships once with the static set |
+| VRAM (8 MB) | part-pixel textures the TA samples | **STATIC** (full image, once) | decoded into VRAM; ships once with the static set |
+| VRAM `[0x410000, 0x460000)` (0x50000) | live BODY sprite texture band | **DYNAMIC** (`bodytex`) | the engine re-decodes the animated body parts into this VRAM span every frame; the static VRAM image goes stale → garbling. Ships per frame. |
 | PVR regs (0x8000) | palette/render state | **STATIC** | ships once (palette deltas, if any, are a future per-frame extension) |
 | `0x0C47FE00..0x0C480200` | PoC r15 stack | SCRATCH | caller re-inits each frame; not engine state |
 
@@ -45,6 +46,19 @@ Notes on the partition (cited to the transpile + disasm, reconciled with re_kb):
   for the match. They ship ONCE in the static block. (VRAM is the part pixels; PVR regs the palette.)
 - **`0x8C1F9F9C` is DYNAMIC, not static.** re_kb `body_walker_tiling` (2026-06-12 correction): it is a
   rolling per-frame scratch table the render path refills per object — so it MUST ship per frame.
+  Sized 0x1800 (the live descriptor table spans ~5135 B; the earlier 0x200 truncated it → garbling).
+- **`rectab` is sized 0x10000, not 0x8000.** The max record index reached 461/1024 with two bodies on
+  busy frames; 0x8000 truncated the table mid-frame. 0x10000 gives headroom for a 3rd/4th body.
+- **The `bodytex` DYNAMIC region is a VRAM SLICE, not guest RAM.** The body part-pixel textures live in
+  VRAM. The full VRAM image ships ONCE in the STATIC block, but the engine re-decodes the *animated body
+  parts* into a sub-band of VRAM every frame, so the static image goes stale and the client samples
+  empty/old texels → garbled body. Fix: ship VRAM `[0x410000, 0x460000)` per frame as a DYNAMIC region.
+  **Encoding:** it reuses the SAME `{addr,len,tag[8]}` region-table struct as RAM regions, but is
+  distinguished purely by **`tag == "bodytex"`**, and its `addr` field holds the **VRAM offset**
+  (`0x410000`) rather than a `0x8C…` guest address. The server (`maplecast_replica_live.cpp`) copies it
+  from the resident `vram[]` array; the client (`replay.html` `liveApplyFrame`/`applyDynamic`) routes it
+  to `pane.vram` at `addr` (NOT `ram[]` at `addr&0xFFFFFF`). Routing is by tag alone — no addr-range
+  assumption — so a region tagged `bodytex` is always a VRAM slice applied to VRAM.
 - **The PoC stack scratch is neither.** The walker/setup use an r15 stack at `0x0C480000` that the
   off-SH4 caller owns and re-inits each frame; it is excluded from the wire.
 
@@ -52,9 +66,12 @@ Notes on the partition (cited to the transpile + disasm, reconciled with re_kb):
 
 - **Touched bytes (single body, this dump): 681 dynamic bytes/frame.** This is the lower bound — what a
   one-character frame actually reads.
-- **Whole-region DYNAMIC ship size (multi-character-safe, worst case): ~58 KB/frame**, dominated by
-  the two alloc tables (idxtab 8 KB + rectab 32 KB = 40 KB) and the char structs (8.5 KB) + slot ptrs
-  (6 KB). At 60 fps that is ~3.5 MB/s raw.
+- **Whole-region DYNAMIC ship size (multi-character-safe, worst case): ~410 KB/frame raw**, dominated by
+  the `bodytex` VRAM band (0x50000 = 320 KB), the two alloc tables (idxtab 8 KB + rectab 64 KB = 72 KB),
+  the char structs (8.5 KB) + slot ptrs (6 KB) + tiledesc (6 KB). At 60 fps that is ~24 MB/s **raw** —
+  but the bodytex band is sparse (mostly the active body's part pixels; the rest of the 320 KB span is
+  zero/stable), so the whole message zstd-compresses well. Earlier figures (~58 KB/frame) predate the
+  bodytex VRAM band and the rectab/tiledesc enlargements that fixed the garbling.
 - **With dirty-diff (v2): far smaller.** Most of rectab/idxtab/char-struct bytes are stable frame-to-frame;
   a per-region XOR/RLE diff collapses the per-frame payload toward the ~681 B touched floor (~0.04 MB/s),
   i.e. **GSTA-scale**, which is the thesis: the render-replica feed is state-sized, not pixel-sized.
@@ -94,7 +111,9 @@ PER-FRAME RECORDS × nFrames:
 
 The dynamic regions appear in the **table order** every frame — the player reads the region table
 once, then for each frame slurps the regions back to their guest addresses (`addr & 0xFFFFFF`) into a
-16 MB RAM image, overlays the static regions once, and calls `render_frame_ta(ram16mb, ...)`. The
+16 MB RAM image, overlays the static regions once, and calls `render_frame_ta(ram16mb, ...)`. **The one
+exception is the `bodytex` region** (tag-identified): it is a VRAM slice, applied to the VRAM image at
+its `addr` (a VRAM offset) instead of to area-3 RAM — see the encoding note above. The
 embedded `engine_ta[]` is GROUND TRUTH: playback validates `render_frame` output == `engine_ta`
 byte-exact per frame (the same diff Phase 2 already passes at frame 0).
 

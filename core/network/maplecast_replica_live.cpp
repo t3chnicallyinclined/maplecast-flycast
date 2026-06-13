@@ -133,7 +133,9 @@ static void buildTables()
 	D(0x8C287DE0, 16u*0x180u,  "slot_ptr");      // slot-table ptr arrays
 	D(0x8C268340, 6u*0x5A4u,   "char_str");      // P1C1..P2C3 char structs
 	D(0x8C1F9D80, 0x20,        "arena");         // arena-control globals
-	D(0x8C1F9F9C, 0x200,       "tiledesc");      // per-frame tile-descriptor scratch
+	D(0x8C1F9F9C, 0x1800,      "tiledesc");      // per-frame tile-descriptor scratch
+	                                             // (live descriptor table spans 5135B —
+	                                             //  0x200 truncated it; 0x1800 covers it)
 	D(0x8C2D6AD8, 0xC0,        "cam_mat");       // camera matrices M2/M1
 	D(0x8C26A510, 0x40,        "camZ");          // camera-Z scale block
 	D(0x8C26823C, 0x04,        "ggp_ptr");       // GameGlobalPointer
@@ -145,8 +147,26 @@ static void buildTables()
 		// These two pointers are resolved at table-build time. They are stable for
 		// the match (arena base), so capturing them here is correct for the stream.
 		if (isRam(idxtab)) D(idxtab, 0x2000, "idxtab");
-		if (isRam(rectab)) D(rectab, 0x8000, "rectab");
+		// rectab: max record index hit 461/1024 with 2 bodies; 0x8000 truncated the
+		// table on busier frames. 0x10000 gives headroom for a 3rd/4th body.
+		if (isRam(rectab)) D(rectab, 0x10000, "rectab");
 	}
+
+	// ---- DYNAMIC (VRAM): the per-frame body sprite TEXTURE band -----------------
+	// The body part-pixel textures the TA samples live in VRAM, NOT in 0x8C... guest
+	// RAM. The static prefix ships VRAM ONCE, but the body texture band is re-decoded
+	// into VRAM by the engine every frame (animation changes the resident part pixels);
+	// shipping VRAM only once leaves the client sampling STALE/EMPTY VRAM => garbling.
+	// So we ship the live body-texture span [0x410000, 0x460000) per frame.
+	//
+	// ENCODING: this is a VRAM slice, not a guest-RAM region. We keep the SAME
+	// {addr,len,tag} table struct but TAG it "bodytex" and store addr = the VRAM
+	// OFFSET (0x410000), not a 0x8C... guest address. The client routes purely by
+	// tag=="bodytex" -> pane.vram (see replay.html), and captureFrame() below copies
+	// this region from the resident vram[] array (not mem_b/guest RAM). No other code
+	// path needs to special-case it: the tag is the single source of truth.
+	// Page-aligned 320KB span covering the observed live band 0x415400..0x450200.
+	D(0x410000, 0x50000, "bodytex");
 
 	_dynTotal = 0;
 	for (auto& r : _dynRegs) _dynTotal += r.len;
@@ -363,10 +383,17 @@ static void captureFrame(u32 vframe)
 	// ---- dynamic regions in table order, raw bytes ----
 	size_t off = hdr;
 	for (auto& r : _dynRegs) {
+		// The "bodytex" region is a VRAM slice, not guest RAM: r.addr is a VRAM
+		// OFFSET (0x410000), so copy from the resident vram[] array (same array the
+		// render path samples and the static prefix snapshots). Identified by tag so
+		// no addr-range assumption is needed; the client routes it to pane.vram.
+		if (strncmp(r.tag, "bodytex", 7) == 0) {
+			memcpy(&buf[off], &vram[r.addr], r.len);
+		}
 		// The two big tables (idxtab/rectab) and the slot ptr arrays + char structs
 		// all live in main RAM; copy from mem_b directly when the addr is a clean
 		// 0x8C... main-RAM address (fast), else fall back to alias-safe reads.
-		if ((r.addr & 0xFF000000u) == 0x8C000000u) {
+		else if ((r.addr & 0xFF000000u) == 0x8C000000u) {
 			memcpy(&buf[off], &mem_b[r.addr & 0x00FFFFFFu], r.len);
 		} else {
 			for (u32 b = 0; b < r.len; b++) buf[off + b] = rd8(r.addr + b);
@@ -428,8 +455,9 @@ void init()
 	if (!_compInit) {
 		// Prefix: up to VRAM(8MB)+PVR(32KB)+RAM(16MB)+~256KB GFX ≈ 24.3MB worst case.
 		_prefixComp.init((size_t)28 * 1024 * 1024);
-		// Per-frame dynamic payload ≈ 58KB; give generous headroom.
-		_frameComp.init((size_t)1 * 1024 * 1024);
+		// Per-frame dynamic payload ≈ 90KB RAM regions + 320KB bodytex VRAM band
+		// ≈ 410KB raw worst case; give generous headroom.
+		_frameComp.init((size_t)2 * 1024 * 1024);
 		_compInit = true;
 	}
 

@@ -63,7 +63,7 @@
 <main>
   <div class="panel">
     <h2>render_frame.wasm slot-walk &rarr; pvr2 (the animated body)</h2>
-    <canvas id="cReplay" width="640" height="480"></canvas>
+    <canvas id="cReplay" width="640" height="480" style="background:#ff00ff"></canvas>
   </div>
 </main>
 
@@ -256,7 +256,11 @@ function applyDynamic(f) {
     const fr = REC.frames[f];
     let off = fr.dynOff;
     for (const r of REC.dynamicRegs) {
-        ram.set(REC.buf.subarray(off, off + r.len), guestOff(r.addr));
+        const slice = REC.buf.subarray(off, off + r.len);
+        // Same routing as the live path: "bodytex" is a VRAM slice (addr = VRAM offset),
+        // everything else is area-3 guest RAM. See liveApplyFrame() for the rationale.
+        if (r.tag === 'bodytex') { if (pane.vram) pane.vram.set(slice, r.addr >>> 0); }
+        else ram.set(slice, guestOff(r.addr));
         off += r.len;
     }
     return fr;
@@ -358,9 +362,16 @@ function liveApplyFrame(u8) {
     p += 4;
     const vframe = dv.getUint32(p, true); p += 4;
     const taSize = dv.getUint32(p, true); p += 4;
-    // splat each DYNAMIC region (table order from msg 1) into the RAM image
+    // splat each DYNAMIC region (table order from msg 1) into the RAM image.
+    // ROUTING: a region tagged "bodytex" is NOT guest RAM — it is the per-frame body
+    // sprite TEXTURE band, a VRAM slice whose addr is the VRAM offset (0x410000). Route
+    // it to pane.vram (the array the TextureManager re-decodes every render()), NOT ram[].
+    // All other regions are area-3 guest RAM -> ram[] at addr&0xFFFFFF. Routing is by TAG
+    // alone (no addr-range assumption) — server-side encoding mirror in maplecast_replica_live.cpp.
     for (const r of livePre.dynamicRegs) {
-        ram.set(u8.subarray(p, p + r.len), guestOff(r.addr));
+        const slice = u8.subarray(p, p + r.len);
+        if (r.tag === 'bodytex') { if (pane.vram) pane.vram.set(slice, r.addr >>> 0); }
+        else ram.set(slice, guestOff(r.addr));
         p += r.len;
     }
     const engTa = taSize ? u8.subarray(p, p + taSize) : null;
