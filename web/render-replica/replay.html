@@ -27,6 +27,8 @@
   .badge.pass { background:#14422a; color:#7CFC9A; border:1px solid #2a6e46; }
   .badge.fail { background:#4a1c1c; color:#ff8a8a; border:1px solid #7e3030; }
   .badge.synth{ background:#3a3320; color:#ffd27f; border:1px solid #6e6030; }
+  .badge.file { background:#1c2330; color:#9fb0c0; border:1px solid #33425a; }
+  .badge.live { background:#1f5d8c; color:#fff; border:1px solid #3a8fd0; }
   #drop { border:1px dashed #33425a; border-radius:6px; padding:6px 12px; color:#7a8694; }
   #drop.hot { border-color:#3a8fd0; color:#cdd6e0; background:#142033; }
 </style>
@@ -46,6 +48,16 @@
   <span>GT <span id="gt" class="badge synth">–</span></span>
   <label id="drop">drop an .mcrr/.bin here · <input type="file" id="file" accept=".bin,.mcrr"></label>
   <span class="sub">?rec=&lt;url&gt; to auto-load</span>
+</div>
+
+<div class="toolbar">
+  <span class="badge" id="modeBadge">FILE</span>
+  <label>live WS <input type="text" id="liveUrl" value="ws://127.0.0.1:7212" style="width:280px; background:#0c0e12; color:#cdd6e0; border:1px solid #33425a; border-radius:4px; padding:5px 8px; font:inherit;"></label>
+  <button id="btnLive">⚡ Connect Live</button>
+  <span class="stat">link <b id="linkState">–</b></span>
+  <span class="stat">live <b id="livefps">–</b> fps</span>
+  <span class="stat">last frame# <b id="liveframe">–</b></span>
+  <span class="sub">?live=&lt;url&gt; to auto-connect · prod: wss://nobd.net/replica-ws</span>
 </div>
 
 <main>
@@ -73,15 +85,20 @@ const W_DIR = new URL('../webgpu/', import.meta.url);
 const { PVR2Renderer }   = await import(new URL('pvr2-renderer.mjs', W_DIR));
 const { TAParser }       = await import(new URL('ta-parser.mjs', W_DIR));
 const { TextureManager } = await import(new URL('texture-manager.mjs', W_DIR));
+// SAME zstd decoder the TA-mirror cockpit (frame-decoder.mjs) uses for the ZCST envelope.
+const { decompress }     = await import(new URL('fzstd.mjs', W_DIR));
 
 const RAM_SIZE = 16 * 1024 * 1024;
 const logEl = document.getElementById('log');
 const log = (m, cls) => { const s = document.createElement('span'); if (cls) s.className = cls; s.textContent = m + '\n'; logEl.appendChild(s); logEl.scrollTop = logEl.scrollHeight; console.log(m); };
 
 // ---------------------------------------------------------------- MCRR parser
-function parseMCRR(ab) {
+// parsePrefix(): header + STATIC/DYNAMIC tables + STATIC payload. Returns where the
+// first "FRMx" record begins (frameStart). The SAME bytes form the head of a full .mcrr
+// file AND the LIVE msg-1 static prefix — so file replay and live replay share this.
+function parsePrefix(ab) {
     const buf = new Uint8Array(ab);
-    const dv  = new DataView(ab);
+    const dv  = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
     let p = 0;
     const u32 = () => { const v = dv.getUint32(p, true); p += 4; return v >>> 0; };
     if (u32() !== 0x5252434D) throw new Error('bad MCRR magic (not "MCRR")');
@@ -101,20 +118,29 @@ function parseMCRR(ab) {
     const pvr  = buf.subarray(p, p + pvrBytes);  p += pvrBytes;
     const staticData = staticRegs.map(r => { const b = buf.subarray(p, p + r.len); p += r.len; return b; });
 
-    // index the frame records (don't copy — store offsets into buf)
+    return { version, nStatic, nDynamic, nFrames, vramBytes, pvrBytes,
+             staticRegs, dynamicRegs, vram, pvr, staticData, frameStart: p, buf };
+}
+
+// parseMCRR(): full file = prefix + indexed frame table (for the scrubbable file path).
+function parseMCRR(ab) {
+    const pre = parsePrefix(ab);
+    const buf = pre.buf;
+    const dv  = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    let p = pre.frameStart;
+    const u32 = () => { const v = dv.getUint32(p, true); p += 4; return v >>> 0; };
     const frames = [];
-    for (let f = 0; f < nFrames; f++) {
+    for (let f = 0; f < pre.nFrames; f++) {
         const fmagic = u32();
         if (fmagic !== 0x784D5246) throw new Error(`frame ${f}: bad "FRMx" magic`);
         const vframe = u32();
         const taSize = u32();
-        const dynOff = p;                          // dynamic region bytes start here
-        for (const r of dynamicRegs) p += r.len;    // skip dynamic payload
-        const taOff = p; p += taSize;               // engine_ta
+        const dynOff = p;                              // dynamic region bytes start here
+        for (const r of pre.dynamicRegs) p += r.len;    // skip dynamic payload
+        const taOff = p; p += taSize;                   // engine_ta
         frames.push({ vframe, taSize, dynOff, taOff });
     }
-    return { version, nStatic, nDynamic, nFrames, vramBytes, pvrBytes,
-             staticRegs, dynamicRegs, vram, pvr, staticData, frames, buf };
+    return { ...pre, frames };
 }
 
 const guestOff = a => (a >>> 0) & 0xFFFFFF;
@@ -171,33 +197,46 @@ const els = {
     scrub: document.getElementById('scrub'), fcur: document.getElementById('fcur'),
     ftot: document.getElementById('ftot'), fps: document.getElementById('fps'),
     gt: document.getElementById('gt'),
+    modeBadge: document.getElementById('modeBadge'),
+    liveUrl: document.getElementById('liveUrl'), btnLive: document.getElementById('btnLive'),
+    linkState: document.getElementById('linkState'), livefps: document.getElementById('livefps'),
+    liveframe: document.getElementById('liveframe'),
 };
+els.modeBadge.className = 'badge file';   // initial mode
+
+// Seed the 16MB RAM image + VRAM/PVR ONCE from a parsed prefix. Shared by the file path
+// and the LIVE path (the live msg-1 ZCST prefix decompresses to the SAME prefix bytes).
+// Sets module-level `ram`/`gpuOK`. Returns nothing; throws only on logic errors (GPU
+// failure degrades gracefully to TA-only).
+async function seedFrom(pre, mb) {
+    // BEFORE the GPU, so TA-level playback/validator works even without a WebGPU adapter.
+    ram = new Uint8Array(RAM_SIZE);
+    pre.staticRegs.forEach((r, i) => {
+        if (r.tag === 'ram16') ram.set(pre.staticData[i], 0);
+        else ram.set(pre.staticData[i], guestOff(r.addr));
+    });
+    log(`  static-seeded ${mb.toFixed(1)} MB RAM + VRAM ${(pre.vramBytes/1048576).toFixed(0)}MB + PVR ${(pre.pvrBytes/1024).toFixed(0)}KB`, 'ok');
+
+    try {
+        await pane.ensure();
+        pane.setStatic(pre.vram, pre.pvr);
+        gpuOK = true;
+    } catch (e) {
+        gpuOK = false;
+        log('  [warn] WebGPU unavailable (' + e.message + ') — TA playback + validator only, no canvas draw.', 'warn');
+    }
+}
 
 async function loadMCRR(ab, label) {
+    stopLive();
+    setMode('file');
     log(`Parsing MCRR (${(ab.byteLength/1048576).toFixed(1)} MB)${label?' — '+label:''}…`);
     REC = parseMCRR(ab);
     log(`  v${REC.version}: ${REC.nStatic} static, ${REC.nDynamic} dynamic, ${REC.nFrames} frames; vram=${REC.vramBytes} pvr=${REC.pvrBytes}`, 'hl');
     log(`  dynamic regions: ${REC.dynamicRegs.map(r=>r.tag).join(', ')}`);
 
     await ensureWasm();
-
-    // seed the 16MB RAM image ONCE from the static block (BEFORE the GPU, so the TA-level
-    // playback/validator works even if WebGPU init fails — e.g. headless w/o an adapter).
-    ram = new Uint8Array(RAM_SIZE);
-    REC.staticRegs.forEach((r, i) => {
-        if (r.tag === 'ram16') ram.set(REC.staticData[i], 0);
-        else ram.set(REC.staticData[i], guestOff(r.addr));
-    });
-
-    // VRAM + palette -> pvr2 (once). If no WebGPU adapter, fall back to TA-only (no canvas).
-    try {
-        await pane.ensure();
-        pane.setStatic(REC.vram, REC.pvr);
-        gpuOK = true;
-    } catch (e) {
-        gpuOK = false;
-        log('  [warn] WebGPU unavailable (' + e.message + ') — TA playback + validator only, no canvas draw.', 'warn');
-    }
+    await seedFrom(REC, ab.byteLength/1048576);
 
     els.ftot.textContent = REC.nFrames;
     els.scrub.max = REC.nFrames - 1; els.scrub.value = 0;
@@ -272,6 +311,143 @@ els.play.onclick = () => setPlaying(!playing);
 els.step.onclick = () => { if (playing) setPlaying(false); showFrame((cur + 1) % REC.nFrames); };
 els.scrub.oninput = () => { if (playing) setPlaying(false); showFrame(+els.scrub.value); };
 
+// ============================================================================
+// LIVE mode (Phase 4c). Same MCRR format streamed over a WebSocket:
+//   msg 1   = ZCST(static prefix)  -> decompress -> parsePrefix -> seedFrom (RAM/VRAM/PVR)
+//   msg N   = "FRMx"(4)+vframe(4)+taSize(4)+DYNAMIC bytes+[engine_ta]  (one raw FRMx record)
+// We reuse parsePrefix/seedFrom/transpiledTA/pane.render VERBATIM. The DYNAMIC region
+// addr/len come from msg-1's dynamic table — a live frame is just "splat each region into
+// RAM then render_frame", identical to applyDynamic but reading the socket bytes.
+// ============================================================================
+const MAGIC_ZCST = 0x5453435A;
+let liveWS = null, livePre = null, liveSeeded = false, livePrefixSeen = false;
+let liveFpsT = performance.now(), liveFpsN = 0;
+
+function setMode(m) {
+    els.modeBadge.textContent = m.toUpperCase();
+    els.modeBadge.className = 'badge ' + (m === 'live' ? 'live' : 'file');
+}
+
+function stopLive() {
+    if (liveWS) { try { liveWS.onclose = null; liveWS.close(); } catch {} liveWS = null; }
+    livePre = null; liveSeeded = false; livePrefixSeen = false;
+    els.btnLive.textContent = '⚡ Connect Live';
+    els.btnLive.classList.remove('active');
+    els.linkState.textContent = '–';
+}
+
+function zcstDecompress(u8) {
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    if (u8.length >= 8 && dv.getUint32(0, true) === MAGIC_ZCST) {
+        // "ZCST"(4) + u32 uncompressedSize(LE) + zstd blob  — SAME envelope as the TA mirror.
+        return decompress(u8.subarray(8));
+    }
+    return u8;   // tolerate an uncompressed prefix
+}
+
+// Apply one raw "FRMx" record (a whole ArrayBuffer/Uint8Array) and render it.
+function liveApplyFrame(u8) {
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    let p = 0;
+    if (dv.getUint32(p, true) !== 0x784D5246) { log('  [live] dropped: bad FRMx magic', 'warn'); return; }
+    p += 4;
+    const vframe = dv.getUint32(p, true); p += 4;
+    const taSize = dv.getUint32(p, true); p += 4;
+    // splat each DYNAMIC region (table order from msg 1) into the RAM image
+    for (const r of livePre.dynamicRegs) {
+        ram.set(u8.subarray(p, p + r.len), guestOff(r.addr));
+        p += r.len;
+    }
+    const engTa = taSize ? u8.subarray(p, p + taSize) : null;
+
+    const { ta, quads, len } = transpiledTA(ram);
+    window.__lastTA = ta;
+    if (gpuOK) pane.render(ta);
+
+    // validator (only if the live frame carries engine_ta — mock/synth sends taSize=0)
+    if (engTa) validateLive(engTa, ta, len);
+    else { els.gt.className = 'badge synth'; els.gt.textContent = 'live (no GT)'; }
+
+    els.liveframe.textContent = vframe;
+    els.fcur.textContent = vframe;
+    liveFpsN++;
+    const now = performance.now();
+    if (now - liveFpsT >= 500) {
+        els.livefps.textContent = (liveFpsN * 1000 / (now - liveFpsT)).toFixed(0);
+        liveFpsN = 0; liveFpsT = now;
+    }
+    if (vframe % 30 === 0) {
+        const tdv = new DataView(ta.buffer, ta.byteOffset, ta.byteLength);
+        const Ax = quads > 0 ? tdv.getFloat32(36, true).toFixed(0) : '–';
+        log(`[live] frame ${vframe} quads=${quads} ta=${len}B Ax=${Ax}`);
+    }
+}
+
+// Live GT check (parallel to validate(), but the engine_ta arrives as a buffer, not a file off).
+function validateLive(eng, ta, len) {
+    const tot = Math.min(eng.length, len);
+    let pOK = 0, pN = 0;
+    for (let o = 0; o + 96 <= tot; o += 96) { pN++; let ok = 1; for (let i = 0; i < 16; i++) if (eng[o+i] !== ta[o+i]) { ok = 0; break; } pOK += ok; }
+    const pass = pN > 0 && pOK === pN;
+    els.gt.className = 'badge ' + (pass ? 'pass' : 'fail');
+    els.gt.textContent = `${pass ? 'PASS' : 'FAIL'} params ${pOK}/${pN}`;
+}
+
+async function connectLive(url) {
+    stopLive();
+    setPlaying(false);
+    setMode('live');
+    // a live stream has no scrubbable frame table — disable file transport controls
+    els.play.disabled = els.step.disabled = els.scrub.disabled = true;
+    els.linkState.textContent = 'connecting…';
+    els.btnLive.textContent = '■ Disconnect';
+    els.btnLive.classList.add('active');
+    log(`[live] connecting ${url}…`, 'hl');
+
+    await ensureWasm();
+
+    let ws;
+    try { ws = new WebSocket(url); } catch (e) { log('[live] bad URL: ' + e.message, 'err'); stopLive(); setMode('file'); return; }
+    ws.binaryType = 'arraybuffer';
+    liveWS = ws;
+
+    ws.onopen = () => { els.linkState.textContent = 'open'; log('[live] socket open — awaiting ZCST static prefix…', 'ok'); };
+    ws.onerror = () => { els.linkState.textContent = 'error'; log('[live] socket error', 'err'); };
+    ws.onclose = () => { els.linkState.textContent = 'closed'; log('[live] socket closed', 'warn'); stopLive(); };
+
+    ws.onmessage = async (ev) => {
+        if (ws !== liveWS) return;
+        const u8 = ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : new Uint8Array(await ev.data.arrayBuffer());
+        try {
+            if (!livePrefixSeen) {
+                // msg 1 = ZCST static prefix. Claim it SYNCHRONOUSLY so FRMx frames that
+                // arrive while the (async) seed runs aren't mis-read as a second prefix.
+                livePrefixSeen = true;
+                const pre = zcstDecompress(u8);   // Uint8Array of the MCRR prefix
+                log(`[live] msg1: ${(u8.length/1048576).toFixed(2)}MB ZCST -> ${(pre.length/1048576).toFixed(1)}MB prefix; seeding…`, 'hl');
+                livePre = parsePrefix(pre);
+                log(`  v${livePre.version}: ${livePre.nStatic} static, ${livePre.nDynamic} dynamic; vram=${livePre.vramBytes} pvr=${livePre.pvrBytes}`, 'hl');
+                log(`  dynamic regions: ${livePre.dynamicRegs.map(r=>r.tag).join(', ')}`);
+                await seedFrom(livePre, pre.length/1048576);
+                liveSeeded = true;
+                els.linkState.textContent = 'streaming';
+                els.gt.className = 'badge synth'; els.gt.textContent = 'live';
+                log('[live] seeded. Streaming frames…', 'ok');
+            } else if (liveSeeded) {
+                // msg N = raw FRMx record (drop frames that race ahead of seed completion)
+                liveApplyFrame(u8);
+            }
+        } catch (e) {
+            log('[live] frame error: ' + (e.stack || e.message), 'err');
+        }
+    };
+}
+
+els.btnLive.onclick = () => {
+    if (liveWS) { stopLive(); setMode('file'); log('[live] disconnected.', 'warn'); return; }
+    connectLive(els.liveUrl.value.trim());
+};
+
 // file picker + drag/drop
 document.getElementById('file').onchange = async e => {
     const f = e.target.files[0]; if (!f) return;
@@ -287,8 +463,15 @@ drop.addEventListener('drop', async e => {
     await loadMCRR(await f.arrayBuffer(), f.name).catch(err => log('LOAD FAIL: ' + (err.stack||err.message), 'err'));
 });
 
+// ?live=<url> auto-connect (takes precedence over ?rec=)
+const liveUrlParam = new URLSearchParams(location.search).get('live');
+if (liveUrlParam) {
+    els.liveUrl.value = liveUrlParam;
+    connectLive(liveUrlParam);
+}
+
 // ?rec=<url> auto-load
-const recUrl = new URLSearchParams(location.search).get('rec');
+const recUrl = liveUrlParam ? null : new URLSearchParams(location.search).get('rec');
 if (recUrl) {
     log(`Fetching ?rec=${recUrl}…`);
     try {
@@ -296,15 +479,19 @@ if (recUrl) {
         if (!r.ok) throw new Error(r.status + ' ' + recUrl);
         await loadMCRR(await r.arrayBuffer(), recUrl);
     } catch (e) { log('?rec fetch failed: ' + (e.stack||e.message), 'err'); }
-} else {
-    log('No ?rec= given. Drop an MCRR file or use the file picker.', 'warn');
-    log('Build a synthetic one: node tools/render-replica-poc/make_synthetic_rec.mjs', 'warn');
+} else if (!liveUrlParam) {
+    log('No ?rec= / ?live= given. Drop an MCRR file, use the file picker, or Connect Live.', 'warn');
+    log('Mock live server: node tools/render-replica-poc/mock_replica_live_server.mjs', 'warn');
+    log('Build a synthetic file:  node tools/render-replica-poc/make_synthetic_rec.mjs', 'warn');
 }
 
 // expose for headless verification
 window.__loadMCRR = loadMCRR;
 window.__showFrame = (f) => showFrame(f);
 window.__setPlaying = setPlaying;
+window.__connectLive = connectLive;
+window.__stopLive = stopLive;
+window.__liveState = () => ({ seeded: liveSeeded, link: els.linkState.textContent, lastFrame: els.liveframe.textContent });
 window.__state = () => ({ cur, nFrames: REC?.nFrames, playing });
 </script>
 </body>
