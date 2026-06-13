@@ -372,7 +372,7 @@ els.scrub.oninput = () => { if (playing) setPlaying(false); showFrame(+els.scrub
 // RAM then render_frame", identical to applyDynamic but reading the socket bytes.
 // ============================================================================
 const MAGIC_ZCST = 0x5453435A;
-let liveWS = null, livePre = null, liveSeeded = false, livePrefixSeen = false;
+let liveWS = null, livePre = null, liveSeeded = false, livePrefixSeen = false, pendingGfx = [];
 let liveFpsT = performance.now(), liveFpsN = 0;
 
 function setMode(m) {
@@ -382,7 +382,7 @@ function setMode(m) {
 
 function stopLive() {
     if (liveWS) { try { liveWS.onclose = null; liveWS.close(); } catch {} liveWS = null; }
-    livePre = null; liveSeeded = false; livePrefixSeen = false;
+    livePre = null; liveSeeded = false; livePrefixSeen = false; pendingGfx = [];
     els.btnLive.textContent = '⚡ Connect Live';
     els.btnLive.classList.remove('active');
     els.linkState.textContent = '–';
@@ -398,6 +398,16 @@ function zcstDecompress(u8) {
 }
 
 // Apply one raw "FRMx" record (a whole ArrayBuffer/Uint8Array) and render it.
+// Peek whether a decompressed FRMx frame carries a GFX tail (nGfx>0) — used to buffer the
+// connect GFX re-ship when it arrives during the async seed (otherwise dropped = the grid).
+function frameHasGfxTail(u8) {
+    if (!livePre) return false;
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    if (u8.length < 12 || dv.getUint32(0, true) !== 0x784D5246) return false;
+    const taSize = dv.getUint32(8, true);
+    const off = 12 + livePre.dynTotal + taSize;        // FRMx(4)+vframe(4)+taSize(4)+dyn+ta
+    return off + 4 <= u8.length && dv.getUint32(off, true) > 0;
+}
 function liveApplyFrame(u8) {
     const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
     let p = 0;
@@ -494,6 +504,7 @@ async function connectLive(url) {
                 const pre = zcstDecompress(u8);   // Uint8Array of the MCRR prefix
                 log(`[live] msg1: ${(u8.length/1048576).toFixed(2)}MB ZCST -> ${(pre.length/1048576).toFixed(1)}MB prefix; seeding…`, 'hl');
                 livePre = parsePrefix(pre);
+                livePre.dynTotal = livePre.dynamicRegs.reduce((s, r) => s + r.len, 0);  // for the GFX-tail peek
                 log(`  v${livePre.version}: ${livePre.nStatic} static, ${livePre.nDynamic} dynamic; vram=${livePre.vramBytes} pvr=${livePre.pvrBytes}`, 'hl');
                 log(`  dynamic regions: ${livePre.dynamicRegs.map(r=>r.tag).join(', ')}`);
                 await seedFrom(livePre, pre.length/1048576);
@@ -501,11 +512,19 @@ async function connectLive(url) {
                 els.linkState.textContent = 'streaming';
                 els.gt.className = 'badge synth'; els.gt.textContent = 'live';
                 log('[live] seeded. Streaming frames…', 'ok');
+                // The connect GFX re-ship rides the first post-prefix frame, which arrives DURING
+                // this async seed and is buffered below (the else branch). Replay it now so the
+                // fresh GFX lands — otherwise it's lost and a late-loaded char grids (GFX gap).
+                if (pendingGfx.length) { log(`[live] applying ${pendingGfx.length} buffered GFX-tail frame(s) from the seed window`, 'ok'); for (const f of pendingGfx) liveApplyFrame(f); pendingGfx = []; }
             } else if (liveSeeded) {
                 // msg N = a FRMx record, possibly ZCST-wrapped (prod server compresses every
                 // message; the mock sends raw). zcstDecompress() handles BOTH (raw passthrough).
-                // (drop frames that race ahead of seed completion)
                 liveApplyFrame(zcstDecompress(u8));
+            } else {
+                // Frame arrived during the async seed: dropped for rendering, BUT if it carries a
+                // GFX tail (the connect fresh-GFX re-ship), buffer it to replay right after seed.
+                const fr = zcstDecompress(u8);
+                if (frameHasGfxTail(fr)) pendingGfx.push(fr);
             }
         } catch (e) {
             log('[live] frame error: ' + (e.stack || e.message), 'err');
