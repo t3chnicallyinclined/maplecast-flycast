@@ -87,21 +87,22 @@ static std::mutex           _prefixMutex;          // guards build of _prefixZcs
 // (ONCE). A char whose art loads AFTER that — e.g. a client that connected pre-art-load — has
 // its GFX2 cell records FROZEN/stale in the client RAM image, so the transpiled walker
 // (loc_8c0344d4) reads garbage cell records and emits a grid. FIX: every frame, walk the slot
-// table, and for each active BODY node ship its GFX1(+0x15C)/GFX2(+0x160) page-aligned 0x20000
-// regions as a VARIABLE dynamic tail — but ONLY when that (base,content-signature) has not been
-// shipped before (covers both the never-shipped case and a re-load that changed the bytes). The
-// signature is a cheap fold over the region so a static (already-fresh) body costs nothing after
-// its first send. Wire cost: ~121KB zstd per (re)loaded body, ~0 steady-state.
+// table, and for each active BODY node ship its GFX1(+0x15C)/GFX2(+0x160) regions at their REAL
+// extent (GFX1 ~1.1MB, GFX2 ~64KB — read from the offset table; see gfxExtentFromBase) as a
+// VARIABLE dynamic tail — but ONLY when that (base,content-signature) has not been shipped before
+// (covers both the never-shipped case and a re-load that changed the bytes). The signature is a
+// cheap fold over the FULL region so a static (already-fresh) body costs nothing after its first
+// send. Wire cost: a body's full GFX1+GFX2 = ~1.3MB raw -> compressed ON (re)LOAD only, ~0 steady.
 struct GfxBase { u32 base; u32 sig; };                 // base addr (page-aligned) + content sig
 static std::vector<GfxBase> _gfxShipped;               // bases+sigs already sent to all clients
 static std::atomic<bool>    _gfxResendAll{false};      // set on new-connect: re-ship all GFX once
 static inline u32 rd32(u32 g);                         // fwd-decl (defined below) — used by gfxSig
 static inline u8  rd8 (u32 g);
-static u32 gfxSig(u32 base)                            // fold the 0x20000 region to a u32 sig
+static u32 gfxSig(u32 base, u32 len)                   // fold the (now real-size) region to a u32 sig
 {
 	u32 h = 2166136261u;
-	for (u32 b = 0; b < 0x20000u; b += 64) {          // sparse sample (every 64B) — enough to
-		h ^= rd32(base + b); h *= 16777619u;          // catch a content change without a full scan
+	for (u32 b = 0; b < len; b += 64) {               // sparse sample (every 64B) across the FULL
+		h ^= rd32(base + b); h *= 16777619u;          // region — catches a content change / re-load
 	}
 	return h;
 }
@@ -109,6 +110,59 @@ static bool gfxAlreadyShipped(u32 base, u32 sig)
 {
 	for (auto& g : _gfxShipped) if (g.base == base) return g.sig == sig;
 	return false;
+}
+
+// ---------------------------------------------------------------------------
+// GFX REGION EXTENT — ship each GFX1/GFX2 region at its REAL size, not a blanket 0x20000.
+// (root-cause fix, re_kb finding:replica_live_gfx_extent. The fixed 128KB truncated the asset:
+// GFX1 reaches ~1.1MB on the live wire — maxq_86.mcrr GFX1 true base 0x0C810000 max-offset 0x115760.)
+//
+// FORMAT (byte-exact, extract_gfx1_atlas.py / rip_gfx2_assembly.py; both segments share it):
+//   front = u32-LE OFFSET TABLE; entry[0] = n*4 so n = entry[0]>>2 = #selectors; entry[i] = byte
+//   offset (from the TRUE base) of selector i's block. The table head sits at the TRUE base
+//   (node+0x160 / node+0x15C), which is NOT necessarily page-aligned (GFX2 true base was 0x..8C0,
+//   0x8C0 into its page) — so the extent MUST be read at `base`, never at `base & ~0xFFF`.
+//   GFX2 block @ off: [u16 count][count*8B records] -> block size = 2 + count*8 (EXACTLY headered).
+//   GFX1 block @ off: [lw][lh][sw][sh] + LZSS stream -> compressed length NOT in the header, so we
+//   bound the LAST block by the largest consecutive-offset GAP observed across the roster (0x234D)
+//   with headroom -> GFX1_LAST_SLACK. Roster facts: GFX2 max last-tail 0x136 / max gap 0x4C2;
+//   GFX1 max last-tail 0x1E3 / max gap 0x234D.
+//
+// Returns the EXTENT measured from `trueBase` (bytes from trueBase to region end), or 0 if the
+// table head doesn't validate (caller falls back to the old 0x20000 so we never under-ship blind).
+static const u32 GFX1_LAST_SLACK = 0x4000u;     // > worst compressed block (0x234D) + tail
+static u32 gfxExtentFromBase(u32 trueBase, bool isGfx2)
+{
+	u32 e0 = rd32(trueBase);
+	u32 n  = e0 >> 2;
+	// table-head sanity: entry0 == n*4 and a plausible selector count.
+	if (n == 0 || n > 20000u || e0 != (n << 2)) return 0;
+	u32 maxoff = 0;
+	for (u32 i = 0; i < n; i++) {
+		u32 o = rd32(trueBase + i * 4);
+		if (o > 0x600000u) return 0;             // offset out of any sane region -> bail to fallback
+		if (o > maxoff) maxoff = o;
+	}
+	if (isGfx2) {
+		u32 cnt = (u32)((rd8(trueBase + maxoff + 1) << 8) | rd8(trueBase + maxoff)); // u16-LE count
+		return maxoff + 2u + cnt * 8u;           // exact: last cell-record block
+	}
+	return maxoff + GFX1_LAST_SLACK;             // GFX1: bound the final compressed part
+}
+
+// Page-aligned ship descriptor for a GFX region whose engine pointer is `gfxPtr` (node+0x15C/0x160).
+// base = page-aligned-down (the splat target the client/render_frame address against); len covers
+// from that page base through the true region end, page-rounded up. Falls back to 0x20000 only if
+// the header doesn't validate (keeps the old behavior for an unexpected layout instead of a 0-len).
+static void gfxShipDescriptor(u32 gfxPtr, bool isGfx2, u32& outBase, u32& outLen)
+{
+	u32 trueBase = gfxPtr;
+	u32 pageBase = trueBase & ~0xFFFu;
+	u32 ext = gfxExtentFromBase(trueBase, isGfx2);
+	outBase = pageBase;
+	if (ext == 0) { outLen = 0x20000u; return; }            // fallback (never blind-truncate to 0)
+	u32 fromPage = (trueBase - pageBase) + ext;             // bytes from page base to region end
+	outLen = (fromPage + 0xFFFu) & ~0xFFFu;                 // page-round up
 }
 static void gfxMarkShipped(u32 base, u32 sig)
 {
@@ -215,8 +269,8 @@ static void buildTables()
 			u32 node = rd32(base + i * 4); if (!isRam(node)) continue;
 			if (rd8(node + 0x3) != 0) continue;                // body only (cat==0)
 			u32 GFX2 = rd32(node + 0x160), GFX1 = rd32(node + 0x15C);
-			if (isRam(GFX2)) S(GFX2 & ~0xFFFu, 0x20000, "GFX2");
-			if (isRam(GFX1)) S(GFX1 & ~0xFFFu, 0x20000, "GFX1");
+			if (isRam(GFX2)) { u32 b, l; gfxShipDescriptor(GFX2, true,  b, l); S(b, l, "GFX2"); }
+			if (isRam(GFX1)) { u32 b, l; gfxShipDescriptor(GFX1, false, b, l); S(b, l, "GFX1"); }
 		}
 	}
 
@@ -277,11 +331,12 @@ static void buildPrefixLocked()
 	for (auto& r : staticTbl) {
 		size_t off = p.size();
 		p.resize(off + r.len);
-		// Fast path for the 16MB RAM backdrop: copy from mem_b directly (the region
-		// addr 0x8C000000 maps to mem_b[0]). For the GFX regions use addrspace reads
-		// (alias-safe; modest size 0x20000 each).
-		if (r.addr == 0x8C000000u) {
-			memcpy(&p[off], &mem_b[0], r.len);
+		// The 16MB RAM backdrop and the GFX1/GFX2 regions are all clean main-RAM (area-3)
+		// addresses; copy from mem_b directly (addr & 0xFFFFFF — alias-identical to addrspace,
+		// and far faster than a per-byte loop now that GFX regions are real-size ~1.2MB each).
+		// Any non-main-RAM static region (none today) falls back to alias-safe reads.
+		if ((r.addr & 0xFF000000u) == 0x8C000000u || (r.addr & 0xFF000000u) == 0x0C000000u) {
+			memcpy(&p[off], &mem_b[r.addr & 0x00FFFFFFu], r.len);
 		} else {
 			for (u32 b = 0; b < r.len; b++) p[off + b] = rd8(r.addr + b);
 		}
@@ -407,7 +462,7 @@ static void senderLoop()
 // has NOT already been shipped (covers the never-shipped char + a mid-stream re-load). Returns
 // the list to append as a variable GFX tail. Does NOT mark them shipped yet — that happens only
 // after this frame WINS the publish swap (so a drop-old discard re-evaluates them next frame).
-struct GfxToShip { u32 base; u32 sig; };
+struct GfxToShip { u32 base; u32 len; u32 sig; };
 static void collectFreshGfx(std::vector<GfxToShip>& out)
 {
 	for (int L = 0; L < 16; L++) {
@@ -416,15 +471,17 @@ static void collectFreshGfx(std::vector<GfxToShip>& out)
 		for (u32 i = 0; i < cnt; i++) {
 			u32 node = rd32(base + i * 4); if (!isRam(node)) continue;
 			if (rd8(node + 0x3) != 0) continue;                 // body only (cat==0)
-			u32 gfx[2] = { rd32(node + 0x160), rd32(node + 0x15C) };  // GFX2, GFX1
+			u32 gfx[2]   = { rd32(node + 0x160), rd32(node + 0x15C) };  // GFX2, GFX1
+			bool isG2[2] = { true, false };
 			for (u32 k = 0; k < 2; k++) {
 				if (!isRam(gfx[k])) continue;
-				u32 pbase = gfx[k] & ~0xFFFu;
-				u32 sig = gfxSig(pbase);
+				u32 pbase, plen;
+				gfxShipDescriptor(gfx[k], isG2[k], pbase, plen); // REAL extent, page-aligned base+len
+				u32 sig = gfxSig(pbase, plen);                   // sig over the FULL region
 				if (gfxAlreadyShipped(pbase, sig)) continue;     // already fresh on the client
 				bool dup = false;
 				for (auto& g : out) if (g.base == pbase) { dup = true; break; }
-				if (!dup) out.push_back({ pbase, sig });
+				if (!dup) out.push_back({ pbase, plen, sig });
 			}
 		}
 	}
@@ -440,16 +497,17 @@ static void captureFrame(u32 vframe)
 	// Determine this frame's fresh-GFX delta (on-change dynamic GFX, the static-gap fix).
 	std::vector<GfxToShip> freshGfx;
 	collectFreshGfx(freshGfx);
-	const u32 GFX_REGION = 0x20000u;
 
 	// Pick the staging buffer NOT currently published (double-buffer). Inner payload =
-	//   12B FRAME RECORD header + fixed dynamic bytes + VARIABLE GFX tail, where the tail is:
-	//     u32 nGfx ; then nGfx × { u32 base ; GFX_REGION bytes }.
-	// nGfx is ALWAYS present (0 in the steady state — a 4B tail). The client reads it after the
-	// fixed dynamic regions (it knows _dynTotal from the region table) and splats each block.
+	//   12B FRAME RECORD header + fixed dynamic bytes + VARIABLE GFX tail, where the tail is now
+	//   LEN-CARRYING (the real-size GFX fix):
+	//     u32 nGfx ; then nGfx × { u32 base ; u32 len ; len bytes }.
+	// nGfx is ALWAYS present (0 in the steady state — a 4B tail). Each region ships at its REAL
+	// extent (GFX1 ~1.1MB, GFX2 ~64KB) instead of a fixed 128KB that truncated the cell records.
 	const size_t hdr   = 12;
 	const size_t tailHdr = 4;                                  // u32 nGfx
-	const size_t gfxBytes = freshGfx.size() * (4 + (size_t)GFX_REGION);
+	size_t gfxBytes = 0;
+	for (auto& g : freshGfx) gfxBytes += 8u + (size_t)g.len;   // {u32 base, u32 len, len bytes}
 	const size_t total = hdr + _dynTotal + tailHdr + gfxBytes;
 
 	int which = _dynWhich ^ 1;          // write the other buffer
@@ -477,14 +535,15 @@ static void captureFrame(u32 vframe)
 		off += r.len;
 	}
 
-	// ---- VARIABLE GFX tail: u32 nGfx, then per fresh body GFX region { base, 0x20000 bytes } ----
+	// ---- VARIABLE GFX tail: u32 nGfx, then per fresh body GFX region { base, len, len bytes } ----
 	u32 nGfx = (u32)freshGfx.size();
 	memcpy(&buf[off], &nGfx, 4); off += 4;
 	for (auto& g : freshGfx) {
 		memcpy(&buf[off], &g.base, 4); off += 4;               // page-aligned guest base (0x8C..)
+		memcpy(&buf[off], &g.len,  4); off += 4;               // REAL region length (per-region)
 		// GFX is main-RAM; copy from mem_b directly (alias-safe identical to addrspace here).
-		memcpy(&buf[off], &mem_b[g.base & 0x00FFFFFFu], GFX_REGION);
-		off += GFX_REGION;
+		memcpy(&buf[off], &mem_b[g.base & 0x00FFFFFFu], g.len);
+		off += g.len;
 	}
 
 	// ---- publish to the WS thread (drop-old: overwrite any undrained frame) ----
@@ -545,14 +604,17 @@ void init()
 	}
 
 	if (!_compInit) {
-		// Prefix: up to VRAM(8MB)+PVR(32KB)+RAM(16MB)+~256KB GFX ≈ 24.3MB worst case.
-		_prefixComp.init((size_t)28 * 1024 * 1024);
+		// Prefix: VRAM(8MB)+PVR(32KB)+RAM(16MB)+ the build-time bodies' REAL-SIZE GFX (GFX1 up to
+		// ~1.2MB + GFX2 ~0.15MB per body, up to 2 bodies resident at prefix build) ≈ 24+2.7 ≈ 27MB.
+		// 32MB gives headroom (the real-size GFX fix grew the static GFX from 0x20000 to ~1.3MB/body).
+		_prefixComp.init((size_t)32 * 1024 * 1024);
 		// Per-frame dynamic payload (Phase 5: STATE ONLY, no texture band) ≈ slot tables +
 		// char structs + tiledesc(0x1800) + idxtab(0x2000) + rectab(0x10000) + camera/globals
-		// ≈ 90-110KB raw worst case; compresses to GSTA-size. PLUS the on-change GFX tail: up to
-		// ~4 bodies × 2 regions × 0x20000 = 1MB on a resend-all frame (new connect / multi-char
-		// load), ~0 in steady state. 6MB init covers the worst case with headroom.
-		_frameComp.init((size_t)6 * 1024 * 1024);
+		// ≈ 90-110KB raw worst case; compresses to GSTA-size. PLUS the REAL-SIZE on-change GFX tail:
+		// a resend-all frame (new connect / multi-char load) ships every active body's full GFX —
+		// up to ~4 bodies × (GFX1 ~1.2MB + GFX2 ~0.15MB) ≈ 5.4MB raw. 8MB init covers that worst case
+		// with headroom; steady state is nGfx=0 (a 4B tail). ONE-TIME per character/per connect.
+		_frameComp.init((size_t)8 * 1024 * 1024);
 		_compInit = true;
 	}
 

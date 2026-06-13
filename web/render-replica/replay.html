@@ -143,9 +143,15 @@ function parseMCRR(ab) {
         const dynOff = p;                              // dynamic region bytes start here
         for (const r of pre.dynamicRegs) p += r.len;    // skip fixed dynamic payload
         const gfxOff = p;                              // variable GFX tail starts here
-        // skip the GFX tail: u32 nGfx, then nGfx × { u32 base, GFX_REGION bytes }
+        // skip the LEN-CARRYING GFX tail: u32 nGfx, then nGfx × { u32 base, u32 len, len bytes }.
         const nGfx = (p + 4 <= buf.length) ? dv.getUint32(p, true) : 0;
-        if (nGfx <= 64) { p += 4 + nGfx * (4 + GFX_REGION); }   // else: old format, no tail
+        if (nGfx <= 64) {                              // a tail (else: old format, no tail)
+            p += 4;
+            for (let g = 0; g < nGfx && p + 8 <= buf.length; g++) {
+                const len = dv.getUint32(p + 4, true); // {base,len}; skip base+len+payload
+                p += 8 + len;
+            }
+        }
         const taOff = p; p += taSize;                   // engine_ta
         frames.push({ vframe, taSize, dynOff, gfxOff, taOff });
     }
@@ -153,11 +159,12 @@ function parseMCRR(ab) {
 }
 
 const guestOff = a => (a >>> 0) & 0xFFFFFF;
-const GFX_REGION = 0x20000;             // per-body GFX1/GFX2 region size (on-change dynamic GFX)
 
 // Read the VARIABLE GFX tail at byte offset `p` of a FRMx record buffer `u8` and splat each
 // fresh GFX region into the module RAM image. Returns the offset AFTER the tail (where engine_ta,
-// if any, begins). The tail = u32 nGfx, then nGfx × { u32 base, GFX_REGION bytes }. Tolerates an
+// if any, begins). LEN-CARRYING wire (the real-size GFX fix): the tail = u32 nGfx, then
+// nGfx × { u32 base, u32 len, len bytes } — each GFX1/GFX2 region ships at its REAL extent (GFX1
+// ~1.1MB, GFX2 ~64KB) instead of a fixed 128KB that truncated the cell records. Tolerates an
 // older server that omits the tail entirely (returns p unchanged if there are < 4 bytes left).
 function applyGfxTail(u8, p) {
     if (p + 4 > u8.length) return p;               // old server: no tail
@@ -165,10 +172,12 @@ function applyGfxTail(u8, p) {
     const nGfx = dv.getUint32(p, true); p += 4;
     if (nGfx > 64) return p - 4;                   // sanity: not a tail (treat as old format)
     for (let i = 0; i < nGfx; i++) {
-        if (p + 4 + GFX_REGION > u8.length) break;
+        if (p + 8 > u8.length) break;
         const base = dv.getUint32(p, true); p += 4;
-        ram.set(u8.subarray(p, p + GFX_REGION), guestOff(base));
-        p += GFX_REGION;
+        const len  = dv.getUint32(p, true); p += 4;
+        if (len > 0x800000 || p + len > u8.length) break;   // sanity: bounded, in-buffer
+        ram.set(u8.subarray(p, p + len), guestOff(base));
+        p += len;
     }
     return p;
 }
