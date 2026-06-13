@@ -170,6 +170,41 @@ static void gfxMarkShipped(u32 base, u32 sig)
 	_gfxShipped.push_back({ base, sig });
 }
 
+// ---------------------------------------------------------------------------
+// ON-CHANGE PVR PALETTE (the palette-gap fix, re_kb finding:replica_live_palette_gap).
+// The static prefix ships pvr_regs[] (incl PALETTE_RAM @ pvr_regs+0x1000, 1024 ARGB entries,
+// 64 banks of 16 — the skin-bank layout) EXACTLY ONCE (buildPrefixLocked). The guest writes each
+// active char s 16-color palette bank into PALETTE_RAM via pvr_WriteReg at CHARACTER-LOAD time
+// (sb_mem.cpp). Any bank written AFTER the prefix was cached — a tag-in, or a client that connected
+// before that art loaded — is FROZEN at the snapshot value (zero -> all-transparent -> the body
+// renders BLACK). This is the GFX static-gap s twin (finding:replica_live_static_gfx_gap) in the
+// palette domain. CONFIRMED: bank 32 (P1C2, entries 512-527, pvr off 0x1800) renders black when the
+// P1C2 palette is written post-prefix; populated banks are correct only because _satlive.mcrr s
+// prefix happened to be built after all 6 chars  palettes loaded (timing-dependent, not range).
+//
+// FIX (server-only, no client palette source today reads per-frame): ship the LIVE 32KB pvr_regs
+// block as an ON-CHANGE dynamic tail (tag implicit by position) whenever its content signature
+// changes vs the last shipped value. Steady-state cost = 0 (the block is constant once palettes are
+// loaded). The client (replay.html liveApplyFrame) refreshes this.pvr from this tail before
+// pane.render -> updatePalette(this.pvr) re-uploads the fresh banks. Wire cost: 32KB raw -> ~a few
+// KB zstd, ONLY on a palette write (char load / tag-in / skin override), ~0 steady.
+static u32  _pvrPalSig      = 0;            // last-shipped pvr_regs content signature
+static bool _pvrPalEverSent = false;        // have we shipped a palette tail at least once?
+static std::atomic<bool> _pvrPalResend{false}; // set on new-connect: re-ship the palette once
+
+// Signature over the palette-relevant pvr_regs span: PAL_RAM_CTRL (0x108) + the full 4KB
+// PALETTE_RAM (0x1000..0x1FFF). Those are the only bytes updatePalette() consumes; folding just
+// them keeps the sig cheap and means a non-palette pvr reg write does not trigger a needless reship.
+static u32 pvrPalSig()
+{
+	u32 h = 2166136261u;
+	h ^= *(const u32*)&pvr_regs[0x108]; h *= 16777619u;     // PAL_RAM_CTRL
+	for (u32 o = 0x1000; o < 0x2000; o += 4) {             // PALETTE_RAM (1024 entries)
+		h ^= *(const u32*)&pvr_regs[o]; h *= 16777619u;
+	}
+	return h;
+}
+
 // Double-buffered DYNAMIC staging + single-slot publish (drop-old).
 static std::vector<uint8_t> _dynBuf[2];
 static int                  _dynWhich = 0;
@@ -400,6 +435,9 @@ static void onOpen(RlConnHdl hdl)
 	// duplicate; the new client gets the GFX it's missing). One relaxed store under the pub mutex
 	// is enough — the SH4 thread reads/writes _gfxShipped only inside captureFrame.
 	_gfxResendAll.store(true, std::memory_order_relaxed);
+	// Likewise re-ship the PVR palette on the next captured frame: the new client's seeded pvr is the
+	// prefix snapshot, which froze any bank written after the prefix was built (the palette-gap fix).
+	_pvrPalResend.store(true, std::memory_order_relaxed);
 	// Send the static prefix if it's already built. If not (no in-match frame has
 	// armed the build yet), the sender loop sends it to all conns the moment it
 	// becomes ready (see drainAndSend), so a client that connects pre-match still
@@ -509,21 +547,36 @@ static void captureFrame(u32 vframe)
 	// benign duplicate; the new client gets the GFX it was missing.
 	if (_gfxResendAll.exchange(false, std::memory_order_relaxed)) _gfxShipped.clear();
 
+	// A new client connected: also re-ship the palette this frame (its seeded pvr is the prefix
+	// snapshot; a bank written after that snapshot would otherwise be frozen/black on the new client).
+	if (_pvrPalResend.exchange(false, std::memory_order_relaxed)) _pvrPalEverSent = false;
+
 	// Determine this frame's fresh-GFX delta (on-change dynamic GFX, the static-gap fix).
 	std::vector<GfxToShip> freshGfx;
 	collectFreshGfx(freshGfx);
 
+	// Determine this frame's palette delta (on-change PVR palette, the palette-gap fix). Ship the
+	// full 32KB pvr_regs block when its palette signature changed (or never shipped / new connect).
+	u32  curPalSig  = pvrPalSig();
+	bool shipPal    = (!_pvrPalEverSent) || (curPalSig != _pvrPalSig);
+	u32  pvrPalLen  = shipPal ? (u32)pvr_RegSize : 0u;
+
 	// Pick the staging buffer NOT currently published (double-buffer). Inner payload =
-	//   12B FRAME RECORD header + fixed dynamic bytes + VARIABLE GFX tail, where the tail is now
-	//   LEN-CARRYING (the real-size GFX fix):
-	//     u32 nGfx ; then nGfx × { u32 base ; u32 len ; len bytes }.
-	// nGfx is ALWAYS present (0 in the steady state — a 4B tail). Each region ships at its REAL
-	// extent (GFX1 ~1.1MB, GFX2 ~64KB) instead of a fixed 128KB that truncated the cell records.
+	//   12B FRAME RECORD header + fixed dynamic bytes + VARIABLE GFX tail + PALETTE tail:
+	//     u32 nGfx ; nGfx × { u32 base ; u32 len ; len bytes }            (GFX tail, real-size fix)
+	//     u32 pvrPalLen ; pvrPalLen bytes of pvr_regs                     (PALETTE tail, palette-gap fix)
+	// Both length words are ALWAYS present (0 in the steady state). Each GFX region ships at its REAL
+	// extent (GFX1 ~1.1MB, GFX2 ~64KB) instead of a fixed 128KB that truncated the cell records. The
+	// palette block is the full 32KB pvr_regs, shipped only when the palette signature changed.
 	const size_t hdr   = 12;
 	const size_t tailHdr = 4;                                  // u32 nGfx
 	size_t gfxBytes = 0;
 	for (auto& g : freshGfx) gfxBytes += 8u + (size_t)g.len;   // {u32 base, u32 len, len bytes}
-	const size_t total = hdr + _dynTotal + tailHdr + gfxBytes;
+	// PALETTE TAIL (strict append AFTER the GFX tail): u32 pvrPalLen ; pvrPalLen bytes of pvr_regs.
+	// pvrPalLen is ALWAYS present (0 in steady state). An older client that stops parsing after the
+	// GFX tail simply ignores these trailing bytes; the updated client refreshes this.pvr from them.
+	const size_t palHdr  = 4;                                  // u32 pvrPalLen
+	const size_t total = hdr + _dynTotal + tailHdr + gfxBytes + palHdr + (size_t)pvrPalLen;
 
 	int which = _dynWhich ^ 1;          // write the other buffer
 	std::vector<uint8_t>& buf = _dynBuf[which];
@@ -561,6 +614,13 @@ static void captureFrame(u32 vframe)
 		off += g.len;
 	}
 
+	// ---- PALETTE TAIL: u32 pvrPalLen, then pvrPalLen bytes of the LIVE pvr_regs (palette-gap fix) ----
+	// pvr_regs is the resident PVR register/palette array owned by the render path on this thread;
+	// the full 32KB block carries PAL_RAM_CTRL(0x108) + PALETTE_RAM(0x1000..0x1FFF) the client's
+	// updatePalette() needs. Shipped only when the palette signature changed (else pvrPalLen=0).
+	memcpy(&buf[off], &pvrPalLen, 4); off += 4;
+	if (pvrPalLen) { memcpy(&buf[off], pvr_regs, pvrPalLen); off += pvrPalLen; }
+
 	// ---- publish to the WS thread (drop-old: overwrite any undrained frame) ----
 	{
 		std::lock_guard<std::mutex> lk(_pubMutex);
@@ -576,6 +636,10 @@ static void captureFrame(u32 vframe)
 	// and re-shipped them. (Marking after publish means at worst we re-ship one extra frame if the
 	// very NEXT frame drops this one before the WS thread drains it — a benign duplicate.)
 	if (nGfx) for (auto& g : freshGfx) gfxMarkShipped(g.base, g.sig);
+
+	// Mark the palette shipped (same after-publish discipline as GFX): a drop-old discard of a
+	// previous frame re-evaluated shipPal against the unchanged _pvrPalSig, so re-shipping is benign.
+	if (pvrPalLen) { _pvrPalSig = curPalSig; _pvrPalEverSent = true; }
 }
 
 // ===========================================================================
