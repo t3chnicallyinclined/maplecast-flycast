@@ -221,6 +221,21 @@ static void buildTables()
 	D(0x8C2895E0, 0x10,        "slot_cnt");      // slot-table count array (16 layers)
 	D(0x8C287DE0, 16u*0x180u,  "slot_ptr");      // slot-table ptr arrays
 	D(0x8C268340, 6u*0x5A4u,   "char_str");      // P1C1..P2C3 char structs
+	// SATELLITE OBJECT POOL (capes/projectiles/drones/effects/extra-limbs) — the
+	// out-of-char-struct BODY nodes the slot-walk loc_8c0308c2 also renders via
+	// render_object_full (loc_8c03093c) + the body walker loc_8c0344d4. Without these
+	// their node+0xDC..+0xF0 anchor/scale + node+0x15C/0x160 GFX read STALE -> missing
+	// or misplaced sprites the moment an assist/projectile/super fires (re_kb
+	// finding:render_frame_positions_validated open_risk; confirmed firing live: frame
+	// 708746 nodes 0x8C26AFC4/0x8C26B194/0x8C275684 = pool idx 3/4/58, all on the
+	// 0x8C26AA54 + N*0x1D0 grid, N in [0,256)). Pool base/stride/count cited to
+	// bank04.asm:11601-11756 loc_8c044dce: base const loc_8c044ec8=0x8C26AA54,
+	// stride loc_8c044ea4=0x1D0, span loc_8c044ed8=0x1D000 => 256 nodes. Ship the WHOLE
+	// pool: render_object_full reads scattered fields across +0x24..+0x184 per node, so
+	// a tight per-node window is fragile — the full 0x1D000 contiguous region is the
+	// correct, still-bounded ship (the GFX those nodes point at already lives in the
+	// once-shipped 16MB static RAM image).
+	D(0x8C26AA54, 0x1D000,     "objpool");       // 256 * 0x1D0 satellite object pool
 	D(0x8C1F9D80, 0x20,        "arena");         // arena-control globals
 	D(0x8C1F9F9C, 0x1800,      "tiledesc");      // per-frame tile-descriptor scratch
 	                                             // (live descriptor table spans 5135B —
