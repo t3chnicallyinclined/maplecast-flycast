@@ -162,22 +162,57 @@ const TCW_OFF = 0x0C;                             // TCW is word 3 of the 16B pa
 //   * For W>32 AND H>32 the full-WxH-twiddle chunk order (storage) and the walker per-tile
 //     SCREEN cell order DIVERGE (a tile-grid permutation). So a contiguous full-blob write
 //     puts the WRONG 32x32 chunk under each wide tile -> the near-empty Sentinel.
-// THE FIX (general, square AND rectangular grids): for W>32 && H>32, take each emitted tile's
-//   OWN intra-part cell (col,row) (render_frame_quad_colrow), carve the full-WxH blob 512B
-//   chunk at STORAGE index twTile(col,row,Tw,Th) (PVR rect-twiddle of the tile coords) and
-//   write it to that tile's OWN TCW vaddr. For <=2-col / single-row parts the storage order is
-//   identity -> keep the proven contiguous whole-blob write. VERIFIED BYTE-EXACT (0 px diff):
-//   PL34 sel124 128x128 (4x4) AND PL17 sel285 64x128 (2x4). (A pure bit-transpose of the
-//   vaddr-chunk index is correct ONLY for square grids; twTile(col,row) is correct for both.)
-// PVR rectangular twiddle over a Tw x Th tile grid (== flycast twop bit-interleave).
-function twTile(x, y, Tw, Th) {
-    const bx = Math.log2(Tw), by = Math.log2(Th), sq = Math.min(bx, by);
-    let r = 0, b = 0;
+// THE FIX (2026-06-13, GENERAL — square, wide, tall, AND sub-32px tiles): the OLD chunk-permutation
+//   model (carve the full-WxH-twiddle blob's 512B chunk at twTile(col,row,Tw,Th)) assumed every tile
+//   is 32x32 and derived the grid from sw/sh (Tw=W>>5,Th=H>>5). That is WRONG for parts whose tile
+//   size is 16 or 8: e.g. Sentinel sel121 is 128x16 painted as an 8x1 grid of 16x16 tiles (m=16),
+//   and sel125 64x16 as 4x1 of m=16. sw/sh>>5 gave Th=0 -> the gate fell through to the contiguous
+//   whole-blob write -> tiles 2..7 read past the 1024B decode -> scatter. The universal truth
+//   (probed across every multi-tile sel): the walker lays a (cols x rows) grid of m x m tiles where
+//   m = W/cols = H/rows (always 8/16/32, square). THE GENERAL CARVE: decode the part ONCE to its
+//   full-WxH-twiddle IMAGE (indices), then for each emitted tile (col,row) build a fresh 32x32
+//   PAL4 LOCAL-twiddle tile whose top-left m x m holds image[(row*m..)+(col*m..)] and write it to
+//   that tile's OWN TCW vaddr. The renderer (_pal4) reads each tile as a 32x32 local twiddle and the
+//   walker's u1 UV-clamp samples only the top-left m x m -> byte-exact for ALL shapes. VERIFIED 0px:
+//   sel121 (8x1 m16), sel124/sel112 (4x4 m32), sel285 (2x4 m32), sel125 (4x1 m16), + every probed sel.
+//   (Single-tile parts keep the proven direct whole-blob write at the run base.)
+const TILE_BYTES = 0x200;                         // one 32x32 PAL4 tile = 512B (1024 px / 2)
+
+// flycast PVR rectangular twiddle index for a w x h region (bx=log2 w, by=log2 h): interleave
+// x/y bits up to min(w,h), then run the longer axis linearly. Used to (a) de-twiddle the stored
+// full-WxH blob into a row-major image and (b) re-twiddle each carved m x m cell into a 32x32 tile.
+function twop(x, y, bx, by) {
+    let r = 0, b = 0; const sq = Math.min(bx, by);
     for (let i = 0; i < sq; i++) { r |= ((x >> i) & 1) << b; b++; r |= ((y >> i) & 1) << b; b++; }
     if (bx > by) r |= (x >> sq) << b; else if (by > bx) r |= (y >> sq) << b;
     return r;
 }
-const TILE_BYTES = 0x200;                         // one 32x32 PAL4 tile = 512B (1024 px / 2)
+// De-twiddle a full-WxH PAL4 storage blob into a row-major nibble image (Uint8Array, W*H, one
+// 4-bit index per byte). bytes = decodePart output (the verbatim VRAM blob).
+function detwiddleImage(bytes, W, H) {
+    const img = new Uint8Array(W * H);
+    const bx = Math.log2(W), by = Math.log2(H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const ti = twop(x, y, bx, by);
+        const b = bytes[ti >> 1] | 0;
+        img[y * W + x] = (ti & 1) ? (b >> 4) & 0xF : b & 0xF;
+    }
+    return img;
+}
+// Build one 32x32 PAL4 LOCAL-twiddle tile (512B) holding image cell (col,row) of pixel size m in
+// its top-left m x m. Returns a Uint8Array(0x200). Matches exactly what the renderer's _pal4 reads.
+function carveTile(img, W, H, col, row, m) {
+    const tile = new Uint8Array(TILE_BYTES);
+    for (let y = 0; y < m; y++) for (let x = 0; x < m; x++) {
+        const sx = col * m + x, sy = row * m + y;
+        if (sx >= W || sy >= H) continue;
+        const v = img[sy * W + sx];
+        const ti = twop(x, y, 5, 5);                 // 32x32 local twiddle
+        if (ti & 1) tile[ti >> 1] = (tile[ti >> 1] & 0x0F) | (v << 4);
+        else        tile[ti >> 1] = (tile[ti >> 1] & 0xF0) | v;
+    }
+    return tile;
+}
 
 export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, quadGfx1s, quadColRow) {
     if (!cache._gfx)  cache._gfx = new Map();     // gfx1 base -> {n,offs,srt}
@@ -225,28 +260,28 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         }
         if (!p) continue;
 
-        const Tw = p.W >> 5, Th = p.H >> 5;       // tile-grid columns / rows (W/32, H/32)
-        if (Tw >= 2 && Th >= 2 && quadColRow) {
-            // WIDE PART (W>32 AND H>32): the full-WxH-twiddle STORAGE chunk order DIVERGES from
-            // the walker per-tile screen order. Carve each emitted tile's correct 32x32-local-
-            // twiddled chunk from the full decode and write it at that tile's OWN vaddr.
-            // re_kb finding:wide_part_tile_storage_order: the chunk holding part-tile (col,row)
-            // is the full-WxH STORAGE index twTile(col,row,Tw,Th) (PVR rect-twiddle of the tile
-            // coords). The low 10 bits of that chunk ARE a self-contained 32x32 local twiddle.
-            const lTw = Math.log2(Tw), lTh = Math.log2(Th); void lTw; void lTh;
+        // GRID FROM THE EMITTED TILES (authoritative — NOT from sw/sh>>5): cols/rows = the
+        // walker's actual per-tile screen cells; the tile pixel size m = W/cols = H/rows (always
+        // 8/16/32, square). This is correct for every shape incl sub-32px tiles (sel121 8x1 m16).
+        let cols = 1, rows = 1;
+        for (const t of tiles) { if (t.col + 1 > cols) cols = t.col + 1; if (t.row + 1 > rows) rows = t.row + 1; }
+        const multi = (tiles.length > 1) && quadColRow && cols >= 1 && rows >= 1 &&
+                      (p.W % cols === 0) && (p.H % rows === 0) && (cols > 1 || rows > 1);
+        if (multi) {
+            // GENERAL CARVE: de-twiddle the part once, then carve each emitted tile's m x m cell
+            // into a fresh 32x32 local-twiddle tile at its OWN TCW vaddr (re_kb finding:
+            // wide_part_tile_storage_order, corrected 2026-06-13 to derive m from the emitted grid).
+            const m = (p.W / cols) | 0;               // == p.H/rows (square tiles)
+            const img = detwiddleImage(p.bytes, p.W, p.H);
             for (const { addr, col, row } of tiles) {
-                if (col < 0 || col >= Tw || row < 0 || row >= Th) continue;
-                const src = twTile(col, row, Tw, Th) * TILE_BYTES;   // storage chunk of (col,row)
-                if (src + TILE_BYTES > p.bytes.length) continue;
+                if (col < 0 || col >= cols || row < 0 || row >= rows) continue;
                 if (addr + TILE_BYTES > vram.length) continue;
-                vram.set(p.bytes.subarray(src, src + TILE_BYTES), addr);
+                vram.set(carveTile(img, p.W, p.H, col, row, m), addr);
                 written++;
             }
         } else {
-            // <=2-column OR single-tile-row part (or no col/row available): the full-WxH chunk
-            // order == walker vaddr order (identity). Write the VERBATIM whole-part blob ONCE at
-            // the run base; the other tiles' +0x200 TCWs index into it. (Proven byte-exact path;
-            // gfx1_decode_equals_vram.)
+            // SINGLE-TILE part (or no col/row available): write the VERBATIM whole-part blob ONCE
+            // at the run base. (Proven byte-exact path; gfx1_decode_equals_vram.)
             if (base + p.destLen > vram.length) continue;
             vram.set(p.bytes, base);
             written++;

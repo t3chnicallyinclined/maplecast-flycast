@@ -193,11 +193,11 @@
 // Reuses ta-parser/pvr2-renderer/texture-manager VERBATIM, and render_frame.wasm UNMODIFIED
 // (Phases 1/2 frozen byte-exact). MCRR spec: docs/RENDER-REPLICA-RECORDING-FORMAT.md.
 // ============================================================================
-import createRenderFrame from './render_frame.mjs?v=cockpit1';
+import createRenderFrame from './render_frame.mjs?v=cockpit2';
 // Phase 5 — PURE-STATE TEXTURES: client decodes each active body part's sprite from the
 // shipped-once compressed GFX (in the RAM image) + the live sprite_id, writes it to pane.vram
 // at the TCW addr render_frame carries. Replaces the per-frame "bodytex" VRAM band (removed).
-import { ensureBodyTextures } from './body_decoder.mjs?v=cockpit1';
+import { ensureBodyTextures } from './body_decoder.mjs?v=cockpit2';
 // Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
 // /gfx/PL{NN}_gfx{1,2}.bin (cached by char_id). Fixes the scramble + is the local-ROM cache.
@@ -376,7 +376,7 @@ function synthSnap(w, h) {
 
 // ---------------------------------------------------------------- render_frame.wasm
 let frameMod;
-async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=cockpit1' : p }); } return frameMod; }
+async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=cockpit2' : p }); } return frameMod; }
 function transpiledTA(ram) {
     const M = frameMod;
     const ramPtr = M._malloc(ram.length); M.HEAPU8.set(ram, ramPtr);
