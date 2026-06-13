@@ -28,6 +28,7 @@
 	See maplecast_oracle_hook.h for the recompiler injection point.
 */
 #include "maplecast_oracle_hook.h"
+#include "maplecast_replica_live.h"  // Phase 4c live render-replica feed (gated, READ-ONLY)
 #include "hw/sh4/sh4_if.h"      // Sh4cntx (p_sh4rcb->cntx.r[16])
 #include "hw/sh4/sh4_mem.h"     // addrspace::read*
 #include "hw/pvr/ta_ctx.h"      // TA_context, rend_context, PolyParam, Vertex
@@ -3146,6 +3147,15 @@ void mc_oracle_charPassCapture(void* ctxv)
 			mc_sidLatchValid[i] = 1;
 		}
 	}
+
+	// RENDER-REPLICA LIVE (Phase 4c, gated MAPLECAST_REPLICA_LIVE, READ-ONLY,
+	// determinism-safe). Piggybacks THIS hook point (the Phase 4a recording point):
+	// if armed AND a loopback WS client is connected AND in-match, memcpy the DYNAMIC
+	// read-set (~58KB) into a double-buffered staging area and hand it to the WS
+	// thread (which compresses + sends off-thread). Returns immediately when the env
+	// var is unset or no client is connected — zero overhead on the prod hot path.
+	// Self-contained in maplecast_replica_live.cpp; does NOT touch the CHARQ path below.
+	maplecast_replica_live::onRenderFrame(ctxv);
 
 	// ONE-SHOT full-RAM dump for the render-replica Option-C PoC (gated MAPLECAST_DUMP_RAM,
 	// READ-ONLY, determinism-safe). Writes the 16MB main RAM (mem_b) once, in-match, so the

@@ -49,6 +49,7 @@
 #include "network/replay_reader.h"
 #include "network/replay_writer.h"
 #include "network/maplecast_control_ws.h"
+#include "network/maplecast_replica_live.h"
 #include "network/maplecast_player.h"
 #include "network/maplecast_replica.h"
 #include "network/maplecast_state_replica.h"
@@ -965,6 +966,8 @@ void Emulator::unloadGame()
 void Emulator::term()
 {
 	unloadGame();
+	// Stop the gated render-replica-live WS thread (no-op when it was never armed).
+	maplecast_replica_live::shutdown();
 	if (state == Init)
 	{
 		debugger::term();
@@ -1340,6 +1343,16 @@ void Emulator::start()
 		if (const char* cpEnv = std::getenv("MAPLECAST_CONTROL_PORT"))
 			controlPort = std::atoi(cpEnv);
 		maplecast_control_ws::init(controlPort);
+
+		// Render-Replica LIVE feed (Phase 4c) — GATED, READ-ONLY loopback WS that
+		// streams the MCRR render read-set so a browser can drive the off-SH4
+		// render_frame() on the live game (SH4 stays authoritative). Self-gates on
+		// env MAPLECAST_REPLICA_LIVE: unset ⇒ no thread, no capture, zero overhead
+		// (byte-identical to today's prod binary). Loopback :7212 (override
+		// MAPLECAST_REPLICA_LIVE_PORT); nginx fronts a wss path. The per-frame
+		// capture piggybacks the existing determinism-safe oracle hook
+		// (mc_oracle_charPassCapture). See docs/RENDER-REPLICA-RECORDING-FORMAT.md.
+		maplecast_replica_live::init();
 	}
 
 	// Replica client (MAPLECAST_REPLICA): GGPO-spectator-style replay
