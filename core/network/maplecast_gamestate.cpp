@@ -1485,193 +1485,191 @@ static void partDump(const GameState& state) {
 // (symlink-free copy) so the tool consumes it directly. Manifest selector column ==
 // the +6 GFX selector == the `part` field in the sidasm assembly (no dangling keys).
 // =============================================================================
+// GFX1DUMP — accumulate ALL of a character's body parts across a whole match by
+// CONTENT IDENTITY (gated MAPLECAST_GFX1DUMP). READ-ONLY.
+//
+// ROOT CAUSE (why the old gfx1Dump capped at ~25 and dumped 0-more):
+//   The DM00 "directory" at *(0x0CE80008) is NOT a per-character catalog of every
+//   part. It is a SMALL (~25-entry) SHARED, COMPACTING working-set pool. Disasm:
+//     * loc_8c0322c0 resolves entry = *(struct+8) + index*0x10; texels at entry+8.
+//       struct@0x0CE80000: *(+4)=populated COUNT, *(+8)=entries base array.
+//     * loc_8c0322d4 is a heap COMPACTOR: it does *(struct) -= delta and walks every
+//       entry doing *(entry+8) -= delta — i.e. texel ADDRESSES SHIFT on compaction.
+//     * loc_8c032a66/loc_8c032ae0 REFILL the pool per pose-load (LZSS-decode this
+//       pose's parts into pool slots), so a given INDEX is reused for different parts.
+//     * The +0xA0 selector scheme (loc_8c032696) indexes the pool by a tiny per-player
+//       selector BYTE (charBase 9/13 region), NOT the +6 GFX2 sprite selector. Feeding
+//       the GFX2 selector (532, 1264, ...) lands far past the 25-entry array, reading
+//       float garbage -> "EMPTY (e0=3f800000 ...) skip" for every high selector.
+//   Net: index/selector are NOT stable part identities and texptr SHIFTS on compaction.
+//   The old gate seen[cid][selector] therefore stuck at the ~15 low-index slots and a
+//   re-fire saw them already-seen -> dumpedThisFire=0 forever, even after many moves.
+//
+// THE FIX: gate by the DECODED PIXEL CONTENT (a hash of the entry's raw texel bytes +
+// its dims/fmt). This identity survives BOTH slot-reuse and arena compaction: when a
+// new pose decodes a never-before-seen part into the pool, it produces a new hash and
+// accumulates; a part that re-appears at a different slot/address hashes the same and is
+// skipped. We walk the directory CONTIGUOUSLY (no +0xA0 bias) over its populated count
+// EVERY in-match frame for the whole MAPLECAST_GFX1DUMP=N-frame window, so as the
+// operator cycles the full moveset the manifest GROWS toward the reachable part set.
+//
+// Output (operator-local, ROM-derived -> /dev/shm only):
+//   /dev/shm/PL{HEX}_gfx1.manifest   "<seq> <hash16> <w> <h> <fmt> <texptr> <ppm>"  (appended)
+//   /dev/shm/PL{HEX}_part_NNN.ppm    one clean part per UNIQUE content hash
+//   /dev/shm/PL{HEX}_gfx1_NNNN.ppm   alias copy (same image), keyed by accumulation seq
+//   /dev/shm/mc_gfx1dump.log         per-fire trace (newThisFire / running total)
+// =============================================================================
 static void gfx1Dump(const GameState& state) {
 	static const char* env = getenv("MAPLECAST_GFX1DUMP");
 	static bool on = env != nullptr;
 	if (!on) return;
-	// Capture the first WINDOW in-match frames after EACH fresh match start. The
-	// one-shot load decode runs at match load, so the buffer is freshest in the
-	// opening frames; we re-scan each of these frames and keep first-seen-per-selector
-	// (a later frame only fills selectors a poses-this-frame missed).
-	static const int WINDOW = (env && atoi(env) > 1) ? atoi(env) : 20;
+	// Accumulate across the whole match. WINDOW = how many in-match frames we scan
+	// after a fresh match start (MAPLECAST_GFX1DUMP=N). The directory is rescanned
+	// EVERY one of these frames; new content hashes accumulate as poses cycle.
+	static const int WINDOW = (env && atoi(env) > 1) ? atoi(env) : 9000;
 	static bool prevInMatch = false;
 	static int  framesIn = 0;
 	static bool cleared = false;
-	static bool seen[0x40][2048] = {{false}};  // [char_id][selector] first-seen gate (Ryu has 1533 unique sels)
+
+	// Content-identity accumulator, per char_id. Each char gets its own seen-hash set
+	// and running part counter. A 16K-slot open-addressed hash set per char is plenty
+	// (Ryu ~1533 unique parts) and costs ~8 MB total (process-lifetime static; fine).
+	static const int   HCAP = 1 << 14;          // 16384 slots per char (load factor <10%)
+	static uint64_t (*seenHash)[1 << 14] = nullptr;
+	static int         partSeq[0x40] = {0};      // accumulation sequence per char (filename)
+	static int         seenCount[0x40] = {0};    // distinct parts captured per char
+	if (!seenHash) seenHash = (uint64_t(*)[1 << 14])calloc((size_t)0x40 * HCAP, sizeof(uint64_t));
+	if (!seenHash) return;
 
 	if (!state.in_match) { prevInMatch = false; framesIn = 0; return; }
-	if (!prevInMatch) {                         // fresh match start -> reset window + gates
-		prevInMatch = true; framesIn = 0;
-		for (int c = 0; c < 0x40; c++) for (int s = 0; s < 2048; s++) seen[c][s] = false;
-		cleared = false;
-	}
-	if (framesIn++ >= WINDOW) return;           // only the opening (fresh-buffer) window
-
-	// On first fire of this window, clear stale dumps + manifests (as the maplecast
-	// user; /dev/shm is maplecast-owned).
-	if (!cleared) {
+	if (!prevInMatch) {                          // fresh match start -> reset everything
+		prevInMatch = true; framesIn = 0; cleared = false;
 		for (int c = 0; c < 0x40; c++) {
-			char mn[96];
-			snprintf(mn, sizeof mn, "/dev/shm/PL%02X_gfx1.manifest", c); remove(mn);
+			partSeq[c] = 0; seenCount[c] = 0;
+			for (int i = 0; i < HCAP; i++) seenHash[c][i] = 0;
+		}
+	}
+	if (framesIn++ >= WINDOW) return;
+
+	if (!cleared) {                              // wipe stale dumps once per fresh match
+		for (int c = 0; c < 0x40; c++) {
+			char mn[96]; snprintf(mn, sizeof mn, "/dev/shm/PL%02X_gfx1.manifest", c); remove(mn);
 		}
 		cleared = true;
 	}
 
 	FILE* lg = fopen("/dev/shm/mc_gfx1dump.log", framesIn == 1 ? "w" : "a");
-	if (lg) fprintf(lg, "# GFX1DUMP fire (framesIn=%d/%d) frame=%u — clean LOAD-decode parts by +6 selector\n",
-	                framesIn, WINDOW, state.frame_counter);
 
-	// ROOT CAUSE of dumpedThisFire=0 (fixed 2026-06-09): the old gfx1Dump read pixels
-	// from the TRANSIENT scratch 0x0CE60000 with the contiguous `texPtr += (w*h)>>1`
-	// walk AND took its dims from the GFX1 offset table (gfxBase + sel*4 -> blob+2/+3).
-	// Mid-match that offset table / scratch is stale (the load decode ran on the VS /
-	// char-load screen, BEFORE in_match flipped true). Worse than noise: the dims read
-	// came back 0, so `w<=0||h<=0` skipped EVERY part -> zero PPMs. The clean, PERSISTENT
-	// source is the DM00 directory (*(0x0CE80008)): MVC2 decodes every part ONCE at load
-	// into a per-part slot recorded there (loc_8c0322c0: entry=*(r6+8)+(k<<4), texels at
-	// *(entry+8); loc_8c032ae0 fills entries in an incrementing r11 order). It SURVIVES
-	// the match — it's the same store that gave the clean PAL4/portrait dumps. We map the
-	// per-pose GFX2 cell records to the DM00 run (record r -> dir key charBase+r, same
-	// decode order) and key the output by the +6 selector so rip_gfx2_assembly.py
-	// --realparts consumes it directly. Reuses the proven partDecodeToPPM (DM00 fmt/dims,
-	// twiddled).  OPTION (a): persistent per-part address, NOT the transient 0x0CE60000.
-	const uint32_t OFF_SLOT_SEL = 0x0ad;   // disasm loc_8c032a66/loc_8c032ba2 (base selector)
-	uint32_t dirBase = addrspace::read32(0x0CE80008);
-	if (!_ramAddr(dirBase)) { uint32_t alt = addrspace::read32(0x8CE80008); if (_ramAddr(alt)) dirBase = alt; }
-	if (!_ramAddr(dirBase)) {              // directory not built yet — wait for char load
-		if (lg) { fprintf(lg, "[GFX1] DM00 directory not built yet (dirBase=%08x) — skip fire\n", dirBase); fclose(lg); }
+	uint32_t dirStruct = 0x0CE80000;
+	uint32_t dirBase   = addrspace::read32(dirStruct + 8);   // entries base array
+	uint32_t dirCount  = addrspace::read32(dirStruct + 4);   // populated entry count
+	if (!_ramAddr(dirBase)) {
+		uint32_t alt = addrspace::read32(0x8CE80008);
+		if (_ramAddr(alt)) { dirBase = alt; dirCount = addrspace::read32(0x8CE80004); }
+	}
+	if (!_ramAddr(dirBase)) {
+		if (lg) { fprintf(lg, "# fire %d/%d frame=%u — DM00 dir not built (dirBase=%08x) skip\n",
+		                  framesIn, WINDOW, state.frame_counter, dirBase); fclose(lg); }
 		return;
 	}
+	// Clamp the walk count: trust *(struct+4) if sane, else fall back to a generous
+	// scan with blank-run termination (the pool is small, this is cheap).
+	int walkN = (dirCount > 0 && dirCount <= 4096) ? (int)dirCount : 4096;
 
+	// The pool is SHARED by all on-screen chars. Capture each unique part under the
+	// char whose palette first decodes it; the content hash dedupes across slots and
+	// across chars (disjoint sprites hash uniquely).
+	struct ActiveChar { uint8_t cid; uint32_t palP; };
+	ActiveChar act[6]; int nact = 0;
 	for (int s = 0; s < 6; s++) {
 		uint32_t pbase = CHAR_BASE[s];
 		if (!(uint8_t)addrspace::read8(pbase + OFF_ACTIVE)) continue;
-		uint8_t  cid  = (uint8_t)addrspace::read8(pbase + OFF_CHAR_ID);
-		uint32_t gfx2 = addrspace::read32(pbase + OFF_GFX01_PTR);   // 0x160 Dat_GFX2 (cell tbl)
-		uint32_t palP = addrspace::read32(pbase + OFF_PAL_PTR);     // 0x164 Dat_Pal
-		uint16_t sid  = (uint16_t)addrspace::read16(pbase + OFF_SPRITE_ID);
-		uint8_t  bsel = (uint8_t)addrspace::read8(pbase + OFF_SLOT_SEL);
-		uint32_t gfx2Base = gfx2 & 0x0FFFFFFFu;
-		if (!_ramAddr(gfx2Base | 0x0C000000u)) continue;
-		// disasm loc_8c032a66: base = (sel==1)?13 : 9. (Kept only for the diagnostic
-		// log — the CORRECT DM00 entry is selector-indexed at +0xA0, see below; the old
-		// charBase+ordinal cursor was the WRONG offset.)
-		int charBase = (bsel == 1) ? 13 : 9;
-
-		// Resolve THIS pose's GFX2 cell (record ORDER == DM00 fill order == load decode).
-		uint32_t sidIdx  = (uint32_t)(sid & 0x7FFF);
-		uint32_t cellOff = addrspace::read32(gfx2Base + sidIdx * 4) & 0x0FFFFFFFu;
-		uint32_t cell    = (gfx2Base + cellOff) & 0x0FFFFFFFu;
-		if (!_ramAddr(cell | 0x0C000000u)) continue;
-		int cnt = (int)(uint16_t)addrspace::read16(cell);
-		if (cnt <= 0 || cnt > 64) continue;
-		uint32_t recs = cell + 2;
-
-		char mn[96]; snprintf(mn, sizeof mn, "/dev/shm/PL%02X_gfx1.manifest", cid);
-		FILE* mf = fopen(mn, "a");
-		if (mf && ftell(mf) == 0)
-			fprintf(mf, "# selector palRow w h fmt texptr ppm  (clean DM00 persistent parts, keyed by +6 selector)\n");
-
-		// === CORRECT DM00 entry addressing (DISASM-CONFIRMED 2026-06-09) ===========
-		// The persistent per-part texels store is SELECTOR-INDEXED at +0xA0, NOT keyed
-		// by charBase+ordinal (that was the wrong offset, giving the portrait/UI run).
-		// Confirmed from the gameplay-part decoder loc_8c032696's copy-out (the only
-		// LOOPING LZSS caller; bank03 lines 5807-5853):
-		//   r8 = *(0x0CE80008)                 ; DM00base   (prologue @5683: mov.l @(0x8,r4),r8, r4=0x0ce80000)
-		//   r7 = *r9 (u8 +6 selector)          ; @5811 mov.b @r9,r7
-		//   r7 <<= 4  (= sel * 0x10 stride)    ; @5813/5817 two shll2 after extu.b
-		//   r7 += r8                           ; @5819 add r8,r7   -> DM00base + sel*0x10
-		//   r7 += 0xA0  (const loc_8c03283c)   ; @5821 add r4,r7   (r4 = mov.w @(loc_8c03283c) = 0x00a0)
-		//   texels = *(r7 + 0x8)               ; @5825 mov.l @(0x8,r7),r7 = copy-out DEST (e8)
-		// So entry = DM00base + sel*0x10 + 0xA0; e0=dims(w=lo16,h=hi16), e4 byte1=fmt,
-		// e8=persistent texels. This is the SAME store the per-frame render loc_8c0344d4
-		// reads via its texptr — it persists the whole match. (The +0x100/r10 sibling
-		// table @5841-5853 is the paired high-half; the +6 gameplay selector is r9/+0xA0.)
-		static const uint32_t DM00_BIAS   = 0xA0;   // bank03:5853 const loc_8c03283c
-		static const uint32_t DM00_STRIDE = 0x10;
-		int dumpedThis = 0;
-		for (int r = 0; r < cnt; r++) {
-			uint32_t rec   = recs + (uint32_t)r * 8;
-			uint16_t rpalw = (uint16_t)addrspace::read16(rec + 4);   // palette word
-			uint16_t rsel  = (uint16_t)addrspace::read16(rec + 6);   // +6 GFX SELECTOR (the key)
-			if (rsel == 0x00FF) break;                               // assembly terminator
-			uint32_t lo = addrspace::read32(rec);
-			if (lo == 0 && rsel == 0 && rpalw == 0) continue;        // pad/separator
-			unsigned palRow = (unsigned)((rpalw & 0x03ff) >> 4);
-
-			// CLEAN PERSISTENT pixels: the DM00 entry is SELECTOR-INDEXED at +0xA0
-			// (disasm trace above). The directory carries this part's OWN dims (e0),
-			// format (e4) + the decoded persistent texel ptr (e8) the game's renderer reads.
-			uint32_t e   = dirBase + (uint32_t)rsel * DM00_STRIDE + DM00_BIAS;
-			uint32_t e0  = addrspace::read32(e);
-			uint32_t e4d = addrspace::read32(e + 4);
-			uint32_t e8d = addrspace::read32(e + 8);
-			int w = (int)(e0 & 0xffff), h = (int)((e0 >> 16) & 0xffff);
-			if (w <= 0 || h <= 0 || w > 512 || h > 512 || !_ramAddr(e8d)) {
-				// Directory entry empty/invalid for this selector (part not loaded /
-				// out of this char's set). The per-part addr in the log exposes a bad
-				// +0xA0/stride immediately if the layout were off.
-				if (lg) fprintf(lg, "[GFX1] cid=%u sel=%u entry=%08x EMPTY (e0=%08x e8=%08x) skip\n",
-				                cid, rsel, e, e0, e8d);
-				continue;
-			}
-			int dfmt = partFmtFromE4(e4d);           // e4 byte1 -> PVR PixelFmt (proven map)
-			bool dlinear = false;                    // DM00 slots are twiddled (proven path)
-
-			if (rsel < 2048 && cid < 0x40 && !seen[cid][rsel]) {
-				// FIRST-SEEN gate: dump this selector's clean persistent part. Write BOTH
-				// the --realparts contract name (PLxx_part_NNN.ppm) AND the brief's
-				// PLxx_gfx1_NNNN.ppm alias, keyed by the +6 selector.
-				char pfn[96]; snprintf(pfn, sizeof pfn, "PL%02X_part_%03u.ppm", cid, rsel);
-				char pfp[112]; snprintf(pfp, sizeof pfp, "/dev/shm/%s", pfn);
-				partDecodeToPPM(e8d, w, h, dfmt, dlinear,
-				                palP + (uint32_t)palRow * 32, pfp, /*swapXY=*/false);
-				char gfn[96]; snprintf(gfn, sizeof gfn, "PL%02X_gfx1_%04u.ppm", cid, rsel);
-				char gfp[112]; snprintf(gfp, sizeof gfp, "/dev/shm/%s", gfn);
-				partDecodeToPPM(e8d, w, h, dfmt, dlinear,
-				                palP + (uint32_t)palRow * 32, gfp, /*swapXY=*/false);
-				seen[cid][rsel] = true;
-				if (mf) fprintf(mf, "%u %u %d %d %d %08x %s\n", rsel, palRow, w, h, dfmt, e8d, pfn);
-				if (lg)  fprintf(lg, "[GFX1] cid=%u(PL%02X) sel=%u entry=%08x %dx%d fmt=%d palRow=%u tex=%08x -> %s\n",
-				                 cid, cid, rsel, e, w, h, dfmt, palRow, e8d, pfn);
-				dumpedThis++;
-			}
-		}
-		if (mf) fclose(mf);
-		// === FULL DM00 DIRECTORY SWEEP (additive) ===============================
-		// The per-pose loop only sees selectors used by the 6 chars CURRENT poses.
-		// The DM00 directory is selector-indexed +0xA0 and PERSISTENT - it holds
-		// EVERY part decoded for this char at load. Sweep all selectors so one
-		// match-start capture covers the whole reachable set (~1533 for Ryu).
-		{
-			FILE* sf = fopen(mn, "a");
-			int sweptThis = 0;
-			for (uint32_t sel = 0; sel < 2048; sel++) {
-				if (cid < 0x40 && seen[cid][sel]) continue;
-				uint32_t e   = dirBase + sel * DM00_STRIDE + DM00_BIAS;
-				uint32_t e0  = addrspace::read32(e);
-				uint32_t e4d = addrspace::read32(e + 4);
-				uint32_t e8d = addrspace::read32(e + 8);
-				int w = (int)(e0 & 0xffff), h = (int)((e0 >> 16) & 0xffff);
-				if (w <= 0 || h <= 0 || w > 512 || h > 512 || !_ramAddr(e8d)) continue;
-				int dfmt = partFmtFromE4(e4d);
-				char pfn[96]; snprintf(pfn, sizeof pfn, "PL%02X_part_%03u.ppm", cid, sel);
-				char pfp[112]; snprintf(pfp, sizeof pfp, "/dev/shm/%s", pfn);
-				partDecodeToPPM(e8d, w, h, dfmt, false, palP, pfp, false);
-				char gfn[96]; snprintf(gfn, sizeof gfn, "PL%02X_gfx1_%04u.ppm", cid, sel);
-				char gfp[112]; snprintf(gfp, sizeof gfp, "/dev/shm/%s", gfn);
-				partDecodeToPPM(e8d, w, h, dfmt, false, palP, gfp, false);
-				if (cid < 0x40) seen[cid][sel] = true;
-				if (sf) fprintf(sf, "%u %u %d %d %d %08x %s\n", sel, 0u, w, h, dfmt, e8d, pfn);
-				sweptThis++;
-			}
-			if (sf) fclose(sf);
-			if (lg) fprintf(lg, "[GFX1] slot%d cid=%u(PL%02X) DM00 sweep dumped %d more selectors\n", s, cid, cid, sweptThis);
-		}
-		if (lg) fprintf(lg, "[GFX1] slot%d cid=%u(PL%02X) sid=%u cnt=%d charBase=%d gfx2=%08x dirBase=%08x dumpedThisFire=%d -> %s\n",
-		                s, cid, cid, sid, cnt, charBase, gfx2Base, dirBase, dumpedThis, mn);
+		act[nact].cid  = (uint8_t)addrspace::read8(pbase + OFF_CHAR_ID);
+		act[nact].palP = addrspace::read32(pbase + OFF_PAL_PTR);
+		nact++;
 	}
-	if (lg) fclose(lg);
+	if (nact == 0) { if (lg) fclose(lg); return; }
+
+	int blanks = 0;
+	int newThisFire = 0;
+	for (int i = 0; i < walkN; i++) {
+		uint32_t e  = dirBase + (uint32_t)i * 0x10;
+		uint32_t e0 = addrspace::read32(e);
+		uint32_t e4 = addrspace::read32(e + 4);
+		uint32_t e8 = addrspace::read32(e + 8);
+		int w = (int)(e0 & 0xffff), h = (int)((e0 >> 16) & 0xffff);
+		bool ok = (w > 0 && h > 0 && w <= 512 && h <= 512 && _ramAddr(e8));
+		if (!ok) { if (++blanks > 96) break; continue; }
+		blanks = 0;
+		int fmt = partFmtFromE4(e4);
+		// Raw texel byte length: paletted (fmt 5 PAL4 / 6 PAL8) vs 16bpp.
+		int bytes;
+		if (fmt == 5)      bytes = (w * h) >> 1;     // PAL4
+		else if (fmt == 6) bytes = (w * h);          // PAL8
+		else               bytes = (w * h) * 2;      // 16bpp
+		if (bytes <= 0 || bytes > (1 << 20)) continue;
+
+		// FNV-1a over the raw decoded texels + dims/fmt header. This is the stable
+		// per-part identity (survives slot reuse + arena compaction).
+		uint64_t hsh = 1469598103934665603ULL;
+		auto mix = [&](uint8_t b){ hsh ^= b; hsh *= 1099511628211ULL; };
+		mix((uint8_t)w); mix((uint8_t)(w >> 8));
+		mix((uint8_t)h); mix((uint8_t)(h >> 8));
+		mix((uint8_t)fmt);
+		// Hash the texels in 4-byte reads. Step keeps big 256x256 parts cheap while
+		// staying collision-safe (we also hash dims/fmt).
+		int step = (bytes > 4096) ? 4 : 1;           // for big parts read every 4th word
+		for (int off = 0; off + 4 <= bytes; off += 4 * step) {
+			uint32_t v = addrspace::read32(e8 + off);
+			mix((uint8_t)v); mix((uint8_t)(v >> 8));
+			mix((uint8_t)(v >> 16)); mix((uint8_t)(v >> 24));
+		}
+		if (hsh == 0) hsh = 1;
+
+		// Dedupe + attribute. Only the FIRST active char that lacks this hash captures
+		// it (shared parts don't double-dump). Decode with that char's palette.
+		for (int a = 0; a < nact; a++) {
+			uint8_t cid = act[a].cid;
+			if (cid >= 0x40) continue;
+			uint32_t slot = (uint32_t)(hsh % HCAP);
+			bool found = false;
+			for (int probe = 0; probe < HCAP; probe++) {
+				uint64_t cur = seenHash[cid][slot];
+				if (cur == hsh) { found = true; break; }
+				if (cur == 0)   { break; }
+				slot = (slot + 1) % HCAP;
+			}
+			if (found) continue;
+			seenHash[cid][slot] = hsh;
+			int seq = partSeq[cid]++; seenCount[cid]++;
+			char pfn[96]; snprintf(pfn, sizeof pfn, "PL%02X_part_%03d.ppm", cid, seq);
+			char pfp[112]; snprintf(pfp, sizeof pfp, "/dev/shm/%s", pfn);
+			partDecodeToPPM(e8, w, h, fmt, /*linear=*/false, act[a].palP, pfp, false);
+			char gfn[96]; snprintf(gfn, sizeof gfn, "PL%02X_gfx1_%04d.ppm", cid, seq);
+			char gfp[112]; snprintf(gfp, sizeof gfp, "/dev/shm/%s", gfn);
+			partDecodeToPPM(e8, w, h, fmt, /*linear=*/false, act[a].palP, gfp, false);
+			char mn[96]; snprintf(mn, sizeof mn, "/dev/shm/PL%02X_gfx1.manifest", cid);
+			FILE* mf = fopen(mn, "a");
+			if (mf) {
+				if (ftell(mf) == 0)
+					fprintf(mf, "# seq hash16 w h fmt texptr ppm  (unique body parts by CONTENT identity, accumulated across match)\n");
+				fprintf(mf, "%d %016llx %d %d %d %08x %s\n",
+				        seq, (unsigned long long)hsh, w, h, fmt, e8, pfn);
+				fclose(mf);
+			}
+			newThisFire++;
+			break;                                   // one capture per unique part
+		}
+	}
+
+	if (lg) {
+		fprintf(lg, "# fire %d/%d frame=%u dirBase=%08x dirCount=%u walkN=%d newThisFire=%d | totals:",
+		        framesIn, WINDOW, state.frame_counter, dirBase, dirCount, walkN, newThisFire);
+		for (int a = 0; a < nact; a++)
+			fprintf(lg, " PL%02X=%d", act[a].cid, seenCount[act[a].cid]);
+		fprintf(lg, "\n");
+		fclose(lg);
+	}
 }
 
 // =============================================================================
