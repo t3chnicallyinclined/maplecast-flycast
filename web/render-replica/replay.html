@@ -80,6 +80,11 @@
 // (Phases 1/2 frozen byte-exact). MCRR spec: docs/RENDER-REPLICA-RECORDING-FORMAT.md.
 // ============================================================================
 import createRenderFrame from './render_frame.mjs';
+// Phase 5 — PURE-STATE TEXTURES: client decodes each active body part's sprite from the
+// shipped-once compressed GFX (in the RAM image) + the live sprite_id, writes it to pane.vram
+// at the TCW addr render_frame carries. Replaces the per-frame "bodytex" VRAM band (removed).
+import { ensureBodyTextures } from './body_decoder.mjs';
+const bodyCache = {};   // decode-on-change memo, persists across frames
 
 const W_DIR = new URL('../webgpu/', import.meta.url);
 const { PVR2Renderer }   = await import(new URL('pvr2-renderer.mjs', W_DIR));
@@ -257,9 +262,11 @@ function applyDynamic(f) {
     let off = fr.dynOff;
     for (const r of REC.dynamicRegs) {
         const slice = REC.buf.subarray(off, off + r.len);
-        // Same routing as the live path: "bodytex" is a VRAM slice (addr = VRAM offset),
-        // everything else is area-3 guest RAM. See liveApplyFrame() for the rationale.
-        if (r.tag === 'bodytex') { if (pane.vram) pane.vram.set(slice, r.addr >>> 0); }
+        // Phase 5: every dynamic region is area-3 guest RAM (state only). The body sprite
+        // TEXTURES are NOT shipped — the client decodes them from the shipped GFX into pane.vram
+        // (ensureBodyTextures in showFrame). A legacy "bodytex" region, if present in an old
+        // recording, is tolerated/ignored (no per-frame pixel band anymore).
+        if (r.tag === 'bodytex') { /* removed from the wire; ignore if an old .mcrr carries it */ }
         else ram.set(slice, guestOff(r.addr));
         off += r.len;
     }
@@ -290,6 +297,9 @@ function showFrame(f) {
     const fr = applyDynamic(f);
     const { ta, quads, len } = transpiledTA(ram);
     window.__lastTA = ta;      // expose for headless verification (TA-level motion probe)
+    // PURE-STATE TEXTURES: ensure the active body parts are decoded into pane.vram at the TCW
+    // addresses this TA references (decode-on-sprite_id-change), BEFORE the textured draw.
+    if (gpuOK && pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache);
     if (gpuOK) pane.render(ta);
     validate(fr, ta, len);
     els.fcur.textContent = f; els.scrub.value = f;
@@ -362,15 +372,15 @@ function liveApplyFrame(u8) {
     p += 4;
     const vframe = dv.getUint32(p, true); p += 4;
     const taSize = dv.getUint32(p, true); p += 4;
-    // splat each DYNAMIC region (table order from msg 1) into the RAM image.
-    // ROUTING: a region tagged "bodytex" is NOT guest RAM — it is the per-frame body
-    // sprite TEXTURE band, a VRAM slice whose addr is the VRAM offset (0x410000). Route
-    // it to pane.vram (the array the TextureManager re-decodes every render()), NOT ram[].
-    // All other regions are area-3 guest RAM -> ram[] at addr&0xFFFFFF. Routing is by TAG
-    // alone (no addr-range assumption) — server-side encoding mirror in maplecast_replica_live.cpp.
+    // splat each DYNAMIC region (table order from msg 1) into the RAM image. Phase 5: every
+    // region is area-3 guest STATE (slot table, char structs, tiledesc, rectab/idxtab, camera).
+    // The body sprite TEXTURES are reconstructed client-side from the shipped-once GFX by
+    // ensureBodyTextures() — no per-frame pixel band on the wire (wire back to GSTA size).
     for (const r of livePre.dynamicRegs) {
         const slice = u8.subarray(p, p + r.len);
-        if (r.tag === 'bodytex') { if (pane.vram) pane.vram.set(slice, r.addr >>> 0); }
+        // Phase 5: state-only wire — body textures decoded client-side (ensureBodyTextures).
+        // Tolerate a legacy "bodytex" region from an older server build by ignoring it.
+        if (r.tag === 'bodytex') { /* no per-frame texture band anymore */ }
         else ram.set(slice, guestOff(r.addr));
         p += r.len;
     }
@@ -378,6 +388,8 @@ function liveApplyFrame(u8) {
 
     const { ta, quads, len } = transpiledTA(ram);
     window.__lastTA = ta;
+    // PURE-STATE TEXTURES (live): decode active body parts into pane.vram @ TCW before draw.
+    if (gpuOK && pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache);
     if (gpuOK) pane.render(ta);
 
     // validator (only if the live frame carries engine_ta — mock/synth sends taSize=0)

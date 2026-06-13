@@ -152,21 +152,18 @@ static void buildTables()
 		if (isRam(rectab)) D(rectab, 0x10000, "rectab");
 	}
 
-	// ---- DYNAMIC (VRAM): the per-frame body sprite TEXTURE band -----------------
-	// The body part-pixel textures the TA samples live in VRAM, NOT in 0x8C... guest
-	// RAM. The static prefix ships VRAM ONCE, but the body texture band is re-decoded
-	// into VRAM by the engine every frame (animation changes the resident part pixels);
-	// shipping VRAM only once leaves the client sampling STALE/EMPTY VRAM => garbling.
-	// So we ship the live body-texture span [0x410000, 0x460000) per frame.
-	//
-	// ENCODING: this is a VRAM slice, not a guest-RAM region. We keep the SAME
-	// {addr,len,tag} table struct but TAG it "bodytex" and store addr = the VRAM
-	// OFFSET (0x410000), not a 0x8C... guest address. The client routes purely by
-	// tag=="bodytex" -> pane.vram (see replay.html), and captureFrame() below copies
-	// this region from the resident vram[] array (not mem_b/guest RAM). No other code
-	// path needs to special-case it: the tag is the single source of truth.
-	// Page-aligned 320KB span covering the observed live band 0x415400..0x450200.
-	D(0x410000, 0x50000, "bodytex");
+	// PHASE 5 — PURE-STATE TEXTURES: the body sprite TEXTURE band is NO LONGER shipped.
+	// The previous "bodytex" shortcut (D(0x410000, 0x50000) = ~320KB/frame of decoded VRAM
+	// pixels) was off-thesis: it streamed pixels instead of state. The CLIENT now reconstructs
+	// each active body part's sprite from the shipped-once compressed GFX (GFX1/GFX2 in the
+	// static prefix + the 16MB RAM image) + the per-frame sprite_id (in the char structs we
+	// already ship), decoding via the validated LZSS (bank03 loc_8c0354c0) and writing the
+	// VERBATIM (twiddled-storage) output to its TCW VRAM address — see web/render-replica/
+	// body_decoder.mjs (ensureBodyTextures). Byte-exact vs engine VRAM (decodeA == VRAM,
+	// proven on _ryu_capture: Cable sid 0xd4 4/4 + 110 rectab-TCW parts 0 mismatch). This
+	// restores the GSTA-size wire (state only, ~tens of KB/frame, no decoded-pixel band).
+	// The tiledesc (0x1800) + rectab (0x10000) enlargements above are KEPT (legit state that
+	// was truncated; nothing to do with the removed texture band).
 
 	_dynTotal = 0;
 	for (auto& r : _dynRegs) _dynTotal += r.len;
@@ -383,17 +380,11 @@ static void captureFrame(u32 vframe)
 	// ---- dynamic regions in table order, raw bytes ----
 	size_t off = hdr;
 	for (auto& r : _dynRegs) {
-		// The "bodytex" region is a VRAM slice, not guest RAM: r.addr is a VRAM
-		// OFFSET (0x410000), so copy from the resident vram[] array (same array the
-		// render path samples and the static prefix snapshots). Identified by tag so
-		// no addr-range assumption is needed; the client routes it to pane.vram.
-		if (strncmp(r.tag, "bodytex", 7) == 0) {
-			memcpy(&buf[off], &vram[r.addr], r.len);
-		}
-		// The two big tables (idxtab/rectab) and the slot ptr arrays + char structs
-		// all live in main RAM; copy from mem_b directly when the addr is a clean
-		// 0x8C... main-RAM address (fast), else fall back to alias-safe reads.
-		else if ((r.addr & 0xFF000000u) == 0x8C000000u) {
+		// PHASE 5: all dynamic regions are guest STATE now (no VRAM texture band). The two
+		// big tables (idxtab/rectab) and the slot ptr arrays + char structs all live in main
+		// RAM; copy from mem_b directly when the addr is a clean 0x8C... main-RAM address
+		// (fast), else fall back to alias-safe reads.
+		if ((r.addr & 0xFF000000u) == 0x8C000000u) {
 			memcpy(&buf[off], &mem_b[r.addr & 0x00FFFFFFu], r.len);
 		} else {
 			for (u32 b = 0; b < r.len; b++) buf[off + b] = rd8(r.addr + b);
@@ -455,8 +446,9 @@ void init()
 	if (!_compInit) {
 		// Prefix: up to VRAM(8MB)+PVR(32KB)+RAM(16MB)+~256KB GFX ≈ 24.3MB worst case.
 		_prefixComp.init((size_t)28 * 1024 * 1024);
-		// Per-frame dynamic payload ≈ 90KB RAM regions + 320KB bodytex VRAM band
-		// ≈ 410KB raw worst case; give generous headroom.
+		// Per-frame dynamic payload (Phase 5: STATE ONLY, no texture band) ≈ slot tables +
+		// char structs + tiledesc(0x1800) + idxtab(0x2000) + rectab(0x10000) + camera/globals
+		// ≈ 90-110KB raw worst case; compresses to GSTA-size. Generous headroom kept.
 		_frameComp.init((size_t)2 * 1024 * 1024);
 		_compInit = true;
 	}
