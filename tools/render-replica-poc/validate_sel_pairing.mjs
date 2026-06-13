@@ -92,14 +92,24 @@ function gfx1Tab(gfx1){ const nn=r32(gfx1)>>>2; const offs=new Uint32Array(nn); 
 function endOf(srt,o){let lo=0,hi=srt.length;while(lo<hi){const m=(lo+hi)>>1;if(srt[m]<=o)lo=m+1;else hi=m;}return lo<srt.length?srt[lo]:o+0x4000;}
 function decExpect(gfx1,sel){ const Gt=gfx1Tab(gfx1); if(sel>=Gt.n)return null; const pbase=gfx1+Gt.offs[sel]; const sw=r8(pbase+2),sh=r8(pbase+3); const W=sw*8,H=sh*8; if(W<=0||H<=0||W>1024||H>1024)return null; const destLen=(W*H)>>1; return decodeA(ram,(pbase+4)&0xFFFFFF,(gfx1+endOf(Gt.srt,Gt.offs[sel]))&0xFFFFFF,destLen); }
 const tav=new DataView(ta.buffer, ta.byteOffset, ta.byteLength);
+const tcwAddr=k=>{const tcw=tav.getUint32(k*96+0x0C,true);return ((tcw&0x1FFFFF)<<3)>>>0;};
+// PART-BASE per (gfx1,sel) run = MIN tile TCW vaddr (corrected per-tile model 2026-06-13). Each
+// tile k of a run reads its 512B (32x32 PAL4) slice from base + (addr-base); the whole part is
+// stored ONCE contiguously at base. So the correct per-quad ground truth is:
+//   VRAM[ quad's TCW .. +N ] == decode(sel)[ (quad's TCW - run base) .. +N ]
+const runBase=new Map();
+for(let k=0;k<quads;k++){ const gfx1=quadGfx1s[k]>>>0,sel=quadSels[k];
+  if(!(gfx1&0x0C000000)&&!(gfx1&0x8C000000))continue; const key=gfx1.toString(16)+':'+sel; const a=tcwAddr(k);
+  const cur=runBase.get(key); if(cur===undefined||a<cur)runBase.set(key,a); }
 let qok=0,qbad=0,qskip=0;
 for(let k=0;k<quads;k++){ const gfx1=quadGfx1s[k]>>>0,sel=quadSels[k];
   if(!(gfx1&0x0C000000)&&!(gfx1&0x8C000000)){qskip++;continue;}
   const exp=decExpect(gfx1,sel); if(!exp){qskip++;continue;}
-  const tcw=tav.getUint32(k*96+0x0C,true); const addr=((tcw&0x1FFFFF)<<3)>>>0;
-  let same=true; const L=Math.min(exp.length, 256); for(let b=0;b<L;b++){ if(vram[addr+b]!==exp[b]){same=false;break;} }
-  if(same)qok++; else {qbad++; if(qbad<=6)console.log(`  quad ${k} TCW-write MISMATCH sel=${sel} gfx1=${gfx1.toString(16)} addr=${addr.toString(16)}`);} }
-console.log(`(4) per-quad written sprite == decode(walker sel): ${qok} OK, ${qbad} BAD, ${qskip} skipped (of ${quads})`);
+  const addr=tcwAddr(k); const base=runBase.get(gfx1.toString(16)+':'+sel); const slice=addr-base;
+  if(slice<0||slice>=exp.length){qskip++;continue;}     // tile beyond the part body (pad tile of a small part)
+  let same=true; const L=Math.min(exp.length-slice, 256); for(let b=0;b<L;b++){ if(vram[addr+b]!==exp[slice+b]){same=false;break;} }
+  if(same)qok++; else {qbad++; if(qbad<=6)console.log(`  quad ${k} TILE-SLICE MISMATCH sel=${sel} gfx1=${gfx1.toString(16)} addr=${addr.toString(16)} sliceOff=${slice}`);} }
+console.log(`(4) per-quad tile-slice == decode(walker sel)[slice]: ${qok} OK, ${qbad} BAD, ${qskip} skipped (of ${quads})`);
 
 // ---- (5) contrast: how many quads the OLD 1:1 pairing got WRONG ----
 // OLD model (per body): pair quad i to cellSels[i], consuming only `ncell` quads; quads beyond

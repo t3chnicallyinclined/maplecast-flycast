@@ -24,17 +24,27 @@
 //   * Per-part VRAM addr = the render param TCW: byteAddr = (TCW & 0x1FFFFF) << 3 (fmt5 PAL4).
 //     render_frame's emitted TA carries that TCW per quad, BYTE-EXACT vs engine (test_ta_emit.c
 //     "TCW-BITEXACT").
-//   * TILING (the fix, 2026-06-13): the body walker (loc_8c0344d4) expands ONE GFX2 cell record
-//     into N TILES (N = desc[r13+1]+1 from the 0x8C1F9F9C tile-descriptor table), each tile a
-//     separate emitted quad, ALL SHARING that cell's GFX1 sel (r11+6 is read once per cell, not
-//     per tile). So quad-count > cell-count whenever any cell tiles, and the OLD 1:1 pairing
-//     quad[i]<->cell-sel[i] SLIPPED after the first tiled cell -> right colors, wrong quad =
-//     the scramble. PROVED on a live frame (maxq_86.mcrr): Cable sid 0x47 = 19 cells -> 71 quads,
-//     slip onset quad 2. THE FIX: render_frame now exposes render_frame_quad_sels() = the SOURCE
-//     sel per emitted quad (the sel the walker actually used, captured at submit time from r11+6).
-//     We decode EACH quad's OWN sel to EACH quad's OWN TCW (a tiled cell's N tiles all decode the
-//     same sel to N different TCWs). NO 1:1 sel walk, NO slip. (The single-char _ryu_capture passed
-//     before only because that pose had no tiled cells; live tiled limbs expose it.)
+//   * TILING (corrected 2026-06-13, PROVEN vs resident VRAM): the body walker (loc_8c0344d4)
+//     expands ONE GFX2 cell record into N TILES (N = desc[r13+1]+1 from the 0x8C1F9F9C tile-
+//     descriptor table), each tile a separate emitted quad, ALL SHARING that cell's GFX1 sel
+//     (r11+6 is read once per cell, not per tile). Each tile's TSP is a FIXED 32x32 PAL4_TW and
+//     its TCW steps +0x200 (= 512B = one 32x32 PAL4 tile) ACROSS THE SAME CONTIGUOUS WHOLE-PART
+//     VRAM BLOB. i.e. the engine stores the part ONCE, contiguously (sw*8 x sh*8, decodeA output
+//     VERBATIM, byte-exact), at the part-base VRAM addr = the run's FIRST (minimum) tile TCW; the
+//     subsequent tile TCWs point INTO that same blob at +512B offsets (the renderer reads each
+//     32x32 tile from its own offset). Load-time decoder loc_8c033d78 confirms this: it decodes
+//     each whole part to 0x0CE60000 contiguously and DMAs it VERBATIM, NO per-tile twiddle.
+//     PROVED vs _scramble_actual.mcrr RESIDENT VRAM (the resident pose sid 0xd4, which IS in VRAM):
+//       sel1264 64x64 2048B -> 4 tiles @ 0x415400/600/800/a00 (the part spans exactly 0x415400..
+//       0x415c00); decodeA(1264) == VRAM[0x415400..+2048] 2048/2048 EXACT. sel1267/1265/1266 same.
+//     THE SCRAMBLE BUG (the OLD code): it wrote the WHOLE-PART blob at EACH quad's OWN TCW, so a
+//     2048B part was re-written starting at 0x415400 AND 0x415600 AND 0x415800 AND 0x415a00 ->
+//     self-overwrite smear (each later write shifts the part +512B over the prior) = the scramble.
+//     THE FIX: write each (gfx1,sel) part's decoded bytes ONCE, at the run's PART-BASE VRAM addr =
+//     the MINIMUM tile TCW vaddr among that run's quads. The other tiles' TCWs already index into
+//     that blob; do NOT write them again. (The single-char _ryu_capture passed before only because
+//     those poses' parts were single-tile m=32: one 32x32 tile == the whole part, so write-each ==
+//     write-once. Multi-tile limbs expose the self-overwrite.)
 //
 // COST: decode runs ONLY when a char slot's sprite_id changes (cache by slot|sprite_id). A pose
 // is 4-19 parts, ~64..8192 decode bytes each; a full pose decode is sub-millisecond in JS. Static
@@ -129,14 +139,15 @@ function decodePart(ram, gfx1, G, sel) {
 //   quadGfx1s : Uint32Array[quadCount] from render_frame_quad_gfx1s() — the owning body's GFX1 base
 //               for quad k (so each sel decodes against the RIGHT character's art).
 //
-// TILING-SAFE PAIRING (2026-06-13 fix): we iterate the EMITTED QUADS (not the cell records) and
-// decode each quad's OWN (gfx1,sel) to its OWN TCW. The body walker expands one GFX2 cell into N
-// tiles, all carrying the same (gfx1,sel) but distinct TCWs — so this writes the SAME sprite to
-// each of that cell's tiles, with NO slip. (The old quad[i]<->cell-sel[i] 1:1 walk slipped after
-// the first tiled cell -> right colors, wrong quad = the scramble; proven on maxq_86.mcrr.)
+// PER-TILE PLACEMENT (2026-06-13, corrected & PROVEN vs resident VRAM): the body walker expands
+// one GFX2 cell into N tiles, all carrying the same (gfx1,sel) but TCWs that step +0x200 (=512B)
+// across the SAME CONTIGUOUS WHOLE-PART blob. So the part is written ONCE at its base VRAM addr =
+// the MINIMUM tile TCW among that (gfx1,sel) run's quads; the other tiles index into that blob.
+// (The OLD code wrote the whole part at EACH quad's own TCW -> self-overwrite smear = the scramble.)
 //
-// DECODE MEMO: keyed by (gfx1,sel) so a tiled cell decodes ONCE and re-writes to each tile; a
-// static pose re-uses last frame's decode. Returns {decoded,bytes,written,quads}.
+// We therefore (1) iterate the EMITTED QUADS to group them by (gfx1,sel) and find each run's base
+// (min) TCW vaddr, then (2) decode each distinct part ONCE and write it ONCE at that base. A static
+// pose re-uses last frame's decode via the memo. Returns {decoded,bytes,written,quads,parts}.
 // ----------------------------------------------------------------------------
 const QUAD = 96;                                  // textured-sprite TA block size (paraType 5)
 const TCW_OFF = 0x0C;                             // TCW is word 3 of the 16B param header
@@ -155,14 +166,25 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         return ((tcw & 0x1FFFFF) << 3) >>> 0;
     };
 
+    // ---- pass 1: group emitted quads into (gfx1,sel) part-runs, record each run's BASE (min) vaddr.
+    // The base vaddr is the part's contiguous VRAM origin; the run's other tiles step into it. ----
+    const runs = new Map();                       // "gfx1:sel" -> { gfx1, sel, base }
     for (let q = 0; q < quadCount; q++) {
-        const sel  = quadSels[q];
         const gfx1 = quadGfx1s[q] >>> 0;
         if (!(gfx1 & 0x0C000000) && !(gfx1 & 0x8C000000)) continue;  // no valid body art
         quads++;
+        const sel  = quadSels[q];
+        const addr = tcwAddrOf(q);
+        if (addr < 0) continue;
+        const key  = gfx1.toString(16) + ':' + sel;
+        const r = runs.get(key);
+        if (r === undefined) runs.set(key, { gfx1, sel, base: addr });
+        else if (addr < r.base) r.base = addr;    // PART BASE = minimum tile TCW vaddr of the run
+    }
 
-        // decode-on-(gfx1,sel): a tiled cell's repeated sel hits this memo after the first tile.
-        const key = (gfx1 >>> 0).toString(16) + ':' + sel;
+    // ---- pass 2: decode each distinct part ONCE and write it ONCE at its base vaddr ----
+    for (const { gfx1, sel, base } of runs.values()) {
+        const key = gfx1.toString(16) + ':' + sel;
         let p = cache._dec.get(key);
         if (p === undefined) {
             const G = gfx1Offsets(ram, gfx1, cache._gfx);
@@ -171,11 +193,9 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
             if (p) { decoded++; bytes += p.destLen; }
         }
         if (!p) continue;
-
-        const addr = tcwAddrOf(q);                // THIS quad's own TCW (distinct per tile)
-        if (addr < 0 || addr + p.destLen > vram.length) continue;
-        vram.set(p.bytes, addr);                  // VERBATIM (twiddled storage) — render samples this
+        if (base + p.destLen > vram.length) continue;
+        vram.set(p.bytes, base);                  // VERBATIM whole-part blob at the part base
         written++;
     }
-    return { decoded, bytes, written, quads };
+    return { decoded, bytes, written, quads, parts: runs.size };
 }
