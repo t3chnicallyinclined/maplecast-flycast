@@ -79,7 +79,7 @@
 // Reuses ta-parser/pvr2-renderer/texture-manager VERBATIM, and render_frame.wasm UNMODIFIED
 // (Phases 1/2 frozen byte-exact). MCRR spec: docs/RENDER-REPLICA-RECORDING-FORMAT.md.
 // ============================================================================
-import createRenderFrame from './render_frame.mjs';
+import createRenderFrame from './render_frame.mjs?v=quadsel3';
 // Phase 5 — PURE-STATE TEXTURES: client decodes each active body part's sprite from the
 // shipped-once compressed GFX (in the RAM image) + the live sprite_id, writes it to pane.vram
 // at the TCW addr render_frame carries. Replaces the per-frame "bodytex" VRAM band (removed).
@@ -141,14 +141,37 @@ function parseMCRR(ab) {
         const vframe = u32();
         const taSize = u32();
         const dynOff = p;                              // dynamic region bytes start here
-        for (const r of pre.dynamicRegs) p += r.len;    // skip dynamic payload
+        for (const r of pre.dynamicRegs) p += r.len;    // skip fixed dynamic payload
+        const gfxOff = p;                              // variable GFX tail starts here
+        // skip the GFX tail: u32 nGfx, then nGfx × { u32 base, GFX_REGION bytes }
+        const nGfx = (p + 4 <= buf.length) ? dv.getUint32(p, true) : 0;
+        if (nGfx <= 64) { p += 4 + nGfx * (4 + GFX_REGION); }   // else: old format, no tail
         const taOff = p; p += taSize;                   // engine_ta
-        frames.push({ vframe, taSize, dynOff, taOff });
+        frames.push({ vframe, taSize, dynOff, gfxOff, taOff });
     }
     return { ...pre, frames };
 }
 
 const guestOff = a => (a >>> 0) & 0xFFFFFF;
+const GFX_REGION = 0x20000;             // per-body GFX1/GFX2 region size (on-change dynamic GFX)
+
+// Read the VARIABLE GFX tail at byte offset `p` of a FRMx record buffer `u8` and splat each
+// fresh GFX region into the module RAM image. Returns the offset AFTER the tail (where engine_ta,
+// if any, begins). The tail = u32 nGfx, then nGfx × { u32 base, GFX_REGION bytes }. Tolerates an
+// older server that omits the tail entirely (returns p unchanged if there are < 4 bytes left).
+function applyGfxTail(u8, p) {
+    if (p + 4 > u8.length) return p;               // old server: no tail
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const nGfx = dv.getUint32(p, true); p += 4;
+    if (nGfx > 64) return p - 4;                   // sanity: not a tail (treat as old format)
+    for (let i = 0; i < nGfx; i++) {
+        if (p + 4 + GFX_REGION > u8.length) break;
+        const base = dv.getUint32(p, true); p += 4;
+        ram.set(u8.subarray(p, p + GFX_REGION), guestOff(base));
+        p += GFX_REGION;
+    }
+    return p;
+}
 
 // ---------------------------------------------------------------- pvr2 pane
 class Pane {
@@ -185,7 +208,7 @@ function synthSnap(w, h) {
 
 // ---------------------------------------------------------------- render_frame.wasm
 let frameMod;
-async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame(); } return frameMod; }
+async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=quadsel3' : p }); } return frameMod; }
 function transpiledTA(ram) {
     const M = frameMod;
     const ramPtr = M._malloc(ram.length); M.HEAPU8.set(ram, ramPtr);
@@ -278,6 +301,8 @@ function applyDynamic(f) {
         else ram.set(slice, guestOff(r.addr));
         off += r.len;
     }
+    // apply the variable GFX tail (on-change dynamic GFX) for this frame, from REC.buf
+    applyGfxTail(REC.buf, fr.gfxOff);
     return fr;
 }
 
@@ -392,6 +417,12 @@ function liveApplyFrame(u8) {
         else ram.set(slice, guestOff(r.addr));
         p += r.len;
     }
+    // ---- VARIABLE GFX TAIL (the static-GFX-gap fix): u32 nGfx, then nGfx × { u32 base, 0x20000
+    // bytes }. The server ships a body's GFX1/GFX2 here ON CHANGE (a char whose art loaded after
+    // the prefix was built, or a new connection). Splat each into the RAM image so render_frame's
+    // walker + body_decoder read FRESH cell records instead of the frozen prefix snapshot. nGfx
+    // is ALWAYS present (0 = steady state). Tolerate an old server that omits the tail (p==len).
+    p = applyGfxTail(u8, p);
     const engTa = taSize ? u8.subarray(p, p + taSize) : null;
 
     const { ta, quads, len, quadSels, quadGfx1s } = transpiledTA(ram);

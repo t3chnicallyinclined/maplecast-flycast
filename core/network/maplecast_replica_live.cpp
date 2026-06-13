@@ -81,6 +81,39 @@ static std::vector<uint8_t> _prefixZcst;           // ready-to-send compressed b
 static std::atomic<bool>    _prefixReady{false};
 static std::mutex           _prefixMutex;          // guards build of _prefixZcst
 
+// ---------------------------------------------------------------------------
+// ON-CHANGE DYNAMIC GFX (the static-GFX-gap fix, re_kb finding:replica_live_static_gfx_fix).
+// The static prefix ships only the bodies' GFX that were resident when the prefix was built
+// (ONCE). A char whose art loads AFTER that — e.g. a client that connected pre-art-load — has
+// its GFX2 cell records FROZEN/stale in the client RAM image, so the transpiled walker
+// (loc_8c0344d4) reads garbage cell records and emits a grid. FIX: every frame, walk the slot
+// table, and for each active BODY node ship its GFX1(+0x15C)/GFX2(+0x160) page-aligned 0x20000
+// regions as a VARIABLE dynamic tail — but ONLY when that (base,content-signature) has not been
+// shipped before (covers both the never-shipped case and a re-load that changed the bytes). The
+// signature is a cheap fold over the region so a static (already-fresh) body costs nothing after
+// its first send. Wire cost: ~121KB zstd per (re)loaded body, ~0 steady-state.
+struct GfxBase { u32 base; u32 sig; };                 // base addr (page-aligned) + content sig
+static std::vector<GfxBase> _gfxShipped;               // bases+sigs already sent to all clients
+static std::atomic<bool>    _gfxResendAll{false};      // set on new-connect: re-ship all GFX once
+static u32 gfxSig(u32 base)                            // fold the 0x20000 region to a u32 sig
+{
+	u32 h = 2166136261u;
+	for (u32 b = 0; b < 0x20000u; b += 64) {          // sparse sample (every 64B) — enough to
+		h ^= rd32(base + b); h *= 16777619u;          // catch a content change without a full scan
+	}
+	return h;
+}
+static bool gfxAlreadyShipped(u32 base, u32 sig)
+{
+	for (auto& g : _gfxShipped) if (g.base == base) return g.sig == sig;
+	return false;
+}
+static void gfxMarkShipped(u32 base, u32 sig)
+{
+	for (auto& g : _gfxShipped) if (g.base == base) { g.sig = sig; return; }
+	_gfxShipped.push_back({ base, sig });
+}
+
 // Double-buffered DYNAMIC staging + single-slot publish (drop-old).
 static std::vector<uint8_t> _dynBuf[2];
 static int                  _dynWhich = 0;
@@ -287,6 +320,14 @@ static void onOpen(RlConnHdl hdl)
 		_conns.insert(hdl);
 	}
 	_clientCount.fetch_add(1, std::memory_order_relaxed);
+	// A NEW client gets the cached static prefix, which only carries the bodies' GFX that were
+	// resident WHEN THE PREFIX WAS BUILT. Any body whose art loaded later was shipped to earlier
+	// clients via the on-change GFX delta and marked in _gfxShipped — so this new client would
+	// otherwise never receive that GFX (grid). FIX: clear _gfxShipped so the next captured frame
+	// re-ships every active body's fresh GFX to ALL clients (existing clients get a benign
+	// duplicate; the new client gets the GFX it's missing). One relaxed store under the pub mutex
+	// is enough — the SH4 thread reads/writes _gfxShipped only inside captureFrame.
+	_gfxResendAll.store(true, std::memory_order_relaxed);
 	// Send the static prefix if it's already built. If not (no in-match frame has
 	// armed the build yet), the sender loop sends it to all conns the moment it
 	// becomes ready (see drainAndSend), so a client that connects pre-match still
@@ -360,12 +401,54 @@ static void senderLoop()
 // SH4-thread per-frame capture
 // ===========================================================================
 
+// Collect, this frame, the active bodies' GFX1/GFX2 page-aligned bases whose (base,content)
+// has NOT already been shipped (covers the never-shipped char + a mid-stream re-load). Returns
+// the list to append as a variable GFX tail. Does NOT mark them shipped yet — that happens only
+// after this frame WINS the publish swap (so a drop-old discard re-evaluates them next frame).
+struct GfxToShip { u32 base; u32 sig; };
+static void collectFreshGfx(std::vector<GfxToShip>& out)
+{
+	for (int L = 0; L < 16; L++) {
+		u32 cnt = rd8(0x8C2895E0 + L); if (cnt == 0 || cnt > 0x60) continue;
+		u32 base = 0x8C287DE0 + L * 0x180;
+		for (u32 i = 0; i < cnt; i++) {
+			u32 node = rd32(base + i * 4); if (!isRam(node)) continue;
+			if (rd8(node + 0x3) != 0) continue;                 // body only (cat==0)
+			u32 gfx[2] = { rd32(node + 0x160), rd32(node + 0x15C) };  // GFX2, GFX1
+			for (u32 k = 0; k < 2; k++) {
+				if (!isRam(gfx[k])) continue;
+				u32 pbase = gfx[k] & ~0xFFFu;
+				u32 sig = gfxSig(pbase);
+				if (gfxAlreadyShipped(pbase, sig)) continue;     // already fresh on the client
+				bool dup = false;
+				for (auto& g : out) if (g.base == pbase) { dup = true; break; }
+				if (!dup) out.push_back({ pbase, sig });
+			}
+		}
+	}
+}
+
 static void captureFrame(u32 vframe)
 {
-	// Pick the staging buffer NOT currently published (double-buffer). Total inner
-	// payload = 12B FRAME RECORD header + dynamic bytes.
-	const size_t hdr = 12;
-	const size_t total = hdr + _dynTotal;
+	// A new client connected: drop our shipped-GFX memory so this frame re-ships every active
+	// body's GFX (the cached prefix only has the build-time bodies). Existing clients get a
+	// benign duplicate; the new client gets the GFX it was missing.
+	if (_gfxResendAll.exchange(false, std::memory_order_relaxed)) _gfxShipped.clear();
+
+	// Determine this frame's fresh-GFX delta (on-change dynamic GFX, the static-gap fix).
+	std::vector<GfxToShip> freshGfx;
+	collectFreshGfx(freshGfx);
+	const u32 GFX_REGION = 0x20000u;
+
+	// Pick the staging buffer NOT currently published (double-buffer). Inner payload =
+	//   12B FRAME RECORD header + fixed dynamic bytes + VARIABLE GFX tail, where the tail is:
+	//     u32 nGfx ; then nGfx × { u32 base ; GFX_REGION bytes }.
+	// nGfx is ALWAYS present (0 in the steady state — a 4B tail). The client reads it after the
+	// fixed dynamic regions (it knows _dynTotal from the region table) and splats each block.
+	const size_t hdr   = 12;
+	const size_t tailHdr = 4;                                  // u32 nGfx
+	const size_t gfxBytes = freshGfx.size() * (4 + (size_t)GFX_REGION);
+	const size_t total = hdr + _dynTotal + tailHdr + gfxBytes;
 
 	int which = _dynWhich ^ 1;          // write the other buffer
 	std::vector<uint8_t>& buf = _dynBuf[which];
@@ -392,6 +475,16 @@ static void captureFrame(u32 vframe)
 		off += r.len;
 	}
 
+	// ---- VARIABLE GFX tail: u32 nGfx, then per fresh body GFX region { base, 0x20000 bytes } ----
+	u32 nGfx = (u32)freshGfx.size();
+	memcpy(&buf[off], &nGfx, 4); off += 4;
+	for (auto& g : freshGfx) {
+		memcpy(&buf[off], &g.base, 4); off += 4;               // page-aligned guest base (0x8C..)
+		// GFX is main-RAM; copy from mem_b directly (alias-safe identical to addrspace here).
+		memcpy(&buf[off], &mem_b[g.base & 0x00FFFFFFu], GFX_REGION);
+		off += GFX_REGION;
+	}
+
 	// ---- publish to the WS thread (drop-old: overwrite any undrained frame) ----
 	{
 		std::lock_guard<std::mutex> lk(_pubMutex);
@@ -401,6 +494,12 @@ static void captureFrame(u32 vframe)
 		_dynWhich = which;              // this buffer is now the "published" one
 	}
 	_pubCv.notify_one();
+
+	// Mark the GFX shipped ONLY now that this frame won the publish swap. A drop-old discard of a
+	// PREVIOUS frame is harmless: this frame re-collected the same fresh bases (still unshipped)
+	// and re-shipped them. (Marking after publish means at worst we re-ship one extra frame if the
+	// very NEXT frame drops this one before the WS thread drains it — a benign duplicate.)
+	if (nGfx) for (auto& g : freshGfx) gfxMarkShipped(g.base, g.sig);
 }
 
 // ===========================================================================
@@ -448,8 +547,10 @@ void init()
 		_prefixComp.init((size_t)28 * 1024 * 1024);
 		// Per-frame dynamic payload (Phase 5: STATE ONLY, no texture band) ≈ slot tables +
 		// char structs + tiledesc(0x1800) + idxtab(0x2000) + rectab(0x10000) + camera/globals
-		// ≈ 90-110KB raw worst case; compresses to GSTA-size. Generous headroom kept.
-		_frameComp.init((size_t)2 * 1024 * 1024);
+		// ≈ 90-110KB raw worst case; compresses to GSTA-size. PLUS the on-change GFX tail: up to
+		// ~4 bodies × 2 regions × 0x20000 = 1MB on a resend-all frame (new connect / multi-char
+		// load), ~0 in steady state. 6MB init covers the worst case with headroom.
+		_frameComp.init((size_t)6 * 1024 * 1024);
 		_compInit = true;
 	}
 
