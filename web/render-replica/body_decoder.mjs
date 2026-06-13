@@ -124,7 +124,7 @@ function decodePart(ram, gfx1, G, sel) {
     const destLen = (W * H) >> 1;                 // PAL4: 2 px/byte
     const srcStart = (pbase + 4) & RAM;
     const srcEnd = (gfx1 + endOf(G.srt, G.offs[sel])) & RAM;
-    return { bytes: decodeA(ram, srcStart, srcEnd, destLen), destLen };
+    return { bytes: decodeA(ram, srcStart, srcEnd, destLen), destLen, W, H };
 }
 
 // ----------------------------------------------------------------------------
@@ -152,7 +152,34 @@ function decodePart(ram, gfx1, G, sel) {
 const QUAD = 96;                                  // textured-sprite TA block size (paraType 5)
 const TCW_OFF = 0x0C;                             // TCW is word 3 of the 16B param header
 
-export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, quadGfx1s) {
+// ---- WIDE-PART TILE STORAGE ORDER (re_kb finding:wide_part_tile_storage_order) -------
+// CANONICAL (traced from loc_8c033d78 storage + loc_8c0344d4 walker, PROVEN on
+// _sentinel_scramble.mcrr PL34 sel124 128x128 / PL17 sel285 64x128):
+//   * Load-time decoder stores a WxH part as ONE CONTIGUOUS FULL-WxH PVR rect-twiddle blob.
+//   * The per-frame walker emits N=(W/32)*(H/32) FIXED 32x32 tiles whose TCW vaddrs step
+//     +0x200 contiguously across that blob: tile k at base+k*0x200, k = vaddr-chunk index.
+//   * The renderer (_pal4) reads each tile as an INDEPENDENT 32x32 LOCAL twiddle at its TCW.
+//   * For W>32 AND H>32 the full-WxH-twiddle chunk order (storage) and the walker per-tile
+//     SCREEN cell order DIVERGE (a tile-grid permutation). So a contiguous full-blob write
+//     puts the WRONG 32x32 chunk under each wide tile -> the near-empty Sentinel.
+// THE FIX (general, square AND rectangular grids): for W>32 && H>32, take each emitted tile's
+//   OWN intra-part cell (col,row) (render_frame_quad_colrow), carve the full-WxH blob 512B
+//   chunk at STORAGE index twTile(col,row,Tw,Th) (PVR rect-twiddle of the tile coords) and
+//   write it to that tile's OWN TCW vaddr. For <=2-col / single-row parts the storage order is
+//   identity -> keep the proven contiguous whole-blob write. VERIFIED BYTE-EXACT (0 px diff):
+//   PL34 sel124 128x128 (4x4) AND PL17 sel285 64x128 (2x4). (A pure bit-transpose of the
+//   vaddr-chunk index is correct ONLY for square grids; twTile(col,row) is correct for both.)
+// PVR rectangular twiddle over a Tw x Th tile grid (== flycast twop bit-interleave).
+function twTile(x, y, Tw, Th) {
+    const bx = Math.log2(Tw), by = Math.log2(Th), sq = Math.min(bx, by);
+    let r = 0, b = 0;
+    for (let i = 0; i < sq; i++) { r |= ((x >> i) & 1) << b; b++; r |= ((y >> i) & 1) << b; b++; }
+    if (bx > by) r |= (x >> sq) << b; else if (by > bx) r |= (y >> sq) << b;
+    return r;
+}
+const TILE_BYTES = 0x200;                         // one 32x32 PAL4 tile = 512B (1024 px / 2)
+
+export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, quadGfx1s, quadColRow) {
     if (!cache._gfx)  cache._gfx = new Map();     // gfx1 base -> {n,offs,srt}
     if (!cache._dec)  cache._dec = new Map();     // "gfx1:sel" -> {bytes,destLen} (decode memo)
     if (cache._dec.size > 4096) cache._dec.clear();  // bound the memo across many distinct poses
@@ -166,9 +193,9 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         return ((tcw & 0x1FFFFF) << 3) >>> 0;
     };
 
-    // ---- pass 1: group emitted quads into (gfx1,sel) part-runs, record each run's BASE (min) vaddr.
-    // The base vaddr is the part's contiguous VRAM origin; the run's other tiles step into it. ----
-    const runs = new Map();                       // "gfx1:sel" -> { gfx1, sel, base }
+    // ---- pass 1: group emitted quads into (gfx1,sel) part-runs. Record each run's BASE (min)
+    // vaddr AND, per tile, its vaddr + intra-part (col,row) (for the wide-part carve). ----
+    const runs = new Map();                       // "gfx1:sel" -> { gfx1, sel, base, tiles:[{addr,col,row}] }
     for (let q = 0; q < quadCount; q++) {
         const gfx1 = quadGfx1s[q] >>> 0;
         if (!(gfx1 & 0x0C000000) && !(gfx1 & 0x8C000000)) continue;  // no valid body art
@@ -177,25 +204,53 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         const addr = tcwAddrOf(q);
         if (addr < 0) continue;
         const key  = gfx1.toString(16) + ':' + sel;
-        const r = runs.get(key);
-        if (r === undefined) runs.set(key, { gfx1, sel, base: addr });
-        else if (addr < r.base) r.base = addr;    // PART BASE = minimum tile TCW vaddr of the run
+        let r = runs.get(key);
+        if (r === undefined) { r = { gfx1, sel, base: addr, tiles: [] }; runs.set(key, r); }
+        const col = quadColRow ? (quadColRow[2 * q] | 0) : 0;
+        const row = quadColRow ? (quadColRow[2 * q + 1] | 0) : 0;
+        r.tiles.push({ addr, col, row });
+        if (addr < r.base) r.base = addr;         // PART BASE = minimum tile TCW vaddr of the run
     }
 
-    // ---- pass 2: decode each distinct part ONCE and write it ONCE at its base vaddr ----
-    for (const { gfx1, sel, base } of runs.values()) {
+    // ---- pass 2: decode each distinct part ONCE; write it at the correct VRAM bytes ----
+    for (const r of runs.values()) {
+        const { gfx1, sel, base, tiles } = r;
         const key = gfx1.toString(16) + ':' + sel;
         let p = cache._dec.get(key);
         if (p === undefined) {
             const G = gfx1Offsets(ram, gfx1, cache._gfx);
-            p = decodePart(ram, gfx1, G, sel);    // {bytes,destLen} or null
+            p = decodePart(ram, gfx1, G, sel);    // {bytes,destLen,W,H} or null
             cache._dec.set(key, p);
             if (p) { decoded++; bytes += p.destLen; }
         }
         if (!p) continue;
-        if (base + p.destLen > vram.length) continue;
-        vram.set(p.bytes, base);                  // VERBATIM whole-part blob at the part base
-        written++;
+
+        const Tw = p.W >> 5, Th = p.H >> 5;       // tile-grid columns / rows (W/32, H/32)
+        if (Tw >= 2 && Th >= 2 && quadColRow) {
+            // WIDE PART (W>32 AND H>32): the full-WxH-twiddle STORAGE chunk order DIVERGES from
+            // the walker per-tile screen order. Carve each emitted tile's correct 32x32-local-
+            // twiddled chunk from the full decode and write it at that tile's OWN vaddr.
+            // re_kb finding:wide_part_tile_storage_order: the chunk holding part-tile (col,row)
+            // is the full-WxH STORAGE index twTile(col,row,Tw,Th) (PVR rect-twiddle of the tile
+            // coords). The low 10 bits of that chunk ARE a self-contained 32x32 local twiddle.
+            const lTw = Math.log2(Tw), lTh = Math.log2(Th); void lTw; void lTh;
+            for (const { addr, col, row } of tiles) {
+                if (col < 0 || col >= Tw || row < 0 || row >= Th) continue;
+                const src = twTile(col, row, Tw, Th) * TILE_BYTES;   // storage chunk of (col,row)
+                if (src + TILE_BYTES > p.bytes.length) continue;
+                if (addr + TILE_BYTES > vram.length) continue;
+                vram.set(p.bytes.subarray(src, src + TILE_BYTES), addr);
+                written++;
+            }
+        } else {
+            // <=2-column OR single-tile-row part (or no col/row available): the full-WxH chunk
+            // order == walker vaddr order (identity). Write the VERBATIM whole-part blob ONCE at
+            // the run base; the other tiles' +0x200 TCWs index into it. (Proven byte-exact path;
+            // gfx1_decode_equals_vram.)
+            if (base + p.destLen > vram.length) continue;
+            vram.set(p.bytes, base);
+            written++;
+        }
     }
     return { decoded, bytes, written, quads, parts: runs.size };
 }

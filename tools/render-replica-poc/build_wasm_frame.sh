@@ -39,19 +39,27 @@ cd "$SCRIPT_DIR"
 [ -f gen_leaf.c ]          || python gen_leaf.py
 
 mkdir -p "$OUT_DIR"
-emcc -O2 -fno-strict-aliasing \
-    gen_walker_root.c render_frame.c gen_render_object.c gen_transform_obj.c \
-    gen_submit_params.c gen_walker.c gen_leaf.c wasm_entry_frame.c \
+
+SRCS="gen_walker_root.c render_frame.c gen_render_object.c gen_transform_obj.c \
+    gen_submit_params.c gen_walker.c gen_leaf.c wasm_entry_frame.c"
+EXPORTS='["_render_frame_ta","_render_frame_body_count","_render_frame_quad_count","_render_frame_quad_sels","_render_frame_quad_gfx1s","_render_frame_quad_colrow","_malloc","_free"]'
+
+# WEB target (the live client uses web/render-replica/render_frame.{mjs,wasm}).
+emcc -O2 -fno-strict-aliasing $SRCS \
     -o "$OUT_DIR/render_frame.mjs" \
-    -s MODULARIZE=1 \
-    -s EXPORT_ES6=1 \
-    -s EXPORT_NAME=createRenderFrame \
-    -s ENVIRONMENT=web \
-    -s ALLOW_MEMORY_GROWTH=1 \
-    -s INITIAL_MEMORY=67108864 \
-    -s EXPORTED_FUNCTIONS='["_render_frame_ta","_render_frame_body_count","_render_frame_quad_count","_render_frame_quad_sels","_render_frame_quad_gfx1s","_malloc","_free"]' \
+    -s MODULARIZE=1 -s EXPORT_ES6=1 -s EXPORT_NAME=createRenderFrame \
+    -s ENVIRONMENT=web -s ALLOW_MEMORY_GROWTH=1 -s INITIAL_MEMORY=67108864 \
+    -s EXPORTED_FUNCTIONS="$EXPORTS" \
+    -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","HEAPU8","HEAPU32"]'
+
+# NODE target (the offline probes/repro import render_frame_node.{mjs,wasm}).
+emcc -O2 -fno-strict-aliasing $SRCS \
+    -o "$SCRIPT_DIR/render_frame_node.mjs" \
+    -s MODULARIZE=1 -s EXPORT_ES6=1 -s EXPORT_NAME=createRenderFrame \
+    -s ENVIRONMENT=node -s ALLOW_MEMORY_GROWTH=1 -s INITIAL_MEMORY=67108864 \
+    -s EXPORTED_FUNCTIONS="$EXPORTS" \
     -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","HEAPU8","HEAPU32"]'
 
 echo ""
 echo "[build_wasm_frame] BUILD COMPLETE:"
-ls -lh "$OUT_DIR"/render_frame.wasm "$OUT_DIR"/render_frame.mjs
+ls -lh "$OUT_DIR"/render_frame.wasm "$OUT_DIR"/render_frame.mjs "$SCRIPT_DIR"/render_frame_node.wasm

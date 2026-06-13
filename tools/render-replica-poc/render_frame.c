@@ -241,6 +241,50 @@ void render_frame_reset(void){
 int  render_frame_nscene(void){ return g_nscene; }
 const SceneQuad* render_frame_scene(void){ return g_scene; }
 
+/* PER-QUAD INTRA-PART TILE (col,row) — the WIDE-PART carve key (re_kb
+ * finding:wide_part_tile_storage_order). For a WxH body part the walker emits a
+ * (W/32)x(H/32) screen grid of 32x32 tiles; the renderer pastes each tile at its
+ * screen cell. The full-WxH-twiddle STORAGE chunk that holds part-tile (col,row) is
+ * twop(col,row,log2Tw,log2Th), and for W>32 && H>32 that storage order DIVERGES from
+ * the walker per-tile vaddr (+0x200) emission order. The client therefore needs the
+ * (col,row) each emitted tile occupies, to carve the correct 32x32 chunk.
+ *
+ * We compute (col,row) from the per-tile SCREEN ANCHOR g_scene[].Ax/Ay (the descriptor-
+ * derived corner the walker produced) by RANKING anchors within each (gfx1,sel) run:
+ * col = rank of Ax DESCENDING (engine lays columns right->left in part space), row =
+ * rank of Ay DESCENDING (bottom-up). This is the engine's OWN per-tile grid placement
+ * (the walker stepped these anchors by the descriptor dx/dy units) — it is per-OBJECT,
+ * pre-merge, and robust under facing (facing flips the whole part's anchors uniformly,
+ * preserving the within-part rank order). out_cr[2*q]=col, out_cr[2*q+1]=row. */
+/* count DISTINCT values (within +-0.5px) strictly greater than `v` among the run's
+ * anchors on one axis -> the 0-based descending rank of `v` = its (col|row). */
+static int distinct_rank_desc(u32 kg, u32 ks, int axis /*0=Ax,1=Ay*/, float v){
+    int rank = 0;
+    for(int r=0;r<g_nscene;r++){
+        if(g_scene[r].gfx1!=kg || g_scene[r].sel!=ks) continue;
+        float rv = axis ? g_scene[r].Ay : g_scene[r].Ax;
+        if(rv <= v + 0.5f) continue;            /* not strictly greater */
+        /* count rv only the first time it appears (distinct) */
+        int first = 1;
+        for(int t=0;t<r;t++){
+            if(g_scene[t].gfx1!=kg||g_scene[t].sel!=ks) continue;
+            float tv = axis ? g_scene[t].Ay : g_scene[t].Ax;
+            if(tv > v + 0.5f && fabsf(tv-rv) < 0.5f){ first = 0; break; }
+        }
+        if(first) rank++;
+    }
+    return rank;
+}
+u32 render_frame_quad_colrow_impl(int* out_cr, u32 cap){
+    u32 w = 0;
+    for(int q=0; q<g_nscene && w<cap; q++,w++){
+        u32 kg = g_scene[q].gfx1, ks = g_scene[q].sel;
+        out_cr[2*w]   = distinct_rank_desc(kg, ks, 0, g_scene[q].Ax);  /* col: Ax desc */
+        out_cr[2*w+1] = distinct_rank_desc(kg, ks, 1, g_scene[q].Ay);  /* row: Ay desc */
+    }
+    return w;
+}
+
 void render_frame(Sh4Ctx *c){
     render_frame_reset();
     render_sprites_0308c2(c);   /* the transpiled loc_8c0308c2; calls render_object_full */

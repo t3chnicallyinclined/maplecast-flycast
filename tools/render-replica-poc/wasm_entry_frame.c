@@ -115,3 +115,14 @@ EXPORT uint32_t render_frame_quad_gfx1s(uint32_t* out_gfx1, uint32_t cap){
     for(int k=0;k<n && w<cap;k++,w++) out_gfx1[w] = S[k].gfx1;
     return w;
 }
+
+/* PER-QUAD INTRA-PART TILE (col,row) — wide-part carve key (re_kb
+ * finding:wide_part_tile_storage_order). out_cr[2*q]=col, out_cr[2*q+1]=row: the tile's
+ * cell in the part's (W/32)x(H/32) grid, derived by ranking the per-tile descriptor
+ * SCREEN ANCHOR within each (gfx1,sel) run (col=Ax-desc rank, row=Ay-desc rank). The
+ * client carves full-blob chunk twop(col,row,log2(W/32),log2(H/32)) into that tile's
+ * TCW. Per-object, pre-merge, robust under facing. NOT a fragile post-merge screen read. */
+uint32_t render_frame_quad_colrow_impl(int* out_cr, uint32_t cap);
+EXPORT uint32_t render_frame_quad_colrow(int* out_cr, uint32_t cap){
+    return render_frame_quad_colrow_impl(out_cr, cap);
+}
