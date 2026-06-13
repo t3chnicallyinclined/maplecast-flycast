@@ -31,6 +31,34 @@
   .badge.live { background:#1f5d8c; color:#fff; border:1px solid #3a8fd0; }
   #drop { border:1px dashed #33425a; border-radius:6px; padding:6px 12px; color:#7a8694; }
   #drop.hot { border-color:#3a8fd0; color:#cdd6e0; background:#142033; }
+
+  /* ── live config cockpit ──────────────────────────────────────────── */
+  #cockpit { width:340px; }
+  #cockpit details { border:1px solid #222; border-radius:5px; margin-bottom:8px; background:#0e1117; }
+  #cockpit summary { cursor:pointer; padding:7px 10px; font-size:11px; letter-spacing:.04em;
+     text-transform:uppercase; color:#9fb0c0; user-select:none; }
+  #cockpit summary:hover { color:#cdd6e0; }
+  #cockpit details[open] summary { border-bottom:1px solid #1b2129; color:#7fd1ff; }
+  .knobs { padding:8px 10px; display:flex; flex-direction:column; gap:7px; }
+  .knob { display:flex; align-items:center; gap:8px; font-size:12px; }
+  .knob label { flex:0 0 130px; color:#9fb0c0; }
+  .knob input[type=range] { flex:1; min-width:60px; }
+  .knob input[type=number], .knob select { background:#0c0e12; color:#cdd6e0; border:1px solid #33425a;
+     border-radius:4px; padding:3px 5px; font:inherit; }
+  .knob .val { flex:0 0 46px; text-align:right; color:#7fd1ff; font-variant-numeric:tabular-nums; }
+  .knob.chk label { flex:1; }
+  .knob input[type=checkbox] { width:15px; height:15px; accent-color:#3a8fd0; }
+  .knobrow { display:flex; gap:6px; flex-wrap:wrap; }
+  .knobrow button { padding:4px 8px; font-size:11px; }
+  #readout { width:100%; border-collapse:collapse; font-size:11px; }
+  #readout th, #readout td { padding:2px 5px; text-align:right; border-bottom:1px solid #1b2129; }
+  #readout th { color:#7a8694; text-transform:uppercase; font-size:9px; letter-spacing:.03em; }
+  #readout td { color:#cdd6e0; font-variant-numeric:tabular-nums; }
+  #readout tr.miss td { color:#ff8a8a; }
+  #roWrap { max-height:300px; overflow:auto; }
+  .roHdr { display:flex; gap:14px; padding:4px 10px; font-size:11px; color:#9fb0c0; flex-wrap:wrap; }
+  .roHdr b { color:#7fd1ff; font-variant-numeric:tabular-nums; }
+  .reset { color:#7a8694; font-size:10px; cursor:pointer; text-decoration:underline; }
 </style>
 </head>
 <body>
@@ -65,6 +93,92 @@
     <h2>render_frame.wasm slot-walk &rarr; pvr2 (the animated body)</h2>
     <canvas id="cReplay" width="640" height="480" style="background:#ff00ff"></canvas>
   </div>
+
+  <div class="panel" id="cockpit">
+    <h2>Live Config Cockpit <span class="reset" id="cfgReset">reset all</span></h2>
+
+    <details open>
+      <summary>Geometry / Position (chase the placement bug)</summary>
+      <div class="knobs">
+        <div class="knob"><label>anchor X offset</label>
+          <input type="range" id="k_ax" min="-320" max="320" step="1" value="0">
+          <span class="val" id="v_ax">0</span></div>
+        <div class="knob"><label>anchor Y offset</label>
+          <input type="range" id="k_ay" min="-240" max="240" step="1" value="0">
+          <span class="val" id="v_ay">0</span></div>
+        <div class="knob"><label>global scale ×</label>
+          <input type="range" id="k_scale" min="0.25" max="3" step="0.05" value="1">
+          <span class="val" id="v_scale">1.00</span></div>
+        <div class="knob chk"><input type="checkbox" id="k_flipP1"><label>flip facing — P1 (slots 0,2,4)</label></div>
+        <div class="knob chk"><input type="checkbox" id="k_flipP2"><label>flip facing — P2 (slots 1,3,5)</label></div>
+        <div class="knob chk"><input type="checkbox" id="k_widepart" checked><label>wide-part carve (body_decoder)</label></div>
+        <div class="knob"><label>isolate part #</label>
+          <input type="range" id="k_isopart" min="-1" max="64" step="1" value="-1">
+          <span class="val" id="v_isopart">all</span></div>
+      </div>
+    </details>
+
+    <details>
+      <summary>Render — lists &amp; depth</summary>
+      <div class="knobs">
+        <div class="knob chk"><input type="checkbox" id="k_drawOp" checked><label>draw Opaque list</label></div>
+        <div class="knob chk"><input type="checkbox" id="k_drawPt" checked><label>draw Punch-Through list</label></div>
+        <div class="knob chk"><input type="checkbox" id="k_drawTr" checked><label>draw Translucent list</label></div>
+        <div class="knob chk"><input type="checkbox" id="k_depthTest"><label>force depth mode override</label></div>
+        <div class="knob"><label>depth func</label>
+          <select id="k_depthFunc">
+            <option value="7">always</option><option value="1">less</option><option value="2">equal</option>
+            <option value="3">less-equal</option><option value="4">greater</option>
+            <option value="6" selected>greater-equal</option><option value="0">never</option>
+          </select></div>
+        <div class="knob chk"><input type="checkbox" id="k_trDepthWrite"><label>translucent depth-write</label></div>
+        <div class="knob chk"><input type="checkbox" id="k_noSort"><label>no z-sort (submission order)</label></div>
+        <div class="knob chk"><input type="checkbox" id="k_revOrder"><label>reverse draw order</label></div>
+        <div class="knob chk"><input type="checkbox" id="k_singlePass" checked><label>single pass</label></div>
+      </div>
+    </details>
+
+    <details>
+      <summary>Render — blend &amp; cull</summary>
+      <div class="knobs">
+        <div class="knob chk"><input type="checkbox" id="k_blendOv"><label>force blend mode</label></div>
+        <div class="knob"><label>blend src</label>
+          <select id="k_blendSrc">
+            <option value="0">zero</option><option value="1">one</option>
+            <option value="4" selected>src-alpha</option><option value="5">1-src-alpha</option>
+          </select></div>
+        <div class="knob"><label>blend dst</label>
+          <select id="k_blendDst">
+            <option value="0">zero</option><option value="1">one</option>
+            <option value="4">src-alpha</option><option value="5" selected>1-src-alpha</option>
+          </select></div>
+        <div class="knob"><label>PT alpha thresh</label>
+          <input type="range" id="k_ptThresh" min="0" max="1" step="0.01" value="0.5">
+          <span class="val" id="v_ptThresh">0.50</span></div>
+        <div class="knob"><label>cull</label>
+          <select id="k_cull">
+            <option value="" selected>per-poly (ISP)</option><option value="none">none</option>
+            <option value="front">front</option><option value="back">back</option>
+          </select></div>
+        <div class="knob chk"><input type="checkbox" id="k_wire"><label>show quad bounds overlay</label></div>
+      </div>
+    </details>
+
+    <details open>
+      <summary>Per-part position readout (render_frame computed)</summary>
+      <div class="roHdr">
+        <span>frame <b id="ro_frame">–</b></span>
+        <span>bodies <b id="ro_bodies">–</b></span>
+        <span>quads <b id="ro_quads">–</b></span>
+      </div>
+      <div id="roWrap">
+      <table id="readout">
+        <thead><tr><th>#</th><th>char</th><th>sel</th><th>scrX</th><th>scrY</th><th>w</th><th>h</th></tr></thead>
+        <tbody id="ro_body"></tbody>
+      </table>
+      </div>
+    </details>
+  </div>
 </main>
 
 <div id="log"></div>
@@ -79,16 +193,57 @@
 // Reuses ta-parser/pvr2-renderer/texture-manager VERBATIM, and render_frame.wasm UNMODIFIED
 // (Phases 1/2 frozen byte-exact). MCRR spec: docs/RENDER-REPLICA-RECORDING-FORMAT.md.
 // ============================================================================
-import createRenderFrame from './render_frame.mjs?v=widepart';
+import createRenderFrame from './render_frame.mjs?v=cockpit1';
 // Phase 5 — PURE-STATE TEXTURES: client decodes each active body part's sprite from the
 // shipped-once compressed GFX (in the RAM image) + the live sprite_id, writes it to pane.vram
 // at the TCW addr render_frame carries. Replaces the per-frame "bodytex" VRAM band (removed).
-import { ensureBodyTextures } from './body_decoder.mjs?v=widepart';
+import { ensureBodyTextures } from './body_decoder.mjs?v=cockpit1';
 // Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
 // /gfx/PL{NN}_gfx{1,2}.bin (cached by char_id). Fixes the scramble + is the local-ROM cache.
 import { applyLocalGfx } from './local_gfx_overlay.mjs';
 const bodyCache = {};   // decode-on-change memo, persists across frames
+
+// ============================================================================
+// LIVE CONFIG COCKPIT — window.__cfg is read EVERY frame by the render path
+// (no reload to take effect). Geometry knobs post-process the emitted TA before
+// the parser/draw; render knobs flow through pvr2-renderer's `dbg` object; the
+// readout reads per-quad screen positions straight out of the TA. The transpiled
+// render_frame / server geometry are NOT touched here (the SH4 agent owns those).
+// ============================================================================
+const __cfg = {
+    // geometry / position
+    anchorDX: 0, anchorDY: 0, scale: 1.0,
+    flipP1: false, flipP2: false,
+    widePart: true,          // body_decoder wide-part carve on/off
+    isoPart: -1,             // -1 = all parts; >=0 = draw only that quad index
+    // render — lists & depth
+    drawOpaque: true, drawPunch: true, drawTrans: true,
+    depthOverride: false, depthFunc: 6, trDepthWrite: false,
+    noSort: false, revOrder: false, singlePass: true,
+    // render — blend & cull
+    blendOverride: false, blendSrc: 4, blendDst: 5,
+    ptThresh: 0.5, cull: '', wire: false,
+};
+window.__cfg = __cfg;
+
+// Build the pvr2-renderer `dbg` object from the live cockpit (read every frame).
+function dbgFromCfg() {
+    const c = __cfg;
+    const dbg = {
+        drawOpaque: c.drawOpaque, drawPunch: c.drawPunch, drawTrans: c.drawTrans,
+        noSort: c.noSort, singlePass: c.singlePass,
+        trDepthWrite: c.trDepthWrite,
+    };
+    if (c.depthOverride) { dbg.opDepthFunc = c.depthFunc; dbg.trDepthFunc = c.depthFunc; }
+    if (c.blendOverride) { dbg.blendOverride = true; dbg.blendSrc = c.blendSrc; dbg.blendDst = c.blendDst; }
+    if (c.cull) dbg.cullOverride = c.cull;
+    // PT alpha threshold: 0 => disable the alpha discard entirely (everything draws, holes filled);
+    // >0 keeps flycast's per-pixel alpha discard (c.a < 0.004). The shader only supports on/off, so
+    // the slider acts as a discard ON/OFF at the 0 boundary (a visual probe for missing-pixel cases).
+    if (c.ptThresh <= 0.0001) dbg.noDiscard = true;
+    return dbg;
+}
 
 const W_DIR = new URL('../webgpu/', import.meta.url);
 const { PVR2Renderer }   = await import(new URL('pvr2-renderer.mjs', W_DIR));
@@ -199,7 +354,7 @@ class Pane {
         this.T.setDirtyPages(null, true);
         this.T.updatePalette(pvr);
     }
-    render(taBuf) {
+    render(taBuf, dbg) {
         const P = new TAParser();
         // Decode textures + palette at DRAW time, exactly like index.html's working path.
         // (VRAM/PVR are static in the read-set, but the TextureManager decode/upload must run
@@ -208,7 +363,7 @@ class Pane {
         this.T.updatePalette(this.pvr);
         const parsed = P.parse(taBuf, taBuf.length);
         const sn = synthSnap(this.canvas.width, this.canvas.height);
-        this.R.renderFrame(parsed, this.T, sn, this.vram, {});
+        this.R.renderFrame(parsed, this.T, sn, this.vram, dbg || {});
         return parsed;
     }
 }
@@ -221,7 +376,7 @@ function synthSnap(w, h) {
 
 // ---------------------------------------------------------------- render_frame.wasm
 let frameMod;
-async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=widepart' : p }); } return frameMod; }
+async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=cockpit1' : p }); } return frameMod; }
 function transpiledTA(ram) {
     const M = frameMod;
     const ramPtr = M._malloc(ram.length); M.HEAPU8.set(ram, ramPtr);
@@ -241,6 +396,184 @@ function transpiledTA(ram) {
     M._free(selPtr); M._free(gfxPtr); M._free(crPtr);
     M._free(ramPtr); M._free(outPtr);
     return { ta, quads, len, quadSels, quadGfx1s, quadColRow };
+}
+
+// ---------------------------------------------------------------- cockpit geometry on the TA
+// The emitted TA is a stream of 96B textured-sprite quad blocks: [sprite param 32B]
+// [sprite vertex 64B]. Inside the vertex block the 4 screen corners are floats:
+//   A=(+36,+40), B=(+48,+52), C=(+60,+64), D=(+72,+76)  (offsets from block start).
+// Geometry cockpit knobs mutate these corners IN PLACE on the emitted TA (a copy), so we
+// never touch the transpiled render_frame. quadGfx1s[q] tells us the owning body's GFX1 base
+// → we map that to a char slot to know which player (P1/P2) a quad belongs to (facing flip).
+const QUAD_TA = 96;
+const CORNERS = [36, 48, 60, 72];   // x byte-offsets of A,B,C,D in a 96B block (y = x+4)
+
+const CHAR_SLOTS = [0x8C268340, 0x8C2688E4, 0x8C268E88, 0x8C26942C, 0x8C2699D0, 0x8C269F74];
+const RAM_LO = 0x00FFFFFF;
+const rdU8  = (a) => ram[a & RAM_LO];
+const rdU16 = (a) => ram[a & RAM_LO] | (ram[(a + 1) & RAM_LO] << 8);
+const rdU32 = (a) => (ram[a & RAM_LO] | (ram[(a + 1) & RAM_LO] << 8) | (ram[(a + 2) & RAM_LO] << 16) | (ram[(a + 3) & RAM_LO] << 24)) >>> 0;
+
+// Per-frame table of active bodies (slot, player side, char_id, sprite_id, gfx1 base).
+function readBodies() {
+    const bodies = [];
+    if (!ram) return bodies;
+    for (let s = 0; s < CHAR_SLOTS.length; s++) {
+        const base = CHAR_SLOTS[s];
+        const active = rdU8(base + 0x000);
+        const gfx1 = rdU32(base + 0x15C) >>> 0;
+        const charId = rdU8(base + 0x001);
+        const sid = rdU16(base + 0x144);
+        bodies.push({ slot: s, side: s & 1, active, charId, sid, gfx1 });
+    }
+    return bodies;
+}
+function sideOfGfx1(gfx1, bodies) {
+    for (const b of bodies) if (b.gfx1 === (gfx1 >>> 0)) return b.side;
+    return -1;
+}
+
+// Apply the geometry cockpit (anchor offset, scale about screen centre, per-player facing flip)
+// to a COPY of the emitted TA. Returns the mutated buffer (or the original if no knob is active).
+// Facing flip = mirror each quad's X corners about the quad's own centre (texU already baked in).
+function applyGeomTA(ta, quads, quadGfx1s, bodies) {
+    const c = __cfg;
+    const need = c.anchorDX || c.anchorDY || c.scale !== 1.0 || c.flipP1 || c.flipP2;
+    if (!need) return ta;
+    const out = ta.slice();                       // copy — never mutate the transpiled output
+    const dv = new DataView(out.buffer, out.byteOffset, out.byteLength);
+    const CX = 320, CY = 240;
+    for (let q = 0; q < quads; q++) {
+        const blk = q * QUAD_TA;
+        if (blk + QUAD_TA > out.byteLength) break;
+        const side = sideOfGfx1(quadGfx1s[q] >>> 0, bodies);
+        const doFlip = (side === 0 && c.flipP1) || (side === 1 && c.flipP2);
+        // quad-local centre X for the per-quad mirror
+        let cxq = 0; for (const ox of CORNERS) cxq += dv.getFloat32(blk + ox, true); cxq /= 4;
+        for (const ox of CORNERS) {
+            let x = dv.getFloat32(blk + ox, true), y = dv.getFloat32(blk + ox + 4, true);
+            if (doFlip) x = 2 * cxq - x;
+            if (c.scale !== 1.0) { x = CX + (x - CX) * c.scale; y = CY + (y - CY) * c.scale; }
+            x += c.anchorDX; y += c.anchorDY;
+            dv.setFloat32(blk + ox, x, true);
+            dv.setFloat32(blk + ox + 4, y, true);
+        }
+    }
+    return out;
+}
+
+// Per-part isolation: zero out every quad EXCEPT index __cfg.isoPart (collapse its corners so
+// the parser drops it / it draws nothing). Operates on a COPY. isoPart === -1 => no-op.
+function applyIsoPartTA(ta, quads) {
+    if (__cfg.isoPart < 0) return ta;
+    const out = ta.slice();
+    const dv = new DataView(out.buffer, out.byteOffset, out.byteLength);
+    for (let q = 0; q < quads; q++) {
+        if (q === __cfg.isoPart) continue;
+        const blk = q * QUAD_TA;
+        if (blk + QUAD_TA > out.byteLength) break;
+        // collapse all 4 corners to a single point → degenerate, draws no pixels
+        for (const ox of CORNERS) { dv.setFloat32(blk + ox, 0, true); dv.setFloat32(blk + ox + 4, 0, true); }
+    }
+    return out;
+}
+
+// Reverse the order of the 96B quad blocks (painter-order experiment). Operates on a COPY.
+function applyRevOrderTA(ta, quads) {
+    if (!__cfg.revOrder || quads < 2) return ta;
+    const out = ta.slice();
+    const tmp = new Uint8Array(QUAD_TA);
+    for (let i = 0, j = quads - 1; i < j; i++, j--) {
+        const bi = i * QUAD_TA, bj = j * QUAD_TA;
+        if (bj + QUAD_TA > out.byteLength) break;
+        tmp.set(out.subarray(bi, bi + QUAD_TA));
+        out.copyWithin(bi, bj, bj + QUAD_TA);
+        out.set(tmp, bj);
+    }
+    return out;
+}
+
+// Extract per-quad screen rect (min/max of the 4 corners) + map to owning char for the readout.
+function readQuadPositions(ta, quads, quadSels, quadGfx1s, bodies) {
+    const dv = new DataView(ta.buffer, ta.byteOffset, ta.byteLength);
+    const rows = [];
+    for (let q = 0; q < quads; q++) {
+        const blk = q * QUAD_TA;
+        if (blk + QUAD_TA > ta.byteLength) break;
+        let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+        for (const ox of CORNERS) {
+            const x = dv.getFloat32(blk + ox, true), y = dv.getFloat32(blk + ox + 4, true);
+            if (x < minx) minx = x; if (x > maxx) maxx = x;
+            if (y < miny) miny = y; if (y > maxy) maxy = y;
+        }
+        const gfx1 = quadGfx1s ? (quadGfx1s[q] >>> 0) : 0;
+        let charId = -1;
+        for (const b of bodies) if (b.gfx1 === gfx1) { charId = b.charId; break; }
+        rows.push({ q, charId, sel: quadSels ? quadSels[q] : -1,
+                    x: Math.round(minx), y: Math.round(miny),
+                    w: Math.round(maxx - minx), h: Math.round(maxy - miny) });
+    }
+    return rows;
+}
+
+// Draw quad-bounds overlay (the "wireframe") on top of the GPU canvas via a 2D overlay ctx.
+let _boundsCanvas = null, _boundsCtx = null;
+function drawBoundsOverlay(rows) {
+    const host = document.getElementById('cReplay');
+    if (!_boundsCanvas) {
+        _boundsCanvas = document.createElement('canvas');
+        _boundsCanvas.width = host.width; _boundsCanvas.height = host.height;
+        _boundsCanvas.style.cssText = host.style.cssText;
+        _boundsCanvas.style.background = 'transparent';
+        _boundsCanvas.style.position = 'absolute';
+        host.style.position = 'relative';
+        host.parentElement.style.position = 'relative';
+        host.parentElement.appendChild(_boundsCanvas);
+        // overlay it exactly over the host canvas
+        _boundsCanvas.style.left = host.offsetLeft + 'px';
+        _boundsCanvas.style.top  = host.offsetTop + 'px';
+        _boundsCtx = _boundsCanvas.getContext('2d');
+    }
+    _boundsCanvas.style.display = __cfg.wire ? 'block' : 'none';
+    if (!__cfg.wire) return;
+    const g = _boundsCtx; g.clearRect(0, 0, _boundsCanvas.width, _boundsCanvas.height);
+    g.lineWidth = 1; g.font = '9px monospace';
+    for (const r of rows) {
+        const hot = (__cfg.isoPart === r.q);
+        g.strokeStyle = hot ? '#ffd27f' : '#7fd1ff';
+        g.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
+        if (hot) { g.fillStyle = '#ffd27f'; g.fillText('#' + r.q, r.x + 2, r.y + 9); }
+    }
+}
+
+// Push the per-part readout table + header. Marks degenerate (zero-size) quads red.
+function updateReadout(frameNo, bodies, rows) {
+    const activeBodies = bodies.filter(b => b.active).length;
+    document.getElementById('ro_frame').textContent = frameNo;
+    document.getElementById('ro_bodies').textContent = activeBodies;
+    document.getElementById('ro_quads').textContent = rows.length;
+    const tb = document.getElementById('ro_body');
+    let html = '';
+    for (const r of rows) {
+        const miss = (r.w <= 0 || r.h <= 0) ? ' class="miss"' : '';
+        const cid = r.charId >= 0 ? '0x' + r.charId.toString(16).toUpperCase() : '–';
+        html += `<tr${miss}><td>${r.q}</td><td>${cid}</td><td>${r.sel}</td>`
+              + `<td>${r.x}</td><td>${r.y}</td><td>${r.w}</td><td>${r.h}</td></tr>`;
+    }
+    tb.innerHTML = html;
+}
+
+// One place both the file path and the live path call: post-process the TA per the geometry
+// cockpit, drive the readout/overlay, and return the buffer to actually draw.
+function cockpitProcess(ta, quads, quadSels, quadGfx1s, frameNo) {
+    const bodies = readBodies();
+    let out = applyGeomTA(ta, quads, quadGfx1s, bodies);
+    out = applyIsoPartTA(out, quads);
+    out = applyRevOrderTA(out, quads);
+    const rows = readQuadPositions(out, quads, quadSels, quadGfx1s, bodies);
+    updateReadout(frameNo, bodies, rows);
+    drawBoundsOverlay(rows);
+    return out;
 }
 
 // ---------------------------------------------------------------- player state
@@ -350,8 +683,12 @@ function showFrame(f) {
     window.__lastTA = ta;      // expose for headless verification (TA-level motion probe)
     // PURE-STATE TEXTURES: ensure the active body parts are decoded into pane.vram at the TCW
     // addresses this TA references (decode-per-quad by its OWN sel — tiling-safe), BEFORE the draw.
-    if (gpuOK && pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, quadColRow);
-    if (gpuOK) pane.render(ta);
+    // Cockpit: passing quadColRow=null forces body_decoder's CONTIGUOUS path (wide-part carve off).
+    const colRow = __cfg.widePart ? quadColRow : null;
+    if (gpuOK && pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, colRow);
+    // Cockpit: post-process the TA (anchor/scale/flip/iso/reverse) + drive the readout & overlay.
+    const drawTA = cockpitProcess(ta, quads, quadSels, quadGfx1s, f);
+    if (gpuOK) pane.render(drawTA, dbgFromCfg());
     validate(fr, ta, len);
     els.fcur.textContent = f; els.scrub.value = f;
     // first quad Ax (motion telltale) into the log occasionally
@@ -460,8 +797,12 @@ function liveApplyFrame(u8) {
     window.__lastTA = ta;
     // PURE-STATE TEXTURES (live): decode each body part into pane.vram @ its OWN TCW, keyed by
     // its OWN (sel,gfx1) — tiling-safe pairing (no 1:1 sel slip) — before draw.
-    if (gpuOK && pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, quadColRow);
-    if (gpuOK) pane.render(ta);
+    // Cockpit: passing quadColRow=null forces body_decoder's CONTIGUOUS path (wide-part carve off).
+    const colRow = __cfg.widePart ? quadColRow : null;
+    if (gpuOK && pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, colRow);
+    // Cockpit: post-process the TA (anchor/scale/flip/iso/reverse) + drive the readout & overlay.
+    const drawTA = cockpitProcess(ta, quads, quadSels, quadGfx1s, vframe);
+    if (gpuOK) pane.render(drawTA, dbgFromCfg());
 
     // validator (only if the live frame carries engine_ta — mock/synth sends taSize=0)
     if (engTa) validateLive(engTa, ta, len);
@@ -594,6 +935,75 @@ if (recUrl) {
     log('Mock live server: node tools/render-replica-poc/mock_replica_live_server.mjs', 'warn');
     log('Build a synthetic file:  node tools/render-replica-poc/make_synthetic_rec.mjs', 'warn');
 }
+
+// ============================================================================
+// COCKPIT WIRING — bind each control to window.__cfg. On change, if we're paused
+// on a file frame, re-render that frame so the knob takes effect instantly; live
+// mode picks it up on the next streamed frame (the path reads __cfg every frame).
+// ============================================================================
+function cockpitRerender() {
+    if (REC && !playing && cur != null) { try { showFrame(cur); } catch {} }
+}
+function bindCfg(id, key, kind, valId, fmt) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const apply = () => {
+        if (kind === 'chk') __cfg[key] = el.checked;
+        else if (kind === 'num') __cfg[key] = parseFloat(el.value);
+        else if (kind === 'int') __cfg[key] = parseInt(el.value, 10);
+        else __cfg[key] = el.value;
+        if (valId) document.getElementById(valId).textContent = fmt ? fmt(__cfg[key]) : __cfg[key];
+        cockpitRerender();
+    };
+    el.addEventListener(kind === 'chk' ? 'change' : 'input', apply);
+    apply();   // sync initial DOM → __cfg → label
+}
+// geometry / position
+bindCfg('k_ax', 'anchorDX', 'int', 'v_ax');
+bindCfg('k_ay', 'anchorDY', 'int', 'v_ay');
+bindCfg('k_scale', 'scale', 'num', 'v_scale', v => v.toFixed(2));
+bindCfg('k_flipP1', 'flipP1', 'chk');
+bindCfg('k_flipP2', 'flipP2', 'chk');
+bindCfg('k_widepart', 'widePart', 'chk');
+bindCfg('k_isopart', 'isoPart', 'int', 'v_isopart', v => v < 0 ? 'all' : v);
+// render — lists & depth
+bindCfg('k_drawOp', 'drawOpaque', 'chk');
+bindCfg('k_drawPt', 'drawPunch', 'chk');
+bindCfg('k_drawTr', 'drawTrans', 'chk');
+bindCfg('k_depthTest', 'depthOverride', 'chk');
+bindCfg('k_depthFunc', 'depthFunc', 'int');
+bindCfg('k_trDepthWrite', 'trDepthWrite', 'chk');
+bindCfg('k_noSort', 'noSort', 'chk');
+bindCfg('k_revOrder', 'revOrder', 'chk');
+bindCfg('k_singlePass', 'singlePass', 'chk');
+// render — blend & cull
+bindCfg('k_blendOv', 'blendOverride', 'chk');
+bindCfg('k_blendSrc', 'blendSrc', 'int');
+bindCfg('k_blendDst', 'blendDst', 'int');
+bindCfg('k_ptThresh', 'ptThresh', 'num', 'v_ptThresh', v => v.toFixed(2));
+bindCfg('k_cull', 'cull', 'str');
+bindCfg('k_wire', 'wire', 'chk');
+// reset-all: restore the page defaults
+document.getElementById('cfgReset').onclick = () => {
+    const d = { anchorDX:0, anchorDY:0, scale:1, flipP1:false, flipP2:false, widePart:true, isoPart:-1,
+        drawOpaque:true, drawPunch:true, drawTrans:true, depthOverride:false, depthFunc:6, trDepthWrite:false,
+        noSort:false, revOrder:false, singlePass:true, blendOverride:false, blendSrc:4, blendDst:5,
+        ptThresh:0.5, cull:'', wire:false };
+    const set = (id, v, t) => { const e = document.getElementById(id); if (!e) return; if (t === 'chk') e.checked = v; else e.value = v; };
+    set('k_ax', d.anchorDX); set('k_ay', d.anchorDY); set('k_scale', d.scale); set('k_flipP1', d.flipP1, 'chk');
+    set('k_flipP2', d.flipP2, 'chk'); set('k_widepart', d.widePart, 'chk'); set('k_isopart', d.isoPart);
+    set('k_drawOp', d.drawOpaque, 'chk'); set('k_drawPt', d.drawPunch, 'chk'); set('k_drawTr', d.drawTrans, 'chk');
+    set('k_depthTest', d.depthOverride, 'chk'); set('k_depthFunc', d.depthFunc); set('k_trDepthWrite', d.trDepthWrite, 'chk');
+    set('k_noSort', d.noSort, 'chk'); set('k_revOrder', d.revOrder, 'chk'); set('k_singlePass', d.singlePass, 'chk');
+    set('k_blendOv', d.blendOverride, 'chk'); set('k_blendSrc', d.blendSrc); set('k_blendDst', d.blendDst);
+    set('k_ptThresh', d.ptThresh); set('k_cull', d.cull); set('k_wire', d.wire, 'chk');
+    Object.assign(__cfg, d);
+    // refresh value labels
+    document.getElementById('v_ax').textContent = '0'; document.getElementById('v_ay').textContent = '0';
+    document.getElementById('v_scale').textContent = '1.00'; document.getElementById('v_isopart').textContent = 'all';
+    document.getElementById('v_ptThresh').textContent = '0.50';
+    cockpitRerender();
+};
 
 // expose for headless verification
 window.__loadMCRR = loadMCRR;
