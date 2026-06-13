@@ -23,6 +23,9 @@ namespace maplecast_oracle_hook {
 	extern uint16_t mc_sidLatch[6];
 	extern uint16_t mc_timerLatch[6];
 	extern uint8_t  mc_sidLatchValid[6];
+	// REAL per-object PVR blend captured at the bank12 submit (MAPLECAST_FRAME_ORACLE_HOOK).
+	// 0=opaque/PT, 1=alpha, 2=additive, 0xFF = no capture this frame (use computeObjectBlend).
+	uint8_t mc_oracle_nodeBlend(uint32_t node);
 }
 
 namespace maplecast_gamestate
@@ -359,8 +362,12 @@ static int readObjectsWalk(ObjectState* out, int maxObjs)
 					  uint32_t gb = gbRaw & 0x0FFFFFFF;
 					  out[n].is_effect = (gb >= 0x0CED0000 && gb < 0x0CEE0000) ? 1 : 0;
 					  out[n].effect_key = (uint16_t)(gbRaw & 0xFFFF); }   // GSTA wire ext
-					// GSTA wire ext: per-object PVR blend/list-type (computeObjectBlend).
-					out[n].blend = computeObjectBlend(out[n].is_effect, out[n].category);
+					// GSTA wire ext: per-object PVR blend/list-type. PREFER the engine's REAL
+					// TSP blend (captured at the bank12 submit when MAPLECAST_FRAME_ORACLE_HOOK is
+					// on) keyed by this node; fall back to the category heuristic if not captured.
+					{ uint8_t rb = maplecast_oracle_hook::mc_oracle_nodeBlend(node);
+					  out[n].blend = (rb != 0xFF) ? rb
+					               : computeObjectBlend(out[n].is_effect, out[n].category); }
 					// PATH A: true assembly hotspot from node+0x178 (parity w/ readAllDrawn).
 					out[n].hot_dx = 0; out[n].hot_dy = 0;
 					readHotspot(node, out[n].hot_dx, out[n].hot_dy);
@@ -440,8 +447,14 @@ static int readAllDrawn(ObjectState* out, int maxObjs)
 			// GSTA wire extension: low 16 bits of the GFX base (node+0x15c) — a stable
 			// per-effect content key (same gfxBase already read for is_effect).
 			out[n].effect_key = (uint16_t)(gfxBase & 0xFFFF);
-			// GSTA wire ext: per-object PVR blend/list-type (computeObjectBlend).
-			out[n].blend = computeObjectBlend(out[n].is_effect, out[n].category);
+			// GSTA wire ext: per-object PVR blend/list-type. PREFER the engine's REAL TSP
+			// blend (captured at the bank12 submit when MAPLECAST_FRAME_ORACLE_HOOK is on)
+			// keyed by this node; fall back to the category heuristic when not captured.
+			// THIS is the fix for the Sentinel rocket-TRAIL blob: its category 0x01 maps to
+			// "opaque" via computeObjectBlend, but its real TSP blend is additive.
+			{ uint8_t rb = maplecast_oracle_hook::mc_oracle_nodeBlend(node);
+			  out[n].blend = (rb != 0xFF) ? rb
+			               : computeObjectBlend(out[n].is_effect, out[n].category); }
 			// PATH A: true assembly hotspot from node+0x178 (0,0 = no extras => client
 			// falls back to the baked anchor).
 			out[n].hot_dx = 0; out[n].hot_dy = 0;
@@ -600,11 +613,15 @@ int readObjects(ObjectState* out, int maxObjs)
 		  uint32_t gb = gbRaw & 0x0FFFFFFF;
 		  out[n].is_effect = (gb >= 0x0CED0000 && gb < 0x0CEE0000) ? 1 : 0;
 		  out[n].effect_key = (uint16_t)(gbRaw & 0xFFFF); }   // GSTA wire ext: low 16 of GFX base
-		// GSTA wire ext: per-object PVR blend/list-type (computeObjectBlend). NOTE: this
-		// legacy path ships category=type@a+0x0E (the disasm +0x03 category is unreachable
-		// from this anchor — see above), so the category-set test is approximate here; the
-		// dominant is_effect=>additive signal is correct regardless.
-		out[n].blend = computeObjectBlend(out[n].is_effect, out[n].category);
+		// GSTA wire ext: per-object PVR blend/list-type. PREFER the engine's REAL TSP blend
+		// (captured at the bank12 submit when MAPLECAST_FRAME_ORACLE_HOOK is on); the node
+		// base for this legacy owner-anchored scan is a-0x18 (the record anchor used for the
+		// hotspot below). Fall back to the category heuristic when not captured. NOTE: the
+		// category=type@a+0x0E here is approximate (the disasm +0x03 category is unreachable
+		// from this anchor); the captured real blend is exact when present.
+		{ uint8_t rb = maplecast_oracle_hook::mc_oracle_nodeBlend(a - 0x18);
+		  out[n].blend = (rb != 0xFF) ? rb
+		               : computeObjectBlend(out[n].is_effect, out[n].category); }
 		// PATH A: legacy owner-anchored scan reads the record at a-0x18; the extras ptr
 		// is then (a-0x18)+0x178. Walk it for the hotspot (0,0 = none).
 		out[n].hot_dx = 0; out[n].hot_dy = 0;

@@ -32,6 +32,8 @@
 #include "hw/sh4/sh4_mem.h"     // addrspace::read*
 #include "hw/pvr/ta_ctx.h"      // TA_context, rend_context, PolyParam, Vertex
 #include "hw/pvr/ta.h"          // ta_parse
+#include "hw/pvr/pvr_mem.h"     // vram (RamRegion) — render-replica VRAM dump
+#include "hw/pvr/pvr_regs.h"    // pvr_regs[] — render-replica PVR-reg dump
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -486,6 +488,13 @@ static bool mc_probeEnabledStatic = []{
 	mc_probeParseConfig();
 	return true;
 }();
+
+// FRAME-ORACLE-HOOK master flag, captured on its OWN (distinct from mc_oracleHookEnabled,
+// which is the OR of every sub-hook). This is the gate for the per-node REAL-BLEND capture
+// (mc_nodeBlend below): it must run whenever the prod-armed MAPLECAST_FRAME_ORACLE_HOOK is
+// set, INDEPENDENT of MAPLECAST_CHARQ_EMIT. So the producer (readObjects) gets the engine's
+// real per-object TSP blend in production with no extra env var.
+static bool mc_frameOracleHookOn = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr);
 
 bool mc_oracleHookEnabled = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr)
                          || mc_decodeHookEnabled
@@ -1947,6 +1956,112 @@ void mc_charqEmit_endFrame()
 }
 
 // ===========================================================================
+// REAL PER-OBJECT PVR BLEND (MAPLECAST_FRAME_ORACLE_HOOK) — the producer-facing
+// node->blend lookup. Replaces the WRONG category heuristic (computeObjectBlend) in
+// readObjects/readAllDrawn with the engine's ACTUAL TSP blend, finalized at the bank12
+// submit. The bug: category gates LAYER/dispatch, NOT blend — Sentinel's rocket TRAIL
+// (owner 0x8C268340, sprite_id 0x8001->idx1, parts sel 22/23, category 0x01) maps to
+// "opaque" by category yet is genuinely ADDITIVE, so it ships as a blob not a glow.
+//
+// MECHANISM (piggybacks on the proven CHARQ-EMIT pairing, but gated on the prod-armed
+// FRAME-ORACLE-HOOK so it runs WITHOUT MAPLECAST_CHARQ_EMIT):
+//   * body-part hook  0x8C034864 (loc_8c0344d4 per-part convergence): node=r14
+//     (mov r4,r14 @prologue; at THIS mid-block PC the prologue has run, so r14 holds the
+//     node — same read CHARQ-EMIT's mc_charqEmitBodyPart uses). Set the current node +
+//     arm the 1:1 pairing flag. The block-entry hook at the routine ENTRY 0x8C0344D4 has
+//     r4=node (prologue not yet run) — we do NOT hook the entry; 0x8C034864 already gives
+//     a clean node read and is the SAME PC CHARQ-EMIT pairs with the submit.
+//   * submit hook     0x8C1248CC (bank12 PVR submit): the paired body part's PVR para
+//     record is complete. TSP = read_u32(recBase+0x14), recBase = (r14 - 0x20). Decode
+//     src=(tsp>>29)&7, dst=(tsp>>26)&7: src==1&&dst==1 => additive(2); src==1&&dst==0 =>
+//     opaque(0); else => alpha(1). Store the STRONGEST blend seen for this node THIS frame
+//     (additive > alpha > opaque) so a multi-part body whose TRAIL parts are additive
+//     reports additive. A submit with no armed pairing (HUD/stage) is skipped.
+//
+// Per-frame open-addressed node->blend map, cleared at the video-frame boundary
+// (0x8C3496B0). READ-ONLY w.r.t. guest (addrspace reads only; no writes into Sh4cntx).
+static const int MC_NB_SLOTS = 64;          // power of two; >> the ~ dozen drawn nodes/frame
+struct McNodeBlend { u32 node; u8 blend; };  // node = norm()'d (& 0x1FFFFFFF) base; blend 0/1/2
+static McNodeBlend s_nodeBlend[MC_NB_SLOTS];
+static u32         s_nbVframe   = 0xFFFFFFFFu;
+static u32         s_nbCurNode  = 0;          // current run node (set by body-part hook)
+static bool        s_nbPending  = false;      // 1:1 pairing arm (body part -> next submit)
+static unsigned long s_nbFireBody = 0, s_nbFireSub = 0;
+
+static inline u32 nbHash(u32 node) { return (node >> 4) & (MC_NB_SLOTS - 1); }
+
+// Clear the per-frame map (open addressing: node==0 means empty slot).
+static void nbClearFrame() { for (int i = 0; i < MC_NB_SLOTS; i++) { s_nodeBlend[i].node = 0; s_nodeBlend[i].blend = 0; } }
+
+// Record/strengthen the blend for `node` (already norm()'d, nonzero). additive(2) wins
+// over alpha(1) wins over opaque(0).
+static void nbStore(u32 node, u8 blend) {
+	if (node == 0) return;
+	u32 h = nbHash(node);
+	for (int i = 0; i < MC_NB_SLOTS; i++) {
+		McNodeBlend& e = s_nodeBlend[(h + i) & (MC_NB_SLOTS - 1)];
+		if (e.node == 0)    { e.node = node; e.blend = blend; return; }
+		if (e.node == node) { if (blend > e.blend) e.blend = blend; return; }
+	}
+	// table full (shouldn't happen with 64 slots) -> drop silently.
+}
+
+// Body-part convergence (0x8C034864): set current node + arm the pairing. node = r14
+// (same read CHARQ-EMIT uses at this PC; prologue's `mov r4,r14` has executed).
+static void mc_nbBodyPart(const u32* r)
+{
+	if (s_nbFireBody++ == 0)
+		fprintf(stderr, "[NODEBLEND] body-part hook first fired (pc=0x%08X) node=r14=0x%08X\n",
+		        PC_ASM_PART, r[14]);
+	u32 node = norm(r[14]);
+	if (!inRam(node)) { s_nbPending = false; return; }
+	// Video-frame boundary: clear the map for the new frame.
+	u32 vframe = addrspace::read32(0x8C3496B0);
+	if (vframe != s_nbVframe) { nbClearFrame(); s_nbVframe = vframe; s_nbCurNode = 0; s_nbPending = false; }
+	s_nbCurNode = node;        // store the area-masked base (matches readObjects' norm key)
+	s_nbPending = true;        // the very next submit is THIS part's quad
+}
+
+// bank12 submit (0x8C1248CC): read the paired part's TSP -> blend, store per node.
+static void mc_nbSubmit(const u32* r)
+{
+	if (!s_nbPending) return;          // HUD/stage submit (no preceding body part) -> skip
+	s_nbPending = false;               // consume the pairing
+	if (s_nbCurNode == 0) return;
+	u32 rec     = (norm(r[14]) | 0x0C000000u);   // DEST sprite-para record (RECORD 2)
+	u32 recBase = rec - CHARQ_REC_OFF;           // RECORD 1: global ISP/TSP/TCW/PCW para
+	if (!inRam(rec) || !inRam(recBase)) return;
+	u32 tsp = addrspace::read32(recBase + 0x14); // TSP/blend word (same source as CHARQ)
+	u32 src = (tsp >> 29) & 7, dst = (tsp >> 26) & 7;
+	u8  blend = (src == 1 && dst == 1) ? 2          // additive (src=ONE,dst=ONE)
+	          : (src == 1 && dst == 0) ? 0          // opaque (src=ONE,dst=ZERO)
+	          : 1;                                  // alpha / translucent (everything else)
+	if (s_nbFireSub++ == 0)
+		fprintf(stderr, "[NODEBLEND] submit hook first fired (pc=0x%08X) node=0x%08X tsp=0x%08X "
+		                "src=%u dst=%u -> blend=%u\n", PC_CHARQ_SUBMIT, s_nbCurNode, tsp, src, dst, blend);
+	nbStore(s_nbCurNode, blend);
+}
+
+// Producer accessor (maplecast_gamestate.cpp readObjects/readAllDrawn). Returns the real
+// per-object blend captured for `node` THIS frame: 0=opaque/PT, 1=alpha, 2=additive, or
+// 0xFF if no capture exists for that node (caller falls back to computeObjectBlend). The
+// node argument may be any P0/P1/P2 alias of the struct base; it is normalized to match
+// the area-masked key the capture stores.
+uint8_t mc_oracle_nodeBlend(u32 node)
+{
+	if (!mc_frameOracleHookOn) return 0xFF;
+	u32 key = norm(node);
+	if (key == 0) return 0xFF;
+	u32 h = nbHash(key);
+	for (int i = 0; i < MC_NB_SLOTS; i++) {
+		const McNodeBlend& e = s_nodeBlend[(h + i) & (MC_NB_SLOTS - 1)];
+		if (e.node == 0)   return 0xFF;     // empty slot in the probe chain -> not present
+		if (e.node == key) return e.blend;
+	}
+	return 0xFF;
+}
+
+// ===========================================================================
 // BODYCAP (MAPLECAST_BODYCAP) — body part DECODED pixels keyed by the RENDER selector.
 // Fires at the SAME PC as ASMTRACE (0x8C034864, loc_8c0344d4 per-part convergence).
 // See mc_bodyCapEnabled for the full selector-space reconciliation. READ-ONLY.
@@ -2192,11 +2307,17 @@ bool mc_isHookedPC(u32 pc)
 	// ASMTRACE: the per-part convergence PC inside loc_8c0344d4 (0x8C034864). Only hooked
 	// when the asm-trace flag is set. Mid-block -> the decoder force-split makes it a block
 	// start; this returns true so rec_x64 injects the GenCall there.
-	if (m == PC_ASM_PART_M) return mc_asmTraceEnabled || mc_bodyCapEnabled || mc_charqEmitEnabled;
+	// Also hooked under the prod FRAME-ORACLE-HOOK for the per-node REAL-BLEND capture
+	// (mc_nbBodyPart sets the current node here). Mid-block -> the decoder force-split
+	// makes it a block start; return true so rec_x64 injects the GenCall.
+	if (m == PC_ASM_PART_M) return mc_asmTraceEnabled || mc_bodyCapEnabled || mc_charqEmitEnabled || mc_frameOracleHookOn;
 	// CHARQ-RENDER: the per-part PVR-record completion PC inside loc_8C1244B0
 	// (0x8C1248CC). Only hooked when the charq-render flag is set. Mid-block -> the
 	// decoder force-split makes it a block start; return true so rec_x64 injects.
-	if (m == PC_CHARQ_SUBMIT_M) return mc_charqRenderEnabled || mc_charqEmitEnabled;
+	// Also hooked under the prod FRAME-ORACLE-HOOK for the per-node REAL-BLEND capture
+	// (mc_nbSubmit reads the paired part's TSP here). Mid-block -> the decoder force-split
+	// makes it a block start; return true so rec_x64 injects the GenCall.
+	if (m == PC_CHARQ_SUBMIT_M) return mc_charqRenderEnabled || mc_charqEmitEnabled || mc_frameOracleHookOn;
 	// GENERIC PROBE: any PC configured in /dev/shm/mc_oracle_probe.conf (parsed once at
 	// static init). Masked compare so the disasm 0x8C.. label matches the executed 0x0C..
 	// alias. The probe PCs may be mid-block (e.g. 0x8C1248CC) -> the decoder force-split
@@ -2462,6 +2583,7 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 		if (mc_asmTraceEnabled) mc_asmTraceHandler(r);
 		if (mc_bodyCapEnabled)  mc_bodyCapHandler(r);
 		if (mc_charqEmitEnabled) mc_charqEmitBodyPart(r);   // set current run identity
+		if (mc_frameOracleHookOn) mc_nbBodyPart(r);         // REAL-BLEND: set current node + arm pairing
 		return;
 	}
 
@@ -2471,6 +2593,7 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 	if (mpc == PC_CHARQ_SUBMIT_M) {
 		if (mc_charqRenderEnabled) mc_charqRenderHandler(r);
 		if (mc_charqEmitEnabled)   mc_charqEmitSubmit(r);   // append a screen sprite quad
+		if (mc_frameOracleHookOn)  mc_nbSubmit(r);          // REAL-BLEND: read paired part's TSP -> per-node blend
 		return;
 	}
 
@@ -3021,6 +3144,45 @@ void mc_oracle_charPassCapture(void* ctxv)
 			mc_sidLatch[i]      = (uint16_t)addrspace::read16(CHAR_BASE[i] + 0x144);
 			mc_timerLatch[i]    = (uint16_t)addrspace::read16(CHAR_BASE[i] + 0x142);
 			mc_sidLatchValid[i] = 1;
+		}
+	}
+
+	// ONE-SHOT full-RAM dump for the render-replica Option-C PoC (gated MAPLECAST_DUMP_RAM,
+	// READ-ONLY, determinism-safe). Writes the 16MB main RAM (mem_b) once, in-match, so the
+	// offline lift-to-C harness can read the load-time-built 0x8C1F9F9C tile-descriptor table
+	// + GFX1/GFX2 + char structs it cannot get from disc. Fires once then latches off.
+	{
+		static const bool s_dumpRam = getenv("MAPLECAST_DUMP_RAM") != nullptr;
+		static bool s_ramDumped = false;
+		if (s_dumpRam && !s_ramDumped && addrspace::read8(0x8C289624) != 0) {
+			const char* p = getenv("MAPLECAST_DUMP_RAM_PATH");
+			if (!p) p = "/dev/shm/mc_ram_dump.bin";
+			FILE* f = fopen(p, "wb");
+			if (f) {
+				size_t n = fwrite(&mem_b[0], 1, (size_t)RAM_SIZE, f);
+				fclose(f);
+				s_ramDumped = true;
+				fprintf(stderr, "[RAMDUMP] wrote %zu/%u bytes to %s\n", n, (unsigned)RAM_SIZE, p);
+				// Companion VRAM (8MB, the part-pixel textures TA quads sample) + PVR regs
+				// (palette/state) for the render-replica TA->pvr2-renderer harness.
+				FILE* fv = fopen("/dev/shm/mc_vram_dump.bin", "wb");
+				if (fv) { size_t nv = fwrite(&vram[0], 1, (size_t)VRAM_SIZE, fv); fclose(fv);
+					fprintf(stderr, "[VRAMDUMP] wrote %zu/%u bytes\n", nv, (unsigned)VRAM_SIZE); }
+				FILE* fp = fopen("/dev/shm/mc_pvr_regs.bin", "wb");
+				if (fp) { size_t np = fwrite(pvr_regs, 1, (size_t)pvr_RegSize, fp); fclose(fp);
+					fprintf(stderr, "[PVRREGS] wrote %zu bytes\n", np); }
+				// Companion ENGINE TA: the raw PowerVR param stream for THIS frame (ctx->tad),
+				// so the converge step diffs transpiled-TA vs engine-TA byte-exact — all four
+				// (RAM/VRAM/PVR/TA) captured at the SAME frame for a true single-frame reference.
+				if (ctxv) {
+					TA_context* tctx = (TA_context*)ctxv;
+					uint8_t* taData = tctx->tad.thd_root;
+					size_t   taSize = (size_t)(tctx->tad.thd_data - tctx->tad.thd_root);
+					FILE* ft = fopen("/dev/shm/mc_engine_ta.bin", "wb");
+					if (ft) { fwrite(taData, 1, taSize, ft); fclose(ft);
+						fprintf(stderr, "[ENGINETA] wrote %zu bytes (thd)\n", taSize); }
+				}
+			}
 		}
 	}
 

@@ -44,6 +44,7 @@
 #include "network/maplecast_audio.h"
 #include "network/maplecast_mirror.h"
 #include "network/maplecast_rollback.h"
+#include "network/maplecast_oracle_hook.h"   // generic-probe v2 no-restart live reload
 #include "network/maplecast_predictor.h"
 #include "network/replay_reader.h"
 #include "network/replay_writer.h"
@@ -1626,6 +1627,25 @@ void Emulator::start()
 							getSh4Executor()->Start();
 							continue;
 						}
+						// GENERIC PROBE v2 — no-restart live reload (SH4-THREAD apply
+						// half). vblank() Stop()'d the SH4 because the render-thread
+						// watcher flagged a config change, so runInternal() has returned
+						// and the SH4 is fully PAUSED here on the emu thread — the SAME
+						// proven-safe context the rollback deferred-rewind above uses for
+						// bm_Reset/ResetCache. Re-parse the config and, if the armed-PC set
+						// may have changed, flush the SH4 block cache so the recompiler
+						// re-runs mc_isHookedPC against the new probe set on subsequently-
+						// compiled blocks (re-injecting the block-entry GenCall at the new
+						// PCs). ResetCache() must NOT run inside a compiled block nor race
+						// the emu thread — both satisfied here. Then Start()+continue to
+						// RESUME the SH4 (a bare Stop() would otherwise fall through to the
+						// break check and terminate the emu thread). No-op when nothing
+						// changed / the probe is disabled, so prod is unaffected.
+						if (maplecast_oracle_hook::mc_probeApplyReload()) {
+							getSh4Executor()->ResetCache();
+							getSh4Executor()->Start();
+							continue;
+						}
 						// In replica mode we're not using GGPO, and
 						// ggpo::nextFrame() returns false when no GGPO
 						// session is active (_endOfFrame is never set),
@@ -1787,6 +1807,22 @@ void Emulator::vblank()
 			// creates fresh waits between Stop() and runInternal()'s return.
 			return;
 		}
+	}
+
+	// GENERIC PROBE v2 — no-restart live reload (SH4-THREAD Stop trigger).
+	// vblank() runs synchronously from SH4 dispatch on the emu thread (a dynarec
+	// frame is on the C++ stack), so we must NOT ResetCache() here. Instead — EXACTLY
+	// like the rollback deferred-rewind above — when the render-thread watcher has
+	// flagged a config change we Stop() the SH4 so Run() returns to the emu-loop
+	// boundary, where mc_probeApplyReload()+getSh4Executor()->ResetCache() run with
+	// the SH4 fully paused. rend_cancel_emu_wait() wakes any parked render/pvrQueue
+	// wait so the SH4 thread can actually exit runInternal(). The emu-loop break
+	// check is gated (see emulator.cpp start loop) so this Stop() resumes instead of
+	// terminating the thread. No-op when the probe is disabled / nothing pending.
+	if (maplecast_oracle_hook::mc_probeReloadPending()) {
+		getSh4Executor()->Stop();
+		rend_cancel_emu_wait();
+		return;
 	}
 
 	// Replay writer: deferred state capture. start() and onFrameInMatchFlag
