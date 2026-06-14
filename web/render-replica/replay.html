@@ -226,7 +226,7 @@ import createRenderFrame from './render_frame.mjs?v=final1';
 // The SpriteClient/SpriteGPU emitter is still IMPORTED but NO LONGER DRAWS the bodies — it
 // is retained only for the (disabled) emitter cross-check; the drawn bodies ARE the transpile.
 import { ensureBodyTextures } from './body_decoder.mjs?v=final1';
-import { SpriteClient } from '../webgpu/sprite-client.mjs?v=hudfix1';
+import { SpriteClient } from '../webgpu/sprite-client.mjs?v=tagbars1';
 import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=final1';
 // Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
@@ -260,7 +260,7 @@ import { EffectsClient } from './effects-client.mjs?v=final1';
 // the engine's white-tex * per-slot vertex color (loc_8c15FFB0) reconstructed as the angled
 // team-tinted parallelogram with the red_health chip trail. Every field reads the live engine
 // addresses (the production GSTA wire's own reads). Supersedes the synthetic renderHudPass().
-import { HudClient } from './hud-client.mjs?v=hudfix1';
+import { HudClient } from './hud-client.mjs?v=tagbars1';
 
 // ============================================================================
 // LIVE CONFIG COCKPIT — window.__cfg is read EVERY frame (no reload to take
@@ -1114,13 +1114,18 @@ function renderHudPass() {
     populateHudStateFromRAM();
     const ctx = ensureHudOverlay();                   // lazy overlay-canvas create (once)
     try {
-        SPRITECLIENT.drawHUD(ctx);                     // PROVEN cockpit HUD (clears + draws bars/meters/timer/combo)
+        // The replica draws the FULL tag-team 3-bar life-bar stack (all 6 shipped HP
+        // slots), matching the TA-mirror truth — not just drawHUD's single active-char
+        // bar. Suppress drawHUD's single life bar so the two do not double-draw; drawHUD
+        // still owns the clear + super meters + timer + combo. [hud:tag-bars]
+        SPRITECLIENT._suppressLifeBars = true;
+        SPRITECLIENT.drawHUD(ctx);                     // clear + meters/timer/combo (life bar suppressed)
         SPRITECLIENT.drawHudReal(ctx);                 // textured HUDQ quads if streamed (no-op otherwise)
-        // COMPOSITE the REAL decoded portraits + names + win stars ON TOP of drawHUD.
-        // drawHUD owns the clear + bars/meters; this adds JUST the corner plates the
-        // swap dropped (textured FAC portraits + roster names + stars), on the SAME ctx,
-        // positioned above the bars so nothing overlaps. [hud:plates-on-drawHUD]
-        hud.renderPlatesOnly(ctx, rdU8, CHAR_SLOTS);
+        // The 3-bar pass draws all 3 tag-team life bars per side (active point on top +
+        // 2 reserve bars stacked) in the angled MVC2 chevron shape, with each row's
+        // corner portrait/monogram + slanted roster name — from the live 6-slot HP.
+        // [hud:tag-bars-v1]
+        hud.renderTagLifeBars(ctx, rdU8, CHAR_SLOTS);
     } catch (e) { log('[hud] ' + e.message, 'warn'); }
 }
 

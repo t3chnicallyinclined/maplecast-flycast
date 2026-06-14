@@ -49,6 +49,7 @@ const P1_SLOTS = [0, 2, 4], P2_SLOTS = [1, 3, 5];
 // bright color (NOT a full-width gradient); the inner stop is the lighter highlight.
 const BAR_COLS = [['#FF40FF', '#FF9CFF'], ['#3CFF3C', '#BBFFAA'], ['#33C8FF', '#AEEBFF']];
 const CHIP_COL = '#8a1414';                     // dark recoverable red (red_health trail)
+const BAR_WARM = '#FFE000';                     // warm-yellow outer anchor of the MVC2 life-bar gradient
 
 // char_id -> display name. AUTHORITATIVE roster from re_kb finding:characters
 // (tools/re_kb/05_characters.surql, source = char_prg/buildSPL.sh manifest). The
@@ -178,7 +179,7 @@ export class HudClient {
     // anchor; HP DEPLETES toward CENTER (the inner tip empties first). lx runs 0=outer →
     // len=inner. mirror=true puts the outer end on the RIGHT (P2). The dark frame, the
     // dark-red chip (recoverable) BEHIND, and the bright team HP ON TOP, then a thin border.
-    _lifeBar(ctx, ox, oy, len, h, skew, mirror, hpFrac, chipFrac, hpCol, hiCol) {
+    _lifeBar(ctx, ox, oy, len, h, skew, mirror, hpFrac, chipFrac, hpCol, hiCol, gradOuter) {
         const dir = mirror ? -1 : 1;
         const Xt = lx => ox + dir * lx, Xb = lx => ox + dir * (lx + skew);
         const yT = oy, yB = oy + h;
@@ -188,11 +189,23 @@ export class HudClient {
         // frame + dark empty channel
         quad(0, len); ctx.fillStyle = '#1a1d24'; ctx.fill();
         quad(0, len); ctx.save(); ctx.clip();
+        // HP fill = MVC2's per-team gradient: a warm bright end at the OUTER (portrait)
+        // corner sweeping to the team color at the inner tip (matches the TA truth's
+        // yellow->orange->team-color bar). gradOuter is the warm anchor (default warm
+        // yellow); hpCol is the team-color inner stop.
+        const hpFill = () => {
+            if (gradOuter) {
+                const g = ctx.createLinearGradient(Xt(0), 0, Xt(len), 0);
+                g.addColorStop(0, gradOuter); g.addColorStop(0.55, hpCol); g.addColorStop(1, hpCol);
+                return g;
+            }
+            return hpCol;
+        };
         // chip + HP fill grow from the OUTER end (l=0) inward to len·frac
         const sub = (frac, col) => { frac = Math.max(0, Math.min(1, frac)); if (frac <= 0) return;
             quad(0, len * frac); ctx.fillStyle = col; ctx.fill(); };
         sub(chipFrac, CHIP_COL);                       // recoverable red trail BEHIND
-        sub(hpFrac, hpCol);                            // bright HP ON TOP
+        sub(hpFrac, hpFill());                          // bright HP ON TOP (gradient)
         // top-edge highlight stripe (the "white-tex modulate" sheen)
         if (hpFrac > 0 && hiCol) { ctx.globalAlpha = 0.5;
             quad(0, len * Math.max(0, Math.min(1, hpFrac))); ctx.fillStyle = hiCol;
@@ -272,6 +285,106 @@ export class HudClient {
         // (search bank0f win-record). Until that ships we draw nothing here (correct:
         // an empty in-match HUD beats fabricated stars). [hud:no-bogus-stars]
         ctx.restore();
+    }
+
+    // ── TAG-TEAM 3-BAR LIFE-BAR STACK ─────────────────────────────────────────
+    // The real MVC2 in-match HUD shows THREE stacked life bars per side — one per
+    // team character — not just the active point char. All 6 char structs ship over
+    // the wire (health +0x420 / red_health +0x424 / char_id +0x001 / active +0x000),
+    // so we draw the full tag-team stack from the 6-slot HP. Layout matches the TA
+    // truth: angled chevron bars leaning toward center, the ACTIVE point char's bar on
+    // top (longest), the two reserve bars stacked below (progressively inset), each
+    // with a small corner portrait/monogram and the roster name slanted over it.
+    //
+    // This is render-replica-only — it composites on the SAME 2D overlay ctx as
+    // drawHUD, which has its single life bar SUPPRESSED (_suppressLifeBars) so the two
+    // do not double-draw. Call AFTER drawHUD (which owns the clear + meters/timer/combo)
+    // and INSTEAD OF renderPlatesOnly (this pass draws the portraits+names itself).
+    // [hud:tag-bars-v1]
+    renderTagLifeBars(ctx, rdU8, charSlots) {
+        if (!ctx || !rdU8) return;
+        if (!rdU8(A.IN_MATCH)) return;
+        const W = ctx.canvas.width, H = ctx.canvas.height;
+        ctx.save();
+        ctx.scale(W / 640, H / 480);
+        ctx.imageSmoothingEnabled = false;
+
+        // Per side, order the 3 team slots ACTIVE-FIRST (active point on top, then the
+        // other two in team order). Each entry carries its team-color index (C1/C2/C3)
+        // so the bar gradient matches the per-slot modulate the engine uses.
+        const order = (slots) => {
+            const act = [], rest = [];
+            for (let i = 0; i < slots.length; i++) {
+                const base = charSlots[slots[i]];
+                const e = { base, colIdx: i, cid: rdU8(base + OFF_CID),
+                            active: rdU8(base + OFF_ACTIVE) };
+                (e.active ? act : rest).push(e);
+            }
+            return act.concat(rest);          // active point char first (top bar)
+        };
+        const p1 = order(P1_SLOTS), p2 = order(P2_SLOTS);
+
+        // Geometry (640x480 game space). Outer end = portrait/corner side; bars lean
+        // toward center (skew>0 shifts the bottom edge inward). The active (top) bar is
+        // full length; reserves are progressively shorter + nudged inboard so the
+        // stack reads as a chevron fan — matching the TA truth.
+        const TOP_Y = 16, ROW_H = 13, ROW_GAP = 2;            // bar height + inter-row gap
+        const PORT = 13;                                       // corner portrait square size
+        const BAR_OUT_GAP = 2;                                // gap between portrait and bar
+        const SKEW = 12;                                       // chevron lean
+        // outer x of the portrait column (P1 left, P2 mirrored right)
+        const P1_PORT_X = 6, P2_PORT_X = 634;
+        const LENS = [250, 238, 226];                         // per-row bar length (top longest)
+        const INSET = [0, 6, 12];                             // per-row inboard nudge of the outer end
+
+        const drawSide = (team, mirror, portX) => {
+            const dir = mirror ? -1 : 1;
+            for (let row = 0; row < 3; row++) {
+                const e = team[row];
+                const y = TOP_Y + row * (ROW_H + ROW_GAP);
+                const cols = BAR_COLS[e ? e.colIdx : row];
+                const hpF  = e ? Math.max(0, Math.min(1, rdU8(e.base + OFF_HP)  / HP_MAX)) : 0;
+                const redF = e ? Math.max(0, Math.min(1, rdU8(e.base + OFF_RED) / HP_MAX)) : 0;
+                // portrait square at the outer corner of this row
+                const px = mirror ? portX - PORT : portX;
+                this._cornerPort(ctx, px, y, PORT, ROW_H, e, rdU8, cols[0], cols[1] || cols[0]);
+                // bar outer end is just inboard of the portrait, nudged by INSET[row]
+                const barOut = portX + dir * (PORT + BAR_OUT_GAP + INSET[row]);
+                this._lifeBar(ctx, barOut, y, LENS[row], ROW_H, SKEW, mirror,
+                              hpF, redF, cols[0], cols[1], BAR_WARM);
+                // slanted roster name over this bar (purple-plate look = dark slab + name)
+                if (e && e.cid >= 0) {
+                    const nm = NAMES[e.cid] || ('CHAR ' + e.cid.toString(16).toUpperCase());
+                    const nameX = mirror ? barOut - LENS[row] * 0.5 : barOut + dir * LENS[row] * 0.5;
+                    this._name(ctx, nm, nameX, y + ROW_H - 1, 6, 'center', '#f0e8ff', LENS[row] * 0.8);
+                }
+            }
+        };
+        drawSide(p1, false, P1_PORT_X);
+        drawSide(p2, true,  P2_PORT_X);
+
+        ctx.restore();
+    }
+
+    // Small corner portrait square for a tag-team bar row: team-framed box with the
+    // real FAC portrait (if this.portraits[cid] loaded) or the char monogram fallback.
+    _cornerPort(ctx, x, y, w, h, e, rdU8, col, hiCol) {
+        const cid = e ? e.cid : -1;
+        ctx.fillStyle = '#0b0d12'; ctx.fillRect(x, y, w, h);
+        const pim = this.portraits && cid >= 0 ? this.portraits[cid] : null;
+        if (pim) {
+            ctx.imageSmoothingEnabled = false;
+            ctx.drawImage(pim, x + 1, y + 1, w - 2, h - 2);
+        } else if (cid >= 0) {
+            ctx.fillStyle = 'rgba(' + this._rgbA(col, 0.18) + ')'; ctx.fillRect(x + 1, y + 1, w - 2, h - 2);
+            const nm = NAMES[cid] || ('#' + cid.toString(16));
+            this._name(ctx, nm[0], x + w / 2, y + 2, h - 4, 'center', hiCol);
+        }
+        // grey-out a KO'd reserve (health 0) so the dead char reads as eliminated
+        if (e && rdU8(e.base + OFF_HP) === 0 && !rdU8(e.base + OFF_ACTIVE)) {
+            ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(x, y, w, h);
+        }
+        ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
     }
 
     // ── the frame ───────────────────────────────────────────────────────────

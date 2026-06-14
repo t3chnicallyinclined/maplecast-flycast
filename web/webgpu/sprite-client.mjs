@@ -2293,13 +2293,19 @@ export class SpriteClient {
     const redFrac = (sl) => sl ? Math.max(0, Math.min(1, sl.red_health / (sl._maxhp || 144))) : 0;
 
     // --- life bars (red chip behind, current HP in front), tinted ripped swatch ---
-    const LB = { x1: 18, x2: 330, y: 16, w: 292, h: 14 };
-    // P1 (left-anchored): red trailing layer first, then HP on top.
-    this._drawBar(ctx, LB.x1, LB.y, LB.w, LB.h, redFrac(p1), '#b01010', '#601010', false);
-    this._drawBar(ctx, LB.x1, LB.y, LB.w, LB.h, hpFrac(p1),  c1[0], c1[1], false);
-    // P2 (right-anchored mirror).
-    this._drawBar(ctx, LB.x2, LB.y, LB.w, LB.h, redFrac(p2), '#b01010', '#601010', true);
-    this._drawBar(ctx, LB.x2, LB.y, LB.w, LB.h, hpFrac(p2),  c2[0], c2[1], true);
+    // The render-replica draws its own 3-bar tag-team life-bar stack (hud-client.mjs
+    // renderTagLifeBars) from the full 6-slot HP, so it suppresses drawHUD's single
+    // active-char bar to avoid a double-draw. The cockpit leaves this unset and keeps
+    // the proven single bar. [hud:tag-bars-suppress]
+    if (!this._suppressLifeBars) {
+      const LB = { x1: 18, x2: 330, y: 16, w: 292, h: 14 };
+      // P1 (left-anchored): red trailing layer first, then HP on top.
+      this._drawBar(ctx, LB.x1, LB.y, LB.w, LB.h, redFrac(p1), '#b01010', '#601010', false);
+      this._drawBar(ctx, LB.x1, LB.y, LB.w, LB.h, hpFrac(p1),  c1[0], c1[1], false);
+      // P2 (right-anchored mirror).
+      this._drawBar(ctx, LB.x2, LB.y, LB.w, LB.h, redFrac(p2), '#b01010', '#601010', true);
+      this._drawBar(ctx, LB.x2, LB.y, LB.w, LB.h, hpFrac(p2),  c2[0], c2[1], true);
+    }
 
     // --- super meters (width = fill/144), team-tinted ripped swatch ---
     this._drawBar(ctx, 18,  456, 250, 9, (hud.p1fill || 0) / METER_MAX, c1[0], c1[1], false);
