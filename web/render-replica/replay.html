@@ -538,8 +538,10 @@ function applyHudQuadTail(u8, p) {
 // Synthesize a TA buffer from the engine HUD quads and draw it through pvr2 (composited OVER the
 // bodies). Each HudQuad -> one TRANSLUCENT polygon: a 32-byte PolyParam (paramType=4) carrying the
 // engine's own pcw/isp/tsp/tcw, then 4 textured-colType0 vertices (32 B each) in TA strip order so
-// the two triangles cover the quad's 4 corners. Strip(v0,v1,v2,v3) => tris (0,1,2)+(1,2,3); the
-// engine corner order is A,B,C,D (CCW), so we emit A,B,D,C to tile it. UNTEXTURED quads (pcw bit3==0)
+// the two triangles cover the quad's 4 corners. A 4-vertex strip draws tris (v0,v1,v2)+(v1,v2,v3);
+// assuming the engine emits the corners in a perimeter walk (0,1,2,3), strip order 0,1,3,2 tiles the
+// quad. The order is a live knob (window._hudQuadOrder) for calibration vs the emitted corner order.
+// UNTEXTURED quads (pcw bit3==0)
 // set colType0 with no texture flag -> the per-corner vertex color col[i] modulates a solid fill
 // (the bank15 team tint + dark-red chip color, REAL now). TEXTURED quads (pcw bit3==1) sample VRAM
 // via the engine tcw/tsp (FONT.BIN digits, same twiddled decode as body parts) modulated by col[i].
