@@ -1801,13 +1801,26 @@ export class SpriteClient {
             if (absDx > _leadAbsDx) { _leadAbsDx = absDx; _leadScreenX = tlx + w / 2; }
             if (posReflect) _anyReflected = true;
           }
-          const z  = (owner.zBase || 0) * 100 + (r.z || 0);
+          // ENGINE DEPTH (2026-06-14): the AUTHORITATIVE per-object z is the engine's PVR
+          // depth = 1/W, W = node+0xE8 (the persp-divide reciprocal transform_object_122560
+          // deposits; render_frame z-fix commit d7a5d88c1). LARGER 1/W = NEARER. SG.render
+          // is a PAINTER (draws the draw list in submission order, no GPU z-buffer for
+          // bodies — sprite-gpu byChar groups + submission order), so the final out.sort IS
+          // the depth model: nearer must paint LATER. owner.engZ = 1/W (set by the caller
+          // from node+0xE8); we sort ASCENDING by it (far/smaller-1/W first = behind), which
+          // lays the cape (separate object, owner cid, its OWN node+0xE8) behind the body in
+          // the SAME cid group — replacing the type-based zBase guess. Falls back to the old
+          // zBase*100 ordering only when no engine z was read (owner.engZ undefined).
+          const z  = (owner.engZ != null)
+                   ? (owner.engZ * 1e6 + (r.z || 0))               // engine 1/W (scaled) + intra-asm tiebreak
+                   : ((owner.zBase || 0) * 100 + (r.z || 0));       // legacy type-based fallback
           // SHADER V-FLIP: the atlas stores parts bottom-up, so correct the texture V
           // for EVERY part (emitFlipY, default ON) XOR the per-record geometry Y-mirror
           // (flipY, the 0x8000 bit). The geometry reflection above (line ~1561) already
           // moved the quad for r.flipy; this only controls which way the texture samples.
           const flipYTex = flipY !== emitFlipY;   // V-only correction XOR per-record Y-mirror
           const item = { charId: owner.fx ? -1 : owner.cid, slot: owner.slot, z,
+            engZ: (owner.engZ != null ? owner.engZ : null),
             sx: part.x, sy: part.y, sw: part.w, sh: part.h,
             dx: tlx * scaleX, dy: tly * scaleY, dw: w * scaleX, dh: h * scaleY,
             flip, flipY: flipYTex, palRow: 0 };
@@ -1894,9 +1907,12 @@ export class SpriteClient {
         const dy = (owner.eyy + gdy + (pdy * offMul - part.h * ay) * sY) * scaleY;
         const dw = part.w * sX * sizeMul * scaleX;
         const dh = part.h * sY * sizeMul * scaleY;
-        const z  = (owner.zBase || 0) * 100 + (r.z || 0);
+        const z  = (owner.engZ != null)
+                 ? (owner.engZ * 1e6 + (r.z || 0))            // engine 1/W (node+0xE8) depth
+                 : ((owner.zBase || 0) * 100 + (r.z || 0));    // legacy type-based fallback
         const palRow = palRowOf(r.pal || 0, owner.pal12d || 0, owner.pal12e || 0);
         const item = { charId: owner.fx ? -1 : owner.cid, slot: owner.slot, z,
+          engZ: (owner.engZ != null ? owner.engZ : null),
           sx: part.x, sy: part.y, sw: part.w, sh: part.h,
           dx, dy, dw, dh, flip, flipY, palRow };
         if (owner.blend != null) item.blend = owner.blend;
@@ -1978,6 +1994,7 @@ export class SpriteClient {
       if (this.predict !== false) { const dt = Math.min(now - sl.t, 33); if (dt > 0) { exx += sl.vx*dt; eyy += sl.vy*dt; } }
       const before = out.length;
       emitAssembly({ cid: sl.char_id, exx, eyy, facing: sl.facing, slot: s, zBase: 0,
+                     engZ: (sl.engZ != null ? sl.engZ : undefined),   // engine 1/W depth (node+0xE8)
                      sclX: sl.scaleX, sclY: sl.scaleY, pal12d: sl.pal12d, pal12e: sl.pal12e },
                    sl.sprite_id);
       if (out.length > before) {
@@ -2019,6 +2036,7 @@ export class SpriteClient {
       // Effect nodes (is_effect / GFX base in Effect Poly 0x0CED0000) -> effects atlas.
       const isFx = !!o.isEffect;
       emitAssembly({ cid: o.cid, exx: px, eyy: py, facing: osl.facing, slot: 0, zBase,
+                     engZ: (o.engZ != null ? o.engZ : undefined),   // satellite's OWN engine 1/W (node+0xE8)
                      sclX: osl.scaleX, sclY: osl.scaleY, pal12d: osl.pal12d, pal12e: osl.pal12e,
                      blend: o.blend, fx: isFx }, o.sid);
     }
@@ -2039,6 +2057,22 @@ export class SpriteClient {
                    : (window._emitZByLayer !== undefined ? !!window._emitZByLayer : true);
     const zByDepth = (typeof window === 'undefined') ? true
                    : (window._emitZByDepth !== undefined ? !!window._emitZByDepth : true);
+    // ENGINE-Z GROUP KEY (2026-06-14, AUTHORITATIVE). Whenever the caller supplied the real
+    // per-object engine depth (item.engZ = 1/W from node+0xE8), the BETWEEN-CHARACTER order
+    // is the engine's own depth, not the draw_layer/screen_y heuristic. Per-cid key = the MIN
+    // engZ over that cid's emitted parts (the farthest sub-object of the cid — e.g. a cape
+    // sitting behind its owner pulls the group's "behind" edge back), so ASCENDING engZ
+    // (smaller 1/W = farther) paints the group first = behind. This is the same 1/W the
+    // render_frame z-fix (d7a5d88c1) proved matches the engine probe (0.00924 band). Default
+    // ON when ANY engZ is present; window._emitZByEngine=false reverts to the layer/depth path.
+    const useEngZ = (typeof window === 'undefined') ? true
+                  : (window._emitZByEngine !== undefined ? !!window._emitZByEngine : true);
+    const ezmap = new Map(); let anyEngZ = false;
+    for (const it of out) {
+      if (it.engZ == null || it.charId < 0) continue;   // skip fx (-1) and engZ-less items
+      anyEngZ = true;
+      if (!ezmap.has(it.charId) || it.engZ < ezmap.get(it.charId)) ezmap.set(it.charId, it.engZ);
+    }
     // Per-cid draw_layer from the active body slots; track whether ANY real layer was seen.
     const lmap = new Map(); let anyLayer = false;
     for (let s = 0; s < 6; s++) { const sl = this.slot[s];
@@ -2048,7 +2082,11 @@ export class SpriteClient {
         if (!lmap.has(sl.char_id) || sl.draw_layer < lmap.get(sl.char_id)) lmap.set(sl.char_id, sl.draw_layer);
       } }
     let groupKey;
-    if (useLayer && anyLayer) {
+    if (useEngZ && anyEngZ) {
+      // AUTHORITATIVE: ascending engine z (1/W). cids with no engZ (none read) -> -Infinity so
+      // they sort to the FRONT-of-list (drawn first = behind) rather than NaN-poisoning the sort.
+      groupKey = (cid) => ezmap.has(cid) ? ezmap.get(cid) : -Infinity;
+    } else if (useLayer && anyLayer) {
       // ASCENDING draw_layer: lower layer sorts FIRST = behind. cids with no layer (0xFF /
       // pure-effect cids) sort to the BACK of the group order (key = -1 < any real layer).
       groupKey = (cid) => lmap.has(cid) ? lmap.get(cid) : -1;

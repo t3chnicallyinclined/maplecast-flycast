@@ -215,7 +215,7 @@
 // Reuses ta-parser/pvr2-renderer/texture-manager VERBATIM, and render_frame.wasm UNMODIFIED
 // (Phases 1/2 frozen byte-exact). MCRR spec: docs/RENDER-REPLICA-RECORDING-FORMAT.md.
 // ============================================================================
-import createRenderFrame from './render_frame.mjs?v=depthz1';
+import createRenderFrame from './render_frame.mjs?v=emitterz1';
 // BODIES — THE TRANSPILE DRAWS (2026-06-14, restored): the character bodies are DRAWN BY
 // render_frame.wasm (the byte-exact transpiled engine render, geometry 0.003px vs ASMTRACE,
 // re_kb 10) -> pvr2-renderer.mjs (flycast's own rasterizer). The per-frame texture decode is
@@ -225,14 +225,14 @@ import createRenderFrame from './render_frame.mjs?v=depthz1';
 // ensureBodyTextures (decode parts into pane.vram) -> pane.render(drawTA, dbgFromCfg()).
 // The SpriteClient/SpriteGPU emitter is still IMPORTED but NO LONGER DRAWS the bodies — it
 // is retained only for the (disabled) emitter cross-check; the drawn bodies ARE the transpile.
-import { ensureBodyTextures } from './body_decoder.mjs?v=depthz1';
-import { SpriteClient } from '../webgpu/sprite-client.mjs?v=depthz1';
-import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=depthz1';
+import { ensureBodyTextures } from './body_decoder.mjs?v=emitterz1';
+import { SpriteClient } from '../webgpu/sprite-client.mjs?v=emitterz1';
+import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=emitterz1';
 // Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
 // /gfx/PL{NN}_gfx{1,2}.bin (cached by char_id). Fixes the scramble + the tag-in GFX gap (covers
 // ALL 6 char structs incl P1C2/P2C2/P1C3/P2C3 tag-ins, not just connect-active bodies).
-import { applyLocalGfx } from './local_gfx_overlay.mjs?v=depthz1';
+import { applyLocalGfx } from './local_gfx_overlay.mjs?v=emitterz1';
 const bodyCache = {};   // decode-on-change memo, persists across frames
 
 // Phase 3 — STAGE (background): decode-from-disc cached locally (web/test-atlas/stages/
@@ -242,7 +242,7 @@ const bodyCache = {};   // decode-on-change memo, persists across frames
 // (M1@0x8C2D6B18 · M2@0x8C2D6AD8, shipped in the "cam_mat" read-set region) using the SAME
 // transform_object_122560 math the bodies use — so the stage scrolls/zooms in lockstep with
 // the fighters, NO guessed camera. Rendered as an OP pass BEHIND the bodies.
-import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=depthz1';
+import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=emitterz1';
 
 // EFFECTS (hitsparks / electric / energy): FAITHFUL — pure-effect pool nodes (cat 1..4, GFX2
 // node+0x160 in the Effect-Poly bank 0x0CED0000) render through the SAME transpiled walker as
@@ -252,7 +252,7 @@ import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=depthz1
 // additive quad) was built on a MISLABEL: loc_8c1294c8 is a 20-byte memcpy (the anim-cell
 // loader), NOT an effect cell processor. EffectsClient is now a no-op overlay that only
 // enumerates live effect nodes for diagnostics — effects render in the WebGPU body pass.
-import { EffectsClient } from './effects-client.mjs?v=depthz1';
+import { EffectsClient } from './effects-client.mjs?v=emitterz1';
 
 // HUD (life bars / super meter / timer / combo / portraits-name / win stars): REAL MVC2 art.
 // The timer + combo + level digits are the game's OWN boxed-digit sprites (FONT.BIN rec1,
@@ -260,7 +260,7 @@ import { EffectsClient } from './effects-client.mjs?v=depthz1';
 // the engine's white-tex * per-slot vertex color (loc_8c15FFB0) reconstructed as the angled
 // team-tinted parallelogram with the red_health chip trail. Every field reads the live engine
 // addresses (the production GSTA wire's own reads). Supersedes the synthetic renderHudPass().
-import { HudClient } from './hud-client.mjs?v=depthz1';
+import { HudClient } from './hud-client.mjs?v=emitterz1';
 
 // ============================================================================
 // LIVE CONFIG COCKPIT — window.__cfg is read EVERY frame (no reload to take
@@ -435,10 +435,12 @@ function parseMCRR(ab) {
     const dv  = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
     let p = pre.frameStart;
     const u32 = () => { const v = dv.getUint32(p, true); p += 4; return v >>> 0; };
+    const dynTotal = pre.dynamicRegs.reduce((s, r) => s + r.len, 0);
     const frames = [];
+    let strictOK = true;
     for (let f = 0; f < pre.nFrames; f++) {
         const fmagic = u32();
-        if (fmagic !== 0x784D5246) throw new Error(`frame ${f}: bad "FRMx" magic`);
+        if (fmagic !== 0x784D5246) { strictOK = false; break; }   // version-mismatched GFX tail -> fall back
         const vframe = u32();
         const taSize = u32();
         const dynOff = p;                              // dynamic region bytes start here
@@ -455,6 +457,26 @@ function parseMCRR(ab) {
         }
         const taOff = p; p += taSize;                   // engine_ta
         frames.push({ vframe, taSize, dynOff, gfxOff, taOff });
+    }
+    // FRMx-SCAN FALLBACK (2026-06-14): an OLDER recorder (e.g. the _uvval.mcrr validation
+    // capture) wrote a GFX tail whose per-entry layout differs from the strict len-carrying
+    // parse above, so the strict per-frame stride lands off a FRMx boundary. When that
+    // happens, SCAN for the FRMx magic using the fixed {12 + dynTotal} body stride (the same
+    // tolerant walk tools/render-replica-poc/_uv_tcw_diff.mjs uses), so the validated capture
+    // still loads on-screen. dynOff = the dynamic-region start; gfx/ta tails are skipped (this
+    // file path only needs the dynamic STATE per frame — render_frame/emitter read from RAM).
+    if (!strictOK) {
+        frames.length = 0;
+        for (let q = pre.frameStart; q + 12 <= buf.length;) {
+            if (dv.getUint32(q, true) !== 0x784D5246) { q++; continue; }
+            const vframe = dv.getUint32(q + 4, true);
+            const taSize = dv.getUint32(q + 8, true);
+            const dynOff = q + 12;
+            frames.push({ vframe, taSize, dynOff, gfxOff: dynOff + dynTotal, taOff: -1, scan: true });
+            q = dynOff + dynTotal;                      // skip the dynamic body; re-scan for the next FRMx
+            if (frames.length >= pre.nFrames) break;
+        }
+        if (!frames.length) throw new Error('no FRMx frames found (scan fallback)');
     }
     return { ...pre, frames };
 }
@@ -645,7 +667,7 @@ function synthSnap(w, h) {
 
 // ---------------------------------------------------------------- render_frame.wasm
 let frameMod;
-async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=depthz1' : p }); } return frameMod; }
+async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=emitterz1' : p }); } return frameMod; }
 function transpiledTA(ram) {
     const M = frameMod;
     const ramPtr = M._malloc(ram.length); M.HEAPU8.set(ram, ramPtr);
@@ -1405,6 +1427,15 @@ window.__rdU16 = (a) => rdU16(a);
 // NO new geometry/decode glue — only RAM->slot field copy (the wire the cockpit consumes).
 const SPRITECLIENT = new SpriteClient(); window._spriteclient = SPRITECLIENT;
 const SG = new SpriteGPU();              window._spritegpu = SG;
+// BODY DRAW MODE (2026-06-14, the EMITTER pivot per the user's chosen path): the bodies are
+// drawn by the GSTA-scale EMITTER (renderBodiesPass -> SpriteClient.buildEmitterDrawList ->
+// SpriteGPU.render on the transparent overlay), NOT render_frame's pvr2 TA. render_frame's TA
+// is still computed every frame as the byte-exact VALIDATION reference (corners/UV/TCW/sel/z,
+// commit d7a5d88c1) but no longer DRAWS. The emitter reads the live char structs + objpool +
+// node+0xE8 (engine 1/W depth) from the RAM image, so it needs NO rectab/idxtab/descriptor
+// tables — Phase B can drop those from the server wire. window.__bodyMode='render_frame' (or
+// ?bodymode=render_frame) restores the old render_frame draw for A/B against the reference.
+window.__bodyMode = (new URLSearchParams(location.search).get('bodymode')) || 'emitter';
 SPRITECLIENT.assemblyMode = true;        // EMITTER (parts) path — the cockpit's default
 window._emitterPort = true;              // faithful loc_8c033e90 emitter port (cockpit default)
 SPRITECLIENT.predict = false;            // RAM is authoritative every frame — no extrapolation
@@ -1454,6 +1485,13 @@ function populateBodiesFromRAM() {
     sl.pos_x     = rdF32(base + 0x034);
     sl.screen_x  = rdF32(base + 0x0E0);                // node+0xE0 foot anchor (own-origin)
     sl.screen_y  = rdF32(base + 0x0E4);
+    // ENGINE PVR DEPTH (2026-06-14): node+0xE8 = homogeneous W (persp-divide reciprocal
+    // transform_object_122560 deposits). The engine submits z = 1/W into every body-tile
+    // vertex (probe 0x0C1248CC, ~0.00924 band; render_frame z-fix d7a5d88c1). LARGER 1/W =
+    // NEARER. We pass 1/W as sl.engZ so the emitter's painter-order draw-list sort (sprite-
+    // client buildEmitterDrawList) layers bodies/capes/projectiles by the ENGINE's own depth
+    // — fixing cape-through-body without a type-based zBase guess.
+    { const w = rdF32(base + 0x0E8); sl.engZ = (w > 1e-6 && w === w) ? (1 / w) : null; }
     const rawSid = rdU16(base + 0x144);
     sl.sprite_id = rawSid & 0x7fff;                    // engine indexes GFX2[sid & 0x7FFF]
     sl.sid_xform = (rawSid & 0x8000) ? 1 : 0;
@@ -1511,9 +1549,14 @@ function populateObjectsFromRAM() {
       const cid = slot >= 0 ? rdU8(CHAR_SLOTS[slot] + 0x001) : 0;
       const gfxBase = rdU32(node + 0x15C) >>> 0, gfxLow = gfxBase & 0x0FFFFFFF;
       const isEffect = (gfxLow >= 0x0CED0000 && gfxLow < 0x0CEE0000) ? 1 : 0;
+      // ENGINE PVR DEPTH for this satellite (its OWN node+0xE8 = W; engZ = 1/W). The cape's
+      // own W differs from the body's, so 1/W places it correctly behind/in-front per the
+      // engine — replacing the type-based zBase guess in the emitter (2026-06-14).
+      const ow = rdF32(node + 0xE8);
+      const oEngZ = (ow > 1e-6 && ow === ow) ? (1 / ow) : null;
       objs.push({ cid, sid: sid & 0x7fff, type: layer,
                   xflip: rdU16(node + 0x130) ? 1 : 0,
-                  x: Math.round(sx), y: Math.round(sy),
+                  x: Math.round(sx), y: Math.round(sy), engZ: oEngZ,
                   isEffect, hotDx: 0, hotDy: 0, hasHot: false, effect_key: gfxBase & 0xFFFF,
                   listType: null, blend: null });
       // kick the satellite's emitter atlas (owner char_id; effects route to FX in emitter)
@@ -1704,19 +1747,25 @@ function showFrame(f) {
     // vs ASMTRACE). It also feeds the per-frame GROUND-TRUTH validator (params 16/16) + readout.
     const { ta, quads, len, quadSels, quadGfx1s, quadColRow, quadMirror } = transpiledTA(ram);
     window.__lastTA = ta;      // expose for headless verification (TA-level motion probe)
-    // PURE-STATE TEXTURES (PER-TILE RE-TILE, 2026-06-14): decode+detwiddle each body part, then
-    // for each emitted tile slice its (col,row) 32×32, re-twiddle, and write at THAT tile's own
-    // TCW. quadColRow = the storage (col,row) grid index (REQUIRED). Supersedes the verbatim-blob
-    // write (which read garbage for non-32-square parts = the live-Sentinel scatter).
-    if (gpuOK && pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, quadColRow, null);
     // Cockpit: post-process the TA (anchor/scale/flip/iso/reverse) + drive the readout & overlay;
-    // returns the buffer to actually DRAW (drawTA carries every geometry/decode knob).
+    // returns the buffer render_frame WOULD draw (kept for the readout/overlay + the A/B fallback).
     const drawTA = cockpitProcess(ta, quads, quadSels, quadGfx1s, f, quadColRow, quadMirror);
-    window.__lastDrawTA = drawTA;                // headless: the exact post-cockpit buffer drawn
+    window.__lastDrawTA = drawTA;                // headless: the exact post-cockpit buffer
+    // EMITTER (default): always POPULATE + BUILD the reconstruction from RAM (engZ depth-sort),
+    // headlessly verifiable even without a GPU; renderBodiesPass self-gates the actual GPU draw.
+    if (window.__bodyMode !== 'render_frame') renderBodiesPass();
     if (gpuOK) {
         const bg = renderStagePass();            // STAGE pass first (clears); bodies composite over
-        const dbg = dbgFromCfg(); if (bg) dbg._bgPreRendered = true;
-        pane.render(drawTA, dbg);                // render_frame TA -> pvr2 == THE DRAWN BODIES
+        if (window.__bodyMode === 'render_frame') {
+            // A/B FALLBACK: the old render_frame pvr2 draw (decode textures into pane.vram first).
+            if (pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, quadColRow, null);
+            const dbg = dbgFromCfg(); if (bg) dbg._bgPreRendered = true;
+            pane.render(drawTA, dbg);
+        } else {
+            // EMITTER: re-run the draw AFTER the stage pass so the body overlay composites on top
+            // of the freshly-cleared stage (the populate/build above already ran; this draws).
+            renderBodiesPass();                  // SpriteClient.buildEmitterDrawList -> SpriteGPU.render
+        }
     }
     renderEffectsPass();                         // EFFECTS pass (additive, above bodies, below HUD)
     renderHudPass();                             // HUD foreground pass (2D overlay, on top of bodies+stage)
@@ -1836,18 +1885,23 @@ function liveApplyFrame(u8) {
     // feeds the per-frame validator + cockpit readout.
     const { ta, quads, len, quadSels, quadGfx1s, quadColRow, quadMirror } = transpiledTA(ram);
     window.__lastTA = ta;
-    // PURE-STATE TEXTURES (PER-TILE RE-TILE, 2026-06-14): decode+detwiddle each part, slice each
-    // emitted tile's (col,row) 32×32, re-twiddle, write at that tile's own TCW (quadColRow = the
-    // storage grid index). Supersedes the verbatim-blob write that scattered non-32-square parts.
-    if (gpuOK && pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, quadColRow, null);
-    // Cockpit: post-process the TA (anchor/scale/flip/iso/reverse) + drive readout/overlay; the
-    // returned drawTA carries every geometry/decode knob and is what we draw.
+    // Cockpit: post-process the TA (kept for the readout/overlay + the render_frame A/B fallback).
     const drawTA = cockpitProcess(ta, quads, quadSels, quadGfx1s, vframe, quadColRow, quadMirror);
-    window.__lastDrawTA = drawTA;                // headless: the exact post-cockpit buffer drawn
+    window.__lastDrawTA = drawTA;                // headless: the exact post-cockpit buffer
+    // EMITTER (default): always POPULATE + BUILD the reconstruction from RAM (engZ depth-sort);
+    // renderBodiesPass self-gates the GPU draw, so this is headlessly verifiable without a device.
+    if (window.__bodyMode !== 'render_frame') renderBodiesPass();
     if (gpuOK) {
         const bg = renderStagePass();            // STAGE pass first (clears); bodies composite over
-        const dbg = dbgFromCfg(); if (bg) dbg._bgPreRendered = true;
-        pane.render(drawTA, dbg);                // render_frame TA -> pvr2 == THE DRAWN BODIES
+        if (window.__bodyMode === 'render_frame') {
+            // A/B FALLBACK: the old render_frame pvr2 draw (decode textures into pane.vram first).
+            if (pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, quadColRow, null);
+            const dbg = dbgFromCfg(); if (bg) dbg._bgPreRendered = true;
+            pane.render(drawTA, dbg);
+        } else {
+            // EMITTER: re-draw AFTER the stage clear so the body overlay composites on top.
+            renderBodiesPass();                  // SpriteClient.buildEmitterDrawList -> SpriteGPU.render
+        }
     }
     renderEffectsPass();                         // EFFECTS pass (additive, above bodies, below HUD)
     renderHudPass();                             // HUD foreground pass (2D overlay, on top of bodies+stage)
@@ -2073,6 +2127,8 @@ window.__connectLive = connectLive;
 window.__stopLive = stopLive;
 window.__liveState = () => ({ seeded: liveSeeded, link: els.linkState.textContent, lastFrame: els.liveframe.textContent });
 window.__state = () => ({ cur, nFrames: REC?.nFrames, playing });
+// Map an ENGINE vframe to its file-frame INDEX (the differ drives a specific captured frame).
+window.__frameIndexForVframe = (vf) => { if (!REC) return -1; for (let i = 0; i < REC.nFrames; i++) if (REC.frames[i].vframe === vf) return i; return -1; };
 window.__pane = pane;   // headless diag: offscreen-readback probe of the live render path
 </script>
 </body>
