@@ -215,7 +215,7 @@
 // Reuses ta-parser/pvr2-renderer/texture-manager VERBATIM, and render_frame.wasm UNMODIFIED
 // (Phases 1/2 frozen byte-exact). MCRR spec: docs/RENDER-REPLICA-RECORDING-FORMAT.md.
 // ============================================================================
-import createRenderFrame from './render_frame.mjs?v=rf2';
+import createRenderFrame from './render_frame.mjs?v=rf3';
 // BODIES — THE TRANSPILE DRAWS (2026-06-14, restored): the character bodies are DRAWN BY
 // render_frame.wasm (the byte-exact transpiled engine render, geometry 0.003px vs ASMTRACE,
 // re_kb 10) -> pvr2-renderer.mjs (flycast's own rasterizer). The per-frame texture decode is
@@ -225,14 +225,14 @@ import createRenderFrame from './render_frame.mjs?v=rf2';
 // ensureBodyTextures (decode parts into pane.vram) -> pane.render(drawTA, dbgFromCfg()).
 // The SpriteClient/SpriteGPU emitter is still IMPORTED but NO LONGER DRAWS the bodies — it
 // is retained only for the (disabled) emitter cross-check; the drawn bodies ARE the transpile.
-import { ensureBodyTextures } from './body_decoder.mjs?v=rf2';
+import { ensureBodyTextures } from './body_decoder.mjs?v=rf3';
 import { SpriteClient } from '../webgpu/sprite-client.mjs?v=rf3';
 import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=rf3';
 // Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
 // /gfx/PL{NN}_gfx{1,2}.bin (cached by char_id). Fixes the scramble + the tag-in GFX gap (covers
 // ALL 6 char structs incl P1C2/P2C2/P1C3/P2C3 tag-ins, not just connect-active bodies).
-import { applyLocalGfx } from './local_gfx_overlay.mjs?v=rf2';
+import { applyLocalGfx } from './local_gfx_overlay.mjs?v=rf3';
 const bodyCache = {};   // decode-on-change memo, persists across frames
 
 // Phase 3 — STAGE (background): decode-from-disc cached locally (web/test-atlas/stages/
@@ -252,7 +252,7 @@ import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=stagefi
 // additive quad) was built on a MISLABEL: loc_8c1294c8 is a 20-byte memcpy (the anim-cell
 // loader), NOT an effect cell processor. EffectsClient is now a no-op overlay that only
 // enumerates live effect nodes for diagnostics — effects render in the WebGPU body pass.
-import { EffectsClient } from './effects-client.mjs?v=rf2';
+import { EffectsClient } from './effects-client.mjs?v=rf3';
 
 // HUD (life bars / super meter / timer / combo / portraits-name / win stars): REAL MVC2 art.
 // The timer + combo + level digits are the game's OWN boxed-digit sprites (FONT.BIN rec1,
@@ -1695,10 +1695,10 @@ function liveApplyFrame(u8) {
     // feeds the per-frame validator + cockpit readout.
     const { ta, quads, len, quadSels, quadGfx1s, quadColRow, quadMirror } = transpiledTA(ram);
     window.__lastTA = ta;
-    // PURE-STATE TEXTURES (FAITHFUL VERBATIM, re_kb 28): decode active body parts into pane.vram
-    // at their part-base TCW (loc_8c0354c0 LZSS + loc_8c033d78 verbatim write). No per-frame
-    // pixel band on the wire — the textures are reconstructed from the shipped-once GFX.
-    if (gpuOK && pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, null, null);
+    // PURE-STATE TEXTURES (PER-TILE RE-TILE, 2026-06-14): decode+detwiddle each part, slice each
+    // emitted tile's (col,row) 32×32, re-twiddle, write at that tile's own TCW (quadColRow = the
+    // storage grid index). Supersedes the verbatim-blob write that scattered non-32-square parts.
+    if (gpuOK && pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, quadColRow, null);
     // Cockpit: post-process the TA (anchor/scale/flip/iso/reverse) + drive readout/overlay; the
     // returned drawTA carries every geometry/decode knob and is what we draw.
     const drawTA = cockpitProcess(ta, quads, quadSels, quadGfx1s, vframe, quadColRow, quadMirror);

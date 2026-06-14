@@ -92,6 +92,80 @@
 
 const RAM = 0x00FFFFFF;            // area-3 / main-RAM low-24-bit mask (0x8C.. and 0x0C.. alias)
 
+// ============================================================================
+// PER-TILE RE-TILE (THE 2026-06-14 FIX — supersedes the verbatim-blob write).
+//
+// WHY VERBATIM WAS WRONG (proven vs the engine, not a model): the engine stores each part
+// as ONE W×H PVR-TWIDDLED blob (decodeA output, byte-exact), BUT the per-frame walker
+// (loc_8c0344d4) emits N tiles for that part, EACH with its OWN rectab-resident TCW, and the
+// pvr2 renderer reads each tile as a STANDALONE 32×32 PAL4_TW texture (flycast texPAL4_TW).
+// A 32×32 twiddle read at part_base+k*0x200 of a W×H-twiddled blob only coincides with the
+// k-th screen cell when W==H==32 (single tile) — for WIDE (128×16 sel121/113), TALL, or any
+// non-32-square part the bytes at +k*0x200 are the MIDDLE of a twiddled row, so the tile reads
+// garbage (the live-Sentinel scatter the user saw). The "every 512B chunk reconstructs its cell"
+// claim held only for the square _fidcap poses that validated it.
+//
+// THE FIX (occupancy-validated 100% vs the PROVEN emitter atlas web/test-atlas/chars/PLxx_parts,
+// tools/render-replica-poc/_validate_retile.mjs — sels 121/112/113/118 all 100%): the engine's
+// per-tile VRAM IS a sequence of standalone 32×32 PAL4_TW chunks. So the faithful client op is:
+//   1. decodeA(part)           -> raw bytes (W×H PVR twiddle) — byte-exact vs engine, unchanged.
+//   2. detwiddlePal4(raw,W,H)  -> linear W×H index buffer (flycast texconv port, atlas-validated).
+//   3. per emitted tile (col,row from render_frame_quad_colrow = STORAGE col Ax-ASC / row Ay-DESC):
+//      extract the 32×32 linear region at (col*32,row*32) (clamped to W×H, zero-pad), re-twiddle
+//      it as a standalone 32×32 PAL4_TW, and write those 512B at THIS tile's own TCW vaddr.
+// The texU mirror (draw-time) does the facing L/R flip; col is facing-independent so the part is
+// re-tiled once in storage order. (re_kb finding:faithful_texture_decode_transpile is RETRACTED;
+// new finding:per_tile_retile_decode.)
+// ============================================================================
+
+// flycast PAL4 twiddle (port of tools/extract_gfx1_atlas.py / texconv.cpp, CHARQ+atlas validated)
+function _twiddleSlow(x, y, xs, ys) {
+    let rv = 0, sh = 0; xs >>= 1; ys >>= 1;
+    while (xs || ys) {
+        if (ys) { rv |= (y & 1) << sh; ys >>= 1; y >>= 1; sh++; }
+        if (xs) { rv |= (x & 1) << sh; xs >>= 1; x >>= 1; sh++; }
+    }
+    return rv;
+}
+const _DETW = [[], []];
+for (let s = 0; s < 11; s++) {
+    const ys = 1 << s; _DETW[0][s] = new Int32Array(1024); _DETW[1][s] = new Int32Array(1024);
+    for (let i = 0; i < 1024; i++) { _DETW[0][s][i] = _twiddleSlow(i, 0, 1024, ys); _DETW[1][s][i] = _twiddleSlow(0, i, ys, 1024); }
+}
+const _PAL4_ORDER = [[0,0],[0,1],[1,0],[1,1],[0,2],[0,3],[1,2],[1,3],[2,0],[2,1],[3,0],[3,1],[2,2],[2,3],[3,2],[3,3]];
+function _log2i(v) { let n = -1; while (v) { v >>= 1; n++; } return n; }
+
+// TWIDDLED W×H PAL4 bytes -> linear W×H index buffer (1 byte/px, low nibble = palette index).
+function detwiddlePal4(data, w, h) {
+    const bcx = _log2i(w), bcy = _log2i(h);
+    const idx = new Uint8Array(w * h);
+    for (let y = 0; y < h; y += 4) for (let x = 0; x < w; x += 4) {
+        const blk = ((_DETW[0][bcy][x] + _DETW[1][bcx][y]) / 16) | 0;
+        const base = blk * 8;
+        for (let i = 0; i < 16; i++) {
+            const cx = _PAL4_ORDER[i][0], cy = _PAL4_ORDER[i][1];
+            const b = (base + (i >> 1) < data.length) ? data[base + (i >> 1)] : 0;
+            idx[(y + cy) * w + (x + cx)] = (i & 1) ? ((b >> 4) & 0xF) : (b & 0xF);
+        }
+    }
+    return idx;
+}
+// Re-twiddle one 32×32 linear index region (1024 entries) into 512 bytes of PAL4_TW (the engine's
+// per-tile VRAM storage). Inverse of detwiddlePal4 for w=h=32 (bcx=bcy=5).
+function retwiddle32(lin) {
+    const out = new Uint8Array(512);
+    for (let y = 0; y < 32; y += 4) for (let x = 0; x < 32; x += 4) {
+        const blk = ((_DETW[0][5][x] + _DETW[1][5][y]) / 16) | 0;
+        const base = blk * 8;
+        for (let i = 0; i < 16; i++) {
+            const cx = _PAL4_ORDER[i][0], cy = _PAL4_ORDER[i][1];
+            const nib = lin[(y + cy) * 32 + (x + cx)] & 0xF;
+            if (i & 1) out[base + (i >> 1)] |= nib << 4; else out[base + (i >> 1)] |= nib;
+        }
+    }
+    return out;
+}
+
 // ---- the validated GFX1 LZSS decoder (bank03 loc_8c0354c0) ------------------
 // Flag byte consumed MSB-first from 0x80. bit CLEAR -> literal (*dst++ = *src++);
 // bit SET -> back-ref b=*src++, dist=b>>4, count=(b&0x0F)+2 copied from dst-(dist+1).
@@ -153,8 +227,10 @@ function cellSels(ram, gfx2, sid) {
     return sels;
 }
 
-// Decode one GFX1 part to its VERBATIM (twiddled-storage) PAL4 bytes — exactly the bytes the
-// engine puts in VRAM. Returns {bytes, destLen} or null if the part is degenerate.
+// Decode one GFX1 part and detwiddle it to a LINEAR W×H index buffer (1 byte/px). The raw
+// decodeA output is W×H PVR-twiddled (byte-exact vs the engine); detwiddlePal4 makes it linear
+// so per-tile 32×32 chunks can be sliced + re-twiddled into the walker's tile TCWs. Returns
+// {lin, W, H, cols, rows} (cols/rows = part dims in 32-px tiles) or null if degenerate.
 function decodePart(ram, gfx1, G, sel) {
     if (sel >= G.n) return null;
     const pbase = gfx1 + G.offs[sel];
@@ -164,54 +240,42 @@ function decodePart(ram, gfx1, G, sel) {
     const destLen = (W * H) >> 1;                 // PAL4: 2 px/byte
     const srcStart = (pbase + 4) & RAM;
     const srcEnd = (gfx1 + endOf(G.srt, G.offs[sel])) & RAM;
-    return { bytes: decodeA(ram, srcStart, srcEnd, destLen), destLen, W, H };
+    const raw = decodeA(ram, srcStart, srcEnd, destLen);   // W×H PVR twiddle (engine byte-exact)
+    const lin = detwiddlePal4(raw, W, H);                   // -> linear W×H index buffer
+    return { lin, W, H, destLen, cols: Math.ceil(W / 32), rows: Math.ceil(H / 32) };
 }
 
 // ----------------------------------------------------------------------------
-// PUBLIC: ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, quadGfx1s)
-//   ram       : seeded 16MB RAM image (Uint8Array) — GFX1 part streams.
-//   vram      : pane.vram (Uint8Array, 8MB) — where TextureManager re-decodes textures from.
-//   ta        : the TA render_frame just emitted (Uint8Array) — authoritative per-quad TCW.
-//   quadCount : render_frame_quad_count() — number of 96B textured-sprite quads in `ta`.
-//   cache     : a persistent object {} the caller keeps across frames (decode memo).
-//   quadSels  : Uint16Array[quadCount] from render_frame_quad_sels() — the SOURCE GFX1 sel the
-//               walker actually used for quad k (TILING-SAFE: a tiled cell's N tiles share one sel).
-//   quadGfx1s : Uint32Array[quadCount] from render_frame_quad_gfx1s() — the owning body's GFX1 base
-//               for quad k (so each sel decodes against the RIGHT character's art).
+// PUBLIC: ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, quadGfx1s, quadColRow)
+//   ram        : seeded 16MB RAM image (Uint8Array) — GFX1 part streams.
+//   vram       : pane.vram (Uint8Array, 8MB) — where TextureManager re-decodes textures from.
+//   ta         : the TA render_frame just emitted (Uint8Array) — authoritative per-quad TCW.
+//   quadCount  : render_frame_quad_count() — number of 96B textured-sprite quads in `ta`.
+//   cache      : a persistent object {} the caller keeps across frames (decode memo).
+//   quadSels   : Uint16Array[quadCount] from render_frame_quad_sels() — the SOURCE GFX1 sel the
+//                walker used for quad k (TILING-SAFE: a tiled cell's N tiles share one sel).
+//   quadGfx1s  : Uint32Array[quadCount] from render_frame_quad_gfx1s() — owning body's GFX1 base.
+//   quadColRow : Int32Array[quadCount*2] from render_frame_quad_colrow() — per-tile STORAGE
+//                (col,row) (col = Ax-ASC rank, row = Ay-DESC rank). This is the tile's position
+//                in the part's 32-px tile grid (REQUIRED — the re-tile key).
 //
-// PER-TILE PLACEMENT (2026-06-13, corrected & PROVEN vs resident VRAM): the body walker expands
-// one GFX2 cell into N tiles, all carrying the same (gfx1,sel) but TCWs that step +0x200 (=512B)
-// across the SAME CONTIGUOUS WHOLE-PART blob. So the part is written ONCE at its base VRAM addr =
-// the MINIMUM tile TCW among that (gfx1,sel) run's quads; the other tiles index into that blob.
-// (The OLD code wrote the whole part at EACH quad's own TCW -> self-overwrite smear = the scramble.)
-//
-// We therefore (1) iterate the EMITTED QUADS to group them by (gfx1,sel) and find each run's base
-// (min) TCW vaddr, then (2) decode each distinct part ONCE and write it ONCE at that base. A static
-// pose re-uses last frame's decode via the memo. Returns {decoded,bytes,written,quads,parts}.
+// PER-TILE RE-TILE (THE 2026-06-14 FIX, see header): the engine stores each part as ONE W×H
+// PVR-twiddled blob, but the walker emits N tiles each read by pvr2 as a STANDALONE 32×32 PAL4_TW
+// at its OWN rectab TCW. So for each emitted quad we decode+detwiddle its part to a linear W×H
+// buffer (memoized), extract the 32×32 region at (col*32,row*32), re-twiddle it as a standalone
+// 32×32, and write those 512B at THIS quad's own TCW. (The verbatim-blob write was wrong: a 32×32
+// twiddle read of a W×H-twiddled blob only coincides for 32-square parts; wide/tall parts read
+// garbage = the live-Sentinel scatter.) Returns {decoded,bytes,written,quads,parts}.
 // ----------------------------------------------------------------------------
 const QUAD = 96;                                  // textured-sprite TA block size (paraType 5)
 const TCW_OFF = 0x0C;                             // TCW is word 3 of the 16B param header
 
-// ============================================================================
-// ensureBodyTextures — FAITHFUL transpile of the engine load-time decode + VERBATIM DMA.
-//
-// The engine (loc_8c033d78) LZSS-decodes each (gfx1,sel) part CONTIGUOUSLY (loc_8c0354c0,
-// no twiddle/reorder) and DMAs that blob to VRAM VERBATIM at ONE part-base texaddr. The
-// per-frame walker (loc_8c0344d4) emits N tiles whose TCW vaddrs step +0x200 INTO that one
-// blob; the renderer (texture-manager _pal4) reads each tile's declared w×h twiddle from its
-// own TCW — exactly flycast texture_TW.  ==> the faithful client op is to write decodeA()'s
-// VERBATIM bytes ONCE at the part-base (= the MINIMUM tile TCW vaddr of the (gfx1,sel) run).
-// NO carve, NO detwiddle, NO re-twiddle: each emitted quad's TCW already indexes the right
-// 512B chunk of the one blob (PROVEN 8/8,4/4,4/4 chunks reconstruct sel13/24/1 exactly).
-//
-// `quadColRow`/`opts` are accepted for call-site compatibility but UNUSED by the faithful
-// path (the carve model they fed is gone — it was a hand model, never the engine).
-// ============================================================================
 export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, quadGfx1s, quadColRow, opts) {
     if (!cache._gfx)  cache._gfx = new Map();     // gfx1 base -> {n,offs,srt}
-    if (!cache._dec)  cache._dec = new Map();     // "gfx1:sel" -> {bytes,destLen} (decode memo)
+    if (!cache._dec)  cache._dec = new Map();     // "gfx1:sel" -> {lin,W,H,...} (decode memo)
     if (cache._dec.size > 4096) cache._dec.clear();  // bound the memo across many distinct poses
     let decoded = 0, bytes = 0, written = 0, quads = 0;
+    const parts = new Set();
 
     const dv = new DataView(ta.buffer, ta.byteOffset, ta.byteLength);
     const tcwAddrOf = (q) => {
@@ -221,41 +285,44 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         return ((tcw & 0x1FFFFF) << 3) >>> 0;       // fmt5 PAL4: byteAddr = (TCW & 0x1FFFFF) << 3
     };
 
-    // ---- pass 1: group emitted quads into (gfx1,sel) part-runs; PART BASE = min tile TCW. ----
-    // The engine stores the whole part as ONE contiguous blob at this base; the run's other
-    // tiles' TCWs step +0x200 INTO it. So we only need the minimum vaddr per (gfx1,sel) run.
-    const runs = new Map();                       // "gfx1:sel" -> { gfx1, sel, base }
+    // Re-tile EACH emitted quad: slice its (col,row) 32×32 from the part's linear buffer, re-twiddle,
+    // write 512B at the quad's OWN TCW. The walker assigns each tile a distinct +0x200 rectab slot;
+    // we fill exactly that slot with the standalone 32×32 PAL4_TW the pvr2 renderer expects.
     for (let q = 0; q < quadCount; q++) {
         const gfx1 = quadGfx1s[q] >>> 0;
         if (!(gfx1 & 0x0C000000) && !(gfx1 & 0x8C000000)) continue;  // no valid body art
         quads++;
         const sel  = quadSels[q];
         const addr = tcwAddrOf(q);
-        if (addr < 0) continue;
-        const key  = gfx1.toString(16) + ':' + sel;
-        let r = runs.get(key);
-        if (r === undefined) { r = { gfx1, sel, base: addr }; runs.set(key, r); }
-        else if (addr < r.base) r.base = addr;    // PART BASE = minimum tile TCW vaddr of the run
-    }
-
-    // ---- pass 2: decode each distinct part ONCE; write the VERBATIM blob at the part base. ----
-    // This IS loc_8c033d78's contiguous decode + verbatim DMA. Every tile TCW of the run already
-    // indexes into this one blob at its +0x200 offset, and the renderer reads each tile's w×h
-    // twiddle from there (flycast texture_TW). Byte-exact by construction; no carve.
-    for (const r of runs.values()) {
-        const { gfx1, sel, base } = r;
+        if (addr < 0 || addr + 512 > vram.length) continue;
         const key = gfx1.toString(16) + ':' + sel;
         let p = cache._dec.get(key);
         if (p === undefined) {
             const G = gfx1Offsets(ram, gfx1, cache._gfx);
-            p = decodePart(ram, gfx1, G, sel);    // {bytes,destLen,W,H} — VERBATIM loc_8c0354c0 output
+            p = decodePart(ram, gfx1, G, sel);    // {lin,W,H,cols,rows} — detwiddled linear part
             cache._dec.set(key, p);
             if (p) { decoded++; bytes += p.destLen; }
         }
         if (!p) continue;
-        if (base + p.destLen > vram.length) continue;
-        vram.set(p.bytes, base);                  // write-once, verbatim (engine DMA semantics)
+        parts.add(key);
+        // STORAGE (col,row) for this tile. quadColRow is the authoritative grid index; fall back
+        // to 0,0 (single-tile parts) if it's absent.
+        const col = quadColRow ? (quadColRow[2 * q] | 0) : 0;
+        const row = quadColRow ? (quadColRow[2 * q + 1] | 0) : 0;
+        // extract the 32×32 linear region at (col*32, row*32), clamped to W×H (zero-pad outside).
+        const lin = p.lin, W = p.W, H = p.H;
+        const tile = new Uint8Array(1024);
+        const ox = col * 32, oy = row * 32;
+        for (let yy = 0; yy < 32; yy++) {
+            const py = oy + yy; if (py >= H) break;
+            const rowBase = py * W, dstBase = yy * 32;
+            for (let xx = 0; xx < 32; xx++) {
+                const px = ox + xx; if (px >= W) break;
+                tile[dstBase + xx] = lin[rowBase + px];
+            }
+        }
+        vram.set(retwiddle32(tile), addr);        // standalone 32×32 PAL4_TW at this tile's own TCW
         written++;
     }
-    return { decoded, bytes, written, quads, parts: runs.size };
+    return { decoded, bytes, written, quads, parts: parts.size };
 }
