@@ -215,7 +215,7 @@
 // Reuses ta-parser/pvr2-renderer/texture-manager VERBATIM, and render_frame.wasm UNMODIFIED
 // (Phases 1/2 frozen byte-exact). MCRR spec: docs/RENDER-REPLICA-RECORDING-FORMAT.md.
 // ============================================================================
-import createRenderFrame from './render_frame.mjs?v=fx1';
+import createRenderFrame from './render_frame.mjs?v=fx2colasc';
 // Phase 5 — PURE-STATE TEXTURES: client decodes each active body part's sprite from the
 // shipped-once compressed GFX (in the RAM image) + the live sprite_id, writes it to pane.vram
 // at the TCW addr render_frame carries. Replaces the per-frame "bodytex" VRAM band (removed).
@@ -439,7 +439,7 @@ function synthSnap(w, h) {
 
 // ---------------------------------------------------------------- render_frame.wasm
 let frameMod;
-async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=fx1' : p }); } return frameMod; }
+async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=fx2colasc' : p }); } return frameMod; }
 function transpiledTA(ram) {
     const M = frameMod;
     const ramPtr = M._malloc(ram.length); M.HEAPU8.set(ram, ramPtr);

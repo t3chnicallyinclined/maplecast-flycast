@@ -356,11 +356,19 @@ u32 render_frame_quad_colrow_impl(int* out_cr, u32 cap){
     u32 w = 0;
     for(int q=0; q<g_nscene && w<cap; q++,w++){
         u32 kg = g_scene[q].gfx1, ks = g_scene[q].sel;
-        /* STORAGE column: facing!=0 (faces right) ranks Ax ASCENDING (col-0 at lowest X);
-         * facing==0 ranks Ax DESCENDING (col-0 at highest X). Facing-independent storage idx. */
-        int facing = g_scene[q].facing ? 1 : 0;
-        out_cr[2*w]   = distinct_rank(kg, ks, 0, g_scene[q].Ax, facing ? 0 : 1); /* col: storage */
-        out_cr[2*w+1] = distinct_rank(kg, ks, 1, g_scene[q].Ay, 1);              /* row: Ay desc */
+        /* STORAGE column = rank Ax ASCENDING for BOTH facings (col-0 at lowest screen X).
+         * CORRECTED 2026-06-14 (END-TO-END atlas-render proof, _oracle/tmp/validate_e2e.py +
+         * tools/render-replica-poc/_test_colrev.mjs): the prior facing-DESC branch for facing==0
+         * DOUBLE-applied the L/R flip — once via the storage-column reversal and once via the
+         * texU mirror (render_frame_quad_mirror) — splitting every multi-column body on the
+         * facing==0 side (the _scramble_actual Cable rendered as two horizontally-offset halves;
+         * forcing ASC assembles it byte-clean). The carve stores cells in fixed storage order;
+         * the SINGLE source of the visual L/R flip is the texU mirror alone (loc_8c0346c4). So
+         * col is facing-INDEPENDENT ascending and the mirror does the flip. (facing==1 was already
+         * ASC and rendered clean — _satlive Cable — so this is a no-op there and a fix for facing==0;
+         * closes finding:emitter_flip_unvalidated for multi-column bodies.) */
+        out_cr[2*w]   = distinct_rank(kg, ks, 0, g_scene[q].Ax, 0); /* col: storage, Ax ASC */
+        out_cr[2*w+1] = distinct_rank(kg, ks, 1, g_scene[q].Ay, 1); /* row: Ay desc */
     }
     return w;
 }
