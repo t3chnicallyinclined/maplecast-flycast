@@ -109,10 +109,13 @@ export class HudClient {
         // OPTIONAL portrait atlas (real FAC pixels). portraits/portraits.json maps
         // { "<char_id>": {x,y,w,h} } into portraits/portraits.png. Absent today (FAC
         // undecoded) -> portraits stays null -> monogram fallback. Harmless on 404.
+        // Cache-bust the portrait atlas: it is re-ripped offline (tools/rip_portraits.py)
+        // and the browser must not serve a stale png/json after a roster/map fix.
+        const PV = 'emitterz3';
         try {
             const [pmeta, pimg] = await Promise.all([
-                fetch(new URL('portraits/portraits.json', this.base)).then(r => r.ok ? r.json() : Promise.reject(r.status)),
-                this._loadImg(new URL('portraits/portraits.png', this.base)),
+                fetch(new URL(`portraits/portraits.json?v=${PV}`, this.base)).then(r => r.ok ? r.json() : Promise.reject(r.status)),
+                this._loadImg(new URL(`portraits/portraits.png?v=${PV}`, this.base)),
             ]);
             const tiles = {};
             for (const k in pmeta.rects || {}) {
