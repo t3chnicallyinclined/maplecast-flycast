@@ -39,6 +39,19 @@
 
 const SCREEN_W = 640, SCREEN_H = 480;
 
+// ── stage_id (wire, @0x8C289638) -> STGxx disc index MAP ──────────────────────
+// stage_id is NOT a 0-based file index. CONFIRMED (re_kb 26, live in-match capture
+// + byte-exact POL fingerprint, modelCount=83 unique): stage_id 0x11 -> STG0B.
+// Other ids are resolved by the fallback (id -> STGxx directly) until each is
+// captured live and its loaded POL fingerprinted. Add confirmed entries here.
+const STAGE_ID_MAP = {
+  0x11: 0x0B,   // CONFIRMED live (re_kb 26): id 17 -> STG0B
+};
+function resolveStageFile(stageId) {
+  if (stageId in STAGE_ID_MAP) return STAGE_ID_MAP[stageId];
+  return stageId & 0xFF;   // fallback: treat id as the file index
+}
+
 // pvrSnap that makes _ndcMat produce a 640x480 viewport (tx=19,ty=14):
 //   w=(tx+1)*32=640, h=(ty+1)*32=480
 export const STAGE_PVRSNAP = (() => {
@@ -82,12 +95,14 @@ export class StageClient {
     this._X  = null;             // cached XMTRX = M1·M2 (rebuilt on camera change)
   }
 
-  // Drive from GSTA each frame. stageId is 0..0x10; animTimer is the u8 wire field.
+  // Drive from GSTA each frame. stageId is the WIRE stage_id (@0x8C289638); it is
+  // mapped to a STGxx disc index via STAGE_ID_MAP (re_kb 26). animTimer is the u8 wire field.
   setState(stageId, animTimer = 0) {
     this.animTimer = animTimer | 0;
-    if (stageId === this.wantId) return;
-    this.wantId = stageId;
-    this._ensureLoaded(stageId);
+    const fileId = resolveStageFile(stageId | 0);
+    if (fileId === this.wantId) return;
+    this.wantId = fileId;
+    this._ensureLoaded(fileId);
   }
 
   // ── ENGINE CAMERA: feed the live frame-global matrices (the GROUNDED path) ──
@@ -226,6 +241,13 @@ export class StageClient {
 
     for (const m of data.meshes) {
       if (!m.tris.length) continue;
+      // WORLD-SPACE ASSEMBLY (re_kb 26): rip_stage.py tags each model placed/unplaced.
+      // Placed models carry WORLD-space verts (model authored in world space = identity,
+      // or pre-multiplied by a captured runtime world matrix). Unplaced = a LOCAL-space
+      // prop with no captured matrix; rendering it would collapse it to one screen dot
+      // (the old "green blob"). SKIP it until its matrix is captured. (placed is absent
+      // in legacy JSON -> default true, unchanged behavior for already-correct stages.)
+      if (m.placed === false) continue;
       const textured = (m.texIndex < data.textures.length) ? 1 : 0;
       let surr = 0;
       if (textured) {
@@ -333,20 +355,30 @@ export class StageClient {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// FULL VERSION (camera/projection — the one remaining RE task):
+// STATUS (re_kb 26, resolved 2026-06-13):
+//   PROJECTION — DONE. XMTRX = M1(@0x8C2D6B18)·M2(@0x8C2D6AD8), the engine's own
+//   frame-global camera, fed live via setCamera(). PROVEN byte-exact: STG0B's placed
+//   geometry projects to the engine's actual stage TA (_stage_gt/engine_ta.bin) at
+//   0.000px residual (median/mean/p90/max). The DEFAULT_CAM perspective path is the
+//   legacy standalone-preview fallback ONLY; the live client always uses setCamera.
+//   WORLD ASSEMBLY — DONE for world-authored models. rip_stage.py marks each model
+//   placed/unplaced: a model with large vertex extent is authored in world space
+//   (identity) and renders correct; small LOCAL-space props need a runtime world
+//   matrix and are skipped (placed=false, handled in _build) until captured.
 //
-// The geometry is full 3D NAOMI world-space, so pixel-exact placement needs MVC2's
-// real fight camera. To CALIBRATE:
-//   1. Capture a live out-of-match TA video frame for STG00 (PVR2Renderer renders
-//      it perfectly today). Note the on-screen position of a few recognisable stage
-//      features (e.g. the wood-plank wall texture t01).
-//   2. The NAOMI projection lives in the per-frame matrix the game uploads; on the
-//      wire camera_x/y = 0x8C1F9CD8/0x8C1F9CDC (maplecast_gamestate.cpp:63-64) shift
-//      the eye. RE the world->view->projection in bank12 (loc_8c1216c0 world->screen)
-//      to recover fov + eye distance + the world Y of the ground plane.
-//   3. Replace DEFAULT_CAM here (and _perStageCam overrides) with the recovered
-//      matrix; drive eye by camera_x/y each frame.
-// Animation: stage_anim_timer (0x8C1F9D80) low bit drives an A/B keyframe toggle
-//   (loc_8c0338ec). To animate, tools/rip_stage.py must additionally decode the
-//   keyframe lists and this module swap the affected meshes' UV/verts by animTimer&1.
-//   For the first version we render the static A-phase.
+// REMAINING (deferred follow-up, cited re_kb 26):
+//   (1) PROP MATRICES. The per-node world matrices for small props (e.g. STG0B's 66
+//       cannons/chains, ±18u local) are RUNTIME state pushed on the NaomiLib matrix
+//       stack @0x8C2D6900 during the tree-walk (bank12 loc_8c122fd0/loc_8c122d00) —
+//       NOT in the POL (the +0x0C/+0x10/+0x14 header floats are a bounding-sphere,
+//       confirmed). To capture: MAPLECAST_ORACLE_PROBE a per-model PC dumping the
+//       stack-top 4x3 (mem window over 0x8C2D6900); remove the camera offline
+//       (node_local = (M1·M2)^-1 · captured) -> STGxx_matrices.json which rip_stage.py
+//       pre-multiplies into world space. Most stages need NO props (STG00/04/07/09/0D
+//       = 0 local models); STG0B is the worst case (only the deck is world-space).
+//   (2) STAGE_ID MAP. STAGE_ID_MAP has the confirmed live entry (0x11->STG0B); other
+//       ids fall back to id->file. Capture each stage live + fingerprint its loaded
+//       POL (modelCount + POL byte-hash, all unique except the 01/0A shared-geometry
+//       pair) to complete the map.
+//   (3) ANIMATION. stage_anim_timer (0x8C1F9D80) low bit drives an A/B keyframe toggle
+//       (loc_8c0338ec); static A-phase for now.

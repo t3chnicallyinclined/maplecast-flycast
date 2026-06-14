@@ -1,0 +1,16 @@
+{
+  "_doc": "MVC2 wire stage_id (@0x8C289638) -> STGxx disc file index. stage_id is NOT a 0-based file index. Confirmed entries are byte-exact live captures (re_kb 26); the rest resolve by the id->file fallback until captured. Mirror of web/webgpu/stage-client.mjs STAGE_ID_MAP.",
+  "confirmed": {
+    "0x11": {
+      "stg": "0B",
+      "source": "re_kb 26 live in-match capture; loaded POL @0x0CEA0000 modelCount=83 uniquely fingerprints STG0B; vertex geometry byte-identical to disc STG0BPOL.BIN",
+      "modelCount": 83
+    }
+  },
+  "fingerprint_note": "modelCount alone is ambiguous (16:[01,0A] 25:[05,0E,0F] 37:[03,04,0C]); modelCount+POLsize+geometry-hash is unique for all 17 EXCEPT 01/0A which are byte-identical POL (shared geometry, different TEX).",
+  "modelCounts": {
+    "00": 15, "01": 16, "02": 49, "03": 37, "04": 37, "05": 25,
+    "06": 23, "07": 18, "08": 91, "09": 21, "0A": 16, "0B": 83,
+    "0C": 37, "0D": 39, "0E": 25, "0F": 25, "10": 26
+  }
+}

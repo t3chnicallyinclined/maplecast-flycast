@@ -296,6 +296,76 @@ def scan_model(pol, address):
     return meshes
 
 
+# ── WORLD-SPACE ASSEMBLY (re_kb 26: finding:stage_real_bug_pernode_matrices) ──
+# The disc POL stores each model in its OWN space. In MVC2 the per-model WORLD
+# placement is RUNTIME state the engine pushes onto the NaomiLib matrix stack
+# (@0x8C2D6900) during the tree-walk (bank12 loc_8c122fd0/loc_8c122d00) — it is
+# NOT in the POL node header (+0x0C/+0x10/+0x14 = NaomiLib bounding-sphere
+# center+radius, NOT a transform; confirmed by deref + by the "applying it makes
+# placement worse" test). So we cannot derive props purely from the POL header.
+#
+# GROUND-TRUTH-VALIDATED FACT (this tool, _stage_gt/engine_ta.bin un-projected
+# through the live camera M1·M2): MODEL 0 (the deck/skybox, world ±2500) is
+# authored DIRECTLY in world space — its raw rip verts project through M1·M2 to
+# the engine's screen output at 0.000px residual (median/mean/p90/max all 0.0 over
+# 2346 verts of STG0B). So model 0 = IDENTITY world matrix; it needs no transform.
+#
+# Models 1..N-1 are small LOCAL-space props (verts ±18: cannons/chains/details).
+# Their world matrices are loaded from an optional captured sidecar (Oracle: the
+# matrix-stack top @0x8C2D6900 per model, camera-removed offline → node-local
+# 4x3 world matrix). When the sidecar is absent the prop is emitted with
+# placed=false so the CLIENT SKIPS it (the old behavior collapsed every prop to a
+# single screen dot at ~320,432 — the "green blob"; skipping is strictly better
+# until the matrices are captured). Model 0 always renders.
+#
+# Sidecar format (atlas/stages/STGxx_matrices.json, optional, gitignored):
+#   { "matrices": { "<modelIndex>": [m00,m01,m02,m03, m10,..,m13, m20,..,m23] } }
+# i.e. a 3x4 row-major world matrix (last row implicitly 0,0,0,1). Model 0 may be
+# omitted (identity). A model present here is placed=true and its verts are
+# pre-multiplied into WORLD space here so the client projects them with M1·M2.
+
+# A model whose max |vertex coord| >= this is authored in WORLD space (deck/scenery,
+# 100s..1000s of units) and renders with an identity matrix; below it is a LOCAL-space
+# prop needing a runtime world matrix. STG0B props peak at ~18u; the deck spans ~2500u.
+WORLD_EXTENT_THRESH = 100.0
+
+
+def _model_extent(meshes):
+    """Max absolute vertex coordinate across all of a model's meshes (0 if empty)."""
+    mx = 0.0
+    for m in meshes:
+        for tri in m["tris"]:
+            for v in tri:
+                p = v["pos"]
+                a = abs(p[0]); b = abs(p[1]); c = abs(p[2])
+                if a > mx: mx = a
+                if b > mx: mx = b
+                if c > mx: mx = c
+    return mx
+
+
+def _apply_mat34(mat, p):
+    x, y, z = p
+    return [
+        mat[0]*x + mat[1]*y + mat[2]*z  + mat[3],
+        mat[4]*x + mat[5]*y + mat[6]*z  + mat[7],
+        mat[8]*x + mat[9]*y + mat[10]*z + mat[11],
+    ]
+
+
+def _load_matrices(sid):
+    """Optional per-model world matrices captured live. Returns {modelIdx:mat34}."""
+    p = os.path.join(OUTDIR, f"STG{sid}_matrices.json")
+    if not os.path.exists(p):
+        return {}
+    try:
+        j = json.load(open(p))
+        return {int(k): v for k, v in (j.get("matrices") or {}).items()}
+    except Exception as e:
+        print(f"  WARN STG{sid}: bad matrices sidecar: {e}")
+        return {}
+
+
 def rip_stage(stage_id_hex):
     sid = stage_id_hex.upper()
     pol_path = os.path.join(DEVDIR, f"STG{sid}POL.BIN")
@@ -308,6 +378,7 @@ def rip_stage(stage_id_hex):
     ram_off = u32(pol, 0x00) & 0xffffff00
     model_table = u32(pol, 0x00) - ram_off
     model_count = u32(pol, 0x04)
+    world_mats = _load_matrices(sid)
 
     textures = scan_texture_headers(pol, ram_off)
 
@@ -324,20 +395,55 @@ def rip_stage(stage_id_hex):
                          "baseLocation": t["baseLocation"], "file": fn})
 
     all_meshes = []
+    placed_count = 0
+    skipped_count = 0
     for mi in range(model_count):
         ram_addr = u32(pol, model_table + 4 * mi)
         addr = ram_addr - ram_off
         if addr < 0 or addr >= len(pol):
             continue
         meshes = scan_model(pol, addr)
+        # Decide world placement by VERTEX EXTENT (re_kb 26, validated 0.000px vs
+        # engine_ta for STG0B model 0). A model authored DIRECTLY in world space has
+        # a large extent (deck/skybox/scenery span 100s..1000s of units) and renders
+        # with an IDENTITY matrix — its raw rip verts ARE world coords. Most stages
+        # author the WHOLE scene this way (STG00/04/07/09/0D = 0 local models). Only
+        # small LOCAL-space props (extent <= WORLD_EXTENT_THRESH, e.g. STG0B's 66
+        # cannons/chains ±18u) need a runtime world matrix; without a captured matrix
+        # they collapse to one screen dot, so we skip them (client honors placed=false).
+        ext = _model_extent(meshes)
+        if ext >= WORLD_EXTENT_THRESH:
+            mat = None            # world-space: raw verts ARE world coords (identity)
+            placed = True
+        elif mi in world_mats:
+            mat = world_mats[mi]  # captured node-local world matrix -> world space
+            placed = True
+        else:
+            mat = None
+            placed = False        # local-space prop, no matrix -> client skips it
+        if placed:
+            placed_count += 1
+        else:
+            skipped_count += 1
         for m in meshes:
             m["model"] = mi
+            m["placed"] = placed
+            if placed and mat is not None:
+                for tri in m["tris"]:
+                    for v in tri:
+                        v["pos"] = _apply_mat34(mat, v["pos"])
         all_meshes.extend(meshes)
 
     out = {
         "stageId": int(sid, 16),
         "ramOffset": ram_off,
         "modelCount": model_count,
+        # world-space assembly status (re_kb 26): model 0 always placed (identity),
+        # props placed only when STGxx_matrices.json supplies their world matrix.
+        "worldAssembled": True,
+        "placedModels": placed_count,
+        "unplacedModels": skipped_count,
+        "hasMatrixSidecar": bool(world_mats),
         "textures": tex_meta,
         "meshes": all_meshes,
     }
@@ -353,9 +459,10 @@ def rip_stage(stage_id_hex):
         src = os.path.join(OUTDIR, t["file"])
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(WEBOUT, t["file"]))
-    ntris = sum(len(m["tris"]) for m in all_meshes)
-    print(f"  STG{sid}: {model_count} models, {len(all_meshes)} meshes, "
-          f"{ntris} tris, {len(tex_meta)} textures -> {os.path.basename(jpath)}")
+    ntris = sum(len(m["tris"]) for m in all_meshes if m.get("placed", True))
+    print(f"  STG{sid}: {model_count} models ({placed_count} placed, "
+          f"{skipped_count} unplaced/skipped), {len(all_meshes)} meshes, "
+          f"{ntris} placed-tris, {len(tex_meta)} textures -> {os.path.basename(jpath)}")
 
 
 def main():
@@ -363,7 +470,7 @@ def main():
         print(__doc__); sys.exit(1)
     arg = sys.argv[1].lower()
     if arg == "all":
-        ids = [f"{i:02X}" for i in range(0x11)]
+        ids = [f"{i:02X}" for i in range(0x11)]  # STG00..STG10 (0..16)
     else:
         ids = [arg.upper().zfill(2)]
     print(f"Ripping to {OUTDIR}")
