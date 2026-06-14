@@ -226,8 +226,8 @@ import createRenderFrame from './render_frame.mjs?v=rf2';
 // The SpriteClient/SpriteGPU emitter is still IMPORTED but NO LONGER DRAWS the bodies — it
 // is retained only for the (disabled) emitter cross-check; the drawn bodies ARE the transpile.
 import { ensureBodyTextures } from './body_decoder.mjs?v=rf2';
-import { SpriteClient } from '../webgpu/sprite-client.mjs?v=rf2';
-import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=rf2';
+import { SpriteClient } from '../webgpu/sprite-client.mjs?v=rf3';
+import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=rf3';
 // Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
 // /gfx/PL{NN}_gfx{1,2}.bin (cached by char_id). Fixes the scramble + the tag-in GFX gap (covers
@@ -1073,17 +1073,50 @@ function hudAngledLifeBar(ctx, ox, oy, len, h, skew, mirror, hpFrac, chipFrac, h
     outline(); ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.stroke();
 }
 
-// The HUD foreground pass [hud:real-art-v1 — cache-bust marker for replay.html]. Called
-// AFTER bodies + stage + effects are on the WebGPU canvas. Delegates to the HudClient,
-// which draws the REAL MVC2 art: timer / combo / level = the game's OWN boxed-digit sprites
-// (FONT.BIN), and the life bar + super meter = the engine's white-tex * per-slot vertex
-// color (loc_8c15FFB0) reconstructed as the angled team-tinted parallelogram + red_health
-// chip trail. Every field reads the live engine addresses (the production GSTA wire reads).
+// The HUD foreground pass [hud:sprite-client-drawHUD — cache-bust marker for replay.html].
+// Called AFTER bodies + stage + effects are on the WebGPU canvas. REUSE PATTERN: instead of
+// the local HudClient reconstruction (orphaned below, like body_decoder), we feed the PROVEN
+// cockpit HUD — web/webgpu/sprite-client.mjs drawHUD — the SAME state its onGSTA produces, read
+// directly from the RAM image, then call SPRITECLIENT.drawHUD(ctx). The result is byte-identical
+// to the cockpit (king.html / webgpu-test.html:1282): yellow/green life bars, red chip trail,
+// TIME digits, LEVEL super meters + pips, tag-team 3-char layout. The HUD art (FONT.BIN digits +
+// white bar swatch) loads via setCharBase (line ~1240) -> loadHudAtlas -> ../test-atlas/hud/
+// hud_atlas.{png,json} (present on prod), identical to the cockpit's atlas source.
+//
+// FIELD ADDRESSES (CONFIRMED — same as the synth HUD below + maplecast_gamestate.cpp): per-char
+// health +0x420, red_health +0x424, active +0x000, char_id +0x001; global in_match 0x8C289624,
+// timer 0x8C289630, p1/p2_fill 0x8C289646/648, p1/p2_lvl 0x8C28964A/64B, p1/p2_combo 0x8C289670/672.
+function populateHudStateFromRAM() {
+    if (!ram) return;
+    SPRITECLIENT.inMatch = rdU8(HUD_IN_MATCH);
+    // Global HUD values -> the exact `this.hud` shape onGSTA builds (drawHUD reads these).
+    SPRITECLIENT.hud = {
+        timer:   rdU8(HUD_TIMER),
+        p1lvl:   rdU8(HUD_P1_LVL),   p2lvl:  rdU8(HUD_P2_LVL),
+        p1combo: rdU16(HUD_P1_COMBO),p2combo:rdU16(HUD_P2_COMBO),
+        p1fill:  rdU16(HUD_P1_FILL), p2fill: rdU16(HUD_P2_FILL),
+    };
+    // Per-slot health drives the life bars + _barCols/_pointSlot (P1=[0,2,4] P2=[1,3,5]).
+    // _maxhp stays at HP_MAX (144) so the bar reads full at round start — drawHUD uses
+    // sl._maxhp||144 exactly. (onGSTA grows _maxhp live; here the RAM value is authoritative
+    // and HP_MAX is the engine constant, so a fixed 144 matches the cockpit's full-bar.)
+    for (let s = 0; s < CHAR_SLOTS.length; s++) {
+        const base = CHAR_SLOTS[s], sl = SPRITECLIENT.slot[s];
+        sl.active     = rdU8(base + 0x000);
+        sl.char_id    = rdU8(base + 0x001);
+        sl.health     = rdU8(base + 0x420);
+        sl.red_health = rdU8(base + 0x424);
+        sl._maxhp     = HP_MAX;
+    }
+}
 function renderHudPass() {
     if (!ram) return;
-    hud.attach(document.getElementById('cReplay'));   // lazy overlay-canvas create (once)
-    try { hud.render(rdU8, rdU16, CHAR_SLOTS); }
-    catch (e) { log('[hud] ' + e.message, 'warn'); }
+    populateHudStateFromRAM();
+    const ctx = ensureHudOverlay();                   // lazy overlay-canvas create (once)
+    try {
+        SPRITECLIENT.drawHUD(ctx);                     // PROVEN cockpit HUD (clears + draws)
+        SPRITECLIENT.drawHudReal(ctx);                 // textured HUDQ quads if streamed (no-op otherwise)
+    } catch (e) { log('[hud] ' + e.message, 'warn'); }
 }
 
 // ── legacy synthetic HUD (DISABLED, kept only as the headless diagnostic readHud() source) ──
@@ -1209,9 +1242,15 @@ window.__hudPoke16 = (a, v) => { if (ram) { ram[a & RAM_LO] = v & 0xFF; ram[(a +
 window.__renderHud = () => renderHudPass();
 window._renderHudPassSynthDISABLED = () => _renderHudPassSynthDISABLED();   // before/after harness
 window.__legacyHudCanvas = () => (ensureHudOverlay(), _hudCanvas);          // before/after harness
-window.__hudReady  = () => hudReady;                  // headless: real-art atlas-load gate
-window.__hudClient = () => hud;                       // headless: inspect the HudClient
-window.__hudCanvas = () => (hud.attach(document.getElementById('cReplay')), hud._canvas || (ensureHudOverlay(), _hudCanvas));
+// The live HUD now draws via SPRITECLIENT.drawHUD onto the ensureHudOverlay() canvas.
+// Readiness = sprite-client's HUD atlas (loadHudAtlas -> ../test-atlas/hud/hud_atlas);
+// canvas = the overlay drawHUD draws onto. (HudClient is orphaned — see __hudClientLegacy.)
+window.__hudReady  = () => !!(SPRITECLIENT && SPRITECLIENT._hud);   // sprite-client HUD atlas gate
+window.__hudClientLegacy = () => hud;                // headless: inspect the orphaned HudClient
+window.__hudCanvas = () => (ensureHudOverlay(), _hudCanvas);        // the drawHUD overlay canvas
+window.__hudCanvasLegacy = () => (hud.attach(document.getElementById('cReplay')), hud._canvas);  // before/after harness
+window.__rdU8  = (a) => rdU8(a);                     // before/after harness: feed HudClient.render
+window.__rdU16 = (a) => rdU16(a);
 
 // ============================================================================
 // BODIES — PROVEN SPRITE-CLIENT RENDER (replaces render_frame + body_decoder).
