@@ -234,7 +234,7 @@ const bodyCache = {};   // decode-on-change memo, persists across frames
 // (M1@0x8C2D6B18 · M2@0x8C2D6AD8, shipped in the "cam_mat" read-set region) using the SAME
 // transform_object_122560 math the bodies use — so the stage scrolls/zooms in lockstep with
 // the fighters, NO guessed camera. Rendered as an OP pass BEHIND the bodies.
-import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=stage2';
+import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=stagecam1';
 
 // Phase 3 — EFFECTS (hitsparks / electric / energy): the pure-effect pool nodes (cat 1..4,
 // GFX base in the shared "Effect Poly" bank 0x0CED0000, NO body GFX2) that the render_frame
