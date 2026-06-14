@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF) [hud:clean-v1]</title>
+<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF) [hud:ui1 · cockpit-live]</title>
 <style>
   :root { color-scheme: dark; }
   body { margin:0; background:#0c0e12; color:#cdd6e0; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; }
@@ -215,7 +215,7 @@
 // Reuses ta-parser/pvr2-renderer/texture-manager VERBATIM, and render_frame.wasm UNMODIFIED
 // (Phases 1/2 frozen byte-exact). MCRR spec: docs/RENDER-REPLICA-RECORDING-FORMAT.md.
 // ============================================================================
-import createRenderFrame from './render_frame.mjs?v=clean1';
+import createRenderFrame from './render_frame.mjs?v=ui1';
 // BODIES — PROVEN SPRITE-CLIENT PATH (2026-06-14): the character bodies are now drawn by the
 // EXACT cockpit renderer (web/webgpu-test.html): SpriteClient.buildAssemblyDrawList ->
 // buildEmitterDrawList (selKeyed body path, geometry CLOSED per re_kb project_emitter_status)
@@ -231,7 +231,7 @@ import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=13';
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
 // /gfx/PL{NN}_gfx{1,2}.bin (cached by char_id). Fixes the scramble + the tag-in GFX gap (covers
 // ALL 6 char structs incl P1C2/P2C2/P1C3/P2C3 tag-ins, not just connect-active bodies).
-import { applyLocalGfx } from './local_gfx_overlay.mjs?v=clean1';
+import { applyLocalGfx } from './local_gfx_overlay.mjs?v=ui1';
 const bodyCache = {};   // decode-on-change memo, persists across frames
 
 // Phase 3 — STAGE (background): decode-from-disc cached locally (web/test-atlas/stages/
@@ -241,7 +241,7 @@ const bodyCache = {};   // decode-on-change memo, persists across frames
 // (M1@0x8C2D6B18 · M2@0x8C2D6AD8, shipped in the "cam_mat" read-set region) using the SAME
 // transform_object_122560 math the bodies use — so the stage scrolls/zooms in lockstep with
 // the fighters, NO guessed camera. Rendered as an OP pass BEHIND the bodies.
-import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=clean1';
+import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=propworld';
 
 // EFFECTS (hitsparks / electric / energy): FAITHFUL — pure-effect pool nodes (cat 1..4, GFX2
 // node+0x160 in the Effect-Poly bank 0x0CED0000) render through the SAME transpiled walker as
@@ -251,7 +251,7 @@ import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=clean1'
 // additive quad) was built on a MISLABEL: loc_8c1294c8 is a 20-byte memcpy (the anim-cell
 // loader), NOT an effect cell processor. EffectsClient is now a no-op overlay that only
 // enumerates live effect nodes for diagnostics — effects render in the WebGPU body pass.
-import { EffectsClient } from './effects-client.mjs?v=clean1';
+import { EffectsClient } from './effects-client.mjs?v=ui1';
 
 // HUD (life bars / super meter / timer / combo / portraits-name / win stars): REAL MVC2 art.
 // The timer + combo + level digits are the game's OWN boxed-digit sprites (FONT.BIN rec1,
@@ -259,7 +259,7 @@ import { EffectsClient } from './effects-client.mjs?v=clean1';
 // the engine's white-tex * per-slot vertex color (loc_8c15FFB0) reconstructed as the angled
 // team-tinted parallelogram with the red_health chip trail. Every field reads the live engine
 // addresses (the production GSTA wire's own reads). Supersedes the synthetic renderHudPass().
-import { HudClient } from './hud-client.mjs?v=clean1';
+import { HudClient } from './hud-client.mjs?v=ui1';
 
 // ============================================================================
 // LIVE CONFIG COCKPIT — window.__cfg is read EVERY frame by the render path
@@ -306,6 +306,81 @@ function dbgFromCfg() {
     // the slider acts as a discard ON/OFF at the 0 boundary (a visual probe for missing-pixel cases).
     if (c.ptThresh <= 0.0001) dbg.noDiscard = true;
     return dbg;
+}
+
+// ============================================================================
+// COCKPIT → BODY PATH (2026-06-14 FIX). The drawn bodies are produced by the
+// SpriteClient emitter (buildEmitterDrawList) + SpriteGPU (renderBodiesPass),
+// NOT by the TA post-process (cockpitProcess's output is discarded — it only
+// feeds the validator + readout). So the cockpit knobs were dead. We re-route
+// __cfg onto the ACTUAL body draw:
+//   • DECODE knobs (texMirror / flipForce) -> the window globals buildEmitterDrawList
+//     reads natively every frame (_emitFaceInv / _emitFaceFlip / _emitPartFlipX).
+//   • GEOMETRY knobs (anchorDX/DY, scale, flipP1/P2, isoPart, revOrder, wire) ->
+//     a post-filter on the emitted drawList (applyCfgToBody), so each is GUARANTEED
+//     to move pixels regardless of the emitter's internal model.
+// Called every frame by renderBodiesPass BEFORE SG.render.
+function cfgToBodyGlobals() {
+    const c = __cfg;
+    // texU mirror master switch: off => force the per-quad mirror OFF (raw, no facing flip).
+    // flipForce overrides: 'on' => force mirror, 'off' => force no mirror, 'auto' => engine sense.
+    if (!c.texMirror)            { window._emitFlipY = false; }   // disable the V/U texture mirror entirely
+    else                          { window._emitFlipY = true; }
+    // flipForce auto = engine sense (defaults). 'on'/'off' are applied as an ABSOLUTE texU
+    // override on the drawList in applyCfgToBody (so they always move pixels, not a toggle).
+    window._emitFaceFlip = false; window._emitPartFlipX = true;   // emitter defaults (auto)
+    // carveSide / colRev / inTileMir / widePart were body_decoder controls; body_decoder is
+    // RETIRED (emitter atlas path). They're re-mapped in applyCfgToBody() to visible drawList
+    // probes (per-side filter / order reverse / texU flip / part-0 isolate) so the UI never
+    // lies — every knob moves a drawn pixel.
+}
+
+// Post-filter the emitter drawList for the geometry knobs that must ALWAYS be visible.
+// drawList items: { charId, slot, z, dx, dy, dw, dh, flip, flipY, ... }. slot 0/2/4 = P1,
+// 1/3/5 = P2 (matches CHAR_SLOTS ordering in populateBodiesFromRAM).
+const _P1_SLOTSET = new Set([0, 2, 4]);
+function applyCfgToBody(drawList) {
+    const c = __cfg;
+    let dl = drawList;
+    // global scale + anchor offset, applied about the canvas-space body anchor. Scale about
+    // each quad's own center keeps parts coherent; anchor offset translates the whole figure.
+    if (c.scale !== 1 || c.anchorDX || c.anchorDY) {
+        const sc = c.scale, adx = c.anchorDX, ady = c.anchorDY;
+        dl = dl.map(it => {
+            const cx = it.dx + it.dw / 2, cy = it.dy + it.dh / 2;
+            const ncx = (cx - 320) * sc + 320 + adx, ncy = (cy - 240) * sc + 240 + ady;
+            const ndw = it.dw * sc, ndh = it.dh * sc;
+            return { ...it, dx: ncx - ndw / 2, dy: ncy - ndh / 2, dw: ndw, dh: ndh };
+        });
+    }
+    // per-side facing flip (mirror the quad's screen-X about canvas center + toggle texU).
+    if (c.flipP1 || c.flipP2) {
+        dl = dl.map(it => {
+            const isP1 = _P1_SLOTSET.has(it.slot | 0);
+            if ((isP1 && c.flipP1) || (!isP1 && c.flipP2)) {
+                return { ...it, dx: 640 - (it.dx + it.dw), flip: !it.flip };
+            }
+            return it;
+        });
+    }
+    // per-side draw filter (carveSide): restrict the drawn body to one player side, or none.
+    if (c.carveSide === 'p1')      dl = dl.filter(it => _P1_SLOTSET.has(it.slot | 0));
+    else if (c.carveSide === 'p2') dl = dl.filter(it => !_P1_SLOTSET.has(it.slot | 0));
+    else if (c.carveSide === 'none') dl = [];
+    // within-tile mirror (inTileMir): flip every quad's texU (a visible decode-mirror probe).
+    if (c.inTileMir) dl = dl.map(it => ({ ...it, flip: !it.flip }));
+    // force part flip (flipForce): ABSOLUTE texU override — 'on' = all mirrored, 'off' = none.
+    if (c.flipForce === 'on')       dl = dl.map(it => ({ ...it, flip: true }));
+    else if (c.flipForce === 'off') dl = dl.map(it => ({ ...it, flip: false }));
+    // isolate a single emitted quad index (-1 = all). widePart=off also isolates (probe).
+    let iso = c.isoPart;
+    if (!c.widePart && iso < 0) iso = 0;
+    if (iso >= 0) dl = dl.filter((_, i) => i === iso);
+    // tile-column reverse (colRev) + reverse draw order (revOrder): both reverse quad submission
+    // order (the z/overlap order), a visible probe of draw ordering.
+    if (c.colRev) dl = dl.slice().reverse();
+    if (c.revOrder) dl = dl.slice().reverse();
+    return dl;
 }
 
 const W_DIR = new URL('../webgpu/', import.meta.url);
@@ -693,6 +768,7 @@ function drawBoundsOverlay(rows) {
         _boundsCtx = _boundsCanvas.getContext('2d');
     }
     _boundsCanvas.style.display = __cfg.wire ? 'block' : 'none';
+    window.__boundsCanvas = () => _boundsCanvas;   // headless: prove the wire knob toggles it
     if (!__cfg.wire) return;
     const g = _boundsCtx; g.clearRect(0, 0, _boundsCanvas.width, _boundsCanvas.height);
     g.lineWidth = 1; g.font = '9px monospace';
@@ -1278,7 +1354,10 @@ function renderBodiesPass() {
   // no WebGPU adapter exists, where the GPU draw below is a no-op). updates this._asmDrawn.
   populateBodiesFromRAM();
   populateObjectsFromRAM();
-  const drawList = SPRITECLIENT.buildAssemblyDrawList(640, 480);
+  cfgToBodyGlobals();                                   // route DECODE knobs onto the emitter's live globals
+  let drawList = SPRITECLIENT.buildAssemblyDrawList(640, 480);
+  drawList = applyCfgToBody(drawList);                  // route GEOMETRY knobs onto the drawn quads
+  window.__lastBodyDrawList = drawList;                 // headless: prove cockpit knobs move the drawn quads
   // GPU DRAW (real hardware only) — the cockpit's exact path: lazy SG.init on the shared pvr2
   // device, register loaded atlases, SG.render onto the transparent overlay.
   if (gpuOK && pane.R && pane.R.dev) {
@@ -1297,7 +1376,7 @@ function renderBodiesPass() {
       }
       // T = TextureManager (pane.T) carries the live PVR body palette (T._pal) for the recolor
       // path — same role window._T plays in the cockpit. updatePalette ran in the stage pass.
-      try { SG.render(drawList, {}, pane.T, SPRITECLIENT.buildSparkList(640, 480), null); }
+      try { SG.render(drawList, dbgFromCfg(), pane.T, SPRITECLIENT.buildSparkList(640, 480), null); }
       catch (e) { log('[bodies] SG.render: ' + e.message, 'err'); }
     }
   }
@@ -1750,7 +1829,7 @@ bindCfg('k_ptThresh', 'ptThresh', 'num', 'v_ptThresh', v => v.toFixed(2));
 bindCfg('k_cull', 'cull', 'str');
 bindCfg('k_wire', 'wire', 'chk');
 // reset-all: restore the page defaults
-document.getElementById('cfgReset').onclick = () => {
+const cfgReset = () => {
     const d = { anchorDX:0, anchorDY:0, scale:1, flipP1:false, flipP2:false, widePart:true, isoPart:-1,
         texMirror:true, flipForce:'auto', carveSide:'both', colRev:false, inTileMir:false,
         drawOpaque:true, drawPunch:true, drawTrans:true, depthOverride:false, depthFunc:6, trDepthWrite:false,
@@ -1773,6 +1852,9 @@ document.getElementById('cfgReset').onclick = () => {
     document.getElementById('v_ptThresh').textContent = '0.50';
     cockpitRerender();
 };
+document.getElementById('cfgReset').onclick = cfgReset;
+window.__cfgReset = cfgReset;             // headless: isolate each knob test
+window.__dbgFromCfg = dbgFromCfg;         // headless: prove render-list/blend knobs reach pvr2 dbg
 
 // expose for headless verification
 window.__loadMCRR = loadMCRR;

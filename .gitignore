@@ -221,3 +221,6 @@ re_kb_data/
 tools/re_kb/ingest/cache/
 tools/re_kb/ingest/data/
 tools/re_kb/ingest/generated/
+
+# Node deps (puppeteer for the render-replica headless verification harness)
+node_modules/
