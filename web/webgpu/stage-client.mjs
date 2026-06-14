@@ -223,13 +223,35 @@ export class StageClient {
       // by matching addr; simplest: meshes already aligned to the surr list by addr.
       let surr = 0;
       if (m.textured) surr = this._surrForMeshTA(data, m);
+      // ── PER-MESH RE-PROJECTION GATE (the never-black fix; re_kb 26 prop-matrix defer) ──
+      // The deck/floor/backdrop are authored in true WORLD space (large extent, real
+      // negative depth) and un-project + re-project byte-exact through the live camera —
+      // so they SCROLL/ZOOM with the fighters. The small props (cannons/chains) carry only
+      // LOCAL-space coords in `world` (the runtime NaomiLib matrix that PLACED them on
+      // screen was never captured — re_kb 26 deferred item 1). Re-projecting their local
+      // coords flings them to ±millions off-screen, which is exactly why the stage went
+      // BLACK (only a few faint deck triangles survived). For those props we render the
+      // engine's OWN baked SCREEN `pos` verbatim (camera-static but correctly placed).
+      // Discriminator (grounded in STG0B world geom): a mesh is world-authored iff its
+      // world depth reaches the deck range (minZ < -500) OR its X extent exceeds 1000u.
+      const worldMesh = this._meshIsWorldAuthored(m);
+      const reproject = useLive && worldMesh;
+      // INTENSITY FLOOR (deck-visibility fix). The engine-TA bake decodes a Col_Type=1
+      // (packed-color) intensity for each vertex. For the large world-authored structural
+      // meshes (deck/floor/backdrop) that intensity came out ~0.01 — modulating the bright
+      // deck texture (ShadInstr=1) by ~0 made the deck render BLACK even though it draws on
+      // hardware. Those textured meshes ARE the stage art and the engine shows them at full
+      // intensity, so floor the base colour to 1.0 for textured world meshes (decal-like
+      // pass-through of the deck texture). Small props keep their real per-vertex shading.
+      const intensityFloor = (worldMesh && m.textured) ? 1.0 : 0.0;
       // OP list (engine ListType 0). Engine isp DepthMode/cull are honoured by the renderer.
       const first = vi;
       for (const tri of m.tris) {
         for (const v of tri) {
-          const c = Math.max(0, Math.min(255, Math.round((v.i ?? 1) * 255)));
+          const iv = Math.max(intensityFloor, (v.i ?? 1));
+          const c = Math.max(0, Math.min(255, Math.round(iv * 255)));
           let px = v.pos[0], py = v.pos[1], pz = v.pos[2];
-          if (useLive) {
+          if (reproject) {
             const [sx, sy, sz] = this._projectEngine(v.world[0], v.world[1], v.world[2]);
             px = sx; py = sy; pz = sz;
           }
@@ -251,6 +273,24 @@ export class StageClient {
       for (const t of data.textures) this._taAddrToSurr[t.addr] = t.surr;
     }
     return this._taAddrToSurr[(m.tcw >>> 0) & 0x1FFFFF] || 0;
+  }
+
+  // World-authored vs local-prop classifier (the re-projection gate, re_kb 26).
+  // A mesh authored in TRUE world space spans the deck's depth (a far-negative minZ) or
+  // a large lateral extent; its world coords round-trip through the live camera. A small
+  // local-space prop (cannon/chain) carries only ±tens-of-units local coords whose runtime
+  // placement matrix was never captured — re-projecting it explodes off-screen, so it must
+  // fall back to the engine's baked screen pos. Cached per-mesh (computed once per bake).
+  _meshIsWorldAuthored(m) {
+    if (m._wa !== undefined) return m._wa;
+    let minZ = Infinity, xext = 0;
+    for (const tri of m.tris) for (const v of tri) {
+      const w = v.world; if (!w) { m._wa = false; return false; }
+      if (w[2] < minZ) minZ = w[2];
+      const ax = Math.abs(w[0]); if (ax > xext) xext = ax;
+    }
+    m._wa = (minZ < -500) || (xext > 1000);
+    return m._wa;
   }
 
   // ── camera: world(x,y,z) -> screen(x,y in 640x480, depth=1/w) ──
