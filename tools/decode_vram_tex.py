@@ -12,16 +12,29 @@ REPO = os.path.dirname(HERE)
 VRAM = open(os.path.join(REPO, "_stage_gt", "vram.bin"), "rb").read()
 
 
-def untwiddle_xy(x, y):
-    # Morton / Z-order inverse: build the twiddled linear index from (x,y)
-    def part(v):
-        v &= 0xFFFF
-        v = (v | (v << 8)) & 0x00FF00FF
-        v = (v | (v << 4)) & 0x0F0F0F0F
-        v = (v | (v << 2)) & 0x33333333
-        v = (v | (v << 1)) & 0x55555555
-        return v
-    return part(x) | (part(y) << 1)
+def _twiddle_slow(x, y, x_sz, y_sz):
+    """flycast texconv.cpp twiddle_slow port (core/hw/pvr/texconv.cpp). Interleaves the
+    (x,y) bits y-first into the twiddled linear texel index, supporting NON-SQUARE
+    textures (x_sz != y_sz). For square textures this equals the Morton interleave."""
+    rv = 0; sh = 0; x_sz >>= 1; y_sz >>= 1
+    while x_sz != 0 or y_sz != 0:
+        if y_sz != 0:
+            rv |= (y & 1) << sh; y_sz >>= 1; y >>= 1; sh += 1
+        if x_sz != 0:
+            rv |= (x & 1) << sh; x_sz >>= 1; x >>= 1; sh += 1
+    return rv
+
+
+def untwiddle_xy(x, y, w=None, h=None):
+    # flycast-exact twiddled texel index for pixel (x,y) in a w×h texture. The PVR
+    # twiddle interleaves x-first relative to the (h,w) dims (validated bit-exact vs
+    # the recognizable STG0B t03 "TIME" texture decode). For square textures this is the
+    # Morton Z-order. Square is the common case (all STG0B textures are square); w/h are
+    # passed for rectangular textures.
+    if w is None or h is None:
+        w = h = 1
+        # square fallback: derive from max coordinate is unsafe; callers pass w,h.
+    return _twiddle_slow(y, x, h, w)
 
 
 def rgb565(c):
@@ -51,7 +64,7 @@ def decode(tex_addr, w, h, pixfmt, twiddled=True, out=None):
     for y in range(h):
         for x in range(w):
             if twiddled:
-                idx = untwiddle_xy(x, y)
+                idx = untwiddle_xy(x, y, w, h)
             else:
                 idx = y * w + x
             o = base + idx * 2

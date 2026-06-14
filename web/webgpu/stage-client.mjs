@@ -212,10 +212,14 @@ export class StageClient {
     this._surrToTex = {};            // surrogate == texIndex here (1:1)
     for (const t of data.textures) this._surrToTex[t.surr] = t.surr - 1;
 
-    const writeVtx = (n, x, y, z, c, u, v) => {
+    const writeVtx = (n, x, y, z, r, g, b, u, v) => {
       const fo = n * 7, bo = n * 28;
       vf[fo] = x; vf[fo + 1] = y; vf[fo + 2] = z;
-      vb[bo + 12] = c; vb[bo + 13] = c; vb[bo + 14] = c; vb[bo + 15] = 255;
+      // per-vertex BASE colour (RGBA8) at byte +12 — the renderer modulates the texture
+      // by this (ShadInstr=1). The bake carries the TYPE-CORRECT per-vertex RGB (vt5
+      // floating colour for the carrier deck), so a textured modulate mesh keeps its real
+      // shading instead of a flat grey collapse.
+      vb[bo + 12] = r; vb[bo + 13] = g; vb[bo + 14] = b; vb[bo + 15] = 255;
       vf[fo + 5] = u; vf[fo + 6] = v;
     };
 
@@ -240,27 +244,20 @@ export class StageClient {
       // world depth reaches the deck range (minZ < -500) OR its X extent exceeds 1000u.
       const worldMesh = this._meshIsWorldAuthored(m);
       const reproject = useLive && worldMesh;
-      // ── BROKEN DECK-TEXTURE -> UNTEXTURED SOLID (the green-grid fix, part 2) ──────────
-      // The engine-TA VRAM decode of the LARGE structural deck/backdrop texture (STG0B
-      // t01, 64x64) came out as saturated green/blue noise (top colors 165,255,57 /
-      // 57,158,255 — a wrong pixel-format/twiddle in bake_stage_from_ta.py, NOT a colour
-      // key: the texture has no alpha variation). Mapped+REPEAT-tiled across the deck's
-      // 776 tris, that green border tiles into an even grid spanning the canvas — exactly
-      // the reported "green wireframe grid". The small props (69 meshes, 480 tris) decode
-      // FINE and render recognizably, so they keep their textures. For the world-authored
-      // deck meshes we drop the corrupt texture and render an untextured solid deck colour
-      // (a dark floor that reads as a platform, NOT a grid) until the deck-texture decode
-      // is fixed offline. (re_kb 26: deck-texture decode is a separate bake-pipeline item.)
-      const deckUntex = worldMesh;
-      if (deckUntex) surr = 0;
-      // INTENSITY FLOOR (deck-visibility fix). The engine-TA bake decodes a Col_Type=1
-      // (packed-color) intensity for each vertex. For the large world-authored structural
-      // meshes (deck/floor/backdrop) that intensity came out ~0.01 — modulating the bright
-      // deck texture (ShadInstr=1) by ~0 made the deck render BLACK even though it draws on
-      // hardware. With the texture now dropped we paint a solid mid-grey deck colour; the
-      // small textured props keep their real per-vertex shading (floor 0 = use v.i).
-      const deckColor = 90;                                  // solid untextured deck grey
-      const intensityFloor = 0.0;                            // props use real per-vertex v.i
+      // ── TEXTURED DECK (deck-texture decode FIXED; was the green-grid workaround) ──────
+      // RESOLVED 2026-06-14 (re_kb 26): the deck rendered green/blue "noise" because the
+      // engine-TA walk read the per-vertex colour from the WRONG offset. The carrier-deck
+      // poly is vertex-type 5 (Floating Colour, textured, 64B): its real BASE colour lives
+      // in the SECOND 32B half (+0x20 A,R,G,B), but parse_engine_ta.walk read +0x18
+      // (ignore_1) as a mono intensity → a bogus ~0.0092 that painted the deck black, and
+      // the green/blue TEXTURE (a correct RGB565 twiddled decode — the TCW 0x0809fc00 says
+      // PixelFmt=1 RGB565, ScanOrder=0 twiddled) was modulated either to black or, when the
+      // texture was dropped, replaced by a flat grid-tiling grey. The walk now decodes the
+      // TYPE-CORRECT per-vertex RGBA, so the deck = its REAL green/blue metal texture ×
+      // its REAL dark-grey vertex ramp (ShadInstr=1 modulate) — a shaded carrier deck, no
+      // grid, no noise. We keep the texture for ALL meshes now (deck + props).
+      const deckUntex = false;
+      const intensityFloor = 0.0;                            // unused; per-vertex rgb carried
       // OP list (engine ListType 0). Engine isp DepthMode/cull are honoured by the renderer.
       // ── PER-TRIANGLE DEGENERATE-CULL (the "green wireframe grid" fix; re_kb 26 item 1) ──
       // Whether a vertex is taken from its baked screen `pos` OR re-projected from `world`,
@@ -292,14 +289,17 @@ export class StageClient {
             px = sx; py = sy; pz = sz;
           }
           if (!onScreen(px, py)) { ok = false; break; }
-          // deck meshes: solid grey (texture dropped); props: real per-vertex intensity.
-          const c = deckUntex ? deckColor
-                  : Math.max(0, Math.min(255, Math.round(Math.max(intensityFloor, (v.i ?? 1)) * 255)));
-          fv.push([px, py, pz, c, v.uv[0], v.uv[1]]);
+          // per-vertex BASE colour: the bake carries the TYPE-CORRECT RGB (v.rgb); the
+          // renderer modulates the texture by it (ShadInstr=1). Fall back to the mono
+          // intensity (v.i) for any pre-fix atlas without rgb.
+          let r, g, b;
+          if (v.rgb) { r = v.rgb[0]; g = v.rgb[1]; b = v.rgb[2]; }
+          else { r = g = b = Math.max(0, Math.min(255, Math.round(Math.max(intensityFloor, (v.i ?? 1)) * 255))); }
+          fv.push([px, py, pz, r, g, b, v.uv[0], v.uv[1]]);
         }
         if (!ok) continue;                 // degenerate (unplaced-prop garbage) — drop it
         const first = vi;
-        for (const f of fv) writeVtx(vi++, f[0], f[1], f[2], f[3], f[4], f[5]);
+        for (const f of fv) writeVtx(vi++, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
         opaque.push({ first, count: 3, isp, tsp, tcw: surr, pcw, tileclip: 0 });
       }
     }

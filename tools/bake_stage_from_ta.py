@@ -105,6 +105,23 @@ def inten_of(base):
     return f if 0.0 <= f <= 4.0 else 1.0
 
 
+def rgb_of(v):
+    """Real per-vertex modulation colour (r,g,b 0..255). parse_engine_ta.walk now
+    decodes the TYPE-CORRECT per-vertex RGBA into v['rgba'] (vt5/6 floating colour in
+    the 2nd 32B half, vt7/8 intensity, vt3/4 packed). The OLD bake read a single
+    mis-located 'base' float as a mono intensity — for the carrier deck (vt5) that was
+    ignore_1 (~0.01), painting the deck black. We carry the true RGB so a textured
+    modulate mesh keeps its shading (the deck's dark-grey × the green/blue texture)."""
+    rgba = v.get("rgba")
+    if rgba is not None:
+        r, g, b, _a = rgba
+        cl = lambda x: max(0, min(255, int(round(x * 255))))
+        return [cl(r), cl(g), cl(b)]
+    i = inten_of(v["base"])
+    c = max(0, min(255, int(round(i * 255))))
+    return [c, c, c]
+
+
 def main():
     sid = (sys.argv[1] if len(sys.argv) > 1 else "0B").upper().zfill(2)
     ta = open(os.path.join(GT, "engine_ta.bin"), "rb").read()
@@ -161,7 +178,8 @@ def main():
                 tri.append({"pos": [round(v["x"], 3), round(v["y"], 3), round(v["z"], 6)],
                             "world": [round(wx, 3), round(wy, 3), round(wz, 3)],
                             "uv": [round(v["u"], 5), round(v["v"], 5)],
-                            "i": round(inten_of(v["base"]), 4)})
+                            "i": round(inten_of(v["base"]), 4),
+                            "rgb": rgb_of(v)})
             tris.append(tri)
         if not tris:
             continue

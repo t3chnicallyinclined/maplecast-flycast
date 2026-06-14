@@ -65,7 +65,15 @@ def _raster(fb, zb, tex, tri):
     if abs(den) < 1e-9:
         return
     uvs = [a["uv"], b["uv"], c["uv"]]
-    ins = [a.get("i", 1), b.get("i", 1), c.get("i", 1)]
+    # per-vertex BASE colour (the bake now carries the type-correct rgb; fall back to the
+    # mono intensity for pre-fix atlases). Matches stage-client writeVtx + the shader's
+    # ShadInstr=1 modulate (texture * base).
+    def _rgb(v):
+        if "rgb" in v:
+            return [v["rgb"][0] / 255.0, v["rgb"][1] / 255.0, v["rgb"][2] / 255.0]
+        i = v.get("i", 1)
+        return [i, i, i]
+    cols = [_rgb(a), _rgb(b), _rgb(c)]
     if tex is not None:
         th, tw = tex.shape[0], tex.shape[1]
     for py in range(miny, maxy + 1):
@@ -78,14 +86,16 @@ def _raster(fb, zb, tex, tri):
             z = l0 * pa[2] + l1 * pb[2] + l2 * pc[2]
             if z <= zb[py, px]:
                 continue
-            inten = l0 * ins[0] + l1 * ins[1] + l2 * ins[2]
+            br = l0 * cols[0][0] + l1 * cols[1][0] + l2 * cols[2][0]
+            bg = l0 * cols[0][1] + l1 * cols[1][1] + l2 * cols[2][1]
+            bb = l0 * cols[0][2] + l1 * cols[1][2] + l2 * cols[2][2]
             if tex is not None:
                 u = l0 * uvs[0][0] + l1 * uvs[1][0] + l2 * uvs[2][0]
                 v = l0 * uvs[0][1] + l1 * uvs[1][1] + l2 * uvs[2][1]
                 tcol = tex[int((v % 1.0) * th) % th, int((u % 1.0) * tw) % tw]
-                fb[py, px] = [tcol[0] * inten, tcol[1] * inten, tcol[2] * inten]
+                fb[py, px] = [tcol[0] * br, tcol[1] * bg, tcol[2] * bb]
             else:
-                fb[py, px] = [inten, inten, inten]
+                fb[py, px] = [br, bg, bb]
             zb[py, px] = z
 
 

@@ -120,18 +120,43 @@ def walk(ta):
         if ptype == 7:
             # vertex param — size depends on current poly
             v64 = cur and cur["_v64"]
-            # screen X,Y,Z(1/w) at +4,+8,+0xC ; base color + UV depend on type but the
-            # standard packed-color textured vertex (type 3) layout is:
-            #   +0 PCW  +4 x  +8 y  +C z  +10 u  +14 v  +18 base_col  +1C offs_col
+            vt = cur["vt"] if cur is not None else None
+            # screen X,Y,Z(1/w) at +4,+8,+0xC ; UV at +0x10,+0x14. The per-vertex BASE
+            # COLOUR layout differs by vertex type (core/hw/pvr/ta_structs.h):
+            #   vt3  (Packed Color, textured):  +0x18 BaseCol(ARGB8888 packed)
+            #   vt5  (Floating Color, textured, 64B): +0x18,+0x1C ignored; the BASE colour
+            #        is the second 32B half — +0x20 A, +0x24 R, +0x28 G, +0x2C B (floats 0..1)
+            #   vt7  (Intensity, textured):     +0x18 BaseInt (float 0..1) — modulates FaceColor
+            # The OLD walk read +0x18 as `base` for EVERY type — for vt5 that is `ignore_1`
+            # (garbage, decoded to a bogus ~0.01 intensity that painted the deck black). We
+            # now decode the real per-vertex RGBA so a textured Intensity/Floating mesh (the
+            # carrier deck, vt5, ShadInstr=modulate) keeps its true dark-grey shading.
             x = f(struct.unpack_from("<I", ta, o + 4)[0])
             y = f(struct.unpack_from("<I", ta, o + 8)[0])
             z = f(struct.unpack_from("<I", ta, o + 12)[0])
             u = f(struct.unpack_from("<I", ta, o + 16)[0])
             v = f(struct.unpack_from("<I", ta, o + 20)[0])
-            base = struct.unpack_from("<I", ta, o + 24)[0]
+            base = struct.unpack_from("<I", ta, o + 24)[0]   # vt3 BaseCol (kept for compat)
+            rgba = None      # (r,g,b,a) floats 0..1 — the REAL modulation colour
+            if vt == 5 or vt == 6:        # Floating Color (textured) — colour in 2nd half
+                A = f(struct.unpack_from("<I", ta, o + 32 + 0)[0])
+                R = f(struct.unpack_from("<I", ta, o + 32 + 4)[0])
+                G = f(struct.unpack_from("<I", ta, o + 32 + 8)[0])
+                B = f(struct.unpack_from("<I", ta, o + 32 + 12)[0])
+                rgba = (R, G, B, A)
+            elif vt == 7 or vt == 8:      # Intensity (textured) — single float, grey
+                bi = f(base)
+                if 0.0 <= bi <= 4.0:
+                    rgba = (bi, bi, bi, 1.0)
+            elif vt == 3 or vt == 4:      # Packed ARGB8888
+                A = ((base >> 24) & 0xFF) / 255.0
+                R = ((base >> 16) & 0xFF) / 255.0
+                G = ((base >> 8) & 0xFF) / 255.0
+                B = (base & 0xFF) / 255.0
+                rgba = (R, G, B, A)
             if cur is not None:
                 cur["verts"].append({"x": x, "y": y, "z": z, "u": u, "v": v, "base": base,
-                                     "eos": (c >> 28) & 1})
+                                     "rgba": rgba, "eos": (c >> 28) & 1})
             o += 64 if v64 else 32
         elif ptype == 4 or ptype == 5:
             b = pcw_bits(c)

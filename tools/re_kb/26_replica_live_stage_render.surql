@@ -159,3 +159,27 @@ RELATE finding:stage_pernode_matrices_closed->cites->source:stage_camera_transfo
 RELATE finding:stage_pernode_matrices_closed->about->finding:stage_real_bug_pernode_matrices;
 RELATE finding:stage_pernode_matrices_closed->about->finding:stage_prop_matrices_deferred;
 RELATE finding:stage_pernode_matrices_closed->about->finding:stage_ta_bake_camera_note;
+
+-- ============================================================================
+-- 26c DECK-TEXTURE "GREEN NOISE" — CLOSED (2026-06-14).
+-- The carrier-deck/floor rendered as solid grey because the prior agent DROPPED
+-- the deck texture, believing it decoded to "green/blue noise" (a wrong
+-- format/twiddle). RE-INVESTIGATION grounded in the TCW DISPROVES the format
+-- theory: the decode was CORRECT; the real bug was the per-vertex COLOUR.
+-- ============================================================================
+
+UPSERT source:deck_tcw SET kind='capture',
+  ref='_stage_gt/engine_ta.bin deck poly (mesh 0, 726 tris) TCW=0x0809FC00, TSP=0x2009A45B',
+  note='Per core/hw/pvr/ta_structs.h union TCW: TexAddr(b0-20)=0x9FC00 -> byte addr 0x9FC00<<3=0x4FE000; ScanOrder(b26)=0 => TWIDDLED; PixelFmt(b27-29)=1 => RGB565 (PixelFormat enum Pixel565=1); VQ(b30)=0; MipMapped(b31)=0; StrideSel(b25)=0. TSP: TexU/TexV=64x64, ShadInstr(b6-7)=1 (MODULATE: out=texture*base), ClampU=1, FlipV=1. So the deck IS a 64x64 RGB565 twiddled texture modulated by the per-vertex base colour. Decode format/twiddle are EXACTLY what bake_stage_from_ta.py tex_params already read from the TCW — they were NEVER wrong.';
+
+UPSERT source:deck_vertex_colour_bug SET kind='code',
+  ref='tools/parse_engine_ta.py walk() vertex branch; tools/bake_stage_from_ta.py inten_of/rgb_of; tools/render_engine_ta.py _raster',
+  note='The deck poly is VERTEX TYPE 5 (Floating Colour, textured, Col_Type=1) — a 64B vertex (TA_Vertex5A 32B + TA_Vertex5B 32B). Its real BASE colour is in the SECOND half (+0x20 A,+0x24 R,+0x28 G,+0x2C B as floats, ~A=1 R=G=B=0.0..0.05 i.e. a dark-grey ramp). The OLD walk read +0x18 (ignore_1) as a mono `base` float for EVERY vertex type, which for vt5 = 0x3c175c5a = bogus intensity 0.0092. So the deck modulated its (correctly-decoded green/blue RGB565) texture by ~0.01 -> NEAR BLACK, and when the texture was dropped, by a flat grey -> a tiling grid. FIX: walk() now decodes the TYPE-CORRECT per-vertex RGBA (vt5/6 = 2nd-half floating colour; vt7/8 = intensity float; vt3/4 = packed ARGB8888) into v[rgba]; bake rgb_of carries it as per-vertex rgb; render_engine_ta + validate_stage_ta_client + stage-client writeVtx all consume the real RGB.';
+
+UPSERT finding:stage_deck_texture_closed SET
+  statement='DECK-TEXTURE "GREEN NOISE" — CLOSED. The deck was NOT a wrong pixel-format/twiddle: the TCW (0x0809FC00) says RGB565 + twiddled + 64x64, and bake_stage_from_ta.py tex_params already decoded exactly that (bit-validated: the SAME decoder produces the recognizable STG0B t03 "TIME" HUD texture). The green/blue grid IS the genuine STG0B floor art (a perspective grid deck with blue support beams) — the engine draws it too. The REAL bug was the per-vertex MODULATION COLOUR: the deck poly is TA vertex type 5 (Floating Colour, 64B), whose base colour lives in the second 32B half (+0x20 ARGB floats, a dark-grey ramp), but parse_engine_ta.walk read +0x18 (ignore_1) as a mono intensity = 0.0092 -> modulated the deck to black, masked by the prior agent dropping the texture to a flat grey. FIXED: (1) parse_engine_ta.walk decodes the TYPE-CORRECT per-vertex RGBA; (2) bake_stage_from_ta.py rgb_of carries per-vertex rgb in STG0B_ta.json; (3) decode_vram_tex untwiddle now uses the flycast twiddle_slow(y,x,h,w) (handles non-square, bit-identical to the validated Morton on square); (4) stage-client.mjs _buildFromTA RE-ENABLES the textured deck (deckUntex=false) and writeVtx writes the real per-vertex RGB so the renderer modulates (ShadInstr=1, shaders.mjs fu.si==1). VALIDATED (cardinal rule 3): the fixed engine-TA ground truth (render_engine_ta.py, _stage_gt/GROUNDTRUTH_engine_ta_STG0B.png) shows the SAME green-grid+blue-beam deck, and the headless client render (tools/render-replica-poc/shot_stage_headless.mjs, _stage_gt/SHOT_deck_textured.png) MATCHES it — deck is TEXTURED, not grey, not noise (_stage_gt/DECK_FIXED_client_vs_engine.png). Cache-bust replay.html emitterz1->emitterz2. Body/HUD/emitter/render_frame UNTOUCHED.',
+  status='confirmed', confidence='high', date='2026-06-14';
+
+RELATE finding:stage_deck_texture_closed->cites->source:deck_tcw;
+RELATE finding:stage_deck_texture_closed->cites->source:deck_vertex_colour_bug;
+RELATE finding:stage_deck_texture_closed->cites->source:stage_camera_transform;

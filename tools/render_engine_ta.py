@@ -84,14 +84,22 @@ def _raster(fb, zb, tex, a, b, c):
     pts = [(a["x"], a["y"]), (b["x"], b["y"]), (c["x"], c["y"])]
     zs = [a["z"], b["z"], c["z"]]
     uvs = [(a["u"], a["v"]), (b["u"], b["v"]), (c["u"], c["v"])]
-    # Intensity-mode (Col_Type=2): vertex base = float intensity (3f800000 = 1.0),
-    # ShadInstr=1 modulate => out = texture * intensity. Decode as float.
+    # Per-vertex BASE colour (ShadInstr=1 modulate => out = texture * base). parse_engine_ta
+    # now decodes the TYPE-CORRECT per-vertex RGBA into v['rgba'] (vt5/6 floating colour
+    # from the 2nd 32B half, vt7/8 intensity). The OLD code read +0x18 'base' as a float
+    # intensity for EVERY type — for the deck (vt5) that was ignore_1 (~0.01), making the
+    # deck render black in the "ground truth". Use the real RGBA so the deck modulates
+    # by its true dark-grey ramp.
     bases = []
     for v in (a, b, c):
-        inten = struct.unpack("<f", struct.pack("<I", v["base"] & 0xFFFFFFFF))[0]
-        if not (0.0 <= inten <= 4.0):
-            inten = 1.0
-        bases.append((inten, inten, inten))
+        rgba = v.get("rgba")
+        if rgba is not None:
+            bases.append((rgba[0], rgba[1], rgba[2]))
+        else:
+            inten = struct.unpack("<f", struct.pack("<I", v["base"] & 0xFFFFFFFF))[0]
+            if not (0.0 <= inten <= 4.0):
+                inten = 1.0
+            bases.append((inten, inten, inten))
     xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
     if max(zs) <= 0:
         return
