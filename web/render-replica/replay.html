@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF) [hud:ui1 · cockpit-live]</title>
+<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF) [hud:ui1 · cockpit-live · plates1]</title>
 <style>
   :root { color-scheme: dark; }
   body { margin:0; background:#0c0e12; color:#cdd6e0; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; }
@@ -260,7 +260,7 @@ import { EffectsClient } from './effects-client.mjs?v=rf2';
 // the engine's white-tex * per-slot vertex color (loc_8c15FFB0) reconstructed as the angled
 // team-tinted parallelogram with the red_health chip trail. Every field reads the live engine
 // addresses (the production GSTA wire's own reads). Supersedes the synthetic renderHudPass().
-import { HudClient } from './hud-client.mjs?v=rf2';
+import { HudClient } from './hud-client.mjs?v=plates1';
 
 // ============================================================================
 // LIVE CONFIG COCKPIT — window.__cfg is read EVERY frame (no reload to take
@@ -1114,8 +1114,13 @@ function renderHudPass() {
     populateHudStateFromRAM();
     const ctx = ensureHudOverlay();                   // lazy overlay-canvas create (once)
     try {
-        SPRITECLIENT.drawHUD(ctx);                     // PROVEN cockpit HUD (clears + draws)
+        SPRITECLIENT.drawHUD(ctx);                     // PROVEN cockpit HUD (clears + draws bars/meters/timer/combo)
         SPRITECLIENT.drawHudReal(ctx);                 // textured HUDQ quads if streamed (no-op otherwise)
+        // COMPOSITE the REAL decoded portraits + names + win stars ON TOP of drawHUD.
+        // drawHUD owns the clear + bars/meters; this adds JUST the corner plates the
+        // swap dropped (textured FAC portraits + roster names + stars), on the SAME ctx,
+        // positioned above the bars so nothing overlaps. [hud:plates-on-drawHUD]
+        hud.renderPlatesOnly(ctx, rdU8, CHAR_SLOTS);
     } catch (e) { log('[hud] ' + e.message, 'warn'); }
 }
 
@@ -1562,11 +1567,11 @@ function showFrame(f) {
     // vs ASMTRACE). It also feeds the per-frame GROUND-TRUTH validator (params 16/16) + readout.
     const { ta, quads, len, quadSels, quadGfx1s, quadColRow, quadMirror } = transpiledTA(ram);
     window.__lastTA = ta;      // expose for headless verification (TA-level motion probe)
-    // PURE-STATE TEXTURES (FAITHFUL VERBATIM, re_kb 28): decode each active body part into
-    // pane.vram at its part-base TCW — loc_8c0354c0 LZSS (byte-exact vs engine .raw) +
-    // loc_8c033d78 verbatim contiguous write. NO carve/detwiddle; each quad's TCW indexes the
-    // right chunk, read at its TSP dims by pane.render's TextureManager (== flycast texture_TW).
-    if (gpuOK && pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, null, null);
+    // PURE-STATE TEXTURES (PER-TILE RE-TILE, 2026-06-14): decode+detwiddle each body part, then
+    // for each emitted tile slice its (col,row) 32×32, re-twiddle, and write at THAT tile's own
+    // TCW. quadColRow = the storage (col,row) grid index (REQUIRED). Supersedes the verbatim-blob
+    // write (which read garbage for non-32-square parts = the live-Sentinel scatter).
+    if (gpuOK && pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, quadColRow, null);
     // Cockpit: post-process the TA (anchor/scale/flip/iso/reverse) + drive the readout & overlay;
     // returns the buffer to actually DRAW (drawTA carries every geometry/decode knob).
     const drawTA = cockpitProcess(ta, quads, quadSels, quadGfx1s, f, quadColRow, quadMirror);
