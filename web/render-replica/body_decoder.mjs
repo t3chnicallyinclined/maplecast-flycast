@@ -178,24 +178,34 @@ const TCW_OFF = 0x0C;                             // TCW is word 3 of the 16B pa
 //   (Single-tile parts keep the proven direct whole-blob write at the run base.)
 const TILE_BYTES = 0x200;                         // one 32x32 PAL4 tile = 512B (1024 px / 2)
 
-// flycast PVR rectangular twiddle index for a w x h region (bx=log2 w, by=log2 h): interleave
-// x/y bits up to min(w,h), then run the longer axis linearly. Used to (a) de-twiddle the stored
-// full-WxH blob into a row-major image and (b) re-twiddle each carved m x m cell into a 32x32 tile.
-function twop(x, y, bx, by) {
-    let r = 0, b = 0; const sq = Math.min(bx, by);
-    for (let i = 0; i < sq; i++) { r |= ((x >> i) & 1) << b; b++; r |= ((y >> i) & 1) << b; b++; }
-    if (bx > by) r |= (x >> sq) << b; else if (by > bx) r |= (y >> sq) << b;
-    return r;
+// flycast PVR PAL4 twiddle — the PROVEN-correct convention, ported VERBATIM from the atlas baker
+// (tools/rip_gfx2_assembly.py _twiddle_slow / tile_to_indices) and matching the renderer
+// (web/webgpu/texture-manager.mjs tw/twop): interleave Y-then-X bits. The previous hand-rolled
+// X-then-Y `twop` transposed every part (60-91% scramble vs the real ROM atlas — sel210 90.5%),
+// which all the carve work was wrongly layered on top of. (xSz/ySz are the block dims, e.g. 32,32.)
+function twiddleSlow(x, y, xSz, ySz) {
+    let rv = 0, sh = 0; xSz >>= 1; ySz >>= 1;
+    while (xSz || ySz) {
+        if (ySz) { rv |= (y & 1) << sh; ySz >>= 1; y >>= 1; sh++; }
+        if (xSz) { rv |= (x & 1) << sh; xSz >>= 1; x >>= 1; sh++; }
+    }
+    return rv;
 }
-// De-twiddle a full-WxH PAL4 storage blob into a row-major nibble image (Uint8Array, W*H, one
-// 4-bit index per byte). bytes = decodePart output (the verbatim VRAM blob).
+const twSq = (x, y, sq) => twiddleSlow(x, 0, sq, sq) + twiddleSlow(0, y, sq, sq);  // one square block
+// De-twiddle a full-WxH PAL4 storage blob into a row-major nibble image (Uint8Array, W*H). PORT of
+// tile_to_indices: a run of min(W,H) SQUARE blocks, each stored CONSECUTIVELY in the blob and
+// twiddled internally (flycast texture_TW loop) — NOT one rectangular twiddle. bytes = decodePart out.
 function detwiddleImage(bytes, W, H) {
     const img = new Uint8Array(W * H);
-    const bx = Math.log2(W), by = Math.log2(H);
-    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-        const ti = twop(x, y, bx, by);
-        const b = bytes[ti >> 1] | 0;
-        img[y * W + x] = (ti & 1) ? (b >> 4) & 0xF : b & 0xF;
+    const sq = Math.min(W, H), blkBytes = (sq * sq) >> 1;
+    let pos = 0;
+    for (let by0 = 0; by0 < H; by0 += sq) for (let bx0 = 0; bx0 < W; bx0 += sq) {
+        const base = pos; pos += blkBytes;
+        for (let y = 0; y < sq; y++) for (let x = 0; x < sq; x++) {
+            const ti = twSq(x, y, sq);
+            const b = bytes[base + (ti >> 1)] | 0;
+            img[(by0 + y) * W + (bx0 + x)] = (ti & 1) ? (b >> 4) & 0xF : b & 0xF;
+        }
     }
     return img;
 }
@@ -209,7 +219,7 @@ function carveTile(img, W, H, col, row, m, inTileMir) {
         const sx = col * m + ix, sy = row * m + y;
         if (sx >= W || sy >= H) continue;
         const v = img[sy * W + sx];
-        const ti = twop(x, y, 5, 5);                 // 32x32 local twiddle
+        const ti = twSq(x, y, 32);                   // 32x32 local twiddle (flycast Y-then-X, matches the renderer)
         if (ti & 1) tile[ti >> 1] = (tile[ti >> 1] & 0x0F) | (v << 4);
         else        tile[ti >> 1] = (tile[ti >> 1] & 0xF0) | v;
     }
