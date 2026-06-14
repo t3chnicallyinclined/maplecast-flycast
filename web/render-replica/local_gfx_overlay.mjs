@@ -60,35 +60,57 @@ function fetchChar(cid, hexName, log) {
     return p;
 }
 
+// A char_struct slot's GFX node base is valid (points into guest area-3 RAM) iff it carries
+// the 0x0C../0x8C.. tag. Tag-in bodies pre-seed this base at match load even while active=0.
+const validBase = (g) => !!((g & 0x0C000000) || (g & 0x8C000000));
+
 // ----------------------------------------------------------------------------
 // PUBLIC: applyLocalGfx(ram, log) — call ONCE PER FRAME, BEFORE render_frame/transpiledTA.
-//   Walks the char structs; for every ACTIVE slot, fetches (memoized by char_id) the local
-//   disc GFX1/GFX2 and writes them into `ram` at node+0x15C/0x160 — OVERRIDING shipped bytes.
+//   Walks ALL SIX char structs (slot stride 0x5A4: P1C1/P2C1/P1C2/P2C2/P1C3/P2C3) — NOT the
+//   slot-table count (which clamps to connect-active bodies and EXCLUDES tag-ins; re_kb 23b).
+//   For every ACTIVE body, overlays the COMPLETE local disc GFX1/GFX2 (memoized by the body's
+//   LIVE char_id @+0x001) at node+0x15C/0x160, OVERRIDING the shipped/seed bytes — so a tag-in
+//   body (P1C2/P2C2/P1C3/P2C3) whose GFX was served stale from the frozen connect seed is fixed
+//   exactly like a connect-active body (re_kb 25 finding:replica_live_stray_field_pin).
+//
+//   TAG-IN HARDENING: also PRE-FETCH the GFX of every INACTIVE-but-loaded body (valid GFX base,
+//   active==0) so its art is cached BEFORE it tags in — this kills the one-frame async-fetch
+//   stand that would otherwise show one garbage frame from the stale seed at the tag-in instant.
 //   Returns { overlaid, pending } for diagnostics. Cheap after first load (cache hit = memcpy).
 // ----------------------------------------------------------------------------
 export function applyLocalGfx(ram, log) {
     let overlaid = 0, pending = 0;
     const done = new Set();                           // a char may occupy several slots — overlay once/frame
     for (const base of SLOTS) {
-        if (u8(ram, base + OFF_ACTIVE) === 0) continue;
+        const active = u8(ram, base + OFF_ACTIVE) !== 0;
         const cid = u8(ram, base + OFF_CID);
         const g1b = u32(ram, base + OFF_GFX1);
         const g2b = u32(ram, base + OFF_GFX2);
-        // sanity: the node must point into guest RAM (0x0C../0x8C.. area-3) for an overlay target.
-        if (!((g1b & 0x0C000000) || (g1b & 0x8C000000))) continue;
+        // the node must point into guest RAM (0x0C../0x8C.. area-3) for an overlay target.
+        // Applies to INACTIVE slots too: a tag-in body pre-seeds a valid GFX base before it
+        // activates, so we can pre-warm its art now and overlay it the instant it tags in.
+        if (!validBase(g1b)) continue;
 
         const hexName = 'PL' + cid.toString(16).toUpperCase().padStart(2, '0');
         let ent = _cache.get(cid);
-        if (ent === undefined) { fetchChar(cid, hexName, log); pending++; continue; }
-        if (ent === 'miss')    { continue; }          // no local art — shipped GFX stands
-        if (!(ent instanceof Uint8Array ? false : ent.gfx1)) {  // still a Promise (in-flight)
-            pending++; continue;
+        if (ent === undefined) {                      // first sighting (active OR pre-warm) -> fetch
+            fetchChar(cid, hexName, log);
+            if (active) pending++;                     // an active body with no art yet = 1 stale frame
+            continue;
         }
+        if (ent === 'miss')    { continue; }          // no local art — shipped GFX stands
+        if (!(ent instanceof Uint8Array) && !ent.gfx1) {  // still a Promise (in-flight)
+            if (active) pending++;
+            continue;
+        }
+        // Only ACTIVE bodies get their GFX written into RAM (an inactive body isn't walked by
+        // render_frame; we only needed its fetch warmed above).
+        if (!active) continue;
         if (done.has(cid)) continue;                  // already overlaid this char this frame
         done.add(cid);
 
-        // OVERRIDE: write the COMPLETE disc GFX over whatever the server shipped, at the exact
-        // base the walker/decoder read from. (gfx1base & 0xFFFFFF) / (gfx2base & 0xFFFFFF).
+        // OVERRIDE: write the COMPLETE disc GFX over whatever the server shipped/seeded, at the
+        // exact base the walker/decoder read from. (gfx1base & 0xFFFFFF) / (gfx2base & 0xFFFFFF).
         const o1 = g1b & RAM_MASK, o2 = g2b & RAM_MASK;
         if (o1 + ent.gfx1.length <= ram.length) ram.set(ent.gfx1, o1);
         if (o2 + ent.gfx2.length <= ram.length) ram.set(ent.gfx2, o2);

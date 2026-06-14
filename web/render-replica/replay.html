@@ -215,15 +215,16 @@
 // Reuses ta-parser/pvr2-renderer/texture-manager VERBATIM, and render_frame.wasm UNMODIFIED
 // (Phases 1/2 frozen byte-exact). MCRR spec: docs/RENDER-REPLICA-RECORDING-FORMAT.md.
 // ============================================================================
-import createRenderFrame from './render_frame.mjs?v=facingmir';
+import createRenderFrame from './render_frame.mjs?v=taginfix';
 // Phase 5 — PURE-STATE TEXTURES: client decodes each active body part's sprite from the
 // shipped-once compressed GFX (in the RAM image) + the live sprite_id, writes it to pane.vram
 // at the TCW addr render_frame carries. Replaces the per-frame "bodytex" VRAM band (removed).
-import { ensureBodyTextures } from './body_decoder.mjs?v=facingmir';
+import { ensureBodyTextures } from './body_decoder.mjs?v=taginfix';
 // Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
-// /gfx/PL{NN}_gfx{1,2}.bin (cached by char_id). Fixes the scramble + is the local-ROM cache.
-import { applyLocalGfx } from './local_gfx_overlay.mjs';
+// /gfx/PL{NN}_gfx{1,2}.bin (cached by char_id). Fixes the scramble + the tag-in GFX gap (covers
+// ALL 6 char structs incl P1C2/P2C2/P1C3/P2C3 tag-ins, not just connect-active bodies).
+import { applyLocalGfx } from './local_gfx_overlay.mjs?v=taginfix';
 const bodyCache = {};   // decode-on-change memo, persists across frames
 
 // ============================================================================
@@ -404,7 +405,7 @@ function synthSnap(w, h) {
 
 // ---------------------------------------------------------------- render_frame.wasm
 let frameMod;
-async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=facingmir' : p }); } return frameMod; }
+async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=taginfix' : p }); } return frameMod; }
 function transpiledTA(ram) {
     const M = frameMod;
     const ramPtr = M._malloc(ram.length); M.HEAPU8.set(ram, ramPtr);
@@ -713,6 +714,11 @@ async function seedFrom(pre, mb) {
         else ram.set(pre.staticData[i], guestOff(r.addr));
     });
     log(`  static-seeded ${mb.toFixed(1)} MB RAM + VRAM ${(pre.vramBytes/1048576).toFixed(0)}MB + PVR ${(pre.pvrBytes/1024).toFixed(0)}KB`, 'ok');
+
+    // PRE-WARM the local-GFX cache from the connect seed: applyLocalGfx kicks a fetch for EVERY
+    // loaded char (active bodies + inactive-but-loaded tag-in candidates), so by the first live
+    // frame the disc art is cached and a tag-in body overlays with ZERO stale frames.
+    try { applyLocalGfx(ram, log); } catch (e) { log('[local-gfx] pre-warm skipped: ' + e.message, 'warn'); }
 
     try {
         await pane.ensure();

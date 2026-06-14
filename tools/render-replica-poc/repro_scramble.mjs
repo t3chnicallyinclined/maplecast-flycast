@@ -103,6 +103,17 @@ const fr = frames[wantF];
 { let o = fr.dynOff; for (const r of dynamicRegs) { ram.set(buf.subarray(o, o + r.len), G(r.addr)); o += r.len; } }
 const nTail = applyGfxTail(fr.gfxOff);
 console.log(`file=${path} frame=${wantF} vframe=${fr.vframe} taSize(carried)=${fr.taSize} gfxTailRegions=${nTail}`);
+// --stale <slot>: overwrite a tag-in body's seed GFX with a DIFFERENT char's art (PL00) to
+// reproduce the prod "frozen previous-char residue" the connect seed serves for a tag-in body.
+if (args.includes('--stale')) {
+    const slot = parseInt(args[args.indexOf('--stale') + 1], 16);
+    const g1b = u32r(slot + 0x15C), g2b = u32r(slot + 0x160), cid = u8r(slot + 1);
+    const sg1 = new Uint8Array(readFileSync(GFX_DIR + 'PL00_gfx1.bin'));
+    const sg2 = new Uint8Array(readFileSync(GFX_DIR + 'PL00_gfx2.bin'));
+    ram.set(sg1.subarray(0, Math.min(sg1.length, ram.length - G(g1b))), G(g1b));
+    ram.set(sg2.subarray(0, Math.min(sg2.length, ram.length - G(g2b))), G(g2b));
+    console.log(`  [--stale] slot 0x${slot.toString(16)} (cid PL${cid.toString(16).toUpperCase().padStart(2,'0')}) GFX seeded with PL00 residue @0x${G(g1b).toString(16)}/0x${G(g2b).toString(16)}`);
+}
 if (!noOverlay) { const n = applyLocalGfx(); console.log(`  overlaid ${n} char GFX`); }
 else console.log('  [--no-overlay] shipped/static GFX stands');
 
