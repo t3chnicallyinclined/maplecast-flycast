@@ -215,16 +215,16 @@
 // Reuses ta-parser/pvr2-renderer/texture-manager VERBATIM, and render_frame.wasm UNMODIFIED
 // (Phases 1/2 frozen byte-exact). MCRR spec: docs/RENDER-REPLICA-RECORDING-FORMAT.md.
 // ============================================================================
-import createRenderFrame from './render_frame.mjs?v=taginfix';
+import createRenderFrame from './render_frame.mjs?v=palettefix';
 // Phase 5 — PURE-STATE TEXTURES: client decodes each active body part's sprite from the
 // shipped-once compressed GFX (in the RAM image) + the live sprite_id, writes it to pane.vram
 // at the TCW addr render_frame carries. Replaces the per-frame "bodytex" VRAM band (removed).
-import { ensureBodyTextures } from './body_decoder.mjs?v=taginfix';
+import { ensureBodyTextures } from './body_decoder.mjs?v=palettefix';
 // Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
 // /gfx/PL{NN}_gfx{1,2}.bin (cached by char_id). Fixes the scramble + the tag-in GFX gap (covers
 // ALL 6 char structs incl P1C2/P2C2/P1C3/P2C3 tag-ins, not just connect-active bodies).
-import { applyLocalGfx } from './local_gfx_overlay.mjs?v=taginfix';
+import { applyLocalGfx } from './local_gfx_overlay.mjs?v=palettefix';
 const bodyCache = {};   // decode-on-change memo, persists across frames
 
 // ============================================================================
@@ -370,6 +370,22 @@ function applyGfxTail(u8, p) {
     return p;
 }
 
+// Read the PALETTE tail at byte offset `p` (strict append AFTER the GFX tail): u32 pvrPalLen,
+// then pvrPalLen bytes of the LIVE pvr_regs (32KB: PAL_RAM_CTRL + PALETTE_RAM). The server ships
+// this ON CHANGE (char load / tag-in / skin override); refresh pane.pvr so the next pane.render ->
+// updatePalette(this.pvr) uploads the fresh banks. pvrPalLen ALWAYS present (0 = steady state).
+// Tolerates an older server that omits the tail (< 4 bytes left -> p unchanged) — backward-safe.
+function applyPvrPalTail(u8, p) {
+    if (p + 4 > u8.length) return p;               // old server: no palette tail
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const palLen = dv.getUint32(p, true); p += 4;
+    if (palLen === 0) return p;                    // steady state: nothing changed
+    if (palLen > 0x10000 || p + palLen > u8.length) return p - 4;  // sanity: not a real tail
+    pane.pvr = u8.slice(p, p + palLen);            // fresh pvr_regs -> next render's updatePalette uploads it
+    p += palLen;
+    return p;
+}
+
 // ---------------------------------------------------------------- pvr2 pane
 class Pane {
     constructor(canvas) { this.canvas = canvas; this.R = new PVR2Renderer(); this.ready = null; }
@@ -405,7 +421,7 @@ function synthSnap(w, h) {
 
 // ---------------------------------------------------------------- render_frame.wasm
 let frameMod;
-async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=taginfix' : p }); } return frameMod; }
+async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=palettefix' : p }); } return frameMod; }
 function transpiledTA(ram) {
     const M = frameMod;
     const ramPtr = M._malloc(ram.length); M.HEAPU8.set(ram, ramPtr);
@@ -903,6 +919,10 @@ function liveApplyFrame(u8) {
     // walker + body_decoder read FRESH cell records instead of the frozen prefix snapshot. nGfx
     // is ALWAYS present (0 = steady state). Tolerate an old server that omits the tail (p==len).
     p = applyGfxTail(u8, p);
+    // ---- PALETTE TAIL (palette-gap fix): u32 pvrPalLen + pvrPalLen bytes of fresh pvr_regs.
+    // Refreshes pane.pvr so a tag-in / late-loaded char's palette reaches the GPU (server ships it
+    // on-change; 0 in steady state). Strict append after the GFX tail, matching buildPrefixLocked.
+    p = applyPvrPalTail(u8, p);
     const engTa = taSize ? u8.subarray(p, p + taSize) : null;
 
     // Phase A: override the shipped/streamed GFX with the COMPLETE local disc art at
