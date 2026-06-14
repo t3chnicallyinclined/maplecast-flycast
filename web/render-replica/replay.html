@@ -242,7 +242,7 @@ const bodyCache = {};   // decode-on-change memo, persists across frames
 // (M1@0x8C2D6B18 · M2@0x8C2D6AD8, shipped in the "cam_mat" read-set region) using the SAME
 // transform_object_122560 math the bodies use — so the stage scrolls/zooms in lockstep with
 // the fighters, NO guessed camera. Rendered as an OP pass BEHIND the bodies.
-import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=emitterz3';
+import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=stageblack1';
 
 // EFFECTS (hitsparks / electric / energy): FAITHFUL — pure-effect pool nodes (cat 1..4, GFX2
 // node+0x160 in the Effect-Poly bank 0x0CED0000) render through the SAME transpiled walker as
@@ -968,23 +968,37 @@ function readMat16(addr) {
 }
 // Drive the stage from the current RAM image, then render it BEHIND the bodies. Called by
 // the render path right before pane.render(bodyTA). gpuOK + a non-degenerate camera required.
+// _stageWhy: latch the LAST reason renderStagePass returned false (or 'ok'), surfaced via
+// window.__stageWhy() — the headless harness + the live console read it so the BLACK-stage
+// cause (gate vs throw vs draw) is never swallowed silently (re_kb 26: green-grid diagnosability).
+let _stageWhy = 'init';
 function renderStagePass() {
-    if (!gpuOK || !stageReady || !ram) return false;
+    if (!gpuOK)     { _stageWhy = 'gpuOK=false'; return false; }
+    if (!stageReady){ _stageWhy = 'stageReady=false'; return false; }
+    if (!ram)       { _stageWhy = 'ram=null'; return false; }
     try {
         const sid = rdU8(ADDR_STAGE_ID);
         stage.setState(sid, rdU8(0x8C1F9D80));       // stage_id + stage_anim_timer
         const M1 = readMat16(ADDR_M1), M2 = readMat16(ADDR_M2);
-        // skip until the camera matrices are non-zero (pre-match / loading frames)
-        if (M2[15] === 0 && M2[0] === 0) return false;
-        stage.setCamera(M1, M2);                      // re-projects on camera change
+        // A degenerate live camera (pre-match / round-transition / loading frame) must NOT
+        // blank the stage to black: the engine-TA bake carries the REAL captured SCREEN verts
+        // (stage._buildFromTA with useLive=false), so we fall back to that baked-screen render
+        // instead of bailing. Only re-project (setCamera) when the camera is valid. PROVEN both
+        // paths render ~48.7% non-black on STG0B (tools/render-replica-poc/_diag_nocam.mjs +
+        // diag_stage_canvaspath.mjs). re_kb 26: never let the camera gate produce a black stage.
+        const camOK = !(M2[15] === 0 && M2[0] === 0);
+        if (camOK) stage.setCamera(M1, M2);           // re-projects on camera change
         const p = stage.parsed, tm = stage.texMgr;
-        if (!p || !tm || !p.vertexCount) return false;
+        if (!p || !p.vertexCount) { _stageWhy = 'no-parsed (vc=' + (p ? p.vertexCount : 'null') + ')'; return false; }
+        if (!tm)                  { _stageWhy = 'no-texMgr'; return false; }
         // OP pass: clear the canvas, draw the stage. Bodies composite over (loadOp 'load').
         pane.R.renderFrame(p, tm, STAGE_PVRSNAP, null,
             { singlePass: true, noSort: true, drawOpaque: true, drawPunch: false, drawTrans: true });
+        _stageWhy = (camOK ? 'ok vc=' : 'ok(baked-cam) vc=') + p.vertexCount;
         return true;
-    } catch (e) { log('[stage] ' + e.message, 'warn'); return false; }
+    } catch (e) { _stageWhy = 'THREW: ' + e.message; log('[stage] ' + e.message, 'warn'); return false; }
 }
+window.__stageWhy = () => _stageWhy;                  // headless/live: the last stage-pass outcome
 // Headless verification hooks for the STAGE pass (mirror the effects/HUD hooks).
 window.__stageReady   = () => stageReady;
 window.__renderStage  = () => renderStagePass();
@@ -993,6 +1007,9 @@ window.__stageInfo    = () => ({
     wantId: stage.wantId, loadedId: stage.stageId,
     vertexCount: stage.parsed ? stage.parsed.vertexCount : 0,
     hasCam: !!stage._X,
+    why: _stageWhy,                                  // last renderStagePass outcome (black-cause probe)
+    gpuOK, stageReady,
+    M2: ram ? Array.from(readMat16(ADDR_M2)).slice(0, 1).concat([readMat16(ADDR_M2)[15]]) : null, // [M2[0],M2[15]]
 });
 
 // ---------------------------------------------------------------- EFFECTS (Phase 3)
