@@ -259,7 +259,13 @@ static void buildTables()
 	// client gets stage_id (0x8C289638) for the Phase-3 STAGE background pass (pick
 	// which cached STGxx to render), plus in_match(0x624)/round(0x62B)/timer(0x630).
 	// stage_anim_timer (0x8C1F9D80) is already shipped in the "arena" region below.
-	D(0x8C289620, 0x20,        "gstate");        // in_match/round/timer/stage_id
+	// PHASE 3 HUD: the window also covers the HUD globals at the SAME addresses the production
+	// GSTA wire reads (core/network/maplecast_gamestate.cpp): p1/p2_meter_fill u16 @0x646/0x648,
+	// p1/p2_meter_level u8 @0x64A/0x64B, p1/p2_combo u16 @0x670/0x672. To reach combo (last byte
+	// 0x673) the window must span 0x289620..0x289673 = 0x54 bytes; rounded to 0x60 (ends 0x28967F,
+	// still inside page 649). Per-char health(+0x420)/red_health(+0x424)/char_id(+0x001) already
+	// ride the "char_str" region below. (re_kb finding:replica_live_hud.)
+	D(0x8C289620, 0x60,        "gstate");        // in_match/round/timer/stage_id + meter/combo (HUD)
 	D(0x8C268340, 6u*0x5A4u,   "char_str");      // P1C1..P2C3 char structs
 	// SATELLITE OBJECT POOL (capes/projectiles/drones/effects/extra-limbs) — the
 	// out-of-char-struct BODY nodes the slot-walk loc_8c0308c2 also renders via
