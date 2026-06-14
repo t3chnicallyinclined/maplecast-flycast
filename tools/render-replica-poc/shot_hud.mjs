@@ -87,16 +87,20 @@ const probe = await page.evaluate((A) => {
   };
   let nonBlank = 0;
   for (let i = 0; i < d.length; i += 4) if (d[i+3] > 10 && (d[i]|d[i+1]|d[i+2])) nonBlank++;
-  // P1 HP 72/144 -> fill ends ~x=164 (18+146); chip 110/144 -> ends ~x=241 (18+223).
-  // P2 HP 130/144 right-anchored in [330,622]; meter P2 72/144 right-anchored in [497,622].
+  // ANGLED layout (HP anchored at the OUTER corner, depletes toward CENTER):
+  // P1 life bar: outer X=84 runs inward (right) len=256 -> inner ~340. HP 72/144=0.5
+  //   -> bright [84..212]; chip 110/144=0.76 -> [84..279]; chip-only band [212..279].
+  // P2 life bar: outer X=556 runs left len=256 -> inner ~300. HP 130/144=0.9 -> [325..556].
+  // Meters at y=458: P1 outer X=20 runs right 230 (full) -> [20..250];
+  //   P2 outer X=620 runs left 230, 72/144=0.5 -> [505..620]. Timer box [305..335].
   const out = { nonBlank, checks: {
-    p1_hp_lit:    teamLit(18 + 40, 17, 40, 12),    // inside the bright HP fill (x~58..98)
-    p1_chip_lit:  litBox(18 + 180, 17, 40, 12),    // between HP-end(164) and chip-end(241): only chip lit
-    p2_hp_lit:    teamLit(330 + 200, 17, 60, 12),  // inside P2 right-anchored HP fill
-    p1_meter_lit: teamLit(18 + 100, 456, 60, 9),   // P1 super meter (full)
-    p2_meter_lit: teamLit(372 + 200, 456, 40, 9),  // P2 meter right-anchored (497..622)
-    timer_lit:    litBox(305, 8, 30, 22),          // centered timer digit box
-    combo_lit:    litBox(20, 40, 40, 16),          // P1 combo digit box
+    p1_hp_lit:    teamLit(110, 20, 40, 10),        // inside P1 bright HP fill [84..212]
+    p1_chip_lit:  litBox(228, 20, 36, 10),         // chip-only band [212..279]: dark red, no bright
+    p2_hp_lit:    teamLit(400, 20, 60, 10),        // inside P2 bright HP fill [325..556]
+    p1_meter_lit: teamLit(110, 460, 60, 8),        // P1 super meter (full) [20..250]
+    p2_meter_lit: teamLit(540, 460, 40, 8),        // P2 meter right-anchored half [505..620]
+    timer_lit:    litBox(305, 9, 30, 22),          // centered timer digit box
+    combo_lit:    litBox(20, 44, 40, 16),          // P1 combo digit box
   }};
   return out;
 }, ADDR);

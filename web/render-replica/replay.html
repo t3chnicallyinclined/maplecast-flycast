@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF)</title>
+<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF) [hud:angled-v2]</title>
 <style>
   :root { color-scheme: dark; }
   body { margin:0; background:#0c0e12; color:#cdd6e0; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; }
@@ -914,9 +914,59 @@ function hudBar(ctx, x, y, w, h, frac, colA, colB, fromRight) {
     ctx.fillStyle = g; ctx.fillRect(fx, y, fw, h);
 }
 
-// The HUD foreground pass. Called AFTER bodies + stage are on the WebGPU canvas. Clears
-// the overlay each frame and (only in-match) draws the bars/meters/timer/combo from
-// readHud(). Layout coords are 640x480 game space, scaled to the canvas.
+// ---- MVC2 angled life-bar primitive --------------------------------------
+// The real MVC2 life bar is a PARALLELOGRAM swept toward screen center: the OUTER
+// end (corner, where the portrait sits) is the full anchor; the bar slants so its
+// inner/center tip is lower. HP DEPLETES from the inner (center) end toward the
+// outer end. `skew` = horizontal shift of the bottom edge vs the top (the lean).
+// `mirror` flips the whole shape for P2 (top-right). Returns the parallelogram
+// path-points so the caller can fill HP/chip sub-regions inside the same clip.
+//
+// Outer end is at screen X = ox (left edge for P1, right edge for P2). The bar
+// runs INWARD a length `len`. We build it as a unit rectangle [0..len]x[0..h] in
+// a local frame, skewed, then translated. `fracFromOuter` fills from the outer
+// anchor (the remaining bright HP); the empty part is at the center side.
+function hudAngledLifeBar(ctx, ox, oy, len, h, skew, mirror, hpFrac, chipFrac, hpCol, chipCol) {
+    // local x runs 0 (outer) .. len (inner/center). bottom edge shifted by +skew.
+    // mirror: outer end is on the RIGHT, inner runs leftward (negative dir).
+    const dir = mirror ? -1 : 1;
+    const X = (lx) => ox + dir * lx;                 // top-edge x at local lx
+    const Xb = (lx) => ox + dir * (lx + skew);       // bottom-edge x (sheared)
+    const yT = oy, yB = oy + h;
+    // full parallelogram outline (outer-top -> inner-top -> inner-bot -> outer-bot)
+    const outline = () => {
+        ctx.beginPath();
+        ctx.moveTo(X(0), yT); ctx.lineTo(X(len), yT);
+        ctx.lineTo(Xb(len), yB); ctx.lineTo(Xb(0), yB);
+        ctx.closePath();
+    };
+    // empty trough
+    ctx.save();
+    outline(); ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fill();
+    // clip to the parallelogram, then draw chip then HP as sheared sub-bars from outer end
+    outline(); ctx.clip();
+    const subBar = (frac, col) => {
+        frac = Math.max(0, Math.min(1, frac)); if (frac <= 0) return;
+        const fl = len * frac;                        // local length filled from outer
+        ctx.beginPath();
+        ctx.moveTo(X(0), yT); ctx.lineTo(X(fl), yT);
+        ctx.lineTo(Xb(fl), yB); ctx.lineTo(Xb(0), yB);
+        ctx.closePath();
+        ctx.fillStyle = col; ctx.fill();
+    };
+    subBar(chipFrac, chipCol);                        // dark red chip trail BEHIND
+    subBar(hpFrac, hpCol);                            // bright HP fill ON TOP
+    ctx.restore();
+    // bright outline frame
+    outline(); ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.stroke();
+}
+
+// The HUD foreground pass [hud:angled-v2 — cache-bust marker for replay.html]. Called
+// AFTER bodies + stage are on the WebGPU canvas. Clears the overlay each frame and (only
+// in-match) draws the REAL MVC2 layout: TWO ANGLED corner life bars (P1 top-left / P2
+// top-right, swept toward center, HP depletes toward center, dark-red chip trailing),
+// portrait/name + win-star pips at each outer end, the centered timer, and the BOTTOM
+// super meters with level pips — all from readHud(). Coords are 640x480 game space.
 function renderHudPass() {
     if (!ram) return;
     const ctx = ensureHudOverlay();
@@ -928,44 +978,104 @@ function renderHudPass() {
     ctx.scale(W / 640, H / 480);
     ctx.imageSmoothingEnabled = false;
 
+    // Bright HP fill = a SOLID team color that depletes (NOT a full-width rainbow). The
+    // colIdx (which of C1/C2/C3 is the active point) picks magenta/green/cyan per team.
     const c1 = HUD_BAR_COLS[hud.p1 ? hud.p1.colIdx : 0];
     const c2 = HUD_BAR_COLS[hud.p2 ? hud.p2.colIdx : 0];
+    const HP1 = c1[0], HP2 = c2[0];                       // solid bright HP color per side
+    const CHIP = '#8a1414';                               // dark-red recoverable chip
     const hp  = (sl) => sl ? Math.max(0, Math.min(1, rdU8(sl.base + 0x420) / HP_MAX)) : 0;
     const red = (sl) => sl ? Math.max(0, Math.min(1, rdU8(sl.base + 0x424) / HP_MAX)) : 0;
 
-    // --- life bars (red chip trailing BEHIND current HP), tinted per team ---
-    const LB = { x1: 18, x2: 330, y: 16, w: 292, h: 14 };
-    // frame
-    ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 1;
-    ctx.strokeRect(LB.x1 - 1, LB.y - 1, LB.w + 2, LB.h + 2);
-    ctx.strokeRect(LB.x2 - 1, LB.y - 1, LB.w + 2, LB.h + 2);
-    ctx.fillStyle = 'rgba(0,0,0,0.45)';
-    ctx.fillRect(LB.x1, LB.y, LB.w, LB.h); ctx.fillRect(LB.x2, LB.y, LB.w, LB.h);
-    // P1 (left-anchored): red trailing layer first, then current HP on top.
-    hudBar(ctx, LB.x1, LB.y, LB.w, LB.h, red(hud.p1), '#b01010', '#601010', false);
-    hudBar(ctx, LB.x1, LB.y, LB.w, LB.h, hp(hud.p1),  c1[0], c1[1], false);
-    // P2 (right-anchored mirror).
-    hudBar(ctx, LB.x2, LB.y, LB.w, LB.h, red(hud.p2), '#b01010', '#601010', true);
-    hudBar(ctx, LB.x2, LB.y, LB.w, LB.h, hp(hud.p2),  c2[0], c2[1], true);
+    // === ANGLED CORNER LIFE BARS =========================================
+    // MVC2: two parallelogram bars swept toward center. P1 top-LEFT (outer end at the
+    // left corner), P2 top-RIGHT (mirrored). HP DEPLETES toward center; the bright HP
+    // is anchored at the OUTER (portrait) end; dark-red chip trails behind it.
+    const LB_OY = 18, LB_H = 15, LB_LEN = 212, LB_SKEW = 26;
+    const P1_OUTER = 80, P2_OUTER = 640 - 80;            // outer-end X (portrait inboard of it)
+    hudAngledLifeBar(ctx, P1_OUTER, LB_OY, LB_LEN, LB_H, LB_SKEW, false,
+                     hp(hud.p1), red(hud.p1), HP1, CHIP);
+    hudAngledLifeBar(ctx, P2_OUTER, LB_OY, LB_LEN, LB_H, LB_SKEW, true,
+                     hp(hud.p2), red(hud.p2), HP2, CHIP);
 
-    // --- super meters (width = fill / 144), team-tinted ---
-    ctx.fillStyle = 'rgba(0,0,0,0.45)';
-    ctx.fillRect(18, 456, 250, 9); ctx.fillRect(372, 456, 250, 9);
-    hudBar(ctx, 18,  456, 250, 9, hud.p1fill / METER_MAX, c1[0], c1[1], false);
-    hudBar(ctx, 372, 456, 250, 9, hud.p2fill / METER_MAX, c2[0], c2[1], true);
+    // --- portrait / name block at each OUTER end ---
+    const portrait = (px, mirror, sl, col) => {
+        const pw = 56, ph = 20, x = mirror ? px - pw : px;
+        ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(x, LB_OY - 2, pw, ph);
+        ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.strokeRect(x + 0.5, LB_OY - 1.5, pw - 1, ph - 1);
+        const cid = sl ? rdU8(sl.base + 0x001) : 0;
+        const id = String(cid).padStart(2, '0');         // char-id as a stand-in name plate
+        hudDigits(ctx, id, mirror ? x + pw - 6 : x + 6, LB_OY + 2, 13, mirror ? 'right' : 'left', col);
+    };
+    portrait(18, false, hud.p1, HP1);
+    portrait(622, true, hud.p2, HP2);
 
-    // --- meter-level pips (0..5) ---
-    ctx.fillStyle = '#ffd24d';
-    for (let i = 0; i < (hud.p1lvl || 0); i++) ctx.fillRect(18 + i * 12, 446, 9, 6);
-    for (let i = 0; i < (hud.p2lvl || 0); i++) ctx.fillRect(613 - i * 12, 446, 9, 6);
+    // --- round / win star pips (round_counter -> stars per side) ---
+    const stars = Math.max(0, Math.min(3, (hud.round | 0)));
+    const star = (sx, mirror, col) => {
+        ctx.fillStyle = col;
+        for (let i = 0; i < stars; i++) {
+            const cx = mirror ? sx - i * 11 : sx + i * 11, cy = LB_OY + LB_H + 6, r = 3.5;
+            ctx.beginPath();
+            for (let k = 0; k < 5; k++) {
+                const a0 = -Math.PI / 2 + k * 2 * Math.PI / 5;
+                const a1 = a0 + Math.PI / 5;
+                ctx.lineTo(cx + Math.cos(a0) * r, cy + Math.sin(a0) * r);
+                ctx.lineTo(cx + Math.cos(a1) * r * 0.45, cy + Math.sin(a1) * r * 0.45);
+            }
+            ctx.closePath(); ctx.fill();
+        }
+    };
+    star(20, false, '#ffe14d');
+    star(620, true, '#ffe14d');
 
-    // --- round timer: two digits, centered top ---
+    // === BOTTOM SUPER METERS ============================================
+    // P1 lower-left / P2 lower-right; fill from the outer corner inward. Slight skew
+    // mirrors the life-bar lean. Level pips (0..5) sit just above the meter.
+    const MT_OY = 458, MT_H = 9, MT_LEN = 200, MT_SKEW = 16;
+    const meter = (ox, mirror, fill, col) => {
+        const dir = mirror ? -1 : 1;
+        const tri = (lx0, lx1, fillCol) => {
+            ctx.beginPath();
+            ctx.moveTo(ox + dir * lx0, MT_OY); ctx.lineTo(ox + dir * lx1, MT_OY);
+            ctx.lineTo(ox + dir * (lx1 + MT_SKEW), MT_OY + MT_H);
+            ctx.lineTo(ox + dir * (lx0 + MT_SKEW), MT_OY + MT_H);
+            ctx.closePath(); ctx.fillStyle = fillCol; ctx.fill();
+        };
+        tri(0, MT_LEN, 'rgba(0,0,0,0.55)');
+        const f = Math.max(0, Math.min(1, fill / METER_MAX));
+        if (f > 0) tri(0, MT_LEN * f, col);
+        // frame
+        ctx.beginPath();
+        ctx.moveTo(ox + dir * 0, MT_OY); ctx.lineTo(ox + dir * MT_LEN, MT_OY);
+        ctx.lineTo(ox + dir * (MT_LEN + MT_SKEW), MT_OY + MT_H);
+        ctx.lineTo(ox + dir * MT_SKEW, MT_OY + MT_H);
+        ctx.closePath(); ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.stroke();
+    };
+    meter(20, false, hud.p1fill, HP1);
+    meter(620, true, hud.p2fill, HP2);
+
+    // --- meter-level number + tick pips (0..5), above the meter ---
+    const levTicks = (ox, mirror, lvl, col) => {
+        const dir = mirror ? -1 : 1;
+        ctx.fillStyle = col;
+        for (let i = 0; i < (lvl || 0); i++)
+            ctx.fillRect(ox + dir * (i * 14) - (mirror ? 9 : 0), MT_OY - 11, 9, 6);
+        const ls = String(lvl | 0);
+        hudDigits(ctx, ls, mirror ? ox - MT_LEN - 4 : ox + MT_LEN + 4, MT_OY - 13, 12,
+                  mirror ? 'right' : 'left', '#ffffff');
+    };
+    levTicks(22, false, hud.p1lvl, '#ffd24d');
+    levTicks(618, true, hud.p2lvl, '#ffd24d');
+
+    // === CENTER TIMER ===================================================
     const tstr = String(Math.max(0, Math.min(99, hud.timer | 0))).padStart(2, '0');
-    hudDigits(ctx, tstr, 320, 8, 22, 'center', '#ffffff');
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(305, 6, 30, 26);
+    hudDigits(ctx, tstr, 320, 9, 22, 'center', '#ffffff');
 
-    // --- combo counters (combo > 1 per side) ---
-    if (hud.p1combo > 1) hudDigits(ctx, String(hud.p1combo), 24,  40, 16, 'left',  '#ffe14d');
-    if (hud.p2combo > 1) hudDigits(ctx, String(hud.p2combo), 616, 40, 16, 'right', '#ffe14d');
+    // === COMBO COUNTERS (combo > 1 per side) ============================
+    if (hud.p1combo > 1) hudDigits(ctx, String(hud.p1combo), 24,  44, 16, 'left',  '#ffe14d');
+    if (hud.p2combo > 1) hudDigits(ctx, String(hud.p2combo), 616, 44, 16, 'right', '#ffe14d');
 
     ctx.restore();
 }
