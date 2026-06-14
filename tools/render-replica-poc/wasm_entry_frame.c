@@ -35,6 +35,7 @@ typedef struct {
     u32 gfx1;                /* owning node's GFX1 base (node+0x15C) — decode key with sel */
     u32 mirror;              /* texU mirror bit = facing XOR per-part 0x4000 (loc_8c0346c4) */
     u32 facing;             /* owning body facing (node+0x110) */
+    float z;                 /* per-object PVR depth = node+0xE8 = 1/w (MUST match render_frame.c) */
 } SceneQuad;
 int  render_frame_nscene(void);
 const SceneQuad* render_frame_scene(void);
@@ -70,10 +71,15 @@ uint32_t render_frame_ta(uint8_t* ram16mb, uint8_t* out_ta, uint32_t out_cap){
          * modulate identity (the engine's own sprite base color for these tiles). */
         W32(16,0xFFFFFFFFu);                         /* sprite base color (opaque white) */
         W32(32,0xE0000000u);                         /* sprite vtx PCW */
-        WF(36,q->Ax); WF(40,q->Ay); WF(44,1.0f);
-        WF(48,q->Bx); WF(52,q->By); WF(56,1.0f);
+        /* per-VERTEX depth z = q->z = the owning object's node+0xE8 (1/w). The engine
+         * submits Az=Bz=Cz=this for every body tile (probe2 PC 0x0C1248CC: Az/Bz/Cz all
+         * ~0.00924). Emitting the real per-object z (instead of the old constant 1.0) is
+         * what lets pvr2-renderer's translucent depth-write + back-to-front sort occlude
+         * cape vs body vs projectile correctly (DEPTH FIX 2026-06-14). */
+        WF(36,q->Ax); WF(40,q->Ay); WF(44,q->z);
+        WF(48,q->Bx); WF(52,q->By); WF(56,q->z);
         WF(60,q->Cx);
-        WF(64,q->Cy); WF(68,1.0f);
+        WF(64,q->Cy); WF(68,q->z);
         WF(72,q->Dx); WF(76,q->Dy);
         { float U=q->u1, V=q->u1;
           /* texU MIRROR (engine loc_8c0346c4 neg-r8): when facing XOR per-part 0x4000, swap

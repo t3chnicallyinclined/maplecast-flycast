@@ -140,6 +140,13 @@ typedef struct {
     u32 gfx1;                /* owning node's GFX1 base (node+0x15C) — decode key with sel */
     u32 mirror;              /* texU mirror bit = facing XOR per-part 0x4000 (loc_8c0346c4) */
     u32 facing;             /* owning body facing (node+0x110); carve storage-col key */
+    float z;                 /* per-object PVR depth = node+0xE8 = 1/w (the persp-divide
+                              * reciprocal deposited by transform_object_122560 /
+                              * loc_8C122560). The engine submits THIS as every vertex's z
+                              * (probe2: Az=Bz=Cz=0.00924 per part). Drives the translucent
+                              * back-to-front sort + depth-write occlusion in pvr2-renderer.
+                              * WAS hardcoded 1.0 -> all objects flattened to one plane ->
+                              * cape-through-body / random overlap (DEPTH FIX 2026-06-14). */
 } SceneQuad;
 #define MAXSCENE 1024
 static SceneQuad g_scene[MAXSCENE];
@@ -201,6 +208,15 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
 
     /* ---- per-tile: compute params from resident rectab[idxtab[alloc_index]] + UV ---- */
     float sxs = rf(c, node+0xEC), sys = rf(c, node+0xF0);
+    /* per-object PVR depth = the RECIPROCAL of node+0xE8. EMPIRICAL (probe2 PC 0x0C1248CC
+     * vs render_frame node+0xE8 readback, 2026-06-14): node+0xE8 holds the homogeneous
+     * W (~106..108 for on-screen bodies), and the engine submits z = 1/W (~0.00924) into
+     * every PVR sprite vertex (Az=Bz=Cz). 1/108.2637 = 0.0092367 == engine probe Az 0.0092370.
+     * PVR depth convention is 1/W (larger = NEARER), so we MUST emit 1/W, not W — emitting W
+     * directly would INVERT the near/far sort and swap occlusion. All of this object's body
+     * tiles share this z. This is the cape/body/projectile occlusion fix (replaces z=1.0). */
+    float ow = rf(c, node+0xE8);
+    float oz = (ow > 1e-6f && ow == ow) ? (1.0f / ow) : 0.5f;  /* z = 1/W; guard NaN/0 */
     u32 palbank = palbank_for(node);
     u32 node_gfx1 = r32(c, node+0x15C);   /* this body's GFX1 base (per-quad decode key) */
     /* body facing (node+0x110) — drives the texU mirror in lockstep with the position pen
@@ -232,12 +248,25 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
         q->sel=g_cap[k].sel;          /* per-quad source sel (tiling-safe pairing key) */
         q->gfx1=node_gfx1;            /* per-quad owning-body GFX1 base (decode with sel) */
         q->facing=node_facing;        /* owning body facing (carve storage-col disambiguation) */
+        q->z=oz;                      /* per-object depth (node+0xE8 = 1/w) for correct sorting */
         /* texU mirror = facing XOR per-part 0x4000 (loc_8c0346c4 neg r8 gate). One bit. */
         q->mirror = node_facing ^ (g_cap[k].flip4000 & 1u);
-        q->Ax=bx;     q->Ay=by-H;     /* lay the quad UPWARD from the bottom-left */
-        q->Bx=bx+W;   q->By=by-H;
-        q->Cx=bx+W;   q->Cy=by;
-        q->Dx=bx;     q->Dy=by;
+        /* SCREEN-X SPAN DIRECTION is set by the OWNING BODY FACING (node+0x110), in
+         * lockstep with the walker's position pen and the texU mirror. The captured
+         * submit anchor `bx` (r15+0x2C+0x04) is the LEFT edge when facing==0 and the
+         * RIGHT edge when facing==1 — the engine's bank12 cell-processor builds the
+         * quad AWAY from the anchor in the facing direction. CONFIRMED from _probe2.log
+         * (Storm cid42 node 0x8c282354 facing=1: footAnchor.x=140.67 == engine corner
+         * C.x[right], engine A.x=114.0=bx-W; Cable cid23 node 0x8c2688e4 facing=0:
+         * footAnchor.x=511.67 == engine corner A.x[left]). Hardcoding bx-as-left gave a
+         * uniform +W (one-tile, ~26.7px) X shift on every facing==1 body part.
+         * left = facing ? bx-W : bx ; right = left + W. */
+        float xl = node_facing ? (bx - W) : bx;
+        float xr = xl + W;
+        q->Ax=xl;     q->Ay=by-H;     /* lay the quad UPWARD from the bottom-left */
+        q->Bx=xr;     q->By=by-H;
+        q->Cx=xr;     q->Cy=by;
+        q->Dx=xl;     q->Dy=by;
         q->u1 = ((float)m < tile) ? ((float)m/tile) : 1.0f;
     }
     return ntiles;

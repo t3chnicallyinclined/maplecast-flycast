@@ -66,7 +66,7 @@
 // on-screen BODY object (not just the one resident node). It consumes the live 16MB RAM
 // and derives each object's submit-allocation base from the running cursor (= node+0xDC
 // prefix-sum). The single-object render_replica.wasm is kept for the diagnostic toggle.
-import createRenderFrame   from './render_frame.mjs';
+import createRenderFrame   from './render_frame.mjs?v=depthz1';
 import createRenderReplica from './render_replica.mjs';
 
 const W_DIR = new URL('../webgpu/', import.meta.url);
@@ -131,7 +131,7 @@ function synthSnap(w, h) {
 // render_frame.wasm walks the slot table and emits every BODY object's tiles.
 let frameMod;
 async function transpiledTA(ram) {
-    if (!frameMod) { log('Instantiating render_frame.wasm (whole-frame slot-walk)…'); frameMod = await createRenderFrame(); }
+    if (!frameMod) { log('Instantiating render_frame.wasm (whole-frame slot-walk)…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=depthz1' : p }); }
     const M = frameMod;
     const ramPtr = M._malloc(ram.length);
     M.HEAPU8.set(ram, ramPtr);
