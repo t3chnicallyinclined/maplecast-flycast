@@ -154,6 +154,10 @@ web/test-atlas/stages/
 # (PL{NN}_gfx1.bin / PL{NN}_gfx2.bin) = byte-identical disc/RAM art the client overlays
 # at node+0x15C/0x160. ROM-derived — never committed; staged locally, served from /gfx.
 web/render-replica/gfx/
+# Render-replica EFFECTS atlas (Phase 3): Effect-Poly bank 0x0CED0000 decoded sprites
+# (effects.png / effects.json keyed by directory idx). ROM-derived — never committed;
+# built offline by tools/build_replica_effects_atlas.py, served from /effects.
+web/render-replica/effects/
 
 # Assembly-driven part-atlas capture outputs (ROM-derived, never committed)
 # Probe writes to /dev/shm; packer writes PL??_parts.png / PL??_asm.json / *_composite.png

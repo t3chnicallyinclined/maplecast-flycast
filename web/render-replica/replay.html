@@ -215,16 +215,16 @@
 // Reuses ta-parser/pvr2-renderer/texture-manager VERBATIM, and render_frame.wasm UNMODIFIED
 // (Phases 1/2 frozen byte-exact). MCRR spec: docs/RENDER-REPLICA-RECORDING-FORMAT.md.
 // ============================================================================
-import createRenderFrame from './render_frame.mjs?v=hud1';
+import createRenderFrame from './render_frame.mjs?v=fx1';
 // Phase 5 — PURE-STATE TEXTURES: client decodes each active body part's sprite from the
 // shipped-once compressed GFX (in the RAM image) + the live sprite_id, writes it to pane.vram
 // at the TCW addr render_frame carries. Replaces the per-frame "bodytex" VRAM band (removed).
-import { ensureBodyTextures } from './body_decoder.mjs?v=hud1';
+import { ensureBodyTextures } from './body_decoder.mjs?v=fx1';
 // Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
 // /gfx/PL{NN}_gfx{1,2}.bin (cached by char_id). Fixes the scramble + the tag-in GFX gap (covers
 // ALL 6 char structs incl P1C2/P2C2/P1C3/P2C3 tag-ins, not just connect-active bodies).
-import { applyLocalGfx } from './local_gfx_overlay.mjs?v=hud1';
+import { applyLocalGfx } from './local_gfx_overlay.mjs?v=fx1';
 const bodyCache = {};   // decode-on-change memo, persists across frames
 
 // Phase 3 — STAGE (background): decode-from-disc cached locally (web/test-atlas/stages/
@@ -234,7 +234,16 @@ const bodyCache = {};   // decode-on-change memo, persists across frames
 // (M1@0x8C2D6B18 · M2@0x8C2D6AD8, shipped in the "cam_mat" read-set region) using the SAME
 // transform_object_122560 math the bodies use — so the stage scrolls/zooms in lockstep with
 // the fighters, NO guessed camera. Rendered as an OP pass BEHIND the bodies.
-import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=hud1';
+import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=fx1';
+
+// Phase 3 — EFFECTS (hitsparks / electric / energy): the pure-effect pool nodes (cat 1..4,
+// GFX base in the shared "Effect Poly" bank 0x0CED0000, NO body GFX2) that the render_frame
+// walker emits 0 tiles for. Rendered CLIENT-side from the RAM image (the effect-node STATE is
+// already in the replica read-set: slot_cnt/slot_ptr/objpool) + a LOCAL effects atlas (the
+// Effect-Poly textures decoded offline, web/render-replica/effects/, gitignored). Binding is
+// GROUNDED, read live: idx=(node+0x15C - *(0x0CED0008))/0x10; anchor node+0xE0/E4; additive.
+// Drawn as a MID-LAYER 2D overlay ABOVE the WebGPU bodies/stage and BELOW the HUD overlay.
+import { EffectsClient } from './effects-client.mjs?v=fx1';
 
 // ============================================================================
 // LIVE CONFIG COCKPIT — window.__cfg is read EVERY frame by the render path
@@ -430,7 +439,7 @@ function synthSnap(w, h) {
 
 // ---------------------------------------------------------------- render_frame.wasm
 let frameMod;
-async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=hud1' : p }); } return frameMod; }
+async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=fx1' : p }); } return frameMod; }
 function transpiledTA(ram) {
     const M = frameMod;
     const ramPtr = M._malloc(ram.length); M.HEAPU8.set(ram, ramPtr);
@@ -469,6 +478,8 @@ const RAM_LO = 0x00FFFFFF;
 const rdU8  = (a) => ram[a & RAM_LO];
 const rdU16 = (a) => ram[a & RAM_LO] | (ram[(a + 1) & RAM_LO] << 8);
 const rdU32 = (a) => (ram[a & RAM_LO] | (ram[(a + 1) & RAM_LO] << 8) | (ram[(a + 2) & RAM_LO] << 16) | (ram[(a + 3) & RAM_LO] << 24)) >>> 0;
+const _f32buf = new DataView(new ArrayBuffer(4));
+const rdF32 = (a) => { _f32buf.setUint32(0, rdU32(a), true); return _f32buf.getFloat32(0, true); };
 
 // Per-frame table of active bodies (slot, player side, char_id, sprite_id, gfx1 base).
 function readBodies() {
@@ -746,6 +757,47 @@ function renderStagePass() {
     } catch (e) { log('[stage] ' + e.message, 'warn'); return false; }
 }
 
+// ---------------------------------------------------------------- EFFECTS (Phase 3)
+// One EffectsClient draws the pure-effect pool nodes (hitsparks/electric/energy) the
+// render_frame walker emits 0 tiles for. It reads the effect-pool nodes out of the RAM
+// image (slot table + node fields, all already shipped) and composites each as one
+// additive textured quad from the local effects atlas, point-centered on node+0xE0/E4.
+// Layered ABOVE the WebGPU bodies/stage and BELOW the HUD (the HUD overlay is created
+// after, so it ends up on top). The atlas loads lazily on connect/load.
+const EFFECTS_BASE = new URL('./effects', import.meta.url).href;
+const effects = new EffectsClient(EFFECTS_BASE);
+let effectsReady = false;
+// RAM accessors handed to the effects pass (same reads the body/HUD passes use).
+const _efxRd = { u8: rdU8, u16: rdU16, u32: rdU32, f32: rdF32 };
+// Render the effects pass on top of the bodies. Called right BEFORE the HUD pass in both
+// the file path (showFrame) and the live path (liveApplyFrame). No-op until the atlas loads.
+function renderEffectsPass() {
+    if (!ram || !effectsReady) return 0;
+    try { return effects.render(document.getElementById('cReplay'), _efxRd); }
+    catch (e) { log('[effects] ' + e.message, 'warn'); return 0; }
+}
+window.__effectsReady = () => effectsReady;         // headless: atlas-load gate
+window.__effectCount = () => effects.lastCount();   // headless verification hook
+window.__effectNodes = () => (ram ? effects.readEffectNodes(_efxRd) : []);
+window.__renderEffects = () => renderEffectsPass();
+window.__effectsOverlay = () => effects._canvas;    // the additive 2D overlay (for readback)
+// Headless EFFECT injection: poke a synthetic effect node (gfx15C -> a real dir entry) into a
+// pool slot + the slot table, so the pass can be validated WITHOUT a live-hit capture. Mirrors
+// the grounded binding exactly. dirIdx selects which directory texture; sx/sy = the anchor.
+window.__pokeEffect = (dirIdx, sx, sy) => {
+    if (!ram) return null;
+    const dirBase = rdU32(0x0CED0008) >>> 0;
+    const entry = (dirBase + dirIdx * 0x10) >>> 0;
+    const NODE = 0x8C26AA54 + 200 * 0x1D0;          // a spare pool slot
+    const w32 = (a, v) => { a &= RAM_LO; ram[a]=v&0xff; ram[a+1]=(v>>>8)&0xff; ram[a+2]=(v>>>16)&0xff; ram[a+3]=(v>>>24)&0xff; };
+    const wf  = (a, f) => { const b=new DataView(new ArrayBuffer(4)); b.setFloat32(0,f,true); w32(a, b.getUint32(0,true)); };
+    w32(NODE+0x15C, entry); ram[(NODE+0x144)&RAM_LO]=7; ram[(NODE+0x3)&RAM_LO]=1;
+    wf(NODE+0xE0, sx); wf(NODE+0xE4, sy); ram[(NODE+0x130)&RAM_LO]=0; ram[(NODE+0x131)&RAM_LO]=0;
+    const L=5, cnt=rdU8(0x8C2895E0+L), slot=Math.min(cnt,0x5F);
+    w32(0x8C287DE0 + L*0x180 + slot*4, NODE); ram[(0x8C2895E0+L)&RAM_LO]=slot+1;
+    return { dirBase: dirBase.toString(16), entry: entry.toString(16), node: NODE.toString(16) };
+};
+
 // ---------------------------------------------------------------- HUD (Phase 3)
 // FOREGROUND pass: health bars / super meters / round timer / combo, drawn on a 2D
 // overlay canvas ON TOP of the WebGPU bodies+stage. Every field is read from the RAM
@@ -951,6 +1003,14 @@ async function seedFrom(pre, mb) {
     // frame the disc art is cached and a tag-in body overlays with ZERO stale frames.
     try { applyLocalGfx(ram, log); } catch (e) { log('[local-gfx] pre-warm skipped: ' + e.message, 'warn'); }
 
+    // Phase 3: load the local effects atlas (Effect-Poly textures, decoded offline). The
+    // effects pass is a 2D additive overlay — NO WebGPU device needed — so load it OUTSIDE
+    // the GPU try-block below (it must work even when the WebGPU adapter is unavailable).
+    if (!effectsReady) {
+        effects.load().then(() => { effectsReady = true; log('[effects] atlas loaded (' + effects.meta.dir.length + ' dir entries)', 'ok'); })
+                      .catch(e => log('[effects] atlas load failed: ' + e.message + ' (effects pass disabled)', 'warn'));
+    }
+
     try {
         await pane.ensure();
         pane.setStatic(pre.vram, pre.pvr);
@@ -1044,6 +1104,7 @@ function showFrame(f) {
         const dbg = dbgFromCfg(); if (bg) dbg._bgPreRendered = true;
         pane.render(drawTA, dbg);
     }
+    renderEffectsPass();                         // EFFECTS pass (additive, above bodies, below HUD)
     renderHudPass();                             // HUD foreground pass (2D overlay, on top of bodies+stage)
     validate(fr, ta, len);
     els.fcur.textContent = f; els.scrub.value = f;
@@ -1167,6 +1228,7 @@ function liveApplyFrame(u8) {
         const dbg = dbgFromCfg(); if (bg) dbg._bgPreRendered = true;
         pane.render(drawTA, dbg);
     }
+    renderEffectsPass();                         // EFFECTS pass (additive, above bodies, below HUD)
     renderHudPass();                             // HUD foreground pass (2D overlay, on top of bodies+stage)
 
     // validator (only if the live frame carries engine_ta — mock/synth sends taSize=0)
