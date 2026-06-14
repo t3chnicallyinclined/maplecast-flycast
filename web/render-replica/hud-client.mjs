@@ -263,19 +263,14 @@ export class HudClient {
         this._plate(ctx, 2,       PY, PW, PH, false, p1, rdU8, c1[0], c1[1] || c1[0]);
         this._plate(ctx, 640 - 2, PY, PW, PH, true,  p2, rdU8, c2[0], c2[1] || c2[0]);
 
-        // WIN STARS — under each name plate (the name renders at y = PY+PH+1 inside _plate,
-        // ~6px tall), placed clear of the bars. Round counter is the only win field shipped.
-        const stars = Math.max(0, Math.min(3, rdU8(A.ROUND) | 0));
-        const drawStar = (cx, cy, r, col) => { ctx.fillStyle = col; ctx.beginPath();
-            for (let k = 0; k < 5; k++) { const a0 = -Math.PI/2 + k*2*Math.PI/5, a1 = a0 + Math.PI/5;
-                ctx.lineTo(cx + Math.cos(a0)*r, cy + Math.sin(a0)*r);
-                ctx.lineTo(cx + Math.cos(a1)*r*0.45, cy + Math.sin(a1)*r*0.45); }
-            ctx.closePath(); ctx.fill(); };
-        const starY = PY + PH + 10;
-        for (let i = 0; i < stars; i++) {
-            drawStar(6 + i * 9,   starY, 3.5, '#ffe14d');
-            drawStar(634 - i * 9, starY, 3.5, '#ffe14d');
-        }
+        // WIN STARS — DROPPED. The field at A.ROUND (0x28962B) is a round COUNTER /
+        // round number, NOT a per-side win count (it reads e.g. 12 mid-match), so
+        // clamping it to min(3,n) painted a bogus 3 stars on BOTH sides every frame —
+        // a render bug, not real win data. The real MVC2 in-match HUD shows NO win-star
+        // pips during play (win indicators appear on the inter-round VS card). A real
+        // per-side round-win field is a MISSING WIRE field -> handed to mvc2-sh4-re-expert
+        // (search bank0f win-record). Until that ships we draw nothing here (correct:
+        // an empty in-match HUD beats fabricated stars). [hud:no-bogus-stars]
         ctx.restore();
     }
 

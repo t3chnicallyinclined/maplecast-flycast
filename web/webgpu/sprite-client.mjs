@@ -2146,6 +2146,25 @@ export class SpriteClient {
     }
   }
   // Draw the round timer / hit counter from the ripped FONT digit glyphs.
+  // ∞ glyph for infinite-time mode (two joined loops, magenta/pink like the real
+  // MVC2 TIME gauge), drawn centered at (cx,cy) with overall height ~h. Pure vector
+  // (no atlas) so it tints cleanly and cannot garble. [hud:infinite-time]
+  _drawInfinity(ctx, cx, cy, h) {
+    const rx = h * 0.42, ry = h * 0.36, off = rx * 0.92, lw = Math.max(2, h * 0.14);
+    ctx.save();
+    ctx.lineWidth = lw; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    // dark halo first for legibility over the gauge, then the bright pink loops
+    for (const [col, w] of [['rgba(0,0,0,0.8)', lw + 2], ['#ff3df0', lw]]) {
+      ctx.strokeStyle = col; ctx.lineWidth = w;
+      for (const sx of [-1, 1]) {
+        ctx.beginPath();
+        ctx.ellipse(cx + sx * off, cy, rx * 0.9, ry, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
   _drawDigits(ctx, str, x, y, dh, align) {
     if (!this._hud || !this._hudImg) return 0;
     const R = this._hud.rects;
@@ -2292,9 +2311,24 @@ export class SpriteClient {
     for (let i = 0; i < (hud.p2lvl || 0); i++) ctx.fillRect(613 - i * 12, 446, 9, 6);
 
     // --- round timer: two ripped FONT digits, centered ---
-    const tstr = String(Math.max(0, Math.min(99, hud.timer | 0))).padStart(2, '0');
-    if (this._hud && this._hudImg) this._drawDigits(ctx, tstr, 320, 12, 22, 'center');
-    else { ctx.fillStyle = '#fff'; ctx.font = 'bold 22px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillText(tstr, 320, 14); }
+    // INFINITE-TIME MODE: the real MVC2 HUD draws an ∞ glyph (not "99") when the
+    // match runs with no clock. There is no dedicated wire flag, so detect it the
+    // way the value behaves: the timer is pinned at 99 and never decrements while
+    // in match. Track a short run of unchanged-99 frames; once it holds, draw ∞.
+    // (A normal match starts at 99 then ticks down, so this only latches in the
+    // genuinely-infinite case after a few frames — and unlatches the moment it moves.)
+    const tval = hud.timer | 0;
+    if (tval === 99 && this._lastTimer === 99) this._inf99 = Math.min(120, (this._inf99 | 0) + 1);
+    else if (tval !== 99) this._inf99 = 0;
+    this._lastTimer = tval;
+    const infinite = this._inf99 >= 20;            // ~1/3s of held-99 latches ∞
+    if (infinite) {
+      this._drawInfinity(ctx, 320, 23, 22);        // ∞ glyph centered where digits sit
+    } else {
+      const tstr = String(Math.max(0, Math.min(99, tval))).padStart(2, '0');
+      if (this._hud && this._hudImg) this._drawDigits(ctx, tstr, 320, 12, 22, 'center');
+      else { ctx.fillStyle = '#fff'; ctx.font = 'bold 22px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillText(tstr, 320, 14); }
+    }
 
     // --- hit counters: ripped FONT digits, combo>1 per side ---
     const drawCombo = (n, x, align) => {
