@@ -1,0 +1,100 @@
+{
+ "source": "MVC2 Dev Files/FONT.BIN",
+ "atlasW": 256,
+ "atlasH": 210,
+ "rects": {
+  "digit_0": {
+   "x": 0,
+   "y": 0,
+   "w": 16,
+   "h": 16
+  },
+  "digit_1": {
+   "x": 17,
+   "y": 0,
+   "w": 16,
+   "h": 16
+  },
+  "digit_2": {
+   "x": 34,
+   "y": 0,
+   "w": 16,
+   "h": 16
+  },
+  "digit_3": {
+   "x": 51,
+   "y": 0,
+   "w": 16,
+   "h": 16
+  },
+  "digit_4": {
+   "x": 68,
+   "y": 0,
+   "w": 16,
+   "h": 16
+  },
+  "digit_5": {
+   "x": 85,
+   "y": 0,
+   "w": 16,
+   "h": 16
+  },
+  "digit_6": {
+   "x": 102,
+   "y": 0,
+   "w": 16,
+   "h": 16
+  },
+  "digit_7": {
+   "x": 119,
+   "y": 0,
+   "w": 16,
+   "h": 16
+  },
+  "digit_8": {
+   "x": 136,
+   "y": 0,
+   "w": 16,
+   "h": 16
+  },
+  "digit_9": {
+   "x": 153,
+   "y": 0,
+   "w": 16,
+   "h": 16
+  },
+  "bar_white": {
+   "x": 170,
+   "y": 0,
+   "w": 4,
+   "h": 4
+  },
+  "font_sheet": {
+   "x": 0,
+   "y": 17,
+   "w": 256,
+   "h": 128
+  },
+  "hud_sheet": {
+   "x": 0,
+   "y": 146,
+   "w": 64,
+   "h": 64
+  }
+ },
+ "barColors": {
+  "C1": [
+   "#FF40FF",
+   "#FFFF00"
+  ],
+  "C2": [
+   "#00FF00",
+   "#FFFF00"
+  ],
+  "C3": [
+   "#00C0FF",
+   "#FFFF00"
+  ]
+ },
+ "notes": "digits 0-9 = tex1 boxed digits de-rotated+keyed; bar_white = tex0 solid swatch (stretch+tint per team). font_sheet/hud_sheet = full decoded textures for any extra glyphs."
+}

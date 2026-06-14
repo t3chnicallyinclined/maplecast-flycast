@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF) [hud:angled-v2]</title>
+<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF) [hud:real-art-v1]</title>
 <style>
   :root { color-scheme: dark; }
   body { margin:0; background:#0c0e12; color:#cdd6e0; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; }
@@ -245,6 +245,14 @@ import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=stageca
 // loader), NOT an effect cell processor. EffectsClient is now a no-op overlay that only
 // enumerates live effect nodes for diagnostics — effects render in the WebGPU body pass.
 import { EffectsClient } from './effects-client.mjs?v=fx3faithful';
+
+// HUD (life bars / super meter / timer / combo / portraits-name / win stars): REAL MVC2 art.
+// The timer + combo + level digits are the game's OWN boxed-digit sprites (FONT.BIN rec1,
+// tools/rip_hud_atlas.py -> ./hud/hud_atlas.{png,json}); the life bar + super meter fill are
+// the engine's white-tex * per-slot vertex color (loc_8c15FFB0) reconstructed as the angled
+// team-tinted parallelogram with the red_health chip trail. Every field reads the live engine
+// addresses (the production GSTA wire's own reads). Supersedes the synthetic renderHudPass().
+import { HudClient } from './hud-client.mjs?v=realart1';
 
 // ============================================================================
 // LIVE CONFIG COCKPIT — window.__cfg is read EVERY frame by the render path
@@ -790,6 +798,12 @@ window.__effectsReady = () => effectsReady;         // headless: atlas-load gate
 window.__effectCount = () => effects.lastCount();   // headless verification hook
 window.__effectNodes = () => (ram ? effects.readEffectNodes(_efxRd) : []);
 window.__renderEffects = () => renderEffectsPass();
+
+// One HudClient draws the REAL MVC2 HUD (timer/combo/level = FONT.BIN digit sprites; life bar +
+// super meter = engine white-tex * per-slot vertex color). Created lazily, layered on top.
+const HUD_BASE = new URL('./hud/', import.meta.url).href;
+const hud = new HudClient(HUD_BASE);
+let hudReady = false;
 window.__effectsOverlay = () => null;               // overlay retired (effects render in body pass)
 // Headless EFFECT node injection (FAITHFUL): poke a cat 1..4 pool node that the WALKER renders
 // (its real keys: node+0x144 sel + node+0x160 GFX2), into a pool slot + the slot table. This
@@ -972,13 +986,23 @@ function hudAngledLifeBar(ctx, ox, oy, len, h, skew, mirror, hpFrac, chipFrac, h
     outline(); ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.stroke();
 }
 
-// The HUD foreground pass [hud:angled-v2 — cache-bust marker for replay.html]. Called
-// AFTER bodies + stage are on the WebGPU canvas. Clears the overlay each frame and (only
-// in-match) draws the REAL MVC2 layout: TWO ANGLED corner life bars (P1 top-left / P2
-// top-right, swept toward center, HP depletes toward center, dark-red chip trailing),
-// portrait/name + win-star pips at each outer end, the centered timer, and the BOTTOM
-// super meters with level pips — all from readHud(). Coords are 640x480 game space.
+// The HUD foreground pass [hud:real-art-v1 — cache-bust marker for replay.html]. Called
+// AFTER bodies + stage + effects are on the WebGPU canvas. Delegates to the HudClient,
+// which draws the REAL MVC2 art: timer / combo / level = the game's OWN boxed-digit sprites
+// (FONT.BIN), and the life bar + super meter = the engine's white-tex * per-slot vertex
+// color (loc_8c15FFB0) reconstructed as the angled team-tinted parallelogram + red_health
+// chip trail. Every field reads the live engine addresses (the production GSTA wire reads).
 function renderHudPass() {
+    if (!ram) return;
+    hud.attach(document.getElementById('cReplay'));   // lazy overlay-canvas create (once)
+    try { hud.render(rdU8, rdU16, CHAR_SLOTS); }
+    catch (e) { log('[hud] ' + e.message, 'warn'); }
+}
+
+// ── legacy synthetic HUD (DISABLED, kept only as the headless diagnostic readHud() source) ──
+// The full synthetic 2D renderer below is no longer called; renderHudPass() now delegates to
+// the HudClient (real art). It is retained ONLY so __readHud()/the field plumbing stay live.
+function _renderHudPassSynthDISABLED() {
     if (!ram) return;
     const ctx = ensureHudOverlay();
     const W = _hudCanvas.width, H = _hudCanvas.height;
@@ -1096,7 +1120,11 @@ window.__readHud = readHud;   // headless verification hook
 window.__hudPoke8  = (a, v) => { if (ram) ram[a & RAM_LO] = v & 0xFF; };
 window.__hudPoke16 = (a, v) => { if (ram) { ram[a & RAM_LO] = v & 0xFF; ram[(a + 1) & RAM_LO] = (v >> 8) & 0xFF; } };
 window.__renderHud = () => renderHudPass();
-window.__hudCanvas = () => (ensureHudOverlay(), _hudCanvas);
+window._renderHudPassSynthDISABLED = () => _renderHudPassSynthDISABLED();   // before/after harness
+window.__legacyHudCanvas = () => (ensureHudOverlay(), _hudCanvas);          // before/after harness
+window.__hudReady  = () => hudReady;                  // headless: real-art atlas-load gate
+window.__hudClient = () => hud;                       // headless: inspect the HudClient
+window.__hudCanvas = () => (hud.attach(document.getElementById('cReplay')), hud._canvas || (ensureHudOverlay(), _hudCanvas));
 
 // ---------------------------------------------------------------- player state
 const pane = new Pane(document.getElementById('cReplay'));
@@ -1140,6 +1168,13 @@ async function seedFrom(pre, mb) {
     if (!effectsReady) {
         effects.load().then(() => { effectsReady = true; log('[effects] faithful path: cat 1..4 render via render_frame walker (loc_8c0344d4)', 'ok'); })
                       .catch(e => log('[effects] init failed: ' + e.message, 'warn'));
+    }
+
+    // HUD real-art atlas (FONT.BIN digit sprites). Non-blocking — the HUD pass uses a vector-digit
+    // fallback until this resolves, so the bars/timer are never blank on the first frames.
+    if (!hudReady) {
+        hud.load().then(m => { hudReady = true; log('[hud] real-art atlas loaded (' + Object.keys(m.rects || {}).length + ' rects, src ' + m.source + ')', 'ok'); })
+                  .catch(e => log('[hud] atlas load failed: ' + e.message + ' (vector-digit fallback)', 'warn'));
     }
 
     try {
