@@ -77,6 +77,11 @@ live_ram.bin
 *_ram.bin
 maxq_*.mcrr
 hot_*.mcrr
+# ASMTRACE slices (ROM-derived: engine per-part PC output from /dev/shm/mc_assembly.log).
+# NEVER commit. Reproduce: ssh prod "awk '\$18==\"<node>\"' /dev/shm/mc_assembly.log".
+_sat_*.txt
+_asm_*.txt
+*_asmtrace.txt
 # Phase-4a read-set trace harness build/output (reproducible via trace_readset.c).
 trace_readset.exe
 _rec_syntax.cpp
