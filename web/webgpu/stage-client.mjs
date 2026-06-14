@@ -240,14 +240,27 @@ export class StageClient {
       // world depth reaches the deck range (minZ < -500) OR its X extent exceeds 1000u.
       const worldMesh = this._meshIsWorldAuthored(m);
       const reproject = useLive && worldMesh;
+      // ── BROKEN DECK-TEXTURE -> UNTEXTURED SOLID (the green-grid fix, part 2) ──────────
+      // The engine-TA VRAM decode of the LARGE structural deck/backdrop texture (STG0B
+      // t01, 64x64) came out as saturated green/blue noise (top colors 165,255,57 /
+      // 57,158,255 — a wrong pixel-format/twiddle in bake_stage_from_ta.py, NOT a colour
+      // key: the texture has no alpha variation). Mapped+REPEAT-tiled across the deck's
+      // 776 tris, that green border tiles into an even grid spanning the canvas — exactly
+      // the reported "green wireframe grid". The small props (69 meshes, 480 tris) decode
+      // FINE and render recognizably, so they keep their textures. For the world-authored
+      // deck meshes we drop the corrupt texture and render an untextured solid deck colour
+      // (a dark floor that reads as a platform, NOT a grid) until the deck-texture decode
+      // is fixed offline. (re_kb 26: deck-texture decode is a separate bake-pipeline item.)
+      const deckUntex = worldMesh;
+      if (deckUntex) surr = 0;
       // INTENSITY FLOOR (deck-visibility fix). The engine-TA bake decodes a Col_Type=1
       // (packed-color) intensity for each vertex. For the large world-authored structural
       // meshes (deck/floor/backdrop) that intensity came out ~0.01 — modulating the bright
       // deck texture (ShadInstr=1) by ~0 made the deck render BLACK even though it draws on
-      // hardware. Those textured meshes ARE the stage art and the engine shows them at full
-      // intensity, so floor the base colour to 1.0 for textured world meshes (decal-like
-      // pass-through of the deck texture). Small props keep their real per-vertex shading.
-      const intensityFloor = (worldMesh && m.textured) ? 1.0 : 0.0;
+      // hardware. With the texture now dropped we paint a solid mid-grey deck colour; the
+      // small textured props keep their real per-vertex shading (floor 0 = use v.i).
+      const deckColor = 90;                                  // solid untextured deck grey
+      const intensityFloor = 0.0;                            // props use real per-vertex v.i
       // OP list (engine ListType 0). Engine isp DepthMode/cull are honoured by the renderer.
       // ── PER-TRIANGLE DEGENERATE-CULL (the "green wireframe grid" fix; re_kb 26 item 1) ──
       // Whether a vertex is taken from its baked screen `pos` OR re-projected from `world`,
@@ -279,8 +292,9 @@ export class StageClient {
             px = sx; py = sy; pz = sz;
           }
           if (!onScreen(px, py)) { ok = false; break; }
-          const iv = Math.max(intensityFloor, (v.i ?? 1));
-          const c = Math.max(0, Math.min(255, Math.round(iv * 255)));
+          // deck meshes: solid grey (texture dropped); props: real per-vertex intensity.
+          const c = deckUntex ? deckColor
+                  : Math.max(0, Math.min(255, Math.round(Math.max(intensityFloor, (v.i ?? 1)) * 255)));
           fv.push([px, py, pz, c, v.uv[0], v.uv[1]]);
         }
         if (!ok) continue;                 // degenerate (unplaced-prop garbage) — drop it
