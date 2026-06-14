@@ -85,3 +85,7 @@ _asm_*.txt
 # Phase-4a read-set trace harness build/output (reproducible via trace_readset.c).
 trace_readset.exe
 _rec_syntax.cpp
+
+# projectile geometry-proof artifacts (ROM-derived images)
+_proj_geom.*
+*.ppm
