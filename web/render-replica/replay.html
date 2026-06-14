@@ -216,10 +216,17 @@
 // (Phases 1/2 frozen byte-exact). MCRR spec: docs/RENDER-REPLICA-RECORDING-FORMAT.md.
 // ============================================================================
 import createRenderFrame from './render_frame.mjs?v=clean1';
-// Phase 5 — PURE-STATE TEXTURES: client decodes each active body part's sprite from the
-// shipped-once compressed GFX (in the RAM image) + the live sprite_id, writes it to pane.vram
-// at the TCW addr render_frame carries. Replaces the per-frame "bodytex" VRAM band (removed).
-import { ensureBodyTextures } from './body_decoder.mjs?v=clean1';
+// BODIES — PROVEN SPRITE-CLIENT PATH (2026-06-14): the character bodies are now drawn by the
+// EXACT cockpit renderer (web/webgpu-test.html): SpriteClient.buildAssemblyDrawList ->
+// buildEmitterDrawList (selKeyed body path, geometry CLOSED per re_kb project_emitter_status)
+// -> SpriteGPU.render, from the baked part-atlas (web/test-atlas/chars/PLxx_parts.png +
+// _asm.json/_lut.json). This REPLACES the old render_frame + body_decoder live-texture-decode
+// pass — every body bug (de-twiddle / carve / col-rank / verbatim) lived in body_decoder's
+// per-frame decode, which is GONE. We still run render_frame's transpiled TA ONLY for the
+// per-frame ground-truth VALIDATOR (params 16/16) + the cockpit geometry readout; it no
+// longer drives any drawn pixel. body_decoder.mjs / ensureBodyTextures are removed.
+import { SpriteClient } from '../webgpu/sprite-client.mjs?v=83';
+import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=13';
 // Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
 // /gfx/PL{NN}_gfx{1,2}.bin (cached by char_id). Fixes the scramble + the tag-in GFX gap (covers
@@ -1126,6 +1133,180 @@ window.__hudReady  = () => hudReady;                  // headless: real-art atla
 window.__hudClient = () => hud;                       // headless: inspect the HudClient
 window.__hudCanvas = () => (hud.attach(document.getElementById('cReplay')), hud._canvas || (ensureHudOverlay(), _hudCanvas));
 
+// ============================================================================
+// BODIES — PROVEN SPRITE-CLIENT RENDER (replaces render_frame + body_decoder).
+//
+// The render-replica already holds the full 16MB RAM image per frame, so every field
+// the cockpit's OBJS/GSTA wire carries is readable directly from RAM. We populate the
+// SAME SpriteClient state the cockpit's onGSTA/onOBJS produce (slot[0..5] + objects[]),
+// then call the IDENTICAL draw path the cockpit uses by default (sprite-client.mjs:1273):
+//   SPRITECLIENT.assemblyMode=true -> buildAssemblyDrawList -> buildEmitterDrawList
+//   (selKeyed body path) -> SG.render(...) onto a transparent overlay canvas.
+//
+// Reused VERBATIM (cited): SpriteClient.buildAssemblyDrawList / buildEmitterDrawList
+// (selKeyed branch, the geometry-CLOSED emitter), loadAsmChar (PLxx_parts.png+_asm.json+
+// _lut.json), SpriteGPU.init/setAtlas/setCharPalette/setIndexedAtlas/setCharLUT/render.
+// NO new geometry/decode glue — only RAM->slot field copy (the wire the cockpit consumes).
+const SPRITECLIENT = new SpriteClient(); window._spriteclient = SPRITECLIENT;
+const SG = new SpriteGPU();              window._spritegpu = SG;
+SPRITECLIENT.assemblyMode = true;        // EMITTER (parts) path — the cockpit's default
+window._emitterPort = true;              // faithful loc_8c033e90 emitter port (cockpit default)
+SPRITECLIENT.predict = false;            // RAM is authoritative every frame — no extrapolation
+SPRITECLIENT.objectsOn = true;           // draw pool satellites (projectiles/capes) via the emitter
+// Baked part-atlas dir (ROM-derived, gitignored, scp'd to prod). SAME assets the cockpit
+// loads. Lazy fetch per char_id on demand (loadAsmChar). Override with ?atlas=<base>.
+const BODY_ATLAS_BASE = new URLSearchParams(location.search).get('atlas')
+  || new URL('../test-atlas/chars', import.meta.url).href;
+SPRITECLIENT.setCharBase(BODY_ATLAS_BASE);
+
+// Transparent overlay canvas for the SpriteGPU body output, stacked EXACTLY over #cReplay
+// (the pvr2 STAGE surface). alphaMode 'premultiplied' lets the stage behind show through the
+// body quads' transparent background (body quads are punch-through, alpha 0/1). The 2D
+// effects/HUD overlays are appended AFTER this, so they stay on top.
+let _bodyCanvas = null;
+function ensureBodyCanvas() {
+  if (_bodyCanvas) return _bodyCanvas;
+  const host = document.getElementById('cReplay');
+  _bodyCanvas = document.createElement('canvas');
+  _bodyCanvas.width = host.width; _bodyCanvas.height = host.height;
+  _bodyCanvas.style.cssText = host.style.cssText;
+  _bodyCanvas.style.background = 'transparent';
+  _bodyCanvas.style.position = 'absolute';
+  _bodyCanvas.style.pointerEvents = 'none';
+  host.style.position = 'relative';
+  host.parentElement.style.position = 'relative';
+  host.parentElement.appendChild(_bodyCanvas);
+  _bodyCanvas.style.left = host.offsetLeft + 'px';
+  _bodyCanvas.style.top  = host.offsetTop + 'px';
+  return _bodyCanvas;
+}
+
+// Populate SPRITECLIENT.slot[0..5] from the 6 char structs in the RAM image — the SAME
+// fields onGSTA parses off the wire (maplecast_gamestate.cpp OFF_*; sprite-client onGSTA).
+// We write the slot fields directly (the cockpit's onGSTA byte-parse is just a transport;
+// the geometry/draw code downstream reads these exact properties). screen_x/y/facing/
+// scaleX/Y/pal12d/pal12e are the load-bearing inputs to buildEmitterDrawList.
+function populateBodiesFromRAM() {
+  if (!ram) return;
+  SPRITECLIENT.inMatch = rdU8(0x8C289624);   // ADDR_IN_MATCH — atlas preload gate (onGSTA)
+  for (let s = 0; s < CHAR_SLOTS.length; s++) {
+    const base = CHAR_SLOTS[s], sl = SPRITECLIENT.slot[s];
+    sl.active    = rdU8(base + 0x000);
+    sl.char_id   = rdU8(base + 0x001);
+    sl.facing    = rdU8(base + 0x110);                 // render-authoritative facing (loc_8c0344d4 gate)
+    sl.palette   = rdU8(base + 0x52D);
+    sl.pos_x     = rdF32(base + 0x034);
+    sl.screen_x  = rdF32(base + 0x0E0);                // node+0xE0 foot anchor (own-origin)
+    sl.screen_y  = rdF32(base + 0x0E4);
+    const rawSid = rdU16(base + 0x144);
+    sl.sprite_id = rawSid & 0x7fff;                    // engine indexes GFX2[sid & 0x7FFF]
+    sl.sid_xform = (rawSid & 0x8000) ? 1 : 0;
+    sl.scaleX    = rdF32(base + 0x050);                // char+0x50/0x54 dynamic zoom
+    sl.scaleY    = rdF32(base + 0x054);
+    sl.pal12d    = rdU8(base + 0x12D);                 // per-part palette row
+    sl.pal12e    = rdU8(base + 0x12E);                 // live hit-flash / palette-effect
+    sl.overlay1a4= rdU8(base + 0x1A4);
+    sl.draw_layer= 0xFF;                               // resolved from the slot table below (z-order)
+    sl.t = SPRITECLIENT._now0 || performance.now(); sl.vx = 0; sl.vy = 0;
+    // Lazy-load this char's emitter atlas (active + bench tag-in candidates, like onGSTA).
+    const want = SPRITECLIENT.inMatch ? (sl.char_id != null) : sl.active;
+    if (want) SPRITECLIENT.loadAsmChar(sl.char_id);
+  }
+  // Slot-table walk -> per-cid draw_layer (the LAYER table IS the draw list; z-order in
+  // buildEmitterDrawList). Mirrors readAllDrawn's layer assignment for the 6 bodies.
+  const SLOT_COUNT_BASE = 0x8C2895E0, SLOT_PTR_BASE = 0x8C287DE0, SLOT_ROW_STRIDE = 0x180;
+  for (let layer = 0; layer < 16; layer++) {
+    const count = rdU8(SLOT_COUNT_BASE + layer);
+    if (count <= 0 || count > 0x60) continue;
+    const row = SLOT_PTR_BASE + layer * SLOT_ROW_STRIDE;
+    for (let i = 0; i < count; i++) {
+      const node = rdU32(row + i * 4) >>> 0;
+      for (let s = 0; s < CHAR_SLOTS.length; s++)
+        if (node === (CHAR_SLOTS[s] >>> 0) && SPRITECLIENT.slot[s].draw_layer === 0xFF)
+          SPRITECLIENT.slot[s].draw_layer = layer;
+    }
+  }
+}
+
+// Populate SPRITECLIENT.objects[] (pool satellites: projectiles / capes / supers / effects)
+// from the slot-table walk — the SAME object set readAllDrawn ships as OBJS, read from RAM.
+// onOBJS produces {cid,sid,type,x,y,xflip,isEffect,blend,...}; we build that shape directly.
+function populateObjectsFromRAM() {
+  if (!ram) { SPRITECLIENT.objects = []; return; }
+  const SLOT_COUNT_BASE = 0x8C2895E0, SLOT_PTR_BASE = 0x8C287DE0, SLOT_ROW_STRIDE = 0x180;
+  const objs = [];
+  for (let layer = 0; layer < 16; layer++) {
+    const count = rdU8(SLOT_COUNT_BASE + layer);
+    if (count <= 0 || count > 0x60) continue;
+    const row = SLOT_PTR_BASE + layer * SLOT_ROW_STRIDE;
+    for (let i = 0; i < count; i++) {
+      const node = rdU32(row + i * 4) >>> 0;
+      if (node < 0x8C000000 || node >= 0x8D000000) continue;
+      let isBody = false;
+      for (let s = 0; s < CHAR_SLOTS.length; s++) if (node === (CHAR_SLOTS[s] >>> 0)) { isBody = true; break; }
+      if (isBody) continue;                            // bodies drawn from the char structs above
+      if (rdU8(node + 0x12C) === 0) continue;          // renderer visibility gate
+      const sid = rdU16(node + 0x144); if (sid === 0) continue;
+      const sx = rdF32(node + 0xE0), sy = rdF32(node + 0xE4);
+      if (sx < -64 || sx > 704 || sy < -64 || sy > 544) continue;
+      // Owner slot (optional — global supers have none): owner word at node+0x18 or +0x80.
+      let slot = -1; const oA = rdU32(node + 0x18) >>> 0, oB = rdU32(node + 0x80) >>> 0;
+      for (let s = 0; s < CHAR_SLOTS.length; s++) if (oA === (CHAR_SLOTS[s] >>> 0) || oB === (CHAR_SLOTS[s] >>> 0)) { slot = s; break; }
+      const cid = slot >= 0 ? rdU8(CHAR_SLOTS[slot] + 0x001) : 0;
+      const gfxBase = rdU32(node + 0x15C) >>> 0, gfxLow = gfxBase & 0x0FFFFFFF;
+      const isEffect = (gfxLow >= 0x0CED0000 && gfxLow < 0x0CEE0000) ? 1 : 0;
+      objs.push({ cid, sid: sid & 0x7fff, type: layer,
+                  xflip: rdU16(node + 0x130) ? 1 : 0,
+                  x: Math.round(sx), y: Math.round(sy),
+                  isEffect, hotDx: 0, hotDy: 0, hasHot: false, effect_key: gfxBase & 0xFFFF,
+                  listType: null, blend: null });
+      // kick the satellite's emitter atlas (owner char_id; effects route to FX in emitter)
+      if (!isEffect) SPRITECLIENT.loadAsmChar(cid);
+    }
+  }
+  SPRITECLIENT.objects = objs;
+}
+
+// Draw the bodies with the proven sprite-client onto the transparent overlay (over the stage).
+// Lazy-inits SG on the SAME WebGPU device the pvr2 stage/pane uses, registers each loaded
+// emitter atlas, then runs the cockpit's exact build+render. Returns the drawn-part count.
+let _sgTried = false;
+function renderBodiesPass() {
+  if (!ram) return 0;
+  // POPULATE + BUILD run with or without a GPU — the slot/object state from RAM and the
+  // emitter draw list are the load-bearing reconstruction (verifiable headlessly even when
+  // no WebGPU adapter exists, where the GPU draw below is a no-op). updates this._asmDrawn.
+  populateBodiesFromRAM();
+  populateObjectsFromRAM();
+  const drawList = SPRITECLIENT.buildAssemblyDrawList(640, 480);
+  // GPU DRAW (real hardware only) — the cockpit's exact path: lazy SG.init on the shared pvr2
+  // device, register loaded atlases, SG.render onto the transparent overlay.
+  if (gpuOK && pane.R && pane.R.dev) {
+    if (!SG.ok && !_sgTried) { _sgTried = true;
+      try { SG.init(pane.R.dev, ensureBodyCanvas(), 'premultiplied'); }
+      catch (e) { log('[bodies] SG.init failed: ' + e.message, 'err'); }
+    }
+    if (SG.ok) {
+      // Register newly-loaded emitter atlases into the GPU (cockpit webgpu-test.html:1273-1276).
+      for (const cid in SPRITECLIENT.asmChars) {
+        const c = SPRITECLIENT.asmChars[cid];
+        if (c && c.img && !SG.chars[cid]) {
+          SG.setAtlas(cid, c.img); SG.setCharPalette(cid, c.pal128);
+          if (c.idxImg && c.lut && !SG.idxChars[cid]) { SG.setIndexedAtlas(cid, c.idxImg); SG.setCharLUT(cid, c.lut); }
+        }
+      }
+      // T = TextureManager (pane.T) carries the live PVR body palette (T._pal) for the recolor
+      // path — same role window._T plays in the cockpit. updatePalette ran in the stage pass.
+      try { SG.render(drawList, {}, pane.T, SPRITECLIENT.buildSparkList(640, 480), null); }
+      catch (e) { log('[bodies] SG.render: ' + e.message, 'err'); }
+    }
+  }
+  return SPRITECLIENT._asmDrawn || 0;
+}
+window.__renderBodies = () => renderBodiesPass();      // headless verification hook
+window.__bodyDrawn    = () => SPRITECLIENT._asmDrawn || 0;
+window.__bodyCanvas   = () => _bodyCanvas;
+
 // ---------------------------------------------------------------- player state
 const pane = new Pane(document.getElementById('cReplay'));
 let REC = null, ram = null, cur = 0, playing = false, rafId = 0, gpuOK = false;
@@ -1255,23 +1436,15 @@ function showFrame(f) {
     // Phase A: override the shipped GFX with the COMPLETE local disc art at node+0x15C/0x160
     // (cached by char_id) BEFORE the walker/decoder read it — fixes the scramble.
     applyLocalGfx(ram, log);
+    // render_frame's transpiled TA is now used ONLY for the per-frame GROUND-TRUTH VALIDATOR
+    // (params 16/16) + the cockpit geometry readout — it no longer drives ANY drawn pixel.
+    // The bodies are drawn by the proven SpriteClient/SpriteGPU emitter path (renderBodiesPass).
     const { ta, quads, len, quadSels, quadGfx1s, quadColRow, quadMirror } = transpiledTA(ram);
     window.__lastTA = ta;      // expose for headless verification (TA-level motion probe)
-    // PURE-STATE TEXTURES (FAITHFUL TRANSPILE 2026-06-14): decode the active body parts into
-    // pane.vram via the engine-faithful path — loc_8c0354c0 LZSS (byte-exact vs engine .raw) +
-    // loc_8c033d78 verbatim contiguous write at the part-base TCW. NO carve/detwiddle/re-twiddle:
-    // each emitted quad's TCW already indexes the right chunk of the one blob, read at its TSP
-    // dims by the renderer (texture-manager _pal4 == flycast texture_TW). colRow/opts are inert
-    // here (the hand-modeled carve they fed is gone); kept only for call-site compatibility.
-    const colRow = carveColRow(quadColRow, quads, quadGfx1s);
-    if (gpuOK && pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, colRow, { inTileMir: __cfg.inTileMir });
-    // Cockpit: post-process the TA (anchor/scale/flip/iso/reverse) + drive the readout & overlay.
-    const drawTA = cockpitProcess(ta, quads, quadSels, quadGfx1s, f, quadColRow, quadMirror);
-    if (gpuOK) {
-        const bg = renderStagePass();            // STAGE pass first (clears); bodies composite over
-        const dbg = dbgFromCfg(); if (bg) dbg._bgPreRendered = true;
-        pane.render(drawTA, dbg);
-    }
+    // Cockpit readout/overlay (anchor/scale/flip/iso) still runs on the TA for inspection.
+    cockpitProcess(ta, quads, quadSels, quadGfx1s, f, quadColRow, quadMirror);
+    if (gpuOK) renderStagePass();                // STAGE pass (clears #cReplay; bodies overlay on top)
+    renderBodiesPass();                          // BODIES via SpriteClient emitter -> SG (populate runs w/o GPU)
     renderEffectsPass();                         // EFFECTS pass (additive, above bodies, below HUD)
     renderHudPass();                             // HUD foreground pass (2D overlay, on top of bodies+stage)
     validate(fr, ta, len);
@@ -1382,21 +1555,12 @@ function liveApplyFrame(u8) {
     // Phase A: override the shipped/streamed GFX with the COMPLETE local disc art at
     // node+0x15C/0x160 (cached by char_id) BEFORE the walker/decoder read — fixes the scramble.
     applyLocalGfx(ram, log);
+    // render_frame's transpiled TA now drives ONLY the validator + cockpit readout (no pixels).
     const { ta, quads, len, quadSels, quadGfx1s, quadColRow, quadMirror } = transpiledTA(ram);
     window.__lastTA = ta;
-    // PURE-STATE TEXTURES (live, FAITHFUL TRANSPILE): decode each body part into pane.vram @ its
-    // part-base TCW via the engine-faithful path (loc_8c0354c0 LZSS + loc_8c033d78 verbatim write),
-    // keyed by its OWN (sel,gfx1) — tiling-safe pairing. NO carve; colRow/opts inert (kept for
-    // call-site compatibility; the hand-modeled carve is removed).
-    const colRow = carveColRow(quadColRow, quads, quadGfx1s);
-    if (gpuOK && pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, colRow, { inTileMir: __cfg.inTileMir });
-    // Cockpit: post-process the TA (anchor/scale/flip/iso/reverse) + drive the readout & overlay.
-    const drawTA = cockpitProcess(ta, quads, quadSels, quadGfx1s, vframe, quadColRow, quadMirror);
-    if (gpuOK) {
-        const bg = renderStagePass();            // STAGE pass first (clears); bodies composite over
-        const dbg = dbgFromCfg(); if (bg) dbg._bgPreRendered = true;
-        pane.render(drawTA, dbg);
-    }
+    cockpitProcess(ta, quads, quadSels, quadGfx1s, vframe, quadColRow, quadMirror);
+    if (gpuOK) renderStagePass();                // STAGE pass (clears #cReplay; bodies overlay on top)
+    renderBodiesPass();                          // BODIES via SpriteClient emitter -> SG (populate runs w/o GPU)
     renderEffectsPass();                         // EFFECTS pass (additive, above bodies, below HUD)
     renderHudPass();                             // HUD foreground pass (2D overlay, on top of bodies+stage)
 

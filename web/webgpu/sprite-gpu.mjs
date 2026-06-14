@@ -147,12 +147,17 @@ export class SpriteGPU {
     this.persistEmpty = true;
   }
 
-  init(device, canvas) {
+  // alphaMode (optional, default 'opaque'): pass 'premultiplied' when SG draws on a
+  // TRANSPARENT overlay canvas stacked over another renderer (e.g. the render-replica's
+  // pvr2 STAGE canvas) — the body quads' transparent background then lets the layer
+  // behind show through instead of clearing it to black. The body quads are punch-through
+  // (index-0 transparent = alpha 0/1), so premultiplied == straight for the drawn pixels.
+  init(device, canvas, alphaMode) {
     try {
       this.dev = device; this.canvas = canvas;
       this.ctx = canvas.getContext('webgpu');
       this.fmt = navigator.gpu.getPreferredCanvasFormat();
-      this.ctx.configure({ device, format: this.fmt, alphaMode: 'opaque' });
+      this.ctx.configure({ device, format: this.fmt, alphaMode: alphaMode || 'opaque' });
       this.PP = new PostProcessor(); this.PP.init(device, this.fmt);
       this.sampler = device.createSampler({ minFilter: 'nearest', magFilter: 'nearest' });
       this.ubuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
