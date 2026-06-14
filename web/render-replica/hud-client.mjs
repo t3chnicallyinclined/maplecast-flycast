@@ -5,11 +5,15 @@
 // game's OWN pixel art, driven by the live engine state (the SAME RAM addresses
 // the production GSTA wire reads — confirmed, not modeled). [hud:real-art-v1]
 //
-// WHAT IS REAL PIXEL ART vs WHAT IS PROCEDURAL (engine-faithful):
-//   • TIMER digits + COMBO/HIT digits + LEVEL digits  -> REAL boxed-digit sprites
-//       from FONT.BIN rec1 (64x64 ARGB4444 twiddled HUD glyph sheet), de-rotated to
-//       upright and luminance-keyed. Atlas built by tools/rip_hud_atlas.py, served
-//       under ./hud/hud_atlas.{png,json}. These are the iconic MVC2 HUD digits.
+// CLEAN RECONSTRUCTION (no garble). The FONT.BIN real-art digit path was the garble source:
+// the ripped `digit_*` atlas rects pointed at empty/fragmented glyph space and tinting that
+// produced pink/magenta noise where digits should be. v1-clean renders EVERY HUD element with
+// crisp procedural primitives — solid team-tinted bars + 7-segment vector digits — no external
+// texture, so there is nothing left to garble. [hud:clean-v1]
+//
+// WHAT IS PROCEDURAL (engine-faithful):
+//   • TIMER digits + COMBO/HIT digits + LEVEL digits  -> CLEAN 7-segment vector digits with a
+//       1px dark halo for legibility. Tint perfectly; need no art asset.
 //   • LIFE BAR + SUPER METER fill  -> PROCEDURAL by design. The engine does NOT use a
 //       distinct bar sprite: it draws a WHITE texel polygon MODULATED by a per-team-slot
 //       vertex color (loc_8c15FFB0). So the faithful reconstruction is the angled
@@ -58,16 +62,18 @@ export class HudClient {
         this._host = null;
     }
 
-    // Load the real-art atlas. Non-blocking: until it resolves, render() uses the
-    // built-in vector-digit fallback so the HUD is never blank.
+    // v1-clean renders entirely from procedural primitives, so the atlas is OPTIONAL and
+    // never gates rendering. load() stays for API compatibility (replay.html calls it) and to
+    // keep the team-color metadata available, but a failure is harmless — the HUD is identical.
     async load() {
-        const url = new URL('hud_atlas', this.base);
-        const [meta, img] = await Promise.all([
-            fetch(new URL('hud_atlas.json', this.base)).then(r => r.ok ? r.json() : Promise.reject(r.status)),
-            this._loadImg(new URL('hud_atlas.png', this.base)),
-        ]);
-        this.meta = meta; this.img = img; this.ready = true;
-        return meta;
+        try {
+            const [meta, img] = await Promise.all([
+                fetch(new URL('hud_atlas.json', this.base)).then(r => r.ok ? r.json() : Promise.reject(r.status)),
+                this._loadImg(new URL('hud_atlas.png', this.base)),
+            ]);
+            this.meta = meta; this.img = img; this.ready = true;
+            return meta;
+        } catch (e) { this.ready = false; return null; }   // procedural HUD renders regardless
     }
     _loadImg(u) {
         return new Promise((res, rej) => {
@@ -97,42 +103,34 @@ export class HudClient {
     }
 
     // ── digit rendering ─────────────────────────────────────────────────────
-    // Draw one real boxed-digit sprite from the atlas, scaled into a dh-tall box.
+    // CLEAN 7-segment vector digits. The FONT.BIN-ripped `digit_*` atlas rects pointed at
+    // blank/fragmented glyph space (y=0 row is empty; the real boxed digits live in the busy
+    // hud_sheet grid and don't tint cleanly), which produced the garbled HUD digits. Vector
+    // digits are crisp, tint perfectly, and need no external art. [hud:clean-v1]
     _glyph(ctx, ch, x, y, dh, color) {
-        if (this.ready && this.meta && /[0-9]/.test(ch)) {
-            const r = this.meta.rects['digit_' + ch];
-            if (r) {
-                const dw = Math.round(dh * r.w / r.h);
-                // tint: draw the white-keyed glyph, then multiply by color
-                ctx.save();
-                ctx.drawImage(this.img, r.x, r.y, r.w, r.h, x, y, dw, dh);
-                if (color && color !== '#ffffff') {
-                    ctx.globalCompositeOperation = 'source-atop';
-                    ctx.fillStyle = color; ctx.fillRect(x, y, dw, dh);
-                }
-                ctx.restore();
-                return dw;
-            }
-        }
-        return this._vecDigit(ctx, ch, x, y, dh, color);   // fallback
+        return this._vecDigit(ctx, ch, x, y, dh, color);
     }
-    // Real-art digit string. align: 'left'|'right'|'center'. Returns total width.
+    // Digit string. align: 'left'|'right'|'center'. Returns total width.
     _digits(ctx, str, x, y, dh, align, color) {
-        const adv = (this.ready ? Math.round(dh * 0.78) : Math.round(dh * 0.80));
-        const dw = adv;
+        const adv = Math.round(dh * 0.74);
         const total = str.length * adv;
         let cx = align === 'right' ? x - total : (align === 'center' ? x - total / 2 : x);
-        for (const ch of str) { this._glyph(ctx, ch, cx, y, dh, color); cx += adv; }
+        for (const ch of str) { this._vecDigit(ctx, ch, cx, y, dh, color); cx += adv; }
         return total;
     }
-    // Vector 7-seg fallback (only used before the atlas finishes loading).
+    // CLEAN 7-segment vector digit. Crisp, tints perfectly, no external art. A 1px dark
+    // halo keeps it readable over the bright bars/portrait plates.
     _vecDigit(ctx, ch, x, y, h, color) {
         const SEG = { '0':'abcdef','1':'bc','2':'abged','3':'abgcd','4':'fgbc','5':'afgcd','6':'afgcde','7':'abc','8':'abcdefg','9':'abcfgd' };
         const segs = SEG[ch]; const w = Math.round(h * 0.62); if (!segs) return w;
         const t = Math.max(2, Math.round(w * 0.16)), midY = y + h / 2;
-        ctx.fillStyle = color || '#fff';
         const seg = { a:[x+t,y,w-2*t,t], b:[x+w-t,y+t,t,h/2-1.5*t], c:[x+w-t,midY+0.5*t,t,h/2-1.5*t],
             d:[x+t,y+h-t,w-2*t,t], e:[x,midY+0.5*t,t,h/2-1.5*t], f:[x,y+t,t,h/2-1.5*t], g:[x+t,midY-t/2,w-2*t,t] };
+        // dark halo (1px offset, all 4 directions) for legibility
+        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        for (const [ddx, ddy] of [[-1,0],[1,0],[0,-1],[0,1]])
+            for (const s of segs) { const r = seg[s]; ctx.fillRect(r[0]+ddx, r[1]+ddy, r[2], r[3]); }
+        ctx.fillStyle = color || '#fff';
         for (const s of segs) { const r = seg[s]; ctx.fillRect(r[0], r[1], r[2], r[3]); }
         return w;
     }

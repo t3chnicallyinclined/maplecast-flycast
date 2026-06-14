@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF) [hud:real-art-v1]</title>
+<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF) [hud:clean-v1]</title>
 <style>
   :root { color-scheme: dark; }
   body { margin:0; background:#0c0e12; color:#cdd6e0; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; }
@@ -252,7 +252,7 @@ import { EffectsClient } from './effects-client.mjs?v=stagetex';
 // the engine's white-tex * per-slot vertex color (loc_8c15FFB0) reconstructed as the angled
 // team-tinted parallelogram with the red_health chip trail. Every field reads the live engine
 // addresses (the production GSTA wire's own reads). Supersedes the synthetic renderHudPass().
-import { HudClient } from './hud-client.mjs?v=stagetex';
+import { HudClient } from './hud-client.mjs?v=clean1';
 
 // ============================================================================
 // LIVE CONFIG COCKPIT — window.__cfg is read EVERY frame by the render path
