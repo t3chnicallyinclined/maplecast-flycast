@@ -203,6 +203,11 @@ Capture details (cited to the live QDIAG HUD-pass inventory, `re_kb finding:repl
 - The HUD textures (FONT.BIN / portrait glyphs) the bars sample are decoded into VRAM at match-load,
   before STARTRENDER, so they resolve against the already-shipped static 8MB VRAM prefix (+ palette tail)
   via each quad's `tcw`.
+- **OPEN (tier-2):** `collectHudQuads` emits ONE `HudQuad` per PVR poly, using the first 4 submit-order
+  verts as the corners. The high-value HUD (life bars, meters, timer/combo digits) are single 4-vert
+  parallelograms and are exact. A few longer tri-strips (verts 8..32 — multi-glyph name plates) capture
+  only their first quad; pixel-perfect HUD text needs the collector to expand a strip into per-quad
+  `HudQuad`s. See `re_kb finding:replica_live_hud_real_ta_open_multistrip`.
 
 ## Next (Phase 4b/4c)
 
