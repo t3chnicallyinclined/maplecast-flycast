@@ -104,3 +104,30 @@ UPSERT finding:replica_live_stage_effects_not_deployed SET
 
 RELATE finding:replica_live_stage_effects_not_deployed->cites->source:stage_effects_headless_proof;
 RELATE finding:replica_live_stage_effects_not_deployed->cites->source:stage_readset;
+
+-- ============================================================================
+-- 26d (2026-06-14): SYNTHESIZED STAGE CONTROL WORDS — CLOSED.
+-- Closes the open item in finding:replica_live_stage_projection_validated item (2):
+-- "the synthesized stage PVR control words (pcw/tsp/isp in stage-client _build) ...
+--  validate per-poly vs a live STG00 TA capture." Grounded in the engine TA, the
+-- green untextured deck is fixed. NO synthesized control words on the grounded path.
+-- replay.html ?v=stagetex. feat/render-replica-live.
+-- ============================================================================
+
+UPSERT source:engine_ta_parse SET kind='tool',
+  ref='tools/parse_engine_ta.py (TaTypeLut-correct TA walk) + tools/bake_stage_from_ta.py + tools/decode_vram_tex.py + tools/render_engine_ta.py (ground-truth raster) + tools/validate_stage_ta_client.py',
+  note='parse_engine_ta.py walks the engine PowerVR param stream _stage_gt/engine_ta.bin (tctx->tad.thd_root..thd_data, dumped same-frame by the oracle hook MAPLECAST_DUMP_RAM) byte-exactly: a poly header is 32B (type 0/1/3) or 64B (type 2/4) and its vertices 32B or 64B depending on poly type — a faithful port of flycast TaTypeLut (core/hw/pvr/ta.cpp poly_data_type_id/poly_header_type_size; vertex SZ64 for vt in {5,6,11,12,13,14}). Para types: 4=Polygon 5=Sprite 7=Vertex; 0/1/2=EOL/UserTileClip/ObjListSet (32B, no poly). Extracts per-group the REAL PCW/ISP/TSP/TCW (ta_structs.h bit layouts) + per-vertex screen XY/depth(1/w)/UV/base. STG0B engine_ta.bin = 136288B -> 96 poly groups, 2457 verts, 16 distinct textured TexAddr. bake_stage_from_ta.py emits atlas/stages/STG0B_ta.json (mode:engine_ta) with those control words + the engine final screen verts + textures decoded straight from the VRAM dump at each group TexAddr (decode_vram_tex.py: byte=TexAddr*8, twiddled, RGB565/ARGB4444/ARGB1555). ROM-derived, gitignored, scp-only.';
+
+UPSERT finding:stage_control_words_grounded SET
+  statement='STAGE CONTROL WORDS GROUNDED IN THE ENGINE TA — the synthesized green deck is FIXED. The old web/webgpu/stage-client.mjs _build SYNTHESIZED pcw/isp/tsp (pcw=(4<<29)|tex<<3|gouraud, isp=(6<<29).., tsp=(1<<29)|(1<<6)) and bound textures by the POL rip per-mesh texIndex — that produced a flat green/blue wireframe deck (only world-authored model 0 placed; its tile is the dark green-box texIndex 0; ALL the textured carrier structures live in the 82 LOCAL-space props the POL rip skips). FIX (no synthesis): tools/bake_stage_from_ta.py bakes the engine OWN stage TA into atlas/stages/STG0B_ta.json carrying the REAL per-poly PCW/ISP/TSP/TCW + the engine final screen-space verts (so ALL 83 models render, props included, exactly as the engine assembled them) + textures decoded from the VRAM dump at each group real TexAddr. stage-client.mjs gains _buildFromTA (consumes those control words verbatim into the PVR2Renderer parsed shape; intensity Col_Type=2 folded into the vertex base for ShadInstr=1 modulate) and prefers STGxx_ta.json over the POL-rip STGxx.json; setCamera() does NOT re-project in TA mode (verts are already the engine final screen coords). PROVEN: tools/validate_stage_ta_client.py rasterizes the client _buildFromTA output and diffs vs tools/render_engine_ta.py (the engine-TA ground-truth raster) = 99.989% identical pixels, mean abs diff 0.0001/ch, max 2 (rasterizer rounding only). Per-poly control-word table: EVERY word differs from the synth guess (e.g. PCW engine 808c001e vs synth 8000000a; ISP engine 93000000 vs c0000000; TSP engine 2009a45b vs 20000040; TCW engine 0809fc00 = RGB565 twiddled @TexAddr 654336, synth used a bare surrogate int). BEFORE/AFTER/TRUTH: _stage_gt/STAGE_BEFORE_AFTER_GROUNDED.png. replay.html cache-bust full2 -> stagetex. Body/decode/effects/HUD UNTOUCHED.',
+  status='confirmed', confidence='high', date='2026-06-14';
+
+UPSERT finding:stage_ta_bake_camera_note SET
+  statement='NOTE on the engine-TA bake vs the live camera. The grounded STGxx_ta.json bakes the engine FINAL SCREEN verts for the CAPTURED frame, so it is camera-static (it does not re-project on setCamera, by design — _isTA guard). This is the correct, fully-grounded source for the captured stage_id=0x11/STG0B frame and supersedes the synthesized-control-word path. To make the grounded path track the LIVE camera per-stage, the screen verts must be un-projected to world ((M1.M2)^-1, which needs the pre-divide fv2 the TA vertex omits — carry it by also capturing the engine pre-persp z, or re-derive world from the POL rip model + per-prop matrices per finding:stage_prop_matrices_deferred) and then re-projected via M1.M2 each frame. For now: grounded control words + textures + full-scene geometry on the captured camera; live-camera world re-assembly of the props remains the open prop-matrix item. The POL-rip world-space path (live-camera, model-0 deck only) stays as the fallback when no _ta.json exists.',
+  status='open', confidence='high', date='2026-06-14';
+
+RELATE finding:stage_control_words_grounded->cites->source:engine_ta_parse;
+RELATE finding:stage_control_words_grounded->cites->source:stage_groundtruth_capture;
+RELATE finding:stage_control_words_grounded->about->finding:replica_live_stage_projection_validated;
+RELATE finding:stage_ta_bake_camera_note->cites->source:engine_ta_parse;
+RELATE finding:stage_ta_bake_camera_note->about->finding:stage_prop_matrices_deferred;

@@ -117,6 +117,11 @@ export class StageClient {
     this._M1 = Float32Array.from(M1.subarray ? M1.subarray(0, 16) : M1.slice(0, 16));
     this._M2 = Float32Array.from(M2.subarray ? M2.subarray(0, 16) : M2.slice(0, 16));
     this._X = this._matmulColMaj(this._M1, this._M2);   // XMTRX = M1·M2 (loc_8c120540)
+    // ENGINE-TA grounded mode bakes the engine's FINAL screen-space verts — they are
+    // already projected through the captured frame's camera, so do NOT re-project here
+    // (re-running _build would treat baked screen coords as world coords). The POL-rip
+    // world-space path DOES re-project to track the live camera.
+    if (this._isTA) return false;
     if (this._data) { this._parsed = this._build(this._data); return true; }
     return false;
   }
@@ -141,7 +146,18 @@ export class StageClient {
     this._loading = true;
     const sid = stageId.toString(16).toUpperCase().padStart(2, '0');
     try {
-      const data = await (await fetch(`${this.base}/STG${sid}.json`)).json();
+      // GROUNDED PATH (re_kb 26 closed): prefer STGxx_ta.json — a bake of the engine's
+      // OWN stage TA (tools/bake_stage_from_ta.py from _stage_gt/engine_ta.bin). It carries
+      // the REAL PVR control words (pcw/isp/tsp/tcw) and VRAM-decoded textures + the fully-
+      // assembled screen geometry (all 83 models incl the props the POL rip cannot place).
+      // Falls back to the POL-rip STGxx.json (world-space deck only, synth control words)
+      // when no TA bake exists for this stage.
+      let data = null, isTA = false;
+      try {
+        const r = await fetch(`${this.base}/STG${sid}_ta.json`);
+        if (r.ok) { data = await r.json(); isTA = (data.mode === 'engine_ta'); }
+      } catch { /* no TA bake */ }
+      if (!data) data = await (await fetch(`${this.base}/STG${sid}.json`)).json();
       const imgs = await Promise.all(data.textures.map(async t => {
         try {
           const blob = await (await fetch(`${this.base}/${t.file}`)).blob();
@@ -149,18 +165,78 @@ export class StageClient {
         } catch { return null; }
       }));
       this._data = data;
+      this._isTA = isTA;
       this._imgs = imgs;
       this.stageId = stageId;
       const cam = this._perStageCam[stageId];
       this.cam = cam ? { ...DEFAULT_CAM, ...cam } : { ...DEFAULT_CAM };
-      this._parsed = this._build(data);
+      this._parsed = isTA ? this._buildFromTA(data) : this._build(data);
       this._uploadTextures();
-      console.log(`[stage-client] loaded STG${sid}: ${data.meshes.length} meshes, ${data.textures.length} textures`);
+      console.log(`[stage-client] loaded STG${sid} (${isTA ? 'engine-TA grounded' : 'POL-rip'}): `
+        + `${data.meshes.length} meshes, ${data.textures.length} textures`);
     } catch (e) {
       console.warn(`[stage-client] failed to load stage ${sid}`, e);
     } finally {
       this._loading = false;
     }
+  }
+
+  // ── GROUNDED build: engine-TA bake -> PVR2Renderer parsed object ──────────────
+  // Control words come STRAIGHT from the engine (data.meshes[].pcw/isp/tsp), NOT
+  // synthesized. Verts are already the engine's final SCREEN-space (sx,sy,1/w) so we
+  // do NOT re-project — this is the captured-frame stage exactly as the engine drew it.
+  // tcw carries the texture surrogate so getTexture binds the VRAM-decoded texture.
+  // intensity (vertex .i, Col_Type=2) is folded into the per-vertex base colour so the
+  // shader's modulate (ShadInstr=1) reproduces the engine's shading.
+  _buildFromTA(data) {
+    let triTotal = 0;
+    for (const m of data.meshes) triTotal += m.tris.length;
+    const vcount = triTotal * 3;
+    const vbuf = new ArrayBuffer(vcount * 28);
+    const vf = new Float32Array(vbuf), vb = new Uint8Array(vbuf);
+    const opaque = [], translucent = [];
+    let vi = 0;
+    this._surrToTex = {};            // surrogate == texIndex here (1:1)
+    for (const t of data.textures) this._surrToTex[t.surr] = t.surr - 1;
+
+    const writeVtx = (n, x, y, z, c, u, v) => {
+      const fo = n * 7, bo = n * 28;
+      vf[fo] = x; vf[fo + 1] = y; vf[fo + 2] = z;
+      vb[bo + 12] = c; vb[bo + 13] = c; vb[bo + 14] = c; vb[bo + 15] = 255;
+      vf[fo + 5] = u; vf[fo + 6] = v;
+    };
+
+    for (const m of data.meshes) {
+      if (!m.tris.length) continue;
+      const pcw = m.pcw >>> 0, isp = m.isp >>> 0, tsp = m.tsp >>> 0;
+      // texture surrogate: map this mesh's tcw addr -> the texture surr we assigned.
+      // bake stores per-mesh tcw; surrogate is the texture's surr field. We re-find it
+      // by matching addr; simplest: meshes already aligned to the surr list by addr.
+      let surr = 0;
+      if (m.textured) surr = this._surrForMeshTA(data, m);
+      // OP list (engine ListType 0). Engine isp DepthMode/cull are honoured by the renderer.
+      const first = vi;
+      for (const tri of m.tris) {
+        for (const v of tri) {
+          const c = Math.max(0, Math.min(255, Math.round((v.i ?? 1) * 255)));
+          writeVtx(vi++, v.pos[0], v.pos[1], v.pos[2], c, v.uv[0], v.uv[1]);
+        }
+      }
+      for (let t = first; t + 3 <= vi; t += 3)
+        opaque.push({ first: t, count: 3, isp, tsp, tcw: surr, pcw, tileclip: 0 });
+    }
+    return { vertexData: vb.subarray(0, vi * 28), vertexCount: vi,
+             opaque, punchThrough: [], translucent };
+  }
+
+  // map a TA mesh to its texture surrogate by TexAddr (the bake assigned surr per
+  // distinct (addr,size,fmt) key; meshes share that addr in tcw).
+  _surrForMeshTA(data, m) {
+    if (!this._taAddrToSurr) {
+      this._taAddrToSurr = {};
+      for (const t of data.textures) this._taAddrToSurr[t.addr] = t.surr;
+    }
+    return this._taAddrToSurr[(m.tcw >>> 0) & 0x1FFFFF] || 0;
   }
 
   // ── camera: world(x,y,z) -> screen(x,y in 640x480, depth=1/w) ──
