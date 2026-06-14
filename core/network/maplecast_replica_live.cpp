@@ -255,6 +255,11 @@ static void buildTables()
 	auto D = [&](u32 a, u32 l, const char* w) { pushReg(_dynRegs, a, l, w); };
 	D(0x8C2895E0, 0x10,        "slot_cnt");      // slot-table count array (16 layers)
 	D(0x8C287DE0, 16u*0x180u,  "slot_ptr");      // slot-table ptr arrays
+	// GLOBAL MATCH STATE (page 649) — 32B window over the 0x8C289620 block so the
+	// client gets stage_id (0x8C289638) for the Phase-3 STAGE background pass (pick
+	// which cached STGxx to render), plus in_match(0x624)/round(0x62B)/timer(0x630).
+	// stage_anim_timer (0x8C1F9D80) is already shipped in the "arena" region below.
+	D(0x8C289620, 0x20,        "gstate");        // in_match/round/timer/stage_id
 	D(0x8C268340, 6u*0x5A4u,   "char_str");      // P1C1..P2C3 char structs
 	// SATELLITE OBJECT POOL (capes/projectiles/drones/effects/extra-limbs) — the
 	// out-of-char-struct BODY nodes the slot-walk loc_8c0308c2 also renders via

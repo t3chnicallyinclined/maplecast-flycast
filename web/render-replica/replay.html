@@ -215,17 +215,26 @@
 // Reuses ta-parser/pvr2-renderer/texture-manager VERBATIM, and render_frame.wasm UNMODIFIED
 // (Phases 1/2 frozen byte-exact). MCRR spec: docs/RENDER-REPLICA-RECORDING-FORMAT.md.
 // ============================================================================
-import createRenderFrame from './render_frame.mjs?v=palettefix';
+import createRenderFrame from './render_frame.mjs?v=stage1';
 // Phase 5 — PURE-STATE TEXTURES: client decodes each active body part's sprite from the
 // shipped-once compressed GFX (in the RAM image) + the live sprite_id, writes it to pane.vram
 // at the TCW addr render_frame carries. Replaces the per-frame "bodytex" VRAM band (removed).
-import { ensureBodyTextures } from './body_decoder.mjs?v=palettefix';
+import { ensureBodyTextures } from './body_decoder.mjs?v=stage1';
 // Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
 // /gfx/PL{NN}_gfx{1,2}.bin (cached by char_id). Fixes the scramble + the tag-in GFX gap (covers
 // ALL 6 char structs incl P1C2/P2C2/P1C3/P2C3 tag-ins, not just connect-active bodies).
-import { applyLocalGfx } from './local_gfx_overlay.mjs?v=palettefix';
+import { applyLocalGfx } from './local_gfx_overlay.mjs?v=stage1';
 const bodyCache = {};   // decode-on-change memo, persists across frames
+
+// Phase 3 — STAGE (background): decode-from-disc cached locally (web/test-atlas/stages/
+// STGxx.json + PNGs, ripped offline by tools/rip_stage.py). The client reads stage_id from
+// the shipped global-state window (0x8C289638, region "gstate") to pick the stage, and
+// projects the stage's full-3D NaomiLib geometry through the LIVE engine camera matrices
+// (M1@0x8C2D6B18 · M2@0x8C2D6AD8, shipped in the "cam_mat" read-set region) using the SAME
+// transform_object_122560 math the bodies use — so the stage scrolls/zooms in lockstep with
+// the fighters, NO guessed camera. Rendered as an OP pass BEHIND the bodies.
+import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=stage1';
 
 // ============================================================================
 // LIVE CONFIG COCKPIT — window.__cfg is read EVERY frame by the render path
@@ -421,7 +430,7 @@ function synthSnap(w, h) {
 
 // ---------------------------------------------------------------- render_frame.wasm
 let frameMod;
-async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=palettefix' : p }); } return frameMod; }
+async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=stage1' : p }); } return frameMod; }
 function transpiledTA(ram) {
     const M = frameMod;
     const ramPtr = M._malloc(ram.length); M.HEAPU8.set(ram, ramPtr);
@@ -701,6 +710,42 @@ function cockpitProcess(ta, quads, quadSels, quadGfx1s, frameNo, quadColRow, qua
     return out;
 }
 
+// ---------------------------------------------------------------- STAGE (Phase 3)
+// One StageClient drives the background. It loads cached disc art (web/test-atlas/stages,
+// served under this page's origin) and projects with the LIVE engine camera matrices read
+// from the RAM image. Rendered as an OP pass BEHIND the bodies via the SAME pvr2 renderer
+// (pane.R) on the SAME canvas texture — stage clears, bodies composite over (loadOp 'load').
+const STAGE_BASE = new URL('../test-atlas/stages', import.meta.url).href;
+const stage = new StageClient(STAGE_BASE);
+let stageReady = false;
+// engine camera matrices in guest RAM (col-major, 16 floats each), read each frame.
+const ADDR_M1 = 0x8C2D6B18, ADDR_M2 = 0x8C2D6AD8, ADDR_STAGE_ID = 0x8C289638;
+function readMat16(addr) {
+    const m = new Float32Array(16);
+    const dv = new DataView(ram.buffer, ram.byteOffset, ram.byteLength);
+    for (let i = 0; i < 16; i++) m[i] = dv.getFloat32((addr + i * 4) & RAM_LO, true);
+    return m;
+}
+// Drive the stage from the current RAM image, then render it BEHIND the bodies. Called by
+// the render path right before pane.render(bodyTA). gpuOK + a non-degenerate camera required.
+function renderStagePass() {
+    if (!gpuOK || !stageReady || !ram) return false;
+    try {
+        const sid = rdU8(ADDR_STAGE_ID);
+        stage.setState(sid, rdU8(0x8C1F9D80));       // stage_id + stage_anim_timer
+        const M1 = readMat16(ADDR_M1), M2 = readMat16(ADDR_M2);
+        // skip until the camera matrices are non-zero (pre-match / loading frames)
+        if (M2[15] === 0 && M2[0] === 0) return false;
+        stage.setCamera(M1, M2);                      // re-projects on camera change
+        const p = stage.parsed, tm = stage.texMgr;
+        if (!p || !tm || !p.vertexCount) return false;
+        // OP pass: clear the canvas, draw the stage. Bodies composite over (loadOp 'load').
+        pane.R.renderFrame(p, tm, STAGE_PVRSNAP, null,
+            { singlePass: true, noSort: true, drawOpaque: true, drawPunch: false, drawTrans: true });
+        return true;
+    } catch (e) { log('[stage] ' + e.message, 'warn'); return false; }
+}
+
 // ---------------------------------------------------------------- player state
 const pane = new Pane(document.getElementById('cReplay'));
 let REC = null, ram = null, cur = 0, playing = false, rafId = 0, gpuOK = false;
@@ -740,6 +785,11 @@ async function seedFrom(pre, mb) {
         await pane.ensure();
         pane.setStatic(pre.vram, pre.pvr);
         gpuOK = true;
+        // Phase 3: bind the stage renderer to the SAME WebGPU device (so its textures upload
+        // and it can renderFrame onto pane's canvas). Stage geometry/textures load lazily on
+        // the first stage_id seen in the stream.
+        try { stage.attachDevice(pane.R.dev); stageReady = true; }
+        catch (e) { log('[stage] device attach failed: ' + e.message, 'warn'); }
     } catch (e) {
         gpuOK = false;
         log('  [warn] WebGPU unavailable (' + e.message + ') — TA playback + validator only, no canvas draw.', 'warn');
@@ -819,7 +869,11 @@ function showFrame(f) {
     if (gpuOK && pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, colRow, { inTileMir: __cfg.inTileMir });
     // Cockpit: post-process the TA (anchor/scale/flip/iso/reverse) + drive the readout & overlay.
     const drawTA = cockpitProcess(ta, quads, quadSels, quadGfx1s, f, quadColRow, quadMirror);
-    if (gpuOK) pane.render(drawTA, dbgFromCfg());
+    if (gpuOK) {
+        const bg = renderStagePass();            // STAGE pass first (clears); bodies composite over
+        const dbg = dbgFromCfg(); if (bg) dbg._bgPreRendered = true;
+        pane.render(drawTA, dbg);
+    }
     validate(fr, ta, len);
     els.fcur.textContent = f; els.scrub.value = f;
     // first quad Ax (motion telltale) into the log occasionally
@@ -937,7 +991,11 @@ function liveApplyFrame(u8) {
     if (gpuOK && pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, colRow, { inTileMir: __cfg.inTileMir });
     // Cockpit: post-process the TA (anchor/scale/flip/iso/reverse) + drive the readout & overlay.
     const drawTA = cockpitProcess(ta, quads, quadSels, quadGfx1s, vframe, quadColRow, quadMirror);
-    if (gpuOK) pane.render(drawTA, dbgFromCfg());
+    if (gpuOK) {
+        const bg = renderStagePass();            // STAGE pass first (clears); bodies composite over
+        const dbg = dbgFromCfg(); if (bg) dbg._bgPreRendered = true;
+        pane.render(drawTA, dbg);
+    }
 
     // validator (only if the live frame carries engine_ta — mock/synth sends taSize=0)
     if (engTa) validateLive(engTa, ta, len);

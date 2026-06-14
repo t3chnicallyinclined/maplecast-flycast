@@ -14,20 +14,28 @@
 // rendered via:
 //   renderFrame(parsed, texMgr, pvrSnap=640x480, null, {singlePass:true, noSort:true, transparentClear:true})
 //
-// ── PROJECTION (THE GAP) ──────────────────────────────────────────────────────
-// IMPORTANT FINDING: STGxxPOL geometry is NOT pre-projected screen space. It is
-// full 3D NAOMI world-space (x in ±48000, real Z depth, valid 0..1 UVs, per-vertex
-// colors) — the same NaomiLib model tree ModNao renders with a free perspective
-// camera. MVC2's render code projects it each frame with the NAOMI perspective
-// camera (camera_x/y on the wire = 0x8C1F9CD8/CDC). The exact fight-camera matrix
-// (fov, eye distance, world->view) is the one remaining unknown — see "FULL VERSION"
-// at the bottom of this file. Until that's calibrated, this module projects with a
-// configurable perspective camera (this.cam) good enough to place the stage behind
-// the characters; per-stage calibration knobs are exposed.
+// ── PROJECTION (GROUNDED — NO MODEL CAMERA) ───────────────────────────────────
+// STGxxPOL geometry is full 3D NAOMI world-space (x in ±48000, real Z depth, valid
+// 0..1 UVs, per-vertex colors) — the same NaomiLib model tree the bodies live in.
+// MVC2 projects EVERY renderable object (bodies AND the stage tree) through ONE
+// frame-global transform: loc_8C122560 (bank12), which the render-replica already
+// ports byte-exact as transform_object_122560 (tools/render-replica-poc/
+// gen_transform_obj.c) and which the body slot-walk feeds world pos through to
+// deposit screen_x/y @node+0xE0/E4. That transform is:
+//     XMTRX = M1(@0x8C2D6B18) · M2(@0x8C2D6AD8)       (column-major mat·mat, loc_8c120540)
+//     fv    = XMTRX · (x,y,z,1)                        (ftrv,                 loc_8c11F870)
+//     inv = 1/fv[3];  sx = fv[0]*inv;  sy = fv[1]*inv;  depth = inv   (persp divide)
+// Both source matrices are FRAME-GLOBAL camera state (built once/frame by the proj
+// setup loc_8c1216c0) and are SHIPPED in the replica-live read-set "cam_mat" region
+// (0x8C2D6AD8 + 0xC0 covers BOTH M2@+0x00 and M1@+0x40). So the client projects the
+// stage with the engine's OWN live camera — it scrolls/zooms in lockstep with the
+// fighters, ZERO guessed fov/eye. setCamera(M1,M2) drives this each frame; the legacy
+// DEFAULT_CAM perspective fallback is kept ONLY for the no-matrix standalone preview.
 //
-// The verts are projected to 640x480 screen space CPU-side here (PVR2Renderer
-// consumes screen-space x,y pre-NDC with z = 1/w depth and applies only the NDC
-// matrix from pvrSnap[0]).
+// fv[0]/fv[1] come out already in 640x480 screen pixels (the engine's proj matrix bakes
+// the viewport), matching the bodies' deposited +0xE0/E4. PVR2Renderer then applies only
+// its NDC matrix from pvrSnap[0]. depth = 1/w (bigger = nearer), same convention as the
+// body TA the renderer consumes.
 
 const SCREEN_W = 640, SCREEN_H = 480;
 
@@ -69,6 +77,9 @@ export class StageClient {
     this.cam = { ...DEFAULT_CAM };
     this.animTimer = 0;          // GSTA stage_anim_timer (low bit drives A/B; see anim note)
     this._perStageCam = {};      // optional { [stageId]: camOverride }
+    this._M1 = null;             // engine viewport matrix @0x8C2D6B18 (16 floats, col-major)
+    this._M2 = null;             // engine proj matrix     @0x8C2D6AD8 (16 floats, col-major)
+    this._X  = null;             // cached XMTRX = M1·M2 (rebuilt on camera change)
   }
 
   // Drive from GSTA each frame. stageId is 0..0x10; animTimer is the u8 wire field.
@@ -77,6 +88,36 @@ export class StageClient {
     if (stageId === this.wantId) return;
     this.wantId = stageId;
     this._ensureLoaded(stageId);
+  }
+
+  // ── ENGINE CAMERA: feed the live frame-global matrices (the GROUNDED path) ──
+  // M1 = viewport matrix (guest 0x8C2D6B18), M2 = projection matrix (guest 0x8C2D6AD8),
+  // each 16 floats in column-major memory order (exactly as load_mat reads them in
+  // gen_transform_obj.c). Recomputes XMTRX = M1·M2 (loc_8c120540 semantics) and, if the
+  // matrices actually changed, re-projects the loaded stage so it tracks the live camera.
+  // Returns true if a re-projection happened. A no-op when called with the same matrices.
+  setCamera(M1, M2) {
+    if (!M1 || !M2 || M1.length < 16 || M2.length < 16) return false;
+    if (this._M1 && this._sameMat(this._M1, M1) && this._sameMat(this._M2, M2)) return false;
+    this._M1 = Float32Array.from(M1.subarray ? M1.subarray(0, 16) : M1.slice(0, 16));
+    this._M2 = Float32Array.from(M2.subarray ? M2.subarray(0, 16) : M2.slice(0, 16));
+    this._X = this._matmulColMaj(this._M1, this._M2);   // XMTRX = M1·M2 (loc_8c120540)
+    if (this._data) { this._parsed = this._build(this._data); return true; }
+    return false;
+  }
+
+  _sameMat(a, b) { for (let i = 0; i < 16; i++) if (a[i] !== b[i]) return false; return true; }
+
+  // column-major mat·mat: out = X·Mnew where each column of Mnew is ftrv'd through X
+  // (loc_8c120540 / matmul_colmaj in gen_transform_obj.c).
+  _matmulColMaj(X, Mnew) {
+    const out = new Float32Array(16);
+    for (let col = 0; col < 4; col++)
+      for (let i = 0; i < 4; i++)
+        out[col * 4 + i] =
+          X[i] * Mnew[col * 4 + 0] + X[i + 4] * Mnew[col * 4 + 1] +
+          X[i + 8] * Mnew[col * 4 + 2] + X[i + 12] * Mnew[col * 4 + 3];
+    return out;
   }
 
   async _ensureLoaded(stageId) {
@@ -144,9 +185,23 @@ export class StageClient {
     return [sx, sy, Math.max(sz, 1e-9)];
   }
 
+  // ENGINE projection (the grounded path): fv = XMTRX·(x,y,z,1); persp divide.
+  // Mirrors transform_object_122560 EXACTLY (ftrv_colmaj + 1/fv[3]). Returns
+  // [screenX_px, screenY_px, depth=1/w]. depth clamped > 0 for the renderer's z buffer.
+  _projectEngine(x, y, z) {
+    const X = this._X;
+    const fx = X[0]*x + X[4]*y + X[8]*z  + X[12];
+    const fy = X[1]*x + X[5]*y + X[9]*z  + X[13];
+    // fv[2] (z) unused for screen xy; fv[3] = w
+    const fw = X[3]*x + X[7]*y + X[11]*z + X[15];
+    const inv = 1.0 / (fw || 1e-6);
+    return [fx * inv, fy * inv, Math.max(inv, 1e-9)];
+  }
+
   // Build the PVR2Renderer parsed object once per stage.
   _build(data) {
-    const vp = this._viewProj();
+    const useEngine = !!this._X;
+    const vp = useEngine ? null : this._viewProj();
     // worst-case verts = tris*3
     let triTotal = 0;
     for (const m of data.meshes) triTotal += m.tris.length;
@@ -184,7 +239,9 @@ export class StageClient {
       // _buildIndexBuffer turns count-2 tris from a strip — for a single tri that's 1.
       for (const tri of m.tris) {
         for (const v of tri) {
-          const [sx, sy, sz] = this._project(vp, v.pos[0], v.pos[1], v.pos[2]);
+          const [sx, sy, sz] = useEngine
+            ? this._projectEngine(v.pos[0], v.pos[1], v.pos[2])
+            : this._project(vp, v.pos[0], v.pos[1], v.pos[2]);
           let col = v.col;
           if (alpha < 0.999) col = [col[0], col[1], col[2], Math.round(col[3] * alpha)];
           writeVtx(vi++, sx, sy, sz, col, v.uv[0], v.uv[1]);
