@@ -131,3 +131,31 @@ RELATE finding:stage_control_words_grounded->cites->source:stage_groundtruth_cap
 RELATE finding:stage_control_words_grounded->about->finding:replica_live_stage_projection_validated;
 RELATE finding:stage_ta_bake_camera_note->cites->source:engine_ta_parse;
 RELATE finding:stage_ta_bake_camera_note->about->finding:stage_prop_matrices_deferred;
+
+-- ============================================================================
+-- 26e (2026-06-14): PER-NODE PROP MATRICES — CLOSED via WORLD-SPACE TA un-projection.
+-- Closes finding:stage_real_bug_pernode_matrices (item A) + finding:
+-- stage_prop_matrices_deferred + finding:stage_ta_bake_camera_note. The props now
+-- render at their correct world positions AND track the LIVE camera, with NO capture
+-- of transient NaomiLib matrix-stack state. feat/render-replica-live, commit 961e43e57.
+-- replay.html stage import bumped clean1->propworld (prod-only, single-line sed).
+-- ============================================================================
+
+UPSERT source:stage_world_unprojection SET kind='tool',
+  ref='tools/bake_stage_from_ta.py (build_unproject/unproject -> per-vertex `world` + hasWorld:true) + tools/_probe_stage_world_render.py (BEFORE/AFTER raster gate) + web/webgpu/stage-client.mjs _buildFromTA(useLive) + setCamera(re-proj on hasWorld)',
+  note='The engine TA vertex carries (sx, sy, inv=1/w); the pre-divide 4-vec is (sx*w, sy*w, fz, w) and we know rows 0,1,3 of XMTRX=M1.M2. So the 3x3 (rows 0,1,3 ; cols x,y,z) inverts for world (x,y,z) per vertex (fz unused). Round-trip (world -> reproject via M1.M2 -> screen) EXACT: median 1e-13 px, max 3.6e-6 px over all 2457 STG0B TA verts (8 clamped-degenerate 1/w=10 sentinels excluded). bake_stage_from_ta.py now writes BOTH the captured screen `pos` AND the un-projected `world` per vertex (+ hasWorld:true). stage-client.mjs _buildFromTA re-projects `world` through the LIVE XMTRX via _projectEngine when this._X is set (useLive); setCamera re-runs _buildFromTA for TA bakes that hasWorld (the old _isTA guard now only blocks legacy no-world bakes).';
+
+UPSERT finding:stage_pernode_matrices_closed SET
+  statement='STAGE PROP/SCENERY RENDER — CLOSED. The collapsed props were NOT a missing-runtime-matrix problem: the captured engine TA (_stage_gt/engine_ta.bin) is the FULL assembled scene (96 poly groups, 27 distinct textures, 2457 verts — the deck AND every prop), NOT model-0-only as finding:stage_world_proof had concluded (that "96 polys = only model 0" reading is CORRECTED: 96 GROUPS across 27 textures is the whole stage; the world-bounds coincidence X +-2500 simply reflects props physically sitting within the deck bounds). Un-projecting each TA vertex through (M1.M2)^-1 recovers EVERY model in WORLD space, with the per-node world matrix already folded into its screen position by the engine — so no NaomiLib matrix-stack capture is needed. The small local-extent props (tex 5107712, extent 3-38u) un-project to distinct correct world positions (e.g. (-25,87,741),(22,86,741),(-21,140,683)). bake_stage_from_ta.py bakes per-vertex `world`; stage-client.mjs _buildFromTA re-projects it through the LIVE camera so the FULL scenery (deck + all props) tracks the camera in lockstep with the fighters — closing BOTH the prop-placement gap (finding:stage_real_bug_pernode_matrices item A / finding:stage_prop_matrices_deferred) and the camera-static limitation (finding:stage_ta_bake_camera_note) at once. VALIDATED vs engine ground truth BEFORE deploy (cardinal rule 3): client live-projected world verts -> engine screen NN residual p90=0.0026px max=0.0069px (PASS); rigid scene under synthetic camera pan/zoom (props move coherently, no collapse); BEFORE(baked screen)/AFTER(live-world) raster identical to 12px/0.004% (the 8 clamped degenerates), _stage_gt/PROP_BEFORE_AFTER_STG0B.png. DEPLOYED prod 149.28.44.118: stage-client.mjs (md5 1c40d61d) + STG0B_ta.json (md5 f784a989) + textures scp-only; replay.html stage import clean1->propworld via single-line sed (other agent owns replay.html; their in-progress edits untouched, my line is prod-only not committed). OPEN (minor): only STG0B has an engine-TA capture; other stages still fall to the POL-rip world-space path (deck only) until each is captured live + baked. Body/HUD/effects/decode UNTOUCHED.',
+  status='confirmed', confidence='high', date='2026-06-14';
+
+UPSERT finding:stage_real_bug_pernode_matrices SET status='closed';
+UPSERT finding:stage_prop_matrices_deferred SET status='closed';
+UPSERT finding:stage_ta_bake_camera_note SET status='closed';
+
+RELATE finding:stage_pernode_matrices_closed->cites->source:stage_world_unprojection;
+RELATE finding:stage_pernode_matrices_closed->cites->source:engine_ta_parse;
+RELATE finding:stage_pernode_matrices_closed->cites->source:stage_camera_transform;
+RELATE finding:stage_pernode_matrices_closed->about->finding:stage_real_bug_pernode_matrices;
+RELATE finding:stage_pernode_matrices_closed->about->finding:stage_prop_matrices_deferred;
+RELATE finding:stage_pernode_matrices_closed->about->finding:stage_ta_bake_camera_note;
