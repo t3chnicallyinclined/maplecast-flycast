@@ -1288,10 +1288,13 @@ function renderHudPass() {
     populateHudStateFromRAM();
     const ctx = ensureHudOverlay();                   // lazy overlay-canvas create (once)
     try {
-        SPRITECLIENT._suppressLifeBars = true;
-        SPRITECLIENT.drawHUD(ctx);                     // clear + meters/timer/combo (life bar suppressed)
+        // ONE HUD: the proven cockpit drawHUD draws a SINGLE life bar per side +
+        // meters/timer/combo. The 3-bar tag-stack overlay (renderTagLifeBars) is REMOVED —
+        // three stacked bars per side read as a doubled HUD; real MVC2 shows one bar/side.
+        SPRITECLIENT._suppressLifeBars = false;        // drawHUD owns the single life bars again
+        SPRITECLIENT.drawHUD(ctx);                     // clear + single life bars + meters/timer/combo
         SPRITECLIENT.drawHudReal(ctx);                 // textured HUDQ quads if streamed (no-op otherwise)
-        hud.renderTagLifeBars(ctx, rdU8, CHAR_SLOTS);
+        hud.renderPlatesOnly(ctx, rdU8, CHAR_SLOTS);   // JUST corner portraits + names (no bars -> no double)
     } catch (e) { log('[hud] ' + e.message, 'warn'); }
 }
 
