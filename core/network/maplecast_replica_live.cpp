@@ -27,6 +27,7 @@
 */
 #include "maplecast_replica_live.h"
 #include "maplecast_compress.h"          // MirrorCompressor / ZCST envelope
+#include "maplecast_oracle_hook.h"       // HudQuad + mc_oracle_hudQuads (HUDQ tail)
 
 #include "hw/sh4/sh4_mem.h"              // addrspace::read*, mem_b, RAM_SIZE
 #include "hw/pvr/pvr_mem.h"              // vram, VRAM_SIZE
@@ -265,6 +266,7 @@ static bool                 _compInit = false;
 // MCRR / FRMx magics (LE on the wire) — see the format doc.
 static constexpr u32 MCRR_MAGIC = 0x5252434Du;     // "MCRR"
 static constexpr u32 FRMX_MAGIC = 0x784D5246u;     // "FRMx"
+static constexpr u32 HUDQ_MAGIC = 0x48554451u;     // "HUDQ" (HUD-TA tail magic, LE)
 
 // In-match flag + video-frame counter (same gate the Oracle uses).
 static constexpr u32 IN_MATCH_ADDR = 0x8C289624;
@@ -650,7 +652,22 @@ static void captureFrame(u32 vframe)
 	// pvrPalLen is ALWAYS present (0 in steady state). An older client that stops parsing after the
 	// GFX tail simply ignores these trailing bytes; the updated client refreshes this.pvr from them.
 	const size_t palHdr  = 4;                                  // u32 pvrPalLen
-	const size_t total = hdr + _dynTotal + tailHdr + gfxBytes + palHdr + (size_t)pvrPalLen;
+
+	// HUDQ TAIL (third variable tail, strict append AFTER the palette tail): the engine's
+	// REAL HUD/composite quads captured this frame from the surviving TA pass (maplecast_oracle_hook
+	// collectHudQuads). u32 magic + u32 nHud + nHud × 96-byte HudQuad. The render-replica client
+	// draws these instead of the hand-coded HUD reconstruction → pixel-perfect. Present ONLY when
+	// MAPLECAST_HUD_TA is armed AND the surviving pass yielded HUD quads (else absent → older clients
+	// and HUD-off runs are byte-identical to before). Magic-tagged so the client can skip it safely.
+	int nHud = 0;
+	const maplecast_oracle_hook::HudQuad* hudQuads =
+		maplecast_oracle_hook::mc_hudTaEnabled ? maplecast_oracle_hook::mc_oracle_hudQuads(&nHud) : nullptr;
+	if (!hudQuads) nHud = 0;
+	static_assert(sizeof(maplecast_oracle_hook::HudQuad) == 96, "HudQuad must be 96 bytes (wire interface)");
+	const size_t hudHdr   = nHud ? 8u : 0u;                   // u32 magic + u32 nHud (only when present)
+	const size_t hudBytes = (size_t)nHud * sizeof(maplecast_oracle_hook::HudQuad);
+
+	const size_t total = hdr + _dynTotal + tailHdr + gfxBytes + palHdr + (size_t)pvrPalLen + hudHdr + hudBytes;
 
 	int which = _dynWhich ^ 1;          // write the other buffer
 	std::vector<uint8_t>& buf = _dynBuf[which];
@@ -694,6 +711,15 @@ static void captureFrame(u32 vframe)
 	// updatePalette() needs. Shipped only when the palette signature changed (else pvrPalLen=0).
 	memcpy(&buf[off], &pvrPalLen, 4); off += 4;
 	if (pvrPalLen) { memcpy(&buf[off], pvr_regs, pvrPalLen); off += pvrPalLen; }
+
+	// ---- HUDQ TAIL: u32 magic, u32 nHud, then nHud × 96-byte HudQuad (the engine's REAL
+	// HUD quads this frame). Strictly AFTER the palette tail. Absent when nHud==0 so the
+	// steady HUD-off path is byte-identical. ----
+	if (nHud) {
+		memcpy(&buf[off], &HUDQ_MAGIC, 4); off += 4;
+		u32 nh = (u32)nHud; memcpy(&buf[off], &nh, 4); off += 4;
+		memcpy(&buf[off], hudQuads, hudBytes); off += hudBytes;
+	}
 
 	// ---- publish to the WS thread (drop-old: overwrite any undrained frame) ----
 	{

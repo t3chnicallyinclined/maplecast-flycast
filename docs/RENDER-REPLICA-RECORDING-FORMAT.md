@@ -143,6 +143,67 @@ READ-ONLY (addrspace + array reads only) → determinism-safe; gated entirely OF
    Sizes: header+tables (tiny) + 8 MB VRAM + 0x8000 PVR + ~256 KB static GFX, then ~58 KB × nFrames
    raw dynamic + the per-frame engine TA. 300 frames ≈ 8 MB static + ~18 MB dynamic+TA ≈ 26 MB.
 
+## Live-wire frame record (Phase 4c) — FRMx + variable tails
+
+The live WS feed (`maplecast_replica_live.cpp` `captureFrame`) emits a per-frame inner payload that
+is the MCRR `FRMx` record plus a strict sequence of **variable tails**, then wraps it in the ZCST
+zstd envelope. The tails always appear in this fixed order; each is self-describing (length/magic
+prefix) so an older client that stops after an earlier tail simply ignores the trailing bytes.
+
+```
+FRAME RECORD (inner payload, LE):
+  u32 magic   = "FRMx" (0x784D5246)
+  u32 vframe                              // 0x8C3496B0 video-frame counter
+  u32 taSize  = 0                         // (live wire ships state, not engine TA)
+  for each dynamic region (table order): u8 bytes[len]
+
+  --- GFX TAIL (always present) ---
+  u32 nGfx
+  nGfx × { u32 base; u32 len; u8 bytes[len] }   // fresh body GFX1/GFX2 regions, on-change
+
+  --- PALETTE TAIL (always present; pvrPalLen=0 in steady state) ---
+  u32 pvrPalLen
+  pvrPalLen bytes of pvr_regs                    // full 32KB block when the palette sig changed
+
+  --- HUDQ TAIL (present ONLY when MAPLECAST_HUD_TA armed AND nHud>0) ---
+  u32 magic = "HUDQ" (0x48554451)
+  u32 nHud
+  nHud × HudQuad                                 // 96 bytes each (struct below)
+```
+
+**`HudQuad` (96 bytes, LE)** — the engine's REAL HUD/composite quad, captured this frame from the
+surviving TA pass by `maplecast_oracle_hook::collectHudQuads`. This is the interface the
+render-replica client (sprite-render expert) consumes to draw the actual MVC2 HUD pixel-perfect,
+replacing the hand-coded reconstruction:
+
+```c
+struct HudQuad {
+  f32 x[4], y[4];   // 4 screen corners, SUBMIT order (HUD bars are angled parallelograms, NOT bbox)
+  f32 u[4], v[4];   // 4 UVs, matching corner order
+  u32 col[4];       // 4 per-vertex base color words, repacked to ARGB8888 (see Col_Type note)
+  u32 pcw, isp, tsp, tcw;   // PVR control words verbatim
+};
+```
+
+Capture details (cited to the live QDIAG HUD-pass inventory, `re_kb finding:replica_live_hud_real_ta`):
+- The surviving STARTRENDER pass that reaches `serverPublish` on headless **is** the MVC2 HUD/composite
+  pass (`rend_norend` runs `ta_parse` and builds the full `ctx->rend`, so the HUD polys are parsed every
+  frame). `collectHudQuads` runs on that already-parsed `ctx->rend` — **zero extra `ta_parse`** beyond the
+  one `mc_oracle_charPassCapture` already does — inside the same per-pass call as the replica capture, so
+  the HUDQ tail and the frame body are the same video frame.
+- **Discriminator (env-overridable):** keep `(cy<TOPY=120 || cy>=BOTY=420) && w<MAXW=320 && h<MAXH=200 &&
+  fmt!=7`; drop the oversized full-screen composite/backdrop (w 13003..14.5M px) and `fmt==7`. On a live
+  in-match frame this kept **78 of 82** polys (the 4 dropped are the composite/backdrop). No `cy<=20`
+  strip, no textured-only gate.
+- **`col[]` semantics:** flycast stores per-vertex color as `col[0..3]={R,G,B,A}` (`ta_vtx.cpp`
+  `vert_packed_color_`); the tail repacks to ARGB8888 = `(A<<24)|(R<<16)|(G<<8)|B`. For MVC2's HUD the
+  polys are `Col_Type 1/2/3` (intensity) with `Offset=1`, so this base color is the float intensity
+  `0x3f800000`=1.0 — the bar tint comes from the FONT/glyph **texture**, not vertex modulate. The client
+  decodes via the shipped `pcw` `Col_Type` bits; `col[]` is the verbatim engine value, never guessed.
+- The HUD textures (FONT.BIN / portrait glyphs) the bars sample are decoded into VRAM at match-load,
+  before STARTRENDER, so they resolve against the already-shipped static 8MB VRAM prefix (+ palette tail)
+  via each quad's `tcw`.
+
 ## Next (Phase 4b/4c)
 
 - **4b:** the browser page reads `mc_render_rec.bin`, replays frame-by-frame through
