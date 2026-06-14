@@ -225,14 +225,14 @@ import createRenderFrame from './render_frame.mjs?v=depthz1';
 // ensureBodyTextures (decode parts into pane.vram) -> pane.render(drawTA, dbgFromCfg()).
 // The SpriteClient/SpriteGPU emitter is still IMPORTED but NO LONGER DRAWS the bodies — it
 // is retained only for the (disabled) emitter cross-check; the drawn bodies ARE the transpile.
-import { ensureBodyTextures } from './body_decoder.mjs?v=winstar1';
-import { SpriteClient } from '../webgpu/sprite-client.mjs?v=winstar1';
-import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=winstar1';
+import { ensureBodyTextures } from './body_decoder.mjs?v=depthz1';
+import { SpriteClient } from '../webgpu/sprite-client.mjs?v=depthz1';
+import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=depthz1';
 // Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
 // /gfx/PL{NN}_gfx{1,2}.bin (cached by char_id). Fixes the scramble + the tag-in GFX gap (covers
 // ALL 6 char structs incl P1C2/P2C2/P1C3/P2C3 tag-ins, not just connect-active bodies).
-import { applyLocalGfx } from './local_gfx_overlay.mjs?v=winstar1';
+import { applyLocalGfx } from './local_gfx_overlay.mjs?v=depthz1';
 const bodyCache = {};   // decode-on-change memo, persists across frames
 
 // Phase 3 — STAGE (background): decode-from-disc cached locally (web/test-atlas/stages/
@@ -242,7 +242,7 @@ const bodyCache = {};   // decode-on-change memo, persists across frames
 // (M1@0x8C2D6B18 · M2@0x8C2D6AD8, shipped in the "cam_mat" read-set region) using the SAME
 // transform_object_122560 math the bodies use — so the stage scrolls/zooms in lockstep with
 // the fighters, NO guessed camera. Rendered as an OP pass BEHIND the bodies.
-import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=winstar1';
+import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=depthz1';
 
 // EFFECTS (hitsparks / electric / energy): FAITHFUL — pure-effect pool nodes (cat 1..4, GFX2
 // node+0x160 in the Effect-Poly bank 0x0CED0000) render through the SAME transpiled walker as
@@ -252,7 +252,7 @@ import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=winstar
 // additive quad) was built on a MISLABEL: loc_8c1294c8 is a 20-byte memcpy (the anim-cell
 // loader), NOT an effect cell processor. EffectsClient is now a no-op overlay that only
 // enumerates live effect nodes for diagnostics — effects render in the WebGPU body pass.
-import { EffectsClient } from './effects-client.mjs?v=winstar1';
+import { EffectsClient } from './effects-client.mjs?v=depthz1';
 
 // HUD (life bars / super meter / timer / combo / portraits-name / win stars): REAL MVC2 art.
 // The timer + combo + level digits are the game's OWN boxed-digit sprites (FONT.BIN rec1,
@@ -260,7 +260,7 @@ import { EffectsClient } from './effects-client.mjs?v=winstar1';
 // the engine's white-tex * per-slot vertex color (loc_8c15FFB0) reconstructed as the angled
 // team-tinted parallelogram with the red_health chip trail. Every field reads the live engine
 // addresses (the production GSTA wire's own reads). Supersedes the synthetic renderHudPass().
-import { HudClient } from './hud-client.mjs?v=winstar1';
+import { HudClient } from './hud-client.mjs?v=depthz1';
 
 // ============================================================================
 // LIVE CONFIG COCKPIT — window.__cfg is read EVERY frame (no reload to take
@@ -498,6 +498,115 @@ function applyPvrPalTail(u8, p) {
     p += palLen;
     return p;
 }
+
+// ---- HUDQ TAIL (the engine's REAL HUD quads — replaces the hand-coded HUD reconstruction).
+// Strict append AFTER the palette tail: u32 magic='HUDQ'(0x48554451 LE) + u32 nHud + nHud × 96-byte
+// HudQuad{ f32 x[4],y[4]; f32 u[4],v[4]; u32 col[4]; u32 pcw,isp,tsp,tcw }. Each HudQuad is the
+// engine's authoritative on-screen HUD primitive (life bar / super meter / TIME / combo digits /
+// portraits / win stars), captured server-side from the global OP/PT/TR lists. We draw them through
+// the SAME pvr2 path as bodies/stage (renderHudQuads), so angled bars, per-corner team-tint vertex
+// colors and twiddled FONT.BIN digit textures all render natively — NO client HUD layout code.
+// If the magic isn't present (short buffer / older server) -> nHud=0 and the legacy reconstruction
+// path stays active (safe rollout). Returns the offset after the tail.
+const HUDQ_MAGIC = 0x48554451;                     // 'HUDQ' little-endian
+let hudQuads = [];                                 // current frame's engine HUD quads (96-byte records)
+function applyHudQuadTail(u8, p) {
+    hudQuads = [];                                 // default: no engine HUD -> legacy fallback draws
+    if (p + 8 > u8.length) return p;               // old server: no HUDQ tail
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    if (dv.getUint32(p, true) !== HUDQ_MAGIC) return p;   // magic absent -> treat as nHud=0
+    p += 4;
+    const nHud = dv.getUint32(p, true); p += 4;
+    if (nHud > 4096) return p;                      // sanity: not a real tail
+    const q = [];
+    for (let i = 0; i < nHud; i++) {
+        if (p + 96 > u8.length) break;             // truncated -> stop (draw what we have)
+        const x = [dv.getFloat32(p,true),    dv.getFloat32(p+4,true),  dv.getFloat32(p+8,true),  dv.getFloat32(p+12,true)];
+        const y = [dv.getFloat32(p+16,true), dv.getFloat32(p+20,true), dv.getFloat32(p+24,true), dv.getFloat32(p+28,true)];
+        const u = [dv.getFloat32(p+32,true), dv.getFloat32(p+36,true), dv.getFloat32(p+40,true), dv.getFloat32(p+44,true)];
+        const v = [dv.getFloat32(p+48,true), dv.getFloat32(p+52,true), dv.getFloat32(p+56,true), dv.getFloat32(p+60,true)];
+        const col = [dv.getUint32(p+64,true), dv.getUint32(p+68,true), dv.getUint32(p+72,true), dv.getUint32(p+76,true)];
+        const pcw = dv.getUint32(p+80,true), isp = dv.getUint32(p+84,true);
+        const tsp = dv.getUint32(p+88,true), tcw = dv.getUint32(p+92,true);
+        q.push({ x, y, u, v, col, pcw, isp, tsp, tcw });
+        p += 96;
+    }
+    hudQuads = q;
+    return p;
+}
+
+// Synthesize a TA buffer from the engine HUD quads and draw it through pvr2 (composited OVER the
+// bodies). Each HudQuad -> one TRANSLUCENT polygon: a 32-byte PolyParam (paramType=4) carrying the
+// engine's own pcw/isp/tsp/tcw, then 4 textured-colType0 vertices (32 B each) in TA strip order so
+// the two triangles cover the quad's 4 corners. Strip(v0,v1,v2,v3) => tris (0,1,2)+(1,2,3); the
+// engine corner order is A,B,C,D (CCW), so we emit A,B,D,C to tile it. UNTEXTURED quads (pcw bit3==0)
+// set colType0 with no texture flag -> the per-corner vertex color col[i] modulates a solid fill
+// (the bank15 team tint + dark-red chip color, REAL now). TEXTURED quads (pcw bit3==1) sample VRAM
+// via the engine tcw/tsp (FONT.BIN digits, same twiddled decode as body parts) modulated by col[i].
+// Blend src=(tsp>>29)&7 / dst=(tsp>>26)&7 is already encoded in tsp -> pvr2 honors it for translucent.
+function buildHudTA(quads) {
+    // 32 B per poly param + 4×32 B verts = 160 B/quad, + a 32 B EndOfList terminator.
+    const buf = new Uint8Array(quads.length * 160 + 32);
+    const dv = new DataView(buf.buffer);
+    let o = 0;
+    const Z = 1.0;   // uniform near-plane 1/w; HUD has its own depth buffer (fresh clear), so any
+                     // positive z works — quads only depth-test against each other.
+    for (const q of quads) {
+        const textured = (q.pcw >> 3) & 1;
+        // PolyParam: paramType=4 (bits 29-31), list type=2 TRANSLUCENT (bits 24-26). Keep the
+        // engine's own object-control low byte (tex/shadow/uv/gouraud/colType) from pcw, but FORCE
+        // colType=0 (packed per-vertex BGRA) so our 4 col[i] words drive the corners directly.
+        let pcw = (4 << 29) | (2 << 24) | (q.pcw & 0x00FFFFFF);
+        pcw = (pcw & ~(3 << 4)) | (0 << 4);        // colType (obj bits 4-5) = 0 (packed color)
+        pcw = (pcw & ~1) | (0);                    // uv = 32-bit float (obj bit0 = 0)
+        dv.setUint32(o, pcw, true);
+        dv.setUint32(o+4,  q.isp, true);
+        dv.setUint32(o+8,  q.tsp, true);
+        dv.setUint32(o+12, textured ? q.tcw : 0, true);
+        dv.setUint32(o+16, 0, true); dv.setUint32(o+20, 0, true);
+        dv.setUint32(o+24, 0, true); dv.setUint32(o+28, 0, true);
+        o += 32;
+        // Vertices: TA triangle-strip order so the two triangles tile the quad. The DEFAULT
+        // assumes the engine emits the 4 corners in a perimeter walk (0,1,2,3) — strip order
+        // 0,1,3,2 => tris (0,1,3)+(1,3,2). If the SH4 expert's HUDQ emits a different corner
+        // order (e.g. the PVR sprite D,C,A,B order), set window._hudQuadOrder to the right
+        // 4-index permutation live (no redeploy) and confirm against the TA-mirror.
+        // colType0 textured vertex = x,y,z(+4/8/12) u,v(+16/20) bc(+24) oc(+28).
+        const order = (typeof window !== 'undefined' && Array.isArray(window._hudQuadOrder) && window._hudQuadOrder.length === 4)
+            ? window._hudQuadOrder : [0, 1, 3, 2];
+        for (let k = 0; k < 4; k++) {
+            const i = order[k], eos = (k === 3) ? 1 : 0;
+            dv.setUint32(o, (7 << 29) | (eos << 28), true);   // paramType=7 vertex (+ EndOfStrip)
+            dv.setFloat32(o+4,  q.x[i], true);
+            dv.setFloat32(o+8,  q.y[i], true);
+            dv.setFloat32(o+12, Z, true);
+            dv.setFloat32(o+16, textured ? q.u[i] : 0, true);
+            dv.setFloat32(o+20, textured ? q.v[i] : 0, true);
+            dv.setUint32(o+24, q.col[i] >>> 0, true);          // base color (ARGB packed) per corner
+            dv.setUint32(o+28, 0, true);                       // offset color = 0
+            o += 32;
+        }
+    }
+    // EndOfList terminator (paramType=0) so the TA parser closes the translucent list.
+    dv.setUint32(o, 0, true); o += 32;
+    return buf.subarray(0, o);
+}
+
+// Draw the engine HUD quads via pvr2, composited over the already-rendered bodies/stage/effects.
+// Returns true if engine quads were drawn (so the legacy reconstruction can be suppressed).
+function renderHudQuads() {
+    if (!gpuOK || !pane.vram || !hudQuads.length) return false;
+    try {
+        const ta = buildHudTA(hudQuads);
+        // _bgPreRendered:true -> first pass loadOp='load' (composite over the scene, no clear).
+        // singlePass+noSort -> draw the HUD strips in submission order (the engine's own order).
+        pane.render(ta, { singlePass: true, noSort: true, drawOpaque: false, drawPunch: false,
+                          drawTrans: true, _bgPreRendered: true });
+        return true;
+    } catch (e) { log('[hudq] ' + e.message, 'warn'); return false; }
+}
+window.__hudQuadCount = () => hudQuads.length;     // headless verification hook
+window.__renderHudQuads = () => renderHudQuads();
 
 // ---------------------------------------------------------------- pvr2 pane
 class Pane {
@@ -1077,11 +1186,15 @@ function hudAngledLifeBar(ctx, ox, oy, len, h, skew, mirror, hpFrac, chipFrac, h
     outline(); ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.stroke();
 }
 
-// The HUD foreground pass [hud:sprite-client-drawHUD — cache-bust marker for replay.html].
-// Called AFTER bodies + stage + effects are on the WebGPU canvas. REUSE PATTERN: instead of
-// the local HudClient reconstruction (orphaned below, like body_decoder), we feed the PROVEN
+// The HUD foreground pass [hud:engine-hudq-v1 — cache-bust marker for replay.html].
+// Called AFTER bodies + stage + effects are on the WebGPU canvas. ENGINE HUD: when the server
+// ships the HUDQ tail, renderHudQuads() draws the engine's OWN HUD primitives (bars/meters/timer/
+// combo/portraits/stars/names) through pvr2 — pixel-faithful, single source, no client layout. The
+// hand-coded reconstruction below is a nHud==0 FALLBACK only (safe rollout; deleted post-validation).
+// Legacy fallback notes (drawHUD reconstruction, suppressed when engine quads are present):
+// the local HudClient reconstruction (orphaned below, like body_decoder); the PROVEN
 // cockpit HUD — web/webgpu/sprite-client.mjs drawHUD — the SAME state its onGSTA produces, read
-// directly from the RAM image, then call SPRITECLIENT.drawHUD(ctx). The result is byte-identical
+// directly from the RAM image, then SPRITECLIENT.drawHUD(ctx). The result is byte-identical
 // to the cockpit (king.html / webgpu-test.html:1282): yellow/green life bars, red chip trail,
 // TIME digits, LEVEL super meters + pips, tag-team 3-char layout. The HUD art (FONT.BIN digits +
 // white bar swatch) loads via setCharBase (line ~1240) -> loadHudAtlas -> ../test-atlas/hud/
@@ -1120,20 +1233,23 @@ function populateHudStateFromRAM() {
 }
 function renderHudPass() {
     if (!ram) return;
+    // ENGINE HUD (the real thing): when the server ships the HUDQ tail (hudQuads.length>0), the
+    // bars/meters/timer/combo/portraits/stars/names ALL come from the engine's own quads, drawn
+    // pixel-faithfully through pvr2. The hand-coded 2D reconstruction is then FULLY SUPPRESSED —
+    // it is the source of the doubling. No client HUD layout code runs in this branch.
+    if (renderHudQuads()) {
+        // clear any stale 2D overlay so the deleted reconstruction can't ghost under the engine HUD
+        if (_hudCanvas) ensureHudOverlay().clearRect(0, 0, _hudCanvas.width, _hudCanvas.height);
+        return;
+    }
+    // ── FALLBACK (nHud==0 / older server): the legacy hand-coded reconstruction. Kept ONLY for a
+    //    safe rollout before the server HUDQ tail is live; remove once the engine HUD is validated.
     populateHudStateFromRAM();
     const ctx = ensureHudOverlay();                   // lazy overlay-canvas create (once)
     try {
-        // The replica draws the FULL tag-team 3-bar life-bar stack (all 6 shipped HP
-        // slots), matching the TA-mirror truth — not just drawHUD's single active-char
-        // bar. Suppress drawHUD's single life bar so the two do not double-draw; drawHUD
-        // still owns the clear + super meters + timer + combo. [hud:tag-bars]
         SPRITECLIENT._suppressLifeBars = true;
         SPRITECLIENT.drawHUD(ctx);                     // clear + meters/timer/combo (life bar suppressed)
         SPRITECLIENT.drawHudReal(ctx);                 // textured HUDQ quads if streamed (no-op otherwise)
-        // The 3-bar pass draws all 3 tag-team life bars per side (active point on top +
-        // 2 reserve bars stacked) in the angled MVC2 chevron shape, with each row's
-        // corner portrait/monogram + slanted roster name — from the live 6-slot HP.
-        // [hud:tag-bars-v1]
         hud.renderTagLifeBars(ctx, rdU8, CHAR_SLOTS);
     } catch (e) { log('[hud] ' + e.message, 'warn'); }
 }
@@ -1547,8 +1663,13 @@ function applyDynamic(f) {
         else ram.set(slice, guestOff(r.addr));
         off += r.len;
     }
-    // apply the variable GFX tail (on-change dynamic GFX) for this frame, from REC.buf
-    applyGfxTail(REC.buf, fr.gfxOff);
+    // apply the variable GFX tail (on-change dynamic GFX) for this frame, from REC.buf, then chain
+    // the PALETTE tail and the HUDQ tail (same strict-append order as the live wire) so a recorded
+    // .mcrr replays the engine HUD identically. Each parser is backward-safe (older recording w/o
+    // a given tail leaves the offset unchanged / hudQuads=[]).
+    let p = applyGfxTail(REC.buf, fr.gfxOff);
+    p = applyPvrPalTail(REC.buf, p);
+    applyHudQuadTail(REC.buf, p);
     return fr;
 }
 
@@ -1700,6 +1821,10 @@ function liveApplyFrame(u8) {
     // Refreshes pane.pvr so a tag-in / late-loaded char's palette reaches the GPU (server ships it
     // on-change; 0 in steady state). Strict append after the GFX tail, matching buildPrefixLocked.
     p = applyPvrPalTail(u8, p);
+    // ---- HUDQ TAIL: the engine's REAL HUD quads (strict append after the palette tail). Parsing
+    // sets hudQuads[]; renderHudPass draws them via pvr2 and suppresses the legacy reconstruction.
+    // Older server (no tail / no magic) -> hudQuads=[] -> legacy fallback stays active.
+    p = applyHudQuadTail(u8, p);
     const engTa = taSize ? u8.subarray(p, p + taSize) : null;
 
     // Phase A: override the shipped/streamed GFX with the COMPLETE local disc art at
