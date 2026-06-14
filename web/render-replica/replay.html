@@ -215,7 +215,7 @@
 // Reuses ta-parser/pvr2-renderer/texture-manager VERBATIM, and render_frame.wasm UNMODIFIED
 // (Phases 1/2 frozen byte-exact). MCRR spec: docs/RENDER-REPLICA-RECORDING-FORMAT.md.
 // ============================================================================
-import createRenderFrame from './render_frame.mjs?v=ui1';
+import createRenderFrame from './render_frame.mjs?v=names1';
 // BODIES — PROVEN SPRITE-CLIENT PATH (2026-06-14): the character bodies are now drawn by the
 // EXACT cockpit renderer (web/webgpu-test.html): SpriteClient.buildAssemblyDrawList ->
 // buildEmitterDrawList (selKeyed body path, geometry CLOSED per re_kb project_emitter_status)
@@ -231,7 +231,7 @@ import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=13';
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
 // /gfx/PL{NN}_gfx{1,2}.bin (cached by char_id). Fixes the scramble + the tag-in GFX gap (covers
 // ALL 6 char structs incl P1C2/P2C2/P1C3/P2C3 tag-ins, not just connect-active bodies).
-import { applyLocalGfx } from './local_gfx_overlay.mjs?v=ui1';
+import { applyLocalGfx } from './local_gfx_overlay.mjs?v=names1';
 const bodyCache = {};   // decode-on-change memo, persists across frames
 
 // Phase 3 — STAGE (background): decode-from-disc cached locally (web/test-atlas/stages/
@@ -251,7 +251,7 @@ import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=propwor
 // additive quad) was built on a MISLABEL: loc_8c1294c8 is a 20-byte memcpy (the anim-cell
 // loader), NOT an effect cell processor. EffectsClient is now a no-op overlay that only
 // enumerates live effect nodes for diagnostics — effects render in the WebGPU body pass.
-import { EffectsClient } from './effects-client.mjs?v=ui1';
+import { EffectsClient } from './effects-client.mjs?v=names1';
 
 // HUD (life bars / super meter / timer / combo / portraits-name / win stars): REAL MVC2 art.
 // The timer + combo + level digits are the game's OWN boxed-digit sprites (FONT.BIN rec1,
@@ -259,14 +259,18 @@ import { EffectsClient } from './effects-client.mjs?v=ui1';
 // the engine's white-tex * per-slot vertex color (loc_8c15FFB0) reconstructed as the angled
 // team-tinted parallelogram with the red_health chip trail. Every field reads the live engine
 // addresses (the production GSTA wire's own reads). Supersedes the synthetic renderHudPass().
-import { HudClient } from './hud-client.mjs?v=ui1';
+import { HudClient } from './hud-client.mjs?v=names1';
 
 // ============================================================================
-// LIVE CONFIG COCKPIT — window.__cfg is read EVERY frame by the render path
-// (no reload to take effect). Geometry knobs post-process the emitted TA before
-// the parser/draw; render knobs flow through pvr2-renderer's `dbg` object; the
-// readout reads per-quad screen positions straight out of the TA. The transpiled
-// render_frame / server geometry are NOT touched here (the SH4 agent owns those).
+// LIVE CONFIG COCKPIT — window.__cfg is read EVERY frame by renderBodiesPass
+// (no reload to take effect). As of the 2026-06-14 body-swap, the DRAWN bodies
+// come from the SpriteClient emitter -> SpriteGPU, so the knobs are routed onto
+// THAT path (cfgToBodyGlobals + applyCfgToBody below), NOT the old TA post-
+// process (which now only feeds the validator + readout). DECODE knobs set the
+// emitter's live window globals; GEOMETRY/DECODE-probe knobs post-filter the
+// emitted drawList; RENDER knobs flow through pvr2-renderer's `dbg` (dbgFromCfg).
+// Every knob therefore moves a drawn body pixel. The transpiled render_frame /
+// server geometry are NOT touched here (the SH4 agent owns those).
 // ============================================================================
 const __cfg = {
     // geometry / position
