@@ -78,6 +78,21 @@ void submit_1244b0(Sh4Ctx *c){
      * by all of that cell's tiles. Capturing it here lets the client decode the RIGHT
      * sprite per quad instead of walking sels 1:1 with quads (which slips under tiling). */
     u32 cell_sel = r16u(c, c->r[11] + 0x6);
+    /* ---- PER-RECORD sel==0xFF -> EMIT NO QUAD (re_kb finding:replica_effect_overemit_sel_ff) ----
+     * A GFX2 cell record whose sel field (@(r11+6)) == 0xFF is an authored BLANK/padding record:
+     * the engine renders ZERO visible tiles for it but STILL advances the per-tile descriptor
+     * cursor (r13) and the per-record cursors past its allocated slots, so the records AFTER it
+     * read the correct (in-phase) descriptor entries. EMPIRICAL GROUND TRUTH (prod ASMTRACE
+     * PC 0x8C034864, _efxdiag.mcrr): node 0c268340 vf295515 -> recs 0..7 = 21 tiles then rec 8
+     * sel=0xFF -> 0 tiles; node 0c2688e4 vf295439 -> rec 12 sel=0xFF -> 0 tiles yet recs 13..16
+     * (sels 230,256,260,258) render normally and IN PHASE. The faithful walker (gen_walker.c) is
+     * left UNTOUCHED so it advances every cursor exactly as the engine does; we suppress only the
+     * VISIBLE quad capture here. Suppressing in the walker (forcing count 0) wrongly froze r13 and
+     * phase-shifted later records by 1 tile each (256:2->1, 260:1->2, 258:2->1) — over/under-emit.
+     * Without ANY guard the 0xFF record tiled into stray quads (e.g. +4 [255,255,255,255]) that
+     * shifted every later shared-gfx1 group quad -> the user-visible "effects missing/misplaced".
+     * 487 node-frames in the capture carry a mid-stream sel==0xFF. */
+    if((cell_sel & 0xFFFFu) == 0xFFu) return;   /* blank record: no quad, cursors already advanced */
     /* per-part X-mirror flag: GFX2 cell record flags u16 @ r11+0x4, bit 0x4000 (the per-part
      * texture-U mirror authored into the cell). XORed with the body facing at draw time. */
     u32 cell_flip = (r16u(c, c->r[11] + 0x4) & 0x4000u) ? 1u : 0u;
