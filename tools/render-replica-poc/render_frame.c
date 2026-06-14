@@ -250,10 +250,15 @@ void render_sprites_0308c2(Sh4Ctx *c);   /* gen_walker_root.c */
  * the SAME submit cursor (node+0xDC prefix-sum) the body path uses — satellites consume
  * idxtab/rectab slots from the very same arena as bodies (the walker loc_8c0344d4 reads
  * node+0xDC + arena_base regardless of cat), so the running cursor must include them.
- * Pure-effect cat 1..4 nodes (aura/hitspark with NO body GFX2) emit 0 tiles here
- * naturally: render_object_setup_030af8 culls on +0x12C and the walker finds no records,
- * so ntiles==0 and nothing is drawn — the real Phase-3 effect path (loc_8c1294c8 cell
- * processor for non-body effects) stays unimplemented, but body satellites now render. */
+ * Pure effects are NOT a separate path. CORRECTION (2026-06-14, re_kb finding:
+ * replica_effect_walker_faithful): loc_8c1294c8 is a 20-byte MEMCPY (the anim-cell loader,
+ * bank12:21885), NOT a cell processor — that label was a mislabel. The REAL effect path is
+ * loc_8c030af8 -> loc_8c034bea (sel node+0x144 dispatch) -> loc_8c0344d4 (THIS walker),
+ * reading cell records from GFX2 node+0x160 by (sel&0x7FFF) — IDENTICAL to a body. So a pure
+ * effect with a valid +0x144 sel + +0x160 GFX2 (in the Effect-Poly bank 0x0CED0000) renders
+ * faithfully right here; it emits 0 tiles only when culled (+0x12C!=0), terminated (sel==0xFF),
+ * or its GFX2 art is not resident. bit15 sel (-> loc_8c0348c8 scaled twin) is the one OPEN
+ * sub-case (per-part-scale dispatch, tracked separately). Body satellites + effects both render. */
 void render_effect_030af8(Sh4Ctx *c, u32 node){
     extern void render_frame_satellite_hook(Sh4Ctx *c, u32 node);
     render_frame_satellite_hook(c, node);

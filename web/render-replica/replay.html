@@ -236,14 +236,15 @@ const bodyCache = {};   // decode-on-change memo, persists across frames
 // the fighters, NO guessed camera. Rendered as an OP pass BEHIND the bodies.
 import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=stagecam1';
 
-// Phase 3 — EFFECTS (hitsparks / electric / energy): the pure-effect pool nodes (cat 1..4,
-// GFX base in the shared "Effect Poly" bank 0x0CED0000, NO body GFX2) that the render_frame
-// walker emits 0 tiles for. Rendered CLIENT-side from the RAM image (the effect-node STATE is
-// already in the replica read-set: slot_cnt/slot_ptr/objpool) + a LOCAL effects atlas (the
-// Effect-Poly textures decoded offline, web/render-replica/effects/, gitignored). Binding is
-// GROUNDED, read live: idx=(node+0x15C - *(0x0CED0008))/0x10; anchor node+0xE0/E4; additive.
-// Drawn as a MID-LAYER 2D overlay ABOVE the WebGPU bodies/stage and BELOW the HUD overlay.
-import { EffectsClient } from './effects-client.mjs?v=fx1';
+// EFFECTS (hitsparks / electric / energy): FAITHFUL — pure-effect pool nodes (cat 1..4, GFX2
+// node+0x160 in the Effect-Poly bank 0x0CED0000) render through the SAME transpiled walker as
+// bodies (loc_8c030af8 setup -> loc_8c034bea sel dispatch -> loc_8c0344d4 walker), which
+// render_frame.wasm's slot-walk ALREADY runs for every cat 1..4 node (re_kb finding 23). The
+// old directory-binding HEURISTIC (idx=(node+0x15C - *(0x0CED0008))/0x10, point-centered
+// additive quad) was built on a MISLABEL: loc_8c1294c8 is a 20-byte memcpy (the anim-cell
+// loader), NOT an effect cell processor. EffectsClient is now a no-op overlay that only
+// enumerates live effect nodes for diagnostics — effects render in the WebGPU body pass.
+import { EffectsClient } from './effects-client.mjs?v=fx3faithful';
 
 // ============================================================================
 // LIVE CONFIG COCKPIT — window.__cfg is read EVERY frame by the render path
@@ -789,22 +790,32 @@ window.__effectsReady = () => effectsReady;         // headless: atlas-load gate
 window.__effectCount = () => effects.lastCount();   // headless verification hook
 window.__effectNodes = () => (ram ? effects.readEffectNodes(_efxRd) : []);
 window.__renderEffects = () => renderEffectsPass();
-window.__effectsOverlay = () => effects._canvas;    // the additive 2D overlay (for readback)
-// Headless EFFECT injection: poke a synthetic effect node (gfx15C -> a real dir entry) into a
-// pool slot + the slot table, so the pass can be validated WITHOUT a live-hit capture. Mirrors
-// the grounded binding exactly. dirIdx selects which directory texture; sx/sy = the anchor.
-window.__pokeEffect = (dirIdx, sx, sy) => {
+window.__effectsOverlay = () => null;               // overlay retired (effects render in body pass)
+// Headless EFFECT node injection (FAITHFUL): poke a cat 1..4 pool node that the WALKER renders
+// (its real keys: node+0x144 sel + node+0x160 GFX2), into a pool slot + the slot table. This
+// makes render_frame.wasm's slot-walk emit the effect's tiles through loc_8c0344d4 — the same
+// path bodies use — WITHOUT a live hit. The OLD poke bound node+0x15C to a directory entry
+// (the heuristic, now removed); to render via the walker the node must carry a real GFX2 cell
+// stream, so we copy the GFX2 ptr + sel from an active BODY (its art is resident) and just
+// re-anchor it at sx/sy. Returns the synthetic node + which body it borrowed geometry from.
+window.__pokeEffect = (sx, sy, borrowSlot) => {
     if (!ram) return null;
-    const dirBase = rdU32(0x0CED0008) >>> 0;
-    const entry = (dirBase + dirIdx * 0x10) >>> 0;
+    const CHAR = [0x8C268340, 0x8C2688E4, 0x8C268E88, 0x8C26942C, 0x8C2699D0, 0x8C269F74];
+    let src = -1;
+    for (let s = 0; s < CHAR.length; s++) { if (rdU8(CHAR[s]) && rdU16(CHAR[s] + 0x144) !== 0xFF) { src = (borrowSlot != null ? CHAR[borrowSlot] : CHAR[s]); break; } }
+    if (src < 0) return { err: 'no active body to borrow GFX2/sel from' };
     const NODE = 0x8C26AA54 + 200 * 0x1D0;          // a spare pool slot
     const w32 = (a, v) => { a &= RAM_LO; ram[a]=v&0xff; ram[a+1]=(v>>>8)&0xff; ram[a+2]=(v>>>16)&0xff; ram[a+3]=(v>>>24)&0xff; };
     const wf  = (a, f) => { const b=new DataView(new ArrayBuffer(4)); b.setFloat32(0,f,true); w32(a, b.getUint32(0,true)); };
-    w32(NODE+0x15C, entry); ram[(NODE+0x144)&RAM_LO]=7; ram[(NODE+0x3)&RAM_LO]=1;
-    wf(NODE+0xE0, sx); wf(NODE+0xE4, sy); ram[(NODE+0x130)&RAM_LO]=0; ram[(NODE+0x131)&RAM_LO]=0;
+    // borrow the walker keys from the active body, re-anchor as a cat-1 effect node
+    w32(NODE+0x160, rdU32(src+0x160) >>> 0);        // GFX2 cell-record table (walker reads this)
+    ram[(NODE+0x144)&RAM_LO] = rdU16(src+0x144) & 0xff; ram[(NODE+0x145)&RAM_LO] = (rdU16(src+0x144)>>>8)&0xff;
+    w32(NODE+0xEC, rdU32(src+0xEC) >>> 0); w32(NODE+0xF0, rdU32(src+0xF0) >>> 0);  // scale
+    ram[(NODE+0x3)&RAM_LO]=1; ram[(NODE+0x12C)&RAM_LO]=0;  // cat=1, gate open (loc_8c030af8)
+    wf(NODE+0xE0, sx); wf(NODE+0xE4, sy); ram[(NODE+0x110)&RAM_LO]=0;
     const L=5, cnt=rdU8(0x8C2895E0+L), slot=Math.min(cnt,0x5F);
     w32(0x8C287DE0 + L*0x180 + slot*4, NODE); ram[(0x8C2895E0+L)&RAM_LO]=slot+1;
-    return { dirBase: dirBase.toString(16), entry: entry.toString(16), node: NODE.toString(16) };
+    return { node: NODE.toString(16), borrowedFrom: src.toString(16), sel: rdU16(NODE+0x144), gfx2: (rdU32(NODE+0x160)>>>0).toString(16) };
 };
 
 // ---------------------------------------------------------------- HUD (Phase 3)
@@ -1122,12 +1133,13 @@ async function seedFrom(pre, mb) {
     // frame the disc art is cached and a tag-in body overlays with ZERO stale frames.
     try { applyLocalGfx(ram, log); } catch (e) { log('[local-gfx] pre-warm skipped: ' + e.message, 'warn'); }
 
-    // Phase 3: load the local effects atlas (Effect-Poly textures, decoded offline). The
-    // effects pass is a 2D additive overlay — NO WebGPU device needed — so load it OUTSIDE
-    // the GPU try-block below (it must work even when the WebGPU adapter is unavailable).
+    // EFFECTS are FAITHFUL: pure-effect cat 1..4 nodes render through the transpiled walker in
+    // the WebGPU body pass (render_frame.wasm slot-walk -> satellite hook -> loc_8c0344d4), so
+    // there's no separate atlas to load. EffectsClient is now a diagnostic-only no-op overlay;
+    // mark it ready immediately (load() is a no-op kept for API compatibility).
     if (!effectsReady) {
-        effects.load().then(() => { effectsReady = true; log('[effects] atlas loaded (' + effects.meta.dir.length + ' dir entries)', 'ok'); })
-                      .catch(e => log('[effects] atlas load failed: ' + e.message + ' (effects pass disabled)', 'warn'));
+        effects.load().then(() => { effectsReady = true; log('[effects] faithful path: cat 1..4 render via render_frame walker (loc_8c0344d4)', 'ok'); })
+                      .catch(e => log('[effects] init failed: ' + e.message, 'warn'));
     }
 
     try {
