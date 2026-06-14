@@ -219,7 +219,7 @@ import createRenderFrame from './render_frame.mjs?v=fx2colasc';
 // Phase 5 — PURE-STATE TEXTURES: client decodes each active body part's sprite from the
 // shipped-once compressed GFX (in the RAM image) + the live sprite_id, writes it to pane.vram
 // at the TCW addr render_frame carries. Replaces the per-frame "bodytex" VRAM band (removed).
-import { ensureBodyTextures } from './body_decoder.mjs?v=verbatim1';
+import { ensureBodyTextures } from './body_decoder.mjs?v=faithful-transpile';
 // Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
 // /gfx/PL{NN}_gfx{1,2}.bin (cached by char_id). Fixes the scramble + the tag-in GFX gap (covers
@@ -1210,10 +1210,12 @@ function showFrame(f) {
     applyLocalGfx(ram, log);
     const { ta, quads, len, quadSels, quadGfx1s, quadColRow, quadMirror } = transpiledTA(ram);
     window.__lastTA = ta;      // expose for headless verification (TA-level motion probe)
-    // PURE-STATE TEXTURES: ensure the active body parts are decoded into pane.vram at the TCW
-    // addresses this TA references (decode-per-quad by its OWN sel — tiling-safe), BEFORE the draw.
-    // Cockpit: passing quadColRow=null forces body_decoder's CONTIGUOUS path (wide-part carve off);
-    // carveSide/colRev rewrite the storage column per side for the per-side A/B.
+    // PURE-STATE TEXTURES (FAITHFUL TRANSPILE 2026-06-14): decode the active body parts into
+    // pane.vram via the engine-faithful path — loc_8c0354c0 LZSS (byte-exact vs engine .raw) +
+    // loc_8c033d78 verbatim contiguous write at the part-base TCW. NO carve/detwiddle/re-twiddle:
+    // each emitted quad's TCW already indexes the right chunk of the one blob, read at its TSP
+    // dims by the renderer (texture-manager _pal4 == flycast texture_TW). colRow/opts are inert
+    // here (the hand-modeled carve they fed is gone); kept only for call-site compatibility.
     const colRow = carveColRow(quadColRow, quads, quadGfx1s);
     if (gpuOK && pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, colRow, { inTileMir: __cfg.inTileMir });
     // Cockpit: post-process the TA (anchor/scale/flip/iso/reverse) + drive the readout & overlay.
@@ -1335,9 +1337,10 @@ function liveApplyFrame(u8) {
     applyLocalGfx(ram, log);
     const { ta, quads, len, quadSels, quadGfx1s, quadColRow, quadMirror } = transpiledTA(ram);
     window.__lastTA = ta;
-    // PURE-STATE TEXTURES (live): decode each body part into pane.vram @ its OWN TCW, keyed by
-    // its OWN (sel,gfx1) — tiling-safe pairing (no 1:1 sel slip) — before draw.
-    // Cockpit: carveColRow honors widePart/carveSide/colRev (per-side wide-part A/B).
+    // PURE-STATE TEXTURES (live, FAITHFUL TRANSPILE): decode each body part into pane.vram @ its
+    // part-base TCW via the engine-faithful path (loc_8c0354c0 LZSS + loc_8c033d78 verbatim write),
+    // keyed by its OWN (sel,gfx1) — tiling-safe pairing. NO carve; colRow/opts inert (kept for
+    // call-site compatibility; the hand-modeled carve is removed).
     const colRow = carveColRow(quadColRow, quads, quadGfx1s);
     if (gpuOK && pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, colRow, { inTileMir: __cfg.inTileMir });
     // Cockpit: post-process the TA (anchor/scale/flip/iso/reverse) + drive the readout & overlay.

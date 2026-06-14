@@ -6,6 +6,46 @@
 // writes the decoded pixels into pane.vram at the TCW address render_frame carries — instead
 // of streaming decoded VRAM pixels (the 320KB/frame "bodytex" shortcut, now removed).
 //
+// ============================================================================
+// FAITHFUL TRANSPILE (2026-06-14) — the texture decode is now a 1:1 port of the ENGINE's
+// load-time decode path, NOT a hand model. CITE: loc_8c033d78 (part-decode driver) +
+// loc_8c0354c0 (LZSS) read instruction-by-instruction from marvelous2 bank03.
+//
+//   * loc_8c0354c0 LZSS: decodeA() below is the faithful transpile (register contract r4=src=
+//     part_base+4, r5=dest_len, r6=dest_base, r9=r5+r6=end; flag MSB-first from 0x80; bit CLEAR=
+//     literal *dest++=*src++; bit SET=back-ref b=*src++, dist=b>>4, count=(b&0x0F)+2 from
+//     dest-(dist+1); output buffer IS the back-ref window, self-contained per part). PROVEN
+//     BYTE-EXACT vs the ENGINE's own decode output (_ryu_capture/PL00_raw_{0001,0013,0024,0034,
+//     0061,0127}.bin, captured live) for square, WIDE (sel24 128x32), and TALL (sel1/13/34/127
+//     32..64 x128) parts: 6/6 diff=0. Same decoder validated across all 1533 Ryu sels in
+//     tools/extract_gfx1_atlas.py (1.93M px, 0 fail).
+//
+//   * loc_8c033d78 storage: the driver LZSS-decodes each part CONTIGUOUSLY into scratch
+//     0x0CE60000 (advancing dest by destLen=(sw*8)*(sh*8)/2 per part, NO twiddle, NO tile
+//     reorder), then DMAs the scratch to VRAM VERBATIM (loc_8c1240a0/loc_8c123e00 assign each
+//     part ONE base texaddr and copy the bytes as-is). So the part lives in VRAM as ONE
+//     CONTIGUOUS full-W×H PVR-twiddle blob = exactly decodeA()'s output.
+//
+//   * THE FAITHFUL CLIENT OP — write decodeA() output VERBATIM at the part-base VRAM addr
+//     (= min TCW of the part's emitted tiles). NO carve, NO detwiddle, NO re-twiddle. The
+//     per-frame walker (loc_8c0344d4, render_frame 0.00px) emits N tiles whose TCW vaddrs step
+//     +0x200 (=one 32×32 PAL4 chunk) CONTIGUOUSLY into that one blob; the client renderer
+//     (texture-manager _pal4) reads each tile's declared w×h twiddle (w=8<<texU,h=8<<texV from
+//     the TSP; twop over w×h) from its own TCW — byte-for-byte flycast texture_TW (texconv.cpp).
+//     PROVEN (offline, disc): every 512B chunk of the contiguous blob, read as a standalone
+//     32×32 twiddle, EXACTLY equals the screen 32×32 cell the full-W×H twiddle places it at —
+//     sel13 64×128 8/8, sel24 128×32 4/4, sel1 32×128 4/4 chunks. The chunk→cell PERMUTATION is
+//     the ENGINE's (the walker's per-tile TCW pairing), already reproduced 0.00px by render_frame;
+//     the client does NOT model it — verbatim-write makes every tile read the right chunk for free.
+//
+//   * SUPERSEDES the hand-MODELED carve (detwiddle whole part with min(W,H) square blocks →
+//     re-twiddle each tile into a fresh 32×32 at a SCREEN-RANK-derived (col,row)). That model was
+//     validated vs a RECONSTRUCTED twiddle MODEL, never the engine, and mis-ordered tiles under
+//     opposite facing / repeated tiles (the "carve-off is closer for Cable-on-P2" symptom). A
+//     faithful transpile is correct BY CONSTRUCTION, the same way render_frame's geometry is.
+//     (re_kb finding:faithful_texture_decode_transpile supersedes wide_part_tile_storage_order*.)
+// ============================================================================
+//
 // GROUND TRUTH (all CONFIRMED against marvelous2 + the _ryu_capture byte-exact gate):
 //   * GFX1 LZSS decoder == bank03 loc_8c0354c0 (KB routine:loc_8c0354c0). decodeA() below is a
 //     line-for-line port; its LINEAR output is BYTE-EXACT vs the engine decode buffer 0x0CE60000
@@ -152,82 +192,22 @@ function decodePart(ram, gfx1, G, sel) {
 const QUAD = 96;                                  // textured-sprite TA block size (paraType 5)
 const TCW_OFF = 0x0C;                             // TCW is word 3 of the 16B param header
 
-// ---- WIDE-PART TILE STORAGE ORDER (re_kb finding:wide_part_tile_storage_order) -------
-// CANONICAL (traced from loc_8c033d78 storage + loc_8c0344d4 walker, PROVEN on
-// _sentinel_scramble.mcrr PL34 sel124 128x128 / PL17 sel285 64x128):
-//   * Load-time decoder stores a WxH part as ONE CONTIGUOUS FULL-WxH PVR rect-twiddle blob.
-//   * The per-frame walker emits N=(W/32)*(H/32) FIXED 32x32 tiles whose TCW vaddrs step
-//     +0x200 contiguously across that blob: tile k at base+k*0x200, k = vaddr-chunk index.
-//   * The renderer (_pal4) reads each tile as an INDEPENDENT 32x32 LOCAL twiddle at its TCW.
-//   * For W>32 AND H>32 the full-WxH-twiddle chunk order (storage) and the walker per-tile
-//     SCREEN cell order DIVERGE (a tile-grid permutation). So a contiguous full-blob write
-//     puts the WRONG 32x32 chunk under each wide tile -> the near-empty Sentinel.
-// THE FIX (2026-06-13, GENERAL — square, wide, tall, AND sub-32px tiles): the OLD chunk-permutation
-//   model (carve the full-WxH-twiddle blob's 512B chunk at twTile(col,row,Tw,Th)) assumed every tile
-//   is 32x32 and derived the grid from sw/sh (Tw=W>>5,Th=H>>5). That is WRONG for parts whose tile
-//   size is 16 or 8: e.g. Sentinel sel121 is 128x16 painted as an 8x1 grid of 16x16 tiles (m=16),
-//   and sel125 64x16 as 4x1 of m=16. sw/sh>>5 gave Th=0 -> the gate fell through to the contiguous
-//   whole-blob write -> tiles 2..7 read past the 1024B decode -> scatter. The universal truth
-//   (probed across every multi-tile sel): the walker lays a (cols x rows) grid of m x m tiles where
-//   m = W/cols = H/rows (always 8/16/32, square). THE GENERAL CARVE: decode the part ONCE to its
-//   full-WxH-twiddle IMAGE (indices), then for each emitted tile (col,row) build a fresh 32x32
-//   PAL4 LOCAL-twiddle tile whose top-left m x m holds image[(row*m..)+(col*m..)] and write it to
-//   that tile's OWN TCW vaddr. The renderer (_pal4) reads each tile as a 32x32 local twiddle and the
-//   walker's u1 UV-clamp samples only the top-left m x m -> byte-exact for ALL shapes. VERIFIED 0px:
-//   sel121 (8x1 m16), sel124/sel112 (4x4 m32), sel285 (2x4 m32), sel125 (4x1 m16), + every probed sel.
-//   (Single-tile parts keep the proven direct whole-blob write at the run base.)
-const TILE_BYTES = 0x200;                         // one 32x32 PAL4 tile = 512B (1024 px / 2)
-
-// flycast PVR PAL4 twiddle — the PROVEN-correct convention, ported VERBATIM from the atlas baker
-// (tools/rip_gfx2_assembly.py _twiddle_slow / tile_to_indices) and matching the renderer
-// (web/webgpu/texture-manager.mjs tw/twop): interleave Y-then-X bits. The previous hand-rolled
-// X-then-Y `twop` transposed every part (60-91% scramble vs the real ROM atlas — sel210 90.5%),
-// which all the carve work was wrongly layered on top of. (xSz/ySz are the block dims, e.g. 32,32.)
-function twiddleSlow(x, y, xSz, ySz) {
-    let rv = 0, sh = 0; xSz >>= 1; ySz >>= 1;
-    while (xSz || ySz) {
-        if (ySz) { rv |= (y & 1) << sh; ySz >>= 1; y >>= 1; sh++; }
-        if (xSz) { rv |= (x & 1) << sh; xSz >>= 1; x >>= 1; sh++; }
-    }
-    return rv;
-}
-const twSq = (x, y, sq) => twiddleSlow(x, 0, sq, sq) + twiddleSlow(0, y, sq, sq);  // one square block
-// De-twiddle a full-WxH PAL4 storage blob into a row-major nibble image (Uint8Array, W*H). PORT of
-// tile_to_indices: a run of min(W,H) SQUARE blocks, each stored CONSECUTIVELY in the blob and
-// twiddled internally (flycast texture_TW loop) — NOT one rectangular twiddle. bytes = decodePart out.
-function detwiddleImage(bytes, W, H) {
-    const img = new Uint8Array(W * H);
-    const sq = Math.min(W, H), blkBytes = (sq * sq) >> 1;
-    let pos = 0;
-    for (let by0 = 0; by0 < H; by0 += sq) for (let bx0 = 0; bx0 < W; bx0 += sq) {
-        const base = pos; pos += blkBytes;
-        for (let y = 0; y < sq; y++) for (let x = 0; x < sq; x++) {
-            const ti = twSq(x, y, sq);
-            const b = bytes[base + (ti >> 1)] | 0;
-            img[(by0 + y) * W + (bx0 + x)] = (ti & 1) ? (b >> 4) & 0xF : b & 0xF;
-        }
-    }
-    return img;
-}
-// Build one 32x32 PAL4 LOCAL-twiddle tile (512B) holding image cell (col,row) of pixel size m in
-// its top-left m x m. Returns a Uint8Array(0x200). Matches exactly what the renderer's _pal4 reads.
-function carveTile(img, W, H, col, row, m, inTileMir) {
-    const tile = new Uint8Array(TILE_BYTES);
-    for (let y = 0; y < m; y++) for (let x = 0; x < m; x++) {
-        // inTileMir (cockpit A/B): mirror the cell horizontally within its m×m footprint.
-        const ix = inTileMir ? (m - 1 - x) : x;
-        const sx = col * m + ix, sy = row * m + y;
-        if (sx >= W || sy >= H) continue;
-        const v = img[sy * W + sx];
-        const ti = twSq(x, y, 32);                   // 32x32 local twiddle (flycast Y-then-X, matches the renderer)
-        if (ti & 1) tile[ti >> 1] = (tile[ti >> 1] & 0x0F) | (v << 4);
-        else        tile[ti >> 1] = (tile[ti >> 1] & 0xF0) | v;
-    }
-    return tile;
-}
-
+// ============================================================================
+// ensureBodyTextures — FAITHFUL transpile of the engine load-time decode + VERBATIM DMA.
+//
+// The engine (loc_8c033d78) LZSS-decodes each (gfx1,sel) part CONTIGUOUSLY (loc_8c0354c0,
+// no twiddle/reorder) and DMAs that blob to VRAM VERBATIM at ONE part-base texaddr. The
+// per-frame walker (loc_8c0344d4) emits N tiles whose TCW vaddrs step +0x200 INTO that one
+// blob; the renderer (texture-manager _pal4) reads each tile's declared w×h twiddle from its
+// own TCW — exactly flycast texture_TW.  ==> the faithful client op is to write decodeA()'s
+// VERBATIM bytes ONCE at the part-base (= the MINIMUM tile TCW vaddr of the (gfx1,sel) run).
+// NO carve, NO detwiddle, NO re-twiddle: each emitted quad's TCW already indexes the right
+// 512B chunk of the one blob (PROVEN 8/8,4/4,4/4 chunks reconstruct sel13/24/1 exactly).
+//
+// `quadColRow`/`opts` are accepted for call-site compatibility but UNUSED by the faithful
+// path (the carve model they fed is gone — it was a hand model, never the engine).
+// ============================================================================
 export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, quadGfx1s, quadColRow, opts) {
-    const inTileMir = !!(opts && opts.inTileMir);   // cockpit within-tile mirror A/B
     if (!cache._gfx)  cache._gfx = new Map();     // gfx1 base -> {n,offs,srt}
     if (!cache._dec)  cache._dec = new Map();     // "gfx1:sel" -> {bytes,destLen} (decode memo)
     if (cache._dec.size > 4096) cache._dec.clear();  // bound the memo across many distinct poses
@@ -238,12 +218,13 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         const off = q * QUAD + TCW_OFF;
         if (off + 4 > ta.byteLength) return -1;
         const tcw = dv.getUint32(off, true);
-        return ((tcw & 0x1FFFFF) << 3) >>> 0;
+        return ((tcw & 0x1FFFFF) << 3) >>> 0;       // fmt5 PAL4: byteAddr = (TCW & 0x1FFFFF) << 3
     };
 
-    // ---- pass 1: group emitted quads into (gfx1,sel) part-runs. Record each run's BASE (min)
-    // vaddr AND, per tile, its vaddr + intra-part (col,row) (for the wide-part carve). ----
-    const runs = new Map();                       // "gfx1:sel" -> { gfx1, sel, base, tiles:[{addr,col,row}] }
+    // ---- pass 1: group emitted quads into (gfx1,sel) part-runs; PART BASE = min tile TCW. ----
+    // The engine stores the whole part as ONE contiguous blob at this base; the run's other
+    // tiles' TCWs step +0x200 INTO it. So we only need the minimum vaddr per (gfx1,sel) run.
+    const runs = new Map();                       // "gfx1:sel" -> { gfx1, sel, base }
     for (let q = 0; q < quadCount; q++) {
         const gfx1 = quadGfx1s[q] >>> 0;
         if (!(gfx1 & 0x0C000000) && !(gfx1 & 0x8C000000)) continue;  // no valid body art
@@ -253,52 +234,28 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         if (addr < 0) continue;
         const key  = gfx1.toString(16) + ':' + sel;
         let r = runs.get(key);
-        if (r === undefined) { r = { gfx1, sel, base: addr, tiles: [] }; runs.set(key, r); }
-        const col = quadColRow ? (quadColRow[2 * q] | 0) : 0;
-        const row = quadColRow ? (quadColRow[2 * q + 1] | 0) : 0;
-        r.tiles.push({ addr, col, row });
-        if (addr < r.base) r.base = addr;         // PART BASE = minimum tile TCW vaddr of the run
+        if (r === undefined) { r = { gfx1, sel, base: addr }; runs.set(key, r); }
+        else if (addr < r.base) r.base = addr;    // PART BASE = minimum tile TCW vaddr of the run
     }
 
-    // ---- pass 2: decode each distinct part ONCE; write it at the correct VRAM bytes ----
+    // ---- pass 2: decode each distinct part ONCE; write the VERBATIM blob at the part base. ----
+    // This IS loc_8c033d78's contiguous decode + verbatim DMA. Every tile TCW of the run already
+    // indexes into this one blob at its +0x200 offset, and the renderer reads each tile's w×h
+    // twiddle from there (flycast texture_TW). Byte-exact by construction; no carve.
     for (const r of runs.values()) {
-        const { gfx1, sel, base, tiles } = r;
+        const { gfx1, sel, base } = r;
         const key = gfx1.toString(16) + ':' + sel;
         let p = cache._dec.get(key);
         if (p === undefined) {
             const G = gfx1Offsets(ram, gfx1, cache._gfx);
-            p = decodePart(ram, gfx1, G, sel);    // {bytes,destLen,W,H} or null
+            p = decodePart(ram, gfx1, G, sel);    // {bytes,destLen,W,H} — VERBATIM loc_8c0354c0 output
             cache._dec.set(key, p);
             if (p) { decoded++; bytes += p.destLen; }
         }
         if (!p) continue;
-
-        // GRID FROM THE EMITTED TILES (authoritative — NOT from sw/sh>>5): cols/rows = the
-        // walker's actual per-tile screen cells; the tile pixel size m = W/cols = H/rows (always
-        // 8/16/32, square). This is correct for every shape incl sub-32px tiles (sel121 8x1 m16).
-        let cols = 1, rows = 1;
-        for (const t of tiles) { if (t.col + 1 > cols) cols = t.col + 1; if (t.row + 1 > rows) rows = t.row + 1; }
-        const multi = (tiles.length > 1) && quadColRow && cols >= 1 && rows >= 1 &&
-                      (p.W % cols === 0) && (p.H % rows === 0) && (cols > 1 || rows > 1);
-        if (multi) {
-            // GENERAL CARVE: de-twiddle the part once, then carve each emitted tile's m x m cell
-            // into a fresh 32x32 local-twiddle tile at its OWN TCW vaddr (re_kb finding:
-            // wide_part_tile_storage_order, corrected 2026-06-13 to derive m from the emitted grid).
-            const m = (p.W / cols) | 0;               // == p.H/rows (square tiles)
-            const img = detwiddleImage(p.bytes, p.W, p.H);
-            for (const { addr, col, row } of tiles) {
-                if (col < 0 || col >= cols || row < 0 || row >= rows) continue;
-                if (addr + TILE_BYTES > vram.length) continue;
-                vram.set(carveTile(img, p.W, p.H, col, row, m, inTileMir), addr);
-                written++;
-            }
-        } else {
-            // SINGLE-TILE part (or no col/row available): write the VERBATIM whole-part blob ONCE
-            // at the run base. (Proven byte-exact path; gfx1_decode_equals_vram.)
-            if (base + p.destLen > vram.length) continue;
-            vram.set(p.bytes, base);
-            written++;
-        }
+        if (base + p.destLen > vram.length) continue;
+        vram.set(p.bytes, base);                  // write-once, verbatim (engine DMA semantics)
+        written++;
     }
     return { decoded, bytes, written, quads, parts: runs.size };
 }
