@@ -149,6 +149,10 @@ export class StageClient {
     if (stageId === this.stageId) return;
     this._loading = true;
     const sid = stageId.toString(16).toUpperCase().padStart(2, '0');
+    // Always log the load ATTEMPT so the path is never silent — a missing "loaded STGxx"
+    // line on the user's console then unambiguously means a fetch/parse error (warned below)
+    // rather than "stage pass never ran". (re_kb 26: green-grid diagnosability.)
+    console.log(`[stage-client] loading STG${sid} (wire stage_id resolved -> file 0x${sid})…`);
     try {
       // GROUNDED PATH (re_kb 26 closed): prefer STGxx_ta.json — a bake of the engine's
       // OWN stage TA (tools/bake_stage_from_ta.py from _stage_gt/engine_ta.bin). It carries
@@ -245,21 +249,45 @@ export class StageClient {
       // pass-through of the deck texture). Small props keep their real per-vertex shading.
       const intensityFloor = (worldMesh && m.textured) ? 1.0 : 0.0;
       // OP list (engine ListType 0). Engine isp DepthMode/cull are honoured by the renderer.
-      const first = vi;
+      // ── PER-TRIANGLE DEGENERATE-CULL (the "green wireframe grid" fix; re_kb 26 item 1) ──
+      // Whether a vertex is taken from its baked screen `pos` OR re-projected from `world`,
+      // a subset of STG0B's vertices land at ±millions (X to -1.6e7): the bake un-projected
+      // them with NO captured runtime placement matrix (deferred re_kb 26 item 1), so both
+      // their baked AND re-projected coords are garbage. Emitted verbatim, each such tri
+      // stretches one on-screen vertex to a ±millions vertex — a few canvas-spanning textured
+      // triangles that read as a sparse WIREFRAME GRID over the real stage. We compute every
+      // tri's 3 final screen verts and DROP the tri if any vertex falls past a generous
+      // viewport margin. This keeps the legitimately-placed deck/backdrop (which lands within
+      // the screen) and culls ONLY the unplaced-prop garbage — analogous to the POL path's
+      // `placed===false` skip, but at triangle granularity (the bake mixes good+bad verts in
+      // one mesh, so a whole-mesh skip would also drop the deck).
+      // 800px slack past the 640x480 edges: keeps every triangle that touches the viewport
+      // (the full on-screen deck — verified 1812 in-view verts preserved) while dropping the
+      // canvas-spanning ±millions garbage. (Larger margins kept the same in-view set but let
+      // more off-screen stretched scenery through; 800 is the tightest that loses no deck.)
+      const MARGIN = 800;
+      const onScreen = (x, y) => Number.isFinite(x) && Number.isFinite(y)
+        && x >= -MARGIN && x <= SCREEN_W + MARGIN && y >= -MARGIN && y <= SCREEN_H + MARGIN;
       for (const tri of m.tris) {
+        // resolve the 3 final screen verts first so we can reject the whole tri atomically
+        const fv = [];
+        let ok = true;
         for (const v of tri) {
-          const iv = Math.max(intensityFloor, (v.i ?? 1));
-          const c = Math.max(0, Math.min(255, Math.round(iv * 255)));
           let px = v.pos[0], py = v.pos[1], pz = v.pos[2];
           if (reproject) {
             const [sx, sy, sz] = this._projectEngine(v.world[0], v.world[1], v.world[2]);
             px = sx; py = sy; pz = sz;
           }
-          writeVtx(vi++, px, py, pz, c, v.uv[0], v.uv[1]);
+          if (!onScreen(px, py)) { ok = false; break; }
+          const iv = Math.max(intensityFloor, (v.i ?? 1));
+          const c = Math.max(0, Math.min(255, Math.round(iv * 255)));
+          fv.push([px, py, pz, c, v.uv[0], v.uv[1]]);
         }
+        if (!ok) continue;                 // degenerate (unplaced-prop garbage) — drop it
+        const first = vi;
+        for (const f of fv) writeVtx(vi++, f[0], f[1], f[2], f[3], f[4], f[5]);
+        opaque.push({ first, count: 3, isp, tsp, tcw: surr, pcw, tileclip: 0 });
       }
-      for (let t = first; t + 3 <= vi; t += 3)
-        opaque.push({ first: t, count: 3, isp, tsp, tcw: surr, pcw, tileclip: 0 });
     }
     return { vertexData: vb.subarray(0, vi * 28), vertexCount: vi,
              opaque, punchThrough: [], translucent };
