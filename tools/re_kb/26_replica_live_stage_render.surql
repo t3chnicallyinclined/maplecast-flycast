@@ -62,6 +62,35 @@ RELATE finding:stage_real_bug_pernode_matrices->cites->source:stage_groundtruth_
 RELATE finding:stage_real_bug_pernode_matrices->cites->source:stage_decode;
 
 -- ============================================================================
+-- 26c FIX SHIPPED (2026-06-13): world-space model assembly + numeric validation.
+-- Implements the fix for finding:stage_real_bug_pernode_matrices. Deployed prod
+-- 149.28.44.118, replay.html ?v=stage2, md5-verified. commit a73f9f442.
+-- ============================================================================
+
+UPSERT source:stage_world_assembly SET kind='tool',
+  ref='tools/rip_stage.py (_model_extent/_apply_mat34/_load_matrices, WORLD_EXTENT_THRESH) + tools/validate_stage_geom.py + tools/stage_id_map.json',
+  note='rip_stage.py now WORLD-ASSEMBLES the stage: per model, if max|vertexCoord| >= 100 the model is authored DIRECTLY in world space and renders with an IDENTITY matrix (raw rip verts ARE world coords); else it is a small LOCAL-space prop needing a runtime world matrix, taken from optional atlas/stages/STGxx_matrices.json (a captured 3x4 per modelIndex, pre-multiplied into world here) or, if absent, flagged placed=false. JSON gains worldAssembled/placedModels/unplacedModels/hasMatrixSidecar; each mesh gains placed. validate_stage_geom.py is the numeric gate: project the placed verts through XMTRX=M1.M2 (from _stage_gt/ram.bin) and NN-diff vs the engine TA screen verts (_stage_gt/engine_ta.bin). stage_id_map.json holds the confirmed wire-id->STGxx map + per-stage modelCount fingerprints.';
+
+UPSERT source:stage_world_proof SET kind='oracle',
+  ref='_stage_gt/engine_ta.bin un-projected through XMTRX=M1.M2; tools/validate_stage_geom.py STG0B',
+  note='THE engine TA param stream (tctx->tad) carries per-vertex SCREEN x/y + depth(1/w) + UV (32B vertex, paraType=7, 0xe0/0xf0). Un-projecting (world = X[[0,1,3],:3]^-1 . (([sx,sy,1]*w) - X[[0,1,3],3]); w=1/depth) recovers EXACT world space. STG0B engine TA un-projects to X +-2500, Y -182..1363, Z -2895..744 = EXACTLY rip model 0 local extent -> model 0 IS identity world-space. PROVEN: rip model 0 raw verts projected via M1.M2 match the engine screen verts at 0.000px (median/mean/p90/max, 2346 verts). The captured frame TA contained ONLY model 0 (96 polys); the 66 local props were not submitted that frame, so prop matrices still need a live Oracle capture.';
+
+UPSERT finding:stage_world_assembly_fix SET
+  statement='STAGE FIX SHIPPED. The collapsed-prop "green blob" is FIXED by world-space assembly, NOT by any projection change (M1.M2 stays — re-confirmed 0.000px). rip_stage.py classifies each model by vertex extent: world-authored models (deck/skybox/scenery, the visible background) render with identity (raw verts = world), validated 0.000px vs engine_ta for STG0B (tools/validate_stage_geom.py PASS); small local-space props with no captured matrix are flagged placed=false and the client (web/webgpu/stage-client.mjs _build) SKIPS them instead of collapsing them to a screen dot at ~(320,432). Most stages need no props (STG00/04/07/09/0D = 0 local models; STG0B worst case = only model 0 world-space, 66 props skipped). Client: STAGE_ID_MAP maps wire stage_id->STGxx (confirmed 0x11->STG0B; else id->file fallback); setState resolves it; projection UNTOUCHED. Re-baked all 17 stages (gitignored). Deployed prod 149.28.44.118 (replay.html stage-client ?v=fx2 -> ?v=stage2, md5-verified local==prod), commit a73f9f442. BEFORE/AFTER: _stage_gt/BEFORE_AFTER_STG0B.png (BEFORE = textured deck + center prop garbage-blob; AFTER = clean placed+textured deck, no blob). Body/HUD/effects/tails UNTOUCHED.',
+  status='confirmed', confidence='high', date='2026-06-13';
+
+UPSERT finding:stage_prop_matrices_deferred SET
+  statement='OPEN (deferred follow-up): per-prop runtime WORLD matrices. The small local-space props (STG0B 66 cannons/chains, etc.) are skipped until their matrices are captured. They are genuine RUNTIME state (the NaomiLib matrix stack top @0x8C2D6900 = camera x node, pushed during the tree-walk loc_8c122fd0/loc_8c122d00) — NOT in the POL (header floats +0x0C/10/14 are a bounding-sphere; the runtime node-matrix cache tables @0x8C2DE690/0x8C2AA26C hold indices+flags, not 4x3 matrices). And the captured engine_ta held only model 0 that frame, so they are not offline-derivable from the current dump. CAPTURE RECIPE: MAPLECAST_ORACLE_PROBE a per-model PC in the dispatch loop (loc_8c03229c, 0x8C03229C) or just after the node push, dumping a mem window over 0x8C2D6900 (the stack-top XMTRX=camera x node) + the model index; offline remove the camera (node_local = (M1.M2)^-1 . captured) -> STGxx_matrices.json which rip_stage.py pre-multiplies. ALSO: complete the stage_id->STGxx map by capturing each stage live + fingerprinting its loaded POL (modelCount+POL-hash unique for all 17 except the 01/0A byte-identical-geometry pair). /dev/shm was freed (ASMTRACE truncated, authorized) but the running flycast lacks MAPLECAST_ORACLE_PROBE/DUMP_RAM env (would need a restart) so the capture itself is the next session.',
+  status='open', confidence='high', date='2026-06-13';
+
+RELATE finding:stage_world_assembly_fix->cites->source:stage_world_assembly;
+RELATE finding:stage_world_assembly_fix->cites->source:stage_world_proof;
+RELATE finding:stage_world_assembly_fix->cites->source:stage_camera_transform;
+RELATE finding:stage_world_assembly_fix->about->finding:stage_real_bug_pernode_matrices;
+RELATE finding:stage_prop_matrices_deferred->cites->source:stage_render_disasm;
+RELATE finding:stage_prop_matrices_deferred->cites->source:stage_world_proof;
+
+-- ============================================================================
 -- 26c (2026-06-13): "stage+effects show NOTHING on prod" — ROOT CAUSE = NOT DEPLOYED.
 -- ============================================================================
 
