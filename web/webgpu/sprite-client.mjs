@@ -2318,16 +2318,36 @@ export class SpriteClient {
 
     // --- round timer: two ripped FONT digits, centered ---
     // INFINITE-TIME MODE: the real MVC2 HUD draws an ∞ glyph (not "99") when the
-    // match runs with no clock. There is no dedicated wire flag, so detect it the
-    // way the value behaves: the timer is pinned at 99 and never decrements while
-    // in match. Track a short run of unchanged-99 frames; once it holds, draw ∞.
-    // (A normal match starts at 99 then ticks down, so this only latches in the
-    // genuinely-infinite case after a few frames — and unlatches the moment it moves.)
+    // match runs with no clock. This is now a DETERMINISTIC read of the game-mode
+    // byte 0x8C26828C ("Game mode", work.asm:22), shipped in the extended ggp_acc
+    // wire region. The render-replica populates hud.gameMode from that RAM byte;
+    // when it equals the infinite-time mode value, draw ∞ — replacing the old
+    // held-99 heuristic (the _inf99 latch). hud.gameMode is undefined in the
+    // cockpit (no RAM image / GSTA carries no game-mode), so there we fall back to
+    // the held-99 latch so the cockpit HUD is unchanged. [hud:infinite-time-flag]
+    // re_kb finding:replica_live_render_field_gaps — Oracle live 0x28C=0x02 with the
+    // infinite observable (in_match=1, timer 0x63=99 frozen, HP 144). The exact gate
+    // value is a live-calibration knob (window._infTimeMode, default 0x02) so it can
+    // be confirmed vs the TA truth without a redeploy.
     const tval = hud.timer | 0;
-    if (tval === 99 && this._lastTimer === 99) this._inf99 = Math.min(120, (this._inf99 | 0) + 1);
-    else if (tval !== 99) this._inf99 = 0;
+    let infinite;
+    if (hud.gameMode != null) {
+      // DETERMINISTIC: the game-mode byte (0x8C26828C) indicates infinite-time. The
+      // exact value is a live-calibration knob (window._infTimeMode, default 0x02 per
+      // the Oracle-confirmed infinite observable). GUARD: only honor ∞ while the timer
+      // reads its frozen max (99) — so if the gate value is ever mis-set it can NEVER
+      // paint ∞ over a live ticking clock (strictly safer than the old held-99 latch,
+      // and still fully deterministic = no multi-frame latch). [hud:infinite-time-flag]
+      const infMode = (typeof window !== 'undefined' && window._infTimeMode != null) ? (window._infTimeMode | 0) : 0x02;
+      infinite = ((hud.gameMode | 0) === infMode) && tval >= 99;
+      this._inf99 = 0;                              // flag path owns the decision
+    } else {
+      // cockpit fallback (no game-mode on the wire): held-99 heuristic, unchanged.
+      if (tval === 99 && this._lastTimer === 99) this._inf99 = Math.min(120, (this._inf99 | 0) + 1);
+      else if (tval !== 99) this._inf99 = 0;
+      infinite = this._inf99 >= 20;
+    }
     this._lastTimer = tval;
-    const infinite = this._inf99 >= 20;            // ~1/3s of held-99 latches ∞
     if (infinite) {
       this._drawInfinity(ctx, 320, 23, 22);        // ∞ glyph centered where digits sit
     } else {

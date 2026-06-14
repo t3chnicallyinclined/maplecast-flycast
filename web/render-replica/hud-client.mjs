@@ -42,6 +42,12 @@ const A = {                                     // engine field addresses (globa
     P1_COMBO:0x8C289670, P2_COMBO:0x8C289672,
 };
 const OFF_ACTIVE = 0x000, OFF_CID = 0x001, OFF_HP = 0x420, OFF_RED = 0x424;
+// PER-SIDE ROUND-WIN COUNT (pl_mem.asm:301): num_wins +0x540, num_lose +0x541,
+// num_draw +0x542, handicap_level +0x543 — all u8. ⚠️ Use +0x540 ONLY: +0x543 is
+// HANDICAP (Oracle live read 0x02 there is handicap, NOT a win). 0x540 < stride
+// 0x5A4 so it already rides the shipped char_str wire region — no extra wire.
+// re_kb finding:replica_live_render_field_gaps. [hud:win-stars]
+const OFF_WINS = 0x540;
 const P1_SLOTS = [0, 2, 4], P2_SLOTS = [1, 3, 5];
 
 // Per-team life-bar / meter modulate color (loc_8c15FFB0): which of a side's 3 chars
@@ -363,6 +369,36 @@ export class HudClient {
         drawSide(p1, false, P1_PORT_X);
         drawSide(p2, true,  P2_PORT_X);
 
+        // ── PER-SIDE WIN STARS (char[pointSlot]+0x540 num_wins) ────────────────
+        // The REAL per-side round-win count (pl_mem.asm:301), NOT the old bogus
+        // global round_counter. Read from the POINT char of each side (team[0] after
+        // the active-first ordering above; fall back to the team's first slot if no
+        // active). Drawn as small bright pips flanking the centered TIME gauge, above
+        // the top life-bar (bars start at TOP_Y=16; timer box sits ~y 6..36). Win
+        // stars appear in the real MVC2 HUD beside TIME — this is the faithful spot.
+        // [hud:win-stars] re_kb finding:replica_live_render_field_gaps
+        const winsOf = (team) => {
+            const e = (team[0] && team[0].active) ? team[0]
+                    : team.find(t => t && t.active) || team[0];
+            return e ? Math.max(0, Math.min(4, rdU8(e.base + OFF_WINS) | 0)) : 0;
+        };
+        const star = (cx, cy, r, col) => {
+            ctx.beginPath();
+            for (let k = 0; k < 5; k++) {
+                const a0 = -Math.PI / 2 + k * 2 * Math.PI / 5, a1 = a0 + Math.PI / 5;
+                ctx.lineTo(cx + Math.cos(a0) * r, cy + Math.sin(a0) * r);
+                ctx.lineTo(cx + Math.cos(a1) * r * 0.45, cy + Math.sin(a1) * r * 0.45);
+            }
+            ctx.closePath();
+            ctx.fillStyle = col; ctx.fill();
+            ctx.lineWidth = 0.8; ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.stroke();
+        };
+        const STAR_Y = 13, STAR_R = 4, STAR_GAP = 11;   // just above the top bar, flanking TIME
+        const w1 = winsOf(p1), w2 = winsOf(p2);
+        // P1 stars grow LEFTWARD from just left of the timer box; P2 grow RIGHTWARD.
+        for (let i = 0; i < w1; i++) star(286 - i * STAR_GAP, STAR_Y, STAR_R, '#ffe14d');
+        for (let i = 0; i < w2; i++) star(354 + i * STAR_GAP, STAR_Y, STAR_R, '#ffe14d');
+
         ctx.restore();
     }
 
@@ -427,17 +463,20 @@ export class HudClient {
         this._plate(ctx, 8,   PLATE_Y, PLATE_W, PLATE_H, false, p1, rdU8, c1[0], c1[1] || c1[0]);
         this._plate(ctx, 632, PLATE_Y, PLATE_W, PLATE_H, true,  p2, rdU8, c2[0], c2[1] || c2[0]);
 
-        // ── ROUND / WIN STARS ─────────────────────────────────────────────────
-        // Small win markers just under the plate, growing inboard.
-        const stars = Math.max(0, Math.min(3, rdU8(A.ROUND) | 0));
+        // ── ROUND / WIN STARS (per-side num_wins +0x540) ──────────────────────
+        // The REAL per-side round-win count (pl_mem.asm:301), read from each side's
+        // POINT char +0x540 — NOT the global round_counter (which mis-painted equal
+        // stars on both sides). [hud:win-stars]
+        const winsP = (p) => p ? Math.max(0, Math.min(4, rdU8(p.base + OFF_WINS) | 0)) : 0;
+        const w1 = winsP(p1), w2 = winsP(p2);
         const drawStar = (cx, cy, r, col) => { ctx.fillStyle = col; ctx.beginPath();
             for (let k = 0; k < 5; k++) { const a0 = -Math.PI/2 + k*2*Math.PI/5, a1 = a0 + Math.PI/5;
                 ctx.lineTo(cx + Math.cos(a0)*r, cy + Math.sin(a0)*r);
                 ctx.lineTo(cx + Math.cos(a1)*r*0.45, cy + Math.sin(a1)*r*0.45); }
             ctx.closePath(); ctx.fill(); };
         const starY = PLATE_Y + PLATE_H + 13;   // below the name row so it never overlaps
-        for (let i = 0; i < stars; i++) { drawStar(12 + i * 11, starY, 4, '#ffe14d');
-                                          drawStar(628 - i * 11, starY, 4, '#ffe14d'); }
+        for (let i = 0; i < w1; i++) drawStar(12 + i * 11, starY, 4, '#ffe14d');
+        for (let i = 0; i < w2; i++) drawStar(628 - i * 11, starY, 4, '#ffe14d');
 
         // ── CENTER TIMER ──────────────────────────────────────────────────────
         const t = String(Math.max(0, Math.min(99, rdU8(A.TIMER) | 0))).padStart(2, '0');

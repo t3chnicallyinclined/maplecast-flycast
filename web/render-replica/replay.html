@@ -215,7 +215,7 @@
 // Reuses ta-parser/pvr2-renderer/texture-manager VERBATIM, and render_frame.wasm UNMODIFIED
 // (Phases 1/2 frozen byte-exact). MCRR spec: docs/RENDER-REPLICA-RECORDING-FORMAT.md.
 // ============================================================================
-import createRenderFrame from './render_frame.mjs?v=xspan1';
+import createRenderFrame from './render_frame.mjs?v=winstar1';
 // BODIES — THE TRANSPILE DRAWS (2026-06-14, restored): the character bodies are DRAWN BY
 // render_frame.wasm (the byte-exact transpiled engine render, geometry 0.003px vs ASMTRACE,
 // re_kb 10) -> pvr2-renderer.mjs (flycast's own rasterizer). The per-frame texture decode is
@@ -225,14 +225,14 @@ import createRenderFrame from './render_frame.mjs?v=xspan1';
 // ensureBodyTextures (decode parts into pane.vram) -> pane.render(drawTA, dbgFromCfg()).
 // The SpriteClient/SpriteGPU emitter is still IMPORTED but NO LONGER DRAWS the bodies — it
 // is retained only for the (disabled) emitter cross-check; the drawn bodies ARE the transpile.
-import { ensureBodyTextures } from './body_decoder.mjs?v=xspan1';
-import { SpriteClient } from '../webgpu/sprite-client.mjs?v=xspan1';
-import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=xspan1';
+import { ensureBodyTextures } from './body_decoder.mjs?v=winstar1';
+import { SpriteClient } from '../webgpu/sprite-client.mjs?v=winstar1';
+import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=winstar1';
 // Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
 // /gfx/PL{NN}_gfx{1,2}.bin (cached by char_id). Fixes the scramble + the tag-in GFX gap (covers
 // ALL 6 char structs incl P1C2/P2C2/P1C3/P2C3 tag-ins, not just connect-active bodies).
-import { applyLocalGfx } from './local_gfx_overlay.mjs?v=xspan1';
+import { applyLocalGfx } from './local_gfx_overlay.mjs?v=winstar1';
 const bodyCache = {};   // decode-on-change memo, persists across frames
 
 // Phase 3 — STAGE (background): decode-from-disc cached locally (web/test-atlas/stages/
@@ -242,7 +242,7 @@ const bodyCache = {};   // decode-on-change memo, persists across frames
 // (M1@0x8C2D6B18 · M2@0x8C2D6AD8, shipped in the "cam_mat" read-set region) using the SAME
 // transform_object_122560 math the bodies use — so the stage scrolls/zooms in lockstep with
 // the fighters, NO guessed camera. Rendered as an OP pass BEHIND the bodies.
-import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=xspan1';
+import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=winstar1';
 
 // EFFECTS (hitsparks / electric / energy): FAITHFUL — pure-effect pool nodes (cat 1..4, GFX2
 // node+0x160 in the Effect-Poly bank 0x0CED0000) render through the SAME transpiled walker as
@@ -252,7 +252,7 @@ import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=xspan1'
 // additive quad) was built on a MISLABEL: loc_8c1294c8 is a 20-byte memcpy (the anim-cell
 // loader), NOT an effect cell processor. EffectsClient is now a no-op overlay that only
 // enumerates live effect nodes for diagnostics — effects render in the WebGPU body pass.
-import { EffectsClient } from './effects-client.mjs?v=xspan1';
+import { EffectsClient } from './effects-client.mjs?v=winstar1';
 
 // HUD (life bars / super meter / timer / combo / portraits-name / win stars): REAL MVC2 art.
 // The timer + combo + level digits are the game's OWN boxed-digit sprites (FONT.BIN rec1,
@@ -260,7 +260,7 @@ import { EffectsClient } from './effects-client.mjs?v=xspan1';
 // the engine's white-tex * per-slot vertex color (loc_8c15FFB0) reconstructed as the angled
 // team-tinted parallelogram with the red_health chip trail. Every field reads the live engine
 // addresses (the production GSTA wire's own reads). Supersedes the synthetic renderHudPass().
-import { HudClient } from './hud-client.mjs?v=xspan1';
+import { HudClient } from './hud-client.mjs?v=winstar1';
 
 // ============================================================================
 // LIVE CONFIG COCKPIT — window.__cfg is read EVERY frame (no reload to take
@@ -936,6 +936,10 @@ window.__pokeEffect = (sx, sy, borrowSlot) => {
 //     p1/p2_combo u16 0x8C289670/0x672.  (All inside the extended "gstate" 0x60 window.)
 // CONSTANTS (CONFIRMED): HP_MAX = 144 (0x90); METER_MAX = 144 (loc_8C0F0FDC fill/144.0).
 const HUD_IN_MATCH = 0x8C289624, HUD_ROUND = 0x8C28962B, HUD_TIMER = 0x8C289630;
+// Game-mode byte (work.asm:22 "Game mode"), in the extended ggp_acc wire region.
+// Gates the infinite-time ∞ glyph (drawHUD reads hud.gameMode). re_kb finding:
+// replica_live_render_field_gaps — Oracle live 0x02 with the infinite observable.
+const HUD_GAME_MODE = 0x8C26828C;
 const HUD_P1_FILL = 0x8C289646, HUD_P2_FILL = 0x8C289648;
 const HUD_P1_LVL  = 0x8C28964A, HUD_P2_LVL  = 0x8C28964B;
 const HUD_P1_COMBO= 0x8C289670, HUD_P2_COMBO= 0x8C289672;
@@ -1095,6 +1099,11 @@ function populateHudStateFromRAM() {
         p1lvl:   rdU8(HUD_P1_LVL),   p2lvl:  rdU8(HUD_P2_LVL),
         p1combo: rdU16(HUD_P1_COMBO),p2combo:rdU16(HUD_P2_COMBO),
         p1fill:  rdU16(HUD_P1_FILL), p2fill: rdU16(HUD_P2_FILL),
+        // INFINITE-TIME flag (deterministic): game-mode byte 0x8C26828C (work.asm:22),
+        // shipped in the extended ggp_acc wire region. drawHUD draws ∞ when this equals
+        // window._infTimeMode (default 0x02). Replaces the held-99 heuristic.
+        // [hud:infinite-time-flag] re_kb finding:replica_live_render_field_gaps
+        gameMode: rdU8(HUD_GAME_MODE),
     };
     // Per-slot health drives the life bars + _barCols/_pointSlot (P1=[0,2,4] P2=[1,3,5]).
     // _maxhp stays at HP_MAX (144) so the bar reads full at round start — drawHUD uses
