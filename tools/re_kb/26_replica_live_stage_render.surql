@@ -31,3 +31,47 @@ RELATE finding:replica_live_stage_render->cites->source:stage_camera_transform;
 RELATE finding:replica_live_stage_render->cites->source:stage_readset;
 RELATE finding:replica_live_stage_projection_validated->cites->source:stage_camera_transform;
 RELATE finding:replica_live_stage_projection_validated->cites->source:stage_decode;
+
+-- ============================================================================
+-- 26b CORRECTION (2026-06-13): the "tilted green plane" RE-INVESTIGATION.
+-- The reported root cause ("M1.M2 is the wrong transform for the 3D stage") is
+-- DISPROVEN by ground truth. Three independent confirmations grounded the REAL bug.
+-- ============================================================================
+
+UPSERT source:stage_render_disasm SET kind='code',
+  ref='marvelous2 bank03 loc_8c03223e (stage model dispatcher) -> bank12 loc_8c122fd0 (NaomiLib POL tree-walk) -> loc_8c122d00 (per-object processor) -> bank11 submit; camera setup bank12 loc_8C1216C0; per-vertex transform bank11 loc_8C11F870 (njCalcPoint: ftrv xmtrx).',
+  note='STAGE RENDER PATH FULLY TRACED. loc_8c03223e (bank03:4990): calls loc_8c11b800 (list-id setter, stores 0x0c10->0x8C2DEE54 — NOT a matrix), writes 0x0cea0000 (stage POL base) -> [0x8c26a904], r12=loc_8c122fd0, then loc_8c03229c loops model[0..modelCount-1] (count = [0x4,[0x0cea0000]]) and jsr loc_8c122fd0 per model. NO per-model matrix push at the dispatcher level. The active XMTRX is the FRAME-GLOBAL camera, set ONCE by loc_8C1216C0 which builds XMTRX = load(M1@0x8C2D6B18)·matmul(M2@0x8C2D6AD8) and stores via the matrix-stack primitives loc_8c120950(push/load)/loc_8c120540(matmul)/loc_8c120900(pop) over the stack header @0x8C2D68E8. Per-vertex projection = loc_8C11F870 (reads x,y,z; w=1; ftrv xmtrx; writes 4 floats). THE PER-MODEL WORLD MATRICES are applied INSIDE the tree-walk (loc_8c122fd0/loc_8c122d00 read the NaomiLib node and push the node matrix onto the stack between the camera and the vertex ftrv) — they are RUNTIME state, NOT in the POL file.';
+
+UPSERT source:stage_groundtruth_capture SET kind='oracle',
+  ref='prod 149.28.44.118 /dev/shm/{mc_ram_dump.bin (16MB main RAM, 0x8C000000), mc_engine_ta.bin (raw PowerVR param stream tctx->tad), mc_pvr_regs.bin} captured in-match (MAPLECAST_DUMP_RAM). Local copies _stage_gt/.',
+  note='Live in-match capture: in_match=1, stage_id=0x11(17). The loaded POL @0x0CEA0000 (= 0x8CEA0000 = main-RAM offset 0xEA0000; the 0x0C/0x8C region is the SAME physical RAM, P0/P1 mirror) has modelCount=83 -> UNIQUELY fingerprints disc STG0B (the ONLY .POL with modelCount=83). So stage_id 0x11 -> STG0B: stage_id is NOT a 0-based file index (disc has STG00..STG10 = stages 0..16; id 17 maps to STG0B). RAM-loaded POL vs disc STG0BPOL.BIN differ ONLY from byte 0x22a (pointer relocation disc-rel 0x00..->RAM-abs 0x8c..); the VERTEX geometry is byte-identical -> rip_stage.py decode == engine geometry.';
+
+UPSERT finding:stage_transform_is_m1m2_CONFIRMED SET
+  statement='THE STAGE TRANSFORM IS XMTRX = M1(0x8C2D6B18)·M2(0x8C2D6AD8) — CONFIRMED CORRECT, NOT the bug. (1) DISASM: the stage tree-walk (loc_8c122fd0) projects every model vertex through loc_8C11F870 ftrv xmtrx, where XMTRX is the SAME frame-global camera the bodies use (loc_8C1216C0), with NO separate "background matrix" — the per-model matrices the engine pushes are LOCAL node transforms layered on top, not a different camera. (2) NUMERIC vs engine ground truth: from the live RAM dump, body P2C1 world pos(213.3,100) projects via M1·M2 to screen (533.3,333.4) = BYTE-EXACT vs the engine-deposited screen @+0xE0/E4 (533.9,333.4); M2·M1 gives garbage (214,-99). matmul order CONFIRMED M1·M2. (3) The engine TA (mc_engine_ta.bin) list0 = the visible stage (2400 verts, Ymed~62, full perspective Z 0.0003..) and the CLIENT model-0 projection through M1·M2 has the SAME vert count (2422) and span (bottom y=585 matches). The prior pass projection math was RIGHT.',
+  status='confirmed', confidence='high', date='2026-06-13';
+
+UPSERT finding:stage_real_bug_pernode_matrices SET
+  statement='THE REAL "tilted/collapsed stage" BUG = TWO decode/data gaps, NOT the transform. (A) MISSING PER-NODE NAOMILIB MATRICES: rip_stage.py (ModNao port) reads RAW vertex positions as world-space, but in MVC2 only model 0 (the deck/skybox, world ±2500) is authored in world space. Models 1..82 are authored in LOCAL space (verts ±15, e.g. cannons/chains/props) and need the per-model WORLD matrix the engine pushes at runtime in the tree-walk — which is NOT in the POL file. The model 0x18-byte MODEL_HEADER fields at +0x0C/+0x10/+0x14 are a NaomiLib BOUNDING-SPHERE center (+radius), NOT a transform (applying them as a translation makes placement WORSE: model0 Ymed 2082 vs engine 62). ModNao itself confirms this — it ships only NAME "stage model hints" (mvc2StageModelHints.ts), renders models individually, and does NOT compose the stage into one world. RESULT: client projects models 1..82 to a collapsed dot at ~(320,432) (the "green blob"), only model 0 spreads correctly (its M1·M2 Ymed=-105 vs engine 62, ~167px residual = model 0 ALSO has a small runtime node matrix). (B) STAGE_ID MAPPING: stage_id is not a file index (0x11->STG0B). The client also has NO geometry for whatever stage_id maps outside STG00..STG10 unless the mapping table is captured. FIX PATH: capture the per-model runtime WORLD matrices live via the Oracle (MAPLECAST_ORACLE_PROBE on the model-dispatch loc_8c03229c / the tree-walk matrix-stack @0x8C2D6900 region, OR the post-transform TA verts), bake world-space-assembled geometry per stage, and build the stage_id->STGxx map. The transform stays M1·M2 (per finding:stage_transform_is_m1m2_CONFIRMED).',
+  status='confirmed', confidence='high', date='2026-06-13';
+
+RELATE finding:stage_transform_is_m1m2_CONFIRMED->cites->source:stage_render_disasm;
+RELATE finding:stage_transform_is_m1m2_CONFIRMED->cites->source:stage_groundtruth_capture;
+RELATE finding:stage_transform_is_m1m2_CONFIRMED->cites->source:stage_camera_transform;
+RELATE finding:stage_real_bug_pernode_matrices->cites->source:stage_render_disasm;
+RELATE finding:stage_real_bug_pernode_matrices->cites->source:stage_groundtruth_capture;
+RELATE finding:stage_real_bug_pernode_matrices->cites->source:stage_decode;
+
+-- ============================================================================
+-- 26c (2026-06-13): "stage+effects show NOTHING on prod" — ROOT CAUSE = NOT DEPLOYED.
+-- ============================================================================
+
+UPSERT source:stage_effects_headless_proof SET kind='tool',
+  ref='tools/render-replica-poc/{shot_stage_headless.mjs (Dawn WebGPU, real GPU), _probe_stage_cam.mjs, _probe_stage_project.mjs, _probe_effects_poke.mjs, _probe_effects_draw.mjs (puppeteer), mock_replica_live_server.mjs (patched to skip GFX+palette tails so real captures stream)}',
+  note='Live prod capture _satlive.mcrr (700 frames, in_match=1): stage_id=0x0B(=STG0B, present), camera M2[15]=812.36/M1[0]=320 NON-ZERO every frame -> the renderStagePass gate (bail if M2[15]==0&&M2[0]==0) PASSES, the cam_mat region ships correctly. shot_stage_headless.mjs drives the UNMODIFIED StageClient+PVR2Renderer (the exact replay.html path) -> 294100/307200 (95.7%) NON-BLACK px (PNG_stage_headless.png: model-0 deck spreads green; models 1..82 collapse per finding:stage_real_bug_pernode_matrices). EFFECTS: __pokeEffect(0,320,240)+readEffectNodes returns 1 node (idx0 128x128) and EffectsClient.render draws 11851 non-transparent overlay px (atomic poke+render in one evaluate; a streamed frame between poke and render re-splats slot_cnt/objpool and wipes the poke -> earlier 0px was a TEST timing artifact, not a code bug).';
+
+UPSERT finding:replica_live_stage_effects_not_deployed SET
+  statement='THE STAGE+EFFECTS "show nothing / black" on the user s LIVE PROD VIDEO is a DEPLOYMENT GAP, not a code/gate/camera bug. PROVEN: (1) renderStagePass() AND renderEffectsPass() ARE wired into liveApplyFrame (web/render-replica/replay.html, the live path, not just showFrame). (2) the gates pass on real prod data (cam_mat + stage_id non-zero in _satlive.mcrr). (3) the render chain works: stage 95.7% non-black + effects 11851px via headless harnesses on the exact client path. BUT prod 149.28.44.118 has NO Phase-3 client: /var/www/maplecast/render-replica/ DOES NOT EXIST; /var/www/maplecast/replay.html is an ANCIENT unrelated 357-line WebGL2 file (title "MapleCast Rend Replay — WebGL2 + Textures", grep stage|effect = 0 hits, no import lines); /var/www/maplecast/test-atlas/stages/ is absent (no stage tiles deployed); /var/www/maplecast/webgpu/stage-client.mjs is the OLD pre-camera version (md5 c9409e1c vs local 04892915). FIX = DEPLOY the Phase-3 client tree: replay.html + render-replica modules (render_frame.{mjs,wasm}, body_decoder.mjs, local_gfx_overlay.mjs, effects-client.mjs) + effects/ atlas to /var/www/maplecast/render-replica/, refresh webgpu/stage-client.mjs, and scp web/test-atlas/stages/STG*.{json,png} -> /var/www/maplecast/test-atlas/stages/ (ROM-derived, scp-only). The page imports ../webgpu/stage-client.mjs + ../test-atlas/stages, so it MUST live at /var/www/maplecast/render-replica/ for those relatives to resolve.',
+  status='confirmed', confidence='high', date='2026-06-13';
+
+RELATE finding:replica_live_stage_effects_not_deployed->cites->source:stage_effects_headless_proof;
+RELATE finding:replica_live_stage_effects_not_deployed->cites->source:stage_readset;

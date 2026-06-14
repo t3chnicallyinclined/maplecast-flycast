@@ -78,6 +78,26 @@ for (let f = 0; f < nFrames; f++) {
     /*vframe*/ u32();
     const taSize = u32();
     for (const r of dynamicRegs) p += r.len;   // dynamic payload
+    // GFX tail (newer captures): u32 nGfx, then nGfx*{u32 base, u32 len, len bytes}.
+    // nGfx<=64 distinguishes it from an old-format record (where these 4 bytes are TA).
+    if (p + 4 <= buf.length) {
+        const nGfx = dv.getUint32(p, true);
+        if (nGfx <= 64) {
+            p += 4;
+            for (let g = 0; g < nGfx && p + 8 <= buf.length; g++) {
+                const len = dv.getUint32(p + 4, true); p += 8 + len;
+            }
+            // PALETTE tail (strict append after GFX tail): u32 palLen + palLen bytes.
+            // Mirror applyPvrPalTail EXACTLY: palLen==0 -> consume only the 4 bytes;
+            // out-of-range -> NOT a tail, don't consume (rewind the 4 bytes).
+            if (p + 4 <= buf.length) {
+                const palLen = dv.getUint32(p, true); p += 4;
+                if (palLen === 0) { /* consumed 4 bytes only */ }
+                else if (palLen <= 0x10000 && p + palLen <= buf.length) p += palLen;
+                else p -= 4;   // not a real palette tail
+            }
+        }
+    }
     p += taSize;                               // engine_ta
     frames.push(buf.subarray(fStart, p));
 }
