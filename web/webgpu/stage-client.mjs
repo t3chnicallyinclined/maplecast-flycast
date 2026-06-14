@@ -117,12 +117,16 @@ export class StageClient {
     this._M1 = Float32Array.from(M1.subarray ? M1.subarray(0, 16) : M1.slice(0, 16));
     this._M2 = Float32Array.from(M2.subarray ? M2.subarray(0, 16) : M2.slice(0, 16));
     this._X = this._matmulColMaj(this._M1, this._M2);   // XMTRX = M1·M2 (loc_8c120540)
-    // ENGINE-TA grounded mode bakes the engine's FINAL screen-space verts — they are
-    // already projected through the captured frame's camera, so do NOT re-project here
-    // (re-running _build would treat baked screen coords as world coords). The POL-rip
-    // world-space path DOES re-project to track the live camera.
-    if (this._isTA) return false;
-    if (this._data) { this._parsed = this._build(this._data); return true; }
+    // GROUNDED ENGINE-TA mode now carries per-vertex WORLD coords (un-projected from the
+    // captured screen verts via (M1·M2)^-1 in bake_stage_from_ta.py, re_kb 26 prop-matrix
+    // capture). So BOTH paths re-project through the live camera: the full assembled scene
+    // (deck + all props, recovered in world space) tracks the live camera in lockstep with
+    // the fighters. A TA bake WITHOUT world coords (legacy) stays camera-static (no re-proj).
+    if (this._isTA && !(this._data && this._data.hasWorld)) return false;
+    if (this._data) {
+      this._parsed = this._isTA ? this._buildFromTA(this._data) : this._build(this._data);
+      return true;
+    }
     return false;
   }
 
@@ -183,12 +187,17 @@ export class StageClient {
 
   // ── GROUNDED build: engine-TA bake -> PVR2Renderer parsed object ──────────────
   // Control words come STRAIGHT from the engine (data.meshes[].pcw/isp/tsp), NOT
-  // synthesized. Verts are already the engine's final SCREEN-space (sx,sy,1/w) so we
-  // do NOT re-project — this is the captured-frame stage exactly as the engine drew it.
+  // synthesized. Each vertex carries the engine's captured-frame SCREEN-space `pos`
+  // (sx,sy,1/w) AND its un-projected `world` coords (data.hasWorld). When the live
+  // camera is available (this._X set via setCamera) and the bake has world coords, we
+  // RE-PROJECT world through the live XMTRX (_projectEngine) so the whole assembled
+  // scene — deck + every prop, all recovered in world space — tracks the live camera.
+  // Otherwise we use the baked screen coords verbatim (camera-static fallback).
   // tcw carries the texture surrogate so getTexture binds the VRAM-decoded texture.
   // intensity (vertex .i, Col_Type=2) is folded into the per-vertex base colour so the
   // shader's modulate (ShadInstr=1) reproduces the engine's shading.
   _buildFromTA(data) {
+    const useLive = !!(this._X && data.hasWorld);
     let triTotal = 0;
     for (const m of data.meshes) triTotal += m.tris.length;
     const vcount = triTotal * 3;
@@ -219,7 +228,12 @@ export class StageClient {
       for (const tri of m.tris) {
         for (const v of tri) {
           const c = Math.max(0, Math.min(255, Math.round((v.i ?? 1) * 255)));
-          writeVtx(vi++, v.pos[0], v.pos[1], v.pos[2], c, v.uv[0], v.uv[1]);
+          let px = v.pos[0], py = v.pos[1], pz = v.pos[2];
+          if (useLive) {
+            const [sx, sy, sz] = this._projectEngine(v.world[0], v.world[1], v.world[2]);
+            px = sx; py = sy; pz = sz;
+          }
+          writeVtx(vi++, px, py, pz, c, v.uv[0], v.uv[1]);
         }
       }
       for (let t = first; t + 3 <= vi; t += 3)

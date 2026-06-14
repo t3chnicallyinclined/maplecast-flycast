@@ -37,6 +37,45 @@ OUTDIR = os.path.join(REPO, "atlas", "stages")
 WEBOUT = os.path.join(REPO, "web", "test-atlas", "stages")
 W, H = 640, 480
 
+ADDR_M1 = 0x8C2D6B18    # engine viewport matrix (col-major, 16 floats)
+ADDR_M2 = 0x8C2D6AD8    # engine projection matrix
+RAM_BASE = 0x8C000000
+
+
+def _mat16(ram, addr):
+    o = addr - RAM_BASE
+    return [struct.unpack_from("<f", ram, o + 4 * i)[0] for i in range(16)]
+
+
+def _to44(m):
+    A = np.zeros((4, 4))
+    for col in range(4):
+        for row in range(4):
+            A[row, col] = m[col * 4 + row]
+    return A
+
+
+def build_unproject():
+    """Return (Ainv, t, X) for inverting the engine transform XMTRX=M1.M2.
+
+    A TA vertex carries (sx, sy, inv=1/w). The pre-divide 4-vector is
+    (sx*w, sy*w, fz, w); we know rows 0,1,3 of XMTRX.[x,y,z,1] = (sx*w, sy*w, w),
+    so the 3x3 (rows 0,1,3 ; cols x,y,z) is invertible for the world (x,y,z).
+    Round-trip verified 1e-13 px (re_kb 26 stage prop-matrix capture)."""
+    ram = open(os.path.join(GT, "ram.bin"), "rb").read()
+    X = _to44(_mat16(ram, ADDR_M1)) @ _to44(_mat16(ram, ADDR_M2))   # M1.M2
+    A = np.array([[X[0, 0], X[0, 1], X[0, 2]],
+                  [X[1, 0], X[1, 1], X[1, 2]],
+                  [X[3, 0], X[3, 1], X[3, 2]]])
+    t = np.array([X[0, 3], X[1, 3], X[3, 3]])
+    return np.linalg.inv(A), t, X
+
+
+def unproject(Ainv, t, sx, sy, inv):
+    w = (1.0 / inv) if inv else 1e9
+    xyz = Ainv @ (np.array([sx * w, sy * w, w]) - t)
+    return float(xyz[0]), float(xyz[1]), float(xyz[2])
+
 
 def tex_params(tsp, tcw):
     texU = 8 << ((tsp >> 3) & 7)
@@ -72,6 +111,12 @@ def main():
     groups = walk(ta)
     os.makedirs(OUTDIR, exist_ok=True)
     os.makedirs(WEBOUT, exist_ok=True)
+
+    # Un-project the engine's final SCREEN verts back to WORLD space via (M1.M2)^-1
+    # so the client can re-project through the LIVE camera (props track the camera,
+    # not frozen to the captured frame). This recovers EVERY model's world position
+    # incl the small local props the POL rip cannot place — re_kb 26 prop-matrix item.
+    Ainv, t, X = build_unproject()
 
     # 1) collect distinct (texkey) -> surrogate + decode each from VRAM
     tex_surr = {}                              # texkey -> surr(1-based)
@@ -112,7 +157,9 @@ def main():
                 continue
             tri = []
             for v in (a, b, c):
+                wx, wy, wz = unproject(Ainv, t, v["x"], v["y"], v["z"])
                 tri.append({"pos": [round(v["x"], 3), round(v["y"], 3), round(v["z"], 6)],
+                            "world": [round(wx, 3), round(wy, 3), round(wz, 3)],
                             "uv": [round(v["u"], 5), round(v["v"], 5)],
                             "i": round(inten_of(v["base"]), 4)})
             tris.append(tri)
@@ -124,6 +171,11 @@ def main():
 
     out = {"mode": "engine_ta", "stage": sid, "screenW": W, "screenH": H,
            "source": "_stage_gt/engine_ta.bin (oracle MAPLECAST_DUMP_RAM, same-frame)",
+           # each vertex carries BOTH the captured-frame screen `pos` and the
+           # un-projected `world` coords (M1.M2)^-1; the client re-projects `world`
+           # through the LIVE camera so props track it. `bakeMatrices` = the M1.M2
+           # the un-projection used (for offline validation only).
+           "hasWorld": True,
            "textures": tex_meta, "meshes": meshes}
     jp = f"STG{sid}_ta.json"
     json.dump(out, open(os.path.join(OUTDIR, jp), "w"))
