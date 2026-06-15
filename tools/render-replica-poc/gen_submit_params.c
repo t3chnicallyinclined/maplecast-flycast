@@ -86,7 +86,22 @@ static void finalize_body(Sh4Ctx *c, PolyParam *p, u32 palbank){
     p->pcw = (p->pcw & 0xF8FCFFFFu) | 0x02000000u;        /* loc_8C1246FC / loc_8C124720 */
     p->isp = (p->isp & 0x1FFFFFFFu) | (4u << 29);         /* loc_8C124700 / DepthMode 4  */
     p->tsp = (p->tsp & 0x03278FFFu) | tsp_or;             /* loc_8C124704 / loc_8c1246b0 */
-    p->tcw = (p->tcw & 0xF81FFFFFu) | ((palbank & 0x3Fu) << 21); /* loc_8c124a82 PalSelect */
+    /* TCW PalSelect (loc_8c124a82): the engine OR's a DYNAMICALLY-ALLOCATED palette bank
+     * (r12 = the loc_8c124bd8 palette-alloc result), NOT the static slot formula
+     * 16*(char_pair+1)+8*player_side. The static palbank can only ever produce EVEN base
+     * banks (16/24/32...), but the engine's ground-truth TA uses banks that include the
+     * +1 sibling (e.g. 17, 25 alongside 16, 24) — confirmed by the A/B param diff
+     * (tools/gsta_ta_diff.py: REAL pal {16,17,24,25} vs GSTA-with-static-override {16,24}).
+     * Forcing the static even bank is exactly the "Cable all-blue" bug: Cable's real palette
+     * lives in an odd bank but the static override drops it to the even sibling -> wrong skin.
+     * The RESIDENT rectab template (read from the wire'd RAM) ALREADY carries the engine's
+     * own per-tile PalSelect, so the faithful behavior is to PRESERVE it -- the inject is the
+     * identity when correct, and here it would corrupt. Only inject when caller passes a
+     * non-zero palbank AND the resident pal is empty (defensive; normally never). */
+    u32 resident_pal = (p->tcw >> 21) & 0x3Fu;
+    if (resident_pal == 0 && (palbank & 0x3Fu) != 0)
+        p->tcw = (p->tcw & 0xF81FFFFFu) | ((palbank & 0x3Fu) << 21);
+    /* else: keep the resident (engine-baked) PalSelect verbatim */
 }
 
 /* Public: compute the engine's deposited poly-param for body tile k of an object.

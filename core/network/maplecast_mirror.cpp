@@ -3997,6 +3997,33 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 		}
 	}
 
+	// Multi-frame keyed TA dump for the A/B param diff vs the mirror client (7200).
+	// MAPLECAST_DUMP_GSTA_TA_DIR=<dir> writes <dir>/frame_<vframe>.bin every frame so a
+	// single parser can align GSTA-emitted TA to the gold-standard mirror-client TA.
+	{
+		static bool _gdInit = false;
+		static std::string _gdDir;
+		if (!_gdInit) {
+			const char* d = std::getenv("MAPLECAST_DUMP_GSTA_TA_DIR");
+			if (d && *d) {
+				_gdDir = d;
+#ifdef _WIN32
+				_mkdir(_gdDir.c_str());
+#else
+				mkdir(_gdDir.c_str(), 0755);
+#endif
+				printf("[GSTA] keyed TA dump -> %s/frame_NNNNNN.bin (by vframe)\n", _gdDir.c_str());
+			}
+			_gdInit = true;
+		}
+		if (!_gdDir.empty() && !fr.ta.empty()) {
+			char path[512];
+			snprintf(path, sizeof(path), "%s/frame_%06u.bin", _gdDir.c_str(), vframe);
+			FILE* f = fopen(path, "wb");
+			if (f) { fwrite(fr.ta.data(), 1, fr.ta.size(), f); fclose(f); }
+		}
+	}
+
 	{
 		std::lock_guard<std::mutex> lk(_gstaMtx);
 		_gstaFrame = std::move(fr);
