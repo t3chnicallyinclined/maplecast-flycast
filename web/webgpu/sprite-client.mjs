@@ -1669,7 +1669,8 @@ export class SpriteClient {
         // emitter geometry so facing is DERIVED from numbers, not eyeballed.
         const _dumpOn = (typeof window !== 'undefined' && window._emitDumpReq && !owner.fx && owner.zBase === 0);
         const _dumpParts = _dumpOn ? [] : null;
-        for (const r of recs) {
+        for (let _ri = 0; _ri < recs.length; _ri++) {
+          const r = recs[_ri];
           const part = c.parts[r.part] || c.parts[String(r.part)];
           if (!part) { skipSel++; continue; }            // sel pixels not captured yet
           // FACING — ROM-DERIVED single sense (2026-06-11). The byte→direction comes from
@@ -1811,9 +1812,14 @@ export class SpriteClient {
           // lays the cape (separate object, owner cid, its OWN node+0xE8) behind the body in
           // the SAME cid group — replacing the type-based zBase guess. Falls back to the old
           // zBase*100 ordering only when no engine z was read (owner.engZ undefined).
+          // intra-assembly depth (re_kb finding:per_part_depth_zinvW): the engine bumps W per
+          // submitted part so Z=1/W DECREASES in record order → record 0 is FRONT-most, last is
+          // REAR-most. We sort ASCENDING + paint last-on-top, so record 0 needs the HIGHEST
+          // tiebreak (drawn last = on top). (Fixes capes/back-layers drawn over the body.)
+          const partZ = recs.length - _ri;                        // record 0 highest → front; last → behind
           const z  = (owner.engZ != null)
-                   ? (owner.engZ * 1e6 + (r.z || 0))               // engine 1/W (scaled) + intra-asm tiebreak
-                   : ((owner.zBase || 0) * 100 + (r.z || 0));       // legacy type-based fallback
+                   ? (owner.engZ * 1e6 + partZ)                    // engine 1/W (scaled) + intra-asm rank
+                   : ((owner.zBase || 0) * 100 + partZ);           // legacy type-based fallback
           // SHADER V-FLIP: the atlas stores parts bottom-up, so correct the texture V
           // for EVERY part (emitFlipY, default ON) XOR the per-record geometry Y-mirror
           // (flipY, the 0x8000 bit). The geometry reflection above (line ~1561) already
