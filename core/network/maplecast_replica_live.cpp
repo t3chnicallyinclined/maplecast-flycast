@@ -27,6 +27,7 @@
 */
 #include "maplecast_replica_live.h"
 #include "maplecast_compress.h"          // MirrorCompressor / ZCST envelope
+#include "maplecast_oracle_hook.h"       // HudQuad + mc_oracle_hudQuads (HUDQ tail)
 
 #include "hw/sh4/sh4_mem.h"              // addrspace::read*, mem_b, RAM_SIZE
 #include "hw/pvr/pvr_mem.h"              // vram, VRAM_SIZE
@@ -98,9 +99,49 @@ static std::vector<GfxBase> _gfxShipped;               // bases+sigs already sen
 static std::atomic<bool>    _gfxResendAll{false};      // set on new-connect: re-ship all GFX once
 static inline u32 rd32(u32 g);                         // fwd-decl (defined below) — used by gfxSig
 static inline u8  rd8 (u32 g);
-static u32 gfxSig(u32 base, u32 len)                   // fold the (now real-size) region to a u32 sig
+
+// gfxSig — content signature over a shipped GFX region. The signature drives the on-change
+// re-ship: if the sig changed since last shipped, the region (and its self-modified dispatch
+// head) is re-sent. THE STORM-SCRAMBLE ROOT-CAUSE FIX (re_kb 32
+// finding:replica_storm_scramble_is_static_gfx2_self_modify_plus_torn_capture):
+//
+//   The engine SELF-MODIFIES the GFX2 cell-record DISPATCH TABLE in place per animation
+//   sub-frame — it rewrites GFX2[(sid&0x7FFF)*4] (one u32) to point at the current pose's
+//   cell records (Storm body sid 0x42: disc 0x1b04 -> live 0x1b44, the same region byte
+//   trueBase+0x108 / pageBase-rel 0x788). The OLD sparse-64 fold sampled only every 64th
+//   byte (rd32 at b=0,64,128,...) and PROVABLY never read 0x788 (1928 = 64*30.125, falls
+//   between samples) — so a single-u32 dispatch mutation never changed the sig and GFX2 was
+//   frozen at the disc default 0x1b04 -> the client walker (loc_8c0344d4: r11 = GFX2 +
+//   GFX2[(sid&0x7FFF)*4]) read the STALE entry -> wrong part list / sels -> scramble.
+//
+//   FIX: for GFX2, DENSELY fold the WHOLE dispatch-table HEAD (the front n*4 bytes, where
+//   entry[0]==n*4 and n is the selector count — ~1174 entries => ~4.7KB) so EVERY u32
+//   dispatch entry contributes to the sig. Any per-sub-frame self-modify now flips the sig
+//   and re-ships the (small, ~4.7KB) GFX2 region. The body LZSS pixels never self-modify, so
+//   the rest of GFX2 / all of GFX1 keep the cheap sparse-64 fold.
+static u32 gfxSig(u32 base, u32 len, bool isGfx2 = false)
 {
 	u32 h = 2166136261u;
+	if (isGfx2) {
+		// DENSE dispatch-head fold: GFX2 true base = node+0x160 (NOT necessarily == base, which is
+		// page-aligned-DOWN). Read entry[0] at the TRUE base to get n; fold every u32 of the head.
+		// The dispatch head can sit 0x8C0 into the page (page-aligned base is < true base); we don't
+		// know the true base here, so locate it: the descriptor uses trueBase = original gfxPtr, and
+		// (trueBase - base) is the in-page offset. Recover it by scanning forward from base for the
+		// first valid table-head (entry0 == n*4, n in 1..20000) within the first 0x1000 bytes.
+		u32 trueBase = base, n = 0;
+		for (u32 d = 0; d < 0x1000u; d += 4) {
+			u32 e0 = rd32(base + d), nn = e0 >> 2;
+			if (nn != 0 && nn <= 20000u && e0 == (nn << 2)) { trueBase = base + d; n = nn; break; }
+		}
+		if (n) {
+			u32 headLen = n * 4u;                     // the dispatch table head (every selector entry)
+			for (u32 b = 0; b < headLen; b += 4) {    // DENSE: every u32 dispatch entry (catches the
+				h ^= rd32(trueBase + b); h *= 16777619u;  // per-sub-frame self-modify, e.g. 0x108)
+			}
+		}
+		// Plus the sparse-64 fold across the rest (LZSS-stored cell records change only on re-load).
+	}
 	for (u32 b = 0; b < len; b += 64) {               // sparse sample (every 64B) across the FULL
 		h ^= rd32(base + b); h *= 16777619u;          // region — catches a content change / re-load
 	}
@@ -225,6 +266,7 @@ static bool                 _compInit = false;
 // MCRR / FRMx magics (LE on the wire) — see the format doc.
 static constexpr u32 MCRR_MAGIC = 0x5252434Du;     // "MCRR"
 static constexpr u32 FRMX_MAGIC = 0x784D5246u;     // "FRMx"
+static constexpr u32 HUDQ_MAGIC = 0x48554451u;     // "HUDQ" (HUD-TA tail magic, LE)
 
 // In-match flag + video-frame counter (same gate the Oracle uses).
 static constexpr u32 IN_MATCH_ADDR = 0x8C289624;
@@ -266,7 +308,20 @@ static void buildTables()
 	// still inside page 649). Per-char health(+0x420)/red_health(+0x424)/char_id(+0x001) already
 	// ride the "char_str" region below. (re_kb finding:replica_live_hud.)
 	D(0x8C289620, 0x60,        "gstate");        // in_match/round/timer/stage_id + meter/combo (HUD)
-	D(0x8C268340, 6u*0x5A4u,   "char_str");      // P1C1..P2C3 char structs
+	// BATTLE STATE (work.asm:9 "8c2895F0 Battle State"): the round-flow state machine — round
+	// intro / fight / KO / win-screen / continue transitions. Oracle-confirmed live: 0x8C2895F0
+	// reads 0x04 (in-round) during a live match, and the slot-count array just below (0x8C2895E0)
+	// cycles 0x03->0x04 across the transition. Window 0x8C2895C0 + 0x60 = 0x2895C0..0x28961F
+	// covers Battle State 0x2895F0 with headroom (and butts up against the gstate region at
+	// 0x289620). Lets the client gate HUD/intro/KO overlays on the real round phase instead of
+	// guessing from health/timer. +0x60 bytes/frame, zstd-trivial. (re_kb finding:replica_live_render_field_gaps.)
+	D(0x8C2895C0, 0x60,        "battle");        // Battle State 0x8C2895F0 (round-flow phases)
+	// PER-SIDE WIN COUNT is char+0x540 num_wins (pl_mem.asm:301: num_wins 0x540 / num_lose 0x541 /
+	// num_draw 0x542 / handicap_level 0x543, all byte). 0x540 < stride 0x5A4, so it ALREADY rides
+	// the char_str region below — no extra wire. Client draws win stars from char[slot]+0x540.
+	// (Oracle-confirmed live: P1C1+0x540=0 wins, +0x543=2 handicap — the 0x02 there is handicap,
+	// NOT a win.) (re_kb finding:replica_live_render_field_gaps.)
+	D(0x8C268340, 6u*0x5A4u,   "char_str");      // P1C1..P2C3 char structs (incl +0x540 num_wins)
 	// SATELLITE OBJECT POOL (capes/projectiles/drones/effects/extra-limbs) — the
 	// out-of-char-struct BODY nodes the slot-walk loc_8c0308c2 also renders via
 	// render_object_full (loc_8c03093c) + the body walker loc_8c0344d4. Without these
@@ -289,7 +344,15 @@ static void buildTables()
 	D(0x8C2D6AD8, 0xC0,        "cam_mat");       // camera matrices M2/M1
 	D(0x8C26A510, 0x40,        "camZ");          // camera-Z scale block
 	D(0x8C26823C, 0x04,        "ggp_ptr");       // GameGlobalPointer
-	D(0x8C268240, 0x40,        "ggp_acc");       // *(GGP) global-accum struct
+	// ggp_acc: the *(GameGlobalPointer) global-accum struct. EXTENDED 0x40 -> 0x60 to reach
+	// the "Game mode" block at 0x8C26828C (work.asm:20-24: char-unlocks 0x270 / color-unlocks
+	// 0x278 / Game mode 0x28C / stage-unlocks 0x291 / text-name-flag 0x298). The Game-mode byte
+	// 0x8C26828C is the TIME-MODE / match-mode selector — needed so the client renders the HUD
+	// timer as "infinity" in an infinite-time match instead of the held-99 heuristic (Oracle-
+	// confirmed live: in_match=1 yet timer 0x8C289630 frozen at 0x63=99, both chars HP=144,
+	// = an infinite-time/idle match). 0x40 ended at 0x28627F (short of 0x28C); 0x60 reaches
+	// 0x29F. +0x20 bytes/frame, zstd-trivial (stable). (re_kb finding:replica_live_render_field_gaps.)
+	D(0x8C268240, 0x60,        "ggp_acc");       // *(GGP) global-accum struct + Game mode @0x28C
 	D(0x8C26A974, 0x100,       "rparam");        // per-char render-param table
 	D(0x8C2DAD30, 0x40,        "tab_ptr");       // rectab/idxtab pointer pair window
 	D(0x8C2AA4C0, 0x10,        "rmode");         // global render-mode word
@@ -541,7 +604,9 @@ static void collectFreshGfx(std::vector<GfxToShip>& out)
 				if (!isRam(gfx[k])) continue;
 				u32 pbase, plen;
 				gfxShipDescriptor(gfx[k], isG2[k], pbase, plen); // REAL extent, page-aligned base+len
-				u32 sig = gfxSig(pbase, plen);                   // sig over the FULL region
+				// GFX2: DENSE dispatch-head fold so a per-sub-frame SELF-MODIFY of GFX2[sid*4]
+				// (the Storm-scramble root cause, re_kb 32) flips the sig and re-ships the region.
+				u32 sig = gfxSig(pbase, plen, isG2[k]);          // sig over the FULL region (+dense head)
 				if (gfxAlreadyShipped(pbase, sig)) continue;     // already fresh on the client
 				bool dup = false;
 				for (auto& g : out) if (g.base == pbase) { dup = true; break; }
@@ -587,7 +652,22 @@ static void captureFrame(u32 vframe)
 	// pvrPalLen is ALWAYS present (0 in steady state). An older client that stops parsing after the
 	// GFX tail simply ignores these trailing bytes; the updated client refreshes this.pvr from them.
 	const size_t palHdr  = 4;                                  // u32 pvrPalLen
-	const size_t total = hdr + _dynTotal + tailHdr + gfxBytes + palHdr + (size_t)pvrPalLen;
+
+	// HUDQ TAIL (third variable tail, strict append AFTER the palette tail): the engine's
+	// REAL HUD/composite quads captured this frame from the surviving TA pass (maplecast_oracle_hook
+	// collectHudQuads). u32 magic + u32 nHud + nHud × 96-byte HudQuad. The render-replica client
+	// draws these instead of the hand-coded HUD reconstruction → pixel-perfect. Present ONLY when
+	// MAPLECAST_HUD_TA is armed AND the surviving pass yielded HUD quads (else absent → older clients
+	// and HUD-off runs are byte-identical to before). Magic-tagged so the client can skip it safely.
+	int nHud = 0;
+	const maplecast_oracle_hook::HudQuad* hudQuads =
+		maplecast_oracle_hook::mc_hudTaEnabled ? maplecast_oracle_hook::mc_oracle_hudQuads(&nHud) : nullptr;
+	if (!hudQuads) nHud = 0;
+	static_assert(sizeof(maplecast_oracle_hook::HudQuad) == 96, "HudQuad must be 96 bytes (wire interface)");
+	const size_t hudHdr   = nHud ? 8u : 0u;                   // u32 magic + u32 nHud (only when present)
+	const size_t hudBytes = (size_t)nHud * sizeof(maplecast_oracle_hook::HudQuad);
+
+	const size_t total = hdr + _dynTotal + tailHdr + gfxBytes + palHdr + (size_t)pvrPalLen + hudHdr + hudBytes;
 
 	int which = _dynWhich ^ 1;          // write the other buffer
 	std::vector<uint8_t>& buf = _dynBuf[which];
@@ -632,6 +712,15 @@ static void captureFrame(u32 vframe)
 	memcpy(&buf[off], &pvrPalLen, 4); off += 4;
 	if (pvrPalLen) { memcpy(&buf[off], pvr_regs, pvrPalLen); off += pvrPalLen; }
 
+	// ---- HUDQ TAIL: u32 magic, u32 nHud, then nHud × 96-byte HudQuad (the engine's REAL
+	// HUD quads this frame). Strictly AFTER the palette tail. Absent when nHud==0 so the
+	// steady HUD-off path is byte-identical. ----
+	if (nHud) {
+		memcpy(&buf[off], &HUDQ_MAGIC, 4); off += 4;
+		u32 nh = (u32)nHud; memcpy(&buf[off], &nh, 4); off += 4;
+		memcpy(&buf[off], hudQuads, hudBytes); off += hudBytes;
+	}
+
 	// ---- publish to the WS thread (drop-old: overwrite any undrained frame) ----
 	{
 		std::lock_guard<std::mutex> lk(_pubMutex);
@@ -672,7 +761,16 @@ void onRenderFrame(void* /*ctxv*/)
 	if (!_tablesBuilt) buildTables();
 	if (!_prefixReady.load(std::memory_order_acquire)) {
 		std::lock_guard<std::mutex> lk(_prefixMutex);
-		if (!_prefixReady.load(std::memory_order_acquire)) buildPrefixLocked();
+		if (!_prefixReady.load(std::memory_order_acquire)) {
+			buildPrefixLocked();
+			// CAPTURE ATOMICITY (re_kb 32: the torn-capture / one-frame cat-3 artifact). The static
+			// prefix GFX2 snapshot above was read at THIS vframe; force this same frame's captureFrame
+			// to re-ship every active body's GFX2/GFX1 as a fresh dynamic tail so the GFX2 dispatch
+			// table the walker reads is INTERNALLY CONSISTENT with the dynamic char/slot state of the
+			// SAME vframe. (_gfxShipped is already empty on first build, but make the contract explicit
+			// so the dispatch head can never lag the dynamic state by a frame.)
+			_gfxShipped.clear();
+		}
 	}
 
 	const u32 vframe = rd32(VFRAME_ADDR);

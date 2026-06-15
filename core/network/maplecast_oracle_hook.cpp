@@ -944,6 +944,15 @@ static int  s_nquad = 0;
 static ScreenQuad s_screen[MAX_SCREEN]; // per-frame SCREEN quads (ta_parse)
 static int  s_nscreen = 0;
 
+// HUD-TA capture (MAPLECAST_HUD_TA) — the surviving HUD/composite pass's real quads.
+// MAX_HUD sized from the live QDIAG inventory: the busiest in-match HUD pass had 82
+// raw polys / 78 kept; 256 is generous headroom for supers/tag-bar churn. The 96-byte
+// HudQuad is published for the live-wire HUDQ tail (maplecast_replica_live captureFrame).
+bool mc_hudTaEnabled = (getenv("MAPLECAST_HUD_TA") != nullptr);
+static const int MAX_HUD = 256;
+static HudQuad s_hud[MAX_HUD];
+static int     s_nhud = 0;
+
 // CHARQ accessor snapshot — published at the END of frameFlush (before the per-frame
 // statics reset) so the CHARQ emit block in serverPublish can read this frame's
 // object identities + the kept-sprite-quad -> object map. s_screen index == the
@@ -2952,6 +2961,145 @@ static void attributeScreenQuads()
 	}
 }
 
+// ---- HUD-TA collector (MAPLECAST_HUD_TA, READ-ONLY) ------------------------
+// Sibling to collectScreenQuads, but for the SURVIVING (HUD/composite) pass that
+// reaches serverPublish/the replica capture. It keeps the engine's REAL HUD bars
+// (life / meter / timer / portraits / names / tag bars) so the render-replica
+// client can draw them pixel-perfect instead of a hand-coded reconstruction.
+//
+// DIFFERENCES vs collectScreenQuads:
+//   * NO cy<=20 top-strip cull, NO textured-only gate (HUD bars are small quads;
+//     the flat-fill bars are still textured here but we don't depend on it).
+//   * Discriminator KEEPS small/medium HUD polys and DROPS the oversized full-screen
+//     composite/backdrop + fmt==7. Derived from the live QDIAG inventory (78 kept /
+//     82 raw; the 4 dropped span w 13003..14.5M px). Env-overridable thresholds so a
+//     QDIAG re-run can tune WITHOUT a rebuild.
+//   * Captures the 4 SUBMIT-ORDER corners (x[4],y[4]) + their UVs + per-vertex base
+//     color (col[4]) + pcw/isp/tsp/tcw verbatim — NOT a bbox (HUD bars are angled
+//     parallelograms). The first 4 strip vertices (submit order) are the quad corners.
+//
+// Thresholds (env-overridable; defaults from the QDIAG inventory):
+//   MAPLECAST_HUD_TA_MAXW   (320)  max bbox width  to keep
+//   MAPLECAST_HUD_TA_MAXH   (200)  max bbox height to keep
+//   MAPLECAST_HUD_TA_TOPY   (120)  keep polys with center y < TOPY (top HUD band)
+//   MAPLECAST_HUD_TA_BOTY   (420)  keep polys with center y >= BOTY (bottom tag bars)
+static void collectHudQuads(rend_context& rc)
+{
+	s_nhud = 0;
+	const u32 nverts = (u32)rc.verts.size();
+	static const float HUD_MAXW = []{ const char* e=getenv("MAPLECAST_HUD_TA_MAXW"); return e?(float)atof(e):320.f; }();
+	static const float HUD_MAXH = []{ const char* e=getenv("MAPLECAST_HUD_TA_MAXH"); return e?(float)atof(e):200.f; }();
+	static const float HUD_TOPY = []{ const char* e=getenv("MAPLECAST_HUD_TA_TOPY"); return e?(float)atof(e):120.f; }();
+	static const float HUD_BOTY = []{ const char* e=getenv("MAPLECAST_HUD_TA_BOTY"); return e?(float)atof(e):420.f; }();
+
+	// QDIAG HUD dump — pre-filter inventory of EVERY parsed HUD-pass poly +the cull flags,
+	// to /dev/shm/mc_hud_qdiag.log. Armed by MAPLECAST_QDIAG (same gate as the body QDIAG).
+	static int   s_hq = getenv("MAPLECAST_QDIAG") ? 1 : 0;
+	static FILE* s_hf = nullptr;
+	static int   s_hqPasses = 0;
+	static const int HQ_MAX_PASSES = 8;
+	if (s_hq == 1) { s_hf = fopen("/dev/shm/mc_hud_qdiag.log", "w"); s_hq = s_hf ? 2 : 0; }
+	if (s_hf && s_hq == 2)
+		fprintf(s_hf, "=== HUD PASS %d  op=%zu pt=%zu tr=%zu ===\n", s_hqPasses,
+		        rc.global_param_op.size(), rc.global_param_pt.size(), rc.global_param_tr.size());
+
+	auto collect = [&](std::vector<PolyParam>& lst, int listType) {
+		for (PolyParam& pp : lst) {
+			if (s_nhud >= MAX_HUD) return;
+			if (pp.count < 3) continue;
+			u32 pcw = pp.pcw.full, tcw = pp.tcw.full, tsp = pp.tsp.full;
+
+			// Gather indices into rc.verts for THIS poly, in submit order, handling
+			// BOTH the rc.idx-indexed case (op/pt + non-autosort tr) and the autosort
+			// rc.verts-direct case (same dual walk collectScreenQuads uses).
+			u32 vidx[4]; int nv = 0;
+			float mnX=1e9f,mxX=-1e9f,mnY=1e9f,mxY=-1e9f;
+			int seen = 0;
+			// ParaType-5 (PVR Sprite, pcw bits29-31==5) — the HUD character-NAME glyphs. For these
+			// the rc.idx path is WRONG: in an autosort-translucent pass sortTriangles (ta_util.cpp)
+			// leaves pp.first as a VERTEX offset but appends DEPTH-SORTED indices to rc.idx starting
+			// at idxSize, so rc.idx[pp.first..] points at arbitrary sorted triangles from OTHER polys
+			// -> the captured 4 verts merge two adjacent glyphs / collapse. Sprite verts are the 4
+			// CONTIGUOUS expanded verts at rc.verts[pp.first..+4] (AppendSpriteVertexA/B), so read
+			// them DIRECTLY. (Fixes the HUD name "diagonal streak" garble client-side, re_kb 36f.)
+			const bool isSpritePara = ((pcw >> 29) & 7) == 5;
+			if (!isSpritePara) {   // primary: pp.first/.count index rc.idx (op/pt + non-autosort tr)
+				u32 iend = pp.first + pp.count; if (iend > rc.idx.size()) iend = (u32)rc.idx.size();
+				for (u32 k = pp.first; k < iend; k++) {
+					u32 vi = rc.idx[k]; if (vi >= nverts) continue;
+					const Vertex& vt = rc.verts[vi];
+					if (vt.x<mnX)mnX=vt.x; if (vt.x>mxX)mxX=vt.x;
+					if (vt.y<mnY)mnY=vt.y; if (vt.y>mxY)mxY=vt.y;
+					if (nv < 4) vidx[nv++] = vi;
+					seen++;
+				}
+			}
+			if (seen == 0) {   // sprites (forced) + autosort tr: pp.first/.count index rc.verts directly
+				u32 vend = pp.first + pp.count; if (vend > nverts) vend = nverts;
+				for (u32 v = pp.first; v < vend; v++) {
+					const Vertex& vt = rc.verts[v];
+					if (std::isnan(vt.x) || fabsf(vt.x) > 1e25f || std::isnan(vt.y) || fabsf(vt.y) > 1e25f) continue;
+					if (vt.x<mnX)mnX=vt.x; if (vt.x>mxX)mxX=vt.x;
+					if (vt.y<mnY)mnY=vt.y; if (vt.y>mxY)mxY=vt.y;
+					if (nv < 4) vidx[nv++] = v;
+					seen++;
+				}
+			}
+			if (seen < 3 || nv < 3) continue;
+			float w = mxX-mnX, h = mxY-mnY, cy = (mnY+mxY)*0.5f;
+			int fmt = (int)((tcw>>27)&7);
+			bool band     = (cy < HUD_TOPY) || (cy >= HUD_BOTY);
+			bool oversized = (w > HUD_MAXW || h > HUD_MAXH);
+			bool keep = band && !oversized && fmt != 7;
+			if (s_hf && s_hq == 2) {
+				static const char* LN[3] = {"op","pt","tr"};
+				fprintf(s_hf, "%s cy=%.1f w=%.1f h=%.1f tcw=%08X tsp=%08X pcw=%08X fmt=%d "
+				              "verts=%u band=%d oversized=%d -> %s\n",
+				        LN[listType], cy, w, h, tcw, tsp, pcw, fmt, pp.count,
+				        (int)band, (int)oversized, keep ? "KEEP" : "drop");
+			}
+			if (!keep) continue;
+
+			HudQuad& q = s_hud[s_nhud++];
+			// 4 SUBMIT-ORDER corners (NOT bbox). A 3-vert poly closes the 4th to the 3rd.
+			for (int c = 0; c < 4; c++) {
+				const Vertex& vt = rc.verts[vidx[c < nv ? c : nv - 1]];
+				q.x[c] = vt.x; q.y[c] = vt.y;
+				q.u[c] = vt.u; q.v[c] = vt.v;
+				// Repack flycast's per-channel col[] (col[0]=R,1=G,2=B,3=A — see
+				// ta_vtx.cpp vert_packed_color_) back to the engine's ARGB8888 word.
+				q.col[c] = ((u32)vt.col[3] << 24) | ((u32)vt.col[0] << 16)
+				         | ((u32)vt.col[1] <<  8) |  (u32)vt.col[2];
+			}
+			q.pcw = pcw; q.isp = pp.isp.full; q.tsp = tsp; q.tcw = tcw;
+		}
+	};
+	collect(rc.global_param_op, 0);
+	collect(rc.global_param_pt, 1);
+	collect(rc.global_param_tr, 2);
+
+	if (s_hf && s_hq == 2) {
+		fprintf(s_hf, "--- HUD pass %d kept=%d ---\n", s_hqPasses, s_nhud);
+		if (++s_hqPasses >= HQ_MAX_PASSES) {
+			fclose(s_hf); s_hf = nullptr; s_hq = 3;
+			fprintf(stderr, "[HUD-QDIAG] %d-pass HUD dump -> /dev/shm/mc_hud_qdiag.log\n", HQ_MAX_PASSES);
+		}
+	}
+}
+
+const HudQuad* mc_oracle_hudQuads(int* outCount)
+{
+	if (outCount) *outCount = s_nhud;
+	return s_nhud ? s_hud : nullptr;
+}
+
+void mc_oracle_collectHud(void* rcv)
+{
+	if (!mc_hudTaEnabled || rcv == nullptr) { s_nhud = 0; return; }
+	if (addrspace::read8(0x8C289624) == 0) { s_nhud = 0; return; }   // in-match only
+	collectHudQuads(*(rend_context*)rcv);
+}
+
 // ---- PHASE-0 PROBE (READ-ONLY) ---------------------------------------------
 // Confirms R1 (the per-object quad-COUNT table is populated EVERY in-match frame,
 // refuting the old "fires once at frame 2568" note) and gathers data for R6 (where
@@ -3146,6 +3294,21 @@ void mc_oracle_charPassCapture(void* ctxv)
 			mc_timerLatch[i]    = (uint16_t)addrspace::read16(CHAR_BASE[i] + 0x142);
 			mc_sidLatchValid[i] = 1;
 		}
+	}
+
+	// HUD-TA capture (gated MAPLECAST_HUD_TA, READ-ONLY). Collect the surviving
+	// HUD/composite pass's REAL quads into s_hud[] BEFORE onRenderFrame so the live
+	// HUDQ tail captureFrame builds below ships THIS pass's HUD (same charPassCapture
+	// call → same video frame; the HUD pass is the surviving/last pass, and the
+	// replica capture uses drop-old last-pass-wins, so the two stay aligned). We
+	// ta_parse the ctx ourselves (read-only, idempotent, same call norend makes) so
+	// ctx->rend is populated even when CHARQ isn't driving the flush. Cheap: only when
+	// armed + in-match; a no-op otherwise. collectHudQuads keys nothing on which pass —
+	// the character pass simply yields ~0 kept HUD quads, the HUD pass yields ~78.
+	if (mc_hudTaEnabled && ctxv && addrspace::read8(0x8C289624) != 0) {
+		TA_context* hctx = (TA_context*)ctxv;
+		ta_parse(hctx, true);
+		mc_oracle_collectHud(&hctx->rend);
 	}
 
 	// RENDER-REPLICA LIVE (Phase 4c, gated MAPLECAST_REPLICA_LIVE, READ-ONLY,

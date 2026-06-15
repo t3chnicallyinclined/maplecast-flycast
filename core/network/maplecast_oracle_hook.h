@@ -195,4 +195,49 @@ const CharqEmitQuad* mc_charqEmit_objQuads(int objIdx, int* outN);
 // next frame. MUST be called after a successful beginFrame.
 void mc_charqEmit_endFrame();
 
+// ===========================================================================
+// HUD-TA capture (MAPLECAST_HUD_TA) — the engine's REAL HUD/composite quads.
+//
+// The SURVIVING STARTRENDER pass that reaches serverPublish on headless IS the
+// MVC2 HUD/composite pass (life bars / meters / timer / portraits / names / tag
+// bars). collectScreenQuads DROPS the HUD (its cy<=20 strip + the body-pass
+// discriminator), so the HUD needs its own collector. collectHudQuads runs on
+// that surviving pass's already-parsed ctx->rend (zero extra ta_parse), keeps the
+// small/medium HUD polys, drops the oversized composite/backdrop + fmt==7, and
+// snapshots s_hud[] for the live-wire HUDQ tail. The render-replica client draws
+// these instead of the hand-coded HUD reconstruction → pixel-perfect.
+//
+// Per-poly inventory (the QDIAG HUD-pass dump on a live in-match prod frame, see
+// finding:replica_live_hud_real_ta): the surviving pass had 82 polys; 78 kept by
+// the discriminator (cy<120 || cy>=420; w<320; h<200; fmt!=7); the 4 dropped are
+// the full-screen composite/backdrop (w 13003..14.5M px). All HUD polys are
+// textured, para type 4, Offset=1, Col_Type 1/2/3 (INTENSITY, not packed ARGB) —
+// so col[] holds the engine's verbatim per-vertex BASE color word (the client
+// decodes it via the shipped pcw Col_Type; for MVC2 HUD it is the float
+// intensity 0x3f800000 = 1.0, the bar tint comes from the FONT/glyph texture).
+//
+// Gated MAPLECAST_HUD_TA + in-match (0x8C289624). READ-ONLY; no-op when off.
+extern bool mc_hudTaEnabled;
+
+// One HUD screen-space quad as read from the parsed TA poly. Corners are in
+// SUBMIT order (HUD bars are angled parallelograms — NOT a bbox). 96 bytes; this
+// is the wire interface the render-replica client (sprite-render expert) consumes.
+struct HudQuad {
+	float x[4], y[4];     // 4 screen corners, submit order
+	float u[4], v[4];     // 4 UVs (matching corner order)
+	u32   col[4];         // 4 per-vertex base color words, verbatim (Col_Type per pcw)
+	u32   pcw, isp, tsp, tcw;   // PVR control words verbatim
+};
+
+// Returns this frame's HUD quads (count via out param). Pointer is the internal
+// static, valid until the next collectHudQuads. NULL/0 when HUD-TA disabled or the
+// surviving pass had no HUD this frame. Read by maplecast_replica_live captureFrame.
+const HudQuad* mc_oracle_hudQuads(int* outCount);
+
+// Collect HUD quads from a just-parsed rend_context (the surviving HUD/composite
+// pass). Called from mc_oracle_charPassCapture BEFORE the replica capture so the
+// HUDQ tail ships THIS pass's HUD. `rc` is forward-declared void* (cast to
+// rend_context& in the .cpp). No-op when MAPLECAST_HUD_TA is unset.
+void mc_oracle_collectHud(void* rc);
+
 }
