@@ -36,6 +36,7 @@
 #include "sh4ctx.h"
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ---- Phase-1 pieces (reused verbatim) ---- */
@@ -249,7 +250,14 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
         q->gfx1=node_gfx1;            /* per-quad owning-body GFX1 base (decode with sel) */
         q->facing=node_facing;        /* owning body facing (carve storage-col disambiguation) */
         q->z=oz;                      /* per-object depth (node+0xE8 = 1/w) for correct sorting */
-        /* texU mirror = facing XOR per-part 0x4000 (loc_8c0346c4 neg r8 gate). One bit. */
+        /* texU mirror = facing XOR per-part 0x4000 (loc_8c0346c4 neg r8 gate). One bit.
+         * MEASURED (A/B vs real :7200 TA, slot-0 deterministic): this facing-XOR formula
+         * mismatches the real engine U on only 1.46% of body tiles (599/41163), whereas
+         * flip4000-ALONE mismatches 35.04% (4551/12989) — the engine DOES fold facing into
+         * the texel-U direction (the screen-X span and texU mirror are BOTH facing-coupled,
+         * in lockstep). flip4000-alone was DISPROVEN by the diff despite the loc_8c0347bc
+         * `tst r8 -> neg r5` disasm reading; the diff wins. The 1.46% residual is a separate,
+         * smaller per-pose effect (pal-16 / one body), NOT the gross facing rule. */
         q->mirror = node_facing ^ (g_cap[k].flip4000 & 1u);
         /* SCREEN-X SPAN DIRECTION is set by the OWNING BODY FACING (node+0x110), in
          * lockstep with the walker's position pen and the texU mirror. The captured
