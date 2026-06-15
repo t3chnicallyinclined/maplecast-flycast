@@ -3015,7 +3015,15 @@ static void collectHudQuads(rend_context& rc)
 			u32 vidx[4]; int nv = 0;
 			float mnX=1e9f,mxX=-1e9f,mnY=1e9f,mxY=-1e9f;
 			int seen = 0;
-			{   // primary: pp.first/.count index rc.idx
+			// ParaType-5 (PVR Sprite, pcw bits29-31==5) — the HUD character-NAME glyphs. For these
+			// the rc.idx path is WRONG: in an autosort-translucent pass sortTriangles (ta_util.cpp)
+			// leaves pp.first as a VERTEX offset but appends DEPTH-SORTED indices to rc.idx starting
+			// at idxSize, so rc.idx[pp.first..] points at arbitrary sorted triangles from OTHER polys
+			// -> the captured 4 verts merge two adjacent glyphs / collapse. Sprite verts are the 4
+			// CONTIGUOUS expanded verts at rc.verts[pp.first..+4] (AppendSpriteVertexA/B), so read
+			// them DIRECTLY. (Fixes the HUD name "diagonal streak" garble client-side, re_kb 36f.)
+			const bool isSpritePara = ((pcw >> 29) & 7) == 5;
+			if (!isSpritePara) {   // primary: pp.first/.count index rc.idx (op/pt + non-autosort tr)
 				u32 iend = pp.first + pp.count; if (iend > rc.idx.size()) iend = (u32)rc.idx.size();
 				for (u32 k = pp.first; k < iend; k++) {
 					u32 vi = rc.idx[k]; if (vi >= nverts) continue;
@@ -3026,7 +3034,7 @@ static void collectHudQuads(rend_context& rc)
 					seen++;
 				}
 			}
-			if (seen == 0) {   // autosort tr: pp.first/.count index rc.verts directly
+			if (seen == 0) {   // sprites (forced) + autosort tr: pp.first/.count index rc.verts directly
 				u32 vend = pp.first + pp.count; if (vend > nverts) vend = nverts;
 				for (u32 v = pp.first; v < vend; v++) {
 					const Vertex& vt = rc.verts[v];

@@ -177,8 +177,11 @@ _ryu_offline/
 # probe quads, PPMs, gate truth/ours/diff PNGs). Never committed.
 _ryu_capture/
 # Live HUDQ capture (hudq_capture.mjs / render_hudq.mjs scratch): VRAM/PVR prefix dumps +
-# decoded font/HUD PNGs are ROM-derived. Never committed.
+# decoded font/HUD PNGs are ROM-derived. Never committed. (_hud_cap, _hud_cap_namegap,
+# _hud_cap_def, and any other _hud_cap* session dirs — wherever they land in the tree.)
 _hud_cap/
+_hud_cap*/
+**/_hud_cap*/
 render_cell*.png
 geomcum_cell*.png
 geom_cell*.png
