@@ -3652,8 +3652,21 @@ static uint32_t gstaEmitSpriteTA(std::vector<uint8_t>& out)
 		                | (2u << 24);              // ListType = Translucent
 		pcw_ta |= 0x00000008u;                     // Texture = 1 (obj_ctrl bit3)
 		pcw_ta |= 0x00000001u;                     // UV_16bit = 1 (obj_ctrl bit0)
+		// EFFECT BLEND (re_kb finding:objs_effect_blend): a quad whose GFX1 base lives in the
+		// shared "Effect Poly" bank [0x0CED0000,0x0CEE0000) is an ADDITIVE effect (hitspark,
+		// aura, super flash), NOT a translucent body/cape. The engine's submit picks the PVR
+		// blend factors from the cell TSP, but the lean render_frame TSP is the generic
+		// translucent one (src=SRC_ALPHA dst=INV_SRC_ALPHA). Force ADDITIVE for Effect-Poly
+		// quads: keep src=SRC_ALPHA, set DstInstr=ONE (additive accumulate). MEASURED note: the
+		// current match's "satellites" are all cat 1..4 BODY-sprite capes/limbs (gfx1 c420040,
+		// NOT Effect-Poly), which correctly stay translucent — this only fires for true effects.
+		uint32_t tsp_ta = q->tsp;
+		const bool isEffect = (q->gfx1 >= 0x0CED0000u && q->gfx1 < 0x0CEE0000u);
+		if (isEffect) {
+			tsp_ta = (tsp_ta & ~(7u << 26)) | (1u << 26);   // DstInstr (bits 28:26) = ONE -> additive
+		}
 		// param header
-		W32(o+0,pcw_ta); W32(o+4,q->isp); W32(o+8,q->tsp); W32(o+12,q->tcw);
+		W32(o+0,pcw_ta); W32(o+4,q->isp); W32(o+8,tsp_ta); W32(o+12,q->tcw);
 		W32(o+16,0xFFFFFFFFu);          // sprite base color (opaque white, MODULATE identity)
 		W32(o+32,0xE0000000u);          // sprite vtx PCW
 		WF(o+36,q->Ax); WF(o+40,q->Ay); WF(o+44,q->z);

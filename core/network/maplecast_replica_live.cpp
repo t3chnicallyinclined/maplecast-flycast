@@ -597,7 +597,18 @@ static void collectFreshGfx(std::vector<GfxToShip>& out)
 		u32 base = 0x8C287DE0 + L * 0x180;
 		for (u32 i = 0; i < cnt; i++) {
 			u32 node = rd32(base + i * 4); if (!isRam(node)) continue;
-			if (rd8(node + 0x3) != 0) continue;                 // body only (cat==0)
+			// Ship GFX for BODIES (cat==0) AND SATELLITES/EFFECTS (cat 1..4). The old
+			// `cat==0 only` filter was a latent BLANK-satellite bug (re_kb
+			// finding:gsta_satellite_gfx_gap, MEASURED 2026-06-15): a cat 1..4 node whose
+			// GFX1/GFX2 is NOT shared with an on-screen body — an assist's projectile, a
+			// summoned drone, an Effect-Poly effect — would never have its art shipped, so
+			// render_frame's satellite walker decodes from stale/zero RAM => the texture is
+			// blank. In the common case the satellite shares the owning body's GFX (Storm's
+			// cape: sat gfx1==body gfx1==c420040), so the on-change sig dedup below makes
+			// this a ZERO-cost no-op there; it only adds bytes when a satellite/effect brings
+			// genuinely NEW art the body filter missed. The render path (render_frame
+			// render_object_full_satellite) already walks these nodes — it just needs the art.
+			{ int cat = (int)(int8_t)rd8(node + 0x3); if (cat < 0 || cat >= 5) continue; }
 			u32 gfx[2]   = { rd32(node + 0x160), rd32(node + 0x15C) };  // GFX2, GFX1
 			bool isG2[2] = { true, false };
 			for (u32 k = 0; k < 2; k++) {
