@@ -1346,12 +1346,12 @@ const _efxRd = { u8: rdU8, u16: rdU16, u32: rdU32, f32: rdF32 };
 // the file path (showFrame) and the live path (liveApplyFrame). No-op until the atlas loads.
 function renderEffectsPass() {
     if (!ram || !effectsReady) return 0;
-    // DIAGNOSIS TOGGLE (2026-06-15) — window._fxRenderMode:
-    //   'on'  (default) — run the effects pass.
-    //   'off'           — skip it entirely. (NOTE: EffectsClient.render is currently a no-op
-    //                     diagnostic overlay — it draws NOTHING; pure effects render in the
-    //                     body/walker pass. So toggling this should NOT change the picture; that
-    //                     is itself the proof the bottom-center flicker is NOT the effects pass.)
+    // NOTE (2026-06-15): EffectsClient.render is a DIAGNOSTIC-ONLY no-op (draws nothing). The
+    // REAL effects now render in the EMITTER body pass (renderBodiesPass -> SpriteClient.
+    // buildEmitterDrawList -> _emitEffectQuad -> FX_CID additive quad at node+0xE0/E4), gated by
+    // window._fxEmit (the EFFECTS cockpit knob). This pass is kept only so __effectNodes() /
+    // __effectCount() diagnostics stay live; _fxRenderMode just enables/disables that no-op
+    // enumeration and does NOT affect what is drawn.
     const fxMode = (typeof window !== 'undefined' && window._fxRenderMode) || 'on';
     if (fxMode === 'off') return 0;
     try { return effects.render(document.getElementById('cReplay'), _efxRd); }

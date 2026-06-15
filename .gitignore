@@ -158,6 +158,10 @@ web/render-replica/gfx/
 # (effects.png / effects.json keyed by directory idx). ROM-derived — never committed;
 # built offline by tools/build_replica_effects_atlas.py, served from /effects.
 web/render-replica/effects/
+# Effect-Poly fx_atlas (sprite-keyed bake of the 25 Effect-Poly dir textures, dual-keyed
+# by directory idx 0..24 AND effect_key=(0x0CED03D8+idx*0x10)&0xFFFF). Consumed by
+# sprite-client.mjs loadFxAtlas() in the emitter effects pass. ROM-derived — never committed.
+web/test-atlas/effects/
 
 # Assembly-driven part-atlas capture outputs (ROM-derived, never committed)
 # Probe writes to /dev/shm; packer writes PL??_parts.png / PL??_asm.json / *_composite.png

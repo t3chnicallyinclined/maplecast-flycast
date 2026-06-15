@@ -2046,11 +2046,27 @@ export class SpriteClient {
     // Effect-bank sats (isEffect) and owner-less / cross-bank sats are NOT drawn from the body
     // atlas (that was the garble) — they render in the engine-faithful path only.
     const satMode = (typeof window !== 'undefined' && window._satRenderMode) || 'on';
+    // EFFECTS PASS (2026-06-15) — pure Effect-Poly nodes (cat 1..4, GFX2 in 0x0CED0000:
+    // hitsparks / energy / projectiles / supers / auras) do NOT live in any baked BODY atlas
+    // (drawing their sel against PL{cid} = the retired garble), and the EMITTER body draw is
+    // what reaches the screen in the render-replica (render_frame.wasm computes a validation
+    // TA but does NOT draw). So an effect node was ABSENT (re_kb finding:replica_live_effects
+    // / finding:replica_live_satellite_gfx_residency). Here we route each effect node to the
+    // shared EFFECTS ATLAS (this.chars[FX_CID], loaded by loadFxAtlas() from the disc Effect-
+    // Poly bake — 25 dir textures, fx_atlas.{json,png}), drawn as ONE additive own-origin quad
+    // at the node's OWN screen pos o.x/o.y (node+0xE0/E4) — the SAME own-origin rule the whole-
+    // sprite buildDrawList already uses for effects (loadFxAtlas / FX_CID). engZ (node+0xE8
+    // 1/W) depth-sorts it against the bodies so a foreground spark draws over and a back aura
+    // behind. window._fxEmit='off' disables it (the on/off knob the task asks for).
+    const fxEmit = (typeof window === 'undefined') ? true
+                 : (window._fxEmit !== undefined ? (window._fxEmit !== 'off' && window._fxEmit !== false) : true);
     if (!force && this.objectsOn !== false && satMode !== 'off') for (const o of (this.objects || [])) {
-      // FX / effect-bank pool nodes do NOT live in any baked body atlas — drawing their sel
-      // against PL{cid} produced garbage. They render via the engine walker (render_frame), not
-      // here. Skip them in the emitter sat draw (the chief source of the bottom-center flicker).
-      if (o.isEffect) { skipSel++; continue; }
+      if (o.isEffect) {
+        if (!fxEmit) { skipSel++; continue; }
+        const fxItem = this._emitEffectQuad(o, scaleX, scaleY);
+        if (fxItem) { out.push(fxItem); drawn++; } else skipSel++;
+        continue;
+      }
       // Require a LIVE, ACTIVE owner body of the SAME char_id. A pool sat is part of its owner's
       // GFX2 only when an active body of that cid is present; without one (global super / dead
       // afterimage / cid==0 effect) the owner-atlas pairing is invalid -> skip (no garble).
@@ -2168,6 +2184,88 @@ export class SpriteClient {
     const asm = fx.assemblies || fx.asm;
     if (!asm) return null;          // effects atlas has no assembly table yet
     return { img: this._fxImg, parts: fx.parts || {}, asm };
+  }
+
+  // EFFECTS-PASS resolver (2026-06-15): turn ONE live effect node (cat 1..4, GFX2 in the
+  // Effect-Poly bank 0x0CED0000) into ONE additive own-origin quad from the shared effects
+  // atlas (this.chars[FX_CID], loaded by loadFxAtlas from the disc Effect-Poly bake). Returns
+  // a drawList item (charId=FX_CID so the GPU's per-cid group binds the fx texture + draws it
+  // additive) or null if the atlas isn't loaded / the node doesn't bind any dir entry.
+  //
+  // BINDING (data-driven, self-correcting). The fx atlas is DUAL-keyed (tools bake): by the
+  // Effect-Poly directory index 0..24 AND by effect_key = (0x0CED03D8 + idx*0x10) & 0xFFFF
+  // (the candidate node+0x15C low-16). The live binding from a node to a dir entry was never
+  // proven offline (mc_effects.log is a directory-only dump), so we try, in order:
+  //   (1) o.effect_key  (node+0x15C & 0xFFFF, set by populateObjectsFromRAM) — direct hit if
+  //       the engine's GFX base IS dirBase+idx*0x10;
+  //   (2) dirIdx = (node+0x15C - 0x0CED03D8) / 0x10, clamped 0..24 — the directory-offset model;
+  //   (3) o.sid (node+0x144) as a raw directory index — last resort.
+  // The first key that exists in the atlas wins. window.__fxBindLog=true prints the resolved
+  // (effect_key, dirIdx, sid -> chosenKey) per distinct node ONCE so the parent can LOCK the
+  // true binding from a live contact frame (the OPEN item in finding:replica_live_effects).
+  _emitEffectQuad(o, scaleX, scaleY) {
+    const c = this.chars[FX_CID];
+    if (!c || !c.img || !c.sprites) { this.loadFxAtlas(); return null; }   // atlas not ready
+    const sp = this._resolveFxSprite(c, o);
+    if (!sp) {
+      // tally the miss so the exact unbound (effect_key/sid) set is inspectable (window._fxMiss)
+      const k = `FX/0x${((o.effect_key ?? o.sid) & 0xffff).toString(16)}`;
+      (this._fxMiss = this._fxMiss || new Map()).set(k, (this._fxMiss.get(k) || 0) + 1);
+      return null;
+    }
+    const px = o.x, py = o.y;
+    if (px < -64 || px > 704 || py < -64 || py > 544) return null;
+    // OWN-ORIGIN anchor: the fx bake stores point-centered dx=-wG/2, dy=-hG/2 (own origin),
+    // and o.x/o.y is the node's OWN screen pos (node+0xE0/E4) — the SAME own-origin rule the
+    // body/cape/projectile draw uses, so no owner-relative reconstruction (re_kb own-origin).
+    const anchorX = (sp.dx != null) ? sp.dx : -sp.wG / 2;
+    const anchorY = (sp.dy != null) ? sp.dy : -sp.hG / 2;
+    // Effects are NOT scaled by the body CPS (they are full-screen-space bakes); honor only the
+    // owner's live zoom if present (a growing super scales its sparks with the caster).
+    let SX = 1, SY = 1;
+    for (let s = 0; s < 6; s++) if (this.slot[s].active && this.slot[s].char_id === o.cid) {
+      SX = _sane(this.slot[s].scaleX); SY = _sane(this.slot[s].scaleY); break; }
+    const oc = (typeof window !== 'undefined' && window._fxCfg) || null;   // live calibration nudge
+    const ocSc = oc ? (oc.scale || 1) : 1, ocDx = oc ? (oc.dx || 0) : 0, ocDy = oc ? (oc.dy || 0) : 0;
+    SX *= ocSc; SY *= ocSc;
+    // ENGINE-Z depth: the node's OWN 1/W (node+0xE8 -> o.engZ). SG.render is a painter and the
+    // emitter sorts groups ASCENDING by per-cid engZ (ezmap), then items by z = engZ*1e6 —
+    // identical scale to the body parts (buildEmitterDrawList line ~1821), so a foreground spark
+    // (larger 1/W) paints OVER the body and a back aura (smaller 1/W) behind. When the node has
+    // NO valid node+0xE8, default to a LARGE engZ (1e3 = very near) so the additive glow draws
+    // ON TOP of the bodies (the safe default for hitsparks) rather than getting buried behind.
+    const ez = (o.engZ != null) ? o.engZ : 1e3;
+    const z = ez * 1e6;
+    if (typeof window !== 'undefined' && window.__fxBindLog) {
+      const dbgk = `${(o.effect_key||0).toString(16)}:${(o.sid||0).toString(16)}`;
+      (this._fxBindSeen = this._fxBindSeen || new Set());
+      if (!this._fxBindSeen.has(dbgk)) { this._fxBindSeen.add(dbgk);
+        console.log('[FXBIND]', { effect_key: '0x'+(o.effect_key||0).toString(16),
+          dirIdx: (((o.effect_key||0) - 0x03D8) >> 4), sid: o.sid, chosen: sp.__key,
+          scr: `(${o.x|0},${o.y|0})`, wh: `${sp.w}x${sp.h}` }); }
+    }
+    return { charId: FX_CID, slot: 0, z, engZ: ez,
+      sx: sp.x, sy: sp.y, sw: sp.w, sh: sp.h,
+      dx: (px + anchorX * SX + ocDx) * scaleX, dy: (py + anchorY * SY + ocDy) * scaleY,
+      dw: sp.wG * SX * scaleX, dh: sp.hG * SY * scaleY,
+      flip: false, flipY: false, palRow: 0,
+      // additive glow — the wire blend nibble (dst=ONE) wins if the server shipped it.
+      blend: (o.blend != null) ? o.blend : 0x01 };
+  }
+
+  // Try the three binding keys (effect_key, dirIdx, sid) against the fx atlas sprite map.
+  _resolveFxSprite(c, o) {
+    const S = c.sprites;
+    const tryKey = (k) => { if (k == null) return null; const s = S[k] || S[String(k)];
+      if (s) { s.__key = k; return s; } return null; };
+    // (1) direct effect_key (node+0x15C & 0xFFFF)
+    let s = tryKey(o.effect_key & 0xffff); if (s) return s;
+    // (2) directory-offset model: dirIdx = (node+0x15C - 0x0CED03D8) / 0x10
+    if (o.effect_key != null) { const di = ((o.effect_key & 0xffff) - 0x03D8) >> 4;
+      if (di >= 0 && di < 64) { s = tryKey(di); if (s) return s; } }
+    // (3) raw sprite_id as a directory index
+    s = tryKey(o.sid & 0xffff); if (s) return s;
+    return null;
   }
 
   // Active hit-sparks for the GPU additive pass — each grows + fades over ~280ms.
