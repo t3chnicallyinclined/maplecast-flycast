@@ -255,6 +255,12 @@
             <option value="add">add (1/1)</option>
             <option value="modulate">modulate (0 / src)</option>
           </select></div>
+        <!-- HUD layer order — all-red-bars FIX: draw para5 colour fill + names ON TOP of para4 backing -->
+        <div class="knob"><label>HUD layer order</label>
+          <select id="kb_hudLayerOrder" data-knob="_hudLayerOrder" data-kind="enum">
+            <option value="engine">engine (submit order) — DEFAULT</option>
+            <option value="poly-first">poly-first (colour fill + names on top) — red-bars FIX</option>
+          </select></div>
         <!-- (2) fill-color probe — all-red-bars: UNIFORM red => capture/buildHudTA bug; TWO-TONE => blend -->
         <div class="knob chk"><input type="checkbox" id="kb_fillColorProbe" data-knob="_fillColorProbe" data-kind="bool"><label>fill-color probe (raw vertex col)</label></div>
         <!-- (3) depth visualise — greyscale HUD quad z -->
@@ -280,12 +286,23 @@
           <input type="number" id="kb_infTimeMode" data-knob="_infTimeMode" data-kind="num" min="0" max="255" step="1" value="2"
                  style="width:64px;"></div>
 
-        <div class="knob"><label style="flex:1;color:#7fd1ff;">EFFECTS</label></div>
-        <div class="knob"><label>effects pass</label>
-          <select id="kb_fxRenderMode" data-knob="_fxRenderMode" data-kind="enum">
-            <option value="on">on (run pass — currently no-op draw)</option>
-            <option value="off">off (skip pass)</option>
+        <div class="knob"><label style="flex:1;color:#7fd1ff;">EFFECTS (hitsparks/energy/supers/auras — fx_atlas, additive)</label></div>
+        <div class="knob"><label>fx emit (atlas)</label>
+          <select id="kb_fxEmit" data-knob="_fxEmit" data-kind="enum">
+            <option value="on">on (draw Effect-Poly nodes from fx_atlas, additive)</option>
+            <option value="off">off (skip — effects absent)</option>
           </select></div>
+        <div class="knob chk"><input type="checkbox" id="kb_fxBindLog" data-knob="__fxBindLog" data-kind="bool"><label>fx binding log (effect_key→dir idx, gated)</label></div>
+        <div class="knob"><label>fx dx nudge</label>
+          <input type="range" id="kb_fxDx" data-knob="_fxCfg.dx" data-kind="objnum" min="-128" max="128" step="1" value="0">
+          <span class="val" id="vkb_fxDx">0</span></div>
+        <div class="knob"><label>fx dy nudge</label>
+          <input type="range" id="kb_fxDy" data-knob="_fxCfg.dy" data-kind="objnum" min="-128" max="128" step="1" value="0">
+          <span class="val" id="vkb_fxDy">0</span></div>
+        <div class="knob"><label>fx scale ×</label>
+          <input type="range" id="kb_fxScale" data-knob="_fxCfg.scale" data-kind="objnum" min="0.1" max="3" step="0.05" value="1">
+          <span class="val" id="vkb_fxScale">1.00</span></div>
+        <div class="knob"><span style="flex:1;color:#7a8694;font-size:11px;">EFFECTS now render in the EMITTER body pass (sprite-client.mjs _emitEffectQuad → FX_CID additive quad at node+0xE0/E4, engZ-sorted). The old renderEffectsPass / _fxRenderMode draws NOTHING (kept as a diagnostic no-op). Run __effectNodes() to list live Effect-Poly nodes; __fxMiss() for unbound effect_keys.</span></div>
 
         <div class="knob"><label style="flex:1;color:#7fd1ff;">DIAGNOSTICS (console-dump buttons)</label></div>
         <div class="knobrow">
@@ -294,6 +311,9 @@
           <button id="kd_stageWhy">__stageWhy()</button>
           <button id="kd_stageInfo">__stageInfo()</button>
           <button id="kd_effectNodes">__effectNodes()</button>
+          <button id="kd_fxNodes">__fxNodes()</button>
+          <button id="kd_fxAtlas">__fxAtlas()</button>
+          <button id="kd_fxMiss">__fxMiss()</button>
         </div>
 
         <div class="knob"><label style="flex:1;color:#ff8a8a;">DEAD in emitter mode (pvr2-only — switch body draw path to render_frame to use)</label></div>
@@ -341,7 +361,7 @@ import createRenderFrame from './render_frame.mjs?v=scene5';
 // The SpriteClient/SpriteGPU emitter is still IMPORTED but NO LONGER DRAWS the bodies — it
 // is retained only for the (disabled) emitter cross-check; the drawn bodies ARE the transpile.
 import { ensureBodyTextures } from './body_decoder.mjs?v=scene5';
-import { SpriteClient } from '../webgpu/sprite-client.mjs?v=scene5b';
+import { SpriteClient } from '../webgpu/sprite-client.mjs?v=fxemit1';
 import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=scene5';
 // Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
@@ -793,6 +813,17 @@ function renderHudQuads() {
         if (mode === 'no-sprites')   quads = hudQuads.filter(q => ((q.pcw >>> 29) & 7) !== 5);
         if (mode === 'sprites-only') quads = hudQuads.filter(q => ((q.pcw >>> 29) & 7) === 5);
         if (!quads.length) return mode !== 'engine'; // suppress legacy fallback while debugging
+        // window._hudLayerOrder — buildHudTA flattens every HUD-quad z to 1.0, so the engine's depth
+        // order is lost and the para4 RED bar backing can land OVER the para5 TEAM-COLOR fill (the
+        // all-red-bars bug: 'sprites-only' shows colour, 'engine' shows red). 'poly-first' draws all
+        // ParaType-4 polys first, then the ParaType-5 sprites ON TOP — restoring the colour fill +
+        // names over the backing. 'engine' = raw submit order (current). STABLE sort (i tie-break).
+        const _hlo = (typeof window !== 'undefined' && window._hudLayerOrder) || 'engine';
+        if (_hlo === 'poly-first') {
+            quads = quads.map((q, i) => [q, i])
+                .sort((a, b) => ((((a[0].pcw>>>29)&7)===5) - (((b[0].pcw>>>29)&7)===5)) || (a[1] - b[1]))
+                .map(p => p[0]);
+        }
         const ta = buildHudTA(quads);
         // ── HUD-pass PVR diagnostic knobs (sh4-re-expert spec; HONORED because the HUD draws via
         // pane.render which reads the pvr2 `dbg` object — unlike the emitter SpriteGPU path). ──
@@ -1330,6 +1361,20 @@ window.__effectsReady = () => effectsReady;         // headless: atlas-load gate
 window.__effectCount = () => effects.lastCount();   // headless verification hook
 window.__effectNodes = () => (ram ? effects.readEffectNodes(_efxRd) : []);
 window.__renderEffects = () => renderEffectsPass();
+// EFFECTS-PASS (EMITTER) diagnostics — the effects now render in the body/emitter pass
+// (sprite-client.mjs _emitEffectQuad → FX_CID additive quad). These expose the live state:
+//   __fxAtlas()  -> {ready, nSprites}  (is the fx_atlas loaded into chars[FX_CID]?)
+//   __fxMiss()   -> [[key,count]]      (effect_keys/sids that bound NO atlas sprite — the
+//                                       exact set whose binding still needs locking)
+//   __fxNodes()  -> the live Effect-Poly object set the emitter is routing (cid/sid/effect_key/x/y)
+window.__fxAtlas = () => { const c = SPRITECLIENT.chars[0xFE0];
+  return { ready: !!(c && c.img), nSprites: c && c.sprites ? Object.keys(c.sprites).length : 0,
+           registered: !!(SG.chars && SG.chars[0xFE0]) }; };
+window.__fxMiss = () => SPRITECLIENT._fxMiss ? [...SPRITECLIENT._fxMiss.entries()] : [];
+window.__fxNodes = () => { if (!ram) return []; populateObjectsFromRAM();
+  return (SPRITECLIENT.objects || []).filter(o => o.isEffect)
+    .map(o => ({ cid: o.cid, sid: o.sid, effect_key: '0x'+(o.effect_key||0).toString(16),
+                 x: o.x, y: o.y, engZ: o.engZ })); };
 
 // One HudClient draws the REAL MVC2 HUD (timer/combo/level = FONT.BIN digit sprites; life bar +
 // super meter = engine white-tex * per-slot vertex color). Created lazily, layered on top.
@@ -1912,6 +1957,14 @@ function renderBodiesPass() {
           if (c.idxImg && c.lut && !SG.idxChars[cid]) { SG.setIndexedAtlas(cid, c.idxImg); SG.setCharLUT(cid, c.lut); }
         }
       }
+      // EFFECTS ATLAS (2026-06-15): the shared Effect-Poly bake (FX_CID 0xFE0, loaded by
+      // SPRITECLIENT.loadFxAtlas into SPRITECLIENT.chars[FX_CID]) — register it so the emitter
+      // effects pass (buildEmitterDrawList -> _emitEffectQuad, charId=FX_CID) can bind+draw it
+      // additive. It is NOT in asmChars (whole-sprite atlas, not a parts atlas), so it needs an
+      // explicit registration. No palette (fx textures are pre-colored RGB565/ARGB) -> the GPU
+      // recolor is a no-op (no charPal match), additive blend (item.blend dst=ONE) glows it.
+      { const FX_CID = 0xFE0, fc = SPRITECLIENT.chars[FX_CID];
+        if (fc && fc.img && !SG.chars[FX_CID]) { SG.setAtlas(FX_CID, fc.img); } }
       // T = TextureManager (pane.T) carries the live PVR body palette (T._pal) for the recolor
       // path — same role window._T plays in the cockpit. updatePalette ran in the stage pass.
       try { SG.render(drawList, dbgFromCfg(), pane.T, SPRITECLIENT.buildSparkList(640, 480), null); }
@@ -2521,6 +2574,9 @@ wireDiag('kd_satNodes',    '__satNodes',      'satNodes');
 wireDiag('kd_stageWhy',    '__stageWhy',      'stageWhy');
 wireDiag('kd_stageInfo',   '__stageInfo',     'stageInfo');
 wireDiag('kd_effectNodes', '__effectNodes',   'effectNodes');
+wireDiag('kd_fxNodes',     '__fxNodes',       'fxNodes');
+wireDiag('kd_fxAtlas',     '__fxAtlas',       'fxAtlas');
+wireDiag('kd_fxMiss',      '__fxMiss',        'fxMiss');
 
 // expose for headless verification
 window.__loadMCRR = loadMCRR;
