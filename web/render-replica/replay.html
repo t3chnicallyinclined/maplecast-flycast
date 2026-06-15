@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF) [hud:ui1 · cockpit-live · plates1]</title>
+<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF) [hud:ui2-stripfix · cockpit-live · plates1]</title>
 <style>
   :root { color-scheme: dark; }
   body { margin:0; background:#0c0e12; color:#cdd6e0; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; }
@@ -590,14 +590,17 @@ function buildHudTA(quads) {
         dv.setUint32(o+16, 0, true); dv.setUint32(o+20, 0, true);
         dv.setUint32(o+24, 0, true); dv.setUint32(o+28, 0, true);
         o += 32;
-        // Vertices: TA triangle-strip order so the two triangles tile the quad. The DEFAULT
-        // assumes the engine emits the 4 corners in a perimeter walk (0,1,2,3) — strip order
-        // 0,1,3,2 => tris (0,1,3)+(1,3,2). If the SH4 expert's HUDQ emits a different corner
-        // order (e.g. the PVR sprite D,C,A,B order), set window._hudQuadOrder to the right
-        // 4-index permutation live (no redeploy) and confirm against the TA-mirror.
+        // Vertices: TA triangle-strip order so the two triangles tile the quad. collectHudQuads
+        // (maplecast_oracle_hook.cpp) captures the 4 corners in the engine's own SUBMIT order
+        // (rc.idx / rc.verts walk) — i.e. the engine's native PVR strip order. So feeding them
+        // straight back as a strip [0,1,2,3] reproduces the engine's OWN two triangles
+        // (0,1,2)+(1,2,3), byte-for-byte. The OLD default [0,1,3,2] assumed a perimeter walk and
+        // diagonally mis-tiled every glyph slice -> the multi-colour FONT.BIN name/digit GARBLE.
+        // CONFIRMED via tools/render-replica-poc/render_hudq.mjs on a live HUDQ capture: order
+        // [0,1,2,3] -> readable STORM/SENTINEL/CABLE/TIME/LEVEL; [0,1,3,2] -> noise. (2026-06-14.)
         // colType0 textured vertex = x,y,z(+4/8/12) u,v(+16/20) bc(+24) oc(+28).
         const order = (typeof window !== 'undefined' && Array.isArray(window._hudQuadOrder) && window._hudQuadOrder.length === 4)
-            ? window._hudQuadOrder : [0, 1, 3, 2];
+            ? window._hudQuadOrder : [0, 1, 2, 3];
         for (let k = 0; k < 4; k++) {
             const i = order[k], eos = (k === 3) ? 1 : 0;
             dv.setUint32(o, (7 << 29) | (eos << 28), true);   // paramType=7 vertex (+ EndOfStrip)

@@ -176,6 +176,9 @@ _ryu_offline/
 # Live CHARQ/Frame-Oracle Ryu captures + emitter_truth_gate.py artifacts (ROM-derived
 # probe quads, PPMs, gate truth/ours/diff PNGs). Never committed.
 _ryu_capture/
+# Live HUDQ capture (hudq_capture.mjs / render_hudq.mjs scratch): VRAM/PVR prefix dumps +
+# decoded font/HUD PNGs are ROM-derived. Never committed.
+_hud_cap/
 render_cell*.png
 geomcum_cell*.png
 geom_cell*.png
