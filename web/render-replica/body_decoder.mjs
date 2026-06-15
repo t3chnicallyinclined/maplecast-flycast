@@ -150,6 +150,19 @@ function detwiddlePal4(data, w, h) {
     }
     return idx;
 }
+// PVR rectangular-twiddle of TILE coordinates (col,row) within a Tw×Th tile grid -> the storage
+// chunk index k. For a part stored as ONE full-W×H PVR rect-twiddle blob, the k-th contiguous
+// 512B (=one 32×32 PAL4 tile) chunk is the grid cell at twTile(col,row,Tw,Th). CONFIRMED-BY-
+// MEASUREMENT (tools/render-replica-poc/_measure_chunk.mjs): for sel124 128×128 4×4 the chunk at
+// twTile(col,row,4,4) read as a standalone 32×32 twiddle == the reference detwiddled cell 0/16384;
+// sel285 64×128 2×4 == 0/8192. (re_kb finding:wide_part_tile_storage_order twTile rule.)
+function twTile(x, y, bx, by) {
+    let r = 0, b = 0; const sq = Math.min(bx, by);
+    for (let i = 0; i < sq; i++) { r |= ((x >> i) & 1) << b; b++; r |= ((y >> i) & 1) << b; b++; }
+    if (bx > by) r |= (x >> sq) << b; else if (by > bx) r |= (y >> sq) << b;
+    return r;
+}
+
 // Re-twiddle one 32×32 linear index region (1024 entries) into 512 bytes of PAL4_TW (the engine's
 // per-tile VRAM storage). Inverse of detwiddlePal4 for w=h=32 (bcx=bcy=5).
 function retwiddle32(lin) {
@@ -242,7 +255,10 @@ function decodePart(ram, gfx1, G, sel) {
     const srcEnd = (gfx1 + endOf(G.srt, G.offs[sel])) & RAM;
     const raw = decodeA(ram, srcStart, srcEnd, destLen);   // W×H PVR twiddle (engine byte-exact)
     const lin = detwiddlePal4(raw, W, H);                   // -> linear W×H index buffer
-    return { lin, W, H, destLen, cols: Math.ceil(W / 32), rows: Math.ceil(H / 32) };
+    // `raw` is kept for the W>32 && H>32 SQUARE-part native-chunk carve (see ensureBodyTextures):
+    // for those the engine's VRAM 512B chunk is the full-W×H-twiddle chunk at twTile(col,row), which
+    // a linear-slice→retwiddle32 roundtrip does NOT reproduce. Copy the native chunk verbatim.
+    return { lin, raw, W, H, destLen, cols: Math.ceil(W / 32), rows: Math.ceil(H / 32) };
 }
 
 // ----------------------------------------------------------------------------
@@ -344,6 +360,17 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         const mR = rows > 0 ? (H / rows) : H;
         if (mR < m) m = mR;                       // square tile = min (guards non-integer runs)
         m = m | 0; if (m <= 0) m = 32; if (m > 32) m = 32;   // clamp to the 32×32 carve window
+        // --- W>32 AND H>32 SQUARE PART (m==32, cols>1, rows>1): copy the NATIVE storage chunk ---
+        // The engine stores the part as ONE full-W×H PVR rect-twiddle blob; tile (col,row)'s VRAM
+        // is the +0x200 chunk at twTile(col,row,Tw,Th) — NOT a linear (col*32,row*32) slice re-
+        // twiddled (that roundtrip diverges for parts >32 in BOTH dims = the Storm-cape garbling).
+        // CONFIRMED-BY-MEASUREMENT: raw chunk == reference cell 0/16384 (sel124) / 0/8192 (sel285).
+        if (m === 32 && cols > 1 && rows > 1 && p.raw) {
+            const Tw = (W / 32) | 0, Th = (H / 32) | 0;
+            const k = twTile(col, row, _log2i(Tw), _log2i(Th));
+            const o = k * 512;
+            if (o + 512 <= p.raw.length) { vram.set(p.raw.subarray(o, o + 512), addr); written++; continue; }
+        }
         // extract the m×m linear region at (col*m, row*m), clamped to W×H, into the tile's
         // top-left (zero-pad the rest of the 32×32 = the engine's UV-clamped sample area).
         const tile = new Uint8Array(1024);

@@ -3776,7 +3776,16 @@ static inline uint8_t  gramU8 (const uint8_t* r, uint32_t a){ return r[a & 0x00F
 // GFX1 part-offset table for a given gfx1 base (cached per frame-set).
 struct GstaGfx { uint32_t n; std::vector<uint32_t> offs, srt; };
 static std::unordered_map<uint32_t, GstaGfx> _gstaGfxCache;          // gfx1 base -> table
-struct GstaDecodedPart { std::vector<uint8_t> lin; int W=0, H=0; size_t destLen=0; bool ok=false; };
+struct GstaDecodedPart { std::vector<uint8_t> lin, raw; int W=0, H=0; size_t destLen=0; bool ok=false; };
+
+// PVR rect-twiddle of TILE coords (col,row) in a Tw×Th tile grid -> storage chunk index k.
+// Port of body_decoder.mjs twTile. (re_kb finding:wide_part_tile_storage_order, MEASURED 0/16384.)
+static int gstaTwTile(int x, int y, int bx, int by) {
+	int r = 0, b = 0; int sq = bx < by ? bx : by;
+	for (int i = 0; i < sq; i++) { r |= ((x >> i) & 1) << b; b++; r |= ((y >> i) & 1) << b; b++; }
+	if (bx > by) r |= (x >> sq) << b; else if (by > bx) r |= (y >> sq) << b;
+	return r;
+}
 static std::map<uint64_t, GstaDecodedPart> _gstaPartCache;          // (gfx1<<32|sel) -> part
 
 static GstaGfx& gstaGfx1Offsets(const uint8_t* ram, uint32_t gfx1) {
@@ -3855,6 +3864,7 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 					uint32_t srcEnd   = (gfx1 + gstaEndOf(G.srt, G.offs[sel])) & 0x00FFFFFF;
 					gstaDecodeA(ram, srcStart, srcEnd, destLen, raw);
 					gstaDetwiddlePal4(raw.data(), raw.size(), W, H, pd.lin);
+					pd.raw = raw;   // kept for the W>32 && H>32 SQUARE-part native-chunk carve
 					pd.W = W; pd.H = H; pd.destLen = destLen; pd.ok = true;
 				}
 			}
@@ -3876,6 +3886,24 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 		int mR = (rows > 0) ? (H / rows) : H;
 		if (mR < m) m = mR;
 		if (m <= 0) m = 32; if (m > 32) m = 32;
+		// --- W>32 AND H>32 SQUARE PART (m==32, cols>1, rows>1): copy the NATIVE storage chunk ---
+		// The engine stores the part as ONE full-W×H PVR rect-twiddle blob; tile (col,row)'s VRAM is
+		// the +0x200 chunk at twTile(col,row,Tw,Th), NOT a linear (col*32,row*32) slice re-twiddled
+		// (that roundtrip diverges for parts >32 in BOTH dims = the Storm-cape garbling).
+		// CONFIRMED-BY-MEASUREMENT: raw chunk == reference cell 0/16384 (sel124) / 0/8192 (sel285).
+		if (m == 32 && cols > 1 && rows > 1 && !pd.raw.empty()) {
+			int Tw = W / 32, Th = H / 32;
+			int k = gstaTwTile(col, row, gsta_log2i(Tw), gsta_log2i(Th));
+			size_t o = (size_t)k * 512;
+			if (o + 512 <= pd.raw.size()) {
+				outTiles.emplace_back();
+				GstaTileWrite& tw = outTiles.back();
+				tw.vaddr = vaddr;
+				memcpy(tw.bytes, &pd.raw[o], 512);
+				written++;
+				continue;
+			}
+		}
 		int ox = col * m, oy = row * m;
 		std::fill(tileLin.begin(), tileLin.end(), 0);
 		for (int yy = 0; yy < m; yy++) {
