@@ -182,16 +182,20 @@ bool mainui_rend_frame()
 			maplecast_palette::applyClientOverrides();
 
 			bool isScreen = renderer->Render();
-			if (maplecast_mirror::gstaModeActive()) {
+			// DIAG: MAPLECAST_GSTA_SHOT screenshots in GSTA mode (reconstruction) OR in
+			// plain mirror mode (engine ground truth) so the two paths can be compared
+			// pixel-for-pixel. The shot path is otherwise identical.
+			if (maplecast_mirror::gstaModeActive() || std::getenv("MAPLECAST_GSTA_SHOT")) {
 				static uint64_t _grn = 0;
-				if ((_grn++ % 120) == 0)
+				if (maplecast_mirror::gstaModeActive() && (_grn++ % 120) == 0)
 					printf("[GSTA] renderer->Render()=%d (frame %llu)\n",
 						(int)isScreen, (unsigned long long)_grn);
+				else if (!maplecast_mirror::gstaModeActive()) _grn++;
 				fflush(stdout);
 				// DIAG: MAPLECAST_GSTA_SHOT=<path-prefix> dumps PNG screenshots of the
 				// rendered frame (frames 120..150) to visually verify the body fragmentation fix.
 				const char* shot = std::getenv("MAPLECAST_GSTA_SHOT");
-				if (shot && *shot && isScreen && _grn >= 120 && _grn <= 150 && (_grn % 6 == 0)) {
+				if (shot && *shot && isScreen && _grn >= 120 && _grn <= 600 && (_grn % 30 == 0)) {
 					std::vector<u8> raw; int w=0,h=0;
 					if (renderer && renderer->GetLastFrame(raw, w, h) && w>0 && h>0) {
 						char pp[600]; snprintf(pp, sizeof(pp), "%s_%llu.png", shot, (unsigned long long)_grn);

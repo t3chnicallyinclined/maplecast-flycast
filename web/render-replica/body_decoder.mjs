@@ -360,13 +360,20 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         const mR = rows > 0 ? (H / rows) : H;
         if (mR < m) m = mR;                       // square tile = min (guards non-integer runs)
         m = m | 0; if (m <= 0) m = 32; if (m > 32) m = 32;   // clamp to the 32×32 carve window
-        // --- W>32 AND H>32 SQUARE PART (m==32, cols>1, rows>1): copy the NATIVE storage chunk ---
-        // The engine stores the part as ONE full-W×H PVR rect-twiddle blob; tile (col,row)'s VRAM
-        // is the +0x200 chunk at twTile(col,row,Tw,Th) — NOT a linear (col*32,row*32) slice re-
-        // twiddled (that roundtrip diverges for parts >32 in BOTH dims = the Storm-cape garbling).
-        // CONFIRMED-BY-MEASUREMENT: raw chunk == reference cell 0/16384 (sel124) / 0/8192 (sel285).
-        if (m === 32 && cols > 1 && rows > 1 && p.raw) {
-            const Tw = (W / 32) | 0, Th = (H / 32) | 0;
+        // --- W>32 AND H>32 *SQUARE* PART (m==32, cols>1, rows>1, AND Tw===Th): copy the NATIVE
+        // storage chunk --- The engine stores a SQUARE >32 part as ONE full-W×H PVR rect-twiddle
+        // blob whose 32×32 chunks follow the square twTile interleave; tile (col,row)'s VRAM is the
+        // chunk at twTile(col,row,Tw,Th). CONFIRMED-BY-MEASUREMENT: raw chunk == reference cell
+        // 0/16384 (sel124, 128×128 4×4).
+        //
+        // **NON-SQUARE FIX (Tw !== Th, e.g. sel254 W=64 H=128 -> Tw=2 Th=4): the square twTile
+        // interleave SCATTERS the tiles (the Storm-torso dark/garbled patch). MEASURED (gsta audit4):
+        // the full-part PAL4_TW detwiddle of sel254 is COHERENT and the LINEAR (col*32,row*32) slice
+        // of `lin` reproduces it EXACTLY, while twTile produces the exact on-screen garble. The prior
+        // "sel285 2×4 == 0/8192" claim was circular (reference built from the same assumption). So for
+        // Tw !== Th, FALL THROUGH to the linear-slice carve below.** CONFIRMED-BY-MEASUREMENT 2026-06-15.
+        const Tw = (W / 32) | 0, Th = (H / 32) | 0;
+        if (m === 32 && cols > 1 && rows > 1 && Tw === Th && p.raw) {
             const k = twTile(col, row, _log2i(Tw), _log2i(Th));
             const o = k * 512;
             if (o + 512 <= p.raw.length) { vram.set(p.raw.subarray(o, o + 512), addr); written++; continue; }

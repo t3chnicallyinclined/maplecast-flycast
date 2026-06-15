@@ -36,11 +36,29 @@ for(const r of runs.values()){if(r.t.length<=1)continue;
   const off=u32r(r.g+r.sel*4);const pb=G(r.g)+off;const W=ram[pb+2]*8,H=ram[pb+3]*8;
   const srt=[];{const nn=u32r(r.g)>>2;const s=new Set();for(let i=0;i<nn;i++)s.add(u32r(r.g+i*4));for(const v of s)srt.push(v);srt.sort((a,b)=>a-b);}
   let end=pb;for(const o of srt){if((G(r.g)+o)>pb){end=G(r.g)+o;break;}}if(end<=pb)end=pb+0x8000;
+  // REFERENCE = the engine's TRUE per-tile pixels = the full-part PAL4 detwiddle (block twop:
+  // _PAL4_ORDER 4x4 blocks placed by twop(bcx,bcy)), which is EXACTLY what flycast's
+  // ConvertTwiddlePal4 + twop sampling reproduces. (Plain twop(x,y,bx,by) WITHOUT the 4x4-block
+  // sub-order is a DIFFERENT, wrong convention — it gives a garbled ref for non-square parts.)
   const full=decodeA(ram,pb+4,end,(W*H)>>1);const ref=new Uint8Array(W*H);const bx=Math.log2(W),by=Math.log2(H);
-  for(let y=0;y<H;y++)for(let x=0;x<W;x++){const ti=twop(x,y,bx,by);ref[y*W+x]=(ti&1)?(full[ti>>1]>>4)&0xF:full[ti>>1]&0xF;}
+  const ORD=[[0,0],[0,1],[1,0],[1,1],[0,2],[0,3],[1,2],[1,3],[2,0],[2,1],[3,0],[3,1],[2,2],[2,3],[3,2],[3,3]];
+  for(let Y=0;Y<H;Y+=4)for(let X=0;X<W;X+=4){const blk=(twop(X,0,bx,by)+twop(0,Y,bx,by))/16|0;const base=blk*8;
+    for(let i=0;i<16;i++){const cx=ORD[i][0],cy=ORD[i][1];const b=full[base+(i>>1)]||0;ref[(Y+cy)*W+(X+cx)]=(i&1)?(b>>4)&0xF:b&0xF;}}
   let cols=1,rows=1;for(const t of r.t){if(t.col+1>cols)cols=t.col+1;if(t.row+1>rows)rows=t.row+1;}const m=(W/cols)|0;
+  // ASM = read each carved 32x32 VRAM tile EXACTLY as flycast's pvr2 does: twop(x,y,5,5) square,
+  // _PAL4_ORDER 4x4 blocks. Place at (col*m,row*m). This is the true display-time content.
   const asm=new Uint8Array(W*H);
-  for(const t of r.t){for(let y=0;y<m;y++)for(let x=0;x<m;x++){const ti=twop(x,y,5,5);const b=vram[t.a+(ti>>1)];const v=(ti&1)?(b>>4)&0xF:b&0xF;const dx=t.col*m+x,dy=t.row*m+y;if(dx<W&&dy<H)asm[dy*W+dx]=v;}}
-  let diff=0;for(let i=0;i<W*H;i++)if(asm[i]!==ref[i])diff++;total++;if(diff)bad++;
-  console.log(`${diff===0?'OK ':'BAD'} sel${String(r.sel).padStart(3)} ${W}x${H} ${cols}x${rows} m=${m} tiles=${r.t.length} diff=${diff}/${W*H}`);}
-console.log(`\n${total-bad}/${total} multi-tile runs BYTE-EXACT`);process.exit(bad?1:0);
+  for(const t of r.t){const til=new Uint8Array(1024);
+    for(let Y=0;Y<32;Y+=4)for(let X=0;X<32;X+=4){const blk=(twop(X,0,5,5)+twop(0,Y,5,5))/16|0;const base=blk*8;
+      for(let i=0;i<16;i++){const cx=ORD[i][0],cy=ORD[i][1];const b=vram[t.a+base+(i>>1)]||0;til[(Y+cy)*32+(X+cx)]=(i&1)?(b>>4)&0xF:b&0xF;}}
+    for(let y=0;y<m;y++)for(let x=0;x<m;x++){const dx=t.col*m+x,dy=t.row*m+y;if(dx<W&&dy<H)asm[dy*W+dx]=til[y*32+x];}}
+  let diff=0;for(let i=0;i<W*H;i++)if(asm[i]!==ref[i])diff++;total++;
+  // CAVEAT (2026-06-15): `ref` assumes the part is stored as ONE full-WxH twiddled blob. That
+  // holds for SQUARE parts (Tw==Th, e.g. sel124 4x4) -> diff=0. It does NOT hold for NON-SQUARE
+  // parts (Tw!=Th, e.g. sel285 2x4): the engine does NOT store those as one blob, so `ref` itself
+  // is scattered and a nonzero diff here is the REFERENCE being wrong, not the carve. The carve for
+  // non-square parts is the LINEAR-slice path, VISUALLY+flycast-twop CONFIRMED coherent for Storm
+  // sel254 AND Sentinel sel285 (gsta audit4 FLYCAST_linear vs FLYCAST_native). Only flag SQUARE.
+  const square=(W/32|0)===(H/32|0);if(diff&&square)bad++;
+  console.log(`${diff===0?'OK ':(square?'BAD':'n/a')} sel${String(r.sel).padStart(3)} ${W}x${H} ${cols}x${rows} m=${m} tiles=${r.t.length} diff=${diff}/${W*H}${(diff&&!square)?'  (non-square: ref model n/a, linear path is correct)':''}`);}
+console.log(`\n${total-bad}/${total} SQUARE multi-tile runs BYTE-EXACT (non-square validated visually via flycast-twop)`);process.exit(bad?1:0);

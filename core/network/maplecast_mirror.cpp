@@ -3873,6 +3873,24 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 		const GstaDecodedPart& pd = pit->second;
 		if (!pd.ok) continue;
 
+		// ONE-SHOT GROUND-TRUTH DUMP (MAPLECAST_DUMP_PART_SEL=<sel>): write the full-part
+		// linear index buffer (pd.lin, W*H bytes) + the raw twiddled blob (pd.raw) so the
+		// carve can be validated offline against the engine's VRAM for a chosen sel.
+		{
+			static int _psN = 0;
+			const char* psE = std::getenv("MAPLECAST_DUMP_PART_SEL");
+			const char* psD = std::getenv("MAPLECAST_DUMP_GSTA_VRAM");
+			if (psE && psD && _psN < 1 && (uint32_t)atoi(psE) == S[q].sel) {
+				_psN++;
+				char pp[600];
+				snprintf(pp, sizeof(pp), "%s/part_sel%u_lin_%dx%d.bin", psD, S[q].sel, pd.W, pd.H);
+				FILE* lf = fopen(pp, "wb"); if (lf) { fwrite(pd.lin.data(), 1, pd.lin.size(), lf); fclose(lf); }
+				snprintf(pp, sizeof(pp), "%s/part_sel%u_raw.bin", psD, S[q].sel);
+				FILE* rf = fopen(pp, "wb"); if (rf) { fwrite(pd.raw.data(), 1, pd.raw.size(), rf); fclose(rf); }
+				printf("[PARTDUMP] sel=%u W=%d H=%d linLen=%zu rawLen=%zu\n", S[q].sel, pd.W, pd.H, pd.lin.size(), pd.raw.size());
+			}
+		}
+
 		int col = colrow[2 * q], row = colrow[2 * q + 1];
 		int W = pd.W, H = pd.H;
 		// TILE SIZE m = W/cols = H/rows (engine's square per-tile pitch, finding 22-v2),
@@ -3886,13 +3904,20 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 		int mR = (rows > 0) ? (H / rows) : H;
 		if (mR < m) m = mR;
 		if (m <= 0) m = 32; if (m > 32) m = 32;
-		// --- W>32 AND H>32 SQUARE PART (m==32, cols>1, rows>1): copy the NATIVE storage chunk ---
-		// The engine stores the part as ONE full-W×H PVR rect-twiddle blob; tile (col,row)'s VRAM is
-		// the +0x200 chunk at twTile(col,row,Tw,Th), NOT a linear (col*32,row*32) slice re-twiddled
-		// (that roundtrip diverges for parts >32 in BOTH dims = the Storm-cape garbling).
-		// CONFIRMED-BY-MEASUREMENT: raw chunk == reference cell 0/16384 (sel124) / 0/8192 (sel285).
-		if (m == 32 && cols > 1 && rows > 1 && !pd.raw.empty()) {
-			int Tw = W / 32, Th = H / 32;
+		// --- W>32 AND H>32 *SQUARE* PART (m==32, cols>1, rows>1, AND Tw==Th): copy the NATIVE
+		// storage chunk --- The engine stores a SQUARE >32 part as ONE full-W×H PVR rect-twiddle
+		// blob whose 32×32 chunks follow the square twTile interleave; tile (col,row)'s VRAM is the
+		// chunk at twTile(col,row,Tw,Th). CONFIRMED-BY-MEASUREMENT: raw chunk == reference cell
+		// 0/16384 (sel124) / 0/8192 (sel285).
+		//
+		// **NON-SQUARE PART FIX (Tw != Th, e.g. sel254 W=64 H=128 -> Tw=2 Th=4): the square
+		// twTile interleave is WRONG (scatters the tiles -> the Storm-torso garbled patch).
+		// MEASURED (audit4): the full-part PAL4_TW detwiddle of sel254 is COHERENT, the LINEAR
+		// (col*32,row*32) slice of pd.lin reproduces it EXACTLY, while gstaTwTile produces the
+		// exact on-screen garble. So for Tw!=Th, FALL THROUGH to the linear-slice carve below.**
+		// CONFIRMED-BY-MEASUREMENT 2026-06-15 (audit4 carve_LINEAR vs carve_NATIVE vs full-lin).
+		int Tw = W / 32, Th = H / 32;
+		if (m == 32 && cols > 1 && rows > 1 && Tw == Th && !pd.raw.empty()) {
 			int k = gstaTwTile(col, row, gsta_log2i(Tw), gsta_log2i(Th));
 			size_t o = (size_t)k * 512;
 			if (o + 512 <= pd.raw.size()) {
@@ -4066,6 +4091,12 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 			char vpath[512]; snprintf(vpath, sizeof(vpath), "%s/gsta_vram_%u.bin", vd, vframe);
 			FILE* vf2 = fopen(vpath, "wb");
 			if (vf2) { fwrite(&vram[0x400000], 1, 0x80000, vf2); fclose(vf2); }
+			// EFFECTIVE palette (post PAL_RAM_CTRL convert) — the exact ARGB flycast samples
+			// for PAL4 index lookups. Diff vs the engine's palette to find index-0 / bank defects.
+			pal_needs_update = true; palette_update();
+			char ppath[512]; snprintf(ppath, sizeof(ppath), "%s/gsta_pal_%u.bin", vd, vframe);
+			FILE* pf2 = fopen(ppath, "wb");
+			if (pf2) { fwrite(palette32_ram, 4, 1024, pf2); fclose(pf2); }
 			char mpath[512]; snprintf(mpath, sizeof(mpath), "%s/gsta_manifest_%u.txt", vd, vframe);
 			FILE* mf = fopen(mpath, "w");
 			if (mf) {
@@ -4456,6 +4487,10 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 				char rvp[512]; snprintf(rvp, sizeof(rvp), "%s/real_vram_%u.bin", rvd, df.frameNum);
 				FILE* rf = fopen(rvp, "wb");
 				if (rf) { fwrite(&vram[0x400000], 1, 0x80000, rf); fclose(rf); }
+				pal_needs_update = true; palette_update();
+				char rpp[512]; snprintf(rpp, sizeof(rpp), "%s/real_pal_%u.bin", rvd, df.frameNum);
+				FILE* rpf = fopen(rpp, "wb");
+				if (rpf) { fwrite(palette32_ram, 4, 1024, rpf); fclose(rpf); }
 			}
 		}
 
