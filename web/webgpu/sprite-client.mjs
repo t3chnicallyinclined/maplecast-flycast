@@ -2023,22 +2023,51 @@ export class SpriteClient {
     }
 
     // --- pool objects (cape / projectile / fx) ---  (skipped while force-demo is on)
-    if (!force && this.objectsOn !== false) for (const o of (this.objects || [])) {
+    //
+    // DIAGNOSIS TOGGLE (2026-06-15) — window._satRenderMode:
+    //   'on'  (default) — draw resolvable pool sats.
+    //   'off'            — draw NO pool sats (only the 6 point-character bodies). Use this in
+    //                      the live browser to confirm the bottom-center flicker IS the sat draw.
+    // The flicker root cause was: a pool node's sel (node+0x144) indexes the node's OWN GFX2
+    // (node+0x160) — for a projectile/effect that is a DIFFERENT cell stream than the owner
+    // body's PL{cid} assembly table. The old code drew o.sid against the OWNER atlas (cid:o.cid),
+    // so whenever a transient pool sel collided with a baked body pose it slapped a WRONG body
+    // sprite at the node's foot (and vanished next frame as the sel changed) = the random-place
+    // bottom-center flicker. Engine truth (effects-client.mjs cite loc_8c030af8 / loc_8c034bea /
+    // loc_8c0344d4): the object renders via the SAME walker keyed by its OWN sel+GFX2. We only
+    // hold a BODY atlas (PL{cid}), so a sat is only correctly drawable when it shares the owner
+    // body's GFX2 — i.e. an OWNED, NON-effect sat whose GFX2 bank == the owner body's art bank.
+    // Effect-bank sats (isEffect) and owner-less / cross-bank sats are NOT drawn from the body
+    // atlas (that was the garble) — they render in the engine-faithful path only.
+    const satMode = (typeof window !== 'undefined' && window._satRenderMode) || 'on';
+    if (!force && this.objectsOn !== false && satMode !== 'off') for (const o of (this.objects || [])) {
+      // FX / effect-bank pool nodes do NOT live in any baked body atlas — drawing their sel
+      // against PL{cid} produced garbage. They render via the engine walker (render_frame), not
+      // here. Skip them in the emitter sat draw (the chief source of the bottom-center flicker).
+      if (o.isEffect) { skipSel++; continue; }
+      // Require a LIVE, ACTIVE owner body of the SAME char_id. A pool sat is part of its owner's
+      // GFX2 only when an active body of that cid is present; without one (global super / dead
+      // afterimage / cid==0 effect) the owner-atlas pairing is invalid -> skip (no garble).
       let osl = null;
       for (let s = 0; s < 6; s++) if (this.slot[s].active && this.slot[s].char_id === o.cid) { osl = this.slot[s]; break; }
-      if (!osl) continue;
+      if (!osl) { skipSel++; continue; }
+      // The sel MUST exist in the owner body's assembly table. If it does not, the old code
+      // counted it "missing" and drew nothing — but a COLLIDING sel (a real body pose index that
+      // happens to equal this node's sel) drew the wrong pose at the foot. Gate on a real hit so
+      // only an actually-owned cape/assist pose draws; anything else is left to the engine walker.
+      const oc = this.asmChars[o.cid];
+      const recs = oc && oc.asm && (oc.asm[o.sid] || oc.asm[o.sid & 0xffff] || oc.asm[String(o.sid)]);
+      if (!recs || !recs.length) { skipSel++; continue; }
       let ox = osl.screen_x, oy = osl.screen_y;
       if (this.predict !== false) { const dt = Math.min(now - osl.t, 33); if (dt > 0) { ox += osl.vx*dt; oy += osl.vy*dt; } }
       if ((ox === 0 && oy === 0) || ox < -60 || ox > 700) continue;
       const far = (o.type !== 3) && ((Math.abs(o.x - ox) + Math.abs(o.y - oy)) > 130);
       const px = far ? o.x : ox, py = far ? o.y : oy;
       const zBase = (o.type === 1) ? 1 : (o.type === 3 ? -2 : -1);
-      // Effect nodes (is_effect / GFX base in Effect Poly 0x0CED0000) -> effects atlas.
-      const isFx = !!o.isEffect;
       emitAssembly({ cid: o.cid, exx: px, eyy: py, facing: osl.facing, slot: 0, zBase,
                      engZ: (o.engZ != null ? o.engZ : undefined),   // satellite's OWN engine 1/W (node+0xE8)
                      sclX: osl.scaleX, sclY: osl.scaleY, pal12d: osl.pal12d, pal12e: osl.pal12e,
-                     blend: o.blend, fx: isFx }, o.sid);
+                     blend: o.blend, fx: false }, o.sid);
     }
 
     // Z-ORDER — GSTA wire ext 2026-06-11. MVC2's TRUE draw order is the slot/LAYER table

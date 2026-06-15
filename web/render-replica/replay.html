@@ -226,7 +226,7 @@ import createRenderFrame from './render_frame.mjs?v=scene2';
 // The SpriteClient/SpriteGPU emitter is still IMPORTED but NO LONGER DRAWS the bodies — it
 // is retained only for the (disabled) emitter cross-check; the drawn bodies ARE the transpile.
 import { ensureBodyTextures } from './body_decoder.mjs?v=scene2';
-import { SpriteClient } from '../webgpu/sprite-client.mjs?v=scene2';
+import { SpriteClient } from '../webgpu/sprite-client.mjs?v=scene2b';
 import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=scene2';
 // Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
@@ -1069,6 +1069,14 @@ const _efxRd = { u8: rdU8, u16: rdU16, u32: rdU32, f32: rdF32 };
 // the file path (showFrame) and the live path (liveApplyFrame). No-op until the atlas loads.
 function renderEffectsPass() {
     if (!ram || !effectsReady) return 0;
+    // DIAGNOSIS TOGGLE (2026-06-15) — window._fxRenderMode:
+    //   'on'  (default) — run the effects pass.
+    //   'off'           — skip it entirely. (NOTE: EffectsClient.render is currently a no-op
+    //                     diagnostic overlay — it draws NOTHING; pure effects render in the
+    //                     body/walker pass. So toggling this should NOT change the picture; that
+    //                     is itself the proof the bottom-center flicker is NOT the effects pass.)
+    const fxMode = (typeof window !== 'undefined' && window._fxRenderMode) || 'on';
+    if (fxMode === 'off') return 0;
     try { return effects.render(document.getElementById('cReplay'), _efxRd); }
     catch (e) { log('[effects] ' + e.message, 'warn'); return 0; }
 }
@@ -1669,6 +1677,33 @@ function renderBodiesPass() {
 window.__renderBodies = () => renderBodiesPass();      // headless verification hook
 window.__bodyDrawn    = () => SPRITECLIENT._asmDrawn || 0;
 window.__bodyCanvas   = () => _bodyCanvas;
+
+// SAT DIAGNOSTICS (2026-06-15) — inspect the live pool-object (cape/projectile/effect) list the
+// emitter would draw, WITH each node's resolution status, so the bottom-center flicker can be
+// pinned to live node data in the browser console:
+//   __satNodes() -> [{ cid, sid, type(layer), x, y, isEffect, ownerActive, hit, willDraw }]
+//     isEffect    : node's GFX base in the Effect-Poly bank (0x0CED0000) -> walker-path only
+//     ownerActive : an active body of this cid exists (required for owner-atlas pairing)
+//     hit         : this sid actually exists in the owner body's baked assembly table
+//     willDraw    : the post-fix emitter would draw it (NOT effect, owner active, sid hits atlas)
+// A flicker node typically shows willDraw=false with hit=false (the old garble case) OR
+// isEffect=true (effects mis-routed to the body atlas). Run while the flicker is on screen.
+window.__satNodes = () => {
+  if (!ram) return [];
+  populateObjectsFromRAM();
+  const out = [];
+  for (const o of (SPRITECLIENT.objects || [])) {
+    let ownerActive = false;
+    for (let s = 0; s < 6; s++) if (SPRITECLIENT.slot[s].active && SPRITECLIENT.slot[s].char_id === o.cid) { ownerActive = true; break; }
+    const oc = SPRITECLIENT.asmChars[o.cid];
+    const recs = oc && oc.asm && (oc.asm[o.sid] || oc.asm[o.sid & 0xffff] || oc.asm[String(o.sid)]);
+    const hit = !!(recs && recs.length);
+    out.push({ cid: o.cid, sid: o.sid, type: o.type, x: o.x, y: o.y,
+               isEffect: !!o.isEffect, ownerActive, hit,
+               willDraw: !o.isEffect && ownerActive && hit });
+  }
+  return out;
+};
 
 // ---------------------------------------------------------------- player state
 const pane = new Pane(document.getElementById('cReplay'));
