@@ -624,8 +624,16 @@ function buildHudTA(quads) {
         // (0,1,2)+(1,2,3); para5 [P,C,A,B] -> (P,C,A)+(A,C,B) via _buildIndexBuffer's parity flip
         // (== ta_util.cpp sortTriangles). No sprite-specific re-tile. window._hudQuadOrder overrides.
         // colType0 textured vertex = x,y,z(+4/8/12) u,v(+16/20) bc(+24) oc(+28).
-        const order = (typeof window !== 'undefined' && Array.isArray(window._hudQuadOrder) && window._hudQuadOrder.length === 4)
-                ? window._hudQuadOrder : [0, 1, 2, 3];
+        // IDENTITY strip [0,1,2,3] for ALL HUD quads — the flycast-grounded reconciliation
+        // (sprite-render expert review). flycast captures BOTH para4 polys (perimeter {A,B,C,D})
+        // AND para5 sprites ([P,C,A,B], cv0=P plane-closed by CaclulateSpritePlane, ta_vtx.cpp
+        // AppendSpriteVertexA/B) in RAW expansion order, draws each as GL_TRIANGLE_STRIP [0,1,2,3];
+        // our pvr2 _buildIndexBuffer reproduces the SAME two triangles byte-for-byte. The prior
+        // per-primitive [2,3,1,0]/centroid re-tiles were reconstructions of a CORRUPT sprite capture
+        // (autosort straddled glyphs) — obsolete now the server side-table captures clean [P,C,A,B].
+        // window._hudQuadOrder overrides for calibration only.
+        const ok4 = (a) => Array.isArray(a) && a.length === 4;
+        const order = (typeof window !== 'undefined' && ok4(window._hudQuadOrder)) ? window._hudQuadOrder : [0, 1, 2, 3];
         for (let k = 0; k < 4; k++) {
             const i = order[k], eos = (k === 3) ? 1 : 0;
             dv.setUint32(o, (7 << 29) | (eos << 28), true);   // paramType=7 vertex (+ EndOfStrip)
