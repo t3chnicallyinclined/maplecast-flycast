@@ -43,6 +43,7 @@
 #include "maplecast_input_sink.h"
 #include "maplecast_control_ws.h"
 #include "maplecast_compress.h"
+#include "gsta_stage.h"        // native MVC2 stage renderer (global-namespace decls)
 
 // Reserved for future palette bank probe (see NOTE in serverPublish).
 uint64_t g_activePalBanks = 0;
@@ -3621,15 +3622,18 @@ static bool gstaApplyPrefix(const uint8_t* d, size_t n)
 	return true;
 }
 
-// Build one PVR2 sprite-TA from the current scene into `out` (port of
-// wasm_entry_frame.c render_frame_ta emit loop). Returns bytes written.
-static uint32_t gstaEmitSpriteTA(std::vector<uint8_t>& out)
+// Build one PVR2 sprite-TA from the current scene, APPENDING to `out` (port of
+// wasm_entry_frame.c render_frame_ta emit loop). Appends after any already-present
+// bytes (e.g. the stage OPAQUE list) so the body TR sprites follow the OP list in the
+// TA stream. Returns the NEW TOTAL size of `out` after appending.
+static uint32_t gstaEmitSpriteTA_append(std::vector<uint8_t>& out)
 {
 	auto h16 = [](float f){ uint32_t u; memcpy(&u,&f,4); return (uint16_t)((u>>16)&0xFFFF); };
 	int n = render_frame_nscene();
 	const GstaSceneQuad* S = render_frame_scene();
-	out.assign((size_t)n * 96 + 32, 0);
-	uint8_t* base = out.data();
+	const size_t startOff = out.size();
+	out.resize(startOff + (size_t)n * 96 + 32, 0);
+	uint8_t* base = out.data() + startOff;
 	uint32_t o = 0;
 	auto W32 = [&](uint32_t off, uint32_t v){ uint8_t* q=base+off; q[0]=v;q[1]=v>>8;q[2]=v>>16;q[3]=v>>24; };
 	auto WF  = [&](uint32_t off, float f){ uint32_t u; memcpy(&u,&f,4); W32(off,u); };
@@ -4072,7 +4076,36 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 	// ---- emit the body sprite-TA (+ append HUD) ----  [fr declared early so the body
 	// texture decode can STAGE its tiles into fr.tiles, applied on the render thread] ----
 	GstaFrame fr;
-	uint32_t bodyLen = gstaEmitSpriteTA(fr.ta);
+
+	// ---- PHASE 3 STAGE (background): emit the OPAQUE polygon-TA FIRST so the FSM opens
+	// the OP list before the translucent body sprites (flycast draws OP -> PT -> TR, so the
+	// stage lands BEHIND the bodies). stage_id @0x8C289638, camera M2@0x8C2D6AD8 /
+	// M1@0x8C2D6B18 read from the seeded RAM image (both ship every frame: gstate + cam_mat).
+	// Stage geometry/control-words come from the engine-TA bake STGxx_ta.json; the textures
+	// are already resident in vram[] at each mesh TCW (the GSTA prefix shipped full VRAM).
+	{
+		auto ru32 = [&](uint32_t a)->uint32_t { a &= 0x00FFFFFFu;
+			const uint8_t* r=_gstaRam.data();
+			return (uint32_t)r[a]|((uint32_t)r[a+1]<<8)|((uint32_t)r[a+2]<<16)|((uint32_t)r[a+3]<<24); };
+		uint32_t stageId = _gstaRam[0x289638 & 0x00FFFFFF];   // u8 stage_id (page-649)
+		float M2[16], M1[16];
+		for (int i=0;i<16;i++){ uint32_t u=ru32(0x2D6AD8 + i*4); memcpy(&M2[i],&u,4); }
+		for (int i=0;i<16;i++){ uint32_t u=ru32(0x2D6B18 + i*4); memcpy(&M1[i],&u,4); }
+		::gstaStageEnsureLoaded(stageId);
+		if (::gstaStageReady()) {
+			std::vector<uint8_t> stageTa;
+			size_t sLen = ::gstaStageEmitTA(stageTa, M1, M2);
+			if (sLen) {
+				fr.ta.insert(fr.ta.end(), stageTa.begin(), stageTa.end());
+				// close the OPAQUE list before the body TR sprites open (FSM: EOL resets
+				// ta_fsm_cl to 7 so the next param's ListType re-opens a list).
+				std::vector<uint8_t> eol(32, 0); fr.ta.insert(fr.ta.end(), eol.begin(), eol.end());
+			}
+		}
+	}
+
+	size_t stagePrefixLen = fr.ta.size();      // bytes occupied by the stage OP list (+EOL)
+	size_t bodyLen = stagePrefixLen + gstaEmitSpriteTA_append(fr.ta);   // == fr.ta.size()
 
 	// ---- M3: decode body textures, STAGED into fr.tiles (applied on render thread) ----
 	int written = gstaDecodeBodies(nQuad, fr.tiles);
