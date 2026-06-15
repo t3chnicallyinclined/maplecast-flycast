@@ -212,6 +212,13 @@ export class TextureManager {
         return rgba;
     }
 
+    // BYTE-EXACT to flycast core/rend/texconv.cpp ConvertTwiddlePal4 + texture_TW (verified
+    // 0/1024 nibble diff vs the literal block-sequential port; re_kb 36 finding:
+    // hud_pal4_decode_is_correct_residual_is_vram_timing). The per-pixel inverse here
+    // (ti=twop(x,y); byte=ti>>1; nibble=ti&1) reproduces flycast's 4x4-block Morton nibble
+    // stream exactly. DO NOT "fix" this for HUD-glyph garble — that garble is a stale VRAM
+    // prefix bank (server-side), not a decode bug; changing _pal4 regresses the cleanly-
+    // decoding super-meter PAL4 sprites.
     _pal4(vram,addr,w,h,bx,by,palSel,rgba) {
         if(!this._pal)return null; const pb=palSel<<4;
         for(let y=0;y<h;y++)for(let x=0;x<w;x++){
