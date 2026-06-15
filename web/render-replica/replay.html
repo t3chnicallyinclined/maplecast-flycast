@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF) [hud:ui2-pal4ok · cockpit-live · plates1]</title>
+<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF) [hud:ui2-yorient-uvprobe · cockpit-live · plates1]</title>
 <style>
   :root { color-scheme: dark; }
   body { margin:0; background:#0c0e12; color:#cdd6e0; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; }
@@ -215,7 +215,7 @@
 // Reuses ta-parser/pvr2-renderer/texture-manager VERBATIM, and render_frame.wasm UNMODIFIED
 // (Phases 1/2 frozen byte-exact). MCRR spec: docs/RENDER-REPLICA-RECORDING-FORMAT.md.
 // ============================================================================
-import createRenderFrame from './render_frame.mjs?v=scene3';
+import createRenderFrame from './render_frame.mjs?v=scene4';
 // BODIES — THE TRANSPILE DRAWS (2026-06-14, restored): the character bodies are DRAWN BY
 // render_frame.wasm (the byte-exact transpiled engine render, geometry 0.003px vs ASMTRACE,
 // re_kb 10) -> pvr2-renderer.mjs (flycast's own rasterizer). The per-frame texture decode is
@@ -225,14 +225,14 @@ import createRenderFrame from './render_frame.mjs?v=scene3';
 // ensureBodyTextures (decode parts into pane.vram) -> pane.render(drawTA, dbgFromCfg()).
 // The SpriteClient/SpriteGPU emitter is still IMPORTED but NO LONGER DRAWS the bodies — it
 // is retained only for the (disabled) emitter cross-check; the drawn bodies ARE the transpile.
-import { ensureBodyTextures } from './body_decoder.mjs?v=scene3';
-import { SpriteClient } from '../webgpu/sprite-client.mjs?v=scene3b';
-import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=scene3';
+import { ensureBodyTextures } from './body_decoder.mjs?v=scene4';
+import { SpriteClient } from '../webgpu/sprite-client.mjs?v=scene4b';
+import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=scene4';
 // Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
 // /gfx/PL{NN}_gfx{1,2}.bin (cached by char_id). Fixes the scramble + the tag-in GFX gap (covers
 // ALL 6 char structs incl P1C2/P2C2/P1C3/P2C3 tag-ins, not just connect-active bodies).
-import { applyLocalGfx } from './local_gfx_overlay.mjs?v=scene3';
+import { applyLocalGfx } from './local_gfx_overlay.mjs?v=scene4';
 const bodyCache = {};   // decode-on-change memo, persists across frames
 
 // Phase 3 — STAGE (background): decode-from-disc cached locally (web/test-atlas/stages/
@@ -242,7 +242,7 @@ const bodyCache = {};   // decode-on-change memo, persists across frames
 // (M1@0x8C2D6B18 · M2@0x8C2D6AD8, shipped in the "cam_mat" read-set region) using the SAME
 // transform_object_122560 math the bodies use — so the stage scrolls/zooms in lockstep with
 // the fighters, NO guessed camera. Rendered as an OP pass BEHIND the bodies.
-import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=scene3';
+import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=scene4';
 
 // EFFECTS (hitsparks / electric / energy): FAITHFUL — pure-effect pool nodes (cat 1..4, GFX2
 // node+0x160 in the Effect-Poly bank 0x0CED0000) render through the SAME transpiled walker as
@@ -252,7 +252,7 @@ import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=scene3'
 // additive quad) was built on a MISLABEL: loc_8c1294c8 is a 20-byte memcpy (the anim-cell
 // loader), NOT an effect cell processor. EffectsClient is now a no-op overlay that only
 // enumerates live effect nodes for diagnostics — effects render in the WebGPU body pass.
-import { EffectsClient } from './effects-client.mjs?v=scene3';
+import { EffectsClient } from './effects-client.mjs?v=scene4';
 
 // HUD (life bars / super meter / timer / combo / portraits-name / win stars): REAL MVC2 art.
 // The timer + combo + level digits are the game's OWN boxed-digit sprites (FONT.BIN rec1,
@@ -260,7 +260,7 @@ import { EffectsClient } from './effects-client.mjs?v=scene3';
 // the engine's white-tex * per-slot vertex color (loc_8c15FFB0) reconstructed as the angled
 // team-tinted parallelogram with the red_health chip trail. Every field reads the live engine
 // addresses (the production GSTA wire's own reads). Supersedes the synthetic renderHudPass().
-import { HudClient } from './hud-client.mjs?v=scene3';
+import { HudClient } from './hud-client.mjs?v=scene4';
 
 // ============================================================================
 // LIVE CONFIG COCKPIT — window.__cfg is read EVERY frame (no reload to take
@@ -388,9 +388,9 @@ function applyCfgToBody(drawList) {
 }
 
 const W_DIR = new URL('../webgpu/', import.meta.url);
-const { PVR2Renderer }   = await import(new URL('pvr2-renderer.mjs?v=scene3', W_DIR));
-const { TAParser }       = await import(new URL('ta-parser.mjs?v=scene3', W_DIR));
-const { TextureManager } = await import(new URL('texture-manager.mjs?v=scene3', W_DIR));
+const { PVR2Renderer }   = await import(new URL('pvr2-renderer.mjs?v=scene4', W_DIR));
+const { TAParser }       = await import(new URL('ta-parser.mjs?v=scene4', W_DIR));
+const { TextureManager } = await import(new URL('texture-manager.mjs?v=scene5', W_DIR));
 // SAME zstd decoder the TA-mirror cockpit (frame-decoder.mjs) uses for the ZCST envelope.
 const { decompress }     = await import(new URL('fzstd.mjs', W_DIR));
 
@@ -672,6 +672,102 @@ function renderHudQuads() {
 }
 window.__hudQuadCount = () => hudQuads.length;     // headless verification hook
 window.__renderHudQuads = () => renderHudQuads();
+// LIVE-BROWSER PROBE: decode EVERY textured HUD quad's texture from the ACTUAL live VRAM +
+// palette this browser holds (pane.vram/pane.pvr), exactly as TextureManager does, and paint
+// each as a green-bordered thumbnail over the page + dump its data. This reveals the truth the
+// offline harness can't: a GARBAGE thumbnail => the live VRAM/palette is wrong (data); a CLEAN
+// thumbnail but garbled on-canvas => geometry/UV sub-rect. Run window.__probeHudNames().
+window.__probeHudNames = () => {
+    if (typeof pane === 'undefined' || !pane || !pane.vram || !pane.T) return 'no pane/vram yet — connect live + be in a match';
+    pane.T.setDirtyPages(null, true);
+    pane.T.updatePalette(pane.pvr);                 // current live palette
+    document.getElementById('hudprobepanel')?.remove();
+    document.getElementById('hudprobeclose')?.remove();
+    const panel = document.createElement('div'); panel.id = 'hudprobepanel';
+    panel.style.cssText = 'position:fixed;left:0;right:0;bottom:0;max-height:44vh;overflow:auto;background:rgba(8,10,14,0.97);border-top:2px solid #0f0;z-index:999998;padding:10px 8px;display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;font:11px ui-monospace,monospace;color:#cdd6e0;';
+    const close = document.createElement('button'); close.id = 'hudprobeclose'; close.textContent = 'close probe ✕';
+    close.style.cssText = 'position:fixed;right:10px;bottom:calc(44vh + 4px);z-index:999999;background:#511;color:#fff;border:1px solid #f44;border-radius:4px;padding:4px 10px;cursor:pointer;font:11px monospace;';
+    close.onclick = () => { panel.remove(); close.remove(); };
+    document.body.appendChild(panel); document.body.appendChild(close);
+    const seen = new Set(); const rows = [];
+    for (let i = 0; i < hudQuads.length; i++) {
+        const q = hudQuads[i];
+        if (!((q.pcw >> 3) & 1)) continue;          // textured only
+        const ptype = (q.pcw >>> 29) & 7;
+        const fmt = (q.tcw >>> 27) & 7, scan = (q.tcw >>> 26) & 1;
+        const addr = (q.tcw & 0x1FFFFF) << 3, palSel = (q.tcw >>> 21) & 0x3F;
+        const vq = (q.tcw >>> 30) & 1, mip = (q.tcw >>> 31) & 1;
+        const texU = (q.tsp >>> 3) & 7, texV = q.tsp & 7, w = 8 << texU, h = 8 << texV;
+        const cy = Math.round((q.y[0]+q.y[1]+q.y[2]+q.y[3])/4);
+        rows.push({ i, ptype, cy, tcw: '0x'+(q.tcw>>>0).toString(16), fmt, scan, palSel, w, h,
+                    u: q.u.map(n=>+n.toFixed(2)).join(','), v: q.v.map(n=>+n.toFixed(2)).join(',') });
+        const key = (q.tcw>>>0)+'_'+(q.tsp>>>0); if (seen.has(key)) continue; seen.add(key);
+        const cell = document.createElement('div'); cell.style.cssText = 'display:flex;gap:5px;align-items:flex-end;border:1px solid #2a3340;padding:5px;border-radius:5px;';
+        let rgba = null; try { rgba = pane.T._decode(pane.vram, addr, fmt, w, h, palSel, scan, vq, mip, texU); } catch (e) {}
+        if (rgba) {
+            const src = new Uint8Array(rgba.subarray(0, w*h*4));   // copy — _decodeBuf is reused
+            const drawCanvas = (o, ow, oh, name) => {
+                const cv = document.createElement('canvas'); cv.width = ow; cv.height = oh;
+                cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(o), ow, oh), 0, 0);
+                const sc = Math.max(1, Math.min(3, Math.floor(96 / Math.max(ow, oh))));
+                cv.style.cssText = `border:1px solid #0a0;image-rendering:pixelated;background:#222;width:${ow*sc}px;height:${oh*sc}px;`;
+                const g = document.createElement('div'); g.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:1px;';
+                const t = document.createElement('div'); t.textContent = name; t.style.cssText = 'font:9px monospace;color:#7f7;';
+                g.appendChild(cv); g.appendChild(t); return g;
+            };
+            // raw-atlas variant (full texture, no UVs) — diagnostic only
+            const mkRaw = (fh, fv, name) => {
+                const o = new Uint8Array(w*h*4);
+                for (let yy = 0; yy < h; yy++) for (let xx = 0; xx < w; xx++) {
+                    const sx = fh ? w-1-xx : xx, sy = fv ? h-1-yy : yy, s = (sy*w+sx)*4, d = (yy*w+xx)*4;
+                    o[d]=src[s]; o[d+1]=src[s+1]; o[d+2]=src[s+2]; o[d+3]=src[s+3];
+                }
+                return drawCanvas(o, w, h, name);
+            };
+            // ENGINE-ORIENTED thumbnail = the texture sampled through THIS quad's captured UVs,
+            // exactly as buildHudTA/pvr2 draws it on screen. This is the truthful "what the user
+            // sees" view: the FONT/digit atlas is stored upside-down in VRAM and the engine flips
+            // it via these UVs (e.g. quad's top screen-y maps to a HIGHER v); portraits are stored
+            // upright. Sampling through UVs renders BOTH upright WITHOUT touching _decode/twop
+            // (which is byte-exact to flycast texconv.cpp; a global decode flip would regress the
+            // already-upright portraits and double-flip the names). The screen-space quad's top is
+            // min-y (corners are TA submit order); we map the output rows top->bottom to the UV
+            // corners ordered by their corner screen-y so 'orig' = upright on-screen appearance.
+            const mkUV = () => {
+                // pick the two corners with the smallest screen-y (top edge) and two largest (bottom)
+                const idxByY = [0,1,2,3].sort((a,b)=> q.y[a]-q.y[b]);
+                const tL=idxByY[0], tR=idxByY[1], bL=idxByY[2], bR=idxByY[3];
+                // order top corners by x so left/right are consistent
+                const [t0,t1] = q.x[tL] <= q.x[tR] ? [tL,tR] : [tR,tL];
+                const [b0,b1] = q.x[bL] <= q.x[bR] ? [bL,bR] : [bR,bL];
+                const TW=Math.max(2,Math.min(96,Math.round(Math.hypot(q.x[t1]-q.x[t0],q.y[t1]-q.y[t0]))+1));
+                const TH=Math.max(2,Math.min(96,Math.round(Math.hypot(q.x[b0]-q.x[t0],q.y[b0]-q.y[t0]))+1));
+                const o = new Uint8Array(TW*TH*4);
+                for (let yy=0; yy<TH; yy++) { const fy=yy/(TH-1||1);
+                    for (let xx=0; xx<TW; xx++) { const fx=xx/(TW-1||1);
+                        // bilinear in UV across the quad: top edge t0->t1, bottom edge b0->b1
+                        const uTop=q.u[t0]+(q.u[t1]-q.u[t0])*fx, vTop=q.v[t0]+(q.v[t1]-q.v[t0])*fx;
+                        const uBot=q.u[b0]+(q.u[b1]-q.u[b0])*fx, vBot=q.v[b0]+(q.v[b1]-q.v[b0])*fx;
+                        const uu=uTop+(uBot-uTop)*fy, vv=vTop+(vBot-vTop)*fy;
+                        const sx=Math.max(0,Math.min(w-1,Math.round(uu*(w-1)))), sy=Math.max(0,Math.min(h-1,Math.round(vv*(h-1))));
+                        const s=(sy*w+sx)*4, d=(yy*TW+xx)*4;
+                        o[d]=src[s]; o[d+1]=src[s+1]; o[d+2]=src[s+2]; o[d+3]=src[s+3];
+                    }
+                }
+                return drawCanvas(o, TW, TH, 'orig (UV)');
+            };
+            cell.appendChild(mkUV());                 // 'orig' = engine-oriented (UV-sampled) — the GATE
+            cell.appendChild(mkRaw(false, false, 'raw'));
+            cell.appendChild(mkRaw(false, true,  'raw·flipV'));
+        } else { const x = document.createElement('div'); x.textContent = '(no decode)'; x.style.color = '#f88'; cell.appendChild(x); }
+        const lbl = document.createElement('div'); lbl.textContent = `p${ptype} fmt${fmt}`;
+        lbl.style.cssText = `writing-mode:vertical-lr;font:9px monospace;color:${ptype === 5 ? '#ff0' : '#8cf'};`;
+        cell.appendChild(lbl);
+        panel.appendChild(cell);
+    }
+    console.table(rows);
+    return `probed ${rows.length} textured quads (${seen.size} unique textures). 'orig (UV)' = the texture sampled through the quad's OWN engine UVs = how it draws on screen (names + portraits both upright; the font atlas is stored upside-down in VRAM and the engine flips it via UVs, the portrait atlas is stored upright). 'raw' = the full atlas with no UVs (font reads upside-down — EXPECTED, not a bug; decode/twop is byte-exact to flycast). Screenshot the panel, then click "close probe".`;
+};
 
 // ---------------------------------------------------------------- pvr2 pane
 class Pane {
@@ -708,7 +804,7 @@ function synthSnap(w, h) {
 
 // ---------------------------------------------------------------- render_frame.wasm
 let frameMod;
-async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=scene3' : p }); } return frameMod; }
+async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=scene4' : p }); } return frameMod; }
 function transpiledTA(ram) {
     const M = frameMod;
     const ramPtr = M._malloc(ram.length); M.HEAPU8.set(ram, ramPtr);

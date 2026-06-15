@@ -1,6 +1,20 @@
 // texture-manager.mjs — Dreamcast texture decode + WebGPU texture cache
 // DIRTY-PAGE-AWARE: only re-decodes textures whose VRAM pages actually changed
 
+// TWIDDLE / DETWIDDLE — BYTE-IDENTICAL to flycast core/rend/texconv.cpp twiddle_slow (L37-66),
+// the detwiddle table build (L69-79: detwiddle[0][s][i]=twiddle_slow(i,0,1024,1<<s);
+// detwiddle[1][s][i]=twiddle_slow(0,i,1<<s,1024)), and twop (L169-171). Verified line-by-line:
+// our tw() emits the Y bit then the X bit each loop iteration, same as twiddle_slow; the table
+// args + twop summation match exactly. THERE IS NO Y-INVERSION HERE.
+//   DO NOT add a global / per-format decode V-flip. The HUD orientation probe (replay.html
+// __probeHudNames) shows the FONT/digit/name atlas decoding UPSIDE-DOWN at 'raw' while portraits
+// decode UPRIGHT — that is the VRAM STORAGE orientation, not a decode bug: the engine stores the
+// font atlas bottom-up and flips it on screen via each quad's captured UVs (digit quad: top
+// screen-y -> higher v), while the portrait atlas is stored upright. buildHudTA passes those UVs
+// through, so the real on-screen render is already upright for BOTH (proven: the engine-UV
+// thumbnail 'orig (UV)' is upright for names AND portraits). A global decode flip would
+// double-flip the names and break the already-upright portraits. re_kb 36 finding:
+// hud_yorientation_is_vram_storage_not_decode.
 const detwiddle = [new Array(11), new Array(11)];
 (() => {
     function tw(x, y, xs, ys) {
