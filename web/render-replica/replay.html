@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF) [hud:ui2-yorient-uvprobe · cockpit-live · plates1]</title>
+<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF) [hud:ui2-yorient-uvprobe · cockpit-live · debug-knobs1]</title>
 <style>
   :root { color-scheme: dark; }
   body { margin:0; background:#0c0e12; color:#cdd6e0; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; }
@@ -186,6 +186,94 @@
       </div>
     </details>
 
+    <!-- ════════════════════════════════════════════════════════════════════
+         LIVE DEBUG KNOBS — every window._*/__* render toggle the session drives
+         from the console, exposed as UI. Each sets the global LIVE (read next
+         frame, NO reload). Grouped by subsystem. Knobs flagged DEAD in this
+         build's body path are marked. Wired by bindKnob() at the bottom.
+         ════════════════════════════════════════════════════════════════════ -->
+    <details open>
+      <summary>⚙ Live Debug Knobs (no reload)</summary>
+      <div class="knobs">
+
+        <div class="knob"><label style="flex:1;color:#7fd1ff;">BODIES</label></div>
+        <div class="knob"><label>body draw path</label>
+          <select id="kb_bodyMode" data-knob="__bodyMode" data-kind="enum">
+            <option value="emitter">emitter (SpriteGPU) — DEFAULT/DRAWS</option>
+            <option value="render_frame">render_frame (pvr2 TA)</option>
+          </select></div>
+        <div class="knob chk"><input type="checkbox" id="kb_emitterPort" data-knob="_emitterPort" data-kind="bool" checked><label>emitter port (loc_8c033e90 faithful)</label></div>
+        <div class="knob chk"><input type="checkbox" id="kb_emitZByEngine" data-knob="_emitZByEngine" data-kind="bool" checked><label>z-sort by engine 1/W (node+0xE8)</label></div>
+        <div class="knob chk"><input type="checkbox" id="kb_emitZByDepth" data-knob="_emitZByDepth" data-kind="bool" checked><label>z-sort by foot depth (fallback)</label></div>
+        <div class="knob chk"><input type="checkbox" id="kb_emitZByLayer" data-knob="_emitZByLayer" data-kind="bool" checked><label>z-sort by slot-table layer</label></div>
+        <div class="knob chk"><input type="checkbox" id="kb_emitFlipY" data-knob="_emitFlipY" data-kind="bool" checked><label>emitter texV/U upright mirror</label></div>
+        <div class="knob chk"><input type="checkbox" id="kb_emitPartFlipX" data-knob="_emitPartFlipX" data-kind="bool" checked><label>per-part texU flip (62/68 byte-id)</label></div>
+        <div class="knob chk"><input type="checkbox" id="kb_emitFaceInv" data-knob="_emitFaceInv" data-kind="bool" checked><label>facing invert (raw-byte sense A/B)</label></div>
+        <div class="knob chk"><input type="checkbox" id="kb_emitForce" data-knob="_emitForce" data-kind="bool"><label>force-static pose demo</label></div>
+        <div class="knob chk"><input type="checkbox" id="kb_emitDbg" data-knob="_emitDbg" data-kind="bool"><label>emitter trace log (gated)</label></div>
+
+        <div class="knob"><label style="flex:1;color:#7fd1ff;">SATELLITES (capes/projectiles)</label></div>
+        <div class="knob"><label>sat render</label>
+          <select id="kb_satRenderMode" data-knob="_satRenderMode" data-kind="enum">
+            <option value="on">on (draw resolvable sats)</option>
+            <option value="off">off (only 6 bodies)</option>
+          </select></div>
+        <div class="knob"><label>object anchor</label>
+          <select id="kb_objAnchor" data-knob="_objAnchor" data-kind="enum">
+            <option value="own">own origin (+0xE0/E4) — TRUTH</option>
+            <option value="auto">auto (proximity — REJECTED)</option>
+          </select></div>
+        <div class="knob chk"><input type="checkbox" id="kb_objDiag" data-knob="_objDiag" data-kind="bool"><label>object anchor diag log (gated)</label></div>
+        <div class="knob"><label>sat dx nudge</label>
+          <input type="range" id="kb_objDx" data-knob="_objCfg.dx" data-kind="objnum" min="-128" max="128" step="1" value="0">
+          <span class="val" id="vkb_objDx">0</span></div>
+        <div class="knob"><label>sat dy nudge</label>
+          <input type="range" id="kb_objDy" data-knob="_objCfg.dy" data-kind="objnum" min="-128" max="128" step="1" value="0">
+          <span class="val" id="vkb_objDy">0</span></div>
+        <div class="knob"><label>sat scale ×</label>
+          <input type="range" id="kb_objScale" data-knob="_objCfg.scale" data-kind="objnum" min="0.25" max="3" step="0.05" value="1">
+          <span class="val" id="vkb_objScale">1.00</span></div>
+
+        <div class="knob"><label style="flex:1;color:#7fd1ff;">HUD</label></div>
+        <div class="knob"><label>HUD render mode</label>
+          <select id="kb_hudRenderMode" data-knob="_hudRenderMode" data-kind="enum">
+            <option value="engine">engine (all quads)</option>
+            <option value="no-sprites">no-sprites (para4 only)</option>
+            <option value="sprites-only">sprites-only (para5 only)</option>
+          </select></div>
+        <div class="knob"><label>HUD sampler</label>
+          <select id="kb_hudSampler" data-knob="_hudSampler" data-kind="enum">
+            <option value="">default (linear+wrap)</option>
+            <option value="nc">nc (nearest + clamp)</option>
+          </select></div>
+        <div class="knob"><label>HUD quad order</label>
+          <input type="text" id="kb_hudQuadOrder" data-knob="_hudQuadOrder" data-kind="int4"
+                 placeholder="0,1,2,3" style="flex:1;background:#0c0e12;color:#cdd6e0;border:1px solid #33425a;border-radius:4px;padding:3px 5px;font:inherit;"></div>
+        <div class="knob"><label>inf-time mode (hex)</label>
+          <input type="number" id="kb_infTimeMode" data-knob="_infTimeMode" data-kind="num" min="0" max="255" step="1" value="2"
+                 style="width:64px;"></div>
+
+        <div class="knob"><label style="flex:1;color:#7fd1ff;">EFFECTS</label></div>
+        <div class="knob"><label>effects pass</label>
+          <select id="kb_fxRenderMode" data-knob="_fxRenderMode" data-kind="enum">
+            <option value="on">on (run pass — currently no-op draw)</option>
+            <option value="off">off (skip pass)</option>
+          </select></div>
+
+        <div class="knob"><label style="flex:1;color:#7fd1ff;">DIAGNOSTICS (console-dump buttons)</label></div>
+        <div class="knobrow">
+          <button id="kd_probeHud">__probeHudNames()</button>
+          <button id="kd_satNodes">__satNodes()</button>
+          <button id="kd_stageWhy">__stageWhy()</button>
+          <button id="kd_stageInfo">__stageInfo()</button>
+          <button id="kd_effectNodes">__effectNodes()</button>
+        </div>
+
+        <div class="knob"><label style="flex:1;color:#ff8a8a;">DEAD in emitter mode (pvr2-only — switch body draw path to render_frame to use)</label></div>
+        <div class="knob"><span style="flex:1;color:#7a8694;font-size:11px;">"Render — lists &amp; depth" + "Render — blend &amp; cull" + Geometry/Decode TA knobs above drive the render_frame→pvr2 path (dbgFromCfg / cockpitProcess). SpriteGPU ignores dbg (resScale only). They MOVE pixels only under body-draw-path = render_frame.</span></div>
+      </div>
+    </details>
+
     <details open>
       <summary>Per-part position readout (render_frame computed)</summary>
       <div class="roHdr">
@@ -215,7 +303,7 @@
 // Reuses ta-parser/pvr2-renderer/texture-manager VERBATIM, and render_frame.wasm UNMODIFIED
 // (Phases 1/2 frozen byte-exact). MCRR spec: docs/RENDER-REPLICA-RECORDING-FORMAT.md.
 // ============================================================================
-import createRenderFrame from './render_frame.mjs?v=scene4';
+import createRenderFrame from './render_frame.mjs?v=scene5';
 // BODIES — THE TRANSPILE DRAWS (2026-06-14, restored): the character bodies are DRAWN BY
 // render_frame.wasm (the byte-exact transpiled engine render, geometry 0.003px vs ASMTRACE,
 // re_kb 10) -> pvr2-renderer.mjs (flycast's own rasterizer). The per-frame texture decode is
@@ -225,14 +313,14 @@ import createRenderFrame from './render_frame.mjs?v=scene4';
 // ensureBodyTextures (decode parts into pane.vram) -> pane.render(drawTA, dbgFromCfg()).
 // The SpriteClient/SpriteGPU emitter is still IMPORTED but NO LONGER DRAWS the bodies — it
 // is retained only for the (disabled) emitter cross-check; the drawn bodies ARE the transpile.
-import { ensureBodyTextures } from './body_decoder.mjs?v=scene4';
-import { SpriteClient } from '../webgpu/sprite-client.mjs?v=scene4b';
-import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=scene4';
+import { ensureBodyTextures } from './body_decoder.mjs?v=scene5';
+import { SpriteClient } from '../webgpu/sprite-client.mjs?v=scene5b';
+import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=scene5';
 // Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
 // truncated) per-char GFX1/GFX2 in the RAM image with the COMPLETE disc art fetched from
 // /gfx/PL{NN}_gfx{1,2}.bin (cached by char_id). Fixes the scramble + the tag-in GFX gap (covers
 // ALL 6 char structs incl P1C2/P2C2/P1C3/P2C3 tag-ins, not just connect-active bodies).
-import { applyLocalGfx } from './local_gfx_overlay.mjs?v=scene4';
+import { applyLocalGfx } from './local_gfx_overlay.mjs?v=scene5';
 const bodyCache = {};   // decode-on-change memo, persists across frames
 
 // Phase 3 — STAGE (background): decode-from-disc cached locally (web/test-atlas/stages/
@@ -242,7 +330,7 @@ const bodyCache = {};   // decode-on-change memo, persists across frames
 // (M1@0x8C2D6B18 · M2@0x8C2D6AD8, shipped in the "cam_mat" read-set region) using the SAME
 // transform_object_122560 math the bodies use — so the stage scrolls/zooms in lockstep with
 // the fighters, NO guessed camera. Rendered as an OP pass BEHIND the bodies.
-import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=scene4';
+import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=scene5';
 
 // EFFECTS (hitsparks / electric / energy): FAITHFUL — pure-effect pool nodes (cat 1..4, GFX2
 // node+0x160 in the Effect-Poly bank 0x0CED0000) render through the SAME transpiled walker as
@@ -252,7 +340,7 @@ import { StageClient, STAGE_PVRSNAP } from '../webgpu/stage-client.mjs?v=scene4'
 // additive quad) was built on a MISLABEL: loc_8c1294c8 is a 20-byte memcpy (the anim-cell
 // loader), NOT an effect cell processor. EffectsClient is now a no-op overlay that only
 // enumerates live effect nodes for diagnostics — effects render in the WebGPU body pass.
-import { EffectsClient } from './effects-client.mjs?v=scene4';
+import { EffectsClient } from './effects-client.mjs?v=scene5';
 
 // HUD (life bars / super meter / timer / combo / portraits-name / win stars): REAL MVC2 art.
 // The timer + combo + level digits are the game's OWN boxed-digit sprites (FONT.BIN rec1,
@@ -260,21 +348,29 @@ import { EffectsClient } from './effects-client.mjs?v=scene4';
 // the engine's white-tex * per-slot vertex color (loc_8c15FFB0) reconstructed as the angled
 // team-tinted parallelogram with the red_health chip trail. Every field reads the live engine
 // addresses (the production GSTA wire's own reads). Supersedes the synthetic renderHudPass().
-import { HudClient } from './hud-client.mjs?v=scene4';
+import { HudClient } from './hud-client.mjs?v=scene5';
 
 // ============================================================================
 // LIVE CONFIG COCKPIT — window.__cfg is read EVERY frame (no reload to take
-// effect). As of the 2026-06-14 TRANSPILE-DRAWS restore, the DRAWN bodies come
-// from render_frame.wasm's TA -> pvr2, so the knobs route onto THAT path:
-//   • GEOMETRY/DECODE knobs (anchorDX/DY, scale, flipP1/P2, isoPart, revOrder,
-//     texMirror) post-process render_frame's TA in cockpitProcess (applyTexMirrorTA
-//     / applyGeomTA / applyIsoPartTA / applyRevOrderTA) BEFORE it is drawn.
-//   • RENDER knobs (lists/depth/blend/cull) flow through pvr2-renderer's `dbg`
-//     (dbgFromCfg) into pane.render.
-// Every knob therefore moves a drawn body pixel on the render_frame draw. The
-// SpriteClient-emitter routing (cfgToBodyGlobals/applyCfgToBody) is now DEAD —
-// the emitter no longer draws. The transpiled render_frame geometry / server
-// geometry are not re-derived here (the SH4 agent owns those).
+// effect). ⚠ AUDIT 2026-06-15 — KNOW WHICH BODY PATH DRAWS:
+//   The RUNNING DEFAULT is window.__bodyMode='emitter' (set below). In emitter
+//   mode the DRAWN bodies are SpriteClient.buildEmitterDrawList -> SpriteGPU.render
+//   (renderBodiesPass), and SpriteGPU IGNORES the pvr2 `dbg` object (it reads only
+//   dbg.resScale). render_frame's TA + cockpitProcess still COMPUTE every frame
+//   (readout/overlay/validator) but DO NOT DRAW unless ?bodymode=render_frame.
+//   THEREFORE, in the default emitter mode:
+//     • LIVE __cfg knobs = the ones cfgToBodyGlobals()/applyCfgToBody() route onto
+//       the emitter drawList (texMirror, flipForce, flipP1/P2, scale, anchorDX/DY,
+//       carveSide, isoPart, widePart, colRev, inTileMir, revOrder).
+//     • DEAD __cfg knobs (no pixel effect in emitter mode) = the pvr2 `dbg` set:
+//       drawOpaque/Punch/Trans, depthOverride/depthFunc, trDepthWrite, noSort,
+//       singlePass, blendOverride/Src/Dst, ptThresh, cull, wire. These ONLY move
+//       pixels under ?bodymode=render_frame (pane.render(drawTA, dbgFromCfg())).
+//   So the cockpit's "Render — lists & depth" + "Render — blend & cull" sections
+//   are NO-OPs at the default body path — use the "Live Debug Knobs" panel's
+//   body-draw-path select to switch to render_frame before expecting them to bite.
+// The transpiled render_frame geometry / server geometry are not re-derived here
+// (the SH4 agent owns those).
 // ============================================================================
 const __cfg = {
     // geometry / position
@@ -388,9 +484,9 @@ function applyCfgToBody(drawList) {
 }
 
 const W_DIR = new URL('../webgpu/', import.meta.url);
-const { PVR2Renderer }   = await import(new URL('pvr2-renderer.mjs?v=scene4', W_DIR));
-const { TAParser }       = await import(new URL('ta-parser.mjs?v=scene4', W_DIR));
-const { TextureManager } = await import(new URL('texture-manager.mjs?v=scene5', W_DIR));
+const { PVR2Renderer }   = await import(new URL('pvr2-renderer.mjs?v=scene5', W_DIR));
+const { TAParser }       = await import(new URL('ta-parser.mjs?v=scene5', W_DIR));
+const { TextureManager } = await import(new URL('texture-manager.mjs?v=scene7', W_DIR));
 // SAME zstd decoder the TA-mirror cockpit (frame-decoder.mjs) uses for the ZCST envelope.
 const { decompress }     = await import(new URL('fzstd.mjs', W_DIR));
 
@@ -812,7 +908,7 @@ function synthSnap(w, h) {
 
 // ---------------------------------------------------------------- render_frame.wasm
 let frameMod;
-async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=scene4' : p }); } return frameMod; }
+async function ensureWasm() { if (!frameMod) { log('Instantiating render_frame.wasm…'); frameMod = await createRenderFrame({ locateFile: (p) => p.endsWith('.wasm') ? p + '?v=scene5' : p }); } return frameMod; }
 function transpiledTA(ram) {
     const M = frameMod;
     const ramPtr = M._malloc(ram.length); M.HEAPU8.set(ram, ramPtr);
@@ -2318,6 +2414,67 @@ const cfgReset = () => {
 document.getElementById('cfgReset').onclick = cfgReset;
 window.__cfgReset = cfgReset;             // headless: isolate each knob test
 window.__dbgFromCfg = dbgFromCfg;         // headless: prove render-list/blend knobs reach pvr2 dbg
+
+// ============================================================================
+// LIVE DEBUG-KNOB WIRING — bind every [data-knob]/[data-kind] control to its
+// window._*/__* global. Sets the global LIVE; the render reads it next frame
+// (no reload). data-kind: bool|enum|num|int4|objnum. objnum writes into a
+// nested object knob (e.g. _objCfg.dx). Each change re-renders the held frame
+// (file mode) so the effect is instantly visible; live mode picks it up on the
+// next streamed frame. Initial DOM is SEEDED FROM the current global so the UI
+// reflects the running default (not a stale HTML attribute).
+// ============================================================================
+function knobGet(path) {
+    const parts = path.split('.');
+    let o = window;
+    for (const p of parts) { if (o == null) return undefined; o = o[p]; }
+    return o;
+}
+function knobSet(path, v) {
+    const parts = path.split('.');
+    if (parts.length === 1) { window[parts[0]] = v; return; }
+    let o = window;
+    for (let i = 0; i < parts.length - 1; i++) { o[parts[i]] = o[parts[i]] || {}; o = o[parts[i]]; }
+    o[parts[parts.length - 1]] = v;
+}
+function bindKnob(el) {
+    const knob = el.dataset.knob, kind = el.dataset.kind;
+    if (!knob) return;
+    const valEl = document.getElementById('vkb_' + el.id.replace(/^kb_/, ''));
+    // seed UI from the live global (or the global from the UI default if undefined)
+    const cur = knobGet(knob);
+    if (kind === 'bool')      { if (cur != null) el.checked = !!cur; else knobSet(knob, el.checked); }
+    else if (kind === 'enum') { if (cur != null) el.value = String(cur); else knobSet(knob, el.value); }
+    else if (kind === 'num')  { if (cur != null) el.value = String(cur); else knobSet(knob, parseFloat(el.value)); }
+    else if (kind === 'objnum'){ if (cur != null) el.value = String(cur); else knobSet(knob, parseFloat(el.value)); }
+    else if (kind === 'int4') { if (Array.isArray(cur)) el.value = cur.join(','); }
+    const apply = () => {
+        if (kind === 'bool')        knobSet(knob, el.checked);
+        else if (kind === 'enum')   knobSet(knob, el.value);
+        else if (kind === 'num')    knobSet(knob, parseFloat(el.value));
+        else if (kind === 'objnum') knobSet(knob, parseFloat(el.value));
+        else if (kind === 'int4')   {
+            const m = el.value.split(/[,\s]+/).map(s => parseInt(s, 10)).filter(n => Number.isFinite(n));
+            knobSet(knob, m.length === 4 ? m : undefined);   // invalid -> clear (path uses [0,1,2,3])
+        }
+        if (valEl) { const v = knobGet(knob); valEl.textContent = (kind === 'objnum' && el.id === 'kb_objScale') ? (+v).toFixed(2) : v; }
+        cockpitRerender();
+    };
+    el.addEventListener(kind === 'bool' || kind === 'enum' ? 'change' : 'input', apply);
+}
+document.querySelectorAll('#cockpit [data-knob]').forEach(bindKnob);
+// diagnostic dump buttons — fire the existing window.__* probes, echo to the log + console.
+function wireDiag(id, fn, name) {
+    const b = document.getElementById(id); if (!b) return;
+    b.onclick = () => { try { const r = window[fn] ? window[fn]() : '(' + fn + ' not ready)';
+        log('[' + name + '] ' + (typeof r === 'string' ? r : JSON.stringify(r, null, 0)), 'hl'); console.log(name, r); }
+        catch (e) { log('[' + name + '] ' + e.message, 'warn'); } };
+}
+wireDiag('kd_probeHud',    '__probeHudNames', 'probeHud');
+wireDiag('kd_satNodes',    '__satNodes',      'satNodes');
+wireDiag('kd_stageWhy',    '__stageWhy',      'stageWhy');
+wireDiag('kd_stageInfo',   '__stageInfo',     'stageInfo');
+wireDiag('kd_effectNodes', '__effectNodes',   'effectNodes');
 
 // expose for headless verification
 window.__loadMCRR = loadMCRR;
