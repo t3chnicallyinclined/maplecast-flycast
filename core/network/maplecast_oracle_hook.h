@@ -240,4 +240,17 @@ const HudQuad* mc_oracle_hudQuads(int* outCount);
 // rend_context& in the .cpp). No-op when MAPLECAST_HUD_TA is unset.
 void mc_oracle_collectHud(void* rc);
 
+// ---- ParaType-5 sprite expansion-vert side table (36g fix) ----------------
+// PVR sprites (TA ParaType 5) are expanded by AppendSpriteVertexA/B into 4 verts
+// [P,C,A,B] = cv[0..3], with cv0 closed by CaclulateSpritePlane. In the autosort-
+// translucent HUD pass, reading rc.verts[pp.first..] post-parse yields GARBAGE for
+// ~2/3 of sprites (re_kb 36g: plane-conformance 10/32). Root fix: capture the 4
+// CLEAN closed cv verts at EXPANSION time, in submission order, and have
+// collectHudQuads consume them in order for sprite polys (immune to any post-parse
+// idx/pp permutation). Called from ta_vtx.cpp AppendSpriteVertexB. READ-ONLY w.r.t.
+// the engine; cheap (one bounded vector). Each entry is 4 corners (P,C,A,B order)
+// of x,y,u,v + ARGB col. No-op cost when HUD-TA disabled (push is gated below).
+void mc_oracle_spriteVertReset();
+void mc_oracle_spriteVertPush(const void* cv4 /* const Vertex[4], cv[0..3] */);
+
 }

@@ -953,6 +953,36 @@ static const int MAX_HUD = 256;
 static HudQuad s_hud[MAX_HUD];
 static int     s_nhud = 0;
 
+// ---- ParaType-5 sprite expansion-vert side table (36g fix) ----------------
+// Filled at AppendSpriteVertexB time (ta_vtx.cpp) with the 4 CLOSED cv verts
+// [P,C,A,B] = cv[0..3] in TA submission order; consumed in order by collectHudQuads
+// for sprite (ParaType-5) polys. The autosort-translucent tr list preserves
+// submission order (sortTriangles permutes rc.idx, NOT the PolyParam vector;
+// sortPolyParams runs only under PerStripSorting, which is OFF headless), so
+// ordinal matching is exact. Reset every parse. Bounded; overflow drops silently.
+struct SprVert { float x[4], y[4], u[4], v[4]; u32 col[4]; };
+static const int MAX_SPRVERT = 1024;
+static SprVert s_sprVert[MAX_SPRVERT];
+static int     s_nSprVert = 0;
+
+void mc_oracle_spriteVertReset() { s_nSprVert = 0; }
+
+void mc_oracle_spriteVertPush(const void* cv4)
+{
+	if (!mc_hudTaEnabled) return;            // only needed for the HUD capture
+	if (s_nSprVert >= MAX_SPRVERT) return;   // bounded; drop on overflow
+	const Vertex* cv = (const Vertex*)cv4;   // cv[0]=P cv[1]=C cv[2]=A cv[3]=B
+	SprVert& e = s_sprVert[s_nSprVert++];
+	for (int c = 0; c < 4; c++) {
+		e.x[c] = cv[c].x; e.y[c] = cv[c].y;
+		e.u[c] = cv[c].u; e.v[c] = cv[c].v;
+		// Repack flycast's per-channel col[] (R,G,B,A) -> engine ARGB8888 word,
+		// identical to the HudQuad packing below.
+		e.col[c] = ((u32)cv[c].col[3] << 24) | ((u32)cv[c].col[0] << 16)
+		         | ((u32)cv[c].col[1] <<  8) |  (u32)cv[c].col[2];
+	}
+}
+
 // CHARQ accessor snapshot — published at the END of frameFlush (before the per-frame
 // statics reset) so the CHARQ emit block in serverPublish can read this frame's
 // object identities + the kept-sprite-quad -> object map. s_screen index == the
@@ -3003,27 +3033,48 @@ static void collectHudQuads(rend_context& rc)
 		fprintf(s_hf, "=== HUD PASS %d  op=%zu pt=%zu tr=%zu ===\n", s_hqPasses,
 		        rc.global_param_op.size(), rc.global_param_pt.size(), rc.global_param_tr.size());
 
+	// Running ParaType-5 sprite ordinal. Sprites only ever land in the translucent
+	// (tr) list, and the tr PolyParam vector preserves TA submission order (sortTriangles
+	// permutes rc.idx, NOT the vector; sortPolyParams is OFF headless). So the Nth sprite
+	// poly we walk here is the Nth sprite pushed to s_sprVert at expansion time -> exact
+	// ordinal match. (36g fix: never read post-parse rc.verts[pp.first..] for sprites.)
+	int spriteOrd = 0;
+
 	auto collect = [&](std::vector<PolyParam>& lst, int listType) {
 		for (PolyParam& pp : lst) {
 			if (s_nhud >= MAX_HUD) return;
 			if (pp.count < 3) continue;
 			u32 pcw = pp.pcw.full, tcw = pp.tcw.full, tsp = pp.tsp.full;
 
-			// Gather indices into rc.verts for THIS poly, in submit order, handling
-			// BOTH the rc.idx-indexed case (op/pt + non-autosort tr) and the autosort
-			// rc.verts-direct case (same dual walk collectScreenQuads uses).
-			u32 vidx[4]; int nv = 0;
+			// 4 submit-order corners (P,C,A,B for sprites; strip corners otherwise) +
+			// their bbox.
+			float cx[4], cy4[4], cu[4], cv4[4]; u32 ccol[4]; int nv = 0;
 			float mnX=1e9f,mxX=-1e9f,mnY=1e9f,mxY=-1e9f;
-			int seen = 0;
-			// ParaType-5 (PVR Sprite, pcw bits29-31==5) — the HUD character-NAME glyphs. For these
-			// the rc.idx path is WRONG: in an autosort-translucent pass sortTriangles (ta_util.cpp)
-			// leaves pp.first as a VERTEX offset but appends DEPTH-SORTED indices to rc.idx starting
-			// at idxSize, so rc.idx[pp.first..] points at arbitrary sorted triangles from OTHER polys
-			// -> the captured 4 verts merge two adjacent glyphs / collapse. Sprite verts are the 4
-			// CONTIGUOUS expanded verts at rc.verts[pp.first..+4] (AppendSpriteVertexA/B), so read
-			// them DIRECTLY. (Fixes the HUD name "diagonal streak" garble client-side, re_kb 36f.)
+
+			// ParaType-5 (PVR Sprite, pcw bits29-31==5) — the HUD character-NAME glyphs.
+			// 36g ROOT FIX: reading rc.verts[pp.first..] (or rc.idx[pp.first..]) post-parse
+			// gives GARBAGE for ~2/3 of sprites (plane-conformance 10/32) because the
+			// autosort-translucent pass's index assembly leaves these 4 verts non-trivially
+			// addressable. Instead consume the CLEAN closed cv[0..3]=[P,C,A,B] captured at
+			// AppendSpriteVertexB EXPANSION time (s_sprVert, submission order). Immune to
+			// any post-parse idx/pp permutation.
 			const bool isSpritePara = ((pcw >> 29) & 7) == 5;
-			if (!isSpritePara) {   // primary: pp.first/.count index rc.idx (op/pt + non-autosort tr)
+			if (isSpritePara) {
+				if (spriteOrd >= s_nSprVert) continue;   // ran out of captured sprites (shouldn't)
+				const SprVert& e = s_sprVert[spriteOrd++];
+				for (int c = 0; c < 4; c++) {
+					cx[c]=e.x[c]; cy4[c]=e.y[c]; cu[c]=e.u[c]; cv4[c]=e.v[c]; ccol[c]=e.col[c];
+					if (std::isnan(e.x[c]) || fabsf(e.x[c]) > 1e25f
+					    || std::isnan(e.y[c]) || fabsf(e.y[c]) > 1e25f) continue;
+					if (e.x[c]<mnX)mnX=e.x[c]; if (e.x[c]>mxX)mxX=e.x[c];
+					if (e.y[c]<mnY)mnY=e.y[c]; if (e.y[c]>mxY)mxY=e.y[c];
+				}
+				nv = 4;
+			} else {
+				// Non-sprite poly: pp.first/.count index rc.idx (op/pt + non-autosort tr)
+				// after makeIndex/makePrimRestartIndex. Fall back to direct rc.verts walk
+				// if seen==0 (e.g. autosort tr triangles whose pp wasn't makeIndex'd).
+				u32 vidx[4]; int seen = 0;
 				u32 iend = pp.first + pp.count; if (iend > rc.idx.size()) iend = (u32)rc.idx.size();
 				for (u32 k = pp.first; k < iend; k++) {
 					u32 vi = rc.idx[k]; if (vi >= nverts) continue;
@@ -3033,19 +3084,26 @@ static void collectHudQuads(rend_context& rc)
 					if (nv < 4) vidx[nv++] = vi;
 					seen++;
 				}
-			}
-			if (seen == 0) {   // sprites (forced) + autosort tr: pp.first/.count index rc.verts directly
-				u32 vend = pp.first + pp.count; if (vend > nverts) vend = nverts;
-				for (u32 v = pp.first; v < vend; v++) {
-					const Vertex& vt = rc.verts[v];
-					if (std::isnan(vt.x) || fabsf(vt.x) > 1e25f || std::isnan(vt.y) || fabsf(vt.y) > 1e25f) continue;
-					if (vt.x<mnX)mnX=vt.x; if (vt.x>mxX)mxX=vt.x;
-					if (vt.y<mnY)mnY=vt.y; if (vt.y>mxY)mxY=vt.y;
-					if (nv < 4) vidx[nv++] = v;
-					seen++;
+				if (seen == 0) {
+					u32 vend = pp.first + pp.count; if (vend > nverts) vend = nverts;
+					for (u32 v = pp.first; v < vend; v++) {
+						const Vertex& vt = rc.verts[v];
+						if (std::isnan(vt.x) || fabsf(vt.x) > 1e25f || std::isnan(vt.y) || fabsf(vt.y) > 1e25f) continue;
+						if (vt.x<mnX)mnX=vt.x; if (vt.x>mxX)mxX=vt.x;
+						if (vt.y<mnY)mnY=vt.y; if (vt.y>mxY)mxY=vt.y;
+						if (nv < 4) vidx[nv++] = v;
+						seen++;
+					}
+				}
+				if (seen < 3 || nv < 3) continue;
+				for (int c = 0; c < 4; c++) {
+					const Vertex& vt = rc.verts[vidx[c < nv ? c : nv - 1]];
+					cx[c]=vt.x; cy4[c]=vt.y; cu[c]=vt.u; cv4[c]=vt.v;
+					ccol[c] = ((u32)vt.col[3] << 24) | ((u32)vt.col[0] << 16)
+					        | ((u32)vt.col[1] <<  8) |  (u32)vt.col[2];
 				}
 			}
-			if (seen < 3 || nv < 3) continue;
+
 			float w = mxX-mnX, h = mxY-mnY, cy = (mnY+mxY)*0.5f;
 			int fmt = (int)((tcw>>27)&7);
 			bool band     = (cy < HUD_TOPY) || (cy >= HUD_BOTY);
@@ -3054,22 +3112,20 @@ static void collectHudQuads(rend_context& rc)
 			if (s_hf && s_hq == 2) {
 				static const char* LN[3] = {"op","pt","tr"};
 				fprintf(s_hf, "%s cy=%.1f w=%.1f h=%.1f tcw=%08X tsp=%08X pcw=%08X fmt=%d "
-				              "verts=%u band=%d oversized=%d -> %s\n",
+				              "verts=%u band=%d oversized=%d %s-> %s\n",
 				        LN[listType], cy, w, h, tcw, tsp, pcw, fmt, pp.count,
-				        (int)band, (int)oversized, keep ? "KEEP" : "drop");
+				        (int)band, (int)oversized, isSpritePara ? "spr5 " : "",
+				        keep ? "KEEP" : "drop");
 			}
 			if (!keep) continue;
 
 			HudQuad& q = s_hud[s_nhud++];
 			// 4 SUBMIT-ORDER corners (NOT bbox). A 3-vert poly closes the 4th to the 3rd.
 			for (int c = 0; c < 4; c++) {
-				const Vertex& vt = rc.verts[vidx[c < nv ? c : nv - 1]];
-				q.x[c] = vt.x; q.y[c] = vt.y;
-				q.u[c] = vt.u; q.v[c] = vt.v;
-				// Repack flycast's per-channel col[] (col[0]=R,1=G,2=B,3=A — see
-				// ta_vtx.cpp vert_packed_color_) back to the engine's ARGB8888 word.
-				q.col[c] = ((u32)vt.col[3] << 24) | ((u32)vt.col[0] << 16)
-				         | ((u32)vt.col[1] <<  8) |  (u32)vt.col[2];
+				int s = c < nv ? c : nv - 1;
+				q.x[c] = cx[s]; q.y[c] = cy4[s];
+				q.u[c] = cu[s]; q.v[c] = cv4[s];
+				q.col[c] = ccol[s];
 			}
 			q.pcw = pcw; q.isp = pp.isp.full; q.tsp = tsp; q.tcw = tcw;
 		}

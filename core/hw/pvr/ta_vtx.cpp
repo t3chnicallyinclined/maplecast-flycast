@@ -10,6 +10,7 @@
 #include "Renderer_if.h"
 #include "cfg/option.h"
 #include "serialize.h"
+#include "network/maplecast_oracle_hook.h"   // sprite-vert side table (36g HUD fix)
 
 #include <algorithm>
 #include <utility>
@@ -1143,6 +1144,12 @@ private:
 
 		CaclulateSpritePlane(cv);
 
+		// 36g HUD fix: stash the 4 CLOSED expansion verts [P,C,A,B]=cv[0..3] in
+		// submission order so collectHudQuads reads CLEAN sprite corners instead of
+		// the post-parse rc.verts[pp.first..] (garbage for ParaType-5 in the autosort
+		// HUD pass). No-op (early-return) unless MAPLECAST_HUD_TA is armed.
+		maplecast_oracle_hook::mc_oracle_spriteVertPush(cv);
+
 		update_fz(cv[0].z);
 
 		CurrentPPlist->push_back(*CurrentPP);
@@ -1258,6 +1265,7 @@ static void ta_parse_vdrc(TA_context* ctx, bool primRestart)
 	vd_ctx = ctx;
 
 	ta_parse_reset();
+	maplecast_oracle_hook::mc_oracle_spriteVertReset();   // 36g: per-parse sprite-vert side table
 
 	PolyParam *bgpp = &vd_rc.global_param_op.front();
 	if (bgpp->pcw.Texture)
