@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF) [hud:ui2-yorient-uvprobe · cockpit-live · debug-knobs1]</title>
+<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF) [hud:ui2-yorient-uvprobe · cockpit-live · debug-knobs2-hud-pvr-diag]</title>
 <style>
   :root { color-scheme: dark; }
   body { margin:0; background:#0c0e12; color:#cdd6e0; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; }
@@ -246,6 +246,33 @@
             <option value="">default (linear+wrap)</option>
             <option value="nc">nc (nearest + clamp)</option>
           </select></div>
+        <!-- (1) blend override — all-red-bars probe: force opaque to see if blend collapses the tint -->
+        <div class="knob"><label>HUD blend override</label>
+          <select id="kb_hudBlendOverride" data-knob="_hudBlendOverride" data-kind="enum">
+            <option value="engine">engine (TSP bits) — DEFAULT</option>
+            <option value="opaque">opaque (1/0) — red-bars probe</option>
+            <option value="alpha">alpha (src·a / 1−a)</option>
+            <option value="add">add (1/1)</option>
+            <option value="modulate">modulate (0 / src)</option>
+          </select></div>
+        <!-- (2) fill-color probe — all-red-bars: UNIFORM red => capture/buildHudTA bug; TWO-TONE => blend -->
+        <div class="knob chk"><input type="checkbox" id="kb_fillColorProbe" data-knob="_fillColorProbe" data-kind="bool"><label>fill-color probe (raw vertex col)</label></div>
+        <!-- (3) depth visualise — greyscale HUD quad z -->
+        <div class="knob chk"><input type="checkbox" id="kb_hudDepthVis" data-knob="_hudDepthVis" data-kind="bool"><label>HUD depth visualise (1/w grey)</label></div>
+        <!-- (4) tex filter — name-glyph fuzz: decouple filter from wrap -->
+        <div class="knob"><label>HUD tex filter</label>
+          <select id="kb_texFilterOverride" data-knob="_texFilterOverride" data-kind="enum">
+            <option value="engine">engine (TSP fm bit) — DEFAULT</option>
+            <option value="nearest">nearest — name-fuzz probe</option>
+            <option value="linear">linear</option>
+          </select></div>
+        <!-- (5) tex wrap — name-glyph fuzz: decouple wrap from filter -->
+        <div class="knob"><label>HUD tex wrap</label>
+          <select id="kb_texWrapOverride" data-knob="_texWrapOverride" data-kind="enum">
+            <option value="engine">engine (TSP clamp/repeat) — DEFAULT</option>
+            <option value="clamp">clamp — name-fuzz probe</option>
+            <option value="repeat">repeat</option>
+          </select></div>
         <div class="knob"><label>HUD quad order</label>
           <input type="text" id="kb_hudQuadOrder" data-knob="_hudQuadOrder" data-kind="int4"
                  placeholder="0,1,2,3" style="flex:1;background:#0c0e12;color:#cdd6e0;border:1px solid #33425a;border-radius:4px;padding:3px 5px;font:inherit;"></div>
@@ -486,7 +513,7 @@ function applyCfgToBody(drawList) {
 const W_DIR = new URL('../webgpu/', import.meta.url);
 const { PVR2Renderer }   = await import(new URL('pvr2-renderer.mjs?v=scene5', W_DIR));
 const { TAParser }       = await import(new URL('ta-parser.mjs?v=scene5', W_DIR));
-const { TextureManager } = await import(new URL('texture-manager.mjs?v=scene7', W_DIR));
+const { TextureManager } = await import(new URL('texture-manager.mjs?v=scene8', W_DIR));
 // SAME zstd decoder the TA-mirror cockpit (frame-decoder.mjs) uses for the ZCST envelope.
 const { decompress }     = await import(new URL('fzstd.mjs', W_DIR));
 
@@ -767,10 +794,29 @@ function renderHudQuads() {
         if (mode === 'sprites-only') quads = hudQuads.filter(q => ((q.pcw >>> 29) & 7) === 5);
         if (!quads.length) return mode !== 'engine'; // suppress legacy fallback while debugging
         const ta = buildHudTA(quads);
-        // _bgPreRendered:true -> first pass loadOp='load' (composite over the scene, no clear).
-        // singlePass+noSort -> draw the HUD strips in submission order (the engine's own order).
-        pane.render(ta, { singlePass: true, noSort: true, drawOpaque: false, drawPunch: false,
-                          drawTrans: true, _bgPreRendered: true });
+        // ── HUD-pass PVR diagnostic knobs (sh4-re-expert spec; HONORED because the HUD draws via
+        // pane.render which reads the pvr2 `dbg` object — unlike the emitter SpriteGPU path). ──
+        const opts = { singlePass: true, noSort: true, drawOpaque: false, drawPunch: false,
+                       drawTrans: true, _bgPreRendered: true };
+        // (1) window._hudBlendOverride — force the translucent blend func, bypassing the TSP bits.
+        //     USE: all-red bars. 'opaque' shows whether blend collapses the team tint into solid red.
+        //     pvr2-renderer.mjs render() honors dbg.blendOverride/blendSrc/blendDst (sb/db override).
+        const _hbo = (typeof window !== 'undefined' && window._hudBlendOverride) || 'engine';
+        if      (_hbo === 'opaque')   { opts.blendOverride = true; opts.blendSrc = 1; opts.blendDst = 0; }
+        else if (_hbo === 'alpha')    { opts.blendOverride = true; opts.blendSrc = 4; opts.blendDst = 5; }
+        else if (_hbo === 'add')      { opts.blendOverride = true; opts.blendSrc = 1; opts.blendDst = 1; }
+        // NOTE: pvr2 render() does `sb=dbg.blendSrc||4` so blendSrc=0 (ZERO) coerces to 4 (SRC_ALPHA).
+        // modulate's true src=0 can't be expressed via this override path; dst=4 (=SRC_COLOR) is honored.
+        else if (_hbo === 'modulate') { opts.blendOverride = true; opts.blendSrc = 0; opts.blendDst = 4; }
+        // (2) window._fillColorProbe — shaderMode 'solid' (shaders.mjs dbg==1u) emits the raw
+        //     interpolated vertex color, no texture/shade. USE: all-red bars — UNIFORM red => the bug
+        //     is the captured col[i]/buildHudTA; TWO-TONE => blend/shading.
+        // (3) window._hudDepthVis — shaderMode 'depth' (shaders.mjs dbg==3u) greyscale 1/w. USE: HUD z.
+        if      (typeof window !== 'undefined' && window._fillColorProbe) opts.shaderMode = 'solid';
+        else if (typeof window !== 'undefined' && window._hudDepthVis)    opts.shaderMode = 'depth';
+        // (4)+(5) window._texFilterOverride / window._texWrapOverride are read inside
+        //     texture-manager.mjs getTexture (sampler creation) — no pane.render wiring needed.
+        pane.render(ta, opts);
         return true;
     } catch (e) { log('[hudq] ' + e.message, 'warn'); return false; }
 }

@@ -123,7 +123,12 @@ export class TextureManager {
         const vq=(tcw>>30)&1, mip=(tcw>>31)&1;
         const paletted = fmt === 5 || fmt === 6;
 
-        const baseKey = `${addr}_${fmt}_${texU}_${texV}_${palSel}_${vq}_${mip}`;
+        const _hsamp = (typeof window !== 'undefined' && window._hudSampler) || '';
+        // HUD diagnostic overrides — decouple filter vs wrap (which _hudSampler='nc' conflates).
+        // 'engine'/'' = use the TSP bits; 'nearest'/'linear' force filter; 'clamp'/'repeat' force wrap.
+        const _tfo = (typeof window !== 'undefined' && window._texFilterOverride) || 'engine';
+        const _two = (typeof window !== 'undefined' && window._texWrapOverride) || 'engine';
+        const baseKey = `${addr}_${fmt}_${texU}_${texV}_${palSel}_${vq}_${mip}_${_hsamp}_${_tfo}_${_two}`;
         const cached = this.cache.get(baseKey);
 
         if (cached) {
@@ -151,8 +156,19 @@ export class TextureManager {
             texture = this.device.createTexture({size:[w,h],format:'rgba8unorm',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
             this.device.queue.writeTexture({texture},rgba,{bytesPerRow:w*4},[w,h]);
             const fm=(tsp>>13)&3, cu=(tsp>>16)&1, cv=(tsp>>15)&1, fu=(tsp>>18)&1, fv=(tsp>>17)&1;
-            sampler = this.device.createSampler({minFilter:fm?'linear':'nearest',magFilter:fm?'linear':'nearest',
-                addressModeU:cu?'clamp-to-edge':fu?'mirror-repeat':'repeat',addressModeV:cv?'clamp-to-edge':fv?'mirror-repeat':'repeat'});
+            // _hudSampler='nc' forces nearest+clamp (debug: is linear filtering / repeat-wrap across
+            // the shared FONT atlas sub-rect the live-Chrome 'fuzz'?). '' = engine TSP bits (default).
+            const _nc = _hsamp === 'nc';
+            // Filter: override wins, else _hudSampler='nc' forces nearest, else the TSP fm bit.
+            const filt = _tfo==='nearest' ? 'nearest' : _tfo==='linear' ? 'linear'
+                       : ((_nc||!fm) ? 'nearest' : 'linear');
+            // Wrap: override wins (clamp/repeat), else _hudSampler='nc' clamps, else the TSP cu/cv/fu/fv bits.
+            const wrapU = _two==='clamp' ? 'clamp-to-edge' : _two==='repeat' ? 'repeat'
+                        : (_nc?'clamp-to-edge':(cu?'clamp-to-edge':fu?'mirror-repeat':'repeat'));
+            const wrapV = _two==='clamp' ? 'clamp-to-edge' : _two==='repeat' ? 'repeat'
+                        : (_nc?'clamp-to-edge':(cv?'clamp-to-edge':fv?'mirror-repeat':'repeat'));
+            sampler = this.device.createSampler({minFilter:filt,magFilter:filt,
+                addressModeU:wrapU,addressModeV:wrapV});
             if (cached) cached.texture.destroy();
             this.stats.misses++;
         }
