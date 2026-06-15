@@ -10,7 +10,10 @@
 	Client: loads server sync state, then applies diffs + feeds TA commands to renderer
 */
 #include <map>
+#include <set>
+#include <unordered_map>
 #include <unordered_set>
+#include <algorithm>
 #include <cstring>
 #include <cmath>
 #include "types.h"
@@ -3647,13 +3650,226 @@ static uint32_t gstaEmitSpriteTA(std::vector<uint8_t>& out)
 	return o;
 }
 
-// ---- M3 STUB: body texture decode (GFX1 -> vram at TCW). Filled in milestone M3.
-// For M2, bodies render with whatever textures the static-prefix VRAM seed holds (the
-// resident poses at connect). Returns #tiles written (0 = M2). ----
-static int gstaDecodeBodies(int /*nQuad*/) { return 0; }
+// =============================================================================
+// M3: BODY TEXTURE DECODE  --  faithful C++ port of web/render-replica/body_decoder.mjs
+// ensureBodyTextures (per_tile_retile_decode). For each emitted body quad: decode its
+// GFX1 part (LZSS loc_8c0354c0, byte-exact) from _gstaRam, detwiddle to a linear W×H
+// index buffer, slice the (col,row) 32×32 tile, re-twiddle it as a standalone 32×32
+// PAL4_TW, and write 512B at the quad's own TCW vaddr in vram[]. (re_kb
+// finding:per_tile_retile_decode + finding:faithful_texture_decode_transpile.)
+// =============================================================================
+// PAL4 twiddle tables (port of body_decoder.mjs _twiddleSlow / _DETW / _PAL4_ORDER).
+static int gsta_twiddleSlow(int x, int y, int xs, int ys) {
+	int rv = 0, sh = 0; xs >>= 1; ys >>= 1;
+	while (xs || ys) {
+		if (ys) { rv |= (y & 1) << sh; ys >>= 1; y >>= 1; sh++; }
+		if (xs) { rv |= (x & 1) << sh; xs >>= 1; x >>= 1; sh++; }
+	}
+	return rv;
+}
+static int gsta_DETW[2][11][1024];
+static const int gsta_PAL4_ORDER[16][2] = {
+	{0,0},{0,1},{1,0},{1,1},{0,2},{0,3},{1,2},{1,3},{2,0},{2,1},{3,0},{3,1},{2,2},{2,3},{3,2},{3,3}
+};
+static bool gsta_twInit = false;
+static void gstaTwInit() {
+	if (gsta_twInit) return;
+	for (int s = 0; s < 11; s++) {
+		int ys = 1 << s;
+		for (int i = 0; i < 1024; i++) {
+			gsta_DETW[0][s][i] = gsta_twiddleSlow(i, 0, 1024, ys);
+			gsta_DETW[1][s][i] = gsta_twiddleSlow(0, i, ys, 1024);
+		}
+	}
+	gsta_twInit = true;
+}
+static int gsta_log2i(int v) { int n = -1; while (v) { v >>= 1; n++; } return n; }
 
-// ---- M4 STUB: build the HUD sprite-TA from the wire HudQuads. Filled in milestone M4.
-static std::vector<uint8_t> gstaBuildHudTA(const uint8_t* /*hud*/, uint32_t /*nHud*/) { return {}; }
+// TWIDDLED W×H PAL4 bytes -> linear W×H index buffer (1 byte/px, low nibble).
+static void gstaDetwiddlePal4(const uint8_t* data, size_t dataLen, int w, int h, std::vector<uint8_t>& idx) {
+	int bcx = gsta_log2i(w), bcy = gsta_log2i(h);
+	idx.assign((size_t)w * h, 0);
+	for (int y = 0; y < h; y += 4) for (int x = 0; x < w; x += 4) {
+		int blk = (gsta_DETW[0][bcy][x] + gsta_DETW[1][bcx][y]) / 16;
+		int base = blk * 8;
+		for (int i = 0; i < 16; i++) {
+			int cx = gsta_PAL4_ORDER[i][0], cy = gsta_PAL4_ORDER[i][1];
+			uint8_t b = ((size_t)(base + (i >> 1)) < dataLen) ? data[base + (i >> 1)] : 0;
+			idx[(size_t)(y + cy) * w + (x + cx)] = (i & 1) ? ((b >> 4) & 0xF) : (b & 0xF);
+		}
+	}
+}
+// Re-twiddle one 32×32 linear index region (1024) into 512B of PAL4_TW.
+static void gstaRetwiddle32(const uint8_t* lin, uint8_t* out512) {
+	memset(out512, 0, 512);
+	for (int y = 0; y < 32; y += 4) for (int x = 0; x < 32; x += 4) {
+		int blk = (gsta_DETW[0][5][x] + gsta_DETW[1][5][y]) / 16;
+		int base = blk * 8;
+		for (int i = 0; i < 16; i++) {
+			int cx = gsta_PAL4_ORDER[i][0], cy = gsta_PAL4_ORDER[i][1];
+			uint8_t nib = lin[(size_t)(y + cy) * 32 + (x + cx)] & 0xF;
+			if (i & 1) out512[base + (i >> 1)] |= nib << 4; else out512[base + (i >> 1)] |= nib;
+		}
+	}
+}
+// GFX1 LZSS decoder (bank03 loc_8c0354c0). Flag MSB-first from 0x80; clear=literal,
+// set=back-ref (b=*src++, dist=b>>4, count=(b&0x0F)+2 from out-(dist+1)). Byte-exact.
+static void gstaDecodeA(const uint8_t* src, size_t sp, size_t srcEnd, size_t destLen, std::vector<uint8_t>& out) {
+	out.assign(destLen, 0);
+	size_t o = 0; uint32_t bc = 0; uint32_t flags = 0;
+	while (o < destLen && sp < srcEnd) {
+		if (bc == 0) { flags = src[sp++]; bc = 0x80; if (sp >= srcEnd) break; }
+		if ((flags & bc) == 0) { out[o++] = src[sp++]; }
+		else {
+			uint8_t b = src[sp++];
+			long s = (long)o - (b >> 4) - 1;
+			int cnt = (b & 0x0F) + 2;
+			for (int k = 0; k < cnt && o < destLen; k++, s++)
+				out[o++] = (s >= 0 && (size_t)s < o) ? out[s] : 0;
+		}
+		bc >>= 1;
+	}
+}
+// LE readers over _gstaRam (area-3 low-24-bit).
+static inline uint32_t gramU32(const uint8_t* r, uint32_t a){ a &= 0x00FFFFFF; return (uint32_t)r[a]|((uint32_t)r[a+1]<<8)|((uint32_t)r[a+2]<<16)|((uint32_t)r[a+3]<<24); }
+static inline uint16_t gramU16(const uint8_t* r, uint32_t a){ a &= 0x00FFFFFF; return (uint16_t)(r[a]|(r[a+1]<<8)); }
+static inline uint8_t  gramU8 (const uint8_t* r, uint32_t a){ return r[a & 0x00FFFFFF]; }
+
+// GFX1 part-offset table for a given gfx1 base (cached per frame-set).
+struct GstaGfx { uint32_t n; std::vector<uint32_t> offs, srt; };
+static std::unordered_map<uint32_t, GstaGfx> _gstaGfxCache;          // gfx1 base -> table
+struct GstaDecodedPart { std::vector<uint8_t> lin; int W=0, H=0; size_t destLen=0; bool ok=false; };
+static std::map<uint64_t, GstaDecodedPart> _gstaPartCache;          // (gfx1<<32|sel) -> part
+
+static GstaGfx& gstaGfx1Offsets(const uint8_t* ram, uint32_t gfx1) {
+	auto it = _gstaGfxCache.find(gfx1);
+	if (it != _gstaGfxCache.end()) return it->second;
+	GstaGfx g; g.n = gramU32(ram, gfx1) >> 2;
+	if (g.n > 0x40000) g.n = 0;                                     // sanity
+	g.offs.resize(g.n);
+	for (uint32_t i = 0; i < g.n; i++) g.offs[i] = gramU32(ram, gfx1 + i * 4);
+	std::set<uint32_t> uniq(g.offs.begin(), g.offs.end());
+	g.srt.assign(uniq.begin(), uniq.end());                        // sorted
+	return _gstaGfxCache.emplace(gfx1, std::move(g)).first->second;
+}
+static uint32_t gstaEndOf(const std::vector<uint32_t>& srt, uint32_t off) {
+	auto it = std::upper_bound(srt.begin(), srt.end(), off);
+	return it != srt.end() ? *it : off + 0x4000;
+}
+
+static int gstaDecodeBodies(int nQuad)
+{
+	if (nQuad <= 0) return 0;
+	gstaTwInit();
+	const uint8_t* ram = _gstaRam.data();
+	const GstaSceneQuad* S = render_frame_scene();
+
+	// per-quad storage (col,row) from the walker (Ax-rank / Ay-rank). gsta_quad_colrow
+	// fills out_cr[2*q]=col, out_cr[2*q+1]=row.
+	static std::vector<int> colrow;
+	colrow.assign((size_t)nQuad * 2, 0);
+	gsta_quad_colrow(colrow.data(), (unsigned)nQuad);
+
+	// Bound the decode-part memo; clear if it grows unbounded across many poses.
+	if (_gstaPartCache.size() > 4096) _gstaPartCache.clear();
+
+	int written = 0;
+	std::vector<uint8_t> raw, tileLin(1024), tile512(512);
+	for (int q = 0; q < nQuad; q++) {
+		uint32_t gfx1 = S[q].gfx1;
+		if (!(gfx1 & 0x0C000000u) && !(gfx1 & 0x8C000000u)) continue;   // no body art
+		uint32_t sel = S[q].sel;
+		// TCW -> vram byte addr (fmt5 PAL4): (TCW & 0x1FFFFF) << 3.
+		uint32_t vaddr = (S[q].tcw & 0x1FFFFF) << 3;
+		if ((size_t)vaddr + 512 > VRAM_SIZE) continue;
+
+		uint64_t key = ((uint64_t)gfx1 << 32) | sel;
+		auto pit = _gstaPartCache.find(key);
+		if (pit == _gstaPartCache.end()) {
+			GstaDecodedPart pd;
+			GstaGfx& G = gstaGfx1Offsets(ram, gfx1);
+			if (sel < G.n) {
+				uint32_t pbase = gfx1 + G.offs[sel];
+				int sw = gramU8(ram, pbase + 2), sh = gramU8(ram, pbase + 3);
+				int W = sw * 8, H = sh * 8;
+				if (W > 0 && H > 0 && W <= 1024 && H <= 1024) {
+					size_t destLen = (size_t)(W * H) >> 1;
+					uint32_t srcStart = (pbase + 4) & 0x00FFFFFF;
+					uint32_t srcEnd   = (gfx1 + gstaEndOf(G.srt, G.offs[sel])) & 0x00FFFFFF;
+					gstaDecodeA(ram, srcStart, srcEnd, destLen, raw);
+					gstaDetwiddlePal4(raw.data(), raw.size(), W, H, pd.lin);
+					pd.W = W; pd.H = H; pd.destLen = destLen; pd.ok = true;
+				}
+			}
+			pit = _gstaPartCache.emplace(key, std::move(pd)).first;
+		}
+		const GstaDecodedPart& pd = pit->second;
+		if (!pd.ok) continue;
+
+		int col = colrow[2 * q], row = colrow[2 * q + 1];
+		int ox = col * 32, oy = row * 32, W = pd.W, H = pd.H;
+		std::fill(tileLin.begin(), tileLin.end(), 0);
+		for (int yy = 0; yy < 32; yy++) {
+			int py = oy + yy; if (py >= H) break;
+			const uint8_t* rowBase = &pd.lin[(size_t)py * W];
+			uint8_t* dst = &tileLin[(size_t)yy * 32];
+			for (int xx = 0; xx < 32; xx++) {
+				int px = ox + xx; if (px >= W) break;
+				dst[xx] = rowBase[px];
+			}
+		}
+		gstaRetwiddle32(tileLin.data(), tile512.data());
+		VramLockedWriteOffset(vaddr);
+		memcpy(&vram[vaddr], tile512.data(), 512);
+		written++;
+	}
+	return written;
+}
+
+// =============================================================================
+// M4: HUD  --  re-emit each wire HudQuad (the engine's REAL HUD primitive) as a
+// paraType-5 sprite-TA block. HudQuad wire layout (maplecast_oracle_hook.h):
+//   f32 x[4],y[4]; f32 u[4],v[4]; u32 col[4]; u32 pcw,isp,tsp,tcw  (96 bytes).
+// The HUD quads are full parallelograms (angled bars), so we emit the first 3
+// corners as the sprite A/B/C (D derived) with the engine's own PVR words +
+// per-vertex base color. Drawn through the SAME pvr2 sprite path as bodies.
+// =============================================================================
+static std::vector<uint8_t> gstaBuildHudTA(const uint8_t* hud, uint32_t nHud)
+{
+	std::vector<uint8_t> out;
+	if (!nHud) return out;
+	auto h16 = [](float f){ uint32_t u; memcpy(&u,&f,4); return (uint16_t)((u>>16)&0xFFFF); };
+	out.assign((size_t)nHud * 96, 0);
+	uint8_t* base = out.data();
+	auto W32 = [&](uint32_t off, uint32_t v){ uint8_t* p=base+off; p[0]=v;p[1]=v>>8;p[2]=v>>16;p[3]=v>>24; };
+	auto WF  = [&](uint32_t off, float f){ uint32_t u; memcpy(&u,&f,4); W32(off,u); };
+	uint32_t o = 0;
+	for (uint32_t i = 0; i < nHud; i++) {
+		const uint8_t* q = hud + (size_t)i * 96;
+		// read the HudQuad fields (LE f32/u32)
+		float x[4], y[4], u[4], v[4]; uint32_t col[4], pcw, isp, tsp, tcw;
+		memcpy(x, q + 0, 16); memcpy(y, q + 16, 16);
+		memcpy(u, q + 32, 16); memcpy(v, q + 48, 16);
+		memcpy(col, q + 64, 16);
+		memcpy(&pcw, q + 80, 4); memcpy(&isp, q + 84, 4); memcpy(&tsp, q + 88, 4); memcpy(&tcw, q + 92, 4);
+		// emit as a paraType-5 textured sprite (A=corner0, B=corner1, C=corner2, D=corner3).
+		W32(o+0,pcw); W32(o+4,isp); W32(o+8,tsp); W32(o+12,tcw);
+		W32(o+16,col[0]);                       // sprite base color (engine's vtx0 color)
+		W32(o+32,0xE0000000u);                  // sprite vtx PCW
+		WF(o+36,x[0]); WF(o+40,y[0]); WF(o+44,1.0f);
+		WF(o+48,x[1]); WF(o+52,y[1]); WF(o+56,1.0f);
+		WF(o+60,x[2]); WF(o+64,y[2]); WF(o+68,1.0f);
+		WF(o+72,x[3]); WF(o+76,y[3]);
+		{
+			uint16_t v0=h16(v[0]),u0=h16(u[0]),v1=h16(v[1]),u1=h16(u[1]),v2=h16(v[2]),u2=h16(u[2]);
+			base[o+84]=v0;base[o+85]=v0>>8; base[o+86]=u0;base[o+87]=u0>>8;
+			base[o+88]=v1;base[o+89]=v1>>8; base[o+90]=u1;base[o+91]=u1>>8;
+			base[o+92]=v2;base[o+93]=v2>>8; base[o+94]=u2;base[o+95]=u2>>8;
+		}
+		o += 96;
+	}
+	return out;
+}
 
 // Apply one raw FRMx record (decompressed). Overlay dynamic regions + tails into
 // _gstaRam/vram/pvr, run render_frame, emit the body TA, decode body textures, and
