@@ -2258,8 +2258,10 @@ export class SpriteClient {
     const S = c.sprites;
     const tryKey = (k) => { if (k == null) return null; const s = S[k] || S[String(k)];
       if (s) { s.__key = k; return s; } return null; };
-    // (1) direct effect_key (node+0x15C & 0xFFFF)
-    let s = tryKey(o.effect_key & 0xffff); if (s) return s;
+    // (1) direct effect_key (node+0x15C & 0xFFFF) — only the directory key range (>=0x3D8),
+    //     so a 0/undefined effect_key cannot spuriously alias the idx-0 sprite key "0".
+    const ek = o.effect_key & 0xffff;
+    let s = (ek >= 0x03D8) ? tryKey(ek) : null; if (s) return s;
     // (2) directory-offset model: dirIdx = (node+0x15C - 0x0CED03D8) / 0x10
     if (o.effect_key != null) { const di = ((o.effect_key & 0xffff) - 0x03D8) >> 4;
       if (di >= 0 && di < 64) { s = tryKey(di); if (s) return s; } }
