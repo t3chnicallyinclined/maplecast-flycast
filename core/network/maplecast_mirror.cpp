@@ -3627,8 +3627,24 @@ static uint32_t gstaEmitSpriteTA(std::vector<uint8_t>& out)
 	for (int k = 0; k < n; k++) {
 		const GstaSceneQuad* q = &S[k];
 		uint8_t* p = base + o; memset(p, 0, 96);
+		// --- TA SPRITE GLOBAL PARAM ---
+		// q->pcw is the engine's INTERNAL region-array PolyParam PCW (submit_params /
+		// gen_submit_params.c finalize_body OR's 0x02000000 = ListType bit, leaving
+		// ParaType=0). Fed verbatim into the TA stream that is FATAL: native flycast
+		// ta_parse (core/hw/pvr/ta.cpp ta_handle_cmd) reads PCW.ParaType (bits 29-31)
+		// and PCW.ListType (bits 24-26) to drive the TA FSM. ParaType=0 == End_Of_List,
+		// so every "sprite" closed the list and emitted NO geometry -> blank window.
+		// Synthesize a VALID TA sprite global param: ParaType=5 (Sprite), keep the
+		// engine obj_ctrl/group-control low bits, force textured + 16-bit UV (the
+		// vertex layout below writes f16 UVs), translucent list (MVC2 bodies are
+		// MODULATE/translucent). CONFIRMED vs ta_structs.h PCW bitfield + ta.cpp FSM.
+		uint32_t pcw_ta = (q->pcw & 0x0000FFFFu)   // keep group-control + obj_ctrl bytes
+		                | (5u << 29)               // ParaType = Sprite
+		                | (2u << 24);              // ListType = Translucent
+		pcw_ta |= 0x00000008u;                     // Texture = 1 (obj_ctrl bit3)
+		pcw_ta |= 0x00000001u;                     // UV_16bit = 1 (obj_ctrl bit0)
 		// param header
-		W32(o+0,q->pcw); W32(o+4,q->isp); W32(o+8,q->tsp); W32(o+12,q->tcw);
+		W32(o+0,pcw_ta); W32(o+4,q->isp); W32(o+8,q->tsp); W32(o+12,q->tcw);
 		W32(o+16,0xFFFFFFFFu);          // sprite base color (opaque white, MODULATE identity)
 		W32(o+32,0xE0000000u);          // sprite vtx PCW
 		WF(o+36,q->Ax); WF(o+40,q->Ay); WF(o+44,q->z);
@@ -3959,6 +3975,28 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 	fr.vramDirty = (written > 0);
 	fr.palDirty  = palDirty;
 
+	// Capture the REAL emitted TA size BEFORE the std::move (the old log read
+	// fr.ta.size() AFTER the move -> moved-from vector -> always 0 -> "ta=0B").
+	size_t taSizeForLog = fr.ta.size();
+
+	// One-shot TA dump for the byte-diff against the gold-standard clientReceive()
+	// path. MAPLECAST_DUMP_GSTA_TA=1 writes one frame's emitted sprite-TA so we can
+	// structurally compare it to a real MVC2 in-match TA. Dumps the first non-empty
+	// frame, then stops.
+	{
+		static bool _gstaDumpDone = false;
+		const char* de = std::getenv("MAPLECAST_DUMP_GSTA_TA");
+		if (de && *de && *de != '0' && !_gstaDumpDone && !fr.ta.empty()) {
+			const char* dp = std::getenv("MAPLECAST_DUMP_GSTA_TA_PATH");
+			std::string path = (dp && *dp) ? dp : "gsta_ta_dump.bin";
+			FILE* f = fopen(path.c_str(), "wb");
+			if (f) { fwrite(fr.ta.data(), 1, fr.ta.size(), f); fclose(f);
+				printf("[GSTA] dumped %zuB TA -> %s (vframe %u, quads=%d)\n",
+					fr.ta.size(), path.c_str(), vframe, nQuad); fflush(stdout); }
+			_gstaDumpDone = true;
+		}
+	}
+
 	{
 		std::lock_guard<std::mutex> lk(_gstaMtx);
 		_gstaFrame = std::move(fr);
@@ -3968,7 +4006,7 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 	static uint64_t _fn = 0;
 	if ((_fn++ % 60) == 0)
 		printf("[GSTA] frame %u: bodies=%u quads=%d texWritten=%d palDirty=%d ta=%zuB\n",
-			vframe, render_frame_body_count(), nQuad, written, (int)palDirty, fr.ta.size());
+			vframe, render_frame_body_count(), nQuad, written, (int)palDirty, taSizeForLog);
 }
 
 // WS thread: connect 7212, msg1=ZCST prefix (seed), msg N = FRMx (apply+render).
@@ -4088,6 +4126,28 @@ bool clientReceiveGsta(rend_context& rc, bool& vramDirty)
 	ctx.rend.clearFramebuffer  = true;
 	ctx.rend.fZ_max = 1.0f;
 
+	// The gold-standard clientReceive() restores a battery of PVR regs from the wire
+	// pvr_snapshot before Process(). The GSTA path has no snapshot AND the SH4 is OFF,
+	// so these PVR-reg globals may be zero. Seed the tile-clip + framebuffer-control
+	// regs the rasterizer needs for a normal 640x480 frame. CRITICAL: the render
+	// viewport size is derived as (tile_x_num+1)*32 x (tile_y_num+1)*32
+	// (dx11_renderer.cpp:1264). A zero TA_GLOB_TILE_CLIP -> 32x32 target -> everything
+	// clipped away (a SECOND blank-screen cause beyond the ParaType=0 PCW bug).
+	ctx.rend.ta_GLOB_TILE_CLIP.full = 0;
+	ctx.rend.ta_GLOB_TILE_CLIP.tile_x_num = (serverW / 32) - 1;   // 640 -> 19
+	ctx.rend.ta_GLOB_TILE_CLIP.tile_y_num = (serverH / 32) - 1;   // 480 -> 14
+	ctx.rend.scaler_ctl.full        = SCALER_CTL.full;
+	ctx.rend.fb_X_CLIP.full         = 0;
+	ctx.rend.fb_X_CLIP.min          = 0; ctx.rend.fb_X_CLIP.max = serverW - 1;
+	ctx.rend.fb_Y_CLIP.full         = 0;
+	ctx.rend.fb_Y_CLIP.min          = 0; ctx.rend.fb_Y_CLIP.max = serverH - 1;
+	ctx.rend.fb_W_LINESTRIDE        = FB_W_LINESTRIDE.full;
+	ctx.rend.fb_W_SOF1              = FB_W_SOF1;
+	ctx.rend.fb_W_CTRL.full         = FB_W_CTRL.full;
+	ctx.rend.fog_clamp_min.full     = FOG_CLAMP_MIN.full;
+	ctx.rend.fog_clamp_max.full     = FOG_CLAMP_MAX.full;
+	ctx.rend.isRTT = false;
+
 	vramDirty = local.vramDirty;
 	if (vramDirty && renderer) renderer->resetTextureCache = true;
 	if (local.palDirty && renderer) {
@@ -4096,6 +4156,16 @@ bool clientReceiveGsta(rend_context& rc, bool& vramDirty)
 	}
 
 	if (renderer) { renderer->Process(&ctx); rc = ctx.rend; }
+
+	// Diagnostic: confirm ta_parse produced actual geometry (op/pt/tr poly params +
+	// verts). All-zero here means the TA framing is still malformed.
+	{
+		static uint64_t _pn = 0;
+		if ((_pn++ % 120) == 0)
+			printf("[GSTA] parsed: verts=%zu op=%zu pt=%zu tr=%zu (taSize=%zu)\n",
+				ctx.rend.verts.size(), ctx.rend.global_param_op.size(),
+				ctx.rend.global_param_pt.size(), ctx.rend.global_param_tr.size(), taSize);
+	}
 	return true;
 }
 #endif // MAPLECAST_GSTA_CLIENT_BUILD

@@ -179,6 +179,13 @@ bool mainui_rend_frame()
 			maplecast_palette::applyClientOverrides();
 
 			bool isScreen = renderer->Render();
+			if (maplecast_mirror::gstaModeActive()) {
+				static uint64_t _grn = 0;
+				if ((_grn++ % 120) == 0)
+					printf("[GSTA] renderer->Render()=%d (frame %llu)\n",
+						(int)isScreen, (unsigned long long)_grn);
+				fflush(stdout);
+			}
 			if (isScreen)
 			{
 				// Draw the ImGui overlay AFTER the game render but BEFORE
