@@ -38,7 +38,14 @@
 #define PTR_IDXTAB 0x8C2DAD3Cu     /* loc_8C1245F8 / loc_8C1249B8 pool */
 #define PTR_RECTAB 0x8C2DAD4Cu     /* loc_8C1245FC / loc_8C1249BC pool */
 
+/* PolyParam is also declared in render_frame.c (identical). When this file is
+ * #include'd into one amalgamation TU (core/network/gsta_render_frame.c) the second
+ * typedef is a redefinition C2371 under MSVC C — guard it. GSTA_POLYPARAM_DEFINED is
+ * defined by the amalgamation right before including this file; undefined in the
+ * standalone PoC build, so the typedef is emitted there exactly as before. */
+#ifndef GSTA_POLYPARAM_DEFINED
 typedef struct { u32 pcw, isp, tsp, tcw; } PolyParam;
+#endif
 
 /* Read the resident 0x20-byte template at rectab[idxtab[rec_index]].
  * rec_index = the per-tile allocation index (*r13 = stack[r15+0x2C]).  */

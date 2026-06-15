@@ -155,9 +155,21 @@ bool mainui_rend_frame()
 		// Drain ALL pending frames in one iteration. clientReceive returns
 		// false when there's nothing new — the while loop keeps up if we
 		// fall behind, and runs exactly once in the common case.
+		// NATIVE GSTA CLIENT (feat/render-replica-live): when in GSTA mode the
+		// frames come from the replica-live (7212) wire reconstructed by the
+		// transpiled render_frame, not the TA-mirror (7200) path. Same drain
+		// contract (fills mirrorCtx, returns true per applied frame).
 		bool drained = false;
-		while (maplecast_mirror::clientReceive(mirrorCtx, vramDirty))
-			drained = true;
+		if (maplecast_mirror::gstaModeActive())
+		{
+			while (maplecast_mirror::clientReceiveGsta(mirrorCtx, vramDirty))
+				drained = true;
+		}
+		else
+		{
+			while (maplecast_mirror::clientReceive(mirrorCtx, vramDirty))
+				drained = true;
+		}
 
 		if (drained)
 		{

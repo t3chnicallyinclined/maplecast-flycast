@@ -82,6 +82,13 @@ void serverPublish(TA_context* ctx);
 // Returns true if a new frame is available. Sets vramDirty if VRAM pages changed.
 bool clientReceive(rend_context& rc, bool& vramDirty);
 
+// Native GSTA client (feat/render-replica-live): true when MAPLECAST_GSTA_CLIENT
+// mode is active (connected to the replica-live 7212 wire, rendering the GSTA
+// state through flycast's own renderer via the transpiled render_frame). When
+// true, the mirror render loop calls clientReceiveGsta() instead of clientReceive().
+bool gstaModeActive();
+bool clientReceiveGsta(rend_context& rc, bool& vramDirty);
+
 // Mark VRAM pages as dirty so the next serverPublish() streams them.
 // Called from DMA paths (Ch2 DMA, PVR DMA, TAWriteSQ 64-bit, ELAN texture
 // DMA, YUV converter) which memcpy directly into vram[] and bypass both the

@@ -70,6 +70,28 @@ target_sources(${PROJECT_NAME} PRIVATE
         replay_reader.h
         maplecast_wasm_bridge.cpp)
 
+# === Native GSTA client (feat/render-replica-live) =========================
+# The transpiled MVC2 render path (tools/render-replica-poc, byte-exact) is
+# amalgamated into gsta_render_frame.c and consumed by the GSTA client section
+# of maplecast_mirror.cpp. Only the mirror-client build needs it (the client
+# renders the ~12KB/frame GSTA wire through flycast's OWN renderer). The POC dir
+# is added as an include dir so "sh4ctx.h" + the #include'd .c paths resolve.
+if(MAPLECAST_CLIENT_ONLY)
+    target_sources(${PROJECT_NAME} PRIVATE
+        gsta_render_frame.c
+        gsta_render_frame.h)
+    # Put the POC dir on the flycast target's include path so gsta_render_frame.c's
+    # #include'd .c files + their "sh4ctx.h" resolve. A source-file property does NOT
+    # propagate here because the target is defined in the top-level CMakeLists, not
+    # this subdir (CMake source-prop scope) — target_include_directories is reliable.
+    target_include_directories(${PROJECT_NAME} PRIVATE
+        "${CMAKE_SOURCE_DIR}/tools/render-replica-poc")
+    # MUST be target_compile_definitions (not add_compile_definitions): the flycast
+    # target is defined in the PARENT CMakeLists, so a directory-scoped define here
+    # never reaches maplecast_mirror.cpp / mainui.cpp (the GSTA section #ifdef'd it out).
+    target_compile_definitions(${PROJECT_NAME} PRIVATE MAPLECAST_GSTA_CLIENT_BUILD)
+endif()
+
 # maplecast_stream (H.264 / NVENC / CUDA GL interop) and maplecast_webrtc
 # (libdatachannel) are the GPU-dependent legacy streaming paths. Exclude
 # them from the headless build — the TA mirror on port 7200 replaces them.

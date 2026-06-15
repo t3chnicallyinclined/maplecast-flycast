@@ -520,11 +520,29 @@ static void clientLoadSync()
 
 static void initClientWebSocket();  // forward declaration
 
+#ifdef MAPLECAST_GSTA_CLIENT_BUILD
+static void initGstaClient();   // forward decl (GSTA section below)
+bool gstaModeActive();
+#endif
+
 void initClient()
 {
 	// Idempotent  --  if already initialized, don't start a second WS thread.
 	// This happens when flycast GUI settings change triggers stop()+start().
 	if (_isClient) return;
+
+#ifdef MAPLECAST_GSTA_CLIENT_BUILD
+	// === NATIVE GSTA CLIENT (feat/render-replica-live) ========================
+	// Opt-in: MAPLECAST_GSTA_CLIENT=1 connects to the replica-live GSTA wire
+	// (7212) and renders it through flycast's OWN renderer via the transpiled
+	// render_frame. Completely separate from the TA-mirror (7200) path below —
+	// it sets _isClient so the mirror render loop runs, but routes to
+	// clientReceiveGsta() instead of clientReceive(). See the GSTA section.
+	if (const char* g = std::getenv("MAPLECAST_GSTA_CLIENT"); g && *g && *g != '0') {
+		initGstaClient();
+		return;
+	}
+#endif
 
 	// Use WebSocket if:
 	//   - MAPLECAST_SERVER_HOST is set (explicit host override), or
@@ -3455,6 +3473,416 @@ static int64_t _clientNowUs() {
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
+
+#ifdef MAPLECAST_GSTA_CLIENT_BUILD
+// =============================================================================
+// NATIVE GSTA CLIENT  --  render the replica-live (7212) GSTA wire through
+// flycast's OWN renderer (feat/render-replica-live: the validated endgame).
+//
+// The proof this works: the TA-mirror (7200) renders PIXEL-PERFECT via flycast's
+// renderer; the GSTA wire (7212) carries the SAME game state but the browser
+// WebGPU reconstruction has bugs. Reconstruct the body TA from the GSTA state
+// with the byte-exact transpiled render_frame (re_kb finding:render_replica_
+// phase1_codederived, params 16/16, 100% pixel match), feed flycast's OWN
+// renderer->Process  ->  pixel-perfect by construction.
+//
+// FLOW (mirrors web/render-replica/replay.html parsePrefix/seedFrom/liveApplyFrame):
+//   7212 WS  ->  msg1 ZCST static prefix: MCRR header + region tables + 8MB VRAM +
+//                32KB PVR + static regions + 16MB RAM  ->  seed _gstaRam/vram/pvr (ONCE)
+//   per FRMx: overlay dynamic regions (splat addr&0xFFFFFF) + GFX/PALETTE/HUDQ tails
+//   ->  render_frame(&ctx{.ram=_gstaRam})  ->  SceneQuad[]
+//   ->  [M3] body_decoder: GFX1[sel] -> vram at TCW
+//   ->  emit 96B sprite-TA into TA_context.tad  (+ HUDQ quads)
+//   ->  renderer->Process  ->  flycast OpenGL.
+//
+// Separate from the TA-mirror path: this never calls clientReceive(); the render
+// loop routes to clientReceiveGsta() when gstaModeActive(). _isClient is set so
+// the mirror render loop in mainui.cpp runs.
+// =============================================================================
+#include "gsta_render_frame.h"
+
+// MCRR / FRMx / HUDQ magics (LE on the wire)  --  match maplecast_replica_live.cpp.
+static constexpr uint32_t GSTA_MCRR_MAGIC = 0x5252434Du;   // "MCRR"
+static constexpr uint32_t GSTA_FRMX_MAGIC = 0x784D5246u;   // "FRMx"
+static constexpr uint32_t GSTA_HUDQ_MAGIC = 0x48554451u;   // "HUDQ"
+
+static bool                 _gstaMode = false;
+static std::atomic<bool>    _gstaSeeded{false};       // static prefix applied
+static std::thread          _gstaThread;
+
+// The flat 16MB area-3 RAM image render_frame reads (NOT the emulator's mem_b,
+// which a CLIENT_ONLY build with no SH4/ROM may not have populated). Seeded once
+// from the prefix's "ram16" static region, overlaid per FRMx by the dynamic regions.
+static std::vector<uint8_t> _gstaRam;                 // 16MB
+
+// One parsed dynamic-region descriptor (addr,len,tag) from the prefix table.
+struct GstaRegion { uint32_t addr, len; char tag[9]; };
+static std::vector<GstaRegion> _gstaDynRegs;
+static uint32_t             _gstaDynTotal = 0;        // sum of dynamic region lens
+
+// Producer -> consumer handoff: the WS thread parses+seeds+renders into a
+// double-buffered TA staging area; the render thread drains it in clientReceiveGsta.
+struct GstaFrame {
+	std::vector<uint8_t> ta;       // emitted PVR2 sprite TA (96B/quad + EOL)
+	uint32_t             vframe = 0;
+	bool                 vramDirty = false;   // body decode / palette touched VRAM/pal
+	bool                 palDirty  = false;
+};
+static GstaFrame              _gstaFrame;              // last rendered frame
+static std::mutex             _gstaMtx;
+static std::atomic<bool>      _gstaReady{false};
+
+// Per-frame scratch reused across frames (avoid realloc churn).
+static GstaSh4Ctx             _gstaCtx;
+
+bool gstaModeActive() { return _gstaMode; }
+
+// forward decls (defined below)
+static int gstaDecodeBodies(int nQuad);
+static std::vector<uint8_t> gstaBuildHudTA(const uint8_t* hud, uint32_t nHud);
+
+// ---- LE readers over a byte buffer (wire is little-endian) ----
+static inline uint32_t gle32(const uint8_t* p) {
+	return (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24);
+}
+
+// Apply the MCRR static prefix (decompressed bytes). Seeds _gstaRam (16MB), the
+// emulator's vram[] (8MB) + pvr_regs[] (32KB), and the static regions; records the
+// dynamic-region table for per-FRMx overlay. Returns false on a malformed prefix.
+// Mirrors replay.html parsePrefix() + seedFrom().
+static bool gstaApplyPrefix(const uint8_t* d, size_t n)
+{
+	if (n < 32 || gle32(d) != GSTA_MCRR_MAGIC) {
+		printf("[GSTA] bad MCRR magic in prefix (%zu B)\n", n); return false;
+	}
+	size_t p = 0;
+	auto u32 = [&]() { uint32_t v = gle32(d + p); p += 4; return v; };
+	u32();                          // magic (checked)
+	uint32_t version  = u32();
+	uint32_t nStatic  = u32();
+	uint32_t nDynamic = u32();
+	u32();                          // nFrames (0, streamed)
+	uint32_t vramBytes= u32();
+	uint32_t pvrBytes = u32();
+	u32();                          // reserved
+
+	auto region = [&](GstaRegion& r) {
+		r.addr = u32(); r.len = u32();
+		memcpy(r.tag, d + p, 8); r.tag[8] = 0; p += 8;
+	};
+	std::vector<GstaRegion> staticRegs(nStatic);
+	for (auto& r : staticRegs) region(r);
+	_gstaDynRegs.assign(nDynamic, {});
+	for (auto& r : _gstaDynRegs) region(r);
+	_gstaDynTotal = 0;
+	for (auto& r : _gstaDynRegs) _gstaDynTotal += r.len;
+
+	// ---- static payload: VRAM, PVR regs, then each static region's bytes ----
+	if (p + vramBytes + pvrBytes > n) { printf("[GSTA] prefix truncated (vram/pvr)\n"); return false; }
+	if (_gstaRam.size() != 16u*1024*1024) _gstaRam.assign(16u*1024*1024, 0);
+
+	if (vramBytes <= (uint32_t)VRAM_SIZE) memcpy(&vram[0], d + p, vramBytes);
+	p += vramBytes;
+	if (pvrBytes <= (uint32_t)pvr_RegSize) memcpy(pvr_regs, d + p, pvrBytes);
+	p += pvrBytes;
+
+	for (auto& r : staticRegs) {
+		if (p + r.len > n) { printf("[GSTA] prefix truncated at static region '%s'\n", r.tag); return false; }
+		if (strcmp(r.tag, "ram16") == 0)
+			memcpy(&_gstaRam[0], d + p, std::min<size_t>(r.len, _gstaRam.size()));
+		else {
+			uint32_t off = r.addr & 0x00FFFFFFu;
+			if ((size_t)off + r.len <= _gstaRam.size())
+				memcpy(&_gstaRam[off], d + p, r.len);
+		}
+		p += r.len;
+	}
+
+	// Seed flycast's renderer with the static VRAM/PVR: unprotect, mark caches dirty.
+	memwatch::unprotect();
+	if (renderer) { renderer->resetTextureCache = true; renderer->updatePalette = true; renderer->updateFogTable = true; }
+	pal_needs_update = true; palette_update();
+
+	printf("[GSTA] prefix seeded: v%u, %u static + %u dynamic regions (dynTotal=%u), vram=%u pvr=%u, ram=16MB\n",
+		version, nStatic, nDynamic, _gstaDynTotal, vramBytes, pvrBytes);
+	for (auto& r : _gstaDynRegs) printf("[GSTA]   dyn region '%s' @%08x len=%u\n", r.tag, r.addr, r.len);
+	return true;
+}
+
+// Build one PVR2 sprite-TA from the current scene into `out` (port of
+// wasm_entry_frame.c render_frame_ta emit loop). Returns bytes written.
+static uint32_t gstaEmitSpriteTA(std::vector<uint8_t>& out)
+{
+	auto h16 = [](float f){ uint32_t u; memcpy(&u,&f,4); return (uint16_t)((u>>16)&0xFFFF); };
+	int n = render_frame_nscene();
+	const GstaSceneQuad* S = render_frame_scene();
+	out.assign((size_t)n * 96 + 32, 0);
+	uint8_t* base = out.data();
+	uint32_t o = 0;
+	auto W32 = [&](uint32_t off, uint32_t v){ uint8_t* q=base+off; q[0]=v;q[1]=v>>8;q[2]=v>>16;q[3]=v>>24; };
+	auto WF  = [&](uint32_t off, float f){ uint32_t u; memcpy(&u,&f,4); W32(off,u); };
+	for (int k = 0; k < n; k++) {
+		const GstaSceneQuad* q = &S[k];
+		uint8_t* p = base + o; memset(p, 0, 96);
+		// param header
+		W32(o+0,q->pcw); W32(o+4,q->isp); W32(o+8,q->tsp); W32(o+12,q->tcw);
+		W32(o+16,0xFFFFFFFFu);          // sprite base color (opaque white, MODULATE identity)
+		W32(o+32,0xE0000000u);          // sprite vtx PCW
+		WF(o+36,q->Ax); WF(o+40,q->Ay); WF(o+44,q->z);
+		WF(o+48,q->Bx); WF(o+52,q->By); WF(o+56,q->z);
+		WF(o+60,q->Cx); WF(o+64,q->Cy); WF(o+68,q->z);
+		WF(o+72,q->Dx); WF(o+76,q->Dy);
+		{
+			float U = q->u1, V = q->u1;
+			float uLo = q->mirror ? U : 0.0f;
+			float uHi = q->mirror ? 0.0f : U;
+			uint16_t v0=h16(V),u0=h16(uLo),v1=h16(V),u1=h16(uHi),v2=h16(0.0f),u2=h16(uHi);
+			p[84]=v0;p[85]=v0>>8; p[86]=u0;p[87]=u0>>8;
+			p[88]=v1;p[89]=v1>>8; p[90]=u1;p[91]=u1>>8;
+			p[92]=v2;p[93]=v2>>8; p[94]=u2;p[95]=u2>>8;
+		}
+		o += 96;
+	}
+	memset(base + o, 0, 32); o += 32;   // EndOfList
+	return o;
+}
+
+// ---- M3 STUB: body texture decode (GFX1 -> vram at TCW). Filled in milestone M3.
+// For M2, bodies render with whatever textures the static-prefix VRAM seed holds (the
+// resident poses at connect). Returns #tiles written (0 = M2). ----
+static int gstaDecodeBodies(int /*nQuad*/) { return 0; }
+
+// ---- M4 STUB: build the HUD sprite-TA from the wire HudQuads. Filled in milestone M4.
+static std::vector<uint8_t> gstaBuildHudTA(const uint8_t* /*hud*/, uint32_t /*nHud*/) { return {}; }
+
+// Apply one raw FRMx record (decompressed). Overlay dynamic regions + tails into
+// _gstaRam/vram/pvr, run render_frame, emit the body TA, decode body textures, and
+// hand the result to the render thread. Port of replay.html liveApplyFrame().
+static void gstaApplyFrame(const uint8_t* d, size_t n)
+{
+	if (!_gstaSeeded.load(std::memory_order_acquire)) return;
+	if (n < 12 || gle32(d) != GSTA_FRMX_MAGIC) { printf("[GSTA] dropped: bad FRMx magic\n"); return; }
+	size_t p = 4;
+	uint32_t vframe = gle32(d + p); p += 4;
+	uint32_t taSize = gle32(d + p); p += 4;     // 0 in the live stream
+
+	// ---- dynamic regions in table order: splat each into _gstaRam at addr&0xFFFFFF ----
+	for (auto& r : _gstaDynRegs) {
+		if (p + r.len > n) { printf("[GSTA] frame truncated in dyn region '%s'\n", r.tag); return; }
+		if (strcmp(r.tag, "bodytex") != 0) {     // legacy texture band (ignored)
+			uint32_t off = r.addr & 0x00FFFFFFu;
+			if ((size_t)off + r.len <= _gstaRam.size())
+				memcpy(&_gstaRam[off], d + p, r.len);
+		}
+		p += r.len;
+	}
+
+	bool palDirty = false;
+
+	// ---- VARIABLE GFX TAIL: u32 nGfx, then nGfx x { u32 base, u32 len, len bytes } ----
+	if (p + 4 <= n) {
+		uint32_t nGfx = gle32(d + p);
+		if (nGfx <= 64) {
+			p += 4;
+			for (uint32_t i = 0; i < nGfx && p + 8 <= n; i++) {
+				uint32_t base = gle32(d + p); p += 4;
+				uint32_t len  = gle32(d + p); p += 4;
+				if (len > 0x800000 || p + len > n) break;
+				uint32_t off = base & 0x00FFFFFFu;
+				if ((size_t)off + len <= _gstaRam.size())
+					memcpy(&_gstaRam[off], d + p, len);
+				p += len;
+			}
+		}
+	}
+
+	// ---- PALETTE TAIL: u32 pvrPalLen, then pvrPalLen bytes of fresh pvr_regs ----
+	if (p + 4 <= n) {
+		uint32_t palLen = gle32(d + p); p += 4;
+		if (palLen && palLen <= (uint32_t)pvr_RegSize && p + palLen <= n) {
+			memcpy(pvr_regs, d + p, palLen);
+			palDirty = true;
+			p += palLen;
+		}
+	}
+
+	// ---- HUDQ TAIL: u32 magic, u32 nHud, nHud x 96-byte HudQuad ----
+	std::vector<uint8_t> hudTa;
+	if (p + 8 <= n && gle32(d + p) == GSTA_HUDQ_MAGIC) {
+		p += 4;
+		uint32_t nHud = gle32(d + p); p += 4;
+		if (nHud <= 4096 && p + (size_t)nHud * 96 <= n) {
+			// HudQuads are already-final PVR quads (4 corners + UV + col + PVR words). The wire
+			// HudQuad layout: f32 x[4],y[4]; f32 u[4],v[4]; u32 col[4]; u32 pcw,isp,tsp,tcw.
+			// Re-emit each as a paraType-5 sprite-TA block (the M4 HUD path).
+			hudTa = gstaBuildHudTA(d + p, nHud);
+			p += (size_t)nHud * 96;
+		}
+	}
+
+	// ---- render the bodies from the seeded RAM (byte-exact transpiled path) ----
+	memset(&_gstaCtx, 0, sizeof(_gstaCtx));
+	_gstaCtx.ram = _gstaRam.data();
+	render_frame(&_gstaCtx);
+	int nQuad = render_frame_nscene();
+
+	// ---- M3: decode body textures into vram at each quad's TCW ----
+	int written = gstaDecodeBodies(nQuad);
+
+	// ---- emit the body sprite-TA (+ append HUD) ----
+	GstaFrame fr;
+	uint32_t bodyLen = gstaEmitSpriteTA(fr.ta);
+	if (!hudTa.empty()) {
+		// strip the body EOL (last 32B) then append HUD quads + a single EOL.
+		if (bodyLen >= 32) fr.ta.resize(bodyLen - 32);
+		fr.ta.insert(fr.ta.end(), hudTa.begin(), hudTa.end());
+		std::vector<uint8_t> eol(32, 0);
+		fr.ta.insert(fr.ta.end(), eol.begin(), eol.end());
+	}
+	fr.vframe    = vframe;
+	fr.vramDirty = (written > 0);
+	fr.palDirty  = palDirty;
+
+	{
+		std::lock_guard<std::mutex> lk(_gstaMtx);
+		_gstaFrame = std::move(fr);
+		_gstaReady.store(true, std::memory_order_release);
+	}
+
+	static uint64_t _fn = 0;
+	if ((_fn++ % 60) == 0)
+		printf("[GSTA] frame %u: bodies=%u quads=%d texWritten=%d palDirty=%d ta=%zuB\n",
+			vframe, render_frame_body_count(), nQuad, written, (int)palDirty, fr.ta.size());
+}
+
+// WS thread: connect 7212, msg1=ZCST prefix (seed), msg N = FRMx (apply+render).
+static void gstaClientRun(std::string host, int port)
+{
+	printf("[GSTA] Connecting to %s:%d (replica-live wire)...\n", host.c_str(), port); fflush(stdout);
+#ifdef _WIN32
+	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+#endif
+	struct addrinfo hints = {}, *res = nullptr;
+	hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM;
+	char portBuf[16]; snprintf(portBuf, sizeof(portBuf), "%d", port);
+	if (getaddrinfo(host.c_str(), portBuf, &hints, &res) != 0 || !res) {
+		printf("[GSTA] getaddrinfo('%s:%d') failed\n", host.c_str(), port); return;
+	}
+	int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+	if (fd < 0) { printf("[GSTA] socket() failed\n"); freeaddrinfo(res); return; }
+	if (connect(fd, res->ai_addr, res->ai_addrlen) != 0) {
+		printf("[GSTA] connect() failed: %s\n", strerror(errno));
+		mc_closesocket(fd); freeaddrinfo(res); return;
+	}
+	freeaddrinfo(res);
+	int one = 1; mc_setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
+	if (!wsHandshake(fd, host.c_str(), port)) {
+		printf("[GSTA] WebSocket handshake failed\n"); mc_closesocket(fd); return;
+	}
+	printf("[GSTA] WebSocket handshake OK  --  awaiting ZCST static prefix\n"); fflush(stdout);
+
+	MirrorDecompressor decomp;
+	decomp.init(40 * 1024 * 1024);   // prefix ~27MB uncompressed + headroom
+
+	std::vector<uint8_t> frame;
+	bool prefixSeen = false;
+	while (true) {
+		if (!wsReadFrame(fd, frame)) { printf("[GSTA] connection lost\n"); break; }
+		if (frame.empty()) continue;                              // ping/text
+		size_t dn = 0;
+		const uint8_t* dd = decomp.decompress(frame.data(), frame.size(), dn);
+		if (!dd || dn < 12) continue;
+
+		if (!prefixSeen) {
+			if (gstaApplyPrefix(dd, dn)) {
+				prefixSeen = true;
+				_gstaSeeded.store(true, std::memory_order_release);
+				printf("[GSTA] seeded; streaming frames\n"); fflush(stdout);
+			}
+			continue;
+		}
+		if (gle32(dd) == GSTA_FRMX_MAGIC) gstaApplyFrame(dd, dn);
+	}
+	mc_closesocket(fd); decomp.destroy();
+}
+
+static void initGstaClient()
+{
+	_isClient   = true;     // run the mirror render loop in mainui.cpp
+	_gstaMode   = true;
+	_useWebSocket = false;  // NOT the TA-mirror WS path
+
+	const char* host = std::getenv("MAPLECAST_SERVER_HOST");
+	if (!host || !*host) host = "127.0.0.1";
+	int port = 7212;
+	if (const char* pe = std::getenv("MAPLECAST_GSTA_PORT")) { int v = atoi(pe); if (v>0 && v<65536) port = v; }
+
+	printf("[GSTA] === NATIVE GSTA CLIENT === ws://%s:%d/ (render_frame -> flycast renderer)\n", host, port);
+	memwatch::unprotect();
+
+	if (!_decodeTaAlloced) { _decodeTaCtx[0].Alloc(); _decodeTaCtx[1].Alloc(); _decodeTaAlloced = true; }
+	_decodeIdx = 0;
+
+	_gstaThread = std::thread(gstaClientRun, std::string(host), port);
+	_gstaThread.detach();
+
+	// input sink still goes to the headless server (7100) so the user can drive the match.
+	int audioPort = 7203;
+	if (const char* a = std::getenv("MAPLECAST_AUDIO_WS_PORT")) audioPort = atoi(a);
+	maplecast_audio_client::init(host, audioPort);
+}
+
+// ---- render-thread consumer: drain the last GSTA frame, feed renderer->Process ----
+// Same contract as clientReceive(): fills `rc`, sets vramDirty, returns true if a frame
+// was applied. Called from mainui.cpp's mirror render loop when gstaModeActive().
+bool clientReceiveGsta(rend_context& rc, bool& vramDirty)
+{
+	vramDirty = false;
+	if (!_gstaMode) return false;
+	if (!_gstaReady.load(std::memory_order_acquire)) return false;
+
+	static GstaFrame local;
+	{
+		std::lock_guard<std::mutex> lk(_gstaMtx);
+		local = std::move(_gstaFrame);
+		_gstaReady.store(false, std::memory_order_release);
+	}
+	if (local.ta.empty()) return false;
+
+	TA_context& ctx = _decodeTaCtx[_decodeIdx];
+	_decodeIdx ^= 1;
+	uint8_t* taDst = ctx.tad.thd_root;
+	size_t taSize = local.ta.size();
+	memcpy(taDst, local.ta.data(), taSize);
+
+	ctx.rend.Clear();
+	ctx.tad.Clear();
+	ctx.tad.thd_data = taDst + taSize;
+
+	// Framebuffer geometry: MVC2 renders at 640x480 internally; the engine's TA
+	// VERTICES are already in screen pixels (render_frame Ax/Ay), so the renderer
+	// just needs a 640x480 target scaled by the client's RenderResolution.
+	uint32_t serverW = 640, serverH = 480;
+	if (config::RenderResolution > 480) {
+		float scale = config::RenderResolution / 480.f;
+		serverW = (uint32_t)(serverW * scale); serverH = (uint32_t)(serverH * scale);
+	}
+	ctx.rend.framebufferWidth  = serverW;
+	ctx.rend.framebufferHeight = serverH;
+	ctx.rend.clearFramebuffer  = true;
+	ctx.rend.fZ_max = 1.0f;
+
+	vramDirty = local.vramDirty;
+	if (vramDirty && renderer) renderer->resetTextureCache = true;
+	if (local.palDirty && renderer) {
+		pal_needs_update = true; palette_update();
+		renderer->updatePalette = true; renderer->updateFogTable = true;
+	}
+
+	if (renderer) { renderer->Process(&ctx); rc = ctx.rend; }
+	return true;
+}
+#endif // MAPLECAST_GSTA_CLIENT_BUILD
 
 // !!! THIS FUNCTION IS THE GOLD STANDARD  --  KEEP IT THAT WAY !!!
 //
