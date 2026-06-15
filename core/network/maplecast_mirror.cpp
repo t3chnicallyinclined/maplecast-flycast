@@ -3525,8 +3525,17 @@ static uint32_t             _gstaDynTotal = 0;        // sum of dynamic region l
 
 // Producer -> consumer handoff: the WS thread parses+seeds+renders into a
 // double-buffered TA staging area; the render thread drains it in clientReceiveGsta.
+// One decoded body tile staged for VRAM application ON THE RENDER THREAD. The body
+// texture decode runs on the WS thread but MUST land in vram[] paired with THIS frame's
+// TA — the rectab arena reuses the same vaddrs every frame, so if the WS thread decodes
+// frame N+k's textures into the single shared vram[] while the render thread is still
+// drawing frame N's TA, every quad samples the WRONG part at the right position = the
+// Cable "fragmentation" (wrong-limb-at-correct-place). Staging the (vaddr,bytes) here and
+// applying them just before Process() guarantees TA<->texture are always the same frame.
+struct GstaTileWrite { uint32_t vaddr; uint8_t bytes[512]; };
 struct GstaFrame {
 	std::vector<uint8_t> ta;       // emitted PVR2 sprite TA (96B/quad + EOL)
+	std::vector<GstaTileWrite> tiles;  // body tiles to apply to vram[] on the render thread
 	uint32_t             vframe = 0;
 	bool                 vramDirty = false;   // body decode / palette touched VRAM/pal
 	bool                 palDirty  = false;
@@ -3541,7 +3550,7 @@ static GstaSh4Ctx             _gstaCtx;
 bool gstaModeActive() { return _gstaMode; }
 
 // forward decls (defined below)
-static int gstaDecodeBodies(int nQuad);
+static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles);
 static std::vector<uint8_t> gstaBuildHudTA(const uint8_t* hud, uint32_t nHud);
 
 // ---- LE readers over a byte buffer (wire is little-endian) ----
@@ -3773,7 +3782,7 @@ static uint32_t gstaEndOf(const std::vector<uint32_t>& srt, uint32_t off) {
 	return it != srt.end() ? *it : off + 0x4000;
 }
 
-static int gstaDecodeBodies(int nQuad)
+static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 {
 	if (nQuad <= 0) return 0;
 	gstaTwInit();
@@ -3835,8 +3844,13 @@ static int gstaDecodeBodies(int nQuad)
 			}
 		}
 		gstaRetwiddle32(tileLin.data(), tile512.data());
-		VramLockedWriteOffset(vaddr);
-		memcpy(&vram[vaddr], tile512.data(), 512);
+		// STAGE the tile for application on the render thread (paired with this frame's
+		// TA) instead of writing the shared vram[] from the WS thread — kills the
+		// texture<->TA frame race (the Cable wrong-limb fragmentation).
+		outTiles.emplace_back();
+		GstaTileWrite& tw = outTiles.back();
+		tw.vaddr = vaddr;
+		memcpy(tw.bytes, tile512.data(), 512);
 		written++;
 	}
 	return written;
@@ -3958,12 +3972,47 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 	render_frame(&_gstaCtx);
 	int nQuad = render_frame_nscene();
 
-	// ---- M3: decode body textures into vram at each quad's TCW ----
-	int written = gstaDecodeBodies(nQuad);
-
-	// ---- emit the body sprite-TA (+ append HUD) ----
+	// ---- emit the body sprite-TA (+ append HUD) ----  [fr declared early so the body
+	// texture decode can STAGE its tiles into fr.tiles, applied on the render thread] ----
 	GstaFrame fr;
 	uint32_t bodyLen = gstaEmitSpriteTA(fr.ta);
+
+	// ---- M3: decode body textures, STAGED into fr.tiles (applied on render thread) ----
+	int written = gstaDecodeBodies(nQuad, fr.tiles);
+
+	// ---- DIAG (MAPLECAST_DUMP_GSTA_VRAM=<dir>): one-shot dump of the body texture
+	// VRAM band [0x80000..0xE0000] + a per-quad manifest (sel,pal,tcw_addr,Ax,Ay,
+	// col,row,mirror) so we can byte-diff GSTA-decoded VRAM vs the real client VRAM
+	// at each Cable wide-part TCW. Read-only diagnostic, no behavior change. ----
+	{
+		static int _vdumpN = 0;
+		const char* vd = std::getenv("MAPLECAST_DUMP_GSTA_VRAM");
+		if (vd && *vd && _vdumpN < 4000 && nQuad > 0) {
+			_vdumpN++;
+			// apply staged tiles into vram[] so the diagnostic reflects this frame's decode
+			for (const auto& tw : fr.tiles) if (tw.vaddr + 512 <= VRAM_SIZE) memcpy(&vram[tw.vaddr], tw.bytes, 512);
+			char vpath[512]; snprintf(vpath, sizeof(vpath), "%s/gsta_vram_%u.bin", vd, vframe);
+			FILE* vf2 = fopen(vpath, "wb");
+			if (vf2) { fwrite(&vram[0x400000], 1, 0x80000, vf2); fclose(vf2); }
+			char mpath[512]; snprintf(mpath, sizeof(mpath), "%s/gsta_manifest_%u.txt", vd, vframe);
+			FILE* mf = fopen(mpath, "w");
+			if (mf) {
+				static std::vector<int> _crd; _crd.assign((size_t)nQuad*2,0);
+				gsta_quad_colrow(_crd.data(),(unsigned)nQuad);
+				static std::vector<uint8_t> _mrd; _mrd.assign((size_t)nQuad,0);
+				gsta_quad_mirror(_mrd.data(),(unsigned)nQuad);
+				const GstaSceneQuad* SS = render_frame_scene();
+				for (int q=0;q<nQuad;q++){
+					uint32_t pal=(SS[q].tcw>>21)&0x3F, addr=(SS[q].tcw&0x1FFFFF)<<3;
+					fprintf(mf,"q%d sel=%u gfx1=%x pal=%u tcw_addr=%x Ax=%.1f Ay=%.1f col=%d row=%d mir=%d\n",
+						q, SS[q].sel, SS[q].gfx1, pal, addr, SS[q].Ax, SS[q].Ay, _crd[2*q], _crd[2*q+1], _mrd[q]);
+				}
+				fclose(mf);
+			}
+		}
+	}
+
+	// ---- append HUD to the already-emitted body sprite-TA ----
 	if (!hudTa.empty()) {
 		// strip the body EOL (last 32B) then append HUD quads + a single EOL.
 		if (bodyLen >= 32) fr.ta.resize(bodyLen - 32);
@@ -4129,6 +4178,18 @@ bool clientReceiveGsta(rend_context& rc, bool& vramDirty)
 		_gstaReady.store(false, std::memory_order_release);
 	}
 	if (local.ta.empty()) return false;
+
+	// Apply THIS frame's staged body tiles into vram[] HERE (render thread), paired with
+	// its TA — so the textures the renderer samples are exactly the ones decoded for this
+	// frame's quads. (The WS thread no longer writes the shared vram[] mid-flight, which
+	// raced the render thread and put the wrong part under each TCW = Cable fragmentation.)
+	if (!local.tiles.empty()) {
+		for (const auto& tw : local.tiles) {
+			if ((size_t)tw.vaddr + 512 > VRAM_SIZE) continue;
+			VramLockedWriteOffset(tw.vaddr);
+			memcpy(&vram[tw.vaddr], tw.bytes, 512);
+		}
+	}
 
 	TA_context& ctx = _decodeTaCtx[_decodeIdx];
 	_decodeIdx ^= 1;
@@ -4309,6 +4370,20 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 			else if (rid == 3 && pageOff + MEM_PAGE_SIZE <= (size_t)pvr_RegSize) {
 				memcpy(pvr_regs + pageOff, df.pages[d].data, MEM_PAGE_SIZE);
 				pvrRegsDirty = true;
+			}
+		}
+
+		// DIAG (MAPLECAST_DUMP_GSTA_VRAM=<dir>): one-shot dump of the REAL engine's
+		// body texture VRAM band [0x80000..0xE0000], keyed by this client's frameNum,
+		// to byte-diff against the GSTA-decoded VRAM at each Cable wide-part TCW.
+		{
+			static int _rvN = 0;
+			const char* rvd = std::getenv("MAPLECAST_DUMP_GSTA_VRAM");
+			if (rvd && *rvd && _rvN < 4000 && df.frameNum > 0) {
+				_rvN++;
+				char rvp[512]; snprintf(rvp, sizeof(rvp), "%s/real_vram_%u.bin", rvd, df.frameNum);
+				FILE* rf = fopen(rvp, "wb");
+				if (rf) { fwrite(&vram[0x400000], 1, 0x80000, rf); fclose(rf); }
 			}
 		}
 

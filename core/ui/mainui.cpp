@@ -20,6 +20,9 @@
 #include "mainui.h"
 #include "hw/pvr/Renderer_if.h"
 #include "gui.h"
+#include <stb_image_write.h>
+#include <vector>
+#include <cstdlib>
 #include "oslib/oslib.h"
 #include "wsi/context.h"
 #include "cfg/option.h"
@@ -185,6 +188,18 @@ bool mainui_rend_frame()
 					printf("[GSTA] renderer->Render()=%d (frame %llu)\n",
 						(int)isScreen, (unsigned long long)_grn);
 				fflush(stdout);
+				// DIAG: MAPLECAST_GSTA_SHOT=<path-prefix> dumps PNG screenshots of the
+				// rendered frame (frames 120..150) to visually verify the body fragmentation fix.
+				const char* shot = std::getenv("MAPLECAST_GSTA_SHOT");
+				if (shot && *shot && isScreen && _grn >= 120 && _grn <= 150 && (_grn % 6 == 0)) {
+					std::vector<u8> raw; int w=0,h=0;
+					if (renderer && renderer->GetLastFrame(raw, w, h) && w>0 && h>0) {
+						char pp[600]; snprintf(pp, sizeof(pp), "%s_%llu.png", shot, (unsigned long long)_grn);
+						stbi_flip_vertically_on_write(0);
+						stbi_write_png(pp, w, h, 3, raw.data(), 0);
+						printf("[GSTA] SHOT %s (%dx%d)\n", pp, w, h); fflush(stdout);
+					}
+				}
 			}
 			if (isScreen)
 			{
