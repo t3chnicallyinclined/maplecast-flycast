@@ -3808,6 +3808,25 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 	colrow.assign((size_t)nQuad * 2, 0);
 	gsta_quad_colrow(colrow.data(), (unsigned)nQuad);
 
+	// PRE-PASS — per-(gfx1,sel) RUN tile-grid extent (cols=maxcol+1, rows=maxrow+1). The carve
+	// step is the ENGINE TILE SIZE m = W/cols = H/rows (8/16/32, square per re_kb
+	// finding:wide_part_tile_storage_order_v2), NOT a hardcoded 32. For a multi-ROW part tiled
+	// at m<32 (sel285 W=64 H=16 -> 4×1 m16 / 8×2 m8) the old row*32 over-stepped past H so every
+	// row>=1 sampled zero -> the flat grey blocks. The walker's per-tile (col,row) ranks are
+	// correct (geometry 0.00px); only the carve PITCH was wrong. CONFIRMED-BY-MEASUREMENT
+	// (ASMTRACE PC 0x8C034864 steps screenY per row; the Y-pen was NEVER dropped) 2026-06-15.
+	struct RunExt { int mc, mr; };
+	std::unordered_map<uint64_t, RunExt> runExt;
+	for (int q = 0; q < nQuad; q++) {
+		uint32_t g = S[q].gfx1;
+		if (!(g & 0x0C000000u) && !(g & 0x8C000000u)) continue;
+		uint64_t k = ((uint64_t)g << 32) | S[q].sel;
+		int c = colrow[2 * q], r = colrow[2 * q + 1];
+		auto it = runExt.find(k);
+		if (it == runExt.end()) runExt[k] = { c, r };
+		else { if (c > it->second.mc) it->second.mc = c; if (r > it->second.mr) it->second.mr = r; }
+	}
+
 	// Bound the decode-part memo; clear if it grows unbounded across many poses.
 	if (_gstaPartCache.size() > 4096) _gstaPartCache.clear();
 
@@ -3845,13 +3864,25 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 		if (!pd.ok) continue;
 
 		int col = colrow[2 * q], row = colrow[2 * q + 1];
-		int ox = col * 32, oy = row * 32, W = pd.W, H = pd.H;
+		int W = pd.W, H = pd.H;
+		// TILE SIZE m = W/cols = H/rows (engine's square per-tile pitch, finding 22-v2),
+		// derived from this run's emitted grid extent. Clamp to the 32×32 carve window the
+		// pvr2 renderer reads (the engine UV-clamps to the top-left m×m). Fallback m=32 for
+		// a single 32-square tile (the prior validated path).
+		auto re = runExt.find(key);   /* key == (gfx1<<32)|sel, same run id */
+		int cols = (re != runExt.end()) ? (re->second.mc + 1) : 1;
+		int rows = (re != runExt.end()) ? (re->second.mr + 1) : 1;
+		int m = (cols > 0) ? (W / cols) : W;
+		int mR = (rows > 0) ? (H / rows) : H;
+		if (mR < m) m = mR;
+		if (m <= 0) m = 32; if (m > 32) m = 32;
+		int ox = col * m, oy = row * m;
 		std::fill(tileLin.begin(), tileLin.end(), 0);
-		for (int yy = 0; yy < 32; yy++) {
+		for (int yy = 0; yy < m; yy++) {
 			int py = oy + yy; if (py >= H) break;
 			const uint8_t* rowBase = &pd.lin[(size_t)py * W];
 			uint8_t* dst = &tileLin[(size_t)yy * 32];
-			for (int xx = 0; xx < 32; xx++) {
+			for (int xx = 0; xx < m; xx++) {
 				int px = ox + xx; if (px >= W) break;
 				dst[xx] = rowBase[px];
 			}

@@ -285,6 +285,29 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         return ((tcw & 0x1FFFFF) << 3) >>> 0;       // fmt5 PAL4: byteAddr = (TCW & 0x1FFFFF) << 3
     };
 
+    // PRE-PASS — per-(gfx1,sel) RUN tile-grid extent: cols = maxcol+1, rows = maxrow+1.
+    // The carve step is the ENGINE TILE SIZE m = W/cols = H/rows (8/16/32, square per
+    // re_kb finding:wide_part_tile_storage_order_v2), NOT a hardcoded 32. For a multi-ROW
+    // part tiled at m<32 (e.g. sel285 W=64 H=16 -> 4×1 m16 or 8×2 m8) the old `row*32`
+    // over-stepped past H so every row>=1 sampled past-end/zero -> the flat grey blocks the
+    // user saw on Storm's cape. The walker's per-tile (col,row) ranks are correct (geometry
+    // 0.00px, finding:tiling_geometry_byte_faithful); only the carve PITCH was wrong.
+    // MEASURED root cause: ASMTRACE PC 0x8C034864 steps screenY per row (the walker advances
+    // the Y-pen); render_frame reproduces it byte-exact — so the degenerate-Ay symptom was
+    // NOT a dropped Y-pen but this carve over-step. (CONFIRMED-BY-MEASUREMENT 2026-06-15.)
+    const runExtent = new Map();   // "gfx1:sel" -> {mc:maxcol, mr:maxrow}
+    if (quadColRow) {
+        for (let q = 0; q < quadCount; q++) {
+            const g = quadGfx1s[q] >>> 0;
+            if (!(g & 0x0C000000) && !(g & 0x8C000000)) continue;
+            const k = g.toString(16) + ':' + quadSels[q];
+            const c = quadColRow[2 * q] | 0, r = quadColRow[2 * q + 1] | 0;
+            let e = runExtent.get(k);
+            if (e === undefined) { e = { mc: c, mr: r }; runExtent.set(k, e); }
+            else { if (c > e.mc) e.mc = c; if (r > e.mr) e.mr = r; }
+        }
+    }
+
     // Re-tile EACH emitted quad: slice its (col,row) 32×32 from the part's linear buffer, re-twiddle,
     // write 512B at the quad's OWN TCW. The walker assigns each tile a distinct +0x200 rectab slot;
     // we fill exactly that slot with the standalone 32×32 PAL4_TW the pvr2 renderer expects.
@@ -309,14 +332,26 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         // to 0,0 (single-tile parts) if it's absent.
         const col = quadColRow ? (quadColRow[2 * q] | 0) : 0;
         const row = quadColRow ? (quadColRow[2 * q + 1] | 0) : 0;
-        // extract the 32×32 linear region at (col*32, row*32), clamped to W×H (zero-pad outside).
+        // TILE SIZE m = W/cols = H/rows (the engine's square per-tile pitch, finding 22-v2).
+        // Derive cols/rows from this run's emitted grid extent (maxcol+1 / maxrow+1). m is
+        // clamped to the 32×32 tile the pvr2 renderer reads (the engine declares a 32×32
+        // texture and UV-clamps to the top-left m×m via u1=m/tile). Fallback m=32 when the
+        // extent is absent or degenerate (single 32-square tile = the prior validated path).
         const lin = p.lin, W = p.W, H = p.H;
+        const e = quadColRow ? runExtent.get(key) : undefined;
+        const cols = e ? (e.mc + 1) : 1, rows = e ? (e.mr + 1) : 1;
+        let m = cols > 0 ? (W / cols) : W;
+        const mR = rows > 0 ? (H / rows) : H;
+        if (mR < m) m = mR;                       // square tile = min (guards non-integer runs)
+        m = m | 0; if (m <= 0) m = 32; if (m > 32) m = 32;   // clamp to the 32×32 carve window
+        // extract the m×m linear region at (col*m, row*m), clamped to W×H, into the tile's
+        // top-left (zero-pad the rest of the 32×32 = the engine's UV-clamped sample area).
         const tile = new Uint8Array(1024);
-        const ox = col * 32, oy = row * 32;
-        for (let yy = 0; yy < 32; yy++) {
+        const ox = col * m, oy = row * m;
+        for (let yy = 0; yy < m; yy++) {
             const py = oy + yy; if (py >= H) break;
             const rowBase = py * W, dstBase = yy * 32;
-            for (let xx = 0; xx < 32; xx++) {
+            for (let xx = 0; xx < m; xx++) {
                 const px = ox + xx; if (px >= W) break;
                 tile[dstBase + xx] = lin[rowBase + px];
             }
