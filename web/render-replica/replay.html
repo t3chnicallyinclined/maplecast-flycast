@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF) [hud:ui2-spritefix · cockpit-live · plates1]</title>
+<title>MapleCast — Render-Replica MOTION (MCRR playback, SH4 OFF) [hud:ui2-engineorder · cockpit-live · plates1]</title>
 <style>
   :root { color-scheme: dark; }
   body { margin:0; background:#0c0e12; color:#cdd6e0; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; }
@@ -568,40 +568,33 @@ function applyHudQuadTail(u8, p) {
 // (the bank15 team tint + dark-red chip color, REAL now). TEXTURED quads (pcw bit3==1) sample VRAM
 // via the engine tcw/tsp (FONT.BIN digits, same twiddled decode as body parts) modulated by col[i].
 // Blend src=(tsp>>29)&7 / dst=(tsp>>26)&7 is already encoded in tsp -> pvr2 honors it for translucent.
-// ParaType-5 (PVR Sprite) re-tile. The HUD character-NAME letters are PVR SPRITES (pcw a2000009,
-// ParaType 5), NOT polygons. flycast's sprite expansion (ta_vtx.cpp AppendSpriteVertexA/B +
-// CaclulateSpritePlane) lays the 4 verts into rc.verts as (P, C, A, B) where P's UV is PLANE-
-// interpolated; collectHudQuads captures those 4 verts in array order. The captured order is NOT a
-// clean perimeter, so the identity strip [0,1,2,3] (correct for the para=4 FONT/portrait/bar polys)
-// puts the shared diagonal on the wrong pair -> a bowtie -> the diagonal colour-streak garble.
-// FIX (re_kb 36f finding:hud_sprite_paratype5_client_recipe): re-tile a sprite quad as a CONVEX
-// QUAD along its true diagonal — sort the 4 corners by centroid angle (pm[]) and emit the strip
-// [pm1,pm0,pm2,pm3] -> pvr2 _buildIndexBuffer tris (pm1,pm0,pm2)+(pm0,pm2,pm3), the right diagonal
-// pm0-pm2. Each vert keeps its CAPTURED u/v/col (P keeps its plane UV). CONFIRMED via
-// tools/render-replica-poc/_spr_probe.mjs on _hud_cap_namegap: streaks gone, names read correctly.
-function _hudSpriteOrder(q) {
-    const cx = (q.x[0] + q.x[1] + q.x[2] + q.x[3]) * 0.25;
-    const cy = (q.y[0] + q.y[1] + q.y[2] + q.y[3]) * 0.25;
-    const pm = [0, 1, 2, 3].sort((a, b) =>
-        Math.atan2(q.y[a] - cy, q.x[a] - cx) - Math.atan2(q.y[b] - cy, q.x[b] - cx));
-    return [pm[1], pm[0], pm[2], pm[3]];
-}
-// A captured ParaType-5 quad is a USABLE single-sprite glyph only if its 4 corners form a compact,
-// non-degenerate parallelogram. The autosort-translucent capture in collectHudQuads occasionally
-// merges two adjacent glyphs' corners into one quad (verts split across two far-apart x-clusters)
-// or collapses corners (duplicate verts / zero UV) — those streak under ANY winding, so skip them.
-// NOTE: these mis-captured sprites are the name's LEADING letters; rendering the full name requires
-// a SERVER-side collectHudQuads capture fix (see re_kb 36f note). Until then this draws the validly-
-// captured (mostly trailing) glyphs cleanly with NO streaks.
-function _hudSpriteUsable(q) {
-    const w = Math.max(q.x[0],q.x[1],q.x[2],q.x[3]) - Math.min(q.x[0],q.x[1],q.x[2],q.x[3]);
-    if (w > 48) return false;                                  // spans >> one glyph: merged capture
-    const xy = new Set(); for (let k=0;k<4;k++) xy.add(q.x[k].toFixed(1)+','+q.y[k].toFixed(1));
-    if (xy.size < 4) return false;                             // collapsed corner(s)
-    const uv = new Set(); for (let k=0;k<4;k++) uv.add(q.u[k].toFixed(3)+','+q.v[k].toFixed(3));
-    if (uv.size < 3) return false;                             // not a real textured slice
-    return true;
-}
+// ParaType-5 (PVR Sprite) — the HUD character-NAME letters (pcw a2000009, ParaType 5). These are
+// PVR SPRITES, but the engine still expands + triangulates them as a 4-vertex strip, and the server
+// now captures that strip in the engine's RAW EXPANSION ORDER. So NO geometric re-tile is needed:
+// the IDENTITY strip [0,1,2,3] reproduces the engine's own two triangles byte-for-byte — exactly
+// like the para=4 polys.
+//
+// PROOF (engine source, not inference):
+//  - ta_vtx.cpp AppendSpriteVertexA (L1047-1073) + AppendSpriteVertexB (L1124-1153) lay the 4
+//    expanded verts at rc.verts[pp.first..+4] in the FIXED order cv = [P, C, A, B]:
+//      cv[0]=P  (corner3 x3,y3; z,u,v PLANE-INTERPOLATED by CaclulateSpritePlane L1075-1122)
+//      cv[1]=C  (corner2: x2,y2,z2, uv u2,v2)
+//      cv[2]=A  (corner0: x0,y0,z0, uv u0,v0)
+//      cv[3]=B  (corner1: x1,y1,z1, uv u1,v1)
+//  - The engine triangulates that strip in ta_util.cpp sortTriangles (L104-128): for i=2 ->
+//    tri (P,C,A); for i=3 (parity flip) -> tri (A,C,B). Shared diagonal C-A. These are the
+//    ACTUALLY-DRAWN triangles (the inf-vert restarts are strip boundaries, not real tris).
+//  - The SERVER (collectHudQuads, maplecast_oracle_hook.cpp) detects isSpritePara=((pcw>>29)&7)==5
+//    and reads rc.verts[pp.first..+4] DIRECTLY (the seen==0 path), NOT the permuted rc.idx walk
+//    (rc.idx is depth-sorted/re-indexed by sortTriangles in an autosort-tr pass, which is what
+//    bowtied the leading letters). So q.x/y/u/v/col[0..3] ARE [P, C, A, B] in raw expansion order.
+//  - The CLIENT pvr2-renderer.mjs _buildIndexBuffer (L156-160) triangulates a count-vertex strip
+//    over pp.first IN ARRAY ORDER: even i -> (v0,v1,v2), odd i -> (v1,v0,v2). For the array
+//    [P,C,A,B] that is tris (P,C,A)+(A,C,B) == the engine's sortTriangles output, byte-identical.
+// THEREFORE para5 uses the SAME identity [0,1,2,3] strip as para4. The prior centroid/atan2
+// perimeter sort (_hudSpriteOrder) + degenerate guard (_hudSpriteUsable) are REMOVED: they were a
+// geometric reconstruction of a permutation that the raw-order capture eliminates at the source
+// (re_kb 36f source:hud_sprite_expand_recipe; supersedes finding:hud_sprite_client_fix_shipped).
 function buildHudTA(quads) {
     // 32 B per poly param + 4×32 B verts = 160 B/quad, + a 32 B EndOfList terminator.
     const buf = new Uint8Array(quads.length * 160 + 32);
@@ -609,12 +602,8 @@ function buildHudTA(quads) {
     let o = 0;
     const Z = 1.0;   // uniform near-plane 1/w; HUD has its own depth buffer (fresh clear), so any
                      // positive z works — quads only depth-test against each other.
-    const noGuard = (typeof window !== 'undefined' && window._hudSpriteNoGuard === true);
     for (const q of quads) {
         const textured = (q.pcw >> 3) & 1;
-        const isSprite = ((q.pcw >>> 29) & 7) === 5;
-        // Skip mis-captured (merged/collapsed) sprite quads that streak under any winding.
-        if (isSprite && !noGuard && !_hudSpriteUsable(q)) continue;
         // PolyParam: paramType=4 (bits 29-31), list type=2 TRANSLUCENT (bits 24-26). Keep the
         // engine's own object-control low byte (tex/shadow/uv/gouraud/colType) from pcw, but FORCE
         // colType=0 (packed per-vertex BGRA) so our 4 col[i] words drive the corners directly.
@@ -628,16 +617,15 @@ function buildHudTA(quads) {
         dv.setUint32(o+16, 0, true); dv.setUint32(o+20, 0, true);
         dv.setUint32(o+24, 0, true); dv.setUint32(o+28, 0, true);
         o += 32;
-        // Vertices: TA triangle-strip order so the two triangles tile the quad.
-        // ParaType-4 polygons (FONT-frame strokes, portraits, bars): collectHudQuads captures the
-        // 4 corners in the engine's own SUBMIT order; the IDENTITY strip [0,1,2,3] reproduces the
-        // engine's two triangles (0,1,2)+(1,2,3) byte-for-byte (window._hudQuadOrder overrides).
-        // ParaType-5 sprites (name letters): re-tile as a convex quad along its true diagonal via
-        // the centroid-angle sort (_hudSpriteOrder) — the identity strip bowties the sprite.
+        // Vertices: TA triangle-strip order so the two triangles tile the quad. BOTH ParaType-4
+        // polygons (FONT-frame strokes, portraits, bars) AND ParaType-5 sprites (name letters) are
+        // captured by collectHudQuads in the engine's RAW expansion/submit order, so the IDENTITY
+        // strip [0,1,2,3] reproduces the engine's own two triangles byte-for-byte: para4 ->
+        // (0,1,2)+(1,2,3); para5 [P,C,A,B] -> (P,C,A)+(A,C,B) via _buildIndexBuffer's parity flip
+        // (== ta_util.cpp sortTriangles). No sprite-specific re-tile. window._hudQuadOrder overrides.
         // colType0 textured vertex = x,y,z(+4/8/12) u,v(+16/20) bc(+24) oc(+28).
-        const order = isSprite ? _hudSpriteOrder(q)
-            : ((typeof window !== 'undefined' && Array.isArray(window._hudQuadOrder) && window._hudQuadOrder.length === 4)
-                ? window._hudQuadOrder : [0, 1, 2, 3]);
+        const order = (typeof window !== 'undefined' && Array.isArray(window._hudQuadOrder) && window._hudQuadOrder.length === 4)
+                ? window._hudQuadOrder : [0, 1, 2, 3];
         for (let k = 0; k < 4; k++) {
             const i = order[k], eos = (k === 3) ? 1 : 0;
             dv.setUint32(o, (7 << 29) | (eos << 28), true);   // paramType=7 vertex (+ EndOfStrip)
