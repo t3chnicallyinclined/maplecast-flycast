@@ -162,6 +162,21 @@ function twTile(x, y, bx, by) {
     if (bx > by) r |= (x >> sq) << b; else if (by > bx) r |= (y >> sq) << b;
     return r;
 }
+// Y-FIRST rectangular twiddle of TILE coords (col,row) in a Tw×Th tile grid -> chunk index.
+// This is flycast's REAL _twiddleSlow interleave (y-bit before x-bit), the correct storage
+// order for a NON-SQUARE multi-32×32-tile part (Tw != Th). twTile() above (x-first) is the
+// SQUARE case. Args are TILE counts (Tw,Th = W/32,H/32), NOT log2. CONFIRMED-BY-MEASUREMENT
+// 2026-06-15: y-first reproduces the engine VRAM chunk byte-exact for sel267/285/273 64×128
+// 2×4, while x-first / linear scatter it (the Storm-cape / Sentinel garble). See
+// docs/GSTA-FINDINGS-FOR-BROWSER.md and tools/render-replica-poc/_test_blockmap.mjs.
+function twTileYFirst(col, row, Tw, Th) {
+    let rv = 0, sh = 0, xs = Tw >> 1, ys = Th >> 1, x = col, y = row;
+    while (xs || ys) {
+        if (ys) { rv |= (y & 1) << sh; ys >>= 1; y >>= 1; sh++; }
+        if (xs) { rv |= (x & 1) << sh; xs >>= 1; x >>= 1; sh++; }
+    }
+    return rv;
+}
 
 // Re-twiddle one 32×32 linear index region (1024 entries) into 512 bytes of PAL4_TW (the engine's
 // per-tile VRAM storage). Inverse of detwiddlePal4 for w=h=32 (bcx=bcy=5).
@@ -360,21 +375,20 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         const mR = rows > 0 ? (H / rows) : H;
         if (mR < m) m = mR;                       // square tile = min (guards non-integer runs)
         m = m | 0; if (m <= 0) m = 32; if (m > 32) m = 32;   // clamp to the 32×32 carve window
-        // --- W>32 AND H>32 *SQUARE* PART (m==32, cols>1, rows>1, AND Tw===Th): copy the NATIVE
-        // storage chunk --- The engine stores a SQUARE >32 part as ONE full-W×H PVR rect-twiddle
-        // blob whose 32×32 chunks follow the square twTile interleave; tile (col,row)'s VRAM is the
-        // chunk at twTile(col,row,Tw,Th). CONFIRMED-BY-MEASUREMENT: raw chunk == reference cell
-        // 0/16384 (sel124, 128×128 4×4).
-        //
-        // **NON-SQUARE FIX (Tw !== Th, e.g. sel254 W=64 H=128 -> Tw=2 Th=4): the square twTile
-        // interleave SCATTERS the tiles (the Storm-torso dark/garbled patch). MEASURED (gsta audit4):
-        // the full-part PAL4_TW detwiddle of sel254 is COHERENT and the LINEAR (col*32,row*32) slice
-        // of `lin` reproduces it EXACTLY, while twTile produces the exact on-screen garble. The prior
-        // "sel285 2×4 == 0/8192" claim was circular (reference built from the same assumption). So for
-        // Tw !== Th, FALL THROUGH to the linear-slice carve below.** CONFIRMED-BY-MEASUREMENT 2026-06-15.
+        // --- W>32 AND H>32 MULTI-TILE PART (m==32, cols>1, rows>1): copy the NATIVE storage chunk.
+        // The engine stores such a part as ONE full-W×H PVR-twiddle blob whose 32×32 chunks follow
+        // the PVR twiddle of the TILE grid; tile (col,row)'s VRAM is the chunk at twiddle(col,row).
+        //   - SQUARE grid (Tw==Th): x-first twiddle (twTile). e.g. sel124 128×128 4×4, sel231 64×64.
+        //   - NON-SQUARE grid (Tw!=Th): Y-FIRST twiddle (twTileYFirst), flycast's real _twiddleSlow
+        //     interleave. e.g. sel267/285/273 64×128 2×4.
+        // CONFIRMED-BY-MEASUREMENT 2026-06-15: both reproduce engine VRAM byte-exact (0 px diff vs
+        // flycast-twop across camcap/camcap2/sentinel/satwalk; tools/render-replica-poc/_test_blockmap.mjs).
+        // SUPERSEDES the broken non-square LINEAR fall-through (re_kb/44): linear scattered the off-
+        // diagonal tiles -> the POSE-DEPENDENT Storm-cape grey-block garble (frame _gsta_nobg_360).
         const Tw = (W / 32) | 0, Th = (H / 32) | 0;
-        if (m === 32 && cols > 1 && rows > 1 && Tw === Th && p.raw) {
-            const k = twTile(col, row, _log2i(Tw), _log2i(Th));
+        if (m === 32 && cols > 1 && rows > 1 && p.raw) {
+            const k = (Tw === Th) ? twTile(col, row, _log2i(Tw), _log2i(Th))
+                                  : twTileYFirst(col, row, Tw, Th);
             const o = k * 512;
             if (o + 512 <= p.raw.length) { vram.set(p.raw.subarray(o, o + 512), addr); written++; continue; }
         }

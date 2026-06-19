@@ -3790,6 +3790,18 @@ static int gstaTwTile(int x, int y, int bx, int by) {
 	if (bx > by) r |= (x >> sq) << b; else if (by > bx) r |= (y >> sq) << b;
 	return r;
 }
+// Y-FIRST rectangular twiddle of TILE coords (col,row) in a Tw×Th tile grid (Tw,Th = tile
+// counts, NOT log2) -> chunk index. flycast's real _twiddleSlow interleave (y-bit before
+// x-bit) = the correct storage order for a NON-SQUARE multi-32×32-tile part. CONFIRMED-BY-
+// MEASUREMENT 2026-06-15: byte-exact vs engine VRAM for sel267/285/273 64×128 2×4 (Storm cape).
+static int gstaTwTileYFirst(int col, int row, int Tw, int Th) {
+	int rv = 0, sh = 0, xs = Tw >> 1, ys = Th >> 1, x = col, y = row;
+	while (xs || ys) {
+		if (ys) { rv |= (y & 1) << sh; ys >>= 1; y >>= 1; sh++; }
+		if (xs) { rv |= (x & 1) << sh; xs >>= 1; x >>= 1; sh++; }
+	}
+	return rv;
+}
 static std::map<uint64_t, GstaDecodedPart> _gstaPartCache;          // (gfx1<<32|sel) -> part
 
 static GstaGfx& gstaGfx1Offsets(const uint8_t* ram, uint32_t gfx1) {
@@ -3908,21 +3920,20 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 		int mR = (rows > 0) ? (H / rows) : H;
 		if (mR < m) m = mR;
 		if (m <= 0) m = 32; if (m > 32) m = 32;
-		// --- W>32 AND H>32 *SQUARE* PART (m==32, cols>1, rows>1, AND Tw==Th): copy the NATIVE
-		// storage chunk --- The engine stores a SQUARE >32 part as ONE full-W×H PVR rect-twiddle
-		// blob whose 32×32 chunks follow the square twTile interleave; tile (col,row)'s VRAM is the
-		// chunk at twTile(col,row,Tw,Th). CONFIRMED-BY-MEASUREMENT: raw chunk == reference cell
-		// 0/16384 (sel124) / 0/8192 (sel285).
-		//
-		// **NON-SQUARE PART FIX (Tw != Th, e.g. sel254 W=64 H=128 -> Tw=2 Th=4): the square
-		// twTile interleave is WRONG (scatters the tiles -> the Storm-torso garbled patch).
-		// MEASURED (audit4): the full-part PAL4_TW detwiddle of sel254 is COHERENT, the LINEAR
-		// (col*32,row*32) slice of pd.lin reproduces it EXACTLY, while gstaTwTile produces the
-		// exact on-screen garble. So for Tw!=Th, FALL THROUGH to the linear-slice carve below.**
-		// CONFIRMED-BY-MEASUREMENT 2026-06-15 (audit4 carve_LINEAR vs carve_NATIVE vs full-lin).
+		// --- W>32 AND H>32 MULTI-TILE PART (m==32, cols>1, rows>1): copy the NATIVE storage chunk.
+		// The engine stores such a part as ONE full-W×H PVR-twiddle blob whose 32×32 chunks follow
+		// the PVR twiddle of the TILE grid; tile (col,row)'s VRAM is the chunk at twiddle(col,row).
+		//   - SQUARE grid (Tw==Th): x-first twiddle (gstaTwTile). e.g. sel124 128×128 4×4, sel231 64×64.
+		//   - NON-SQUARE grid (Tw!=Th): Y-FIRST twiddle (gstaTwTileYFirst), flycast's real _twiddleSlow
+		//     interleave. e.g. sel267/285/273 64×128 2×4.
+		// CONFIRMED-BY-MEASUREMENT 2026-06-15: both reproduce engine VRAM byte-exact (0 px diff vs
+		// flycast-twop across camcap/camcap2/sentinel/satwalk; tools/render-replica-poc/_test_blockmap.mjs).
+		// SUPERSEDES the broken non-square LINEAR fall-through (re_kb/44 was wrong): linear scattered
+		// the off-diagonal tiles -> the POSE-DEPENDENT Storm-cape grey-block garble (_gsta_nobg_360).
 		int Tw = W / 32, Th = H / 32;
-		if (m == 32 && cols > 1 && rows > 1 && Tw == Th && !pd.raw.empty()) {
-			int k = gstaTwTile(col, row, gsta_log2i(Tw), gsta_log2i(Th));
+		if (m == 32 && cols > 1 && rows > 1 && !pd.raw.empty()) {
+			int k = (Tw == Th) ? gstaTwTile(col, row, gsta_log2i(Tw), gsta_log2i(Th))
+			                   : gstaTwTileYFirst(col, row, Tw, Th);
 			size_t o = (size_t)k * 512;
 			if (o + 512 <= pd.raw.size()) {
 				outTiles.emplace_back();
@@ -4083,6 +4094,8 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 	// M1@0x8C2D6B18 read from the seeded RAM image (both ship every frame: gstate + cam_mat).
 	// Stage geometry/control-words come from the engine-TA bake STGxx_ta.json; the textures
 	// are already resident in vram[] at each mesh TCW (the GSTA prefix shipped full VRAM).
+	// NOTE: the stage is INNOCENT of the cape grey-blocks — that was the non-square carve
+	// (Y-first twiddle, same commit); confirmed via multi-frame capture stage on-vs-off.
 	{
 		auto ru32 = [&](uint32_t a)->uint32_t { a &= 0x00FFFFFFu;
 			const uint8_t* r=_gstaRam.data();
