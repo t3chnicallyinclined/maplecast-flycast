@@ -4023,10 +4023,43 @@ static std::vector<uint8_t> gstaBuildHudTA(const uint8_t* hud, uint32_t nHud)
 // Apply one raw FRMx record (decompressed). Overlay dynamic regions + tails into
 // _gstaRam/vram/pvr, run render_frame, emit the body TA, decode body textures, and
 // hand the result to the render thread. Port of replay.html liveApplyFrame().
+// ---- per-phase profiler (MAPLECAST_GSTA_PROF=1) — READ-ONLY, gated OFF by default.
+// Accumulates wall-clock µs per phase across the run AND tracks vframe progression
+// (the wire game-frame) vs produced frames, so we can distinguish "reconstruction too
+// slow -> server drop-old skips" from "genuine wire drop" from "match content". ----
+struct GstaProf {
+	bool   on = false;
+	bool   init = false;
+	double splat=0, tails=0, render=0, stage=0, bodyta=0, decode=0, hud=0, total=0;
+	uint64_t frames=0;            // produced frames (gstaApplyFrame completions)
+	uint64_t vframeFirst=0, vframePrev=0, vframeSpanSum=0, vframeJumps=0;
+	uint64_t produceDropped=0;    // produced frames overwritten before render consumed them
+	// render-thread consume side (what the user actually SEES):
+	std::atomic<uint64_t> rConsumed{0}, rVframePrev{0}, rVframeJumps{0}, rVframeSpan{0};
+	std::chrono::steady_clock::time_point wallStart;
+};
+static GstaProf _gprof;
+static inline double _gnow() {
+	return std::chrono::duration<double, std::micro>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 static void gstaApplyFrame(const uint8_t* d, size_t n)
 {
 	if (!_gstaSeeded.load(std::memory_order_acquire)) return;
 	if (n < 12 || gle32(d) != GSTA_FRMX_MAGIC) { printf("[GSTA] dropped: bad FRMx magic\n"); return; }
+
+	if (!_gprof.init) {
+		_gprof.init = true;
+		const char* pe = std::getenv("MAPLECAST_GSTA_PROF");
+		_gprof.on = (pe && *pe && *pe != '0');
+		_gprof.wallStart = std::chrono::steady_clock::now();
+		if (_gprof.on) printf("[GPROF] per-phase profiler ON\n");
+	}
+	const bool prof = _gprof.on;
+	double t0 = prof ? _gnow() : 0.0;
+	double tApply0 = t0;
+
 	size_t p = 4;
 	uint32_t vframe = gle32(d + p); p += 4;
 	uint32_t taSize = gle32(d + p); p += 4;     // 0 in the live stream
@@ -4041,6 +4074,8 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 		}
 		p += r.len;
 	}
+
+	if (prof) { double t=_gnow(); _gprof.splat += t-t0; t0=t; }
 
 	bool palDirty = false;
 
@@ -4085,11 +4120,15 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 		}
 	}
 
+	if (prof) { double t=_gnow(); _gprof.tails += t-t0; t0=t; }
+
 	// ---- render the bodies from the seeded RAM (byte-exact transpiled path) ----
 	memset(&_gstaCtx, 0, sizeof(_gstaCtx));
 	_gstaCtx.ram = _gstaRam.data();
 	render_frame(&_gstaCtx);
 	int nQuad = render_frame_nscene();
+
+	if (prof) { double t=_gnow(); _gprof.render += t-t0; t0=t; }
 
 	// ---- emit the body sprite-TA (+ append HUD) ----  [fr declared early so the body
 	// texture decode can STAGE its tiles into fr.tiles, applied on the render thread] ----
@@ -4124,11 +4163,17 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 		}
 	}
 
+	if (prof) { double t=_gnow(); _gprof.stage += t-t0; t0=t; }
+
 	size_t stagePrefixLen = fr.ta.size();      // bytes occupied by the stage OP list (+EOL)
 	size_t bodyLen = stagePrefixLen + gstaEmitSpriteTA_append(fr.ta);   // == fr.ta.size()
 
+	if (prof) { double t=_gnow(); _gprof.bodyta += t-t0; t0=t; }
+
 	// ---- M3: decode body textures, STAGED into fr.tiles (applied on render thread) ----
 	int written = gstaDecodeBodies(nQuad, fr.tiles);
+
+	if (prof) { double t=_gnow(); _gprof.decode += t-t0; t0=t; }
 
 	// ---- DIAG (MAPLECAST_DUMP_GSTA_VRAM=<dir>): one-shot dump of the body texture
 	// VRAM band [0x80000..0xE0000] + a per-quad manifest (sel,pal,tcw_addr,Ax,Ay,
@@ -4231,6 +4276,10 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 
 	{
 		std::lock_guard<std::mutex> lk(_gstaMtx);
+		// PROFILE: if the render thread hasn't consumed the previous produced frame yet
+		// (_gstaReady still true), overwriting _gstaFrame DROPS that frame -> the render
+		// thread skips a wire frame -> motion judder even though produce is 60Hz.
+		if (prof && _gstaReady.load(std::memory_order_acquire)) _gprof.produceDropped++;
 		_gstaFrame = std::move(fr);
 		_gstaReady.store(true, std::memory_order_release);
 	}
@@ -4239,6 +4288,43 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 	if ((_fn++ % 60) == 0)
 		printf("[GSTA] frame %u: bodies=%u quads=%d texWritten=%d palDirty=%d ta=%zuB\n",
 			vframe, render_frame_body_count(), nQuad, written, (int)palDirty, taSizeForLog);
+
+	if (prof) {
+		// HUD-append phase is small; fold remaining apply time into 'hud'.
+		double tEnd = _gnow();
+		_gprof.hud   += tEnd - t0;
+		_gprof.total += tEnd - tApply0;
+
+		// vframe progression: how far the wire game-frame jumped between two PRODUCED
+		// frames. ~1 = smooth (we reconstruct every wire frame). >1 = wire frames are
+		// being skipped (server drop-old) because we produce slower than 60Hz.
+		if (_gprof.frames == 0) { _gprof.vframeFirst = vframe; }
+		else {
+			int64_t dv = (int64_t)vframe - (int64_t)_gprof.vframePrev;
+			if (dv > 0) { _gprof.vframeSpanSum += (uint64_t)dv; if (dv > 1) _gprof.vframeJumps++; }
+		}
+		_gprof.vframePrev = vframe;
+		_gprof.frames++;
+
+		if ((_gprof.frames % 120) == 0) {
+			double wallSec = std::chrono::duration<double>(
+				std::chrono::steady_clock::now() - _gprof.wallStart).count();
+			double prodFps = _gprof.frames / (wallSec > 0 ? wallSec : 1);
+			double vframeSpan = (double)(vframe - _gprof.vframeFirst);
+			double avgJump = _gprof.frames > 1 ? (double)_gprof.vframeSpanSum / (_gprof.frames - 1) : 0;
+			double f = _gprof.frames;
+			printf("[GPROF] produced=%llu wall=%.1fs PRODUCE_FPS=%.1f | "
+			       "vframe %llu..%u span=%.0f AVG_VFRAME_PER_PRODUCE=%.2f jumps>1=%llu\n",
+				(unsigned long long)_gprof.frames, wallSec, prodFps,
+				(unsigned long long)_gprof.vframeFirst, vframe, vframeSpan, avgJump,
+				(unsigned long long)_gprof.vframeJumps);
+			printf("[GPROF] avg us/frame: splat=%.0f tails=%.0f render=%.0f stage=%.0f "
+			       "bodyta=%.0f decode=%.0f hud=%.0f | TOTAL=%.0f\n",
+				_gprof.splat/f, _gprof.tails/f, _gprof.render/f, _gprof.stage/f,
+				_gprof.bodyta/f, _gprof.decode/f, _gprof.hud/f, _gprof.total/f);
+			fflush(stdout);
+		}
+	}
 }
 
 // WS thread: connect 7212, msg1=ZCST prefix (seed), msg N = FRMx (apply+render).
@@ -4334,6 +4420,28 @@ bool clientReceiveGsta(rend_context& rc, bool& vramDirty)
 		_gstaReady.store(false, std::memory_order_release);
 	}
 	if (local.ta.empty()) return false;
+
+	// PROFILE (render-consume side = what the user SEES): vframe stride between two
+	// CONSUMED frames. >1 means the render thread skipped a wire frame (the WS thread
+	// produced it then overwrote it before this thread drained it) -> visible judder.
+	if (_gprof.on) {
+		uint64_t prev = _gprof.rVframePrev.load(std::memory_order_relaxed);
+		uint64_t cn   = _gprof.rConsumed.fetch_add(1, std::memory_order_relaxed);
+		if (cn > 0) {
+			int64_t dv = (int64_t)local.vframe - (int64_t)prev;
+			if (dv > 0) { _gprof.rVframeSpan.fetch_add((uint64_t)dv, std::memory_order_relaxed);
+				if (dv > 1) _gprof.rVframeJumps.fetch_add(1, std::memory_order_relaxed); }
+		}
+		_gprof.rVframePrev.store(local.vframe, std::memory_order_relaxed);
+		if (((cn+1) % 120) == 0) {
+			uint64_t span = _gprof.rVframeSpan.load(std::memory_order_relaxed);
+			uint64_t jumps = _gprof.rVframeJumps.load(std::memory_order_relaxed);
+			printf("[GPROF-RENDER] consumed=%llu RENDER_VFRAME_PER_CONSUME=%.3f jumps>1=%llu produceDropped=%llu\n",
+				(unsigned long long)(cn+1), cn>0 ? (double)span/cn : 0.0,
+				(unsigned long long)jumps, (unsigned long long)_gprof.produceDropped);
+			fflush(stdout);
+		}
+	}
 
 	// Apply THIS frame's staged body tiles into vram[] HERE (render thread), paired with
 	// its TA — so the textures the renderer samples are exactly the ones decoded for this

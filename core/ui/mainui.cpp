@@ -187,9 +187,16 @@ bool mainui_rend_frame()
 			// pixel-for-pixel. The shot path is otherwise identical.
 			if (maplecast_mirror::gstaModeActive() || std::getenv("MAPLECAST_GSTA_SHOT")) {
 				static uint64_t _grn = 0;
-				if (maplecast_mirror::gstaModeActive() && (_grn++ % 120) == 0)
-					printf("[GSTA] renderer->Render()=%d (frame %llu)\n",
-						(int)isScreen, (unsigned long long)_grn);
+				// RENDER-thread FPS: cadence of renderer->Render() (independent of the
+				// WS-thread produce rate). Compared against [GPROF] PRODUCE_FPS this tells
+				// us whether motion smoothness is render-bound or produce-bound.
+				static auto _rt0 = std::chrono::steady_clock::now();
+				if (maplecast_mirror::gstaModeActive() && (_grn++ % 120) == 0) {
+					double rs = std::chrono::duration<double>(
+						std::chrono::steady_clock::now() - _rt0).count();
+					printf("[GSTA] renderer->Render()=%d (frame %llu) RENDER_FPS=%.1f\n",
+						(int)isScreen, (unsigned long long)_grn, _grn / (rs>0?rs:1));
+				}
 				else if (!maplecast_mirror::gstaModeActive()) _grn++;
 				fflush(stdout);
 				// DIAG: MAPLECAST_GSTA_SHOT=<path-prefix> dumps PNG screenshots of the
