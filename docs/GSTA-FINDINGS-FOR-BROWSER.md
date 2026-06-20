@@ -119,3 +119,61 @@ a hand-authored reference.** Same applies to `web/webgpu-test.html` DIFF tooling
 - **Texture↔TA threading race** (commit `b82834447`): native-only (WS thread decoded into shared
   `vram[]` while the render thread sampled a prior frame). The browser applies tiles synchronously
   per frame, so it never had this. Listed so it isn't mistakenly "ported."
+
+## ★ "PURPLE CABLE" IS NOT A BUG — the engine itself draws this Cable purple  [CONFIRMED-BY-MEASUREMENT 2026-06-19]
+The recurring "Cable's palette looks wrong (purple, not blue/grey military)" report was investigated
+end-to-end against the engine arbiter and is **a correct render, not a defect**. Do NOT "fix" the
+Cable palette in the browser — it would diverge FROM the engine.
+
+**Identification (char struct, page-616, NOT the color read):** slot-0 in-match has
+P1C1 = **Storm** `char_id 0x2A` (right, facing 0, palette 0, bank 16) and
+P2C1 = **Cable** `char_id 0x17` (left, facing 1, **palette index 1**, body bank 24). The purple
+left-side character with yellow boots is P2C1 Cable. (`+0x001` char_id, `+0x52D` palette,
+`+0x110` facing, `+0xE0/E4` screen — read live from the GSTA prefix `ram16` region.)
+
+**The decisive chain, all measured:**
+1. **Engine real TA** (mirror client `MAPLECAST_DUMP_TA` on the SAME headless, 806 frames): Cable's
+   PAL4 body sprites (`tcw` PalSelect) = **bank 24**, never bank 25. Full engine bank set across all
+   frames = `{16,17,18,24,25}` — IDENTICAL to the GSTA client's set. No bank-selection divergence.
+2. **Engine PVR PALETTE_RAM** (the `pvr_regs` shipped in the GSTA prefix, which IS the engine's own
+   palette): **bank 24 = purple/yellow** (`fc7d`=rgb204,119,221 / `fff1`=yellow boots), **bank 25 =
+   blue** (Cable's *standard* military palette). This Cable selected palette index 1 → bank 24 → purple.
+   Banks 24 AND 25 are both correctly populated and shipped (this is NOT the re_kb/25 palette gap).
+3. **Engine pixel ground truth**: rendered the engine's real TA + engine VRAM + engine palette through
+   flycast's own pvr2 path (`tools/render-replica-poc/render_ta.mjs --mirror`, the DIFF "truth" canvas)
+   → the engine draws **purple Cable with yellow boots**, pixel-matching the GSTA client.
+4. **GSTA faithfulness**: `render_frame finalize_body` (`gen_submit_params.c`) PRESERVES the resident
+   rectab TCW PalSelect verbatim (only injects when `resident_pal==0`), so the GSTA bank == the engine
+   bank by construction. Costume-color histograms (Cable greys/peach, Storm white/grey/skin) match
+   engine-vs-GSTA across the 12-frame spread.
+
+**Lesson (matches the project's "DO NOT trust the color read" rule):** a palette that *looks* wrong to
+a human can be exactly what the engine renders (alt/team-color skin via palette index). The arbiter is
+the engine's TCW bank + its PALETTE_RAM contents + its own pixel render — never intuition about a
+character's "canonical" colors. **Browser note:** the browser render_frame path (`body_decoder.mjs` +
+`gen_submit_params.c finalize_body`) already PRESERVES the bank, so it inherits this correct behavior;
+the EMITTER path's static-formula bank (`16*(char_pair+1)+8*player_side`, even-only) would force Cable
+to bank 24's even sibling regardless of palette index and is the one that gets skins wrong — another
+reason to switch the browser default to render_frame (the big lever at the top).
+
+## STORM "better but not perfect" — no measurable body divergence found  [CONFIRMED-BY-MEASUREMENT 2026-06-19]
+Diffed Storm (gfx1 `c420040`) GSTA-vs-engine: blend `(4,5)`, ListType 2, texfmt 5 IDENTICAL; pal-bank
+set `{16,17,18}` IDENTICAL (bank 18 = her lightning-aura sub-palette, engine-authored, appears in 1484
+engine frames). Carve: GSTA-decoded VRAM body band == engine VRAM **byte-exact (0.00% diff)** on the
+frame-aligned pair; the 38% on non-aligned frames is pure pose drift (the engine re-decodes a different
+pose's parts into the same VRAM addresses), NOT a carve defect. The three recent cape-carve fixes
+(`90533abc4` m-pitch, `1ee855655`/`c2a89e5db` non-square Y-first twiddle) already closed the cape
+garble. Across the 12-frame shot spread (390/420/450/480/510/540/570/600) Storm is clean — white/grey
+costume, lightning-quill hair, cape, no grey blocks. Any *residual* "not perfect" is at the
+pose-coverage/animation-timing level, not a per-part render-model bug in the bank/carve/facing/blend.
+
+## METHOD NOTE — capturing the engine ground truth for a palette/part A/B  [reusable recipe]
+1. GSTA wire (port 7212): capture the `MCRR` prefix → its `ram16` region = live char structs
+   (identify chars by `+0x001`); its `pvr_regs` block = engine PALETTE_RAM (`+0x1000`, 1024 ARGB4444
+   entries, `+0x108`=PAL_RAM_CTRL=2 → 4444). The GSTA client's `MAPLECAST_DUMP_GSTA_VRAM=<dir>` writes
+   a per-quad manifest (`sel/gfx1/pal/tcw_addr/Ax/Ay/col/row/mir`) — the exact bank render_frame picks.
+2. Engine real TA (mirror client, `MAPLECAST_MIRROR_CLIENT=1 --server …:7200 MAPLECAST_DUMP_TA=1`):
+   parse Sprite (ParaType 5) TCW → `pal=(tcw>>21)&0x3F` for the engine's authoritative bank per object.
+3. Engine pixels: `render_ta.mjs --mirror <captured .zcst>` (self-contained SYNC+TA) renders the
+   engine's own frame through pvr2 — the byte-for-byte arbiter canvas. Diff GSTA shot vs this, never
+   vs a hand-rolled reference.
