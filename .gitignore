@@ -237,3 +237,7 @@ node_modules/
 
 # ROM-derived stage ground-truth captures (ram/vram/engine_ta dumps + rasters) — never commit
 _stage_gt/
+
+# ROM-derived RAM/TA captures (never commit — derived from ROM execution)
+*.mcrr
+*.zcst

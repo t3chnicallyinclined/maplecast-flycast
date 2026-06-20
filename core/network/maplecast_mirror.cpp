@@ -3656,14 +3656,21 @@ static uint32_t gstaEmitSpriteTA_append(std::vector<uint8_t>& out)
 		                | (2u << 24);              // ListType = Translucent
 		pcw_ta |= 0x00000008u;                     // Texture = 1 (obj_ctrl bit3)
 		pcw_ta |= 0x00000001u;                     // UV_16bit = 1 (obj_ctrl bit0)
-		// EFFECT BLEND (re_kb finding:objs_effect_blend): a quad whose GFX1 base lives in the
-		// shared "Effect Poly" bank [0x0CED0000,0x0CEE0000) is an ADDITIVE effect (hitspark,
-		// aura, super flash), NOT a translucent body/cape. The engine's submit picks the PVR
-		// blend factors from the cell TSP, but the lean render_frame TSP is the generic
-		// translucent one (src=SRC_ALPHA dst=INV_SRC_ALPHA). Force ADDITIVE for Effect-Poly
-		// quads: keep src=SRC_ALPHA, set DstInstr=ONE (additive accumulate). MEASURED note: the
-		// current match's "satellites" are all cat 1..4 BODY-sprite capes/limbs (gfx1 c420040,
-		// NOT Effect-Poly), which correctly stay translucent — this only fires for true effects.
+		// EFFECT BLEND. A quad whose GFX1 base lives in the shared Effect-Poly bank
+		// [0x0CED0000,0x0CEE0000) is a hitspark/aura/super-flash effect, NOT a translucent
+		// body/cape. The engine submits these through a DIFFERENT finalize branch (the type==4
+		// cell-TSP path loc_8c124740, gated on r13[0x30]) that reads the cells own SrcInstr/
+		// DstInstr (finding:objs_effect_blend, reference_mvc2_effects_bank: effect-poly = additive).
+		// The lean GSTA render_frame runs ONLY the BODY translucent finalize (gen_submit_params.c
+		// finalize_body forces SRCA->INVSRCA, which is REQUIRED for the raw-template body tiles),
+		// so q->tsp is the generic translucent blend for every quad. We re-apply the engine effect
+		// rule HERE: for an Effect-Poly gfx1, set DstInstr=ONE (additive accumulate, keep
+		// SrcInstr=SRCA). MEASUREMENT (2026-06-20, _fxwin_3min.zcst, 60s+3min live engine TA,
+		// 326k+ sprites + 10790 OBJF frames): the slot-0 match fired NO super/projectile in any
+		// window -- 100% SRCA->INVSRCA, ZERO is_effect/additive -- so this branch is a verified
+		// no-op on all CURRENT traffic and only takes effect when a real Effect-Poly cell renders.
+		// The deeper-faithful path (read the effect cells own resident TSP via the type==4 branch)
+		// is the OPEN item, blocked on a live contact-frame capture (docs/GSTA-FINDINGS-FOR-BROWSER.md).
 		uint32_t tsp_ta = q->tsp;
 		const bool isEffect = (q->gfx1 >= 0x0CED0000u && q->gfx1 < 0x0CEE0000u);
 		if (isEffect) {

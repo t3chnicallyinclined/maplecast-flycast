@@ -177,3 +177,65 @@ pose-coverage/animation-timing level, not a per-part render-model bug in the ban
 3. Engine pixels: `render_ta.mjs --mirror <captured .zcst>` (self-contained SYNC+TA) renders the
    engine's own frame through pvr2 — the byte-for-byte arbiter canvas. Diff GSTA shot vs this, never
    vs a hand-rolled reference.
+
+## SUPER / HYPER-COMBO / PROJECTILE EFFECTS — measured state + the two open gaps  [CONFIRMED-BY-MEASUREMENT 2026-06-20]
+
+User report: "super hyper combos aren't rendering properly" (garbled pink streaks + blue blocks on
+Storm's special). Investigated the native GSTA client (7212) effect path vs the engine (mirror :7200).
+
+### What I could measure (and the hard blocker)
+Captured the live engine TA from :7200 over **60s + 3min** windows (`_fxwin_long.zcst`, `_fxwin_3min.zcst`)
+AND walked the slot table across every available RAM capture (`_camcap.mcrr`, `_camcap2.mcrr`,
+`_satwalk2.mcrr`). RESULT — **the slot-0 match fired NO super / projectile / hitspark in any window:**
+- Engine TA blend histogram, 326,751 + more sprites: **100% `lt2 SRCA->INVSRCA`, ZERO additive** (no
+  `DstInstr=ONE`). (`tools/render-replica-poc/_scan_blend.mjs`.)
+- OBJF stream, 10,790 frames: constant 54 objects, categories **{1,2,3} only** (no projectile/effect
+  cats 7/8/9), **`is_effect` == 0 on every record**, blend byte ∈ {0 opaque, 1 alpha} — never 2 additive.
+  (`_scan_objs.mjs`.)
+- Slot-walk of all RAM captures: every cat 1..4 node is a **body-sprite satellite** (cape/limb/drone)
+  with GFX in a resident **fighter** bank (`0c420040`, `0c508680`, …) — **ZERO nodes with GFX1/GFX2 in
+  the Effect-Poly bank `0x0CED0000`.** (`_find_efx_nodes.mjs`.)
+
+**So the user's garble could not be reproduced passively — no effect-poly node was on screen in 3+ min.**
+The reconstruction on the frames I DO have is faithful: render_frame on a real camcap frame emits 6 bodies
++ 4 satellites = 103 quads, **all `SRCA->INVSRCA`, matching the engine's measured blend exactly.** The
+body-sprite *projectile/satellite* path (a Cable drone, an assist, a cape) is therefore correct today.
+
+### GAP 1 (WIRE/DECODE) — Effect-Poly bank `0x0CED0000` has a DIFFERENT header than a char GFX1 table
+The GSTA texture decode (`maplecast_mirror.cpp gstaDecodeBodies` → `gstaGfx1Offsets`) treats EVERY
+`gfx1` as a GFX1 LZSS offset table: `n = u32[gfx1] >> 2`, then `parts[sel] = gfx1 + u32[gfx1+sel*4]`.
+MEASURED header bytes (camcap RAM):
+- A real char GFX1 (`0c420040`): `head=0x3984` → `n=3681` (valid); `off[0..3]=0x3984,0x3e44,…` = relative
+  byte offsets. **Decodes correctly.**
+- Effect-Poly bank (`0x0CED0000`): `head=0x0CED0010`, `u32[1]=0xF1(241)`, `u32[2]=0x0CED03D8` (= the
+  directory base also at `0x0CED0008`), `u32[3+]=0x0CED0578,0x0CED0598,…` = **ABSOLUTE pointers, not a
+  relative-offset table.** `n = 0x0CED0010>>2 = 0x033B4004` → tripped by the `n>0x40000 -> 0` sanity →
+  `sel<n` false → **part decode produces NOTHING → effect quad gets no texture → it samples whatever
+  stale VRAM sits at its TCW** = the pink-streak / blue-block garble signature.
+
+So IF an effect node's GFX1 (`node+0x15C`) is the Effect-Poly bank base (or a directory pointer into it),
+the body decoder mis-parses it. The Effect-Poly bank is a `*(0x0CED0008)` directory of `0x10`-byte
+entries (per `maplecast_gamestate.cpp` EFFECTS DUMP), NOT a `count + relative-offset` GFX1 table — it
+needs its own decode (resolve the per-effect art blob via the directory, then decode THAT blob, which may
+itself be GFX1-format). **This is UNVALIDATED — it needs a live effect node to confirm whether `+0x15C`
+for an effect is the bank base, a directory pointer, or a normal GFX1 blob elsewhere.**
+
+### GAP 2 (BLEND) — additive is a gfx1-bank HEURISTIC, not engine-derived
+`gstaEmitSpriteTA_append` forces `DstInstr=ONE` (additive) for any `gfx1 ∈ [0x0CED0000,0x0CEE0000)`.
+The engine actually derives an effect's additive blend from a **different submit finalize branch**
+(`type==4` cell-TSP path `loc_8c124740`, gated on `r13[0x30]`) that reads the effect cell's OWN
+SrcInstr/DstInstr — the lean GSTA path only runs the BODY translucent finalize (`gen_submit_params.c
+finalize_body`, which MUST force `SRCA->INVSRCA` because the resident rectab is a MIX of pre-finalized
+tiles `0x949004D2` and raw-template tiles `0x000004C0`/blend-0; preserving the resident blend was tried
+and REJECTED — it blanks the raw tiles to `ZERO->ZERO`). The gfx1-bank additive heuristic is kept (it is
+a verified no-op on all current traffic and the best available approximation per
+`finding:objs_effect_blend` / `reference_mvc2_effects_bank`), but the faithful path is to run the
+`type==4` cell-TSP finalize for effect tiles. Both need the same live capture to validate.
+
+### NEEDED TO CLOSE (precise): a CONTACT-FRAME capture with an effect-poly node on screen
+Fire a super/hyper/projectile in slot-0 (or any matchup) and capture while an Effect-Poly node is live,
+then: (a) `_find_efx_nodes.mjs` confirms a cat 1..4 node with GFX2 `node+0x160 ∈ 0x0CED0000`; (b) read
+its `+0x15C` to learn the effect art layout; (c) A/B the GSTA-emitted effect quad vs the engine TA for
+that frame. Server-side residency is ALREADY handled — `maplecast_replica_live.cpp collectFreshGfx`
+ships cat 1..4 GFX1+GFX2 on-change (the cat-0-only gap of re_kb/29 is CLOSED), so the art reaches the
+client; the OPEN work is purely the client decode (GAP 1) + blend (GAP 2).

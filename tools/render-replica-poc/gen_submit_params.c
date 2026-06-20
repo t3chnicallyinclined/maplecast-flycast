@@ -86,6 +86,16 @@ static void finalize_body(Sh4Ctx *c, PolyParam *p, u32 palbank){
     p->pcw = (p->pcw & 0xF8FCFFFFu) | 0x02000000u;        /* loc_8C1246FC / loc_8C124720 */
     p->isp = (p->isp & 0x1FFFFFFFu) | (4u << 29);         /* loc_8C124700 / DepthMode 4  */
     p->tsp = (p->tsp & 0x03278FFFu) | tsp_or;             /* loc_8C124704 / loc_8c1246b0 */
+    /* NOTE (2026-06-20, CONFIRMED-BY-MEASUREMENT): this finalize FORCES the TSP blend region
+     * (bits 31:26) to SRCA->INVSRCA, and that is REQUIRED, not optional. The resident rectab is
+     * a MIX of pre-finalized tiles (TSP 0x949004D2, blend already SRCA->INVSRCA) AND raw template
+     * tiles (TSP 0x000004C0, blend bits == 0). Preserving the resident blend was TRIED and
+     * REJECTED: it emits ZERO->ZERO (invisible) for the raw-template tiles (camcap rectab
+     * rec2..10 idx0..8). The engine derives an EFFECT additive blend from a DIFFERENT finalize
+     * branch (type==4 cell-TSP path loc_8c124740, gated on r13[0x30]); the lean GSTA path runs
+     * only the BODY translucent finalize, so a true additive super cell is the ONE open blend
+     * case (no effect fired in 3min+ live capture to exercise it). See the wire-gap note in
+     * docs/GSTA-FINDINGS-FOR-BROWSER.md. */
     /* TCW PalSelect (loc_8c124a82): the engine OR's a DYNAMICALLY-ALLOCATED palette bank
      * (r12 = the loc_8c124bd8 palette-alloc result), NOT the static slot formula
      * 16*(char_pair+1)+8*player_side. The static palbank can only ever produce EVEN base
