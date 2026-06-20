@@ -23,6 +23,40 @@
 #include <string>
 #include "../deps/json/json.hpp"
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
+// Directory containing the running executable (so STGxx_ta.json resolves regardless of
+// the launch cwd — the user runs flycast from $HOME and the cwd-relative bases miss).
+// Returns "" if it can't be determined.
+static std::string gstaExeDir()
+{
+    static std::string cached;
+    static bool done = false;
+    if (done) return cached;
+    done = true;
+#if defined(_WIN32)
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        std::string p(buf, n);
+        size_t slash = p.find_last_of("\\/");
+        if (slash != std::string::npos) cached = p.substr(0, slash);
+    }
+#else
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n > 0) {
+        buf[n] = 0;
+        std::string p(buf);
+        size_t slash = p.find_last_of('/');
+        if (slash != std::string::npos) cached = p.substr(0, slash);
+    }
+#endif
+    return cached;
+}
+
 using json = nlohmann::json;
 
 // ---- TA emit layout constants (match core/hw/pvr/ta.cpp ta_handle_cmd FSM) ----
@@ -32,7 +66,8 @@ using json = nlohmann::json;
 // We force obj_ctrl = Texture only (0x08) so the FSM selects vertex type 3 regardless of
 // the engine mesh's original Col_Type — we always carry a packed ARGB8888 base colour.
 static constexpr float SCREEN_W = 640.f, SCREEN_H = 480.f;
-static constexpr float MARGIN   = 800.f;     // viewport slack for the degenerate-tri cull
+// (the old whole-tri MARGIN reject was replaced by a per-tri screen-bbox-overlap test in
+//  gstaStageEmitTA — see re_kb finding:gsta_stage_floor_cull_fix.)
 
 struct StageVtx { float pos[3]; float world[3]; float uv[2]; uint8_t rgb[3]; bool hasWorld; };
 struct StageMesh {
@@ -109,11 +144,21 @@ bool gstaStageEnsureLoaded(uint32_t stageId)
     if (g_stage.ready && g_stage.stageId == stageId) return true;
     int fileIdx = gstaResolveStageFile(stageId);
 
-    // base dir: env override, else a few sensible defaults relative to the cwd / exe.
-    std::string base;
+    // base dir resolution order (CONFIRMED-BY-MEASUREMENT: the user launches the GSTA
+    // client from $HOME, so the cwd-relative bases below MISS and the stage silently
+    // fails to load — re_kb finding:gsta_stage_path_from_binary). Resolve, in order:
+    //   1. MAPLECAST_GSTA_STAGE_DIR (explicit override),
+    //   2. the EXECUTABLE's own dir + ./atlas/stages + ../atlas/stages + ../../atlas/stages
+    //      (binary lives in build/, repo root is build/.. so ../atlas/stages hits),
+    //   3. cwd-relative fallbacks (legacy; work when launched from the repo root/build/).
+    std::string base, ed = gstaExeDir();
     if (const char* e = std::getenv("MAPLECAST_GSTA_STAGE_DIR")) base = e;
-    const char* candBases[] = { base.c_str(), "atlas/stages",
-                                "../atlas/stages", "../../atlas/stages" };
+    std::string edStages   = ed.empty() ? "" : ed + "/atlas/stages";
+    std::string edUp1      = ed.empty() ? "" : ed + "/../atlas/stages";
+    std::string edUp2      = ed.empty() ? "" : ed + "/../../atlas/stages";
+    const char* candBases[] = { base.c_str(),
+                                ed.c_str(), edStages.c_str(), edUp1.c_str(), edUp2.c_str(),
+                                "atlas/stages", "../atlas/stages", "../../atlas/stages" };
     char fname[64];
     snprintf(fname, sizeof(fname), "STG%02X_ta.json", fileIdx & 0xFF);
 
@@ -187,8 +232,8 @@ bool gstaStageEnsureLoaded(uint32_t stageId)
     nd.ready = !nd.meshes.empty();
     g_stage = std::move(nd);
     size_t triTotal = 0; for (auto& m : g_stage.meshes) triTotal += m.verts.size()/3;
-    printf("[GSTA-STAGE] loaded STG%02X (engine-TA grounded): %zu meshes, %zu tris, hasWorld=%d\n",
-           fileIdx & 0xFF, g_stage.meshes.size(), triTotal, (int)g_stage.hasWorld);
+    printf("[GSTA-STAGE] loaded STG%02X (engine-TA grounded) from %s: %zu meshes, %zu tris, hasWorld=%d\n",
+           fileIdx & 0xFF, path.c_str(), g_stage.meshes.size(), triTotal, (int)g_stage.hasWorld);
     return g_stage.ready;
 }
 
@@ -228,19 +273,37 @@ size_t gstaStageEmitTA(std::vector<uint8_t>& out, const float* M1, const float* 
 
         for (size_t t = 0; t < nTris; t++) {
             const StageVtx* tv[3] = { &m.verts[t*3+0], &m.verts[t*3+1], &m.verts[t*3+2] };
-            // resolve final screen verts first so we can reject the whole tri atomically
+            // resolve final screen verts first so we can reject the whole tri atomically.
+            // CULL MODEL (CONFIRMED-BY-MEASUREMENT, re_kb finding:gsta_stage_floor_cull_fix):
+            //  - REJECT a vertex only if it is GARBAGE: non-finite, or a 1/w-clamp sentinel
+            //    (depth==SENTINEL_Z, |screen|>1e6 — the 8 grazing/behind-camera verts the
+            //    engine TA carries with inv=10 in STG0B mesh0). The OLD `|coord|>MARGIN(800)`
+            //    per-vertex reject WRONGLY culled mesh3 — the BLUE FLOOR deck quad — whose 2
+            //    triangles legitimately span X +-6822 while crossing the visible bottom band
+            //    (Y 362..585). The engine SUBMITS that huge quad and lets the PVR clip it; so
+            //    must we. Floor was 0.03 coverage vs engine 0.41 BEFORE this fix.
+            //  - then KEEP the triangle iff its SCREEN BBOX OVERLAPS the visible frame (+slack);
+            //    flycast's rasterizer clips the off-screen remainder exactly like the engine.
+            static constexpr float BBOX_SLACK = 64.f;     // px slop around the 640x480 frame
+            static constexpr float GARBAGE    = 1.0e6f;   // |screen px| beyond this = sentinel
             float fx[3], fy[3], fz[3]; bool ok = true;
+            float bxMin=1e30f, bxMax=-1e30f, byMin=1e30f, byMax=-1e30f;
             for (int k=0;k<3;k++) {
                 float px = tv[k]->pos[0], py = tv[k]->pos[1], pz = tv[k]->pos[2];
                 if (reproject && tv[k]->hasWorld) {
                     projectEngine(X, tv[k]->world[0], tv[k]->world[1], tv[k]->world[2], px, py, pz);
                 }
                 if (!std::isfinite(px) || !std::isfinite(py)
-                    || px < -MARGIN || px > SCREEN_W + MARGIN
-                    || py < -MARGIN || py > SCREEN_H + MARGIN) { ok = false; break; }
+                    || std::fabs(px) > GARBAGE || std::fabs(py) > GARBAGE) { ok = false; break; }
                 fx[k]=px; fy[k]=py; fz[k]=pz;
+                if (px<bxMin) bxMin=px; if (px>bxMax) bxMax=px;
+                if (py<byMin) byMin=py; if (py>byMax) byMax=py;
             }
             if (!ok) continue;
+            // bbox must overlap the visible screen (+slack); fully-off-screen tris (upper
+            // deck / skybox above the frame) are dropped — they never touch the viewport.
+            if (bxMax < -BBOX_SLACK || bxMin > SCREEN_W + BBOX_SLACK
+                || byMax < -BBOX_SLACK || byMin > SCREEN_H + BBOX_SLACK) continue;
 
             // PER-VERTEX RGB MODULATE (re_kb finding:stage_deck_texture_closed): the bake now
             // carries the TYPE-CORRECT per-vertex RGB (the dark-grey/grid ramp for the deck,

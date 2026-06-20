@@ -75,9 +75,38 @@ from `stage-client.mjs` that washed the dark grid bright and hid the blue floor 
 engine-TA ground-truth raster** and replaced with the bake's real **per-vertex RGB**. The browser
 `stage-client.mjs` very likely STILL has this floor-to-white override — check `_buildFromTA` and use
 per-vertex colour, validated against `_stage_gt/GROUNDTRUTH_engine_ta_STG0B.png` (the engine TA bake).
-**Open (native, also browser):** lower blue-floor deck stripes render too dark (deck bottom-row
-per-vertex RGB ~0 modulates near-black; engine shows lit blue stripes) — recheck per-vertex colour on
-mesh0 bottom rows vs the engine TA.
+## STAGE FLOOR/DECK black — ROOT-CAUSED + FIXED  [commit pending, re_kb/47, `finding:gsta_stage_floor_cull_fix`]
+The "lower blue-floor deck renders dark/missing" item above was **NOT a per-vertex-colour problem** —
+that earlier guess (deck bottom-row RGB ~0) was **wrong**. Per-mesh measurement vs the engine TA found
+the real cause:
+
+**The BLUE LOWER-DECK FLOOR (mesh3, texture t02 tcw `0xa0000`) was MARGIN-culled.** It is 2 huge
+triangles spanning X ±6822 that cross the visible bottom band (baked screen Y 362..585). The native
+emit rejected a whole triangle if ANY vertex left `[-MARGIN(800), 640/480+MARGIN]`, so the giant floor
+quad was dropped entirely. The engine instead **submits the full quad and lets the PowerVR guard-band
+clip it** (the captured engine TA carries mesh3 at full ±6822 extent). Also `mesh0` (green deck) has 8
+grazing/behind-camera verts the engine clamps to `1/w=10` with screen XY ≈ −1.4e7 (`pos[2]==10`
+sentinel), and the whole-tri reject killed every strip triangle touching one.
+
+Measured lower-deck band coverage (y 330..410): engine GT **0.41**, native BEFORE **0.03** (93%
+missing), native AFTER **0.49–0.58** across 17 frames, rgb now **blue-dominant** `[~40,~78,~148]`
+matching engine `[3,18,70]`. All 4 stage bands hue-match the engine (grid green-dom, deck+floor
+blue-dom).
+
+**Fix (engine-faithful, applies to the browser too):** drop the whole-tri MARGIN reject. Reject a
+vertex ONLY if non-finite or `|screen| > 1e6` (the `1/w=10` sentinel garbage); then keep a triangle
+iff its screen **bounding box overlaps** the visible frame (±64px slack). Let the rasterizer clip the
+rest. The browser `stage-client.mjs _buildFromTA` has the **same `MARGIN`-based per-vertex cull** —
+apply the same change there or its blue floor is culled identically. The "~12 culled props" were these
+world-authored deck/floor pieces, **not** the local props (69 props rendered 68/69; the 1 miss is a
+deck piece entirely above the frame, engine-culled too).
+
+## STAGE PATH must resolve from the BINARY dir  [commit pending, re_kb/47, `finding:gsta_stage_path_from_binary`]
+Native `gstaStageEnsureLoaded` resolved `STGxx_ta.json` only via the env override + cwd-relative bases,
+so launching `build/flycast.exe` from `$HOME` silently failed to load the stage. Fixed: prepend the
+**executable's own dir** (`GetModuleFileNameA` / `readlink /proc/self/exe`) and `exeDir/../atlas/stages`
+etc. to the candidate bases. Browser analogue: resolve stage assets relative to the **module URL**
+(`import.meta.url`), not a page-relative path, so the page works regardless of where it's served from.
 
 ## META-LESSON — a hand-rolled validator can lie
 `tools/render-replica-poc/_validate_all_multi.mjs` reported false `diff=0` because its reference

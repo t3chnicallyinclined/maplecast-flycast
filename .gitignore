@@ -234,3 +234,6 @@ tools/re_kb/ingest/generated/
 
 # Node deps (puppeteer for the render-replica headless verification harness)
 node_modules/
+
+# ROM-derived stage ground-truth captures (ram/vram/engine_ta dumps + rasters) — never commit
+_stage_gt/
