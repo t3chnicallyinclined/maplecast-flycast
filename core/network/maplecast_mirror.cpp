@@ -4538,6 +4538,14 @@ bool clientReceiveGsta(rend_context& rc, bool& vramDirty)
 	}
 	return true;
 }
+#else // !MAPLECAST_GSTA_CLIENT_BUILD
+// Headless / server build: stub the GSTA-client entry points so mainui.cpp links.
+// There is no GSTA reconstruction client here, so gstaModeActive() is always false
+// (the normal clientReceive() path runs). This fixes the headless link break
+// (unresolved gstaModeActive/clientReceiveGsta from mainui.cpp) that left the
+// build-headless-win binary undefined.
+bool gstaModeActive() { return false; }
+bool clientReceiveGsta(rend_context&, bool&) { return false; }
 #endif // MAPLECAST_GSTA_CLIENT_BUILD
 
 // !!! THIS FUNCTION IS THE GOLD STANDARD  --  KEEP IT THAT WAY !!!
