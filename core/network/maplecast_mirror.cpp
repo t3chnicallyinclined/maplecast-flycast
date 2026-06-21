@@ -3867,6 +3867,24 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 	for (int q = 0; q < nQuad; q++) {
 		uint32_t gfx1 = S[q].gfx1;
 		if (!(gfx1 & 0x0C000000u) && !(gfx1 & 0x8C000000u)) continue;   // no body art
+		// EFFECT-POLY GUARD (GAP 1, decode). A gfx1 in the shared Effect-Poly bank
+		// [0x0CED0000,0x0CEE0000) is NOT a char GFX1 LZSS offset table — it is an
+		// ABSOLUTE-POINTER texture DIRECTORY (head=0x0CED0010; dir base at *(0x0CED0008)
+		// = 0x0CED03D8; 0x10-byte entries {e0=w|h<<16, e4=fmt desc, e8=ABSOLUTE texel ptr,
+		// ec=0}, already-decoded PVR texels — NO LZSS, NO twiddle decode). Feeding it to
+		// the body LZSS/detwiddle path below mis-reads n = u32[gfx1]>>2 = 0x033B4004 (the
+		// n>0x40000 sanity then zeroes the table -> sel<n false -> the part decode produces
+		// a corrupt 512B blob written at the effect quad's TCW = the pink-streak/blue-block
+		// garble (docs/GSTA-FINDINGS-FOR-BROWSER.md GAP 1). SKIP it here so the effect quad
+		// keeps whatever the engine already placed at its TCW instead of corruption — a
+		// strict improvement over the mis-parse. The faithful directory decode (resolve
+		// sel -> directory entry -> upload the e8 texels at the right format) is the OPEN
+		// item, BLOCKED on a live Effect-Poly capture: the headless emu thread does not
+		// advance frames on the current Windows build (stalls at InitAudio, frame=0/fps=0,
+		// ~0.5% CPU — MEASURED 2026-06-20), so no super/effect node has ever been captured
+		// live to confirm the sel->entry key mapping or the texel format. UNVALIDATED until
+		// a live effect can be measured; this guard is the safe precursor.
+		if (gfx1 >= 0x0CED0000u && gfx1 < 0x0CEE0000u) continue;
 		uint32_t sel = S[q].sel;
 		// TCW -> vram byte addr (fmt5 PAL4): (TCW & 0x1FFFFF) << 3.
 		uint32_t vaddr = (S[q].tcw & 0x1FFFFF) << 3;

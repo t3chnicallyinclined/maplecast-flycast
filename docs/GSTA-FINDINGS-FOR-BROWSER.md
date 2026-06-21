@@ -239,3 +239,46 @@ its `+0x15C` to learn the effect art layout; (c) A/B the GSTA-emitted effect qua
 that frame. Server-side residency is ALREADY handled — `maplecast_replica_live.cpp collectFreshGfx`
 ships cat 1..4 GFX1+GFX2 on-change (the cat-0-only gap of re_kb/29 is CLOSED), so the art reaches the
 client; the OPEN work is purely the client decode (GAP 1) + blend (GAP 2).
+
+## EFFECT CAPTURE ATTEMPT 2026-06-20 — STILL BLOCKED: the Windows headless emu thread does NOT advance frames  [CONFIRMED-BY-MEASUREMENT]
+Goal: unblock GAP 1/2 using the "frozen super" in slot 1 (== the headless autoload base
+`build-headless-win/data/<rom>.state`, md5 `d87b36b3…`, 9.56MB, **byte-identical to `_1.state`** — verified,
+so the autoload IS loading the claimed state). Method: reboot headless autoloading the state and capture
+BOTH wires (mirror :7200 full TA = ground truth, GSTA :7212 replica-live) from the FIRST frame.
+
+**ROOT BLOCKER (new, measured) — the emulator never runs:**
+- Across 4 reboots, with the recorder connected within ~0ms of the ports listening (`tools/render-replica-poc/_cap_persist.mjs`,
+  reconnect-forever) for a full 35s window each: mirror :7200 sent **1 SYNC + only JSON lobby telemetry,
+  ZERO TA delta frames**; GSTA :7212 prefix **NEVER built** (`onRenderFrame` gates on `rd8(0x8C289624)!=0`;
+  it stayed 0 the whole window — no in-match render ever fired).
+- Mirror lobby telemetry on every poll (fresh boot AND autoload boot): **`"frame":0 "fps":0 "dirty":0`**.
+  The SH4 is at frame 0 and never advances.
+- Process CPU over ~3s wall: **0.9219s → 0.9375s = +0.0156s (~0.5%)**. A running SH4 (even norend headless)
+  pegs CPU; ~0.5% = the emu thread is **blocked, not executing**.
+- Both headless logs (fresh + autoload) **halt at `[emulator] Flycast-emu thread running, about to call
+  InitAudio()`** (`core/emulator.cpp` line ~1563) with no line after — the thread is almost certainly
+  **stalled inside `InitAudio()`** on this Windows headless build (binary mtime Jun 15; mirror source last
+  edited Jun 20 → the binary is also STALE).
+
+**Consequence:** the dual-stream effect diff is IMPOSSIBLE until the headless actually steps frames — no
+super can play out, no Effect-Poly node can ever appear in a live capture. This is an emu/build/environment
+problem, NOT the GSTA effect code. The OPEN GAP 1/2 validation remains blocked for the SAME underlying
+reason as the 2026-06-20 entry above (no live effect), now with a sharper cause: the emulator isn't running.
+
+**OFFLINE savestate probe is unreliable:** the `.state` is `FLYSAVE1` + zlib-chunked sections (RAM in 1MB
+zlib blocks interleaved with VRAM/regs); naive block-ordering by 0x789c scan reads page-616/649 as all-zero,
+which is NOT trustworthy (likely mis-ordered, not truly empty). Do not conclude "no effect in the state"
+from the offline decode — only a LIVE in-match read settles it.
+
+**Code change shipped this session (safe, UNVALIDATED for the positive case):** `gstaDecodeBodies`
+(`core/network/maplecast_mirror.cpp`) now **SKIPS** any gfx1 in `[0x0CED0000,0x0CEE0000)` instead of
+mis-parsing the Effect-Poly absolute-pointer directory as a char GFX1 LZSS table. This turns the GAP-1
+garble (corrupt 512B VRAM write at the effect's TCW) into a clean no-op — strictly better than corruption,
+and a verified no-op on all current traffic (zero effect nodes ever observed). The FAITHFUL directory
+decode (resolve `sel`→0x10-byte entry at `*(0x0CED0008)`, upload the absolute `e8` texels at the `e4`
+format) + GAP 2 (the `type==4` cell-TSP effect blend) remain OPEN, blocked on a live effect.
+
+**TO RESUME (precise):** FIRST fix the headless emu stall (rebuild the Win headless from current source;
+investigate the `InitAudio()` hang on Windows headless — confirm the emu thread advances `frame>0` /
+`fps>0` on a plain fresh boot BEFORE attempting any effect capture). Only once `frame=N>0` advances live
+can the frozen-super autoload play out and the GAP 1/2 dual-stream diff proceed.
