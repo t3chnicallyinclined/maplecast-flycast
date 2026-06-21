@@ -3674,6 +3674,19 @@ static uint32_t gstaEmitSpriteTA_append(std::vector<uint8_t>& out)
 		uint32_t tsp_ta = q->tsp;
 		const bool isEffect = (q->gfx1 >= 0x0CED0000u && q->gfx1 < 0x0CEE0000u);
 		if (isEffect) {
+			// GAP 2 (blend). The effect texels are already resident in the shipped VRAM
+			// (GAP 1 is the SKIP — the engine pre-uploaded them; see gstaDecodeBodies). The
+			// engine derives an effect cell's blend from the type==4 cell-TSP finalize
+			// (bank12 loc_8c124740) reading the
+			// cell's OWN SrcInstr/DstInstr — not reachable on the lean GSTA body-finalize
+			// path. is_effect (GFX in the Effect-Poly bank) is the cited engine-faithful
+			// additive signal (re_kb finding:objs_effect_blend / reference_mvc2_effects_bank:
+			// hitsparks/energy/super flashes accumulate). Keep SrcInstr=SRCA, set DstInstr=ONE
+			// (additive glow). The exact per-cell TSP (e.g. an alpha-blended ARGB4444 aura vs
+			// an additive RGB565 beam) is the remaining refinement, blocked on a live effect
+			// quad to A/B against the engine TA (no captured frame has one yet — MEASURED:
+			// _live_fx2 has resident effect textures but ZERO active effect render nodes and
+			// ZERO engine additive sprites across 1199 frames).
 			tsp_ta = (tsp_ta & ~(7u << 26)) | (1u << 26);   // DstInstr (bits 28:26) = ONE -> additive
 		}
 		// param header
@@ -3879,11 +3892,34 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 		// keeps whatever the engine already placed at its TCW instead of corruption — a
 		// strict improvement over the mis-parse. The faithful directory decode (resolve
 		// sel -> directory entry -> upload the e8 texels at the right format) is the OPEN
-		// item, BLOCKED on a live Effect-Poly capture: the headless emu thread does not
-		// advance frames on the current Windows build (stalls at InitAudio, frame=0/fps=0,
-		// ~0.5% CPU — MEASURED 2026-06-20), so no super/effect node has ever been captured
-		// live to confirm the sel->entry key mapping or the texel format. UNVALIDATED until
-		// a live effect can be measured; this guard is the safe precursor.
+		// item — NOW RESOLVED (2026-06-21, CONFIRMED-BY-MEASUREMENT, _live_fx2.gsta.mcrr):
+		// the FAITHFUL action for an Effect-Poly quad is to SKIP the body decode and leave
+		// the quad sampling the ALREADY-RESIDENT VRAM texels — exactly the fc7072a69 skip.
+		// The engine flow is fundamentally different from a body and does NOT decode per
+		// frame:
+		//   * The Effect-Poly bank is an absolute-pointer DIRECTORY (head 0x0CED0010, base
+		//     *(0x0CED0008)=0x0CED03D8, 0x10-byte entries {e0=w|(h<<16), e4=PVR PixelFmt
+		//     |0x300, e8=texel ptr, ec=0}, 25 valid entries [0..24] terminated by e0==0).
+		//   * e8 (e.g. 0x0CDA4000 = 13.6 MB) is a SYSTEM-RAM source of already-PVR twiddled
+		//     16-bit texels (NO LZSS, NO palette) — it is NOT a VRAM address (it exceeds the
+		//     8 MB DC VRAM). The engine DMAs that block to a DYNAMICALLY-ALLOCATED VRAM slot
+		//     and points the effect cell's TCW there. MEASURED: dir[0]'s exact texels are
+		//     resident in the captured VRAM at 0x4BF000 (content match), NOT at e8 and NOT at
+		//     e8 & vram_mask (0x5A4000 holds DIFFERENT data). So the binding from a directory
+		//     entry to a VRAM slot is the engine's allocator, recoverable only from a live
+		//     effect quad's TCW.
+		//   * That VRAM is SHIPPED verbatim in the GSTA prefix (vramBytes=8 MB). When a real
+		//     effect quad renders, its TCW (from the resident rectab template, gen_submit_
+		//     params.c) already points at the resident VRAM slot — the texels are present.
+		//     The ONLY thing the client must NOT do is corrupt that VRAM by mis-LZSS'ing the
+		//     directory (the old pink/blue garble). The skip does exactly that. Uploading the
+		//     e8 texels to e8&mask was TRIED and is WRONG (different VRAM address, different
+		//     data) — reverted.
+		//   * NOTE: this offline capture has the effect TEXTURES resident but ZERO active
+		//     effect render nodes and ZERO engine additive sprites across all 1199 frames, so
+		//     the live node->VRAM-slot binding and the per-cell blend (GAP 2 type==4 cell-TSP,
+		//     loc_8c124740) still need a contact-frame capture to A/B. The decode model above
+		//     is settled by measurement; only the live binding diff remains.
 		if (gfx1 >= 0x0CED0000u && gfx1 < 0x0CEE0000u) continue;
 		uint32_t sel = S[q].sel;
 		// TCW -> vram byte addr (fmt5 PAL4): (TCW & 0x1FFFFF) << 3.

@@ -282,3 +282,54 @@ format) + GAP 2 (the `type==4` cell-TSP effect blend) remain OPEN, blocked on a 
 investigate the `InitAudio()` hang on Windows headless — confirm the emu thread advances `frame>0` /
 `fps>0` on a plain fresh boot BEFORE attempting any effect capture). Only once `frame=N>0` advances live
 can the frozen-super autoload play out and the GAP 1/2 dual-stream diff proceed.
+
+## 2026-06-21 — EFFECT DECODE MODEL SETTLED BY MEASUREMENT (the "better tool" answer)  [CONFIRMED-BY-MEASUREMENT]
+
+Read the engine's EXACT Effect-Poly decode/render with marvelous2 + the offline RAM capture
+(`tools/render-replica-poc/_live_fx2.gsta.mcrr`, a real super loaded) + the mirror TA
+(`_live_fx2.mirror.zcst`). Result: **GAP 1 is settled — the faithful client action is the SKIP
+(fc7072a69), now PROVEN correct, not a placeholder.** My first directory-UPLOAD attempt was wrong and
+was reverted after measurement.
+
+### The engine's exact effect path (PCs cited — marvelous2)
+- Per-part submit is the SAME for body and effect: walker `loc_8c0344d4` (bank03:10218) → per-part
+  convergence `loc_8c034864` (jsr `bank12.loc_8C1244B0`, the PVR submit). `loc_8C1244B0` reads the
+  per-part PVR template (PCW/ISP/TSP/**TCW**) from the RESIDENT rectab `*(0x8C2DAD4c) + idxtab[*r13]*0x20`
+  (`gen_submit_params.c read_template`), **NOT from GFX1/GFX2.** The TCW already carries the texture's
+  resident VRAM address. The effect texture is NEVER LZSS-decoded per frame.
+- The Effect-Poly bank `[0x0CED0000,0x0CEE0000)` is an absolute-pointer **directory** (head 0x0CED0010,
+  base `*(0x0CED0008)`=0x0CED03D8, 0x10-byte entries `{e0=w|(h<<16), e4=PVR PixelFmt|0x300, e8=texel ptr,
+  ec=0}`, 25 valid entries [0..24], terminated by e0==0). `e4 & 7` = PixelFmt (0=ARGB1555, 1=RGB565,
+  2=ARGB4444); the marker `0x300` is in bits 8-9 (mask `& 0xFFFF`, NOT `& 0xFF`).
+
+### The decisive measurements (why UPLOAD is wrong and SKIP is right)
+- `e8` (e.g. 0x0CDA4000 = **13.6 MB**) is a **SYSTEM-RAM source** of already-PVR twiddled 16-bit texels
+  (no LZSS, no palette): RAM-nz 25947/32768. It is **NOT a VRAM address** — it exceeds the 8 MB DC VRAM.
+- The engine DMAs that block to a **dynamically-allocated VRAM slot** and points the cell TCW there.
+  MEASURED: dir[0]'s exact texels are resident in the captured VRAM **at 0x4BF000** (content match),
+  NOT at e8, and NOT at `e8 & vram_mask` (0x5A4000 holds different data). The directory→VRAM-slot binding
+  is the engine allocator, recoverable ONLY from a live effect quad's TCW.
+- That VRAM is shipped verbatim in the GSTA prefix (vramBytes = 8 MB). So when a real effect quad renders,
+  its resident-template TCW already points at the resident VRAM texels — **present, no client decode
+  needed.** The only failure mode is the OLD code corrupting VRAM by mis-LZSS'ing the directory (the
+  pink/blue garble). The skip removes exactly that. → `gstaDecodeBodies` keeps `continue` for effect-bank
+  gfx1, with the corrected rationale in-code.
+
+### Still OPEN (needs a live contact frame — the offline capture lacks one)
+`_live_fx2` has the effect TEXTURES resident but **ZERO active effect render nodes** (objpool scan, 1199
+frames) and **ZERO engine additive sprites** (`_scan_fx.mjs`, DstInstr==ONE never appears). So no effect
+was on-screen during the captured window — the super's art loaded but the flash had ended / not yet
+spawned. To finish: capture a frame with a live Effect-Poly quad (engine additive sprite present), then
+A/B (a) its TCW → resident VRAM slot (confirms the binding, no client work) and (b) its per-cell TSP
+SrcInstr/DstInstr (GAP 2: the engine's type==4 cell-TSP finalize `loc_8c124740`, bank12) vs our gfx1-bank
+additive heuristic (DstInstr=ONE), which remains the cited best approximation (re_kb finding:objs_effect_blend).
+
+### "Which tool gave the cleanest ground truth?"
+**marvelous2 (the disassembly) + the offline RAM capture together** were decisive — the disasm fixed the
+submit-reads-TCW-from-rectab model, and the capture's byte-level VRAM/system-RAM measurements (e8 is
+13.6 MB system RAM; texels resident in VRAM at 0x4BF000) overturned the directory-upload hypothesis in
+minutes. **The Oracle and ASMTRACE could NOT have helped here** because the headless never put a live
+effect on screen (the same blocker as 2026-06-20) — there was nothing live to probe. A wire diff would
+have been the worst tool: it shows nothing when no effect renders. The capture's RAM bytes (cheap,
+offline, deterministic) beat the live probe whenever the phenomenon is "what is resident where," which is
+exactly the effect-decode question.
