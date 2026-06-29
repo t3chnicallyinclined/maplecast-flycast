@@ -3604,6 +3604,28 @@ void mc_oracle_charPassCapture(void* ctxv)
 	mc_oracle_frameFlush(ctxv, vframe);
 }
 
+// CHARACTER-PASS TABLE SNAPSHOT wrapper (re_kb/50). Called from serverPublish (the CHARACTER
+// pass) so the LIVE idxtab/rectab effect entries are snapshotted before captureFrame ships them.
+void mc_replicaSnapshotCharPassTables()
+{
+	maplecast_replica_live::snapshotCharPassTables();
+	// CONFIRM (gated MAPLECAST_VERIFY_DC): log idxtab[1005] at this (char-pass) point. A super
+	// shows whether it holds the EFFECT entry (!=872, live) or the stale body entry (872).
+	if (getenv("MAPLECAST_VERIFY_DC") != nullptr && addrspace::read8(0x8C289624) != 0) {
+		static unsigned long s_snN = 0;
+		if ((s_snN++ % 20) == 0) {
+			u32 idxtab = addrspace::read32(0x8C2DAD3C);
+			u32 rectab = addrspace::read32(0x8C2DAD4C);
+			u32 e1005  = ((idxtab >> 24) & 0x7Fu) == 0x0Cu ? (u32)addrspace::read16(idxtab + 1005*2) : 0xFFFF;
+			// also resolve the TCW at idxtab[1005] -> rectab[e1005]+0xC. During a super, EITHER
+			// e1005 changes (idxtab transient) OR the rectab[872] TCW changes (rectab transient).
+			u32 tcw1005 = ((rectab >> 24) & 0x7Fu) == 0x0Cu ? (addrspace::read32(rectab + e1005*0x20 + 0x0C) & 0x1FFFFF) : 0;
+			fprintf(stderr, "[SNAP-CHARPASS] vframe=%u idxtab[1005]=%u tcw=%05x (idxtab!=872 OR tcw band 89/8a => live-effect; 872/c1xxx => stale-body)\n",
+			        addrspace::read32(0x8C3496B0), e1005, tcw1005);
+		}
+	}
+}
+
 void mc_oracle_frameFlush(void* ctxv, u32 frame)
 {
 	// Run when EITHER the master hook OR the Phase-0 probe is enabled. The probe

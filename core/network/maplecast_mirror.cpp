@@ -1789,6 +1789,18 @@ void serverPublish(TA_context* ctx)
 	// the SH4's STARTRENDER write (a dynarec block can be on the stack). No-op when
 	// the probe is disabled.
 	maplecast_oracle_hook::mc_probeCheckReload();
+
+	// CHARACTER-PASS TABLE SNAPSHOT (re_kb/50 idxtab effect-range fix). EMPIRICAL: charPassCapture
+	// (rend_start_render) only ever sees the HUD pass (realBody=0), but serverPublish HERE gets the
+	// CHARACTER pass ctx (the [ORACLE-PASS] frameFlush log shows realBody=22..172 here). The
+	// idxtab/rectab EFFECT entries (idxtab[972..1074]) are written by the char-pass submit and
+	// reverted by the HUD pass; charPassCapture/captureFrame ship them STALE -> the scale walker
+	// resolves the wrong (body) texture for super/projectile effects. So snapshot the LIVE tables
+	// HERE (char pass) into replica-live side buffers that captureFrame ships instead of the
+	// HUD-pass RAM. Read-only side-snapshot of 2 regions; free when no replica client / not in-match
+	// / tables not built. NOT a pass-gate — captureFrame still ships every frame at the HUD pass.
+	maplecast_oracle_hook::mc_replicaSnapshotCharPassTables();
+
 	// Pass the live ctx so the flush can ta_parse() the completed frame and recover
 	// the per-frame SCREEN quads (real screen x,y) to attribute per OBJ_BEGIN object.
 	//

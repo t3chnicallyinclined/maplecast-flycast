@@ -51,6 +51,14 @@ void init();
 // and a future TA-ground-truth extension.
 void onRenderFrame(void* ctxv);
 
+// CHARACTER-PASS table snapshot (re_kb/50 idxtab effect-range fix). Called from
+// mc_oracle_charPassCapture() ONLY on the CHARACTER pass (isCharacterPass), where the
+// idxtab/rectab effect entries are LIVE (written by the char-pass submit) before the
+// HUD pass reverts them. Read-only side-snapshot of the 2 table regions into side
+// buffers; captureFrame ships these instead of the live (HUD-pass-stale) RAM. Free
+// when disabled / no client. SCOPED — not the onRenderFrame pass-gate.
+void snapshotCharPassTables();
+
 // Clean shutdown (stop the WS thread). Called from emulator term.
 void shutdown();
 

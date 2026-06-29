@@ -76,6 +76,25 @@ static std::vector<Reg>    _dynRegs;
 static bool                _tablesBuilt = false;
 static u32                 _dynTotal    = 0;       // sum of dynamic region lens (payload size)
 
+// CHARACTER-PASS TABLE SNAPSHOT (re_kb/50 — the idxtab effect-range staleness fix).
+// idxtab/rectab effect entries (idxtab[972..1074]) are written by the per-tile submit
+// (bank12 loc_8c124a30) DURING the SH4 character-pass render walk, then OVERWRITTEN/reverted
+// by the HUD/composite pass before the replica capture (captureFrame) runs at the HUD-pass
+// STARTRENDER. So the live HUD-pass idxtab maps the effect indices to STALE body rectab
+// entries -> the scale walker resolves the wrong (body) texture (MEASURED: idxtab[1005]=872
+// -> rectab[872]=c1e00 body, engine rendered an effect TCW). FIX: snapshot idxtab+rectab at
+// the CHARACTER pass (mc_oracle_charPassCapture, isCharacterPass) into these side buffers;
+// captureFrame ships THESE for the idxtab/rectab regions instead of the live (HUD-pass) RAM.
+// This is a SCOPED read-only side-snapshot of 2 regions — NOT the onRenderFrame pass-gate
+// (that gated the whole capture and stalled the stream). Body entries are identical both
+// passes, so shipping the char-pass snapshot is safe for bodies and fixes effects.
+static std::vector<uint8_t> _idxtabSnap;            // char-pass idxtab bytes
+static std::vector<uint8_t> _rectabSnap;            // char-pass rectab bytes
+static u32                  _idxtabAddr = 0, _idxtabLen = 0;
+static u32                  _rectabAddr = 0, _rectabLen = 0;
+static std::atomic<bool>    _tablesSnapValid{false};
+static std::mutex           _tablesSnapMutex;
+
 // The STATIC PREFIX (header + tables + VRAM + PVR + 16MB RAM), built once, then
 // zstd'd into a ZCST envelope cached for every connecting client.
 static std::vector<uint8_t> _prefixZcst;           // ready-to-send compressed bytes
@@ -359,10 +378,10 @@ static void buildTables()
 	{   u32 idxtab = rd32(0x8C2DAD3C), rectab = rd32(0x8C2DAD4C);
 		// These two pointers are resolved at table-build time. They are stable for
 		// the match (arena base), so capturing them here is correct for the stream.
-		if (isRam(idxtab)) D(idxtab, 0x2000, "idxtab");
+		if (isRam(idxtab)) { D(idxtab, 0x2000, "idxtab"); _idxtabAddr = idxtab; _idxtabLen = 0x2000; }
 		// rectab: max record index hit 461/1024 with 2 bodies; 0x8000 truncated the
 		// table on busier frames. 0x10000 gives headroom for a 3rd/4th body.
-		if (isRam(rectab)) D(rectab, 0x10000, "rectab");
+		if (isRam(rectab)) { D(rectab, 0x10000, "rectab"); _rectabAddr = rectab; _rectabLen = 0x10000; }
 	}
 
 	// EFFECT RECTAB-TEMPLATE arenas (re_kb/50 super-freeze fix — the bit15 SCALE-walker path).
@@ -714,19 +733,30 @@ static void captureFrame(u32 vframe)
 	memcpy(&buf[8], &h2, 4);
 
 	// ---- dynamic regions in table order, raw bytes ----
+	// CHAR-PASS TABLE OVERRIDE (re_kb/50): for the idxtab/rectab regions, ship the CHARACTER-PASS
+	// side-snapshot (snapshotCharPassTables) instead of the live HUD-pass RAM — the effect-range
+	// entries are only valid at the char pass. Falls back to live RAM until the first char-pass
+	// snapshot exists (and for non-table regions). Lock briefly to read the snapshot coherently.
+	const bool haveSnap = _tablesSnapValid.load(std::memory_order_acquire);
+	std::unique_lock<std::mutex> snapLk(_tablesSnapMutex, std::defer_lock);
+	if (haveSnap) snapLk.lock();
 	size_t off = hdr;
 	for (auto& r : _dynRegs) {
-		// PHASE 5: all dynamic regions are guest STATE now (no VRAM texture band). The two
-		// big tables (idxtab/rectab) and the slot ptr arrays + char structs all live in main
-		// RAM; copy from mem_b directly when the addr is a clean 0x8C... main-RAM address
-		// (fast), else fall back to alias-safe reads.
-		if ((r.addr & 0xFF000000u) == 0x8C000000u) {
-			memcpy(&buf[off], &mem_b[r.addr & 0x00FFFFFFu], r.len);
+		const uint8_t* src = nullptr;
+		if (haveSnap && r.addr == _idxtabAddr && r.len == _idxtabLen && _idxtabSnap.size() == r.len)
+			src = _idxtabSnap.data();
+		else if (haveSnap && r.addr == _rectabAddr && r.len == _rectabLen && _rectabSnap.size() == r.len)
+			src = _rectabSnap.data();
+		if (src) {
+			memcpy(&buf[off], src, r.len);                          // char-pass snapshot (effect-correct)
+		} else if ((r.addr & 0xFF000000u) == 0x8C000000u) {
+			memcpy(&buf[off], &mem_b[r.addr & 0x00FFFFFFu], r.len); // fast main-RAM path
 		} else {
-			for (u32 b = 0; b < r.len; b++) buf[off + b] = rd8(r.addr + b);
+			for (u32 b = 0; b < r.len; b++) buf[off + b] = rd8(r.addr + b); // alias-safe fallback
 		}
 		off += r.len;
 	}
+	if (snapLk.owns_lock()) snapLk.unlock();
 
 	// ---- VARIABLE GFX tail: u32 nGfx, then per fresh body GFX region { base, len, len bytes } ----
 	u32 nGfx = (u32)freshGfx.size();
@@ -779,6 +809,33 @@ static void captureFrame(u32 vframe)
 // ===========================================================================
 // Public API
 // ===========================================================================
+
+// CHARACTER-PASS TABLE SNAPSHOT (re_kb/50). Called from mc_oracle_charPassCapture ONLY on the
+// CHARACTER pass. Snapshots the live idxtab/rectab (effect entries are written by the char-pass
+// submit and reverted by the HUD pass) into side buffers that captureFrame ships instead of the
+// HUD-pass-stale RAM. Read-only, 2 region memcpys; free when off / no client / not in-match /
+// tables not built. Body entries are identical both passes — safe for bodies, fixes effects.
+void snapshotCharPassTables()
+{
+	if (!_armed) return;
+	if (_clientCount.load(std::memory_order_relaxed) == 0) return;
+	if (rd8(IN_MATCH_ADDR) == 0) return;
+	if (!_tablesBuilt) return;                 // addr/len set by buildTables (first onRenderFrame)
+	if (!_idxtabAddr && !_rectabAddr) return;
+
+	std::lock_guard<std::mutex> lk(_tablesSnapMutex);
+	auto snap = [](u32 addr, u32 len, std::vector<uint8_t>& dst) {
+		if (!addr || !len) return;
+		if (dst.size() != len) dst.resize(len);
+		if ((addr & 0xFF000000u) == 0x8C000000u)
+			memcpy(dst.data(), &mem_b[addr & 0x00FFFFFFu], len);     // fast main-RAM path
+		else
+			for (u32 b = 0; b < len; b++) dst[b] = rd8(addr + b);   // alias-safe fallback
+	};
+	snap(_idxtabAddr, _idxtabLen, _idxtabSnap);
+	snap(_rectabAddr, _rectabLen, _rectabSnap);
+	_tablesSnapValid.store(true, std::memory_order_release);
+}
 
 void onRenderFrame(void* /*ctxv*/)
 {

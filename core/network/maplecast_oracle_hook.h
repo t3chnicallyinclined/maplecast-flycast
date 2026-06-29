@@ -87,6 +87,12 @@ void DYNACALL mc_oracle_blockEntry(u32 pc);
 // casts it back to TA_context*. No-op when the hook is disabled / ctx is null.
 void mc_oracle_frameFlush(void* ctx, u32 frame);
 
+// CHARACTER-PASS TABLE SNAPSHOT (re_kb/50). Thin wrapper calling
+// maplecast_replica_live::snapshotCharPassTables() — declared here so maplecast_mirror.cpp
+// (serverPublish, the CHARACTER-pass point) can trigger it without including replica_live.h.
+// Read-only; free when the replica feed is disabled / no client / not in-match.
+void mc_replicaSnapshotCharPassTables();
+
 // CHARQ — the DEFINITIVE per-part body-quad capture point. Called from
 // rend_start_render() (core/hw/pvr/Renderer_if.cpp, after the isRTT stamp, BEFORE
 // QueueRender) for EVERY STARTRENDER context. MVC2 emits multiple STARTRENDER passes
