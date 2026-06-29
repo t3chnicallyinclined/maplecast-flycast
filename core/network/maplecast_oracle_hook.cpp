@@ -3517,17 +3517,29 @@ void mc_oracle_charPassCapture(void* ctxv)
 	// offline lift-to-C harness can read the load-time-built 0x8C1F9F9C tile-descriptor table
 	// + GFX1/GFX2 + char structs it cannot get from disc. Fires once then latches off.
 	{
+		// TRIGGERED variant (MAPLECAST_DUMP_RAM_TRIGGER=<file>): the user freezes the exact
+		// pose (e.g. the Storm aerial transposition), then `touch`es the trigger file; THIS
+		// in-match frame dumps RAM+VRAM+PVR+engine-TA together (zero-skew, a single coherent
+		// frame for a byte-exact render_frame vs engine A/B), then DELETES the trigger so it
+		// can be re-armed for the next pose. READ-ONLY w.r.t. guest state.
+		bool trigger = false;
+		const char* trigPath = getenv("MAPLECAST_DUMP_RAM_TRIGGER");
+		if (trigPath && *trigPath && addrspace::read8(0x8C289624) != 0) {
+			FILE* tf = fopen(trigPath, "rb");
+			if (tf) { fclose(tf); remove(trigPath); trigger = true; }   // consume the trigger
+		}
 		static const bool s_dumpRam = getenv("MAPLECAST_DUMP_RAM") != nullptr;
 		static bool s_ramDumped = false;
-		if (s_dumpRam && !s_ramDumped && addrspace::read8(0x8C289624) != 0) {
+		if ((trigger || (s_dumpRam && !s_ramDumped)) && addrspace::read8(0x8C289624) != 0) {
 			const char* p = getenv("MAPLECAST_DUMP_RAM_PATH");
 			if (!p) p = "/dev/shm/mc_ram_dump.bin";
 			FILE* f = fopen(p, "wb");
 			if (f) {
 				size_t n = fwrite(&mem_b[0], 1, (size_t)RAM_SIZE, f);
 				fclose(f);
-				s_ramDumped = true;
-				fprintf(stderr, "[RAMDUMP] wrote %zu/%u bytes to %s\n", n, (unsigned)RAM_SIZE, p);
+				if (!trigger) s_ramDumped = true;   // latch only the one-shot; trigger is re-armable
+				fprintf(stderr, "[RAMDUMP] wrote %zu/%u bytes to %s (vframe=%u, %s)\n", n, (unsigned)RAM_SIZE, p,
+				        addrspace::read32(0x8C3496B0), trigger ? "TRIGGERED" : "one-shot");
 				// Companion VRAM (8MB, the part-pixel textures TA quads sample) + PVR regs
 				// (palette/state) for the render-replica TA->pvr2-renderer harness.
 				FILE* fv = fopen("/dev/shm/mc_vram_dump.bin", "wb");
