@@ -57,4 +57,9 @@ void shutdown();
 // True when the gate is armed (the env var was set at init). Diagnostic only.
 bool enabled();
 
+// True when armed AND at least one loopback WS client is connected. The caller uses
+// this to skip the per-pass character-pass discrimination (a ta_parse) entirely when
+// no client is listening — preserving the zero-overhead-when-idle hot-path contract.
+bool hasClients();
+
 }

@@ -965,13 +965,35 @@ static const int MAX_SPRVERT = 1024;
 static SprVert s_sprVert[MAX_SPRVERT];
 static int     s_nSprVert = 0;
 
-void mc_oracle_spriteVertReset() { s_nSprVert = 0; }
+// MAPLECAST_HUD_TRACE — zero-cost-off runtime trace of the 36g push/consume path,
+// to /dev/shm/mc_hud_trace.log. Proves whether the EXPANSION verts are clean at
+// capture (PUSH) and whether the ordinal consume matches the push (CONSUME).
+bool mc_hudTraceEnabled = (getenv("MAPLECAST_HUD_TRACE") != nullptr);
+static FILE* s_traceF = nullptr;
+static int   s_traceFrames = 0;
+static const int HUD_TRACE_MAX_FRAMES = 4;   // a handful of in-match parses is enough
+static bool  s_tracePushOpen = false;        // a parse (reset) has begun this trace window
+static FILE* mc_traceFile() {
+	if (!mc_hudTraceEnabled) return nullptr;
+	if (s_traceFrames >= HUD_TRACE_MAX_FRAMES) return nullptr;
+	if (!s_traceF) s_traceF = fopen("/dev/shm/mc_hud_trace.log", "w");
+	return s_traceF;
+}
+
+void mc_oracle_spriteVertReset() {
+	s_nSprVert = 0;
+	if (mc_hudTraceEnabled) {
+		FILE* f = mc_traceFile();
+		if (f) { fprintf(f, "=== RESET (parse boundary) frame-window %d ===\n", s_traceFrames); s_tracePushOpen = true; }
+	}
+}
 
 void mc_oracle_spriteVertPush(const void* cv4)
 {
 	if (!mc_hudTaEnabled) return;            // only needed for the HUD capture
 	if (s_nSprVert >= MAX_SPRVERT) return;   // bounded; drop on overflow
 	const Vertex* cv = (const Vertex*)cv4;   // cv[0]=P cv[1]=C cv[2]=A cv[3]=B
+	int ord = s_nSprVert;
 	SprVert& e = s_sprVert[s_nSprVert++];
 	for (int c = 0; c < 4; c++) {
 		e.x[c] = cv[c].x; e.y[c] = cv[c].y;
@@ -981,7 +1003,27 @@ void mc_oracle_spriteVertPush(const void* cv4)
 		e.col[c] = ((u32)cv[c].col[3] << 24) | ((u32)cv[c].col[0] << 16)
 		         | ((u32)cv[c].col[1] <<  8) |  (u32)cv[c].col[2];
 	}
+	if (mc_hudTraceEnabled && s_tracePushOpen) {
+		FILE* f = mc_traceFile();
+		if (f) {
+			// Plane residual: a closed sprite expansion has cv0 == cv3 + cv1 - cv2
+			// (P == B + C - A). Big residual => verts garbage AT CAPTURE.
+			float rx = e.x[0] - (e.x[3] + e.x[1] - e.x[2]);
+			float ry = e.y[0] - (e.y[3] + e.y[1] - e.y[2]);
+			float res = sqrtf(rx*rx + ry*ry);
+			fprintf(f, "PUSH ord=%d res=%.3f  "
+			        "P(%.1f,%.1f|%.3f,%.3f) C(%.1f,%.1f|%.3f,%.3f) "
+			        "A(%.1f,%.1f|%.3f,%.3f) B(%.1f,%.1f|%.3f,%.3f)\n",
+			        ord, res,
+			        e.x[0],e.y[0],e.u[0],e.v[0], e.x[1],e.y[1],e.u[1],e.v[1],
+			        e.x[2],e.y[2],e.u[2],e.v[2], e.x[3],e.y[3],e.u[3],e.v[3]);
+		}
+	}
 }
+
+// Non-static accessor so collectHudQuads (same TU, but mc_traceFile is static and
+// defined above it) can reach the trace file handle from its sprite branch.
+FILE* mc_traceFileExt() { return mc_traceFile(); }
 
 // CHARQ accessor snapshot — published at the END of frameFlush (before the per-frame
 // statics reset) so the CHARQ emit block in serverPublish can read this frame's
@@ -3060,8 +3102,28 @@ static void collectHudQuads(rend_context& rc)
 			// any post-parse idx/pp permutation.
 			const bool isSpritePara = ((pcw >> 29) & 7) == 5;
 			if (isSpritePara) {
-				if (spriteOrd >= s_nSprVert) continue;   // ran out of captured sprites (shouldn't)
+				if (spriteOrd >= s_nSprVert) {
+					if (mc_hudTraceEnabled) {
+						extern FILE* mc_traceFileExt();
+						FILE* f = mc_traceFileExt();
+						if (f) fprintf(f, "CONSUME ord=%d OVERRUN (s_nSprVert=%d) -- sprite poly with no captured vert\n", spriteOrd, s_nSprVert);
+					}
+					continue;   // ran out of captured sprites (shouldn't)
+				}
+				int usedOrd = spriteOrd;
 				const SprVert& e = s_sprVert[spriteOrd++];
+				if (mc_hudTraceEnabled) {
+					extern FILE* mc_traceFileExt();
+					FILE* f = mc_traceFileExt();
+					if (f) {
+						float rx = e.x[0] - (e.x[3] + e.x[1] - e.x[2]);
+						float ry = e.y[0] - (e.y[3] + e.y[1] - e.y[2]);
+						fprintf(f, "CONSUME ord=%d res=%.3f pcw=%08X count=%u  "
+						        "P(%.1f,%.1f) C(%.1f,%.1f) A(%.1f,%.1f) B(%.1f,%.1f)\n",
+						        usedOrd, sqrtf(rx*rx+ry*ry), pcw, pp.count,
+						        e.x[0],e.y[0], e.x[1],e.y[1], e.x[2],e.y[2], e.x[3],e.y[3]);
+					}
+				}
 				for (int c = 0; c < 4; c++) {
 					cx[c]=e.x[c]; cy4[c]=e.y[c]; cu[c]=e.u[c]; cv4[c]=e.v[c]; ccol[c]=e.col[c];
 					if (std::isnan(e.x[c]) || fabsf(e.x[c]) > 1e25f
@@ -3133,6 +3195,20 @@ static void collectHudQuads(rend_context& rc)
 	collect(rc.global_param_op, 0);
 	collect(rc.global_param_pt, 1);
 	collect(rc.global_param_tr, 2);
+
+	if (mc_hudTraceEnabled && s_tracePushOpen) {
+		FILE* f = mc_traceFileExt();
+		if (f) {
+			fprintf(f, "--- CONSUME SUMMARY: sprite polys consumed=%d, sprites pushed=%d, hud kept=%d ---\n",
+			        spriteOrd, s_nSprVert, s_nhud);
+			fflush(f);
+		}
+		s_tracePushOpen = false;
+		if (++s_traceFrames >= HUD_TRACE_MAX_FRAMES && s_traceF) {
+			fclose(s_traceF); s_traceF = nullptr;
+			fprintf(stderr, "[HUD-TRACE] %d-parse trace -> /dev/shm/mc_hud_trace.log\n", HUD_TRACE_MAX_FRAMES);
+		}
+	}
 
 	if (s_hf && s_hq == 2) {
 		fprintf(s_hf, "--- HUD pass %d kept=%d ---\n", s_hqPasses, s_nhud);
@@ -3373,8 +3449,76 @@ void mc_oracle_charPassCapture(void* ctxv)
 	// read-set (~58KB) into a double-buffered staging area and hand it to the WS
 	// thread (which compresses + sends off-thread). Returns immediately when the env
 	// var is unset or no client is connected — zero overhead on the prod hot path.
-	// Self-contained in maplecast_replica_live.cpp; does NOT touch the CHARQ path below.
-	maplecast_replica_live::onRenderFrame(ctxv);
+	//
+	// CHARACTER-PASS GATE (the super-freeze over-tile fix, re_kb/50). MVC2 ships TWO
+	// STARTRENDERs per video frame: the CHARACTER pass (carries the bodies; QueueRender
+	// DROPS it — single-slot) then the surviving HUD/composite pass. The body walker's
+	// per-object tile-descriptor cursor node+0xDC and the per-frame tile-descriptor table
+	// 0x8C1F9F9C are RUNTIME-BUILT per pass by loc_8c0337bc/loc_8c129728 (re_kb/22): the
+	// frame-init RESETS the running cursor 0x8C1F9D98<-0 and rebuilds the descriptor table
+	// at the START of EACH pass. So at the HUD pass STARTRENDER the objpool's node+0xDC has
+	// been RE-SEEDED for the HUD pass's (minimal) geometry — every body/effect node that the
+	// HUD pass did not re-emit reads a STALE/zero +0xDC. The replica capture previously fired
+	// UNCONDITIONALLY on every pass with drop-old (last-pass-wins) -> it snapshotted the
+	// objpool at the HUD pass, so during a super freeze the ~28 newly-spawned lightning
+	// effect nodes all read +0xDC=0 -> all index tiledesc[0..7] -> each over-tiles ~8x ->
+	// the ~6-8 tiled Storm bodies + fists (A/B MEASURED: GSTA 677 quads vs engine 104 on the
+	// same frame; +0xDC valid pre-super, 0 on freeze frames). FIX: capture ONLY on the
+	// CHARACTER pass (the one whose TA actually carries the body quads), where node+0xDC /
+	// tiledesc reflect the bodies the wire renders. Same realBody discriminator CHARQ uses
+	// (proven: character pass has body-region sprite quads y in [200,460]; HUD pass has none).
+	// Run the discrimination only when a replica client is actually listening (so the per-pass
+	// ta_parse is OFF on idle prod), OR when the VERIFY diagnostic is armed (so we can confirm
+	// the +0xDC pass timing on the headless before any client connects).
+	const bool replicaWantsCapture = maplecast_replica_live::hasClients();
+	const bool verifyDc = (getenv("MAPLECAST_VERIFY_DC") != nullptr);
+	if ((replicaWantsCapture || verifyDc) && ctxv != nullptr &&
+	    addrspace::read8(0x8C289624) != 0) {
+		TA_context* rctx = (TA_context*)ctxv;
+		ta_parse(rctx, true);                   // read-only: builds rctx->rend (norend's call)
+		PassStats rps; memset(&rps, 0, sizeof rps);
+		collectScreenQuads(rctx->rend, &rps);
+		bool isCharPass = (rps.realBody >= CHARQ_REALBODY_MIN);
+
+		// VERIFY (gated MAPLECAST_VERIFY_DC=1, one-shot per ~30 passes, stderr only): prove
+		// WHICH pass carries a non-zero node+0xDC for the layer-0 effect nodes, so the
+		// character-pass gate is confirmed by measurement on the live headless, not on faith.
+		if (verifyDc) {
+			static unsigned long s_vN = 0;
+			if ((s_vN++ % 15) == 0) {
+				// Scan ALL 16 slot-walk layers (effect/body nodes land in any layer, not just 0).
+				// Report per-node cat + node+0xDC so we can SEE whether the CHARACTER pass carries a
+				// distinct non-zero +0xDC for the effect nodes (the fix's premise) vs the HUD pass.
+				int nNodes = 0, nzdc = 0, nDcStale = 0, nEffect = 0;
+				u32 sampNode = 0, sampDc = 0; int sampCat = 0; bool sampSet = false;
+				for (int L = 0; L < 16; L++) {
+					u32 cnt = addrspace::read8(0x8C2895E0 + L);
+					if (cnt == 0 || cnt > 0x60) continue;
+					u32 ptrBase = 0x8C287DE0 + L * 0x180;
+					for (u32 i = 0; i < cnt; i++) {
+						u32 node = addrspace::read32(ptrBase + i * 4);
+						if (((node >> 24) & 0x7Fu) != 0x0Cu) continue;
+						int cat = (int8_t)addrspace::read8(node + 0x3);
+						u32 dc  = addrspace::read16(node + 0xDC);
+						nNodes++;
+						if (dc != 0) nzdc++; else nDcStale++;
+						if (cat >= 1 && cat <= 4) {            // satellite/effect node
+							nEffect++;
+							if (!sampSet) { sampNode = node; sampDc = dc; sampCat = cat; sampSet = true; }
+						}
+					}
+				}
+				fprintf(stderr, "[VERIFY-DC] vframe=%u pass=%-9s realBody=%d nodes=%d effect=%d "
+				                "nonZeroDC=%d zeroDC=%d cursor9D98=%u sampEffNode=%08x cat=%d dc=%u\n",
+				        addrspace::read32(0x8C3496B0), isCharPass ? "CHARACTER" : "hud",
+				        rps.realBody, nNodes, nEffect, nzdc, nDcStale,
+				        addrspace::read32(0x8C1F9D98), sampNode, sampCat, sampDc);
+			}
+		}
+
+		if (isCharPass)
+			maplecast_replica_live::onRenderFrame(ctxv);
+	}
 
 	// ONE-SHOT full-RAM dump for the render-replica Option-C PoC (gated MAPLECAST_DUMP_RAM,
 	// READ-ONLY, determinism-safe). Writes the 16MB main RAM (mem_b) once, in-match, so the
