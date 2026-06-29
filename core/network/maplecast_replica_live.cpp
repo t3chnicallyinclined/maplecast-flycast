@@ -365,6 +365,29 @@ static void buildTables()
 		if (isRam(rectab)) D(rectab, 0x10000, "rectab");
 	}
 
+	// EFFECT RECTAB-TEMPLATE arenas (re_kb/50 super-freeze fix — the bit15 SCALE-walker path).
+	// MVC2's super/projectile effect parts (sel bit15 set) render via loc_8c0348c8 (the SCALE
+	// walker), whose per-record rectab alloc-index = 0x390 + read.b(*(node+0x180)+0x220+ctr).
+	// node+0x180 points at a PER-CHARACTER effect display-list TEMPLATE in 0x0C56_5000-family RAM
+	// (bank13.asm loc_8c135594 bases / loc_8c1355b4 ends: each char slot owns a 0x3000 arena,
+	// 0x0C565000..0x0C568000 etc). The engine REBUILDS this template every frame during the effect
+	// pass (LIVE ASMTRACE on PC 0x8C034BA4: the per-record indices 0x3CC..0x432 derive from live
+	// non-zero template bytes that DIFFER from the prefix-snapshot's stale 00,01,02..). Since the
+	// template only rode the once-shipped static 16MB RAM image, the GSTA client read STALE bytes ->
+	// the scale walker computed wrong indices -> wrong (c1xxx) effect TCWs -> the phantom-tiled-body
+	// garble. FIX (additive read-set ship; does NOT alter the body path): ship the 7 per-character
+	// template arenas every frame so render_frame's scale walker reads the LIVE per-record indices.
+	// 7*0x3000 = ~84KB raw, but zstd-trivial when unchanged (they only carry data during a super).
+	// Bases/ends are static ROM constants (bank13.asm); shipping all 7 is multi-character-safe.
+	{
+		static const u32 kEffectTemplateBase[7] = {
+			0x8C565000u, 0x8C955000u, 0x8C6B5000u, 0x8CAA5000u,
+			0x8C805000u, 0x8CBF5000u, 0x8CD45000u
+		};
+		for (int i = 0; i < 7; i++)
+			if (isRam(kEffectTemplateBase[i])) D(kEffectTemplateBase[i], 0x3000, "efxtmpl");
+	}
+
 	// PHASE 5 — PURE-STATE TEXTURES: the body sprite TEXTURE band is NO LONGER shipped.
 	// The previous "bodytex" shortcut (D(0x410000, 0x50000) = ~320KB/frame of decoded VRAM
 	// pixels) was off-thesis: it streamed pixels instead of state. The CLIENT now reconstructs

@@ -44,6 +44,8 @@ void render_object_setup_03093c(Sh4Ctx *c);          /* gen_render_object.c   */
 void render_object_setup_030af8(Sh4Ctx *c);          /* gen_render_satellite.c (cat 1..4) */
 void transform_object_122560(Sh4Ctx *c, u32 node);   /* gen_transform_obj.c   */
 void walker_0344d4(Sh4Ctx *c);                       /* gen_walker.c          */
+void walker_0348c8(Sh4Ctx *c);                       /* gen_walker_scale.c (bit15 scale walker) */
+static u32 s_running_cursor;                          /* fwd (tentative); defined below */
 typedef struct { u32 pcw, isp, tsp, tcw; } PolyParam;
 void submit_params(Sh4Ctx *c, u32 rec_index, u32 palbank, PolyParam *out); /* gen_submit_params.c */
 
@@ -193,7 +195,36 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
     Sh4Ctx wc; memcpy(&wc, c, sizeof wc); wc.ram=c->ram;
     wc.r[4]=node; wc.r[15]=0x0C480000u; wc.pr=0xDEADBEEFu;
     g_ncap=0;
-    walker_0344d4(&wc);
+
+    /* SPRITE_ID bit15 DISPATCH (re_kb/50; engine loc_8c034bea & mask loc_8c034c34=0x8000). The
+     * engine routes (sel & 0x8000)==0 -> loc_8c0344d4 (multi-tile body walker, character bodies)
+     * and (sel & 0x8000)!=0 -> loc_8c0348c8 (SCALE walker, ONE scaled sprite per cell record).
+     * MVC2 super/projectile EFFECT parts carry bit15-set sels (Lightning Storm bolts 0x8006..0x801d);
+     * the engine emits 1 sprite per part (A/B: ~90 quads on the super, each effect TCW once).
+     * render_frame previously tiled them ~34x -> the phantom-body garble. The scale walker''s per-
+     * record rectab alloc-index = 0x390 + read.b(*(node+0x180)+0x220+ctr), where node+0x180 is a
+     * PER-CHARACTER effect display-list template that the engine rebuilds every frame — now shipped
+     * in the per-frame read-set ("efxtmpl", maplecast_replica_live.cpp) so this read sees the LIVE
+     * per-record indices (was stale -> wrong TCW). */
+    u32 _sel = (u32)(u16)( (u32)wc.ram[(node & 0x00FFFFFFu) + 0x144]
+                         | ((u32)wc.ram[(node & 0x00FFFFFFu) + 0x145] << 8) );
+    if (_sel & 0x8000u) {
+        walker_0348c8(&wc);              /* effect node: single scaled sprite per record */
+    } else {
+        /* SUPER-FREEZE CURSOR REPAIR for the bit15-CLEAR body walker (re_kb/50): on a freeze frame
+         * the resident node+0xDC is stale-0 for the real bodies too, so the tiling walker mis-indexes
+         * the tiledesc and over-tiles. render_frame''s s_running_cursor IS the engine prefix-sum
+         * (advanced by emitted tile count in the hooks); substitute it when resident==0 && cursor!=0
+         * (the unambiguous stale-non-first case) — a strict no-op on normal frames. */
+        u32 resident_dc = (u32)(u16)( (u32)wc.ram[(node & 0x00FFFFFFu) + 0xDC]
+                                    | ((u32)wc.ram[(node & 0x00FFFFFFu) + 0xDD] << 8) );
+        if (resident_dc == 0 && s_running_cursor != 0) {
+            u32 lo = (node & 0x00FFFFFFu) + 0xDC;
+            wc.ram[lo]     = (u8)(s_running_cursor & 0xFF);
+            wc.ram[lo + 1] = (u8)((s_running_cursor >> 8) & 0xFF);
+        }
+        walker_0344d4(&wc);              /* character body: multi-tile walker */
+    }
     int ntiles = g_ncap;
 
     /* ---- CORRUPTION GATE (live multi-object robustness) ----
@@ -331,7 +362,7 @@ u32   g_obj_node[64];
 /* render_frame_body_hook: called by the slot-walk for each BODY node (cat==0). It runs
  * the per-object render AND advances the running cursor, recording both the engine's
  * resident node+0xDC and our computed prefix-sum for the per-object proof. */
-static u32 s_running_cursor = 0;
+/* s_running_cursor: tentative-defined up top */
 void render_frame_body_hook(Sh4Ctx *c, u32 node){
     if(g_body_count < 64){
         g_obj_node[g_body_count]       = node;
