@@ -46,6 +46,42 @@ void transform_object_122560(Sh4Ctx *c, u32 node);   /* gen_transform_obj.c   */
 void walker_0344d4(Sh4Ctx *c);                       /* gen_walker.c          */
 void walker_0348c8(Sh4Ctx *c);                       /* gen_walker_scale.c (bit15 scale walker) */
 static u32 s_running_cursor;                          /* fwd (tentative); defined below */
+
+/* ============================================================================
+ * EFFECT idxtab REMAP (re_kb/50 — the last residual: char-pass-transient idxtab).
+ * The bit15 SCALE walker (loc_8c0348c8) resolves its per-record TCW via
+ * rectab[idxtab[alloc_index]]. The idxtab EFFECT entries (alloc_index 972..1074) are
+ * written by the char-pass submit and reverted by the HUD pass, so the wire ships them
+ * STALE -> they point at BODY rectab entries -> the scale walker resolves the wrong
+ * (body) texture. MEASURED (live ASMTRACE 0x8C034BA4 + _live_fx6): the FRESH rectab DOES
+ * contain the effect textures in a CONTIGUOUS block (effect-band TCWs 0x89000..0x8bfff,
+ * entries 415..606), and the engine maps the contiguous effect index range 1:1 onto it.
+ * So the CORRECT entry for an effect alloc_index = effect_block_start + (idx - idx_base),
+ * where effect_block_start = the start of the contiguous effect-TCW rectab block (derived
+ * per frame) and idx_base = the MATCH-GLOBAL minimum scale-walker alloc_index (the first
+ * effect index, which maps to the first effect entry). VALIDATED OFFLINE on _live_fx6:
+ * idx 972..1074 -> entries 415..517 -> 103/103 reconstructed TCWs are real effect textures
+ * present in the 7200 mirror, 0 fabricated, across all super frames. This remap is applied
+ * to the scale walker''s submit ONLY (bit15 quads); body quads are untouched.
+ * ==========================================================================*/
+static u32 g_eff_block_start = 0;     /* per-frame: rectab entry of the effect-TCW block start */
+static u32 g_eff_idx_base    = 0xFFFFFFFFu;  /* MATCH-GLOBAL min scale-walker alloc_index */
+static int g_eff_remap_ready = 0;     /* effect block found this frame */
+
+/* Scan the resident rectab for the start of the contiguous effect-TCW (0x89000..0x8bfff)
+ * block. Returns the entry index, or 0 if none. Effect textures are the lightning/super
+ * sprites; the block is contiguous (engine allocates it in one run). */
+static u32 find_effect_block_start(Sh4Ctx *c){
+    u32 rectab = r32(c, 0x8C2DAD4C);
+    if(((rectab>>24)&0x7Fu) != 0x0Cu) return 0;
+    int run = 0, start = -1;
+    for(u32 e = 0; e < 2048; e++){
+        u32 tcw = r32(c, rectab + e*0x20 + 0x0C) & 0x1FFFFF;
+        if(tcw >= 0x89000u && tcw < 0x8C000u){ if(run==0) start=(int)e; run++; }
+        else { if(run >= 8) break; run=0; start=-1; }
+    }
+    return (run >= 8 && start >= 0) ? (u32)start : 0;
+}
 typedef struct { u32 pcw, isp, tsp, tcw; } PolyParam;
 void submit_params(Sh4Ctx *c, u32 rec_index, u32 palbank, PolyParam *out); /* gen_submit_params.c */
 
@@ -208,7 +244,8 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
      * per-record indices (was stale -> wrong TCW). */
     u32 _sel = (u32)(u16)( (u32)wc.ram[(node & 0x00FFFFFFu) + 0x144]
                          | ((u32)wc.ram[(node & 0x00FFFFFFu) + 0x145] << 8) );
-    if (_sel & 0x8000u) {
+    int _is_effect = (_sel & 0x8000u) != 0;
+    if (_is_effect) {
         walker_0348c8(&wc);              /* effect node: single scaled sprite per record */
     } else {
         /* SUPER-FREEZE CURSOR REPAIR for the bit15-CLEAR body walker (re_kb/50): on a freeze frame
@@ -258,9 +295,36 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
     /* the walker's per-tile alloc_index already = node+0xDC + arena_base + k (it read the
      * resident node+0xDC and *(0x8C1F9D94)); we use it directly — that IS the cursor-
      * derived base in action. (render_frame separately ASSERTS node+0xDC == prefix-sum.) */
+    /* EFFECT idxtab REMAP setup (re_kb/50): for a bit15 effect object, ensure the rectab
+     * effect-block start is found this frame and track the match-global min effect index.
+     * The remap then points each effect alloc_index at the contiguous effect rectab block
+     * (the stale wire idxtab points it at a body entry — the wrong texture). */
+    if(_is_effect){
+        if(!g_eff_remap_ready){ g_eff_block_start = find_effect_block_start(c); g_eff_remap_ready = (g_eff_block_start != 0); }
+        for(int k=0; k<ntiles; k++)
+            if(g_cap[k].alloc_index < g_eff_idx_base) g_eff_idx_base = g_cap[k].alloc_index;
+    }
+
     for(int k=0; k<ntiles && g_nscene<MAXSCENE; k++){
         PolyParam pp;
+        /* EFFECT remap: substitute the corrected rectab entry for this effect quad's stale
+         * idxtab mapping. entry = effect_block_start + (alloc_index - idx_base). Patch the
+         * ctx idxtab[alloc_index] so the shared submit_params resolves the right effect TCW;
+         * restore it after (idempotent, other objects may share the index). Body quads skip. */
+        u32 _save_e = 0, _idxa = 0; int _patched = 0;
+        if(_is_effect && g_eff_remap_ready && g_eff_idx_base != 0xFFFFFFFFu
+           && g_cap[k].alloc_index >= g_eff_idx_base){
+            u32 entry = g_eff_block_start + (g_cap[k].alloc_index - g_eff_idx_base);
+            u32 idxtab = r32(c, 0x8C2DAD3C);
+            if(((idxtab>>24)&0x7Fu) == 0x0Cu && entry < 0x10000u){
+                _idxa = idxtab + g_cap[k].alloc_index*2;
+                _save_e = r16u(c, _idxa);
+                w16(c, _idxa, entry);
+                _patched = 1;
+            }
+        }
         submit_params(c, g_cap[k].alloc_index, palbank, &pp);
+        if(_patched) w16(c, _idxa, _save_e);   /* restore the wire idxtab entry */
 
         /* tile m: the descriptor byte0 for this tile. Re-derive from the resident table
          * exactly as the walker did: idx into DESC_TABLE = node+0xDC + (tile's record).
@@ -397,6 +461,9 @@ void render_frame_satellite_hook(Sh4Ctx *c, u32 node){
  * the scene TA accumulator. Caller reads g_scene[0..g_nscene) and the per-object proof. */
 void render_frame_reset(void){
     g_nscene=0; g_body_count=0; g_sat_count=0; s_running_cursor=0;
+    /* EFFECT remap: per-frame state (block start re-found each frame; the idx_base is
+     * MATCH-GLOBAL — only ever decreases as new effect records appear — so NOT reset here). */
+    g_eff_block_start=0; g_eff_remap_ready=0;
 }
 int  render_frame_nscene(void){ return g_nscene; }
 const SceneQuad* render_frame_scene(void){ return g_scene; }
