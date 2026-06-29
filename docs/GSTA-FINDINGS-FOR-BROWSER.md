@@ -386,3 +386,42 @@ SAME read-set; it will exhibit the identical super over-tiling once a super rend
 comparison pinned the mechanism. marvelous2 supplied the inner-loop formula (`count=u8(tiledesc[+0xDC])+1`).
 Oracle/ASMTRACE are now usable (a super renders live) and are the right tool to confirm the engine-side
 `+0xDC` write timing for the server fix. A hand-rolled validator would have been wrong again (re_kb/44).
+
+---
+
+## ★ SUPER/PROJECTILE EFFECT garble — FULLY FIXED [2026-06-29, re_kb/50 CONFIRMED]
+The Lightning Storm / super effect garble (phantom tiled bodies + wrong-texture effects) is
+fixed end-to-end in `render_frame` (the path the browser render_frame-mode uses too). THREE
+root causes, all in the shared `tools/render-replica-poc/render_frame.c` + the read-set:
+
+1. **bit15 SCALE-walker dispatch.** The engine (`loc_8c034bea` & mask `0x8000`) routes effect
+   nodes (sel bit15 set, e.g. Lightning bolts 0x8006..0x801d) to the SCALE walker
+   `loc_8c0348c8` (ONE scaled sprite per cell record), NOT the tiling body walker. render_frame
+   was tiling them ~34x → the phantom bodies. Fix: `gen_walker_scale.py`/`.c` + the dispatch in
+   `render_object_full_ex` (sel & 0x8000 → `walker_0348c8`).
+2. **Per-frame effect TEMPLATE (efxtmpl).** The scale walker's per-record alloc-index reads a
+   per-character effect display-list template (`node+0x180` = 0x0C565000-family, 7 char arenas
+   of 0x3000) the engine rebuilds each frame; the wire shipped it ONCE → stale index. Fix: ship
+   the 7 efxtmpl arenas per-frame (`maplecast_replica_live.cpp`, additive read-set). **Browser:
+   the replica-live wire now carries these; no browser change needed beyond using the rebuilt wire.**
+3. **idxtab effect-range remap (client-side).** The idxtab effect entries (alloc_index 972..1074)
+   are CHARACTER-PASS-TRANSIENT — the engine writes them during the char-pass submit and reverts
+   them by the HUD pass, so the wire ships them stale (pointing at BODY rectab entries → wrong
+   texture). The serverPublish snapshot was TOO LATE (runs after both render walks). FIX is
+   CLIENT-side in `render_frame.c`: the FRESH rectab holds the effect textures in a contiguous
+   block (effect-band TCWs 0x89000..0x8bfff), and the engine maps the effect index range 1:1 onto
+   it, so the correct entry = `effect_block_start + (alloc_index - idx_base)` (both derived from
+   the wire: a rectab effect-band scan + the match-global min scale-walker alloc_index). Applied to
+   the SCALE walker's submit only (bit15 quads); body quads untouched.
+
+**Validation (vs the 7200 mirror, `_live_fx6`):** over-tile GONE (effect TCWs 1x each), effect
+textures RIGHT (103/103 reconstructed effect TCWs are real engine textures present in the mirror,
+0 fabricated, across all super frames), GSTA quad count tracks the mirror, NO normal-frame
+regression (the remap is a strict no-op when a frame has no bit15 nodes). The residual ~0.89
+Jaccard is frame-skew between the two unsynchronized capture streams, not a render bug.
+
+**Browser applicability:** all three fixes live in the shared `render_frame.c` + `gen_walker_scale.c`
++ the replica-live read-set, which the browser render_frame-mode (`replay.html?bodymode=render_frame`)
+uses. The browser inherits the fix once it rebuilds `web/render-replica/render_frame.{wasm,mjs}`
+(done) and runs against the efxtmpl-carrying wire. The EMITTER path (if still default) does NOT
+have it — another reason to switch the browser default to render_frame (see the top lever).
