@@ -34,3 +34,8 @@ RELATE finding:gsta_body_part_transposition->cites->source:gsta_render_gaps_ab;
 RELATE finding:gsta_hud_bar_magenta_correct->cites->source:gsta_render_gaps_ab;
 RELATE finding:gsta_hud_meter_open->cites->source:gsta_render_gaps_ab;
 RELATE finding:gsta_motion_blocks_body_idxtab->about->finding:gsta_super_effect_overtile;
+
+-- 2026-06-29 — ISSUE 1a FIXED (cull the never-engine 0x85xxx blocks).
+UPSERT finding:gsta_motion_blocks_body_idxtab SET
+  statement='FIXED 2026-06-29. The motion BLOCKS = render_frame body/satellite quads resolving to the 0x85xxx TCW band, which the engine NEVER uses (MEASURED 0/1077 mirror frames). The 15 0x85xxx quads at the super peak are body-tagged (is_effect=0), recidx 169-183, from satellite parts the engine GATES OFF at the super peak (the mirror super-peak carries only effect bands 88/89/8a, no 0x82-85 satellite body parts). Their idxtab entry is char-pass-transient and the correct entry is unrecoverable from the stale wire AND the engine draws nothing there, so the faithful action is to CULL them. FIX (render_frame.c render_frame_cull_85xxx): degenerate any quad whose resolved TCW is in 0x85xxx (collapse B=C=D=A -> zero-area -> no pixels). VALIDATED vs the 7200 mirror (_live_fx6): super frames now emit 0 VISIBLE 0x85xxx quads (the blocks are gone), 0 fabricated; NORMAL frames untouched (0 0x85xxx quads on fi=50/100/200/600/700 -> the cull is a strict no-op; rare: only 3/360 sampled frames had any 0x85xxx, all super). Effect post-pass intact (89/8a bands correct). Web render_frame.wasm + native build/flycast.exe rebuilt. re_kb/50 sibling.',
+  status='confirmed', confidence='high', date='2026-06-29';

@@ -133,6 +133,7 @@ EXPORT uint32_t render_frame_quad_gfx1s(uint32_t* out_gfx1, uint32_t cap){
     return w;
 }
 
+
 /* PER-QUAD INTRA-PART TILE (col,row) — wide-part carve key (re_kb
  * finding:wide_part_tile_storage_order_v2 + finding:per_side_facing_fix). out_cr[2*q]=col
  * (FACING-INDEPENDENT STORAGE column), out_cr[2*q+1]=row. col = rank of the per-tile screen

@@ -543,8 +543,30 @@ static void render_frame_fix_effect_tcws(Sh4Ctx *c){
     }
 }
 
+/* CULL PROVABLY-WRONG 0x85xxx QUADS (re_kb/51 — the motion BLOCKS). The 0x85xxx TCW band is
+ * NEVER used by the engine (MEASURED: 0 quads across all 1077 mirror frames of _live_fx6),
+ * yet during a super render_frame emits ~7-15 BODY/satellite quads that resolve to 0x85xxx —
+ * the gray/white/pink floating BLOCKS the user sees. Their idxtab entry is char-pass-transient
+ * (the body satellite parts the engine GATES OFF at the super peak; the mirror super-peak has
+ * only effect bands, no 0x82-85 satellite body parts). We cannot reconstruct a "correct" entry
+ * (the stale idxtab lost it and the engine draws nothing there), so DEGENERATE these quads to a
+ * zero-area triangle (collapse all 3 verts to A) so they emit no pixels — matching the engine,
+ * which draws nothing in 0x85xxx. Provably safe: 0x85xxx is never-engine, so culling can only
+ * remove garbage. Rare (3/360 frames sampled, super-only); normal frames untouched. */
+static void render_frame_cull_85xxx(void){
+    for(int i=0;i<g_nscene;i++){
+        u32 band = g_scene[i].tcw & 0x1FFFFFu;
+        if(band >= 0x85000u && band < 0x86000u){
+            /* collapse the quad: B=C=D=A so the rasterizer emits nothing. */
+            g_scene[i].Bx = g_scene[i].Cx = g_scene[i].Dx = g_scene[i].Ax;
+            g_scene[i].By = g_scene[i].Cy = g_scene[i].Dy = g_scene[i].Ay;
+        }
+    }
+}
+
 void render_frame(Sh4Ctx *c){
     render_frame_reset();
     render_sprites_0308c2(c);   /* the transpiled loc_8c0308c2; calls render_object_full */
     render_frame_fix_effect_tcws(c);   /* re-resolve effect quad TCWs (per-frame correct) */
+    render_frame_cull_85xxx();          /* drop the never-engine 0x85xxx blocks (re_kb/51) */
 }
