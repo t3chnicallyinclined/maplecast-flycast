@@ -25,8 +25,38 @@ RELATE finding:gsta_super_effect_overtile->cites->routine:loc_8c033b0a;
 -- PER FRAME by loc_8c129728, and node+0xDC is re-seeded from 0x8C1F9D98 each render pass (reset by
 -- loc_8c0337bc). The super-freeze stale-0 read is exactly a capture BEFORE that per-frame rebuild
 -- populated the effect nodes. So the server must snapshot objpool+0xDC / tiledesc AFTER loc_8c129728.
+-- ============================================================================
+-- 2026-06-29 CORRECTION: the "capture on the CHARACTER pass" fix (a4ddf453f) was WRONG
+-- and REGRESSED the 7212 stream to black (0 FRMx). Reverted fc45c5532. MEASURED root
+-- cause of the regression (TRACE-GATE on the live headless): at the rend_start_render
+-- hook (mc_oracle_charPassCapture, where onRenderFrame lives) the ONLY TA pass visible
+-- is the HUD/composite pass (op=573, realBody=0). The CHARACTER geometry (op=1145,
+-- realBody~36) does NOT pass through this hook in a form the realBody discriminator sees
+-- — it reaches serverPublish (maplecast_mirror.cpp:1804 mc_oracle_frameFlush) instead.
+-- So gating onRenderFrame on realBody>=N at this hook NEVER fires -> prefix-only stream.
+-- The a4ddf453f "live verification" only passed because MAPLECAST_VERIFY_DC forced the
+-- block to run; the real hasClients() path never did.
+--
+-- CORRECTED UNDERSTANDING (live VERIFY-DC, unconditional capture, current binary):
+-- at mc_oracle_charPassCapture in NORMAL play the objpool node+0xDC IS VALID for the
+-- effect/satellite nodes (nonZeroDC=4/5 every frame; sample cat=3/cat=4 nodes dc=49..76).
+-- So the capture POINT is fine for normal frames. The stale node+0xDC=0 is SPECIFIC to
+-- the SUPER-FREEZE (hitstop) frames seen in _live_fx3, where the engine does not re-run
+-- the slot-walk geometry-prep so newly-spawned lightning effect nodes never get +0xDC
+-- written (=0 initial). THEREFORE the fix is NOT a server capture-timing change at this
+-- hook — it must be CLIENT-SIDE in render_frame: when the resident node+0xDC is stale-0
+-- on a freeze frame, the client must use its OWN per-object prefix-sum cursor for the
+-- tiledesc index. OPEN: the naive client prefix-sum hit 575 not 104 offline (the
+-- circular-cursor trap, re_kb/44) — solve the cursor reconstruction (advance by actual
+-- emitted TILE count, not record count) and validate vs the mirror (target 104). Needs
+-- a live super capture (_live_fx4) to confirm the exact freeze-frame stale state first.
 RELATE finding:gsta_super_effect_overtile->cites->source:gsta_fx3_ab_measurement;
 RELATE finding:gsta_super_effect_overtile->cites->routine:loc_8c0344d4;
 RELATE finding:gsta_super_effect_overtile->about->finding:descriptor_table_runtime_built;
 RELATE finding:gsta_super_effect_overtile->about->finding:inner_tile_loop_descriptor;
 RELATE finding:gsta_super_effect_overtile->about->finding:gsta_effect_decode_skip_proven;
+
+-- Supersede the now-wrong "FIXED via character-pass gate" status with the corrected state.
+UPSERT finding:gsta_super_effect_overtile SET
+  statement='REOPENED 2026-06-29 (the character-pass capture-gate fix was WRONG + reverted). The super/projectile garble = slot-walk effect nodes OVER-TILING because on SUPER-FREEZE frames the GSTA-captured per-object tile-descriptor cursor node+0xDC reads 0 (hitstop: the SH4 does not re-run the slot-walk geometry-prep loc_8c033b0a that writes node+0xDC = *(0x8C1F9D98), so newly-spawned lightning effect nodes keep their 0 init), making every effect record mis-index the stale tiledesc[0..7]=8-tiles -> ~29 quads/TCW (A/B: GSTA 677 vs engine 104). ATTEMPTED FIX a4ddf453f (gate the replica capture on the CHARACTER TA pass at rend_start_render) was WRONG: that hook only ever sees the HUD pass (op=573/realBody=0; the character geometry op=1145 reaches serverPublish, not this hook), so the gate never fired -> 7212 black (0 FRMx). REVERTED fc45c5532 -> stream restored (60 FRMx/s MEASURED). CORRECTED: at this hook node+0xDC is VALID in normal play (live VERIFY-DC: effect nodes dc=49..76, nonZeroDC=4/5), so the capture point is fine; the staleness is ONLY on freeze frames. THE FIX BELONGS CLIENT-SIDE in render_frame: when the resident node+0xDC is stale-0 on a freeze frame, use the client''s OWN per-object prefix-sum cursor (advance by emitted TILE count) for the tiledesc index; validate vs the mirror (target GSTA quads == 104, was 677). The naive client cursor hit 575 offline (circular-cursor trap, re_kb/44) — unsolved. NEEDS a live Lightning Storm capture (_live_fx4) to confirm the freeze-frame stale state and to gate the client fix. BEST TOOL = A/B TA diff (7212 vs 7200, same super frame) + VERIFY-DC for the live +0xDC state. Branch feat/render-replica-live.',
+  status='open', confidence='high', date='2026-06-29';
