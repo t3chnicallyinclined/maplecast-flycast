@@ -31,6 +31,7 @@
 #include "gen_render_satellite.c"
 #include "gen_transform_obj.c"
 #include "gen_walker.c"
+#include "gen_walker_scale.c"   /* bit15 SCALE walker (loc_8c0348c8) — effect-node dispatch (re_kb/50) */
 /* render_frame.c already typedef'd PolyParam — suppress the identical one in
  * gen_submit_params.c so the single amalgamation TU has no C2371 redefinition. */
 #define GSTA_POLYPARAM_DEFINED
