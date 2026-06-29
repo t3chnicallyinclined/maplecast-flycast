@@ -3467,57 +3467,49 @@ void mc_oracle_charPassCapture(void* ctxv)
 	// CHARACTER pass (the one whose TA actually carries the body quads), where node+0xDC /
 	// tiledesc reflect the bodies the wire renders. Same realBody discriminator CHARQ uses
 	// (proven: character pass has body-region sprite quads y in [200,460]; HUD pass has none).
-	// Run the discrimination only when a replica client is actually listening (so the per-pass
-	// ta_parse is OFF on idle prod), OR when the VERIFY diagnostic is armed (so we can confirm
-	// the +0xDC pass timing on the headless before any client connects).
-	const bool replicaWantsCapture = maplecast_replica_live::hasClients();
-	const bool verifyDc = (getenv("MAPLECAST_VERIFY_DC") != nullptr);
-	if ((replicaWantsCapture || verifyDc) && ctxv != nullptr &&
+	// CAPTURE-TIMING FIX (re_kb/50, super-freeze over-tile). The objpool per-object tile-
+	// descriptor cursor node+0xDC (writer loc_8c033b0a = *(0x8C1F9D98)) and the tiledesc table
+	// 0x8C1F9F9C are RUNTIME-REBUILT during the SH4 slot-walk each frame, then the engine emits
+	// MULTIPLE TA passes per video frame through rend_start_render (THIS hook). MEASURED at this
+	// hook (TRACE-GATE / [CHARPASS]): the pass visible here is the HUD/composite pass (op=573,
+	// realBody=0) — the CHARACTER geometry (op=1145, realBody~36) is the one that survives to
+	// serverPublish, NOT what this hook sees. So an attempt to gate the capture on the TA pass
+	// SHAPE at this hook is wrong (it never matches) and STALLS the wire — reverted. onRenderFrame
+	// itself stays cheap (first-line _clientCount==0 / in-match early-returns). The actual super-
+	// freeze fix is done INSIDE the read-set (maplecast_replica_live.cpp captureFrame): the wire
+	// now carries the per-object node+0xDC EXACTLY as the slot-walk left it (the objpool window
+	// already ships +0xDC); the client uses its OWN per-object prefix-sum cursor when the resident
+	// +0xDC is stale-zero on a freeze frame — see captureFrame / the render_frame s_running_cursor.
+	maplecast_replica_live::onRenderFrame(ctxv);
+
+	// OPTIONAL VERIFY (gated MAPLECAST_VERIFY_DC, READ-ONLY, stderr, throttled): dump per-pass
+	// node+0xDC across all 16 slot layers so the +0xDC validity-at-capture can be measured live
+	// (used to root-cause the super over-tile). Independent of the capture path above.
+	if (getenv("MAPLECAST_VERIFY_DC") != nullptr && ctxv != nullptr &&
 	    addrspace::read8(0x8C289624) != 0) {
-		TA_context* rctx = (TA_context*)ctxv;
-		ta_parse(rctx, true);                   // read-only: builds rctx->rend (norend's call)
-		PassStats rps; memset(&rps, 0, sizeof rps);
-		collectScreenQuads(rctx->rend, &rps);
-		bool isCharPass = (rps.realBody >= CHARQ_REALBODY_MIN);
-
-		// VERIFY (gated MAPLECAST_VERIFY_DC=1, one-shot per ~30 passes, stderr only): prove
-		// WHICH pass carries a non-zero node+0xDC for the layer-0 effect nodes, so the
-		// character-pass gate is confirmed by measurement on the live headless, not on faith.
-		if (verifyDc) {
-			static unsigned long s_vN = 0;
-			if ((s_vN++ % 15) == 0) {
-				// Scan ALL 16 slot-walk layers (effect/body nodes land in any layer, not just 0).
-				// Report per-node cat + node+0xDC so we can SEE whether the CHARACTER pass carries a
-				// distinct non-zero +0xDC for the effect nodes (the fix's premise) vs the HUD pass.
-				int nNodes = 0, nzdc = 0, nDcStale = 0, nEffect = 0;
-				u32 sampNode = 0, sampDc = 0; int sampCat = 0; bool sampSet = false;
-				for (int L = 0; L < 16; L++) {
-					u32 cnt = addrspace::read8(0x8C2895E0 + L);
-					if (cnt == 0 || cnt > 0x60) continue;
-					u32 ptrBase = 0x8C287DE0 + L * 0x180;
-					for (u32 i = 0; i < cnt; i++) {
-						u32 node = addrspace::read32(ptrBase + i * 4);
-						if (((node >> 24) & 0x7Fu) != 0x0Cu) continue;
-						int cat = (int8_t)addrspace::read8(node + 0x3);
-						u32 dc  = addrspace::read16(node + 0xDC);
-						nNodes++;
-						if (dc != 0) nzdc++; else nDcStale++;
-						if (cat >= 1 && cat <= 4) {            // satellite/effect node
-							nEffect++;
-							if (!sampSet) { sampNode = node; sampDc = dc; sampCat = cat; sampSet = true; }
-						}
-					}
+		static unsigned long s_vN = 0;
+		if ((s_vN++ % 15) == 0) {
+			int nNodes = 0, nzdc = 0, nDcStale = 0, nEffect = 0;
+			u32 sampNode = 0, sampDc = 0; int sampCat = 0; bool sampSet = false;
+			for (int L = 0; L < 16; L++) {
+				u32 cnt = addrspace::read8(0x8C2895E0 + L);
+				if (cnt == 0 || cnt > 0x60) continue;
+				u32 ptrBase = 0x8C287DE0 + L * 0x180;
+				for (u32 i = 0; i < cnt; i++) {
+					u32 node = addrspace::read32(ptrBase + i * 4);
+					if (((node >> 24) & 0x7Fu) != 0x0Cu) continue;
+					int cat = (int8_t)addrspace::read8(node + 0x3);
+					u32 dc  = addrspace::read16(node + 0xDC);
+					nNodes++;
+					if (dc != 0) nzdc++; else nDcStale++;
+					if (cat >= 1 && cat <= 4) { nEffect++; if (!sampSet) { sampNode = node; sampDc = dc; sampCat = cat; sampSet = true; } }
 				}
-				fprintf(stderr, "[VERIFY-DC] vframe=%u pass=%-9s realBody=%d nodes=%d effect=%d "
-				                "nonZeroDC=%d zeroDC=%d cursor9D98=%u sampEffNode=%08x cat=%d dc=%u\n",
-				        addrspace::read32(0x8C3496B0), isCharPass ? "CHARACTER" : "hud",
-				        rps.realBody, nNodes, nEffect, nzdc, nDcStale,
-				        addrspace::read32(0x8C1F9D98), sampNode, sampCat, sampDc);
 			}
+			fprintf(stderr, "[VERIFY-DC] vframe=%u nodes=%d effect=%d nonZeroDC=%d zeroDC=%d "
+			                "cursor9D98=%u sampEffNode=%08x cat=%d dc=%u\n",
+			        addrspace::read32(0x8C3496B0), nNodes, nEffect, nzdc, nDcStale,
+			        addrspace::read32(0x8C1F9D98), sampNode, sampCat, sampDc);
 		}
-
-		if (isCharPass)
-			maplecast_replica_live::onRenderFrame(ctxv);
 	}
 
 	// ONE-SHOT full-RAM dump for the render-replica Option-C PoC (gated MAPLECAST_DUMP_RAM,
