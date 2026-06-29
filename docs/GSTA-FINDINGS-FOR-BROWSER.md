@@ -333,3 +333,56 @@ effect on screen (the same blocker as 2026-06-20) — there was nothing live to 
 have been the worst tool: it shows nothing when no effect renders. The capture's RAM bytes (cheap,
 offline, deterministic) beat the live probe whenever the phenomenon is "what is resident where," which is
 exactly the effect-decode question.
+
+---
+
+## ★ SUPER / PROJECTILE GARBLE = SLOT-WALK EFFECT-NODE OVER-TILING  [2026-06-29, CONFIRMED-BY-MEASUREMENT, re_kb/50]
+**This SUPERSEDES the entire "Effect-Poly decode" line of work above.** A live Lightning Storm super was
+captured (`_live_fx3.gsta.mcrr` + `_live_fx3.mirror.zcst`) WITH active render nodes. The garble
+(~6-8 tiled copies of Storm's full body + floating brown fists, drawn over the HUD) is **NOT** an
+Effect-Poly (`0x0CED0000`) problem — the effect-node scanner found **ZERO** Effect-Poly nodes across the
+whole super. It is the **slot-walk satellite effect nodes OVER-TILING**.
+
+### The A/B arbiter (the tool that solved it)
+**A/B TA diff: GSTA reconstructed-TA (7212, render_frame) vs MIRROR real-TA (7200, flycast's own render =
+ground truth), same super frame (Jaccard 0.990 = identical frame).** Measured:
+- **MIRROR (engine): 104 quads, 104 distinct TCWs** = exactly **1 quad per effect TCW** (each lightning
+  bolt is its own texture).
+- **GSTA (render_frame): 677 quads, ~29 per effect TCW = +573 excess**, concentrated on the contiguous
+  lightning effect TCWs (`0x88a80, 0x88ac0, 0x88b00, ...` 0x40 apart). GSTA body count explodes 5→34.
+
+### Root cause (measured, normal-vs-super comparison `_desc_probe.mjs`)
+The engine body walker `loc_8c0344d4` computes its inner per-record TILE COUNT as
+`count = u8( tiledesc[ *(node+0xDC) + rec ].byte1 ) + 1`, where `tiledesc = 0x8C1F9F9C` and
+`node+0xDC` is the per-object **prefix-sum cursor** the engine deposits during the geometry-prep pass
+`loc_8c033b0a`.
+- **NORMAL frame:** `node+0xDC` is a distinct non-zero per-object value (60, 53, …) → indexes the object's
+  real descriptors (`[8,3,0,3]`=4 tiles, `[16,0,0,1]`=1 tile). Correct.
+- **SUPER-FREEZE frame:** `node+0xDC` reads **0 for ALL nodes**, so every effect node mis-indexes
+  `tiledesc[0..7]` = a stale `[8,7,k,1]` (count 8) → **8 tiles per record × ~28 effect nodes = the
+  ~29x explosion**. The engine itself renders fine (its own pass uses consistent values); the **GSTA
+  read-set snapshots `node+0xDC` and `tiledesc` STALE during the super freeze** (the engine skips/defers
+  the +0xDC-writing pass during hitstop, and the capture grabs the objpool/tiledesc before they're
+  written for these nodes).
+
+### All three reported symptoms are ONE bug
+The "effect-over-HUD" overlap and the "HUD looks like it's missing layers" are **consequences** of the
++573 garbage translucent quads blanketing the whole screen (incl. the HUD band), not independent z-order
+or HUD-layer bugs. The HUD itself (HUDQ tail = the engine's real surviving-TA HUD primitives) is
+pixel-faithful; it's just buried under garbage quads. Fix the over-tiling → HUD clears.
+
+### Fix direction (server-side; needs a fresh live A/B to validate — do NOT ship blind)
+The fault is in the **GSTA read-set capture timing/completeness** (`maplecast_replica_live.cpp`): the
+objpool `node+0xDC` and the `tiledesc` scratch (`0x8C1F9F9C`) must be captured AFTER the engine writes
+them this frame, OR `render_frame` must use its own computed `s_running_cursor` prefix-sum as the tiledesc
+base when the resident `node+0xDC` is stale/zero (beware the circular-cursor trap — validate against the
+mirror). Acceptance gate: **GSTA per-frame quad count == mirror per-frame quad count** on the super
+(target 104, currently 677). **Browser note:** the browser render_frame path has the SAME walker and the
+SAME read-set; it will exhibit the identical super over-tiling once a super renders. Same fix applies.
+
+### Which tool was best for THIS job
+**The A/B TA diff (GSTA 7212 vs mirror real-TA 7200, same frame) was decisive** — it produced the exact
++573 over-tile number and the exact offending TCWs, then the normal-vs-super `node+0xDC`/`tiledesc`
+comparison pinned the mechanism. marvelous2 supplied the inner-loop formula (`count=u8(tiledesc[+0xDC])+1`).
+Oracle/ASMTRACE are now usable (a super renders live) and are the right tool to confirm the engine-side
+`+0xDC` write timing for the server fix. A hand-rolled validator would have been wrong again (re_kb/44).
