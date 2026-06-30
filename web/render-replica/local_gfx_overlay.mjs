@@ -1,12 +1,23 @@
 // local_gfx_overlay.mjs — Phase A LOCAL-ROM GFX overlay (render-replica).
 //
-// THESIS: the server still ships each body's GFX1/GFX2 (possibly STALE or TRUNCATED —
-// the persistent scramble). This module OVERRIDES that art with the COMPLETE disc GFX
-// fetched from web/render-replica/gfx/PL{NN}_gfx{1,2}.bin (NN = upper-hex char_id == PLxx
-// index), written into the RAM image at the EXACT addresses the walker reads:
+// THESIS: the server ships each body's GFX1 (LZSS pixel sheet) STATIC-ONCE — it can be STALE
+// or TRUNCATED. This module OVERRIDES the GFX1 PIXELS ONLY with the COMPLETE disc GFX1 fetched
+// from web/render-replica/gfx/PL{NN}_gfx1.bin (NN = upper-hex char_id == PLxx index), written
+// into the RAM image at the EXACT address the pixel decoder reads:
 //     node+0x15C -> GFX1 (pixel/LZSS sheet, body_decoder reads here)
-//     node+0x160 -> GFX2 (cell-record sheet, the walker reads here)
-// So render_frame's walker + body_decoder read PERFECT, never-truncated art = no scramble.
+// So body_decoder reads PERFECT, never-truncated PIXELS.
+//
+// *** GFX2 IS DELIBERATELY *NOT* OVERLAID *** (re_kb 32
+// finding:replica_storm_scramble_is_static_gfx2_self_modify_plus_torn_capture). The GFX2
+// cell-record DISPATCH TABLE (node+0x160) SELF-MODIFIES at runtime: the engine rewrites
+// GFX2[(sid&0x7FFF)*4] per animation sub-frame to point at the CURRENT pose's records
+// (Storm body sid 0x42: disc default 0x1b04 -> engine-live 0x1b44 at region byte 0x108).
+// The DISC GFX2 holds the STATIC default (0x1b04). Overlaying it would REVERT the engine's
+// runtime self-modified dispatch entry back to the default -> the walker (loc_8c0344d4:
+// r11 = GFX2 + GFX2[(sid&0x7FFF)*4]) reads the WRONG cell records -> the Storm scramble.
+// The server now ships the FRESH (self-modified) GFX2 dispatch table on-change as a dynamic
+// tail (gfxSig dense dispatch-head fold). The walker MUST read the server's fresh GFX2 — so
+// we do NOT touch node+0x160 here.
 //
 // GROUND TRUTH (CONFIRMED 2026-06-13, tools/extract_replica_gfx.py --verify-ram vs
 // _ryu_capture/mc_ram_dump.bin): the disc segments are BYTE-IDENTICAL to RAM at node+0x15C/
@@ -109,11 +120,13 @@ export function applyLocalGfx(ram, log) {
         if (done.has(cid)) continue;                  // already overlaid this char this frame
         done.add(cid);
 
-        // OVERRIDE: write the COMPLETE disc GFX over whatever the server shipped/seeded, at the
-        // exact base the walker/decoder read from. (gfx1base & 0xFFFFFF) / (gfx2base & 0xFFFFFF).
-        const o1 = g1b & RAM_MASK, o2 = g2b & RAM_MASK;
+        // OVERRIDE GFX1 (PIXELS) ONLY — write the COMPLETE disc GFX1 over whatever the server
+        // shipped/seeded, at the exact base body_decoder reads (gfx1base & 0xFFFFFF).
+        // GFX2 (node+0x160) is INTENTIONALLY NOT overlaid: the disc default would revert the
+        // engine's runtime self-modified dispatch entry (re_kb 32, Storm sid 0x42 0x1b04 vs
+        // engine-live 0x1b44). The walker reads the server's FRESH GFX2 instead.
+        const o1 = g1b & RAM_MASK;
         if (o1 + ent.gfx1.length <= ram.length) ram.set(ent.gfx1, o1);
-        if (o2 + ent.gfx2.length <= ram.length) ram.set(ent.gfx2, o2);
         overlaid++;
     }
     return { overlaid, pending };

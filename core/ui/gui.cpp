@@ -1789,8 +1789,14 @@ void gui_displayMirrorDebug()
 	// All mirror-client overlays render here, inside NewFrame/Render.
 	// gui_competitive_hud::draw removed -- telemetry moved to
 	// web/telemetry.html, no in-game HUD path.
-	gui_maplecast_settings::draw();
-	gui_game_overlay::draw();
+	// The gear ("S") settings button + the on-screen input panel are hidden
+	// by default for a clean render view. Set MAPLECAST_SHOW_OVERLAYS=1 to
+	// bring them back (no rebuild needed -- env-gated at runtime).
+	static const bool _showOverlays = (std::getenv("MAPLECAST_SHOW_OVERLAYS") != nullptr);
+	if (_showOverlays) {
+		gui_maplecast_settings::draw();
+		gui_game_overlay::draw();
+	}
 	gui_recording_indicator::draw();
 
 	ImGui::Render();

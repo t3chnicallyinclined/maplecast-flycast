@@ -260,6 +260,37 @@ size_t gstaStageEmitTA(std::vector<uint8_t>& out, const float* M1, const float* 
 
     for (auto& m : g_stage.meshes) {
         if (m.verts.empty()) continue;
+
+        // ---- HUD-OVERLAY MESH CULL (bars-don't-deplete root cause) -------------------
+        // The engine-TA stage bake (bake_stage_from_ta.py) ingested a HUD-active in-match
+        // engine_ta.bin and kept EVERY opaque (ListType==0) textured group with NO screen-band
+        // or HUD-TCW exclusion. So STG0B_ta.json carries the entire MVC2 HUD overlay (life bars,
+        // super-meter, name plates, tag/round bars) baked in as STATIC screen-space meshes —
+        // frozen at the capture frame's HP/meter. They render every frame at their baked screen
+        // pos (non-world-authored -> not reprojected), so the on-screen bars NEVER deplete and
+        // SURVIVE both MAPLECAST_HUD_DIAG=2 (they aren't HUDQ) and =3 (they're the STAGE, which =3
+        // keeps). This was why every gstaBuildHudTA reshape did nothing: the static stage HUD drew
+        // on top of the reshaped HUDQ bars. CULL them by TCW band so the reshaped HUDQ HUD becomes
+        // the only HUD source.
+        //
+        // BANDS (MEASURED on STG0B_ta.json, tcw & 0x1FFFFF; 68/72 meshes are HUD, 4 real stage):
+        //   0x80000           — life-bar FILL quads (w~152 h~8, the team-color body; x12)
+        //   0x9be00           — bar backing/frame + bottom tag/round bars (x44, top+bottom strips)
+        //   0x9de00..0x9e900  — super-meter + per-slot bars (one band per element; x14)
+        // The REAL stage is ONLY 0x9fc00 (floor/skybox x3) + 0xa0000 (deck x1) — NEVER in the HUD
+        // set, so this filter cannot touch real geometry. (Authoritative permanent fix is to strip
+        // these in bake_stage_from_ta.py + re-bake; this client guard makes a clean bake unnecessary
+        // and protects against a future HUD-polluted bake.)
+        {
+            const uint32_t band = m.tcw & 0x1FFFFFu;
+            const bool isHudBand =
+                (band == 0x80000u) ||                       // life-bar fill
+                (band == 0x9be00u) ||                       // bar frame/backing + bottom bars
+                (band >= 0x9de00u && band <= 0x9e900u);     // super-meter + per-slot bars
+            if (isHudBand) continue;                        // static HUD overlay — drop; HUDQ draws the live HUD
+        }
+        // -----------------------------------------------------------------------------
+
         const size_t nTris = m.verts.size() / 3;
 
         // PCW: keep the engine ParaType(4)/ListType(0)/depth bits, but FORCE obj_ctrl to

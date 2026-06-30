@@ -1614,27 +1614,31 @@ function populateHudStateFromRAM() {
 }
 function renderHudPass() {
     if (!ram) return;
-    // ENGINE HUD (the real thing): when the server ships the HUDQ tail (hudQuads.length>0), the
-    // bars/meters/timer/combo/portraits/stars/names ALL come from the engine's own quads, drawn
-    // pixel-faithfully through pvr2. The hand-coded 2D reconstruction is then FULLY SUPPRESSED —
-    // it is the source of the doubling. No client HUD layout code runs in this branch.
-    if (renderHudQuads()) {
-        // clear any stale 2D overlay so the deleted reconstruction can't ghost under the engine HUD
-        if (_hudCanvas) ensureHudOverlay().clearRect(0, 0, _hudCanvas.width, _hudCanvas.height);
-        return;
-    }
-    // ── FALLBACK (nHud==0 / older server): the legacy hand-coded reconstruction. Kept ONLY for a
-    //    safe rollout before the server HUDQ tail is live; remove once the engine HUD is validated.
+    // ── RECONSTRUCT-FROM-STATE HUD (architecture decision, re_kb/54). The HUD bars/meters/
+    //    timer/combo/portraits/names are deterministic UI computed from state ALREADY in the
+    //    read-set (per-slot health +0x420, red_health +0x424, active +0x000, char_id +0x001;
+    //    meter_fill 0x8C289646/648, lvl 0x8C28964A/64B, timer 0x630, combo 0x670). drawHUD +
+    //    renderPlatesOnly reconstruct ALL of it at ZERO added bandwidth.
+    //
+    //    The engine HUDQ pass-through (renderHudQuads, MAPLECAST_HUD_TA ~30KB/frame) is DROPPED:
+    //    it (a) costs bandwidth and (b) was the issue-3 fill-static bug — the captured HUDQ
+    //    life-bar quad does NOT track health (MEASURED x[439..591] constant as p2hp 144->55,
+    //    _gsta_hudq_fill.mjs), whereas the engine's REAL pt4 bar poly (tcw=0x9be00) shrinks
+    //    x[438.8..592.5]->[438.8..440.5] as health drops, and drawHUD's _lifeBar recomputes
+    //    hpFrac=health/144 EVERY frame and tracks correctly. re_kb finding:hud_fill_poly_located
+    //    + overlays_are_reconstructable_zero_bw. With HUDQ off, MAPLECAST_HUD_TA is droppable.
+    //    (Win-stars stay UNDRAWN — the per-side win field is a missing wire field;
+    //    [hud:no-bogus-stars] empty beats fabricated.)
     populateHudStateFromRAM();
     const ctx = ensureHudOverlay();                   // lazy overlay-canvas create (once)
     try {
         // ONE HUD: the proven cockpit drawHUD draws a SINGLE life bar per side +
-        // meters/timer/combo. The 3-bar tag-stack overlay (renderTagLifeBars) is REMOVED —
-        // three stacked bars per side read as a doubled HUD; real MVC2 shows one bar/side.
-        SPRITECLIENT._suppressLifeBars = false;        // drawHUD owns the single life bars again
-        SPRITECLIENT.drawHUD(ctx);                     // clear + single life bars + meters/timer/combo
-        SPRITECLIENT.drawHudReal(ctx);                 // textured HUDQ quads if streamed (no-op otherwise)
-        hud.renderPlatesOnly(ctx, rdU8, CHAR_SLOTS);   // JUST corner portraits + names (no bars -> no double)
+        // meters/timer/combo, all state-driven (health/red_health/meter_fill). The 3-bar
+        // tag-stack overlay (renderTagLifeBars) stays REMOVED — three stacked bars per side
+        // read as a doubled HUD; real MVC2 shows one bar/side.
+        SPRITECLIENT._suppressLifeBars = false;        // drawHUD owns the single life bars
+        SPRITECLIENT.drawHUD(ctx);                     // clear + life bars + meters/timer/combo (state)
+        hud.renderPlatesOnly(ctx, rdU8, CHAR_SLOTS);   // corner portraits + names (state, no bars)
     } catch (e) { log('[hud] ' + e.message, 'warn'); }
 }
 

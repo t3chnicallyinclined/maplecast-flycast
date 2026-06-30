@@ -3542,12 +3542,20 @@ void mc_oracle_charPassCapture(void* ctxv)
 				        addrspace::read32(0x8C3496B0), trigger ? "TRIGGERED" : "one-shot");
 				// Companion VRAM (8MB, the part-pixel textures TA quads sample) + PVR regs
 				// (palette/state) for the render-replica TA->pvr2-renderer harness.
-				FILE* fv = fopen("/dev/shm/mc_vram_dump.bin", "wb");
+				// Paths are env-overridable so a Windows headless (MSVC fopen cannot resolve
+				// /dev/shm) can write native paths — RAM+VRAM+PVR+TA at the SAME triggered frame
+				// gives a ZERO-drift render_frame-vs-engine A/B. Defaults keep Linux behavior.
+				const char* vramPath = getenv("MAPLECAST_DUMP_VRAM_PATH"); if (!vramPath) vramPath = "/dev/shm/mc_vram_dump.bin";
+				const char* pvrPath  = getenv("MAPLECAST_DUMP_PVR_PATH");  if (!pvrPath)  pvrPath  = "/dev/shm/mc_pvr_regs.bin";
+				const char* taPath   = getenv("MAPLECAST_DUMP_TA_PATH");   if (!taPath)   taPath   = "/dev/shm/mc_engine_ta.bin";
+				FILE* fv = fopen(vramPath, "wb");
 				if (fv) { size_t nv = fwrite(&vram[0], 1, (size_t)VRAM_SIZE, fv); fclose(fv);
-					fprintf(stderr, "[VRAMDUMP] wrote %zu/%u bytes\n", nv, (unsigned)VRAM_SIZE); }
-				FILE* fp = fopen("/dev/shm/mc_pvr_regs.bin", "wb");
+					fprintf(stderr, "[VRAMDUMP] wrote %zu/%u bytes to %s\n", nv, (unsigned)VRAM_SIZE, vramPath); }
+				else fprintf(stderr, "[VRAMDUMP] FAILED to open %s\n", vramPath);
+				FILE* fp = fopen(pvrPath, "wb");
 				if (fp) { size_t np = fwrite(pvr_regs, 1, (size_t)pvr_RegSize, fp); fclose(fp);
-					fprintf(stderr, "[PVRREGS] wrote %zu bytes\n", np); }
+					fprintf(stderr, "[PVRREGS] wrote %zu bytes to %s\n", np, pvrPath); }
+				else fprintf(stderr, "[PVRREGS] FAILED to open %s\n", pvrPath);
 				// Companion ENGINE TA: the raw PowerVR param stream for THIS frame (ctx->tad),
 				// so the converge step diffs transpiled-TA vs engine-TA byte-exact — all four
 				// (RAM/VRAM/PVR/TA) captured at the SAME frame for a true single-frame reference.
@@ -3555,9 +3563,10 @@ void mc_oracle_charPassCapture(void* ctxv)
 					TA_context* tctx = (TA_context*)ctxv;
 					uint8_t* taData = tctx->tad.thd_root;
 					size_t   taSize = (size_t)(tctx->tad.thd_data - tctx->tad.thd_root);
-					FILE* ft = fopen("/dev/shm/mc_engine_ta.bin", "wb");
+					FILE* ft = fopen(taPath, "wb");
 					if (ft) { fwrite(taData, 1, taSize, ft); fclose(ft);
-						fprintf(stderr, "[ENGINETA] wrote %zu bytes (thd)\n", taSize); }
+						fprintf(stderr, "[ENGINETA] wrote %zu bytes (thd) to %s\n", taSize, taPath); }
+					else fprintf(stderr, "[ENGINETA] FAILED to open %s\n", taPath);
 				}
 			}
 		}

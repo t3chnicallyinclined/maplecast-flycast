@@ -37,10 +37,13 @@ function connectGsta(){let ws;try{ws=new WebSocket('ws://127.0.0.1:7212');}catch
 connectMirror();connectGsta();
 setTimeout(finish,HARD*1000);
 function finish(){if(finishing)return;finishing=true;
-  if(mir.chunks.length)writeFileSync(out+'.mirror.zcst',framed(mir.chunks));
-  console.error(`[mirror] ${mir.chunks.length} msgs (${mir.ta} ZCST TA)`);
+  // gsta FIRST (the key file — replica-live wire carrying the effect-poly state; smaller, always fits)
   if(gst.prefix){const pb=Buffer.from(gst.prefix);pb.writeUInt32LE(gst.frames.length,16);
     writeFileSync(out+'.gsta.mcrr',Buffer.concat([pb,...gst.frames.map(f=>Buffer.from(f))]));
-    console.error(`[gsta] prefix + ${gst.frames.length} frames`);}
+    console.error(`[gsta] prefix + ${gst.frames.length} frames -> ${out}.gsta.mcrr`);}
   else console.error('[gsta] NO prefix (in_match never flipped to 1)');
+  // mirror can exceed Node's 2GB single-write limit — guard it so a failure never loses the gsta file
+  try{ if(mir.chunks.length)writeFileSync(out+'.mirror.zcst',framed(mir.chunks));
+    console.error(`[mirror] ${mir.chunks.length} msgs (${mir.ta} ZCST TA) -> ${out}.mirror.zcst`); }
+  catch(e){ console.error(`[mirror] write FAILED (${e.code}): too big for one write — use a shorter --hard window. gsta IS saved.`); }
   process.exit(0);}

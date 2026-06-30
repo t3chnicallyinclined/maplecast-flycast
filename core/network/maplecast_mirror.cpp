@@ -4049,11 +4049,76 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 // corners as the sprite A/B/C (D derived) with the engine's own PVR words +
 // per-vertex base color. Drawn through the SAME pvr2 sprite path as bodies.
 // =============================================================================
+// HUD life-bar FILL-from-state reshape (re_kb/54,/55 — issue 3, native client).
+// PART A (staged): the HUD life bars must TRACK health. The HUDQ tail carries the engine's
+// REAL bar polys (correct position/color/texture) but the captured fill can be a stale/skewed
+// frame's width (MEASURED: HUDQ life-bar quad x[439..591] constant as p2hp 144->55, while the
+// engine's real fill shrinks x[438.8..592.5]->[438.8..440.5]). In the NATIVE client the HUDQ
+// and _gstaRam are the SAME wire frame (no drift), so we RESHAPE the HP-fill quad's inner edge
+// to outer + hpFrac*fullWidth using the live per-slot health from _gstaRam. Everything else
+// (frame/highlight/portraits/names/meter/timer/combo glyphs) ships verbatim from HUDQ — this is
+// the staged bars-from-state win; the full reconstruct + HUDQ drop is the follow-up end state.
+//
+// HP-fill signature (MEASURED _live_fx7 fnum=441, tools/_hud_bar_geom.mjs): tcw==0x80000, the
+// thin bar-body row (height ~6..12px) in the top life-bar band (cy ~70..120). The OUTER end is
+// the portrait side (P1=left=minX anchored, fill grows right; P2=right=maxX anchored, fill grows
+// left). 3 bars stack per side (cy rows ~78/98/118) = the 3 team chars, active on top. We map a
+// fill quad to its team slot by side (screen center x<320 => P1) + row index (cy order), then
+// shrink the INNER edge toward the outer anchor by that slot's hpFrac. Conservative: only quads
+// matching the signature are reshaped; all others pass through unchanged. ZERO added bytes.
+// (_gstaRam is the seeded 16MB RAM image, std::vector<uint8_t> declared above.)
 static std::vector<uint8_t> gstaBuildHudTA(const uint8_t* hud, uint32_t nHud)
 {
 	std::vector<uint8_t> out;
 	if (!nHud) return out;
+	if (_gstaRam.size() < 16u*1024*1024) return out;   // not seeded yet -> nothing to reshape
+	// DIAGNOSTIC: HUD_DIAG>=2 returns empty -> emit NO HUDQ-sourced HUD at all. If the on-screen
+	// bars persist with this, they come from a DIFFERENT path (e.g. render_frame's body TA), not here.
+	{ const char* dg = std::getenv("MAPLECAST_HUD_DIAG"); if (dg && atoi(dg) >= 2) return out; }
 	auto h16 = [](float f){ uint32_t u; memcpy(&u,&f,4); return (uint16_t)((u>>16)&0xFFFF); };
+	auto rd8 = [&](uint32_t a)->uint8_t { return _gstaRam[a & 0x00FFFFFFu]; };
+	// Per-char struct bases (page 616) + HP offset; slots P1C1..P2C3.
+	static const uint32_t CHAR_BASE[6] = { 0x268340,0x2688E4,0x268E88,0x26942C,0x2699D0,0x269F74 };
+	static const int P1_SLOTS[3] = {0,2,4}, P2_SLOTS[3] = {1,3,5};
+	const uint8_t HP_MAX = 144;
+	// Build active-first slot order per side (active point char on the TOP bar), like the browser.
+	auto orderSide = [&](const int* slots, int* outOrder){
+		int n=0; int rest[3], nr=0;
+		for (int i=0;i<3;i++){ uint32_t b=CHAR_BASE[slots[i]]; if (rd8(b+0x000)) outOrder[n++]=slots[i]; else rest[nr++]=slots[i]; }
+		for (int i=0;i<nr;i++) outOrder[n++]=rest[i];
+	};
+	int p1ord[3], p2ord[3]; orderSide(P1_SLOTS,p1ord); orderSide(P2_SLOTS,p2ord);
+	// First pass: collect candidate HP-fill quads (signature), remember their cy so we can rank rows.
+	struct Cand { int idx; bool p1; float cy; };
+	std::vector<Cand> cands;
+	for (uint32_t i=0;i<nHud;i++){ const uint8_t* q=hud+(size_t)i*96;
+		float x[4],y[4]; uint32_t tcw; memcpy(x,q+0,16); memcpy(y,q+16,16); memcpy(&tcw,q+92,4);
+		float minx=x[0],maxx=x[0],miny=y[0],maxy=y[0];
+		for (int k=1;k<4;k++){ minx=std::min(minx,x[k]); maxx=std::max(maxx,x[k]); miny=std::min(miny,y[k]); maxy=std::max(maxy,y[k]); }
+		float w=maxx-minx, h=maxy-miny, cy=(miny+maxy)*0.5f, cx=(minx+maxx)*0.5f;
+		if ((tcw & 0x1FFFFFu)==0x80000u && w>100.f && w<340.f && h>=4.f && h<=14.f && cy>60.f && cy<130.f)
+			cands.push_back({(int)i, cx<320.f, cy});
+	}
+	// Map a cand to its team slot by VISUAL ROW. CRITICAL: each visible bar is drawn as
+	// MULTIPLE 0x80000 quads at ~the same cy (body + highlight pass, cy differs by <1px), so
+	// we must CLUSTER cands into visual rows (within ~6px) and map each ROW (not each quad) to
+	// a slot — otherwise the duplicate quad at the same cy gets ranked as a DIFFERENT row ->
+	// mapped to a reserve slot at full HP -> its full-width twin OVERDRAWS the shrunk one and
+	// the bar never visibly depletes (MEASURED: _live_hud, this was the no-deplete bug). Build
+	// the per-side sorted ROW list (distinct cy clusters), then row = nearest cluster.
+	auto rowsForSide = [&](bool p1)->std::vector<float>{
+		std::vector<float> cys; for (auto& d:cands) if (d.p1==p1) cys.push_back(d.cy);
+		std::sort(cys.begin(), cys.end());
+		std::vector<float> rows; for (float cy:cys){ if (rows.empty() || cy-rows.back()>6.f) rows.push_back(cy); }
+		return rows;
+	};
+	std::vector<float> p1rows=rowsForSide(true), p2rows=rowsForSide(false);
+	auto slotForCand = [&](const Cand& c)->int{
+		const std::vector<float>& rows = c.p1 ? p1rows : p2rows;
+		int row=0; for (size_t r=0;r<rows.size();r++){ if (std::fabs(c.cy-rows[r])<=6.f){ row=(int)r; break; } }
+		if (row>2) row=2;
+		return c.p1 ? p1ord[row] : p2ord[row];
+	};
 	out.assign((size_t)nHud * 96, 0);
 	uint8_t* base = out.data();
 	auto W32 = [&](uint32_t off, uint32_t v){ uint8_t* p=base+off; p[0]=v;p[1]=v>>8;p[2]=v>>16;p[3]=v>>24; };
@@ -4067,6 +4132,22 @@ static std::vector<uint8_t> gstaBuildHudTA(const uint8_t* hud, uint32_t nHud)
 		memcpy(u, q + 32, 16); memcpy(v, q + 48, 16);
 		memcpy(col, q + 64, 16);
 		memcpy(&pcw, q + 80, 4); memcpy(&isp, q + 84, 4); memcpy(&tsp, q + 88, 4); memcpy(&tcw, q + 92, 4);
+		// RESHAPE the HP-fill quad inner edge by live health (state-driven, no drift).
+		const Cand* myc = nullptr; for (auto& c:cands) if (c.idx==(int)i){ myc=&c; break; }
+		if (myc) {
+			int slot = slotForCand(*myc);
+			float hpF = (float)rd8(CHAR_BASE[slot] + 0x420) / (float)HP_MAX;
+			if (hpF<0.f) hpF=0.f; if (hpF>1.f) hpF=1.f;
+			// === DIAGNOSTIC (TEMP): force 25% width regardless of health, to test whether
+			// this reshape path is what actually draws the on-screen bars. Revert after. ===
+			if (std::getenv("MAPLECAST_HUD_DIAG")) hpF = 0.25f;
+			float minx=x[0],maxx=x[0]; for (int k=1;k<4;k++){ minx=std::min(minx,x[k]); maxx=std::max(maxx,x[k]); }
+			// Outer end = portrait side: P1 left(minx) anchored, inner=maxx; P2 right(maxx) anchored, inner=minx.
+			// Move the INNER x-coords toward the outer anchor so width = full*hpF. Preserve U so the
+			// (white-swatch) texture still samples; the bar is a flat swatch so the inner UV is moot.
+			if (myc->p1) { float inner = minx + (maxx-minx)*hpF; for (int k=0;k<4;k++) if (x[k] > minx + 0.5f) x[k] = inner; }
+			else         { float inner = maxx - (maxx-minx)*hpF; for (int k=0;k<4;k++) if (x[k] < maxx - 0.5f) x[k] = inner; }
+		}
 		// emit as a paraType-5 textured sprite (A=corner0, B=corner1, C=corner2, D=corner3).
 		W32(o+0,pcw); W32(o+4,isp); W32(o+8,tsp); W32(o+12,tcw);
 		W32(o+16,col[0]);                       // sprite base color (engine's vtx0 color)
@@ -4233,6 +4314,15 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 
 	size_t stagePrefixLen = fr.ta.size();      // bytes occupied by the stage OP list (+EOL)
 	size_t bodyLen = stagePrefixLen + gstaEmitSpriteTA_append(fr.ta);   // == fr.ta.size()
+
+	// DIAGNOSTIC: HUD_DIAG>=3 strips the body/scene TA (render_frame output) too, leaving ONLY
+	// the stage. If the bars STILL persist with =3, they are in neither hudTa nor render_frame.
+	{ const char* dg=std::getenv("MAPLECAST_HUD_DIAG");
+	  if (dg && atoi(dg)>=3) { fr.ta.resize(stagePrefixLen); bodyLen=stagePrefixLen; }
+	  if (dg) { static int _dn=0; if ((_dn++ % 60)==0)
+	    printf("[HUDDIAG=%s] bodyQuads=%d hudTaBytes=%zu fr.ta=%zu stage=%zu\n",
+	           dg, nQuad, hudTa.size(), fr.ta.size(), stagePrefixLen); fflush(stdout); }
+	}
 
 	if (prof) { double t=_gnow(); _gprof.bodyta += t-t0; t0=t; }
 
