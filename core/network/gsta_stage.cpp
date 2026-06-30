@@ -21,6 +21,8 @@
 #include <cstring>
 #include <cmath>
 #include <string>
+#include <vector>
+#include <algorithm>
 #include "../deps/json/json.hpp"
 
 #if defined(_WIN32)
@@ -242,7 +244,8 @@ bool gstaStageReady() { return g_stage.ready; }
 // =============================================================================
 // EMIT: append the stage OPAQUE polygon-TA, re-projected through the live camera.
 // =============================================================================
-size_t gstaStageEmitTA(std::vector<uint8_t>& out, const float* M1, const float* M2)
+size_t gstaStageEmitTA(std::vector<uint8_t>& out, const float* M1, const float* M2,
+                       const uint8_t* ram)
 {
     if (!g_stage.ready) return 0;
 
@@ -255,39 +258,125 @@ size_t gstaStageEmitTA(std::vector<uint8_t>& out, const float* M1, const float* 
         if (!m1z && !m2z) { matmulColMaj(M1, M2, X); haveCam = true; }
     }
 
+    // ====================================================================================
+    // LIVE HUD RESHAPE (bars-deplete fix, reshape-on-the-rendering-path).
+    // The engine-TA stage bake (bake_stage_from_ta.py) baked the ENTIRE MVC2 HUD overlay into
+    // STG0B_ta.json as static screen-space meshes (life bars / super-meter / frames / name
+    // plates / tag bars) frozen at the capture frame's HP/meter. PROVEN (live HUD_DIAG verify):
+    // this baked stage HUD is the ONLY HUD that renders on the native GSTA client — the HUDQ
+    // path (gstaBuildHudTA) does NOT reach the screen (no HUDQ tail / not presented). So we
+    // RESHAPE the dynamic-fill meshes RIGHT HERE on the path that provably renders: keep the
+    // engine's pixel-exact baked geometry/colors/position, and drive ONLY the fill width from
+    // the LIVE per-frame state in `ram` (_gstaRam). Zero bandwidth, no HUDQ dependency.
+    //
+    // BANDS (MEASURED on STG0B_ta.json, tcw & 0x1FFFFF):
+    //   RESHAPED: 0x80000          — life-bar FILL quads (w~152 h~8, the team-color body)
+    //             0x9de00..0x9e900 — super-meter + per-slot fill bars (one band per element)
+    //   LEFT BAKED AS-IS: 0x9be00  — bar frames/backing + bottom tag/round bars (correct for
+    //             this matchup), name plates, and the real stage 0x9fc00/0xa0000 floor+skybox.
+    // (Permanent fix tracked separately: stage/matchup-general HUD STATE reconstruction +
+    //  bake_stage_from_ta.py HUD exclusion. This reshape unblocks depleting bars now.)
+    //
+    // SLOT MAP (ported verbatim from maplecast_mirror.cpp gstaBuildHudTA): map each fill mesh
+    // to a fighter slot by SIDE (mesh center cx<320 => P1) + VISUAL ROW (cluster the side's
+    // fill-mesh center-Ys into rows within 6px; active-point-char on the TOP bar). Per-char
+    // bases page-616, HP @ +0x420 (max 144). Meter @ globals page-649.
+    static const uint32_t CHAR_BASE[6] = { 0x268340,0x2688E4,0x268E88,0x26942C,0x2699D0,0x269F74 };
+    static const int P1_SLOTS[3] = {0,2,4}, P2_SLOTS[3] = {1,3,5};
+    const uint8_t HP_MAX = 144;
+    const bool   haveRam = (ram != nullptr);
+    const bool   hudDiag = (std::getenv("MAPLECAST_HUD_DIAG") != nullptr);   // =1 force 25% (reach test)
+    auto rd8  = [&](uint32_t a)->uint8_t  { return ram[a & 0x00FFFFFFu]; };
+    auto rd16 = [&](uint32_t a)->uint16_t { uint32_t b=a&0x00FFFFFFu; return (uint16_t)(ram[b]|(ram[b+1]<<8)); };
+
+    // Per-mesh: is it a life-bar FILL (0x80000) or a meter FILL (0x9de00..0x9e900)?
+    auto bandOf = [](const StageMesh& m){ return m.tcw & 0x1FFFFFu; };
+    auto isLifeFill  = [&](const StageMesh& m){ return bandOf(m) == 0x80000u; };
+    auto isMeterFill = [&](const StageMesh& m){ uint32_t b=bandOf(m); return b>=0x9de00u && b<=0x9e900u; };
+
+    // Baked X/Y extent of a mesh (screen-space; HUD fill meshes are NOT world-authored so their
+    // baked pos == screen pos). Returns false on empty.
+    auto meshExtent = [](const StageMesh& m, float& minx, float& maxx, float& cy)->bool{
+        if (m.verts.empty()) return false;
+        minx=1e30f; maxx=-1e30f; float mny=1e30f, mxy=-1e30f;
+        for (auto& v : m.verts){ float x=v.pos[0], y=v.pos[1];
+            if (x<minx)minx=x; if (x>maxx)maxx=x; if (y<mny)mny=y; if (y>mxy)mxy=y; }
+        cy=(mny+mxy)*0.5f; return true;
+    };
+
+    // Active-first slot order per side (active point char on the TOP bar) — same as gstaBuildHudTA.
+    auto orderSide = [&](const int* slots, int* outOrder){
+        int n=0, rest[3], nr=0;
+        for (int i=0;i<3;i++){ uint32_t b=CHAR_BASE[slots[i]];
+            if (haveRam && rd8(b+0x000)) outOrder[n++]=slots[i]; else rest[nr++]=slots[i]; }
+        for (int i=0;i<nr;i++) outOrder[n++]=rest[i];
+    };
+    int p1ord[3], p2ord[3]; orderSide(P1_SLOTS,p1ord); orderSide(P2_SLOTS,p2ord);
+
+    // PRE-PASS: per-side sorted ROW list (distinct cy clusters of LIFE-FILL meshes), so the
+    // multiple same-cy fill meshes per visible bar (body + highlight pass) all map to one row
+    // -> one slot -> shrink together (the gstaBuildHudTA twin-overdraw fix, re_kb/56).
+    auto rowsForSide = [&](bool p1)->std::vector<float>{
+        std::vector<float> cys;
+        for (auto& m : g_stage.meshes){ if (!isLifeFill(m)) continue;
+            float mnx,mxx,cy; if(!meshExtent(m,mnx,mxx,cy)) continue;
+            bool meshP1 = (((mnx+mxx)*0.5f) < 320.f);
+            if (meshP1==p1) cys.push_back(cy); }
+        std::sort(cys.begin(), cys.end());
+        std::vector<float> rows;
+        for (float cy:cys){ if (rows.empty() || cy-rows.back()>6.f) rows.push_back(cy); }
+        return rows;
+    };
+    std::vector<float> p1rows = haveRam ? rowsForSide(true)  : std::vector<float>();
+    std::vector<float> p2rows = haveRam ? rowsForSide(false) : std::vector<float>();
+    auto lifeSlotForMesh = [&](bool p1, float cy)->int{
+        const std::vector<float>& rows = p1 ? p1rows : p2rows;
+        int row=0; for (size_t r=0;r<rows.size();r++){ if (std::fabs(cy-rows[r])<=6.f){ row=(int)r; break; } }
+        if (row>2) row=2;
+        return p1 ? p1ord[row] : p2ord[row];
+    };
+
     size_t startBytes = out.size();
     size_t emittedTris = 0;
 
     for (auto& m : g_stage.meshes) {
         if (m.verts.empty()) continue;
 
-        // ---- HUD-OVERLAY MESH CULL (bars-don't-deplete root cause) -------------------
-        // The engine-TA stage bake (bake_stage_from_ta.py) ingested a HUD-active in-match
-        // engine_ta.bin and kept EVERY opaque (ListType==0) textured group with NO screen-band
-        // or HUD-TCW exclusion. So STG0B_ta.json carries the entire MVC2 HUD overlay (life bars,
-        // super-meter, name plates, tag/round bars) baked in as STATIC screen-space meshes —
-        // frozen at the capture frame's HP/meter. They render every frame at their baked screen
-        // pos (non-world-authored -> not reprojected), so the on-screen bars NEVER deplete and
-        // SURVIVE both MAPLECAST_HUD_DIAG=2 (they aren't HUDQ) and =3 (they're the STAGE, which =3
-        // keeps). This was why every gstaBuildHudTA reshape did nothing: the static stage HUD drew
-        // on top of the reshaped HUDQ bars. CULL them by TCW band so the reshaped HUDQ HUD becomes
-        // the only HUD source.
-        //
-        // BANDS (MEASURED on STG0B_ta.json, tcw & 0x1FFFFF; 68/72 meshes are HUD, 4 real stage):
-        //   0x80000           — life-bar FILL quads (w~152 h~8, the team-color body; x12)
-        //   0x9be00           — bar backing/frame + bottom tag/round bars (x44, top+bottom strips)
-        //   0x9de00..0x9e900  — super-meter + per-slot bars (one band per element; x14)
-        // The REAL stage is ONLY 0x9fc00 (floor/skybox x3) + 0xa0000 (deck x1) — NEVER in the HUD
-        // set, so this filter cannot touch real geometry. (Authoritative permanent fix is to strip
-        // these in bake_stage_from_ta.py + re-bake; this client guard makes a clean bake unnecessary
-        // and protects against a future HUD-polluted bake.)
-        {
-            const uint32_t band = m.tcw & 0x1FFFFFu;
-            const bool isHudBand =
-                (band == 0x80000u) ||                       // life-bar fill
-                (band == 0x9be00u) ||                       // bar frame/backing + bottom bars
-                (band >= 0x9de00u && band <= 0x9e900u);     // super-meter + per-slot bars
-            if (isHudBand) continue;                        // static HUD overlay — drop; HUDQ draws the live HUD
+        // ---- LIVE HUD-FILL RESHAPE (per mesh; see header block above) ----------------
+        // Compute, for a dynamic-fill mesh, the INNER x clamp so its width = fullWidth*frac.
+        // The fill is anchored to its OUTER (portrait-side) edge; the INNER edge moves toward
+        // it as state drops. We clamp fx[k] (the emitted x, below) — NOT g_stage (frame-safe).
+        bool   reshapeFill = false;     // this mesh is a state-driven fill
+        bool   fillP1      = false;     // anchored to its left edge (P1) vs right edge (P2)
+        float  fillOuter   = 0.f;       // the anchored outer edge x (baked)
+        float  fillInner   = 0.f;       // the clamped inner edge x (= outer +/- frac*fullWidth)
+        if (haveRam && (isLifeFill(m) || isMeterFill(m))) {
+            float minx, maxx, cy;
+            if (meshExtent(m, minx, maxx, cy)) {
+                fillP1 = (((minx+maxx)*0.5f) < 320.f);
+                float fullW = maxx - minx;
+                float frac  = 1.f;
+                if (isLifeFill(m)) {
+                    int slot = lifeSlotForMesh(fillP1, cy);
+                    frac = (float)rd8(CHAR_BASE[slot] + 0x420) / (float)HP_MAX;
+                } else {
+                    // SUPER-METER fill. meter_fill @0x8C289646 (P1) — the HUD shows the ACTIVE
+                    // side's meter on its bar; map by side. lvl @0x8C28964A gates max but the
+                    // fill value already encodes current charge; normalize by the per-level max
+                    // (one bar segment = 0..~144 like the life bar; the engine bar texture is the
+                    // same swatch). Use the side's meter_fill u16, clamped to [0,1] over a full
+                    // segment. (Tracked: exact meter normalization + multi-level rendering.)
+                    uint32_t meterAddr = fillP1 ? 0x289646u : 0x289648u;  // P1/P2 meter_fill u16
+                    float    raw = (float)rd16(meterAddr);
+                    // engine meter segment is 0..~0x90 (144) per the life-bar swatch scale; clamp.
+                    frac = raw / 144.f;
+                }
+                if (hudDiag) frac = 0.25f;                 // HUD_DIAG=1: reach test (snap to 25%)
+                if (frac < 0.f) frac = 0.f; if (frac > 1.f) frac = 1.f;
+                reshapeFill = true;
+                if (fillP1) { fillOuter = minx; fillInner = minx + fullW*frac; }   // P1 anchored LEFT
+                else        { fillOuter = maxx; fillInner = maxx - fullW*frac; }   // P2 anchored RIGHT
+            }
         }
         // -----------------------------------------------------------------------------
 
@@ -323,6 +412,13 @@ size_t gstaStageEmitTA(std::vector<uint8_t>& out, const float* M1, const float* 
                 float px = tv[k]->pos[0], py = tv[k]->pos[1], pz = tv[k]->pos[2];
                 if (reproject && tv[k]->hasWorld) {
                     projectEngine(X, tv[k]->world[0], tv[k]->world[1], tv[k]->world[2], px, py, pz);
+                }
+                // LIVE HUD-FILL RESHAPE: clamp the INNER-edge x to fillInner so the bar width
+                // tracks state. Outer (portrait-side) edge is preserved; only the verts on the
+                // inner side move. Frame-safe (mutates the local px only, never g_stage).
+                if (reshapeFill) {
+                    if (fillP1) { if (px > fillOuter + 0.5f) px = fillInner; }   // anchored LEFT
+                    else        { if (px < fillOuter - 0.5f) px = fillInner; }   // anchored RIGHT
                 }
                 if (!std::isfinite(px) || !std::isfinite(py)
                     || std::fabs(px) > GARBAGE || std::fabs(py) > GARBAGE) { ok = false; break; }

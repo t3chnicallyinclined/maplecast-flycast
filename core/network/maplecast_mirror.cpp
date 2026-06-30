@@ -4300,7 +4300,7 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 		::gstaStageEnsureLoaded(stageId);
 		if (::gstaStageReady()) {
 			std::vector<uint8_t> stageTa;
-			size_t sLen = ::gstaStageEmitTA(stageTa, M1, M2);
+			size_t sLen = ::gstaStageEmitTA(stageTa, M1, M2, _gstaRam.data());
 			if (sLen) {
 				fr.ta.insert(fr.ta.end(), stageTa.begin(), stageTa.end());
 				// close the OPAQUE list before the body TR sprites open (FSM: EOL resets

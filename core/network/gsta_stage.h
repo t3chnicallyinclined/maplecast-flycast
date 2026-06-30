@@ -30,8 +30,13 @@ bool gstaStageEnsureLoaded(uint32_t stageId);
 // re-projecting world-authored meshes through the live camera matrices M1 (16 f32,
 // col-major) and M2 (16 f32). `out` is the TA byte stream being assembled; the stage
 // MUST be emitted BEFORE the body sprite list so the FSM opens the OP list first.
+// `ram` = the seeded 16MB area-3 image (_gstaRam.data()); used to RESHAPE the baked HUD
+//   life-bar / super-meter fill meshes by LIVE state (health/meter), so the engine's
+//   pixel-exact baked HUD geometry depletes from the per-frame wire state (zero bandwidth,
+//   no HUDQ dependency). May be null (then HUD fill meshes emit baked / un-reshaped).
 // Returns the number of bytes appended (0 if no stage / not loaded).
-size_t gstaStageEmitTA(std::vector<uint8_t>& out, const float* M1, const float* M2);
+size_t gstaStageEmitTA(std::vector<uint8_t>& out, const float* M1, const float* M2,
+                       const uint8_t* ram = nullptr);
 
 // True once a stage bake is loaded and has emittable geometry.
 bool gstaStageReady();
