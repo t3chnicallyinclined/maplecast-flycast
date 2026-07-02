@@ -3415,6 +3415,57 @@ uint16_t mc_sidLatch[6]      = {0};
 uint16_t mc_timerLatch[6]    = {0};
 uint8_t  mc_sidLatchValid[6] = {0};
 
+// FRAME-EXACT 4-FILE DUMP HELPER (2026-07-02). Writes RAM+VRAM+PVR+engine-TA for THIS char-pass
+// frame to the given path set, zero-skew (all from the same STARTRENDER ctx). Reused by the
+// file-trigger path AND the auto-super-trigger (which needs distinct f0/f1 path sets). READ-ONLY.
+static void mc_writeFrameExactDump(void* ctxv, const char* ramPath, const char* vramPath,
+                                   const char* pvrPath, const char* taPath, const char* why)
+{
+	FILE* f = fopen(ramPath, "wb");
+	if (!f) { fprintf(stderr, "[DUMP] FAILED to open %s\n", ramPath); return; }
+	size_t n = fwrite(&mem_b[0], 1, (size_t)RAM_SIZE, f); fclose(f);
+	fprintf(stderr, "[RAMDUMP] wrote %zu/%u bytes to %s (vframe=%u, %s)\n", n, (unsigned)RAM_SIZE,
+	        ramPath, addrspace::read32(0x8C3496B0), why);
+	FILE* fv = fopen(vramPath, "wb");
+	if (fv) { size_t nv = fwrite(&vram[0], 1, (size_t)VRAM_SIZE, fv); fclose(fv);
+		fprintf(stderr, "[VRAMDUMP] wrote %zu/%u bytes to %s\n", nv, (unsigned)VRAM_SIZE, vramPath); }
+	else fprintf(stderr, "[VRAMDUMP] FAILED to open %s\n", vramPath);
+	FILE* fp = fopen(pvrPath, "wb");
+	if (fp) { size_t np = fwrite(pvr_regs, 1, (size_t)pvr_RegSize, fp); fclose(fp);
+		fprintf(stderr, "[PVRREGS] wrote %zu bytes to %s\n", np, pvrPath); }
+	else fprintf(stderr, "[PVRREGS] FAILED to open %s\n", pvrPath);
+	if (ctxv) {
+		TA_context* tctx = (TA_context*)ctxv;
+		uint8_t* taData = tctx->tad.thd_root;
+		size_t   taSize = (size_t)(tctx->tad.thd_data - tctx->tad.thd_root);
+		FILE* ft = fopen(taPath, "wb");
+		if (ft) { fwrite(taData, 1, taSize, ft); fclose(ft);
+			fprintf(stderr, "[ENGINETA] wrote %zu bytes (thd) to %s\n", taSize, taPath); }
+		else fprintf(stderr, "[ENGINETA] FAILED to open %s\n", taPath);
+	}
+}
+
+// SUPER/EFFECT-ACTIVE DETECTOR (2026-07-02, finding:super_active_bit15_detector). Returns true
+// when any on-screen slot-table node carries a bit15-SET sprite_id (sid & 0x8000). Per re_kb/50 +
+// gen_walker_scale.c: bit15 sels route to the SCALE walker loc_8c0348c8 — the super/projectile
+// EFFECT path; MVC2's Lightning Storm bolts are sels 0x8006..0x801d. MEASURED baseline: bit15==0
+// on ALL idle AND motion frames (the 3 preserved dumps), so bit15>0 <=> super/effect bolts on
+// screen. This is the authoritative, zero-false-positive auto-capture condition. READ-ONLY.
+static bool mc_superEffectActive()
+{
+	for (int L = 0; L < 16; L++) {
+		u32 cnt = addrspace::read8(0x8C2895E0 + L);
+		if (cnt == 0 || cnt > 0x60) continue;
+		u32 pb = 0x8C287DE0 + L * 0x180;
+		for (u32 i = 0; i < cnt; i++) {
+			u32 node = addrspace::read32(pb + i * 4);
+			if (((node >> 24) & 0x7Fu) != 0x0Cu) continue;
+			if (addrspace::read16(node + 0x144) & 0x8000u) return true;   // bit15 sel = effect scale-walker
+		}
+	}
+	return false;
+}
+
 void mc_oracle_charPassCapture(void* ctxv)
 {
 	// ALWAYS-ON body sid/timer latch (NOT gated on CHARQ — runs every STARTRENDER). In-match
@@ -3482,6 +3533,25 @@ void mc_oracle_charPassCapture(void* ctxv)
 	// +0xDC is stale-zero on a freeze frame — see captureFrame / the render_frame s_running_cursor.
 	maplecast_replica_live::onRenderFrame(ctxv);
 
+	// TILEDESC CHARACTER-PASS SNAPSHOT (2026-07-02, finding:tiledesc_snapshot_must_be_char_pass).
+	// The per-frame tile-descriptor table 0x8C1F9F9C is RESET-then-REBUILT from index 0 at the
+	// START of EACH render pass (re_kb/22). The idxtab/rectab snapshot fires at serverPublish
+	// (where the effect entries survive), but the tiledesc BODY region is already re-seeded for
+	// the HUD pass by then -> a serverPublish tiledesc snapshot SHATTERS moving bodies (MEASURED
+	// regression: duplicated emblem/face, torn halves, confetti). So snapshot the tiledesc HERE,
+	// on the CHARACTER pass (this hook fires per-STARTRENDER; the char pass is the realBody-
+	// qualifying one — same gate the dump uses, which captured the tiledesc that walked 24/24 +
+	// 49/49 both bodies byte-exact). READ-ONLY; only pays the ta_parse when a replica client is
+	// connected + in-match (the snapshot function itself re-checks arm/client/in-match/built).
+	if (ctxv && maplecast_replica_live::hasClients() && addrspace::read8(0x8C289624) != 0) {
+		TA_context* sctx = (TA_context*)ctxv;
+		ta_parse(sctx, true);                        // read-only, idempotent (norend's own call)
+		PassStats sps; memset(&sps, 0, sizeof sps);
+		collectScreenQuads(sctx->rend, &sps);
+		if (sps.realBody >= CHARQ_REALBODY_MIN)      // THIS STARTRENDER is the CHARACTER pass
+			maplecast_replica_live::snapshotCharPassTiledesc();
+	}
+
 	// OPTIONAL VERIFY (gated MAPLECAST_VERIFY_DC, READ-ONLY, stderr, throttled): dump per-pass
 	// node+0xDC across all 16 slot layers so the +0xDC validity-at-capture can be measured live
 	// (used to root-cause the super over-tile). Independent of the capture path above.
@@ -3522,51 +3592,89 @@ void mc_oracle_charPassCapture(void* ctxv)
 		// in-match frame dumps RAM+VRAM+PVR+engine-TA together (zero-skew, a single coherent
 		// frame for a byte-exact render_frame vs engine A/B), then DELETES the trigger so it
 		// can be re-armed for the next pose. READ-ONLY w.r.t. guest state.
-		bool trigger = false;
 		const char* trigPath = getenv("MAPLECAST_DUMP_RAM_TRIGGER");
+		// CHARACTER-PASS GATE for the dump (2026-07-02). MVC2 emits TWO STARTRENDER passes per
+		// video frame and THIS hook fires on BOTH; the dropped CHARACTER pass carries the body
+		// quads while the surviving HUD/composite pass has none (re_kb/50, MEASURED). For a
+		// byte-exact render_frame-vs-engine BODY diff the dumped mc_engine_ta.bin MUST be the
+		// CHARACTER pass. So consuming the trigger only ARMS a pending latch; the actual dump
+		// (RAM+VRAM+PVR+TA) fires on the NEXT pass whose ta_parse yields realBody>=MIN body
+		// quads — i.e. the pass whose ctx->tad actually contains the bodies we diff.
+		static bool s_dumpPending = false;
 		if (trigPath && *trigPath && addrspace::read8(0x8C289624) != 0) {
 			FILE* tf = fopen(trigPath, "rb");
-			if (tf) { fclose(tf); remove(trigPath); trigger = true; }   // consume the trigger
+			if (tf) { fclose(tf); remove(trigPath); s_dumpPending = true; }   // consume the trigger -> arm
 		}
 		static const bool s_dumpRam = getenv("MAPLECAST_DUMP_RAM") != nullptr;
 		static bool s_ramDumped = false;
+		// Is THIS pass the character pass? Only pay for the parse when a dump is actually pending.
+		bool trigger = false;
+		if (s_dumpPending && ctxv && addrspace::read8(0x8C289624) != 0) {
+			TA_context* dctx = (TA_context*)ctxv;
+			ta_parse(dctx, true);                       // read-only, idempotent (same call norend makes)
+			PassStats dps; memset(&dps, 0, sizeof dps);
+			collectScreenQuads(dctx->rend, &dps);
+			if (dps.realBody >= CHARQ_REALBODY_MIN) { trigger = true; s_dumpPending = false; }
+		}
 		if ((trigger || (s_dumpRam && !s_ramDumped)) && addrspace::read8(0x8C289624) != 0) {
-			const char* p = getenv("MAPLECAST_DUMP_RAM_PATH");
-			if (!p) p = "/dev/shm/mc_ram_dump.bin";
-			FILE* f = fopen(p, "wb");
-			if (f) {
-				size_t n = fwrite(&mem_b[0], 1, (size_t)RAM_SIZE, f);
-				fclose(f);
-				if (!trigger) s_ramDumped = true;   // latch only the one-shot; trigger is re-armable
-				fprintf(stderr, "[RAMDUMP] wrote %zu/%u bytes to %s (vframe=%u, %s)\n", n, (unsigned)RAM_SIZE, p,
-				        addrspace::read32(0x8C3496B0), trigger ? "TRIGGERED" : "one-shot");
-				// Companion VRAM (8MB, the part-pixel textures TA quads sample) + PVR regs
-				// (palette/state) for the render-replica TA->pvr2-renderer harness.
-				// Paths are env-overridable so a Windows headless (MSVC fopen cannot resolve
-				// /dev/shm) can write native paths — RAM+VRAM+PVR+TA at the SAME triggered frame
-				// gives a ZERO-drift render_frame-vs-engine A/B. Defaults keep Linux behavior.
-				const char* vramPath = getenv("MAPLECAST_DUMP_VRAM_PATH"); if (!vramPath) vramPath = "/dev/shm/mc_vram_dump.bin";
-				const char* pvrPath  = getenv("MAPLECAST_DUMP_PVR_PATH");  if (!pvrPath)  pvrPath  = "/dev/shm/mc_pvr_regs.bin";
-				const char* taPath   = getenv("MAPLECAST_DUMP_TA_PATH");   if (!taPath)   taPath   = "/dev/shm/mc_engine_ta.bin";
-				FILE* fv = fopen(vramPath, "wb");
-				if (fv) { size_t nv = fwrite(&vram[0], 1, (size_t)VRAM_SIZE, fv); fclose(fv);
-					fprintf(stderr, "[VRAMDUMP] wrote %zu/%u bytes to %s\n", nv, (unsigned)VRAM_SIZE, vramPath); }
-				else fprintf(stderr, "[VRAMDUMP] FAILED to open %s\n", vramPath);
-				FILE* fp = fopen(pvrPath, "wb");
-				if (fp) { size_t np = fwrite(pvr_regs, 1, (size_t)pvr_RegSize, fp); fclose(fp);
-					fprintf(stderr, "[PVRREGS] wrote %zu bytes to %s\n", np, pvrPath); }
-				else fprintf(stderr, "[PVRREGS] FAILED to open %s\n", pvrPath);
-				// Companion ENGINE TA: the raw PowerVR param stream for THIS frame (ctx->tad),
-				// so the converge step diffs transpiled-TA vs engine-TA byte-exact — all four
-				// (RAM/VRAM/PVR/TA) captured at the SAME frame for a true single-frame reference.
-				if (ctxv) {
-					TA_context* tctx = (TA_context*)ctxv;
-					uint8_t* taData = tctx->tad.thd_root;
-					size_t   taSize = (size_t)(tctx->tad.thd_data - tctx->tad.thd_root);
-					FILE* ft = fopen(taPath, "wb");
-					if (ft) { fwrite(taData, 1, taSize, ft); fclose(ft);
-						fprintf(stderr, "[ENGINETA] wrote %zu bytes (thd) to %s\n", taSize, taPath); }
-					else fprintf(stderr, "[ENGINETA] FAILED to open %s\n", taPath);
+			if (!trigger) s_ramDumped = true;   // latch only the one-shot; trigger is re-armable
+			// Paths are env-overridable so a Windows headless (MSVC fopen cannot resolve /dev/shm)
+			// can write native paths — RAM+VRAM+PVR+TA at the SAME triggered frame = ZERO-drift A/B.
+			const char* p = getenv("MAPLECAST_DUMP_RAM_PATH");  if (!p) p = "/dev/shm/mc_ram_dump.bin";
+			const char* vramPath = getenv("MAPLECAST_DUMP_VRAM_PATH"); if (!vramPath) vramPath = "/dev/shm/mc_vram_dump.bin";
+			const char* pvrPath  = getenv("MAPLECAST_DUMP_PVR_PATH");  if (!pvrPath)  pvrPath  = "/dev/shm/mc_pvr_regs.bin";
+			const char* taPath   = getenv("MAPLECAST_DUMP_TA_PATH");   if (!taPath)   taPath   = "/dev/shm/mc_engine_ta.bin";
+			mc_writeFrameExactDump(ctxv, p, vramPath, pvrPath, taPath, trigger ? "TRIGGERED" : "one-shot");
+		}
+
+		// AUTO-SUPER TRIGGER (2026-07-02, MAPLECAST_DUMP_ON_SUPER=1, OFF by default). When a super/
+		// effect is ACTIVE (mc_superEffectActive: any bit15 sprite_id on screen = the Lightning-Storm
+		// scale-walker path), auto-capture TWO CONSECUTIVE char-pass frames — f0 (this frame) + f1
+		// (the next char pass) — to distinct paths, so ONE super activation covers BOTH the effect
+		// read-set (Capture A) AND the per-frame N/N+1 mutation diff (Capture B). No file trigger, no
+		// human timing. Fires ONCE per activation: a latch rearms only on a super inactive->active
+		// EDGE, so it will not spam-dump every super frame and destabilize the headless. The f0/f1
+		// paths are env-overridable (MAPLECAST_SUPER_*_PATH); defaults keep the preserved motion/idle
+		// dumps untouched. Only runs on the CHARACTER pass (trigger==the realBody-qualified frame from
+		// the same ta_parse above), so f0/f1 both carry the body+effect TA. READ-ONLY.
+		static const bool s_dumpOnSuper = getenv("MAPLECAST_DUMP_ON_SUPER") != nullptr
+		                               && getenv("MAPLECAST_DUMP_ON_SUPER")[0] != '0';
+		if (s_dumpOnSuper && addrspace::read8(0x8C289624) != 0 && ctxv) {
+			// We need the realBody char-pass discriminator for THIS pass. Reuse the parse the
+			// file-trigger path did when pending; otherwise parse here (cheap, only while armed).
+			static enum { SUPER_IDLE, SUPER_CAP_F1_PENDING } s_superState = SUPER_IDLE;
+			static bool s_superLatched = false;   // true while a super is active + already captured
+			bool superNow = mc_superEffectActive();
+			// EDGE rearm: super went inactive -> clear the latch so the NEXT activation captures.
+			if (!superNow) { s_superLatched = false; s_superState = SUPER_IDLE; }
+			// Is THIS the CHARACTER pass? realBody-qualify via a read-only idempotent ta_parse
+			// (only while we still owe a capture — free otherwise). Same discriminator f0 used, so
+			// f0 and f1 are BOTH real body/effect char-pass frames (consecutive video frames).
+			bool charPass = false;
+			if (superNow && !s_superLatched) {
+				TA_context* pctx = (TA_context*)ctxv;
+				ta_parse(pctx, true);
+				PassStats pps; memset(&pps, 0, sizeof pps);
+				collectScreenQuads(pctx->rend, &pps);
+				charPass = (pps.realBody >= CHARQ_REALBODY_MIN);
+			}
+			if (superNow && !s_superLatched && charPass) {
+				if (s_superState == SUPER_IDLE) {
+					const char* r0 = getenv("MAPLECAST_SUPER_RAM_F0");  if (!r0) r0 = "/dev/shm/mc_super_ram_f0.bin";
+					const char* v0 = getenv("MAPLECAST_SUPER_VRAM_F0"); if (!v0) v0 = "/dev/shm/mc_super_vram_f0.bin";
+					const char* p0 = getenv("MAPLECAST_SUPER_PVR_F0");  if (!p0) p0 = "/dev/shm/mc_super_pvr_f0.bin";
+					const char* t0 = getenv("MAPLECAST_SUPER_TA_F0");   if (!t0) t0 = "/dev/shm/mc_super_ta_f0.bin";
+					mc_writeFrameExactDump(ctxv, r0, v0, p0, t0, "AUTO-SUPER f0");
+					s_superState = SUPER_CAP_F1_PENDING;   // capture f1 on the NEXT char pass
+				} else if (s_superState == SUPER_CAP_F1_PENDING) {
+					const char* r1 = getenv("MAPLECAST_SUPER_RAM_F1");  if (!r1) r1 = "/dev/shm/mc_super_ram_f1.bin";
+					const char* v1 = getenv("MAPLECAST_SUPER_VRAM_F1"); if (!v1) v1 = "/dev/shm/mc_super_vram_f1.bin";
+					const char* p1 = getenv("MAPLECAST_SUPER_PVR_F1");  if (!p1) p1 = "/dev/shm/mc_super_pvr_f1.bin";
+					const char* t1 = getenv("MAPLECAST_SUPER_TA_F1");   if (!t1) t1 = "/dev/shm/mc_super_ta_f1.bin";
+					mc_writeFrameExactDump(ctxv, r1, v1, p1, t1, "AUTO-SUPER f1");
+					s_superState = SUPER_IDLE;
+					s_superLatched = true;   // done for this activation; rearm on inactive->active edge
+					fprintf(stderr, "[AUTO-SUPER] captured f0+f1 for this Lightning-Storm activation; latched until super clears.\n");
 				}
 			}
 		}

@@ -33,27 +33,46 @@ typedef struct {
 /* translate guest virtual -> ram[] index (area-3 only for this PoC) */
 static inline u32 mc_idx(u32 a){ return a & 0x00FFFFFFu; }
 
+#ifdef MC_READLOG
+/* READ-SET CAPTURE (2026-07-02, wire-read-set completeness diagnostic). When compiled with
+ * -DMC_READLOG, every guest RAM read through the r32/r16/r8 accessors records the touched byte
+ * range into a coverage bitmap (one bit per byte of the 16MB area-3 RAM). The harness dumps the
+ * merged address RANGES = render_frame's TRUE read-set, to diff against the wire's D() regions. */
+extern unsigned char mc_readbmp[0x1000000/8];   /* 2MB bitmap, one bit/RAM byte */
+static inline void mc_readlog(u32 a, u32 n){
+    u32 i0 = a & 0x00FFFFFFu;
+    for (u32 k = 0; k < n; k++){ u32 i = (i0 + k) & 0x00FFFFFFu; mc_readbmp[i>>3] |= (unsigned char)(1u << (i & 7)); }
+}
+#define MC_RLOG(a,n) mc_readlog((a),(n))
+#else
+#define MC_RLOG(a,n) ((void)0)
+#endif
+
 /* LITTLE-ENDIAN guest loads. MVC2 runs the SH4 in LE mode (flycast stores guest RAM
  * in host LE order); the prod RAM dump is verbatim LE. Earlier the PoC used BE
  * accessors + a byteswapped image — a double-inversion that cancelled for word/half
  * reads but CORRUPTED sub-word BYTE reads (node+0x12c guard, node+0x5d, descriptor
  * bytes). LE everywhere + a verbatim dump copy is the correct, consistent model. */
 static inline u32 r32(Sh4Ctx*c, u32 a){
+    MC_RLOG(a,4);
     u32 i=mc_idx(a); u8*p=c->ram+i;
     return (u32)p[0]|((u32)p[1]<<8)|((u32)p[2]<<16)|((u32)p[3]<<24);
 }
 static inline u32 r16s(Sh4Ctx*c, u32 a){
+    MC_RLOG(a,2);
     u32 i=mc_idx(a); u8*p=c->ram+i;
     u16 v=(u16)p[0]|((u16)p[1]<<8);
     return (u32)(s32)(s16)v;       /* mov.w sign-extends */
 }
 static inline u32 r16u(Sh4Ctx*c, u32 a){
+    MC_RLOG(a,2);
     u32 i=mc_idx(a); u8*p=c->ram+i; return (u16)p[0]|((u16)p[1]<<8);
 }
 static inline u32 r8s(Sh4Ctx*c, u32 a){
+    MC_RLOG(a,1);
     u32 i=mc_idx(a); return (u32)(s32)(s8)c->ram[i];  /* mov.b sign-extends */
 }
-static inline u32 r8u(Sh4Ctx*c, u32 a){ return c->ram[mc_idx(a)]; }
+static inline u32 r8u(Sh4Ctx*c, u32 a){ MC_RLOG(a,1); return c->ram[mc_idx(a)]; }
 
 static inline void w32(Sh4Ctx*c, u32 a, u32 v){
     u32 i=mc_idx(a); u8*p=c->ram+i;

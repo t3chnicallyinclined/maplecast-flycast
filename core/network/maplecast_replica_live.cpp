@@ -90,9 +90,22 @@ static u32                 _dynTotal    = 0;       // sum of dynamic region lens
 // passes, so shipping the char-pass snapshot is safe for bodies and fixes effects.
 static std::vector<uint8_t> _idxtabSnap;            // char-pass idxtab bytes
 static std::vector<uint8_t> _rectabSnap;            // char-pass rectab bytes
+static std::vector<uint8_t> _tiledescSnap;          // char-pass tile-descriptor bytes (0x8C1F9F9C)
 static u32                  _idxtabAddr = 0, _idxtabLen = 0;
 static u32                  _rectabAddr = 0, _rectabLen = 0;
+// TILEDESC char-pass snapshot (2026-07-02, finding:storm_idle_tiledesc_count_staleness). The
+// per-frame tile-descriptor table 0x8C1F9F9C is FIXED-address (not pointer-resolved). Its COUNT
+// bytes (byte1 per entry) at the LOW/arena-start indices the FIRST body consumes are re-seeded
+// (toward cnt=1) by the HUD pass AFTER the character-pass body walk read them — same char-pass-
+// transient class as the idxtab/rectab effect entries (re_kb/50). PAIRED-DUMP GROUND TRUTH
+// (Storm P1C1 dc=0): CLEAN char-pass desc CNT[18,19,20]=2,2,4 -> walker 24/24 == engine; the
+// HUD-pass-stale capture had CNT[18,19,20]=1,1,1 -> walker 21/25 (4 Storm limb tiles dropped ->
+// "stale white/gray blocks around idle Storm"). The SIZE bytes are identical both passes; only
+// the COUNT bytes are clobbered. So snapshot the WHOLE tiledesc at the char pass and ship THAT.
+static const u32            TILEDESC_ADDR = 0x8C1F9F9Cu;
+static const u32            TILEDESC_LEN  = 0x1800u;
 static std::atomic<bool>    _tablesSnapValid{false};
+static std::atomic<bool>    _tiledescSnapValid{false};   // separate: tiledesc snaps at CHAR pass, not serverPublish
 static std::mutex           _tablesSnapMutex;
 
 // The STATIC PREFIX (header + tables + VRAM + PVR + 16MB RAM), built once, then
@@ -737,9 +750,10 @@ static void captureFrame(u32 vframe)
 	// side-snapshot (snapshotCharPassTables) instead of the live HUD-pass RAM — the effect-range
 	// entries are only valid at the char pass. Falls back to live RAM until the first char-pass
 	// snapshot exists (and for non-table regions). Lock briefly to read the snapshot coherently.
-	const bool haveSnap = _tablesSnapValid.load(std::memory_order_acquire);
+	const bool haveSnap    = _tablesSnapValid.load(std::memory_order_acquire);     // idxtab/rectab (serverPublish)
+	const bool haveTdSnap  = _tiledescSnapValid.load(std::memory_order_acquire);   // tiledesc (CHAR pass)
 	std::unique_lock<std::mutex> snapLk(_tablesSnapMutex, std::defer_lock);
-	if (haveSnap) snapLk.lock();
+	if (haveSnap || haveTdSnap) snapLk.lock();
 	size_t off = hdr;
 	for (auto& r : _dynRegs) {
 		const uint8_t* src = nullptr;
@@ -747,6 +761,8 @@ static void captureFrame(u32 vframe)
 			src = _idxtabSnap.data();
 		else if (haveSnap && r.addr == _rectabAddr && r.len == _rectabLen && _rectabSnap.size() == r.len)
 			src = _rectabSnap.data();
+		else if (haveTdSnap && r.addr == TILEDESC_ADDR && r.len == TILEDESC_LEN && _tiledescSnap.size() == r.len)
+			src = _tiledescSnap.data();   // CHAR-PASS tiledesc (Storm-idle fix, torn-safe: snapped pre-HUD-rebuild)
 		if (src) {
 			memcpy(&buf[off], src, r.len);                          // char-pass snapshot (effect-correct)
 		} else if ((r.addr & 0xFF000000u) == 0x8C000000u) {
@@ -834,7 +850,45 @@ void snapshotCharPassTables()
 	};
 	snap(_idxtabAddr, _idxtabLen, _idxtabSnap);
 	snap(_rectabAddr, _rectabLen, _rectabSnap);
+	// NOTE: the tiledesc (0x8C1F9F9C) is NOT snapshotted here. serverPublish runs AFTER the
+	// HUD pass STARTRENDER, and the tiledesc is RESET-then-REBUILT from index 0 at the START
+	// of EACH render pass (loc_8c0337bc stores base into cursor 0x8C1F9D98; loc_8c129728 fills
+	// it — re_kb/22 finding:tile_descriptor_runtime_built). So at serverPublish the LOW/body
+	// descriptor region has ALREADY been re-seeded for the HUD pass's minimal geometry -> a
+	// serverPublish tiledesc snapshot is WORSE than live RAM (it SHATTERS moving bodies:
+	// duplicated emblem/face, torn halves, confetti — MEASURED regression 2026-07-02). The
+	// tiledesc is instead snapshotted at the CHARACTER pass STARTRENDER via
+	// snapshotCharPassTiledesc() (below), the instant the walker's descriptors are live and
+	// BEFORE the HUD pass rebuilds — the same instant the DUMP captures (dump gave 24/24 +
+	// 49/49 both bodies byte-exact vs engine).
 	_tablesSnapValid.store(true, std::memory_order_release);
+}
+
+// TILEDESC CHARACTER-PASS SNAPSHOT (2026-07-02, finding:tiledesc_snapshot_must_be_char_pass).
+// Called from mc_oracle_charPassCapture ONLY on the CHARACTER pass (realBody-gated STARTRENDER),
+// which fires BEFORE QueueRender and BEFORE the HUD pass resets+rebuilds 0x8C1F9F9C. At this
+// instant the per-frame tile-descriptor table holds BOTH bodies' descriptors exactly as the
+// SH4 body walk (loc_8c0344d4) left them (re_kb/22: table is frame-local, rebuilt per pass from
+// index 0). captureFrame ships THIS instead of the HUD-pass-stale/rebuilt RAM. Gated env
+// MAPLECAST_TILEDESC_CHARSNAP (default ON); set to "0" to A/B-disable (ships live tiledesc).
+void snapshotCharPassTiledesc()
+{
+	static const bool s_enabled = []{
+		const char* e = getenv("MAPLECAST_TILEDESC_CHARSNAP");
+		return !(e && e[0] == '0');   // default ON; "0" disables for A/B
+	}();
+	if (!s_enabled) return;
+	if (!_armed) return;
+	if (_clientCount.load(std::memory_order_relaxed) == 0) return;
+	if (rd8(IN_MATCH_ADDR) == 0) return;
+	if (!_tablesBuilt) return;
+	std::lock_guard<std::mutex> lk(_tablesSnapMutex);
+	if (_tiledescSnap.size() != TILEDESC_LEN) _tiledescSnap.resize(TILEDESC_LEN);
+	if ((TILEDESC_ADDR & 0xFF000000u) == 0x8C000000u)
+		memcpy(_tiledescSnap.data(), &mem_b[TILEDESC_ADDR & 0x00FFFFFFu], TILEDESC_LEN);
+	else
+		for (u32 b = 0; b < TILEDESC_LEN; b++) _tiledescSnap[b] = rd8(TILEDESC_ADDR + b);
+	_tiledescSnapValid.store(true, std::memory_order_release);
 }
 
 void onRenderFrame(void* /*ctxv*/)

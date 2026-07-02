@@ -59,6 +59,13 @@ void onRenderFrame(void* ctxv);
 // when disabled / no client. SCOPED — not the onRenderFrame pass-gate.
 void snapshotCharPassTables();
 
+// TILEDESC CHARACTER-PASS SNAPSHOT (2026-07-02). The per-frame tile-descriptor table
+// 0x8C1F9F9C is reset+rebuilt from index 0 at the START of each render pass, so it must be
+// captured at the CHARACTER pass STARTRENDER (before the HUD pass rebuilds it) — NOT at
+// serverPublish (where snapshotCharPassTables fires). Called from mc_oracle_charPassCapture
+// gated on the realBody char-pass discriminator. captureFrame ships this tiledesc snapshot.
+void snapshotCharPassTiledesc();
+
 // Clean shutdown (stop the WS thread). Called from emulator term.
 void shutdown();
 

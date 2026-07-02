@@ -82,8 +82,26 @@ void submit_params(Sh4Ctx *c, u32 rec_index, u32 palbank, PolyParam *out); /* ge
 
 /* leaves the walker links against */
 void leaf_e460(Sh4Ctx*);
-void leaf_e2e0(Sh4Ctx*c){ (void)c; }
-void leaf_e860(Sh4Ctx*c){ (void)c; }
+/* SIN/COS LEAVES (loc_8c11e860 = sin, loc_8c11e2e0 = cos) — TRANSPILED SEMANTICS 2026-07-02
+ * (finding:effect_sincos_leaves). These were STUBBED to no-ops, so fr0 held stale garbage on the
+ * scale walker's ROTATED effect path (node+0x104=0x8000 = a 180deg-rotated bolt): the anchor
+ * fr15 + cos*fr14 (gen_walker_scale.c:602) ran away to ~10000px = the last 9 Lightning-Storm bolts.
+ * DISASM (marvelous2 bank11.asm loc_8C11E860): the input ANGLE is r4 as a 16-bit unsigned
+ * (extu.w r4), 65536 == a full circle; the routine computes angle_rad = (r4/65536)*2*PI (constants
+ * 0x40C90FDb=2*PI, 0x47800000=65536, 0x3FC90FDb=PI/2, 0x3F000000=0.5) via a poly sin, returning
+ * fr0. loc_8C11E2E0 (cos) range-reduces r4 then falls through to sin (cos(x)=sin(x+90deg)). Host
+ * sinf/cosf reproduce the poly to far under 0.5px. Return fr0 = trig(angle) * fr4 (fr4 = radius/1.0). */
+#include <math.h>
+void leaf_e860(Sh4Ctx*c){                         /* sin */
+    u32 ang = c->r[4] & 0xFFFFu;                   /* extu.w r4 — 16-bit angle, 65536=2*PI */
+    float rad = (float)ang * (6.2831853071795862f / 65536.0f);
+    c->fr[0] = sinf(rad);
+}
+void leaf_e2e0(Sh4Ctx*c){                         /* cos (= sin shifted a quarter circle) */
+    u32 ang = c->r[4] & 0xFFFFu;
+    float rad = (float)ang * (6.2831853071795862f / 65536.0f);
+    c->fr[0] = cosf(rad);
+}
 void helper_1294bc(Sh4Ctx*c){ (void)c; }
 
 /* ============================================================================
@@ -98,7 +116,11 @@ void helper_1294bc(Sh4Ctx*c){ (void)c; }
  * in render_object_full_ex (one facing per object). texU mirror = facing XOR (flip4000!=0),
  * the engine's loc_8c0346c4 `neg r8` gate (re_kb finding:field_semantics_from_setter /
  * routine:loc_8c0346c4). */
-typedef struct { float bx, by; u32 alloc_index; u32 sel; u32 flip4000; } TileCap;
+typedef struct { float bx, by; u32 alloc_index; u32 sel; u32 flip4000;
+                 /* EFFECT sel: the scale walker loc_8c0348c8 reads its per-record GFX1 sel from
+                  * *(r13+6) (gen_walker_scale.c:265), NOT *(r11+6) like the body walker. Captured
+                  * here so the effect W/H can index GFX1[efx_sel] for the logical dims. */
+                 u32 efx_sel; } TileCap;
 static TileCap g_cap[MAXQ];
 static int g_ncap = 0;
 
@@ -145,6 +167,10 @@ void submit_1244b0(Sh4Ctx *c){
         g_cap[g_ncap].alloc_index = r32(c, r4 + 0x00);  /* *r13 = stack[r15+0x2C] */
         g_cap[g_ncap].sel = cell_sel;                    /* the cell's GFX1 sel (per-quad) */
         g_cap[g_ncap].flip4000 = cell_flip;              /* per-part 0x4000 X-mirror flag */
+        /* EFFECT sel from *(r13+6) (scale walker loc_8c0348c8:265) — used ONLY on the effect
+         * path for the GFX1-logical W/H lookup. For the body walker r13 is the tiledesc cursor
+         * (not a record), so this value is meaningless there and simply unused (guarded by _is_effect). */
+        g_cap[g_ncap].efx_sel = (u32)(u16)r16u(c, c->r[13] + 0x6);
         g_ncap++;                       /* only advance while in-bounds: ntiles<=MAXQ */
     }
     /* else: drop the tile (over-read guard). A real body never exceeds MAXQ; reaching it
@@ -244,19 +270,16 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
     if (_is_effect) {
         walker_0348c8(&wc);              /* effect node: single scaled sprite per record */
     } else {
-        /* SUPER-FREEZE CURSOR REPAIR for the bit15-CLEAR body walker (re_kb/50): on a freeze frame
-         * the resident node+0xDC is stale-0 for the real bodies too, so the tiling walker mis-indexes
-         * the tiledesc and over-tiles. render_frame''s s_running_cursor IS the engine prefix-sum
-         * (advanced by emitted tile count in the hooks); substitute it when resident==0 && cursor!=0
-         * (the unambiguous stale-non-first case) — a strict no-op on normal frames. */
-        u32 resident_dc = (u32)(u16)( (u32)wc.ram[(node & 0x00FFFFFFu) + 0xDC]
-                                    | ((u32)wc.ram[(node & 0x00FFFFFFu) + 0xDD] << 8) );
-        if (resident_dc == 0 && s_running_cursor != 0) {
-            u32 lo = (node & 0x00FFFFFFu) + 0xDC;
-            wc.ram[lo]     = (u8)(s_running_cursor & 0xFF);
-            wc.ram[lo + 1] = (u8)((s_running_cursor >> 8) & 0xFF);
-        }
-        walker_0344d4(&wc);              /* character body: multi-tile walker */
+        /* CURSOR: trust the RESIDENT node+0xDC — the engine's OWN authoritative arena alloc index
+         * (0x8C1F9D98 snapshot, loc_8c033b0a), shipped in the live wire (char_str + objpool). The
+         * old "super-freeze repair" overwrote it with s_running_cursor when `resident==0 &&
+         * cursor!=0`, but +0xDC==0 is CORRECT for the arena's FIRST body — an effect rendering
+         * before it makes cursor!=0, so the guard fired on a legitimate first-body-0 and shifted
+         * every P1C1 tile's idxtab index -> wrong TCWs / stale-texture blocks during motion.
+         * MEASURED (garble_diff vs engine TA, vframe97425 + motion70): removing the repair takes the
+         * body from 4/75 to 70/70 full-quad exact; resident +0xDC is authoritative every frame.
+         * (finding:gsta_cursor_repair_first_body_regression, 2026-07-02.) */
+        walker_0344d4(&wc);              /* character body: multi-tile walker (resident +0xDC) */
     }
     int ntiles = g_ncap;
 
@@ -312,8 +335,26 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
         if(m==0) m=8;                               /* guard: never 0 (8px min tile) */
 
         u32 texu = (pp.tsp>>3)&7; float tile=(float)(8u<<texu);
-        float W = (float)m * sxs, H = (float)m * sys;
-        float bx=g_cap[k].bx, by=g_cap[k].by;       /* walker BOTTOM-left anchor */
+        /* TILE EXTENT source differs BODY vs EFFECT (MEASURED 2026-07-02 on the Lightning-Storm
+         * super, finding:effect_quad_size_from_gfx1_logical). BODY: W=m*scale, m = body descriptor
+         * byte0 (DESC_TABLE) per-tile pixel size. EFFECT (scale walker loc_8c0348c8): the sprite is
+         * a SCALED single sprite whose UNSCALED extent is the GFX1 part header's LOGICAL dims
+         * (lw*8 x lh*8, header +0/+1), NOT the body descriptor m and NOT the TSP tile. PROOF: all 47
+         * bolts' unscaled W/H are exact multiples of 8 == lw*8/lh*8 for the record's sel (e.g. sel70
+         * lw=6 -> W=48*sxs=80.0 == engine; sel66 lw=5 -> 40*sxs=66.7 == engine). The body m gave
+         * 8*sxs=13.3 on the multi-tile bolts = the mis-sized/"missing" Lightning Storm bolts. */
+        float W, H;
+        if (_is_effect) {
+            u32 e_gfx1 = r32(c, node+0x15C);
+            u32 e_off  = r32(c, e_gfx1 + g_cap[k].efx_sel*4) & 0x00FFFFFFu; /* GFX1[efx_sel] header */
+            u32 lw = r8u(c, e_gfx1 + e_off + 0);                          /* logical tile width  */
+            u32 lh = r8u(c, e_gfx1 + e_off + 1);                          /* logical tile height */
+            if (lw==0) lw=1; if (lh==0) lh=1;
+            W = (float)(lw*8u) * sxs;  H = (float)(lh*8u) * sys;
+        } else {
+            W = (float)m * sxs;        H = (float)m * sys;
+        }
+        float bx=g_cap[k].bx, by=g_cap[k].by;       /* walker anchor */
         g_scene_is_effect[g_nscene] = (u8)(_is_effect ? 1 : 0);  /* tag for the effect TCW post-pass */
         SceneQuad *q = &g_scene[g_nscene++];
         q->pcw=pp.pcw; q->isp=pp.isp; q->tsp=pp.tsp; q->tcw=pp.tcw;
@@ -343,10 +384,34 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
          * left = facing ? bx-W : bx ; right = left + W. */
         float xl = node_facing ? (bx - W) : bx;
         float xr = xl + W;
-        q->Ax=xl;     q->Ay=by-H;     /* lay the quad UPWARD from the bottom-left */
-        q->Bx=xr;     q->By=by-H;
-        q->Cx=xr;     q->Cy=by;
-        q->Dx=xl;     q->Dy=by;
+        /* Y ANCHOR DIRECTION differs BODY vs EFFECT (MEASURED 2026-07-02, finding:effect_quad_y_anchor
+         * on the Lightning-Storm super). The BODY walker loc_8c0344d4 is BOTTOM-anchored -> lays the
+         * quad UPWARD (Ay=by-H, Cy=by). The EFFECT scale walker loc_8c0348c8 submits `by` as the quad
+         * TOP -> lays DOWNWARD (Ay=by, Cy=by+H). PROOF: for every bolt whose corner A = the captured
+         * (bx,by), engine Ay-by=0.00 and Cy-by=+H. */
+        float ytop = _is_effect ? by       : (by - H);
+        float ybot = _is_effect ? (by + H) : by;
+        /* ROTATED EFFECT (node+0x104 & 0x8000 = 180deg, the scale walker's sin/cos leaf-flip path
+         * loc_8c034b66): the quad is laid REVERSED on BOTH axes. MEASURED (Lightning-Storm bolts,
+         * finding:effect_quad_180_rotation): with the sin/cos leaves now transpiled the anchor bx/by
+         * is correct (== engine C.x/A.y), and the engine builds A=(bx+W, by), C=(bx, by-H) — i.e.
+         * X-reversed (A=right) AND Y-reversed (A=top-most, box grows UP) vs the normal effect lay.
+         * PROOF: engine A(396,405) C(369.3,371.1), bx=369.3 by=405 W=26.7 H=34.3 -> Ax=bx+W=396,
+         * Cx=bx=369.3, Ay=by=405, Cy=by-H=370.7. Scoped to _is_effect + the 0x8000 flag so the 38
+         * non-rotated bolts and the body path are untouched. */
+        if (_is_effect && (r32(c, node+0x104) & 0x8000u)) {
+            /* Y is reversed for both facings (box grows UP: A at by, C at by-H). X reversal is
+             * FACING-DEPENDENT — the anchor bx is a different corner per facing (MEASURED node
+             * 800c facing=1: bx==engine C.x[left] -> A=bx+W; node 8012 facing=0: bx==engine
+             * A.x[right] -> A=bx, C=bx-W). So: facing=1 -> A=bx+W,C=bx ; facing=0 -> A=bx,C=bx-W. */
+            xl = node_facing ? (bx + W) : bx;       /* A corner X */
+            xr = node_facing ? bx       : (bx - W); /* C corner X */
+            ytop = by;     ybot = by - H;           /* A at by (top), grows UP */
+        }
+        q->Ax=xl;     q->Ay=ytop;
+        q->Bx=xr;     q->By=ytop;
+        q->Cx=xr;     q->Cy=ybot;
+        q->Dx=xl;     q->Dy=ybot;
         q->u1 = ((float)m < tile) ? ((float)m/tile) : 1.0f;
     }
     return ntiles;
@@ -567,6 +632,17 @@ static void render_frame_cull_85xxx(void){
 void render_frame(Sh4Ctx *c){
     render_frame_reset();
     render_sprites_0308c2(c);   /* the transpiled loc_8c0308c2; calls render_object_full */
-    render_frame_fix_effect_tcws(c);   /* re-resolve effect quad TCWs (per-frame correct) */
-    render_frame_cull_85xxx();          /* drop the never-engine 0x85xxx blocks (re_kb/51) */
+    /* EFFECT-TCW POST-PASS REMOVED (2026-07-02, finding:effect_tcw_postpass_obsolete). The
+     * per-frame render_frame_fix_effect_tcws forced effect quads into a "contiguous effect block"
+     * (band 0x89000..0x8C000) — a heuristic that was a BAND-AID for the pre-fix wrong effect
+     * geometry. Now that the effect quads carry the correct native TCW (via the 4 effect terms:
+     * GFX1-logical size, Y-down anchor, transpiled sin/cos leaves, 180deg-rotation corner-lay),
+     * the post-pass is HARMFUL: MEASURED on BOTH supers it CORRUPTS the pal distribution — Lightning
+     * Storm pal18 47->~14, Projectile pal 66/47/17 -> 90/2/12/26 (94/130). With it OFF both supers
+     * match the engine (lstorm 153/154 + 47/47 bolts; projectile 129/130; both pal-exact) and body
+     * motion70 stays 70/70. So it is REMOVED, not scoped. render_frame_cull_85xxx is KEPT as a
+     * harmless safety net (MEASURED: 0 quads land in the never-engine 0x85xxx band on all 3 frames
+     * with correct geometry, so it is a strict no-op today; retained to collapse any future stale
+     * 0x85xxx quad to zero-area, re_kb/51). */
+    render_frame_cull_85xxx();          /* never-engine 0x85xxx safety net (no-op on correct geom) */
 }
