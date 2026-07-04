@@ -223,7 +223,19 @@ const u32 = (ram, a) => (ram[a & RAM] | (ram[(a + 1) & RAM] << 8) | (ram[(a + 2)
 
 // Char-struct layout (re_kb struct:char_struct / CLAUDE.md). Slot order == render slot order.
 const SLOTS = [0x8C268340, 0x8C2688E4, 0x8C268E88, 0x8C26942C, 0x8C2699D0, 0x8C269F74];
-const OFF_ACTIVE = 0x000, OFF_SID = 0x144, OFF_GFX1 = 0x15C, OFF_GFX2 = 0x160;
+const OFF_ACTIVE = 0x000, OFF_SID = 0x144, OFF_FACING = 0x110, OFF_GFX1 = 0x15C, OFF_GFX2 = 0x160;
+
+// facingForGfx1 — the owning body's facing (node+0x110 != 0 <=> faces RIGHT, the MIRRORED side).
+// The carve reverses the STORAGE column for the mirrored facing (see ensureBodyTextures). We read
+// it straight from the resident char struct by matching the body's GFX1 base (node+0x15C).
+function facingForGfx1(ram, gfx1) {
+    const g = gfx1 & 0x00FFFFFF;
+    for (const s of SLOTS) {
+        if (!u8(ram, s + OFF_ACTIVE)) continue;
+        if ((u32(ram, s + OFF_GFX1) & 0x00FFFFFF) === g) return u8(ram, s + OFF_FACING) ? 1 : 0;
+    }
+    return 0;
+}
 
 // Build the sorted GFX1 offset table once per (gfx1 base) so we can bound each part's stream.
 function gfx1Offsets(ram, gfx1, cache) {
@@ -301,7 +313,7 @@ function decodePart(ram, gfx1, G, sel) {
 const QUAD = 96;                                  // textured-sprite TA block size (paraType 5)
 const TCW_OFF = 0x0C;                             // TCW is word 3 of the 16B param header
 
-export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, quadGfx1s, quadColRow, opts) {
+export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, quadGfx1s, quadColRow, opts, quadMirror) {
     if (!cache._gfx)  cache._gfx = new Map();     // gfx1 base -> {n,offs,srt}
     if (!cache._dec)  cache._dec = new Map();     // "gfx1:sel" -> {lin,W,H,...} (decode memo)
     if (cache._dec.size > 4096) cache._dec.clear();  // bound the memo across many distinct poses
@@ -361,7 +373,7 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         parts.add(key);
         // STORAGE (col,row) for this tile. quadColRow is the authoritative grid index; fall back
         // to 0,0 (single-tile parts) if it's absent.
-        const col = quadColRow ? (quadColRow[2 * q] | 0) : 0;
+        const colRaw = quadColRow ? (quadColRow[2 * q] | 0) : 0;   // SCREEN col (Ax-ASC rank); -> storage col below
         const row = quadColRow ? (quadColRow[2 * q + 1] | 0) : 0;
         // TILE SIZE m = W/cols = H/rows (the engine's square per-tile pitch, finding 22-v2).
         // Derive cols/rows from this run's emitted grid extent (maxcol+1 / maxrow+1). m is
@@ -371,6 +383,28 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         const lin = p.lin, W = p.W, H = p.H;
         const e = quadColRow ? runExtent.get(key) : undefined;
         const cols = e ? (e.mc + 1) : 1, rows = e ? (e.mr + 1) : 1;
+        // STORAGE COLUMN vs the EFFECTIVE MIRROR (the per-side multi-column fix, 2026-07-03).
+        // render_frame's quadColRow gives col = Ax-ASC rank = the SCREEN column (left→right). The
+        // storage↔screen column direction REVERSES whenever the tile is horizontally mirrored on
+        // screen — mir = facing XOR per-part flip4000 (the texU mirror, loc_8c0346c4 neg-r8 gate):
+        // the leftmost screen tile must sample the RIGHTMOST storage column so that, once the
+        // per-tile texU mirror flips each tile, the WHOLE part reads as the correctly L/R-mirrored
+        // image. The old `col ASC for both` (render_frame 2026-06-14) flipped each column IN PLACE
+        // but never reordered them -> multi-column parts scrambled on the mirrored side (facing=1
+        // sel252/261/265: CURRENT 264/222/3714px wrong vs baker-mirrored; reversed col = 0px).
+        // Single-column parts (cols==1) and un-mirrored tiles are a no-op. MEASURED vs the byte-
+        // exact baker-mirrored (_screengate.mjs: facing=1 15/15, facing=0 clean). We key on the
+        // per-quad texU mirror (render_frame_quad_mirror) when the caller supplies it (folds in
+        // per-part flip4000); else fall back to the owning body's facing read from RAM (node+0x110)
+        // — correct for the flip4000==0 common case. (re_kb finding:per_side_storage_col_reverses
+        // — restored, keyed on the effective texU mirror.)
+        let flip;
+        if (quadMirror) { flip = quadMirror[q] & 1; }
+        else {
+            flip = cache._fac ? cache._fac.get(gfx1) : undefined;
+            if (flip === undefined) { if (!cache._fac) cache._fac = new Map(); flip = facingForGfx1(ram, gfx1); cache._fac.set(gfx1, flip); }
+        }
+        const col = flip ? (cols - 1 - colRaw) : colRaw;
         let m = cols > 0 ? (W / cols) : W;
         const mR = rows > 0 ? (H / rows) : H;
         if (mR < m) m = mR;                       // square tile = min (guards non-integer runs)
@@ -378,17 +412,23 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         // --- W>32 AND H>32 MULTI-TILE PART (m==32, cols>1, rows>1): copy the NATIVE storage chunk.
         // The engine stores such a part as ONE full-W×H PVR-twiddle blob whose 32×32 chunks follow
         // the PVR twiddle of the TILE grid; tile (col,row)'s VRAM is the chunk at twiddle(col,row).
-        //   - SQUARE grid (Tw==Th): x-first twiddle (twTile). e.g. sel124 128×128 4×4, sel231 64×64.
-        //   - NON-SQUARE grid (Tw!=Th): Y-FIRST twiddle (twTileYFirst), flycast's real _twiddleSlow
-        //     interleave. e.g. sel267/285/273 64×128 2×4.
-        // CONFIRMED-BY-MEASUREMENT 2026-06-15: both reproduce engine VRAM byte-exact (0 px diff vs
-        // flycast-twop across camcap/camcap2/sentinel/satwalk; tools/render-replica-poc/_test_blockmap.mjs).
+        //   - Y-FIRST twiddle (twTileYFirst) for BOTH square AND non-square grids — flycast's real
+        //     _twiddleSlow interleave (y-bit before x-bit). e.g. sel285 64×128 2×4, sel197 64×64 2×2,
+        //     sel124 128×128 4×4. (The prior `Tw==Th ? twTile(x-first)` split was WRONG; see below.)
+        // CONFIRMED-BY-MEASUREMENT 2026-07-03: reassembling the carved tiles reproduces the byte-exact
+        // baker (extract_gfx1_atlas full-span detwiddled lin) 0px for all parts, both chars, 4 frames.
         // SUPERSEDES the broken non-square LINEAR fall-through (re_kb/44): linear scattered the off-
         // diagonal tiles -> the POSE-DEPENDENT Storm-cape grey-block garble (frame _gsta_nobg_360).
         const Tw = (W / 32) | 0, Th = (H / 32) | 0;
         if (m === 32 && cols > 1 && rows > 1 && p.raw) {
-            const k = (Tw === Th) ? twTile(col, row, _log2i(Tw), _log2i(Th))
-                                  : twTileYFirst(col, row, Tw, Th);
+            // Y-FIRST for BOTH square and non-square grids. The PVR twiddle interleaves the
+            // y-bit before the x-bit (flycast _twiddleSlow), so tile-grid chunk order is
+            // Y-first universally. The old `Tw==Th ? twTile(x-first) : yfirst` split was WRONG
+            // for square grids (sel197 64x64 2x2 diff 1860/4096 vs the byte-exact baker
+            // extract_gfx1_atlas full-span lin); twTile's x-first square validation (re_kb/43)
+            // was against a self-consistent model, never the baker. Y-first matches the baker
+            // 0px for square AND non-square. (re_kb finding:carve_square_yfirst_supersedes_xfirst.)
+            const k = twTileYFirst(col, row, Tw, Th);
             const o = k * 512;
             if (o + 512 <= p.raw.length) { vram.set(p.raw.subarray(o, o + 512), addr); written++; continue; }
         }

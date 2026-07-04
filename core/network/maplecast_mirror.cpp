@@ -44,6 +44,11 @@
 #include "maplecast_control_ws.h"
 #include "maplecast_compress.h"
 #include "gsta_stage.h"        // native MVC2 stage renderer (global-namespace decls)
+#ifdef MAPLECAST_GSTA_CLIENT_BUILD
+#include "gsta_render_debug.h" // live render-debug globals (control-WS); MUST be at GLOBAL scope
+                               // (the namespace maplecast_mirror opens at line ~287, so including
+                               // this inside it would nest gsta_render_debug -> link/lookup errors).
+#endif
 
 // Reserved for future palette bank probe (see NOTE in serverPublish).
 uint64_t g_activePalBanks = 0;
@@ -3521,6 +3526,7 @@ static int64_t _clientNowUs() {
 static constexpr uint32_t GSTA_MCRR_MAGIC = 0x5252434Du;   // "MCRR"
 static constexpr uint32_t GSTA_FRMX_MAGIC = 0x784D5246u;   // "FRMx"
 static constexpr uint32_t GSTA_HUDQ_MAGIC = 0x48554451u;   // "HUDQ"
+static constexpr uint32_t GSTA_BTCW_MAGIC = 0x57435442u;   // "BTCW" (resolved-body-tcw tail)
 
 static bool                 _gstaMode = false;
 static std::atomic<bool>    _gstaSeeded{false};       // static prefix applied
@@ -3641,6 +3647,10 @@ static bool gstaApplyPrefix(const uint8_t* d, size_t n)
 static uint32_t gstaEmitSpriteTA_append(std::vector<uint8_t>& out)
 {
 	auto h16 = [](float f){ uint32_t u; memcpy(&u,&f,4); return (uint16_t)((u>>16)&0xFFFF); };
+	// LIVE render-debug (control-WS): body force-color (isolate body coverage).
+	auto& _DBG = ::gsta_render_debug::g();
+	const bool _bodyForceC = _DBG.bodyForceColorOn.load(std::memory_order_relaxed) != 0;
+	const uint32_t _bodyColARGB = _DBG.bodyForceColorARGB.load(std::memory_order_relaxed);
 	int n = render_frame_nscene();
 	const GstaSceneQuad* S = render_frame_scene();
 	const size_t startOff = out.size();
@@ -3703,7 +3713,7 @@ static uint32_t gstaEmitSpriteTA_append(std::vector<uint8_t>& out)
 		}
 		// param header
 		W32(o+0,pcw_ta); W32(o+4,q->isp); W32(o+8,tsp_ta); W32(o+12,q->tcw);
-		W32(o+16,0xFFFFFFFFu);          // sprite base color (opaque white, MODULATE identity)
+		W32(o+16, _bodyForceC ? _bodyColARGB : 0xFFFFFFFFu);   // sprite base color (white=MODULATE id; live override)
 		W32(o+32,0xE0000000u);          // sprite vtx PCW
 		WF(o+36,q->Ax); WF(o+40,q->Ay); WF(o+44,q->z);
 		WF(o+48,q->Bx); WF(o+52,q->By); WF(o+56,q->z);
@@ -3816,7 +3826,7 @@ struct GstaDecodedPart { std::vector<uint8_t> lin, raw; int W=0, H=0; size_t des
 
 // PVR rect-twiddle of TILE coords (col,row) in a Tw×Th tile grid -> storage chunk index k.
 // Port of body_decoder.mjs twTile. (re_kb finding:wide_part_tile_storage_order, MEASURED 0/16384.)
-static int gstaTwTile(int x, int y, int bx, int by) {
+[[maybe_unused]] static int gstaTwTile(int x, int y, int bx, int by) {  /* x-first: superseded by gstaTwTileYFirst (see carve) */
 	int r = 0, b = 0; int sq = bx < by ? bx : by;
 	for (int i = 0; i < sq; i++) { r |= ((x >> i) & 1) << b; b++; r |= ((y >> i) & 1) << b; b++; }
 	if (bx > by) r |= (x >> sq) << b; else if (by > bx) r |= (y >> sq) << b;
@@ -3980,7 +3990,7 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 			}
 		}
 
-		int col = colrow[2 * q], row = colrow[2 * q + 1];
+		int colRaw = colrow[2 * q], row = colrow[2 * q + 1];   // colRaw = SCREEN col (Ax-ASC); -> storage col below
 		int W = pd.W, H = pd.H;
 		// TILE SIZE m = W/cols = H/rows (engine's square per-tile pitch, finding 22-v2),
 		// derived from this run's emitted grid extent. Clamp to the 32×32 carve window the
@@ -3989,6 +3999,18 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 		auto re = runExt.find(key);   /* key == (gfx1<<32)|sel, same run id */
 		int cols = (re != runExt.end()) ? (re->second.mc + 1) : 1;
 		int rows = (re != runExt.end()) ? (re->second.mr + 1) : 1;
+		// STORAGE COLUMN vs the EFFECTIVE MIRROR (per-side multi-column fix, 2026-07-03). colRaw is
+		// the SCREEN col (Ax-ASC rank); the storage↔screen column direction REVERSES whenever the
+		// tile is horizontally mirrored on screen (S[q].mirror = facing XOR per-part flip4000, the
+		// texU mirror / loc_8c0346c4 neg-r8 gate). The leftmost screen tile must sample the RIGHTMOST
+		// storage column so that, once the per-tile texU mirror flips each tile, the WHOLE part reads
+		// as the correctly L/R-mirrored image. The old `col ASC for both` flipped each column IN PLACE
+		// but never reordered them -> multi-column parts scrambled on the mirrored side (facing=1
+		// sel252/261/265: 264/222/3714px wrong vs baker-mirrored; reversed col = 0px). cols==1 and
+		// un-mirrored tiles are a no-op. Lockstep with body_decoder.mjs ensureBodyTextures. MEASURED
+		// vs the byte-exact baker-mirrored (_screengate.mjs facing=1 15/15). (re_kb finding:
+		// per_side_storage_col_reverses — restored, keyed on the effective texU mirror.)
+		int col = (S[q].mirror & 1u) ? (cols - 1 - colRaw) : colRaw;
 		int m = (cols > 0) ? (W / cols) : W;
 		int mR = (rows > 0) ? (H / rows) : H;
 		if (mR < m) m = mR;
@@ -3996,17 +4018,24 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 		// --- W>32 AND H>32 MULTI-TILE PART (m==32, cols>1, rows>1): copy the NATIVE storage chunk.
 		// The engine stores such a part as ONE full-W×H PVR-twiddle blob whose 32×32 chunks follow
 		// the PVR twiddle of the TILE grid; tile (col,row)'s VRAM is the chunk at twiddle(col,row).
-		//   - SQUARE grid (Tw==Th): x-first twiddle (gstaTwTile). e.g. sel124 128×128 4×4, sel231 64×64.
-		//   - NON-SQUARE grid (Tw!=Th): Y-FIRST twiddle (gstaTwTileYFirst), flycast's real _twiddleSlow
-		//     interleave. e.g. sel267/285/273 64×128 2×4.
-		// CONFIRMED-BY-MEASUREMENT 2026-06-15: both reproduce engine VRAM byte-exact (0 px diff vs
-		// flycast-twop across camcap/camcap2/sentinel/satwalk; tools/render-replica-poc/_test_blockmap.mjs).
+		//   - Y-FIRST twiddle (gstaTwTileYFirst) for BOTH square AND non-square grids — flycast's real
+		//     _twiddleSlow interleave (y-bit before x-bit). e.g. sel285 64×128 2×4, sel197 64×64 2×2,
+		//     sel124 128×128 4×4. (The prior `Tw==Th ? gstaTwTile(x-first)` split was WRONG; see below.)
+		// CONFIRMED-BY-MEASUREMENT 2026-07-03: reassembling the carved tiles reproduces the byte-exact
+		// baker (extract_gfx1_atlas full-span detwiddled lin) 0px for all parts, both chars, 4 frames.
 		// SUPERSEDES the broken non-square LINEAR fall-through (re_kb/44 was wrong): linear scattered
 		// the off-diagonal tiles -> the POSE-DEPENDENT Storm-cape grey-block garble (_gsta_nobg_360).
 		int Tw = W / 32, Th = H / 32;
 		if (m == 32 && cols > 1 && rows > 1 && !pd.raw.empty()) {
-			int k = (Tw == Th) ? gstaTwTile(col, row, gsta_log2i(Tw), gsta_log2i(Th))
-			                   : gstaTwTileYFirst(col, row, Tw, Th);
+			// Y-FIRST for BOTH square and non-square grids. The PVR twiddle interleaves the
+			// y-bit before the x-bit (flycast _twiddleSlow), so tile-grid chunk order is Y-first
+			// universally. The old `Tw==Th ? gstaTwTile(x-first) : yfirst` split was WRONG for
+			// square grids (sel197 64x64 2x2 diff 1860/4096 vs the byte-exact baker
+			// extract_gfx1_atlas full-span lin); gstaTwTile's x-first square validation (re_kb/43)
+			// was against a self-consistent model, never the baker. Y-first matches the baker 0px
+			// for square AND non-square. Lockstep with body_decoder.mjs ensureBodyTextures.
+			// (re_kb finding:carve_square_yfirst_supersedes_xfirst.)
+			int k = gstaTwTileYFirst(col, row, Tw, Th);
 			size_t o = (size_t)k * 512;
 			if (o + 512 <= pd.raw.size()) {
 				outTiles.emplace_back();
@@ -4261,9 +4290,23 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 		if (nHud <= 4096 && p + (size_t)nHud * 96 <= n) {
 			// HudQuads are already-final PVR quads (4 corners + UV + col + PVR words). The wire
 			// HudQuad layout: f32 x[4],y[4]; f32 u[4],v[4]; u32 col[4]; u32 pcw,isp,tsp,tcw.
-			// Re-emit each as a paraType-5 sprite-TA block (the M4 HUD path).
-			hudTa = gstaBuildHudTA(d + p, nHud);
+			// Re-emit each as a paraType-5 sprite-TA block (the M4 HUD path). LIVE: hudqOn gate.
+			if (::gsta_render_debug::g().hudqOn.load(std::memory_order_relaxed))
+				hudTa = gstaBuildHudTA(d + p, nHud);
 			p += (size_t)nHud * 96;
+		}
+	}
+
+	// ---- BTCW TAIL: u32 magic "BTCW", u32 nWords, nWords u32 (per body [node][ntiles][tcw...]).
+	// The engine's RESOLVED per-tile body tcws (parity-flip fix). Hand them to render_frame, which
+	// uses them verbatim for body tiles instead of the parity-sensitive rectab[idxtab[alloc]] lookup. ----
+	render_frame_set_body_tcws(nullptr, 0);          // clear last frame's (default: no override)
+	if (p + 8 <= n && gle32(d + p) == GSTA_BTCW_MAGIC) {
+		p += 4;
+		uint32_t nWords = gle32(d + p); p += 4;
+		if (nWords <= (size_t)(6 * (2 + 64)) && p + (size_t)nWords * 4 <= n) {
+			render_frame_set_body_tcws((const uint32_t*)(d + p), (int)nWords);
+			p += (size_t)nWords * 4;
 		}
 	}
 
@@ -4274,6 +4317,91 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 	_gstaCtx.ram = _gstaRam.data();
 	render_frame(&_gstaCtx);
 	int nQuad = render_frame_nscene();
+
+	// ---- PALETTE FIX (Cable-all-blue root cause; verified 402/402 + Storm 68/0 in replay of
+	// gsta_rec.bin). MVC2 body sprites are paletted and the ENGINE latches the palette PER-DRAW,
+	// time-multiplexing the shared PVR PALETTE_RAM bank (e.g. Cable=bank24). The serverPublish()
+	// snapshot catches whatever was LAST written, so ~44% of frames snapshot bank24 mid-BLUE (an
+	// effect/aura palette), and the body then samples blue. The STABLE, per-object truth is the
+	// resident Dat_Pal @char+0x164 (a 16-color ARGB4444 window that never corrupts — MEASURED
+	// 0x0C90BA00 valid + purple in all 913 frames). FIX: bake each active body slot's Dat_Pal into
+	// a PRIVATE, otherwise-unused PVR palette bank (banks 0..5 — banks 16..63 hold the shared/effect
+	// palettes; 0..15 are empty across the whole recording) and repoint that slot's body quads'
+	// TCW.PalSelect to it. Pure client change; Dat_Pal already ships in the prefix's full 16MB RAM.
+	// (finalize_body's bank-25 preserve is the WRONG diagnosis — bank25 is a constant, never Cable.)
+	{
+		static const uint32_t GFIX_CHAR_BASE[6] =
+			{ 0x268340,0x2688E4,0x268E88,0x26942C,0x2699D0,0x269F74 };
+		// PALETTE_RAM lives at pvr_regs offset 0x1000 (u32/entry). Private bank b -> entries b*16..b*16+15.
+		uint32_t* palRam = (uint32_t*)(pvr_regs + 0x1000);
+		uint32_t gfxOfSlot[6]; int privBankOfSlot[6];
+		for (int s = 0; s < 6; s++) { gfxOfSlot[s] = 0; privBankOfSlot[s] = -1; }
+		for (int s = 0; s < 6; s++) {
+			uint32_t base = GFIX_CHAR_BASE[s];
+			if (_gstaRam[base & 0x00FFFFFFu] == 0) continue;   // slot inactive (+0x000 active)
+			uint32_t gfx1 = gle32(&_gstaRam[(base + 0x15C) & 0x00FFFFFFu]);   // node+0x15C GFX1 base
+			uint32_t datpal = gle32(&_gstaRam[(base + 0x164) & 0x00FFFFFFu]); // node+0x164 Dat_Pal ptr
+			if (((datpal >> 24) & 0x7Fu) != 0x0Cu) continue;   // not an area-3 pointer -> skip
+			int b = s;                                          // private bank = slot index (0..5)
+			const uint8_t* dp = &_gstaRam[datpal & 0x00FFFFFFu];// 16 ARGB4444 LE entries
+			for (int i = 0; i < 16; i++) {
+				uint16_t argb4 = (uint16_t)(dp[i*2] | (dp[i*2+1] << 8));
+				// PVR PALETTE_RAM holds the raw palette word in the PAL_RAM_CTRL format; MVC2 body
+				// palettes are ARGB4444, matching the recording's PAL_RAM_CTRL=2. Store verbatim.
+				palRam[b*16 + i] = (uint32_t)argb4;
+			}
+			gfxOfSlot[s] = gfx1; privBankOfSlot[s] = b;
+			palDirty = true;
+		}
+		// Repoint each body quad's TCW.PalSelect (bits 21..26) to its owning slot's private bank.
+		// The scene is a static array in render_frame.c; safe to mutate in-place for this frame.
+		GstaSceneQuad* Sq = const_cast<GstaSceneQuad*>(render_frame_scene());
+		for (int q = 0; q < nQuad; q++) {
+			for (int s = 0; s < 6; s++) {
+				if (privBankOfSlot[s] < 0) continue;
+				if (Sq[q].gfx1 == gfxOfSlot[s]) {
+					Sq[q].tcw = (Sq[q].tcw & 0xF81FFFFFu)
+					          | ((uint32_t)(privBankOfSlot[s] & 0x3F) << 21);
+					break;
+				}
+			}
+		}
+	}
+
+	// ---- TEXCACHE-STABILITY FIX: body sprite "bounce" (2026-07-03, CONFIRMED-BY-MEASUREMENT).
+	// The engine DOUBLE-BUFFERS each body's decoded texture into TWO VRAM parity halves that are
+	// exactly 0x30000 bytes apart, selected per-frame by the arena parity *(0x8C1F9D94) — MEASURED
+	// 16 => LOW half (texaddr 0x41xxxx) and 400 => HIGH half (texaddr 0x44xxxx). The body quad's
+	// TCW texaddr therefore ALTERNATES 0x41xxxx<->0x44xxxx every frame. Content at both halves is
+	// byte-identical (expert VRAM check + parity_probe.mjs: delta is a constant 0x30000 for BOTH
+	// bodies AND their satellites across every frame), so the flip is HARMLESS to the engine's
+	// render — but on the CLIENT the pvr2 texture cache keys on texaddr, so the per-frame
+	// alternation thrashes two cache entries and re-uploads out of step with the render thread =
+	// the visible sprite "bounce" (offline reconstruction is PROVEN bounce-free: sel+col/row 0/56
+	// stable across the flip, write-dest == sample-src). FIX: PIN every body quad to the LOW
+	// (arena==16) parity. On a HIGH-parity frame subtract 0x30000 bytes (= 0x6000 in the TCW
+	// texaddr WORD field) so the quad samples ONE stable address every frame -> the texcache sees a
+	// single entry per tile -> no thrash. gstaDecodeBodies reads this SAME mutated scene, so the
+	// tile WRITE lands at the identical canonical address (write==sample invariant preserved). The
+	// low half is always resident (shipped in the prefix + it is exactly what the correct arena==16
+	// frames already render). Lossless (identical bytes). Escape hatch: MAPLECAST_BODY_PARITY_PIN=0.
+	{
+		const char* pinE = std::getenv("MAPLECAST_BODY_PARITY_PIN");
+		bool pin = !(pinE && pinE[0]=='0');
+		uint32_t arena = gle32(&_gstaRam[0x1F9D94]);
+		if (pin && arena == 400) {
+			GstaSceneQuad* Sq2 = const_cast<GstaSceneQuad*>(render_frame_scene());
+			for (int q = 0; q < nQuad; q++) {
+				uint32_t g = Sq2[q].gfx1;
+				bool isBody = ((g & 0x0C000000u) || (g & 0x8C000000u))
+				              && !(g >= 0x0CED0000u && g < 0x0CEE0000u);
+				if (!isBody) continue;
+				uint32_t ta = Sq2[q].tcw & 0x1FFFFFu;
+				if (ta >= 0x6000u)
+					Sq2[q].tcw = (Sq2[q].tcw & ~0x1FFFFFu) | (ta - 0x6000u);
+			}
+		}
+	}
 
 	if (prof) { double t=_gnow(); _gprof.render += t-t0; t0=t; }
 
@@ -4314,6 +4442,15 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 
 	size_t stagePrefixLen = fr.ta.size();      // bytes occupied by the stage OP list (+EOL)
 	size_t bodyLen = stagePrefixLen + gstaEmitSpriteTA_append(fr.ta);   // == fr.ta.size()
+
+	// LIVE render-debug (control-WS): bodyOn=0 (or SOLO stage/hud) strips the body/scene TA
+	// (render_frame output), leaving stage+HUD only — isolate HUD/stage from bodies, no rebuild.
+	{
+		auto& _D = ::gsta_render_debug::g();
+		int _solo = _D.soloMode.load(std::memory_order_relaxed);   // 1 stage, 2 body, 3 hud
+		bool _hideBody = (_D.bodyOn.load(std::memory_order_relaxed) == 0) || _solo == 1 || _solo == 3;
+		if (_hideBody) { fr.ta.resize(stagePrefixLen); bodyLen = stagePrefixLen; }
+	}
 
 	// DIAGNOSTIC: HUD_DIAG>=3 strips the body/scene TA (render_frame output) too, leaving ONLY
 	// the stage. If the bars STILL persist with =3, they are in neither hudTa nor render_frame.
@@ -4663,7 +4800,19 @@ bool clientReceiveGsta(rend_context& rc, bool& vramDirty)
 		renderer->updatePalette = true; renderer->updateFogTable = true;
 	}
 
-	if (renderer) { renderer->Process(&ctx); rc = ctx.rend; }
+	if (renderer) {
+		renderer->Process(&ctx);
+		// LIVE render-debug (control-WS): per-TA-LIST isolation. Clearing a parsed list's
+		// PolyParam vector before Render() suppresses that whole list (OP / PT / TR) — lets the
+		// user isolate which list carries which geometry. Defaults on (no-op) when all enabled.
+		{
+			auto& _D = ::gsta_render_debug::g();
+			if (_D.listOpaqueOn.load(std::memory_order_relaxed) == 0) ctx.rend.global_param_op.clear();
+			if (_D.listPunchOn .load(std::memory_order_relaxed) == 0) ctx.rend.global_param_pt.clear();
+			if (_D.listTransOn .load(std::memory_order_relaxed) == 0) ctx.rend.global_param_tr.clear();
+		}
+		rc = ctx.rend;
+	}
 
 	// Diagnostic: confirm ta_parse produced actual geometry (op/pt/tr poly params +
 	// verts). All-zero here means the TA framing is still malformed.

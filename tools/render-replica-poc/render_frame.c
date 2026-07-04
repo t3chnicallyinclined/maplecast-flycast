@@ -124,6 +124,58 @@ typedef struct { float bx, by; u32 alloc_index; u32 sel; u32 flip4000;
 static TileCap g_cap[MAXQ];
 static int g_ncap = 0;
 
+/* ---- SHIP-RESOLVED-BODY-TCW (2026-07-03, finding:ship_resolved_body_tcw) ----
+ * The engine's RESOLVED per-tile body tcw (r12+0x0C at the submit) is STABLE; render_frame's own
+ * rectab[idxtab[alloc_index]] resolution FLIPS every frame with the arena_base parity (16<->400)
+ * -> the frame-to-frame texture bounce. The headless captures the resolved tcw per (body node, tile
+ * index in render order) and ships it (BTCW wire tail). render_frame_set_body_tcws() hands us that
+ * buffer; for BODY tiles we look up (node, k) and use the shipped tcw VERBATIM, bypassing the
+ * parity-sensitive table lookup. Layout: per body [u32 node(0x0C..)][u32 ntiles][ntiles u32 tcw]. */
+#ifdef BODYTCW_DEBUG
+#include <stdio.h>
+#endif
+static const u32* g_bodyTcwBuf = 0;
+static int        g_bodyTcwWords = 0;
+void render_frame_set_body_tcws(const u32* buf, int nWords){
+    g_bodyTcwBuf = (buf && nWords > 0) ? buf : 0;
+    g_bodyTcwWords = (buf && nWords > 0) ? nWords : 0;
+#ifdef BODYTCW_DEBUG
+    fprintf(stderr,"[BTSET] buf=%p nWords=%d -> g_words=%d\n", (void*)buf, nWords, g_bodyTcwWords);
+#endif
+}
+/* Look up the shipped resolved tcw for (node, tileIdx). Returns 1 + writes *out on hit, else 0.
+ * node is the render_frame node base (may be 0x8C.. or 0x0C..); the wire keys on the 0x0C.. alias. */
+#ifdef BODYTCW_DEBUG
+static int g_btDbg = 0;
+#endif
+static int body_tcw_lookup(u32 node, int tileIdx, u32* out){
+    if(!g_bodyTcwBuf) {
+#ifdef BODYTCW_DEBUG
+        if(g_btDbg++ < 3) fprintf(stderr,"[BTDBG] buf NULL (node=0x%08X words=%d)\n", node, g_bodyTcwWords);
+#endif
+        return 0;
+    }
+    u32 key = (node & 0x0FFFFFFFu) | 0x0C000000u;   /* normalize to the 0x0C.. alias the wire uses */
+    int i = 0;
+#ifdef BODYTCW_DEBUG
+    if(key==0x0C268340u && tileIdx==0) fprintf(stderr,"[BTDBG] CHARBODY lookup node=0x%08X key=0x%08X words=%d buf0=0x%08X buf1=%u\n",
+        node, key, g_bodyTcwWords, g_bodyTcwBuf[0], g_bodyTcwBuf[1]);
+#endif
+    while(i + 2 <= g_bodyTcwWords){
+        u32 bnode = g_bodyTcwBuf[i];
+        u32 nt    = g_bodyTcwBuf[i+1];
+        if(((bnode & 0x0FFFFFFFu) | 0x0C000000u) == key){
+            if(tileIdx >= 0 && (u32)tileIdx < nt && (i + 2 + tileIdx) < g_bodyTcwWords){
+                *out = g_bodyTcwBuf[i + 2 + tileIdx];
+                return 1;
+            }
+            return 0;   /* body found but tile index out of range -> no override (fall back) */
+        }
+        i += 2 + (int)nt;   /* skip to next body record */
+    }
+    return 0;
+}
+
 void submit_1244b0(Sh4Ctx *c){
     u32 r4 = c->r[4];                 /* = r15+0x2C, the per-tile stack record */
     /* SOURCE CELL SEL for this tile. The walker (gen_walker.c loc_8c0344d4) reads the
@@ -232,6 +284,83 @@ static u32 palbank_for(u32 node){
  * that here so the screen tile extent W=m*scaleX, H=m*scaleY matches the walker. */
 #define DESC_TABLE 0x8C1F9F9Cu
 
+/* ============================================================================
+ * rebuild_tile_grid — GFX1-DERIVED tile-grid regeneration (the racy-tiledes fix).
+ *
+ * ROOT CAUSE: the per-frame descriptor table @0x8C1F9F9C (built by the engine's
+ * loc_8c033ba8->loc_8c033ce0 from the RESIDENT GFX1 part headers) ships TORN/STALE
+ * over the wire — a prior pose's slice bleeds in. The body walker loc_8c0344d4 is
+ * FAITHFUL: it reads count + per-tile (col,row) steps from that table and emits one
+ * tile per entry. On a torn slice an 8x8 part (physically ONE 8x8 tile) carries a
+ * stale 8-tile count with a marching Y column -> the walker faithfully lays 8 tiles
+ * marching off-screen (the "column past cy 480" garble). The walker is right; its
+ * INPUT is stale.
+ *
+ * FIX: before running the walker, REGENERATE this body's descriptor slice from the
+ * RESIDENT GFX1 headers (which ARE pose-correct — resident, not per-frame torn),
+ * reproducing the engine builder byte-for-byte:
+ *   sel=u16(rec+6); hdr=GFX1base+u32(GFX1base+sel*4); sw=u8(hdr+2), sh=u8(hdr+3)
+ *   W=sw*8, H=sh*8; d=min(W,H); m=(d==8?8:d==16?16:32)      (bank03 loc_8c033be0)
+ *   cols=W/m, rows=H/m, count=cols*rows   (== engine (W*H/2)/{0x20,0x80,0x200})
+ *   per-tile [0]=m, [1]=count-1, [2]=col, [3]=rows-row, emitted in the engine's
+ *   2-row-band twiddle order (by 2-row band from top; col mid; row inner).
+ * VALIDATED byte-exact (m,count,col,row all 4 bytes) vs the shipped table on the
+ * fully-clean frames f96/f98 (46/46 records, 0 mismatch), and == the dominant
+ * (clean) shipped value across 850+ frames per sel (_genval/_stale probes); on torn
+ * frames it REPLACES the stale slice with the pose-correct one. Refs: bank03
+ * loc_8c033ba8..loc_8c033ce0; re_kb finding:inner_tile_loop_descriptor (22),
+ * finding:tiling_geometry_byte_faithful (17). Body-only (bit15 effects use the
+ * separate scale-walker path). This feeds BOTH the walker position pen AND the
+ * per-tile extent read (render_object_full_ex m=u8(DESC_TABLE+(dc+k)*4)). */
+static void rebuild_tile_grid(Sh4Ctx *c, u32 node){
+    u32 gfx2 = r32(c, node+0x160);
+    u32 gfx1 = r32(c, node+0x15C);
+    if(!gfx2 || !gfx1) return;
+    u32 sid  = r16u(c, node+0x144) & 0x7FFFu;
+    u32 dc   = r16u(c, node+0xDC);
+    u32 cell = r32(c, gfx2 + (sid<<2)) + gfx2;
+    u32 nrec = r16u(c, cell);
+    if(nrec==0 || nrec>256) return;          /* guard against a corrupt cell */
+    u32 rec  = cell + 2;
+    u32 idx  = dc;                            /* tile cursor into DESC_TABLE (== walker seed) */
+    for(u32 r=0; r<nrec; r++, rec+=8){
+        u32 sel = r16u(c, rec+6);
+        if((sel & 0xFFFFu) == 0xFFu) continue;   /* blank record: emits no tile (walker skips 0xFF) */
+        u32 off = r32(c, gfx1 + (sel<<2));
+        u32 hdr = gfx1 + off;
+        u32 sw = r8u(c, hdr+2), sh = r8u(c, hdr+3);
+        u32 W = sw*8u, H = sh*8u;
+        if(W==0 || H==0) continue;
+        u32 d = (W<H)?W:H;
+        u32 m = (d==8u)?8u : (d==16u)?16u : 32u;
+        u32 cols = W/m, rows = H/m;
+        u32 cnt  = cols*rows; if(cnt==0) cnt=1;
+        if(idx + cnt > 768u) return;             /* table is 768 entries; never overrun it */
+        u32 t = 0;
+        for(u32 by=0; by<rows; by+=2){
+            u32 bh = (rows - by < 2u) ? (rows - by) : 2u;
+            for(u32 cx=0; cx<cols; cx++){
+                for(u32 ry=0; ry<bh; ry++){
+                    u32 row = by + ry;
+                    u32 a = DESC_TABLE + (idx + t)*4u;
+                    w8(c, a+0, (u8)m);
+                    w8(c, a+1, (u8)(cnt-1));
+                    w8(c, a+2, (u8)cx);
+                    w8(c, a+3, (u8)(rows - row));
+                    t++;
+                }
+            }
+        }
+        idx += cnt;
+    }
+}
+
+/* +0xDC budget-table helpers (defined below with the g_dc_table state) — forward-declared
+ * so render_object_full_ex can clamp the body tile count to its arena budget. */
+static void dc_table_reset(void);
+static void dc_table_add(Sh4Ctx *c, u32 node);
+static u32  dc_budget(Sh4Ctx *c, u32 node);
+
 /* render_object_full_ex: the shared per-object body render. `is_sat` selects which engine
  * setup routine deposits the per-frame walker fields:
  *   cat==0 BODY      -> render_object_setup_03093c (loc_8c03093c "Render Main Sprite")
@@ -279,6 +408,16 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
          * MEASURED (garble_diff vs engine TA, vframe97425 + motion70): removing the repair takes the
          * body from 4/75 to 70/70 full-quad exact; resident +0xDC is authoritative every frame.
          * (finding:gsta_cursor_repair_first_body_regression, 2026-07-02.) */
+        /* RACY-TILEDES FIX: regenerate this body's descriptor slice from the RESIDENT
+         * GFX1 headers so the walker consumes a pose-correct grid instead of the torn
+         * per-frame table (cures the marching phantom column). Writes into wc.ram ==
+         * c->ram at DESC_TABLE+dc*4, exactly where the walker (and the extent read
+         * below) will look. See rebuild_tile_grid header for the byte-exact validation. */
+        /* A/B TOGGLE (user-confirmable): MAPLECAST_TILEGRID=0 disables the descriptor
+         * regeneration so the walker consumes the raw (torn) per-frame tiledes — i.e.
+         * the OLD behavior. Default ON. Lets the user flip the fix in/out live. */
+        { const char* _tg = getenv("MAPLECAST_TILEGRID");
+          if (!(_tg && _tg[0]=='0')) rebuild_tile_grid(&wc, node); }
         walker_0344d4(&wc);              /* character body: multi-tile walker (resident +0xDC) */
     }
     int ntiles = g_ncap;
@@ -293,6 +432,18 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
     if(ntiles >= MAXQ){
         return 0;   /* report 0 tiles: cursor advance unaffected (engine still owns +0xDC) */
     }
+
+    /* ---- +0xDC BUDGET CLAMP: REMOVED (superseded by rebuild_tile_grid) ---------------
+     * The old clamp cut the body's tile count to (next active +0xDC - this +0xDC) to hide
+     * the OVER-emission that a torn/inflated per-frame tiledesc caused. rebuild_tile_grid
+     * now regenerates each body's descriptor slice from the RESIDENT GFX1 headers, so the
+     * walker self-terminates at the correct GFX1-derived count and the clamp has nothing to
+     * cut. VERIFIED: with rebuild_tile_grid in place the clamp is a NO-OP on all 1762 frames
+     * of _cape_live (A/B build with/without -DMC_DC_CLAMP: byte-identical _posviz scan
+     * 1754/1762, worst 213px@f850, median 69px; Storm 24/24, Cable 27/27; ZERO new runaway
+     * or off-screen column on any frame). The MAXQ corruption gate above remains the runaway
+     * backstop. (The clamp was the descriptor bug's band-aid; the fix removes the wound.) */
+    (void)dc_budget;
 
     /* ---- per-tile: compute params from resident rectab[idxtab[alloc_index]] + UV ---- */
     float sxs = rf(c, node+0xEC), sys = rf(c, node+0xF0);
@@ -324,6 +475,22 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
          * Here we just emit the body-resolved quad and TAG it (g_scene_is_effect) so the
          * post-pass re-resolves its TCW from the contiguous effect rectab block. */
         submit_params(c, g_cap[k].alloc_index, palbank, &pp);
+
+        /* SHIP-RESOLVED-BODY-TCW OVERRIDE (BODY tiles only): replace the parity-flipping
+         * rectab[idxtab[alloc]] tcw with the engine's RESOLVED per-tile tcw shipped for
+         * (node, k). Effects (_is_effect) keep their own path untouched. When no tcw was
+         * shipped for this tile (or no BTCW tail this frame) we fall back to pp.tcw. */
+        if(!_is_effect){
+            u32 shippedTcw;
+            if(body_tcw_lookup(node, k, &shippedTcw)) {
+#ifdef BODYTCW_DEBUG
+                if(((node&0x0FFFFFFFu)|0x0C000000u)==0x0C268340u && k<2)
+                    fprintf(stderr,"[BTOVR] node char tile=%d pp.tcw 0x%08X -> shipped 0x%08X (tex 0x%X->0x%X)\n",
+                        k, pp.tcw, shippedTcw, (pp.tcw&0x1FFFFF)<<3, (shippedTcw&0x1FFFFF)<<3);
+#endif
+                pp.tcw = shippedTcw;
+            }
+        }
 
         /* tile m: the descriptor byte0 for this tile. Re-derive from the resident table
          * exactly as the walker did: idx into DESC_TABLE = node+0xDC + (tile's record).
@@ -432,6 +599,33 @@ int render_object_full_satellite(Sh4Ctx *c, u32 node){ return render_object_full
  * ==========================================================================*/
 void render_sprites_0308c2(Sh4Ctx *c);   /* gen_walker_root.c */
 
+/* +0xDC BUDGET pre-pass: walk the on-screen slot table exactly like render_sprites_0308c2
+ * (gen_walker_root.c, loc_8c0308c2) but ONLY collect each active node's resident +0xDC into
+ * g_dc_table, so dc_budget() can clamp each body to (next active +0xDC - this +0xDC). Kept
+ * HERE in render_frame.c (NOT the auto-generated gen_walker_root.c) so the generator can''t
+ * clobber it. Node-enumeration gates are byte-identical to the render walk. */
+static void collect_dc_0308c2(Sh4Ctx *c){
+    const u32 COUNT_BASE = 0x8C2895E0u, PTR_BASE = 0x8C287DE0u, LAYER_STRIDE = 0x180u;
+    u32 r8 = COUNT_BASE + 0x10u, r12 = PTR_BASE, r13 = COUNT_BASE;
+    for(;;){
+        u32 r10 = r12, r14 = 0;
+        for(;;){
+            s32 count = r8s(c, r13);
+            if(!((s32)r14 < count)) break;
+            if(count > 0x60) break;
+            u32 node = r32(c, r10 + (r14 << 2));
+            if(node == 0 || (((node >> 24) & 0x7Fu) != 0x0Cu)){ r14++; continue; }
+            /* ACTIVE GATE — must match render_sprites_0308c2 (gen_walker_root.c) exactly, or the
+             * +0xDC budget prefix-sum would count tiles for objects the render walk skips. */
+            if(r8u(c, node + 0x00u) == 0){ r14++; continue; }
+            dc_table_add(c, node);   /* both cat==0 body and cat 1..4 satellite share the arena */
+            r14++;
+        }
+        r13 += 1; r12 += LAYER_STRIDE;
+        if(!(r13 < r8)) break;
+    }
+}
+
 /* CAT 1..4 dispatch (loc_8c030af8). The slot-walk routes node+0x3 in [1,5) here. The
  * routine itself (bank03:1538-1552) re-gates 0 < cat < 5 and reads node+0x12C; a body-
  * sprite satellite then deposits the walker fields and emits through loc_8c0344d4. We run
@@ -460,6 +654,34 @@ void render_effect_030af8(Sh4Ctx *c, u32 node){
  * engine's resident node+0xDC for every body object. These are exposed for the harness. */
 int   g_body_count = 0;          /* how many body objects render_frame rendered      */
 int   g_sat_count  = 0;          /* how many cat 1..4 satellites render_frame rendered */
+
+/* ---- +0xDC BUDGET TABLE (the arena prefix-sum, engine-authoritative) --------------
+ * The engine deposits node+0xDC as a per-object PREFIX-SUM into the tile-alloc arena
+ * (loc_8c033b0a; body0 dc=0, body1 dc=38, ...). Each object's ALLOCATED tile budget is
+ * therefore (the next-larger active +0xDC) - (this object's +0xDC). The engine's EFFECTIVE
+ * per-body output equals that budget (measured: Storm body renders 36 == its 38-slot budget;
+ * the tiledesc byte1-sum captured over the wire is inflated to 59-70 because our snapshot
+ * grabs the descriptor table at a DIFFERENT instant than the ROM's walk). Clamping the
+ * walker's emitted tile count to this budget REPRODUCES the ROM's effective output (it does
+ * NOT diverge — the ROM at its own walk instant reads a descriptor already == the budget).
+ * We collect every active body/satellite node's +0xDC in a pre-pass so dc_budget() can find
+ * the next-larger value order-independently (the slot walk is NOT in +0xDC order). */
+static u32 g_dc_table[128];      /* all active nodes' resident +0xDC this frame */
+static int g_dc_count = 0;
+static void dc_table_reset(void){ g_dc_count = 0; }
+static void dc_table_add(Sh4Ctx *c, u32 node){
+    if(g_dc_count < 128){ g_dc_table[g_dc_count++] = r16u(c, node + 0xDCu); }
+}
+/* budget for `node` = (smallest active +0xDC strictly greater than this node's dc) - dc.
+ * Returns a large sentinel if this node has the maximum dc (last in the arena -> no clamp). */
+static u32 dc_budget(Sh4Ctx *c, u32 node){
+    u32 dc = r16u(c, node + 0xDCu);
+    u32 next = 0xFFFFFFFFu;
+    for(int i=0;i<g_dc_count;i++){ u32 v = g_dc_table[i]; if(v > dc && v < next) next = v; }
+    if(next == 0xFFFFFFFFu) return 0xFFFFFFFFu;   /* last object: no upper bound */
+    return next - dc;
+}
+
 u32   g_obj_dc_resident[64];     /* resident node+0xDC per body (engine prefix-sum)   */
 u32   g_obj_dc_computed[64];     /* render_frame's running-cursor prefix-sum          */
 int   g_obj_ntiles[64];          /* tiles each body emitted                           */
@@ -503,6 +725,7 @@ void render_frame_satellite_hook(Sh4Ctx *c, u32 node){
  * the scene TA accumulator. Caller reads g_scene[0..g_nscene) and the per-object proof. */
 void render_frame_reset(void){
     g_nscene=0; g_body_count=0; g_sat_count=0; s_running_cursor=0;
+    dc_table_reset();               /* clear the +0xDC budget table for this frame */
     /* EFFECT TCW post-pass state is PER-FRAME (recomputed in render_frame_fix_effect_tcws from
      * g_scene_is_effect + the per-frame min recidx) — nothing to reset here. */
 }
@@ -631,6 +854,11 @@ static void render_frame_cull_85xxx(void){
 
 void render_frame(Sh4Ctx *c){
     render_frame_reset();
+    /* +0xDC BUDGET PRE-PASS: collect every active node's resident +0xDC BEFORE rendering, so
+     * dc_budget() can clamp each body to (next-larger active +0xDC - this dc) = its arena-
+     * allocated tile count. This reproduces the engine's EFFECTIVE per-body output (== budget)
+     * and cures the over-emission caused by the wire's inflated tiledesc byte1-sum. */
+    collect_dc_0308c2(c);
     render_sprites_0308c2(c);   /* the transpiled loc_8c0308c2; calls render_object_full */
     /* EFFECT-TCW POST-PASS REMOVED (2026-07-02, finding:effect_tcw_postpass_obsolete). The
      * per-frame render_frame_fix_effect_tcws forced effect quads into a "contiguous effect block"
