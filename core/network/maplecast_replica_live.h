@@ -66,6 +66,43 @@ void snapshotCharPassTables();
 // gated on the realBody char-pass discriminator. captureFrame ships this tiledesc snapshot.
 void snapshotCharPassTiledesc();
 
+// WALK-INSTANT TILEDESC SNAPSHOT (2026-07-02, finding:tiledesc_walk_instant_snapshot). Snapshots
+// the tiledesc @0x8C1F9F9C at the BODY-WALKER ENTRY (loc_8c0344d4, PC 0x8C0344D4), where its
+// per-record byte1 is the AUTHORITATIVE pre-consumption count (== +0xDC budget; TDTILE ground
+// truth). At STARTRENDER the byte1 is already inflated (re-seed). Called from the oracle hook on
+// the FIRST char-body walk of each video frame. When active (default, MAPLECAST_TILEDESC_WALKSNAP),
+// it OWNS the tiledesc snapshot and snapshotCharPassTiledesc becomes a no-op (it fires later/stale).
+void snapshotWalkInstantTiledesc();
+
+// FIRST-BODY idxtab WINDOW char-pass snapshot (2026-07-03, finding:hud_clobbers_first_body_idxtab).
+// The first char body (+0xDC=0) resolves idxtab[arena_base+0..+ntiles0); the HUD pass's own first
+// object reuses the SAME low arena indices (0x8C1F9D98 reset per pass) and clobbers that window by
+// the time captureFrame ships the HUD-pass idxtab -> Storm scrambled, Cable (+0xDC=25) fine. This
+// snapshots ONLY body0's idxtab window at the CHARACTER-pass STARTRENDER (body0's idxtab written,
+// HUD not yet run) for captureFrame to overlay. rectab stays STARTRENDER. Gated
+// MAPLECAST_IDXTAB_CHARSNAP (default OFF, A/B). Called from mc_oracle_charPassCapture.
+void snapshotCharPassIdxtabBody0Window();
+
+// CHAR-PASS GFX2 SNAPSHOT (Storm under-tile fix, re_kb/60 finding:storm_shipped_descriptor_tear).
+// The engine SELF-MODIFIES the GFX2 cell-record dispatch head GFX2[(sid&0x7FFF)*4] in place per
+// animation sub-frame; that mutation is live only during the CHARACTER pass and is reverted before
+// captureFrame's live GFX2 read at serverPublish, so the wire froze GFX2 and the client walker
+// (render_frame rebuild_tile_grid) computed a stale tile count (Storm ~24-38 vs engine ~49-53).
+// This snapshots each active body's GFX2 region at the CHARACTER-pass STARTRENDER (like the tiledesc
+// snapshot); collectFreshGfx/captureFrame source GFX2 from it so the LIVE head + referenced records
+// ship fresh every frame the head changes. Default ON; MAPLECAST_GFX2_CHARSNAP=0 A/B-disables.
+// Called from mc_oracle_charPassCapture on the realBody-gated char pass.
+void snapshotCharPassGfx2();
+
+// SLOT-TABLE + OBJPOOL CHAR-PASS SNAPSHOT (finding:replica_live_slot_objpool_snapshot_coherency).
+// Snapshots slot_cnt(0x8C2895E0)/slot_ptr(0x8C287DE0)/objpool(0x8C26AA54) at the render-walk instant
+// (loc_8c0308c2) so the shipped display list and the objpool node+0x12C visibility bit are coherent
+// with the engine's char-pass render-walk — a removed satellite's stale +0x12C cannot leak past a
+// non-coherent count (phantom-cape span-balloon fix). captureFrame ships these instead of live RAM.
+// Default ON (MAPLECAST_SLOT_CHARSNAP=0 A/B-disables); must stay coherent with the tiledesc snapshot.
+// Called from mc_oracle_charPassCapture on the realBody-gated char pass.
+void snapshotCharPassSlots();
+
 // Clean shutdown (stop the WS thread). Called from emulator term.
 void shutdown();
 

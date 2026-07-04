@@ -94,6 +94,20 @@ void render_sprites_0308c2(Sh4Ctx *c){
             /* node must be an area-3 RAM pointer (((g>>24)&0x7F)==0x0C, non-null); a junk
              * slot entry that isn't would index garbage for cat/GFX. Skip it defensively. */
             if(node == 0 || (((node >> 24) & 0x7Fu) != 0x0Cu)){ r14++; continue; }
+            /* VISIBILITY GATE (node+0x12C, LOW BYTE, nonzero-only). The engine slot-walk
+             * loc_8c0308c2 NEVER reads node+0x00 — that gate was our invention. The walk reads
+             * ONLY node+0x03 (category dispatch, below); every [0..count) node renders. The REAL
+             * per-node visibility/cull test is the BYTE at node+0x12C, tested nonzero, INSIDE both
+             * sub-renderers (bank03.asm body loc_8c03093c :1285-1290, effect loc_8c030af8 :1530-
+             * 1535: read node+0x12C; if 0 -> bra skip). Identical to readAllDrawn
+             * (maplecast_gamestate.cpp: `if (read8(node+0x12C)==0) continue;`), the working OBJS
+             * path. CONFIRMED three-way (body disasm + effect disasm + readAllDrawn), 2026-07.
+             * The old node+0x00 gate false-dropped LIVE projectile/effect satellites (which carry
+             * active==0 but +0x12C!=0): MEASURED on _super_fresh f825 the 4 cat=1 beam segments
+             * (0x8c2797c4.. sel 0x447/0x443/0x43f/0x43b, +0x12C=0x0010FF01) + 2 cat=4 nodes were
+             * all skipped -> client emitted 0 of the engine's ~146 bank17 effect quads.
+             * TEST ONLY THE LOW BYTE: +0x12E is hit-flash, +0x130 is xflip — never widen to u16/u32. */
+            if(r8u(c, node + 0x12Cu) == 0){ r14++; continue; }
             s32 cat  = r8s(c, node + 0x3);    /* [1227] mov.b @(0x3,r4) category byte */
             if(cat == 0){                     /* [1228-1230] tst;bf -> cat==0 = BODY */
                 render_frame_body_hook(c, node); /* bsr loc_8c03093c (Render Main Sprite) */

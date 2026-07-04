@@ -39,6 +39,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -108,6 +109,50 @@ static std::atomic<bool>    _tablesSnapValid{false};
 static std::atomic<bool>    _tiledescSnapValid{false};   // separate: tiledesc snaps at CHAR pass, not serverPublish
 static std::mutex           _tablesSnapMutex;
 
+// SLOT-TABLE + OBJPOOL CHARACTER-PASS SNAPSHOT (2026-07-04, finding:replica_live_slot_objpool_snapshot_coherency).
+// The engine's authoritative "what renders this frame" is the freshly-built display list at the
+// CHARACTER-pass render-walk (loc_8c0308c2, bank03:1200): for each of 16 layers it walks idx in
+// [0, slot_cnt[layer]) over slot_ptr[layer][idx], dispatching body (loc_8c03093c) or effect
+// (loc_8c030af8) by node+0x03 category; each applies a SECONDARY node+0x12C!=0 visibility gate
+// (loc_8c03093c:1285-1290, loc_8c030af8:1530-1535 — offsets loc_8c030aa4/loc_8c030c66 = 0x12C).
+// The table is CLEARED every frame (loc_8c045208 zeroes 0x8C2895E0[0..0x10)) and REBUILT by the
+// per-node registrar loc_8c04515e (bank04:12166), which is ITSELF gated on node+0x12C!=0
+// (bank04:12174-12177: mov.b @(0x12c,r4); tst; bt skip) — it then increments slot_cnt[layer]
+// (0x8C2895E0+node+0x24) and appends the node ptr (0x8C287DE0[...]). So a satellite that is
+// removed/deactivated is simply NOT re-registered — but its objpool node+0x12C byte is NOT cleared
+// that frame, so it leaks a stale-nonzero visibility bit. If the server snapshots slot_cnt/slot_ptr
+// (0x8C2895E0/0x8C287DE0) and the objpool (+0x12C @ 0x8C26AA54) at DIFFERENT instants than the
+// char-pass render-walk, a decremented-away node with stale +0x12C leaks (MEASURED cape f1000: 3
+// dead P1-body satellites 0x8c278ce4/0x8c26afc4/0x8c26adf4, active==0 but +0x12C==0x0010FF01, ship
+// in slot_cnt=4 -> client balloons the body span 45->60 tiles). FIX: snapshot all three regions AT
+// THE CHARACTER PASS — the same realBody-gated STARTRENDER instant the tiledesc/gfx2 snapshots use
+// (mc_oracle_charPassCapture) — and captureFrame ships THESE, so the client sees the coherent
+// render-walk view (removed nodes already out of the count; +0x12C matched to that instant). Gated
+// MAPLECAST_SLOT_CHARSNAP, DEFAULT ON (must stay coherent with the DEFAULT-ON tiledesc snapshot).
+static const u32            SLOTCNT_ADDR = 0x8C2895E0u;   static const u32 SLOTCNT_LEN = 0x10u;
+static const u32            SLOTPTR_ADDR = 0x8C287DE0u;   static const u32 SLOTPTR_LEN = 16u * 0x180u;
+static const u32            OBJPOOL_ADDR = 0x8C26AA54u;   static const u32 OBJPOOL_LEN = 0x1D000u;
+static std::vector<uint8_t> _slotCntSnap;                 // char-pass slot_cnt bytes (0x8C2895E0)
+static std::vector<uint8_t> _slotPtrSnap;                 // char-pass slot_ptr bytes (0x8C287DE0)
+static std::vector<uint8_t> _objpoolSnap;                 // char-pass objpool bytes (0x8C26AA54, carries +0x12C)
+static std::atomic<bool>    _slotSnapValid{false};        // snaps at CHAR pass, shipped by captureFrame
+
+// FIRST-BODY idxtab WINDOW char-pass snapshot (2026-07-03, finding:hud_clobbers_first_body_idxtab).
+// The FIRST character body has +0xDC=0, so its tiles resolve idxtab[arena_base + 0 .. +ntiles0).
+// The per-object arena cursor 0x8C1F9D98 is RESET to 0 at the START of EACH render pass, so the
+// HUD pass's OWN first object ALSO writes idxtab[arena_base + 0 ..] — OVERWRITING exactly the
+// first body's window by the time captureFrame ships the HUD-pass idxtab. The 2nd body (+0xDC=25)
+// resolves idxtab[arena_base+25..], which the HUD pass never reaches, so it survives -> Cable
+// coherent, Storm scrambled (right tiles, wrong per-tile tcw). FIX: snapshot ONLY the first body's
+// idxtab window at the CHARACTER-pass STARTRENDER (mc_oracle_charPassCapture) — where body0's walk
+// has WRITTEN its idxtab AND the HUD pass has NOT yet clobbered it (rend_start_render fires after
+// the SH4 draw walk, before QueueRender/HUD) — and OVERLAY it onto the shipped (HUD-pass) idxtab in
+// captureFrame. rectab stays STARTRENDER (finalized during the walk; taking it early = red/white
+// garbage regression, 2026-07-03). Gated MAPLECAST_IDXTAB_CHARSNAP, DEFAULT OFF (A/B).
+static std::vector<uint8_t> _idxWinSnap;                 // the first-body idxtab window bytes
+static u32                  _idxWinOff = 0, _idxWinLen = 0;   // byte offset+len into the idxtab region
+static std::atomic<bool>    _idxWinValid{false};
+
 // The STATIC PREFIX (header + tables + VRAM + PVR + 16MB RAM), built once, then
 // zstd'd into a ZCST envelope cached for every connecting client.
 static std::vector<uint8_t> _prefixZcst;           // ready-to-send compressed bytes
@@ -129,6 +174,21 @@ static std::mutex           _prefixMutex;          // guards build of _prefixZcs
 struct GfxBase { u32 base; u32 sig; };                 // base addr (page-aligned) + content sig
 static std::vector<GfxBase> _gfxShipped;               // bases+sigs already sent to all clients
 static std::atomic<bool>    _gfxResendAll{false};      // set on new-connect: re-ship all GFX once
+
+// CHAR-PASS GFX2 SNAPSHOT (Storm under-tile fix, re_kb/60 finding:storm_shipped_descriptor_tear).
+// The engine SELF-MODIFIES the GFX2 cell-record DISPATCH HEAD GFX2[(sid&0x7FFF)*4] in place per
+// animation sub-frame (re_kb/32). That mutation is LIVE only during the CHARACTER render pass; by
+// the time captureFrame's collectFreshGfx reads GFX2 (the winning HUD-pass STARTRENDER — the same
+// instant that reverts the tiledesc) the head is back at the disc/default pose, so the on-change
+// sig never sees the char-pass value and the wire FREEZES GFX2 -> the client walker (render_frame
+// rebuild_tile_grid: cell = GFX2 + GFX2[sid*4]) reads a stale record list -> wrong tile count
+// (Storm ~24-38 vs engine ~49-53). FIX (mirrors snapshotCharPassTiledesc): snapshot each active
+// body's GFX2 region AT THE CHARACTER PASS, and have collectFreshGfx/captureFrame SOURCE GFX2 bytes
+// from that snapshot so the LIVE self-modified head + its referenced records ship fresh every frame
+// the head changes. GFX1 (LZSS pixels) never self-modifies -> stays live-sourced / static-once.
+struct Gfx2Snap { u32 base; u32 len; u32 gen; std::vector<uint8_t> bytes; };
+static std::vector<Gfx2Snap> _gfx2CharSnap;            // per-active-body GFX2 @ CHAR pass (render thread only)
+static u32                   _gfx2CharSnapGen = 0;     // bumped each char pass; entry gen!=cur => stale/pruned
 static inline u32 rd32(u32 g);                         // fwd-decl (defined below) — used by gfxSig
 static inline u8  rd8 (u32 g);
 
@@ -243,6 +303,23 @@ static void gfxMarkShipped(u32 base, u32 sig)
 	_gfxShipped.push_back({ base, sig });
 }
 
+// Dense content signature over a CAPTURED buffer (the CHAR-PASS GFX2 snapshot). Folds EVERY u32 so
+// a single per-sub-frame dispatch-head self-modify (e.g. Storm GFX2[sid*4] 0x1b04<->0x1b44) always
+// flips the sig -> the region re-ships. GFX2 is small (~4-64KB) so the dense fold is cheap.
+static u32 gfxSigBufDense(const uint8_t* buf, u32 len)
+{
+	u32 h = 2166136261u;
+	for (u32 b = 0; b + 4 <= len; b += 4) { u32 w; memcpy(&w, buf + b, 4); h ^= w; h *= 16777619u; }
+	return h;
+}
+// Look up THIS char-pass's GFX2 snapshot for a page-aligned base (gen==current only; a stale gen
+// means the char pass hasn't refreshed it this frame -> caller falls back to the live head).
+static const Gfx2Snap* findGfx2Snap(u32 base)
+{
+	for (auto& s : _gfx2CharSnap) if (s.base == base && s.gen == _gfx2CharSnapGen) return &s;
+	return nullptr;
+}
+
 // ---------------------------------------------------------------------------
 // ON-CHANGE PVR PALETTE (the palette-gap fix, re_kb finding:replica_live_palette_gap).
 // The static prefix ships pvr_regs[] (incl PALETTE_RAM @ pvr_regs+0x1000, 1024 ARGB entries,
@@ -299,6 +376,7 @@ static bool                 _compInit = false;
 static constexpr u32 MCRR_MAGIC = 0x5252434Du;     // "MCRR"
 static constexpr u32 FRMX_MAGIC = 0x784D5246u;     // "FRMx"
 static constexpr u32 HUDQ_MAGIC = 0x48554451u;     // "HUDQ" (HUD-TA tail magic, LE)
+static constexpr u32 BTCW_MAGIC = 0x57435442u;     // "BTCW" (resolved-body-tcw tail magic, LE)
 
 // In-match flag + video-frame counter (same gate the Oracle uses).
 static constexpr u32 IN_MATCH_ADDR = 0x8C289624;
@@ -644,7 +722,7 @@ static void senderLoop()
 // has NOT already been shipped (covers the never-shipped char + a mid-stream re-load). Returns
 // the list to append as a variable GFX tail. Does NOT mark them shipped yet — that happens only
 // after this frame WINS the publish swap (so a drop-old discard re-evaluates them next frame).
-struct GfxToShip { u32 base; u32 len; u32 sig; };
+struct GfxToShip { u32 base; u32 len; u32 sig; const uint8_t* src; };  // src=char-pass snapshot bytes (GFX2) or nullptr (live)
 static void collectFreshGfx(std::vector<GfxToShip>& out)
 {
 	for (int L = 0; L < 16; L++) {
@@ -670,13 +748,25 @@ static void collectFreshGfx(std::vector<GfxToShip>& out)
 				if (!isRam(gfx[k])) continue;
 				u32 pbase, plen;
 				gfxShipDescriptor(gfx[k], isG2[k], pbase, plen); // REAL extent, page-aligned base+len
-				// GFX2: DENSE dispatch-head fold so a per-sub-frame SELF-MODIFY of GFX2[sid*4]
-				// (the Storm-scramble root cause, re_kb 32) flips the sig and re-ships the region.
-				u32 sig = gfxSig(pbase, plen, isG2[k]);          // sig over the FULL region (+dense head)
+				// GFX2 (isG2): SOURCE the bytes from the CHARACTER-PASS snapshot — the LIVE
+				// self-modified dispatch head — NOT the (reverted) HUD-pass RAM read at this instant.
+				// This is the Storm under-tile fix (re_kb/60): reading GFX2 live here freezes the head
+				// at the disc default on every frame but the rare one that caught it mid-pass, so the
+				// walker's tile count is wrong. The dense-folded snapshot sig flips on any per-sub-frame
+				// head mutation -> the (small) GFX2 region re-ships with the CORRECT records. GFX1
+				// (pixels) does not self-modify -> live-sourced, static-once (cheap sparse-64 fold).
+				const uint8_t* src = nullptr; u32 sig;
+				if (isG2[k]) {
+					const Gfx2Snap* sn = findGfx2Snap(pbase);
+					if (sn && sn->len == plen) { src = sn->bytes.data(); sig = gfxSigBufDense(src, plen); }
+					else sig = gfxSig(pbase, plen, true);        // fallback: no char-pass snap yet -> live head
+				} else {
+					sig = gfxSig(pbase, plen, false);            // GFX1 pixels: live, static-once
+				}
 				if (gfxAlreadyShipped(pbase, sig)) continue;     // already fresh on the client
 				bool dup = false;
 				for (auto& g : out) if (g.base == pbase) { dup = true; break; }
-				if (!dup) out.push_back({ pbase, plen, sig });
+				if (!dup) out.push_back({ pbase, plen, sig, src });
 			}
 		}
 	}
@@ -733,7 +823,14 @@ static void captureFrame(u32 vframe)
 	const size_t hudHdr   = nHud ? 8u : 0u;                   // u32 magic + u32 nHud (only when present)
 	const size_t hudBytes = (size_t)nHud * sizeof(maplecast_oracle_hook::HudQuad);
 
-	const size_t total = hdr + _dynTotal + tailHdr + gfxBytes + palHdr + (size_t)pvrPalLen + hudHdr + hudBytes;
+	// ---- SHIP-RESOLVED-BODY-TCW tail: the engine's resolved per-tile body tcws (parity-flip fix) ----
+	int btcwWords = 0;
+	const uint32_t* btcwBuf = maplecast_oracle_hook::mc_oracle_bodyTcws(&btcwWords);
+	const size_t btcwHdr   = btcwWords ? 8u : 0u;             // u32 magic "BTCW" + u32 nWords
+	const size_t btcwBytes = (size_t)btcwWords * 4u;
+
+	const size_t total = hdr + _dynTotal + tailHdr + gfxBytes + palHdr + (size_t)pvrPalLen
+	                   + hudHdr + hudBytes + btcwHdr + btcwBytes;
 
 	int which = _dynWhich ^ 1;          // write the other buffer
 	std::vector<uint8_t>& buf = _dynBuf[which];
@@ -752,8 +849,10 @@ static void captureFrame(u32 vframe)
 	// snapshot exists (and for non-table regions). Lock briefly to read the snapshot coherently.
 	const bool haveSnap    = _tablesSnapValid.load(std::memory_order_acquire);     // idxtab/rectab (serverPublish)
 	const bool haveTdSnap  = _tiledescSnapValid.load(std::memory_order_acquire);   // tiledesc (CHAR pass)
+	const bool haveIdxWin  = _idxWinValid.load(std::memory_order_acquire);         // first-body idxtab window (CHAR pass)
+	const bool haveSlotSnap = _slotSnapValid.load(std::memory_order_acquire);      // slot_cnt/slot_ptr/objpool (CHAR pass)
 	std::unique_lock<std::mutex> snapLk(_tablesSnapMutex, std::defer_lock);
-	if (haveSnap || haveTdSnap) snapLk.lock();
+	if (haveSnap || haveTdSnap || haveIdxWin || haveSlotSnap) snapLk.lock();
 	size_t off = hdr;
 	for (auto& r : _dynRegs) {
 		const uint8_t* src = nullptr;
@@ -763,12 +862,31 @@ static void captureFrame(u32 vframe)
 			src = _rectabSnap.data();
 		else if (haveTdSnap && r.addr == TILEDESC_ADDR && r.len == TILEDESC_LEN && _tiledescSnap.size() == r.len)
 			src = _tiledescSnap.data();   // CHAR-PASS tiledesc (Storm-idle fix, torn-safe: snapped pre-HUD-rebuild)
+		// CHAR-PASS DISPLAY-LIST + OBJPOOL OVERRIDE (finding:replica_live_slot_objpool_snapshot_coherency):
+		// ship the render-walk-instant slot_cnt/slot_ptr/objpool so a removed satellite's stale node+0x12C
+		// cannot leak past the coherent count (the phantom-cape span-balloon fix). Coherent with tiledesc.
+		else if (haveSlotSnap && r.addr == SLOTCNT_ADDR && r.len == SLOTCNT_LEN && _slotCntSnap.size() == r.len)
+			src = _slotCntSnap.data();
+		else if (haveSlotSnap && r.addr == SLOTPTR_ADDR && r.len == SLOTPTR_LEN && _slotPtrSnap.size() == r.len)
+			src = _slotPtrSnap.data();
+		else if (haveSlotSnap && r.addr == OBJPOOL_ADDR && r.len == OBJPOOL_LEN && _objpoolSnap.size() == r.len)
+			src = _objpoolSnap.data();
 		if (src) {
 			memcpy(&buf[off], src, r.len);                          // char-pass snapshot (effect-correct)
 		} else if ((r.addr & 0xFF000000u) == 0x8C000000u) {
 			memcpy(&buf[off], &mem_b[r.addr & 0x00FFFFFFu], r.len); // fast main-RAM path
 		} else {
 			for (u32 b = 0; b < r.len; b++) buf[off + b] = rd8(r.addr + b); // alias-safe fallback
+		}
+		// FIRST-BODY idxtab WINDOW OVERLAY (MAPLECAST_IDXTAB_CHARSNAP): overlay body0's char-pass
+		// idxtab window onto the just-written (HUD-pass) idxtab region — ONLY the [_idxWinOff,
+		// +_idxWinLen) bytes, so Cable's band + the effect band + rectab stay HUD-pass/STARTRENDER.
+		// This is the targeted Storm fix; rectab is NOT touched (finalized during the walk).
+		if (r.addr == _idxtabAddr && r.len == _idxtabLen &&
+		    _idxWinValid.load(std::memory_order_acquire) &&
+		    _idxWinLen > 0 && _idxWinSnap.size() == _idxWinLen &&
+		    (size_t)_idxWinOff + _idxWinLen <= r.len) {
+			memcpy(&buf[off + _idxWinOff], _idxWinSnap.data(), _idxWinLen);
 		}
 		off += r.len;
 	}
@@ -780,8 +898,11 @@ static void captureFrame(u32 vframe)
 	for (auto& g : freshGfx) {
 		memcpy(&buf[off], &g.base, 4); off += 4;               // page-aligned guest base (0x8C..)
 		memcpy(&buf[off], &g.len,  4); off += 4;               // REAL region length (per-region)
-		// GFX is main-RAM; copy from mem_b directly (alias-safe identical to addrspace here).
-		memcpy(&buf[off], &mem_b[g.base & 0x00FFFFFFu], g.len);
+		// GFX bytes: for GFX2 (g.src set) copy the CHARACTER-PASS snapshot — the LIVE self-modified
+		// dispatch head + referenced records — so the client walker reads the correct pose (re_kb/60
+		// Storm under-tile fix). For GFX1 (g.src==nullptr) copy live main-RAM (pixels don't self-modify).
+		if (g.src) memcpy(&buf[off], g.src, g.len);
+		else       memcpy(&buf[off], &mem_b[g.base & 0x00FFFFFFu], g.len);
 		off += g.len;
 	}
 
@@ -799,6 +920,15 @@ static void captureFrame(u32 vframe)
 		memcpy(&buf[off], &HUDQ_MAGIC, 4); off += 4;
 		u32 nh = (u32)nHud; memcpy(&buf[off], &nh, 4); off += 4;
 		memcpy(&buf[off], hudQuads, hudBytes); off += hudBytes;
+	}
+
+	// ---- BTCW TAIL: u32 magic "BTCW", u32 nWords, then nWords u32 (per body [node][ntiles][tcw...]).
+	// The engine's RESOLVED per-tile body tcws — render_frame uses them verbatim for body tiles,
+	// killing the arena-parity flip. Strictly AFTER the HUDQ tail; absent when btcwWords==0. ----
+	if (btcwWords) {
+		memcpy(&buf[off], &BTCW_MAGIC, 4); off += 4;
+		u32 nw = (u32)btcwWords; memcpy(&buf[off], &nw, 4); off += 4;
+		memcpy(&buf[off], btcwBuf, btcwBytes); off += btcwBytes;
 	}
 
 	// ---- publish to the WS thread (drop-old: overwrite any undrained frame) ----
@@ -826,6 +956,28 @@ static void captureFrame(u32 vframe)
 // Public API
 // ===========================================================================
 
+// fwd-decls: the walk-snap helpers + idxtab body-band constants are defined below (with the
+// tiledesc/table snapshot core) but are referenced by snapshotCharPassTables (the EFFECT-band merge).
+static bool walkSnapActive();
+static void snapRange(u32 addr, u32 fullLen, u32 off, u32 len, std::vector<uint8_t>& dst);
+static const u32 IDXTAB_BODY_ENTRIES = 912;                       // body band = idxtab indices [0, 912)
+static const u32 IDXTAB_BODY_BYTES   = IDXTAB_BODY_ENTRIES * 4;   // = 0xE40 bytes
+
+// idxtab/rectab BODY-BAND WALK-INSTANT co-snapshot — DEFAULT OFF (MAPLECAST_IDXTAB_WALKSNAP).
+// REGRESSED (2026-07-03, faithful raster): moving the idxtab body band to the walk instant gives
+// WRONG tcws — BOTH bodies (incl. the previously-coherent Cable) render red/white striped texture
+// garbage (wrong-texture-sampling). The idxtab must stay at STARTRENDER (snapshotCharPassTables).
+// The TILEDESC walk-instant fix STAYS (count correct, Cable coherent). This env is an A/B lever
+// only; keep it OFF for the good state (tiledesc-walk + idxtab-STARTRENDER).
+static bool idxtabWalkSnapActive()
+{
+	static const bool on = []{
+		const char* e = getenv("MAPLECAST_IDXTAB_WALKSNAP");
+		return (e && e[0] == '1');   // default OFF; explicit "1" enables (A/B only)
+	}();
+	return on;
+}
+
 // CHARACTER-PASS TABLE SNAPSHOT (re_kb/50). Called from mc_oracle_charPassCapture ONLY on the
 // CHARACTER pass. Snapshots the live idxtab/rectab (effect entries are written by the char-pass
 // submit and reverted by the HUD pass) into side buffers that captureFrame ships instead of the
@@ -848,8 +1000,21 @@ void snapshotCharPassTables()
 		else
 			for (u32 b = 0; b < len; b++) dst[b] = rd8(addr + b);   // alias-safe fallback
 	};
-	snap(_idxtabAddr, _idxtabLen, _idxtabSnap);
-	snap(_rectabAddr, _rectabLen, _rectabSnap);
+	// DEFAULT (idxtab-STARTRENDER): snapshot the WHOLE idxtab + rectab here. This is the
+	// BEST-CONFIRMED state — the idxtab body band MUST stay at STARTRENDER (the walk-instant
+	// body-band co-snapshot REGRESSED both bodies to striped garbage; 2026-07-03 raster). The
+	// TILEDESC walk-instant fix is independent and STAYS (snapshotWalkInstantTiledesc).
+	//
+	// A/B ONLY (MAPLECAST_IDXTAB_WALKSNAP=1): the walk-entry hook owns the BODY band [0,912) +
+	// rectab, so here we snapshot ONLY the EFFECT band [912..] to avoid clobbering it. OFF by default.
+	if (idxtabWalkSnapActive()) {
+		if (_idxtabAddr && _idxtabLen && _idxtabLen > IDXTAB_BODY_BYTES)
+			snapRange(_idxtabAddr, _idxtabLen, IDXTAB_BODY_BYTES,
+			          _idxtabLen - IDXTAB_BODY_BYTES, _idxtabSnap);   // EFFECT band only
+	} else {
+		snap(_idxtabAddr, _idxtabLen, _idxtabSnap);                  // FULL idxtab (STARTRENDER)
+		snap(_rectabAddr, _rectabLen, _rectabSnap);                  // FULL rectab (STARTRENDER)
+	}
 	// NOTE: the tiledesc (0x8C1F9F9C) is NOT snapshotted here. serverPublish runs AFTER the
 	// HUD pass STARTRENDER, and the tiledesc is RESET-then-REBUILT from index 0 at the START
 	// of EACH render pass (loc_8c0337bc stores base into cursor 0x8C1F9D98; loc_8c129728 fills
@@ -871,8 +1036,261 @@ void snapshotCharPassTables()
 // SH4 body walk (loc_8c0344d4) left them (re_kb/22: table is frame-local, rebuilt per pass from
 // index 0). captureFrame ships THIS instead of the HUD-pass-stale/rebuilt RAM. Gated env
 // MAPLECAST_TILEDESC_CHARSNAP (default ON); set to "0" to A/B-disable (ships live tiledesc).
+// idxtab BODY/EFFECT band split. The BODY tiles resolve tcw = rectab[idxtab[alloc_index]] with
+// alloc_index = node+0xDC + arena_base + k — LOW indices (bodies' +0xDC 0..~50 + arena_base 16/400,
+// so < ~500). The EFFECT scale walker uses alloc_index = 0x390 (912) + template read -> idxtab
+// [912..1074] (re_kb/50, effect entries idxtab[972..1074]). So idxtab[0..IDXTAB_BODY_ENTRIES) is
+// the BODY band; [912..] the EFFECT band. u32 entries -> byte offset = entry*4. (IDXTAB_BODY_ENTRIES
+// / IDXTAB_BODY_BYTES are defined at the top of the Public API section.)
+
+// Core tiledesc memcpy (0x8C1F9F9C, 0x1800B) into _tiledescSnap under the shared mutex.
+// Marks _tiledescSnapValid. Shared by both the (legacy) STARTRENDER path and the walk-instant
+// path. Caller must hold the arm/client/in-match/built gates.
+static void doSnapshotTiledesc()
+{
+	std::lock_guard<std::mutex> lk(_tablesSnapMutex);
+	if (_tiledescSnap.size() != TILEDESC_LEN) _tiledescSnap.resize(TILEDESC_LEN);
+	if ((TILEDESC_ADDR & 0xFF000000u) == 0x8C000000u)
+		memcpy(_tiledescSnap.data(), &mem_b[TILEDESC_ADDR & 0x00FFFFFFu], TILEDESC_LEN);
+	else
+		for (u32 b = 0; b < TILEDESC_LEN; b++) _tiledescSnap[b] = rd8(TILEDESC_ADDR + b);
+	_tiledescSnapValid.store(true, std::memory_order_release);
+}
+
+// SLOT-TABLE + OBJPOOL CHARACTER-PASS SNAPSHOT. Called from mc_oracle_charPassCapture ONLY on the
+// realBody-gated CHARACTER pass — the same instant snapshotCharPassTiledesc/Gfx2 fire — so the
+// display list (slot_cnt/slot_ptr) and the objpool (+0x12C visibility bit + node+0xDC cursor) are
+// captured EXACTLY as the render-walk loc_8c0308c2 consumed them, BEFORE the HUD pass rebuilds the
+// table for its minimal geometry. captureFrame ships these three snapshots instead of the live
+// (HUD-pass / serverPublish-instant) RAM, so a removed satellite's stale node+0x12C can never leak
+// past the coherent slot_cnt (see the module-state comment block for the disasm cites). READ-ONLY,
+// three region memcpys under the shared table-snapshot mutex; free when off / no client / not
+// in-match / tables not built. Gated MAPLECAST_SLOT_CHARSNAP, DEFAULT ON (must be coherent with the
+// DEFAULT-ON tiledesc/gfx2 char-pass snapshots — they are one render-walk view or none).
+static bool slotCharSnapActive()
+{
+	static const bool on = []{
+		const char* e = getenv("MAPLECAST_SLOT_CHARSNAP");
+		return !(e && e[0] == '0');   // default ON; "0" A/B-disables (ships live/serverPublish RAM)
+	}();
+	return on;
+}
+
+void snapshotCharPassSlots()
+{
+	if (!slotCharSnapActive()) return;
+	if (!_armed) return;
+	if (_clientCount.load(std::memory_order_relaxed) == 0) return;
+	if (rd8(IN_MATCH_ADDR) == 0) return;
+	if (!_tablesBuilt) return;
+
+	std::lock_guard<std::mutex> lk(_tablesSnapMutex);
+	auto snap = [](u32 addr, u32 len, std::vector<uint8_t>& dst) {
+		if (dst.size() != len) dst.resize(len);
+		if ((addr & 0xFF000000u) == 0x8C000000u)
+			memcpy(dst.data(), &mem_b[addr & 0x00FFFFFFu], len);     // fast main-RAM path
+		else
+			for (u32 b = 0; b < len; b++) dst[b] = rd8(addr + b);   // alias-safe fallback
+	};
+	snap(SLOTCNT_ADDR, SLOTCNT_LEN, _slotCntSnap);   // display-list counts (render-walk instant)
+	snap(SLOTPTR_ADDR, SLOTPTR_LEN, _slotPtrSnap);   // display-list node ptrs (compacted this frame)
+	snap(OBJPOOL_ADDR, OBJPOOL_LEN, _objpoolSnap);   // node fields incl +0x12C visibility, +0xDC cursor
+	_slotSnapValid.store(true, std::memory_order_release);
+}
+
+// FIRST-BODY idxtab WINDOW snapshot — the targeted Storm fix. Called from the CHARACTER-pass
+// STARTRENDER (mc_oracle_charPassCapture, realBody-gated) where body0's idxtab is WRITTEN (walk
+// done) and the HUD pass has NOT yet clobbered it. Snapshots ONLY idxtab[arena_base+0 ..
+// arena_base+ntiles0) into _idxWinSnap; captureFrame overlays it onto the shipped idxtab.
+//   arena_base = *(0x8C1F9D94) (16 or 400, per-frame parity — read LIVE, not hardcoded).
+//   body0      = the active char body with +0xDC==0 (the FIRST arena object).
+//   ntiles0    = the smallest POSITIVE active-body +0xDC (== body0's tile count, since +0xDC is a
+//                prefix-sum: next body's prefix = body0's ntiles). If body0 is the only active body,
+//                ntiles0 = its walk-instant tiledesc tile count is unknown here without the cell walk,
+//                so we fall back to a safe cap (the effect band start relative to arena_base).
+// Gated MAPLECAST_IDXTAB_CHARSNAP (default OFF). rectab untouched (stays STARTRENDER).
+static bool idxtabCharSnapActive()
+{
+	static const bool on = []{
+		const char* e = getenv("MAPLECAST_IDXTAB_CHARSNAP");
+		return (e && e[0] == '1');   // default OFF; explicit "1" enables (A/B)
+	}();
+	return on;
+}
+void snapshotCharPassIdxtabBody0Window()
+{
+	if (!idxtabCharSnapActive()) return;
+	if (!_armed) return;
+	if (_clientCount.load(std::memory_order_relaxed) == 0) return;
+	if (rd8(IN_MATCH_ADDR) == 0) return;
+	if (!_tablesBuilt || !_idxtabAddr || !_idxtabLen) return;
+
+	static const u32 CB[6] = { 0x8C268340u, 0x8C2688E4u, 0x8C268E88u,
+	                           0x8C26942Cu, 0x8C2699D0u, 0x8C269F74u };
+	// arena_base LIVE (16 or 400 per-frame parity). read32 through addrspace (alias-safe).
+	u32 arena = addrspace::read32(0x8C1F9D94u);
+	// HARD GUARD: the engine only ever uses arena_base 16 or 400 (the two ping-pong halves). If we
+	// read anything else, the char-pass instant is wrong / the value isn't live yet -> BAIL rather
+	// than compute a garbage offset that could OOB. (This is also the diagnostic the coordinator asked
+	// for: a garbage arena_base means the read instant is wrong.)
+	if (arena != 16u && arena != 400u) {
+		static bool s_warned = false;
+		if (getenv("MAPLECAST_IDXTAB_CHARSNAP") && !s_warned) {
+			s_warned = true;
+			fprintf(stderr, "[IDXWIN] BAIL: arena_base=0x%08X (%u) not 16/400 at char pass — read instant wrong\n",
+			        arena, arena);
+		}
+		_idxWinValid.store(false, std::memory_order_release);
+		return;
+	}
+	// Find body0 (+0xDC==0, active) and ntiles0 = smallest positive active +0xDC.
+	bool haveBody0 = false; u32 ntiles0 = 0xFFFFFFFFu;
+	for (int i = 0; i < 6; i++) {
+		if (rd8(CB[i] + 0x000) == 0) continue;                 // inactive slot
+		u32 dc = (u32)addrspace::read16(CB[i] + 0xDC);
+		if (dc == 0) haveBody0 = true;
+		else if (dc < ntiles0) ntiles0 = dc;                   // next prefix = body0 tile count
+	}
+	if (!haveBody0) { _idxWinValid.store(false, std::memory_order_release); return; }
+	if (ntiles0 == 0xFFFFFFFFu) ntiles0 = 64;                  // only body active: safe cap (< effect band)
+	if (ntiles0 == 0 || ntiles0 > 256) ntiles0 = 256;         // clamp: never 0, never touch the effect band
+
+	// window = idxtab entries [arena+0, arena+ntiles0) -> bytes [ (arena)*4, (arena+ntiles0)*4 ).
+	// arena is now guaranteed 16 or 400 and ntiles0 in [1,256], so these can't overflow.
+	u32 offBytes = arena * 4u;
+	u32 lenBytes = ntiles0 * 4u;
+	// HARD BOUNDS: never index past _idxtabLen (the buffer captureFrame ships) nor produce len 0.
+	if (offBytes >= _idxtabLen) { _idxWinValid.store(false, std::memory_order_release); return; }
+	if (offBytes + lenBytes > _idxtabLen) lenBytes = _idxtabLen - offBytes;
+	if (lenBytes == 0) { _idxWinValid.store(false, std::memory_order_release); return; }
+
+	std::lock_guard<std::mutex> lk(_tablesSnapMutex);
+	if (_idxWinSnap.size() != lenBytes) _idxWinSnap.resize(lenBytes);
+	// SOURCE read: use the alias-safe rd8 loop unconditionally. The fast mem_b path assumed a
+	// 0x8C.. base masked to 16MB, but _idxtabAddr is POINTER-RESOLVED (rd32(0x8C2DAD3C)) and may be
+	// a P0/0x0C.. alias or sit anywhere in area-3 — the raw &mem_b[..&0xFFFFFF] indexing was the
+	// likely fault. addrspace::read8 resolves any alias correctly.
+	for (u32 b = 0; b < lenBytes; b++) _idxWinSnap[b] = rd8(_idxtabAddr + offBytes + b);
+	_idxWinOff = offBytes; _idxWinLen = lenBytes;
+	_idxWinValid.store(true, std::memory_order_release);
+
+	// ONE-TIME DIAGNOSTIC (the coordinator's [IDXWIN] values).
+	if (getenv("MAPLECAST_IDXTAB_CHARSNAP")) {
+		static bool s_printed = false;
+		if (!s_printed) {
+			s_printed = true;
+			fprintf(stderr, "[IDXWIN] arena_base=%u ntiles0=%u off=%u len=%u idxtabLen=%u idxtabAddr=0x%08X\n",
+			        arena, ntiles0, offBytes, lenBytes, _idxtabLen, _idxtabAddr);
+		}
+	}
+}
+
+// CHAR-PASS GFX2 SNAPSHOT (Storm under-tile fix, re_kb/60). Called from mc_oracle_charPassCapture
+// ONLY on the CHARACTER pass (realBody-gated STARTRENDER) — the instant the engine's body walker
+// (loc_8c0344d4) reads the SELF-MODIFIED GFX2 dispatch head. By serverPublish (the winning HUD-pass
+// captureFrame) that head is reverted to the disc/default pose, so collectFreshGfx's live read froze
+// the tile count. Here we snapshot each active body's GFX2 region (page-aligned base + real extent)
+// while the head is live; collectFreshGfx/captureFrame source GFX2 from this snapshot so the correct
+// (fresh) records ship EVERY frame the head changes. Default ON; MAPLECAST_GFX2_CHARSNAP=0 A/B-disables
+// (reverts to the frozen live read). Render-thread only (same thread as captureFrame) -> lock-free.
+static bool gfx2CharSnapActive()
+{
+	static const bool on = []{
+		const char* e = getenv("MAPLECAST_GFX2_CHARSNAP");
+		return !(e && e[0] == '0');   // default ON; explicit "0" disables (A/B)
+	}();
+	return on;
+}
+void snapshotCharPassGfx2()
+{
+	if (!gfx2CharSnapActive()) return;
+	if (!_armed) return;
+	if (_clientCount.load(std::memory_order_relaxed) == 0) return;
+	if (rd8(IN_MATCH_ADDR) == 0) return;
+	if (!_tablesBuilt) return;
+
+	const u32 gen = ++_gfx2CharSnapGen;
+	// Walk the slot table exactly like collectFreshGfx; snapshot each active body/effect node's GFX2
+	// region at THIS char-pass instant (the self-modified dispatch head is live here).
+	for (int L = 0; L < 16; L++) {
+		u32 cnt = rd8(0x8C2895E0 + L); if (cnt == 0 || cnt > 0x60) continue;
+		u32 base = 0x8C287DE0 + L * 0x180;
+		for (u32 i = 0; i < cnt; i++) {
+			u32 node = rd32(base + i * 4); if (!isRam(node)) continue;
+			{ int cat = (int)(int8_t)rd8(node + 0x3); if (cat < 0 || cat >= 5) continue; }
+			u32 gfx2 = rd32(node + 0x160); if (!isRam(gfx2)) continue;
+			u32 pbase, plen; gfxShipDescriptor(gfx2, true, pbase, plen);
+			if (!plen) continue;
+			// find-or-add by page base (reuse the byte buffer to avoid per-frame realloc)
+			Gfx2Snap* sn = nullptr;
+			for (auto& s : _gfx2CharSnap) if (s.base == pbase) { sn = &s; break; }
+			if (!sn) { _gfx2CharSnap.push_back(Gfx2Snap{ pbase, 0, 0, {} }); sn = &_gfx2CharSnap.back(); }
+			if (sn->bytes.size() != plen) sn->bytes.resize(plen);
+			if ((pbase & 0xFF000000u) == 0x8C000000u)
+				memcpy(sn->bytes.data(), &mem_b[pbase & 0x00FFFFFFu], plen);  // fast main-RAM path
+			else
+				for (u32 b = 0; b < plen; b++) sn->bytes[b] = rd8(pbase + b); // alias-safe fallback
+			sn->len = plen; sn->gen = gen;
+		}
+	}
+	// Prune entries not refreshed this pass (swapped-out chars) so the vector stays bounded.
+	_gfx2CharSnap.erase(std::remove_if(_gfx2CharSnap.begin(), _gfx2CharSnap.end(),
+		[gen](const Gfx2Snap& s){ return s.gen != gen; }), _gfx2CharSnap.end());
+}
+
+// Snapshot a byte sub-range [off, off+len) of a table at `addr` into dst (dst is the FULL-table
+// buffer; the sub-range is copied in place, other bytes untouched). Caller holds _tablesSnapMutex.
+static void snapRange(u32 addr, u32 fullLen, u32 off, u32 len, std::vector<uint8_t>& dst)
+{
+	if (!addr || !fullLen) return;
+	if (dst.size() != fullLen) dst.resize(fullLen);
+	if (off >= fullLen) return;
+	if (off + len > fullLen) len = fullLen - off;
+	if ((addr & 0xFF000000u) == 0x8C000000u)
+		memcpy(dst.data() + off, &mem_b[(addr + off) & 0x00FFFFFFu], len);
+	else
+		for (u32 b = 0; b < len; b++) dst[off + b] = rd8(addr + off + b);
+}
+
+// WALK-INSTANT idxtab/rectab BODY-BAND snapshot. The BODY idxtab band is char-pass-transient like
+// the tiledesc COUNT bytes: the HUD pass rebuilds the tile arena from index 0 for its own (minimal)
+// geometry, shifting the low idxtab entries the FIRST body's tiles resolve against — so a STARTRENDER
+// idxtab snapshot maps the walk-instant tiledesc's alloc indices to the WRONG rectab entries
+// (MEASURED: Storm first body scrambled — right tiles, wrong per-tile tcw). We snapshot the idxtab
+// BODY band [0, 912) AND the whole rectab (rectab entries the body idxtab points at are anywhere in
+// rectab; the effect submit only APPENDS high rectab entries during the walk, so the low/body rectab
+// entries are already final at the walk instant) at the SAME walk instant as the tiledesc. The
+// EFFECT idxtab band [912..] is left for the STARTRENDER path (written DURING the walk). Caller holds
+// the arm/client/in-match/built gates.
+static void doSnapshotWalkInstantTables()
+{
+	std::lock_guard<std::mutex> lk(_tablesSnapMutex);
+	// idxtab BODY band only (preserve the effect band for the STARTRENDER snapshot).
+	if (_idxtabAddr && _idxtabLen)
+		snapRange(_idxtabAddr, _idxtabLen, 0, IDXTAB_BODY_BYTES, _idxtabSnap);
+	// rectab: the whole table. Body idxtab entries can point anywhere; the effect submit only
+	// APPENDS higher rectab slots during the walk, and those aren't referenced by body idxtab.
+	if (_rectabAddr && _rectabLen)
+		snapRange(_rectabAddr, _rectabLen, 0, _rectabLen, _rectabSnap);
+	_tablesSnapValid.store(true, std::memory_order_release);
+}
+
+// Is the walk-instant tiledesc snapshot active? When it is (default), the STARTRENDER tiledesc
+// path MUST NOT run — STARTRENDER fires LATER in the frame than the walker entry and its tiledesc
+// is INFLATED (re-seeded), so it would CLOBBER the correct walk-entry snapshot. So the two paths
+// are mutually exclusive: walk-snap ON => STARTRENDER tiledesc snapshot is a no-op.
+static bool walkSnapActive()
+{
+	static const bool on = []{
+		const char* e = getenv("MAPLECAST_TILEDESC_WALKSNAP");
+		return !(e && e[0] == '0');   // default ON
+	}();
+	return on;
+}
+
 void snapshotCharPassTiledesc()
 {
+	if (walkSnapActive()) return;      // walk-instant path owns the tiledesc; STARTRENDER stale
 	static const bool s_enabled = []{
 		const char* e = getenv("MAPLECAST_TILEDESC_CHARSNAP");
 		return !(e && e[0] == '0');   // default ON; "0" disables for A/B
@@ -882,13 +1300,82 @@ void snapshotCharPassTiledesc()
 	if (_clientCount.load(std::memory_order_relaxed) == 0) return;
 	if (rd8(IN_MATCH_ADDR) == 0) return;
 	if (!_tablesBuilt) return;
-	std::lock_guard<std::mutex> lk(_tablesSnapMutex);
-	if (_tiledescSnap.size() != TILEDESC_LEN) _tiledescSnap.resize(TILEDESC_LEN);
-	if ((TILEDESC_ADDR & 0xFF000000u) == 0x8C000000u)
-		memcpy(_tiledescSnap.data(), &mem_b[TILEDESC_ADDR & 0x00FFFFFFu], TILEDESC_LEN);
-	else
-		for (u32 b = 0; b < TILEDESC_LEN; b++) _tiledescSnap[b] = rd8(TILEDESC_ADDR + b);
-	_tiledescSnapValid.store(true, std::memory_order_release);
+	doSnapshotTiledesc();
+}
+
+// WALK-INSTANT TILEDESC SNAPSHOT (2026-07-02, finding:tiledesc_walk_instant_snapshot). Called
+// from the oracle hook at the BODY-WALKER ENTRY (loc_8c0344d4, PC 0x8C0344D4), on the FIRST
+// char-body walk of the video frame. GROUND-TRUTH REASON (TDTILE capture, Storm vf46489): the
+// per-record tiledesc byte1 the walk READS sums to the +0xDC budget (24 tiles/7 records), i.e.
+// it is CORRECT at the walk. By STARTRENDER (where snapshotCharPassTiledesc fires) the SAME
+// records read INFLATED byte1 (sum 59) — the table is re-seeded/rebuilt for the HUD pass
+// (loc_8c0337bc/loc_8c129728, re_kb/22). The tiledesc ENTRIES are READ-ONLY during the walk
+// (r13 only advances +4/tile, no writes), so the walker-entry state IS the authoritative
+// pre-consumption b1. This overrides the STARTRENDER tiledesc: whichever fires, captureFrame
+// ships _tiledescSnap; the walk-entry value is the correct one and it is written LAST relative
+// to STARTRENDER in program order per frame. idxtab/rectab are NOT snapshotted here — their
+// EFFECT entries are WRITTEN by the per-tile submit DURING the walk (re_kb/50, line 80), so
+// they remain correct only at/after STARTRENDER (snapshotCharPassTables, EFFECT band). Gated
+// MAPLECAST_TILEDESC_WALKSNAP (default ON); "0" reverts to the STARTRENDER-only behavior.
+//
+// idxtab/rectab BODY BAND: co-snapshotted here ONLY under MAPLECAST_IDXTAB_WALKSNAP=1 (DEFAULT
+// OFF). That experiment REGRESSED both bodies to striped texture garbage (2026-07-03 raster) — the
+// idxtab must stay at STARTRENDER (snapshotCharPassTables, full table). So by default this function
+// snapshots ONLY the tiledesc. The idxtab A/B lever is retained but off.
+void snapshotWalkInstantTiledesc()
+{
+	if (!walkSnapActive()) return;   // "0" A/B-disables (STARTRENDER path only)
+	if (!_armed) return;
+	if (_clientCount.load(std::memory_order_relaxed) == 0) return;
+	if (rd8(IN_MATCH_ADDR) == 0) return;
+	if (!_tablesBuilt) return;
+	doSnapshotTiledesc();
+	if (idxtabWalkSnapActive())
+		doSnapshotWalkInstantTables();   // A/B ONLY (default OFF): idxtab body band [0,912) + rectab
+
+	// ONE-SHOT VERIFY (gated MAPLECAST_WALKSNAP_VERIFY): after the FIRST successful walk-instant
+	// snapshot, print Storm's (node 0x8C268340) first-record tiledesc byte1 values + the per-record
+	// (b1+1) sum FROM THE SNAPSHOT. It MUST show small b1 (walk-instant, sum ~24-38), NOT the
+	// STARTRENDER-inflated ~57. r13 base = node+0xDC (prefix) into the tiledesc @0x8C1F9F9C.
+	if (getenv("MAPLECAST_WALKSNAP_VERIFY") != nullptr) {
+		static bool s_printed = false;
+		if (!s_printed) {
+			s_printed = true;
+			const u32 NODE = 0x8C268340u;
+			u32 gfx2 = rd32(NODE + 0x160);
+			u32 sid  = (u32)addrspace::read16(NODE + 0x144) & 0x7FFFu;
+			u32 dc   = (u32)addrspace::read16(NODE + 0xDC);
+			if ((gfx2 & 0xFF000000u) && gfx2 >= 0x8C000000u && gfx2 < 0x8D000000u) {
+				u32 cell = gfx2 + rd32(gfx2 + sid * 4);
+				u32 rc   = (u32)addrspace::read16(cell);
+				u32 r13 = dc, sum = 0; char buf[256]; int off = 0;
+				for (u32 r = 0; r < rc && r < 12; r++) {
+					// read b1 FROM THE SNAPSHOT (not live RAM). _tiledescSnap[0] == TILEDESC_ADDR,
+					// so the entry offset is r13*4 (no base add). byte1 is at +1.
+					u32 idx = r13 * 4 + 1;
+					u32 b1  = (idx < _tiledescSnap.size()) ? _tiledescSnap[idx] : 0xFFu;
+					off += snprintf(buf + off, sizeof(buf) - off, "%u ", b1 + 1);
+					sum += b1 + 1; r13 += b1 + 1;
+				}
+				fprintf(stderr, "[WALKSNAP-VERIFY] Storm sid=%u dc=%u recCount=%u first-record (b1+1): %s "
+				                "=> sum(first %u)=%u  (walk-instant expects ~24-38, NOT ~57)\n",
+				        sid, dc, rc, buf, (rc < 12 ? rc : 12), sum);
+				// idxtab BODY-band consistency: dump the first 12 body idxtab entries as SNAPSHOTTED
+				// at the walk (should be self-consistent with the tiledesc). The coordinator compares
+				// this against a STARTRENDER dump; if they DIFFER, the HUD-pass idxtab was scrambling
+				// the first body — which this walk-instant body-band snapshot now fixes.
+				if (_idxtabAddr && _idxtabSnap.size() >= 48) {
+					char ib[256]; int io = 0;
+					for (u32 e = 0; e < 12; e++) {
+						u32 v = (u32)_idxtabSnap[e*4] | ((u32)_idxtabSnap[e*4+1] << 8)
+						      | ((u32)_idxtabSnap[e*4+2] << 16) | ((u32)_idxtabSnap[e*4+3] << 24);
+						io += snprintf(ib + io, sizeof(ib) - io, "%u ", v);
+					}
+					fprintf(stderr, "[WALKSNAP-VERIFY] idxtab body[0..11] @walk: %s\n", ib);
+				}
+			}
+		}
+	}
 }
 
 void onRenderFrame(void* /*ctxv*/)

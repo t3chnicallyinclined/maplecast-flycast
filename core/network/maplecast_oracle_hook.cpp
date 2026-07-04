@@ -497,6 +497,19 @@ static bool mc_probeEnabledStatic = []{
 // real per-object TSP blend in production with no extra env var.
 static bool mc_frameOracleHookOn = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr);
 
+// REPLICA-LIVE WALK-SNAP: a plain live-wire launch (MAPLECAST_REPLICA_LIVE set, not "0") must
+// enable the compile-time block-entry hook path so the walk-entry GenCall (0x8C0344D4 tiledesc
+// snapshot) injects — WITHOUT dragging in the heavyweight per-frame oracle CAPTURE (object
+// collection + /dev/shm jsonl, which is gated on mc_frameOracleHookOn and stays OFF here). Env is
+// readable at static init; replica_live::init() sets _armed later but from the SAME env, so this
+// mirrors it for the compile-time gate. MAPLECAST_TILEDESC_WALKSNAP=0 opts out (STARTRENDER path).
+static bool mc_replicaWalkSnapOn = []{
+	const char* rl = getenv("MAPLECAST_REPLICA_LIVE");
+	if (!rl || rl[0] == '0' || rl[0] == '\0') return false;       // live-wire not armed
+	const char* ws = getenv("MAPLECAST_TILEDESC_WALKSNAP");
+	return !(ws && ws[0] == '0');                                 // walk-snap default ON
+}();
+
 bool mc_oracleHookEnabled = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr)
                          || mc_decodeHookEnabled
                          || mc_decodeTraceEnabled
@@ -505,7 +518,20 @@ bool mc_oracleHookEnabled = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr)
                          || mc_bodyCapEnabled
                          || mc_charqRenderEnabled
                          || mc_charqEmitEnabled
-                         || mc_probeEnabledStatic;   // generic probe forces the master gate
+                         || mc_probeEnabledStatic    // generic probe forces the master gate
+                         || mc_replicaWalkSnapOn      // plain replica-live: inject the walk-snap GenCall
+                         // GROUND-TRUTH TCW / TILEDESC-TILES probe: standalone (no FRAME_ORACLE_HOOK,
+                         // so no heavyweight capture). Read the env directly here (s_tdTiles/s_tdProbe
+                         // are defined later); forces the master gate so the 0x8C034864 + 0x8C1248CC
+                         // GenCalls inject. The per-PC gate + the OBJ/SAT_BEGIN objCaptureOn gate keep
+                         // the heavy capture dormant.
+                         || (getenv("MAPLECAST_TILEDESC_TILES") != nullptr)
+                         || (getenv("MAPLECAST_TILEDESC_PROBE") != nullptr)
+                         // SHIP-RESOLVED-BODY-TCW: the production body-tcw capture (0x8C1248CC) needs
+                         // the GenCall injected on a plain replica-live launch, independent of walk-snap.
+                         || (getenv("MAPLECAST_REPLICA_LIVE") != nullptr
+                             && getenv("MAPLECAST_REPLICA_LIVE")[0] != '0'
+                             && getenv("MAPLECAST_REPLICA_LIVE")[0] != '\0');
 
 // Sub-flag: also capture the LOAD-TIME part-atlas decode quads at loc_8c033e90
 // (0x8C033EC0 post-write). PROVEN (live prod capture 2026-06-08): that routine
@@ -669,6 +695,14 @@ static const u32 PC_DECODE_ENTRY2_M = PC_DECODE_ENTRY2 & SH4_AREA_MASK; // 0x0C0
 // start; mc_isHookedPC must return true so rec_x64 injects the GenCall.
 static const u32 PC_ASM_PART   = 0x8C034864;
 static const u32 PC_ASM_PART_M = PC_ASM_PART & SH4_AREA_MASK;  // 0x0C034864
+// WALK-INSTANT TILEDESC SNAPSHOT: the BODY-WALKER ENTRY (loc_8c0344d4). The tiledesc @0x8C1F9F9C
+// is read-only through the walk (r13 only advances), so its per-record byte1 here is the
+// authoritative pre-consumption count (== +0xDC budget; TDTILE ground truth) — BEFORE the HUD
+// pass re-seeds it to the inflated STARTRENDER value. On the FIRST char-body walk of each video
+// frame we snapshot the full tiledesc for the replica wire. Block start (routine entry) so the
+// GenCall injects; mc_isHookedPC returns true when the replica live-wire is armed with clients.
+static const u32 PC_WALK_ENTRY   = 0x8C0344D4;
+static const u32 PC_WALK_ENTRY_M = PC_WALK_ENTRY & SH4_AREA_MASK;  // 0x0C0344D4
 // CHARQ-RENDER: the per-part PVR-list-record completion PC inside loc_8C1244B0
 // (bank12). At 0x8C1248CC (`pref @r14`, right after the final record write and before
 // the cursor advances) the 0x40-byte PVR poly record at r14-0x20 is fully resolved.
@@ -2088,6 +2122,230 @@ static void nbStore(u32 node, u8 blend) {
 	// table full (shouldn't happen with 64 slots) -> drop silently.
 }
 
+// TILEDESC WALK-INSTANT PROBE (MAPLECAST_TILEDESC_PROBE, READ-ONLY, gated). At the per-part
+// convergence PC 0x8C034864 the walker's r13 points at the CURRENT record's tiledesc entry
+// (byte1 = the per-record tile count the engine is ACTUALLY walking). We accumulate byte1+1
+// per part for each node over one video frame, then dump the per-node sum at the frame
+// boundary. This measures the AUTHORITATIVE per-record count AT THE WALK — to compare against
+// the STARTRENDER-snapshot byte1-sum (measured 59 inflated) and the +0xDC budget (38). If the
+// walk-instant sum == +0xDC budget, the fix is to snapshot the tiledesc HERE, not at STARTRENDER.
+static const bool s_tdProbe = (getenv("MAPLECAST_TILEDESC_PROBE") != nullptr);
+struct McTdProbe { u32 node; u32 sumPlus1; u32 parts; u32 dc; };
+static McTdProbe s_tdp[64];
+static int       s_tdpN = 0;
+static u32       s_tdpVframe = 0xFFFFFFFFu;
+
+// ===========================================================================
+// PRODUCTION: SHIP-RESOLVED-BODY-TCW (finding:ship_resolved_body_tcw, 2026-07-03).
+// The arena_base parity flip (16<->400 per frame) makes render_frame's alloc_index ->
+// idxtab[alloc] -> rectab[..] body tcw ALTERNATE every frame (OURS Storm texaddr flips
+// 0x44xxxx<->0x41xxxx, exactly 0x30000 = the parity offset) => the frame-to-frame BOUNCE.
+// The engine's RESOLVED per-tile body tcw (r12+0x0C at the 0x8C1248CC submit) is STABLE
+// (0x41xxxx). FIX: capture that resolved tcw per (char body, tile-index-in-render-order) and
+// ship it; render_frame uses it verbatim for body tiles, bypassing the parity-sensitive table
+// resolution entirely. Effects/bolts UNTOUCHED. Keyed by NODE address (0x0C..) + tile index so
+// render_frame maps each shipped tcw to the right tile in its identical body-then-tile walk order.
+// Captured for ALL active char bodies. Read-only; armed whenever the replica live-wire is on.
+// Production gate: capture whenever the replica live-wire is armed (env-derived at static init, same
+// as mc_replicaWalkSnapOn) — independent of the MAPLECAST_TILEDESC_TILES probe env.
+static bool mc_bodyTcwOn = []{
+	const char* rl = getenv("MAPLECAST_REPLICA_LIVE");
+	return rl && rl[0] != '0' && rl[0] != '\0';
+}();
+struct McBodyTcw { u32 node; u32 ntiles; u32 tcw[64]; };   // 64 = MAXQ body tiles (matches render_frame)
+static McBodyTcw   s_bodyTcw[6];        // one per char body slot (0..5), node=0 when unused this frame
+static int         s_bodyTcwN = 0;      // number of populated entries this frame
+static u32          s_bodyTcwVframe = 0xFFFFFFFFu;
+// Flat wire buffer, rebuilt at frame boundary: [u32 node][u32 ntiles][ntiles u32 tcw] per body.
+static u32          s_bodyTcwWire[6 * (2 + 64)];
+static int          s_bodyTcwWireWords = 0;
+static void bodyTcwFinishFrame()      // pack the accumulated per-body lists into the flat wire buffer
+{
+	int w = 0;
+	for (int i = 0; i < s_bodyTcwN; i++) {
+		const McBodyTcw& b = s_bodyTcw[i];
+		if (b.node == 0 || b.ntiles == 0) continue;
+		s_bodyTcwWire[w++] = b.node;
+		s_bodyTcwWire[w++] = b.ntiles;
+		for (u32 t = 0; t < b.ntiles && t < 64; t++) s_bodyTcwWire[w++] = b.tcw[t];
+	}
+	s_bodyTcwWireWords = w;
+}
+static McBodyTcw* bodyTcwGet(u32 node0C)   // find/open the accumulator entry for this body this frame
+{
+	for (int i = 0; i < s_bodyTcwN; i++) if (s_bodyTcw[i].node == node0C) return &s_bodyTcw[i];
+	if (s_bodyTcwN >= 6) return nullptr;
+	McBodyTcw* b = &s_bodyTcw[s_bodyTcwN++];
+	b->node = node0C; b->ntiles = 0;
+	return b;
+}
+// ACCESSOR (called from replica_live captureFrame at rend_start_render, AFTER all this frame's
+// submits). Packs the CURRENT accumulation into the flat wire buffer and returns it.
+// Wire layout of the returned words: per body [node][ntiles][ntiles x tcw]. *outWords = word count.
+const u32* mc_oracle_bodyTcws(int* outWords)
+{
+	bodyTcwFinishFrame();                 // pack the current frame's accumulation NOW
+	if (outWords) *outWords = s_bodyTcwWireWords;
+	return s_bodyTcwWire;
+}
+
+// GROUND-TRUTH PER-TILE TCW TRACE (MAPLECAST_TILEDESC_TILES, reuses the tiles flag). Pairs the
+// body-part convergence PC 0x8C034864 (identity: node, sel=read_u16(r11+6), r13, anchor r15+0x30/34)
+// with the NEXT bank12 submit completion PC 0x8C1248CC, where the engine's FINAL resolved TCW is
+// live at recBase+0x08 (RESOLVED = rectab[idxtab[alloc_index]]+0x0C: VRAM texel addr bits 0..20 +
+// PixelFmt + PalSelect bits 21..26). This is the engine's ground-truth per-tile texture — captured
+// at the ROM's real submit instant, sidestepping the idxtab/rectab timing bind entirely. Extended to
+// ALL 6 char bodies (0x268340/0x2688E4/0x268E88/0x26942C/0x2699D0/0x269F74), keyed by (body, tile
+// index-in-body) so the shipped tcw maps to the right render_frame tile. READ-ONLY.
+static const u32 TDTCW_BODY[6] = { 0x0C268340u, 0x0C2688E4u, 0x0C268E88u,
+                                   0x0C26942Cu, 0x0C2699D0u, 0x0C269F74u };
+static int  tdTcwBodySlot(u32 node0C) {                 // -1 if not a char body
+	for (int i = 0; i < 6; i++) if (TDTCW_BODY[i] == node0C) return i;
+	return -1;
+}
+static u32  s_tdTcwNode = 0;          // node (0x0C..) armed by the last body-part hook (0 = disarmed)
+static int  s_tdTcwSlot = -1;         // which of the 6 char bodies (-1 = none)
+static u32  s_tdTcwSel  = 0;
+static u32  s_tdTcwR13  = 0;
+static float s_tdTcwSx = 0.f, s_tdTcwSy = 0.f;
+static bool s_tdTcwPending = false;   // 1:1 pairing arm (body part -> next submit)
+static u32  s_tdTcwVframe = 0xFFFFFFFFu;
+static u32  s_tdTcwTileIdx[6] = {0,0,0,0,0,0};   // per-body running tile index this frame
+static void tdProbeFlush()
+{
+	for (int i = 0; i < s_tdpN; i++)
+		fprintf(stderr, "[TDPROBE] vf-boundary node=0x%08X walk_byte1sum(+1)=%u parts=%u +0xDC=%u\n",
+		        s_tdp[i].node, s_tdp[i].sumPlus1, s_tdp[i].parts, s_tdp[i].dc);
+	s_tdpN = 0;
+}
+// PER-DISPATCH IDENTITY LOG (MAPLECAST_TILEDESC_TILES): at each 0x8C034864 dispatch, emit ONE
+// line with the emitted tile's identity — the SOURCE SEL (read_u16(r11+6), same as the walker/
+// ASMTRACE), the tiledesc entry r13 + its byte0/byte1, and the SCREEN ANCHOR (r15+0x30/0x34,
+// where BOTH transform paths have written the final screen X/Y — the ASMTRACE ground-truth foot
+// anchor). This is the engine's EXACT per-tile list (parts-many, == +0xDC budget) the client must
+// reproduce. Scoped to the 2 char-body nodes so the log stays small. r15 here is the walker's
+// frame; r11 the GFX2 record cursor; r13 the tiledesc entry. All READ-ONLY.
+static const bool s_tdTiles = (getenv("MAPLECAST_TILEDESC_TILES") != nullptr);
+static void tdProbeAccum(u32 node, const u32* r)
+{
+	u32 vframe = addrspace::read32(0x8C3496B0);
+	if (vframe != s_tdpVframe) { tdProbeFlush(); s_tdpVframe = vframe; }
+	u32 r13 = r[13];
+	// r13 points at the tiledesc entry (byte0=tile size, byte1=per-record tile count-1). Only
+	// trust an area-3 pointer.
+	if (((r13 >> 24) & 0x7Fu) != 0x0Cu) return;
+	u32 r13p = (r13 & 0x1FFFFFFFu) | 0x0C000000u;
+	u32 b0 = addrspace::read8(r13p), b1 = addrspace::read8(r13p + 1);
+	u32 cnt = b1 + 1;
+	// per-dispatch identity: sel + anchor + descriptor bytes (the ground-truth tile list)
+	if (s_tdTiles && (node == 0x0C268340u || node == 0x0C2688E4u)) {
+		u32 r11 = r[11], r15 = r[15];
+		u32 sel = (((r11 >> 24) & 0x7Fu) == 0x0Cu)
+		        ? addrspace::read16(((r11 & 0x1FFFFFFFu) | 0x0C000000u) + 6) : 0xFFFFu;
+		float sx = 0.f, sy = 0.f;
+		if (((r15 >> 24) & 0x7Fu) == 0x0Cu) {
+			u32 r15p = (r15 & 0x1FFFFFFFu) | 0x0C000000u;
+			u32 ux = addrspace::read32(r15p + 0x30), uy = addrspace::read32(r15p + 0x34);
+			memcpy(&sx, &ux, 4); memcpy(&sy, &uy, 4);
+		}
+		fprintf(stderr, "[TDTILE] vf=%u node=0x%08X sel=%u r13=0x%08X b0=%u b1=%u sx=%.1f sy=%.1f\n",
+		        vframe, node, sel, r13, b0, b1, sx, sy);
+	}
+	for (int i = 0; i < s_tdpN; i++) {
+		if (s_tdp[i].node == node) { s_tdp[i].sumPlus1 += cnt; s_tdp[i].parts++; return; }
+	}
+	if (s_tdpN < 64) {
+		s_tdp[s_tdpN].node = node; s_tdp[s_tdpN].sumPlus1 = cnt; s_tdp[s_tdpN].parts = 1;
+		s_tdp[s_tdpN].dc = addrspace::read16(((node & 0x1FFFFFFFu) | 0x0C000000u) + 0xDC);
+		s_tdpN++;
+	}
+}
+
+// GROUND-TRUTH TCW — arm at the body-part PC (0x8C034864): record the per-tile identity for ANY of
+// the 6 char bodies (node/sel/r13/anchor + which body slot + per-body tile index), arm the 1:1
+// pairing so the next submit logs its resolved tcw.
+static void tdTcwArm(const u32* r)
+{
+	// per-frame reset of the per-body tile counters.
+	u32 vframe = addrspace::read32(0x8C3496B0);
+	if (vframe != s_tdTcwVframe) {
+		s_tdTcwVframe = vframe;
+		for (int i = 0; i < 6; i++) s_tdTcwTileIdx[i] = 0;
+	}
+	u32 node = norm(r[14]) | 0x0C000000u;
+	int slot = tdTcwBodySlot(node);
+	if (slot < 0) { s_tdTcwPending = false; s_tdTcwSlot = -1; return; }   // not a char body
+	s_tdTcwNode = node;
+	s_tdTcwSlot = slot;
+	u32 r11 = r[11], r15 = r[15];
+	s_tdTcwSel = (((r11 >> 24) & 0x7Fu) == 0x0Cu)
+	           ? (u32)addrspace::read16(((r11 & 0x1FFFFFFFu) | 0x0C000000u) + 6) : 0xFFFFu;
+	s_tdTcwR13 = r[13];
+	s_tdTcwSx = s_tdTcwSy = 0.f;
+	if (((r15 >> 24) & 0x7Fu) == 0x0Cu) {
+		u32 r15p = (r15 & 0x1FFFFFFFu) | 0x0C000000u;
+		u32 ux = addrspace::read32(r15p + 0x30), uy = addrspace::read32(r15p + 0x34);
+		memcpy(&s_tdTcwSx, &ux, 4); memcpy(&s_tdTcwSy, &uy, 4);
+	}
+	s_tdTcwPending = true;
+}
+
+// GROUND-TRUTH TCW+UV — emit at the submit PC (0x8C1248CC). CORRECTED SOURCE (CHARQ breakthrough,
+// mc_charqEmitSubmit:2020-2027): the engine's REAL per-tile body TCW is at r12+0x0C (PAL4 fmt5,
+// vram=(tcw&0x1FFFFF)<<3 ~0x419800, pal bits 25..21) — NOT recBase+0x08, which yields the artifact
+// 0x949004d2 -> "texaddr 0x2690" (a fmt2 8x8 non-body tex, the SOLID-COLOR trap). We log BOTH so the
+// coordinator sees the discrepancy: the r12+0x0C tcw is the one that matches OURS' 0x44xxxx model.
+// Plus the per-tile UV (sprite-para record 2 = r14): 3 UVs at rec+0x34..+0x3E, 16-bit-truncated
+// floats. This is the engine's exact texture slice for this Storm tile.
+static inline float tdExpandUV(u16 hi) { u32 u = (u32)hi << 16; float f; memcpy(&f, &u, 4); return f; }
+static void tdTcwEmit(const u32* r)
+{
+	if (!s_tdTcwPending) return;        // no preceding first-body part -> skip (HUD/other body)
+	s_tdTcwPending = false;
+	u32 rec = norm(r[14]) | 0x0C000000u;                 // sprite-para record 2 (corners + UVs)
+	u32 recBase = rec - CHARQ_REC_OFF;                   // record 1 (global PCW/ISP/TCW/TSP)
+	if (!inRam(rec) || !inRam(recBase)) return;
+	// REAL body tcw = r12+0x0C (proven); the recBase+0x08 word is the non-body artifact.
+	u32 r12 = norm(r[12]) | 0x0C000000u;
+	u32 tcwReal = inRam(r12 + 0x0C) ? addrspace::read32(r12 + 0x0C) : 0u;
+	u32 tcwRec  = addrspace::read32(recBase + 0x08);
+	u32 texReal = (tcwReal & 0x1FFFFFu) << 3;
+	u32 palReal = (tcwReal >> 21) & 0x3Fu;
+	u32 texRec  = (tcwRec  & 0x1FFFFFu) << 3;
+	u32 palRec  = (tcwRec  >> 21) & 0x3Fu;
+	// per-tile UV (the 3 provided sprite corners; D is derived). 16-bit-hi f32.
+	float AU = tdExpandUV((u16)addrspace::read16(rec + 0x34));
+	float AV = tdExpandUV((u16)addrspace::read16(rec + 0x36));
+	float BU = tdExpandUV((u16)addrspace::read16(rec + 0x38));
+	float BV = tdExpandUV((u16)addrspace::read16(rec + 0x3A));
+	float CU = tdExpandUV((u16)addrspace::read16(rec + 0x3C));
+	float CV = tdExpandUV((u16)addrspace::read16(rec + 0x3E));
+	u32 vframe = addrspace::read32(0x8C3496B0);
+	int slot = s_tdTcwSlot;
+	u32 tidx = (slot >= 0 && slot < 6) ? s_tdTcwTileIdx[slot]++ : 0xFFFFFFFFu;   // per-body tile index
+
+	// PRODUCTION CAPTURE: append this tile's RESOLVED body tcw (tcwReal = r12+0x0C) to its body's
+	// ordered list, keyed by node (0x0C..). Per-frame boundary reset. This is what the wire ships.
+	if (slot >= 0 && s_tdTcwNode) {
+		if (vframe != s_bodyTcwVframe) {           // new video frame: pack last frame, reset
+			bodyTcwFinishFrame();
+			s_bodyTcwVframe = vframe; s_bodyTcwN = 0;
+			for (int i = 0; i < 6; i++) { s_bodyTcw[i].node = 0; s_bodyTcw[i].ntiles = 0; }
+		}
+		McBodyTcw* b = bodyTcwGet(s_tdTcwNode);
+		if (b && b->ntiles < 64) b->tcw[b->ntiles++] = tcwReal;
+	}
+
+	if (s_tdTiles) {                               // PROBE PRINT (env only)
+		fprintf(stderr, "[TDTCW] vf=%u body=%d tile=%u node=0x%08X sel=%u r13=0x%08X tcwR12=0x%08X texR12=0x%08X palR12=%u "
+		                "| tcwRec=0x%08X texRec=0x%08X palRec=%u sx=%.1f sy=%.1f\n",
+		        vframe, slot, tidx, s_tdTcwNode, s_tdTcwSel, s_tdTcwR13, tcwReal, texReal, palReal,
+		        tcwRec, texRec, palRec, s_tdTcwSx, s_tdTcwSy);
+		fprintf(stderr, "[TDUV] vf=%u body=%d tile=%u sel=%u AU=%.4f AV=%.4f BU=%.4f BV=%.4f CU=%.4f CV=%.4f\n",
+		        vframe, slot, tidx, s_tdTcwSel, AU, AV, BU, BV, CU, CV);
+	}
+}
+
 // Body-part convergence (0x8C034864): set current node + arm the pairing. node = r14
 // (same read CHARQ-EMIT uses at this PC; prologue's `mov r4,r14` has executed).
 static void mc_nbBodyPart(const u32* r)
@@ -2356,13 +2614,22 @@ bool mc_isHookedPC(u32 pc)
 	// other alias). This is the FIX for the never-fires bug: block->vaddr is 0x0C..,
 	// the literals are 0x8C.., and an exact == never matched.
 	u32 m = pc & SH4_AREA_MASK;
-	if (m == PC_OBJ_BEGIN_M) return true;
+	// OBJ_BEGIN / SAT_BEGIN drive the heavyweight per-object Oracle CAPTURE (findOrCreateObj/
+	// enrichObj/R2-record + the frameFlush jsonl). Gate them on the CAPTURE consumers, NOT
+	// unconditionally: a plain replica-live launch (mc_replicaWalkSnapOn) turns mc_oracleHookEnabled
+	// ON so the walk-entry GenCall injects, but it must NOT drag in this object capture (it spams the
+	// jsonl — which fails with no /dev/shm on Windows — and drops the headless to ~1fps). Requiring
+	// the real capture flags keeps these dormant on a walk-snap-only launch. (Was `return true`,
+	// which only ever fired when MAPLECAST_FRAME_ORACLE_HOOK made mc_oracleHookEnabled true anyway.)
+	const bool objCaptureOn = mc_frameOracleHookOn || mc_charqRenderEnabled
+	                       || mc_charqEmitEnabled  || mc_decodeQuadsEnabled;
+	if (m == PC_OBJ_BEGIN_M) return objCaptureOn;
 	// The satellite/effect render path (loc_8c030af8). Same block-entry treatment as
 	// OBJ_BEGIN: r4 = node, writes screen_xy to +0xE0/+0xE4. This is what makes
 	// projectiles/capes/drones first-class Oracle objects. 0x8C030AF8 is a bsr target
 	// (bank03:1236) so it's already a block start; the decoder force-split is a no-op
 	// guarded by rpc!=vaddr, but mc_isHookedPC must return true so the GenCall injects.
-	if (m == PC_SAT_BEGIN_M) return true;
+	if (m == PC_SAT_BEGIN_M) return objCaptureOn;
 	// The quad-DONE PC (0x8C033EC0) is the post-WRITE quad-store: the 16-byte quad header
 	// {w,h,attr,texptr,palptr} is fully written but the part PIXELS at r8 are NOT decoded
 	// yet. Hook it only for the decode-quad sub-flag (the HEADER buffer capture). The
@@ -2392,14 +2659,20 @@ bool mc_isHookedPC(u32 pc)
 	// Also hooked under the prod FRAME-ORACLE-HOOK for the per-node REAL-BLEND capture
 	// (mc_nbBodyPart sets the current node here). Mid-block -> the decoder force-split
 	// makes it a block start; return true so rec_x64 injects the GenCall.
-	if (m == PC_ASM_PART_M) return mc_asmTraceEnabled || mc_bodyCapEnabled || mc_charqEmitEnabled || mc_frameOracleHookOn;
+	if (m == PC_ASM_PART_M) return mc_asmTraceEnabled || mc_bodyCapEnabled || mc_charqEmitEnabled || mc_frameOracleHookOn || s_tdProbe || s_tdTiles || mc_bodyTcwOn;
+	// WALK-INSTANT TILEDESC SNAPSHOT: the body-walker ENTRY (loc_8c0344d4 / 0x8C0344D4). Hooked
+	// on a plain replica live-wire launch (mc_replicaWalkSnapOn, env-derived at static init, same
+	// gate that ORs into mc_oracleHookEnabled) so the GenCall injects WITHOUT the heavyweight
+	// oracle capture. Snapshots the tiledesc at the walk instant (correct b1) vs STARTRENDER
+	// (inflated). Block start (routine entry); returns true so rec_x64 injects the GenCall.
+	if (m == PC_WALK_ENTRY_M) return mc_replicaWalkSnapOn;
 	// CHARQ-RENDER: the per-part PVR-record completion PC inside loc_8C1244B0
 	// (0x8C1248CC). Only hooked when the charq-render flag is set. Mid-block -> the
 	// decoder force-split makes it a block start; return true so rec_x64 injects.
 	// Also hooked under the prod FRAME-ORACLE-HOOK for the per-node REAL-BLEND capture
 	// (mc_nbSubmit reads the paired part's TSP here). Mid-block -> the decoder force-split
 	// makes it a block start; return true so rec_x64 injects the GenCall.
-	if (m == PC_CHARQ_SUBMIT_M) return mc_charqRenderEnabled || mc_charqEmitEnabled || mc_frameOracleHookOn;
+	if (m == PC_CHARQ_SUBMIT_M) return mc_charqRenderEnabled || mc_charqEmitEnabled || mc_frameOracleHookOn || s_tdTiles || mc_bodyTcwOn;
 	// GENERIC PROBE: any PC configured in /dev/shm/mc_oracle_probe.conf (parsed once at
 	// static init). Masked compare so the disasm 0x8C.. label matches the executed 0x0C..
 	// alias. The probe PCs may be mid-block (e.g. 0x8C1248CC) -> the decoder force-split
@@ -2666,7 +2939,26 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 		if (mc_bodyCapEnabled)  mc_bodyCapHandler(r);
 		if (mc_charqEmitEnabled) mc_charqEmitBodyPart(r);   // set current run identity
 		if (mc_frameOracleHookOn) mc_nbBodyPart(r);         // REAL-BLEND: set current node + arm pairing
+		if (s_tdProbe) tdProbeAccum(norm(r[14]) | 0x0C000000u, r);  // TILEDESC walk-instant sum
+		if (s_tdTiles || mc_bodyTcwOn) tdTcwArm(r);         // GROUND-TRUTH TCW: arm per-body pairing (probe or prod)
 		return;
+	}
+
+	// WALK-INSTANT TILEDESC SNAPSHOT — the body-walker ENTRY (loc_8c0344d4 / 0x8C0344D4). The
+	// tiledesc @0x8C1F9F9C is read-only through the walk (r13 only advances +4/tile), so its
+	// per-record byte1 here is the AUTHORITATIVE pre-consumption count (== +0xDC budget; TDTILE
+	// ground truth) — before the HUD pass re-seeds it to the inflated STARTRENDER value.
+	//
+	// CADENCE: the tiledesc BUILDER (bank12.loc_8c129728) runs INCREMENTALLY per object, just
+	// before each body's walk (many call sites in bank03) — it APPENDS each body's entries. So at
+	// the FIRST body's walk entry the SECOND body's entries are still last-frame-stale. We snapshot
+	// on EVERY char-body walk entry within the frame (LAST-WINS): the last body's entry captures
+	// ALL bodies that walked this frame (earlier bodies' lower-offset entries persist), and it is
+	// still BEFORE the HUD-pass re-seed. Per-frame this is ~2 memcpys of 0x1800B — negligible.
+	if (mpc == PC_WALK_ENTRY_M) {
+		if (mc_replicaWalkSnapOn)
+			maplecast_replica_live::snapshotWalkInstantTiledesc();   // last-wins within the frame
+		return;                                                       // NO oracle capture / jsonl here
 	}
 
 	// CHARQ-RENDER per-part PVR-record capture — loc_8C1244B0 completion PC (0x8C1248CC).
@@ -2676,6 +2968,7 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 		if (mc_charqRenderEnabled) mc_charqRenderHandler(r);
 		if (mc_charqEmitEnabled)   mc_charqEmitSubmit(r);   // append a screen sprite quad
 		if (mc_frameOracleHookOn)  mc_nbSubmit(r);          // REAL-BLEND: read paired part's TSP -> per-node blend
+		if (s_tdTiles || mc_bodyTcwOn) tdTcwEmit(r);       // GROUND-TRUTH TCW: capture per-body resolved tcw (prod) + probe print
 		return;
 	}
 
@@ -3548,8 +3841,26 @@ void mc_oracle_charPassCapture(void* ctxv)
 		ta_parse(sctx, true);                        // read-only, idempotent (norend's own call)
 		PassStats sps; memset(&sps, 0, sizeof sps);
 		collectScreenQuads(sctx->rend, &sps);
-		if (sps.realBody >= CHARQ_REALBODY_MIN)      // THIS STARTRENDER is the CHARACTER pass
+		if (sps.realBody >= CHARQ_REALBODY_MIN) {     // THIS STARTRENDER is the CHARACTER pass
 			maplecast_replica_live::snapshotCharPassTiledesc();
+			// FIRST-BODY idxtab WINDOW (MAPLECAST_IDXTAB_CHARSNAP, default OFF): body0's idxtab is
+			// WRITTEN here (its char-pass walk is done) and the HUD pass hasn't clobbered the low
+			// arena indices yet. Snapshot body0's window for captureFrame to overlay. (Targeted Storm
+			// scramble fix; the function self-gates on the env + arm/client/in-match/built.)
+			maplecast_replica_live::snapshotCharPassIdxtabBody0Window();
+			// CHAR-PASS GFX2 SNAPSHOT (Storm under-tile fix, re_kb/60): the GFX2 cell-record dispatch
+			// head GFX2[(sid&0x7FFF)*4] SELF-MODIFIES per animation sub-frame and is reverted before
+			// captureFrame's live GFX2 read -> the wire froze the record list -> Storm's tile count was
+			// wrong (~24-38 vs engine ~49-53). Snapshot each active body's LIVE GFX2 here (same instant
+			// the walker reads it); collectFreshGfx/captureFrame ship it fresh. Default ON; self-gates.
+			maplecast_replica_live::snapshotCharPassGfx2();
+			// SLOT-TABLE + OBJPOOL CHAR-PASS SNAPSHOT (finding:replica_live_slot_objpool_snapshot_coherency):
+			// capture slot_cnt(0x8C2895E0)/slot_ptr(0x8C287DE0)/objpool(0x8C26AA54, carries +0x12C) at THIS
+			// render-walk instant (loc_8c0308c2) so a removed satellite's stale node+0x12C cannot leak past a
+			// non-coherent count -> phantom-cape span balloon. captureFrame ships these instead of live RAM.
+			// Coherent with the tiledesc/gfx2 char-pass snapshots (one render-walk view or none). Default ON.
+			maplecast_replica_live::snapshotCharPassSlots();
+		}
 	}
 
 	// OPTIONAL VERIFY (gated MAPLECAST_VERIFY_DC, READ-ONLY, stderr, throttled): dump per-pass

@@ -615,9 +615,12 @@ static void collect_dc_0308c2(Sh4Ctx *c){
             if(count > 0x60) break;
             u32 node = r32(c, r10 + (r14 << 2));
             if(node == 0 || (((node >> 24) & 0x7Fu) != 0x0Cu)){ r14++; continue; }
-            /* ACTIVE GATE — must match render_sprites_0308c2 (gen_walker_root.c) exactly, or the
-             * +0xDC budget prefix-sum would count tiles for objects the render walk skips. */
-            if(r8u(c, node + 0x00u) == 0){ r14++; continue; }
+            /* VISIBILITY GATE (node+0x12C LOW BYTE, nonzero-only) — must match render_sprites_0308c2
+             * (gen_walker_root.c) exactly, or the +0xDC budget prefix-sum would count tiles for
+             * objects the render walk skips (or vice-versa). The engine's real per-node gate is
+             * node+0x12C, NOT node+0x00 (which the slot-walk never reads); swapped in lockstep with
+             * gen_walker_root.c. TEST ONLY THE LOW BYTE (+0x12E=hit-flash, +0x130=xflip). */
+            if(r8u(c, node + 0x12Cu) == 0){ r14++; continue; }
             dc_table_add(c, node);   /* both cat==0 body and cat 1..4 satellite share the arena */
             r14++;
         }
