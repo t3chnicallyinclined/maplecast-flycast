@@ -367,6 +367,12 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
     for (let q = 0; q < quadCount; q++) {
         const gfx1 = quadGfx1s[q] >>> 0;
         if (!(gfx1 & 0x0C000000) && !(gfx1 & 0x8C000000)) continue;  // no valid body art
+        // BIT15 EFFECT QUADS ARE RESIDENT-BACKED -- NEVER STAGE (2026-07-05 _live4 byte-gate,
+        // lockstep with maplecast_mirror.cpp gstaDecodeBodies). Their textures are engine-
+        // uploaded (effect slots 0x475xxx/0x60xxxx/0x400xxx, shipped byte-exact in the GSTA
+        // prefix VRAM); their sels are 0xC000-class sentinels, not GFX1 indices -- decoding
+        // them staged garbage OVER the good resident texels. srcdesc flags bit0==0 marks them.
+        if (quadSrcDesc && !(quadSrcDesc[4 * q + 3] & 1)) continue;
         quads++;
         const sel  = quadSels[q];
         const addr = tcwAddrOf(q);
@@ -469,7 +475,16 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
             // extract_gfx1_atlas full-span lin); twTile's x-first square validation (re_kb/43)
             // was against a self-consistent model, never the baker. Y-first matches the baker
             // 0px for square AND non-square. (re_kb finding:carve_square_yfirst_supersedes_xfirst.)
-            const k = twTileYFirst(col, row2, Tw, Th);
+            // NATIVE-CHUNK ORDER = the engine's 2-ROW-BAND desc order (bands of 2 rows
+            // top-down, column-major inside a band) -- MEASURED vs engine VRAM 2026-07-05
+            // (_live4 sel 0xD61 128x128 4x4: chunk == band-index on all 9 nonzero tiles;
+            // Y-first mismapped 8/16). Band-order == Y-first for any grid with either dim
+            // <= 2 (all previously validated cases identical); only >2x>2 grids change.
+            // Lockstep with maplecast_mirror.cpp gstaDecodeBodies.
+            const bby = row2 & ~1;
+            const bbh = (Th - bby < 2) ? (Th - bby) : 2;
+            const k = bby * Tw + col * bbh + (row2 - bby);
+            void twTileYFirst;   // kept for reference
             const o = k * 512;
             if (o + 512 <= p.raw.length) { vram.set(p.raw.subarray(o, o + 512), addr); written++; continue; }
         }

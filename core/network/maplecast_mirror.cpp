@@ -3911,6 +3911,14 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 	for (int q = 0; q < nQuad; q++) {
 		uint32_t gfx1 = S[q].gfx1;
 		if (!(gfx1 & 0x0C000000u) && !(gfx1 & 0x8C000000u)) continue;   // no body art
+		// BIT15 EFFECT QUADS ARE RESIDENT-BACKED — NEVER STAGE (2026-07-05, _live4 byte-gate).
+		// Their textures are ENGINE-UPLOADED (effect slots 0x475xxx/0x60xxxx/0x400xxx, shipped
+		// in the GSTA prefix VRAM byte-exact — MEASURED 512/512 vs engine at every sampled
+		// slot, both arena parities). Their sels are NOT GFX1 indices (0xC000-class sentinels)
+		// — decoding them staged GARBAGE tiles that overwrote the good resident texels (the
+		// pal17 Z48 at vf53770 once the cull revision let them reach this loop; pre-revision
+		// they were culled before decode, so this skip restores the validated staging set).
+		if (q < (int)gIsEff.size() && gIsEff[q]) continue;
 		// EFFECT-POLY GUARD (GAP 1, decode). A gfx1 in the shared Effect-Poly bank
 		// [0x0CED0000,0x0CEE0000) is NOT a char GFX1 LZSS offset table — it is an
 		// ABSOLUTE-POINTER texture DIRECTORY (head=0x0CED0010; dir base at *(0x0CED0008)
@@ -4097,15 +4105,19 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 		// the off-diagonal tiles -> the POSE-DEPENDENT Storm-cape grey-block garble (_gsta_nobg_360).
 		int Tw = W / 32, Th = H / 32;
 		if (m == 32 && cols > 1 && rows > 1 && !pd.raw.empty()) {
-			// Y-FIRST for BOTH square and non-square grids. The PVR twiddle interleaves the
-			// y-bit before the x-bit (flycast _twiddleSlow), so tile-grid chunk order is Y-first
-			// universally. The old `Tw==Th ? gstaTwTile(x-first) : yfirst` split was WRONG for
-			// square grids (sel197 64x64 2x2 diff 1860/4096 vs the byte-exact baker
-			// extract_gfx1_atlas full-span lin); gstaTwTile's x-first square validation (re_kb/43)
-			// was against a self-consistent model, never the baker. Y-first matches the baker 0px
-			// for square AND non-square. Lockstep with body_decoder.mjs ensureBodyTextures.
-			// (re_kb finding:carve_square_yfirst_supersedes_xfirst.)
-			int k = gstaTwTileYFirst(col, row, Tw, Th);
+			// NATIVE-CHUNK ORDER = the engine's 2-ROW-BAND desc order (rebuild_tile_grid's own
+			// emission: bands of 2 rows top-down, column-major inside a band), SUPERSEDING the
+			// Y-first twiddle (2026-07-05, MEASURED vs engine VRAM: _live4 m1345 sel 0xD61
+			// 128x128 4x4 — all 9 nonzero tiles chunk == band-index; Y-first mismapped 8/16 =
+			// the Cable-knockdown fragments). Band-order == Y-first for every grid with either
+			// dim <= 2 (2x2, 2x4, 4x2 — the previously validated cape/sel197 cases produce
+			// IDENTICAL indices), so this only changes >2x>2 grids, where the earlier Y-first
+			// "validation" was self-consistent reassembly (carve+reassemble with the same
+			// function), never engine VRAM. Lockstep with body_decoder.mjs ensureBodyTextures.
+			int _by = row & ~1;
+			int _bh = (Th - _by < 2) ? (Th - _by) : 2;
+			int k = _by * Tw + col * _bh + (row - _by);
+			(void)gstaTwTileYFirst;   // kept for reference/diagnostics
 			size_t o = (size_t)k * 512;
 			if (o + 512 <= pd.raw.size()) {
 				outTiles.emplace_back();
@@ -4487,7 +4499,17 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 				              && !(g >= 0x0CED0000u && g < 0x0CEE0000u);
 				if (!isBody) continue;
 				uint32_t ta = Sq2[q].tcw & 0x1FFFFFu;
-				if (ta >= 0x6000u)
+				// PIN SCOPE FIX (2026-07-05, _live4 byte-gate): only the DOUBLE-BUFFERED body
+				// arena alternates parity halves (byteaddr 0x410000-0x42FFFF <-> 0x440000-
+				// 0x45FFFF, delta 0x30000). The old blanket `ta >= 0x6000` ALSO shifted the
+				// bit15 effect tiles' tcws (0x475xxx / 0x60xxxx / 0x400xxx bands — MEASURED:
+				// the engine uses those SAME addrs at BOTH arena parities, m1330 arena==16 vs
+				// m1345 arena==400, i.e. NOT double-buffered) => they sampled addr-0x30000
+				// (stale/foreign texels = the restored-tile W12/Z50) AND their re-pinned
+				// STAGING clobbered innocent resident regions (prefix content at 0x400600 was
+				// byte-exact vs engine until a mis-pinned write). Scope: HIGH arena half only,
+				// byteaddr in [0x440000,0x460000) == ta word in [0x88000,0x8C000).
+				if (ta >= 0x88000u && ta < 0x8C000u)
 					Sq2[q].tcw = (Sq2[q].tcw & ~0x1FFFFFu) | (ta - 0x6000u);
 			}
 		}

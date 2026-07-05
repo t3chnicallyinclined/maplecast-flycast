@@ -2212,6 +2212,18 @@ static u32          s_bodyTcwVframe = 0xFFFFFFFFu;
 // Flat wire buffer, rebuilt at frame boundary: [u32 node][u32 ntiles][ntiles u32 tcw] per node.
 static u32          s_bodyTcwWire[MC_BTCW_MAX_NODES * (2 + MC_BTCW_MAX_TILES)];
 static int          s_bodyTcwWireWords = 0;
+// PREV-FRAME RETENTION (overseer follow-up 2026-07-05, palsel NEARMISS carry): a copy
+// of the LAST captured frame's per-(node,k) shipped words, swapped in at tdTcwEmit's
+// video-frame boundary just BEFORE s_bodyTcw resets. Consulted by the palsel recompose
+// when the entry->palsel map holds only a vf-1 stamp (entry NOT re-registered this
+// frame — the MEASURED residual cross-tint class, 32/32 zero exceptions): on slot-churn
+// frames the raw entry word is the vf-1 parity-build's OTHER-character word, while a
+// node's OWN palsel is stable across frames (hit-flash runs persist multiple frames) —
+// so carrying last frame's (node,k) palsel is strictly better than shipping raw.
+// Bounded (same shape as s_bodyTcw, ~17KB static); READ-ONLY w.r.t. guest.
+static McBodyTcw    s_bodyTcwPrev[MC_BTCW_MAX_NODES];
+static int          s_bodyTcwPrevN = 0;
+static u32          s_bodyTcwPrevVframe = 0xFFFFFFFFu;   // vframe s_bodyTcwPrev captured
 static void bodyTcwFinishFrame()      // pack the accumulated per-node lists into the flat wire buffer
 {
 	int w = 0;
@@ -2237,6 +2249,17 @@ static McBodyTcw* bodyTcwGet(u32 node0C)   // find/open the accumulator entry fo
 	McBodyTcw* b = &s_bodyTcw[s_bodyTcwN++];
 	b->node = node0C; b->ntiles = 0;
 	return b;
+}
+// LAST frame's shipped word for the SAME (node,k), or nullptr if that node/k wasn't
+// captured last frame (new node, longer tile list, or the prev copy is older than
+// vf-1 — the caller gates on s_bodyTcwPrevVframe). Used by the palsel NEARMISS carry.
+static const u32* bodyTcwPrevWord(u32 node0C, u32 k)
+{
+	for (int i = 0; i < s_bodyTcwPrevN; i++)
+		if (s_bodyTcwPrev[i].node == node0C)
+			return (k < s_bodyTcwPrev[i].ntiles && k < (u32)MC_BTCW_MAX_TILES)
+			       ? &s_bodyTcwPrev[i].tcw[k] : nullptr;
+	return nullptr;
 }
 // ACCESSOR (called from replica_live captureFrame at rend_start_render, AFTER all this frame's
 // submits). Packs the CURRENT accumulation into the flat wire buffer and returns it.
@@ -2386,8 +2409,9 @@ static McPalselEnt s_palselMap[MC_PALSEL_MAP_SZ];            // zero-init: entry
 static inline int  palselSlot(u32 entryNorm) { return (int)((entryNorm >> 5) & (MC_PALSEL_MAP_SZ - 1)); }
 // Per-frame diagnostics (logged + reset at tdTcwEmit's video-frame boundary):
 static u32 s_palselHitFrame  = 0;    // emits recomposed from a THIS-frame map entry
-static u32 s_palselMissFrame = 0;    // emits kept raw (no fresh map entry) — the self-validation counter
-static u32 s_palselNearFrame = 0;    // entry matched but stamp was vframe-1 (stamp-skew probe, raw kept)
+static u32 s_palselMissFrame = 0;    // emits kept raw (TRUE miss) — the self-validation counter
+static u32 s_palselNearFrame = 0;    // entry matched but stamp was vframe-1 (the NEARMISS class)
+static u32 s_palselCarryFrame = 0;   // nearmiss emits recomposed from LAST frame's (node,k) word (carry tier)
 static u32 s_palselRefreshFrame = 0; // refresh-pass stale-carry stores (0x8C1241A8) since last boundary
 static unsigned long mc_btcwPalselMapMiss = 0;   // lifetime miss total (spec-named diagnostic)
 static u32 s_palselStoreFires[4] = {0,0,0,0};    // lifetime fires per store site (REG_RES/REG_DIR/CHG_RES/CHG_DIR)
@@ -2445,8 +2469,9 @@ static void palselRecord(u32 entryReg, u32 word, int which)
 
 // One [BTCWFIRE] line per armed capture fire (see the block comment above).
 // `k` = the production per-node tile index this fire is appended at (0xFFFFFFFF if
-// the node list overflowed); `palfix` = H (recomposed, changed) / h (hit, no change)
-// / M (miss, raw kept).
+// the node list overflowed); `palfix` = H (map hit, recompose changed the word) /
+// h (map hit, no change) / C (nearmiss, palsel carried from last frame's (node,k)) /
+// M (true miss, raw kept).
 static void btcwFireLog(u32 vframe, u32 node, u32 k, u32 raw, u32 r12p, char palfix)
 {
 	s_btcwFireSeq++;
@@ -2473,16 +2498,16 @@ static void btcwFireLog(u32 vframe, u32 node, u32 k, u32 raw, u32 r12p, char pal
 // Throttled: first 32 nonzero frames, then every 64th.
 static void palselFrameLog(u32 prevVframe)
 {
-	if (s_palselMissFrame || s_palselRefreshFrame || s_palselNearFrame) {
+	if (s_palselMissFrame || s_palselRefreshFrame || s_palselNearFrame || s_palselCarryFrame) {
 		static u32 s_palselLogN = 0;
 		if (s_palselLogN < 32 || (s_palselLogN & 63) == 0)
-			fprintf(stderr, "[BTCW-PALSEL] vf=%u hits=%u miss=%u nearmiss(vf-1)=%u refresh-carry=%u "
-			                "missTotal=%lu dupFires=%u\n",
-			        prevVframe, s_palselHitFrame, s_palselMissFrame, s_palselNearFrame,
+			fprintf(stderr, "[BTCW-PALSEL] vf=%u hits=%u miss=%u nearmiss(vf-1)=%u carry-from-node=%u "
+			                "refresh-carry=%u missTotal=%lu dupFires=%u\n",
+			        prevVframe, s_palselHitFrame, s_palselMissFrame, s_palselNearFrame, s_palselCarryFrame,
 			        s_palselRefreshFrame, mc_btcwPalselMapMiss, s_btcwDupFrame);
 		s_palselLogN++;
 	}
-	s_palselHitFrame = s_palselMissFrame = s_palselNearFrame = s_palselRefreshFrame = 0;
+	s_palselHitFrame = s_palselMissFrame = s_palselNearFrame = s_palselCarryFrame = s_palselRefreshFrame = 0;
 	s_btcwDupN = 0; s_btcwDupFrame = 0;
 }
 
@@ -2509,29 +2534,60 @@ static void tdTcwEmit(const u32* r)
 	if (s_tdTcwNode && vframe != s_bodyTcwVframe) {
 		bodyTcwFinishFrame();
 		palselFrameLog(s_bodyTcwVframe);
+		// PREV-FRAME RETENTION swap (palsel NEARMISS carry): keep last frame's shipped
+		// per-(node,k) words before the reset. Stamped with the frame they captured so
+		// the carry only consults a true vf-1 copy (a capture gap disables it).
+		if (s_bodyTcwN > 0) memcpy(s_bodyTcwPrev, s_bodyTcw, sizeof(McBodyTcw) * (size_t)s_bodyTcwN);
+		s_bodyTcwPrevN      = s_bodyTcwN;
+		s_bodyTcwPrevVframe = s_bodyTcwVframe;
 		s_bodyTcwVframe = vframe; s_bodyTcwN = 0;
 		for (int i = 0; i < MC_BTCW_MAX_NODES; i++) { s_bodyTcw[i].node = 0; s_bodyTcw[i].ntiles = 0; }
+	}
+
+	// Open the accumulator entry EARLY so (node,k) is known to the recompose below
+	// (k = the index this fire's word appends at; same value the append block uses).
+	McBodyTcw* b = nullptr;
+	u32        k = 0xFFFFFFFFu;
+	if (s_tdTcwNode) {
+		b = bodyTcwGet(s_tdTcwNode);
+		if (b) k = b->ntiles;
 	}
 
 	// REAL body tcw = r12+0x0C (proven); the recBase+0x08 word is the non-body artifact.
 	u32 tcwRaw  = inRam(r12 + 0x0C) ? addrspace::read32(r12 + 0x0C) : 0u;
 
-	// PALSEL RECOMPOSE (re_kb/62 finding:tcw_palsel_patch_pipeline): if a CURRENT-palsel
-	// store was recorded for THIS descriptor entry THIS frame, recompose
-	// tcw = (raw & 0xF81FFFFF) | palsel_bits; else keep raw + count the miss.
+	// PALSEL RECOMPOSE (re_kb/62 finding:tcw_palsel_patch_pipeline + overseer follow-up):
+	//   HIT      map entry stamped THIS frame -> tcw = (raw & 0xF81FFFFF) | palsel. Unchanged.
+	//   NEARMISS map entry stamped vf-1 (entry NOT re-registered this frame — the MEASURED
+	//            residual cross-tint class): carry the palsel from LAST frame's shipped word
+	//            for the SAME (node,k). A node's palsel is stable across frames (hit-flash
+	//            runs persist multiple frames; only a flash edge frame is 1 frame off —
+	//            strictly better than the other-character tint the raw word carries on
+	//            churn frames). Counted as carry-from-node, palfix='C'.
+	//   TRUE MISS (no map entry, or no prev (node,k) to carry from): ship raw + miss
+	//            counter. Unchanged.
 	u32  tcwReal = tcwRaw;
 	char palfix  = 'M';
 	{
 		u32 key = norm(r12);
 		const McPalselEnt& e = s_palselMap[palselSlot(key)];
+		bool nearmiss = (e.entry == key && e.vframe + 1 == vframe);
 		if (e.entry == key && e.vframe == vframe) {
 			tcwReal = (tcwRaw & 0xF81FFFFFu) | e.palsel;
 			s_palselHitFrame++;
 			palfix = (tcwReal == tcwRaw) ? 'h' : 'H';   // H = the recompose actually changed the word
 		} else {
-			if (e.entry == key && e.vframe + 1 == vframe) s_palselNearFrame++;   // stamp-skew probe
-			s_palselMissFrame++;
-			mc_btcwPalselMapMiss++;
+			if (nearmiss) s_palselNearFrame++;
+			const u32* pw = (nearmiss && s_bodyTcwPrevVframe + 1 == vframe && s_tdTcwNode)
+			              ? bodyTcwPrevWord(s_tdTcwNode, k) : nullptr;
+			if (pw) {
+				tcwReal = (tcwRaw & 0xF81FFFFFu) | (*pw & 0x07E00000u);
+				s_palselCarryFrame++;
+				palfix = 'C';
+			} else {
+				s_palselMissFrame++;
+				mc_btcwPalselMapMiss++;
+			}
 		}
 	}
 
@@ -2553,9 +2609,8 @@ static void tdTcwEmit(const u32* r)
 	// PRODUCTION CAPTURE: append this tile's RESOLVED (palsel-recomposed) tcw to its node's
 	// ordered list, keyed by node (0x0C..). This is what the wire ships. Captured for ALL
 	// drawn nodes — the 6 char bodies (slot>=0) AND cat!=0 satellites/effects (slot<0).
+	// b/k were opened BEFORE the recompose (the nearmiss carry needs (node,k)).
 	if (s_tdTcwNode) {
-		McBodyTcw* b = bodyTcwGet(s_tdTcwNode);
-		u32 k = b ? b->ntiles : 0xFFFFFFFFu;
 		if (b && b->ntiles < MC_BTCW_MAX_TILES) b->tcw[b->ntiles++] = tcwReal;
 		// PER-FIRE DIAGNOSTIC (MAPLECAST_BTCW_FIRELOG, default OFF): logs the RAW
 		// (pre-recompose) word so the stale-vs-current topology is visible per fire.

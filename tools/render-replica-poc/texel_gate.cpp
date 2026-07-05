@@ -177,6 +177,14 @@ static int decodeBodies(const uint8_t* ram, const SceneQuad* S, int nQuad,
         uint32_t gfx1 = S[q].gfx1;
         if (!(gfx1 & 0x0C000000u) && !(gfx1 & 0x8C000000u)) continue;
         if (gfx1 >= 0x0CED0000u && gfx1 < 0x0CEE0000u) continue;
+        /* BIT15 EFFECT QUADS ARE RESIDENT-BACKED — NEVER STAGE (2026-07-05 _live4 byte-gate).
+         * Their textures are ENGINE-UPLOADED (rotating effect slots 0x475xxx/0x60xxxx/0x400xxx,
+         * shipped in the GSTA prefix VRAM byte-exact — MEASURED 512/512 vs engine at every
+         * sampled slot). Their sels are NOT GFX1 indices (0xC000-class sentinels) — decoding
+         * them produced garbage tiles that OVERWROTE the good resident texels (the Z48 at
+         * m1345 once the cull revision let them reach the decode). Pre-revision they never
+         * got here (culled), so this skip restores the validated staging set exactly. */
+        if (isEff[q]) continue;
         uint32_t sel = S[q].sel;
         uint32_t vaddr = (S[q].tcw & 0x1FFFFF) << 3;
         if ((size_t)vaddr + 512 > 8u*1024*1024) continue;
@@ -293,7 +301,19 @@ static int decodeBodies(const uint8_t* ram, const SceneQuad* S, int nQuad,
 #endif
         int Tw = W / 32, Th = H / 32;
         if (m == 32 && cols > 1 && rows > 1 && !pd.raw.empty()) {
-            int k = gstaTwTileYFirst(col, row, Tw, Th);
+            /* NATIVE-CHUNK ORDER = the engine's 2-ROW-BAND desc order (rebuild_tile_grid's
+             * own emission: bands of 2 rows top-down; column-major inside a band), NOT the
+             * Y-first twiddle. MEASURED 2026-07-05 vs engine VRAM (_live4 m1345 sel 0xD61
+             * 128x128 4x4: all 9 nonzero tiles chunk==band-index; Y-first mismapped 8/16 =
+             * the Cable-knockdown fragments). Band-order == Y-first for every grid with
+             * either dim <= 2 (2x2, 2x4, 4x2 -- the previously validated cases produce
+             * IDENTICAL indices), so this only changes >2x>2 grids where Y-first was never
+             * engine-validated (the old sel124/sel197 checks were self-consistent
+             * reassembly, not engine VRAM). */
+            int by = row & ~1;
+            int bh = (Th - by < 2) ? (Th - by) : 2;
+            int k = by * Tw + col * bh + (row - by);
+            (void)gstaTwTileYFirst;
             size_t o = (size_t)k * 512;
             if (o + 512 <= pd.raw.size()) {
                 outTiles.emplace_back();
@@ -360,7 +380,11 @@ int main(int argc, char** argv){
     std::vector<uint8_t> srcDesc((size_t)nQuad*4, 0);
     render_frame_quad_srcdesc_impl(srcDesc.data(), (u32)nQuad);
 
-    /* PARITY PIN (verbatim from maplecast_mirror.cpp, arena==400 -> LOW half). */
+    /* PARITY PIN (verbatim from maplecast_mirror.cpp, arena==400 -> LOW half).
+     * PIN SCOPE FIX (2026-07-05): only the double-buffered body arena (byteaddr
+     * [0x440000,0x460000) -> -0x30000). Bit15 effect tcws (0x475xxx/0x60xxxx/0x400xxx,
+     * MEASURED not double-buffered: same addrs at both arena parities m1330/m1345) keep
+     * their shipped addr. Build with -DOLDPIN for the pre-fix blanket shift (A/B). */
     uint32_t arena = gramU32(RAM, 0x1F9D94);
     if (arena == 400) {
         for (int q = 0; q < nQuad; q++) {
@@ -368,7 +392,11 @@ int main(int argc, char** argv){
             bool isBody = ((g & 0x0C000000u) || (g & 0x8C000000u)) && !(g >= 0x0CED0000u && g < 0x0CEE0000u);
             if (!isBody) continue;
             uint32_t ta = S[q].tcw & 0x1FFFFFu;
+#ifdef OLDPIN
             if (ta >= 0x6000u) S[q].tcw = (S[q].tcw & ~0x1FFFFFu) | (ta - 0x6000u);
+#else
+            if (ta >= 0x88000u && ta < 0x8C000u) S[q].tcw = (S[q].tcw & ~0x1FFFFFu) | (ta - 0x6000u);
+#endif
         }
     }
 
@@ -376,8 +404,11 @@ int main(int argc, char** argv){
     int written = decodeBodies(RAM, S.data(), nQuad, colrow, isEff, srcDesc, tiles);
     printf("=== %s: nQuad=%d staged=%d arena=%u ===\n", argv[1], nQuad, written, arena);
 
-    /* staged band */
+    /* staged band — seeded from the PREFIX VRAM band (argv[5], models the client's resident
+     * seed: prefix -> then fr.tiles overwrite; unstaged resident-backed quads now gate against
+     * their true resident texels instead of a false ZERO) */
     std::vector<uint8_t> myBand(0x80000, 0);
+    if (argc >= 6) { FILE* f=fopen(argv[5],"rb"); if(f){ fread(myBand.data(),1,0x80000,f); fclose(f);} }
     for (auto& t : tiles) if (t.vaddr >= BAND && t.vaddr+512 <= BANDEND) memcpy(&myBand[t.vaddr-BAND], t.bytes, 512);
 
     /* (1) CERTIFY vs live client band */
