@@ -4572,6 +4572,11 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 			char vpath[512]; snprintf(vpath, sizeof(vpath), "%s/gsta_vram_%u.bin", vd, vframe);
 			FILE* vf2 = fopen(vpath, "wb");
 			if (vf2) { fwrite(&vram[0x400000], 1, 0x80000, vf2); fclose(vf2); }
+			// EFFECT-BAND texels (0x600000..0x620000: bit15 super bolts/hail) — was a validation
+			// blind spot (the texel gate could not score the LSTORM/HAIL effect-band quads).
+			snprintf(vpath, sizeof(vpath), "%s/gsta_vram6_%u.bin", vd, vframe);
+			FILE* vf6 = fopen(vpath, "wb");
+			if (vf6) { fwrite(&vram[0x600000], 1, 0x20000, vf6); fclose(vf6); }
 			// EFFECTIVE palette (post PAL_RAM_CTRL convert) — the exact ARGB flycast samples
 			// for PAL4 index lookups. Diff vs the engine's palette to find index-0 / bank defects.
 			pal_needs_update = true; palette_update();

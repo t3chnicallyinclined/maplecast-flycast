@@ -495,17 +495,18 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
 #endif
                 pp.tcw = shippedTcw;
             }
-            /* 3b-ii (MEASURED 2026-07-05): the scale walker OVER-EMITS one spurious effect tile
-             * (count/phase slip, defect #3b-i). The extras miss body_tcw_lookup or land a
-             * non-effect texture; the stale idxtab fallback is a wrong/LARGE tile = the yellow
-             * wedge + the phantom 0x60bc00-0x60c600 band. Drop any effect quad lacking a real
-             * effect-band (0x60xxxx) shipped tcw — a fallback effect tcw is known-wrong. The
-             * (node,k) count fix (3b-i) will restore the few real tiles this drops off-end.
-             * `continue` skips before g_nscene++ so no phantom quad / g_scene_is_effect entry is
-             * emitted (no phase side effect); k still advances. Bodies untouched. */
+            /* 3b-ii (MEASURED 2026-07-05): drop effect quads whose tcw is the stale-idxtab
+             * FALLBACK (no shipped tcw for this tile) — that fallback is known-wrong for
+             * effects (the yellow-wedge / phantom-band class). `continue` skips before
+             * g_nscene++ so no phantom quad / g_scene_is_effect entry is emitted; k still
+             * advances. Bodies untouched.
+             * REVISED (2026-07-05, _live4 gate): cull on !hit ONLY. The original band test
+             * (require 0x60xxxx) predates the BTCW palsel recompose + the snapshot-ordering
+             * fix; on the coherent wire the engine LEGITIMATELY renders bit15 tiles with
+             * body-arena tcws (engine-TA proof: LATTACK b17 arena quads on screen), and the
+             * band test discarded 65-78 REAL tiles/frame on those moves. */
             if(_is_effect){
-                u32 a = (pp.tcw & 0x1FFFFFu) << 3;
-                if(!hit || a < 0x600000u || a >= 0x620000u) continue;
+                if(!hit) continue;
             }
         }
 

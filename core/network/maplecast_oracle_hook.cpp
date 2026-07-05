@@ -4094,8 +4094,6 @@ void mc_oracle_charPassCapture(void* ctxv)
 	// now carries the per-object node+0xDC EXACTLY as the slot-walk left it (the objpool window
 	// already ships +0xDC); the client uses its OWN per-object prefix-sum cursor when the resident
 	// +0xDC is stale-zero on a freeze frame — see captureFrame / the render_frame s_running_cursor.
-	maplecast_replica_live::onRenderFrame(ctxv);
-
 	// TILEDESC CHARACTER-PASS SNAPSHOT (2026-07-02, finding:tiledesc_snapshot_must_be_char_pass).
 	// The per-frame tile-descriptor table 0x8C1F9F9C is RESET-then-REBUILT from index 0 at the
 	// START of EACH render pass (re_kb/22). The idxtab/rectab snapshot fires at serverPublish
@@ -4106,6 +4104,14 @@ void mc_oracle_charPassCapture(void* ctxv)
 	// qualifying one — same gate the dump uses, which captured the tiledesc that walked 24/24 +
 	// 49/49 both bodies byte-exact). READ-ONLY; only pays the ta_parse when a replica client is
 	// connected + in-match (the snapshot function itself re-checks arm/client/in-match/built).
+	//
+	// ORDERING FIX (2026-07-05, satellite ±1-frame TEARING): this snapshot block MUST run
+	// BEFORE onRenderFrame/captureFrame below. It used to run AFTER -> the CHAR-pass invocation
+	// shipped frame N's BTCW with frame N-1's objpool/tiledesc/gfx2 snapshots, and the drop-old
+	// publish made torn-vs-coherent a per-frame coin flip (~half of frames: satellites lagged
+	// one frame, torn GFX2 showed the previous cell's art). MEASURED: LAG=348 anchors + the
+	// W133/Z31 texel residual on _live3. Bytes are identical either way (SH4 frozen during the
+	// hook) — ordering only.
 	if (ctxv && maplecast_replica_live::hasClients() && addrspace::read8(0x8C289624) != 0) {
 		TA_context* sctx = (TA_context*)ctxv;
 		ta_parse(sctx, true);                        // read-only, idempotent (norend's own call)
@@ -4132,6 +4138,8 @@ void mc_oracle_charPassCapture(void* ctxv)
 			maplecast_replica_live::snapshotCharPassSlots();
 		}
 	}
+
+	maplecast_replica_live::onRenderFrame(ctxv);
 
 	// OPTIONAL VERIFY (gated MAPLECAST_VERIFY_DC, READ-ONLY, stderr, throttled): dump per-pass
 	// node+0xDC across all 16 slot layers so the +0xDC validity-at-capture can be measured live
