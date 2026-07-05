@@ -247,7 +247,7 @@ static float rf(Sh4Ctx*c, u32 a){ u32 w=r32(c,a); return *(float*)&w; }
 /* the running scene TA: each tile -> one fully-computed sprite descriptor */
 typedef struct {
     u32 pcw, isp, tsp, tcw, recidx;
-    float Ax,Ay,Bx,By,Cx,Cy,Dx,Dy, u1;
+    float Ax,Ay,Bx,By,Cx,Cy,Dx,Dy, u1, v1;
     u32 sel;                 /* SOURCE GFX1 cell sel for this tile (per-quad, tiling-safe) */
     u32 gfx1;                /* owning node's GFX1 base (node+0x15C) — decode key with sel */
     u32 mirror;              /* texU mirror bit = facing XOR per-part 0x4000 (loc_8c0346c4) */
@@ -511,6 +511,7 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
          * lw=6 -> W=48*sxs=80.0 == engine; sel66 lw=5 -> 40*sxs=66.7 == engine). The body m gave
          * 8*sxs=13.3 on the multi-tile bolts = the mis-sized/"missing" Lightning Storm bolts. */
         float W, H;
+        float eff_uSpan = 1.0f, eff_vSpan = 1.0f;
         if (_is_effect) {
             u32 e_gfx1 = r32(c, node+0x15C);
             u32 e_off  = r32(c, e_gfx1 + g_cap[k].efx_sel*4) & 0x00FFFFFFu; /* GFX1[efx_sel] header */
@@ -518,6 +519,13 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
             u32 lh = r8u(c, e_gfx1 + e_off + 1);                          /* logical tile height */
             if (lw==0) lw=1; if (lh==0) lh=1;
             W = (float)(lw*8u) * sxs;  H = (float)(lh*8u) * sys;
+            /* PER-AXIS UV span = logical content / power-of-2 texture (MEASURED vs 7200:
+             * q0 lw2/lh3, tex 16x32 -> uSpan 1.0 x vSpan 0.75). The single-scalar u1 (U=V) was
+             * the 2nd effect defect: it mis-sampled non-square tiles -> salmon/brown. */
+            u32 usize = 8u << ((pp.tsp >> 3) & 7u);
+            u32 vsize = 8u << ( pp.tsp       & 7u);
+            eff_uSpan = (float)(lw*8u) / (float)usize;
+            eff_vSpan = (float)(lh*8u) / (float)vsize;
         } else {
             W = (float)m * sxs;        H = (float)m * sys;
         }
@@ -579,7 +587,8 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
         q->Bx=xr;     q->By=ytop;
         q->Cx=xr;     q->Cy=ybot;
         q->Dx=xl;     q->Dy=ybot;
-        q->u1 = ((float)m < tile) ? ((float)m/tile) : 1.0f;
+        if (_is_effect) { q->u1 = eff_uSpan; q->v1 = eff_vSpan; }
+        else            { q->u1 = ((float)m < tile) ? ((float)m/tile) : 1.0f; q->v1 = q->u1; }
     }
     return ntiles;
 }
@@ -801,6 +810,17 @@ u32 render_frame_quad_colrow_impl(int* out_cr, u32 cap){
 u32 render_frame_quad_mirror_impl(uint8_t* out_m, u32 cap){
     u32 w = 0;
     for(int q=0; q<g_nscene && w<cap; q++,w++) out_m[w] = (uint8_t)(g_scene[q].mirror & 1u);
+    return w;
+}
+
+/* Per-quad bit15 effect tag (g_scene_is_effect), exposed so the client's body private-bank
+ * palette repoint can EXCLUDE effect quads. The repoint matches by gfx1 alone, and effect
+ * quads share the owning character's gfx1, so without this they get swept into a body's warm
+ * private bank (palsel->0) => yellow. CONFIRMED-BY-MEASUREMENT 2026-07-05 (engine effect
+ * palsel=18; live-only repoint clobbered it to 0). */
+u32 render_frame_quad_is_effect_impl(uint8_t* out_e, u32 cap){
+    u32 w = 0;
+    for(int q=0; q<g_nscene && w<cap; q++,w++) out_e[w] = (uint8_t)(g_scene_is_effect[q] & 1u);
     return w;
 }
 

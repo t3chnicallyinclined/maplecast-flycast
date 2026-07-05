@@ -3720,7 +3720,7 @@ static uint32_t gstaEmitSpriteTA_append(std::vector<uint8_t>& out)
 		WF(o+60,q->Cx); WF(o+64,q->Cy); WF(o+68,q->z);
 		WF(o+72,q->Dx); WF(o+76,q->Dy);
 		{
-			float U = q->u1, V = q->u1;
+			float U = q->u1, V = q->v1;
 			float uLo = q->mirror ? U : 0.0f;
 			float uHi = q->mirror ? 0.0f : U;
 			uint16_t v0=h16(V),u0=h16(uLo),v1=h16(V),u1=h16(uHi),v2=h16(0.0f),u2=h16(uHi);
@@ -4304,7 +4304,11 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 	if (p + 8 <= n && gle32(d + p) == GSTA_BTCW_MAGIC) {
 		p += 4;
 		uint32_t nWords = gle32(d + p); p += 4;
-		if (nWords <= (size_t)(6 * (2 + 64)) && p + (size_t)nWords * 4 <= n) {
+		// Sanity bound must match the oracle capture caps (maplecast_oracle_hook.h MC_BTCW_MAX_*).
+		// EXTENDED 2026-07-04: the BTCW tail now carries satellite/effect nodes too, not just the 6
+		// bodies, so the old 6*(2+64)=396 bound would REJECT the whole tail (dropping bodies too) the
+		// moment a super fires. Raised in lockstep with the server.
+		if (nWords <= (size_t)(MC_BTCW_MAX_NODES * (2 + MC_BTCW_MAX_TILES)) && p + (size_t)nWords * 4 <= n) {
 			render_frame_set_body_tcws((const uint32_t*)(d + p), (int)nWords);
 			p += (size_t)nWords * 4;
 		}
@@ -4356,7 +4360,14 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 		// Repoint each body quad's TCW.PalSelect (bits 21..26) to its owning slot's private bank.
 		// The scene is a static array in render_frame.c; safe to mutate in-place for this frame.
 		GstaSceneQuad* Sq = const_cast<GstaSceneQuad*>(render_frame_scene());
+		// EXCLUDE bit15 effect quads: they share the owning character's gfx1, so a gfx1-only
+		// match would sweep them into a body's warm private bank (palsel->0) => yellow bolts.
+		// The engine renders effects on their real palsel (bank 18); leave those quads untouched.
+		// CONFIRMED-BY-MEASUREMENT 2026-07-05 (engine effect palsel=18; live-only repoint clobbered to 0).
+		static std::vector<uint8_t> _isEff; _isEff.assign((size_t)nQuad, 0);
+		gsta_quad_is_effect(_isEff.data(), (unsigned)nQuad);
 		for (int q = 0; q < nQuad; q++) {
+			if (q < (int)_isEff.size() && _isEff[q]) continue;   // effect quad: keep engine palsel (bank 18)
 			for (int s = 0; s < 6; s++) {
 				if (privBankOfSlot[s] < 0) continue;
 				if (Sq[q].gfx1 == gfxOfSlot[s]) {
@@ -4496,10 +4507,48 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 				static std::vector<uint8_t> _mrd; _mrd.assign((size_t)nQuad,0);
 				gsta_quad_mirror(_mrd.data(),(unsigned)nQuad);
 				const GstaSceneQuad* SS = render_frame_scene();
+				// PixelFmt names — enum PixelFormat @ core/hw/pvr/ta_structs.h:706-715
+				static const char* _pfName[8] = {"1555","565","4444","yuv","bump","pal4","pal8","rsvd"};
 				for (int q=0;q<nQuad;q++){
-					uint32_t pal=(SS[q].tcw>>21)&0x3F, addr=(SS[q].tcw&0x1FFFFF)<<3;
-					fprintf(mf,"q%d sel=%u gfx1=%x pal=%u tcw_addr=%x Ax=%.1f Ay=%.1f col=%d row=%d mir=%d\n",
-						q, SS[q].sel, SS[q].gfx1, pal, addr, SS[q].Ax, SS[q].Ay, _crd[2*q], _crd[2*q+1], _mrd[q]);
+					const GstaSceneQuad& Q = SS[q];
+					uint32_t tcw = Q.tcw, tsp = Q.tsp;
+					// --- TCW decode (union TCW @ core/hw/pvr/ta_structs.h:108-126) ---
+					uint32_t pal      =(tcw>>21)&0x3F;       // PalSelect  : bits 21-26
+					uint32_t addr     =(tcw&0x1FFFFF)<<3;    // TexAddr    : bits 0-20 (*8 = byte addr)
+					uint32_t strideSel=(tcw>>25)&0x1;        // StrideSel  : bit 25
+					uint32_t scanOrder=(tcw>>26)&0x1;        // ScanOrder  : bit 26 (0 = twiddled)
+					uint32_t pixFmt   =(tcw>>27)&0x7;        // PixelFmt   : bits 27-29
+					uint32_t vq       =(tcw>>30)&0x1;        // VQ_Comp    : bit 30
+					uint32_t mip      =(tcw>>31)&0x1;        // MipMapped  : bit 31
+					// --- TSP decode (union TSP @ core/hw/pvr/ta_structs.h:77-101) ---
+					uint32_t texV     =(tsp>>0)&0x7;         // TexV       : bits 0-2
+					uint32_t texU     =(tsp>>3)&0x7;         // TexU       : bits 3-5
+					uint32_t usizeU   =8u<<texU;             // width  = 8<<TexU (TexCache.h:237)
+					uint32_t vsizeV   =8u<<texV;             // height = 8<<TexV (TexCache.h:238)
+					uint32_t filter   =(tsp>>13)&0x3;        // FilterMode : bits 13-14
+					uint32_t clampV   =(tsp>>15)&0x1;        // ClampV     : bit 15
+					uint32_t clampU   =(tsp>>16)&0x1;        // ClampU     : bit 16
+					uint32_t flipV    =(tsp>>17)&0x1;        // FlipV      : bit 17
+					uint32_t flipU    =(tsp>>18)&0x1;        // FlipU      : bit 18
+					uint32_t srcInstr =(tsp>>29)&0x7;        // SrcInstr   : bits 29-31
+					uint32_t dstInstr =(tsp>>26)&0x7;        // DstInstr   : bits 26-28
+					// UVs are NOT stored on the quad; synthesized in gstaEmitSpriteTA_append
+					// (~L3722-3730) from Q.u1 (== U max == V max) + Q.mirror. Dump the raw carry.
+					fprintf(mf,
+						"q%d sel=%u gfx1=%x pal=%u tcw_addr=%x col=%d row=%d mir=%d"
+						" tcw=%08x tsp=%08x pcw=%08x isp=%08x recidx=%u"
+						" pixfmt=%s scanorder=%u twiddled=%u vq=%u mip=%u stride=%u"
+						" usize=%u vsize=%u texU=%u texV=%u filter=%u clampU=%u clampV=%u flipU=%u flipV=%u"
+						" srcinstr=%u dstinstr=%u"
+						" Ax=%.2f Ay=%.2f Bx=%.2f By=%.2f Cx=%.2f Cy=%.2f Dx=%.2f Dy=%.2f"
+						" u1=%.5f v1=%.5f z=%.6f facing=%u\n",
+						q, Q.sel, Q.gfx1, pal, addr, _crd[2*q], _crd[2*q+1], _mrd[q],
+						tcw, tsp, Q.pcw, Q.isp, Q.recidx,
+						_pfName[pixFmt], scanOrder, (scanOrder==0?1u:0u), vq, mip, strideSel,
+						usizeU, vsizeV, texU, texV, filter, clampU, clampV, flipU, flipV,
+						srcInstr, dstInstr,
+						Q.Ax, Q.Ay, Q.Bx, Q.By, Q.Cx, Q.Cy, Q.Dx, Q.Dy,
+						Q.u1, Q.v1, Q.z, Q.facing);
 				}
 				fclose(mf);
 			}

@@ -30,7 +30,7 @@
 void render_frame(Sh4Ctx *c);
 typedef struct {
     u32 pcw, isp, tsp, tcw, recidx;
-    float Ax,Ay,Bx,By,Cx,Cy,Dx,Dy, u1;
+    float Ax,Ay,Bx,By,Cx,Cy,Dx,Dy, u1, v1;
     u32 sel;                 /* SOURCE GFX1 cell sel for this tile (per-quad, tiling-safe) */
     u32 gfx1;                /* owning node's GFX1 base (node+0x15C) — decode key with sel */
     u32 mirror;              /* texU mirror bit = facing XOR per-part 0x4000 (loc_8c0346c4) */
@@ -81,7 +81,7 @@ uint32_t render_frame_ta(uint8_t* ram16mb, uint8_t* out_ta, uint32_t out_cap){
         WF(60,q->Cx);
         WF(64,q->Cy); WF(68,q->z);
         WF(72,q->Dx); WF(76,q->Dy);
-        { float U=q->u1, V=q->u1;
+        { float U=q->u1, V=q->v1;
           /* texU MIRROR (engine loc_8c0346c4 neg-r8): when facing XOR per-part 0x4000, swap
            * the left/right U so the tile draws horizontally mirrored. uLo/uHi default 0..U;
            * mirrored -> U..0. The carve writes STORAGE-order pixels (facing-independent); this

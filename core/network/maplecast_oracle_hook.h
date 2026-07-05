@@ -240,6 +240,23 @@ struct HudQuad {
 // surviving pass had no HUD this frame. Read by maplecast_replica_live captureFrame.
 const HudQuad* mc_oracle_hudQuads(int* outCount);
 
+// SHIP-RESOLVED-BODY-TCW (2026-07-03, finding:ship_resolved_body_tcw). Returns the flat per-frame
+// buffer of the engine's RESOLVED per-tile TCWs (r12+0x0C at the 0x8C1248CC submit), captured for
+// ALL drawn nodes to bypass the arena-parity tcw flip (the frame-to-frame bounce). Layout:
+// per node [u32 node(0x0C..)][u32 ntiles][ntiles x u32 tcw], in node-then-tile render order. *outWords
+// = total u32 count. Static, valid until the next frame's capture. Read by replica_live captureFrame.
+//
+// EXTENDED 2026-07-04 (finding:ship_resolved_effect_tcw) from the 6 char bodies to ALL drawn nodes
+// incl cat!=0 satellites/effects — the projectile/effect satellites route through the SAME body
+// walker loc_8c0344d4 (same body-part PC 0x8C034864 + submit PC 0x8C1248CC), so their resolved
+// effect TCWs are captured identically, keyed by node. Fixes the "confetti"/garbled effects (effect
+// tiles were emitted at correct count/position but with stale marching body-region TCWs; only the
+// 6 bodies had a shipped resolved TCW). The MC_BTCW_MAX_* caps are shared by the oracle capture
+// (maplecast_oracle_hook.cpp) AND the client wire-parse bound (maplecast_mirror.cpp) — keep in lockstep.
+#define MC_BTCW_MAX_NODES 32     // per-frame drawn nodes with a captured TCW list (was 6 = bodies only)
+#define MC_BTCW_MAX_TILES 128    // per-node tiles (was 64; satL8_1 already needs 67)
+const uint32_t* mc_oracle_bodyTcws(int* outWords);
+
 // Collect HUD quads from a just-parsed rend_context (the surviving HUD/composite
 // pass). Called from mc_oracle_charPassCapture BEFORE the replica capture so the
 // HUDQ tail ships THIS pass's HUD. `rc` is forward-declared void* (cast to

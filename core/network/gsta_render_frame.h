@@ -24,7 +24,7 @@ typedef struct {
 /* === SceneQuad — must match render_frame.c. One emitted body tile (PVR2 sprite). === */
 typedef struct {
     uint32_t pcw, isp, tsp, tcw, recidx;
-    float    Ax, Ay, Bx, By, Cx, Cy, Dx, Dy, u1;
+    float    Ax, Ay, Bx, By, Cx, Cy, Dx, Dy, u1, v1;
     uint32_t sel;       /* GFX1 cell sel (decode key) */
     uint32_t gfx1;      /* owning node GFX1 base (node+0x15C) */
     uint32_t mirror;    /* texU mirror bit (facing XOR per-part 0x4000) */
@@ -38,9 +38,18 @@ int  render_frame_nscene(void);
 const GstaSceneQuad* render_frame_scene(void);
 uint32_t render_frame_body_count(void);
 
+/* SHIP-RESOLVED-BODY-TCW (2026-07-03): hand render_frame the engine's RESOLVED per-tile body tcws
+ * for THIS frame (the BTCW wire tail). Layout: per body [u32 node(0x0C..)][u32 ntiles][ntiles u32 tcw],
+ * `nWords` u32 total. render_frame uses them verbatim for body tiles (keyed by node + per-body tile
+ * index in its identical body-then-tile walk order), bypassing the arena-parity-sensitive
+ * rectab[idxtab[alloc]] resolution -> kills the frame-to-frame texture bounce. Pass (NULL,0) to clear
+ * (falls back to the resident-table lookup). Valid until the next call. */
+void render_frame_set_body_tcws(const uint32_t* buf, int nWords);
+
 /* Per-quad metadata for the body texture decode (M3). */
 unsigned int gsta_quad_colrow(int* out_cr, unsigned int cap);
 unsigned int gsta_quad_mirror(unsigned char* out_m, unsigned int cap);
+unsigned int gsta_quad_is_effect(unsigned char* out_e, unsigned int cap);
 
 #ifdef __cplusplus
 }

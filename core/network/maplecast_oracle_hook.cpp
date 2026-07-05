@@ -695,6 +695,17 @@ static const u32 PC_DECODE_ENTRY2_M = PC_DECODE_ENTRY2 & SH4_AREA_MASK; // 0x0C0
 // start; mc_isHookedPC must return true so rec_x64 injects the GenCall.
 static const u32 PC_ASM_PART   = 0x8C034864;
 static const u32 PC_ASM_PART_M = PC_ASM_PART & SH4_AREA_MASK;  // 0x0C034864
+// SCALE-WALKER per-tile ARM PC (loc_8c0348c8 / loc_8c034ba4) — the bit15 (sel&0x8000) EFFECT/super
+// path analog of the body-walker's 0x8C034864. RE-CONFIRMED (bank03.asm loc_8c0348c8/loc_8c034ba4,
+// 2026-07-04): at 0x8C034BA4 r14=node (0x8C.. base, callee-saved, invariant across the walk),
+// r10=per-node tile index k. Rotation path (node+0x104=0x8000) and fast path BOTH converge here.
+// It funnels through the SAME submit routine loc_8C1244B0 (PC_CHARQ_SUBMIT 0x8C1248CC), so the
+// existing tdTcwEmit read (r12+0x0C) ALREADY fires for effect tiles — this hook only ARMS the
+// pairing that was missing. Mid-block (bra target) -> decoder force-split makes it a block start;
+// mc_isHookedPC returns true so rec_x64 injects the GenCall. Fallback per-tile head = 0x8C0349CC
+// (also a bra target, same r14=node, same 1:1-before-submit) if the JIT never splits at 0x8C034BA4.
+static const u32 PC_SCALE_PART   = 0x8C034BA4;
+static const u32 PC_SCALE_PART_M = PC_SCALE_PART & SH4_AREA_MASK;  // 0x0C034BA4
 // WALK-INSTANT TILEDESC SNAPSHOT: the BODY-WALKER ENTRY (loc_8c0344d4). The tiledesc @0x8C1F9F9C
 // is read-only through the walk (r13 only advances), so its per-record byte1 here is the
 // authoritative pre-consumption count (== +0xDC budget; TDTILE ground truth) — BEFORE the HUD
@@ -2152,14 +2163,14 @@ static bool mc_bodyTcwOn = []{
 	const char* rl = getenv("MAPLECAST_REPLICA_LIVE");
 	return rl && rl[0] != '0' && rl[0] != '\0';
 }();
-struct McBodyTcw { u32 node; u32 ntiles; u32 tcw[64]; };   // 64 = MAXQ body tiles (matches render_frame)
-static McBodyTcw   s_bodyTcw[6];        // one per char body slot (0..5), node=0 when unused this frame
+struct McBodyTcw { u32 node; u32 ntiles; u32 tcw[MC_BTCW_MAX_TILES]; };   // per drawn node (body OR satellite)
+static McBodyTcw   s_bodyTcw[MC_BTCW_MAX_NODES];   // one per drawn node this frame (bodies + cat!=0 sats)
 static int         s_bodyTcwN = 0;      // number of populated entries this frame
 static u32          s_bodyTcwVframe = 0xFFFFFFFFu;
-// Flat wire buffer, rebuilt at frame boundary: [u32 node][u32 ntiles][ntiles u32 tcw] per body.
-static u32          s_bodyTcwWire[6 * (2 + 64)];
+// Flat wire buffer, rebuilt at frame boundary: [u32 node][u32 ntiles][ntiles u32 tcw] per node.
+static u32          s_bodyTcwWire[MC_BTCW_MAX_NODES * (2 + MC_BTCW_MAX_TILES)];
 static int          s_bodyTcwWireWords = 0;
-static void bodyTcwFinishFrame()      // pack the accumulated per-body lists into the flat wire buffer
+static void bodyTcwFinishFrame()      // pack the accumulated per-node lists into the flat wire buffer
 {
 	int w = 0;
 	for (int i = 0; i < s_bodyTcwN; i++) {
@@ -2167,14 +2178,20 @@ static void bodyTcwFinishFrame()      // pack the accumulated per-body lists int
 		if (b.node == 0 || b.ntiles == 0) continue;
 		s_bodyTcwWire[w++] = b.node;
 		s_bodyTcwWire[w++] = b.ntiles;
-		for (u32 t = 0; t < b.ntiles && t < 64; t++) s_bodyTcwWire[w++] = b.tcw[t];
+		for (u32 t = 0; t < b.ntiles && t < MC_BTCW_MAX_TILES; t++) s_bodyTcwWire[w++] = b.tcw[t];
 	}
 	s_bodyTcwWireWords = w;
 }
-static McBodyTcw* bodyTcwGet(u32 node0C)   // find/open the accumulator entry for this body this frame
+static McBodyTcw* bodyTcwGet(u32 node0C)   // find/open the accumulator entry for this node this frame
 {
 	for (int i = 0; i < s_bodyTcwN; i++) if (s_bodyTcw[i].node == node0C) return &s_bodyTcw[i];
-	if (s_bodyTcwN >= 6) return nullptr;
+	if (s_bodyTcwN >= MC_BTCW_MAX_NODES) {   // NO SILENT TRUNCATION: log the overflow, drop this node's list
+		static u32 s_btcwCapWarn = 0;
+		if (s_btcwCapWarn++ < 8)
+			fprintf(stderr, "[BTCW] drawn-node cap %d exceeded (node=0x%08X) — satellite TCWs dropped this frame\n",
+			        MC_BTCW_MAX_NODES, node0C);
+		return nullptr;
+	}
 	McBodyTcw* b = &s_bodyTcw[s_bodyTcwN++];
 	b->node = node0C; b->ntiles = 0;
 	return b;
@@ -2274,9 +2291,15 @@ static void tdTcwArm(const u32* r)
 	}
 	u32 node = norm(r[14]) | 0x0C000000u;
 	int slot = tdTcwBodySlot(node);
-	if (slot < 0) { s_tdTcwPending = false; s_tdTcwSlot = -1; return; }   // not a char body
+	// SATELLITE/EFFECT EXTENSION (2026-07-04, finding:ship_resolved_effect_tcw): projectile/effect
+	// satellites route through the SAME body walker loc_8c0344d4 -> this same body-part PC 0x8C034864
+	// fires for their parts. ARM the per-tile TCW capture for them too (slot<0), keyed by node, so
+	// their resolved effect TCWs ship in BTCW exactly like bodies. This PC is reached ONLY by the
+	// shared body/satellite walker (HUD/stage submits arrive with no pending -> skipped downstream),
+	// so any area-3 node here is a legit drawn body or satellite. Bail only on a garbage (non-RAM) r14.
+	if (slot < 0 && !inRam(node)) { s_tdTcwPending = false; s_tdTcwSlot = -1; return; }
 	s_tdTcwNode = node;
-	s_tdTcwSlot = slot;
+	s_tdTcwSlot = slot;   // -1 for satellites (probe-only counter; the capture below keys by node)
 	u32 r11 = r[11], r15 = r[15];
 	s_tdTcwSel = (((r11 >> 24) & 0x7Fu) == 0x0Cu)
 	           ? (u32)addrspace::read16(((r11 & 0x1FFFFFFFu) | 0x0C000000u) + 6) : 0xFFFFu;
@@ -2324,16 +2347,17 @@ static void tdTcwEmit(const u32* r)
 	int slot = s_tdTcwSlot;
 	u32 tidx = (slot >= 0 && slot < 6) ? s_tdTcwTileIdx[slot]++ : 0xFFFFFFFFu;   // per-body tile index
 
-	// PRODUCTION CAPTURE: append this tile's RESOLVED body tcw (tcwReal = r12+0x0C) to its body's
-	// ordered list, keyed by node (0x0C..). Per-frame boundary reset. This is what the wire ships.
-	if (slot >= 0 && s_tdTcwNode) {
+	// PRODUCTION CAPTURE: append this tile's RESOLVED tcw (tcwReal = r12+0x0C) to its node's ordered
+	// list, keyed by node (0x0C..). Per-frame boundary reset. This is what the wire ships. Captured for
+	// ALL drawn nodes — the 6 char bodies (slot>=0) AND cat!=0 satellites/effects (slot<0, armed above).
+	if (s_tdTcwNode) {
 		if (vframe != s_bodyTcwVframe) {           // new video frame: pack last frame, reset
 			bodyTcwFinishFrame();
 			s_bodyTcwVframe = vframe; s_bodyTcwN = 0;
-			for (int i = 0; i < 6; i++) { s_bodyTcw[i].node = 0; s_bodyTcw[i].ntiles = 0; }
+			for (int i = 0; i < MC_BTCW_MAX_NODES; i++) { s_bodyTcw[i].node = 0; s_bodyTcw[i].ntiles = 0; }
 		}
 		McBodyTcw* b = bodyTcwGet(s_tdTcwNode);
-		if (b && b->ntiles < 64) b->tcw[b->ntiles++] = tcwReal;
+		if (b && b->ntiles < MC_BTCW_MAX_TILES) b->tcw[b->ntiles++] = tcwReal;
 	}
 
 	if (s_tdTiles) {                               // PROBE PRINT (env only)
@@ -2660,6 +2684,10 @@ bool mc_isHookedPC(u32 pc)
 	// (mc_nbBodyPart sets the current node here). Mid-block -> the decoder force-split
 	// makes it a block start; return true so rec_x64 injects the GenCall.
 	if (m == PC_ASM_PART_M) return mc_asmTraceEnabled || mc_bodyCapEnabled || mc_charqEmitEnabled || mc_frameOracleHookOn || s_tdProbe || s_tdTiles || mc_bodyTcwOn;
+	// SCALE-WALKER (bit15 EFFECT) per-tile ARM PC (0x8C034BA4). Hooked ONLY when the resolved-tcw
+	// capture is on (prod mc_bodyTcwOn or the probe s_tdTiles) — it arms tdTcwArm for effect tiles so
+	// their resolved TCW ships in BTCW. Mid-block -> force-split -> GenCall injects. (2026-07-04)
+	if (m == PC_SCALE_PART_M) return s_tdTiles || mc_bodyTcwOn;
 	// WALK-INSTANT TILEDESC SNAPSHOT: the body-walker ENTRY (loc_8c0344d4 / 0x8C0344D4). Hooked
 	// on a plain replica live-wire launch (mc_replicaWalkSnapOn, env-derived at static init, same
 	// gate that ORs into mc_oracleHookEnabled) so the GenCall injects WITHOUT the heavyweight
@@ -2941,6 +2969,16 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 		if (mc_frameOracleHookOn) mc_nbBodyPart(r);         // REAL-BLEND: set current node + arm pairing
 		if (s_tdProbe) tdProbeAccum(norm(r[14]) | 0x0C000000u, r);  // TILEDESC walk-instant sum
 		if (s_tdTiles || mc_bodyTcwOn) tdTcwArm(r);         // GROUND-TRUTH TCW: arm per-body pairing (probe or prod)
+		return;
+	}
+
+	// SCALE-WALKER per-tile ARM — loc_8c0348c8/loc_8c034ba4 convergence PC (0x8C034BA4), the bit15
+	// (sel&0x8000) EFFECT/super analog of the body-part PC above. Same arm as the satellite branch:
+	// r14=node, keyed by node, 1:1-paired with the NEXT loc_8C1244B0 submit (0x8C1248CC) which already
+	// captures the resolved effect TCW via tdTcwEmit. This is the fix for bit15 supers rendering with
+	// stale marching body-region TCWs (the "confetti"). (finding:ship_resolved_effect_tcw, 2026-07-04)
+	if (mpc == PC_SCALE_PART_M) {
+		if (s_tdTiles || mc_bodyTcwOn) tdTcwArm(r);
 		return;
 	}
 
