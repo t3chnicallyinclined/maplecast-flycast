@@ -115,6 +115,10 @@ git add web/ && git commit -m "sync: pull production web files from VPS"
 - **VPS**: `149.28.44.118` (dedicated AMD EPYC Genoa, 2 threads, 4 GB RAM, Ubuntu 24.04)
 - **DNS**: `nobd.net` → `149.28.44.118`
 - **Old VPS** (`66.55.128.93`): decommissioned on 2026-04-15
+- **Co-tenant (non-MapleCast):** the **NOBD Discord bots** also run on this box as systemd units
+  (`nobd-oracle`, `nobd-roles`), fully isolated under `/opt/nobd-oracle/` with their own venv. They
+  don't touch the flycast/relay/hub/SurrealDB stack — leave them alone (and they leave us alone).
+  Owned by the `mvc2-oracle` repo's `discord-expert` agent; healthcheck `/opt/nobd-oracle/status.sh`.
 
 ## Component layout
 
