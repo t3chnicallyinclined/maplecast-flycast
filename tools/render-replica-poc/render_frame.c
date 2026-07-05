@@ -264,6 +264,12 @@ typedef struct {
 static SceneQuad g_scene[MAXSCENE];
 static int g_nscene = 0;
 static u8  g_scene_is_effect[MAXSCENE];   /* 1 = bit15 effect quad (post-pass re-resolves TCW) */
+/* PER-QUAD SOURCE-DESC snapshot (emit-time; see the capture in render_object_full_ex and
+ * render_frame_quad_srcdesc_impl): m px / storage cx / (rows-row) / flags(valid|flip4000<<1). */
+static u8  g_scene_src_m [MAXSCENE];
+static u8  g_scene_src_cx[MAXSCENE];
+static u8  g_scene_src_ry[MAXSCENE];
+static u8  g_scene_src_fl[MAXSCENE];
 
 /* palette bank for a node: slot formula 16*(char_pair+1)+8*player_side. We derive it
  * from the node's char-struct identity when it is one of the 6 fighter bodies; for a
@@ -467,28 +473,39 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
      * derived base in action. (render_frame separately ASSERTS node+0xDC == prefix-sum.) */
     for(int k=0; k<ntiles && g_nscene<MAXSCENE; k++){
         PolyParam pp;
-        /* EFFECT idxtab is shipped STALE (char-pass-transient, re_kb/50), so submit_params
-         * resolves the wrong (body) TCW for effect quads. We DEFER the fix to a per-frame
-         * POST-PASS (render_frame_fix_effect_tcws) which has ALL effect alloc_indices and can
-         * use the PER-FRAME (per-super) min as the base — a single inline match-global min
-         * drifts across different supers and lands quads in the wrong rectab band (the blocks).
-         * Here we just emit the body-resolved quad and TAG it (g_scene_is_effect) so the
-         * post-pass re-resolves its TCW from the contiguous effect rectab block. */
+        /* submit_params resolves TCW via rectab[idxtab[alloc]] — which is shipped STALE for
+         * EFFECT quads (char-pass-transient idxtab, re_kb/50) -> the wrong (earlier-tile) TCW
+         * -> 19 mispaired bolts sampling the wrong tile (pink/salmon). MEASURED 2026-07-05
+         * (defect #3). The BTCW tail ships the engine's RESOLVED per-(node,k) tcw for effect
+         * nodes too (verified: BTCW effect-addr multiset == engine 102/102, all 19 present),
+         * so the override below is applied to effects AND bodies. */
         submit_params(c, g_cap[k].alloc_index, palbank, &pp);
 
-        /* SHIP-RESOLVED-BODY-TCW OVERRIDE (BODY tiles only): replace the parity-flipping
-         * rectab[idxtab[alloc]] tcw with the engine's RESOLVED per-tile tcw shipped for
-         * (node, k). Effects (_is_effect) keep their own path untouched. When no tcw was
-         * shipped for this tile (or no BTCW tail this frame) we fall back to pp.tcw. */
-        if(!_is_effect){
+        /* SHIP-RESOLVED-TCW OVERRIDE (bodies AND effects): replace the parity-flipping /
+         * stale-idxtab rectab[idxtab[alloc]] tcw with the engine's RESOLVED per-tile tcw
+         * shipped for (node, k). Falls back to pp.tcw when nothing was shipped for this tile. */
+        {
             u32 shippedTcw;
-            if(body_tcw_lookup(node, k, &shippedTcw)) {
+            int hit = body_tcw_lookup(node, k, &shippedTcw);
+            if(hit) {
 #ifdef BODYTCW_DEBUG
                 if(((node&0x0FFFFFFFu)|0x0C000000u)==0x0C268340u && k<2)
                     fprintf(stderr,"[BTOVR] node char tile=%d pp.tcw 0x%08X -> shipped 0x%08X (tex 0x%X->0x%X)\n",
                         k, pp.tcw, shippedTcw, (pp.tcw&0x1FFFFF)<<3, (shippedTcw&0x1FFFFF)<<3);
 #endif
                 pp.tcw = shippedTcw;
+            }
+            /* 3b-ii (MEASURED 2026-07-05): the scale walker OVER-EMITS one spurious effect tile
+             * (count/phase slip, defect #3b-i). The extras miss body_tcw_lookup or land a
+             * non-effect texture; the stale idxtab fallback is a wrong/LARGE tile = the yellow
+             * wedge + the phantom 0x60bc00-0x60c600 band. Drop any effect quad lacking a real
+             * effect-band (0x60xxxx) shipped tcw — a fallback effect tcw is known-wrong. The
+             * (node,k) count fix (3b-i) will restore the few real tiles this drops off-end.
+             * `continue` skips before g_nscene++ so no phantom quad / g_scene_is_effect entry is
+             * emitted (no phase side effect); k still advances. Bodies untouched. */
+            if(_is_effect){
+                u32 a = (pp.tcw & 0x1FFFFFu) << 3;
+                if(!hit || a < 0x600000u || a >= 0x620000u) continue;
             }
         }
 
@@ -531,6 +548,19 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
         }
         float bx=g_cap[k].bx, by=g_cap[k].by;       /* walker anchor */
         g_scene_is_effect[g_nscene] = (u8)(_is_effect ? 1 : 0);  /* tag for the effect TCW post-pass */
+        /* PER-QUAD SOURCE DESC CAPTURE (2026-07-05, the satellite-fragmentation fix; see
+         * render_frame_quad_srcdesc_impl). Snapshot the walker's OWN per-tile descriptor
+         * (DESC_TABLE entry dc+k: [0]=m px, [2]=cx STORAGE column, [3]=rows-row) AT EMIT
+         * TIME — the table is a shared scratch the NEXT node's rebuild_tile_grid may
+         * CLOBBER (measured: torn +0xDC made two nodes' slices overlap, so a decode-time
+         * re-read of idx 464 returned the LATER node's entry). flags: bit0 = valid (body
+         * tile), bit1 = the per-record flip4000 (the walker's own texU-flip bit, g_cap —
+         * NOT facing): a flip4000 record pairs its tiles with storage columns DESCENDING.
+         * Pure metadata capture — emission behavior unchanged. */
+        g_scene_src_m [g_nscene] = (u8)(_is_effect ? 0 : (m > 255 ? 255 : m));
+        g_scene_src_cx[g_nscene] = (u8)(_is_effect ? 0 : r8u(c, DESC_TABLE + (dc + k)*4 + 2));
+        g_scene_src_ry[g_nscene] = (u8)(_is_effect ? 0 : r8u(c, DESC_TABLE + (dc + k)*4 + 3));
+        g_scene_src_fl[g_nscene] = (u8)((_is_effect ? 0u : 1u) | ((g_cap[k].flip4000 & 1u) << 1));
         SceneQuad *q = &g_scene[g_nscene++];
         q->pcw=pp.pcw; q->isp=pp.isp; q->tsp=pp.tsp; q->tcw=pp.tcw;
         q->recidx=g_cap[k].alloc_index;
@@ -821,6 +851,36 @@ u32 render_frame_quad_mirror_impl(uint8_t* out_m, u32 cap){
 u32 render_frame_quad_is_effect_impl(uint8_t* out_e, u32 cap){
     u32 w = 0;
     for(int q=0; q<g_nscene && w<cap; q++,w++) out_e[w] = (uint8_t)(g_scene_is_effect[q] & 1u);
+    return w;
+}
+
+/* PER-QUAD SOURCE DESCRIPTOR (2026-07-05 — the satellite-fragmentation/texel fix, offline
+ * byte-gate texel_gate.cpp). out[4*q..4*q+3] = [m, cx, ry, flags] snapshotted AT EMIT TIME
+ * from the walker's OWN DESC_TABLE entry (idx = node+0xDC + k):
+ *   m     tile pixel size (8/16/32) — the descriptor byte0 the walker itself consumed;
+ *   cx    STORAGE column (facing-independent; rebuild_tile_grid byte2);
+ *   ry    rows - row (rebuild_tile_grid byte3; row = (H/m) - ry);
+ *   flags bit0 = valid (0 for bit15 effect quads — their recidx is a scale-walker alloc),
+ *         bit1 = per-record flip4000 (the walker's texU-flip bit): pairs storage columns
+ *                DESCENDING (col = pCols-1-cx). Keyed on flip4000 alone, NOT the effective
+ *                texU mirror: facing does not reorder storage (MEASURED 98/98 on the
+ *                facing-mirrored pal17 satellites vs engine VRAM; flip4000 sel 0xD4C
+ *                engine slot0 holds col1). Emit-time capture is CLOBBER-PROOF: the desc
+ *                table is shared scratch that a later node's rebuild_tile_grid overwrites
+ *                (measured overlap on torn +0xDC).
+ * This SUPERSEDES rank-based colrow as the carve key: global Ax/Ay ranks merge/interleave
+ * when 2+ satellite nodes draw the same (gfx1,sel) per frame (typhoon), collapsing the
+ * rank grid (sel 0xDEC ranked 16 cols on an 8-col part). Rank colrow remains exported for
+ * consumers/diagnostics. The decoders (maplecast_mirror.cpp gstaDecodeBodies +
+ * body_decoder.mjs ensureBodyTextures) consume this in lockstep. */
+u32 render_frame_quad_srcdesc_impl(uint8_t* out, u32 cap){
+    u32 w = 0;
+    for(int q=0; q<g_nscene && w<cap; q++,w++){
+        out[4*w+0] = g_scene_src_m [q];
+        out[4*w+1] = g_scene_src_cx[q];
+        out[4*w+2] = g_scene_src_ry[q];
+        out[4*w+3] = g_scene_src_fl[q];
+    }
     return w;
 }
 

@@ -726,6 +726,48 @@ static const u32 PC_CHARQ_SUBMIT_M = PC_CHARQ_SUBMIT & SH4_AREA_MASK;  // 0x0C12
 // BODY caller (vs the ~7 HUD/effect callers of loc_8C1244B0, which have other pr's).
 static const u32 PC_BODY_SUBMIT_RET   = 0x8C03487A;
 static const u32 PC_BODY_SUBMIT_RET_M = PC_BODY_SUBMIT_RET & SH4_AREA_MASK;  // 0x0C03487A
+// BTCW PALSEL-PATCH store PCs (re_kb/62 finding:tcw_palsel_patch_pipeline, CONFIRMED
+// bank12.asm loc_8c124022 @9142 / loc_8c12404c @9164 / loc_8c124a82 @10622 /
+// loc_8C12495E @10465 / loc_8c124170 @9333). The engine patches the descriptor-entry
+// TCW's PalSelect (bits 21-26, mask 0x07E00000) OUTSIDE the submit; the submit
+// (loc_8C1244B0) reads entry+0x0C ONCE @0x8C124864 and copies it VERBATIM to the TA
+// (@0x8C124866). On slot-churn frames the REFRESH pass (loc_8c124140/170) re-installs
+// a CURRENT addr while ORing back the entry's PREVIOUS palsel (store 0x8C1241A8) ->
+// the BTCW capture at 0x8C1248CC ships a STALE palsel (~24 quads/frame at super
+// peaks). Fix: hook the four CURRENT-palsel store sites into a per-frame
+// entry->palsel map that tdTcwEmit consults (see BTCW PALSEL RECOMPOSE below).
+//
+// DELAY-SLOT CONSTRAINT (CONFIRMED decoder.cpp:985: the force-split requires
+// !state.cpu.is_delayslot — a branch/delay pair is never split, so a delay-slot PC
+// can NEVER become a block start and a block-entry GenCall there would NEVER fire).
+// Two of the four stores sit in bra delay slots; those two hook the BRANCH PC
+// (2 bytes earlier) where the composed word + entry reg are ALREADY live:
+//   0x8C12402E bra loc_8c12405c (delay slot 0x8C124030 = mov.l r2,@(0x0C,r13)) —
+//              full registration, RESIDENCY mode (loc_8c124022): entry=r13, word=r2
+//              (compose `or r12,r2` @0x8C12402C precedes the bra).
+//   0x8C12405A mov.l r2,@(0x0C,r13) — full registration, DIRECT-BANK (loc_8c12404c):
+//              the store PC itself (regular instr, falls through to loc_8c12405c);
+//              hook fires PRE-store with r2 composed (`or r0,r2` @0x8C124058) + r13.
+//   0x8C124A8E mov.l r2,@(0x0C,r14) — palette-change API, RESIDENCY (loc_8c124a82):
+//              store PC (regular instr, falls through); entry=r14, word=r2.
+//   0x8C124976 bra loc_8C124A90 (delay slot 0x8C124978 = mov.l r4,@(0x0C,r14)) —
+//              palette-change API, DIRECT-BANK (loc_8C12495E): entry=r14, word=r4
+//              (compose `or r1,r4` @0x8C124972; @0x8C124974 `and r0,r10` touches
+//              neither r4 nor r14).
+// DIAGNOSTIC-ONLY (does NOT feed the map):
+//   0x8C1241A8 mov.l r0,@(0xC,r3) — the REFRESH pass's stale-carry store
+//              (loc_8c124170: old palsel extracted @0x8C124190 `and 0x07E00000`,
+//              OR'd back @0x8C1241A6). Counts how often the carry path runs.
+static const u32 PC_PALSEL_REG_RES   = 0x8C12402E;   // registration/residency (bra PC; store in its delay slot)
+static const u32 PC_PALSEL_REG_RES_M = PC_PALSEL_REG_RES & SH4_AREA_MASK;   // 0x0C12402E
+static const u32 PC_PALSEL_REG_DIR   = 0x8C12405A;   // registration/direct-bank (the store PC)
+static const u32 PC_PALSEL_REG_DIR_M = PC_PALSEL_REG_DIR & SH4_AREA_MASK;   // 0x0C12405A
+static const u32 PC_PALSEL_CHG_RES   = 0x8C124A8E;   // palette-change/residency (the store PC)
+static const u32 PC_PALSEL_CHG_RES_M = PC_PALSEL_CHG_RES & SH4_AREA_MASK;   // 0x0C124A8E
+static const u32 PC_PALSEL_CHG_DIR   = 0x8C124976;   // palette-change/direct-bank (bra PC; store in its delay slot)
+static const u32 PC_PALSEL_CHG_DIR_M = PC_PALSEL_CHG_DIR & SH4_AREA_MASK;   // 0x0C124976
+static const u32 PC_PALSEL_REFRESH   = 0x8C1241A8;   // refresh stale-carry store (diagnostic counter ONLY)
+static const u32 PC_PALSEL_REFRESH_M = PC_PALSEL_REFRESH & SH4_AREA_MASK;   // 0x0C1241A8
 // Record geometry inside the PVR display list written by loc_8C1244B0.
 static const u32 CHARQ_REC_OFF   = 0x20;   // r14 at PC_CHARQ_SUBMIT = base + 0x20
 static const u32 CHARQ_REC_BYTES = 0x40;   // poly header 0x20 + one vertex block 0x20
@@ -2313,6 +2355,137 @@ static void tdTcwArm(const u32* r)
 	s_tdTcwPending = true;
 }
 
+// ===========================================================================
+// BTCW PALSEL RECOMPOSE (re_kb/62 finding:tcw_palsel_patch_pipeline, 2026-07-05).
+// MEASURED bug: on slot-churn frames (super peaks) the word read at the submit PC
+// (r12+0x0C) carries a STALE PalSelect — the refresh pass loc_8c124140/170 re-installs
+// a CURRENT addr but ORs back the entry's PREVIOUS palsel (store 0x8C1241A8), and the
+// submit loc_8C1244B0 never re-patches palsel (verbatim copy to the TA). The four
+// CURRENT-palsel store sites (PC_PALSEL_* above) feed this per-frame entry->palsel
+// map; tdTcwEmit consults it and ships tcw = (raw & 0xF81FFFFF) | palsel when the map
+// holds a THIS-frame entry for r12.
+//
+// SELF-VALIDATION (the open question a fresh super-peak capture answers empirically):
+//   map-HIT on churn frames  -> capture-side staleness: BTCW now ships current palsel.
+//   map-MISS on churn frames (mc_btcwPalselMapMiss fires, refresh-carry count high) ->
+//     the stale word is what the engine GENUINELY submitted (hardware-faithful); the
+//     client-side decision becomes cosmetic.
+//
+// Map: direct-mapped, overwrite-ok (per spec — entries are bounded arena-slot
+// addresses). Keys are descriptor-entry arena addresses (32-byte stride, arena ptr
+// @0x8C2DAD4C), norm()-masked (0x1FFFFFFF; equals the spec's & 0x0FFFFFFF for area-3
+// RAM). hash = (entry>>5) & (SZ-1) is collision-free for a contiguous arena of <= SZ
+// entries (the slot->entry-index table @0x8C2DAD3C is byte-indexed, 0xFF = unassigned
+// -> <= 255 live entries). No per-frame clear: each slot carries a vframe stamp and
+// lookups require stamp == THIS frame (reset-by-staleness, like the BTCW state).
+// SH4-thread only (same GenCall context as every other hook here); READ-ONLY w.r.t.
+// guest.
+struct McPalselEnt { u32 entry; u32 vframe; u32 palsel; };   // palsel = word & 0x07E00000
+static const int   MC_PALSEL_MAP_SZ = 256;                   // power of 2
+static McPalselEnt s_palselMap[MC_PALSEL_MAP_SZ];            // zero-init: entry=0 never matches
+static inline int  palselSlot(u32 entryNorm) { return (int)((entryNorm >> 5) & (MC_PALSEL_MAP_SZ - 1)); }
+// Per-frame diagnostics (logged + reset at tdTcwEmit's video-frame boundary):
+static u32 s_palselHitFrame  = 0;    // emits recomposed from a THIS-frame map entry
+static u32 s_palselMissFrame = 0;    // emits kept raw (no fresh map entry) — the self-validation counter
+static u32 s_palselNearFrame = 0;    // entry matched but stamp was vframe-1 (stamp-skew probe, raw kept)
+static u32 s_palselRefreshFrame = 0; // refresh-pass stale-carry stores (0x8C1241A8) since last boundary
+static unsigned long mc_btcwPalselMapMiss = 0;   // lifetime miss total (spec-named diagnostic)
+static u32 s_palselStoreFires[4] = {0,0,0,0};    // lifetime fires per store site (REG_RES/REG_DIR/CHG_RES/CHG_DIR)
+
+// PER-FIRE DIAGNOSTIC LOG (overseer addition 2026-07-05): MAPLECAST_BTCW_FIRELOG=1
+// logs EVERY armed BTCW capture fire at 0x8C1248CC (not per-frame accumulation):
+//   [BTCWFIRE] seq vf node k raw r12 ee54 sel r13 palfix dup
+// raw = the UNpatched r12+0x0C word; ee54 = u32 @0x8C2DEE54 (the slot-namespace/
+// parity offset, setter bank11 loc_8C11B800, zeroed by bank12 loc_8C122CF0);
+// dup = per-frame duplicate-fire count for the same LOGICAL tile (node, tiledesc
+// entry r13, sel). NOTE: k is a fresh running index assigned per fire, so (node,k)
+// is tautologically unique — the logical-tile key is what a genuine double-submit
+// repeats, and that is what the dup counter keys on. Bounded: MAPLECAST_BTCW_FIRELOG_MAX
+// total lines (default 5000) + optional MAPLECAST_BTCW_FIRELOG_MIN_VF (skip fires
+// below that vframe, so the window can target a super peak). This log disambiguates
+// the three staleness topologies: (1) both stale AND current words fire per tile
+// (by ee54/order) -> fire-selection fix (simpler than the recompose map); (2) only
+// the stale word ever fires here -> the displayed TA is written elsewhere (trace the
+// real store site); (3) only current fires -> staleness enters post-capture
+// (recorder buffer audit). Default OFF; READ-ONLY.
+static const bool s_btcwFireLogOn = []{
+	const char* v = getenv("MAPLECAST_BTCW_FIRELOG");
+	return v != nullptr && v[0] != '0';
+}();
+static const unsigned long s_btcwFireLogMax = []{
+	const char* v = getenv("MAPLECAST_BTCW_FIRELOG_MAX");
+	unsigned long n = v ? strtoul(v, nullptr, 0) : 0;
+	return n ? n : 5000ul;
+}();
+static const u32 s_btcwFireLogMinVf = []{
+	const char* v = getenv("MAPLECAST_BTCW_FIRELOG_MIN_VF");
+	return v ? (u32)strtoul(v, nullptr, 0) : 0u;
+}();
+static unsigned long s_btcwFireSeq = 0;    // monotonic per armed fire (counts even after the line cap)
+// Per-frame logical-tile dup set: packed key, bounded linear scan (diagnostic only).
+static const int MC_BTCW_DUP_MAX = 1024;
+static u64 s_btcwDupKey[MC_BTCW_DUP_MAX];
+static int s_btcwDupN = 0;
+static u32 s_btcwDupFrame = 0;             // dup fires since the last frame boundary
+
+// Record one CURRENT-palsel store: map[entry] = { this vframe, word & 0x07E00000 }.
+// `which`: 0=REG_RES 1=REG_DIR 2=CHG_RES 3=CHG_DIR (diagnostic labeling only).
+static void palselRecord(u32 entryReg, u32 word, int which)
+{
+	u32 entry = norm(entryReg);
+	if (!inRam(entry)) return;
+	if (s_palselStoreFires[which & 3]++ == 0)
+		fprintf(stderr, "[BTCW-PALSEL] store-site %d first fired: entry=0x%08X word=0x%08X palsel=0x%08X\n",
+		        which, entry, word, word & 0x07E00000u);
+	McPalselEnt& e = s_palselMap[palselSlot(entry)];
+	e.entry  = entry;
+	e.vframe = addrspace::read32(0x8C3496B0);
+	e.palsel = word & 0x07E00000u;
+}
+
+// One [BTCWFIRE] line per armed capture fire (see the block comment above).
+// `k` = the production per-node tile index this fire is appended at (0xFFFFFFFF if
+// the node list overflowed); `palfix` = H (recomposed, changed) / h (hit, no change)
+// / M (miss, raw kept).
+static void btcwFireLog(u32 vframe, u32 node, u32 k, u32 raw, u32 r12p, char palfix)
+{
+	s_btcwFireSeq++;
+	if (vframe < s_btcwFireLogMinVf) return;
+	// dup detection: same logical tile (node, tiledesc entry, sel) twice in one frame.
+	u64 key = ((u64)(node & 0xFFFFFFu) << 40) | ((u64)(s_tdTcwR13 & 0xFFFFFFu) << 16)
+	        | (u64)(s_tdTcwSel & 0xFFFFu);
+	bool dup = false;
+	for (int i = 0; i < s_btcwDupN; i++) if (s_btcwDupKey[i] == key) { dup = true; break; }
+	if (dup) s_btcwDupFrame++;
+	else if (s_btcwDupN < MC_BTCW_DUP_MAX) s_btcwDupKey[s_btcwDupN++] = key;
+	static unsigned long s_btcwFireLines = 0;
+	if (s_btcwFireLines >= s_btcwFireLogMax) return;
+	s_btcwFireLines++;
+	u32 ee54 = addrspace::read32(0x8C2DEE54);
+	fprintf(stderr, "[BTCWFIRE] seq=%lu vf=%u node=0x%08X k=%u raw=0x%08X r12=0x%08X ee54=0x%08X "
+	                "sel=%u r13=0x%08X palfix=%c dup=%u\n",
+	        s_btcwFireSeq, vframe, node, k, raw, r12p, ee54,
+	        s_tdTcwSel, s_tdTcwR13, palfix, s_btcwDupFrame);
+}
+
+// Frame-boundary log + reset for the palsel/firelog per-frame state. Called from
+// tdTcwEmit's existing video-frame boundary (once per frame that has captures).
+// Throttled: first 32 nonzero frames, then every 64th.
+static void palselFrameLog(u32 prevVframe)
+{
+	if (s_palselMissFrame || s_palselRefreshFrame || s_palselNearFrame) {
+		static u32 s_palselLogN = 0;
+		if (s_palselLogN < 32 || (s_palselLogN & 63) == 0)
+			fprintf(stderr, "[BTCW-PALSEL] vf=%u hits=%u miss=%u nearmiss(vf-1)=%u refresh-carry=%u "
+			                "missTotal=%lu dupFires=%u\n",
+			        prevVframe, s_palselHitFrame, s_palselMissFrame, s_palselNearFrame,
+			        s_palselRefreshFrame, mc_btcwPalselMapMiss, s_btcwDupFrame);
+		s_palselLogN++;
+	}
+	s_palselHitFrame = s_palselMissFrame = s_palselNearFrame = s_palselRefreshFrame = 0;
+	s_btcwDupN = 0; s_btcwDupFrame = 0;
+}
+
 // GROUND-TRUTH TCW+UV — emit at the submit PC (0x8C1248CC). CORRECTED SOURCE (CHARQ breakthrough,
 // mc_charqEmitSubmit:2020-2027): the engine's REAL per-tile body TCW is at r12+0x0C (PAL4 fmt5,
 // vram=(tcw&0x1FFFFF)<<3 ~0x419800, pal bits 25..21) — NOT recBase+0x08, which yields the artifact
@@ -2328,9 +2501,40 @@ static void tdTcwEmit(const u32* r)
 	u32 rec = norm(r[14]) | 0x0C000000u;                 // sprite-para record 2 (corners + UVs)
 	u32 recBase = rec - CHARQ_REC_OFF;                   // record 1 (global PCW/ISP/TCW/TSP)
 	if (!inRam(rec) || !inRam(recBase)) return;
-	// REAL body tcw = r12+0x0C (proven); the recBase+0x08 word is the non-body artifact.
 	u32 r12 = norm(r[12]) | 0x0C000000u;
-	u32 tcwReal = inRam(r12 + 0x0C) ? addrspace::read32(r12 + 0x0C) : 0u;
+	u32 vframe = addrspace::read32(0x8C3496B0);
+
+	// Video-frame boundary FIRST (pack last frame's wire buffer, log+reset the palsel
+	// per-frame diagnostics) so THIS fire's hit/miss counters land in THIS frame's bucket.
+	if (s_tdTcwNode && vframe != s_bodyTcwVframe) {
+		bodyTcwFinishFrame();
+		palselFrameLog(s_bodyTcwVframe);
+		s_bodyTcwVframe = vframe; s_bodyTcwN = 0;
+		for (int i = 0; i < MC_BTCW_MAX_NODES; i++) { s_bodyTcw[i].node = 0; s_bodyTcw[i].ntiles = 0; }
+	}
+
+	// REAL body tcw = r12+0x0C (proven); the recBase+0x08 word is the non-body artifact.
+	u32 tcwRaw  = inRam(r12 + 0x0C) ? addrspace::read32(r12 + 0x0C) : 0u;
+
+	// PALSEL RECOMPOSE (re_kb/62 finding:tcw_palsel_patch_pipeline): if a CURRENT-palsel
+	// store was recorded for THIS descriptor entry THIS frame, recompose
+	// tcw = (raw & 0xF81FFFFF) | palsel_bits; else keep raw + count the miss.
+	u32  tcwReal = tcwRaw;
+	char palfix  = 'M';
+	{
+		u32 key = norm(r12);
+		const McPalselEnt& e = s_palselMap[palselSlot(key)];
+		if (e.entry == key && e.vframe == vframe) {
+			tcwReal = (tcwRaw & 0xF81FFFFFu) | e.palsel;
+			s_palselHitFrame++;
+			palfix = (tcwReal == tcwRaw) ? 'h' : 'H';   // H = the recompose actually changed the word
+		} else {
+			if (e.entry == key && e.vframe + 1 == vframe) s_palselNearFrame++;   // stamp-skew probe
+			s_palselMissFrame++;
+			mc_btcwPalselMapMiss++;
+		}
+	}
+
 	u32 tcwRec  = addrspace::read32(recBase + 0x08);
 	u32 texReal = (tcwReal & 0x1FFFFFu) << 3;
 	u32 palReal = (tcwReal >> 21) & 0x3Fu;
@@ -2343,27 +2547,27 @@ static void tdTcwEmit(const u32* r)
 	float BV = tdExpandUV((u16)addrspace::read16(rec + 0x3A));
 	float CU = tdExpandUV((u16)addrspace::read16(rec + 0x3C));
 	float CV = tdExpandUV((u16)addrspace::read16(rec + 0x3E));
-	u32 vframe = addrspace::read32(0x8C3496B0);
 	int slot = s_tdTcwSlot;
 	u32 tidx = (slot >= 0 && slot < 6) ? s_tdTcwTileIdx[slot]++ : 0xFFFFFFFFu;   // per-body tile index
 
-	// PRODUCTION CAPTURE: append this tile's RESOLVED tcw (tcwReal = r12+0x0C) to its node's ordered
-	// list, keyed by node (0x0C..). Per-frame boundary reset. This is what the wire ships. Captured for
-	// ALL drawn nodes — the 6 char bodies (slot>=0) AND cat!=0 satellites/effects (slot<0, armed above).
+	// PRODUCTION CAPTURE: append this tile's RESOLVED (palsel-recomposed) tcw to its node's
+	// ordered list, keyed by node (0x0C..). This is what the wire ships. Captured for ALL
+	// drawn nodes — the 6 char bodies (slot>=0) AND cat!=0 satellites/effects (slot<0).
 	if (s_tdTcwNode) {
-		if (vframe != s_bodyTcwVframe) {           // new video frame: pack last frame, reset
-			bodyTcwFinishFrame();
-			s_bodyTcwVframe = vframe; s_bodyTcwN = 0;
-			for (int i = 0; i < MC_BTCW_MAX_NODES; i++) { s_bodyTcw[i].node = 0; s_bodyTcw[i].ntiles = 0; }
-		}
 		McBodyTcw* b = bodyTcwGet(s_tdTcwNode);
+		u32 k = b ? b->ntiles : 0xFFFFFFFFu;
 		if (b && b->ntiles < MC_BTCW_MAX_TILES) b->tcw[b->ntiles++] = tcwReal;
+		// PER-FIRE DIAGNOSTIC (MAPLECAST_BTCW_FIRELOG, default OFF): logs the RAW
+		// (pre-recompose) word so the stale-vs-current topology is visible per fire.
+		if (s_btcwFireLogOn) btcwFireLog(vframe, s_tdTcwNode, k, tcwRaw, r12, palfix);
 	}
 
 	if (s_tdTiles) {                               // PROBE PRINT (env only)
-		fprintf(stderr, "[TDTCW] vf=%u body=%d tile=%u node=0x%08X sel=%u r13=0x%08X tcwR12=0x%08X texR12=0x%08X palR12=%u "
+		fprintf(stderr, "[TDTCW] vf=%u body=%d tile=%u node=0x%08X sel=%u r13=0x%08X tcwRaw=0x%08X palfix=%c "
+		                "tcwShip=0x%08X texShip=0x%08X palShip=%u "
 		                "| tcwRec=0x%08X texRec=0x%08X palRec=%u sx=%.1f sy=%.1f\n",
-		        vframe, slot, tidx, s_tdTcwNode, s_tdTcwSel, s_tdTcwR13, tcwReal, texReal, palReal,
+		        vframe, slot, tidx, s_tdTcwNode, s_tdTcwSel, s_tdTcwR13, tcwRaw, palfix,
+		        tcwReal, texReal, palReal,
 		        tcwRec, texRec, palRec, s_tdTcwSx, s_tdTcwSy);
 		fprintf(stderr, "[TDUV] vf=%u body=%d tile=%u sel=%u AU=%.4f AV=%.4f BU=%.4f BV=%.4f CU=%.4f CV=%.4f\n",
 		        vframe, slot, tidx, s_tdTcwSel, AU, AV, BU, BV, CU, CV);
@@ -2688,6 +2892,18 @@ bool mc_isHookedPC(u32 pc)
 	// capture is on (prod mc_bodyTcwOn or the probe s_tdTiles) — it arms tdTcwArm for effect tiles so
 	// their resolved TCW ships in BTCW. Mid-block -> force-split -> GenCall injects. (2026-07-04)
 	if (m == PC_SCALE_PART_M) return s_tdTiles || mc_bodyTcwOn;
+	// BTCW PALSEL-PATCH stores (re_kb/62 finding:tcw_palsel_patch_pipeline): the four
+	// CURRENT-palsel store sites feed the per-frame entry->palsel map; the refresh
+	// stale-carry store is a diagnostic counter ONLY. Armed with the SAME gates as the
+	// BTCW capture (probe s_tdTiles or prod mc_bodyTcwOn). 0x8C12405A / 0x8C124A8E are
+	// the store PCs themselves (regular instrs, mid-block -> force-split); 0x8C12402E /
+	// 0x8C124976 are the bra PCs whose DELAY SLOT holds the store (decoder.cpp:985 never
+	// splits a branch/delay pair, so the delay-slot PC can never host a block-entry
+	// GenCall — the branch PC has the same regs live, composed by the preceding `or`).
+	if (m == PC_PALSEL_REG_RES_M || m == PC_PALSEL_REG_DIR_M ||
+	    m == PC_PALSEL_CHG_RES_M || m == PC_PALSEL_CHG_DIR_M ||
+	    m == PC_PALSEL_REFRESH_M)
+		return s_tdTiles || mc_bodyTcwOn;
 	// WALK-INSTANT TILEDESC SNAPSHOT: the body-walker ENTRY (loc_8c0344d4 / 0x8C0344D4). Hooked
 	// on a plain replica live-wire launch (mc_replicaWalkSnapOn, env-derived at static init, same
 	// gate that ORs into mc_oracleHookEnabled) so the GenCall injects WITHOUT the heavyweight
@@ -3009,6 +3225,22 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 		if (s_tdTiles || mc_bodyTcwOn) tdTcwEmit(r);       // GROUND-TRUTH TCW: capture per-body resolved tcw (prod) + probe print
 		return;
 	}
+
+	// BTCW PALSEL-PATCH store hooks (re_kb/62 finding:tcw_palsel_patch_pipeline).
+	// Record the CURRENT palsel the engine just composed for a descriptor entry;
+	// consulted by tdTcwEmit at the submit PC. Register map CONFIRMED (bank12.asm):
+	//   REG_RES 0x8C12402E: entry=r13, word=r2 (store is the hooked bra's delay slot)
+	//   REG_DIR 0x8C12405A: entry=r13, word=r2 (the store PC; hook fires PRE-store)
+	//   CHG_RES 0x8C124A8E: entry=r14, word=r2 (the store PC)
+	//   CHG_DIR 0x8C124976: entry=r14, word=r4 (store is the hooked bra's delay slot)
+	// READ-ONLY w.r.t. guest; SH4 thread (same context as every hook here).
+	if (mpc == PC_PALSEL_REG_RES_M) { if (s_tdTiles || mc_bodyTcwOn) palselRecord(r[13], r[2], 0); return; }
+	if (mpc == PC_PALSEL_REG_DIR_M) { if (s_tdTiles || mc_bodyTcwOn) palselRecord(r[13], r[2], 1); return; }
+	if (mpc == PC_PALSEL_CHG_RES_M) { if (s_tdTiles || mc_bodyTcwOn) palselRecord(r[14], r[2], 2); return; }
+	if (mpc == PC_PALSEL_CHG_DIR_M) { if (s_tdTiles || mc_bodyTcwOn) palselRecord(r[14], r[4], 3); return; }
+	// REFRESH stale-carry store (0x8C1241A8) — DIAGNOSTIC ONLY, does NOT feed the map:
+	// counts how often the carry path ran (reported per frame by palselFrameLog).
+	if (mpc == PC_PALSEL_REFRESH_M) { if (s_tdTiles || mc_bodyTcwOn) s_palselRefreshFrame++; return; }
 
 	if (mpc == PC_OBJ_BEGIN_M) {
 		if (s_fireObjBegin++ == 0)

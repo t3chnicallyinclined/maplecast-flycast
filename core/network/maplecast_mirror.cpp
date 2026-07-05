@@ -3874,6 +3874,15 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 	static std::vector<int> colrow;
 	colrow.assign((size_t)nQuad * 2, 0);
 	gsta_quad_colrow(colrow.data(), (unsigned)nQuad);
+	// per-quad bit15 flag: the DESC-KEYED carve below applies to NON-effect quads only
+	// (a bit15 quad's recidx is a scale-walker alloc, not a DESC_TABLE index).
+	static std::vector<uint8_t> gIsEff;
+	gIsEff.assign((size_t)nQuad, 0);
+	gsta_quad_is_effect(gIsEff.data(), (unsigned)nQuad);
+	// per-quad SOURCE DESCRIPTOR [m,cx,ry,flags] (emit-time snapshot; gsta_render_frame.h).
+	static std::vector<uint8_t> gSrcDesc;
+	gSrcDesc.assign((size_t)nQuad * 4, 0);
+	gsta_quad_srcdesc(gSrcDesc.data(), (unsigned)nQuad);
 
 	// PRE-PASS — per-(gfx1,sel) RUN tile-grid extent (cols=maxcol+1, rows=maxrow+1). The carve
 	// step is the ENGINE TILE SIZE m = W/cols = H/rows (8/16/32, square per re_kb
@@ -4015,6 +4024,67 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 		int mR = (rows > 0) ? (H / rows) : H;
 		if (mR < m) m = mR;
 		if (m <= 0) m = 32; if (m > 32) m = 32;
+		// ---- DESC-KEYED CARVE (2026-07-05, texel_gate.cpp byte-gate; fixes the satellite
+		// fragmentation / typhoon tile-debris). The rank-extent grid above is only an
+		// APPROXIMATION that BREAKS when the same (gfx1,sel) part is drawn by MORE THAN ONE
+		// node per frame (typhoon = 2-4 cat3/cat4 satellite instances): the GLOBAL Ax/Ay
+		// ranks merge/interleave across instances, so cols overcounts (sel 0xDEC W=128
+		// 8x16px cols ranked 0..15 -> m collapsed 16->8; high ranks carved out of range ->
+		// the ZERO tail). MEASURED offline (texel_gate, replica CERTIFIED 200/200 vs the
+		// live client band): window-level pal17 satellites were EXACT=0 of 134.
+		// THE FIX (engine-authoritative, no ranks):
+		//   * engine tile size mq = u1 * (8<<TSP.texU) — render_frame.c's own body-path
+		//     u1 = m/tile encoding, == the walker's descriptor byte0 (verified vs desc).
+		//   * part grid = FULL-SPAN dims / mq (pCols=W/mq, pRows=H/mq).
+		//   * storage (col,row) from the walker's OWN per-tile descriptor
+		//     (DESC_TABLE@0x8C1F9F9C entry dc+k: [2]=cx STORAGE column facing-independent,
+		//     [3]=rows-row — rebuilt pose-correct by rebuild_tile_grid), delivered via
+		//     gsta_quad_srcdesc = the EMIT-TIME snapshot: the table is shared scratch a
+		//     LATER node's rebuild clobbers, so a decode-time re-read is unsafe (measured
+		//     idx-464 overlap between Cable 0xD4C m32 and satellite 0xDE6 m16).
+		//   * PER-RECORD flip4000 (= texU-mirror XOR owner facing) reverses the cx pairing
+		//     (MEASURED sel 0xD4C: engine slot0 holds col1); facing alone does NOT reorder
+		//     storage (MEASURED 98/98 on facing-mirrored pal17) — the single-source-of-flip
+		//     invariant (texU mirror) is untouched.
+		//   * GUARD dm==mq: on a torn +0xDC the desc entry belongs to another node
+		//     (MEASURED vf1795928: recidx 464 claimed by Cable 0xD4C m32 AND satellite
+		//     0xDE6 m16); fall back to part-grid + screen-rank wrap.
+		// Single-instance parts are bit-identical to the old path (cols==pCols, W/cols==mq)
+		// — bodies stayed EXACT 21-23/30-33 across the gate, hit-flash 4/4. Coherent-frame
+		// satellites: pal17 0 -> 98 EXACT + 36 both-zero of 134 (vf1795922). Residual WRONG
+		// at torn frames is INPUT skew (engine drew sel 0xDEF art where the shipped cell
+		// says 0xDE9 — proven by content search), not a carve defect. Bit15 quads keep the
+		// legacy path bit-for-bit. Lockstep with body_decoder.mjs ensureBodyTextures.
+		if (!gIsEff[q]) {
+			int dm  = gSrcDesc[4*q+0];
+			int dcx = gSrcDesc[4*q+1];
+			int dry = gSrcDesc[4*q+2];
+			int dfl = gSrcDesc[4*q+3];
+			// engine tile size: the emit-time desc m (the walker's own byte0); sanity-check
+			// against the quad's u1 encoding (u1 = m/tile, tile = 8<<TSP.texU) — same source.
+			int usz = 8 << ((S[q].tsp >> 3) & 7);
+			int mq = (int)(S[q].u1 * (float)usz + 0.5f);
+			if (mq < 1) mq = 1; if (mq > 32) mq = 32;
+			int pCols = W / mq; if (pCols < 1) pCols = 1;
+			int pRows = H / mq; if (pRows < 1) pRows = 1;
+			if ((dfl & 1) && dm == mq) {
+				// DESC-KEYED: cx = STORAGE column; flags bit1 = per-record flip4000 pairs
+				// columns DESCENDING (facing alone does NOT reorder storage).
+				int cc = dcx % pCols;
+				col = (dfl & 2) ? (pCols - 1 - cc) : cc;
+				int rr = pRows - dry;             // desc[3] = rows - row
+				if (rr < 0) rr = 0; if (rr >= pRows) rr = pRows - 1;
+				row = rr;
+			} else {
+				// FALLBACK (no valid desc): part-grid + screen-rank wrap — reversal over the
+				// SCREEN extent (rank space, texU-mirror keyed as before), then wrap.
+				int cc = (S[q].mirror & 1u) ? (cols - 1 - colRaw) : colRaw;
+				col = ((cc % pCols) + pCols) % pCols;
+				row = ((row % pRows) + pRows) % pRows;
+			}
+			m = mq;
+			cols = pCols; rows = pRows;           // native-chunk gate keys on the part grid
+		}
 		// --- W>32 AND H>32 MULTI-TILE PART (m==32, cols>1, rows>1): copy the NATIVE storage chunk.
 		// The engine stores such a part as ONE full-W×H PVR-twiddle blob whose 32×32 chunks follow
 		// the PVR twiddle of the TILE grid; tile (col,row)'s VRAM is the chunk at twiddle(col,row).
@@ -4360,21 +4430,30 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 		// Repoint each body quad's TCW.PalSelect (bits 21..26) to its owning slot's private bank.
 		// The scene is a static array in render_frame.c; safe to mutate in-place for this frame.
 		GstaSceneQuad* Sq = const_cast<GstaSceneQuad*>(render_frame_scene());
-		// EXCLUDE bit15 effect quads: they share the owning character's gfx1, so a gfx1-only
-		// match would sweep them into a body's warm private bank (palsel->0) => yellow bolts.
-		// The engine renders effects on their real palsel (bank 18); leave those quads untouched.
-		// CONFIRMED-BY-MEASUREMENT 2026-07-05 (engine effect palsel=18; live-only repoint clobbered to 0).
+		// DISCRIMINATOR (CONFIRMED-BY-MEASUREMENT 2026-07-05, _live3 enumeration): repoint a quad
+		// ONLY when its engine-resolved palsel == the owning slot's own BASE shared bank
+		// (skin formula: bank = 16*(pair+1) + 8*side -> slots 0..5 = {16,24,32,40,48,56}).
+		// The repoint exists solely to protect the base bank from time-multiplex corruption
+		// (Cable-all-blue). Any quad the engine deliberately points elsewhere — pal17 projectiles
+		// (353 enumerated), pal18 non-bit15 streaks (53), pal25 hit-flash (4, emitted at exact
+		// engine positions but painted in the victim's base palette = INVISIBLE) — must keep its
+		// engine palsel and be colored by the per-frame palette tail (ships byte-exact).
+		// A gfx1-only match swept ALL of these into banks 0/1: wrong projectile colors + invisible
+		// hit-flash. The earlier bit15/is_effect exclusion was necessary but too narrow (non-bit15
+		// satellites/hit-flash still swept); kept as belt-and-suspenders.
+		static const uint32_t GFIX_BASE_BANK[6] = { 16, 24, 32, 40, 48, 56 };
 		static std::vector<uint8_t> _isEff; _isEff.assign((size_t)nQuad, 0);
 		gsta_quad_is_effect(_isEff.data(), (unsigned)nQuad);
 		for (int q = 0; q < nQuad; q++) {
-			if (q < (int)_isEff.size() && _isEff[q]) continue;   // effect quad: keep engine palsel (bank 18)
+			if (q < (int)_isEff.size() && _isEff[q]) continue;   // bit15 effect quad: keep engine palsel
+			uint32_t curPal = (Sq[q].tcw >> 21) & 0x3Fu;
 			for (int s = 0; s < 6; s++) {
 				if (privBankOfSlot[s] < 0) continue;
-				if (Sq[q].gfx1 == gfxOfSlot[s]) {
-					Sq[q].tcw = (Sq[q].tcw & 0xF81FFFFFu)
-					          | ((uint32_t)(privBankOfSlot[s] & 0x3F) << 21);
-					break;
-				}
+				if (Sq[q].gfx1 != gfxOfSlot[s]) continue;
+				if (curPal != GFIX_BASE_BANK[s]) break;          // engine non-base (17/18/25...): PRESERVE
+				Sq[q].tcw = (Sq[q].tcw & 0xF81FFFFFu)
+				          | ((uint32_t)(privBankOfSlot[s] & 0x3F) << 21);
+				break;
 			}
 		}
 	}

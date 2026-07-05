@@ -96,6 +96,14 @@ for (let f = 0; f < nFrames; f++) {
                 else if (palLen <= 0x10000 && p + palLen <= buf.length) p += palLen;
                 else p -= 4;   // not a real palette tail
             }
+            // HUDQ tail (magic "HUDQ" + u32 nHud + nHud*96B HudQuad). Present only when armed.
+            if (p + 8 <= buf.length && dv.getUint32(p, true) === 0x48554451) {
+                p += 4; const nHud = dv.getUint32(p, true); p += 4; p += nHud * 96;
+            }
+            // BTCW tail (magic "BTCW" + u32 nWords + nWords*u32). Present only when captured.
+            if (p + 8 <= buf.length && dv.getUint32(p, true) === 0x57435442) {
+                p += 4; const nw = dv.getUint32(p, true); p += 4; p += nw * 4;
+            }
         }
     }
     p += taSize;                               // engine_ta

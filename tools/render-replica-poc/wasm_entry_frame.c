@@ -153,3 +153,21 @@ uint32_t render_frame_quad_mirror_impl(uint8_t* out_m, uint32_t cap);
 EXPORT uint32_t render_frame_quad_mirror(uint8_t* out_m, uint32_t cap){
     return render_frame_quad_mirror_impl(out_m, cap);
 }
+
+/* PER-QUAD SOURCE DESCRIPTOR [m, cx, ry, flags] x quadCount (4 bytes/quad; flags bit0=valid,
+ * bit1=per-record flip4000 — storage columns pair DESCENDING), snapshotted at EMIT time from
+ * the walker's own DESC_TABLE entry (clobber-proof vs the shared-scratch rebuild overwrite).
+ * The carve key that SUPERSEDES rank colrow (2026-07-05 satellite-fragmentation fix — global
+ * Ax/Ay ranks merge/interleave when 2+ satellite nodes draw the same (gfx1,sel) per frame).
+ * body_decoder.mjs ensureBodyTextures consumes this in lockstep with the native client. */
+uint32_t render_frame_quad_srcdesc_impl(uint8_t* out, uint32_t cap);
+EXPORT uint32_t render_frame_quad_srcdesc(uint8_t* out, uint32_t cap){
+    return render_frame_quad_srcdesc_impl(out, cap);
+}
+
+/* PER-QUAD bit15 effect tag — needed by the client's palette-repoint discriminator to
+ * exclude effect quads (was defined in render_frame.c but never exported to the wasm). */
+uint32_t render_frame_quad_is_effect_impl(uint8_t* out_e, uint32_t cap);
+EXPORT uint32_t render_frame_quad_is_effect(uint8_t* out_e, uint32_t cap){
+    return render_frame_quad_is_effect_impl(out_e, cap);
+}

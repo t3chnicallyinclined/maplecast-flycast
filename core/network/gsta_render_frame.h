@@ -50,6 +50,12 @@ void render_frame_set_body_tcws(const uint32_t* buf, int nWords);
 unsigned int gsta_quad_colrow(int* out_cr, unsigned int cap);
 unsigned int gsta_quad_mirror(unsigned char* out_m, unsigned int cap);
 unsigned int gsta_quad_is_effect(unsigned char* out_e, unsigned int cap);
+/* Per-quad SOURCE DESCRIPTOR [m, cx, ry, flags] x quadCount (4 bytes/quad), snapshotted at
+ * EMIT time from the walker's own DESC_TABLE entry (clobber-proof vs the shared-scratch
+ * rebuild overwrite). flags bit0 = valid (0 for bit15 quads), bit1 = per-record flip4000
+ * (storage columns pair DESCENDING). The carve key that supersedes rank colrow for the
+ * body texture decode (2026-07-05 satellite-fragmentation fix; texel_gate.cpp byte-gate). */
+unsigned int gsta_quad_srcdesc(unsigned char* out, unsigned int cap);
 
 #ifdef __cplusplus
 }

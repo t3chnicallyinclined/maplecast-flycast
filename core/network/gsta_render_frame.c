@@ -44,10 +44,14 @@
 unsigned int render_frame_quad_colrow_impl(int* out_cr, unsigned int cap);
 unsigned int render_frame_quad_mirror_impl(unsigned char* out_m, unsigned int cap);
 unsigned int render_frame_quad_is_effect_impl(unsigned char* out_e, unsigned int cap);
+unsigned int render_frame_quad_srcdesc_impl(unsigned char* out, unsigned int cap);
 
 unsigned int gsta_quad_colrow(int* out_cr, unsigned int cap){ return render_frame_quad_colrow_impl(out_cr, cap); }
 unsigned int gsta_quad_mirror(unsigned char* out_m, unsigned int cap){ return render_frame_quad_mirror_impl(out_m, cap); }
 unsigned int gsta_quad_is_effect(unsigned char* out_e, unsigned int cap){ return render_frame_quad_is_effect_impl(out_e, cap); }
+/* per-quad [m,cx,ry,flags] source-descriptor snapshot (emit-time, clobber-proof) — the
+ * carve key that supersedes rank colrow (render_frame.c render_frame_quad_srcdesc_impl). */
+unsigned int gsta_quad_srcdesc(unsigned char* out, unsigned int cap){ return render_frame_quad_srcdesc_impl(out, cap); }
 
 /* render_frame_body_count() lives in wasm_entry_frame.c (the EMSCRIPTEN entry, not
  * amalgamated here); g_body_count is the underlying global (render_frame.c). Re-expose it. */

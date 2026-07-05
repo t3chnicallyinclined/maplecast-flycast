@@ -1004,9 +1004,18 @@ function transpiledTA(ram) {
     const quadGfx1s  = new Uint32Array(M.HEAPU8.buffer.slice(gfxPtr, gfxPtr + quads * 4));
     const quadColRow = new Int32Array(M.HEAPU8.buffer.slice(crPtr, crPtr + quads * 8));
     const quadMirror = new Uint8Array(M.HEAPU8.buffer.slice(mirPtr, mirPtr + quads));
+    // PER-QUAD SOURCE DESC [m,cx,ry,flags] (emit-time snapshot; the carve key that supersedes
+    // rank colrow — 2026-07-05 satellite-fragmentation fix). Optional: null on an older wasm.
+    let quadSrcDesc = null;
+    if (M._render_frame_quad_srcdesc) {
+        const sdPtr = M._malloc(quads * 4 || 4);
+        M._render_frame_quad_srcdesc(sdPtr, quads);
+        quadSrcDesc = new Uint8Array(M.HEAPU8.buffer.slice(sdPtr, sdPtr + quads * 4));
+        M._free(sdPtr);
+    }
     M._free(selPtr); M._free(gfxPtr); M._free(crPtr); M._free(mirPtr);
     M._free(ramPtr); M._free(outPtr);
-    return { ta, quads, len, quadSels, quadGfx1s, quadColRow, quadMirror };
+    return { ta, quads, len, quadSels, quadGfx1s, quadColRow, quadMirror, quadSrcDesc };
 }
 
 // ---------------------------------------------------------------- cockpit geometry on the TA
@@ -2144,7 +2153,7 @@ function showFrame(f) {
     applyLocalGfx(ram, log);
     // THE TRANSPILE DRAWS: render_frame's transpiled TA IS the drawn bodies (geometry 0.003px
     // vs ASMTRACE). It also feeds the per-frame GROUND-TRUTH validator (params 16/16) + readout.
-    const { ta, quads, len, quadSels, quadGfx1s, quadColRow, quadMirror } = transpiledTA(ram);
+    const { ta, quads, len, quadSels, quadGfx1s, quadColRow, quadMirror, quadSrcDesc } = transpiledTA(ram);
     window.__lastTA = ta;      // expose for headless verification (TA-level motion probe)
     // Cockpit: post-process the TA (anchor/scale/flip/iso/reverse) + drive the readout & overlay;
     // returns the buffer render_frame WOULD draw (kept for the readout/overlay + the A/B fallback).
@@ -2157,7 +2166,7 @@ function showFrame(f) {
         const bg = renderStagePass();            // STAGE pass first (clears); bodies composite over
         if (window.__bodyMode === 'render_frame') {
             // A/B FALLBACK: the old render_frame pvr2 draw (decode textures into pane.vram first).
-            if (pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, quadColRow, null, quadMirror);
+            if (pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, quadColRow, null, quadMirror, quadSrcDesc);
             const dbg = dbgFromCfg(); if (bg) dbg._bgPreRendered = true;
             pane.render(drawTA, dbg);
         } else {
@@ -2282,7 +2291,7 @@ function liveApplyFrame(u8) {
     applyLocalGfx(ram, log);
     // THE TRANSPILE DRAWS (live): render_frame's transpiled TA IS the drawn bodies; it also
     // feeds the per-frame validator + cockpit readout.
-    const { ta, quads, len, quadSels, quadGfx1s, quadColRow, quadMirror } = transpiledTA(ram);
+    const { ta, quads, len, quadSels, quadGfx1s, quadColRow, quadMirror, quadSrcDesc } = transpiledTA(ram);
     window.__lastTA = ta;
     // Cockpit: post-process the TA (kept for the readout/overlay + the render_frame A/B fallback).
     const drawTA = cockpitProcess(ta, quads, quadSels, quadGfx1s, vframe, quadColRow, quadMirror);
@@ -2294,7 +2303,7 @@ function liveApplyFrame(u8) {
         const bg = renderStagePass();            // STAGE pass first (clears); bodies composite over
         if (window.__bodyMode === 'render_frame') {
             // A/B FALLBACK: the old render_frame pvr2 draw (decode textures into pane.vram first).
-            if (pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, quadColRow, null, quadMirror);
+            if (pane.vram) ensureBodyTextures(ram, pane.vram, ta, quads, bodyCache, quadSels, quadGfx1s, quadColRow, null, quadMirror, quadSrcDesc);
             const dbg = dbgFromCfg(); if (bg) dbg._bgPreRendered = true;
             pane.render(drawTA, dbg);
         } else {

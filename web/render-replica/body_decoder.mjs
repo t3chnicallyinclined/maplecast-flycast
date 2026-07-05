@@ -313,7 +313,17 @@ function decodePart(ram, gfx1, G, sel) {
 const QUAD = 96;                                  // textured-sprite TA block size (paraType 5)
 const TCW_OFF = 0x0C;                             // TCW is word 3 of the 16B param header
 
-export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, quadGfx1s, quadColRow, opts, quadMirror) {
+// quadSrcDesc (optional, Uint8Array[quadCount*4] from render_frame_quad_srcdesc): the
+// EMIT-TIME per-quad source descriptor [m, cx, ry, flags] — the walker's OWN DESC_TABLE
+// entry (flags bit0=valid, bit1=per-record flip4000). THE CARVE KEY that supersedes the
+// rank-based quadColRow (2026-07-05 satellite-fragmentation fix): global Ax/Ay ranks
+// merge/interleave when 2+ satellite nodes draw the same (gfx1,sel) per frame (typhoon),
+// collapsing the rank grid (sel 0xDEC: 16 merged ranks on an 8-col part -> m 16->8, tail
+// cols carved out of range -> the pink tile-debris / Cable fragmentation). Byte-gate
+// certified offline (tools/render-replica-poc/texel_gate.cpp vs engine mirror VRAM):
+// coherent-frame pal17 satellites 0 -> 98 EXACT + 36 both-zero of 134; bodies/hit-flash
+// unchanged-perfect. Lockstep with maplecast_mirror.cpp gstaDecodeBodies.
+export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, quadGfx1s, quadColRow, opts, quadMirror, quadSrcDesc) {
     if (!cache._gfx)  cache._gfx = new Map();     // gfx1 base -> {n,offs,srt}
     if (!cache._dec)  cache._dec = new Map();     // "gfx1:sel" -> {lin,W,H,...} (decode memo)
     if (cache._dec.size > 4096) cache._dec.clear();  // bound the memo across many distinct poses
@@ -404,11 +414,42 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
             flip = cache._fac ? cache._fac.get(gfx1) : undefined;
             if (flip === undefined) { if (!cache._fac) cache._fac = new Map(); flip = facingForGfx1(ram, gfx1); cache._fac.set(gfx1, flip); }
         }
-        const col = flip ? (cols - 1 - colRaw) : colRaw;
+        let col = flip ? (cols - 1 - colRaw) : colRaw;
+        let row2 = row;
         let m = cols > 0 ? (W / cols) : W;
         const mR = rows > 0 ? (H / rows) : H;
         if (mR < m) m = mR;                       // square tile = min (guards non-integer runs)
         m = m | 0; if (m <= 0) m = 32; if (m > 32) m = 32;   // clamp to the 32×32 carve window
+        // ---- DESC-KEYED CARVE (2026-07-05; see the header note on quadSrcDesc). Uses the
+        // walker's OWN emit-time descriptor: m = desc byte0 (engine tile size), storage
+        // col = cx (facing-INDEPENDENT; per-record flip4000 pairs columns DESCENDING —
+        // MEASURED sel 0xD4C engine slot0=col1; facing alone does NOT reorder storage,
+        // MEASURED 98/98 facing-mirrored pal17). Part grid from FULL-SPAN dims / m. The
+        // rank path above remains the fallback for quads without a valid desc (bit15) or
+        // when the desc m disagrees with the part grid (torn input). Invariants untouched:
+        // Y-first twiddle chunk order, the texU draw-time mirror (single source of the
+        // visual flip), BTCW override, parity pin. Lockstep: maplecast_mirror.cpp.
+        let pCols = cols, pRows = rows;
+        if (quadSrcDesc) {
+            const dm  = quadSrcDesc[4*q+0], dcx = quadSrcDesc[4*q+1];
+            const dry = quadSrcDesc[4*q+2], dfl = quadSrcDesc[4*q+3];
+            if ((dfl & 1) && (dm === 8 || dm === 16 || dm === 32)) {
+                pCols = (W / dm) | 0; if (pCols < 1) pCols = 1;
+                pRows = (H / dm) | 0; if (pRows < 1) pRows = 1;
+                const cc = dcx % pCols;
+                col = (dfl & 2) ? (pCols - 1 - cc) : cc;
+                let rr = pRows - dry;                       // desc[3] = rows - row
+                if (rr < 0) rr = 0; if (rr >= pRows) rr = pRows - 1;
+                row2 = rr;
+                m = dm;
+            } else {
+                // fallback: part grid from the quad's rank wrap (multi-instance safe)
+                pCols = (W / m) | 0; if (pCols < 1) pCols = 1;
+                pRows = (H / m) | 0; if (pRows < 1) pRows = 1;
+                col = ((col % pCols) + pCols) % pCols;
+                row2 = ((row % pRows) + pRows) % pRows;
+            }
+        }
         // --- W>32 AND H>32 MULTI-TILE PART (m==32, cols>1, rows>1): copy the NATIVE storage chunk.
         // The engine stores such a part as ONE full-W×H PVR-twiddle blob whose 32×32 chunks follow
         // the PVR twiddle of the TILE grid; tile (col,row)'s VRAM is the chunk at twiddle(col,row).
@@ -420,7 +461,7 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         // SUPERSEDES the broken non-square LINEAR fall-through (re_kb/44): linear scattered the off-
         // diagonal tiles -> the POSE-DEPENDENT Storm-cape grey-block garble (frame _gsta_nobg_360).
         const Tw = (W / 32) | 0, Th = (H / 32) | 0;
-        if (m === 32 && cols > 1 && rows > 1 && p.raw) {
+        if (m === 32 && pCols > 1 && pRows > 1 && p.raw) {
             // Y-FIRST for BOTH square and non-square grids. The PVR twiddle interleaves the
             // y-bit before the x-bit (flycast _twiddleSlow), so tile-grid chunk order is
             // Y-first universally. The old `Tw==Th ? twTile(x-first) : yfirst` split was WRONG
@@ -428,14 +469,14 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
             // extract_gfx1_atlas full-span lin); twTile's x-first square validation (re_kb/43)
             // was against a self-consistent model, never the baker. Y-first matches the baker
             // 0px for square AND non-square. (re_kb finding:carve_square_yfirst_supersedes_xfirst.)
-            const k = twTileYFirst(col, row, Tw, Th);
+            const k = twTileYFirst(col, row2, Tw, Th);
             const o = k * 512;
             if (o + 512 <= p.raw.length) { vram.set(p.raw.subarray(o, o + 512), addr); written++; continue; }
         }
         // extract the m×m linear region at (col*m, row*m), clamped to W×H, into the tile's
         // top-left (zero-pad the rest of the 32×32 = the engine's UV-clamped sample area).
         const tile = new Uint8Array(1024);
-        const ox = col * m, oy = row * m;
+        const ox = col * m, oy = row2 * m;
         for (let yy = 0; yy < m; yy++) {
             const py = oy + yy; if (py >= H) break;
             const rowBase = py * W, dstBase = yy * 32;
