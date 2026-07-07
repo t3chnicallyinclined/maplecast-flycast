@@ -412,8 +412,26 @@ bool init()
 	// forces single-threaded rendering for the same reason. Do it here too so
 	// the SH4 resumes cleanly from the JOIN. Must run before the emu/render
 	// threads spawn (player::init is called from Emulator::start setup).
-	if (maplecast_lockstep::active())
+	if (maplecast_lockstep::active()) {
 		config::ThreadedRendering.override(false);
+		// Determinism lockdown for the RENDERING lockstep client: the server is
+		// norend, so anything the real renderer does that reaches guest-visible
+		// state (framebuffer writeback to guest VRAM, wall-clock frameskip) must
+		// be neutralized or the client's SH4 diverges from the server's within a
+		// few frames. Match the server's deterministic behavior:
+		//   - EmulateFramebuffer OFF: don't write the rendered framebuffer back
+		//     into guest VRAM (the server norend never does; a writeback the SH4
+		//     later reads/DMAs would desync).
+		//   - AutoSkipFrame 0: frameskip is gated on wall-clock SH4FastEnough
+		//     (spg.cpp:182), which is non-deterministic between a fast norend
+		//     server and a slower rendering client.
+		config::EmulateFramebuffer.override(false);
+		config::AutoSkipFrame.override(0);
+		printf("[player] lockstep determinism lockdown: ThreadedRendering=%d "
+		       "EmulateFramebuffer=%d AutoSkipFrame=%d Sh4Clock=%d\n",
+		       (int)config::ThreadedRendering, (int)config::EmulateFramebuffer,
+		       (int)config::AutoSkipFrame, (int)config::Sh4Clock);
+	}
 
 	if (!resolveServer(spec)) return false;
 
