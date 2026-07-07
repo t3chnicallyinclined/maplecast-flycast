@@ -55,12 +55,14 @@
 #include "maplecast_player.h"
 #include "maplecast_input_server.h"   // TapeEntry, unpackSeqSlot, kTapePort implicit
 #include "maplecast_state_sync.h"
+#include "maplecast_lockstep.h"       // lockstep checksum layer (env-gated, OFF by default)
 
 #include <atomic>
 #include <thread>
 #include <mutex>
 #include <deque>
 #include <vector>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -68,6 +70,7 @@
 
 #include "net_platform.h"
 #include "maplecast_compat.h"
+#include "cfg/option.h"   // config::ThreadedRendering override for lockstep
 
 // kcode[]/lt[]/rt[] globals â€” same globals the server writes in updateSlot()
 extern u32 kcode[4];
@@ -286,9 +289,14 @@ static void rxLoop()
 
 		ssize_t n = mc_recv(_sock, buf, sizeof(buf), 0);
 		if (n < 0) {
-			if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
-			printf("[player] recv error: %s\n", strerror(errno));
-			break;
+			// Recv timeout (SO_RCVTIMEO, now correctly honored on Windows) or a
+			// transient error. errno is NOT a reliable Winsock indicator — a
+			// timeout leaves errno=0 ("No error"), which previously fell through
+			// to break and KILLED the tape rx thread on the first idle 100ms
+			// window (before any tape subscription established). Just retry; the
+			// _active flag + HELO pacing bound this loop, and shutdown()
+			// ::shutdown()s the socket so we exit promptly.
+			continue;
 		}
 		if (n < 8) continue;
 
@@ -390,6 +398,23 @@ bool init()
 	const char* spec = std::getenv("MAPLECAST_PLAYER_CLIENT");
 	if (!spec || !*spec) return false;
 
+	// Lockstep bring-up: make stdout unbuffered so the catch-up / checksum
+	// diagnostics are visible LIVE in a redirected log (otherwise a fully
+	// buffered stdout hides everything after boot until the 4 KB buffer fills
+	// or the process exits). Gated on the debug env so it never affects prod.
+	if (std::getenv("MAPLECAST_LOCKSTEP_DEBUG"))
+		setvbuf(stdout, nullptr, _IONBF, 0);
+
+	// Lockstep client applies a full dc_serialize JOIN snapshot mid-match and
+	// then resumes SH4 execution. With ThreadedRendering ON, the emu thread and
+	// the render thread deadlock on the pvr queue handshake right after the
+	// loadstate (both spin, frame counter frozen). The native mirror client
+	// forces single-threaded rendering for the same reason. Do it here too so
+	// the SH4 resumes cleanly from the JOIN. Must run before the emu/render
+	// threads spawn (player::init is called from Emulator::start setup).
+	if (maplecast_lockstep::active())
+		config::ThreadedRendering.override(false);
+
 	if (!resolveServer(spec)) return false;
 
 	// Parse stall policy env var.
@@ -438,6 +463,13 @@ bool init()
 		       "until a state arrives\n");
 	}
 
+	// Lockstep-mirror checksum layer (env-gated MAPLECAST_LOCKSTEP=1, default
+	// OFF). Subscribes to the server's game-state-hash channel (UDP 7103) so
+	// frameGate can verify per-frame parity + resync on divergence. No-op
+	// unless enabled — the player client is unchanged when lockstep is off.
+	if (maplecast_lockstep::active())
+		maplecast_lockstep::clientInit(_serverHost.c_str());
+
 	printf("[player] === PLAYER CLIENT MODE ENABLED ===\n");
 	return true;
 }
@@ -446,6 +478,8 @@ void shutdown()
 {
 	if (!_active.load()) return;
 	_active.store(false);
+	if (maplecast_lockstep::active())
+		maplecast_lockstep::clientShutdown();
 	maplecast_state_sync::clientStop();
 	if (_fwdSock >= 0) {
 		mc_closesocket(_fwdSock);
@@ -481,6 +515,19 @@ void seedLocalFrame(uint64_t frame)
 	_localFrame.store(frame, std::memory_order_relaxed);
 }
 
+void requestResync()
+{
+	// Re-arm the one-shot initial-state apply so frameGate's !_initialSynced
+	// block runs clientApplyPending again (which dc_deserialize's the fresh
+	// state + reseeds _localFrame via seedLocalFrame). Bounce the state-sync
+	// TCP so the server's accept path sets needsInitialSync=true and ships a
+	// brand-new snapshot.
+	_initialSynced.store(false, std::memory_order_relaxed);
+	maplecast_state_sync::clientStop();
+	maplecast_state_sync::clientStart(_serverHost.c_str());
+	printf("[player] resync requested — bounced state-sync, awaiting fresh JOIN\n");
+}
+
 bool frameGate()
 {
 	if (!_active.load(std::memory_order_relaxed)) return true;  // no-op path
@@ -509,6 +556,26 @@ bool frameGate()
 					_queues[slot].entries.pop_front();
 			}
 			_initialSynced.store(true, std::memory_order_relaxed);
+			// Diagnostic: seeded frame vs what the tape currently holds, so a
+			// counter-scale mismatch (JOIN serverFrame vs tape stamps) or a
+			// too-stale JOIN (seed older than the buffer) is visible at a
+			// glance instead of manifesting as a silent stall.
+			uint64_t t0o=0,t0n=0,t1o=0,t1n=0; size_t s0=0,s1=0;
+			{
+				std::lock_guard<std::mutex> l0(_queues[0].mu);
+				s0 = _queues[0].entries.size();
+				if (s0) { t0o=_queues[0].entries.front().frame; t0n=_queues[0].entries.back().frame; }
+			}
+			{
+				std::lock_guard<std::mutex> l1(_queues[1].mu);
+				s1 = _queues[1].entries.size();
+				if (s1) { t1o=_queues[1].entries.front().frame; t1n=_queues[1].entries.back().frame; }
+			}
+			printf("[player] JOIN applied: seeded localFrame=%llu; tape slot0=[%llu..%llu]/%zu "
+			       "slot1=[%llu..%llu]/%zu (seed should fall within tape range)\n",
+			       (unsigned long long)newFrame,
+			       (unsigned long long)t0o,(unsigned long long)t0n,s0,
+			       (unsigned long long)t1o,(unsigned long long)t1n,s1);
 		} else {
 			// No state yet â€” block the SH4. We have no frame number
 			// to apply tape entries against.
@@ -520,78 +587,116 @@ bool frameGate()
 	const uint64_t localFrame = _localFrame.load(std::memory_order_relaxed);
 	const StallPolicy policy  = (StallPolicy)_stallPolicy.load(std::memory_order_relaxed);
 
-	// GGPO-style blocking read against the dense tape. The server now
-	// publishes one entry per slot per server frame (see
-	// maplecast_input_server::publishFrameTick), so for any localFrame
-	// the answer is unambiguous:
+	// Lockstep-mirror checksum (env-gated). We are about to run frame
+	// `localFrame`, so resident guest RAM currently reflects the END of frame
+	// (localFrame-1). clientVerify hashes that region and compares against the
+	// server's hash for the matching frame, triggering a resync on divergence.
+	// No-op unless MAPLECAST_LOCKSTEP=1.
+	if (maplecast_lockstep::active())
+		maplecast_lockstep::clientVerify(localFrame);
+
+	// ── Lockstep catch-up + advance (determinism-correct) ──────────────
+	// With a state-sync JOIN + per-frame checksum, the client MUST EXECUTE
+	// every frame from the seeded snapshot forward, consuming tape[localFrame]
+	// EXACTLY. We never skip execution (the old "fast-forward the counter to
+	// the queue head" path jumped over frames without running them — which is
+	// fine for a tape-only viewer but DESYNCS a lockstep client, since the
+	// game state then reflects fewer frames than the counter claims).
 	//
-	//   - if the queue front for this slot is at frame < localFrame,
-	//     it's a stale entry from before we caught up â€” discard it.
-	//   - if the queue front is at frame == localFrame, apply it (this
-	//     is the input the server's SH4 saw at this frame) and pop.
-	//   - if the queue front is at frame > localFrame, the server has
-	//     moved past us â€” fast-forward localFrame to that entry's frame
-	//     and apply (the catchup-from-stall path).
-	//   - if the queue is empty for this slot, we don't have data yet,
-	//     stall.
-	//
-	// Both slots must be satisfied before the SH4 can advance.
-	bool slotSatisfied[2]      = { false, false };
-	uint64_t advanceTarget     = localFrame;
-	bool needFastForward       = false;
-	uint64_t fastForwardFrame  = localFrame;
+	// Live-join catch-up: after applying a ~10 MB JOIN at frame S the server
+	// has run ahead to L, so the tape holds S..L. We replay S..L by running
+	// each frame back-to-back; `fastForwardMode` unthrottles wall-clock pacing
+	// (never SH4 execution — determinism-safe) so we outrun the live server
+	// and settle a few frames behind L. If tape[localFrame] has aged out of
+	// the buffer (we fell too far behind to reproduce it), we request a fresh,
+	// NEWER JOIN and retry — the self-correcting catch-up loop.
+	bool     slotExact[2] = { false, false };
+	bool     slotGone[2]  = { false, false };  // localFrame older than buffer
+	uint64_t qOldest[2]   = { 0, 0 };
+	uint64_t qNewest[2]   = { 0, 0 };
+	size_t   qSize[2]     = { 0, 0 };
+	maplecast_input::TapeEntry pending[2];
 
 	for (int slot = 0; slot < 2; slot++) {
 		PendingQueue& q = _queues[slot];
 		std::lock_guard<std::mutex> lock(q.mu);
-		// Discard stale heads.
+		// Discard entries strictly older than the frame we need.
 		while (!q.entries.empty() && q.entries.front().frame < localFrame)
 			q.entries.pop_front();
-		if (q.entries.empty()) continue;
-		const uint64_t headFrame = q.entries.front().frame;
-		if (headFrame == localFrame) {
-			maplecast_input::TapeEntry e = q.entries.front();
+		qSize[slot] = q.entries.size();
+		if (q.entries.empty()) continue;   // transient: no data yet for this slot
+		qOldest[slot] = q.entries.front().frame;
+		qNewest[slot] = q.entries.back().frame;
+		if (qOldest[slot] == localFrame) {
+			pending[slot] = q.entries.front();
 			q.entries.pop_front();
-			applyEntry(e, (uint8_t)slot);
-			slotSatisfied[slot] = true;
-		} else if (headFrame > localFrame) {
-			// Catchup. Take the head â€” the server has produced data
-			// for this slot at headFrame, we should fast-forward to
-			// match. Both slots will independently arrive at the same
-			// fast-forward frame because publishFrameTick stamps both
-			// slots with the same frame number per server tick.
-			needFastForward = true;
-			if (headFrame > fastForwardFrame) fastForwardFrame = headFrame;
-			maplecast_input::TapeEntry e = q.entries.front();
-			q.entries.pop_front();
-			applyEntry(e, (uint8_t)slot);
-			slotSatisfied[slot] = true;
+			slotExact[slot] = true;
+		} else {
+			// front > localFrame: the frame we need aged out of the buffer.
+			slotGone[slot] = true;
 		}
 	}
 
-	const bool bothSatisfied = slotSatisfied[0] && slotSatisfied[1];
+	const bool bothExact = slotExact[0] && slotExact[1];
+	const bool anyGone   = slotGone[0] || slotGone[1];
 
-	if (bothSatisfied) {
-		if (needFastForward) {
-			_localFrame.store(fastForwardFrame + 1, std::memory_order_relaxed);
-		} else {
-			_localFrame.fetch_add(1, std::memory_order_relaxed);
-		}
+	// Lag = furthest frame BOTH slots have reached, minus where we are.
+	uint64_t newestCommon = 0;
+	if (qNewest[0] && qNewest[1]) newestCommon = std::min(qNewest[0], qNewest[1]);
+	const uint64_t lag = (newestCommon > localFrame) ? (newestCommon - localFrame) : 0;
+
+	// Unthrottle while materially behind; settle to server pace near the edge.
+	if      (lag > 8)  settings.input.fastForwardMode = true;
+	else if (lag <= 2) settings.input.fastForwardMode = false;
+
+	if (bothExact) {
+		applyEntry(pending[0], 0);
+		applyEntry(pending[1], 1);
+		_localFrame.fetch_add(1, std::memory_order_relaxed);
 		return true;
 	}
 
+	// Fell behind the tape buffer for at least one slot — can't reproduce
+	// localFrame. Request a fresh (newer) JOIN and retry. Throttled so we
+	// don't storm 10 MB snapshots while one is in flight.
+	if (anyGone) {
+		static int64_t _lastReJoinUs = 0;
+		int64_t now = nowUs();
+		if (now - _lastReJoinUs > 1000000) {
+			_lastReJoinUs = now;
+			printf("[player] behind tape buffer: want=%llu slot0=[%llu..%llu]/%zu "
+			       "slot1=[%llu..%llu]/%zu — requesting fresh JOIN\n",
+			       (unsigned long long)localFrame,
+			       (unsigned long long)qOldest[0], (unsigned long long)qNewest[0], qSize[0],
+			       (unsigned long long)qOldest[1], (unsigned long long)qNewest[1], qSize[1]);
+			requestResync();
+		}
+		_framesStalled.fetch_add(1, std::memory_order_relaxed);
+		return false;
+	}
+
 	if (policy == StallPolicy::Speculate) {
-		// Speculate: advance with the last-applied kcode for any slot
-		// we couldn't satisfy. Used for bad-network fallback testing.
+		// Speculate: advance with the last-applied kcode for any slot we
+		// couldn't satisfy. Bad-network fallback testing only.
 		_framesSpeculated.fetch_add(1, std::memory_order_relaxed);
 		_localFrame.fetch_add(1, std::memory_order_relaxed);
 		return true;
 	}
 
-	// Hard policy: spin the emu loop. The 250Âµs sleep in the emu loop
-	// caller (core/emulator.cpp) keeps the CPU from melting.
+	// Hard policy: transient stall (one/both slots have no data yet). Spin the
+	// emu loop (250us sleep in the caller). Log the queue range occasionally so
+	// a genuine wedge is VISIBLE rather than silent.
 	_framesStalled.fetch_add(1, std::memory_order_relaxed);
-	(void)advanceTarget;  // reserved for future telemetry
+	{
+		static uint64_t _stallLogCtr = 0;
+		if ((_stallLogCtr++ % 120) == 0)
+			printf("[player] frameGate stall: want=%llu slot0=[%llu..%llu]/%zu "
+			       "slot1=[%llu..%llu]/%zu serverLatest=%llu\n",
+			       (unsigned long long)localFrame,
+			       (unsigned long long)qOldest[0], (unsigned long long)qNewest[0], qSize[0],
+			       (unsigned long long)qOldest[1], (unsigned long long)qNewest[1], qSize[1],
+			       (unsigned long long)_serverLatestFrame.load(std::memory_order_relaxed));
+	}
 	return false;
 }
 

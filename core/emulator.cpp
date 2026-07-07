@@ -1854,6 +1854,14 @@ void Emulator::vblank()
 	// the renderTimeout/threaded checks below — those affect "should we
 	// signal end-of-frame to the rend thread", which is orthogonal to
 	// "should we capture rollback state."
+	// GATE ADD (Test B): continuous per-frame game-state hash log, gated on
+	// MAPLECAST_GSHASH_LOG. Runs every vblank independent of the rollback ring.
+	{
+		static const char* _gshashLogPath = std::getenv("MAPLECAST_GSHASH_LOG");
+		if (_gshashLogPath)
+			maplecast_rollback::gshashLogTick(_gshashLogPath);
+	}
+
 	if (maplecast_rollback::active()) {
 		static uint64_t _rollbackFrameSeq = 0;
 		maplecast_rollback::saveFrame(++_rollbackFrameSeq);

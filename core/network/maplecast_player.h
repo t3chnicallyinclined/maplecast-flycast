@@ -83,6 +83,13 @@ bool frameGate();
 // take effect on the first frameGate() call after init().
 void seedLocalFrame(uint64_t frame);
 
+// Lockstep resync: re-arm the one-shot initial-state apply and bounce the
+// state-sync TCP so the server ships a fresh JOIN snapshot (accept sets
+// needsInitialSync=true). frameGate's existing !_initialSynced block then
+// dc_deserialize's the fresh state + reseeds the frame counter. Called by
+// maplecast_lockstep::clientVerify() when the game-state checksum diverges.
+void requestResync();
+
 // Current stall policy — set from MAPLECAST_PLAYER_STALL_POLICY env var
 // at init time, settable at runtime for testing.
 StallPolicy getStallPolicy();

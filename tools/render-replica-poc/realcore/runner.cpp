@@ -205,6 +205,11 @@ void ITLB_Sync(u32) {}
 // -- interrupts / scheduler (not compiled) --
 int UpdateINTC() { return 0; }
 bool SRdecode() { return false; }   // sh4_interrupts.cpp not compiled; UpdateSR() calls it
+
+// -- gsta_charpass hook (sh4_interpreter.cpp references these; runner uses its own
+//    mc_readtrace::onPc watchdog, so the charpass hook stays inert here) --
+bool gsta_charpass_active = false;
+void gsta_charpass_onpc(u32) {}
 void Do_Exception(u32 epc, Sh4ExceptionCode expEvn) {
     // Capture the fault and break the Run loop via debugger::Stop (caught in Run()).
     g_faulted = true; g_faultEpc = epc; g_faultEvn = (u32)expEvn;
@@ -268,10 +273,14 @@ int main(int argc, char** argv) {
     bool doIsolate = true;
     bool dropChars = false;   // negative control: also zero char structs/objpool (a NEEDED region)
     bool dropScratch = false; // GATING TEST: also zero the render-scratch the driver rebuilds
+    bool minCtx = false;      // zero r0..r14 (keep r15/pc/pr/sr/fpscr) to test reg-invariance
+    const char* ctxOverride = nullptr; // load entry ctx from a DIFFERENT seed than the RAM
     for (int i = 1; i < argc; i++) {
         if (!std::strcmp(argv[i], "--no-isolate")) doIsolate = false;
         if (!std::strcmp(argv[i], "--drop-chars")) dropChars = true;
         if (!std::strcmp(argv[i], "--drop-scratch")) dropScratch = true;
+        if (!std::strcmp(argv[i], "--min-ctx"))    minCtx = true;
+        if (!std::strncmp(argv[i], "--ctx-override=", 15)) ctxOverride = argv[i] + 15;
     }
 
     FILE* f = std::fopen(seedPath, "rb");
@@ -381,6 +390,25 @@ int main(int argc, char** argv) {
     Sh4Executor* cpu = Get_Sh4Interpreter();
     cpu->Init();
     Sh4cntx = seedCtx;                 // restore entry CPU/FP register state
+    if (ctxOverride) {                 // load the 512B entry ctx from a DIFFERENT seed
+        FILE* cf = std::fopen(ctxOverride, "rb");
+        if (cf) {
+            char mg[8]; std::fread(mg,1,8,cf);
+            bool cv2 = std::memcmp(mg,"RTSEED02",8)==0;
+            std::fseek(cf, 8 + 20 + (cv2 ? (4 + 72) : 0), SEEK_SET);
+            static Sh4Context ovCtx; std::fread(&ovCtx,1,sizeof(Sh4Context),cf);
+            std::fclose(cf);
+            Sh4cntx = ovCtx;
+            std::printf("[run] --ctx-override: entry ctx loaded from %s\n", ctxOverride);
+        }
+    }
+    if (minCtx) {                      // reg-invariance test: keep only r15/pc/pr/sr/fpscr
+        for (int i = 0; i < 15; i++) Sh4cntx.r[i] = 0;
+        for (int i = 0; i < 16; i++) { Sh4cntx.fr[i] = 0; Sh4cntx.xf[i] = 0; }
+        Sh4cntx.mac.full = 0; Sh4cntx.fpul = 0;
+        for (int i = 0; i < 8; i++) Sh4cntx.r_bank[i] = 0;
+        std::printf("[run] --min-ctx: zeroed r0..r14, fr/xf, mac, fpul, r_bank (kept r15/pc/pr/sr/fpscr)\n");
+    }
     // context fixups: force entry PC, override the (stale, cross-process) SQ pointer
     Sh4cntx.pc = entryPC;
     Sh4cntx.doSqWrite = sqCapture;

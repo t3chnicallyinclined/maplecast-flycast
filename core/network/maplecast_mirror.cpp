@@ -36,6 +36,7 @@
 #include "maplecast_ws_server.h"
 #include "maplecast_audio_ws.h"
 #include "maplecast_state_sync.h"
+#include "maplecast_lockstep.h"
 #include "maplecast_input_server.h"
 #include "replay_writer.h"
 #include "maplecast_rollback.h"
@@ -44,6 +45,7 @@
 #include "maplecast_control_ws.h"
 #include "maplecast_compress.h"
 #include "gsta_stage.h"        // native MVC2 stage renderer (global-namespace decls)
+#include "gsta_charpass.h"     // Phase 2a: native char-pass driver (global-namespace decls)
 #ifdef MAPLECAST_GSTA_CLIENT_BUILD
 #include "gsta_render_debug.h" // live render-debug globals (control-WS); MUST be at GLOBAL scope
                                // (the namespace maplecast_mirror opens at line ~287, so including
@@ -460,6 +462,21 @@ static MirrorCompressor _compressor;
 
 void initServer()
 {
+	// Lockstep: serverPublish (which builds the JOIN snapshot AND computes the
+	// game-state checksum) runs on the RENDER thread when ThreadedRendering is
+	// on — concurrently with the SH4 emu thread mutating mem_b. That makes the
+	// JOIN and the shipped hash capture DIFFERENT, racing SH4 states, so a
+	// lockstep client's restored JOIN never matches that frame's hash (endless
+	// resync). Forcing single-threaded rendering makes serverPublish run
+	// synchronously on the emu thread at STARTRENDER (SH4 quiescent), so the
+	// JOIN + hash are atomic and mutually consistent. Must be set before the
+	// emu/render threads spawn (initServer runs during Emulator::start setup).
+	if (maplecast_lockstep::active()) {
+		config::ThreadedRendering.override(false);
+		printf("[MIRROR] lockstep: forcing single-threaded rendering so JOIN+hash "
+		       "are atomic w.r.t. the SH4\n");
+	}
+
 	if (!openShm(true)) return;
 	_isServer = true;
 	initRegions();
@@ -503,6 +520,12 @@ void initServer()
 	// so native player clients can subscribe to periodic dc_serialize
 	// snapshots. Failure to start is non-fatal  --  the TA mirror still works.
 	maplecast_state_sync::serverStart();
+
+	// Lockstep-mirror game-state-hash channel (env-gated MAPLECAST_LOCKSTEP=1,
+	// default OFF). Ships the deterministic game-state-region checksum to
+	// native lockstep clients every MAPLECAST_LOCKSTEP_INTERVAL frames so they
+	// can verify parity + resync. No-op / not bound unless enabled.
+	maplecast_lockstep::serverStart();
 
 	printf("[MIRROR] === SERVER MODE === streaming TA + memory diffs\n");
 }
@@ -1781,6 +1804,27 @@ void serverPublish(TA_context* ctx)
 	static uint32_t _localFrameNum = 0;
 	_localFrameNum++;
 
+	// LOCKSTEP DIAG (throttled): resolve which counter the tape / JOIN / hash
+	// each use, and whether the tape publisher is still draining to subscribers.
+	if (maplecast_lockstep::active()) {
+		static uint32_t _dbgCtr = 0;
+		if ((_dbgCtr++ % 120) == 0) {
+			auto ts = maplecast_input::getTapeStats();
+			bool wsOn = maplecast_ws::active();
+			uint32_t wsN = wsOn ? maplecast_ws::clientCount() : 0;
+			printf("[lockstep-diag] serverPublish: _localFrameNum=%u "
+			       "currentFrame=%llu | ws=%d/%u path=%s | tape lastPub=%llu sent=%llu "
+			       "subs=%u drops=%llu\n",
+			       _localFrameNum,
+			       (unsigned long long)currentFrame(),
+			       (int)wsOn, wsN, (wsOn && wsN > 0) ? "FULL" : "early",
+			       (unsigned long long)ts.lastPublishedFrame,
+			       (unsigned long long)ts.packetsSent, ts.subscribers,
+			       (unsigned long long)ts.entriesDropped);
+			fflush(stdout);
+		}
+	}
+
 	// === MAPLECAST_FRAME_ORACLE_HOOK — flush the LIVE block-entry attribution that
 	// the recompiler hook (0x8C03093C begin / 0x8C033E90 quad) buffered during this
 	// frame's SH4 draw walk. serverPublish runs once per frame AFTER that walk
@@ -1874,6 +1918,21 @@ void serverPublish(TA_context* ctx)
 		// + predictor compare) so fire it regardless. Used for: rollback
 		// netcode predictor (A.5/A.6), .mcrec recording when active.
 		maplecast_input::publishFrameTick(_localFrameNum);
+
+		// Lockstep-mirror (env-gated MAPLECAST_LOCKSTEP=1, default OFF): a
+		// native lockstep client can connect to a headless authoritative
+		// server that has NO browser WS clients — this is that path. The
+		// full-client path below ships JOIN + tape + hash keyed on
+		// hdr->frame_count; here there is no WS client so we key everything on
+		// _localFrameNum instead (which _atomicCurrentFrame was just set to, so
+		// currentFrame() and the JOIN's serverFrame agree). Ship the JOIN
+		// snapshot (only builds when a state-sync client still needs it) and
+		// the game-state checksum so the lockstep client can sync + verify.
+		// Entirely inert unless MAPLECAST_LOCKSTEP is set.
+		if (maplecast_lockstep::active()) {
+			maplecast_state_sync::onServerFramePublished(_localFrameNum);
+			maplecast_lockstep::onServerFrame(_localFrameNum);
+		}
 		return;
 	}
 
@@ -2339,6 +2398,11 @@ done_diff:
 	// the state-sync server is running AND at least one client is
 	// connected.
 	maplecast_state_sync::onServerFramePublished(hdr->frame_count);
+
+	// Lockstep-mirror: ship the game-state-region checksum for this committed
+	// frame (every MAPLECAST_LOCKSTEP_INTERVAL frames). Same frame number the
+	// tape + JOIN snapshot use here, so client-side compares key correctly.
+	maplecast_lockstep::onServerFrame(hdr->frame_count);
 
 	// Compress + broadcast over WebSocket to browser clients
 	uint64_t compressUs = 0;
@@ -3521,7 +3585,6 @@ static int64_t _clientNowUs() {
 // the mirror render loop in mainui.cpp runs.
 // =============================================================================
 #include "gsta_render_frame.h"
-#include "gsta_charpass.h"     // Phase 2a: native char-pass driver (real SH4 render)
 
 // MCRR / FRMx / HUDQ magics (LE on the wire)  --  match maplecast_replica_live.cpp.
 static constexpr uint32_t GSTA_MCRR_MAGIC = 0x5252434Du;   // "MCRR"
@@ -4356,6 +4419,126 @@ static inline bool p3dPcwVtx64(uint32_t pcw) {
 	return tex && (vol == 1 || colType == 1);
 }
 
+// ---- PHASE 2a NATIVE-TA FIXUP: apply the SAME two client-side texture fixes the
+// transpile applies to render_frame's SceneQuad, but to the ENGINE's native TA parcels.
+// Walks the 32B SQ-chunk stream, and for each TEXTURED Type-4/5 global header rewrites
+// its TCW (byte offset 12) with:
+//   (2) PALETTE private-bank repoint: engine palsel in the skin base banks
+//       {16,24,32,40,48,56} -> the client's baked private banks {0..5} (fixes the shared-
+//       bank time-multiplex "Cable-all-blue"); engine non-base palsel (17/18/25 projectile/
+//       effect/hit-flash) is PRESERVED (covered by the per-frame palette tail).
+//   (3) BODY PARITY-PIN: on a HIGH-parity frame (arena==400) pin the double-buffered body
+//       texaddr word [0x88000,0x8C000) down by 0x6000 so it samples the SAME low half that
+//       gstaDecodeBodies decoded into (write==sample invariant; else melty/stale texels).
+// Correct stream walk: sprite globals are 32B (verts 64B), poly globals 32/64B per
+// p3dPcwHdr64 (verts per p3dPcwVtx64); 64B params advance 2 chunks so 2nd-half data is
+// never misread as a PCW. Only textured globals carry a TCW (modvols/flat skipped).
+static void gstaNativeTAFixup(std::vector<uint8_t>& ta, const uint8_t* ram)
+{
+	static const uint32_t CB[6]       = {0x268340,0x2688E4,0x268E88,0x26942C,0x2699D0,0x269F74};
+	static const uint32_t BASEBANK[6] = {16,24,32,40,48,56};
+	int bakedBank[6];
+	for (int s = 0; s < 6; s++) {
+		bakedBank[s] = -1;
+		uint32_t base = CB[s] & 0x00FFFFFFu;
+		if (ram[base] == 0) continue;                           // slot inactive
+		uint32_t datpal = gle32(&ram[(base + 0x164) & 0x00FFFFFFu]);
+		if (((datpal >> 24) & 0x7Fu) != 0x0Cu) continue;        // not area-3 Dat_Pal
+		bakedBank[s] = s;                                        // private bank s baked
+	}
+	uint32_t arena = gle32(&ram[0x1F9D94]);
+	const char* pinE = std::getenv("MAPLECAST_BODY_PARITY_PIN");
+	bool doPin = !(pinE && pinE[0] == '0') && (arena == 400);
+
+	size_t n = ta.size(), i = 0; bool curVtx64 = false;
+	while (i + 32 <= n) {
+		uint32_t pcw = gle32(&ta[i]);
+		uint32_t pt  = (pcw >> 29) & 7;
+		bool tex     = ((pcw >> 3) & 1) != 0;
+		int chunks = 1; bool tcwHere = false;
+		switch (pt) {
+			case 4: chunks = p3dPcwHdr64(pcw) ? 2 : 1; curVtx64 = p3dPcwVtx64(pcw); tcwHere = tex; break;
+			case 5: chunks = 1; curVtx64 = true; tcwHere = tex; break;   // sprite global 32B, verts 64B
+			case 7: chunks = curVtx64 ? 2 : 1; break;                    // vertex
+			default: chunks = 1; break;                                  // EOL / clip / objlist
+		}
+		if (tcwHere) {
+			uint32_t tcw = gle32(&ta[i + 12]);
+			uint32_t palsel = (tcw >> 21) & 0x3Fu;
+			for (int s = 0; s < 6; s++)
+				if (palsel == BASEBANK[s] && bakedBank[s] >= 0) {
+					tcw = (tcw & 0xF81FFFFFu) | ((uint32_t)(bakedBank[s] & 0x3F) << 21);
+					break;
+				}
+			if (doPin) {
+				uint32_t taddr = tcw & 0x1FFFFFu;
+				if (taddr >= 0x88000u && taddr < 0x8C000u)
+					tcw = (tcw & ~0x1FFFFFu) | (taddr - 0x6000u);
+			}
+			ta[i+12] = tcw & 0xFF; ta[i+13] = (tcw>>8)&0xFF;
+			ta[i+14] = (tcw>>16)&0xFF; ta[i+15] = (tcw>>24)&0xFF;
+		}
+		i += (size_t)chunks * 32;
+	}
+}
+
+// Walk a TA parcel stream and collect the TexAddr (TCW bits 0-20) of every textured
+// SPRITE global (ParaType 5), in emission order. Used to correlate render_frame's body
+// sprites with the native char-pass sprites (validated 1:1 same-order by measurement).
+static void gstaExtractSpriteAddrs(const std::vector<uint8_t>& ta, std::vector<uint32_t>& out)
+{
+	out.clear();
+	size_t n = ta.size(), i = 0; bool curVtx64 = false;
+	while (i + 32 <= n) {
+		uint32_t pcw = gle32(&ta[i]);
+		uint32_t pt  = (pcw >> 29) & 7; bool tex = ((pcw >> 3) & 1) != 0;
+		int chunks = 1;
+		switch (pt) {
+			case 4: chunks = p3dPcwHdr64(pcw) ? 2 : 1; curVtx64 = p3dPcwVtx64(pcw); break;
+			case 5: chunks = 1; curVtx64 = true;
+			        if (tex) out.push_back(gle32(&ta[i + 12]) & 0x1FFFFFu); break;
+			case 7: chunks = curVtx64 ? 2 : 1; break;
+			default: chunks = 1; break;
+		}
+		i += (size_t)chunks * 32;
+	}
+}
+
+// FLICKER FIX (concern #3, temporal): rewrite the TexAddr of the native TA's textured
+// SPRITE globals (bodies) IN ORDER from newAddr[] — the render_frame scene addresses
+// that gstaDecodeBodies actually decodes to. This makes the native bodies SAMPLE exactly
+// where the texture was WRITTEN (== the transpile's proven, flicker-free body addressing),
+// while the native POLYS (effects) keep their own resident-backed addrs. Returns #rewritten.
+static int gstaSyncSpriteAddrs(std::vector<uint8_t>& ta, const std::vector<uint32_t>& newAddr)
+{
+	size_t n = ta.size(), i = 0, k = 0; bool curVtx64 = false; int changed = 0;
+	while (i + 32 <= n && k < newAddr.size()) {
+		uint32_t pcw = gle32(&ta[i]);
+		uint32_t pt  = (pcw >> 29) & 7; bool tex = ((pcw >> 3) & 1) != 0;
+		int chunks = 1;
+		switch (pt) {
+			case 4: chunks = p3dPcwHdr64(pcw) ? 2 : 1; curVtx64 = p3dPcwVtx64(pcw); break;
+			case 5:
+				chunks = 1; curVtx64 = true;
+				if (tex) {
+					uint32_t tcw = gle32(&ta[i + 12]);
+					uint32_t want = newAddr[k++] & 0x1FFFFFu;
+					if ((tcw & 0x1FFFFFu) != want) {
+						tcw = (tcw & ~0x1FFFFFu) | want;
+						ta[i+12]=tcw&0xFF; ta[i+13]=(tcw>>8)&0xFF;
+						ta[i+14]=(tcw>>16)&0xFF; ta[i+15]=(tcw>>24)&0xFF;
+						changed++;
+					}
+				}
+				break;
+			case 7: chunks = curVtx64 ? 2 : 1; break;
+			default: chunks = 1; break;
+		}
+		i += (size_t)chunks * 32;
+	}
+	return changed;
+}
+
 static void gstaApplyFrame(const uint8_t* d, size_t n)
 {
 	if (!_gstaSeeded.load(std::memory_order_acquire)) return;
@@ -4643,7 +4826,48 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 	bool nativeDone = false;
 	if (s_nativeCharpass) {
 		static std::vector<uint8_t> _nta; _nta.clear(); double _cpMs = 0;
-		if (gsta_charpass::run_live(_gstaRam.data(), _nta, &_cpMs) && !_nta.empty()) {
+		if (::gsta_charpass::run_live(_gstaRam.data(), _nta, &_cpMs) && !_nta.empty()) {
+			// concerns #2 (palette private-bank repoint) + #3 (body parity-pin), applied
+			// to the native engine TCWs exactly as the transpile does to render_frame's scene.
+			gstaNativeTAFixup(_nta, _gstaRam.data());
+
+			// ---- FLICKER FIX v2 — DECODE-FOLLOWS-NATIVE (concern #3, temporal).
+			// The body texture DECODE (gstaDecodeBodies below) writes render_frame's
+			// byte-faithful CONTENT (gfx1/sel/col/row from the runtime tile descriptor
+			// 0x8C1F9F9C — re_kb/22, correct) but render_frame RESOLVES the dest ADDRESS
+			// itself, which DRIFTS/COLLIDES vs the engine on some frames (MEASURED f150:
+			// 7/89 sprites differ, incl a duplicate addr -> two tiles collide at one addr,
+			// one overwrites the other = the gray/washed body on alternating frames). The
+			// native char-pass render RESOLVED each tile's address AUTHORITATIVELY (its TCW
+			// IS the engine's own output). FIX: override each SceneQuad's decode TexAddr with
+			// the native char-pass addr (lockstep, 1:1 emit order), so gstaDecodeBodies
+			// decodes the correct content to the AUTHORITATIVE, DISTINCT addresses the native
+			// TA samples -> decode==sample every frame, no collision, no drift. The native TA
+			// keeps its (parity-pinned) addrs; content stays render_frame's (byte-faithful).
+			{
+				static std::vector<uint8_t> _rfta; _rfta.clear();
+				gstaEmitSpriteTA_append(_rfta);            // render_frame body TA (scene emit order)
+				static std::vector<uint32_t> _rfA, _ntA;
+				gstaExtractSpriteAddrs(_rfta, _rfA);       // render_frame (drifty) decode addrs
+				gstaExtractSpriteAddrs(_nta,  _ntA);       // native authoritative sample addrs
+				size_t mm = std::min(_rfA.size(), _ntA.size());
+				GstaSceneQuad* Sq = const_cast<GstaSceneQuad*>(render_frame_scene());
+				size_t k = 0; int _remap = 0;
+				for (int q = 0; q < nQuad && k < mm; q++) {
+					uint32_t a = Sq[q].tcw & 0x1FFFFFu;
+					if (a != _rfA[k]) continue;            // not the next emitted body sprite
+					if (_ntA[k] != a) {                    // redirect the decode to the native addr
+						Sq[q].tcw = (Sq[q].tcw & ~0x1FFFFFu) | (_ntA[k] & 0x1FFFFFu);
+						_remap++;
+					}
+					k++;
+				}
+				static int _rn = 0;
+				if ((_rn++ % 120) == 0)
+					printf("[charpass] decode-follows-native: %d/%zu body decode addrs redirected "
+					       "to authoritative native addrs\n", _remap, mm);
+			}
+
 			fr.ta.insert(fr.ta.end(), _nta.begin(), _nta.end());
 			std::vector<uint8_t> eol(32, 0); fr.ta.insert(fr.ta.end(), eol.begin(), eol.end());
 			bodyLen = fr.ta.size();

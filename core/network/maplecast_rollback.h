@@ -110,6 +110,10 @@ bool active();
 //   5. After POST final hash: memcmp(pre, post) → log result
 void f1TickFromVblank(uint64_t saveSeq);
 
+// Continuous per-frame game-state hash logger (MAPLECAST_GSHASH_LOG=path).
+// Independent of the rollback ring; called every vblank. See .cpp.
+void gshashLogTick(const char* path);
+
 // True if F.1 test has run to completion (regardless of pass/fail).
 bool f1Done();
 // True if F.1 test passed (only meaningful after f1Done()).
@@ -128,6 +132,16 @@ bool dcAuditDone();
 // Total bytes that differed between live and post-rewind blobs.
 // Meaningful only after dcAuditDone(). 0 = byte-perfect round-trip.
 uint64_t dcAuditDiffBytes();
+
+// Game-state-region checksum. Hashes the coordinator-specified deterministic
+// RAM ranges DIRECTLY from guest mem_b (char structs 0x8C268340..+6*0x5A4,
+// global game-state page 0x8C289000..+0x1000, frame ctr 0x8C3496B0, fight tick
+// 0x8C268250) — NOT the dc_serialize blob (which carries the 2 execution-
+// invariant scheduler-epoch bytes that would false-mismatch every frame). This
+// is the SAME function the F.1 lockstep gate used; the lockstep-mirror client
+// and server both call it so a match proves game-state parity. Safe to call
+// from the emu thread at a frame boundary. No init() required.
+uint64_t gameStateRegionHash();
 
 // Telemetry snapshot for debug UIs.
 struct Stats {

@@ -120,6 +120,24 @@ inline int mc_sendto(SOCKET s, const void* b, size_t n, int f, const struct sock
 	return ::sendto(s, (const char*)b, (int)n, f, a, al);
 }
 inline int mc_setsockopt(SOCKET s, int l, int o, const void* v, int vl) {
+	// SO_RCVTIMEO / SO_SNDTIMEO Windows ABI mismatch: Winsock expects the
+	// option value to be a DWORD of MILLISECONDS, whereas POSIX (and every
+	// MapleCast call site) passes a `struct timeval`. Passing the timeval
+	// straight through makes Winsock read its first 4 bytes (tv_sec, usually
+	// 0) as the millisecond timeout — i.e. 0 == "block forever". That silently
+	// deadlocks every UDP receive loop that relies on the timeout to poll
+	// (notably the input-tape publisher and the native player client's tape
+	// receiver). Convert timeval → DWORD ms here so ALL call sites are fixed
+	// at once and Linux behaviour is unchanged.
+	if (l == SOL_SOCKET && (o == SO_RCVTIMEO || o == SO_SNDTIMEO)
+	    && v != nullptr && vl == (int)sizeof(struct timeval)) {
+		const struct timeval* tvp = (const struct timeval*)v;
+		DWORD ms = (DWORD)(tvp->tv_sec * 1000 + tvp->tv_usec / 1000);
+		// Never collapse a nonzero-but-sub-millisecond timeout to 0 (=block
+		// forever on Windows); clamp up to 1 ms so the loop still polls.
+		if (ms == 0 && (tvp->tv_sec != 0 || tvp->tv_usec != 0)) ms = 1;
+		return ::setsockopt(s, l, o, (const char*)&ms, sizeof(ms));
+	}
 	return ::setsockopt(s, l, o, (const char*)v, vl);
 }
 inline int mc_getsockopt(SOCKET s, int l, int o, void* v, int* vl) {

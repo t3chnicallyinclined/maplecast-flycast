@@ -60,6 +60,8 @@ target_sources(${PROJECT_NAME} PRIVATE
         maplecast_state_replica.h
         maplecast_rollback.cpp
         maplecast_rollback.h
+        maplecast_lockstep.cpp
+        maplecast_lockstep.h
         maplecast_predictor.cpp
         maplecast_predictor.h
         maplecast_input_sink.cpp

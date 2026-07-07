@@ -72,6 +72,11 @@
 #include "maplecast_player.h"
 #include "serialize.h"
 #include "emulator.h"
+#include "hw/pvr/Renderer_if.h"   // rend_resync_after_rollback()
+#include "hw/pvr/spg.h"           // spg_getNextInterrupt()
+#include "hw/sh4/sh4_sched.h"     // sh4_sched_request / sh4_sched_is_scheduled
+#include "maplecast_rollback.h"   // gameStateRegionHash() (restore-verify diag)
+extern int vblank_schid;          // defined in hw/pvr/spg.cpp
 
 #include <atomic>
 #include <thread>
@@ -662,6 +667,30 @@ bool clientApplyPending()
 	try {
 		Deserializer deser(rawPtr, rawSize, /*rollback=*/false);
 		emu.loadstate(deser);
+		// Drain stale/duplicate Render queue entries the pre-load live-forward
+		// path left behind. WITHOUT this, the SH4 blocks in pvrQueue::enqueue on
+		// a duplicate Render on the very next STARTRENDER after the restore, and
+		// the emu thread freezes (CPU ~0, no frame advance) — exactly what the
+		// lockstep client hit after applying its JOIN. The rollback ring
+		// (maplecast_rollback restoreFromBlob/rewindToFrame) and .mcrec replay
+		// both call this after emu.loadstate for the same reason; the state-sync
+		// JOIN path must too.
+		rend_resync_after_rollback();
+
+		// Re-arm vblank_schid if the snapshot captured it inactive. The server's
+		// buildFullSaveState often fires from INSIDE the vblank handler
+		// (handle_cb sets sched.end=-1 before dispatching), so the serialized
+		// vblank_schid can be dead. In the server's own process the post-callback
+		// reschedule revives it, but a fresh dc_deserialize on the client runs
+		// OUTSIDE any vblank context — so without this, no vblank ever fires, the
+		// SH4 dispatches blocks forever with no frame completion (100% CPU spin,
+		// frame counter frozen). Same fix replay_reader applies on autoload.
+		if (!sh4_sched_is_scheduled(vblank_schid)) {
+			const int re_sch = spg_getNextInterrupt();
+			sh4_sched_request(vblank_schid, re_sch);
+			printf("[state-sync] client: re-armed vblank_schid (was inactive in "
+			       "snapshot) at +%d cycles\n", re_sch);
+		}
 	} catch (const std::exception& e) {
 		printf("[state-sync] client: emu.loadstate threw: %s\n", e.what());
 		return false;
@@ -671,9 +700,28 @@ bool clientApplyPending()
 	    std::chrono::duration_cast<std::chrono::microseconds>(ta1 - ta0).count(),
 	    std::memory_order_relaxed);
 
+	// DIAG: the game-state-region hash of the RESTORED state. Compare this
+	// against the server's shipped hash for ps.serverFrame — if they differ,
+	// the JOIN (dc_serialize→loadstate) is not reproducing the checksummed
+	// region; if they match, the mismatch is a frame-keying issue instead.
+	printf("[state-sync] client: restored gameStateRegionHash @serverFrame=%llu = %016llx\n",
+	       (unsigned long long)ps.serverFrame,
+	       (unsigned long long)maplecast_rollback::gameStateRegionHash());
+
 	// Reseed the player-client local frame counter so we step in lockstep
 	// with the server from this snapshot forward.
-	maplecast_player::seedLocalFrame(ps.serverFrame);
+	//
+	// OFF-BY-ONE (measurement-forced by the lockstep checksum): the snapshot at
+	// serverFrame=S is captured in serverPublish AFTER frame S's SH4 execution
+	// (buildFullSaveState runs post-STARTRENDER), so the restored RAM already
+	// reflects the END of frame S. tape[S] is the input the server CONSUMED
+	// during frame S — already baked into this state. Therefore the NEXT frame
+	// the client must run is S+1 (consuming tape[S+1]); seeding S would re-run
+	// frame S (double-count) and make the client's END-of-S state compare
+	// against the server's END-of-(S-1) checksum → guaranteed mismatch/resync.
+	// Seed S+1 so localFrame==the next frame to run and clientVerify's
+	// completed=frameToRun-1 lines up: END-of-S state vs server hash[S].
+	maplecast_player::seedLocalFrame(ps.serverFrame + 1);
 
 	c_everSynced = true;
 	c_statesApplied.fetch_add(1, std::memory_order_relaxed);

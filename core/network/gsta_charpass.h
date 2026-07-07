@@ -26,8 +26,10 @@ static const u32 RET_PC    = 0x8C039648u;   // caller return (pr at entry)
 // into outTa (32B each). ccn72 (optional, 18*u32) seeds on-chip CCN regs incl QACR;
 // pass nullptr to leave them zero (capture is unaffected — proven). Returns true iff
 // the driver reached RET_PC (no watchdog/fault). *wallMs = wall-clock if non-null.
+// inPlace=true runs the driver directly on ram16 (no 16MB working copy) — the live PERF
+// path (ram16 must be writable; the driver only touches re-shipped render scratch).
 bool run(const uint8_t* ram16, const uint8_t* ctx512, const uint8_t* ccn72,
-         std::vector<uint8_t>& outTa, double* wallMs);
+         std::vector<uint8_t>& outTa, double* wallMs, bool inPlace = false);
 
 // One-shot self-test (MAPLECAST_CHARPASS_SELFTEST=<seed2.bin>): load an RTSEED02 seed,
 // run(), print parcel count + md5, write charpass_ta.bin. Returns true if it ran.

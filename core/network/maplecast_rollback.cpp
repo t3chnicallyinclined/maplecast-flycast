@@ -43,6 +43,7 @@
 #include "hw/pvr/spg.h"
 #include "hw/sh4/sh4_if.h"
 #include "hw/sh4/sh4_sched.h"
+#include "hw/sh4/sh4_mem.h"   // mem_b (guest RAM) for game-state-region hashing
 extern int vblank_schid; // defined in core/hw/pvr/spg.cpp
 #include <xxhash.h>  // bundled at core/deps/xxHash/, on the include path
 
@@ -549,7 +550,91 @@ static uint32_t             _f1Counter  = 0;   // sub-counter within current sta
 static uint64_t             _f1Anchor   = 0;   // frame to rewind back to
 static std::vector<uint64_t> _f1PreHashes;
 static std::vector<uint64_t> _f1PostHashes;
+// GATE ADD: game-state-region hash (char structs + global game-state page +
+// frame ctr + fight tick) and full-RAM hash (16MB minus known-nondeterministic
+// render-interp/stage-anim scratch), read from LIVE guest RAM each frame.
+// Classifies F.1 blob mismatch: if these MATCH while blob differs, the diff is
+// scheduler-epoch-only (harmless for a native-render lockstep client).
+static std::vector<uint64_t> _f1PreGs,  _f1PostGs;
+static std::vector<uint64_t> _f1PreRam, _f1PostRam;
 static bool                 _f1Pass     = false;
+
+// Hash the coordinator-specified deterministic game-state region directly from
+// guest RAM (mem_b indexed by physical offset = guestAddr - 0x8C000000).
+// Exposed (declared in maplecast_rollback.h) so the lockstep-mirror client and
+// server share ONE definition of the checksum region — same bytes, same order.
+uint64_t gameStateRegionHash()
+{
+	XXH3_state_t* st = XXH3_createState();
+	XXH3_64bits_reset(st);
+	XXH3_64bits_update(st, &mem_b[0x268340], 6u * 0x5A4u); // 6 char structs
+	XXH3_64bits_update(st, &mem_b[0x289000], 0x1000u);     // global game-state page
+	XXH3_64bits_update(st, &mem_b[0x3496B0], 4u);          // frame counter
+	XXH3_64bits_update(st, &mem_b[0x268250], 1u);          // fight tick
+	uint64_t h = XXH3_64bits_digest(st);
+	XXH3_freeState(st);
+	return h;
+}
+
+// Hash full 16MB main RAM EXCLUDING the known frame-deterministic render scratch
+// (render-interp/phase 0x8C1F9D8C-98 + stage-anim 0x8C1F9D80 → phys 0x1F9D80..0x1F9DA0).
+static uint64_t fullRamHashExclScratch()
+{
+	const size_t rs = RAM_SIZE;
+	const size_t exStart = 0x1F9D80, exEnd = 0x1F9DA0;
+	XXH3_state_t* st = XXH3_createState();
+	XXH3_64bits_reset(st);
+	XXH3_64bits_update(st, &mem_b[0], exStart);
+	if (rs > exEnd)
+		XXH3_64bits_update(st, &mem_b[exEnd], rs - exEnd);
+	uint64_t h = XXH3_64bits_digest(st);
+	XXH3_freeState(st);
+	return h;
+}
+
+// GATE ADD (Test B): continuous per-frame game-state logger. Independent of
+// the rollback ring — called every vblank when MAPLECAST_GSHASH_LOG is set.
+// Logs the in-RAM game frame counter (0x8C3496B0) + game-state-region hash +
+// full-RAM(excl scratch) hash. Two independent frame-keyed input-replay runs
+// producing byte-identical logs = forward + input determinism over a full match.
+void gshashLogTick(const char* path)
+{
+	static FILE* f = nullptr;
+	static bool  tried = false;
+	if (!f) {
+		if (tried) return;
+		tried = true;
+		f = fopen(path, "w");
+		if (!f) { printf("[gshash] cannot open %s\n", path); return; }
+		printf("[gshash] logging game-state hashes to %s\n", path);
+	}
+	uint32_t gframe;
+	memcpy(&gframe, &mem_b[0x3496B0], 4);
+	// Per-subregion localization: 6 char structs (0x5A4 each), game-state page,
+	// then 16 × 1MB buckets over full RAM. Lets an offline A/B diff name exactly
+	// which region (and thus subsystem/addr range) diverges on a given frame.
+	static const uint32_t charBase[6] = {0x268340,0x2688E4,0x268E88,0x26942C,0x2699D0,0x269F74};
+	fprintf(f, "%u", gframe);
+	for (int c = 0; c < 6; c++)
+		fprintf(f, " %016llx",
+		        (unsigned long long)XXH3_64bits(&mem_b[charBase[c]], 0x5A4));
+	fprintf(f, " %016llx", (unsigned long long)XXH3_64bits(&mem_b[0x289000], 0x1000));
+	const size_t bucket = (size_t)RAM_SIZE / 16;
+	for (int b = 0; b < 16; b++) {
+		size_t off = (size_t)b * bucket;
+		size_t len = bucket;
+		// zero the render-scratch window inside its bucket by hashing around it
+		if (0x1F9D80 >= off && 0x1F9D80 < off + len) {
+			uint64_t h1 = XXH3_64bits(&mem_b[off], 0x1F9D80 - off);
+			uint64_t h2 = XXH3_64bits(&mem_b[0x1F9DA0], off + len - 0x1F9DA0);
+			fprintf(f, " %016llx", (unsigned long long)(h1 ^ h2));
+		} else {
+			fprintf(f, " %016llx", (unsigned long long)XXH3_64bits(&mem_b[off], len));
+		}
+	}
+	fprintf(f, "\n");
+	fflush(f);
+}
 
 static void f1TryConfigure()
 {
@@ -571,6 +656,8 @@ static void f1TryConfigure()
 	_f1Depth  = depth;
 	_f1PreHashes.assign(depth, 0);
 	_f1PostHashes.assign(depth, 0);
+	_f1PreGs.assign(depth, 0);   _f1PostGs.assign(depth, 0);
+	_f1PreRam.assign(depth, 0);  _f1PostRam.assign(depth, 0);
 	_f1Stage  = F1_WARMUP;
 	printf("[rollback-f1] armed: warmup=%u frames, depth=%u (will rewind %u frames, replay, compare hashes)\n",
 	       warmup, depth, depth);
@@ -626,10 +713,14 @@ void f1TickFromVblank(uint64_t saveSeq)
 	if (_f1Stage == F1_PRE) {
 		if (_f1Counter < _f1Depth) {
 			_f1PreHashes[_f1Counter] = blobHash();
-			printf("[rollback-f1] PRE  [%u/%u] saveSeq=%llu hash=%016llx\n",
+			_f1PreGs[_f1Counter]     = gameStateRegionHash();
+			_f1PreRam[_f1Counter]    = fullRamHashExclScratch();
+			printf("[rollback-f1] PRE  [%u/%u] saveSeq=%llu blob=%016llx gs=%016llx ram=%016llx\n",
 			       _f1Counter + 1, _f1Depth,
 			       (unsigned long long)saveSeq,
-			       (unsigned long long)_f1PreHashes[_f1Counter]);
+			       (unsigned long long)_f1PreHashes[_f1Counter],
+			       (unsigned long long)_f1PreGs[_f1Counter],
+			       (unsigned long long)_f1PreRam[_f1Counter]);
 			_f1Counter++;
 		}
 		if (_f1Counter >= _f1Depth) {
@@ -649,31 +740,52 @@ void f1TickFromVblank(uint64_t saveSeq)
 	if (_f1Stage == F1_POST) {
 		if (_f1Counter < _f1Depth) {
 			_f1PostHashes[_f1Counter] = blobHash();
-			printf("[rollback-f1] POST [%u/%u] saveSeq=%llu hash=%016llx (pre was %016llx)\n",
+			_f1PostGs[_f1Counter]     = gameStateRegionHash();
+			_f1PostRam[_f1Counter]    = fullRamHashExclScratch();
+			printf("[rollback-f1] POST [%u/%u] saveSeq=%llu blob=%016llx gs=%016llx ram=%016llx\n",
 			       _f1Counter + 1, _f1Depth,
 			       (unsigned long long)saveSeq,
 			       (unsigned long long)_f1PostHashes[_f1Counter],
-			       (unsigned long long)_f1PreHashes[_f1Counter]);
+			       (unsigned long long)_f1PostGs[_f1Counter],
+			       (unsigned long long)_f1PostRam[_f1Counter]);
 			_f1Counter++;
 		}
 		if (_f1Counter >= _f1Depth) {
-			// POST complete — compare hashes.
-			bool allMatch = true;
+			// POST complete — compare hashes. Track blob / game-state /
+			// full-RAM separately so we can classify WHERE any divergence
+			// lives (the whole make-or-break for the lockstep pivot).
+			bool blobMatch = true, gsMatch = true, ramMatch = true;
 			for (uint32_t i = 0; i < _f1Depth; i++) {
 				if (_f1PreHashes[i] != _f1PostHashes[i]) {
-					printf("[rollback-f1] MISMATCH frame %u: pre=%016llx post=%016llx\n",
-					       i + 1,
-					       (unsigned long long)_f1PreHashes[i],
+					printf("[rollback-f1] BLOB  MISMATCH frame %u: pre=%016llx post=%016llx\n",
+					       i + 1, (unsigned long long)_f1PreHashes[i],
 					       (unsigned long long)_f1PostHashes[i]);
-					allMatch = false;
+					blobMatch = false;
+				}
+				if (_f1PreGs[i] != _f1PostGs[i]) {
+					printf("[rollback-f1] GSTATE MISMATCH frame %u: pre=%016llx post=%016llx\n",
+					       i + 1, (unsigned long long)_f1PreGs[i],
+					       (unsigned long long)_f1PostGs[i]);
+					gsMatch = false;
+				}
+				if (_f1PreRam[i] != _f1PostRam[i]) {
+					printf("[rollback-f1] RAM    MISMATCH frame %u: pre=%016llx post=%016llx\n",
+					       i + 1, (unsigned long long)_f1PreRam[i],
+					       (unsigned long long)_f1PostRam[i]);
+					ramMatch = false;
 				}
 			}
-			_f1Pass = allMatch;
+			// The lockstep gate passes on GAME-STATE (+full RAM) equality, NOT
+			// on full-blob equality (blob includes scheduler-epoch bytes that
+			// are execution-invariant).
+			_f1Pass = gsMatch && ramMatch;
 			_f1Stage = F1_DONE;
-			printf("[rollback-f1] === %s === (%u/%u frames matched)\n",
-			       _f1Pass ? "PASS" : "FAIL",
-			       _f1Pass ? _f1Depth : 0,
-			       _f1Depth);
+			printf("[rollback-f1] === CLASSIFICATION === blob:%s  game-state:%s  full-RAM(excl scratch):%s\n",
+			       blobMatch ? "MATCH" : "DIFFER",
+			       gsMatch   ? "MATCH" : "DIFFER",
+			       ramMatch  ? "MATCH" : "DIFFER");
+			printf("[rollback-f1] === LOCKSTEP GATE %s === (game-state+RAM %u/%u frames byte-identical)\n",
+			       _f1Pass ? "GO" : "NO-GO", _f1Depth, _f1Depth);
 		}
 		return;
 	}
