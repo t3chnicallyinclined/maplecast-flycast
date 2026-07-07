@@ -16,6 +16,7 @@
 #include <thread>
 #include <mutex>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 #include <cstdio>
@@ -303,84 +304,109 @@ static int64_t c_frameOffset  = 0;
 static bool    c_offsetLocked = false;
 static uint64_t c_skewMatched = 0;   // matches credited via the locked offset
 static int      c_consecMismatch = 0;
+// Server frames already scored, so the two compare triggers (a server hash
+// arriving vs the client's local frame catching up to it) don't double-count.
+static std::set<uint64_t> c_comparedServer;
+// Offset-detection / drift-follow window. Searched over the DENSE local ring
+// (every frame) for a byte-identical match to a server hash — so it's robust to
+// a sparse server hash cadence (INTERVAL>1) and only needs to span the small
+// state-vs-label skew, not the interval.
+static constexpr int kOffsetWindow = 30;
 
 static void trimMap(std::map<uint64_t, uint64_t>& m)
 {
 	while (m.size() > kMaxHashes) m.erase(m.begin());
 }
 
-// Compare local vs server hash for `frame` if both are present. Caller holds
-// c_mu. Returns: 0 = not both present, 1 = match, 2 = mismatch.
-static int compareLocked(uint64_t frame)
+// Score one server-hash frame S against the client's DENSE local-hash ring.
+// Caller holds c_mu. Idempotent per S (via c_comparedServer). This is SERVER-
+// driven: for a (possibly sparse, INTERVAL>1) server hash we search the local
+// ring for the byte-identical frame, so a sparse server cadence and a growing
+// lag can never wedge detection at matched=0 (the earlier ±6 client-driven
+// probe searched the SPARSE server side and failed under INTERVAL=60).
+//
+// Invariant: local[N] == server[N + offset]  <=>  server[S] == local[S - offset].
+static void onServerHash(uint64_t S)
 {
-	auto ll = c_localHashes.find(frame);
-	if (ll == c_localHashes.end()) return 0;
-	// Compare local[frame] against server[frame + lockedOffset]. The offset is 0
-	// until the first divergence auto-detects a constant skew.
-	const uint64_t target = (uint64_t)((int64_t)frame + c_frameOffset);
-	auto ls = c_serverHashes.find(target);
-	if (ls == c_serverHashes.end()) return 0;   // server hash for the target frame not in yet
-	c_compared.fetch_add(1, std::memory_order_relaxed);
+	auto ls = c_serverHashes.find(S);
+	if (ls == c_serverHashes.end()) return;
+	if (c_comparedServer.count(S)) return;           // already scored this S
 
-	if (ls->second == ll->second) {
-		c_matched.fetch_add(1, std::memory_order_relaxed);
-		c_consecMismatch = 0;
-		if (debugOn() && (frame % 300 == 0))
-			printf("[lockstep] client MATCH  frame=%llu (offset%+lld) h=%016llx\n",
-			       (unsigned long long)frame, (long long)c_frameOffset,
-			       (unsigned long long)ll->second);
-		return 1;
+	if (c_offsetLocked) {
+		auto ll = c_localHashes.find((uint64_t)((int64_t)S - c_frameOffset));
+		if (ll == c_localHashes.end()) {
+			// Client hasn't reached S-offset yet OR it aged out. If it's still
+			// ahead of the ring, retry later; if it aged out, drop it.
+			if (!c_localHashes.empty() && S - (uint64_t)c_frameOffset < c_localHashes.begin()->first)
+				c_comparedServer.insert(S);          // permanently gone; skip
+			return;
+		}
+		c_comparedServer.insert(S);
+		c_compared.fetch_add(1, std::memory_order_relaxed);
+		if (ll->second == ls->second) {
+			c_matched.fetch_add(1, std::memory_order_relaxed);
+			c_consecMismatch = 0;
+			return;
+		}
+		// Mismatch at the locked offset — follow a slow frame-accounting drift
+		// (still byte-identical at a nearby offset) over the dense local ring.
+		for (int k = -kOffsetWindow; k <= kOffsetWindow; k++) {
+			auto l2 = c_localHashes.find((uint64_t)((int64_t)S - k));
+			if (l2 != c_localHashes.end() && l2->second == ls->second) {
+				printf("[lockstep] frame-accounting DRIFT: offset %+lld -> %+d "
+				       "@server=%llu (still byte-identical)\n",
+				       (long long)c_frameOffset, k, (unsigned long long)S);
+				c_frameOffset = k;
+				c_matched.fetch_add(1, std::memory_order_relaxed);
+				c_skewMatched++;
+				c_consecMismatch = 0;
+				return;
+			}
+		}
+		// Genuine mismatch: no offset reproduces the state = real divergence.
+		c_mismatched.fetch_add(1, std::memory_order_relaxed);
+		c_consecMismatch++;
+		printf("[lockstep] client MISMATCH server=%llu local=%016llx server=%016llx "
+		       "consec=%d\n",
+		       (unsigned long long)S, (unsigned long long)ll->second,
+		       (unsigned long long)ls->second, c_consecMismatch);
+		return;
 	}
 
-	// Diverged at the current offset. Probe a window of offsets for a byte-
-	// identical match. If one exists, the SIM IS DETERMINISTIC and only the
-	// frame LABEL is offset — either the initial resume skew (first lock) or a
-	// slow frame-ACCOUNTING drift (the GUI present-loop advancing SH4 frames out
-	// of 1:1 with the stream tick). Re-lock to follow it: this keeps the mirror
-	// in checksum sync AND measures the drift (a steady offset = pure label
-	// skew; a growing offset = frame-accounting drift; neither is tick
-	// corruption). Only a total absence of any matching offset is real
-	// render-perturbs-sim divergence.
-	{
-		int best = 99;
-		for (int d = -6; d <= 6; d++) {
-			auto it = c_serverHashes.find((uint64_t)((int64_t)frame + d));
-			if (it != c_serverHashes.end() && it->second == ll->second) { best = d; break; }
-		}
-		if (best != 99) {
-			const bool first = !c_offsetLocked;
-			const int64_t prev = c_frameOffset;
-			c_frameOffset  = best;
+	// Not yet locked: detect the constant offset by finding the local frame whose
+	// state hash equals this server hash. Searches the DENSE local ring.
+	for (int k = -kOffsetWindow; k <= kOffsetWindow; k++) {
+		auto ll = c_localHashes.find((uint64_t)((int64_t)S - k));
+		if (ll != c_localHashes.end() && ll->second == ls->second) {
+			c_frameOffset  = k;
 			c_offsetLocked = true;
+			c_comparedServer.insert(S);
+			c_compared.fetch_add(1, std::memory_order_relaxed);
 			c_matched.fetch_add(1, std::memory_order_relaxed);
 			c_skewMatched++;
 			c_consecMismatch = 0;
-			if (first)
-				printf("[lockstep] LOCKED frame-compare offset = %+d "
-				       "(local[%llu]==server[%llu], byte-identical) — sim is "
-				       "deterministic; render client runs an extra SH4 frame on "
-				       "resume. NOT a per-tick divergence.\n",
-				       best, (unsigned long long)frame,
-				       (unsigned long long)(frame + best));
-			else
-				printf("[lockstep] frame-accounting DRIFT: offset %+lld -> %+d "
-				       "@frame=%llu (still byte-identical — render present-loop "
-				       "advanced the SH4 tick out of 1:1 with the stream)\n",
-				       (long long)prev, best, (unsigned long long)frame);
-			return 1;
+			printf("[lockstep] LOCKED frame-compare offset = %+d (server-driven: "
+			       "local[%llu]==server[%llu], byte-identical) — sim deterministic, "
+			       "render-path frame-label skew. NOT a per-tick divergence.\n",
+			       k, (unsigned long long)((int64_t)S - k), (unsigned long long)S);
+			return;
 		}
 	}
+	// No match yet — the client hasn't reached this frame, or it's genuinely
+	// diverged. Don't score it; retry on the next trigger. (If it never matches
+	// after the client passes it, the mismatch path above will catch it once an
+	// offset is locked.)
+}
 
-	// Genuine mismatch: no offset in the window reproduces the state. THIS would
-	// be real per-tick (render-perturbs-sim) divergence.
-	c_mismatched.fetch_add(1, std::memory_order_relaxed);
-	c_consecMismatch++;
-	printf("[lockstep] client MISMATCH frame=%llu local=%016llx server[+%lld]=%016llx "
-	       "consec=%d\n",
-	       (unsigned long long)frame,
-	       (unsigned long long)ll->second, (long long)c_frameOffset,
-	       (unsigned long long)ls->second, c_consecMismatch);
-	return 2;
+// Drive comparisons for all server frames the client can now compare (both
+// triggers funnel here). Caller holds c_mu. Cheap: the server ring is small
+// (INTERVAL-spaced), and c_comparedServer skips already-scored frames.
+static void drainComparisons()
+{
+	for (const auto& kv : c_serverHashes)
+		onServerHash(kv.first);
+	// Trim the compared-set to the live server-hash window.
+	while (c_comparedServer.size() > 8192) c_comparedServer.erase(c_comparedServer.begin());
 }
 
 static void rxLoop()
@@ -427,7 +453,7 @@ static void rxLoop()
 		std::lock_guard<std::mutex> lock(c_mu);
 		c_serverHashes[frame] = hash;
 		trimMap(c_serverHashes);
-		compareLocked(frame);   // local hash for this frame may already be in
+		drainComparisons();   // client may already have run this frame
 	}
 
 	mc_closesocket(c_sock);
@@ -479,6 +505,7 @@ void clientShutdown()
 	std::lock_guard<std::mutex> lock(c_mu);
 	c_serverHashes.clear();
 	c_localHashes.clear();
+	c_comparedServer.clear();
 	printf("[lockstep] client shutdown\n");
 }
 
@@ -492,12 +519,15 @@ void clientVerify(uint64_t frameToRun)
 	const uint64_t completed = frameToRun - 1;
 	const uint64_t h = maplecast_rollback::gameStateRegionHash();
 
-	int result;
+	bool sustainedDivergence;
 	{
 		std::lock_guard<std::mutex> lock(c_mu);
 		c_localHashes[completed] = h;
 		trimMap(c_localHashes);
-		result = compareLocked(completed);
+		// Drive server-driven comparisons: score every server frame the client
+		// can now compare (this local frame may complete a pending one).
+		drainComparisons();
+		sustainedDivergence = (c_consecMismatch >= 30);
 	}
 
 	// Periodic checksum summary (always printed + flushed) so the gate can read
@@ -519,11 +549,11 @@ void clientVerify(uint64_t frameToRun)
 	}
 
 	// Resync ONLY on SUSTAINED genuine divergence — no constant offset reproduces
-	// the state for many consecutive frames. A single/transient mismatch, or a
-	// pure frame-label skew (auto-locked above), must NOT trigger the 10 MB
-	// re-JOIN storm that froze earlier builds. Require a run of real mismatches.
-	static constexpr int kResyncThreshold = 30;
-	if (result == 2 && c_consecMismatch >= kResyncThreshold) {
+	// the state for many consecutive scored server frames. A transient mismatch,
+	// a pure frame-label skew (auto-locked), or mere lag (which never scores a
+	// mismatch — onServerHash just waits) must NOT trigger the 10 MB re-JOIN
+	// storm that froze earlier builds.
+	if (sustainedDivergence) {
 		int64_t now = nowUs();
 		if (now - c_lastResyncUs > 2000000) {   // >=2s cooldown
 			c_lastResyncUs = now;
@@ -537,6 +567,7 @@ void clientVerify(uint64_t frameToRun)
 			std::lock_guard<std::mutex> lock(c_mu);
 			c_localHashes.clear();
 			c_serverHashes.clear();
+			c_comparedServer.clear();
 			c_offsetLocked   = false;
 			c_frameOffset    = 0;
 			c_consecMismatch = 0;

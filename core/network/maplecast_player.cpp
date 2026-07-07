@@ -70,7 +70,8 @@
 
 #include "net_platform.h"
 #include "maplecast_compat.h"
-#include "cfg/option.h"   // config::ThreadedRendering override for lockstep
+#include "cfg/option.h"          // config::ThreadedRendering override for lockstep
+#include "hw/pvr/Renderer_if.h"  // rend_enable_renderer() — lag-driven render-skip
 
 // kcode[]/lt[]/rt[] globals â€” same globals the server writes in updateSlot()
 extern u32 kcode[4];
@@ -405,32 +406,51 @@ bool init()
 	if (std::getenv("MAPLECAST_LOCKSTEP_DEBUG"))
 		setvbuf(stdout, nullptr, _IONBF, 0);
 
-	// Lockstep client applies a full dc_serialize JOIN snapshot mid-match and
-	// then resumes SH4 execution. With ThreadedRendering ON, the emu thread and
-	// the render thread deadlock on the pvr queue handshake right after the
-	// loadstate (both spin, frame counter frozen). The native mirror client
-	// forces single-threaded rendering for the same reason. Do it here too so
-	// the SH4 resumes cleanly from the JOIN. Must run before the emu/render
-	// threads spawn (player::init is called from Emulator::start setup).
+	// RATE DECOUPLING for the RENDERING lockstep client. The server is a 60fps
+	// norend authority; the real GUI client does SH4 + native GL + sdl2 audio
+	// and CANNOT finish a frame in 16.67ms, so single-threaded it runs BELOW
+	// 60fps, falls progressively behind, overruns the tape buffer and freezes.
+	// The SH4 (sim) must advance at the STREAM rate regardless of render/display
+	// speed — render is a passive, droppable downstream consumer. This is
+	// determinism-safe: the client is NOT the mirror server (isServer=false), so
+	// the render path never writes guest-visible state (no serverPublish, no
+	// framebuffer writeback) — verified by the offset-locked checksum staying
+	// matched with threaded render ON.
+	//   - ThreadedRendering OFF: threaded render deadlocks at the post-loadstate
+	//     resume (emu+render thread wedge on the pvr queue — MEASURED: client
+	//     froze at the JOIN frame, fps=0). Single-threaded resumes cleanly, so
+	//     the SH4 runs synchronously with the render. Rate is instead held by
+	//     the lag-driven render-skip below.
+	//   - EmulateFramebuffer OFF: never write the rendered framebuffer back into
+	//     guest VRAM (the norend server never does).
+	// RATE FIX (frameGate): when the client lags the live tape, DROP the draw
+	// (rend_enable_renderer(false)) so the SH4 runs at full norend speed and
+	// catches up; re-enable near the live edge. scheduleRenderDone fires before
+	// the skip (Renderer_if.cpp:600) so SH4 timing is identical — sim stays
+	// deterministic, only pixels drop. This keeps the sim at the 60fps stream
+	// rate with the render dropping frames when it can't keep up.
 	if (maplecast_lockstep::active()) {
 		config::ThreadedRendering.override(false);
-		// Determinism lockdown for the RENDERING lockstep client: the server is
-		// norend, so anything the real renderer does that reaches guest-visible
-		// state (framebuffer writeback to guest VRAM, wall-clock frameskip) must
-		// be neutralized or the client's SH4 diverges from the server's within a
-		// few frames. Match the server's deterministic behavior:
-		//   - EmulateFramebuffer OFF: don't write the rendered framebuffer back
-		//     into guest VRAM (the server norend never does; a writeback the SH4
-		//     later reads/DMAs would desync).
-		//   - AutoSkipFrame 0: frameskip is gated on wall-clock SH4FastEnough
-		//     (spg.cpp:182), which is non-deterministic between a fast norend
-		//     server and a slower rendering client.
 		config::EmulateFramebuffer.override(false);
-		config::AutoSkipFrame.override(0);
-		printf("[player] lockstep determinism lockdown: ThreadedRendering=%d "
-		       "EmulateFramebuffer=%d AutoSkipFrame=%d Sh4Clock=%d\n",
+		// Force NATIVE 480p internal resolution. A single-threaded client can't
+		// sustain 60fps if the user's config upscales (2x/4x/6x = the ~18-25fps
+		// we measured); at native res MVC2 renders far faster. Determinism-safe
+		// (resolution is display-only, never reaches the SH4).
+		config::RenderResolution.override(480);
+		// Steady-state pacing comes from the real audio backend (push() blocks
+		// the SH4 to wall-clock 44.1kHz = 60fps — audiostream.cpp:63,
+		// config::LimitFPS is a compile-time true). That gives the smooth 60fps
+		// playout rate with real sound. During the one-time post-JOIN catch-up we
+		// need to briefly exceed 60fps, so frameGate flips fastForwardMode ON
+		// there (which mutes AICA -> no WriteSample -> no audio block,
+		// sgc_if.cpp:1599) and OFF once re-centred on the playout buffer. Render
+		// is dropped when it can't keep 16.67ms (SkipFrame) so the SIM holds
+		// 60fps single-threaded (threaded render deadlocks at the JOIN resume).
+		printf("[player] lockstep playout: ThreadedRendering=%d EmulateFramebuffer=%d "
+		       "Sh4Clock=%d (60fps audio-paced steady, frameGate playout buffer + "
+		       "render-skip; fast-forward only for post-JOIN catch-up)\n",
 		       (int)config::ThreadedRendering, (int)config::EmulateFramebuffer,
-		       (int)config::AutoSkipFrame, (int)config::Sh4Clock);
+		       (int)config::Sh4Clock);
 	}
 
 	if (!resolveServer(spec)) return false;
@@ -646,8 +666,12 @@ bool frameGate()
 		qOldest[slot] = q.entries.front().frame;
 		qNewest[slot] = q.entries.back().frame;
 		if (qOldest[slot] == localFrame) {
+			// PEEK ONLY — do NOT pop here. We must consume the frame from BOTH
+			// slots atomically once bothExact; popping a ready slot's frame while
+			// the other slot isn't ready yet (queues momentarily out of sync,
+			// e.g. right after a JOIN) would LOSE that frame and wedge the two
+			// slots permanently (the classic "frame N truly lost" after JOIN).
 			pending[slot] = q.entries.front();
-			q.entries.pop_front();
 			slotExact[slot] = true;
 		} else {
 			// front > localFrame: the frame we need aged out of the buffer.
@@ -658,63 +682,122 @@ bool frameGate()
 	const bool bothExact = slotExact[0] && slotExact[1];
 	const bool anyGone   = slotGone[0] || slotGone[1];
 
-	// Lag = furthest frame BOTH slots have reached, minus where we are.
-	uint64_t newestCommon = 0;
-	if (qNewest[0] && qNewest[1]) newestCommon = std::min(qNewest[0], qNewest[1]);
-	const uint64_t lag = (newestCommon > localFrame) ? (newestCommon - localFrame) : 0;
+	// ── Playout-buffer / fixed-delay pacing ────────────────────────────
+	// Play the tape at a STEADY real-time 60fps, sitting a small FIXED distance
+	// behind the live tape head — NOT chasing the newest frame. Trades a
+	// constant ~kBufferDepth-frame latency for smooth jitter-tolerant playout,
+	// replacing the old unthrottled sprint-to-edge (the "skipping around super
+	// fast" the user saw). server=60fps and client=60fps, so the gap stays flat.
+	//
+	// Pacing sources:
+	//   * STEADY state — the real audio backend paces the SH4 to 60fps
+	//     (push() blocks to wall-clock 44.1kHz, audiostream.cpp:63) AND plays
+	//     sound. frameGate does NOT add a second clock here (that would
+	//     double-pace to ~30fps); it just advances one tape frame per tick.
+	//   * CATCH-UP — the one-time post-JOIN backlog (the JOIN is stale by the
+	//     ~1s it took to transfer). Here we mute audio (fastForwardMode ->
+	//     AICA muted, no push() block, sgc_if.cpp:1599) and wall-clock cap the
+	//     rate to ~90fps so it's a gentle 1s catch-up, NOT an unthrottled sprint.
+	static constexpr int64_t kBufferDepth = 3;   // target frames behind the head
+	uint64_t tapeHead = 0;
+	if (qNewest[0] && qNewest[1]) tapeHead = std::min(qNewest[0], qNewest[1]);
+	const int64_t buffer = (tapeHead > localFrame) ? (int64_t)(tapeHead - localFrame) : 0;
+	const int64_t err    = buffer - kBufferDepth;
 
-	// Unthrottle while materially behind; settle to server pace near the edge.
-	if      (lag > 8)  settings.input.fastForwardMode = true;
-	else if (lag <= 2) settings.input.fastForwardMode = false;
+	// Hysteretic catch-up: engage well behind the target, disengage near it.
+	static bool _catchUp = false;
+	if      (!_catchUp && err >= 12) _catchUp = true;
+	else if ( _catchUp && err <= 2)  _catchUp = false;
+
+	const int64_t nowT = nowUs();
+
+	if (maplecast_lockstep::active()) {
+		settings.input.fastForwardMode = _catchUp;   // mute audio only during catch-up
+		// Drop DRAWS (not ticks) so the SIM holds its rate even when a native GL
+		// frame can't finish in 16.67ms (threaded render deadlocks at the JOIN
+		// resume). Skipped frames still run the SH4 (scheduleRenderDone fires
+		// first, Renderer_if.cpp:600 — determinism-safe, pixels only).
+		int skip = _catchUp ? 4 : (err >= 3 ? 1 : 0);
+		if ((int)config::SkipFrame != skip)
+			config::SkipFrame.override(skip);
+	}
+
+	// Wall-clock cap the CATCH-UP phase only (audio is muted there, so nothing
+	// else throttles it). ~90fps => a 100-frame post-JOIN backlog drains in ~1s.
+	static int64_t _nextTickUs = 0;
+	if (_catchUp) {
+		if (_nextTickUs == 0 || nowT > _nextTickUs + 200000) _nextTickUs = nowT;
+		if (nowT < _nextTickUs) return false;    // paced hold (gentle catch-up)
+	}
 
 	if (bothExact) {
+		// Both slots have localFrame — NOW pop it from both (atomic consume).
+		for (int slot = 0; slot < 2; slot++) {
+			PendingQueue& q = _queues[slot];
+			std::lock_guard<std::mutex> lock(q.mu);
+			if (!q.entries.empty() && q.entries.front().frame == localFrame)
+				q.entries.pop_front();
+		}
 		applyEntry(pending[0], 0);
 		applyEntry(pending[1], 1);
 		_localFrame.fetch_add(1, std::memory_order_relaxed);
-		return true;
-	}
-
-	// Fell behind the tape buffer for at least one slot — can't reproduce
-	// localFrame. Request a fresh (newer) JOIN and retry. Throttled so we
-	// don't storm 10 MB snapshots while one is in flight.
-	if (anyGone) {
-		static int64_t _lastReJoinUs = 0;
-		int64_t now = nowUs();
-		if (now - _lastReJoinUs > 1000000) {
-			_lastReJoinUs = now;
-			printf("[player] behind tape buffer: want=%llu slot0=[%llu..%llu]/%zu "
-			       "slot1=[%llu..%llu]/%zu — requesting fresh JOIN\n",
-			       (unsigned long long)localFrame,
-			       (unsigned long long)qOldest[0], (unsigned long long)qNewest[0], qSize[0],
-			       (unsigned long long)qOldest[1], (unsigned long long)qNewest[1], qSize[1]);
-			requestResync();
+		if (_catchUp) _nextTickUs = nowT + 11000;   // ~90fps cap during catch-up
+		// Periodic playout telemetry — fps (should be ~60 steady), buffer depth
+		// (should hover ~kBufferDepth, flat), and render-skip.
+		if (maplecast_lockstep::active()) {
+			static int64_t _t0 = 0; static uint64_t _f0 = 0;
+			if (_t0 == 0) { _t0 = nowT; _f0 = localFrame; }
+			if (nowT - _t0 >= 2000000) {
+				double fps = (double)(localFrame - _f0) * 1e6 / (double)(nowT - _t0);
+				printf("[player] PLAYOUT fps=%.1f frame=%llu tapeHead=%llu buffer=%lld "
+				       "catchUp=%d skip=%d\n",
+				       fps, (unsigned long long)localFrame, (unsigned long long)tapeHead,
+				       (long long)buffer, (int)_catchUp, (int)config::SkipFrame);
+				fflush(stdout);
+				_t0 = nowT; _f0 = localFrame;
+			}
 		}
-		_framesStalled.fetch_add(1, std::memory_order_relaxed);
-		return false;
-	}
-
-	if (policy == StallPolicy::Speculate) {
-		// Speculate: advance with the last-applied kcode for any slot we
-		// couldn't satisfy. Bad-network fallback testing only.
-		_framesSpeculated.fetch_add(1, std::memory_order_relaxed);
-		_localFrame.fetch_add(1, std::memory_order_relaxed);
 		return true;
 	}
 
-	// Hard policy: transient stall (one/both slots have no data yet). Spin the
-	// emu loop (250us sleep in the caller). Log the queue range occasionally so
-	// a genuine wedge is VISIBLE rather than silent.
-	_framesStalled.fetch_add(1, std::memory_order_relaxed);
-	{
-		static uint64_t _stallLogCtr = 0;
-		if ((_stallLogCtr++ % 120) == 0)
-			printf("[player] frameGate stall: want=%llu slot0=[%llu..%llu]/%zu "
-			       "slot1=[%llu..%llu]/%zu serverLatest=%llu\n",
-			       (unsigned long long)localFrame,
-			       (unsigned long long)qOldest[0], (unsigned long long)qNewest[0], qSize[0],
-			       (unsigned long long)qOldest[1], (unsigned long long)qNewest[1], qSize[1],
-			       (unsigned long long)_serverLatestFrame.load(std::memory_order_relaxed));
+	// Not advanceable this tick. Truly-lost (later frames arrived but this one
+	// aged out of BOTH the server ring and our queue) -> re-JOIN. Being a few
+	// frames behind is the STEADY STATE now, never an error, so a plain underrun
+	// (frame just hasn't arrived yet) only HOLDS and refills.
+	if (anyGone) {
+		// localFrame isn't in the queue but LATER frames are. Usually it's just
+		// a late/out-of-order packet — HOLD and let it arrive (enqueueEntry sorts
+		// it back into place). Only if it never shows after a grace window is it
+		// truly lost, and only THEN re-JOIN. This keeps the mirror running
+		// through ordinary UDP jitter instead of storming 10 MB re-JOINs.
+		static uint64_t _waitFrame = 0; static int64_t _waitStartUs = 0;
+		if (_waitFrame != localFrame) { _waitFrame = localFrame; _waitStartUs = nowT; }
+		if (nowT - _waitStartUs >= 500000) {
+			static int64_t _lastReJoinUs = 0;
+			if (nowT - _lastReJoinUs > 2000000) {
+				_lastReJoinUs = nowT;
+				printf("[player] tape frame %llu truly lost (queue [%llu..%llu]/%zu, "
+				       "waited 500ms) — re-JOIN\n",
+				       (unsigned long long)localFrame,
+				       (unsigned long long)qOldest[0], (unsigned long long)qNewest[0], qSize[0]);
+				requestResync();
+			}
+		} else {
+			static uint64_t _lateCtr = 0;
+			if ((_lateCtr++ % 60) == 0)
+				printf("[player] tape frame %llu late (queue [%llu..%llu]/%zu) — holding\n",
+				       (unsigned long long)localFrame,
+				       (unsigned long long)qOldest[0], (unsigned long long)qNewest[0], qSize[0]);
+		}
+	} else {
+		static uint64_t _underrunCtr = 0;
+		if ((_underrunCtr++ % 240) == 0)
+			printf("[player] playout underrun: want=%llu tapeHead=%llu buffer=%lld "
+			       "(holding, buffer refills)\n",
+			       (unsigned long long)localFrame, (unsigned long long)tapeHead,
+			       (long long)buffer);
 	}
+	_framesStalled.fetch_add(1, std::memory_order_relaxed);
 	return false;
 }
 
