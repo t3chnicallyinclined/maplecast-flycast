@@ -1,4 +1,6 @@
 target_sources(${PROJECT_NAME} PRIVATE
+        mc_readtrace.cpp
+        mc_readtrace.h
         alienfnt_modem.cpp
         alienfnt_modem.h
         dns.cpp
@@ -81,7 +83,9 @@ if(MAPLECAST_CLIENT_ONLY)
         gsta_render_frame.c
         gsta_render_frame.h
         gsta_stage.cpp
-        gsta_stage.h)
+        gsta_stage.h
+        gsta_render_debug.cpp
+        gsta_render_debug.h)
     # Put the POC dir on the flycast target's include path so gsta_render_frame.c's
     # #include'd .c files + their "sh4ctx.h" resolve. A source-file property does NOT
     # propagate here because the target is defined in the top-level CMakeLists, not

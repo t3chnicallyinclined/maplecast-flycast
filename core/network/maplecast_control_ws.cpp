@@ -61,6 +61,22 @@
 #include "maplecast_control_ws.h"
 #include "maplecast_compat.h"
 #include "maplecast_mirror.h"
+// GSTA render-debug globals. Compiled ONLY into the CLIENT_ONLY (native GSTA client) target
+// where gsta_render_debug.{h,cpp} exist. For any other build we provide inert fallbacks so the
+// hud_get/hud_set handlers below compile+link everywhere (they just report empty / unknown-key).
+// (Earlier the whole handler was #ifdef'd out under MAPLECAST_GSTA_CLIENT_BUILD, but that macro's
+//  effect at THIS TU proved unreliable in the build — a stale-obj/reconfigure ordering trap — so
+//  the handler is now UNCONDITIONAL and the CLIENT-only bits are behind the include guard.)
+#if defined(MAPLECAST_CLIENT_ONLY_BUILD) || defined(MAPLECAST_GSTA_CLIENT_BUILD)
+#include "gsta_render_debug.h"
+#define MC_HAVE_GSTA_RENDER_DEBUG 1
+#else
+namespace gsta_render_debug {
+    inline bool setKey(const char*, double){ return false; }
+    inline void forEach(void(*)(void*, const char*, double), void*){}
+}
+#define MC_HAVE_GSTA_RENDER_DEBUG 0
+#endif
 #include "maplecast_audio_client.h"
 #include "maplecast_input_server.h"
 #include "replay_writer.h"
@@ -583,6 +599,37 @@ static void onMessage(ControlConnHdl hdl, ControlWsServer::message_ptr msg)
 		data["isClient"] = maplecast_mirror::isClient();
 		sendJson(hdl, json{
 			{"ok", true}, {"cmd", "status"}, {"reply_id", reply_id}, {"data", data},
+		});
+		return;
+
+	} else if (cmdName == "hud_get") {
+		// Return ALL native GSTA render-debug globals for the browser panel initial sync.
+		json data = json::object();
+		::gsta_render_debug::forEach([](void* ctx, const char* key, double value){
+			(*static_cast<json*>(ctx))[key] = value;
+		}, &data);
+		sendJson(hdl, json{
+			{"ok", true}, {"cmd", "hud_get"}, {"reply_id", reply_id}, {"data", data},
+		});
+		return;
+
+	} else if (cmdName == "hud_set") {
+		// Set one render-debug global live: {"cmd":"hud_set","key":"forceTestQuad","value":1}
+		if (!parsed.contains("key") || !parsed["key"].is_string()) {
+			sendJson(hdl, errReplyImmediate(reply_id, "hud_set", "missing 'key'"));
+			return;
+		}
+		if (!parsed.contains("value") || !parsed["value"].is_number()) {
+			sendJson(hdl, errReplyImmediate(reply_id, "hud_set", "missing numeric 'value'"));
+			return;
+		}
+		std::string k = parsed["key"].get<std::string>();
+		double v = parsed["value"].get<double>();
+		bool ok = ::gsta_render_debug::setKey(k.c_str(), v);
+		if (!ok) { sendJson(hdl, errReplyImmediate(reply_id, "hud_set", "unknown key: " + k)); return; }
+		sendJson(hdl, json{
+			{"ok", true}, {"cmd", "hud_set"}, {"reply_id", reply_id},
+			{"data", json{{"key", k}, {"value", v}}},
 		});
 		return;
 

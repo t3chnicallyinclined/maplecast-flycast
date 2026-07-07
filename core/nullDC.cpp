@@ -19,6 +19,7 @@
 #include "serialize.h"
 #include "oslib/i18n.h"
 #include "input/maplelink.h"
+#include "network/mc_readtrace.h"
 #include <time.h>
 #ifdef TARGET_UWP
 #include <winrt/Windows.System.h>
@@ -118,6 +119,10 @@ int flycast_init(int argc, char* argv[])
 
 		if(config::ProfilerEnabled)
 			LogManager::GetInstance()->SetEnable(LogTypes::PROFILER, true);
+
+		// STEP 2 read-set trace: parse MAPLECAST_READTRACE + force interpreter
+		// BEFORE the SH4 backend is created at game load. No-op when unset.
+		mc_readtrace::init();
 
 		return 0;
 	} catch (const std::exception& e) {

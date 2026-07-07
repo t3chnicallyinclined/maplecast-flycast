@@ -6,6 +6,7 @@
 #include "hw/sh4/sh4_mem.h"
 #include "oslib/oslib.h"
 #include "oslib/virtmem.h"
+#include "network/mc_readtrace.h"
 #include <cassert>
 
 namespace addrspace
@@ -104,6 +105,9 @@ void *writeConst(u32 addr, bool& ismem, u32 sz)
 template<typename T>
 T DYNACALL readt(u32 addr)
 {
+	// STEP 2 read-set trace (MAPLECAST_READTRACE): gated OFF in prod — g_armed is
+	// false unless the render-driver subtree is executing under interpreter mode.
+	if (unlikely(mc_readtrace::g_armed)) mc_readtrace::onRead(addr);
 	constexpr u32 sz = sizeof(T);
 
 	u32 page = addr >> 24;	//1 op, shift/extract
@@ -148,6 +152,10 @@ template u64 DYNACALL readt<u64>(u32 addr);
 template<typename T>
 void DYNACALL writet(u32 addr, T data)
 {
+	// STEP 2 read-set trace: record writes within the driver closure so a later
+	// read of a WRITTEN-THIS-CLOSURE address is classified build-then-read scratch,
+	// not an external dependency. Gated OFF in prod (g_armed false).
+	if (unlikely(mc_readtrace::g_armed)) mc_readtrace::onWrite(addr);
 	constexpr u32 sz = sizeof(T);
 
 	u32 page = addr>>24;

@@ -377,6 +377,7 @@ static constexpr u32 MCRR_MAGIC = 0x5252434Du;     // "MCRR"
 static constexpr u32 FRMX_MAGIC = 0x784D5246u;     // "FRMx"
 static constexpr u32 HUDQ_MAGIC = 0x48554451u;     // "HUDQ" (HUD-TA tail magic, LE)
 static constexpr u32 BTCW_MAGIC = 0x57435442u;     // "BTCW" (resolved-body-tcw tail magic, LE)
+static constexpr u32 PL3D_MAGIC = 0x44334C50u;     // "PL3D" (3D-machine SQ-flush tail magic, LE)
 
 // In-match flag + video-frame counter (same gate the Oracle uses).
 static constexpr u32 IN_MATCH_ADDR = 0x8C289624;
@@ -829,8 +830,17 @@ static void captureFrame(u32 vframe)
 	const size_t btcwHdr   = btcwWords ? 8u : 0u;             // u32 magic "BTCW" + u32 nWords
 	const size_t btcwBytes = (size_t)btcwWords * 4u;
 
+	// ---- PL3D tail: the 3D-machine (bank12 loc_8c129cc0 POL drawer) TA parcels captured at
+	// the engine's own SQ flushes this frame (re_kb/64 finding:3d_draw_emit_map — impact
+	// sparks / cast flashes / 3D effects). 36-byte records {kind,slot,cls,pad,32B SQ line};
+	// the client appends the lines VERBATIM to fr.ta. Absent when no flush fired. ----
+	int p3dBytes = 0;
+	const uint8_t* p3dBuf = maplecast_oracle_hook::mc_oracle_poly3d(&p3dBytes);
+	const size_t p3dHdr   = p3dBytes ? 8u : 0u;               // u32 magic "PL3D" + u32 nBytes
+	const size_t p3dTail  = (size_t)p3dBytes;
+
 	const size_t total = hdr + _dynTotal + tailHdr + gfxBytes + palHdr + (size_t)pvrPalLen
-	                   + hudHdr + hudBytes + btcwHdr + btcwBytes;
+	                   + hudHdr + hudBytes + btcwHdr + btcwBytes + p3dHdr + p3dTail;
 
 	int which = _dynWhich ^ 1;          // write the other buffer
 	std::vector<uint8_t>& buf = _dynBuf[which];
@@ -929,6 +939,15 @@ static void captureFrame(u32 vframe)
 		memcpy(&buf[off], &BTCW_MAGIC, 4); off += 4;
 		u32 nw = (u32)btcwWords; memcpy(&buf[off], &nw, 4); off += 4;
 		memcpy(&buf[off], btcwBuf, btcwBytes); off += btcwBytes;
+	}
+
+	// ---- PL3D TAIL: u32 magic "PL3D", u32 nBytes, then nBytes of 36-byte flush records.
+	// Strictly AFTER the BTCW tail (older clients skip unknown trailing bytes — same
+	// pattern as every prior tail); absent when no 3D-machine flush fired this frame. ----
+	if (p3dBytes) {
+		memcpy(&buf[off], &PL3D_MAGIC, 4); off += 4;
+		u32 nb = (u32)p3dBytes; memcpy(&buf[off], &nb, 4); off += 4;
+		memcpy(&buf[off], p3dBuf, p3dTail); off += p3dTail;
 	}
 
 	// ---- publish to the WS thread (drop-old: overwrite any undrained frame) ----

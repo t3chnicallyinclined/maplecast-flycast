@@ -531,7 +531,14 @@ bool mc_oracleHookEnabled = (getenv("MAPLECAST_FRAME_ORACLE_HOOK") != nullptr)
                          // the GenCall injected on a plain replica-live launch, independent of walk-snap.
                          || (getenv("MAPLECAST_REPLICA_LIVE") != nullptr
                              && getenv("MAPLECAST_REPLICA_LIVE")[0] != '0'
-                             && getenv("MAPLECAST_REPLICA_LIVE")[0] != '\0');
+                             && getenv("MAPLECAST_REPLICA_LIVE")[0] != '\0')
+                         // 3D-MACHINE PL3D capture (re_kb/64): explicit MAPLECAST_POLY3D=1 arms the
+                         // 10 loc_8c129cc0 SQ-flush GenCalls standalone (a replica-live launch already
+                         // forces the master gate via the REPLICA_LIVE clause above; mc_poly3dOn
+                         // defaults ON in that case — see the PL3D section).
+                         || (getenv("MAPLECAST_POLY3D") != nullptr
+                             && getenv("MAPLECAST_POLY3D")[0] != '0'
+                             && getenv("MAPLECAST_POLY3D")[0] != '\0');
 
 // Sub-flag: also capture the LOAD-TIME part-atlas decode quads at loc_8c033e90
 // (0x8C033EC0 post-write). PROVEN (live prod capture 2026-06-08): that routine
@@ -768,6 +775,45 @@ static const u32 PC_PALSEL_CHG_DIR   = 0x8C124976;   // palette-change/direct-ba
 static const u32 PC_PALSEL_CHG_DIR_M = PC_PALSEL_CHG_DIR & SH4_AREA_MASK;   // 0x0C124976
 static const u32 PC_PALSEL_REFRESH   = 0x8C1241A8;   // refresh stale-carry store (diagnostic counter ONLY)
 static const u32 PC_PALSEL_REFRESH_M = PC_PALSEL_REFRESH & SH4_AREA_MASK;   // 0x0C1241A8
+// 3D-MACHINE (PL3D) SQ-FLUSH CAPTURE PCs (re_kb/64 finding:3d_draw_emit_map; CONFIRMED
+// against bank12.asm 23192-24200 with per-instruction PC annotation 2026-07-06 — all 10
+// PCs land exactly on `pref @r6` instructions). The ONE POL model drawer loc_8c129cc0
+// (bank12:23192) composes TA parcels in the SH4 store queues (SQ cursor r6 = 0xE0000000 |
+// (slot-entry & 0x03FFFFFF)) and flushes each 32-byte line with `pref @r6`. Hook at the
+// pref PC = block entry BEFORE the pref executes, when Sh4cntx.sq_buffer holds the exact
+// line about to flush — a VERBATIM byte capture of what the TA (slot0, QACR=0x10) or the
+// deferred P2 command buffers (slots1-4, QACR=0xAC) receive.
+// DELAY-SLOT AUDIT (the 0x8C124030 lesson, decoder.cpp:985): NONE of the 10 PCs is a
+// branch delay slot — predecessors are mov.l/fschg/dt/fmov/mov (bank12.asm L23417-23421,
+// L23428-23430, L23634-23638, L23639-23641*, L23811-23814, L23843-23846, L23915-23918,
+// L23990-23993, L24035-24038, L24113-24116). *0x8C129FEC is the FALL-THROUGH after a
+// bf.s/delay pair (natural block start; executes exactly when the 2nd line must flush).
+// Do NOT arm the @r4/@r14 prefs (data prefetch, not SQ flushes).
+// KIND RETAG (2026-07-06, first-live-capture iteration — CORRECTS the re_kb/64 emit-map
+// param labels; MEASURED: 0x8C129E66/78 never fired live, every dump record was kind=2,
+// each frame assembled as ONE param-less implicit poly = the giant-polygon artifact):
+// 0x8C129E66/78 sit on the CULLED-STRIP skip path (loc_8C129E08, entered ONLY from the
+// cull-fail branches @0x8C129EA6/B6/C0/CE — bank12.asm L23457-23477); live strips never
+// take it. The LIVE per-run global param is composed at loc_8C129F90 from the scratch-
+// stack words pushed at 0x8C129EAA (word2) / 0x8C129EC6 (word0) — read back @r9+
+// (`mov.l @r9+,r3` L23593; `fmov @r9+,fr2` @0x8C129FDC = DR pair = TWO words), written
+// DESCENDING onto a fresh SQ line (`add 0x10,r6`; `fmov fr2,@-r6` = words 2-3
+// [TSP][TCW]; `fmov fr0,@-r6` = words 0-1 [PCW][ISP], L23631-23636) and FLUSHED at
+// 0x8C129FE6 — with 0x8C129FEC the CONDITIONAL second line (the 8 face-color floats
+// pre-written at +0x20 by 0x8C129F06-16 L23505-23513; the bf.s @0x8C129FE8 skips it for
+// non-intensity params). The REAL vertex flushes are the six loop PCs (loops A/B/C via
+// bsr loc_8C12A0A0 @0x8C129FFE + the rts exits). kind: 0 = param line 1
+// [PCW][ISP][TSP][TCW], 1 = param line 2 (face colors), 2 = vertex line. The culled-
+// path PCs stay hooked (rare; engine-faithful list state; same kinds).
+static const struct { u32 pcM; u8 kind; } PC_P3D_TAB[] = {
+	{ 0x0C129FE6u, 0 },   // LIVE per-run global-param line 1 flush (THE param hook)
+	{ 0x0C129FECu, 1 },   // LIVE param line 2 (face colors; conditional intensity bit)
+	{ 0x0C129E66u, 0 },   // CULLED-strip param line 1 ([r8][0][0][0]; rarely executes)
+	{ 0x0C129E78u, 1 },   // CULLED-strip param line 2
+	{ 0x0C12A114u, 2 }, { 0x0C12A150u, 2 }, { 0x0C12A1CCu, 2 },
+	{ 0x0C12A24Cu, 2 }, { 0x0C12A29Eu, 2 }, { 0x0C12A320u, 2 },
+};
+static const int PC_P3D_N = (int)(sizeof(PC_P3D_TAB) / sizeof(PC_P3D_TAB[0]));
 // Record geometry inside the PVR display list written by loc_8C1244B0.
 static const u32 CHARQ_REC_OFF   = 0x20;   // r14 at PC_CHARQ_SUBMIT = base + 0x20
 static const u32 CHARQ_REC_BYTES = 0x40;   // poly header 0x20 + one vertex block 0x20
@@ -2629,6 +2675,183 @@ static void tdTcwEmit(const u32* r)
 	}
 }
 
+// ===========================================================================
+// 3D-MACHINE SQ-FLUSH CAPTURE (PL3D, Phase A — re_kb/64 finding:3d_draw_emit_map,
+// 2026-07-06). Captures the POL drawer's (bank12 loc_8c129cc0) composed TA parcels at
+// its own SQ flushes: at each hooked `pref @r6` (block entry, pref NOT yet executed)
+// the 32-byte line about to flush is Sh4cntx.sq_buffer[(r6>>5)&1] — flycast's SQ
+// buffer persists across prefs exactly like hardware, so the captured bytes are
+// BYTE-IDENTICAL to what the TA FIFO (slot0) / deferred P2 buffers (slots1-4)
+// receive, including any engine-deliberate leftover words. No FP-register
+// reconstruction needed. Registers at the flush (CONFIRMED bank12.asm):
+//   r6  = SQ virtual cursor (0xE0000000-based)
+//   r5  = slot-entry external target cursor (top byte 0x10 = TA FIFO / 0xAC = P2 RAM)
+//   r11 = emit-slot index << 2 (cached for the same-slot QACR skip)
+// Record: { kind(0=param1,1=param2/face-colors,2=vertex), slot=r11>>2, cls=r5>>24,
+// pad, 32B line } = MC_P3D_LINE_BYTES. Flat per-frame buffer, reset per video frame
+// (0x8C3496B0) like BTCW; cap MC_P3D_MAX_LINES (~32KB) with a NON-SILENT dropped
+// counter. Gate: MAPLECAST_POLY3D (explicit 0/1) — DEFAULT ON when the replica
+// live-wire is armed (same convention as mc_bodyTcwOn). READ-ONLY w.r.t. guest;
+// SH4 thread (same GenCall context as every hook here).
+static bool mc_poly3dOn = []{
+	const char* v = getenv("MAPLECAST_POLY3D");
+	if (v) return v[0] != '0' && v[0] != '\0';
+	const char* rl = getenv("MAPLECAST_REPLICA_LIVE");
+	return rl && rl[0] != '0' && rl[0] != '\0';
+}();
+static u8            s_p3dBuf[(size_t)MC_P3D_MAX_LINES * MC_P3D_LINE_BYTES];
+static int           s_p3dLines   = 0;
+static u32           s_p3dVframe  = 0xFFFFFFFFu;
+static u32           s_p3dDropped = 0;            // lines dropped this frame (cap overflow)
+static unsigned long s_p3dDropTotal = 0;          // lifetime dropped (airtight accounting)
+static unsigned long s_p3dFires   = 0;            // lifetime flush-fire counter
+
+// CLASS FILTER AT CAPTURE (2026-07-06 iteration — the flood fix). MEASURED first live
+// round: the 910-line cap saturated EVERY frame (calm included) and the first fire was
+// cls=0xAC slot=2 = a DEFERRED P2 buffer — the stage lists (0xB/0xD) ride the same
+// drawer (the pre-flagged risk) and drown the effects. P0 proved the mirror-visible
+// effect polys arrive via slot0 TA-DIRECT (cls 0x10). DEFAULT: accept cls 0x10 only.
+// Env MAPLECAST_P3D_CLS widens without rebuild: "all", or a comma list of hex class
+// bytes (e.g. "10,ac") — the knob for the HUD-win question (if the meter/timer HUD
+// rode a deferred class, widen and re-gate). The PRE-FILTER histogram below measures
+// the real distribution on every fresh capture.
+static u8   s_p3dClsList[8];
+static int  s_p3dClsN   = 0;
+static bool s_p3dClsAll = false;
+static bool s_p3dClsInit = []{
+	const char* v = getenv("MAPLECAST_P3D_CLS");
+	if (!v || !*v) { s_p3dClsList[0] = 0x10; s_p3dClsN = 1; return true; }   // default: TA-direct only
+	if (v[0]=='a' || v[0]=='A') { s_p3dClsAll = true; return true; }         // "all"
+	const char* p = v;
+	while (*p && s_p3dClsN < 8) {
+		char* end = nullptr;
+		unsigned long b = strtoul(p, &end, 16);
+		if (end == p) break;
+		s_p3dClsList[s_p3dClsN++] = (u8)b;
+		p = (*end == ',') ? end + 1 : end;
+	}
+	if (s_p3dClsN == 0) { s_p3dClsList[0] = 0x10; s_p3dClsN = 1; }
+	return true;
+}();
+static inline bool p3dClsAccept(u8 cls) {
+	if (s_p3dClsAll) return true;
+	for (int i = 0; i < s_p3dClsN; i++) if (s_p3dClsList[i] == cls) return true;
+	return false;
+}
+// PRE-FILTER per-frame histogram: fires by kind + by slot (with each slot's cls byte) +
+// filtered/dropped counts + passes. Printed for the first 8 fire-frames and every 600th
+// after — the slot/cls distribution measurement the filter decision needs, self-reported
+// on every fresh capture. Cheap (a few adds per fire + rare stderr).
+static u32 s_p3dHistKind[3] = {0,0,0};
+static u32 s_p3dHistSlot[8] = {0,0,0,0,0,0,0,0};
+static u8  s_p3dSlotCls[8]  = {0,0,0,0,0,0,0,0};
+static u32 s_p3dFiltered    = 0;                  // fires rejected by the class filter this frame
+static u32 s_p3dHistFrames  = 0;                  // fire-frames seen (print throttle)
+// PASS DEDUP (iteration 3 — gate [6] MEASURED ~22x over-injection: 352 shadow-class polys
+// injected vs 16 the engine draws at the same frame. The drawer runs in MULTIPLE render
+// passes per vframe; the accumulator concatenated ALL of them and pinned at the 910 cap —
+// whose MID-PARCEL truncation is also the TA-stream desync suspect). Fix: keep only the
+// NEWEST pass's parcels. mc_oracle_charPassCapture (called for EVERY STARTRENDER,
+// Renderer_if.cpp:649, bump at its ungated top) advances s_p3dPassCounter; the capture
+// rewinds LAZILY at its first flush after each boundary — so at any STARTRENDER read
+// instant the buffer holds exactly the JUST-ENDED pass's parcels (one pass's worth,
+// matching engine per-pass counts). SH4-thread only (STARTRENDER = a guest reg write).
+static u32 s_p3dPassCounter = 0;                  // bumped per STARTRENDER
+static u32 s_p3dPassSeen    = 0xFFFFFFFFu;        // last boundary the capture rewound for
+static u32 s_p3dPassesFrame = 0;                  // rewinds that discarded lines this vframe
+// PER-TCW-CLASS PER-SLOT tally (MAPLECAST_P3D_CLASSHIST=1 — the missing-classes probe:
+// gate classes 0x4808ee00/0x50091e00 (3D ring)/0x48090000 (dust)/0x40095400 absent from
+// the capture; this shows PRE-FILTER which emit slot each engine class rides, or that a
+// class never crosses the hooked param PC at all -> it emits via a different drawer
+// entry (bank13 loc_8c132640 / the &0x2000 dispatch) = sh4-re handoff). Tallied at
+// kind-0 fires from the SQ line's w3, ACROSS passes (not rewound — richer), reset per
+// vframe; printed every fire-frame while armed.
+static const bool s_p3dClassHist = (getenv("MAPLECAST_P3D_CLASSHIST") != nullptr);
+struct McP3dClsTally { u32 cls; u8 slot; u32 n; };
+static McP3dClsTally s_p3dClsHist[24];
+static int           s_p3dClsHistN = 0;
+
+static void p3dCapture(const u32* r, u8 kind)
+{
+	u32 vframe = addrspace::read32(0x8C3496B0);
+	if (vframe != s_p3dVframe) {
+		// Frame boundary: print LAST frame's histogram + drop accounting, then reset.
+		if (s_p3dVframe != 0xFFFFFFFFu) {
+			if (s_p3dHistFrames < 8 || (s_p3dHistFrames % 600) == 0) {
+				fprintf(stderr, "[P3D] vf=%u kept=%d passes=%u filtered=%u dropped=%u totdrop=%lu "
+				                "kind[p1/p2/v]=%u/%u/%u slots:",
+				        s_p3dVframe, s_p3dLines, s_p3dPassesFrame + 1, s_p3dFiltered,
+				        s_p3dDropped, s_p3dDropTotal,
+				        s_p3dHistKind[0], s_p3dHistKind[1], s_p3dHistKind[2]);
+				for (int i = 0; i < 8; i++)
+					if (s_p3dHistSlot[i])
+						fprintf(stderr, " s%d(cls=%02X)=%u", i, s_p3dSlotCls[i], s_p3dHistSlot[i]);
+				fprintf(stderr, "\n");
+			}
+			if (s_p3dClassHist && s_p3dClsHistN) {
+				fprintf(stderr, "[P3D-CLS] vf=%u", s_p3dVframe);
+				for (int i = 0; i < s_p3dClsHistN; i++)
+					fprintf(stderr, " s%u:%08X=%u", s_p3dClsHist[i].slot, s_p3dClsHist[i].cls, s_p3dClsHist[i].n);
+				fprintf(stderr, "\n");
+			}
+			s_p3dHistFrames++;
+		}
+		memset(s_p3dHistKind, 0, sizeof s_p3dHistKind);
+		memset(s_p3dHistSlot, 0, sizeof s_p3dHistSlot);
+		s_p3dFiltered = 0; s_p3dPassesFrame = 0; s_p3dClsHistN = 0;
+		s_p3dVframe = vframe; s_p3dLines = 0; s_p3dDropped = 0;
+	}
+	// PASS-BOUNDARY lazy rewind: the first flush after a STARTRENDER restarts the line
+	// buffer, so only the newest pass's parcels are resident whenever the wire reads.
+	if (s_p3dPassSeen != s_p3dPassCounter) {
+		s_p3dPassSeen = s_p3dPassCounter;
+		if (s_p3dLines) s_p3dPassesFrame++;   // a prior pass's lines are being discarded
+		s_p3dLines = 0;
+		s_p3dDropped = 0;                     // cap accounting is per-pass now
+	}
+	u8 slot = (u8)((r[11] >> 2) & 7);     // emit-slot index (r11 = slot<<2)
+	u8 cls  = (u8)(r[5] >> 24);           // slot class: 0x10 TA-direct / 0xAC deferred P2
+	s_p3dHistKind[kind < 3 ? kind : 2]++; // measure PRE-filter (the real distribution)
+	s_p3dHistSlot[slot]++;
+	s_p3dSlotCls[slot] = cls;
+	// The line about to flush: SQ0/SQ1 selected by bit 5 of the SQ virtual address.
+	const SQBuffer& sq = Sh4cntx.sq_buffer[(r[6] >> 5) & 1];
+	// Missing-classes probe: tally (slot, tcw-class) at param fires, PRE-filter.
+	if (s_p3dClassHist && kind == 0) {
+		u32 tcw; memcpy(&tcw, sq.data + 12, 4);
+		u32 cls32 = tcw & 0xFFFFFF00u;
+		int f = -1;
+		for (int i = 0; i < s_p3dClsHistN; i++)
+			if (s_p3dClsHist[i].cls == cls32 && s_p3dClsHist[i].slot == slot) { f = i; break; }
+		if (f < 0 && s_p3dClsHistN < 24) {
+			f = s_p3dClsHistN++;
+			s_p3dClsHist[f].cls = cls32; s_p3dClsHist[f].slot = slot; s_p3dClsHist[f].n = 0;
+		}
+		if (f >= 0) s_p3dClsHist[f].n++;
+	}
+	if (s_p3dFires++ == 0)
+		fprintf(stderr, "[P3D] first SQ flush: kind=%u slot=%u cls=0x%02X r6=0x%08X r5=0x%08X (filter: %s)\n",
+		        kind, slot, cls, r[6], r[5], s_p3dClsAll ? "all" : "cls-list");
+	if (!p3dClsAccept(cls)) { s_p3dFiltered++; return; }
+	if (s_p3dLines >= MC_P3D_MAX_LINES) { s_p3dDropped++; s_p3dDropTotal++; return; }
+	u8* rec = &s_p3dBuf[(size_t)s_p3dLines * MC_P3D_LINE_BYTES];
+	rec[0] = kind;
+	rec[1] = slot;
+	rec[2] = cls;
+	rec[3] = 0;
+	memcpy(rec + 4, sq.data, 32);
+	s_p3dLines++;
+}
+
+// ACCESSOR (called from replica_live captureFrame at rend_start_render, AFTER all this
+// frame's flushes — same pattern/thread context as mc_oracle_bodyTcws). Returns the
+// packed per-frame record buffer; *outBytes = total bytes (multiple of MC_P3D_LINE_BYTES).
+const uint8_t* mc_oracle_poly3d(int* outBytes)
+{
+	if (outBytes) *outBytes = s_p3dLines * MC_P3D_LINE_BYTES;
+	return s_p3dBuf;
+}
+
 // Body-part convergence (0x8C034864): set current node + arm the pairing. node = r14
 // (same read CHARQ-EMIT uses at this PC; prologue's `mov r4,r14` has executed).
 static void mc_nbBodyPart(const u32* r)
@@ -2959,6 +3182,12 @@ bool mc_isHookedPC(u32 pc)
 	    m == PC_PALSEL_CHG_RES_M || m == PC_PALSEL_CHG_DIR_M ||
 	    m == PC_PALSEL_REFRESH_M)
 		return s_tdTiles || mc_bodyTcwOn;
+	// 3D-MACHINE PL3D SQ-flush PCs (re_kb/64 + the 2026-07-06 kind retag): the POL
+	// drawer's 10 `pref @r6` flushes (param + vertex, see PC_P3D_TAB). All mid-block
+	// (none is a delay slot — audited at the table) -> the decoder force-split makes
+	// each a block start so the GenCall injects. Gated on mc_poly3dOn.
+	for (int i = 0; i < PC_P3D_N; i++)
+		if (m == PC_P3D_TAB[i].pcM) return mc_poly3dOn;
 	// WALK-INSTANT TILEDESC SNAPSHOT: the body-walker ENTRY (loc_8c0344d4 / 0x8C0344D4). Hooked
 	// on a plain replica live-wire launch (mc_replicaWalkSnapOn, env-derived at static init, same
 	// gate that ORs into mc_oracleHookEnabled) so the GenCall injects WITHOUT the heavyweight
@@ -3296,6 +3525,13 @@ void DYNACALL mc_oracle_blockEntry(u32 pc)
 	// REFRESH stale-carry store (0x8C1241A8) — DIAGNOSTIC ONLY, does NOT feed the map:
 	// counts how often the carry path ran (reported per frame by palselFrameLog).
 	if (mpc == PC_PALSEL_REFRESH_M) { if (s_tdTiles || mc_bodyTcwOn) s_palselRefreshFrame++; return; }
+
+	// 3D-MACHINE PL3D SQ-flush capture (re_kb/64 + the 2026-07-06 kind retag — the
+	// LIVE param flush is 0x8C129FE6/EC, see PC_P3D_TAB): read the SQ line VERBATIM at
+	// the flush instant (p3dCapture). kind from the table: 0 = param line 1
+	// [PCW][ISP][TSP][TCW], 1 = param line 2 (face colors), 2 = vertex line.
+	for (int i = 0; i < PC_P3D_N; i++)
+		if (mpc == PC_P3D_TAB[i].pcM) { if (mc_poly3dOn) p3dCapture(r, PC_P3D_TAB[i].kind); return; }
 
 	if (mpc == PC_OBJ_BEGIN_M) {
 		if (s_fireObjBegin++ == 0)
@@ -4086,6 +4322,11 @@ static bool mc_superEffectActive()
 
 void mc_oracle_charPassCapture(void* ctxv)
 {
+	// P3D PASS BOUNDARY (ungated — Renderer_if.cpp:649 calls this for EVERY STARTRENDER):
+	// advance the PL3D pass counter; the capture rewinds lazily at its next flush so the
+	// accumulator only ever holds one pass's parcels (the ~22x over-injection dedup).
+	s_p3dPassCounter++;
+
 	// ALWAYS-ON body sid/timer latch (NOT gated on CHARQ — runs every STARTRENDER). In-match
 	// only (0x8C289624). Captures THIS frame's render-phase sprite_id for all 6 bodies so the
 	// wire ships the pose that's actually on screen, not serverPublish's 1-frame-later read.

@@ -46,6 +46,7 @@
 #include "network/maplecast_rollback.h"
 #include "network/maplecast_oracle_hook.h"   // generic-probe v2 no-restart live reload
 #include "network/maplecast_predictor.h"
+#include "network/mc_readtrace.h"             // STEP 2 read-set delta trace (dynarec->interp flip)
 #include "network/replay_reader.h"
 #include "network/replay_writer.h"
 #include "network/maplecast_control_ws.h"
@@ -782,6 +783,31 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 			// Diagnostic: we want to know whether auto-load is actually firing in
 			// headless mode, since savestate auto-load is the workaround for the
 			// MVC2 attract-mode SH4 reset crash.
+			//
+			// ── CONSTRAINT (root-caused 2026-07-06): the autoload savestates were
+			// captured under REIOS (HLE BIOS). Their low-RAM BIOS work area is
+			// 0xFF filler and their syscall vectors point at reios trampolines
+			// (8C0000B0.. → 8C001000/02/04/06/08 — verified live via control-WS
+			// ram_read). The current rig boots the REAL DC BIOS, so ANY guest
+			// entry into the BIOS reset path (attract-mode reboot, or the
+			// A+B+X+Y+Start soft-reset chord) executes the 0xFF filler at
+			// RAM+0x10 via P2 → illegal opcode 0xFFFF with SR.BL=1 →
+			//   [SH4-FAULT] BLOCKED exception expEvn=0x180 epc=AC000010
+			//   → "Fatal: SH4 exception when blocked", unrecoverable crash-loop.
+			// Consequences:
+			//   1. Autoload MUST succeed (dc_loadstate fails SILENTLY — void
+			//      return, WARN_LOG only) and the guest must NEVER reach the
+			//      reset path. The input server neutralizes the soft-reset
+			//      chord (maplecast_input_server.cpp updateSlot,
+			//      MAPLECAST_ALLOW_SOFT_RESET=1 opts out).
+			//   2. A "boot crashes without MAPLECAST_REPLICA_LIVE" report
+			//      (2026-07-06) was A/B-tested and did NOT reproduce: boots are
+			//      healthy with and without REPLICA_LIVE. The observed fault had
+			//      this exact signature and is input-triggered (a stray
+			//      synthetic-input stream on udp:7100 during the A/B), not an
+			//      init-order dependency.
+			//   3. Long-term fix if the reset path is ever needed: re-capture
+			//      the training savestate from a REAL-BIOS boot chain.
 			printf("[autoload-debug] path='%s' GGPO=%d AutoLoad=%d NaomiNet=%d multiboard=%d slot=%d\n",
 				settings.content.path.c_str(),
 				(int)config::GGPOEnable,
@@ -1485,15 +1511,25 @@ void Emulator::start()
 		// Control WS for the settings HTML page (same as the server's
 		// overlord channel, but on the local machine for client settings).
 		{
-			int controlPort = 7211;
+			// PORT-COLLISION FIX: the native GSTA client is commonly co-located with a headless
+			// server on the SAME box, and the headless ALSO binds a control WS on :7211 (it starts
+			// first, so it OWNS 7211 -> the client's init(7211) fails to bind and the browser panel
+			// ends up talking to the HEADLESS control WS, which has no hud_get/hud_set -> "unknown
+			// command"). So a GSTA client defaults its control WS to :7221 (override with
+			// MAPLECAST_CONTROL_PORT). Plain (non-GSTA) mirror clients keep :7211.
+			bool isGsta = std::getenv("MAPLECAST_GSTA_CLIENT")
+			           && std::getenv("MAPLECAST_GSTA_CLIENT")[0]
+			           && std::getenv("MAPLECAST_GSTA_CLIENT")[0] != '0';
+			int controlPort = isGsta ? 7221 : 7211;
 			if (const char* cp = std::getenv("MAPLECAST_CONTROL_PORT"))
 				controlPort = std::atoi(cp);
 			if (maplecast_control_ws::init(controlPort)) {
-				// Settings page available at:
-				//   file://<PWD>/web/client-settings.html?port=<PORT>
-				// Opened via Back/Select button or gear icon click.
-				printf("[MIRROR] settings page: file://%s/web/client-settings.html?port=%d\n",
-					std::getenv("PWD") ? std::getenv("PWD") : ".", controlPort);
+				if (isGsta)
+					printf("[GSTA] render-debug panel: open web/gsta-render-debug.html?port=%d  (ws://localhost:%d)\n",
+						controlPort, controlPort);
+				else
+					printf("[MIRROR] settings page: file://%s/web/client-settings.html?port=%d\n",
+						std::getenv("PWD") ? std::getenv("PWD") : ".", controlPort);
 			}
 		}
 
@@ -1540,6 +1576,24 @@ void Emulator::start()
 		state = Loaded;
 		printf("[MIRROR] === CLIENT MODE === CPU stopped, renderer-only, %d texture threads\n",
 			(int)config::MaxThreads);
+	}
+
+	// NATIVE GSTA CLIENT (MAPLECAST_GSTA_CLIENT=1): it does NOT set MAPLECAST_MIRROR_CLIENT
+	// (it runs its own initGstaClient via maplecast_mirror::initClient), so the client-side
+	// control WS above never started. Start it here so the browser render-debug panel
+	// (web/gsta-render-debug.html) can drive the live gsta_render_debug globals over :7211.
+	if (std::getenv("MAPLECAST_GSTA_CLIENT")
+	    && std::getenv("MAPLECAST_GSTA_CLIENT")[0]
+	    && std::getenv("MAPLECAST_GSTA_CLIENT")[0] != '0'
+	    && !std::getenv("MAPLECAST_MIRROR_CLIENT"))
+	{
+		int controlPort = 7211;
+		if (const char* cp = std::getenv("MAPLECAST_CONTROL_PORT"))
+			controlPort = std::atoi(cp);
+		if (maplecast_control_ws::init(controlPort)) {
+			printf("[GSTA] render-debug panel: open web/gsta-render-debug.html?port=%d  (ws://localhost:%d)\n",
+				controlPort, controlPort);
+		}
 	}
 
 	// Mirror client writes directly to VRAM/RAM — don't re-protect after unprotect.
@@ -1655,6 +1709,15 @@ void Emulator::start()
 						// break check and terminate the emu thread). No-op when nothing
 						// changed / the probe is disabled, so prod is unaffected.
 						if (maplecast_oracle_hook::mc_probeApplyReload()) {
+							getSh4Executor()->ResetCache();
+							getSh4Executor()->Start();
+							continue;
+						}
+						// STEP 2 read-set trace: vblank Stop()'d for the flip. SH4 is paused
+						// here — safe to flip DynarecEnabled=false + ResetCache so the next
+						// runInternal() executes under the interpreter (readt chokepoint) and
+						// the trace arms at driver 0x8C030858. One-shot; no-op after.
+						if (mc_readtrace::applyFlip()) {
 							getSh4Executor()->ResetCache();
 							getSh4Executor()->Start();
 							continue;
@@ -1833,6 +1896,17 @@ void Emulator::vblank()
 	// check is gated (see emulator.cpp start loop) so this Stop() resumes instead of
 	// terminating the thread. No-op when the probe is disabled / nothing pending.
 	if (maplecast_oracle_hook::mc_probeReloadPending()) {
+		getSh4Executor()->Stop();
+		rend_cancel_emu_wait();
+		return;
+	}
+
+	// STEP 2 read-set trace: count frames; at the trigger frame Stop() the SH4 so
+	// Run() returns to the emu-loop boundary where applyFlip() flips to interpreter
+	// under a paused SH4 (SAME safe context as the probe reload above). No-op unless
+	// MAPLECAST_READTRACE is set.
+	mc_readtrace::onFrame();
+	if (mc_readtrace::flipStopPending()) {
 		getSh4Executor()->Stop();
 		rend_cancel_emu_wait();
 		return;

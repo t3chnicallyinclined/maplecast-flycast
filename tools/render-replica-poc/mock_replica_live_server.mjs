@@ -104,6 +104,10 @@ for (let f = 0; f < nFrames; f++) {
             if (p + 8 <= buf.length && dv.getUint32(p, true) === 0x57435442) {
                 p += 4; const nw = dv.getUint32(p, true); p += 4; p += nw * 4;
             }
+            // PL3D tail (magic "PL3D" + u32 nBytes + records). Present only when captured.
+            if (p + 8 <= buf.length && dv.getUint32(p, true) === 0x44334C50) {
+                p += 4; const nb = dv.getUint32(p, true); p += 4; p += nb;
+            }
         }
     }
     p += taSize;                               // engine_ta

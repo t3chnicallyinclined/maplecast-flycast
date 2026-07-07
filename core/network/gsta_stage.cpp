@@ -13,6 +13,7 @@
 //    (re_kb finding:replica_live_stage_black_fix).
 
 #include "gsta_stage.h"
+#include "gsta_render_debug.h"
 
 #ifdef MAPLECAST_GSTA_CLIENT_BUILD
 
@@ -249,6 +250,32 @@ size_t gstaStageEmitTA(std::vector<uint8_t>& out, const float* M1, const float* 
 {
     if (!g_stage.ready) return 0;
 
+    // ---- LIVE render-debug globals (control-WS driven, web/gsta-render-debug.html) ----
+    auto& DBG = gsta_render_debug::g();
+    auto RB = [&](std::atomic<int>& a){ return a.load(std::memory_order_relaxed) != 0; };
+    const int  dbg_solo        = DBG.soloMode.load(std::memory_order_relaxed);   // 0 off,1 stage,2 body,3 hud
+    // SOLO overrides: solo=1 (stage only) keeps stage+synth-off? -> stage-only = baked geometry only.
+    const bool solo_stage      = (dbg_solo == 1), solo_body = (dbg_solo == 2), solo_hud = (dbg_solo == 3);
+    const bool dbg_stageOn     = RB(DBG.stageOn)    && !solo_body && !solo_hud;
+    const bool dbg_synthOn     = RB(DBG.hudSynthOn) && !solo_stage && !solo_body;
+    const bool dbg_filterBaked = RB(DBG.filterBakedDyn);
+    const bool dbg_barsOn      = RB(DBG.hudBarsOn);
+    const bool dbg_meterOn     = RB(DBG.hudMeterOn);
+    const bool dbg_framesOn    = RB(DBG.stageFramesOn) && RB(DBG.hudFramesOn);
+    const bool dbg_reproject   = RB(DBG.stageReproject);
+    const bool dbg_stageForceC  = RB(DBG.stageForceColorOn);
+    const uint32_t dbg_stageColARGB = DBG.stageForceColorARGB.load(std::memory_order_relaxed);
+    const bool dbg_gradientOn  = RB(DBG.hudGradientOn);
+    const bool dbg_chipOn      = RB(DBG.hudChipOn);
+    const bool dbg_highlightOn = RB(DBG.hudHighlightOn);
+    const bool dbg_colOverride = RB(DBG.fillColorOverrideOn);
+    const uint32_t dbg_colARGB = DBG.fillColorARGB.load(std::memory_order_relaxed);
+    const float dbg_zBias      = (float)DBG.zBiasMicro.load(std::memory_order_relaxed) * 1e-6f;
+    const float dbg_dx         = (float)DBG.posDX.load(std::memory_order_relaxed);
+    const float dbg_dy         = (float)DBG.posDY.load(std::memory_order_relaxed);
+    const bool dbg_forceTest   = RB(DBG.forceTestQuad);
+    const int  dbg_listType    = DBG.hudListType.load(std::memory_order_relaxed);   // 0 OP, 1 TR
+
     // XMTRX = M1 . M2 (col-major). Re-project world-authored meshes through it.
     float X[16]; bool haveCam = false;
     if (M1 && M2) {
@@ -259,28 +286,27 @@ size_t gstaStageEmitTA(std::vector<uint8_t>& out, const float* M1, const float* 
     }
 
     // ====================================================================================
-    // LIVE HUD RESHAPE (bars-deplete fix, reshape-on-the-rendering-path).
+    // PROCEDURAL HUD (state-reconstruction) — the matchup/stage-independent, zero-bandwidth fix.
     // The engine-TA stage bake (bake_stage_from_ta.py) baked the ENTIRE MVC2 HUD overlay into
-    // STG0B_ta.json as static screen-space meshes (life bars / super-meter / frames / name
-    // plates / tag bars) frozen at the capture frame's HP/meter. PROVEN (live HUD_DIAG verify):
-    // this baked stage HUD is the ONLY HUD that renders on the native GSTA client — the HUDQ
-    // path (gstaBuildHudTA) does NOT reach the screen (no HUDQ tail / not presented). So we
-    // RESHAPE the dynamic-fill meshes RIGHT HERE on the path that provably renders: keep the
-    // engine's pixel-exact baked geometry/colors/position, and drive ONLY the fill width from
-    // the LIVE per-frame state in `ram` (_gstaRam). Zero bandwidth, no HUDQ dependency.
+    // STG0B_ta.json as static screen-space meshes, FROZEN at the capture frame's HP/meter AND the
+    // capture matchup's team color. PROVEN (live verify): this baked stage HUD is the ONLY HUD that
+    // renders on the native GSTA client (the HUDQ/gstaBuildHudTA path never reaches the screen).
+    // Reshaping the frozen art depletes width but cannot fix the team COLOR (which retints per
+    // active point char, loc_8c15FFB0) nor the MULTI-LEVEL meter. So we:
+    //   (1) DROP the baked DYNAMIC fill meshes here: life-bar fills (0x80000) + meter fills
+    //       (0x9de00..0x9e900). (isLifeFill/isMeterFill below; the per-mesh loop `continue`s them.)
+    //   (2) KEEP baked: bar FRAMES/backing (0x9be00) + name plates + portraits (correct for this
+    //       matchup) + the real stage (0x9fc00/0xa0000).
+    //   (3) SYNTHESIZE the life bars + multi-level super meter from _gstaRam state as TA quads
+    //       AFTER the loop (emitHudBars block), at the MEASURED STG0B positions, ROM team colors
+    //       + gradient + red_health chip + live HP/meter. Ported from web/render-replica/
+    //       hud-client.mjs _lifeBar/_meter (re_kb/27,/36,/55). Zero bandwidth (state already shipped).
+    // (QUEUED generality: reconstruct plates/names from char_id; strip HUD in bake_stage_from_ta.py
+    //  + re-bake so the baked frames also go procedural.)
     //
-    // BANDS (MEASURED on STG0B_ta.json, tcw & 0x1FFFFF):
-    //   RESHAPED: 0x80000          — life-bar FILL quads (w~152 h~8, the team-color body)
-    //             0x9de00..0x9e900 — super-meter + per-slot fill bars (one band per element)
-    //   LEFT BAKED AS-IS: 0x9be00  — bar frames/backing + bottom tag/round bars (correct for
-    //             this matchup), name plates, and the real stage 0x9fc00/0xa0000 floor+skybox.
-    // (Permanent fix tracked separately: stage/matchup-general HUD STATE reconstruction +
-    //  bake_stage_from_ta.py HUD exclusion. This reshape unblocks depleting bars now.)
-    //
-    // SLOT MAP (ported verbatim from maplecast_mirror.cpp gstaBuildHudTA): map each fill mesh
-    // to a fighter slot by SIDE (mesh center cx<320 => P1) + VISUAL ROW (cluster the side's
-    // fill-mesh center-Ys into rows within 6px; active-point-char on the TOP bar). Per-char
-    // bases page-616, HP @ +0x420 (max 144). Meter @ globals page-649.
+    // STATE: per-char page-616 bases; active +0x000 (point-char detect), HP +0x420 (max 144),
+    // red_health/chip +0x424. Globals page-649: meter_fill u16 0x289646(P1)/648(P2),
+    // meter_level u8 0x28964A(P1)/64B(P2) (0..5), METER_MAX=144/level (loc_8C0F0FDC).
     static const uint32_t CHAR_BASE[6] = { 0x268340,0x2688E4,0x268E88,0x26942C,0x2699D0,0x269F74 };
     static const int P1_SLOTS[3] = {0,2,4}, P2_SLOTS[3] = {1,3,5};
     const uint8_t HP_MAX = 144;
@@ -289,52 +315,20 @@ size_t gstaStageEmitTA(std::vector<uint8_t>& out, const float* M1, const float* 
     auto rd8  = [&](uint32_t a)->uint8_t  { return ram[a & 0x00FFFFFFu]; };
     auto rd16 = [&](uint32_t a)->uint16_t { uint32_t b=a&0x00FFFFFFu; return (uint16_t)(ram[b]|(ram[b+1]<<8)); };
 
-    // Per-mesh: is it a life-bar FILL (0x80000) or a meter FILL (0x9de00..0x9e900)?
+    // Per-mesh classifier: is it a baked DYNAMIC HUD FILL that the procedural synthesis replaces?
+    // CORRECTED 2026-07-02 (measured vs the live HUDQ oracle + the STG0B bake band histogram):
+    // BOTH the life-bar fill AND the super-meter fill are baked at tcw band 0x080000 (the white
+    // texel, tcw=0x08080000) — 12 meshes total (6 life + 6 meter). The OLD isMeterFill range
+    // 0x9de00..0x9e900 was WRONG: that band is the baked PORTRAITS (0x9de00..0x9e600, tcw 0809deXX)
+    // + the LEVEL/EXP icons (0x9e700..0x9e900), NOT the meter fill — so it was DROPPING the baked
+    // portraits (native-path "missing portrait"/monogram-fallback root cause). The portraits are
+    // byte-exact vs HUDQ (pcw 0x808c002c tsp 0x2009a452 tcw 0x0809deXX, resident VRAM 0x4efXXX) and
+    // MUST be KEPT. So isMeterFill now matches the REAL meter fill band (0x080000), same as the life
+    // fill; both are dropped + re-synthesized. The 0x9deXX portrait band is no longer dropped.
+    // (re_kb finding:hud_p2a_portrait_dropfilter_fix + source:hudq_bar_meter_bytetarget.)
     auto bandOf = [](const StageMesh& m){ return m.tcw & 0x1FFFFFu; };
     auto isLifeFill  = [&](const StageMesh& m){ return bandOf(m) == 0x80000u; };
-    auto isMeterFill = [&](const StageMesh& m){ uint32_t b=bandOf(m); return b>=0x9de00u && b<=0x9e900u; };
-
-    // Baked X/Y extent of a mesh (screen-space; HUD fill meshes are NOT world-authored so their
-    // baked pos == screen pos). Returns false on empty.
-    auto meshExtent = [](const StageMesh& m, float& minx, float& maxx, float& cy)->bool{
-        if (m.verts.empty()) return false;
-        minx=1e30f; maxx=-1e30f; float mny=1e30f, mxy=-1e30f;
-        for (auto& v : m.verts){ float x=v.pos[0], y=v.pos[1];
-            if (x<minx)minx=x; if (x>maxx)maxx=x; if (y<mny)mny=y; if (y>mxy)mxy=y; }
-        cy=(mny+mxy)*0.5f; return true;
-    };
-
-    // Active-first slot order per side (active point char on the TOP bar) — same as gstaBuildHudTA.
-    auto orderSide = [&](const int* slots, int* outOrder){
-        int n=0, rest[3], nr=0;
-        for (int i=0;i<3;i++){ uint32_t b=CHAR_BASE[slots[i]];
-            if (haveRam && rd8(b+0x000)) outOrder[n++]=slots[i]; else rest[nr++]=slots[i]; }
-        for (int i=0;i<nr;i++) outOrder[n++]=rest[i];
-    };
-    int p1ord[3], p2ord[3]; orderSide(P1_SLOTS,p1ord); orderSide(P2_SLOTS,p2ord);
-
-    // PRE-PASS: per-side sorted ROW list (distinct cy clusters of LIFE-FILL meshes), so the
-    // multiple same-cy fill meshes per visible bar (body + highlight pass) all map to one row
-    // -> one slot -> shrink together (the gstaBuildHudTA twin-overdraw fix, re_kb/56).
-    auto rowsForSide = [&](bool p1)->std::vector<float>{
-        std::vector<float> cys;
-        for (auto& m : g_stage.meshes){ if (!isLifeFill(m)) continue;
-            float mnx,mxx,cy; if(!meshExtent(m,mnx,mxx,cy)) continue;
-            bool meshP1 = (((mnx+mxx)*0.5f) < 320.f);
-            if (meshP1==p1) cys.push_back(cy); }
-        std::sort(cys.begin(), cys.end());
-        std::vector<float> rows;
-        for (float cy:cys){ if (rows.empty() || cy-rows.back()>6.f) rows.push_back(cy); }
-        return rows;
-    };
-    std::vector<float> p1rows = haveRam ? rowsForSide(true)  : std::vector<float>();
-    std::vector<float> p2rows = haveRam ? rowsForSide(false) : std::vector<float>();
-    auto lifeSlotForMesh = [&](bool p1, float cy)->int{
-        const std::vector<float>& rows = p1 ? p1rows : p2rows;
-        int row=0; for (size_t r=0;r<rows.size();r++){ if (std::fabs(cy-rows[r])<=6.f){ row=(int)r; break; } }
-        if (row>2) row=2;
-        return p1 ? p1ord[row] : p2ord[row];
-    };
+    auto isMeterFill = [&](const StageMesh& m){ return bandOf(m) == 0x80000u; };
 
     size_t startBytes = out.size();
     size_t emittedTris = 0;
@@ -342,43 +336,21 @@ size_t gstaStageEmitTA(std::vector<uint8_t>& out, const float* M1, const float* 
     for (auto& m : g_stage.meshes) {
         if (m.verts.empty()) continue;
 
-        // ---- LIVE HUD-FILL RESHAPE (per mesh; see header block above) ----------------
-        // Compute, for a dynamic-fill mesh, the INNER x clamp so its width = fullWidth*frac.
-        // The fill is anchored to its OUTER (portrait-side) edge; the INNER edge moves toward
-        // it as state drops. We clamp fx[k] (the emitted x, below) — NOT g_stage (frame-safe).
-        bool   reshapeFill = false;     // this mesh is a state-driven fill
-        bool   fillP1      = false;     // anchored to its left edge (P1) vs right edge (P2)
-        float  fillOuter   = 0.f;       // the anchored outer edge x (baked)
-        float  fillInner   = 0.f;       // the clamped inner edge x (= outer +/- frac*fullWidth)
-        if (haveRam && (isLifeFill(m) || isMeterFill(m))) {
-            float minx, maxx, cy;
-            if (meshExtent(m, minx, maxx, cy)) {
-                fillP1 = (((minx+maxx)*0.5f) < 320.f);
-                float fullW = maxx - minx;
-                float frac  = 1.f;
-                if (isLifeFill(m)) {
-                    int slot = lifeSlotForMesh(fillP1, cy);
-                    frac = (float)rd8(CHAR_BASE[slot] + 0x420) / (float)HP_MAX;
-                } else {
-                    // SUPER-METER fill. meter_fill @0x8C289646 (P1) — the HUD shows the ACTIVE
-                    // side's meter on its bar; map by side. lvl @0x8C28964A gates max but the
-                    // fill value already encodes current charge; normalize by the per-level max
-                    // (one bar segment = 0..~144 like the life bar; the engine bar texture is the
-                    // same swatch). Use the side's meter_fill u16, clamped to [0,1] over a full
-                    // segment. (Tracked: exact meter normalization + multi-level rendering.)
-                    uint32_t meterAddr = fillP1 ? 0x289646u : 0x289648u;  // P1/P2 meter_fill u16
-                    float    raw = (float)rd16(meterAddr);
-                    // engine meter segment is 0..~0x90 (144) per the life-bar swatch scale; clamp.
-                    frac = raw / 144.f;
-                }
-                if (hudDiag) frac = 0.25f;                 // HUD_DIAG=1: reach test (snap to 25%)
-                if (frac < 0.f) frac = 0.f; if (frac > 1.f) frac = 1.f;
-                reshapeFill = true;
-                if (fillP1) { fillOuter = minx; fillInner = minx + fullW*frac; }   // P1 anchored LEFT
-                else        { fillOuter = maxx; fillInner = maxx - fullW*frac; }   // P2 anchored RIGHT
-            }
-        }
-        // -----------------------------------------------------------------------------
+        // ---- LIVE render-debug: whole-stage / frames isolation ----
+        if (!dbg_stageOn) continue;                        // hide ALL baked stage geometry
+        // hide the baked HUD FRAMES/plates band (0x9be00) when toggled off (A/B the synth alone)
+        if (!dbg_framesOn && (m.tcw & 0x1FFFFFu) == 0x9be00u) continue;
+
+        // ---- DROP the baked DYNAMIC HUD-fill meshes (procedural synthesis replaces them) ----
+        // The baked life-bar fills (0x80000) and super-meter fills (0x9de00..0x9e900) are FROZEN
+        // at the capture frame's HP/meter AND frozen at the capture matchup's TEAM COLOR (loc_
+        // 8c15FFB0 per-vertex modulate). They cannot deplete correctly, cannot retint when the
+        // active point char changes, and (meter) cannot render the multi-level gauge. We DROP them
+        // here and SYNTHESIZE the life bars + meter procedurally from _gstaRam state AFTER this
+        // loop (emitHudBars below), at the SAME measured positions. KEPT baked (correct as-is for
+        // this matchup): the bar frames/backing (0x9be00), name plates, portraits. (The live
+        // `filterBakedDyn` knob can DISABLE this drop to A/B the frozen baked fills vs the synth.)
+        if (dbg_filterBaked && haveRam && (isLifeFill(m) || isMeterFill(m))) continue;
 
         const size_t nTris = m.verts.size() / 3;
 
@@ -389,7 +361,7 @@ size_t gstaStageEmitTA(std::vector<uint8_t>& out, const float* M1, const float* 
         // guarantee ParaType=4 (Polygon) + ListType=0 (Opaque) on the high bits:
         pcw = (pcw & 0x00FFFFFFu) | (4u << 29) | (0u << 24);
 
-        const bool reproject = haveCam && meshIsWorldAuthored(m);
+        const bool reproject = haveCam && dbg_reproject && meshIsWorldAuthored(m);
 
         for (size_t t = 0; t < nTris; t++) {
             const StageVtx* tv[3] = { &m.verts[t*3+0], &m.verts[t*3+1], &m.verts[t*3+2] };
@@ -412,13 +384,6 @@ size_t gstaStageEmitTA(std::vector<uint8_t>& out, const float* M1, const float* 
                 float px = tv[k]->pos[0], py = tv[k]->pos[1], pz = tv[k]->pos[2];
                 if (reproject && tv[k]->hasWorld) {
                     projectEngine(X, tv[k]->world[0], tv[k]->world[1], tv[k]->world[2], px, py, pz);
-                }
-                // LIVE HUD-FILL RESHAPE: clamp the INNER-edge x to fillInner so the bar width
-                // tracks state. Outer (portrait-side) edge is preserved; only the verts on the
-                // inner side move. Frame-safe (mutates the local px only, never g_stage).
-                if (reshapeFill) {
-                    if (fillP1) { if (px > fillOuter + 0.5f) px = fillInner; }   // anchored LEFT
-                    else        { if (px < fillOuter - 0.5f) px = fillInner; }   // anchored RIGHT
                 }
                 if (!std::isfinite(px) || !std::isfinite(py)
                     || std::fabs(px) > GARBAGE || std::fabs(py) > GARBAGE) { ok = false; break; }
@@ -449,6 +414,7 @@ size_t gstaStageEmitTA(std::vector<uint8_t>& out, const float* M1, const float* 
                 uint32_t vpcw = (k == 2) ? 0xF0000000u : 0xE0000000u;  // last vtx ends the strip
                 uint8_t r = tv[k]->rgb[0], g = tv[k]->rgb[1], b = tv[k]->rgb[2];
                 uint32_t baseCol = 0xFF000000u | ((uint32_t)r<<16) | ((uint32_t)g<<8) | (uint32_t)b;
+                if (dbg_stageForceC) baseCol = dbg_stageColARGB;   // isolate stage coverage (test tint)
                 wU32(out, vpcw);
                 wF32(out, fx[k]); wF32(out, fy[k]); wF32(out, fz[k]);
                 wF32(out, tv[k]->uv[0]); wF32(out, tv[k]->uv[1]);
@@ -456,6 +422,314 @@ size_t gstaStageEmitTA(std::vector<uint8_t>& out, const float* M1, const float* 
                 wU32(out, 0);           // OffsCol
             }
             emittedTris++;
+        }
+    }
+
+    // ====================================================================================
+    // PROCEDURAL HUD SYNTHESIS (life bars + super meter) — the matchup/stage-independent,
+    // zero-bandwidth fix. Replaces the DROPPED baked dynamic meshes with quads synthesized
+    // from _gstaRam state at the MEASURED STG0B positions. Ported from the proven Canvas2D
+    // reference web/render-replica/hud-client.mjs (_lifeBar / _meter), re_kb/27,/36,/55.
+    //
+    // Every quad is a WHITE-swatch OPAQUE poly (the same resident texel + control words the
+    // engine bars use: pcw=808c001f isp=93400000 tsp=20880440 tcw=08080000, U=V=0) modulated
+    // by a per-vertex ARGB8888 base color — exactly the engine's loc_8c15FFB0 white-tex*vertex-
+    // color model. Emitted here in the OPAQUE (ListType 0) list, so it lands behind the bodies
+    // like the rest of the stage/baked-frame HUD; the baked FRAMES (0x9be00) still draw around it.
+    if (haveRam && dbg_synthOn) {
+        // -- swatch control words (reused from the baked life fill) --
+        // CRITICAL (empty-bars root cause): the baked life-fill PCW is 0x808c001f, whose obj_ctrl
+        // low byte 0x1f = UV16|Gouraud|Offset|Texture|ColType=1. That tells the flycast TA FSM
+        // (ta.cpp ta_handle_cmd) to expect a Type-5/6 vertex (16-bit UV + FLOAT/intensity color +
+        // offset) — a DIFFERENT byte layout than the 32B Type-3 (pcw,x,y,z,u,v,basecol,offscol) we
+        // actually write below. Feeding Type-3 bytes under a Type-5 PCW => the FSM misparses stride/
+        // fields => our quads land off-screen / degenerate / drop => INVISIBLE (frames render because
+        // the baked mesh loop REWRITES its pcw to 0x08 to match its own Type-3 verts, gsta_stage.cpp
+        // per-mesh loop `pcw = (m.pcw & 0xFFFFFF00)|0x08`). We do the SAME rewrite here: force
+        // obj_ctrl=0x08 (Texture=1, ColType=0, UV32, no gouraud/offset) => Type-3, matching our verts.
+        // (This is why the depth fix was necessary-but-not-sufficient: even in front, a mis-typed
+        // vertex stream draws nothing.)
+        // base PCW: force obj_ctrl=0x08 (Type-3). LIVE list-type knob: 0=OPAQUE (ListType 0,
+        // default/correct), 1=TRANSLUCENT (ListType 2) to test drawing over the opaque backing.
+        uint32_t HUD_PCW = (0x808c001fu & 0xFFFFFF00u) | 0x08u;         // = 0x808c0008 (Type-3, OPAQUE)
+        if (dbg_listType == 1) HUD_PCW = (HUD_PCW & ~(7u<<24)) | (2u<<24);   // ListType = Translucent
+        const uint32_t HUD_ISP = 0x93400000u,
+                       HUD_TSP = 0x20880440u, HUD_TCW = 0x08080000u;
+        // HUD-PLANE DEPTH (Deliverable B fix). PVR Z = 1/W (LARGER = NEARER). The old hardcoded
+        // HUD_Z=0.0002 was FAR-plane -> the OPAQUE synth fills were depth-culled BEHIND the co-
+        // located baked backing (0x9be00, real Z ~0.0053..0.0078) -> invisible. MEASURED (both
+        // the STG0B bake pos[2] AND the _live_hud MIRROR vertex Z agree, B1): the HUD rows do NOT
+        // share one depth — row0 (cy52) sits at Z~0.00768, rows1/2 (cy78/98) at Z~0.00525, and
+        // the fill at each row matches its OWN backing's Z. So we PASS Z PER QUAD (inherited from
+        // the co-located baked backing per row), with a tiny nearer bias (+Z) so the fill always
+        // wins the depth test against its frame. Meter rows likewise carry their measured Z.
+        const float Z_BIAS = dbg_zBias;   // LIVE per-row nearer bias (default 0.00003, control-WS)
+
+        // Emit one flat-color parallelogram (2 tris) at depth `z` from screen quad corners
+        // TL(x0,y0) TR(x1,y0) BR(x1+skew,y1) BL(x0+skew,y1), all verts colored `argb`.
+        // LIVE knobs applied here: global position nudge (dbg_dx/dy) + fill-color override.
+        auto emitQuad = [&](float x0, float x1, float y0, float y1, float skew, float z, uint32_t argb){
+            if (dbg_colOverride) argb = dbg_colARGB;               // force test color (bypass team/gradient)
+            if (x1 < x0) { float t=x0; x0=x1; x1=t; }
+            const float vx[4] = { x0+dbg_dx, x1+dbg_dx, x1+skew+dbg_dx, x0+skew+dbg_dx };
+            const float vy[4] = { y0+dbg_dy, y0+dbg_dy, y1+dbg_dy,      y1+dbg_dy      };
+            const int   tri[2][3] = { {0,1,2}, {0,2,3} };
+            for (int t=0;t<2;t++){
+                wU32(out, HUD_PCW); wU32(out, HUD_ISP); wU32(out, HUD_TSP); wU32(out, HUD_TCW);
+                wU32(out, 0); wU32(out, 0); wU32(out, 0); wU32(out, 0);
+                for (int j=0;j<3;j++){
+                    int k = tri[t][j];
+                    uint32_t vpcw = (j==2) ? 0xF0000000u : 0xE0000000u;
+                    wU32(out, vpcw);
+                    wF32(out, vx[k]); wF32(out, vy[k]); wF32(out, z);
+                    wF32(out, 0.f);  wF32(out, 0.f);        // U=V=0 (solid swatch texel)
+                    wU32(out, argb); wU32(out, 0);
+                }
+                emittedTris++;
+            }
+        };
+
+        // ================================================================================
+        // ENGINE-EXACT life-bar strip (byte-matches the engine's real HUD fill quad).
+        // MEASURED from _live_hud.mirror.zcst: the engine emits each life bar as ONE 4-vertex
+        // STRIP with pcw=0x808c001f (obj_ctrl 0x1f = Textured, Col_Type=1 FLOATING color, 16-bit
+        // UV, Gouraud, Offset) -> flycast TA Type-6 = SZ64 vertices (TA_Vertex6A geometry record +
+        // TA_Vertex6B float-ARGB color record = 64 bytes/vertex). The gradient is done via PER-VERTEX
+        // gouraud FLOAT ARGB (NOT stacked layers): inner corners = opaque team color (A=1), outer
+        // corners = warm color with A=0 (transparent) -> the yellow->team fade + the depletion is a
+        // single translucent-alpha strip. Offset color = 0. So we emit the SAME control words + the
+        // SAME 64B vertex layout with our live per-corner float ARGB.
+        //   Vertex6A (32B): vpcw, x, y, z, [u16 v][u16 u], ign, ign, ign
+        //   Vertex6B (32B): BaseA,BaseR,BaseG,BaseB (f32), OffsA,OffsR,OffsG,OffsB (f32)
+        // corners a=TL b=TR c=BR d=BL (strip order TR,TL,BR,BL matches the engine's e001b1b0 set:
+        // (269.5,57.7)(46.6,57.7)(269.5,46.0)(46.6,46.0) = C,D,B,A). We use the strip order
+        // v0=BR v1=BL v2=TR v3=TL, each with its own float ARGB. `colA/colB/colC/colD` are ARGB8888
+        // (a=alpha). Emits the engine PCW 0x808c001f so it byte-matches.
+        const uint32_t FILL_PCW6 = (dbg_listType==1) ? ((0x808c001fu & ~(7u<<24)) | (2u<<24)) : 0x808c001fu;
+        auto argbF = [&](uint32_t argb, int idx)->float{ return (float)((argb >> (24-8*idx)) & 0xFF) / 255.f; };
+        auto emitVtx6 = [&](uint32_t vpcw, float x, float y, float z, uint32_t argb){
+            // 6A geometry
+            wU32(out, vpcw); wF32(out, x+dbg_dx); wF32(out, y+dbg_dy); wF32(out, z);
+            wU32(out, 0);              // [u16 v][u16 u] = 0 (white swatch)
+            wU32(out, 0); wU32(out, 0); wU32(out, 0);   // ign1..3
+            // 6B float ARGB base + zero offset
+            wF32(out, argbF(argb,0)); wF32(out, argbF(argb,1)); wF32(out, argbF(argb,2)); wF32(out, argbF(argb,3));
+            wF32(out, 0.f); wF32(out, 0.f); wF32(out, 0.f); wF32(out, 0.f);
+        };
+        // One engine-faithful gouraud strip. Corners TL(x0,y0) TR(x1,y0) BR(x1,y1) BL(x0,y1),
+        // strip submit order matching the engine (v0=BR,v1=BL,v2=TR,v3=TL); last vtx vpcw ends strip.
+        auto emitStrip6 = [&](float x0,float x1,float y0,float y1,float z,
+                              uint32_t cTL,uint32_t cTR,uint32_t cBR,uint32_t cBL){
+            if (dbg_colOverride) { cTL=cTR=cBR=cBL=dbg_colARGB; }
+            // global param (32B): pcw isp tsp tcw + 4 pad
+            wU32(out, FILL_PCW6); wU32(out, HUD_ISP); wU32(out, HUD_TSP); wU32(out, HUD_TCW);
+            wU32(out, 0); wU32(out, 0); wU32(out, 0); wU32(out, 0);
+            emitVtx6(0xE0000000u, x1, y1, z, cBR);   // BR
+            emitVtx6(0xE0000000u, x0, y1, z, cBL);   // BL
+            emitVtx6(0xE0000000u, x1, y0, z, cTR);   // TR
+            emitVtx6(0xF0000000u, x0, y0, z, cTL);   // TL (ends strip)
+            emittedTris += 2;
+        };
+        // emitStrip6 is the engine-exact life-bar fill (called from drawSide below).
+
+        // BYTE-EXACT engine RED CHIP/drain quad. The engine emits the chip as its OWN Type-6 strip
+        // with DISTINCT control words from the HP fill: pcw=0x808c002d (obj_ctrl 0x2d, no gouraud
+        // gate diff), tsp=0x20080440 (NOTE: 0x20080440 not the fill's 0x20880440 — bit 0x00800000
+        // clear), tcw=0x08080000, flat col=0xfffe0000 (A=0xFF). CONFIRMED HUDQ oracle quads [4]/[10]/
+        // [16]/[22]/[28]/[34]. Same 4-vert strip vertex layout as emitStrip6, just different global
+        // param + a single flat color. (re_kb source:hudq_bar_meter_bytetarget.)
+        const uint32_t CHIP_PCW6 = (dbg_listType==1) ? ((0x808c002du & ~(7u<<24)) | (2u<<24)) : 0x808c002du;
+        const uint32_t CHIP_TSP6 = 0x20080440u;
+        auto emitChip6 = [&](float x0,float x1,float y0,float y1,float z,uint32_t argb){
+            if (dbg_colOverride) argb = dbg_colARGB;
+            wU32(out, CHIP_PCW6); wU32(out, HUD_ISP); wU32(out, CHIP_TSP6); wU32(out, HUD_TCW);
+            wU32(out, 0); wU32(out, 0); wU32(out, 0); wU32(out, 0);
+            emitVtx6(0xE0000000u, x1, y1, z, argb);   // BR
+            emitVtx6(0xE0000000u, x0, y1, z, argb);   // BL
+            emitVtx6(0xE0000000u, x1, y0, z, argb);   // TR
+            emitVtx6(0xF0000000u, x0, y0, z, argb);   // TL (ends strip)
+            emittedTris += 2;
+        };
+
+        // FORCE TEST QUAD (bisect emit-vs-render): a big bright opaque quad at NEAR depth,
+        // center-screen. If this shows but the bars don't -> bar geometry/state wrong; if even
+        // this is invisible -> the emit/TA-structure/list is broken. (Uses emitQuad so it shares
+        // the exact synth control words; color-override still applies if set.)
+        if (dbg_forceTest)
+            emitQuad(220.f, 420.f, 200.f, 280.f, 0.f, 0.0090f, 0xFFFF00FFu);   // bright magenta
+        auto lerp8 = [](uint8_t a, uint8_t b, float t)->uint8_t{
+            float v = (float)a + ((float)b-(float)a)*t; if(v<0)v=0; if(v>255)v=255; return (uint8_t)(v+0.5f); };
+        auto mkARGB = [](int r,int g,int b)->uint32_t{
+            return 0xFF000000u | ((uint32_t)(r&0xFF)<<16) | ((uint32_t)(g&0xFF)<<8) | (uint32_t)(b&0xFF); };
+
+        // ---- TEAM COLORS (loc_8c15FFB0): active point char C1/C2/C3 -> magenta/green/cyan.
+        //      [bright HP inner-stop, light highlight].  gradOuter = warm yellow (outer anchor). ----
+        struct RGB { int r,g,b; };
+        static const RGB TEAM_HP[3]  = { {255,64,255}, {60,255,60}, {51,200,255} };  // C1/C2/C3 bright
+        static const RGB TEAM_HI[3]  = { {255,156,255},{187,255,170},{174,235,255} }; // highlight
+        static const RGB FRAME_RGB   = {26,29,36};     // dark empty channel (#1a1d24)
+        // (GRAD_WARM/CHIP_RGB removed — superseded by the byte-exact ARGB stops below.)
+
+        // ---- BYTE-EXACT engine gouraud stops (ARGB8888), for the Type-6 fill strip. These are the
+        //      loc_8c15FFB0 table words after the engine's intensity map (channel c -> c*254/255 trunc:
+        //      ff->fe, 40->3f, c0->bf, 00->00), CONFIRMED against the live HUDQ oracle
+        //      (_hud_cap/hudq_inventory.txt): C1 inner fefe3ffe / outer fefefe00; C3/super inner
+        //      fe00bffe. Alpha 0xFE on the fill (matched). Indexed by pointColIdx C1/C2/C3.
+        //      (re_kb finding:hud_p2a_bars_already_byteexact + source:hudq_bar_meter_bytetarget.)
+        static const uint32_t TEAM_HP_ARGB[3] = { 0xfefe3ffeu, 0xfe00fe00u, 0xfe00bffeu }; // magenta/green/cyan inner
+        static const uint32_t GRAD_WARM_ARGB  = 0xfefefe00u;   // engine outer gouraud anchor (yellow, A=0xfe)
+        static const uint32_t CHIP_ARGB       = 0xfffe0000u;   // engine red chip/drain (flat, A=0xff)
+
+        // active point-char slot index (0/1/2 within the side) -> team color idx; -1 if none active.
+        auto pointColIdx = [&](const int* slots)->int{
+            for (int i=0;i<3;i++) if (rd8(CHAR_BASE[slots[i]]+0x000)) return i;
+            return -1;
+        };
+
+        // ---- LIFE BARS: 3 rows per side, active-first order (row0=active point on top). ----
+        // MEASURED STG0B fill rects (P1 anchored LEFT, P2 anchored RIGHT; flat, skew 0):
+        //   row0 y[46..58] x P1[46.6..269.5] P2[370.5..593.4]   (w~223 — the point-char bar)
+        //   row1 y[74..82] x P1[48.6..200.7] P2[439.3..591.4]   (w~152 — reserve)
+        //   row2 y[94..102]x P1[48.6..200.7] P2[439.3..591.4]   (w~152 — reserve)
+        // `z` = the MEASURED per-row HUD-plane 1/W (bake pos[2] == mirror vertex Z, B1): life row0
+        // (cy52)=0.00768, rows1/2 (cy78/98)=0.00525. The fill inherits its co-located backing's Z.
+        struct BarRect { float x0,x1,y0,y1,z; };
+        static const BarRect P1BARS[3] = {
+            {46.6f,269.5f,46.0f,57.7f,0.00768f}, {48.6f,200.7f,74.3f,82.3f,0.00525f}, {48.6f,200.7f,94.3f,102.3f,0.00525f} };
+        static const BarRect P2BARS[3] = {
+            {370.5f,593.4f,46.0f,57.7f,0.00768f}, {439.3f,591.4f,74.3f,82.3f,0.00525f}, {439.3f,591.4f,94.3f,102.3f,0.00525f} };
+
+        auto drawSide = [&](const int* slots, const BarRect* bars, bool p1){
+            int col = pointColIdx(slots); if (col < 0) col = 0;
+            const RGB& hi = TEAM_HI[col];   // highlight sheen (HP inner stop now via TEAM_HP_ARGB)
+            // active-first row order: active point char on row0, then the other two in slot order.
+            int order[3]; int n=0, rest[3], nr=0;
+            for (int i=0;i<3;i++){ if (rd8(CHAR_BASE[slots[i]]+0x000)) order[n++]=slots[i]; else rest[nr++]=slots[i]; }
+            for (int i=0;i<nr;i++) order[n++]=rest[i];
+            for (int row=0; row<3; row++){
+                const BarRect& b = bars[row];
+                int slot = order[row];
+                float hpF   = (float)rd8(CHAR_BASE[slot]+0x420) / (float)HP_MAX;
+                float chipF = (float)rd8(CHAR_BASE[slot]+0x424) / (float)HP_MAX;   // recoverable red
+                if (hudDiag) hpF = 0.25f;                    // HUD_DIAG=1 reach test
+                if (hpF<0)hpF=0; if (hpF>1)hpF=1; if (chipF<0)chipF=0; if (chipF>1)chipF=1;
+                if (chipF < hpF) chipF = hpF;                // chip never shorter than live HP
+                float fullW = b.x1 - b.x0;
+                float outer = p1 ? b.x0 : b.x1;              // portrait-side anchor
+                float zBar  = b.z + Z_BIAS;                  // this row's HUD-plane depth (nearer than backing)
+                auto innerX = [&](float frac){ return p1 ? (outer + fullW*frac) : (outer - fullW*frac); };
+                // PER-LAYER DEPTH STEP (the "invisible bar" root cause). Every quad here is in the
+                // OPAQUE list with ISP DepthCompare=GREATER + ZWrite ON (isp=0x93400000). Stacking
+                // the frame->chip->fill->highlight layers at the SAME z means each layer's GREATER
+                // test vs the one below is `z > z` = FALSE -> only the FIRST (dark frame) quad draws
+                // and every colored fill/chip on top is depth-REJECTED -> the bar shows as an empty
+                // dark channel = "invisible". MEASURED in the dumped fr.ta: 6+ synth quads all at
+                // z=0.00771 over the bar center. FIX: step each successive layer slightly NEARER
+                // (larger z) so it passes GREATER over the previous layer. Step is tiny (well under
+                // the ~0.0002 gap to the next HUD row) but resolvable at this z magnitude (~0.0077).
+                const float ZL = 0.00002f;   // per-layer nearer step
+                int _layer = 0;
+                auto zLayer = [&](){ return zBar + (float)(_layer++) * ZL; };
+                // 1) dark empty channel (full width) -- BOTTOM layer
+                emitQuad(b.x0, b.x1, b.y0, b.y1, 0.f, zLayer(), mkARGB(FRAME_RGB.r,FRAME_RGB.g,FRAME_RGB.b));
+                // 2) recoverable-red chip TRAIL behind (outer -> chipF)  [live: hudChipOn]
+                //    BYTE-EXACT: engine chip is its OWN Type-6 strip (pcw 0x808c002d / tsp 0x20080440
+                //    / flat col 0xfffe0000), NOT emitQuad+mkARGB. Corners: outer edge -> chipF inner.
+                if (dbg_chipOn && chipF > 0.001f) {
+                    float zChip = zLayer();
+                    float xl = p1 ? outer : innerX(chipF), xr = p1 ? innerX(chipF) : outer;
+                    emitChip6(xl, xr, b.y0, b.y1, zChip, CHIP_ARGB);
+                }
+                // 3) bright HP fill ON TOP (outer -> hpF) as the ENGINE-EXACT gouraud strip.
+                //    MEASURED (engine 0x808c001f fill): a single Type-6 4-vertex strip with per-
+                //    vertex FLOAT ARGB gouraud — OUTER corners = warm yellow (R=1,G=1,B=0,A=1),
+                //    INNER corners = team color (e.g. R=1,G=0.25,B=1,A=1). We emit exactly that via
+                //    emitStrip6 (engine PCW/verts/offset-color). hudGradientOn=0 -> flat team color.
+                if (hpF > 0.001f) {
+                    float zFill = zLayer();
+                    float xOuter = outer, xInner = innerX(hpF);
+                    // per-corner ARGB (BYTE-EXACT engine gouraud stops, A=0xFE): outer=warm yellow
+                    // fefefe00 (or team stop if gradient off), inner=team stop TEAM_HP_ARGB[col].
+                    uint32_t cInner = TEAM_HP_ARGB[col];
+                    uint32_t cOuter = dbg_gradientOn ? GRAD_WARM_ARGB : cInner;
+                    // map outer/inner (which is left/right depending on side) to TL/TR/BR/BL.
+                    // P1: outer=left(x0side), inner=right. P2: outer=right, inner=left.
+                    float xl = p1 ? xOuter : xInner, xr = p1 ? xInner : xOuter;
+                    uint32_t cl = p1 ? cOuter : cInner, cr = p1 ? cInner : cOuter;
+                    // emitStrip6(x0,x1,y0,y1,z, cTL,cTR,cBR,cBL): left col = cl, right col = cr.
+                    emitStrip6(xl, xr, b.y0, b.y1, zFill, cl, cr, cr, cl);
+                    // 4) thin top highlight sheen (upper ~1/3 of the fill span)  [live: hudHighlightOn]
+                    if (dbg_highlightOn) {
+                        float hy1 = b.y0 + (b.y1-b.y0)*0.34f;
+                        emitQuad(outer, innerX(hpF), b.y0, hy1, 0.f, zLayer(), mkARGB(hi.r,hi.g,hi.b));
+                    }
+                }
+            }
+        };
+        if (dbg_barsOn) { drawSide(P1_SLOTS, P1BARS, true); drawSide(P2_SLOTS, P2BARS, false); }
+
+        // ---- SUPER METER: multi-level. meter_level u8 (0x28964A P1/0x28964B P2)=stocked levels
+        //      0..5; meter_fill u16 (0x289646/648)=current-level partial 0..METER_MAX(144). The
+        //      3 meter fill-bar rows are the level bars; we light `level` of them FULL + the next
+        //      one to fill/144, team-tinted. NOTE: these engine meter bands (0x9e1/2/3xx P1,
+        //      0x9e7/8/9xx P2) render in the TOP HUD area (cy 66/89/109) interleaved with the life
+        //      bars — that is the real MVC2 top-HUD layout, NOT a bottom-of-screen bar. Positions
+        //      below are the EXACT measured engine mirror rects (_live_hud, per-band pixel-exact).
+        //      Per-row Z (measured bake: row0 cy66=0.00794, rows1/2 cy89/109=0.00588).
+        static const BarRect P1MET[3] = {
+            {39.7f,183.8f,61.9f,70.9f,0.00794f}, {44.5f,151.3f,85.3f,91.9f,0.00588f}, {44.5f,151.3f,105.4f,112.0f,0.00588f} };
+        static const BarRect P2MET[3] = {
+            {455.8f,600.7f,61.9f,70.9f,0.00794f}, {488.4f,595.8f,85.3f,91.9f,0.00588f}, {488.4f,595.8f,105.4f,112.0f,0.00588f} };
+        static const float   P1MET_SKEW[3] = { 4.4f, 3.3f, 3.3f };
+        static const float   P2MET_SKEW[3] = { -4.4f, -3.3f, -3.3f };
+        const float METER_MAX = 144.f;
+
+        auto drawMeter = [&](const int* slots, const BarRect* mrows, const float* mskew,
+                             bool p1, uint32_t levelAddr, uint32_t fillAddr){
+            int col = pointColIdx(slots); if (col < 0) col = 0;
+            const RGB& mc = TEAM_HP[col]; const RGB& mh = TEAM_HI[col];
+            int   level = rd8(levelAddr); if (level > 3) level = 3;   // 3 baked meter rows available
+            float part  = (float)rd16(fillAddr) / METER_MAX;
+            if (hudDiag) part = 0.25f;
+            if (part < 0) part = 0; if (part > 1) part = 1;
+            for (int row=0; row<3; row++){
+                const BarRect& b = mrows[row]; float sk = mskew[row];
+                float fullW = b.x1 - b.x0;
+                float outer = p1 ? b.x0 : b.x1;
+                float zBar  = b.z + Z_BIAS;
+                auto innerX = [&](float frac){ return p1 ? (outer + fullW*frac) : (outer - fullW*frac); };
+                // PER-LAYER DEPTH STEP (same OPAQUE GREATER+ZWrite tie fix as the life bars):
+                // empty channel -> fill -> highlight must each step slightly nearer or the fill/
+                // highlight get depth-rejected over the channel and the meter shows empty.
+                const float ZLM = 0.00002f; int _ml = 0;
+                auto zMet = [&](){ return zBar + (float)(_ml++) * ZLM; };
+                // dark empty channel (bottom layer)
+                emitQuad(b.x0, b.x1, b.y0, b.y1, sk, zMet(), mkARGB(21,24,30));
+                // this row's fill fraction: full if below the stocked level, partial at the level,
+                // empty above. (row is a whole level segment; higher rows = higher levels.)
+                float f = (row < level) ? 1.f : (row == level ? part : 0.f);
+                if (f > 0.001f) {
+                    // BYTE-EXACT: the engine meter FILL bar is the SAME white-texel gouraud strip as
+                    // the life bar (pcw 0x808c001f / tsp 0x20880440 / tcw 0x08080000, inner=team stop
+                    // / outer=warm yellow), FLAT (no skew) — CONFIRMED HUDQ oracle quads [14]/[20]/
+                    // [26]/[32]. The segmented notch ART (fmt=5 PAL4 tcw 2a489xxx) is a SEPARATE quad
+                    // family fixed by the VRAM dirty-page agent, not here.
+                    float zFill = zMet();
+                    float xInner = innerX(f);
+                    uint32_t cInner = TEAM_HP_ARGB[col];
+                    uint32_t cOuter = dbg_gradientOn ? GRAD_WARM_ARGB : cInner;
+                    float xl = p1 ? outer : xInner, xr = p1 ? xInner : outer;
+                    uint32_t cl = p1 ? cOuter : cInner, cr = p1 ? cInner : cOuter;
+                    emitStrip6(xl, xr, b.y0, b.y1, zFill, cl, cr, cr, cl);
+                    // highlight sheen
+                    float hy1 = b.y0 + (b.y1-b.y0)*0.4f;
+                    emitQuad(outer, innerX(f), b.y0, hy1, sk, zMet(), mkARGB(mh.r,mh.g,mh.b));
+                }
+            }
+        };
+        if (dbg_meterOn) {
+            drawMeter(P1_SLOTS, P1MET, P1MET_SKEW, true,  0x28964Au, 0x289646u);
+            drawMeter(P2_SLOTS, P2MET, P2MET_SKEW, false, 0x28964Bu, 0x289648u);
         }
     }
 

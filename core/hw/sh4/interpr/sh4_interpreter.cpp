@@ -13,6 +13,7 @@
 #include "../sh4_cache.h"
 #include "debug/gdb_server.h"
 #include "../sh4_cycles.h"
+#include "network/mc_readtrace.h"
 
 Sh4ICache icache;
 Sh4OCache ocache;
@@ -56,6 +57,9 @@ void Sh4Interpreter::Run()
 			try {
 				do
 				{
+					// STEP 2 read-set trace: arm/disarm at block-start PC (no-op unless
+					// MAPLECAST_READTRACE). ctx->pc here is the block-start address.
+					if (unlikely(mc_readtrace::g_enabled)) mc_readtrace::onPc(ctx->pc);
 #ifdef SH4RECOMP_BLOCKS
 					// Static blocks operate directly on Sh4cntx — no bridge
 					if (!sh4recomp_try_exec(ctx->pc)) {

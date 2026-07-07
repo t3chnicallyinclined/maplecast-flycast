@@ -202,7 +202,10 @@ bool mainui_rend_frame()
 				// DIAG: MAPLECAST_GSTA_SHOT=<path-prefix> dumps PNG screenshots of the
 				// rendered frame (frames 120..150) to visually verify the body fragmentation fix.
 				const char* shot = std::getenv("MAPLECAST_GSTA_SHOT");
-				if (shot && *shot && isScreen && _grn >= 120 && _grn <= 600 && (_grn % 30 == 0)) {
+				static const int _shEvery = [](){ const char* e=std::getenv("MAPLECAST_GSTA_SHOT_EVERY"); int v=e?atoi(e):30; return v>0?v:30; }();
+					static const unsigned long long _shStart = [](){ const char* e=std::getenv("MAPLECAST_GSTA_SHOT_START"); return (unsigned long long)(e?atoll(e):120); }();
+					static const unsigned long long _shEnd   = [](){ const char* e=std::getenv("MAPLECAST_GSTA_SHOT_END");   return (unsigned long long)(e?atoll(e):600); }();
+					if (shot && *shot && isScreen && _grn >= _shStart && _grn <= _shEnd && (_grn % (unsigned long long)_shEvery == 0)) {
 					std::vector<u8> raw; int w=0,h=0;
 					if (renderer && renderer->GetLastFrame(raw, w, h) && w>0 && h>0) {
 						char pp[600]; snprintf(pp, sizeof(pp), "%s_%llu.png", shot, (unsigned long long)_grn);

@@ -920,6 +920,37 @@ static void updateSlot(int slot, uint8_t ltVal, uint8_t rtVal, uint16_t buttons)
 {
 	if (slot < 0 || slot > 1) return;
 
+	// ── SOFT-RESET-CHORD GUARD (2026-07-06) ──────────────────────────────
+	// A+B+X+Y+Start held together is the Katana-standard soft-reset chord:
+	// MVC2's handler jumps into the real-BIOS reset path. Our autoload
+	// savestates were captured under REIOS (HLE BIOS) — their low-RAM BIOS
+	// work area is 0xFF filler (verified live via control-WS ram_read:
+	// 8C000000..0F = FF, syscall vectors = reios 8C001000/02/04/06/08). The
+	// real BIOS reset code jumps to its cache-flush stub at RAM+0x10 via P2
+	// → executes opcode 0xFFFF (illegal) with SR.BL=1 →
+	//   [SH4-FAULT] BLOCKED exception expEvn=0x180 epc=AC000010
+	//   → FlycastException("Fatal: SH4 exception when blocked") → dead SH4.
+	// Live-proven 2026-07-06: a clean active-low stream holding ONLY this
+	// chord kills the SH4 in <20 s (register-exact repro). On a shared
+	// streaming server a guest-initiated soft reset is never desirable
+	// anyway (admin reset lives on the control WS), so neutralize the chord
+	// here — the single convergence point for UDP/WS/XDP input — by forcing
+	// Start released. A+B+X+Y stay held (ordinary attack buttons). Opt out
+	// with MAPLECAST_ALLOW_SOFT_RESET=1 (e.g. real-BIOS-born savestates).
+	static const bool _allowSoftReset = std::getenv("MAPLECAST_ALLOW_SOFT_RESET") != nullptr;
+	constexpr uint16_t kResetChord = 0x060E;   // A|B|X|Y|START (core/input/gamepad.h; active-low: 0 bit = pressed)
+	if (!_allowSoftReset && (buttons & kResetChord) == 0) {
+		buttons |= 0x0008;                     // release START → chord broken
+		static int64_t _lastChordWarnUs = 0;   // rate-limit: 1 line/s (benign race)
+		int64_t nowW = nowUs();
+		if (nowW - _lastChordWarnUs > 1000000) {
+			_lastChordWarnUs = nowW;
+			printf("[input-server] soft-reset chord (A+B+X+Y+Start) on slot %d neutralized -- "
+			       "guest reset path is fatal under REIOS-born savestates "
+			       "(MAPLECAST_ALLOW_SOFT_RESET=1 to permit)\n", slot);
+		}
+	}
+
 	// Phase A â€” tear-free packed slot atomic FIRST. The CMD9 latch in
 	// ggpo::getLocalInput() reads from this single 64-bit word, so writers
 	// and readers can never see a torn buttons/lt/rt triple. Sequence number

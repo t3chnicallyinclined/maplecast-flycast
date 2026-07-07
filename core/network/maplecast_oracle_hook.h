@@ -257,6 +257,23 @@ const HudQuad* mc_oracle_hudQuads(int* outCount);
 #define MC_BTCW_MAX_TILES 128    // per-node tiles (was 64; satL8_1 already needs 67)
 const uint32_t* mc_oracle_bodyTcws(int* outWords);
 
+// 3D-MACHINE SQ-FLUSH CAPTURE (PL3D, Phase A scaffold — re_kb/64 finding:3d_draw_emit_map,
+// 2026-07-06). The SECOND render machine (bank12 loc_8c129cc0, the single NaomiLib POL model
+// drawer: impact sparks / cast flashes / 3D effects) composes TA parcels in the SH4 STORE
+// QUEUES and flushes them with `pref @r6`. Hooks at the drawer's 10 flush PCs read the
+// 32-byte SQ line VERBATIM at the flush instant (Sh4cntx.sq_buffer — byte-identical to what
+// the TA / deferred buffer receives; no register reconstruction). Per-frame flat buffer of
+// 36-byte records: { u8 kind (0=param line1, 1=param line2/face-colors, 2=vertex), u8 slot
+// (emit-slot idx 0..7 = r11>>2), u8 cls (slot-entry top byte: 0x10 = TA polygon FIFO direct,
+// 0xAC = deferred P2 command buffer), u8 pad, u8 line[32] }. Reset per video frame like BTCW.
+// Shipped as the PL3D wire tail; the client appends the lines verbatim to fr.ta.
+// The caps are shared by the capture AND the client wire-parse bound — keep in lockstep.
+#define MC_P3D_LINE_BYTES 36     // wire record: 4B header + 32B SQ line
+#define MC_P3D_MAX_LINES  910    // ~32KB/frame cap (peak measured ~116 polys x ~6 lines ~ 700)
+// Returns the packed per-frame record buffer (*outBytes = total bytes, multiple of 36).
+// Static, valid until the next frame's capture. Read by replica_live captureFrame.
+const uint8_t* mc_oracle_poly3d(int* outBytes);
+
 // Collect HUD quads from a just-parsed rend_context (the surviving HUD/composite
 // pass). Called from mc_oracle_charPassCapture BEFORE the replica capture so the
 // HUDQ tail ships THIS pass's HUD. `rc` is forward-declared void* (cast to

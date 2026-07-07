@@ -3527,6 +3527,7 @@ static constexpr uint32_t GSTA_MCRR_MAGIC = 0x5252434Du;   // "MCRR"
 static constexpr uint32_t GSTA_FRMX_MAGIC = 0x784D5246u;   // "FRMx"
 static constexpr uint32_t GSTA_HUDQ_MAGIC = 0x48554451u;   // "HUDQ"
 static constexpr uint32_t GSTA_BTCW_MAGIC = 0x57435442u;   // "BTCW" (resolved-body-tcw tail)
+static constexpr uint32_t GSTA_PL3D_MAGIC = 0x44334C50u;   // "PL3D" (3D-machine SQ-flush tail)
 
 static bool                 _gstaMode = false;
 static std::atomic<bool>    _gstaSeeded{false};       // static prefix applied
@@ -4302,6 +4303,58 @@ static inline double _gnow() {
 		std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+// PL3D injection TCW-class blocklist (Phase-A tradeoff, 2026-07-06 tuning round 2).
+// Defaults = the GIANT PERSPECTIVE SHEETS (P0 classes 0x50096f00/0x50097200 — the 32kpx
+// hail ground/sky planes: LEGITIMATE engine content, but injected verbatim WITHOUT the
+// engine's projection/clip context they rasterize as screen-covering orange/yellow
+// wedges burying the characters — scratchpad/_livefix_312.png) + 0x1009ce00 (the
+// RTT-suspect class whose texture is prefix-zero -> would draw garbage). Phase-B
+// transpile will carry the proper projection/clip context and lift this blocklist.
+// Env MAPLECAST_P3D_SKIP_TCW=comma-hex overrides the list; SET-BUT-EMPTY disables.
+static uint32_t s_p3dSkipTcw[16];
+static int      s_p3dSkipTcwN = -1;    // -1 = not parsed yet
+static void p3dSkipTcwInit()
+{
+	if (s_p3dSkipTcwN >= 0) return;
+	s_p3dSkipTcwN = 0;
+	const char* v = std::getenv("MAPLECAST_P3D_SKIP_TCW");
+	if (!v) {                                    // unset -> the default blocklist
+		s_p3dSkipTcw[0] = 0x50096F00u;           // perspective sheet A (hail ground/sky)
+		s_p3dSkipTcw[1] = 0x50097200u;           // perspective sheet B
+		s_p3dSkipTcw[2] = 0x1009CE00u;           // RTT-suspect (prefix-zero texture)
+		s_p3dSkipTcwN = 3;
+		return;
+	}
+	const char* p = v;                           // set (possibly empty) -> parse; empty disables
+	while (*p && s_p3dSkipTcwN < 16) {
+		char* end = nullptr;
+		unsigned long b = strtoul(p, &end, 16);
+		if (end == p) break;
+		s_p3dSkipTcw[s_p3dSkipTcwN++] = (uint32_t)b;
+		p = (*end == ',') ? end + 1 : end;
+	}
+}
+
+// TA chunk-size rules (CONFIRMED core/hw/pvr/ta.cpp TaTypeLut — the injection validator
+// and the stream sanity scan derive sizes EXACTLY like flycast's TA FSM):
+//   POLY GLOBAL is 64B iff (Volume==0 && Col_Type==2 && Texture && Offset) [Type 2]
+//                       or (Volume==1 && Col_Type==2)                      [Type 4]
+//                (poly_header_type_size, ta.cpp:386-436; else 32B)
+//   POLY VERTEX is 64B iff data-type id in {5,6,11,12,13,14} (ta.cpp:141)
+//                == Texture && (Volume || Col_Type==1); else 32B.
+//   SPRITE GLOBAL (ParaType 5) is 32B and its vertices are 64B (ta.cpp:163).
+// PCW obj_ctrl bits: [0]UV_16bit [1]Gouraud [2]Offset [3]Texture [4:5]Col_Type [6]Volume.
+static inline bool p3dPcwHdr64(uint32_t pcw) {
+	uint32_t colType = (pcw >> 4) & 3, vol = (pcw >> 6) & 1;
+	bool tex = ((pcw >> 3) & 1) != 0, off = ((pcw >> 2) & 1) != 0;
+	return (vol == 0 && colType == 2 && tex && off) || (vol == 1 && colType == 2);
+}
+static inline bool p3dPcwVtx64(uint32_t pcw) {
+	uint32_t colType = (pcw >> 4) & 3, vol = (pcw >> 6) & 1;
+	bool tex = ((pcw >> 3) & 1) != 0;
+	return tex && (vol == 1 || colType == 1);
+}
+
 static void gstaApplyFrame(const uint8_t* d, size_t n)
 {
 	if (!_gstaSeeded.load(std::memory_order_acquire)) return;
@@ -4393,6 +4446,24 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 		if (nWords <= (size_t)(MC_BTCW_MAX_NODES * (2 + MC_BTCW_MAX_TILES)) && p + (size_t)nWords * 4 <= n) {
 			render_frame_set_body_tcws((const uint32_t*)(d + p), (int)nWords);
 			p += (size_t)nWords * 4;
+		}
+	}
+
+	// ---- PL3D TAIL: u32 magic "PL3D", u32 nBytes, then nBytes of 36-byte flush records
+	// { u8 kind (0=param line1, 1=param line2/face-colors, 2=vertex), u8 slot, u8 cls
+	// (0x10 = TA-direct slot0 / 0xAC = deferred P2 buffer), u8 pad, 32B SQ line } — the
+	// 3D-machine (bank12 loc_8c129cc0 POL drawer: impact sparks / cast flashes) TA parcels
+	// captured VERBATIM at the engine's own SQ flushes (re_kb/64 finding:3d_draw_emit_map).
+	// Injected into fr.ta below (Phase A scaffold). Bound must match MC_P3D_* (oracle_hook.h). ----
+	static std::vector<uint8_t> _gstaP3d;
+	_gstaP3d.clear();
+	if (p + 8 <= n && gle32(d + p) == GSTA_PL3D_MAGIC) {
+		p += 4;
+		uint32_t nb = gle32(d + p); p += 4;
+		if (nb <= (uint32_t)(MC_P3D_MAX_LINES * MC_P3D_LINE_BYTES)
+		    && (nb % MC_P3D_LINE_BYTES) == 0 && p + nb <= n) {
+			_gstaP3d.assign(d + p, d + p + nb);
+			p += nb;
 		}
 	}
 
@@ -4669,6 +4740,290 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 		std::vector<uint8_t> eol(32, 0);
 		fr.ta.insert(fr.ta.end(), eol.begin(), eol.end());
 	}
+
+	// ---- PL3D INJECTION (Phase A, re_kb/64): append the 3D-machine parcels VERBATIM into
+	// the open TR list before its EndOfList — they are already TA-format screen-space polys
+	// composed by the engine's own drawer; textures are static POL-embedded TCWs resolving
+	// from resident VRAM (P0 verdict, finding:3d_texture_binding — no palettes). Placed
+	// AFTER the HUD append: the HUD block resizes to the ABSOLUTE bodyLen-32, which would
+	// truncate anything appended before it. The CLASS FILTER now lives at CAPTURE
+	// (maplecast_oracle_hook.cpp p3dCapture, default cls 0x10 = TA-direct only, widen via
+	// MAPLECAST_P3D_CLS on the HEADLESS) — whatever classes the wire ships are injected
+	// here, counted separately (slot0 vs deferred). Env MAPLECAST_GSTA_POLY3D=0 skips
+	// injection (parse/dump still run). ----
+	size_t p3dSlot0 = 0, p3dDefer = 0, p3dOrphan = 0, p3dPolys = 0, p3dTcwSkip = 0, p3dBboxSkip = 0;
+	size_t p3dFormSkip = 0, p3dK1Drop = 0, p3dNoK1Skip = 0, p3dRuleDiv = 0;
+	if (!_gstaP3d.empty()) {
+		const char* pe3 = std::getenv("MAPLECAST_GSTA_POLY3D");
+		if (!(pe3 && pe3[0] == '0')) {
+			p3dSkipTcwInit();
+			const size_t nRec = _gstaP3d.size() / MC_P3D_LINE_BYTES;
+			// LIST-ORDER FIX (2026-07-07, ROOT-CAUSED via mirror-native comparison + frozen live
+			// gate @ vf53900): the injected 3D-machine/HUD parcels carry PCW.ListType=0 (OPAQUE)
+			// and the ENGINE emits them IN THE OPAQUE LIST (mirror _live11 @vf53900: pcw
+			// 808c002e/3c/3e tcw 0809be00 all list-0, byte-identical strip structure to ours).
+			// The DC TA is list-ORDER-strict (OP -> OP-mod -> TR -> TR-mod -> PT, each ONCE). The
+			// old code appended these AFTER the body/HUD TR list. Two prior attempts failed:
+			//   (a) append into the open TR list (strip TR EOL) -> flycast's ta_fsm_cl binds the
+			//       OPAQUE-intended parcels into TR (ta_vtx.cpp ta_main:476 only startList()s when
+			//       CurrentList==None; mid-list globals inherit the open list, IGNORING PCW.ListType)
+			//       -> per-triangle autosorted/alpha-blended (gldraw.cpp drawSorted) -> mega-strip.
+			//   (b) keep the TR EOL so a 2nd OP list opens after TR -> flycast's ta_poly_data vertex
+			//       loop (ta_vtx.cpp:381-388) is still mid-strip at the boundary and SWALLOWS that
+			//       EOL as a vertex (release verify() is a no-op) -> endList never runs, CurrentList
+			//       stays TR -> injected globals swallowed into the TR mega-strip (LIVE-MEASURED:
+			//       MAPLECAST_DUMP_TR_EXTENTS ON showed TR count=185 span=743 despite the static EOL).
+			// FIX: emit the injected OPAQUE parcels INTO THE STAGE OP PREFIX, before its EOL, so
+			// they are in-order within the single OP list and flycast bins them OP per their PCW.
+			// Build into p3dOut, then insert at (stagePrefixLen-32) = just before the stage OP EOL.
+			// (Validated offline: render_ta.mjs renders HUD/portraits/meters clean in OPAQUE, floor
+			// blue+behind, ZERO olive wedge; _listframe shows ONE OP list + ONE TR list, DC-legal.)
+			std::vector<uint8_t> p3dOut;
+			p3dOut.reserve(nRec * 32);
+			// PARCEL-GRANULAR walk. Per parcel (a kind-0 param + its kind-1/2 lines), BEFORE
+			// appending:
+			//   1. ORPHAN GUARD (round 1): lines before any param are skipped — a capture gap
+			//      degrades to absence, not the 800-vert giant-poly garbage.
+			//   2. KIND-1 BY THE STRICT ColType RULE (iteration 4c FINAL — raw mirror stream
+			//      m1680 +0x198A0, per-variant table exact 31/31 + 0/33; SUPERSEDES both the
+			//      iter-3 ta.cpp-rule validator AND the first iter-4 "kind-1 never injected"
+			//      spec, whose 'hook artifact' verdict was the differ's own walker bug):
+			//      PVR spec — ColType==2 ((PCW>>4)&3) => 64-byte global, the face-color line
+			//      IS in-stream at +32 (PCWs 0x808c002c/2d/2e: 31/31 exact); ColType==3 =>
+			//      32-byte global, NO second line (0x808c003c/3e: 0/33). The capture is
+			//      byte-faithful INCLUDING kind-1 (64/64 byte-exact at the calm frame).
+			//      EITHER wrong polarity wedges one family: drop kind-1 on ColType-2 and the
+			//      TA eats v0's coords as intensity colors (saturated bar-yellow, one-line
+			//      shift); expect it on ColType-3 and the real v0 is eaten as colors — same
+			//      wedge. POLICY: inject kind-1 IFF ColType==2 STRICT. A ColType-2 parcel
+			//      missing its captured kind-1 (capture gap) -> SKIP the whole parcel, NEVER
+			//      synthesize (nok1skip). A ColType!=2 parcel carrying one -> drop that line
+			//      only (k1drop). If the strict rule and flycast's own TaTypeLut
+			//      (p3dPcwHdr64) DISAGREE on a PCW -> skip + count (rulediv): flycast's
+			//      parser consumes fr.ta, so a divergent parcel mis-sizes in EITHER form
+			//      (cannot fire on the measured families — 0x2c/2d/2e are Tex+Offset so both
+			//      rules say 64B; 0x3c/3e are ColType-3 so both say 32B).
+			//   3. TA-FORM VALIDATION (iteration 3): ParaType==4; only kind-1/2 after the param;
+			//      64B-vertex parcels arrive as [head][cont] pairs with ParaType-7 heads; the
+			//      LAST vertex carries End_Of_Strip (bit28). Malformed -> skip (formskip).
+			//   4. TCW-CLASS BLOCKLIST (Phase-A tradeoff, see p3dSkipTcwInit) + 5. BBOX net.
+			// CAPTURE GAP FILED (iteration 4 item 3, not fixed here): the capture holds the
+			// OP-pass submission only (captured PCWs have list bits = 0); the mirror shows the
+			// engine RE-SUBMITS the same classes on the TR pass (list2) — the biggest orphan
+			// class (14-30/frame). The per-pass rewind (oracle_hook p3dCapture) may be
+			// discarding one of the two submissions if OP and TR emit in DIFFERENT passes —
+			// candidate fixes: keep the last COMPLETE pass PAIR, or capture list bits per
+			// parcel and re-emit both lists here. Coordinate with the emission expert's differ
+			// (byte truth per class per list) before changing the capture.
+			size_t i = 0;
+			while (i < nRec) {
+				const uint8_t* rec = &_gstaP3d[i * MC_P3D_LINE_BYTES];
+				if (rec[0] != 0) { p3dOrphan++; i++; continue; }        // GUARD: param-less line
+				size_t j = i + 1;                                        // parcel = records [i, j)
+				while (j < nRec && _gstaP3d[j * MC_P3D_LINE_BYTES] != 0) j++;
+				const uint8_t* pl = rec + 4;                             // param line 1 [PCW][ISP][TSP][TCW]
+				uint32_t pcw = gle32(pl), tcw = gle32(pl + 12);
+				// --- 2. header-size policy: STRICT ColType==2 rule (iteration 4c) ----------
+				size_t hdrLines = (i + 1 < j && _gstaP3d[(i + 1) * MC_P3D_LINE_BYTES] == 1) ? 2 : 1;
+				bool   strict64 = (((pcw >> 4) & 3) == 2);               // PROVEN: ColType==2 <=> 64B global
+				if (strict64 != p3dPcwHdr64(pcw)) { p3dRuleDiv++; i = j; continue; }   // parser-divergent PCW: skip
+				if (strict64 && hdrLines != 2)    { p3dNoK1Skip++; i = j; continue; }  // capture gap: NEVER synthesize
+				// --- 3. TA-form validation -------------------------------------------------
+				bool v64       = p3dPcwVtx64(pcw);
+				bool malformed = ((pcw >> 29) != 4);                     // drawer emits poly globals only
+				if (!malformed)
+					for (size_t t = i + hdrLines; t < j; t++)            // only vertex lines after the header
+						if (_gstaP3d[t * MC_P3D_LINE_BYTES] != 2) { malformed = true; break; }
+				size_t vtxLines = j - i - hdrLines;
+				if (!malformed && vtxLines) {
+					if (v64 && (vtxLines & 1)) malformed = true;         // 64B verts = [head][cont] pairs
+					size_t step = v64 ? 2 : 1;
+					for (size_t t = i + hdrLines; !malformed && t < j; t += step) {
+						const uint8_t* q = &_gstaP3d[t * MC_P3D_LINE_BYTES];
+						if ((gle32(q + 4) >> 29) != 7) malformed = true; // every vertex head = ParaType 7
+					}
+					if (!malformed) {                                    // last vertex must close the strip
+						size_t lastHead = v64 ? (j - 2) : (j - 1);
+						const uint8_t* q = &_gstaP3d[lastHead * MC_P3D_LINE_BYTES];
+						if (!(gle32(q + 4) & 0x10000000u)) malformed = true;   // End_Of_Strip bit28
+					}
+				}
+				if (malformed) { p3dFormSkip++; i = j; continue; }
+				// --- 3. TCW-class blocklist ------------------------------------------------
+				bool skip = false;
+				if (pcw & 0x8u) {                                        // textured param
+					for (int k = 0; k < s_p3dSkipTcwN; k++)
+						if ((tcw & 0xFFFFFF00u) == (s_p3dSkipTcw[k] & 0xFFFFFF00u)) {
+							skip = true; p3dTcwSkip++; break;
+						}
+				}
+				// --- 4. bbox safety net (structure-aware: heads only, v64-paired) ----------
+				if (!skip && vtxLines) {
+					float bx0 = 1e9f, by0 = 1e9f, bx1 = -1e9f, by1 = -1e9f;
+					size_t step = v64 ? 2 : 1;
+					for (size_t t = i + hdrLines; t < j; t += step) {
+						const uint8_t* vl = &_gstaP3d[t * MC_P3D_LINE_BYTES] + 4;
+						float x, y; uint32_t ux = gle32(vl + 4), uy = gle32(vl + 8);
+						memcpy(&x, &ux, 4); memcpy(&y, &uy, 4);
+						if (x < bx0) bx0 = x; if (x > bx1) bx1 = x;
+						if (y < by0) by0 = y; if (y > by1) by1 = y;
+					}
+					if (bx1 >= bx0 && ((bx1 - bx0) > 1400.f || (by1 - by0) > 1400.f)) {
+						skip = true; p3dBboxSkip++;
+					}
+				}
+				if (!skip) {
+					p3dPolys++;
+					for (size_t t = i; t < j; t++) {
+						const uint8_t* lr = &_gstaP3d[t * MC_P3D_LINE_BYTES];
+						// KIND-1 BY STRICT ColType (iteration 4c): in-stream for ColType-2
+						// (the 64B global's +32 face-color half), dropped for ColType!=2.
+						if (lr[0] == 1 && !strict64) { p3dK1Drop++; continue; }
+						if (lr[2] == 0xAC) p3dDefer++; else p3dSlot0++;
+						p3dOut.insert(p3dOut.end(), lr + 4, lr + 4 + 32);  // the 32B SQ line, verbatim
+					}
+				}
+				i = j;
+			}
+			// Splice the injected OPAQUE parcels into the stage OP list, just BEFORE its EOL
+			// (which lives at [stagePrefixLen-32, stagePrefixLen)). This keeps DC list order legal
+			// (single OP list) and puts them where flycast bins them OPAQUE per their PCW.ListType.
+			if (!p3dOut.empty()) {
+				if (stagePrefixLen >= 32 && stagePrefixLen <= fr.ta.size()) {
+					fr.ta.insert(fr.ta.begin() + (ptrdiff_t)(stagePrefixLen - 32),
+					             p3dOut.begin(), p3dOut.end());
+				} else {
+					// No stage OP prefix this frame: prepend a self-contained OP list
+					// [injected][EOL] at the front so the parcels still bin OPAQUE, in order.
+					std::vector<uint8_t> eol(32, 0);
+					p3dOut.insert(p3dOut.end(), eol.begin(), eol.end());
+					fr.ta.insert(fr.ta.begin(), p3dOut.begin(), p3dOut.end());
+				}
+			}
+			static int _p3dLog = 0;
+			if ((_p3dLog++ % 120) == 0)
+				printf("[GSTA] p3d: %zu polys, %zu lines injected (slot0=%zu defer=%zu orphan=%zu "
+				       "k1drop=%zu nok1skip=%zu rulediv=%zu formskip=%zu tcwskip=%zu bboxskip=%zu) vf=%u\n",
+				       p3dPolys, p3dSlot0 + p3dDefer, p3dSlot0, p3dDefer, p3dOrphan,
+				       p3dK1Drop, p3dNoK1Skip, p3dRuleDiv, p3dFormSkip, p3dTcwSkip, p3dBboxSkip, vframe);
+		}
+	}
+
+	// ---- PL3D DUMP (gate [6] input): gsta_polys_<vframe>.txt under MAPLECAST_DUMP_GSTA_VRAM.
+	// One line per poly: slot, cls, param=[w0]=PCW, w1=ISP, w2=TSP, w3=TCW (the LIVE param
+	// flush 0x8C129FE6 carries the real 4-word global — 2026-07-06 kind retag; only the RARE
+	// culled-path params 0x8C129E66 have w1-w3 zeroed by the engine @0x8C129E5E-64), vertex
+	// count (lines whose w0 ParaType bits 31:29 == 7), raw line count, bbox from the vertex
+	// heads' x=w1/y=w2 floats. Vertex records before any param open an implicit poly
+	// (param=0) — those are exactly what the injection's orphan guard skips. ----
+	{
+		// ONCE-PER-VFRAME (iteration 4 item 2 — 352-vs-62 dump inflation): the render-side
+		// consume path CANNOT accumulate (clientReceiveGsta drains _gstaReady once per
+		// published frame and ctx.rend.Clear()/tad.Clear() run per Process), so any
+		// multiplication is message-cadence or stale-file artifact. This guard makes the
+		// dump literally once per vframe (first message wins; repeats counted + logged so
+		// the upstream cadence is MEASURED, not guessed). NOTE for the gate: the dump dir
+		// may hold stale gsta_polys_*.txt files from a PREVIOUS run past the 4000-file cap —
+		// clear it per run; the [P3DDUMP] stdout line (vf + parcels + msg seq) is the
+		// cross-check that a file belongs to this run.
+		static int      _p3dDumpN = 0;
+		static uint32_t _p3dDumpVframe = 0xFFFFFFFFu;
+		static uint32_t _p3dDumpRepeats = 0;
+		static uint32_t _p3dMsgSeq = 0;
+		_p3dMsgSeq++;
+		const char* vd3 = std::getenv("MAPLECAST_DUMP_GSTA_VRAM");
+		if (vd3 && *vd3 && vframe == _p3dDumpVframe) {
+			_p3dDumpRepeats++;
+			if (_p3dDumpRepeats <= 16 || (_p3dDumpRepeats % 256) == 0)
+				printf("[P3DDUMP] repeat vframe %u (msg=%u repeats=%u) — dump skipped, injection unaffected\n",
+				       vframe, _p3dMsgSeq, _p3dDumpRepeats);
+		}
+		if (vd3 && *vd3 && _p3dDumpN < 4000 && vframe != _p3dDumpVframe) {
+			_p3dDumpN++;
+			_p3dDumpVframe = vframe;
+			printf("[P3DDUMP] vf=%u msg=%u tailLines=%zu tailBytes=%zu\n",
+			       vframe, _p3dMsgSeq, _gstaP3d.size() / MC_P3D_LINE_BYTES, _gstaP3d.size());
+			char p3path[512]; snprintf(p3path, sizeof(p3path), "%s/gsta_polys_%u.txt", vd3, vframe);
+			FILE* p3f = fopen(p3path, "w");
+			if (p3f) {
+				const size_t nRec = _gstaP3d.size() / MC_P3D_LINE_BYTES;
+				int  polyN = 0, verts = 0, lines = 0;
+				bool open = false;
+				uint32_t slot = 0, cls = 0, w[4] = {0,0,0,0};
+				float bx0 = 0, by0 = 0, bx1 = 0, by1 = 0;
+				auto flushPoly = [&]() {
+					if (!open) return;
+					fprintf(p3f, "poly%d slot=%u cls=%02x param=%08x w1=%08x w2=%08x w3=%08x "
+					             "verts=%d lines=%d bbox=%.1f,%.1f,%.1f,%.1f\n",
+					        polyN++, slot, cls, w[0], w[1], w[2], w[3], verts, lines, bx0, by0, bx1, by1);
+					open = false;
+				};
+				for (size_t i = 0; i < nRec; i++) {
+					const uint8_t* rec = &_gstaP3d[i * MC_P3D_LINE_BYTES];
+					const uint8_t* ln  = rec + 4;
+					uint32_t w0 = gle32(ln);
+					if (rec[0] == 0) {                     // param line 1: new poly record
+						flushPoly();
+						open = true; slot = rec[1]; cls = rec[2];
+						for (int k = 0; k < 4; k++) w[k] = gle32(ln + k * 4);
+						verts = 0; lines = 0;
+						bx0 = by0 = 1e9f; bx1 = by1 = -1e9f;
+					} else if (rec[0] == 2) {              // vertex line
+						if (!open) {                       // implicit poly (mid-frame carry)
+							open = true; slot = rec[1]; cls = rec[2];
+							w[0] = w[1] = w[2] = w[3] = 0;
+							verts = 0; lines = 0;
+							bx0 = by0 = 1e9f; bx1 = by1 = -1e9f;
+						}
+						lines++;
+						if ((w0 >> 29) == 7) {             // TA vertex parcel head (ParaType 7)
+							verts++;
+							float x, y; uint32_t ux = gle32(ln + 4), uy = gle32(ln + 8);
+							memcpy(&x, &ux, 4); memcpy(&y, &uy, 4);
+							if (x < bx0) bx0 = x; if (x > bx1) bx1 = x;
+							if (y < by0) by0 = y; if (y > by1) by1 = y;
+						}
+					}
+					// rec[0] == 1 (param line 2, face colors) needs no dump field
+				}
+				flushPoly();
+				fclose(p3f);
+			}
+
+			// TA-STREAM SANITY (iteration-3 unit test, logged to stdout so the gate file
+			// stays clean): walk the FULLY-assembled fr.ta (stage + bodies + HUD + PL3D +
+			// EOLs) with flycast's exact size rules (p3dPcwHdr64/p3dPcwVtx64 == ta.cpp
+			// TaTypeLut; sprite globals -> 64B verts, ta.cpp:163). anomalies MUST be 0 and
+			// glob >= injectedPolys — a nonzero anomaly count pinpoints a splice desync
+			// (vertex with no open list, truncated 64B tail, leftover bytes).
+			{
+				size_t off2 = 0, nGlob = 0, nSpr = 0, nVtx = 0, nEol = 0, nAnom = 0;
+				bool vtx64 = false, openList = false;
+				const uint8_t* T = fr.ta.data(); const size_t TN = fr.ta.size();
+				while (off2 + 32 <= TN) {
+					uint32_t w0 = gle32(T + off2);
+					uint32_t pt = w0 >> 29;
+					size_t sz = 32;
+					if (pt == 0)      { nEol++; openList = false; }
+					else if (pt == 4) { nGlob++; openList = true; vtx64 = p3dPcwVtx64(w0);
+						// header size by the STRICT ColType rule (iteration 4c, mirror-proven);
+						// a strict-vs-TaTypeLut divergence would mis-size in flycast's parser ->
+						// counted as an anomaly (injection already skips such parcels).
+						bool s64 = ((w0 >> 4) & 3) == 2;
+						if (s64 != p3dPcwHdr64(w0)) nAnom++;
+						if (s64) sz = 64; }
+					else if (pt == 5) { nSpr++;  openList = true; vtx64 = true; }
+					else if (pt == 7) { nVtx++; if (!openList) nAnom++; if (vtx64) sz = 64; }
+					if (off2 + sz > TN) { nAnom++; break; }        // truncated 64B tail
+					off2 += sz;
+				}
+				if (off2 != TN) nAnom++;                           // leftover bytes
+				printf("[P3DTA] vf=%u ta=%zuB glob=%zu spr=%zu vtx=%zu eol=%zu anomalies=%zu injectedPolys=%zu\n",
+				       vframe, TN, nGlob, nSpr, nVtx, nEol, nAnom, p3dPolys);
+			}
+		}
+	}
+
 	fr.vframe    = vframe;
 	fr.vramDirty = (written > 0);
 	fr.palDirty  = palDirty;
@@ -4977,6 +5332,42 @@ bool clientReceiveGsta(rend_context& rc, bool& vramDirty)
 			printf("[GSTA] parsed: verts=%zu op=%zu pt=%zu tr=%zu (taSize=%zu)\n",
 				ctx.rend.verts.size(), ctx.rend.global_param_op.size(),
 				ctx.rend.global_param_pt.size(), ctx.rend.global_param_tr.size(), taSize);
+	}
+
+	// DIAG (MAPLECAST_DUMP_TR_EXTENTS=1): dump flycast's ACTUAL RUNTIME PolyParam
+	// screen extents per list, computed from ctx.rend.verts[first..first+count]. Pins
+	// whether flycast's runtime parser produces LARGE extents for the injected list-2
+	// parcels (a runtime-vs-TaTypeLut divergence — the wedge would be a PARSE bug) or
+	// SMALL extents matching our two byte-faithful models (the wedge is a RENDER bug).
+	// Read-only; A/B POLY3D=1 vs =0 on a held frame (mock_hold_server.mjs).
+	if (const char* de = std::getenv("MAPLECAST_DUMP_TR_EXTENTS"); de && *de && *de != '0') {
+		// Value "1" -> stdout (lost for the GUI client); any other value -> that file path.
+		FILE* tf = (strcmp(de, "1") == 0) ? stdout : fopen(de, "a");
+		if (!tf) tf = stdout;
+		auto dumpList = [&](const char* nm, const std::vector<PolyParam>& L) {
+			const auto& V = ctx.rend.verts;
+			int nbig = 0; float maxspan = 0.f; int bx0=0,by0=0,bx1=0,by1=0, boff=0; uint32_t btcw=0, bpcw=0; size_t bcnt=0;
+			for (const auto& pp : L) {
+				if (pp.count < 3) continue;
+				float mnx=1e30f,mxx=-1e30f,mny=1e30f,mxy=-1e30f;
+				for (u32 i = pp.first; i < pp.first + pp.count && i < V.size(); i++) {
+					float x = V[i].x, y = V[i].y;
+					if (x<mnx)mnx=x; if(x>mxx)mxx=x; if(y<mny)mny=y; if(y>mxy)mxy=y;
+				}
+				float span = (mxx-mnx) > (mxy-mny) ? (mxx-mnx) : (mxy-mny);
+				if (span > 500.f) {
+					nbig++;
+					fprintf(tf, "[TREXT] %s BIG pp pcw=%08x tcw=%08x first=%u count=%u bbox=[%d,%d,%d,%d] span=%.0f\n",
+						nm, pp.pcw.full, pp.tcw.full, pp.first, pp.count, (int)mnx,(int)mny,(int)mxx,(int)mxy, span);
+				}
+				if (span > maxspan) { maxspan=span; bx0=(int)mnx;by0=(int)mny;bx1=(int)mxx;by1=(int)mxy; btcw=pp.tcw.full; bpcw=pp.pcw.full; bcnt=pp.count; }
+			}
+			fprintf(tf, "[TREXT] %s: polys=%zu big(span>500)=%d maxspan=%.0f (pcw=%08x tcw=%08x count=%zu bbox=[%d,%d,%d,%d])\n",
+				nm, L.size(), nbig, maxspan, bpcw, btcw, bcnt, bx0,by0,bx1,by1);
+		};
+		dumpList("OP", ctx.rend.global_param_op);
+		dumpList("TR", ctx.rend.global_param_tr);
+		if (tf != stdout) fclose(tf);
 	}
 	return true;
 }
