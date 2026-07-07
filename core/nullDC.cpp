@@ -20,6 +20,7 @@
 #include "oslib/i18n.h"
 #include "input/maplelink.h"
 #include "network/mc_readtrace.h"
+#include "network/gsta_charpass.h"
 #include <time.h>
 #ifdef TARGET_UWP
 #include <winrt/Windows.System.h>
@@ -123,6 +124,12 @@ int flycast_init(int argc, char* argv[])
 		// STEP 2 read-set trace: parse MAPLECAST_READTRACE + force interpreter
 		// BEFORE the SH4 backend is created at game load. No-op when unset.
 		mc_readtrace::init();
+
+		// Phase 2a byte gate: MAPLECAST_CHARPASS_SELFTEST=<seed2.bin> runs the real
+		// char-pass driver in-process and prints the TA md5 (expect be1377d2...),
+		// then exits. One-shot, gated OFF by default.
+		if (gsta_charpass::selftest_from_env())
+			std::exit(0);
 
 		return 0;
 	} catch (const std::exception& e) {

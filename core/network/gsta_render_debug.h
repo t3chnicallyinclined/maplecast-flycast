@@ -44,7 +44,12 @@ struct Globals {
 
     // ============================ HUD SYNTH =======================================
     std::atomic<int> hudBarsOn{1};        // procedural life bars
-    std::atomic<int> hudMeterOn{1};       // procedural super meter
+    std::atomic<int> hudMeterOn{0};       // procedural super meter — DEFAULT OFF (2026-07-07):
+                                          // the synth drawMeter placed a 3-row bar at Y 61.9/85.3/105.4,
+                                          // which the mirror ground truth proves are the NAME-PLATE slots,
+                                          // not a meter — the real super meter is the BOTTOM bar. This was
+                                          // the user-reported "meter up by the health" doubling. The
+                                          // engine-injected HUD is authoritative for the meter.
     std::atomic<int> hudFramesOn{1};      // (mirrors stageFramesOn for the panel) baked frames band
     std::atomic<int> hudGradientOn{1};    // life-bar warm->team gradient (0 = flat team color)
     std::atomic<int> hudChipOn{1};        // red_health chip trail

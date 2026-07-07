@@ -2721,6 +2721,10 @@ static bool s_p3dClsAll = false;
 static bool s_p3dClsInit = []{
 	const char* v = getenv("MAPLECAST_P3D_CLS");
 	if (!v || !*v) { s_p3dClsList[0] = 0x10; s_p3dClsN = 1; return true; }   // default: TA-direct only
+	// NOTE (re_kb/65): the electric/hit effects ride slot2/cls 0xAC (TRANSLUCENT). MAPLECAST_P3D_CLS=10,ac
+	// captures them — BUT the current hand-assembly injection routes everything to the OP prefix, which
+	// would re-wedge a TR poly. The proper fix (capture 0xAC + inject into a TR list) is SUPERSEDED by the
+	// controlled-SH4-render redirect: the real render emits these effects natively in the correct list.
 	if (v[0]=='a' || v[0]=='A') { s_p3dClsAll = true; return true; }         // "all"
 	const char* p = v;
 	while (*p && s_p3dClsN < 8) {

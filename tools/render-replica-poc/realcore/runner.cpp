@@ -69,8 +69,21 @@ static const size_t OTHER_CAP = 128;
 struct TaChunk { u32 dest; u8 data[32]; };
 static std::vector<TaChunk> g_ta;
 
+// --drop-scratch per-region miss accounting: the render-scratch regions the current
+// wire ships but the driver is HYPOTHESIZED to rebuild within its own char-pass closure.
+// A zeroed byte read-before-write here = genuine cross-frame input (FALSIFY); zero misses
+// + byte-exact TA = driver-rebuilt (CONFIRM).
+struct ScratchRange { u32 lo, hi; const char* name; u64 miss; u32 firstPc, firstAddr; };
+static std::vector<ScratchRange> g_scratch;
 static inline void logMiss(u32 addr) {
     if (g_miss.size() < MISS_CAP) g_miss.push_back({ g_curPc, addr });
+    u32 phys = addr & 0x1FFFFFFFu;
+    for (auto& s : g_scratch)
+        if (phys >= s.lo && phys < s.hi) {
+            if (s.miss == 0) { s.firstPc = g_curPc; s.firstAddr = addr; }
+            s.miss++;
+            break;
+        }
 }
 static inline void logOther(u32 addr, u32 sz) {
     if (g_other.size() < OTHER_CAP) g_other.push_back({ g_curPc, addr, sz });
@@ -254,9 +267,11 @@ int main(int argc, char** argv) {
     const char* seedPath = (argc > 1) ? argv[1] : "rt_seed.bin";
     bool doIsolate = true;
     bool dropChars = false;   // negative control: also zero char structs/objpool (a NEEDED region)
+    bool dropScratch = false; // GATING TEST: also zero the render-scratch the driver rebuilds
     for (int i = 1; i < argc; i++) {
         if (!std::strcmp(argv[i], "--no-isolate")) doIsolate = false;
         if (!std::strcmp(argv[i], "--drop-chars")) dropChars = true;
+        if (!std::strcmp(argv[i], "--drop-scratch")) dropScratch = true;
     }
 
     FILE* f = std::fopen(seedPath, "rb");
@@ -323,6 +338,39 @@ int main(int argc, char** argv) {
     std::printf("[isolate] %s — zeroed %llu / %u non-resident bytes\n",
                 doIsolate ? "ON" : "OFF(control)", (unsigned long long)zeroed, RAM_BYTES);
 
+    // ---- GATING TEST: --drop-scratch. ADDITIONALLY zero the render-scratch regions the
+    // current wire ships but the driver is hypothesized to REBUILD within its own closure.
+    // If any is read-before-write -> genuine cross-frame input (FALSIFY, reported per-region).
+    if (dropScratch) {
+        auto ramRd32 = [&](u32 guest) -> u32 {
+            u32 off = (guest & 0x1FFFFFFFu) - RAM_LO;
+            u32 v; std::memcpy(&v, &g_ram[off], 4); return v;
+        };
+        // Resolve the pointer-based idxtab/rectab arenas from the tab_ptr window (0x8C2DAD3C/4C),
+        // exactly as maplecast_replica_live.cpp buildTables does.
+        u32 idxtab = ramRd32(0x8C2DAD3Cu), rectab = ramRd32(0x8C2DAD4Cu);
+        auto addScratch = [&](u32 guestLo, u32 len, const char* name) {
+            u32 lo = guestLo & 0x1FFFFFFFu;
+            g_scratch.push_back({ lo, lo + len, name, 0, 0, 0 });
+        };
+        addScratch(0x8C1F9000u, 0x3000u, "render-scratch(arena+tiledesc 0x1F9000-1FC000)");
+        addScratch(idxtab,      0x2000u, "idxtab-arena");
+        addScratch(rectab,      0x10000u, "rectab-arena");
+        static const u32 EFX[7] = { 0x8C565000u, 0x8C955000u, 0x8C6B5000u,
+                                    0x8CAA5000u, 0x8C805000u, 0x8CBF5000u, 0x8CD45000u };
+        for (int i = 0; i < 7; i++) addScratch(EFX[i], 0x3000u, "efxtmpl");
+        u64 zs = 0;
+        for (auto& s : g_scratch)
+            for (u32 phys = s.lo; phys < s.hi; phys++) {
+                u32 off = phys - RAM_LO;
+                if (off < RAM_BYTES && !g_zeroed[off]) { g_ram[off] = 0; g_zeroed[off] = 1; zs++; }
+            }
+        std::printf("[drop-scratch] ON — zeroed %llu scratch bytes; idxtab=0x%08X rectab=0x%08X; regions:\n",
+                    (unsigned long long)zs, idxtab, rectab);
+        for (auto& s : g_scratch)
+            std::printf("  scratch 0x%08X..0x%08X  %s\n", s.lo | 0x80000000u, s.hi | 0x80000000u, s.name);
+    }
+
     // wire memory handlers
     ReadMem8 = rd8; ReadMem16 = rd16; IReadMem16 = rd16; ReadMem32 = rd32; ReadMem64 = rd64;
     WriteMem8 = wr8; WriteMem16 = wr16; WriteMem32 = wr32; WriteMem64 = wr64;
@@ -368,6 +416,23 @@ int main(int argc, char** argv) {
     std::printf("non-RAM reads: %zu (showing up to %zu)\n", g_other.size(), OTHER_CAP);
     for (auto& o : g_other)
         std::printf("  OTHER pc=0x%08X addr=0x%08X sz=%u\n", o.pc, o.addr, o.sz);
+
+    // ---- GATING TEST per-region verdict ----
+    if (!g_scratch.empty()) {
+        std::printf("\n===== DROP-SCRATCH PER-REGION VERDICT =====\n");
+        u64 tot = 0;
+        for (auto& s : g_scratch) {
+            tot += s.miss;
+            if (s.miss == 0)
+                std::printf("  REBUILT   0x%08X..0x%08X  %-42s  0 miss\n",
+                            s.lo | 0x80000000u, s.hi | 0x80000000u, s.name);
+            else
+                std::printf("  MUST-STAY 0x%08X..0x%08X  %-42s  %llu miss (first pc=0x%08X addr=0x%08X)\n",
+                            s.lo | 0x80000000u, s.hi | 0x80000000u, s.name,
+                            (unsigned long long)s.miss, s.firstPc, s.firstAddr);
+        }
+        std::printf("  TOTAL scratch read-before-write misses: %llu\n", (unsigned long long)tot);
+    }
 
     // dump TA
     if (!g_ta.empty()) {

@@ -3521,6 +3521,7 @@ static int64_t _clientNowUs() {
 // the mirror render loop in mainui.cpp runs.
 // =============================================================================
 #include "gsta_render_frame.h"
+#include "gsta_charpass.h"     // Phase 2a: native char-pass driver (real SH4 render)
 
 // MCRR / FRMx / HUDQ magics (LE on the wire)  --  match maplecast_replica_live.cpp.
 static constexpr uint32_t GSTA_MCRR_MAGIC = 0x5252434Du;   // "MCRR"
@@ -4624,7 +4625,43 @@ static void gstaApplyFrame(const uint8_t* d, size_t n)
 	if (prof) { double t=_gnow(); _gprof.stage += t-t0; t0=t; }
 
 	size_t stagePrefixLen = fr.ta.size();      // bytes occupied by the stage OP list (+EOL)
-	size_t bodyLen = stagePrefixLen + gstaEmitSpriteTA_append(fr.ta);   // == fr.ta.size()
+
+	// ---- PHASE 2a: NATIVE CHAR-PASS (MAPLECAST_GSTA_NATIVE_CHARPASS=1) ----
+	// Replace the hand-assembled body sprite-TA (+P3D injection) with the ENGINE's own
+	// char-pass render driver run in-process (gsta_charpass) on this frame's _gstaRam.
+	// The captured SQ parcels ARE the bodies + effects, correctly list-ordered (engine
+	// output) — spliced as its own segment after the stage OP list. Byte-exact vs the
+	// engine (md5 be1377d2..., proven by the standalone runner + in-process selftest).
+	// render_frame() above still ran (its SceneQuad drives palette-fix + gstaDecodeBodies
+	// texture decode). Gated OFF by default; transpile stays the fallback.
+	size_t bodyLen;
+	static int s_nativeCharpass = -1;
+	if (s_nativeCharpass < 0) {
+		const char* e = std::getenv("MAPLECAST_GSTA_NATIVE_CHARPASS");
+		s_nativeCharpass = (e && *e && *e != '0') ? 1 : 0;
+	}
+	bool nativeDone = false;
+	if (s_nativeCharpass) {
+		static std::vector<uint8_t> _nta; _nta.clear(); double _cpMs = 0;
+		if (gsta_charpass::run_live(_gstaRam.data(), _nta, &_cpMs) && !_nta.empty()) {
+			fr.ta.insert(fr.ta.end(), _nta.begin(), _nta.end());
+			std::vector<uint8_t> eol(32, 0); fr.ta.insert(fr.ta.end(), eol.begin(), eol.end());
+			bodyLen = fr.ta.size();
+			nativeDone = true;
+			if (prof) { double t=_gnow(); (void)t; }
+			static int _pn = 0;
+			if ((_pn++ % 120) == 0)
+				printf("[charpass] NATIVE TA %zu parcels %.2fms (byte-exact vs engine)\n",
+				       _nta.size()/32, _cpMs);
+		} else {
+			static bool _warned = false;
+			if (!_warned) { _warned = true;
+				printf("[charpass] NATIVE requested but run_live unavailable "
+				       "(set MAPLECAST_GSTA_CHARPASS_SEED=<RTSEED02>) — using transpile\n"); }
+		}
+	}
+	if (!nativeDone)
+		bodyLen = stagePrefixLen + gstaEmitSpriteTA_append(fr.ta);   // transpile fallback
 
 	// LIVE render-debug (control-WS): bodyOn=0 (or SOLO stage/hud) strips the body/scene TA
 	// (render_frame output), leaving stage+HUD only — isolate HUD/stage from bodies, no rebuild.

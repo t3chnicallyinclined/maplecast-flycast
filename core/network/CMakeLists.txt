@@ -1,6 +1,8 @@
 target_sources(${PROJECT_NAME} PRIVATE
         mc_readtrace.cpp
         mc_readtrace.h
+        gsta_charpass.cpp
+        gsta_charpass.h
         alienfnt_modem.cpp
         alienfnt_modem.h
         dns.cpp
