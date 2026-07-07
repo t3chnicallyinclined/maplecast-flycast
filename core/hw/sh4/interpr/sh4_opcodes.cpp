@@ -11,6 +11,7 @@
 #include "debug/gdb_server.h"
 #include "hw/sh4/dyna/decoder.h"
 #include "emulator.h"
+#include "network/mc_readtrace.h"
 
 #ifdef STRICT_MODE
 #include "hw/sh4/sh4_cache.h"
@@ -1150,6 +1151,8 @@ sh4op(i0000_nnnn_1000_0011)
 
 	if ((Dest >> 26) == 0x38) // Store Queue
 	{
+		// STEP 3 byte-gate: capture the engine's native TA parcel (no-op unless armed).
+		if (unlikely(mc_readtrace::g_armed)) mc_readtrace::onSqWrite(Dest, ctx);
 		ctx->doSqWrite(Dest, ctx);
 	}
 	else

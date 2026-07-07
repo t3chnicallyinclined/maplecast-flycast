@@ -3,6 +3,7 @@
 #include "mc_readtrace.h"
 #include "hw/sh4/sh4_if.h"     // Sh4cntx (p_sh4rcb->cntx.r[16], .pr)
 #include "hw/sh4/sh4_mem.h"    // addrspace::read32, mem_b (raw 16MB RAM), RAM_SIZE
+#include "hw/sh4/modules/ccn.h" // CCN[18] (QACR0/1 — the one shippable non-RAM dep)
 #include "cfg/option.h"        // config::DynarecEnabled
 #include <cstdio>
 #include <cstdlib>
@@ -36,6 +37,10 @@ static uint8_t*  g_ramWr   = nullptr;           // WRITES within the closure
 static uint8_t*  g_ramRbw  = nullptr;           // READ-BEFORE-WRITE (genuine external read)
 // Distinct non-RAM reads (PVR regs, VRAM, store-queue, etc.).
 static std::set<u32> g_other;
+
+// STEP 3 byte-gate: the ENGINE's native store-queue TA emission during the driver
+// window (same 32-byte parcels the standalone runner captures via doSqWrite).
+static std::vector<uint8_t> g_engineTa;   // appended 32B per SQ flush while armed
 
 static inline void setRamBit(u32 off){ g_ramBits[off >> 3] |= (uint8_t)(1u << (off & 7)); }
 static inline bool getRamBit(u32 off){ return (g_ramBits[off >> 3] >> (off & 7)) & 1u; }
@@ -211,21 +216,27 @@ static void step3_seed_dump(){
     if (!p || !p[0]) p = "rt_seed.bin";
     FILE* f = std::fopen(p, "wb");
     if (!f){ std::fprintf(stderr, "[readtrace] STEP3 seed: cannot open %s\n", p); return; }
-    const char magic[8] = {'R','T','S','E','E','D','0','1'};
+    // RTSEED02: header + CCN[18] (on-chip CPU regs incl QACR0/1 — the one non-RAM
+    // dep the runner found) + raw Sh4Context + raw 16MB RAM. Seeding CCN lets the
+    // standalone runner run with ZERO stubbed registers (byte-gate faithfulness).
+    const char magic[8] = {'R','T','S','E','E','D','0','2'};
     u32 entryPC = 0x8C030858u;
     u32 ctxSz   = (u32)sizeof(Sh4cntx);
     u32 ramSz   = (u32)RAM_SIZE;
+    u32 ccnSz   = (u32)sizeof(CCN);            // 18 * 4 = 72 bytes
     std::fwrite(magic, 1, 8, f);
     std::fwrite(&entryPC, 4, 1, f);
     std::fwrite(&g_spEntry, 4, 1, f);
     std::fwrite(&g_retPc, 4, 1, f);
     std::fwrite(&ctxSz, 4, 1, f);
     std::fwrite(&ramSz, 4, 1, f);
+    std::fwrite(&ccnSz, 4, 1, f);
+    std::fwrite(CCN, 1, ccnSz, f);             // on-chip CCN regs (QACR0/1 @ idx 14/15)
     std::fwrite(&Sh4cntx, 1, ctxSz, f);        // entry CPU/FP register context
     std::fwrite(&mem_b[0], 1, ramSz, f);       // entry 16MB main RAM
     std::fclose(f);
-    std::fprintf(stderr, "[readtrace] STEP3 SEED written (%u B ctx + %u B RAM) entryPC=0x%08X spEntry=0x%08X retPc=0x%08X -> %s\n",
-                 ctxSz, ramSz, entryPC, g_spEntry, g_retPc, p);
+    std::fprintf(stderr, "[readtrace] STEP3 SEED(RTSEED02) written (%u B ccn + %u B ctx + %u B RAM) QACR0=0x%08X QACR1=0x%08X entryPC=0x%08X spEntry=0x%08X retPc=0x%08X -> %s\n",
+                 ccnSz, ctxSz, ramSz, CCN[14], CCN[15], entryPC, g_spEntry, g_retPc, p);
 }
 
 // STEP 3 ISOLATE — zero every main-RAM byte OUTSIDE the resident read-set regions,
@@ -273,6 +284,18 @@ void onPc(u32 pc){
         if (g_isolated)
             std::fprintf(stderr, "[readtrace] STEP3 ISOLATE RESULT: RAN TO COMPLETION — real-opcode render reached retPc 0x%08X on RESIDENT-ONLY RAM (read-set PROVEN complete; no fault). Emitted-TA vs mirror = the byte/pixel gate.\n",
                          g_retPc | 0x80000000u);
+        // STEP 3 byte-gate: write the ENGINE's native SQ-emitted TA for this exact
+        // driver call (entry..retPc). Directly comparable to the runner's ta_out.bin.
+        if (!g_engineTa.empty()){
+            const char* tp = std::getenv("MAPLECAST_READTRACE_ENGINE_TA");
+            if (!tp || !tp[0]) tp = "engine_ta.bin";
+            if (FILE* tf = std::fopen(tp, "wb")){
+                std::fwrite(g_engineTa.data(), 1, g_engineTa.size(), tf);
+                std::fclose(tf);
+                std::fprintf(stderr, "[readtrace] STEP3 ENGINE TA written: %zu parcels (%zu bytes) -> %s\n",
+                             g_engineTa.size()/32, g_engineTa.size(), tp);
+            }
+        }
         dump();
     }
 }
@@ -297,6 +320,15 @@ void onWrite(u32 addr){
     if (Sh4cntx.r[15] >= g_spEntry) return;
     u32 m = addr & AREA_MASK;
     if (m >= RT_RAM_LO && m < RT_RAM_LO + RT_RAM_SZ) setWrBit(m - RT_RAM_LO);
+}
+
+// STEP 3 byte-gate: capture the 32-byte store-queue parcel the driver is about to
+// flush (pref @Rn into the SQ area). Gated on g_armed by the caller so it only
+// fires inside the driver window (entry..retPc) — the SAME window the standalone
+// runner captures, so g_engineTa is byte-comparable to runner_ta.bin.
+void onSqWrite(u32 dest, Sh4Context* ctx){
+    const uint8_t* sq = ctx->sq_buffer[(dest >> 5) & 1].data;
+    g_engineTa.insert(g_engineTa.end(), sq, sq + 32);
 }
 
 } // namespace mc_readtrace

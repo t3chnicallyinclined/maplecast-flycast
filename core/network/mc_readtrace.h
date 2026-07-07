@@ -23,6 +23,8 @@
 #pragma once
 #include "types.h"
 
+struct Sh4Context;   // for onSqWrite (STEP 3 engine TA capture)
+
 namespace mc_readtrace {
 
 extern bool g_enabled;   // MAPLECAST_READTRACE set at boot
@@ -58,5 +60,11 @@ void onRead(u32 addr);
 // the dump distinguishes build-then-read scratch (written earlier this closure)
 // from a genuine external read dependency.
 void onWrite(u32 addr);
+
+// STEP 3 byte-gate: capture the ENGINE's native store-queue TA emission (the same
+// 32-byte SQ parcels the standalone runner captures) during the driver window.
+// Called from the pref opcode (sh4_opcodes.cpp) right before ctx->doSqWrite, gated
+// on g_armed. Apples-to-apples ground truth for engine_ta.bin vs runner_ta.bin.
+void onSqWrite(u32 dest, ::Sh4Context* ctx);
 
 }
