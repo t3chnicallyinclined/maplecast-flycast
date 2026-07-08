@@ -399,11 +399,14 @@ bool init()
 	const char* spec = std::getenv("MAPLECAST_PLAYER_CLIENT");
 	if (!spec || !*spec) return false;
 
-	// Lockstep bring-up: make stdout unbuffered so the catch-up / checksum
-	// diagnostics are visible LIVE in a redirected log (otherwise a fully
-	// buffered stdout hides everything after boot until the 4 KB buffer fills
-	// or the process exits). Gated on the debug env so it never affects prod.
-	if (std::getenv("MAPLECAST_LOCKSTEP_DEBUG"))
+	// Make stdout LINE-buffered for the whole lockstep client so PLAYOUT /
+	// underrun / checksum telemetry is visible LIVE in a redirected log. A
+	// redirected stdout is block-buffered by default (stays 0 bytes until a 4 KB
+	// buffer fills or the process exits) — which blinds all live diagnosis. Do
+	// this unconditionally when lockstep is active (not just under a DEBUG env),
+	// since the user's real launcher may not set it. Line-buffered flushes on
+	// every '\n' with far less overhead than fully-unbuffered.
+	if (maplecast_lockstep::active())
 		setvbuf(stdout, nullptr, _IONBF, 0);
 
 	// RATE DECOUPLING for the RENDERING lockstep client. The server is a 60fps
@@ -430,27 +433,51 @@ bool init()
 	// deterministic, only pixels drop. This keeps the sim at the 60fps stream
 	// rate with the render dropping frames when it can't keep up.
 	if (maplecast_lockstep::active()) {
+		// ThreadedRendering ON: the emu thread advances the SH4 at a steady 60fps
+		// (playout-buffer paced) INDEPENDENT of render/display speed — render runs
+		// on the main thread and presents async, dropping frames when it can't
+		// keep up. Single-threaded chained the sim to the ~35fps render and lost
+		// to the 60fps server (buffer drained). The post-loadstate resume race
+		// that froze earlier threaded builds is fixed by rend_start_rollback()
+		// around the JOIN load (maplecast_state_sync::clientApplyPending — GGPO's
+		// proven threaded-loadstate sync). Determinism holds because the client
+		// render is read-only (isServer=false) — re-verified by the offset-locked
+		// checksum matching with threaded render ON.
+		// ThreadedRendering ON: the emu thread advances the SH4 + input-tape
+		// replay at a STEADY 60fps (playout-paced) INDEPENDENT of render/present
+		// jitter; the render runs on the main (Flycast-rend) thread and presents
+		// async. Single-threaded, the sim was chained to the render/present/audio
+		// loop, so per-frame jitter hitched BOTH video (spikes) AND input replay
+		// (stuck inputs). The post-loadstate resume race is handled by
+		// rend_start_rollback() around the JOIN load (c_everSynced-guarded) in
+		// maplecast_state_sync::clientApplyPending. Render is fast now (the 30ms
+		// was rend.DumpTextures=yes, since fixed), so renderEnd.Wait() returns
+		// quickly and the pipeline holds 60fps. Determinism holds (client render
+		// is read-only, isServer=false) — verified by the offset-locked checksum.
+		// Single-threaded (the threaded GUI build crashes at boot). With a FAST
+		// render this holds 60fps: sim ~9ms/frame (SH4 + native-480p GL + no-vsync
+		// present) runs faster than realtime, so the audio backend paces it to
+		// 60fps (audiostream.cpp:63); catch-up mutes audio (fastForwardMode) so
+		// the dynarec runs ~110fps and drains a backlog.
 		config::ThreadedRendering.override(false);
 		config::EmulateFramebuffer.override(false);
-		// Force NATIVE 480p internal resolution. A single-threaded client can't
-		// sustain 60fps if the user's config upscales (2x/4x/6x = the ~18-25fps
-		// we measured); at native res MVC2 renders far faster. Determinism-safe
-		// (resolution is display-only, never reaches the SH4).
+		// FORCE render fast regardless of the loaded emu.cfg:
+		//  - DumpTextures OFF: writing every texture to disk each frame was the
+		//    ~30ms/frame (=> sim <60fps => the client fell 170s behind). MUST be
+		//    off or the sim can never keep the live edge.
+		//  - VSync OFF: present() must not block on the display vblank.
+		//  - Native 480p: don't upscale on a client that must keep pace.
+		config::DumpTextures.override(false);
+		config::VSync.override(false);
 		config::RenderResolution.override(480);
-		// Steady-state pacing comes from the real audio backend (push() blocks
-		// the SH4 to wall-clock 44.1kHz = 60fps — audiostream.cpp:63,
-		// config::LimitFPS is a compile-time true). That gives the smooth 60fps
-		// playout rate with real sound. During the one-time post-JOIN catch-up we
-		// need to briefly exceed 60fps, so frameGate flips fastForwardMode ON
-		// there (which mutes AICA -> no WriteSample -> no audio block,
-		// sgc_if.cpp:1599) and OFF once re-centred on the playout buffer. Render
-		// is dropped when it can't keep 16.67ms (SkipFrame) so the SIM holds
-		// 60fps single-threaded (threaded render deadlocks at the JOIN resume).
+		// Steady-state 60fps pacing comes from the real audio backend (push()
+		// blocks to wall-clock 44.1kHz, audiostream.cpp:63) with real sound; the
+		// one-time post-JOIN catch-up mutes audio via fastForwardMode
+		// (sgc_if.cpp:1599). frameGate holds the playout buffer.
 		printf("[player] lockstep playout: ThreadedRendering=%d EmulateFramebuffer=%d "
-		       "Sh4Clock=%d (60fps audio-paced steady, frameGate playout buffer + "
-		       "render-skip; fast-forward only for post-JOIN catch-up)\n",
+		       "RenderResolution=%d Sh4Clock=%d (emu-thread 60fps sim, async render)\n",
 		       (int)config::ThreadedRendering, (int)config::EmulateFramebuffer,
-		       (int)config::Sh4Clock);
+		       (int)config::RenderResolution, (int)config::Sh4Clock);
 	}
 
 	if (!resolveServer(spec)) return false;
@@ -682,53 +709,38 @@ bool frameGate()
 	const bool bothExact = slotExact[0] && slotExact[1];
 	const bool anyGone   = slotGone[0] || slotGone[1];
 
-	// ── Playout-buffer / fixed-delay pacing ────────────────────────────
-	// Play the tape at a STEADY real-time 60fps, sitting a small FIXED distance
-	// behind the live tape head — NOT chasing the newest frame. Trades a
-	// constant ~kBufferDepth-frame latency for smooth jitter-tolerant playout,
-	// replacing the old unthrottled sprint-to-edge (the "skipping around super
-	// fast" the user saw). server=60fps and client=60fps, so the gap stays flat.
+	// ── Playout-buffer pacing (single-threaded, RENDER EVERY FRAME) ──────
+	// CRITICAL: single-threaded lockstep must render every frame. present()->
+	// getSh4Executor()->Stop() after each frame (Renderer_if.cpp:443) is what
+	// returns control to frameGate so the NEXT tape input is applied. Any
+	// render-SKIP (config::SkipFrame / rend_enable_renderer=false) makes
+	// QueueRender return false -> no present -> no Stop -> runInternal runs
+	// SEVERAL frames on STALE input before the next STARTRENDER -> the sim
+	// DIVERGES from the server (which applies fresh input every frame). So NO
+	// render-skip here (removing it also fixed the genuine mismatches).
 	//
-	// Pacing sources:
-	//   * STEADY state — the real audio backend paces the SH4 to 60fps
-	//     (push() blocks to wall-clock 44.1kHz, audiostream.cpp:63) AND plays
-	//     sound. frameGate does NOT add a second clock here (that would
-	//     double-pace to ~30fps); it just advances one tape frame per tick.
-	//   * CATCH-UP — the one-time post-JOIN backlog (the JOIN is stale by the
-	//     ~1s it took to transfer). Here we mute audio (fastForwardMode ->
-	//     AICA muted, no push() block, sgc_if.cpp:1599) and wall-clock cap the
-	//     rate to ~90fps so it's a gentle 1s catch-up, NOT an unthrottled sprint.
+	// Rate: with a FAST render (DumpTextures off + native 480p + no vsync,
+	// ~9ms/frame) the sim runs faster than realtime, so the audio backend paces
+	// it to a STEADY 60fps at the live edge (push() blocks to 44.1kHz,
+	// audiostream.cpp:63) with sound. To CATCH UP a post-JOIN backlog we mute
+	// audio (fastForwardMode -> AICA muted -> no push block, sgc_if.cpp:1599) so
+	// the dynarec runs ~110fps (still rendering every frame) until re-centred on
+	// the playout buffer, then hand pacing back to 60fps audio.
 	static constexpr int64_t kBufferDepth = 3;   // target frames behind the head
 	uint64_t tapeHead = 0;
 	if (qNewest[0] && qNewest[1]) tapeHead = std::min(qNewest[0], qNewest[1]);
 	const int64_t buffer = (tapeHead > localFrame) ? (int64_t)(tapeHead - localFrame) : 0;
 	const int64_t err    = buffer - kBufferDepth;
 
-	// Hysteretic catch-up: engage well behind the target, disengage near it.
+	// Hysteretic catch-up: mute audio (=> sim runs at full ~110fps render speed)
+	// when materially behind; hand pacing back to the 60fps audio near target.
 	static bool _catchUp = false;
-	if      (!_catchUp && err >= 12) _catchUp = true;
-	else if ( _catchUp && err <= 2)  _catchUp = false;
+	if      (!_catchUp && err >= 10) _catchUp = true;
+	else if ( _catchUp && err <= 1)  _catchUp = false;   // settle ~kBufferDepth+1
+	if (maplecast_lockstep::active())
+		settings.input.fastForwardMode = _catchUp;
 
 	const int64_t nowT = nowUs();
-
-	if (maplecast_lockstep::active()) {
-		settings.input.fastForwardMode = _catchUp;   // mute audio only during catch-up
-		// Drop DRAWS (not ticks) so the SIM holds its rate even when a native GL
-		// frame can't finish in 16.67ms (threaded render deadlocks at the JOIN
-		// resume). Skipped frames still run the SH4 (scheduleRenderDone fires
-		// first, Renderer_if.cpp:600 — determinism-safe, pixels only).
-		int skip = _catchUp ? 4 : (err >= 3 ? 1 : 0);
-		if ((int)config::SkipFrame != skip)
-			config::SkipFrame.override(skip);
-	}
-
-	// Wall-clock cap the CATCH-UP phase only (audio is muted there, so nothing
-	// else throttles it). ~90fps => a 100-frame post-JOIN backlog drains in ~1s.
-	static int64_t _nextTickUs = 0;
-	if (_catchUp) {
-		if (_nextTickUs == 0 || nowT > _nextTickUs + 200000) _nextTickUs = nowT;
-		if (nowT < _nextTickUs) return false;    // paced hold (gentle catch-up)
-	}
 
 	if (bothExact) {
 		// Both slots have localFrame — NOW pop it from both (atomic consume).
@@ -741,18 +753,16 @@ bool frameGate()
 		applyEntry(pending[0], 0);
 		applyEntry(pending[1], 1);
 		_localFrame.fetch_add(1, std::memory_order_relaxed);
-		if (_catchUp) _nextTickUs = nowT + 11000;   // ~90fps cap during catch-up
-		// Periodic playout telemetry — fps (should be ~60 steady), buffer depth
-		// (should hover ~kBufferDepth, flat), and render-skip.
+		// Periodic playout telemetry — fps (~60 steady, ~110 during catch-up),
+		// buffer depth (should hover ~kBufferDepth, flat), catch-up state.
 		if (maplecast_lockstep::active()) {
 			static int64_t _t0 = 0; static uint64_t _f0 = 0;
 			if (_t0 == 0) { _t0 = nowT; _f0 = localFrame; }
-			if (nowT - _t0 >= 2000000) {
+			if (nowT - _t0 >= 1000000) {
 				double fps = (double)(localFrame - _f0) * 1e6 / (double)(nowT - _t0);
-				printf("[player] PLAYOUT fps=%.1f frame=%llu tapeHead=%llu buffer=%lld "
-				       "catchUp=%d skip=%d\n",
+				printf("[player] PLAYOUT fps=%.1f frame=%llu tapeHead=%llu buffer=%lld catchUp=%d\n",
 				       fps, (unsigned long long)localFrame, (unsigned long long)tapeHead,
-				       (long long)buffer, (int)_catchUp, (int)config::SkipFrame);
+				       (long long)buffer, (int)_catchUp);
 				fflush(stdout);
 				_t0 = nowT; _f0 = localFrame;
 			}

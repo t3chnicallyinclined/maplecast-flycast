@@ -665,6 +665,20 @@ bool clientApplyPending()
 	// maplecast_mirror.cpp:buildFullSaveState for the explanation.
 	auto ta0 = std::chrono::high_resolution_clock::now();
 	try {
+		// THREADED RENDERING SYNC: with ThreadedRendering ON the render runs on a
+		// separate (main) thread. Block until it's at its post-Process safe point
+		// (vramRollback set) before we overwrite VRAM/state — otherwise the load
+		// races a mid-render and the client HARD-FREEZES at the JOIN (measured).
+		// This is exactly what GGPO's load_game_state does (ggpo.cpp:442) to
+		// loadstate safely during rollback with threaded rendering.
+		//
+		// Guard: ONLY on a re-JOIN (c_everSynced), never the FIRST JOIN. At boot
+		// the emu thread hasn't run a frame yet, so NO render is in flight (no
+		// race) AND vramRollback was never set by a completed render — so
+		// rend_start_rollback() would block forever waiting for a render that
+		// can't happen (the emu thread is stuck here, so it never enqueues one).
+		if (c_everSynced)
+			rend_start_rollback();
 		Deserializer deser(rawPtr, rawSize, /*rollback=*/false);
 		emu.loadstate(deser);
 		// Drain stale/duplicate Render queue entries the pre-load live-forward
