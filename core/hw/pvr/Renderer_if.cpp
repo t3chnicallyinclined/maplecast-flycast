@@ -18,6 +18,7 @@
 #include "network/maplecast_input_server.h"
 #include "network/maplecast_gamestate.h"   // MAPLECAST_BAKE sprite-stability probe
 #include "network/maplecast_oracle_hook.h" // MAPLECAST_CHARQ pre-QueueRender body-quad capture
+#include "network/maplecast_predict.h"     // no-render re-sim primitive (headless advance)
 
 #include <mutex>
 #include <deque>
@@ -629,6 +630,15 @@ void rend_start_render()
 			ctx->rend.clearFramebuffer = false;
 		}
 		ggpo::endOfFrame();
+		// MapleCast predict: no-render re-sim primitive. When a headless advance
+		// is in progress, stop the SH4 at the display (non-RTT) STARTRENDER — one
+		// game-frame — exactly like ggpo::endOfFrame above, but with the render
+		// skipped (rend_enable_renderer(false) => QueueRender below recycles the
+		// ctx, zero GPU work). scheduleRenderDone already fired (line ~600) so the
+		// RENDER_DONE interrupt timing is unchanged. No-op unless a headless
+		// advance is active on this (emu) thread.
+		if (maplecast_predict::headlessAdvanceActive())
+			emu.getSh4Executor()->Stop();
 	}
 
 	// === MAPLECAST_CHARQ — DEFINITIVE per-part body-quad capture ===============

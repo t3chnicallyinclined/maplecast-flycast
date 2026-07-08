@@ -56,6 +56,7 @@
 #include "maplecast_input_server.h"   // TapeEntry, unpackSeqSlot, kTapePort implicit
 #include "maplecast_state_sync.h"
 #include "maplecast_lockstep.h"       // lockstep checksum layer (env-gated, OFF by default)
+#include "maplecast_predict.h"        // client-side predict/rollback (env-gated, OFF by default)
 
 #include <atomic>
 #include <thread>
@@ -660,6 +661,12 @@ bool frameGate()
 	if (maplecast_lockstep::active())
 		maplecast_lockstep::clientVerify(localFrame);
 
+	// Predict/rollback subsystem — STAGE 1 drives the no-render re-sim PRIMITIVE
+	// gate here (SH4 is paused between frames). No-op unless MAPLECAST_PREDICT is
+	// set. The full predict/ring/reconcile loop is a later stage.
+	if (maplecast_predict::active())
+		maplecast_predict::onFrameBoundary(localFrame);
+
 	// ── Lockstep catch-up + advance (determinism-correct) ──────────────
 	// With a state-sync JOIN + per-frame checksum, the client MUST EXECUTE
 	// every frame from the seeded snapshot forward, consuming tape[localFrame]
@@ -732,11 +739,17 @@ bool frameGate()
 	const int64_t buffer = (tapeHead > localFrame) ? (int64_t)(tapeHead - localFrame) : 0;
 	const int64_t err    = buffer - kBufferDepth;
 
-	// Hysteretic catch-up: mute audio (=> sim runs at full ~110fps render speed)
-	// when materially behind; hand pacing back to the 60fps audio near target.
+	// Hysteretic catch-up: mute audio (=> sim runs at ~110fps) only for a LARGE
+	// backlog (post-JOIN transfer latency / a stalled re-JOIN). We do NOT try to
+	// actively drain small offsets: the fastForward drain (110fps vs the 60fps
+	// producer) empties the queue faster than the per-tick disengage check can
+	// react, overshooting the buffer to 0 -> underruns/stutter (measured). So the
+	// buffer settles at the JOIN transfer latency (~5-6 on localhost, ~90ms). The
+	// real low-latency fix is client-side PREDICTION+ROLLBACK (MAPLECAST_PREDICT),
+	// which runs the sim AT the live edge and removes the playout buffer entirely.
 	static bool _catchUp = false;
-	if      (!_catchUp && err >= 10) _catchUp = true;
-	else if ( _catchUp && err <= 1)  _catchUp = false;   // settle ~kBufferDepth+1
+	if      (!_catchUp && err >= 15) _catchUp = true;
+	else if ( _catchUp && err <= 2)  _catchUp = false;
 	if (maplecast_lockstep::active())
 		settings.input.fastForwardMode = _catchUp;
 
