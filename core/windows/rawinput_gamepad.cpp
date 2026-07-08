@@ -34,6 +34,7 @@
 #include "rawinput_gamepad.h"
 #include "../network/maplecast_input_sink.h"
 #include "../network/maplecast_input_server.h"
+#include "../network/maplecast_player.h"   // lockstep local-input redirect
 #include "../input/gamepad.h"
 #include "../input/gamepad_device.h"
 
@@ -570,7 +571,16 @@ static void xinputPollLoop()
 				// Bitmap-button range is < 0x20000 (axis keys above
 				// that route through different paths).
 				if (port >= 0 && port < 4 && (uint32_t)key < 0x20000) {
-					if (pressed)
+					// Lockstep player client: redirect the local stick OUT of the
+					// sim's kcode[] into the local-only buffer (see
+					// maplecast_player.h) so it can't race/leak into the tape-
+					// driven sim (double-press/sticky + hash divergence).
+					if (maplecast_player::localInputRedirectActive()) {
+						if (pressed)
+							maplecast_player::g_localKcode[port] &= ~(u32)key;
+						else
+							maplecast_player::g_localKcode[port] |= (u32)key;
+					} else if (pressed)
 						kcode[port] &= ~(u32)key;
 					else
 						kcode[port] |= (u32)key;

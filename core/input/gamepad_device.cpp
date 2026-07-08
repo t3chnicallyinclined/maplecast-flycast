@@ -24,6 +24,7 @@
 #include "emulator.h"
 #include "hw/maple/maple_devs.h"
 #include "mouse.h"
+#include "network/maplecast_player.h"   // lockstep local-input redirect
 
 #include <algorithm>
 #include <cstdlib>
@@ -73,6 +74,20 @@ bool GamepadDevice::handleButtonInput(int port, DreamcastKey key, bool pressed)
 	{
 		if (port < 0)
 			return false;
+		// Lockstep player client: redirect the local stick OUT of the sim's
+		// kcode[] into the local-only buffer (see maplecast_player.h). The sim
+		// is driven PURELY by the tape; this raw stick is only forwarded to the
+		// server. Without this, the local press RACES the tape injection into
+		// kcode[] and leaks into the client's own sim (double-press/sticky +
+		// hash divergence). Triggers are redirected in handleAnalogInput.
+		if (maplecast_player::localInputRedirectActive() && port < 4)
+		{
+			if (pressed)
+				maplecast_player::g_localKcode[port] &= ~key;
+			else
+				maplecast_player::g_localKcode[port] |= key;
+			return true;
+		}
 		if (pressed)
 			kcode[port] &= ~key;
 		else
@@ -354,10 +369,13 @@ bool GamepadDevice::gamepad_axis_input(u32 code, int value)
 			else {
 				mv = std::min(std::abs(v) * 2, 0xffff);
 			}
+			// Lockstep player client: redirect local triggers out of the sim's
+			// lt[]/rt[] into the local-only buffer (same reason as buttons).
+			const bool _lsRedir = maplecast_player::localInputRedirectActive() && port < 4;
 			if (key == DC_AXIS_LT)
-				lt[port] = mv;
+				(_lsRedir ? maplecast_player::g_localLt[port] : lt[port]) = mv;
 			else if (key == DC_AXIS_RT)
-				rt[port] = mv;
+				(_lsRedir ? maplecast_player::g_localRt[port] : rt[port]) = mv;
 			else if (key == DC_AXIS_LT2)
 				lt2[port] = mv;
 			else if (key == DC_AXIS_RT2)

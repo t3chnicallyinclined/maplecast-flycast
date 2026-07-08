@@ -81,6 +81,14 @@ extern u16 rt[4], lt[4];
 namespace maplecast_player
 {
 
+// Local-input redirect: the raw local stick, kept OUT of the sim's kcode[] so
+// the sim is tape-only (see maplecast_player.h). Active-low buttons / triggers.
+uint32_t g_localKcode[4] = { ~0u, ~0u, ~0u, ~0u };
+uint16_t g_localLt[4]    = { 0, 0, 0, 0 };
+uint16_t g_localRt[4]    = { 0, 0, 0, 0 };
+static std::atomic<bool> _redirectLocal{false};
+bool localInputRedirectActive() { return _redirectLocal.load(std::memory_order_relaxed); }
+
 static std::atomic<bool>      _active{false};
 static std::atomic<bool>      _connected{false};
 static std::thread            _rxThread;
@@ -350,10 +358,18 @@ static void forwardLocalInput()
 {
 	if (_fwdSock < 0) return;
 
-	const uint32_t rawKcode = kcode[0];
+	// Read the RAW LOCAL STICK from the redirect buffers, NOT kcode[0]. kcode[0]
+	// is the SIM's input = the tape injection; reading it here would forward the
+	// server's own echo back (a loop) and — critically — the local stick must
+	// NOT be in kcode[0] at all (that was the double-application bug). The
+	// gamepad path writes the live stick into g_localKcode[] when the redirect
+	// is active; when it's not (shouldn't happen for a player client), fall back
+	// to kcode so behaviour is unchanged.
+	const bool redir = localInputRedirectActive();
+	const uint32_t rawKcode = redir ? g_localKcode[0] : kcode[0];
 	const uint16_t buttons  = (uint16_t)(rawKcode & 0xFFFF);
-	const uint8_t  ltVal    = (uint8_t)(lt[0] >> 8);
-	const uint8_t  rtVal    = (uint8_t)(rt[0] >> 8);
+	const uint8_t  ltVal    = (uint8_t)((redir ? g_localLt[0] : lt[0]) >> 8);
+	const uint8_t  rtVal    = (uint8_t)((redir ? g_localRt[0] : rt[0]) >> 8);
 
 	if (_fwdHasFirst && buttons == _fwdLastButtons
 	                 && ltVal   == _fwdLastLt
@@ -516,6 +532,11 @@ bool init()
 		printf("[player] local input forwarding -> port 7100 as slot %d\n",
 		       _fwdClaimedSlot);
 	}
+
+	// Drive the SIM purely from the tape: redirect the local stick OUT of the
+	// sim's kcode[] (into g_localKcode[]) so it can't leak/double-apply. Only
+	// forwardLocalInput() reads the local stick, sending it to the server.
+	_redirectLocal.store(true, std::memory_order_relaxed);
 
 	_active.store(true);
 	_rxThread = std::thread(rxLoop);
@@ -765,6 +786,11 @@ bool frameGate()
 		}
 		applyEntry(pending[0], 0);
 		applyEntry(pending[1], 1);
+		// Record the authoritative input just applied for `localFrame` so the
+		// predict/reconcile re-sim (and GATE 0) can replay it. No-op unless
+		// MAPLECAST_PREDICT is set.
+		if (maplecast_predict::active())
+			maplecast_predict::recordAppliedInput(localFrame);
 		_localFrame.fetch_add(1, std::memory_order_relaxed);
 		// Periodic playout telemetry — fps (~60 steady, ~110 during catch-up),
 		// buffer depth (should hover ~kBufferDepth, flat), catch-up state.

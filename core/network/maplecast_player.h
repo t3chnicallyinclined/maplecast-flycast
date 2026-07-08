@@ -43,6 +43,27 @@
 namespace maplecast_player
 {
 
+// ── Local-input redirect (fixes the double-input-application bug) ──────
+// A lockstep client's SIM must be driven PURELY by the tape (deterministic,
+// matches the server). But flycast's normal gamepad path writes the local
+// stick straight into the sim's kcode[]/lt[]/rt[] — which RACES the tape's
+// per-frame injection, so a live press LEAKS into the client's own sim (applied
+// instantly here AND ~150ms later via the tape => "double press / sticky", and
+// a client-only input the server's tape never had at that frame => hash
+// divergence / compared=0). When active, the gamepad path redirects the local
+// stick into these separate buffers instead of kcode[]/lt[]/rt[]; the sim then
+// only ever sees the tape, and forwardLocalInput() reads THESE to send the raw
+// stick to the server (which echoes it back, authoritatively frame-stamped, via
+// the tape). True iff the lockstep player client is active.
+bool localInputRedirectActive();
+
+// The redirected local-stick state (active-low buttons like kcode, triggers 0-
+// 255<<8 like lt/rt). Written by the gamepad path when the redirect is active,
+// read by forwardLocalInput(). Indexed by port (0..3).
+extern uint32_t g_localKcode[4];
+extern uint16_t g_localLt[4];
+extern uint16_t g_localRt[4];
+
 enum class StallPolicy : uint8_t {
 	Hard      = 0,   // block SH4 advance until tape reaches localFrame
 	Speculate = 1,   // advance assuming last-known buttons held

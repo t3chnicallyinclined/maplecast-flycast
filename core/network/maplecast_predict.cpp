@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <map>
 #include <vector>
 
 #include "maplecast_compat.h"          // clock_gettime on Windows
@@ -181,13 +182,139 @@ static void runGate()
 	s_stage = DONE;
 }
 
+// ── input ring (authoritative input applied per frame) ───────────────
+static std::map<uint64_t, HeldInput> g_inputs;
+static constexpr size_t kInputRing = 4096;
+
+void recordAppliedInput(uint64_t frame)
+{
+	if (!active()) return;
+	g_inputs[frame] = snapInput();
+	while (g_inputs.size() > kInputRing) g_inputs.erase(g_inputs.begin());
+}
+
+// ── GATE 0: restore-into-a-live-running client is CLEAN ──────────────
+// From a warmed-up frame F, capture the anchor, run K frames NORMALLY (input
+// recorded), capture F+K, then RESTORE the anchor into the LIVE client and
+// re-sim K frames HEADLESS with the RECORDED inputs -> must byte-match F+K.
+// Finally restore F+K so the client resumes exactly where it was — the reconcile
+// does this every frame, so it must leave NO residual host state: after the op
+// the client MUST stay 60fps / buffer flat / offset-locked (no mismatch storm).
+// Env: MAPLECAST_PREDICT_GATE0=W,K.
+enum G0Stage { G0_IDLE, G0_WARMUP, G0_ANCHOR, G0_RUN, G0_MONITOR, G0_DONE };
+static G0Stage g0_stage = G0_IDLE;
+static bool     g0_configured = false;
+static uint32_t g0_warmup = 0, g0_K = 0;
+static uint64_t g0_anchorFrame = 0;
+static std::vector<uint8_t> g0_blobA, g0_blobB;
+static int32_t  g0_jitA = 0, g0_jitB = 0;
+static size_t   g0_nA = 0, g0_nB = 0;
+static uint64_t g0_hashA = 0;
+static bool     g0_pass = false;
+
+static void g0Configure()
+{
+	if (g0_configured) return;
+	g0_configured = true;
+	const char* e = std::getenv("MAPLECAST_PREDICT_GATE0");
+	if (!e || !*e) return;
+	unsigned w = 0, k = 0;
+	if (sscanf(e, "%u,%u", &w, &k) != 2 || k == 0) {
+		printf("[predict-gate0] malformed MAPLECAST_PREDICT_GATE0='%s' (want W,K)\n", e);
+		return;
+	}
+	g0_warmup = w; g0_K = k;
+	try { g0_blobA.resize(40u*1024u*1024u); g0_blobB.resize(40u*1024u*1024u); }
+	catch (...) { printf("[predict-gate0] blob alloc failed\n"); return; }
+	g0_stage = G0_WARMUP;
+	printf("[predict-gate0] armed: warmup=%u K=%u\n", w, k);
+}
+
+// Called at frame F+K (from onFrameBoundary), AFTER the client normally reached
+// F+K and recorded inputs F..F+K-1. Runs the restore-into-live + re-sim check.
+static void g0RunCheck(uint64_t nowFrame)
+{
+	using namespace maplecast_rollback;
+	// Capture F+K (the live "current" state) so we can put the client back here.
+	int32_t jitB = 0;
+	g0_nB = captureFrameToBlob(g0_blobB.data(), g0_blobB.size(), jitB);
+	g0_jitB = jitB;
+	const uint64_t hashB = gameStateRegionHash();
+	if (g0_nB == 0) { printf("[predict-gate0] captureB failed\n"); g0_stage = G0_DONE; return; }
+
+	// Restore the anchor F INTO THE LIVE CLIENT (render loop + audio running).
+	// Do NOT mute audio for the re-sim: fastForwardMode is only proven SYMMETRIC-
+	// neutral (primitive gate muted both sides); here we compare against the
+	// UN-muted live F..F+K run, so the re-sim must also run un-muted to match.
+	const bool prevFF = settings.input.fastForwardMode;
+	if (!restoreFromBlob(g0_blobA.data(), g0_nA, g0_jitA)) {
+		printf("[predict-gate0] restoreA failed\n");
+		g0_stage = G0_DONE; return;
+	}
+	const bool restoreOk = (gameStateRegionHash() == g0_hashA);
+
+	// Re-sim K frames HEADLESS replaying the recorded authoritative inputs.
+	g_headless.store(true, std::memory_order_relaxed);
+	const bool prevEnabled = rend_is_enabled();
+	const int64_t t0 = nowUs();
+	for (uint32_t i = 0; i < g0_K; i++) {
+		auto it = g_inputs.find(g0_anchorFrame + i);
+		if (it != g_inputs.end()) applyInput(it->second);
+		runOneFrame(true);
+	}
+	const int64_t resimUs = nowUs() - t0;
+	g_headless.store(false, std::memory_order_relaxed);
+	rend_enable_renderer(prevEnabled);
+	const uint64_t hashResim = gameStateRegionHash();
+
+	// Put the client back at F+K so the LIVE timeline is undisturbed.
+	restoreFromBlob(g0_blobB.data(), g0_nB, g0_jitB);
+	settings.input.fastForwardMode = prevFF;
+
+	g0_pass = restoreOk && (hashResim == hashB);
+	printf("[predict-gate0] anchorF=%llu K=%u  resim=%016llx  live(F+K)=%016llx  "
+	       "restoreA:%s  match:%s  resim=%lld us (%.1f us/frame)\n",
+	       (unsigned long long)g0_anchorFrame, g0_K,
+	       (unsigned long long)hashResim, (unsigned long long)hashB,
+	       restoreOk ? "OK" : "BAD", (hashResim == hashB) ? "YES" : "NO",
+	       (long long)resimUs, g0_K ? (double)resimUs / g0_K : 0.0);
+	printf("[predict-gate0] === RESTORE-INTO-LIVE %s === now WATCH the lockstep "
+	       "CHECKSUM/PLAYOUT: fps must stay 60, buffer flat, mismatched~0.\n",
+	       g0_pass ? "byte-exact GO" : "NO-GO");
+	fflush(stdout);
+}
+
 void onFrameBoundary(uint64_t frame)
 {
 	if (!active()) return;
+
+	// Primitive gate (MAPLECAST_PREDICT_TEST).
 	configure();
-	if (s_stage != WARMUP) return;
-	if (s_warmup > 0) { s_warmup--; return; }
-	runGate();
+	if (s_stage == WARMUP) {
+		if (s_warmup > 0) s_warmup--; else runGate();
+	}
+
+	// GATE 0 (MAPLECAST_PREDICT_GATE0).
+	g0Configure();
+	switch (g0_stage) {
+	case G0_WARMUP:
+		if (g0_warmup > 0) { g0_warmup--; break; }
+		// Anchor the current live frame F.
+		g0_anchorFrame = frame;
+		g0_nA = maplecast_rollback::captureFrameToBlob(g0_blobA.data(), g0_blobA.size(), g0_jitA);
+		g0_hashA = maplecast_rollback::gameStateRegionHash();
+		g0_stage = (g0_nA ? G0_RUN : G0_DONE);
+		break;
+	case G0_RUN:
+		// Wait until the live client has normally advanced K frames past F,
+		// recording inputs along the way, then run the restore-into-live check.
+		if (frame >= g0_anchorFrame + g0_K) {
+			g0RunCheck(frame);
+			g0_stage = G0_MONITOR;
+		}
+		break;
+	default: break;
+	}
 }
 
 bool testDone()   { return s_stage == DONE; }

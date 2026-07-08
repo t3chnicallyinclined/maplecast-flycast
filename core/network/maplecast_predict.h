@@ -57,9 +57,16 @@ int64_t advanceHeadless(int frames);
 
 // Per-frame hook, called from maplecast_player::frameGate() at the top of each
 // frame BEFORE the SH4 runs (SH4 paused). Drives the MAPLECAST_PREDICT_TEST
-// primitive gate state machine. No-op unless the gate is armed. Returns true if
-// the gate consumed this frame (caller should still proceed normally).
+// primitive gate and the MAPLECAST_PREDICT_GATE0 restore-into-live gate. No-op
+// unless armed.
 void onFrameBoundary(uint64_t frame);
+
+// Record the authoritative input applied for `frame` (both slots already
+// written to kcode[]/lt[]/rt[]). Called from frameGate right AFTER applyEntry,
+// BEFORE runInternal, so the recorded snapshot is exactly what the SH4 sees for
+// that frame. Feeds the GATE 0 / reconcile re-sim (which replays the same
+// inputs). No-op unless predict is active.
+void recordAppliedInput(uint64_t frame);
 
 // Gate result accessors (meaningful after the gate completes).
 bool testDone();
