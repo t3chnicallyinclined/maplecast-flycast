@@ -1,5 +1,15 @@
 # Stripped-Down TA + Texture Cache Renderer
 
+> **🪦 OUTCOME (2026-07-08): Superseded — never shipped as designed.**
+> The stripped-TA/STAF + TX64 ship-once-texture family was demoted (RENDER-DECISION.md,
+> 2026-06-07) and the geometry/pixel-shipping approach was then abandoned in favor of the
+> state-only GSTA render replica (commits 189544592, 1dc03e611, 483511fef) and the lockstep
+> client (bc16af338). **Known-wrong number in this doc:** "~1.7 MB/s" mirror cost is
+> unlabeled-uncompressed; the measured wire is ~4.1 Mbps zstd / ~12 Mbps raw
+> (ARCHITECTURE.md §compression, Apr 2026). The §4 bandwidth MODEL (per-quad costs,
+> texture-working-set sizes) remains useful input to any future TA-wire shrink.
+> Canonical ledger: docs/RENDER-STATE.md.
+
 > **Status:** design. Clean-room. No copyrighted disassembly, no ROM-derived
 > pixels committed. All texture bytes referenced here are produced at runtime
 > from the live emulator's VRAM and never land in the repo.

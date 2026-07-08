@@ -1,5 +1,13 @@
 # Rollback Ring + GGPO-style Predictor — SHELVED 2026-05-09
 
+> **⚠️ STATUS (2026-07-08): UN-SHELVED.** Un-shelve condition #1 (client-side SH4 predictor)
+> triggered: the lockstep-mirror client (commit bc16af338) runs a full local SH4 bit-exact,
+> and the predict/rollback arc is ACTIVE on feat/render-replica-live (STAGE 0–c + CAPSTONE,
+> commits 3cf92ca83..3cf861b33; MAPLECAST_PREDICT_LIVE=1). The "central server, thin clients"
+> rationale below no longer describes the native client. NOTE: the link to
+> docs/ROLLBACK-RING-DESIGN.md is broken (file never existed in docs/).
+> Canonical ledger: docs/RENDER-STATE.md.
+
 The Phase 1 GGPO-style rollback prediction work is **shelved**. The code is
 kept intact (don't delete it) but is **off by default** and not exercised
 in production. This document records why we shelved it and what stays

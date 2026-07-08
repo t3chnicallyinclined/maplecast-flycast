@@ -1,5 +1,13 @@
 # Assembly-Driven Part Renderer — Design & Feasibility
 
+> **🪦 OUTCOME (2026-07-08): Superseded; central blocker claim OVERTURNED.**
+> This doc's claim that ~86% of parts cannot decode offline (live scratch dependency) was later
+> disproven: offline LZSS + de-twiddle closed byte-exact and the full roster was baked
+> offline from disc (re_kb finding emitter_render_model, tools/re_kb/08; 2026-06-10/11).
+> The renderer itself was then superseded by the transpiled render_frame path
+> (commit 189544592). Treat all feasibility conclusions here as historical.
+> Canonical ledger: docs/RENDER-STATE.md.
+
 > **Goal.** Ship only compact game STATE per frame (`sprite_id` + screen pos per body
 > and per pool object — already in the GSTA). The client reconstructs each frame by
 > looking up a precomputed assembly (`sprite_id → parts + offsets`) and drawing PARTS
