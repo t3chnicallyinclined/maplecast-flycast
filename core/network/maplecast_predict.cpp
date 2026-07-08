@@ -874,6 +874,137 @@ static void saRunCheck(uint64_t nowFrame)
 	       sa_K ? (double)predUs / sa_K : 0.0);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE b — RECONCILE + HASH-GATE (rollback on mispredicted remote input)
+// ═══════════════════════════════════════════════════════════════════════════
+// The full predict/reconcile core, gated headlessly with SYNTHETIC changing
+// remote input (the coordinator's "drive changing remote input" — forces
+// mispredicts so rollbacks actually fire). Ground truth = the all-authoritative
+// forward sim (what the server computes). The predict+reconcile loop predicts the
+// remote as repeat-last; when authoritative remote for a frame differs from the
+// prediction, it ROLLS BACK to the confirmed frame (page-delta), applies the
+// authoritative input, and re-sims forward. After each confirm the confirmed
+// frame's game-state hash MUST equal the ground-truth (server) hash for that frame
+// — the determinism safety net that must actually RUN.
+enum SBStage { SB_IDLE, SB_WARMUP, SB_RUN, SB_DONE };
+static SBStage  sb_stage = SB_IDLE;
+static bool     sb_configured = false;
+static uint32_t sb_warmup = 0, sb_K = 0, sb_trials = 1, sb_trialIdx = 0, sb_pass = 0;
+static uint64_t sb_anchor = 0;
+static uint64_t sb_totalRollbacks = 0, sb_maxDepth = 0, sb_confirmChecks = 0, sb_confirmMatches = 0;
+
+static void sbConfigure()
+{
+	if (sb_configured) return;
+	sb_configured = true;
+	const char* e = std::getenv("MAPLECAST_PREDICT_STAGEB");
+	if (!e || !*e) return;
+	unsigned w = 0, k = 0, n = 1;
+	if (sscanf(e, "%u,%u,%u", &w, &k, &n) < 2 || k == 0) {
+		printf("[predict-sb] malformed MAPLECAST_PREDICT_STAGEB='%s'\n", e); return;
+	}
+	sb_warmup = w; sb_K = k; sb_trials = n ? n : 1;
+	if (!pd::init()) return;
+	srand(0x57B6E0u ^ w ^ (k << 8));
+	sb_stage = SB_WARMUP;
+	printf("[predict-sb] armed: warmup=%u K=%u trials=%u\n", w, k, sb_trials);
+}
+
+// Synthetic AUTHORITATIVE remote input for frame j: changes every ~4 frames so
+// the repeat-last prediction mispredicts and rollbacks fire.
+static uint32_t sbAuthRemote(uint32_t j)
+{
+	static const uint16_t cyc[4] = { 0xFFFF, 0xFEFF, 0xFF7F, 0xFDFF };  // neutral + 3 held
+	return 0xFFFF0000u | cyc[(j / 2) % 4];   // changes every 2 frames -> mispredicts fire
+}
+
+static void sbRunCheck(uint64_t nowFrame)
+{
+	using namespace maplecast_rollback;
+	if (!pd::canRestore(sb_anchor)) return;
+	const uint32_t K = sb_K;
+	if (K > 16) return;
+
+	const bool prevFF = settings.input.fastForwardMode, prevMute = settings.aica.muteAudio;
+	settings.input.fastForwardMode = true; settings.aica.muteAudio = true;
+	const bool prevEnabled = rend_is_enabled();
+	g_headless.store(true, std::memory_order_relaxed);
+
+	const int rs = g_localSlot ^ 1;
+	const HeldInput base = snapInput();
+	auto applyFrame = [&](uint32_t localBtns, uint32_t remoteBtns) {
+		kcode[g_localSlot] = localBtns; lt[g_localSlot] = base.lt_[g_localSlot]; rt[g_localSlot] = base.rt_[g_localSlot];
+		kcode[rs] = remoteBtns;         lt[rs] = base.lt_[rs];                   rt[rs] = base.rt_[rs];
+	};
+	const uint32_t localNeutral = 0xFFFFFFFFu;
+
+	// GROUND TRUTH: all-authoritative forward sim; record per-frame hash.
+	uint64_t truth[16];
+	pd::restore(sb_anchor);
+	for (uint32_t j = 0; j < K; j++) {
+		applyFrame(localNeutral, sbAuthRemote(j));
+		runOneGameFrameHeadless();
+		pd::save(sb_anchor + j + 1);
+		truth[j] = gameStateRegionHash();
+	}
+
+	// PREDICT + RECONCILE. predicted head runs LEAD ahead of confirmed with
+	// repeat-last remote; authoritative frames arrive in order and trigger rollback.
+	pd::restore(sb_anchor);
+	const uint32_t LEAD = (K < 3) ? K : 3;
+	uint32_t predRemote[16];
+	uint32_t lastConfirmed = 0xFFFF0000u | 0xFFFF;   // neutral
+	uint32_t head = 0;                               // frames predicted (0..K)
+	auto predictTo = [&](uint32_t target) {
+		while (head < target) {
+			predRemote[head] = lastConfirmed;
+			applyFrame(localNeutral, lastConfirmed);
+			runOneGameFrameHeadless();
+			pd::save(sb_anchor + head + 1);
+			head++;
+		}
+	};
+	uint32_t rollbacks = 0, maxDepth = 0, confirmMatch = 0;
+	bool allConfirmOk = true;
+	for (uint32_t j = 0; j < K; j++) {
+		predictTo(std::min(j + 1 + LEAD, K));               // keep the head LEAD ahead
+		const uint32_t auth = sbAuthRemote(j);
+		if (auth != predRemote[j]) {                        // MISPREDICT -> rollback
+			rollbacks++;
+			const uint32_t depth = head - j;                // frames to re-sim
+			if (depth > maxDepth) maxDepth = depth;
+			pd::restore(sb_anchor + j);                     // rewind to confirmed boundary
+			lastConfirmed = auth;
+			for (uint32_t f = j; f < head; f++) {           // re-sim tail: auth@j, repeat-last after
+				const uint32_t rem = (f == j) ? auth : lastConfirmed;
+				predRemote[f] = rem;
+				applyFrame(localNeutral, rem);
+				runOneGameFrameHeadless();
+				pd::save(sb_anchor + f + 1);
+			}
+		}
+		lastConfirmed = auth;                               // frame j now confirmed
+		// CONFIRMED-HASH GATE: the confirmed frame's state must == server truth.
+		pd::restore(sb_anchor + j + 1);
+		const uint64_t ch = gameStateRegionHash();
+		sb_confirmChecks++;
+		if (ch == truth[j]) { confirmMatch++; sb_confirmMatches++; } else allConfirmOk = false;
+		// re-extend the head after the check-rollback
+		head = j + 1;
+		predictTo(std::min(j + 1 + LEAD, K));
+	}
+
+	g_headless.store(false, std::memory_order_relaxed);
+	rend_enable_renderer(prevEnabled);
+	settings.input.fastForwardMode = prevFF; settings.aica.muteAudio = prevMute;
+
+	const bool ok = allConfirmOk && (rollbacks > 0);       // converged + rollbacks fired
+	sb_trialIdx++; if (ok) sb_pass++;
+	sb_totalRollbacks += rollbacks; if (maxDepth > sb_maxDepth) sb_maxDepth = maxDepth;
+	printf("[predict-sb] TRIAL %u/%u: K=%u -> %s  confirmed-hash=%u/%u matched  rollbacks=%u maxDepth=%u\n",
+	       sb_trialIdx, sb_trials, K, ok ? "PASS" : "FAIL", confirmMatch, K, rollbacks, maxDepth);
+}
+
 void onFrameBoundary(uint64_t frame)
 {
 	if (!active()) return;
@@ -937,6 +1068,37 @@ void onFrameBoundary(uint64_t frame)
 				sa_warmup = 20 + (rand() % 60);
 				sa_K = 2 + (rand() % 11);
 				sa_stage = SA_WARMUP;
+			}
+		}
+		break;
+	default: break;
+	}
+
+	// STAGE b — reconcile + hash-gate (MAPLECAST_PREDICT_STAGEB). Ring saved above.
+	sbConfigure();
+	switch (sb_stage) {
+	case SB_WARMUP:
+		if (sb_warmup > 0) { sb_warmup--; break; }
+		sb_anchor = frame;
+		sb_stage = SB_RUN;
+		break;
+	case SB_RUN:
+		if (frame >= sb_anchor + sb_K + 4) {   // ensure the ring holds the whole span
+			sbRunCheck(frame);
+			if (sb_trialIdx >= sb_trials) {
+				printf("[predict-sb] ===== STAGE b %s: %u/%u trials converged; confirmed-hash "
+				       "%llu/%llu matched; %llu rollbacks (maxDepth %llu); genuine-mismatch=%llu =====\n",
+				       (sb_pass == sb_trials && sb_confirmMatches == sb_confirmChecks) ? "GREEN" : "RED",
+				       sb_pass, sb_trials,
+				       (unsigned long long)sb_confirmMatches, (unsigned long long)sb_confirmChecks,
+				       (unsigned long long)sb_totalRollbacks, (unsigned long long)sb_maxDepth,
+				       (unsigned long long)(sb_confirmChecks - sb_confirmMatches));
+				fflush(stdout);
+				sb_stage = SB_DONE;
+			} else {
+				sb_warmup = 20 + (rand() % 60);
+				sb_K = 4 + (rand() % 9);
+				sb_stage = SB_WARMUP;
 			}
 		}
 		break;
