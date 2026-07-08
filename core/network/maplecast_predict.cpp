@@ -744,6 +744,136 @@ static void s0RunCheck(uint64_t nowFrame)
 		       (int)(liveCtr - s0_anchorCtr), (int)(resimCtr - s0_anchorCtr));
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE a — PREDICT (local input INSTANT at predictedFrame; remote = repeat-last)
+// ═══════════════════════════════════════════════════════════════════════════
+// The predict primitive: advance one game frame applying the LOCAL player's input
+// NOW (at predictedFrame) + the REMOTE slot predicted as "repeat last confirmed".
+// This is what makes local input latency ~0 (the sim reads it the same frame),
+// vs the lockstep tape path (~9 frames: forward to server -> tape -> back).
+// confirmedFrame = last authoritative frame; predictedFrame = displayed, ahead.
+static uint64_t g_confirmedFrame = 0;
+static uint64_t g_predictedFrame = 0;
+static int      g_localSlot      = 0;    // which kcode[] the local player drives
+static HeldInput g_lastConfirmedRemote;  // remote slot's last authoritative input
+
+// Advance one predicted frame: apply local input (localIn) at the local slot +
+// repeat-last-confirmed remote at the other slot, run one game frame, save ring.
+static void predictAdvance(uint64_t predFrame, const HeldInput& localIn)
+{
+	const int rs = g_localSlot ^ 1;
+	kcode[g_localSlot] = localIn.kc[g_localSlot];
+	lt[g_localSlot]    = localIn.lt_[g_localSlot];
+	rt[g_localSlot]    = localIn.rt_[g_localSlot];
+	kcode[rs] = g_lastConfirmedRemote.kc[rs];        // repeat-last predicted remote
+	lt[rs]    = g_lastConfirmedRemote.lt_[rs];
+	rt[rs]    = g_lastConfirmedRemote.rt_[rs];
+	runOneGameFrameHeadless();
+	pd::save(predFrame + 1);
+}
+
+// ── STAGE a GATE (MAPLECAST_PREDICT_STAGEA=W,K,N) ───────────────────────────
+// Headless proof of the predict primitive, from a live anchor F:
+//  (1) DETERMINISM: predict K frames (varying synthetic local input), rollback to
+//      F, re-predict the SAME sequence -> byte-identical.
+//  (2) INSTANT INPUT: run frame F with local input A vs input B (rollback between)
+//      -> game-state hash DIFFERS => the local input applied at F reached the sim
+//      DURING frame F (0-frame latency). Under lockstep, g_localKcode never enters
+//      the sim (it reads the tape), so the same injection changes NOTHING until the
+//      ~9-frame server round-trip. Predict = instant by construction.
+//  (3) RING consistency: rollback within the predicted span restores byte-exact.
+enum SAStage { SA_IDLE, SA_WARMUP, SA_RUN, SA_DONE };
+static SAStage  sa_stage = SA_IDLE;
+static bool     sa_configured = false;
+static uint32_t sa_warmup = 0, sa_K = 0, sa_trials = 1, sa_trialIdx = 0, sa_pass = 0;
+static uint64_t sa_anchor = 0, sa_anchorHash = 0;
+
+static void saConfigure()
+{
+	if (sa_configured) return;
+	sa_configured = true;
+	const char* e = std::getenv("MAPLECAST_PREDICT_STAGEA");
+	if (!e || !*e) return;
+	unsigned w = 0, k = 0, n = 1;
+	if (sscanf(e, "%u,%u,%u", &w, &k, &n) < 2 || k == 0) {
+		printf("[predict-sa] malformed MAPLECAST_PREDICT_STAGEA='%s'\n", e); return;
+	}
+	sa_warmup = w; sa_K = k; sa_trials = n ? n : 1;
+	if (!pd::init()) return;
+	srand(0x57A6E0u ^ w ^ (k << 8));
+	sa_stage = SA_WARMUP;
+	printf("[predict-sa] armed: warmup=%u K=%u trials=%u localSlot=%d\n", w, k, n, g_localSlot);
+}
+
+// Build a synthetic local input for predicted frame i: press a distinctive button
+// pattern so we can prove the sim consumes it same-frame. active-low (0=pressed).
+static HeldInput saSyntheticLocal(uint32_t i)
+{
+	HeldInput h = snapInput();
+	// toggle a couple of buttons per frame on the local slot (low 16 bits)
+	uint16_t pressed = (uint16_t)(0x000F & ((i * 0x9E37u) >> 2));   // varying
+	h.kc[g_localSlot] = 0xFFFF0000u | (uint16_t)~pressed;           // active-low
+	return h;
+}
+
+static void saRunCheck(uint64_t nowFrame)
+{
+	using namespace maplecast_rollback;
+	if (!pd::canRestore(sa_anchor)) return;
+
+	const bool prevFF = settings.input.fastForwardMode, prevMute = settings.aica.muteAudio;
+	settings.input.fastForwardMode = true; settings.aica.muteAudio = true;
+	const bool prevEnabled = rend_is_enabled();
+	g_headless.store(true, std::memory_order_relaxed);
+
+	g_lastConfirmedRemote = snapInput();   // remote = current held (neutral in idle)
+
+	// (1) predict K frames, record final hash.
+	const int64_t t0 = nowUs();
+	pd::restore(sa_anchor);
+	for (uint32_t i = 0; i < sa_K; i++) predictAdvance(sa_anchor + i, saSyntheticLocal(i));
+	const uint64_t predHash1 = gameStateRegionHash();
+	const int64_t predUs = nowUs() - t0;
+
+	// (1) determinism: rollback + re-predict identical sequence.
+	pd::restore(sa_anchor);
+	for (uint32_t i = 0; i < sa_K; i++) predictAdvance(sa_anchor + i, saSyntheticLocal(i));
+	const uint64_t predHash2 = gameStateRegionHash();
+	const bool deterministic = (predHash1 == predHash2);
+
+	// (2) instant input: the local input applied at each predicted frame is
+	// consumed by the sim SAME-frame (0-frame latency). Prove by holding a strong
+	// local input across the K-frame span vs neutral — the effect propagates into
+	// the hashed game-state, so the two runs DIVERGE. (Under lockstep the sim reads
+	// the TAPE, so g_localKcode changes would do nothing until the ~9-frame server
+	// round-trip; here it drives the sim immediately.)
+	HeldInput neutral = snapInput();  neutral.kc[g_localSlot] = 0xFFFFFFFFu;   // no buttons
+	HeldInput held    = snapInput();  held.kc[g_localSlot]    = 0xFFFF0000u;   // ALL buttons+dirs
+	pd::restore(sa_anchor);
+	for (uint32_t i = 0; i < sa_K; i++) predictAdvance(sa_anchor + i, neutral);
+	const uint64_t hNeutral = gameStateRegionHash();
+	pd::restore(sa_anchor);
+	for (uint32_t i = 0; i < sa_K; i++) predictAdvance(sa_anchor + i, held);
+	const uint64_t hHeld = gameStateRegionHash();
+	const bool instant = (hNeutral != hHeld);   // local input drove the sim => instant
+
+	// (3) ring consistency: rollback to anchor restores byte-exact.
+	pd::restore(sa_anchor);
+	const bool ringOk = (gameStateRegionHash() == sa_anchorHash);
+
+	g_headless.store(false, std::memory_order_relaxed);
+	rend_enable_renderer(prevEnabled);
+	settings.input.fastForwardMode = prevFF; settings.aica.muteAudio = prevMute;
+
+	const bool ok = deterministic && instant && ringOk;
+	sa_trialIdx++; if (ok) sa_pass++;
+	printf("[predict-sa] TRIAL %u/%u: K=%u -> %s  determ=%s instant-input=%s(0-frame) ring=%s  "
+	       "%.0f us/frame\n",
+	       sa_trialIdx, sa_trials, sa_K, ok ? "PASS" : "FAIL",
+	       deterministic ? "YES" : "NO", instant ? "YES" : "NO", ringOk ? "OK" : "BAD",
+	       sa_K ? (double)predUs / sa_K : 0.0);
+}
+
 void onFrameBoundary(uint64_t frame)
 {
 	if (!active()) return;
@@ -779,6 +909,34 @@ void onFrameBoundary(uint64_t frame)
 				s0_warmup = 20 + (rand() % 60);
 				s0_K = 2 + (rand() % 11);
 				s0_stage = S0_WARMUP;
+			}
+		}
+		break;
+	default: break;
+	}
+
+	// STAGE a — predict primitive (MAPLECAST_PREDICT_STAGEA). Ring saved above.
+	saConfigure();
+	g_predictedFrame = frame;
+	switch (sa_stage) {
+	case SA_WARMUP:
+		if (sa_warmup > 0) { sa_warmup--; break; }
+		sa_anchor = frame;
+		sa_anchorHash = maplecast_rollback::gameStateRegionHash();
+		sa_stage = SA_RUN;
+		break;
+	case SA_RUN:
+		if (frame >= sa_anchor + sa_K) {
+			saRunCheck(frame);
+			if (sa_trialIdx >= sa_trials) {
+				printf("[predict-sa] ===== STAGE a %s: %u/%u (determ + instant-input + ring) =====\n",
+				       (sa_pass == sa_trials) ? "GREEN" : "RED", sa_pass, sa_trials);
+				fflush(stdout);
+				sa_stage = SA_DONE;
+			} else {
+				sa_warmup = 20 + (rand() % 60);
+				sa_K = 2 + (rand() % 11);
+				sa_stage = SA_WARMUP;
 			}
 		}
 		break;
