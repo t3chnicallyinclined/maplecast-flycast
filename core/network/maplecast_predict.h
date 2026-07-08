@@ -79,4 +79,22 @@ bool testPassed();
 uint64_t predictedFrame();
 static constexpr uint64_t INPUT_DELAY = 2;   // frames of input delay (GGPO-style)
 
+// ── CAPSTONE — live frameGate predict-drive (MAPLECAST_PREDICT_LIVE=1) ───────
+// True iff MAPLECAST_PREDICT_LIVE is set (implies active()). Cached.
+bool liveActive();
+// Arm the page-delta ring for the live predict-drive. Idempotent. Returns false
+// if the ring couldn't allocate. Call once before the first tick.
+bool liveInit();
+// Page-delta ring primitives for the live loop (thin wrappers over pd::).
+bool     ringSave(uint64_t frame);        // save boundary `frame` (SH4 paused)
+bool     ringRestore(uint64_t frame);     // rollback to boundary `frame`
+bool     ringHas(uint64_t frame);         // is `frame` restorable?
+uint64_t ringOldest();
+uint64_t ringMostRecent();
+// Advance the SH4 exactly one MVC2 game frame, render OFF + audio muted (for the
+// invisible reconcile re-sim). Caller sets kcode[]/lt[]/rt[] first.
+void     advanceHeadlessOneFrame();
+// Set the current predicted frame (so predictedFrame()/frame-stamp track the head).
+void     setPredictedFrame(uint64_t f);
+
 }

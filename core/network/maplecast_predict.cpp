@@ -1299,4 +1299,31 @@ bool testPassed() { return s_pass; }
 
 uint64_t predictedFrame() { return g_predictedFrame; }
 
+// ── CAPSTONE — live predict-drive API (thin wrappers over the pd:: ring) ─────
+bool liveActive()
+{
+	static int cached = -1;
+	if (cached < 0) cached = (std::getenv("MAPLECAST_PREDICT_LIVE") != nullptr) ? 1 : 0;
+	return cached && active();
+}
+bool liveInit()              { return pd::init(); }
+bool ringSave(uint64_t f)    { if (!pd::armed) return false; pd::save(f); return true; }
+bool ringRestore(uint64_t f) { return pd::restore(f); }
+bool ringHas(uint64_t f)     { return pd::canRestore(f); }
+uint64_t ringOldest()        { return pd::oldest; }
+uint64_t ringMostRecent()    { return pd::mostRecent; }
+void setPredictedFrame(uint64_t f) { g_predictedFrame = f; }
+
+void advanceHeadlessOneFrame()
+{
+	const bool prevFF = settings.input.fastForwardMode, prevMute = settings.aica.muteAudio;
+	const bool prevEnabled = rend_is_enabled();
+	settings.input.fastForwardMode = true; settings.aica.muteAudio = true;
+	g_headless.store(true, std::memory_order_relaxed);
+	runOneGameFrameHeadless();
+	g_headless.store(false, std::memory_order_relaxed);
+	rend_enable_renderer(prevEnabled);
+	settings.input.fastForwardMode = prevFF; settings.aica.muteAudio = prevMute;
+}
+
 }

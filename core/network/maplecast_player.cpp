@@ -118,6 +118,20 @@ struct PendingQueue {
 };
 static PendingQueue _queues[2];
 
+// ── CAPSTONE — live predict-drive state (MAPLECAST_PREDICT_LIVE=1) ───────────
+// The predicted head runs ahead of confirmed; per-frame we record the predicted
+// input (to detect mispredicts) and buffer authoritative tape entries (to
+// re-apply on rollback). PRING > ring DEPTH so the lead is always covered.
+static constexpr int LP_RING = 128;
+struct LpInput { uint16_t btn = 0xFFFF; uint8_t lt = 0, rt = 0; };
+static LpInput   _lpPred[2][LP_RING];        // predicted input we applied, per slot
+static LpInput   _lpAuth[2][LP_RING];        // authoritative input, per slot
+static uint64_t  _lpAuthFrame[2][LP_RING];   // which frame that auth slot holds (validate)
+static uint64_t  _lpConfirmed = 0;           // last fully-authoritative frame run
+static bool      _lpInited    = false;
+static LpInput   _lpLastConfRemote;          // remote's last confirmed input (repeat-predict)
+static uint64_t  _lpRollbacks = 0, _lpMaxDepth = 0, _lpReJoins = 0;
+
 // Telemetry
 static std::atomic<uint64_t> _packetsReceived{0};
 static std::atomic<uint64_t> _entriesReceived{0};
@@ -636,6 +650,106 @@ void requestResync()
 	printf("[player] resync requested — bounced state-sync, awaiting fresh JOIN\n");
 }
 
+// ── CAPSTONE — the live predict-drive tick (MAPLECAST_PREDICT_LIVE=1) ────────
+// Returns true (advance the head one game frame — Emulator::run renders it) or
+// false (transient: not ready). Ingests authoritative tape, reconciles (rollback
+// on mispredict via the page-delta ring), then predicts the head with the local
+// player's live input NOW + repeat-last-confirmed remote. The confirmed timeline
+// stays server-authoritative; clientVerify (called above in frameGate) is the
+// determinism gate. Only reached when maplecast_predict::liveActive().
+static bool livePredictDrive(uint64_t localFrame)
+{
+	const int ls = _fwdClaimedSlot & 1;   // local slot
+	const int rs = ls ^ 1;                // remote slot
+	const uint64_t P = localFrame;        // predicted head (about to run frame P)
+
+	if (!_lpInited) {
+		if (!maplecast_predict::liveInit()) return false;
+		_lpConfirmed = (P == 0) ? 0 : P - 1;
+		_lpLastConfRemote = LpInput{};
+		_lpInited = true;
+		printf("[predict-live] drive ARMED: localSlot=%d confirmed=%llu head=%llu\n",
+		       ls, (unsigned long long)_lpConfirmed, (unsigned long long)P);
+	}
+
+	// 1. INGEST authoritative tape (both slots) for confirmed+1 .. P-1.
+	for (int slot = 0; slot < 2; slot++) {
+		PendingQueue& q = _queues[slot];
+		std::lock_guard<std::mutex> lock(q.mu);
+		while (!q.entries.empty()) {
+			const auto& e = q.entries.front();
+			if (e.frame <= _lpConfirmed) { q.entries.pop_front(); continue; }  // stale
+			if (e.frame >= P) break;                                          // future/unrun
+			const int idx = (int)(e.frame % LP_RING);
+			_lpAuth[slot][idx] = LpInput{ e.buttons, e.lt, e.rt };
+			_lpAuthFrame[slot][idx] = e.frame;
+			q.entries.pop_front();
+		}
+	}
+
+	// 2. RECONCILE: advance confirmed while both slots' authoritative for N present;
+	//    note the earliest mispredicted frame.
+	uint64_t reSimFrom = UINT64_MAX;
+	for (uint64_t N = _lpConfirmed + 1; N < P; N++) {
+		const int idx = (int)(N % LP_RING);
+		if (_lpAuthFrame[ls][idx] != N || _lpAuthFrame[rs][idx] != N) break;   // not both yet
+		const bool matchL = (_lpAuth[ls][idx].btn == _lpPred[ls][idx].btn);
+		const bool matchR = (_lpAuth[rs][idx].btn == _lpPred[rs][idx].btn);
+		if (!(matchL && matchR) && reSimFrom == UINT64_MAX) reSimFrom = N;
+		_lpLastConfRemote = _lpAuth[rs][idx];
+		_lpConfirmed = N;
+	}
+
+	// 3. ROLLBACK + RE-SIM from the earliest mispredict to the head (invisible).
+	if (reSimFrom != UINT64_MAX) {
+		if (!maplecast_predict::ringHas(reSimFrom)) {
+			// Beyond the ring — can't reproduce. Fall back to a full re-JOIN.
+			_lpReJoins++;
+			printf("[predict-live] mispredict@%llu beyond ring (oldest=%llu) -> re-JOIN\n",
+			       (unsigned long long)reSimFrom, (unsigned long long)maplecast_predict::ringOldest());
+			_lpInited = false;
+			requestResync();
+			return false;
+		}
+		const uint64_t depth = (P > reSimFrom) ? (P - reSimFrom) : 0;
+		if (depth > _lpMaxDepth) _lpMaxDepth = depth;
+		_lpRollbacks++;
+		maplecast_predict::ringRestore(reSimFrom);
+		for (uint64_t f = reSimFrom; f < P; f++) {
+			const int idx = (int)(f % LP_RING);
+			const bool haveAuth = (_lpAuthFrame[ls][idx] == f && _lpAuthFrame[rs][idx] == f);
+			if (haveAuth) {
+				kcode[ls] = (uint32_t)_lpAuth[ls][idx].btn | 0xFFFF0000u;
+				lt[ls] = (uint16_t)_lpAuth[ls][idx].lt << 8; rt[ls] = (uint16_t)_lpAuth[ls][idx].rt << 8;
+				kcode[rs] = (uint32_t)_lpAuth[rs][idx].btn | 0xFFFF0000u;
+				lt[rs] = (uint16_t)_lpAuth[rs][idx].lt << 8; rt[rs] = (uint16_t)_lpAuth[rs][idx].rt << 8;
+				_lpPred[ls][idx] = _lpAuth[ls][idx]; _lpPred[rs][idx] = _lpAuth[rs][idx];
+			} else {
+				kcode[ls] = (uint32_t)_lpPred[ls][idx].btn | 0xFFFF0000u;
+				lt[ls] = (uint16_t)_lpPred[ls][idx].lt << 8; rt[ls] = (uint16_t)_lpPred[ls][idx].rt << 8;
+				kcode[rs] = (uint32_t)_lpLastConfRemote.btn | 0xFFFF0000u;
+				lt[rs] = (uint16_t)_lpLastConfRemote.lt << 8; rt[rs] = (uint16_t)_lpLastConfRemote.rt << 8;
+				_lpPred[rs][idx] = _lpLastConfRemote;
+			}
+			maplecast_predict::advanceHeadlessOneFrame();
+			maplecast_predict::ringSave(f + 1);
+		}
+	}
+
+	// 4. PREDICT the head frame P: LOCAL input NOW (instant) + repeat-last remote.
+	kcode[ls] = g_localKcode[ls]; lt[ls] = g_localLt[ls]; rt[ls] = g_localRt[ls];
+	kcode[rs] = (uint32_t)_lpLastConfRemote.btn | 0xFFFF0000u;
+	lt[rs] = (uint16_t)_lpLastConfRemote.lt << 8; rt[rs] = (uint16_t)_lpLastConfRemote.rt << 8;
+	_lpPred[ls][P % LP_RING] = LpInput{ (uint16_t)(g_localKcode[ls] & 0xFFFF),
+	                                    (uint8_t)(g_localLt[ls] >> 8), (uint8_t)(g_localRt[ls] >> 8) };
+	_lpPred[rs][P % LP_RING] = _lpLastConfRemote;
+
+	// 5. Advance the head — Emulator::run renders frame P after we return true.
+	_localFrame.fetch_add(1, std::memory_order_relaxed);
+	maplecast_predict::setPredictedFrame(P + 1);
+	return true;
+}
+
 bool frameGate()
 {
 	if (!_active.load(std::memory_order_relaxed)) return true;  // no-op path
@@ -708,6 +822,17 @@ bool frameGate()
 	// set. The full predict/ring/reconcile loop is a later stage.
 	if (maplecast_predict::active())
 		maplecast_predict::onFrameBoundary(localFrame);
+
+	// ── CAPSTONE — live predict-drive (MAPLECAST_PREDICT_LIVE=1) ────────
+	// Replaces the lockstep bothExact tape-wait: apply the LOCAL player's input
+	// NOW at the predicted head + repeat-last-confirmed remote, advance, render.
+	// Reconcile against authoritative tape (rollback on mispredict). Confirmed
+	// timeline stays server-authoritative (clientVerify is the determinism gate).
+	if (maplecast_predict::liveActive()) {
+		if (livePredictDrive(localFrame))
+			return true;
+		return false;   // transient: not enough tape yet to start
+	}
 
 	// ── Lockstep catch-up + advance (determinism-correct) ──────────────
 	// With a state-sync JOIN + per-frame checksum, the client MUST EXECUTE
