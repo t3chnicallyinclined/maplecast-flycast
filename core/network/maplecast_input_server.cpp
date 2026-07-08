@@ -1322,6 +1322,7 @@ static void udpThreadLoop(int port)
 					printf("[input-server] PC(stamped) auto-bind: slot %d\n", claimedSlot);
 				}
 			}
+			{ static int _sdbg=0; if(_sdbg<3){ printf("[input-server] STAMPED rx: slot=%d F=%llu btn=%04x (server frame=%llu)\n", claimedSlot, (unsigned long long)F, buttons, (unsigned long long)maplecast_mirror::currentFrame()); _sdbg++; fflush(stdout);} }
 			scheduleStampedInput(claimedSlot, F, buttons, ltVal, rtVal);
 			continue;   // scheduled — skip the arrival-time updateSlot path
 		}

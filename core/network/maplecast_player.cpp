@@ -131,6 +131,18 @@ static uint64_t  _lpConfirmed = 0;           // last fully-authoritative frame r
 static bool      _lpInited    = false;
 static LpInput   _lpLastConfRemote;          // remote's last confirmed input (repeat-predict)
 static uint64_t  _lpRollbacks = 0, _lpMaxDepth = 0, _lpReJoins = 0;
+// Local input at its EFFECT frame: the client samples the stick at tick H and the
+// input takes effect at frame H+INPUT_DELAY, on BOTH the client's predicted head
+// AND the server (frame-stamped) — so the predicted local input == the
+// authoritative echo => self-mispredict = 0 (stage c invariant, applied live).
+static LpInput   _lpLocalEff[LP_RING];       // local input that takes effect at frame f
+static uint64_t  _lpLocalEffFrame[LP_RING];  // stamp: which frame that entry is for
+static bool      _lpLocalEffInit = false;
+// Headless input-injection test (MAPLECAST_PREDICT_LIVE_INJECT): drive a held
+// local input for a window WITHOUT a stick, to validate the input path.
+static uint64_t  _lpInjectStart = 0;
+static uint64_t  _lpRbAtInjectStart = 0;
+static uint64_t  _lpInjEchoed = 0, _lpInjMatched = 0, _lpInjConfirmed = 0;
 
 // Telemetry
 static std::atomic<uint64_t> _packetsReceived{0};
@@ -650,6 +662,25 @@ void requestResync()
 	printf("[player] resync requested — bounced state-sync, awaiting fresh JOIN\n");
 }
 
+// Send a 15-byte frame-stamped local-input packet (server applies it AT stampF).
+static void lpForwardStamped(const LpInput& in, int slot, uint64_t stampF)
+{
+	if (_fwdSock < 0) return;
+	uint8_t pkt[15];
+	pkt[0] = 'P'; pkt[1] = 'C'; pkt[2] = (uint8_t)slot;
+	pkt[3] = in.lt; pkt[4] = in.rt;
+	pkt[5] = (uint8_t)(in.btn >> 8); pkt[6] = (uint8_t)(in.btn & 0xFF);
+	for (int i = 0; i < 8; i++) pkt[7 + i] = (uint8_t)((stampF >> (8 * i)) & 0xFF);
+	mc_sendto(_fwdSock, pkt, sizeof(pkt), 0, (const sockaddr*)&_fwdInputAddr, sizeof(_fwdInputAddr));
+}
+// The local input that takes EFFECT at frame f (neutral if none stamped for f).
+static LpInput lpLocalForFrame(uint64_t f)
+{
+	const int idx = (int)(f % LP_RING);
+	if (_lpLocalEffInit && _lpLocalEffFrame[idx] == f) return _lpLocalEff[idx];
+	return LpInput{};   // neutral
+}
+
 // ── CAPSTONE — the live predict-drive tick (MAPLECAST_PREDICT_LIVE=1) ────────
 // Returns true (advance the head one game frame — Emulator::run renders it) or
 // false (transient: not ready). Ingests authoritative tape, reconciles (rollback
@@ -693,9 +724,18 @@ static bool livePredictDrive(uint64_t localFrame)
 	for (uint64_t N = _lpConfirmed + 1; N < P; N++) {
 		const int idx = (int)(N % LP_RING);
 		if (_lpAuthFrame[ls][idx] != N || _lpAuthFrame[rs][idx] != N) break;   // not both yet
-		const bool matchL = (_lpAuth[ls][idx].btn == _lpPred[ls][idx].btn);
+		// The client is AUTHORITATIVE for its OWN (local) slot — it applied its own
+		// input, so it NEVER reconciles the local slot (that was the self-mispredict
+		// spiral). Only the REMOTE slot can mispredict.
 		const bool matchR = (_lpAuth[rs][idx].btn == _lpPred[rs][idx].btn);
-		if (!(matchL && matchR) && reSimFrom == UINT64_MAX) reSimFrom = N;
+		if (!matchR && reSimFrom == UINT64_MAX) reSimFrom = N;
+		// INJECTION verify: did the server echo our (injected) local input, and did
+		// our prediction match it? Proves the forward+stamp+echo path end-to-end.
+		if (_lpInjectStart && N >= _lpInjectStart && N < _lpInjectStart + 180) {
+			if (_lpAuth[ls][idx].btn == 0xFFBF) _lpInjEchoed++;
+			if (_lpAuth[ls][idx].btn == _lpPred[ls][idx].btn) _lpInjMatched++;
+			_lpInjConfirmed++;
+		}
 		_lpLastConfRemote = _lpAuth[rs][idx];
 		_lpConfirmed = N;
 	}
@@ -717,16 +757,16 @@ static bool livePredictDrive(uint64_t localFrame)
 		maplecast_predict::ringRestore(reSimFrom);
 		for (uint64_t f = reSimFrom; f < P; f++) {
 			const int idx = (int)(f % LP_RING);
-			const bool haveAuth = (_lpAuthFrame[ls][idx] == f && _lpAuthFrame[rs][idx] == f);
-			if (haveAuth) {
-				kcode[ls] = (uint32_t)_lpAuth[ls][idx].btn | 0xFFFF0000u;
-				lt[ls] = (uint16_t)_lpAuth[ls][idx].lt << 8; rt[ls] = (uint16_t)_lpAuth[ls][idx].rt << 8;
+			// LOCAL slot: ALWAYS the client's own recorded input (authoritative for
+			// its own slot) — never the tape echo. REMOTE slot: authoritative from
+			// the tape if present for f, else repeat-last-confirmed prediction.
+			kcode[ls] = (uint32_t)_lpPred[ls][idx].btn | 0xFFFF0000u;
+			lt[ls] = (uint16_t)_lpPred[ls][idx].lt << 8; rt[ls] = (uint16_t)_lpPred[ls][idx].rt << 8;
+			if (_lpAuthFrame[rs][idx] == f) {
 				kcode[rs] = (uint32_t)_lpAuth[rs][idx].btn | 0xFFFF0000u;
 				lt[rs] = (uint16_t)_lpAuth[rs][idx].lt << 8; rt[rs] = (uint16_t)_lpAuth[rs][idx].rt << 8;
-				_lpPred[ls][idx] = _lpAuth[ls][idx]; _lpPred[rs][idx] = _lpAuth[rs][idx];
+				_lpPred[rs][idx] = _lpAuth[rs][idx];
 			} else {
-				kcode[ls] = (uint32_t)_lpPred[ls][idx].btn | 0xFFFF0000u;
-				lt[ls] = (uint16_t)_lpPred[ls][idx].lt << 8; rt[ls] = (uint16_t)_lpPred[ls][idx].rt << 8;
 				kcode[rs] = (uint32_t)_lpLastConfRemote.btn | 0xFFFF0000u;
 				lt[rs] = (uint16_t)_lpLastConfRemote.lt << 8; rt[rs] = (uint16_t)_lpLastConfRemote.rt << 8;
 				_lpPred[rs][idx] = _lpLastConfRemote;
@@ -736,12 +776,84 @@ static bool livePredictDrive(uint64_t localFrame)
 		}
 	}
 
-	// 4. PREDICT the head frame P: LOCAL input NOW (instant) + repeat-last remote.
-	kcode[ls] = g_localKcode[ls]; lt[ls] = g_localLt[ls]; rt[ls] = g_localRt[ls];
+	// ── LEAD CAP — bound the predicted-confirmed gap (kills any spiral) ─────
+	// The predicted head must never run more than MAX_LEAD ahead of confirmed. If
+	// it does (client fell behind under load), STALL the head so confirmed (tape
+	// replay) catches up; beyond the ring, re-JOIN. This makes a runaway backlog
+	// physically impossible regardless of rollback cost.
+	{
+		static constexpr uint64_t MAX_LEAD = 18;   // < ring DEPTH (32)
+		const uint64_t gap = (P > _lpConfirmed) ? (P - _lpConfirmed) : 0;
+		if (gap > 28) {
+			_lpReJoins++;
+			printf("[predict-live] gap %llu beyond ring -> re-JOIN\n", (unsigned long long)gap);
+			_lpInited = false; requestResync();
+			return false;
+		}
+		if (gap > MAX_LEAD) return false;   // stall head; let confirmed catch up
+	}
+
+	// ── Local input, frame-stamp ALIGNED ──────────────────────────────────
+	// Sample the live stick NOW; it takes effect at frame P+INPUT_DELAY, on BOTH
+	// the client's predicted head AND the server (frame-stamped). Then apply to
+	// THIS head (frame P) the input that takes effect at P (sampled DELAY ticks
+	// ago) — so the head input == the value the server will confirm for P => no
+	// self-mispredict, no rollback storm on press.
+	if (!_lpLocalEffInit) {
+		for (int i = 0; i < LP_RING; i++) _lpLocalEffFrame[i] = UINT64_MAX;
+		_lpLocalEffInit = true;
+	}
+	// INJECTION TEST: SUSTAINED + CHANGING local input over a long window (no
+	// hardware) to expose any build-up/spiral. Hold 60 frames, then MASH a
+	// changing pattern for 300 frames. Assert flat gap + flat rollbacks (no
+	// compounding) via periodic telemetry, and the window summary.
+	static uint64_t _lpArmHead = 0, _lpGapMax = 0;
+	if (_lpArmHead == 0) _lpArmHead = P;
+	if (std::getenv("MAPLECAST_PREDICT_LIVE_INJECT")) {
+		if (_lpInjectStart == 0 && P > _lpArmHead + 200) { _lpInjectStart = P + 10; _lpRbAtInjectStart = _lpRollbacks; }
+		const uint64_t s = _lpInjectStart;
+		if (s && P >= s && P < s + 60) {                 // phase 1: hold a direction
+			g_localKcode[ls] = 0xFFFF0000u | 0xFEFF; g_localLt[ls] = 0; g_localRt[ls] = 0;
+		} else if (s && P >= s + 60 && P < s + 360) {    // phase 2: mash changing pattern
+			static const uint16_t mash[4] = { 0xFFBF, 0xFF7F, 0xFEFF, 0xFFFF };
+			g_localKcode[ls] = 0xFFFF0000u | mash[((P - s) / 4) % 4];
+			g_localLt[ls] = 0; g_localRt[ls] = 0;
+		} else if (s && P == s + 360) {
+			g_localKcode[ls] = 0xFFFFFFFFu;              // release
+			printf("[predict-live] ===== SUSTAINED-INJECT RESULT (360-frame press): "
+			       "confirmed=%llu echoed=%llu matched=%llu(want==confirmed) "
+			       "rollbacks-during-press=%llu(want ~0) maxDepth=%llu maxGap=%llu(want flat) =====\n",
+			       (unsigned long long)_lpInjConfirmed, (unsigned long long)_lpInjEchoed,
+			       (unsigned long long)_lpInjMatched,
+			       (unsigned long long)(_lpRollbacks - _lpRbAtInjectStart),
+			       (unsigned long long)_lpMaxDepth, (unsigned long long)_lpGapMax);
+			fflush(stdout);
+		}
+	}
+	// Periodic drive telemetry (predict path bypasses PLAYOUT): gap + rollbacks.
+	{
+		const uint64_t gap = (P > _lpConfirmed) ? (P - _lpConfirmed) : 0;
+		if (gap > _lpGapMax) _lpGapMax = gap;
+		if ((P % 120) == 0)
+			printf("[predict-live] tele frame=%llu gap=%llu(confirmed=%llu) rollbacks=%llu maxDepth=%llu reJoins=%llu\n",
+			       (unsigned long long)P, (unsigned long long)gap, (unsigned long long)_lpConfirmed,
+			       (unsigned long long)_lpRollbacks, (unsigned long long)_lpMaxDepth,
+			       (unsigned long long)_lpReJoins);
+	}
+	const uint64_t effF = P + maplecast_predict::INPUT_DELAY;
+	LpInput cur{ (uint16_t)(g_localKcode[ls] & 0xFFFF),
+	             (uint8_t)(g_localLt[ls] >> 8), (uint8_t)(g_localRt[ls] >> 8) };
+	_lpLocalEff[effF % LP_RING] = cur;
+	_lpLocalEffFrame[effF % LP_RING] = effF;
+	lpForwardStamped(cur, ls, effF);           // server applies `cur` AT effF (== our head-apply for effF)
+
+	// 4. PREDICT head frame P: DELAYED local (effect-at-P) + repeat-last remote.
+	const LpInput headLocal = lpLocalForFrame(P);
+	kcode[ls] = (uint32_t)headLocal.btn | 0xFFFF0000u;
+	lt[ls] = (uint16_t)headLocal.lt << 8; rt[ls] = (uint16_t)headLocal.rt << 8;
 	kcode[rs] = (uint32_t)_lpLastConfRemote.btn | 0xFFFF0000u;
 	lt[rs] = (uint16_t)_lpLastConfRemote.lt << 8; rt[rs] = (uint16_t)_lpLastConfRemote.rt << 8;
-	_lpPred[ls][P % LP_RING] = LpInput{ (uint16_t)(g_localKcode[ls] & 0xFFFF),
-	                                    (uint8_t)(g_localLt[ls] >> 8), (uint8_t)(g_localRt[ls] >> 8) };
+	_lpPred[ls][P % LP_RING] = headLocal;      // == authoritative echo => matchL
 	_lpPred[rs][P % LP_RING] = _lpLastConfRemote;
 
 	// 5. Advance the head — Emulator::run renders frame P after we return true.
@@ -758,7 +870,10 @@ bool frameGate()
 	// server FIRST. The server echoes our inputs back through the tape
 	// stamped with the authoritative frame number â€” that's the round-trip
 	// that makes the local gamepad "feel real" from the SH4's perspective.
-	forwardLocalInput();
+	// In predict-LIVE mode the drive forwards the input itself (frame-stamped to
+	// the effect frame), so skip the un-stamped forward here to avoid double-send.
+	if (!maplecast_predict::liveActive())
+		forwardLocalInput();
 
 	// Phase 3 v2: ONE-SHOT initial state apply. Once _initialSynced is
 	// true, clientApplyPending will return false on every subsequent call
