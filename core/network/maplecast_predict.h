@@ -72,4 +72,11 @@ void recordAppliedInput(uint64_t frame);
 bool testDone();
 bool testPassed();
 
+// STAGE c — frame-stamped local input. The frame the client is currently
+// predicting/displaying; the client stamps its forwarded input with
+// predictedFrame() + INPUT_DELAY so the server applies it at the SAME frame the
+// client did, eliminating self-mispredict. 0 until the predict loop is running.
+uint64_t predictedFrame();
+static constexpr uint64_t INPUT_DELAY = 2;   // frames of input delay (GGPO-style)
+
 }

@@ -381,6 +381,27 @@ static void forwardLocalInput()
 	_fwdLastRt      = rtVal;
 	_fwdHasFirst    = true;
 
+	// STAGE c — frame-stamped input: when the predict loop is running, stamp the
+	// forwarded input with the target landing frame F = predictedFrame + INPUT_DELAY
+	// so the server applies it AT F (the same frame the client predicted it at) —
+	// eliminating self-mispredict. 15-byte "PC" variant:
+	//   "PC"[slot][LT][RT][btn_hi][btn_lo][frame:u64_LE]
+	// Falls back to the 7-byte packet when predict is off (default client untouched).
+	const uint64_t predF = maplecast_predict::active() ? maplecast_predict::predictedFrame() : 0;
+	if (predF != 0) {
+		uint8_t pkt[15];
+		pkt[0] = 'P'; pkt[1] = 'C'; pkt[2] = (uint8_t)_fwdClaimedSlot;
+		pkt[3] = ltVal; pkt[4] = rtVal;
+		pkt[5] = (uint8_t)(buttons >> 8); pkt[6] = (uint8_t)(buttons & 0xFF);
+		const uint64_t F = predF + maplecast_predict::INPUT_DELAY;
+		for (int i = 0; i < 8; i++) pkt[7 + i] = (uint8_t)((F >> (8 * i)) & 0xFF);   // LE
+		ssize_t sent = mc_sendto(_fwdSock, pkt, sizeof(pkt), 0,
+		                      (const sockaddr*)&_fwdInputAddr, sizeof(_fwdInputAddr));
+		if (sent == (ssize_t)sizeof(pkt))
+			_fwdPacketsSent.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+
 	// 7-byte PC packet: "PC"[slot][LT][RT][btn_hi][btn_lo]
 	uint8_t pkt[7];
 	pkt[0] = 'P';

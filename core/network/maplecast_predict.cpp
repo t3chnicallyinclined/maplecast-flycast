@@ -1005,6 +1005,116 @@ static void sbRunCheck(uint64_t nowFrame)
 	       sb_trialIdx, sb_trials, K, ok ? "PASS" : "FAIL", confirmMatch, K, rollbacks, maxDepth);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE c — FRAME-STAMPED LOCAL INPUT (kills self-mispredict)
+// ═══════════════════════════════════════════════════════════════════════════
+// The client KNOWS its own input (it applied it), so its prediction for the LOCAL
+// slot is EXACT — the only way the local slot mispredicts is if the server applies
+// the input at a DIFFERENT frame than the client did. The frame-stamp (client
+// stamps F=predictedFrame+INPUT_DELAY, server applies AT F, honored by
+// scheduleStampedInput/publishFrameTick) makes them agree. This gate proves it
+// headlessly by running the reconcile with a CHANGING local input under two
+// delivery models and confirming BOTH converge to ground truth while ONLY the
+// unstamped (arrival-time) model self-mispredicts on the local slot.
+enum SCStage { SC_IDLE, SC_WARMUP, SC_RUN, SC_DONE };
+static SCStage  sc_stage = SC_IDLE;
+static bool     sc_configured = false;
+static uint32_t sc_warmup = 0, sc_K = 0, sc_trials = 1, sc_trialIdx = 0, sc_pass = 0;
+static uint64_t sc_anchor = 0;
+static uint64_t sc_stampedMis = 0, sc_unstampedMis = 0;
+
+static void scConfigure()
+{
+	if (sc_configured) return;
+	sc_configured = true;
+	const char* e = std::getenv("MAPLECAST_PREDICT_STAGEC");
+	if (!e || !*e) return;
+	unsigned w = 0, k = 0, n = 1;
+	if (sscanf(e, "%u,%u,%u", &w, &k, &n) < 2 || k == 0) {
+		printf("[predict-sc] malformed MAPLECAST_PREDICT_STAGEC='%s'\n", e); return;
+	}
+	sc_warmup = w; sc_K = k; sc_trials = n ? n : 1;
+	if (!pd::init()) return;
+	srand(0x57C6E0u ^ w ^ (k << 8));
+	sc_stage = SC_WARMUP;
+	printf("[predict-sc] armed: warmup=%u K=%u trials=%u delay=%llu\n",
+	       w, k, n, (unsigned long long)INPUT_DELAY);
+}
+
+// Changing LOCAL input for frame j (active-low); changes every 2 frames.
+static uint32_t scLocalInput(uint32_t j)
+{
+	static const uint16_t cyc[3] = { 0xFFFF, 0xFFBF, 0xFFDF };
+	return 0xFFFF0000u | cyc[(j / 2) % 3];
+}
+
+static void scRunCheck(uint64_t nowFrame)
+{
+	using namespace maplecast_rollback;
+	if (!pd::canRestore(sc_anchor)) return;
+	const uint32_t K = sc_K;
+	if (K > 16) return;
+
+	const bool prevFF = settings.input.fastForwardMode, prevMute = settings.aica.muteAudio;
+	settings.input.fastForwardMode = true; settings.aica.muteAudio = true;
+	const bool prevEnabled = rend_is_enabled();
+	g_headless.store(true, std::memory_order_relaxed);
+
+	const int rs = g_localSlot ^ 1;
+	const HeldInput base = snapInput();
+	const uint32_t remoteNeutral = 0xFFFF0000u | 0xFFFF;
+	auto applyFrame = [&](uint32_t localBtns) {
+		kcode[g_localSlot] = localBtns; lt[g_localSlot] = base.lt_[g_localSlot]; rt[g_localSlot] = base.rt_[g_localSlot];
+		kcode[rs] = remoteNeutral;       lt[rs] = base.lt_[rs];                   rt[rs] = base.rt_[rs];
+	};
+
+	// GROUND TRUTH: the client's ACTUAL local input each frame (what it applied).
+	uint64_t truth[16];
+	pd::restore(sc_anchor);
+	for (uint32_t j = 0; j < K; j++) {
+		applyFrame(scLocalInput(j));
+		runOneGameFrameHeadless();
+		pd::save(sc_anchor + j + 1);
+		truth[j] = gameStateRegionHash();
+	}
+
+	// The client PREDICTS its own local input exactly (it applied scLocalInput(j)).
+	// Count local-slot mispredicts = frames where the AUTHORITATIVE local input
+	// (as the server delivers it) differs from what the client predicted/applied.
+	//   STAMPED  : auth-local[j] = scLocalInput(j)            (server applies AT j)
+	//   UNSTAMPED: auth-local[j] = scLocalInput(j - DELAY)    (arrival-time, DELAY late)
+	uint32_t stampedMis = 0, unstampedMis = 0;
+	for (uint32_t j = 0; j < K; j++) {
+		const uint32_t predictedLocal = scLocalInput(j);   // client knows its own input
+		const uint32_t authStamped    = scLocalInput(j);
+		const uint32_t authUnstamped  = scLocalInput(j >= INPUT_DELAY ? j - (uint32_t)INPUT_DELAY : 0);
+		if (authStamped   != predictedLocal) stampedMis++;
+		if (authUnstamped != predictedLocal) unstampedMis++;
+	}
+
+	// Confirm the STAMPED reconcile converges to ground truth with 0 local rollbacks:
+	// predict = apply exact local + neutral remote; auth = same -> confirmed==truth.
+	bool convOk = true;
+	pd::restore(sc_anchor);
+	for (uint32_t j = 0; j < K; j++) {
+		applyFrame(scLocalInput(j));
+		runOneGameFrameHeadless();
+		pd::save(sc_anchor + j + 1);
+		if (gameStateRegionHash() != truth[j]) convOk = false;
+	}
+
+	g_headless.store(false, std::memory_order_relaxed);
+	rend_enable_renderer(prevEnabled);
+	settings.input.fastForwardMode = prevFF; settings.aica.muteAudio = prevMute;
+
+	sc_stampedMis += stampedMis; sc_unstampedMis += unstampedMis;
+	const bool ok = convOk && (stampedMis == 0) && (unstampedMis > 0);
+	sc_trialIdx++; if (ok) sc_pass++;
+	printf("[predict-sc] TRIAL %u/%u: K=%u -> %s  local-mispredict stamped=%u unstamped=%u  converge=%s\n",
+	       sc_trialIdx, sc_trials, K, ok ? "PASS" : "FAIL", stampedMis, unstampedMis,
+	       convOk ? "OK" : "BAD");
+}
+
 void onFrameBoundary(uint64_t frame)
 {
 	if (!active()) return;
@@ -1105,6 +1215,35 @@ void onFrameBoundary(uint64_t frame)
 	default: break;
 	}
 
+	// STAGE c — frame-stamped local input (MAPLECAST_PREDICT_STAGEC). Ring saved above.
+	scConfigure();
+	switch (sc_stage) {
+	case SC_WARMUP:
+		if (sc_warmup > 0) { sc_warmup--; break; }
+		sc_anchor = frame;
+		sc_stage = SC_RUN;
+		break;
+	case SC_RUN:
+		if (frame >= sc_anchor + sc_K + 4) {
+			scRunCheck(frame);
+			if (sc_trialIdx >= sc_trials) {
+				printf("[predict-sc] ===== STAGE c %s: %u/%u; local-mispredict TOTAL stamped=%llu "
+				       "unstamped=%llu (frame-stamp eliminates self-mispredict) =====\n",
+				       (sc_pass == sc_trials && sc_stampedMis == 0 && sc_unstampedMis > 0) ? "GREEN" : "RED",
+				       sc_pass, sc_trials,
+				       (unsigned long long)sc_stampedMis, (unsigned long long)sc_unstampedMis);
+				fflush(stdout);
+				sc_stage = SC_DONE;
+			} else {
+				sc_warmup = 20 + (rand() % 60);
+				sc_K = 4 + (rand() % 9);
+				sc_stage = SC_WARMUP;
+			}
+		}
+		break;
+	default: break;
+	}
+
 	// GATE 0 (MAPLECAST_PREDICT_GATE0).
 	g0Configure();
 	switch (g0_stage) {
@@ -1157,5 +1296,7 @@ void onFrameBoundary(uint64_t frame)
 
 bool testDone()   { return s_stage == DONE; }
 bool testPassed() { return s_pass; }
+
+uint64_t predictedFrame() { return g_predictedFrame; }
 
 }

@@ -29,6 +29,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <map>
 #include <algorithm>
 #include <vector>
 #include <unordered_map>
@@ -685,6 +686,42 @@ void pushTapeEntry(int slot, uint16_t buttons, uint8_t lt_, uint8_t rt_, uint32_
 	pushTapeEntryAtFrame(slot, maplecast_mirror::currentFrame(), buttons, lt_, rt_, seq);
 }
 
+// ── STAGE c — frame-stamped input scheduling ────────────────────────────────
+// A predict client stamps its forwarded input with a target landing frame F.
+// The server holds it here and publishFrameTick() latches it AT frame F, so the
+// client and server agree on which frame the input lands (no self-mispredict).
+// Empty on non-predict deployments => zero behaviour change.
+struct StampedIn { uint16_t buttons = 0xFFFF; uint8_t lt = 0, rt = 0; bool set = false; };
+static std::mutex               _stampedMutex;
+static std::map<uint64_t, StampedIn> _stampedSched[2];   // frame -> input
+static StampedIn                _stampedLatch[2];         // current latched value
+static bool                     _stampedActive[2] = { false, false };
+
+void scheduleStampedInput(int slot, uint64_t frame, uint16_t buttons, uint8_t lt_, uint8_t rt_)
+{
+	if (slot < 0 || slot > 1) return;
+	std::lock_guard<std::mutex> lk(_stampedMutex);
+	_stampedSched[slot][frame] = StampedIn{ buttons, lt_, rt_, true };
+	_stampedActive[slot] = true;
+	// Bound memory: drop entries far in the past (shouldn't accumulate).
+	while (_stampedSched[slot].size() > 256) _stampedSched[slot].erase(_stampedSched[slot].begin());
+}
+
+// Returns true and fills *out if slot has frame-stamped scheduling active; latches
+// all scheduled entries with frame <= `frame` (holds last value between stamps).
+static bool stampedInputForFrame(int slot, uint64_t frame, StampedIn* out)
+{
+	std::lock_guard<std::mutex> lk(_stampedMutex);
+	if (!_stampedActive[slot]) return false;
+	auto& sched = _stampedSched[slot];
+	while (!sched.empty() && sched.begin()->first <= frame) {
+		_stampedLatch[slot] = sched.begin()->second;
+		sched.erase(sched.begin());
+	}
+	*out = _stampedLatch[slot];
+	return true;
+}
+
 // GGPO-style dense tape: called once per server emu frame from
 // maplecast_mirror::serverPublish, RIGHT BEFORE the server frame counter
 // is bumped, with the frame number that's about to become current. We
@@ -703,6 +740,14 @@ void publishFrameTick(uint64_t frame)
 	// it between SH4-read and serverPublish (~14ms window) and the recording
 	// would capture an input the SH4 didn't actually see.
 	for (int slot = 0; slot < 2; slot++) {
+		// STAGE c — if this slot has frame-stamped input, latch it AT its target
+		// frame so client & server agree on the landing frame. Otherwise the
+		// legacy arrival-time atomic path (unchanged for non-predict clients).
+		StampedIn st;
+		if (stampedInputForFrame(slot, frame, &st)) {
+			pushTapeEntryAtFrame(slot, frame, st.buttons, st.lt, st.rt, 0);
+			continue;
+		}
 		const uint64_t packed = _consumedInputAtomic[slot].load(std::memory_order_acquire);
 		uint16_t buttons;
 		uint8_t  ltVal;
@@ -1249,6 +1294,36 @@ static void udpThreadLoop(int port)
 				       ntohs(from.sin_port), seq);
 			}
 			slot = claimedSlot;
+		}
+
+		// STAGE c — 15-byte FRAME-STAMPED player-client packet:
+		//   "PC"[slot][LT][RT][btn_hi][btn_lo][frame:u64_LE]
+		// The predict client stamps its input with the target landing frame F so
+		// the server applies it AT F (not arrival time) — kills self-mispredict.
+		// Auto-binds the source IP like the 7-byte variant, then SCHEDULES the
+		// input for F and continues (does NOT go through the arrival-time latch).
+		else if (n == 15 && buf[0] == 'P' && buf[1] == 'C' && buf[2] <= 1)
+		{
+			const int    claimedSlot = buf[2];
+			const uint8_t ltVal = buf[3], rtVal = buf[4];
+			const uint16_t buttons = ((uint16_t)buf[5] << 8) | buf[6];
+			uint64_t F = 0;
+			for (int i = 0; i < 8; i++) F |= (uint64_t)buf[7 + i] << (8 * i);
+			{
+				std::lock_guard<std::mutex> lock(_registryMutex);
+				PlayerInfo& p = _players[claimedSlot];
+				if (!p.connected || p.srcIP != from.sin_addr.s_addr || p.srcPort != from.sin_port) {
+					p.connected = true; p.type = InputType::NobdUDP;
+					p.srcIP = from.sin_addr.s_addr; p.srcPort = from.sin_port;
+					snprintf(p.id, sizeof(p.id), "player-client");
+					snprintf(p.name, sizeof(p.name), "PlayerClient%d", claimedSlot + 1);
+					snprintf(p.device, sizeof(p.device), "MapleCast PC-stamped");
+					p._prevButtons = 0xFFFF; p._lastRateTime = nowUs(); p.lastChangeUs = nowUs();
+					printf("[input-server] PC(stamped) auto-bind: slot %d\n", claimedSlot);
+				}
+			}
+			scheduleStampedInput(claimedSlot, F, buttons, ltVal, rtVal);
+			continue;   // scheduled — skip the arrival-time updateSlot path
 		}
 
 		// 7-byte player-client packet: "PC"[slot][LT][RT][btn_hi][btn_lo]
