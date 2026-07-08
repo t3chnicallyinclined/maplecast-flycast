@@ -11,6 +11,8 @@
 #include "hw/sh4/sh4_mem.h"            // mem_b (guest RAM) for sub-region hashing
 #include "hw/sh4/modules/mmu.h"        // mmu_set_state (fast restore, skip bm_Reset)
 #include "hw/mem/mem_watch.h"          // memwatch: page-fault write tracking + block-invalidation
+#include "hw/pvr/spg.h"                // spg_last_jitter / spg_getNextInterrupt (vblank reschedule)
+#include "hw/sh4/sh4_sched.h"          // sh4_sched_request (vblank_schid reschedule after rewind)
 #include "serialize.h"                 // dc_serialize + dc_audit_marks (region diff)
 #include <xxhash.h>                    // XXH3_64bits (bundled at core/deps/xxHash/)
 
@@ -27,6 +29,7 @@
 
 extern u32 kcode[4];
 extern u16 rt[4], lt[4];
+extern int vblank_schid;   // defined in core/hw/pvr/spg.cpp
 
 namespace maplecast_predict
 {
@@ -535,6 +538,212 @@ static void g0DecisiveExperiment()
 	fflush(stdout);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE 0 — rollback=true PAGE-DELTA RING (the fast + correct rollback ring)
+// ═══════════════════════════════════════════════════════════════════════════
+// The reconcile loop's per-frame save/restore. Distinct from maplecast_rollback's
+// full-savestate ring (rollback=false, ~17ms cold JIT flush). Here:
+//   hwBlob[f] = dc_serialize(rollback=TRUE): SH4/PVR/AICA regs + sched ONLY.
+//               mem_b / vram / aram are NOT serialized — delegated ENTIRELY to
+//               page-delta (avoids the rollback=false "hybrid" bug the local
+//               fallback hit).
+//   delta[f]  = pre-write content of the pages WRITTEN DURING frame f (memwatch).
+// Restore to boundary F (from mostRecent M): unwind delta[M-1..F] (memcpy pre-write
+//   pages back), then dc_deserialize(hwBlob[F], rollback=TRUE) with NO bm_Reset —
+//   memwatch's write path (mem_watch.h:195 bm_RamWriteAccess/VramLockedWrite)
+//   invalidates stale dynarec blocks/texcache for changed pages, so the JIT stays
+//   warm AND correct (proven byte-exact 7/7 with memwatch armed).
+namespace pd {
+
+static constexpr int DEPTH = 32;   // rollback horizon; beyond = re-JOIN
+
+struct Delta {
+	memwatch::PageMap ram, vram, aram, elan;
+	void capture() {
+		memwatch::ramWatcher.getPages(ram);
+		memwatch::vramWatcher.getPages(vram);
+		memwatch::aramWatcher.getPages(aram);
+		memwatch::elanWatcher.getPages(elan);
+	}
+	void clear() { ram.clear(); vram.clear(); aram.clear(); elan.clear(); }
+	void applyReverse() const {   // memcpy pre-write page content back = undo frame
+		for (const auto& p : ram)  memcpy(memwatch::ramWatcher.getMemPage(p.first),  &p.second.data[0], PAGE_SIZE);
+		for (const auto& p : vram) memcpy(memwatch::vramWatcher.getMemPage(p.first), &p.second.data[0], PAGE_SIZE);
+		for (const auto& p : aram) memcpy(memwatch::aramWatcher.getMemPage(p.first), &p.second.data[0], PAGE_SIZE);
+		for (const auto& p : elan) memcpy(memwatch::elanWatcher.getMemPage(p.first), &p.second.data[0], PAGE_SIZE);
+	}
+};
+
+struct Slot { uint64_t frame = UINT64_MAX; std::vector<uint8_t> hw; size_t hwSize = 0; Delta delta; int spgJitter = 0; };
+
+static Slot     ring[DEPTH];
+static bool     inited = false, armed = false;
+static uint64_t mostRecent = UINT64_MAX;   // newest boundary saved
+static uint64_t oldest      = UINT64_MAX;
+static bool     havePrev = false;
+static uint64_t prevFrame = 0;
+
+static bool init()
+{
+	if (inited) return armed;
+	inited = true;
+	try { for (auto& s : ring) s.hw.resize(4u * 1024u * 1024u); }
+	catch (...) { printf("[predict-pd] ring alloc failed\n"); return false; }
+	memwatch::mirrorActive = true;
+	memwatch::reset();
+	memwatch::protect();
+	armed = true;
+	printf("[predict-pd] ring armed: depth=%d, rollback=true hw-blob + page-delta RAM\n", DEPTH);
+	return true;
+}
+
+// Save the boundary state for frame F (SH4 paused, frame F about to run). Also
+// finalizes delta[F-1] = the pages written during the just-completed frame.
+static void save(uint64_t F)
+{
+	if (!armed) return;
+	// Re-arm protection on pages touched during the frame that just ran, THEN
+	// drain them into that frame's delta slot (GGPO/saveFrame order, L236-246).
+	memwatch::protect();
+	if (havePrev) {
+		Slot& ds = ring[prevFrame % DEPTH];
+		ds.delta.clear();
+		ds.delta.capture();          // pre-write content of prevFrame's pages
+	} else {
+		Delta junk; junk.capture();  // discard boot-time writes
+	}
+	// Serialize hardware-only state at boundary F (rollback=true skips big RAM).
+	Slot& s = ring[F % DEPTH];
+	s.frame = F;
+	s.spgJitter = spg_last_jitter;   // for the vblank_schid reschedule on rewind
+	try { Serializer ser(s.hw.data(), s.hw.size(), /*rollback=*/true);
+	      dc_serialize(ser); s.hwSize = ser.size(); }
+	catch (...) { s.hwSize = 0; }
+	mostRecent = F;
+	oldest = (mostRecent >= (uint64_t)DEPTH - 1) ? (mostRecent - (DEPTH - 2)) : 0;
+	havePrev = true; prevFrame = F;
+}
+
+static bool canRestore(uint64_t F)
+{
+	return armed && mostRecent != UINT64_MAX && F <= mostRecent && F >= oldest
+	       && ring[F % DEPTH].frame == F && ring[F % DEPTH].hwSize > 0;
+}
+
+// Restore the machine to boundary F (start of frame F). Fast: no bm_Reset.
+static bool restore(uint64_t F)
+{
+	if (!canRestore(F)) return false;
+	memwatch::unprotect();
+	for (uint64_t f = mostRecent; f > F; f--) {           // undo frames M-1..F  (delta[f-1]? no: delta of each ran frame)
+		const Slot& sl = ring[(f - 1) % DEPTH];
+		if (sl.frame == (f - 1)) sl.delta.applyReverse();
+	}
+	int jitter = 0;
+	{
+		Slot& s = ring[F % DEPTH];
+		Deserializer deser(s.hw.data(), s.hwSize, /*rollback=*/true);
+		try { dc_deserialize(deser); } catch (...) { return false; }
+		jitter = s.spgJitter;
+	}
+	mmu_set_state();
+	rend_resync_after_rollback();
+	// Reconstruct LIVE's post-callback vblank_schid reschedule (mirrors
+	// maplecast_rollback::rewindToFrame L384-386). Without this, vblank_schid can
+	// stay inactive after the rewind -> no vblanks fire -> SH4 dispatches blocks
+	// forever with no forward progress (the observed intermittent STALL).
+	{
+		const int re_sch = spg_getNextInterrupt();
+		sh4_sched_request(vblank_schid, std::max(0, re_sch - jitter));
+	}
+	memwatch::reset();
+	memwatch::protect();
+	mostRecent = F; havePrev = false;   // forward re-sim rebuilds deltas from F
+	return true;
+}
+
+} // namespace pd
+
+// ── STAGE 0 GATE (MAPLECAST_PREDICT_STAGE0=W,K,N) ───────────────────────────
+// Live client saves EVERY frame to the page-delta ring. Each trial: pick anchor
+// F, let live advance K, then pd::restore(F) + re-sim K (rebuilding the ring) and
+// require the game-state hash == the live F+K hash, byte-exact, ~3ms/frame, while
+// the client holds 60fps (fps-neutral). The re-sim state BECOMES the live state
+// (no restore-back) — exactly how production reconcile continues.
+enum S0Stage { S0_IDLE, S0_WARMUP, S0_RUN, S0_DONE };
+static S0Stage  s0_stage = S0_IDLE;
+static bool     s0_configured = false;
+static uint32_t s0_warmup = 0, s0_K = 0, s0_trials = 1, s0_trialIdx = 0, s0_pass = 0;
+static uint64_t s0_anchor = 0, s0_anchorCtr = 0, s0_anchorHash = 0;
+static double   s0_totUs = 0;
+
+static void s0Configure()
+{
+	if (s0_configured) return;
+	s0_configured = true;
+	const char* e = std::getenv("MAPLECAST_PREDICT_STAGE0");
+	if (!e || !*e) return;
+	unsigned w = 0, k = 0, n = 1;
+	if (sscanf(e, "%u,%u,%u", &w, &k, &n) < 2 || k == 0) {
+		printf("[predict-s0] malformed MAPLECAST_PREDICT_STAGE0='%s' (want W,K[,N])\n", e); return;
+	}
+	s0_warmup = w; s0_K = k; s0_trials = n ? n : 1;
+	if (!pd::init()) return;
+	srand(0x5747E0u ^ w ^ (k << 8));
+	s0_stage = S0_WARMUP;
+	printf("[predict-s0] armed: warmup=%u K=%u trials=%u\n", w, k, s0_trials);
+}
+
+static void s0RunCheck(uint64_t nowFrame)
+{
+	using namespace maplecast_rollback;
+	const uint64_t liveHash = gameStateRegionHash();
+	const uint32_t liveCtr  = *(uint32_t*)&mem_b[0x3496B0];
+
+	if (!pd::canRestore(s0_anchor)) {
+		printf("[predict-s0] TRIAL %u/%u: anchor %llu not in ring (oldest=%llu most=%llu) -> SKIP\n",
+		       s0_trialIdx + 1, s0_trials, (unsigned long long)s0_anchor,
+		       (unsigned long long)pd::oldest, (unsigned long long)pd::mostRecent);
+		return;
+	}
+	// Rewind to the anchor via page-delta, then re-sim K frames headless/muted,
+	// re-saving each frame so the ring stays consistent for the next trial.
+	const bool prevFF = settings.input.fastForwardMode, prevMute = settings.aica.muteAudio;
+	settings.input.fastForwardMode = true; settings.aica.muteAudio = true;
+	const bool prevEnabled = rend_is_enabled();
+	g_headless.store(true, std::memory_order_relaxed);
+
+	const int64_t t0 = nowUs();
+	const bool restored = pd::restore(s0_anchor);
+	const bool restoreOk = restored && (gameStateRegionHash() == s0_anchorHash);
+	for (uint32_t i = 0; i < s0_K; i++) {
+		auto it = g_inputs.find(s0_anchor + i);
+		if (it != g_inputs.end()) applyInput(it->second);
+		runOneGameFrameHeadless();
+		pd::save(s0_anchor + i + 1);   // rebuild ring forward (keeps deltas consistent)
+	}
+	const int64_t resimUs = nowUs() - t0;
+
+	g_headless.store(false, std::memory_order_relaxed);
+	rend_enable_renderer(prevEnabled);
+	settings.input.fastForwardMode = prevFF; settings.aica.muteAudio = prevMute;
+
+	const uint64_t resimHash = gameStateRegionHash();
+	const uint32_t resimCtr  = *(uint32_t*)&mem_b[0x3496B0];
+	const bool advOk = (resimCtr - s0_anchorCtr) == (liveCtr - s0_anchorCtr);
+	const bool ok = restoreOk && advOk && (resimHash == liveHash);
+	s0_trialIdx++; if (ok) s0_pass++;
+	const double usf = s0_K ? (double)resimUs / s0_K : 0.0; s0_totUs += usf;
+	printf("[predict-s0] TRIAL %u/%u: K=%u -> %s  resim=%016llx live=%016llx  advance=%s  "
+	       "%.0f us/frame (%.1f ms)\n",
+	       s0_trialIdx, s0_trials, s0_K, ok ? "PASS" : "FAIL",
+	       (unsigned long long)resimHash, (unsigned long long)liveHash,
+	       advOk ? "OK" : "BAD", usf, usf * s0_K / 1000.0);
+	if (!ok)
+		printf("[predict-s0]   FAIL detail: advance live+%d resim+%d\n",
+		       (int)(liveCtr - s0_anchorCtr), (int)(resimCtr - s0_anchorCtr));
+}
+
 void onFrameBoundary(uint64_t frame)
 {
 	if (!active()) return;
@@ -543,6 +752,37 @@ void onFrameBoundary(uint64_t frame)
 	configure();
 	if (s_stage == WARMUP) {
 		if (s_warmup > 0) s_warmup--; else runGate();
+	}
+
+	// STAGE 0 — page-delta ring (MAPLECAST_PREDICT_STAGE0). Save EVERY live frame.
+	s0Configure();
+	if (pd::armed) pd::save(frame);
+	switch (s0_stage) {
+	case S0_WARMUP:
+		if (s0_warmup > 0) { s0_warmup--; break; }
+		s0_anchor    = frame;
+		s0_anchorCtr = *(uint32_t*)&mem_b[0x3496B0];
+		s0_anchorHash = maplecast_rollback::gameStateRegionHash();
+		s0_stage = S0_RUN;
+		break;
+	case S0_RUN:
+		if (frame >= s0_anchor + s0_K) {
+			s0RunCheck(frame);
+			if (s0_trialIdx >= s0_trials) {
+				printf("[predict-s0] ===== STAGE 0 %s: %u/%u byte-exact page-delta rollbacks, "
+				       "avg %.0f us/frame =====\n",
+				       (s0_pass == s0_trials) ? "GREEN" : "RED", s0_pass, s0_trials,
+				       s0_trials ? s0_totUs / s0_trials : 0.0);
+				fflush(stdout);
+				s0_stage = S0_DONE;
+			} else {
+				s0_warmup = 20 + (rand() % 60);
+				s0_K = 2 + (rand() % 11);
+				s0_stage = S0_WARMUP;
+			}
+		}
+		break;
+	default: break;
 	}
 
 	// GATE 0 (MAPLECAST_PREDICT_GATE0).
