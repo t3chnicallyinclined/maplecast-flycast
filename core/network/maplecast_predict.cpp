@@ -8,7 +8,9 @@
 #include "emulator.h"                  // emu, getSh4Executor
 #include "hw/sh4/sh4_if.h"             // Sh4Executor Run/Start/Stop
 #include "hw/pvr/Renderer_if.h"        // rend_enable_renderer / rend_is_enabled
+#include "serialize.h"                 // dc_serialize + dc_audit_marks (region diff)
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -206,7 +208,7 @@ static G0Stage g0_stage = G0_IDLE;
 static bool     g0_configured = false;
 static uint32_t g0_warmup = 0, g0_K = 0;
 static uint64_t g0_anchorFrame = 0;
-static std::vector<uint8_t> g0_blobA, g0_blobB;
+static std::vector<uint8_t> g0_blobA, g0_blobB, g0_blobLive, g0_blobResim;
 static int32_t  g0_jitA = 0, g0_jitB = 0;
 static size_t   g0_nA = 0, g0_nB = 0;
 static uint64_t g0_hashA = 0;
@@ -224,10 +226,44 @@ static void g0Configure()
 		return;
 	}
 	g0_warmup = w; g0_K = k;
-	try { g0_blobA.resize(40u*1024u*1024u); g0_blobB.resize(40u*1024u*1024u); }
-	catch (...) { printf("[predict-gate0] blob alloc failed\n"); return; }
+	try {
+		g0_blobA.resize(40u*1024u*1024u); g0_blobB.resize(40u*1024u*1024u);
+		g0_blobLive.resize(40u*1024u*1024u); g0_blobResim.resize(40u*1024u*1024u);
+	} catch (...) { printf("[predict-gate0] blob alloc failed\n"); return; }
 	g0_stage = G0_WARMUP;
 	printf("[predict-gate0] armed: warmup=%u K=%u\n", w, k);
+}
+
+// Restore a full dc_serialize blob WITHOUT the vblank_schid re-arm that
+// maplecast_rollback::restoreFromBlob does. That re-arm is correct only for
+// captures taken INSIDE the vblank handler (where vblank_schid was saved
+// end=-1); GATE 0 captures at a clean frame boundary where the deserialized
+// vblank_schid is already VALID, so re-arming it CORRUPTS the scheduler and the
+// re-sim diverges. Plain emu.loadstate keeps the deserialized scheduler as-is.
+static bool g0Restore(const std::vector<uint8_t>& blob, size_t n)
+{
+	try {
+		Deserializer deser(blob.data(), n, false);
+		emu.loadstate(deser);
+	} catch (...) { return false; }
+	rend_resync_after_rollback();   // drain stale render-queue entries
+	return true;
+}
+
+// Serialize the FULL machine state into `buf` recording per-region marks, so the
+// GATE 0 diff can bucket divergent bytes by dc_serialize subsystem.
+static size_t g0SerializeMarked(std::vector<uint8_t>& buf, std::vector<DcAuditMark>& marks)
+{
+	marks.clear();
+	dc_audit_marks = &marks;
+	size_t sz = 0;
+	try {
+		Serializer ser(buf.data(), buf.size(), false);   // rollback=false: full state
+		dc_serialize(ser);
+		sz = ser.size();
+	} catch (...) { sz = 0; }
+	dc_audit_marks = nullptr;
+	return sz;
 }
 
 // Called at frame F+K (from onFrameBoundary), AFTER the client normally reached
@@ -241,35 +277,114 @@ static void g0RunCheck(uint64_t nowFrame)
 	g0_jitB = jitB;
 	const uint64_t hashB = gameStateRegionHash();
 	if (g0_nB == 0) { printf("[predict-gate0] captureB failed\n"); g0_stage = G0_DONE; return; }
+	// FULL live-continuation blob (with region marks) for the byte-diff.
+	std::vector<DcAuditMark> marksLive;
+	const size_t nLive = g0SerializeMarked(g0_blobLive, marksLive);
 
 	// Restore the anchor F INTO THE LIVE CLIENT (render loop + audio running).
-	// Do NOT mute audio for the re-sim: fastForwardMode is only proven SYMMETRIC-
-	// neutral (primitive gate muted both sides); here we compare against the
-	// UN-muted live F..F+K run, so the re-sim must also run un-muted to match.
-	const bool prevFF = settings.input.fastForwardMode;
-	if (!restoreFromBlob(g0_blobA.data(), g0_nA, g0_jitA)) {
+	// Use g0Restore (plain emu.loadstate, NO vblank re-arm) — the capture is a
+	// clean frame boundary so the deserialized scheduler is already valid.
+	if (!g0Restore(g0_blobA, g0_nA)) {
 		printf("[predict-gate0] restoreA failed\n");
 		g0_stage = G0_DONE; return;
 	}
 	const bool restoreOk = (gameStateRegionHash() == g0_hashA);
 
+	// ── ROUND-TRIP FIDELITY (K=0): serialize the JUST-restored state and diff it
+	// against blobA. Any divergence here is a capture->restore round-trip LOSS
+	// (state that dc_serialize writes but dc_deserialize doesn't restore identically,
+	// or vice-versa) — independent of any re-sim. ──
+	{
+		std::vector<DcAuditMark> marksRT;
+		const size_t nRT = g0SerializeMarked(g0_blobResim, marksRT);
+		const size_t common = std::min(g0_nA, nRT);
+		uint64_t total = 0;
+		for (size_t i = 0; i < common; i++)
+			if (g0_blobA[i] != g0_blobResim[i]) total++;
+		printf("[predict-gate0] ROUNDTRIP(K=0): blobA=%zu reser=%zu; %llu differing. Regions:\n",
+		       g0_nA, nRT, (unsigned long long)total);
+		for (size_t mi = 0; mi < marksRT.size(); mi++) {
+			const size_t start = marksRT[mi].offset;
+			const size_t end = (mi + 1 < marksRT.size()) ? marksRT[mi+1].offset : common;
+			if (end > common || start >= end) continue;
+			uint64_t rdiff = 0; size_t firstOff = SIZE_MAX;
+			for (size_t j = start; j < end; j++)
+				if (g0_blobA[j] != g0_blobResim[j]) { if (firstOff==SIZE_MAX) firstOff=j-start; rdiff++; }
+			if (rdiff)
+				printf("[predict-gate0]   RT %-19s | %8llu / %8zu bytes | first@+%zu\n",
+				       marksRT[mi].name, (unsigned long long)rdiff, end-start, firstOff);
+		}
+		// Re-restore so the re-sim starts from the clean anchor (the serialize above
+		// is read-only, but re-restore defensively to guarantee identical start).
+		g0Restore(g0_blobA, g0_nA);
+	}
+
 	// Re-sim K frames HEADLESS replaying the recorded authoritative inputs.
 	g_headless.store(true, std::memory_order_relaxed);
 	const bool prevEnabled = rend_is_enabled();
 	const int64_t t0 = nowUs();
+	int inpFound = 0, inpMissing = 0;
+	for (uint32_t i = 0; i < g0_K; i++) {
+		auto it = g_inputs.find(g0_anchorFrame + i);
+		if (it != g_inputs.end()) { applyInput(it->second); inpFound++;
+			printf("[predict-gate0]   resim f=%llu kc0=%08x lt0=%u rt0=%u\n",
+			       (unsigned long long)(g0_anchorFrame + i), it->second.kc[0],
+			       it->second.lt_[0], it->second.rt_[0]);
+		} else { inpMissing++;
+			printf("[predict-gate0]   resim f=%llu INPUT-MISSING (kcode live=%08x)\n",
+			       (unsigned long long)(g0_anchorFrame + i), kcode[0]);
+		}
+		runOneFrame(true);
+	}
+	printf("[predict-gate0] inputs: found=%d missing=%d (ring=%zu)\n",
+	       inpFound, inpMissing, g_inputs.size());
+	const int64_t resimUs = nowUs() - t0;
+	g_headless.store(false, std::memory_order_relaxed);
+	rend_enable_renderer(prevEnabled);
+	const uint64_t hashResim = gameStateRegionHash();
+	// FULL re-sim blob for the byte-diff.
+	std::vector<DcAuditMark> marksResim;
+	const size_t nResim = g0SerializeMarked(g0_blobResim, marksResim);
+
+	// DETERMINISM PROBE: restore the SAME anchor A again and re-sim the SAME K
+	// frames with the SAME recorded inputs. If hashResim2 != hashResim, the
+	// re-sim reads state NOT captured by the restore (host-timing / external) =>
+	// the restore/mechanism is the bug, not a live-vs-resim rendering gap.
+	g0Restore(g0_blobA, g0_nA);
+	g_headless.store(true, std::memory_order_relaxed);
 	for (uint32_t i = 0; i < g0_K; i++) {
 		auto it = g_inputs.find(g0_anchorFrame + i);
 		if (it != g_inputs.end()) applyInput(it->second);
 		runOneFrame(true);
 	}
-	const int64_t resimUs = nowUs() - t0;
 	g_headless.store(false, std::memory_order_relaxed);
 	rend_enable_renderer(prevEnabled);
-	const uint64_t hashResim = gameStateRegionHash();
+	const uint64_t hashResim2 = gameStateRegionHash();
+	printf("[predict-gate0] determinism: resim=%016llx resim2=%016llx  %s\n",
+	       (unsigned long long)hashResim, (unsigned long long)hashResim2,
+	       (hashResim == hashResim2) ? "DETERMINISTIC" : "NON-DETERMINISTIC(external-state)");
+
+	// MECHANISM PROBE: from the SAME restore A, re-sim K frames with RENDER ON
+	// (runOneFrame(false) — the primitive's "normal" path). If hashNormal == hashB
+	// (live) the divergence is RENDER-OFF; if hashNormal == hashResim (== the
+	// render-off run) but still != hashB, the divergence is the restore-vs-live-
+	// forward MECHANISM, not render.
+	g0Restore(g0_blobA, g0_nA);
+	for (uint32_t i = 0; i < g0_K; i++) {
+		auto it = g_inputs.find(g0_anchorFrame + i);
+		if (it != g_inputs.end()) applyInput(it->second);
+		runOneFrame(false);   // render ON, emu-loop-equivalent mechanism
+	}
+	const uint64_t hashNormal = gameStateRegionHash();
+	printf("[predict-gate0] mechanism: renderOFF=%016llx renderON=%016llx live=%016llx  "
+	       "[renderON==live:%s  renderON==renderOFF:%s]\n",
+	       (unsigned long long)hashResim, (unsigned long long)hashNormal,
+	       (unsigned long long)hashB,
+	       (hashNormal == hashB) ? "YES" : "no",
+	       (hashNormal == hashResim) ? "YES" : "no");
 
 	// Put the client back at F+K so the LIVE timeline is undisturbed.
-	restoreFromBlob(g0_blobB.data(), g0_nB, g0_jitB);
-	settings.input.fastForwardMode = prevFF;
+	g0Restore(g0_blobB, g0_nB);
 
 	g0_pass = restoreOk && (hashResim == hashB);
 	printf("[predict-gate0] anchorF=%llu K=%u  resim=%016llx  live(F+K)=%016llx  "
@@ -278,9 +393,32 @@ static void g0RunCheck(uint64_t nowFrame)
 	       (unsigned long long)hashResim, (unsigned long long)hashB,
 	       restoreOk ? "OK" : "BAD", (hashResim == hashB) ? "YES" : "NO",
 	       (long long)resimUs, g0_K ? (double)resimUs / g0_K : 0.0);
-	printf("[predict-gate0] === RESTORE-INTO-LIVE %s === now WATCH the lockstep "
-	       "CHECKSUM/PLAYOUT: fps must stay 60, buffer flat, mismatched~0.\n",
-	       g0_pass ? "byte-exact GO" : "NO-GO");
+
+	// ── PRECISE DIVERGENCE DIAGNOSIS: byte-diff the two full blobs, bucketed by
+	// dc_serialize region (dcs_mark), so we see EXACTLY what the re-sim didn't
+	// reproduce (AICA? sh4_sched? TMU? a RAM region?). ──
+	if (!g0_pass && nLive > 0 && nResim > 0) {
+		const size_t common = std::min(nLive, nResim);
+		uint64_t total = 0;
+		for (size_t i = 0; i < common; i++)
+			if (g0_blobLive[i] != g0_blobResim[i]) total++;
+		printf("[predict-gate0] BLOB DIFF: live=%zu resim=%zu bytes; %llu differing "
+		       "(%.4f%%). Divergent regions:\n", nLive, nResim,
+		       (unsigned long long)total, common ? 100.0*(double)total/common : 0.0);
+		for (size_t mi = 0; mi < marksLive.size(); mi++) {
+			const size_t start = marksLive[mi].offset;
+			const size_t end = (mi + 1 < marksLive.size()) ? marksLive[mi+1].offset : common;
+			if (end > common || start >= end) continue;
+			uint64_t rdiff = 0; size_t firstOff = SIZE_MAX;
+			for (size_t j = start; j < end; j++)
+				if (g0_blobLive[j] != g0_blobResim[j]) { if (firstOff==SIZE_MAX) firstOff=j-start; rdiff++; }
+			if (rdiff)
+				printf("[predict-gate0]   %-22s | %8llu / %8zu bytes | first@+%zu\n",
+				       marksLive[mi].name, (unsigned long long)rdiff, end-start, firstOff);
+		}
+	}
+	printf("[predict-gate0] === RESTORE-INTO-LIVE %s ===\n",
+	       g0_pass ? "byte-exact GO" : "NO-GO (see BLOB DIFF regions above)");
 	fflush(stdout);
 }
 
