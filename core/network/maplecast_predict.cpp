@@ -10,6 +10,7 @@
 #include "hw/pvr/Renderer_if.h"        // rend_enable_renderer / rend_is_enabled
 #include "hw/sh4/sh4_mem.h"            // mem_b (guest RAM) for sub-region hashing
 #include "hw/sh4/modules/mmu.h"        // mmu_set_state (fast restore, skip bm_Reset)
+#include "hw/mem/mem_watch.h"          // memwatch: page-fault write tracking + block-invalidation
 #include "serialize.h"                 // dc_serialize + dc_audit_marks (region diff)
 #include <xxhash.h>                    // XXH3_64bits (bundled at core/deps/xxHash/)
 
@@ -259,6 +260,19 @@ static void g0Configure()
 	} catch (...) { printf("[predict-gate0] blob alloc failed\n"); return; }
 	g0_stage = G0_WARMUP;
 	srand(0xC0FFEEu ^ w ^ (k << 8));
+	// FOUNDATION UNLOCK (memwatch): arm the page-fault write watcher so the
+	// bm_Reset-FREE fast restore stays correct over open-ended live continuation.
+	// The watcher's write path (mem_watch.h:195) calls bm_RamWriteAccess /
+	// VramLockedWrite on every faulted page, INVALIDATING stale dynarec blocks &
+	// texcache for changed pages — the exact mechanism that makes GGPO's
+	// bm_Reset-free rollback correct. GATE 0's earlier fast-restore mismatch storm
+	// was caused by MAPLECAST_DISABLE_MEMWATCH=1 (no invalidation), NOT by the fast
+	// restore being unsafe. Env: MAPLECAST_PREDICT_MEMWATCH=1.
+	if (std::getenv("MAPLECAST_PREDICT_MEMWATCH")) {
+		memwatch::mirrorActive = true;
+		memwatch::protect();
+		printf("[predict-gate0] memwatch ARMED (block-invalidation on write => fast restore safe)\n");
+	}
 	printf("[predict-gate0] armed: warmup=%u K=%u trials=%u\n", w, k, g0_trials);
 }
 
