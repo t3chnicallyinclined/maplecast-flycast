@@ -1,5 +1,16 @@
 # TA-Wire v2 — sub-1 Mbps plan (measured basis)
 
+> **STATUS 2026-07-09 (end of the build night): P0/P1/P1.5/P2 LIVE ON PROD and user-verified
+> smooth in real play.** Prod env: ZSTREAM=1 LEVEL=9 SOA=1 TACANON=1 (PAGEGATE + STAGESTRIP
+> present but OFF). Measured: ZCS2 ~1.1-1.2 Mbps in-match / 0.43 idle; legacy 5.18 Mbps
+> (-24% for all viewers via the TACANON encoder fix). Phase 3a STAGESTRIP: built, byte-gated
+> (strip-chain 1500/1500), 0.898 Mbps in-match on the rig — PARKED pending re-test on the
+> now-clean transport + the 3b bake sweep. Client hardening shipped: WS-only page (WT
+> datagrams corrupt stateful streams), structural frame whitelist, post-inverse frameSize
+> belt (convention: frameSize EXCLUDES its own 4 bytes — two off-by-4 client bugs cost an
+> evening; READ THE PRODUCER before writing wire checks). NEXT: worker-decode (supers FPS),
+> 3a re-test, 3b bake sweep, 3c own-HUD.
+
 > Basis: docs/render-state/06 (prior art) + 07 (compression lab, 2026-07-08 capture).
 > Wire today: 6.875 Mbps in-match on feat/render-replica-live. Measured target stack:
 > 0.93–0.79 Mbps @ ≤0.31 ms/frame. Zero image-quality loss at every phase; the
