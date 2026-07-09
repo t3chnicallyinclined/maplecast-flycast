@@ -2188,6 +2188,22 @@ void serverPublish(TA_context* ctx)
 	for (size_t i = 0; i < VRAM_BITMAP_WORDS; i++)
 		forcedDirty[i] = _vramDirtyBitmap[i].exchange(0, std::memory_order_acquire);
 
+	// === MAPLECAST_PAGEGATE (TA-Wire v2 Phase 0, docs/TA-WIRE-V2-PLAN.md) ===
+	// The forced-ship above predates the deterministic wire: with strict
+	// memcmp-vs-shadow and every shadow write paired with a client SYNC/ship
+	// (sites :491/:2210/:2325/:3518), shadow == client state, so a forced page
+	// whose bytes EQUAL shadow is a page the client provably already holds.
+	// Measured (render-state/07): 56.9% of shipped pages are such re-ships.
+	//   =measure : wire UNCHANGED, count forced-equal pages (live validation)
+	//   =1       : forced bit no longer forces a memcmp-equal ship
+	// Default (unset/0): legacy behavior, ship forced pages unconditionally.
+	static const int _pageGate = [](){
+		const char* e = std::getenv("MAPLECAST_PAGEGATE");
+		if (!e || !*e || *e == '0') return 0;
+		return (*e == 'm' || *e == 'M') ? 1 : 2;
+	}();
+	static uint64_t _pgForcedEqual = 0, _pgForcedTotal = 0, _pgShipped = 0;
+
 	// VRAM + PVR regs: memcmp against shadow copies, OR forced-dirty bitmap (VRAM only)
 	//
 	// Snapshot live â†’ shadow ONCE per dirty page, then ship from shadow. The
@@ -2202,7 +2218,20 @@ void serverPublish(TA_context* ctx)
 		for (size_t p = 0; p < numPages; p++) {
 			size_t off = p * MEM_PAGE_SIZE;
 			bool forced = isVram && (forcedDirty[p >> 6] & (1ULL << (p & 63)));
-			if (forced || memcmp(reg.ptr + off, reg.shadow + off, MEM_PAGE_SIZE) != 0) {
+			// PAGEGATE: when active, always run the content compare so a forced
+			// bit on identical bytes can be counted (measure) or skipped (gate).
+			bool changed;
+			if (_pageGate && forced) {
+				changed = memcmp(reg.ptr + off, reg.shadow + off, MEM_PAGE_SIZE) != 0;
+				_pgForcedTotal++;
+				if (!changed) {
+					_pgForcedEqual++;
+					if (_pageGate == 2) continue;   // gate mode: client provably has these bytes
+				}
+			} else {
+				changed = forced || memcmp(reg.ptr + off, reg.shadow + off, MEM_PAGE_SIZE) != 0;
+			}
+			if (changed || forced) {
 				// Worst-case slot size: VCACHE header (1+4+8+1=14) + data, or
 				// standard header (1+4=5) + data. Use 14 to cover both.
 				if ((size_t)(dst - dstStart) + 14 + MEM_PAGE_SIZE > RING_SIZE / 3)
@@ -2233,6 +2262,22 @@ void serverPublish(TA_context* ctx)
 	}
 done_diff:
 	memcpy(dirtyCountPtr, &totalDirty, 4);
+
+	// PAGEGATE telemetry (both modes), every 600 frames. Prints even when
+	// forcedTotal==0 — "the forced path never fired" is itself a finding.
+	if (_pageGate) {
+		_pgShipped += totalDirty;
+		if (frameNum % 600 == 0) {
+			printf("[PAGEGATE] mode=%s forced=%llu forcedEqual=%llu (%.1f%%) shipped=%llu %s\n",
+				_pageGate == 1 ? "measure" : "gate",
+				(unsigned long long)_pgForcedTotal,
+				(unsigned long long)_pgForcedEqual,
+				_pgForcedTotal ? 100.0 * _pgForcedEqual / _pgForcedTotal : 0.0,
+				(unsigned long long)_pgShipped,
+				_pageGate == 1 ? "(wire unchanged)" : "(equal pages skipped)");
+			fflush(stdout);
+		}
+	}
 
 	// VCACHE byte accounting — pre-compression (uncompressed inner-frame) bytes
 	// saved by shipping references instead of full pages this frame, and a
