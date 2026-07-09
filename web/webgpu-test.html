@@ -2076,7 +2076,9 @@ async function main(){
                 {
                     const m0=(d[0]|d[1]<<8|d[2]<<16|d[3]<<24)>>>0;
                     const known = m0===0x5453435A||m0===0x434E5953||m0===0x4E595346||m0===0x45564153;
-                    if(!known && m0!==d.length>>>0) return;
+                    // Uncompressed frames self-describe: frameSize field EXCLUDES its
+                    // own 4 bytes (same convention the desync belt learned the hard way).
+                    if(!known && m0+4!==d.length>>>0) return;
                 }
                 try{
                     const wsArrival=performance.now();
