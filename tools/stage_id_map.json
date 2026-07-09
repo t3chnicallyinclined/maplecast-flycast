@@ -12,5 +12,25 @@
     "00": 15, "01": 16, "02": 49, "03": 37, "04": 37, "05": 25,
     "06": 23, "07": 18, "08": 91, "09": 21, "0A": 16, "0B": 83,
     "0C": 37, "0D": 39, "0E": 25, "0F": 25, "10": 26
+  },
+  "_names_doc": "Human names per STGxx DISC FILE index (NOT wire stage_id). Format facts extracted from ModNao mvc2StageAttribMappings.ts (github.com/rob2d/modnao, non-commercial license 2026-05-25 — facts only, fresh JSON). Cross-checks: 01/0A share geometry = the two Desert variants; 03/0C share a textureDefsHash = the two Carnival variants; 0B = Training matches our confirmed 0x11->STG0B live capture. Mirror of stage-client.mjs STAGE_NAMES.",
+  "names": {
+    "00": "Airship Stage (Day, Flying)",
+    "01": "Desert Stage (Orange Sky)",
+    "02": "Factory Stage",
+    "03": "Carnival Stage (Summer/Spring)",
+    "04": "Swamp Stage",
+    "05": "Cave Stage (Water)",
+    "06": "Clocktower Stage (Clear Sky)",
+    "07": "River on Ice Stage",
+    "08": "Abyss Stage",
+    "09": "Airship Stage (Night, Floating)",
+    "0A": "Desert Stage (Blue Sky)",
+    "0B": "Training Stage",
+    "0C": "Carnival Stage (Winter/Fall)",
+    "0D": "Swamp (Asian)",
+    "0E": "Cave Stage (Lava)",
+    "0F": "Clocktower Stage (Snowy)",
+    "10": "River on Raft Stage"
   }
 }

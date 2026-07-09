@@ -52,6 +52,32 @@ function resolveStageFile(stageId) {
   return stageId & 0xFF;   // fallback: treat id as the file index
 }
 
+// Human names per STGxx DISC FILE index (NOT wire stage_id). Format facts from
+// ModNao mvc2StageAttribMappings.ts (github.com/rob2d/modnao — facts only, fresh
+// table). Mirror of tools/stage_id_map.json "names". Cross-checks that ground it:
+// 01/0A byte-identical POL = the two Desert variants; 03/0C shared TEX-defs hash
+// = the two Carnival variants; 0B "Training Stage" matches the confirmed live
+// 0x11->STG0B capture. Cosmetic (logs/UI) — resolveStageFile does NOT use it.
+export const STAGE_NAMES = {
+  0x00: 'Airship Stage (Day, Flying)',
+  0x01: 'Desert Stage (Orange Sky)',
+  0x02: 'Factory Stage',
+  0x03: 'Carnival Stage (Summer/Spring)',
+  0x04: 'Swamp Stage',
+  0x05: 'Cave Stage (Water)',
+  0x06: 'Clocktower Stage (Clear Sky)',
+  0x07: 'River on Ice Stage',
+  0x08: 'Abyss Stage',
+  0x09: 'Airship Stage (Night, Floating)',
+  0x0A: 'Desert Stage (Blue Sky)',
+  0x0B: 'Training Stage',
+  0x0C: 'Carnival Stage (Winter/Fall)',
+  0x0D: 'Swamp (Asian)',
+  0x0E: 'Cave Stage (Lava)',
+  0x0F: 'Clocktower Stage (Snowy)',
+  0x10: 'River on Raft Stage',
+};
+
 // pvrSnap that makes _ndcMat produce a 640x480 viewport (tx=19,ty=14):
 //   w=(tx+1)*32=640, h=(ty+1)*32=480
 export const STAGE_PVRSNAP = (() => {
@@ -180,7 +206,8 @@ export class StageClient {
       this.cam = cam ? { ...DEFAULT_CAM, ...cam } : { ...DEFAULT_CAM };
       this._parsed = isTA ? this._buildFromTA(data) : this._build(data);
       this._uploadTextures();
-      console.log(`[stage-client] loaded STG${sid} (${isTA ? 'engine-TA grounded' : 'POL-rip'}): `
+      const nm = STAGE_NAMES[stageId] || '?';
+      console.log(`[stage-client] loaded STG${sid} "${nm}" (${isTA ? 'engine-TA grounded' : 'POL-rip'}): `
         + `${data.meshes.length} meshes, ${data.textures.length} textures`);
     } catch (e) {
       console.warn(`[stage-client] failed to load stage ${sid}`, e);
@@ -428,6 +455,15 @@ export class StageClient {
       }
       const alpha = (m.alpha === undefined) ? 1 : m.alpha;
       const isTrans = (!m.isOpaque) || alpha < 0.999;
+      // ── UNTEXTURED mesh tint (mesh diffuse @ +0x30, ripped as m.color f32 RGB) ──
+      // Previously an untextured mesh without per-vertex colors rendered flat WHITE
+      // (v.col defaults to 255,255,255,255). The NinjaLib mesh diffuse is the
+      // authored tint for exactly that case. Per-vertex colors (hasColor) and
+      // textured meshes keep their existing color sources. Legacy JSON: no m.color
+      // -> null -> unchanged white.
+      const c255 = (f) => Math.max(0, Math.min(255, Math.round((f ?? 1) * 255)));
+      const meshTint = (!textured && !m.hasColor && Array.isArray(m.color))
+        ? [c255(m.color[0]), c255(m.color[1]), c255(m.color[2]), 255] : null;
       const first = vi;
       // emit each triangle as its own 3-vert "strip" (count=3); PVR2Renderer
       // _buildIndexBuffer turns count-2 tris from a strip — for a single tri that's 1.
@@ -436,7 +472,7 @@ export class StageClient {
           const [sx, sy, sz] = useEngine
             ? this._projectEngine(v.pos[0], v.pos[1], v.pos[2])
             : this._project(vp, v.pos[0], v.pos[1], v.pos[2]);
-          let col = v.col;
+          let col = meshTint || v.col;
           if (alpha < 0.999) col = [col[0], col[1], col[2], Math.round(col[3] * alpha)];
           writeVtx(vi++, sx, sy, sz, col, v.uv[0], v.uv[1]);
         }
@@ -450,11 +486,25 @@ export class StageClient {
       // Synthesize PVR control words:
       //   pcw: paraType=4, textured bit3, gouraud bit1 (per-vertex colors)
       const pcw = (4 << 29) | (textured << 3) | (1 << 1);
+      //   texture wrapping (mesh byte +0x0A, decoded by rip_stage.py into m.wrap).
+      //   TSP bit meanings VERIFIED in-tree (core/hw/pvr/ta_structs.h TSP union:
+      //   ClampV=bit15, ClampU=bit16, FlipV=bit17, FlipU=bit18 — same extraction
+      //   texture-manager.mjs:158 uses). Mapping per axis: flip -> mirror-repeat
+      //   (FlipX), plain repeat -> no bits, neither -> clamp (ClampX). hStretch is
+      //   a Ninja size hint with no TSP equivalent. Legacy JSON without m.wrap
+      //   synthesizes 0 = repeat/repeat (previous behavior, unchanged).
+      let wrapBits = 0;
+      if (m.wrap) {
+        if (m.wrap.hFlip) wrapBits |= (1 << 18);            // FlipU
+        else if (!m.wrap.hRepeat) wrapBits |= (1 << 16);    // ClampU
+        if (m.wrap.vFlip) wrapBits |= (1 << 17);            // FlipV
+        else if (!m.wrap.vRepeat) wrapBits |= (1 << 15);    // ClampV
+      }
       //   tsp: blend. opaque => ONE/ZERO (PVR2Renderer forces this for opaque anyway);
       //        trans => src-alpha / one-minus-src-alpha; useAlpha bit20; ShadInstr=1 (modulate) bit6
-      const tsp = isTrans
+      const tsp = wrapBits | (isTrans
         ? ((4 << 29) | (5 << 26) | (1 << 20) | (1 << 6))
-        : ((1 << 29) | (0 << 26) | (1 << 6));
+        : ((1 << 29) | (0 << 26) | (1 << 6)));
       //   isp: DepthMode greater-equal(6) for trans / less-equal for op; CullMode none(0); ZWrite on for op
       const isp = isTrans
         ? ((6 << 29) | (0 << 27) | (1 << 26))   // dm=6, cull=0, zwrite-dis=1
@@ -480,7 +530,7 @@ export class StageClient {
   _uploadTextures() {
     const dev = this._dev;
     if (!dev || !this._data) return;
-    const texByIdx = new Map();   // texIndex -> {texture, sampler, w, h}
+    const texByIdx = new Map();   // texIndex -> {texture, sampler, samplers:{}, w, h}
     for (let i = 0; i < this._imgs.length; i++) {
       const img = this._imgs[i];
       if (!img) continue;
@@ -490,10 +540,15 @@ export class StageClient {
       dev.queue.copyExternalImageToTexture({ source: img }, { texture }, [w, h]);
       const sampler = dev.createSampler({ minFilter: 'linear', magFilter: 'linear',
         addressModeU: 'repeat', addressModeV: 'repeat' });
-      texByIdx.set(i, { texture, sampler, w, h });
+      texByIdx.set(i, { texture, sampler, samplers: {}, w, h });
     }
     let fb = null;
     const surrToTex = this._surrToTex || {};
+    // Wrap-aware sampling is applied ONLY on the POL-fallback path, where _build
+    // synthesized the TSP clamp/flip bits from the ripped m.wrap flags. The
+    // shipped engine-TA path (_buildFromTA) keeps the previous fixed repeat
+    // sampler — do not change its behavior.
+    const honorWrap = !this._isTA;
     this._tm = {
       getFallbackTexture() {
         if (fb) return fb;
@@ -507,7 +562,22 @@ export class StageClient {
         if (!surr) return null;
         const ti = surrToTex[surr];
         if (ti === undefined) return null;
-        return texByIdx.get(ti) || null;
+        const e = texByIdx.get(ti);
+        if (!e) return null;
+        if (!honorWrap) return e;
+        // TSP wrap bits (core/hw/pvr/ta_structs.h; extraction identical to
+        // texture-manager.mjs:158-169): clamp wins, then flip = mirror-repeat.
+        const cu = (tsp >> 16) & 1, cv = (tsp >> 15) & 1;
+        const fu = (tsp >> 18) & 1, fv = (tsp >> 17) & 1;
+        const wu = cu ? 'clamp-to-edge' : fu ? 'mirror-repeat' : 'repeat';
+        const wv = cv ? 'clamp-to-edge' : fv ? 'mirror-repeat' : 'repeat';
+        const key = wu + '|' + wv;
+        let s = e.samplers[key];
+        if (!s) {
+          s = e.samplers[key] = dev.createSampler({ minFilter: 'linear',
+            magFilter: 'linear', addressModeU: wu, addressModeV: wv });
+        }
+        return { texture: e.texture, sampler: s, w: e.w, h: e.h };
       },
     };
   }
