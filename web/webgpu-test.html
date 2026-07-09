@@ -301,6 +301,13 @@ const ZCS2 = {
     out.set(v.subarray(tailOff),o);
     return out;
   },
+  errs:0,
+  _desync(why){   // recover cleanly: resync zstd at next epoch AND make the TA
+    this.errs++;  // chain wait for a keyframe (deltas on a missing base = garble
+    this.synced=false; this.chunks=[]; this.clen=0;   // or parser blowup).
+    try{ if(window._D){ window._D.hasPrevTA=false; } }catch(e){}
+    if(this.errs<5||this.errs%60===0) console.warn('[ZCS2] desync ('+why+') — resync at next epoch; errs='+this.errs);
+  },
   onMsg(d){
     const epoch=d[4], flags=d[5];
     this._soa=(flags&2)!==0;
@@ -309,17 +316,23 @@ const ZCS2 = {
       this.chunks=[]; this.clen=0;
       this.dec=new ZcsDecompress((c)=>{ this.chunks.push(c); this.clen+=c.length; });
       this.epoch=epoch; this.synced=true; this.epochs++;
-    } else if(!this.synced || epoch!==this.epoch) return null;  // wait for next stream-start
+    } else {
+      if(!this.synced) return null;                    // wait for next stream-start
+      if(epoch!==this.epoch){ this._desync('epoch gap '+this.epoch+'->'+epoch); return null; }  // relay dropped msgs
+    }
     this.zB+=d.byteLength; this.frames++;
     const t0=performance.now();
     try{ this.dec.push(d.subarray(10)); }
-    catch(e){ console.warn('[ZCS2] fzstd:',e.message,'— resync at next epoch'); this.synced=false; return null; }
+    catch(e){ this._desync('fzstd: '+e.message); return null; }
     this.decMs+=performance.now()-t0;
     if(this.clen>=innerSize){
       const inner=new Uint8Array(innerSize); let o=0;
       for(const c of this.chunks){ const n=Math.min(c.length,innerSize-o); inner.set(c.subarray(0,n),o); o+=n; if(o>=innerSize)break; }
+      const extra=this.clen-innerSize;
       this.chunks=[]; this.clen=0;
-      return this._soa ? this.soaInverse(inner) : inner;
+      if(extra>0){ this._desync('chunk overrun +'+extra+'B'); return null; }  // lost a msg mid-frame
+      try{ return this._soa ? this.soaInverse(inner) : inner; }
+      catch(e){ this._desync('soaInverse: '+e.message); return null; }
     }
     return null;
   }
@@ -341,7 +354,7 @@ window._ZCS2=ZCS2;
     el.textContent =
       'ZCS2   '+(z*8/1e6).toFixed(2)+' Mbps   epoch '+(ZCS2.epoch<0?'–':ZCS2.epoch)+'\n'
      +'legacy '+(l*8/1e6).toFixed(2)+' Mbps   ratio '+(z?(l/z).toFixed(2)+'×':'–')+'\n'
-     +'dec '+(ZCS2.frames?(ZCS2.decMs/ZCS2.frames).toFixed(2):'0.00')+' ms/msg   src: '+src;
+     +'dec '+(ZCS2.frames?(ZCS2.decMs/ZCS2.frames).toFixed(2):'0.00')+' ms/msg   desyncs '+ZCS2.errs+'\nsrc: '+src;
   },1000);
 })();
 
