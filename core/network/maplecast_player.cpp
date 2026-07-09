@@ -57,6 +57,7 @@
 #include "maplecast_state_sync.h"
 #include "maplecast_lockstep.h"       // lockstep checksum layer (env-gated, OFF by default)
 #include "maplecast_predict.h"        // client-side predict/rollback (env-gated, OFF by default)
+#include "maplecast_rollback.h"       // gameStateRegionHash (predict-live confirmed-hash gate)
 
 #include <atomic>
 #include <thread>
@@ -135,15 +136,23 @@ static uint64_t  _lpRollbacks = 0, _lpMaxDepth = 0, _lpReJoins = 0;
 // input takes effect at frame H+INPUT_DELAY, on BOTH the client's predicted head
 // AND the server (frame-stamped) — so the predicted local input == the
 // authoritative echo => self-mispredict = 0 (stage c invariant, applied live).
-static LpInput   _lpLocalEff[LP_RING];       // local input that takes effect at frame f
-static uint64_t  _lpLocalEffFrame[LP_RING];  // stamp: which frame that entry is for
-static bool      _lpLocalEffInit = false;
 // Headless input-injection test (MAPLECAST_PREDICT_LIVE_INJECT): drive a held
 // local input for a window WITHOUT a stick, to validate the input path.
 static uint64_t  _lpInjectStart = 0;
 static uint64_t  _lpRbAtInjectStart = 0;
 static uint64_t  _lpInjEchoed = 0, _lpInjMatched = 0, _lpInjConfirmed = 0;
 static uint64_t  _lpArmHead = 0, _lpGapMax = 0;
+// RUN-AHEAD: serverLive estimate anchors (lockstep serverFrame extrapolated by
+// head-ticks) + newest tape frame seen. The head is driven to serverLive+INPUT_DELAY.
+static uint64_t  _lpSrvFrame = 0, _lpSrvAnchorHead = 0, _lpTapeNewest = 0;
+static uint64_t  _lpLeadMin = UINT64_MAX, _lpLeadMax = 0;
+// CONFIRMED-HASH gate: the head's game-state hash per frame; when a frame confirms
+// (no rollback), compared to the server's authoritative hash for that frame.
+static uint64_t  _lpLiveHash[LP_RING];
+static uint64_t  _lpLiveHashFrame[LP_RING];
+static bool      _lpLiveHashInit = false;
+static uint64_t  _lpConfMatch = 0, _lpConfMismatch = 0;
+static uint64_t  _lpConfM[3] = {0,0,0}, _lpConfMM[3] = {0,0,0};   // offsets N-1,N,N+1
 
 // INJECTION TEST (MAPLECAST_PREDICT_LIVE_INJECT): drive a SUSTAINED + CHANGING
 // local input for a long window WITHOUT hardware, set at the TOP of frameGate so
@@ -692,12 +701,18 @@ void requestResync()
 	printf("[player] resync requested — bounced state-sync, awaiting fresh JOIN\n");
 }
 
-// The local input that takes EFFECT at frame f (neutral if none stamped for f).
-static LpInput lpLocalForFrame(uint64_t f)
+
+// Send a 15-byte frame-stamped local-input packet via the PROVEN socket/dest
+// (same _fwdSock/_fwdInputAddr the 7-byte lockstep forward delivers through).
+static void lpForwardStamped(const LpInput& in, int slot, uint64_t stampF)
 {
-	const int idx = (int)(f % LP_RING);
-	if (_lpLocalEffInit && _lpLocalEffFrame[idx] == f) return _lpLocalEff[idx];
-	return LpInput{};   // neutral
+	if (_fwdSock < 0) return;
+	uint8_t pkt[15];
+	pkt[0] = 'P'; pkt[1] = 'C'; pkt[2] = (uint8_t)slot;
+	pkt[3] = in.lt; pkt[4] = in.rt;
+	pkt[5] = (uint8_t)(in.btn >> 8); pkt[6] = (uint8_t)(in.btn & 0xFF);
+	for (int i = 0; i < 8; i++) pkt[7 + i] = (uint8_t)((stampF >> (8 * i)) & 0xFF);
+	mc_sendto(_fwdSock, pkt, sizeof(pkt), 0, (const sockaddr*)&_fwdInputAddr, sizeof(_fwdInputAddr));
 }
 
 // ── CAPSTONE — the live predict-drive tick (MAPLECAST_PREDICT_LIVE=1) ────────
@@ -723,14 +738,17 @@ static bool livePredictDrive(uint64_t localFrame)
 		       ls, (unsigned long long)_lpConfirmed, (unsigned long long)P);
 	}
 
-	// 1. INGEST authoritative tape (both slots) for confirmed+1 .. P-1.
+	// 1. INGEST authoritative tape (both slots) — ALL received frames < head P
+	//    (the head leads the server, so many tape frames sit between confirmed and P).
 	for (int slot = 0; slot < 2; slot++) {
 		PendingQueue& q = _queues[slot];
 		std::lock_guard<std::mutex> lock(q.mu);
+		if (!q.entries.empty() && q.entries.back().frame > _lpTapeNewest)
+			_lpTapeNewest = q.entries.back().frame;   // newest received (live-edge proxy)
 		while (!q.entries.empty()) {
 			const auto& e = q.entries.front();
 			if (e.frame <= _lpConfirmed) { q.entries.pop_front(); continue; }  // stale
-			if (e.frame >= P) break;                                          // future/unrun
+			if (e.frame >= P) break;                                          // not yet run by head
 			const int idx = (int)(e.frame % LP_RING);
 			_lpAuth[slot][idx] = LpInput{ e.buttons, e.lt, e.rt };
 			_lpAuthFrame[slot][idx] = e.frame;
@@ -739,7 +757,7 @@ static bool livePredictDrive(uint64_t localFrame)
 	}
 
 	// 2. RECONCILE: advance confirmed while both slots' authoritative for N present;
-	//    note the earliest mispredicted frame.
+	//    note the earliest mispredicted frame. (Bound by head P.)
 	uint64_t reSimFrom = UINT64_MAX;
 	for (uint64_t N = _lpConfirmed + 1; N < P; N++) {
 		const int idx = (int)(N % LP_RING);
@@ -758,6 +776,20 @@ static bool livePredictDrive(uint64_t localFrame)
 		}
 		_lpLastConfRemote = _lpAuth[rs][idx];
 		_lpConfirmed = N;
+		// CONFIRMED-HASH GATE: if this frame was NOT rolled back (its head hash is
+		// still valid) compare our end-of-N state hash to the server's authoritative
+		// hash. Test 3 label offsets (-1/0/+1) to pin the true alignment (idle masks
+		// a 1-frame skew; injection exposes it). Whichever offset has mismatch==0 is
+		// the correct one — that's the real determinism proof under input.
+		if (reSimFrom == UINT64_MAX && _lpLiveHashFrame[idx] == N) {
+			uint64_t sh;
+			for (int k = 0; k < 3; k++) {
+				const int64_t sfN = (int64_t)N + (k - 1);   // N-1, N, N+1
+				if (sfN >= 0 && maplecast_lockstep::serverHashForClientFrame((uint64_t)sfN, &sh)) {
+					if (_lpLiveHash[idx] == sh) _lpConfM[k]++; else _lpConfMM[k]++;
+				}
+			}
+		}
 	}
 
 	// 3. ROLLBACK + RE-SIM from the earliest mispredict to the head (invisible).
@@ -796,64 +828,74 @@ static bool livePredictDrive(uint64_t localFrame)
 		}
 	}
 
-	// ── LEAD CAP — bound the predicted-confirmed gap (kills any spiral) ─────
-	// The predicted head must never run more than MAX_LEAD ahead of confirmed. If
-	// it does (client fell behind under load), STALL the head so confirmed (tape
-	// replay) catches up; beyond the ring, re-JOIN. This makes a runaway backlog
-	// physically impossible regardless of rollback cost.
-	{
-		static constexpr uint64_t MAX_LEAD = 18;   // < ring DEPTH (32)
-		const uint64_t gap = (P > _lpConfirmed) ? (P - _lpConfirmed) : 0;
-		if (gap > 28) {
+	// ── RUN-AHEAD: drive the head to LEAD the server's live edge by INPUT_DELAY ──
+	// serverLive estimate: lockstep serverFrame (updated every hashInterval),
+	// extrapolated by head-ticks since its last update, floored by the newest tape
+	// frame received. The head then leads the server so local input applied at the
+	// head is INSTANT (>= live edge) and, stamped for the head frame, lands on the
+	// server in the FUTURE => applied on time => confirmed matches server.
+	const uint64_t sf = maplecast_lockstep::lastServerFrame();
+	if (sf != 0 && sf != _lpSrvFrame) { _lpSrvFrame = sf; _lpSrvAnchorHead = P; }
+	uint64_t serverLive = (_lpSrvFrame != 0) ? (_lpSrvFrame + (P - _lpSrvAnchorHead)) : _lpTapeNewest;
+	if (_lpTapeNewest > serverLive) serverLive = _lpTapeNewest;
+	uint64_t target = serverLive + maplecast_predict::INPUT_DELAY;
+	static constexpr uint64_t MAX_LEAD = 22;               // < ring DEPTH (32)
+	if (target > _lpConfirmed + MAX_LEAD) {                // fell too far behind confirm
+		target = _lpConfirmed + MAX_LEAD;
+		if (P > _lpConfirmed + 28) {                       // beyond ring -> re-JOIN
 			_lpReJoins++;
-			printf("[predict-live] gap %llu beyond ring -> re-JOIN\n", (unsigned long long)gap);
-			_lpInited = false; requestResync();
-			return false;
+			printf("[predict-live] head-confirmed gap %llu beyond ring -> re-JOIN\n",
+			       (unsigned long long)(P - _lpConfirmed));
+			_lpInited = false; requestResync(); return false;
 		}
-		if (gap > MAX_LEAD) return false;   // stall head; let confirmed catch up
 	}
+	if (target < P) target = P;                            // never go backward
 
-	// ── Local input, frame-stamp ALIGNED ──────────────────────────────────
-	// Sample the live stick NOW; it takes effect at frame P+INPUT_DELAY, on BOTH
-	// the client's predicted head AND the server (frame-stamped). Then apply to
-	// THIS head (frame P) the input that takes effect at P (sampled DELAY ticks
-	// ago) — so the head input == the value the server will confirm for P => no
-	// self-mispredict, no rollback storm on press.
-	if (!_lpLocalEffInit) {
-		for (int i = 0; i < LP_RING; i++) _lpLocalEffFrame[i] = UINT64_MAX;
-		_lpLocalEffInit = true;
-	}
-	// Periodic drive telemetry (predict path bypasses PLAYOUT): gap + rollbacks.
-	{
-		const uint64_t gap = (P > _lpConfirmed) ? (P - _lpConfirmed) : 0;
-		if (gap > _lpGapMax) _lpGapMax = gap;
-		if ((P % 120) == 0)
-			printf("[predict-live] tele frame=%llu gap=%llu(confirmed=%llu) rollbacks=%llu maxDepth=%llu reJoins=%llu\n",
-			       (unsigned long long)P, (unsigned long long)gap, (unsigned long long)_lpConfirmed,
-			       (unsigned long long)_lpRollbacks, (unsigned long long)_lpMaxDepth,
-			       (unsigned long long)_lpReJoins);
-	}
-	// Record what takes effect at P+INPUT_DELAY (the forward is done by
-	// forwardLocalInput() at the top of frameGate, via the proven send path — it
-	// stamps predictedFrame()+INPUT_DELAY == effF, reading the same g_localKcode).
-	const uint64_t effF = P + maplecast_predict::INPUT_DELAY;
+	// Sample the local stick NOW and forward it stamped for the HEAD frame `target`
+	// (a FUTURE server frame => the server applies it exactly there = on time, and
+	// the client applies the same value at its head => self-mispredict stays 0).
 	LpInput cur{ (uint16_t)(g_localKcode[ls] & 0xFFFF),
 	             (uint8_t)(g_localLt[ls] >> 8), (uint8_t)(g_localRt[ls] >> 8) };
-	_lpLocalEff[effF % LP_RING] = cur;
-	_lpLocalEffFrame[effF % LP_RING] = effF;
+	lpForwardStamped(cur, ls, target);
 
-	// 4. PREDICT head frame P: DELAYED local (effect-at-P) + repeat-last remote.
-	const LpInput headLocal = lpLocalForFrame(P);
-	kcode[ls] = (uint32_t)headLocal.btn | 0xFFFF0000u;
-	lt[ls] = (uint16_t)headLocal.lt << 8; rt[ls] = (uint16_t)headLocal.rt << 8;
-	kcode[rs] = (uint32_t)_lpLastConfRemote.btn | 0xFFFF0000u;
-	lt[rs] = (uint16_t)_lpLastConfRemote.lt << 8; rt[rs] = (uint16_t)_lpLastConfRemote.rt << 8;
-	_lpPred[ls][P % LP_RING] = headLocal;      // == authoritative echo => matchL
-	_lpPred[rs][P % LP_RING] = _lpLastConfRemote;
+	// Advance the head from P up to `target` (headless predict: local=cur +
+	// remote=repeat-last-confirmed), rendering only the final frame. Steady state
+	// after the initial jump: target == P => 0 headless frames, one rendered frame.
+	auto applyHead = [&](uint64_t f) {
+		const int idx = (int)(f % LP_RING);
+		kcode[ls] = (uint32_t)cur.btn | 0xFFFF0000u; lt[ls]=(uint16_t)cur.lt<<8; rt[ls]=(uint16_t)cur.rt<<8;
+		kcode[rs] = (uint32_t)_lpLastConfRemote.btn | 0xFFFF0000u; lt[rs]=(uint16_t)_lpLastConfRemote.lt<<8; rt[rs]=(uint16_t)_lpLastConfRemote.rt<<8;
+		_lpPred[ls][idx] = cur; _lpPred[rs][idx] = _lpLastConfRemote;
+	};
+	for (uint64_t f = P; f < target; f++) {                // catch-up (headless, invisible)
+		applyHead(f);
+		maplecast_predict::advanceHeadlessOneFrame();
+		maplecast_predict::ringSave(f + 1);
+	}
+	applyHead(target);                                     // the head frame — rendered next
 
-	// 5. Advance the head — Emulator::run renders frame P after we return true.
-	_localFrame.fetch_add(1, std::memory_order_relaxed);
-	maplecast_predict::setPredictedFrame(P + 1);
+	// Telemetry: lead over server (must be POSITIVE ~INPUT_DELAY), gap/depth.
+	const int64_t lead = (int64_t)target - (int64_t)serverLive;
+	if ((uint64_t)(lead < 0 ? -lead : lead) != 0) { if ((uint64_t)llabs(lead) < _lpLeadMin) _lpLeadMin=(uint64_t)llabs(lead); }
+	if ((uint64_t)llabs(lead) > _lpLeadMax) _lpLeadMax=(uint64_t)llabs(lead);
+	const uint64_t gap = (target > _lpConfirmed) ? (target - _lpConfirmed) : 0;
+	if (gap > _lpGapMax) _lpGapMax = gap;
+	if ((target % 120) == 0)
+		printf("[predict-live] tele head=%llu serverLive~%llu lead=%+lld confirmed=%llu gap=%llu "
+		       "rollbacks=%llu maxDepth=%llu reJoins=%llu confHash=%llu/%llu(match/mism)\n",
+		       (unsigned long long)target, (unsigned long long)serverLive, (long long)lead,
+		       (unsigned long long)_lpConfirmed, (unsigned long long)gap,
+		       (unsigned long long)_lpRollbacks, (unsigned long long)_lpMaxDepth,
+		       (unsigned long long)_lpReJoins,
+		       (unsigned long long)_lpConfMatch, (unsigned long long)_lpConfMismatch),
+		printf("[predict-live]   confHash-by-offset  N-1:%llu/%llu  N:%llu/%llu  N+1:%llu/%llu (match/mism)\n",
+		       (unsigned long long)_lpConfM[0],(unsigned long long)_lpConfMM[0],
+		       (unsigned long long)_lpConfM[1],(unsigned long long)_lpConfMM[1],
+		       (unsigned long long)_lpConfM[2],(unsigned long long)_lpConfMM[2]);
+
+	// Advance: Emulator::run renders the head frame `target` after we return true.
+	_localFrame.store(target + 1, std::memory_order_relaxed);
+	maplecast_predict::setPredictedFrame(target);
 	return true;
 }
 
@@ -870,10 +912,11 @@ bool frameGate()
 	if (maplecast_predict::liveActive())
 		lpInjectTick(_localFrame.load(std::memory_order_relaxed), _fwdClaimedSlot & 1);
 
-	// forwardLocalInput sends the frame-stamped 15-byte packet when predict is
-	// active (via the SAME proven socket/dest that the 7-byte path uses). This is
-	// the ONE forward path — the drive no longer sends separately.
-	forwardLocalInput();
+	// In predict-LIVE the drive forwards the local input itself, stamped for the
+	// RUN-AHEAD head frame (a future server frame) — not predictedFrame()+DELAY.
+	// So skip forwardLocalInput here to avoid a double / wrongly-stamped send.
+	if (!maplecast_predict::liveActive())
+		forwardLocalInput();
 
 	// Phase 3 v2: ONE-SHOT initial state apply. Once _initialSynced is
 	// true, clientApplyPending will return false on every subsequent call
@@ -929,7 +972,12 @@ bool frameGate()
 	// (localFrame-1). clientVerify hashes that region and compares against the
 	// server's hash for the matching frame, triggering a resync on divergence.
 	// No-op unless MAPLECAST_LOCKSTEP=1.
-	if (maplecast_lockstep::active())
+	// In predict-LIVE the current state is the SPECULATIVE run-ahead HEAD (leads
+	// the server by INPUT_DELAY), so clientVerify would compare the leading head to
+	// the server's authoritative frame and false-mismatch -> resync storm. The
+	// predict path's determinism gate is the reconcile (confirmed replays the tape;
+	// see livePredictDrive), so skip the lagging-mirror checksum here.
+	if (maplecast_lockstep::active() && !maplecast_predict::liveActive())
 		maplecast_lockstep::clientVerify(localFrame);
 
 	// Predict/rollback subsystem — STAGE 1 drives the no-render re-sim PRIMITIVE
@@ -944,6 +992,16 @@ bool frameGate()
 	// Reconcile against authoritative tape (rollback on mispredict). Confirmed
 	// timeline stays server-authoritative (clientVerify is the determinism gate).
 	if (maplecast_predict::liveActive()) {
+		// Record the head's game-state hash for the frame that just finished
+		// (RAM = END of localFrame-1). When that frame later CONFIRMS without a
+		// rollback, it's compared to the server's authoritative hash => the real
+		// determinism gate for the leading predict head.
+		if (!_lpLiveHashInit) { for (int i=0;i<LP_RING;i++) _lpLiveHashFrame[i]=UINT64_MAX; _lpLiveHashInit=true; }
+		if (localFrame > 0) {
+			const uint64_t hf = localFrame - 1;
+			_lpLiveHash[hf % LP_RING] = maplecast_rollback::gameStateRegionHash();
+			_lpLiveHashFrame[hf % LP_RING] = hf;
+		}
 		if (livePredictDrive(localFrame))
 			return true;
 		return false;   // transient: not enough tape yet to start

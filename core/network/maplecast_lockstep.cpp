@@ -590,4 +590,27 @@ ClientStats getClientStats()
 	return out;
 }
 
+// Lightweight accessor for the predict-live run-ahead: the server's most recent
+// frame as reported over the hash channel (updated every hashInterval frames).
+uint64_t lastServerFrame()
+{
+	return client::c_lastServerFrame.load(std::memory_order_relaxed);
+}
+
+// Offset-aware server-hash lookup for the predict-live CONFIRMED-hash gate. Given
+// a CLIENT frame, returns the server's authoritative hash for the matching server
+// frame (server_frame = client_frame + c_frameOffset) if the offset is locked and
+// that hash has arrived. Thread-safe (c_mu).
+bool serverHashForClientFrame(uint64_t clientFrame, uint64_t* out)
+{
+	using namespace client;
+	std::lock_guard<std::mutex> lock(c_mu);
+	// The client consumes the tape stamped in SERVER frame numbers, so its
+	// confirmed frame == the server frame directly (strict — no fuzzy ±offset).
+	auto it = c_serverHashes.find(clientFrame);
+	if (it == c_serverHashes.end()) return false;
+	if (out) *out = it->second;
+	return true;
+}
+
 } // namespace maplecast_lockstep

@@ -119,4 +119,11 @@ struct ClientStats {
 };
 ClientStats getClientStats();
 
+// Server's most recent frame (from the hash channel). 0 until the first hash.
+uint64_t lastServerFrame();
+
+// Offset-aware: server's authoritative hash for a CLIENT frame (predict-live
+// confirmed-hash gate). Returns false if offset unlocked or hash not yet received.
+bool serverHashForClientFrame(uint64_t clientFrame, uint64_t* out);
+
 }
