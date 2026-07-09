@@ -568,7 +568,16 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
         q->sel=g_cap[k].sel;          /* per-quad source sel (tiling-safe pairing key) */
         q->gfx1=node_gfx1;            /* per-quad owning-body GFX1 base (decode with sel) */
         q->facing=node_facing;        /* owning body facing (carve storage-col disambiguation) */
-        q->z=oz;                      /* per-object depth (node+0xE8 = 1/w) for correct sorting */
+        /* PER-PART depth (re_kb/38): the engine bumps W by +0.001 per submitted tile
+         * (loc_8c034864, BEFORE each submit) so within ONE sprite Z=1/W strictly
+         * DECREASES in submission order -> first tile FRONTMOST under the sprite list's
+         * Greater/GEqual depth test. Emitting the constant per-object oz flattened all
+         * parts to one plane, so intra-body order fell to paint/submission (last-on-top)
+         * = the INVERSE of the engine -> cape-in-front. Feed 1/(W + 0.001*(k+1)): node_W
+         * cancels for intra-sprite ordering, and the per-object ow band is preserved so
+         * cross-object occlusion is unchanged. EMPIRICALLY constant-z before this fix
+         * (frame 300: body0 23 parts all z=0.00940869); distinct per part after. */
+        q->z = (ow > 1e-6f && ow == ow) ? (1.0f / (ow + 0.001f * (float)(k + 1))) : oz;
         /* texU mirror = facing XOR per-part 0x4000 (loc_8c0346c4 neg r8 gate). One bit.
          * MEASURED (A/B vs real :7200 TA, slot-0 deterministic): this facing-XOR formula
          * mismatches the real engine U on only 1.46% of body tiles (599/41163), whereas
