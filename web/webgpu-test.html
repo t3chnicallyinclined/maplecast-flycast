@@ -259,7 +259,7 @@ canvas{display:block;background:transparent}
 import {FrameDecoder} from './webgpu/frame-decoder.mjs?v=8';
 import {Decompress as ZcsDecompress} from './webgpu/fzstd.mjs';
 import {StageClient} from './webgpu/stage-client.mjs?v=2';
-import {TAParser} from './webgpu/ta-parser.mjs';
+import {TAParser} from './webgpu/ta-parser.mjs?v=2';
 import {TextureManager} from './webgpu/texture-manager.mjs';
 import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=5';
 import {PostProcessor} from './webgpu/post-process.mjs';
@@ -653,16 +653,25 @@ window._bodyMerge=(g,wantVf,ord)=>{
   // Only splice when the kept counts line up exactly (self-verifying);
   // otherwise fall back to append-at-end.
   const bodyPolys=bump(bp.translucent||[]);
+  // Splice by wire PARAM identity: one param can parse into several strip
+  // polys (ta-parser endStrip semantics), so entry counts NEVER key the walk;
+  // the descriptor counts PARAMS and kept polys carry .param. A K/P run of
+  // cnt params consumes kept entries until cnt distinct params have passed.
   let spliced=false;
   if(ord&&ord.length>=4){
-    const n=ord[0]; let oi=1, kSum=0, sSum=0;
-    for(let r=0;r<n;r++){ const cls=ord[oi], cnt=ord[oi+1]|ord[oi+2]<<8; oi+=3; if(cls===0) sSum+=cnt; else kSum+=cnt; }
-    if(kSum===g.translucent.length){
-      const kept=g.translucent, merged=[]; let bi=0, ki=0; oi=1;
+    const kept=g.translucent;
+    let kParams=0; for(let i2=0;i2<kept.length;i2++) if(i2===0||kept[i2].param!==kept[i2-1].param) kParams++;
+    const n=ord[0]; let oi=1, kSum=0;
+    for(let r=0;r<n;r++){ const cls=ord[oi]; kSum+=cls===0?0:(ord[oi+1]|ord[oi+2]<<8); oi+=3; }
+    if(kSum===kParams&&kept.every(q=>q.param!==undefined)){
+      const merged=[]; let bi=0, ki=0; oi=1;
       for(let r=0;r<n;r++){
         const cls=ord[oi], cnt=ord[oi+1]|ord[oi+2]<<8; oi+=3;
         if(cls===0){ const take=Math.min(cnt,bodyPolys.length-bi); for(let i2=0;i2<take;i2++) merged.push(bodyPolys[bi++]); }
-        else { const take=Math.min(cnt,kept.length-ki); for(let i2=0;i2<take;i2++) merged.push(kept[ki++]); }
+        else{ let seen=0, last=-1;
+          while(ki<kept.length){ const q=kept[ki];
+            if(q.param!==last){ if(seen===cnt) break; seen++; last=q.param; }
+            merged.push(q); ki++; } }
       }
       while(ki<kept.length) merged.push(kept[ki++]);
       while(bi<bodyPolys.length) merged.push(bodyPolys[bi++]);
@@ -670,7 +679,7 @@ window._bodyMerge=(g,wantVf,ord)=>{
       BODY.spliceOk=(BODY.spliceOk|0)+1;
     } else {
       BODY.spliceSkew=(BODY.spliceSkew|0)+1;
-      if(BODY.spliceSkew<4) console.warn('[body] splice skew: kept',g.translucent.length,'vs descriptor',kSum,'-- append fallback');
+      if(BODY.spliceSkew<4) console.warn('[body] splice skew: kept params',kParams,'vs descriptor',kSum,'-- append fallback');
     }
   }
   if(!spliced) g.translucent=[...g.translucent,...bodyPolys];

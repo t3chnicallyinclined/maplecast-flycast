@@ -61,18 +61,24 @@ export class TAParser {
             if (curList >= 0) listsEnded.add(curList);
             curPP = null; curPPList = null; curList = -1;
         };
+        // Param identity: one wire PARAM (paraType 4/5) can become MULTIPLE
+        // poly entries (endStrip pushes one per strip). `param` preserves the
+        // wire enumeration -- the char-flip splice keys on it, matching the
+        // server's per-param order descriptor exactly (no count heuristics).
+        let paramSeq = 0;
         const newPP = () => {
             // Finalize previous PP before starting new one
             if (curPP && curPP.count === 0) {
                 curPP.count = this._n - curPP.first;
                 if (curPP.count === 0 && curPPList) curPPList.pop();
             }
-            curPP = { first: this._n, count: 0, isp: cISP, tsp: cTSP, tcw: cTCW, pcw: cPCW, tileclip };
+            paramSeq++;
+            curPP = { first: this._n, count: 0, isp: cISP, tsp: cTSP, tcw: cTCW, pcw: cPCW, tileclip, param: paramSeq };
             if (curPPList) curPPList.push(curPP);
         };
         const endStrip = () => { if (!curPP) return; curPP.count = this._n - curPP.first;
             if (curPP.count > 0 && curPPList) { const p = curPP;
-                curPP = { first: this._n, count: 0, isp: p.isp, tsp: p.tsp, tcw: p.tcw, pcw: p.pcw, tileclip: p.tileclip };
+                curPP = { first: this._n, count: 0, isp: p.isp, tsp: p.tsp, tcw: p.tcw, pcw: p.pcw, tileclip: p.tileclip, param: p.param };
                 curPPList.push(curPP); }
         };
 

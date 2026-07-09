@@ -620,6 +620,11 @@ static inline void _csOrderPush(uint8_t cls, uint32_t n = 1)
 static uint32_t taStripStage(const uint8_t* ta, uint32_t taSize, uint8_t* out)
 {
 	_csOrder.clear();
+	// Order-descriptor entries land at each param's FIRST VERTEX, not at the
+	// param itself: the renderer (flycast ta_vtx / web ta-parser newPP) DROPS
+	// zero-vertex params, so counting them here desynced the splice (measured:
+	// a vertexless leading TR poly param every frame).
+	int8_t _csPend = -1; bool _csPendPushed = true;
 	const auto& allow = stripAllowlist();
 	uint32_t off = 0, w = 0;
 	int curList = -1; bool isSpr = false, haveParam = false, dropping = false;
@@ -648,7 +653,7 @@ static uint32_t taStripStage(const uint8_t* ta, uint32_t taSize, uint8_t* out)
 			else                                           sz = 32;
 			uint32_t tcw; memcpy(&tcw, ta + off + 12, 4);
 			dropping = (curList == 0) && inAllow(tcw & 0x1FFFFF);
-			if (curList == 2 && !dropping) _csOrderPush(2);     // kept TR poly (P)
+			_csPend = (curList == 2 && !dropping) ? 2 : -1; _csPendPushed = false;
 			if (!dropping) emit(sz);
 			off += sz; continue;
 		}
@@ -674,7 +679,7 @@ static uint32_t taStripStage(const uint8_t* ta, uint32_t taSize, uint8_t* out)
 			}
 			dropping = ((curList == 0) && inAllow(addr))
 			        || (csOn && curList == 2 && csHit);
-			if (curList == 2) _csOrderPush(dropping ? 0 : 1);   // S=stripped, K=kept sprite
+			_csPend = (curList == 2) ? (dropping ? 0 : 1) : -1; _csPendPushed = false;   // S=stripped, K=kept sprite
 			if (!dropping) emit(32);
 			off += 32; continue;
 		}
@@ -688,6 +693,7 @@ static uint32_t taStripStage(const uint8_t* ta, uint32_t taSize, uint8_t* out)
 				else if (!vol) sz = (colType == 1 && off + 64 <= taSize) ? 64 : 32;
 				else sz = 32;
 			}
+			if (haveParam && !_csPendPushed) { if (_csPend >= 0) _csOrderPush((uint8_t)_csPend); _csPendPushed = true; }
 			if (!dropping) emit(sz);
 			off += sz; continue;
 		}
