@@ -1142,6 +1142,26 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 				} catch (...) {}
 				return;
 			}
+			// wire-v2 VCACHE: a viewer asks for a fresh SYNC broadcast. Sent on
+			// join (the relay serves its CACHED SYNC without telling the server,
+			// so the join-driven VCACHE reseed never fires otherwise) and on a
+			// VCACHE ref-miss (a content-ref for a hash the viewer never received
+			// -- its page stays silently stale until resync). The fresh SYNC also
+			// resets the ZCS2 stream epoch and reseeds the VCACHE sent-set (both
+			// flags are set at the broadcastFreshSync drain site in serverPublish).
+			// Rate-limited: a SYNC is a multi-MB broadcast to every client.
+			if (ctrl["type"] == "request_sync")
+			{
+				static std::atomic<int64_t> _lastSyncReqMs{0};
+				int64_t now = (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+					std::chrono::steady_clock::now().time_since_epoch()).count();
+				int64_t prev = _lastSyncReqMs.load(std::memory_order_relaxed);
+				if (now - prev >= 2000 && _lastSyncReqMs.compare_exchange_strong(prev, now)) {
+					printf("[maplecast-ws] request_sync from viewer -> fresh SYNC broadcast\n");
+					maplecast_mirror::requestSyncBroadcast();
+				}
+				return;
+			}
 			// Skin system â€” palette_write, palette_clear, match_info use "cmd"
 			// instead of "type". Handle them before the type-based chain so they
 			// work even when the message has no "type" field (e.g. from king.html

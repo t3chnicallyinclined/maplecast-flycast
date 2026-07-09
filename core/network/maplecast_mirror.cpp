@@ -1446,22 +1446,53 @@ static void wsClientRun(std::string host, int port)
 		// Stage dirty pages  --  copy page data so render thread can apply safely.
 		// Allow up to a full VRAM+PVR resync (~2056 pages on scene change).
 		uint32_t dirtyCount; memcpy(&dirtyCount, src, 4); src += 4;
+		// wire-v2 VCACHE sentinel (0xFFFFFFFF): real count follows; entries
+		// carry hash(8)+hasData(1) [+ page iff hasData]. hasData==0 refs a
+		// page shipped earlier -- resolve from the client-side content cache.
+		// Content-addressed => a stale cache entry is never WRONG (the hash
+		// names the content), so no clear-on-SYNC; the size cap bounds memory.
+		// Mirrors web/webgpu/frame-decoder.mjs + relay protocol.rs.
+		static std::unordered_map<uint64_t, std::vector<uint8_t>> _cliVcache;
+		bool vcacheWire = (dirtyCount == 0xFFFFFFFFu);
+		if (vcacheWire) { memcpy(&dirtyCount, src, 4); src += 4; }
 		if (dirtyCount > 4096) dirtyCount = 4096;  // sanity bound
 
 		DecodedFrame df;
 		df.frameNum = frameNum;
 		memcpy(df.pvr_snapshot, pvr_snap, sizeof(pvr_snap));
 		df.taSize = taSize;
-		df.dirtyCount = dirtyCount;
 		df.vramDirty = false;
 		df.pages.resize(dirtyCount);
 
+		uint32_t kept = 0;
 		for (uint32_t d = 0; d < dirtyCount; d++) {
-			df.pages[d].regionId = *src++;
-			memcpy(&df.pages[d].pageIdx, src, 4); src += 4;
-			memcpy(df.pages[d].data, src, MEM_PAGE_SIZE); src += MEM_PAGE_SIZE;
-			if (df.pages[d].regionId == 1) df.vramDirty = true;
+			uint8_t regionId = *src++;
+			uint32_t pageIdx; memcpy(&pageIdx, src, 4); src += 4;
+			const uint8_t* pageData;
+			if (vcacheWire) {
+				uint64_t hash; memcpy(&hash, src, 8); src += 8;
+				uint8_t hasData = *src++;
+				if (hasData) {
+					pageData = src; src += MEM_PAGE_SIZE;
+					if (_cliVcache.size() > 32768) _cliVcache.clear();  // growth cap
+					_cliVcache[hash].assign(pageData, pageData + MEM_PAGE_SIZE);
+				} else {
+					auto it = _cliVcache.find(hash);
+					if (it == _cliVcache.end())
+						continue;   // miss: page stays stale until the next SYNC
+					pageData = it->second.data();
+				}
+			} else {
+				pageData = src; src += MEM_PAGE_SIZE;
+			}
+			df.pages[kept].regionId = regionId;
+			df.pages[kept].pageIdx = pageIdx;
+			memcpy(df.pages[kept].data, pageData, MEM_PAGE_SIZE);
+			if (regionId == 1) df.vramDirty = true;
+			kept++;
 		}
+		df.pages.resize(kept);
+		df.dirtyCount = kept;
 
 		// Publish  --  render thread picks it up.
 		//
@@ -6487,26 +6518,49 @@ bool clientReceive(rend_context& rc, bool& vramDirty)
 	// below (same optimization as the WS path above).
 	bool pvrRegsDirty = false;
 	uint32_t dirtyPages; memcpy(&dirtyPages, src, 4); src += 4;
+	// wire-v2 VCACHE sentinel -- same resolve as the WS staging path (see
+	// clientReceive); a client runs exactly one transport so the static is safe.
+	static std::unordered_map<uint64_t, std::vector<uint8_t>> _cliVcache;
+	bool vcacheWire = (dirtyPages == 0xFFFFFFFFu);
+	if (vcacheWire) { memcpy(&dirtyPages, src, 4); src += 4; }
 	for (uint32_t d = 0; d < dirtyPages; d++) {
 		uint8_t regionId = *src++;
 		uint32_t pageIdx; memcpy(&pageIdx, src, 4); src += 4;
 		size_t pageOff = pageIdx * MEM_PAGE_SIZE;
 
+		const uint8_t* pageData;
+		if (vcacheWire) {
+			uint64_t hash; memcpy(&hash, src, 8); src += 8;
+			uint8_t hasData = *src++;
+			if (hasData) {
+				pageData = src; src += MEM_PAGE_SIZE;
+				if (_cliVcache.size() > 32768) _cliVcache.clear();  // growth cap
+				_cliVcache[hash].assign(pageData, pageData + MEM_PAGE_SIZE);
+			} else {
+				auto it = _cliVcache.find(hash);
+				if (it == _cliVcache.end())
+					continue;   // miss: page stays stale until the next SYNC
+				pageData = it->second.data();
+			}
+		} else {
+			pageData = src; src += MEM_PAGE_SIZE;
+		}
+
 		if (regionId == 0 && pageOff + MEM_PAGE_SIZE <= 16 * 1024 * 1024)
-			memcpy(&mem_b[pageOff], src, MEM_PAGE_SIZE);
+			memcpy(&mem_b[pageOff], pageData, MEM_PAGE_SIZE);
 		else if (regionId == 1 && pageOff + MEM_PAGE_SIZE <= VRAM_SIZE) {
 			// Unprotect BEFORE writing  --  texture cache may have mprotect'd this page
 			VramLockedWriteOffset(pageOff);
-			memcpy(&vram[pageOff], src, MEM_PAGE_SIZE);
+			memcpy(&vram[pageOff], pageData, MEM_PAGE_SIZE);
 			vramDirty = true;
 		}
 		else if (regionId == 2 && pageOff + MEM_PAGE_SIZE <= 2 * 1024 * 1024)
-			memcpy(&aica::aica_ram[pageOff], src, MEM_PAGE_SIZE);
+			memcpy(&aica::aica_ram[pageOff], pageData, MEM_PAGE_SIZE);
 		else if (regionId == 3 && pageOff + MEM_PAGE_SIZE <= (size_t)pvr_RegSize) {
-			memcpy(pvr_regs + pageOff, src, MEM_PAGE_SIZE);
+			memcpy(pvr_regs + pageOff, pageData, MEM_PAGE_SIZE);
 			pvrRegsDirty = true;
 		}
-		src += MEM_PAGE_SIZE;
+		// src already advanced past the payload above
 	}
 
 	// Build TA context  --  data is already in taDst, no copy needed

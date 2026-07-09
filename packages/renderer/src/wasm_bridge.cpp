@@ -33,6 +33,7 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <unordered_map>
 #include <emscripten.h>
 
 // External: renderer pointer lives in stubs.cpp
@@ -68,6 +69,11 @@ extern PostProcessor postProcessor;
 static TA_context _ctx;
 static bool _ctxAlloced = false;
 static std::vector<uint8_t> _prevTA;       // Previous frame's TA buffer (for delta decode)
+// wire-v2 VCACHE (MAPLECAST_VCACHE): content-addressed dirty pages. The
+// count slot carries the sentinel 0xFFFFFFFF, then the real count; each
+// entry adds a u64 content hash + hasData flag. hasData==0 refs a page
+// shipped earlier -- fill from this cache. Mirrors frame-decoder.mjs.
+static std::unordered_map<uint64_t, std::vector<uint8_t>> _vcachePages;
 static bool _initialized = false;
 static uint32_t _frameCount = 0;
 static MirrorDecompressor _decomp;
@@ -178,6 +184,7 @@ int renderer_reinit()
     pal_needs_update = true;
     palette_update();
     _prevTA.clear();
+    _vcachePages.clear();   // SYNC/reset replaces VRAM state -> cached page identities invalid
 
     printf("[renderer] REINIT complete — fresh renderer state\n");
     return 1;
@@ -262,6 +269,7 @@ static bool applyFsynPacket(const uint8_t* data, size_t size)
     pal_needs_update = true;
     palette_update();
     _prevTA.clear();
+    _vcachePages.clear();   // SYNC/reset replaces VRAM state -> cached page identities invalid
     return true;
 }
 
@@ -324,6 +332,7 @@ int renderer_sync(uint8_t* data, int size)
 
     // Clear previous TA buffer (force keyframe on next frame)
     _prevTA.clear();
+    _vcachePages.clear();   // SYNC/reset replaces VRAM state -> cached page identities invalid
 
     printf("[renderer] SYNC applied: VRAM=%u PVR=%u resetTexCache=%d\n",
         vramSize, pvrSize, renderer ? renderer->resetTextureCache : -1);
@@ -509,24 +518,50 @@ int renderer_frame(uint8_t* data, int size)
     memcpy(&dirtyPages, src, 4); src += 4;
     bool vramDirty = false;
 
+    // VCACHE wire (sentinel count): the real count follows, and each entry
+    // carries hash(8) + hasData(1) [+ 4096 bytes iff hasData]. See the
+    // _vcachePages declaration; encoding mirrors maplecast_mirror.cpp.
+    bool vcacheWire = (dirtyPages == 0xFFFFFFFFu);
+    if (vcacheWire) {
+        memcpy(&dirtyPages, src, 4); src += 4;
+    }
+
     for (uint32_t d = 0; d < dirtyPages; d++) {
         uint8_t regionId = *src++;
         uint32_t pageIdx;
         memcpy(&pageIdx, src, 4); src += 4;
         size_t pageOff = (size_t)pageIdx * 4096;
 
+        const uint8_t* pageData = src;
+        if (vcacheWire) {
+            uint64_t hash;
+            memcpy(&hash, src, 8); src += 8;
+            uint8_t hasData = *src++;
+            if (hasData) {
+                pageData = src; src += 4096;
+                _vcachePages[hash].assign(pageData, pageData + 4096);
+            } else {
+                auto it = _vcachePages.find(hash);
+                if (it == _vcachePages.end())
+                    continue;   // miss: page stays stale until the next SYNC
+                pageData = it->second.data();
+            }
+        } else {
+            src += 4096;
+        }
+
         if (regionId == 1 && pageOff + 4096 <= VRAM_SIZE) {
             // VRAM page — unprotect BEFORE memcpy (matches desktop client),
             // then memcpy + flag for texture cache invalidation.
             VramLockedWriteOffset(pageOff);
-            memcpy(&vram[pageOff], src, 4096);
+            memcpy(&vram[pageOff], pageData, 4096);
             vramDirty = true;
         } else if (regionId == 3 && pageOff + 4096 <= (size_t)pvr_RegSize) {
             // PVR register page
-            memcpy(pvr_regs + pageOff, src, 4096);
+            memcpy(pvr_regs + pageOff, pageData, 4096);
         }
-        // regions 0 and 2: skip data, this build has no host buffer for them
-        src += 4096;
+        // regions 0 and 2: discarded (no host buffer in this build); src was
+        // already advanced past the payload above.
     }
 
     if (skipRender) return -10;
@@ -653,6 +688,7 @@ void renderer_destroy()
     wasm_gl_destroy();
     _initialized = false;
     _prevTA.clear();
+    _vcachePages.clear();   // SYNC/reset replaces VRAM state -> cached page identities invalid
     printf("[renderer] Destroyed\n");
 }
 

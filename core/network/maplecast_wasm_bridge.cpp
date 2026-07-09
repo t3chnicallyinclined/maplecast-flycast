@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <unordered_map>
 #include <emscripten.h>
 
 extern Renderer* renderer;
@@ -201,32 +202,56 @@ int mirror_render_frame(uint8_t* data, int size)
 	// not lost during the delta-before-keyframe window.
 	bool vramDirty = false;
 	uint32_t dirtyPages; memcpy(&dirtyPages, src, 4); src += 4;
+	// wire-v2 VCACHE (MAPLECAST_VCACHE): sentinel count 0xFFFFFFFF => the real
+	// count follows, each entry adds hash(8) + hasData(1) [+ page iff hasData];
+	// hasData==0 refs a page shipped earlier. Mirrors maplecast_mirror.cpp
+	// serverPublish + web/webgpu/frame-decoder.mjs.
+	static std::unordered_map<uint64_t, std::vector<uint8_t>> _vcachePages;
+	bool vcacheWire = (dirtyPages == 0xFFFFFFFFu);
+	if (vcacheWire) { memcpy(&dirtyPages, src, 4); src += 4; }
 	for (uint32_t d = 0; d < dirtyPages; d++)
 	{
 		uint8_t regionId = *src++;
 		uint32_t pageIdx; memcpy(&pageIdx, src, 4); src += 4;
 		size_t pageOff = pageIdx * MEM_PAGE_SIZE;
 
+		const uint8_t* pageData = src;
+		if (vcacheWire) {
+			uint64_t hash; memcpy(&hash, src, 8); src += 8;
+			uint8_t hasData = *src++;
+			if (hasData) {
+				pageData = src; src += MEM_PAGE_SIZE;
+				_vcachePages[hash].assign(pageData, pageData + MEM_PAGE_SIZE);
+			} else {
+				auto it = _vcachePages.find(hash);
+				if (it == _vcachePages.end())
+					continue;   // miss: page stays stale until the next SYNC
+				pageData = it->second.data();
+			}
+		} else {
+			src += MEM_PAGE_SIZE;
+		}
+
 		if (regionId == 0 && pageOff + MEM_PAGE_SIZE <= 16 * 1024 * 1024)
 		{
-			memcpy(&mem_b[pageOff], src, MEM_PAGE_SIZE);
+			memcpy(&mem_b[pageOff], pageData, MEM_PAGE_SIZE);
 		}
 		else if (regionId == 1 && pageOff + MEM_PAGE_SIZE <= VRAM_SIZE)
 		{
 			// Unprotect BEFORE writing — texture cache may have mprotect'd this page
 			VramLockedWriteOffset(pageOff);
-			memcpy(&vram[pageOff], src, MEM_PAGE_SIZE);
+			memcpy(&vram[pageOff], pageData, MEM_PAGE_SIZE);
 			vramDirty = true;
 		}
 		else if (regionId == 2 && pageOff + MEM_PAGE_SIZE <= 2 * 1024 * 1024)
 		{
-			memcpy(&aica::aica_ram[pageOff], src, MEM_PAGE_SIZE);
+			memcpy(&aica::aica_ram[pageOff], pageData, MEM_PAGE_SIZE);
 		}
 		else if (regionId == 3 && pageOff + MEM_PAGE_SIZE <= (size_t)pvr_RegSize)
 		{
-			memcpy(pvr_regs + pageOff, src, MEM_PAGE_SIZE);
+			memcpy(pvr_regs + pageOff, pageData, MEM_PAGE_SIZE);
 		}
-		src += MEM_PAGE_SIZE;
+		// src already advanced past the payload above
 	}
 
 	if (skipRender || taSize == 0) return 0;

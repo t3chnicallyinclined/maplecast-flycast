@@ -27,6 +27,12 @@ export class FrameDecoder {
         // cached page identity from the prior scene is invalid.
         this._vcache = new Map();
         this._vcacheMissLogged = false;
+        // Ref-miss counter. A miss means the server sent a content-ref for a
+        // hash this decoder never received (fresh join through the relay's
+        // cached SYNC) -- the page stays silently STALE (fuzzy pixels) until a
+        // fresh SYNC arrives. The page watches this counter and requests one
+        // upstream ({"type":"request_sync"}, forwarded by the relay).
+        this.vcacheMisses = 0;
     }
 
     _decompress(data) {
@@ -162,8 +168,9 @@ export class FrameDecoder {
                     this._vcache.set(key, pageBytes.slice());   // copy: data buffer is reused
                 } else {
                     pageBytes = this._vcache.get(key);          // reference: fill from cache
-                    if (!pageBytes) {                            // miss (shouldn't happen post-SYNC)
-                        if (!this._vcacheMissLogged) { console.warn('[VCACHE] cache miss for ref page', key, '- skipping'); this._vcacheMissLogged = true; }
+                    if (!pageBytes) {                            // miss: page stays stale until a fresh SYNC
+                        this.vcacheMisses++;
+                        if (!this._vcacheMissLogged) { console.warn('[VCACHE] cache miss for ref page', key, '- stale until resync'); this._vcacheMissLogged = true; }
                         continue;
                     }
                 }
