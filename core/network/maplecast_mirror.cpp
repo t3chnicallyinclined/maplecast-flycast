@@ -2927,6 +2927,7 @@ done_diff:
 			static ZSTD_CCtx* _zc = nullptr;
 			static uint8_t _zEpoch = 0;
 			static uint32_t _zSinceReset = 0;
+			static uint16_t _zSeq = 0;
 			static std::vector<uint8_t> _zBuf;
 			static const int _zLevel = [](){ const char* e = std::getenv("MAPLECAST_ZSTREAM_LEVEL");
 				int v = e ? atoi(e) : 3; return (v >= 1 && v <= 19) ? v : 3; }();
@@ -2945,7 +2946,7 @@ done_diff:
 				ZSTD_CCtx_reset(_zc, ZSTD_reset_session_only);
 				ZSTD_CCtx_setParameter(_zc, ZSTD_c_compressionLevel, _zLevel);
 				ZSTD_CCtx_setParameter(_zc, ZSTD_c_windowLog, 24);
-				_zEpoch++; _zSinceReset = 0;
+				_zEpoch++; _zSinceReset = 0; _zSeq = 0;
 			}
 			_zSinceReset++;
 			// --- Phase 2 runSoA (MAPLECAST_ZSTREAM_SOA=1, flags bit1) -------------
@@ -3152,12 +3153,20 @@ done_diff:
 			// filled by taStripStage above. u8 nRuns + nRuns x {u8 cls, u16 count}.
 			const uint32_t csnRuns = (stripDone && charStripMode() == 2) ? (uint32_t)(_csOrder.size() / 3) : 0;
 			const uint32_t ordLen = csnRuns ? 1 + 3 * csnRuns : 0;
-			_zBuf.resize(10 + camLen + vfLen + 1 + 3 * 256 + ZSTD_compressBound(zPayloadSize));
+			// flags bit7 (128): u16 per-epoch sequence number (payloads ride in
+			// ascending bit order: cam(3), vf(5), ord(6), seq(7)). A mid-epoch msg
+			// loss (relay backpressure drop, socket loss) does NOT change the epoch
+			// byte, so it was previously undetectable until the corrupted zstd
+			// stream produced garbage in the client's soaInverse. The seq makes it
+			// deterministic: client desyncs on the first gap and resyncs at the
+			// next stream-start instead of decoding garbage.
+			const uint32_t seqLen = 2;
+			_zBuf.resize(10 + camLen + vfLen + 1 + 3 * 256 + seqLen + ZSTD_compressBound(zPayloadSize));
 			_zBuf[0]='Z'; _zBuf[1]='C'; _zBuf[2]='S'; _zBuf[3]='2';
 			_zBuf[4]=_zEpoch; _zBuf[5]=(uint8_t)((streamStart ? 1 : 0) | (soaDone ? 2 : 0)
 				| ((stripFlagsOn && !stripAllowlist().empty()) ? 4 : 0) | (camLen ? 8 : 0)
 				| ((stripFlagsOn && charStripMode() == 2) ? 16 : 0) | (vfLen ? 32 : 0)
-				| (ordLen ? 64 : 0));
+				| (ordLen ? 64 : 0) | 128);
 			memcpy(_zBuf.data()+6, &zPayloadSize, 4);
 			if (camLen) {
 				uint8_t* cm = _zBuf.data() + 10;
@@ -3175,7 +3184,8 @@ done_diff:
 				*op++ = (uint8_t)csnRuns;
 				memcpy(op, _csOrder.data(), 3 * csnRuns);
 			}
-			ZSTD_outBuffer ob{ _zBuf.data()+10+camLen+vfLen+ordLen, _zBuf.size()-10-camLen-vfLen-ordLen, 0 };
+			memcpy(_zBuf.data() + 10 + camLen + vfLen + ordLen, &_zSeq, 2);
+			ZSTD_outBuffer ob{ _zBuf.data()+10+camLen+vfLen+ordLen+seqLen, _zBuf.size()-10-camLen-vfLen-ordLen-seqLen, 0 };
 			ZSTD_inBuffer  ib{ zPayload, zPayloadSize, 0 };
 			size_t zr = ZSTD_compressStream2(_zc, &ob, &ib, ZSTD_e_flush);
 			if (ZSTD_isError(zr) || ib.pos != ib.size || zr != 0) {
@@ -3186,7 +3196,8 @@ done_diff:
 					ZSTD_isError(zr) ? ZSTD_getErrorName(zr) : "incomplete flush");
 				_zstreamResetPending.store(true, std::memory_order_release);
 			} else {
-				maplecast_ws::broadcastBinary(_zBuf.data(), (uint32_t)(10 + camLen + vfLen + ordLen + ob.pos));
+				maplecast_ws::broadcastBinary(_zBuf.data(), (uint32_t)(10 + camLen + vfLen + ordLen + seqLen + ob.pos));
+				_zSeq++;   // u16 wrap is fine — client compares (prev+1)&0xFFFF
 				if (stripDone) {
 					// (camera now rides INSIDE the ZCS2 header, flags bit3 — the old
 					// separate CAMM msg raced the async worker decode.)

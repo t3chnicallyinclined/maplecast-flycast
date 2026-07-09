@@ -352,8 +352,17 @@ const ZCS2 = {
     this.lastVf=vfLen?((d[10+camLen]|d[11+camLen]<<8|d[12+camLen]<<16|d[13+camLen]<<24)>>>0):-1;
     let ordLen=0; this.lastOrd=null;
     if(flags&64){ const nb=d[10+camLen+vfLen]; ordLen=1+3*nb; this.lastOrd=d.slice(10+camLen+vfLen,10+camLen+vfLen+ordLen); }
+    // bit7: u16 per-epoch seq — a mid-epoch msg loss doesn't change the epoch
+    // byte, so without this it was only caught when the corrupted zstd stream
+    // fed garbage to soaInverse. Detect the gap HERE, before poisoning dec.
+    const seqLen=(flags&128)?2:0;
+    if(seqLen){ const sq=d[10+camLen+vfLen+ordLen]|d[11+camLen+vfLen+ordLen]<<8;
+      if(flags&1) this._seq=sq;
+      else{ const want=(this._seq+1)&0xFFFF;
+        if(sq!==want){ this._desync('seq gap '+this._seq+'->'+sq); return null; }
+        this._seq=sq; } }
     const t0=performance.now();
-    try{ this.dec.push(d.subarray(10+camLen+vfLen+ordLen)); }
+    try{ this.dec.push(d.subarray(10+camLen+vfLen+ordLen+seqLen)); }
     catch(e){ this._desync('fzstd: '+e.message); return null; }
     this.decMs+=performance.now()-t0;
     if(this.clen>=innerSize){
@@ -389,7 +398,7 @@ window._ZCS2=ZCS2;
 ZCS2.worker=null;
 (function(){
   const src=`
-    let Dz=null, dec=null, epoch=-1, synced=false, chunks=[], clen=0;
+    let Dz=null, dec=null, epoch=-1, synced=false, chunks=[], clen=0, seqW=-1;
     const post=(m,t)=>self.postMessage(m,t||[]);
     function soaInverse(v){
       const dv=new DataView(v.buffer,v.byteOffset,v.byteLength);
@@ -424,18 +433,26 @@ ZCS2.worker=null;
       // the engine positions of the stripped char runs, for the body splice.
       let ordLen=0, ord=null;
       if(flags&64){ const nb=d[10+camLen+vfLen]; ordLen=1+3*nb; ord=d.slice(10+camLen+vfLen,10+camLen+vfLen+ordLen).buffer; }
+      // bit7: u16 per-epoch seq -- deterministic mid-epoch drop detection
+      // (a lost msg leaves the epoch byte unchanged; catch it BEFORE the
+      // corrupted zstd stream feeds garbage to soaInverse).
+      const seqLen=(flags&128)?2:0;
+      const sq=seqLen?(d[10+camLen+vfLen+ordLen]|d[11+camLen+vfLen+ordLen]<<8):-1;
       const innerSize=(d[6]|d[7]<<8|d[8]<<16|d[9]<<24)>>>0;
       if(flags&1){
         chunks=[]; clen=0;
         dec=new Dz((c)=>{ chunks.push(c); clen+=c.length; });
         if(!synced) post({resumed:1});
-        epoch=ep; synced=true; post({epoch:ep, stripped, cstrip});
+        epoch=ep; synced=true; seqW=sq; post({epoch:ep, stripped, cstrip});
       } else {
         if(!synced) return;
         if(ep!==epoch){ synced=false; chunks=[]; clen=0; post({desync:'epoch gap '+epoch+'->'+ep}); return; }
+        if(seqLen){ const want=(seqW+1)&0xFFFF;
+          if(sq!==want){ synced=false; chunks=[]; clen=0; post({desync:'seq gap '+seqW+'->'+sq}); return; }
+          seqW=sq; }
       }
       const t0=performance.now();
-      try{ dec.push(d.subarray(10+camLen+vfLen+ordLen)); }
+      try{ dec.push(d.subarray(10+camLen+vfLen+ordLen+seqLen)); }
       catch(e){ synced=false; chunks=[]; clen=0; post({desync:'fzstd: '+e.message}); return; }
       if(clen>=innerSize){
         const inner=new Uint8Array(innerSize); let o=0;

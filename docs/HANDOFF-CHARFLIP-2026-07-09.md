@@ -37,6 +37,7 @@ Flags (bit → meaning → payload appended in this order after the 10B header):
 | 4 | 16 | CHAR-stripped frame | — |
 | 5 | 32 | vframe stamp | u32 game frame counter (0x8C3496B0) |
 | 6 | 64 | TR run-order descriptor | u8 nRuns + nRuns × {u8 cls, u16 count} |
+| 7 | 128 | per-epoch seq (2026-07-09) | u16 msg counter, resets 0 at stream-start. Deterministic mid-epoch drop detection: a lost msg leaves the epoch byte unchanged, so it previously surfaced only as zstd garbage in soaInverse. Client desyncs on the first gap. Parsers: webgpu-test (main+worker), zcs2-test, `tools/render-replica-poc/zcs2_seq_gate.mjs` (synthetic gate, run anywhere) |
 
 - **Strip set** = TCW addr 4K blocks `{0x82,0x83,0x88,0x89}` (TR-list para5 only; para4
   NEVER stripped). Blocks 84/85/86/8a (assists/effect classes render_frame doesn't emit)
@@ -60,6 +61,15 @@ Flags (bit → meaning → payload appended in this order after the 10B header):
 - **VCACHE sentinel is now in ALL parsers** (parser-lockstep rule): frame-decoder.mjs,
   relay protocol.rs, native client (BOTH clientReceive + SHM paths in maplecast_mirror.cpp),
   both wasm bridges. Note: prod king.html does not parse the TA wire at all.
+- **Relay fanout rebuilt (2026-07-09)**: per-client SendQueue with type-aware backpressure —
+  ZCS2/state/audio NEVER dropped, legacy deltas drop-oldest over an 8MB budget (then the relay
+  auto-sends request_sync on the client's behalf), a SYNC entering the queue evicts every queued
+  legacy delta + older SYNC. Targeted SYNC delivery: clients that speak request_sync get ONLY
+  snapshots they asked for (another client's join can't stall your socket). Zero-copy Bytes end
+  to end; broadcast channel 16→1024. Root cause it kills: tokio broadcast `Lagged` silently
+  dropped ~0.25s of messages whenever a multi-MB SYNC crossed a slow socket, corrupting that
+  client's ZCS2 epoch — the "perfect until the sync hits, then background gone + garble" loop.
+  Policy pinned by unit tests in fanout.rs (`send_queue_tests`).
 
 ## 2. Client architecture (webgpu-test.html)
 

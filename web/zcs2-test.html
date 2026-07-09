@@ -100,22 +100,33 @@ function soaInverse(v){   // Phase 2 runSoA (flags bit1) -> exact legacy inner b
   out.set(v.subarray(tailOff),o);
   return out;
 }
-let zdec=null, zEpoch=-1, zPending=[], zPendingLen=0, zNeed=0, zSynced=false, zSoa=false;
+let zdec=null, zEpoch=-1, zPending=[], zPendingLen=0, zNeed=0, zSynced=false, zSoa=false, zSeq=-1;
 function zcs2Msg(d) {
   const epoch = d[4], flags = d[5];
   zSoa=(flags&2)!==0;
   const innerSize = new DataView(d.buffer, d.byteOffset+6, 4).getUint32(0, true);
+  // Header payloads ride in ascending bit order after the 10B header:
+  // cam(bit3)=132B, vframe(bit5)=4B, ord(bit6)=1+3n, seq(bit7)=u16.
+  const camLen=(flags&8)?132:0;
+  const vfLen=(flags&32)?4:0;
+  const ordLen=(flags&64)?1+3*d[10+camLen+vfLen]:0;
+  const seqLen=(flags&128)?2:0;
+  const sq=seqLen?(d[10+camLen+vfLen+ordLen]|d[11+camLen+vfLen+ordLen]<<8):-1;
   if (flags & 1) {                        // stream-start: fresh decoder
     zdec = new ZStream((chunk) => { zPending.push(chunk); zPendingLen += chunk.length; });
-    zEpoch = epoch; zSynced = true;
+    zEpoch = epoch; zSynced = true; zSeq = sq;
     log(`stream-start: epoch ${epoch}`, 'good');
   } else if (!zSynced || epoch !== zEpoch) {
     return;                               // joined mid-stream: wait for next stream-start
+  } else if (seqLen) {                    // bit7 seq: deterministic mid-epoch drop detection
+    const want=(zSeq+1)&0xFFFF;
+    if (sq!==want) { log(`seq gap ${zSeq}->${sq} — msg lost mid-epoch, waiting for next stream-start`, 'err'); zSynced=false; return; }
+    zSeq=sq;
   }
   zBytes += d.length; zFrames++;
   zNeed = innerSize;
   const t0 = performance.now();
-  try { zdec.push(d.subarray(10)); }
+  try { zdec.push(d.subarray(10+camLen+vfLen+ordLen+seqLen)); }
   catch (e) { log('fzstd error: '+e.message+' — waiting for next stream-start', 'err'); zSynced=false; return; }
   decMs += performance.now()-t0; decN++;
   if (zPendingLen >= zNeed) {             // server flushes per frame: exactly one inner frame

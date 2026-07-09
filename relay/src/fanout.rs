@@ -136,8 +136,13 @@ pub struct MetricsSnapshot {
 
 impl RelayState {
     pub fn new(max_clients: usize) -> Self {
-        // 16 slots — if a client falls behind 16 frames, they drop frames (good)
-        let (frame_tx, _) = broadcast::channel(16);
+        // 1024 slots of refcounted Bytes handles (~16KB of pointers). Per-client
+        // send tasks never block on the socket anymore (see SendQueue), so
+        // receivers drain in microseconds — this is pure headroom. The old
+        // 16-slot buffer silently dropped ~0.25s of messages whenever a multi-MB
+        // SYNC crossed a slow client's socket, corrupting that client's ZCS2
+        // zstd epoch (the "perfect until the sync hits" bug).
+        let (frame_tx, _) = broadcast::channel(1024);
         let (signal_tx, _) = broadcast::channel(64);
         let (upstream_text_tx, upstream_text_rx) = tokio::sync::mpsc::channel(256);
         let (upstream_bin_tx, upstream_bin_rx) = tokio::sync::mpsc::channel(256);
@@ -429,6 +434,203 @@ impl RelayState {
 }
 
 // ============================================================================
+// Per-client send queue — type-aware backpressure (2026-07-09)
+//
+// The old path sent every broadcast message inline in the client's select!
+// loop: while a slow socket drained (e.g. an 8MB SYNC crossing a home
+// downlink), the loop couldn't poll frame_rx, the broadcast channel lagged,
+// and tokio silently DROPPED messages — including ZCS2 stream chunks, which
+// corrupt the whole remaining zstd epoch for that client (the live "perfect
+// until the SYNC hits, then background gone + garble" bug).
+//
+// Now the select! loop only classifies + enqueues (never awaits the socket)
+// and a dedicated sender task drains the queue. Drop policy by FrameClass:
+//   - Critical (ZCS2/state/audio/unknown): NEVER dropped.
+//   - LegacyDelta: over-budget evicts oldest legacy first; the relay then
+//     auto-requests a SYNC upstream on the client's behalf (self-healing).
+//   - Sync: supersedes — evicts every queued LegacyDelta and older Sync
+//     (they describe state the snapshot already contains), then queues.
+// Surviving messages keep EXACT arrival order — selective loss, never
+// reordering, so the wire's delta-chain invariants hold by construction.
+// Every entry is a refcounted Bytes handle — queuing copies nothing.
+//
+// Single consumer: exactly one sender task pops per queue (close() relies on
+// notify_one's stored permit reaching that one waiter).
+// ============================================================================
+
+/// Queued legacy-delta budget: ~9s of the full legacy wire (~7 Mbps). Deltas
+/// are the ONLY droppable class, so this is the knob that bounds a slow
+/// client's queue; recovery is a SYNC away and auto-requested on eviction.
+const LEGACY_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
+/// Total-queue cutoff: if even the lossless set backs up this far, the client
+/// is gone (or so far behind that a reconnect beats delivering the backlog).
+const QUEUE_HARD_CAP: usize = 64 * 1024 * 1024;
+
+struct SendQueueInner {
+    q: std::collections::VecDeque<(Message, protocol::FrameClass)>,
+    bytes: usize,
+    legacy_bytes: usize,
+    closed: bool,
+    // stats
+    dropped_legacy: u64,
+    superseded: u64,
+    peak_bytes: usize,
+}
+
+struct SendQueue {
+    // std Mutex, not tokio: critical sections are a few pointer ops and never
+    // await; uncontended lock/unlock is ~20ns vs a possible task switch.
+    inner: std::sync::Mutex<SendQueueInner>,
+    notify: tokio::sync::Notify,
+}
+
+#[derive(Debug)]
+enum Enqueued {
+    Ok,
+    /// Queued, but legacy deltas were evicted to make room — the client's
+    /// page state is now stale and needs a SYNC.
+    OkForcedDrop,
+    /// Queue is closed (sender died or hard cap tripped) — stop the client.
+    Closed,
+}
+
+fn msg_wire_len(m: &Message) -> usize {
+    match m {
+        Message::Binary(b) => b.len(),
+        Message::Text(t) => t.len(),
+        Message::Ping(b) | Message::Pong(b) => b.len(),
+        _ => 0,
+    }
+}
+
+impl SendQueue {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: std::sync::Mutex::new(SendQueueInner {
+                q: std::collections::VecDeque::with_capacity(64),
+                bytes: 0,
+                legacy_bytes: 0,
+                closed: false,
+                dropped_legacy: 0,
+                superseded: 0,
+                peak_bytes: 0,
+            }),
+            notify: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn push(&self, msg: Message, class: protocol::FrameClass) -> Enqueued {
+        let len = msg_wire_len(&msg);
+        let mut g = self.inner.lock().unwrap();
+        if g.closed {
+            return Enqueued::Closed;
+        }
+        let mut forced = false;
+        match class {
+            protocol::FrameClass::Sync => {
+                // Snapshot supersedes queued legacy deltas + older snapshots:
+                // they describe state this SYNC already contains. This also
+                // instantly deflates a backlogged queue right when recovery
+                // starts, instead of making the client chew stale deltas first.
+                let mut freed = 0usize;
+                let mut freed_legacy = 0usize;
+                let mut n = 0u64;
+                g.q.retain(|(m, c)| match c {
+                    protocol::FrameClass::LegacyDelta | protocol::FrameClass::Sync => {
+                        let l = msg_wire_len(m);
+                        freed += l;
+                        if *c == protocol::FrameClass::LegacyDelta {
+                            freed_legacy += l;
+                        }
+                        n += 1;
+                        false
+                    }
+                    protocol::FrameClass::Critical => true,
+                });
+                g.bytes -= freed;
+                g.legacy_bytes -= freed_legacy;
+                g.superseded += n;
+            }
+            protocol::FrameClass::LegacyDelta => {
+                // Over budget: evict oldest queued legacy first. Critical
+                // entries are never touched.
+                while g.legacy_bytes + len > LEGACY_QUEUE_BUDGET {
+                    let Some(idx) = g
+                        .q
+                        .iter()
+                        .position(|(_, c)| *c == protocol::FrameClass::LegacyDelta)
+                    else {
+                        break;
+                    };
+                    let (m, _) = g.q.remove(idx).expect("position() just found it");
+                    let l = msg_wire_len(&m);
+                    g.bytes -= l;
+                    g.legacy_bytes -= l;
+                    g.dropped_legacy += 1;
+                    forced = true;
+                }
+            }
+            protocol::FrameClass::Critical => {}
+        }
+        g.q.push_back((msg, class));
+        g.bytes += len;
+        if class == protocol::FrameClass::LegacyDelta {
+            g.legacy_bytes += len;
+        }
+        if g.bytes > g.peak_bytes {
+            g.peak_bytes = g.bytes;
+        }
+        if g.bytes > QUEUE_HARD_CAP {
+            g.closed = true;
+            drop(g);
+            self.notify.notify_one();
+            return Enqueued::Closed;
+        }
+        drop(g);
+        self.notify.notify_one();
+        if forced {
+            Enqueued::OkForcedDrop
+        } else {
+            Enqueued::Ok
+        }
+    }
+
+    /// Pop the next message in order; awaits when empty; None once closed.
+    async fn pop(&self) -> Option<Message> {
+        loop {
+            let notified = self.notify.notified();
+            {
+                let mut g = self.inner.lock().unwrap();
+                if g.closed {
+                    return None;
+                }
+                if let Some((m, c)) = g.q.pop_front() {
+                    let l = msg_wire_len(&m);
+                    g.bytes -= l;
+                    if c == protocol::FrameClass::LegacyDelta {
+                        g.legacy_bytes -= l;
+                    }
+                    return Some(m);
+                }
+            }
+            notified.await;
+        }
+    }
+
+    fn close(&self) {
+        self.inner.lock().unwrap().closed = true;
+        // notify_one stores a permit if the (single) consumer isn't parked yet,
+        // so the close can't be lost to the register-then-await race.
+        self.notify.notify_one();
+    }
+
+    fn stats(&self) -> (u64, u64, usize) {
+        let g = self.inner.lock().unwrap();
+        (g.dropped_legacy, g.superseded, g.peak_bytes)
+    }
+}
+
+// ============================================================================
 // TCP Upstream Listener — flycast pushes frames to us
 // ============================================================================
 
@@ -532,10 +734,11 @@ async fn handle_ws_client(
     let ws = tokio_tungstenite::accept_async(stream).await?;
     let (mut ws_tx, mut ws_rx) = ws.split();
 
-    // Step 1: Send cached SYNC if available
+    // Step 1: Send cached SYNC if available (direct, pre-loop — the socket is
+    // otherwise idle here; refcounted Bytes handle, zero copies).
     if let Some(sync_data) = state.get_sync().await {
         info!("Sending cached SYNC to {} ({:.1}MB)", peer, sync_data.len() as f64 / 1024.0 / 1024.0);
-        ws_tx.send(Message::Binary(sync_data.to_vec().into())).await?;
+        ws_tx.send(Message::Binary(sync_data)).await?;
     } else {
         info!("No SYNC cached yet — {} will wait for first SYNC", peer);
     }
@@ -545,18 +748,41 @@ async fn handle_ws_client(
     // waiting for the next ~60s broadcast (and reconnect-looping in the gap).
     if let Some(mcsv_data) = state.get_mcsv().await {
         info!("Sending cached MCSV to {} ({:.1}MB)", peer, mcsv_data.len() as f64 / 1024.0 / 1024.0);
-        ws_tx.send(Message::Binary(mcsv_data.to_vec().into())).await?;
+        ws_tx.send(Message::Binary(mcsv_data)).await?;
     }
 
     // Step 2: Subscribe to frame broadcast
     let mut frame_rx = state.subscribe_frames();
     let mut signal_rx = state.subscribe_signals();
 
+    // Step 3: per-client send queue + dedicated sender task (see the SendQueue
+    // block comment). The select! loop below NEVER awaits the socket, so a slow
+    // drain (multi-MB SYNC on a home downlink) can no longer lag frame_rx into
+    // silent broadcast drops that corrupt the client's ZCS2 zstd epoch.
+    let queue = SendQueue::new();
+    let sender = {
+        let q = queue.clone();
+        tokio::spawn(async move {
+            let mut sent: u64 = 0;
+            let mut bytes: u64 = 0;
+            while let Some(msg) = q.pop().await {
+                let n = msg_wire_len(&msg) as u64;
+                if ws_tx.send(msg).await.is_err() {
+                    break;
+                }
+                sent += 1;
+                bytes += n;
+            }
+            q.close(); // send error (or main-loop close): stop accepting enqueues
+            (sent, bytes)
+        })
+    };
+
     // Stats for this client
-    let mut frames_sent: u64 = 0;
-    let mut frames_dropped: u64 = 0;
     let mut frames_filtered: u64 = 0;
-    let mut bytes_sent: u64 = 0;
+    let mut syncs_skipped: u64 = 0;
+    let mut lagged_at_source: u64 = 0;
+    let mut auto_resyncs: u64 = 0;
 
     // Subscription mode for this connection. Default Full = today's behavior
     // (every frame forwarded). A state-replica client flips this to true by
@@ -567,55 +793,88 @@ async fn handle_ws_client(
     let mut state_only = false;
     // ZCS2 subscribers (wire-v2): the client renders from the ZCS2 streaming
     // envelope, so legacy ZCST DELTA frames are dead weight (~5 Mbps). Shed them
-    // here; compressed SYNCs (uncompressedSize > 1 MiB) still pass for joins,
-    // as do ZCS2/CAMM/audio/side channels. The client flips back to "full" on
-    // decode desync so the legacy fallback keeps working.
+    // at classification time (never queued); SYNCs and ZCS2/CAMM/audio/side
+    // channels still flow. The client flips back to "full" on decode desync so
+    // the legacy fallback keeps working.
     let mut zcs2_only = false;
+    // Targeted SYNC delivery: a wire-v2 client announces itself by sending
+    // {"type":"request_sync"} (the page does so on connect). From then on it
+    // receives ONLY snapshots it asked for — a multi-MB SYNC broadcast triggered
+    // by ANOTHER client's join no longer stalls this client's socket (that stall
+    // was the queue backup that dropped its ZCS2 messages). Legacy clients that
+    // never send request_sync receive every SYNC, exactly as before.
+    let mut sync_capable = false;
+    let mut wants_sync = false;
+    let mut last_auto_resync = std::time::Instant::now() - std::time::Duration::from_secs(60);
 
     loop {
         tokio::select! {
-            // Forward TA frames to this client
+            // Classify + enqueue TA frames for this client (never blocks)
             frame = frame_rx.recv() => {
                 match frame {
                     Ok(data) => {
                         // State-only subscribers receive ONLY the state keep-list.
-                        // Drop video frames before they touch the socket.
+                        // Drop video frames before they touch the queue.
                         if state_only && !protocol::is_state_frame(&data) {
                             frames_filtered += 1;
                             continue;
                         }
-                        if zcs2_only && data.len() >= 8 && &data[0..4] == protocol::ZCST_MAGIC {
-                            let usz = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-                            if usz <= 1_048_576 {   // legacy delta frame; SYNC (>1MiB) passes
-                                frames_filtered += 1;
+                        let class = protocol::classify(&data);
+                        if zcs2_only && class == protocol::FrameClass::LegacyDelta {
+                            frames_filtered += 1;
+                            continue;
+                        }
+                        if class == protocol::FrameClass::Sync {
+                            if sync_capable && !wants_sync {
+                                syncs_skipped += 1;
                                 continue;
                             }
+                            wants_sync = false;
                         }
-                        let len = data.len();
-                        match ws_tx.send(Message::Binary(data.to_vec().into())).await {
-                            Ok(_) => {
-                                frames_sent += 1;
-                                bytes_sent += len as u64;
+                        match queue.push(Message::Binary(data), class) {
+                            Enqueued::Ok => {}
+                            Enqueued::OkForcedDrop => {
+                                // Legacy deltas were evicted for this client — its page
+                                // state is now stale. Self-heal: request a SYNC upstream
+                                // on its behalf (rate-limited here AND server-side).
+                                if last_auto_resync.elapsed() >= std::time::Duration::from_secs(2) {
+                                    last_auto_resync = std::time::Instant::now();
+                                    wants_sync = true;
+                                    auto_resyncs += 1;
+                                    state.forward_text_to_upstream("{\"type\":\"request_sync\"}");
+                                    info!("Client {} backpressure: legacy deltas dropped — auto request_sync", peer);
+                                }
                             }
-                            Err(e) => {
-                                debug!("Client {} send error: {}", peer, e);
+                            Enqueued::Closed => {
+                                warn!("Client {} send queue hard-capped — disconnecting", peer);
                                 break;
                             }
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        frames_dropped += n;
-                        debug!("Client {} lagged {} frames (total dropped: {})", peer, n, frames_dropped);
+                        // Near-impossible now (enqueue never blocks, channel is 1024
+                        // deep), but if it fires we lost messages at the SOURCE. A
+                        // ZCS2 client detects that deterministically via the bit7 seq
+                        // gap and resyncs itself; still self-heal the page state here.
+                        lagged_at_source += n;
+                        warn!("Client {} lagged {} frames at source (total: {})", peer, n, lagged_at_source);
+                        if last_auto_resync.elapsed() >= std::time::Duration::from_secs(2) {
+                            last_auto_resync = std::time::Instant::now();
+                            wants_sync = true;
+                            auto_resyncs += 1;
+                            state.forward_text_to_upstream("{\"type\":\"request_sync\"}");
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
 
-            // Forward signaling messages
+            // Forward signaling messages (through the queue: text stays ordered
+            // with the frames instead of racing them on the socket)
             signal = signal_rx.recv() => {
                 match signal {
                     Ok(msg) => {
-                        if ws_tx.send(Message::Text(msg.into())).await.is_err() {
+                        if matches!(queue.push(Message::Text(msg.into()), protocol::FrameClass::Critical), Enqueued::Closed) {
                             break;
                         }
                     }
@@ -635,17 +894,26 @@ async fn handle_ws_client(
                         if text.starts_with("{\"type\":\"ping\"") {
                             // Extract the "t" field verbatim and reply.
                             // Avoids serde_json overhead — the timestamp is whatever
-                            // string the client sent us.
+                            // string the client sent us. Rides the queue so the
+                            // measured RTT honestly includes head-of-line latency.
                             if let Some(t_start) = text.find("\"t\":") {
                                 let t_str = &text[t_start + 4..];
                                 let t_end = t_str.find(|c: char| c == '}' || c == ',').unwrap_or(t_str.len());
                                 let t_val = &t_str[..t_end];
                                 let pong = format!("{{\"type\":\"pong\",\"t\":{}}}", t_val);
-                                if ws_tx.send(Message::Text(pong.into())).await.is_err() {
+                                if matches!(queue.push(Message::Text(pong.into()), protocol::FrameClass::Critical), Enqueued::Closed) {
                                     break;
                                 }
                             }
                             continue;
+                        }
+                        // request_sync marks this client wire-v2 sync-capable: it
+                        // gets the snapshot it just asked for, and from now on ONLY
+                        // snapshots it asks for (targeted SYNC delivery). Still
+                        // forwarded upstream below, as before.
+                        if text.contains("\"type\":\"request_sync\"") {
+                            sync_capable = true;
+                            wants_sync = true;
                         }
                         // Subscription control: a state-replica client switching
                         // to SH4-rendered mode sends {"type":"subscribe","mode":"state"}
@@ -687,7 +955,7 @@ async fn handle_ws_client(
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Ping(data))) => {
-                        let _ = ws_tx.send(Message::Pong(data)).await;
+                        let _ = queue.push(Message::Pong(data), protocol::FrameClass::Critical);
                     }
                     Some(Err(e)) => {
                         debug!("Client {} ws error: {}", peer, e);
@@ -699,10 +967,15 @@ async fn handle_ws_client(
         }
     }
 
-    if frames_sent > 0 {
+    queue.close();
+    let (frames_sent, bytes_sent) = sender.await.unwrap_or((0, 0));
+    let (dropped_legacy, superseded, peak_queue) = queue.stats();
+    if frames_sent > 0 || dropped_legacy > 0 {
         info!(
-            "Client {} final stats: sent={} dropped={} filtered={} bytes={:.1}MB",
-            peer, frames_sent, frames_dropped, frames_filtered, bytes_sent as f64 / 1024.0 / 1024.0
+            "Client {} final stats: sent={} bytes={:.1}MB filtered={} dropped_legacy={} superseded={} syncs_skipped={} lagged_src={} auto_resyncs={} peak_queue={:.1}MB",
+            peer, frames_sent, bytes_sent as f64 / 1024.0 / 1024.0, frames_filtered,
+            dropped_legacy, superseded, syncs_skipped, lagged_at_source, auto_resyncs,
+            peak_queue as f64 / 1024.0 / 1024.0
         );
     }
 
@@ -741,7 +1014,9 @@ pub async fn ws_upstream_connector(
                         msg = ws_rx.next() => {
                             match msg {
                                 Some(Ok(Message::Binary(data))) => {
-                                    let data = Bytes::from(data.to_vec());
+                                    // tungstenite 0.26 hands us Bytes already — forward
+                                    // the refcounted handle straight into the broadcast,
+                                    // zero copies end to end.
                                     frames += 1;
                                     state.on_upstream_frame(data).await;
                                 }
@@ -799,5 +1074,136 @@ pub async fn ws_upstream_connector(
         }
 
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    }
+}
+
+// ============================================================================
+// SendQueue policy tests — the drop rules are load-bearing for wire integrity
+// (a wrongly-dropped ZCS2 chunk corrupts a whole client epoch), so they are
+// pinned here as executable spec.
+// ============================================================================
+#[cfg(test)]
+mod send_queue_tests {
+    use super::*;
+    use protocol::FrameClass;
+
+    fn bin(n: usize, fill: u8) -> Message {
+        Message::Binary(vec![fill; n].into())
+    }
+
+    fn first_byte(m: Message) -> u8 {
+        match m {
+            Message::Binary(b) => b[0],
+            _ => panic!("expected binary"),
+        }
+    }
+
+    #[tokio::test]
+    async fn critical_never_dropped_and_order_preserved() {
+        let q = SendQueue::new();
+        // 50MB of critical — way over the legacy budget, under the hard cap.
+        for i in 0..50u8 {
+            assert!(matches!(q.push(bin(1_000_000, i), FrameClass::Critical), Enqueued::Ok));
+        }
+        for i in 0..50u8 {
+            assert_eq!(first_byte(q.pop().await.unwrap()), i);
+        }
+        let (dropped, superseded, _) = q.stats();
+        assert_eq!((dropped, superseded), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn legacy_evicts_oldest_first_and_reports_forced_drop() {
+        let q = SendQueue::new();
+        q.push(bin(100, 0xCC), FrameClass::Critical);
+        let n = (LEGACY_QUEUE_BUDGET / 1_000_000 + 4) as u8;
+        let mut forced = false;
+        for i in 0..n {
+            match q.push(bin(1_000_000, i), FrameClass::LegacyDelta) {
+                Enqueued::OkForcedDrop => forced = true,
+                Enqueued::Ok => {}
+                Enqueued::Closed => panic!("hard cap must not trip here"),
+            }
+        }
+        assert!(forced);
+        let (dropped, _, _) = q.stats();
+        assert!(dropped >= 1);
+        // Critical survives untouched, at its original (front) position…
+        assert_eq!(first_byte(q.pop().await.unwrap()), 0xCC);
+        // …and the surviving legacy run starts exactly at the eviction count
+        // (oldest-first) and stays in order.
+        for i in (dropped as u8)..n {
+            assert_eq!(first_byte(q.pop().await.unwrap()), i);
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_supersedes_queued_legacy_and_older_syncs() {
+        let q = SendQueue::new();
+        q.push(bin(1_000, 1), FrameClass::LegacyDelta);
+        q.push(bin(1_000, 2), FrameClass::Critical);
+        q.push(bin(5_000, 3), FrameClass::Sync); // supersedes 1
+        q.push(bin(1_000, 4), FrameClass::LegacyDelta);
+        q.push(bin(5_000, 5), FrameClass::Sync); // supersedes 3 + 4
+        q.push(bin(1_000, 6), FrameClass::LegacyDelta);
+        let (_, superseded, _) = q.stats();
+        assert_eq!(superseded, 3);
+        assert_eq!(first_byte(q.pop().await.unwrap()), 2);
+        assert_eq!(first_byte(q.pop().await.unwrap()), 5);
+        assert_eq!(first_byte(q.pop().await.unwrap()), 6);
+    }
+
+    #[tokio::test]
+    async fn hard_cap_closes_queue() {
+        let q = SendQueue::new();
+        let mut closed = false;
+        for _ in 0..(QUEUE_HARD_CAP / 1_000_000 + 8) {
+            if matches!(q.push(bin(1_000_000, 0), FrameClass::Critical), Enqueued::Closed) {
+                closed = true;
+                break;
+            }
+        }
+        assert!(closed);
+        // Closed queue rejects everything and pops nothing (drain is pointless
+        // for a client we are disconnecting).
+        assert!(matches!(q.push(bin(10, 0), FrameClass::Critical), Enqueued::Closed));
+        assert!(q.pop().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn pop_parks_until_push_and_close_wakes() {
+        let q = SendQueue::new();
+        let q2 = q.clone();
+        let popper = tokio::spawn(async move { q2.pop().await.map(first_byte) });
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        q.push(bin(4, 7), FrameClass::Critical);
+        assert_eq!(popper.await.unwrap(), Some(7));
+
+        let q3 = q.clone();
+        let popper = tokio::spawn(async move { q3.pop().await });
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        q.close();
+        assert!(popper.await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn byte_accounting_survives_mixed_traffic() {
+        let q = SendQueue::new();
+        for i in 0..200u8 {
+            let class = match i % 3 {
+                0 => FrameClass::Critical,
+                1 => FrameClass::LegacyDelta,
+                _ => FrameClass::Sync,
+            };
+            q.push(bin(10_000 + i as usize, i), class);
+        }
+        while q.pop().await.is_some() {
+            let g = q.inner.lock().unwrap();
+            if g.q.is_empty() {
+                assert_eq!(g.bytes, 0, "bytes counter must return to zero");
+                assert_eq!(g.legacy_bytes, 0, "legacy counter must return to zero");
+                break;
+            }
+        }
     }
 }

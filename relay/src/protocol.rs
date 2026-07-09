@@ -130,6 +130,93 @@ pub fn frame_num(data: &[u8]) -> Option<u32> {
     }
 }
 
+/// ZCS2 (TA-Wire v2) streaming-envelope magic. The relay never parses past the
+/// magic — ZCS2 messages are opaque here — but it must know one thing about
+/// them: each is a chunk of ONE long per-epoch zstd stream, so losing a single
+/// message mid-epoch corrupts every remaining frame of that epoch for that
+/// client. ZCS2 is therefore NEVER droppable under backpressure.
+pub const ZCS2_MAGIC: &[u8; 4] = b"ZCS2";
+
+/// Backpressure class of a broadcast message for the per-client send queue.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FrameClass {
+    /// Never dropped, strictly in-order: ZCS2 stream chunks, state frames
+    /// (GSTA/OBJF/MCSV), audio, TX64/side channels, anything unrecognized
+    /// (keep-list logic: an unknown future packet type defaults to lossless).
+    Critical,
+    /// Legacy ZCST delta frame (compressed inner ≤ 1 MiB): droppable
+    /// oldest-first under backpressure — the client recovers via the next
+    /// SYNC, which the relay auto-requests whenever it is forced to drop.
+    /// (STAF frames also match this shape; that channel is a dead campaign.)
+    LegacyDelta,
+    /// Full snapshot (raw "SYNC" or ZCST envelope > 1 MiB): supersedes every
+    /// queued LegacyDelta and any older queued Sync for that client — they
+    /// describe state the snapshot already contains.
+    Sync,
+}
+
+/// Classify a broadcast message from its outer wire bytes only — zero
+/// decompression, two branch loads on the hot path.
+pub fn classify(data: &[u8]) -> FrameClass {
+    if data.len() >= 8 && &data[0..4] == ZCST_MAGIC {
+        let usz = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
+        if usz > 1024 * 1024 {
+            FrameClass::Sync
+        } else {
+            FrameClass::LegacyDelta
+        }
+    } else if is_sync(data) {
+        FrameClass::Sync
+    } else {
+        FrameClass::Critical
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    fn zcst(usz: u32) -> Vec<u8> {
+        let mut v = ZCST_MAGIC.to_vec();
+        v.extend_from_slice(&usz.to_le_bytes());
+        v.extend_from_slice(&[0u8; 16]);
+        v
+    }
+
+    #[test]
+    fn legacy_delta_is_droppable() {
+        assert_eq!(classify(&zcst(200_000)), FrameClass::LegacyDelta);
+        assert_eq!(classify(&zcst(1_048_576)), FrameClass::LegacyDelta); // boundary: exactly 1MiB is a delta
+    }
+
+    #[test]
+    fn compressed_sync_is_sync() {
+        assert_eq!(classify(&zcst(8 * 1024 * 1024)), FrameClass::Sync);
+        assert_eq!(classify(&zcst(1_048_577)), FrameClass::Sync);
+    }
+
+    #[test]
+    fn raw_sync_is_sync() {
+        let mut v = SYNC_MAGIC.to_vec();
+        v.extend_from_slice(&[0u8; 16]);
+        assert_eq!(classify(&v), FrameClass::Sync);
+    }
+
+    #[test]
+    fn zcs2_state_audio_unknown_are_critical() {
+        let mut z = ZCS2_MAGIC.to_vec();
+        z.extend_from_slice(&[0u8; 16]);
+        assert_eq!(classify(&z), FrameClass::Critical);
+        let mut g = GSTA_MAGIC.to_vec();
+        g.extend_from_slice(&[0u8; 16]);
+        assert_eq!(classify(&g), FrameClass::Critical);
+        assert_eq!(classify(&[AUDIO_MAGIC_0, AUDIO_MAGIC_1, 0, 0, 1, 2]), FrameClass::Critical);
+        assert_eq!(classify(b"WHAT is this"), FrameClass::Critical);
+        // Truncated ZCST header (len < 8): malformed — default lossless.
+        assert_eq!(classify(b"ZCST"), FrameClass::Critical);
+    }
+}
+
 /// Parse dirty pages from a delta frame and apply them to cached VRAM/PVR.
 /// Returns number of pages applied.
 pub fn apply_dirty_pages(
