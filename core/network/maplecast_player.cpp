@@ -771,8 +771,14 @@ static bool livePredictDrive(uint64_t localFrame)
 		// a different value, and trust-own never reconciled it -> permanent state
 		// divergence under input. Reconciling the local slot too fires a small
 		// rollback that corrects it; the head keeps our live input for instant feel.)
-		const bool matchL = (_lpAuth[ls][idx].btn == _lpPred[ls][idx].btn);
-		const bool matchR = (_lpAuth[rs][idx].btn == _lpPred[rs][idx].btn);
+		// FULL input comparison (btn + lt + rt) — the sim applies analog triggers
+		// too, so a trigger-only prediction miss must also trigger a rollback (was
+		// btn-only: a latent wrong-state-no-rollback hole).
+		auto inSame = [](const LpInput& a, const LpInput& b) {
+			return a.btn == b.btn && a.lt == b.lt && a.rt == b.rt;
+		};
+		const bool matchL = inSame(_lpAuth[ls][idx], _lpPred[ls][idx]);
+		const bool matchR = inSame(_lpAuth[rs][idx], _lpPred[rs][idx]);
 		if (!(matchL && matchR) && reSimFrom == UINT64_MAX) reSimFrom = N;
 		// INJECTION verify: did the server echo our (injected) local input, and did
 		// our prediction match it? Proves the forward+stamp+echo path end-to-end.
@@ -796,17 +802,15 @@ static bool livePredictDrive(uint64_t localFrame)
 					if (_lpLiveHash[idx] == sh) _lpConfM[k]++; else _lpConfMM[k]++;
 				}
 			}
-			// On a DIRECT-N mismatch, log the client's 5 sub-hashes for N so it can
-			// be diffed against [SUBHASH-SRV] f=N to localize the divergent region.
-			if (std::getenv("MAPLECAST_SUBHASH_LOG") && _lpSubLogged < 8) {
-				uint64_t sh0;
-				if (maplecast_lockstep::serverHashForClientFrame(N, &sh0) && _lpLiveHash[idx] != sh0) {
-					const uint64_t* s = _lpLiveSub[idx];
-					printf("[SUBHASH-CLI] f=%llu chars=%016llx gs=%016llx fctr=%016llx ftick=%016llx latch=%016llx\n",
-					       (unsigned long long)N,(unsigned long long)s[0],(unsigned long long)s[1],
-					       (unsigned long long)s[2],(unsigned long long)s[3],(unsigned long long)s[4]);
-					fflush(stdout); _lpSubLogged++;
-				}
+			// LATCH LOCALIZER: log the client head's raw controller latch for a WINDOW
+			// of CONSECUTIVE confirmed frames near injection start, so it can be aligned
+			// against [LATCH-SRV] f=N to pin the exact apply-phase off-by-one direction.
+			if (std::getenv("MAPLECAST_SUBHASH_LOG") && _lpInjectStart &&
+			    N >= _lpInjectStart && N < _lpInjectStart + 40) {
+				const uint64_t* s = _lpLiveSub[idx];
+				printf("[LATCH-CLI] f=%llu latch=%016llx chars=%016llx\n",
+				       (unsigned long long)N,(unsigned long long)s[4],(unsigned long long)s[0]);
+				fflush(stdout);
 			}
 		}
 	}
@@ -851,6 +855,14 @@ static bool livePredictDrive(uint64_t localFrame)
 			}
 			maplecast_predict::advanceHeadlessOneFrame();
 			maplecast_predict::ringSave(f + 1);
+			// Update the per-frame hash to the RE-SIMMED (post-rollback) state so the
+			// confirmed-hash gate compares the CONFIRMED state to the server — not a
+			// stale speculative head hash. This makes confHash the decisive
+			// cross-instance test (confirmed re-sim frame f vs server hash f).
+			_lpLiveHash[idx] = maplecast_rollback::gameStateRegionHash();
+			_lpLiveHashFrame[idx] = f;
+			if (std::getenv("MAPLECAST_SUBHASH_LOG"))
+				maplecast_rollback::gameStateSubHashes(_lpLiveSub[idx]);
 		}
 	}
 
