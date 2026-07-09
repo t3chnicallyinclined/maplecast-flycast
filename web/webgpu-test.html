@@ -580,8 +580,8 @@ window._body=BODY;
 // quad's UVs are ALREADY correct for it — no UV rewrite. Default OFF: without
 // ?bodytex=local nothing below runs (byte-identical behavior).
 const BTEX={want:(new URLSearchParams(location.search).get('bodytex')||'')==='local',
-  on:false,ensure:null,applyGfx:null,lvram:null,cache:{},tex:new Map(),samp:new Map(),
-  stats:{staged:0,texObj:0,fallback:0,decMs:0},err:0};
+  on:false,ensure:null,applyGfx:null,lvram:null,cache:{},tex:new Map(),samp:new Map(),cap:2048,
+  stats:{staged:0,texObj:0,fallback:0,decMs:0,hit:0,miss:0,evict:0},err:0};
 window._btex=BTEX;
 const _bodyGuest=a=>(a>>>0)&0xFFFFFF;
 window._bodyStart=async function bodyStart(){
@@ -839,15 +839,30 @@ function _btexAttach(bp,bt){
     if(ph===undefined){ ph=_btexHash(pal,palSel<<6,64,0x9E3779B9); bankH.set(palSel,ph); }
     const key=_btexHash(bt.tiles,k*512,512,ph)+'_'+_btexHash(bt.tiles,k*512,512,~ph)+'_'+palSel+'_'+((tsp>>13)&0x3F);
     let e=BTEX.tex.get(key);
-    if(!e){
-      if(BTEX.tex.size>2048){ for(const v of BTEX.tex.values()){ try{v.texture.destroy();}catch(_){} } BTEX.tex.clear(); }
+    if(e){
+      // LRU touch: re-insert so this key becomes newest (Map preserves insertion
+      // order → keys().next() is the coldest). Keeps the visible working set hot.
+      BTEX.tex.delete(key); BTEX.tex.set(key,e); BTEX.stats.hit++;
+    } else {
+      // LRU eviction — drop the COLDEST entries one at a time while at capacity.
+      // The old path destroyed ALL 2048 textures at once on overflow, which then
+      // forced a full re-decode + re-upload of the entire visible set on the very
+      // next frame — a periodic multi-ms GPU stall under heavy action (and the
+      // bulk create/destroy churn pressured GPU memory over a long session).
+      // Steady one-at-a-time eviction keeps hot poses resident and removes the cliff.
+      while(BTEX.tex.size>=BTEX.cap){
+        const oldest=BTEX.tex.keys().next().value;
+        const ov=BTEX.tex.get(oldest); BTEX.tex.delete(oldest);
+        try{ov.texture.destroy();}catch(_){}
+        BTEX.stats.evict++;
+      }
       const rgba=new Uint8Array(32*32*4);
       if(!T._pal4(bt.tiles.subarray(k*512,(k+1)*512),0,32,32,5,5,palSel,rgba)){ BTEX.stats.fallback++; continue; }
       const texture=dev.createTexture({size:[32,32],format:'rgba8unorm',
         usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
       dev.queue.writeTexture({texture},rgba,{bytesPerRow:128},[32,32]);
       e={texture,sampler:_btexSampler(dev,tsp)};
-      BTEX.tex.set(key,e);
+      BTEX.tex.set(key,e); BTEX.stats.miss++;
     }
     pp.texObj=e; BTEX.stats.texObj++;
   }
