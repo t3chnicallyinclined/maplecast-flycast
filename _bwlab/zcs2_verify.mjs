@@ -156,7 +156,8 @@ function onZcs2(d) {
   } else if (!zSynced || epoch!==zEpoch) return;
   zBytes += d.length;
   const t0=performance.now();
-  try { zdec.push(d.subarray(10+((d[5]&8)?132:0)+((d[5]&32)?4:0))); } catch(e){ console.log('fzstd err:',e.message); zSynced=false; return; }
+  { const zb=10+((d[5]&8)?132:0)+((d[5]&32)?4:0); const zo=(d[5]&64)?1+3*d[zb]:0;
+  try { zdec.push(d.subarray(zb+zo)); } catch(e){ console.log('fzstd err:',e.message); zSynced=false; return; } }
   decMs += performance.now()-t0; decN++;
   if (zLen >= innerSize) {
     const inner = new Uint8Array(innerSize);

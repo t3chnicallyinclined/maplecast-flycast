@@ -350,8 +350,10 @@ const ZCS2 = {
       this.M2=cf.slice(0,16); this.M1=cf.slice(16,32); }
     const vfLen=(flags&32)?4:0;
     this.lastVf=vfLen?((d[10+camLen]|d[11+camLen]<<8|d[12+camLen]<<16|d[13+camLen]<<24)>>>0):-1;
+    let ordLen=0; this.lastOrd=null;
+    if(flags&64){ const nb=d[10+camLen+vfLen]; ordLen=1+3*nb; this.lastOrd=d.slice(10+camLen+vfLen,10+camLen+vfLen+ordLen); }
     const t0=performance.now();
-    try{ this.dec.push(d.subarray(10+camLen+vfLen)); }
+    try{ this.dec.push(d.subarray(10+camLen+vfLen+ordLen)); }
     catch(e){ this._desync('fzstd: '+e.message); return null; }
     this.decMs+=performance.now()-t0;
     if(this.clen>=innerSize){
@@ -418,6 +420,10 @@ ZCS2.worker=null;
       const cam=camLen? d.slice(10,10+132).buffer : null;   // sid u32 + M2 16f + M1 16f
       const vfLen=(flags&32)?4:0;   // bit5: replica vframe stamp (char-flip exact pairing)
       const vf=vfLen?((d[10+camLen]|d[11+camLen]<<8|d[12+camLen]<<16|d[13+camLen]<<24)>>>0):-1;
+      // bit6: TR run-order descriptor (u8 nRuns + nRuns x {u8 cls,u16 cnt}) --
+      // the engine positions of the stripped char runs, for the body splice.
+      let ordLen=0, ord=null;
+      if(flags&64){ const nb=d[10+camLen+vfLen]; ordLen=1+3*nb; ord=d.slice(10+camLen+vfLen,10+camLen+vfLen+ordLen).buffer; }
       const innerSize=(d[6]|d[7]<<8|d[8]<<16|d[9]<<24)>>>0;
       if(flags&1){
         chunks=[]; clen=0;
@@ -429,7 +435,7 @@ ZCS2.worker=null;
         if(ep!==epoch){ synced=false; chunks=[]; clen=0; post({desync:'epoch gap '+epoch+'->'+ep}); return; }
       }
       const t0=performance.now();
-      try{ dec.push(d.subarray(10+camLen+vfLen)); }
+      try{ dec.push(d.subarray(10+camLen+vfLen+ordLen)); }
       catch(e){ synced=false; chunks=[]; clen=0; post({desync:'fzstd: '+e.message}); return; }
       if(clen>=innerSize){
         const inner=new Uint8Array(innerSize); let o=0;
@@ -441,8 +447,8 @@ ZCS2.worker=null;
         catch(e){ synced=false; post({desync:'soaInverse: '+e.message}); return; }
         const fsz=(fin[0]|fin[1]<<8|fin[2]<<16|fin[3]<<24)>>>0;
         if(fsz+4!==fin.length){ synced=false; post({desync:'frameSize '+fsz+'+4 != '+fin.length}); return; }
-        const t=[fin.buffer]; if(cam) t.push(cam);
-        post({frame:fin.buffer, len:fin.length, stripped, cstrip, vf, cam, decMs:performance.now()-t0},t);
+        const t=[fin.buffer]; if(cam) t.push(cam); if(ord) t.push(ord);
+        post({frame:fin.buffer, len:fin.length, stripped, cstrip, vf, ord, cam, decMs:performance.now()-t0},t);
       }
     };`;
   try{
@@ -481,6 +487,7 @@ ZCS2.worker=null;
         ZCS2._frameStripped=m.stripped;
         ZCS2._frameCharStripped=m.cstrip;
         ZCS2._frameVf=(m.vf===undefined?-1:m.vf);
+        ZCS2._frameOrd=m.ord?new Uint8Array(m.ord):null;
         window._injectFrame(new Uint8Array(m.frame,0,m.len));
       }
     };
@@ -622,7 +629,7 @@ function _bodyApplyFrame(u8){
 // Merge the latest body TA into the parsed wire frame — same model as
 // _stageMerge but APPENDED (bodies draw over the remaining TR content).
 const _bodyParser2=new TAParser();
-window._bodyMerge=(g,wantVf)=>{
+window._bodyMerge=(g,wantVf,ord)=>{
   let ta=BODY.ta;
   // PAIR AT vframe-1: the engine's TA lags the state counter by one frame
   // (capture-proven: body(V) == engine TA stamped V+1; garble_diff 2026-07-09).
@@ -640,7 +647,33 @@ window._bodyMerge=(g,wantVf)=>{
   nv.set(gw,0); nv.set(bw,gw.length);
   const shift=g.vertexCount;
   const bump=list=>(list||[]).map(q=>{const r=Object.assign({},q); r.first=q.first+shift; return r;});
-  g.translucent=[...g.translucent,...bump(bp.translucent)];
+  // SPLICE at the ENGINE's TR positions (order descriptor, flags bit6):
+  // cls 0 = a run of stripped char quads (take from our body polys),
+  // cls 1/2 = kept wire sprites/polys (take from the parsed wire list).
+  // Only splice when the kept counts line up exactly (self-verifying);
+  // otherwise fall back to append-at-end.
+  const bodyPolys=bump(bp.translucent||[]);
+  let spliced=false;
+  if(ord&&ord.length>=4){
+    const n=ord[0]; let oi=1, kSum=0, sSum=0;
+    for(let r=0;r<n;r++){ const cls=ord[oi], cnt=ord[oi+1]|ord[oi+2]<<8; oi+=3; if(cls===0) sSum+=cnt; else kSum+=cnt; }
+    if(kSum===g.translucent.length){
+      const kept=g.translucent, merged=[]; let bi=0, ki=0; oi=1;
+      for(let r=0;r<n;r++){
+        const cls=ord[oi], cnt=ord[oi+1]|ord[oi+2]<<8; oi+=3;
+        if(cls===0){ const take=Math.min(cnt,bodyPolys.length-bi); for(let i2=0;i2<take;i2++) merged.push(bodyPolys[bi++]); }
+        else { const take=Math.min(cnt,kept.length-ki); for(let i2=0;i2<take;i2++) merged.push(kept[ki++]); }
+      }
+      while(ki<kept.length) merged.push(kept[ki++]);
+      while(bi<bodyPolys.length) merged.push(bodyPolys[bi++]);
+      g.translucent=merged; spliced=true;
+      BODY.spliceOk=(BODY.spliceOk|0)+1;
+    } else {
+      BODY.spliceSkew=(BODY.spliceSkew|0)+1;
+      if(BODY.spliceSkew<4) console.warn('[body] splice skew: kept',g.translucent.length,'vs descriptor',kSum,'-- append fallback');
+    }
+  }
+  if(!spliced) g.translucent=[...g.translucent,...bodyPolys];
   g.vertexData=new Uint8Array(nv.buffer,0,need*4);
   g.vertexCount+=bp.vertexCount;
   g._bodyMerged=true;
@@ -669,7 +702,7 @@ if(BODY.want) window._bodyStart();
       'ZCS2   '+(z*8/1e6).toFixed(2)+' Mbps   epoch '+(ZCS2.epoch<0?'–':ZCS2.epoch)+'\n'
      +'legacy '+(l*8/1e6).toFixed(2)+' Mbps   ratio '+(z?(l/z).toFixed(2)+'×':'–')+'\n'
      +'dec '+(ZCS2.frames?(ZCS2.decMs/ZCS2.frames).toFixed(2):'0.00')+' ms/msg   desyncs '+ZCS2.errs+'\nsrc: '+src
-     +(window._body&&window._body.started?'\nbody: '+(window._body.ready?(window._body.frames+'f vf'+window._body.vframe+(window._body.ta?' '+(window._body.ta.length/96|0)+'q':'')+(window._body.pairHit?' pair '+window._body.pairHit+'/'+((window._body.pairHit|0)+(window._body.pairMiss|0)):'')):'seeding...'):'');
+     +(window._body&&window._body.started?'\nbody: '+(window._body.ready?(window._body.frames+'f vf'+window._body.vframe+(window._body.ta?' '+(window._body.ta.length/96|0)+'q':'')+(window._body.pairHit?' pair '+window._body.pairHit+'/'+((window._body.pairHit|0)+(window._body.pairMiss|0)):'')+(window._body.spliceOk||window._body.spliceSkew?' spl '+(window._body.spliceOk|0)+'/'+((window._body.spliceOk|0)+(window._body.spliceSkew|0)):'')):'seeding...'):'');
   },1000);
 })();
 
@@ -2246,6 +2279,7 @@ async function main(){
                     ZCS2._frameStripped=ZCS2.lastStripped;
                     ZCS2._frameCharStripped=ZCS2.lastCharStripped;
                     ZCS2._frameVf=(ZCS2.lastVf===undefined?-1:ZCS2.lastVf);
+                    ZCS2._frameOrd=ZCS2.lastOrd||null;
                     if(ZCS2.lastCharStripped && window._bodyStart) window._bodyStart();
                 }
                 else if(d.length>=8 && d[0]===0x5A && d[1]===0x43 && d[2]===0x53 && d[3]===0x54){ // 'ZCST'
@@ -2401,8 +2435,9 @@ async function main(){
                     // within TR). A/B mode (?bodylocal) double-draws over the wire bodies.
                     const _bodyNow=ZCS2._frameCharStripped; ZCS2._frameCharStripped=false;
                     const _bodyVf=(ZCS2._frameVf===undefined?-1:ZCS2._frameVf); ZCS2._frameVf=-1;
+                    const _bodyOrd=ZCS2._frameOrd; ZCS2._frameOrd=null;
                     if(ZCS2.render&&(_bodyNow||(window._body&&window._body.want&&window._body.ready&&_mergeNow))){
-                      try{ window._bodyMerge(g,_bodyVf); }catch(e5){ if(((ZCS2._bmErr=(ZCS2._bmErr||0)+1))<4) console.warn('[body-merge]',e5); } }
+                      try{ window._bodyMerge(g,_bodyVf,_bodyOrd); }catch(e5){ if(((ZCS2._bmErr=(ZCS2._bmErr||0)+1))<4) console.warn('[body-merge]',e5); } }
                     if(!_merged){ try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e2) {} }
                     pMs=performance.now()-t1;
                     lastParsed=g; window._lastParsed=g; window._lastFrameNum=D.frameNum;

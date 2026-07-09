@@ -595,8 +595,31 @@ static const std::vector<uint32_t>& stripAllowlist()
 // Copy-through TA walk (same FSM as taCanonicalize): every param+its vertices is
 // copied EXCEPT opaque-list polys whose TCW addr is allowlisted (param + verts
 // dropped). Returns the stripped size. `out` must be >= taSize.
+// CHARSTRIP order descriptor: the engine INTERLEAVES char sprites with kept
+// TR content (measured: P1 S43 K5 S16 K23 S27 P12) — drawing re-emitted bodies
+// at the end breaks compositing during action. taStripStage records the TR
+// run sequence (S=stripped sprite, K=kept sprite, P=kept para4 poly) so the
+// client can SPLICE its body quads back at the engine positions.
+// Wire: ZCS2 flags bit6 -> u8 nRuns + nRuns x { u8 cls, u16 count } after the
+// vframe stamp. cls: 0=S 1=K 2=P.
+static std::vector<uint8_t> _csOrder;
+static inline void _csOrderPush(uint8_t cls, uint32_t n = 1)
+{
+	if (_csOrder.size() >= 3 * 255) return;                     // cap: merge overflow into last
+	if (!_csOrder.empty() && _csOrder[_csOrder.size() - 3] == cls) {
+		uint16_t c; memcpy(&c, &_csOrder[_csOrder.size() - 2], 2);
+		uint32_t nc = c + n; if (nc > 65535) nc = 65535;
+		uint16_t v = (uint16_t)nc; memcpy(&_csOrder[_csOrder.size() - 2], &v, 2);
+	} else {
+		_csOrder.push_back(cls);
+		uint16_t v = (uint16_t)(n > 65535 ? 65535 : n);
+		_csOrder.resize(_csOrder.size() + 2);
+		memcpy(&_csOrder[_csOrder.size() - 2], &v, 2);
+	}
+}
 static uint32_t taStripStage(const uint8_t* ta, uint32_t taSize, uint8_t* out)
 {
+	_csOrder.clear();
 	const auto& allow = stripAllowlist();
 	uint32_t off = 0, w = 0;
 	int curList = -1; bool isSpr = false, haveParam = false, dropping = false;
@@ -625,6 +648,7 @@ static uint32_t taStripStage(const uint8_t* ta, uint32_t taSize, uint8_t* out)
 			else                                           sz = 32;
 			uint32_t tcw; memcpy(&tcw, ta + off + 12, 4);
 			dropping = (curList == 0) && inAllow(tcw & 0x1FFFFF);
+			if (curList == 2 && !dropping) _csOrderPush(2);     // kept TR poly (P)
 			if (!dropping) emit(sz);
 			off += sz; continue;
 		}
@@ -650,6 +674,7 @@ static uint32_t taStripStage(const uint8_t* ta, uint32_t taSize, uint8_t* out)
 			}
 			dropping = ((curList == 0) && inAllow(addr))
 			        || (csOn && curList == 2 && csHit);
+			if (curList == 2) _csOrderPush(dropping ? 0 : 1);   // S=stripped, K=kept sprite
 			if (!dropping) emit(32);
 			off += 32; continue;
 		}
@@ -3079,11 +3104,17 @@ done_diff:
 			// on the hysteresis gate; content is unaffected (empty TA == stripped).
 			const bool stripFlagsOn = _ssStripActive;
 			const uint32_t vfLen = (stripFlagsOn && charStripMode() == 2) ? 4 : 0;
-			_zBuf.resize(10 + camLen + vfLen + ZSTD_compressBound(zPayloadSize));
+			// order descriptor (bit6): only when this frame actually ran the strip
+			// (stripDone) -- skip-frames have no TA to splice into. _csOrder was
+			// filled by taStripStage above. u8 nRuns + nRuns x {u8 cls, u16 count}.
+			const uint32_t csnRuns = (stripDone && charStripMode() == 2) ? (uint32_t)(_csOrder.size() / 3) : 0;
+			const uint32_t ordLen = csnRuns ? 1 + 3 * csnRuns : 0;
+			_zBuf.resize(10 + camLen + vfLen + 1 + 3 * 256 + ZSTD_compressBound(zPayloadSize));
 			_zBuf[0]='Z'; _zBuf[1]='C'; _zBuf[2]='S'; _zBuf[3]='2';
 			_zBuf[4]=_zEpoch; _zBuf[5]=(uint8_t)((streamStart ? 1 : 0) | (soaDone ? 2 : 0)
 				| ((stripFlagsOn && !stripAllowlist().empty()) ? 4 : 0) | (camLen ? 8 : 0)
-				| ((stripFlagsOn && charStripMode() == 2) ? 16 : 0) | (vfLen ? 32 : 0));
+				| ((stripFlagsOn && charStripMode() == 2) ? 16 : 0) | (vfLen ? 32 : 0)
+				| (ordLen ? 64 : 0));
 			memcpy(_zBuf.data()+6, &zPayloadSize, 4);
 			if (camLen) {
 				uint8_t* cm = _zBuf.data() + 10;
@@ -3096,7 +3127,12 @@ done_diff:
 				uint32_t vf = addrspace::read32(0x8C3496B0);
 				memcpy(_zBuf.data() + 10 + camLen, &vf, 4);
 			}
-			ZSTD_outBuffer ob{ _zBuf.data()+10+camLen+vfLen, _zBuf.size()-10-camLen-vfLen, 0 };
+			if (ordLen) {
+				uint8_t* op = _zBuf.data() + 10 + camLen + vfLen;
+				*op++ = (uint8_t)csnRuns;
+				memcpy(op, _csOrder.data(), 3 * csnRuns);
+			}
+			ZSTD_outBuffer ob{ _zBuf.data()+10+camLen+vfLen+ordLen, _zBuf.size()-10-camLen-vfLen-ordLen, 0 };
 			ZSTD_inBuffer  ib{ zPayload, zPayloadSize, 0 };
 			size_t zr = ZSTD_compressStream2(_zc, &ob, &ib, ZSTD_e_flush);
 			if (ZSTD_isError(zr) || ib.pos != ib.size || zr != 0) {
@@ -3107,7 +3143,7 @@ done_diff:
 					ZSTD_isError(zr) ? ZSTD_getErrorName(zr) : "incomplete flush");
 				_zstreamResetPending.store(true, std::memory_order_release);
 			} else {
-				maplecast_ws::broadcastBinary(_zBuf.data(), (uint32_t)(10 + camLen + vfLen + ob.pos));
+				maplecast_ws::broadcastBinary(_zBuf.data(), (uint32_t)(10 + camLen + vfLen + ordLen + ob.pos));
 				if (stripDone) {
 					// (camera now rides INSIDE the ZCS2 header, flags bit3 — the old
 					// separate CAMM msg raced the async worker decode.)
