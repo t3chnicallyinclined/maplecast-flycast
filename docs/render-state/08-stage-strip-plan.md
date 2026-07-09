@@ -50,6 +50,15 @@ Two browser wires exist. The replica-live wire (7212) ALREADY renders the stage 
   (4) live camera-motion A/B never witnessed (get a moving-match capture as acceptance);
   (5) OP-clear z/order vs stripped wire expectations.
 
+## Decision note (user, 2026-07-09): own-HUD is the endgame branch
+The −49% measured leg stripped the ENTIRE opaque list (stage+HUD) — the TCW-partitioned
+strip (HUD kept on wire) lands below that. Drawing our own HUD client-side unlocks the full
+strip: pieces already exist (HUD closure byte-matched re_kb/57-59; native synthesis in
+gsta_stage.cpp; browser hud-client.mjs; data = the GSTA 253B side-channel already on the
+7200 wire — health/meter/combo/timer every frame). Bonus: custom fonts / streamer layouts /
+frame-data overlays (project_mvc2_mod_layer). Sequencing: 3a ships TCW-partitioned
+(HUD-safe); own-HUD = 3c, crossed when we get there.
+
 ## Also queued (from live testing 2026-07-09)
 - Frame drops during specials on the ZCS2 render path: main-thread fzstd+SoA decode
   (~1.5 ms/msg, worse on burst frames) + relay 16-slot backpressure → desyncs → legacy
