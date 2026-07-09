@@ -59,3 +59,19 @@
 - ZCS2 = default wire: page defaults ON, relay `{"type":"subscribe","mode":"zcs2"}` sheds legacy
   deltas per-client (SYNC passes; auto-restore on desync; b67794fd1). Worker decode + keyframe-
   aligned epochs (78b2f4c6b).
+
+## ModNao research addendum (2026-07-09)
+- **Already mined**: tools/rip_stage.py IS a ModNao port (github.com/rob2d/modnao, cited in its
+  header) — NLOBJPUT decoder, strip winding, twiddle, color conv all extracted long ago.
+- **Cannot complete the disc-only 3b bake**: the blockers aren't in the disc data — per-prop
+  world transforms are RUNTIME matrix-stack state (bank12 loc_8c122fd0) and real PVR words come
+  only from live TA. ModNao renders with meshBasicMaterial (no PVR synthesis, no camera model).
+  3b stays: one MAPLECAST_DUMP_RAM capture per stage + bake_stage_from_ta.py (scriptable sweep).
+- **Residual value to lift (format facts only)**: VQ + LZSS texture branches
+  (loadTextureFileWorker.ts), wrapping-flag table (getTextureWrappingFlags.ts → TSP clamp/flip),
+  mesh textureControlValue + specular fields, and mvc2StageAttribMappings.ts = the full
+  17-stage name map for tools/stage_id_map.json (only 0x11→STG0B confirmed today).
+- **⚠ LICENSE**: ModNao relicensed 2026-05-25 to a custom non-commercial license with a
+  no-AI-analysis clause. Existing port predates + attributes; ANY further borrowing = format
+  facts (offsets/bit meanings), never verbatim code; MapleCast stays non-commercial or gets
+  written permission.
