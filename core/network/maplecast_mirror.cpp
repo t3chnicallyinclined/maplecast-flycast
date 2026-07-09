@@ -2710,7 +2710,11 @@ done_diff:
 			bool streamStart = false;
 			if (!_zc) { _zc = ZSTD_createCCtx(); streamStart = true; }
 			if (_zstreamResetPending.exchange(false, std::memory_order_acq_rel)) streamStart = true;
-			if (_zResetEvery && _zSinceReset >= _zResetEvery) streamStart = true;
+			// Align periodic epoch resets to KEYFRAMES: a joiner needs both a
+			// stream-start (zstd decode point) AND a TA keyframe (delta-chain base).
+			// Unaligned, a join waited for the epoch then up to another second for
+			// a keyframe. Aligned, the first decodable frame IS renderable.
+			if (_zResetEvery && _zSinceReset >= _zResetEvery && forceKeyframe) streamStart = true;
 			if (streamStart) {
 				ZSTD_CCtx_reset(_zc, ZSTD_reset_session_only);
 				ZSTD_CCtx_setParameter(_zc, ZSTD_c_compressionLevel, _zLevel);

@@ -368,6 +368,96 @@ const ZCS2 = {
 };
 window._ZCS2=ZCS2;
 
+// === ZCS2 WORKER DECODE (2026-07-09) =========================================
+// fzstd streaming + SoA inverse + frameSize belt run OFF the main thread — the
+// biggest frames (supers) no longer stall the render loop, and decode pipelines
+// AHEAD of render. Decoded inners are re-injected through transport.onframe
+// (set below as window._injectFrame), flowing the EXACT normal path. Falls back
+// to main-thread onMsg if the worker fails to init.
+ZCS2.worker=null;
+(function(){
+  const src=`
+    let Dz=null, dec=null, epoch=-1, synced=false, chunks=[], clen=0;
+    const post=(m,t)=>self.postMessage(m,t||[]);
+    function soaInverse(v){
+      const dv=new DataView(v.buffer,v.byteOffset,v.byteLength);
+      const v2Sec=dv.getUint32(76,true), nRuns=dv.getUint32(80,true);
+      const offs=84, lens=offs+nRuns*4, dat=lens+nRuns*2;
+      let dataB=0; for(let i=0;i<nRuns;i++) dataB+=dv.getUint16(lens+i*2,true);
+      const tailOff=80+v2Sec, legacySec=nRuns*6+dataB+4;
+      const out=new Uint8Array(80+legacySec+(v.length-tailOff));
+      out.set(v.subarray(0,80),0);
+      const ov=new DataView(out.buffer);
+      ov.setUint32(76,legacySec,true);
+      let o=80, dp=dat, prev=0;
+      for(let i=0;i<nRuns;i++){
+        prev+=dv.getUint32(offs+i*4,true);
+        const rl=dv.getUint16(lens+i*2,true);
+        ov.setUint32(o,prev,true); ov.setUint16(o+4,rl,true); o+=6;
+        out.set(v.subarray(dp,dp+rl),o); o+=rl; dp+=rl;
+      }
+      ov.setUint32(o,0xFFFFFFFF,true); o+=4;
+      out.set(v.subarray(tailOff),o);
+      return out;
+    }
+    self.onmessage=async(ev)=>{
+      if(ev.data.init){ const m=await import(ev.data.init); Dz=m.Decompress; post({ready:1}); return; }
+      const d=new Uint8Array(ev.data.b, ev.data.off, ev.data.len);
+      const flags=d[5], ep=d[4], soa=(flags&2)!==0, stripped=(flags&4)!==0;
+      const innerSize=(d[6]|d[7]<<8|d[8]<<16|d[9]<<24)>>>0;
+      if(flags&1){
+        chunks=[]; clen=0;
+        dec=new Dz((c)=>{ chunks.push(c); clen+=c.length; });
+        if(!synced) post({resumed:1});
+        epoch=ep; synced=true; post({epoch:ep, stripped});
+      } else {
+        if(!synced) return;
+        if(ep!==epoch){ synced=false; chunks=[]; clen=0; post({desync:'epoch gap '+epoch+'->'+ep}); return; }
+      }
+      const t0=performance.now();
+      try{ dec.push(d.subarray(10)); }
+      catch(e){ synced=false; chunks=[]; clen=0; post({desync:'fzstd: '+e.message}); return; }
+      if(clen>=innerSize){
+        const inner=new Uint8Array(innerSize); let o=0;
+        for(const c of chunks){ const n=Math.min(c.length,innerSize-o); inner.set(c.subarray(0,n),o); o+=n; if(o>=innerSize)break; }
+        const extra=clen-innerSize; chunks=[]; clen=0;
+        if(extra>0){ synced=false; post({desync:'chunk overrun +'+extra+'B'}); return; }
+        let fin;
+        try{ fin=soa?soaInverse(inner):inner; }
+        catch(e){ synced=false; post({desync:'soaInverse: '+e.message}); return; }
+        const fsz=(fin[0]|fin[1]<<8|fin[2]<<16|fin[3]<<24)>>>0;
+        if(fsz+4!==fin.length){ synced=false; post({desync:'frameSize '+fsz+'+4 != '+fin.length}); return; }
+        post({frame:fin.buffer, len:fin.length, stripped, decMs:performance.now()-t0},[fin.buffer]);
+      }
+    };`;
+  try{
+    const w=new Worker(URL.createObjectURL(new Blob([src],{type:'text/javascript'})),{type:'module'});
+    w.postMessage({init: location.origin+'/webgpu/fzstd.mjs'});
+    w.onmessage=(ev)=>{
+      const m=ev.data;
+      if(m.ready){ ZCS2.worker=w; console.log('[ZCS2] worker decode ONLINE'); return; }
+      if(m.desync){ ZCS2._desync('worker: '+m.desync); ZCS2.synced=false; return; }
+      if(m.resumed && ZCS2.render){ ZCS2._resetTAChain('epoch resume'); }
+      if(m.epoch!==undefined){
+        ZCS2.epoch=m.epoch; ZCS2.synced=true; ZCS2.epochs++;
+        if(ZCS2._stripKnown!==undefined && m.stripped!==ZCS2._stripKnown && ZCS2.render) ZCS2._resetTAChain('strip '+ZCS2._stripKnown+'->'+m.stripped);
+        ZCS2._stripKnown=m.stripped;
+        return;
+      }
+      if(m.frame){
+        ZCS2.frames++; ZCS2.decMs+=m.decMs;
+        ZCS2.lastStripped=m.stripped;
+        if(ZCS2._stripKnown!==undefined && m.stripped!==ZCS2._stripKnown && ZCS2.render) ZCS2._resetTAChain('strip '+ZCS2._stripKnown+'->'+m.stripped);
+        ZCS2._stripKnown=m.stripped;
+        if(!ZCS2.render || !window._injectFrame) return;
+        ZCS2._frameStripped=m.stripped;
+        window._injectFrame(new Uint8Array(m.frame,0,m.len));
+      }
+    };
+    w.onerror=(e)=>{ console.warn('[ZCS2] worker error — main-thread fallback', e.message); ZCS2.worker=null; };
+  }catch(e){ console.warn('[ZCS2] worker init failed — main-thread fallback', e.message); }
+})();
+
 // === Phase 3a: local stage underlay ==========================================
 // When a ZCS2 frame is stage-stripped (flag bit2), prepend the baked stage's
 // polys (re-projected through the live CAMM camera) to the parsed wire frame.
@@ -1935,6 +2025,8 @@ async function main(){
             onopen: ()=>ss(`Connected via ${transport.type} — waiting for SYNC`,'ok'),
             onclose: ()=>ss('Disconnected'),
             onframe: (d)=>{
+                // (worker re-injection point: decoded ZCS2 inners re-enter here)
+                if(!window._injectFrame) window._injectFrame=(u8)=>{ try{ transport.onframe(u8); }catch(e){} };
                 wB+=d.byteLength;
                 // Audio packet: [0xAD][0x10][seq16][512×int16 stereo PCM]
                 if(d.length>=4 && d[0]===0xAD && d[1]===0x10){
@@ -1955,6 +2047,12 @@ async function main(){
                     return;
                 }
                 if(d.length>=10 && d[0]===0x5A && d[1]===0x43 && d[2]===0x53 && d[3]===0x32){ // 'ZCS2'
+                    if(ZCS2.worker){   // OFF-THREAD decode: post raw msg (transfer), frames re-inject async
+                        ZCS2.zB+=d.byteLength;
+                        try{ ZCS2.worker.postMessage({b:d.buffer,off:d.byteOffset,len:d.byteLength},[d.buffer]); }
+                        catch(e){ ZCS2.worker.postMessage({b:d.slice().buffer,off:0,len:d.length}); }
+                        return;
+                    }
                     const inner=ZCS2.onMsg(d);
                     if(!(ZCS2.render && inner)) return;
                     d=inner;   // fall through: uncompressed inner delta frame
