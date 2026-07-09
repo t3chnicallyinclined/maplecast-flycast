@@ -595,9 +595,9 @@ window._bodyStart=async function bodyStart(){
   }
   try{
     const [{default:createRenderFrame},fz]=await Promise.all([
-      import('./render-replica/render_frame.mjs?v=scene6'),
+      import('./render-replica/render_frame.mjs?v=capez1'),
       import('./webgpu/fzstd.mjs')]);
-    BODY.mod=await createRenderFrame({locateFile:p=>p.endsWith('.wasm')?'render-replica/'+p+'?v=scene6':p});
+    BODY.mod=await createRenderFrame({locateFile:p=>p.endsWith('.wasm')?'render-replica/'+p+'?v=capez1':p});
     if(BTEX.want){ // ?bodytex=local: the validated client-side texel layer + disc-art overlay
       const [bd,lg]=await Promise.all([
         import('./render-replica/body_decoder.mjs?v=scene7'),
