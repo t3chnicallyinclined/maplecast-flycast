@@ -426,7 +426,7 @@ addEventListener('keydown',e=>{
   const box=document.createElement('div');
   box.style.cssText='border:1px solid #06a;margin:6px 0;padding:6px;background:#012';
   box.innerHTML='<b style="color:#0af">SPRITE CLIENT (Option 6)</b><br>'
-    +'<label><input type="checkbox" id="sc_on" checked> Render chars from 253B state (no TA)</label><br>'
+    +'<label><input type="checkbox" id="sc_on"> Render chars from 253B state (no TA)</label><br>'
     // PARKED paths (assembly/emitter/STAF garble the character) — hidden so the user
     // works with ONE path. Wrapped in #sc_parked which is display:none'd below.
     // EMITTER (reconstruct-from-sprite_id via PL{hex}_parts/_asm) — now LIVE for PL00.
@@ -591,7 +591,11 @@ addEventListener('keydown',e=>{
   const hctx=sch.getContext('2d');
   (canvas.parentNode||document.body).appendChild(wrap);
   const SG=new SpriteGPU(); window._spritegpu=SG;
-  let scOn=true, gpuOn=true, hudOn=true, fxOn=true;   // EFCT additive effects (electric/hitsparks/supers) ON: server-isolated + frame-synced via mcfx->TXTR, no rAF skew
+  // DEFAULT = TA VIDEO (2026-07-09): the sprite client used to default ON, which sets
+  // _skipTA and starves the TA/ZCS2 render (the force-demo path keeps showSprite stuck
+  // even out of match). Sprite mode is now opt-in: ?sprite=1 or the checkbox.
+  let scOn=(new URLSearchParams(location.search).get('sprite')==='1');
+  let gpuOn=true, hudOn=true, fxOn=true;   // EFCT additive effects (electric/hitsparks/supers) ON: server-isolated + frame-synced via mcfx->TXTR, no rAF skew
   window._skipTA = scOn;   // sprite mode renders from GSTA/OBJS — don't decode the TA video stream (overruns applyFrame on big super frames + burns CPU)
   let stafMode=false;   // STAF stripped-TA full-frame path (A/B vs whole-sprite/assembly)
   // CHARQ DISABLED (2026-06-10): the CHARQ per-part PVR-quad path is OFF by default and
@@ -618,6 +622,7 @@ addEventListener('keydown',e=>{
     scg.style.display=(scOn&&g)?'block':'none';
     scv.style.display=(scOn&&!g&&!stafMode&&!charqMode)?'block':'none';
   };
+  box.querySelector('#sc_on').checked=scOn;   // reflect ?sprite=1 opt-in
   box.querySelector('#sc_on').onchange=e=>{ scOn=e.target.checked; window._skipTA=scOn; showCanvas(); };
   // A/B toggle: whole-sprite <-> assembly. Clears the GPU atlas cache so the
   // correct image (whole-sprite atlas vs parts atlas) re-uploads for each path.
