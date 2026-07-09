@@ -258,6 +258,7 @@ canvas{display:block;background:transparent}
 <script type="module">
 import {FrameDecoder} from './webgpu/frame-decoder.mjs?v=7';
 import {Decompress as ZcsDecompress} from './webgpu/fzstd.mjs';
+import {StageClient} from './webgpu/stage-client.mjs?v=1';
 import {TAParser} from './webgpu/ta-parser.mjs';
 import {TextureManager} from './webgpu/texture-manager.mjs';
 import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=5';
@@ -308,9 +309,14 @@ const ZCS2 = {
     try{ if(window._D){ window._D.hasPrevTA=false; } }catch(e){}
     if(this.errs<5||this.errs%60===0) console.warn('[ZCS2] desync ('+why+') — resync at next epoch; errs='+this.errs);
   },
+  // Phase 3a stage-strip state: bit2 = this frame's TA has the stage polys
+  // stripped (render the local baked stage under it). Camera arrives via the
+  // CAMM companion msg (stage_id + M2 + M1) parsed in the router.
+  lastStripped:false, camSid:-1, M1:null, M2:null,
   onMsg(d){
     const epoch=d[4], flags=d[5];
     this._soa=(flags&2)!==0;
+    this.lastStripped=(flags&4)!==0;
     const innerSize=(d[6]|d[7]<<8|d[8]<<16|d[9]<<24)>>>0;
     if(flags&1){
       this.chunks=[]; this.clen=0;
@@ -338,6 +344,38 @@ const ZCS2 = {
   }
 };
 window._ZCS2=ZCS2;
+
+// === Phase 3a: local stage underlay ==========================================
+// When a ZCS2 frame is stage-stripped (flag bit2), prepend the baked stage's
+// polys (re-projected through the live CAMM camera) to the parsed wire frame.
+// Stage polys carry the engine's REAL control words; their TCWs resolve through
+// the normal TextureManager against D.vram (VRAM still ships — only geometry
+// was stripped). Draw order: stage opaque first = behind everything, exactly
+// where the engine drew it.
+const STAGE=new StageClient('test-atlas/stages');
+window._stage=STAGE;
+window._stageMerge=(g)=>{
+  if(!ZCS2.M1||!ZCS2.M2) return;
+  STAGE.setState(ZCS2.camSid>=0?ZCS2.camSid:0x11);
+  STAGE.setCamera(ZCS2.M1,ZCS2.M2);
+  const sp=STAGE.parsed;
+  if(!sp||!sp.vertexCount) return;
+  const F=7;   // 28 B/vert = 7 f32 slots (x,y,z,col,spc,u,v)
+  const sw=new Float32Array(sp.vertexData.buffer,sp.vertexData.byteOffset,sp.vertexCount*F);
+  const gw=new Float32Array(g.vertexData.buffer,g.vertexData.byteOffset,g.vertexCount*F);
+  const nv=new Float32Array(sw.length+gw.length);
+  nv.set(sw,0); nv.set(gw,sw.length);
+  const shift=sp.vertexCount;
+  const bump=list=>list.map(p=>{const q=Object.assign({},p); q.first=p.first+shift; return q;});
+  const stageOp=sp.opaque||[];
+  g.opaque=[...stageOp,...bump(g.opaque)];
+  g.punchThrough=bump(g.punchThrough);
+  g.translucent=bump(g.translucent);
+  if(g.renderPasses&&g.renderPasses.length)
+    g.renderPasses[0]={...g.renderPasses[0], op_count:g.renderPasses[0].op_count+stageOp.length};
+  g.vertexData=new Uint8Array(nv.buffer);
+  g.vertexCount+=sp.vertexCount;
+};
 (function(){
   const p=document.createElement('div');
   p.id='zcs2_panel';
@@ -1879,6 +1917,12 @@ async function main(){
                 // panel's "render from ZCS2" is on and the stream is synced, the decoded
                 // inner frame REPLACES `d` and falls through — the entire normal TA path
                 // below (FrameDecoder/TAParser/PVR2Renderer) runs off the NEW wire.
+                if(d.length>=136 && d[0]===0x43 && d[1]===0x41 && d[2]===0x4D && d[3]===0x4D){ // 'CAMM'
+                    ZCS2.camSid=(d[4]|d[5]<<8|d[6]<<16|d[7]<<24)>>>0;
+                    const f=new Float32Array(d.slice(8,136).buffer);   // aligned copy
+                    ZCS2.M2=f.slice(0,16); ZCS2.M1=f.slice(16,32);
+                    return;
+                }
                 if(d.length>=10 && d[0]===0x5A && d[1]===0x43 && d[2]===0x53 && d[3]===0x32){ // 'ZCS2'
                     const inner=ZCS2.onMsg(d);
                     if(!(ZCS2.render && inner)) return;
@@ -2005,6 +2049,8 @@ async function main(){
                     const t1=performance.now();
                     const g=P.parse(fr.taBuffer,fr.taSize);
                     try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e2) {}
+                    // Phase 3a: stage-stripped ZCS2 frame -> prepend the local baked stage
+                    if(ZCS2.render&&ZCS2.lastStripped){ try{ window._stageMerge(g); }catch(e3){ if(((ZCS2._smErr=(ZCS2._smErr||0)+1))<4) console.warn('[stage-merge]',e3); } }
                     pMs=performance.now()-t1;
                     lastParsed=g; window._lastParsed=g; window._lastFrameNum=D.frameNum;
                     // Feed predictor with real frame vertex data

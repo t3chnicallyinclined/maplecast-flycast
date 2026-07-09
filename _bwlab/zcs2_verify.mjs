@@ -51,11 +51,94 @@ function soaInverse(v){
   out.set(v.subarray(tailOff),o);
   return out;
 }
-let zSoaFrames=0;
-let zdec=null, zEpoch=-1, zSynced=false, zChunks=[], zLen=0, zSoa=false;
+// ---- Phase 3a stage-strip gate --------------------------------------------
+// JS port of the server's taStripStage walker (STG0B allowlist). The gate:
+// after each frame, md5(zcs2 stripped-chain TA) == md5(stripLocal(legacy TA)).
+import crypto from 'crypto';
+const STRIP_ALLOW=new Set([0x9fc00,0xa0000]);
+function taStripJS(ta,taSize){
+  const out=new Uint8Array(taSize); let off=0,w=0;
+  let curList=-1,isSpr=false,haveParam=false,dropping=false,cObj=0;
+  const u32=o=>ta[o]|ta[o+1]<<8|ta[o+2]<<16|ta[o+3]<<24;
+  const emit=n=>{out.set(ta.subarray(off,off+n),w); w+=n;};
+  while(off+32<=taSize){
+    const pcw=u32(off)>>>0, pt=(pcw>>>29)&7;
+    if(pt===0||pt===1||pt===2||pt===3||pt===6){haveParam=false;dropping=false;if(pt===0)curList=-1;emit(32);off+=32;continue;}
+    if(pt===4){
+      const lt=(pcw>>>24)&7; if(curList===-1)curList=lt;
+      if(curList===1||curList===3){haveParam=false;dropping=false;emit(32);off+=32;continue;}
+      cObj=pcw&0xFF; isSpr=false; haveParam=true;
+      const colType=(cObj>>4)&3, vol=(cObj>>6)&1;
+      let sz; if(colType===2&&!vol&&((cObj>>2)&1)) sz=(off+64<=taSize)?64:32;
+      else if(colType>=1&&vol) sz=(off+64<=taSize)?64:32; else sz=32;
+      const tcw=u32(off+12)>>>0;
+      dropping=(curList===0)&&STRIP_ALLOW.has(tcw&0x1FFFFF);
+      if(!dropping)emit(sz); off+=sz; continue;
+    }
+    if(pt===5){
+      const lt=(pcw>>>24)&7; if(curList===-1)curList=lt;
+      cObj=pcw&0xFF; isSpr=true; haveParam=true;
+      const tcw=u32(off+12)>>>0;
+      dropping=(curList===0)&&STRIP_ALLOW.has(tcw&0x1FFFFF);
+      if(!dropping)emit(32); off+=32; continue;
+    }
+    if(pt===7){
+      let sz;
+      if(!haveParam)sz=32;
+      else if(isSpr&&off+64<=taSize)sz=64;
+      else{const tex=(cObj>>3)&1,colType=(cObj>>4)&3,vol=(cObj>>6)&1;
+        if(!tex)sz=32; else if(!vol)sz=(colType===1&&off+64<=taSize)?64:32; else sz=32;}
+      if(!dropping)emit(sz); off+=sz; continue;
+    }
+    emit(32); off+=32;
+  }
+  if(off<taSize&&!dropping){out.set(ta.subarray(off,taSize),w); w+=taSize-off;}
+  return out.subarray(0,w);
+}
+function applyTA(chain,inner){
+  const dv=new DataView(inner.buffer,inner.byteOffset,inner.byteLength);
+  const taSize=dv.getUint32(72,true), dPay=dv.getUint32(76,true);
+  if(chain.buf.length<taSize){const n=new Uint8Array(taSize);n.set(chain.buf);chain.buf=n;}
+  if(dPay===taSize){ chain.buf.set(inner.subarray(80,80+taSize),0); chain.has=true; }
+  else if(chain.has){ let o=80; const end=80+dPay;
+    while(o+4<=end){ const roff=dv.getUint32(o,true); o+=4; if(roff===0xFFFFFFFF)break;
+      const rl=dv.getUint16(o,true); o+=2; chain.buf.set(inner.subarray(o,o+rl),roff); o+=rl; } }
+  chain.size=taSize; return chain.has;
+}
+const md5=b=>crypto.createHash('md5').update(b).digest('hex');
+const chainL={buf:new Uint8Array(0),size:0,has:false};
+const chainZ={buf:new Uint8Array(0),size:0,has:false};
+let stripPairs=0, stripExact=0, stripMismatch=0;
+function stripGate(src,inner,frameNum){
+  if(src==='zcst'){
+    if(!applyTA(chainL,inner))return;
+    chainL.dig=md5(taStripJS(chainL.buf.subarray(0,chainL.size),chainL.size));
+    chainL.fn=frameNum;
+  }else{
+    if(!applyTA(chainZ,inner))return;
+    chainZ.dig=md5(chainZ.buf.subarray(0,chainZ.size));
+    chainZ.fn=frameNum;
+  }
+  if(chainL.dig&&chainZ.dig&&chainL.fn===chainZ.fn){
+    stripPairs++;
+    if(chainL.dig===chainZ.dig)stripExact++;
+    else{stripMismatch++;
+      if(stripMismatch===1){
+        const ls=taStripJS(chainL.buf.subarray(0,chainL.size),chainL.size);
+        const zs=chainZ.buf.subarray(0,chainZ.size);
+        console.log(`frame ${frameNum}: STRIP-CHAIN MISMATCH localStrip=${ls.length}B wire=${zs.length}B`);
+        import('fs').then(fs=>{ fs.writeFileSync('C:/Users/trist/projects/maplecast-flycast/_bwlab/_strip_local.bin',ls);
+          fs.writeFileSync('C:/Users/trist/projects/maplecast-flycast/_bwlab/_strip_wire.bin',zs); });
+      }
+      else if(stripMismatch<4)console.log(`frame ${frameNum}: STRIP-CHAIN MISMATCH`);}
+  }
+}
+let zSoaFrames=0, zStripFrames=0;
+let zdec=null, zEpoch=-1, zSynced=false, zChunks=[], zLen=0, zSoa=false, zStrip=false;
 function onZcs2(d) {
   const epoch=d[4], flags=d[5];
   zSoa=(flags&2)!==0; if(zSoa) zSoaFrames++;
+  zStrip=(flags&4)!==0; if(zStrip) zStripFrames++;
   const innerSize = d[6] | d[7]<<8 | d[8]<<16 | d[9]<<24;
   if (flags & 1) {
     zdec = new ZStream((c)=>{ zChunks.push(c); zLen+=c.length; });
@@ -69,14 +152,26 @@ function onZcs2(d) {
     const inner = new Uint8Array(innerSize);
     let o=0; for (const c of zChunks){ const n=Math.min(c.length,innerSize-o); inner.set(c.subarray(0,n),o); o+=n; if(o>=innerSize) break; }
     zChunks=[]; zLen=0;
-    verify('zcs2', zSoa ? soaInverse(inner) : inner);
+    const fin = zSoa ? soaInverse(inner) : inner;
+    if (zStrip) {  // stripped frame: whole-frame pairing mismatches BY DESIGN;
+                   // the gate is the strip-chain compare instead.
+      const fn = fin[4]|fin[5]<<8|fin[6]<<16|fin[7]<<24;
+      stripGate('zcs2', fin, fn>>>0);
+    } else {
+      verify('zcs2', fin);
+    }
   }
 }
 function onZcst(d) {
   const sz = d[4] | d[5]<<8 | d[6]<<16 | d[7]<<24;
   if (sz > 1024*1024) return;   // compressed SYNC
   legBytes += d.length;
-  try { verify('zcst', zOneShot(d.subarray(8), new Uint8Array(sz))); } catch(e){}
+  try {
+    const inner = zOneShot(d.subarray(8), new Uint8Array(sz));
+    const fn = inner[4]|inner[5]<<8|inner[6]<<16|inner[7]<<24;
+    stripGate('zcst', inner, fn>>>0);
+    verify('zcst', inner);
+  } catch(e){}
 }
 
 const ws = new WebSocket(URL);
@@ -99,7 +194,10 @@ const iv = setInterval(()=>{
   if (secs>=SECS) {
     console.log(`== TOTAL ${secs}s: ZCST ${(totLeg*8/1e6/secs).toFixed(3)} Mbps  ZCS2 ${(totZ*8/1e6/secs).toFixed(3)} Mbps  `+
       `ratio ${(totLeg/Math.max(1,totZ)).toFixed(2)}x  epochs ${epochs}  paired ${paired} exact ${exact} MISMATCH ${mismatch}  soaFrames ${zSoaFrames}`);
-    console.log(mismatch===0 && paired>100 ? 'VERDICT: BYTE-EXACT PASS' : 'VERDICT: FAIL/INSUFFICIENT');
-    clearInterval(iv); ws.close(); process.exit(mismatch===0 && paired>100 ? 0 : 1);
+    if (zStripFrames>0)
+      console.log(`STRIP GATE: stripFrames ${zStripFrames}  chainPairs ${stripPairs}  exact ${stripExact}  MISMATCH ${stripMismatch}`);
+    const ok = mismatch===0 && stripMismatch===0 && (paired>100 || stripPairs>100);
+    console.log(ok ? 'VERDICT: BYTE-EXACT PASS' : 'VERDICT: FAIL/INSUFFICIENT');
+    clearInterval(iv); ws.close(); process.exit(ok ? 0 : 1);
   }
 }, 1000);

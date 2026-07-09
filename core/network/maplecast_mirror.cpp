@@ -562,6 +562,98 @@ static void taCanonicalize(uint8_t* ta, uint32_t taSize, bool zero)
 	}
 }
 
+// === MAPLECAST_STAGESTRIP (TA-Wire v2 Phase 3a, docs/render-state/08) ========
+// Strip OPAQUE-list polys whose TCW texture-addr field (tcw & 0x1FFFFF) is in
+// the stage allowlist. STG0B measured truth: the training stage is FOUR meshes —
+// the 3 grid walls (0x9fc00) + the floor deck (0xa0000); the other 14 opaque
+// TCWs are the HUD (bars/portraits/frames, y-bands 43-112 & 417-455) and MUST
+// stay on the wire. Applied ONLY to the ZCS2 stripped delta chain (legacy wire
+// byte-for-byte untouched); a stripped frame sets ZCS2 header flag bit2 and is
+// accompanied by a per-frame CAMM msg (stage_id + M2 + M1) so the client can
+// render the baked stage locally. MAPLECAST_STAGESTRIP=1 -> default STG0B list;
+// or a comma-separated hex TCW-addr list for other stages.
+static const std::vector<uint32_t>& stripAllowlist()
+{
+	static const std::vector<uint32_t> v = [](){
+		std::vector<uint32_t> r;
+		const char* e = std::getenv("MAPLECAST_STAGESTRIP");
+		if (!e || !*e || *e == '0') return r;
+		std::string s = (e[0]=='1' && !e[1]) ? "9fc00,a0000" : std::string(e);
+		size_t p = 0;
+		while (p < s.size()) {
+			size_t q = s.find(',', p);
+			if (q == std::string::npos) q = s.size();
+			r.push_back((uint32_t)strtoul(s.substr(p, q - p).c_str(), nullptr, 16));
+			p = q + 1;
+		}
+		return r;
+	}();
+	return v;
+}
+// Copy-through TA walk (same FSM as taCanonicalize): every param+its vertices is
+// copied EXCEPT opaque-list polys whose TCW addr is allowlisted (param + verts
+// dropped). Returns the stripped size. `out` must be >= taSize.
+static uint32_t taStripStage(const uint8_t* ta, uint32_t taSize, uint8_t* out)
+{
+	const auto& allow = stripAllowlist();
+	uint32_t off = 0, w = 0;
+	int curList = -1; bool isSpr = false, haveParam = false, dropping = false;
+	uint8_t cObj = 0;
+	auto emit = [&](uint32_t n){ memcpy(out + w, ta + off, n); w += n; };
+	auto inAllow = [&](uint32_t tcwAddr){
+		for (uint32_t a : allow) if (a == tcwAddr) return true;
+		return false;
+	};
+	while (off + 32 <= taSize) {
+		uint32_t pcw; memcpy(&pcw, ta + off, 4);
+		uint32_t pt = (pcw >> 29) & 7;
+		if (pt == 0 || pt == 1 || pt == 2 || pt == 3 || pt == 6) {
+			haveParam = false; dropping = false;
+			if (pt == 0) curList = -1;
+			emit(32); off += 32; continue;
+		}
+		if (pt == 4) {
+			uint32_t lt = (pcw >> 24) & 7;
+			if (curList == -1) curList = (int)lt;
+			if (curList == 1 || curList == 3) { haveParam = false; dropping = false; emit(32); off += 32; continue; }
+			cObj = (uint8_t)(pcw & 0xFF); isSpr = false; haveParam = true;
+			uint32_t colType = (cObj >> 4) & 3, vol = (cObj >> 6) & 1, sz;
+			if (colType == 2 && !vol && ((cObj >> 2) & 1)) sz = (off + 64 <= taSize) ? 64 : 32;
+			else if (colType >= 1 && vol)                  sz = (off + 64 <= taSize) ? 64 : 32;
+			else                                           sz = 32;
+			uint32_t tcw; memcpy(&tcw, ta + off + 12, 4);
+			dropping = (curList == 0) && inAllow(tcw & 0x1FFFFF);
+			if (!dropping) emit(sz);
+			off += sz; continue;
+		}
+		if (pt == 5) {
+			uint32_t lt = (pcw >> 24) & 7;
+			if (curList == -1) curList = (int)lt;
+			cObj = (uint8_t)(pcw & 0xFF); isSpr = true; haveParam = true;
+			uint32_t tcw; memcpy(&tcw, ta + off + 12, 4);
+			dropping = (curList == 0) && inAllow(tcw & 0x1FFFFF);
+			if (!dropping) emit(32);
+			off += 32; continue;
+		}
+		if (pt == 7) {
+			uint32_t sz;
+			if (!haveParam) sz = 32;
+			else if (isSpr && off + 64 <= taSize) sz = 64;
+			else {
+				uint32_t tex = (cObj >> 3) & 1, colType = (cObj >> 4) & 3, vol = (cObj >> 6) & 1;
+				if (!tex) sz = 32;
+				else if (!vol) sz = (colType == 1 && off + 64 <= taSize) ? 64 : 32;
+				else sz = 32;
+			}
+			if (!dropping) emit(sz);
+			off += sz; continue;
+		}
+		emit(32); off += 32;
+	}
+	if (off < taSize && !dropping) { memcpy(out + w, ta + off, taSize - off); w += taSize - off; }
+	return w;
+}
+
 static bool zstreamEnabled()
 {
 	static const bool on = [](){ const char* e = std::getenv("MAPLECAST_ZSTREAM");
@@ -2199,6 +2291,13 @@ void serverPublish(TA_context* ctx)
 
 	memcpy(dst, &taSize, 4); dst += 4;
 
+	// Wire bytes come from the double-buffer COPY (which TACANON canonicalizes),
+	// never from the live taData pointer. Before 2026-07-09 the encoder read
+	// taData directly, which silently made MAPLECAST_TACANON a wire no-op (the
+	// zeroed copy was diffed against but raw bytes were shipped) — caught by the
+	// Phase-3a strip-chain gate.
+	const uint8_t* wireTA = _taBuf[cur];
+
 	bool forceKeyframe = (frameNum % 60 == 0);
 	bool canDelta = _taHasPrev && taSize > 0 && !forceKeyframe;
 
@@ -2212,17 +2311,17 @@ void serverPublish(TA_context* ctx)
 		uint32_t i = 0;
 		while (i < taSize)
 		{
-			while (i < commonSize && taData[i] == prevData[i]) i++;
+			while (i < commonSize && wireTA[i] == prevData[i]) i++;
 			if (i >= taSize) break;
 
 			uint32_t runStart = i;
 			while (i < taSize && (i - runStart) < 65535 &&
-				   (i >= commonSize || taData[i] != prevData[i])) i++;
+				   (i >= commonSize || wireTA[i] != prevData[i])) i++;
 			if (i < taSize) {
 				uint32_t gapEnd = std::min(i + 8, taSize);
 				bool moreChanges = false;
 				for (uint32_t j = i; j < gapEnd; j++)
-					if (j >= commonSize || taData[j] != prevData[j]) { moreChanges = true; break; }
+					if (j >= commonSize || wireTA[j] != prevData[j]) { moreChanges = true; break; }
 				if (moreChanges)
 					while (i < gapEnd) i++;
 			}
@@ -2241,7 +2340,7 @@ void serverPublish(TA_context* ctx)
 			uint16_t runLen = (uint16_t)fullLen;
 			memcpy(dst, &runStart, 4); dst += 4;
 			memcpy(dst, &runLen, 2); dst += 2;
-			memcpy(dst, taData + runStart, runLen); dst += runLen;
+			memcpy(dst, wireTA + runStart, runLen); dst += runLen;
 		}
 		uint32_t term = 0xFFFFFFFF;
 		memcpy(dst, &term, 4); dst += 4;
@@ -2265,7 +2364,7 @@ void serverPublish(TA_context* ctx)
 	{
 		uint32_t deltaPayloadSize = taSize;
 		memcpy(dst, &deltaPayloadSize, 4); dst += 4;
-		if (taSize > 0) { memcpy(dst, taData, taSize); dst += taSize; }
+		if (taSize > 0) { memcpy(dst, wireTA, taSize); dst += taSize; }
 	}
 
 	// Swap double buffer
@@ -2630,10 +2729,81 @@ done_diff:
 				return e && *e && *e != '0'; }();
 			static std::vector<uint8_t> _soaBuf;
 			const uint8_t* zPayload = dstStart; uint32_t zPayloadSize = totalSize; bool soaDone = false;
-			uint32_t _dPay; memcpy(&_dPay, dstStart + 76, 4);
-			uint32_t _dTa;  memcpy(&_dTa,  dstStart + 72, 4);
-			if (_zSoA && totalSize > 84 && _dPay != _dTa) {   // delta frame only
-				const uint8_t* runs = dstStart + 80; uint32_t rp = 0, nRuns = 0, dataB = 0; bool ok = true;
+
+			// --- Phase 3a STAGESTRIP: stripped-TA delta chain (ZCS2-only) ---------
+			// A SECOND TA double-buffer holding the stage-stripped canonical TA, with
+			// its own run encoder (exact copy of the legacy loop incl. 65535 clamp +
+			// 8-byte gap-merge). The ZCS2 inner becomes: header(80, taSize/deltaPay
+			// patched) + stripped delta/keyframe + the legacy checksum/pages tail
+			// verbatim. Legacy wire untouched. Flag bit2 marks a stripped frame; the
+			// CAMM companion (below) carries stage_id + M2 + M1 for the local stage.
+			bool stripDone = false;
+			if (!stripAllowlist().empty() && totalSize > 84 && taSize > 0) {
+				static std::vector<uint8_t> _ssTa[2];
+				static uint32_t _ssSz[2] = {0, 0};
+				static int _ssCur = 0; static bool _ssHasPrev = false;
+				static std::vector<uint8_t> _ssInner;
+				static uint64_t _ssStrippedB = 0, _ssFrames = 0;
+				const int sc = _ssCur, sp = 1 - sc;
+				if (_ssTa[sc].size() < taSize) _ssTa[sc].resize(taSize);
+				_ssSz[sc] = taStripStage(_taBuf[cur], taSize, _ssTa[sc].data());
+				_ssStrippedB += taSize - _ssSz[sc]; _ssFrames++;
+				uint32_t legacyDPay; memcpy(&legacyDPay, dstStart + 76, 4);
+				const uint32_t tailOff = 80 + legacyDPay;
+				const uint32_t tailLen = totalSize - tailOff;
+				const bool ssKey = forceKeyframe || !_ssHasPrev;
+				_ssInner.resize(80 + 8 + (size_t)_ssSz[sc] * 2 + tailLen);
+				uint8_t* w = _ssInner.data();
+				memcpy(w, dstStart, 80);
+				memcpy(w + 72, &_ssSz[sc], 4);           // taSize = stripped size
+				uint32_t ssDPay;
+				if (ssKey) {
+					ssDPay = _ssSz[sc];
+					memcpy(w + 80, _ssTa[sc].data(), _ssSz[sc]);
+				} else {
+					uint8_t* dp = w + 80;
+					const uint8_t* curB = _ssTa[sc].data(); const uint32_t curN = _ssSz[sc];
+					const uint8_t* prvB = _ssTa[sp].data(); const uint32_t prvN = _ssSz[sp];
+					const uint32_t common = curN < prvN ? curN : prvN;
+					uint32_t i = 0;
+					while (i < curN) {
+						while (i < common && curB[i] == prvB[i]) i++;
+						if (i >= curN) break;
+						uint32_t runStart = i;
+						while (i < curN && (i - runStart) < 65535 && (i >= common || curB[i] != prvB[i])) i++;
+						if (i < curN) {
+							uint32_t gapEnd = (i + 8 < curN) ? i + 8 : curN;
+							bool more = false;
+							for (uint32_t j = i; j < gapEnd; j++)
+								if (j >= common || curB[j] != prvB[j]) { more = true; break; }
+							if (more) while (i < gapEnd) i++;
+						}
+						uint32_t fl = i - runStart;
+						if (fl > 65535) { i = runStart + 65535; fl = 65535; }
+						uint16_t rl = (uint16_t)fl;
+						memcpy(dp, &runStart, 4); dp += 4;
+						memcpy(dp, &rl, 2); dp += 2;
+						memcpy(dp, curB + runStart, rl); dp += rl;
+					}
+					uint32_t term = 0xFFFFFFFF;
+					memcpy(dp, &term, 4); dp += 4;
+					ssDPay = (uint32_t)(dp - (w + 80));
+				}
+				memcpy(w + 76, &ssDPay, 4);
+				memcpy(w + 80 + ssDPay, dstStart + tailOff, tailLen);
+				uint32_t ssTotal = 80 + ssDPay + tailLen;
+				memcpy(w, &ssTotal, 4);                   // frameSize field
+				if (frameNum % 600 == 0 && _ssFrames > 0)
+					printf("[STAGESTRIP] avg %llu B/frame stripped (ta %u -> %u this frame)\n",
+						(unsigned long long)(_ssStrippedB / _ssFrames), taSize, _ssSz[sc]);
+				_ssCur = sp; _ssHasPrev = true;
+				zPayload = w; zPayloadSize = ssTotal; stripDone = true;
+			}
+
+			uint32_t _dPay; memcpy(&_dPay, zPayload + 76, 4);
+			uint32_t _dTa;  memcpy(&_dTa,  zPayload + 72, 4);
+			if (_zSoA && zPayloadSize > 84 && _dPay != _dTa) {   // delta frame only
+				const uint8_t* runs = zPayload + 80; uint32_t rp = 0, nRuns = 0, dataB = 0; bool ok = true;
 				while (rp + 4 <= _dPay) {           // count pass
 					uint32_t roff; memcpy(&roff, runs + rp, 4);
 					if (roff == 0xFFFFFFFFu) { rp += 4; break; }
@@ -2643,10 +2813,10 @@ done_diff:
 					nRuns++; dataB += rl; rp += 6 + rl;
 				}
 				if (ok && rp == _dPay) {
-					uint32_t tailOff = 80 + _dPay, tailLen = totalSize - tailOff;
+					uint32_t tailOff = 80 + _dPay, tailLen = zPayloadSize - tailOff;
 					uint32_t v2Sec = 4 + nRuns * 6 + dataB;
 					_soaBuf.resize(80 + v2Sec + tailLen);
-					memcpy(_soaBuf.data(), dstStart, 80);
+					memcpy(_soaBuf.data(), zPayload, 80);
 					memcpy(_soaBuf.data() + 76, &v2Sec, 4);          // v2 deltaPayloadSize
 					uint8_t* o = _soaBuf.data() + 80;
 					memcpy(o, &nRuns, 4);
@@ -2661,14 +2831,14 @@ done_diff:
 						memcpy(dat, runs + rp + 6, rl); dat += rl;
 						rp += 6 + rl;
 					}
-					memcpy(dat, dstStart + tailOff, tailLen);
+					memcpy(dat, zPayload + tailOff, tailLen);
 					zPayload = _soaBuf.data(); zPayloadSize = (uint32_t)(80 + v2Sec + tailLen);
 					soaDone = true;
 				}
 			}
 			_zBuf.resize(10 + ZSTD_compressBound(zPayloadSize));
 			_zBuf[0]='Z'; _zBuf[1]='C'; _zBuf[2]='S'; _zBuf[3]='2';
-			_zBuf[4]=_zEpoch; _zBuf[5]=(uint8_t)((streamStart ? 1 : 0) | (soaDone ? 2 : 0));
+			_zBuf[4]=_zEpoch; _zBuf[5]=(uint8_t)((streamStart ? 1 : 0) | (soaDone ? 2 : 0) | (stripDone ? 4 : 0));
 			memcpy(_zBuf.data()+6, &zPayloadSize, 4);
 			ZSTD_outBuffer ob{ _zBuf.data()+10, _zBuf.size()-10, 0 };
 			ZSTD_inBuffer  ib{ zPayload, zPayloadSize, 0 };
@@ -2682,6 +2852,18 @@ done_diff:
 				_zstreamResetPending.store(true, std::memory_order_release);
 			} else {
 				maplecast_ws::broadcastBinary(_zBuf.data(), (uint32_t)(10 + ob.pos));
+				if (stripDone) {
+					// CAMM companion for the local stage: 'CAMM'(4) + stage_id(4) +
+					// M2 16f @0x8C2D6AD8 (view-proj: ALL zoom/pan) + M1 16f @0x8C2D6B18
+					// (viewport). 136 B raw, broadcast per frame (relay forwards verbatim).
+					uint8_t cm[136];
+					memcpy(cm, "CAMM", 4);
+					uint32_t sid = addrspace::read8(0x8C289638);
+					memcpy(cm + 4, &sid, 4);
+					for (int i = 0; i < 16; i++) { uint32_t v = addrspace::read32(0x8C2D6AD8 + i * 4); memcpy(cm + 8  + i * 4, &v, 4); }
+					for (int i = 0; i < 16; i++) { uint32_t v = addrspace::read32(0x8C2D6B18 + i * 4); memcpy(cm + 72 + i * 4, &v, 4); }
+					maplecast_ws::broadcastBinary(cm, 136);
+				}
 				uint64_t zUs = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
 					std::chrono::steady_clock::now() - t0z).count();
 				static uint64_t _zBytes = 0, _zFrames = 0, _zUsTot = 0;
