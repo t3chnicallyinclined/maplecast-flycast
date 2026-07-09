@@ -2738,7 +2738,11 @@ done_diff:
 			// verbatim. Legacy wire untouched. Flag bit2 marks a stripped frame; the
 			// CAMM companion (below) carries stage_id + M2 + M1 for the local stage.
 			bool stripDone = false;
-			if (!stripAllowlist().empty() && totalSize > 84 && taSize > 0) {
+			// in_match gate (0x8C289624): at attract/menus the stage_id + camera are
+			// stale/garbage — stripping nothing while flagging bit2 would make clients
+			// draw the training stage under menus. Strip only during a real match.
+			if (!stripAllowlist().empty() && totalSize > 84 && taSize > 0
+					&& addrspace::read8(0x8C289624)) {
 				static std::vector<uint8_t> _ssTa[2];
 				static uint32_t _ssSz[2] = {0, 0};
 				static int _ssCur = 0; static bool _ssHasPrev = false;
