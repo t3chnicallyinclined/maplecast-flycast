@@ -965,13 +965,35 @@ static const int MAX_SPRVERT = 1024;
 static SprVert s_sprVert[MAX_SPRVERT];
 static int     s_nSprVert = 0;
 
-void mc_oracle_spriteVertReset() { s_nSprVert = 0; }
+// MAPLECAST_HUD_TRACE — zero-cost-off runtime trace of the 36g push/consume path,
+// to /dev/shm/mc_hud_trace.log. Proves whether the EXPANSION verts are clean at
+// capture (PUSH) and whether the ordinal consume matches the push (CONSUME).
+bool mc_hudTraceEnabled = (getenv("MAPLECAST_HUD_TRACE") != nullptr);
+static FILE* s_traceF = nullptr;
+static int   s_traceFrames = 0;
+static const int HUD_TRACE_MAX_FRAMES = 4;   // a handful of in-match parses is enough
+static bool  s_tracePushOpen = false;        // a parse (reset) has begun this trace window
+static FILE* mc_traceFile() {
+	if (!mc_hudTraceEnabled) return nullptr;
+	if (s_traceFrames >= HUD_TRACE_MAX_FRAMES) return nullptr;
+	if (!s_traceF) s_traceF = fopen("/dev/shm/mc_hud_trace.log", "w");
+	return s_traceF;
+}
+
+void mc_oracle_spriteVertReset() {
+	s_nSprVert = 0;
+	if (mc_hudTraceEnabled) {
+		FILE* f = mc_traceFile();
+		if (f) { fprintf(f, "=== RESET (parse boundary) frame-window %d ===\n", s_traceFrames); s_tracePushOpen = true; }
+	}
+}
 
 void mc_oracle_spriteVertPush(const void* cv4)
 {
 	if (!mc_hudTaEnabled) return;            // only needed for the HUD capture
 	if (s_nSprVert >= MAX_SPRVERT) return;   // bounded; drop on overflow
 	const Vertex* cv = (const Vertex*)cv4;   // cv[0]=P cv[1]=C cv[2]=A cv[3]=B
+	int ord = s_nSprVert;
 	SprVert& e = s_sprVert[s_nSprVert++];
 	for (int c = 0; c < 4; c++) {
 		e.x[c] = cv[c].x; e.y[c] = cv[c].y;
@@ -981,7 +1003,27 @@ void mc_oracle_spriteVertPush(const void* cv4)
 		e.col[c] = ((u32)cv[c].col[3] << 24) | ((u32)cv[c].col[0] << 16)
 		         | ((u32)cv[c].col[1] <<  8) |  (u32)cv[c].col[2];
 	}
+	if (mc_hudTraceEnabled && s_tracePushOpen) {
+		FILE* f = mc_traceFile();
+		if (f) {
+			// Plane residual: a closed sprite expansion has cv0 == cv3 + cv1 - cv2
+			// (P == B + C - A). Big residual => verts garbage AT CAPTURE.
+			float rx = e.x[0] - (e.x[3] + e.x[1] - e.x[2]);
+			float ry = e.y[0] - (e.y[3] + e.y[1] - e.y[2]);
+			float res = sqrtf(rx*rx + ry*ry);
+			fprintf(f, "PUSH ord=%d res=%.3f  "
+			        "P(%.1f,%.1f|%.3f,%.3f) C(%.1f,%.1f|%.3f,%.3f) "
+			        "A(%.1f,%.1f|%.3f,%.3f) B(%.1f,%.1f|%.3f,%.3f)\n",
+			        ord, res,
+			        e.x[0],e.y[0],e.u[0],e.v[0], e.x[1],e.y[1],e.u[1],e.v[1],
+			        e.x[2],e.y[2],e.u[2],e.v[2], e.x[3],e.y[3],e.u[3],e.v[3]);
+		}
+	}
 }
+
+// Non-static accessor so collectHudQuads (same TU, but mc_traceFile is static and
+// defined above it) can reach the trace file handle from its sprite branch.
+FILE* mc_traceFileExt() { return mc_traceFile(); }
 
 // CHARQ accessor snapshot — published at the END of frameFlush (before the per-frame
 // statics reset) so the CHARQ emit block in serverPublish can read this frame's
@@ -3060,8 +3102,28 @@ static void collectHudQuads(rend_context& rc)
 			// any post-parse idx/pp permutation.
 			const bool isSpritePara = ((pcw >> 29) & 7) == 5;
 			if (isSpritePara) {
-				if (spriteOrd >= s_nSprVert) continue;   // ran out of captured sprites (shouldn't)
+				if (spriteOrd >= s_nSprVert) {
+					if (mc_hudTraceEnabled) {
+						extern FILE* mc_traceFileExt();
+						FILE* f = mc_traceFileExt();
+						if (f) fprintf(f, "CONSUME ord=%d OVERRUN (s_nSprVert=%d) -- sprite poly with no captured vert\n", spriteOrd, s_nSprVert);
+					}
+					continue;   // ran out of captured sprites (shouldn't)
+				}
+				int usedOrd = spriteOrd;
 				const SprVert& e = s_sprVert[spriteOrd++];
+				if (mc_hudTraceEnabled) {
+					extern FILE* mc_traceFileExt();
+					FILE* f = mc_traceFileExt();
+					if (f) {
+						float rx = e.x[0] - (e.x[3] + e.x[1] - e.x[2]);
+						float ry = e.y[0] - (e.y[3] + e.y[1] - e.y[2]);
+						fprintf(f, "CONSUME ord=%d res=%.3f pcw=%08X count=%u  "
+						        "P(%.1f,%.1f) C(%.1f,%.1f) A(%.1f,%.1f) B(%.1f,%.1f)\n",
+						        usedOrd, sqrtf(rx*rx+ry*ry), pcw, pp.count,
+						        e.x[0],e.y[0], e.x[1],e.y[1], e.x[2],e.y[2], e.x[3],e.y[3]);
+					}
+				}
 				for (int c = 0; c < 4; c++) {
 					cx[c]=e.x[c]; cy4[c]=e.y[c]; cu[c]=e.u[c]; cv4[c]=e.v[c]; ccol[c]=e.col[c];
 					if (std::isnan(e.x[c]) || fabsf(e.x[c]) > 1e25f
@@ -3133,6 +3195,20 @@ static void collectHudQuads(rend_context& rc)
 	collect(rc.global_param_op, 0);
 	collect(rc.global_param_pt, 1);
 	collect(rc.global_param_tr, 2);
+
+	if (mc_hudTraceEnabled && s_tracePushOpen) {
+		FILE* f = mc_traceFileExt();
+		if (f) {
+			fprintf(f, "--- CONSUME SUMMARY: sprite polys consumed=%d, sprites pushed=%d, hud kept=%d ---\n",
+			        spriteOrd, s_nSprVert, s_nhud);
+			fflush(f);
+		}
+		s_tracePushOpen = false;
+		if (++s_traceFrames >= HUD_TRACE_MAX_FRAMES && s_traceF) {
+			fclose(s_traceF); s_traceF = nullptr;
+			fprintf(stderr, "[HUD-TRACE] %d-parse trace -> /dev/shm/mc_hud_trace.log\n", HUD_TRACE_MAX_FRAMES);
+		}
+	}
 
 	if (s_hf && s_hq == 2) {
 		fprintf(s_hf, "--- HUD pass %d kept=%d ---\n", s_hqPasses, s_nhud);
