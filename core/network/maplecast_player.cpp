@@ -131,6 +131,11 @@ static uint64_t  _lpAuthFrame[2][LP_RING];   // which frame that auth slot holds
 static uint64_t  _lpConfirmed = 0;           // last fully-authoritative frame run
 static bool      _lpInited    = false;
 static LpInput   _lpLastConfRemote;          // remote's last confirmed input (repeat-predict)
+// APPLY-PHASE FIX (STEP 2): persists the last logical head input across drive
+// calls so the head's 1-frame input pipeline is continuous in steady state
+// (target==P, zero catch-up frames) — the rendered frame consumes the previous
+// tick's input, matching the server's Emulator::run phase.
+static LpInput   _lpHeadPipe;
 static uint64_t  _lpRollbacks = 0, _lpMaxDepth = 0, _lpReJoins = 0;
 // Local input at its EFFECT frame: the client samples the stick at tick H and the
 // input takes effect at frame H+INPUT_DELAY, on BOTH the client's predicted head
@@ -730,6 +735,16 @@ static bool livePredictDrive(uint64_t localFrame)
 	const int rs = ls ^ 1;                // remote slot
 	const uint64_t P = localFrame;        // predicted head (about to run frame P)
 
+	// APPLY-PHASE FIX (STEP 2): 1-frame input pipeline depth. The client's
+	// headless advance consumes the just-set kcode one game-frame earlier than the
+	// server's Emulator::run; PH==1 delays the applied input by one logical frame
+	// so the client head reacts on the SAME game-frame as the server. Env-tunable
+	// (MAPLECAST_PREDICT_PHASE=0 disables, for A/B verification). Applied in BOTH
+	// the rollback re-sim and the head catch-up so the two timelines agree
+	// (rollbacks stay bounded).
+	static int PH = -2;
+	if (PH == -2) { const char* pe = std::getenv("MAPLECAST_PREDICT_PHASE"); PH = pe ? atoi(pe) : 1; }
+
 	if (!_lpInited) {
 		if (!maplecast_predict::liveInit()) return false;
 		_lpConfirmed = (P == 0) ? 0 : P - 1;
@@ -756,6 +771,23 @@ static bool livePredictDrive(uint64_t localFrame)
 			_lpAuthFrame[slot][idx] = e.frame;
 			q.entries.pop_front();
 		}
+	}
+
+	// 1b. Capture the just-rendered head's per-frame hash for frame P-1. The
+	//     confHash gate below only compares a frame that was NOT rolled back this
+	//     tick (reSimFrom==UINT64_MAX && _lpLiveHashFrame==N): for such a frame the
+	//     head's predicted input MATCHED the authoritative tape, so the head state
+	//     == the confirmed (tape-replayed) state — a valid confirmed-vs-server
+	//     sample. Rolled-back frames overwrite this with the re-sim hash below.
+	//     Without this, the gate only sees re-simmed frames (sparse/absent once the
+	//     phase fix suppresses rollbacks) — this keeps the gate densely populated.
+	if (P > 0) {
+		const uint64_t hf = P - 1;
+		const int hi = (int)(hf % LP_RING);
+		_lpLiveHash[hi] = maplecast_rollback::gameStateRegionHash();
+		_lpLiveHashFrame[hi] = hf;
+		if (std::getenv("MAPLECAST_SUBHASH_LOG"))
+			maplecast_rollback::gameStateSubHashes(_lpLiveSub[hi]);
 	}
 
 	// 2. RECONCILE: advance confirmed while both slots' authoritative for N present;
@@ -830,29 +862,45 @@ static bool livePredictDrive(uint64_t localFrame)
 		if (depth > _lpMaxDepth) _lpMaxDepth = depth;
 		_lpRollbacks++;
 		maplecast_predict::ringRestore(reSimFrom);
+		// APPLY-PHASE FIX (STEP 2): the client's headless advance
+		// (runOneGameFrameHeadless, loops to the 0x3496B0 game-frame tick) consumes
+		// the just-set kcode ONE game-frame EARLIER than the server's Emulator::run
+		// (which runs to present()). This latent 1-frame latch->act skew is
+		// phase-INVARIANT under a held input (why GATE 0 passed) but SEEDS a
+		// compounding char divergence under CHANGING input (the 34/1065 confHash
+		// mismatch). Reproduce the server's phase by applying the PREVIOUS logical
+		// frame's input to kcode (an in-order 1-frame input pipeline). The loop
+		// restarts fresh each drive call from the ring, so the pipeline is
+		// rollback-safe. PH default 1 (delay); env-tunable for A/B verification.
+		// Prime the pipeline from the logical input of frame (reSimFrom-1) — a
+		// confirmed frame whose authoritative tape is still resident in the ring.
+		LpInput pipeL, pipeR;
+		{
+			const uint64_t g = reSimFrom - 1;
+			const int gi = (int)(g % LP_RING);
+			pipeL = (_lpAuthFrame[ls][gi] == g) ? _lpAuth[ls][gi] : _lpPred[ls][gi];
+			pipeR = (_lpAuthFrame[rs][gi] == g) ? _lpAuth[rs][gi] : _lpLastConfRemote;
+		}
 		for (uint64_t f = reSimFrom; f < P; f++) {
 			const int idx = (int)(f % LP_RING);
-			// Re-sim with the AUTHORITATIVE tape input for BOTH slots when available
-			// (confirmed frames => exact server replay); future frames (no tape yet)
-			// use the predicted local (client's live input, for instant feel) +
-			// repeat-last-confirmed remote.
-			if (_lpAuthFrame[ls][idx] == f) {
-				kcode[ls] = (uint32_t)_lpAuth[ls][idx].btn | 0xFFFF0000u;
-				lt[ls] = (uint16_t)_lpAuth[ls][idx].lt << 8; rt[ls] = (uint16_t)_lpAuth[ls][idx].rt << 8;
-				_lpPred[ls][idx] = _lpAuth[ls][idx];
-			} else {
-				kcode[ls] = (uint32_t)_lpPred[ls][idx].btn | 0xFFFF0000u;
-				lt[ls] = (uint16_t)_lpPred[ls][idx].lt << 8; rt[ls] = (uint16_t)_lpPred[ls][idx].rt << 8;
-			}
-			if (_lpAuthFrame[rs][idx] == f) {
-				kcode[rs] = (uint32_t)_lpAuth[rs][idx].btn | 0xFFFF0000u;
-				lt[rs] = (uint16_t)_lpAuth[rs][idx].lt << 8; rt[rs] = (uint16_t)_lpAuth[rs][idx].rt << 8;
-				_lpPred[rs][idx] = _lpAuth[rs][idx];
-			} else {
-				kcode[rs] = (uint32_t)_lpLastConfRemote.btn | 0xFFFF0000u;
-				lt[rs] = (uint16_t)_lpLastConfRemote.lt << 8; rt[rs] = (uint16_t)_lpLastConfRemote.rt << 8;
-				_lpPred[rs][idx] = _lpLastConfRemote;
-			}
+			// Logical input for THIS frame (drives mispredict bookkeeping + the
+			// next iteration's pipeline). AUTHORITATIVE tape for confirmed frames
+			// (exact server replay); future frames use predicted local + repeat-
+			// last-confirmed remote.
+			LpInput logL, logR;
+			if (_lpAuthFrame[ls][idx] == f) { logL = _lpAuth[ls][idx]; _lpPred[ls][idx] = logL; }
+			else                              logL = _lpPred[ls][idx];
+			if (_lpAuthFrame[rs][idx] == f) { logR = _lpAuth[rs][idx]; _lpPred[rs][idx] = logR; }
+			else                            { logR = _lpLastConfRemote; _lpPred[rs][idx] = logR; }
+			// APPLIED input = phase-delayed (previous logical frame) when PH==1, so
+			// the headless sim reacts on the SAME game-frame the server did.
+			const LpInput& appL = (PH == 1) ? pipeL : logL;
+			const LpInput& appR = (PH == 1) ? pipeR : logR;
+			kcode[ls] = (uint32_t)appL.btn | 0xFFFF0000u;
+			lt[ls] = (uint16_t)appL.lt << 8; rt[ls] = (uint16_t)appL.rt << 8;
+			kcode[rs] = (uint32_t)appR.btn | 0xFFFF0000u;
+			lt[rs] = (uint16_t)appR.lt << 8; rt[rs] = (uint16_t)appR.rt << 8;
+			pipeL = logL; pipeR = logR;
 			maplecast_predict::advanceHeadlessOneFrame();
 			maplecast_predict::ringSave(f + 1);
 			// Update the per-frame hash to the RE-SIMMED (post-rollback) state so the
@@ -864,6 +912,10 @@ static bool livePredictDrive(uint64_t localFrame)
 			if (std::getenv("MAPLECAST_SUBHASH_LOG"))
 				maplecast_rollback::gameStateSubHashes(_lpLiveSub[idx]);
 		}
+		// Continue the head's input pipeline from the re-sim's final logical frame
+		// (P-1) so the head phase joins the confirmed timeline seamlessly (no
+		// spurious mispredict at the re-sim/head seam => rollbacks stay bounded).
+		_lpHeadPipe = pipeL;
 	}
 
 	// ── RUN-AHEAD: drive the head to LEAD the server's live edge by INPUT_DELAY ──
@@ -904,11 +956,21 @@ static bool livePredictDrive(uint64_t localFrame)
 	// Advance the head from P up to `target` (headless predict: local=cur +
 	// remote=repeat-last-confirmed), rendering only the final frame. Steady state
 	// after the initial jump: target == P => 0 headless frames, one rendered frame.
+	// APPLY-PHASE FIX (STEP 2): the head uses the SAME 1-frame input pipeline as
+	// the re-sim. logical input for frame f is `cur` (local) / last-confirmed
+	// (remote); the APPLIED input is the previous logical frame's (PH==1) so the
+	// head reacts on the same game-frame as the server. _lpHeadPipe carries the
+	// pipeline across drive calls (steady state = one rendered frame/call).
+	LpInput headPipeL = _lpHeadPipe;
+	LpInput headPipeR = _lpLastConfRemote;   // remote is a held repeat => delay is a no-op
 	auto applyHead = [&](uint64_t f) {
 		const int idx = (int)(f % LP_RING);
-		kcode[ls] = (uint32_t)cur.btn | 0xFFFF0000u; lt[ls]=(uint16_t)cur.lt<<8; rt[ls]=(uint16_t)cur.rt<<8;
-		kcode[rs] = (uint32_t)_lpLastConfRemote.btn | 0xFFFF0000u; lt[rs]=(uint16_t)_lpLastConfRemote.lt<<8; rt[rs]=(uint16_t)_lpLastConfRemote.rt<<8;
+		const LpInput& appL = (PH == 1) ? headPipeL : cur;
+		const LpInput& appR = (PH == 1) ? headPipeR : _lpLastConfRemote;
+		kcode[ls] = (uint32_t)appL.btn | 0xFFFF0000u; lt[ls]=(uint16_t)appL.lt<<8; rt[ls]=(uint16_t)appL.rt<<8;
+		kcode[rs] = (uint32_t)appR.btn | 0xFFFF0000u; lt[rs]=(uint16_t)appR.lt<<8; rt[rs]=(uint16_t)appR.rt<<8;
 		_lpPred[ls][idx] = cur; _lpPred[rs][idx] = _lpLastConfRemote;
+		headPipeL = cur; headPipeR = _lpLastConfRemote;
 	};
 	for (uint64_t f = P; f < target; f++) {                // catch-up (headless, invisible)
 		applyHead(f);
@@ -916,6 +978,7 @@ static bool livePredictDrive(uint64_t localFrame)
 		maplecast_predict::ringSave(f + 1);
 	}
 	applyHead(target);                                     // the head frame — rendered next
+	_lpHeadPipe = cur;                                     // seed next call's pipeline
 
 	// Telemetry: lead over server (must be POSITIVE ~INPUT_DELAY), gap/depth.
 	const int64_t lead = (int64_t)target - (int64_t)serverLive;

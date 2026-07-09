@@ -17,4 +17,4 @@ set MAPLECAST_LOCKSTEP=1
 set MAPLECAST_HEADLESS_AUTOLOAD=1
 set MAPLECAST_PREDICT=1
 set MAPLECAST_PREDICT_LIVE=1
-build\flycast.exe "C:\roms\roms\mvc2.gdi"
+build\flycast.exe "C:\Users\trist\Downloads\Dreamcast Games\Marvel vs. Capcom 2 v1.001 (2000)(Capcom)(US)[!]\Marvel vs. Capcom 2 v1.001 (2000)(Capcom)(US)[!].gdi"

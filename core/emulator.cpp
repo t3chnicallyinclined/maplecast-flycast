@@ -1860,6 +1860,9 @@ void Emulator::vblank()
 		static const char* _gshashLogPath = std::getenv("MAPLECAST_GSHASH_LOG");
 		if (_gshashLogPath)
 			maplecast_rollback::gshashLogTick(_gshashLogPath);
+		static const char* _lagProbePath = std::getenv("MAPLECAST_LAGPROBE");
+		if (_lagProbePath)
+			maplecast_rollback::lagProbeTick(_lagProbePath);
 	}
 
 	if (maplecast_rollback::active()) {
