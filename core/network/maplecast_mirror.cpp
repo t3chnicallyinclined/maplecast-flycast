@@ -460,6 +460,28 @@ static int _taCur = 0;
 static bool _taHasPrev = false;
 static MirrorCompressor _compressor;
 
+// === MAPLECAST_ZSTREAM (TA-Wire v2 Phase 1, docs/TA-WIRE-V2-PLAN.md) ===
+// Streaming-zstd envelope for delta frames: ONE persistent ZSTD_CStream whose
+// window (wlog=24, 16MiB) spans prior frames, flushed once per frame. The
+// cross-frame redundancy (dup pages, 92%-identical keyframes, idle-loop TA
+// periodicity) is invisible to the per-frame ZCST compressor and free here —
+// measured 6.87 -> 1.93 Mbps at ~0.11 ms/frame (docs/render-state/07).
+// Wire msg: 'ZCS2'(4) epoch(1) flags(1: bit0=stream-start) innerSize(4 LE)
+//           + one zstd-frame chunk (decoder: feed chunks of one long zstd
+//           frame to a streaming decompressor; each msg yields exactly
+//           innerSize bytes = one legacy UNCOMPRESSED inner delta frame).
+// Stream resets (new epoch, flags bit0): on every fresh-SYNC broadcast (so a
+// joiner decodes from its SYNC onward) and every MAPLECAST_ZSTREAM_RESET
+// frames (default 300; 0=never). SYNC itself stays legacy ZCST (one-shot).
+// Env-gated MAPLECAST_ZSTREAM=1, default OFF — legacy ZCST path unchanged.
+static std::atomic<bool> _zstreamResetPending{true};   // true => first frame is stream-start
+static bool zstreamEnabled()
+{
+	static const bool on = [](){ const char* e = std::getenv("MAPLECAST_ZSTREAM");
+		return e && *e && *e != '0'; }();
+	return on;
+}
+
 void initServer()
 {
 	// Lockstep: serverPublish (which builds the JOIN snapshot AND computes the
@@ -2368,6 +2390,8 @@ done_diff:
 		// client_request_sync handler pattern.
 		for (int i = 0; i < _numRegions; i++)
 			memcpy(_regions[i].shadow, _regions[i].ptr, _regions[i].size);
+		// ZCS2: restart the streaming envelope at this SYNC so joiners decode onward.
+		_zstreamResetPending.store(true, std::memory_order_release);
 	}
 
 	// Patch frame size
@@ -2454,10 +2478,67 @@ done_diff:
 	uint32_t compressedSize = totalSize;
 	if (maplecast_ws::active())
 	{
+		// Legacy ZCST broadcast — ALWAYS emitted, byte-for-byte unchanged, so every
+		// existing client (king.html, emulator.html, native, relay cache) is
+		// unaffected by the ZCS2 experiment. ZCS2 rides alongside as an EXTRA
+		// message (shadow mode) until all parsers migrate.
+		{
 		size_t compSize = 0;
 		const uint8_t* compData = _compressor.compress(dstStart, totalSize, compSize, compressUs);
 		maplecast_ws::broadcastBinary(compData, compSize);
 		compressedSize = (uint32_t)compSize;
+		}
+
+		if (zstreamEnabled()) {
+			// ZCS2 streaming envelope (see block comment at _zstreamResetPending).
+			static ZSTD_CCtx* _zc = nullptr;
+			static uint8_t _zEpoch = 0;
+			static uint32_t _zSinceReset = 0;
+			static std::vector<uint8_t> _zBuf;
+			static const int _zLevel = [](){ const char* e = std::getenv("MAPLECAST_ZSTREAM_LEVEL");
+				int v = e ? atoi(e) : 3; return (v >= 1 && v <= 19) ? v : 3; }();
+			static const uint32_t _zResetEvery = [](){ const char* e = std::getenv("MAPLECAST_ZSTREAM_RESET");
+				return (uint32_t)(e ? atoi(e) : 300); }();
+			auto t0z = std::chrono::steady_clock::now();
+			bool streamStart = false;
+			if (!_zc) { _zc = ZSTD_createCCtx(); streamStart = true; }
+			if (_zstreamResetPending.exchange(false, std::memory_order_acq_rel)) streamStart = true;
+			if (_zResetEvery && _zSinceReset >= _zResetEvery) streamStart = true;
+			if (streamStart) {
+				ZSTD_CCtx_reset(_zc, ZSTD_reset_session_only);
+				ZSTD_CCtx_setParameter(_zc, ZSTD_c_compressionLevel, _zLevel);
+				ZSTD_CCtx_setParameter(_zc, ZSTD_c_windowLog, 24);
+				_zEpoch++; _zSinceReset = 0;
+			}
+			_zSinceReset++;
+			_zBuf.resize(10 + ZSTD_compressBound(totalSize));
+			_zBuf[0]='Z'; _zBuf[1]='C'; _zBuf[2]='S'; _zBuf[3]='2';
+			_zBuf[4]=_zEpoch; _zBuf[5]=streamStart ? 1 : 0;
+			memcpy(_zBuf.data()+6, &totalSize, 4);
+			ZSTD_outBuffer ob{ _zBuf.data()+10, _zBuf.size()-10, 0 };
+			ZSTD_inBuffer  ib{ dstStart, totalSize, 0 };
+			size_t zr = ZSTD_compressStream2(_zc, &ob, &ib, ZSTD_e_flush);
+			if (ZSTD_isError(zr) || ib.pos != ib.size || zr != 0) {
+				// Should not happen (bound-sized output). Legacy ZCST already went
+				// out above, so viewers are unaffected; skip this ZCS2 msg and
+				// force a stream restart so ZCS2 listeners resync cleanly.
+				printf("[ZSTREAM] compress error (%s) — ZCS2 msg skipped, stream restart queued\n",
+					ZSTD_isError(zr) ? ZSTD_getErrorName(zr) : "incomplete flush");
+				_zstreamResetPending.store(true, std::memory_order_release);
+			} else {
+				maplecast_ws::broadcastBinary(_zBuf.data(), (uint32_t)(10 + ob.pos));
+				uint64_t zUs = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+					std::chrono::steady_clock::now() - t0z).count();
+				static uint64_t _zBytes = 0, _zFrames = 0, _zUsTot = 0;
+				_zBytes += 10 + ob.pos; _zFrames++; _zUsTot += zUs;
+				if (frameNum % 600 == 0 && _zFrames > 0) {
+					printf("[ZSTREAM] epoch=%u lvl=%d avg=%llu B/frame (%.3f Mbps @60) avg=%.3f ms/frame (shadow alongside ZCST)\n",
+						_zEpoch, _zLevel, (unsigned long long)(_zBytes/_zFrames),
+						(_zBytes/(double)_zFrames)*60.0*8.0/1e6, (_zUsTot/(double)_zFrames)/1000.0);
+					fflush(stdout);
+				}
+			}
+		}
 
 		// Broadcast game state every frame (~60Hz). "GSTA" magic +
 		// 253-byte serialized MVC2 state. Native client parses this for
@@ -3563,6 +3644,8 @@ done_diff:
 			memcpy(_regions[i].shadow, _regions[i].ptr, _regions[i].size);
 		// Reset TA delta so next frame is sent as full
 		_taHasPrev = false;
+		// ZCS2: restart the streaming envelope at this SYNC so joiners decode onward.
+		_zstreamResetPending.store(true, std::memory_order_release);
 		hdr->sync_ready = 1;
 		printf("[MIRROR] Client requested sync  --  fresh state + TA reset\n");
 	}

@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ZCS2 wire test — TA-Wire v2 Phase 1</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0b0e14; color:#d7dce2; font:14px/1.45 Consolas,ui-monospace,monospace; }
+  header { padding:14px 18px 6px; }
+  h1 { font-size:16px; margin:0 0 2px; color:#fff; }
+  .sub { color:#8a93a2; font-size:12px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:10px; padding:12px 18px; }
+  .card { background:#131824; border:1px solid #232b3b; border-radius:8px; padding:10px 14px; }
+  .card .k { color:#8a93a2; font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
+  .card .v { font-size:22px; font-weight:700; margin-top:2px; }
+  .card .d { color:#8a93a2; font-size:11px; margin-top:2px; }
+  .legacy .v { color:#e2b34d; } .zcs2 .v { color:#4dd08a; } .ratio .v { color:#6fb8ff; }
+  .ok .v { color:#4dd08a; } .bad .v { color:#ff6b6b; }
+  #bars { padding:0 18px 8px; }
+  canvas { width:100%; height:140px; background:#0e1220; border:1px solid #232b3b; border-radius:8px; display:block; }
+  #log { margin:8px 18px 16px; background:#0e1220; border:1px solid #232b3b; border-radius:8px;
+         padding:8px 12px; height:150px; overflow-y:auto; font-size:12px; white-space:pre-wrap; }
+  .warn { color:#e2b34d; } .err { color:#ff6b6b; } .good { color:#4dd08a; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ZCS2 wire test <span class="sub">— streaming-zstd envelope vs legacy ZCST, live (TA-Wire v2 Phase 1)</span></h1>
+  <div class="sub" id="conn">connecting…</div>
+</header>
+
+<div class="grid">
+  <div class="card legacy"><div class="k">Legacy ZCST</div><div class="v" id="mLeg">–</div><div class="d" id="dLeg">avg B/frame –</div></div>
+  <div class="card zcs2"><div class="k">ZCS2 streaming</div><div class="v" id="mZ">–</div><div class="d" id="dZ">avg B/frame – · epoch –</div></div>
+  <div class="card ratio"><div class="k">Reduction</div><div class="v" id="mRatio">–</div><div class="d">same frames, same second</div></div>
+  <div class="card" id="cVerify"><div class="k">Byte-exact verify</div><div class="v" id="mVer">–</div><div class="d" id="dVer">ZCS2 inner vs ZCST inner, per frame</div></div>
+  <div class="card"><div class="k">Frames</div><div class="v" id="mFrames">0</div><div class="d" id="dFrames">paired 0 · unpaired 0</div></div>
+  <div class="card"><div class="k">Decode time</div><div class="v" id="mDec">–</div><div class="d">fzstd streaming, per ZCS2 msg</div></div>
+</div>
+
+<div id="bars"><canvas id="chart" width="1200" height="140"></canvas></div>
+<div id="log"></div>
+
+<script type="module">
+import { decompress as zOneShot, Decompress as ZStream } from './webgpu/fzstd.mjs?v=1';
+
+const qs   = new URLSearchParams(location.search);
+const WSURL = qs.get('ws') || ((location.protocol==='https:'?'wss://':'ws://') + location.host + '/ws');
+const $ = id => document.getElementById(id);
+const log = (m, cls='') => { const el=$('log');
+  el.innerHTML += (cls?`<span class="${cls}">`:'') + m + (cls?'</span>':'') + '\n';
+  el.scrollTop = el.scrollHeight; };
+
+// ---- per-second accounting -------------------------------------------------
+let legBytes=0, zBytes=0, legFrames=0, zFrames=0, decMs=0, decN=0;
+const hist = [];                       // [{leg,z}] per second, for the chart
+let totLeg=0, totZ=0, totSec=0;
+
+// ---- byte-exact verify: pair inner frames by frameNum ----------------------
+// inner delta frame layout: frameSize(4) frameNum(4) ... (CLAUDE.md wire format)
+const pend = new Map();                // frameNum -> {src, bytes}
+let paired=0, exact=0, mismatch=0, unpaired=0, frames=0;
+function verify(src, inner) {
+  if (inner.length < 8) return;
+  const fn = new DataView(inner.buffer, inner.byteOffset+4, 4).getUint32(0, true);
+  frames++;
+  const other = pend.get(fn);
+  if (other && other.src !== src) {
+    pend.delete(fn); paired++;
+    const a = other.bytes, b = inner;
+    let same = a.length === b.length;
+    if (same) for (let i=0;i<a.length;i++) if (a[i]!==b[i]) { same=false; break; }
+    if (same) exact++; else { mismatch++; log(`frame ${fn}: MISMATCH len ${a.length} vs ${b.length}`, 'err'); }
+  } else {
+    pend.set(fn, {src, bytes: inner.slice()});
+    if (pend.size > 240) { pend.delete(pend.keys().next().value); unpaired++; }
+  }
+}
+
+// ---- ZCS2 streaming decoder --------------------------------------------------
+let zdec=null, zEpoch=-1, zPending=[], zPendingLen=0, zNeed=0, zSynced=false;
+function zcs2Msg(d) {
+  const epoch = d[4], flags = d[5];
+  const innerSize = new DataView(d.buffer, d.byteOffset+6, 4).getUint32(0, true);
+  if (flags & 1) {                        // stream-start: fresh decoder
+    zdec = new ZStream((chunk) => { zPending.push(chunk); zPendingLen += chunk.length; });
+    zEpoch = epoch; zSynced = true;
+    log(`stream-start: epoch ${epoch}`, 'good');
+  } else if (!zSynced || epoch !== zEpoch) {
+    return;                               // joined mid-stream: wait for next stream-start
+  }
+  zBytes += d.length; zFrames++;
+  zNeed = innerSize;
+  const t0 = performance.now();
+  try { zdec.push(d.subarray(10)); }
+  catch (e) { log('fzstd error: '+e.message+' — waiting for next stream-start', 'err'); zSynced=false; return; }
+  decMs += performance.now()-t0; decN++;
+  if (zPendingLen >= zNeed) {             // server flushes per frame: exactly one inner frame
+    const inner = new Uint8Array(zNeed);
+    let o=0; for (const c of zPending) { const n=Math.min(c.length, zNeed-o); inner.set(c.subarray(0,n), o); o+=n;
+      if (o>=zNeed) break; }
+    zPending=[]; zPendingLen=0;
+    verify('zcs2', inner);
+  }
+}
+
+// ---- legacy ZCST -------------------------------------------------------------
+function zcstMsg(d) {
+  const sz = new DataView(d.buffer, d.byteOffset+4, 4).getUint32(0, true);
+  if (sz > 1024*1024) return;             // compressed SYNC — not a delta frame
+  legBytes += d.length; legFrames++;
+  try { verify('zcst', zOneShot(d.subarray(8), new Uint8Array(sz))); } catch(e) {}
+}
+
+// ---- socket -------------------------------------------------------------------
+const ws = new WebSocket(WSURL); ws.binaryType='arraybuffer';
+ws.onopen  = () => { $('conn').textContent = 'connected: '+WSURL; log('connected '+WSURL,'good'); };
+ws.onclose = () => { $('conn').textContent = 'DISCONNECTED — refresh to retry'; log('socket closed','err'); };
+ws.onmessage = ev => {
+  if (typeof ev.data === 'string') return;
+  const d = new Uint8Array(ev.data);
+  if (d.length < 10) return;
+  if (d[0]===0x5A && d[1]===0x43 && d[2]===0x53) {
+    if (d[3]===0x54) zcstMsg(d);          // 'ZCST'
+    else if (d[3]===0x32) zcs2Msg(d);     // 'ZCS2'
+  }
+};
+
+// ---- 1 Hz UI ------------------------------------------------------------------
+const fmt = b => (b*8/1e6).toFixed(2)+' Mbps';
+setInterval(() => {
+  if (legFrames||zFrames) { hist.push({leg:legBytes, z:zBytes}); if (hist.length>120) hist.shift();
+    totLeg+=legBytes; totZ+=zBytes; totSec++; }
+  $('mLeg').textContent = fmt(legBytes);
+  $('dLeg').textContent = `avg ${legFrames?Math.round(legBytes/legFrames):0} B/frame · session ${fmt(totSec?totLeg/totSec:0)}`;
+  $('mZ').textContent = fmt(zBytes);
+  $('dZ').textContent = `avg ${zFrames?Math.round(zBytes/zFrames):0} B/frame · epoch ${zEpoch<0?'–':zEpoch} · session ${fmt(totSec?totZ/totSec:0)}`;
+  $('mRatio').textContent = (legBytes&&zBytes) ? (legBytes/zBytes).toFixed(2)+'×' : '–';
+  $('mFrames').textContent = frames;
+  $('dFrames').textContent = `paired ${paired} · exact ${exact} · mismatch ${mismatch}`;
+  const vEl=$('cVerify');
+  $('mVer').textContent = paired ? (mismatch? mismatch+' MISMATCH' : '100% exact') : (zSynced?'pairing…':'waiting for stream-start');
+  vEl.className = 'card ' + (mismatch ? 'bad' : (paired ? 'ok' : ''));
+  $('mDec').textContent = decN ? (decMs/decN).toFixed(2)+' ms' : '–';
+  legBytes=zBytes=0; legFrames=zFrames=0; decMs=0; decN=0;
+  // chart
+  const c=$('chart'), g=c.getContext('2d'); g.clearRect(0,0,c.width,c.height);
+  const max = Math.max(1, ...hist.map(h=>h.leg));
+  const bw = Math.max(2, Math.floor(c.width/Math.max(60,hist.length))-2);
+  hist.forEach((h,i) => { const x=i*(bw+2);
+    g.fillStyle='#e2b34d'; const hl=h.leg/max*(c.height-6); g.fillRect(x, c.height-hl, bw, hl);
+    g.fillStyle='#4dd08a'; const hz=h.z/max*(c.height-6);  g.fillRect(x, c.height-hz, bw, hz); });
+  g.fillStyle='#8a93a2'; g.font='11px monospace';
+  g.fillText('yellow = legacy ZCST   green = ZCS2 (same frames)', 8, 12);
+}, 1000);
+
+log('ZCS2 wire test — expects a server running MAPLECAST_ZSTREAM=1 (dual-emit shadow mode).');
+log('Pass ?ws=ws://localhost:7200 for the local rig; default is wss://<host>/ws (prod relay).');
+</script>
+</body>
+</html>
