@@ -56,7 +56,10 @@ function soaInverse(v){
 // after each frame, md5(zcs2 stripped-chain TA) == md5(stripLocal(legacy TA)).
 import crypto from 'crypto';
 const STRIP_ALLOW=new Set([0x9fc00,0xa0000]);
-function taStripJS(ta,taSize){
+// CHARSTRIP mirror (render-state/09): TR-para5 with TCW addr in the decoded-GFX
+// staging range. Applied only when the wire flags bit4 (16) say the server did.
+const CS_LO=0x082000, CS_HI=0x08B000;
+function taStripJS(ta,taSize,charStrip){
   const out=new Uint8Array(taSize); let off=0,w=0;
   let curList=-1,isSpr=false,haveParam=false,dropping=false,cObj=0;
   const u32=o=>ta[o]|ta[o+1]<<8|ta[o+2]<<16|ta[o+3]<<24;
@@ -78,8 +81,9 @@ function taStripJS(ta,taSize){
     if(pt===5){
       const lt=(pcw>>>24)&7; if(curList===-1)curList=lt;
       cObj=pcw&0xFF; isSpr=true; haveParam=true;
-      const tcw=u32(off+12)>>>0;
-      dropping=(curList===0)&&STRIP_ALLOW.has(tcw&0x1FFFFF);
+      const tcw=u32(off+12)>>>0, addr=tcw&0x1FFFFF;
+      dropping=((curList===0)&&STRIP_ALLOW.has(addr))
+             ||(charStrip&&curList===2&&addr>=CS_LO&&addr<CS_HI);
       if(!dropping)emit(32); off+=32; continue;
     }
     if(pt===7){
@@ -112,7 +116,7 @@ let stripPairs=0, stripExact=0, stripMismatch=0;
 function stripGate(src,inner,frameNum){
   if(src==='zcst'){
     if(!applyTA(chainL,inner))return;
-    chainL.dig=md5(taStripJS(chainL.buf.subarray(0,chainL.size),chainL.size));
+    chainL.dig=md5(taStripJS(chainL.buf.subarray(0,chainL.size),chainL.size,zCStrip));
     chainL.fn=frameNum;
   }else{
     if(!applyTA(chainZ,inner))return;
@@ -133,12 +137,13 @@ function stripGate(src,inner,frameNum){
       else if(stripMismatch<4)console.log(`frame ${frameNum}: STRIP-CHAIN MISMATCH`);}
   }
 }
-let zSoaFrames=0, zStripFrames=0;
+let zSoaFrames=0, zStripFrames=0, zCStrip=false;
 let zdec=null, zEpoch=-1, zSynced=false, zChunks=[], zLen=0, zSoa=false, zStrip=false;
 function onZcs2(d) {
   const epoch=d[4], flags=d[5];
   zSoa=(flags&2)!==0; if(zSoa) zSoaFrames++;
   zStrip=(flags&4)!==0; if(zStrip) zStripFrames++;
+  zCStrip=(flags&16)!==0;
   const innerSize = d[6] | d[7]<<8 | d[8]<<16 | d[9]<<24;
   if (flags & 1) {
     zdec = new ZStream((c)=>{ zChunks.push(c); zLen+=c.length; });

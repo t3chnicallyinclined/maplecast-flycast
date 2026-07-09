@@ -572,6 +572,8 @@ static void taCanonicalize(uint8_t* ta, uint32_t taSize, bool zero)
 // accompanied by a per-frame CAMM msg (stage_id + M2 + M1) so the client can
 // render the baked stage locally. MAPLECAST_STAGESTRIP=1 -> default STG0B list;
 // or a comma-separated hex TCW-addr list for other stages.
+static int charStripMode();                       // fwd (defined below)
+static void charStripRange(uint32_t& lo, uint32_t& hi);
 static const std::vector<uint32_t>& stripAllowlist()
 {
 	static const std::vector<uint32_t> v = [](){
@@ -631,7 +633,15 @@ static uint32_t taStripStage(const uint8_t* ta, uint32_t taSize, uint8_t* out)
 			if (curList == -1) curList = (int)lt;
 			cObj = (uint8_t)(pcw & 0xFF); isSpr = true; haveParam = true;
 			uint32_t tcw; memcpy(&tcw, ta + off + 12, 4);
-			dropping = (curList == 0) && inAllow(tcw & 0x1FFFFF);
+			uint32_t addr = tcw & 0x1FFFFF;
+			// CHARSTRIP (render-state/09): TR-list sprites in the decoded-GFX
+			// staging range = character/effect quads the client draws locally
+			// from state via render_frame. para4 (3D machine) NEVER stripped.
+			static const bool csOn = (charStripMode() == 2);
+			static uint32_t csLo = 0, csHi = 0;
+			if (csOn && csHi == 0) charStripRange(csLo, csHi);
+			dropping = ((curList == 0) && inAllow(addr))
+			        || (csOn && curList == 2 && addr >= csLo && addr < csHi);
 			if (!dropping) emit(32);
 			off += 32; continue;
 		}
@@ -652,6 +662,141 @@ static uint32_t taStripStage(const uint8_t* ta, uint32_t taSize, uint8_t* out)
 	}
 	if (off < taSize && !dropping) { memcpy(out + w, ta + off, taSize - off); w += taSize - off; }
 	return w;
+}
+
+// === MAPLECAST_CHARSTRIP (character flip, docs/render-state/09) ==============
+// Phase A: MEASURE mode -- histogram of TR-list (translucent) para5 sprite
+// quads by TCW texture addr. Characters/effects and the HUD name letters ALL
+// ride TR para5 (appendix 09), so the strip set must be TCW-scoped. The
+// classifier: quads whose 4 vertex Ys sit inside the HUD y-bands (stage-strip
+// measured truth: 43-112 & 417-455 in 480-space, padded) are HUD-suspect;
+// TCWs that are ~100% HUD-band = FONT/HUD (SPARE), the rest = char/effect
+// (STRIP). Zero wire change in measure mode.
+struct CharTcwStat { uint64_t quads = 0, bytes = 0, hudQuads = 0; float yMin = 1e9f, yMax = -1e9f; uint32_t pcw = 0; };
+static std::unordered_map<uint32_t, CharTcwStat> _charTcwHist;
+static int charStripMode()   // 0=off, 1=measure, 2=strip
+{
+	static const int m = [](){ const char* e = std::getenv("MAPLECAST_CHARSTRIP");
+		if (!e || !*e || e[0] == '0') return 0;
+		if (strcmp(e, "measure") == 0) return 1;
+		return 2; }();
+	return m;
+}
+// TCW addr strip range: the decoded-GFX VRAM staging area. Measured truth
+// (rig Ryu-training AND 4min prod attract, 2026-07-09): every in-match
+// TR-para5 TCW falls in [0x082000,0x08B000); FONT.BIN / HUD textures live
+// outside it, so out-of-range quads pass untouched (fails SAFE). Override:
+// MAPLECAST_CHARSTRIP=lo-hi (hex).
+static void charStripRange(uint32_t& lo, uint32_t& hi)
+{
+	static const std::pair<uint32_t,uint32_t> r = [](){
+		const char* e = std::getenv("MAPLECAST_CHARSTRIP");
+		uint32_t lo = 0x082000, hi = 0x08B000;
+		if (e) { const char* dash = strchr(e, '-');
+			if (dash) { lo = (uint32_t)strtoul(e, nullptr, 16);
+			            hi = (uint32_t)strtoul(dash + 1, nullptr, 16); } }
+		return std::make_pair(lo, hi); }();
+	lo = r.first; hi = r.second;
+}
+static void taCharMeasure(const uint8_t* ta, uint32_t taSize)
+{
+	uint32_t off = 0; int curList = -1;
+	bool isSpr = false, haveParam = false, inTrSpr = false;
+	uint8_t cObj = 0; uint32_t curTcw = 0;
+	while (off + 32 <= taSize) {
+		uint32_t pcw; memcpy(&pcw, ta + off, 4);
+		uint32_t pt = (pcw >> 29) & 7;
+		if (pt == 0 || pt == 1 || pt == 2 || pt == 3 || pt == 6) {
+			haveParam = false; inTrSpr = false;
+			if (pt == 0) curList = -1;
+			off += 32; continue;
+		}
+		if (pt == 4) {
+			uint32_t lt = (pcw >> 24) & 7;
+			if (curList == -1) curList = (int)lt;
+			if (curList == 1 || curList == 3) { haveParam = false; inTrSpr = false; off += 32; continue; }
+			cObj = (uint8_t)(pcw & 0xFF); isSpr = false; haveParam = true; inTrSpr = false;
+			uint32_t colType = (cObj >> 4) & 3, vol = (cObj >> 6) & 1, sz;
+			if (colType == 2 && !vol && ((cObj >> 2) & 1)) sz = (off + 64 <= taSize) ? 64 : 32;
+			else if (colType >= 1 && vol)                  sz = (off + 64 <= taSize) ? 64 : 32;
+			else                                           sz = 32;
+			off += sz; continue;
+		}
+		if (pt == 5) {
+			uint32_t lt = (pcw >> 24) & 7;
+			if (curList == -1) curList = (int)lt;
+			cObj = (uint8_t)(pcw & 0xFF); isSpr = true; haveParam = true;
+			uint32_t tcw; memcpy(&tcw, ta + off + 12, 4);
+			inTrSpr = (curList == 2);
+			if (inTrSpr) {
+				curTcw = tcw & 0x1FFFFF;
+				CharTcwStat& st = _charTcwHist[curTcw];
+				st.quads++; st.bytes += 32; st.pcw = pcw;
+			}
+			off += 32; continue;
+		}
+		if (pt == 7) {
+			uint32_t sz;
+			if (!haveParam) sz = 32;
+			else if (isSpr && off + 64 <= taSize) sz = 64;
+			else {
+				uint32_t tex = (cObj >> 3) & 1, colType = (cObj >> 4) & 3, vol = (cObj >> 6) & 1;
+				if (!tex) sz = 32;
+				else if (!vol) sz = (colType == 1 && off + 64 <= taSize) ? 64 : 32;
+				else sz = 32;
+			}
+			if (inTrSpr && isSpr && sz == 64) {
+				CharTcwStat& st = _charTcwHist[curTcw];
+				st.bytes += 64;
+				float ys[4];
+				memcpy(&ys[0], ta + off + 8, 4);
+				memcpy(&ys[1], ta + off + 20, 4);
+				memcpy(&ys[2], ta + off + 32, 4);
+				memcpy(&ys[3], ta + off + 44, 4);
+				bool hud = true;
+				for (float y : ys)
+					if (!((y >= 25.f && y <= 135.f) || (y >= 395.f && y <= 470.f))) { hud = false; break; }
+				if (hud) st.hudQuads++;
+			for (float y : ys) { if (y < st.yMin) st.yMin = y; if (y > st.yMax) st.yMax = y; }
+			}
+			off += sz; continue;
+		}
+		off += 32;
+	}
+}
+static void charMeasureLog(uint32_t frameNum)
+{
+	static uint64_t frames = 0;
+	frames++;
+	if (frames % 600 != 0) return;
+	std::vector<std::pair<uint32_t, CharTcwStat>> v(_charTcwHist.begin(), _charTcwHist.end());
+	std::sort(v.begin(), v.end(), [](auto& a, auto& b){ return a.second.bytes > b.second.bytes; });
+	uint64_t tot = 0; for (auto& e : v) tot += e.second.bytes;
+	printf("[CHARSTRIP measure] frame %u | %zu TR-para5 TCWs | %llu KB total (last 600f)\n",
+		frameNum, v.size(), (unsigned long long)(tot / 1024));
+	for (size_t i = 0; i < v.size() && i < 14; i++) {
+		double hudPct = v[i].second.quads ? 100.0 * v[i].second.hudQuads / v[i].second.quads : 0.0;
+		printf("  tcw=%06x quads=%llu KB=%llu hud%%=%.0f -> %s\n",
+			v[i].first, (unsigned long long)v[i].second.quads,
+			(unsigned long long)(v[i].second.bytes / 1024), hudPct,
+			hudPct > 90.0 ? "SPARE(HUD)" : "STRIP(char/fx)");
+	}
+	// SPARE candidates: TCWs whose quads live ~always in the HUD y-bands
+	// (FONT letters etc.) regardless of volume rank -- these become the
+	// spare-list for the inverse strip (strip ALL TR-para5 except these).
+	// Full per-TCW dump for offline classification (tools read the CSV).
+	FILE* f = fopen("_charstrip_hist.csv", "a");
+	if (f) {
+		for (auto& e : v)
+			fprintf(f, "%u,%06x,%08x,%llu,%llu,%llu,%.1f,%.1f\n",
+				frameNum, e.first, e.second.pcw,
+				(unsigned long long)e.second.quads,
+				(unsigned long long)e.second.bytes,
+				(unsigned long long)e.second.hudQuads,
+				e.second.yMin, e.second.yMax);
+		fclose(f);
+	}
+	_charTcwHist.clear();
 }
 
 static bool zstreamEnabled()
@@ -2799,8 +2944,14 @@ done_diff:
 				if (_ssEngaged && _ssOutStreak >= 180) { _ssEngaged = false; _ssStripReset = true; }
 				_ssStripActive = _ssEngaged;
 			}
-			if (!stripAllowlist().empty() && totalSize > 84 && taSize > 0
-					&& _ssStripActive) {
+			// CHARSTRIP Phase A: measure TR-para5 composition while in-match (same
+			// hysteresis gate as the stage strip so the data is clean fight frames).
+			if (charStripMode() == 1 && _ssStripActive && taSize > 0) {
+				taCharMeasure(_taBuf[cur], taSize);
+				charMeasureLog(frameNum);
+			}
+			if ((!stripAllowlist().empty() || charStripMode() == 2) && totalSize > 84
+					&& taSize > 0 && _ssStripActive) {
 				static std::vector<uint8_t> _ssTa[2];
 				static uint32_t _ssSz[2] = {0, 0};
 				static int _ssCur = 0; static bool _ssHasPrev = false;
@@ -2907,7 +3058,9 @@ done_diff:
 			const uint32_t camLen = stripDone ? 132 : 0;
 			_zBuf.resize(10 + camLen + ZSTD_compressBound(zPayloadSize));
 			_zBuf[0]='Z'; _zBuf[1]='C'; _zBuf[2]='S'; _zBuf[3]='2';
-			_zBuf[4]=_zEpoch; _zBuf[5]=(uint8_t)((streamStart ? 1 : 0) | (soaDone ? 2 : 0) | (stripDone ? 4 : 0) | (camLen ? 8 : 0));
+			_zBuf[4]=_zEpoch; _zBuf[5]=(uint8_t)((streamStart ? 1 : 0) | (soaDone ? 2 : 0)
+				| ((stripDone && !stripAllowlist().empty()) ? 4 : 0) | (camLen ? 8 : 0)
+				| ((stripDone && charStripMode() == 2) ? 16 : 0));
 			memcpy(_zBuf.data()+6, &zPayloadSize, 4);
 			if (camLen) {
 				uint8_t* cm = _zBuf.data() + 10;

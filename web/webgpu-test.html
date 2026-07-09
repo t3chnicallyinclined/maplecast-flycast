@@ -321,13 +321,16 @@ const ZCS2 = {
   onMsg(d){
     const epoch=d[4], flags=d[5];
     this._soa=(flags&2)!==0;
-    const strip=(flags&4)!==0;
+    const strip=(flags&4)!==0, cstrip=(flags&16)!==0;
     // Strip-state TRANSITION (match start/end): the server's ZCS2 chain switches
     // between the stripped and full TA double-buffers — deltas across the switch
-    // are against the OTHER base. Resync via keyframe (<=1s).
-    if(this._stripKnown!==undefined && strip!==this._stripKnown && this.render) this._resetTAChain('strip '+this._stripKnown+'->'+strip);
-    this._stripKnown=strip;
+    // are against the OTHER base. Resync via keyframe (<=1s). Key combines the
+    // stage (bit2) and character (bit4) strips — either flip changes the base.
+    const skey=(strip?1:0)|(cstrip?2:0);
+    if(this._stripKnown!==undefined && skey!==this._stripKnown && this.render) this._resetTAChain('strip '+this._stripKnown+'->'+skey);
+    this._stripKnown=skey;
     this.lastStripped=strip;
+    this.lastCharStripped=cstrip;
     const innerSize=(d[6]|d[7]<<8|d[8]<<16|d[9]<<24)>>>0;
     if(flags&1){
       this.chunks=[]; this.clen=0;
@@ -408,7 +411,7 @@ ZCS2.worker=null;
     self.onmessage=async(ev)=>{
       if(ev.data.init){ const m=await import(ev.data.init); Dz=m.Decompress; post({ready:1}); return; }
       const d=new Uint8Array(ev.data.b, ev.data.off, ev.data.len);
-      const flags=d[5], ep=d[4], soa=(flags&2)!==0, stripped=(flags&4)!==0;
+      const flags=d[5], ep=d[4], soa=(flags&2)!==0, stripped=(flags&4)!==0, cstrip=(flags&16)!==0;
       const camLen=(flags&8)?132:0;
       const cam=camLen? d.slice(10,10+132).buffer : null;   // sid u32 + M2 16f + M1 16f
       const innerSize=(d[6]|d[7]<<8|d[8]<<16|d[9]<<24)>>>0;
@@ -416,7 +419,7 @@ ZCS2.worker=null;
         chunks=[]; clen=0;
         dec=new Dz((c)=>{ chunks.push(c); clen+=c.length; });
         if(!synced) post({resumed:1});
-        epoch=ep; synced=true; post({epoch:ep, stripped});
+        epoch=ep; synced=true; post({epoch:ep, stripped, cstrip});
       } else {
         if(!synced) return;
         if(ep!==epoch){ synced=false; chunks=[]; clen=0; post({desync:'epoch gap '+epoch+'->'+ep}); return; }
@@ -435,7 +438,7 @@ ZCS2.worker=null;
         const fsz=(fin[0]|fin[1]<<8|fin[2]<<16|fin[3]<<24)>>>0;
         if(fsz+4!==fin.length){ synced=false; post({desync:'frameSize '+fsz+'+4 != '+fin.length}); return; }
         const t=[fin.buffer]; if(cam) t.push(cam);
-        post({frame:fin.buffer, len:fin.length, stripped, cam, decMs:performance.now()-t0},t);
+        post({frame:fin.buffer, len:fin.length, stripped, cstrip, cam, decMs:performance.now()-t0},t);
       }
     };`;
   try{
@@ -451,23 +454,28 @@ ZCS2.worker=null;
         // Synced on the new wire: shed the legacy deltas at the RELAY (~5 Mbps
         // stops crossing the internet for this client). Restored on any desync.
         if(ZCS2.render && window._zcs2Sub) window._zcs2Sub('zcs2');
-        if(ZCS2._stripKnown!==undefined && m.stripped!==ZCS2._stripKnown && ZCS2.render) ZCS2._resetTAChain('strip '+ZCS2._stripKnown+'->'+m.stripped);
-        ZCS2._stripKnown=m.stripped;
+        { const skey=(m.stripped?1:0)|(m.cstrip?2:0);
+          if(ZCS2._stripKnown!==undefined && skey!==ZCS2._stripKnown && ZCS2.render) ZCS2._resetTAChain('strip '+ZCS2._stripKnown+'->'+skey);
+          ZCS2._stripKnown=skey; }
         return;
       }
       if(m.frame){
         ZCS2.frames++; ZCS2.decMs+=m.decMs;
         ZCS2.lastStripped=m.stripped;
+        ZCS2.lastCharStripped=m.cstrip;
         if(m.cam){   // camera paired with THIS frame — no more one-frame stage swim
           const cd=new DataView(m.cam);
           ZCS2.camSid=cd.getUint32(0,true);
           const f=new Float32Array(m.cam,4,32);
           ZCS2.M2=f.slice(0,16); ZCS2.M1=f.slice(16,32);
         }
-        if(ZCS2._stripKnown!==undefined && m.stripped!==ZCS2._stripKnown && ZCS2.render) ZCS2._resetTAChain('strip '+ZCS2._stripKnown+'->'+m.stripped);
-        ZCS2._stripKnown=m.stripped;
+        { const skey=(m.stripped?1:0)|(m.cstrip?2:0);
+          if(ZCS2._stripKnown!==undefined && skey!==ZCS2._stripKnown && ZCS2.render) ZCS2._resetTAChain('strip '+ZCS2._stripKnown+'->'+skey);
+          ZCS2._stripKnown=skey; }
+        if(m.cstrip && window._bodyStart) window._bodyStart();   // char-stripped wire => need the local bodies
         if(!ZCS2.render || !window._injectFrame) return;
         ZCS2._frameStripped=m.stripped;
+        ZCS2._frameCharStripped=m.cstrip;
         window._injectFrame(new Uint8Array(m.frame,0,m.len));
       }
     };
@@ -510,6 +518,109 @@ window._stageMerge=(g)=>{
   g.vertexCount+=sp.vertexCount;
   g._stageMerged=true;
 };
+
+// === Character flip Phase B (render-state/09): local bodies from state ======
+// render_frame.wasm (the transpiled SH4 render) re-emits the characters' TR
+// para5 sprite TA from resident RAM state — byte-exact vs the engine (KB
+// finding:render_replica_phase1_codederived). The emitted TCWs are the
+// engine's REAL control words and resolve through TextureManager against
+// D.vram exactly like wire quads (VRAM pages still ship; only GEOMETRY is
+// stripped). Feed: /replica-live — msg1 = ZCST-zstd MCRR prefix (seeds a 16MB
+// RAM image), then FRMx per frame (dynamic regions + on-change GFX tail).
+// Pairing v1: latest-wins (±1 frame body-vs-HUD skew). Starts on ?bodylocal=1
+// (A/B double-draw over the un-stripped wire) or on the first char-stripped
+// (flags bit4) ZCS2 frame.
+const BODY={want:new URLSearchParams(location.search).has('bodylocal'),
+  started:false,ready:false,mod:null,ram:null,dynRegs:null,ta:null,vframe:-1,frames:0,gfxN:0,err:0,ws:null};
+window._body=BODY;
+const _bodyGuest=a=>(a>>>0)&0xFFFFFF;
+window._bodyStart=async function bodyStart(){
+  if(BODY.started) return; BODY.started=true;
+  try{
+    const [{default:createRenderFrame},fz]=await Promise.all([
+      import('./render-replica/render_frame.mjs?v=scene5'),
+      import('./webgpu/fzstd.mjs')]);
+    BODY.mod=await createRenderFrame({locateFile:p=>p.endsWith('.wasm')?'render-replica/'+p+'?v=scene5':p});
+    const qp=new URLSearchParams(location.search);
+    const proto=location.protocol==='https:'?'wss':'ws';
+    const url=qp.get('replica')||`${proto}://${location.host}/replica-live`;
+    const ws=new WebSocket(url); ws.binaryType='arraybuffer'; BODY.ws=ws;
+    let seeded=false;
+    ws.onopen=()=>console.log('[body] replica feed connected:',url);
+    ws.onclose=()=>{ BODY.ready=false; BODY.started=false; console.warn('[body] feed closed — will restart on next stripped frame'); };
+    ws.onmessage=(ev)=>{ try{
+      let u8=new Uint8Array(ev.data);
+      if(!seeded){
+        if(u8.length>=8&&u8[0]===0x5A&&u8[1]===0x43&&u8[2]===0x53&&u8[3]===0x54) u8=fz.decompress(u8.subarray(8));
+        const pre=_bodyParsePrefix(u8);
+        BODY.ram=new Uint8Array(16*1024*1024);
+        pre.staticRegs.forEach((r,i)=>{ if(r.tag==='ram16') BODY.ram.set(pre.staticData[i],0);
+          else BODY.ram.set(pre.staticData[i],_bodyGuest(r.addr)); });
+        BODY.dynRegs=pre.dynamicRegs; seeded=true; BODY.ready=true;
+        console.log('[body] seeded: '+pre.staticRegs.length+' static + '+pre.dynamicRegs.length+' dynamic regions');
+        return;
+      }
+      if(u8.length>=8&&u8[0]===0x5A&&u8[1]===0x43&&u8[2]===0x53&&u8[3]===0x54) u8=fz.decompress(u8.subarray(8));   // FRMx may be ZCST-wrapped too
+      _bodyApplyFrame(u8);
+    }catch(e){ if(++BODY.err<4) console.warn('[body]',e); } };
+  }catch(e){ BODY.started=false; console.warn('[body] start failed',e); }
+};
+function _bodyParsePrefix(buf){
+  const dv=new DataView(buf.buffer,buf.byteOffset,buf.byteLength); let p=0;
+  const u32=()=>{const v=dv.getUint32(p,true);p+=4;return v>>>0;};
+  if(u32()!==0x5252434D) throw new Error('bad MCRR magic');
+  u32(); const nStatic=u32(),nDynamic=u32(); u32(); const vramB=u32(),pvrB=u32(); u32();
+  const region=()=>{const addr=u32(),len=u32(); let tag=''; for(let i=0;i<8;i++){const c=buf[p+i]; if(c)tag+=String.fromCharCode(c);} p+=8; return {addr,len,tag};};
+  const staticRegs=Array.from({length:nStatic},region);
+  const dynamicRegs=Array.from({length:nDynamic},region);
+  p+=vramB+pvrB;   // prefix VRAM/PVR unused: the ZCS2 wire keeps D.vram/D.pvrRegs live
+  const staticData=staticRegs.map(r=>{const b=buf.subarray(p,p+r.len);p+=r.len;return b;});
+  return {staticRegs,dynamicRegs,staticData};
+}
+function _bodyApplyFrame(u8){
+  const dv=new DataView(u8.buffer,u8.byteOffset,u8.byteLength);
+  if(u8.length<12||dv.getUint32(0,true)!==0x784D5246) return;   // FRMx only
+  const vframe=dv.getUint32(4,true); let p=12;
+  for(const r of BODY.dynRegs){ if(r.tag!=='bodytex') BODY.ram.set(u8.subarray(p,p+r.len),_bodyGuest(r.addr)); p+=r.len; }
+  // on-change GFX tail: u32 nGfx, then nGfx × { u32 base, u32 len, payload } —
+  // a char whose art loaded after the prefix (tag-in) lands here; splat into RAM
+  // so the walker reads fresh cell records. (palette/HUDQ tails + engine_ta are
+  // ignored: palettes ride the ZCS2 PVR pages, HUD stays on the wire.)
+  if(p+4<=u8.length){ const nGfx=dv.getUint32(p,true);
+    if(nGfx<=64){ p+=4;
+      for(let i=0;i<nGfx&&p+8<=u8.length;i++){ const base=dv.getUint32(p,true),len=dv.getUint32(p+4,true); p+=8;
+        if(len>0x800000||p+len>u8.length) break;
+        BODY.ram.set(u8.subarray(p,p+len),_bodyGuest(base)); p+=len; BODY.gfxN++; } } }
+  const M=BODY.mod;
+  const ramPtr=M._malloc(BODY.ram.length); M.HEAPU8.set(BODY.ram,ramPtr);
+  const cap=256*1024, outPtr=M._malloc(cap);
+  const len=M._render_frame_ta(ramPtr,outPtr,cap);
+  BODY.ta=M.HEAPU8.slice(outPtr,outPtr+len);
+  M._free(ramPtr); M._free(outPtr);
+  BODY.vframe=vframe; BODY.frames++;
+}
+// Merge the latest body TA into the parsed wire frame — same model as
+// _stageMerge but APPENDED (bodies draw over the remaining TR content).
+const _bodyParser2=new TAParser();
+window._bodyMerge=(g)=>{
+  if(!BODY.ta||!BODY.ta.length) return;
+  let bp; try{ bp=_bodyParser2.parse(BODY.ta,BODY.ta.length); }catch(e){ if(++BODY.err<6) console.warn('[body] parse',e); return; }
+  if(!bp||!bp.vertexCount) return;
+  const F=7;
+  const bw=new Float32Array(bp.vertexData.buffer,bp.vertexData.byteOffset,bp.vertexCount*F);
+  const gw=new Float32Array(g.vertexData.buffer,g.vertexData.byteOffset,g.vertexCount*F);
+  const need=gw.length+bw.length;
+  if(!window._bmBuf||window._bmBuf.length<need) window._bmBuf=new Float32Array(Math.ceil(need*1.5));
+  const nv=window._bmBuf.subarray(0,need);
+  nv.set(gw,0); nv.set(bw,gw.length);
+  const shift=g.vertexCount;
+  const bump=list=>(list||[]).map(q=>{const r=Object.assign({},q); r.first=q.first+shift; return r;});
+  g.translucent=[...g.translucent,...bump(bp.translucent)];
+  g.vertexData=new Uint8Array(nv.buffer,0,need*4);
+  g.vertexCount+=bp.vertexCount;
+  g._bodyMerged=true;
+};
+if(BODY.want) window._bodyStart();
 (function(){
   const p=document.createElement('div');
   p.id='zcs2_panel';
@@ -532,7 +643,8 @@ window._stageMerge=(g)=>{
     el.textContent =
       'ZCS2   '+(z*8/1e6).toFixed(2)+' Mbps   epoch '+(ZCS2.epoch<0?'–':ZCS2.epoch)+'\n'
      +'legacy '+(l*8/1e6).toFixed(2)+' Mbps   ratio '+(z?(l/z).toFixed(2)+'×':'–')+'\n'
-     +'dec '+(ZCS2.frames?(ZCS2.decMs/ZCS2.frames).toFixed(2):'0.00')+' ms/msg   desyncs '+ZCS2.errs+'\nsrc: '+src;
+     +'dec '+(ZCS2.frames?(ZCS2.decMs/ZCS2.frames).toFixed(2):'0.00')+' ms/msg   desyncs '+ZCS2.errs+'\nsrc: '+src
+     +(window._body&&window._body.started?'\nbody: '+(window._body.ready?(window._body.frames+'f vf'+window._body.vframe+(window._body.ta?' '+(window._body.ta.length/96|0)+'q':'')):'seeding...'):'');
   },1000);
 })();
 
@@ -2107,6 +2219,8 @@ async function main(){
                     // frames — the wire stage + the local stage z-fighting = the
                     // green flicker during/after supers.)
                     ZCS2._frameStripped=ZCS2.lastStripped;
+                    ZCS2._frameCharStripped=ZCS2.lastCharStripped;
+                    if(ZCS2.lastCharStripped && window._bodyStart) window._bodyStart();
                 }
                 else if(d.length>=8 && d[0]===0x5A && d[1]===0x43 && d[2]===0x53 && d[3]===0x54){ // 'ZCST'
                     ZCS2.legacyB+=d.byteLength;
@@ -2256,6 +2370,12 @@ async function main(){
                     const _mergeNow=ZCS2._frameStripped; ZCS2._frameStripped=false;
                     let _merged=false;
                     if(ZCS2.render&&_mergeNow){ try{ window._stageMerge(g); _merged=!!g._stageMerged; }catch(e3){ if(((ZCS2._smErr=(ZCS2._smErr||0)+1))<4) console.warn('[stage-merge]',e3); } }
+                    // Character flip: draw the render_frame bodies AFTER the stage merge
+                    // (bodies composite over stage, under nothing — appended = drawn last
+                    // within TR). A/B mode (?bodylocal) double-draws over the wire bodies.
+                    const _bodyNow=ZCS2._frameCharStripped; ZCS2._frameCharStripped=false;
+                    if(ZCS2.render&&(_bodyNow||(window._body&&window._body.want&&window._body.ready))){
+                      try{ window._bodyMerge(g); }catch(e5){ if(((ZCS2._bmErr=(ZCS2._bmErr||0)+1))<4) console.warn('[body-merge]',e5); } }
                     if(!_merged){ try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e2) {} }
                     pMs=performance.now()-t1;
                     lastParsed=g; window._lastParsed=g; window._lastFrameNum=D.frameNum;
