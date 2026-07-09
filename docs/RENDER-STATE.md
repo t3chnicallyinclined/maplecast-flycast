@@ -43,7 +43,7 @@ Render paths for the MVC2 stream, ranked. Any new session starts at the top.
 
 ## 3. Bandwidth numbers — pinned (cite ONLY these)
 
-- **TA mirror:** ~4.1 Mbps in-match zstd / ~12 Mbps uncompressed / ~900 Kbps idle (ARCHITECTURE.md §compression table, Apr 2026 — the only conditions-stated measurement).
+- **TA mirror:** ~4.1 Mbps in-match zstd / ~12 Mbps uncompressed / ~900 Kbps idle (ARCHITECTURE.md §compression table, Apr 2026). **2026-07-08 re-measurement on feat/render-replica-live: 6.875 Mbps in-match** (+1.08 Mbps side-channel) — the growth is dominated by DMA force-dirty page re-ships (56.9% of shipped pages byte-identical); split + sub-1-Mbps plan in `render-state/07-bandwidth-lab-results.md` (measured best stack: **0.788 Mbps @ 0.23 ms/frame**).
 - **GSTA state wire:** ~7 KB/frame (≈3.4 Mbps at 60fps; PHASE-B shrink never executed).
 - **Lockstep wire:** ~2.4 KB/s (bc16af338).
 - The "~1.7 MB/s" figure in Jun-7-era docs = unlabeled/uncompressed, do not cite. The "36–88 Mbps" figure = unrecovered measurement conditions, do not cite without re-measuring.
