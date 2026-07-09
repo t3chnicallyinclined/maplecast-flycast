@@ -114,6 +114,10 @@ void f1TickFromVblank(uint64_t saveSeq);
 // Independent of the rollback ring; called every vblank. See .cpp.
 void gshashLogTick(const char* path);
 
+// Input-lag probe: deterministic per-frame input driver + raw-field logger.
+// MAPLECAST_LAGPROBE=path enables; TRIG/MASK env configure. See .cpp.
+void lagProbeTick(const char* path);
+
 // True if F.1 test has run to completion (regardless of pass/fail).
 bool f1Done();
 // True if F.1 test passed (only meaningful after f1Done()).
@@ -142,6 +146,10 @@ uint64_t dcAuditDiffBytes();
 // and server both call it so a match proves game-state parity. Safe to call
 // from the emu thread at a frame boundary. No init() required.
 uint64_t gameStateRegionHash();
+
+// Per-region hashes (predict-live confirmed-vs-server divergence diagnostic):
+// [0]chars [1]gs-page [2]frame-ctr [3]fight-tick [4]raw-input-latch(0x8C200BA8).
+void gameStateSubHashes(uint64_t out[5]);
 
 // Telemetry snapshot for debug UIs.
 struct Stats {

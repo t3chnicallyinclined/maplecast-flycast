@@ -494,6 +494,12 @@ void publishFrameTickFromGlobals(uint64_t frame);
 // Sequence number is monotonic and process-lifetime.
 void injectLocalSlotInput(int slot, uint16_t buttons, uint8_t lt_, uint8_t rt_);
 
+// Predict-live: the frame-stamped input for `frame` on `slot` (latched). Called
+// from ggpo::getLocalInput so the server's SH4 READS the client's stamped input
+// at the frame it was stamped for. Returns false if no frame-stamped scheduling
+// on this slot (non-predict deployments — unchanged behaviour).
+bool getStampedInput(int slot, uint64_t frame, uint16_t& btn, uint8_t& lt_, uint8_t& rt_);
+
 // Telemetry snapshot for the input tape publisher. All counters are
 // monotonic process-lifetime totals unless otherwise noted.
 struct TapeStats {

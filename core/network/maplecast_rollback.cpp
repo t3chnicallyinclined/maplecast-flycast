@@ -36,6 +36,10 @@
 */
 #include "maplecast_rollback.h"
 #include "types.h"
+
+// Global active-low controller state (defined in gamepad_device.cpp). Written by
+// the input server on UDP; used by the lag probe to drive P1 deterministically.
+extern u32 kcode[4];
 #include "serialize.h"
 #include "emulator.h"
 #include "hw/mem/mem_watch.h"
@@ -576,6 +580,19 @@ uint64_t gameStateRegionHash()
 	return h;
 }
 
+// Per-region hashes for the predict-live confirmed-vs-server divergence diagnostic.
+// out[0]=char structs  out[1]=gs-page(0x289000)  out[2]=frame-ctr  out[3]=fight-tick
+// out[4]=raw input latch (0x8C200BA8, 8 bytes) — same region set on client+server so
+// their per-frame logs can be diffed to localize which region diverges under input.
+void gameStateSubHashes(uint64_t out[5])
+{
+	out[0] = XXH3_64bits(&mem_b[0x268340], 6u * 0x5A4u);
+	out[1] = XXH3_64bits(&mem_b[0x289000], 0x1000u);
+	out[2] = XXH3_64bits(&mem_b[0x3496B0], 4u);
+	out[3] = XXH3_64bits(&mem_b[0x268250], 1u);
+	out[4] = XXH3_64bits(&mem_b[0x200BA8], 8u);   // raw controller latch
+}
+
 // Hash full 16MB main RAM EXCLUDING the known frame-deterministic render scratch
 // (render-interp/phase 0x8C1F9D8C-98 + stage-anim 0x8C1F9D80 → phys 0x1F9D80..0x1F9DA0).
 static uint64_t fullRamHashExclScratch()
@@ -633,6 +650,82 @@ void gshashLogTick(const char* path)
 		}
 	}
 	fprintf(f, "\n");
+	fflush(f);
+}
+
+// ── INPUT-LAG PROBE (MAPLECAST_LAGPROBE=path) ────────────────────────────────
+// Deterministic per-frame input driver + raw-field logger for measuring MVC2's
+// internal input pipeline lag. Runs every vblank (end-of-frame, after this frame's
+// game logic ran). Anchored to the in-RAM game frame counter (0x8C3496B0) so the
+// input edge lands on the same guest frame every run.
+//
+//   MAPLECAST_LAGPROBE       output log path (enables the probe)
+//   MAPLECAST_LAGPROBE_TRIG  guest-frames after baseline to begin applying input
+//   MAPLECAST_LAGPROBE_MASK  DC key bits to PRESS (active-low: cleared in kcode),
+//                            hex. 0 = neutral baseline run (never presses).
+//
+// kcode[] is only otherwise written by the input server on a UDP packet; with no
+// input client connected it stays at our value, so this write is authoritative.
+void lagProbeTick(const char* path)
+{
+	static FILE* f = nullptr;
+	static bool  tried = false;
+	static bool  haveBase = false;
+	static uint32_t baseFrame = 0;
+	static uint32_t trig = 0;
+	static uint32_t mask = 0;
+	if (!f) {
+		if (tried) return;
+		tried = true;
+		const char* te = std::getenv("MAPLECAST_LAGPROBE_TRIG");
+		const char* me = std::getenv("MAPLECAST_LAGPROBE_MASK");
+		trig = te ? (uint32_t)strtoul(te, nullptr, 0) : 30;
+		mask = me ? (uint32_t)strtoul(me, nullptr, 16) : 0;
+		f = fopen(path, "w");
+		if (!f) { printf("[lagprobe] cannot open %s\n", path); return; }
+		printf("[lagprobe] logging to %s  trig=%u mask=0x%x\n", path, trig, mask);
+		fprintf(f, "# rel gframe kcode16 posx velx vely fac110 walk1d3 st1d0 xflip1d2 fc142 sid144 in340 in344 in348 in34c structhash\n");
+	}
+	// P1C1 base = phys 0x268340 (guest 0x8C268340).
+	const uint32_t B = 0x268340;
+	uint32_t gframe; memcpy(&gframe, &mem_b[0x3496B0], 4);
+	if (!haveBase) { haveBase = true; baseFrame = gframe; }
+	uint32_t rel = gframe - baseFrame;
+
+	// Apply the scripted input for the NEXT frame's maple poll.
+	if (rel >= trig && mask != 0)
+		kcode[0] = ((~mask) & 0xFFFFu) | 0xFFFF0000u;
+	else
+		kcode[0] = 0xFFFFFFFFu;
+
+	float posx, velx, vely;
+	memcpy(&posx, &mem_b[B + 0x034], 4);
+	memcpy(&velx, &mem_b[B + 0x05c], 4);
+	memcpy(&vely, &mem_b[B + 0x060], 4);
+	uint8_t  fac110 = mem_b[B + 0x110];
+	uint8_t  st1d0  = mem_b[B + 0x1d0];
+	uint8_t  xflip1d2 = mem_b[B + 0x1d2];
+	uint8_t  walk1d3  = mem_b[B + 0x1d3];
+	uint16_t fc142, sid144;
+	memcpy(&fc142,  &mem_b[B + 0x142], 2);
+	memcpy(&sid144, &mem_b[B + 0x144], 2);
+	uint32_t in340, in344, in348, in34c;
+	memcpy(&in340, &mem_b[B + 0x340], 4);
+	memcpy(&in344, &mem_b[B + 0x344], 4);
+	memcpy(&in348, &mem_b[B + 0x348], 4);
+	memcpy(&in34c, &mem_b[B + 0x34c], 4);
+	uint64_t sh = XXH3_64bits(&mem_b[B], 0x5A4);
+
+	// Raw-input hunt: dump the 4KB page 0x200000..0x201000 as hex so a
+	// baseline-vs-pressed diff pins the exact byte the controller poll latches.
+	static char gh[0x1000*2+1];
+	for (int i = 0; i < 0x1000; i++)
+		snprintf(gh + i*2, 3, "%02x", (unsigned)mem_b[0x200000 + i]);
+
+	fprintf(f, "%u %u %04x %.6f %.6f %.6f %u %u %u %u %u %u %08x %08x %08x %08x %016llx %s\n",
+	        rel, gframe, (kcode[0] & 0xFFFFu),
+	        posx, velx, vely, fac110, walk1d3, st1d0, xflip1d2, fc142, sid144,
+	        in340, in344, in348, in34c, (unsigned long long)sh, gh);
 	fflush(f);
 }
 

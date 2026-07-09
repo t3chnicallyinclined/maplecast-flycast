@@ -153,6 +153,8 @@ static uint64_t  _lpLiveHashFrame[LP_RING];
 static bool      _lpLiveHashInit = false;
 static uint64_t  _lpConfMatch = 0, _lpConfMismatch = 0;
 static uint64_t  _lpConfM[3] = {0,0,0}, _lpConfMM[3] = {0,0,0};   // offsets N-1,N,N+1
+static uint64_t  _lpLiveSub[LP_RING][5];                          // per-frame sub-hashes
+static int       _lpSubLogged = 0;                                // limit mismatch logs
 
 // INJECTION TEST (MAPLECAST_PREDICT_LIVE_INJECT): drive a SUSTAINED + CHANGING
 // local input for a long window WITHOUT hardware, set at the TOP of frameGate so
@@ -762,11 +764,16 @@ static bool livePredictDrive(uint64_t localFrame)
 	for (uint64_t N = _lpConfirmed + 1; N < P; N++) {
 		const int idx = (int)(N % LP_RING);
 		if (_lpAuthFrame[ls][idx] != N || _lpAuthFrame[rs][idx] != N) break;   // not both yet
-		// The client is AUTHORITATIVE for its OWN (local) slot — it applied its own
-		// input, so it NEVER reconciles the local slot (that was the self-mispredict
-		// spiral). Only the REMOTE slot can mispredict.
+		// Reconcile BOTH slots against the authoritative tape so the confirmed
+		// timeline is an EXACT replay of the server's inputs => confirmed==server
+		// GUARANTEED. (Trust-own-input silently masked local-slot frame-stamp
+		// misalignment: the server applied our input at a frame where we'd predicted
+		// a different value, and trust-own never reconciled it -> permanent state
+		// divergence under input. Reconciling the local slot too fires a small
+		// rollback that corrects it; the head keeps our live input for instant feel.)
+		const bool matchL = (_lpAuth[ls][idx].btn == _lpPred[ls][idx].btn);
 		const bool matchR = (_lpAuth[rs][idx].btn == _lpPred[rs][idx].btn);
-		if (!matchR && reSimFrom == UINT64_MAX) reSimFrom = N;
+		if (!(matchL && matchR) && reSimFrom == UINT64_MAX) reSimFrom = N;
 		// INJECTION verify: did the server echo our (injected) local input, and did
 		// our prediction match it? Proves the forward+stamp+echo path end-to-end.
 		if (_lpInjectStart && N >= _lpInjectStart && N < _lpInjectStart + 180) {
@@ -789,6 +796,18 @@ static bool livePredictDrive(uint64_t localFrame)
 					if (_lpLiveHash[idx] == sh) _lpConfM[k]++; else _lpConfMM[k]++;
 				}
 			}
+			// On a DIRECT-N mismatch, log the client's 5 sub-hashes for N so it can
+			// be diffed against [SUBHASH-SRV] f=N to localize the divergent region.
+			if (std::getenv("MAPLECAST_SUBHASH_LOG") && _lpSubLogged < 8) {
+				uint64_t sh0;
+				if (maplecast_lockstep::serverHashForClientFrame(N, &sh0) && _lpLiveHash[idx] != sh0) {
+					const uint64_t* s = _lpLiveSub[idx];
+					printf("[SUBHASH-CLI] f=%llu chars=%016llx gs=%016llx fctr=%016llx ftick=%016llx latch=%016llx\n",
+					       (unsigned long long)N,(unsigned long long)s[0],(unsigned long long)s[1],
+					       (unsigned long long)s[2],(unsigned long long)s[3],(unsigned long long)s[4]);
+					fflush(stdout); _lpSubLogged++;
+				}
+			}
 		}
 	}
 
@@ -809,11 +828,18 @@ static bool livePredictDrive(uint64_t localFrame)
 		maplecast_predict::ringRestore(reSimFrom);
 		for (uint64_t f = reSimFrom; f < P; f++) {
 			const int idx = (int)(f % LP_RING);
-			// LOCAL slot: ALWAYS the client's own recorded input (authoritative for
-			// its own slot) — never the tape echo. REMOTE slot: authoritative from
-			// the tape if present for f, else repeat-last-confirmed prediction.
-			kcode[ls] = (uint32_t)_lpPred[ls][idx].btn | 0xFFFF0000u;
-			lt[ls] = (uint16_t)_lpPred[ls][idx].lt << 8; rt[ls] = (uint16_t)_lpPred[ls][idx].rt << 8;
+			// Re-sim with the AUTHORITATIVE tape input for BOTH slots when available
+			// (confirmed frames => exact server replay); future frames (no tape yet)
+			// use the predicted local (client's live input, for instant feel) +
+			// repeat-last-confirmed remote.
+			if (_lpAuthFrame[ls][idx] == f) {
+				kcode[ls] = (uint32_t)_lpAuth[ls][idx].btn | 0xFFFF0000u;
+				lt[ls] = (uint16_t)_lpAuth[ls][idx].lt << 8; rt[ls] = (uint16_t)_lpAuth[ls][idx].rt << 8;
+				_lpPred[ls][idx] = _lpAuth[ls][idx];
+			} else {
+				kcode[ls] = (uint32_t)_lpPred[ls][idx].btn | 0xFFFF0000u;
+				lt[ls] = (uint16_t)_lpPred[ls][idx].lt << 8; rt[ls] = (uint16_t)_lpPred[ls][idx].rt << 8;
+			}
 			if (_lpAuthFrame[rs][idx] == f) {
 				kcode[rs] = (uint32_t)_lpAuth[rs][idx].btn | 0xFFFF0000u;
 				lt[rs] = (uint16_t)_lpAuth[rs][idx].lt << 8; rt[rs] = (uint16_t)_lpAuth[rs][idx].rt << 8;
@@ -834,12 +860,17 @@ static bool livePredictDrive(uint64_t localFrame)
 	// frame received. The head then leads the server so local input applied at the
 	// head is INSTANT (>= live edge) and, stamped for the head frame, lands on the
 	// server in the FUTURE => applied on time => confirmed matches server.
-	const uint64_t sf = maplecast_lockstep::lastServerFrame();
-	if (sf != 0 && sf != _lpSrvFrame) { _lpSrvFrame = sf; _lpSrvAnchorHead = P; }
-	uint64_t serverLive = (_lpSrvFrame != 0) ? (_lpSrvFrame + (P - _lpSrvAnchorHead)) : _lpTapeNewest;
+	// Anchor the head to the TAPE (which is server-numbered) with a FIXED lead, so
+	// the head frame numbering == the server's and never drifts. LP_LEAD must exceed
+	// the tape-delivery latency so the head leads the server's TRUE current frame
+	// (newest_tape = server_current - latency; head = newest_tape + LP_LEAD leads by
+	// LP_LEAD - latency). The stamp == head == a future server frame => the server
+	// applies our input on time and the client applied the same value there.
+	static constexpr uint64_t LP_LEAD  = 16;               // > tape latency (~11) + margin
+	static constexpr uint64_t MAX_LEAD = 26;               // < ring DEPTH (32)
+	uint64_t serverLive = maplecast_lockstep::lastServerFrame();   // telemetry only
 	if (_lpTapeNewest > serverLive) serverLive = _lpTapeNewest;
-	uint64_t target = serverLive + maplecast_predict::INPUT_DELAY;
-	static constexpr uint64_t MAX_LEAD = 22;               // < ring DEPTH (32)
+	uint64_t target = _lpTapeNewest + LP_LEAD;
 	if (target > _lpConfirmed + MAX_LEAD) {                // fell too far behind confirm
 		target = _lpConfirmed + MAX_LEAD;
 		if (P > _lpConfirmed + 28) {                       // beyond ring -> re-JOIN
@@ -1001,6 +1032,8 @@ bool frameGate()
 			const uint64_t hf = localFrame - 1;
 			_lpLiveHash[hf % LP_RING] = maplecast_rollback::gameStateRegionHash();
 			_lpLiveHashFrame[hf % LP_RING] = hf;
+			if (std::getenv("MAPLECAST_SUBHASH_LOG"))
+				maplecast_rollback::gameStateSubHashes(_lpLiveSub[hf % LP_RING]);
 		}
 		if (livePredictDrive(localFrame))
 			return true;

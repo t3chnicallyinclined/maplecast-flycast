@@ -722,6 +722,18 @@ static bool stampedInputForFrame(int slot, uint64_t frame, StampedIn* out)
 	return true;
 }
 
+// Public: the frame-stamped input for `frame` (latched). Called from
+// ggpo::getLocalInput so the server's SH4 actually READS the stamped input at
+// the frame it was stamped for (the sim, not just the tape). Returns false if
+// this slot has no frame-stamped scheduling (non-predict deployments).
+bool getStampedInput(int slot, uint64_t frame, uint16_t& btn, uint8_t& lt_, uint8_t& rt_)
+{
+	StampedIn st;
+	if (!stampedInputForFrame(slot, frame, &st)) return false;
+	btn = st.buttons; lt_ = st.lt; rt_ = st.rt;
+	return true;
+}
+
 // GGPO-style dense tape: called once per server emu frame from
 // maplecast_mirror::serverPublish, RIGHT BEFORE the server frame counter
 // is bumped, with the frame number that's about to become current. We
@@ -740,14 +752,11 @@ void publishFrameTick(uint64_t frame)
 	// it between SH4-read and serverPublish (~14ms window) and the recording
 	// would capture an input the SH4 didn't actually see.
 	for (int slot = 0; slot < 2; slot++) {
-		// STAGE c — if this slot has frame-stamped input, latch it AT its target
-		// frame so client & server agree on the landing frame. Otherwise the
-		// legacy arrival-time atomic path (unchanged for non-predict clients).
-		StampedIn st;
-		if (stampedInputForFrame(slot, frame, &st)) {
-			pushTapeEntryAtFrame(slot, frame, st.buttons, st.lt, st.rt, 0);
-			continue;
-		}
+		// Record what the SH4 ACTUALLY consumed this frame (_consumedInputAtomic,
+		// set in ggpo::getLocalInput). For frame-stamped (predict-live) input,
+		// getLocalInput applies the stamped value to the sim AT its frame, so
+		// _consumedInputAtomic already IS the stamped value here => the tape, the
+		// server sim, and the client prediction all agree on the same frame.
 		const uint64_t packed = _consumedInputAtomic[slot].load(std::memory_order_acquire);
 		uint16_t buttons;
 		uint8_t  ltVal;

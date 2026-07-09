@@ -140,6 +140,18 @@ static void getLocalInput(MapleInputState inputState[4])
 				maplecast_input::unpackSlotInput(packed, buttons, ltRaw, rtRaw, seq);
 			}
 
+			// Predict-live: if the client frame-stamped its input for THIS frame,
+			// the SH4 must read the stamped value AT this frame (latchFrame) —
+			// otherwise the server sim ignores it (input only reached the tape) and
+			// the client's confirmed timeline diverges. Overrides the atomic latch
+			// only when frame-stamped scheduling is active (non-predict unchanged).
+			{
+				uint16_t sBtn; uint8_t sLt, sRt;
+				if (maplecast_input::getStampedInput(player, latchFrame, sBtn, sLt, sRt)) {
+					buttons = sBtn; ltRaw = sLt; rtRaw = sRt;
+				}
+			}
+
 			// kcode[] format is active-low low 16 bits + upper-16-bits-set
 			// (see updateSlot in maplecast_input_server.cpp). Match that
 			// here so downstream consumers (CMD9 handler, ggpo Inputs

@@ -239,6 +239,16 @@ void onServerFrame(uint64_t frame)
 	}
 	s_hashesSent.fetch_add(1, std::memory_order_relaxed);
 
+	// DIAG: per-region sub-hashes so the confirmed-vs-server divergence can be
+	// localized by diffing this server log against the client's SUBHASH log.
+	if (std::getenv("MAPLECAST_SUBHASH_LOG")) {
+		uint64_t sub[5]; maplecast_rollback::gameStateSubHashes(sub);
+		printf("[SUBHASH-SRV] f=%llu chars=%016llx gs=%016llx fctr=%016llx ftick=%016llx latch=%016llx\n",
+		       (unsigned long long)frame,(unsigned long long)sub[0],(unsigned long long)sub[1],
+		       (unsigned long long)sub[2],(unsigned long long)sub[3],(unsigned long long)sub[4]);
+		fflush(stdout);
+	}
+
 	if (debugOn() && (frame % 60 == 0))
 		printf("[lockstep] server hash frame=%llu h=%016llx subs=%zu\n",
 		       (unsigned long long)frame, (unsigned long long)h, s_subs.size());

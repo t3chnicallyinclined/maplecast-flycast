@@ -7,4 +7,5 @@ set MAPLECAST_HEADLESS_AUTOLOAD=1
 set MAPLECAST_PREDICT=1
 set MAPLECAST_PREDICT_LIVE=1
 set MAPLECAST_PREDICT_LIVE_INJECT=1
+set MAPLECAST_SUBHASH_LOG=1
 build\flycast.exe "C:\roms\roms\mvc2.gdi" > C:\Users\trist\projects\maplecast-flycast\_cliINJ.log 2>&1
