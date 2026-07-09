@@ -2374,7 +2374,7 @@ async function main(){
                     // (bodies composite over stage, under nothing — appended = drawn last
                     // within TR). A/B mode (?bodylocal) double-draws over the wire bodies.
                     const _bodyNow=ZCS2._frameCharStripped; ZCS2._frameCharStripped=false;
-                    if(ZCS2.render&&(_bodyNow||(window._body&&window._body.want&&window._body.ready))){
+                    if(ZCS2.render&&(_bodyNow||(window._body&&window._body.want&&window._body.ready&&_mergeNow))){
                       try{ window._bodyMerge(g); }catch(e5){ if(((ZCS2._bmErr=(ZCS2._bmErr||0)+1))<4) console.warn('[body-merge]',e5); } }
                     if(!_merged){ try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e2) {} }
                     pMs=performance.now()-t1;
