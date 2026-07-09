@@ -1846,7 +1846,13 @@ static inline uint64_t vcacheHashPage(const uint8_t* p)
 	return h;
 }
 static constexpr uint32_t VCACHE_PAGE_SENTINEL = 0xFFFFFFFFu;
-static constexpr uint64_t VCACHE_RESEED_FRAMES = 600;
+// Reseed = clear the sent-set so content re-ships WITH data (joiners' hash
+// caches start empty). Was a blunt 10s timer (600) — which wiped the cache
+// between supers, re-shipping every recurring super page as 4KB (the user's
+// 4-5 Mbps triple-super spikes). Now: reseed ON JOIN/SYNC (the actual need,
+// via _vcacheReseedPending set at both SYNC sites) + a long safety fallback.
+static constexpr uint64_t VCACHE_RESEED_FRAMES = 18000;   // 5-min fallback
+static std::atomic<bool> _vcacheReseedPending{false};
 // ============================================================================
 // Effect-texture decode + content-addressed hashing (EFCT/TXTR path). Ported from
 // the client decoder (web/webgpu/texture-manager.mjs). Effects are 16-bit direct
@@ -2395,7 +2401,9 @@ void serverPublish(TA_context* ctx)
 	// pages, so we can read the real dedup savings while the game runs a real match.
 	static const bool _vcacheMeasure = (std::getenv("MAPLECAST_VCACHE_MEASURE") != nullptr);
 	static std::unordered_set<uint64_t> _vcacheSent;
-	if ((_vcacheOn || _vcacheMeasure) && frameNum > 0 && (frameNum % VCACHE_RESEED_FRAMES) == 0)
+	if ((_vcacheOn || _vcacheMeasure)
+			&& (_vcacheReseedPending.exchange(false, std::memory_order_acq_rel)
+				|| (frameNum > 0 && (frameNum % VCACHE_RESEED_FRAMES) == 0)))
 		_vcacheSent.clear();
 
 	// dirtyPageCount slot. In VCACHE mode we write the sentinel + a real-count
@@ -2599,6 +2607,7 @@ done_diff:
 			memcpy(_regions[i].shadow, _regions[i].ptr, _regions[i].size);
 		// ZCS2: restart the streaming envelope at this SYNC so joiners decode onward.
 		_zstreamResetPending.store(true, std::memory_order_release);
+		_vcacheReseedPending.store(true, std::memory_order_release);  // joiner hash caches start empty
 	}
 
 	// Patch frame size
@@ -4011,6 +4020,7 @@ done_diff:
 		_taHasPrev = false;
 		// ZCS2: restart the streaming envelope at this SYNC so joiners decode onward.
 		_zstreamResetPending.store(true, std::memory_order_release);
+		_vcacheReseedPending.store(true, std::memory_order_release);  // joiner hash caches start empty
 		hdr->sync_ready = 1;
 		printf("[MIRROR] Client requested sync  --  fresh state + TA reset\n");
 	}
