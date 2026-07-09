@@ -79,9 +79,31 @@ function verify(src, inner) {
 }
 
 // ---- ZCS2 streaming decoder --------------------------------------------------
-let zdec=null, zEpoch=-1, zPending=[], zPendingLen=0, zNeed=0, zSynced=false;
+function soaInverse(v){   // Phase 2 runSoA (flags bit1) -> exact legacy inner bytes
+  const dv=new DataView(v.buffer,v.byteOffset,v.byteLength);
+  const v2Sec=dv.getUint32(76,true), nRuns=dv.getUint32(80,true);
+  const offs=84, lens=offs+nRuns*4, dat=lens+nRuns*2;
+  let dataB=0; for(let i=0;i<nRuns;i++) dataB+=dv.getUint16(lens+i*2,true);
+  const tailOff=80+v2Sec, legacySec=nRuns*6+dataB+4;
+  const out=new Uint8Array(80+legacySec+(v.length-tailOff));
+  out.set(v.subarray(0,80),0);
+  const ov=new DataView(out.buffer);
+  ov.setUint32(76,legacySec,true);
+  let o=80, dp=dat, prev=0;
+  for(let i=0;i<nRuns;i++){
+    prev+=dv.getUint32(offs+i*4,true);
+    const rl=dv.getUint16(lens+i*2,true);
+    ov.setUint32(o,prev,true); ov.setUint16(o+4,rl,true); o+=6;
+    out.set(v.subarray(dp,dp+rl),o); o+=rl; dp+=rl;
+  }
+  ov.setUint32(o,0xFFFFFFFF,true); o+=4;
+  out.set(v.subarray(tailOff),o);
+  return out;
+}
+let zdec=null, zEpoch=-1, zPending=[], zPendingLen=0, zNeed=0, zSynced=false, zSoa=false;
 function zcs2Msg(d) {
   const epoch = d[4], flags = d[5];
+  zSoa=(flags&2)!==0;
   const innerSize = new DataView(d.buffer, d.byteOffset+6, 4).getUint32(0, true);
   if (flags & 1) {                        // stream-start: fresh decoder
     zdec = new ZStream((chunk) => { zPending.push(chunk); zPendingLen += chunk.length; });
@@ -101,7 +123,7 @@ function zcs2Msg(d) {
     let o=0; for (const c of zPending) { const n=Math.min(c.length, zNeed-o); inner.set(c.subarray(0,n), o); o+=n;
       if (o>=zNeed) break; }
     zPending=[]; zPendingLen=0;
-    verify('zcs2', inner);
+    verify('zcs2', zSoa ? soaInverse(inner) : inner);
   }
 }
 

@@ -2619,12 +2619,59 @@ done_diff:
 				_zEpoch++; _zSinceReset = 0;
 			}
 			_zSinceReset++;
-			_zBuf.resize(10 + ZSTD_compressBound(totalSize));
+			// --- Phase 2 runSoA (MAPLECAST_ZSTREAM_SOA=1, flags bit1) -------------
+			// Rewrite the interleaved delta runs [off u32][len u16][data]...term as
+			// [nRuns u32][gap-offs u32×n][lens u16×n][data]. Same info, SoA layout:
+			// ascending small gaps + repetitive lens compress far better and drop the
+			// per-run header interleave (39% of the delta section). Keyframes and
+			// non-delta frames pass through untransformed (bit1 clear). The client
+			// inverse-transform reconstructs the EXACT legacy inner bytes.
+			static const bool _zSoA = [](){ const char* e = std::getenv("MAPLECAST_ZSTREAM_SOA");
+				return e && *e && *e != '0'; }();
+			static std::vector<uint8_t> _soaBuf;
+			const uint8_t* zPayload = dstStart; uint32_t zPayloadSize = totalSize; bool soaDone = false;
+			uint32_t _dPay; memcpy(&_dPay, dstStart + 76, 4);
+			uint32_t _dTa;  memcpy(&_dTa,  dstStart + 72, 4);
+			if (_zSoA && totalSize > 84 && _dPay != _dTa) {   // delta frame only
+				const uint8_t* runs = dstStart + 80; uint32_t rp = 0, nRuns = 0, dataB = 0; bool ok = true;
+				while (rp + 4 <= _dPay) {           // count pass
+					uint32_t roff; memcpy(&roff, runs + rp, 4);
+					if (roff == 0xFFFFFFFFu) { rp += 4; break; }
+					if (rp + 6 > _dPay) { ok = false; break; }
+					uint16_t rl; memcpy(&rl, runs + rp + 4, 2);
+					if (rp + 6 + rl > _dPay) { ok = false; break; }
+					nRuns++; dataB += rl; rp += 6 + rl;
+				}
+				if (ok && rp == _dPay) {
+					uint32_t tailOff = 80 + _dPay, tailLen = totalSize - tailOff;
+					uint32_t v2Sec = 4 + nRuns * 6 + dataB;
+					_soaBuf.resize(80 + v2Sec + tailLen);
+					memcpy(_soaBuf.data(), dstStart, 80);
+					memcpy(_soaBuf.data() + 76, &v2Sec, 4);          // v2 deltaPayloadSize
+					uint8_t* o = _soaBuf.data() + 80;
+					memcpy(o, &nRuns, 4);
+					uint8_t* offs = o + 4; uint8_t* lens = offs + nRuns * 4; uint8_t* dat = lens + nRuns * 2;
+					uint32_t prevOff = 0; rp = 0;
+					for (uint32_t i = 0; i < nRuns; i++) {
+						uint32_t roff; memcpy(&roff, runs + rp, 4);
+						uint16_t rl;  memcpy(&rl,  runs + rp + 4, 2);
+						uint32_t gap = roff - prevOff; prevOff = roff;
+						memcpy(offs + i * 4, &gap, 4);
+						memcpy(lens + i * 2, &rl, 2);
+						memcpy(dat, runs + rp + 6, rl); dat += rl;
+						rp += 6 + rl;
+					}
+					memcpy(dat, dstStart + tailOff, tailLen);
+					zPayload = _soaBuf.data(); zPayloadSize = (uint32_t)(80 + v2Sec + tailLen);
+					soaDone = true;
+				}
+			}
+			_zBuf.resize(10 + ZSTD_compressBound(zPayloadSize));
 			_zBuf[0]='Z'; _zBuf[1]='C'; _zBuf[2]='S'; _zBuf[3]='2';
-			_zBuf[4]=_zEpoch; _zBuf[5]=streamStart ? 1 : 0;
-			memcpy(_zBuf.data()+6, &totalSize, 4);
+			_zBuf[4]=_zEpoch; _zBuf[5]=(uint8_t)((streamStart ? 1 : 0) | (soaDone ? 2 : 0));
+			memcpy(_zBuf.data()+6, &zPayloadSize, 4);
 			ZSTD_outBuffer ob{ _zBuf.data()+10, _zBuf.size()-10, 0 };
-			ZSTD_inBuffer  ib{ dstStart, totalSize, 0 };
+			ZSTD_inBuffer  ib{ zPayload, zPayloadSize, 0 };
 			size_t zr = ZSTD_compressStream2(_zc, &ob, &ib, ZSTD_e_flush);
 			if (ZSTD_isError(zr) || ib.pos != ib.size || zr != 0) {
 				// Should not happen (bound-sized output). Legacy ZCST already went
