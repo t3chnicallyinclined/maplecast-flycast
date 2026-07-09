@@ -59,21 +59,34 @@ let totLeg=0, totZ=0, totSec=0;
 
 // ---- byte-exact verify: pair inner frames by frameNum ----------------------
 // inner delta frame layout: frameSize(4) frameNum(4) ... (CLAUDE.md wire format)
-const pend = new Map();                // frameNum -> {src, bytes}
-let paired=0, exact=0, mismatch=0, unpaired=0, frames=0;
-function verify(src, inner) {
+const pend = new Map();                // frameNum -> {src, bytes, stripped}
+let paired=0, exact=0, mismatch=0, stripped=0, savedBytes=0, fullBytes=0, unpaired=0, frames=0;
+// Pair legacy ZCST (always full) with ZCS2 (maybe stripped) by frameNum.
+// Since CHARSTRIP/STAGESTRIP make ZCS2 deliberately SMALLER than legacy, a
+// difference on a stripped frame is EXPECTED — meter it as bandwidth saved, not
+// an error. Only an UN-stripped ZCS2 frame must be byte-identical to legacy; a
+// diff THERE is a real wire regression and is the only thing worth flagging red.
+function verify(src, inner, isStripped) {
   if (inner.length < 8) return;
   const fn = new DataView(inner.buffer, inner.byteOffset+4, 4).getUint32(0, true);
   frames++;
   const other = pend.get(fn);
   if (other && other.src !== src) {
     pend.delete(fn); paired++;
-    const a = other.bytes, b = inner;
-    let same = a.length === b.length;
-    if (same) for (let i=0;i<a.length;i++) if (a[i]!==b[i]) { same=false; break; }
-    if (same) exact++; else { mismatch++; log(`frame ${fn}: MISMATCH len ${a.length} vs ${b.length}`, 'err'); }
+    const zStripped = isStripped || other.stripped;         // zcst side passes false
+    const zcstBytes = src==='zcst' ? inner : other.bytes;   // legacy full
+    const zcs2Bytes = src==='zcs2' ? inner : other.bytes;   // v2 (maybe stripped)
+    if (zStripped) {
+      stripped++; fullBytes += zcstBytes.length;
+      savedBytes += Math.max(0, zcstBytes.length - zcs2Bytes.length);
+    } else {
+      let same = zcstBytes.length === zcs2Bytes.length;
+      if (same) for (let i=0;i<zcstBytes.length;i++) if (zcstBytes[i]!==zcs2Bytes[i]) { same=false; break; }
+      if (same) exact++;
+      else { mismatch++; log(`frame ${fn}: REAL MISMATCH (unstripped) len ${zcstBytes.length} vs ${zcs2Bytes.length}`, 'err'); }
+    }
   } else {
-    pend.set(fn, {src, bytes: inner.slice()});
+    pend.set(fn, {src, bytes: inner.slice(), stripped: !!isStripped});
     if (pend.size > 240) { pend.delete(pend.keys().next().value); unpaired++; }
   }
 }
@@ -104,6 +117,7 @@ let zdec=null, zEpoch=-1, zPending=[], zPendingLen=0, zNeed=0, zSynced=false, zS
 function zcs2Msg(d) {
   const epoch = d[4], flags = d[5];
   zSoa=(flags&2)!==0;
+  const stripFrame=((flags&4)||(flags&16))!==0;   // bit2 stage-strip OR bit4 char-strip
   const innerSize = new DataView(d.buffer, d.byteOffset+6, 4).getUint32(0, true);
   // Header payloads ride in ascending bit order after the 10B header:
   // cam(bit3)=132B, vframe(bit5)=4B, ord(bit6)=1+3n, seq(bit7)=u16.
@@ -134,7 +148,7 @@ function zcs2Msg(d) {
     let o=0; for (const c of zPending) { const n=Math.min(c.length, zNeed-o); inner.set(c.subarray(0,n), o); o+=n;
       if (o>=zNeed) break; }
     zPending=[]; zPendingLen=0;
-    verify('zcs2', zSoa ? soaInverse(inner) : inner);
+    verify('zcs2', zSoa ? soaInverse(inner) : inner, stripFrame);
   }
 }
 
@@ -143,7 +157,7 @@ function zcstMsg(d) {
   const sz = new DataView(d.buffer, d.byteOffset+4, 4).getUint32(0, true);
   if (sz > 1024*1024) return;             // compressed SYNC — not a delta frame
   legBytes += d.length; legFrames++;
-  try { verify('zcst', zOneShot(d.subarray(8), new Uint8Array(sz))); } catch(e) {}
+  try { verify('zcst', zOneShot(d.subarray(8), new Uint8Array(sz)), false); } catch(e) {}   // legacy is never stripped
 }
 
 // ---- socket -------------------------------------------------------------------
@@ -171,9 +185,14 @@ setInterval(() => {
   $('dZ').textContent = `avg ${zFrames?Math.round(zBytes/zFrames):0} B/frame · epoch ${zEpoch<0?'–':zEpoch} · session ${fmt(totSec?totZ/totSec:0)}`;
   $('mRatio').textContent = (legBytes&&zBytes) ? (legBytes/zBytes).toFixed(2)+'×' : '–';
   $('mFrames').textContent = frames;
-  $('dFrames').textContent = `paired ${paired} · exact ${exact} · mismatch ${mismatch}`;
+  $('dFrames').textContent = `paired ${paired} · exact ${exact} · stripped ${stripped} · mismatch ${mismatch}`;
   const vEl=$('cVerify');
-  $('mVer').textContent = paired ? (mismatch? mismatch+' MISMATCH' : '100% exact') : (zSynced?'pairing…':'waiting for stream-start');
+  $('mVer').textContent = paired
+    ? (mismatch ? mismatch+' REAL MISMATCH'
+       : stripped ? `stripped ✓ · ${fullBytes?Math.round(100*savedBytes/fullBytes):0}% saved`
+       : '100% exact')
+    : (zSynced?'pairing…':'waiting for stream-start');
+  // Red ONLY on a real (un-stripped) mismatch; stripped frames are the expected win.
   vEl.className = 'card ' + (mismatch ? 'bad' : (paired ? 'ok' : ''));
   $('mDec').textContent = decN ? (decMs/decN).toFixed(2)+' ms' : '–';
   legBytes=zBytes=0; legFrames=zFrames=0; decMs=0; decN=0;
@@ -188,7 +207,7 @@ setInterval(() => {
   g.fillText('yellow = legacy ZCST   green = ZCS2 (same frames)', 8, 12);
 }, 1000);
 
-log('ZCS2 wire test — expects a server running MAPLECAST_ZSTREAM=1 (dual-emit shadow mode).');
+log('ZCS2 wire test — strip-aware. Stripped frames (CHARSTRIP/STAGESTRIP) are EXPECTED to differ from legacy; the card meters bytes saved. Only un-stripped byte diffs flag REAL MISMATCH.');
 log('Pass ?ws=ws://localhost:7200 for the local rig; default is wss://<host>/ws (prod relay).');
 </script>
 </body>
