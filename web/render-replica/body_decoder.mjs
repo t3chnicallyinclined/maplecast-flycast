@@ -326,6 +326,10 @@ const TCW_OFF = 0x0C;                             // TCW is word 3 of the 16B pa
 export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, quadGfx1s, quadColRow, opts, quadMirror, quadSrcDesc) {
     if (!cache._gfx)  cache._gfx = new Map();     // gfx1 base -> {n,offs,srt}
     if (!cache._dec)  cache._dec = new Map();     // "gfx1:sel" -> {lin,W,H,...} (decode memo)
+    // opts.mask (OUTPUT-ONLY, optional): Uint8Array[quadCount]; set to 1 for every quad whose
+    // tile bytes this call actually wrote into `vram` (the ?bodytex=local direct-texture path
+    // keys per-quad texObj attach on it — quads skipped here MUST fall back to wire VRAM).
+    const mask = (opts && opts.mask) || null;
     if (cache._dec.size > 4096) cache._dec.clear();  // bound the memo across many distinct poses
     let decoded = 0, bytes = 0, written = 0, quads = 0;
     const parts = new Set();
@@ -364,9 +368,17 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
     // Re-tile EACH emitted quad: slice its (col,row) 32×32 from the part's linear buffer, re-twiddle,
     // write 512B at the quad's OWN TCW. The walker assigns each tile a distinct +0x200 rectab slot;
     // we fill exactly that slot with the standalone 32×32 PAL4_TW the pvr2 renderer expects.
+    const _f16dv = new DataView(new ArrayBuffer(4));
+    const _f16 = (bits) => { _f16dv.setUint32(0, (bits << 16) >>> 0, true); return _f16dv.getFloat32(0, true); };
     for (let q = 0; q < quadCount; q++) {
         const gfx1 = quadGfx1s[q] >>> 0;
         if (!(gfx1 & 0x0C000000) && !(gfx1 & 0x8C000000)) continue;  // no valid body art
+        // EFFECT-POLY GUARD (GAP 1; C++ twin maplecast_mirror.cpp gstaDecodeBodies): a gfx1
+        // in the shared Effect-Poly bank [0x0CED0000,0x0CEE0000) is an ABSOLUTE-POINTER texture
+        // DIRECTORY (already-decoded PVR texels), NOT a GFX1 LZSS offset table. Feeding it to
+        // the LZSS path decodes a corrupt blob over the quad's TCW (the pink-streak garble).
+        // SKIP: the quad keeps the engine-resident VRAM texels at its TCW.
+        if ((gfx1 & 0x0FFFFFFF) >= 0x0CED0000 && (gfx1 & 0x0FFFFFFF) < 0x0CEE0000) continue;
         // BIT15 EFFECT QUADS ARE RESIDENT-BACKED -- NEVER STAGE (2026-07-05 _live4 byte-gate,
         // lockstep with maplecast_mirror.cpp gstaDecodeBodies). Their textures are engine-
         // uploaded (effect slots 0x475xxx/0x60xxxx/0x400xxx, shipped byte-exact in the GSTA
@@ -439,22 +451,33 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         if (quadSrcDesc) {
             const dm  = quadSrcDesc[4*q+0], dcx = quadSrcDesc[4*q+1];
             const dry = quadSrcDesc[4*q+2], dfl = quadSrcDesc[4*q+3];
-            if ((dfl & 1) && (dm === 8 || dm === 16 || dm === 32)) {
-                pCols = (W / dm) | 0; if (pCols < 1) pCols = 1;
-                pRows = (H / dm) | 0; if (pRows < 1) pRows = 1;
+            // ENGINE TILE SIZE mq = u1 * (8<<TSP.texU) — the quad's OWN u1 encoding (u1 =
+            // m/tile, render_frame's body path), the same source as the walker's desc byte0.
+            // GUARD dm==mq: on a torn desc (+0xDC shared scratch clobbered by a later node —
+            // MEASURED idx-464 overlap Cable 0xD4C m32 vs satellite 0xDE6 m16) the entry
+            // belongs to ANOTHER node; fall back to part-grid + screen-rank wrap. LOCKSTEP
+            // with the byte-gated C++ twin (maplecast_mirror.cpp gstaDecodeBodies, 2026-07-05
+            // texel_gate certification) — the old JS trusted dm with only an {8,16,32} check.
+            const tspq = dv.getUint32(q * QUAD + 8, true);
+            const usz = 8 << ((tspq >> 3) & 7);
+            const u1q = Math.max(_f16(dv.getUint16(q * QUAD + 86, true)),
+                                 _f16(dv.getUint16(q * QUAD + 90, true)),
+                                 _f16(dv.getUint16(q * QUAD + 94, true)));
+            let mq = Math.round(u1q * usz); if (mq < 1) mq = 1; if (mq > 32) mq = 32;
+            pCols = (W / mq) | 0; if (pCols < 1) pCols = 1;
+            pRows = (H / mq) | 0; if (pRows < 1) pRows = 1;
+            if ((dfl & 1) && dm === mq) {
                 const cc = dcx % pCols;
                 col = (dfl & 2) ? (pCols - 1 - cc) : cc;
                 let rr = pRows - dry;                       // desc[3] = rows - row
                 if (rr < 0) rr = 0; if (rr >= pRows) rr = pRows - 1;
                 row2 = rr;
-                m = dm;
             } else {
                 // fallback: part grid from the quad's rank wrap (multi-instance safe)
-                pCols = (W / m) | 0; if (pCols < 1) pCols = 1;
-                pRows = (H / m) | 0; if (pRows < 1) pRows = 1;
                 col = ((col % pCols) + pCols) % pCols;
                 row2 = ((row % pRows) + pRows) % pRows;
             }
+            m = mq;
         }
         // --- W>32 AND H>32 MULTI-TILE PART (m==32, cols>1, rows>1): copy the NATIVE storage chunk.
         // The engine stores such a part as ONE full-W×H PVR-twiddle blob whose 32×32 chunks follow
@@ -486,7 +509,7 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
             const k = bby * Tw + col * bbh + (row2 - bby);
             void twTileYFirst;   // kept for reference
             const o = k * 512;
-            if (o + 512 <= p.raw.length) { vram.set(p.raw.subarray(o, o + 512), addr); written++; continue; }
+            if (o + 512 <= p.raw.length) { vram.set(p.raw.subarray(o, o + 512), addr); written++; if (mask) mask[q] = 1; continue; }
         }
         // extract the m×m linear region at (col*m, row*m), clamped to W×H, into the tile's
         // top-left (zero-pad the rest of the 32×32 = the engine's UV-clamped sample area).
@@ -501,7 +524,7 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
             }
         }
         vram.set(retwiddle32(tile), addr);        // standalone 32×32 PAL4_TW at this tile's own TCW
-        written++;
+        written++; if (mask) mask[q] = 1;
     }
     return { decoded, bytes, written, quads, parts: parts.size };
 }

@@ -549,8 +549,23 @@ window._stageMerge=(g)=>{
 const BODYSRC=(new URLSearchParams(location.search).get('bodysrc')||'wasm').toLowerCase();
 window._bodySrc=BODYSRC;
 const BODY={want:new URLSearchParams(location.search).has('bodylocal'),
-  started:false,ready:false,mod:null,ram:null,dynRegs:null,ta:null,vframe:-1,frames:0,gfxN:0,err:0,ws:null};
+  started:false,ready:false,mod:null,ram:null,dynRegs:null,ta:null,bt:null,vframe:-1,frames:0,gfxN:0,err:0,ws:null};
 window._body=BODY;
+// === ?bodytex=local: body-quad TEXTURES from the CLIENT-SIDE body_decoder ====
+// The render_frame GEOMETRY/splice/pairing stay untouched; only each staged
+// quad's texture source changes: instead of TCW->TextureManager over the wire
+// VRAM (raced by the two-socket skew — adjacent-frame staging = the per-tile
+// "confetti"), the texels are decoded from the SAME BODY.ram image that emitted
+// the quad (body_decoder ensureBodyTextures, the path byte-gated 5/5 vs the
+// mirror in 189544592, + applyLocalGfx disc-art overlay) and ride pp.texObj
+// (direct-texture override in pvr2-renderer — TextureManager bypassed). Each
+// staged tile is the engine's own 32x32 PAL4_TW at the quad's TCW, so the
+// quad's UVs are ALREADY correct for it — no UV rewrite. Default OFF: without
+// ?bodytex=local nothing below runs (byte-identical behavior).
+const BTEX={want:(new URLSearchParams(location.search).get('bodytex')||'')==='local',
+  on:false,ensure:null,applyGfx:null,lvram:null,cache:{},tex:new Map(),samp:new Map(),
+  stats:{staged:0,texObj:0,fallback:0,decMs:0},err:0};
+window._btex=BTEX;
 const _bodyGuest=a=>(a>>>0)&0xFFFFFF;
 window._bodyStart=async function bodyStart(){
   if(BODY.started) return; BODY.started=true;
@@ -563,9 +578,17 @@ window._bodyStart=async function bodyStart(){
   }
   try{
     const [{default:createRenderFrame},fz]=await Promise.all([
-      import('./render-replica/render_frame.mjs?v=scene5'),
+      import('./render-replica/render_frame.mjs?v=scene6'),
       import('./webgpu/fzstd.mjs')]);
-    BODY.mod=await createRenderFrame({locateFile:p=>p.endsWith('.wasm')?'render-replica/'+p+'?v=scene5':p});
+    BODY.mod=await createRenderFrame({locateFile:p=>p.endsWith('.wasm')?'render-replica/'+p+'?v=scene6':p});
+    if(BTEX.want){ // ?bodytex=local: the validated client-side texel layer + disc-art overlay
+      const [bd,lg]=await Promise.all([
+        import('./render-replica/body_decoder.mjs?v=scene7'),
+        import('./render-replica/local_gfx_overlay.mjs?v=scene5')]);
+      BTEX.ensure=bd.ensureBodyTextures; BTEX.applyGfx=lg.applyLocalGfx;
+      BTEX.lvram=new Uint8Array(8*1024*1024);   // local staging image (decoder writes at each quad's TCW)
+      BTEX.on=true; console.log('[btex] bodytex=local ACTIVE (body_decoder texels + applyLocalGfx)');
+    }
     const qp=new URLSearchParams(location.search);
     const proto=location.protocol==='https:'?'wss':'ws';
     const url=qp.get('replica')||`${proto}://${location.host}/replica-live`;
@@ -582,6 +605,9 @@ window._bodyStart=async function bodyStart(){
         pre.staticRegs.forEach((r,i)=>{ if(r.tag==='ram16') BODY.ram.set(pre.staticData[i],0);
           else BODY.ram.set(pre.staticData[i],_bodyGuest(r.addr)); });
         BODY.dynRegs=pre.dynamicRegs; seeded=true; BODY.ready=true;
+        // ?bodytex=local: PRE-WARM the local disc-art cache from the connect seed (kicks a
+        // fetch for every loaded char, active + tag-in candidates) — replay.html seedFrom port.
+        if(BTEX.on){ try{ BTEX.applyGfx(BODY.ram,null); }catch(e){ if(++BTEX.err<4) console.warn('[btex] pre-warm',e); } }
         console.log('[body] seeded: '+pre.staticRegs.length+' static + '+pre.dynamicRegs.length+' dynamic regions');
         return;
       }
@@ -616,6 +642,9 @@ function _bodyApplyFrame(u8){
       for(let i=0;i<nGfx&&p+8<=u8.length;i++){ const base=dv.getUint32(p,true),len=dv.getUint32(p+4,true); p+=8;
         if(len>0x800000||p+len>u8.length) break;
         BODY.ram.set(u8.subarray(p,p+len),_bodyGuest(base)); p+=len; BODY.gfxN++; } } }
+  // ?bodytex=local: override shipped GFX1 pixels with the COMPLETE local disc art at
+  // node+0x15C (cached by char_id) BEFORE the walker/decoder read — replay.html port.
+  if(BTEX.on){ try{ BTEX.applyGfx(BODY.ram,null); }catch(e){ if(++BTEX.err<4) console.warn('[btex] gfx',e); } }
   const M=BODY.mod;
   const ramPtr=M._malloc(BODY.ram.length); M.HEAPU8.set(BODY.ram,ramPtr);
   const cap=256*1024, outPtr=M._malloc(cap);
@@ -625,19 +654,62 @@ function _bodyApplyFrame(u8){
   // assists, CA beams...) stay on the wire, so re-emitting them here would
   // DOUBLE-DRAW. Same measured block set as the server predicate.
   const flt=new Uint8Array(len); let w=0;
-  for(let o=0;o+96<=len;o+=96){
+  const kept=BTEX.on?[]:null; let qi=0;   // RAW quad index of each kept quad (meta pairing)
+  for(let o=0;o+96<=len;o+=96,qi++){
     const a=((raw[o+12]|raw[o+13]<<8|raw[o+14]<<16|raw[o+15]<<24)>>>0)&0x1FFFFF;
     const bk=a>>>12;
-    if(bk===0x82||bk===0x83||bk===0x88||bk===0x89){ flt.set(raw.subarray(o,o+96),w); w+=96; }
+    if(bk===0x82||bk===0x83||bk===0x88||bk===0x89){ flt.set(raw.subarray(o,o+96),w); w+=96; if(kept)kept.push(qi); }
   }
   BODY.ta=flt.slice(0,w);
   M._free(ramPtr); M._free(outPtr);
+  // ?bodytex=local: stage the kept quads' texels NOW (state-coherent: same BODY.ram that
+  // emitted this ta) via the validated ensureBodyTextures, then SNAPSHOT each staged 512B
+  // tile so a ring-paired older frame keeps ITS OWN texels even after lvram advances.
+  BODY.bt=BTEX.on?_btexStage(M,kept):null;
   BODY.vframe=vframe; BODY.frames++;
   // vframe-keyed ring for EXACT wire pairing (the engine double-buffers sprite
   // staging per frame; latest-wins pairing reads the other bank's stale tiles).
   if(!BODY.ring) BODY.ring=[];
-  BODY.ring.push({vf:vframe,ta:BODY.ta});
+  BODY.ring.push({vf:vframe,ta:BODY.ta,bt:BODY.bt});
   if(BODY.ring.length>16) BODY.ring.shift();
+}
+// ?bodytex=local — per-frame texel stage. Extracts render_frame's per-quad texture-pairing
+// exports (sel/gfx1/colrow/mirror/srcdesc — replay.html transpiledTA extraction, filtered to
+// the kept quads), runs the byte-gated ensureBodyTextures into BTEX.lvram, and snapshots each
+// written quad's 512B PAL4_TW tile. Returns {mask,tiles} or null.
+function _btexStage(M,kept){
+  if(!kept||!BODY.ta||!BODY.ta.length) return null;
+  try{
+    const t0=performance.now();
+    const nq=kept.length, nqAll=M._render_frame_quad_count();
+    if(!nq||!nqAll) return null;
+    // all mallocs BEFORE any heap view (malloc growth detaches HEAPU8.buffer)
+    const sp=M._malloc(nqAll*2||2),gp=M._malloc(nqAll*4||4),cp=M._malloc(nqAll*8||8),mp=M._malloc(nqAll||1);
+    const sdp=M._render_frame_quad_srcdesc?M._malloc(nqAll*4||4):0;
+    M._render_frame_quad_sels(sp,nqAll); M._render_frame_quad_gfx1s(gp,nqAll);
+    M._render_frame_quad_colrow(cp,nqAll); M._render_frame_quad_mirror(mp,nqAll);
+    if(sdp) M._render_frame_quad_srcdesc(sdp,nqAll);
+    const HS=new Uint16Array(M.HEAPU8.buffer,sp,nqAll),HG=new Uint32Array(M.HEAPU8.buffer,gp,nqAll),
+          HC=new Int32Array(M.HEAPU8.buffer,cp,nqAll*2),H8=M.HEAPU8;
+    const kS=new Uint16Array(nq),kG=new Uint32Array(nq),kCR=new Int32Array(nq*2),kM=new Uint8Array(nq);
+    const kSD=sdp?new Uint8Array(nq*4):null;
+    for(let i=0;i<nq;i++){ const q=kept[i];
+      kS[i]=HS[q]; kG[i]=HG[q]; kCR[2*i]=HC[2*q]; kCR[2*i+1]=HC[2*q+1]; kM[i]=H8[mp+q];
+      if(kSD){ kSD[4*i]=H8[sdp+4*q]; kSD[4*i+1]=H8[sdp+4*q+1]; kSD[4*i+2]=H8[sdp+4*q+2]; kSD[4*i+3]=H8[sdp+4*q+3]; } }
+    M._free(sp); M._free(gp); M._free(cp); M._free(mp); if(sdp) M._free(sdp);
+    const opts={mask:new Uint8Array(nq)};
+    BTEX.ensure(BODY.ram,BTEX.lvram,BODY.ta,nq,BTEX.cache,kS,kG,kCR,opts,kM,kSD);
+    const tiles=new Uint8Array(nq*512); let staged=0;
+    for(let i=0;i<nq;i++){ if(!opts.mask[i]) continue;
+      const o=i*96+12;
+      const tcw=(BODY.ta[o]|BODY.ta[o+1]<<8|BODY.ta[o+2]<<16|BODY.ta[o+3]<<24)>>>0;
+      const a=((tcw&0x1FFFFF)<<3)>>>0;
+      if(a+512<=BTEX.lvram.length){ tiles.set(BTEX.lvram.subarray(a,a+512),i*512); staged++; }
+      else opts.mask[i]=0; }
+    BTEX.stats.staged=staged;
+    BTEX.stats.decMs+=((performance.now()-t0)-BTEX.stats.decMs)*0.1;   // EMA ms/frame
+    return {mask:opts.mask,tiles};
+  }catch(e){ if(++BTEX.err<6) console.warn('[btex] stage',e); return null; }
 }
 // Merge the latest body TA into the parsed wire frame — same model as
 // _stageMerge but APPENDED (bodies draw over the remaining TR content).
@@ -652,13 +724,16 @@ window._bodyMerge=(g,wantVf,ord)=>{
     // the TA wire, so the latest state IS this frame's state (no vframe ring).
     try{ bp=window._spriteBridge.build(); }catch(e){ if(++BODY.err<6) console.warn('[body] bridge',e); return; }
   } else {
-  let ta=BODY.ta;
+  let ta=BODY.ta, bt=BODY.bt;
   // PAIR AT vframe-1: the engine's TA lags the state counter by one frame
   // (capture-proven: body(V) == engine TA stamped V+1; garble_diff 2026-07-09).
   if(wantVf>=0&&BODY.ring){ const hit=BODY.ring.find(e=>e.vf===wantVf-1);
-    if(hit){ ta=hit.ta; BODY.pairHit=(BODY.pairHit|0)+1; } else BODY.pairMiss=(BODY.pairMiss|0)+1; }
+    if(hit){ ta=hit.ta; bt=hit.bt; BODY.pairHit=(BODY.pairHit|0)+1; } else BODY.pairMiss=(BODY.pairMiss|0)+1; }
   if(!ta||!ta.length) return;
   try{ bp=_bodyParser2.parse(ta,ta.length); }catch(e){ if(++BODY.err<6) console.warn('[body] parse',e); return; }
+  // ?bodytex=local: attach the paired frame's OWN decoded texels (pp.texObj) to each staged
+  // quad — geometry/splice below are untouched; unstaged quads keep the wire-VRAM lookup.
+  if(BTEX.on&&bt&&bp){ try{ _btexAttach(bp,bt); }catch(e){ if(++BTEX.err<8) console.warn('[btex] attach',e); } }
   }
   if(!bp||!bp.vertexCount) return;
   const F=7;
@@ -710,6 +785,56 @@ window._bodyMerge=(g,wantVf,ord)=>{
   g.vertexCount+=bp.vertexCount;
   g._bodyMerged=true;
 };
+
+// === ?bodytex=local attach: decoded tiles -> per-quad GPUTexture (pp.texObj) =
+// Each staged quad's texture is the engine's OWN declared 32x32 PAL4 at its TCW
+// (walker TSP is fixed 32x32; body_decoder wrote exactly that 512B PAL4_TW), so
+// the quad's UVs need NO adjustment — texObj is byte-for-byte what the wire
+// path would decode from unraced staging. Palette = window._T._pal (the SAME
+// live-wire palette the TextureManager decode uses -> local vs wire differ ONLY
+// by staging bytes). Cache key = content hash of (512B tile + 64B palette bank)
+// + palSel + sampler bits: pose-static frames re-decode NOTHING; a palette
+// write (hit-flash/skins) changes the bank hash -> new texture, exact.
+function _btexHash(u8,off,len,seed){ let h=(seed>>>0)^0x811C9DC5;
+  for(let i=0;i<len;i++){ h^=u8[off+i]; h=Math.imul(h,0x01000193)>>>0; } return h>>>0; }
+function _btexSampler(dev,tsp){
+  // EXACT TextureManager sampler derivation (TSP fm/cu/cv/fu/fv bits) — parity with the wire path.
+  const fm=(tsp>>13)&3,cu=(tsp>>16)&1,cv=(tsp>>15)&1,fu=(tsp>>18)&1,fv=(tsp>>17)&1;
+  const filt=fm?'linear':'nearest';
+  const wu=cu?'clamp-to-edge':fu?'mirror-repeat':'repeat';
+  const wv=cv?'clamp-to-edge':fv?'mirror-repeat':'repeat';
+  const k=filt+'|'+wu+'|'+wv; let s=BTEX.samp.get(k);
+  if(!s){ s=dev.createSampler({minFilter:filt,magFilter:filt,addressModeU:wu,addressModeV:wv}); BTEX.samp.set(k,s); }
+  return s;
+}
+function _btexAttach(bp,bt){
+  const dev=window._R&&window._R.dev, T=window._T;
+  if(!dev||!T||!T._pal) return;              // palette not up yet -> wire fallback this frame
+  const pal=T._pal, bankH=new Map();         // palSel -> 64B palette-bank hash (per call)
+  for(const pp of (bp.translucent||[])){
+    const k=(pp.param|0)-1;                  // TAParser param enumeration == filtered quad index
+    if(k<0||k>=bt.mask.length||!bt.mask[k]){ BTEX.stats.fallback++; continue; }
+    const tcw=pp.tcw>>>0, tsp=pp.tsp>>>0;
+    const fmt=(tcw>>27)&7, tw=8<<((tsp>>3)&7), th=8<<(tsp&7);
+    if(fmt!==5||tw!==32||th!==32){ BTEX.stats.fallback++; continue; }   // only the proven 32x32 PAL4 case
+    const palSel=(tcw>>21)&0x3F;
+    let ph=bankH.get(palSel);
+    if(ph===undefined){ ph=_btexHash(pal,palSel<<6,64,0x9E3779B9); bankH.set(palSel,ph); }
+    const key=_btexHash(bt.tiles,k*512,512,ph)+'_'+_btexHash(bt.tiles,k*512,512,~ph)+'_'+palSel+'_'+((tsp>>13)&0x3F);
+    let e=BTEX.tex.get(key);
+    if(!e){
+      if(BTEX.tex.size>2048){ for(const v of BTEX.tex.values()){ try{v.texture.destroy();}catch(_){} } BTEX.tex.clear(); }
+      const rgba=new Uint8Array(32*32*4);
+      if(!T._pal4(bt.tiles.subarray(k*512,(k+1)*512),0,32,32,5,5,palSel,rgba)){ BTEX.stats.fallback++; continue; }
+      const texture=dev.createTexture({size:[32,32],format:'rgba8unorm',
+        usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
+      dev.queue.writeTexture({texture},rgba,{bytesPerRow:128},[32,32]);
+      e={texture,sampler:_btexSampler(dev,tsp)};
+      BTEX.tex.set(key,e);
+    }
+    pp.texObj=e; BTEX.stats.texObj++;
+  }
+}
 
 // === SPRITE-MACHINE poly-entry bridge (?bodysrc=sprite) ======================
 // Converts the sprite machine's per-object draw list (sprite-client.mjs
