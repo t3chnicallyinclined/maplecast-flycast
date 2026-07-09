@@ -341,8 +341,12 @@ const ZCS2 = {
       if(epoch!==this.epoch){ this._desync('epoch gap '+this.epoch+'->'+epoch); return null; }  // relay dropped msgs
     }
     this.zB+=d.byteLength; this.frames++;
+    const camLen=(flags&8)?132:0;
+    if(camLen){ this.camSid=(d[10]|d[11]<<8|d[12]<<16|d[13]<<24)>>>0;
+      const cf=new Float32Array(d.slice(14,14+128).buffer);
+      this.M2=cf.slice(0,16); this.M1=cf.slice(16,32); }
     const t0=performance.now();
-    try{ this.dec.push(d.subarray(10)); }
+    try{ this.dec.push(d.subarray(10+camLen)); }
     catch(e){ this._desync('fzstd: '+e.message); return null; }
     this.decMs+=performance.now()-t0;
     if(this.clen>=innerSize){
@@ -405,6 +409,8 @@ ZCS2.worker=null;
       if(ev.data.init){ const m=await import(ev.data.init); Dz=m.Decompress; post({ready:1}); return; }
       const d=new Uint8Array(ev.data.b, ev.data.off, ev.data.len);
       const flags=d[5], ep=d[4], soa=(flags&2)!==0, stripped=(flags&4)!==0;
+      const camLen=(flags&8)?132:0;
+      const cam=camLen? d.slice(10,10+132).buffer : null;   // sid u32 + M2 16f + M1 16f
       const innerSize=(d[6]|d[7]<<8|d[8]<<16|d[9]<<24)>>>0;
       if(flags&1){
         chunks=[]; clen=0;
@@ -416,7 +422,7 @@ ZCS2.worker=null;
         if(ep!==epoch){ synced=false; chunks=[]; clen=0; post({desync:'epoch gap '+epoch+'->'+ep}); return; }
       }
       const t0=performance.now();
-      try{ dec.push(d.subarray(10)); }
+      try{ dec.push(d.subarray(10+camLen)); }
       catch(e){ synced=false; chunks=[]; clen=0; post({desync:'fzstd: '+e.message}); return; }
       if(clen>=innerSize){
         const inner=new Uint8Array(innerSize); let o=0;
@@ -428,7 +434,8 @@ ZCS2.worker=null;
         catch(e){ synced=false; post({desync:'soaInverse: '+e.message}); return; }
         const fsz=(fin[0]|fin[1]<<8|fin[2]<<16|fin[3]<<24)>>>0;
         if(fsz+4!==fin.length){ synced=false; post({desync:'frameSize '+fsz+'+4 != '+fin.length}); return; }
-        post({frame:fin.buffer, len:fin.length, stripped, decMs:performance.now()-t0},[fin.buffer]);
+        const t=[fin.buffer]; if(cam) t.push(cam);
+        post({frame:fin.buffer, len:fin.length, stripped, cam, decMs:performance.now()-t0},t);
       }
     };`;
   try{
@@ -451,6 +458,12 @@ ZCS2.worker=null;
       if(m.frame){
         ZCS2.frames++; ZCS2.decMs+=m.decMs;
         ZCS2.lastStripped=m.stripped;
+        if(m.cam){   // camera paired with THIS frame — no more one-frame stage swim
+          const cd=new DataView(m.cam);
+          ZCS2.camSid=cd.getUint32(0,true);
+          const f=new Float32Array(m.cam,4,32);
+          ZCS2.M2=f.slice(0,16); ZCS2.M1=f.slice(16,32);
+        }
         if(ZCS2._stripKnown!==undefined && m.stripped!==ZCS2._stripKnown && ZCS2.render) ZCS2._resetTAChain('strip '+ZCS2._stripKnown+'->'+m.stripped);
         ZCS2._stripKnown=m.stripped;
         if(!ZCS2.render || !window._injectFrame) return;

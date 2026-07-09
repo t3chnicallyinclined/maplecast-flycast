@@ -2845,11 +2845,23 @@ done_diff:
 					soaDone = true;
 				}
 			}
-			_zBuf.resize(10 + ZSTD_compressBound(zPayloadSize));
+			// Header: flags bit3 = 132B camera block (stage_id u32 + M2 16f + M1 16f)
+			// follows the 10B header, BEFORE the zstd chunk. Riding INSIDE the frame
+			// message pairs the camera with ITS frame exactly — the separate CAMM
+			// msg raced the async worker decode (one-frame stage swim under motion).
+			const uint32_t camLen = stripDone ? 132 : 0;
+			_zBuf.resize(10 + camLen + ZSTD_compressBound(zPayloadSize));
 			_zBuf[0]='Z'; _zBuf[1]='C'; _zBuf[2]='S'; _zBuf[3]='2';
-			_zBuf[4]=_zEpoch; _zBuf[5]=(uint8_t)((streamStart ? 1 : 0) | (soaDone ? 2 : 0) | (stripDone ? 4 : 0));
+			_zBuf[4]=_zEpoch; _zBuf[5]=(uint8_t)((streamStart ? 1 : 0) | (soaDone ? 2 : 0) | (stripDone ? 4 : 0) | (camLen ? 8 : 0));
 			memcpy(_zBuf.data()+6, &zPayloadSize, 4);
-			ZSTD_outBuffer ob{ _zBuf.data()+10, _zBuf.size()-10, 0 };
+			if (camLen) {
+				uint8_t* cm = _zBuf.data() + 10;
+				uint32_t sid = addrspace::read8(0x8C289638);
+				memcpy(cm, &sid, 4);
+				for (int i = 0; i < 16; i++) { uint32_t v = addrspace::read32(0x8C2D6AD8 + i * 4); memcpy(cm + 4  + i * 4, &v, 4); }
+				for (int i = 0; i < 16; i++) { uint32_t v = addrspace::read32(0x8C2D6B18 + i * 4); memcpy(cm + 68 + i * 4, &v, 4); }
+			}
+			ZSTD_outBuffer ob{ _zBuf.data()+10+camLen, _zBuf.size()-10-camLen, 0 };
 			ZSTD_inBuffer  ib{ zPayload, zPayloadSize, 0 };
 			size_t zr = ZSTD_compressStream2(_zc, &ob, &ib, ZSTD_e_flush);
 			if (ZSTD_isError(zr) || ib.pos != ib.size || zr != 0) {
@@ -2860,18 +2872,10 @@ done_diff:
 					ZSTD_isError(zr) ? ZSTD_getErrorName(zr) : "incomplete flush");
 				_zstreamResetPending.store(true, std::memory_order_release);
 			} else {
-				maplecast_ws::broadcastBinary(_zBuf.data(), (uint32_t)(10 + ob.pos));
+				maplecast_ws::broadcastBinary(_zBuf.data(), (uint32_t)(10 + camLen + ob.pos));
 				if (stripDone) {
-					// CAMM companion for the local stage: 'CAMM'(4) + stage_id(4) +
-					// M2 16f @0x8C2D6AD8 (view-proj: ALL zoom/pan) + M1 16f @0x8C2D6B18
-					// (viewport). 136 B raw, broadcast per frame (relay forwards verbatim).
-					uint8_t cm[136];
-					memcpy(cm, "CAMM", 4);
-					uint32_t sid = addrspace::read8(0x8C289638);
-					memcpy(cm + 4, &sid, 4);
-					for (int i = 0; i < 16; i++) { uint32_t v = addrspace::read32(0x8C2D6AD8 + i * 4); memcpy(cm + 8  + i * 4, &v, 4); }
-					for (int i = 0; i < 16; i++) { uint32_t v = addrspace::read32(0x8C2D6B18 + i * 4); memcpy(cm + 72 + i * 4, &v, 4); }
-					maplecast_ws::broadcastBinary(cm, 136);
+					// (camera now rides INSIDE the ZCS2 header, flags bit3 — the old
+					// separate CAMM msg raced the async worker decode.)
 				}
 				uint64_t zUs = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
 					std::chrono::steady_clock::now() - t0z).count();

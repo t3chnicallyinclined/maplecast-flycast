@@ -146,7 +146,7 @@ function onZcs2(d) {
   } else if (!zSynced || epoch!==zEpoch) return;
   zBytes += d.length;
   const t0=performance.now();
-  try { zdec.push(d.subarray(10)); } catch(e){ console.log('fzstd err:',e.message); zSynced=false; return; }
+  try { zdec.push(d.subarray(10+((d[5]&8)?132:0))); } catch(e){ console.log('fzstd err:',e.message); zSynced=false; return; }
   decMs += performance.now()-t0; decN++;
   if (zLen >= innerSize) {
     const inner = new Uint8Array(innerSize);
