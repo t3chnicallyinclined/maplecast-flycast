@@ -2796,7 +2796,8 @@ done_diff:
 				memcpy(w + 76, &ssDPay, 4);
 				memcpy(w + 80 + ssDPay, dstStart + tailOff, tailLen);
 				uint32_t ssTotal = 80 + ssDPay + tailLen;
-				memcpy(w, &ssTotal, 4);                   // frameSize field
+				uint32_t ssFrameSize = ssTotal - 4;       // wire convention: frameSize EXCLUDES its own field
+				memcpy(w, &ssFrameSize, 4);
 				if (frameNum % 600 == 0 && _ssFrames > 0)
 					printf("[STAGESTRIP] avg %llu B/frame stripped (ta %u -> %u this frame)\n",
 						(unsigned long long)(_ssStrippedB / _ssFrames), taSize, _ssSz[sc]);

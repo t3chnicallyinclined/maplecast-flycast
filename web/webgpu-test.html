@@ -350,12 +350,18 @@ const ZCS2 = {
       const extra=this.clen-innerSize;
       this.chunks=[]; this.clen=0;
       if(extra>0){ this._desync('chunk overrun +'+extra+'B'); return null; }  // lost a msg mid-frame
-      // Belt: the inner frame's own frameSize field must equal innerSize — a lossy
-      // or reordered transport can assemble a size-correct but byte-mixed frame.
-      const fsz=(inner[0]|inner[1]<<8|inner[2]<<16|inner[3]<<24)>>>0;
-      if(fsz!==innerSize){ this._desync('inner frameSize '+fsz+' != '+innerSize); return null; }
-      try{ return this._soa ? this.soaInverse(inner) : inner; }
+      let fin;
+      try{ fin = this._soa ? this.soaInverse(inner) : inner; }
       catch(e){ this._desync('soaInverse: '+e.message); return null; }
+      // Belt (POST-inverse, on the final legacy-format frame): the wire convention
+      // is frameSize = total bytes MINUS its own 4-byte field (serverPublish:
+      // frameSizeVal = totalSize - 4). The first belt version assumed inclusive
+      // size and rejected EVERY frame -> permanent desync loop (the "pausing").
+      // SoA inners carry a stale pre-transform frameSize by design, so the check
+      // runs after reconstruction, where it also validates the inverse itself.
+      const fsz=(fin[0]|fin[1]<<8|fin[2]<<16|fin[3]<<24)>>>0;
+      if(fsz+4!==fin.length){ this._desync('frameSize '+fsz+'+4 != len '+fin.length); return null; }
+      return fin;
     }
     return null;
   }
