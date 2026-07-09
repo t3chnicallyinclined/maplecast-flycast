@@ -1943,6 +1943,11 @@ async function main(){
                     const inner=ZCS2.onMsg(d);
                     if(!(ZCS2.render && inner)) return;
                     d=inner;   // fall through: uncompressed inner delta frame
+                    // Tag THIS frame as ZCS2-sourced+stripped for the merge site.
+                    // (A sticky global here double-drew the stage on legacy-fallback
+                    // frames — the wire stage + the local stage z-fighting = the
+                    // green flicker during/after supers.)
+                    ZCS2._frameStripped=ZCS2.lastStripped;
                 }
                 else if(d.length>=8 && d[0]===0x5A && d[1]===0x43 && d[2]===0x53 && d[3]===0x54){ // 'ZCST'
                     ZCS2.legacyB+=d.byteLength;
@@ -2065,8 +2070,11 @@ async function main(){
                     const t1=performance.now();
                     const g=P.parse(fr.taBuffer,fr.taSize);
                     try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e2) {}
-                    // Phase 3a: stage-stripped ZCS2 frame -> prepend the local baked stage
-                    if(ZCS2.render&&ZCS2.lastStripped){ try{ window._stageMerge(g); }catch(e3){ if(((ZCS2._smErr=(ZCS2._smErr||0)+1))<4) console.warn('[stage-merge]',e3); } }
+                    // Phase 3a: stage-stripped ZCS2 frame -> prepend the local baked stage.
+                    // Consume the per-frame tag — NEVER a sticky global (legacy-fallback
+                    // frames carry the wire stage and must not get the local one too).
+                    const _mergeNow=ZCS2._frameStripped; ZCS2._frameStripped=false;
+                    if(ZCS2.render&&_mergeNow){ try{ window._stageMerge(g); }catch(e3){ if(((ZCS2._smErr=(ZCS2._smErr||0)+1))<4) console.warn('[stage-merge]',e3); } }
                     pMs=performance.now()-t1;
                     lastParsed=g; window._lastParsed=g; window._lastFrameNum=D.frameNum;
                     // Feed predictor with real frame vertex data
