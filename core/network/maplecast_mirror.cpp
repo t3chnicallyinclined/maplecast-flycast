@@ -2742,16 +2742,31 @@ done_diff:
 			// verbatim. Legacy wire untouched. Flag bit2 marks a stripped frame; the
 			// CAMM companion (below) carries stage_id + M2 + M1 for the local stage.
 			bool stripDone = false;
-			// in_match gate (0x8C289624): at attract/menus the stage_id + camera are
-			// stale/garbage — stripping nothing while flagging bit2 would make clients
-			// draw the training stage under menus. Strip only during a real match.
+			static bool _ssStripActive = false;   // hysteresis-latched strip gate
+			static bool _ssStripReset  = false;   // restart stripped chain on re-engage
+			// in_match gate (0x8C289624) WITH HYSTERESIS: the raw byte FLAPS during
+			// round transitions / super cinematics — each flip toggled the strip,
+			// forcing chain resyncs and alternating the client's stage between wire
+			// and local render (THE green flicker). Engage after 60 stable in-match
+			// frames; disengage only after 180 stable out-frames. On disengage,
+			// restart the stripped chain so re-engagement begins with a keyframe.
+			{
+				static int  _ssInStreak = 0, _ssOutStreak = 0;
+				static bool _ssEngaged = false;
+				if (addrspace::read8(0x8C289624)) { _ssInStreak++; _ssOutStreak = 0; }
+				else                              { _ssOutStreak++; _ssInStreak = 0; }
+				if (!_ssEngaged && _ssInStreak >= 60) _ssEngaged = true;
+				if (_ssEngaged && _ssOutStreak >= 180) { _ssEngaged = false; _ssStripReset = true; }
+				_ssStripActive = _ssEngaged;
+			}
 			if (!stripAllowlist().empty() && totalSize > 84 && taSize > 0
-					&& addrspace::read8(0x8C289624)) {
+					&& _ssStripActive) {
 				static std::vector<uint8_t> _ssTa[2];
 				static uint32_t _ssSz[2] = {0, 0};
 				static int _ssCur = 0; static bool _ssHasPrev = false;
 				static std::vector<uint8_t> _ssInner;
 				static uint64_t _ssStrippedB = 0, _ssFrames = 0;
+				if (_ssStripReset) { _ssHasPrev = false; _ssStripReset = false; }
 				const int sc = _ssCur, sp = 1 - sc;
 				if (_ssTa[sc].size() < taSize) _ssTa[sc].resize(taSize);
 				_ssSz[sc] = taStripStage(_taBuf[cur], taSize, _ssTa[sc].data());
