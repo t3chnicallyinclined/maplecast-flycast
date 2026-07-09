@@ -257,6 +257,7 @@ canvas{display:block;background:transparent}
 
 <script type="module">
 import {FrameDecoder} from './webgpu/frame-decoder.mjs?v=7';
+import {Decompress as ZcsDecompress} from './webgpu/fzstd.mjs';
 import {TAParser} from './webgpu/ta-parser.mjs';
 import {TextureManager} from './webgpu/texture-manager.mjs';
 import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=5';
@@ -266,6 +267,60 @@ import {FramePredictor} from './webgpu/frame-predictor.mjs';
 import {SpriteBake} from './webgpu/bake.mjs?v=11';
 import {SpriteClient} from './webgpu/sprite-client.mjs?v=85';
 import {SpriteGPU} from './webgpu/sprite-gpu.mjs?v=12';
+// === ZCS2 (TA-Wire v2 Phase 1) — streaming-zstd shadow wire =================
+// 'ZCS2'(4)+epoch(1)+flags(1:bit0 streamStart)+innerSize(4 LE)+zstd-chunk of ONE
+// long per-epoch zstd frame, flushed per game frame. onMsg() feeds a streaming
+// fzstd decoder and returns the decoded INNER frame (a plain UNCOMPRESSED legacy
+// delta frame) when complete. The panel (bottom-right) meters both wires; its
+// "render from ZCS2" toggle makes the WHOLE existing render path run off the
+// new wire (inner frame replaces `d` in onframe; legacy ZCST deltas are then
+// skipped while SYNCs still apply). Server side: MAPLECAST_ZSTREAM=1 dual-emit.
+const ZCS2 = {
+  render:false, epoch:-1, synced:false, dec:null, chunks:[], clen:0,
+  zB:0, legacyB:0, frames:0, decMs:0, epochs:0,
+  onMsg(d){
+    const epoch=d[4], flags=d[5];
+    const innerSize=(d[6]|d[7]<<8|d[8]<<16|d[9]<<24)>>>0;
+    if(flags&1){
+      this.chunks=[]; this.clen=0;
+      this.dec=new ZcsDecompress((c)=>{ this.chunks.push(c); this.clen+=c.length; });
+      this.epoch=epoch; this.synced=true; this.epochs++;
+    } else if(!this.synced || epoch!==this.epoch) return null;  // wait for next stream-start
+    this.zB+=d.byteLength; this.frames++;
+    const t0=performance.now();
+    try{ this.dec.push(d.subarray(10)); }
+    catch(e){ console.warn('[ZCS2] fzstd:',e.message,'— resync at next epoch'); this.synced=false; return null; }
+    this.decMs+=performance.now()-t0;
+    if(this.clen>=innerSize){
+      const inner=new Uint8Array(innerSize); let o=0;
+      for(const c of this.chunks){ const n=Math.min(c.length,innerSize-o); inner.set(c.subarray(0,n),o); o+=n; if(o>=innerSize)break; }
+      this.chunks=[]; this.clen=0;
+      return inner;
+    }
+    return null;
+  }
+};
+window._ZCS2=ZCS2;
+(function(){
+  const p=document.createElement('div');
+  p.id='zcs2_panel';
+  p.style.cssText='position:fixed;bottom:8px;right:8px;z-index:99999;background:rgba(10,14,20,.9);border:1px solid #2a3550;border-radius:6px;color:#cfe;font:11px/1.55 monospace;padding:6px 10px;min-width:236px';
+  p.innerHTML='<b style="color:#6fb8ff">ZCS2 wire</b> <label style="float:right;color:#4dd08a;cursor:pointer"><input id="zcs2_render" type="checkbox"> render from ZCS2</label>'
+    +'<div id="zcs2_stats" style="white-space:pre;margin-top:3px">waiting for ZCS2 stream…</div>';
+  document.body.appendChild(p);
+  p.querySelector('#zcs2_render').onchange=e=>{ ZCS2.render=e.target.checked; };
+  let lastZ=0,lastL=0;
+  setInterval(()=>{
+    const z=ZCS2.zB-lastZ, l=ZCS2.legacyB-lastL; lastZ=ZCS2.zB; lastL=ZCS2.legacyB;
+    const el=document.getElementById('zcs2_stats'); if(!el) return;
+    const src = ZCS2.render ? (ZCS2.synced?'ZCS2 ▶ (new wire renders)':'ZCS2 ⏳ waiting for epoch…') : 'legacy ZCST';
+    el.textContent =
+      'ZCS2   '+(z*8/1e6).toFixed(2)+' Mbps   epoch '+(ZCS2.epoch<0?'–':ZCS2.epoch)+'\n'
+     +'legacy '+(l*8/1e6).toFixed(2)+' Mbps   ratio '+(z?(l/z).toFixed(2)+'×':'–')+'\n'
+     +'dec '+(ZCS2.frames?(ZCS2.decMs/ZCS2.frames).toFixed(2):'0.00')+' ms/msg   src: '+src;
+  },1000);
+})();
+
 // StafGL (sprite-staf-gl.mjs) RETIRED — the STAF/HUDF stream now renders through the
 // proven PVR2Renderer (see STAFR/renderStaf below). StafGL stays on disk for reference.
 
@@ -1777,6 +1832,22 @@ async function main(){
                         audioWorkletPort.postMessage(new Int16Array(d.buffer, d.byteOffset+4, (d.length-4)/2));
                     }
                     return;
+                }
+                // ZCS2 streaming shadow wire (TA-Wire v2): meter + decode. When the
+                // panel's "render from ZCS2" is on and the stream is synced, the decoded
+                // inner frame REPLACES `d` and falls through — the entire normal TA path
+                // below (FrameDecoder/TAParser/PVR2Renderer) runs off the NEW wire.
+                if(d.length>=10 && d[0]===0x5A && d[1]===0x43 && d[2]===0x53 && d[3]===0x32){ // 'ZCS2'
+                    const inner=ZCS2.onMsg(d);
+                    if(!(ZCS2.render && inner)) return;
+                    d=inner;   // fall through: uncompressed inner delta frame
+                }
+                else if(d.length>=8 && d[0]===0x5A && d[1]===0x43 && d[2]===0x53 && d[3]===0x54){ // 'ZCST'
+                    ZCS2.legacyB+=d.byteLength;
+                    if(ZCS2.render && ZCS2.synced){
+                        const sz=(d[4]|d[5]<<8|d[6]<<16|d[7]<<24)>>>0;
+                        if(sz<=1024*1024) return;   // skip legacy DELTA (ZCS2 renders); SYNC falls through
+                    }
                 }
                 // GSTA state broadcast: 'GSTA' + serialized GameState (char_id,
                 // sprite_id, pos). Routed to the bake harness; never a TA frame.
