@@ -600,7 +600,17 @@ function _bodyApplyFrame(u8){
   const ramPtr=M._malloc(BODY.ram.length); M.HEAPU8.set(BODY.ram,ramPtr);
   const cap=256*1024, outPtr=M._malloc(cap);
   const len=M._render_frame_ta(ramPtr,outPtr,cap);
-  BODY.ta=M.HEAPU8.slice(outPtr,outPtr+len);
+  const raw=M.HEAPU8.subarray(outPtr,outPtr+len);
+  // Filter to the SERVER'S strip set {82,83,88,89}: quads outside it (84/8a
+  // assists, CA beams...) stay on the wire, so re-emitting them here would
+  // DOUBLE-DRAW. Same measured block set as the server predicate.
+  const flt=new Uint8Array(len); let w=0;
+  for(let o=0;o+96<=len;o+=96){
+    const a=((raw[o+12]|raw[o+13]<<8|raw[o+14]<<16|raw[o+15]<<24)>>>0)&0x1FFFFF;
+    const bk=a>>>12;
+    if(bk===0x82||bk===0x83||bk===0x88||bk===0x89){ flt.set(raw.subarray(o,o+96),w); w+=96; }
+  }
+  BODY.ta=flt.slice(0,w);
   M._free(ramPtr); M._free(outPtr);
   BODY.vframe=vframe; BODY.frames++;
   // vframe-keyed ring for EXACT wire pairing (the engine double-buffers sprite
@@ -614,7 +624,9 @@ function _bodyApplyFrame(u8){
 const _bodyParser2=new TAParser();
 window._bodyMerge=(g,wantVf)=>{
   let ta=BODY.ta;
-  if(wantVf>=0&&BODY.ring){ const hit=BODY.ring.find(e=>e.vf===wantVf);
+  // PAIR AT vframe-1: the engine's TA lags the state counter by one frame
+  // (capture-proven: body(V) == engine TA stamped V+1; garble_diff 2026-07-09).
+  if(wantVf>=0&&BODY.ring){ const hit=BODY.ring.find(e=>e.vf===wantVf-1);
     if(hit){ ta=hit.ta; BODY.pairHit=(BODY.pairHit|0)+1; } else BODY.pairMiss=(BODY.pairMiss|0)+1; }
   if(!ta||!ta.length) return;
   let bp; try{ bp=_bodyParser2.parse(ta,ta.length); }catch(e){ if(++BODY.err<6) console.warn('[body] parse',e); return; }

@@ -639,9 +639,17 @@ static uint32_t taStripStage(const uint8_t* ta, uint32_t taSize, uint8_t* out)
 			// from state via render_frame. para4 (3D machine) NEVER stripped.
 			static const bool csOn = (charStripMode() == 2);
 			static uint32_t csLo = 0, csHi = 0;
-			if (csOn && csHi == 0) charStripRange(csLo, csHi);
+			static bool csRangeInit = false;
+			if (csOn && !csRangeInit) { charStripRange(csLo, csHi); csRangeInit = true; }
+			bool csHit;
+			if (csHi > csLo) {                        // explicit env range
+				csHit = (addr >= csLo && addr < csHi);
+			} else {                                  // default: proven block set
+				uint32_t bk = addr >> 12;
+				csHit = (bk == 0x82 || bk == 0x83 || bk == 0x88 || bk == 0x89);
+			}
 			dropping = ((curList == 0) && inAllow(addr))
-			        || (csOn && curList == 2 && addr >= csLo && addr < csHi);
+			        || (csOn && curList == 2 && csHit);
 			if (!dropping) emit(32);
 			off += 32; continue;
 		}
@@ -682,16 +690,18 @@ static int charStripMode()   // 0=off, 1=measure, 2=strip
 		return 2; }();
 	return m;
 }
-// TCW addr strip range: the decoded-GFX VRAM staging area. Measured truth
-// (rig Ryu-training AND 4min prod attract, 2026-07-09): every in-match
-// TR-para5 TCW falls in [0x082000,0x08B000); FONT.BIN / HUD textures live
-// outside it, so out-of-range quads pass untouched (fails SAFE). Override:
-// MAPLECAST_CHARSTRIP=lo-hi (hex).
+// TCW addr strip set: the staging 4K blocks render_frame provably RE-EMITS.
+// Frame-by-frame capture diff vs the legacy ground truth (2026-07-09,
+// _bwlab/garble_diff.mjs on a live user match): body covers blocks 82/88
+// (99.6%) and 83/89 (97%); blocks 84/85/86/8a are 79-100% MISSING (assist/
+// effect classes the walker skips) -> stripping those left holes/garble.
+// Strip ONLY {82,83,88,89}; everything else stays on the wire (fails SAFE).
+// Override: MAPLECAST_CHARSTRIP=lo-hi (hex) for a contiguous range.
 static void charStripRange(uint32_t& lo, uint32_t& hi)
 {
 	static const std::pair<uint32_t,uint32_t> r = [](){
 		const char* e = std::getenv("MAPLECAST_CHARSTRIP");
-		uint32_t lo = 0x082000, hi = 0x08B000;
+		uint32_t lo = 0, hi = 0;   // 0,0 = use the default BLOCK SET below
 		if (e) { const char* dash = strchr(e, '-');
 			if (dash) { lo = (uint32_t)strtoul(e, nullptr, 16);
 			            hi = (uint32_t)strtoul(dash + 1, nullptr, 16); } }
@@ -3055,19 +3065,25 @@ done_diff:
 			// follows the 10B header, BEFORE the zstd chunk. Riding INSIDE the frame
 			// message pairs the camera with ITS frame exactly — the separate CAMM
 			// msg raced the async worker decode (one-frame stage swim under motion).
-			const uint32_t camLen = stripDone ? 132 : 0;
+			const uint32_t camLen = (stripDone || _ssStripActive) ? 132 : 0;
 			// flags bit5 (32): u32 replica vframe (the game frame counter 0x8C3496B0,
 			// the SAME counter the replica-live FRMx records carry) appended after the
 			// camera block. The char-flip client pairs its render_frame body TA to the
 			// EXACT wire frame -- latest-wins pairing showed one-frame flicker because
 			// the engine double-buffers sprite staging (banks 082xxx/088xxx alternate
 			// per frame), so a +/-1 frame skew reads the other bank's stale tiles.
-			const uint32_t vfLen = (stripDone && charStripMode() == 2) ? 4 : 0;
+			// STICKY strip flags: on taSize==0 skip-frames the stripped chain
+			// doesn't run (stripDone false) but the frame carries no TA either --
+			// flapping bits 2/4 off for one frame made every client reset its TA
+			// chain (and tripped the verifier) on every render-skip. Key the FLAGS
+			// on the hysteresis gate; content is unaffected (empty TA == stripped).
+			const bool stripFlagsOn = _ssStripActive;
+			const uint32_t vfLen = (stripFlagsOn && charStripMode() == 2) ? 4 : 0;
 			_zBuf.resize(10 + camLen + vfLen + ZSTD_compressBound(zPayloadSize));
 			_zBuf[0]='Z'; _zBuf[1]='C'; _zBuf[2]='S'; _zBuf[3]='2';
 			_zBuf[4]=_zEpoch; _zBuf[5]=(uint8_t)((streamStart ? 1 : 0) | (soaDone ? 2 : 0)
-				| ((stripDone && !stripAllowlist().empty()) ? 4 : 0) | (camLen ? 8 : 0)
-				| ((stripDone && charStripMode() == 2) ? 16 : 0) | (vfLen ? 32 : 0));
+				| ((stripFlagsOn && !stripAllowlist().empty()) ? 4 : 0) | (camLen ? 8 : 0)
+				| ((stripFlagsOn && charStripMode() == 2) ? 16 : 0) | (vfLen ? 32 : 0));
 			memcpy(_zBuf.data()+6, &zPayloadSize, 4);
 			if (camLen) {
 				uint8_t* cm = _zBuf.data() + 10;

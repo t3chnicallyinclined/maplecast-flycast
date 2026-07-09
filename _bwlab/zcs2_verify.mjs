@@ -58,7 +58,7 @@ import crypto from 'crypto';
 const STRIP_ALLOW=new Set([0x9fc00,0xa0000]);
 // CHARSTRIP mirror (render-state/09): TR-para5 with TCW addr in the decoded-GFX
 // staging range. Applied only when the wire flags bit4 (16) say the server did.
-const CS_LO=0x082000, CS_HI=0x08B000;
+const CS_BLK=new Set([0x82,0x83,0x88,0x89]);   // proven re-emit block set (garble_diff 2026-07-09)
 function taStripJS(ta,taSize,charStrip){
   const out=new Uint8Array(taSize); let off=0,w=0;
   let curList=-1,isSpr=false,haveParam=false,dropping=false,cObj=0;
@@ -83,7 +83,7 @@ function taStripJS(ta,taSize,charStrip){
       cObj=pcw&0xFF; isSpr=true; haveParam=true;
       const tcw=u32(off+12)>>>0, addr=tcw&0x1FFFFF;
       dropping=((curList===0)&&STRIP_ALLOW.has(addr))
-             ||(charStrip&&curList===2&&addr>=CS_LO&&addr<CS_HI);
+             ||(charStrip&&curList===2&&CS_BLK.has(addr>>>12));
       if(!dropping)emit(32); off+=32; continue;
     }
     if(pt===7){
@@ -145,7 +145,9 @@ function onZcs2(d) {
   const epoch=d[4], flags=d[5];
   zSoa=(flags&2)!==0; if(zSoa) zSoaFrames++;
   zStrip=(flags&4)!==0; if(zStrip) zStripFrames++;
-  zCStrip=(flags&16)!==0; zFlagsSeen=true;
+  { const c=(flags&16)!==0;
+    if(zFlagsSeen&&c!==zCStrip){ chainL.dig=null; chainZ.dig=null; }   // strip predicate CHANGED: digests straddling the flip are stale
+    zCStrip=c; zFlagsSeen=true; }
   const vfLen=(flags&32)?4:0;   // bit5: replica vframe stamp
   const innerSize = d[6] | d[7]<<8 | d[8]<<16 | d[9]<<24;
   if (flags & 1) {
