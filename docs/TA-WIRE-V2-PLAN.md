@@ -47,8 +47,27 @@
 - Then free level bump to z9 (0.31 ms measured). Expected: **0.93 Mbps**; optional
   VCACHE-refs variant → **0.79 Mbps**.
 
-## Phase 3 (optional, later) — semantic quad-delta ring; WebTransport for latency tail
-- Only if <0.5 Mbps wanted from the TA wire before switching tiers to GSTA/lockstep.
+## Phase 1.5 — dead-byte canonicalization  [server-only, measured −17.3% on real play]
+- MEASURED (stage_share.py, idle + 180s real-gameplay captures, _bwlab/STAGE-SHARE-REPORT.md):
+  61.8% of within-stage churn (72% of ALL churn at idle) is bytes NO parser reads —
+  padding bytes +24..+31 of 64B floating-color stage verts flip between engine
+  staging-buffer scratch patterns. Zero parser-ignored byte ranges before the TA diff
+  (canonicalize) → they stop churning forever. No wire change, no client change.
+- Gate: four-parser read-set audit of the masked byte classes + determinism rig.
+
+## Phase 3 — STAGE-STRIP: client-local stage render  [measured −49.0% on real play]
+- MEASURED on the 180s real-gameplay capture (streaming z3 sim): as-is 3.505 Mbps →
+  stage-stripped **1.789 (−49.0%)**; with canonicalization **1.615 (−53.9%)**. Spike
+  seconds 9.3 → ~3.3 Mbps. Stage = ~123 KB/frame of buffer; x/y churn (camera) is real.
+- Server: strip op-list stage polys from the mirrored TA (server already ta_parses);
+  client renders the stage locally (native: gsta_stage path exists; browser: baked STG
+  mesh + cam_mat M1·M2, proven 4.3e-5 px, re_kb/39). PREREQ: per-stage engine-TA bake
+  sweep (only STG0B validated; stage_id→STGxx map incomplete — RENDER-STATE §2).
+- **Translate-opcode PARKED by measurement:** 38.7% of stage frame-pairs are NOT a
+  single screen-space translate (parallax layers at different depths; residuals up to
+  780k px) — the stage needs the real 3D reproject, i.e. exactly the local stage render.
+
+## Phase 4 (later) — WebTransport for latency tail.
 
 ## Standing gates per phase
 1. MAPLECAST_DUMP_TA determinism rig, server+client, incl. scene transitions — 0 divergence.
