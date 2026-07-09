@@ -2059,6 +2059,19 @@ async function main(){
                 // client never uses — and decoding big super frames overruns applyFrame
                 // (the RangeError flood) and burns CPU (jank). Skip it in sprite mode.
                 if(window._skipTA) return;
+                // STRUCTURAL WHITELIST (2026-07-09): only genuine frames may reach
+                // applyFrame. The old approach blacklisted known side-channel magics
+                // and missed some (OBJF etc.) — harmless while this page defaulted to
+                // sprite mode (_skipTA bailed first), but in TA mode every unguarded
+                // msg parsed as a frame header => RangeError spam + giant allocs.
+                // Rule: ZCST/SYNC/FSYN/SAVE magic, or an uncompressed delta frame
+                // whose frameSize field equals the message length. Everything else
+                // is not ours — drop silently.
+                {
+                    const m0=(d[0]|d[1]<<8|d[2]<<16|d[3]<<24)>>>0;
+                    const known = m0===0x5453435A||m0===0x434E5953||m0===0x4E595346||m0===0x45564153;
+                    if(!known && m0!==d.length>>>0) return;
+                }
                 try{
                     const wsArrival=performance.now();
                     if(lastFrameArrival>0){
