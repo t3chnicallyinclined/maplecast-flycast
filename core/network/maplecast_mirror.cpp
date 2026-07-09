@@ -3046,7 +3046,44 @@ done_diff:
 				}
 				memcpy(w + 76, &ssDPay, 4);
 				memcpy(w + 80 + ssDPay, dstStart + tailOff, tailLen);
-				uint32_t ssTotal = 80 + ssDPay + tailLen;
+				uint32_t ssTailLen = tailLen;
+				// === CHARSTRIP PAGE GATE (MAPLECAST_CHARSTRIP_PAGES=1, default OFF) ===
+				// Drop VRAM pages backing the STRIPPED texture blocks {82,83,88,89}
+				// (tcw 4K blocks; bytes = pageAddr>>15) from the ZCS2 tail ONLY. The
+				// stripped TA has no quads referencing them and the ?bodytex=local
+				// client textures bodies from local disc GFX -- so these pages are
+				// dead weight: MEASURED 84.1% of ALL page bytes in a live match
+				// (71.1/84.6 MB per 67s). Kept blocks 84/85/86/8a/8b still ship
+				// (their quads stay on the wire). Legacy tail untouched. Handles
+				// both encodings (plain + VCACHE sentinel). DO NOT ENABLE until
+				// clients default to local body textures.
+				static const bool _csPages = [](){ const char* e = std::getenv("MAPLECAST_CHARSTRIP_PAGES");
+					return e && *e && *e != '0'; }();
+				if (_csPages && charStripMode() == 2 && ssTailLen >= 8) {
+					uint8_t* tp = w + 80 + ssDPay;      // checksum(4) + count slot(4) + entries
+					uint32_t cnt; memcpy(&cnt, tp + 4, 4);
+					bool vcw = (cnt == 0xFFFFFFFFu);
+					uint32_t hdr = vcw ? 12 : 8;        // checksum + sentinel + real count
+					if (vcw) memcpy(&cnt, tp + 8, 4);
+					uint8_t* rd = tp + hdr; uint8_t* wr = rd;
+					uint8_t* tend = tp + ssTailLen;
+					uint32_t kept = 0;
+					for (uint32_t i2 = 0; i2 < cnt && rd < tend; i2++) {
+						uint8_t rid = rd[0];
+						uint32_t pidx; memcpy(&pidx, rd + 1, 4);
+						uint32_t esz = 5 + (vcw ? 9 : 0);
+						uint8_t hasData = vcw ? rd[13] : 1;
+						if (hasData) esz += 4096;
+						if (rd + esz > tend) break;
+						uint32_t blk = (pidx * 4096u) >> 15;   // byte addr -> tcw 4K block
+						bool gate = (rid == 1) && (blk == 0x82 || blk == 0x83 || blk == 0x88 || blk == 0x89);
+						if (!gate) { if (wr != rd) memmove(wr, rd, esz); wr += esz; kept++; }
+						rd += esz;
+					}
+					memcpy(tp + (vcw ? 8 : 4), &kept, 4);
+					ssTailLen = (uint32_t)(wr - tp);
+				}
+				uint32_t ssTotal = 80 + ssDPay + ssTailLen;
 				uint32_t ssFrameSize = ssTotal - 4;       // wire convention: frameSize EXCLUDES its own field
 				memcpy(w, &ssFrameSize, 4);
 				if (frameNum % 600 == 0 && _ssFrames > 0)
