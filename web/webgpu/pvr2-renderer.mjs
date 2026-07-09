@@ -339,9 +339,13 @@ export class PVR2Renderer {
                 // Pipeline — only set when changed
                 const pipe=this._pipe(sb,db,dm,zw,cullIdx,'triangle-list');
                 if(pipe!==_lastPipe){rp.setPipeline(pipe);_lastPipe=pipe;}
-                // Texture bind group — only set when changed
+                // Texture bind group — only set when changed. A poly entry may carry a
+                // DIRECT texture handle (pp.texObj = {texture,sampler}, e.g. the sprite-
+                // machine bridge's atlas textures) which takes precedence over the
+                // TCW->TextureManager VRAM lookup. Entries without texObj are unchanged.
                 let tbg=fbBG;
-                if((pcw>>3)&1){const t=texMgr.getTexture(tsp,tcw,vram);if(t)tbg=this._texBG(t.texture,t.sampler);}
+                if(pp.texObj)tbg=this._texBG(pp.texObj.texture,pp.texObj.sampler);
+                else if((pcw>>3)&1){const t=texMgr.getTexture(tsp,tcw,vram);if(t)tbg=this._texBG(t.texture,t.sampler);}
                 if(tbg!==_lastTBG){rp.setBindGroup(1,tbg);_lastTBG=tbg;}
                 // Uniform bind group (always changes — dynamic offset per poly)
                 rp.setBindGroup(0,this.uBG,[pp._s*this.SLOT]);
@@ -424,7 +428,8 @@ export class PVR2Renderer {
                         if(dbg.blendOverride){sb=dbg.blendSrc||4;db=dbg.blendDst||5;}
                         const pipe=this._pipe(sb,db,dm,zw,cm^1,'triangle-list');
                         let tbg=fbBG;
-                        if((pcw>>3)&1){const tx=texMgr.getTexture(tsp,tcw,vram);if(tx)tbg=this._texBG(tx.texture,tx.sampler);}
+                        if(pp.texObj)tbg=this._texBG(pp.texObj.texture,pp.texObj.sampler);   // direct handle (sprite-bridge) wins
+                        else if((pcw>>3)&1){const tx=texMgr.getTexture(tsp,tcw,vram);if(tx)tbg=this._texBG(tx.texture,tx.sampler);}
                         if(pipe!==_lastPipe){rp.setPipeline(pipe);_lastPipe=pipe;}
                         rp.setBindGroup(0,this.uBG,[pp._s*this.SLOT]);
                         if(tbg!==_lastTBG){rp.setBindGroup(1,tbg);_lastTBG=tbg;}

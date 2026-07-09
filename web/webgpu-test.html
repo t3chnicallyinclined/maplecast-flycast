@@ -261,7 +261,7 @@ import {Decompress as ZcsDecompress} from './webgpu/fzstd.mjs';
 import {StageClient} from './webgpu/stage-client.mjs?v=2';
 import {TAParser} from './webgpu/ta-parser.mjs?v=2';
 import {TextureManager} from './webgpu/texture-manager.mjs';
-import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=5';
+import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=6';
 import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
@@ -542,12 +542,25 @@ window._stageMerge=(g)=>{
 // Pairing v1: latest-wins (±1 frame body-vs-HUD skew). Starts on ?bodylocal=1
 // (A/B double-draw over the un-stripped wire) or on the first char-stripped
 // (flags bit4) ZCS2 frame.
+// BODY SOURCE B (?bodysrc=sprite): draw the stripped characters via the VALIDATED
+// sprite machine (sprite-client buildDrawList/buildEmitterDrawList + PLxx atlases +
+// the sprite-gpu atlas images) instead of the render_frame.wasm replica feed. The
+// wasm path stays the default and the A/B reference — same splice, same descriptor.
+const BODYSRC=(new URLSearchParams(location.search).get('bodysrc')||'wasm').toLowerCase();
+window._bodySrc=BODYSRC;
 const BODY={want:new URLSearchParams(location.search).has('bodylocal'),
   started:false,ready:false,mod:null,ram:null,dynRegs:null,ta:null,vframe:-1,frames:0,gfxN:0,err:0,ws:null};
 window._body=BODY;
 const _bodyGuest=a=>(a>>>0)&0xFFFFFF;
 window._bodyStart=async function bodyStart(){
   if(BODY.started) return; BODY.started=true;
+  if(BODYSRC==='sprite'){
+    // Sprite-machine source: GSTA/OBJS already arrive on the MAIN wire socket
+    // (routed to SPRITECLIENT below) — no replica feed, no wasm. Mark ready so
+    // the ?bodylocal A/B gate works identically for both sources.
+    BODY.ready=true; console.log('[body] source = SPRITE MACHINE (GSTA/OBJS on the main wire; no replica feed)');
+    return;
+  }
   try{
     const [{default:createRenderFrame},fz]=await Promise.all([
       import('./render-replica/render_frame.mjs?v=scene5'),
@@ -630,13 +643,23 @@ function _bodyApplyFrame(u8){
 // _stageMerge but APPENDED (bodies draw over the remaining TR content).
 const _bodyParser2=new TAParser();
 window._bodyMerge=(g,wantVf,ord)=>{
+  let bp;
+  if(BODYSRC==='sprite'){
+    // SOURCE B: poly entries straight from the sprite machine (no TA bytes, no
+    // parse). Same bp shape as TAParser output ({vertexData,vertexCount,
+    // translucent}); everything below (bump + descriptor splice) is IDENTICAL
+    // for both sources. Pairing: the GSTA/OBJS state rides the SAME socket as
+    // the TA wire, so the latest state IS this frame's state (no vframe ring).
+    try{ bp=window._spriteBridge.build(); }catch(e){ if(++BODY.err<6) console.warn('[body] bridge',e); return; }
+  } else {
   let ta=BODY.ta;
   // PAIR AT vframe-1: the engine's TA lags the state counter by one frame
   // (capture-proven: body(V) == engine TA stamped V+1; garble_diff 2026-07-09).
   if(wantVf>=0&&BODY.ring){ const hit=BODY.ring.find(e=>e.vf===wantVf-1);
     if(hit){ ta=hit.ta; BODY.pairHit=(BODY.pairHit|0)+1; } else BODY.pairMiss=(BODY.pairMiss|0)+1; }
   if(!ta||!ta.length) return;
-  let bp; try{ bp=_bodyParser2.parse(ta,ta.length); }catch(e){ if(++BODY.err<6) console.warn('[body] parse',e); return; }
+  try{ bp=_bodyParser2.parse(ta,ta.length); }catch(e){ if(++BODY.err<6) console.warn('[body] parse',e); return; }
+  }
   if(!bp||!bp.vertexCount) return;
   const F=7;
   const bw=new Float32Array(bp.vertexData.buffer,bp.vertexData.byteOffset,bp.vertexCount*F);
@@ -687,6 +710,81 @@ window._bodyMerge=(g,wantVf,ord)=>{
   g.vertexCount+=bp.vertexCount;
   g._bodyMerged=true;
 };
+
+// === SPRITE-MACHINE poly-entry bridge (?bodysrc=sprite) ======================
+// Converts the sprite machine's per-object draw list (sprite-client.mjs
+// buildDrawList / buildEmitterDrawList — the validated own-origin anchor,
+// facing XOR 0x4000 texU mirror, full-CPS scale; NOTHING re-derived here) into
+// pvr2-compatible TRANSLUCENT poly entries + 28B/vert vertex data, consumed by
+// the SAME _bodyMerge descriptor splice as the wasm source. Control words are
+// the MEASURED engine char-quad constants (uniform over 287,962 stripped quads
+// in _bwlab/_cap_userplay/cap.bin): pcw=0xA2000009, tsp=0x949004D2 (src-alpha/
+// inv-src-alpha, modulate-alpha), vert col=white, z band [0.00923,0.01096] —
+// we pin z at the band FLOOR so later-drawn kept TR content (>=) always passes
+// the greater-equal depth test. Textures: the PLxx atlas images upload ONCE per
+// cid as GPUTextures carried on pp.texObj — pvr2-renderer.mjs?v=6 prefers a
+// direct texObj handle over the TCW->TextureManager lookup (tcw stays 0).
+// FX items (charId FX_CID 0xFE0 / -1) are SKIPPED: effect bands (0x475xxx/
+// 0x60xxxx/0x400xxx) are NOT in the server strip set {82,83,88,89}, so those
+// quads stay on the wire — drawing them here would double-draw (same rule as
+// the wasm source's block filter).
+// KNOWN GAP (measured elsewhere, not dismissed): the atlas is baked at the
+// BASE palette; sprite-gpu's live-palette recolor shader (hit-flash/skins) is
+// not applied on this path yet — item.tint rides the PVR OFFSET COLOR (pcw
+// bit2) as the same additive approximation sprite-gpu uses.
+const SPRB={frames:0,quads:0,skipFx:0,texMiss:0,z:0.00923,err:0,_texCache:new Map()};
+window._spriteBridge=SPRB;
+SPRB.texFor=(dev,cid,img)=>{
+  let e=SPRB._texCache.get(cid);
+  if(e&&e.img===img) return e;                    // re-upload only when the atlas image changed
+  try{
+    const tex=dev.createTexture({size:[img.width,img.height],format:'rgba8unorm',
+      usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST|GPUTextureUsage.RENDER_ATTACHMENT});
+    dev.queue.copyExternalImageToTexture({source:img},{texture:tex},[img.width,img.height]);
+    if(!SPRB._samp) SPRB._samp=dev.createSampler({minFilter:'nearest',magFilter:'nearest'});
+    e={img,texture:tex,sampler:SPRB._samp};
+    SPRB._texCache.set(cid,e); return e;
+  }catch(err){ SPRB.texMiss++; return null; }
+};
+SPRB.build=()=>{
+  const SC=window._spriteclient; if(!SC) return null;
+  const asm=!!SC.assemblyMode;
+  const items=asm?SC.buildAssemblyDrawList(640,480):SC.buildDrawList(640,480);
+  if(!items||!items.length) return null;
+  const dev=window._R&&window._R.dev;
+  const vd=new Uint8Array(items.length*4*28);
+  const f32=new Float32Array(vd.buffer);
+  const polys=[]; let vi=0, param=0;
+  for(const it of items){
+    if(it.charId===0xFE0||it.charId===-1){ SPRB.skipFx++; continue; }   // fx = kept on the wire
+    const src=asm?SC.asmChars[it.charId]:SC.chars[it.charId];
+    const img=src&&src.img; if(!img){ SPRB.texMiss++; continue; }
+    const W=img.width,H=img.height;
+    let u0=it.sx/W,v0=it.sy/H,u1=(it.sx+it.sw)/W,v1=(it.sy+it.sh)/H;
+    if(it.flip){const t=u0;u0=u1;u1=t;}
+    if(it.flipY){const t=v0;v0=v1;v1=t;}
+    const x0=it.dx,y0=it.dy,x1=it.dx+it.dw,y1=it.dy+it.dh;
+    if(!(isFinite(x0)&&isFinite(y0)&&isFinite(x1)&&isFinite(y1))) continue;
+    const t=it.tint;
+    const spc=t?((255<<24|Math.min(255,t[0]*255)<<16|Math.min(255,t[1]*255)<<8|Math.min(255,t[2]*255))>>>0):0;
+    const put=(x,y,u,v)=>{const fi=vi*7,bi=vi*28;
+      f32[fi]=x;f32[fi+1]=y;f32[fi+2]=SPRB.z;
+      vd[bi+12]=255;vd[bi+13]=255;vd[bi+14]=255;vd[bi+15]=255;   // white base (engine-measured)
+      vd[bi+16]=(spc>>16)&255;vd[bi+17]=(spc>>8)&255;vd[bi+18]=spc&255;vd[bi+19]=(spc>>>24)&255;
+      f32[fi+5]=u;f32[fi+6]=v; vi++; };
+    const first=vi;
+    put(x0,y0,u0,v0);put(x1,y0,u1,v0);put(x0,y1,u0,v1);put(x1,y1,u1,v1);   // strip TL,TR,BL,BR
+    const add=it.blend!=null&&(it.blend&0xf)===1;                          // dst nibble ONE => additive
+    const pp={first,count:4,isp:(6<<29)>>>0,
+      tsp:add?0x849004D2:0x949004D2,                                      // measured engine tsp; db=1 for fx-blend
+      tcw:0,pcw:(0xA2000009|(spc?4:0))>>>0,tileclip:0,param:--param};
+    if(dev){ const tx=SPRB.texFor(dev,it.charId,img); if(tx) pp.texObj=tx; }
+    polys.push(pp);
+  }
+  if(!vi) return null;
+  SPRB.frames++; SPRB.quads=polys.length;
+  return {vertexData:vd.subarray(0,vi*28),vertexCount:vi,translucent:polys};
+};
 if(BODY.want) window._bodyStart();
 (function(){
   const p=document.createElement('div');
@@ -711,7 +809,8 @@ if(BODY.want) window._bodyStart();
       'ZCS2   '+(z*8/1e6).toFixed(2)+' Mbps   epoch '+(ZCS2.epoch<0?'–':ZCS2.epoch)+'\n'
      +'legacy '+(l*8/1e6).toFixed(2)+' Mbps   ratio '+(z?(l/z).toFixed(2)+'×':'–')+'\n'
      +'dec '+(ZCS2.frames?(ZCS2.decMs/ZCS2.frames).toFixed(2):'0.00')+' ms/msg   desyncs '+ZCS2.errs+'\nsrc: '+src
-     +(window._body&&window._body.started?'\nbody: '+(window._body.ready?(window._body.frames+'f vf'+window._body.vframe+(window._body.ta?' '+(window._body.ta.length/96|0)+'q':'')+(window._body.pairHit?' pair '+window._body.pairHit+'/'+((window._body.pairHit|0)+(window._body.pairMiss|0)):'')+(window._body.spliceOk||window._body.spliceSkew?' spl '+(window._body.spliceOk|0)+'/'+((window._body.spliceOk|0)+(window._body.spliceSkew|0)):'')):'seeding...'):'');
+     +(window._body&&window._body.started?'\nbody: '+(window._body.ready?(window._body.frames+'f vf'+window._body.vframe+(window._body.ta?' '+(window._body.ta.length/96|0)+'q':'')+(window._body.pairHit?' pair '+window._body.pairHit+'/'+((window._body.pairHit|0)+(window._body.pairMiss|0)):'')+(window._body.spliceOk||window._body.spliceSkew?' spl '+(window._body.spliceOk|0)+'/'+((window._body.spliceOk|0)+(window._body.spliceSkew|0)):'')):'seeding...'):'')
+     +(window._bodySrc==='sprite'&&window._spriteBridge?'\nbridge: SPRITE '+window._spriteBridge.quads+'q f'+window._spriteBridge.frames+(window._spriteBridge.texMiss?' texMiss '+window._spriteBridge.texMiss:''):'');
   },1000);
 })();
 
