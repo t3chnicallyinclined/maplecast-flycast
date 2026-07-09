@@ -475,6 +475,93 @@ static MirrorCompressor _compressor;
 // frames (default 300; 0=never). SYNC itself stays legacy ZCST (one-shot).
 // Env-gated MAPLECAST_ZSTREAM=1, default OFF — legacy ZCST path unchanged.
 static std::atomic<bool> _zstreamResetPending{true};   // true => first frame is stream-start
+
+// === MAPLECAST_TACANON (TA-Wire v2 Phase 1.5, docs/TA-WIRE-V2-PLAN.md) ======
+// Dead-byte canonicalization: zero the TA byte ranges NO parser reads (PVR HW
+// spec "ignored" fields + the four-parser read set) in the WIRE copy before the
+// delta diff, so engine staging-buffer scratch patterns stop churning the wire.
+// MEASURED (_bwlab/STAGE-SHARE-REPORT.md + real-play re-run): 72% of idle churn /
+// 62% of in-play stage churn is these bytes; canonicalization = -17.3% wire on
+// real gameplay, server-only, no wire-format or client change.
+// Classes (validated vs FrameDecoder+TAParser md5 11/11, byte-exact run rebuild
+// 5257/5257 — _bwlab/stage_share.py DEAD_RANGES):
+//   eol    paraType-0 control block: bytes 4..32 (reserved)
+//   p32c01 32B poly param, colType 0/1, !volume: bytes 16..32 (unread tail)
+//   sprp   sprite param: bytes 24..32 (DMA bookkeeping)
+//   sprv   64B sprite vertex: bytes 48..52
+//   v64pad 64B textured floating-color vertex (colType 1, !vol): bytes 24..32
+//   v32nt0 32B non-tex packed-color vertex (colType 0): bytes 16..24 + 28..32
+// =measure counts (no mutation); =1 zeroes. Stats -> [TACANON] every 600 frames.
+static uint64_t _tacanonDead = 0, _tacanonFrames = 0;
+static int tacanonMode()
+{
+	static const int m = [](){
+		const char* e = std::getenv("MAPLECAST_TACANON");
+		if (!e || !*e || *e == '0') return 0;
+		return (*e == 'm' || *e == 'M') ? 1 : 2;
+	}();
+	return m;
+}
+static void taCanonicalize(uint8_t* ta, uint32_t taSize, bool zero)
+{
+	auto killRange = [&](uint32_t lo, uint32_t hi){
+		if (hi > taSize) hi = taSize;
+		if (lo >= hi) return;
+		_tacanonDead += hi - lo;
+		if (zero) memset(ta + lo, 0, hi - lo);
+	};
+	uint32_t off = 0;
+	int  curList = -1;
+	bool inPolyList = false, isSpr = false, haveParam = false;
+	uint8_t cObj = 0;
+	while (off + 32 <= taSize) {
+		uint32_t pcw; memcpy(&pcw, ta + off, 4);
+		uint32_t paraType = (pcw >> 29) & 7;
+		if (paraType == 0 || paraType == 1 || paraType == 2 || paraType == 3 || paraType == 6) {
+			haveParam = false;
+			if (paraType == 0) { curList = -1; inPolyList = false; killRange(off + 4, off + 32); }
+			off += 32; continue;
+		}
+		if (paraType == 4) {   // polygon param
+			uint32_t lt = (pcw >> 24) & 7;
+			if (curList == -1) { curList = (int)lt; inPolyList = (lt == 0 || lt == 2 || lt == 4); }
+			if (curList == 1 || curList == 3) { haveParam = false; off += 32; continue; }  // modvol
+			cObj = (uint8_t)(pcw & 0xFF);
+			isSpr = false; haveParam = true;
+			uint32_t colType = (cObj >> 4) & 3, vol = (cObj >> 6) & 1;
+			uint32_t sz;
+			if (colType == 2 && !vol && ((cObj >> 2) & 1)) sz = (off + 64 <= taSize) ? 64 : 32;
+			else if (colType >= 1 && vol)                  sz = (off + 64 <= taSize) ? 64 : 32;
+			else                                           sz = 32;
+			if (sz == 32 && (colType == 0 || colType == 1) && !vol) killRange(off + 16, off + 32);
+			off += sz; continue;
+		}
+		if (paraType == 5) {   // sprite param
+			uint32_t lt = (pcw >> 24) & 7;
+			if (curList == -1) { curList = (int)lt; inPolyList = (lt == 0 || lt == 2 || lt == 4); }
+			cObj = (uint8_t)(pcw & 0xFF);
+			isSpr = true; haveParam = true;
+			killRange(off + 24, off + 32);
+			off += 32; continue;
+		}
+		if (paraType == 7) {   // vertex
+			if (!inPolyList || !haveParam) { off += 32; continue; }
+			uint32_t tex = (cObj >> 3) & 1, colType = (cObj >> 4) & 3, vol = (cObj >> 6) & 1;
+			if (isSpr && off + 64 <= taSize) { killRange(off + 48, off + 52); off += 64; continue; }
+			uint32_t sz;
+			if (!tex) {
+				sz = 32;
+				if (colType == 0) { killRange(off + 16, off + 24); killRange(off + 28, off + 32); }
+			} else if (!vol) {
+				sz = (colType == 1 && off + 64 <= taSize) ? 64 : 32;
+				if (sz == 64) killRange(off + 24, off + 32);
+			} else sz = 32;
+			off += sz; continue;
+		}
+		off += 32;
+	}
+}
+
 static bool zstreamEnabled()
 {
 	static const bool on = [](){ const char* e = std::getenv("MAPLECAST_ZSTREAM");
@@ -2084,6 +2171,27 @@ void serverPublish(TA_context* ctx)
 	// Copy current TA into double buffer
 	memcpy(_taBuf[cur], taData, taSize);
 	_taBufSize[cur] = taSize;
+
+	// TACANON (Phase 1.5): canonicalize the WIRE copy only — the live TA and the
+	// MAPLECAST_DUMP_TA server dump above are untouched. Both delta legs (this
+	// buffer and prev, canonicalized last frame) are canonical, so dead-byte
+	// churn never reaches the run encoder. Keyframes ship canonical too — the
+	// zeroed ranges are parser-ignored by construction (see taCanonicalize).
+	{
+		const int _tcMode = tacanonMode();
+		if (_tcMode) {
+			taCanonicalize(_taBuf[cur], taSize, _tcMode == 2);
+			_tacanonFrames++;
+			if (frameNum % 600 == 0 && _tacanonFrames > 0) {
+				printf("[TACANON] mode=%s deadB/frame=%llu (%.1f%% of %u B buffer)\n",
+					_tcMode == 1 ? "measure" : "zero",
+					(unsigned long long)(_tacanonDead / _tacanonFrames),
+					taSize ? 100.0 * (_tacanonDead / (double)_tacanonFrames) / taSize : 0.0,
+					taSize);
+				fflush(stdout);
+			}
+		}
+	}
 
 	static uint64_t totalDeltaPayload = 0;
 	static uint64_t totalTABytes = 0;
