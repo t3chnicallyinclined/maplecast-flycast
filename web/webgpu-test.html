@@ -350,6 +350,10 @@ const ZCS2 = {
       const extra=this.clen-innerSize;
       this.chunks=[]; this.clen=0;
       if(extra>0){ this._desync('chunk overrun +'+extra+'B'); return null; }  // lost a msg mid-frame
+      // Belt: the inner frame's own frameSize field must equal innerSize — a lossy
+      // or reordered transport can assemble a size-correct but byte-mixed frame.
+      const fsz=(inner[0]|inner[1]<<8|inner[2]<<16|inner[3]<<24)>>>0;
+      if(fsz!==innerSize){ this._desync('inner frameSize '+fsz+' != '+innerSize); return null; }
       try{ return this._soa ? this.soaInverse(inner) : inner; }
       catch(e){ this._desync('soaInverse: '+e.message); return null; }
     }
@@ -1915,7 +1919,12 @@ async function main(){
         const _wsOverride=new URLSearchParams(location.search).get('ws');
         const transport=new AdaptiveTransport({
             wsUrl: _wsOverride || `${proto}://${host}/ws`,
-            wtUrl: _wsOverride ? null : `https://${host}/webtransport`,  // Will fail gracefully → WS fallback
+            // WebTransport DISABLED for this page (2026-07-09): its datagram channel
+            // is unreliable/unordered — fine for the stateless legacy wire, FATAL for
+            // the stateful ZCS2 zstd stream (lost/reordered datagrams => corrupt inner
+            // frames => the applyFrame RangeError spam + background flicker). WS only
+            // until the relay serves ZCS2 over reliable WT streams (wire-v2 Phase 4).
+            wtUrl: null,
             onstatus: (msg)=>ss(msg),
             onopen: ()=>ss(`Connected via ${transport.type} — waiting for SYNC`,'ok'),
             onclose: ()=>ss('Disconnected'),
