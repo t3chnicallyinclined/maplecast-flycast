@@ -3056,11 +3056,18 @@ done_diff:
 			// message pairs the camera with ITS frame exactly — the separate CAMM
 			// msg raced the async worker decode (one-frame stage swim under motion).
 			const uint32_t camLen = stripDone ? 132 : 0;
-			_zBuf.resize(10 + camLen + ZSTD_compressBound(zPayloadSize));
+			// flags bit5 (32): u32 replica vframe (the game frame counter 0x8C3496B0,
+			// the SAME counter the replica-live FRMx records carry) appended after the
+			// camera block. The char-flip client pairs its render_frame body TA to the
+			// EXACT wire frame -- latest-wins pairing showed one-frame flicker because
+			// the engine double-buffers sprite staging (banks 082xxx/088xxx alternate
+			// per frame), so a +/-1 frame skew reads the other bank's stale tiles.
+			const uint32_t vfLen = (stripDone && charStripMode() == 2) ? 4 : 0;
+			_zBuf.resize(10 + camLen + vfLen + ZSTD_compressBound(zPayloadSize));
 			_zBuf[0]='Z'; _zBuf[1]='C'; _zBuf[2]='S'; _zBuf[3]='2';
 			_zBuf[4]=_zEpoch; _zBuf[5]=(uint8_t)((streamStart ? 1 : 0) | (soaDone ? 2 : 0)
 				| ((stripDone && !stripAllowlist().empty()) ? 4 : 0) | (camLen ? 8 : 0)
-				| ((stripDone && charStripMode() == 2) ? 16 : 0));
+				| ((stripDone && charStripMode() == 2) ? 16 : 0) | (vfLen ? 32 : 0));
 			memcpy(_zBuf.data()+6, &zPayloadSize, 4);
 			if (camLen) {
 				uint8_t* cm = _zBuf.data() + 10;
@@ -3069,7 +3076,11 @@ done_diff:
 				for (int i = 0; i < 16; i++) { uint32_t v = addrspace::read32(0x8C2D6AD8 + i * 4); memcpy(cm + 4  + i * 4, &v, 4); }
 				for (int i = 0; i < 16; i++) { uint32_t v = addrspace::read32(0x8C2D6B18 + i * 4); memcpy(cm + 68 + i * 4, &v, 4); }
 			}
-			ZSTD_outBuffer ob{ _zBuf.data()+10+camLen, _zBuf.size()-10-camLen, 0 };
+			if (vfLen) {
+				uint32_t vf = addrspace::read32(0x8C3496B0);
+				memcpy(_zBuf.data() + 10 + camLen, &vf, 4);
+			}
+			ZSTD_outBuffer ob{ _zBuf.data()+10+camLen+vfLen, _zBuf.size()-10-camLen-vfLen, 0 };
 			ZSTD_inBuffer  ib{ zPayload, zPayloadSize, 0 };
 			size_t zr = ZSTD_compressStream2(_zc, &ob, &ib, ZSTD_e_flush);
 			if (ZSTD_isError(zr) || ib.pos != ib.size || zr != 0) {
@@ -3080,7 +3091,7 @@ done_diff:
 					ZSTD_isError(zr) ? ZSTD_getErrorName(zr) : "incomplete flush");
 				_zstreamResetPending.store(true, std::memory_order_release);
 			} else {
-				maplecast_ws::broadcastBinary(_zBuf.data(), (uint32_t)(10 + camLen + ob.pos));
+				maplecast_ws::broadcastBinary(_zBuf.data(), (uint32_t)(10 + camLen + vfLen + ob.pos));
 				if (stripDone) {
 					// (camera now rides INSIDE the ZCS2 header, flags bit3 — the old
 					// separate CAMM msg raced the async worker decode.)

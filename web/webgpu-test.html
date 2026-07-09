@@ -348,8 +348,10 @@ const ZCS2 = {
     if(camLen){ this.camSid=(d[10]|d[11]<<8|d[12]<<16|d[13]<<24)>>>0;
       const cf=new Float32Array(d.slice(14,14+128).buffer);
       this.M2=cf.slice(0,16); this.M1=cf.slice(16,32); }
+    const vfLen=(flags&32)?4:0;
+    this.lastVf=vfLen?((d[10+camLen]|d[11+camLen]<<8|d[12+camLen]<<16|d[13+camLen]<<24)>>>0):-1;
     const t0=performance.now();
-    try{ this.dec.push(d.subarray(10+camLen)); }
+    try{ this.dec.push(d.subarray(10+camLen+vfLen)); }
     catch(e){ this._desync('fzstd: '+e.message); return null; }
     this.decMs+=performance.now()-t0;
     if(this.clen>=innerSize){
@@ -414,6 +416,8 @@ ZCS2.worker=null;
       const flags=d[5], ep=d[4], soa=(flags&2)!==0, stripped=(flags&4)!==0, cstrip=(flags&16)!==0;
       const camLen=(flags&8)?132:0;
       const cam=camLen? d.slice(10,10+132).buffer : null;   // sid u32 + M2 16f + M1 16f
+      const vfLen=(flags&32)?4:0;   // bit5: replica vframe stamp (char-flip exact pairing)
+      const vf=vfLen?((d[10+camLen]|d[11+camLen]<<8|d[12+camLen]<<16|d[13+camLen]<<24)>>>0):-1;
       const innerSize=(d[6]|d[7]<<8|d[8]<<16|d[9]<<24)>>>0;
       if(flags&1){
         chunks=[]; clen=0;
@@ -425,7 +429,7 @@ ZCS2.worker=null;
         if(ep!==epoch){ synced=false; chunks=[]; clen=0; post({desync:'epoch gap '+epoch+'->'+ep}); return; }
       }
       const t0=performance.now();
-      try{ dec.push(d.subarray(10+camLen)); }
+      try{ dec.push(d.subarray(10+camLen+vfLen)); }
       catch(e){ synced=false; chunks=[]; clen=0; post({desync:'fzstd: '+e.message}); return; }
       if(clen>=innerSize){
         const inner=new Uint8Array(innerSize); let o=0;
@@ -438,7 +442,7 @@ ZCS2.worker=null;
         const fsz=(fin[0]|fin[1]<<8|fin[2]<<16|fin[3]<<24)>>>0;
         if(fsz+4!==fin.length){ synced=false; post({desync:'frameSize '+fsz+'+4 != '+fin.length}); return; }
         const t=[fin.buffer]; if(cam) t.push(cam);
-        post({frame:fin.buffer, len:fin.length, stripped, cstrip, cam, decMs:performance.now()-t0},t);
+        post({frame:fin.buffer, len:fin.length, stripped, cstrip, vf, cam, decMs:performance.now()-t0},t);
       }
     };`;
   try{
@@ -476,6 +480,7 @@ ZCS2.worker=null;
         if(!ZCS2.render || !window._injectFrame) return;
         ZCS2._frameStripped=m.stripped;
         ZCS2._frameCharStripped=m.cstrip;
+        ZCS2._frameVf=(m.vf===undefined?-1:m.vf);
         window._injectFrame(new Uint8Array(m.frame,0,m.len));
       }
     };
@@ -598,13 +603,21 @@ function _bodyApplyFrame(u8){
   BODY.ta=M.HEAPU8.slice(outPtr,outPtr+len);
   M._free(ramPtr); M._free(outPtr);
   BODY.vframe=vframe; BODY.frames++;
+  // vframe-keyed ring for EXACT wire pairing (the engine double-buffers sprite
+  // staging per frame; latest-wins pairing reads the other bank's stale tiles).
+  if(!BODY.ring) BODY.ring=[];
+  BODY.ring.push({vf:vframe,ta:BODY.ta});
+  if(BODY.ring.length>16) BODY.ring.shift();
 }
 // Merge the latest body TA into the parsed wire frame — same model as
 // _stageMerge but APPENDED (bodies draw over the remaining TR content).
 const _bodyParser2=new TAParser();
-window._bodyMerge=(g)=>{
-  if(!BODY.ta||!BODY.ta.length) return;
-  let bp; try{ bp=_bodyParser2.parse(BODY.ta,BODY.ta.length); }catch(e){ if(++BODY.err<6) console.warn('[body] parse',e); return; }
+window._bodyMerge=(g,wantVf)=>{
+  let ta=BODY.ta;
+  if(wantVf>=0&&BODY.ring){ const hit=BODY.ring.find(e=>e.vf===wantVf);
+    if(hit){ ta=hit.ta; BODY.pairHit=(BODY.pairHit|0)+1; } else BODY.pairMiss=(BODY.pairMiss|0)+1; }
+  if(!ta||!ta.length) return;
+  let bp; try{ bp=_bodyParser2.parse(ta,ta.length); }catch(e){ if(++BODY.err<6) console.warn('[body] parse',e); return; }
   if(!bp||!bp.vertexCount) return;
   const F=7;
   const bw=new Float32Array(bp.vertexData.buffer,bp.vertexData.byteOffset,bp.vertexCount*F);
@@ -644,7 +657,7 @@ if(BODY.want) window._bodyStart();
       'ZCS2   '+(z*8/1e6).toFixed(2)+' Mbps   epoch '+(ZCS2.epoch<0?'–':ZCS2.epoch)+'\n'
      +'legacy '+(l*8/1e6).toFixed(2)+' Mbps   ratio '+(z?(l/z).toFixed(2)+'×':'–')+'\n'
      +'dec '+(ZCS2.frames?(ZCS2.decMs/ZCS2.frames).toFixed(2):'0.00')+' ms/msg   desyncs '+ZCS2.errs+'\nsrc: '+src
-     +(window._body&&window._body.started?'\nbody: '+(window._body.ready?(window._body.frames+'f vf'+window._body.vframe+(window._body.ta?' '+(window._body.ta.length/96|0)+'q':'')):'seeding...'):'');
+     +(window._body&&window._body.started?'\nbody: '+(window._body.ready?(window._body.frames+'f vf'+window._body.vframe+(window._body.ta?' '+(window._body.ta.length/96|0)+'q':'')+(window._body.pairHit?' pair '+window._body.pairHit+'/'+((window._body.pairHit|0)+(window._body.pairMiss|0)):'')):'seeding...'):'');
   },1000);
 })();
 
@@ -2220,6 +2233,7 @@ async function main(){
                     // green flicker during/after supers.)
                     ZCS2._frameStripped=ZCS2.lastStripped;
                     ZCS2._frameCharStripped=ZCS2.lastCharStripped;
+                    ZCS2._frameVf=(ZCS2.lastVf===undefined?-1:ZCS2.lastVf);
                     if(ZCS2.lastCharStripped && window._bodyStart) window._bodyStart();
                 }
                 else if(d.length>=8 && d[0]===0x5A && d[1]===0x43 && d[2]===0x53 && d[3]===0x54){ // 'ZCST'
@@ -2374,8 +2388,9 @@ async function main(){
                     // (bodies composite over stage, under nothing — appended = drawn last
                     // within TR). A/B mode (?bodylocal) double-draws over the wire bodies.
                     const _bodyNow=ZCS2._frameCharStripped; ZCS2._frameCharStripped=false;
+                    const _bodyVf=(ZCS2._frameVf===undefined?-1:ZCS2._frameVf); ZCS2._frameVf=-1;
                     if(ZCS2.render&&(_bodyNow||(window._body&&window._body.want&&window._body.ready&&_mergeNow))){
-                      try{ window._bodyMerge(g); }catch(e5){ if(((ZCS2._bmErr=(ZCS2._bmErr||0)+1))<4) console.warn('[body-merge]',e5); } }
+                      try{ window._bodyMerge(g,_bodyVf); }catch(e5){ if(((ZCS2._bmErr=(ZCS2._bmErr||0)+1))<4) console.warn('[body-merge]',e5); } }
                     if(!_merged){ try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e2) {} }
                     pMs=performance.now()-t1;
                     lastParsed=g; window._lastParsed=g; window._lastFrameNum=D.frameNum;

@@ -115,6 +115,7 @@ const chainZ={buf:new Uint8Array(0),size:0,has:false};
 let stripPairs=0, stripExact=0, stripMismatch=0;
 function stripGate(src,inner,frameNum){
   if(src==='zcst'){
+    if(!zFlagsSeen)return;   // don't digest with a guessed charStrip predicate
     if(!applyTA(chainL,inner))return;
     chainL.dig=md5(taStripJS(chainL.buf.subarray(0,chainL.size),chainL.size,zCStrip));
     chainL.fn=frameNum;
@@ -138,12 +139,14 @@ function stripGate(src,inner,frameNum){
   }
 }
 let zSoaFrames=0, zStripFrames=0, zCStrip=false;
+let zFlagsSeen=false;   // gate legacy-side strip digests until the wire's strip flags are KNOWN (connect race)
 let zdec=null, zEpoch=-1, zSynced=false, zChunks=[], zLen=0, zSoa=false, zStrip=false;
 function onZcs2(d) {
   const epoch=d[4], flags=d[5];
   zSoa=(flags&2)!==0; if(zSoa) zSoaFrames++;
   zStrip=(flags&4)!==0; if(zStrip) zStripFrames++;
-  zCStrip=(flags&16)!==0;
+  zCStrip=(flags&16)!==0; zFlagsSeen=true;
+  const vfLen=(flags&32)?4:0;   // bit5: replica vframe stamp
   const innerSize = d[6] | d[7]<<8 | d[8]<<16 | d[9]<<24;
   if (flags & 1) {
     zdec = new ZStream((c)=>{ zChunks.push(c); zLen+=c.length; });
@@ -151,7 +154,7 @@ function onZcs2(d) {
   } else if (!zSynced || epoch!==zEpoch) return;
   zBytes += d.length;
   const t0=performance.now();
-  try { zdec.push(d.subarray(10+((d[5]&8)?132:0))); } catch(e){ console.log('fzstd err:',e.message); zSynced=false; return; }
+  try { zdec.push(d.subarray(10+((d[5]&8)?132:0)+((d[5]&32)?4:0))); } catch(e){ console.log('fzstd err:',e.message); zSynced=false; return; }
   decMs += performance.now()-t0; decN++;
   if (zLen >= innerSize) {
     const inner = new Uint8Array(innerSize);
