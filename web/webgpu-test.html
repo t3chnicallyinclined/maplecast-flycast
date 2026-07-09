@@ -508,6 +508,7 @@ window._stageMerge=(g)=>{
     g.renderPasses[0]={...g.renderPasses[0], op_count:g.renderPasses[0].op_count+stageOp.length};
   g.vertexData=new Uint8Array(nv.buffer,0,need*4);
   g.vertexCount+=sp.vertexCount;
+  g._stageMerged=true;
 };
 (function(){
   const p=document.createElement('div');
@@ -2227,12 +2228,17 @@ async function main(){
                     if(!T._pal||fr.vramDirty||fr.pvrDirty) T.updatePalette(D.pvrRegs);
                     const t1=performance.now();
                     const g=P.parse(fr.taBuffer,fr.taSize);
-                    try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e2) {}
                     // Phase 3a: stage-stripped ZCS2 frame -> prepend the local baked stage.
                     // Consume the per-frame tag — NEVER a sticky global (legacy-fallback
                     // frames carry the wire stage and must not get the local one too).
+                    // NOTE: when the local stage is merged, SKIP fillBGP — the engine's
+                    // background plane z-fights the re-projected far stage geometry
+                    // (per-frame tie flips under camera motion = the residual green
+                    // flicker); the bake covers the whole backdrop, BGP is redundant.
                     const _mergeNow=ZCS2._frameStripped; ZCS2._frameStripped=false;
-                    if(ZCS2.render&&_mergeNow){ try{ window._stageMerge(g); }catch(e3){ if(((ZCS2._smErr=(ZCS2._smErr||0)+1))<4) console.warn('[stage-merge]',e3); } }
+                    let _merged=false;
+                    if(ZCS2.render&&_mergeNow){ try{ window._stageMerge(g); _merged=!!g._stageMerged; }catch(e3){ if(((ZCS2._smErr=(ZCS2._smErr||0)+1))<4) console.warn('[stage-merge]',e3); } }
+                    if(!_merged){ try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e2) {} }
                     pMs=performance.now()-t1;
                     lastParsed=g; window._lastParsed=g; window._lastFrameNum=D.frameNum;
                     // Feed predictor with real frame vertex data
