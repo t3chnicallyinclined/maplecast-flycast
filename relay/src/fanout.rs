@@ -77,6 +77,9 @@ struct SyncCache {
     pvr: Vec<u8>,
     /// Pre-built SYNC binary for fast send to new clients
     raw: Bytes,
+    /// VCACHE content-hash -> page bytes (wire-v2 content-addressed pages).
+    /// Fresh per SYNC, mirroring the browser's clear-on-SYNC.
+    page_cache: std::collections::HashMap<u64, Vec<u8>>,
 }
 
 #[derive(Default)]
@@ -246,7 +249,7 @@ impl RelayState {
                 // so new clients receive the same bandwidth-efficient SYNC
                 let raw = data.clone();
                 let mut cache = self.inner.sync_cache.write().await;
-                *cache = Some(SyncCache { vram, pvr, raw });
+                *cache = Some(SyncCache { vram, pvr, raw, page_cache: std::collections::HashMap::new() });
             }
 
             let mut stats = self.inner.stats.lock().await;
@@ -260,7 +263,7 @@ impl RelayState {
             {
                 let mut cache = self.inner.sync_cache.write().await;
                 if let Some(ref mut c) = *cache {
-                    protocol::apply_dirty_pages(inspect, &mut c.vram, &mut c.pvr);
+                    protocol::apply_dirty_pages(inspect, &mut c.vram, &mut c.pvr, &mut c.page_cache);
                     // We don't rebuild c.raw here — late joiners get the cached
                     // SYNC as it was last received from upstream (compressed or not).
                     // The flycast server sends fresh keyframes periodically anyway.

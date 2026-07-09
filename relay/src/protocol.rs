@@ -136,6 +136,7 @@ pub fn apply_dirty_pages(
     frame: &[u8],
     vram: &mut [u8],
     pvr: &mut [u8],
+    page_cache: &mut std::collections::HashMap<u64, Vec<u8>>,
 ) -> usize {
     if frame.len() < 80 {
         return 0;
@@ -153,19 +154,52 @@ pub fn apply_dirty_pages(
         return 0;
     }
 
-    let dirty_count =
+    let mut dirty_count =
         u32::from_le_bytes([frame[off], frame[off + 1], frame[off + 2], frame[off + 3]]) as usize;
     off += 4;
 
+    // VCACHE (wire-v2, MAPLECAST_VCACHE): content-addressed pages. Sentinel count
+    // 0xFFFFFFFF, then the real count; each entry = regionId(1) + pageIdx(4) +
+    // contentHash(8 LE) + hasData(1) + [4096 bytes iff hasData]. hasData=0 is a
+    // reference resolved from page_cache (filled by earlier hasData=1 entries;
+    // the server reseeds content every VCACHE_RESEED_FRAMES, so a post-clear miss
+    // self-heals within that window). Mirrors web/webgpu/frame-decoder.mjs.
+    let vcache = dirty_count == 0xFFFF_FFFF;
+    if vcache {
+        if off + 4 > frame.len() {
+            return 0;
+        }
+        dirty_count =
+            u32::from_le_bytes([frame[off], frame[off + 1], frame[off + 2], frame[off + 3]]) as usize;
+        off += 4;
+        // Growth cap: a long session can accumulate 100k+ unique pages. Clearing
+        // forces ref-misses only until the server's periodic reseed.
+        if page_cache.len() > 20_000 {
+            page_cache.clear();
+        }
+    }
+
+    fn apply_page(region_id: u8, page_offset: usize, data: &[u8], vram: &mut [u8], pvr: &mut [u8]) -> bool {
+        match region_id {
+            1 if page_offset + PAGE_SIZE <= vram.len() => {
+                vram[page_offset..page_offset + PAGE_SIZE].copy_from_slice(data);
+                true
+            }
+            3 if page_offset + PAGE_SIZE <= pvr.len() => {
+                pvr[page_offset..page_offset + PAGE_SIZE].copy_from_slice(data);
+                true
+            }
+            _ => false,
+        }
+    }
+
     let mut applied = 0;
     for _ in 0..dirty_count {
-        if off + 1 + 4 + PAGE_SIZE > frame.len() {
+        if off + 5 > frame.len() {
             break;
         }
-
         let region_id = frame[off];
         off += 1;
-
         let page_idx = u32::from_le_bytes([
             frame[off],
             frame[off + 1],
@@ -173,27 +207,39 @@ pub fn apply_dirty_pages(
             frame[off + 3],
         ]) as usize;
         off += 4;
-
         let page_offset = page_idx * PAGE_SIZE;
-        let page_data = &frame[off..off + PAGE_SIZE];
-        off += PAGE_SIZE;
 
-        match region_id {
-            1 => {
-                // VRAM
-                if page_offset + PAGE_SIZE <= vram.len() {
-                    vram[page_offset..page_offset + PAGE_SIZE].copy_from_slice(page_data);
+        if vcache {
+            if off + 9 > frame.len() {
+                break;
+            }
+            let h_lo = u32::from_le_bytes([frame[off], frame[off + 1], frame[off + 2], frame[off + 3]]) as u64;
+            let h_hi = u32::from_le_bytes([frame[off + 4], frame[off + 5], frame[off + 6], frame[off + 7]]) as u64;
+            let hash = h_lo | (h_hi << 32);
+            let has_data = frame[off + 8];
+            off += 9;
+            if has_data != 0 {
+                if off + PAGE_SIZE > frame.len() {
+                    break;
+                }
+                page_cache.insert(hash, frame[off..off + PAGE_SIZE].to_vec());
+                if apply_page(region_id, page_offset, &frame[off..off + PAGE_SIZE], vram, pvr) {
+                    applied += 1;
+                }
+                off += PAGE_SIZE;
+            } else if let Some(p) = page_cache.get(&hash) {
+                if apply_page(region_id, page_offset, p, vram, pvr) {
                     applied += 1;
                 }
             }
-            3 => {
-                // PVR regs
-                if page_offset + PAGE_SIZE <= pvr.len() {
-                    pvr[page_offset..page_offset + PAGE_SIZE].copy_from_slice(page_data);
-                    applied += 1;
-                }
+        } else {
+            if off + PAGE_SIZE > frame.len() {
+                break;
             }
-            _ => {} // unknown region, skip
+            if apply_page(region_id, page_offset, &frame[off..off + PAGE_SIZE], vram, pvr) {
+                applied += 1;
+            }
+            off += PAGE_SIZE;
         }
     }
 
