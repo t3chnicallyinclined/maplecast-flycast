@@ -306,6 +306,7 @@ const ZCS2 = {
   _desync(why){   // recover cleanly: resync zstd at next epoch AND make the TA
     this.errs++;  // chain wait for a keyframe (deltas on a missing base = garble
     this.synced=false; this.chunks=[]; this.clen=0;   // or parser blowup).
+    try{ if(window._zcs2Sub) window._zcs2Sub('full'); }catch(e){}  // restore legacy fallback
     try{ if(window._D){ window._D.hasPrevTA=false; } }catch(e){}
     if(this.errs<5||this.errs%60===0) console.warn('[ZCS2] desync ('+why+') — resync at next epoch; errs='+this.errs);
   },
@@ -440,6 +441,9 @@ ZCS2.worker=null;
       if(m.resumed && ZCS2.render){ ZCS2._resetTAChain('epoch resume'); }
       if(m.epoch!==undefined){
         ZCS2.epoch=m.epoch; ZCS2.synced=true; ZCS2.epochs++;
+        // Synced on the new wire: shed the legacy deltas at the RELAY (~5 Mbps
+        // stops crossing the internet for this client). Restored on any desync.
+        if(ZCS2.render && window._zcs2Sub) window._zcs2Sub('zcs2');
         if(ZCS2._stripKnown!==undefined && m.stripped!==ZCS2._stripKnown && ZCS2.render) ZCS2._resetTAChain('strip '+ZCS2._stripKnown+'->'+m.stripped);
         ZCS2._stripKnown=m.stripped;
         return;
@@ -499,7 +503,13 @@ window._stageMerge=(g)=>{
   p.innerHTML='<b style="color:#6fb8ff">ZCS2 wire</b> <label style="float:right;color:#4dd08a;cursor:pointer"><input id="zcs2_render" type="checkbox"> render from ZCS2</label>'
     +'<div id="zcs2_stats" style="white-space:pre;margin-top:3px">waiting for ZCS2 stream…</div>';
   document.body.appendChild(p);
-  p.querySelector('#zcs2_render').onchange=e=>{ ZCS2.render=e.target.checked; ZCS2._resetTAChain('render toggle'); };
+  // DEFAULT ON (2026-07-09, user decision): ZCS2 is the wire. ?legacy=1 opts out.
+  ZCS2.render = (new URLSearchParams(location.search).get('legacy')!=='1');
+  p.querySelector('#zcs2_render').checked=ZCS2.render;
+  p.querySelector('#zcs2_render').onchange=e=>{
+    ZCS2.render=e.target.checked; ZCS2._resetTAChain('render toggle');
+    if(window._zcs2Sub) window._zcs2Sub(ZCS2.render&&ZCS2.synced ? 'zcs2' : 'full');
+  };
   let lastZ=0,lastL=0;
   setInterval(()=>{
     const z=ZCS2.zB-lastZ, l=ZCS2.legacyB-lastL; lastZ=ZCS2.zB; lastL=ZCS2.legacyB;
@@ -2022,7 +2032,14 @@ async function main(){
             // until the relay serves ZCS2 over reliable WT streams (wire-v2 Phase 4).
             wtUrl: null,
             onstatus: (msg)=>ss(msg),
-            onopen: ()=>ss(`Connected via ${transport.type} — waiting for SYNC`,'ok'),
+            onopen: ()=>{ ss(`Connected via ${transport.type} — waiting for SYNC`,'ok');
+                window._zcs2Sub=(mode)=>{ try{
+                    if(transport._ws && transport._ws.readyState===1){
+                        transport._ws.send(JSON.stringify({type:'subscribe',mode}));
+                        if(window._zcs2SubLast!==mode){ window._zcs2SubLast=mode; console.log('[ZCS2] relay subscribe:',mode); }
+                    }
+                }catch(e){} };
+            },
             onclose: ()=>ss('Disconnected'),
             onframe: (d)=>{
                 // (worker re-injection point: decoded ZCS2 inners re-enter here)

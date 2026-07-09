@@ -562,6 +562,12 @@ async fn handle_ws_client(
     // and drops all TA/VRAM/SYNC/audio video for this socket. Lock-free: this
     // task owns both the subscribe-message arm and the forward arm.
     let mut state_only = false;
+    // ZCS2 subscribers (wire-v2): the client renders from the ZCS2 streaming
+    // envelope, so legacy ZCST DELTA frames are dead weight (~5 Mbps). Shed them
+    // here; compressed SYNCs (uncompressedSize > 1 MiB) still pass for joins,
+    // as do ZCS2/CAMM/audio/side channels. The client flips back to "full" on
+    // decode desync so the legacy fallback keeps working.
+    let mut zcs2_only = false;
 
     loop {
         tokio::select! {
@@ -574,6 +580,13 @@ async fn handle_ws_client(
                         if state_only && !protocol::is_state_frame(&data) {
                             frames_filtered += 1;
                             continue;
+                        }
+                        if zcs2_only && data.len() >= 8 && &data[0..4] == protocol::ZCST_MAGIC {
+                            let usz = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+                            if usz <= 1_048_576 {   // legacy delta frame; SYNC (>1MiB) passes
+                                frames_filtered += 1;
+                                continue;
+                            }
                         }
                         let len = data.len();
                         match ws_tx.send(Message::Binary(data.to_vec().into())).await {
@@ -638,10 +651,16 @@ async fn handle_ws_client(
                         // This message is relay-local — never forwarded upstream.
                         if text.contains("\"type\":\"subscribe\"") {
                             let want_state = text.contains("\"mode\":\"state\"");
+                            let want_zcs2  = text.contains("\"mode\":\"zcs2\"");
                             if want_state != state_only {
                                 state_only = want_state;
                                 info!("Client {} → subscribe mode: {}", peer,
                                     if state_only { "state-only (GSTA/OBJF/MCSV)" } else { "full mirror" });
+                            }
+                            if want_zcs2 != zcs2_only {
+                                zcs2_only = want_zcs2;
+                                info!("Client {} → zcs2 mode: {} (legacy deltas {})", peer,
+                                    zcs2_only, if zcs2_only { "SHED" } else { "restored" });
                             }
                             continue;
                         }
