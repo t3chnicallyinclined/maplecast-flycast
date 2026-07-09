@@ -313,14 +313,27 @@ const ZCS2 = {
   // stripped (render the local baked stage under it). Camera arrives via the
   // CAMM companion msg (stage_id + M2 + M1) parsed in the router.
   lastStripped:false, camSid:-1, M1:null, M2:null,
+  _resetTAChain(why){   // the TA delta chain's BASE changed sources — wait for a keyframe
+    try{ if(window._D) window._D.hasPrevTA=false; }catch(e){}
+    if((this._rst=(this._rst||0)+1)<6) console.log('[ZCS2] TA-chain reset ('+why+')');
+  },
   onMsg(d){
     const epoch=d[4], flags=d[5];
     this._soa=(flags&2)!==0;
-    this.lastStripped=(flags&4)!==0;
+    const strip=(flags&4)!==0;
+    // Strip-state TRANSITION (match start/end): the server's ZCS2 chain switches
+    // between the stripped and full TA double-buffers — deltas across the switch
+    // are against the OTHER base. Resync via keyframe (<=1s).
+    if(this._stripKnown!==undefined && strip!==this._stripKnown && this.render) this._resetTAChain('strip '+this._stripKnown+'->'+strip);
+    this._stripKnown=strip;
+    this.lastStripped=strip;
     const innerSize=(d[6]|d[7]<<8|d[8]<<16|d[9]<<24)>>>0;
     if(flags&1){
       this.chunks=[]; this.clen=0;
       this.dec=new ZcsDecompress((c)=>{ this.chunks.push(c); this.clen+=c.length; });
+      // Resuming after an unsynced gap while rendering: the legacy fallback fed
+      // D's TA chain the FULL buffer — ZCS2 deltas would land on the wrong base.
+      if(!this.synced && this.render) this._resetTAChain('epoch resume');
       this.epoch=epoch; this.synced=true; this.epochs++;
     } else {
       if(!this.synced) return null;                    // wait for next stream-start
@@ -363,7 +376,10 @@ window._stageMerge=(g)=>{
   const F=7;   // 28 B/vert = 7 f32 slots (x,y,z,col,spc,u,v)
   const sw=new Float32Array(sp.vertexData.buffer,sp.vertexData.byteOffset,sp.vertexCount*F);
   const gw=new Float32Array(g.vertexData.buffer,g.vertexData.byteOffset,g.vertexCount*F);
-  const nv=new Float32Array(sw.length+gw.length);
+  // persistent merge buffer (supers allocate 10k+ verts/frame otherwise)
+  const need=sw.length+gw.length;
+  if(!window._smBuf||window._smBuf.length<need) window._smBuf=new Float32Array(Math.ceil(need*1.5));
+  const nv=window._smBuf.subarray(0,need);
   nv.set(sw,0); nv.set(gw,sw.length);
   const shift=sp.vertexCount;
   const bump=list=>list.map(p=>{const q=Object.assign({},p); q.first=p.first+shift; return q;});
@@ -373,7 +389,7 @@ window._stageMerge=(g)=>{
   g.translucent=bump(g.translucent);
   if(g.renderPasses&&g.renderPasses.length)
     g.renderPasses[0]={...g.renderPasses[0], op_count:g.renderPasses[0].op_count+stageOp.length};
-  g.vertexData=new Uint8Array(nv.buffer);
+  g.vertexData=new Uint8Array(nv.buffer,0,need*4);
   g.vertexCount+=sp.vertexCount;
 };
 (function(){
@@ -383,7 +399,7 @@ window._stageMerge=(g)=>{
   p.innerHTML='<b style="color:#6fb8ff">ZCS2 wire</b> <label style="float:right;color:#4dd08a;cursor:pointer"><input id="zcs2_render" type="checkbox"> render from ZCS2</label>'
     +'<div id="zcs2_stats" style="white-space:pre;margin-top:3px">waiting for ZCS2 stream…</div>';
   document.body.appendChild(p);
-  p.querySelector('#zcs2_render').onchange=e=>{ ZCS2.render=e.target.checked; };
+  p.querySelector('#zcs2_render').onchange=e=>{ ZCS2.render=e.target.checked; ZCS2._resetTAChain('render toggle'); };
   let lastZ=0,lastL=0;
   setInterval(()=>{
     const z=ZCS2.zB-lastZ, l=ZCS2.legacyB-lastL; lastZ=ZCS2.zB; lastL=ZCS2.legacyB;
