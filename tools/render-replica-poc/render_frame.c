@@ -331,7 +331,15 @@ static void rebuild_tile_grid(Sh4Ctx *c, u32 node){
     u32 idx  = dc;                            /* tile cursor into DESC_TABLE (== walker seed) */
     for(u32 r=0; r<nrec; r++, rec+=8){
         u32 sel = r16u(c, rec+6);
-        if((sel & 0xFFFFu) == 0xFFu) continue;   /* blank record: emits no tile (walker skips 0xFF) */
+        /* sel==0xFF BLANK records MUST get their formula-derived desc slots. The engine's
+         * builder allocates them like any record (PROVEN vf724219 node 0c2688e4: shipped
+         * slot [20 00 00 01] == the formula on GFX1[0xFF] sw=4 sh=4) and the walker
+         * consumes them while the DRAW is suppressed (pen still accumulates: ASMTRACE
+         * r13 a05c->a064 skips exactly one slot, accX/accY carry the blank's dx/dy).
+         * The old `continue` here COMPACTED the slice one slot left of the engine's ->
+         * every later record read its neighbor's count/m -> +1 over-emission + the
+         * misplaced low strip ("dark band", the re_kb/51 residual class). The visible
+         * quad is dropped in submit_1244b0 (sel==0xFF guard) exactly like the engine. */
         u32 off = r32(c, gfx1 + (sel<<2));
         u32 hdr = gfx1 + off;
         u32 sw = r8u(c, hdr+2), sh = r8u(c, hdr+3);

@@ -32,8 +32,8 @@ Render paths for the MVC2 stream, ranked. Any new session starts at the top.
 
 | Subsystem | Authoritative impl | Proven | Open |
 |---|---|---|---|
-| Bodies | rank-2/3 above | texels 100% byte-exact; geometry byte-exact vs ASMTRACE; 9/9 params | 2a pixel-side; palsel root fix; part transposition (51) |
-| Satellites/projectiles | gen_render_satellite.c + slot-table walk | in the 5/5 close; <0.005px | satellite GFX residency (re_kb/29, never triggered) |
+| Bodies | rank-2/3 above | texels 100% byte-exact; geometry byte-exact vs ASMTRACE; 9/9 params; **2026-07-09: frame-exact 1273-frame gameplay gate 5664/5664 node-frames clean (_tx_detect)** | 2a pixel-side; palsel root fix; ~~part transposition (51)~~ RESOLVED 2026-07-09 — was the sel==0xFF blank-record desc-slot compaction in rebuild_tile_grid (re_kb/66) |
+| Satellites/projectiles | gen_render_satellite.c + slot-table walk | in the 5/5 close; <0.005px | ~~satellite GFX residency (re_kb/29)~~ FIXED 2026-07-09 — objpool 0x8C26AA54+0x1D000 in the per-frame read-set, deployed prod (HANDOFF-SATELLITE-READSET) |
 | 3D machine (sparks/flashes) | INSIDE the 2a native TA by construction (re_kb/61-65) | byte-gated via 2a | splice order of deferred cls-0xAC parcels; **P3D double-draw when 2a is on (G1)** |
 | HUD | Phase 2b — separate closure `loc_8c03012c` (re_kb/57) | bars/portraits byte-matched vs HUDQ oracle (58/59) | run the real closure 2a-style; meter-segment VRAM prefix gap (36); win-stars drawable NOW from char+0x540 (33 supersedes 55) |
 | Stage | gsta_stage.cpp + STG0B engine-TA bake | z-order + floor cull fixed (45/47) | only STG0B baked; stage_id→STGxx map; list-0xB set-piece double-draw audit vs 2a |
@@ -68,7 +68,8 @@ Client 3D-machine re-implementation · P3D capture/OP-prefix injection as a rend
 
 ## 7. Solved-bug catalogs
 
-Do not re-solve: facing XOR 0x4000 · full-span vs logical-crop · pen-origin reflection · bit15=scale-dispatch · 2-row-band carve (FINAL) · sprite base color +16 · rectab PalSelect preserve · purple-Cable-is-correct · +0x12C visibility gate · OP-prefix injection legality · desc-keyed carve · char-pass (not HUD-pass) snapshot timing · the eight mirror-wire bugs (ARCHITECTURE.md). Full catalogs with file:line: `render-state/01`.
+Do not re-solve: facing XOR 0x4000 · full-span vs logical-crop · pen-origin reflection · bit15=scale-dispatch · 2-row-band carve (FINAL) · sprite base color +16 · rectab PalSelect preserve · purple-Cable-is-correct · +0x12C visibility gate · OP-prefix injection legality · desc-keyed carve · char-pass (not HUD-pass) snapshot timing · **sel==0xFF blank records CONSUME desc slots** (engine allocates formula slots + suppresses only the draw; never skip them in a desc rebuild — re_kb/66) · the eight mirror-wire bugs (ARCHITECTURE.md). Full catalogs with file:line: `render-state/01`.
+**Diff-tooling gotchas (2026-07-09):** ASMTRACE screen anchor = quad LEFT-edge X or RIGHT-edge X depending on facing (Y = quad max-y always) — compare corner-aware or every moving part shows a phantom width×(5/3) offset (`_diff_sweep` has this artifact; `_tx_detect` is corner-aware). ASMTRACE dies silently when /dev/shm fills (mid-line truncation) — check `df /dev/shm` before trusting a "missing" trace window.
 
 ## 8. Doc status
 
