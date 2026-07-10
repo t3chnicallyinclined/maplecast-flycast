@@ -135,6 +135,19 @@ def main():
     # incl the small local props the POL rip cannot place — re_kb 26 prop-matrix item.
     Ainv, t, X = build_unproject()
 
+    # MVC2 HUD texture sheets (VRAM texture-word addrs = tcw & 0x1FFFFF). The engine
+    # draws the HUD in the SAME OP list as the stage, so an unfiltered bake ships a
+    # FROZEN HUD whose depth writes sit exactly at the live HUD's z-planes (0.0052..
+    # 0.0141) and Greater-reject it every frame — the 2026-07-09 "dark band"
+    # (census-proven: STG0B meshes 4..71 were all HUD sheets, z-identical TCW twins
+    # of the live wire's 0809be00/08080000/0809dexx-0809e9xx HUD groups).
+    HUD_TEX_WORDS = {0x9be00, 0x80000} | set(range(0x9de00, 0x9ea00, 0x100))
+    def is_hud(g):
+        return bool(g["bits"]["Texture"]) and ((g["tcw"] & 0x1FFFFF) in HUD_TEX_WORDS)
+    n_hud = sum(1 for g in groups if g["verts"] and g["bits"]["ListType"] == 0 and is_hud(g))
+    if n_hud:
+        print(f"  HUD filter: dropping {n_hud} captured-HUD groups (frozen bars/portraits/font)")
+
     # 1) collect distinct (texkey) -> surrogate + decode each from VRAM
     tex_surr = {}                              # texkey -> surr(1-based)
     tex_meta = []
@@ -142,6 +155,8 @@ def main():
         if not g["bits"]["Texture"] or not g["verts"]:
             continue
         if g["bits"]["ListType"] != 0:
+            continue
+        if is_hud(g):
             continue
         addr, tu, tv, pf, tw = tex_params(g["tsp"], g["tcw"])
         key = (addr, tu, tv, pf, tw)
@@ -162,6 +177,8 @@ def main():
     meshes = []
     for g in groups:
         if not g["verts"] or g["bits"]["ListType"] != 0:
+            continue
+        if is_hud(g):
             continue
         textured = g["bits"]["Texture"]
         surr = 0
