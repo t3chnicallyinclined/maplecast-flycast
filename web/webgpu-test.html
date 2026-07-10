@@ -604,9 +604,10 @@ window._body=BODY;
 // mirror in 189544592, + applyLocalGfx disc-art overlay) and ride pp.texObj
 // (direct-texture override in pvr2-renderer — TextureManager bypassed). Each
 // staged tile is the engine's own 32x32 PAL4_TW at the quad's TCW, so the
-// quad's UVs are ALREADY correct for it — no UV rewrite. Default OFF: without
-// ?bodytex=local nothing below runs (byte-identical behavior).
-const BTEX={want:(new URLSearchParams(location.search).get('bodytex')||'')==='local',
+// quad's UVs are ALREADY correct for it — no UV rewrite. DEFAULT ON (2026-07-10,
+// strategic: everything client-side from cache, tiny wire, low latency — the
+// local decode bypasses the VCACHE wire-VRAM staleness). Opt out with ?bodytex=wire.
+const BTEX={want:(new URLSearchParams(location.search).get('bodytex')||'local')!=='wire',
   on:false,ensure:null,applyGfx:null,lvram:null,cache:{},tex:new Map(),samp:new Map(),cap:2048,
   stats:{staged:0,texObj:0,fallback:0,decMs:0,hit:0,miss:0,evict:0},err:0};
 window._btex=BTEX;
