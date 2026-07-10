@@ -130,14 +130,23 @@ async function poke(offHex, hex){
 // magnitudes — tune with the speed arg.
 const fhex = v => { const b=Buffer.alloc(4); b.writeFloatLE(v); return b.toString('hex'); };
 const DIR = { R:[1,0],L:[-1,0],U:[0,-1],D:[0,1], UR:[0.7,-0.7],UL:[-0.7,-0.7],DR:[0.7,0.7],DL:[-0.7,0.7] };
+// A dash is a momentary VELOCITY KICK only — it does NOT set the flight flag or force a
+// stance (that trapped the char in flight mode where the controller is ignored). Jump first
+// with the pad, then dash in the air. Use RESET/LAND (■) to return to full control.
 async function dash(base, dir, speed){
   const d=DIR[dir]; if(!d) throw new Error('bad dir'); const s=+speed||14;
   await wr(base+OFF.vx, fhex(d[0]*s)); await wr(base+OFF.vy, fhex(d[1]*s));
-  await wr(base+OFF.stance, '02');                 // airborne
-  const h=await rd(base+OFF.flight,1); if(u8(h,0)===0) await wr(base+OFF.flight,'01');
-  return { dash:dir, speed:s, note:'velocity injected (experimental)' };
+  return { dash:dir, speed:s, note:'velocity kick only — controller keeps control' };
 }
-async function stopMotion(base){ await wr(base+OFF.vx, fhex(0)); await wr(base+OFF.vy, fhex(0)); return {stopped:true}; }
+// RESET/LAND — undo any stuck state (flight, forced stance/anim, residual velocity) so the
+// controller regains control. This is the fix-it button if a mod traps the character.
+async function stopMotion(base){
+  await wr(base+OFF.vx, fhex(0)); await wr(base+OFF.vy, fhex(0));
+  await wr(base+OFF.flight, '00');    // clear flight mode (the input-lockout culprit)
+  await wr(base+OFF.stance, '00');    // back to standing
+  await wr(base+OFF.animstate, '0000'); // neutral anim → engine resumes normal control
+  return { reset:'landed — flight/stance/velocity/anim cleared, control returned' };
+}
 
 // ---- MOVES / ANIM: force the char into any of ITS animation groups (0x00-0x1B) or a move
 // state. To use ANOTHER character's moves, MORPH first (that swaps in their moveset), then
