@@ -924,26 +924,12 @@ static void render_frame_fix_effect_tcws(Sh4Ctx *c){
     }
 }
 
-/* CULL PROVABLY-WRONG 0x85xxx QUADS (re_kb/51 — the motion BLOCKS). The 0x85xxx TCW band is
- * NEVER used by the engine (MEASURED: 0 quads across all 1077 mirror frames of _live_fx6),
- * yet during a super render_frame emits ~7-15 BODY/satellite quads that resolve to 0x85xxx —
- * the gray/white/pink floating BLOCKS the user sees. Their idxtab entry is char-pass-transient
- * (the body satellite parts the engine GATES OFF at the super peak; the mirror super-peak has
- * only effect bands, no 0x82-85 satellite body parts). We cannot reconstruct a "correct" entry
- * (the stale idxtab lost it and the engine draws nothing there), so DEGENERATE these quads to a
- * zero-area triangle (collapse all 3 verts to A) so they emit no pixels — matching the engine,
- * which draws nothing in 0x85xxx. Provably safe: 0x85xxx is never-engine, so culling can only
- * remove garbage. Rare (3/360 frames sampled, super-only); normal frames untouched. */
-static void render_frame_cull_85xxx(void){
-    for(int i=0;i<g_nscene;i++){
-        u32 band = g_scene[i].tcw & 0x1FFFFFu;
-        if(band >= 0x85000u && band < 0x86000u){
-            /* collapse the quad: B=C=D=A so the rasterizer emits nothing. */
-            g_scene[i].Bx = g_scene[i].Cx = g_scene[i].Dx = g_scene[i].Ax;
-            g_scene[i].By = g_scene[i].Cy = g_scene[i].Dy = g_scene[i].Ay;
-        }
-    }
-}
+/* render_frame_cull_85xxx REMOVED 2026-07-09. It was a band-aid that collapsed render_frame's
+ * OWN wrong quads (the ~7-15 body/satellite parts that resolve to the never-engine 0x85xxx band
+ * during supers — re_kb/51 motion blocks) to zero-area so they emit no pixels. That masks the
+ * underlying walker geometry divergence instead of fixing it, and was validated on only 3 frames
+ * ("no-op on correct geom"). Removed so the ground-truth (ASMTRACE) diff sees the real
+ * divergence; the fix is correct walker geometry, after which nothing lands in 0x85xxx anyway. */
 
 void render_frame(Sh4Ctx *c){
     render_frame_reset();
@@ -965,5 +951,5 @@ void render_frame(Sh4Ctx *c){
      * harmless safety net (MEASURED: 0 quads land in the never-engine 0x85xxx band on all 3 frames
      * with correct geometry, so it is a strict no-op today; retained to collapse any future stale
      * 0x85xxx quad to zero-area, re_kb/51). */
-    render_frame_cull_85xxx();          /* never-engine 0x85xxx safety net (no-op on correct geom) */
+    /* (render_frame_cull_85xxx removed 2026-07-09 — unmask re_kb/51 walker divergence; see above) */
 }

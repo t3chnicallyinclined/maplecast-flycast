@@ -25,12 +25,13 @@ staticRegs.forEach((r, i) => { if (r.tag === 'ram16') ram.set(staticData[i], 0);
 p = frameStart; const frames = [];
 for (let f = 0; f < nFrames; f++) {
   if (u32() !== 0x784D5246) throw new Error(`frame ${f}: bad FRMx`);
-  const vframe = u32(); const taSize = u32();
+  // capture_break.mjs stamps offset-8 with the post-dyn tail length (the on-change
+  // GFX tail; the live replica FRMx carries no engine TA — render_frame regenerates
+  // it from RAM). So a frame = header(12) + dyn + tail, and we skip the tail opaquely.
+  const vframe = u32(); const tailLen = u32();
   const dynOff = p; for (const r of dynamicRegs) p += r.len;
-  const gfxOff = p; const nGfx = (p + 4 <= buf.length) ? dv.getUint32(p, true) : 0;
-  if (nGfx <= 64) { p += 4; for (let g = 0; g < nGfx && p + 8 <= buf.length; g++) { const len = dv.getUint32(p + 4, true); p += 8 + len; } }
-  const taOff = p; p += taSize;
-  frames.push({ vframe, taSize, dynOff, gfxOff, taOff });
+  p += tailLen;
+  frames.push({ vframe, dynOff });
 }
 const fr = frames[wantF];
 { let o = fr.dynOff; for (const r of dynamicRegs) { ram.set(buf.subarray(o, o + r.len), G(r.addr)); o += r.len; } }
@@ -57,30 +58,34 @@ for (let i = 0; i < quads; i++) {
   rfQuads.push({ idx: i, sel: sels[i], gfx1: gfxs[i] >>> 0, bx: ax, by: cy });
 }
 
-// ---- parse ASMTRACE frame ----
-const asmLines = readFileSync(asmPath, 'utf8').trim().split('\n').filter(Boolean);
-// cols: frame sid slot cid sel dx dy accX accY screenX screenY pal row flip flags r11 r13 node
-const asm = asmLines.map(l => { const t = l.split(/\s+/); return { sel: +t[4], sx: +t[9], sy: +t[10], node: t[17] }; });
+// ---- parse ASMTRACE frame (cols: frame sid slot cid sel dx dy accX accY screenX screenY pal row flip flags r11 r13 node) ----
+const asmLines = readFileSync(asmPath, 'utf8').trim().split('\n').filter(l => l && !l.startsWith('#'));
+const asm = asmLines.map(l => { const t = l.split(/\s+/); return { cid:+t[3], sel:+t[4], sx:+t[9], sy:+t[10], flip:+t[13], flags:parseInt(t[14],16)||0, node:t[17] }; });
 
-// ---- match by node-owner then preserve emission order (both walk r13/r11 in order) ----
-function diffForNode(nodeHex, gfx1) {
+// node -> its gfx1 straight from the seeded RAM (node+0x15C), so no stale hardcoded map.
+const r32 = a => { const i=(a>>>0)&0xFFFFFF; return (ram[i]|ram[i+1]<<8|ram[i+2]<<16|ram[i+3]<<24)>>>0; };
+
+function diffForNode(nodeHex) {
+  const nodeGuest = parseInt(nodeHex, 16);
+  const gfx1 = r32(nodeGuest + 0x15C) >>> 0;
   const a = asm.filter(x => x.node === nodeHex);
   const r = rfQuads.filter(x => x.gfx1 === gfx1);
   const n = Math.min(a.length, r.length);
-  let maxDX = 0, maxDY = 0, sumDX = 0, sumDY = 0, worst = null;
+  const totalY = a.filter(x => x.flags & 0x20).length, totalX = a.filter(x => x.flags & 0x10).length;
+  let maxDX = 0, maxDY = 0, selMiss = 0;
   for (let i = 0; i < n; i++) {
-    const dX = Math.abs(r[i].bx - a[i].sx), dY = Math.abs(r[i].by - a[i].sy);
-    sumDX += dX; sumDY += dY;
-    if (dX > maxDX) maxDX = dX; if (dY > maxDY) maxDY = dY;
-    if (!worst || dX + dY > worst.d) worst = { i, d: dX + dY, sel: r[i].sel, asmSel: a[i].sel, rfx: r[i].bx, asmx: a[i].sx, rfy: r[i].by, asmy: a[i].sy };
+    maxDX = Math.max(maxDX, Math.abs(r[i].bx - a[i].sx));
+    maxDY = Math.max(maxDY, Math.abs(r[i].by - a[i].sy));
+    if (r[i].sel !== a[i].sel) selMiss++;
   }
-  console.log(`\nNODE ${nodeHex} gfx1=0x${gfx1.toString(16)}: asmParts=${a.length} rfParts=${r.length} matched=${n}`);
-  console.log(`  maxDX=${maxDX.toFixed(2)}px maxDY=${maxDY.toFixed(2)}px  meanDX=${(sumDX/n).toFixed(3)} meanDY=${(sumDY/n).toFixed(3)}`);
-  if (worst) console.log(`  worst part #${worst.i}: sel(rf=${worst.sel} asm=${worst.asmSel}) X(rf=${worst.rfx.toFixed(2)} asm=${worst.asmx}) Y(rf=${worst.rfy.toFixed(2)} asm=${worst.asmy})`);
-  // print first 6 part-by-part rows
-  console.log('   #  sel(rf/asm)   X rf / asm        Y rf / asm');
-  for (let i = 0; i < Math.min(n, 8); i++)
-    console.log(`  ${String(i).padStart(2)}  ${r[i].sel}/${a[i].sel}\t  ${r[i].bx.toFixed(2)} / ${a[i].sx}\t  ${r[i].by.toFixed(2)} / ${a[i].sy}`);
+  const cov = (a.length === r.length && n === a.length) ? 'COVER-OK' : `COVER-MISMATCH(asm=${a.length} rf=${r.length})`;
+  console.log(`\nNODE ${nodeHex} cid=${a[0]?.cid} gfx1=0x${gfx1.toString(16)}: ${cov} matched=${n}  maxDX=${maxDX.toFixed(1)} maxDY=${maxDY.toFixed(1)} selMiss=${selMiss}  asm-flags Ymir(0x20)=${totalY} Xmir(0x10)=${totalX}`);
+  for (let i = 0; i < n; i++) if (a[i].flags) {
+    const dX = Math.abs(r[i].bx - a[i].sx), dY = Math.abs(r[i].by - a[i].sy);
+    console.log(`   part${String(i).padStart(2)} sel(rf=${r[i].sel}/asm=${a[i].sel}) FLAGS=0x${a[i].flags.toString(16)}${a[i].flags&0x20?' [Y-MIRROR: render_frame drops]':''}${a[i].flags&0x10?' [X-mirror]':''}  pos rf(${r[i].bx.toFixed(0)},${r[i].by.toFixed(0)}) asm(${a[i].sx},${a[i].sy}) dX=${dX.toFixed(1)} dY=${dY.toFixed(1)}`);
+  }
 }
 console.log(`vframe=${fr.vframe} render_frame quads=${quads} asmParts=${asm.length}`);
-for (const [g, node] of Object.entries(GFX1_TO_NODE)) diffForNode(node, +g);
+const nodes = [...new Set(asm.map(x => x.node))];
+console.log(`nodes in frame: ${nodes.length}`);
+for (const node of nodes) diffForNode(node);

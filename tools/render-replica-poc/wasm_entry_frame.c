@@ -171,3 +171,14 @@ uint32_t render_frame_quad_is_effect_impl(uint8_t* out_e, uint32_t cap);
 EXPORT uint32_t render_frame_quad_is_effect(uint8_t* out_e, uint32_t cap){
     return render_frame_quad_is_effect_impl(out_e, cap);
 }
+
+/* PER-BODY node + tile-count exports — let the offline diff (_diff_vs_asm) partition
+ * render_frame's quads by owning node (multiple satellites of one char share a gfx1,
+ * so gfx1 alone can't key them). g_scene is body-major in walk order: body b owns the
+ * next g_obj_ntiles[b] quads. Mirrors render_frame_test.c's per-object grouping. */
+extern int g_body_count;
+extern int g_obj_ntiles[64];
+extern unsigned int g_obj_node[64];
+EXPORT int      render_frame_obj_count(void){ return g_body_count; }
+EXPORT unsigned int render_frame_obj_node(int i){ return (i>=0 && i<g_body_count) ? g_obj_node[i] : 0u; }
+EXPORT int      render_frame_obj_ntiles(int i){ return (i>=0 && i<g_body_count) ? g_obj_ntiles[i] : 0; }
