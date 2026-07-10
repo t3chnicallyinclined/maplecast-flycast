@@ -307,7 +307,14 @@ static int decodeBodies(const uint8_t* ram, const SceneQuad* S, int nQuad,
              * 608 bad tiles / 37 parts / 13 chars (incl Sentinel rocket-punch 4x8 sel570..1167);
              * gstaTwTileYFirst = 0 bad, all shapes. == colpair for Tw<=4&&Th<=4 (zero-regression).
              * The engine stores each part as ONE verbatim WxH twiddle blob (DMA loc_8c033d78). */
-            int k = gstaTwTileYFirst(col, row, Tw, Th);
+            // FLIP4000 fix (re_kb/24, 2026-07-10): the per-record 0x4000 is a DRAW-TIME texU mirror
+            // ONLY, never a storage re-store. The col reversal above (dfl&2) double-applied it on
+            // the native path -> Storm Lightning-Strike flying-pose (sel0x35d flip4000 64x64) tile
+            // column-SWAP. Use the RAW storage column for the native twiddle-chunk; the reversed
+            // col stays for the LINEAR path. Byte-gated 52/52+48/48 EXACT (_storm_native_gate.mjs).
+            int ncol = col;
+            if ((dfl & 1) && dm == (int)m) ncol = ((dcx % pCols) + pCols) % pCols;
+            int k = gstaTwTileYFirst(ncol, row, Tw, Th);
             size_t o = (size_t)k * 512;
             if (o + 512 <= pd.raw.size()) {
                 outTiles.emplace_back();

@@ -531,7 +531,20 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
             // superset: only 4x8/8x8 change, exactly the broken cases). Lockstep with
             // maplecast_mirror.cpp gstaDecodeBodies + texel_gate.cpp.
             void colPairChunk;   // kept for reference (descriptor emit order, re_kb/68; NOT the texel key)
-            const k = twTileYFirst(col, row2, Tw, Th);
+            // NATIVE STORAGE COLUMN = the descriptor's raw STORAGE column (cx), WITHOUT the
+            // per-record 0x4000 reversal applied to `col` above. The engine DMAs each part
+            // VERBATIM (loc_8c033d78), so VRAM off k == decodeA(part)[k] unconditionally; the
+            // 0x4000 flag is the DRAW-TIME texU mirror ONLY (re_kb/24 per_side_storage_col_reverses,
+            // ROM-traced loc_8c0346c4), NEVER a storage re-store. The (dfl&2) reversal double-applies
+            // 0x4000 for m32 NATIVE flip parts -> the Storm Lightning-Strike sel0x35d COLUMN-PAIR
+            // SWAP (52/52 & 48/48 tiles wrong vs engine VRAM; this fix -> byte-EXACT, 0 regression
+            // across 100+ non-flip native parts + rocket.mcrr sel0xdf2/0xdfc). Byte-gated:
+            // tools/render-replica-poc/_storm_native_gate.mjs (CUR==FIX==engine-VRAM). The linear
+            // (sub-32 satellite) path below keeps `col` untouched (byte-gated pal17 satellite cert).
+            let ncol = col;
+            if (quadSrcDesc && (quadSrcDesc[4 * q + 3] & 1) && quadSrcDesc[4 * q + 0] === m)
+                ncol = ((quadSrcDesc[4 * q + 1] % pCols) + pCols) % pCols;
+            const k = twTileYFirst(ncol, row2, Tw, Th);
             const o = k * 512;
             if (k >= 0 && o + 512 <= p.raw.length) { vram.set(p.raw.subarray(o, o + 512), addr); written++; if (mask) mask[q] = 1; continue; }
         }

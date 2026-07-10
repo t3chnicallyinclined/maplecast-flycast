@@ -4982,7 +4982,14 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 			// the 8x8 (256x256) — 608 bad tiles / 37 parts / 13 chars incl Sentinel's rocket-punch
 			// arm (sel570/790/1151/1161/1167 4x8); gstaTwTileYFirst = 0 bad, all shapes. It equals
 			// colpair for Tw<=4&&Th<=4 (zero-regression). NOTE: source-only; needs native rebuild.
-			int k = gstaTwTileYFirst(col, row, Tw, Th);
+			// FLIP4000 fix (re_kb/24, 2026-07-10): the per-record 0x4000 is a DRAW-TIME texU mirror
+			// ONLY, never a storage re-store. The col reversal above (dfl&2) double-applied it on
+			// the native path -> Storm Lightning-Strike flying-pose (sel0x35d flip4000 64x64) tile
+			// column-SWAP. Use the RAW storage column for the native twiddle-chunk; the reversed
+			// col stays for the LINEAR path. Byte-gated 52/52+48/48 EXACT (_storm_native_gate.mjs).
+			int ncol = col;
+			if ((dfl & 1) && dm == (int)m) ncol = ((dcx % pCols) + pCols) % pCols;
+			int k = gstaTwTileYFirst(ncol, row, Tw, Th);
 			size_t o = (size_t)k * 512;
 			if (o + 512 <= pd.raw.size()) {
 				outTiles.emplace_back();
