@@ -20,6 +20,10 @@ canvas{display:block;background:transparent}
 #panel input[type=range]{width:100px;vertical-align:middle}
 #panel select{background:#222;color:#eee;border:1px solid #444;padding:1px 4px}
 #panel .val{color:#0f0;float:right}
+#panel details{border:1px solid #2a2a2a;border-radius:4px;margin:6px 0;padding:2px 6px 6px;background:#161616}
+#panel summary{cursor:pointer;font-size:12px;color:#0ff;padding:4px 0;user-select:none;font-weight:bold;letter-spacing:1px}
+#panel details[open] summary{border-bottom:1px solid #333;margin-bottom:4px}
+#panel details h2{font-size:11px;color:#8ac}
 </style>
 </head>
 <body>
@@ -76,7 +80,7 @@ canvas{display:block;background:transparent}
 <div id="st">Connecting...</div>
 </div>
 <div id="panel">
-<h2>Render Debug</h2>
+<details open><summary>Draw Lists · Shader</summary>
 <label><input type="checkbox" id="dbg_opaque" checked> Draw Opaque</label>
 <label><input type="checkbox" id="dbg_punch" checked> Draw Punch-Through</label>
 <label><input type="checkbox" id="dbg_trans" checked> Draw Translucent</label>
@@ -86,6 +90,8 @@ canvas{display:block;background:transparent}
 <label><input type="radio" name="shmode" value="uv"> UV Debug</label>
 <label><input type="radio" name="shmode" value="depth"> Depth Debug</label>
 <label><input type="radio" name="shmode" value="alpha"> Alpha Debug</label>
+</details>
+<details open><summary>Depth · Blend · Passes</summary>
 <h2>Translucent Sort</h2>
 <label><input type="checkbox" id="dbg_noSort" checked> Disable Z-sort (submission order)</label>
 <label>Z epsilon: <input type="range" id="dbg_zEpsilon" min="0" max="100" value="5"> <span class="val" id="dbg_zEpsilonVal">0.00005</span></label>
@@ -142,7 +148,8 @@ canvas{display:block;background:transparent}
 </select></label>
 <h2>Texture</h2>
 <label><input type="checkbox" id="dbg_texInvalidate"> Force invalidate every frame</label>
-<h2 style="color:#f80">🤯 INSANE EFFECTS</h2>
+</details>
+<details><summary>🤯 Insane Effects</summary>
 <label><input type="checkbox" id="fx_0"> 🌀 Acid Trip</label>
 <label><input type="checkbox" id="fx_1"> 💀 X-Ray</label>
 <label><input type="checkbox" id="fx_2"> 🎵 Audio Visualizer</label>
@@ -159,7 +166,8 @@ canvas{display:block;background:transparent}
 <label><input type="checkbox" id="fx_13"> 🌙 Night Vision</label>
 <label><input type="checkbox" id="fx_14"> 🔥 Thermal</label>
 <label><input type="checkbox" id="fx_15"> 🌊 Underwater</label>
-<h2 style="color:#f0f">GRAPHICS ENHANCE</h2>
+</details>
+<details><summary>Graphics Enhance</summary>
 <button id="gfx_reset" style="width:100%;background:#333;color:#f44;border:1px solid #f44;padding:6px;cursor:pointer;font-family:inherit;font-size:11px;margin:2px 0;font-weight:bold">RESET ALL EFFECTS</button>
 <label>Resolution: <select id="gfx_res">
 <option value="1">1x (640×480)</option>
@@ -187,7 +195,8 @@ canvas{display:block;background:transparent}
 <label>Vignette: <input type="range" id="gfx_vignette" min="0" max="100" value="0"> <span class="val" id="gfx_vignetteVal">0</span></label>
 <label>Scanlines: <input type="range" id="gfx_scanlines" min="0" max="100" value="0"> <span class="val" id="gfx_scanlinesVal">0</span></label>
 <label>Hue Shift: <input type="range" id="gfx_hue" min="0" max="100" value="0"> <span class="val" id="gfx_hueVal">0</span></label>
-<h2 style="color:#f00">CUSTOM BACKGROUND</h2>
+</details>
+<details><summary>Custom Background · 3D Arenas</summary>
 <label><input type="checkbox" id="gfx_customBg"> Enable Custom Background</label>
 <label>Floor Z cutoff: <input type="range" id="gfx_floorZ" min="0" max="100" value="30"> <span class="val" id="gfx_floorZVal">0.003</span></label>
 <input type="text" id="gfx_bgUrl" placeholder="Image or Video URL..." style="width:95%;background:#222;color:#0f0;border:1px solid #444;padding:4px;font-family:inherit;font-size:10px;margin:4px 0">
@@ -218,12 +227,9 @@ canvas{display:block;background:transparent}
 <button class="stgBtn" data-bg="/stages/bg-olympus-temple.jpg" style="background:#330;color:#fd0;border:1px solid #fd0;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Olympus</button>
 <button class="stgBtn" data-bg="/bg-cosmic-colosseum.jpg" style="background:#203;color:#c8f;border:1px solid #c8f;padding:3px;cursor:pointer;font-family:inherit;font-size:8px">Cosmic</button>
 </div>
-<input type="text" id="gfx_bgUrl" placeholder="Image, Video, or GLB URL..." style="width:95%;background:#222;color:#0f0;border:1px solid #444;padding:4px;font-family:inherit;font-size:10px;margin:4px 0">
-<button id="gfx_loadBg" style="width:48%;background:#333;color:#0f0;border:1px solid #0f0;padding:3px;cursor:pointer;font-family:inherit;font-size:9px">Image</button>
-<button id="gfx_loadVid" style="width:48%;background:#333;color:#0ff;border:1px solid #0ff;padding:3px;cursor:pointer;font-family:inherit;font-size:9px">Video</button>
-<button id="gfx_load3d" style="width:48%;background:#333;color:#ff0;border:1px solid #ff0;padding:3px;cursor:pointer;font-family:inherit;font-size:9px">GLB Model</button>
 <div id="gfx_bgStatus" style="font-size:9px;color:#555;margin:2px 0">No background loaded</div>
-<h2 style="color:#0ff">🔧 TRANSFORMS</h2>
+</details>
+<details><summary>Transforms · Character FX</summary>
 <label>Zoom: <input type="range" id="fx_zoom" min="50" max="300" value="100"> <span class="val" id="fx_zoomVal">100%</span></label>
 <label>Char Scale: <input type="range" id="fx_charScale" min="25" max="400" value="100"> <span class="val" id="fx_charScaleVal">100%</span></label>
 <label>Screen Shake: <input type="range" id="fx_shakeAmt" min="0" max="50" value="0"> <span class="val" id="fx_shakeAmtVal">0</span></label>
@@ -235,7 +241,8 @@ canvas{display:block;background:transparent}
 <label><input type="checkbox" id="fx_17"> 🌈 Char Rainbow</label>
 <label><input type="checkbox" id="fx_18"> 🔥 Char Fire</label>
 <label><input type="checkbox" id="fx_19"> 👻 Char Ghost</label>
-<h2 style="color:#0f0">🕹️ PLAY</h2>
+</details>
+<details><summary>Inspector · Overrides</summary>
 <h2>List Inspector</h2>
 <label>Trans skip first: <input type="range" id="dbg_trSkip" min="0" max="500" value="0"> <span class="val" id="dbg_trSkipVal">0</span></label>
 <label>Trans max draw: <input type="range" id="dbg_trMax" min="0" max="500" value="0"> <span class="val" id="dbg_trMaxVal">0 (all)</span></label>
@@ -259,8 +266,6 @@ canvas{display:block;background:transparent}
 <h2>Tile Clip</h2>
 <label><input type="checkbox" id="dbg_tileClipOff"> Disable ALL tile clips</label>
 <label><input type="checkbox" id="dbg_tileClipLog"> Log tile clips (console)</label>
-<h2>Render Passes</h2>
-<label>Force single pass: <input type="checkbox" id="dbg_singlePass" checked></label>
 <h2>Latency Mode</h2>
 <label><input type="radio" name="latMode" value="vsync" checked> Vsync (smooth, +8ms avg)</label>
 <label><input type="radio" name="latMode" value="immediate"> Immediate (lowest latency)</label>
@@ -270,7 +275,8 @@ canvas{display:block;background:transparent}
 <button id="dbg_dumpFrame" style="background:#333;color:#0f0;border:1px solid #0f0;padding:4px 8px;cursor:pointer;font-family:inherit;margin:4px 0">Dump frame to console</button>
 <h2>Offset Color</h2>
 <label><input type="checkbox" id="dbg_noOffset"> Disable offset color</label>
-<h2>Render Stats (see left panel)</h2>
+</details>
+<div style="font-size:10px;color:#666;margin:6px 0">Render stats: see left panel</div>
 </div>
 
 <script type="module">
@@ -964,7 +970,7 @@ if(BODY.want) window._bodyStart();
 (function(){
   const p=document.createElement('div');
   p.id='zcs2_panel';
-  p.style.cssText='position:fixed;bottom:8px;right:8px;z-index:99999;background:rgba(10,14,20,.9);border:1px solid #2a3550;border-radius:6px;color:#cfe;font:11px/1.55 monospace;padding:6px 10px;min-width:236px';
+  p.style.cssText='position:fixed;bottom:8px;right:296px;z-index:99999;background:rgba(10,14,20,.9);border:1px solid #2a3550;border-radius:6px;color:#cfe;font:11px/1.55 monospace;padding:6px 10px;min-width:236px';   /* right:296 = clear of the 280px sidebar */
   p.innerHTML='<b style="color:#6fb8ff">ZCS2 wire</b> <label style="float:right;color:#4dd08a;cursor:pointer"><input id="zcs2_render" type="checkbox"> render from ZCS2</label>'
     +'<div id="zcs2_stats" style="white-space:pre;margin-top:3px">waiting for ZCS2 stream…</div>';
   document.body.appendChild(p);
@@ -2100,7 +2106,10 @@ document.getElementById('dbg_shadOverride').onchange=e=>DBG.shadOverride=e.targe
 document.getElementById('dbg_shadInstr').onchange=e=>DBG.shadInstr=parseInt(e.target.value);
 document.getElementById('dbg_useAlpha').onchange=e=>DBG.useAlphaOverride=parseInt(e.target.value);
 DBG.shadOverride=false;DBG.shadInstr=-1;DBG.useAlphaOverride=-1;
-DBG.tileClipOff=false;DBG.tileClipLog=false;DBG.singlePass=true;DBG.freeze=false;DBG.noOffset=false;
+DBG.tileClipOff=false;DBG.tileClipLog=false;DBG.freeze=false;DBG.noOffset=false;
+// singlePass now defaults FALSE (set in the knobs block above): honor the wire's render-pass
+// boundaries — the engine draws the HUD in a LATER pass against CLEARED depth; forcing a
+// single pass depth-rejects HUD quads against the scene (the "incomplete HUD" bug).
 // Graphics enhance
 DBG.resScale=2;DBG.fxaa=false;DBG.bloom=false;DBG.bloomAmt=0.3;DBG.crtAdv=false;DBG.crtCurve=0.2;
 DBG.grain=false;DBG.colorTemp=0;DBG.sat=1.0;DBG.contrast=1.0;DBG.bright=1.0;DBG.sharp=0;
@@ -2599,7 +2608,7 @@ async function main(){
                 if(SpriteClient.isWATCH(d)){ try{ SPRITECLIENT.onWATCH(d);
                   let wd=document.getElementById('sc_watch');
                   if(!wd){ wd=document.createElement('pre'); wd.id='sc_watch';
-                    wd.style.cssText='position:fixed;top:120px;right:8px;z-index:99999;background:rgba(0,0,0,.82);color:#ff0;font:10px/1.25 monospace;padding:6px;white-space:pre;max-height:70vh;overflow:auto;pointer-events:none';
+                    wd.style.cssText='position:fixed;top:120px;right:296px;z-index:99999;background:rgba(0,0,0,.82);color:#ff0;font:10px/1.25 monospace;padding:6px;white-space:pre;max-height:70vh;overflow:auto;pointer-events:none';
                     document.body.appendChild(wd); }
                   wd.textContent=SPRITECLIENT.watchText();
                 }catch(e){} return; }
