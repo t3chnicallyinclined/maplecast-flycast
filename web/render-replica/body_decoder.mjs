@@ -177,6 +177,32 @@ function twTileYFirst(col, row, Tw, Th) {
     }
     return rv;
 }
+// COLUMN-PAIR-MAJOR storage chunk index for a Tw×Th tile grid (re_kb/68). A LINE-FOR-LINE
+// port of render_frame.c rebuild_tile_grid's engine tile-emit loop: a 2-column macro-column
+// walks ALL 2-row bands, THEN the next pair -> [col-pair][2-row band][col-in-pair][row]. This
+// IS the engine's per-tile TCW-slot order (walker steps +0x200 per emit slot) AND therefore the
+// verbatim-DMA VRAM chunk order at the part base. The client's native-chunk carve must index the
+// blob by THIS (== render_frame's byte-exact TCW addr slot) so blob[k*512] lands at the SAME
+// relative offset the engine DMAed it to. IDENTICAL to the old row-band-major carve for Tw<=2 OR
+// Th<=2 (proven: every satellite/body run bit-unchanged); for 4x4+ parts (Sentinel sel124/112)
+// the old carve 2x2-block-SWAPPED the off-diagonal tiles = re_kb/68's "swapped diagonally"
+// residual on the TEXEL side. render_frame widecarve1 fixed the geometry twin; this fixes the carve.
+function colPairChunk(col, row, Tw, Th) {
+    let t = 0;
+    for (let cp = 0; cp < Tw; cp += 2) {
+        const cw = (Tw - cp < 2) ? (Tw - cp) : 2;
+        for (let by = 0; by < Th; by += 2) {
+            const bh = (Th - by < 2) ? (Th - by) : 2;
+            for (let cx2 = 0; cx2 < cw; cx2++) {
+                for (let ry = 0; ry < bh; ry++) {
+                    if (cp + cx2 === col && by + ry === row) return t;
+                    t++;
+                }
+            }
+        }
+    }
+    return -1;
+}
 
 // Re-twiddle one 32×32 linear index region (1024 entries) into 512 bytes of PAL4_TW (the engine's
 // per-tile VRAM storage). Inverse of detwiddlePal4 for w=h=32 (bcx=bcy=5).
@@ -491,25 +517,22 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         // diagonal tiles -> the POSE-DEPENDENT Storm-cape grey-block garble (frame _gsta_nobg_360).
         const Tw = (W / 32) | 0, Th = (H / 32) | 0;
         if (m === 32 && pCols > 1 && pRows > 1 && p.raw) {
-            // Y-FIRST for BOTH square and non-square grids. The PVR twiddle interleaves the
-            // y-bit before the x-bit (flycast _twiddleSlow), so tile-grid chunk order is
-            // Y-first universally. The old `Tw==Th ? twTile(x-first) : yfirst` split was WRONG
-            // for square grids (sel197 64x64 2x2 diff 1860/4096 vs the byte-exact baker
-            // extract_gfx1_atlas full-span lin); twTile's x-first square validation (re_kb/43)
-            // was against a self-consistent model, never the baker. Y-first matches the baker
-            // 0px for square AND non-square. (re_kb finding:carve_square_yfirst_supersedes_xfirst.)
-            // NATIVE-CHUNK ORDER = the engine's 2-ROW-BAND desc order (bands of 2 rows
-            // top-down, column-major inside a band) -- MEASURED vs engine VRAM 2026-07-05
-            // (_live4 sel 0xD61 128x128 4x4: chunk == band-index on all 9 nonzero tiles;
-            // Y-first mismapped 8/16). Band-order == Y-first for any grid with either dim
-            // <= 2 (all previously validated cases identical); only >2x>2 grids change.
-            // Lockstep with maplecast_mirror.cpp gstaDecodeBodies.
-            const bby = row2 & ~1;
-            const bbh = (Th - bby < 2) ? (Th - bby) : 2;
-            const k = bby * Tw + col * bbh + (row2 - bby);
-            void twTileYFirst;   // kept for reference
+            // NATIVE-CHUNK ORDER = COLUMN-PAIR MAJOR (re_kb/68, closes re_kb/51 on the TEXEL
+            // side). The engine builder (loc_8c033ba8..ce0) emits wide-part tiles column-pair
+            // major -> the walker's per-tile TCW steps +0x200 in that order -> the verbatim-DMA
+            // VRAM chunk at part_base+k*0x200 is chunk k in that same order. So the client MUST
+            // index p.raw by colPairChunk(col,row) == render_frame's byte-exact TCW addr slot
+            // (rebuild_tile_grid, widecarve1). The OLD row-band-major carve
+            // (k = (row2&~1)*Tw + col*bh + row-in-band) was MEASURED vs a self-consistent model
+            // in the pre-re_kb/68 era; it 2x2-block-SWAPS the two off-diagonal blocks of any
+            // 4x4+ part (Sentinel sel124/112 = 8/16 tiles wrong, band4.mcrr). colPairChunk is
+            // byte-IDENTICAL to row-band-major for Tw<=2 OR Th<=2 (every satellite/body run
+            // unchanged) and byte-exact vs engine VRAM for 4x4+ via the verbatim-DMA argument.
+            // Lockstep with maplecast_mirror.cpp gstaDecodeBodies + texel_gate.cpp.
+            void twTileYFirst;   // kept for reference (whole-part twiddle order; NOT the carve key)
+            const k = colPairChunk(col, row2, Tw, Th);
             const o = k * 512;
-            if (o + 512 <= p.raw.length) { vram.set(p.raw.subarray(o, o + 512), addr); written++; if (mask) mask[q] = 1; continue; }
+            if (k >= 0 && o + 512 <= p.raw.length) { vram.set(p.raw.subarray(o, o + 512), addr); written++; if (mask) mask[q] = 1; continue; }
         }
         // extract the m×m linear region at (col*m, row*m), clamped to W×H, into the tile's
         // top-left (zero-pad the rest of the 32×32 = the engine's UV-clamped sample area).

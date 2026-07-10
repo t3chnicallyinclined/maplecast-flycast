@@ -4974,18 +4974,26 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 		// the off-diagonal tiles -> the POSE-DEPENDENT Storm-cape grey-block garble (_gsta_nobg_360).
 		int Tw = W / 32, Th = H / 32;
 		if (m == 32 && cols > 1 && rows > 1 && !pd.raw.empty()) {
-			// NATIVE-CHUNK ORDER = the engine's 2-ROW-BAND desc order (rebuild_tile_grid's own
-			// emission: bands of 2 rows top-down, column-major inside a band), SUPERSEDING the
-			// Y-first twiddle (2026-07-05, MEASURED vs engine VRAM: _live4 m1345 sel 0xD61
-			// 128x128 4x4 — all 9 nonzero tiles chunk == band-index; Y-first mismapped 8/16 =
-			// the Cable-knockdown fragments). Band-order == Y-first for every grid with either
-			// dim <= 2 (2x2, 2x4, 4x2 — the previously validated cape/sel197 cases produce
-			// IDENTICAL indices), so this only changes >2x>2 grids, where the earlier Y-first
-			// "validation" was self-consistent reassembly (carve+reassemble with the same
-			// function), never engine VRAM. Lockstep with body_decoder.mjs ensureBodyTextures.
-			int _by = row & ~1;
-			int _bh = (Th - _by < 2) ? (Th - _by) : 2;
-			int k = _by * Tw + col * _bh + (row - _by);
+			// NATIVE-CHUNK ORDER = COLUMN-PAIR-MAJOR (re_kb/68 texel twin), lockstep with
+			// render_frame rebuild_tile_grid (widecarve1) + body_decoder.mjs colPairChunk.
+			// CORRECTED 2026-07-10: the prior 2-ROW-BAND order 2x2-block-SWAPPED the off-diagonal
+			// tiles of a DENSE >2x>2 part. BYTE-GATED vs the real Sentinel blob (band4.mcrr sel124
+			// 128x128 4x4, production Y-first readback): col-pair 0/464 bad, row-band 232/464 bad.
+			// The old _live4 sel 0xD61 "validation" had only 9/16 nonzero tiles, so the swapped
+			// (zero) off-diagonal blocks couldn't distinguish the two orders. == row-band for
+			// Tw<=2 OR Th<=2 (every satellite/normal body — bit-unchanged). NOTE: source-only;
+			// needs a native-mirror rebuild to take effect.
+			int k = -1, _t = 0;
+			for (int cp = 0; cp < Tw && k < 0; cp += 2) {
+				int cw = (Tw - cp < 2) ? (Tw - cp) : 2;
+				for (int _by = 0; _by < Th && k < 0; _by += 2) {
+					int _bh = (Th - _by < 2) ? (Th - _by) : 2;
+					for (int cx2 = 0; cx2 < cw && k < 0; cx2++)
+						for (int ry = 0; ry < _bh; ry++, _t++)
+							if (cp + cx2 == col && _by + ry == row) { k = _t; break; }
+				}
+			}
+			if (k < 0) k = 0;
 			(void)gstaTwTileYFirst;   // kept for reference/diagnostics
 			size_t o = (size_t)k * 512;
 			if (o + 512 <= pd.raw.size()) {

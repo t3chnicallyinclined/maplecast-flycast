@@ -37,7 +37,7 @@ Render paths for the MVC2 stream, ranked. Any new session starts at the top.
 | 3D machine (sparks/flashes) | INSIDE the 2a native TA by construction (re_kb/61-65) | byte-gated via 2a | splice order of deferred cls-0xAC parcels; **P3D double-draw when 2a is on (G1)** |
 | HUD | Phase 2b — separate closure `loc_8c03012c` (re_kb/57) | bars/portraits byte-matched vs HUDQ oracle (58/59) | run the real closure 2a-style; meter-segment VRAM prefix gap (36); win-stars drawable NOW from char+0x540 (33 supersedes 55) |
 | Stage | gsta_stage.cpp + STG0B engine-TA bake | z-order + floor cull fixed (45/47); **2026-07-09: bake HUD-contamination purged (re_kb/67)** — the bake shipped a frozen captured HUD (68/72 meshes) that depth-rejected the live HUD; bake tool now filters HUD_TEX_WORDS | only STG0B baked; stage_id→STGxx map; list-0xB set-piece double-draw audit vs 2a |
-| Textures/palettes | lockstep carve pair (2-row-band FINAL) + on-change PVR tail | 100% texel, 0.00% palette-bank mismatch | — |
+| Textures/palettes | lockstep carve pair (**COLUMN-PAIR-MAJOR** per re_kb/70; 2-row-band was the texel twin of the re_kb/68 swap) + on-change PVR tail | 100% texel (byte-gated 0/464 on dense Sentinel 4×4); 0.00% palette-bank mismatch | **VCACHE ref-page misses = permanent stale VRAM on the wire path** (frame-decoder.mjs:171; bodytex=local bypasses it) |
 | Camera | cam_mat M1·M2 (re_kb/39) | 4.3e-5px over 1000 frames | live moving-match witness (validation only) |
 | Wire read-set | 16MB seed + 15 dyn regions + GFX/palette tails | **complete: stale universe = 0 bytes (re_kb/25); drop-scratch falsified trimming** | on-change GFX for cat 1–4 satellites (29) |
 
