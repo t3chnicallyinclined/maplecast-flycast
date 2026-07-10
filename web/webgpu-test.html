@@ -715,7 +715,10 @@ function _bodyApplyFrame(u8){
   // staging per frame; latest-wins pairing reads the other bank's stale tiles).
   if(!BODY.ring) BODY.ring=[];
   BODY.ring.push({vf:vframe,ta:BODY.ta,bt:BODY.bt});
-  if(BODY.ring.length>16) BODY.ring.shift();
+  // 120 frames (~2s) of two-socket drift tolerance. The old 16 (~267ms) overflowed
+  // within minutes of connect (socket latency drifts apart) -> permanent pairMiss ->
+  // latest-wins fallback = WRONG-POSE bodies (the progressive whole-sprite garble).
+  if(BODY.ring.length>120) BODY.ring.shift();
 }
 // ?bodytex=local — per-frame texel stage. Extracts render_frame's per-quad texture-pairing
 // exports (sel/gfx1/colrow/mirror/srcdesc — replay.html transpiledTA extraction, filtered to
@@ -771,8 +774,17 @@ window._bodyMerge=(g,wantVf,ord)=>{
   let ta=BODY.ta, bt=BODY.bt;
   // PAIR AT vframe-1: the engine's TA lags the state counter by one frame
   // (capture-proven: body(V) == engine TA stamped V+1; garble_diff 2026-07-09).
-  if(wantVf>=0&&BODY.ring){ const hit=BODY.ring.find(e=>e.vf===wantVf-1);
-    if(hit){ ta=hit.ta; bt=hit.bt; BODY.pairHit=(BODY.pairHit|0)+1; } else BODY.pairMiss=(BODY.pairMiss|0)+1; }
+  if(wantVf>=0&&BODY.ring&&BODY.ring.length){
+    // exact vf-1 first; else NEAREST ring entry (a 1-2 frame stale pose is near-right;
+    // the old latest-wins fallback could be 30+ frames AHEAD = full garble under drift).
+    let hit=null,best=1e9;
+    for(const e of BODY.ring){ const d=Math.abs(e.vf-(wantVf-1)); if(d<best){best=d;hit=e;} }
+    BODY.pairDrift=best;
+    if(best===0) BODY.pairHit=(BODY.pairHit|0)+1;
+    else BODY.pairNear=(BODY.pairNear|0)+1;
+    if(hit&&best<=90){ ta=hit.ta; bt=hit.bt; }
+    else BODY.pairMiss=(BODY.pairMiss|0)+1;   // >1.5s adrift: unusable, latest-wins fallback
+  }
   if(!ta||!ta.length) return;
   try{ bp=_bodyParser2.parse(ta,ta.length); }catch(e){ if(++BODY.err<6) console.warn('[body] parse',e); return; }
   // ?bodytex=local: attach the paired frame's OWN decoded texels (pp.texObj) to each staged
@@ -1002,7 +1014,7 @@ if(BODY.want) window._bodyStart();
       'ZCS2   '+(z*8/1e6).toFixed(2)+' Mbps   epoch '+(ZCS2.epoch<0?'–':ZCS2.epoch)+'\n'
      +'legacy '+(l*8/1e6).toFixed(2)+' Mbps   ratio '+(z?(l/z).toFixed(2)+'×':'–')+'\n'
      +'dec '+(ZCS2.frames?(ZCS2.decMs/ZCS2.frames).toFixed(2):'0.00')+' ms/msg   desyncs '+ZCS2.errs+'\nsrc: '+src
-     +(window._body&&window._body.started?'\nbody: '+(window._body.ready?(window._body.frames+'f vf'+window._body.vframe+(window._body.ta?' '+(window._body.ta.length/96|0)+'q':'')+(window._body.pairHit?' pair '+window._body.pairHit+'/'+((window._body.pairHit|0)+(window._body.pairMiss|0)):'')+(window._body.spliceOk||window._body.spliceSkew?' spl '+(window._body.spliceOk|0)+'/'+((window._body.spliceOk|0)+(window._body.spliceSkew|0)):'')):'seeding...'):'')
+     +(window._body&&window._body.started?'\nbody: '+(window._body.ready?(window._body.frames+'f vf'+window._body.vframe+(window._body.ta?' '+(window._body.ta.length/96|0)+'q':'')+(window._body.pairHit||window._body.pairNear?' pair '+(window._body.pairHit|0)+'e/'+(window._body.pairNear|0)+'n/'+(window._body.pairMiss|0)+'m vfΔ'+(window._body.pairDrift|0):'')+(window._body.spliceOk||window._body.spliceSkew?' spl '+(window._body.spliceOk|0)+'/'+((window._body.spliceOk|0)+(window._body.spliceSkew|0)):'')):'seeding...'):'')
      +(window._bodySrc==='sprite'&&window._spriteBridge?'\nbridge: SPRITE '+window._spriteBridge.quads+'q f'+window._spriteBridge.frames+(window._spriteBridge.texMiss?' texMiss '+window._spriteBridge.texMiss:''):'');
   },1000);
 })();
