@@ -1,0 +1,75 @@
+<!doctype html><meta charset=utf8><title>MapleCast Command Center</title>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<style>
+*{box-sizing:border-box}html,body{margin:0;height:100%;background:#0d0d10;color:#eee;font:13px/1.5 system-ui,monospace}
+#wrap{display:flex;height:100vh;gap:0}
+#stream{flex:1;min-width:0;border:0;background:#000}
+#ctl{width:380px;overflow-y:auto;padding:12px 14px;border-left:1px solid #223}
+h1{font-size:16px;color:#0ff;margin:0 0 2px}h3{font-size:11px;color:#8cf;margin:0}
+button{background:#1a2230;color:#eee;border:1px solid #46c;border-radius:6px;padding:7px 10px;margin:3px 2px;cursor:pointer;font:inherit;font-size:12px}
+button:hover{background:#26344a}button.warn{border-color:#f80;color:#fc8}button.danger{border-color:#f44;color:#f88}
+button.sm{padding:6px 8px}input,select{background:#000;color:#0f0;border:1px solid #444;border-radius:4px;padding:5px;font:inherit}
+fieldset{border:1px solid #223;border-radius:8px;margin:8px 0;padding:6px 10px}legend{color:#8cf;font-size:11px;padding:0 6px}
+.pad{display:inline-grid;grid-template-columns:repeat(3,42px);gap:3px}.pad button{margin:0;padding:7px 0;width:42px}
+pre{background:#000;border:1px solid #333;border-radius:6px;padding:8px;white-space:pre-wrap;max-height:26vh;overflow:auto;font-size:11px}
+small{color:#888}#key{color:#f88}
+@media(max-width:820px){#wrap{flex-direction:column}#ctl{width:auto;border-left:0;border-top:1px solid #223}#stream{height:52vh}}
+</style>
+<div id=wrap>
+  <iframe id=stream src="/webgpu-test.html"></iframe>
+  <div id=ctl>
+    <h1>🎮 Command Center</h1>
+    <small>Live RAM control over the stream on the left. Addresses from MVC2-MEMORY-MAP + anotak framedata. ⚠️ = experimental.</small>
+    <div style="margin:6px 0"><b>Slot:</b>
+      <select id=slot><option>P1C1</option><option>P2C1</option><option>P1C2</option><option>P2C2</option><option>P1C3</option><option>P2C3</option></select>
+      <button class=sm onclick=go('read')>🔄 Read</button>
+      <button class=sm onclick=setKey()>🔑 key</button> <span id=key></span></div>
+
+    <fieldset><legend>Character</legend>
+      <button onclick=go('morphP1')>🎭 Morph P1 (no tag)</button><button onclick=go('morphP2')>🎭 Morph P2</button><br>
+      <button onclick=go('swapP1')>🔀 Swap P1 (tag)</button><button onclick=go('swapP2')>🔀 Swap P2</button>
+      <button class=warn onclick=go('teleport')>↔️ Teleport sides</button></fieldset>
+
+    <fieldset><legend>Movement — 8-way air dash ⚠️</legend>
+      <span class=pad>
+        <button onclick=dash('UL')>↖</button><button onclick=dash('U')>↑</button><button onclick=dash('UR')>↗</button>
+        <button onclick=dash('L')>←</button><button class=sm onclick=slotCall('stop')>■</button><button onclick=dash('R')>→</button>
+        <button onclick=dash('DL')>↙</button><button onclick=dash('D')>↓</button><button onclick=dash('DR')>↘</button>
+      </span> speed <input id=speed value=14 size=3></fieldset>
+
+    <fieldset><legend>Moves / Anim ⚠️ (Morph first to use another char's kit)</legend>
+      group <input id=group placeholder=00-1B size=4><button class=sm onclick=slotCall('playGroup',{group:val('group')})>▶ group</button>
+      state <input id=state placeholder=hex size=5><button class=sm onclick=slotCall('playState',{val:val('state')})>▶ state</button><br>
+      sp-move <input id=sp placeholder=hex size=5><button class=sm onclick=slotCall('special',{val:val('sp')})>▶ special</button></fieldset>
+
+    <fieldset><legend>Buffs (P1) ⚠️</legend>
+      <button onclick=go('meterP1')>⚡ meter</button><button onclick=go('speedP1')>💨 speed</button>
+      <button onclick=go('flightP1')>🕊️ flight</button><button onclick=go('armorP1')>🛡️ armor</button></fieldset>
+
+    <fieldset><legend>Health / Facing</legend>
+      <button onclick=go('healP1')>❤️ P1</button><button onclick=go('healP2')>❤️ P2</button><button onclick=go('healAll')>❤️ All</button>
+      <button onclick=go('flipP1')>🔃 Flip P1</button><button onclick=go('flipP2')>🔃 Flip P2</button></fieldset>
+
+    <fieldset><legend>Raw poke</legend>
+      off(hex) <input id=off placeholder=268340 size=8> bytes <input id=hex placeholder=90 size=10>
+      <button class=danger onclick=poke()>💥</button></fieldset>
+
+    <pre id=out>Enter your mod key (🔑) to enable writes.</pre>
+  </div>
+</div>
+<script>
+const out=document.getElementById('out'), val=id=>document.getElementById(id).value, slot=()=>document.getElementById('slot').value;
+let MK=localStorage.getItem('modkey')||'';
+function showKey(){ document.getElementById('key').textContent = MK?('key set ('+MK.slice(0,4)+'…)'):'no key'; }
+function setKey(){ const k=prompt('Mod key:',MK); if(k!=null){ MK=k.trim(); localStorage.setItem('modkey',MK); showKey(); } }
+showKey();
+async function call(action,q){ out.textContent='…';
+  try{ const r=await fetch('/modcmd/cmd?key='+encodeURIComponent(MK),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action,...q})});
+    const j=await r.json(); out.textContent=JSON.stringify(j.reply??j,null,2); }
+  catch(e){ out.textContent='ERROR: '+e.message; } }
+function go(a){ call(a,{}); }
+function slotCall(a,q){ call(a,{slot:slot(),...(q||{})}); }
+function dash(dir){ call('dash',{slot:slot(),dir,speed:val('speed')}); }
+function poke(){ call('poke',{off:val('off'),hex:val('hex')}); }
+if(MK) go('read');
+</script>

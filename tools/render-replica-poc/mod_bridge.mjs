@@ -10,8 +10,16 @@
 //  prior dead tunnel — Windows leaves the socket lingering a while.)
 import http from 'node:http';
 
+// WebSocket: Node 22 has it global; Node 20 (prod) does not — fall back to the `ws` package.
+let WS = globalThis.WebSocket;
+if(!WS){ try{ WS = (await import('ws')).WebSocket || (await import('ws')).default; }
+  catch{ console.error('[bridge] no global WebSocket and `ws` not installed — run: npm i ws'); process.exit(1); } }
+
 const CTRL_PORT = process.argv[2] || process.env.MC_CTRL_PORT || '7211';
-const CTRL = `ws://127.0.0.1:${CTRL_PORT}`, PORT = 9099;
+const CTRL = `ws://127.0.0.1:${CTRL_PORT}`, PORT = process.env.MC_MOD_PORT || 9099;
+// When MC_MOD_KEY is set (prod behind nginx), /cmd REQUIRES ?key=<KEY> or X-Mod-Key.
+// Local use (no env) leaves it open — it's already loopback-only via your ssh tunnel.
+const MOD_KEY = process.env.MC_MOD_KEY || '';
 
 // ---- addresses (RAM offsets = DC addr & 0xFFFFFF), all from docs/MVC2-MEMORY-MAP.md ----
 const STRIDE = 0x5A4;
@@ -28,7 +36,7 @@ const CID = {'0x00':'Ryu','0x17':'Cable','0x23':'Dan','0x2a':'Storm','0x2c':'Mag
 // ---- persistent control-WS connection with request/reply matching ----
 let ws = null, rid = 0; const pend = new Map();
 function connect(){
-  ws = new WebSocket(CTRL);
+  ws = new WS(CTRL);
   ws.onopen = () => console.log('[bridge] control WS connected', CTRL);
   ws.onclose = () => { console.log('[bridge] control WS closed — retrying in 2s (is the tunnel up?)'); ws=null; setTimeout(connect,2000); };
   ws.onerror = () => {};
@@ -228,9 +236,15 @@ function poke(){ call('poke',{off:val('off'),hex:val('hex')}); }
 go('read');
 </script>`;
 
+function keyOK(req){
+  if(!MOD_KEY) return true;   // no key configured = local/loopback mode, open
+  const u=new URL(req.url,'http://x'); return u.searchParams.get('key')===MOD_KEY || req.headers['x-mod-key']===MOD_KEY;
+}
 http.createServer(async (req,res)=>{
-  if(req.method==='GET' && req.url==='/'){ res.writeHead(200,{'content-type':'text/html'}); return res.end(PANEL); }
-  if(req.method==='POST' && req.url==='/cmd'){
+  const path=req.url.split('?')[0];
+  if(req.method==='GET' && (path==='/'||path==='/panel')){ res.writeHead(200,{'content-type':'text/html'}); return res.end(PANEL); }
+  if(req.method==='POST' && path==='/cmd'){
+    if(!keyOK(req)){ res.writeHead(403,{'content-type':'application/json'}); return res.end(JSON.stringify({ok:false,error:'bad or missing mod key'})); }
     let body=''; req.on('data',d=>body+=d); req.on('end', async ()=>{
       try{ const q=JSON.parse(body||'{}'); const fn=ACT[q.action]; if(!fn) throw new Error('unknown action '+q.action);
         const reply=await fn(q); res.writeHead(200,{'content-type':'application/json'}); res.end(JSON.stringify({ok:true,reply})); }
@@ -238,4 +252,4 @@ http.createServer(async (req,res)=>{
     }); return;
   }
   res.writeHead(404); res.end();
-}).listen(PORT, ()=>console.log(`[bridge] cockpit -> http://localhost:${PORT}  (tunnel 7211 must be up)`));
+}).listen(PORT, ()=>console.log(`[bridge] mod bridge on :${PORT} -> control ${CTRL}${MOD_KEY?' (key-gated)':' (OPEN — loopback only)'}`));
