@@ -287,7 +287,7 @@ import {Decompress as ZcsDecompress} from './webgpu/fzstd.mjs';
 import {StageClient} from './webgpu/stage-client.mjs?v=2';
 import {TAParser} from './webgpu/ta-parser.mjs?v=2';
 import {TextureManager} from './webgpu/texture-manager.mjs';
-import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=8';
+import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=9';
 import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
@@ -564,6 +564,7 @@ window._stageMerge=(g)=>{
   const shift=sp.vertexCount;
   const bump=list=>list.map(p=>{const q=Object.assign({},p); q.first=p.first+shift; return q;});
   const stageOp=sp.opaque||[];
+  for(const q of stageOp) q._src='stage';   // census origin tag (stage-bake vs wire vs body)
   g.opaque=[...stageOp,...bump(g.opaque)];
   g.punchThrough=bump(g.punchThrough);
   g.translucent=bump(g.translucent);
@@ -794,6 +795,7 @@ window._bodyMerge=(g,wantVf,ord)=>{
   // Only splice when the kept counts line up exactly (self-verifying);
   // otherwise fall back to append-at-end.
   const bodyPolys=bump(bp.translucent||[]);
+  for(const q of bodyPolys) q._src='body';   // census origin tag
   // Splice by wire PARAM identity: one param can parse into several strip
   // polys (ta-parser endStrip semantics), so entry counts NEVER key the walk;
   // the descriptor counts PARAMS and kept polys carry .param. A K/P run of
@@ -824,6 +826,14 @@ window._bodyMerge=(g,wantVf,ord)=>{
     }
   }
   if(!spliced) g.translucent=[...g.translucent,...bodyPolys];
+  // PASS BOOKKEEPING (the Cable-vanish fix): the merged TR list is bodyPolys.length
+  // longer than the wire's per-pass EOL counts. Extend the FINAL pass, exactly like
+  // _stageMerge extends op_count — else honoring wire passes (singlePass=false)
+  // truncates the merged list's tail and the appended bodies are never drawn.
+  if(g.renderPasses&&g.renderPasses.length){
+    const li=g.renderPasses.length-1, lp=g.renderPasses[li];
+    g.renderPasses[li]={...lp, tr_count:lp.tr_count+bodyPolys.length};
+  }
   g.vertexData=new Uint8Array(nv.buffer,0,need*4);
   g.vertexCount+=bp.vertexCount;
   g._bodyMerged=true;
@@ -905,7 +915,7 @@ function _btexAttach(bp,bt){
 // inv-src-alpha, modulate-alpha), vert col=white, z band [0.00923,0.01096] —
 // we pin z at the band FLOOR so later-drawn kept TR content (>=) always passes
 // the greater-equal depth test. Textures: the PLxx atlas images upload ONCE per
-// cid as GPUTextures carried on pp.texObj — pvr2-renderer.mjs?v=8 prefers a
+// cid as GPUTextures carried on pp.texObj — pvr2-renderer.mjs?v=9 prefers a
 // direct texObj handle over the TCW->TextureManager lookup (tcw stays 0).
 // FX items (charId FX_CID 0xFE0 / -1) are SKIPPED: effect bands (0x475xxx/
 // 0x60xxxx/0x400xxx) are NOT in the server strip set {82,83,88,89}, so those

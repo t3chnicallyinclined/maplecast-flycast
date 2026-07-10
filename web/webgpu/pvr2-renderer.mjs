@@ -270,6 +270,14 @@ export class PVR2Renderer {
         this._censusMap = dbg.census ? new Map() : null;   // one-shot state census (dbg panel button)
         let passes = parsed.renderPasses || [{op_count:opaque.length,pt_count:punchThrough.length,tr_count:translucent.length}];
         if(dbg.singlePass) passes=[{op_count:opaque.length,pt_count:punchThrough.length,tr_count:translucent.length}];
+        // SAFETY CLAMP: client-side merges (baked-stage prepend, render_frame body splice)
+        // can grow the lists beyond the wire's per-pass EOL counts. Always extend the FINAL
+        // pass to cover the full lists so merged polys are never silently undrawn
+        // (the Cable-vanish class). Math.max = idempotent, multi-pass boundaries preserved.
+        {const lp=passes[passes.length-1];
+         if(lp){lp.op_count=Math.max(lp.op_count,opaque.length);
+                lp.pt_count=Math.max(lp.pt_count,punchThrough.length);
+                lp.tr_count=Math.max(lp.tr_count,translucent.length);}}
 
         const cW = renderTarget ? renderTarget.width : this.depth.width;
         const cH = renderTarget ? renderTarget.height : this.depth.height;
@@ -334,7 +342,7 @@ export class PVR2Renderer {
                 let sb=(tsp>>29)&7, db=(tsp>>26)&7;
                 const _blendApply=lt==='opaque'?dbg.blendApplyOp!==false:lt==='punch_through'?dbg.blendApplyPt!==false:dbg.blendApplyTr!==false;
                 if(dbg.blendOverride&&_blendApply){sb=dbg.blendSrc||4;db=dbg.blendDst||5;}
-                if(this._censusMap){const k=`${lt} dm=${dm} zw=${zw} sb=${sb} db=${db} texd=${(tcw>>>0).toString(16).padStart(8,'0')}`;
+                if(this._censusMap){const k=`${lt} src=${pp._src||'wire'} dm=${dm} zw=${zw} sb=${sb} db=${db} texd=${(tcw>>>0).toString(16).padStart(8,'0')}`;
                     const vfz=new Float32Array(vertexData.buffer,vertexData.byteOffset,vertexCount*7);
                     let zmin=Infinity,zmax=-Infinity;for(let v=0;v<pp.count;v++){const z=vfz[(pp.first+v)*7+2];if(z<zmin)zmin=z;if(z>zmax)zmax=z;}
                     const e=this._censusMap.get(k)||{n:0,zmin:Infinity,zmax:-Infinity};
@@ -435,7 +443,7 @@ export class PVR2Renderer {
                         if(dbg.trDepthWrite)zw=1;
                         let sb=(tsp>>29)&7,db=(tsp>>26)&7;
                         if(dbg.blendOverride&&dbg.blendApplyTr!==false){sb=dbg.blendSrc||4;db=dbg.blendDst||5;}
-                        if(this._censusMap){const k=`trans(sorted) dm=${dm} zw=${zw} sb=${sb} db=${db} texd=${(tcw>>>0).toString(16).padStart(8,'0')}`;
+                        if(this._censusMap){const k=`trans(sorted) src=${pp._src||'wire'} dm=${dm} zw=${zw} sb=${sb} db=${db} texd=${(tcw>>>0).toString(16).padStart(8,'0')}`;
                             const e=this._censusMap.get(k)||{n:0,zmin:Infinity,zmax:-Infinity};e.n++;this._censusMap.set(k,e);}
                         const pipe=this._pipe(sb,db,dm,zw,cm^1,'triangle-list');
                         let tbg=fbBG;
