@@ -285,7 +285,7 @@ import {Decompress as ZcsDecompress} from './webgpu/fzstd.mjs';
 import {StageClient} from './webgpu/stage-client.mjs?v=2';
 import {TAParser} from './webgpu/ta-parser.mjs?v=2';
 import {TextureManager} from './webgpu/texture-manager.mjs';
-import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=7';
+import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=8';
 import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
@@ -903,7 +903,7 @@ function _btexAttach(bp,bt){
 // inv-src-alpha, modulate-alpha), vert col=white, z band [0.00923,0.01096] —
 // we pin z at the band FLOOR so later-drawn kept TR content (>=) always passes
 // the greater-equal depth test. Textures: the PLxx atlas images upload ONCE per
-// cid as GPUTextures carried on pp.texObj — pvr2-renderer.mjs?v=7 prefers a
+// cid as GPUTextures carried on pp.texObj — pvr2-renderer.mjs?v=8 prefers a
 // direct texObj handle over the TCW->TextureManager lookup (tcw stays 0).
 // FX items (charId FX_CID 0xFE0 / -1) are SKIPPED: effect bands (0x475xxx/
 // 0x60xxxx/0x400xxx) are NOT in the server strip set {82,83,88,89}, so those

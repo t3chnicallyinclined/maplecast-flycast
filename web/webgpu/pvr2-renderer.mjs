@@ -334,7 +334,11 @@ export class PVR2Renderer {
                 let sb=(tsp>>29)&7, db=(tsp>>26)&7;
                 const _blendApply=lt==='opaque'?dbg.blendApplyOp!==false:lt==='punch_through'?dbg.blendApplyPt!==false:dbg.blendApplyTr!==false;
                 if(dbg.blendOverride&&_blendApply){sb=dbg.blendSrc||4;db=dbg.blendDst||5;}
-                if(this._censusMap){const k=`${lt} dm=${dm} zw=${zw} sb=${sb} db=${db} texd=${(tcw>>>0).toString(16).padStart(8,'0')}`;this._censusMap.set(k,(this._censusMap.get(k)||0)+1);}
+                if(this._censusMap){const k=`${lt} dm=${dm} zw=${zw} sb=${sb} db=${db} texd=${(tcw>>>0).toString(16).padStart(8,'0')}`;
+                    const vfz=new Float32Array(vertexData.buffer,vertexData.byteOffset,vertexCount*7);
+                    let zmin=Infinity,zmax=-Infinity;for(let v=0;v<pp.count;v++){const z=vfz[(pp.first+v)*7+2];if(z<zmin)zmin=z;if(z>zmax)zmax=z;}
+                    const e=this._censusMap.get(k)||{n:0,zmin:Infinity,zmax:-Infinity};
+                    e.n++;if(zmin<e.zmin)e.zmin=zmin;if(zmax>e.zmax)e.zmax=zmax;this._censusMap.set(k,e);}
                 let cullIdx = cm^1;
                 if(dbg.cullOverride==='none')cullIdx=0;
                 else if(dbg.cullOverride==='front')cullIdx=2;
@@ -431,7 +435,8 @@ export class PVR2Renderer {
                         if(dbg.trDepthWrite)zw=1;
                         let sb=(tsp>>29)&7,db=(tsp>>26)&7;
                         if(dbg.blendOverride&&dbg.blendApplyTr!==false){sb=dbg.blendSrc||4;db=dbg.blendDst||5;}
-                        if(this._censusMap){const k=`trans(sorted) dm=${dm} zw=${zw} sb=${sb} db=${db} texd=${(tcw>>>0).toString(16).padStart(8,'0')}`;this._censusMap.set(k,(this._censusMap.get(k)||0)+1);}
+                        if(this._censusMap){const k=`trans(sorted) dm=${dm} zw=${zw} sb=${sb} db=${db} texd=${(tcw>>>0).toString(16).padStart(8,'0')}`;
+                            const e=this._censusMap.get(k)||{n:0,zmin:Infinity,zmax:-Infinity};e.n++;this._censusMap.set(k,e);}
                         const pipe=this._pipe(sb,db,dm,zw,cm^1,'triangle-list');
                         let tbg=fbBG;
                         if(pp.texObj)tbg=this._texBG(pp.texObj.texture,pp.texObj.sampler);   // direct handle (sprite-bridge) wins
@@ -465,9 +470,10 @@ export class PVR2Renderer {
         }
         if(this._censusMap){
             const hasWire=!!parsed.renderPasses;
-            const rows=[...this._censusMap.entries()].sort((a,b)=>b[1]-a[1]).map(([k,n])=>`${k}  n=${n}`);
+            const fz=v=>v===Infinity||v===-Infinity?'?':v.toPrecision(4);
+            const rows=[...this._censusMap.entries()].sort((a,b)=>b[1].n-a[1].n).map(([k,e])=>`${k}  n=${e.n}  z=[${fz(e.zmin)}..${fz(e.zmax)}]`);
             console.log(`[census] passes=${passes.length} (from wire: ${hasWire})`, JSON.stringify(passes));
-            console.log('[census] list dm=depthFunc(0nev 1ls 3le 4gt 6ge 7alw) zw=depthWrite sb/db=blend(0zero 1one 4srcA 5invSrcA) texd=TCW\n'+rows.join('\n'));
+            console.log('[census] list dm=depthFunc(0nev 1ls 3le 4gt 6ge 7alw) zw=depthWrite sb/db=blend(0zero 1one 4srcA 5invSrcA) texd=TCW z=[min..max]\n'+rows.join('\n'));
             window._censusLast={passes,rows};
             dbg.census=false; this._censusMap=null;
         }
