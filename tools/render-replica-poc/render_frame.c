@@ -350,18 +350,29 @@ static void rebuild_tile_grid(Sh4Ctx *c, u32 node){
         u32 cols = W/m, rows = H/m;
         u32 cnt  = cols*rows; if(cnt==0) cnt=1;
         if(idx + cnt > 768u) return;             /* table is 768 entries; never overrun it */
+        /* ENGINE TILE ORDER = COLUMN-PAIR MAJOR (re_kb/68, closes re_kb/51): the builder
+         * walks a 2-column macro-column through ALL row-bands, THEN the next column pair:
+         *   [col-pair][2-row band][col-in-pair][row-in-band]
+         * PROVEN vs the SHIPPED desc (band4.mcrr vf310394 node 0c268e88 sel 124, 4x4):
+         *   engine:  c0r4 c0r3 c1r4 c1r3  c0r2 c0r1 c1r2 c1r1  c2r4 c2r3 c3r4 c3r3  c2r2..
+         * The old row-band-major scan ([band][all cols][row]) matches for cols<=2 OR
+         * rows<=2 (all normal chars) but 2x2-block-SWAPS 4x4+ parts (Sentinel) — the
+         * user-visible flashing block holes / re_kb/51 "swapped diagonally" residual. */
         u32 t = 0;
-        for(u32 by=0; by<rows; by+=2){
-            u32 bh = (rows - by < 2u) ? (rows - by) : 2u;
-            for(u32 cx=0; cx<cols; cx++){
-                for(u32 ry=0; ry<bh; ry++){
-                    u32 row = by + ry;
-                    u32 a = DESC_TABLE + (idx + t)*4u;
-                    w8(c, a+0, (u8)m);
-                    w8(c, a+1, (u8)(cnt-1));
-                    w8(c, a+2, (u8)cx);
-                    w8(c, a+3, (u8)(rows - row));
-                    t++;
+        for(u32 cp=0; cp<cols; cp+=2){
+            u32 cw = (cols - cp < 2u) ? (cols - cp) : 2u;
+            for(u32 by=0; by<rows; by+=2){
+                u32 bh = (rows - by < 2u) ? (rows - by) : 2u;
+                for(u32 cx2=0; cx2<cw; cx2++){
+                    for(u32 ry=0; ry<bh; ry++){
+                        u32 cx = cp + cx2, row = by + ry;
+                        u32 a = DESC_TABLE + (idx + t)*4u;
+                        w8(c, a+0, (u8)m);
+                        w8(c, a+1, (u8)(cnt-1));
+                        w8(c, a+2, (u8)cx);
+                        w8(c, a+3, (u8)(rows - row));
+                        t++;
+                    }
                 }
             }
         }

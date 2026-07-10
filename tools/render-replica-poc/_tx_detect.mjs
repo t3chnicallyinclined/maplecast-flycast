@@ -91,7 +91,12 @@ for (let fi=0; fi<nF; fi++) {
       }
     }
     nfTotal++;
-    if (!a){ nfCountMismatch++; continue; }
+    if (!a){ nfCountMismatch++;
+      // UNDER/OVER-EMISSION report (the "missing tile block" class): no shift produced
+      // a count match — record rf vs asm tile counts at shift 0 for this node.
+      const am0=asmByVf.get(fr.vf); const a0=am0&&am0.get(node);
+      (globalThis._cmList=globalThis._cmList||[]).push({vf:fr.vf,node,rf:rf0.length,asm:a0?a0.length:0});
+      continue; }
     if (bestScore>TOL) shiftHist[bestShift]=(shiftHist[bestShift]||0); // divergent even at best shift
     shiftHist[bestShift]=(shiftHist[bestShift]||0)+1;
     // index-paired residuals
@@ -122,6 +127,12 @@ for (let fi=0; fi<nF; fi++) {
 }
 
 console.log(`frames checked: ${framesChecked} (vf ${vfMin}..${vfMax}); node-frames: ${nfTotal}, clean: ${nfClean}, count-mismatch(skipped): ${nfCountMismatch}`);
+if (globalThis._cmList && globalThis._cmList.length){
+  console.log(`\nCOUNT-MISMATCH node-frames (under/over-emission — the missing-tile class):`);
+  for (const c of globalThis._cmList.slice(0,30)) console.log(`  vf=${c.vf} node=${c.node} rf=${c.rf} asm=${c.asm} delta=${c.rf-c.asm}`);
+  const byNode={}; for(const c of globalThis._cmList) byNode[c.node]=(byNode[c.node]||0)+1;
+  console.log(`  by node: ${JSON.stringify(byNode)}`);
+}
 console.log(`best-shift histogram (node-frames): ${JSON.stringify(shiftHist)}`);
 console.log(`\nCONFIRMED 2-PART TRANSPOSITIONS: ${swaps.length}`);
 for (const s of swaps.slice(0,40))

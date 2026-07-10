@@ -32,7 +32,7 @@ Render paths for the MVC2 stream, ranked. Any new session starts at the top.
 
 | Subsystem | Authoritative impl | Proven | Open |
 |---|---|---|---|
-| Bodies | rank-2/3 above | texels 100% byte-exact; geometry byte-exact vs ASMTRACE; 9/9 params; **2026-07-09: frame-exact 1273-frame gameplay gate 5664/5664 node-frames clean (_tx_detect)** | 2a pixel-side; palsel root fix; ~~part transposition (51)~~ RESOLVED 2026-07-09 — was the sel==0xFF blank-record desc-slot compaction in rebuild_tile_grid (re_kb/66) |
+| Bodies | rank-2/3 above | texels 100% byte-exact; geometry byte-exact vs ASMTRACE; 9/9 params; **2026-07-09: frame-exact gameplay gates 5664/5664 (band2) + 4800/4800 (band4) node-frames clean (_tx_detect)** | 2a pixel-side; palsel root fix; ~~part transposition (51)~~ RESOLVED 2026-07-09 — TWO mechanisms: sel==0xFF blank-record desc-slot compaction (re_kb/66) + wide-part COLUMN-PAIR-MAJOR tile order (re_kb/68, Sentinel 4×4 block swaps) |
 | Satellites/projectiles | gen_render_satellite.c + slot-table walk | in the 5/5 close; <0.005px | ~~satellite GFX residency (re_kb/29)~~ FIXED 2026-07-09 — objpool 0x8C26AA54+0x1D000 in the per-frame read-set, deployed prod (HANDOFF-SATELLITE-READSET) |
 | 3D machine (sparks/flashes) | INSIDE the 2a native TA by construction (re_kb/61-65) | byte-gated via 2a | splice order of deferred cls-0xAC parcels; **P3D double-draw when 2a is on (G1)** |
 | HUD | Phase 2b — separate closure `loc_8c03012c` (re_kb/57) | bars/portraits byte-matched vs HUDQ oracle (58/59) | run the real closure 2a-style; meter-segment VRAM prefix gap (36); win-stars drawable NOW from char+0x540 (33 supersedes 55) |
