@@ -73,6 +73,29 @@ async function swapPoint(pair){
   const va=await readSlot(A), vb=await readSlot(B);
   return { swapped:[aName,bName], now:{[aName]:va.name,[bName]:vb.name} };
 }
+// MORPH IN PLACE (no tag animation): swap only the character IDENTITY between two slots,
+// KEEPING each slot's situational state so the engine never sees a "point changed" event
+// and never plays the tag sequence. Each slot stays where it was, same active/point flag,
+// same velocity/facing/anim progress — but is now a different character.
+//   KEEP (from self): active +0x000, pos +0x034/38, vel +0x05C/60, screen +0xE0/E4,
+//                     facing-copy +0x110, anim_state/xflip/walkdir +0x1D0..0x1D3.
+//   SWAP (from other): everything else = char_id, DAT/GFX/anim/hitbox pointers
+//                     (+0x154..0x188), health, meter, palette, moveset.
+// This is the experiment for re_kb/69's "clean instant swap". If the engine STILL tags,
+// the hidden point-order field lives inside the swapped region — that finding narrows it.
+const KEEP = [[0x000,1],[0x034,8],[0x05C,8],[0x0E0,8],[0x110,1],[0x1D0,4]];
+function applyKeep(baseHex, selfHex){ let h=baseHex;
+  for(const [off,len] of KEEP){ const a=off*2,b=(off+len)*2; h=h.slice(0,a)+selfHex.slice(a,b)+h.slice(b); }
+  return h; }
+async function morphInPlace(pair){
+  const [aName,bName]=pair||['P1C1','P1C2']; const A=SLOT[aName], B=SLOT[bName];
+  const ca=await rd(A,STRIDE), cb=await rd(B,STRIDE);
+  await wr(A, applyKeep(cb, ca));   // A slot: B's identity, A's situation (stays point if it was)
+  await wr(B, applyKeep(ca, cb));
+  const va=await readSlot(A), vb=await readSlot(B);
+  return { morphed:[aName,bName], now:{[aName]:`${va.name} active=${va.active}`,[bName]:`${vb.name} active=${vb.active}`},
+           note:'no tag if point-order field is outside the struct — watch the stream' };
+}
 async function teleportSides(){
   const a=await rd(SLOT.P1C1,8), b=await rd(SLOT.P2C1,8);
   const pa=a.slice(OFF.x*2,(OFF.x+8)*2), pb=b.slice(OFF.x*2,(OFF.x+8)*2);
@@ -93,52 +116,115 @@ async function poke(offHex, hex){
   await wr(off,hex); return { off:'0x'+off.toString(16), wrote:hex };
 }
 
+// ---- MOVEMENT: 8-way air dash / launch via velocity injection (+0x5C vx, +0x60 vy) ----
+// Screen-absolute directions (R=+x, DOWN=+y in this space). float LE. Also sets stance=jump
+// so the char is airborne + flight ON so gravity doesn't immediately cancel it. EXPERIMENTAL
+// magnitudes — tune with the speed arg.
+const fhex = v => { const b=Buffer.alloc(4); b.writeFloatLE(v); return b.toString('hex'); };
+const DIR = { R:[1,0],L:[-1,0],U:[0,-1],D:[0,1], UR:[0.7,-0.7],UL:[-0.7,-0.7],DR:[0.7,0.7],DL:[-0.7,0.7] };
+async function dash(base, dir, speed){
+  const d=DIR[dir]; if(!d) throw new Error('bad dir'); const s=+speed||14;
+  await wr(base+OFF.vx, fhex(d[0]*s)); await wr(base+OFF.vy, fhex(d[1]*s));
+  await wr(base+OFF.stance, '02');                 // airborne
+  const h=await rd(base+OFF.flight,1); if(u8(h,0)===0) await wr(base+OFF.flight,'01');
+  return { dash:dir, speed:s, note:'velocity injected (experimental)' };
+}
+async function stopMotion(base){ await wr(base+OFF.vx, fhex(0)); await wr(base+OFF.vy, fhex(0)); return {stopped:true}; }
+
+// ---- MOVES / ANIM: force the char into any of ITS animation groups (0x00-0x1B) or a move
+// state. To use ANOTHER character's moves, MORPH first (that swaps in their moveset), then
+// trigger. Writing anim_group (+0x158) plays that group; animation_state (+0x1D0) is the
+// "which move to play" driver; special_move (+0x1E9) is the sp-move id. All EXPERIMENTAL —
+// forcing arbitrary values mid-move can desync the anim walk; a neutral frame is safest. ----
+async function playGroup(base, groupHex){ const g=parseInt(groupHex,16); if(!(g>=0&&g<=0x1B)) throw new Error('group 00-1B');
+  await wr(base+0x158, g.toString(16).padStart(2,'0')); await wr(base+OFF.animstate, '0000'); return {playGroup:'0x'+g.toString(16)}; }
+async function playState(base, valHex){ const v=parseInt(valHex,16); if(!(v>=0&&v<=0xFFFF)) throw new Error('bad state');
+  const b=Buffer.alloc(2); b.writeUInt16LE(v); await wr(base+OFF.animstate, b.toString('hex')); return {animState:'0x'+v.toString(16)}; }
+async function special(base, valHex){ const v=parseInt(valHex,16)&0xFF; await wr(base+0x1E9, v.toString(16).padStart(2,'0')); return {special:'0x'+v.toString(16)}; }
+
 const ACT = {
   read: readSlots,
   swapP1: ()=>swapPoint(['P1C1','P1C2']), swapP2: ()=>swapPoint(['P2C1','P2C2']),
+  morphP1: ()=>morphInPlace(['P1C1','P1C2']), morphP2: ()=>morphInPlace(['P2C1','P2C2']),
   teleport: teleportSides,
   healP1: ()=>heal(SLOT.P1C1), healP2: ()=>heal(SLOT.P2C1), healAll,
   flipP1: ()=>flip(SLOT.P1C1), flipP2: ()=>flip(SLOT.P2C1),
   meterP1: ()=>meterMax('P1'), meterP2: ()=>meterMax('P2'),
   speedP1: ()=>buff(SLOT.P1C1,'speed'), flightP1: ()=>buff(SLOT.P1C1,'flight'), armorP1: ()=>buff(SLOT.P1C1,'armor'),
+  // movement / 8-way air dash (q.slot picks the slot; default P1C1)
+  dash: (q)=>dash(SLOT[q.slot]||SLOT.P1C1, q.dir, q.speed),
+  stop: (q)=>stopMotion(SLOT[q.slot]||SLOT.P1C1),
+  // moves / anim
+  playGroup: (q)=>playGroup(SLOT[q.slot]||SLOT.P1C1, q.group),
+  playState: (q)=>playState(SLOT[q.slot]||SLOT.P1C1, q.val),
+  special:   (q)=>special(SLOT[q.slot]||SLOT.P1C1, q.val),
   poke: (q)=>poke(q.off, q.hex),
 };
 
 // ---- HTTP server: panel + /cmd ----
-const PANEL = `<!doctype html><meta charset=utf8><title>MapleCast Mod Cockpit</title>
-<style>body{background:#111;color:#eee;font:14px/1.5 system-ui,monospace;margin:0;padding:20px;max-width:640px}
-h1{font-size:18px;color:#0ff}button{background:#223;color:#eee;border:1px solid #46c;border-radius:6px;padding:10px 14px;margin:4px;cursor:pointer;font:inherit}
-button:hover{background:#345}button.warn{border-color:#f80;color:#fc8}button.danger{border-color:#f44;color:#f88}
-pre{background:#000;border:1px solid #333;border-radius:6px;padding:10px;white-space:pre-wrap;max-height:40vh;overflow:auto}
-input{background:#000;color:#0f0;border:1px solid #444;border-radius:4px;padding:6px;font:inherit}
-.row{margin:8px 0}small{color:#888}</style>
-<h1>🎮 MapleCast Mod Cockpit</h1>
-<small>Loopback control WS via your ssh tunnel. Addresses from docs/MVC2-MEMORY-MAP.md.
-Watch results in the webgpu-test tab.</small>
-<div class=row><b>Swap / teleport</b><br><button onclick=go('swapP1')>🔀 Swap P1 point↔bench</button>
-<button onclick=go('swapP2')>🔀 Swap P2 point↔bench</button>
-<button class=warn onclick=go('teleport')>↔️ Teleport P1↔P2 sides</button></div>
-<div class=row><b>Health</b><br><button onclick=go('healP1')>❤️ Heal P1</button>
-<button onclick=go('healP2')>❤️ Heal P2</button>
-<button onclick=go('healAll')>❤️ Heal ALL 6</button></div>
-<div class=row><b>Facing</b><br><button onclick=go('flipP1')>🔃 Flip P1</button>
-<button onclick=go('flipP2')>🔃 Flip P2</button></div>
-<div class=row><b>Buffs (experimental)</b><br><button onclick=go('meterP1')>⚡ P1 meter max</button>
-<button onclick=go('speedP1')>💨 P1 speed</button><button onclick=go('flightP1')>🕊️ P1 flight</button>
-<button onclick=go('armorP1')>🛡️ P1 armor</button></div>
-<div class=row><small>Raw poke — RAM offset(hex, e.g. 268340) + bytes(hex, LE):</small><br>
-<input id=off placeholder=268340 size=10> <input id=hex placeholder=90 size=20>
-<button class=danger onclick=poke()>💥 Poke</button></div>
-<div class=row><button onclick=go('read')>🔄 Read all slots + globals</button></div>
+const PANEL = `<!doctype html><meta charset=utf8><title>MapleCast Command Center</title>
+<style>body{background:#0d0d10;color:#eee;font:13px/1.5 system-ui,monospace;margin:0;padding:16px;max-width:720px}
+h1{font-size:18px;color:#0ff;margin:0 0 4px}h3{font-size:12px;color:#8cf;margin:14px 0 4px;text-transform:uppercase;letter-spacing:1px}
+button{background:#1a2230;color:#eee;border:1px solid #46c;border-radius:6px;padding:8px 12px;margin:3px;cursor:pointer;font:inherit}
+button:hover{background:#26344a}button.warn{border-color:#f80;color:#fc8}button.danger{border-color:#f44;color:#f88}button.sm{padding:6px 9px;font-size:12px}
+pre{background:#000;border:1px solid #333;border-radius:6px;padding:10px;white-space:pre-wrap;max-height:34vh;overflow:auto}
+input,select{background:#000;color:#0f0;border:1px solid #444;border-radius:4px;padding:6px;font:inherit}
+.row{margin:6px 0}small{color:#888}.pad{display:inline-grid;grid-template-columns:repeat(3,46px);gap:3px;vertical-align:middle}
+.pad button{margin:0;padding:8px 0;width:46px}fieldset{border:1px solid #223;border-radius:8px;margin:8px 0;padding:8px 12px}
+legend{color:#8cf;font-size:12px;padding:0 6px}</style>
+<h1>🎮 MapleCast Command Center</h1>
+<small>Live RAM control via your ssh tunnel. Addresses grounded in docs/MVC2-MEMORY-MAP.md +
+MVC2-FRAMEDATA-FIELDS.md (anotak↔marvelous2). Watch the webgpu-test tab. ⚠️ = experimental.</small>
+
+<div class=row><b>Target slot:</b>
+<select id=slot><option>P1C1</option><option>P2C1</option><option>P1C2</option><option>P2C2</option><option>P1C3</option><option>P2C3</option></select>
+<button class=sm onclick=go('read')>🔄 Read all + globals</button></div>
+
+<fieldset><legend>Character</legend>
+<button onclick=go('morphP1')>🎭 Morph P1 in-place (no tag)</button>
+<button onclick=go('morphP2')>🎭 Morph P2 in-place</button>
+<button onclick=go('swapP1')>🔀 Swap P1 (tag)</button><button onclick=go('swapP2')>🔀 Swap P2</button>
+<button class=warn onclick=go('teleport')>↔️ Teleport sides</button></fieldset>
+
+<fieldset><legend>Movement — 8-way air dash ⚠️</legend>
+<span class=pad>
+<button onclick=dash('UL')>↖</button><button onclick=dash('U')>↑</button><button onclick=dash('UR')>↗</button>
+<button onclick=dash('L')>←</button><button class=sm onclick=slotCall('stop')>■</button><button onclick=dash('R')>→</button>
+<button onclick=dash('DL')>↙</button><button onclick=dash('D')>↓</button><button onclick=dash('DR')>↘</button>
+</span>
+&nbsp; speed <input id=speed value=14 size=3> &nbsp;<small>writes velocity + airborne + flight on the target slot</small></fieldset>
+
+<fieldset><legend>Moves / Anim ⚠️ (to use another char's moves: Morph first, then trigger)</legend>
+anim group <input id=group placeholder=00-1B size=4><button class=sm onclick=slotCall('playGroup',{group:val('group')})>▶ play group</button><br>
+anim state <input id=state placeholder=hex size=6><button class=sm onclick=slotCall('playState',{val:val('state')})>▶ set state</button>
+&nbsp; sp-move <input id=sp placeholder=hex size=6><button class=sm onclick=slotCall('special',{val:val('sp')})>▶ special</button></fieldset>
+
+<fieldset><legend>Buffs (P1) ⚠️</legend>
+<button onclick=go('meterP1')>⚡ meter max</button><button onclick=go('speedP1')>💨 speed</button>
+<button onclick=go('flightP1')>🕊️ flight</button><button onclick=go('armorP1')>🛡️ armor</button></fieldset>
+
+<fieldset><legend>Health / Facing</legend>
+<button onclick=go('healP1')>❤️ Heal P1</button><button onclick=go('healP2')>❤️ Heal P2</button>
+<button onclick=go('healAll')>❤️ Heal ALL</button>
+<button onclick=go('flipP1')>🔃 Flip P1</button><button onclick=go('flipP2')>🔃 Flip P2</button></fieldset>
+
+<fieldset><legend>Raw poke</legend>
+RAM offset(hex) <input id=off placeholder=268340 size=10> bytes(hex LE) <input id=hex placeholder=90 size=16>
+<button class=danger onclick=poke()>💥 Poke</button></fieldset>
+
 <pre id=out>ready.</pre>
 <script>
 const out=document.getElementById('out');
+const val=id=>document.getElementById(id).value;
+const slot=()=>document.getElementById('slot').value;
 async function call(action,q){ out.textContent='…';
   try{ const r=await fetch('/cmd',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action,...q})});
     const j=await r.json(); out.textContent=JSON.stringify(j.reply??j,null,2); }
   catch(e){ out.textContent='ERROR: '+e.message; } }
-function go(a){ call(a,{}); }
-function poke(){ call('poke',{off:document.getElementById('off').value,hex:document.getElementById('hex').value}); }
+function go(a){ call(a,{}); }                                   // fixed-slot actions
+function slotCall(a,q){ call(a,{slot:slot(),...(q||{})}); }     // target-slot actions
+function dash(dir){ call('dash',{slot:slot(),dir,speed:val('speed')}); }
+function poke(){ call('poke',{off:val('off'),hex:val('hex')}); }
 go('read');
 </script>`;
 
