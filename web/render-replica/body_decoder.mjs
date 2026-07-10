@@ -493,8 +493,26 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
             pCols = (W / mq) | 0; if (pCols < 1) pCols = 1;
             pRows = (H / mq) | 0; if (pRows < 1) pRows = 1;
             if ((dfl & 1) && dm === mq) {
+                // STORAGE COLUMN = the descriptor's RAW cx, WITHOUT the 0x4000 reversal (scene11,
+                // 2026-07-10). The engine DMAs each part VERBATIM (loc_8c033d78), so storage is
+                // facing-INDEPENDENT (re_kb/24 per_side_storage_col_reverses, ROM loc_8c0346c4) and
+                // the per-record 0x4000 is a DRAW-TIME texU mirror ONLY. The old
+                // `col = (dfl&2) ? (pCols-1-cc) : cc` DOUBLE-APPLIED 0x4000 here (once as the texU
+                // mirror at draw time, again as a storage re-store) for the LINEAR path — the exact
+                // twin of the re_kb/71 NATIVE double-apply that scene10 already removed. The native
+                // path below overrode `col` with a raw ncol, so it was immune; the linear (m<32 or
+                // Nx1 32-strip) path used `col` DIRECTLY and so column-reversed every flip4000
+                // horizontal multi-column part. BYTE-GATED spurious: tools/render-replica-poc/
+                // _zz_catalog_carve_gate.mjs (whole 59-char GFX2 catalog, whole-part Y-first
+                // detwiddle GT — the same standard that engine-VRAM-validated the native fix):
+                // reversal ON = 2618 BAD parts / 7664 BAD tiles, ALL flip4000 horizontal (strip|1 +
+                // sub32|1); reversal OFF (this) = 0 bad, 0 regression (non-flip + vertical pCols==1
+                // + native paths bit-unchanged by construction). C++ twins maplecast_mirror.cpp
+                // gstaDecodeBodies + texel_gate.cpp need the same source-only change + native rebuild
+                // for the definitive engine-mirror-VRAM cross-check (the seed[EX] proof _storm_native
+                // did for native). re_kb finding:per_side_storage_col_reverses (linear twin).
                 const cc = dcx % pCols;
-                col = (dfl & 2) ? (pCols - 1 - cc) : cc;
+                col = cc;
                 let rr = pRows - dry;                       // desc[3] = rows - row
                 if (rr < 0) rr = 0; if (rr >= pRows) rr = pRows - 1;
                 row2 = rr;

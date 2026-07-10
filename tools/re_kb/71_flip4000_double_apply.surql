@@ -21,3 +21,14 @@ UPSERT finding:multiinstance_4x8_carve_gap SET
   status='open', confidence='medium', date='2026-07-10';
 
 RELATE finding:multiinstance_4x8_carve_gap->cites->source:storm_native_gate;
+
+-- 2026-07-10 — the LINEAR twin, found by the WHOLE-CATALOG gate (192032 parts / 59 chars).
+UPSERT source:catalog_carve_gate SET kind='measurement',
+  ref='tools/render-replica-poc/_zz_catalog_carve_gate.mjs — walks the full GFX2 sprite dispatch of all 59 chars, drives the REAL production ensureBodyTextures per (sel,flip), byte-gates each tile vs whole-part Y-first detwiddle',
+  note='COMPREHENSIVE catalog scan (supersedes _zz_roster_carve_gate which had no GFX2/flip context + skipped 2x2/2xN/Nx2/strip). Baseline: 2618 BAD parts / 7664 BAD tiles — 100% flip4000=1 on HORIZONTAL (Nx1) LINEAR parts (2x1/4x1/8x1/16x1 @ m=8/16/32); 0 non-flip, 0 native, 0 vertical. Storm 8-way Lightning Strike other-directions = sel0x35e(64x32 strip)+0x35f/0x360(32x8 sub32) all column-reversed. Post-fix: 0 BAD / 192032 parts. sel0x316 4x8 = CLEAN single-instance (the 32/64 WRONG is multi-instance runtime, NOT static — stays open).';
+
+UPSERT finding:flip4000_double_apply_carve SET
+  statement='CONFIRMED + FIXED 2026-07-10 (native AND linear). The per-record 0x4000 is a DRAW-TIME texU mirror ONLY (re_kb/24 loc_8c0346c4), never a storage re-store. The carve applied it TWICE (once as render_frame_quad_mirror, once as a storage-column reversal col=(dfl&2)?(pCols-1-cc):cc). scene10 fixed the NATIVE (m=32 twiddle-chunk) path via ncol=dcx%pCols. The whole-catalog gate (_zz_catalog_carve_gate.mjs, 192032 parts / 59 chars) then proved the LINEAR desc-keyed branch had the SAME bug on horizontal flip4000 parts (2618 bad parts / 7664 bad tiles, 100% flip4000=1 horizontal-linear). LINEAR FIX (scene11): col = cc (remove the reversal; non-flip and vertical pCols=1 are byte-identical -> zero regression). Full-catalog gate post-fix = 0 BAD / 192032. Storm Lightning-Strike ALL directions now clean (native sel0x35d + linear sel0x35e/0x35f/0x360). Deployed body_decoder ?v=scene11; C++ twins (maplecast_mirror.cpp gstaDecodeBodies + texel_gate.cpp) col=cc source-only (native rebuild pending for the engine-mirror-VRAM cross-check of a horizontal-linear flip part).',
+  status='confirmed', confidence='high', date='2026-07-10';
+
+RELATE finding:flip4000_double_apply_carve->cites->source:catalog_carve_gate;

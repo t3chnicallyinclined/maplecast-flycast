@@ -628,7 +628,7 @@ window._bodyStart=async function bodyStart(){
     BODY.mod=await createRenderFrame({locateFile:p=>p.endsWith('.wasm')?'render-replica/'+p+'?v=widecarve1':p});
     if(BTEX.want){ // ?bodytex=local: the validated client-side texel layer + disc-art overlay
       const [bd,lg]=await Promise.all([
-        import('./render-replica/body_decoder.mjs?v=scene10'),
+        import('./render-replica/body_decoder.mjs?v=scene11'),
         import('./render-replica/local_gfx_overlay.mjs?v=scene5')]);
       BTEX.ensure=bd.ensureBodyTextures; BTEX.applyGfx=lg.applyLocalGfx;
       BTEX.lvram=new Uint8Array(8*1024*1024);   // local staging image (decoder writes at each quad's TCW)

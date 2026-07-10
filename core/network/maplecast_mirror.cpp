@@ -4945,10 +4945,20 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 			int pCols = W / mq; if (pCols < 1) pCols = 1;
 			int pRows = H / mq; if (pRows < 1) pRows = 1;
 			if ((dfl & 1) && dm == mq) {
-				// DESC-KEYED: cx = STORAGE column; flags bit1 = per-record flip4000 pairs
-				// columns DESCENDING (facing alone does NOT reorder storage).
+				// DESC-KEYED: cx = STORAGE column (facing-INDEPENDENT). flags bit1 = per-record
+				// flip4000 = a DRAW-TIME texU mirror ONLY (loc_8c0346c4, re_kb/24) — NEVER a storage
+				// re-store. The old `col = (dfl&2) ? (pCols-1-cc) : cc` DOUBLE-APPLIED 0x4000 on the
+				// LINEAR path (twin of the re_kb/71 native double-apply scene10 already removed); the
+				// native path below overrode col with a raw ncol so it was immune, but the linear
+				// (m<32 or Nx1 32-strip) path used col DIRECTLY -> column-reversed every flip4000
+				// horizontal multi-column part. BYTE-GATED spurious across the whole 59-char GFX2
+				// catalog (tools/render-replica-poc/_zz_catalog_carve_gate.mjs, whole-part Y-first
+				// detwiddle GT): reversal ON = 2618 BAD parts / 7664 BAD tiles (ALL flip4000
+				// horizontal); OFF (this) = 0 bad, 0 regression. SOURCE-ONLY — needs native rebuild
+				// + engine-mirror-VRAM texel_gate re-run for the definitive close (the native fix's
+				// seed[EX] cross-check). Lockstep with body_decoder.mjs + texel_gate.cpp.
 				int cc = dcx % pCols;
-				col = (dfl & 2) ? (pCols - 1 - cc) : cc;
+				col = cc;
 				int rr = pRows - dry;             // desc[3] = rows - row
 				if (rr < 0) rr = 0; if (rr >= pRows) rr = pRows - 1;
 				row = rr;
