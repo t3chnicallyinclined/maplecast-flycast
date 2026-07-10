@@ -139,6 +139,8 @@ canvas{display:block;background:transparent}
 <h2>Passes / Census</h2>
 <label><input type="checkbox" id="dbg_singlePass"> Force SINGLE pass (no mid-frame depth clear)</label>
 <button id="dbg_census" style="width:100%;background:#333;color:#0ff;border:1px solid #0ff;padding:4px;cursor:pointer;font-family:inherit;font-size:11px;margin:2px 0">Dump state census → console (F12)</button>
+<button id="dbg_saveKnobs" style="width:49%;background:#333;color:#0f0;border:1px solid #0f0;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">💾 Save knobs</button>
+<button id="dbg_clearKnobs" style="width:49%;background:#333;color:#f80;border:1px solid #f80;padding:4px;cursor:pointer;font-family:inherit;font-size:10px;margin:2px 0">↺ Reset saved</button>
 <h2>Culling</h2>
 <label><select id="dbg_cull">
 <option value="auto" selected>Auto (per-poly)</option>
@@ -2079,7 +2081,25 @@ document.getElementById('dbg_blendOp').onchange=e=>DBG.blendApplyOp=e.target.che
 document.getElementById('dbg_blendPt').onchange=e=>DBG.blendApplyPt=e.target.checked;
 document.getElementById('dbg_blendTr').onchange=e=>DBG.blendApplyTr=e.target.checked;
 document.getElementById('dbg_singlePass').onchange=e=>DBG.singlePass=e.target.checked;
-document.getElementById('dbg_census').onclick=()=>{DBG.census=true;console.log('[census] armed — capturing next rendered frame');};
+// --- Knob persistence (localStorage 'mc_knobs') + settings echo in the census ---
+const KNOB_MAP={dbg_opaque:['drawOpaque','ck'],dbg_punch:['drawPunch','ck'],dbg_trans:['drawTrans','ck'],
+  dbg_noSort:['noSort','ck'],dbg_trDepth:['trDepthFunc','sel'],dbg_trDepthWrite:['trDepthWrite','ck'],
+  dbg_opDepth:['opDepthFunc','sel'],dbg_opZW:['opDepthWrite','sel'],dbg_ptDepth:['ptDepthFunc','sel'],
+  dbg_ptDepthWrite:['ptDepthWrite','ck'],dbg_alphaDiscard:['alphaDiscard','rng'],
+  dbg_discardTransOnly:['discardTransOnly','ck'],dbg_noDiscard:['noDiscard','ck'],
+  dbg_blendOverride:['blendOverride','ck'],dbg_blendSrc:['blendSrc','sel'],dbg_blendDst:['blendDst','sel'],
+  dbg_blendOp:['blendApplyOp','ck'],dbg_blendPt:['blendApplyPt','ck'],dbg_blendTr:['blendApplyTr','ck'],
+  dbg_singlePass:['singlePass','ck'],dbg_cull:['cullOverride','sel'],dbg_texInvalidate:['texForceInvalidate','ck'],
+  dbg_tileClipOff:['tileClipOff','ck'],dbg_noOffset:['noOffset','ck']};
+const knobSnapshot=()=>{const o={};for(const [,[k]] of Object.entries(KNOB_MAP))o[k]=DBG[k];o.shaderMode=DBG.shaderMode;o.zEpsilon=DBG.zEpsilon;return o;};
+window._applyKnobs=function(o){ Object.assign(DBG,o);
+  for(const [id,[k,ty]] of Object.entries(KNOB_MAP)){ const el=document.getElementById(id); if(!el||o[k]===undefined)continue;
+    if(ty==='ck')el.checked=!!o[k]; else el.value=String(o[k]); }
+  if(o.shaderMode){const r=document.querySelector('input[name=shmode][value='+o.shaderMode+']');if(r)r.checked=true;}
+  console.log('[knobs] applied',JSON.stringify(o)); };
+document.getElementById('dbg_saveKnobs').onclick=()=>{const o=knobSnapshot();localStorage.setItem('mc_knobs',JSON.stringify(o));console.log('[knobs] SAVED — auto-restores on every reload:',JSON.stringify(o));};
+document.getElementById('dbg_clearKnobs').onclick=()=>{localStorage.removeItem('mc_knobs');console.log('[knobs] cleared — defaults on next load');};
+document.getElementById('dbg_census').onclick=()=>{DBG.census=true;console.log('[census] armed — capturing next rendered frame');console.log('[census] knobs '+JSON.stringify(knobSnapshot()));};
 document.getElementById('dbg_cull').onchange = e => DBG.cullOverride = e.target.value;
 document.getElementById('dbg_texInvalidate').onchange = e => DBG.texForceInvalidate = e.target.checked;
 // Effects — each checkbox sets a bit in DBG.fxBits (mapped to packed bits 12+)
@@ -2462,6 +2482,10 @@ document.getElementById('dbg_tileClipLog').onchange=e=>DBG.tileClipLog=e.target.
 document.getElementById('dbg_singlePass').onchange=e=>DBG.singlePass=e.target.checked;
 document.getElementById('dbg_freeze').onchange=e=>DBG.freeze=e.target.checked;
 document.getElementById('dbg_noOffset').onchange=e=>DBG.noOffset=e.target.checked;
+
+// Restore saved knobs LAST — after every default assignment above — so a saved
+// combo survives reload (💾 Save knobs / ↺ Reset saved in Passes·Census).
+try{const _s=localStorage.getItem('mc_knobs');if(_s)window._applyKnobs(JSON.parse(_s));}catch(e){console.warn('[knobs] restore failed',e);}
 
 async function main(){
     if(!navigator.gpu){ss('WebGPU not supported. Use Chrome 113+.','err');return;}
