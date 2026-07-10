@@ -95,7 +95,7 @@ for (let fi=0; fi<nF; fi++) {
       // UNDER/OVER-EMISSION report (the "missing tile block" class): no shift produced
       // a count match — record rf vs asm tile counts at shift 0 for this node.
       const am0=asmByVf.get(fr.vf); const a0=am0&&am0.get(node);
-      (globalThis._cmList=globalThis._cmList||[]).push({vf:fr.vf,node,rf:rf0.length,asm:a0?a0.length:0});
+      (globalThis._cmList=globalThis._cmList||[]).push({vf:fr.vf,node,rf:rfA.length,asm:a0?a0.length:0});
       continue; }
     if (bestScore>TOL) shiftHist[bestShift]=(shiftHist[bestShift]||0); // divergent even at best shift
     shiftHist[bestShift]=(shiftHist[bestShift]||0)+1;

@@ -38,3 +38,12 @@ UPSERT finding:texel_carve_colpair_major SET
   status='confirmed', confidence='high', date='2026-07-10';
 
 RELATE finding:texel_carve_colpair_major->cites->source:zz_roster_carve_gate;
+
+-- 2026-07-10 — CAVEAT CLOSED: engine ground-truth confirmation (ASMTRACE, live 4x8 pose).
+UPSERT source:asmtrace_rocket_4x8 SET kind='oracle',
+  ref='rocket.mcrr (Sentinel LP rocket punch, vframe 27908-29707) + ASMTRACE PC 0x8C034864 sel790 (128x256 4x8 arm, 32 tiles); _tx per-tile emit-order derivation',
+  note='The engine emit order (r13-ascending descriptor slots -> per-tile screenX/screenY) for the live 4x8 rocket-arm part MATCHES twTileYFirst EXACTLY and NOT colPairChunk: over 32 tiles engine==twTileYFirst true, engine==colPairChunk false (first 8 slots identical -> why 4x4 could not distinguish them). Definitive engine arbitration of the whole-part twiddle key, no thesis. Also fixed Storm HK tornado (another 4x8+ part) with the same scene9 -> universality demonstrated across 2 chars/2 moves.';
+UPSERT finding:texel_carve_colpair_major SET
+  statement='CONFIRMED (engine ground-truth) 2026-07-10. twTileYFirst is the native-chunk carve key. ENGINE-ARBITRATED: ASMTRACE on a live Sentinel 4x8 rocket-punch pose (sel790) shows the engine emit order == twTileYFirst, != colPairChunk (the prior caveat is CLOSED — no longer thesis-only). Universal, not per-character: ONE fix (body_decoder ?v=scene9) simultaneously corrected Sentinel rocket punch AND Storm HK tornado (both 4x8+ parts); roster gate 0 bad / 21312 tiles / 59 chars. colPairChunk (re_kb original) coincides with twTileYFirst only on 4x4 & 8x4. render_frame geometry emit order is ALSO twTileYFirst-consistent (same ASMTRACE, screen positions). body_decoder.mjs uses twTileYFirst (DEPLOYED); C++ twins gstaTwTileYFirst source-only (native rebuild pending).',
+  status='confirmed', confidence='high', date='2026-07-10';
+RELATE finding:texel_carve_colpair_major->cites->source:asmtrace_rocket_4x8;
