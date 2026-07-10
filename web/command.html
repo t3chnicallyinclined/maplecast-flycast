@@ -20,10 +20,12 @@ small{color:#888}#key{color:#f88}
   <div id=ctl>
     <h1>🎮 Command Center</h1>
     <small>Live RAM control over the stream on the left. Addresses from MVC2-MEMORY-MAP + anotak framedata. ⚠️ = experimental.</small>
-    <div style="margin:6px 0"><b>Slot:</b>
-      <select id=slot><option>P1C1</option><option>P2C1</option><option>P1C2</option><option>P2C2</option><option>P1C3</option><option>P2C3</option></select>
+    <div style="margin:6px 0"><b>Target:</b>
+      <select id=slot><option value="P1*">P1 active (on-screen)</option><option value="P2*">P2 active (on-screen)</option>
+      <option>P1C1</option><option>P2C1</option><option>P1C2</option><option>P2C2</option><option>P1C3</option><option>P2C3</option></select>
       <button class=sm onclick=go('read')>🔄 Read</button>
-      <button class=sm onclick=setKey()>🔑 key</button> <span id=key></span></div>
+      <button class=sm onclick=setKey()>🔑 key</button> <span id=key></span>
+      <div><small>Team scrambles after swaps — "active" targets whoever is on screen.</small></div></div>
 
     <fieldset><legend>Character</legend>
       <button onclick=go('morphP1')>🎭 Morph P1 (no tag)</button><button onclick=go('morphP2')>🎭 Morph P2</button><br>
@@ -42,13 +44,15 @@ small{color:#888}#key{color:#f88}
       state <input id=state placeholder=hex size=5><button class=sm onclick=slotCall('playState',{val:val('state')})>▶ state</button><br>
       sp-move <input id=sp placeholder=hex size=5><button class=sm onclick=slotCall('special',{val:val('sp')})>▶ special</button></fieldset>
 
-    <fieldset><legend>Buffs (P1) ⚠️</legend>
-      <button onclick=go('meterP1')>⚡ meter</button><button onclick=go('speedP1')>💨 speed</button>
-      <button onclick=go('flightP1')>🕊️ flight</button><button onclick=go('armorP1')>🛡️ armor</button></fieldset>
+    <fieldset><legend>Buffs — target slot ⚠️</legend>
+      <button onclick=go('meterP1')>⚡ P1 meter</button>
+      <button onclick=slotCall('buffSlot',{kind:'speed'})>💨 speed</button>
+      <button onclick=slotCall('buffSlot',{kind:'flight'})>🕊️ flight</button>
+      <button onclick=slotCall('buffSlot',{kind:'armor'})>🛡️ armor</button></fieldset>
 
-    <fieldset><legend>Health / Facing</legend>
-      <button onclick=go('healP1')>❤️ P1</button><button onclick=go('healP2')>❤️ P2</button><button onclick=go('healAll')>❤️ All</button>
-      <button onclick=go('flipP1')>🔃 Flip P1</button><button onclick=go('flipP2')>🔃 Flip P2</button></fieldset>
+    <fieldset><legend>Health / Facing — target slot</legend>
+      <button onclick=slotCall('healSlot')>❤️ Heal target</button><button onclick=go('healAll')>❤️ Heal All</button>
+      <button onclick=slotCall('flipSlot')>🔃 Flip target</button></fieldset>
 
     <fieldset><legend>Raw poke</legend>
       off(hex) <input id=off placeholder=268340 size=8> bytes <input id=hex placeholder=90 size=10>

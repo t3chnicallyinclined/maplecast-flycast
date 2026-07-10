@@ -31,7 +31,19 @@ const OFF = { active:0x000, cid:0x001, x:0x034, y:0x038, vx:0x05C, vy:0x060, fac
 const GLOBAL = { timer:0x289630, p1meterFill:0x289646, p2meterFill:0x289648,
                  p1meterLvl:0x28964A, p2meterLvl:0x28964B, p1combo:0x289670, p2combo:0x289672 };
 const HP_FULL = 0x90;  // 144 = full health for these chars (matches live read)
-const CID = {'0x00':'Ryu','0x17':'Cable','0x23':'Dan','0x2a':'Storm','0x2c':'Magneto','0x34':'Sentinel','0x3a':'Servbot'};
+const CID = {'0x00':'Ryu','0x17':'Cable','0x23':'Dan','0x2a':'Storm','0x2c':'Magneto','0x32':'Colossus','0x34':'Sentinel','0x3a':'Servbot'};
+
+// Resolve a slot name to a RAM base. 'P1*'/'P2*' = the ACTIVE (on-screen) char on that
+// side — the team can be scrambled (swaps move the point char to any of C1/C2/C3), so
+// targeting by fixed slot hits the wrong character. Picks active==1 nearest screen center.
+async function resolveSlot(name){
+  if(SLOT[name]) return SLOT[name];
+  const m=/^P([12])\*$/.exec(name||''); if(!m) return SLOT.P1C1;
+  const side=m[1], cand=[`P${side}C1`,`P${side}C2`,`P${side}C3`];
+  let best=null, bestX=1e9;
+  for(const n of cand){ const s=await readSlot(SLOT[n]); if(s.active===1 && Math.abs(s.x)<bestX){ bestX=Math.abs(s.x); best=SLOT[n]; } }
+  return best || SLOT[cand[0]];
+}
 
 // ---- persistent control-WS connection with request/reply matching ----
 let ws = null, rid = 0; const pend = new Map();
@@ -168,13 +180,17 @@ const ACT = {
   flipP1: ()=>flip(SLOT.P1C1), flipP2: ()=>flip(SLOT.P2C1),
   meterP1: ()=>meterMax('P1'), meterP2: ()=>meterMax('P2'),
   speedP1: ()=>buff(SLOT.P1C1,'speed'), flightP1: ()=>buff(SLOT.P1C1,'flight'), armorP1: ()=>buff(SLOT.P1C1,'armor'),
-  // movement / 8-way air dash (q.slot picks the slot; default P1C1)
-  dash: (q)=>dash(SLOT[q.slot]||SLOT.P1C1, q.dir, q.speed),
-  stop: (q)=>stopMotion(SLOT[q.slot]||SLOT.P1C1),
+  // movement / 8-way air dash (q.slot picks the slot; 'P1*'/'P2*' = active char)
+  dash: async(q)=>dash(await resolveSlot(q.slot), q.dir, q.speed),
+  stop: async(q)=>stopMotion(await resolveSlot(q.slot)),
   // moves / anim
-  playGroup: (q)=>playGroup(SLOT[q.slot]||SLOT.P1C1, q.group),
-  playState: (q)=>playState(SLOT[q.slot]||SLOT.P1C1, q.val),
-  special:   (q)=>special(SLOT[q.slot]||SLOT.P1C1, q.val),
+  playGroup: async(q)=>playGroup(await resolveSlot(q.slot), q.group),
+  playState: async(q)=>playState(await resolveSlot(q.slot), q.val),
+  special:   async(q)=>special(await resolveSlot(q.slot), q.val),
+  // slot-aware heal/flip/buff (target the dropdown/active char, not a fixed slot)
+  healSlot:  async(q)=>heal(await resolveSlot(q.slot)),
+  flipSlot:  async(q)=>flip(await resolveSlot(q.slot)),
+  buffSlot:  async(q)=>buff(await resolveSlot(q.slot), q.kind),
   poke: (q)=>poke(q.off, q.hex),
 };
 
