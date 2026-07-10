@@ -301,26 +301,13 @@ static int decodeBodies(const uint8_t* ram, const SceneQuad* S, int nQuad,
 #endif
         int Tw = W / 32, Th = H / 32;
         if (m == 32 && cols > 1 && rows > 1 && !pd.raw.empty()) {
-            /* NATIVE-CHUNK ORDER = COLUMN-PAIR-MAJOR (re_kb/68 texel twin), matching
-             * render_frame rebuild_tile_grid (widecarve1) + body_decoder.mjs colPairChunk.
-             * CORRECTED 2026-07-10: the prior 2-ROW-BAND order was 50% wrong (2x2-block-swap
-             * of the off-diagonal tiles) on a DENSE >2x>2 part — byte-gated vs the real
-             * Sentinel blob (band4.mcrr sel124 128x128 4x4, production Y-first readback):
-             * col-pair 0/464 bad, row-band 232/464 bad. The old _live4 sel 0xD61 "validation"
-             * had only 9/16 nonzero tiles, so the swapped (zero) off-diagonal blocks couldn't
-             * distinguish the two orders. Identical to row-band for Tw<=2 OR Th<=2. */
-            int k = -1, _t = 0;
-            for (int cp = 0; cp < Tw && k < 0; cp += 2) {
-                int cw = (Tw - cp < 2) ? (Tw - cp) : 2;
-                for (int _by2 = 0; _by2 < Th && k < 0; _by2 += 2) {
-                    int _bh2 = (Th - _by2 < 2) ? (Th - _by2) : 2;
-                    for (int cx2 = 0; cx2 < cw && k < 0; cx2++)
-                        for (int ry = 0; ry < _bh2; ry++, _t++)
-                            if (cp + cx2 == col && _by2 + ry == row) { k = _t; break; }
-                }
-            }
-            if (k < 0) k = 0;
-            (void)gstaTwTileYFirst;
+            /* NATIVE-CHUNK ORDER = WHOLE-PART Y-FIRST TWIDDLE (gstaTwTileYFirst). CORRECTED
+             * 2026-07-10 (re_kb/70): the roster byte-gate (_zz_roster_carve_gate.mjs) MEASURED
+             * the colpair/descriptor order WRONG on every 4x8 (128x256) + the 8x8 (256x256) —
+             * 608 bad tiles / 37 parts / 13 chars (incl Sentinel rocket-punch 4x8 sel570..1167);
+             * gstaTwTileYFirst = 0 bad, all shapes. == colpair for Tw<=4&&Th<=4 (zero-regression).
+             * The engine stores each part as ONE verbatim WxH twiddle blob (DMA loc_8c033d78). */
+            int k = gstaTwTileYFirst(col, row, Tw, Th);
             size_t o = (size_t)k * 512;
             if (o + 512 <= pd.raw.size()) {
                 outTiles.emplace_back();

@@ -517,20 +517,21 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         // diagonal tiles -> the POSE-DEPENDENT Storm-cape grey-block garble (frame _gsta_nobg_360).
         const Tw = (W / 32) | 0, Th = (H / 32) | 0;
         if (m === 32 && pCols > 1 && pRows > 1 && p.raw) {
-            // NATIVE-CHUNK ORDER = COLUMN-PAIR MAJOR (re_kb/68, closes re_kb/51 on the TEXEL
-            // side). The engine builder (loc_8c033ba8..ce0) emits wide-part tiles column-pair
-            // major -> the walker's per-tile TCW steps +0x200 in that order -> the verbatim-DMA
-            // VRAM chunk at part_base+k*0x200 is chunk k in that same order. So the client MUST
-            // index p.raw by colPairChunk(col,row) == render_frame's byte-exact TCW addr slot
-            // (rebuild_tile_grid, widecarve1). The OLD row-band-major carve
-            // (k = (row2&~1)*Tw + col*bh + row-in-band) was MEASURED vs a self-consistent model
-            // in the pre-re_kb/68 era; it 2x2-block-SWAPS the two off-diagonal blocks of any
-            // 4x4+ part (Sentinel sel124/112 = 8/16 tiles wrong, band4.mcrr). colPairChunk is
-            // byte-IDENTICAL to row-band-major for Tw<=2 OR Th<=2 (every satellite/body run
-            // unchanged) and byte-exact vs engine VRAM for 4x4+ via the verbatim-DMA argument.
-            // Lockstep with maplecast_mirror.cpp gstaDecodeBodies + texel_gate.cpp.
-            void twTileYFirst;   // kept for reference (whole-part twiddle order; NOT the carve key)
-            const k = colPairChunk(col, row2, Tw, Th);
+            // NATIVE-CHUNK ORDER = WHOLE-PART Y-FIRST TWIDDLE (twTileYFirst). CORRECTED
+            // 2026-07-10 (re_kb/70): the engine stores each >2x2 part as ONE verbatim WxH
+            // PVR-twiddle blob (DMA path loc_8c033d78, shape-agnostic), so tile (col,row)'s
+            // 512B VRAM chunk is at the Y-FIRST tile-twiddle position twTileYFirst(col,row).
+            // colPairChunk (the descriptor/screen-position emit order, re_kb/68) COINCIDES with
+            // twTileYFirst ONLY for 4x4 & 8x4 — the roster byte-gate (_zz_roster_carve_gate.mjs,
+            // whole 59-char GFX1 set) MEASURED colPairChunk WRONG on every 4x8 (128x256, 16
+            // tiles) and the 8x8 (256x256, 32 tiles): 608 bad tiles / 37 parts / 13 chars
+            // (Juggernaut, Abyss1, Sentinel sel570/790/1151/1161/1167 = the ROCKET-PUNCH arm,
+            // Venom, Felicia, ...). twTileYFirst = 0 bad across all 21312 tiles, every shape,
+            // and is byte-IDENTICAL to colPairChunk for Tw<=4&&Th<=4 (a zero-regression
+            // superset: only 4x8/8x8 change, exactly the broken cases). Lockstep with
+            // maplecast_mirror.cpp gstaDecodeBodies + texel_gate.cpp.
+            void colPairChunk;   // kept for reference (descriptor emit order, re_kb/68; NOT the texel key)
+            const k = twTileYFirst(col, row2, Tw, Th);
             const o = k * 512;
             if (k >= 0 && o + 512 <= p.raw.length) { vram.set(p.raw.subarray(o, o + 512), addr); written++; if (mask) mask[q] = 1; continue; }
         }

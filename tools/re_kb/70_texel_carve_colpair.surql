@@ -22,3 +22,19 @@ UPSERT finding:storm_cape_texel_clean SET
   status='open', confidence='high', date='2026-07-10';
 
 RELATE finding:storm_cape_texel_clean->cites->source:zz_realblob_gate;
+
+-- ============================================================================
+-- 2026-07-10 CORRECTION (roster-wide byte-gate, _zz_roster_carve_gate.mjs, all
+-- 59 GFX1 bins): colPairChunk is NOT universal. The correct universal key is
+-- twTileYFirst (whole-part Y-first tile-twiddle). This SUPERSEDES the above.
+-- ============================================================================
+
+UPSERT source:zz_roster_carve_gate SET kind='measurement',
+  ref='tools/render-replica-poc/_zz_roster_carve_gate.mjs (all PL00..PL3A GFX1, whole-part Y-first detwiddle ground truth); _zz_carve_detail.mjs per-tile',
+  note='1230 dense >2x2 parts / 21312 tiles gated, 0 UNGATED. colPairChunk bad=608 (every 4x8 128x256 = 16 tiles + the one 8x8 256x256 = 32 tiles, across 13 chars: Juggernaut, Abyss1, Sentinel sel570/790/1151/1161/1167, Venom, Felicia 8x8, Morrigan, Strider, Hulk, Hayato, SonSon, Amingo, Spiral, Blackheart). row-band bad=10868 (~51%). twTileYFirst bad=0 for EVERY shape. colPair==twTileYFirst only for 4x4 & 8x4 (where re_kb/68/70 were validated -> indistinguishable). 4 chars have NO dense parts (Chun-Li, Akuma, Charlie, Dan).';
+
+UPSERT finding:texel_carve_colpair_major SET
+  statement='CORRECTED + RESOLVED 2026-07-10. The native-chunk texel carve key is twTileYFirst (whole-part Y-FIRST tile-twiddle), NOT colPairChunk. The engine stores each >2x2 part as ONE verbatim WxH PVR-twiddle blob (shape-agnostic DMA loc_8c033d78), so tile (col,row)''s 512B chunk = twTileYFirst(col,row). colPairChunk is the DESCRIPTOR/screen-position emit order (re_kb/68, correct for GEOMETRY) and COINCIDES with twTileYFirst only for 4x4 & 8x4 — it was accepted on 4x4-only evidence. Roster byte-gate MEASURED colPairChunk WRONG on all 4x8 (128x256) + the 8x8 (256x256): 608 bad tiles / 37 parts / 13 chars, incl Sentinel''s ROCKET-PUNCH arm (sel570/790/1151/1161/1167, 4x8) = the user-reported "arm tiles not diagonal". twTileYFirst = 0 bad, all shapes; zero-regression superset (== colPair for Tw<=4&&Th<=4, only 4x8/8x8 change). FIXED: body_decoder.mjs ensureBodyTextures uses twTileYFirst (DEPLOYED ?v=scene9); C++ twins maplecast_mirror.cpp gstaDecodeBodies + texel_gate.cpp source-only (need native rebuild). OPEN caveat (INFERRED->needs SH4 confirm): ground truth is the whole-part detwiddle (DMA-verbatim thesis, proven on non-dense + shape-agnostic DMA); the engine''s actual per-tile TCW order for a live 4x8/8x8 pose was never DIRECTLY read (only 4x4). Definitive close = capture_break + ASMTRACE (PC 0x8C034864) TCW read on a live rocket-punch (4x8) pose vs engine VRAM (mvc2-sh4-re-expert). re_kb/68 geometry twin (wide_part_colpair_order) shares the 4x4-only validation — its emit ORDER is ASMTRACE-confirmed for screen positions, distinct from the texel twiddle key.',
+  status='confirmed', confidence='high', date='2026-07-10';
+
+RELATE finding:texel_carve_colpair_major->cites->source:zz_roster_carve_gate;

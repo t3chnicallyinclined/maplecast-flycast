@@ -4974,27 +4974,15 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 		// the off-diagonal tiles -> the POSE-DEPENDENT Storm-cape grey-block garble (_gsta_nobg_360).
 		int Tw = W / 32, Th = H / 32;
 		if (m == 32 && cols > 1 && rows > 1 && !pd.raw.empty()) {
-			// NATIVE-CHUNK ORDER = COLUMN-PAIR-MAJOR (re_kb/68 texel twin), lockstep with
-			// render_frame rebuild_tile_grid (widecarve1) + body_decoder.mjs colPairChunk.
-			// CORRECTED 2026-07-10: the prior 2-ROW-BAND order 2x2-block-SWAPPED the off-diagonal
-			// tiles of a DENSE >2x>2 part. BYTE-GATED vs the real Sentinel blob (band4.mcrr sel124
-			// 128x128 4x4, production Y-first readback): col-pair 0/464 bad, row-band 232/464 bad.
-			// The old _live4 sel 0xD61 "validation" had only 9/16 nonzero tiles, so the swapped
-			// (zero) off-diagonal blocks couldn't distinguish the two orders. == row-band for
-			// Tw<=2 OR Th<=2 (every satellite/normal body — bit-unchanged). NOTE: source-only;
-			// needs a native-mirror rebuild to take effect.
-			int k = -1, _t = 0;
-			for (int cp = 0; cp < Tw && k < 0; cp += 2) {
-				int cw = (Tw - cp < 2) ? (Tw - cp) : 2;
-				for (int _by = 0; _by < Th && k < 0; _by += 2) {
-					int _bh = (Th - _by < 2) ? (Th - _by) : 2;
-					for (int cx2 = 0; cx2 < cw && k < 0; cx2++)
-						for (int ry = 0; ry < _bh; ry++, _t++)
-							if (cp + cx2 == col && _by + ry == row) { k = _t; break; }
-				}
-			}
-			if (k < 0) k = 0;
-			(void)gstaTwTileYFirst;   // kept for reference/diagnostics
+			// NATIVE-CHUNK ORDER = WHOLE-PART Y-FIRST TWIDDLE (gstaTwTileYFirst). CORRECTED
+			// 2026-07-10 (re_kb/70): the engine stores each >2x2 part as ONE verbatim WxH twiddle
+			// blob (DMA loc_8c033d78, shape-agnostic), so tile (col,row)'s 512B chunk is at the
+			// Y-first tile-twiddle position. The roster byte-gate (_zz_roster_carve_gate.mjs, all
+			// 59 GFX1 bins) MEASURED the descriptor/colpair order WRONG on every 4x8 (128x256) +
+			// the 8x8 (256x256) — 608 bad tiles / 37 parts / 13 chars incl Sentinel's rocket-punch
+			// arm (sel570/790/1151/1161/1167 4x8); gstaTwTileYFirst = 0 bad, all shapes. It equals
+			// colpair for Tw<=4&&Th<=4 (zero-regression). NOTE: source-only; needs native rebuild.
+			int k = gstaTwTileYFirst(col, row, Tw, Th);
 			size_t o = (size_t)k * 512;
 			if (o + 512 <= pd.raw.size()) {
 				outTiles.emplace_back();
