@@ -186,12 +186,16 @@ export class StageClient {
       // assembled screen geometry (all 83 models incl the props the POL rip cannot place).
       // Falls back to the POL-rip STGxx.json (world-space deck only, synth control words)
       // when no TA bake exists for this stage.
+      // ?v= cache-buster: these fetches run LAZILY (on the first wire stage_id), so a
+      // hard refresh does NOT bypass the HTTP cache for them — bump on asset changes
+      // (hudpurge1 = the 2026-07-09 STG0B HUD-contamination purge, re_kb/67).
+      const V = 'hudpurge1';
       let data = null, isTA = false;
       try {
-        const r = await fetch(`${this.base}/STG${sid}_ta.json`);
+        const r = await fetch(`${this.base}/STG${sid}_ta.json?v=${V}`);
         if (r.ok) { data = await r.json(); isTA = (data.mode === 'engine_ta'); }
       } catch { /* no TA bake */ }
-      if (!data) data = await (await fetch(`${this.base}/STG${sid}.json`)).json();
+      if (!data) data = await (await fetch(`${this.base}/STG${sid}.json?v=${V}`)).json();
       const imgs = await Promise.all(data.textures.map(async t => {
         try {
           const blob = await (await fetch(`${this.base}/${t.file}`)).blob();
