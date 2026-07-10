@@ -267,6 +267,7 @@ export class PVR2Renderer {
         const enc=this.dev.createCommandEncoder();
         const texView = renderTarget ? renderTarget.colorView : this.ctx.getCurrentTexture().createView();
         const depthView = renderTarget ? renderTarget.depthView : this.depth.createView();
+        this._censusMap = dbg.census ? new Map() : null;   // one-shot state census (dbg panel button)
         let passes = parsed.renderPasses || [{op_count:opaque.length,pt_count:punchThrough.length,tr_count:translucent.length}];
         if(dbg.singlePass) passes=[{op_count:opaque.length,pt_count:punchThrough.length,tr_count:translucent.length}];
 
@@ -294,6 +295,7 @@ export class PVR2Renderer {
                 if(dbg.excludeTex&&dbg.excludeTex.has(tcw>>>0))continue; // bake: drop shadow/meter/HUD textures → clean character only
                 let dm=(isp>>29)&7,cm=(isp>>27)&3,zw=(isp>>26)&1?0:1;
                 if(lt==='opaque'&&dbg.opDepthFunc>=0)dm=dbg.opDepthFunc;
+                if(lt==='opaque'&&dbg.opDepthWrite>=0)zw=dbg.opDepthWrite;
                 if(lt==='opaque'&&dm===0)continue;
                 // Custom background: skip stage geometry by Z threshold
                 // Opaque: skip background + FillBGP (low Z)
@@ -324,12 +326,15 @@ export class PVR2Renderer {
                     else layerBit=2;                         // CHARACTER / HUD
                     if(dbg.reHide & layerBit) continue;
                 }
-                if(lt==='punch_through'||lt==='translucent')dm=6;
-                if(lt==='translucent')zw=1; if(lt==='punch_through')zw=1;
+                if(lt==='punch_through')dm=(dbg.ptDepthFunc>=0?dbg.ptDepthFunc:6);
+                if(lt==='translucent')dm=6;
+                if(lt==='translucent')zw=(dbg.trDepthWrite===false?0:1);
+                if(lt==='punch_through')zw=(dbg.ptDepthWrite===false?0:1);
                 if(lt==='translucent'&&dbg.trDepthFunc!==undefined)dm=dbg.trDepthFunc;
-                if(lt==='translucent'&&dbg.trDepthWrite)zw=1;
                 let sb=(tsp>>29)&7, db=(tsp>>26)&7;
-                if(dbg.blendOverride){sb=dbg.blendSrc||4;db=dbg.blendDst||5;}
+                const _blendApply=lt==='opaque'?dbg.blendApplyOp!==false:lt==='punch_through'?dbg.blendApplyPt!==false:dbg.blendApplyTr!==false;
+                if(dbg.blendOverride&&_blendApply){sb=dbg.blendSrc||4;db=dbg.blendDst||5;}
+                if(this._censusMap){const k=`${lt} dm=${dm} zw=${zw} sb=${sb} db=${db} texd=${(tcw>>>0).toString(16).padStart(8,'0')}`;this._censusMap.set(k,(this._censusMap.get(k)||0)+1);}
                 let cullIdx = cm^1;
                 if(dbg.cullOverride==='none')cullIdx=0;
                 else if(dbg.cullOverride==='front')cullIdx=2;
@@ -425,7 +430,8 @@ export class PVR2Renderer {
                         if(dbg.trDepthFunc!==undefined)dm=dbg.trDepthFunc;
                         if(dbg.trDepthWrite)zw=1;
                         let sb=(tsp>>29)&7,db=(tsp>>26)&7;
-                        if(dbg.blendOverride){sb=dbg.blendSrc||4;db=dbg.blendDst||5;}
+                        if(dbg.blendOverride&&dbg.blendApplyTr!==false){sb=dbg.blendSrc||4;db=dbg.blendDst||5;}
+                        if(this._censusMap){const k=`trans(sorted) dm=${dm} zw=${zw} sb=${sb} db=${db} texd=${(tcw>>>0).toString(16).padStart(8,'0')}`;this._censusMap.set(k,(this._censusMap.get(k)||0)+1);}
                         const pipe=this._pipe(sb,db,dm,zw,cm^1,'triangle-list');
                         let tbg=fbBG;
                         if(pp.texObj)tbg=this._texBG(pp.texObj.texture,pp.texObj.sampler);   // direct handle (sprite-bridge) wins
@@ -456,6 +462,14 @@ export class PVR2Renderer {
 
             rp.end();
             prevPass=pass;
+        }
+        if(this._censusMap){
+            const hasWire=!!parsed.renderPasses;
+            const rows=[...this._censusMap.entries()].sort((a,b)=>b[1]-a[1]).map(([k,n])=>`${k}  n=${n}`);
+            console.log(`[census] passes=${passes.length} (from wire: ${hasWire})`, JSON.stringify(passes));
+            console.log('[census] list dm=depthFunc(0nev 1ls 3le 4gt 6ge 7alw) zw=depthWrite sb/db=blend(0zero 1one 4srcA 5invSrcA) texd=TCW\n'+rows.join('\n'));
+            window._censusLast={passes,rows};
+            dbg.census=false; this._censusMap=null;
         }
         if (!renderTarget) {
             // Direct to canvas — submit immediately

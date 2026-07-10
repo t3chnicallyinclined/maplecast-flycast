@@ -107,6 +107,20 @@ canvas{display:block;background:transparent}
 <option value="7">always</option>
 <option value="1">less</option>
 </select></label>
+<label>Force DepthWrite: <select id="dbg_opZW">
+<option value="-1" selected>Per-poly (auto)</option>
+<option value="1">On</option>
+<option value="0">Off</option>
+</select></label>
+<h2>Punch-Through Depth</h2>
+<label>DepthFunc: <select id="dbg_ptDepth">
+<option value="-1" selected>greater-equal (default)</option>
+<option value="7">always</option>
+<option value="4">greater</option>
+<option value="1">less</option>
+<option value="3">less-equal</option>
+</select></label>
+<label><input type="checkbox" id="dbg_ptDepthWrite" checked> Depth Write (PT)</label>
 <h2>Alpha</h2>
 <label>Discard threshold: <input type="range" id="dbg_alphaDiscard" min="0" max="255" value="1"> <span class="val" id="dbg_alphaDiscardVal">1</span></label>
 <label><input type="checkbox" id="dbg_discardTransOnly"> Discard trans only</label>
@@ -115,6 +129,10 @@ canvas{display:block;background:transparent}
 <label><input type="checkbox" id="dbg_blendOverride"> Override blend</label>
 <label>Src: <select id="dbg_blendSrc"><option value="4" selected>SrcAlpha</option><option value="1">One</option><option value="0">Zero</option><option value="2">DstColor</option><option value="5">InvSrcAlpha</option></select></label>
 <label>Dst: <select id="dbg_blendDst"><option value="5" selected>InvSrcAlpha</option><option value="1">One</option><option value="0">Zero</option><option value="4">SrcAlpha</option><option value="3">InvSrcColor</option></select></label>
+<label>Apply to: <input type="checkbox" id="dbg_blendOp" checked>OP <input type="checkbox" id="dbg_blendPt" checked>PT <input type="checkbox" id="dbg_blendTr" checked>TR</label>
+<h2>Passes / Census</h2>
+<label><input type="checkbox" id="dbg_singlePass"> Force SINGLE pass (no mid-frame depth clear)</label>
+<button id="dbg_census" style="width:100%;background:#333;color:#0ff;border:1px solid #0ff;padding:4px;cursor:pointer;font-family:inherit;font-size:11px;margin:2px 0">Dump state census → console (F12)</button>
 <h2>Culling</h2>
 <label><select id="dbg_cull">
 <option value="auto" selected>Auto (per-poly)</option>
@@ -261,7 +279,7 @@ import {Decompress as ZcsDecompress} from './webgpu/fzstd.mjs';
 import {StageClient} from './webgpu/stage-client.mjs?v=2';
 import {TAParser} from './webgpu/ta-parser.mjs?v=2';
 import {TextureManager} from './webgpu/texture-manager.mjs';
-import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=6';
+import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=7';
 import {PostProcessor} from './webgpu/post-process.mjs';
 import {AdaptiveTransport} from './webgpu/transport.mjs';
 import {FramePredictor} from './webgpu/frame-predictor.mjs';
@@ -595,9 +613,9 @@ window._bodyStart=async function bodyStart(){
   }
   try{
     const [{default:createRenderFrame},fz]=await Promise.all([
-      import('./render-replica/render_frame.mjs?v=capez1'),
+      import('./render-replica/render_frame.mjs?v=blankslot1'),
       import('./webgpu/fzstd.mjs')]);
-    BODY.mod=await createRenderFrame({locateFile:p=>p.endsWith('.wasm')?'render-replica/'+p+'?v=capez1':p});
+    BODY.mod=await createRenderFrame({locateFile:p=>p.endsWith('.wasm')?'render-replica/'+p+'?v=blankslot1':p});
     if(BTEX.want){ // ?bodytex=local: the validated client-side texel layer + disc-art overlay
       const [bd,lg]=await Promise.all([
         import('./render-replica/body_decoder.mjs?v=scene7'),
@@ -879,7 +897,7 @@ function _btexAttach(bp,bt){
 // inv-src-alpha, modulate-alpha), vert col=white, z band [0.00923,0.01096] —
 // we pin z at the band FLOOR so later-drawn kept TR content (>=) always passes
 // the greater-equal depth test. Textures: the PLxx atlas images upload ONCE per
-// cid as GPUTextures carried on pp.texObj — pvr2-renderer.mjs?v=6 prefers a
+// cid as GPUTextures carried on pp.texObj — pvr2-renderer.mjs?v=7 prefers a
 // direct texObj handle over the TCW->TextureManager lookup (tcw stays 0).
 // FX items (charId FX_CID 0xFE0 / -1) are SKIPPED: effect bands (0x475xxx/
 // 0x60xxxx/0x400xxx) are NOT in the server strip set {82,83,88,89}, so those
@@ -2045,6 +2063,17 @@ alphaSlider.oninput = e => { DBG.alphaDiscard = parseInt(e.target.value); docume
 document.getElementById('dbg_blendOverride').onchange = e => DBG.blendOverride = e.target.checked;
 document.getElementById('dbg_blendSrc').onchange = e => DBG.blendSrc = parseInt(e.target.value);
 document.getElementById('dbg_blendDst').onchange = e => DBG.blendDst = parseInt(e.target.value);
+// Per-list depth/blend knobs + pass/census tools (2026-07-09 HUD depth/blend hunt)
+DBG.opDepthWrite=-1; DBG.ptDepthFunc=-1; DBG.ptDepthWrite=true;
+DBG.blendApplyOp=true; DBG.blendApplyPt=true; DBG.blendApplyTr=true; DBG.singlePass=false;
+document.getElementById('dbg_opZW').onchange=e=>DBG.opDepthWrite=parseInt(e.target.value);
+document.getElementById('dbg_ptDepth').onchange=e=>DBG.ptDepthFunc=parseInt(e.target.value);
+document.getElementById('dbg_ptDepthWrite').onchange=e=>DBG.ptDepthWrite=e.target.checked;
+document.getElementById('dbg_blendOp').onchange=e=>DBG.blendApplyOp=e.target.checked;
+document.getElementById('dbg_blendPt').onchange=e=>DBG.blendApplyPt=e.target.checked;
+document.getElementById('dbg_blendTr').onchange=e=>DBG.blendApplyTr=e.target.checked;
+document.getElementById('dbg_singlePass').onchange=e=>DBG.singlePass=e.target.checked;
+document.getElementById('dbg_census').onclick=()=>{DBG.census=true;console.log('[census] armed — capturing next rendered frame');};
 document.getElementById('dbg_cull').onchange = e => DBG.cullOverride = e.target.value;
 document.getElementById('dbg_texInvalidate').onchange = e => DBG.texForceInvalidate = e.target.checked;
 // Effects — each checkbox sets a bit in DBG.fxBits (mapped to packed bits 12+)
