@@ -282,7 +282,7 @@ canvas{display:block;background:transparent}
 </div>
 
 <script type="module">
-import {FrameDecoder} from './webgpu/frame-decoder.mjs?v=missdiag1';
+import {FrameDecoder} from './webgpu/frame-decoder.mjs?v=wirediag1';
 import {Decompress as ZcsDecompress} from './webgpu/fzstd.mjs';
 import {StageClient} from './webgpu/stage-client.mjs?v=3';
 import {TAParser} from './webgpu/ta-parser.mjs?v=2';
@@ -600,6 +600,7 @@ window._fullHeap=new URLSearchParams(location.search).get('fullheap')==='1';   /
 window._fxDecode=new URLSearchParams(location.search).get('fxdecode')==='1';   // A/B: decode bit15 effect parts LOCALLY (mask 0x7FFF) instead of wire VRAM -> kills the super SYNC spike
 window._noSync=new URLSearchParams(location.search).get('nosync')==='1';       // EXPERIMENT: suppress the ref-miss sync-request (the super scene-change SYNC) — the 'join' sync still fires
 window._missDiag=new URLSearchParams(location.search).get('missdiag')==='1';   // DIAG: log which VRAM 64KB regions VCACHE-miss during a super (where called-in char data loads)
+window._wireDiag=+(new URLSearchParams(location.search).get('wirediag')||0);   // DIAG: per-frame wire byte breakdown (taDelta/vramData/vramRefs/pvr/stm2) — attributes the super spike. =1 logs big frames, =2 logs all
 const BODY={want:new URLSearchParams(location.search).has('bodylocal'),
   started:false,ready:false,mod:null,ram:null,dynRegs:null,ta:null,bt:null,vframe:-1,frames:0,gfxN:0,err:0,ws:null};
 window._body=BODY;

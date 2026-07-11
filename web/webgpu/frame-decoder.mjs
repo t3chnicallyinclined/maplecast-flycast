@@ -48,6 +48,12 @@ export class FrameDecoder {
         const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
         if (data.length < 8) return false;
         const magic = view.getUint32(0, true);
+        // WIRE-COMPOSITION DIAGNOSTIC (?wirediag=1): attribute the super-spike bytes. A SYNC is
+        // ~8MB FLAT every time; the observed 16MB->4-6MB decay is texture caching, not a SYNC.
+        if (typeof window !== 'undefined' && window._wireDiag) {
+            const tag = magic === MAGIC_FSYN ? 'FSYN' : magic === MAGIC_SYNC ? 'SYNC' : magic === MAGIC_SAVE ? 'SAVE' : 'sync?';
+            console.log('[WIRE] ' + tag + ' full-VRAM replace, decompressed=' + (data.length/1024/1024).toFixed(2) + 'MB');
+        }
 
         if (magic === MAGIC_FSYN) {
             let off = 4;
@@ -146,6 +152,8 @@ export class FrameDecoder {
         let dirtyPages = view.getUint32(off, true); off += 4;
         let vramDirty = false, pvrDirty = false;
         const dirtyPageList = [];
+        // ?wirediag=1 tallies: separate real texture bytes (hasData=1) from cache refs (hasData=0).
+        let _wdVramData = 0, _wdVramRefs = 0, _wdPvr = 0;
 
         // VCACHE branch (env MAPLECAST_VCACHE): the count slot is the sentinel
         // 0xFFFFFFFF, followed by the real count, and each page carries a u64
@@ -189,9 +197,11 @@ export class FrameDecoder {
                     this.vram.set(pageBytes, pageOff);
                     vramDirty = true;
                     dirtyPageList.push(pageIdx);
+                    if (hasData) _wdVramData += PAGE_SIZE; else _wdVramRefs++;
                 } else if (regionId === 3 && pageOff + PAGE_SIZE <= PVR_REG_SIZE) {
                     this.pvrRegs.set(pageBytes, pageOff);
                     pvrDirty = true;
+                    _wdPvr += PAGE_SIZE;
                 }
             }
         } else {
@@ -203,11 +213,30 @@ export class FrameDecoder {
                     this.vram.set(data.subarray(off, off + PAGE_SIZE), pageOff);
                     vramDirty = true;
                     dirtyPageList.push(pageIdx);
+                    _wdVramData += PAGE_SIZE;
                 } else if (regionId === 3 && pageOff + PAGE_SIZE <= PVR_REG_SIZE) {
                     this.pvrRegs.set(data.subarray(off, off + PAGE_SIZE), pageOff);
                     pvrDirty = true;
+                    _wdPvr += PAGE_SIZE;
                 }
                 off += PAGE_SIZE;
+            }
+        }
+
+        // ?wirediag=1: attribute every big frame. `off` now points past the dirty pages; the
+        // remainder (data.length - off) is the STM2 state-merge trailer. Log large frames (or all
+        // frames at ?wirediag=2) so a super's byte spike is visibly assigned to VRAM/refs/PVR/STM2.
+        if (typeof window !== 'undefined' && window._wireDiag) {
+            const trailer = Math.max(0, data.length - off);
+            const total = data.length;
+            if (total > (window._wireDiagThresh || 131072) || window._wireDiag >= 2) {
+                console.log('[WIRE] f=' + frameNum
+                    + ' total=' + (total/1024).toFixed(0) + 'KB'
+                    + ' | taDelta=' + (deltaPayloadSize/1024).toFixed(1) + 'KB'
+                    + ' | vramData=' + (_wdVramData/1024).toFixed(0) + 'KB(' + (_wdVramData/PAGE_SIZE) + 'pg)'
+                    + ' vramRefs=' + _wdVramRefs
+                    + ' | pvr=' + (_wdPvr/1024).toFixed(1) + 'KB'
+                    + ' | stm2=' + (trailer/1024).toFixed(1) + 'KB');
             }
         }
 
