@@ -691,12 +691,14 @@ static void checkMatchEnd()
 			}
 		}
 
-		// Periodic MCSV broadcast: relay clients that connect mid-match miss the
-		// on-connect send (relay's upstream WS is already open). 60s interval:
-		// onOpen covers direct connections; direct-join replica clients get it
-		// immediately. Kept long to avoid ~5 MB interruptions on viewer streams
-		// every few seconds. Replica clients only apply the first MCSV anyway.
-		{
+		// Periodic MCSV broadcast: DISABLED by default (MAPLECAST_MCSV_PERIODIC=1 re-enables). It ships a
+		// ~6.5MB full save-state to ALL clients every ~60s so mid-match-joining RELAY/REPLICA (native SH4)
+		// clients catch up — but BROWSER render clients RECEIVE IT AND DROP IT (no SH4), so it was pure
+		// wasted bandwidth (the periodic ~6.5MB "super spike" red herring). We are not running native
+		// clients now; onOpen still seeds any that connect, and replica clients only apply the FIRST MCSV.
+		static const bool _mcsvPeriodic = [](){ const char* e = std::getenv("MAPLECAST_MCSV_PERIODIC");
+			return e && e[0] && e[0] != '0'; }();
+		if (_mcsvPeriodic) {
 			static int _mcsvBroadcastTick = 0;
 			if (++_mcsvBroadcastTick >= 60) {
 				_mcsvBroadcastTick = 0;
