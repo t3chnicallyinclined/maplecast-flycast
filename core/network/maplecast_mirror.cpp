@@ -3178,7 +3178,11 @@ done_diff:
 						if (!gate) { if (wr != rd) memmove(wr, rd, esz); wr += esz; kept++; }
 						rd += esz;
 					}
-					memcpy(tp + (vcw ? 8 : 4), &kept, 4);
+					// PRESERVE THE STM2 STATE TRAILER: it rides AFTER the dirty pages (client back-seeks it from the
+						// frame END). Page compaction moved `wr` back by the dropped pages, so slide the trailing
+						// state bytes [rd, tend) down to `wr` before truncating — else state-merge bodies go blank.
+						if (rd < tend) { size_t _tb = (size_t)(tend - rd); if (wr != rd) memmove(wr, rd, _tb); wr += _tb; }
+						memcpy(tp + (vcw ? 8 : 4), &kept, 4);
 					ssTailLen = (uint32_t)(wr - tp);
 				}
 				uint32_t ssTotal = 80 + ssDPay + ssTailLen;

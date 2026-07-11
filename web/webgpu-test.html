@@ -595,9 +595,9 @@ window._bodySrc=BODYSRC;
 // STATE-MERGE (?statemerge=1, server MAPLECAST_STATE_MERGE=1): the per-frame body state rides the
 // MAIN wire as a trailing "STM2" section instead of the separate /replica-live (:7212) socket — one
 // stream, same vframe (no pairing drift). :7212 still supplies the one-time BODY.ram seed for now.
-window._stateMerge=new URLSearchParams(location.search).get('statemerge')==='1';
+window._stateMerge=(new URLSearchParams(location.search).get('statemerge')||'1')!=='0';   // DEFAULT ON (opt out ?statemerge=0): folded body state on the main wire
 window._fullHeap=new URLSearchParams(location.search).get('fullheap')==='1';   // A/B: force the full 16MB heap copy (vs incremental dyn-region copy)
-window._fxDecode=new URLSearchParams(location.search).get('fxdecode')==='1';   // A/B: decode bit15 effect parts LOCALLY (mask 0x7FFF) instead of wire VRAM -> kills the super SYNC spike
+window._fxDecode=(new URLSearchParams(location.search).get('fxdecode')||'1')!=='0';   // DEFAULT ON (opt out ?fxdecode=0): decode bit15 effect parts LOCALLY (mask 0x7FFF) — REQUIRED once the server strips {82,83,88,89} effect VRAM, else effects garble
 window._noSync=new URLSearchParams(location.search).get('nosync')==='1';       // EXPERIMENT: suppress the ref-miss sync-request (the super scene-change SYNC) — the 'join' sync still fires
 window._missDiag=new URLSearchParams(location.search).get('missdiag')==='1';   // DIAG: log which VRAM 64KB regions VCACHE-miss during a super (where called-in char data loads)
 window._wireDiag=+(new URLSearchParams(location.search).get('wirediag')||0);   // DIAG: per-frame wire byte breakdown (taDelta/vramData/vramRefs/pvr/stm2) — attributes the super spike. =1 logs big frames, =2 logs all
