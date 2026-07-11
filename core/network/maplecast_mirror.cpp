@@ -2870,7 +2870,18 @@ done_diff:
 			// own ~7KB delta). Fix: KEY only on a real keyframe/first frame; else delta the COMMON PREFIX
 			// vs prev and append the GROWN TAIL as fresh runs (client preserves its running copy on resize).
 			const size_t prevLen = _smPrev.size();
-			const bool key = forceKeyframe || prevLen == 0;
+			// SPIKE FIX — defer the periodic full KEY away from high-churn moments (supers). A KEY reseed
+				// landing during a super can't dedup the novel super assets, so the zstd wire spikes ~30x
+				// (2KB -> 59KB, MEASURED via WIREMON f=109200 ratio 200x->7x). The deltas keep every
+				// existing client perfectly synced; the KEY is only a joiner seed + safety reseed, so it can
+				// wait for a calm frame. If a keyframe is due but the LAST delta was large (churn), skip it
+				// and reseed on the next calm keyframe. (A join DURING a super waits ~2-3s for the body — rare + brief.)
+				static size_t _smLastDelta = 0;
+				static bool   _smKeyPending = false;
+				const bool _smChurning = _smLastDelta > 24000;          // >~24KB last delta => super/cold-asset churn
+				const bool _smKeyDue   = forceKeyframe || _smKeyPending;
+				const bool key = (prevLen == 0) || (_smKeyDue && !_smChurning);
+				if (_smKeyDue && !key) _smKeyPending = true; else if (key) _smKeyPending = false;
 			_smSec.clear();
 			_smSec.push_back(key ? 0 : 1);
 			if (key) {
@@ -2902,7 +2913,8 @@ done_diff:
 					  } }
 					memcpy(&_smSec[runsPos], &nRuns, 4);
 			}
-			_smPrev.assign(sp, sp + sn);
+			_smLastDelta = key ? 0 : _smSec.size();   // churn proxy for the next frame's KEY-defer decision
+				_smPrev.assign(sp, sp + sn);
 			if ((size_t)(dst - dstStart) + _smSec.size() + 12 <= RING_SIZE / 3) {
 				memcpy(dst, _smSec.data(), _smSec.size()); dst += _smSec.size();
 				uint32_t baseLen = (uint32_t)sn;            memcpy(dst, &baseLen, 4); dst += 4;
