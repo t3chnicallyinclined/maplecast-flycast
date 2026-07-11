@@ -703,8 +703,12 @@ function _bodyApplyFrame(u8){
   // node+0x15C (cached by char_id) BEFORE the walker/decoder read — replay.html port.
   if(BTEX.on){ try{ BTEX.applyGfx(BODY.ram,null); }catch(e){ if(++BTEX.err<4) console.warn('[btex] gfx',e); } }
   const M=BODY.mod;
-  const ramPtr=M._malloc(BODY.ram.length); M.HEAPU8.set(BODY.ram,ramPtr);
-  const cap=256*1024, outPtr=M._malloc(cap);
+  // PERF (state-merge fps): the body reconstruct now runs inline in the render tick, so the old
+  // per-frame malloc(16MB)+free(16MB) alloc churn was murdering fps. Allocate the WASM-heap RAM +
+  // output buffers ONCE and reuse them every frame (stash on M so they persist).
+  if(!M._mcRamPtr){ M._mcRamPtr=M._malloc(BODY.ram.length); M._mcOutPtr=M._malloc(256*1024); }
+  const ramPtr=M._mcRamPtr, outPtr=M._mcOutPtr, cap=256*1024;
+  M.HEAPU8.set(BODY.ram,ramPtr);
   const len=M._render_frame_ta(ramPtr,outPtr,cap);
   const raw=M.HEAPU8.subarray(outPtr,outPtr+len);
   // Filter to the SERVER'S strip set {82,83,88,89}: quads outside it (84/8a
@@ -718,7 +722,7 @@ function _bodyApplyFrame(u8){
     if(bk===0x82||bk===0x83||bk===0x88||bk===0x89){ flt.set(raw.subarray(o,o+96),w); w+=96; if(kept)kept.push(qi); }
   }
   BODY.ta=flt.slice(0,w);
-  M._free(ramPtr); M._free(outPtr);
+  // (ramPtr/outPtr are persistent now — no per-frame free)
   // ?bodytex=local: stage the kept quads' texels NOW (state-coherent: same BODY.ram that
   // emitted this ta) via the validated ensureBodyTextures, then SNAPSHOT each staged 512B
   // tile so a ring-paired older frame keeps ITS OWN texels even after lvram advances.
