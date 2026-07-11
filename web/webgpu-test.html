@@ -667,7 +667,7 @@ window._bodyStart=async function bodyStart(){
       // STATE-MERGE: the per-frame body already rode the MAIN wire (STM2) and was applied there.
       // Bail BEFORE the (expensive) decompress so we don't decode this redundant :7212 copy twice on
       // the main thread — that double-decode was the fps hit. :7212 stays open only for the seed.
-      if(window._stateMerge) return;
+      if(window._stateMerge && window._stmSeen) return;   // only skip :7212 once the server is ACTUALLY emitting STM2 on the main wire (self-heals if the server lacks the code)
       if(u8.length>=8&&u8[0]===0x5A&&u8[1]===0x43&&u8[2]===0x53&&u8[3]===0x54) u8=fz.decompress(u8.subarray(8));   // FRMx may be ZCST-wrapped too
       _bodyApplyFrame(u8);
     }catch(e){ if(++BODY.err<4) console.warn('[body]',e); } };
@@ -2784,7 +2784,8 @@ async function main(){
                        ((d[d.length-4]|d[d.length-3]<<8|d[d.length-2]<<16|d[d.length-1]<<24)>>>0)===0x324D5453){
                       const _sn=(d[d.length-8]|d[d.length-7]<<8|d[d.length-6]<<16|d[d.length-5]<<24)>>>0;
                       const _st=d.length-8-_sn;
-                      if(_st>=0){ try{ _bodyApplyFrame(d.subarray(_st,d.length-8)); }catch(_e){ if((ZCS2._smaErr=(ZCS2._smaErr||0)+1)<4) console.warn('[state-merge apply]',_e); } }
+                      if(_st>=0){ window._stmSeen=true;   // STM2 is live on the wire -> safe to shed the :7212 per-frame copy
+                        try{ _bodyApplyFrame(d.subarray(_st,d.length-8)); }catch(_e){ if((ZCS2._smaErr=(ZCS2._smaErr||0)+1)<4) console.warn('[state-merge apply]',_e); } }
                     }
                     if(DBG.texForceInvalidate) T.invalidateAll();
                     T.setDirtyPages(fr.dirtyPageList, fr.pvrDirty);
