@@ -596,6 +596,7 @@ window._bodySrc=BODYSRC;
 // MAIN wire as a trailing "STM2" section instead of the separate /replica-live (:7212) socket — one
 // stream, same vframe (no pairing drift). :7212 still supplies the one-time BODY.ram seed for now.
 window._stateMerge=new URLSearchParams(location.search).get('statemerge')==='1';
+window._fullHeap=new URLSearchParams(location.search).get('fullheap')==='1';   // A/B: force the full 16MB heap copy (vs incremental dyn-region copy)
 const BODY={want:new URLSearchParams(location.search).has('bodylocal'),
   started:false,ready:false,mod:null,ram:null,dynRegs:null,ta:null,bt:null,vframe:-1,frames:0,gfxN:0,err:0,ws:null};
 window._body=BODY;
@@ -694,8 +695,9 @@ function _bodyApplyFrame(u8){
   // a char whose art loaded after the prefix (tag-in) lands here; splat into RAM
   // so the walker reads fresh cell records. (palette/HUDQ tails + engine_ta are
   // ignored: palettes ride the ZCS2 PVR pages, HUD stays on the wire.)
+  let _gfxTail=false;   // a body's GFX (headers/cell-records the walker reads from the heap) changed this frame
   if(p+4<=u8.length){ const nGfx=dv.getUint32(p,true);
-    if(nGfx<=64){ p+=4;
+    if(nGfx<=64){ p+=4; if(nGfx>0)_gfxTail=true;
       for(let i=0;i<nGfx&&p+8<=u8.length;i++){ const base=dv.getUint32(p,true),len=dv.getUint32(p+4,true); p+=8;
         if(len>0x800000||p+len>u8.length) break;
         BODY.ram.set(u8.subarray(p,p+len),_bodyGuest(base)); p+=len; BODY.gfxN++; } } }
@@ -706,9 +708,14 @@ function _bodyApplyFrame(u8){
   // PERF (state-merge fps): the body reconstruct now runs inline in the render tick, so the old
   // per-frame malloc(16MB)+free(16MB) alloc churn was murdering fps. Allocate the WASM-heap RAM +
   // output buffers ONCE and reuse them every frame (stash on M so they persist).
-  if(!M._mcRamPtr){ M._mcRamPtr=M._malloc(BODY.ram.length); M._mcOutPtr=M._malloc(256*1024); }
+  if(!M._mcRamPtr){ M._mcRamPtr=M._malloc(BODY.ram.length); M._mcOutPtr=M._malloc(256*1024); M._mcRamFor=null; }
   const ramPtr=M._mcRamPtr, outPtr=M._mcOutPtr, cap=256*1024;
-  M.HEAPU8.set(BODY.ram,ramPtr);
+  // PERF: incremental heap sync. FULL 16MB copy only on connect/re-seed (BODY.ram identity change) or a
+  // GFX tail (tag-in brings new GFX2/GFX1-headers the walker reads from the heap). Otherwise copy ONLY the
+  // ~214KB dynamic regions the walker actually reads per frame (static base + GFX headers are heap-invariant;
+  // bodytex=local pixels are read from BODY.ram by _btexStage, not the heap). ?fullheap=1 forces full (A/B).
+  if(window._fullHeap || M._mcRamFor!==BODY.ram || _gfxTail){ M.HEAPU8.set(BODY.ram,ramPtr); M._mcRamFor=BODY.ram; }
+  else { const H=M.HEAPU8; for(const r of BODY.dynRegs){ if(r.tag!=='bodytex'){ const g=_bodyGuest(r.addr); H.set(BODY.ram.subarray(g,g+r.len),ramPtr+g); } } }
   const len=M._render_frame_ta(ramPtr,outPtr,cap);
   const raw=M.HEAPU8.subarray(outPtr,outPtr+len);
   // Filter to the SERVER'S strip set {82,83,88,89}: quads outside it (84/8a
