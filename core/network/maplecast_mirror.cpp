@@ -43,6 +43,7 @@
 #include "maplecast_audio_client.h"
 #include "maplecast_input_sink.h"
 #include "maplecast_control_ws.h"
+#include "maplecast_replica_live.h"   // STATE-MERGE: fold the body feed into this wire (currentStatePayload)
 #include "maplecast_compress.h"
 #include "gsta_stage.h"        // native MVC2 stage renderer (global-namespace decls)
 #include "gsta_charpass.h"     // Phase 2a: native char-pass driver (global-namespace decls)
@@ -2825,6 +2826,32 @@ done_diff:
 		// ZCS2: restart the streaming envelope at this SYNC so joiners decode onward.
 		_zstreamResetPending.store(true, std::memory_order_release);
 		_vcacheReseedPending.store(true, std::memory_order_release);  // joiner hash caches start empty
+	}
+
+	// === STATE-MERGE (MAPLECAST_STATE_MERGE): fold /replica-live's body feed into THIS frame ===
+	// Append the body state (replica-live's captureFrame FRMx payload, built coherently at the char
+	// pass — see mc_replicaSnapshotCharPassTables above) as a self-describing "STAT" section.
+	// serverPublish compresses `dstStart` into BOTH the legacy ZCST and the ZCS2 streaming wire, so the
+	// body rides whichever wire the client renders — same packet, SAME vframe (no two-socket pairing
+	// drift). Old parsers (king.html / native clientReceive / relay apply_dirty_pages) stop at the
+	// dirty-page list and skip these trailing bytes. Appended BEFORE the frameSize patch so `frameSize`
+	// covers it (the browser's frameSize+4==len belt holds). Bounds-guarded to the same RING_SIZE/3
+	// per-frame budget as the dirty-page loop; ZCS2's streaming window dedupes the ~99%-static payload
+	// so the marginal wire cost is ~the changed bytes. Wire: "STAT"(4) + u32 payloadLen + FRMx payload.
+	static const bool _stateMerge = [](){ const char* e = std::getenv("MAPLECAST_STATE_MERGE");
+		return e && e[0] && e[0] != '0'; }();
+	// Layout: [FRMx body payload (self-describing)] + u32 payloadLen + "STM2"(4) end-marker. The
+	// trailer lets the browser back-seek the section from the END of the frame without parsing past
+	// the dirty pages (robust vs the page walk). Only appended when the payload FITS the frame budget.
+	if (_stateMerge) {
+		const uint8_t* sp = nullptr; size_t sn = 0;
+		if (maplecast_replica_live::currentStatePayload(sp, sn) && sp && sn &&
+		    (size_t)(dst - dstStart) + sn + 8 <= RING_SIZE / 3) {
+			memcpy(dst, sp, sn);              dst += sn;      // the FRMx body payload
+			uint32_t plen = (uint32_t)sn;
+			memcpy(dst, &plen, 4);            dst += 4;       // u32 payloadLen (back-seek)
+			memcpy(dst, "STM2", 4);           dst += 4;       // end-marker "STM2"
+		}
 	}
 
 	// Patch frame size

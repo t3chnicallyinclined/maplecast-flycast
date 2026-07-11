@@ -1401,7 +1401,13 @@ void onRenderFrame(void* /*ctxv*/)
 {
 	// HOT PATH GATE (free when off / idle): not armed, or no client connected.
 	if (!_armed) return;
-	if (_clientCount.load(std::memory_order_relaxed) == 0) return;
+	// STATE-MERGE: when the body feed is folded into the main ZCS2/ZCST wire (MAPLECAST_STATE_MERGE),
+	// serverPublish reads currentStatePayload() to append the STAT section — so capture MUST run for
+	// the main-wire client even with NO /replica-live (:7212) client connected. Without this override,
+	// dropping the :7212 socket (the whole point of the fold) would stop the body capture entirely.
+	static const bool _stateMergeCap = [](){ const char* e = std::getenv("MAPLECAST_STATE_MERGE");
+		return e && e[0] && e[0] != '0'; }();
+	if (_clientCount.load(std::memory_order_relaxed) == 0 && !_stateMergeCap) return;
 
 	// In-match gate — same as the Oracle. Outside a match the render read-set is
 	// not meaningful for the fighter renderer; skip the capture entirely.
