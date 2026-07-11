@@ -282,7 +282,7 @@ canvas{display:block;background:transparent}
 </div>
 
 <script type="module">
-import {FrameDecoder} from './webgpu/frame-decoder.mjs?v=wirediag1';
+import {FrameDecoder} from './webgpu/frame-decoder.mjs?v=wirediag2';
 import {Decompress as ZcsDecompress} from './webgpu/fzstd.mjs';
 import {StageClient} from './webgpu/stage-client.mjs?v=3';
 import {TAParser} from './webgpu/ta-parser.mjs?v=2';
@@ -2809,7 +2809,12 @@ async function main(){
                       // fallback cleanly instead of allocating garbage): body state is ~214KB.
                       if(_ss>=0 && _bl>0 && _bl<=0x80000 && _dl<=d.length){ try{
                         const sec=d.subarray(_ss,d.length-12); const flag=sec[0];
-                        if(!BODY.stm||BODY.stm.length!==_bl) BODY.stm=new Uint8Array(_bl);
+                        // Size-tolerant delta: the state payload is variable-length, so BODY.stm must
+                        // GROW/SHRINK to baseLen while PRESERVING the common prefix — a DELTA rides the
+                        // prev frame's bytes. (Zero-reallocating here would corrupt the delta; only KEY,
+                        // which full-overwrites below, is safe against a fresh buffer.)
+                        if(!BODY.stm) BODY.stm=new Uint8Array(_bl);
+                        else if(BODY.stm.length!==_bl){ const _n=new Uint8Array(_bl); _n.set(BODY.stm.subarray(0,Math.min(BODY.stm.length,_bl))); BODY.stm=_n; }
                         if(flag===0){ BODY.stm.set(sec.subarray(1,1+_bl)); BODY._stmKey=true; }        // KEY: full state
                         else if(BODY._stmKey){ let o=1; const nr=(sec[o]|sec[o+1]<<8|sec[o+2]<<16|sec[o+3]<<24)>>>0; o+=4;   // DELTA: apply runs
                           for(let i=0;i<nr;i++){ const off=(sec[o]|sec[o+1]<<8|sec[o+2]<<16|sec[o+3]<<24)>>>0; o+=4; const rl=sec[o]|sec[o+1]<<8; o+=2; BODY.stm.set(sec.subarray(o,o+rl),off); o+=rl; } }

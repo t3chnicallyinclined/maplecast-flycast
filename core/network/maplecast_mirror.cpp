@@ -2863,7 +2863,14 @@ done_diff:
 			//   KEY   data = full payload (baseLen bytes)
 			//   DELTA data = [u32 nRuns] then nRuns x { u32 off, u16 len, len bytes } vs the previous frame.
 			static std::vector<uint8_t> _smPrev, _smSec;
-			const bool key = forceKeyframe || _smPrev.size() != sn;
+			// SIZE-TOLERANT DELTA (the 360KB/frame fix): the /replica-live payload is variable-length
+			// (on-change GFX tail, HUD-quad count, palette/btcw tails), so the old `_smPrev.size()!=sn`
+			// keyframe trigger fired on nearly EVERY frame -> we shipped the FULL ~360KB state every frame
+			// and the delta never ran (measured live: stm2=360KB flat, KEY every frame, vs /replica-live's
+			// own ~7KB delta). Fix: KEY only on a real keyframe/first frame; else delta the COMMON PREFIX
+			// vs prev and append the GROWN TAIL as fresh runs (client preserves its running copy on resize).
+			const size_t prevLen = _smPrev.size();
+			const bool key = forceKeyframe || prevLen == 0;
 			_smSec.clear();
 			_smSec.push_back(key ? 0 : 1);
 			if (key) {
@@ -2871,18 +2878,29 @@ done_diff:
 			} else {
 				const size_t runsPos = _smSec.size();
 				_smSec.resize(_smSec.size() + 4);                 // nRuns placeholder
-				uint32_t nRuns = 0; size_t i = 0;
-				while (i < sn) {
+				uint32_t nRuns = 0; size_t i = 0; const size_t common = sn < prevLen ? sn : prevLen;
+				while (i < common) {
 					if (sp[i] == _smPrev[i]) { i++; continue; }
 					size_t start = i, end = i, gap = 0;
-					while (i < sn) { if (sp[i] != _smPrev[i]) { end = i + 1; gap = 0; } else { if (++gap >= 8) break; } i++; }
+					while (i < common && (i - start) < 65535) { if (sp[i] != _smPrev[i]) { end = i + 1; gap = 0; } else { if (++gap >= 8) break; } i++; }
 					uint32_t off = (uint32_t)start; uint16_t rl = (uint16_t)(end - start);
 					_smSec.insert(_smSec.end(), (uint8_t*)&off, (uint8_t*)&off + 4);
 					_smSec.insert(_smSec.end(), (uint8_t*)&rl,  (uint8_t*)&rl  + 2);
 					_smSec.insert(_smSec.end(), sp + start, sp + end);
 					nRuns++;
 				}
-				memcpy(&_smSec[runsPos], &nRuns, 4);
+				// (2) grown tail [prevLen, sn): all-new bytes, chunked to the u16 runLen limit
+					{ size_t t = prevLen;
+					  while (t < sn) {
+						size_t tend = (t + 65535 < sn) ? (t + 65535) : sn;
+						uint32_t toff = (uint32_t)t; uint16_t trl = (uint16_t)(tend - t);
+						_smSec.insert(_smSec.end(), (uint8_t*)&toff, (uint8_t*)&toff + 4);
+						_smSec.insert(_smSec.end(), (uint8_t*)&trl,  (uint8_t*)&trl  + 2);
+						_smSec.insert(_smSec.end(), sp + t, sp + tend);
+						nRuns++;
+						t = tend;
+					  } }
+					memcpy(&_smSec[runsPos], &nRuns, 4);
 			}
 			_smPrev.assign(sp, sp + sn);
 			if ((size_t)(dst - dstStart) + _smSec.size() + 12 <= RING_SIZE / 3) {

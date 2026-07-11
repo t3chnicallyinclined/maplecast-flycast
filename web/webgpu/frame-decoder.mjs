@@ -229,6 +229,21 @@ export class FrameDecoder {
         if (typeof window !== 'undefined' && window._wireDiag) {
             const trailer = Math.max(0, data.length - off);
             const total = data.length;
+            // Decode the STM2 footer (back-seek): [u32 baseLen][u32 dataLen]["STM2"]. flag byte at
+            // section start tells KEY(0) vs DELTA(1). If it's KEY every frame, the server's
+            // `_smPrev.size()!=sn` trigger is firing on the variable payload size -> the delta never
+            // engages -> we ship the full ~360KB state every frame instead of ~7KB of changed bytes.
+            let stmTag = '';
+            if (total >= 12 && data[total-4]===0x53 && data[total-3]===0x54 && data[total-2]===0x4D && data[total-1]===0x32) {
+                const dl = (data[total-8]|data[total-7]<<8|data[total-6]<<16|data[total-5]<<24)>>>0;
+                const bl = (data[total-12]|data[total-11]<<8|data[total-10]<<16|data[total-9]<<24)>>>0;
+                const ss = total - 12 - dl;
+                if (ss >= 0) {
+                    const flag = data[ss];
+                    if (flag === 0) stmTag = ' [KEY base=' + (bl/1024).toFixed(0) + 'KB]';
+                    else { const nr = (data[ss+1]|data[ss+2]<<8|data[ss+3]<<16|data[ss+4]<<24)>>>0; stmTag = ' [DELTA nRuns=' + nr + ' data=' + (dl/1024).toFixed(1) + 'KB]'; }
+                }
+            }
             if (total > (window._wireDiagThresh || 131072) || window._wireDiag >= 2) {
                 console.log('[WIRE] f=' + frameNum
                     + ' total=' + (total/1024).toFixed(0) + 'KB'
@@ -236,7 +251,7 @@ export class FrameDecoder {
                     + ' | vramData=' + (_wdVramData/1024).toFixed(0) + 'KB(' + (_wdVramData/PAGE_SIZE) + 'pg)'
                     + ' vramRefs=' + _wdVramRefs
                     + ' | pvr=' + (_wdPvr/1024).toFixed(1) + 'KB'
-                    + ' | stm2=' + (trailer/1024).toFixed(1) + 'KB');
+                    + ' | stm2=' + (trailer/1024).toFixed(1) + 'KB' + stmTag);
             }
         }
 
