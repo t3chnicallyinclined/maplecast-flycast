@@ -597,7 +597,7 @@ window._bodySrc=BODYSRC;
 // stream, same vframe (no pairing drift). :7212 still supplies the one-time BODY.ram seed for now.
 window._stateMerge=new URLSearchParams(location.search).get('statemerge')==='1';
 window._fullHeap=new URLSearchParams(location.search).get('fullheap')==='1';   // A/B: force the full 16MB heap copy (vs incremental dyn-region copy)
-window._fxCacheOff=new URLSearchParams(location.search).get('fxcache')==='0';  // A/B: disable the persistent effect-texel cache (Layer 1a)
+window._fxDecode=new URLSearchParams(location.search).get('fxdecode')==='1';   // A/B: decode bit15 effect parts LOCALLY (mask 0x7FFF) instead of wire VRAM -> kills the super SYNC spike
 const BODY={want:new URLSearchParams(location.search).has('bodylocal'),
   started:false,ready:false,mod:null,ram:null,dynRegs:null,ta:null,bt:null,vframe:-1,frames:0,gfxN:0,err:0,ws:null};
 window._body=BODY;
@@ -634,7 +634,7 @@ window._bodyStart=async function bodyStart(){
     BODY.mod=await createRenderFrame({locateFile:p=>p.endsWith('.wasm')?'render-replica/'+p+'?v=flipfix1':p});
     if(BTEX.want){ // ?bodytex=local: the validated client-side texel layer + disc-art overlay
       const [bd,lg]=await Promise.all([
-        import('./render-replica/body_decoder.mjs?v=fxcache1'),
+        import('./render-replica/body_decoder.mjs?v=fxdec1'),
         import('./render-replica/local_gfx_overlay.mjs?v=scene5')]);
       BTEX.ensure=bd.ensureBodyTextures; BTEX.applyGfx=lg.applyLocalGfx;
       BTEX.lvram=new Uint8Array(8*1024*1024);   // local staging image (decoder writes at each quad's TCW)

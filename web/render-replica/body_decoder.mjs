@@ -399,38 +399,22 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
     for (let q = 0; q < quadCount; q++) {
         const gfx1 = quadGfx1s[q] >>> 0;
         if (!(gfx1 & 0x0C000000) && !(gfx1 & 0x8C000000)) continue;  // no valid body art
-        // EFFECT QUADS — two classes, both engine-resident (NOT GFX1-decodable, so we never LZSS them):
-        //   (1) Effect-Poly bank [0x0CED0000,0x0CEE0000): absolute-pointer PVR directory (LZSS would garble).
-        //   (2) bit15 resident-backed (srcdesc bit0==0): sels are 0xC000 sentinels, slots 0x475xxx/0x60xxxx.
-        // Their texels ride the WIRE VRAM — which is exactly what floods on a super: cold/LRU-evicted effect
-        // pages -> VCACHE ref-miss -> a full 8MB resync (the 4-6MB repeat-super spikes). PERSISTENT EFFECT-TEXEL
-        // CACHE (Layer 1a): once we've seen VALID resident texels at a quad's TCW, re-write them from cache
-        // every frame so an evicted effect page is never missing -> no ref-miss -> no repeat resync. Populated
-        // from the wire on first valid sight (the cold ship pays once; loading-screen pre-warm (1b) kills that
-        // too). Keyed by (gfx1,sel,addr) so animation frames / different effects never alias. ?fxcache=0 opts out.
+        // EFFECT-POLY (Store C: gfx1 in [0x0CED0000,0x0CEE0000) is an absolute-pointer PVR directory, NOT a
+        // GFX1 LZSS table — LZSS would garble it). Still resident-backed; skip (fx_atlas is the eventual home).
+        if ((gfx1 & 0x0FFFFFFF) >= 0x0CED0000 && (gfx1 & 0x0FFFFFFF) < 0x0CEE0000) continue;
+        // BIT15 EFFECT PARTS (Store B) — the super-spike source. These ride wire VRAM (cold/evicted -> VCACHE
+        // ref-miss -> a full 8MB resync). Skin Studio (mvc2-skin-studio rom-reader.mjs:181) proves they are
+        // NORMAL GFX2 cells: bit15 (0x8000) is just the scale-effect flag; MASK it (& 0x7FFF) and they decode
+        // from the char GFX exactly like body parts (decodePart failed before only because it got the raw
+        // sentinel sel, sel>=G.n -> null). So decode locally -> local texels, NO wire VRAM, no ref-miss, no
+        // super SYNC. Gated ?fxdecode=1 (default keeps the resident-wire skip) until the live decode is A/B-proven.
         {
-            const effPoly  = (gfx1 & 0x0FFFFFFF) >= 0x0CED0000 && (gfx1 & 0x0FFFFFFF) < 0x0CEE0000;
             const effBit15 = quadSrcDesc && !(quadSrcDesc[4 * q + 3] & 1);
-            if (effPoly || effBit15) {
-                if (!(typeof window !== 'undefined' && window._fxCacheOff)) {
-                    const a = tcwAddrOf(q);
-                    if (a >= 0 && a + 512 <= vram.length) {
-                        if (!cache._fx) cache._fx = new Map();
-                        const k = (gfx1 >>> 0).toString(16) + ':' + quadSels[q] + ':' + a;
-                        const cc = cache._fx.get(k);
-                        if (cc) { vram.set(cc, a); fxRestored++; }               // persist: re-write cached resident texels
-                        else {                                                    // populate once the wire has valid (non-zero) texels here
-                            const cur = vram.subarray(a, a + 512);
-                            let nz = false; for (let i = 0; i < 512; i++) { if (cur[i]) { nz = true; break; } }
-                            if (nz) { cache._fx.set(k, cur.slice()); fxCached++; }
-                        }
-                    }
-                }
-                continue;
-            }
+            if (effBit15 && !(typeof window !== 'undefined' && window._fxDecode)) continue;
+            // else fall through: the body decode path below runs with the bit15-masked sel.
         }
         quads++;
-        const sel  = quadSels[q];
+        const sel  = quadSels[q] & 0x7FFF;   // MASK bit15 (scale-effect flag) — no-op for bodies, decodes effect parts (Skin Studio rom-reader.mjs:181)
         const addr = tcwAddrOf(q);
         if (addr < 0 || addr + 512 > vram.length) continue;
         const key = gfx1.toString(16) + ':' + sel;
