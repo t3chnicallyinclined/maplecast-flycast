@@ -2845,12 +2845,44 @@ done_diff:
 	// the dirty pages (robust vs the page walk). Only appended when the payload FITS the frame budget.
 	if (_stateMerge) {
 		const uint8_t* sp = nullptr; size_t sn = 0;
-		if (maplecast_replica_live::currentStatePayload(sp, sn) && sp && sn &&
-		    (size_t)(dst - dstStart) + sn + 8 <= RING_SIZE / 3) {
-			memcpy(dst, sp, sn);              dst += sn;      // the FRMx body payload
-			uint32_t plen = (uint32_t)sn;
-			memcpy(dst, &plen, 4);            dst += 4;       // u32 payloadLen (back-seek)
-			memcpy(dst, "STM2", 4);           dst += 4;       // end-marker "STM2"
+		if (maplecast_replica_live::currentStatePayload(sp, sn) && sp && sn) {
+			// STM2 DELTA (fps fix): shipping the FULL ~214KB state made the browser's JS zstd decoder
+			// EXPAND 214KB/frame (~13ms decode -> ~20fps) even though the compressed WIRE was tiny (the
+			// streaming window deduped it). So ship only the CHANGED bytes; the client keeps a running
+			// copy and reconstructs. KEY (full) on a keyframe / size change so a joiner (whose ZCS2 sync
+			// aligns to keyframes) can seed. Section: [u8 flag 0=KEY 1=DELTA] + data ; trailer
+			// [u32 baseLen][u32 dataLen]["STM2"] (back-seek from the frame end).
+			//   KEY   data = full payload (baseLen bytes)
+			//   DELTA data = [u32 nRuns] then nRuns x { u32 off, u16 len, len bytes } vs the previous frame.
+			static std::vector<uint8_t> _smPrev, _smSec;
+			const bool key = forceKeyframe || _smPrev.size() != sn;
+			_smSec.clear();
+			_smSec.push_back(key ? 0 : 1);
+			if (key) {
+				_smSec.insert(_smSec.end(), sp, sp + sn);
+			} else {
+				const size_t runsPos = _smSec.size();
+				_smSec.resize(_smSec.size() + 4);                 // nRuns placeholder
+				uint32_t nRuns = 0; size_t i = 0;
+				while (i < sn) {
+					if (sp[i] == _smPrev[i]) { i++; continue; }
+					size_t start = i, end = i, gap = 0;
+					while (i < sn) { if (sp[i] != _smPrev[i]) { end = i + 1; gap = 0; } else { if (++gap >= 8) break; } i++; }
+					uint32_t off = (uint32_t)start; uint16_t rl = (uint16_t)(end - start);
+					_smSec.insert(_smSec.end(), (uint8_t*)&off, (uint8_t*)&off + 4);
+					_smSec.insert(_smSec.end(), (uint8_t*)&rl,  (uint8_t*)&rl  + 2);
+					_smSec.insert(_smSec.end(), sp + start, sp + end);
+					nRuns++;
+				}
+				memcpy(&_smSec[runsPos], &nRuns, 4);
+			}
+			_smPrev.assign(sp, sp + sn);
+			if ((size_t)(dst - dstStart) + _smSec.size() + 12 <= RING_SIZE / 3) {
+				memcpy(dst, _smSec.data(), _smSec.size()); dst += _smSec.size();
+				uint32_t baseLen = (uint32_t)sn;            memcpy(dst, &baseLen, 4); dst += 4;
+				uint32_t dataLen = (uint32_t)_smSec.size(); memcpy(dst, &dataLen, 4); dst += 4;
+				memcpy(dst, "STM2", 4);                     dst += 4;
+			}
 		}
 	}
 
