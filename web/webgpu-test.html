@@ -2794,7 +2794,9 @@ async function main(){
                       const _dl=(d[d.length-8]|d[d.length-7]<<8|d[d.length-6]<<16|d[d.length-5]<<24)>>>0;    // dataLen
                       const _bl=(d[d.length-12]|d[d.length-11]<<8|d[d.length-10]<<16|d[d.length-9]<<24)>>>0; // baseLen (full state size)
                       const _ss=d.length-12-_dl;
-                      if(_ss>=0){ try{
+                      // sanity (also makes an OLD-server 8-byte-trailer frame fall through to the :7212
+                      // fallback cleanly instead of allocating garbage): body state is ~214KB.
+                      if(_ss>=0 && _bl>0 && _bl<=0x80000 && _dl<=d.length){ try{
                         const sec=d.subarray(_ss,d.length-12); const flag=sec[0];
                         if(!BODY.stm||BODY.stm.length!==_bl) BODY.stm=new Uint8Array(_bl);
                         if(flag===0){ BODY.stm.set(sec.subarray(1,1+_bl)); BODY._stmKey=true; }        // KEY: full state
