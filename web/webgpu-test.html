@@ -284,7 +284,7 @@ canvas{display:block;background:transparent}
 <script type="module">
 import {FrameDecoder} from './webgpu/frame-decoder.mjs?v=wirediag2';
 import {Decompress as ZcsDecompress} from './webgpu/fzstd.mjs';
-import {StageClient} from './webgpu/stage-client.mjs?v=3';
+import {StageClient} from './webgpu/stage-client.mjs?v=4';
 import {TAParser} from './webgpu/ta-parser.mjs?v=2';
 import {TextureManager} from './webgpu/texture-manager.mjs';
 import {PVR2Renderer} from './webgpu/pvr2-renderer.mjs?v=9';
@@ -573,11 +573,16 @@ window._stageMerge=(g)=>{
   const stageOp=sp.opaque||[];
   for(const q of stageOp){ q._src='stage';   // census origin tag (stage-bake vs wire vs body)
     if(STAGE._tm){ const t=STAGE._tm.getTexture(q.tsp,q.tcw); if(t) q.texObj=t; } }
+  // TRANSLUCENT stage layers (ListType-2 floor grid + glow, baked 2026-07-11) -> g.translucent so
+  // the renderer blends them over the opaque dome. Same local-texture binding as the opaque path.
+  const stageTr=sp.translucent||[];
+  for(const q of stageTr){ q._src='stage';
+    if(STAGE._tm){ const t=STAGE._tm.getTexture(q.tsp,q.tcw); if(t) q.texObj=t; } }
   g.opaque=[...stageOp,...bump(g.opaque)];
   g.punchThrough=bump(g.punchThrough);
-  g.translucent=bump(g.translucent);
+  g.translucent=[...stageTr,...bump(g.translucent)];
   if(g.renderPasses&&g.renderPasses.length)
-    g.renderPasses[0]={...g.renderPasses[0], op_count:g.renderPasses[0].op_count+stageOp.length};
+    g.renderPasses[0]={...g.renderPasses[0], op_count:g.renderPasses[0].op_count+stageOp.length, tr_count:(g.renderPasses[0].tr_count||0)+stageTr.length};
   g.vertexData=new Uint8Array(nv.buffer,0,need*4);
   g.vertexCount+=sp.vertexCount;
   g._stageMerged=true;

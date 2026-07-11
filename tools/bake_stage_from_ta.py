@@ -154,18 +154,19 @@ def main():
     for g in groups:
         if not g["bits"]["Texture"] or not g["verts"]:
             continue
-        if g["bits"]["ListType"] != 0:
+        if g["bits"]["ListType"] not in (0, 2):   # 0=opaque, 2=translucent (floor grid + glow)
             continue
         if is_hud(g):
             continue
         addr, tu, tv, pf, tw = tex_params(g["tsp"], g["tcw"])
-        key = (addr, tu, tv, pf, tw)
+        palsel = (g["tcw"] >> 21) & 0x3F     # PAL4/8 palette selector (same addr, diff palette = diff tex)
+        key = (addr, tu, tv, pf, tw, palsel)
         if key not in tex_surr:
             surr = len(tex_surr) + 1
             tex_surr[key] = surr
             fn = f"STG{sid}_ta_t{surr:02d}.png"
             try:
-                im = decode_vram(addr, tu, tv, pf, tw)
+                im = decode_vram(addr, tu, tv, pf, tw, palsel=palsel)
                 im.save(os.path.join(OUTDIR, fn))
                 im.save(os.path.join(WEBOUT, fn))
             except Exception as e:
@@ -176,7 +177,7 @@ def main():
     # 2) emit one mesh per group (its real control words + screen tris)
     meshes = []
     for g in groups:
-        if not g["verts"] or g["bits"]["ListType"] != 0:
+        if not g["verts"] or g["bits"]["ListType"] not in (0, 2):
             continue
         if is_hud(g):
             continue
@@ -184,7 +185,8 @@ def main():
         surr = 0
         if textured:
             addr, tu, tv, pf, tw = tex_params(g["tsp"], g["tcw"])
-            surr = tex_surr.get((addr, tu, tv, pf, tw), 0)
+            palsel = (g["tcw"] >> 21) & 0x3F
+            surr = tex_surr.get((addr, tu, tv, pf, tw, palsel), 0)
         tris = []
         for a, b, c in strip_to_tris(g["verts"]):
             if max(a["z"], b["z"], c["z"]) <= 0:     # behind camera
@@ -202,6 +204,7 @@ def main():
             continue
         meshes.append({"surr": surr,
                        "pcw": g["pcw"], "isp": g["isp"], "tsp": g["tsp"], "tcw": g["tcw"],
+                       "listType": g["bits"]["ListType"],   # 0=opaque (dome), 2=translucent (floor/glow)
                        "textured": textured, "tris": tris})
 
     out = {"mode": "engine_ta", "stage": sid, "screenW": W, "screenH": H,

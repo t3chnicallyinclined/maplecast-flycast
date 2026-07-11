@@ -331,7 +331,10 @@ export class StageClient {
         if (!ok) continue;                 // degenerate (unplaced-prop garbage) — drop it
         const first = vi;
         for (const f of fv) writeVtx(vi++, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
-        opaque.push({ first, count: 3, isp, tsp, tcw: surr, pcw, tileclip: 0 });
+        const _pp = { first, count: 3, isp, tsp, tcw: surr, pcw, tileclip: 0 };
+        // ListType 2 (translucent — the floor grid + glow) -> the TR list so the renderer
+        // blends it over the opaque dome; ListType 0 -> opaque. (Baked 2026-07-11.)
+        if (m.listType === 2) translucent.push(_pp); else opaque.push(_pp);
       }
     }
     return { vertexData: vb.subarray(0, vi * 28), vertexCount: vi,

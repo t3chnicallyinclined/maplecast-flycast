@@ -56,17 +56,54 @@ def argb1555(c):
 
 CONV = {0: argb1555, 1: rgb565, 2: argb4444}
 
+# ── PVR palette (for PAL4/PAL8, fmt 5/6) — ported from texture-manager.mjs:92-102 ──
+# Palette RAM at pvr_regs.bin[0x1000 : 0x1000+4096] (1024 u32 entries); the entry
+# format is regs[0x108]&3 (0=1555, 1=565, 2=4444, 3=8888). Static per stage.
+_PAL = None
+def _load_palette():
+    global _PAL
+    if _PAL is not None:
+        return _PAL
+    regs = open(os.path.join(REPO, "_stage_gt", "pvr_regs.bin"), "rb").read()
+    ctrl = struct.unpack_from("<I", regs, 0x108)[0] & 3
+    pal = []
+    for i in range(1024):
+        raw = struct.unpack_from("<I", regs, 0x1000 + i * 4)[0]
+        if ctrl == 3:
+            pal.append(((raw >> 16) & 0xFF, (raw >> 8) & 0xFF, raw & 0xFF, (raw >> 24) & 0xFF))
+        else:
+            pal.append([argb1555, rgb565, argb4444][ctrl](raw & 0xFFFF))
+    _PAL = pal
+    return pal
 
-def decode(tex_addr, w, h, pixfmt, twiddled=True, out=None):
+
+def decode(tex_addr, w, h, pixfmt, twiddled=True, out=None, palsel=0):
     base = tex_addr * 8
-    conv = CONV[pixfmt]
     img = bytearray(w * h * 4)
+    if pixfmt in (5, 6):                       # PAL4 / PAL8 (palettized) — texture-manager.mjs _pal4/_pal8
+        pal = _load_palette()
+        pb = (palsel << 4) if pixfmt == 5 else ((palsel >> 4) << 8)
+        for y in range(h):
+            for x in range(w):
+                ti = untwiddle_xy(x, y, w, h) if twiddled else (y * w + x)
+                if pixfmt == 5:                # 4bpp: 2 texels/byte
+                    bo = base + (ti >> 1)
+                    b = VRAM[bo] if bo < len(VRAM) else 0
+                    ni = ((b >> 4) & 0xF) if (ti & 1) else (b & 0xF)
+                else:                          # 8bpp
+                    bo = base + ti
+                    ni = VRAM[bo] if bo < len(VRAM) else 0
+                c = pal[(pb + ni) & 0x3FF]
+                ci = (y * w + x) * 4
+                img[ci] = c[0]; img[ci + 1] = c[1]; img[ci + 2] = c[2]; img[ci + 3] = c[3]
+        im = Image.frombytes("RGBA", (w, h), bytes(img))
+        if out:
+            im.save(out)
+        return im
+    conv = CONV[pixfmt]
     for y in range(h):
         for x in range(w):
-            if twiddled:
-                idx = untwiddle_xy(x, y, w, h)
-            else:
-                idx = y * w + x
+            idx = untwiddle_xy(x, y, w, h) if twiddled else (y * w + x)
             o = base + idx * 2
             c = struct.unpack_from("<H", VRAM, o)[0]
             r, g, b, a = conv(c)
