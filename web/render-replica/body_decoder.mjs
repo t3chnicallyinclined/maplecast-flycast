@@ -357,7 +357,7 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
     // keys per-quad texObj attach on it — quads skipped here MUST fall back to wire VRAM).
     const mask = (opts && opts.mask) || null;
     if (cache._dec.size > 4096) cache._dec.clear();  // bound the memo across many distinct poses
-    let decoded = 0, bytes = 0, written = 0, quads = 0;
+    let decoded = 0, bytes = 0, written = 0, quads = 0, fxCached = 0, fxRestored = 0;
     const parts = new Set();
 
     const dv = new DataView(ta.buffer, ta.byteOffset, ta.byteLength);
@@ -399,18 +399,36 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
     for (let q = 0; q < quadCount; q++) {
         const gfx1 = quadGfx1s[q] >>> 0;
         if (!(gfx1 & 0x0C000000) && !(gfx1 & 0x8C000000)) continue;  // no valid body art
-        // EFFECT-POLY GUARD (GAP 1; C++ twin maplecast_mirror.cpp gstaDecodeBodies): a gfx1
-        // in the shared Effect-Poly bank [0x0CED0000,0x0CEE0000) is an ABSOLUTE-POINTER texture
-        // DIRECTORY (already-decoded PVR texels), NOT a GFX1 LZSS offset table. Feeding it to
-        // the LZSS path decodes a corrupt blob over the quad's TCW (the pink-streak garble).
-        // SKIP: the quad keeps the engine-resident VRAM texels at its TCW.
-        if ((gfx1 & 0x0FFFFFFF) >= 0x0CED0000 && (gfx1 & 0x0FFFFFFF) < 0x0CEE0000) continue;
-        // BIT15 EFFECT QUADS ARE RESIDENT-BACKED -- NEVER STAGE (2026-07-05 _live4 byte-gate,
-        // lockstep with maplecast_mirror.cpp gstaDecodeBodies). Their textures are engine-
-        // uploaded (effect slots 0x475xxx/0x60xxxx/0x400xxx, shipped byte-exact in the GSTA
-        // prefix VRAM); their sels are 0xC000-class sentinels, not GFX1 indices -- decoding
-        // them staged garbage OVER the good resident texels. srcdesc flags bit0==0 marks them.
-        if (quadSrcDesc && !(quadSrcDesc[4 * q + 3] & 1)) continue;
+        // EFFECT QUADS — two classes, both engine-resident (NOT GFX1-decodable, so we never LZSS them):
+        //   (1) Effect-Poly bank [0x0CED0000,0x0CEE0000): absolute-pointer PVR directory (LZSS would garble).
+        //   (2) bit15 resident-backed (srcdesc bit0==0): sels are 0xC000 sentinels, slots 0x475xxx/0x60xxxx.
+        // Their texels ride the WIRE VRAM — which is exactly what floods on a super: cold/LRU-evicted effect
+        // pages -> VCACHE ref-miss -> a full 8MB resync (the 4-6MB repeat-super spikes). PERSISTENT EFFECT-TEXEL
+        // CACHE (Layer 1a): once we've seen VALID resident texels at a quad's TCW, re-write them from cache
+        // every frame so an evicted effect page is never missing -> no ref-miss -> no repeat resync. Populated
+        // from the wire on first valid sight (the cold ship pays once; loading-screen pre-warm (1b) kills that
+        // too). Keyed by (gfx1,sel,addr) so animation frames / different effects never alias. ?fxcache=0 opts out.
+        {
+            const effPoly  = (gfx1 & 0x0FFFFFFF) >= 0x0CED0000 && (gfx1 & 0x0FFFFFFF) < 0x0CEE0000;
+            const effBit15 = quadSrcDesc && !(quadSrcDesc[4 * q + 3] & 1);
+            if (effPoly || effBit15) {
+                if (!(typeof window !== 'undefined' && window._fxCacheOff)) {
+                    const a = tcwAddrOf(q);
+                    if (a >= 0 && a + 512 <= vram.length) {
+                        if (!cache._fx) cache._fx = new Map();
+                        const k = (gfx1 >>> 0).toString(16) + ':' + quadSels[q] + ':' + a;
+                        const cc = cache._fx.get(k);
+                        if (cc) { vram.set(cc, a); fxRestored++; }               // persist: re-write cached resident texels
+                        else {                                                    // populate once the wire has valid (non-zero) texels here
+                            const cur = vram.subarray(a, a + 512);
+                            let nz = false; for (let i = 0; i < 512; i++) { if (cur[i]) { nz = true; break; } }
+                            if (nz) { cache._fx.set(k, cur.slice()); fxCached++; }
+                        }
+                    }
+                }
+                continue;
+            }
+        }
         quads++;
         const sel  = quadSels[q];
         const addr = tcwAddrOf(q);
@@ -581,5 +599,5 @@ export function ensureBodyTextures(ram, vram, ta, quadCount, cache, quadSels, qu
         vram.set(retwiddle32(tile), addr);        // standalone 32×32 PAL4_TW at this tile's own TCW
         written++; if (mask) mask[q] = 1;
     }
-    return { decoded, bytes, written, quads, parts: parts.size };
+    return { decoded, bytes, written, quads, parts: parts.size, fxCached, fxRestored };
 }
