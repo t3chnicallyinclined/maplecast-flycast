@@ -3315,6 +3315,30 @@ done_diff:
 							printf("[WIREMON] f=%u zcs2=%uB inner=%uB ratio=%.0fx | taDelta=%uB pages/etc=%ldB stm2=%uB[%s]%s\n",
 								frameNum, wireB, zPayloadSize, ob.pos ? (double)zPayloadSize/(double)ob.pos : 0.0,
 								taD, rest, stm2B, stmFlag==0?"KEY":stmFlag==1?"DELTA":"?", streamStart?" RESET":"");
+							// VRAM BLOCK HISTOGRAM: on a big-page frame (super loading art), tally which region-1
+							// tcw 4K blocks the dirty pages land in, so the effect-strip targets exactly those
+							// (the body strip already drops {82,83,88,89}). pages start at header(80)+delta+checksum(4).
+							if (rest > 16000) {
+								uint32_t bl[256]; memset(bl, 0, sizeof(bl));
+								size_t po = 80 + (size_t)taD + 4;
+								if (po + 4 <= zPayloadSize) {
+									uint32_t cnt; memcpy(&cnt, zPayload + po, 4); po += 4;
+									bool vc = (cnt == 0xFFFFFFFFu);
+									if (vc && po + 4 <= zPayloadSize) { memcpy(&cnt, zPayload + po, 4); po += 4; }
+									for (uint32_t p = 0; p < cnt && po + 5 <= zPayloadSize; p++) {
+										uint8_t rid = zPayload[po]; uint32_t pidx; memcpy(&pidx, zPayload + po + 1, 4);
+										size_t esz = 5; uint8_t hd = 1;
+										if (vc) { hd = (po + 13 < zPayloadSize) ? zPayload[po + 13] : 0; esz += 9; }
+										if (hd) esz += 4096;
+										if (rid == 1 && hd) { uint32_t b = (uint32_t)(((uint64_t)pidx * 4096u) >> 15); if (b < 256) bl[b] += 4096; }
+										po += esz;
+									}
+									char buf[256]; int bo2 = 0;
+									for (int k = 0; k < 6; k++) { int mi = -1; uint32_t mv = 0; for (int b = 0; b < 256; b++) if (bl[b] > mv) { mv = bl[b]; mi = b; }
+										if (mi < 0) break; bo2 += snprintf(buf + bo2, sizeof(buf) - bo2, " 0x%x=%uKB", mi, bl[mi]/1024); bl[mi] = 0; }
+									printf("[WIREMON-BLK] f=%u pages=%ldKB |%s\n", frameNum, rest/1024, buf);
+								}
+							}
 							fflush(stdout);
 						}
 					}
