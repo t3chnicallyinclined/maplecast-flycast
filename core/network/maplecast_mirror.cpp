@@ -3157,7 +3157,13 @@ done_diff:
 				// clients default to local body textures.
 				static const bool _csPages = [](){ const char* e = std::getenv("MAPLECAST_CHARSTRIP_PAGES");
 					return e && *e && *e != '0'; }();
-				if (_csPages && charStripMode() == 2 && ssTailLen >= 8) {
+				// DECOUPLED from charStripMode()==2 (2026-07-11): the page-strip drops the {82,83,88,89}
+				// VRAM texture pages (84.1% of page bytes) whether or not the TA char-strip is on. Running
+				// it WITHOUT char-strip keeps the body/effect QUADS on the wire (TA byte-stable -> geometry
+				// delta stays ~0.6 Mbps, no 5x inflation); the client local-textures those kept quads by
+				// overlaying its already-decoded BTEX.lvram tiles into D.vram. ONLY safe with that client
+				// overlay active (bodytex=local) — else the kept quads sample stale D.vram = garbage.
+				if (_csPages && ssTailLen >= 8) {
 					uint8_t* tp = w + 80 + ssDPay;      // checksum(4) + count slot(4) + entries
 					uint32_t cnt; memcpy(&cnt, tp + 4, 4);
 					bool vcw = (cnt == 0xFFFFFFFFu);

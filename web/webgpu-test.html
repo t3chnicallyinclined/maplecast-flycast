@@ -601,6 +601,7 @@ window._fxDecode=(new URLSearchParams(location.search).get('fxdecode')||'1')!=='
 window._noSync=new URLSearchParams(location.search).get('nosync')==='1';       // EXPERIMENT: suppress the ref-miss sync-request (the super scene-change SYNC) — the 'join' sync still fires
 window._missDiag=new URLSearchParams(location.search).get('missdiag')==='1';   // DIAG: log which VRAM 64KB regions VCACHE-miss during a super (where called-in char data loads)
 window._wireDiag=+(new URLSearchParams(location.search).get('wirediag')||0);   // DIAG: per-frame wire byte breakdown (taDelta/vramData/vramRefs/pvr/stm2) — attributes the super spike. =1 logs big frames, =2 logs all
+window._vramOverlay=new URLSearchParams(location.search).get('vramoverlay')==='1';   // CLEAN STRIP (Phase 1): overlay locally-decoded body tiles into D.vram so the server can drop {82,83,88,89} pages while quads stay on the wire TA (no delta inflation). Needs server MAPLECAST_CHARSTRIP_PAGES=1 + CHARSTRIP=1
 const BODY={want:new URLSearchParams(location.search).has('bodylocal'),
   started:false,ready:false,mod:null,ram:null,dynRegs:null,ta:null,bt:null,vframe:-1,frames:0,gfxN:0,err:0,ws:null};
 window._body=BODY;
@@ -774,18 +775,35 @@ function _btexStage(M,kept){
     M._free(sp); M._free(gp); M._free(cp); M._free(mp); if(sdp) M._free(sdp);
     const opts={mask:new Uint8Array(nq)};
     BTEX.ensure(BODY.ram,BTEX.lvram,BODY.ta,nq,BTEX.cache,kS,kG,kCR,opts,kM,kSD);
-    const tiles=new Uint8Array(nq*512); let staged=0;
+    const tiles=new Uint8Array(nq*512); const addrs=new Int32Array(nq); let staged=0;
     for(let i=0;i<nq;i++){ if(!opts.mask[i]) continue;
       const o=i*96+12;
       const tcw=(BODY.ta[o]|BODY.ta[o+1]<<8|BODY.ta[o+2]<<16|BODY.ta[o+3]<<24)>>>0;
       const a=((tcw&0x1FFFFF)<<3)>>>0;
-      if(a+512<=BTEX.lvram.length){ tiles.set(BTEX.lvram.subarray(a,a+512),i*512); staged++; }
+      if(a+512<=BTEX.lvram.length){ tiles.set(BTEX.lvram.subarray(a,a+512),i*512); addrs[i]=a; staged++; }
       else opts.mask[i]=0; }
     BTEX.stats.staged=staged;
     BTEX.stats.decMs+=((performance.now()-t0)-BTEX.stats.decMs)*0.1;   // EMA ms/frame
-    return {mask:opts.mask,tiles};
+    return {mask:opts.mask,tiles,addrs};
   }catch(e){ if(++BTEX.err<6) console.warn('[btex] stage',e); return null; }
 }
+// CLEAN STRIP overlay (Phase 1, ?vramoverlay=1): the server drops the {82,83,88,89} VRAM texture
+// pages (84% of page bytes) because the body/effect texels they hold are decoded LOCALLY into
+// BTEX.lvram at byte-exact TCWs. The body/effect QUADS stay on the wire TA (byte-stable -> no
+// geometry-delta inflation), so they'd sample stale D.vram at those TCWs. Overlay our local tiles
+// into D.vram at each staged quad's TCW addr, then invalidate, so the kept wire quads texture from
+// the local decode via the normal TextureManager. Idempotent when pages AREN'T stripped (local
+// tile == wire tile). Must run AFTER D.applyFrame populated D.vram and AFTER _bodyApplyFrame staged
+// BODY.bt, BEFORE R.renderFrame samples textures.
+window._btexOverlayVram=(D,T)=>{
+  const bt=BODY.bt; if(!BTEX.on||!bt||!bt.addrs||!D||!D.vram) return 0;
+  const lv=BTEX.lvram, dv=D.vram, mask=bt.mask, addrs=bt.addrs; let n=0;
+  for(let i=0;i<mask.length;i++){ if(!mask[i]) continue; const a=addrs[i];
+    if(a>0 && a+512<=dv.length){ dv.set(lv.subarray(a,a+512),a); n++; } }
+  if(n && T && T.invalidateAll) T.invalidateAll();   // re-decode the overlaid TCWs from the patched D.vram
+  BTEX.stats.overlay=n;
+  return n;
+};
 // Merge the latest body TA into the parsed wire frame — same model as
 // _stageMerge but APPENDED (bodies draw over the remaining TR content).
 const _bodyParser2=new TAParser();
@@ -1018,7 +1036,7 @@ SPRB.build=()=>{
   SPRB.frames++; SPRB.quads=polys.length;
   return {vertexData:vd.subarray(0,vi*28),vertexCount:vi,translucent:polys};
 };
-if(BODY.want) window._bodyStart();
+if(BODY.want || window._vramOverlay) window._bodyStart();   // _vramOverlay needs BTEX.lvram staged even without char-strip
 (function(){
   const p=document.createElement('div');
   p.id='zcs2_panel';
@@ -2824,6 +2842,9 @@ async function main(){
                     if(DBG.texForceInvalidate) T.invalidateAll();
                     T.setDirtyPages(fr.dirtyPageList, fr.pvrDirty);
                     if(!T._pal||fr.vramDirty||fr.pvrDirty) T.updatePalette(D.pvrRegs);
+                    // CLEAN STRIP: patch the locally-decoded body/effect tiles into D.vram where the
+                    // server dropped the {82,83,88,89} pages, so the kept wire-TA quads texture locally.
+                    if(window._vramOverlay) window._btexOverlayVram(D,T);
                     const t1=performance.now();
                     const g=P.parse(fr.taBuffer,fr.taSize);
                     // Phase 3a: stage-stripped ZCS2 frame -> prepend the local baked stage.
