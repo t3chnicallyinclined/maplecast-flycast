@@ -13,12 +13,61 @@
 > here: PIXEL-NEUTRAL — the optimization must not change what render_frame draws.** (So the temporal garble-gone
 > gate P2b is deferred to the fidelity track; P2's acceptance is the frozen-frame pixel-neutral diff.)
 
+## ⭐ LOCKED MINIMAL RECIPE (2026-07-11) — the actual "one stream" fold (supersedes the heavier P1/P2 below)
+
+Re-anchored to what's REAL on prod: **ZCS2 is already the default render wire** (webgpu-test.html:1003,
+`?legacy=1` opts out) at ~0.215 Mbps. The ONLY convolution left is the second socket (`/replica-live` :7212).
+Fold it in — and it's tiny because **the server already compresses ONE buffer (`dstStart`) into BOTH the legacy
+ZCST and the ZCS2 streaming wire** (`mirror.cpp:2914-2925`), and **ZCS2's 16 MB streaming window auto-dedupes the
+~99%-static body state** (so no explicit delta encoder is needed on the ZCS2 path — the window IS the delta).
+
+**Four edits, gated `MAPLECAST_STATE_MERGE` (default OFF), flip live like ZCS2:**
+1. **`replica_live.cpp` `currentStatePayload()` — DONE (this session).** Exposes this frame's already-built
+   `captureFrame` FRMx payload (coherent char-pass snapshot) for serverPublish to append.
+2. **`replica_live.cpp onRenderFrame` gate (:1404)** — currently `if (_clientCount==0) return;` so capture stops
+   once the `:7212` socket is dropped. Change to also run when state-merge is on (capture for the main wire):
+   `if (_clientCount==0 && !stateMergeEnabled()) return;`.
+3. **`mirror.cpp serverPublish` — append the `STAT` section to `dstStart` BEFORE the frameSize patch (~:2831)**, so
+   both wires carry it and `frameSize` covers it (client's `frameSize+4==len` belt at webgpu-test.html:410 holds):
+   `"STAT"(4) + u32 payloadLen + [FRMx payload from currentStatePayload()]`. Old parsers (king.html/native/relay)
+   stop at the dirty-page list and skip it. Call after `mc_replicaSnapshotCharPassTables()` (:2275) is already done.
+4. **`webgpu-test.html`** — after the decoded frame is in hand (ZCS2 `fin` or legacy), scan past the dirty pages
+   for `"STAT"`, hand its payload to the EXISTING `_bodyApplyFrame()` (it parses a full FRMx unchanged), and when
+   folded, **don't open the `/replica-live` socket** + delete the `_bodyMerge` ring (body is in-frame = same vframe).
+
+**Why it's low-risk:** the body payload is unchanged bytes (reuses captureFrame + `_bodyApplyFrame` verbatim); it
+rides existing infra; gated OFF; old clients skip it; ZCS2 streaming compresses the static part for free.
+**Gate/test:** flip `MAPLECAST_STATE_MERGE=1` on prod env + a client `?statemerge=1`; the ZCS2 panel's `body: …vfΔ`
+line should show the body arriving with vfΔ=0 (in-frame), then with the socket dropped the line's socket stats go away.
+Acceptance = PIXEL-NEUTRAL (render unchanged) — the fold moves the transport, not the picture.
+
 ## North star
 Browser holds ONE WebSocket. Each frame = ONE ZCST packet, ONE `vframe`: char-stripped TA **+** render_frame
 STATE, delta-coded. Pairing garble becomes structurally impossible; wire drops ~300KB→~0.4KB; button→pixel
 drops by up to one full frame (16.67 ms) for free.
 
 ---
+
+## PROD RE-BASELINE 2026-07-11 (MEASURED on prod, not the lab — the plan's baseline was stale)
+
+Prod (`149.28.44.118`) ALREADY runs most of the optimize stack (running-process env + live telemetry):
+- **PAGEGATE=1** — `forcedEqual 100.0%`, every forced-dirty VRAM page skipped. (P0 = DONE.)
+- **CHARSTRIP=1** — bodies stripped from the TA (render_frame redraws them).
+- **STAGESTRIP=1** — `~112,292 B/frame` of stage TA stripped (ta 142K → ~31K).
+- **TACANON=1** — `~14,333 B/frame` dead bytes zeroed (~10% of buffer).
+- **VCACHE=1**, **HUD_TA=1**, **OBJS_SLOTTABLE=1**, **REPLICA_LIVE=1**.
+- **ZSTREAM=1 L9 (streaming zstd)** — telemetry `avg ~447 B/frame = 0.215 Mbps`, BUT **"shadow alongside ZCST"**
+  = MEASURED, NOT SERVED. The served wire is still per-frame ZCST.
+
+**The lab's 6.875 Mbps was the LOCAL WINDOWS RIG without this stack. Do NOT cite it for prod.**
+So: **P0 (PAGEGATE) is already live; most of P3 (streaming/charstrip/stagestrip) is already built.**
+**Remaining REAL wins:**
+1. **Promote ZSTREAM shadow → SERVED** — render wire → ~0.215 Mbps to actual users. Four-parser (clients need the
+   streaming decompressor). Likely the single biggest served-wire cut; needs pixel-neutral + late-join proof.
+2. **The `/replica-live` CONSOLIDATION/merge** — the latency + one-socket + clean-architecture win, INDEPENDENT of
+   bandwidth. Still the main structural item.
+**TODO before more bandwidth work:** measure the ACTUAL served ZCST Mbps + `/replica-live` bytes/frame on prod
+(no direct telemetry line yet) — measure, don't assume.
 
 ## What the panel CHANGED from the draft (do not skip)
 

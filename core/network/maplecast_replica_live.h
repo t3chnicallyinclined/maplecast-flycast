@@ -51,6 +51,18 @@ void init();
 // and a future TA-ground-truth extension.
 void onRenderFrame(void* ctxv);
 
+// STATE-MERGE (fold /replica-live into the main ZCS2/ZCST wire — one stream, no second socket).
+// Exposes THIS frame's just-built body-state payload (the captureFrame FRMx record, assembled
+// coherently at the char pass) so serverPublish can append it as a self-describing "STAT" section
+// to its frame buffer. Because the server compresses the SAME buffer into BOTH the legacy ZCST and
+// the ZCS2 streaming wire, the body then rides whichever wire the client renders — same packet,
+// same vframe (no two-socket pairing drift). The payload IS a complete FRMx record (its own header
+// carries the vframe), so the browser's existing _bodyApplyFrame parses it unchanged. Valid on the
+// render thread AFTER captureFrame has run this frame; returns false when disabled / no frame built.
+// The returned pointer is stable for the duration of the current serverPublish (same render thread,
+// double-buffer only swaps on the next frame). Copy it out promptly.
+bool currentStatePayload(const uint8_t*& payload, size_t& len);
+
 // CHARACTER-PASS table snapshot (re_kb/50 idxtab effect-range fix). Called from
 // mc_oracle_charPassCapture() ONLY on the CHARACTER pass (isCharacterPass), where the
 // idxtab/rectab effect entries are LIVE (written by the char-pass submit) before the

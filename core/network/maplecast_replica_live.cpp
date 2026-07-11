@@ -1428,6 +1428,19 @@ void onRenderFrame(void* /*ctxv*/)
 	captureFrame(vframe);
 }
 
+// STATE-MERGE accessor — see the header. Returns this frame's just-built FRMx body-state payload
+// (set at the end of captureFrame) so serverPublish can append it as a "STAT" section to the frame
+// both wires already carry. Render-thread only; the buffer is stable for this frame (double-buffer
+// swaps next frame). Brief lock to read the published pointer coherently vs the WS sender thread.
+bool currentStatePayload(const uint8_t*& payload, size_t& len)
+{
+	std::lock_guard<std::mutex> lk(_pubMutex);
+	if (!_pubPtr || _pubLen == 0) { payload = nullptr; len = 0; return false; }
+	payload = _pubPtr;
+	len     = _pubLen;
+	return true;
+}
+
 void init()
 {
 	const char* env = getenv("MAPLECAST_REPLICA_LIVE");
