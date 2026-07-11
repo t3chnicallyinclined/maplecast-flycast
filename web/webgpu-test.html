@@ -659,13 +659,9 @@ window._bodyStart=async function bodyStart(){
         // fetch for every loaded char, active + tag-in candidates) — replay.html seedFrom port.
         if(BTEX.on){ try{ BTEX.applyGfx(BODY.ram,null); }catch(e){ if(++BTEX.err<4) console.warn('[btex] pre-warm',e); } }
         console.log('[body] seeded: '+pre.staticRegs.length+' static + '+pre.dynamicRegs.length+' dynamic regions');
-        // STATE-MERGE: the one-time BODY.ram seed is now in hand — CLOSE :7212. The per-frame body
-        // (and tag-in GFX) ride the MAIN wire STM2 section, so the page keeps exactly ONE persistent
-        // socket. captureFrame keeps running server-side (onRenderFrame stateMerge override), so STAT
-        // continues after this close.
-        if(window._stateMerge){ BODY._smSeeded=true;
-          console.log('[state-merge] ✓ seeded — closing :7212; body now 100% on the MAIN wire (one persistent stream)');
-          try{ws.close();}catch(_e){} }
+        // (STATE-MERGE seed-then-close reverted: closing :7212 made the server's body capture go stale
+        //  -> bodies vanished. :7212 stays open as the seed+idle socket; per-frame body still rides the
+        //  MAIN wire STM2. Fully retiring :7212 = the server-side onOpen-seed follow-up, not a client close.)
         return;
       }
       // STATE-MERGE: the per-frame body already rode the MAIN wire (STM2) and was applied there.
