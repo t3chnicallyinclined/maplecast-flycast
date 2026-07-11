@@ -3282,6 +3282,30 @@ done_diff:
 				_zstreamResetPending.store(true, std::memory_order_release);
 			} else {
 				maplecast_ws::broadcastBinary(_zBuf.data(), (uint32_t)(10 + camLen + vfLen + ordLen + seqLen + ob.pos));
+					{
+						static const bool _wireMon = [](){ const char* e = std::getenv("MAPLECAST_WIREMON");
+							return e && e[0] && e[0] != '0'; }();
+						if (_wireMon) {
+							// Per-frame ZCS2 wire monitor — WHEN/WHY the wire explodes during a super. REAL
+							// compressed wire bytes (what the client eats), inner size, and compression RATIO —
+							// a ratio COLLAPSE (50x -> ~2x) = novel content the streaming window can't dedup
+							// (cold super textures / fresh geometry). Breaks out taDelta (inner offset 76), the
+							// STM2 state trailer + KEY/DELTA flag, and flags a zstd stream RESET (window loss).
+							uint32_t wireB = 10 + camLen + vfLen + ordLen + seqLen + (uint32_t)ob.pos;
+							uint32_t taD = 0; if (zPayloadSize >= 80) memcpy(&taD, zPayload + 76, 4);
+							uint32_t stm2B = 0; int stmFlag = -1;
+							if (zPayloadSize >= 12 && zPayload[zPayloadSize-4]=='S' && zPayload[zPayloadSize-3]=='T'
+								&& zPayload[zPayloadSize-2]=='M' && zPayload[zPayloadSize-1]=='2') {
+								uint32_t dl = 0; memcpy(&dl, zPayload + zPayloadSize - 8, 4);
+								if ((uint64_t)dl + 12 <= zPayloadSize) { stm2B = dl + 12; stmFlag = zPayload[zPayloadSize - dl - 12]; }
+							}
+							long rest = (long)zPayloadSize - 80 - (long)taD - (long)stm2B;
+							printf("[WIREMON] f=%u zcs2=%uB inner=%uB ratio=%.0fx | taDelta=%uB pages/etc=%ldB stm2=%uB[%s]%s\n",
+								frameNum, wireB, zPayloadSize, ob.pos ? (double)zPayloadSize/(double)ob.pos : 0.0,
+								taD, rest, stm2B, stmFlag==0?"KEY":stmFlag==1?"DELTA":"?", streamStart?" RESET":"");
+							fflush(stdout);
+						}
+					}
 				_zSeq++;   // u16 wrap is fine — client compares (prev+1)&0xFFFF
 				if (stripDone) {
 					// (camera now rides INSIDE the ZCS2 header, flags bit3 — the old
