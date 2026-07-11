@@ -563,8 +563,16 @@ window._stageMerge=(g)=>{
   nv.set(sw,0); nv.set(gw,sw.length);
   const shift=sp.vertexCount;
   const bump=list=>list.map(p=>{const q=Object.assign({},p); q.first=p.first+shift; return q;});
+  // STAGE-LOCAL TEXTURES (2026-07-11): bind the LOCAL baked stage atlas so the merged stage polys
+  // render from the local cache, not the wire VRAM. The polys carry a SURROGATE tcw (1,2,…) that the
+  // main TextureManager can't resolve (addr=surr<<3 = garbage) — so we resolve it through STAGE._tm
+  // (attachDevice -> _uploadTextures builds surrogate->GPUTexture) and attach it as pp.texObj, which
+  // the renderer prefers over the TCW->VRAM path. Rebuild _tm whenever the loaded stage changes.
+  const _sdev=window._R&&window._R.dev;
+  if(_sdev && STAGE._data && STAGE._tmData!==STAGE._data){ try{ STAGE.attachDevice(_sdev); STAGE._tmData=STAGE._data; }catch(e){ if(!STAGE._attErr){STAGE._attErr=1;console.warn('[stage] attachDevice',e);} } }
   const stageOp=sp.opaque||[];
-  for(const q of stageOp) q._src='stage';   // census origin tag (stage-bake vs wire vs body)
+  for(const q of stageOp){ q._src='stage';   // census origin tag (stage-bake vs wire vs body)
+    if(STAGE._tm){ const t=STAGE._tm.getTexture(q.tsp,q.tcw); if(t) q.texObj=t; } }
   g.opaque=[...stageOp,...bump(g.opaque)];
   g.punchThrough=bump(g.punchThrough);
   g.translucent=bump(g.translucent);
