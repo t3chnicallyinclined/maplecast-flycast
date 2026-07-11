@@ -45,7 +45,7 @@ mkdir -p "$OUT_DIR"
 
 SRCS="gen_walker_root.c render_frame.c gen_render_object.c gen_render_satellite.c \
     gen_transform_obj.c gen_submit_params.c gen_walker.c gen_walker_scale.c gen_leaf.c wasm_entry_frame.c"
-EXPORTS='["_render_frame_ta","_render_frame_body_count","_render_frame_sat_count","_render_frame_quad_count","_render_frame_quad_sels","_render_frame_quad_gfx1s","_render_frame_quad_colrow","_render_frame_quad_mirror","_render_frame_quad_srcdesc","_render_frame_set_body_tcws","_malloc","_free"]'
+EXPORTS='["_render_frame_ta","_render_frame_body_count","_render_frame_sat_count","_render_frame_quad_count","_render_frame_quad_sels","_render_frame_quad_gfx1s","_render_frame_quad_colrow","_render_frame_quad_mirror","_render_frame_quad_mirror_v","_render_frame_quad_facing","_render_frame_quad_rawflags","_render_frame_quad_srcdesc","_render_frame_set_body_tcws","_malloc","_free"]'
 
 # WEB target (the live client uses web/render-replica/render_frame.{mjs,wasm}).
 emcc -O2 -fno-strict-aliasing $SRCS \

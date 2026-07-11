@@ -111,12 +111,22 @@ void helper_1294bc(Sh4Ctx*c){ (void)c; }
  * captured here so render_frame can map tile k -> rectab without re-deriving it.
  * ==========================================================================*/
 #define MAXQ 256
-/* per-tile capture. `flip4000` = the GFX2 cell record's per-part 0x4000 X-mirror flag (read
- * from the cell flags u16 @ r11+0x4). The body's facing (node+0x110) is attached per-object
- * in render_object_full_ex (one facing per object). texU mirror = facing XOR (flip4000!=0),
- * the engine's loc_8c0346c4 `neg r8` gate (re_kb finding:field_semantics_from_setter /
- * routine:loc_8c0346c4). */
-typedef struct { float bx, by; u32 alloc_index; u32 sel; u32 flip4000;
+/* per-tile capture. The GFX2 cell record flags u16 @ r11+0x4 carries TWO ORTHOGONAL per-part
+ * flip bits (disasm loc_8c0344d4, register-traced 2026-07-10 — SWAPPED from the old model):
+ *   `hflip` = flags & 0x8000 = HORIZONTAL flip = control 0x10 -> neg r4 (X, col offset) +
+ *             @0x44/@0x4C (texU) swap. FACING (node+0x110) COMPOSES with it: the engine runs
+ *             the block on facing XOR (0x8000!=0) (facing==0 branch bt-skip if clear @10504;
+ *             facing!=0 branch bf-skip if set @10595). So texU mirror = facing XOR hflip.
+ *   `vflip` = flags & 0x4000 = VERTICAL flip = control 0x20 -> neg r5 (Y, row offset) +
+ *             @0x48/@0x50 (texV) swap. NOT facing-composed (runs when set, both facings). So
+ *             texV mirror = vflip alone.
+ * (The OLD code read only 0x4000 and folded it into texU — wrong bit AND wrong axis; it left
+ * 0x8000 parts with no H mirror and 0x4000 parts with a spurious U instead of the correct V.
+ * The walker gen_walker.c already applies neg r4/neg r5 for the POSITION on the correct axes;
+ * this fixes the DRAW-TIME texture mirror to match. See render_frame_quad_mirror_impl /
+ * render_frame_quad_mirror_v_impl. The low bits 0x10/0x20/0x40/0x80 are hitbox/hit-flash
+ * (loc_8c0341b4 -> char+0x170), NON-render — ignored. re_kb/24, re_kb/71, finding:emitter_flip.) */
+typedef struct { float bx, by; u32 alloc_index; u32 sel; u32 hflip; u32 vflip; u32 rawflags;
                  /* EFFECT sel: the scale walker loc_8c0348c8 reads its per-record GFX1 sel from
                   * *(r13+6) (gen_walker_scale.c:265), NOT *(r11+6) like the body walker. Captured
                   * here so the effect W/H can index GFX1[efx_sel] for the logical dims. */
@@ -201,9 +211,13 @@ void submit_1244b0(Sh4Ctx *c){
      * shifted every later shared-gfx1 group quad -> the user-visible "effects missing/misplaced".
      * 487 node-frames in the capture carry a mid-stream sel==0xFF. */
     if((cell_sel & 0xFFFFu) == 0xFFu) return;   /* blank record: no quad, cursors already advanced */
-    /* per-part X-mirror flag: GFX2 cell record flags u16 @ r11+0x4, bit 0x4000 (the per-part
-     * texture-U mirror authored into the cell). XORed with the body facing at draw time. */
-    u32 cell_flip = (r16u(c, c->r[11] + 0x4) & 0x4000u) ? 1u : 0u;
+    /* per-part flip flags: GFX2 cell record flags u16 @ r11+0x4. bit 0x8000 = HORIZONTAL (texU,
+     * facing-composed); bit 0x4000 = VERTICAL (texV, not facing-composed). Disasm loc_8c0344d4
+     * (0x8000->control 0x10->neg r4=X; 0x4000->control 0x20->neg r5=Y). Attached per-quad below;
+     * facing (node+0x110) is folded into hflip in render_object_full_ex at draw time. */
+    u32 cell_flags = r16u(c, c->r[11] + 0x4);
+    u32 cell_hflip = (cell_flags & 0x8000u) ? 1u : 0u;   /* horizontal: texU mirror + facing XOR */
+    u32 cell_vflip = (cell_flags & 0x4000u) ? 1u : 0u;   /* vertical:   texV mirror (no facing)  */
     /* ROBUSTNESS (live multi-object): g_cap holds at most MAXQ tiles. On a normal body
      * the walker emits ~9-40 tiles; a STALE/corrupt GFX2 (e.g. a body whose art was not
      * resident at the streamed prefix-build, or a per-frame region the read-set under-ships)
@@ -218,7 +232,9 @@ void submit_1244b0(Sh4Ctx *c){
         g_cap[g_ncap].by = *(float*)&by;
         g_cap[g_ncap].alloc_index = r32(c, r4 + 0x00);  /* *r13 = stack[r15+0x2C] */
         g_cap[g_ncap].sel = cell_sel;                    /* the cell's GFX1 sel (per-quad) */
-        g_cap[g_ncap].flip4000 = cell_flip;              /* per-part 0x4000 X-mirror flag */
+        g_cap[g_ncap].hflip = cell_hflip;                /* per-part 0x8000 horizontal (texU) flag */
+        g_cap[g_ncap].vflip = cell_vflip;                /* per-part 0x4000 vertical   (texV) flag */
+        g_cap[g_ncap].rawflags = cell_flags;             /* raw cell flags u16 (diagnostic/gate) */
         /* EFFECT sel from *(r13+6) (scale walker loc_8c0348c8:265) — used ONLY on the effect
          * path for the GFX1-logical W/H lookup. For the body walker r13 is the tiledesc cursor
          * (not a record), so this value is meaningless there and simply unused (guarded by _is_effect). */
@@ -250,7 +266,9 @@ typedef struct {
     float Ax,Ay,Bx,By,Cx,Cy,Dx,Dy, u1, v1;
     u32 sel;                 /* SOURCE GFX1 cell sel for this tile (per-quad, tiling-safe) */
     u32 gfx1;                /* owning node's GFX1 base (node+0x15C) — decode key with sel */
-    u32 mirror;              /* texU mirror bit = facing XOR per-part 0x4000 (loc_8c0346c4) */
+    u32 mirror;              /* texU mirror bit = facing XOR per-part 0x8000 (loc_8c0344d4 H-flip) */
+    u32 mirror_v;            /* texV mirror bit = per-part 0x4000 (loc_8c0344d4 V-flip, no facing) */
+    u32 rawflags;            /* raw cell flags u16 (diagnostic/gate — the 0x8000/0x4000 source) */
     u32 facing;             /* owning body facing (node+0x110); carve storage-col key */
     float z;                 /* per-object PVR depth = node+0xE8 = 1/w (the persp-divide
                               * reciprocal deposited by transform_object_122560 /
@@ -580,7 +598,13 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
         g_scene_src_m [g_nscene] = (u8)(_is_effect ? 0 : (m > 255 ? 255 : m));
         g_scene_src_cx[g_nscene] = (u8)(_is_effect ? 0 : r8u(c, DESC_TABLE + (dc + k)*4 + 2));
         g_scene_src_ry[g_nscene] = (u8)(_is_effect ? 0 : r8u(c, DESC_TABLE + (dc + k)*4 + 3));
-        g_scene_src_fl[g_nscene] = (u8)((_is_effect ? 0u : 1u) | ((g_cap[k].flip4000 & 1u) << 1));
+        /* src_fl bit1 = the per-record 0x4000 flag (== the old `flip4000`). KEPT BYTE-IDENTICAL to
+         * the scene11-certified carve input: body_decoder.mjs no longer reverses storage by this bit
+         * (scene11 removed the double-apply; carve is col=cc, storage-verbatim), so it is vestigial
+         * for the carve — preserved unchanged so the byte-gated decoders (maplecast_mirror.cpp /
+         * texel_gate.cpp / body_decoder.mjs) see the exact same descriptor. The DRAW-TIME axes now
+         * live in q->mirror (0x8000 texU) and q->mirror_v (0x4000 texV) below. */
+        g_scene_src_fl[g_nscene] = (u8)((_is_effect ? 0u : 1u) | ((g_cap[k].vflip & 1u) << 1));
         SceneQuad *q = &g_scene[g_nscene++];
         q->pcw=pp.pcw; q->isp=pp.isp; q->tsp=pp.tsp; q->tcw=pp.tcw;
         q->recidx=g_cap[k].alloc_index;
@@ -597,15 +621,22 @@ static int render_object_full_ex(Sh4Ctx *c, u32 node, int is_sat){
          * cross-object occlusion is unchanged. EMPIRICALLY constant-z before this fix
          * (frame 300: body0 23 parts all z=0.00940869); distinct per part after. */
         q->z = (ow > 1e-6f && ow == ow) ? (1.0f / (ow + 0.001f * (float)(k + 1))) : oz;
-        /* texU mirror = facing XOR per-part 0x4000 (loc_8c0346c4 neg r8 gate). One bit.
-         * MEASURED (A/B vs real :7200 TA, slot-0 deterministic): this facing-XOR formula
-         * mismatches the real engine U on only 1.46% of body tiles (599/41163), whereas
-         * flip4000-ALONE mismatches 35.04% (4551/12989) — the engine DOES fold facing into
-         * the texel-U direction (the screen-X span and texU mirror are BOTH facing-coupled,
-         * in lockstep). flip4000-alone was DISPROVEN by the diff despite the loc_8c0347bc
-         * `tst r8 -> neg r5` disasm reading; the diff wins. The 1.46% residual is a separate,
-         * smaller per-pose effect (pal-16 / one body), NOT the gross facing rule. */
-        q->mirror = node_facing ^ (g_cap[k].flip4000 & 1u);
+        /* texU (HORIZONTAL) mirror = facing XOR per-part 0x8000 (loc_8c0344d4: the 0x8000 block
+         * sets control 0x10 => neg r4 = X/col-offset reflect AND swaps @0x44/@0x4C = texU; and the
+         * block runs on facing XOR (0x8000!=0) — facing==0 bt-skips if clear @10504, facing!=0
+         * bf-skips if set @10595). CORRECTED 2026-07-10 (was `facing ^ 0x4000`): 0x4000 is the
+         * VERTICAL axis (control 0x20 => neg r5 = Y AND @0x48/@0x50 = texV), NOT texU — it moved to
+         * q->mirror_v below. The old model's residual (~1.46% of body tiles under `facing^0x4000`)
+         * was exactly the 0x4000 (vertical) parts being XORed into U where they belong in V; and it
+         * left every 0x8000-only part (roster-wide, e.g. Storm sel0x104 H=23, sel0x1b6 H=39) with NO
+         * per-part H mirror. gen_walker.c applies the matching neg r4 for the POSITION already, so
+         * this keeps texture+position on the same axis (they never decouple, re_kb/24). */
+        q->rawflags = g_cap[k].rawflags;   /* diagnostic: raw cell flags (0x8000/0x4000 source) */
+        q->mirror   = node_facing ^ (g_cap[k].hflip & 1u);
+        /* texV (VERTICAL) mirror = per-part 0x4000, NO facing XOR (loc_8c0344d4: the 0x4000 block
+         * runs whenever set, both facings; it sets control 0x20 => neg r5 = Y AND swaps @0x48/@0x50
+         * = texV). Consumed by wasm_entry_frame.c (v0<->v1 swap) + render_frame_quad_mirror_v. */
+        q->mirror_v = g_cap[k].vflip & 1u;
         /* SCREEN-X SPAN DIRECTION is set by the OWNING BODY FACING (node+0x110), in
          * lockstep with the walker's position pen and the texU mirror. The captured
          * submit anchor `bx` (r15+0x2C+0x04) is the LEFT edge when facing==0 and the
@@ -869,6 +900,34 @@ u32 render_frame_quad_colrow_impl(int* out_cr, u32 cap){
 u32 render_frame_quad_mirror_impl(uint8_t* out_m, u32 cap){
     u32 w = 0;
     for(int q=0; q<g_nscene && w<cap; q++,w++) out_m[w] = (uint8_t)(g_scene[q].mirror & 1u);
+    return w;
+}
+
+/* PER-QUAD texV MIRROR bit (per-part 0x4000, VERTICAL — loc_8c0344d4 control 0x20 / @0x48/@0x50
+ * swap). NO facing XOR (vertical is facing-independent). The client/renderer swaps the quad V
+ * coords when set, mirroring each tile top-to-bottom. Decoupled from the storage carve (rows stay
+ * verbatim, re_kb/71) so a part is stored ONCE and V-flipped here — the exact analog of the texU
+ * mirror. out_m[k] = 0/1. */
+u32 render_frame_quad_mirror_v_impl(uint8_t* out_m, u32 cap){
+    u32 w = 0;
+    for(int q=0; q<g_nscene && w<cap; q++,w++) out_m[w] = (uint8_t)(g_scene[q].mirror_v & 1u);
+    return w;
+}
+
+/* PER-QUAD owning-body FACING (g_scene[q].facing) — EXACTLY aligned to the mirror/mirror_v arrays
+ * (same g_scene order), so a gate can strip facing out of q->mirror without guessing the body
+ * partition (obj_ntiles slips at effect nodes where quads are culled). Diagnostic export. */
+u32 render_frame_quad_facing_impl(uint8_t* out_f, u32 cap){
+    u32 w = 0;
+    for(int q=0; q<g_nscene && w<cap; q++,w++) out_f[w] = (uint8_t)(g_scene[q].facing & 1u);
+    return w;
+}
+
+/* PER-QUAD RAW CELL FLAGS (u16, diagnostic/gate) — the 0x8000/0x4000 source the mirror/mirror_v
+ * derive from, so a gate can verify the model DIRECTLY (no OLD build / facing derivation). */
+u32 render_frame_quad_rawflags_impl(uint16_t* out_f, u32 cap){
+    u32 w = 0;
+    for(int q=0; q<g_nscene && w<cap; q++,w++) out_f[w] = (uint16_t)(g_scene[q].rawflags & 0xFFFFu);
     return w;
 }
 

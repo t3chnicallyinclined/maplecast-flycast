@@ -999,11 +999,17 @@ function transpiledTA(ram) {
     M._render_frame_quad_sels(selPtr, quads);
     M._render_frame_quad_gfx1s(gfxPtr, quads);
     M._render_frame_quad_colrow(crPtr, quads);   // per-quad intra-part (col,row) for the wide-part carve
-    M._render_frame_quad_mirror(mirPtr, quads);  // per-quad texU mirror bit (facing XOR per-part 0x4000)
+    M._render_frame_quad_mirror(mirPtr, quads);  // per-quad texU mirror bit (facing XOR per-part 0x8000, H)
     const quadSels   = new Uint16Array(M.HEAPU8.buffer.slice(selPtr, selPtr + quads * 2));
     const quadGfx1s  = new Uint32Array(M.HEAPU8.buffer.slice(gfxPtr, gfxPtr + quads * 4));
     const quadColRow = new Int32Array(M.HEAPU8.buffer.slice(crPtr, crPtr + quads * 8));
     const quadMirror = new Uint8Array(M.HEAPU8.buffer.slice(mirPtr, mirPtr + quads));
+    // PER-QUAD texV mirror bit (per-part 0x4000, VERTICAL — loc_8c0344d4 0x4000/control-0x20 block).
+    // The V flip is already BAKED into the TA UVs (wasm_entry_frame.c v0<->v1 swap) that pvr2
+    // pane.render consumes, so the bodytex draw shows it without further work; this bit is exposed
+    // for the cockpit/decoder (analog of quadMirror). null on an older wasm without the export.
+    let quadMirrorV = null;
+    if (M._render_frame_quad_mirror_v) { M._render_frame_quad_mirror_v(mirPtr, quads); quadMirrorV = new Uint8Array(M.HEAPU8.buffer.slice(mirPtr, mirPtr + quads)); }
     // PER-QUAD SOURCE DESC [m,cx,ry,flags] (emit-time snapshot; the carve key that supersedes
     // rank colrow — 2026-07-05 satellite-fragmentation fix). Optional: null on an older wasm.
     let quadSrcDesc = null;
@@ -1015,7 +1021,7 @@ function transpiledTA(ram) {
     }
     M._free(selPtr); M._free(gfxPtr); M._free(crPtr); M._free(mirPtr);
     M._free(ramPtr); M._free(outPtr);
-    return { ta, quads, len, quadSels, quadGfx1s, quadColRow, quadMirror, quadSrcDesc };
+    return { ta, quads, len, quadSels, quadGfx1s, quadColRow, quadMirror, quadMirrorV, quadSrcDesc };
 }
 
 // ---------------------------------------------------------------- cockpit geometry on the TA

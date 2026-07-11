@@ -3,7 +3,8 @@
 // uses which render transform, and does render_frame handle it" map:
 //   (1) skin-studio anim catalog  web/anim/PL{NN}.json  (group name -> subanims -> cells -> sprite_id)
 //   (2) GFX2 dispatch  web/render-replica/gfx/PL{NN}_gfx2.bin  (sprite_id -> parts -> flags u16)
-//   (3) render_frame's handled-flag set (currently only 0x4000 texU mirror; render_frame.c:206)
+//   (3) render_frame's handled-flag set (2026-07-10: BOTH 0x8000 texU H-flip AND 0x4000 texV
+//       V-flip — submit_1244b0 reads both; q->mirror=facing^0x8000, q->mirror_v=0x4000)
 // Output: every animation GROUP that references a part carrying an UNHANDLED flag bit, labeled by
 // its human name — so "Storm / Lightning attack uses 0x8000 (unhandled)" instead of a bare sel.
 // This is the render-side twin of the carve catalog gate, driven by the real animation catalog.
@@ -16,7 +17,7 @@ const GFXDIR  = new URL('../../web/render-replica/gfx/', import.meta.url);
 const onlyChars = process.argv.filter(a=>/^PL[0-9A-Fa-f]{2}$/.test(a)).map(s=>s.toUpperCase());
 const gapsOnly = process.argv.includes('--gaps-only');
 
-const HANDLED = 0x4000;                    // render_frame.c:206 reads ONLY 0x4000 (texU mirror)
+const HANDLED = 0xC000;                    // render_frame submit_1244b0 reads 0x8000 (texU H) + 0x4000 (texV V)
 const r16=(b,a)=>b[a]|(b[a+1]<<8), r32=(b,a)=>(b[a]|(b[a+1]<<8)|(b[a+2]<<16)|(b[a+3]<<24))>>>0;
 
 // GFX2: sprite_id -> Set(flags) over its cell records

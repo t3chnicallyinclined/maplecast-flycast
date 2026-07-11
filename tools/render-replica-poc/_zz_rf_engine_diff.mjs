@@ -39,8 +39,13 @@ const M=await createRenderFrame({locateFile:x=>x});
 const ramPtr=M._malloc(ram.length), outPtr=M._malloc(256*1024);
 const mCap=4096, mPtr=M._malloc(mCap);
 
-// engine flags bits render_frame currently accounts for (only 0x4000 = texU mirror)
-const HANDLED=0x4000;
+// engine flag bits render_frame accounts for (2026-07-10): 0x8000 = texU H-mirror (facing-composed)
+// + 0x4000 = texV V-mirror. NOTE: the per-quad `mirror` gate below compares against ap.flip =
+// the ASMTRACE `flip` col = (flags & 0x10), which is the HITBOX bit, NOT the render mirror — that
+// comparison is INVALID for the texU/texV axes (don't trust `texU-mirror mismatch`). The FLAG-GAP
+// report (unaccounted render bits) is the valid signal; with HANDLED=0xC000 it should show no
+// 0x8000/0x4000 rows (only the non-render 0x10/0x20/0x40/0x80 hitbox bits).
+const HANDLED=0xC000;
 let framesChecked=0, partsSeen=0, posBad=0, mirrorBad=0;
 const flagGap=new Map();   // engine flag bit present + render_frame emitted no transform -> count
 const flagGapSel=new Map();

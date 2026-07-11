@@ -33,7 +33,9 @@ typedef struct {
     float Ax,Ay,Bx,By,Cx,Cy,Dx,Dy, u1, v1;
     u32 sel;                 /* SOURCE GFX1 cell sel for this tile (per-quad, tiling-safe) */
     u32 gfx1;                /* owning node's GFX1 base (node+0x15C) — decode key with sel */
-    u32 mirror;              /* texU mirror bit = facing XOR per-part 0x4000 (loc_8c0346c4) */
+    u32 mirror;              /* texU mirror bit = facing XOR per-part 0x8000 (loc_8c0344d4 H-flip) */
+    u32 mirror_v;            /* texV mirror bit = per-part 0x4000 (loc_8c0344d4 V-flip, no facing) */
+    u32 rawflags;            /* raw cell flags u16 (diagnostic/gate) */
     u32 facing;             /* owning body facing (node+0x110) */
     float z;                 /* per-object PVR depth = node+0xE8 = 1/w (MUST match render_frame.c) */
 } SceneQuad;
@@ -82,13 +84,20 @@ uint32_t render_frame_ta(uint8_t* ram16mb, uint8_t* out_ta, uint32_t out_cap){
         WF(64,q->Cy); WF(68,q->z);
         WF(72,q->Dx); WF(76,q->Dy);
         { float U=q->u1, V=q->v1;
-          /* texU MIRROR (engine loc_8c0346c4 neg-r8): when facing XOR per-part 0x4000, swap
-           * the left/right U so the tile draws horizontally mirrored. uLo/uHi default 0..U;
-           * mirrored -> U..0. The carve writes STORAGE-order pixels (facing-independent); this
-           * mirror is the ONLY place the L/R flip is applied — exactly like the engine. */
+          /* texU MIRROR (HORIZONTAL, engine loc_8c0344d4 0x8000 block: control 0x10 + @0x44/@0x4C
+           * swap): when facing XOR per-part 0x8000, swap the left/right U so the tile draws
+           * horizontally mirrored. uLo/uHi default 0..U; mirrored -> U..0. The carve writes
+           * STORAGE-order pixels (flip-independent); this mirror is the ONLY place the L/R flip is
+           * applied — exactly like the engine. */
           float uLo = q->mirror ? U : 0.0f;
           float uHi = q->mirror ? 0.0f : U;
-          u16 v0=h16(V),u0=h16(uLo),v1=h16(V),u1=h16(uHi),v2=h16(0.0f),u2=h16(uHi);
+          /* texV MIRROR (VERTICAL, engine loc_8c0344d4 0x4000 block: control 0x20 + @0x48/@0x50
+           * swap): when per-part 0x4000 (no facing), swap the top/bottom V so the tile draws
+           * vertically mirrored. Default vTop=V, vBot=0 (the existing convention: A/B at top carry
+           * v=V, C at bottom v=0); mirrored -> vTop=0, vBot=V. Exact analog of the texU u-swap. */
+          float vTop = q->mirror_v ? 0.0f : V;
+          float vBot = q->mirror_v ? V : 0.0f;
+          u16 v0=h16(vTop),u0=h16(uLo),v1=h16(vTop),u1=h16(uHi),v2=h16(vBot),u2=h16(uHi);
           p[84]=v0;p[85]=v0>>8; p[86]=u0;p[87]=u0>>8;
           p[88]=v1;p[89]=v1>>8; p[90]=u1;p[91]=u1>>8;
           p[92]=v2;p[93]=v2>>8; p[94]=u2;p[95]=u2>>8; }
@@ -152,6 +161,26 @@ EXPORT uint32_t render_frame_quad_colrow(int* out_cr, uint32_t cap){
 uint32_t render_frame_quad_mirror_impl(uint8_t* out_m, uint32_t cap);
 EXPORT uint32_t render_frame_quad_mirror(uint8_t* out_m, uint32_t cap){
     return render_frame_quad_mirror_impl(out_m, cap);
+}
+
+/* PER-QUAD texV MIRROR (VERTICAL, per-part 0x4000 — loc_8c0344d4 0x4000/control-0x20 block).
+ * out_m[k]=0/1. The TA UVs above already carry the V-swap for the pvr2 draw; this export lets the
+ * cockpit/decoder consume the bit directly (analog of render_frame_quad_mirror). */
+uint32_t render_frame_quad_mirror_v_impl(uint8_t* out_m, uint32_t cap);
+EXPORT uint32_t render_frame_quad_mirror_v(uint8_t* out_m, uint32_t cap){
+    return render_frame_quad_mirror_v_impl(out_m, cap);
+}
+
+/* PER-QUAD owning-body FACING (diagnostic; g_scene-aligned with mirror/mirror_v). */
+uint32_t render_frame_quad_facing_impl(uint8_t* out_f, uint32_t cap);
+EXPORT uint32_t render_frame_quad_facing(uint8_t* out_f, uint32_t cap){
+    return render_frame_quad_facing_impl(out_f, cap);
+}
+
+/* PER-QUAD RAW CELL FLAGS u16 (diagnostic; the 0x8000/0x4000 source of mirror/mirror_v). */
+uint32_t render_frame_quad_rawflags_impl(uint16_t* out_f, uint32_t cap);
+EXPORT uint32_t render_frame_quad_rawflags(uint16_t* out_f, uint32_t cap){
+    return render_frame_quad_rawflags_impl(out_f, cap);
 }
 
 /* PER-QUAD SOURCE DESCRIPTOR [m, cx, ry, flags] x quadCount (4 bytes/quad; flags bit0=valid,
