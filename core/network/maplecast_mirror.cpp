@@ -268,6 +268,14 @@ static inline int64_t _publishNowUs() {
 void requestSyncBroadcast()
 {
 	if (!_isServer) return;
+	// EXPERIMENT (MAPLECAST_NO_SCENE_SYNC=1): a client (or the relay under super load) requesting a resync
+	// currently broadcasts the full ~8MB VRAM SYNC to ALL clients -> the triple-super spike everyone sees
+	// even though they never asked (measured: server-initiated, no client-side log). With bodytex=local +
+	// fxdecode the char/effect texels are decoded locally, so that resync is largely redundant. Gate it to
+	// confirm the spike is this broadcast and that the render survives without it.
+	static const bool _noSceneSync = [](){ const char* e = std::getenv("MAPLECAST_NO_SCENE_SYNC");
+		return e && e[0] && e[0] != '0'; }();
+	if (_noSceneSync) return;
 	_forceSyncBroadcast.store(true, std::memory_order_relaxed);
 }
 
