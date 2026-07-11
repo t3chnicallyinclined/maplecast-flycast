@@ -282,7 +282,7 @@ canvas{display:block;background:transparent}
 </div>
 
 <script type="module">
-import {FrameDecoder} from './webgpu/frame-decoder.mjs?v=fxmiss1';
+import {FrameDecoder} from './webgpu/frame-decoder.mjs?v=missdiag1';
 import {Decompress as ZcsDecompress} from './webgpu/fzstd.mjs';
 import {StageClient} from './webgpu/stage-client.mjs?v=3';
 import {TAParser} from './webgpu/ta-parser.mjs?v=2';
@@ -598,6 +598,8 @@ window._bodySrc=BODYSRC;
 window._stateMerge=new URLSearchParams(location.search).get('statemerge')==='1';
 window._fullHeap=new URLSearchParams(location.search).get('fullheap')==='1';   // A/B: force the full 16MB heap copy (vs incremental dyn-region copy)
 window._fxDecode=new URLSearchParams(location.search).get('fxdecode')==='1';   // A/B: decode bit15 effect parts LOCALLY (mask 0x7FFF) instead of wire VRAM -> kills the super SYNC spike
+window._noSync=new URLSearchParams(location.search).get('nosync')==='1';       // EXPERIMENT: suppress the ref-miss sync-request (the super scene-change SYNC) — the 'join' sync still fires
+window._missDiag=new URLSearchParams(location.search).get('missdiag')==='1';   // DIAG: log which VRAM 64KB regions VCACHE-miss during a super (where called-in char data loads)
 const BODY={want:new URLSearchParams(location.search).has('bodylocal'),
   started:false,ready:false,mod:null,ram:null,dynRegs:null,ta:null,bt:null,vframe:-1,frames:0,gfxN:0,err:0,ws:null};
 window._body=BODY;
@@ -2786,7 +2788,7 @@ async function main(){
                     if(D.syncPending){ T.invalidateAll(); D.syncPending=false; }  // SYNC replaced VRAM -> refresh stale textures ONCE (fixes the out-of-match MENU background w/o per-frame force-invalidate)
                     // VCACHE ref-miss => our VRAM has silently-stale pages (fuzzy
                     // pixels). Self-heal: request a fresh SYNC from the server.
-                    if(D.vcacheMisses>(window._vcMissSeen|0)){ window._vcMissSeen=D.vcacheMisses; if(window._reqSync) window._reqSync('ref-miss x'+D.vcacheMisses); }
+                    if(D.vcacheMisses>(window._vcMissSeen|0)){ window._vcMissSeen=D.vcacheMisses; if(window._reqSync && !window._noSync) window._reqSync('ref-miss x'+D.vcacheMisses); }   // ?nosync=1 suppresses the super scene-change resync
                     dMs=performance.now()-t0;
                     if(!fr)return;
                     // STATE-MERGE: the per-frame body state rides THIS frame as a trailing "STM2"

@@ -169,13 +169,16 @@ export class FrameDecoder {
                 } else {
                     pageBytes = this._vcache.get(key);          // reference: fill from cache
                     if (!pageBytes) {                            // miss: page stays stale until a fresh SYNC
-                        // fxdecode: the char + effect texel VRAM band [0x400000,0x480000) is decoded LOCALLY
-                        // (bodytex=local bodies + bit15 effect parts). body_decoder overwrites these pages
-                        // AFTER this apply, so a ref-miss here is harmless — do NOT count it / request a
-                        // resync. That miss->full-8MB-SYNC was the entire triple-super spike.
                         const pOff = pageIdx * PAGE_SIZE;
-                        if (regionId === 1 && pOff >= 0x400000 && pOff < 0x480000 &&
-                            typeof window !== 'undefined' && window._fxDecode) continue;
+                        // DIAGNOSTIC (?missdiag=1): tally WHICH VRAM 64KB regions miss during a super — that's
+                        // where the called-in characters load their "extra data". window._missReg[blk]=count;
+                        // log each NEW region so the console shows the exact load footprint.
+                        if (typeof window !== 'undefined' && window._missDiag) {
+                            const blk = regionId === 1 ? (pOff >>> 16) : ('r' + regionId);
+                            if (!window._missReg) window._missReg = {};
+                            if (!window._missReg[blk]) console.warn('[MISS-REGION]', regionId === 1 ? '0x' + pOff.toString(16) + ' (blk 0x' + blk.toString(16) + ')' : 'region ' + regionId);
+                            window._missReg[blk] = (window._missReg[blk] || 0) + 1;
+                        }
                         this.vcacheMisses++;
                         if (!this._vcacheMissLogged) { console.warn('[VCACHE] cache miss for ref page', key, '- stale until resync'); this._vcacheMissLogged = true; }
                         continue;
