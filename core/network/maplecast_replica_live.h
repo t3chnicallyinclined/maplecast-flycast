@@ -34,6 +34,9 @@
 */
 #pragma once
 
+#include <cstdint>   // uint8_t — currentStatePayload()
+#include <cstddef>   // size_t
+
 namespace maplecast_replica_live
 {
 
