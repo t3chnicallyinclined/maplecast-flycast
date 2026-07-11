@@ -660,8 +660,11 @@ window._bodyStart=async function bodyStart(){
         console.log('[body] seeded: '+pre.staticRegs.length+' static + '+pre.dynamicRegs.length+' dynamic regions');
         return;
       }
+      // STATE-MERGE: the per-frame body already rode the MAIN wire (STM2) and was applied there.
+      // Bail BEFORE the (expensive) decompress so we don't decode this redundant :7212 copy twice on
+      // the main thread — that double-decode was the fps hit. :7212 stays open only for the seed.
+      if(window._stateMerge) return;
       if(u8.length>=8&&u8[0]===0x5A&&u8[1]===0x43&&u8[2]===0x53&&u8[3]===0x54) u8=fz.decompress(u8.subarray(8));   // FRMx may be ZCST-wrapped too
-      if(window._stateMerge) return;   // STATE-MERGE: per-frame body rides the MAIN wire (STM2); :7212 is seed-only
       _bodyApplyFrame(u8);
     }catch(e){ if(++BODY.err<4) console.warn('[body]',e); } };
   }catch(e){ BODY.started=false; console.warn('[body] start failed',e); }
