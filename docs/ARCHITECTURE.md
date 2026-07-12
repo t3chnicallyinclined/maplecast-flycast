@@ -199,9 +199,93 @@ WebSocket (port 7200) ──→ maplecast_ws_server.cpp
 
 ---
 
+## Current Render Architecture & End-to-End Frame Flow (2026-07-11)
+
+> **This is the current shipping render config** for the default browser client. Canonical
+> detail: [RENDER-ARCHITECTURE-CHECKPOINT-2026-07-11.md](RENDER-ARCHITECTURE-CHECKPOINT-2026-07-11.md);
+> campaign record: [HANDOFF-WIRE-THINNING-2026-07-11.md](HANDOFF-WIRE-THINNING-2026-07-11.md).
+> The Mode 1–4 pipeline mechanics below (king.html WASM TA-mirror, H.264, headless, WebGPU) are
+> still accurate as building blocks — what changed is WHICH client is the default and HOW each
+> frame's content is split between "ride the wire" and "render locally." The wire-format
+> landmines, the four-parser rule, and the byte-perfect determinism guarantees below all still
+> apply.
+
+**The default client is now https://nobd.net/webgpu-test.html** — the **render_frame**
+(transpiled-SH4) WebGPU browser renderer, fed by the **ZCS2 streaming-zstd wire** (the
+shared-window streaming-zstd evolution of the ZCST envelope). No URL params needed; the bare
+link IS this config.
+
+### The one-line principle
+
+**Strip only the DYNAMIC content that actually costs bandwidth (the character bodies); ship the
+STATIC / cheap content LIVE and pixel-perfect (stage, effects).** Static content is ~free on the
+wire — the zstd streaming window dedupes bitwise-identical frames down to almost nothing — so
+stripping it would save ~0 while forcing a stale offline bake to maintain. Bodies move every
+frame, so they cost wire, so that is exactly where the server strip + local render earns its keep.
+
+### The split — what renders how
+
+| Content | Nature | How it renders | Wire cost |
+|---|---|---|---|
+| **Stage / background** | static (bitwise-identical every frame) | rides the wire TA + VRAM, drawn by the client PVR2 renderer from the parsed wire frame | ~0 (zstd dedup) — **pixel-perfect** |
+| **Character bodies** | dynamic | server char-strips the para5 body quads (banks `{82,83,88,89}`); client draws them via **render_frame** fed by the folded **STM2** body state, spliced in by `_bodyMerge` | thin (STM2 delta) — **byte-exact** |
+| **Effects / projectiles / supers** | dynamic | ride the wire TA, drawn by the client | modest |
+| **HUD** | wire | rides the wire TA | modest |
+
+### Prod env flags (149.28.44.118, `/etc/maplecast/headless.env`)
+
+```
+MAPLECAST_ZSTREAM=1  ZSTREAM_LEVEL=9  ZSTREAM_SOA=1  ZSTREAM_RESET=600  # ZCS2 streaming-zstd wire
+MAPLECAST_STAGESTRIP=0     # OFF — stage rides the wire pixel-perfect (static → ~0 cost)
+MAPLECAST_CHARSTRIP=1      # ON  — strip body quads; render_frame draws them locally, byte-exact
+MAPLECAST_STATE_MERGE=1    # body state folded into the main ZCS2 wire as the STM2 trailer (one socket)
+MAPLECAST_VCACHE=1         # content-addressed VRAM page cache
+MAPLECAST_NO_SCENE_SYNC=1  # request-driven full-VRAM SYNC broadcast gated OFF (proven redundant)
+```
+
+Client defaults (`webgpu-test.html`): `statemerge` + `fxdecode` DEFAULT ON, `bodysrc=wasm`
+(render_frame — NOT the sprite machine; re_kb/74 kept render_frame as the drawer).
+
+### End-to-end frame flow
+
+```
+headless flycast (authoritative SH4 sim on the VPS) renders the frame
+  → serverPublish() builds the delta frame + folds the STM2 body-state trailer
+    + char-strips the body quads (banks {82,83,88,89})
+  → ZCS2 streaming-zstd envelope, emitted over VPS loopback :7212
+  → nginx (TLS terminate; wss://nobd.net/replica-live → 127.0.0.1:7212, relay-bypassed)
+  → browser
+  → fzstd worker decompresses the ZCS2 frame
+  → FrameDecoder applies the dirty pages to D.vram / pvrRegs
+  → TAParser parses the wire TA (stage + effects + HUD)
+  → render_frame(BODY.stm) emits the local body quads, spliced in by _bodyMerge
+  → PVR2Renderer (WebGPU) draws the composited frame
+```
+
+### Measured bandwidth (2026-07-11)
+
+- **~3 Mbps gameplay**, spiking **~6 Mbps** on a triple super.
+- The ~3 Mbps steady figure is dominated by **CHARSTRIP TA-delta inflation** — removing the body
+  quads shifts every remaining TA byte, so the byte-run delta re-encodes the shifted tail. The
+  **#1 remaining optimization** is to replace the server-side char-strip with a **client-side
+  body-quad skip** (keep the TA byte-stable → small delta ~0.6 Mbps; the client filters body
+  quads by bank and draws render_frame locally).
+- The super spike is the effect render-STATE (efxtmpl scale arenas + rectab), a genuine
+  render_frame floor the client cannot regenerate (see HANDOFF-WIRE-THINNING-2026-07-11.md).
+
+---
+
 ## Video Flow — How Frames Reach The Browser
 
 ### Mode 1: TA Mirror (Primary)
+
+> **(2026-07-11) Superseded as the DEFAULT client — but still the substrate.** The king.html
+> WASM path documented below ships the full TA + VRAM every frame and renders *everything* from
+> the wire. The current default client (`webgpu-test.html`) reuses this exact pipeline for the
+> stage, effects, and HUD but **strips the character bodies** and renders them locally via
+> render_frame over the ZCS2 streaming-zstd wire — see **"Current Render Architecture &
+> End-to-End Frame Flow (2026-07-11)"** above. Everything below (the wire format, the four-parser
+> rule, the determinism guarantees) still applies in full.
 
 ```
 Flycast Emulator (headless server, nobd.net VPS, listens on 127.0.0.1:7210)

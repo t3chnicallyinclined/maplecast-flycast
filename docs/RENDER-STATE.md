@@ -16,17 +16,31 @@
 
 Render paths for the MVC2 stream, ranked. Any new session starts at the top.
 
+> **2026-07-11 — CURRENT SHIPPING CONFIG (browser default on https://nobd.net/webgpu-test.html).**
+> The default now ships **render_frame (rank 3)** as the body drawer over the **ZCS2 streaming-zstd
+> wire (rank 4, evolved from the raw TA delta)**. The whole-sprite / emitter "sprite machine"
+> (rank 5 / the emitter row) was **A/B-rejected (re_kb/74, re-verified 2026-07-11 — it renders worse
+> and its wire-size edge is gone)**. The split: **stage + HUD + effects ride the wire pixel-perfect
+> (`STAGESTRIP=0` — static content is ~0 cost under zstd streaming-window dedup); character bodies
+> are server char-stripped (`CHARSTRIP=1`) and drawn locally by render_frame from the folded STM2
+> body state (`STATE_MERGE=1`), byte-exact.** Prod env (149.28.44.118): `ZSTREAM=1 ZSTREAM_LEVEL=9
+> ZSTREAM_SOA=1 ZSTREAM_RESET=600 STAGESTRIP=0 CHARSTRIP=1 STATE_MERGE=1 VCACHE=1 NO_SCENE_SYNC=1`.
+> Measured **~3 Mbps gameplay / ~6 Mbps triple super** (§3; #1 open opt = client-side body-quad skip
+> → ~0.6 Mbps). Ranks 1–2 (lockstep / native charpass) are UNCHANGED as the ROM-holding / thin-client
+> frontier. Authoritative: **docs/RENDER-ARCHITECTURE-CHECKPOINT-2026-07-11.md** +
+> docs/HANDOFF-WIRE-THINNING-2026-07-11.md.
+
 | Rank | Path | Wire | Gate status | Live status |
 |---|---|---|---|---|
 | **1** | **Lockstep-mirror client** — client runs full local SH4+ROM from the input/checksum wire (`core/network/maplecast_lockstep.{h,cpp}`, `MAPLECAST_LOCKSTEP=1`, commit `bc16af338`) | **~2.4 KB/s** | bit-exact, **live-proven 9121/9121 checksums** | ACTIVE arc (predict STAGE 0–c + CAPSTONE `3cf92ca83..3cf861b33`, `MAPLECAST_PREDICT_LIVE=1`). Declared successor to the whole render-reconstruction stack. Requires ROM+SH4 on client. |
 | **2** | **Phase 2a native char-pass** — MVC2's real render driver run in-process on streamed `_gstaRam` (`gsta_charpass.cpp`, `MAPLECAST_GSTA_NATIVE_CHARPASS=1`, commit `483511fef`) | GSTA ~7 KB/frame | TA byte gate CLOSED offline (md5 == engine, 4519 parcels) | **SHELVED** by `bc16af338` ("superseded by lockstep") mid-arc. First live run 2026-07-08: TA runs in budget (0.95–4.1 ms) but **bodies render invisible** — pixel-side (palette repoint / decode-follows-native / splice) unfinished. Blockers G1–G9 in `render-state/02`. Fallback frontier if lockstep is rejected (thin clients). |
-| **3** | **render_frame transpile + lockstep decoders** — the DEFAULT GSTA client render (gsta_render_frame.c + gstaDecodeBodies / body_decoder.mjs) | GSTA ~7 KB/frame | sprite machine CLOSED 5/5 byte-exact vs mirror on out-of-sample capture (`189544592`) | Shipping default (flag off). Known residual opens: body-part transposition (re_kb/51), 3D-machine injection residual ~2%, HUD/stage on separate paths. |
-| **4** | **TA mirror** — raw TA delta + dirty pages (`serverPublish`) | **~4.1 Mbps in-match** (zstd; ~12 raw; ~900 Kbps idle) | byte-perfect deterministic wire (466d72d54); THE ground truth for every gate | Production for browsers/spectators. No ROM needed. |
+| **3** | **render_frame transpile + lockstep decoders** — the DEFAULT GSTA client render (gsta_render_frame.c + gstaDecodeBodies / body_decoder.mjs) | GSTA ~7 KB/frame | sprite machine CLOSED 5/5 byte-exact vs mirror on out-of-sample capture (`189544592`) | Shipping default (flag off). **2026-07-11: this IS the live browser default (render_frame.wasm drawing char-stripped bodies over the ZCS2 wire); sprite machine A/B-rejected re_kb/74 — CHECKPOINT-2026-07-11.** Known residual opens: body-part transposition (re_kb/51), 3D-machine injection residual ~2%, HUD/stage on separate paths. |
+| **4** | **TA mirror** — raw TA delta + dirty pages (`serverPublish`) | **~4.1 Mbps in-match** (zstd; ~12 raw; ~900 Kbps idle). **2026-07-11: the shipping browser wire is now ZCS2 streaming-zstd — ~3 Mbps gameplay / ~6 Mbps triple super (§3, appendix 07).** | byte-perfect deterministic wire (466d72d54); THE ground truth for every gate | Production for browsers/spectators. No ROM needed. |
 | **5** | Whole-sprite atlas client (`sprite-client.mjs buildDrawList`) | ~15 KB/s class | approximation BY DESIGN (RGB bake, tint flash) | Prod lean path. Never byte-exact; don't use for fidelity work. |
 | — | Emitter part-assembly (`buildEmitterDrawList`) | — | geometry 0.00px, **RETIRED as drawer** (`364f9ce1e`) | Browser replay.html default is STILL 'emitter' (replay.html:1811) — standing decision to flip to render_frame is OPEN. |
 | — | StafGL, EFCT/TX64/STAF texture channels, VCACHE, HUDQ-as-renderer, live-SH4 state injection | — | — | **DEAD.** Tombstones + reasons in `render-state/01/03/04`. |
 
-**The one-sentence strategic state:** lockstep (input-wire, bit-exact, 2.4 KB/s) won for ROM-holding native clients; the GSTA reconstruction stack (ranks 2–3) remains the path for ROM-less/thin clients; the TA mirror remains the browser/spectator wire and the universal ground truth.
+**The one-sentence strategic state:** lockstep (input-wire, bit-exact, 2.4 KB/s) won for ROM-holding native clients; the GSTA reconstruction stack (ranks 2–3) remains the path for ROM-less/thin clients; the TA mirror remains the browser/spectator wire and the universal ground truth. **[2026-07-11: the browser/spectator wire is now the ZCS2 streaming-zstd evolution of the TA mirror, with render_frame (rank 3) drawing server-char-stripped bodies locally while stage/effects/HUD ride the wire pixel-perfect — the shipping default; see CHECKPOINT-2026-07-11.]**
 
 ## 2. Subsystem ledger (GSTA reconstruction stack)
 
@@ -36,13 +50,14 @@ Render paths for the MVC2 stream, ranked. Any new session starts at the top.
 | Satellites/projectiles | gen_render_satellite.c + slot-table walk | in the 5/5 close; <0.005px | ~~satellite GFX residency (re_kb/29)~~ FIXED 2026-07-09 — objpool 0x8C26AA54+0x1D000 in the per-frame read-set, deployed prod (HANDOFF-SATELLITE-READSET) |
 | 3D machine (sparks/flashes) | INSIDE the 2a native TA by construction (re_kb/61-65) | byte-gated via 2a | splice order of deferred cls-0xAC parcels; **P3D double-draw when 2a is on (G1)** |
 | HUD | Phase 2b — separate closure `loc_8c03012c` (re_kb/57) | bars/portraits byte-matched vs HUDQ oracle (58/59) | run the real closure 2a-style; meter-segment VRAM prefix gap (36); win-stars drawable NOW from char+0x540 (33 supersedes 55) |
-| Stage | gsta_stage.cpp + STG0B engine-TA bake | z-order + floor cull fixed (45/47); **2026-07-09: bake HUD-contamination purged (re_kb/67)** — the bake shipped a frozen captured HUD (68/72 meshes) that depth-rejected the live HUD; bake tool now filters HUD_TEX_WORDS | only STG0B baked; stage_id→STGxx map; list-0xB set-piece double-draw audit vs 2a |
+| Stage | gsta_stage.cpp + STG0B engine-TA bake | z-order + floor cull fixed (45/47); **2026-07-09: bake HUD-contamination purged (re_kb/67)** — the bake shipped a frozen captured HUD (68/72 meshes) that depth-rejected the live HUD; bake tool now filters HUD_TEX_WORDS | only STG0B baked; stage_id→STGxx map; list-0xB set-piece double-draw audit vs 2a. **2026-07-11: SHIPPING config rides the stage on the wire pixel-perfect (`STAGESTRIP=0`, static ⇒ ~0 cost under zstd streaming dedup) — the bake is a PARKED detour, NOT the shipping path; the floor cull was a `_buildFromTA` MARGIN=800 bug (fixed, moot). CHECKPOINT-2026-07-11.** |
 | Textures/palettes | native-chunk carve key = **twTileYFirst** (whole-part Y-first tile-twiddle; re_kb/70 CORRECTED — colPairChunk was 4×4-valid but broke 4×8/8×8, roster-gated) + on-change PVR tail | **0 bad / 21312 tiles across all 59 chars** (_zz_roster_carve_gate); 0.00% palette-bank mismatch | SH4 confirm of the live 4×8/8×8 TCW order (mvc2-sh4-re-expert); **VCACHE ref-page misses = permanent stale VRAM on wire path** (frame-decoder.mjs:171; bodytex=local bypasses it) |
 | Camera | cam_mat M1·M2 (re_kb/39) | 4.3e-5px over 1000 frames | live moving-match witness (validation only) |
 | Wire read-set | 16MB seed + 15 dyn regions + GFX/palette tails | **complete: stale universe = 0 bytes (re_kb/25); drop-scratch falsified trimming** | on-change GFX for cat 1–4 satellites (29) |
 
 ## 3. Bandwidth numbers — pinned (cite ONLY these)
 
+- **Shipping wire (2026-07-11, ZCS2 streaming-zstd, STAGESTRIP=0 / CHARSTRIP=1):** **~3 Mbps in-match gameplay, ~6 Mbps triple-super spikes** (steady non-super ~0.6 Mbps). The 3 Mbps is dominated by the **CHARSTRIP TA-delta inflation** (stripping the para5 body quads shifts every remaining TA byte → the byte-run delta re-encodes the shifted tail); #1 open optimization = **client-side body-quad skip** (keep the TA byte-stable) → ~0.6 Mbps. The super spike is the effect render-STATE floor (efxtmpl scale arenas + rectab, game-sim-filled — the client runs render opcodes, not the sim, so it cannot regenerate them). Detail: appendix 07 (2026-07-11 entry) + CHECKPOINT-2026-07-11.
 - **TA mirror:** ~4.1 Mbps in-match zstd / ~12 Mbps uncompressed / ~900 Kbps idle (ARCHITECTURE.md §compression table, Apr 2026). **2026-07-08 re-measurement on feat/render-replica-live: 6.875 Mbps in-match** (+1.08 Mbps side-channel) — the growth is dominated by DMA force-dirty page re-ships (56.9% of shipped pages byte-identical); split + sub-1-Mbps plan in `render-state/07-bandwidth-lab-results.md` (measured best stack: **0.788 Mbps @ 0.23 ms/frame**).
 - **GSTA state wire:** ~7 KB/frame (≈3.4 Mbps at 60fps; PHASE-B shrink never executed).
 - **Lockstep wire:** ~2.4 KB/s (bc16af338).

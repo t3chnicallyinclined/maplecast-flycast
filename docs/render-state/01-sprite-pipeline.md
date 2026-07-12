@@ -3,6 +3,17 @@
 > Produced 2026-07-08 by the mvc2-sprite-render expert during the RENDER-STATE ledger sweep.
 > Line numbers pinned to `feat/render-replica-live` HEAD ~9f86257e3 as read that day (lines drift; function names also given).
 
+> **2026-07-11 — shipping-config update (docs/RENDER-ARCHITECTURE-CHECKPOINT-2026-07-11.md).**
+> The browser DEFAULT (https://nobd.net/webgpu-test.html, `bodysrc=wasm`) now ships **render_frame
+> (the transpile chain in §1 Authoritative)** as the body drawer, live on the ZCS2 streaming-zstd
+> wire. The **whole-sprite / emitter "sprite machine" was A/B-rejected (re_kb/74, re-verified
+> 2026-07-11)** — it renders worse and its wire-size edge is gone, so the tombstones below stand
+> confirmed. Body split: the server char-strips the para5 body quads (banks {82,83,88,89},
+> `CHARSTRIP=1`); render_frame draws them locally from the folded STM2 body state (`STATE_MERGE=1`),
+> byte-exact. **Stage is NOT stripped (`STAGESTRIP=0`) — it rides the wire TA/VRAM pixel-perfect
+> (static ⇒ ~0 cost under zstd streaming-window dedup)**; effects/projectiles/supers/HUD ride the
+> wire too. Ranks 1–2 (native charpass / lockstep) unchanged as the native frontier.
+
 ## 1. CHARACTER BODIES
 
 ### Authoritative
@@ -150,7 +161,7 @@ Whole-sprite path fixes (kept even though fidelity-superseded): anisotropic CPS 
 
 ## Cross-cutting
 
-1. **The five body implementations, ranked by authority:** (1) Phase 2a native charpass [byte-gated offline, flag-OFF, live pixel gap] > (2) render_frame transpile + lockstep decoders [byte-gated, DEFAULT] > (3) emitter [geometry 0.00px, RETIRED as drawer] > (4) whole-sprite [prod lean, approximation by design] > (5) legacy A/B relic. Any rebuild session starts at (1)/(2). [Post-sweep note: lockstep-mirror bc16af338 sits above all of these — see RENDER-STATE.md §1.]
+1. **The five body implementations, ranked by authority:** (1) Phase 2a native charpass [byte-gated offline, flag-OFF, live pixel gap] > (2) render_frame transpile + lockstep decoders [byte-gated, DEFAULT] > (3) emitter [geometry 0.00px, RETIRED as drawer] > (4) whole-sprite [prod lean, approximation by design] > (5) legacy A/B relic. Any rebuild session starts at (1)/(2). [Post-sweep note: lockstep-mirror bc16af338 sits above all of these — see RENDER-STATE.md §1.] **[2026-07-11: render_frame (2) is the CONFIRMED live BROWSER default on the ZCS2 streaming-zstd wire; the whole-sprite/emitter "sprite machine" was A/B-rejected (re_kb/74 — renders worse, wire edge gone). Stage rides the wire pixel-perfect (STAGESTRIP=0); bodies are char-stripped + drawn locally. docs/RENDER-ARCHITECTURE-CHECKPOINT-2026-07-11.md.]**
 2. **Lockstep invariant (most dangerous re-hit):** gstaDecodeBodies (mirror.cpp) and ensureBodyTextures (body_decoder.mjs) implement the SAME carve and must be edited together (stated in-code mirror.cpp:4092/4130/4181, body_decoder.mjs:478-487).
 3. **Gates per subsystem:** bodies/texels = replay + texel_gate on `_live*` corpus vs 7200 mirror; charpass = selftest md5; emitter (if revived) = validate_emitter_geom.py 0.00px; browser = DIFF v7. Eyeballing is never the gate (≥12 poses, re_kb/46).
 4. **Deploy rules that bit us:** ROM-derived atlases scp-only; `?v=` bump every module change (e8fcb8011, 6cf93d513 were real regressions); prod web has been ahead of git (c38dc7163 snapshot discipline).

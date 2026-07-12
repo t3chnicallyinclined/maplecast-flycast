@@ -6,7 +6,39 @@
 > (corpus `_bwlab\cap.mirror.zcst` + `cap.gsta.mcrr` are ROM-derived — NEVER commit).
 > Full report: `_bwlab\REPORT.md`.
 
+## 2026-07-11 — SHIPPING measurement (streaming zstd LANDED; STAGESTRIP=0 / CHARSTRIP=1)
+
+> The lab's rec #1 below (streaming zstd, shared window) **shipped** and is the browser default on
+> https://nobd.net/webgpu-test.html. The numbers here supersede the 6.875 Mbps lab baseline below
+> (measured on a different, pre-ZCS2/pre-charstrip wire) — the lab section is kept as the derivation
+> that led here. Authoritative shipping config: `docs/RENDER-ARCHITECTURE-CHECKPOINT-2026-07-11.md`.
+
+Prod env (149.28.44.118): `ZSTREAM=1 ZSTREAM_LEVEL=9 ZSTREAM_SOA=1 ZSTREAM_RESET=600 STAGESTRIP=0
+CHARSTRIP=1 STATE_MERGE=1 VCACHE=1 NO_SCENE_SYNC=1`.
+
+- **Measured ~3 Mbps in-match gameplay; ~6 Mbps spikes on a triple super.** Steady non-super
+  wire ~0.6 Mbps. (Down from the 6.875 Mbps pre-campaign baseline below.)
+- **The ~3 Mbps gameplay figure is dominated by CHARSTRIP TA-delta inflation** — the DOMINANT
+  remaining cost. Server char-stripping the para5 body quads (banks {82,83,88,89}) shifts every
+  remaining TA byte, so the byte-run delta re-encodes the whole shifted tail. **#1 remaining
+  optimization = client-side body-quad skip**: keep the TA byte-stable, filter body quads by bank
+  on the client, draw them via local render_frame → measured **~0.6 Mbps** on the clean-strip
+  experiment (commit 492c23219, built + REVERTED; see `docs/HANDOFF-WIRE-THINNING-2026-07-11.md`).
+- **The ~6 Mbps super spike is a genuine render_frame render-STATE floor**, not over-shipping: the
+  folded STM2 body-state trailer carries the effect render-state (efxtmpl scale arenas 0x8C565000
+  7×0x3000 + rectab 0x10000, ~70 KB/frame = 84% of a super's decompressed volume). Those regions
+  are FILLED by the game sim and READ by render_frame's scale-walker; the client runs render
+  opcodes, not the sim, so it cannot regenerate them → they MUST ship. Kill it only via pre-baked
+  super effects (HYBRID) if the spike matters.
+- Landed this campaign: **STM2 size-tolerant delta** (was keyframing every frame → flat ~360KB/frame)
+  + **STM2 KEY-defer** (killed the 59KB super reseed spike). Detail: HANDOFF-WIRE-THINNING-2026-07-11.md.
+
+---
+
 ## Headline: the wire measured 6.875 Mbps in-match on this branch (not the Apr-2026 ~4.1)
+
+> **⚠️ HISTORICAL (2026-07-08 lab baseline).** Superseded as the shipping number by the 2026-07-11
+> measurement above; kept as the derivation of the streaming-zstd recommendation that shipped.
 
 - ZCST frames: 30,135,897 B / 35.07 s = **6.875 Mbps** (avg 14,323 B/frame; steady 6.27–7.37).
 - Side-channel msgs on the same socket (OBJS/OBJF/GSTA/TXTR/PALF): +1.08 Mbps → **8.10 total**.
