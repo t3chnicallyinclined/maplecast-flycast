@@ -188,30 +188,12 @@ function pollOnce() {
       state.mySlot, lt, rt, (btn >> 8) & 0xFF, btn & 0xFF);
   }
   if (!sentViaQUIC) {
-    // E2E probe (?e2e=1): send 8-byte [W3][seq u32 LE] — flycast wraps it as the native "PC"
-    // packet so the server's E2EP tail attributes the latch to OUR seq. Sent-log ring lets the
-    // page compute true press->present when the frame's latchedSeq >= our seq.
-    if (window._e2eProbe) {
-      // Seq must be monotonic ACROSS page reloads: the input server dedups per-source (all
-      // browser inputs share the loopback srcKey), so a reset-to-1 seq is dropped as stale
-      // until it passes the old session's max ("inputs dead after refresh"). Epoch-seconds
-      // base guarantees each session starts above the last.
-      // Base = epoch MILLISECONDS (mod 2^31): grows 1000/s, sends grow ~60/s max, so every
-      // refresh's base ALWAYS clears the previous session's high-water mark at the server's
-      // per-source dedup. (v1 used epoch-seconds<<4 = 16/s growth < send rate -> the dedup
-      // wall returned after any session longer than ~4 min; << also overflowed int32.)
-      if (!window._e2eSeq) window._e2eSeq = Date.now() % 0x7FFFFFFF;
-      window._e2eSeq++;
-      const b = new Uint8Array(8);
-      b.set(_inputBuf, 0);
-      b[4] = window._e2eSeq & 0xFF; b[5] = (window._e2eSeq >> 8) & 0xFF;
-      b[6] = (window._e2eSeq >> 16) & 0xFF; b[7] = (window._e2eSeq >> 24) & 0xFF;
-      cws.send(b);
-      (window._e2eSent = window._e2eSent || []).push({ seq: window._e2eSeq, t: performance.now(), changed });
-      if (window._e2eSent.length > 600) window._e2eSent.splice(0, 300);
-    } else {
-      cws.send(_inputBuf);  // TCP fallback
-    }
+    // E2E probe input-wrap RETIRED (2026-07-12): wrapping inputs as PC packets hit 4 distinct
+    // failure modes (seq-space, unassigned-drop, dedup-reset, dedup-outrun) and kept killing
+    // live inputs. Inputs ALWAYS ride the proven 4-byte wire now. The probe's baseline is
+    // banked (~22ms n=820, memory project_e2e_latency_baseline); if per-press attribution is
+    // needed again, redesign it as a SIDE-CHANNEL (separate probe packet), never on the input wire.
+    cws.send(_inputBuf);
   }
   state.diag.inputSendCount++;
   if (!state.diag._inputPathLogged && state.diag.inputSendCount === 1) {
