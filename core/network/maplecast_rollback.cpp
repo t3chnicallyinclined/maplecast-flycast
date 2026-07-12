@@ -337,6 +337,42 @@ bool rewindToFrame(uint64_t frame, bool lightweight)
 			memcpy(memwatch::elanWatcher.getMemPage(pair.first), &pair.second.data[0], PAGE_SIZE);
 	}
 
+	// ── A2 dirty-page tracking-completeness audit (MAPLECAST_RA_REWIND_AUDIT=1) ──
+	// NON-DESTRUCTIVE to the real rewind. We snapshot the LIVE region bytes (the
+	// leg-2/3 = frame N+2 state; the pagewalk above is empty for run-ahead so live
+	// is untouched) and DRAIN the memwatch TRACKED page-set here, BEFORE
+	// emu.loadstate restores TRUTH (frame N) below. Then (post-loadstate) we diff
+	// LIVE vs TRUTH per page and cross it against TRACKED to find LEAK pages
+	// (changed-but-untracked = the hybrid-state source a dirty-page restore misses).
+	//
+	// Why the drain (getPages) is harmless: it empties the watcher's live map, but
+	// emu.loadstate calls memwatch::reset() (emulator.cpp:1157) which clears it
+	// regardless, and our memwatch::protect() at the end of this function re-arms
+	// with started=false -> full protectMem(0,0xffffffff) re-protect. So the real
+	// rewind is byte-for-byte unchanged. Reads are safe: memwatch::unprotect() ran
+	// at the top of rewindToFrame (all pages RW), and region_lock is PAGE_READONLY
+	// anyway (win_vmem.cpp:19) so reads never fault even after re-arm.
+	static const bool _raAudit = std::getenv("MAPLECAST_RA_REWIND_AUDIT") != nullptr;
+	static std::vector<uint8_t> _auRam, _auVram, _auAram;   // LIVE snapshots (reused)
+	memwatch::PageMap _auTrkRam, _auTrkVram, _auTrkAram;     // drained TRACKED sets
+	if (_raAudit) {
+		const size_t rs = RAM_SIZE, vs = VRAM_SIZE, as = ARAM_SIZE;
+		if (_auRam.size()  != rs) _auRam.resize(rs);
+		if (_auVram.size() != vs) _auVram.resize(vs);
+		if (_auAram.size() != as) _auAram.resize(as);
+		// getMemPage(0) = &mem_b[0] / &vram[0] / &aica::aica_ram[0] (mem_watch.h
+		// 145/117/161) — the primary (protected) mirror; now holds LIVE (N+2).
+		memcpy(_auRam.data(),  memwatch::ramWatcher.getMemPage(0),  rs);
+		memcpy(_auVram.data(), memwatch::vramWatcher.getMemPage(0), vs);
+		memcpy(_auAram.data(), memwatch::aramWatcher.getMemPage(0), as);
+		// TRACKED = pages memwatch captured during legs 2-3 (undrained live map;
+		// saveFrame(N) already drained leg1's pages into slot.pages). This is
+		// exactly the page-set a dirty-page rewind would restore.
+		memwatch::ramWatcher.getPages(_auTrkRam);
+		memwatch::vramWatcher.getPages(_auTrkVram);
+		memwatch::aramWatcher.getPages(_auTrkAram);
+	}
+
 	// Restore the SH4 + PVR scalar state from the dc_serialize blob at the
 	// target frame. CRITICAL: use emu.loadstate(deser) instead of calling
 	// dc_deserialize directly. loadstate does 8 additional critical things
@@ -411,6 +447,58 @@ bool rewindToFrame(uint64_t frame, bool lightweight)
 		static long long _pw=0,_ds=0,_pr=0,_n=0;
 		_pw+=us(_rwt0,_rwt1); _ds+=us(_rwt1,_rwt2); _pr+=us(_rwt2,_rwt3); _n++;
 		if (_n%600==0){ printf("[REWIND-PROF] pagewalk=%lldus deserialize=%lldus protect=%lldus (n=%lld)\n",_pw/600,_ds/600,_pr/600,_n); fflush(stdout); _pw=_ds=_pr=0; }
+	}
+
+	// ── A2 dirty-page audit, part 2: post-loadstate LIVE-vs-TRUTH diff ──
+	// getMemPage(0) now holds TRUTH (frame N) restored by emu.loadstate above.
+	// Per region: ACTUAL_CHANGED = { page : LIVE[page] != TRUTH[page] };
+	//   LEAK     = ACTUAL_CHANGED \ TRACKED  (changed but memwatch missed it)
+	//   SPURIOUS = TRACKED \ ACTUAL_CHANGED  (tracked but net-unchanged; harmless)
+	// PASS for a region = LEAK stays 0 over thousands of rewinds -> a dirty-page
+	// restore of that region would be byte-exact. Any LEAK>0 -> region must stay
+	// full-restore; per-rewind lines print the leaking page offsets to trace them.
+	if (_raAudit) {
+		struct RegionAcc { uint64_t changed=0, tracked=0, leak=0, spurious=0, rewinds=0; };
+		static RegionAcc _acRam, _acVram, _acAram;
+		auto audit1 = [](const char* name, RegionAcc& acc,
+		                 const std::vector<uint8_t>& live, const void* truthBase,
+		                 const memwatch::PageMap& tracked, size_t regionSize) {
+			const uint8_t* truth = (const uint8_t*)truthBase;
+			size_t changed = 0, leak = 0, spurious = 0;
+			std::vector<uint32_t> leakPages;
+			for (size_t off = 0; off < regionSize; off += PAGE_SIZE) {
+				const size_t n = std::min((size_t)PAGE_SIZE, regionSize - off);
+				const bool chg = memcmp(&live[off], truth + off, n) != 0;
+				const bool trk = tracked.find((u32)off) != tracked.end();
+				if (chg) changed++;
+				if (chg && !trk) { leak++; if (leakPages.size() < 32) leakPages.push_back((u32)off); }
+				if (trk && !chg) spurious++;
+			}
+			acc.changed += changed; acc.tracked += tracked.size();
+			acc.leak += leak; acc.spurious += spurious; acc.rewinds++;
+			// Per-rewind LEAK detail (only when nonzero) to trace the pages.
+			if (leak > 0) {
+				printf("[RA-AUDIT] %-4s LEAK=%zu changed=%zu tracked=%zu  leak-page-offsets:",
+				       name, leak, changed, tracked.size());
+				for (uint32_t p : leakPages) printf(" 0x%x", (unsigned)p);
+				if (leak > leakPages.size()) printf(" ...(+%zu more)", leak - leakPages.size());
+				printf("\n"); fflush(stdout);
+			}
+			// Rollup every 600 audited rewinds.
+			if ((acc.rewinds % 600) == 0) {
+				printf("[RA-AUDIT] %-4s over %llu rewinds: avg changed=%.1f tracked=%.1f  "
+				       "LEAK-total=%llu SPURIOUS-total=%llu  => %s\n",
+				       name, (unsigned long long)acc.rewinds,
+				       (double)acc.changed / (double)acc.rewinds,
+				       (double)acc.tracked / (double)acc.rewinds,
+				       (unsigned long long)acc.leak, (unsigned long long)acc.spurious,
+				       acc.leak == 0 ? "PASS (dirty-page-safe)" : "FAIL (must full-restore)");
+				fflush(stdout);
+			}
+		};
+		audit1("RAM",  _acRam,  _auRam,  memwatch::ramWatcher.getMemPage(0),  _auTrkRam,  _auRam.size());
+		audit1("VRAM", _acVram, _auVram, memwatch::vramWatcher.getMemPage(0), _auTrkVram, _auVram.size());
+		audit1("ARAM", _acAram, _auAram, memwatch::aramWatcher.getMemPage(0), _auTrkAram, _auAram.size());
 	}
 
 	_mostRecentFrame = frame;  // we've effectively undone everything past this
