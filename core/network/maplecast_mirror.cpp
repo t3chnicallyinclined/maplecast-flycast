@@ -2239,6 +2239,15 @@ uint32_t currentGuestVf() { return addrspace::read32(0x8C3496B0); }   // guest f
 void serverPublish(TA_context* ctx)
 {
 	if (!_isServer || !_shmPtr || !ctx) return;
+	{
+		static const bool _raTrace = std::getenv("MAPLECAST_RUNAHEAD_TRACE") != nullptr;
+		if (_raTrace) {
+			static uint32_t _pord = 0;
+			printf("[RA-TRACE] PUB ord=%u hid=%d vf=%u
+", ++_pord,
+				(int)ctx->rend.mc_hiddenLeg, ctx->rend.mc_vframe);
+		}
+	}
 	if (ctx->rend.mc_hiddenLeg) return;   // A2 hidden-frame leg (context-stamped — see ta_ctx.h)
 
 	// Skip heavy work (diff, compress, broadcast) when no clients connected.

@@ -609,6 +609,18 @@ void rend_start_render()
 	// A2 run-ahead: sample the leg flag HERE (emu thread, synchronous) — see ta_ctx.h.
 	ctx->rend.mc_hiddenLeg = maplecast_mirror::suppressActive();
 	ctx->rend.mc_vframe = maplecast_mirror::currentGuestVf();   // rewind-proof vf (defect #2)
+	// A2 TRACE (MAPLECAST_RUNAHEAD_TRACE=1): the decisive datum — does STARTRENDER for frame N's
+	// content fire during the NEXT tick's hidden window? If PUB lines show hid=1 on preview vfs,
+	// the pipelined-submit hypothesis is confirmed and publish must be CONTENT-keyed (vf), not leg-stamped.
+	{
+		static const bool _raTrace = std::getenv("MAPLECAST_RUNAHEAD_TRACE") != nullptr;
+		if (_raTrace) {
+			static uint32_t _ord = 0;
+			printf("[RA-TRACE] SR  ord=%u leg=%d vf=%u
+", ++_ord,
+				(int)ctx->rend.mc_hiddenLeg, ctx->rend.mc_vframe);
+		}
+	}
 	ctx->rend.fb_W_SOF1 = FB_W_SOF1;
 	ctx->rend.fb_W_CTRL.full = FB_W_CTRL.full;
 
