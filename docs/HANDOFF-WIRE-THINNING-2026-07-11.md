@@ -1,5 +1,28 @@
 # Wire-Thinning Campaign — Handoff (2026-07-11)
 
+## SESSION OUTCOME (capstone, end of 2026-07-11)
+
+The campaign CLOSED at a shipping checkpoint — docs/RENDER-ARCHITECTURE-CHECKPOINT-2026-07-11.md is
+now the authoritative config (default on nobd.net/webgpu-test.html, no URL params):
+
+- **Stage on the wire, pixel-perfect** (STAGESTRIP=0 — static content is ~0 cost under zstd dedup;
+  the stage bake became a parked detour, its floor-cull + translucent/PAL4 fixes landed anyway).
+- **Bodies local via render_frame, byte-exact** (CHARSTRIP=1 + STATE_MERGE=1 STM2 fold, one socket).
+- **Effects/projectiles/supers/HUD on the wire** — all working.
+- Measured: ~3 Mbps gameplay / ~6 Mbps triple super.
+
+Session arc in commits: STM2 size-tolerant delta (d99599353) → KEY-defer (8d6237b61) → WIREMON +
+block histogram (16e05c36c, 7892bab78) → clean-strip built (492c23219, reverted on measurement) →
+stage translucent/PAL4 bake (para5 later filtered — char junk) → floor MARGIN cull fix (f097ade34) →
+**fillBGP-before-_bodyMerge coupling fix (011f222c0) = the unlock** → checkpoint (8ab263f78) → docs
+reconciled (730133fbe). Root causes proven en route: the 360KB/frame STM2 keyframe bug, the 59KB
+KEY-during-super spike, the super's 84% render-STATE floor (efxtmpl/rectab — genuine, not a bug),
+the sprite-machine re-rejection (re_kb/74), and the CHARSTRIP TA-delta inflation (the ~3 Mbps driver,
+#1 open optimization = client-side body-quad skip → ~0.6 Mbps).
+
+Open (recorded in the checkpoint + memory): cape z-order, client-side quad skip, pre-baked super
+effects (the 6 MB spike), the 3D effects machine, char-select precache.
+
 North star: **thinnest possible in-match wire** — ship everything static at character
 select, stream only per-frame dynamic state. See memory `project_charselect_precache_thesis`.
 Render path = **render_frame** (transpiled SH4), NOT the sprite machine (re_kb/74 verdict, re-verified 2026-07-11: sprite machine renders worse; its wire edge is gone).
