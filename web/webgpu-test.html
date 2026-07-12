@@ -2963,15 +2963,32 @@ async function main(){
                         const E=window._e2eLast;
                         if(window._schedPresent && E && !E._presented){
                             E._presented=true;
+                            // v0.1 FIX (garble): D.vram/textures are SHARED LIVE state — delaying the
+                            // RENDER let newer frames mutate VRAM under old geometry (shredded bodies).
+                            // Correct split: RENDER NOW (VRAM-coherent) into the offscreen target;
+                            // delay only the BLIT to glass. Shared rt = latest-wins at present time.
+                            const t2=performance.now();
+                            PP.ensureTargets(640,480,DBG.resScale||1);
+                            const rt=PP.getRenderTarget();
+                            R.renderFrame(g,T,fr.pvrSnapshot,D.vram,DBG,rt);
+                            if(R._lastEncoder){ R.dev.queue.submit([R._lastEncoder.finish()]); R._lastEncoder=null; }
+                            rMs=performance.now()-t2;
+                            totalFrames++; renderFrames++;
+                            maDecode+=(dMs-maDecode)*A; maParse+=(pMs-maParse)*A;
+                            maRender+=(rMs-maRender)*A; maTotal+=((dMs+pMs+rMs)-maTotal)*A; fc++;
                             const now=performance.now(), pub=Number(E.pubUs)/1000;   // server ms (monotonic)
                             const FF=(window._ff=window._ff||{anchor:Infinity,n:0,lastReset:now});
-                            const d=now-pub;                                          // offset + one_way + decode
+                            const d=now-pub;
                             if(d<FF.anchor||now-FF.lastReset>30000){ FF.anchor=Math.min(d,FF.anchor===Infinity?d:FF.anchor); if(now-FF.lastReset>30000){FF.anchor=d;FF.lastReset=now;} }
-                            const target=pub+FF.anchor+(window._ffDelta||50);         // local T_present
-                            const dt=target-now;
+                            const target=pub+FF.anchor+(window._ffDelta||50), dt=target-now;
                             FF.n++;
-                            if(FF.n%300===0) console.log('[fairframe] slack',dt.toFixed(1),'ms (Δ='+(window._ffDelta||50)+', anchor drift-reset 30s)');
-                            if(dt>1) setTimeout(_renderNow,dt); else _renderNow();
+                            if(FF.n%300===0) console.log('[fairframe] slack',dt.toFixed(1),'ms (Δ='+(window._ffDelta||50)+')');
+                            const _blit=()=>{ try{ const enc=R.dev.createCommandEncoder();
+                                PP.blit(enc,R.ctx.getCurrentTexture().createView(),canvas.width,canvas.height,DBG);
+                                R.dev.queue.submit([enc.finish()]);
+                                BAKE.onRendered(canvas); if(window._e2eProbe)window._e2eMark();
+                            }catch(e){ if((FF.err=(FF.err||0)+1)<4) console.warn('[fairframe blit]',e); } };
+                            if(dt>1) setTimeout(_blit,dt); else _blit();
                         } else {
                             _renderNow();
                         }
