@@ -2234,6 +2234,13 @@ static bool decodeTexAny(uint32_t tcw, uint32_t tsp, uint8_t* out) {
 static std::atomic<bool> _suppressPublish{false};
 void setSuppressPublish(bool v) { _suppressPublish.store(v, std::memory_order_release); }
 bool suppressActive() { return _suppressPublish.load(std::memory_order_acquire); }
+// A2 v2 frame stepping: runInternal() is RUN-UNTIL-STOPPED (local-rig trace, 2026-07-12 — wrapping
+// it never cycled; all 4 dark rounds). The emu loop arms this one-shot; rend_start_render consumes
+// it and Stop()s the SH4 at the next display STARTRENDER (the predict primitive) so runInternal
+// returns after exactly one frame leg.
+static std::atomic<bool> _raStepStop{false};
+void raArmStepStop() { _raStepStop.store(true, std::memory_order_release); }
+bool raConsumeStepStop() { return _raStepStop.exchange(false, std::memory_order_acq_rel); }
 uint32_t currentGuestVf() { return addrspace::read32(0x8C3496B0); }   // guest frame counter (emu thread)
 
 void serverPublish(TA_context* ctx)

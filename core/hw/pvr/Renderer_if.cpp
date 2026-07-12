@@ -653,6 +653,10 @@ void rend_start_render()
 		// advance is active on this (emu) thread.
 		if (maplecast_predict::headlessAdvanceActive())
 			emu.getSh4Executor()->Stop();
+		// A2 v2: one-shot frame-step stop (armed by the run-ahead emu loop) — same proven
+		// primitive as predict's headless advance above.
+		if (maplecast_mirror::raConsumeStepStop())
+			emu.getSh4Executor()->Stop();
 	}
 
 	// === MAPLECAST_CHARQ — DEFINITIVE per-part body-quad capture ===============

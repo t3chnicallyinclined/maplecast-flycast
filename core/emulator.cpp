@@ -1737,25 +1737,31 @@ void Emulator::start()
 								fflush(stdout);
 							}
 							if (_raReady && maplecast_mirror::isServer()) {
+								// A2 v2 (local-rig trace 2026-07-12): runInternal() is RUN-UNTIL-STOPPED —
+								// v1 wrapped it and never cycled (1695 SRs all hidden, 0 publishes = all
+								// 4 dark rounds). Step frame legs with the predict primitive: arm a
+								// one-shot Stop consumed at the next display STARTRENDER so each
+								// runInternal() returns after exactly one leg; Start() re-arms the SH4.
 								extern std::atomic<bool> mc_runaheadPreviewLeg;
 								static uint64_t _raF = 0;
 								_raF++;
 								maplecast_mirror::setSuppressPublish(true);
-								// Hidden leg: its contexts recycle AT QueueRender via the ctx-stamped
-								// mc_hiddenLeg (ta_ctx.cpp) — no global renderer toggle (wall-clock
-								// globals raced the pipelined render thread; two failed rounds).
-								runInternal();                                   // authoritative T (hidden)
+								maplecast_mirror::raArmStepStop();
+								runInternal();                                   // -> stops at SR(T): hidden leg
+								getSh4Executor()->Start();
 								maplecast_mirror::setSuppressPublish(false);
 								maplecast_rollback::saveFrame(_raF);
 								mc_runaheadPreviewLeg.store(true, std::memory_order_relaxed);
 								startTime = sh4_sched_now64();
 								renderTimeout = false;
+								maplecast_mirror::raArmStepStop();
 								try {
-									runInternal();                               // preview T+1 (publishes)
+									runInternal();                               // -> stops at SR(T+1): preview publishes
 								} catch (...) {
 									mc_runaheadPreviewLeg.store(false, std::memory_order_relaxed);
 									throw;
 								}
+								getSh4Executor()->Start();
 								mc_runaheadPreviewLeg.store(false, std::memory_order_relaxed);
 								if (!maplecast_rollback::rewindToFrame(_raF)) {
 									printf("[RUNAHEAD] rewind FAILED at frame %llu - disabling\n",
