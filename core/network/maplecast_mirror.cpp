@@ -2228,9 +2228,16 @@ static bool decodeTexAny(uint32_t tcw, uint32_t tsp, uint8_t* out) {
 }
 } // namespace mcfx
 
+// A2 RUN-AHEAD (2026-07-12): the emu loop suppresses publish for the HIDDEN authoritative frame
+// (its render must not hit the wire — only the preview frame publishes). Set/cleared around
+// runInternal() legs in Emulator::run(); read here on the render thread. Atomic: cross-thread.
+static std::atomic<bool> _suppressPublish{false};
+void setSuppressPublish(bool v) { _suppressPublish.store(v, std::memory_order_release); }
+
 void serverPublish(TA_context* ctx)
 {
 	if (!_isServer || !_shmPtr || !ctx) return;
+	if (_suppressPublish.load(std::memory_order_acquire)) return;   // A2 hidden-frame leg
 
 	// Skip heavy work (diff, compress, broadcast) when no clients connected.
 	// Still increment the frame counter so local overlays/telemetry work.

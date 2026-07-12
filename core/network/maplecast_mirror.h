@@ -105,6 +105,8 @@ void markVramDirty(uint32_t offset, uint32_t size);
 // The publish path serializes the SYNC build/broadcast on the render thread
 // to avoid races with VRAM mid-update.
 void requestSyncBroadcast();
+// A2 run-ahead: suppress serverPublish for the hidden authoritative frame (emu loop sets/clears).
+void setSuppressPublish(bool v);
 
 // Build the full DC save state via dc_serialize into a freshly malloc'd
 // buffer. Caller must free() it. Returns nullptr on failure. This is the
