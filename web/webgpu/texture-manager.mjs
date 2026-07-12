@@ -93,6 +93,7 @@ export class TextureManager {
         if (!regs || regs.length < 0x1000+4096) return;
         const pv = new DataView(regs.buffer, regs.byteOffset+0x1000, 4096);
         const ctrl = new DataView(regs.buffer, regs.byteOffset).getUint32(0x108,true) & 3;
+        const prev = this._pal;
         this._pal = new Uint8Array(4096);
         const unp = [u1555,u565,u4444,u4444][ctrl];
         for (let i=0;i<1024;i++) {
@@ -100,12 +101,36 @@ export class TextureManager {
             const c = ctrl===3 ? [(raw>>16)&0xFF,(raw>>8)&0xFF,raw&0xFF,(raw>>24)&0xFF] : unp(raw&0xFFFF);
             this._pal[i*4]=c[0]; this._pal[i*4+1]=c[1]; this._pal[i*4+2]=c[2]; this._pal[i*4+3]=c[3];
         }
+        // D7 (kill-list): BANK-scoped palette invalidation. A blanket _palDirty re-decoded EVERY
+        // paletted texture on ANY PVR-dirty frame — hit-flash/super-flash palette writes caused a
+        // full decode storm at the worst moments. Diff per pal4 bank (64 banks x 16 entries x 4B);
+        // pal8 coarse banks (4 x 256) derive from the fine banks. Textures re-decode only when
+        // THEIR bank changed. Falls back to blanket when no previous palette exists.
+        if (prev) {
+            this._palBank4 = this._palBank4 || new Uint8Array(64);
+            this._palBank8 = this._palBank8 || new Uint8Array(4);
+            this._palBank8.fill(0);
+            for (let b = 0; b < 64; b++) {
+                let ch = 0;
+                const off = b * 64;
+                for (let j = 0; j < 64; j += 4) {
+                    if (this._pal[off+j]!==prev[off+j] || this._pal[off+j+1]!==prev[off+j+1] ||
+                        this._pal[off+j+2]!==prev[off+j+2] || this._pal[off+j+3]!==prev[off+j+3]) { ch = 1; break; }
+                }
+                this._palBank4[b] = ch;
+                if (ch) this._palBank8[b >> 4] = 1;
+            }
+        } else { this._palBank4 = null; this._palBank8 = null; }
     }
 
     // Check if a texture's VRAM range overlaps any dirty page
-    _isDirty(addr, byteSize, paletted) {
-        // Palette change invalidates all paletted textures
-        if (paletted && this._palDirty) return true;
+    _isDirty(addr, byteSize, paletted, palBank, fmt) {
+        // Palette change: bank-scoped when we have per-bank diffs (D7), else blanket fallback
+        if (paletted && this._palDirty) {
+            if (this._palBank4 && palBank !== undefined)
+                { if (fmt === 5 ? this._palBank4[palBank & 63] : this._palBank8[(palBank >> 4) & 3]) return true; }
+            else return true;
+        }
         // No dirty VRAM pages → not dirty
         if (!this._dirtyPages) return false;
         // Check page overlap: texture covers [addr, addr+byteSize)
@@ -133,7 +158,7 @@ export class TextureManager {
 
         if (cached) {
             // Check if this texture's VRAM pages were dirtied
-            if (!this._isDirty(cached.addr, cached.endAddr - cached.addr, paletted)) {
+            if (!this._isDirty(cached.addr, cached.endAddr - cached.addr, paletted, cached.palSel, cached.fmt)) {
                 this.stats.hits++;
                 return cached;
             }
@@ -173,7 +198,7 @@ export class TextureManager {
             this.stats.misses++;
         }
 
-        const entry = {texture, sampler, w, h, addr, endAddr: addr + byteSize, paletted};
+        const entry = {texture, sampler, w, h, addr, endAddr: addr + byteSize, paletted, palSel, fmt};
         this.cache.set(baseKey, entry);
         return entry;
     }

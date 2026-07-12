@@ -748,11 +748,12 @@ function _bodyApplyFrame(u8){
   // so the walker reads fresh cell records. (palette/HUDQ tails + engine_ta are
   // ignored: palettes ride the ZCS2 PVR pages, HUD stays on the wire.)
   let _gfxTail=false;   // a body's GFX (headers/cell-records the walker reads from the heap) changed this frame
+  const _gfxSpans=[];   // D4: the tail's exact {guestOff,len} spans — copy ONLY these to the heap (was a 16MB full copy = 2-6ms hitch per tag-in)
   if(p+4<=u8.length){ const nGfx=dv.getUint32(p,true);
     if(nGfx<=64){ p+=4; if(nGfx>0)_gfxTail=true;
       for(let i=0;i<nGfx&&p+8<=u8.length;i++){ const base=dv.getUint32(p,true),len=dv.getUint32(p+4,true); p+=8;
         if(len>0x800000||p+len>u8.length) break;
-        BODY.ram.set(u8.subarray(p,p+len),_bodyGuest(base)); p+=len; BODY.gfxN++; } } }
+        const g=_bodyGuest(base); BODY.ram.set(u8.subarray(p,p+len),g); _gfxSpans.push([g,len]); p+=len; BODY.gfxN++; } } }
   // ?bodytex=local: override shipped GFX1 pixels with the COMPLETE local disc art at
   // node+0x15C (cached by char_id) BEFORE the walker/decoder read — replay.html port.
   if(BTEX.on){ try{ BTEX.applyGfx(BODY.ram,null); }catch(e){ if(++BTEX.err<4) console.warn('[btex] gfx',e); } }
@@ -766,8 +767,12 @@ function _bodyApplyFrame(u8){
   // GFX tail (tag-in brings new GFX2/GFX1-headers the walker reads from the heap). Otherwise copy ONLY the
   // ~214KB dynamic regions the walker actually reads per frame (static base + GFX headers are heap-invariant;
   // bodytex=local pixels are read from BODY.ram by _btexStage, not the heap). ?fullheap=1 forces full (A/B).
-  if(window._fullHeap || M._mcRamFor!==BODY.ram || _gfxTail){ M.HEAPU8.set(BODY.ram,ramPtr); M._mcRamFor=BODY.ram; }
-  else { const H=M.HEAPU8; for(const r of BODY.dynRegs){ if(r.tag!=='bodytex'){ const g=_bodyGuest(r.addr); H.set(BODY.ram.subarray(g,g+r.len),ramPtr+g); } } }
+  if(window._fullHeap || M._mcRamFor!==BODY.ram){ M.HEAPU8.set(BODY.ram,ramPtr); M._mcRamFor=BODY.ram; }
+  else { const H=M.HEAPU8;
+    // D4: a GFX tail no longer forces the 16MB copy — the walker's fresh bytes ARE the tail
+    // spans; copy exactly those (GFX2 dispatch + cell records) + the per-frame dyn regions.
+    for(const [g,l] of _gfxSpans) H.set(BODY.ram.subarray(g,g+l),ramPtr+g);
+    for(const r of BODY.dynRegs){ if(r.tag!=='bodytex'){ const g=_bodyGuest(r.addr); H.set(BODY.ram.subarray(g,g+r.len),ramPtr+g); } } }
   const len=M._render_frame_ta(ramPtr,outPtr,cap);
   const raw=M.HEAPU8.subarray(outPtr,outPtr+len);
   // Filter to the SERVER'S strip set {82,83,88,89}: quads outside it (84/8a
