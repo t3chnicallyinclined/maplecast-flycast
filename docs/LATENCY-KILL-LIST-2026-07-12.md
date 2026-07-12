@@ -57,3 +57,10 @@ press → poll(≤1ms) → /play WSS → nginx → :7210 → UDP :7100 → atomi
 3. **Tier 2 (the big swing):** A2 run-ahead depth=1 (after dc_serialize timing proves it fits) → B2 hash-gated diff → C4 WT input → D10 worker/OffscreenCanvas.
 
 Ceiling math: Tier 0+1 ≈ 25-40ms off; +A2 ≈ another 16.7ms → **~80ms → ~30-40ms browser button-to-pixel**, approaching the native client's 10ms + display.
+
+## MEASURED BASELINE (2026-07-12, probe live — commit ce4352c82)
+press-ema ~21-24ms = residual 10-30 (uplink + vblank-wait beat) + server 1.7 (latch->publish) + client 2.4-3.1 (recv->submit).
+Caveats: +16.7ms MVC2 internal frame to VISIBLE response (~39ms); compositor scanout not included (tPresent=submit).
+**A1 FALSIFIED** (est. 9-12ms; measured latch->publish = 1.7ms — the pacing slack already sits publish->next-latch).
+Re-ranked: A2 run-ahead (16.7ms, THE lever) > B1 SYNC un-hitch (p99 ~90ms spikes) > D2 compositor (PresentMon).
+Probe lesson: first run read min 0.7ms (below physical floor) — internal-vs-client seq-space bug; always gate on the floor.
