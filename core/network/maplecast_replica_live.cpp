@@ -775,6 +775,20 @@ static void collectFreshGfx(std::vector<GfxToShip>& out)
 
 static void captureFrame(u32 vframe)
 {
+	// A2 STATE-WIRE gate (MAPLECAST_STATEVF=1): the DUMP_TA offset test measured the LEGACY TA
+	// display list, NOT this 7212 state wire the GSTA client consumes. Log the state the wire
+	// actually ships at publish: pos_x (+0x34, game-LOGIC, unambiguously F+2 after the preview leg)
+	// and screen_x (+0xE0, RENDER-DEPOSITED at STARTRENDER — may inherit MVC2's 1-frame submit defer).
+	// Compare baseline vs run-ahead published sequences: +1 offset on pos_x => run-ahead delivers.
+	{
+		static const bool _svf = std::getenv("MAPLECAST_STATEVF") != nullptr;
+		if (_svf) {
+			printf("[STATEVF-PUB] vf=%u posx=%08x screenx=%08x\n",
+			       vframe, rd32(0x8C268374), rd32(0x8C268420));
+			fflush(stdout);
+		}
+	}
+
 	// A new client connected: drop our shipped-GFX memory so this frame re-ships every active
 	// body's GFX (the cached prefix only has the build-time bodies). Existing clients get a
 	// benign duplicate; the new client gets the GFX it was missing.

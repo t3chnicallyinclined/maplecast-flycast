@@ -1792,6 +1792,15 @@ void Emulator::start()
 								mc_runaheadPreviewLeg.store(false, std::memory_order_relaxed);
 								bool _raRewindOk = maplecast_rollback::rewindToFrame(_raF, /*lightweight=*/true);
 								auto _raT4 = std::chrono::steady_clock::now();
+								// A2 STATE-WIRE gate (MAPLECAST_STATEVF=1): the authoritative BOUNDARY state
+								// right after rewind (F+1). Pair with [STATEVF-PUB] (what the wire shipped):
+								// if PUB pos_x leads this BND by one frame, the state wire ships F+2 = +1 works.
+								{
+									static const bool _svf = std::getenv("MAPLECAST_STATEVF") != nullptr;
+									if (_svf)
+										printf("[STATEVF-BND] posx=%08x screenx=%08x\n",
+										       ReadMem32_nommu(0x8C268374), ReadMem32_nommu(0x8C268420));
+								}
 								{
 									static uint64_t _pH=0,_pS=0,_pP=0,_pR=0,_pN=0;
 									auto us=[](auto a,auto b){ return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(b-a).count(); };
