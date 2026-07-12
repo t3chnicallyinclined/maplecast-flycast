@@ -1723,7 +1723,47 @@ void Emulator::start()
 						}
 						startTime = sh4_sched_now64();
 						renderTimeout = false;
-						runInternal();
+						// === A2 RUN-AHEAD depth=1 (THREADED loop — the path prod actually runs;
+						// mirror of the Emulator::run() version, same contract/comments there) ===
+						{
+							static const bool _raWant = [](){ const char* e = std::getenv("MAPLECAST_RUNAHEAD");
+								return e && e[0] && e[0] != '0'; }();
+							static bool _raReady = false, _raTried = false;
+							if (_raWant && !_raTried) {
+								_raTried = true;
+								_raReady = maplecast_rollback::init();
+								printf("[RUNAHEAD] %s (threaded loop)\n", _raReady ? "ARMED depth=1"
+								                                                   : "rollback init FAILED - disabled");
+								fflush(stdout);
+							}
+							if (_raReady && maplecast_mirror::isServer()) {
+								extern std::atomic<bool> mc_runaheadPreviewLeg;
+								static uint64_t _raF = 0;
+								_raF++;
+								maplecast_mirror::setSuppressPublish(true);
+								runInternal();                                   // authoritative T (hidden)
+								maplecast_mirror::setSuppressPublish(false);
+								maplecast_rollback::saveFrame(_raF);
+								mc_runaheadPreviewLeg.store(true, std::memory_order_relaxed);
+								startTime = sh4_sched_now64();
+								renderTimeout = false;
+								try {
+									runInternal();                               // preview T+1 (publishes)
+								} catch (...) {
+									mc_runaheadPreviewLeg.store(false, std::memory_order_relaxed);
+									throw;
+								}
+								mc_runaheadPreviewLeg.store(false, std::memory_order_relaxed);
+								if (!maplecast_rollback::rewindToFrame(_raF)) {
+									printf("[RUNAHEAD] rewind FAILED at frame %llu - disabling\n",
+										(unsigned long long)_raF);
+									fflush(stdout);
+									_raReady = false;
+								}
+							} else {
+								runInternal();
+							}
+						}
 
 						// Rollback ring stop-callback-restart: if vblank
 						// called Stop() because a rewind is pending, runInternal
