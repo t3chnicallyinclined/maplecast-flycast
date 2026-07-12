@@ -628,7 +628,7 @@ if(window._schedPresent) setInterval(()=>{ const D=window._ffDbg,F=window._ff;
   if(!D){ console.log('[ff-hb] no sched frames yet'); return; }
   console.log('[ff-hb]', 'lastFrame', (performance.now()-D.t).toFixed(0)+'ms ago,',
     'frames',D.frames+',', 'blits',(F&&F.blits||0)+',', 'pend',!!(F&&F.pendingBlit)+',',
-    'tgtNow',D.tgtNow.toFixed(1)+',', 'd',D.d.toFixed(1)+',', 'anchor',(F&&F.anchor!==Infinity?F.anchor.toFixed(1):'-'));
+    'tgtNow',D.tgtNow.toFixed(1)+',', 'trim',(F&&F.trim||0).toFixed(1)+',', 'res',(F&&F.resEma!==undefined?F.resEma.toFixed(1):'-'));
 },1000);
 window._e2eMark=()=>{  // called right after render submit (both present paths)
   const E=window._e2eLast; if(!E||E._done) return; E._done=true;
@@ -2986,7 +2986,9 @@ async function main(){
                             const FF=(window._ff=window._ff||{anchor:Infinity,n:0,lastReset:now});
                             const d=now-pub;
                             if(d<FF.anchor||now-FF.lastReset>30000){ FF.anchor=Math.min(d,FF.anchor===Infinity?d:FF.anchor); if(now-FF.lastReset>30000){FF.anchor=d;FF.lastReset=now;} }
-                            const target=pub+FF.anchor+(window._ffDelta||50), dt=target-now;
+                            // F2.1 phase-trim: FF.trim (learned in the presenter) shifts appointments
+                            // to land ~2ms before a vsync — recovers the avg ~8ms quantization wait.
+                            const target=pub+FF.anchor+(window._ffDelta||50)-(FF.trim||0), dt=target-now;
                             FF.n++;
                             if(FF.n%300===0) console.log('[fairframe] slack',dt.toFixed(1),'ms (Δ='+(window._ffDelta||50)+')');
                             // v0.3 (heartbeat-proven starvation fix): a SINGLE latest-wins slot never
@@ -3023,6 +3025,12 @@ async function main(){
                                     PP.blit(enc,R.ctx.getCurrentTexture().createView(),canvas.width,canvas.height,DBG,e.bg);
                                     R.dev.queue.submit([enc.finish()]);
                                     FF.blits=(FF.blits||0)+1;
+                                    // F2.1: residual = how long the frame waited past its appointment for
+                                    // THIS vsync (0..16.7 = pure quantization waste). Servo the trim so the
+                                    // steady-state residual is ~2ms (appointments land just before a vsync).
+                                    const res=nowL-e.target;
+                                    if(res>=0&&res<20){ FF.resEma=(FF.resEma===undefined?res:FF.resEma+(res-FF.resEma)*0.05);
+                                      FF.trim=Math.max(-16.7,Math.min(16.7,(FF.trim||0)+0.05*(FF.resEma-2))); }
                                     BAKE.onRendered(canvas); if(window._e2eProbe)window._e2eMark(); }
                                 }catch(err){ if((FF.err=(FF.err||0)+1)<4) console.warn('[fairframe present]',err); }
                                 requestAnimationFrame(loop); };
