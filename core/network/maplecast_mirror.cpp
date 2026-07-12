@@ -2924,6 +2924,28 @@ done_diff:
 		}
 	}
 
+	// === E2E PROBE tail (MAPLECAST_E2E_PROBE=1, kill-list 2026-07-12) ===
+	// 32-byte self-locating tail AFTER everything (client checks last-4=='E2EP' and strips it
+	// before the STM2 back-seek): frameNum u32 + t_latch_us i64 + t_publish_us i64 +
+	// latchedClientSeq[slot0] u32 + [slot1] u32 + 'E2EP'. t_latch/t_publish share CLOCK_MONOTONIC
+	// so the server span is exact with ZERO clock sync; the browser matches latchedSeq against its
+	// own sent-seq log for true press->present. ~32B/frame, zstd-trivial. Default OFF.
+	{
+		static const bool _e2eProbe = [](){ const char* e = std::getenv("MAPLECAST_E2E_PROBE");
+			return e && e[0] && e[0] != '0'; }();
+		if (_e2eProbe) {
+			int64_t lus = 0; uint32_t s0 = 0, s1 = 0;
+			maplecast_input::e2eLatchInfo(lus, s0, s1);
+			int64_t pus = _publishNowUs();
+			memcpy(dst, &frameNum, 4); dst += 4;
+			memcpy(dst, &lus, 8);      dst += 8;
+			memcpy(dst, &pus, 8);      dst += 8;
+			memcpy(dst, &s0, 4);       dst += 4;
+			memcpy(dst, &s1, 4);       dst += 4;
+			memcpy(dst, "E2EP", 4);    dst += 4;
+		}
+	}
+
 	// Patch frame size
 	uint32_t totalSize = (uint32_t)(dst - dstStart);
 	uint32_t frameSizeVal = totalSize - 4;

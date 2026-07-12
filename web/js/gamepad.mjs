@@ -188,7 +188,21 @@ function pollOnce() {
       state.mySlot, lt, rt, (btn >> 8) & 0xFF, btn & 0xFF);
   }
   if (!sentViaQUIC) {
-    cws.send(_inputBuf);  // TCP fallback
+    // E2E probe (?e2e=1): send 8-byte [W3][seq u32 LE] — flycast wraps it as the native "PC"
+    // packet so the server's E2EP tail attributes the latch to OUR seq. Sent-log ring lets the
+    // page compute true press->present when the frame's latchedSeq >= our seq.
+    if (window._e2eProbe) {
+      window._e2eSeq = (window._e2eSeq || 0) + 1;
+      const b = new Uint8Array(8);
+      b.set(_inputBuf, 0);
+      b[4] = window._e2eSeq & 0xFF; b[5] = (window._e2eSeq >> 8) & 0xFF;
+      b[6] = (window._e2eSeq >> 16) & 0xFF; b[7] = (window._e2eSeq >> 24) & 0xFF;
+      cws.send(b);
+      (window._e2eSent = window._e2eSent || []).push({ seq: window._e2eSeq, t: performance.now(), changed });
+      if (window._e2eSent.length > 600) window._e2eSent.splice(0, 300);
+    } else {
+      cws.send(_inputBuf);  // TCP fallback
+    }
   }
   state.diag.inputSendCount++;
   if (!state.diag._inputPathLogged && state.diag.inputSendCount === 1) {

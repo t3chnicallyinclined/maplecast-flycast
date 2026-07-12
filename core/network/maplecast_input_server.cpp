@@ -328,9 +328,27 @@ struct LatchStatsAccum {
 };
 static LatchStatsAccum _latchStats[2];
 
+// E2E probe (kill-list, 2026-07-12): the latch instant + the packet seq current at THIS latch,
+// per slot — serverPublish stamps these into the ZCS2 'E2EP' tail so a browser can compute true
+// press->present. Written by the maple thread at latch; read by the publish thread. Relaxed is
+// fine (diagnostic, monotonic).
+static std::atomic<int64_t>  _e2eLastLatchUs{0};
+static std::atomic<uint32_t> _e2eLatchedSeq0{0};
+static std::atomic<uint32_t> _e2eLatchedSeq1{0};
+
+void e2eLatchInfo(int64_t& latchUs, uint32_t& seq0, uint32_t& seq1)
+{
+	latchUs = _e2eLastLatchUs.load(std::memory_order_relaxed);
+	seq0 = _e2eLatchedSeq0.load(std::memory_order_relaxed);
+	seq1 = _e2eLatchedSeq1.load(std::memory_order_relaxed);
+}
+
 void recordLatchSample(int slot, int64_t deltaUs, uint32_t packetSeq, uint64_t frameNum)
 {
 	if (slot < 0 || slot > 1) return;
+	// E2E probe snapshot — before the seq==0 early-return below so the latch CLOCK ticks even idle.
+	_e2eLastLatchUs.store(nowUs(), std::memory_order_relaxed);
+	(slot == 0 ? _e2eLatchedSeq0 : _e2eLatchedSeq1).store(packetSeq, std::memory_order_relaxed);
 	LatchStatsAccum& s = _latchStats[slot];
 
 	// Single producer (the maple thread on the headless server, or the SH4

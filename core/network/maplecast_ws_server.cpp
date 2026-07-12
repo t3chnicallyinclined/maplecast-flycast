@@ -1125,6 +1125,29 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 				sendto(_udpSock, data.c_str(), 4, 0, (struct sockaddr*)&_udpDest, sizeof(_udpDest));
 			}
 		}
+		else if (data.size() == 8)
+		{
+			// E2E probe (2026-07-12): 8-byte browser input = [LT][RT][btnHi][btnLo][seq:u32 LE].
+			// Wrap as the EXISTING 11-byte "PC" packet so the input server's seq/arrival-time
+			// bookkeeping (and the E2EP latch attribution) works unchanged. ?e2e=1 clients only.
+			if (_udpSock < 0)
+			{
+				_udpSock = (int)socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+				memset(&_udpDest, 0, sizeof(_udpDest));
+				_udpDest.sin_family = AF_INET;
+				_udpDest.sin_port = htons(7100);
+				_udpDest.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+			}
+			int slot = getSlotForConn(hdl);
+			if (slot >= 0 && slot <= 1)
+			{
+				char pc[11];
+				pc[0] = 'P'; pc[1] = 'C'; pc[2] = (char)slot;
+				memcpy(pc + 3, data.c_str() + 4, 4);   // seq u32 LE
+				memcpy(pc + 7, data.c_str(), 4);       // W3 [LT][RT][btnHi][btnLo]
+				sendto(_udpSock, pc, 11, 0, (struct sockaddr*)&_udpDest, sizeof(_udpDest));
+			}
+		}
 	}
 	else if (msg->get_opcode() == websocketpp::frame::opcode::text)
 	{

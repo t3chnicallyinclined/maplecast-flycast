@@ -111,6 +111,11 @@ inline void unpackSlotInput(uint64_t packed, uint16_t& buttons, uint8_t& ltVal, 
 //   frameNum   — maplecast_mirror::currentFrame() at latch time
 void recordLatchSample(int slot, int64_t deltaUs, uint32_t packetSeq, uint64_t frameNum);
 
+// E2E probe (2026-07-12): the latch instant (CLOCK_MONOTONIC us) + the packet seq current at
+// that latch, per slot. serverPublish stamps these into the ZCS2 'E2EP' tail (MAPLECAST_E2E_PROBE)
+// so a browser computes true press->present with zero clock sync (server span is same-clock).
+void e2eLatchInfo(int64_t& latchUs, uint32_t& seq0, uint32_t& seq1);
+
 // Phase A — per-slot latch statistics summary, served via the WebSocket
 // status JSON every second. Backed by the ring buffer recordLatchSample()
 // writes to. All fields are zero before the first sample on a slot.

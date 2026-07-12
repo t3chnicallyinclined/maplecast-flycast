@@ -615,6 +615,25 @@ window._noSync=new URLSearchParams(location.search).get('nosync')==='1';       /
 window._missDiag=new URLSearchParams(location.search).get('missdiag')==='1';   // DIAG: log which VRAM 64KB regions VCACHE-miss during a super (where called-in char data loads)
 window._wireDiag=+(new URLSearchParams(location.search).get('wirediag')||0);   // DIAG: per-frame wire byte breakdown (taDelta/vramData/vramRefs/pvr/stm2) — attributes the super spike. =1 logs big frames, =2 logs all
 window._vramOverlay=new URLSearchParams(location.search).get('vramoverlay')==='1';   // CLEAN STRIP (Phase 1): overlay locally-decoded body tiles into D.vram so the server can drop {82,83,88,89} pages while quads stay on the wire TA (no delta inflation). Needs server MAPLECAST_CHARSTRIP_PAGES=1 + CHARSTRIP=1
+// === E2E PROBE (?e2e=1 + server MAPLECAST_E2E_PROBE=1): TRUE press->present ==================
+// gamepad.mjs sends [W3][seq]; the server's E2EP frame tail carries {latchUs,pubUs,latchedSeq}.
+// ZERO clock sync needed: total = tPresent-tSend (client clock); serverSpan = pubUs-latchUs
+// (server clock); clientSpan = tPresent-tRecv; residual = total-server-client = network+latchWait.
+window._e2eProbe=new URLSearchParams(location.search).get('e2e')==='1';
+window._e2eMark=()=>{  // called right after render submit (both present paths)
+  const E=window._e2eLast; if(!E||E._done) return; E._done=true;
+  const tP=performance.now();
+  const slot=(window.state&&window.state.mySlot>=0)?window.state.mySlot:0;
+  const L=slot===1?E.seq1:E.seq0; if(!L||!window._e2eSent) return;
+  let hit=null;
+  window._e2eSent=window._e2eSent.filter(s=>{ if(s.seq<=L){ if(!hit||s.seq>hit.seq)hit=s; return false;} return true; });
+  if(!hit) return;
+  const total=tP-hit.t, server=(Number(E.pubUs-E.latchUs))/1000, client=tP-E.tRecv;
+  const S=(window._e2eStats=window._e2eStats||{n:0,ema:0,min:1e9,max:0});
+  S.n++; S.ema=S.ema+(total-S.ema)*0.1; if(total<S.min)S.min=total; if(total>S.max)S.max=total;
+  S.last={total:+total.toFixed(1),server:+server.toFixed(1),client:+client.toFixed(1),residual:+(total-server-client).toFixed(1),changed:hit.changed};
+  if(S.n%30===1) console.log('[E2E] press->present',S.last,'| ema',S.ema.toFixed(1),'ms min',S.min.toFixed(1),'max',S.max.toFixed(1),'n',S.n);
+};
 const BODY={want:new URLSearchParams(location.search).has('bodylocal'),
   started:false,ready:false,mod:null,ram:null,dynRegs:null,ta:null,bt:null,vframe:-1,frames:0,gfxN:0,err:0,ws:null};
 window._body=BODY;
@@ -2834,8 +2853,19 @@ async function main(){
                     // (BODY.stm) so the JS zstd decoder only expands ~a few hundred bytes/frame instead of 214KB
                     // (the fps killer). Reconstruct -> feed the EXISTING _bodyApplyFrame (same vframe, no ring).
                     // Trailer (back-seek): [section][u32 baseLen][u32 dataLen]["STM2"].
-                    if(window._stateMerge && typeof _bodyApplyFrame==='function' && d.length>=12 &&
-                       ((d[d.length-4]|d[d.length-3]<<8|d[d.length-2]<<16|d[d.length-1]<<24)>>>0)===0x324D5453){
+                    // E2E PROBE tail: 'E2EP' is appended AFTER STM2 — strip + record it FIRST so the
+                    // STM2 back-seek below still lands on its own trailer. 32B: fn u32, latch i64,
+                    // pub i64, seq0 u32, seq1 u32, 'E2EP'.
+                    let _dd=d;
+                    if(d.length>=32 && d[d.length-4]===0x45&&d[d.length-3]===0x32&&d[d.length-2]===0x45&&d[d.length-1]===0x50){
+                      const eo=d.length-32, dv2=new DataView(d.buffer,d.byteOffset+eo,32);
+                      window._e2eLast={frame:dv2.getUint32(0,true),latchUs:dv2.getBigInt64(4,true),pubUs:dv2.getBigInt64(12,true),
+                                       seq0:dv2.getUint32(20,true),seq1:dv2.getUint32(24,true),tRecv:performance.now(),_done:false};
+                      _dd=d.subarray(0,eo);
+                    }
+                    if(window._stateMerge && typeof _bodyApplyFrame==='function' && _dd.length>=12 &&
+                       ((_dd[_dd.length-4]|_dd[_dd.length-3]<<8|_dd[_dd.length-2]<<16|_dd[_dd.length-1]<<24)>>>0)===0x324D5453){
+                      const d=_dd;   // shadow: the STM2 section reads relative to the E2EP-stripped end
                       const _dl=(d[d.length-8]|d[d.length-7]<<8|d[d.length-6]<<16|d[d.length-5]<<24)>>>0;    // dataLen
                       const _bl=(d[d.length-12]|d[d.length-11]<<8|d[d.length-10]<<16|d[d.length-9]<<24)>>>0; // baseLen (full state size)
                       const _ss=d.length-12-_dl;
@@ -2906,7 +2936,7 @@ async function main(){
                         R.renderFrame(g,T,fr.pvrSnapshot,D.vram,DBG,rt);
                         if(rt&&R._lastEncoder){PP.blit(R._lastEncoder,R.ctx.getCurrentTexture().createView(),canvas.width,canvas.height,DBG);R.dev.queue.submit([R._lastEncoder.finish()]);}
                         if(window._diffMirrorTA) window._diffMirrorTA(canvas);  // mirror #c while valid (DIFF v7)
-                        BAKE.onRendered(canvas);
+                        BAKE.onRendered(canvas); if(window._e2eProbe)window._e2eMark();
                         rMs=performance.now()-t2;
                         totalFrames++; renderFrames++;
                         const total=dMs+pMs+rMs;
@@ -3118,7 +3148,7 @@ async function main(){
             R.renderFrame(g,T,snap,D.vram,DBG,rt);
             if(rt&&R._lastEncoder){PP.blit(R._lastEncoder,R.ctx.getCurrentTexture().createView(),canvas.width,canvas.height,DBG);R.dev.queue.submit([R._lastEncoder.finish()]);};
             if(window._diffMirrorTA) window._diffMirrorTA(canvas);  // mirror #c while the swap-chain image is still valid (DIFF v7)
-            BAKE.onRendered(canvas);
+            BAKE.onRendered(canvas); if(window._e2eProbe)window._e2eMark();
             rMs=performance.now()-t2;
             totalFrames++; renderFrames++;
             const total=dMs+pMs+rMs;
