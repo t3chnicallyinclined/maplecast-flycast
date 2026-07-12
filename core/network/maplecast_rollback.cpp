@@ -109,6 +109,15 @@ static uint64_t          _oldestFrame     = UINT64_MAX;
 static uint64_t          _framesSaved     = 0;
 static uint64_t          _rollbacksDone   = 0;
 
+// ── A2 dirty-page rewind determinism gate scratch ────────────────────
+// FULL (rollback=false) blob of the most-recently-saved frame, stashed only
+// under MAPLECAST_RA_DIRTY_GATE so the rewind can do an authoritative
+// full-deser rewind and byte-compare it against the dirty-page result.
+// Run-ahead only ever rewinds to the just-saved frame, so ONE buffer suffices.
+static std::vector<uint8_t> _gateFullBlob;
+static size_t               _gateFullSize  = 0;
+static uint64_t             _gateFullFrame = UINT64_MAX;
+
 // dc_serialize blob size. With rollback=false (full state including
 // VRAM + 16MB mem_b), MVC2 states are ~28 MB. Reserve 40 MB per slot
 // for headroom. 10 slots × 40 MB = 400 MB — fine on modern desktop.
@@ -214,7 +223,17 @@ void saveFrame(uint64_t frame)
 	//    dc_deserialize → continue) confirmed full-state round-trip is
 	//    clean. We still record page-deltas in slot.pages for diff
 	//    streaming to mirror clients (separate consumer).
-	Serializer ser(slot.serialBlob.data(), SLOT_BLOB_SIZE, false);
+	// A2 dirty-page rewind: under MAPLECAST_RA_DIRTY_REWIND / _GATE the ring blob
+	// is SCALARS-ONLY (rollback=true skips ONLY mem_b + vram + aica_ram — VERIFIED
+	// the only rollback()-guarded arrays: sh4_mmr.cpp:688, pvr.cpp:96, aica_if.cpp:537;
+	// elan.cpp:1832 is Naomi2-only; the maple_cfg.cpp:464/499 guards change device
+	// object lifecycle but write/read the SAME blob bytes). The 3 arrays are restored
+	// on rewind by the memwatch live-map pagewalk. SAVE and RESTORE MUST use the SAME
+	// rollback flag (both gated on the same env) or the deserializer desyncs.
+	static const bool _raDirty     = std::getenv("MAPLECAST_RA_DIRTY_REWIND") != nullptr;
+	static const bool _raDirtyGate = std::getenv("MAPLECAST_RA_DIRTY_GATE") != nullptr;
+	const bool _blobRollback = _raDirty || _raDirtyGate;
+	Serializer ser(slot.serialBlob.data(), SLOT_BLOB_SIZE, _blobRollback);
 	try {
 		uint32_t frame32 = (uint32_t)(frame & 0xFFFFFFFFu);
 		ser << frame32;
@@ -225,6 +244,26 @@ void saveFrame(uint64_t frame)
 		       (unsigned long long)frame, e.what());
 		slot.serialSize = 0;
 		return;
+	}
+
+	// Gate: also stash a FULL (rollback=false) blob of THIS frame for the
+	// dirty-vs-full determinism compare in rewindToFrame. One scratch buffer is
+	// enough — run-ahead only ever rewinds to the just-saved frame.
+	if (_raDirtyGate) {
+		try {
+			if (_gateFullBlob.size() != SLOT_BLOB_SIZE) _gateFullBlob.resize(SLOT_BLOB_SIZE);
+			Serializer fser(_gateFullBlob.data(), SLOT_BLOB_SIZE, false);
+			uint32_t f32 = (uint32_t)(frame & 0xFFFFFFFFu);
+			fser << f32;
+			dc_serialize(fser);
+			_gateFullSize  = fser.size();
+			_gateFullFrame = frame;
+		} catch (const Serializer::Exception& e) {
+			printf("[ra-gate] saveFrame(%llu): full dc_serialize failed: %s\n",
+			       (unsigned long long)frame, e.what());
+			_gateFullSize = 0;
+			_gateFullFrame = UINT64_MAX;
+		}
 	}
 
 	// 2. Re-arm protection on pages-just-touched, BEFORE draining them.
@@ -287,6 +326,97 @@ void saveFrame(uint64_t frame)
 	// F.2 byte-diff audit orchestration. No-op unless MAPLECAST_DC_AUDIT
 	// is set. Runs once and stops.
 	dcAuditTickFromVblank(frame);
+}
+
+// A2 dirty-page determinism gate. On entry the guest state holds the DIRTY-PAGE
+// rewind result of `frame` (fixups already applied by the caller). We serialize
+// it FULL (blobA), then do the authoritative full-deser rewind of the same frame
+// from _gateFullBlob applying the SAME post-loadstate fixups, serialize FULL
+// (blobB), and byte-compare. First diff is localized to a subsystem via dcs_mark.
+// Leaves the full-path (authoritative) state so a dirty-path bug can't corrupt
+// the running sim. PASS = 0 diff sustained over thousands of rewinds.
+static void raDirtyGateCompare(uint64_t frame, int spgJitter, bool lightweight)
+{
+	if (_gateFullFrame != frame || _gateFullSize == 0) {
+		static uint64_t _w = 0;
+		if ((_w++ % 600) == 0)
+			printf("[ra-gate] no full blob for frame %llu (have %llu) — skip compare\n",
+			       (unsigned long long)frame, (unsigned long long)_gateFullFrame);
+		return;
+	}
+	static std::vector<uint8_t>     _blobA, _blobB;
+	static std::vector<DcAuditMark> _marksA, _marksB;
+	if (_blobA.size() != SLOT_BLOB_SIZE) _blobA.resize(SLOT_BLOB_SIZE);
+	if (_blobB.size() != SLOT_BLOB_SIZE) _blobB.resize(SLOT_BLOB_SIZE);
+
+	auto serFull = [](std::vector<uint8_t>& buf, std::vector<DcAuditMark>& marks) -> size_t {
+		marks.clear();
+		dc_audit_marks = &marks;
+		size_t sz = 0;
+		try { Serializer s(buf.data(), buf.size(), false); dc_serialize(s); sz = s.size(); }
+		catch (const Serializer::Exception& e) { printf("[ra-gate] serialize overflow: %s\n", e.what()); sz = 0; }
+		dc_audit_marks = nullptr;
+		return sz;
+	};
+
+	// blobA = dirty-page-rewound state (fixups already applied by caller).
+	const size_t sizeA = serFull(_blobA, _marksA);
+
+	// Authoritative full-deser rewind of the same frame + IDENTICAL fixups so the
+	// only variable is the state-restore method (dirty pagewalk vs full deser).
+	try {
+		Deserializer d(_gateFullBlob.data(), _gateFullSize, false);
+		uint32_t f32; d >> f32;
+		emu.loadstate(d, lightweight);
+	} catch (const Deserializer::Exception& e) {
+		printf("[ra-gate] full deser failed: %s\n", e.what());
+		return;
+	}
+	rend_resync_after_rollback();
+	{
+		const int re_sch = spg_getNextInterrupt();
+		sh4_sched_request(vblank_schid, std::max(0, re_sch - spgJitter));
+	}
+
+	// blobB = full-deser-rewound state.
+	const size_t sizeB = serFull(_blobB, _marksB);
+
+	// Compare.
+	static uint64_t _n = 0, _diffRewinds = 0;
+	_n++;
+	const size_t common = std::min(sizeA, sizeB);
+	uint64_t diff = 0;
+	size_t firstDiff = SIZE_MAX;
+	for (size_t i = 0; i < common; i++)
+		if (_blobA[i] != _blobB[i]) { if (firstDiff == SIZE_MAX) firstDiff = i; diff++; }
+	if (sizeA != sizeB)
+		diff += (sizeA > sizeB) ? (sizeA - sizeB) : (sizeB - sizeA);
+	if (diff != 0) _diffRewinds++;
+
+	if (diff != 0) {
+		const char* region = "(size-only)";
+		size_t regOff = 0;
+		if (firstDiff != SIZE_MAX) {
+			for (size_t mi = 0; mi < _marksA.size(); mi++) {
+				const size_t st = _marksA[mi].offset;
+				const size_t en = (mi + 1 < _marksA.size()) ? _marksA[mi + 1].offset : common;
+				if (firstDiff >= st && firstDiff < en) { region = _marksA[mi].name; regOff = firstDiff - st; break; }
+			}
+		}
+		printf("[ra-gate] DIFF frame %llu: %llu bytes (sizeA=%zu sizeB=%zu) first@+%zu region=%s +%zu (A=%02x B=%02x)\n",
+		       (unsigned long long)frame, (unsigned long long)diff, sizeA, sizeB,
+		       firstDiff == SIZE_MAX ? (size_t)0 : firstDiff, region, regOff,
+		       firstDiff == SIZE_MAX ? 0 : (unsigned)_blobA[firstDiff],
+		       firstDiff == SIZE_MAX ? 0 : (unsigned)_blobB[firstDiff]);
+		fflush(stdout);
+	}
+	if ((_n % 600) == 0) {
+		printf("[ra-gate] over %llu rewinds: %llu had diffs => %s\n",
+		       (unsigned long long)_n, (unsigned long long)_diffRewinds,
+		       _diffRewinds == 0 ? "PASS (dirty==full, byte-identical)"
+		                         : "FAIL (dirty-page state diverges — see DIFF lines)");
+		fflush(stdout);
+	}
 }
 
 bool rewindToFrame(uint64_t frame, bool lightweight)
@@ -352,10 +482,25 @@ bool rewindToFrame(uint64_t frame, bool lightweight)
 	// rewind is byte-for-byte unchanged. Reads are safe: memwatch::unprotect() ran
 	// at the top of rewindToFrame (all pages RW), and region_lock is PAGE_READONLY
 	// anyway (win_vmem.cpp:19) so reads never fault even after re-arm.
-	static const bool _raAudit = std::getenv("MAPLECAST_RA_REWIND_AUDIT") != nullptr;
+	// A2 mode flags. Tracking audit and dirty rewind BOTH drain the memwatch live
+	// map, so they are mutually exclusive; dirty wins (it is the ships path) and the
+	// tracking audit yields when dirty is on. _dirtyPath MUST equal saveFrame's
+	// _blobRollback exactly (both = _raDirty||_raDirtyGate) or the deser desyncs.
+	static const bool _raAudit     = std::getenv("MAPLECAST_RA_REWIND_AUDIT") != nullptr;
+	static const bool _raDirty     = std::getenv("MAPLECAST_RA_DIRTY_REWIND") != nullptr;
+	static const bool _raDirtyGate = std::getenv("MAPLECAST_RA_DIRTY_GATE") != nullptr;
+	const bool _dirtyPath  = _raDirty || _raDirtyGate;   // == saveFrame _blobRollback
+	const bool _trackAudit = _raAudit && !_dirtyPath;    // tracking audit yields to dirty
+	if (_raAudit && _dirtyPath) {
+		static bool _warned = false;
+		if (!_warned) { _warned = true;
+			printf("[ra] NOTE: MAPLECAST_RA_REWIND_AUDIT ignored — RA_DIRTY_REWIND/_GATE owns the live map.\n");
+			fflush(stdout);
+		}
+	}
 	static std::vector<uint8_t> _auRam, _auVram, _auAram;   // LIVE snapshots (reused)
 	memwatch::PageMap _auTrkRam, _auTrkVram, _auTrkAram;     // drained TRACKED sets
-	if (_raAudit) {
+	if (_trackAudit) {
 		const size_t rs = RAM_SIZE, vs = VRAM_SIZE, as = ARAM_SIZE;
 		if (_auRam.size()  != rs) _auRam.resize(rs);
 		if (_auVram.size() != vs) _auVram.resize(vs);
@@ -371,6 +516,30 @@ bool rewindToFrame(uint64_t frame, bool lightweight)
 		memwatch::ramWatcher.getPages(_auTrkRam);
 		memwatch::vramWatcher.getPages(_auTrkVram);
 		memwatch::aramWatcher.getPages(_auTrkAram);
+	}
+
+	// ── A2 DIRTY-PAGE PAGEWALK (MAPLECAST_RA_DIRTY_REWIND / _GATE) ──
+	// Replaces the (empty-for-run-ahead) ring pagewalk above: drain memwatch's
+	// LIVE map (legs-2/3 captures; pair.second.data = PRE-WRITE = frame-N bytes,
+	// proven byte-complete by the LEAK=0 tracking audit) and memcpy each page back
+	// to undo legs 2-3 on mem_b/vram/aica_ram. The scalars-only blob (rollback=true)
+	// restores everything else via emu.loadstate below. MUST run BEFORE loadstate:
+	// loadstate calls memwatch::reset() which clears the live map.
+	//
+	// Consumes the live map (mutually exclusive with the tracking audit above,
+	// which yields to us). _dirtyPath / _raDirtyGate were declared with the mode
+	// flags at the top of the tracking-audit block above.
+	if (_dirtyPath) {
+		memwatch::PageMap dpRam, dpVram, dpAram, dpElan;
+		memwatch::ramWatcher.getPages(dpRam);
+		memwatch::vramWatcher.getPages(dpVram);
+		memwatch::aramWatcher.getPages(dpAram);
+		memwatch::elanWatcher.getPages(dpElan);
+		for (const auto& pr : dpRam)  memcpy(memwatch::ramWatcher.getMemPage(pr.first),  &pr.second.data[0], PAGE_SIZE);
+		for (const auto& pr : dpVram) memcpy(memwatch::vramWatcher.getMemPage(pr.first), &pr.second.data[0], PAGE_SIZE);
+		for (const auto& pr : dpAram) memcpy(memwatch::aramWatcher.getMemPage(pr.first), &pr.second.data[0], PAGE_SIZE);
+		for (const auto& pr : dpElan) memcpy(memwatch::elanWatcher.getMemPage(pr.first), &pr.second.data[0], PAGE_SIZE);
+		// mem_b/vram/aica_ram now hold frame N; loadstate(rollback=true) restores scalars.
 	}
 
 	// Restore the SH4 + PVR scalar state from the dc_serialize blob at the
@@ -395,14 +564,15 @@ bool rewindToFrame(uint64_t frame, bool lightweight)
 	// IS load-bearing — clears watcher state so our re-protect below
 	// arms correctly for the next frame.
 	{
-		// rollback=false: blob includes VRAM + mem_b. emu.loadstate does the
-		// load-bearing wrappers (bm_Reset, ResetCache, aica recompiler flush,
-		// mmu_flush_table, custom_texture init, EventManager LoadState
-		// broadcast) that plain dc_deserialize alone misses. Tested both
-		// paths — drift is identical (~155 bytes / 448-cycle skew), so
-		// bm_Reset/ResetCache aren't the cycle-drift source. We use
-		// emu.loadstate for the safer dynarec-aware path.
-		Deserializer deser(target.serialBlob.data(), target.serialSize, false);
+		// Deserializer rollback flag MUST match how saveFrame wrote this slot:
+		// _dirtyPath ? rollback=true (scalars-only; mem_b/vram/aica_ram already
+		// restored by the dirty pagewalk above) : rollback=false (full blob).
+		// emu.loadstate does the load-bearing wrappers (bm_Reset, ResetCache,
+		// aica recompiler flush, mmu_flush_table, custom_texture init,
+		// EventManager LoadState broadcast) in BOTH modes — that coherence pass
+		// is the other half of why the prior page-delta attempt deadlocked, so
+		// we keep emu.loadstate rather than a bare dc_deserialize.
+		Deserializer deser(target.serialBlob.data(), target.serialSize, _dirtyPath);
 		uint32_t frame32;
 		deser >> frame32;
 		_rwt1 = std::chrono::steady_clock::now();
@@ -438,6 +608,15 @@ bool rewindToFrame(uint64_t frame, bool lightweight)
 		}
 	}
 
+	// A2 dirty-page determinism GATE: with the state now holding the dirty-page
+	// rewind result (+fixups), re-serialize it, then do the authoritative
+	// full-deser rewind of the same frame and byte-compare. Leaves the full-path
+	// (authoritative) state. Its second emu.loadstate re-does unprotect()+reset(),
+	// so the re-arm below still fires started=false -> full re-protect. No-op
+	// unless MAPLECAST_RA_DIRTY_GATE=1.
+	if (_raDirtyGate)
+		raDirtyGateCompare(frame, target.spgJitter, lightweight);
+
 	// memwatch::reset already done by emu.loadstate; just re-arm.
 	if (!_memwatchDisabledRewind)
 		memwatch::protect();
@@ -457,7 +636,7 @@ bool rewindToFrame(uint64_t frame, bool lightweight)
 	// PASS for a region = LEAK stays 0 over thousands of rewinds -> a dirty-page
 	// restore of that region would be byte-exact. Any LEAK>0 -> region must stay
 	// full-restore; per-rewind lines print the leaking page offsets to trace them.
-	if (_raAudit) {
+	if (_trackAudit) {
 		struct RegionAcc { uint64_t changed=0, tracked=0, leak=0, spurious=0, rewinds=0; };
 		static RegionAcc _acRam, _acVram, _acAram;
 		auto audit1 = [](const char* name, RegionAcc& acc,
