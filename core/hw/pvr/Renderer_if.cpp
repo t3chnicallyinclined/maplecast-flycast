@@ -261,9 +261,10 @@ private:
 					size_t taSize = (size_t)(taContext->tad.thd_data - taContext->tad.thd_root);
 					if (taSize > 0) {
 						_ddFrameNum++;
+						uint32_t _ddVf = addrspace::read32(0x8C3496B0);   // A2 gate: stamp guest frame counter
 						char path[512];
-						snprintf(path, sizeof(path), "%s/frame_%06u.bin",
-						         _ddDir.c_str(), _ddFrameNum);
+						snprintf(path, sizeof(path), "%s/frame_%06u_vf%08u.bin",
+						         _ddDir.c_str(), _ddFrameNum, _ddVf);
 						FILE* f = fopen(path, "wb");
 						if (f) {
 							fwrite(taData, 1, taSize, f);
