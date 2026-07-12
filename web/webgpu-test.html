@@ -624,6 +624,12 @@ window._e2eProbe=new URLSearchParams(location.search).get('e2e')==='1';
 // +Δ instead of on arrival (tournament-fairness pacing; needs server E2EP stamps).
 window._schedPresent=new URLSearchParams(location.search).get('present')==='sched';
 window._ffDelta=+(new URLSearchParams(location.search).get('delta')||50);
+if(window._schedPresent) setInterval(()=>{ const D=window._ffDbg,F=window._ff;
+  if(!D){ console.log('[ff-hb] no sched frames yet'); return; }
+  console.log('[ff-hb]', 'lastFrame', (performance.now()-D.t).toFixed(0)+'ms ago,',
+    'frames',D.frames+',', 'blits',(F&&F.blits||0)+',', 'pend',!!(F&&F.pendingBlit)+',',
+    'tgtNow',D.tgtNow.toFixed(1)+',', 'd',D.d.toFixed(1)+',', 'anchor',(F&&F.anchor!==Infinity?F.anchor.toFixed(1):'-'));
+},1000);
 window._e2eMark=()=>{  // called right after render submit (both present paths)
   const E=window._e2eLast; if(!E||E._done) return; E._done=true;
   const tP=performance.now();
@@ -2986,8 +2992,12 @@ async function main(){
                             const _blit=()=>{ try{ const enc=R.dev.createCommandEncoder();
                                 PP.blit(enc,R.ctx.getCurrentTexture().createView(),canvas.width,canvas.height,DBG);
                                 R.dev.queue.submit([enc.finish()]);
+                                FF.blits=(FF.blits||0)+1;
                                 BAKE.onRendered(canvas); if(window._e2eProbe)window._e2eMark();
                             }catch(e){ if((FF.err=(FF.err||0)+1)<4) console.warn('[fairframe blit]',e); } };
+                            // heartbeat state (read by the 1Hz logger) — discriminates the freeze:
+                            // decode-stall (frames stops) vs condition-false (tgtNow grows) vs stale-blit
+                            window._ffDbg={t:now,d:d,anchor:FF.anchor,tgtNow:dt,frames:(window._ffDbg?window._ffDbg.frames:0)+1};
                             // v0.2 (the "smooth then glitchy" fix): setTimeout presents beat against
                             // the display's vsync (server 59.94Hz vs display 60Hz — phases align, then
                             // drift through the boundary = periodic judder). Present via a rAF loop:
