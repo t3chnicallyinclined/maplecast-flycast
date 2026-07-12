@@ -1,3 +1,4 @@
+#include <atomic>
 #include "audiostream.h"
 #include "cfg/option.h"
 #include "emulator.h"
@@ -49,8 +50,16 @@ AudioBackend *AudioBackend::getBackend(const std::string& slug)
 	return nullptr;
 }
 
+// A2 RUN-AHEAD (2026-07-12): true while the emu loop executes the PREVIEW frame (T+1). Its
+// audio duplicates what the authoritative re-run of T+1 will generate next tick — drop it at
+// the top of WriteSample. This ALSO skips the backend push = the null-audio pacing sleep,
+// which would otherwise add ~11.6ms per tick and kill run-ahead outright.
+std::atomic<bool> mc_runaheadPreviewLeg{false};
+
 void WriteSample(s16 r, s16 l)
 {
+	if (mc_runaheadPreviewLeg.load(std::memory_order_relaxed))
+		return;   // preview leg: no audio, no pacing
 	// Stream raw audio to remote players (before local volume scaling)
 	maplecast_audio::pushSample(l, r);
 

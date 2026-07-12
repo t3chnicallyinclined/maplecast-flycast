@@ -1221,7 +1221,55 @@ void Emulator::run()
 	if (!singleStep && stepRangeTo == 0)
 	getSh4Executor()->Start();
 	try {
-		runInternal();
+		// === A2 RUN-AHEAD depth=1 (MAPLECAST_RUNAHEAD=1, default OFF; kill-list 2026-07-12) ===
+		// MVC2's internal input lag is exactly 1 frame (measured), so the PREVIEW frame T+1's
+		// pixels are fully determined by the input latched in frame T — publishing T+1 and
+		// rewinding is mispredict-free by construction. Cycle: hidden authoritative T ->
+		// rollback-ring save -> preview T+1 (publishes) -> ring rewind to T. Save/rewind reuse
+		// the byte-exact F.2-audited rollback machinery (NOT naive dc_deserialize — misses 8
+		// resets; NOT loadstate/frame — dynarec flush storm). INCOMPATIBLE with .mcrec record /
+		// lockstep tape consumers (1-frame-per-tick assumption) — operator flag, default OFF.
+		static const bool _raWant = [](){ const char* e = std::getenv("MAPLECAST_RUNAHEAD");
+			return e && e[0] && e[0] != '0'; }();
+		static bool _raReady = false, _raTried = false;
+		if (_raWant && !_raTried) {
+			_raTried = true;
+			_raReady = maplecast_rollback::init();
+			printf("[RUNAHEAD] %s
+", _raReady ? "ARMED depth=1 (preview publish + ring rewind)"
+			                                    : "rollback init FAILED - disabled");
+			fflush(stdout);
+		}
+		if (_raReady && maplecast_mirror::isServer()) {
+			extern std::atomic<bool> mc_runaheadPreviewLeg;
+			static uint64_t _raF = 0;
+			_raF++;
+			maplecast_mirror::setSuppressPublish(true);
+			runInternal();                                   // authoritative frame T (hidden)
+			maplecast_mirror::setSuppressPublish(false);
+			maplecast_rollback::saveFrame(_raF);
+			mc_runaheadPreviewLeg.store(true, std::memory_order_relaxed);
+			startTime = sh4_sched_now64();
+			renderTimeout = false;
+			try {
+				runInternal();                               // preview T+1 (publishes)
+			} catch (...) {
+				mc_runaheadPreviewLeg.store(false, std::memory_order_relaxed);
+				throw;
+			}
+			mc_runaheadPreviewLeg.store(false, std::memory_order_relaxed);
+			if (!maplecast_rollback::rewindToFrame(_raF)) {
+				// Rewind failed: authoritative track is now T+1 (the preview). Continuity is
+				// preserved (it WAS a valid frame) but disable run-ahead — don't compound.
+				printf("[RUNAHEAD] rewind FAILED at frame %llu - disabling
+",
+					(unsigned long long)_raF);
+				fflush(stdout);
+				_raReady = false;
+			}
+		} else {
+			runInternal();
+		}
 		if (ggpo::active())
 			ggpo::nextFrame();
 	} catch (const std::exception& e) {
