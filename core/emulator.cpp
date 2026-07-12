@@ -1804,6 +1804,12 @@ void Emulator::start()
 									const u32 _svA2 = _svfStep ? ReadMem32_nommu(0x8C268482) : 0;   // anim after preview leg (before rewind)
 								mc_runaheadPreviewLeg.store(false, std::memory_order_relaxed);
 								maplecast_mirror::setSuppressPublish(true);      // belt: suppressed between ticks
+								// A2 run-ahead: drain the render pipeline BEFORE rewinding. leg3's publish
+								// render is async on the render thread; rewindToFrame -> rend_resync ->
+								// FinishRender(DequeueRender()) would otherwise race the render thread's
+								// FinishRender on the same ctx (ta_ctx.cpp verify + double recycle). A slow
+								// forced-SYNC broadcastFreshSync (8 MB) on a viewer connect widens the window.
+								rend_wait_render_idle();
 								bool _raRewindOk = maplecast_rollback::rewindToFrame(_raF, /*lightweight=*/true);
 								auto _raT4 = std::chrono::steady_clock::now();
 								// A2 STATE-WIRE gate (MAPLECAST_STATEVF=1): the authoritative BOUNDARY state

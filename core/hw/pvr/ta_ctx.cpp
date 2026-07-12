@@ -111,6 +111,20 @@ void FinishRender(TA_context* ctx)
 	frame_finished.Set();
 }
 
+// A2 run-ahead: block the emu thread until the render thread has drained the
+// in-flight render (single-slot rqueue cleared by FinishRender above). The
+// run-ahead rewind (rewindToFrame -> rend_resync_after_rollback ->
+// FinishRender(DequeueRender())) otherwise races the render thread's own
+// FinishRender on the SAME ctx: verify(rqueue == ctx) fires (plus a double
+// tactx_Recycle). No FrameCount side-effect (unlike DequeueRender), so safe to
+// poll. frame_finished latches (auto-reset, no lost wakeup); the bounded guard
+// degrades a dead render thread to a dropped rewind, not a hang.
+void WaitRenderQueueDrained()
+{
+	for (int guard = 0; rqueue != nullptr && guard < 500; guard++)
+		frame_finished.Wait(20);
+}
+
 static std::mutex mtx_pool;
 using Lock = std::lock_guard<std::mutex>;
 

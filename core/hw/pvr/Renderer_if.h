@@ -24,6 +24,7 @@ void rend_allow_rollback();
 // anchor doesn't deadlock the next SH4 dispatch on rend_end_render's Wait.
 // See implementation comment for details.
 void rend_resync_after_rollback();
+void rend_wait_render_idle();   // A2 run-ahead: drain render pipeline before rewind
 void rend_enable_renderer(bool enabled);
 bool rend_is_enabled();
 void rend_serialize(Serializer& ser);

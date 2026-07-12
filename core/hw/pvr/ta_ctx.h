@@ -417,6 +417,7 @@ void SetCurrentTARC(u32 addr);
 bool QueueRender(TA_context* ctx);
 TA_context* DequeueRender();
 void FinishRender(TA_context* ctx);
+void WaitRenderQueueDrained();   // A2 run-ahead: emu-thread barrier before rewind
 
 //must be moved to proper header
 void FillBGP(TA_context* ctx);

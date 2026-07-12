@@ -818,6 +818,16 @@ void rend_resync_after_rollback()
 	pvrQueue.cancelEnqueue();
 }
 
+// A2 run-ahead: the emu thread MUST NOT rewind (page-walk / loadstate /
+// rend_resync's FinishRender) while the render thread still owns the in-flight
+// render context. No-op when rendering runs inline on the emu thread (no
+// separate render thread => no race).
+void rend_wait_render_idle()
+{
+	if (config::ThreadedRendering)
+		WaitRenderQueueDrained();
+}
+
 void rend_enable_renderer(bool enabled) {
 	rendererEnabled = enabled;
 }
