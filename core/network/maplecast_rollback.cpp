@@ -403,6 +403,8 @@ bool rewindToFrame(uint64_t frame)
 	_mostRecentFrame = frame;  // we've effectively undone everything past this
 	_rollbacksDone++;
 
+	static uint64_t _rwLogN = 0;   // A2: runahead rewinds EVERY tick — 60 printf/s of journald I/O is itself a perf suspect; log 1-in-600
+	if ((_rwLogN++ % 600) == 0)
 	printf("[rollback] rewound to frame %llu — sched_now %llu→%llu, pc 0x%08x→0x%08x\n",
 	       (unsigned long long)frame,
 	       (unsigned long long)prerewindNow,

@@ -1754,12 +1754,16 @@ void Emulator::start()
 								// used a different counter — "target 1 older than ring tail 22")
 								{ uint64_t mr = maplecast_rollback::mostRecentSaved();
 								  _raF = (mr == UINT64_MAX || mr == 0) ? _raF + 1 : mr + 1; }
+								// A2 PROF: per-leg stopwatch — names the thief in the 92ms/tick (budget ~24ms).
+								auto _raT0 = std::chrono::steady_clock::now();
 								maplecast_mirror::setSuppressPublish(true);
 								maplecast_mirror::raArmStepStop();
 								runInternal();                                   // -> stops at SR(T): hidden leg
 								getSh4Executor()->Start();
+								auto _raT1 = std::chrono::steady_clock::now();
 								maplecast_mirror::setSuppressPublish(false);
 								maplecast_rollback::saveFrame(_raF);
+								auto _raT2 = std::chrono::steady_clock::now();
 								mc_runaheadPreviewLeg.store(true, std::memory_order_relaxed);
 								startTime = sh4_sched_now64();
 								renderTimeout = false;
@@ -1771,8 +1775,23 @@ void Emulator::start()
 									throw;
 								}
 								getSh4Executor()->Start();
+								auto _raT3 = std::chrono::steady_clock::now();
 								mc_runaheadPreviewLeg.store(false, std::memory_order_relaxed);
-								if (!maplecast_rollback::rewindToFrame(_raF)) {
+								bool _raRewindOk = maplecast_rollback::rewindToFrame(_raF);
+								auto _raT4 = std::chrono::steady_clock::now();
+								{
+									static uint64_t _pH=0,_pS=0,_pP=0,_pR=0,_pN=0;
+									auto us=[](auto a,auto b){ return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(b-a).count(); };
+									_pH+=us(_raT0,_raT1); _pS+=us(_raT1,_raT2); _pP+=us(_raT2,_raT3); _pR+=us(_raT3,_raT4);
+									if (++_pN % 600 == 0) {
+										printf("[RUNAHEAD-PROF] avg/tick: hidden=%.1fms save=%.1fms preview=%.1fms rewind=%.1fms total=%.1fms (n=%llu)\n",
+											_pH/600000.0,_pS/600000.0,_pP/600000.0,_pR/600000.0,
+											(_pH+_pS+_pP+_pR)/600000.0,(unsigned long long)_pN);
+										fflush(stdout);
+										_pH=_pS=_pP=_pR=0;
+									}
+								}
+								if (!_raRewindOk) {
 									printf("[RUNAHEAD] rewind FAILED at frame %llu - disabling\n",
 										(unsigned long long)_raF);
 									fflush(stdout);
