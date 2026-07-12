@@ -1147,6 +1147,12 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 				memcpy(pc + 7, data.c_str(), 4);       // W3 [LT][RT][btnHi][btnLo]
 				sendto(_udpSock, pc, 11, 0, (struct sockaddr*)&_udpDest, sizeof(_udpDest));
 			}
+			else
+			{
+				// Unassigned: mirror the 4-byte path's raw fallback (strip the seq) — WITHOUT
+				// this, ?e2e=1 inputs were SILENTLY DROPPED pre-assignment = "inputs not working".
+				sendto(_udpSock, data.c_str(), 4, 0, (struct sockaddr*)&_udpDest, sizeof(_udpDest));
+			}
 		}
 	}
 	else if (msg->get_opcode() == websocketpp::frame::opcode::text)
