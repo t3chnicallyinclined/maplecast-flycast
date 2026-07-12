@@ -1769,11 +1769,14 @@ void Emulator::start()
 								  _raF = (mr == UINT64_MAX || mr == 0) ? _raF + 1 : mr + 1; }
 								// A2 PROF: per-leg stopwatch — names the thief in the 92ms/tick (budget ~24ms).
 								auto _raT0 = std::chrono::steady_clock::now();
+									static const bool _svfStep = std::getenv("MAPLECAST_STATEVF") != nullptr;
+									const u32 _svA0 = _svfStep ? ReadMem32_nommu(0x8C268482) : 0;   // anim before hidden leg
 								maplecast_mirror::setSuppressPublish(true);
 								maplecast_mirror::raArmStepStop();
 								runInternal();                                   // -> stops at SR(T): hidden leg
 								getSh4Executor()->Start();
 								auto _raT1 = std::chrono::steady_clock::now();
+									const u32 _svA1 = _svfStep ? ReadMem32_nommu(0x8C268482) : 0;   // anim after hidden leg
 								maplecast_mirror::setSuppressPublish(false);
 								maplecast_rollback::saveFrame(_raF);
 								auto _raT2 = std::chrono::steady_clock::now();
@@ -1789,6 +1792,7 @@ void Emulator::start()
 								}
 								getSh4Executor()->Start();
 								auto _raT3 = std::chrono::steady_clock::now();
+									const u32 _svA2 = _svfStep ? ReadMem32_nommu(0x8C268482) : 0;   // anim after preview leg (before rewind)
 								mc_runaheadPreviewLeg.store(false, std::memory_order_relaxed);
 								bool _raRewindOk = maplecast_rollback::rewindToFrame(_raF, /*lightweight=*/true);
 								auto _raT4 = std::chrono::steady_clock::now();
@@ -1797,9 +1801,16 @@ void Emulator::start()
 								// if PUB pos_x leads this BND by one frame, the state wire ships F+2 = +1 works.
 								{
 									static const bool _svf = std::getenv("MAPLECAST_STATEVF") != nullptr;
-									if (_svf)
-										printf("[STATEVF-BND] anim=%08x screenx=%08x\n",
-										       ReadMem32_nommu(0x8C268482), ReadMem32_nommu(0x8C268420));
+									if (_svf) {
+										const u32 _svA3 = ReadMem32_nommu(0x8C268482);   // anim after rewind (boundary)
+										// A0=pre-hidden A1=post-hidden A2=post-preview(shipped) A3=post-rewind.
+										// If A2==A1 -> the PREVIEW LEG DID NOT ADVANCE (stepping bug). If A2 leads
+										// A1 by one anim-frame -> preview advanced but the WIRE captured the wrong
+										// leg (capture-timing). A3 should == A1 (rewind restores the hidden frame).
+										printf("[STATEVF-STEP] A0=%08x A1=%08x A2=%08x A3=%08x  %s\n",
+										       _svA0, _svA1, _svA2, _svA3,
+										       (_svA2==_svA1) ? "PREVIEW-DID-NOT-ADVANCE" : "preview-advanced");
+									}
 								}
 								{
 									static uint64_t _pH=0,_pS=0,_pP=0,_pR=0,_pN=0;
