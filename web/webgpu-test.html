@@ -620,6 +620,10 @@ window._vramOverlay=new URLSearchParams(location.search).get('vramoverlay')==='1
 // ZERO clock sync needed: total = tPresent-tSend (client clock); serverSpan = pubUs-latchUs
 // (server clock); clientSpan = tPresent-tRecv; residual = total-server-client = network+latchWait.
 window._e2eProbe=new URLSearchParams(location.search).get('e2e')==='1';
+// FAIRFRAME F2 (docs/WORKSTREAM-FAIRFRAME.md): ?present=sched&delta=<ms> — present at server-stamp
+// +Δ instead of on arrival (tournament-fairness pacing; needs server E2EP stamps).
+window._schedPresent=new URLSearchParams(location.search).get('present')==='sched';
+window._ffDelta=+(new URLSearchParams(location.search).get('delta')||50);
 window._e2eMark=()=>{  // called right after render submit (both present paths)
   const E=window._e2eLast; if(!E||E._done) return; E._done=true;
   const tP=performance.now();
@@ -2934,6 +2938,7 @@ async function main(){
                     // (The render-loop call had a multi-rAF VRAM skew -> stale/wrong textures.)
                     if(window._taWatch && window._spriteclient){ try{ window._taScanFrame(g, window._spriteclient, true); }catch(e){} }
                     if(DBG.immediateRender){
+                        const _renderNow=()=>{
                         // IMMEDIATE MODE: render NOW, skip RAF wait (~8ms savings)
                         const t2=performance.now();
                         PP.ensureTargets(640,480,DBG.resScale||1);
@@ -2948,6 +2953,28 @@ async function main(){
                         maDecode+=(dMs-maDecode)*A; maParse+=(pMs-maParse)*A;
                         maRender+=(rMs-maRender)*A; maTotal+=(total-maTotal)*A;
                         fc++;
+                        };
+                        // FAIRFRAME F2 (?present=sched&delta=N, docs/WORKSTREAM-FAIRFRAME.md): present
+                        // at T_present = map(pubUs)+Δ instead of on arrival. map anchors on the MIN
+                        // observed (arrival − pubUs) over a sliding window (fastest delivery ≈ offset +
+                        // min one-way; no absolute clock sync needed). Needs the E2EP stamp (server
+                        // MAPLECAST_E2E_PROBE=1). Falls back to immediate when no stamp. Coarse
+                        // setTimeout to target−3ms then a rAF-free spin isn't worth it at v0 — measure first.
+                        const E=window._e2eLast;
+                        if(window._schedPresent && E && !E._presented){
+                            E._presented=true;
+                            const now=performance.now(), pub=Number(E.pubUs)/1000;   // server ms (monotonic)
+                            const FF=(window._ff=window._ff||{anchor:Infinity,n:0,lastReset:now});
+                            const d=now-pub;                                          // offset + one_way + decode
+                            if(d<FF.anchor||now-FF.lastReset>30000){ FF.anchor=Math.min(d,FF.anchor===Infinity?d:FF.anchor); if(now-FF.lastReset>30000){FF.anchor=d;FF.lastReset=now;} }
+                            const target=pub+FF.anchor+(window._ffDelta||50);         // local T_present
+                            const dt=target-now;
+                            FF.n++;
+                            if(FF.n%300===0) console.log('[fairframe] slack',dt.toFixed(1),'ms (Δ='+(window._ffDelta||50)+', anchor drift-reset 30s)');
+                            if(dt>1) setTimeout(_renderNow,dt); else _renderNow();
+                        } else {
+                            _renderNow();
+                        }
                     } else {
                         // VSYNC MODE: store for RAF render
                         if(pendingFrame) skippedFrames++;
