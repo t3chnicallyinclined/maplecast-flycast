@@ -1863,6 +1863,30 @@ void Emulator::vblank()
 		static const char* _lagProbePath = std::getenv("MAPLECAST_LAGPROBE");
 		if (_lagProbePath)
 			maplecast_rollback::lagProbeTick(_lagProbePath);
+		// A2 RUN-AHEAD GATE (kill-list 2026-07-12, MAPLECAST_RUNAHEAD_MEASURE=1): run-ahead
+		// depth=1 needs save + 2x emulate + load inside 16.67ms. This measures the save leg
+		// (dc_serialize into a reusable buffer) per frame ON THIS HARDWARE. avg+max logged
+		// every 600f. If avg > ~4ms on the 2-vCPU prod box, A2 doesn't fit — kill it cheaply.
+		{
+			static const bool _raMeasure = std::getenv("MAPLECAST_RUNAHEAD_MEASURE") != nullptr;
+			if (_raMeasure) {
+				static std::vector<u8> _raBuf;
+				static uint64_t _raN = 0, _raUsTot = 0, _raUsMax = 0;
+				auto t0 = std::chrono::steady_clock::now();
+				if (_raBuf.empty()) { Serializer szm; dc_serialize(szm); _raBuf.resize(szm.size() + (1u<<20)); }
+				Serializer szr(_raBuf.data(), _raBuf.size(), false);
+				dc_serialize(szr);
+				uint64_t us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+					std::chrono::steady_clock::now() - t0).count();
+				_raUsTot += us; if (us > _raUsMax) _raUsMax = us; _raN++;
+				if (_raN % 600 == 0) {
+					printf("[RUNAHEAD-MEASURE] dc_serialize avg=%.2fms max=%.2fms size=%.1fMB n=%llu\n",
+						(_raUsTot / (double)_raN) / 1000.0, _raUsMax / 1000.0,
+						szr.size() / 1048576.0, (unsigned long long)_raN);
+					fflush(stdout);
+				}
+			}
+		}
 	}
 
 	if (maplecast_rollback::active()) {
