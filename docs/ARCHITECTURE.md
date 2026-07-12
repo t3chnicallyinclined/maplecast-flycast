@@ -243,6 +243,12 @@ MAPLECAST_VCACHE=1         # content-addressed VRAM page cache
 MAPLECAST_NO_SCENE_SYNC=1  # request-driven full-VRAM SYNC broadcast gated OFF (proven redundant)
 ```
 
+> These are render-tuning flags **on top of** the base flags that actually start
+> the daemons: `MAPLECAST=1` (input server UDP :7100 — miss it and browser input
+> is **silently dropped**, join+render still work) + `MAPLECAST_MIRROR_SERVER=1`
+> (wire :7200). Full standup checklist + no-sudo public-endpoint pattern:
+> **DEPLOYMENT.md → "Standing up a browser-PLAYABLE server"**.
+
 Client defaults (`webgpu-test.html`): `statemerge` + `fxdecode` DEFAULT ON, `bodysrc=wasm`
 (render_frame — NOT the sprite machine; re_kb/74 kept render_frame as the drawer).
 

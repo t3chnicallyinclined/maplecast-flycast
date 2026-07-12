@@ -103,6 +103,78 @@ git add web/ && git commit -m "sync: pull production web files from VPS"
 
 ---
 
+## Standing up a browser-PLAYABLE server (env + ports checklist)
+
+> Hard-won during the 2026-07-12 run-ahead feel-test standup. A server that
+> *renders* in the browser and a server you can actually *play* are NOT the same
+> thing — the input path has its own gate that fails **silently**.
+
+### Required env flags
+
+`MAPLECAST_MIRROR_SERVER=1` starts the **video** (mirror wire :7200). It does
+**NOT** start the **input** server. Miss the input flag and the browser joins,
+logs `P1 JOINED`, renders perfectly — and every button press is silently
+dropped, then the player is idle-kicked after 5 min. You will chase the stick,
+the Gamepad API, the proxy, and the join handshake before you find it.
+
+| Flag | Starts | Symptom if missing |
+|------|--------|--------------------|
+| `MAPLECAST=1` | **Input server (UDP :7100/:7101)** + audio + telemetry (`emulator.cpp:1365`) | Join + render work, **all input silently dropped → idle-kick**. THE one people miss. |
+| `MAPLECAST_MIRROR_SERVER=1` | Mirror wire + control WS (:7200) | No video wire at all |
+| `MAPLECAST_HEADLESS_AUTOLOAD=1` | Auto-loads `mvc2.state` next to the ROM | Boots to BIOS/menu, not in a match |
+| `MAPLECAST_REPLICA_LIVE=1` | replica-live GSTA seed (:7212) | render_frame client has no body seed |
+| `MAPLECAST_STATE_MERGE=1` | folds per-frame body state onto the main wire (STM2) | bodies don't update / two-socket skew |
+| `MAPLECAST_RUNAHEAD=1` | arms the run-ahead 3-leg cycle (optional) | (feature off) |
+
+**Minimum browser-playable set:** `MAPLECAST=1 MAPLECAST_MIRROR_SERVER=1 MAPLECAST_HEADLESS_AUTOLOAD=1 MAPLECAST_REPLICA_LIVE=1 MAPLECAST_STATE_MERGE=1`.
+The local rig's `start_maplecast.bat` sets `MAPLECAST=1` — copy from it, not from a mirror-only launcher.
+
+### Port map (browser-playable headless)
+
+| Port | Proto | Role | Bind |
+|------|-------|------|------|
+| 7100 / 7101 | UDP | Input server + tape publisher (**needs `MAPLECAST=1`**) | `*` |
+| 7200 | TCP | **Unified** mirror wire **+** control WS — browser join AND gamepad input both land here | `*` |
+| 7203 | TCP | Audio WS | `*` |
+| 7211 | TCP | Control WS (config/telemetry) | loopback |
+| 7212 | TCP | replica-live GSTA seed | loopback |
+
+Input flow end-to-end: browser `/play` WS → `:7200` `onMessage` (binary 4-byte frame) → tagged with the player's slot → **UDP `:7100`** → input latch → SH4. If `:7100` isn't bound, that last hop is a silent drop.
+
+### Client join reality (`webgpu-test.html`)
+
+- It does **NOT** auto-join. There is a **🎮 JOIN P1** button (`joinP1.onclick`). Press a stick button first (Gamepad API needs interaction to register the pad), then click JOIN P1.
+- `sessionId` is unique per page-load. **Ghost eviction** fires when a *second* join arrives with the same display name, so a second tab / reload race / mashing JOIN kicks the first. **One tab, one join.**
+- Served over HTTPS the client runs prod "relay mode" and also loads the social stack (queue.mjs, SurrealDB `/db/rpc`, chat). Without SurrealDB those error/retry loudly in the console — **cosmetic, ignore them.**
+
+### No-sudo / firewalled box → public endpoint (caddy + cloudflared)
+
+For a box with **no root** and **no openable inbound port** (e.g. a Hetzner
+dedicated box whose firewall you can't touch). A closed inbound port is a closed
+door — so go **outbound**:
+
+```
+browser ──HTTPS──▶ Cloudflare edge ──▶ cloudflared (outbound tunnel, no inbound port)
+                                          │
+                                          ▼
+                                   caddy :8088 (userspace path-router, no root)
+                                     /ws           → localhost:7200
+                                     /play         → localhost:7200
+                                     /replica-live → localhost:7212
+                                     /audio        → localhost:7203
+                                     /             → serve web/ (static)
+                                          │
+                                          ▼
+                                   headless flycast (the sim)
+```
+
+- Over the cloudflared HTTPS URL the client is in relay mode → all paths (`/ws /play /replica-live /audio`) resolve to the same host → **no per-path URL override needed** (exactly how prod nginx works).
+- **Run every long-lived daemon in `tmux`.** caddy / cloudflared / flycast started over a one-shot `ssh` command die when the session closes — `caddy start`, `nohup`, and `setsid` all failed to survive here; detached tmux sessions persist. Use `tmux new-session -d -s NAME '/abs/path/script.sh'` (absolute paths — `~` does not expand inside the tmux command).
+- **Latency:** Cloudflare adds only ~10–15 ms over the direct RTT (its edge sits next to the box). The transport is already UDP-input + `TCP_NODELAY`-wire, so there's no cheaper transport knob. XDP/DPDK is the wrong layer for a propagation-dominated budget — it's a jitter/throughput play on the prod input path (see the Phase-2 note in the fresh-box steps below), not a mean-latency win.
+- Quick tunnel (`cloudflared tunnel --url http://localhost:8088`) gives an **ephemeral** URL; for a stable `sub.nobd.net` use a **named tunnel** (needs a Cloudflare API token scoped to the zone's DNS).
+
+---
+
 # Full Production Setup (2026-04-15) — New Dedicated-CPU VPS
 
 > This is the canonical recipe for bringing up nobd.net from scratch.
