@@ -2876,9 +2876,16 @@ async function main(){
                     const _bodyNow=ZCS2._frameCharStripped; ZCS2._frameCharStripped=false;
                     const _bodyVf=(ZCS2._frameVf===undefined?-1:ZCS2._frameVf); ZCS2._frameVf=-1;
                     const _bodyOrd=ZCS2._frameOrd; ZCS2._frameOrd=null;
+                    // COUPLING FIX (2026-07-11): fillBGP BEFORE _bodyMerge. fillBGP rebuilds g.vertexData
+                    // from P._u8 (+BGP quad) and bumps every poly first+=4; running it AFTER _bodyMerge
+                    // clobbered the spliced body verts (which live in _bmBuf, not P._u8) -> body first[]
+                    // dangled past the uploaded buffer -> stretched/invisible bodies whenever STAGESTRIP
+                    // was OFF (no _stageMerge -> _merged=false -> fillBGP runs). Run it FIRST so _bodyMerge
+                    // appends onto the BGP-augmented buffer with correct first[]. (STAGESTRIP-on: _merged
+                    // stays true, fillBGP skipped either way — unchanged.)
+                    if(!_merged){ try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e2) {} }
                     if(ZCS2.render&&(_bodyNow||(window._body&&window._body.want&&window._body.ready&&_mergeNow))){
                       try{ window._bodyMerge(g,_bodyVf,_bodyOrd); }catch(e5){ if(((ZCS2._bmErr=(ZCS2._bmErr||0)+1))<4) console.warn('[body-merge]',e5); } }
-                    if(!_merged){ try { P.fillBGP(g, D.pvrRegs, D.vram); } catch(e2) {} }
                     pMs=performance.now()-t1;
                     lastParsed=g; window._lastParsed=g; window._lastFrameNum=D.frameNum;
                     // Feed predictor with real frame vertex data
