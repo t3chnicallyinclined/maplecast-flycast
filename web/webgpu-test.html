@@ -2988,7 +2988,18 @@ async function main(){
                                 R.dev.queue.submit([enc.finish()]);
                                 BAKE.onRendered(canvas); if(window._e2eProbe)window._e2eMark();
                             }catch(e){ if((FF.err=(FF.err||0)+1)<4) console.warn('[fairframe blit]',e); } };
-                            if(dt>1) setTimeout(_blit,dt); else _blit();
+                            // v0.2 (the "smooth then glitchy" fix): setTimeout presents beat against
+                            // the display's vsync (server 59.94Hz vs display 60Hz — phases align, then
+                            // drift through the boundary = periodic judder). Present via a rAF loop:
+                            // each vsync, blit the NEWEST frame whose T_present has arrived (−8ms
+                            // half-frame centering). Vsync-locked pacing, latest-wins, no beat.
+                            FF.pendingBlit=_blit; FF.pendingTarget=target;
+                            if(!FF.rafLoop){ FF.rafLoop=true;
+                              const loop=()=>{ if(!window._schedPresent){FF.rafLoop=false;return;}
+                                if(FF.pendingBlit && performance.now()>=FF.pendingTarget-8){
+                                  const b=FF.pendingBlit; FF.pendingBlit=null; b(); }
+                                requestAnimationFrame(loop); };
+                              requestAnimationFrame(loop); }
                         } else {
                             _renderNow();
                         }
