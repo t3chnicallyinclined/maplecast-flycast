@@ -192,7 +192,12 @@ function pollOnce() {
     // packet so the server's E2EP tail attributes the latch to OUR seq. Sent-log ring lets the
     // page compute true press->present when the frame's latchedSeq >= our seq.
     if (window._e2eProbe) {
-      window._e2eSeq = (window._e2eSeq || 0) + 1;
+      // Seq must be monotonic ACROSS page reloads: the input server dedups per-source (all
+      // browser inputs share the loopback srcKey), so a reset-to-1 seq is dropped as stale
+      // until it passes the old session's max ("inputs dead after refresh"). Epoch-seconds
+      // base guarantees each session starts above the last.
+      if (!window._e2eSeq) window._e2eSeq = (Math.floor(Date.now() / 1000) % 0x30000000) << 4;
+      window._e2eSeq++;
       const b = new Uint8Array(8);
       b.set(_inputBuf, 0);
       b[4] = window._e2eSeq & 0xFF; b[5] = (window._e2eSeq >> 8) & 0xFF;
