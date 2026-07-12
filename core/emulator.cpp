@@ -1787,7 +1787,7 @@ void Emulator::start()
 								getSh4Executor()->Start();
 								auto _raT3 = std::chrono::steady_clock::now();
 								mc_runaheadPreviewLeg.store(false, std::memory_order_relaxed);
-								bool _raRewindOk = maplecast_rollback::rewindToFrame(_raF);
+								bool _raRewindOk = maplecast_rollback::rewindToFrame(_raF, /*lightweight=*/true);
 								auto _raT4 = std::chrono::steady_clock::now();
 								{
 									static uint64_t _pH=0,_pS=0,_pP=0,_pR=0,_pN=0;

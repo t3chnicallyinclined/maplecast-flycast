@@ -288,7 +288,7 @@ void saveFrame(uint64_t frame)
 	dcAuditTickFromVblank(frame);
 }
 
-bool rewindToFrame(uint64_t frame)
+bool rewindToFrame(uint64_t frame, bool lightweight)
 {
 	if (!_active.load(std::memory_order_relaxed)) return false;
 	if (_mostRecentFrame == UINT64_MAX) return false;
@@ -365,7 +365,7 @@ bool rewindToFrame(uint64_t frame)
 		Deserializer deser(target.serialBlob.data(), target.serialSize, false);
 		uint32_t frame32;
 		deser >> frame32;
-		emu.loadstate(deser);
+		emu.loadstate(deser, lightweight);   // A2: lightweight skips the per-tick dynarec flush
 		rend_resync_after_rollback();
 
 		// CRITICAL: vblank_schid was saved with end=-1 (inactive) because
