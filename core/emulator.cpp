@@ -1798,8 +1798,8 @@ void Emulator::start()
 								{
 									static const bool _svf = std::getenv("MAPLECAST_STATEVF") != nullptr;
 									if (_svf)
-										printf("[STATEVF-BND] posx=%08x screenx=%08x\n",
-										       ReadMem32_nommu(0x8C268374), ReadMem32_nommu(0x8C268420));
+										printf("[STATEVF-BND] anim=%08x screenx=%08x\n",
+										       ReadMem32_nommu(0x8C268482), ReadMem32_nommu(0x8C268420));
 								}
 								{
 									static uint64_t _pH=0,_pS=0,_pP=0,_pR=0,_pN=0;

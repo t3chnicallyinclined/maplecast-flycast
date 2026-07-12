@@ -30,6 +30,7 @@
 #include "maplecast_oracle_hook.h"       // HudQuad + mc_oracle_hudQuads (HUDQ tail)
 
 #include "hw/sh4/sh4_mem.h"              // addrspace::read*, mem_b, RAM_SIZE
+#include "network/maplecast_mirror.h"    // A2 STATEVF: suppressActive() to log only the shipped leg
 #include "hw/pvr/pvr_mem.h"              // vram, VRAM_SIZE
 #include "hw/pvr/pvr_regs.h"             // pvr_regs[], pvr_RegSize
 #include "types.h"                       // RAM_SIZE / VRAM_SIZE macros
@@ -781,10 +782,14 @@ static void captureFrame(u32 vframe)
 	// and screen_x (+0xE0, RENDER-DEPOSITED at STARTRENDER — may inherit MVC2's 1-frame submit defer).
 	// Compare baseline vs run-ahead published sequences: +1 offset on pos_x => run-ahead delivers.
 	{
+		// anim@+0x142/sprite@+0x144 (u32 @0x8C268482) CHANGE every frame via the idle animation
+		// (pos_x is static when idle). Log only the SHIPPED (preview/non-suppressed) leg so the
+		// run-ahead sequence is 1-per-tick and comparable to baseline. vf STAMP is unreliable
+		// (increments at vblank AFTER this point) — compare the anim CONTENT, not the vf.
 		static const bool _svf = std::getenv("MAPLECAST_STATEVF") != nullptr;
-		if (_svf) {
-			printf("[STATEVF-PUB] vf=%u posx=%08x screenx=%08x\n",
-			       vframe, rd32(0x8C268374), rd32(0x8C268420));
+		if (_svf && !maplecast_mirror::suppressActive()) {
+			printf("[STATEVF-PUB] vf=%u anim=%08x screenx=%08x\n",
+			       vframe, rd32(0x8C268482), rd32(0x8C268420));
 			fflush(stdout);
 		}
 	}
