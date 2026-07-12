@@ -328,6 +328,8 @@ struct LatchStatsAccum {
 };
 static LatchStatsAccum _latchStats[2];
 
+static inline int64_t nowUs();   // defined below (single monotonic clock for this TU)
+
 // E2E probe (kill-list, 2026-07-12): the latch instant + the packet seq current at THIS latch,
 // per slot — serverPublish stamps these into the ZCS2 'E2EP' tail so a browser can compute true
 // press->present. Written by the maple thread at latch; read by the publish thread. Relaxed is
