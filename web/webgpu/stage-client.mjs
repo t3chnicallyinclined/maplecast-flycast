@@ -189,7 +189,7 @@ export class StageClient {
       // ?v= cache-buster: these fetches run LAZILY (on the first wire stage_id), so a
       // hard refresh does NOT bypass the HTTP cache for them — bump on asset changes
       // (hudpurge1 = the 2026-07-09 STG0B HUD-contamination purge, re_kb/67).
-      const V = 'hudpurge1';
+      const V = 'floorfix2';
       let data = null, isTA = false;
       try {
         const r = await fetch(`${this.base}/STG${sid}_ta.json?v=${V}`);
