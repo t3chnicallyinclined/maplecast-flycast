@@ -131,33 +131,59 @@ def walk(ta):
             # (garbage, decoded to a bogus ~0.01 intensity that painted the deck black). We
             # now decode the real per-vertex RGBA so a textured Intensity/Floating mesh (the
             # carrier deck, vt5, ShadInstr=modulate) keeps its true dark-grey shading.
-            x = f(struct.unpack_from("<I", ta, o + 4)[0])
-            y = f(struct.unpack_from("<I", ta, o + 8)[0])
-            z = f(struct.unpack_from("<I", ta, o + 12)[0])
-            u = f(struct.unpack_from("<I", ta, o + 16)[0])
-            v = f(struct.unpack_from("<I", ta, o + 20)[0])
-            base = struct.unpack_from("<I", ta, o + 24)[0]   # vt3 BaseCol (kept for compat)
-            rgba = None      # (r,g,b,a) floats 0..1 — the REAL modulation colour
-            if vt == 5 or vt == 6:        # Floating Color (textured) — colour in 2nd half
-                A = f(struct.unpack_from("<I", ta, o + 32 + 0)[0])
-                R = f(struct.unpack_from("<I", ta, o + 32 + 4)[0])
-                G = f(struct.unpack_from("<I", ta, o + 32 + 8)[0])
-                B = f(struct.unpack_from("<I", ta, o + 32 + 12)[0])
-                rgba = (R, G, B, A)
-            elif vt == 7 or vt == 8:      # Intensity (textured) — single float, grey
-                bi = f(base)
-                if 0.0 <= bi <= 4.0:
-                    rgba = (bi, bi, bi, 1.0)
-            elif vt == 3 or vt == 4:      # Packed ARGB8888
-                A = ((base >> 24) & 0xFF) / 255.0
-                R = ((base >> 16) & 0xFF) / 255.0
-                G = ((base >> 8) & 0xFF) / 255.0
-                B = (base & 0xFF) / 255.0
-                rgba = (R, G, B, A)
-            if cur is not None:
-                cur["verts"].append({"x": x, "y": y, "z": z, "u": u, "v": v, "base": base,
-                                     "rgba": rgba, "eos": (c >> 28) & 1})
-            o += 64 if v64 else 32
+            if vt == "sprite" and cur is not None:
+                # para5 SPRITE (the stage FLOOR GRID + effect sprites): 4 corners A@+4 B@+16 C@+28
+                # D@+40; packed-u16 half-float UVs (V,U order) @+52..+62; D's z/uv plane-solved. Emit
+                # the flycast strip order D,C,A,B (eos on B) so strip_to_tris makes DCA+ACB — the SAME
+                # 2 tris the client's renderer produces. Ref web/webgpu/ta-parser.mjs:171-202. (Was
+                # dropped: the old walk read a sprite as ONE vertex -> strip_to_tris -> 0 tris.)
+                Ax=f(struct.unpack_from("<I",ta,o+4)[0]);  Ay=f(struct.unpack_from("<I",ta,o+8)[0]);  Az=f(struct.unpack_from("<I",ta,o+12)[0])
+                Bx=f(struct.unpack_from("<I",ta,o+16)[0]); By=f(struct.unpack_from("<I",ta,o+20)[0]); Bz=f(struct.unpack_from("<I",ta,o+24)[0])
+                Cx=f(struct.unpack_from("<I",ta,o+28)[0]); Cy=f(struct.unpack_from("<I",ta,o+32)[0]); Cz=f(struct.unpack_from("<I",ta,o+36)[0])
+                Dx=f(struct.unpack_from("<I",ta,o+40)[0]); Dy=f(struct.unpack_from("<I",ta,o+44)[0])
+                Au=Av=Bu=Bv=Cu=Cv=0.0
+                if cur["bits"].get("Texture", 0):
+                    Av=struct.unpack_from("<e",ta,o+52)[0]; Au=struct.unpack_from("<e",ta,o+54)[0]
+                    Bv=struct.unpack_from("<e",ta,o+56)[0]; Bu=struct.unpack_from("<e",ta,o+58)[0]
+                    Cv=struct.unpack_from("<e",ta,o+60)[0]; Cu=struct.unpack_from("<e",ta,o+62)[0]
+                _ACx,_ACy,_ACz=Cx-Ax,Cy-Ay,Cz-Az; _ABx,_ABy,_ABz=Bx-Ax,By-Ay,Bz-Az; _APx,_APy=Dx-Ax,Dy-Ay
+                _ABu,_ABv,_ACu,_ACv=Bu-Au,Bv-Av,Cu-Au,Cv-Av
+                _k3=_ACx*_ABy-_ACy*_ABx
+                _k2=(_APx*_ABy-_APy*_ABx)/_k3 if _k3!=0 else 0.0
+                _k1=(Dx-Ax-_k2*_ACx)/_ABx if _ABx!=0 else ((Dy-Ay-_k2*_ACy)/_ABy if _ABy!=0 else 0.0)
+                Dz=Az+_k1*_ABz+_k2*_ACz; Du=Au+_k1*_ABu+_k2*_ACu; Dv=Av+_k1*_ABv+_k2*_ACv
+                for _i,(vx,vy,vz,vu,vvv) in enumerate(((Dx,Dy,Dz,Du,Dv),(Cx,Cy,Cz,Cu,Cv),(Ax,Ay,Az,Au,Av),(Bx,By,Bz,Bu,Bv))):
+                    cur["verts"].append({"x":vx,"y":vy,"z":vz,"u":vu,"v":vvv,"base":0xFFFFFFFF,
+                                         "rgba":(1.0,1.0,1.0,1.0),"eos":1 if _i==3 else 0})
+                o += 64
+            else:
+                x = f(struct.unpack_from("<I", ta, o + 4)[0])
+                y = f(struct.unpack_from("<I", ta, o + 8)[0])
+                z = f(struct.unpack_from("<I", ta, o + 12)[0])
+                u = f(struct.unpack_from("<I", ta, o + 16)[0])
+                v = f(struct.unpack_from("<I", ta, o + 20)[0])
+                base = struct.unpack_from("<I", ta, o + 24)[0]   # vt3 BaseCol (kept for compat)
+                rgba = None      # (r,g,b,a) floats 0..1 — the REAL modulation colour
+                if vt == 5 or vt == 6:        # Floating Color (textured) — colour in 2nd half
+                    A = f(struct.unpack_from("<I", ta, o + 32 + 0)[0])
+                    R = f(struct.unpack_from("<I", ta, o + 32 + 4)[0])
+                    G = f(struct.unpack_from("<I", ta, o + 32 + 8)[0])
+                    B = f(struct.unpack_from("<I", ta, o + 32 + 12)[0])
+                    rgba = (R, G, B, A)
+                elif vt == 7 or vt == 8:      # Intensity (textured) — single float, grey
+                    bi = f(base)
+                    if 0.0 <= bi <= 4.0:
+                        rgba = (bi, bi, bi, 1.0)
+                elif vt == 3 or vt == 4:      # Packed ARGB8888
+                    A = ((base >> 24) & 0xFF) / 255.0
+                    R = ((base >> 16) & 0xFF) / 255.0
+                    G = ((base >> 8) & 0xFF) / 255.0
+                    B = (base & 0xFF) / 255.0
+                    rgba = (R, G, B, A)
+                if cur is not None:
+                    cur["verts"].append({"x": x, "y": y, "z": z, "u": u, "v": v, "base": base,
+                                         "rgba": rgba, "eos": (c >> 28) & 1})
+                o += 64 if v64 else 32
         elif ptype == 4 or ptype == 5:
             b = pcw_bits(c)
             isp = struct.unpack_from("<I", ta, o + 4)[0]
