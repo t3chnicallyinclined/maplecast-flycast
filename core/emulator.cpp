@@ -1777,23 +1777,33 @@ void Emulator::start()
 								getSh4Executor()->Start();
 								auto _raT1 = std::chrono::steady_clock::now();
 									const u32 _svA1 = _svfStep ? ReadMem32_nommu(0x8C268482) : 0;   // anim after hidden leg
+								maplecast_rollback::saveFrame(_raF);             // save N = rewind target (suppress STILL ON)
+								// A2 3-LEG cycle (flycast-internals fix): MVC2 defers render-submit by 1 frame, so the OLD
+								// 2-leg preview shipped the HIDDEN (N) list. leg2 = SUPPRESSED lookahead: advance resident to
+								// N+1 + BUILD N+1's char list; its deferred-N submit fires here and is dropped (mc_hiddenLeg).
+								maplecast_mirror::raArmStepStop();
+								runInternal();                                   // leg2: lookahead -> N+1 (build N+1 list, do not ship)
+								getSh4Executor()->Start();
+								// leg3 (PUBLISH): first STARTRENDER submits N+1's list (deferred) -> captured coherently
+								// (resident scalars + char-pass snaps + BTCW all = N+1) -> ships.
 								maplecast_mirror::setSuppressPublish(false);
-								maplecast_rollback::saveFrame(_raF);
 								auto _raT2 = std::chrono::steady_clock::now();
 								mc_runaheadPreviewLeg.store(true, std::memory_order_relaxed);
 								startTime = sh4_sched_now64();
 								renderTimeout = false;
 								maplecast_mirror::raArmStepStop();
 								try {
-									runInternal();                               // -> stops at SR(T+1): preview publishes
+									runInternal();                               // leg3: ships N+1 (deferred submit), advances to N+2
 								} catch (...) {
 									mc_runaheadPreviewLeg.store(false, std::memory_order_relaxed);
+									maplecast_mirror::setSuppressPublish(true);
 									throw;
 								}
 								getSh4Executor()->Start();
 								auto _raT3 = std::chrono::steady_clock::now();
 									const u32 _svA2 = _svfStep ? ReadMem32_nommu(0x8C268482) : 0;   // anim after preview leg (before rewind)
 								mc_runaheadPreviewLeg.store(false, std::memory_order_relaxed);
+								maplecast_mirror::setSuppressPublish(true);      // belt: suppressed between ticks
 								bool _raRewindOk = maplecast_rollback::rewindToFrame(_raF, /*lightweight=*/true);
 								auto _raT4 = std::chrono::steady_clock::now();
 								// A2 STATE-WIRE gate (MAPLECAST_STATEVF=1): the authoritative BOUNDARY state
