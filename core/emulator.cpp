@@ -1993,6 +1993,11 @@ void Emulator::vblank()
 		}
 	}
 
+	// A2 v3.1: frame-step stop at the TRUE frame boundary (post-render, scheduler alive) —
+	// the same stop-callback-restart context the rollback ring uses from vblank.
+	if (maplecast_mirror::raConsumeStepStop())
+		getSh4Executor()->Stop();
+
 	if (maplecast_rollback::active() && !mc_runaheadArmed) {
 		static uint64_t _rollbackFrameSeq = 0;
 		maplecast_rollback::saveFrame(++_rollbackFrameSeq);
