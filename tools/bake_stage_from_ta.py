@@ -154,8 +154,10 @@ def main():
     for g in groups:
         if not g["bits"]["Texture"] or not g["verts"]:
             continue
-        if g["bits"]["ListType"] not in (0, 2):   # 0=opaque, 2=translucent (floor grid + glow)
+        if g["bits"]["ListType"] not in (0, 2):   # 0=opaque, 2=translucent (glow)
             continue
+        if g["paraType"] == 5:   # para5 SPRITES in a match capture = CHARACTER/effect content
+            continue             # (bank 0x82 collides with char bodies) — NOT stage geometry
         if is_hud(g):
             continue
         addr, tu, tv, pf, tw = tex_params(g["tsp"], g["tcw"])
@@ -178,6 +180,8 @@ def main():
     meshes = []
     for g in groups:
         if not g["verts"] or g["bits"]["ListType"] not in (0, 2):
+            continue
+        if g["paraType"] == 5:   # para5 sprites = character/effect content, not stage geometry
             continue
         if is_hud(g):
             continue
