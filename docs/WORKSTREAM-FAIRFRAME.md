@@ -61,3 +61,11 @@ input:   latch already server-aligned → equalized stimulus + equalized latch =
 ## Status log
 - 2026-07-12: Workstream locked. F1 = env flip (E2EP already in binary b0250090). F2 client
   scheduler v0 implemented behind ?present=sched (see webgpu-test.html).
+- 2026-07-12 (v0→v0.2 lessons, all committed): v0 delayed the RENDER → shredded bodies (D.vram is
+  shared live state; retained-image presentation is MANDATORY). v0.1 render-now/blit-later via
+  setTimeout → smooth-then-judder (59.94 vs 60Hz vsync BEAT; vsync-locking MANDATORY). v0.2 rAF
+  presenter → clean + calibrated (slack 47.2ms @Δ=50) but presents SILENTLY stop after seconds:
+  NO GPU errors, NO blit warnings ⇒ either decode stalls upstream or the schedule condition goes
+  false. NEXT: add a [fairframe] 1Hz heartbeat {pendingBlit?, target-now, wsFrames} to discriminate
+  decode-stall vs present-stall — ONE log line answers it. Mode stays opt-in experimental; default
+  path untouched.
