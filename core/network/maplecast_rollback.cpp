@@ -322,6 +322,7 @@ bool rewindToFrame(uint64_t frame, bool lightweight)
 	// also restores RAM/VRAM. Kept for safety + cheap.
 	static const bool _rwProf = std::getenv("MAPLECAST_STATEVF") != nullptr;
 	auto _rwt0 = std::chrono::steady_clock::now();
+	std::chrono::steady_clock::time_point _rwt1{}, _rwt2{};
 	for (uint64_t f = _mostRecentFrame; f > frame; f--)
 	{
 		const int idx = (int)(f % RING_DEPTH);
@@ -368,9 +369,9 @@ bool rewindToFrame(uint64_t frame, bool lightweight)
 		Deserializer deser(target.serialBlob.data(), target.serialSize, false);
 		uint32_t frame32;
 		deser >> frame32;
-		auto _rwt1 = std::chrono::steady_clock::now();
+		_rwt1 = std::chrono::steady_clock::now();
 		emu.loadstate(deser, lightweight);   // A2: lightweight skips the per-tick dynarec flush
-		auto _rwt2 = std::chrono::steady_clock::now();
+		_rwt2 = std::chrono::steady_clock::now();
 		rend_resync_after_rollback();
 
 		// CRITICAL: vblank_schid was saved with end=-1 (inactive) because
@@ -409,8 +410,7 @@ bool rewindToFrame(uint64_t frame, bool lightweight)
 		auto us=[](auto a,auto b){ return (long long)std::chrono::duration_cast<std::chrono::microseconds>(b-a).count(); };
 		static long long _pw=0,_ds=0,_pr=0,_n=0;
 		_pw+=us(_rwt0,_rwt1); _ds+=us(_rwt1,_rwt2); _pr+=us(_rwt2,_rwt3); _n++;
-		if (_n%600==0){ printf("[REWIND-PROF] pagewalk=%lldus deserialize=%lldus protect=%lldus (n=%lld)
-",_pw/600,_ds/600,_pr/600,_n); fflush(stdout); _pw=_ds=_pr=0; }
+		if (_n%600==0){ printf("[REWIND-PROF] pagewalk=%lldus deserialize=%lldus protect=%lldus (n=%lld)\n",_pw/600,_ds/600,_pr/600,_n); fflush(stdout); _pw=_ds=_pr=0; }
 	}
 
 	_mostRecentFrame = frame;  // we've effectively undone everything past this
