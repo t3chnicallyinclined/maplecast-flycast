@@ -267,7 +267,7 @@ export class PostProcessor {
         });
         this.offscreenView = this.offscreenTex.createView();
 
-        (bgOverride||this.bindGroup) = this.dev.createBindGroup({ layout: this.bgl, entries: [
+        this.bindGroup = this.dev.createBindGroup({ layout: this.bgl, entries: [
             { binding: 0, resource: this.offscreenView },
             { binding: 1, resource: this.sampler },
             { binding: 2, resource: { buffer: this.uniformBuf } },
