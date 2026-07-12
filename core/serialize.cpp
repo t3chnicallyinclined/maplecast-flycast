@@ -1,6 +1,8 @@
 // serialize.cpp : save states
 #include "serialize.h"
 #include "types.h"
+#include <chrono>
+#include <cstdlib>
 #include "hw/aica/aica_if.h"
 #include "hw/holly/sb.h"
 #include "hw/flashrom/nvmem.h"
@@ -158,13 +160,34 @@ void dc_deserialize(Deserializer& deser)
 {
 	DEBUG_LOG(SAVESTATE, "Loading state version %d", deser.version());
 
+	// A2 cheap-rewind investigation: per-subsystem deserialize profiler
+	// (MAPLECAST_DESER_PROF=1). aica/pvr/sh4 carry the 28MB (aram/vram/mem_b);
+	// this splits the ~11ms rewind restore across them to pick the raw-memcpy target.
+	static const bool _dp = std::getenv("MAPLECAST_DESER_PROF") != nullptr;
+	auto _dpn = []{ return std::chrono::steady_clock::now(); };
+	auto _t0 = _dp ? _dpn() : std::chrono::steady_clock::time_point{};
+
 	MAYBE_SKIP("aica",   aica::deserialize(deser));
+	auto _tAica = _dp ? _dpn() : _t0;
 	MAYBE_SKIP("sb",     sb_deserialize(deser));
 	MAYBE_SKIP("nvmem",  nvmem::deserialize(deser));
 	MAYBE_SKIP("gdrom",  gdrom::deserialize(deser));
 	MAYBE_SKIP("maple",  mcfg_DeserializeDevices(deser));
+	auto _tPre = _dp ? _dpn() : _t0;
 	MAYBE_SKIP("pvr",    pvr::deserialize(deser));
+	auto _tPvr = _dp ? _dpn() : _t0;
 	MAYBE_SKIP("sh4",    sh4::deserialize(deser));
+	if (_dp) {
+		auto us = [](auto a, auto b){ return (long long)std::chrono::duration_cast<std::chrono::microseconds>(b - a).count(); };
+		auto _tSh4 = _dpn();
+		static long long _aA=0,_aMid=0,_aP=0,_aS=0,_n=0;
+		_aA += us(_t0,_tAica); _aMid += us(_tAica,_tPre); _aP += us(_tPre,_tPvr); _aS += us(_tPvr,_tSh4); _n++;
+		if (_n % 600 == 0) {
+			printf("[DESER-PROF] aica=%lldus mid(sb/nvmem/gdrom/maple)=%lldus pvr=%lldus sh4=%lldus (n=%lld)\n",
+				_aA/600, _aMid/600, _aP/600, _aS/600, _n); fflush(stdout);
+			_aA=_aMid=_aP=_aS=0;
+		}
+	}
 
 	if (shouldSkipSubsys("bba_flag")) {
 		size_t sz = lookupSubsysSize("bba_flag");
