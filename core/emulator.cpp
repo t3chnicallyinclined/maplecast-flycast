@@ -82,6 +82,11 @@
 #include "oslib/i18n.h"
 
 settings_t settings;
+
+// A2 run-ahead: true once the run-ahead loop owns the rollback ring — gates the vblank
+// auto-save (its divergent frame numbering evicted the loop's slot before the first rewind:
+// "target 1 older than ring tail 22", local trace 2026-07-12).
+static bool mc_runaheadArmed = false;
 constexpr char const *BIOS_TITLE = "Dreamcast BIOS";
 
 static void loadSpecialSettings()
@@ -1732,6 +1737,7 @@ void Emulator::start()
 							if (_raWant && !_raTried) {
 								_raTried = true;
 								_raReady = maplecast_rollback::init();
+								mc_runaheadArmed = _raReady;   // gates the vblank auto-save (divergent numbering)
 								printf("[RUNAHEAD] %s (threaded loop)\n", _raReady ? "ARMED depth=1"
 								                                                   : "rollback init FAILED - disabled");
 								fflush(stdout);
@@ -1744,7 +1750,10 @@ void Emulator::start()
 								// runInternal() returns after exactly one leg; Start() re-arms the SH4.
 								extern std::atomic<bool> mc_runaheadPreviewLeg;
 								static uint64_t _raF = 0;
-								_raF++;
+								// number our saves AFTER anything already in the ring (boot-time auto-saves
+								// used a different counter — "target 1 older than ring tail 22")
+								{ uint64_t mr = maplecast_rollback::mostRecentSaved();
+								  _raF = (mr == UINT64_MAX || mr == 0) ? _raF + 1 : mr + 1; }
 								maplecast_mirror::setSuppressPublish(true);
 								maplecast_mirror::raArmStepStop();
 								runInternal();                                   // -> stops at SR(T): hidden leg
@@ -1984,7 +1993,7 @@ void Emulator::vblank()
 		}
 	}
 
-	if (maplecast_rollback::active()) {
+	if (maplecast_rollback::active() && !mc_runaheadArmed) {
 		static uint64_t _rollbackFrameSeq = 0;
 		maplecast_rollback::saveFrame(++_rollbackFrameSeq);
 
