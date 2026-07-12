@@ -306,9 +306,16 @@ export class StageClient {
       // (the full on-screen deck — verified 1812 in-view verts preserved) while dropping the
       // canvas-spanning ±millions garbage. (Larger margins kept the same in-view set but let
       // more off-screen stretched scenery through; 800 is the tightest that loses no deck.)
-      const MARGIN = 800;
+      // 2026-07-11 FLOOR FIX: the old MARGIN=800 viewport cull dropped the FLOOR — a ground plane's
+      // near corners project to X≈-6182/+6822 (perspective spreads a floor's near edge far past the
+      // 640x480 viewport), so both floor tris had an off-screen corner and were culled. It also killed
+      // the deck edges + ~200 dome tris. The cull only needs to drop the ±14.5-MILLION-px un-projection
+      // garbage from unplaced props; legit large off-screen tris (ground plane, ±thousands) are clipped
+      // by the GPU rasterizer. Use a finite-SANITY bound instead. (Validated: kept tris 545->826/832;
+      // floor 0->2, deck 0->48, dome 525->720; only the 6 genuine ±14.5M garbage tris dropped.)
+      const SANITY = 100000;
       const onScreen = (x, y) => Number.isFinite(x) && Number.isFinite(y)
-        && x >= -MARGIN && x <= SCREEN_W + MARGIN && y >= -MARGIN && y <= SCREEN_H + MARGIN;
+        && Math.abs(x) <= SANITY && Math.abs(y) <= SANITY;
       for (const tri of m.tris) {
         // resolve the 3 final screen verts first so we can reject the whole tri atomically
         const fv = [];
