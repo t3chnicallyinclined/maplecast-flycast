@@ -1,4 +1,5 @@
 #include "audiostream.h"
+#include <atomic>
 #include "oslib/i18n.h"
 #include <chrono>
 #include <thread>
@@ -24,7 +25,10 @@ public:
 		// is the prime suspect for the 448-cycle LIVE-vs-REDO drift.
 		static const bool _bypassPacing = std::getenv("MAPLECAST_DC_AUDIT") != nullptr
 			|| std::getenv("MAPLECAST_BYPASS_AUDIO_PACING") != nullptr;
-		if (_bypassPacing)
+		// A2 run-ahead paces itself at the tick end (this sample-based sleep is confused by the
+		// per-tick rewind un-producing the hidden leg's audio -> 85fps). Skip it while armed.
+		extern std::atomic<bool> mc_runaheadArmed;
+		if (_bypassPacing || mc_runaheadArmed.load(std::memory_order_relaxed))
 			return 1;
 
 		if (wait && last_time.time_since_epoch() != the_clock::duration::zero())

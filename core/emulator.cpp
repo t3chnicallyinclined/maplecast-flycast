@@ -86,7 +86,10 @@ settings_t settings;
 // A2 run-ahead: true once the run-ahead loop owns the rollback ring — gates the vblank
 // auto-save (its divergent frame numbering evicted the loop's slot before the first rewind:
 // "target 1 older than ring tail 22", local trace 2026-07-12).
-static bool mc_runaheadArmed = false;
+std::atomic<bool> mc_runaheadArmed{false};   // GLOBAL: audiobackend_null externs this to skip pacing
+                                             // under run-ahead (the rewind un-produces the hidden
+                                             // leg's audio, confusing the sample-based pacer -> 85fps;
+                                             // an explicit 60Hz tick-end pacer replaces it).
 constexpr char const *BIOS_TITLE = "Dreamcast BIOS";
 
 static void loadSpecialSettings()
@@ -1747,7 +1750,7 @@ void Emulator::start()
 							if (_raWant && !_raTried) {
 								_raTried = true;
 								_raReady = maplecast_rollback::init();
-								mc_runaheadArmed = _raReady;   // gates the vblank auto-save (divergent numbering)
+								mc_runaheadArmed.store(_raReady, std::memory_order_relaxed);   // gates vblank auto-save + audio pacing
 								printf("[RUNAHEAD] %s (threaded loop)\n", _raReady ? "ARMED depth=1"
 								                                                   : "rollback init FAILED - disabled");
 								fflush(stdout);
@@ -1808,6 +1811,23 @@ void Emulator::start()
 										(unsigned long long)_raF);
 									fflush(stdout);
 									_raReady = false;
+								}
+								// 60Hz TICK-END PACER: run-ahead bypasses the null-audio pacer (the rewind
+								// un-produces the hidden leg's audio, confusing the sample-based sleep ->
+								// game ran 85fps). Pace HERE instead — sleep to the next 16.667ms grid
+								// AFTER all the work (publish already went out). "Pace at the end, not
+								// inside the frame" (the user's insight). Drift-tolerant: if a tick ran
+								// long (super), resync the grid instead of accumulating debt.
+								{
+									static std::chrono::steady_clock::time_point _raDeadline{};
+									const auto _period = std::chrono::microseconds(16667);
+									auto _now = std::chrono::steady_clock::now();
+									if (_raDeadline.time_since_epoch().count() == 0) _raDeadline = _now;
+									_raDeadline += _period;
+									if (_now < _raDeadline)
+										std::this_thread::sleep_until(_raDeadline);
+									else if (_now - _raDeadline > _period * 4)
+										_raDeadline = _now;   // fell >4 frames behind — resync, don't spiral
 								}
 							} else {
 								runInternal();
@@ -2029,7 +2049,7 @@ void Emulator::vblank()
 	if (maplecast_mirror::raConsumeStepStop())
 		getSh4Executor()->Stop();
 
-	if (maplecast_rollback::active() && !mc_runaheadArmed) {
+	if (maplecast_rollback::active() && !mc_runaheadArmed.load(std::memory_order_relaxed)) {
 		static uint64_t _rollbackFrameSeq = 0;
 		maplecast_rollback::saveFrame(++_rollbackFrameSeq);
 
