@@ -606,6 +606,8 @@ void rend_start_render()
 	FillBGP(ctx);
 
 	ctx->rend.isRTT = (FB_W_SOF1 & 0x1000000) != 0;
+	// A2 run-ahead: sample the leg flag HERE (emu thread, synchronous) — see ta_ctx.h.
+	ctx->rend.mc_hiddenLeg = maplecast_mirror::suppressActive();
 	ctx->rend.fb_W_SOF1 = FB_W_SOF1;
 	ctx->rend.fb_W_CTRL.full = FB_W_CTRL.full;
 

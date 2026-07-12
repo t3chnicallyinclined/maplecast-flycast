@@ -107,6 +107,7 @@ void markVramDirty(uint32_t offset, uint32_t size);
 void requestSyncBroadcast();
 // A2 run-ahead: suppress serverPublish for the hidden authoritative frame (emu loop sets/clears).
 void setSuppressPublish(bool v);
+bool suppressActive();
 
 // Build the full DC save state via dc_serialize into a freshly malloc'd
 // buffer. Caller must free() it. Returns nullptr on failure. This is the

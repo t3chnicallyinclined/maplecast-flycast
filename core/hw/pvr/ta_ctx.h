@@ -232,6 +232,11 @@ struct rend_context
 	f32 fZ_max;
 
 	bool isRTT;
+	// A2 run-ahead: stamped TRUE at rend_start_render (emu thread) when this context was produced
+	// by the HIDDEN authoritative leg — serverPublish must skip it. Rides the context because
+	// rendering is PIPELINED: publish executes during the NEXT tick's leg (a wall-clock flag
+	// suppressed 100% of frames — total wire blackout, 2026-07-12).
+	bool mc_hiddenLeg = false;
 	bool clearFramebuffer;
 	
 	TA_GLOB_TILE_CLIP_type ta_GLOB_TILE_CLIP;

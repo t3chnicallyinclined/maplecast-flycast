@@ -2233,11 +2233,12 @@ static bool decodeTexAny(uint32_t tcw, uint32_t tsp, uint8_t* out) {
 // runInternal() legs in Emulator::run(); read here on the render thread. Atomic: cross-thread.
 static std::atomic<bool> _suppressPublish{false};
 void setSuppressPublish(bool v) { _suppressPublish.store(v, std::memory_order_release); }
+bool suppressActive() { return _suppressPublish.load(std::memory_order_acquire); }
 
 void serverPublish(TA_context* ctx)
 {
 	if (!_isServer || !_shmPtr || !ctx) return;
-	if (_suppressPublish.load(std::memory_order_acquire)) return;   // A2 hidden-frame leg
+	if (ctx->rend.mc_hiddenLeg) return;   // A2 hidden-frame leg (context-stamped — see ta_ctx.h)
 
 	// Skip heavy work (diff, compress, broadcast) when no clients connected.
 	// Still increment the frame counter so local overlays/telemetry work.
