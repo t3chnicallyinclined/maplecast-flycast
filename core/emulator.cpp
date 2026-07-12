@@ -1127,19 +1127,28 @@ void Emulator::stepRange(u32 from, u32 to)
 	stop();
 }
 
-void Emulator::loadstate(Deserializer& deser)
+void Emulator::loadstate(Deserializer& deser, bool lightweight)
 {
-	if (!custom_texture.preloaded())
+	// A2 run-ahead: LIGHTWEIGHT restore skips the dynarec/texture flushes. The rewind goes back
+	// exactly 1 frame, so the SH4 blocks compiled during this tick and the decoded textures are
+	// STILL VALID (identical code/VRAM); ResetCache+bm_Reset every tick emptied the JIT cache and
+	// the NEXT (hidden) leg re-compiled every block cold = the 80ms/tick thief (profiler 2026-07-12).
+	// Genuine self-modifying code is still caught by the dynarec's own SMC page-write invalidation.
+	if (!lightweight)
 	{
-		custom_texture.terminate();
-		custom_texture.init();
-	}
+		if (!custom_texture.preloaded())
+		{
+			custom_texture.terminate();
+			custom_texture.init();
+		}
 #if FEAT_AREC == DYNAREC_JIT
-	aica::arm::recompiler::flush();
+		aica::arm::recompiler::flush();
 #endif
+	}
 	mmu_flush_table();
 #if FEAT_SHREC != DYNAREC_NONE
-	bm_Reset();
+	if (!lightweight)
+		bm_Reset();
 #endif
 	memwatch::unprotect();
 	memwatch::reset();
@@ -1147,7 +1156,8 @@ void Emulator::loadstate(Deserializer& deser)
 	dc_deserialize(deser);
 
 	mmu_set_state();
-	getSh4Executor()->ResetCache();
+	if (!lightweight)
+		getSh4Executor()->ResetCache();
 	EventManager::event(Event::LoadState);
 }
 

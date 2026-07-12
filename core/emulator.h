@@ -176,7 +176,7 @@ public:
 	/*
 	 * Load the machine state from the passed deserializer
 	 */
-	void loadstate(Deserializer& deser);
+	void loadstate(Deserializer& deser, bool lightweight = false);
 	/**
 	 * Insert a new media in the GD-ROM drive.
 	 */

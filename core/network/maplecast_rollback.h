@@ -69,7 +69,7 @@ void saveFrame(uint64_t frame);
 // where the SH4 is fully paused (executor->Stop() called and Run() has
 // returned). For async-safe usage from inside SH4 execution (vblank
 // handler), use requestRewindToFrame() instead.
-bool rewindToFrame(uint64_t frame);
+bool rewindToFrame(uint64_t frame, bool lightweight = false);
 
 // Async-safe rewind request. Sets a pending flag; the actual loadstate
 // happens later when the SH4 thread is at a safe pause point. Caller can
