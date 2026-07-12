@@ -64,3 +64,14 @@ Caveats: +16.7ms MVC2 internal frame to VISIBLE response (~39ms); compositor sca
 **A1 FALSIFIED** (est. 9-12ms; measured latch->publish = 1.7ms — the pacing slack already sits publish->next-latch).
 Re-ranked: A2 run-ahead (16.7ms, THE lever) > B1 SYNC un-hitch (p99 ~90ms spikes) > D2 compositor (PresentMon).
 Probe lesson: first run read min 0.7ms (below physical floor) — internal-vs-client seq-space bug; always gate on the floor.
+
+## A2 GATE RESULT (2026-07-12, prod): **GO**
+MAPLECAST_RUNAHEAD_MEASURE on prod: dc_serialize avg=1.80ms max=15.28ms(first-call artifact) size=26.7MB.
+Budget: save 1.8 + 2x emulate (~4-10) + load (~2) ~= 8-14ms < 16.67ms. Run-ahead depth=1 FITS.
+Implementation plan (next session): per tick T — latch i_T; emulate frame T HIDDEN (suppress publish/
+audio/tape/publishFrameTick); dc_serialize -> S; emulate T+1 with repeated i_T and PUBLISH (pixels of
+T+1 are fully determined by i_T — MVC2 acts +1 — so this is mispredict-free); dc_loadstate(S). Gates:
+MAPLECAST_RUNAHEAD=1 default OFF; DUMP_TA determinism rig must stay byte-identical vs no-runahead on
+the AUTHORITATIVE track; .mcrec/tape/lockstep assume 1 frame/tick — suppress on the hidden+preview legs.
+Payoff: visible response ~39ms -> ~22ms; the E2E press number keeps its value but the presented frame
+now CONTAINS the response.
