@@ -259,7 +259,7 @@ export class PostProcessor {
         // Must match the renderer's pipeline target format (canvas format)
         this.offscreenTex = this.dev.createTexture({
             size: [w, h], format: this.canvasFmt,
-            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,   // COPY_SRC: fairframe ring snapshot
         });
         this.offscreenDepth = this.dev.createTexture({
             size: [w, h], format: 'depth32float',
@@ -267,7 +267,7 @@ export class PostProcessor {
         });
         this.offscreenView = this.offscreenTex.createView();
 
-        this.bindGroup = this.dev.createBindGroup({ layout: this.bgl, entries: [
+        (bgOverride||this.bindGroup) = this.dev.createBindGroup({ layout: this.bgl, entries: [
             { binding: 0, resource: this.offscreenView },
             { binding: 1, resource: this.sampler },
             { binding: 2, resource: { buffer: this.uniformBuf } },
@@ -285,7 +285,7 @@ export class PostProcessor {
     }
 
     // Blit offscreen → canvas with post-processing
-    blit(encoder, canvasView, canvasW, canvasH, dbg) {
+    blit(encoder, canvasView, canvasW, canvasH, dbg, bgOverride) {
         const uniforms = new Float32Array(24);
         uniforms[0] = this._w;
         uniforms[1] = this._h;
@@ -320,7 +320,7 @@ export class PostProcessor {
             }],
         });
         rp.setPipeline(this.pipeline);
-        rp.setBindGroup(0, this.bindGroup);
+        rp.setBindGroup(0, (bgOverride||this.bindGroup));
         rp.draw(3); // fullscreen triangle
         rp.end();
     }

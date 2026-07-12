@@ -2989,25 +2989,42 @@ async function main(){
                             const target=pub+FF.anchor+(window._ffDelta||50), dt=target-now;
                             FF.n++;
                             if(FF.n%300===0) console.log('[fairframe] slack',dt.toFixed(1),'ms (Δ='+(window._ffDelta||50)+')');
-                            const _blit=()=>{ try{ const enc=R.dev.createCommandEncoder();
-                                PP.blit(enc,R.ctx.getCurrentTexture().createView(),canvas.width,canvas.height,DBG);
-                                R.dev.queue.submit([enc.finish()]);
-                                FF.blits=(FF.blits||0)+1;
-                                BAKE.onRendered(canvas); if(window._e2eProbe)window._e2eMark();
-                            }catch(e){ if((FF.err=(FF.err||0)+1)<4) console.warn('[fairframe blit]',e); } };
-                            // heartbeat state (read by the 1Hz logger) — discriminates the freeze:
-                            // decode-stall (frames stops) vs condition-false (tgtNow grows) vs stale-blit
+                            // v0.3 (heartbeat-proven starvation fix): a SINGLE latest-wins slot never
+                            // fires when Δ > frame period (each new frame replaces the pending target
+                            // before it arrives — blits froze at 15 while frames hit 497). TRUE design:
+                            // a FRAME RING — every frame is snapshotted into its own retained texture
+                            // with its own appointment; the presenter shows the newest frame whose time
+                            // has come and keeps future ones queued. This also makes the Δ-delay REAL
+                            // (a shared rt always showed newest content regardless of appointment).
+                            if(!FF.ring||FF.ringW!==PP._w||FF.ringH!==PP._h){
+                              FF.ring=[]; FF.ringW=PP._w; FF.ringH=PP._h; FF.ri=0; FF.q=[];
+                              for(let i=0;i<5;i++){
+                                const tex=R.dev.createTexture({size:[PP._w,PP._h],format:PP.canvasFmt,
+                                  usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
+                                FF.ring.push({tex,bg:R.dev.createBindGroup({layout:PP.bgl,entries:[
+                                  {binding:0,resource:tex.createView()},{binding:1,resource:PP.sampler},
+                                  {binding:2,resource:{buffer:PP.uniformBuf}}]})});
+                              }
+                            }
+                            // snapshot this frame's image into its ring slot (tiny GPU copy)
+                            const slot=FF.ring[FF.ri=(FF.ri+1)%FF.ring.length];
+                            { const enc=R.dev.createCommandEncoder();
+                              enc.copyTextureToTexture({texture:PP.offscreenTex},{texture:slot.tex},[PP._w,PP._h,1]);
+                              R.dev.queue.submit([enc.finish()]); }
+                            FF.q=FF.q||[]; FF.q.push({bg:slot.bg,target});
+                            if(FF.q.length>FF.ring.length-1) FF.q.splice(0,FF.q.length-(FF.ring.length-1));
                             window._ffDbg={t:now,d:d,anchor:FF.anchor,tgtNow:dt,frames:(window._ffDbg?window._ffDbg.frames:0)+1};
-                            // v0.2 (the "smooth then glitchy" fix): setTimeout presents beat against
-                            // the display's vsync (server 59.94Hz vs display 60Hz — phases align, then
-                            // drift through the boundary = periodic judder). Present via a rAF loop:
-                            // each vsync, blit the NEWEST frame whose T_present has arrived (−8ms
-                            // half-frame centering). Vsync-locked pacing, latest-wins, no beat.
-                            FF.pendingBlit=_blit; FF.pendingTarget=target;
                             if(!FF.rafLoop){ FF.rafLoop=true;
                               const loop=()=>{ if(!window._schedPresent){FF.rafLoop=false;return;}
-                                if(FF.pendingBlit && performance.now()>=FF.pendingTarget-8){
-                                  const b=FF.pendingBlit; FF.pendingBlit=null; b(); }
+                                try{
+                                  const nowL=performance.now(); let e=null;
+                                  while(FF.q.length && FF.q[0].target<=nowL+8) e=FF.q.shift();   // newest due; drop older
+                                  if(e){ const enc=R.dev.createCommandEncoder();
+                                    PP.blit(enc,R.ctx.getCurrentTexture().createView(),canvas.width,canvas.height,DBG,e.bg);
+                                    R.dev.queue.submit([enc.finish()]);
+                                    FF.blits=(FF.blits||0)+1;
+                                    BAKE.onRendered(canvas); if(window._e2eProbe)window._e2eMark(); }
+                                }catch(err){ if((FF.err=(FF.err||0)+1)<4) console.warn('[fairframe present]',err); }
                                 requestAnimationFrame(loop); };
                               requestAnimationFrame(loop); }
                         } else {
