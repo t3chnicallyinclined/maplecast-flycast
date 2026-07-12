@@ -1235,9 +1235,8 @@ void Emulator::run()
 		if (_raWant && !_raTried) {
 			_raTried = true;
 			_raReady = maplecast_rollback::init();
-			printf("[RUNAHEAD] %s
-", _raReady ? "ARMED depth=1 (preview publish + ring rewind)"
-			                                    : "rollback init FAILED - disabled");
+			printf("[RUNAHEAD] %s\n", _raReady ? "ARMED depth=1 (preview publish + ring rewind)"
+			                                   : "rollback init FAILED - disabled");
 			fflush(stdout);
 		}
 		if (_raReady && maplecast_mirror::isServer()) {
@@ -1261,8 +1260,7 @@ void Emulator::run()
 			if (!maplecast_rollback::rewindToFrame(_raF)) {
 				// Rewind failed: authoritative track is now T+1 (the preview). Continuity is
 				// preserved (it WAS a valid frame) but disable run-ahead — don't compound.
-				printf("[RUNAHEAD] rewind FAILED at frame %llu - disabling
-",
+				printf("[RUNAHEAD] rewind FAILED at frame %llu - disabling\n",
 					(unsigned long long)_raF);
 				fflush(stdout);
 				_raReady = false;
