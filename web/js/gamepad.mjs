@@ -196,7 +196,11 @@ function pollOnce() {
       // browser inputs share the loopback srcKey), so a reset-to-1 seq is dropped as stale
       // until it passes the old session's max ("inputs dead after refresh"). Epoch-seconds
       // base guarantees each session starts above the last.
-      if (!window._e2eSeq) window._e2eSeq = (Math.floor(Date.now() / 1000) % 0x30000000) << 4;
+      // Base = epoch MILLISECONDS (mod 2^31): grows 1000/s, sends grow ~60/s max, so every
+      // refresh's base ALWAYS clears the previous session's high-water mark at the server's
+      // per-source dedup. (v1 used epoch-seconds<<4 = 16/s growth < send rate -> the dedup
+      // wall returned after any session longer than ~4 min; << also overflowed int32.)
+      if (!window._e2eSeq) window._e2eSeq = Date.now() % 0x7FFFFFFF;
       window._e2eSeq++;
       const b = new Uint8Array(8);
       b.set(_inputBuf, 0);
