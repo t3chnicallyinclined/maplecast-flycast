@@ -69,3 +69,10 @@ input:   latch already server-aligned → equalized stimulus + equalized latch =
   false. NEXT: add a [fairframe] 1Hz heartbeat {pendingBlit?, target-now, wsFrames} to discriminate
   decode-stall vs present-stall — ONE log line answers it. Mode stays opt-in experimental; default
   path untouched.
+- 2026-07-12 **F2 COMPLETE + F0 GATE PASSED**: v0.3 frame-ring presenter (5 retained textures,
+  per-frame appointments, vsync presenter, PP.blit bindGroup override) VERIFIED live 40+s:
+  frames+blits lockstep @60/s, tgtNow 46-50ms steady, anchor drift ±0.5ms (gate ±2ms), no freeze/
+  garble. v0.2 starvation root-cause: single latest-wins slot never fires when Δ > frame period.
+  User feel: "snappier before" = CORRECT — Δ=50 is the deliberate tournament cushion; default
+  (immediate) stays the snappy mode. NEXT: walk Δ down for the per-connection floor, then F3
+  (server per-match Δ negotiation) → F4 (dual-client fairness proof).
