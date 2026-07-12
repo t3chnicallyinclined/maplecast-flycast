@@ -75,3 +75,11 @@ MAPLECAST_RUNAHEAD=1 default OFF; DUMP_TA determinism rig must stay byte-identic
 the AUTHORITATIVE track; .mcrec/tape/lockstep assume 1 frame/tick — suppress on the hidden+preview legs.
 Payoff: visible response ~39ms -> ~22ms; the E2E press number keeps its value but the presented frame
 now CONTAINS the response.
+
+## B1 DEPRIORITIZED (2026-07-12, measured): the periodic SYNC compress is **7ms live**
+(`[MIRROR] 60s periodic resilience SYNC` -> `8.0MB -> 0.6MB (14.3x) in 7ms`), not the estimated
+25-60ms — mostly-static VRAM compresses far faster than generic-throughput math. Total inline cost
+~7-10ms once/60s = sub-frame blip. Off-threading it (builder thread + deferred epoch/shadow/VCACHE
+bookkeeping, ordering-critical) is now bad ROI vs risk. Revisit only if a probe shows user-visible
+hitches at the 60s marks. F2.1 + D4 + D7 SHIPPED 2026-07-12 (phase-trim servo, gfxTail span-copy,
+bank-scoped palette invalidation).
