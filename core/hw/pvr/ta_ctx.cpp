@@ -49,7 +49,18 @@ static cResetEvent frame_finished;
 bool QueueRender(TA_context* ctx)
 {
 	verify(ctx != 0);
-	
+
+	// A2 run-ahead: the HIDDEN authoritative leg's contexts never render — recycle here,
+	// carried BY THE CONTEXT (stamped at rend_start_render on the emu thread). Global toggles
+	// (suppress flag, rend_enable_renderer) both failed: rendering is pipelined, so any
+	// wall-clock global is read by the render thread during the WRONG leg. No RenderCount++,
+	// no frame_finished wait — the queue stays free for the preview's context.
+	if (ctx->rend.mc_hiddenLeg)
+	{
+		tactx_Recycle(ctx);
+		return false;
+	}
+
 	bool skipFrame = !rend_is_enabled();
 	if (!skipFrame)
 	{
