@@ -1784,9 +1784,11 @@ void Emulator::start()
 									auto us=[](auto a,auto b){ return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(b-a).count(); };
 									_pH+=us(_raT0,_raT1); _pS+=us(_raT1,_raT2); _pP+=us(_raT2,_raT3); _pR+=us(_raT3,_raT4);
 									if (++_pN % 600 == 0) {
-										printf("[RUNAHEAD-PROF] avg/tick: hidden=%.1fms save=%.1fms preview=%.1fms rewind=%.1fms total=%.1fms (n=%llu)\n",
-											_pH/600000.0,_pS/600000.0,_pP/600000.0,_pR/600000.0,
-											(_pH+_pS+_pP+_pR)/600000.0,(unsigned long long)_pN);
+										// integer µs only — a float varargs quirk printed 'inf' on MSVC
+										printf("[RUNAHEAD-PROF] avg/tick us: hidden=%llu save=%llu preview=%llu rewind=%llu total=%llu (n=%llu)\n",
+											(unsigned long long)(_pH/600),(unsigned long long)(_pS/600),
+											(unsigned long long)(_pP/600),(unsigned long long)(_pR/600),
+											(unsigned long long)((_pH+_pS+_pP+_pR)/600),(unsigned long long)_pN);
 										fflush(stdout);
 										_pH=_pS=_pP=_pR=0;
 									}
