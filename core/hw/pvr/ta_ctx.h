@@ -237,6 +237,11 @@ struct rend_context
 	// rendering is PIPELINED: publish executes during the NEXT tick's leg (a wall-clock flag
 	// suppressed 100% of frames — total wire blackout, 2026-07-12).
 	bool mc_hiddenLeg = false;
+	// A2 defect #2 (temporal slicing): the guest vframe (0x8C3496B0) snapshotted at STARTRENDER
+	// on the emu thread — serverPublish's ZCS2 header must use THIS, not a live RAM read (by
+	// publish time the emu may have already rewound; live read = header vf mismatches TA content
+	// = body-pairing desync).
+	u32 mc_vframe = 0;
 	bool clearFramebuffer;
 	
 	TA_GLOB_TILE_CLIP_type ta_GLOB_TILE_CLIP;

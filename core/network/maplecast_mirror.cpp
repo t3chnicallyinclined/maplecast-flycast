@@ -2234,6 +2234,7 @@ static bool decodeTexAny(uint32_t tcw, uint32_t tsp, uint8_t* out) {
 static std::atomic<bool> _suppressPublish{false};
 void setSuppressPublish(bool v) { _suppressPublish.store(v, std::memory_order_release); }
 bool suppressActive() { return _suppressPublish.load(std::memory_order_acquire); }
+uint32_t currentGuestVf() { return addrspace::read32(0x8C3496B0); }   // guest frame counter (emu thread)
 
 void serverPublish(TA_context* ctx)
 {
@@ -3306,7 +3307,9 @@ done_diff:
 				for (int i = 0; i < 16; i++) { uint32_t v = addrspace::read32(0x8C2D6B18 + i * 4); memcpy(cm + 68 + i * 4, &v, 4); }
 			}
 			if (vfLen) {
-				uint32_t vf = addrspace::read32(0x8C3496B0);
+				// A2 defect #2: use the STARTRENDER-stamped vf (rewind-proof); live-read fallback
+				// only when the stamp is 0 (pre-match menus) — identical behavior there.
+				uint32_t vf = ctx->rend.mc_vframe ? ctx->rend.mc_vframe : addrspace::read32(0x8C3496B0);
 				memcpy(_zBuf.data() + 10 + camLen, &vf, 4);
 			}
 			if (ordLen) {

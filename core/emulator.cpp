@@ -1244,7 +1244,9 @@ void Emulator::run()
 			static uint64_t _raF = 0;
 			_raF++;
 			maplecast_mirror::setSuppressPublish(true);
+			rend_enable_renderer(false);   // hidden leg: ctx recycles, queue stays free (see threaded loop)
 			runInternal();                                   // authoritative frame T (hidden)
+			rend_enable_renderer(true);
 			maplecast_mirror::setSuppressPublish(false);
 			maplecast_rollback::saveFrame(_raF);
 			mc_runaheadPreviewLeg.store(true, std::memory_order_relaxed);
@@ -1741,7 +1743,13 @@ void Emulator::start()
 								static uint64_t _raF = 0;
 								_raF++;
 								maplecast_mirror::setSuppressPublish(true);
+								// Hidden leg renders NOTHING: with the renderer disabled, QueueRender
+								// RECYCLES the ctx (predict's proven no-render primitive) — so the
+								// single-slot queue is always free for the PREVIEW's context. This was
+								// the blackout: 2 ctx/tick vs 1-slot queue dropped the preview every tick.
+								rend_enable_renderer(false);
 								runInternal();                                   // authoritative T (hidden)
+								rend_enable_renderer(true);
 								maplecast_mirror::setSuppressPublish(false);
 								maplecast_rollback::saveFrame(_raF);
 								mc_runaheadPreviewLeg.store(true, std::memory_order_relaxed);
