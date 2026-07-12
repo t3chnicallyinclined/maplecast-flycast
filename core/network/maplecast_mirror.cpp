@@ -3008,17 +3008,10 @@ done_diff:
 	uint32_t compressedSize = totalSize;
 	if (maplecast_ws::active())
 	{
-		// Legacy ZCST broadcast — ALWAYS emitted, byte-for-byte unchanged, so every
-		// existing client (king.html, emulator.html, native, relay cache) is
-		// unaffected by the ZCS2 experiment. ZCS2 rides alongside as an EXTRA
-		// message (shadow mode) until all parsers migrate.
-		{
-		size_t compSize = 0;
-		const uint8_t* compData = _compressor.compress(dstStart, totalSize, compSize, compressUs);
-		maplecast_ws::broadcastBinary(compData, compSize);
-		compressedSize = (uint32_t)compSize;
-		}
-
+		// LATENCY kill-list B4a (2026-07-12): ZCS2 now compresses+broadcasts FIRST — it's the wire
+		// every shipping browser renders, so it should not queue behind the legacy ZCST compress
+		// (~0.1-0.3ms/frame earlier delivery). The legacy leg moved AFTER the zstream block below
+		// (byte-for-byte unchanged otherwise; no data dependency — both legs only read dstStart).
 		if (zstreamEnabled()) {
 			// ZCS2 streaming envelope (see block comment at _zstreamResetPending).
 			static ZSTD_CCtx* _zc = nullptr;
@@ -3368,6 +3361,18 @@ done_diff:
 					fflush(stdout);
 				}
 			}
+		}
+
+		// Legacy ZCST broadcast — ALWAYS emitted, byte-for-byte unchanged, so every
+		// existing client (king.html, emulator.html, native, relay cache) is
+		// unaffected by the ZCS2 experiment. B4a: moved AFTER the ZCS2 leg so the
+		// shipping wire ships first; next step is demand-gating this when no legacy
+		// client is connected, then retiring it once king.html speaks ZCS2.
+		{
+		size_t compSize = 0;
+		const uint8_t* compData = _compressor.compress(dstStart, totalSize, compSize, compressUs);
+		maplecast_ws::broadcastBinary(compData, compSize);
+		compressedSize = (uint32_t)compSize;
 		}
 
 		// Broadcast game state every frame (~60Hz). "GSTA" magic +

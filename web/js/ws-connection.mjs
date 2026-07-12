@@ -180,6 +180,11 @@ export function ensureControlWs() {
 
     ws.onopen = () => {
       console.log('[control-ws] open');
+      // LATENCY (kill-list C1, 2026-07-12): this socket is CONTROL — declare it, or flycast
+      // broadcasts the full ~3-6 Mbps video wire + multi-MB SYNCs here too (we silently dropped
+      // them below while they queued the player's downlink = frame-arrival jitter while playing).
+      // Server adds this conn to the broadcastBinary skip set (_controlOnlyConns). Idempotent.
+      try { ws.send(JSON.stringify({ type: 'control_only' })); } catch {}
       // Personal-reply receive handler — flycast sends back assigned/kicked/pong
       // on the direct WS. The actual lobby/queue/slot UI updates come from
       // SurrealDB live queries, NOT from these messages.

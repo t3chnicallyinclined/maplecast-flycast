@@ -89,6 +89,17 @@ struct MirrorCompressor
 		std::lock_guard<std::mutex> lk(mtx);
 		auto t0 = std::chrono::high_resolution_clock::now();
 
+		// LATENCY kill-list B5 (2026-07-12): the buffer was sized once at init (256KB inner) but
+		// scene transitions ship 1.2-2.2MB inner frames — zstd hit dstSize-too-small and the
+		// fallback below SILENTLY broadcast the raw multi-MB frame (relay marks it Critical =
+		// undroppable) = episodic 10-100ms delivery spikes at round starts, invisible with no log.
+		// Fix: grow the buffer to compressBound(srcSize) on demand (rare, amortized-zero).
+		size_t need = 8 + ZSTD_compressBound(srcSize);
+		if (need > bufSize) {
+			uint8_t* nb = (uint8_t*)realloc(buf, need);
+			if (nb) { buf = nb; bufSize = need; }
+		}
+
 		// Header: magic + uncompressed size
 		memcpy(buf, &MCST_MAGIC_COMPRESSED, 4);
 		memcpy(buf + 4, &srcSize, 4);
@@ -97,7 +108,12 @@ struct MirrorCompressor
 		                                     src, srcSize, level);
 		if (ZSTD_isError(zstdSize))
 		{
-			// Compression failed — send uncompressed (no header)
+			// Compression failed — send uncompressed (no header). B5: LOG it (rate-limited) —
+			// this fallback was silent while shipping multi-MB raw frames.
+			static int _rawFallbacks = 0;
+			if (++_rawFallbacks <= 20)
+				fprintf(stderr, "[MIRROR-COMPRESS] RAW fallback #%d: %s (srcSize=%u bufSize=%zu)\n",
+					_rawFallbacks, ZSTD_getErrorName(zstdSize), srcSize, bufSize);
 			outSize = srcSize;
 			compressUs = 0;
 			return src;

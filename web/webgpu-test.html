@@ -269,8 +269,8 @@ canvas{display:block;background:transparent}
 <label><input type="checkbox" id="dbg_tileClipOff"> Disable ALL tile clips</label>
 <label><input type="checkbox" id="dbg_tileClipLog"> Log tile clips (console)</label>
 <h2>Latency Mode</h2>
-<label><input type="radio" name="latMode" value="vsync" checked> Vsync (smooth, +8ms avg)</label>
-<label><input type="radio" name="latMode" value="immediate"> Immediate (lowest latency)</label>
+<label><input type="radio" name="latMode" value="vsync"> Vsync (smooth, +8ms avg)</label>
+<label><input type="radio" name="latMode" value="immediate" checked> Immediate (lowest latency)</label>
 <label><input type="checkbox" id="dbg_predictive"> Predictive (extrapolate between frames)</label>
 <h2>Frame Inspector</h2>
 <label><input type="checkbox" id="dbg_freeze"> FREEZE frame</label>
@@ -2555,8 +2555,11 @@ document.getElementById('fullscreenBtn').onclick=()=>{
         },{once:true});
     });
 };
-DBG.immediateRender=false;DBG.predictive=false;
-document.querySelectorAll('input[name=latMode]').forEach(r=>r.onchange=e=>{DBG.immediateRender=e.target.value==='immediate';});
+// LATENCY (kill-list D1, 2026-07-12): immediate present is the DEFAULT — the vsync path parked a
+// decoded frame ~8ms avg (0-16.7) waiting for rAF AND dropped frames (latest-wins) when 2 arrivals
+// shared one rAF. ?present=vsync or the radio opts back in. rafWait EMA metered either way.
+DBG.immediateRender=(new URLSearchParams(location.search).get('present')||'immediate')!=='vsync';DBG.predictive=false;
+document.querySelectorAll('input[name=latMode]').forEach(r=>{r.onchange=e=>{DBG.immediateRender=e.target.value==='immediate';};r.checked=(r.value==='immediate')===DBG.immediateRender;});
 document.getElementById('dbg_predictive').onchange=e=>DBG.predictive=e.target.checked;
 document.getElementById('dbg_tileClipOff').onchange=e=>DBG.tileClipOff=e.target.checked;
 document.getElementById('dbg_tileClipLog').onchange=e=>DBG.tileClipLog=e.target.checked;
@@ -2913,7 +2916,7 @@ async function main(){
                     } else {
                         // VSYNC MODE: store for RAF render
                         if(pendingFrame) skippedFrames++;
-                        pendingFrame=g; pendingPvrSnap=fr.pvrSnapshot;
+                        pendingFrame=g; pendingPvrSnap=fr.pvrSnapshot; window._tDecoded=performance.now();   // D1 meter: rAF-wait = tRender - tDecoded
                     }
                     parsed_passes=g.renderPasses?g.renderPasses.length:1;
                     wsFrames++;
@@ -3051,6 +3054,9 @@ async function main(){
             if(!pendingFrame)return;
             const g=pendingFrame, snap=pendingPvrSnap;
             pendingFrame=null; pendingPvrSnap=null;
+            // D1 meter: how long the decoded frame sat waiting for this rAF (the latency the
+            // immediate-present default removes). EMA + max, shown in the perf HUD.
+            if(window._tDecoded){ const w=performance.now()-window._tDecoded; window._rafWaitMa=(window._rafWaitMa||0)+(w-(window._rafWaitMa||0))*0.05; if(w>(window._rafWaitMax||0))window._rafWaitMax=w; window._tDecoded=0; }
             // Live render stats (every 120 rendered frames)
             if(renderFrames%120===0){
                 const blendModes={},shadInstrs={},texFmts={},listCounts={op:0,pt:0,tr:0};
@@ -3103,6 +3109,7 @@ async function main(){
                 s+=`\nTileClip: ${tcActive}/${tcTotal} active`;
                 if(g.renderPasses)s+=`\nPasses: ${g.renderPasses.length}`;
                 s+=`\nSkipped: ${skippedFrames} (WS>${'>'}RAF)`;
+                if(window._rafWaitMa) s+=`\nrafWait: ${window._rafWaitMa.toFixed(1)}ms avg / ${(window._rafWaitMax||0).toFixed(1)}ms max${DBG.immediateRender?' (immediate: bypassed)':''}`;
                 document.getElementById('dbg_stats_left').textContent=s;
             }
             const t2=performance.now();
