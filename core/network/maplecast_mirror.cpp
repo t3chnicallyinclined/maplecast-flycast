@@ -2243,8 +2243,7 @@ void serverPublish(TA_context* ctx)
 		static const bool _raTrace = std::getenv("MAPLECAST_RUNAHEAD_TRACE") != nullptr;
 		if (_raTrace) {
 			static uint32_t _pord = 0;
-			printf("[RA-TRACE] PUB ord=%u hid=%d vf=%u
-", ++_pord,
+			printf("[RA-TRACE] PUB ord=%u hid=%d vf=%u\n", ++_pord,
 				(int)ctx->rend.mc_hiddenLeg, ctx->rend.mc_vframe);
 		}
 	}

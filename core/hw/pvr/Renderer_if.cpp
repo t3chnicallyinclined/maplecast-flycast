@@ -616,8 +616,7 @@ void rend_start_render()
 		static const bool _raTrace = std::getenv("MAPLECAST_RUNAHEAD_TRACE") != nullptr;
 		if (_raTrace) {
 			static uint32_t _ord = 0;
-			printf("[RA-TRACE] SR  ord=%u leg=%d vf=%u
-", ++_ord,
+			printf("[RA-TRACE] SR  ord=%u leg=%d vf=%u\n", ++_ord,
 				(int)ctx->rend.mc_hiddenLeg, ctx->rend.mc_vframe);
 		}
 	}
