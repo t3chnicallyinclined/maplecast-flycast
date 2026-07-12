@@ -330,10 +330,16 @@ static LatchStatsAccum _latchStats[2];
 
 static inline int64_t nowUs();   // defined below (single monotonic clock for this TU)
 
-// E2E probe (kill-list, 2026-07-12): the latch instant + the packet seq current at THIS latch,
-// per slot — serverPublish stamps these into the ZCS2 'E2EP' tail so a browser can compute true
-// press->present. Written by the maple thread at latch; read by the publish thread. Relaxed is
-// fine (diagnostic, monotonic).
+// Sequence number of the last CLIENT-seq'd arrival per slot (PC packets / 8-byte browser probe
+// inputs). Written by the UDP thread on arrival; read at vblank latch + by measureInputAge.
+// (Moved above recordLatchSample so the E2E probe can snapshot it at the latch.)
+static std::atomic<uint32_t> _lastInputArrivalSeq[2] = {0, 0};
+
+// E2E probe (kill-list, 2026-07-12): the latch instant + the CLIENT packet seq current at THIS
+// latch, per slot — serverPublish stamps these into the ZCS2 'E2EP' tail so a browser can compute
+// true press->present. NOTE: must be the CLIENT seq-space (_lastInputArrivalSeq, from the PC
+// packet), NOT recordLatchSample's packetSeq arg — that is updateSlot's INTERNAL ++counter, a
+// different seq-space (first probe run measured garbage: min 0.7ms, below physical floor).
 static std::atomic<int64_t>  _e2eLastLatchUs{0};
 static std::atomic<uint32_t> _e2eLatchedSeq0{0};
 static std::atomic<uint32_t> _e2eLatchedSeq1{0};
@@ -349,8 +355,10 @@ void recordLatchSample(int slot, int64_t deltaUs, uint32_t packetSeq, uint64_t f
 {
 	if (slot < 0 || slot > 1) return;
 	// E2E probe snapshot — before the seq==0 early-return below so the latch CLOCK ticks even idle.
+	// CLIENT seq-space (see the _lastInputArrivalSeq note above), NOT the internal packetSeq arg.
 	_e2eLastLatchUs.store(nowUs(), std::memory_order_relaxed);
-	(slot == 0 ? _e2eLatchedSeq0 : _e2eLatchedSeq1).store(packetSeq, std::memory_order_relaxed);
+	(slot == 0 ? _e2eLatchedSeq0 : _e2eLatchedSeq1).store(
+		_lastInputArrivalSeq[slot].load(std::memory_order_relaxed), std::memory_order_relaxed);
 	LatchStatsAccum& s = _latchStats[slot];
 
 	// Single producer (the maple thread on the headless server, or the SH4
@@ -536,7 +544,7 @@ static std::atomic<uint64_t> _lastInputArrivalUs[2] = {0, 0};
 // Client-side CLOCK_MONOTONIC Âµs from the 19-byte packet (different clock domain).
 static std::atomic<uint64_t> _lastInputClientTs[2] = {0, 0};
 // Sequence number of the last arrival (so latch can detect "new since last check")
-static std::atomic<uint32_t> _lastInputArrivalSeq[2] = {0, 0};
+// (definition moved above recordLatchSample for the E2E probe snapshot — see _lastInputArrivalSeq there)
 // Input age at vblank: how many Âµs old the input was when the game latched it.
 // Written at vblank, read by telemetry/HUD. EMA with Î±=1/16.
 static std::atomic<int64_t> _inputAgeAtLatchUs[2] = {0, 0};
