@@ -29,14 +29,13 @@ mod zcs2;
 use frame::FrameDecoder;
 
 struct Gpu {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     renderer: render::Renderer,
-    egui_ctx: egui::Context,
-    egui_state: egui_winit::State,
-    egui_renderer: egui_wgpu::Renderer,
     frames: u32,
     fps_t0: std::time::Instant,
 }
@@ -83,26 +82,14 @@ impl Gpu {
         let renderer = render::Renderer::new(&device, format);
         *debug.gpu_name.lock().unwrap() = adapter.get_info().name;
 
-        // egui overlay (F1)
-        let egui_ctx = egui::Context::default();
-        let egui_state = egui_winit::State::new(
-            egui_ctx.clone(),
-            egui::ViewportId::ROOT,
-            &*window,
-            Some(window.scale_factor() as f32),
-            None,
-        );
-        let egui_renderer = egui_wgpu::Renderer::new(&device, format, None, 1);
-
         Self {
+            instance,
+            adapter,
             surface,
             device,
             queue,
             config,
             renderer,
-            egui_ctx,
-            egui_state,
-            egui_renderer,
             frames: 0,
             fps_t0: std::time::Instant::now(),
         }
@@ -118,7 +105,6 @@ impl Gpu {
 
     fn render(
         &mut self,
-        window: &Window,
         shared: &Arc<Mutex<FrameDecoder>>,
         replica: &Arc<Mutex<replica::ReplicaState>>,
         debug: &debug::DebugState,
@@ -167,14 +153,79 @@ impl Gpu {
                 self.renderer.clear_only(&self.device, &self.queue, &view);
             }
         }
-        self.render_egui(window, &view, debug);
         frame.present();
     }
+}
 
-    fn render_egui(&mut self, window: &Window, view: &wgpu::TextureView, debug: &debug::DebugState) {
-        let raw = self.egui_state.take_egui_input(window);
+/// A separate OS window hosting the egui debug panel (device/queue shared with Gpu).
+struct DebugWin {
+    window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    egui_ctx: egui::Context,
+    egui_state: egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
+}
+
+impl DebugWin {
+    fn new(
+        instance: &wgpu::Instance,
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        window: Arc<Window>,
+    ) -> Self {
+        let size = window.inner_size();
+        let surface = instance.create_surface(window.clone()).expect("debug surface");
+        let caps = surface.get_capabilities(adapter);
+        let format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| !f.is_srgb())
+            .unwrap_or(caps.formats[0]);
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: wgpu::PresentMode::AutoVsync,
+            alpha_mode: caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(device, &config);
+        let egui_ctx = egui::Context::default();
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &*window,
+            Some(window.scale_factor() as f32),
+            None,
+        );
+        let egui_renderer = egui_wgpu::Renderer::new(device, format, None, 1);
+        Self { window, surface, config, egui_ctx, egui_state, egui_renderer }
+    }
+
+    fn resize(&mut self, device: &wgpu::Device, w: u32, h: u32) {
+        if w > 0 && h > 0 {
+            self.config.width = w;
+            self.config.height = h;
+            self.surface.configure(device, &self.config);
+        }
+    }
+
+    fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, debug: &debug::DebugState) {
+        let frame = match self.surface.get_current_texture() {
+            Ok(f) => f,
+            Err(_) => {
+                self.surface.configure(device, &self.config);
+                return;
+            }
+        };
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let raw = self.egui_state.take_egui_input(&self.window);
         let out = self.egui_ctx.run(raw, |ctx| debug::ui(ctx, debug));
-        self.egui_state.handle_platform_output(window, out.platform_output);
+        self.egui_state.handle_platform_output(&self.window, out.platform_output);
         let ppp = out.pixels_per_point;
         let tris = self.egui_ctx.tessellate(out.shapes, ppp);
         let sd = egui_wgpu::ScreenDescriptor {
@@ -182,20 +233,19 @@ impl Gpu {
             pixels_per_point: ppp,
         };
         for (id, delta) in &out.textures_delta.set {
-            self.egui_renderer.update_texture(&self.device, &self.queue, *id, delta);
+            self.egui_renderer.update_texture(device, queue, *id, delta);
         }
-        let mut enc = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("egui") });
-        self.egui_renderer.update_buffers(&self.device, &self.queue, &mut enc, &tris, &sd);
+        let mut enc =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("debug") });
+        self.egui_renderer.update_buffers(device, queue, &mut enc, &tris, &sd);
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("egui"),
+                label: Some("debug"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
+                    view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.06, g: 0.06, b: 0.07, a: 1.0 }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -205,10 +255,11 @@ impl Gpu {
             });
             self.egui_renderer.render(&mut rp, &tris, &sd);
         }
-        self.queue.submit(Some(enc.finish()));
+        queue.submit(Some(enc.finish()));
         for id in &out.textures_delta.free {
             self.egui_renderer.free_texture(id);
         }
+        frame.present();
     }
 }
 
@@ -311,30 +362,60 @@ fn main() {
     );
     let mut gpu = pollster::block_on(Gpu::new(window.clone(), &debug));
 
+    // Separate debug/telemetry window (F1 on the game window shows/hides it).
+    let debug_window = Arc::new(
+        WindowBuilder::new()
+            .with_title("MapleCast · debug")
+            .with_inner_size(winit::dpi::LogicalSize::new(360.0, 580.0))
+            .build(&event_loop)
+            .expect("debug window"),
+    );
+    let mut debug_win = DebugWin::new(&gpu.instance, &gpu.adapter, &gpu.device, debug_window.clone());
+    let game_id = window.id();
+    let debug_id = debug_window.id();
+
     event_loop
-        .run(move |event, elwt| match &event {
-            Event::WindowEvent { event: wev, .. } => {
-                // Feed the panel first (it consumes mouse/keyboard when hovered).
-                let _ = gpu.egui_state.on_window_event(&window, wev);
-                match wev {
+        .run(move |event, elwt| {
+            use std::sync::atomic::Ordering::Relaxed;
+            match &event {
+                Event::WindowEvent { window_id, event: wev } if *window_id == game_id => match wev {
                     WindowEvent::CloseRequested => elwt.exit(),
                     WindowEvent::Resized(size) => gpu.resize(size.width, size.height),
-                    WindowEvent::RedrawRequested => {
-                        gpu.render(&window, &shared, &replica_shared, &debug)
-                    }
+                    WindowEvent::RedrawRequested => gpu.render(&shared, &replica_shared, &debug),
                     WindowEvent::KeyboardInput { event: key, .. } => {
                         if key.state == winit::event::ElementState::Pressed
                             && key.physical_key
                                 == winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::F1)
                         {
-                            debug.toggle_overlay();
+                            let vis = !debug.overlay.load(Relaxed);
+                            debug.overlay.store(vis, Relaxed);
+                            debug_window.set_visible(vis);
                         }
                     }
                     _ => {}
+                },
+                Event::WindowEvent { window_id, event: wev } if *window_id == debug_id => {
+                    let _ = debug_win.egui_state.on_window_event(&debug_window, wev);
+                    match wev {
+                        WindowEvent::CloseRequested => {
+                            debug.overlay.store(false, Relaxed);
+                            debug_window.set_visible(false);
+                        }
+                        WindowEvent::Resized(size) => debug_win.resize(&gpu.device, size.width, size.height),
+                        WindowEvent::RedrawRequested => {
+                            if debug.overlay.load(Relaxed) {
+                                debug_win.render(&gpu.device, &gpu.queue, &debug);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
+                Event::AboutToWait => {
+                    window.request_redraw();
+                    debug_window.request_redraw();
+                }
+                _ => {}
             }
-            Event::AboutToWait => window.request_redraw(),
-            _ => {}
         })
         .expect("event loop run");
 }

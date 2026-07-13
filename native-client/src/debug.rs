@@ -64,21 +64,12 @@ impl DebugState {
         self.rtt_x100.store((ms * 100.0) as u64, Relaxed);
         self.rtt_seen.store(true, Relaxed);
     }
-    pub fn toggle_overlay(&self) {
-        self.overlay.store(!self.overlay.load(Relaxed), Relaxed);
-    }
 }
 
 /// Build the debug panel. Reads telemetry, writes back option toggles.
 pub fn ui(ctx: &egui::Context, d: &DebugState) {
-    if !d.overlay.load(Relaxed) {
-        return;
-    }
-    egui::Window::new("MapleCast · debug")
-        .default_pos([12.0, 12.0])
-        .default_width(240.0)
-        .resizable(true)
-        .show(ctx, |ui| {
+    egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("MapleCast · debug");
             ui.label(format!("GPU: {}", d.gpu_name.lock().unwrap()));
             ui.separator();
 
@@ -126,8 +117,8 @@ pub fn ui(ctx: &egui::Context, d: &DebugState) {
             checkbox(ui, &d.bodies_force_color, "bodies force-color (silhouette)");
 
             ui.separator();
-            ui.weak("F1 toggles this panel");
-        });
+            ui.weak("F1 (on the game window) shows/hides this window");
+    });
 }
 
 fn status_line(ui: &mut egui::Ui, label: &str, ok: bool) {
