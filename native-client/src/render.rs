@@ -275,6 +275,13 @@ impl Renderer {
         let mut fu_stage = vec![0u8; (SLOT * MAX_SLOTS) as usize];
         let mut indices: Vec<u32> = Vec::new();
         let mut draws: Vec<Draw> = Vec::new();
+        // Wire TRANSLUCENT effects (kind 2) are held separately and drawn LAST — after the
+        // render_frame bodies — so an effect/assist/kept-wire-satellite can't force-write
+        // depth ahead of the bodies and discard their tiles (the "effect draws over
+        // everything" root: arm-through-body + missing-tiles-on-hit). Matches the engine/web
+        // op -> pt -> (bodies) -> tr order; the shared depth buffer still occludes an effect
+        // that is genuinely behind a body.
+        let mut tr_draws: Vec<Draw> = Vec::new();
         let mut slot: u32 = 0;
 
         let lists: [(&Vec<PolyParam>, u8); 3] = [
@@ -350,7 +357,7 @@ impl Renderer {
                 }
                 let idx_count = indices.len() as u32 - idx_first;
 
-                draws.push(Draw {
+                let d = Draw {
                     slot,
                     idx_first,
                     idx_count,
@@ -361,7 +368,13 @@ impl Renderer {
                     tcw: pp.tcw,
                     tsp: pp.tsp,
                     textured,
-                });
+                };
+                // kind 2 = wire translucent -> deferred past the body pass; op/pt stay first.
+                if kind == 2 {
+                    tr_draws.push(d);
+                } else {
+                    draws.push(d);
+                }
                 slot += 1;
             }
         }
@@ -430,10 +443,10 @@ impl Renderer {
         }
         let _ = &body_keep_tex; // keep body textures alive through the pass
 
-        debug.stage_quads.store(draws.len() as u64, Relaxed);
+        debug.stage_quads.store((draws.len() + tr_draws.len()) as u64, Relaxed);
         debug.body_quads.store(body_draws.len() as u64, Relaxed);
 
-        if draws.is_empty() && body_draws.is_empty() {
+        if draws.is_empty() && body_draws.is_empty() && tr_draws.is_empty() {
             // nothing to draw yet — clear only
             self.clear_only(device, queue, view);
             return;
@@ -459,7 +472,7 @@ impl Renderer {
         // decode textures -> bind groups (cache per (tcw,tsp) within the frame)
         let mut tex_cache: HashMap<(u32, u32), wgpu::BindGroup> = HashMap::new();
         let mut keep_tex: Vec<wgpu::Texture> = Vec::new();
-        for d in &draws {
+        for d in draws.iter().chain(tr_draws.iter()) {
             if !d.textured {
                 continue;
             }
@@ -486,7 +499,7 @@ impl Renderer {
 
         // Warm the pipeline cache (needs &mut self) BEFORE the render pass, so the
         // pass only takes shared borrows.
-        for d in draws.iter().chain(body_draws.iter()) {
+        for d in draws.iter().chain(body_draws.iter()).chain(tr_draws.iter()) {
             self.pipe(device, d.sb, d.db, d.dm, d.dw);
         }
 
@@ -542,6 +555,25 @@ impl Renderer {
                     rp.set_pipeline(&self.pipes[&pipe_key(d.sb, d.db, d.dm, d.dw)]);
                     let tbg = if d.textured {
                         &body_tex_bgs[d.tcw as usize]
+                    } else {
+                        &self.white_bg
+                    };
+                    rp.set_bind_group(1, tbg, &[]);
+                    rp.set_bind_group(0, &self.ubg, &[d.slot * SLOT as u32]);
+                    rp.draw_indexed(d.idx_first..d.idx_first + d.idx_count, 0, 0..1);
+                }
+            }
+
+            // wire TRANSLUCENT effects LAST — rebind the main vertex buffer (tr_draws index
+            // into vbuf/ibuf like `draws`; only the body pass switched to body_vbuf). Drawn
+            // over the bodies but depth-TESTED (dm:6), so an effect behind a body is occluded
+            // and only a genuinely-nearer effect shows on top. Fixes effect-over-everything.
+            if !tr_draws.is_empty() {
+                rp.set_vertex_buffer(0, self.vbuf.slice(..));
+                for d in &tr_draws {
+                    rp.set_pipeline(&self.pipes[&pipe_key(d.sb, d.db, d.dm, d.dw)]);
+                    let tbg = if d.textured {
+                        tex_cache.get(&(d.tcw, d.tsp)).unwrap_or(&self.white_bg)
                     } else {
                         &self.white_bg
                     };
