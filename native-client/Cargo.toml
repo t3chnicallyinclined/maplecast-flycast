@@ -21,6 +21,8 @@ env_logger = "0.11"
 # rustls gives us DIRECT wss:// to nobd — the TLS gap that blocked the flycast-native client.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# Pin the rustls crypto provider (ring) so wss:// works without an explicit picker.
+rustls = { version = "0.23", features = ["ring"] }
 futures-util = "0.3"
 zstd = "0.13"
 

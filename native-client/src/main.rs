@@ -12,6 +12,7 @@ use winit::{
 };
 
 mod input;
+mod net;
 
 struct Gpu {
     surface: wgpu::Surface<'static>,
@@ -109,8 +110,24 @@ impl Gpu {
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    // Headless net probe (no window): MAPLECAST_NET_ONLY=1 connects to nobd,
+    // logs ~6s of messages, and exits — proves the direct wss:// path.
+    if std::env::var("MAPLECAST_NET_ONLY").is_ok() {
+        let url = std::env::var("MAPLECAST_WS").unwrap_or_else(|_| "wss://nobd.net/ws".into());
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(6), net::run(&url)).await;
+        });
+        return;
+    }
+
     // Native controller -> UDP:7100 (proven wire; direct to public nobd).
     input::spawn_input_thread(input::InputConfig::from_env());
+
+    // M1 step 1: direct wss:// to nobd (rustls) — log what arrives. Decode next.
+    net::spawn_net_thread(
+        std::env::var("MAPLECAST_WS").unwrap_or_else(|_| "wss://nobd.net/ws".into()),
+    );
 
     let event_loop = EventLoop::new().expect("event loop");
     let window = Arc::new(
