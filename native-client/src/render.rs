@@ -24,6 +24,8 @@ pub struct Renderer {
     ibuf: wgpu::Buffer,
     vcap: u64,
     icap: u64,
+    body_vbuf: wgpu::Buffer,
+    body_vcap: u64,
     depth: Option<(wgpu::TextureView, u32, u32)>,
     white_bg: wgpu::BindGroup,
     _white_tex: wgpu::Texture,
@@ -134,6 +136,7 @@ impl Renderer {
 
         let vbuf = mkbuf(device, 1 << 20, wgpu::BufferUsages::VERTEX);
         let ibuf = mkbuf(device, 1 << 20, wgpu::BufferUsages::INDEX);
+        let body_vbuf = mkbuf(device, 1 << 16, wgpu::BufferUsages::VERTEX);
 
         // 1x1 white fallback texture for untextured polys.
         let (white_bg, white_tex) = make_tex_bg(
@@ -161,6 +164,8 @@ impl Renderer {
             ibuf,
             vcap: 1 << 20,
             icap: 1 << 20,
+            body_vbuf,
+            body_vcap: 1 << 16,
             depth: None,
             white_bg,
             _white_tex: white_tex,
@@ -236,6 +241,7 @@ impl Renderer {
         pvr_snapshot: &[u32; 16],
         width: u32,
         height: u32,
+        bodies: &[crate::ffi::SceneQuad],
     ) {
         // ndcMat from the PVR tile-count register.
         let g = pvr_snapshot[0];
@@ -353,7 +359,41 @@ impl Renderer {
             }
         }
 
-        if draws.is_empty() {
+        // --- body quads: render_frame output, force-colored silhouettes ---
+        let mut body_verts: Vec<u8> = Vec::new();
+        let mut body_draws: Vec<Draw> = Vec::new();
+        for q in bodies {
+            if (slot as u64) >= MAX_SLOTS {
+                break;
+            }
+            let base = (body_verts.len() / 28) as u32; // 0-based within body_vbuf
+            for (x, y) in [(q.ax, q.ay), (q.bx, q.by), (q.cx, q.cy), (q.dx, q.dy)] {
+                push_body_vert(&mut body_verts, x, y, q.z);
+            }
+            write_fu(&mut fu_stage, (slot as usize) * SLOT as usize, 0.0, 0, 0, 1, 0, 0, 0);
+            let idx_first = indices.len() as u32;
+            for &(a, b, c) in &[(0u32, 1, 2), (0, 2, 3)] {
+                indices.push(base + a);
+                indices.push(base + b);
+                indices.push(base + c);
+            }
+            let idx_count = indices.len() as u32 - idx_first;
+            body_draws.push(Draw {
+                slot,
+                idx_first,
+                idx_count,
+                sb: 4, // src-alpha
+                db: 5, // one-minus-src-alpha
+                dm: 6, // greater-equal
+                dw: false,
+                tcw: 0,
+                tsp: 0,
+                textured: false,
+            });
+            slot += 1;
+        }
+
+        if draws.is_empty() && body_draws.is_empty() {
             // nothing to draw yet — clear only
             self.clear_only(device, queue, view);
             return;
@@ -367,6 +407,14 @@ impl Renderer {
             self.ibuf = mkbuf(device, self.icap, wgpu::BufferUsages::INDEX);
         }
         queue.write_buffer(&self.ibuf, 0, ib);
+
+        if !body_verts.is_empty() {
+            if body_verts.len() as u64 > self.body_vcap {
+                self.body_vcap = (body_verts.len() as u64).next_power_of_two();
+                self.body_vbuf = mkbuf(device, self.body_vcap, wgpu::BufferUsages::VERTEX);
+            }
+            queue.write_buffer(&self.body_vbuf, 0, &body_verts);
+        }
 
         // decode textures -> bind groups (cache per (tcw,tsp) within the frame)
         let mut tex_cache: HashMap<(u32, u32), wgpu::BindGroup> = HashMap::new();
@@ -398,7 +446,7 @@ impl Renderer {
 
         // Warm the pipeline cache (needs &mut self) BEFORE the render pass, so the
         // pass only takes shared borrows.
-        for d in &draws {
+        for d in draws.iter().chain(body_draws.iter()) {
             self.pipe(device, d.sb, d.db, d.dm, d.dw);
         }
 
@@ -441,6 +489,17 @@ impl Renderer {
                 rp.set_bind_group(1, tbg, &[]);
                 rp.set_bind_group(0, &self.ubg, &[d.slot * SLOT as u32]);
                 rp.draw_indexed(d.idx_first..d.idx_first + d.idx_count, 0, 0..1);
+            }
+
+            // bodies: rebind the body vertex buffer (its indices are 0-based)
+            if !body_draws.is_empty() {
+                rp.set_vertex_buffer(0, self.body_vbuf.slice(..));
+                for d in &body_draws {
+                    rp.set_pipeline(&self.pipes[&pipe_key(d.sb, d.db, d.dm, d.dw)]);
+                    rp.set_bind_group(1, &self.white_bg, &[]);
+                    rp.set_bind_group(0, &self.ubg, &[d.slot * SLOT as u32]);
+                    rp.draw_indexed(d.idx_first..d.idx_first + d.idx_count, 0, 0..1);
+                }
             }
         }
         queue.submit(Some(enc.finish()));
@@ -556,6 +615,31 @@ fn wrap(w: Wrap) -> wgpu::AddressMode {
         Wrap::Clamp => wgpu::AddressMode::ClampToEdge,
         Wrap::Mirror => wgpu::AddressMode::MirrorRepeat,
     }
+}
+
+/// One force-colored body vertex (28B): pos + magenta ~70% + zero offset + zero uv.
+fn push_body_vert(buf: &mut Vec<u8>, x: f32, y: f32, z: f32) {
+    buf.extend_from_slice(&x.to_le_bytes());
+    buf.extend_from_slice(&y.to_le_bytes());
+    buf.extend_from_slice(&z.to_le_bytes());
+    buf.extend_from_slice(&[0xFF, 0x00, 0xFF, 0xB4]); // R,G,B,A
+    buf.extend_from_slice(&[0, 0, 0, 0]); // offset color
+    buf.extend_from_slice(&0f32.to_le_bytes()); // u
+    buf.extend_from_slice(&0f32.to_le_bytes()); // v
+}
+
+/// Write a 32-byte FU uniform at `o`.
+#[allow(clippy::too_many_arguments)]
+fn write_fu(buf: &mut [u8], o: usize, atv: f32, si: u32, ht: u32, ua: u32, ita: u32, ho: u32, at: u32) {
+    buf[o..o + 4].copy_from_slice(&atv.to_le_bytes());
+    let put = |b: &mut [u8], off: usize, v: u32| b[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    put(buf, o + 4, si);
+    put(buf, o + 8, ht);
+    put(buf, o + 12, ua);
+    put(buf, o + 16, ita);
+    put(buf, o + 20, ho);
+    put(buf, o + 24, at);
+    put(buf, o + 28, 0);
 }
 
 fn pipe_key(sb: u32, db: u32, dm: u32, dw: bool) -> u64 {

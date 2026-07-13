@@ -19,6 +19,7 @@ mod frame;
 mod input;
 mod net;
 mod render;
+mod replica;
 mod ta;
 mod texture;
 mod zcs2;
@@ -84,7 +85,11 @@ impl Gpu {
         }
     }
 
-    fn render(&mut self, shared: &Arc<Mutex<FrameDecoder>>) {
+    fn render(
+        &mut self,
+        shared: &Arc<Mutex<FrameDecoder>>,
+        replica: &Arc<Mutex<replica::ReplicaState>>,
+    ) {
         let frame = match self.surface.get_current_texture() {
             Ok(f) => f,
             Err(_) => {
@@ -100,6 +105,11 @@ impl Gpu {
             if fd.renderable {
                 let parsed = ta::parse(fd.ta());
                 let palette = texture::bake_palette(&fd.pvr_regs);
+
+                // Reconstruct fighter bodies: render_frame walks the slot table over
+                // the /replica-live 16MB RAM and emits body quads.
+                let bodies = body_quads(replica);
+
                 self.renderer.render(
                     &self.device,
                     &self.queue,
@@ -110,12 +120,36 @@ impl Gpu {
                     &fd.pvr_snapshot,
                     self.config.width,
                     self.config.height,
+                    &bodies,
                 );
             } else {
                 self.renderer.clear_only(&self.device, &self.queue, &view);
             }
         }
         frame.present();
+    }
+}
+
+/// Run render_frame over the /replica-live RAM image; return the emitted body quads.
+fn body_quads(replica: &Arc<Mutex<replica::ReplicaState>>) -> Vec<ffi::SceneQuad> {
+    let mut rep = replica.lock().unwrap();
+    if !rep.seeded {
+        return Vec::new();
+    }
+    let mut ctx = ffi::GstaSh4Ctx::zeroed();
+    ctx.ram = rep.ram.as_mut_ptr();
+    // SAFETY: ctx.ram is the locked 16MB RAM (valid for the call). render_frame fills
+    // the static g_scene; we copy it out before releasing the lock.
+    unsafe {
+        ffi::render_frame(&mut ctx);
+        let n = ffi::render_frame_nscene().max(0) as usize;
+        let s = ffi::render_frame_scene();
+        if s.is_null() || n == 0 {
+            return Vec::new();
+        }
+        static L: std::sync::Once = std::sync::Once::new();
+        L.call_once(|| log::info!("[bodies] render_frame emitting {n} quads"));
+        std::slice::from_raw_parts(s, n).to_vec()
     }
 }
 
@@ -139,6 +173,14 @@ fn main() {
         shared.clone(),
     );
 
+    // Second socket: /replica-live seeds + maintains the 16MB SH4 RAM image that
+    // render_frame walks to reconstruct the char-stripped fighter bodies.
+    let replica_shared = Arc::new(Mutex::new(replica::ReplicaState::new()));
+    replica::spawn_replica_thread(
+        std::env::var("MAPLECAST_REPLICA").unwrap_or_else(|_| "wss://nobd.net/replica-live".into()),
+        replica_shared.clone(),
+    );
+
     let event_loop = EventLoop::new().expect("event loop");
     let window = Arc::new(
         WindowBuilder::new()
@@ -154,7 +196,7 @@ fn main() {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => elwt.exit(),
                 WindowEvent::Resized(size) => gpu.resize(size.width, size.height),
-                WindowEvent::RedrawRequested => gpu.render(&shared),
+                WindowEvent::RedrawRequested => gpu.render(&shared, &replica_shared),
                 _ => {}
             },
             Event::AboutToWait => window.request_redraw(),
