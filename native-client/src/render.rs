@@ -241,7 +241,7 @@ impl Renderer {
         pvr_snapshot: &[u32; 16],
         width: u32,
         height: u32,
-        bodies: &[crate::ffi::SceneQuad],
+        bodies: &[crate::BodyItem],
         debug: &crate::debug::DebugState,
     ) {
         use std::sync::atomic::Ordering::Relaxed;
@@ -366,18 +366,40 @@ impl Renderer {
             }
         }
 
-        // --- body quads: render_frame output, force-colored silhouettes ---
+        // --- body quads: render_frame output, textured (or force-colored) ---
         let mut body_verts: Vec<u8> = Vec::new();
         let mut body_draws: Vec<Draw> = Vec::new();
-        for q in bodies {
+        let mut body_tex_bgs: Vec<wgpu::BindGroup> = Vec::new();
+        let mut body_keep_tex: Vec<wgpu::Texture> = Vec::new();
+        for item in bodies {
             if !show_bodies || (slot as u64) >= MAX_SLOTS {
                 break;
             }
+            let q = &item.quad;
             let base = (body_verts.len() / 28) as u32; // 0-based within body_vbuf
-            for (x, y) in [(q.ax, q.ay), (q.bx, q.by), (q.cx, q.cy), (q.dx, q.dy)] {
-                push_body_vert(&mut body_verts, x, y, q.z);
+            let textured = item.tex.is_some();
+            // texU mirror (emitter :4807); the decoded tile IS the sprite, so UV span [0,1].
+            let (ulo, uhi) = if q.mirror != 0 { (1.0, 0.0) } else { (0.0, 1.0) };
+            // corners A,B,C,D -> UVs A(ulo,1) B(uhi,1) C(uhi,0) D(ulo,0)  (emitter :4801-4812)
+            let uvs = [(ulo, 1.0f32), (uhi, 1.0), (uhi, 0.0), (ulo, 0.0)];
+            let corners = [(q.ax, q.ay), (q.bx, q.by), (q.cx, q.cy), (q.dx, q.dy)];
+            let col: u32 = if textured { 0xFFFF_FFFF } else { 0xB4FF_00FF };
+            for k in 0..4 {
+                push_body_vert(&mut body_verts, corners[k].0, corners[k].1, q.z, col, uvs[k].0, uvs[k].1);
             }
-            write_fu(&mut fu_stage, (slot as usize) * SLOT as usize, 0.0, 0, 0, 1, 0, 0, 0);
+            // textured -> ht=1, si=1 (modulate the white base with the texture).
+            let (si, ht) = if textured { (1u32, 1u32) } else { (0, 0) };
+            write_fu(&mut fu_stage, (slot as usize) * SLOT as usize, 0.0, si, ht, 1, 0, 0, 0);
+            let tex_ref: u32 = if let Some(bt) = &item.tex {
+                let (bg, tex) = make_tex_bg(
+                    device, &self.bgl1, &bt.rgba, bt.w, bt.h, false, Wrap::Clamp, Wrap::Clamp, Some(queue),
+                );
+                body_keep_tex.push(tex);
+                body_tex_bgs.push(bg);
+                (body_tex_bgs.len() - 1) as u32
+            } else {
+                u32::MAX
+            };
             let idx_first = indices.len() as u32;
             for &(a, b, c) in &[(0u32, 1, 2), (0, 2, 3)] {
                 indices.push(base + a);
@@ -389,16 +411,17 @@ impl Renderer {
                 slot,
                 idx_first,
                 idx_count,
-                sb: 4, // src-alpha
-                db: 5, // one-minus-src-alpha
-                dm: 6, // greater-equal
+                sb: 4,
+                db: 5,
+                dm: 6,
                 dw: false,
-                tcw: 0,
+                tcw: tex_ref, // body: index into body_tex_bgs (u32::MAX = force-color)
                 tsp: 0,
-                textured: false,
+                textured,
             });
             slot += 1;
         }
+        let _ = &body_keep_tex; // keep body textures alive through the pass
 
         debug.stage_quads.store(draws.len() as u64, Relaxed);
         debug.body_quads.store(body_draws.len() as u64, Relaxed);
@@ -510,7 +533,12 @@ impl Renderer {
                 rp.set_vertex_buffer(0, self.body_vbuf.slice(..));
                 for d in &body_draws {
                     rp.set_pipeline(&self.pipes[&pipe_key(d.sb, d.db, d.dm, d.dw)]);
-                    rp.set_bind_group(1, &self.white_bg, &[]);
+                    let tbg = if d.textured {
+                        &body_tex_bgs[d.tcw as usize]
+                    } else {
+                        &self.white_bg
+                    };
+                    rp.set_bind_group(1, tbg, &[]);
                     rp.set_bind_group(0, &self.ubg, &[d.slot * SLOT as u32]);
                     rp.draw_indexed(d.idx_first..d.idx_first + d.idx_count, 0, 0..1);
                 }
@@ -644,15 +672,18 @@ fn pillarbox_4x3(w: u32, h: u32) -> (f32, f32, f32, f32) {
     }
 }
 
-/// One force-colored body vertex (28B): pos + magenta ~70% + zero offset + zero uv.
-fn push_body_vert(buf: &mut Vec<u8>, x: f32, y: f32, z: f32) {
+/// One body vertex (28B): pos (z=1/w) + ARGB color as bytes R,G,B,A + zero offset + uv.
+fn push_body_vert(buf: &mut Vec<u8>, x: f32, y: f32, z: f32, col: u32, u: f32, v: f32) {
     buf.extend_from_slice(&x.to_le_bytes());
     buf.extend_from_slice(&y.to_le_bytes());
     buf.extend_from_slice(&z.to_le_bytes());
-    buf.extend_from_slice(&[0xFF, 0x00, 0xFF, 0xB4]); // R,G,B,A
+    buf.push(((col >> 16) & 0xFF) as u8);
+    buf.push(((col >> 8) & 0xFF) as u8);
+    buf.push((col & 0xFF) as u8);
+    buf.push(((col >> 24) & 0xFF) as u8);
     buf.extend_from_slice(&[0, 0, 0, 0]); // offset color
-    buf.extend_from_slice(&0f32.to_le_bytes()); // u
-    buf.extend_from_slice(&0f32.to_le_bytes()); // v
+    buf.extend_from_slice(&u.to_le_bytes());
+    buf.extend_from_slice(&v.to_le_bytes());
 }
 
 /// Write a 32-byte FU uniform at `o`.

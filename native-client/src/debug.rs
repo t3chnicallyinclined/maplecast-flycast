@@ -39,7 +39,7 @@ impl DebugState {
             gpu_name: Mutex::new(String::new()),
             show_bodies: AtomicBool::new(true),
             show_stage: AtomicBool::new(true),
-            bodies_force_color: AtomicBool::new(true),
+            bodies_force_color: AtomicBool::new(false),
             overlay: AtomicBool::new(true),
         }
     }

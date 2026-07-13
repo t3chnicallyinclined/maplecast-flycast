@@ -78,3 +78,20 @@ extern "C" {
 pub fn link_probe() -> i32 {
     unsafe { render_frame_nscene() }
 }
+
+/// Per-quad [m, cx, ry, flags] source descriptors for the current frame's `n` quads
+/// (the emit-time tile-carve key). Returns exactly `n` entries (missing padded 0).
+pub fn quad_srcdesc(n: usize) -> Vec<[u8; 4]> {
+    let mut buf = vec![0u8; n * 4];
+    let _ = unsafe { gsta_quad_srcdesc(buf.as_mut_ptr(), n as u32) };
+    (0..n)
+        .map(|i| [buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2], buf[i * 4 + 3]])
+        .collect()
+}
+
+/// Per-quad "is a BIT15 effect quad" flags for the current frame's `n` quads.
+pub fn quad_is_effect(n: usize) -> Vec<bool> {
+    let mut buf = vec![0u8; n];
+    let _ = unsafe { gsta_quad_is_effect(buf.as_mut_ptr(), n as u32) };
+    buf.iter().map(|&b| b != 0).collect()
+}

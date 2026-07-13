@@ -14,6 +14,7 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
+mod body_tex;
 mod debug;
 mod ffi;
 mod frame;
@@ -211,12 +212,20 @@ impl Gpu {
     }
 }
 
-/// Run render_frame over the /replica-live RAM image; return the emitted body quads.
+/// A reconstructed body quad + its decoded texture (None = force-color silhouette).
+pub struct BodyItem {
+    pub quad: ffi::SceneQuad,
+    pub tex: Option<body_tex::BodyTex>,
+}
+
+/// Run render_frame over the /replica-live RAM image, and (unless force-color) decode
+/// each emitted body quad's texture from the RAM while it's still locked.
 fn body_quads(
     replica: &Arc<Mutex<replica::ReplicaState>>,
     debug: &debug::DebugState,
-) -> Vec<ffi::SceneQuad> {
-    if !debug.show_bodies.load(std::sync::atomic::Ordering::Relaxed) {
+) -> Vec<BodyItem> {
+    use std::sync::atomic::Ordering::Relaxed;
+    if !debug.show_bodies.load(Relaxed) {
         return Vec::new();
     }
     let mut rep = replica.lock().unwrap();
@@ -226,8 +235,8 @@ fn body_quads(
     let mut ctx = ffi::GstaSh4Ctx::zeroed();
     ctx.ram = rep.ram.as_mut_ptr();
     // SAFETY: ctx.ram is the locked 16MB RAM (valid for the call). render_frame fills
-    // the static g_scene; we copy it out before releasing the lock.
-    unsafe {
+    // the static g_scene; the returned slice is valid until the next render_frame call.
+    let (quads, srcdescs, effects) = unsafe {
         ffi::render_frame(&mut ctx);
         let n = ffi::render_frame_nscene().max(0) as usize;
         let s = ffi::render_frame_scene();
@@ -236,8 +245,25 @@ fn body_quads(
         }
         static L: std::sync::Once = std::sync::Once::new();
         L.call_once(|| log::info!("[bodies] render_frame emitting {n} quads"));
-        std::slice::from_raw_parts(s, n).to_vec()
-    }
+        (
+            std::slice::from_raw_parts(s, n).to_vec(),
+            ffi::quad_srcdesc(n),
+            ffi::quad_is_effect(n),
+        )
+    };
+    let force_color = debug.bodies_force_color.load(Relaxed);
+    quads
+        .iter()
+        .enumerate()
+        .map(|(i, q)| BodyItem {
+            quad: *q,
+            tex: if force_color {
+                None
+            } else {
+                body_tex::decode_body(q, srcdescs[i], effects[i], &rep.ram)
+            },
+        })
+        .collect()
 }
 
 fn main() {
