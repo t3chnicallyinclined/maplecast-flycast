@@ -1,0 +1,30 @@
+[package]
+name = "maplecast-native"
+version = "0.1.0"
+edition = "2021"
+description = "MapleCast native client — a fresh wgpu port of the working WebGPU renderer. Direct wss:// to nobd, native UDP input, no webview."
+
+[dependencies]
+# --- windowing + GPU (the native WebGPU stack: wgpu runs the same WGSL as the browser) ---
+winit = "0.29"
+wgpu = "0.20"
+pollster = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+
+# --- native controller -> UDP:7100 input (already proven vs the live server) ---
+gilrs = "0.11"
+
+log = "0.4"
+env_logger = "0.11"
+
+# --- networking (lands with the M1 milestone; see PORT-PLAN.md) ---
+# rustls gives us DIRECT wss:// to nobd — the TLS gap that blocked the flycast-native client.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+zstd = "0.13"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
