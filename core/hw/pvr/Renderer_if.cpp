@@ -682,6 +682,13 @@ void rend_start_render()
 		pvrQueue.enqueue(PvrMessageQueue::Render);
 		if (!config::DelayFrameSwapping && !ctx->rend.isRTT && !config::EmulateFramebuffer)
 			pvrQueue.enqueue(PvrMessageQueue::Present);
+		// A2 SHORT-LEG3 (MAPLECAST_RA_SHORT_LEG3): this is the publish leg's winning ctx —
+		// serverPublish ships it off the render thread. Everything the SH4 does after this
+		// (N+2 game update) is rewound away, so stop now and skip the tail. Fires once, only on
+		// the non-hidden display pass, only when leg3 armed it (raConsumePublishStop is one-shot).
+		if (!ctx->rend.mc_hiddenLeg && !ctx->rend.isRTT
+			&& maplecast_mirror::raConsumePublishStop())
+			emu.getSh4Executor()->Stop();
 	}
 }
 

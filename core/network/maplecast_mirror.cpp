@@ -2241,6 +2241,12 @@ bool suppressActive() { return _suppressPublish.load(std::memory_order_acquire);
 static std::atomic<bool> _raStepStop{false};
 void raArmStepStop() { _raStepStop.store(true, std::memory_order_release); }
 bool raConsumeStepStop() { return _raStepStop.exchange(false, std::memory_order_acq_rel); }
+// A2 SHORT-LEG3: a SECOND one-shot stop consumed at the publish STARTRENDER (after QueueRender
+// accepts + the render thread owns the ship), so leg3 halts right after publishing N+1 and skips
+// the rewound-away N+2 game-update tail. Gated MAPLECAST_RA_SHORT_LEG3.
+static std::atomic<bool> _raPublishStop{false};
+void raArmPublishStop()     { _raPublishStop.store(true, std::memory_order_release); }
+bool raConsumePublishStop() { return _raPublishStop.exchange(false, std::memory_order_acq_rel); }
 uint32_t currentGuestVf() { return addrspace::read32(0x8C3496B0); }   // guest frame counter (emu thread)
 
 void serverPublish(TA_context* ctx)

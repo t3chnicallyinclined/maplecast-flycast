@@ -1791,7 +1791,9 @@ void Emulator::start()
 								mc_runaheadPreviewLeg.store(true, std::memory_order_relaxed);
 								startTime = sh4_sched_now64();
 								renderTimeout = false;
-								maplecast_mirror::raArmStepStop();
+								static const bool _raShortLeg3 = [](){ const char* e = std::getenv("MAPLECAST_RA_SHORT_LEG3"); return e && e[0] && e[0] != '0'; }();
+								maplecast_mirror::raArmStepStop();                       // vblank fallback (unchanged)
+								if (_raShortLeg3) maplecast_mirror::raArmPublishStop();   // A2 short-leg3: halt right after N+1 publish SR
 								try {
 									runInternal();                               // leg3: ships N+1 (deferred submit), advances to N+2
 								} catch (...) {
@@ -1800,6 +1802,7 @@ void Emulator::start()
 									throw;
 								}
 								getSh4Executor()->Start();
+								if (_raShortLeg3) maplecast_mirror::raConsumeStepStop();  // discard the unused vblank fallback if publish-stop won the race
 								auto _raT3 = std::chrono::steady_clock::now();
 									const u32 _svA2 = _svfStep ? ReadMem32_nommu(0x8C268482) : 0;   // anim after preview leg (before rewind)
 								mc_runaheadPreviewLeg.store(false, std::memory_order_relaxed);

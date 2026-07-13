@@ -110,6 +110,8 @@ void setSuppressPublish(bool v);
 bool suppressActive();
 void raArmStepStop();
 bool raConsumeStepStop();
+void raArmPublishStop();      // A2 short-leg3: halt leg3 right after the N+1 publish SR
+bool raConsumePublishStop();
 uint32_t currentGuestVf();
 
 // Build the full DC save state via dc_serialize into a freshly malloc'd
