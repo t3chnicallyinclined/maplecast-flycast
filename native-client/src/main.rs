@@ -135,7 +135,9 @@ impl Gpu {
             if fd.renderable {
                 let parsed = ta::parse(fd.ta());
                 let palette = texture::bake_palette(&fd.pvr_regs);
-                let bodies = body_quads(replica, debug, &palette);
+                // Stage textures use the /ws palette above; body palette is phase-locked
+                // to /replica-live inside body_quads (assist-flash fix).
+                let bodies = body_quads(replica, debug);
                 self.renderer.render(
                     &self.device,
                     &self.queue,
@@ -274,7 +276,6 @@ pub struct BodyItem {
 fn body_quads(
     replica: &Arc<Mutex<replica::ReplicaState>>,
     debug: &debug::DebugState,
-    pvr_pal: &[u8],
 ) -> Vec<BodyItem> {
     use std::sync::atomic::Ordering::Relaxed;
     if !debug.show_bodies.load(Relaxed) {
@@ -305,6 +306,11 @@ fn body_quads(
         )
     };
     let force_color = debug.bodies_force_color.load(Relaxed);
+    // Phase-lock the body palette to the SAME /replica-live snapshot render_frame just
+    // walked (rep.pvr_regs — updated by the PALETTE tail in the same FRMx that splats the
+    // char regions), NOT the async /ws socket (fd.pvr_regs). Kills the 1-frame default-skin
+    // flash on assist-spawn (the cross-socket lag). Verified vs the web ground truth.
+    let pvr_pal = texture::bake_palette(&rep.pvr_regs);
 
     quads
         .iter()
@@ -315,7 +321,7 @@ fn body_quads(
             tex: if force_color {
                 None
             } else {
-                body_tex::decode_body(q, srcdescs[i], effects[i], &rep.ram, pvr_pal, colrows[i])
+                body_tex::decode_body(q, srcdescs[i], effects[i], &rep.ram, &pvr_pal, colrows[i])
             },
         })
         .collect()

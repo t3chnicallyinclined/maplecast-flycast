@@ -414,7 +414,14 @@ impl Renderer {
                 sb: 4,
                 db: 5,
                 dm: 6,
-                dw: false,
+                // depth-WRITE ON: the engine's body/cape/satellite list occludes by a
+                // written depth buffer (ISP DepthMode=4/Greater, ZWriteDisable=0), not
+                // paint order. q.z = 1/(W+0.001·k) (render_frame.c:623) then orders parts
+                // so the cape/satellite sit BEHIND the body. Matches the web path
+                // (pvr2-renderer.mjs:10 "write=ON, func=greater-equal"). No sort (that
+                // flickers). alpha-0 texels are already discarded (shaders.wgsl:81) so
+                // transparent regions write no depth.
+                dw: true,
                 tcw: tex_ref, // body: index into body_tex_bgs (u32::MAX = force-color)
                 tsp: 0,
                 textured,
