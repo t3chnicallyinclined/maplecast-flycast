@@ -14,6 +14,7 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
+mod ffi;
 mod frame;
 mod input;
 mod net;
@@ -123,6 +124,8 @@ fn main() {
         "info,wgpu_core=warn,wgpu_hal=warn,naga=warn,gilrs=error",
     ))
     .init();
+
+    log::info!("[ffi] render_frame linked (nscene at rest = {})", ffi::link_probe());
 
     // Shared decoded frame state (TA + VRAM + PVR), written by the net thread.
     let shared = Arc::new(Mutex::new(FrameDecoder::new()));

@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "MapleCast native client — a fresh wgpu port of the working WebGPU renderer. Direct wss:// to nobd, native UDP input, no webview."
 
+[build-dependencies]
+# Compiles the transpiled-SH4 body drawer (core/network/gsta_render_frame.c) natively.
+cc = "1"
+
 [dependencies]
 # --- windowing + GPU (the native WebGPU stack: wgpu runs the same WGSL as the browser) ---
 winit = "0.29"

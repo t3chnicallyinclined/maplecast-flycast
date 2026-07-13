@@ -1207,6 +1207,7 @@ name = "maplecast-native"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "cc",
  "env_logger",
  "futures-util",
  "gilrs",
