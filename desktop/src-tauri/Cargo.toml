@@ -1,0 +1,39 @@
+[package]
+name = "maplecast-desktop"
+version = "0.1.0"
+description = "MapleCast native low-latency desktop client — thin Tauri shell around the live WebGPU client + a native UDP input path"
+authors = ["MapleCast"]
+edition = "2021"
+rust-version = "1.77"
+
+# The library the Tauri app is built from (Tauri v2 layout).
+[lib]
+name = "maplecast_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+# Deep-link / custom-URL-scheme handler: this is what makes a shared
+# `maplecast://match/<id>` link launch (or focus) the app straight into a match.
+tauri-plugin-deep-link = "2"
+# Single-instance: a second launch (e.g. clicking another match link) forwards
+# the URL to the already-running window instead of opening a duplicate.
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+# Native gamepad polling — the whole point of going native: poll off the
+# webview thread and send input over raw UDP instead of the browser's
+# rAF-gated Gamepad API + WebSocket.
+gilrs = "0.11"
+url = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

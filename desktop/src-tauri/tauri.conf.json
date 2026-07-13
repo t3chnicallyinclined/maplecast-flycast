@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "MapleCast",
+  "version": "0.1.0",
+  "identifier": "net.nobd.maplecast",
+  "build": {
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "MapleCast",
+        "width": 1280,
+        "height": 720,
+        "resizable": true,
+        "fullscreen": false,
+        "url": "index.html"
+      }
+    ],
+    "security": {
+      "csp": null,
+      "capabilities": ["default"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "shortDescription": "MapleCast low-latency desktop client",
+    "longDescription": "Native desktop client for MapleCast. Loads the live WebGPU renderer and sends controller input over a native UDP path for lower latency than the browser."
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["maplecast"]
+      }
+    }
+  }
+}

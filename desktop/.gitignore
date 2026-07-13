@@ -1,0 +1,14 @@
+# Rust build output
+/src-tauri/target/
+target/
+
+# Tauri codegen (regenerated from tauri.conf.json + capabilities)
+/src-tauri/gen/
+
+# Generated app icons (run `cargo tauri icon <logo.png>` to produce these).
+# Kept out of git to avoid committing binary blobs; generate locally / in CI.
+/src-tauri/icons/
+
+# Signing keys — NEVER commit the private updater key
+*.key
+/src-tauri/*.pem
