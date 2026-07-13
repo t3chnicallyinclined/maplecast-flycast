@@ -52,6 +52,7 @@ async fn run(
 
     let (ws, _) = tokio_tungstenite::connect_async(url).await?;
     log::info!("[net] connected {url}");
+    *debug.server.lock().unwrap() = url.to_string();
     let (mut write, mut read) = ws.split();
 
     // Ask for the one-time SYNC keyframe (full VRAM/PVR base).

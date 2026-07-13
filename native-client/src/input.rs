@@ -28,19 +28,23 @@ impl InputConfig {
     }
 }
 
-pub fn spawn_input_thread(cfg: InputConfig) {
+pub fn spawn_input_thread(cfg: InputConfig, debug: std::sync::Arc<crate::debug::DebugState>) {
     std::thread::Builder::new()
         .name("maplecast-input".into())
-        .spawn(move || run(cfg))
+        .spawn(move || run(cfg, debug))
         .expect("spawn input thread");
 }
 
-fn run(cfg: InputConfig) {
+fn run(cfg: InputConfig, debug: std::sync::Arc<crate::debug::DebugState>) {
+    *debug.input_host.lock().unwrap() = cfg.host.clone();
     let sock = match UdpSocket::bind("0.0.0.0:0") {
         Ok(s) => s,
         Err(e) => { log::error!("[input] bind failed: {e}"); return; }
     };
     let target = format!("{}:{}", cfg.host, cfg.port);
+    // Connect so we can recv the server's input ACKs ([0xFE][seq_lo][ts]) for RTT.
+    let _ = sock.connect(target.as_str());
+    let _ = sock.set_nonblocking(true);
     let mut gilrs = match Gilrs::new() {
         Ok(g) => g,
         Err(e) => { log::error!("[input] gilrs init failed: {e:?}"); return; }
@@ -50,6 +54,9 @@ fn run(cfg: InputConfig) {
     let mut last: (u16, u8, u8) = (0xFFFF, 0, 0);
     let mut seq: u32 = 1; // strictly monotonic; server drops seq <= last-seen
     let mut ticks: u32 = 0;
+    let mut send_times: [Option<std::time::Instant>; 256] = [None; 256];
+    let mut rtt_ema: Option<f64> = None;
+    let mut rx = [0u8; 16];
 
     loop {
         while gilrs.next_event().is_some() {}
@@ -58,8 +65,20 @@ fn run(cfg: InputConfig) {
         let heartbeat = ticks % 200 == 0; // ~every 200ms at 1kHz
         if cur != last || heartbeat {
             let pkt = build_input_packet(cfg.slot, cur.1, cur.2, cur.0, seq);
-            let _ = sock.send_to(&pkt, &target);
+            let _ = sock.send(&pkt);
+            send_times[(seq & 0xFF) as usize] = Some(std::time::Instant::now());
             seq = seq.wrapping_add(1);
+        }
+        // Drain input ACKs ([0xFE][seq_lo][ts]) -> input RTT (native UDP round-trip).
+        while let Ok(n) = sock.recv(&mut rx) {
+            if n >= 2 && rx[0] == 0xFE {
+                if let Some(t) = send_times[rx[1] as usize].take() {
+                    let rtt = t.elapsed().as_secs_f64() * 1000.0;
+                    let ema = rtt_ema.map_or(rtt, |e| e * 0.85 + rtt * 0.15);
+                    rtt_ema = Some(ema);
+                    debug.set_rtt(ema);
+                }
+            }
         }
         last = cur;
         std::thread::sleep(Duration::from_millis(1)); // ~1 kHz

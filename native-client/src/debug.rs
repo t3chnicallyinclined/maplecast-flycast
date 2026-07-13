@@ -18,6 +18,11 @@ pub struct DebugState {
     pub seeded: AtomicBool,
     pub regions: AtomicU64,
     pub gpu_name: Mutex<String>,
+    // --- connection / latency ---
+    pub server: Mutex<String>,
+    pub input_host: Mutex<String>,
+    rtt_x100: AtomicU64,
+    pub rtt_seen: AtomicBool,
     // --- render options ---
     pub show_bodies: AtomicBool,
     pub show_stage: AtomicBool,
@@ -37,6 +42,10 @@ impl DebugState {
             seeded: AtomicBool::new(false),
             regions: AtomicU64::new(0),
             gpu_name: Mutex::new(String::new()),
+            server: Mutex::new(String::new()),
+            input_host: Mutex::new(String::new()),
+            rtt_x100: AtomicU64::new(0),
+            rtt_seen: AtomicBool::new(false),
             show_bodies: AtomicBool::new(true),
             show_stage: AtomicBool::new(true),
             bodies_force_color: AtomicBool::new(false),
@@ -49,6 +58,11 @@ impl DebugState {
     }
     pub fn set_fps(&self, v: f64) {
         self.fps_x10.store((v * 10.0) as u64, Relaxed);
+    }
+    /// EMA of the input round-trip time (native UDP -> :7100 -> ACK), in ms.
+    pub fn set_rtt(&self, ms: f64) {
+        self.rtt_x100.store((ms * 100.0) as u64, Relaxed);
+        self.rtt_seen.store(true, Relaxed);
     }
     pub fn toggle_overlay(&self) {
         self.overlay.store(!self.overlay.load(Relaxed), Relaxed);
@@ -87,12 +101,22 @@ pub fn ui(ctx: &egui::Context, d: &DebugState) {
             });
 
             ui.separator();
+            ui.strong("Connection");
+            ui.label(format!("stream: {}", d.server.lock().unwrap()));
+            ui.label(format!("input:  {}:7100", d.input_host.lock().unwrap()));
+            if d.rtt_seen.load(Relaxed) {
+                ui.label(format!(
+                    "input RTT (E2E net): {:.1} ms",
+                    d.rtt_x100.load(Relaxed) as f64 / 100.0
+                ));
+            } else {
+                ui.label("input RTT: — (press a button)");
+            }
             status_line(ui, "thin ZCS2 wire", d.thin_active.load(Relaxed));
-            let seeded = d.seeded.load(Relaxed);
             status_line(
                 ui,
                 &format!("replica RAM ({} regions)", d.regions.load(Relaxed)),
-                seeded,
+                d.seeded.load(Relaxed),
             );
 
             ui.separator();

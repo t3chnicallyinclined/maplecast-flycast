@@ -281,7 +281,7 @@ fn main() {
     let shared = Arc::new(Mutex::new(FrameDecoder::new()));
 
     // Native controller -> UDP:7100 (direct to nobd).
-    input::spawn_input_thread(input::InputConfig::from_env());
+    input::spawn_input_thread(input::InputConfig::from_env(), debug.clone());
 
     // Thin ZCS2 wire -> shared FrameDecoder.
     net::spawn_net_thread(
