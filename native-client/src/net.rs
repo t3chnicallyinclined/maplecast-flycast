@@ -50,6 +50,8 @@ async fn run(url: &str, shared: &Arc<Mutex<FrameDecoder>>) -> Result<(), BoxErr>
 
     let mut zcs2 = Zcs2::new();
     let mut thin = false;
+    let mut bytes: u64 = 0;
+    let mut t0 = std::time::Instant::now();
 
     while let Some(msg) = read.next().await {
         let b = match msg? {
@@ -60,6 +62,13 @@ async fn run(url: &str, shared: &Arc<Mutex<FrameDecoder>>) -> Result<(), BoxErr>
             }
             _ => continue,
         };
+        bytes += b.len() as u64;
+        let el = t0.elapsed().as_secs_f64();
+        if el >= 2.0 {
+            log::info!("[net] {:.2} Mbps{}", (bytes as f64 * 8.0) / el / 1e6, if thin { " (thin)" } else { "" });
+            bytes = 0;
+            t0 = std::time::Instant::now();
+        }
         if b.len() < 4 {
             continue;
         }
