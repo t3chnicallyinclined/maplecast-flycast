@@ -12,6 +12,7 @@ use winit::{
 };
 
 mod decode;
+mod frame;
 mod input;
 mod net;
 
