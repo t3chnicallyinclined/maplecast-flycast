@@ -1,26 +1,35 @@
 //! MapleCast native client — fresh wgpu port of the working WebGPU renderer.
 //!
-//! Milestone 0 (this file): a native wgpu window that clears the screen, with the
-//! proven native controller -> UDP:7100 input wired in. This is the clean
-//! foundation the renderer ports onto. See PORT-PLAN.md for the roadmap.
+//! Consumes exactly the thin ZCS2/GSTA wire that webgpu-test.html renders when
+//! "ZCS2" is checked: direct wss:// to nobd, native controller -> UDP:7100 input,
+//! no webview. The render (TA parse + wgpu pipeline) drops in on the shared
+//! FrameDecoder as the M2 modules land.
 
-use std::sync::Arc;
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use std::sync::{Arc, Mutex};
 use winit::{
     event::{Event, WindowEvent},
     event_loop::EventLoop,
     window::{Window, WindowBuilder},
 };
 
-mod decode;
 mod frame;
 mod input;
 mod net;
+mod render;
+mod ta;
+mod texture;
+mod zcs2;
+
+use frame::FrameDecoder;
 
 struct Gpu {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    renderer: render::Renderer,
 }
 
 impl Gpu {
@@ -36,7 +45,7 @@ impl Gpu {
             })
             .await
             .expect("no suitable GPU adapter");
-        log::info!("[gpu] adapter: {:?}", adapter.get_info());
+        log::info!("[gpu] {:?}", adapter.get_info().name);
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor::default(), None)
@@ -44,26 +53,26 @@ impl Gpu {
             .expect("request device");
 
         let caps = surface.get_capabilities(&adapter);
+        // NON-sRGB surface — the renderer writes final color with no gamma encode.
         let format = caps
             .formats
             .iter()
             .copied()
-            .find(|f| f.is_srgb())
+            .find(|f| !f.is_srgb())
             .unwrap_or(caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
-            // AutoNoVsync = Mailbox/Immediate when available — the low-latency
-            // present the "extreme low latency" goal wants (vs Fifo/vsync).
-            present_mode: wgpu::PresentMode::AutoNoVsync,
+            present_mode: wgpu::PresentMode::AutoNoVsync, // low-latency present
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
-        Self { surface, device, queue, config }
+        let renderer = render::Renderer::new(&device, format);
+        Self { surface, device, queue, config, renderer }
     }
 
     fn resize(&mut self, w: u32, h: u32) {
@@ -74,7 +83,7 @@ impl Gpu {
         }
     }
 
-    fn render(&mut self) {
+    fn render(&mut self, shared: &Arc<Mutex<FrameDecoder>>) {
         let frame = match self.surface.get_current_texture() {
             Ok(f) => f,
             Err(_) => {
@@ -83,52 +92,48 @@ impl Gpu {
             }
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut enc = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         {
-            // M0: just clear. The ported pvr2 render pass (WGSL from
-            // web/webgpu/pvr2-renderer.mjs) drops in here at M2.
-            let _rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("clear"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.03, b: 0.05, a: 1.0 }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
+            // Hold the decoder lock across parse+draw so we never render a frame
+            // whose VRAM is mid-update (the flicker race).
+            let fd = shared.lock().unwrap();
+            if fd.renderable {
+                let parsed = ta::parse(fd.ta());
+                let palette = texture::bake_palette(&fd.pvr_regs);
+                self.renderer.render(
+                    &self.device,
+                    &self.queue,
+                    &view,
+                    &parsed,
+                    &fd.vram,
+                    &palette,
+                    &fd.pvr_snapshot,
+                    self.config.width,
+                    self.config.height,
+                );
+            } else {
+                self.renderer.clear_only(&self.device, &self.queue, &view);
+            }
         }
-        self.queue.submit(Some(enc.finish()));
         frame.present();
     }
 }
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
+        "info,wgpu_core=warn,wgpu_hal=warn,naga=warn,gilrs=error",
+    ))
+    .init();
 
-    // Headless net probe (no window): MAPLECAST_NET_ONLY=1 connects to nobd,
-    // logs ~6s of messages, and exits — proves the direct wss:// path.
-    if std::env::var("MAPLECAST_NET_ONLY").is_ok() {
-        let url = std::env::var("MAPLECAST_WS").unwrap_or_else(|_| "wss://nobd.net/ws".into());
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        rt.block_on(async {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(6), net::run(&url)).await;
-        });
-        return;
-    }
+    // Shared decoded frame state (TA + VRAM + PVR), written by the net thread.
+    let shared = Arc::new(Mutex::new(FrameDecoder::new()));
 
-    // Native controller -> UDP:7100 (proven wire; direct to public nobd).
+    // Native controller -> UDP:7100 (direct to nobd).
     input::spawn_input_thread(input::InputConfig::from_env());
 
-    // M1 step 1: direct wss:// to nobd (rustls) — log what arrives. Decode next.
+    // Thin ZCS2 wire -> shared FrameDecoder.
     net::spawn_net_thread(
         std::env::var("MAPLECAST_WS").unwrap_or_else(|_| "wss://nobd.net/ws".into()),
+        shared.clone(),
     );
 
     let event_loop = EventLoop::new().expect("event loop");
@@ -146,7 +151,7 @@ fn main() {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => elwt.exit(),
                 WindowEvent::Resized(size) => gpu.resize(size.width, size.height),
-                WindowEvent::RedrawRequested => gpu.render(),
+                WindowEvent::RedrawRequested => gpu.render(&shared),
                 _ => {}
             },
             Event::AboutToWait => window.request_redraw(),

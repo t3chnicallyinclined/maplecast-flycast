@@ -25,6 +25,9 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", features = ["ring"] }
 futures-util = "0.3"
 zstd = "0.13"
+# Low-level persistent streaming decompressor for the ZCS2 wire (one zstd frame
+# flushed per message, window spans prior frames) — the high-level API can't do this.
+zstd-safe = { version = "7", features = ["std"] }
 
 [profile.release]
 opt-level = 3

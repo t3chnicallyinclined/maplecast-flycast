@@ -49,22 +49,24 @@ impl FrameDecoder {
         &self.prev_ta[..self.prev_ta_size.min(self.prev_ta.len())]
     }
 
-    /// Rough sanity metric: how many KB of VRAM are nonzero (proves SYNC landed).
-    pub fn vram_nonzero_kb(&self) -> usize {
-        self.vram.iter().filter(|&&b| b != 0).count() / 1024
-    }
-
-    /// A ZCST envelope: "ZCST"(4) + uncompressedSize(u32 LE) + zstd blob.
-    pub fn apply_zcst(&mut self, msg: &[u8]) -> Result<(), BoxErr> {
-        let inner = crate::decode::decompress_zcst(msg)?;
+    /// Apply a ZCST message ONLY if it's the one-time SYNC keyframe (the VRAM/PVR
+    /// base the client requests on connect). Legacy ZCST deltas are ignored —
+    /// per-frame rendering runs off the thin ZCS2 wire (apply_delta_frame).
+    pub fn apply_sync_zcst(&mut self, msg: &[u8]) -> Result<bool, BoxErr> {
+        let inner = decompress_zcst(msg)?;
         if inner.len() < 4 {
-            return Ok(());
+            return Ok(false);
         }
         match &inner[0..4] {
-            b"SYNC" => self.apply_sync(&inner),
-            b"FSYN" => self.apply_fsyn(&inner),
-            b"SAVE" => Ok(()), // no-op passthrough
-            _ => self.apply_delta(&inner), // legacy delta frame (starts with frameSize u32)
+            b"SYNC" => {
+                self.apply_sync(&inner)?;
+                Ok(true)
+            }
+            b"FSYN" => {
+                self.apply_fsyn(&inner)?;
+                Ok(true)
+            }
+            _ => Ok(false), // SAVE or legacy delta -> ignored (thin wire renders from ZCS2)
         }
     }
 
@@ -118,8 +120,9 @@ impl FrameDecoder {
         Ok(())
     }
 
-    /// Legacy delta frame: 80B header + TA section + checksum + dirty pages.
-    fn apply_delta(&mut self, f: &[u8]) -> Result<(), BoxErr> {
+    /// The inner delta frame (from the ZCS2 wire, or a ZCST delta): 80B header +
+    /// TA section + checksum + dirty pages. Reconstructs the persistent TA + VRAM.
+    pub fn apply_delta_frame(&mut self, f: &[u8]) -> Result<(), BoxErr> {
         if f.len() < 80 {
             return Err("delta: short header".into());
         }
@@ -241,6 +244,14 @@ impl FrameDecoder {
             _ => {}
         }
     }
+}
+
+/// ZCST envelope: "ZCST"(4) + uncompressedSize(u32 LE) + zstd blob -> raw bytes.
+fn decompress_zcst(msg: &[u8]) -> Result<Vec<u8>, BoxErr> {
+    if msg.len() < 8 || &msg[0..4] != b"ZCST" {
+        return Err("not a ZCST message".into());
+    }
+    Ok(zstd::stream::decode_all(&msg[8..])?)
 }
 
 fn rd_u32(b: &[u8], o: usize) -> Result<u32, BoxErr> {

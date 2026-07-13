@@ -1,21 +1,18 @@
-//! M1 (step 1): direct wss:// connect to nobd + log what arrives.
+//! Network client: direct wss:// to nobd, thin ZCS2 wire -> shared FrameDecoder.
 //!
-//! This is the payoff of going Rust-native: rustls speaks TLS, so we reach
-//! `wss://nobd.net/ws` DIRECTLY — the exact thing the C++ flycast client could
-//! not do (its build dropped OpenSSL). No tunnel, no plaintext port.
-//!
-//! For now this just connects and logs each binary message's magic + length, to
-//! prove the connection and show what the default subscription yields. The
-//! ZCS2/ZCST decode (grounded in the browser worker) lands next; decoded frames
-//! will flow to the renderer over a channel.
+//! Exactly what webgpu-test.html does with "ZCS2" checked: request a SYNC base on
+//! connect, then decode the thin ZCS2 per-frame wire, and tell the relay to drop
+//! the heavy legacy deltas. rustls speaks TLS, so this reaches nobd directly.
 
+use crate::frame::FrameDecoder;
+use crate::zcs2::Zcs2;
 use futures_util::{SinkExt, StreamExt};
+use std::sync::{Arc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 
 type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 
-/// Spawn the network client on its own thread + tokio runtime (off the render loop).
-pub fn spawn_net_thread(url: String) {
+pub fn spawn_net_thread(url: String, shared: Arc<Mutex<FrameDecoder>>) {
     std::thread::Builder::new()
         .name("maplecast-net".into())
         .spawn(move || {
@@ -24,69 +21,77 @@ pub fn spawn_net_thread(url: String) {
                 .build()
                 .expect("tokio runtime");
             rt.block_on(async move {
-                if let Err(e) = run(&url).await {
-                    log::error!("[net] {e}");
+                loop {
+                    if let Err(e) = run(&url, &shared).await {
+                        log::warn!("[net] {e} — reconnecting");
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             });
         })
         .expect("spawn net thread");
 }
 
-pub async fn run(url: &str) -> Result<(), BoxErr> {
+async fn run(url: &str, shared: &Arc<Mutex<FrameDecoder>>) -> Result<(), BoxErr> {
     // rustls 0.23 needs a process-level crypto provider selected explicitly.
     static CRYPTO: std::sync::Once = std::sync::Once::new();
     CRYPTO.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
 
-    log::info!("[net] connecting {url} (rustls TLS) ...");
-    let (ws, resp) = tokio_tungstenite::connect_async(url).await?;
-    log::info!("[net] connected — HTTP {}", resp.status());
-
+    let (ws, _) = tokio_tungstenite::connect_async(url).await?;
+    log::info!("[net] connected {url}");
     let (mut write, mut read) = ws.split();
 
-    // M1 handshake: ask for a SYNC keyframe so the delta chain has a base.
+    // Ask for the one-time SYNC keyframe (full VRAM/PVR base).
     write
         .send(Message::Text("{\"type\":\"request_sync\"}".into()))
         .await?;
-    log::info!("[net] sent request_sync");
 
-    let mut fd = crate::frame::FrameDecoder::new();
-    let mut n: u64 = 0;
-    let mut frames: u64 = 0;
+    let mut zcs2 = Zcs2::new();
+    let mut thin = false;
 
     while let Some(msg) = read.next().await {
-        match msg? {
-            Message::Binary(b) => {
-                n += 1;
-                // ZCST path (SYNC keyframe + full-body deltas) -> FrameDecoder.
-                if b.len() >= 4 && &b[0..4] == b"ZCST" {
-                    match fd.apply_zcst(&b) {
-                        Ok(()) => {
-                            frames += 1;
-                            if frames <= 10 || frames % 120 == 0 {
-                                log::info!(
-                                    "[frame] #{frames} num={} ta={}B vram={}KB pvr_snap0={:#010x} renderable={}",
-                                    fd.frame_num,
-                                    fd.ta().len(),
-                                    fd.vram_nonzero_kb(),
-                                    fd.pvr_snapshot[0],
-                                    fd.renderable
-                                );
-                            }
-                        }
-                        Err(e) => log::warn!("[frame] apply_zcst: {e}"),
-                    }
-                }
-            }
-            Message::Ping(_) => {}
+        let b = match msg? {
+            Message::Binary(b) => b,
             Message::Close(c) => {
                 log::warn!("[net] server closed: {c:?}");
                 break;
             }
-            _ => {}
+            _ => continue,
+        };
+        if b.len() < 4 {
+            continue;
+        }
+        match &b[0..4] {
+            b"ZCST" => {
+                // one-time SYNC base only; legacy deltas are ignored (thin wire)
+                let _ = shared.lock().unwrap().apply_sync_zcst(&b);
+            }
+            b"ZCS2" => match zcs2.feed(&b) {
+                Ok(Some(inner)) => {
+                    let renderable = {
+                        let mut fd = shared.lock().unwrap();
+                        if let Err(e) = fd.apply_delta_frame(&inner) {
+                            log::warn!("[frame] {e}");
+                        }
+                        fd.renderable
+                    };
+                    if !thin && renderable {
+                        // Tell the relay to stop forwarding the heavy legacy deltas.
+                        write
+                            .send(Message::Text("{\"type\":\"subscribe\",\"mode\":\"zcs2\"}".into()))
+                            .await
+                            .ok();
+                        thin = true;
+                        log::info!("[net] thin ZCS2 wire active");
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => log::warn!("[zcs2] {e}"),
+            },
+            _ => {} // GSTA/OBJS/PALF/TXTR/... side-channels: not needed for the TA render
         }
     }
-    log::info!("[net] stream ended: {n} msgs, {frames} ZCST frames decoded");
     Ok(())
 }

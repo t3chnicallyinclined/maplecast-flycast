@@ -1,1 +1,5 @@
 /target/
+# stray rustc/codegen artifacts (incl. the Windows reserved-name 'nul.*' trap)
+*.rcgu.o
+*.rmeta
+nul*
