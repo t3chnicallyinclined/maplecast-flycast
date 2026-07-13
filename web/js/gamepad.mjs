@@ -24,6 +24,13 @@
 
 import { state } from './state.mjs';
 
+// Native desktop client (MapleCast Tauri app) hosts this page with ?native=1 and
+// polls the controller natively in Rust -> UDP:7100. When set, the browser must
+// NOT also send input over the control WS, or the two writers fight for the
+// server slot (last-writer-wins). The app appends native=1 for exactly this.
+const NATIVE_INPUT = typeof location !== 'undefined'
+  && new URLSearchParams(location.search).get('native') === '1';
+
 const _inputBuf = new Uint8Array(4);
 let _lastBtn = 0, _lastLT = 0, _lastRT = 0;
 let _lastSendMs = 0;
@@ -120,6 +127,8 @@ window.addEventListener('touchstart', firstGestureWake, true);
 // ---- Input polling (only runs while in a slot) ----
 
 function pollOnce() {
+  // Native desktop client owns input via UDP:7100 — never send over the WS.
+  if (NATIVE_INPUT) return;
   // Inputs go to the DIRECT flycast control WS (home.nobd.net), NOT the
   // relay WS (state.ws → nobd.net). The relay carries spectator broadcast
   // and queue chatter; the control WS is where the actual emulator listens
