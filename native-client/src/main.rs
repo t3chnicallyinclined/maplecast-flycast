@@ -11,6 +11,7 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
+mod decode;
 mod input;
 mod net;
 

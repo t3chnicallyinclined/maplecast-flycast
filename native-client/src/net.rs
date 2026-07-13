@@ -45,6 +45,7 @@ pub async fn run(url: &str) -> Result<(), BoxErr> {
 
     let (mut _write, mut read) = ws.split();
     let mut n: u64 = 0;
+    let mut zcst_decoded: u64 = 0;
     let mut by_magic: std::collections::BTreeMap<String, u64> = Default::default();
 
     while let Some(msg) = read.next().await {
@@ -57,6 +58,22 @@ pub async fn run(url: &str) -> Result<(), BoxErr> {
                     .map(|&c| if c.is_ascii_graphic() { c as char } else { '.' })
                     .collect();
                 *by_magic.entry(magic.clone()).or_default() += 1;
+
+                // Validate the ZCST decode path against real frames (first few).
+                if magic == "ZCST" && zcst_decoded < 5 {
+                    zcst_decoded += 1;
+                    match crate::decode::decompress_zcst(&b) {
+                        Ok(frame) => match crate::decode::parse_delta_header(&frame) {
+                            Some(h) => log::info!(
+                                "[decode] ZCST #{zcst_decoded}: wire={}B -> {}B  frame_num={} ta_size={} delta={}B dirty_pages={}",
+                                b.len(), h.decompressed_len, h.frame_num, h.ta_size, h.delta_payload_size, h.dirty_page_count
+                            ),
+                            None => log::warn!("[decode] ZCST #{zcst_decoded}: decompressed {}B but header parse failed", frame.len()),
+                        },
+                        Err(e) => log::warn!("[decode] ZCST #{zcst_decoded} decompress failed: {e}"),
+                    }
+                }
+
                 if n <= 24 || n % 120 == 0 {
                     log::info!("[net] msg #{n} magic='{magic}' len={}  seen={:?}", b.len(), by_magic);
                 }
