@@ -1832,9 +1832,19 @@ void Emulator::start()
 									}
 								}
 								{
+									static const bool _spikeLog = std::getenv("MAPLECAST_RA_SPIKE") != nullptr;
 									static uint64_t _pH=0,_pS=0,_pP=0,_pR=0,_pN=0;
 									auto us=[](auto a,auto b){ return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(b-a).count(); };
-									_pH+=us(_raT0,_raT1); _pS+=us(_raT1,_raT2); _pP+=us(_raT2,_raT3); _pR+=us(_raT3,_raT4);
+									uint64_t _tH=us(_raT0,_raT1),_tS=us(_raT1,_raT2),_tP=us(_raT2,_raT3),_tR=us(_raT3,_raT4);
+									// A2 SPIKE (MAPLECAST_RA_SPIKE): flag any single tick that blew the 16.67ms
+									// budget = a visible dip below 60fps. Heavy hit-frames land here.
+									if (_spikeLog && (_tH+_tS+_tP+_tR) > 16667) {
+										printf("[TICK-SPIKE] total=%lluus DIP<60fps (hidden=%llu save=%llu preview=%llu rewind=%llu)\n",
+											(unsigned long long)(_tH+_tS+_tP+_tR),(unsigned long long)_tH,(unsigned long long)_tS,
+											(unsigned long long)_tP,(unsigned long long)_tR);
+										fflush(stdout);
+									}
+									_pH+=_tH; _pS+=_tS; _pP+=_tP; _pR+=_tR;
 									if (++_pN % 600 == 0) {
 										// integer µs only — a float varargs quirk printed 'inf' on MSVC
 										printf("[RUNAHEAD-PROF] avg/tick us: hidden=%llu save=%llu preview=%llu rewind=%llu total=%llu (n=%llu)\n",
