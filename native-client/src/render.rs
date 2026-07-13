@@ -476,6 +476,10 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            // MvC2 is 640x480 (4:3). Render into a centered 4:3 viewport so the
+            // content keeps its aspect at any (e.g. 16:9) window size — pillarbox.
+            let (vx, vy, vw, vh) = pillarbox_4x3(width, height);
+            rp.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
             rp.set_vertex_buffer(0, self.vbuf.slice(..));
             rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint32);
 
@@ -614,6 +618,19 @@ fn wrap(w: Wrap) -> wgpu::AddressMode {
         Wrap::Repeat => wgpu::AddressMode::Repeat,
         Wrap::Clamp => wgpu::AddressMode::ClampToEdge,
         Wrap::Mirror => wgpu::AddressMode::MirrorRepeat,
+    }
+}
+
+/// Centered 4:3 viewport (MvC2 native aspect) within the surface — pillar/letterbox.
+fn pillarbox_4x3(w: u32, h: u32) -> (f32, f32, f32, f32) {
+    let (w, h) = (w as f32, h as f32);
+    let target = 4.0 / 3.0;
+    if w / h > target {
+        let vw = h * target;
+        ((w - vw) * 0.5, 0.0, vw, h)
+    } else {
+        let vh = w / target;
+        (0.0, (h - vh) * 0.5, w, vh)
     }
 }
 

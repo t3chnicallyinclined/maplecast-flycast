@@ -185,7 +185,9 @@ fn main() {
     let window = Arc::new(
         WindowBuilder::new()
             .with_title("MapleCast (native)")
-            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0))
+            // 4:3 (MvC2 native aspect) at higher-than-native res. Maximize for max
+            // quality — the 4:3 pillarbox viewport renders at the full surface size.
+            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 960.0))
             .build(&event_loop)
             .expect("window"),
     );
