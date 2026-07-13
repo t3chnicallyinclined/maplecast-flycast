@@ -72,6 +72,7 @@ extern "C" {
     pub fn render_frame_set_body_tcws(tcws: *const u32, n: i32);
     pub fn gsta_quad_srcdesc(out: *mut u8, cap: u32) -> u32;
     pub fn gsta_quad_is_effect(out: *mut u8, cap: u32) -> u32;
+    pub fn gsta_quad_colrow(out: *mut i32, cap: u32) -> u32;
 }
 
 /// Force-link probe: safe before any frame (returns the current g_nscene, 0 at rest).
@@ -94,4 +95,11 @@ pub fn quad_is_effect(n: usize) -> Vec<bool> {
     let mut buf = vec![0u8; n];
     let _ = unsafe { gsta_quad_is_effect(buf.as_mut_ptr(), n as u32) };
     buf.iter().map(|&b| b != 0).collect()
+}
+
+/// Per-quad [col, row] walker-rank for the current frame's `n` quads (the re-tile key).
+pub fn quad_colrow(n: usize) -> Vec<[i32; 2]> {
+    let mut buf = vec![0i32; n * 2];
+    let _ = unsafe { gsta_quad_colrow(buf.as_mut_ptr(), n as u32) };
+    (0..n).map(|i| [buf[i * 2], buf[i * 2 + 1]]).collect()
 }

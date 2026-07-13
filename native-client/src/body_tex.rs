@@ -231,7 +231,14 @@ fn resolve_palette(ram: &[u8], gfx1: u32, palsel: u32) -> Option<[u16; 16]> {
 /// `[m, cx, ry, flags]` snapshot, `is_effect` from `gsta_quad_is_effect`. Returns None for
 /// effect quads, non-body GFX1, or any out-of-bounds / unresolvable input. Colours come from
 /// the resident Dat_Pal window (see `resolve_palette`).
-pub fn decode_body(q: &SceneQuad, srcdesc: [u8; 4], is_effect: bool, ram: &[u8]) -> Option<BodyTex> {
+pub fn decode_body(
+    q: &SceneQuad,
+    srcdesc: [u8; 4],
+    is_effect: bool,
+    ram: &[u8],
+    pvr_pal: &[u8],
+    colrow: [i32; 2],
+) -> Option<BodyTex> {
     // BIT15 effect quads are resident-backed; their sels are not GFX1 indices (~5004).
     if is_effect {
         return None;
@@ -285,9 +292,33 @@ pub fn decode_body(q: &SceneQuad, srcdesc: [u8; 4], is_effect: bool, ram: &[u8])
     let raw = lzss_decode(ram, src_start, src_end, dest_len);
     let lin = detwiddle_pal4(&raw, w, h);
 
-    // ---- palette (must resolve before we spend cycles carving; Cable-all-blue fix) ----
+    // ---- palette -> unified RGBA8 [u8;64] ----
+    // Base-bank bodies keep the resident Dat_Pal (the Cable-all-blue fix, unchanged).
+    // Non-base banks (pal17 projectile / pal25 hit-flash / super-tint on move frames)
+    // are coloured from the live PVR palette bank instead of bailing to magenta.
     let palsel = (q.tcw >> 21) & 0x3F;
-    let pal = resolve_palette(ram, gfx1, palsel)?;
+    let mut pal_rgba = [0u8; 64];
+    match resolve_palette(ram, gfx1, palsel) {
+        Some(dat) => {
+            for i in 0..16 {
+                let word = dat[i] as u32; // ARGB4444
+                let r = ((word >> 8) & 0xF) as u8;
+                let g = ((word >> 4) & 0xF) as u8;
+                let b = (word & 0xF) as u8;
+                let a = ((word >> 12) & 0xF) as u8;
+                pal_rgba[i * 4] = (r << 4) | r;
+                pal_rgba[i * 4 + 1] = (g << 4) | g;
+                pal_rgba[i * 4 + 2] = (b << 4) | b;
+                pal_rgba[i * 4 + 3] = (a << 4) | a;
+            }
+        }
+        None => {
+            let base = (palsel as usize) * 16 * 4; // 16 RGBA8 entries per bank
+            if base + 64 <= pvr_pal.len() {
+                pal_rgba.copy_from_slice(&pvr_pal[base..base + 64]);
+            }
+        }
+    }
 
     // ---- tile geometry: engine tile size mq = u1 * (8<<TSP.texU); desc-keyed (col,row)
     //      (`gstaDecodeBodies` ~5155-5188) ----
@@ -310,7 +341,16 @@ pub fn decode_body(q: &SceneQuad, srcdesc: [u8; 4], is_effect: bool, ram: &[u8])
         let rr = (p_rows - dry).clamp(0, p_rows - 1);
         (col, rr as usize)
     } else {
-        (0usize, 0usize)
+        // Desc snapshot torn: fall back to the LIVE walker rank (the same rank the desc
+        // snapshots — render_frame_quad_colrow_impl). This carves each tile of a
+        // multi-tile part from its own cell instead of the (0,0) corner (which made the
+        // whole part render as one flat block on torn move frames).
+        //   col = facing-INDEPENDENT storage column (ASC for both facings; the L/R flip
+        //         is the texU mirror alone at UV time — render_frame.c:880-892). No flip.
+        //   row = pRows - rowRank (matches the desc branch's `p_rows - dry`).
+        let col = (colrow[0].rem_euclid(p_cols)) as usize;
+        let rr = (p_rows - colrow[1]).clamp(0, p_rows - 1);
+        (col, rr as usize)
     };
 
     // ---- carve the m×m tile from the linear whole-part buffer, map through the palette ----
@@ -327,20 +367,12 @@ pub fn decode_body(q: &SceneQuad, srcdesc: [u8; 4], is_effect: bool, ram: &[u8])
             if px >= w {
                 break;
             }
-            let idx = lin[py * w + px] as usize;
+            let idx = (lin[py * w + px] as usize) & 0xF;
             if idx == 0 {
                 continue; // palette index 0 = transparent (rgba already zero)
             }
-            let word = pal[idx] as u32; // ARGB4444
-            let r = ((word >> 8) & 0xF) as u8;
-            let g = ((word >> 4) & 0xF) as u8;
-            let b = (word & 0xF) as u8;
-            let a = ((word >> 12) & 0xF) as u8;
             let d = (yy * m + xx) * 4;
-            rgba[d] = (r << 4) | r;
-            rgba[d + 1] = (g << 4) | g;
-            rgba[d + 2] = (b << 4) | b;
-            rgba[d + 3] = (a << 4) | a;
+            rgba[d..d + 4].copy_from_slice(&pal_rgba[idx * 4..idx * 4 + 4]);
         }
     }
 

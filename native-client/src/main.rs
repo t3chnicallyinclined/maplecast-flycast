@@ -135,7 +135,7 @@ impl Gpu {
             if fd.renderable {
                 let parsed = ta::parse(fd.ta());
                 let palette = texture::bake_palette(&fd.pvr_regs);
-                let bodies = body_quads(replica, debug);
+                let bodies = body_quads(replica, debug, &palette);
                 self.renderer.render(
                     &self.device,
                     &self.queue,
@@ -274,6 +274,7 @@ pub struct BodyItem {
 fn body_quads(
     replica: &Arc<Mutex<replica::ReplicaState>>,
     debug: &debug::DebugState,
+    pvr_pal: &[u8],
 ) -> Vec<BodyItem> {
     use std::sync::atomic::Ordering::Relaxed;
     if !debug.show_bodies.load(Relaxed) {
@@ -287,7 +288,7 @@ fn body_quads(
     ctx.ram = rep.ram.as_mut_ptr();
     // SAFETY: ctx.ram is the locked 16MB RAM (valid for the call). render_frame fills
     // the static g_scene; the returned slice is valid until the next render_frame call.
-    let (quads, srcdescs, effects) = unsafe {
+    let (quads, srcdescs, effects, colrows) = unsafe {
         ffi::render_frame(&mut ctx);
         let n = ffi::render_frame_nscene().max(0) as usize;
         let s = ffi::render_frame_scene();
@@ -300,18 +301,21 @@ fn body_quads(
             std::slice::from_raw_parts(s, n).to_vec(),
             ffi::quad_srcdesc(n),
             ffi::quad_is_effect(n),
+            ffi::quad_colrow(n),
         )
     };
     let force_color = debug.bodies_force_color.load(Relaxed);
+
     quads
         .iter()
         .enumerate()
+        .filter(|(i, _)| !effects[*i]) // bit15 effect quads carry no body art -> skip (no magenta)
         .map(|(i, q)| BodyItem {
             quad: *q,
             tex: if force_color {
                 None
             } else {
-                body_tex::decode_body(q, srcdescs[i], effects[i], &rep.ram)
+                body_tex::decode_body(q, srcdescs[i], effects[i], &rep.ram, pvr_pal, colrows[i])
             },
         })
         .collect()
