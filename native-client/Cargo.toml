@@ -21,6 +21,11 @@ gilrs = "0.11"
 log = "0.4"
 env_logger = "0.11"
 
+# --- debug/telemetry overlay (F1) ---
+egui = "0.28"
+egui-wgpu = "0.28"
+egui-winit = { version = "0.28", default-features = false }
+
 # --- networking (lands with the M1 milestone; see PORT-PLAN.md) ---
 # rustls gives us DIRECT wss:// to nobd — the TLS gap that blocked the flycast-native client.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }

@@ -12,7 +12,11 @@ use tokio_tungstenite::tungstenite::Message;
 
 type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 
-pub fn spawn_net_thread(url: String, shared: Arc<Mutex<FrameDecoder>>) {
+pub fn spawn_net_thread(
+    url: String,
+    shared: Arc<Mutex<FrameDecoder>>,
+    debug: Arc<crate::debug::DebugState>,
+) {
     std::thread::Builder::new()
         .name("maplecast-net".into())
         .spawn(move || {
@@ -22,7 +26,7 @@ pub fn spawn_net_thread(url: String, shared: Arc<Mutex<FrameDecoder>>) {
                 .expect("tokio runtime");
             rt.block_on(async move {
                 loop {
-                    if let Err(e) = run(&url, &shared).await {
+                    if let Err(e) = run(&url, &shared, &debug).await {
                         log::warn!("[net] {e} — reconnecting");
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -32,7 +36,14 @@ pub fn spawn_net_thread(url: String, shared: Arc<Mutex<FrameDecoder>>) {
         .expect("spawn net thread");
 }
 
-async fn run(url: &str, shared: &Arc<Mutex<FrameDecoder>>) -> Result<(), BoxErr> {
+async fn run(
+    url: &str,
+    shared: &Arc<Mutex<FrameDecoder>>,
+    debug: &crate::debug::DebugState,
+) -> Result<(), BoxErr> {
+    use std::sync::atomic::Ordering::Relaxed;
+    debug.thin_active.store(false, Relaxed);
+
     // rustls 0.23 needs a process-level crypto provider selected explicitly.
     static CRYPTO: std::sync::Once = std::sync::Once::new();
     CRYPTO.call_once(|| {
@@ -65,7 +76,9 @@ async fn run(url: &str, shared: &Arc<Mutex<FrameDecoder>>) -> Result<(), BoxErr>
         bytes += b.len() as u64;
         let el = t0.elapsed().as_secs_f64();
         if el >= 2.0 {
-            log::info!("[net] {:.2} Mbps{}", (bytes as f64 * 8.0) / el / 1e6, if thin { " (thin)" } else { "" });
+            let mbps = (bytes as f64 * 8.0) / el / 1e6;
+            debug.set_mbps(mbps);
+            log::info!("[net] {:.2} Mbps{}", mbps, if thin { " (thin)" } else { "" });
             bytes = 0;
             t0 = std::time::Instant::now();
         }
@@ -93,6 +106,7 @@ async fn run(url: &str, shared: &Arc<Mutex<FrameDecoder>>) -> Result<(), BoxErr>
                             .await
                             .ok();
                         thin = true;
+                        debug.thin_active.store(true, Relaxed);
                         log::info!("[net] thin ZCS2 wire active");
                     }
                 }

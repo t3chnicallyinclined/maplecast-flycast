@@ -318,7 +318,11 @@ impl Decompressor {
 
 /// Connect `wss://.../replica-live`, seed from MCRR, patch every FRMx into `shared`.
 /// Reconnects on error. Runs on its own thread with a single-threaded tokio runtime.
-pub fn spawn_replica_thread(url: String, shared: Arc<Mutex<ReplicaState>>) {
+pub fn spawn_replica_thread(
+    url: String,
+    shared: Arc<Mutex<ReplicaState>>,
+    debug: Arc<crate::debug::DebugState>,
+) {
     std::thread::Builder::new()
         .name("maplecast-replica".into())
         .spawn(move || {
@@ -328,7 +332,7 @@ pub fn spawn_replica_thread(url: String, shared: Arc<Mutex<ReplicaState>>) {
                 .expect("tokio runtime");
             rt.block_on(async move {
                 loop {
-                    if let Err(e) = run(&url, &shared).await {
+                    if let Err(e) = run(&url, &shared, &debug).await {
                         log::warn!("[replica] {e} — reconnecting");
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -338,7 +342,11 @@ pub fn spawn_replica_thread(url: String, shared: Arc<Mutex<ReplicaState>>) {
         .expect("spawn replica thread");
 }
 
-async fn run(url: &str, shared: &Arc<Mutex<ReplicaState>>) -> Result<(), BoxErr> {
+async fn run(
+    url: &str,
+    shared: &Arc<Mutex<ReplicaState>>,
+    debug: &crate::debug::DebugState,
+) -> Result<(), BoxErr> {
     // rustls 0.23 needs a process-level crypto provider selected explicitly (see net.rs).
     static CRYPTO: std::sync::Once = std::sync::Once::new();
     CRYPTO.call_once(|| {
@@ -370,6 +378,9 @@ async fn run(url: &str, shared: &Arc<Mutex<ReplicaState>>) -> Result<(), BoxErr>
         // A prefix message (re)seeds — robust to reconnect; frames apply only once seeded.
         if magic == MCRR_MAGIC {
             if st.apply_prefix(inner) {
+                use std::sync::atomic::Ordering::Relaxed;
+                debug.seeded.store(true, Relaxed);
+                debug.regions.store(st.dyn_regs.len() as u64, Relaxed);
                 log::info!(
                     "[replica] seeded from MCRR prefix ({} dynamic regions)",
                     st.dyn_regs.len()

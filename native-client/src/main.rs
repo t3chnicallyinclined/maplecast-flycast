@@ -14,6 +14,7 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
+mod debug;
 mod ffi;
 mod frame;
 mod input;
@@ -32,10 +33,15 @@ struct Gpu {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     renderer: render::Renderer,
+    egui_ctx: egui::Context,
+    egui_state: egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
+    frames: u32,
+    fps_t0: std::time::Instant,
 }
 
 impl Gpu {
-    async fn new(window: Arc<Window>) -> Self {
+    async fn new(window: Arc<Window>, debug: &debug::DebugState) -> Self {
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window.clone()).expect("create surface");
@@ -74,7 +80,31 @@ impl Gpu {
         };
         surface.configure(&device, &config);
         let renderer = render::Renderer::new(&device, format);
-        Self { surface, device, queue, config, renderer }
+        *debug.gpu_name.lock().unwrap() = adapter.get_info().name;
+
+        // egui overlay (F1)
+        let egui_ctx = egui::Context::default();
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &*window,
+            Some(window.scale_factor() as f32),
+            None,
+        );
+        let egui_renderer = egui_wgpu::Renderer::new(&device, format, None, 1);
+
+        Self {
+            surface,
+            device,
+            queue,
+            config,
+            renderer,
+            egui_ctx,
+            egui_state,
+            egui_renderer,
+            frames: 0,
+            fps_t0: std::time::Instant::now(),
+        }
     }
 
     fn resize(&mut self, w: u32, h: u32) {
@@ -87,9 +117,19 @@ impl Gpu {
 
     fn render(
         &mut self,
+        window: &Window,
         shared: &Arc<Mutex<FrameDecoder>>,
         replica: &Arc<Mutex<replica::ReplicaState>>,
+        debug: &debug::DebugState,
     ) {
+        self.frames += 1;
+        let el = self.fps_t0.elapsed().as_secs_f64();
+        if el >= 0.5 {
+            debug.set_fps(self.frames as f64 / el);
+            self.frames = 0;
+            self.fps_t0 = std::time::Instant::now();
+        }
+
         let frame = match self.surface.get_current_texture() {
             Ok(f) => f,
             Err(_) => {
@@ -102,14 +142,13 @@ impl Gpu {
             // Hold the decoder lock across parse+draw so we never render a frame
             // whose VRAM is mid-update (the flicker race).
             let fd = shared.lock().unwrap();
+            debug
+                .frame_num
+                .store(fd.frame_num as u64, std::sync::atomic::Ordering::Relaxed);
             if fd.renderable {
                 let parsed = ta::parse(fd.ta());
                 let palette = texture::bake_palette(&fd.pvr_regs);
-
-                // Reconstruct fighter bodies: render_frame walks the slot table over
-                // the /replica-live 16MB RAM and emits body quads.
-                let bodies = body_quads(replica);
-
+                let bodies = body_quads(replica, debug);
                 self.renderer.render(
                     &self.device,
                     &self.queue,
@@ -121,17 +160,65 @@ impl Gpu {
                     self.config.width,
                     self.config.height,
                     &bodies,
+                    debug,
                 );
             } else {
                 self.renderer.clear_only(&self.device, &self.queue, &view);
             }
         }
+        self.render_egui(window, &view, debug);
         frame.present();
+    }
+
+    fn render_egui(&mut self, window: &Window, view: &wgpu::TextureView, debug: &debug::DebugState) {
+        let raw = self.egui_state.take_egui_input(window);
+        let out = self.egui_ctx.run(raw, |ctx| debug::ui(ctx, debug));
+        self.egui_state.handle_platform_output(window, out.platform_output);
+        let ppp = out.pixels_per_point;
+        let tris = self.egui_ctx.tessellate(out.shapes, ppp);
+        let sd = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.config.width, self.config.height],
+            pixels_per_point: ppp,
+        };
+        for (id, delta) in &out.textures_delta.set {
+            self.egui_renderer.update_texture(&self.device, &self.queue, *id, delta);
+        }
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("egui") });
+        self.egui_renderer.update_buffers(&self.device, &self.queue, &mut enc, &tris, &sd);
+        {
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("egui"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            self.egui_renderer.render(&mut rp, &tris, &sd);
+        }
+        self.queue.submit(Some(enc.finish()));
+        for id in &out.textures_delta.free {
+            self.egui_renderer.free_texture(id);
+        }
     }
 }
 
 /// Run render_frame over the /replica-live RAM image; return the emitted body quads.
-fn body_quads(replica: &Arc<Mutex<replica::ReplicaState>>) -> Vec<ffi::SceneQuad> {
+fn body_quads(
+    replica: &Arc<Mutex<replica::ReplicaState>>,
+    debug: &debug::DebugState,
+) -> Vec<ffi::SceneQuad> {
+    if !debug.show_bodies.load(std::sync::atomic::Ordering::Relaxed) {
+        return Vec::new();
+    }
     let mut rep = replica.lock().unwrap();
     if !rep.seeded {
         return Vec::new();
@@ -161,6 +248,9 @@ fn main() {
 
     log::info!("[ffi] render_frame linked (nscene at rest = {})", ffi::link_probe());
 
+    // Shared debug/telemetry + render-option state (F1 overlay).
+    let debug = Arc::new(debug::DebugState::new());
+
     // Shared decoded frame state (TA + VRAM + PVR), written by the net thread.
     let shared = Arc::new(Mutex::new(FrameDecoder::new()));
 
@@ -171,6 +261,7 @@ fn main() {
     net::spawn_net_thread(
         std::env::var("MAPLECAST_WS").unwrap_or_else(|_| "wss://nobd.net/ws".into()),
         shared.clone(),
+        debug.clone(),
     );
 
     // Second socket: /replica-live seeds + maintains the 16MB SH4 RAM image that
@@ -179,6 +270,7 @@ fn main() {
     replica::spawn_replica_thread(
         std::env::var("MAPLECAST_REPLICA").unwrap_or_else(|_| "wss://nobd.net/replica-live".into()),
         replica_shared.clone(),
+        debug.clone(),
     );
 
     let event_loop = EventLoop::new().expect("event loop");
@@ -191,16 +283,30 @@ fn main() {
             .build(&event_loop)
             .expect("window"),
     );
-    let mut gpu = pollster::block_on(Gpu::new(window.clone()));
+    let mut gpu = pollster::block_on(Gpu::new(window.clone(), &debug));
 
     event_loop
-        .run(move |event, elwt| match event {
-            Event::WindowEvent { event, .. } => match event {
-                WindowEvent::CloseRequested => elwt.exit(),
-                WindowEvent::Resized(size) => gpu.resize(size.width, size.height),
-                WindowEvent::RedrawRequested => gpu.render(&shared, &replica_shared),
-                _ => {}
-            },
+        .run(move |event, elwt| match &event {
+            Event::WindowEvent { event: wev, .. } => {
+                // Feed the panel first (it consumes mouse/keyboard when hovered).
+                let _ = gpu.egui_state.on_window_event(&window, wev);
+                match wev {
+                    WindowEvent::CloseRequested => elwt.exit(),
+                    WindowEvent::Resized(size) => gpu.resize(size.width, size.height),
+                    WindowEvent::RedrawRequested => {
+                        gpu.render(&window, &shared, &replica_shared, &debug)
+                    }
+                    WindowEvent::KeyboardInput { event: key, .. } => {
+                        if key.state == winit::event::ElementState::Pressed
+                            && key.physical_key
+                                == winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::F1)
+                        {
+                            debug.toggle_overlay();
+                        }
+                    }
+                    _ => {}
+                }
+            }
             Event::AboutToWait => window.request_redraw(),
             _ => {}
         })

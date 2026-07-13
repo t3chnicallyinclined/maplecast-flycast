@@ -242,7 +242,11 @@ impl Renderer {
         width: u32,
         height: u32,
         bodies: &[crate::ffi::SceneQuad],
+        debug: &crate::debug::DebugState,
     ) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let show_stage = debug.show_stage.load(Relaxed);
+        let show_bodies = debug.show_bodies.load(Relaxed);
         // ndcMat from the PVR tile-count register.
         let g = pvr_snapshot[0];
         let w = ((g & 0x3F) + 1) * 32;
@@ -279,6 +283,9 @@ impl Renderer {
             (&parsed.translucent, 2),
         ];
         for (list, kind) in lists {
+            if !show_stage {
+                break;
+            }
             for pp in list {
                 if pp.count < 3 || (slot as u64) >= MAX_SLOTS {
                     continue;
@@ -363,7 +370,7 @@ impl Renderer {
         let mut body_verts: Vec<u8> = Vec::new();
         let mut body_draws: Vec<Draw> = Vec::new();
         for q in bodies {
-            if (slot as u64) >= MAX_SLOTS {
+            if !show_bodies || (slot as u64) >= MAX_SLOTS {
                 break;
             }
             let base = (body_verts.len() / 28) as u32; // 0-based within body_vbuf
@@ -392,6 +399,9 @@ impl Renderer {
             });
             slot += 1;
         }
+
+        debug.stage_quads.store(draws.len() as u64, Relaxed);
+        debug.body_quads.store(body_draws.len() as u64, Relaxed);
 
         if draws.is_empty() && body_draws.is_empty() {
             // nothing to draw yet — clear only
