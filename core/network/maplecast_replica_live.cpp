@@ -1500,6 +1500,15 @@ void init()
 		_ws.clear_error_channels(websocketpp::log::elevel::all);
 		_ws.init_asio();
 		_ws.set_reuse_addr(true);
+		// TCP_NODELAY (disable Nagle) on every accepted socket: each 60fps frame is a small
+		// message that must leave immediately. Without this, Nagle batches frames into bursts
+		// -> the client sees uneven inter-frame gaps (jagged motion). Pairs with the client
+		// jitter buffer: a smoother source lets that buffer (and its latency) stay small.
+		_ws.set_socket_init_handler(
+			[](websocketpp::connection_hdl, websocketpp::lib::asio::ip::tcp::socket& s) {
+				websocketpp::lib::asio::error_code ec;
+				s.set_option(websocketpp::lib::asio::ip::tcp::no_delay(true), ec);
+			});
 		_ws.set_open_handler(&onOpen);
 		_ws.set_close_handler(&onClose);
 		// No message handler: this is a one-way stream (server → client). Inbound
