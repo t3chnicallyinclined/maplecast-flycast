@@ -54,6 +54,7 @@ pub struct DebugState {
     e2e_echo_seq: AtomicU64,            // latest E2EP-echoed client seq for our slot (u64::MAX = none)
     e2e_ms_x100: AtomicU64,             // computed press->present ema
     e2e_slot: AtomicU64,                // our input slot (which of the two E2EP seqs to read)
+    e2e_last_seq: AtomicU64,            // last seq we measured — only measure FRESH inputs
 }
 
 impl DebugState {
@@ -92,6 +93,7 @@ impl DebugState {
             e2e_echo_seq: AtomicU64::new(u64::MAX),
             e2e_ms_x100: AtomicU64::new(0),
             e2e_slot: AtomicU64::new(0),
+            e2e_last_seq: AtomicU64::new(u64::MAX),
         }
     }
 
@@ -136,6 +138,11 @@ impl DebugState {
         if s == u64::MAX {
             return;
         }
+        // Measure only when a NEW input's frame is presented — otherwise the value inflates as
+        // we re-present the same latest input between fresh packets (236fps present vs 60fps wire).
+        if s == self.e2e_last_seq.swap(s, Relaxed) {
+            return;
+        }
         let sent = self.e2e_send_us[(s as usize) & 0xFF].load(Relaxed);
         if sent == 0 {
             return;
@@ -154,6 +161,29 @@ impl DebugState {
     }
     pub fn e2e_ms(&self) -> f64 {
         self.e2e_ms_x100.load(Relaxed) as f64 / 100.0
+    }
+
+    // --- getters for the live status file (external monitoring) ---
+    pub fn rtt_ms(&self) -> f64 {
+        self.rtt_x100.load(Relaxed) as f64 / 100.0
+    }
+    pub fn fps(&self) -> f64 {
+        self.fps_x10.load(Relaxed) as f64 / 10.0
+    }
+    pub fn wire_fps(&self) -> f64 {
+        self.wire_fps_x10.load(Relaxed) as f64 / 10.0
+    }
+    pub fn replica_fps(&self) -> f64 {
+        self.replica_fps_x10.load(Relaxed) as f64 / 10.0
+    }
+    pub fn render_ms(&self) -> f64 {
+        self.render_ms_x100.load(Relaxed) as f64 / 100.0
+    }
+    pub fn gap_max_ms(&self) -> f64 {
+        self.gap_max_x100.load(Relaxed) as f64 / 100.0
+    }
+    pub fn mbps(&self) -> f64 {
+        self.mbps_x100.load(Relaxed) as f64 / 100.0
     }
     /// EMA of the input round-trip time (native UDP -> :7100 -> ACK), in ms.
     pub fn set_rtt(&self, ms: f64) {

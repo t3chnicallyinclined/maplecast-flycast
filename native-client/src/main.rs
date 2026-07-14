@@ -467,9 +467,16 @@ fn main() {
         .and_then(|p| std::fs::File::create(p).ok());
     if let Some(f) = telem.as_mut() {
         use std::io::Write;
-        let _ = writeln!(f, "t_ms,wf,rf,render_ms,gap_ms,body_quads,body_uploads,dropped,buf");
+        let _ = writeln!(f, "t_ms,wf,rf,render_ms,gap_ms,body_quads,body_uploads,dropped,buf,e2e_ms,rtt_ms");
     }
     let telem_t0 = std::time::Instant::now();
+    // Live status file (ALWAYS on): the full current stat snapshot, overwritten ~2x/sec, next
+    // to the exe so external tooling can read the live numbers without the debug window.
+    let status_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("maplecast-status.txt")))
+        .unwrap_or_else(|| std::env::temp_dir().join("maplecast-status.txt"));
+    log::info!("[status] live stats file -> {}", status_path.display());
 
     event_loop
         .run(move |event, elwt| {
@@ -500,7 +507,7 @@ fn main() {
                             use std::io::Write;
                             let _ = writeln!(
                                 f,
-                                "{:.1},{},{},{:.3},{:.3},{},{},{},{}",
+                                "{:.1},{},{},{:.3},{:.3},{},{},{},{},{:.1},{:.1}",
                                 telem_t0.elapsed().as_secs_f64() * 1000.0,
                                 debug.wire_frame.load(Relaxed),
                                 debug.replica_frame.load(Relaxed),
@@ -510,6 +517,8 @@ fn main() {
                                 debug.body_uploads.load(Relaxed),
                                 debug.dropped.load(Relaxed),
                                 debug.jitter_depth.load(Relaxed),
+                                debug.e2e_ms(),
+                                debug.rtt_ms(),
                             );
                         }
                     }
@@ -558,6 +567,17 @@ fn main() {
                         debug.set_wire_fps(wf.wrapping_sub(fps_wire0) as f64 / el);
                         debug.set_replica_fps(rf.wrapping_sub(fps_rep0) as f64 / el);
                         debug.set_render_stats(rt_ema, win_rt_max, win_gap_max);
+                        // Live status snapshot (key=value; overwritten each window) — read this
+                        // file to see the client's live numbers from outside.
+                        let status = format!(
+                            "press_present_ms={:.1}\ninput_rtt_ms={:.1}\nrender_fps={:.1}\nwire_fps={:.1}\nreplica_fps={:.1}\njitter_on={}\njitter_depth={}\ndropped={}\ngame_frame={}\nrender_ms_ema={:.2}\nframe_gap_max_ms={:.1}\nbandwidth_mbps={:.2}\nrun_secs={:.0}\n",
+                            debug.e2e_ms(), debug.rtt_ms(), debug.fps(), debug.wire_fps(),
+                            debug.replica_fps(), debug.jitter_on.load(Relaxed),
+                            debug.jitter_depth.load(Relaxed), debug.dropped.load(Relaxed),
+                            debug.frame_num.load(Relaxed), debug.render_ms(),
+                            debug.gap_max_ms(), debug.mbps(), telem_t0.elapsed().as_secs_f64(),
+                        );
+                        let _ = std::fs::write(&status_path, status);
                         win_rt_max = 0.0;
                         win_gap_max = 0.0;
                         fps_wire0 = wf;
