@@ -37,6 +37,7 @@ pub fn spawn_input_thread(cfg: InputConfig, debug: std::sync::Arc<crate::debug::
 
 fn run(cfg: InputConfig, debug: std::sync::Arc<crate::debug::DebugState>) {
     *debug.input_host.lock().unwrap() = cfg.host.clone();
+    debug.set_input_slot(cfg.slot); // which E2EP-echoed seq is ours
     let sock = match UdpSocket::bind("0.0.0.0:0") {
         Ok(s) => s,
         Err(e) => { log::error!("[input] bind failed: {e}"); return; }
@@ -67,6 +68,7 @@ fn run(cfg: InputConfig, debug: std::sync::Arc<crate::debug::DebugState>) {
             let pkt = build_input_packet(cfg.slot, cur.1, cur.2, cur.0, seq);
             let _ = sock.send(&pkt);
             send_times[(seq & 0xFF) as usize] = Some(std::time::Instant::now());
+            debug.input_sent(seq); // stamp for the E2E press->present probe
             seq = seq.wrapping_add(1);
         }
         // Drain input ACKs ([0xFE][seq_lo][ts]) -> input RTT (native UDP round-trip).

@@ -46,6 +46,14 @@ pub struct DebugState {
     // smooth bursty network delivery (adds ~1 frame of video latency). Toggle to A/B.
     pub jitter_on: AtomicBool,
     pub jitter_depth: AtomicU64, // frames currently buffered (telemetry)
+    // E2E press->present probe. The server stamps the E2EP tail with the client input seq it
+    // latched into each frame (MAPLECAST_E2E_PROBE=1). We record each seq's send time in OUR
+    // clock; on present we look up the echoed seq -> full press->present, zero clock sync.
+    e2e_t0: std::time::Instant,
+    e2e_send_us: Box<[AtomicU64; 256]>, // send_us[seq & 0xFF] = us since t0 at packet send (0 = none)
+    e2e_echo_seq: AtomicU64,            // latest E2EP-echoed client seq for our slot (u64::MAX = none)
+    e2e_ms_x100: AtomicU64,             // computed press->present ema
+    e2e_slot: AtomicU64,                // our input slot (which of the two E2EP seqs to read)
 }
 
 impl DebugState {
@@ -79,6 +87,11 @@ impl DebugState {
             overlay: AtomicBool::new(true),
             jitter_on: AtomicBool::new(false),
             jitter_depth: AtomicU64::new(0),
+            e2e_t0: std::time::Instant::now(),
+            e2e_send_us: Box::new(std::array::from_fn(|_| AtomicU64::new(0))),
+            e2e_echo_seq: AtomicU64::new(u64::MAX),
+            e2e_ms_x100: AtomicU64::new(0),
+            e2e_slot: AtomicU64::new(0),
         }
     }
 
@@ -101,6 +114,46 @@ impl DebugState {
         self.render_ms_x100.store((ema_ms * 100.0) as u64, Relaxed);
         self.render_max_x100.store((max_ms * 100.0) as u64, Relaxed);
         self.gap_max_x100.store((gap_max_ms * 100.0) as u64, Relaxed);
+    }
+
+    // --- E2E press->present probe ---
+    pub fn set_input_slot(&self, slot: u8) {
+        self.e2e_slot.store(slot as u64, Relaxed);
+    }
+    /// Record the send time of input packet `seq` (our clock).
+    pub fn input_sent(&self, seq: u32) {
+        let us = self.e2e_t0.elapsed().as_micros() as u64;
+        self.e2e_send_us[(seq & 0xFF) as usize].store(us.max(1), Relaxed); // 0 = "none"
+    }
+    /// Server echoed the seq it latched into this frame (per slot) — keep ours.
+    pub fn e2e_echo(&self, seq0: u32, seq1: u32) {
+        let s = if self.e2e_slot.load(Relaxed) == 1 { seq1 } else { seq0 };
+        self.e2e_echo_seq.store(s as u64, Relaxed);
+    }
+    /// On present: press->present = now - send_time[echoed seq], EMA'd. Zero clock sync.
+    pub fn e2e_present(&self) {
+        let s = self.e2e_echo_seq.load(Relaxed);
+        if s == u64::MAX {
+            return;
+        }
+        let sent = self.e2e_send_us[(s as usize) & 0xFF].load(Relaxed);
+        if sent == 0 {
+            return;
+        }
+        let now = self.e2e_t0.elapsed().as_micros() as u64;
+        if now < sent {
+            return;
+        }
+        let e2e = (now - sent) as f64 / 1000.0;
+        if e2e > 1000.0 {
+            return; // seq& 0xFF wrap collided with a stale send — ignore
+        }
+        let prev = self.e2e_ms_x100.load(Relaxed) as f64 / 100.0;
+        let ema = if prev == 0.0 { e2e } else { prev * 0.9 + e2e * 0.1 };
+        self.e2e_ms_x100.store((ema * 100.0) as u64, Relaxed);
+    }
+    pub fn e2e_ms(&self) -> f64 {
+        self.e2e_ms_x100.load(Relaxed) as f64 / 100.0
     }
     /// EMA of the input round-trip time (native UDP -> :7100 -> ACK), in ms.
     pub fn set_rtt(&self, ms: f64) {
@@ -165,11 +218,20 @@ pub fn ui(ctx: &egui::Context, d: &DebugState) {
             ui.label(format!("input:  {}:7100", d.input_host.lock().unwrap()));
             if d.rtt_seen.load(Relaxed) {
                 ui.label(format!(
-                    "input RTT (E2E net): {:.1} ms",
+                    "input RTT (net): {:.1} ms",
                     d.rtt_x100.load(Relaxed) as f64 / 100.0
                 ));
             } else {
                 ui.label("input RTT: — (press a button)");
+            }
+            let e2e = d.e2e_ms();
+            if e2e > 0.0 {
+                ui.colored_label(
+                    egui::Color32::from_rgb(120, 200, 255),
+                    format!("press → present: {:.1} ms", e2e),
+                );
+            } else {
+                ui.label("press → present: — (server E2EP + input)");
             }
             status_line(ui, "thin ZCS2 wire", d.thin_active.load(Relaxed));
             status_line(

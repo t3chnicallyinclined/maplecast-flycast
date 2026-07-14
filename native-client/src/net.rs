@@ -102,6 +102,15 @@ async fn run(
                     };
                     // Signal a new stage/wire frame -> wakes the render loop + drives wire-fps.
                     debug.wire_frame.fetch_add(1, Relaxed);
+                    // E2E probe: the server's self-locating E2EP tail (last 32B, magic 'E2EP',
+                    // MAPLECAST_E2E_PROBE=1) carries the client input seq it latched into this
+                    // frame, per slot. Record ours -> the render loop times press->present.
+                    let n = inner.len();
+                    if n >= 32 && &inner[n - 4..] == b"E2EP" {
+                        let s0 = u32::from_le_bytes(inner[n - 12..n - 8].try_into().unwrap());
+                        let s1 = u32::from_le_bytes(inner[n - 8..n - 4].try_into().unwrap());
+                        debug.e2e_echo(s0, s1);
+                    }
                     if !thin && renderable {
                         // Tell the relay to stop forwarding the heavy legacy deltas.
                         write

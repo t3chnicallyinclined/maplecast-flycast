@@ -216,6 +216,7 @@ impl Gpu {
         self.renderer
             .submit(&self.device, &self.queue, &view, self.config.width, self.config.height);
         frame.present();
+        debug.e2e_present(); // press->present: now - send_time[latched seq] (E2E probe)
     }
 }
 
