@@ -42,9 +42,11 @@
 namespace maplecast_rollback
 {
 
-// Ring depth. Matches GGPO's MAX_PREDICTION_FRAMES + 2 = 10. Keep aligned
-// with the predictor's max prediction depth — A.6 will use this.
-constexpr int RING_DEPTH = 10;
+// Ring depth. GGPO prediction wanted 10 (MAX_PREDICTION_FRAMES + 2), but A2 run-ahead is
+// depth-1 (save N in leg1, rewind to N after leg3 — 1-2 live slots), so 10x40MB=400MB eager
+// arena needlessly risks the 1GB MemoryMax OOM on the 2-vCPU prod box. 3 slots (120MB) keeps
+// margin. Bump back to 10 only if GGPO-depth prediction (Tier-3) is revived.
+constexpr int RING_DEPTH = 3;
 
 // Initialize the ring. Allocates the 40 MB arena, sets memwatch::mirrorActive
 // so the page-fault watcher starts tracking writes. Idempotent. Returns
