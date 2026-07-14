@@ -388,6 +388,10 @@ async fn run(
             }
         } else if magic == FRMX_MAGIC && st.seeded {
             st.apply_frame(inner);
+            // Signal a new body frame -> wakes the render loop + drives replica-fps.
+            debug
+                .replica_frame
+                .store(st.vframe as u64, std::sync::atomic::Ordering::Relaxed);
         }
     }
     Ok(())

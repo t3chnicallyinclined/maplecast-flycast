@@ -11,6 +11,13 @@ pub struct DebugState {
     // --- telemetry ---
     mbps_x100: AtomicU64,
     fps_x10: AtomicU64,
+    // Frame-arrival counters (bumped by the net / replica threads); the render loop
+    // watches these to render ONLY on a new frame instead of spinning, and they drive
+    // the wire/replica fps readouts so we watch the SERVER cadence, not render-loop fps.
+    pub wire_frame: AtomicU64,    // net.rs: fetch_add(1) per applied /ws (ZCS2) frame
+    pub replica_frame: AtomicU64, // replica.rs: store(vframe) per /replica-live FRMx
+    wire_fps_x10: AtomicU64,
+    replica_fps_x10: AtomicU64,
     pub stage_quads: AtomicU64,
     pub body_quads: AtomicU64,
     pub frame_num: AtomicU64,
@@ -35,6 +42,10 @@ impl DebugState {
         Self {
             mbps_x100: AtomicU64::new(0),
             fps_x10: AtomicU64::new(0),
+            wire_frame: AtomicU64::new(0),
+            replica_frame: AtomicU64::new(0),
+            wire_fps_x10: AtomicU64::new(0),
+            replica_fps_x10: AtomicU64::new(0),
             stage_quads: AtomicU64::new(0),
             body_quads: AtomicU64::new(0),
             frame_num: AtomicU64::new(0),
@@ -59,6 +70,14 @@ impl DebugState {
     pub fn set_fps(&self, v: f64) {
         self.fps_x10.store((v * 10.0) as u64, Relaxed);
     }
+    /// Frames/sec actually arriving on each socket (computed from the counters over a
+    /// window). ~60 each is healthy; render fps below wire fps means we drop frames.
+    pub fn set_wire_fps(&self, v: f64) {
+        self.wire_fps_x10.store((v * 10.0) as u64, Relaxed);
+    }
+    pub fn set_replica_fps(&self, v: f64) {
+        self.replica_fps_x10.store((v * 10.0) as u64, Relaxed);
+    }
     /// EMA of the input round-trip time (native UDP -> :7100 -> ACK), in ms.
     pub fn set_rtt(&self, ms: f64) {
         self.rtt_x100.store((ms * 100.0) as u64, Relaxed);
@@ -74,8 +93,14 @@ pub fn ui(ctx: &egui::Context, d: &DebugState) {
             ui.separator();
 
             egui::Grid::new("telemetry").num_columns(2).show(ui, |ui| {
-                ui.label("fps");
+                ui.label("render fps");
                 ui.label(format!("{:.1}", d.fps_x10.load(Relaxed) as f64 / 10.0));
+                ui.end_row();
+                ui.label("wire fps");
+                ui.label(format!("{:.1}  (server ~60)", d.wire_fps_x10.load(Relaxed) as f64 / 10.0));
+                ui.end_row();
+                ui.label("replica fps");
+                ui.label(format!("{:.1}  (server ~60)", d.replica_fps_x10.load(Relaxed) as f64 / 10.0));
                 ui.end_row();
                 ui.label("bandwidth");
                 ui.label(format!("{:.2} Mbps", d.mbps_x100.load(Relaxed) as f64 / 100.0));

@@ -10,7 +10,7 @@
 use std::sync::{Arc, Mutex};
 use winit::{
     event::{Event, WindowEvent},
-    event_loop::EventLoop,
+    event_loop::{ControlFlow, EventLoop},
     window::{Window, WindowBuilder},
 };
 
@@ -384,13 +384,23 @@ fn main() {
     let game_id = window.id();
     let debug_id = debug_window.id();
 
+    // Render-loop pacing (see AboutToWait): draw only when a new frame arrived, poll the
+    // frame counters cheaply, and derive wire/replica fps from them.
+    let mut last_req_epoch: (u64, u64) = (u64::MAX, u64::MAX);
+    let mut fps_t = std::time::Instant::now();
+    let mut fps_wire0: u64 = 0;
+    let mut fps_rep0: u64 = 0;
+
     event_loop
         .run(move |event, elwt| {
             use std::sync::atomic::Ordering::Relaxed;
             match &event {
                 Event::WindowEvent { window_id, event: wev } if *window_id == game_id => match wev {
                     WindowEvent::CloseRequested => elwt.exit(),
-                    WindowEvent::Resized(size) => gpu.resize(size.width, size.height),
+                    WindowEvent::Resized(size) => {
+                        gpu.resize(size.width, size.height);
+                        window.request_redraw(); // re-render at the new size despite the frame gate
+                    }
                     WindowEvent::RedrawRequested => gpu.render(&shared, &replica_shared, &debug),
                     WindowEvent::KeyboardInput { event: key, .. } => {
                         if key.state == winit::event::ElementState::Pressed
@@ -421,8 +431,31 @@ fn main() {
                     }
                 }
                 Event::AboutToWait => {
-                    window.request_redraw();
-                    debug_window.request_redraw();
+                    // Render ONLY when a new frame actually arrived — the net/replica threads
+                    // bump these counters per frame. Previously this spun request_redraw every
+                    // iteration (~150fps), re-running the full decode/upload pipeline on stale
+                    // frames. Now we poll the counters every 1ms and draw on change, so a new
+                    // frame still reaches the screen within ~1ms while idle work drops to ~0.
+                    let ep = (debug.wire_frame.load(Relaxed), debug.replica_frame.load(Relaxed));
+                    if ep != last_req_epoch {
+                        last_req_epoch = ep;
+                        window.request_redraw();
+                        if debug.overlay.load(Relaxed) {
+                            debug_window.request_redraw();
+                        }
+                    }
+                    // wire / replica fps from the counter deltas over a ~0.5s window.
+                    let el = fps_t.elapsed().as_secs_f64();
+                    if el >= 0.5 {
+                        debug.set_wire_fps(ep.0.wrapping_sub(fps_wire0) as f64 / el);
+                        debug.set_replica_fps(ep.1.wrapping_sub(fps_rep0) as f64 / el);
+                        fps_wire0 = ep.0;
+                        fps_rep0 = ep.1;
+                        fps_t = std::time::Instant::now();
+                    }
+                    elwt.set_control_flow(ControlFlow::WaitUntil(
+                        std::time::Instant::now() + std::time::Duration::from_millis(1),
+                    ));
                 }
                 _ => {}
             }

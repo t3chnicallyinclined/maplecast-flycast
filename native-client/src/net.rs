@@ -100,6 +100,8 @@ async fn run(
                         }
                         fd.renderable
                     };
+                    // Signal a new stage/wire frame -> wakes the render loop + drives wire-fps.
+                    debug.wire_frame.fetch_add(1, Relaxed);
                     if !thin && renderable {
                         // Tell the relay to stop forwarding the heavy legacy deltas.
                         write

@@ -6,6 +6,7 @@
 use crate::ta::{Parsed, PolyParam};
 use crate::texture::{self, Wrap};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 const DEPTH_FMT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SLOT: u64 = 256; // dynamic-uniform stride (>= min alignment)
@@ -29,6 +30,17 @@ pub struct Renderer {
     depth: Option<(wgpu::TextureView, u32, u32)>,
     white_bg: wgpu::BindGroup,
     _white_tex: wgpu::Texture,
+    // Cross-frame body-tile cache: content-hash(rgba) -> GPU texture+bindgroup. A decoded
+    // body part is uploaded ONCE and reused while unchanged, instead of re-creating a GPU
+    // texture per part every frame (the per-frame churn that spiked render load).
+    body_cache: HashMap<u64, CachedBody>,
+    body_frame_ctr: u64,
+}
+
+struct CachedBody {
+    bg: Arc<wgpu::BindGroup>, // Arc: wgpu 0.20 BindGroup isn't Clone; Arc clone is cheap
+    _tex: wgpu::Texture,      // keeps the texture alive while the bindgroup references it
+    last: u64,                // body_frame_ctr at last use — for age-based eviction
 }
 
 struct Draw {
@@ -169,6 +181,8 @@ impl Renderer {
             depth: None,
             white_bg,
             _white_tex: white_tex,
+            body_cache: HashMap::new(),
+            body_frame_ctr: 0,
         }
     }
 
@@ -380,10 +394,15 @@ impl Renderer {
         }
 
         // --- body quads: render_frame output, textured (or force-colored) ---
+        self.body_frame_ctr += 1;
+        {
+            // Evict tiles unused for ~3s (bounds VRAM as animations cycle art).
+            let f = self.body_frame_ctr;
+            self.body_cache.retain(|_, c| c.last + 180 >= f);
+        }
         let mut body_verts: Vec<u8> = Vec::new();
         let mut body_draws: Vec<Draw> = Vec::new();
-        let mut body_tex_bgs: Vec<wgpu::BindGroup> = Vec::new();
-        let mut body_keep_tex: Vec<wgpu::Texture> = Vec::new();
+        let mut body_tex_bgs: Vec<Arc<wgpu::BindGroup>> = Vec::new();
         for item in bodies {
             if !show_bodies || (slot as u64) >= MAX_SLOTS {
                 break;
@@ -404,10 +423,8 @@ impl Renderer {
             let (si, ht) = if textured { (1u32, 1u32) } else { (0, 0) };
             write_fu(&mut fu_stage, (slot as usize) * SLOT as usize, 0.0, si, ht, 1, 0, 0, 0);
             let tex_ref: u32 = if let Some(bt) = &item.tex {
-                let (bg, tex) = make_tex_bg(
-                    device, &self.bgl1, &bt.rgba, bt.w, bt.h, false, Wrap::Clamp, Wrap::Clamp, Some(queue),
-                );
-                body_keep_tex.push(tex);
+                // Reuse the cached GPU tile if this exact content was seen recently.
+                let bg = self.body_bg(device, queue, &bt.rgba, bt.w, bt.h);
                 body_tex_bgs.push(bg);
                 (body_tex_bgs.len() - 1) as u32
             } else {
@@ -441,7 +458,6 @@ impl Renderer {
             });
             slot += 1;
         }
-        let _ = &body_keep_tex; // keep body textures alive through the pass
 
         debug.stage_quads.store((draws.len() + tr_draws.len()) as u64, Relaxed);
         debug.body_quads.store(body_draws.len() as u64, Relaxed);
@@ -553,8 +569,8 @@ impl Renderer {
                 rp.set_vertex_buffer(0, self.body_vbuf.slice(..));
                 for d in &body_draws {
                     rp.set_pipeline(&self.pipes[&pipe_key(d.sb, d.db, d.dm, d.dw)]);
-                    let tbg = if d.textured {
-                        &body_tex_bgs[d.tcw as usize]
+                    let tbg: &wgpu::BindGroup = if d.textured {
+                        body_tex_bgs[d.tcw as usize].as_ref()
                     } else {
                         &self.white_bg
                     };
@@ -605,6 +621,29 @@ impl Renderer {
             });
         }
         queue.submit(Some(enc.finish()));
+    }
+
+    /// Get-or-create the GPU texture+bindgroup for a decoded body tile, cached across
+    /// frames by content hash so an unchanged part skips the upload each frame.
+    fn body_bg(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        rgba: &[u8],
+        w: u32,
+        h: u32,
+    ) -> Arc<wgpu::BindGroup> {
+        let key = fnv1a64(rgba);
+        let f = self.body_frame_ctr;
+        if let Some(c) = self.body_cache.get_mut(&key) {
+            c.last = f;
+            return c.bg.clone();
+        }
+        let (bg, tex) =
+            make_tex_bg(device, &self.bgl1, rgba, w, h, false, Wrap::Clamp, Wrap::Clamp, Some(queue));
+        let bg = Arc::new(bg);
+        self.body_cache.insert(key, CachedBody { bg: bg.clone(), _tex: tex, last: f });
+        bg
     }
 
     fn ensure_depth(&mut self, device: &wgpu::Device, w: u32, h: u32) {
@@ -737,6 +776,16 @@ fn write_fu(buf: &mut [u8], o: usize, atv: f32, si: u32, ht: u32, ua: u32, ita: 
     put(buf, o + 20, ho);
     put(buf, o + 24, at);
     put(buf, o + 28, 0);
+}
+
+/// FNV-1a 64 over a body tile's RGBA bytes — the body-texture cache key.
+fn fnv1a64(data: &[u8]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for &b in data {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 fn pipe_key(sb: u32, db: u32, dm: u32, dw: bool) -> u64 {
