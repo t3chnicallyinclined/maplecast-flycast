@@ -1756,6 +1756,43 @@ void Emulator::start()
 								fflush(stdout);
 							}
 							if (_raReady && maplecast_mirror::isServer()) {
+								// A2 ADAPTIVE run-ahead (super-drop fix, gated MAPLECAST_RA_ADAPTIVE):
+								// on a HEAVY (super) frame run-ahead's one-shot leg3 publish MISSES — MVC2
+								// renders character sprites via render-to-texture, so extra RTT passes hog
+								// the single render slot ahead of the composite, or the super-freeze reuses
+								// the framebuffer so no fresh composite STARTRENDER fires — so raConsumePublishStop
+								// never binds, the vblank fallback ends leg3, the rewind discards everything,
+								// and the tick ships NOTHING -> both feeds drop to 35-45fps. Run-ahead gives
+								// ZERO benefit during a super (sim frozen), so for heavy frames we SKIP the
+								// 3-leg cycle and do a plain baseline single-emulate + async publish (the path
+								// the user CONFIRMED is smooth at 60). Detect via the previous PUBLISHED TA size
+								// ballooning (super ~480-520KB vs ~150KB neutral), with exit hysteresis to cover
+								// the 1-frame read lag + geometry ramp-down tail.
+								static const bool _raAdaptive = [](){ const char* e = std::getenv("MAPLECAST_RA_ADAPTIVE"); return e && e[0] && e[0] != '0'; }();
+								static bool _raHeavyMode = false; static int _raSubCount = 0;
+								static uint64_t _raHeavyTicks = 0, _raLightTicks = 0, _raLeg3Missed = 0;
+								bool _heavy = false;
+								if (_raAdaptive) {
+									uint32_t _ts = maplecast_mirror::lastPublishedTaSize();
+									if (_ts > 300*1024) { _raHeavyMode = true; _raSubCount = 0; }
+									else if (_raHeavyMode && _ts < 220*1024) { if (++_raSubCount >= 2) _raHeavyMode = false; }
+									else if (_raHeavyMode) _raSubCount = 0;
+									_heavy = _raHeavyMode;
+								}
+								if (_heavy) {
+									// HEAVY (super): plain authoritative single-frame advance + async publish
+									// == the run-ahead-OFF baseline path (no save/preview/publish-stop/rewind).
+									_raHeavyTicks++;
+									maplecast_mirror::raConsumePublishStop();  // clear any stale one-shot left by a prior light leg3 (else it Stop()s the SH4 mid-plain-frame)
+									maplecast_mirror::raConsumeStepStop();
+									maplecast_mirror::setSuppressPublish(false); // this frame MUST publish (prior tick left suppress=true)
+									maplecast_mirror::raArmStepStop();            // vblank consumes it -> runInternal returns after exactly ONE video frame
+									runInternal();                               // advance one authoritative frame; its composite publishes normally (no RTT-collision truncation)
+									getSh4Executor()->Start();
+									maplecast_mirror::raConsumeStepStop();        // belt: discard if unfired
+									maplecast_mirror::setSuppressPublish(true);   // restore between-tick belt (matches the light post-condition)
+								} else {
+								_raLightTicks++;
 								// A2 v2 (local-rig trace 2026-07-12): runInternal() is RUN-UNTIL-STOPPED —
 								// v1 wrapped it and never cycled (1695 SRs all hidden, 0 publishes = all
 								// 4 dark rounds). Step frame legs with the predict primitive: arm a
@@ -1803,6 +1840,11 @@ void Emulator::start()
 								}
 								getSh4Executor()->Start();
 								if (_raShortLeg3) maplecast_mirror::raConsumeStepStop();  // discard the unused vblank fallback if publish-stop won the race
+									// A2 ADAPTIVE proof + leak-guard: if the publish-stop is STILL armed here, leg3's
+									// composite never bound (RTT slot collision / super-freeze framebuffer reuse) =
+									// this tick shipped NOTHING. Consuming it also stops a stale one-shot leaking into
+									// the next tick. This is the super stall that adaptive mode routes around.
+									if (_raShortLeg3 && maplecast_mirror::raConsumePublishStop()) _raLeg3Missed++;
 								auto _raT3 = std::chrono::steady_clock::now();
 									const u32 _svA2 = _svfStep ? ReadMem32_nommu(0x8C268482) : 0;   // anim after preview leg (before rewind)
 								mc_runaheadPreviewLeg.store(false, std::memory_order_relaxed);
@@ -1860,6 +1902,23 @@ void Emulator::start()
 										(unsigned long long)_raF);
 									fflush(stdout);
 									_raReady = false;
+								}
+								} // end LIGHT branch (the HEAVY branch above skips the 3-leg cycle)
+
+								// A2 ADAPTIVE window report (BOTH heavy + light ticks) — the proof metric:
+								// with adaptive OFF, supers make leg3Missed>0 and publishes<600 (the stall);
+								// with adaptive ON, heavy>0, leg3Missed->0, publishes->~600 (fixed). Cross-check
+								// against the native client's wire_fps holding 60 during a super.
+								{
+									static uint64_t _wN = 0;
+									if (++_wN % 600 == 0) {
+										uint32_t _pubs = maplecast_mirror::consumePublishBroadcasts();
+										printf("[RA-ADAPT] per600: heavy=%llu light=%llu publishes=%u leg3Missed=%llu\n",
+											(unsigned long long)_raHeavyTicks, (unsigned long long)_raLightTicks,
+											_pubs, (unsigned long long)_raLeg3Missed);
+										fflush(stdout);
+										_raHeavyTicks = 0; _raLightTicks = 0; _raLeg3Missed = 0;
+									}
 								}
 								// 60Hz TICK-END PACER: run-ahead bypasses the null-audio pacer (the rewind
 								// un-produces the hidden leg's audio, confusing the sample-based sleep ->

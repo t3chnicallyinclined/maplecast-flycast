@@ -116,6 +116,13 @@ bool raConsumeStepStop();
 void raArmPublishStop();      // A2 short-leg3: halt leg3 right after the N+1 publish SR
 bool raConsumePublishStop();
 uint32_t currentGuestVf();
+// A2 ADAPTIVE run-ahead (super-drop fix): the previous PUBLISHED frame's uncompressed TA
+// delta size (super ~480-520KB vs ~150KB neutral) — the emu-thread gate reads this to skip
+// run-ahead's one-shot leg3 on heavy/super frames (where its publish misses -> the tick ships
+// nothing -> 35-45fps). Plus a read+reset counter of real (non-hidden) publishes/window = the
+// proof metric (must climb 35-45 -> 60 during supers once adaptive is on).
+uint32_t lastPublishedTaSize();
+uint32_t consumePublishBroadcasts();
 
 // Build the full DC save state via dc_serialize into a freshly malloc'd
 // buffer. Caller must free() it. Returns nullptr on failure. This is the

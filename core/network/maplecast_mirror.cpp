@@ -571,6 +571,218 @@ static void taCanonicalize(uint8_t* ta, uint32_t taSize, bool zero)
 	}
 }
 
+// === MAPLECAST_TADICT (TDW1/TDWS content-addressed TA dict wire) =============
+// docs/TA-DICT-WIRE-PLAN.md §2. Shadow leg, default OFF. NEW message magics —
+// legacy ZCST and ZCS2 stay byte-for-byte untouched; the relay classifies
+// unknown magics as Critical (never dropped, strictly in-order), which is the
+// delivery guarantee a dictionary stream needs. Encodes the SAME wire TA copy
+// the legacy delta ships (_taBuf[cur], post-TACANON) — flags bit1 mirrors the
+// TACANON zero mode (descriptive only; the encoder is mask-agnostic).
+// Block walk = the taCanonicalize FSM above. Any change there must be mirrored
+// here AND in _bwlab/ta_dictwire_decode.py walk_blocks().
+static int tadictMode()
+{
+	static const int m = [](){
+		const char* e = std::getenv("MAPLECAST_TADICT");
+		return (e && *e && *e != '0') ? atoi(e) : 0;
+	}();
+	return m;
+}
+static std::atomic<bool> _tdwResetPending{true};   // TDW1 zstd stream restart (flags bit0)
+static std::atomic<bool> _tdwSnapPending{true};    // send TDWS dict snapshot before next TDW1
+namespace tadict {
+
+static std::vector<uint8_t>  arena;      // dictionary block bytes, append-only
+static std::vector<uint32_t> blkOff;     // id -> offset into arena
+static std::vector<uint8_t>  blkLen;     // id -> 32 | 64
+static std::unordered_map<uint64_t, std::vector<uint32_t>> byHash;  // FNV64 -> candidate ids
+static ZSTD_CCtx* zc = nullptr;
+static uint8_t  dictEpoch = 0;
+static uint16_t seq = 0;
+static std::vector<uint8_t> inner, msg, snapInner;
+static MirrorCompressor snapComp;        // own instance (ZCST one-shot for TDWS)
+static bool snapCompInit = false;
+static uint64_t stWire = 0, stInner = 0, stNewB = 0, stUs = 0;
+static uint32_t stFrames = 0;
+
+static inline uint64_t fnv64(const uint8_t* p, uint32_t n)
+{
+	uint64_t h = 1469598103934665603ULL;
+	for (uint32_t i = 0; i < n; i++) { h ^= p[i]; h *= 1099511628211ULL; }
+	return h;
+}
+
+static uint32_t internBlock(const uint8_t* p, uint32_t len, bool& isNew)
+{
+	uint64_t h = fnv64(p, len);
+	auto it = byHash.find(h);
+	if (it != byHash.end())
+		for (uint32_t id : it->second)
+			if (blkLen[id] == len && memcmp(arena.data() + blkOff[id], p, len) == 0) {
+				isNew = false;
+				return id;
+			}
+	uint32_t id = (uint32_t)blkOff.size();
+	blkOff.push_back((uint32_t)arena.size());
+	blkLen.push_back((uint8_t)len);
+	arena.insert(arena.end(), p, p + len);
+	byHash[h].push_back(id);
+	isNew = true;
+	return id;
+}
+
+// Emit-order block spans: the taCanonicalize FSM, sizes only (no masking).
+template<typename F>
+static void walkBlocks(const uint8_t* ta, uint32_t taSize, F&& emit)
+{
+	uint32_t off = 0;
+	int  curList = -1;
+	bool inPolyList = false, isSpr = false, haveParam = false;
+	uint8_t cObj = 0;
+	while (off + 32 <= taSize) {
+		uint32_t pcw; memcpy(&pcw, ta + off, 4);
+		uint32_t paraType = (pcw >> 29) & 7;
+		uint32_t sz = 32;
+		if (paraType == 0 || paraType == 1 || paraType == 2 || paraType == 3 || paraType == 6) {
+			haveParam = false;
+			if (paraType == 0) { curList = -1; inPolyList = false; }
+		} else if (paraType == 4) {
+			uint32_t lt = (pcw >> 24) & 7;
+			if (curList == -1) { curList = (int)lt; inPolyList = (lt == 0 || lt == 2 || lt == 4); }
+			if (curList == 1 || curList == 3) { haveParam = false; }
+			else {
+				cObj = (uint8_t)(pcw & 0xFF);
+				isSpr = false; haveParam = true;
+				uint32_t colType = (cObj >> 4) & 3, vol = (cObj >> 6) & 1;
+				if (colType == 2 && !vol && ((cObj >> 2) & 1)) sz = (off + 64 <= taSize) ? 64 : 32;
+				else if (colType >= 1 && vol)                  sz = (off + 64 <= taSize) ? 64 : 32;
+			}
+		} else if (paraType == 5) {
+			uint32_t lt = (pcw >> 24) & 7;
+			if (curList == -1) { curList = (int)lt; inPolyList = (lt == 0 || lt == 2 || lt == 4); }
+			cObj = (uint8_t)(pcw & 0xFF);
+			isSpr = true; haveParam = true;
+		} else if (paraType == 7) {
+			if (inPolyList && haveParam) {
+				uint32_t tex = (cObj >> 3) & 1, colType = (cObj >> 4) & 3, vol = (cObj >> 6) & 1;
+				if (isSpr && off + 64 <= taSize) sz = 64;
+				else if (tex && !vol && colType == 1 && off + 64 <= taSize) sz = 64;
+			}
+		}
+		emit(ta + off, sz);
+		off += sz;
+	}
+}
+
+static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, uint32_t vframe)
+{
+	auto t0 = std::chrono::steady_clock::now();
+	static const uint32_t maxBlocks = [](){ const char* e = std::getenv("MAPLECAST_TADICT_MAXBLOCKS");
+		uint32_t v = e ? (uint32_t)strtoul(e, nullptr, 10) : 0; return v ? v : 1048576u; }();
+	static const uint64_t maxBytes = [](){ const char* e = std::getenv("MAPLECAST_TADICT_MAXMB");
+		uint64_t v = e ? strtoull(e, nullptr, 10) : 0; return (v ? v : 64ull) << 20; }();
+
+	// Dict cap breach: epoch bump + clear + snapshot(empty) + stream restart.
+	if (blkOff.size() >= maxBlocks || arena.size() >= maxBytes) {
+		arena.clear(); blkOff.clear(); blkLen.clear(); byHash.clear();
+		dictEpoch++;
+		_tdwSnapPending.store(true, std::memory_order_release);
+		_tdwResetPending.store(true, std::memory_order_release);
+		printf("[TADICT] dict cap hit — epoch bump to %u\n", dictEpoch);
+	}
+
+	// TDWS snapshot FIRST (dict state BEFORE this frame's new blocks). ZCST
+	// one-shot envelope, level 3 — same class as SYNC.
+	if (_tdwSnapPending.exchange(false, std::memory_order_acq_rel)) {
+		snapInner.clear();
+		snapInner.reserve(16 + arena.size() + blkOff.size());
+		const char* mg = "TDWS";
+		snapInner.insert(snapInner.end(), mg, mg + 4);
+		snapInner.push_back(dictEpoch);
+		snapInner.insert(snapInner.end(), 3, 0);
+		uint32_t nBlk = (uint32_t)blkOff.size();
+		uint32_t secB = (uint32_t)(arena.size() + blkOff.size());   // blocks + 1 len byte each
+		snapInner.insert(snapInner.end(), (uint8_t*)&nBlk, (uint8_t*)&nBlk + 4);
+		snapInner.insert(snapInner.end(), (uint8_t*)&secB, (uint8_t*)&secB + 4);
+		for (uint32_t id = 0; id < nBlk; id++) {
+			snapInner.push_back(blkLen[id]);
+			const uint8_t* bp = arena.data() + blkOff[id];
+			snapInner.insert(snapInner.end(), bp, bp + blkLen[id]);
+		}
+		if (!snapCompInit) { snapComp.init(1 << 20); snapCompInit = true; }
+		size_t outSz = 0; uint64_t cUs = 0;
+		const uint8_t* out = snapComp.compress(snapInner.data(), (uint32_t)snapInner.size(), outSz, cUs, 3);
+		maplecast_ws::broadcastBinary(out, (uint32_t)outSz);
+		printf("[TADICT] TDWS snapshot: epoch=%u blocks=%u raw=%zuB wire=%zuB\n",
+			dictEpoch, nBlk, snapInner.size(), outSz);
+	}
+
+	// Inner payload: frameNum, vframe, taSize, nBlocks, newSection, refs, news.
+	inner.clear();
+	inner.reserve(20 + taSize / 4);
+	inner.insert(inner.end(), (uint8_t*)&frameNum, (uint8_t*)&frameNum + 4);
+	inner.insert(inner.end(), (uint8_t*)&vframe, (uint8_t*)&vframe + 4);
+	inner.insert(inner.end(), (uint8_t*)&taSize, (uint8_t*)&taSize + 4);
+	uint32_t nBlocks = 0, newSection = 0;
+	inner.insert(inner.end(), 8, 0);                       // patched below
+	static std::vector<uint8_t> news;
+	news.clear();
+	walkBlocks(wireTA, taSize, [&](const uint8_t* p, uint32_t len){
+		bool isNew = false;
+		uint32_t id = internBlock(p, len, isNew);
+		inner.insert(inner.end(), (uint8_t*)&id, (uint8_t*)&id + 4);
+		if (isNew) { news.push_back((uint8_t)len); news.insert(news.end(), p, p + len); }
+		nBlocks++;
+	});
+	newSection = (uint32_t)news.size();
+	memcpy(inner.data() + 12, &nBlocks, 4);
+	memcpy(inner.data() + 16, &newSection, 4);
+	inner.insert(inner.end(), news.begin(), news.end());
+
+	// TDW1 envelope: magic(4) dictEpoch(1) flags(1) seq(2) innerSize(4) + stream chunk.
+	bool streamStart = false;
+	if (!zc) { zc = ZSTD_createCCtx(); streamStart = true; }
+	if (_tdwResetPending.exchange(false, std::memory_order_acq_rel)) streamStart = true;
+	if (streamStart) {
+		ZSTD_CCtx_reset(zc, ZSTD_reset_session_only);
+		ZSTD_CCtx_setParameter(zc, ZSTD_c_compressionLevel, 3);
+		ZSTD_CCtx_setParameter(zc, ZSTD_c_windowLog, 24);
+		seq = 0;
+	}
+	uint32_t innerSize = (uint32_t)inner.size();
+	msg.resize(12 + ZSTD_compressBound(innerSize));
+	msg[0]='T'; msg[1]='D'; msg[2]='W'; msg[3]='1';
+	msg[4] = dictEpoch;
+	msg[5] = (uint8_t)((streamStart ? 1 : 0) | (tacanonMode() == 2 ? 2 : 0));
+	memcpy(msg.data() + 6, &seq, 2);
+	memcpy(msg.data() + 8, &innerSize, 4);
+	ZSTD_outBuffer ob{ msg.data() + 12, msg.size() - 12, 0 };
+	ZSTD_inBuffer  ib{ inner.data(), inner.size(), 0 };
+	size_t zr = ZSTD_compressStream2(zc, &ob, &ib, ZSTD_e_flush);
+	if (ZSTD_isError(zr) || ib.pos != ib.size || zr != 0) {
+		printf("[TADICT] compress error (%s) — msg skipped, stream restart queued\n",
+			ZSTD_isError(zr) ? ZSTD_getErrorName(zr) : "incomplete flush");
+		_tdwResetPending.store(true, std::memory_order_release);
+		return;
+	}
+	seq++;
+	maplecast_ws::broadcastBinary(msg.data(), (uint32_t)(12 + ob.pos));
+
+	stWire += 12 + ob.pos; stInner += innerSize; stNewB += newSection; stFrames++;
+	stUs += (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+		std::chrono::steady_clock::now() - t0).count();
+	if (stFrames && frameNum % 600 == 0) {
+		printf("[TADICT] dict=%zu blk/%.1fMB wire=%.0fB/frame (%.3f Mbps) inner=%.0fB new=%.0fB enc=%.0fus\n",
+			blkOff.size(), arena.size() / 1048576.0,
+			stWire / (double)stFrames, (stWire / (double)stFrames) * 60.0 * 8.0 / 1e6,
+			stInner / (double)stFrames, stNewB / (double)stFrames, stUs / (double)stFrames);
+		fflush(stdout);
+		stWire = stInner = stNewB = stUs = 0; stFrames = 0;
+	}
+}
+
+} // namespace tadict
+
 // === MAPLECAST_STAGESTRIP (TA-Wire v2 Phase 3a, docs/render-state/08) ========
 // Strip OPAQUE-list polys whose TCW texture-addr field (tcw & 0x1FFFFF) is in
 // the stage allowlist. STG0B measured truth: the training stage is FOUR meshes —
@@ -2253,6 +2465,14 @@ static std::atomic<bool> _raPublishStop{false};
 void raArmPublishStop()     { _raPublishStop.store(true, std::memory_order_release); }
 bool raConsumePublishStop() { return _raPublishStop.exchange(false, std::memory_order_acq_rel); }
 uint32_t currentGuestVf() { return addrspace::read32(0x8C3496B0); }   // guest frame counter (emu thread)
+// A2 ADAPTIVE (super-drop fix): the last published (non-hidden) frame's uncompressed TA delta
+// size, stored on the render thread in serverPublish; read on the emu thread to gate run-ahead.
+static std::atomic<uint32_t> _lastPublishedTaSize{0};
+uint32_t lastPublishedTaSize() { return _lastPublishedTaSize.load(std::memory_order_relaxed); }
+// Count of real (non-hidden) publishes; read+reset per window by the emu PROF block = the proof
+// that leg3 is actually producing composites (drops to 35-45 during supers = the bug).
+static std::atomic<uint32_t> _publishBroadcasts{0};
+uint32_t consumePublishBroadcasts() { return _publishBroadcasts.exchange(0, std::memory_order_relaxed); }
 
 void serverPublish(TA_context* ctx)
 {
@@ -2271,6 +2491,8 @@ void serverPublish(TA_context* ctx)
 	// Still increment the frame counter so local overlays/telemetry work.
 	static uint32_t _localFrameNum = 0;
 	_localFrameNum++;
+	// A2 ADAPTIVE proof metric: a real (non-hidden) composite reached publish this tick.
+	_publishBroadcasts.fetch_add(1, std::memory_order_relaxed);
 
 	// LOCKSTEP DIAG (throttled): resolve which counter the tape / JOIN / hash
 	// each use, and whether the tape publisher is still draining to subscribers.
@@ -2471,6 +2693,8 @@ void serverPublish(TA_context* ctx)
 	// === Raw TA command buffer  --  double-buffered delta ===
 	uint32_t taSize = (uint32_t)(ctx->tad.thd_data - ctx->tad.thd_root);
 	uint8_t* taData = ctx->tad.thd_root;
+	// A2 ADAPTIVE: publish this non-hidden frame's TA size for the emu-thread run-ahead gate.
+	_lastPublishedTaSize.store(taSize, std::memory_order_relaxed);
 
 	// NOTE: Palette bank probe (dynamic targeting) was attempted but
 	// the TA buffer scan had alignment issues  --  TA commands are variable
@@ -2644,6 +2868,13 @@ void serverPublish(TA_context* ctx)
 	// 	taChecksum ^= *(uint32_t*)(taData + i);
 	uint32_t taChecksum = 0;  // placeholder  --  client expects 4 bytes here
 	memcpy(dst, &taChecksum, 4); dst += 4;
+
+	// TDW1 shadow leg (MAPLECAST_TADICT, docs/TA-DICT-WIRE-PLAN.md): dict-encode
+	// the SAME wire TA copy the legacy delta above just shipped. New magics,
+	// broadcast-only — no existing parser's input changes.
+	if (tadictMode() && maplecast_ws::active())
+		tadict::publish(wireTA, taSize, frameNum,
+			ctx->rend.mc_vframe ? ctx->rend.mc_vframe : addrspace::read32(0x8C3496B0));
 
 	// Persistent palette overrides  --  re-apply custom palette colors to
 	// PVR palette RAM BEFORE the diff scan so the changes are captured
@@ -2869,6 +3100,9 @@ done_diff:
 		// ZCS2: restart the streaming envelope at this SYNC so joiners decode onward.
 		_zstreamResetPending.store(true, std::memory_order_release);
 		_vcacheReseedPending.store(true, std::memory_order_release);  // joiner hash caches start empty
+		// TDW: pair a dict snapshot with a stream restart so a joiner can decode onward.
+		_tdwSnapPending.store(true, std::memory_order_release);
+		_tdwResetPending.store(true, std::memory_order_release);
 	}
 
 	// === STATE-MERGE (MAPLECAST_STATE_MERGE): fold /replica-live's body feed into THIS frame ===
@@ -4541,6 +4775,9 @@ done_diff:
 		// ZCS2: restart the streaming envelope at this SYNC so joiners decode onward.
 		_zstreamResetPending.store(true, std::memory_order_release);
 		_vcacheReseedPending.store(true, std::memory_order_release);  // joiner hash caches start empty
+		// TDW: pair a dict snapshot with a stream restart so a joiner can decode onward.
+		_tdwSnapPending.store(true, std::memory_order_release);
+		_tdwResetPending.store(true, std::memory_order_release);
 		hdr->sync_ready = 1;
 		printf("[MIRROR] Client requested sync  --  fresh state + TA reset\n");
 	}
