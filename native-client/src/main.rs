@@ -39,6 +39,7 @@ struct Gpu {
     frames: u32,
     fps_t0: std::time::Instant,
     last_epoch: (u64, u64), // last DECODED (wire_frame, replica_frame) — decode gate + drops
+    next_release: std::time::Instant, // jitter buffer: when to release the next buffered frame
 }
 
 impl Gpu {
@@ -94,6 +95,7 @@ impl Gpu {
             frames: 0,
             fps_t0: std::time::Instant::now(),
             last_epoch: (u64::MAX, u64::MAX),
+            next_release: std::time::Instant::now(),
         }
     }
 
@@ -109,6 +111,7 @@ impl Gpu {
         &mut self,
         shared: &Arc<Mutex<FrameDecoder>>,
         replica: &Arc<Mutex<replica::ReplicaState>>,
+        queue: &Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
         debug: &debug::DebugState,
     ) {
         use std::sync::atomic::Ordering::Relaxed;
@@ -118,6 +121,53 @@ impl Gpu {
             debug.set_fps(self.frames as f64 / el);
             self.frames = 0;
             self.fps_t0 = std::time::Instant::now();
+        }
+
+        // JITTER BUFFER: the replica thread queues every incoming frame; we are the single
+        // consumer. ON -> release ONE frame per ~16.67ms local tick (a PLL keeps ~1 frame
+        // buffered) to smooth bursty network delivery. OFF -> drain immediately (no added
+        // latency). Applying a frame bumps replica_frame, which the decode gate reacts to.
+        {
+            let now = std::time::Instant::now();
+            let depth = queue.lock().unwrap().len();
+            debug.jitter_depth.store(depth as u64, Relaxed);
+            if !debug.jitter_on.load(Relaxed) {
+                if depth > 0 {
+                    let drained: Vec<Vec<u8>> = queue.lock().unwrap().drain(..).collect();
+                    let mut rep = replica.lock().unwrap();
+                    for f in &drained {
+                        if rep.seeded {
+                            rep.apply_frame(f);
+                        }
+                    }
+                    if rep.seeded {
+                        debug.replica_frame.store(rep.vframe as u64, Relaxed);
+                    }
+                }
+                self.next_release = now;
+            } else if now >= self.next_release && depth > 0 {
+                const TARGET: i64 = 1;
+                const MAX: usize = 4;
+                let frame = {
+                    let mut q = queue.lock().unwrap();
+                    while q.len() > MAX {
+                        q.pop_front(); // drop stale frames to bound latency (catch up)
+                    }
+                    q.pop_front()
+                };
+                if let Some(f) = frame {
+                    let mut rep = replica.lock().unwrap();
+                    if rep.seeded {
+                        rep.apply_frame(&f);
+                        debug.replica_frame.store(rep.vframe as u64, Relaxed);
+                    }
+                }
+                // PLL: release faster when the buffer builds, slower when it drains — locks the
+                // release rate to the average arrival while holding ~TARGET frames buffered.
+                let err = depth as i64 - TARGET;
+                let interval = (16_667 - err * 800).clamp(13_000, 20_000);
+                self.next_release = now + std::time::Duration::from_micros(interval as u64);
+            }
         }
 
         // DECODE only when the server frame changed (heavy: TA parse + render_frame + body
@@ -364,9 +414,17 @@ fn main() {
     // Second socket: /replica-live seeds + maintains the 16MB SH4 RAM image that
     // render_frame walks to reconstruct the char-stripped fighter bodies.
     let replica_shared = Arc::new(Mutex::new(replica::ReplicaState::new()));
+    // Incoming /replica-live frames land here; the render loop is the SINGLE consumer
+    // (jitter buffer: paced release when on, immediate drain when off).
+    let frame_queue = Arc::new(Mutex::new(std::collections::VecDeque::<Vec<u8>>::new()));
+    // MAPLECAST_JITTER=1 starts with the jitter buffer on (the debug checkbox toggles it live).
+    if std::env::var("MAPLECAST_JITTER").ok().as_deref() == Some("1") {
+        debug.jitter_on.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     replica::spawn_replica_thread(
         std::env::var("MAPLECAST_REPLICA").unwrap_or_else(|_| "wss://nobd.net/replica-live".into()),
         replica_shared.clone(),
+        frame_queue.clone(),
         debug.clone(),
     );
 
@@ -402,6 +460,15 @@ fn main() {
     let mut rt_ema: f64 = 0.0; // ema render() ms
     let mut win_rt_max: f64 = 0.0; // worst render() ms this window
     let mut win_gap_max: f64 = 0.0; // worst present gap this window (the hitch)
+    // Per-frame CSV log (set MAPLECAST_TELEMETRY_LOG=path) — for offline hitch analysis.
+    let mut telem = std::env::var("MAPLECAST_TELEMETRY_LOG")
+        .ok()
+        .and_then(|p| std::fs::File::create(p).ok());
+    if let Some(f) = telem.as_mut() {
+        use std::io::Write;
+        let _ = writeln!(f, "t_ms,wf,rf,render_ms,gap_ms,body_quads,body_uploads,dropped,buf");
+    }
+    let telem_t0 = std::time::Instant::now();
 
     event_loop
         .run(move |event, elwt| {
@@ -415,18 +482,34 @@ fn main() {
                     }
                     WindowEvent::RedrawRequested => {
                         let t0 = std::time::Instant::now();
-                        if let Some(p) = last_present {
-                            let gap = t0.duration_since(p).as_secs_f64() * 1000.0;
-                            if gap > win_gap_max {
-                                win_gap_max = gap;
-                            }
+                        let gap = last_present
+                            .map(|p| t0.duration_since(p).as_secs_f64() * 1000.0)
+                            .unwrap_or(0.0);
+                        if gap > win_gap_max {
+                            win_gap_max = gap;
                         }
                         last_present = Some(t0);
-                        gpu.render(&shared, &replica_shared, &debug);
+                        gpu.render(&shared, &replica_shared, &frame_queue, &debug);
                         let rt = t0.elapsed().as_secs_f64() * 1000.0;
                         rt_ema = if rt_ema == 0.0 { rt } else { rt_ema * 0.9 + rt * 0.1 };
                         if rt > win_rt_max {
                             win_rt_max = rt;
+                        }
+                        if let Some(f) = telem.as_mut() {
+                            use std::io::Write;
+                            let _ = writeln!(
+                                f,
+                                "{:.1},{},{},{:.3},{:.3},{},{},{},{}",
+                                telem_t0.elapsed().as_secs_f64() * 1000.0,
+                                debug.wire_frame.load(Relaxed),
+                                debug.replica_frame.load(Relaxed),
+                                rt,
+                                gap,
+                                debug.body_quads.load(Relaxed),
+                                debug.body_uploads.load(Relaxed),
+                                debug.dropped.load(Relaxed),
+                                debug.jitter_depth.load(Relaxed),
+                            );
                         }
                     }
                     WindowEvent::KeyboardInput { event: key, .. } => {

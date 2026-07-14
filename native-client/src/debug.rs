@@ -42,6 +42,10 @@ pub struct DebugState {
     pub show_stage: AtomicBool,
     pub bodies_force_color: AtomicBool,
     pub overlay: AtomicBool,
+    // Jitter buffer: hold incoming frames and release them on a steady local clock to
+    // smooth bursty network delivery (adds ~1 frame of video latency). Toggle to A/B.
+    pub jitter_on: AtomicBool,
+    pub jitter_depth: AtomicU64, // frames currently buffered (telemetry)
 }
 
 impl DebugState {
@@ -73,6 +77,8 @@ impl DebugState {
             show_stage: AtomicBool::new(true),
             bodies_force_color: AtomicBool::new(false),
             overlay: AtomicBool::new(true),
+            jitter_on: AtomicBool::new(false),
+            jitter_depth: AtomicU64::new(0),
         }
     }
 
@@ -148,6 +154,9 @@ pub fn ui(ctx: &egui::Context, d: &DebugState) {
                 ui.label("dropped");
                 ui.label(format!("{}", d.dropped.load(Relaxed)));
                 ui.end_row();
+                ui.label("buffer depth");
+                ui.label(format!("{} frames", d.jitter_depth.load(Relaxed)));
+                ui.end_row();
             });
 
             ui.separator();
@@ -174,6 +183,7 @@ pub fn ui(ctx: &egui::Context, d: &DebugState) {
             checkbox(ui, &d.show_stage, "stage / effects / HUD");
             checkbox(ui, &d.show_bodies, "fighter bodies");
             checkbox(ui, &d.bodies_force_color, "bodies force-color (silhouette)");
+            checkbox(ui, &d.jitter_on, "jitter buffer — smooth motion (+~1 frame)");
 
             ui.separator();
             ui.weak("F1 (on the game window) shows/hides this window");

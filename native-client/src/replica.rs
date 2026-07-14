@@ -21,6 +21,7 @@
 //! (seed once); every later message is an FRMx per-frame patch.
 
 use futures_util::StreamExt;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 use zstd_safe::DCtx;
@@ -153,7 +154,7 @@ impl ReplicaState {
     /// Patch one FRMx frame into the resident image. Port of maplecast_mirror.cpp
     /// gstaApplyFrame (~5573): dynamic regions in table order, then the optional
     /// GFX / PALETTE / HUDQ / BTCW / PL3D tails (parsed defensively, present-or-not).
-    fn apply_frame(&mut self, d: &[u8]) {
+    pub fn apply_frame(&mut self, d: &[u8]) {
         let n = d.len();
         if n < 12 || rd32(d, 0) != FRMX_MAGIC {
             return;
@@ -321,6 +322,7 @@ impl Decompressor {
 pub fn spawn_replica_thread(
     url: String,
     shared: Arc<Mutex<ReplicaState>>,
+    queue: Arc<Mutex<VecDeque<Vec<u8>>>>,
     debug: Arc<crate::debug::DebugState>,
 ) {
     std::thread::Builder::new()
@@ -332,7 +334,7 @@ pub fn spawn_replica_thread(
                 .expect("tokio runtime");
             rt.block_on(async move {
                 loop {
-                    if let Err(e) = run(&url, &shared, &debug).await {
+                    if let Err(e) = run(&url, &shared, &queue, &debug).await {
                         log::warn!("[replica] {e} — reconnecting");
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -345,6 +347,7 @@ pub fn spawn_replica_thread(
 async fn run(
     url: &str,
     shared: &Arc<Mutex<ReplicaState>>,
+    queue: &Arc<Mutex<VecDeque<Vec<u8>>>>,
     debug: &crate::debug::DebugState,
 ) -> Result<(), BoxErr> {
     // rustls 0.23 needs a process-level crypto provider selected explicitly (see net.rs).
@@ -374,9 +377,9 @@ async fn run(
             continue;
         }
         let magic = rd32(inner, 0);
-        let mut st = shared.lock().unwrap();
         // A prefix message (re)seeds — robust to reconnect; frames apply only once seeded.
         if magic == MCRR_MAGIC {
+            let mut st = shared.lock().unwrap();
             if st.apply_prefix(inner) {
                 use std::sync::atomic::Ordering::Relaxed;
                 debug.seeded.store(true, Relaxed);
@@ -386,12 +389,11 @@ async fn run(
                     st.dyn_regs.len()
                 );
             }
-        } else if magic == FRMX_MAGIC && st.seeded {
-            st.apply_frame(inner);
-            // Signal a new body frame -> wakes the render loop + drives replica-fps.
-            debug
-                .replica_frame
-                .store(st.vframe as u64, std::sync::atomic::Ordering::Relaxed);
+        } else if magic == FRMX_MAGIC {
+            // Queue every frame; the render loop is the SINGLE consumer (paced release when
+            // the jitter buffer is on, immediate drain when off). One consumer keeps the
+            // FRMx delta sequence strictly in order.
+            queue.lock().unwrap().push_back(inner.to_vec());
         }
     }
     Ok(())
