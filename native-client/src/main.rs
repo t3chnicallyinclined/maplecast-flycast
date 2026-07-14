@@ -384,12 +384,17 @@ fn main() {
     let game_id = window.id();
     let debug_id = debug_window.id();
 
-    // Render-loop pacing (see AboutToWait): draw only when a new frame arrived, poll the
-    // frame counters cheaply, and derive wire/replica fps from them.
-    let mut last_req_epoch: (u64, u64) = (u64::MAX, u64::MAX);
+    // Render-loop pacing (see AboutToWait): draw once per SERVER game frame, poll the
+    // frame counters cheaply, and derive wire/replica fps + render-timing telemetry.
+    let mut last_frame: u64 = u64::MAX; // server frame last drawn
     let mut fps_t = std::time::Instant::now();
     let mut fps_wire0: u64 = 0;
     let mut fps_rep0: u64 = 0;
+    let mut renders: u64 = 0; // render() calls this window (drop detection)
+    let mut last_present: Option<std::time::Instant> = None;
+    let mut rt_ema: f64 = 0.0; // ema render() ms
+    let mut win_rt_max: f64 = 0.0; // worst render() ms this window
+    let mut win_gap_max: f64 = 0.0; // worst present gap this window (the hitch)
 
     event_loop
         .run(move |event, elwt| {
@@ -401,7 +406,23 @@ fn main() {
                         gpu.resize(size.width, size.height);
                         window.request_redraw(); // re-render at the new size despite the frame gate
                     }
-                    WindowEvent::RedrawRequested => gpu.render(&shared, &replica_shared, &debug),
+                    WindowEvent::RedrawRequested => {
+                        let t0 = std::time::Instant::now();
+                        if let Some(p) = last_present {
+                            let gap = t0.duration_since(p).as_secs_f64() * 1000.0;
+                            if gap > win_gap_max {
+                                win_gap_max = gap;
+                            }
+                        }
+                        last_present = Some(t0);
+                        gpu.render(&shared, &replica_shared, &debug);
+                        let rt = t0.elapsed().as_secs_f64() * 1000.0;
+                        rt_ema = if rt_ema == 0.0 { rt } else { rt_ema * 0.9 + rt * 0.1 };
+                        if rt > win_rt_max {
+                            win_rt_max = rt;
+                        }
+                        renders += 1;
+                    }
                     WindowEvent::KeyboardInput { event: key, .. } => {
                         if key.state == winit::event::ElementState::Pressed
                             && key.physical_key
@@ -431,26 +452,37 @@ fn main() {
                     }
                 }
                 Event::AboutToWait => {
-                    // Render ONLY when a new frame actually arrived — the net/replica threads
-                    // bump these counters per frame. Previously this spun request_redraw every
-                    // iteration (~150fps), re-running the full decode/upload pipeline on stale
-                    // frames. Now we poll the counters every 1ms and draw on change, so a new
-                    // frame still reaches the screen within ~1ms while idle work drops to ~0.
-                    let ep = (debug.wire_frame.load(Relaxed), debug.replica_frame.load(Relaxed));
-                    if ep != last_req_epoch {
-                        last_req_epoch = ep;
+                    let wf = debug.wire_frame.load(Relaxed);
+                    let rf = debug.replica_frame.load(Relaxed);
+                    // Lock render to the SERVER game frame: once the replica seeds, the game
+                    // frame (rf = vframe, 60fps) drives EXACTLY one render per frame — synced to
+                    // the server, so the two independent sockets can't double-render a tick
+                    // (that was render fps ~88 vs 60). Before seed, the stage (wf) drives so the
+                    // background still shows. Polled every 1ms -> <1ms frame-to-screen.
+                    let frame = if rf != 0 { rf } else { wf };
+                    if frame != last_frame {
+                        last_frame = frame;
                         window.request_redraw();
                         if debug.overlay.load(Relaxed) {
                             debug_window.request_redraw();
                         }
                     }
-                    // wire / replica fps from the counter deltas over a ~0.5s window.
+                    // fps + render-timing telemetry over a ~0.5s window.
                     let el = fps_t.elapsed().as_secs_f64();
                     if el >= 0.5 {
-                        debug.set_wire_fps(ep.0.wrapping_sub(fps_wire0) as f64 / el);
-                        debug.set_replica_fps(ep.1.wrapping_sub(fps_rep0) as f64 / el);
-                        fps_wire0 = ep.0;
-                        fps_rep0 = ep.1;
+                        let rf_adv = rf.wrapping_sub(fps_rep0);
+                        debug.set_wire_fps(wf.wrapping_sub(fps_wire0) as f64 / el);
+                        debug.set_replica_fps(rf_adv as f64 / el);
+                        // server frames that advanced but we didn't draw = dropped (a hitch).
+                        if rf_adv > renders {
+                            debug.dropped.fetch_add(rf_adv - renders, Relaxed);
+                        }
+                        debug.set_render_stats(rt_ema, win_rt_max, win_gap_max);
+                        win_rt_max = 0.0;
+                        win_gap_max = 0.0;
+                        renders = 0;
+                        fps_wire0 = wf;
+                        fps_rep0 = rf;
                         fps_t = std::time::Instant::now();
                     }
                     elwt.set_control_flow(ControlFlow::WaitUntil(

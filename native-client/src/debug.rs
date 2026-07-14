@@ -18,6 +18,12 @@ pub struct DebugState {
     pub replica_frame: AtomicU64, // replica.rs: store(vframe) per /replica-live FRMx
     wire_fps_x10: AtomicU64,
     replica_fps_x10: AtomicU64,
+    // Render/pacing telemetry — to see HITCHES (uneven frame delivery reads as lag even
+    // when RTT is fine). All written by the render loop over a ~0.5s window.
+    render_ms_x100: AtomicU64,  // ema of render() CPU time (build + upload + submit)
+    render_max_x100: AtomicU64, // worst single render() in the window
+    gap_max_x100: AtomicU64,    // worst gap between two presents in the window (the hitch)
+    pub dropped: AtomicU64,     // server frames that arrived but were not drawn in time
     pub stage_quads: AtomicU64,
     pub body_quads: AtomicU64,
     pub frame_num: AtomicU64,
@@ -46,6 +52,10 @@ impl DebugState {
             replica_frame: AtomicU64::new(0),
             wire_fps_x10: AtomicU64::new(0),
             replica_fps_x10: AtomicU64::new(0),
+            render_ms_x100: AtomicU64::new(0),
+            render_max_x100: AtomicU64::new(0),
+            gap_max_x100: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
             stage_quads: AtomicU64::new(0),
             body_quads: AtomicU64::new(0),
             frame_num: AtomicU64::new(0),
@@ -77,6 +87,12 @@ impl DebugState {
     }
     pub fn set_replica_fps(&self, v: f64) {
         self.replica_fps_x10.store((v * 10.0) as u64, Relaxed);
+    }
+    /// Per-window render timing: ema render time, worst render, worst present gap (ms).
+    pub fn set_render_stats(&self, ema_ms: f64, max_ms: f64, gap_max_ms: f64) {
+        self.render_ms_x100.store((ema_ms * 100.0) as u64, Relaxed);
+        self.render_max_x100.store((max_ms * 100.0) as u64, Relaxed);
+        self.gap_max_x100.store((gap_max_ms * 100.0) as u64, Relaxed);
     }
     /// EMA of the input round-trip time (native UDP -> :7100 -> ACK), in ms.
     pub fn set_rtt(&self, ms: f64) {
@@ -113,6 +129,19 @@ pub fn ui(ctx: &egui::Context, d: &DebugState) {
                 ui.end_row();
                 ui.label("game frame");
                 ui.label(format!("{}", d.frame_num.load(Relaxed)));
+                ui.end_row();
+                ui.label("render ms");
+                ui.label(format!(
+                    "{:.2}  (max {:.1})",
+                    d.render_ms_x100.load(Relaxed) as f64 / 100.0,
+                    d.render_max_x100.load(Relaxed) as f64 / 100.0
+                ));
+                ui.end_row();
+                ui.label("frame gap max");
+                ui.label(format!("{:.1} ms  (16.7 = 60fps)", d.gap_max_x100.load(Relaxed) as f64 / 100.0));
+                ui.end_row();
+                ui.label("dropped");
+                ui.label(format!("{}", d.dropped.load(Relaxed)));
                 ui.end_row();
             });
 
