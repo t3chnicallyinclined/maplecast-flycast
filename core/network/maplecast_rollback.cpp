@@ -230,7 +230,7 @@ void saveFrame(uint64_t frame)
 	// object lifecycle but write/read the SAME blob bytes). The 3 arrays are restored
 	// on rewind by the memwatch live-map pagewalk. SAVE and RESTORE MUST use the SAME
 	// rollback flag (both gated on the same env) or the deserializer desyncs.
-	static const bool _raDirty     = std::getenv("MAPLECAST_RA_DIRTY_REWIND") != nullptr;
+	static const bool _raDirty     = [](){ const char* e = std::getenv("MAPLECAST_RA_DIRTY_REWIND"); return !(e && e[0] == '0'); }(); // A2: default ON — 1.9ms dirty rewind vs ~13ms full deser; disable with =0
 	static const bool _raDirtyGate = std::getenv("MAPLECAST_RA_DIRTY_GATE") != nullptr;
 	const bool _blobRollback = _raDirty || _raDirtyGate;
 	Serializer ser(slot.serialBlob.data(), SLOT_BLOB_SIZE, _blobRollback);
@@ -487,7 +487,7 @@ bool rewindToFrame(uint64_t frame, bool lightweight)
 	// tracking audit yields when dirty is on. _dirtyPath MUST equal saveFrame's
 	// _blobRollback exactly (both = _raDirty||_raDirtyGate) or the deser desyncs.
 	static const bool _raAudit     = std::getenv("MAPLECAST_RA_REWIND_AUDIT") != nullptr;
-	static const bool _raDirty     = std::getenv("MAPLECAST_RA_DIRTY_REWIND") != nullptr;
+	static const bool _raDirty     = [](){ const char* e = std::getenv("MAPLECAST_RA_DIRTY_REWIND"); return !(e && e[0] == '0'); }(); // A2: default ON — 1.9ms dirty rewind vs ~13ms full deser; disable with =0
 	static const bool _raDirtyGate = std::getenv("MAPLECAST_RA_DIRTY_GATE") != nullptr;
 	const bool _dirtyPath  = _raDirty || _raDirtyGate;   // == saveFrame _blobRollback
 	const bool _trackAudit = _raAudit && !_dirtyPath;    // tracking audit yields to dirty

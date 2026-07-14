@@ -1416,10 +1416,15 @@ void snapshotWalkInstantTiledesc()
 	}
 }
 
-void onRenderFrame(void* /*ctxv*/)
+void onRenderFrame(void* ctxv)
 {
 	// HOT PATH GATE (free when off / idle): not armed, or no client connected.
 	if (!_armed) return;
+	// A2 RUN-AHEAD: capture ONLY leg3 (the published N+1 frame) for the native client's bodies.
+	// The hidden (N) + lookahead (N+1-build) legs must not reach the client. Context-stamped +
+	// race-free — mirrors serverPublish's /ws gate (mirror.cpp:2263). Correctness also needs
+	// MAPLECAST_RA_SHORT_LEG3 (default ON) so an N+2-building SR can't clobber the drop-old publish.
+	if (maplecast_mirror::ctxIsHiddenLeg(ctxv)) return;
 	// STATE-MERGE: when the body feed is folded into the main ZCS2/ZCST wire (MAPLECAST_STATE_MERGE),
 	// serverPublish reads currentStatePayload() to append the STAT section — so capture MUST run for
 	// the main-wire client even with NO /replica-live (:7212) client connected. Without this override,
@@ -1450,6 +1455,11 @@ void onRenderFrame(void* /*ctxv*/)
 	}
 
 	const u32 vframe = rd32(VFRAME_ADDR);
+	// A2 dedup (belt): publish each guest vframe at most once, so a second non-hidden SR can't
+	// re-ship the same frame via drop-old. Transparent when run-ahead is off (vframe advances +1).
+	static u32 _lastPubVframe = 0xFFFFFFFFu;
+	if (vframe == _lastPubVframe) return;
+	_lastPubVframe = vframe;
 	captureFrame(vframe);
 }
 

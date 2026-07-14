@@ -108,6 +108,9 @@ void requestSyncBroadcast();
 // A2 run-ahead: suppress serverPublish for the hidden authoritative frame (emu loop sets/clears).
 void setSuppressPublish(bool v);
 bool suppressActive();
+// Read the per-STARTRENDER context-stamped hidden-leg flag (race-free vs live suppressActive()).
+// ctxv is the TA_context*; null-safe. Gates the :7212 /replica-live capture to leg3 (N+1) only.
+bool ctxIsHiddenLeg(void* ctxv);
 void raArmStepStop();
 bool raConsumeStepStop();
 void raArmPublishStop();      // A2 short-leg3: halt leg3 right after the N+1 publish SR

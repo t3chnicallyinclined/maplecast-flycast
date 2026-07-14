@@ -1791,7 +1791,7 @@ void Emulator::start()
 								mc_runaheadPreviewLeg.store(true, std::memory_order_relaxed);
 								startTime = sh4_sched_now64();
 								renderTimeout = false;
-								static const bool _raShortLeg3 = [](){ const char* e = std::getenv("MAPLECAST_RA_SHORT_LEG3"); return e && e[0] && e[0] != '0'; }();
+								static const bool _raShortLeg3 = [](){ const char* e = std::getenv("MAPLECAST_RA_SHORT_LEG3"); return !(e && e[0] == '0'); }(); // A2: default ON — correctness prereq for the :7212 capture gate (one N+1 SR/tick); disable with =0
 								maplecast_mirror::raArmStepStop();                       // vblank fallback (unchanged)
 								if (_raShortLeg3) maplecast_mirror::raArmPublishStop();   // A2 short-leg3: halt right after N+1 publish SR
 								try {

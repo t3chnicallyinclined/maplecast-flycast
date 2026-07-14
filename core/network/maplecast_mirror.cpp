@@ -2234,6 +2234,11 @@ static bool decodeTexAny(uint32_t tcw, uint32_t tsp, uint8_t* out) {
 static std::atomic<bool> _suppressPublish{false};
 void setSuppressPublish(bool v) { _suppressPublish.store(v, std::memory_order_release); }
 bool suppressActive() { return _suppressPublish.load(std::memory_order_acquire); }
+bool ctxIsHiddenLeg(void* ctxv) {
+	// Context-stamped (Renderer_if.cpp:611 snapshots suppressActive() per STARTRENDER) — race-free
+	// vs the emu thread flipping suppress between legs. Null-safe (no ctx -> not hidden -> capture).
+	return ctxv && reinterpret_cast<TA_context*>(ctxv)->rend.mc_hiddenLeg;
+}
 // A2 v2 frame stepping: runInternal() is RUN-UNTIL-STOPPED (local-rig trace, 2026-07-12 — wrapping
 // it never cycled; all 4 dark rounds). The emu loop arms this one-shot; rend_start_render consumes
 // it and Stop()s the SH4 at the next display STARTRENDER (the predict primitive) so runInternal
