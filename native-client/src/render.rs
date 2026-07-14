@@ -35,6 +35,17 @@ pub struct Renderer {
     // texture per part every frame (the per-frame churn that spiked render load).
     body_cache: HashMap<u64, CachedBody>,
     body_frame_ctr: u64,
+    frame_uploads: u32,
+    // Persisted draw state: an UNCHANGED server frame re-submits these without rebuilding,
+    // so presentation stays continuous+smooth while the heavy decode runs only on a new
+    // frame. Filled by rebuild(), consumed by submit().
+    frame_draws: Vec<Draw>,
+    frame_body_draws: Vec<Draw>,
+    frame_tr_draws: Vec<Draw>,
+    frame_tex_cache: HashMap<(u32, u32), wgpu::BindGroup>,
+    frame_body_bgs: Vec<Arc<wgpu::BindGroup>>,
+    frame_keep_tex: Vec<wgpu::Texture>,
+    has_content: bool,
 }
 
 struct CachedBody {
@@ -183,6 +194,14 @@ impl Renderer {
             _white_tex: white_tex,
             body_cache: HashMap::new(),
             body_frame_ctr: 0,
+            frame_uploads: 0,
+            frame_draws: Vec::new(),
+            frame_body_draws: Vec::new(),
+            frame_tr_draws: Vec::new(),
+            frame_tex_cache: HashMap::new(),
+            frame_body_bgs: Vec::new(),
+            frame_keep_tex: Vec::new(),
+            has_content: false,
         }
     }
 
@@ -244,17 +263,17 @@ impl Renderer {
         })
     }
 
-    pub fn render(
+    /// Decode + upload ONE server frame into persistent GPU state (draw lists, buffers,
+    /// bind groups). Call only when the server frame changed; submit() then presents it —
+    /// and cheaply re-presents it on unchanged frames — so presentation stays smooth.
+    pub fn rebuild(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        view: &wgpu::TextureView,
         parsed: &Parsed,
         vram: &[u8],
         palette: &[u8],
         pvr_snapshot: &[u32; 16],
-        width: u32,
-        height: u32,
         bodies: &[crate::BodyItem],
         debug: &crate::debug::DebugState,
     ) {
@@ -395,6 +414,7 @@ impl Renderer {
 
         // --- body quads: render_frame output, textured (or force-colored) ---
         self.body_frame_ctr += 1;
+        self.frame_uploads = 0;
         {
             // Evict tiles unused for ~3s (bounds VRAM as animations cycle art).
             let f = self.body_frame_ctr;
@@ -461,11 +481,14 @@ impl Renderer {
 
         debug.stage_quads.store((draws.len() + tr_draws.len()) as u64, Relaxed);
         debug.body_quads.store(body_draws.len() as u64, Relaxed);
+        debug.body_uploads.store(self.frame_uploads as u64, Relaxed);
 
-        if draws.is_empty() && body_draws.is_empty() && tr_draws.is_empty() {
-            // nothing to draw yet — clear only
-            self.clear_only(device, queue, view);
-            return;
+        self.has_content = !(draws.is_empty() && body_draws.is_empty() && tr_draws.is_empty());
+        if !self.has_content {
+            self.frame_draws.clear();
+            self.frame_body_draws.clear();
+            self.frame_tr_draws.clear();
+            return; // submit() will clear the surface
         }
 
         queue.write_buffer(&self.dynbuf, 0, &fu_stage[..(slot as usize) * SLOT as usize]);
@@ -519,6 +542,34 @@ impl Renderer {
             self.pipe(device, d.sb, d.db, d.dm, d.dw);
         }
 
+        // Persist the built frame so submit() (every present) re-draws it without rebuilding.
+        self.frame_draws = draws;
+        self.frame_body_draws = body_draws;
+        self.frame_tr_draws = tr_draws;
+        self.frame_tex_cache = tex_cache;
+        self.frame_body_bgs = body_tex_bgs;
+        self.frame_keep_tex = keep_tex;
+    }
+
+    /// Mark the last frame as empty (nothing renderable) so submit() clears the surface.
+    pub fn set_empty(&mut self) {
+        self.has_content = false;
+    }
+
+    /// Present the last rebuilt frame into `view`. Cheap (no decode) — call every present so
+    /// presentation stays continuous+smooth while rebuild() runs only on a new server frame.
+    pub fn submit(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+    ) {
+        if !self.has_content {
+            self.clear_only(device, queue, view);
+            return;
+        }
         self.ensure_depth(device, width, height);
         let depth_view = &self.depth.as_ref().unwrap().0;
 
@@ -545,17 +596,16 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            // MvC2 is 640x480 (4:3). Render into a centered 4:3 viewport so the
-            // content keeps its aspect at any (e.g. 16:9) window size — pillarbox.
+            // MvC2 is 640x480 (4:3) — centered pillarbox viewport at any window size.
             let (vx, vy, vw, vh) = pillarbox_4x3(width, height);
             rp.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
             rp.set_vertex_buffer(0, self.vbuf.slice(..));
             rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint32);
 
-            for d in &draws {
+            for d in &self.frame_draws {
                 rp.set_pipeline(&self.pipes[&pipe_key(d.sb, d.db, d.dm, d.dw)]);
                 let tbg = if d.textured {
-                    tex_cache.get(&(d.tcw, d.tsp)).unwrap_or(&self.white_bg)
+                    self.frame_tex_cache.get(&(d.tcw, d.tsp)).unwrap_or(&self.white_bg)
                 } else {
                     &self.white_bg
                 };
@@ -565,12 +615,12 @@ impl Renderer {
             }
 
             // bodies: rebind the body vertex buffer (its indices are 0-based)
-            if !body_draws.is_empty() {
+            if !self.frame_body_draws.is_empty() {
                 rp.set_vertex_buffer(0, self.body_vbuf.slice(..));
-                for d in &body_draws {
+                for d in &self.frame_body_draws {
                     rp.set_pipeline(&self.pipes[&pipe_key(d.sb, d.db, d.dm, d.dw)]);
                     let tbg: &wgpu::BindGroup = if d.textured {
-                        body_tex_bgs[d.tcw as usize].as_ref()
+                        self.frame_body_bgs[d.tcw as usize].as_ref()
                     } else {
                         &self.white_bg
                     };
@@ -580,16 +630,13 @@ impl Renderer {
                 }
             }
 
-            // wire TRANSLUCENT effects LAST — rebind the main vertex buffer (tr_draws index
-            // into vbuf/ibuf like `draws`; only the body pass switched to body_vbuf). Drawn
-            // over the bodies but depth-TESTED (dm:6), so an effect behind a body is occluded
-            // and only a genuinely-nearer effect shows on top. Fixes effect-over-everything.
-            if !tr_draws.is_empty() {
+            // wire TRANSLUCENT effects LAST (over bodies, still depth-tested).
+            if !self.frame_tr_draws.is_empty() {
                 rp.set_vertex_buffer(0, self.vbuf.slice(..));
-                for d in &tr_draws {
+                for d in &self.frame_tr_draws {
                     rp.set_pipeline(&self.pipes[&pipe_key(d.sb, d.db, d.dm, d.dw)]);
                     let tbg = if d.textured {
-                        tex_cache.get(&(d.tcw, d.tsp)).unwrap_or(&self.white_bg)
+                        self.frame_tex_cache.get(&(d.tcw, d.tsp)).unwrap_or(&self.white_bg)
                     } else {
                         &self.white_bg
                     };
@@ -642,6 +689,7 @@ impl Renderer {
         let (bg, tex) =
             make_tex_bg(device, &self.bgl1, rgba, w, h, false, Wrap::Clamp, Wrap::Clamp, Some(queue));
         let bg = Arc::new(bg);
+        self.frame_uploads += 1;
         self.body_cache.insert(key, CachedBody { bg: bg.clone(), _tex: tex, last: f });
         bg
     }

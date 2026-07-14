@@ -10,7 +10,7 @@
 use std::sync::{Arc, Mutex};
 use winit::{
     event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
+    event_loop::EventLoop,
     window::{Window, WindowBuilder},
 };
 
@@ -38,6 +38,7 @@ struct Gpu {
     renderer: render::Renderer,
     frames: u32,
     fps_t0: std::time::Instant,
+    last_epoch: (u64, u64), // last DECODED (wire_frame, replica_frame) — decode gate + drops
 }
 
 impl Gpu {
@@ -92,6 +93,7 @@ impl Gpu {
             renderer,
             frames: 0,
             fps_t0: std::time::Instant::now(),
+            last_epoch: (u64::MAX, u64::MAX),
         }
     }
 
@@ -109,12 +111,48 @@ impl Gpu {
         replica: &Arc<Mutex<replica::ReplicaState>>,
         debug: &debug::DebugState,
     ) {
+        use std::sync::atomic::Ordering::Relaxed;
         self.frames += 1;
         let el = self.fps_t0.elapsed().as_secs_f64();
         if el >= 0.5 {
             debug.set_fps(self.frames as f64 / el);
             self.frames = 0;
             self.fps_t0 = std::time::Instant::now();
+        }
+
+        // DECODE only when the server frame changed (heavy: TA parse + render_frame + body
+        // decode); PRESENT every call (cheap: re-draw the cached frame). Continuous present
+        // keeps motion smooth while the expensive work runs only at the server's 60fps.
+        let ep = (debug.wire_frame.load(Relaxed), debug.replica_frame.load(Relaxed));
+        if ep != self.last_epoch {
+            // server frames skipped since the last decode = we couldn't keep up (a drop).
+            let prev_rf = self.last_epoch.1;
+            if prev_rf != u64::MAX && ep.1 > prev_rf.wrapping_add(1) {
+                debug.dropped.fetch_add(ep.1 - prev_rf - 1, Relaxed);
+            }
+            self.last_epoch = ep;
+            // Hold the decoder lock across parse+decode so we never read VRAM mid-update.
+            let fd = shared.lock().unwrap();
+            debug.frame_num.store(fd.frame_num as u64, Relaxed);
+            if fd.renderable {
+                let parsed = ta::parse(fd.ta());
+                let palette = texture::bake_palette(&fd.pvr_regs);
+                // Stage textures use the /ws palette; body palette is phase-locked to
+                // /replica-live inside body_quads (assist-flash fix).
+                let bodies = body_quads(replica, debug);
+                self.renderer.rebuild(
+                    &self.device,
+                    &self.queue,
+                    &parsed,
+                    &fd.vram,
+                    &palette,
+                    &fd.pvr_snapshot,
+                    &bodies,
+                    debug,
+                );
+            } else {
+                self.renderer.set_empty();
+            }
         }
 
         let frame = match self.surface.get_current_texture() {
@@ -125,36 +163,8 @@ impl Gpu {
             }
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        {
-            // Hold the decoder lock across parse+draw so we never render a frame
-            // whose VRAM is mid-update (the flicker race).
-            let fd = shared.lock().unwrap();
-            debug
-                .frame_num
-                .store(fd.frame_num as u64, std::sync::atomic::Ordering::Relaxed);
-            if fd.renderable {
-                let parsed = ta::parse(fd.ta());
-                let palette = texture::bake_palette(&fd.pvr_regs);
-                // Stage textures use the /ws palette above; body palette is phase-locked
-                // to /replica-live inside body_quads (assist-flash fix).
-                let bodies = body_quads(replica, debug);
-                self.renderer.render(
-                    &self.device,
-                    &self.queue,
-                    &view,
-                    &parsed,
-                    &fd.vram,
-                    &palette,
-                    &fd.pvr_snapshot,
-                    self.config.width,
-                    self.config.height,
-                    &bodies,
-                    debug,
-                );
-            } else {
-                self.renderer.clear_only(&self.device, &self.queue, &view);
-            }
-        }
+        self.renderer
+            .submit(&self.device, &self.queue, &view, self.config.width, self.config.height);
         frame.present();
     }
 }
@@ -384,13 +394,10 @@ fn main() {
     let game_id = window.id();
     let debug_id = debug_window.id();
 
-    // Render-loop pacing (see AboutToWait): draw once per SERVER game frame, poll the
-    // frame counters cheaply, and derive wire/replica fps + render-timing telemetry.
-    let mut last_frame: u64 = u64::MAX; // server frame last drawn
+    // Telemetry state (see AboutToWait): wire/replica fps + render-timing over a window.
     let mut fps_t = std::time::Instant::now();
     let mut fps_wire0: u64 = 0;
     let mut fps_rep0: u64 = 0;
-    let mut renders: u64 = 0; // render() calls this window (drop detection)
     let mut last_present: Option<std::time::Instant> = None;
     let mut rt_ema: f64 = 0.0; // ema render() ms
     let mut win_rt_max: f64 = 0.0; // worst render() ms this window
@@ -421,7 +428,6 @@ fn main() {
                         if rt > win_rt_max {
                             win_rt_max = rt;
                         }
-                        renders += 1;
                     }
                     WindowEvent::KeyboardInput { event: key, .. } => {
                         if key.state == winit::event::ElementState::Pressed
@@ -452,42 +458,28 @@ fn main() {
                     }
                 }
                 Event::AboutToWait => {
-                    let wf = debug.wire_frame.load(Relaxed);
-                    let rf = debug.replica_frame.load(Relaxed);
-                    // Lock render to the SERVER game frame: once the replica seeds, the game
-                    // frame (rf = vframe, 60fps) drives EXACTLY one render per frame — synced to
-                    // the server, so the two independent sockets can't double-render a tick
-                    // (that was render fps ~88 vs 60). Before seed, the stage (wf) drives so the
-                    // background still shows. Polled every 1ms -> <1ms frame-to-screen.
-                    let frame = if rf != 0 { rf } else { wf };
-                    if frame != last_frame {
-                        last_frame = frame;
-                        window.request_redraw();
-                        if debug.overlay.load(Relaxed) {
-                            debug_window.request_redraw();
-                        }
+                    // Present EVERY iteration — submit() is cheap and the heavy decode is gated
+                    // to new server frames inside gpu.render(). Continuous presentation restores
+                    // the smoothness the 60fps present-lock had lost (drops are counted at the
+                    // decode gate now, not here).
+                    window.request_redraw();
+                    if debug.overlay.load(Relaxed) {
+                        debug_window.request_redraw();
                     }
                     // fps + render-timing telemetry over a ~0.5s window.
+                    let wf = debug.wire_frame.load(Relaxed);
+                    let rf = debug.replica_frame.load(Relaxed);
                     let el = fps_t.elapsed().as_secs_f64();
                     if el >= 0.5 {
-                        let rf_adv = rf.wrapping_sub(fps_rep0);
                         debug.set_wire_fps(wf.wrapping_sub(fps_wire0) as f64 / el);
-                        debug.set_replica_fps(rf_adv as f64 / el);
-                        // server frames that advanced but we didn't draw = dropped (a hitch).
-                        if rf_adv > renders {
-                            debug.dropped.fetch_add(rf_adv - renders, Relaxed);
-                        }
+                        debug.set_replica_fps(rf.wrapping_sub(fps_rep0) as f64 / el);
                         debug.set_render_stats(rt_ema, win_rt_max, win_gap_max);
                         win_rt_max = 0.0;
                         win_gap_max = 0.0;
-                        renders = 0;
                         fps_wire0 = wf;
                         fps_rep0 = rf;
                         fps_t = std::time::Instant::now();
                     }
-                    elwt.set_control_flow(ControlFlow::WaitUntil(
-                        std::time::Instant::now() + std::time::Duration::from_millis(1),
-                    ));
                 }
                 _ => {}
             }

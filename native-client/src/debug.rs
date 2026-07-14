@@ -24,6 +24,7 @@ pub struct DebugState {
     render_max_x100: AtomicU64, // worst single render() in the window
     gap_max_x100: AtomicU64,    // worst gap between two presents in the window (the hitch)
     pub dropped: AtomicU64,     // server frames that arrived but were not drawn in time
+    pub body_uploads: AtomicU64, // body-texture GPU uploads (cache MISSES) on the last frame
     pub stage_quads: AtomicU64,
     pub body_quads: AtomicU64,
     pub frame_num: AtomicU64,
@@ -56,6 +57,7 @@ impl DebugState {
             render_max_x100: AtomicU64::new(0),
             gap_max_x100: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            body_uploads: AtomicU64::new(0),
             stage_quads: AtomicU64::new(0),
             body_quads: AtomicU64::new(0),
             frame_num: AtomicU64::new(0),
@@ -126,6 +128,9 @@ pub fn ui(ctx: &egui::Context, d: &DebugState) {
                 ui.end_row();
                 ui.label("body quads");
                 ui.label(format!("{}", d.body_quads.load(Relaxed)));
+                ui.end_row();
+                ui.label("body uploads");
+                ui.label(format!("{}  (cache miss/frame)", d.body_uploads.load(Relaxed)));
                 ui.end_row();
                 ui.label("game frame");
                 ui.label(format!("{}", d.frame_num.load(Relaxed)));
