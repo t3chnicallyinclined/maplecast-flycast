@@ -570,12 +570,15 @@ fn main() {
                         // Live status snapshot (key=value; overwritten each window) — read this
                         // file to see the client's live numbers from outside.
                         let status = format!(
-                            "press_present_ms={:.1}\ninput_rtt_ms={:.1}\nrender_fps={:.1}\nwire_fps={:.1}\nreplica_fps={:.1}\njitter_on={}\njitter_depth={}\ndropped={}\ngame_frame={}\nrender_ms_ema={:.2}\nframe_gap_max_ms={:.1}\nbandwidth_mbps={:.2}\nrun_secs={:.0}\n",
+                            "press_present_ms={:.1}\ninput_rtt_ms={:.1}\nrender_fps={:.1}\nwire_fps={:.1}\nreplica_fps={:.1}\njitter_on={}\njitter_depth={}\ndropped={}\ngame_frame={}\nrender_ms_ema={:.2}\nframe_gap_max_ms={:.1}\nbandwidth_mbps={:.2}\nstage_quads={}\nstage_tex={}\nstage_uploads={}\nbody_uploads={}\nrun_secs={:.0}\n",
                             debug.e2e_ms(), debug.rtt_ms(), debug.fps(), debug.wire_fps(),
                             debug.replica_fps(), debug.jitter_on.load(Relaxed),
                             debug.jitter_depth.load(Relaxed), debug.dropped.load(Relaxed),
                             debug.frame_num.load(Relaxed), debug.render_ms(),
-                            debug.gap_max_ms(), debug.mbps(), telem_t0.elapsed().as_secs_f64(),
+                            debug.gap_max_ms(), debug.mbps(),
+                            debug.stage_quads.load(Relaxed), debug.stage_tex.load(Relaxed),
+                            debug.stage_uploads.load(Relaxed),
+                            debug.body_uploads.load(Relaxed), telem_t0.elapsed().as_secs_f64(),
                         );
                         let _ = std::fs::write(&status_path, status);
                         win_rt_max = 0.0;

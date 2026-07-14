@@ -296,6 +296,89 @@ pub fn decode(tcw: u32, tsp: u32, vram: &[u8], palette: &[u8]) -> Option<Tex> {
     })
 }
 
+/// Content fingerprint of a texture's SOURCE bytes — its (tcw,tsp) header + the VRAM
+/// region + (for paletted formats) the palette bank it samples. This is the cross-frame
+/// texture-cache key: if every byte `decode` would read is unchanged the fingerprint is
+/// unchanged and the already-decoded GPU texture is reused; if ANY source byte changes
+/// (stage animation, texture streaming, or a skin/palette swap) the fingerprint changes
+/// and the texture is re-decoded.
+///
+/// SAFETY: the hashed VRAM range [start,end) is a SUPERSET of what `decode` reads (start
+/// = the base addr ≤ the mip-adjusted tex_addr; end covers the largest texel offset), and
+/// the palette range is the exact bank. So a stale (false) cache HIT is impossible — the
+/// only failure mode is an unrelated byte in the superset changing, which forces a
+/// harmless re-decode (a false MISS). Field decode mirrors `decode` exactly (same fixed
+/// PowerVR2 TCW/TSP bit layout + the shared mip tables).
+pub fn source_fingerprint(tcw: u32, tsp: u32, vram: &[u8], palette: &[u8]) -> u64 {
+    const P: u64 = 0x0000_0100_0000_01b3;
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for &b in &tcw.to_le_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(P);
+    }
+    for &b in &tsp.to_le_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(P);
+    }
+
+    let addr = (((tcw & 0x1FFFFF) << 3) & 0x7FFFFF) as usize;
+    let fmt = (tcw >> 27) & 7;
+    let tex_u = ((tsp >> 3) & 7) as usize;
+    let tex_v = (tsp & 7) as usize;
+    let w = 8usize << tex_u;
+    let hpx = 8usize << tex_v;
+    let pal_sel = ((tcw >> 21) & 0x3F) as usize;
+    let vq = (tcw >> 30) & 1;
+    let mip = (tcw >> 31) & 1;
+
+    // VRAM source range [start,end) — a SUPERSET of decode's reads (start = base addr).
+    let (start, end) = if vq == 1 {
+        let idx_addr = if mip == 1 { addr + VQ_MIP_POINT[tex_u + 3] } else { addr + VQ_CODEBOOK_SIZE };
+        (addr, idx_addr + (w >> 1) * (hpx >> 1)) // codebook (2048B) + index stream
+    } else {
+        let mut tex_addr = addr;
+        if mip == 1 {
+            let mip_idx = tex_u + 3;
+            tex_addr = match fmt {
+                5 => addr + (OTHER_MIP_POINT[mip_idx] >> 1),
+                6 => addr + OTHER_MIP_POINT[mip_idx],
+                _ => addr + OTHER_MIP_POINT[mip_idx] * 2,
+            };
+        }
+        let len = match fmt {
+            5 => (w * hpx + 1) / 2,   // 4bpp
+            6 => w * hpx,             // 8bpp
+            0 | 1 | 2 => w * hpx * 2, // 16bpp
+            _ => 0,                   // 3/4/7 unsupported -> decode returns None anyway
+        };
+        (addr, tex_addr + len)
+    };
+    let end = end.min(vram.len());
+    if start < end {
+        for &b in &vram[start..end] {
+            h ^= b as u64;
+            h = h.wrapping_mul(P);
+        }
+    }
+
+    // Palette bank (paletted only) — a skin/palette swap MUST invalidate the cache.
+    let (pstart, plen) = match fmt {
+        5 => ((pal_sel << 4) * 4, 16 * 4),         // pal4: 16 entries
+        6 => (((pal_sel >> 4) << 8) * 4, 256 * 4), // pal8: 256 entries
+        _ => (0, 0),
+    };
+    if plen > 0 {
+        let pend = (pstart + plen).min(palette.len());
+        if pstart < pend {
+            for &b in &palette[pstart..pend] {
+                h ^= b as u64;
+                h = h.wrapping_mul(P);
+            }
+        }
+    }
+    h
+}
+
 /// 16-bit non-paletted (ARGB1555 / RGB565 / ARGB4444). (texture-manager.mjs :226-232)
 fn decode_16(
     rgba: &mut [u8],

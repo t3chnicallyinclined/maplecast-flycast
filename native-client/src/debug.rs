@@ -25,6 +25,8 @@ pub struct DebugState {
     gap_max_x100: AtomicU64,    // worst gap between two presents in the window (the hitch)
     pub dropped: AtomicU64,     // server frames that arrived but were not drawn in time
     pub body_uploads: AtomicU64, // body-texture GPU uploads (cache MISSES) on the last frame
+    pub stage_uploads: AtomicU64, // stage/effect-texture decodes+GPU uploads (cache MISSES) last frame
+    pub stage_tex: AtomicU64,     // unique textured stage/effect textures resolved last frame
     pub stage_quads: AtomicU64,
     pub body_quads: AtomicU64,
     pub frame_num: AtomicU64,
@@ -71,6 +73,8 @@ impl DebugState {
             gap_max_x100: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             body_uploads: AtomicU64::new(0),
+            stage_uploads: AtomicU64::new(0),
+            stage_tex: AtomicU64::new(0),
             stage_quads: AtomicU64::new(0),
             body_quads: AtomicU64::new(0),
             frame_num: AtomicU64::new(0),

@@ -33,22 +33,38 @@ pub struct Renderer {
     // Cross-frame body-tile cache: content-hash(rgba) -> GPU texture+bindgroup. A decoded
     // body part is uploaded ONCE and reused while unchanged, instead of re-creating a GPU
     // texture per part every frame (the per-frame churn that spiked render load).
-    body_cache: HashMap<u64, CachedBody>,
+    body_cache: HashMap<u64, CachedTex>,
+    // Cross-frame STAGE/EFFECT texture cache: source-fingerprint(vram+palette bank) -> GPU
+    // texture+bindgroup. Same idea as body_cache but for the wire TA's stage/effect
+    // textures, which previously re-decoded + re-created a GPU texture for EVERY (tcw,tsp)
+    // EVERY server frame — the per-frame churn that spiked client render load on 480KB
+    // super frames (static backgrounds re-decoded needlessly; super particle textures
+    // re-decoded every frame for the whole super). Keyed by SOURCE content so a stage
+    // animation / texture stream / skin-palette swap still re-decodes correctly.
+    stage_cache: HashMap<u64, CachedTex>,
     body_frame_ctr: u64,
     frame_uploads: u32,
+    frame_stage_uploads: u32,
     // Persisted draw state: an UNCHANGED server frame re-submits these without rebuilding,
     // so presentation stays continuous+smooth while the heavy decode runs only on a new
     // frame. Filled by rebuild(), consumed by submit().
     frame_draws: Vec<Draw>,
     frame_body_draws: Vec<Draw>,
     frame_tr_draws: Vec<Draw>,
-    frame_tex_cache: HashMap<(u32, u32), wgpu::BindGroup>,
+    // Per-frame stage/effect bindgroups, indexed by Draw.tcw (like frame_body_bgs). Each
+    // Arc is held for the frame so submit() re-presents without touching the cache.
+    frame_stage_bgs: Vec<Arc<wgpu::BindGroup>>,
     frame_body_bgs: Vec<Arc<wgpu::BindGroup>>,
+    // Keeps uncached (MAPLECAST_STAGECACHE=0) stage textures alive for the frame — the
+    // A/B-baseline path that re-decodes every frame like the pre-cache code did.
     frame_keep_tex: Vec<wgpu::Texture>,
+    // Cross-frame stage cache on (default) vs off (MAPLECAST_STAGECACHE=0 = re-decode every
+    // frame, the pre-fix behavior) — lets us A/B render_ms in one binary on the same scene.
+    stage_cache_on: bool,
     has_content: bool,
 }
 
-struct CachedBody {
+struct CachedTex {
     bg: Arc<wgpu::BindGroup>, // Arc: wgpu 0.20 BindGroup isn't Clone; Arc clone is cheap
     _tex: wgpu::Texture,      // keeps the texture alive while the bindgroup references it
     last: u64,                // body_frame_ctr at last use — for age-based eviction
@@ -193,14 +209,17 @@ impl Renderer {
             white_bg,
             _white_tex: white_tex,
             body_cache: HashMap::new(),
+            stage_cache: HashMap::new(),
             body_frame_ctr: 0,
             frame_uploads: 0,
+            frame_stage_uploads: 0,
             frame_draws: Vec::new(),
             frame_body_draws: Vec::new(),
             frame_tr_draws: Vec::new(),
-            frame_tex_cache: HashMap::new(),
+            frame_stage_bgs: Vec::new(),
             frame_body_bgs: Vec::new(),
             frame_keep_tex: Vec::new(),
+            stage_cache_on: std::env::var("MAPLECAST_STAGECACHE").ok().as_deref() != Some("0"),
             has_content: false,
         }
     }
@@ -415,10 +434,15 @@ impl Renderer {
         // --- body quads: render_frame output, textured (or force-colored) ---
         self.body_frame_ctr += 1;
         self.frame_uploads = 0;
+        self.frame_stage_uploads = 0;
         {
             // Evict tiles unused for ~3s (bounds VRAM as animations cycle art).
             let f = self.body_frame_ctr;
             self.body_cache.retain(|_, c| c.last + 180 >= f);
+            // Same age-based eviction for the stage/effect texture cache: static
+            // backgrounds are touched every frame (never evict); transient super/effect
+            // textures and superseded skin-palette bakes age out after ~3s.
+            self.stage_cache.retain(|_, c| c.last + 180 >= f);
         }
         let mut body_verts: Vec<u8> = Vec::new();
         let mut body_draws: Vec<Draw> = Vec::new();
@@ -482,6 +506,8 @@ impl Renderer {
         debug.stage_quads.store((draws.len() + tr_draws.len()) as u64, Relaxed);
         debug.body_quads.store(body_draws.len() as u64, Relaxed);
         debug.body_uploads.store(self.frame_uploads as u64, Relaxed);
+        // NOTE: stage_uploads/stage_tex are stored AFTER the resolve loop below (that loop
+        // is what populates frame_stage_uploads + frame_stage_bgs).
 
         self.has_content = !(draws.is_empty() && body_draws.is_empty() && tr_draws.is_empty());
         if !self.has_content {
@@ -508,31 +534,52 @@ impl Renderer {
             queue.write_buffer(&self.body_vbuf, 0, &body_verts);
         }
 
-        // decode textures -> bind groups (cache per (tcw,tsp) within the frame)
-        let mut tex_cache: HashMap<(u32, u32), wgpu::BindGroup> = HashMap::new();
-        let mut keep_tex: Vec<wgpu::Texture> = Vec::new();
-        for d in draws.iter().chain(tr_draws.iter()) {
+        // Resolve stage/effect textures to GPU bindgroups. Each textured Draw.tcw is
+        // rewritten to an index into frame_stage_bgs (mirroring the body path); untextured
+        // or decode-failed draws fall back to white.
+        //
+        // Dedup by (tcw,tsp) FIRST (within one frame a given address+format is one texture),
+        // so the source-fingerprint hash + cache lookup runs ONCE per unique texture, not
+        // once per draw. On a cache hit (steady state) this skips BOTH the CPU decode and
+        // the GPU texture/bindgroup creation that previously ran for every texture every
+        // frame. The cross-frame cache is keyed by SOURCE fingerprint (NOT (tcw,tsp) — an
+        // address can point at different content over time), so a stage anim / texture
+        // stream / skin-palette swap re-decodes correctly.
+        let cache_on = self.stage_cache_on;
+        self.frame_keep_tex.clear();
+        let mut frame_stage_bgs: Vec<Arc<wgpu::BindGroup>> = Vec::new();
+        let mut txkey2idx: HashMap<(u32, u32), u32> = HashMap::new();
+        for d in draws.iter_mut().chain(tr_draws.iter_mut()) {
             if !d.textured {
+                d.tcw = u32::MAX;
                 continue;
             }
-            let key = (d.tcw, d.tsp);
-            if tex_cache.contains_key(&key) {
-                continue;
-            }
-            if let Some(t) = texture::decode(d.tcw, d.tsp, vram, palette) {
-                let (bg, tex) = make_tex_bg(
-                    device,
-                    &self.bgl1,
-                    &t.rgba,
-                    t.w,
-                    t.h,
-                    t.filter_linear,
-                    t.wrap_u,
-                    t.wrap_v,
-                    Some(queue),
-                );
-                keep_tex.push(tex);
-                tex_cache.insert(key, bg);
+            let tk = (d.tcw, d.tsp);
+            let idx = if let Some(&i) = txkey2idx.get(&tk) {
+                i
+            } else {
+                let bg = if cache_on {
+                    let fp = texture::source_fingerprint(d.tcw, d.tsp, vram, palette);
+                    self.stage_bg(device, queue, d.tcw, d.tsp, vram, palette, fp)
+                } else {
+                    self.stage_decode_uncached(device, queue, d.tcw, d.tsp, vram, palette)
+                };
+                let i = match bg {
+                    Some(bg) => {
+                        let i = frame_stage_bgs.len() as u32;
+                        frame_stage_bgs.push(bg);
+                        i
+                    }
+                    None => u32::MAX,
+                };
+                txkey2idx.insert(tk, i);
+                i
+            };
+            if idx == u32::MAX {
+                d.textured = false;
+                d.tcw = u32::MAX;
+            } else {
+                d.tcw = idx;
             }
         }
 
@@ -542,13 +589,16 @@ impl Renderer {
             self.pipe(device, d.sb, d.db, d.dm, d.dw);
         }
 
+        // Stage texture stats — stored HERE (after the resolve loop populated them).
+        debug.stage_uploads.store(self.frame_stage_uploads as u64, Relaxed);
+        debug.stage_tex.store(frame_stage_bgs.len() as u64, Relaxed);
+
         // Persist the built frame so submit() (every present) re-draws it without rebuilding.
         self.frame_draws = draws;
         self.frame_body_draws = body_draws;
         self.frame_tr_draws = tr_draws;
-        self.frame_tex_cache = tex_cache;
+        self.frame_stage_bgs = frame_stage_bgs;
         self.frame_body_bgs = body_tex_bgs;
-        self.frame_keep_tex = keep_tex;
     }
 
     /// Mark the last frame as empty (nothing renderable) so submit() clears the surface.
@@ -604,8 +654,8 @@ impl Renderer {
 
             for d in &self.frame_draws {
                 rp.set_pipeline(&self.pipes[&pipe_key(d.sb, d.db, d.dm, d.dw)]);
-                let tbg = if d.textured {
-                    self.frame_tex_cache.get(&(d.tcw, d.tsp)).unwrap_or(&self.white_bg)
+                let tbg: &wgpu::BindGroup = if d.textured {
+                    self.frame_stage_bgs[d.tcw as usize].as_ref()
                 } else {
                     &self.white_bg
                 };
@@ -635,8 +685,8 @@ impl Renderer {
                 rp.set_vertex_buffer(0, self.vbuf.slice(..));
                 for d in &self.frame_tr_draws {
                     rp.set_pipeline(&self.pipes[&pipe_key(d.sb, d.db, d.dm, d.dw)]);
-                    let tbg = if d.textured {
-                        self.frame_tex_cache.get(&(d.tcw, d.tsp)).unwrap_or(&self.white_bg)
+                    let tbg: &wgpu::BindGroup = if d.textured {
+                        self.frame_stage_bgs[d.tcw as usize].as_ref()
                     } else {
                         &self.white_bg
                     };
@@ -690,8 +740,58 @@ impl Renderer {
             make_tex_bg(device, &self.bgl1, rgba, w, h, false, Wrap::Clamp, Wrap::Clamp, Some(queue));
         let bg = Arc::new(bg);
         self.frame_uploads += 1;
-        self.body_cache.insert(key, CachedBody { bg: bg.clone(), _tex: tex, last: f });
+        self.body_cache.insert(key, CachedTex { bg: bg.clone(), _tex: tex, last: f });
         bg
+    }
+
+    /// Get-or-create the GPU texture+bindgroup for a stage/effect texture, cached across
+    /// frames by its source fingerprint so an unchanged texture skips BOTH the CPU decode
+    /// and the GPU upload. Returns None for unsupported formats (caller uses white).
+    #[allow(clippy::too_many_arguments)]
+    fn stage_bg(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        tcw: u32,
+        tsp: u32,
+        vram: &[u8],
+        palette: &[u8],
+        fp: u64,
+    ) -> Option<Arc<wgpu::BindGroup>> {
+        let f = self.body_frame_ctr;
+        if let Some(c) = self.stage_cache.get_mut(&fp) {
+            c.last = f;
+            return Some(c.bg.clone());
+        }
+        let t = texture::decode(tcw, tsp, vram, palette)?;
+        let (bg, tex) = make_tex_bg(
+            device, &self.bgl1, &t.rgba, t.w, t.h, t.filter_linear, t.wrap_u, t.wrap_v, Some(queue),
+        );
+        let bg = Arc::new(bg);
+        self.frame_stage_uploads += 1;
+        self.stage_cache.insert(fp, CachedTex { bg: bg.clone(), _tex: tex, last: f });
+        Some(bg)
+    }
+
+    /// A/B baseline (MAPLECAST_STAGECACHE=0): decode + upload the stage texture EVERY frame,
+    /// no cross-frame cache — the pre-fix behavior, for measuring what the cache saves. The
+    /// texture is parked in frame_keep_tex so it survives until submit().
+    fn stage_decode_uncached(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        tcw: u32,
+        tsp: u32,
+        vram: &[u8],
+        palette: &[u8],
+    ) -> Option<Arc<wgpu::BindGroup>> {
+        let t = texture::decode(tcw, tsp, vram, palette)?;
+        let (bg, tex) = make_tex_bg(
+            device, &self.bgl1, &t.rgba, t.w, t.h, t.filter_linear, t.wrap_u, t.wrap_v, Some(queue),
+        );
+        self.frame_keep_tex.push(tex);
+        self.frame_stage_uploads += 1;
+        Some(Arc::new(bg))
     }
 
     fn ensure_depth(&mut self, device: &wgpu::Device, w: u32, h: u32) {
