@@ -712,9 +712,23 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 		if (!snapCompInit) { snapComp.init(1 << 20); snapCompInit = true; }
 		size_t outSz = 0; uint64_t cUs = 0;
 		const uint8_t* out = snapComp.compress(snapInner.data(), (uint32_t)snapInner.size(), outSz, cUs, 3);
-		maplecast_ws::broadcastBinary(out, (uint32_t)outSz);
-		printf("[TADICT] TDWS snapshot: epoch=%u blocks=%u raw=%zuB wire=%zuB\n",
-			dictEpoch, nBlk, snapInner.size(), outSz);
+		// OWN outer magic — NEVER the ZCST outer. Every legacy consumer decompresses
+		// every ZCST message and pattern-matches the inner (render-worker.mjs even
+		// routes usize>1MB ZCST as a SYNC), so a new inner type under ZCST corrupts
+		// unaware clients (2026-07-14: 12.7MB TDWS eaten as SYNC = garbled VRAM).
+		// snapComp wrote [ZCST][usize][blob]; stamp the magic to TDWS. If zstd
+		// fell back to raw (returns src, no header), skip — a raw snapshot would
+		// be indistinguishable from garbage at the client.
+		if (out == snapInner.data()) {
+			printf("[TADICT] TDWS compress fell back to raw — snapshot skipped, will retry on next SYNC\n");
+			_tdwSnapPending.store(true, std::memory_order_release);
+		} else {
+			uint8_t* w = const_cast<uint8_t*>(out);
+			w[0] = 'T'; w[1] = 'D'; w[2] = 'W'; w[3] = 'S';
+			maplecast_ws::broadcastBinary(w, (uint32_t)outSz);
+			printf("[TADICT] TDWS snapshot: epoch=%u blocks=%u raw=%zuB wire=%zuB\n",
+				dictEpoch, nBlk, snapInner.size(), outSz);
+		}
 	}
 
 	// Inner payload: frameNum, vframe, taSize, nBlocks, newSection, refs, news.
@@ -2469,6 +2483,13 @@ uint32_t currentGuestVf() { return addrspace::read32(0x8C3496B0); }   // guest f
 // size, stored on the render thread in serverPublish; read on the emu thread to gate run-ahead.
 static std::atomic<uint32_t> _lastPublishedTaSize{0};
 uint32_t lastPublishedTaSize() { return _lastPublishedTaSize.load(std::memory_order_relaxed); }
+// A2 ADAPTIVE v2 (the CORRECT heaviness signal, per flycast-internals-expert): the FULL inner-frame
+// payload size totalSize = (dst - dstStart) = VRAM dirty-page payload + TA + STM2 body-state — the
+// number that gets compressed TWICE and is what rend_wait_render_idle stalls on during a super.
+// This BALLOONS on supers (480-530KB) even when the TA delta stays ~150KB, so the adaptive gate
+// must key on THIS, not lastPublishedTaSize.
+static std::atomic<uint32_t> _lastPublishedTotalSize{0};
+uint32_t lastPublishedTotalSize() { return _lastPublishedTotalSize.load(std::memory_order_relaxed); }
 // Count of real (non-hidden) publishes; read+reset per window by the emu PROF block = the proof
 // that leg3 is actually producing composites (drops to 35-45 during supers = the bug).
 static std::atomic<uint32_t> _publishBroadcasts{0};
@@ -3101,7 +3122,12 @@ done_diff:
 		_zstreamResetPending.store(true, std::memory_order_release);
 		_vcacheReseedPending.store(true, std::memory_order_release);  // joiner hash caches start empty
 		// TDW: pair a dict snapshot with a stream restart so a joiner can decode onward.
-		_tdwSnapPending.store(true, std::memory_order_release);
+		// Snapshot ONLY on join/manual (forced) SYNCs — re-broadcasting the ever-growing
+		// dict on the 60s periodic resilience SYNC measured 1.6-4.8 MB/min of pure
+		// overhead live (2026-07-14). Connected clients already hold the dict; the
+		// stream restart alone keeps them aligned across the periodic SYNC.
+		if (manualSave || forced)
+			_tdwSnapPending.store(true, std::memory_order_release);
 		_tdwResetPending.store(true, std::memory_order_release);
 	}
 
@@ -3219,6 +3245,9 @@ done_diff:
 	uint32_t totalSize = (uint32_t)(dst - dstStart);
 	uint32_t frameSizeVal = totalSize - 4;
 	memcpy(dstStart, &frameSizeVal, 4);
+	// A2 ADAPTIVE v2: publish the full inner-frame payload size for the emu-thread run-ahead gate
+	// (this is the VRAM dirty-page payload that balloons on supers + stalls rend_wait_render_idle).
+	_lastPublishedTotalSize.store(totalSize, std::memory_order_relaxed);
 
 	__sync_synchronize();
 	hdr->latest_offset = writePos;

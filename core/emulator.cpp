@@ -1773,9 +1773,12 @@ void Emulator::start()
 								static uint64_t _raHeavyTicks = 0, _raLightTicks = 0, _raLeg3Missed = 0;
 								bool _heavy = false;
 								if (_raAdaptive) {
-									uint32_t _ts = maplecast_mirror::lastPublishedTaSize();
-									if (_ts > 300*1024) { _raHeavyMode = true; _raSubCount = 0; }
-									else if (_raHeavyMode && _ts < 220*1024) { if (++_raSubCount >= 2) _raHeavyMode = false; }
+									// v2 FIX: gate on the FULL inner-frame payload (VRAM dirty pages + TA + STM2), NOT the TA
+										// delta. Supers balloon this to 480-530KB while TA stays ~150KB (why the old TA gate
+										// never fired). Neutral totalSize ~150-220KB.
+										uint32_t _ts = maplecast_mirror::lastPublishedTotalSize();
+									if (_ts > 350*1024) { _raHeavyMode = true; _raSubCount = 0; }
+									else if (_raHeavyMode && _ts < 250*1024) { if (++_raSubCount >= 2) _raHeavyMode = false; }
 									else if (_raHeavyMode) _raSubCount = 0;
 									_heavy = _raHeavyMode;
 								}
@@ -1855,6 +1858,7 @@ void Emulator::start()
 								// FinishRender on the same ctx (ta_ctx.cpp verify + double recycle). A slow
 								// forced-SYNC broadcastFreshSync (8 MB) on a viewer connect widens the window.
 								rend_wait_render_idle();
+								auto _raT3b = std::chrono::steady_clock::now();   // SPLIT: _raT3->_raT3b = the WAIT (sync stall on the render thread's heavy publish); _raT3b->_raT4 = rewindToFrame (dirty-page compute)
 								bool _raRewindOk = maplecast_rollback::rewindToFrame(_raF, /*lightweight=*/true);
 								auto _raT4 = std::chrono::steady_clock::now();
 								// A2 STATE-WIRE gate (MAPLECAST_STATEVF=1): the authoritative BOUNDARY state
@@ -1875,26 +1879,26 @@ void Emulator::start()
 								}
 								{
 									static const bool _spikeLog = std::getenv("MAPLECAST_RA_SPIKE") != nullptr;
-									static uint64_t _pH=0,_pS=0,_pP=0,_pR=0,_pN=0;
+									static uint64_t _pH=0,_pS=0,_pP=0,_pW=0,_pR=0,_pN=0;
 									auto us=[](auto a,auto b){ return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(b-a).count(); };
-									uint64_t _tH=us(_raT0,_raT1),_tS=us(_raT1,_raT2),_tP=us(_raT2,_raT3),_tR=us(_raT3,_raT4);
+									uint64_t _tH=us(_raT0,_raT1),_tS=us(_raT1,_raT2),_tP=us(_raT2,_raT3),_tW=us(_raT3,_raT3b),_tR=us(_raT3b,_raT4);
 									// A2 SPIKE (MAPLECAST_RA_SPIKE): flag any single tick that blew the 16.67ms
 									// budget = a visible dip below 60fps. Heavy hit-frames land here.
-									if (_spikeLog && (_tH+_tS+_tP+_tR) > 16667) {
-										printf("[TICK-SPIKE] total=%lluus DIP<60fps (hidden=%llu save=%llu preview=%llu rewind=%llu)\n",
-											(unsigned long long)(_tH+_tS+_tP+_tR),(unsigned long long)_tH,(unsigned long long)_tS,
-											(unsigned long long)_tP,(unsigned long long)_tR);
+									if (_spikeLog && (_tH+_tS+_tP+_tW+_tR) > 16667) {
+										printf("[TICK-SPIKE] total=%lluus DIP<60fps (hidden=%llu save=%llu preview=%llu WAIT=%llu rewind=%llu)\n",
+											(unsigned long long)(_tH+_tS+_tP+_tW+_tR),(unsigned long long)_tH,(unsigned long long)_tS,
+											(unsigned long long)_tP,(unsigned long long)_tW,(unsigned long long)_tR);
 										fflush(stdout);
 									}
-									_pH+=_tH; _pS+=_tS; _pP+=_tP; _pR+=_tR;
+									_pH+=_tH; _pS+=_tS; _pP+=_tP; _pW+=_tW; _pR+=_tR;
 									if (++_pN % 600 == 0) {
 										// integer µs only — a float varargs quirk printed 'inf' on MSVC
-										printf("[RUNAHEAD-PROF] avg/tick us: hidden=%llu save=%llu preview=%llu rewind=%llu total=%llu (n=%llu)\n",
+										printf("[RUNAHEAD-PROF] avg/tick us: hidden=%llu save=%llu preview=%llu WAIT=%llu rewind=%llu total=%llu (n=%llu)\n",
 											(unsigned long long)(_pH/600),(unsigned long long)(_pS/600),
-											(unsigned long long)(_pP/600),(unsigned long long)(_pR/600),
-											(unsigned long long)((_pH+_pS+_pP+_pR)/600),(unsigned long long)_pN);
+											(unsigned long long)(_pP/600),(unsigned long long)(_pW/600),(unsigned long long)(_pR/600),
+											(unsigned long long)((_pH+_pS+_pP+_pW+_pR)/600),(unsigned long long)_pN);
 										fflush(stdout);
-										_pH=_pS=_pP=_pR=0;
+										_pH=_pS=_pP=_pW=_pR=0;
 									}
 								}
 								if (!_raRewindOk) {

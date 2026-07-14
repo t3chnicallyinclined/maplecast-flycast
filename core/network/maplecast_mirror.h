@@ -122,6 +122,9 @@ uint32_t currentGuestVf();
 // nothing -> 35-45fps). Plus a read+reset counter of real (non-hidden) publishes/window = the
 // proof metric (must climb 35-45 -> 60 during supers once adaptive is on).
 uint32_t lastPublishedTaSize();
+// A2 ADAPTIVE v2: the FULL inner-frame payload (VRAM dirty pages + TA + STM2) — the CORRECT
+// heaviness signal for the run-ahead gate (balloons 150->480KB+ on supers; TA size does not).
+uint32_t lastPublishedTotalSize();
 uint32_t consumePublishBroadcasts();
 
 // Build the full DC save state via dc_serialize into a freshly malloc'd
