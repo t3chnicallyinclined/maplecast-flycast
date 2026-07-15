@@ -1103,6 +1103,7 @@ static void onClose(ConnHdl hdl)
 // live state migration (implemented at the bottom of this file)
 static void migHandleRequest(ConnHdl hdl, const nlohmann::json& ctrl);
 static void migHandleIncomingPush(ConnHdl hdl, const std::string& data);
+static void migEagerInit();
 
 static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 {
@@ -1775,6 +1776,7 @@ bool init(int port)
 		_ws.set_open_handler(&onOpen);
 		_ws.set_close_handler(&onClose);
 		_ws.set_message_handler(&onMessage);
+		migEagerInit();   // migration arenas at boot, not on the hot path (edge OOM fix)
 		// Tele-0.3: PONG handler. We periodically ping each client with
 		// a microsecond timestamp as the payload; on pong arrival we
 		// decode the timestamp, compute RTT = now - ts_in_ping, and
@@ -2246,8 +2248,28 @@ static bool       _migSendPending = false;
 static std::vector<uint8_t> _migInBlob;   // received STPU payload (ZCST-compressed)
 static uint32_t   _migInRawSize = 0;
 static bool       _migApplyPending = false;
+static MirrorDecompressor _migDecomp;     // boot-reserved (migEagerInit)
+static bool       _migDecompInit = false;
 
 static const char* fleetKey() { return std::getenv("MAPLECAST_FLEET_KEY"); }
+
+// Reserve the migration arenas at BOOT, not on the hot path. Edge nodes run
+// ~50MB from the ceiling; the receive+apply allocation burst (10MB blob +
+// 32MB decompress buffer) outran kernel reclaim TWICE on sea (OOM-KILL,
+// 2026-07-15) even with 3GB of free swap. Boot-time allocation succeeds while
+// memory is calm and the pages stay swappable; the hot path then allocates
+// ~nothing beyond websocketpp's own payload buffer.
+static void migEagerInit()
+{
+	const char* key = fleetKey();
+	if (!key || !*key)
+		return;
+	_migDecomp.init(32 * 1024 * 1024);
+	_migDecompInit = true;
+	_migInBlob.reserve(16 * 1024 * 1024);
+	printf("[migrate] armed (MAPLECAST_FLEET_KEY set) -- 48MB arenas reserved at boot\n");
+	fflush(stdout);
+}
 
 static void migNotifyRequester(ConnHdl hdl, const json& msg)
 {
@@ -2474,31 +2496,20 @@ static void migHandleIncomingPush(ConnHdl hdl, const std::string& data)
 // moments after "APPLIED". Only this site is safe for the apply.
 bool applyPendingMigration()
 {
-	bool apply = false;
-	std::vector<uint8_t> blob;
-	uint32_t rawSize = 0;
-	{
-		std::lock_guard<std::mutex> lock(_migMu);
-		if (_migApplyPending) {
-			apply = true;
-			blob = std::move(_migInBlob);
-			rawSize = _migInRawSize;
-			_migApplyPending = false;
-			_migInBlob.clear();
-		}
-	}
-	if (!apply)
+	// Hold _migMu through the whole apply: the only contender is the WS
+	// thread stashing a second push, which SHOULD wait out an in-flight
+	// load. Decompressing straight out of the boot-reserved _migInBlob
+	// arena (clear() keeps its capacity) means zero hot-path allocation —
+	// the OOM-kill fix, see migEagerInit().
+	std::lock_guard<std::mutex> lock(_migMu);
+	if (!_migApplyPending)
 		return false;
-	// MEMORY DISCIPLINE (edge nodes have <1GB and flycast idles ~700MB — the
-	// first internet gate OOM-KILLED sea, 2026-07-15): size the decompress
-	// buffer to the actual state (32MB covers DC+Naomi, same as state_sync)
-	// and drop the compressed blob the moment it's decoded.
-	static MirrorDecompressor decomp;
-	static bool decompInit = false;
-	if (!decompInit) { decomp.init(32 * 1024 * 1024); decompInit = true; }
+	_migApplyPending = false;
+	const uint32_t rawSize = _migInRawSize;
+	if (!_migDecompInit) { _migDecomp.init(32 * 1024 * 1024); _migDecompInit = true; }
 	size_t gotRaw = 0;
-	const uint8_t* raw = decomp.decompress(blob.data(), blob.size(), gotRaw);
-	blob = std::vector<uint8_t>();   // free the 10MB wire blob before loadstate
+	const uint8_t* raw = _migDecomp.decompress(_migInBlob.data(), _migInBlob.size(), gotRaw);
+	_migInBlob.clear();   // keep the reserved capacity
 	if (!raw || gotRaw != rawSize) {
 		printf("[migrate] apply ABORTED: decompress got %zu B, expected %u B\n", gotRaw, rawSize);
 		fflush(stdout);
