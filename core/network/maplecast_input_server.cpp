@@ -1656,7 +1656,11 @@ bool init(int udpPort)
 	// --- Input tape publisher socket (Phase 1 of lockstep-player-client) ---
 	// Separate UDP socket on kTapePort (7101). Failure to bind is non-fatal:
 	// the main input path still works, only the tape fan-out is lost.
-	_tapeSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	// Gold/decommission mode (MAPLECAST_TDW_ONLY): the tape serves only the
+	// lockstep/replay arcs — keep the port closed.
+	static const bool _tdwOnly = [](){ const char* e = std::getenv("MAPLECAST_TDW_ONLY");
+		return e && *e && *e != '0'; }();
+	_tapeSock = _tdwOnly ? -1 : (int)socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 	if (_tapeSock >= 0) {
 #ifdef SO_REUSEPORT
 		int reuse1 = 1;

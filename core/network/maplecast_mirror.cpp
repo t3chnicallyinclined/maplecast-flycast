@@ -764,7 +764,9 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 		}
 		if (!snapCompInit) { snapComp.init(1 << 20); snapCompInit = true; }
 		size_t outSz = 0; uint64_t cUs = 0;
-		const uint8_t* out = snapComp.compress(snapInner.data(), (uint32_t)snapInner.size(), outSz, cUs, 3);
+		// level 19: joins are rare one-shots — spend CPU there, not wire
+		// (measured 1.6MB @ lvl3 for a 224K-block dict; join-spike reduction).
+		const uint8_t* out = snapComp.compress(snapInner.data(), (uint32_t)snapInner.size(), outSz, cUs, 19);
 		// OWN outer magic — NEVER the ZCST outer. Every legacy consumer decompresses
 		// every ZCST message and pattern-matches the inner (render-worker.mjs even
 		// routes usize>1MB ZCST as a SYNC), so a new inner type under ZCST corrupts
@@ -897,19 +899,25 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 	maplecast_ws::broadcastBinary(msg.data(), (uint32_t)(12 + ob.pos));
 
 	static uint64_t stNewBody = 0, stNewOther = 0;
-	stWire += 12 + ob.pos; stInner += innerSize; stNewB += newSection; stFrames++;
-	stNewBody += newBodyB; stNewOther += newOtherB;
-	stUs += (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+	static uint32_t stWireMax = 0, stEncMax = 0;   // spike telemetry (per window)
+	const uint32_t thisWire = (uint32_t)(12 + ob.pos);
+	const uint32_t thisUs = (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(
 		std::chrono::steady_clock::now() - t0).count();
+	stWire += thisWire; stInner += innerSize; stNewB += newSection; stFrames++;
+	stNewBody += newBodyB; stNewOther += newOtherB;
+	stUs += thisUs;
+	if (thisWire > stWireMax) stWireMax = thisWire;
+	if (thisUs > stEncMax) stEncMax = thisUs;
 	if (stFrames && frameNum % 600 == 0) {
-		printf("[TADICT] dict=%zu blk/%.1fMB wire=%.0fB/frame (%.3f Mbps) inner=%.0fB new=%.0fB (body=%.0f other=%.0f) enc=%.0fus\n",
+		printf("[TADICT] dict=%zu blk/%.1fMB wire=%.0fB/frame (%.3f Mbps, max %uB) inner=%.0fB new=%.0fB (body=%.0f other=%.0f) enc=%.0fus (max %uus)\n",
 			blkOff.size(), arena.size() / 1048576.0,
-			stWire / (double)stFrames, (stWire / (double)stFrames) * 60.0 * 8.0 / 1e6,
+			stWire / (double)stFrames, (stWire / (double)stFrames) * 60.0 * 8.0 / 1e6, stWireMax,
 			stInner / (double)stFrames, stNewB / (double)stFrames,
 			stNewBody / (double)stFrames, stNewOther / (double)stFrames,
-			stUs / (double)stFrames);
+			stUs / (double)stFrames, stEncMax);
 		fflush(stdout);
 		stWire = stInner = stNewB = stUs = 0; stNewBody = stNewOther = 0; stFrames = 0;
+		stWireMax = 0; stEncMax = 0;
 	}
 }
 
@@ -1259,7 +1267,10 @@ void initServer()
 	// Phase 3 of lockstep-player-client: start the state-sync TCP listener
 	// so native player clients can subscribe to periodic dc_serialize
 	// snapshots. Failure to start is non-fatal  --  the TA mirror still works.
-	maplecast_state_sync::serverStart();
+	// State-sync (:7102) serves lockstep/replica native clients — no TDW-class
+	// client uses it; keep the port closed in gold/decommission mode.
+	if (!tdwOnly())
+		maplecast_state_sync::serverStart();
 
 	// Lockstep-mirror game-state-hash channel (env-gated MAPLECAST_LOCKSTEP=1,
 	// default OFF). Ships the deterministic game-state-region checksum to

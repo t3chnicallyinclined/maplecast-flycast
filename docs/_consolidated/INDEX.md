@@ -17,6 +17,16 @@ The authoritative map of `docs/`. Every markdown doc is listed once, by category
 
 ## ★ START HERE (read these first)
 
+> **⚡ TDW ERA (2026-07-14/15): the wire changed.** The TDW dictionary wire is
+> now the default/gold standard — read these FOUR first for anything
+> wire/client/topology related:
+> **[../TDW-PROTOCOL.md](../TDW-PROTOCOL.md)** (normative wire spec) ·
+> **[../TDW-GOLD-STANDARD.md](../TDW-GOLD-STANDARD.md)** (gate audit + decommission ledger) ·
+> **[../SYSTEM-MODEL.md](../SYSTEM-MODEL.md)** (process/wire topology + fan-out decision) ·
+> **[../TA-DICT-WIRE-PLAN.md](../TA-DICT-WIRE-PLAN.md)** (the measured campaign record).
+> Legacy wires (ZCST mirror / ZCS2 / GSTA side channels / replica-live) are
+> transitional: serving old clients only, retiring per client class.
+
 New contributor or AI agent: read these 5–8 before touching anything.
 
 1. **[../ARCHITECTURE.md](../ARCHITECTURE.md)** — the whole-system mental model: 5 pillars, TA-mirror wire format, headless build, latency budgets, and the byte-perfect determinism guarantee. *(CURRENT)*
