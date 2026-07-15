@@ -1468,4 +1468,18 @@ void deserialize(Deserializer& deser)
 	deser >> ByteCount;
 }
 
+// Live-migration capture guard (docs/STATE-HANDOFF-PLAN.md v1.1): TRUE while
+// the drive is mid-read — packet in flight, sectors pending, or GD-DMA
+// running. A state captured at such a frame carries in-flight disc state
+// that reproducibly wedges on the destination node at match-load (the
+// "freezes then back to character select" report, 2026-07-15). Heuristic
+// cross-thread read — the caller defers the capture with a bounded retry.
+bool maplecast_gdrom_busy()
+{
+	return gd_state != gds_waitcmd
+	    || read_params.remaining_sectors > 0
+	    || (SB_GDST & 1)
+	    || SecNumber.Status == GD_BUSY;
+}
+
 }

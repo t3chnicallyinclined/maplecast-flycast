@@ -22,6 +22,7 @@
 #include "hw/sh4/sh4_sched.h"     // sh4_sched_request / sh4_sched_is_scheduled
 #include <climits>                // LONG_MAX (migration memory guard)
 extern int vblank_schid;          // defined in hw/pvr/spg.cpp (same pattern as state_sync)
+namespace gdrom { bool maplecast_gdrom_busy(); }   // disc-quiet capture guard (gdromv3.cpp)
 
 #include <websocketpp/config/asio_no_tls.hpp>
 #include <websocketpp/server.hpp>
@@ -2646,6 +2647,22 @@ void drainMigration()
 	{
 		std::lock_guard<std::mutex> lock(_migMu);
 		if (!_migSendPending) return;
+		// DISC-QUIET GUARD: a state captured mid-read (char-select -> match
+		// load streams from GD-ROM) carries in-flight drive state that
+		// reproducibly wedges the DESTINATION at match-load ("freezes then
+		// back to character select", 2026-07-15). Defer up to ~5s for a
+		// quiet frame; loads finish in well under that.
+		static int deferred = 0;
+		if (gdrom::maplecast_gdrom_busy() && deferred < 300) {
+			if (deferred++ == 0) {
+				printf("[migrate] disc busy at capture request -- deferring to a quiet frame\n");
+				fflush(stdout);
+			}
+			return;   // _migSendPending stays set; retry next frame
+		}
+		if (deferred >= 300)
+			printf("[migrate] disc still busy after 5s -- capturing anyway (bounded)\n");
+		deferred = 0;
 		dest = _migDest;
 		requester = _migRequester;
 		_migSendPending = false;
