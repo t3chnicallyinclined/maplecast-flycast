@@ -632,44 +632,72 @@ static uint32_t internBlock(const uint8_t* p, uint32_t len, bool& isNew)
 }
 
 // Emit-order block spans: the taCanonicalize FSM, sizes only (no masking).
+// emit(ptr, sz, isBody, isPlayer):
+//   isBody   = param textures from the body staging banks {0x82,0x83,0x88,0x89}
+//              (32KB bank = TCW byte addr >>15, the CHARSTRIP classifier) —
+//              stats attribution: players vs stage/HUD/fx.
+//   isPlayer = the players-wire KEEP set: every paraType-5 SPRITE param except
+//              HUD-word TCWs (fonts/bars/portraits, re_kb/67 words) — bodies +
+//              their satellites (capes, projectiles, effect sprites in bands
+//              0x84/85/8a/8b + tile bands 0xc1/c2/ca; measured 2026-07-14:
+//              Storm cape = body banks, Sentinel rocket = effect/tile bands).
+//              Textured POLY params (stage/3D-machine strips) stay excluded.
 template<typename F>
 static void walkBlocks(const uint8_t* ta, uint32_t taSize, F&& emit)
 {
 	uint32_t off = 0;
 	int  curList = -1;
-	bool inPolyList = false, isSpr = false, haveParam = false;
+	bool inPolyList = false, isSpr = false, haveParam = false, curBody = false, curPlayer = false;
 	uint8_t cObj = 0;
+	auto tcwIsBody = [](uint32_t tcw){
+		uint32_t bank = ((tcw & 0x1FFFFF) << 3) >> 15;
+		return bank == 0x82 || bank == 0x83 || bank == 0x88 || bank == 0x89;
+	};
+	auto tcwIsHud = [](uint32_t tcw){
+		uint32_t addr = tcw & 0x1FFFFF;
+		return addr == 0x9BE00 || addr == 0x80000 || (addr >= 0x9DE00 && addr <= 0x9E900);
+	};
 	while (off + 32 <= taSize) {
 		uint32_t pcw; memcpy(&pcw, ta + off, 4);
 		uint32_t paraType = (pcw >> 29) & 7;
 		uint32_t sz = 32;
+		bool isBody = false, isPlayer = false;
 		if (paraType == 0 || paraType == 1 || paraType == 2 || paraType == 3 || paraType == 6) {
-			haveParam = false;
+			haveParam = false; curBody = false; curPlayer = false;
 			if (paraType == 0) { curList = -1; inPolyList = false; }
 		} else if (paraType == 4) {
 			uint32_t lt = (pcw >> 24) & 7;
 			if (curList == -1) { curList = (int)lt; inPolyList = (lt == 0 || lt == 2 || lt == 4); }
-			if (curList == 1 || curList == 3) { haveParam = false; }
+			if (curList == 1 || curList == 3) { haveParam = false; curBody = false; curPlayer = false; }
 			else {
 				cObj = (uint8_t)(pcw & 0xFF);
 				isSpr = false; haveParam = true;
 				uint32_t colType = (cObj >> 4) & 3, vol = (cObj >> 6) & 1;
 				if (colType == 2 && !vol && ((cObj >> 2) & 1)) sz = (off + 64 <= taSize) ? 64 : 32;
 				else if (colType >= 1 && vol)                  sz = (off + 64 <= taSize) ? 64 : 32;
+				uint32_t tcw; memcpy(&tcw, ta + off + 12, 4);
+				curBody = ((cObj >> 3) & 1) && tcwIsBody(tcw);
+				curPlayer = curBody;               // poly params: only body-bank ones
+				isBody = curBody; isPlayer = curPlayer;
 			}
 		} else if (paraType == 5) {
 			uint32_t lt = (pcw >> 24) & 7;
 			if (curList == -1) { curList = (int)lt; inPolyList = (lt == 0 || lt == 2 || lt == 4); }
 			cObj = (uint8_t)(pcw & 0xFF);
 			isSpr = true; haveParam = true;
+			uint32_t tcw; memcpy(&tcw, ta + off + 12, 4);
+			curBody = tcwIsBody(tcw);
+			curPlayer = !tcwIsHud(tcw);            // ALL sprites except HUD fonts/bars
+			isBody = curBody; isPlayer = curPlayer;
 		} else if (paraType == 7) {
 			if (inPolyList && haveParam) {
 				uint32_t tex = (cObj >> 3) & 1, colType = (cObj >> 4) & 3, vol = (cObj >> 6) & 1;
 				if (isSpr && off + 64 <= taSize) sz = 64;
 				else if (tex && !vol && colType == 1 && off + 64 <= taSize) sz = 64;
+				isBody = curBody; isPlayer = curPlayer;
 			}
 		}
-		emit(ta + off, sz);
+		emit(ta + off, sz, isBody, isPlayer);
 		off += sz;
 	}
 }
@@ -731,24 +759,45 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 		}
 	}
 
+	// PLAYERS-ONLY wire (MAPLECAST_TADICT_PLAYERS=1, plan §3b endgame (a)):
+	// the TDW leg carries ONLY body-bank param/vertex blocks + control blocks
+	// (list structure). Everything else (stage/HUD/effects TA) is dropped from
+	// this leg — measured offline at 0.347 Mbps on real play. NOTE: in this
+	// mode the TDW TA is intentionally NOT byte-equal to the chain TA; the
+	// equality gate does not apply (clients render the TDW TA directly).
+	static const bool playersOnly = [](){ const char* e = std::getenv("MAPLECAST_TADICT_PLAYERS");
+		return e && *e && *e != '0'; }();
+
 	// Inner payload: frameNum, vframe, taSize, nBlocks, newSection, refs, news.
 	inner.clear();
 	inner.reserve(20 + taSize / 4);
 	inner.insert(inner.end(), (uint8_t*)&frameNum, (uint8_t*)&frameNum + 4);
 	inner.insert(inner.end(), (uint8_t*)&vframe, (uint8_t*)&vframe + 4);
 	inner.insert(inner.end(), (uint8_t*)&taSize, (uint8_t*)&taSize + 4);
-	uint32_t nBlocks = 0, newSection = 0;
+	uint32_t nBlocks = 0, newSection = 0, keptSize = 0;
 	inner.insert(inner.end(), 8, 0);                       // patched below
 	static std::vector<uint8_t> news;
 	news.clear();
-	walkBlocks(wireTA, taSize, [&](const uint8_t* p, uint32_t len){
+	uint32_t newBodyB = 0, newOtherB = 0;
+	walkBlocks(wireTA, taSize, [&](const uint8_t* p, uint32_t len, bool isBody, bool isPlayer){
+		if (playersOnly && !isPlayer) {
+			uint32_t pcw; memcpy(&pcw, p, 4);
+			uint32_t pt = (pcw >> 29) & 7;
+			if (pt == 4 || pt == 5 || pt == 7)
+				return;                     // non-player param/vertex: dropped
+		}
 		bool isNew = false;
 		uint32_t id = internBlock(p, len, isNew);
 		inner.insert(inner.end(), (uint8_t*)&id, (uint8_t*)&id + 4);
-		if (isNew) { news.push_back((uint8_t)len); news.insert(news.end(), p, p + len); }
-		nBlocks++;
+		if (isNew) {
+			news.push_back((uint8_t)len); news.insert(news.end(), p, p + len);
+			if (isBody) newBodyB += len; else newOtherB += len;
+		}
+		nBlocks++; keptSize += len;
 	});
 	newSection = (uint32_t)news.size();
+	if (playersOnly)
+		memcpy(inner.data() + 8, &keptSize, 4);            // taSize = filtered size
 	memcpy(inner.data() + 12, &nBlocks, 4);
 	memcpy(inner.data() + 16, &newSection, 4);
 	inner.insert(inner.end(), news.begin(), news.end());
@@ -782,16 +831,20 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 	seq++;
 	maplecast_ws::broadcastBinary(msg.data(), (uint32_t)(12 + ob.pos));
 
+	static uint64_t stNewBody = 0, stNewOther = 0;
 	stWire += 12 + ob.pos; stInner += innerSize; stNewB += newSection; stFrames++;
+	stNewBody += newBodyB; stNewOther += newOtherB;
 	stUs += (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
 		std::chrono::steady_clock::now() - t0).count();
 	if (stFrames && frameNum % 600 == 0) {
-		printf("[TADICT] dict=%zu blk/%.1fMB wire=%.0fB/frame (%.3f Mbps) inner=%.0fB new=%.0fB enc=%.0fus\n",
+		printf("[TADICT] dict=%zu blk/%.1fMB wire=%.0fB/frame (%.3f Mbps) inner=%.0fB new=%.0fB (body=%.0f other=%.0f) enc=%.0fus\n",
 			blkOff.size(), arena.size() / 1048576.0,
 			stWire / (double)stFrames, (stWire / (double)stFrames) * 60.0 * 8.0 / 1e6,
-			stInner / (double)stFrames, stNewB / (double)stFrames, stUs / (double)stFrames);
+			stInner / (double)stFrames, stNewB / (double)stFrames,
+			stNewBody / (double)stFrames, stNewOther / (double)stFrames,
+			stUs / (double)stFrames);
 		fflush(stdout);
-		stWire = stInner = stNewB = stUs = 0; stFrames = 0;
+		stWire = stInner = stNewB = stUs = 0; stNewBody = stNewOther = 0; stFrames = 0;
 	}
 }
 
@@ -3554,7 +3607,14 @@ done_diff:
 			// follows the 10B header, BEFORE the zstd chunk. Riding INSIDE the frame
 			// message pairs the camera with ITS frame exactly — the separate CAMM
 			// msg raced the async worker decode (one-frame stage swim under motion).
-			const uint32_t camLen = (stripDone || _ssStripActive) ? 132 : 0;
+			// MAPLECAST_ZSTREAM_CAM=1: ship the camera block EVERY frame (not just
+			// when stage-stripping). Feeds the camera-compensated prediction-coding
+			// lab (docs/TA-DICT-WIRE-PLAN.md §3b): per-frame M1/M2 ride the CLEAR
+			// ZCS2 header, so offline analysis extracts them without zstd decode.
+			// Existing ZCS2 clients already parse flags bit3 (shipped for stagestrip).
+			static const bool _zCamAlways = [](){ const char* e = std::getenv("MAPLECAST_ZSTREAM_CAM");
+				return e && *e && *e != '0'; }();
+			const uint32_t camLen = (stripDone || _ssStripActive || _zCamAlways) ? 132 : 0;
 			// flags bit5 (32): u32 replica vframe (the game frame counter 0x8C3496B0,
 			// the SAME counter the replica-live FRMx records carry) appended after the
 			// camera block. The char-flip client pairs its render_frame body TA to the
