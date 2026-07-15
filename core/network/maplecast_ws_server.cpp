@@ -100,6 +100,12 @@ static std::map<void*, ClientStats> _connClientStats;
 // flycast connection, so _connSlot[hdl] keys uniquely per browser instead of
 // colliding on the relay's single multiplexed upstream.
 static std::set<void*> _controlOnlyConns;
+// TDW-subscribed connections ({"type":"subscribe","mode":"tdw"}): native TDW
+// clients on a server that still runs the legacy legs for browsers. They get
+// TDW1/TDWS + SYNC keyframes only — the multi-Mbps ZCST deltas / ZCS2 / GSTA /
+// PALF side channels are skipped per-connection (the client would just count
+// the bytes and drop them).
+static std::set<void*> _tdwOnlyConns;
 
 struct QueueEntry {
 	void* key;
@@ -1076,6 +1082,7 @@ static void onClose(ConnHdl hdl)
 			key = (void*)_ws.get_con_from_hdl(hdl).get();
 			_connSlot.erase(key);
 			_controlOnlyConns.erase(key);
+			_tdwOnlyConns.erase(key);
 			_connRttUs.erase(key);       // Tele-0.3
 			_connClientStats.erase(key); // Tele-0.5
 			_queue.erase(std::remove_if(_queue.begin(), _queue.end(),
@@ -1206,6 +1213,25 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 			if (ctrl["type"] == "migrate")
 			{
 				migHandleRequest(hdl, ctrl);
+				return;
+			}
+			// Per-connection leg subscription: native TDW clients opt out of
+			// the legacy broadcast legs (ZCST deltas/ZCS2/GSTA/PALF/...) that
+			// browsers still need — they keep TDW1/TDWS + SYNC keyframes.
+			if (ctrl["type"] == "subscribe")
+			{
+				try {
+					void* key = (void*)_ws.get_con_from_hdl(hdl).get();
+					std::lock_guard<std::mutex> lock(_connMutex);
+					if (ctrl.value("mode", "") == "tdw") {
+						_tdwOnlyConns.insert(key);
+						printf("[maplecast-ws] client subscribed: tdw-only (legacy legs shed)\n");
+					} else {
+						_tdwOnlyConns.erase(key);
+						printf("[maplecast-ws] client subscribed: all legs\n");
+					}
+					fflush(stdout);
+				} catch (...) {}
 				return;
 			}
 			if (ctrl["type"] == "request_sync")
@@ -1877,8 +1903,23 @@ void broadcastBinary(const void* data, size_t size)
 	// type for websocketpp send) and moved into the lambda. On _wsThread,
 	// the send loop runs to completion without any other thread waiting
 	// on it.
+	// Classify once: does a TDW-subscribed client want this message? TDW1/TDWS
+	// always; a ZCST whose uncompressed size exceeds 1MB is a SYNC keyframe
+	// (the render-worker heuristic) — TDW clients still seed/heal from those.
+	// Everything else (ZCST deltas, ZCS2, GSTA/PALF/OBJS/EFCT/TXTR) is legacy.
+	bool tdwWanted = false;
+	if (size >= 4) {
+		const uint8_t* b = reinterpret_cast<const uint8_t*>(data);
+		if (memcmp(b, "TDW1", 4) == 0 || memcmp(b, "TDWS", 4) == 0)
+			tdwWanted = true;
+		else if (memcmp(b, "ZCST", 4) == 0 && size >= 8) {
+			uint32_t usize;
+			memcpy(&usize, b + 4, 4);
+			tdwWanted = usize > 1024 * 1024;   // SYNC keyframe
+		}
+	}
 	std::string payload(reinterpret_cast<const char*>(data), size);
-	_ws.get_io_service().post([payload = std::move(payload)]() mutable {
+	_ws.get_io_service().post([payload = std::move(payload), tdwWanted]() mutable {
 		std::vector<ConnHdl> targets;
 		{
 			std::lock_guard<std::mutex> lock(_connMutex);
@@ -1894,6 +1935,7 @@ void broadcastBinary(const void* data, size_t size)
 					void* key = (void*)_ws.get_con_from_hdl(conn).get();
 					if (relaySkip.count(key)) continue;
 					if (_controlOnlyConns.count(key)) continue;
+					if (!tdwWanted && _tdwOnlyConns.count(key)) continue;
 					targets.push_back(conn);
 				} catch (...) {}
 			}
