@@ -407,7 +407,7 @@ fn main() {
 
     // Thin ZCS2 wire -> shared FrameDecoder.
     net::spawn_net_thread(
-        std::env::var("MAPLECAST_WS").unwrap_or_else(|_| "wss://nobd.net/ws".into()),
+        std::env::var("MAPLECAST_WS").unwrap_or_else(|_| "wss://play.nobd.net/ws".into()),
         shared.clone(),
         debug.clone(),
     );
@@ -423,7 +423,7 @@ fn main() {
         debug.jitter_on.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     replica::spawn_replica_thread(
-        std::env::var("MAPLECAST_REPLICA").unwrap_or_else(|_| "wss://nobd.net/replica-live".into()),
+        std::env::var("MAPLECAST_REPLICA").unwrap_or_else(|_| "wss://play.nobd.net/replica-live".into()),
         replica_shared.clone(),
         frame_queue.clone(),
         debug.clone(),

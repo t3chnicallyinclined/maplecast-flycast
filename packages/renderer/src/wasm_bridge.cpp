@@ -390,7 +390,7 @@ int renderer_sync(uint8_t* data, int size)
 //       turns over heavily) silently render with stale textures from the
 //       previous scene. This is THE bug that motivated this whole comment.
 //
-// Test surface: load https://nobd.net/king.html, watch character select,
+// Test surface: load https://play.nobd.net/king.html, watch character select,
 // stage select, and the rotating-globe scene. If those render right, the
 // bridge is working. If only in-match works, you've broken one of A-E.
 //

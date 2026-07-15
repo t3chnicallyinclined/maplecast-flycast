@@ -1,7 +1,7 @@
 //! MapleCast desktop shell.
 //!
 //! A thin Tauri v2 window that loads the LIVE WebGPU client (default
-//! https://nobd.net/webgpu-test.html) and adds the one thing a browser cannot:
+//! https://play.nobd.net/webgpu-test.html) and adds the one thing a browser cannot:
 //! a native controller -> UDP:7100 input path polled off the webview thread.
 //!
 //! Design decisions (see desktop/README.md for the full rationale):

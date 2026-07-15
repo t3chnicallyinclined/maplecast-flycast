@@ -6,7 +6,7 @@
 #   1. VPS hosts the hub (public via nginx /hub/api)
 #   2. VPS relay registers itself as Node #1
 #   3. Your local machine runs Node #2 via Docker, pointing at VPS hub
-#   4. Dashboard at https://nobd.net/network.html shows both
+#   4. Dashboard at https://play.nobd.net/network.html shows both
 #
 # Usage:
 #   ./deploy/scripts/test-network.sh deploy-hub <user@vps>
@@ -144,7 +144,7 @@ REMOTE
   echo "  MAPLECAST_HUB_TOKEN=<bootstrap-token-from-hub.env>"
   echo "  MAPLECAST_NODE_NAME=nobd-main"
   echo "  MAPLECAST_NODE_REGION=us-east"
-  echo "  MAPLECAST_PUBLIC_HOST=nobd.net"
+  echo "  MAPLECAST_PUBLIC_HOST=play.nobd.net"
 }
 
 # ────────────────────────────────────────────────────────────────────
@@ -185,7 +185,7 @@ cmd_deploy_dashboard() {
   scp "$REPO/web/network.html" "$target:/tmp/network.html"
   ssh "$target" "sudo install -m 0644 /tmp/network.html /var/www/maplecast/network.html && rm /tmp/network.html"
 
-  ok "Dashboard live at: https://nobd.net/network.html"
+  ok "Dashboard live at: https://play.nobd.net/network.html"
 }
 
 # ────────────────────────────────────────────────────────────────────
@@ -228,7 +228,7 @@ cmd_local_node() {
   ok "Local node started."
   echo "  Tail logs:    docker logs -f $NODE_CONTAINER"
   echo "  Verify:       $0 status"
-  echo "  Dashboard:    https://nobd.net/network.html"
+  echo "  Dashboard:    https://play.nobd.net/network.html"
   echo "  Stop:         $0 stop-local"
 }
 
@@ -278,7 +278,7 @@ else:
         print(f"  {n[\"node_id\"]:36}  {n[\"name\"]:18}  {n[\"status\"]:10}  {loc}")
 '
   echo
-  echo "Dashboard: https://nobd.net/network.html"
+  echo "Dashboard: https://play.nobd.net/network.html"
 }
 
 # ────────────────────────────────────────────────────────────────────

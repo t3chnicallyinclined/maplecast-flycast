@@ -15,8 +15,8 @@ mode (`-DMAPLECAST_HEADLESS=ON`, see "Mode 3: Headless" below) with zero
 capture, VRAM diff, zstd compression, and WebSocket broadcast are all pure
 CPU. Total memory footprint on the VPS: ~322 MB (flycast ~301 MB + relay
 ~21 MB). CPU utilization: ~12% of 2 vCPU. Sustained 60 fps to public
-`wss://nobd.net/ws`. The home box is no longer in the production path —
-nobd.net spectators never touch it.
+`wss://play.nobd.net/ws`. The home box is no longer in the production path —
+play.nobd.net spectators never touch it.
 
 A separate GPU-backed flycast build still exists in the same source tree
 for local sub-1ms play at a physical cab. Both builds coexist from one
@@ -69,7 +69,7 @@ nobd.net VPS                                         BROWSERS
 ┌─────────────────────────────────────────┐                               │  │
 │  nginx (HTTPS, certbot, Let's Encrypt)   │                               │  │
 │  /       → static (king.html, wasm)      │ ──── HTTPS on 443 ──────────┘  │
-│  /ws     → relay  (wss://nobd.net/ws)    │                                │
+│  /ws     → relay  (wss://play.nobd.net/ws)│                                │
 │  /db     → SurrealDB                     │                                │
 └─────────────────────────────────────────┘                                │
                │                                                            │
@@ -210,7 +210,7 @@ WebSocket (port 7200) ──→ maplecast_ws_server.cpp
 > landmines, the four-parser rule, and the byte-perfect determinism guarantees below all still
 > apply.
 
-**The default client is now https://nobd.net/webgpu-test.html** — the **render_frame**
+**The default client is now https://play.nobd.net/webgpu-test.html** — the **render_frame**
 (transpiled-SH4) WebGPU browser renderer, fed by the **ZCS2 streaming-zstd wire** (the
 shared-window streaming-zstd evolution of the ZCST envelope). No URL params needed; the bare
 link IS this config.
@@ -259,7 +259,7 @@ headless flycast (authoritative SH4 sim on the VPS) renders the frame
   → serverPublish() builds the delta frame + folds the STM2 body-state trailer
     + char-strips the body quads (banks {82,83,88,89})
   → ZCS2 streaming-zstd envelope, emitted over VPS loopback :7212
-  → nginx (TLS terminate; wss://nobd.net/replica-live → 127.0.0.1:7212, relay-bypassed)
+  → nginx (TLS terminate; wss://play.nobd.net/replica-live → 127.0.0.1:7212, relay-bypassed)
   → browser
   → fzstd worker decompresses the ZCS2 frame
   → FrameDecoder applies the dirty pages to D.vram / pvrRegs
@@ -349,10 +349,10 @@ MapleCast Relay (Rust, same VPS :7201)       [relay/src/fanout.rs]
   │
   ▼
 nginx (HTTPS termination, /ws → 127.0.0.1:7201)
-  │ wss://nobd.net/ws
+  │ wss://play.nobd.net/ws
   │
   ▼
-Browser (king.html on nobd.net)              [web/king.html, web/js/]
+Browser (king.html on play.nobd.net)         [web/king.html, web/js/]
   │
   ├─ frame-worker.mjs                        Dedicated Worker thread
   │  │ Owns one WebSocket connection
@@ -1424,8 +1424,8 @@ the player. There are two topologies:
 
 1. **VPS-resident headless flycast (nobd.net production, 2026-04-08+).**
    Flycast and relay are on the same VPS box. Browsers on the internet
-   hit `wss://nobd.net/ws`. Player input pays **internet RTT from
-   player to VPS**. This is the live nobd.net stream for remote
+   hit `wss://play.nobd.net/ws`. Player input pays **internet RTT from
+   player to VPS**. This is the live play.nobd.net stream for remote
    spectators.
 
 2. **Home-resident GPU flycast (dev only).** Flycast runs on a local
@@ -1845,7 +1845,7 @@ file perms.
 
 ### Browser-vs-native: TLS requirement
 
-- **Browsers loading https://nobd.net** are subject to the mixed-content
+- **Browsers loading https://play.nobd.net** are subject to the mixed-content
   rule. They CANNOT open `ws://` connections to a community node — only
   `wss://`. So: community nodes wanting browser players need TLS
   (Cloudflare Tunnel, Tailscale Funnel, or own LE cert).
@@ -2232,13 +2232,13 @@ effect.
 
 ## Dashboard — `web/network.html`
 
-Public page at `https://nobd.net/network.html`. Leaflet.js world map with
+Public page at `https://play.nobd.net/network.html`. Leaflet.js world map with
 node pins (color-coded by status: ready/in_match/stale/offline). Stats
 bar shows aggregate metrics. Sortable table of all input servers. Auto-
 probes the nearest 5 from your geographic location (browser-side WS ping)
 and shows your latency to each.
 
-Mixed-content gotcha: from `https://nobd.net/` the dashboard can only
+Mixed-content gotcha: from `https://play.nobd.net/` the dashboard can only
 ping nodes with TLS (`wss://`). Plain-`ws://` community nodes show as
 "unreachable" — that's a browser security model thing, not a bug. To
 test plain-ws nodes, serve the dashboard from `http://localhost` with

@@ -185,9 +185,9 @@ ok "Wire format documented — live testing requires a native client match"
 step "Web dashboards (HTTP 200 + core content)"
 
 check_page() {
-  local path="$1" expect="$2" label="$3"
+  local path="$1" expect="$2" label="$3" host="${4:-play.nobd.net}"
   local body
-  body=$(curl -sf "https://nobd.net$path" 2>/dev/null || echo "")
+  body=$(curl -sf "https://$host$path" 2>/dev/null || echo "")
   if [[ -n "$body" ]] && echo "$body" | grep -q "$expect"; then
     ok "$label"
   else
@@ -195,7 +195,7 @@ check_page() {
   fi
 }
 check_page /network.html  'Input Servers'            'network.html  (map + ROM badges)'
-check_page /replays.html  'Tournament Archive'        'replays.html  (upload/download)'
+check_page /replays.html  'Tournament Archive'        'replays.html  (upload/download)' play.nobd.net
 check_page /spectate.html 'Spectate Live Matches'     'spectate.html (live match picker)'
 
 # ── Final summary ─────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 # MapleCast — Native Windows Mirror Client Build
 
-Build a native `flycast.exe` on Windows that runs in mirror-client mode and connects to a remote MapleCast server (e.g. `nobd.net`). The client receives the byte-perfect TA mirror stream over WebSocket, decompresses with zstd, and renders MVC2 pixel-perfect via WebGL/OpenGL — same flow as a Linux mirror client. No NVENC, no WebRTC, no OpenSSL, no DirectX 9 SDK.
+Build a native `flycast.exe` on Windows that runs in mirror-client mode and connects to a remote MapleCast server (e.g. `play.nobd.net`). The client receives the byte-perfect TA mirror stream over WebSocket, decompresses with zstd, and renders MVC2 pixel-perfect via WebGL/OpenGL — same flow as a Linux mirror client. No NVENC, no WebRTC, no OpenSSL, no DirectX 9 SDK.
 
 This is the build mode added by `MAPLECAST_CLIENT_ONLY=ON`. It excludes the server-side streaming paths (NVENC H.264 encoder, libdatachannel WebRTC, DX9 backend) so the binary builds cleanly on a stock Windows dev environment with vcpkg-managed libcurl as the only external dep.
 
@@ -167,7 +167,7 @@ A console window pops alongside the Flycast window with all the diagnostic outpu
 **Direct connection (skip hub discovery):**
 ```powershell
 $env:MAPLECAST_MIRROR_CLIENT=1
-$env:MAPLECAST_SERVER_HOST="nobd.net"
+$env:MAPLECAST_SERVER_HOST="play.nobd.net"
 $env:MAPLECAST_SERVER_PORT="7200"   # direct flycast WS — players
 & "build\flycast.exe"
 ```
@@ -201,10 +201,10 @@ The successful-launch fingerprint:
 [MIRROR] Hub discovery enabled — querying https://nobd.net/hub/api
 [hub-discovery] Discovered N input server(s) from https://nobd.net/hub/api
 [hub-discovery] probe nobd-main: X.Xms avg (4 samples)
-[MIRROR] Hub picked input server 'nobd-main' at nobd.net:7201 (X.Xms RTT)
-[MIRROR] === CLIENT MODE (WebSocket) === ws://nobd.net:7200/
-[MIRROR-WS] Connecting to nobd.net:7200...
-[audio-client] thread started, target ws://nobd.net:7203/
+[MIRROR] Hub picked input server 'nobd-main' at play.nobd.net:7201 (X.Xms RTT)
+[MIRROR] === CLIENT MODE (WebSocket) === ws://play.nobd.net:7200/
+[MIRROR-WS] Connecting to play.nobd.net:7200...
+[audio-client] thread started, target ws://play.nobd.net:7203/
 [control-ws] listening on ws://127.0.0.1:7211 (loopback only)
 [input-sink] ready → <ip>:7100 slot 0 (19-byte seq+ts + redundant send)
 [MIRROR] === CLIENT MODE === CPU stopped, renderer-only, 16 texture threads
@@ -247,9 +247,9 @@ All outbound. No inbound listeners except `127.0.0.1:7211` (loopback, for the lo
 | Direction | Protocol | Target | Purpose |
 |---|---|---|---|
 | Outbound | HTTPS | `nobd.net:443` | Hub discovery (libcurl) |
-| Outbound | WS | `nobd.net:7200` | TA stream (mirror frames) |
-| Outbound | WS | `nobd.net:7203` | Audio PCM stream |
-| Outbound | UDP | `nobd.net:7100` | Gamepad input (redundant T+0/T+1ms) |
+| Outbound | WS | `play.nobd.net:7200` | TA stream (mirror frames) |
+| Outbound | WS | `play.nobd.net:7203` | Audio PCM stream |
+| Outbound | UDP | `play.nobd.net:7100` | Gamepad input (redundant T+0/T+1ms) |
 | Inbound | TCP | `127.0.0.1:7211` | Local overlay control WS (loopback only) |
 
 No firewall configuration needed beyond standard outbound permission.
@@ -292,7 +292,7 @@ Audio backend may have stalled — try `$env:MAPLECAST_NO_AUDIO=1` (if implement
 - **No Raw Input bypass on Windows yet** — gamepad goes through SDL, which adds ~1-3ms vs the Linux evdev direct path. SDL is fine for desktop play; Raw Input would be a future improvement.
 - **No SCHED_FIFO equivalent** — input/audio threads run at default Windows priority. The Linux client gets RT-FIFO scheduling for the SH4 thread (irrelevant on the client) and the input sink. On Windows we don't currently use `SetThreadPriority(THREAD_PRIORITY_TIME_CRITICAL)` — could be added.
 - **No XDP zero-copy input** — Linux-only feature, irrelevant for clients (the client *sends* gamepad UDP, server *receives* with XDP).
-- **No mmap'd `/dev/shm` same-box optimization** — Linux-only, irrelevant for remote clients connecting to nobd.net.
+- **No mmap'd `/dev/shm` same-box optimization** — Linux-only, irrelevant for remote clients connecting to play.nobd.net.
 - **Comment encoding noise** — During the port, some Unicode characters in C++ comments (box-drawing `├─`, em-dashes, `µ` in latency comments) got re-encoded by PowerShell's UTF-8 save into multi-byte sequences. Code is correct, comments look mangled. Cosmetic; can be cleaned up in a future pass.
 
 ---

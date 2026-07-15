@@ -6,7 +6,7 @@ MapleCast turns [Flycast](https://github.com/flyinghead/flycast) into a real-tim
 
 > **Note:** MapleCast has only been tested and tuned for Marvel vs. Capcom 2. The TA streaming approach is Dreamcast-general in theory, but the wire format, game state extraction, skin system, and renderer have all been built around MVC2. Other games may or may not work.
 
-It powers [**nobd.net**](https://nobd.net) — an always-on MVC2 cab anyone can spectate or sit down at from a browser.
+It powers [**play.nobd.net**](https://play.nobd.net) — an always-on MVC2 cab anyone can spectate or sit down at from a browser.
 
 | | Video streaming (H.264 / Twitch / Parsec) | MapleCast |
 |---|---|---|
@@ -294,7 +294,7 @@ maplecast-flycast/
 
 - **Headless build** — 27 MB binary, zero GPU/SDL/X11 linkage. Runs anywhere.
 - **WebGPU renderer** — pure JavaScript, no compile step. 15+ post-processing effects, 3D arena backgrounds, live diagnostics. Edit and refresh.
-- **WASM renderer** — pixel-perfect WebGL2, ~750 KB compiled. The production renderer on nobd.net.
+- **WASM renderer** — pixel-perfect WebGL2, ~750 KB compiled. The production renderer on play.nobd.net.
 - **Rust relay** — fans WebSocket stream to 500 concurrent viewers. SYNC cache for instant late-joiner state. WebTransport (QUIC/UDP) support.
 - **253-byte game state** — reverse-engineered MVC2 RAM into per-frame health, combos, meter, characters, timer. Powers live ELO and leaderboards.
 - **5,200 community skins** — live PVR palette swaps visible to all viewers. One click, instant color change, no ROM hack.

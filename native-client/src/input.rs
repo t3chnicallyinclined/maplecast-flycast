@@ -21,7 +21,7 @@ pub struct InputConfig {
 impl InputConfig {
     pub fn from_env() -> Self {
         Self {
-            host: std::env::var("MAPLECAST_INPUT_HOST").unwrap_or_else(|_| "nobd.net".into()),
+            host: std::env::var("MAPLECAST_INPUT_HOST").unwrap_or_else(|_| "play.nobd.net".into()),
             port: std::env::var("MAPLECAST_INPUT_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(7100),
             slot: std::env::var("MAPLECAST_SLOT").ok().and_then(|s| s.parse().ok()).unwrap_or(0),
         }

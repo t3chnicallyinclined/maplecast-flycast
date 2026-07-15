@@ -8,7 +8,7 @@ This is the public-facing deployment overview. It tells you how to build and run
 |---|---|---|
 | **headless flycast** (recommended for servers) | `cmake -DMAPLECAST_HEADLESS=ON -B build-headless && cmake --build build-headless` | CPU-only mirror server. No GPU, no SDL, no X11, no audio. ~26 MB stripped binary on Linux, ~9 MB on Windows. Runs MVC2 + TA mirror streaming on a $5/month VPS. **Identical binary architecture on Linux and Windows** — Linux deploys to a VPS, Windows runs locally as the rollback predictor for sub-RTT input feel. See [ARCHITECTURE.md "Mode 3: Headless"](ARCHITECTURE.md) for the design rationale. |
 | **GPU flycast** (for local/cab play) | `cmake -B build && cmake --build build` | Standard flycast with full rendering. Used at a physical cab or for local LAN play with sub-millisecond input latency. |
-| **Windows mirror client** (native desktop spectator/player) | `cmake -DMAPLECAST_CLIENT_ONLY=ON -B build` (with vcpkg toolchain for libcurl) | Native Windows `flycast.exe` that connects to a remote MapleCast server (e.g. nobd.net) and renders the TA mirror stream pixel-perfect. No NVENC, no WebRTC, no DX9, no OpenSSL. See [WINDOWS-CLIENT-BUILD.md](WINDOWS-CLIENT-BUILD.md) for the full setup recipe. |
+| **Windows mirror client** (native desktop spectator/player) | `cmake -DMAPLECAST_CLIENT_ONLY=ON -B build` (with vcpkg toolchain for libcurl) | Native Windows `flycast.exe` that connects to a remote MapleCast server (e.g. play.nobd.net) and renders the TA mirror stream pixel-perfect. No NVENC, no WebRTC, no DX9, no OpenSSL. See [WINDOWS-CLIENT-BUILD.md](WINDOWS-CLIENT-BUILD.md) for the full setup recipe. |
 | **WASM renderer** (browser viewer) | `cd packages/renderer && bash build.sh` | Standalone WebAssembly renderer that consumes the TA mirror stream and draws MVC2 in a browser canvas. See [WASM-BUILD-GUIDE.md](WASM-BUILD-GUIDE.md). |
 
 ### Local rollback-predictor topology (Phase 1 of rollback prediction)
@@ -185,7 +185,7 @@ browser ──HTTPS──▶ Cloudflare edge ──▶ cloudflared (outbound tun
 ## Current production target
 
 - **VPS**: `149.28.44.118` (dedicated AMD EPYC Genoa, 2 threads, 4 GB RAM, Ubuntu 24.04)
-- **DNS**: `nobd.net` → `149.28.44.118`
+- **DNS**: `nobd.net` → `149.28.44.118` (marketing board + hub at `nobd.net/hub/api`); `play.nobd.net` → `149.28.44.118` (game front end / stream — King of Marvel client + `/ws`, `/play`, `/audio`, `/replica-live`); `zero.nobd.net` → 301 redirect → `nobd.net`
 - **Old VPS** (`66.55.128.93`): decommissioned on 2026-04-15
 - **Co-tenant (non-MapleCast):** the **NOBD Discord bots** also run on this box as systemd units
   (`nobd-oracle`, `nobd-roles`), fully isolated under `/opt/nobd-oracle/` with their own venv. They
@@ -328,8 +328,8 @@ ExecStart=/opt/maplecast/maplecast-relay \
   --ws-upstream ws://127.0.0.1:7210 --ws-listen 0.0.0.0:7201 \
   --http-listen 127.0.0.1:7202 --max-clients 500 \
   --wt-listen 0.0.0.0:443 \
-  --tls-cert /etc/letsencrypt/live/nobd.net/fullchain.pem \
-  --tls-key  /etc/letsencrypt/live/nobd.net/privkey.pem
+  --tls-cert /etc/letsencrypt/live/play.nobd.net/fullchain.pem \
+  --tls-key  /etc/letsencrypt/live/play.nobd.net/privkey.pem
 Environment=TURN_SECRET=<generate with openssl rand -hex 32>
 Environment=NOBD_DB_URL=http://127.0.0.1:8000
 Environment=NOBD_DB_NS=maplecast
@@ -358,13 +358,13 @@ Environment=MAPLECAST_HUB_URL=http://127.0.0.1:7220/hub/api
 Environment=MAPLECAST_HUB_TOKEN=<admin-token-from-step-4>
 Environment=MAPLECAST_NODE_NAME=nobd-main
 Environment=MAPLECAST_NODE_REGION=us-east
-Environment=MAPLECAST_PUBLIC_HOST=nobd.net
-# nginx terminates TLS; proxy wss://nobd.net/{ws,play,audio} to internal.
-# Without these overrides the hub stores ws://nobd.net:7201/ws which gets
+Environment=MAPLECAST_PUBLIC_HOST=play.nobd.net
+# nginx terminates TLS; proxy wss://play.nobd.net/{ws,play,audio} to internal.
+# Without these overrides the hub stores ws://play.nobd.net:7201/ws which gets
 # mixed-content-blocked from the https:// dashboard.
-Environment=MAPLECAST_PUBLIC_RELAY_URL=wss://nobd.net/ws
-Environment=MAPLECAST_PUBLIC_CONTROL_URL=wss://nobd.net/play
-Environment=MAPLECAST_PUBLIC_AUDIO_URL=wss://nobd.net/audio
+Environment=MAPLECAST_PUBLIC_RELAY_URL=wss://play.nobd.net/ws
+Environment=MAPLECAST_PUBLIC_CONTROL_URL=wss://play.nobd.net/play
+Environment=MAPLECAST_PUBLIC_AUDIO_URL=wss://play.nobd.net/audio
 # ROM hash reporting — needs the same path flycast opens
 Environment=MAPLECAST_ROM=/opt/maplecast/roms/mvc2.gdi
 # Phase 2 ultra-low-latency: SCHED_FIFO + XDP + MEMLOCK for AF_XDP UMEM
@@ -405,7 +405,11 @@ systemctl enable --now maplecast-hub maplecast-headless maplecast-relay
 Use certbot for Let's Encrypt (one-time):
 
 ```bash
+# Marketing board (apex + www) — nginx authenticator rewrites the vhost:
 certbot --nginx -d nobd.net -d www.nobd.net
+# Game front end / relay TLS — a SEPARATE cert the relay reads directly, issued
+# via webroot so it is independent of the board vhost that now owns the apex:
+certbot certonly --webroot -w /var/www/maplecast -d play.nobd.net
 ```
 
 Edit `/etc/nginx/sites-enabled/maplecast` — the full production config is

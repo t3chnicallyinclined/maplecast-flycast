@@ -11,7 +11,7 @@ use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct InputConfig {
-    /// The live client the window loads (default https://nobd.net/webgpu-test.html).
+    /// The live client the window loads (default https://play.nobd.net/webgpu-test.html).
     pub client_url: String,
     /// Host of the :7100 UDP input server (defaults to the client's host).
     pub input_host: String,
@@ -27,12 +27,12 @@ pub struct InputConfig {
 impl InputConfig {
     pub fn from_env() -> Self {
         let client_url = std::env::var("MAPLECAST_URL")
-            .unwrap_or_else(|_| "https://nobd.net/webgpu-test.html".to_string());
+            .unwrap_or_else(|_| "https://play.nobd.net/webgpu-test.html".to_string());
         let input_host = std::env::var("MAPLECAST_INPUT_HOST")
             .ok()
             .filter(|s| !s.is_empty())
             .or_else(|| host_of(&client_url))
-            .unwrap_or_else(|| "nobd.net".to_string());
+            .unwrap_or_else(|| "play.nobd.net".to_string());
         let input_port = std::env::var("MAPLECAST_INPUT_PORT")
             .ok()
             .and_then(|s| s.parse().ok())

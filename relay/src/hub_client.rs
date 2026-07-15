@@ -27,7 +27,7 @@ pub struct HubConfig {
     pub input_port: u16,
     /// Optional override for the public wss:// URL the browser uses for the
     /// TA stream. Set this when the relay sits behind nginx TLS termination
-    /// (e.g. wss://nobd.net/ws). Defaults to ws://{public_host}:{port}/ws.
+    /// (e.g. wss://play.nobd.net/ws). Defaults to ws://{public_host}:{port}/ws.
     pub public_relay_url: Option<String>,
     pub public_control_url: Option<String>,
     pub public_audio_url: Option<String>,

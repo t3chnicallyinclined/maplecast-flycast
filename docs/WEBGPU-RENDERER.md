@@ -2,7 +2,7 @@
 
 Pure JavaScript + WebGPU renderer for the MapleCast TA mirror stream.
 Zero WASM, zero compile step, zero build toolchain. Edit a `.mjs` file,
-refresh the browser, see the change. Live at `nobd.net/webgpu-test.html`.
+refresh the browser, see the change. Live at `play.nobd.net/webgpu-test.html`.
 
 ---
 
@@ -89,12 +89,12 @@ This is implemented in `transport.mjs` via the `AdaptiveTransport` class.
 Browser
   │
   ├─ 1. Try WebTransport (QUIC/UDP)
-  │     new WebTransport('https://nobd.net/webtransport')
+  │     new WebTransport('https://play.nobd.net/webtransport')
   │     3-second timeout
   │     If .ready resolves → use QUIC
   │
   ├─ 2. Fallback: WebSocket (TCP)
-  │     new WebSocket('wss://nobd.net/ws')
+  │     new WebSocket('wss://play.nobd.net/ws')
   │     Standard TCP path (same as king.html)
   │
   ▼
@@ -127,7 +127,7 @@ Relay (Rust, wtransport crate)
   │     Reliable streams for SYNC delivery
   │
   └─ TCP :7201 (WebSocket) ← legacy WS connections
-       nginx /ws reverse proxy (wss://nobd.net/ws)
+       nginx /ws reverse proxy (wss://play.nobd.net/ws)
        Same frame data, TCP-wrapped
 ```
 

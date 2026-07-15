@@ -49,7 +49,16 @@ An AI assistant scp'd the git version of king.html to production, overwriting th
 
 ## Architecture Overview
 
-MapleCast turns Flycast (Dreamcast emulator) into a game streaming server. One MVC2 instance runs on a single 2-vCPU VPS with NO GPU. ~322 MB RAM, ~12% CPU. 60fps to `wss://nobd.net/ws`.
+> **Domain topology (2026-07-14 migration).** The game front end + this node's
+> streams moved to **play.nobd.net**. **nobd.net** is now the NOBD-ZERO marketing
+> board (Next.js standalone) that ALSO proxies the game control plane on the same
+> box — `/hub/api`, `/ws`, `/play`, `/audio`, `/db`, `/replica-live`, ... — so the
+> distributed node network + native/desktop clients keep working. Every `*.html`
+> game page 301s from nobd.net → play.nobd.net; `zero.nobd.net` 301s → nobd.net.
+> The hub URL deliberately stays `nobd.net/hub/api`. Details: `docs/DEPLOYMENT.md`
+> (DNS section). Same prod box (149.28.44.118); routing is nginx `server_name`.
+
+MapleCast turns Flycast (Dreamcast emulator) into a game streaming server. One MVC2 instance runs on a single 2-vCPU VPS with NO GPU. ~322 MB RAM, ~12% CPU. 60fps to `wss://play.nobd.net/ws`.
 
 **As of 2026-04-14 there's a fifth pillar — the Distributed Input Server Network.** Anyone can run an "input server" (flycast headless + the relay binary). A central hub on nobd.net does discovery + matchmaking. Native clients auto-pick the lowest-RTT server via UDP probing. Browsers connect through nginx-TLS-fronted endpoints. The hub is **NEVER** in the gameplay hot path. **Read `docs/ARCHITECTURE.md` "Pillar 5: Distributed Input Server Network" before touching any hub/node/native-client code.** Companion vision doc: `docs/COMPETITIVE-CLIENT.md`.
 

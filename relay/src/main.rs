@@ -103,16 +103,16 @@ struct Args {
     #[arg(long, env = "MAPLECAST_PUBLIC_HOST")]
     public_host: Option<String>,
 
-    /// Override the public relay WS URL (e.g. wss://nobd.net/ws when nginx
+    /// Override the public relay WS URL (e.g. wss://play.nobd.net/ws when nginx
     /// terminates TLS). Defaults to ws://{public_host}:{ws_port}/ws.
     #[arg(long, env = "MAPLECAST_PUBLIC_RELAY_URL")]
     public_relay_url: Option<String>,
 
-    /// Override the public control WS URL (e.g. wss://nobd.net/play)
+    /// Override the public control WS URL (e.g. wss://play.nobd.net/play)
     #[arg(long, env = "MAPLECAST_PUBLIC_CONTROL_URL")]
     public_control_url: Option<String>,
 
-    /// Override the public audio WS URL (e.g. wss://nobd.net/audio)
+    /// Override the public audio WS URL (e.g. wss://play.nobd.net/audio)
     #[arg(long, env = "MAPLECAST_PUBLIC_AUDIO_URL")]
     public_audio_url: Option<String>,
 }

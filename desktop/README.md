@@ -1,7 +1,7 @@
 # MapleCast Desktop (Tauri shell)
 
 A thin native desktop client for MapleCast. It opens a window on the **live
-WebGPU client** (`https://nobd.net/webgpu-test.html`) and adds the one thing a
+WebGPU client** (`https://play.nobd.net/webgpu-test.html`) and adds the one thing a
 browser cannot: a **native controller → UDP `:7100` input path**, polled at
 ~1 kHz off the webview thread instead of the browser's rAF-gated Gamepad API
 over a TCP WebSocket.
@@ -73,7 +73,7 @@ So the **browser stays the front door**; this app is the low-latency upgrade.
 cd C:\Users\trist\projects\maplecast-flycast\desktop\src-tauri
 cargo tauri icon C:\path\to\a\1024x1024\logo.png
 
-# 2) Run it (dev) — loads https://nobd.net/webgpu-test.html?native=1
+# 2) Run it (dev) — loads https://play.nobd.net/webgpu-test.html?native=1
 cd C:\Users\trist\projects\maplecast-flycast\desktop
 cargo tauri dev
 ```
@@ -90,7 +90,7 @@ cargo tauri dev
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `MAPLECAST_URL` | `https://nobd.net/webgpu-test.html` | Page the window loads |
+| `MAPLECAST_URL` | `https://play.nobd.net/webgpu-test.html` | Page the window loads |
 | `MAPLECAST_INPUT_HOST` | host of `MAPLECAST_URL` | `:7100` UDP input server host |
 | `MAPLECAST_INPUT_PORT` | `7100` | UDP input port |
 | `MAPLECAST_SLOT` | `0` | Player slot this client drives (0 = P1, 1 = P2) |

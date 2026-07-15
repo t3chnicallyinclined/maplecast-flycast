@@ -105,7 +105,7 @@ A mutex protects the vector since the WS handler thread and the emulator publish
 
 ### Sending a skin change
 
-The browser's skin picker sends a JSON message over the control WebSocket (`wss://nobd.net/play` → nginx → flycast port 7210):
+The browser's skin picker sends a JSON message over the control WebSocket (`wss://play.nobd.net/play` → nginx → flycast port 7210):
 
 ```json
 {

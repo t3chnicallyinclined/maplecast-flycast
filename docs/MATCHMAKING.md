@@ -253,7 +253,7 @@ filter overrides.
 
 - "Create lobby" button on play.html.
 - Generates a 6-char invite code; shareable URL
-  `https://nobd.net/play.html?lobby=ABC123`.
+  `https://play.nobd.net/play.html?lobby=ABC123`.
 - Joining a lobby skips the queue and routes both players to a
   reserved slot on a chosen server.
 - Use cases: friend matches, training rooms, run-back sets without
