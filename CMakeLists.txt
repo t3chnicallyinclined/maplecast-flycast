@@ -122,6 +122,8 @@ option(MAPLECAST_CLIENT_ONLY "Build the mirror-client-only flycast binary (no NV
 # incrementally by wrapping them per core/network/maplecast_gold.h; default
 # OFF = lab binary, byte-for-byte today's behavior.
 option(MAPLECAST_GOLD "Product build: compile out RE/diagnostic instrumentation" OFF)
+# Fleet/deploy builds: portable ISA baseline (see the -march block further down).
+option(MAPLECAST_PORTABLE "Build for a portable x86-64-v2 baseline instead of -march=native" OFF)
 if(MAPLECAST_GOLD)
 	add_compile_definitions(MAPLECAST_GOLD_BUILD=1)
 endif()
@@ -361,8 +363,16 @@ else()
 			set_property(TARGET ${PROJECT_NAME} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
 			message(STATUS "LTO enabled for ${PROJECT_NAME}")
 		endif()
-		target_compile_options(${PROJECT_NAME} PRIVATE -march=native)
-		message(STATUS "Native CPU tuning enabled (-march=native)")
+		if(MAPLECAST_PORTABLE)
+			# Fleet builds: a portable baseline instead of the build host's ISA.
+			# LESSON (2026-07-15): -march=native on a Zen4 build host emitted
+			# AVX-512 that SIGILL-crash-looped every Skylake-vCPU edge node.
+			target_compile_options(${PROJECT_NAME} PRIVATE -march=x86-64-v2)
+			message(STATUS "Portable CPU baseline enabled (-march=x86-64-v2)")
+		else()
+			target_compile_options(${PROJECT_NAME} PRIVATE -march=native)
+			message(STATUS "Native CPU tuning enabled (-march=native)")
+		endif()
 	endif()
 endif()
 
