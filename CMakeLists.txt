@@ -116,6 +116,15 @@ option(MAPLECAST_HEADLESS "Build a headless flycast server (no GL, no SDL, no wi
 # to encode or peer-stream. Ideal for Windows desktop clients connecting to a
 # remote nobd.net-style server.
 option(MAPLECAST_CLIENT_ONLY "Build the mirror-client-only flycast binary (no NVENC, no WebRTC)" OFF)
+
+# GOLD profile (docs/TDW-GOLD-STANDARD.md section 2c): compile the RE/diagnostic
+# instrumentation OUT of the product binary. Convert diagnostic families
+# incrementally by wrapping them per core/network/maplecast_gold.h; default
+# OFF = lab binary, byte-for-byte today's behavior.
+option(MAPLECAST_GOLD "Product build: compile out RE/diagnostic instrumentation" OFF)
+if(MAPLECAST_GOLD)
+	add_compile_definitions(MAPLECAST_GOLD_BUILD=1)
+endif()
 if(MAPLECAST_CLIENT_ONLY AND MAPLECAST_HEADLESS)
 	message(FATAL_ERROR "MAPLECAST_CLIENT_ONLY and MAPLECAST_HEADLESS are mutually exclusive — pick one.")
 endif()
