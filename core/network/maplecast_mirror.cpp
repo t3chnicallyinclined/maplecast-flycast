@@ -588,6 +588,17 @@ static int tadictMode()
 	}();
 	return m;
 }
+// MAPLECAST_TDW_ONLY=1: DECOMMISSION MODE — stop broadcasting the legs no
+// TDW-class client consumes (legacy ZCST deltas, GSTA/PALF/WTCH/OBJS side
+// channels). SYNC one-shots (the connect seed) still broadcast; ZCS2 is
+// already env-gated (leave MAPLECAST_ZSTREAM unset). Legacy-consuming clients
+// (king.html, gate/render dev modes) need this OFF.
+static bool tdwOnly()
+{
+	static const bool v = [](){ const char* e = std::getenv("MAPLECAST_TDW_ONLY");
+		return e && *e && *e != '0'; }();
+	return v;
+}
 static std::atomic<bool> _tdwResetPending{true};   // TDW1 zstd stream restart (flags bit0)
 static std::atomic<bool> _tdwSnapPending{true};    // send TDWS dict snapshot before next TDW1
 namespace tadict {
@@ -716,7 +727,7 @@ static void walkBlocks(const uint8_t* ta, uint32_t taSize, F&& emit)
 }
 
 static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, uint32_t vframe,
-                    const uint8_t* pages, uint32_t pagesLen)
+                    const uint8_t* pvrSnap /*64B*/, const uint8_t* pages, uint32_t pagesLen)
 {
 	auto t0 = std::chrono::steady_clock::now();
 	static const uint32_t maxBlocks = [](){ const char* e = std::getenv("MAPLECAST_TADICT_MAXBLOCKS");
@@ -803,6 +814,9 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 		for (int i = 0; i < 16; i++) { uint32_t v = addrspace::read32(0x8C2D6B18 + i * 4); memcpy(cm + 68 + i * 4, &v, 4); }
 		inner.insert(inner.end(), cm, cm + 132);
 	}
+	// PVR reg snapshot (envelope flags bit5): 64B, right after the camera —
+	// the client's NDC/projection matrix reads reg[0] (tile counts).
+	inner.insert(inner.end(), pvrSnap, pvrSnap + 64);
 	static std::vector<uint8_t> news;
 	news.clear();
 	uint32_t newBodyB = 0, newOtherB = 0;
@@ -834,6 +848,22 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 	const bool hasPages = pages && pagesLen;
 	if (hasPages)
 		inner.insert(inner.end(), pages, pages + pagesLen);
+	// E2E probe tail (self-locating 32B, same layout as the legacy inner tail:
+	// frameNum + t_latch + t_publish + latchedSeq[2] + 'E2EP') — the TDW-only
+	// client measures press->present without touching ZCS2 at all.
+	{
+		static const bool e2eProbe = [](){ const char* e = std::getenv("MAPLECAST_E2E_PROBE");
+			return e && e[0] && e[0] != '0'; }();
+		if (e2eProbe) {
+			int64_t lus = 0; uint32_t s0 = 0, s1 = 0;
+			maplecast_input::e2eLatchInfo(lus, s0, s1);
+			int64_t pus = _publishNowUs();
+			uint8_t t[32];
+			memcpy(t, &frameNum, 4); memcpy(t + 4, &lus, 8); memcpy(t + 12, &pus, 8);
+			memcpy(t + 20, &s0, 4); memcpy(t + 24, &s1, 4); memcpy(t + 28, "E2EP", 4);
+			inner.insert(inner.end(), t, t + 32);
+		}
+	}
 
 	// TDW1 envelope: magic(4) dictEpoch(1) flags(1) seq(2) innerSize(4) + stream chunk.
 	bool streamStart = false;
@@ -850,7 +880,8 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 	msg[0]='T'; msg[1]='D'; msg[2]='W'; msg[3]='1';
 	msg[4] = dictEpoch;
 	msg[5] = (uint8_t)((streamStart ? 1 : 0) | (tacanonMode() == 2 ? 2 : 0)
-		| 8 /*camera in inner*/ | (hasPages ? 16 : 0) /*page section after news*/);
+		| 8 /*camera in inner*/ | (hasPages ? 16 : 0) /*page section after news*/
+		| 32 /*pvr snapshot after camera*/);
 	memcpy(msg.data() + 6, &seq, 2);
 	memcpy(msg.data() + 8, &innerSize, 4);
 	ZSTD_outBuffer ob{ msg.data() + 12, msg.size() - 12, 0 };
@@ -3105,10 +3136,12 @@ void serverPublish(TA_context* ctx)
 done_diff:
 	memcpy(dirtyCountPtr, &totalDirty, 4);
 
-	// TDW1 broadcast — geometry + camera + the page section just built.
+	// TDW1 broadcast — geometry + camera + PVR reg snapshot + the page section.
+	// (pvr snapshot = legacy inner header bytes 8..72; the client's projection
+	// matrix comes from reg[0], so TDW must carry it — 2026-07-15 regression.)
 	if (_tdwTA)
 		tadict::publish(_tdwTA, taSize, frameNum, _tdwVf,
-			_tdwPages, (uint32_t)(dst - _tdwPages));
+			dstStart + 8, _tdwPages, (uint32_t)(dst - _tdwPages));
 
 	// PAGEGATE telemetry (both modes), every 600 frames. Prints even when
 	// forcedTotal==0 — "the forced path never fired" is itself a finding.
@@ -3794,7 +3827,7 @@ done_diff:
 		// unaffected by the ZCS2 experiment. B4a: moved AFTER the ZCS2 leg so the
 		// shipping wire ships first; next step is demand-gating this when no legacy
 		// client is connected, then retiring it once king.html speaks ZCS2.
-		{
+		if (!tdwOnly()) {
 		size_t compSize = 0;
 		const uint8_t* compData = _compressor.compress(dstStart, totalSize, compSize, compressUs);
 		maplecast_ws::broadcastBinary(compData, compSize);
@@ -3807,7 +3840,7 @@ done_diff:
 		// per-frame state so fast motion (dash/jump) tracks smoothly.
 		// Bandwidth ~5 KB/s (265 B * 60Hz) — still negligible.
 		static uint32_t _gsCounter = 0;
-		if (++_gsCounter >= 1) {
+		if (!tdwOnly() && ++_gsCounter >= 1) {
 			_gsCounter = 0;
 			maplecast_gamestate::GameState gs;
 			maplecast_gamestate::readGameState(gs);
@@ -3832,7 +3865,7 @@ done_diff:
 			// position (+0xC8/+0xCC). The CLIENT decides where to draw: attached parts (near
 			// the owner) snap to the owner's LIVE screen pos + the true anchor (no lag; an
 			// off-screen assist's parts vanish with it); spawned objects (far) use +0xC8/+0xCC.
-			{
+			if (!tdwOnly()) {
 				// Cap = 255, the 1-byte OBJS count field's hard maximum, which is
 				// well above MVC2's finite drawable-object ceiling (the pool is a
 				// fixed-stride region; a heavy 3v3-super frame is ~120 owner'd
@@ -4312,7 +4345,7 @@ done_diff:
 		// texture to RGBA and ship it ONCE as a zstd "TXTR" packet; the state-only
 		// client caches by hash and draws the EXACT game texture. ta_parse fills
 		// rc.tr/pt here (Process re-parses later; raw mirror wire untouched).
-		{
+		if (!tdwOnly()) {
 			ta_parse(ctx, true);
 			const int FX_MAX = 24;
 			uint8_t fxBuf[4 + 1 + FX_MAX * 20];
