@@ -21,6 +21,27 @@ void broadcastBinary(const void* data, size_t size);
 // unless checkMatchEnd has requested a capture.
 void drainMcsvCapture();
 
+// Live state migration (docs/STATE-HANDOFF-PLAN.md), two halves with DIFFERENT
+// thread contracts (learned the hard way on the 2026-07-15 live gate):
+//
+// drainMigration() — the SOURCE capture: builds + pushes the state when a
+//   player's "migrate" message is pending. Called from the serverPublish site
+//   (render thread) — dc_serialize from there is the same proven path as
+//   drainMcsvCapture / control-WS savestate_save.
+//
+// applyPendingMigration() — the DESTINATION apply: EMU THREAD with the SH4
+//   PAUSED. The STPU receipt arms raArmStepStop() so runInternal() returns at
+//   the next true frame boundary; the emu loop then calls this in the same
+//   stop-callback-restart slot the rollback rewind / oracle-probe reload use,
+//   and must Start()+continue when it returns true. Applying from the render
+//   thread swaps RAM under a running SH4 → verify() abort (gate 2, 2026-07-15);
+//   a loop-top hook never fires because runInternal doesn't return per frame
+//   on a plain server (gate 3).
+//
+// Both no-op unless MAPLECAST_FLEET_KEY-authenticated work is pending.
+void drainMigration();
+bool applyPendingMigration();   // true = a pending state was consumed (resume SH4)
+
 // Build a fresh "SYNC" packet from current vram[]/pvr_regs, zstd-compress it
 // (ZCST magic), and broadcast to ALL connected clients. Called by the mirror
 // server on scene transitions so non-seed clients get a clean state instead

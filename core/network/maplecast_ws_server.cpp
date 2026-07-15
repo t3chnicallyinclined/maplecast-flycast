@@ -15,6 +15,12 @@
 #include "hw/sh4/sh4_mem.h"
 #include "hw/pvr/pvr_mem.h"
 #include "hw/pvr/pvr_regs.h"
+// live state migration (drainMigration): the proven state-sync JOIN recipe
+#include "serialize.h"
+#include "hw/pvr/Renderer_if.h"   // rend_start_rollback / rend_resync_after_rollback
+#include "hw/pvr/spg.h"           // spg_getNextInterrupt
+#include "hw/sh4/sh4_sched.h"     // sh4_sched_request / sh4_sched_is_scheduled
+extern int vblank_schid;          // defined in hw/pvr/spg.cpp (same pattern as state_sync)
 
 #include <websocketpp/config/asio_no_tls.hpp>
 #include <websocketpp/server.hpp>
@@ -36,6 +42,7 @@ void maplecast_palette_clear();
 
 #ifdef _WIN32
 #include <winsock2.h>
+#include <ws2tcpip.h>  // getaddrinfo (migration push)
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -43,6 +50,7 @@ void maplecast_palette_clear();
 #include <strings.h>   // strcasecmp
 #include <unistd.h>
 #include <sys/statvfs.h>  // disk usage (Tele-0.6)
+#include <netdb.h>     // getaddrinfo (migration push)
 #endif
 #include "maplecast_compat.h"
 
@@ -1092,12 +1100,22 @@ static void onClose(ConnHdl hdl)
 	broadcastStatus();
 }
 
+// live state migration (implemented at the bottom of this file)
+static void migHandleRequest(ConnHdl hdl, const nlohmann::json& ctrl);
+static void migHandleIncomingPush(ConnHdl hdl, const std::string& data);
+
 static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 {
 	if (msg->get_opcode() == websocketpp::frame::opcode::binary)
 	{
 		// Binary = gamepad input (4 bytes: LT, RT, btnHi, btnLo)
 		const auto& data = msg->get_payload();
+		// Migration STPU push from another fleet node (docs/STATE-HANDOFF-PLAN.md)
+		if (data.size() >= 12 && memcmp(data.data(), "STPU", 4) == 0)
+		{
+			migHandleIncomingPush(hdl, data);
+			return;
+		}
 		if (data.size() == 4)
 		{
 			// Init UDP socket if needed
@@ -1181,6 +1199,13 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 			// resets the ZCS2 stream epoch and reseeds the VCACHE sent-set (both
 			// flags are set at the broadcastFreshSync drain site in serverPublish).
 			// Rate-limited: a SYNC is a multi-MB broadcast to every client.
+			// Live state migration: a player's client asks THIS server to hand
+			// its game to another fleet node (docs/STATE-HANDOFF-PLAN.md v1).
+			if (ctrl["type"] == "migrate")
+			{
+				migHandleRequest(hdl, ctrl);
+				return;
+			}
 			if (ctrl["type"] == "request_sync")
 			{
 				static std::atomic<int64_t> _lastSyncReqMs{0};
@@ -2186,6 +2211,372 @@ int clientCount()
 void broadcastSaveStateBytes(const void* /*data*/, size_t /*size*/)
 {
 	printf("[maplecast-ws] broadcastSaveStateBytes â€” STUB (not implemented)\n");
+}
+
+// ==================== live state MIGRATION (server transfer) ====================
+//
+// docs/STATE-HANDOFF-PLAN.md v1. A player's client asks THIS server to hand its
+// game to another fleet node; the game continues there byte-identically
+// (dc_serialize round-trip is byte-perfect, fleet binaries are md5-identical).
+//
+//   client --text--> {"type":"migrate","dest":"host[:port]","key":K}   (:7200)
+//   emu thread: drainMigration() -> buildFullSaveState() (frame boundary,
+//               SR.BL=0 -- same rule as drainMcsvCapture)
+//   worker thread: zstd (MirrorCompressor) -> raw WS client push to dest :7200
+//               "STPU"(4) keyLen(u32) key rawSize(u32) zcstBlob
+//   dest onMessage: validate MAPLECAST_FLEET_KEY -> stash -> text stpu_ack
+//   dest emu thread: drainMigration() applies via the PROVEN state-sync JOIN
+//               recipe (rend_start_rollback -> emu.loadstate -> rend_resync ->
+//               vblank re-arm) then requestSyncBroadcast() so mirror shadows
+//               realign and the forced TDWS snapshot fires for TDW clients.
+//   worker: on ack -> requester gets {"type":"migrated","dest":...} and its
+//               client switches wire+input to dest.
+//
+// NEVER route this through Emulator::loadstate from the WS/render thread --
+// that's the exact maplecast_control_ws.cpp:314 crash. Both the capture and
+// the apply run ONLY inside drainMigration() on the emu thread.
+//
+// Gate: MAPLECAST_FLEET_KEY must be set AND match on both ends; otherwise
+// migrate requests and STPU pushes are rejected outright.
+
+static std::mutex _migMu;
+static std::string _migDest;           // pending outbound: dest host[:port]
+static ConnHdl    _migRequester;       // who asked (gets migrated/migrate_failed)
+static bool       _migSendPending = false;
+static std::vector<uint8_t> _migInBlob;   // received STPU payload (ZCST-compressed)
+static uint32_t   _migInRawSize = 0;
+static bool       _migApplyPending = false;
+
+static const char* fleetKey() { return std::getenv("MAPLECAST_FLEET_KEY"); }
+
+static void migNotifyRequester(ConnHdl hdl, const json& msg)
+{
+	try { _ws.send(hdl, msg.dump(), websocketpp::frame::opcode::text); } catch (...) {}
+}
+
+// Raw RFC 6455 WS client: connect to host:port, opt out of the binary
+// broadcast (control_only), push ONE binary frame, wait for the stpu_ack /
+// stpu_err text reply. Returns true on acked. Runs on a detached worker.
+static bool migPushToDest(const std::string& hostPort, const std::vector<uint8_t>& frame,
+                          std::string& err)
+{
+	std::string host = hostPort;
+	int port = 7200;
+	auto colon = hostPort.rfind(':');
+	if (colon != std::string::npos) {
+		host = hostPort.substr(0, colon);
+		port = std::atoi(hostPort.c_str() + colon + 1);
+		if (port <= 0) port = 7200;
+	}
+
+	struct addrinfo hints = {}, *res = nullptr;
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
+	char portStr[16];
+	snprintf(portStr, sizeof portStr, "%d", port);
+	if (getaddrinfo(host.c_str(), portStr, &hints, &res) != 0 || !res) {
+		err = "DNS resolve failed for " + host;
+		return false;
+	}
+	auto sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+	if (connect(sock, res->ai_addr, (int)res->ai_addrlen) != 0) {
+		freeaddrinfo(res);
+		mc_closesocket(sock);
+		err = "connect failed to " + hostPort;
+		return false;
+	}
+	freeaddrinfo(res);
+#ifdef _WIN32
+	DWORD tmo = 20000;
+	mc_setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tmo, sizeof tmo);
+#else
+	struct timeval tv = {20, 0};
+	mc_setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+#endif
+
+	auto sendAll = [&](const void* p, size_t n) -> bool {
+		const char* c = (const char*)p;
+		while (n) {
+			int w = mc_send(sock, c, n, 0);
+			if (w <= 0) return false;
+			c += w; n -= (size_t)w;
+		}
+		return true;
+	};
+
+	// HTTP upgrade
+	char req[512];
+	snprintf(req, sizeof req,
+		"GET / HTTP/1.1\r\nHost: %s:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+		"Sec-WebSocket-Key: bWFwbGVjYXN0LW1pZ3JhdGU=\r\nSec-WebSocket-Version: 13\r\n\r\n",
+		host.c_str(), port);
+	if (!sendAll(req, strlen(req))) { mc_closesocket(sock); err = "handshake send failed"; return false; }
+	std::string resp;
+	while (resp.find("\r\n\r\n") == std::string::npos && resp.size() < 8192) {
+		char buf[1024];
+		int r = mc_recv(sock, buf, sizeof buf, 0);
+		if (r <= 0) { mc_closesocket(sock); err = "handshake recv failed"; return false; }
+		resp.append(buf, r);
+	}
+	if (resp.find(" 101 ") == std::string::npos) {
+		mc_closesocket(sock);
+		err = "upgrade rejected: " + resp.substr(0, resp.find("\r\n"));
+		return false;
+	}
+
+	// Client frames MUST be masked; an all-zero mask key is valid and keeps
+	// the multi-MB payload zero-copy (XOR with 0 = identity).
+	auto sendFrame = [&](uint8_t opcode, const void* p, size_t n) -> bool {
+		uint8_t hdr[14];
+		size_t h = 0;
+		hdr[h++] = 0x80 | opcode;
+		if (n < 126) hdr[h++] = 0x80 | (uint8_t)n;
+		else if (n < 65536) {
+			hdr[h++] = 0x80 | 126;
+			hdr[h++] = (uint8_t)(n >> 8); hdr[h++] = (uint8_t)n;
+		} else {
+			hdr[h++] = 0x80 | 127;
+			for (int i = 7; i >= 0; i--) hdr[h++] = (uint8_t)((uint64_t)n >> (8 * i));
+		}
+		hdr[h++] = 0; hdr[h++] = 0; hdr[h++] = 0; hdr[h++] = 0;   // mask key = 0
+		return sendAll(hdr, h) && sendAll(p, n);
+	};
+
+	const char* optOut = "{\"type\":\"control_only\"}";
+	if (!sendFrame(0x1, optOut, strlen(optOut)) || !sendFrame(0x2, frame.data(), frame.size())) {
+		mc_closesocket(sock);
+		err = "push send failed";
+		return false;
+	}
+
+	// Read server frames; skip anything that isn't our text ack (the dest may
+	// still ship its initial SYNC before control_only lands).
+	std::vector<uint8_t> rbuf;
+	auto needBytes = [&](size_t n) -> bool {
+		while (rbuf.size() < n) {
+			char buf[65536];
+			int r = mc_recv(sock, buf, sizeof buf, 0);
+			if (r <= 0) return false;
+			rbuf.insert(rbuf.end(), buf, buf + r);
+		}
+		return true;
+	};
+	auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(25);
+	while (std::chrono::steady_clock::now() < deadline) {
+		if (!needBytes(2)) { err = "ack recv failed/timeout"; mc_closesocket(sock); return false; }
+		uint8_t op = rbuf[0] & 0x0F;
+		uint64_t len = rbuf[1] & 0x7F;
+		size_t off = 2;
+		if (len == 126) { if (!needBytes(4)) break; len = ((uint64_t)rbuf[2] << 8) | rbuf[3]; off = 4; }
+		else if (len == 127) {
+			if (!needBytes(10)) break;
+			len = 0;
+			for (int i = 0; i < 8; i++) len = (len << 8) | rbuf[2 + i];
+			off = 10;
+		}
+		if (!needBytes(off + len)) break;
+		if (op == 0x1) {
+			std::string txt((const char*)rbuf.data() + off, (size_t)len);
+			rbuf.erase(rbuf.begin(), rbuf.begin() + (long)(off + len));
+			try {
+				auto j = json::parse(txt);
+				if (j.value("type", "") == "stpu_ack") { mc_closesocket(sock); return true; }
+				if (j.value("type", "") == "stpu_err") {
+					err = j.value("error", "dest rejected push");
+					mc_closesocket(sock);
+					return false;
+				}
+			} catch (...) {}
+			continue;   // other lobby JSON -- keep waiting
+		}
+		rbuf.erase(rbuf.begin(), rbuf.begin() + (long)(off + len));   // skip binary
+	}
+	mc_closesocket(sock);
+	err = "no ack from dest within 25s";
+	return false;
+}
+
+// Text-side entry: {"type":"migrate","dest":...,"key":...}. Runs on the asio
+// handler thread -- only validates + stashes; the emu thread does the capture.
+static void migHandleRequest(ConnHdl hdl, const json& ctrl)
+{
+	const char* key = fleetKey();
+	if (!key || !*key) {
+		migNotifyRequester(hdl, {{"type","migrate_failed"},{"error","migration disabled: MAPLECAST_FLEET_KEY not set on this server"}});
+		return;
+	}
+	if (ctrl.value("key", "") != key) {
+		migNotifyRequester(hdl, {{"type","migrate_failed"},{"error","bad fleet key"}});
+		return;
+	}
+	std::string dest = ctrl.value("dest", "");
+	if (dest.empty() || dest.size() > 128) {
+		migNotifyRequester(hdl, {{"type","migrate_failed"},{"error","missing dest"}});
+		return;
+	}
+	static std::atomic<int64_t> lastMs{0};
+	int64_t now = (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
+	int64_t prev = lastMs.load(std::memory_order_relaxed);
+	if (now - prev < 10000 || !lastMs.compare_exchange_strong(prev, now)) {
+		migNotifyRequester(hdl, {{"type","migrate_failed"},{"error","migration rate-limited (10s)"}});
+		return;
+	}
+	{
+		std::lock_guard<std::mutex> lock(_migMu);
+		_migDest = dest;
+		_migRequester = hdl;
+		_migSendPending = true;
+	}
+	printf("[migrate] request -> %s (capture on next frame boundary)\n", dest.c_str());
+	fflush(stdout);
+}
+
+// Binary-side entry: an incoming STPU push from another fleet node. Validate +
+// stash + receipt-ack; the emu thread applies at the next frame boundary.
+static void migHandleIncomingPush(ConnHdl hdl, const std::string& data)
+{
+	const char* key = fleetKey();
+	auto reject = [&](const char* why) {
+		printf("[migrate] STPU rejected: %s\n", why);
+		fflush(stdout);
+		migNotifyRequester(hdl, {{"type","stpu_err"},{"error",why}});
+	};
+	if (!key || !*key) { reject("MAPLECAST_FLEET_KEY not set on receiver"); return; }
+	if (data.size() < 12) { reject("short frame"); return; }
+	uint32_t keyLen, rawSize;
+	memcpy(&keyLen, data.data() + 4, 4);
+	if (keyLen > 256 || data.size() < 12 + keyLen) { reject("bad key length"); return; }
+	if (std::string(data.data() + 8, keyLen) != key) { reject("bad fleet key"); return; }
+	memcpy(&rawSize, data.data() + 8 + keyLen, 4);
+	if (rawSize < 1024 * 1024 || rawSize > 128u * 1024 * 1024) { reject("implausible raw size"); return; }
+	{
+		std::lock_guard<std::mutex> lock(_migMu);
+		_migInBlob.assign(data.begin() + 12 + keyLen, data.end());
+		_migInRawSize = rawSize;
+		_migApplyPending = true;
+	}
+	// Pop the emu thread out of runInternal() at the next TRUE frame boundary
+	// (emulator.cpp:2171 consumes this and Stop()s the SH4) — WITHOUT this,
+	// runInternal never returns on a plain server and the apply site is never
+	// reached (proven by the round-3 gate: hook heartbeat fired once at boot).
+	maplecast_mirror::raArmStepStop();
+	printf("[migrate] STPU received: %zu B compressed (raw %u B) -- apply on next frame boundary\n",
+	       data.size() - 12 - keyLen, rawSize);
+	fflush(stdout);
+	migNotifyRequester(hdl, {{"type","stpu_ack"},{"raw",rawSize}});
+}
+
+// EMU THREAD, frame boundary, SH4 halted — called from Emulator::run() BEFORE
+// the frame executes (the state_replica::frameInject precedent). The first
+// live gate (2026-07-15) proved the serverPublish site is the RENDER thread:
+// applying there swapped RAM under a RUNNING SH4 -> verify() abort 0x80000003
+// moments after "APPLIED". Only this site is safe for the apply.
+bool applyPendingMigration()
+{
+	bool apply = false;
+	std::vector<uint8_t> blob;
+	uint32_t rawSize = 0;
+	{
+		std::lock_guard<std::mutex> lock(_migMu);
+		if (_migApplyPending) {
+			apply = true;
+			blob = std::move(_migInBlob);
+			rawSize = _migInRawSize;
+			_migApplyPending = false;
+			_migInBlob.clear();
+		}
+	}
+	if (!apply)
+		return false;
+	static MirrorDecompressor decomp;
+	static bool decompInit = false;
+	if (!decompInit) { decomp.init(64 * 1024 * 1024); decompInit = true; }
+	size_t gotRaw = 0;
+	const uint8_t* raw = decomp.decompress(blob.data(), blob.size(), gotRaw);
+	if (!raw || gotRaw != rawSize) {
+		printf("[migrate] apply ABORTED: decompress got %zu B, expected %u B\n", gotRaw, rawSize);
+		fflush(stdout);
+		return true;   // work was pending: caller must Start()+continue either way
+	}
+	try {
+		// Render guard = the A2 run-ahead recipe (emulator.cpp:1860): DRAIN
+		// the render queue, then loadstate + rend_resync. NOT the lockstep
+		// client's rend_start_rollback() -- that waits on a vramRollback
+		// signal an idle headless render thread never fires (hang, first
+		// gate attempt 2026-07-15). Full (non-lightweight) loadstate: this
+		// is FOREIGN state, the JIT cache/textures must flush.
+		rend_wait_render_idle();
+		Deserializer deser(raw, gotRaw, /*rollback=*/false);
+		emu.loadstate(deser);
+		rend_resync_after_rollback();
+		if (!sh4_sched_is_scheduled(vblank_schid)) {
+			const int re_sch = spg_getNextInterrupt();
+			sh4_sched_request(vblank_schid, re_sch);
+			printf("[migrate] re-armed vblank_schid at +%d cycles\n", re_sch);
+		}
+	} catch (const std::exception& e) {
+		printf("[migrate] emu.loadstate threw: %s -- state unchanged\n", e.what());
+		fflush(stdout);
+		return true;
+	}
+	// Realign every mirror consumer: fresh SYNC for legacy clients, forced
+	// TDWS snapshot for TDW clients (ARCHITECTURE.md bug #8 discipline).
+	maplecast_mirror::requestSyncBroadcast();
+	printf("[migrate] APPLIED %u B state -- game continues from the source node\n", rawSize);
+	fflush(stdout);
+	return true;
+}
+
+// serverPublish site (render thread): the CAPTURE side only. dc_serialize from
+// here is the same proven path as drainMcsvCapture / control-WS savestate_save.
+void drainMigration()
+{
+	// -- capture + hand off (this node is the SOURCE) --
+	std::string dest;
+	ConnHdl requester;
+	{
+		std::lock_guard<std::mutex> lock(_migMu);
+		if (!_migSendPending) return;
+		dest = _migDest;
+		requester = _migRequester;
+		_migSendPending = false;
+	}
+	size_t rawSz = 0;
+	uint8_t* rawState = maplecast_mirror::buildFullSaveState(rawSz);
+	if (!rawState) {
+		migNotifyRequester(requester, {{"type","migrate_failed"},{"error","state capture failed"}});
+		return;
+	}
+	printf("[migrate] captured %zu B state -- compress+push to %s off-thread\n", rawSz, dest.c_str());
+	fflush(stdout);
+	std::thread([dest, requester, rawState, rawSz]() {
+		MirrorCompressor comp;
+		comp.init(rawSz + rawSz / 2 + 1024);
+		size_t compSize = 0;
+		uint64_t compUs = 0;
+		const uint8_t* compPtr = comp.compress(rawState, (uint32_t)rawSz, compSize, compUs);
+		const char* key = fleetKey();   // validated non-null at request time
+		uint32_t keyLen = (uint32_t)strlen(key), raw32 = (uint32_t)rawSz;
+		std::vector<uint8_t> frame;
+		frame.reserve(12 + keyLen + compSize);
+		frame.insert(frame.end(), {'S','T','P','U'});
+		frame.insert(frame.end(), (uint8_t*)&keyLen, (uint8_t*)&keyLen + 4);
+		frame.insert(frame.end(), key, key + keyLen);
+		frame.insert(frame.end(), (uint8_t*)&raw32, (uint8_t*)&raw32 + 4);
+		frame.insert(frame.end(), compPtr, compPtr + compSize);
+		free(rawState);
+		std::string err;
+		if (migPushToDest(dest, frame, err)) {
+			printf("[migrate] dest %s ACKED (%zu B wire) -- redirecting client\n", dest.c_str(), frame.size());
+			fflush(stdout);
+			migNotifyRequester(requester, {{"type","migrated"},{"dest",dest}});
+		} else {
+			printf("[migrate] push to %s FAILED: %s\n", dest.c_str(), err.c_str());
+			fflush(stdout);
+			migNotifyRequester(requester, {{"type","migrate_failed"},{"error",err}});
+		}
+	}).detach();
 }
 
 }  // namespace maplecast_ws

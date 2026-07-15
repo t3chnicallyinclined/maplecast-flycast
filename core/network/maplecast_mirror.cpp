@@ -2745,8 +2745,12 @@ void serverPublish(TA_context* ctx)
 	// SR.BL=0), NOT on the status thread that requests it — a mid-interrupt
 	// snapshot crashes replica clients on load ("SH4 exception when blocked").
 	// Cheap atomic check every frame; the heavy serialize fires once per match.
-	if (maplecast_ws::active())
+	if (maplecast_ws::active()) {
 		maplecast_ws::drainMcsvCapture();
+		// Live state migration: apply an inbound hand-off / capture an
+		// outbound one. Same emu-thread frame-boundary contract as MCSV.
+		maplecast_ws::drainMigration();
+	}
 
 	if (!maplecast_ws::active() || maplecast_ws::clientCount() == 0) {
 		// Update frame counter + basic telemetry for local overlays

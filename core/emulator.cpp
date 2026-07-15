@@ -54,6 +54,7 @@
 #include "network/maplecast_player.h"
 #include "network/maplecast_replica.h"
 #include "network/maplecast_state_replica.h"
+#include "network/maplecast_ws_server.h"   // applyPendingMigration (live state hand-off)
 #include "network/maplecast_input_sink.h"
 #include "network/maplecast_evdev_input.h"
 #ifdef _WIN32
@@ -1234,6 +1235,10 @@ void Emulator::run()
 			return;
 		}
 	}
+	// Live state migration apply (docs/STATE-HANDOFF-PLAN.md): ONLY safe site —
+	// emu thread, frame boundary, SH4 halted. The serverPublish site is the
+	// render thread; applying there crashed the SH4 mid-execution (2026-07-15).
+	maplecast_ws::applyPendingMigration();
 	startTime = sh4_sched_now64();
 	renderTimeout = false;
 	if (!singleStep && stepRangeTo == 0)
@@ -1986,6 +1991,14 @@ void Emulator::start()
 						// the trace arms at driver 0x8C030858. One-shot; no-op after.
 						if (mc_readtrace::applyFlip()) {
 							getSh4Executor()->ResetCache();
+							getSh4Executor()->Start();
+							continue;
+						}
+						// Live state migration apply (docs/STATE-HANDOFF-PLAN.md): the STPU
+						// receipt armed raArmStepStop, so runInternal returned with the SH4
+						// PAUSED — the same proven-safe slot as the rollback rewind above.
+						// emu.loadstate flushes JIT/MMU/memwatch itself; resume and continue.
+						if (maplecast_ws::applyPendingMigration()) {
 							getSh4Executor()->Start();
 							continue;
 						}

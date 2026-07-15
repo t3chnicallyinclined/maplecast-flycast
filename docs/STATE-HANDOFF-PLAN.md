@@ -108,12 +108,42 @@ Sources: [CS2 net graph guide](https://steamcommunity.com/sharedfiles/filedetail
 [tickrate primer](https://speedtesthq.com/guides/gaming/what-is-server-tickrate),
 [server browser conventions](https://www.gametracker.com/search/).
 
-## Build order
-1. **v1 server side** in `maplecast_mirror.cpp`: MIGR handler + STPU
-   push/receive using the run-ahead serialize/deserialize primitive +
-   `requestSyncBroadcast()`. Gate: `MAPLECAST_MIGRATE=1` + fleet key.
-2. **Client**: transfer button + REDIRECT handling (switch machinery exists).
-3. Gate test: local rig → sea transfer mid-match; frame-counter continuity
-   check (same discipline as the v0 proof) + byte-gate on the first 100
-   post-transfer frames.
-4. v2 warm standby rides the relay/fan-out arc (SYSTEM-MODEL.md §5).
+## v1 BUILT + GATED (2026-07-15 evening)
+
+Implemented in `maplecast_ws_server.cpp` (migration section at the bottom) +
+`emulator.cpp` (apply slot) + `native-client-tdw` (transfer ▶ button, reply
+handling). **Gate: two instances on one Windows box (A :7200, B :7205);
+marker 0x07000000 planted in A's frame counter via ram_write; client-style
+"migrate" JSON to A → B's counter read exactly 0x07000000 after "APPLIED
+27785526 B state", both processes healthy, B's game advancing.** ACK 0.1s on
+loopback; capture 27.8MB → 10.1MB wire.
+
+### The three thread-contract lessons (each cost a live gate round)
+1. `rend_start_rollback()` (the lockstep-client guard) HANGS a headless
+   server — it waits on a vramRollback signal only a completed render sets.
+   Use the A2 recipe: `rend_wait_render_idle()`.
+2. The serverPublish site is the RENDER thread. Applying there swaps RAM
+   under a RUNNING SH4 → `verify()` abort 0x80000003 seconds after "APPLIED".
+   Capture (dc_serialize) from there is fine — same path as MCSV/control-WS
+   saves.
+3. A loop-top emu-thread hook never fires: `runInternal()` does NOT return
+   per frame on a plain server. The working pattern (4th member of the
+   existing family: rollback rewind, oracle-probe reload, readtrace flip):
+   STPU receipt arms `raArmStepStop()` → vblank Stop()s the SH4 at the next
+   true frame boundary → emu loop applies with the SH4 PAUSED →
+   `Start()+continue`.
+
+### Multi-instance servers (same box) — proven by the gate rig
+One flycast process = one SH4 = one game. N games per box = N processes with
+per-instance ports, ALL already env-tunable: `MAPLECAST_PORT` (input UDP),
+`MAPLECAST_SERVER_PORT` (mirror WS; audio = +3), `MAPLECAST_CONTROL_PORT`.
+`_run_srv_tadict_b.bat` = the reference second instance (7105/7205/7215).
+Client directory entries carry `host:port` input hosts for non-7100 instances.
+Capacity math: prod instance ≈ 12% CPU + ~322MB → a 2-vCPU box comfortably
+runs 2-4 instances; lobby "rooms" = instances the hub registers per node.
+
+### Remaining for fleet
+- Fleet rollout: portable rebuild + canary + roll; arm MAPLECAST_FLEET_KEY on
+  every node (local key in `_fleet_key.txt`, NOT committed).
+- Local→edge gate over the real internet (expect ~1s blackout).
+- v2 warm standby rides the relay/fan-out arc (SYSTEM-MODEL.md §5).
