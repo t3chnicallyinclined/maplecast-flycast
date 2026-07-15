@@ -142,8 +142,26 @@ Client directory entries carry `host:port` input hosts for non-7100 instances.
 Capacity math: prod instance ≈ 12% CPU + ~322MB → a 2-vCPU box comfortably
 runs 2-4 instances; lobby "rooms" = instances the hub registers per node.
 
-### Remaining for fleet
-- Fleet rollout: portable rebuild + canary + roll; arm MAPLECAST_FLEET_KEY on
-  every node (local key in `_fleet_key.txt`, NOT committed).
-- Local→edge gate over the real internet (expect ~1s blackout).
+### INTERNET GATE PASSED + FLEET ROLLED (2026-07-15 ~22:00)
+**Local Windows desktop → prod main (nobd.net:7200): "migrated" in 0.5s,
+main's frame counter read exactly the locally-planted marker 0x0070700b,
+APPLIED 27785454 B, service healthy.** Fleet uniform on `728d091ca55b`
+(all 5 edges + main, active, NRestarts=0, MAPLECAST_FLEET_KEY armed).
+
+### The edge-OOM saga (lesson 4 — three kills on sea)
+955MB edges idle with flycast ~755MB resident and ~50-70MB available; the
+receive/apply burst OOM-KILLED sea three times DESPITE 3GB of free swap
+(allocation rate outruns reclaim; kill lands seconds after "APPLIED" or even
+at receipt). Fixes layered in: 32MB ctx + early blob free (insufficient) →
+`migEagerInit()` boot-reserved arenas (insufficient — the box has no true
+headroom) → **memory guards: receiver rejects STPU below 150MB MemAvailable,
+source rejects a migrate below 250MB; the player stays put with a clear
+error.** Consequence: **the current 1GB edges decline migrations by design;
+they need 2GB instances to participate** (or a flycast-footprint diet —
+resident is ~443MB anon + 278MB shmem, worth its own audit).
+
+### Remaining
+- v1.1: post-apply ack (today the sender acks on receipt — an apply-side
+  failure after ack still reports "migrated"), rom_hash in the STPU header.
+- Edge participation: upsize to 2GB (user/billing decision) or footprint diet.
 - v2 warm standby rides the relay/fan-out arc (SYSTEM-MODEL.md §5).
