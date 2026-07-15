@@ -715,7 +715,8 @@ static void walkBlocks(const uint8_t* ta, uint32_t taSize, F&& emit)
 	}
 }
 
-static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, uint32_t vframe)
+static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, uint32_t vframe,
+                    const uint8_t* pages, uint32_t pagesLen)
 {
 	auto t0 = std::chrono::steady_clock::now();
 	static const uint32_t maxBlocks = [](){ const char* e = std::getenv("MAPLECAST_TADICT_MAXBLOCKS");
@@ -827,6 +828,12 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 	memcpy(inner.data() + 12, &nBlocks, 4);
 	memcpy(inner.data() + 16, &newSection, 4);
 	inner.insert(inner.end(), news.begin(), news.end());
+	// ONE-PROTOCOL pages (envelope bit4): the legacy page section verbatim
+	// (count-or-sentinel + entries) — the TDW stream's 16MB zstd window
+	// dedupes re-shipped identical pages the same way ZCS2's does.
+	const bool hasPages = pages && pagesLen;
+	if (hasPages)
+		inner.insert(inner.end(), pages, pages + pagesLen);
 
 	// TDW1 envelope: magic(4) dictEpoch(1) flags(1) seq(2) innerSize(4) + stream chunk.
 	bool streamStart = false;
@@ -842,7 +849,8 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 	msg.resize(12 + ZSTD_compressBound(innerSize));
 	msg[0]='T'; msg[1]='D'; msg[2]='W'; msg[3]='1';
 	msg[4] = dictEpoch;
-	msg[5] = (uint8_t)((streamStart ? 1 : 0) | (tacanonMode() == 2 ? 2 : 0) | 8 /*camera in inner*/);
+	msg[5] = (uint8_t)((streamStart ? 1 : 0) | (tacanonMode() == 2 ? 2 : 0)
+		| 8 /*camera in inner*/ | (hasPages ? 16 : 0) /*page section after news*/);
 	memcpy(msg.data() + 6, &seq, 2);
 	memcpy(msg.data() + 8, &innerSize, 4);
 	ZSTD_outBuffer ob{ msg.data() + 12, msg.size() - 12, 0 };
@@ -2969,12 +2977,15 @@ void serverPublish(TA_context* ctx)
 	uint32_t taChecksum = 0;  // placeholder  --  client expects 4 bytes here
 	memcpy(dst, &taChecksum, 4); dst += 4;
 
-	// TDW1 shadow leg (MAPLECAST_TADICT, docs/TA-DICT-WIRE-PLAN.md): dict-encode
-	// the SAME wire TA copy the legacy delta above just shipped. New magics,
-	// broadcast-only — no existing parser's input changes.
-	if (tadictMode() && maplecast_ws::active())
-		tadict::publish(wireTA, taSize, frameNum,
-			ctx->rend.mc_vframe ? ctx->rend.mc_vframe : addrspace::read32(0x8C3496B0));
+	// TDW leg (MAPLECAST_TADICT): stash the wire TA pointer now (the _taBuf slot
+	// stays valid for this frame); the broadcast happens AFTER the dirty-page
+	// loop so TDW1 carries the page section too — ONE PROTOCOL: geometry +
+	// camera + textures in a single per-frame message (envelope bit4).
+	const uint8_t* _tdwTA = nullptr; uint32_t _tdwVf = 0;
+	if (tadictMode() && maplecast_ws::active()) {
+		_tdwTA = wireTA;
+		_tdwVf = ctx->rend.mc_vframe ? ctx->rend.mc_vframe : addrspace::read32(0x8C3496B0);
+	}
 
 	// Persistent palette overrides  --  re-apply custom palette colors to
 	// PVR palette RAM BEFORE the diff scan so the changes are captured
@@ -2998,6 +3009,8 @@ void serverPublish(TA_context* ctx)
 				|| (frameNum > 0 && (frameNum % VCACHE_RESEED_FRAMES) == 0)))
 		_vcacheSent.clear();
 
+	// TDW: the page section starts here (sentinel/count slot + entries).
+	const uint8_t* _tdwPages = dst;
 	// dirtyPageCount slot. In VCACHE mode we write the sentinel + a real-count
 	// slot so the client can tell the two encodings apart.
 	uint8_t* dirtyCountPtr;
@@ -3091,6 +3104,11 @@ void serverPublish(TA_context* ctx)
 	}
 done_diff:
 	memcpy(dirtyCountPtr, &totalDirty, 4);
+
+	// TDW1 broadcast — geometry + camera + the page section just built.
+	if (_tdwTA)
+		tadict::publish(_tdwTA, taSize, frameNum, _tdwVf,
+			_tdwPages, (uint32_t)(dst - _tdwPages));
 
 	// PAGEGATE telemetry (both modes), every 600 frames. Prints even when
 	// forcedTotal==0 — "the forced path never fired" is itself a finding.
