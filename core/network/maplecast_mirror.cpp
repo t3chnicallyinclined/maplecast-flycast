@@ -677,7 +677,16 @@ static void walkBlocks(const uint8_t* ta, uint32_t taSize, F&& emit)
 				else if (colType >= 1 && vol)                  sz = (off + 64 <= taSize) ? 64 : 32;
 				uint32_t tcw; memcpy(&tcw, ta + off + 12, 4);
 				curBody = ((cObj >> 3) & 1) && tcwIsBody(tcw);
-				curPlayer = curBody;               // poly params: only body-bank ones
+				// keep rule v4 (measured 2026-07-14, menu-probe histogram): drop
+				// ONLY the stage geometry (allowlist TCWs — THE 89.6% churn
+				// class); everything else rides — real HUD (fills/chips opaque
+				// 0x80, frames 0x9b, portraits/LV 0x9d/0x9e), menus (TR 0x80
+				// text tiles), shadows (0x8e/0x8f), overlays. HUD churn measured
+				// 2.7% — synthesis not worth the divergence surface.
+				bool tex = (cObj >> 3) & 1;
+				uint32_t addr = tcw & 0x1FFFFF;
+				bool isStage = tex && (addr == 0x9FC00 || addr == 0xA0000);
+				curPlayer = !isStage;
 				isBody = curBody; isPlayer = curPlayer;
 			}
 		} else if (paraType == 5) {
@@ -687,7 +696,11 @@ static void walkBlocks(const uint8_t* ta, uint32_t taSize, F&& emit)
 			isSpr = true; haveParam = true;
 			uint32_t tcw; memcpy(&tcw, ta + off + 12, 4);
 			curBody = tcwIsBody(tcw);
-			curPlayer = !tcwIsHud(tcw);            // ALL sprites except HUD fonts/bars
+			// keep ALL sprites: bodies, satellites, effects — AND font-sheet
+			// sprites (names, timer digits, pause-menu text; measured 2026-07-14:
+			// excluding HUD words killed the START menu). No conflict with the
+			// synthetic HUD — its engine originals are pt4 POLYS, still stripped.
+			curPlayer = true;
 			isBody = curBody; isPlayer = curPlayer;
 		} else if (paraType == 7) {
 			if (inPolyList && haveParam) {
@@ -768,14 +781,27 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 	static const bool playersOnly = [](){ const char* e = std::getenv("MAPLECAST_TADICT_PLAYERS");
 		return e && *e && *e != '0'; }();
 
-	// Inner payload: frameNum, vframe, taSize, nBlocks, newSection, refs, news.
+	// Inner payload: frameNum, vframe, taSize, nBlocks, newSection,
+	//                [camera 132B, envelope flags bit3], refs, news.
 	inner.clear();
-	inner.reserve(20 + taSize / 4);
+	inner.reserve(20 + 132 + taSize / 4);
 	inner.insert(inner.end(), (uint8_t*)&frameNum, (uint8_t*)&frameNum + 4);
 	inner.insert(inner.end(), (uint8_t*)&vframe, (uint8_t*)&vframe + 4);
 	inner.insert(inner.end(), (uint8_t*)&taSize, (uint8_t*)&taSize + 4);
 	uint32_t nBlocks = 0, newSection = 0, keptSize = 0;
 	inner.insert(inner.end(), 8, 0);                       // patched below
+	// ONE-PROTOCOL: the per-frame camera rides TDW1 itself (envelope flags bit3):
+	// stage_id u32 + M2(0x8C2D6AD8) 16f + M1(0x8C2D6B18) 16f — same block as the
+	// ZCS2 bit3 camera. The players client re-projects its LOCAL stage bake with
+	// this; no ZCS2 dependency for geometry or camera (plan §3b endgame (a)).
+	{
+		uint8_t cm[132];
+		uint32_t sid = addrspace::read8(0x8C289638);
+		memcpy(cm, &sid, 4);
+		for (int i = 0; i < 16; i++) { uint32_t v = addrspace::read32(0x8C2D6AD8 + i * 4); memcpy(cm + 4  + i * 4, &v, 4); }
+		for (int i = 0; i < 16; i++) { uint32_t v = addrspace::read32(0x8C2D6B18 + i * 4); memcpy(cm + 68 + i * 4, &v, 4); }
+		inner.insert(inner.end(), cm, cm + 132);
+	}
 	static std::vector<uint8_t> news;
 	news.clear();
 	uint32_t newBodyB = 0, newOtherB = 0;
@@ -816,7 +842,7 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 	msg.resize(12 + ZSTD_compressBound(innerSize));
 	msg[0]='T'; msg[1]='D'; msg[2]='W'; msg[3]='1';
 	msg[4] = dictEpoch;
-	msg[5] = (uint8_t)((streamStart ? 1 : 0) | (tacanonMode() == 2 ? 2 : 0));
+	msg[5] = (uint8_t)((streamStart ? 1 : 0) | (tacanonMode() == 2 ? 2 : 0) | 8 /*camera in inner*/);
 	memcpy(msg.data() + 6, &seq, 2);
 	memcpy(msg.data() + 8, &innerSize, 4);
 	ZSTD_outBuffer ob{ msg.data() + 12, msg.size() - 12, 0 };
