@@ -2489,17 +2489,26 @@ bool applyPendingMigration()
 	}
 	if (!apply)
 		return false;
+	// MEMORY DISCIPLINE (edge nodes have <1GB and flycast idles ~700MB — the
+	// first internet gate OOM-KILLED sea, 2026-07-15): size the decompress
+	// buffer to the actual state (32MB covers DC+Naomi, same as state_sync)
+	// and drop the compressed blob the moment it's decoded.
 	static MirrorDecompressor decomp;
 	static bool decompInit = false;
-	if (!decompInit) { decomp.init(64 * 1024 * 1024); decompInit = true; }
+	if (!decompInit) { decomp.init(32 * 1024 * 1024); decompInit = true; }
 	size_t gotRaw = 0;
 	const uint8_t* raw = decomp.decompress(blob.data(), blob.size(), gotRaw);
+	blob = std::vector<uint8_t>();   // free the 10MB wire blob before loadstate
 	if (!raw || gotRaw != rawSize) {
 		printf("[migrate] apply ABORTED: decompress got %zu B, expected %u B\n", gotRaw, rawSize);
 		fflush(stdout);
 		return true;   // work was pending: caller must Start()+continue either way
 	}
 	try {
+		// Suppress publishes while the state swaps (run-ahead's hidden-leg
+		// tool): a viewer-connected node's render thread would otherwise
+		// diff/ship RAM+VRAM mid-memcpy — a torn frame at best.
+		maplecast_mirror::setSuppressPublish(true);
 		// Render guard = the A2 run-ahead recipe (emulator.cpp:1860): DRAIN
 		// the render queue, then loadstate + rend_resync. NOT the lockstep
 		// client's rend_start_rollback() -- that waits on a vramRollback
@@ -2515,7 +2524,9 @@ bool applyPendingMigration()
 			sh4_sched_request(vblank_schid, re_sch);
 			printf("[migrate] re-armed vblank_schid at +%d cycles\n", re_sch);
 		}
+		maplecast_mirror::setSuppressPublish(false);
 	} catch (const std::exception& e) {
+		maplecast_mirror::setSuppressPublish(false);
 		printf("[migrate] emu.loadstate threw: %s -- state unchanged\n", e.what());
 		fflush(stdout);
 		return true;
