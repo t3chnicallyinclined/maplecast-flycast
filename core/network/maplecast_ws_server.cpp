@@ -20,6 +20,7 @@
 #include "hw/pvr/Renderer_if.h"   // rend_start_rollback / rend_resync_after_rollback
 #include "hw/pvr/spg.h"           // spg_getNextInterrupt
 #include "hw/sh4/sh4_sched.h"     // sh4_sched_request / sh4_sched_is_scheduled
+#include <climits>                // LONG_MAX (migration memory guard)
 extern int vblank_schid;          // defined in hw/pvr/spg.cpp (same pattern as state_sync)
 
 #include <websocketpp/config/asio_no_tls.hpp>
@@ -2253,6 +2254,31 @@ static bool       _migDecompInit = false;
 
 static const char* fleetKey() { return std::getenv("MAPLECAST_FLEET_KEY"); }
 
+// MemAvailable in MB (Linux; ~unlimited elsewhere). The 955MB edges sit at
+// ~50-70MB available with flycast ~755MB resident — an apply OR a capture
+// there OOM-KILLS the node (proven three times on sea, 2026-07-15, despite
+// 3GB free swap: the burst outruns reclaim). A node that can't afford the
+// work must REFUSE it — the player stays put with a clear error instead of
+// the destination dying and rebooting into its own autoload.
+static long memAvailableMB()
+{
+#ifdef __linux__
+	FILE* f = fopen("/proc/meminfo", "r");
+	if (!f) return LONG_MAX;
+	char line[128];
+	long kb = -1;
+	while (fgets(line, sizeof line, f))
+		if (sscanf(line, "MemAvailable: %ld kB", &kb) == 1)
+			break;
+	fclose(f);
+	return kb < 0 ? LONG_MAX : kb / 1024;
+#else
+	return LONG_MAX;
+#endif
+}
+static const long MIG_RECV_MIN_MB = 150;   // blob + arenas already reserved + loadstate churn
+static const long MIG_SEND_MIN_MB = 250;   // 28MB state malloc + 42MB compressor + 10MB frame
+
 // Reserve the migration arenas at BOOT, not on the hot path. Edge nodes run
 // ~50MB from the ceiling; the receive+apply allocation burst (10MB blob +
 // 32MB decompress buffer) outran kernel reclaim TWICE on sea (OOM-KILL,
@@ -2436,6 +2462,14 @@ static void migHandleRequest(ConnHdl hdl, const json& ctrl)
 		migNotifyRequester(hdl, {{"type","migrate_failed"},{"error","missing dest"}});
 		return;
 	}
+	{
+		long availMB = memAvailableMB();
+		if (availMB < MIG_SEND_MIN_MB) {
+			migNotifyRequester(hdl, {{"type","migrate_failed"},
+				{"error","source low on memory (" + std::to_string(availMB) + "MB available)"}});
+			return;
+		}
+	}
 	static std::atomic<int64_t> lastMs{0};
 	int64_t now = (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
 		std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -2465,6 +2499,16 @@ static void migHandleIncomingPush(ConnHdl hdl, const std::string& data)
 		migNotifyRequester(hdl, {{"type","stpu_err"},{"error",why}});
 	};
 	if (!key || !*key) { reject("MAPLECAST_FLEET_KEY not set on receiver"); return; }
+	{
+		long availMB = memAvailableMB();
+		if (availMB < MIG_RECV_MIN_MB) {
+			char why[96];
+			snprintf(why, sizeof why,
+			         "receiver low on memory (%ldMB available, need %ldMB)", availMB, MIG_RECV_MIN_MB);
+			reject(why);
+			return;
+		}
+	}
 	if (data.size() < 12) { reject("short frame"); return; }
 	uint32_t keyLen, rawSize;
 	memcpy(&keyLen, data.data() + 4, 4);
