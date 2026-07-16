@@ -105,6 +105,10 @@ void markVramDirty(uint32_t offset, uint32_t size);
 // The publish path serializes the SYNC build/broadcast on the render thread
 // to avoid races with VRAM mid-update.
 void requestSyncBroadcast();
+// TDW joiner service: queue a TDWS dict snapshot + stream restart on the next
+// publish. Join-path only — independent of the SYNC broadcast machinery (its
+// kill switches / rate limits must never gate a joiner's dictionary).
+void requestTdwSnapshot();
 // A2 run-ahead: suppress serverPublish for the hidden authoritative frame (emu loop sets/clears).
 void setSuppressPublish(bool v);
 bool suppressActive();

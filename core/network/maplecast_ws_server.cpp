@@ -1222,16 +1222,23 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 			if (ctrl["type"] == "subscribe")
 			{
 				try {
-					void* key = (void*)_ws.get_con_from_hdl(hdl).get();
-					std::lock_guard<std::mutex> lock(_connMutex);
-					if (ctrl.value("mode", "") == "tdw") {
-						_tdwOnlyConns.insert(key);
-						printf("[maplecast-ws] client subscribed: tdw-only (legacy legs shed)\n");
-					} else {
-						_tdwOnlyConns.erase(key);
-						printf("[maplecast-ws] client subscribed: all legs\n");
+					bool tdw = ctrl.value("mode", "") == "tdw";
+					{
+						void* key = (void*)_ws.get_con_from_hdl(hdl).get();
+						std::lock_guard<std::mutex> lock(_connMutex);
+						if (tdw) {
+							_tdwOnlyConns.insert(key);
+							printf("[maplecast-ws] client subscribed: tdw-only (legacy legs shed)\n");
+						} else {
+							_tdwOnlyConns.erase(key);
+							printf("[maplecast-ws] client subscribed: all legs\n");
+						}
+						fflush(stdout);
 					}
-					fflush(stdout);
+					// TDW joiners need the dictionary NOW — served directly, never
+					// via the legacy SYNC broadcast (kill switches / rate limits).
+					if (tdw)
+						maplecast_mirror::requestTdwSnapshot();
 				} catch (...) {}
 				return;
 			}

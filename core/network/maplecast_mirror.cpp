@@ -601,6 +601,20 @@ static bool tdwOnly()
 }
 static std::atomic<bool> _tdwResetPending{true};   // TDW1 zstd stream restart (flags bit0)
 static std::atomic<bool> _tdwSnapPending{true};    // send TDWS dict snapshot before next TDW1
+
+// TDW joiner service: queue a TDWS dictionary snapshot + stream restart for
+// the next publish. Called by the ws subscribe handler so a TDW join NEVER
+// depends on the legacy SYNC broadcast machinery — that path has kill
+// switches (MAPLECAST_NO_SCENE_SYNC silently blackholed every post-boot TDW
+// join on main for a day, 2026-07-16) and a 2s rate limit, neither of which
+// should gate a joiner's dictionary.
+void requestTdwSnapshot()
+{
+	if (!_isServer) return;
+	_tdwSnapPending.store(true, std::memory_order_release);
+	_tdwResetPending.store(true, std::memory_order_release);
+}
+
 namespace tadict {
 
 static std::vector<uint8_t>  arena;      // dictionary block bytes, append-only
