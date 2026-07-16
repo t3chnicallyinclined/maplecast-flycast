@@ -623,23 +623,59 @@ static inline uint64_t fnv64(const uint8_t* p, uint32_t n)
 	return h;
 }
 
-static uint32_t internBlock(const uint8_t* p, uint32_t len, bool& isNew)
+// find: id+1 if the exact bytes are already interned, else 0.
+static uint32_t findBlock(const uint8_t* p, uint32_t len)
 {
 	uint64_t h = fnv64(p, len);
 	auto it = byHash.find(h);
 	if (it != byHash.end())
 		for (uint32_t id : it->second)
-			if (blkLen[id] == len && memcmp(arena.data() + blkOff[id], p, len) == 0) {
-				isNew = false;
-				return id;
-			}
+			if (blkLen[id] == len && memcmp(arena.data() + blkOff[id], p, len) == 0)
+				return id + 1;
+	return 0;
+}
+
+static uint32_t insertBlock(const uint8_t* p, uint32_t len)
+{
+	uint64_t h = fnv64(p, len);
 	uint32_t id = (uint32_t)blkOff.size();
 	blkOff.push_back((uint32_t)arena.size());
 	blkLen.push_back((uint8_t)len);
 	arena.insert(arena.end(), p, p + len);
 	byHash[h].push_back(id);
-	isNew = true;
 	return id;
+}
+
+// SPLIT-POSITION coding (MAPLECAST_TDW_SPLITPOS=1, envelope bit6) — the
+// dict-growth killer. Measured (plan §3b): 98.5% of "new" vertex blocks are
+// position-only variants — same sprite, camera-transformed to new f32 corners.
+// A sprite VERTEX param (paraType-7 under a paraType-5 header, 64B) carries
+// its 11 position floats at bytes 4..48; the rest (PCW + packed UVs) is the
+// finite vocabulary. So: dictionary the SHAPE (positions zeroed) and ship the
+// 44 position bytes raw in a per-frame section. Moving sprite: 4B ref + 44B
+// positions and ZERO dict growth, vs 4B ref + 64B literal + a dict entry
+// forever. Ref encoding: top bit set = shape ref, splice the next 44B.
+//
+// TWIN-INTERN determinism (id-space sync with a client that only sees the
+// news literals): whenever a NEW pt7 64B literal is interned, BOTH sides also
+// intern its zeroed-positions twin (if absent) immediately after. The client
+// applies the same rule on receiving the literal — dictionaries stay
+// id-identical with no extra wire. TDWS snapshots carry twins as ordinary
+// entries, so joiners need no special handling.
+static inline bool pcwIsVertex64(const uint8_t* p, uint32_t len)
+{
+	if (len != 64) return false;
+	uint32_t pcw; memcpy(&pcw, p, 4);
+	return ((pcw >> 29) & 7) == 7;
+}
+static void twinInternIfVertex(const uint8_t* p, uint32_t len)
+{
+	if (!pcwIsVertex64(p, len)) return;
+	uint8_t shape[64];
+	memcpy(shape, p, 64);
+	memset(shape + 4, 0, 44);
+	if (memcmp(shape, p, 64) != 0 && !findBlock(shape, 64))
+		insertBlock(shape, 64);
 }
 
 // Emit-order block spans: the taCanonicalize FSM, sizes only (no masking).
@@ -721,7 +757,10 @@ static void walkBlocks(const uint8_t* ta, uint32_t taSize, F&& emit)
 				isBody = curBody; isPlayer = curPlayer;
 			}
 		}
-		emit(ta + off, sz, isBody, isPlayer);
+		// isSprVert: a 64B SPRITE vertex param — the split-position class (its
+		// 11 corner floats live at bytes 4..48; poly vertices have a different
+		// layout and stay whole-block).
+		emit(ta + off, sz, isBody, isPlayer, paraType == 7 && isSpr && sz == 64);
 		off += sz;
 	}
 }
@@ -819,24 +858,48 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 	// PVR reg snapshot (envelope flags bit5): 64B, right after the camera —
 	// the client's NDC/projection matrix reads reg[0] (tile counts).
 	inner.insert(inner.end(), pvrSnap, pvrSnap + 64);
-	static std::vector<uint8_t> news;
+	static const bool splitPos = [](){ const char* e = std::getenv("MAPLECAST_TDW_SPLITPOS");
+		return e && *e && *e != '0'; }();
+	static std::vector<uint8_t> news, posStream;
 	news.clear();
+	posStream.clear();
 	uint32_t newBodyB = 0, newOtherB = 0;
-	walkBlocks(wireTA, taSize, [&](const uint8_t* p, uint32_t len, bool isBody, bool isPlayer){
+	walkBlocks(wireTA, taSize, [&](const uint8_t* p, uint32_t len, bool isBody, bool isPlayer, bool isSprVert){
 		if (playersOnly && !isPlayer) {
 			uint32_t pcw; memcpy(&pcw, p, 4);
 			uint32_t pt = (pcw >> 29) & 7;
 			if (pt == 4 || pt == 5 || pt == 7)
 				return;                     // non-player param/vertex: dropped
 		}
-		bool isNew = false;
-		uint32_t id = internBlock(p, len, isNew);
-		inner.insert(inner.end(), (uint8_t*)&id, (uint8_t*)&id + 4);
-		if (isNew) {
-			news.push_back((uint8_t)len); news.insert(news.end(), p, p + len);
-			if (isBody) newBodyB += len; else newOtherB += len;
-		}
 		nBlocks++; keptSize += len;
+		uint32_t hit = findBlock(p, len);
+		if (hit) {
+			uint32_t id = hit - 1;
+			inner.insert(inner.end(), (uint8_t*)&id, (uint8_t*)&id + 4);
+			return;
+		}
+		if (splitPos && isSprVert) {
+			// position-only variant of a known shape? ship shapeRef + 44B raw
+			// positions — no literal, no dict growth.
+			uint8_t shape[64];
+			memcpy(shape, p, 64);
+			memset(shape + 4, 0, 44);
+			if (uint32_t sh = findBlock(shape, 64)) {
+				uint32_t ref = (sh - 1) | 0x80000000u;
+				inner.insert(inner.end(), (uint8_t*)&ref, (uint8_t*)&ref + 4);
+				posStream.insert(posStream.end(), p + 4, p + 48);
+				return;
+			}
+		}
+		// genuinely new content: intern + ship the literal (client mirrors the
+		// twin-intern so id spaces stay identical).
+		uint32_t id = insertBlock(p, len);
+		inner.insert(inner.end(), (uint8_t*)&id, (uint8_t*)&id + 4);
+		news.push_back((uint8_t)len);
+		news.insert(news.end(), p, p + len);
+		if (isBody) newBodyB += len; else newOtherB += len;
+		if (splitPos)
+			twinInternIfVertex(p, len);
 	});
 	newSection = (uint32_t)news.size();
 	if (playersOnly)
@@ -844,6 +907,13 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 	memcpy(inner.data() + 12, &nBlocks, 4);
 	memcpy(inner.data() + 16, &newSection, 4);
 	inner.insert(inner.end(), news.begin(), news.end());
+	// split-position section (envelope bit6): u32 len + the raw 44B position
+	// runs, consumed in shape-ref order.
+	if (splitPos) {
+		uint32_t posLen = (uint32_t)posStream.size();
+		inner.insert(inner.end(), (uint8_t*)&posLen, (uint8_t*)&posLen + 4);
+		inner.insert(inner.end(), posStream.begin(), posStream.end());
+	}
 	// ONE-PROTOCOL pages (envelope bit4): the legacy page section verbatim
 	// (count-or-sentinel + entries) — the TDW stream's 16MB zstd window
 	// dedupes re-shipped identical pages the same way ZCS2's does.
@@ -883,7 +953,8 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 	msg[4] = dictEpoch;
 	msg[5] = (uint8_t)((streamStart ? 1 : 0) | (tacanonMode() == 2 ? 2 : 0)
 		| 8 /*camera in inner*/ | (hasPages ? 16 : 0) /*page section after news*/
-		| 32 /*pvr snapshot after camera*/);
+		| 32 /*pvr snapshot after camera*/
+		| (splitPos ? 64 : 0) /*split-position section after news*/);
 	memcpy(msg.data() + 6, &seq, 2);
 	memcpy(msg.data() + 8, &innerSize, 4);
 	ZSTD_outBuffer ob{ msg.data() + 12, msg.size() - 12, 0 };
