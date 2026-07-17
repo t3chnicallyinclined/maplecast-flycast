@@ -161,3 +161,11 @@ render ~324 fps; wire 57.9-61.7 fps; 0 drops.
   is wider than 4:3 (a plain 4:3 window runs no egui, no extra submit) — keeps
   the low-latency windowed path clean.
 - debug.rs: bars_hud AtomicBool (F3).
+
+## 2026-07-17 — motion-jitter instrumentation
+- debug.rs: wire_gap_max_x100 + set_wire_gap/wire_gap_max_ms. main.rs Gpu:
+  decode_t + win_wire_gap_max — worst interval between GAME-frame content
+  updates per window (16.7=perfect 60fps; a spike = the visible micro-teleport).
+- Surfaced in the bar HUD ("motion gap N ms", colored) + status file
+  (wire_gap_max_ms). This is the smoothness metric to watch/validate against —
+  distinct from frame_gap_max_ms (present cadence, always smooth at 236fps).

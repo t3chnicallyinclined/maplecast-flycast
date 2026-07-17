@@ -47,6 +47,8 @@ struct Gpu {
     fps_t0: std::time::Instant,
     last_epoch: (u64, u64), // last DECODED (wire_frame, replica_frame) — decode gate + drops
     next_release: std::time::Instant, // jitter buffer: when to release the next buffered frame
+    decode_t: std::time::Instant,     // time of the last game-frame update (wire-jitter metric)
+    win_wire_gap_max: f64,            // worst game-frame update interval this window (ms)
     // egui overlay on the GAME window — the fullscreen pillarbox bar HUD
     // (the tabbed panel is a separate window that fullscreen hides).
     window: Arc<Window>,
@@ -129,6 +131,8 @@ impl Gpu {
             fps_t0: std::time::Instant::now(),
             last_epoch: (u64::MAX, u64::MAX),
             next_release: std::time::Instant::now(),
+            decode_t: std::time::Instant::now(),
+            win_wire_gap_max: 0.0,
         }
     }
 
@@ -152,6 +156,8 @@ impl Gpu {
         let el = self.fps_t0.elapsed().as_secs_f64();
         if el >= 0.5 {
             debug.set_fps(self.frames as f64 / el);
+            debug.set_wire_gap(self.win_wire_gap_max);
+            self.win_wire_gap_max = 0.0;
             self.frames = 0;
             self.fps_t0 = std::time::Instant::now();
         }
@@ -208,6 +214,16 @@ impl Gpu {
         // keeps motion smooth while the expensive work runs only at the server's 60fps.
         let ep = (debug.wire_frame.load(Relaxed), debug.replica_frame.load(Relaxed));
         if ep != self.last_epoch {
+            // motion-jitter metric: how long since the last game-frame update?
+            // steady ~16.7ms = smooth; a spike = a late/bunched frame = the
+            // visible micro-teleport. Ignore the first tick (huge startup gap).
+            if self.last_epoch != (u64::MAX, u64::MAX) {
+                let g = self.decode_t.elapsed().as_secs_f64() * 1000.0;
+                if g > self.win_wire_gap_max {
+                    self.win_wire_gap_max = g;
+                }
+            }
+            self.decode_t = std::time::Instant::now();
             // server frames skipped since the last decode = we couldn't keep up (a drop).
             let prev_rf = self.last_epoch.1;
             if prev_rf != u64::MAX && ep.1 > prev_rf.wrapping_add(1) {
@@ -370,6 +386,12 @@ fn bars_ui(ctx: &egui::Context, d: &debug::DebugState) {
             ui.colored_label(dim, egui::RichText::new(format!(
                 "render {:.0} / wire {:.0} fps", d.fps(), d.wire_fps()
             )).size(12.0));
+            // motion smoothness: worst gap between game-frame updates (16.7=perfect)
+            let wg = d.wire_gap_max_ms();
+            let wgcol = if wg > 33.0 { egui::Color32::from_rgb(255, 110, 90) }
+                        else if wg > 22.0 { egui::Color32::from_rgb(255, 180, 60) }
+                        else { dim };
+            ui.colored_label(wgcol, egui::RichText::new(format!("motion gap {wg:.0} ms")).size(12.0));
             ui.colored_label(dim, egui::RichText::new(format!("{:.2} Mbps", d.mbps())).size(12.0));
             let dropped = d.dropped.load(Relaxed);
             if dropped > 0 {
@@ -1275,12 +1297,12 @@ fn main() {
                         // Live status snapshot (key=value; overwritten each window) — read this
                         // file to see the client's live numbers from outside.
                         let status = format!(
-                            "press_present_ms={:.1}\ninput_rtt_ms={:.1}\nrender_fps={:.1}\nwire_fps={:.1}\nreplica_fps={:.1}\njitter_on={}\njitter_depth={}\ndropped={}\ngame_frame={}\nrender_ms_ema={:.2}\nframe_gap_max_ms={:.1}\nbandwidth_mbps={:.2}\nstage_quads={}\nstage_tex={}\nstage_uploads={}\nbody_uploads={}\nrun_secs={:.0}\n",
+                            "press_present_ms={:.1}\ninput_rtt_ms={:.1}\nrender_fps={:.1}\nwire_fps={:.1}\nreplica_fps={:.1}\njitter_on={}\njitter_depth={}\ndropped={}\ngame_frame={}\nrender_ms_ema={:.2}\nframe_gap_max_ms={:.1}\nwire_gap_max_ms={:.1}\nbandwidth_mbps={:.2}\nstage_quads={}\nstage_tex={}\nstage_uploads={}\nbody_uploads={}\nrun_secs={:.0}\n",
                             debug.e2e_ms(), debug.rtt_ms(), debug.fps(), debug.wire_fps(),
                             debug.replica_fps(), debug.jitter_on.load(Relaxed),
                             debug.jitter_depth.load(Relaxed), debug.dropped.load(Relaxed),
                             debug.frame_num.load(Relaxed), debug.render_ms(),
-                            debug.gap_max_ms(), debug.mbps(),
+                            debug.gap_max_ms(), debug.wire_gap_max_ms(), debug.mbps(),
                             debug.stage_quads.load(Relaxed), debug.stage_tex.load(Relaxed),
                             debug.stage_uploads.load(Relaxed),
                             debug.body_uploads.load(Relaxed), telem_t0.elapsed().as_secs_f64(),

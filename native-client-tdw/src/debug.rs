@@ -31,6 +31,7 @@ pub struct DebugState {
     render_ms_x100: AtomicU64,  // ema of render() CPU time (build + upload + submit)
     render_max_x100: AtomicU64, // worst single render() in the window
     gap_max_x100: AtomicU64,    // worst gap between two presents in the window (the hitch)
+    wire_gap_max_x100: AtomicU64, // worst interval between two GAME-frame updates (motion jitter)
     pub dropped: AtomicU64,     // server frames that arrived but were not drawn in time
     pub body_uploads: AtomicU64, // body-texture GPU uploads (cache MISSES) on the last frame
     pub stage_uploads: AtomicU64, // stage/effect-texture decodes+GPU uploads (cache MISSES) last frame
@@ -125,6 +126,7 @@ impl DebugState {
             render_ms_x100: AtomicU64::new(0),
             render_max_x100: AtomicU64::new(0),
             gap_max_x100: AtomicU64::new(0),
+            wire_gap_max_x100: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             body_uploads: AtomicU64::new(0),
             stage_uploads: AtomicU64::new(0),
@@ -225,6 +227,15 @@ impl DebugState {
         self.render_ms_x100.store((ema_ms * 100.0) as u64, Relaxed);
         self.render_max_x100.store((max_ms * 100.0) as u64, Relaxed);
         self.gap_max_x100.store((gap_max_ms * 100.0) as u64, Relaxed);
+    }
+    /// Worst interval (ms) between two GAME-frame content updates in the window
+    /// — the motion-smoothness metric. ~16.7 = perfectly paced 60fps; a spike
+    /// means a frame arrived late/bunched (the visible micro-teleport).
+    pub fn set_wire_gap(&self, ms: f64) {
+        self.wire_gap_max_x100.store((ms * 100.0) as u64, Relaxed);
+    }
+    pub fn wire_gap_max_ms(&self) -> f64 {
+        self.wire_gap_max_x100.load(Relaxed) as f64 / 100.0
     }
 
     // --- E2E press->present probe ---
