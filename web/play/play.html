@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>MapleCast · King of Marvel</title>
+  <meta name="description" content="Marvel vs Capcom 2, live in your browser. No login, no download — your browser draws the game from a thin state wire.">
+  <meta name="theme-color" content="#08060d">
+  <link rel="stylesheet" href="css/play.css?v=1">
+</head>
+<body>
+  <div class="crt flicker" aria-hidden="true"></div>
+
+  <!-- ============================== TOP BAR ============================== -->
+  <header class="topbar">
+    <a class="brand" href="/"><span class="coin">C</span>MAPLECAST</a>
+    <div class="counts" aria-label="live activity">
+      <span class="c-w"><span class="count" id="watchCount">—</span> WATCHING</span>
+      <span class="c-p"><span class="count" id="playCount">—</span> PLAYING</span>
+      <span class="c-l"><span class="count" id="queueCount">—</span> IN LINE</span>
+    </div>
+    <span class="nologin"><i></i> No login &middot; jump in</span>
+  </header>
+
+  <!-- ============================== KING MARQUEE ============================== -->
+  <div class="marquee" aria-label="current king of the hill">
+    <span class="crown">&#x1F451;</span>
+    <span class="king-name" id="kingName">NO KING</span>
+    <span class="king-streak" id="kingStreak">CABINET OPEN</span>
+  </div>
+
+  <!-- ============================== STAGE ============================== -->
+  <main class="stage">
+
+    <!-- LEFT: Hall of Fame -->
+    <div class="col-left">
+      <div class="panel">
+        <div class="lb-tabs" role="tablist" aria-label="leaderboard sort">
+          <button role="tab" aria-selected="true" data-sort="streak">Streak</button>
+          <button role="tab" aria-selected="false" data-sort="elo">Elo</button>
+          <button role="tab" aria-selected="false" data-sort="today">Today</button>
+        </div>
+        <div class="panel-h" style="border-top:1px solid var(--line)"><span><span class="ic">&#x1F3C6;</span> HALL OF FAME</span></div>
+        <!-- leaderboard.mjs paints rows here -->
+        <div class="leaderboard-list" id="leaderboardList">
+          <div class="lb-row"><span class="rk">1</span><span class="nm">&mdash;</span><span class="v">&mdash;</span></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-h"><span><span class="ic">&#x1F464;</span> CLICK A NAME</span></div>
+        <div style="padding:12px 14px; color:var(--dim); font-size:13px;">Tap any fighter to flip their card &mdash; Elo, W-L, best streak, combos &amp; mains.</div>
+      </div>
+    </div>
+
+    <!-- CENTER: the cabinet -->
+    <div class="col-center">
+      <div class="cabinet-top">&#x25C6;&nbsp; MARVEL VS CAPCOM 2 &nbsp;&#x25C6;</div>
+      <div class="screen" role="img" aria-label="Live match, rendered in your browser">
+        <!-- fallback neon arena shows while the real render warms up -->
+        <canvas class="fallback-arena" id="fallbackArena"></canvas>
+        <!-- the reused WebGPU renderer draws the live game here -->
+        <canvas id="game-canvas" width="640" height="480"></canvas>
+        <div class="name-overlay" id="nameOverlay"></div>
+
+        <!-- fighting HUD -->
+        <div class="match-hud" id="matchHud" aria-hidden="true">
+          <div class="hud-players">
+            <div class="hud-player p1"><div class="bar"><i></i></div><div class="hud-tag">&#x25C4; P1</div></div>
+            <div class="hud-center"><div class="hud-timer" id="hudTimer">&mdash;</div><div class="hud-combo" id="hudCombo"></div></div>
+            <div class="hud-player p2"><div class="bar"><i></i></div><div class="hud-tag">P2 &#x25BA;</div></div>
+          </div>
+          <div class="hud-meters">
+            <div class="meter m1"><i></i><span class="lv">LV1</span></div>
+            <div class="meter m2"><i></i><span class="lv">LV4</span></div>
+          </div>
+        </div>
+
+        <div class="live-badge"><span class="live-dot"></span> LIVE</div>
+
+        <!-- idle overlay when no match is running -->
+        <div class="idle-screen" id="idleScreen">
+          <div class="game-logo chroma">KING OF MARVEL</div>
+          <div class="sub">&#x25C6; INSERT COIN &middot; PRESS START &#x25C6;</div>
+        </div>
+
+        <div class="bezel" aria-hidden="true"></div>
+        <div class="glass" aria-hidden="true"></div>
+      </div>
+
+      <!-- controls -->
+      <div class="controls">
+        <button class="btn btn-primary" id="gotNextBtn"><span class="tri">&#x25B6;</span> I GOT NEXT</button>
+        <button class="btn btn-ghost btn-sm" id="leaveGameBtn" style="display:none"><span class="tri">&#x25A0;</span> LEAVE SEAT</button>
+        <div class="spacer"></div>
+        <button class="icon-btn" id="skinBtn" title="Choose skin" aria-label="Choose skin">&#x1F3A8;</button>
+        <button class="icon-btn" id="fsBtn" title="Fullscreen" aria-label="Fullscreen">&#x26F6;</button>
+        <button class="icon-btn" id="settingsGear" title="Settings &amp; diagnostics" aria-label="Settings and diagnostics">&#x2699;</button>
+      </div>
+
+      <!-- now playing -->
+      <div class="versus">
+        <div class="np-card p1">
+          <div class="np-label">P1</div>
+          <div class="np-name" id="npP1">OPEN</div>
+          <div class="np-record" id="npP1Record">PRESS START</div>
+        </div>
+        <div class="vs-badge">VS</div>
+        <div class="np-card p2">
+          <div class="np-label">P2</div>
+          <div class="np-name" id="npP2">OPEN</div>
+          <div class="np-record" id="npP2Record">PRESS START</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: the line + chat -->
+    <div class="col-right">
+      <div class="panel">
+        <div class="panel-h"><span><span class="ic">&#x1F3AE;</span> THE LINE</span><span class="sub"><span id="queueCountR">0</span> waiting</span></div>
+        <div class="q-me">
+          <span class="lab">You</span>
+          <button class="btn btn-primary btn-sm" id="gotNextBtn2"><span class="tri">&#x25B6;</span> I GOT NEXT</button>
+        </div>
+        <!-- queue.mjs initQueueLive paints #queueList -->
+        <div class="queue-list" id="queueList">
+          <div class="queue-empty">No one in line &mdash; the cabinet is open.</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-h"><span><span class="ic">&#x1F4AC;</span> LIVE CHAT</span><span class="sub"><span id="chatHere">0</span> here</span></div>
+        <!-- chat.mjs initChat paints #chatMessages -->
+        <div class="chat-messages" id="chatMessages">
+          <div class="chat-msg sys"><span class="t">Welcome to the arcade. No login &mdash; say something.</span></div>
+        </div>
+        <form class="chat-input-row" id="chatForm" onsubmit="return false;">
+          <input class="chat-input" id="chatInput" type="text" placeholder="Talk trash&hellip;" maxlength="200"
+                 autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          <button class="chat-send" type="submit">SEND</button>
+        </form>
+      </div>
+    </div>
+  </main>
+
+  <!-- ============================== TICKER ============================== -->
+  <div class="ticker-bar" aria-hidden="true">
+    <div class="ticker-content" id="tickerContent">
+      <span class="ticker-crown">&#x1FA99;</span> CABINET OPEN &mdash; PUT YOUR QUARTER UP &nbsp;&bull;&nbsp; streamed as state, drawn in your browser &nbsp;&bull;&nbsp; no login &nbsp;&bull;&nbsp;
+    </div>
+  </div>
+
+  <!-- ============================== STATUS BAR ============================== -->
+  <div class="statusbar" aria-label="stream stats">
+    <span class="seg tip">&#x25CF; It's not video &mdash; your browser draws it</span>
+    <span class="seg opt">WIRE <b id="stMbps">&mdash;</b></span>
+    <span class="seg">LATENCY <b id="stLatency">&mdash;</b></span>
+    <span class="seg opt">RENDER <b>WebGPU</b> <span class="k">SH4 OFF</span></span>
+    <span class="seg opt">FIDELITY <span class="k">BYTE-EXACT</span></span>
+  </div>
+
+  <script type="module" src="js/boot.mjs?v=1"></script>
+</body>
+</html>
