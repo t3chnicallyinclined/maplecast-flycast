@@ -1911,20 +1911,23 @@ void broadcastBinary(const void* data, size_t size)
 	// type for websocketpp send) and moved into the lambda. On _wsThread,
 	// the send loop runs to completion without any other thread waiting
 	// on it.
-	// Classify once: does a TDW-subscribed client want this message? TDW1/TDWS
-	// always; a ZCST whose uncompressed size exceeds 1MB is a SYNC keyframe
-	// (the render-worker heuristic) — TDW clients still seed/heal from those.
-	// Everything else (ZCST deltas, ZCS2, GSTA/PALF/OBJS/EFCT/TXTR) is legacy.
+	// Classify once: does a TDW-subscribed client want this BROADCAST? ONLY the
+	// TDW1 wire + TDWS dict snapshots. A TDW client is seeded by the targeted
+	// onOpen SYNC (this file, ~L1039) and thereafter keeps VRAM byte-exact from
+	// the complete per-frame page section (TDW1 bit4) over reliable TCP — so the
+	// periodic 60s / scene-change / request-triggered full SYNC broadcasts are
+	// PURE OVERHEAD for it (an 8MB VRAM re-apply hitch every 60s). Those SYNCs
+	// exist to re-base incremental-VRAM viewers (browser ZCST/ZCS2) that can
+	// silently drift on loss. Skip them for TDW conns.
+	// SAFETY NOTE: this holds ONLY while (a) the transport is reliable (direct
+	// :7200 TCP) and (b) the per-frame page diff is complete (the full VRAM
+	// memcmp). If a TDW client is ever served over a lossy/relay path, or the
+	// memcmp is replaced by partial DMA-dirty tracking, restore SYNC for it.
 	bool tdwWanted = false;
 	if (size >= 4) {
 		const uint8_t* b = reinterpret_cast<const uint8_t*>(data);
 		if (memcmp(b, "TDW1", 4) == 0 || memcmp(b, "TDWS", 4) == 0)
 			tdwWanted = true;
-		else if (memcmp(b, "ZCST", 4) == 0 && size >= 8) {
-			uint32_t usize;
-			memcpy(&usize, b + 4, 4);
-			tdwWanted = usize > 1024 * 1024;   // SYNC keyframe
-		}
 	}
 	std::string payload(reinterpret_cast<const char*>(data), size);
 	_ws.get_io_service().post([payload = std::move(payload), tdwWanted]() mutable {
