@@ -148,3 +148,16 @@ render ~324 fps; wire 57.9-61.7 fps; 0 drops.
   (HardwareIndependentFlip vs Composed) — the E2EP probe is blind below present().
 - NEXT (A3/A4): event-driven render wake + DXGI waitable swapchain; shrink the
   FrameDecoder lock hold across parse+upload (main.rs:192-234).
+
+## 2026-07-17 — fullscreen UX: Escape exit + bar HUD
+- Escape leaves borderless-fullscreen (req_fullscreen=0); the only way out
+  since there's no window chrome. F3 toggles the bar HUD.
+- egui overlay ADDED TO THE GAME WINDOW (Gpu now owns egui_ctx/state/renderer
+  + the window Arc): bars_ui() draws connection/server info (name, ping+signal
+  bars, press->present, fps, Mbps, dropped, input host) into the pillarbox side
+  bars — where the separate tabbed panel is hidden in fullscreen. Overlay is a
+  second load-op render pass after the game submit, before present().
+- ZERO-COST GUARD: the whole egui pass is skipped unless the surface aspect
+  is wider than 4:3 (a plain 4:3 window runs no egui, no extra submit) — keeps
+  the low-latency windowed path clean.
+- debug.rs: bars_hud AtomicBool (F3).

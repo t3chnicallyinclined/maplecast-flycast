@@ -47,6 +47,12 @@ struct Gpu {
     fps_t0: std::time::Instant,
     last_epoch: (u64, u64), // last DECODED (wire_frame, replica_frame) — decode gate + drops
     next_release: std::time::Instant, // jitter buffer: when to release the next buffered frame
+    // egui overlay on the GAME window — the fullscreen pillarbox bar HUD
+    // (the tabbed panel is a separate window that fullscreen hides).
+    window: Arc<Window>,
+    egui_ctx: egui::Context,
+    egui_state: egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
 }
 
 impl Gpu {
@@ -96,7 +102,22 @@ impl Gpu {
         let renderer = render::Renderer::new(&device, format);
         *debug.gpu_name.lock().unwrap() = adapter.get_info().name;
 
+        // egui overlay for the bar HUD (same plumbing as DebugWin, on the game surface).
+        let egui_ctx = egui::Context::default();
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &*window,
+            Some(window.scale_factor() as f32),
+            None,
+        );
+        let egui_renderer = egui_wgpu::Renderer::new(&device, format, None, 1);
+
         Self {
+            window,
+            egui_ctx,
+            egui_state,
+            egui_renderer,
             instance,
             adapter,
             surface,
@@ -248,9 +269,125 @@ impl Gpu {
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         self.renderer
             .submit(&self.device, &self.queue, &view, self.config.width, self.config.height);
+
+        // Bar HUD overlay: connection/server info in the pillarbox side bars.
+        // Loads (does not clear) so it composites over the game render. Skipped
+        // ENTIRELY (no egui run / no extra submit) unless there are real bars —
+        // a plain 4:3 window pays nothing on the low-latency path.
+        let has_bars = self.config.width as f32 / self.config.height as f32 > 4.0 / 3.0 + 0.02;
+        if has_bars && debug.bars_hud.load(Relaxed) {
+            let raw = self.egui_state.take_egui_input(&self.window);
+            let out = self.egui_ctx.run(raw, |ctx| bars_ui(ctx, debug));
+            let ppp = out.pixels_per_point;
+            let tris = self.egui_ctx.tessellate(out.shapes, ppp);
+            let sd = egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [self.config.width, self.config.height],
+                pixels_per_point: ppp,
+            };
+            for (id, delta) in &out.textures_delta.set {
+                self.egui_renderer.update_texture(&self.device, &self.queue, *id, delta);
+            }
+            let mut enc = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("bars-hud") });
+            self.egui_renderer.update_buffers(&self.device, &self.queue, &mut enc, &tris, &sd);
+            {
+                let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("bars-hud"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                self.egui_renderer.render(&mut rp, &tris, &sd);
+            }
+            self.queue.submit(Some(enc.finish()));
+            for id in &out.textures_delta.free {
+                self.egui_renderer.free_texture(id);
+            }
+        }
+
         frame.present();
         debug.e2e_present(); // press->present: now - send_time[latched seq] (E2E probe)
     }
+}
+
+/// The fullscreen pillarbox bar HUD: connection + server + perf info drawn into
+/// the black side bars of the GAME window (where the separate panel is hidden).
+/// No-op when the bars are too narrow (a plain 4:3 window).
+fn bars_ui(ctx: &egui::Context, d: &debug::DebugState) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let sr = ctx.screen_rect();
+    let (w, h) = (sr.width(), sr.height());
+    let bar = (w - h * 4.0 / 3.0) * 0.5; // pillarbox bar width (logical pts)
+    if bar < 96.0 {
+        return; // no meaningful bar (windowed / near-4:3) — draw nothing
+    }
+    let white = egui::Color32::from_gray(235);
+    let dim = egui::Color32::from_gray(150);
+    let blue = egui::Color32::from_rgb(120, 200, 255);
+
+    // active server name + ping
+    let (name, rtt) = {
+        let servers = d.servers.lock().unwrap();
+        let i = d.active_server.load(Relaxed) as usize;
+        let n = servers.get(i).map(|s| s.name.clone()).unwrap_or_default();
+        (n, d.server_rtt_x100[i.min(7)].load(Relaxed))
+    };
+    let (bars, bcol) = if rtt == u64::MAX {
+        ("\u{2717}", egui::Color32::from_rgb(255, 90, 90))
+    } else {
+        let ms = rtt as f64 / 100.0;
+        if ms < 15.0 { ("\u{2582}\u{2584}\u{2586}\u{2588}", egui::Color32::from_rgb(80, 220, 120)) }
+        else if ms < 35.0 { ("\u{2582}\u{2584}\u{2586}", egui::Color32::from_rgb(170, 220, 80)) }
+        else if ms < 70.0 { ("\u{2582}\u{2584}", egui::Color32::from_rgb(255, 180, 60)) }
+        else { ("\u{2582}", egui::Color32::from_rgb(255, 110, 90)) }
+    };
+    let e2e = d.e2e_ms();
+
+    egui::Area::new(egui::Id::new("bar-hud-left"))
+        .fixed_pos(egui::pos2(12.0, 16.0))
+        .show(ctx, |ui| {
+            ui.set_max_width(bar - 24.0);
+            ui.label(egui::RichText::new(if name.is_empty() { "—" } else { &name }).color(white).size(15.0).strong());
+            ui.horizontal(|ui| {
+                ui.colored_label(bcol, egui::RichText::new(bars).monospace().size(15.0));
+                let pingtxt = if rtt == u64::MAX { "down".into() } else { format!("{:.1} ms", rtt as f64 / 100.0) };
+                ui.colored_label(blue, pingtxt);
+            });
+            if e2e > 0.0 {
+                ui.colored_label(white, format!("press\u{2192}present  {e2e:.0} ms"));
+            }
+            let mig = d.migrate_status.lock().unwrap().clone();
+            if !mig.is_empty() {
+                ui.colored_label(dim, egui::RichText::new(mig).size(11.0));
+            }
+            ui.add_space(6.0);
+            ui.colored_label(dim, egui::RichText::new(format!(
+                "render {:.0} / wire {:.0} fps", d.fps(), d.wire_fps()
+            )).size(12.0));
+            ui.colored_label(dim, egui::RichText::new(format!("{:.2} Mbps", d.mbps())).size(12.0));
+            let dropped = d.dropped.load(Relaxed);
+            if dropped > 0 {
+                ui.colored_label(egui::Color32::from_rgb(255, 180, 60), format!("dropped {dropped}"));
+            }
+            ui.add_space(4.0);
+            ui.colored_label(egui::Color32::from_gray(90),
+                egui::RichText::new(format!("in \u{2192} {}", d.input_host.lock().unwrap())).size(10.0));
+        });
+
+    // hint in the RIGHT bar, bottom
+    egui::Area::new(egui::Id::new("bar-hud-right"))
+        .fixed_pos(egui::pos2(w - bar + 12.0, h - 34.0))
+        .show(ctx, |ui| {
+            ui.set_max_width(bar - 24.0);
+            ui.colored_label(egui::Color32::from_gray(90),
+                egui::RichText::new("Esc exit \u{00b7} F3 hide \u{00b7} F1/F2 panel").size(10.0));
+        });
 }
 
 /// A separate OS window hosting the egui debug panel (device/queue shared with Gpu).
@@ -1030,6 +1167,18 @@ fn main() {
                                     if vis {
                                         dock_panel();
                                     }
+                                }
+                                winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Escape) => {
+                                    // Escape leaves borderless-fullscreen — the only
+                                    // way out (there's no window chrome to click).
+                                    if debug.fullscreen_on.load(Relaxed) {
+                                        debug.req_fullscreen.store(0, Relaxed);
+                                    }
+                                }
+                                winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::F3) => {
+                                    // F3 toggles the in-game pillarbox bar HUD.
+                                    let v = !debug.bars_hud.load(Relaxed);
+                                    debug.bars_hud.store(v, Relaxed);
                                 }
                                 _ => {}
                             }
