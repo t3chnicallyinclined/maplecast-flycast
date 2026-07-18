@@ -952,7 +952,18 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 	}
 
 	// TDW1 envelope: magic(4) dictEpoch(1) flags(1) seq(2) innerSize(4) + stream chunk.
-	bool streamStart = false;
+	// INDEPENDENT-FRAME mode (MAPLECAST_TDW_INDEP=1, for the QUIC/datagram wire):
+	// reset the compressor EVERY frame so each TDW1 is a self-contained zstd blob,
+	// not a continuation of the prior frame. Streaming zstd (the default) needs
+	// reliable in-order delivery — a single lost datagram desyncs it forever
+	// (the QUIC "stuck": one loss -> permanent (0/0)). With per-frame reset a
+	// lost frame is simply skipped and the next decodes; the client already
+	// resets its decoder on the streamStart bit, so no client change. Costs a
+	// little cross-frame window dedup — but split-position + the dict already do
+	// the heavy deduping, so the delta is small (measure on the frozen replay).
+	static const bool tdwIndep = [](){ const char* e = std::getenv("MAPLECAST_TDW_INDEP");
+		return e && *e && *e != '0'; }();
+	bool streamStart = tdwIndep;
 	if (!zc) { zc = ZSTD_createCCtx(); streamStart = true; }
 	if (_tdwResetPending.exchange(false, std::memory_order_acq_rel)) streamStart = true;
 	if (streamStart) {
