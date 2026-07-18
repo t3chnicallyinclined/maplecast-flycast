@@ -300,6 +300,13 @@ Design: `docs/DATASET-EXPORTER-DESIGN.md`; field catalog: `../mvc2-ai/docs/DATAS
 - **Operator access to the toggle:** the Mod Command Center at `nobd.net/modcmd/` (mod key
   required) — flip **Dataset Recording** for a training session. The control WS itself stays
   loopback-only; the bridge (`maplecast-modbridge`) is the only thing that reaches it.
+- **Recording monitor/control panel:** `nobd.net/modcmd/monitor?key=<KEY>` (page = `web/recmon.html`,
+  served by the bridge's GET `/monitor`; has its own Start/Stop toggle). Shows recording ON/OFF,
+  `in_match`, the live `.mctele` frames/size + client-computed f/s & KB/s, the **decision-frame
+  rate** (% of frames where input changes — the data-quality signal: flat 0 = idle, healthy = real
+  play), and both players' state (char, HP, meter, combo, x) + decoded Input_DEC. Reads live via
+  the bridge's `monitor` action (control-WS `ram_read` + `fs.stat` of the latest recording) — **no
+  binary rebuild**, pure bridge + static page.
 
 ## Code Guidelines
 
