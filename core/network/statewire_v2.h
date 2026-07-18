@@ -65,6 +65,21 @@ inline void encode(const uint8_t* cur, uint32_t n, const uint8_t* ref,
     out.insert(out.end(), body.begin(), body.end());
 }
 
+// Byte length of the v2 block at enc[0..] (so the caller can locate the GFX/pal/HUD
+// tails that follow it in the frame record). Mirrors the JS decodeV2Len.
+inline size_t block_len(const uint8_t* enc, size_t encLen) {
+    if (encLen < 1) return 0;
+    if (enc[0] == 1) return encLen < 5 ? encLen : 5 + (size_t)get_u32(enc + 1);
+    if (encLen < 9) return encLen;
+    uint32_t nRuns = get_u32(enc + 5);
+    size_t o = 9;
+    for (uint32_t r = 0; r < nRuns; r++) {
+        if (o + 8 > encLen) return encLen;
+        o += 8 + (size_t)get_u32(enc + o + 4);
+    }
+    return o;
+}
+
 // Decode `enc` into `blob` (n bytes) given `ref` (the last keyframe, n bytes).
 // Returns false on malformed input. For a keyframe, `blob` becomes the new key.
 inline bool decode(const uint8_t* enc, size_t encLen, const uint8_t* ref,

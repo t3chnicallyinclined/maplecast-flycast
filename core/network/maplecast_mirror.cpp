@@ -18,6 +18,7 @@
 #include <cmath>
 #include "types.h"
 #include "maplecast_mirror.h"
+#include "statewire_v2.h"                // state-wire v2 keyframe/delta codec (FRM2)
 #include "hub_discovery.h"
 #include "hw/pvr/ta_ctx.h"
 #include "hw/pvr/ta.h"
@@ -5126,6 +5127,7 @@ static int64_t _clientNowUs() {
 // MCRR / FRMx / HUDQ magics (LE on the wire)  --  match maplecast_replica_live.cpp.
 static constexpr uint32_t GSTA_MCRR_MAGIC = 0x5252434Du;   // "MCRR"
 static constexpr uint32_t GSTA_FRMX_MAGIC = 0x784D5246u;   // "FRMx"
+static constexpr uint32_t GSTA_FRM2_MAGIC = 0x324D5246u;   // "FRM2" — state-wire v2
 static constexpr uint32_t GSTA_HUDQ_MAGIC = 0x48554451u;   // "HUDQ"
 static constexpr uint32_t GSTA_BTCW_MAGIC = 0x57435442u;   // "BTCW" (resolved-body-tcw tail)
 static constexpr uint32_t GSTA_PL3D_MAGIC = 0x44334C50u;   // "PL3D" (3D-machine SQ-flush tail)
@@ -5731,7 +5733,13 @@ static int gstaDecodeBodies(int nQuad, std::vector<GstaTileWrite>& outTiles)
 			// column-SWAP. Use the RAW storage column for the native twiddle-chunk; the reversed
 			// col stays for the LINEAR path. Byte-gated 52/52+48/48 EXACT (_storm_native_gate.mjs).
 			int ncol = col;
-			if ((dfl & 1) && dm == (int)m) ncol = ((dcx % pCols) + pCols) % pCols;
+			// FLIP4000 storage-column (re_kb/24): re-derive the desc fields at THIS scope —
+			// the sibling block (5670, `if(!gIsEff[q])`) that first computed dm/dcx/dfl/pCols
+			// has closed. For non-eff parts m==mq so W/m==pCols; values are identical to it.
+			// (This is the "SOURCE-ONLY — needs native rebuild" fix the comment above flags.)
+			{ int _dfl = gSrcDesc[4*q+3], _dm = gSrcDesc[4*q+0], _dcx = gSrcDesc[4*q+1];
+			  int _pCols = W / (m < 1 ? 1 : m); if (_pCols < 1) _pCols = 1;
+			  if ((_dfl & 1) && _dm == (int)m) ncol = ((_dcx % _pCols) + _pCols) % _pCols; }
 			int k = gstaTwTileYFirst(ncol, row, Tw, Th);
 			size_t o = (size_t)k * 512;
 			if (o + 512 <= pd.raw.size()) {
@@ -6987,7 +6995,30 @@ static void gstaClientRun(std::string host, int port)
 			}
 			continue;
 		}
-		if (gle32(dd) == GSTA_FRMX_MAGIC) gstaApplyFrame(dd, dn);
+		uint32_t fmagic = gle32(dd);
+		if (fmagic == GSTA_FRMX_MAGIC) {
+			gstaApplyFrame(dd, dn);
+		} else if (fmagic == GSTA_FRM2_MAGIC) {
+			// state-wire v2: decode the dirty-diffed DYNAMIC block vs the last keyframe,
+			// then rebuild a FRMx-equivalent frame ([hdr][raw dyn blob][tails]) so the
+			// unchanged applier splats it exactly as v1. Server forces a keyframe on connect.
+			static std::vector<uint8_t> v2key, v2blob, v2rebuilt;
+			uint32_t dynTotal = 0; for (auto& r : _gstaDynRegs) dynTotal += r.len;
+			const uint8_t* enc = dd + 12; size_t encLen = dn - 12;
+			if (enc[0] != 1 && v2key.size() != dynTotal) continue;   // delta before a keyframe: wait
+			size_t bl = statewire_v2::block_len(enc, encLen);
+			if (!statewire_v2::decode(enc, bl, v2key.empty() ? nullptr : v2key.data(), dynTotal, v2blob)) {
+				printf("[GSTA] v2 decode failed\n"); continue;
+			}
+			if (enc[0] == 1) v2key = v2blob;                          // keyframe becomes the base
+			size_t tailOff = 12 + bl, tailLen = (dn > tailOff) ? dn - tailOff : 0;
+			v2rebuilt.resize(12 + (size_t)dynTotal + tailLen);
+			memcpy(&v2rebuilt[0], dd, 12);                            // header (vframe, taSize) ...
+			uint32_t fm = GSTA_FRMX_MAGIC; memcpy(&v2rebuilt[0], &fm, 4);   // ... magic -> FRMx
+			memcpy(&v2rebuilt[12], v2blob.data(), dynTotal);
+			if (tailLen) memcpy(&v2rebuilt[12 + dynTotal], dd + tailOff, tailLen);
+			gstaApplyFrame(v2rebuilt.data(), v2rebuilt.size());
+		}
 	}
 	mc_closesocket(fd); decomp.destroy();
 }
