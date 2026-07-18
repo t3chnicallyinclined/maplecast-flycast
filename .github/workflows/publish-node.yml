@@ -19,10 +19,13 @@ jobs:
       contents: read
       packages: write
     steps:
-      - name: Checkout (with submodules — flycast deps live in core/deps/**)
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Init flycast dep submodules
+        # Only core/deps (the repo has an orphan gitlink 'mvc2-randomizer-temp'
+        # with no .gitmodules URL that breaks a recursive checkout).
+        run: git submodule update --init --recursive core/deps
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
