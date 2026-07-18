@@ -1,0 +1,30 @@
+# MapleCast TDW → QUIC bridge (docs/OPTIMIZATION-ROADMAP.md D1, Phase 1).
+# Co-located with a flycast server: WS-subscribes the TDW players wire on :7200
+# and re-serves it over QUIC — TDW1 as unreliable datagrams (no head-of-line
+# blocking, the whole point), SYNC/TDWS/oversized frames as reliable per-message
+# uni-streams. Reuses the relay's proven classification (webtransport.rs) but as
+# a standalone binary so the production relay/browser path is untouched.
+[package]
+name = "maplecast-quic-bridge"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "maplecast-quic-bridge"
+path = "src/main.rs"
+
+[dependencies]
+quinn = "0.11"
+rustls = { version = "0.23", features = ["ring"] }
+rcgen = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+bytes = "1"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = 3
+lto = true

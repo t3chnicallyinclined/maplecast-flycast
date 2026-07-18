@@ -20,6 +20,7 @@ mod ffi;
 mod frame;
 mod input;
 mod net;
+mod quic;
 mod render;
 mod replica;
 mod hud;
@@ -971,9 +972,15 @@ fn main() {
     // Native controller -> UDP:7100 (direct to nobd).
     input::spawn_input_thread(input::InputConfig::from_env(), debug.clone());
 
-    // Thin ZCS2 wire -> shared FrameDecoder.
-    // wire url comes from the server directory (entry 0 seeds from MAPLECAST_WS)
-    net::spawn_net_thread(shared.clone(), debug.clone());
+    // Wire -> shared FrameDecoder. MC_QUIC routes TDW over the QUIC bridge
+    // (datagrams, no TCP head-of-line) instead of the TCP WS; otherwise the
+    // WS path (server directory entry 0 from MAPLECAST_WS) as before.
+    if std::env::var("MC_QUIC").is_ok() {
+        log::info!("[net] MC_QUIC set — TDW over QUIC bridge (TCP WS disabled)");
+        quic::spawn_quic_thread(shared.clone(), debug.clone());
+    } else {
+        net::spawn_net_thread(shared.clone(), debug.clone());
+    }
 
     // Second socket: /replica-live seeds + maintains the 16MB SH4 RAM image that
     // render_frame walks to reconstruct the char-stripped fighter bodies.

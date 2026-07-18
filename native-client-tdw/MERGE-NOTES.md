@@ -169,3 +169,14 @@ render ~324 fps; wire 57.9-61.7 fps; 0 drops.
 - Surfaced in the bar HUD ("motion gap N ms", colored) + status file
   (wire_gap_max_ms). This is the smoothness metric to watch/validate against —
   distinct from frame_gap_max_ms (present cadence, always smooth at 236fps).
+
+## 2026-07-17 — QUIC datagram wire (roadmap D1, Phase 1)
+- NEW quic-bridge/ (standalone Rust, quinn): WS-subscribes flycast :7200 TDW,
+  re-serves TDW1->datagram / SYNC+TDWS+oversized->uni-stream. flycast UNCHANGED
+  (loosest coupling — QUIC stays OUT of the C++).
+- native-client-tdw: quinn dep + src/quic.rs (MC_QUIC=1 -> QUIC instead of TCP
+  WS; own copy of the players-mode ZCST/TDWS/TDW1 handler so net.rs is untouched)
+  + measurement (datagram loss% via frame-num gaps, worst inter-arrival). main.rs
+  spawns quic vs net by MC_QUIC. Cert-skip verifier for the self-signed bridge
+  (Phase-1 only; prod uses the real cert).
+- Test: _run_srv_tadict.bat + _run_bridge.bat + (set MC_QUIC=1) _run_native_tdw.bat.
