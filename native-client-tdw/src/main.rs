@@ -18,6 +18,7 @@ mod body_tex;
 mod debug;
 mod ffi;
 mod frame;
+mod gate;
 mod input;
 mod net;
 mod quic;
@@ -591,6 +592,16 @@ fn main() {
         "info,wgpu_core=warn,wgpu_hal=warn,naga=warn,gilrs=error",
     ))
     .init();
+
+    // G0 deterministic loss gate (docs/TDW2-DESIGN.md): offline, no GPU/network.
+    //   maplecast-native gate <capture> [--drop N] [--drop-at ..] [--recover R]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.get(1).map(String::as_str) == Some("gate") {
+            gate::run_gate(&args[2..]);
+            return;
+        }
+    }
 
     log::info!("[ffi] render_frame linked (nscene at rest = {})", ffi::link_probe());
 
