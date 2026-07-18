@@ -173,4 +173,27 @@ uint64_t entryCount();
 // caller can tune cadence per use case).
 void checkpoint(uint64_t frame);
 
+// ── Dataset state-stream (.mctele) sidecar ────────────────────────────
+// Companion to the input log for the mvc2-ai dataset exporter: one
+// full-RAM state blob per published frame, streamed to a session file
+// <recordings_dir>/session-<stamp>.mctele. Gated by MAPLECAST_RECORD_STATE
+// (read in initMatchRecording); OFF unless that env is set, so existing
+// MAPLECAST_RECORD_MATCHES users are unaffected. The mirror's serverPublish
+// builds the blob from guest RAM (this module stays memory-map-agnostic)
+// and calls appendState at the same frame boundary as checkpoint().
+struct StateSeg { uint32_t addr; uint32_t len; };  // guest addr + byte length
+
+// True iff MAPLECAST_RECORD_STATE was set when initMatchRecording ran.
+bool stateRecordingEnabled();
+
+// Declare the per-frame blob layout and open the .mctele. Idempotent —
+// first call opens the file and writes the header; later calls no-op.
+// blobLen must equal the sum of the seg lengths.
+void beginStateStream(const StateSeg* segs, uint32_t nsegs, uint32_t blobLen);
+
+// Append one frame's state blob. `frame` is the publish frame
+// (hdr->frame_count), the same clock the input log uses. No-op until
+// beginStateStream has run.
+void appendState(uint64_t frame, const uint8_t* blob, uint32_t len);
+
 } // namespace maplecast_replay
