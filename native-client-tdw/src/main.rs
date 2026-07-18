@@ -17,6 +17,7 @@ use winit::{
 mod body_tex;
 mod debug;
 mod ffi;
+mod arrival;
 mod frame;
 mod gate;
 mod input;

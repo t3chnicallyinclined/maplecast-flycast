@@ -113,12 +113,8 @@ async fn run(addr: &str, shared: &Arc<Mutex<FrameDecoder>>, debug: &DebugState) 
     *debug.server.lock().unwrap() = format!("quic://{server}");
 
     let mut tdw = Tdw::new();
-    // measurement + telemetry state
-    let mut rx = 0u64; // TDW1 datagrams received
-    let mut lost = 0u64; // TDW1 frames missing (frame-number gaps)
-    let mut last_fn: Option<u32> = None;
-    let mut last_arr = std::time::Instant::now();
-    let mut arr_max = 0f64;
+    // S0 same-stage jitter probe (IDENTICAL metric + log format to the TCP path)
+    let mut probe = crate::arrival::ArrivalProbe::new("QUIC");
     let mut bytes = 0u64;
     let mut t0 = std::time::Instant::now();
 
@@ -127,13 +123,13 @@ async fn run(addr: &str, shared: &Arc<Mutex<FrameDecoder>>, debug: &DebugState) 
             dg = conn.read_datagram() => {
                 let b = dg?;
                 bytes += b.len() as u64;
-                handle(&b, &mut tdw, shared, debug, &mut rx, &mut lost, &mut last_fn, &mut last_arr, &mut arr_max);
+                handle(&b, &mut tdw, shared, debug, &mut probe);
             }
             uni = conn.accept_uni() => {
                 let mut s = uni?;
                 let b = s.read_to_end(32 * 1024 * 1024).await?;
                 bytes += b.len() as u64;
-                handle(&b, &mut tdw, shared, debug, &mut rx, &mut lost, &mut last_fn, &mut last_arr, &mut arr_max);
+                handle(&b, &mut tdw, shared, debug, &mut probe);
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
         }
@@ -143,31 +139,19 @@ async fn run(addr: &str, shared: &Arc<Mutex<FrameDecoder>>, debug: &DebugState) 
             let mbps = bytes as f64 * 8.0 / el / 1e6;
             debug.set_mbps(mbps);
             debug.set_leg_mbps(0.0, 0.0, mbps, 0.0);
-            let losspct = if rx + lost > 0 { lost as f64 * 100.0 / (rx + lost) as f64 } else { 0.0 };
-            log::info!(
-                "[quic] {mbps:.2} Mbps · datagram loss {losspct:.2}% ({lost}/{}) · worst inter-arrival {arr_max:.1} ms",
-                rx + lost
-            );
-            rx = 0;
-            lost = 0;
-            arr_max = 0.0;
+            log::info!("[quic] {mbps:.2} Mbps");
             bytes = 0;
             t0 = std::time::Instant::now();
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn handle(
     b: &[u8],
     tdw: &mut Tdw,
     shared: &Arc<Mutex<FrameDecoder>>,
     debug: &DebugState,
-    rx: &mut u64,
-    lost: &mut u64,
-    last_fn: &mut Option<u32>,
-    last_arr: &mut std::time::Instant,
-    arr_max: &mut f64,
+    probe: &mut crate::arrival::ArrivalProbe,
 ) {
     if b.len() < 4 {
         return;
@@ -189,21 +173,7 @@ fn handle(
         }
         b"TDW1" => match tdw.feed(b) {
             Ok(Some(fr)) => {
-                // measurement: frame-number gaps = lost datagrams (loss), and
-                // the interval since the last accepted frame (delay/jitter).
-                if let Some(pn) = *last_fn {
-                    let d = fr.frame_num.wrapping_sub(pn);
-                    if d > 1 {
-                        *lost += (d - 1) as u64;
-                    }
-                }
-                *last_fn = Some(fr.frame_num);
-                *rx += 1;
-                let g = last_arr.elapsed().as_secs_f64() * 1000.0;
-                if g > *arr_max {
-                    *arr_max = g;
-                }
-                *last_arr = std::time::Instant::now();
+                probe.on_frame(fr.frame_num);   // S0: same-stage arrival jitter + loss
 
                 let mut fd = shared.lock().unwrap();
                 if let Some(pg) = fr.pages.as_deref() {

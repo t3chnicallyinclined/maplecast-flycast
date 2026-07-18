@@ -183,6 +183,7 @@ async fn run(
     let tdw_on = tdw_mode == "gate" || tdw_mode == "render" || tdw_players;
     let tdw_render = tdw_mode == "render";
     let mut tdw = Tdw::new();
+    let mut arr_probe = crate::arrival::ArrivalProbe::new("TCP");   // S0 same-stage jitter probe
     let mut tdw_pending: HashMap<u32, crate::tdw::TdwFrame> = HashMap::new();
     let (mut tdw_eq, mut tdw_ne) = (0u64, 0u64);
     if tdw_on {
@@ -341,6 +342,7 @@ async fn run(
                 match tdw.feed(&b) {
                     Ok(Some(fr)) => {
                         if tdw_players {
+                            arr_probe.on_frame(fr.frame_num);   // S0: same-stage arrival jitter + loss
                             // TDW-ONLY: apply directly — no ZCS2 pairing at all.
                             // TDW1 carries geometry+camera+pvr+pages+E2E tail.
                             {
