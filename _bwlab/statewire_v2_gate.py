@@ -78,6 +78,13 @@ def runs_vs(cur, key):
 #   prev (--prev)     : delta vs the PREVIOUS frame -> tiniest (this frame's churn only)
 #                       but a dropped frame desyncs the chain until the next keyframe.
 PREV = '--prev' in sys.argv
+# --dump PATH [--dumpn N]: write a cross-language test vector (for the JS decoder):
+#   [u32 dynbytes][u32 nframes] then per frame [u32 enclen][enc bytes][u32 crc32(raw blob)]
+import zlib
+DUMP = None; DUMPN = 180
+if '--dump' in sys.argv: DUMP = sys.argv[sys.argv.index('--dump')+1]
+if '--dumpn' in sys.argv: DUMPN = int(sys.argv[sys.argv.index('--dumpn')+1])
+_dumprecs = bytearray(); _dumpcount = 0
 enc_ref = None; keyid = 0          # encoder's reference blob
 dec_ref = None; dec_key = None     # decoder's reference + last keyframe (own state)
 raw_sizes=[]; v2_sizes=[]; v2z_sizes=[]; rawz_sizes=[]
@@ -101,6 +108,9 @@ for fi, pos in enumerate(fpos):
         enc = bytes([0]) + bytes(body); ndelta += 1
         if PREV: enc_ref = cur         # prev-mode: reference rolls forward every frame
     raw_sizes.append(dynbytes)
+    if DUMP and fi < DUMPN:            # cross-language vector: enc + crc of the expected raw blob
+        _dumprecs += struct.pack('<I', len(enc)) + enc + struct.pack('<I', zlib.crc32(cur.tobytes()) & 0xffffffff)
+        _dumpcount += 1
     # --- loss test: maybe drop this delta on the wire ---
     if (not is_key) and DROP > 0 and rng.random() < DROP/100.0:
         dropped_frames.add(fi)
@@ -127,6 +137,11 @@ for fi, pos in enumerate(fpos):
         corrupt += 1
         if first_corrupt is None: first_corrupt = fi
         ok = False
+
+if DUMP:
+    with open(DUMP,'wb') as fo:
+        fo.write(struct.pack('<II', dynbytes, _dumpcount)); fo.write(_dumprecs)
+    print(f"dumped {_dumpcount} test-vector frames ({len(_dumprecs)} B) -> {DUMP}")
 
 raw=np.array(raw_sizes); v2=np.array(v2_sizes); v2z=np.array(v2z_sizes); rawz=np.array(rawz_sizes)
 nfr=len(v2)
