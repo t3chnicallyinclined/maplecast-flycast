@@ -252,6 +252,9 @@ pub struct HubStore {
     pub operators: HashMap<String, Operator>,
     // Pending matchmake ping reports keyed by player_id
     pub pending_pings: HashMap<String, PendingPings>,
+    // OPEN registration anti-spam: unix timestamps of recent NEW-node
+    // registrations per source IP (pruned to the last hour on each check).
+    pub recent_regs: HashMap<std::net::IpAddr, Vec<i64>>,
 }
 
 pub type SharedStore = Arc<RwLock<HubStore>>;

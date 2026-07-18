@@ -22,12 +22,39 @@ use crate::types::*;
 // upgrade to argon2 hash check when operators table is in SurrealDB)
 // ============================================================================
 
-fn validate_operator(store: &HubStore, token: &str) -> Option<String> {
-    store
-        .operators
-        .iter()
-        .find(|(_, op)| op.approved && op.token_hash == token)
-        .map(|(_, op)| op.name.clone())
+// Short stable pseudonymous operator id derived from the (secret) token — just a
+// display label for the map, not cryptographic.
+fn short_id(token: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    token.hash(&mut h);
+    format!("{:08x}", h.finish() as u32)
+}
+
+// OPEN-registration anti-spam: at most LIMIT NEW nodes per source IP per hour.
+// Returns true if the caller is over the limit and should be rejected.
+fn reg_rate_limited(store: &mut HubStore, ip: std::net::IpAddr, now: chrono::DateTime<chrono::Utc>) -> bool {
+    const LIMIT: usize = 20;
+    let cutoff = now.timestamp() - 3600;
+    let v = store.recent_regs.entry(ip).or_default();
+    v.retain(|&t| t > cutoff);
+    if v.len() >= LIMIT {
+        return true;
+    }
+    v.push(now.timestamp());
+    false
+}
+
+// Ownership: only the holder of a node's self-issued token may update/remove it.
+fn token_owns_node(store: &HubStore, token: &str, node_id: &str) -> bool {
+    match store.nodes.get(node_id) {
+        Some(node) => store
+            .operators
+            .get(&node.operator_name)
+            .map(|op| op.token_hash == token)
+            .unwrap_or(false),
+        None => false,
+    }
 }
 
 // ============================================================================
@@ -40,35 +67,61 @@ pub async fn register_node(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
-    let s = store.write().await;
+    let mut s = store.write().await;
+    let now = Utc::now();
 
-    // Validate operator token
-    let operator_name = match validate_operator(&s, &req.operator_token) {
+    // OPEN registration: identity IS the operator_token (a self-issued secret the
+    // node persists, like its node_id). Reuse an existing operator if the token
+    // matches, else auto-create one — no approval gate. Anti-spam: cap NEW nodes
+    // per source IP per hour. The client-side ROM-hash badge flags non-canonical
+    // ROMs; hosting is casual-open (ranked stays on trusted nodes).
+    let is_new_node = !s.nodes.contains_key(&req.node_id);
+    let operator_name = match s
+        .operators
+        .values()
+        .find(|op| op.token_hash == req.operator_token)
+        .map(|op| op.name.clone())
+    {
         Some(name) => name,
         None => {
-            warn!("Registration rejected: invalid operator token from {}", addr);
-            return (
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({"ok": false, "error": "invalid operator token"})),
+            if is_new_node && reg_rate_limited(&mut s, addr.ip(), now) {
+                warn!("Registration rate-limited for {}", addr);
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({"ok": false, "error": "too many new nodes from your address — try again later"})),
+                );
+            }
+            let name = format!("op-{}", short_id(&req.operator_token));
+            s.operators.insert(
+                name.clone(),
+                Operator {
+                    name: name.clone(),
+                    token_hash: req.operator_token.clone(),
+                    approved: true,
+                    max_nodes: 25,
+                    created_at: now,
+                },
             );
+            info!("New operator self-registered: {} from {}", name, addr);
+            name
         }
     };
 
-    // Check if operator has hit their node limit
+    // Per-operator node cap (excludes this node_id so re-registration is free).
     let operator_node_count = s
         .nodes
         .values()
-        .filter(|n| n.operator_name == operator_name && n.status != "offline")
+        .filter(|n| n.operator_name == operator_name && n.status != "offline" && n.node_id != req.node_id)
         .count() as u32;
     let max_nodes = s
         .operators
         .get(&operator_name)
         .map(|o| o.max_nodes)
-        .unwrap_or(5);
+        .unwrap_or(25);
     if operator_node_count >= max_nodes {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"ok": false, "error": "node limit reached"})),
+            Json(serde_json::json!({"ok": false, "error": "node limit reached for this operator"})),
         );
     }
 
@@ -83,7 +136,6 @@ pub async fn register_node(
     let geo = geo::lookup_ip(&geo_ip).await;
     let mut s = store.write().await;
 
-    let now = Utc::now();
     let node = Node {
         node_id: req.node_id.clone(),
         operator_name: operator_name.clone(),
@@ -150,23 +202,19 @@ pub async fn heartbeat(
 ) -> impl IntoResponse {
     let mut s = store.write().await;
 
-    // Validate operator token
-    if validate_operator(&s, &req.operator_token).is_none() {
+    if !s.nodes.contains_key(&node_id) {
         return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"ok": false, "error": "invalid token"})),
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"ok": false, "error": "node not found"})),
         );
     }
-
-    let node: &mut Node = match s.nodes.get_mut(&node_id) {
-        Some(n) => n,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"ok": false, "error": "node not found"})),
-            );
-        }
-    };
+    if !token_owns_node(&s, &req.operator_token, &node_id) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"ok": false, "error": "token does not own this node"})),
+        );
+    }
+    let node: &mut Node = s.nodes.get_mut(&node_id).unwrap();
 
     node.status = req.status;
     node.metrics = Some(req.metrics);
@@ -215,25 +263,24 @@ pub async fn deregister_node(
 ) -> impl IntoResponse {
     let mut s = store.write().await;
 
-    if validate_operator(&s, &q.operator_token).is_none() {
+    if !s.nodes.contains_key(&node_id) {
         return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"ok": false, "error": "invalid token"})),
-        );
-    }
-
-    if let Some(node) = s.nodes.get_mut(&node_id) {
-        info!("Node deregistered: {} ({})", node.name, node_id);
-        node.status = "offline".to_string();
-        // Live feed: node left the mesh — maps drop its pin.
-        let _ = events.send(NodeEvent { kind: "left", node: node_to_public(node) });
-        (StatusCode::OK, Json(serde_json::json!({"ok": true})))
-    } else {
-        (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"ok": false, "error": "node not found"})),
-        )
+        );
     }
+    if !token_owns_node(&s, &q.operator_token, &node_id) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"ok": false, "error": "token does not own this node"})),
+        );
+    }
+    let node = s.nodes.get_mut(&node_id).unwrap();
+    info!("Node deregistered: {} ({})", node.name, node_id);
+    node.status = "offline".to_string();
+    // Live feed: node left the mesh — maps drop its pin.
+    let _ = events.send(NodeEvent { kind: "left", node: node_to_public(node) });
+    (StatusCode::OK, Json(serde_json::json!({"ok": true})))
 }
 
 // ============================================================================
