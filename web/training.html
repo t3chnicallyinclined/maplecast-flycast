@@ -1,0 +1,168 @@
+<!doctype html>
+<meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<base href="/training/">
+<title>MapleCast — Training Console</title>
+<style>
+:root{--bg:#0a0e18;--card:#131b2e;--edge:#233350;--ink:#cdd9ea;--dim:#7f93a8;--accent:#38e0ff;--good:#27ae60;--bad:#c0392b;--warn:#e0a020}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:13px/1.5 system-ui,-apple-system,sans-serif;margin:0;padding:16px;max-width:1080px;margin:0 auto}
+h1{font-size:17px;margin:0;color:var(--accent);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+h2{font-size:11px;letter-spacing:1px;color:var(--dim);text-transform:uppercase;margin:0 0 8px}
+.row{display:grid;gap:12px;margin-top:12px}
+.c2{grid-template-columns:1fr 1fr}.c3{grid-template-columns:1fr 1fr 1fr}.c4{grid-template-columns:repeat(4,1fr)}
+.card{background:var(--card);border:1px solid var(--edge);border-radius:9px;padding:13px}
+.big{font-size:22px;font-weight:700;color:#fff}
+.huge{font-size:30px;font-weight:800;color:#fff;line-height:1}
+.dim{color:var(--dim)}.sub{font-size:11px;color:var(--dim)}
+.badge{padding:4px 13px;border-radius:13px;font-weight:700;font-size:13px}
+.b-off{background:#2a3346;color:var(--dim)}.b-arm{background:var(--warn);color:#201800}.b-rec{background:var(--bad);color:#fff;animation:pulse 1s infinite}
+@keyframes pulse{50%{opacity:.55}}
+button{font:600 13px system-ui;padding:7px 18px;border:0;border-radius:7px;cursor:pointer;background:#2c5aa0;color:#fff}
+button:hover{filter:brightness(1.15)}button.armed{background:var(--bad)}button:disabled{opacity:.5;cursor:default}
+.bar{height:11px;background:#0c1524;border:1px solid var(--edge);border-radius:6px;overflow:hidden;margin:4px 0}.bar>i{display:block;height:100%;transition:width .2s}
+.hp>i{background:linear-gradient(90deg,#e04040,#f5a623)}.red>i{background:#6a1a1a}
+.btns span{display:inline-block;min-width:30px;text-align:center;padding:5px 2px;margin:2px;border-radius:5px;background:#1a2438;color:#4a5a72;font-weight:700;font-size:12px}
+.btns span.p{background:var(--accent);color:#012}
+.dir{font-size:30px;font-weight:800;color:var(--accent);display:inline-block;min-width:56px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;color:var(--dim);font-weight:600;padding:5px 8px;border-bottom:1px solid var(--edge);position:sticky;top:0;background:var(--card)}
+td{padding:5px 8px;border-bottom:1px solid #1a2338}
+.tag{font-size:10px;padding:2px 7px;border-radius:9px;font-weight:700}
+.up{background:#123a22;color:#4ad07e}.pend{background:#3a2e12;color:var(--warn)}
+.scroll{max-height:280px;overflow:auto}
+.kv{display:flex;justify-content:space-between;gap:10px;padding:3px 0;border-bottom:1px solid #1a2338}
+.kv b{color:#fff;font-weight:600}
+#err{color:#e77;font-size:12px;margin-top:8px;min-height:16px}
+.mono{font-family:ui-monospace,Consolas,monospace}
+</style>
+
+<h1>&#129504; MapleCast &middot; Training Console
+  <span id=badge class="badge b-off">OFF</span>
+  <button id=tog onclick=toggle()>Start Recording</button>
+  <span id=state class=sub></span>
+</h1>
+
+<div class="row c2">
+  <!-- current session -->
+  <div class=card>
+    <h2>Current session</h2>
+    <div id=file class="mono dim">&mdash; no session yet &mdash;</div>
+    <div style=margin-top:6px><span class=big id=frames>0</span> frames &nbsp;&middot;&nbsp; <span id=size>0</span> MB
+      &nbsp;&middot;&nbsp; <span id=rate>0</span> f/s &nbsp; <span id=kbs>0</span> KB/s</div>
+    <div style=margin-top:10px>
+      <span class=sub>DECISION-FRAME RATE</span>
+      <div><span class=huge id=dfr>&mdash;</span> <span class=sub>of frames where input changes</span></div>
+      <div class=bar><i id=dfrbar style="width:0;background:var(--accent)"></i></div>
+      <div class=sub>the data-quality signal &mdash; flat 0% = idle, healthy real play climbs into the tens of %</div>
+    </div>
+  </div>
+  <!-- match -->
+  <div class=card>
+    <h2>Match &nbsp;<span id=timer class=dim></span></h2>
+    <div><b id=p1n>P1</b> <span id=p1meta class=sub></span></div>
+    <div class="bar red"><i id=p1red style=width:0></i></div><div class="bar hp"><i id=p1hp style=width:0></i></div>
+    <div style=margin-top:8px><b id=p2n>P2</b> <span id=p2meta class=sub></span></div>
+    <div class="bar red"><i id=p2red style=width:0></i></div><div class="bar hp"><i id=p2hp style=width:0></i></div>
+  </div>
+</div>
+
+<div class="row c2">
+  <div class=card><h2>P1 input (Input_DEC, live)</h2><span class=dir id=p1dir>N</span><div class=btns id=p1btn></div></div>
+  <div class=card><h2>P2 input (Input_DEC, live)</h2><span class=dir id=p2dir>N</span><div class=btns id=p2btn></div></div>
+</div>
+
+<div class="row c4">
+  <div class=card><h2>Local recordings</h2><span class=big id=locn>0</span> files<div class=sub id=locsz>0 MB &middot; 0 frames</div></div>
+  <div class=card><h2>Uploaded &rarr; R2</h2><span class=big id=upn>0</span><div class=sub id=pend>0 pending</div></div>
+  <div class=card><h2>R2 bucket total</h2><span class=big id=r2n>0</span> obj<div class=sub id=r2sz>0 MB</div></div>
+  <div class=card><h2>Last R2 sync</h2><span class=big id=sync>&mdash;</span><div class=sub id=r2err></div></div>
+</div>
+
+<div class="row c2">
+  <div class=card>
+    <h2>Session library</h2>
+    <div class=scroll><table><thead><tr><th>file</th><th>when</th><th>frames</th><th>size</th><th>R2</th></tr></thead><tbody id=sess></tbody></table></div>
+  </div>
+  <div class=card>
+    <h2>Training status</h2>
+    <div class=kv><span>Model</span><b id=tmodel>&mdash;</b></div>
+    <div class=kv><span>Last run</span><b id=trun>&mdash;</b></div>
+    <div id=tmetrics style=margin-top:6px></div>
+    <div class=sub id=tnote style=margin-top:8px></div>
+  </div>
+</div>
+
+<div id=err></div>
+
+<script>
+const KEY=new URLSearchParams(location.search).get('key')||'';
+const $=id=>document.getElementById(id);
+const q=p=>p+(p.includes('?')?'&':'?')+(KEY?'key='+encodeURIComponent(KEY):'');
+const api=(p,opt)=>fetch(q('api/'+p),opt).then(r=>r.json());
+const B=['lp','hp','lk','hk','a1','a2'];
+const HP=144, MB=1048576;
+let last=null,lastT=0,dwin=[],lastSig='';
+function ago(ms){ if(ms==null) return '—'; const s=(Date.now()-ms)/1000;
+  if(s<60) return Math.round(s)+'s ago'; if(s<3600) return Math.round(s/60)+'m ago'; return Math.round(s/3600)+'h ago'; }
+function meta(p){ return p.name+' &middot; HP '+p.hp+'/'+HP+' &middot; meter L'+p.meterLvl+' &middot; combo '+p.combo+' &middot; x '+p.x; }
+function btns(el,i){ el.innerHTML=B.map(k=>'<span class="'+(i[k]?'p':'')+'">'+k.toUpperCase()+'</span>').join(''); }
+
+async function toggle(){ $('tog').disabled=true;
+  try{ const on=$('badge').textContent==='OFF'; const j=await api('record?on='+(on?1:0),{method:'POST'});
+    if(!j.ok) $('err').textContent='toggle failed: '+JSON.stringify(j); }
+  catch(e){ $('err').textContent='toggle error: '+e.message; }
+  $('tog').disabled=false; poll(); }
+
+async function poll(){
+  try{
+    const d=await api('monitor');
+    if(!d.ok||!d.p1){ $('err').textContent='monitor: '+JSON.stringify(d); return; }
+    $('err').textContent='';
+    // 3-state badge: OFF -> ARMED (toggle on, no data yet) -> RECORDING (bytes flowing)
+    const st = d.writing ? 'rec' : (d.recording ? 'arm' : 'off');
+    $('badge').textContent = st==='rec'?'RECORDING':st==='arm'?'ARMED':'OFF';
+    $('badge').className='badge '+(st==='rec'?'b-rec':st==='arm'?'b-arm':'b-off');
+    $('tog').textContent=d.recording?'Stop Recording':'Start Recording'; $('tog').className=d.recording?'armed':'';
+    $('state').textContent=(d.inMatch?'in match':'idle (not capturing)')+(d.writing?' · writing to disk':'');
+    $('timer').textContent='timer '+d.timer;
+    $('p1n').textContent='P1 '+d.p1.name; $('p2n').textContent='P2 '+d.p2.name;
+    $('p1meta').innerHTML=meta(d.p1); $('p2meta').innerHTML=meta(d.p2);
+    $('p1hp').style.width=(d.p1.hp/HP*100)+'%'; $('p2hp').style.width=(d.p2.hp/HP*100)+'%';
+    $('p1red').style.width=(d.p1.red/HP*100)+'%'; $('p2red').style.width=(d.p2.red/HP*100)+'%';
+    $('p1dir').textContent=d.input.p1.dir; $('p2dir').textContent=d.input.p2.dir;
+    btns($('p1btn'),d.input.p1); btns($('p2btn'),d.input.p2);
+    if(d.mctele){ $('file').textContent=d.mctele.name; $('frames').textContent=d.mctele.frames.toLocaleString(); $('size').textContent=(d.mctele.size/MB).toFixed(1);
+      const now=Date.now(); if(last){ const dt=(now-lastT)/1000||1;
+        $('rate').textContent=Math.max(0,Math.round((d.mctele.frames-last.frames)/dt));
+        $('kbs').textContent=Math.max(0,Math.round((d.mctele.size-last.size)/1024/dt)); }
+      last={frames:d.mctele.frames,size:d.mctele.size}; lastT=now;
+    } else { $('file').textContent='— no session yet —'; $('frames').textContent='0'; $('size').textContent='0'; $('rate').textContent='0'; $('kbs').textContent='0'; }
+    // decision-frame rate over a rolling ~80-sample window (client-derived)
+    const sig=JSON.stringify([d.input.p1,d.input.p2]); if(lastSig){ dwin.push(sig!==lastSig); if(dwin.length>80) dwin.shift(); } lastSig=sig;
+    if(dwin.length){ const pct=100*dwin.filter(Boolean).length/dwin.length; $('dfr').textContent=pct.toFixed(0)+'%'; $('dfrbar').style.width=Math.min(100,pct*2)+'%'; }
+  }catch(e){ $('err').textContent='poll error: '+e.message; }
+}
+
+async function slow(){
+  try{
+    const s=await api('storage');
+    if(s.ok){ $('locn').textContent=s.local.count; $('locsz').innerHTML=(s.local.bytes/MB).toFixed(1)+' MB &middot; '+s.local.frames.toLocaleString()+' frames';
+      $('upn').textContent=s.local.uploaded; $('pend').textContent=s.local.pending+' pending';
+      $('r2n').textContent=s.r2.count; $('r2sz').textContent=(s.r2.bytes/MB).toFixed(1)+' MB';
+      $('sync').textContent=ago(s.lastSync); $('r2err').textContent=s.r2.ok?'':(s.r2.err||''); }
+    const j=await api('sessions');
+    if(j.ok){ $('sess').innerHTML = j.sessions.length ? j.sessions.map(x=>
+      '<tr><td class=mono>'+x.name+'</td><td class=dim>'+ago(x.mtime)+'</td><td>'+x.frames.toLocaleString()+'</td><td>'+(x.size/MB).toFixed(1)+' MB</td>'+
+      '<td><span class="tag '+(x.inR2?'up':'pend')+'">'+(x.inR2?'&#10003; R2':'local')+'</span></td></tr>').join('')
+      : '<tr><td colspan=5 class=dim>no recordings yet &mdash; flip Start Recording during a match</td></tr>'; }
+    const t=await api('training');
+    if(t.ok){ const T=t.training; $('tmodel').textContent=T.model||'(none trained yet)'; $('trun').textContent=T.lastRun||'—';
+      $('tmetrics').innerHTML=Object.entries(T.metrics||{}).map(([k,v])=>'<div class=kv><span>'+k+'</span><b>'+v+'</b></div>').join('');
+      $('tnote').textContent=T.note||''; }
+  }catch(e){ /* slow lane is best-effort */ }
+}
+
+setInterval(poll,250); poll();
+setInterval(slow,8000); slow();
+</script>

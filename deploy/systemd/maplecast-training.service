@@ -1,0 +1,24 @@
+[Unit]
+Description=MapleCast Training Console (dataset recording control + monitor + R2/storage)
+Documentation=https://nobd.net/training
+After=network.target maplecast-headless.service
+Wants=maplecast-headless.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/maplecast
+# Reaches the loopback control WS (7211) for state reads + dataset_record.
+Environment=MC_CTRL_PORT=7211
+Environment=MC_TRAIN_PORT=9097
+Environment=MAPLECAST_RECORDINGS_DIR=/opt/maplecast/recordings
+Environment=MC_R2_REMOTE=r2:mvc2-dataset/recordings
+Environment=MC_TRAIN_PAGE=/opt/maplecast/training.html
+# Injected on the box at install time — NEVER commit the real key.
+Environment=MC_TRAIN_KEY=CHANGEME
+ExecStart=/usr/bin/node /opt/maplecast/training_server.mjs
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

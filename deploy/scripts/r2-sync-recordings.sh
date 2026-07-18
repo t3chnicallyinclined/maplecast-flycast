@@ -26,6 +26,7 @@ set -euo pipefail
 REC_DIR="${MAPLECAST_RECORDINGS_DIR:-/var/lib/maplecast/recordings}"
 R2_REMOTE="${R2_REMOTE:-r2:mvc2-dataset/recordings}"   # <bucket>/<prefix>
 RETAIN_DAYS="${RETAIN_DAYS:-2}"                          # local backstop window after upload
+SYNC_MARK="$REC_DIR/.last-r2-sync"                      # mtime read by the Training Console
 
 command -v rclone >/dev/null || { echo "[r2-sync] rclone not installed"; exit 1; }
 [ -d "$REC_DIR" ] || { echo "[r2-sync] no recordings dir: $REC_DIR"; exit 0; }
@@ -40,4 +41,7 @@ rclone copy "$REC_DIR" "$R2_REMOTE" \
 find "$REC_DIR" -type f \
   \( -name '*.mcrec' -o -name '*.mctele' -o -name '*.mctele.zst' -o -name '*.ckpt' \) \
   -mtime +"$RETAIN_DAYS" -print -delete
+
+# 3. Stamp a marker the Training Console reads to show "last R2 sync".
+touch "$SYNC_MARK"
 echo "[r2-sync] done"
