@@ -109,6 +109,7 @@ pub async fn register_node(
         public_relay_url: req.public_relay_url,
         public_control_url: req.public_control_url,
         public_audio_url: req.public_audio_url,
+        game: None,
     };
 
     info!(
@@ -170,6 +171,7 @@ pub async fn heartbeat(
     node.status = req.status;
     node.metrics = Some(req.metrics);
     node.stats = req.stats;
+    node.game = req.game;
     node.last_heartbeat = Utc::now();
     // Reset stale count on successful heartbeat
     if node.status != "offline" {
@@ -191,6 +193,9 @@ pub struct HeartbeatPayload {
     pub status: String,
     pub metrics: NodeMetrics,
     pub stats: NodeStats,
+    /// Live in-match state (flycast getStatus.game), forwarded verbatim. Absent when idle.
+    #[serde(default)]
+    pub game: Option<serde_json::Value>,
 }
 
 // ============================================================================
@@ -522,6 +527,8 @@ fn node_to_public(n: &Node) -> NodePublic {
         rom_hash: n.rom_hash.clone(),
         version: n.version.clone(),
         relay_url: n.relay_url(),
+        metrics: n.metrics.clone(),
+        game: n.game.clone(),
     }
 }
 
@@ -553,6 +560,7 @@ pub async fn active_matches(State(store): State<SharedStore>) -> impl IntoRespon
             "relay_url": n.relay_url(),
             "spectators": n.metrics.as_ref().map(|m| m.clients).unwrap_or(0),
             "frames": n.metrics.as_ref().map(|m| m.frames_received).unwrap_or(0),
+            "game": n.game,
         }))
         .collect();
 

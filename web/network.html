@@ -208,13 +208,65 @@
       font-size: 0.75rem;
       border-top: 1px solid #111;
     }
+
+    /* ── Landing chrome (clean, map-first) ─────────────────────────── */
+    .topbar { display:flex; align-items:center; gap:12px; padding:14px 24px; border-bottom:1px solid #242a33;
+      font-family: system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; }
+    .topbar .logo { font-weight:800; letter-spacing:.3px; display:flex; align-items:center; gap:8px; color:#e2e6ec; }
+    .topbar .logo .dot { width:9px; height:9px; border-radius:50%; background:#34d399; box-shadow:0 0 10px #34d399; }
+    .topbar .sp { flex:1; }
+    .btn { font-family: system-ui,sans-serif; font-weight:600; font-size:14px; padding:9px 16px; border-radius:8px;
+      cursor:pointer; text-decoration:none; border:1px solid #34d399; background:#34d399; color:#03130d;
+      display:inline-flex; gap:7px; align-items:center; }
+    .btn:hover { background:#42e0a8; }
+    .btn.ghost { background:transparent; color:#e2e6ec; border-color:#242a33; }
+    .btn.ghost:hover { border-color:#8b93a1; }
+    .hero { text-align:center; padding:26px 24px 18px; font-family: system-ui,sans-serif; }
+    .hero h1 { font-size:clamp(24px,3.6vw,34px); font-weight:800; letter-spacing:-.4px; color:#e2e6ec; text-shadow:none; }
+    .hero h1 .g { color:#34d399; }
+    .hero p { color:#8b93a1; font-size:clamp(15px,1.8vw,17px); max-width:60ch; margin:10px auto 0; }
+    .why { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; padding:16px 24px 0; font-family: system-ui,sans-serif; }
+    .why > div { background:#12151b; border:1px solid #242a33; border-radius:9px; padding:13px 15px; }
+    .why b { display:block; color:#34d399; font-family:ui-monospace,monospace; font-size:12px; letter-spacing:.5px; margin-bottom:4px; }
+    .why span { color:#8b93a1; font-size:13.5px; }
+    .cta { text-align:center; padding:28px 24px 10px; font-family: system-ui,sans-serif; }
+    .cta .line { color:#8b93a1; font-size:15px; max-width:60ch; margin:0 auto 14px; }
+    @media (max-width:720px){ .why { grid-template-columns:1fr; } }
+
+    /* ── Live matches ──────────────────────────────────────────────── */
+    .live-section { padding: 20px 24px 0; font-family: system-ui,sans-serif; }
+    .live-section h2 { color:#e2e6ec; font-size:1rem; font-weight:700; margin-bottom:12px;
+      display:flex; align-items:center; gap:8px; letter-spacing:0; text-transform:none; text-shadow:none; }
+    .live-section h2::before { content:''; width:8px; height:8px; border-radius:50%; background:#ff5a5a; box-shadow:0 0 8px #ff5a5a; }
+    .live-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:12px; }
+    .match-card { background:#12151b; border:1px solid #242a33; border-radius:9px; padding:13px 15px; }
+    .mc-top { display:flex; justify-content:space-between; font-size:12px; color:#8b93a1; }
+    .mc-vs { display:flex; align-items:center; gap:10px; margin-top:10px; }
+    .mc-team { flex:1; min-width:0; }
+    .mc-chars { font-size:13px; font-weight:600; color:#e2e6ec; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .mc-team.p2 { text-align:right; }
+    .mc-x { font-family:ui-monospace,monospace; font-size:11px; color:#5b6472; }
+    .hp { height:6px; background:#242a33; border-radius:3px; margin-top:6px; overflow:hidden; }
+    .hp i { display:block; height:100%; background:#34d399; }
+    .mc-team.p2 .hp { transform:scaleX(-1); }
+    .mc-bot { margin-top:10px; display:flex; justify-content:space-between; font-size:12px; color:#8b93a1; font-family:ui-monospace,monospace; }
+    .mc-watch { color:#34d399; text-decoration:none; }
+    .mc-watch:hover { text-decoration:underline; }
   </style>
 </head>
 <body>
 
-  <div class="header">
-    <h1>MapleCast Input Servers</h1>
-    <a href="/">Back to Arcade</a>
+  <div class="topbar">
+    <span class="logo"><span class="dot"></span> MapleCast &middot; The Network</span>
+    <span class="sp"></span>
+    <a class="btn ghost" href="/">Watch live &#8599;</a>
+    <a class="btn" href="#host">&#9656; Host a node</a>
+  </div>
+
+  <div class="hero">
+    <h1>More nodes, <span class="g">better games</span>.</h1>
+    <p>Every match runs on the node nearest both players &mdash; so the more people running one,
+      the better everyone's connection. Node operators keep the whole network fast.</p>
   </div>
 
   <div class="stats-bar">
@@ -238,6 +290,17 @@
 
   <div id="map"></div>
 
+  <div class="live-section" id="live-section" style="display:none">
+    <h2>Live now</h2>
+    <div class="live-grid" id="live-grid"></div>
+  </div>
+
+  <div class="why">
+    <div><b>/ lower ping</b><span>Each node halves the network distance for the players closest to it.</span></div>
+    <div><b>/ more capacity</b><span>Every node hosts its own matches &mdash; more nodes, more games at once.</span></div>
+    <div><b>/ it's cheap</b><span>A small box, no GPU. It streams game state, not video &mdash; tiny bandwidth.</span></div>
+  </div>
+
   <div class="latency-section" id="latency-section" style="display:none">
     <h2>Your Latency</h2>
     <div class="latency-grid" id="latency-grid"></div>
@@ -260,6 +323,11 @@
       </thead>
       <tbody id="node-tbody"></tbody>
     </table>
+  </div>
+
+  <div class="cta" id="host">
+    <div class="line">Got a spare Linux box? Put your city on the map. Operator access is approved &mdash; it keeps the network clean.</div>
+    <a class="btn" href="#">&#9656; Request operator access</a>
   </div>
 
   <div class="footer">
@@ -355,9 +423,42 @@
     const nodeList = () => Array.from(nodesById.values());
     function renderAll(probe) {
       const list = nodeList();
+      renderLive(list);
       renderMap(list);
       renderTable(list);
       if (probe) probeAll(list);
+    }
+
+    // ── Live match cards (from each in-match node's game state) ──
+    function hpPct(hp) {
+      if (Array.isArray(hp)) hp = hp[0];
+      const v = Number(hp) || 0;
+      return Math.max(0, Math.min(100, (v / 144) * 100));   // MVC2 health is 0..144
+    }
+    function renderLive(list) {
+      const live = list.filter(n => n.game && n.game.in_match);
+      const sec = document.getElementById('live-section');
+      const grid = document.getElementById('live-grid');
+      // game.in_match is the real "a match is running" signal (relay status only
+      // reports ready/draining), so it also drives the Active Matches stat.
+      document.getElementById('stat-matches').textContent = live.length;
+      if (!live.length) { sec.style.display = 'none'; grid.innerHTML = ''; return; }
+      sec.style.display = 'block';
+      grid.innerHTML = live.map(n => {
+        const g = n.game;
+        const p1 = (g.p1_chars || []).join(' · ') || 'Player 1';
+        const p2 = (g.p2_chars || []).join(' · ') || 'Player 2';
+        const stage = (typeof g.stage === 'number') ? ('Stage ' + g.stage) : (g.stage || '');
+        return `<div class="match-card">
+          <div class="mc-top"><span>${esc(n.name)} · ${esc(n.region)}</span><span>&#128065; ${n.spectators}</span></div>
+          <div class="mc-vs">
+            <div class="mc-team p1"><div class="mc-chars">${esc(p1)}</div><div class="hp"><i style="width:${hpPct(g.p1_hp)}%"></i></div></div>
+            <span class="mc-x">VS</span>
+            <div class="mc-team p2"><div class="mc-chars">${esc(p2)}</div><div class="hp"><i style="width:${hpPct(g.p2_hp)}%"></i></div></div>
+          </div>
+          <div class="mc-bot"><span>${esc(stage)}</span><a class="mc-watch" href="/?watch=${encodeURIComponent(n.node_id)}">Watch &#8599;</a></div>
+        </div>`;
+      }).join('');
     }
 
     // ── Live event feed (SSE) ───────────────────────────────────

@@ -92,6 +92,7 @@ mod tests {
             public_relay_url: None,
             public_control_url: None,
             public_audio_url: None,
+            game: None,
         }
     }
 
