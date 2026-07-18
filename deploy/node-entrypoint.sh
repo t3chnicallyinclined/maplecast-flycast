@@ -59,6 +59,26 @@ for i in $(seq 1 30); do
   sleep 0.5
 done
 
+# ── Hub registration: default to the public hub + a persisted per-node token ──
+# Open registration (anyone with a ROM can host): the token is simply THIS node's
+# ownership secret. Generate a random one on first run and persist it so the node
+# keeps owning its spot on the map across restarts. Mount a volume at
+# ~/.maplecast (/opt/maplecast/.maplecast) to keep the token + node id stable.
+: "${MAPLECAST_HUB_URL:=https://nobd.net/hub/api}"
+: "${MAPLECAST_NODE_NAME:=node-$(hostname)}"
+TOKEN_FILE="$HOME/.maplecast/hub_token"
+if [ -z "$MAPLECAST_HUB_TOKEN" ]; then
+  mkdir -p "$(dirname "$TOKEN_FILE")"
+  if [ -s "$TOKEN_FILE" ]; then
+    MAPLECAST_HUB_TOKEN="$(cat "$TOKEN_FILE")"
+  else
+    MAPLECAST_HUB_TOKEN="$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32)"
+    printf '%s' "$MAPLECAST_HUB_TOKEN" > "$TOKEN_FILE"
+    echo "Generated a new node token (persisted at $TOKEN_FILE)."
+  fi
+fi
+export MAPLECAST_HUB_URL MAPLECAST_HUB_TOKEN MAPLECAST_NODE_NAME
+
 # Build relay args
 RELAY_ARGS="--ws-upstream ws://127.0.0.1:7200 --no-webtransport"
 
