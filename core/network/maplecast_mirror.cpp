@@ -967,6 +967,15 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 	bool streamStart = tdwIndep;
 	if (!zc) { zc = ZSTD_createCCtx(); streamStart = true; }
 	if (_tdwResetPending.exchange(false, std::memory_order_acq_rel)) streamStart = true;
+	// Periodic streamStart re-arm (MAPLECAST_TDW_KEYEVERY=N, 0=off): every N frames emit an
+	// independently-decodable frame so a client that desynced on a lost datagram (QUIC)
+	// recovers within N frames (~N/60 s) instead of freezing until the next SYNC. Costs one
+	// larger reset frame per N (~44 kbps at N=60). Interim; keyframe/delta wire = the real fix.
+	{ static const uint32_t tdwKeyEvery = [](){ const char* e = std::getenv("MAPLECAST_TDW_KEYEVERY");
+		return (uint32_t)(e && *e ? atoi(e) : 0); }();
+	  static uint32_t tdwFrameCtr = 0;
+	  if (tdwKeyEvery > 0 && (tdwFrameCtr % tdwKeyEvery) == 0) streamStart = true;
+	  tdwFrameCtr++; }
 	if (streamStart) {
 		ZSTD_CCtx_reset(zc, ZSTD_reset_session_only);
 		ZSTD_CCtx_setParameter(zc, ZSTD_c_compressionLevel, 3);
@@ -2758,6 +2767,20 @@ void serverPublish(TA_context* ctx)
 			       (unsigned long long)ts.lastPublishedFrame,
 			       (unsigned long long)ts.packetsSent, ts.subscribers,
 			       (unsigned long long)ts.entriesDropped);
+			fflush(stdout);
+		}
+	}
+
+	// Determinism oracle (MAPLECAST_DETLOG): per-frame game-state region hash,
+	// computed independently of the state tap below. Run with DETLOG set both
+	// WITHOUT and WITH MAPLECAST_RECORD_STATE and diff the two [DETLOG] streams —
+	// identical => the read-only tap does not perturb the sim. Works headless
+	// (no lockstep subscriber needed, unlike the SUBHASH path).
+	{
+		static const bool _detLog = std::getenv("MAPLECAST_DETLOG") != nullptr;
+		if (_detLog) {
+			printf("[DETLOG] f=%u h=%016llx\n", (unsigned)_localFrameNum,
+			       (unsigned long long)maplecast_rollback::gameStateRegionHash());
 			fflush(stdout);
 		}
 	}
