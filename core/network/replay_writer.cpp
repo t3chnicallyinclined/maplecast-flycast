@@ -72,6 +72,7 @@ static std::vector<uint8_t>  _teleBuf;               // batched frame entries
 static std::mutex            _teleMtx;
 static uint32_t              _teleBlobLen = 0;
 static long                  _teleFirstFrameOff = 0; // header offset to patch at close
+static std::string           _teleDir;               // .mctele output dir (runtime toggle or env)
 
 // Frame-alignment: stamps in the input log + checkpoint sidecar are
 // relative to the first frame stamped after the deferred capture fires.
@@ -929,6 +930,7 @@ bool initMatchRecording(const std::string& dir, int retentionDays)
 	// input recorder: .mctele is written only when MAPLECAST_RECORD_STATE is set.
 	_teleEnabled.store(std::getenv("MAPLECAST_RECORD_STATE") != nullptr,
 	                   std::memory_order_relaxed);
+	{ std::lock_guard<std::mutex> lk(_teleMtx); _teleDir = dir; }   // env-mode output dir
 
 	// Capture the autoload savestate ONCE. Same dc_savestate +
 	// dc_loadstate dance the single-file recorder does, just keeping
@@ -1021,6 +1023,28 @@ void onFrameInMatchFlag(uint8_t in_match)
 
 bool stateRecordingEnabled() { return _teleEnabled.load(std::memory_order_relaxed); }
 
+// Runtime dataset-recording toggle (admin control WS). _teleEnabled is the single
+// flag the serverPublish tap gates on; flipping it here turns capture on/off live.
+bool datasetRecordingActive() { return _teleEnabled.load(std::memory_order_relaxed); }
+
+void setDatasetRecording(bool on, const std::string& dir)
+{
+	if (on) {
+		{
+			std::lock_guard<std::mutex> lk(_teleMtx);
+			_teleDir = dir.empty() ? std::string("recordings") : dir;
+		}
+		_teleEnabled.store(true, std::memory_order_relaxed);
+		printf("[dataset] recording ON (dir=%s)\n", dir.empty() ? "recordings" : dir.c_str());
+		fflush(stdout);
+	} else {
+		_teleEnabled.store(false, std::memory_order_relaxed);
+		closeStateStream();          // flush + finalize the .mctele
+		printf("[dataset] recording OFF\n");
+		fflush(stdout);
+	}
+}
+
 static void closeStateStream()
 {
 	std::lock_guard<std::mutex> lk(_teleMtx);
@@ -1051,12 +1075,9 @@ void beginStateStream(const StateSeg* segs, uint32_t nsegs, uint32_t blobLen)
 	if (_teleActive.load(std::memory_order_relaxed)) return;
 	if (!_teleEnabled.load(std::memory_order_relaxed)) return;
 
-	std::string dir; uint64_t stampUs;
-	{
-		std::lock_guard<std::mutex> slk(_sessMtx);
-		dir = _sessDir; stampUs = _sessStartUnixUs;
-	}
-	if (dir.empty()) return;
+	if (_teleDir.empty()) return;               // set by setDatasetRecording() or the env init
+	const std::string dir = _teleDir;
+	const uint64_t stampUs = nowUnixUs();
 
 	std::time_t t = (std::time_t)(stampUs / 1000000);
 	std::tm tm;

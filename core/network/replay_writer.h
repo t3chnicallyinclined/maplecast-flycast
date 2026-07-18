@@ -186,6 +186,16 @@ struct StateSeg { uint32_t addr; uint32_t len; };  // guest addr + byte length
 // True iff MAPLECAST_RECORD_STATE was set when initMatchRecording ran.
 bool stateRecordingEnabled();
 
+// ── Runtime dataset-recording toggle (admin, via the control WS) ──────
+// When ON, serverPublish's tap writes the .mctele — per-frame game state PLUS
+// both players' latched Input_DEC, so the dataset is fully self-contained (no
+// .mcrec needed). OFF by default so idle/menu/normal play is never recorded;
+// the operator flips it on for a specific training session and off after. The
+// tap re-checks this every frame, so it takes effect instantly. `dir` is where
+// the .mctele lands (defaults to the record-matches dir).
+bool datasetRecordingActive();
+void setDatasetRecording(bool on, const std::string& dir);
+
 // Declare the per-frame blob layout and open the .mctele. Idempotent —
 // first call opens the file and writes the header; later calls no-op.
 // blobLen must equal the sum of the seg lengths.
