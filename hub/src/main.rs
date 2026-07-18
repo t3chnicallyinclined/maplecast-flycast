@@ -36,7 +36,7 @@ use tracing::info;
 
 use queue::{QueueStore, SharedQueue};
 use replays::SharedReplayCache;
-use types::{Operator, SharedStore};
+use types::{NodeEvent, Operator, SharedEvents, SharedStore};
 
 // Combined app state — handlers extract just the substate they need via FromRef.
 #[derive(Clone)]
@@ -44,6 +44,7 @@ struct AppState {
     store: SharedStore,
     replays: SharedReplayCache,
     queue: SharedQueue,
+    events: SharedEvents,
 }
 
 impl FromRef<AppState> for SharedStore {
@@ -54,6 +55,9 @@ impl FromRef<AppState> for SharedReplayCache {
 }
 impl FromRef<AppState> for SharedQueue {
     fn from_ref(app: &AppState) -> SharedQueue { app.queue.clone() }
+}
+impl FromRef<AppState> for SharedEvents {
+    fn from_ref(app: &AppState) -> SharedEvents { app.events.clone() }
 }
 
 #[derive(Parser, Debug)]
@@ -90,6 +94,10 @@ async fn main() {
 
     let store = types::new_store();
 
+    // Live-event bus — register/heartbeat/deregister/stale-sweep push NodeEvents
+    // here; the /hub/api/events SSE endpoint fans them out to open maps.
+    let (events, _) = tokio::sync::broadcast::channel::<NodeEvent>(256);
+
     // Bootstrap a default operator for development/testing
     if let (Some(name), Some(token)) = (&args.bootstrap_operator, &args.bootstrap_token) {
         let mut s = store.write().await;
@@ -108,8 +116,9 @@ async fn main() {
 
     // Spawn stale node sweeper
     let sweeper_store = store.clone();
+    let sweeper_events = events.clone();
     tokio::spawn(async move {
-        api::stale_sweeper(sweeper_store).await;
+        api::stale_sweeper(sweeper_store, sweeper_events).await;
     });
 
     // Replay cache — scans /var/lib/maplecast/replays on boot + every 60s
@@ -134,6 +143,7 @@ async fn main() {
         store: store.clone(),
         replays: replay_cache,
         queue: queue_store,
+        events,
     };
 
     // Build router
@@ -161,6 +171,8 @@ async fn main() {
         .route("/hub/api/dashboard/stats", get(api::dashboard_stats))
         .route("/hub/api/dashboard/nodes", get(api::dashboard_nodes))
         .route("/hub/api/dashboard/input-servers", get(api::dashboard_nodes))
+        // Live event feed (SSE) — real-time node join/update/leave for the map
+        .route("/hub/api/events", get(api::events))
         // Replay sharing (Phase 5)
         .route("/hub/api/replays", post(replays::upload_replay).get(replays::list_replays))
         .route("/hub/api/replays/{id}", get(replays::download_replay))

@@ -173,7 +173,7 @@ pub struct NodeUrls {
     pub input_udp_port: u16,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct NodePublic {
     pub node_id: String,
     pub name: String,
@@ -191,6 +191,23 @@ pub struct NodePublic {
     pub version: String,
     pub relay_url: String,
 }
+
+// ============================================================================
+// Live event feed — a broadcast bus so the map updates in real time (SSE)
+// instead of the 5s poll. Emitted on register / heartbeat / deregister / the
+// stale-sweeper's status transitions. Subscribers get a clone; a lagging
+// subscriber just misses events and self-heals on its next poll reconcile.
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NodeEvent {
+    /// "joined" | "updated" | "left"
+    pub kind: &'static str,
+    pub node: NodePublic,
+}
+
+/// The event bus. Handlers hold the Sender; the SSE endpoint subscribes.
+pub type SharedEvents = tokio::sync::broadcast::Sender<NodeEvent>;
 
 #[derive(Debug, Serialize)]
 pub struct DashboardStats {

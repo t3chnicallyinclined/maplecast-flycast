@@ -3,10 +3,14 @@ use axum::{
     extract::{Path, Query, State, ConnectInfo},
     http::StatusCode,
     response::IntoResponse,
+    response::sse::{Event, KeepAlive, Sse},
 };
 use chrono::Utc;
 use serde::Deserialize;
+use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::time::Duration;
+use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
 use tracing::{info, warn};
 
 use crate::geo;
@@ -32,6 +36,7 @@ fn validate_operator(store: &HubStore, token: &str) -> Option<String> {
 
 pub async fn register_node(
     State(store): State<SharedStore>,
+    State(events): State<SharedEvents>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
@@ -114,6 +119,9 @@ pub async fn register_node(
 
     s.nodes.insert(req.node_id.clone(), node);
 
+    // Live feed: a node just joined the mesh — push it to every open map.
+    let _ = events.send(NodeEvent { kind: "joined", node: node_to_public(&s.nodes[&req.node_id]) });
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -135,6 +143,7 @@ pub struct HeartbeatAuth {
 
 pub async fn heartbeat(
     State(store): State<SharedStore>,
+    State(events): State<SharedEvents>,
     Path(node_id): Path<String>,
     Json(req): Json<HeartbeatPayload>,
 ) -> impl IntoResponse {
@@ -167,6 +176,9 @@ pub async fn heartbeat(
         node.stale_count = 0;
     }
 
+    // Live feed: refreshed status + metrics (spectators, frame flow) for this node.
+    let _ = events.send(NodeEvent { kind: "updated", node: node_to_public(node) });
+
     (
         StatusCode::OK,
         Json(serde_json::json!({"ok": true})),
@@ -192,6 +204,7 @@ pub struct DeleteQuery {
 
 pub async fn deregister_node(
     State(store): State<SharedStore>,
+    State(events): State<SharedEvents>,
     Path(node_id): Path<String>,
     Query(q): Query<DeleteQuery>,
 ) -> impl IntoResponse {
@@ -207,6 +220,8 @@ pub async fn deregister_node(
     if let Some(node) = s.nodes.get_mut(&node_id) {
         info!("Node deregistered: {} ({})", node.name, node_id);
         node.status = "offline".to_string();
+        // Live feed: node left the mesh — maps drop its pin.
+        let _ = events.send(NodeEvent { kind: "left", node: node_to_public(node) });
         (StatusCode::OK, Json(serde_json::json!({"ok": true})))
     } else {
         (
@@ -467,6 +482,26 @@ pub async fn dashboard_nodes(State(store): State<SharedStore>) -> impl IntoRespo
 }
 
 // ============================================================================
+// GET /hub/api/events — Server-Sent Events: live node join/update/leave feed.
+// The map subscribes here (EventSource) so pins pop in instantly instead of
+// waiting for the 5s poll; the poll stays as a reconcile/fallback. Each SSE
+// message is a JSON NodeEvent {kind, node}. A subscriber that lags past the
+// channel buffer just drops events and re-syncs on its next poll.
+// ============================================================================
+
+pub async fn events(
+    State(bus): State<SharedEvents>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let rx = bus.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|r| {
+        let evt = r.ok()?; // skip a lagged receiver's error frame
+        let e = Event::default().json_data(&evt).ok()?;
+        Some(Ok::<Event, Infallible>(e))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
@@ -528,13 +563,14 @@ pub async fn active_matches(State(store): State<SharedStore>) -> impl IntoRespon
 // Stale node sweeper — runs as a background tokio task
 // ============================================================================
 
-pub async fn stale_sweeper(store: SharedStore) {
+pub async fn stale_sweeper(store: SharedStore, events: SharedEvents) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
 
     loop {
         interval.tick().await;
         let now = Utc::now();
         let mut s = store.write().await;
+        let mut transitions: Vec<NodeEvent> = Vec::new();
 
         for node in s.nodes.values_mut() {
             if node.status == "offline" {
@@ -553,6 +589,8 @@ pub async fn stale_sweeper(store: SharedStore) {
                     );
                     node.status = "offline".to_string();
                     node.stale_count += 1;
+                    // Live feed: node went dark — maps drop its pin.
+                    transitions.push(NodeEvent { kind: "left", node: node_to_public(node) });
                 }
             } else if age > 30 {
                 if node.status != "stale" {
@@ -561,6 +599,7 @@ pub async fn stale_sweeper(store: SharedStore) {
                         node.name, node.node_id, age
                     );
                     node.status = "stale".to_string();
+                    transitions.push(NodeEvent { kind: "updated", node: node_to_public(node) });
                 }
             }
         }
@@ -569,5 +608,10 @@ pub async fn stale_sweeper(store: SharedStore) {
         s.pending_pings.retain(|_, p| {
             now.signed_duration_since(p.submitted_at).num_seconds() < 300
         });
+
+        drop(s);
+        for ev in transitions {
+            let _ = events.send(ev);
+        }
     }
 }

@@ -348,6 +348,40 @@
       });
     }
 
+    // ── Live node cache ─────────────────────────────────────────
+    // The poll is the authoritative reconcile; the SSE feed updates this
+    // incrementally so pins pop in/out the instant a node joins or drops.
+    const nodesById = new Map();
+    const nodeList = () => Array.from(nodesById.values());
+    function renderAll(probe) {
+      const list = nodeList();
+      renderMap(list);
+      renderTable(list);
+      if (probe) probeAll(list);
+    }
+
+    // ── Live event feed (SSE) ───────────────────────────────────
+    function connectEvents() {
+      let es;
+      try { es = new EventSource(`${HUB_URL}/events`); }
+      catch (e) { console.warn('[dashboard] SSE unavailable:', e.message); return; }
+      es.onmessage = (ev) => {
+        let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+        const n = msg.node;
+        if (!n || !n.node_id) return;
+        if (msg.kind === 'left') nodesById.delete(n.node_id);
+        else nodesById.set(n.node_id, n);         // joined | updated
+        renderAll(false);                          // reuse cached pings; poll re-probes
+        document.getElementById('stat-nodes').textContent = nodesById.size;
+        if (msg.kind === 'joined') flashJoin(n);
+      };
+      // EventSource auto-reconnects on error; the poll keeps the map fresh meanwhile.
+    }
+    function flashJoin(n) {
+      const m = markers.get(n.node_id);
+      if (m) { m.openPopup(); setTimeout(() => m.closePopup(), 2500); }
+    }
+
     // ── Fetch + render ──────────────────────────────────────────
 
     async function fetchAndRender() {
@@ -368,9 +402,10 @@
         if (nodesResp.ok) {
           const data = await nodesResp.json();
           const nodes = data.nodes || [];
-          renderMap(nodes);
-          renderTable(nodes);
-          probeAll(nodes);
+          // Authoritative reconcile: rebuild the cache from the poll, then render.
+          nodesById.clear();
+          for (const n of nodes) nodesById.set(n.node_id, n);
+          renderAll(true);
         }
       } catch (e) {
         console.warn('[dashboard] Fetch failed:', e.message);
@@ -538,6 +573,7 @@
 
     fetchAndRender();
     setInterval(fetchAndRender, POLL_INTERVAL);
+    connectEvents();   // live join/update/leave feed — pins pop in without waiting for the poll
   </script>
 </body>
 </html>
