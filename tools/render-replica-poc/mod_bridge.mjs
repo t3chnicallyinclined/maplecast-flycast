@@ -173,6 +173,7 @@ async function special(base, valHex){ const v=parseInt(valHex,16)&0xFF; await wr
 
 const ACT = {
   read: readSlots,
+  dataset_record: async(q)=>{ const m=await ctrl({cmd:'dataset_record', on:!!q.on}); return m.ok ? m.data : m; },
   swapP1: ()=>swapPoint(['P1C1','P1C2']), swapP2: ()=>swapPoint(['P2C1','P2C2']),
   morphP1: ()=>morphInPlace(['P1C1','P1C2']), morphP2: ()=>morphInPlace(['P2C1','P2C2']),
   teleport: teleportSides,
@@ -212,6 +213,11 @@ MVC2-FRAMEDATA-FIELDS.md (anotak↔marvelous2). Watch the webgpu-test tab. ⚠�
 <div class=row><b>Target slot:</b>
 <select id=slot><option>P1C1</option><option>P2C1</option><option>P1C2</option><option>P2C2</option><option>P1C3</option><option>P2C3</option></select>
 <button class=sm onclick=go('read')>🔄 Read all + globals</button></div>
+
+<fieldset><legend>📼 Dataset Recording (training capture)</legend>
+<button id=recbtn onclick=recToggle() style="background:#c0392b;font-weight:bold">● Recording OFF</button>
+<span id=recmsg style="margin-left:8px;color:#8a8"></span><br>
+<small>Captures .mctele (state + both players' inputs) during matches → R2. OFF by default; flip per training session.</small></fieldset>
 
 <fieldset><legend>Character</legend>
 <button onclick=go('morphP1')>🎭 Morph P1 in-place (no tag)</button>
@@ -258,6 +264,13 @@ function go(a){ call(a,{}); }                                   // fixed-slot ac
 function slotCall(a,q){ call(a,{slot:slot(),...(q||{})}); }     // target-slot actions
 function dash(dir){ call('dash',{slot:slot(),dir,speed:val('speed')}); }
 function poke(){ call('poke',{off:val('off'),hex:val('hex')}); }
+let recOn=false;
+async function recToggle(){
+  try{ const r=await fetch('/cmd',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'dataset_record',on:!recOn})});
+    const j=await r.json(); recOn=!!((j.reply&&j.reply.recording)||j.recording); }
+  catch(e){ out.textContent='ERROR: '+e.message; }
+  const b=document.getElementById('recbtn'); b.textContent=recOn?'● Recording ON':'● Recording OFF'; b.style.background=recOn?'#27ae60':'#c0392b';
+  document.getElementById('recmsg').textContent=recOn?'capturing this session…':''; }
 go('read');
 </script>`;
 

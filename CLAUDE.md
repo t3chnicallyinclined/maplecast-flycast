@@ -273,10 +273,13 @@ Design: `docs/DATASET-EXPORTER-DESIGN.md`; field catalog: `../mvc2-ai/docs/DATAS
 
 ### Admin toggle — OFF by default (no continuous recording)
 - Control-WS command **`dataset_record {on[,dir]}`** (`maplecast_control_ws.cpp`) flips the
-  runtime flag; the tap responds live. A **"Dataset Recording"** toggle in
-  `web/client-settings.html` (control WS `:7211`) drives it. Recording is OFF unless an operator
-  flips it for a specific training session. No `dir` from the web toggle → recorder uses
-  `recordings/` (prod `WorkingDirectory=/opt/maplecast` → `/opt/maplecast/recordings`).
+  runtime flag; the tap responds live. The **server-side admin** surface is the **Mod Command
+  Center** (`mod_bridge.mjs`, systemd `maplecast-modbridge`, node :9099 behind nginx
+  `/modcmd/`, key-gated): its `dataset_record` action forwards to the loopback control WS
+  (:7211). A **"Dataset Recording"** toggle lives in that panel (NOT in the client's
+  `client-settings.html` — recording is a server admin action, since the authoritative server
+  owns both inputs). OFF unless an operator flips it per training session. No `dir` → recorder
+  uses `recordings/` (prod `WorkingDirectory=/opt/maplecast` → `/opt/maplecast/recordings`).
 
 ### R2 offload + training flow
 - `deploy/scripts/r2-sync-recordings.sh` (cron on prod, root) uploads `.mctele` to Cloudflare
@@ -294,8 +297,9 @@ Design: `docs/DATASET-EXPORTER-DESIGN.md`; field catalog: `../mvc2-ai/docs/DATAS
   `flycast.bak-20260718-225110`), built from branch **`deploy/exporter-prod`** (node-console tip
   + the 5 `(dataset)` commits — the exporter itself is on `feat/dataset-exporter`). Exporter
   GATED OFF; the `dataset_record` toggle is confirmed live on prod.
-- **Operator access to the toggle:** `ssh -L 7211:127.0.0.1:7211 root@149.28.44.118`, then open
-  `web/client-settings.html` (its control WS targets `localhost:7211` → tunneled to prod).
+- **Operator access to the toggle:** the Mod Command Center at `nobd.net/modcmd/` (mod key
+  required) — flip **Dataset Recording** for a training session. The control WS itself stays
+  loopback-only; the bridge (`maplecast-modbridge`) is the only thing that reaches it.
 
 ## Code Guidelines
 

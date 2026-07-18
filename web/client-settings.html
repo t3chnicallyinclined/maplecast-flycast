@@ -67,20 +67,6 @@ input[type=checkbox] { width: 16px; height: 16px; accent-color: #4fc3f7; }
   <button class="p-max" onclick="preset('max')">Max Quality</button>
 </div>
 
-<section id="sec-dataset">
-  <h2 onclick="toggle(this)">Dataset Recording</h2>
-  <div class="section-body">
-    <p style="font-size:0.82em;color:#9aa;margin:0 0 8px">
-      Capture per-frame game state + both players' inputs (.mctele) for a training
-      session. OFF by default — records only during matches while ON. One side controls it.
-    </p>
-    <button id="dataset-btn" onclick="toggleDataset()"
-            style="padding:9px 18px;border:none;border-radius:5px;background:#c0392b;color:#fff;
-                   cursor:pointer;font-weight:bold;font-size:0.95em">&#9679; Recording OFF</button>
-    <span id="dataset-msg" style="margin-left:10px;color:#8a8"></span>
-  </div>
-</section>
-
 <section id="sec-video">
   <h2 onclick="toggle(this)">Video</h2>
   <div class="section-body">
@@ -200,7 +186,6 @@ function connect() {
     if (m.cmd === 'telemetry' && m.ok) applyTelemetry(m.data);
     if (m.cmd === 'mapping_get' && m.ok) onMappingGet(m.data);
     if (m.cmd === 'mapping_detected' && m.ok) onMappingDetected(m.data);
-    if (m.cmd === 'dataset_record' && m.ok) onDatasetReply(m.data);
   };
 }
 
@@ -211,16 +196,6 @@ function send(cmd, extra = {}) {
 function setI(el) { send('config_set', { key: el.id, value: parseInt(el.value) }); }
 function setB(el) { send('config_set', { key: el.id, value: el.checked }); }
 function toggle(h2) { h2.parentElement.classList.toggle('collapsed'); }
-
-let datasetOn = false;
-function toggleDataset() { send('dataset_record', { on: !datasetOn }); }
-function onDatasetReply(d) {
-  datasetOn = !!d.recording;
-  const b = $('dataset-btn');
-  b.innerHTML = datasetOn ? '● Recording ON' : '● Recording OFF';
-  b.style.background = datasetOn ? '#27ae60' : '#c0392b';
-  $('dataset-msg').textContent = datasetOn ? 'capturing this session…' : '';
-}
 
 function applyConfig(d) {
   for (const [k, v] of Object.entries(d)) {
