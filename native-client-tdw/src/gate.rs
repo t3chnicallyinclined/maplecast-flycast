@@ -106,6 +106,7 @@ pub fn run_gate(args: &[String]) {
     let mut drop_at: Option<HashSet<usize>> = None;
     let mut recover: usize = 2;
     let mut drop_keyframes = false;
+    let mut dump_inner: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -129,6 +130,10 @@ pub fn run_gate(args: &[String]) {
                 drop_keyframes = true;
                 i += 1;
             }
+            "--dump-inner" => {
+                dump_inner = args.get(i + 1).cloned();
+                i += 2;
+            }
             other => {
                 eprintln!("[gate] unknown arg: {other}");
                 i += 1;
@@ -137,6 +142,32 @@ pub fn run_gate(args: &[String]) {
     }
 
     let msgs = load_capture(capture);
+
+    // --dump-inner: decode cleanly and write the per-frame INNER payloads (before
+    // ref-expansion) as [u32 len][bytes] — the blob the keyframe/delta TDW wire
+    // dirty-diffs. Feeds the offline codec prototype (statewire_tdw_kf.py).
+    if let Some(path) = dump_inner {
+        let mut tdw = Tdw::new();
+        let mut out: Vec<u8> = Vec::new();
+        let mut n = 0u32;
+        for m in &msgs {
+            match &m.kind {
+                b"TDWS" => { let _ = tdw.feed_snapshot(&m.bytes); }
+                b"TDW1" => {
+                    if let Ok(Some(fr)) = tdw.feed(&m.bytes) {
+                        out.extend_from_slice(&(fr.inner.len() as u32).to_le_bytes());
+                        out.extend_from_slice(&fr.inner);
+                        n += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        std::fs::write(&path, &out).unwrap_or_else(|e| { eprintln!("[gate] write {path}: {e}"); std::process::exit(2); });
+        println!("dumped {n} inner payloads ({} B) -> {path}", out.len());
+        return;
+    }
+
     let n_tdw1 = msgs.iter().filter(|m| &m.kind == b"TDW1").count();
     let n_tdws = msgs.iter().filter(|m| &m.kind == b"TDWS").count();
     println!("== G0 loss gate ==");
