@@ -30,10 +30,16 @@ pub fn spawn_quic_thread(shared: Arc<Mutex<FrameDecoder>>, debug: Arc<DebugState
                 .build()
                 .expect("tokio rt");
             rt.block_on(async move {
-                let addr = std::env::var("MC_QUIC")
-                    .ok()
-                    .filter(|s| s != "1" && !s.is_empty())
-                    .unwrap_or_else(|| "127.0.0.1:7300".into());
+                // MC_QUIC=host:port -> explicit bridge; anything else (1/on/true,
+                // or a stray trailing space from `set MC_QUIC=1 &&`) -> default.
+                // Only treat it as an address if it actually looks like one.
+                let v = std::env::var("MC_QUIC").unwrap_or_default();
+                let v = v.trim();
+                let addr = if v.contains(':') {
+                    v.to_string()
+                } else {
+                    "127.0.0.1:7300".into()
+                };
                 loop {
                     if let Err(e) = run(&addr, &shared, &debug).await {
                         log::warn!("[quic] {e} — reconnecting");
