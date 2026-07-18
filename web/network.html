@@ -239,18 +239,23 @@
       display:flex; align-items:center; gap:8px; letter-spacing:0; text-transform:none; text-shadow:none; }
     .live-section h2::before { content:''; width:8px; height:8px; border-radius:50%; background:#ff5a5a; box-shadow:0 0 8px #ff5a5a; }
     .live-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:12px; }
-    .match-card { background:#12151b; border:1px solid #242a33; border-radius:9px; padding:13px 15px; }
-    .mc-top { display:flex; justify-content:space-between; font-size:12px; color:#8b93a1; }
-    .mc-vs { display:flex; align-items:center; gap:10px; margin-top:10px; }
-    .mc-team { flex:1; min-width:0; }
-    .mc-chars { font-size:13px; font-weight:600; color:#e2e6ec; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .mc-team.p2 { text-align:right; }
-    .mc-x { font-family:ui-monospace,monospace; font-size:11px; color:#5b6472; }
-    .hp { height:6px; background:#242a33; border-radius:3px; margin-top:6px; overflow:hidden; }
-    .hp i { display:block; height:100%; background:#34d399; }
-    .mc-team.p2 .hp { transform:scaleX(-1); }
-    .mc-bot { margin-top:10px; display:flex; justify-content:space-between; font-size:12px; color:#8b93a1; font-family:ui-monospace,monospace; }
-    .mc-watch { color:#34d399; text-decoration:none; }
+    .match-card { background:#12151b; border:1px solid #242a33; border-radius:10px; padding:14px 16px; display:flex; flex-direction:column; gap:8px; }
+    .mc-loc { font-size:13px; color:#e2e6ec; font-weight:600; display:flex; align-items:center; gap:6px; }
+    .mc-loc .mc-node { margin-left:auto; font-family:ui-monospace,monospace; font-size:11px; color:#8b93a1; font-weight:400; }
+    .mc-stage { font-size:12px; color:#8b93a1; display:flex; align-items:center; gap:8px; }
+    .mc-stage .mc-timer { color:#e2e6ec; font-variant-numeric:tabular-nums; }
+    .mc-stage .mc-spec { margin-left:auto; font-family:ui-monospace,monospace; }
+    .mc-fight { display:grid; grid-template-columns:1fr auto 1fr; gap:4px 10px; align-items:start; margin-top:2px; }
+    .mc-side { min-width:0; }
+    .mc-side.p2 { text-align:right; }
+    .mc-names { font-size:13px; font-weight:600; color:#e2e6ec; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .hp { height:7px; background:#242a33; border-radius:4px; margin-top:6px; overflow:hidden; }
+    .hp i { display:block; height:100%; background:linear-gradient(90deg,#f59e0b,#34d399); }
+    .mc-side.p2 .hp { transform:scaleX(-1); }
+    .mc-lv { font-family:ui-monospace,monospace; font-size:10px; color:#22d3ee; margin-top:4px; letter-spacing:.5px; }
+    .mc-mid { align-self:center; font-family:ui-monospace,monospace; font-size:11px; color:#5b6472; text-align:center; }
+    .mc-combo { color:#ff5a5a; font-weight:700; margin-top:3px; }
+    .mc-watch { font-size:12px; color:#34d399; text-decoration:none; margin-top:2px; }
     .mc-watch:hover { text-decoration:underline; }
   </style>
 </head>
@@ -429,34 +434,43 @@
       if (probe) probeAll(list);
     }
 
-    // ── Live match cards (from each in-match node's game state) ──
+    // ── MVC2 roster + stages (make match cards readable) ──
+    const MVC2_CHARS = ['Ryu','Zangief','Guile','Morrigan','Anakaris','Strider','Cyclops','Wolverine','Psylocke','Iceman','Rogue','Captain America','Spider-Man','Hulk','Venom','Dr. Doom','Tron Bonne','Jill','Hayato','Ruby Heart','SonSon','Amingo','Marrow','Cable','Abyss I','Abyss II','Abyss III','Chun-Li','Megaman','Roll','Akuma','B.B. Hood','Felicia','Charlie','Sakura','Dan','Cammy','Dhalsim','M. Bison','Ken','Gambit','Juggernaut','Storm','Sabretooth','Magneto','Shuma-Gorath','War Machine','Silver Samurai','Omega Red','Spiral','Colossus','Iron Man','Sentinel','Blackheart','Thanos','Jin'];
+    const STAGE_NAMES = {0:'Airship (Day)',1:'Desert (Orange)',2:'Factory',3:'Carnival (Summer)',4:'Swamp',5:'Cave (Water)',6:'Clocktower',7:'River on Ice',8:'Abyss',9:'Airship (Night)',10:'Desert (Blue)',11:'Training',12:'Carnival (Winter)',13:'Swamp (Asian)',14:'Cave (Lava)',15:'Clocktower (Snow)',16:'River on Raft'};
+    const cName = id => MVC2_CHARS[id] || `#${id}`;
+    const team = arr => (arr || []).map(cName).join(' · ') || '—';
     function hpPct(hp) {
       if (Array.isArray(hp)) hp = hp[0];
       const v = Number(hp) || 0;
       return Math.max(0, Math.min(100, (v / 144) * 100));   // MVC2 health is 0..144
     }
+
+    // ── Live match cards — who's fighting what, where ──
     function renderLive(list) {
       const live = list.filter(n => n.game && n.game.in_match);
       const sec = document.getElementById('live-section');
       const grid = document.getElementById('live-grid');
-      // game.in_match is the real "a match is running" signal (relay status only
-      // reports ready/draining), so it also drives the Active Matches stat.
+      // game.in_match is the real "match running" signal (relay status only
+      // reports ready/draining), so it drives the Active Matches stat too.
       document.getElementById('stat-matches').textContent = live.length;
       if (!live.length) { sec.style.display = 'none'; grid.innerHTML = ''; return; }
       sec.style.display = 'block';
       grid.innerHTML = live.map(n => {
         const g = n.game;
-        const p1 = (g.p1_chars || []).join(' · ') || 'Player 1';
-        const p2 = (g.p2_chars || []).join(' · ') || 'Player 2';
-        const stage = (typeof g.stage === 'number') ? ('Stage ' + g.stage) : (g.stage || '');
+        const loc = n.geo ? `${esc(n.geo.city)}, ${esc(n.geo.region || n.geo.country)}` : esc(n.region);
+        const stage = STAGE_NAMES[g.stage] ?? `Stage ${g.stage}`;
+        const timer = (g.timer != null) ? `${g.timer}s` : '';
+        const combo = Math.max(g.p1_combo || 0, g.p2_combo || 0);
+        const lv = m => (m != null) ? `LV${m}` : '';
         return `<div class="match-card">
-          <div class="mc-top"><span>${esc(n.name)} · ${esc(n.region)}</span><span>&#128065; ${n.spectators}</span></div>
-          <div class="mc-vs">
-            <div class="mc-team p1"><div class="mc-chars">${esc(p1)}</div><div class="hp"><i style="width:${hpPct(g.p1_hp)}%"></i></div></div>
-            <span class="mc-x">VS</span>
-            <div class="mc-team p2"><div class="mc-chars">${esc(p2)}</div><div class="hp"><i style="width:${hpPct(g.p2_hp)}%"></i></div></div>
+          <div class="mc-loc"><span>&#128205;</span> ${loc}<span class="mc-node">${esc(n.name)}</span></div>
+          <div class="mc-stage">${esc(stage)}${timer ? ` &middot; <span class="mc-timer">${timer}</span>` : ''}<span class="mc-spec">&#128065; ${n.spectators}</span></div>
+          <div class="mc-fight">
+            <div class="mc-side p1"><div class="mc-names">${esc(team(g.p1_chars))}</div><div class="hp"><i style="width:${hpPct(g.p1_hp)}%"></i></div><div class="mc-lv">${lv(g.p1_meter)}</div></div>
+            <div class="mc-mid">VS${combo > 1 ? `<div class="mc-combo">${combo} HIT</div>` : ''}</div>
+            <div class="mc-side p2"><div class="mc-names">${esc(team(g.p2_chars))}</div><div class="hp"><i style="width:${hpPct(g.p2_hp)}%"></i></div><div class="mc-lv">${lv(g.p2_meter)}</div></div>
           </div>
-          <div class="mc-bot"><span>${esc(stage)}</span><a class="mc-watch" href="/?watch=${encodeURIComponent(n.node_id)}">Watch &#8599;</a></div>
+          <a class="mc-watch" href="/?watch=${encodeURIComponent(n.node_id)}">Watch this match &#8599;</a>
         </div>`;
       }).join('');
     }
