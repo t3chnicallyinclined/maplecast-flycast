@@ -109,12 +109,21 @@ async fn serve_client(conn: quinn::Connection, flycast_ws: &str) -> Result<()> {
             break;
         }
 
-        // A frame that fits a datagram AND isn't a big keyframe -> datagram.
-        // TDW1 warm frames (~700B) ride here. Everything oversized (SYNC/TDWS/
-        // page-heavy super frames) -> its own reliable uni-stream.
+        // SEMANTIC SPLIT — route by MEANING, not size:
+        //   * kfdelta pure-geometry deltas (bit7 set, bit2 clear) that fit a datagram
+        //     -> UNRELIABLE datagram. Loss-tolerant: a dropped one just skips a frame,
+        //     the next delta rebases on the last keyframe. No head-of-line stall.
+        //   * everything cumulative/critical (bit2 = keyframe | new dict blocks | pages),
+        //     any non-kfdelta frame, and any oversized delta -> RELIABLE uni-stream. The
+        //     dictionary can never lose a block, and the fat keyframe never stalls the
+        //     delta path (that was the ~1s spike on TCP).
         let max_dg = conn.max_datagram_size().unwrap_or(0);
-        let is_tdw1 = data.len() >= 4 && &data[0..4] == b"TDW1";
-        if is_tdw1 && data.len() <= max_dg {
+        let is_tdw1 = data.len() >= 6 && &data[0..4] == b"TDW1";
+        let flags = if is_tdw1 { data[5] } else { 0 };
+        let is_kfdelta = (flags & 0x80) != 0; // bit7
+        let is_reliable = (flags & 0x04) != 0; // bit2 = cumulative state
+        let use_datagram = is_tdw1 && is_kfdelta && !is_reliable && data.len() <= max_dg;
+        if use_datagram {
             match conn.send_datagram(Bytes::copy_from_slice(&data)) {
                 Ok(()) => dgrams += 1,
                 Err(_) => {

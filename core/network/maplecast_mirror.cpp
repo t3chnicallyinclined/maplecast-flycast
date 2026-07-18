@@ -992,28 +992,45 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 	if (tdwKfOn) {
 		static const uint32_t kfEvery = [](){ const char* e = std::getenv("MAPLECAST_TDW_KFEVERY");
 			uint32_t v = e && *e ? (uint32_t)atoi(e) : 60u; return v ? v : 60u; }();
-		static std::vector<uint8_t> kfKey, kfBlk, kfZ;
+		// zstd-DICTIONARY keyframe/delta: a delta = zstd(inner) with the KEYFRAME inner as
+		// the LZ dictionary. Shift-robust (LZ matches the moved content — the old byte-diff
+		// choked on per-frame layout shifts, deltas came out FATTER than keyframes) and
+		// loss-tolerant (a delta decodes from ONLY its keyframe, which rides the reliable
+		// channel). Keyframe = plain zstd(inner). keyId(4) binds a delta to its keyframe.
+		static std::vector<uint8_t> kfKey, kfZ;   // kfKey = raw keyframe inner (the dict)
 		static uint32_t kfKeyId = 0, kfCtr = 0;
+		static ZSTD_CCtx* kfCctx = ZSTD_createCCtx();
 		bool isKey = (kfCtr % kfEvery == 0) || streamStart || kfKey.empty();
 		kfCtr++;
 		if (isKey) { kfKey.assign(inner.begin(), inner.end()); kfKeyId++; }
-		statewire_tdw::encode(inner.data(), (uint32_t)inner.size(),
-			kfKey.data(), (uint32_t)kfKey.size(), kfKeyId, isKey, kfBlk);
-		size_t bound = ZSTD_compressBound(kfBlk.size());
+		size_t bound = ZSTD_compressBound(inner.size());
 		if (kfZ.size() < bound) kfZ.resize(bound);
-		size_t zn = ZSTD_compress(kfZ.data(), kfZ.size(), kfBlk.data(), kfBlk.size(), 3);
+		size_t zn = isKey
+			? ZSTD_compressCCtx(kfCctx, kfZ.data(), kfZ.size(), inner.data(), inner.size(), 3)
+			: ZSTD_compress_usingDict(kfCctx, kfZ.data(), kfZ.size(), inner.data(), inner.size(),
+				kfKey.data(), kfKey.size(), 3);
 		if (ZSTD_isError(zn)) { printf("[TADICT] kf zstd error: %s\n", ZSTD_getErrorName(zn)); return; }
 		uint32_t innerSz = (uint32_t)inner.size();
-		msg.resize(12 + zn);
+		// SEMANTIC SPLIT flag (bit2=4): this frame carries CUMULATIVE state (a keyframe,
+		// new dict blocks, or VRAM pages) that must NOT be lost -> the QUIC bridge routes
+		// it to a RELIABLE stream. Pure-geometry deltas (bit2 clear) ride unreliable
+		// datagrams (loss-tolerant, rebase on the keyframe). The client ignores bit2 (it
+		// just decodes whatever arrives); only the bridge routes on it.
+		uint32_t nsec = 0;
+		if (inner.size() >= 20) memcpy(&nsec, inner.data() + 16, 4);   // inner: newSection @ +16
+		bool reliable = isKey || hasPages || nsec > 0;
+		// wire: TDW1(4) epoch(1) flags(1) seq(2) keyId(4) innerSz(4) zdata
+		msg.resize(16 + zn);
 		msg[0]='T'; msg[1]='D'; msg[2]='W'; msg[3]='1';
 		msg[4] = dictEpoch;
-		msg[5] = (uint8_t)((isKey ? 1 : 0) | (tacanonMode() == 2 ? 2 : 0)
+		msg[5] = (uint8_t)((isKey ? 1 : 0) | (tacanonMode() == 2 ? 2 : 0) | (reliable ? 4 : 0)
 			| 8 | (hasPages ? 16 : 0) | 32 | (splitPos ? 64 : 0) | 128 /*kfdelta*/);
 		uint16_t s16 = (uint16_t)seq; memcpy(msg.data() + 6, &s16, 2);
-		memcpy(msg.data() + 8, &innerSz, 4);
-		memcpy(msg.data() + 12, kfZ.data(), zn);
+		memcpy(msg.data() + 8, &kfKeyId, 4);
+		memcpy(msg.data() + 12, &innerSz, 4);
+		memcpy(msg.data() + 16, kfZ.data(), zn);
 		seq++;
-		maplecast_ws::broadcastBinary(msg.data(), (uint32_t)(12 + zn));
+		maplecast_ws::broadcastBinary(msg.data(), (uint32_t)(16 + zn));
 		return;
 	}
 

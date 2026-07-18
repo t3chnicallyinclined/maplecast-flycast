@@ -171,27 +171,30 @@ impl Tdw {
             return Ok(None); // dictionary unknown for this epoch — wait for TDWS
         }
 
-        // --- keyframe/delta TDW wire (flag bit7): loss-tolerant. One-shot zstd ->
-        // statewire_tdw block -> inner. A delta whose keyframe was lost (keyId
-        // mismatch) is SKIPPED, not misapplied -> recovers at the next keyframe. ---
+        // --- keyframe/delta TDW wire (flag bit7): zstd-DICTIONARY, loss-tolerant.
+        // keyframe = plain zstd(inner) [becomes the dict]; delta = zstd(inner) coded with
+        // the keyframe inner as the LZ dictionary (shift-robust). A delta whose keyframe was
+        // lost (keyId mismatch) is SKIPPED, not misapplied -> recovers at the next keyframe.
+        // wire: TDW1(4) epoch(1) flags(1) seq(2) keyId(4) innerSz(4) zdata@16
         if flags & 0x80 != 0 {
-            let block = zstd::stream::decode_all(&msg[12..])
-                .map_err(|e| -> BoxErr { format!("kf zstd: {e}").into() })?;
-            if block.len() < 9 {
-                return Ok(None);
-            }
-            let is_key = block[0] == 1;
-            let key_id = u32::from_le_bytes([block[1], block[2], block[3], block[4]]);
+            let is_key = flags & 0x01 != 0;
+            let key_id = rd_u32(msg, 8)?;
+            let inner_sz = rd_u32(msg, 12)? as usize;
+            let z = &msg[16..];
             let inner = if is_key {
-                match tdw_decode(&block, &[]) { Some(i) => i, None => return Ok(None) }
+                zstd::stream::decode_all(z)
+                    .map_err(|e| -> BoxErr { format!("kf zstd: {e}").into() })?
             } else {
                 if !self.synced || key_id != self.kf_key_id {
-                    return Ok(None); // keyframe lost / not yet seen — wait for the next keyframe
+                    return Ok(None); // keyframe lost / not yet seen — wait for next keyframe
                 }
+                let mut out = vec![0u8; inner_sz];
                 let key = std::mem::take(&mut self.kf_key);
-                let r = tdw_decode(&block, &key);
+                let r = self.dctx.decompress_using_dict(&mut out, z, &key);
                 self.kf_key = key;
-                match r { Some(i) => i, None => return Ok(None) }
+                let n = r.map_err(zerr)?;
+                out.truncate(n);
+                out
             };
             if is_key {
                 self.kf_key.clone_from(&inner);

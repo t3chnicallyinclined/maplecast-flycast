@@ -33,6 +33,14 @@ pub fn spawn_net_thread(
                 // (with a 10s fallback). Local play is always manual.
                 {
                     use std::sync::atomic::Ordering::Relaxed;
+                    // MC_CONNECT=<idx>: connect straight to servers[idx] (0 = the local
+                    // rig / MAPLECAST_WS), skipping the picker AND the auto-closest probe
+                    // (which deliberately excludes local). For one-command local testing.
+                    if let Some(i) = std::env::var("MC_CONNECT").ok()
+                        .and_then(|s| s.trim().parse::<u64>().ok())
+                    {
+                        debug.switch_server.store(i, Relaxed);
+                    }
                     let auto = std::env::var("MC_NO_AUTO").is_err();
                     let t0 = std::time::Instant::now();
                     loop {
