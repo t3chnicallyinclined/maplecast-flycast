@@ -10,8 +10,10 @@ Registration is open — no approval, no account. Your node shows up on the
 - **A Linux box.** A cheap VPS is easiest (public IP, always on). A spare home
   machine works too — see *Reachability* below.
 - **Docker.**
-- **Your own MvC2 GDI.** It never leaves your box; the node only reports its
-  SHA-256 so the map can show a "verified ROM" badge.
+- **Your own MvC2 disc + a Dreamcast BIOS.** Put the `.gdi` (with its track
+  files) and your `dc_boot.bin` in one folder. Both stay on your box — the node
+  only reports the ROM's SHA-256 for the "verified" badge. (flycast needs a real
+  BIOS; its HLE boot isn't reliable for MvC2.)
 - **Open ports:** `7201/tcp` (the stream) and `7100/udp` (input).
 
 ## One command

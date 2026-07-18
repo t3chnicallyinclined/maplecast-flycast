@@ -46,6 +46,19 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
+# Dreamcast BIOS: flycast needs a real dc_boot.bin to boot the disc — its HLE
+# (reios) boot is not reliable for MvC2 and will crash. Drop your own dc_boot.bin
+# in the ROM folder (next to the .gdi); it's copied into flycast's data dir.
+BIOS_DST="$HOME/.local/share/flycast/dc_boot.bin"
+DATA_DIR="$(dirname "$ROM_PATH")"
+if [ -f "$DATA_DIR/dc_boot.bin" ]; then
+  cp -f "$DATA_DIR/dc_boot.bin" "$BIOS_DST"
+  echo "Loaded Dreamcast BIOS from $DATA_DIR/dc_boot.bin"
+elif [ ! -f "$BIOS_DST" ]; then
+  echo "WARNING: no dc_boot.bin found. Put your Dreamcast BIOS (dc_boot.bin) in the"
+  echo "         ROM folder — without it flycast falls back to HLE boot, which crashes."
+fi
+
 # Start flycast headless in background
 echo "Starting flycast headless with ROM: $ROM_PATH"
 /usr/local/bin/flycast "$ROM_PATH" &
