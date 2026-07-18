@@ -63,6 +63,16 @@ static constexpr size_t      FLUSH_AFTER_BYTES = 16 * 1024;
 static uint64_t              _startUnixUs = 0;
 static std::string           _lastOutPath;
 
+// ── Dataset state-stream (.mctele) state ──────────────────────────────
+// Independent of the input recorder above. See replay_writer.h.
+static std::atomic<bool>     _teleEnabled{false};    // MAPLECAST_RECORD_STATE
+static std::atomic<bool>     _teleActive{false};     // stream opened
+static FILE*                 _teleFile = nullptr;
+static std::vector<uint8_t>  _teleBuf;               // batched frame entries
+static std::mutex            _teleMtx;
+static uint32_t              _teleBlobLen = 0;
+static long                  _teleFirstFrameOff = 0; // header offset to patch at close
+
 // Frame-alignment: stamps in the input log + checkpoint sidecar are
 // relative to the first frame stamped after the deferred capture fires.
 // Without this rebase the .mcrec would carry the recorder process's
@@ -137,6 +147,9 @@ static void stopCkptWorker();
 // the bottom of this file in an anonymous namespace).
 static void sessAppend(uint64_t frame, uint32_t seqAndSlot, uint16_t buttons,
                        uint8_t lt, uint8_t rt);
+
+// Forward decl for the .mctele state-stream finalizer (registered via atexit).
+static void closeStateStream();
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -912,6 +925,11 @@ bool initMatchRecording(const std::string& dir, int retentionDays)
 	}
 	cleanupOldRecordings(dir, retentionDays);
 
+	// Dataset state-stream gate (see replay_writer.h). Independent of the
+	// input recorder: .mctele is written only when MAPLECAST_RECORD_STATE is set.
+	_teleEnabled.store(std::getenv("MAPLECAST_RECORD_STATE") != nullptr,
+	                   std::memory_order_relaxed);
+
 	// Capture the autoload savestate ONCE. Same dc_savestate +
 	// dc_loadstate dance the single-file recorder does, just keeping
 	// the bytes in memory instead of writing to a .mcrec.
@@ -996,6 +1014,113 @@ void onFrameInMatchFlag(uint8_t in_match)
 			fflush(stdout);
 			spawnMatchWrite(startFrame);
 		}
+	}
+}
+
+// ── Dataset state-stream (.mctele) — see replay_writer.h ──────────────
+
+bool stateRecordingEnabled() { return _teleEnabled.load(std::memory_order_relaxed); }
+
+static void closeStateStream()
+{
+	std::lock_guard<std::mutex> lk(_teleMtx);
+	if (!_teleFile) return;
+	if (!_teleBuf.empty()) {
+		fwrite(_teleBuf.data(), 1, _teleBuf.size(), _teleFile);
+		_teleBuf.clear();
+	}
+	// Patch sess_first_frame (the session frame origin the input log rebases
+	// to) into the header so the offline join can map input relFrames to the
+	// absolute frame keys used here.
+	uint64_t ff;
+	{ std::lock_guard<std::mutex> slk(_sessMtx); ff = _sessFirstFrame; }
+	fseek(_teleFile, _teleFirstFrameOff, SEEK_SET);
+	uint8_t b[8]; writeLE64(b, ff);
+	fwrite(b, 1, 8, _teleFile);
+	fclose(_teleFile);
+	_teleFile = nullptr;
+	_teleActive.store(false, std::memory_order_relaxed);
+	printf("[record-state] .mctele closed (sess_first_frame=%llu)\n",
+	       (unsigned long long)ff);
+	fflush(stdout);
+}
+
+void beginStateStream(const StateSeg* segs, uint32_t nsegs, uint32_t blobLen)
+{
+	std::lock_guard<std::mutex> lk(_teleMtx);
+	if (_teleActive.load(std::memory_order_relaxed)) return;
+	if (!_teleEnabled.load(std::memory_order_relaxed)) return;
+
+	std::string dir; uint64_t stampUs;
+	{
+		std::lock_guard<std::mutex> slk(_sessMtx);
+		dir = _sessDir; stampUs = _sessStartUnixUs;
+	}
+	if (dir.empty()) return;
+
+	std::time_t t = (std::time_t)(stampUs / 1000000);
+	std::tm tm;
+#ifdef _WIN32
+	localtime_s(&tm, &t);
+#else
+	localtime_r(&t, &tm);
+#endif
+	char ts[32];   std::strftime(ts, sizeof(ts), "%Y%m%d-%H%M%S", &tm);
+	char tail[64]; std::snprintf(tail, sizeof(tail), "session-%s.mctele", ts);
+#ifdef _WIN32
+	std::string path = dir + "\\" + tail;
+#else
+	std::string path = dir + "/" + tail;
+#endif
+
+	_teleFile = fopen(path.c_str(), "wb");
+	if (!_teleFile) {
+		printf("[record-state] cannot open %s\n", path.c_str());
+		return;
+	}
+
+	// Header: magic + version + blob_len + num_segs + [addr,len]*n +
+	// sess_first_frame(u64, patched at close) + reserved[16].
+	const char magic[8] = { 'M','C','T','E','L','E','0','1' };
+	fwrite(magic, 1, 8, _teleFile);
+	uint8_t v[4];
+	writeLE32(v, 1);       fwrite(v, 1, 4, _teleFile);   // version
+	writeLE32(v, blobLen); fwrite(v, 1, 4, _teleFile);   // blob_len
+	writeLE32(v, nsegs);   fwrite(v, 1, 4, _teleFile);   // num_segs
+	for (uint32_t i = 0; i < nsegs; i++) {
+		writeLE32(v, segs[i].addr); fwrite(v, 1, 4, _teleFile);
+		writeLE32(v, segs[i].len);  fwrite(v, 1, 4, _teleFile);
+	}
+	_teleFirstFrameOff = ftell(_teleFile);
+	uint8_t ff[8]; writeLE64(ff, UINT64_MAX); fwrite(ff, 1, 8, _teleFile);
+	uint8_t reserved[16] = {0}; fwrite(reserved, 1, 16, _teleFile);
+
+	_teleBlobLen = blobLen;
+	_teleBuf.clear();
+	_teleActive.store(true, std::memory_order_relaxed);
+	fflush(_teleFile);
+
+	static bool atexitRegistered = false;
+	if (!atexitRegistered) { atexit([]() { closeStateStream(); }); atexitRegistered = true; }
+
+	printf("[record-state] .mctele open: %s (blob=%u B, %u segs)\n",
+	       path.c_str(), blobLen, nsegs);
+	fflush(stdout);
+}
+
+void appendState(uint64_t frame, const uint8_t* blob, uint32_t len)
+{
+	if (!_teleActive.load(std::memory_order_relaxed)) return;
+	std::lock_guard<std::mutex> lk(_teleMtx);
+	if (!_teleFile || len != _teleBlobLen) return;
+
+	uint8_t hdr[8]; writeLE64(hdr, frame);
+	_teleBuf.insert(_teleBuf.end(), hdr, hdr + 8);
+	_teleBuf.insert(_teleBuf.end(), blob, blob + len);
+
+	if (_teleBuf.size() >= 256 * 1024) {   // flush ~every 256 KB off-thread of the sim
+		fwrite(_teleBuf.data(), 1, _teleBuf.size(), _teleFile);
+		_teleBuf.clear();
 	}
 }
 

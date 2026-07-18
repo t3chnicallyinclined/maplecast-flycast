@@ -2762,6 +2762,43 @@ void serverPublish(TA_context* ctx)
 		}
 	}
 
+	// ── Dataset state tap (.mctele) — passive full-RAM read for the mvc2-ai
+	// exporter. Placed BEFORE the no-subscriber early-return below so it fires
+	// on the headless recorder path (no viewer) too. Runs on THIS (publish)
+	// thread at the frame boundary after the SH4 draw walk; strictly READ-ONLY
+	// (cannot perturb the sim). Keyed on _localFrameNum — the same counter the
+	// input tape / .mcrec use on this path — so state and inputs align. Gated
+	// OFF unless MAPLECAST_RECORD_STATE is set alongside MAPLECAST_RECORD_MATCHES.
+	if (maplecast_replay::matchRecordingActive() && maplecast_replay::stateRecordingEnabled()) {
+		static const maplecast_replay::StateSeg _stateSegs[] = {
+			{ 0x8C268340u, 6u * 0x5A4u },  // 6 char structs P1C1..P2C3 (whole struct each)
+			{ 0x8C2895E0u, 0xA0u },        // globals: slot table, match state, meters, combos, wins
+			{ 0x8C26A520u, 0x60u },        // camera block (pos + zoom)
+			{ 0x8C2681DCu, 0x28u },        // Input_DEC, both slots (semantic input)
+			{ 0x8C3496B0u, 0x04u },        // guest frame_counter (join cross-check)
+		};
+		static const uint32_t _stateBlobLen = []{
+			uint32_t n = 0; for (const auto& s : _stateSegs) n += s.len; return n;
+		}();
+		static bool _stateStreamBegun = false;
+		if (!_stateStreamBegun) {
+			maplecast_replay::beginStateStream(_stateSegs,
+				(uint32_t)(sizeof(_stateSegs) / sizeof(_stateSegs[0])), _stateBlobLen);
+			_stateStreamBegun = true;
+		}
+		static thread_local std::vector<uint8_t> _stateBlob;
+		_stateBlob.resize(_stateBlobLen);
+		uint32_t off = 0;
+		for (const auto& s : _stateSegs) {
+			for (uint32_t i = 0; i < s.len; i += 4) {
+				uint32_t w = addrspace::read32(s.addr + i);
+				memcpy(&_stateBlob[off + i], &w, 4);
+			}
+			off += s.len;
+		}
+		maplecast_replay::appendState((uint64_t)_localFrameNum, _stateBlob.data(), _stateBlobLen);
+	}
+
 	// === MAPLECAST_FRAME_ORACLE_HOOK — flush the LIVE block-entry attribution that
 	// the recompiler hook (0x8C03093C begin / 0x8C033E90 quad) buffered during this
 	// frame's SH4 draw walk. serverPublish runs once per frame AFTER that walk
