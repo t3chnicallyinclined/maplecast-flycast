@@ -297,16 +297,20 @@ Design: `docs/DATASET-EXPORTER-DESIGN.md`; field catalog: `../mvc2-ai/docs/DATAS
   `flycast.bak-20260718-225110`), built from branch **`deploy/exporter-prod`** (node-console tip
   + the 5 `(dataset)` commits — the exporter itself is on `feat/dataset-exporter`). Exporter
   GATED OFF; the `dataset_record` toggle is confirmed live on prod.
-- **Operator access to the toggle:** the Mod Command Center at `nobd.net/modcmd/` (mod key
-  required) — flip **Dataset Recording** for a training session. The control WS itself stays
-  loopback-only; the bridge (`maplecast-modbridge`) is the only thing that reaches it.
-- **Recording monitor/control panel:** `nobd.net/modcmd/monitor?key=<KEY>` (page = `web/recmon.html`,
-  served by the bridge's GET `/monitor`; has its own Start/Stop toggle). Shows recording ON/OFF,
-  `in_match`, the live `.mctele` frames/size + client-computed f/s & KB/s, the **decision-frame
-  rate** (% of frames where input changes — the data-quality signal: flat 0 = idle, healthy = real
-  play), and both players' state (char, HP, meter, combo, x) + decoded Input_DEC. Reads live via
-  the bridge's `monitor` action (control-WS `ram_read` + `fs.stat` of the latest recording) — **no
-  binary rebuild**, pure bridge + static page.
+- **Operator console (PRIMARY):** the **Training Console** at `nobd.net/training?key=<TRAIN_KEY>` —
+  a DEDICATED standalone service (`tools/training-console/training_server.mjs`, systemd
+  `maplecast-training`, node :9097 behind nginx `/training/`, its OWN key `MC_TRAIN_KEY` ≠ the mod
+  key). Deliberately separate from the Mod Command Center. Full ops: recording control (3-state
+  badge OFF/ARMED/RECORDING + Start/Stop), live monitor (both players' state + decoded Input_DEC,
+  session frames/size/rate, **decision-frame rate** = the data-quality signal), **session library**
+  (every local `.mctele` with exact frame count parsed from the `MCTELE01` header + R2 upload
+  status), **storage/R2** (local vs uploaded vs pending, R2 bucket totals via `rclone lsjson`
+  cached, last R2 sync time), and a training-status tile (reads `training-status.json`). Reaches the
+  loopback control WS (7211) for state + `dataset_record`; RAM never touches the public net. Page =
+  `web/training.html`. **No binary rebuild** — pure service + static page.
+- **Legacy/secondary:** the Mod Command Center still exposes a **Dataset Recording** toggle and a
+  `nobd.net/modcmd/monitor?key=<MOD_KEY>` page (`web/recmon.html`, bridge GET `/monitor`) — same
+  control WS, mod-key-gated. The Training Console supersedes it as the home for this.
 
 ## Code Guidelines
 
