@@ -166,6 +166,10 @@ struct HeartbeatPayload {
     status: String,
     metrics: MetricsPayload,
     stats: StatsPayload,
+    /// Live in-match state (flycast getStatus.game), forwarded verbatim so the
+    /// node map can render match cards. Omitted when the node isn't in a match.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    game: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -277,15 +281,23 @@ pub async fn run(config: HubConfig, state: RelayState) {
         interval.tick().await;
 
         let metrics = state.metrics().await;
+        let game = state.latest_game().await;
+        let in_match = game
+            .as_ref()
+            .and_then(|g| g.get("in_match"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let uptime = start_time.elapsed().as_secs();
 
         let heartbeat_url = format!("{}/nodes/{}/heartbeat", config.hub_url, node_id);
         let hb = HeartbeatPayload {
             operator_token: config.hub_token.clone(),
-            status: if metrics.upstream_connected {
-                "ready".to_string()
-            } else {
+            status: if !metrics.upstream_connected {
                 "draining".to_string()
+            } else if in_match {
+                "in_match".to_string()
+            } else {
+                "ready".to_string()
             },
             metrics: MetricsPayload {
                 upstream_connected: metrics.upstream_connected,
@@ -300,6 +312,7 @@ pub async fn run(config: HubConfig, state: RelayState) {
                 total_frames: metrics.frames_received,
                 uptime_s: uptime,
             },
+            game,
         };
 
         match client.post(&heartbeat_url).json(&hb).send().await {

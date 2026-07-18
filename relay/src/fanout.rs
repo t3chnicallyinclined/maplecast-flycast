@@ -60,6 +60,11 @@ struct RelayInner {
     /// Stats
     stats: Mutex<RelayStats>,
 
+    /// Latest in-match game state parsed from flycast's getStatus broadcasts
+    /// (the `game` object). Forwarded to the hub in the heartbeat so the node
+    /// map can render live match cards. None when idle / between matches.
+    latest_game: Mutex<Option<serde_json::Value>>,
+
     /// JSON signaling broadcast (for relay_* messages)
     signal_tx: broadcast::Sender<String>,
 
@@ -155,6 +160,7 @@ impl RelayState {
                 client_count: Mutex::new(0),
                 max_clients,
                 stats: Mutex::new(RelayStats::default()),
+                latest_game: Mutex::new(None),
                 signal_tx,
                 upstream_text_tx,
                 upstream_text_rx: Mutex::new(Some(upstream_text_rx)),
@@ -390,6 +396,27 @@ impl RelayState {
     /// Broadcast a signaling message to all clients
     fn broadcast_signal(&self, msg: &str) {
         let _ = self.inner.signal_tx.send(msg.to_string());
+    }
+
+    /// Observe a flycast status broadcast and cache its `game` object (live
+    /// match state), or clear it when the status carries no game (match ended
+    /// / idle). Cheap-gated: only JSON-parses messages that look like a status
+    /// frame, so the ~1 Hz status stream costs one small parse per second.
+    async fn observe_status(&self, text: &str) {
+        if !text.contains("\"type\":\"status\"") {
+            return;
+        }
+        let game = serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|v| v.get("game").cloned())
+            .filter(|g| !g.is_null());
+        *self.inner.latest_game.lock().await = game;
+    }
+
+    /// The latest in-match game state (getStatus.game) for the hub heartbeat.
+    /// None when the node isn't hosting a match.
+    pub async fn latest_game(&self) -> Option<serde_json::Value> {
+        self.inner.latest_game.lock().await.clone()
     }
 
     /// Forward a client's text message to the upstream flycast server
@@ -1022,6 +1049,7 @@ pub async fn ws_upstream_connector(
                                 }
                                 Some(Ok(Message::Text(text))) => {
                                     debug!("Upstream JSON: {}...", &text[..text.len().min(100)]);
+                                    state.observe_status(&text).await;
                                     state.broadcast_signal(&text);
                                 }
                                 Some(Ok(Message::Close(_))) => {
