@@ -19,6 +19,7 @@
 #include "types.h"
 #include "maplecast_mirror.h"
 #include "statewire_v2.h"                // state-wire v2 keyframe/delta codec (FRM2)
+#include "statewire_tdw.h"               // TDW keyframe/delta codec (loss-tolerant, bit7)
 #include "hub_discovery.h"
 #include "hw/pvr/ta_ctx.h"
 #include "hw/pvr/ta.h"
@@ -982,6 +983,40 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 		ZSTD_CCtx_setParameter(zc, ZSTD_c_windowLog, 24);
 		seq = 0;
 	}
+	// ---- keyframe/delta TDW wire (MAPLECAST_TDW_KFDELTA=1): the loss-tolerant path
+	// (flag bit7). Dirty-diff the inner vs the last keyframe (statewire_tdw), one-shot
+	// zstd it, emit. A dropped delta skips one frame; the next rebases on the keyframe
+	// -> no permanent desync (unlike streaming zstd). Bypasses the streaming path. ----
+	static const bool tdwKfOn = [](){ const char* e = std::getenv("MAPLECAST_TDW_KFDELTA");
+		return e && *e && *e != '0'; }();
+	if (tdwKfOn) {
+		static const uint32_t kfEvery = [](){ const char* e = std::getenv("MAPLECAST_TDW_KFEVERY");
+			uint32_t v = e && *e ? (uint32_t)atoi(e) : 60u; return v ? v : 60u; }();
+		static std::vector<uint8_t> kfKey, kfBlk, kfZ;
+		static uint32_t kfKeyId = 0, kfCtr = 0;
+		bool isKey = (kfCtr % kfEvery == 0) || streamStart || kfKey.empty();
+		kfCtr++;
+		if (isKey) { kfKey.assign(inner.begin(), inner.end()); kfKeyId++; }
+		statewire_tdw::encode(inner.data(), (uint32_t)inner.size(),
+			kfKey.data(), (uint32_t)kfKey.size(), kfKeyId, isKey, kfBlk);
+		size_t bound = ZSTD_compressBound(kfBlk.size());
+		if (kfZ.size() < bound) kfZ.resize(bound);
+		size_t zn = ZSTD_compress(kfZ.data(), kfZ.size(), kfBlk.data(), kfBlk.size(), 3);
+		if (ZSTD_isError(zn)) { printf("[TADICT] kf zstd error: %s\n", ZSTD_getErrorName(zn)); return; }
+		uint32_t innerSz = (uint32_t)inner.size();
+		msg.resize(12 + zn);
+		msg[0]='T'; msg[1]='D'; msg[2]='W'; msg[3]='1';
+		msg[4] = dictEpoch;
+		msg[5] = (uint8_t)((isKey ? 1 : 0) | (tacanonMode() == 2 ? 2 : 0)
+			| 8 | (hasPages ? 16 : 0) | 32 | (splitPos ? 64 : 0) | 128 /*kfdelta*/);
+		uint16_t s16 = (uint16_t)seq; memcpy(msg.data() + 6, &s16, 2);
+		memcpy(msg.data() + 8, &innerSz, 4);
+		memcpy(msg.data() + 12, kfZ.data(), zn);
+		seq++;
+		maplecast_ws::broadcastBinary(msg.data(), (uint32_t)(12 + zn));
+		return;
+	}
+
 	uint32_t innerSize = (uint32_t)inner.size();
 	msg.resize(12 + ZSTD_compressBound(innerSize));
 	msg[0]='T'; msg[1]='D'; msg[2]='W'; msg[3]='1';

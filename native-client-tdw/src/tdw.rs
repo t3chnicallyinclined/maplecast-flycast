@@ -28,6 +28,11 @@ pub struct Tdw {
     synced: bool,
     acc: Vec<u8>,
     scratch: Vec<u8>,
+    /// keyframe/delta wire (flag bit7): the last keyframe inner + its id. A delta
+    /// rebases on this; a delta with a different keyId (its keyframe was lost) is
+    /// skipped until the next keyframe -> no misapply, bounded loss recovery.
+    kf_key: Vec<u8>,
+    kf_key_id: u32,
     /// content-hash index (FNV64, same as the server) — needed for the
     /// split-position TWIN-INTERN mirror: on interning a new pt7 64B literal,
     /// both sides also intern its zeroed-positions twin IF ABSENT, keeping the
@@ -78,6 +83,8 @@ impl Tdw {
             synced: false,
             acc: Vec::new(),
             scratch: vec![0u8; 1 << 20],
+            kf_key: Vec::new(),
+            kf_key_id: 0,
             by_hash: std::collections::HashMap::new(),
         }
     }
@@ -160,12 +167,42 @@ impl Tdw {
         }
         let epoch = msg[4];
         let flags = msg[5];
-        let seq = u16::from_le_bytes([msg[6], msg[7]]);
-        let inner_size = rd_u32(msg, 8)? as usize;
-
         if self.dict_epoch != Some(epoch) {
             return Ok(None); // dictionary unknown for this epoch — wait for TDWS
         }
+
+        // --- keyframe/delta TDW wire (flag bit7): loss-tolerant. One-shot zstd ->
+        // statewire_tdw block -> inner. A delta whose keyframe was lost (keyId
+        // mismatch) is SKIPPED, not misapplied -> recovers at the next keyframe. ---
+        if flags & 0x80 != 0 {
+            let block = zstd::stream::decode_all(&msg[12..])
+                .map_err(|e| -> BoxErr { format!("kf zstd: {e}").into() })?;
+            if block.len() < 9 {
+                return Ok(None);
+            }
+            let is_key = block[0] == 1;
+            let key_id = u32::from_le_bytes([block[1], block[2], block[3], block[4]]);
+            let inner = if is_key {
+                match tdw_decode(&block, &[]) { Some(i) => i, None => return Ok(None) }
+            } else {
+                if !self.synced || key_id != self.kf_key_id {
+                    return Ok(None); // keyframe lost / not yet seen — wait for the next keyframe
+                }
+                let key = std::mem::take(&mut self.kf_key);
+                let r = tdw_decode(&block, &key);
+                self.kf_key = key;
+                match r { Some(i) => i, None => return Ok(None) }
+            };
+            if is_key {
+                self.kf_key.clone_from(&inner);
+                self.kf_key_id = key_id;
+                self.synced = true;
+            }
+            return self.parse_inner(inner, flags);
+        }
+
+        let seq = u16::from_le_bytes([msg[6], msg[7]]);
+        let inner_size = rd_u32(msg, 8)? as usize;
         if flags & 0x01 != 0 {
             self.dctx.reset(ResetDirective::SessionOnly).map_err(zerr)?;
             self.acc.clear();
@@ -209,7 +246,12 @@ impl Tdw {
             return Err(format!("TDW1 chunk overrun: {got} != {inner_size}").into());
         }
         let inner = std::mem::take(&mut self.acc);
+        self.parse_inner(inner, flags)
+    }
 
+    /// Parse a decompressed inner payload into a TdwFrame (dict-ref expansion +
+    /// camera/pvr/pages/E2EP tails). Shared by the streaming and keyframe/delta paths.
+    fn parse_inner(&mut self, inner: Vec<u8>, flags: u8) -> Result<Option<TdwFrame>, BoxErr> {
         // --- inner payload -> reassemble the TA from dict refs ---
         if inner.len() < 20 {
             return Err("TDW1 inner: short".into());
@@ -332,6 +374,45 @@ impl Tdw {
 
 fn zerr(code: usize) -> BoxErr {
     format!("zstd: {}", zstd_safe::get_error_name(code)).into()
+}
+
+/// Decode a statewire_tdw block (keyframe or delta) into the inner blob.
+/// keyframe: [1][keyId u32][rawLen u32][bytes]; delta: [0][keyId u32][targetLen u32]
+/// [nRuns u32][runs]. `reff` = the keyframe blob (ignored for a keyframe).
+/// Mirrors core/network/statewire_tdw.h decode(); returns None on malformed input.
+fn tdw_decode(enc: &[u8], reff: &[u8]) -> Option<Vec<u8>> {
+    if enc.len() < 9 {
+        return None;
+    }
+    let sz = u32::from_le_bytes([enc[5], enc[6], enc[7], enc[8]]) as usize;
+    if enc[0] == 1 {
+        if enc.len() < 9 + sz {
+            return None;
+        }
+        return Some(enc[9..9 + sz].to_vec());
+    }
+    if enc.len() < 13 {
+        return None;
+    }
+    let n_runs = u32::from_le_bytes([enc[9], enc[10], enc[11], enc[12]]);
+    let mut blob = vec![0u8; sz];
+    let m = sz.min(reff.len());
+    blob[..m].copy_from_slice(&reff[..m]);
+    let mut o = 13usize;
+    for _ in 0..n_runs {
+        if o + 8 > enc.len() {
+            return None;
+        }
+        let off = u32::from_le_bytes([enc[o], enc[o + 1], enc[o + 2], enc[o + 3]]) as usize;
+        let len = u32::from_le_bytes([enc[o + 4], enc[o + 5], enc[o + 6], enc[o + 7]]) as usize;
+        o += 8;
+        if o + len > enc.len() || off + len > sz {
+            return None;
+        }
+        blob[off..off + len].copy_from_slice(&enc[o..o + len]);
+        o += len;
+    }
+    Some(blob)
 }
 fn rd_u32(b: &[u8], o: usize) -> Result<u32, BoxErr> {
     b.get(o..o + 4)
