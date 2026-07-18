@@ -266,6 +266,26 @@
     .run-cmd code { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px; color:#c9d1d9; white-space:pre; line-height:1.65; }
     .run-need { display:flex; flex-wrap:wrap; gap:8px 20px; margin:14px 0; font-size:13px; color:#c9d1d9; }
     .run-note { color:#8b93a1; font-size:13px; margin:0; }
+
+    /* ── Match preview (mini live renderer) ── */
+    .match-card { cursor:pointer; transition:border-color .15s; }
+    .match-card:hover { border-color:#34d399; }
+    .match-card:hover .mc-watch { color:#42e0a8; }
+    .preview-modal { position:fixed; inset:0; z-index:1000; display:none; align-items:center; justify-content:center;
+      background:rgba(6,9,13,.82); font-family:system-ui,sans-serif; padding:16px; }
+    .preview-modal.open { display:flex; }
+    .preview-box { background:#12151b; border:1px solid #2a313c; border-radius:12px; padding:14px; max-width:min(94vw,700px); }
+    .preview-head { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+    .preview-head .pv-title { font-weight:700; color:#e2e6ec; font-size:14px; }
+    .preview-head .pv-status { margin-left:auto; font-family:ui-monospace,monospace; font-size:11px; color:#34d399; }
+    .preview-head .pv-close { background:none; border:1px solid #2a313c; color:#c9d1d9; border-radius:6px;
+      width:28px; height:28px; cursor:pointer; font-size:16px; line-height:1; }
+    .preview-head .pv-close:hover { border-color:#8b93a1; }
+    .preview-screen { position:relative; width:640px; max-width:100%; aspect-ratio:4/3; background:#070a0e; border-radius:8px; overflow:hidden; }
+    #preview-canvas { width:100%; height:100%; display:block; image-rendering:pixelated; }
+    .preview-screen .pv-wait { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+      color:#5b6472; font-family:ui-monospace,monospace; font-size:12px; }
+    .preview-foot { margin-top:8px; font-size:11px; color:#5b6472; font-family:ui-monospace,monospace; }
   </style>
 </head>
 <body>
@@ -356,6 +376,21 @@
       <span>&#10003; Ports 7201/tcp + 7100/udp open</span>
     </div>
     <p class="run-note">Native clients connect immediately; serving <em>browser</em> viewers needs a public IP + TLS. Hosting is open &amp; casual &mdash; ranked stays on trusted nodes.</p>
+  </div>
+
+  <div class="preview-modal" id="preview-modal" aria-hidden="true">
+    <div class="preview-box">
+      <div class="preview-head">
+        <span class="pv-title" id="pv-title">Live match</span>
+        <span class="pv-status" id="pv-status">connecting&hellip;</span>
+        <button class="pv-close" id="pv-close" title="Close" aria-label="Close preview">&times;</button>
+      </div>
+      <div class="preview-screen">
+        <canvas id="preview-canvas" width="640" height="480"></canvas>
+        <div class="pv-wait" id="pv-wait">connecting to node&hellip;</div>
+      </div>
+      <div class="preview-foot">rendered live in your browser from the node's thin wire &middot; SH4 off</div>
+    </div>
   </div>
 
   <div class="footer">
@@ -485,7 +520,7 @@
         const timer = (g.timer != null) ? `${g.timer}s` : '';
         const combo = Math.max(g.p1_combo || 0, g.p2_combo || 0);
         const lv = m => (m != null) ? `LV${m}` : '';
-        return `<div class="match-card">
+        return `<div class="match-card" data-relay="${esc(n.relay_url || '')}" data-name="${esc(n.name)} · ${loc}">
           <div class="mc-loc"><span>&#128205;</span> ${loc}<span class="mc-node">${esc(n.name)}</span></div>
           <div class="mc-stage">${esc(stage)}${timer ? ` &middot; <span class="mc-timer">${timer}</span>` : ''}<span class="mc-spec">&#128065; ${n.spectators}</span></div>
           <div class="mc-fight">
@@ -493,7 +528,7 @@
             <div class="mc-mid">VS${combo > 1 ? `<div class="mc-combo">${combo} HIT</div>` : ''}</div>
             <div class="mc-side p2"><div class="mc-names">${esc(team(g.p2_chars))}</div><div class="hp"><i style="width:${hpPct(g.p2_hp)}%"></i></div><div class="mc-lv">${lv(g.p2_meter)}</div></div>
           </div>
-          <a class="mc-watch" href="/?watch=${encodeURIComponent(n.node_id)}">Watch this match &#8599;</a>
+          <span class="mc-watch">&#9654; Watch live preview</span>
         </div>`;
       }).join('');
     }
@@ -712,6 +747,45 @@
     fetchAndRender();
     setInterval(fetchAndRender, POLL_INTERVAL);
     connectEvents();   // live join/update/leave feed — pins pop in without waiting for the poll
+
+    // ── Match preview: click a Live-now card → a small live render of that node ──
+    let _mp = null, _MiniPlayer = null;
+    async function openPreview(relay, name) {
+      if (!relay) return;
+      const modal = document.getElementById('preview-modal');
+      const st = document.getElementById('pv-status');
+      const wait = document.getElementById('pv-wait');
+      document.getElementById('pv-title').textContent = name || 'Live match';
+      st.textContent = 'connecting…'; wait.textContent = 'connecting to node…'; wait.style.display = 'flex';
+      modal.classList.add('open'); modal.setAttribute('aria-hidden', 'false');
+      if (_mp) { try { _mp.stop(); } catch (e) {} _mp = null; }
+      try {
+        if (!_MiniPlayer) ({ MiniPlayer: _MiniPlayer } = await import('./webgpu/mini-player.mjs'));
+      } catch (e) { st.textContent = 'renderer unavailable'; wait.textContent = 'renderer failed to load'; return; }
+      if (!modal.classList.contains('open')) return;   // closed during the import
+      _mp = new _MiniPlayer(document.getElementById('preview-canvas'), relay, {
+        onstatus: (s) => {
+          st.textContent = (s === 'playing') ? 'live' : s;
+          if (s === 'playing') wait.style.display = 'none';
+          if (s === 'gpu-error') { st.textContent = 'WebGPU unavailable'; wait.textContent = 'this browser has no WebGPU'; }
+          if (s === 'closed') wait.style.display = 'flex', wait.textContent = 'disconnected';
+        },
+      });
+    }
+    function closePreview() {
+      const modal = document.getElementById('preview-modal');
+      modal.classList.remove('open'); modal.setAttribute('aria-hidden', 'true');
+      if (_mp) { try { _mp.stop(); } catch (e) {} _mp = null; }
+    }
+    document.getElementById('live-grid').addEventListener('click', (e) => {
+      const card = e.target.closest('.match-card');
+      if (card && card.dataset.relay) openPreview(card.dataset.relay, card.dataset.name);
+    });
+    document.getElementById('pv-close').addEventListener('click', closePreview);
+    document.getElementById('preview-modal').addEventListener('click', (e) => {
+      if (e.target.id === 'preview-modal') closePreview();   // backdrop click
+    });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePreview(); });
   </script>
 </body>
 </html>
