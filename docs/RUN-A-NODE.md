@@ -20,6 +20,7 @@ Registration is open — no approval, no account. Your node shows up on the
 
 ```bash
 docker run -d --name maplecast-node --restart unless-stopped \
+  --shm-size=1g \
   -p 7201:7201/tcp -p 7100:7100/udp \
   -v /path/to/mvc2-folder:/data:ro \
   -v maplecast-node:/opt/maplecast/.maplecast \
@@ -27,6 +28,9 @@ docker run -d --name maplecast-node --restart unless-stopped \
   -e MAPLECAST_NODE_REGION="us-east" \
   ghcr.io/t3chnicallyinclined/maplecast-node:latest
 ```
+
+> `--shm-size=1g` is required — flycast maps its emulated memory through
+> `/dev/shm`, and Docker's 64 MB default is too small (the node crashes without it).
 
 > Mount the **folder** that holds your `.gdi` — a GDI disc image is an index plus
 > its `track01.bin` / `track02.raw` / … files, and they all need to be together.

@@ -343,6 +343,7 @@
     <h2>Run a node</h2>
     <p class="run-sub">Anyone with the ROM can host. One command on a Linux box with Docker &mdash; your node boots the game, registers, geolocates, and shows up on the map above. No account, no approval.</p>
     <pre class="run-cmd"><code>docker run -d --name maplecast-node --restart unless-stopped \
+  --shm-size=1g \
   -p 7201:7201/tcp -p 7100:7100/udp \
   -v /path/to/mvc2-folder:/data:ro \
   -v maplecast-node:/opt/maplecast/.maplecast \
