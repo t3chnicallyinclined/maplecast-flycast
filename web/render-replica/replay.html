@@ -361,6 +361,7 @@ import createRenderFrame from './render_frame.mjs?v=scene6';
 // The SpriteClient/SpriteGPU emitter is still IMPORTED but NO LONGER DRAWS the bodies — it
 // is retained only for the (disabled) emitter cross-check; the drawn bodies ARE the transpile.
 import { ensureBodyTextures } from './body_decoder.mjs?v=scene11';
+import { decodeV2, decodeV2Len } from './statewire_v2.mjs?v=v2wire1';   // state-wire v2 (FRM2)
 import { SpriteClient } from '../webgpu/sprite-client.mjs?v=fxemit1';
 import { SpriteGPU }    from '../webgpu/sprite-gpu.mjs?v=scene5';
 // Phase A — LOCAL-ROM GFX overlay: before each render_frame, override the shipped (stale/
@@ -2222,6 +2223,7 @@ els.scrub.oninput = () => { if (playing) setPlaying(false); showFrame(+els.scrub
 // ============================================================================
 const MAGIC_ZCST = 0x5453435A;
 let liveWS = null, livePre = null, liveSeeded = false, livePrefixSeen = false, pendingGfx = [];
+let liveKey = null;   // state-wire v2: the client's last keyframe DYNAMIC blob (delta base)
 let liveFpsT = performance.now(), liveFpsN = 0;
 
 function setMode(m) {
@@ -2231,7 +2233,7 @@ function setMode(m) {
 
 function stopLive() {
     if (liveWS) { try { liveWS.onclose = null; liveWS.close(); } catch {} liveWS = null; }
-    livePre = null; liveSeeded = false; livePrefixSeen = false; pendingGfx = [];
+    livePre = null; liveSeeded = false; livePrefixSeen = false; pendingGfx = []; liveKey = null;
     els.btnLive.textContent = '⚡ Connect Live';
     els.btnLive.classList.remove('active');
     els.linkState.textContent = '–';
@@ -2252,29 +2254,51 @@ function zcstDecompress(u8) {
 function frameHasGfxTail(u8) {
     if (!livePre) return false;
     const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
-    if (u8.length < 12 || dv.getUint32(0, true) !== 0x784D5246) return false;
-    const taSize = dv.getUint32(8, true);
-    const off = 12 + livePre.dynTotal + taSize;        // FRMx(4)+vframe(4)+taSize(4)+dyn+ta
+    if (u8.length < 12) return false;
+    const magic = dv.getUint32(0, true);
+    let off;
+    if (magic === 0x784D5246) {                        // "FRMx" v1: fixed dynTotal stride
+        off = 12 + livePre.dynTotal + dv.getUint32(8, true);
+    } else if (magic === 0x324D5246) {                 // "FRM2" v2: variable-length block
+        off = 12 + decodeV2Len(u8.subarray(12));
+    } else return false;
     return off + 4 <= u8.length && dv.getUint32(off, true) > 0;
 }
 function liveApplyFrame(u8) {
     const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
-    let p = 0;
-    if (dv.getUint32(p, true) !== 0x784D5246) { log('  [live] dropped: bad FRMx magic', 'warn'); return; }
-    p += 4;
+    const magic = dv.getUint32(0, true);
+    const isV2 = magic === 0x324D5246;                 // "FRM2" — state-wire v2 (keyframe/delta)
+    if (magic !== 0x784D5246 && !isV2) { log('  [live] dropped: bad FRMx/FRM2 magic', 'warn'); return; }
+    let p = 4;
     const vframe = dv.getUint32(p, true); p += 4;
-    const taSize = dv.getUint32(p, true); p += 4;
+    const taSize = dv.getUint32(p, true); p += 4;       // 0 on the live wire (state, not TA)
     // splat each DYNAMIC region (table order from msg 1) into the RAM image. Phase 5: every
     // region is area-3 guest STATE (slot table, char structs, tiledesc, rectab/idxtab, camera).
     // The body sprite TEXTURES are reconstructed client-side from the shipped-once GFX by
     // ensureBodyTextures() — no per-frame pixel band on the wire (wire back to GSTA size).
-    for (const r of livePre.dynamicRegs) {
-        const slice = u8.subarray(p, p + r.len);
-        // Phase 5: state-only wire — body textures decoded client-side (ensureBodyTextures).
-        // Tolerate a legacy "bodytex" region from an older server build by ignoring it.
-        if (r.tag === 'bodytex') { /* no per-frame texture band anymore */ }
-        else ram.set(slice, guestOff(r.addr));
-        p += r.len;
+    if (isV2) {
+        // v2: the DYNAMIC block is keyframe/delta-encoded. Reconstruct the full dynTotal
+        // blob from the last keyframe, splat regions from IT, and advance p past the
+        // variable-length block so the GFX/pal/HUD tails below are found correctly.
+        const enc = u8.subarray(p);
+        if (enc[0] !== 1 && !liveKey) return;           // a delta before any keyframe — wait for one
+        const dyn = decodeV2(enc, liveKey, livePre.dynTotal);
+        if (enc[0] === 1) liveKey = dyn;                // a keyframe becomes the delta base
+        p += decodeV2Len(enc);
+        let o = 0;
+        for (const r of livePre.dynamicRegs) {
+            if (r.tag !== 'bodytex') ram.set(dyn.subarray(o, o + r.len), guestOff(r.addr));
+            o += r.len;
+        }
+    } else {
+        for (const r of livePre.dynamicRegs) {
+            const slice = u8.subarray(p, p + r.len);
+            // Phase 5: state-only wire — body textures decoded client-side (ensureBodyTextures).
+            // Tolerate a legacy "bodytex" region from an older server build by ignoring it.
+            if (r.tag === 'bodytex') { /* no per-frame texture band anymore */ }
+            else ram.set(slice, guestOff(r.addr));
+            p += r.len;
+        }
     }
     // ---- VARIABLE GFX TAIL (the static-GFX-gap fix): u32 nGfx, then nGfx × { u32 base, 0x20000
     // bytes }. The server ships a body's GFX1/GFX2 here ON CHANGE (a char whose art loaded after

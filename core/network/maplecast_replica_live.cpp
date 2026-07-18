@@ -28,6 +28,7 @@
 #include "maplecast_replica_live.h"
 #include "maplecast_compress.h"          // MirrorCompressor / ZCST envelope
 #include "maplecast_oracle_hook.h"       // HudQuad + mc_oracle_hudQuads (HUDQ tail)
+#include "statewire_v2.h"                // state-wire v2 keyframe/delta codec (opt-in)
 
 #include "hw/sh4/sh4_mem.h"              // addrspace::read*, mem_b, RAM_SIZE
 #include "network/maplecast_mirror.h"    // A2 STATEVF: suppressActive() to log only the shipped leg
@@ -376,6 +377,26 @@ static bool                 _compInit = false;
 // MCRR / FRMx magics (LE on the wire) — see the format doc.
 static constexpr u32 MCRR_MAGIC = 0x5252434Du;     // "MCRR"
 static constexpr u32 FRMX_MAGIC = 0x784D5246u;     // "FRMx"
+
+// --- state-wire v2 (MAPLECAST_STATEWIRE_V2=1): keyframe/delta dirty-diff of the
+// per-frame DYNAMIC payload (statewire_v2.h, proven byte-exact in Py/C++/JS). OFF
+// by default -> the v1 FRMx frame publishes unchanged. Frame magic FRM2 tells the
+// client to decode the variable-length dynamic block before the GFX/pal/HUD tails. ---
+static constexpr u32 FRM2_MAGIC = 0x324D5246u;     // "FRM2"
+static std::vector<uint8_t> _v2Out[2];             // double-buffered v2 output (like _dynBuf)
+static std::vector<uint8_t> _v2Blk;                // encoded dynamic block (scratch)
+static std::vector<uint8_t> _v2Key;                // last keyframe raw dynamic blob
+static u32  _v2KeyId    = 0;                        // frame ctr of the last keyframe
+static u32  _v2FrameCtr = 0;
+static std::atomic<bool> _v2ForceKey{false};       // new connect -> next frame is a keyframe
+static bool statewireV2On() {
+	static const bool on = []{ const char* e = getenv("MAPLECAST_STATEWIRE_V2"); return e && e[0] == '1'; }();
+	return on;
+}
+static u32 statewireV2KeyInterval() {
+	static const u32 k = []{ const char* e = getenv("MAPLECAST_STATEWIRE_V2_KEY"); u32 v = e ? (u32)atoi(e) : 60u; return v ? v : 60u; }();
+	return k;
+}
 static constexpr u32 HUDQ_MAGIC = 0x48554451u;     // "HUDQ" (HUD-TA tail magic, LE)
 static constexpr u32 BTCW_MAGIC = 0x57435442u;     // "BTCW" (resolved-body-tcw tail magic, LE)
 static constexpr u32 PL3D_MAGIC = 0x44334C50u;     // "PL3D" (3D-machine SQ-flush tail magic, LE)
@@ -797,7 +818,7 @@ static void captureFrame(u32 vframe)
 	// A new client connected: drop our shipped-GFX memory so this frame re-ships every active
 	// body's GFX (the cached prefix only has the build-time bodies). Existing clients get a
 	// benign duplicate; the new client gets the GFX it was missing.
-	if (_gfxResendAll.exchange(false, std::memory_order_relaxed)) _gfxShipped.clear();
+	if (_gfxResendAll.exchange(false, std::memory_order_relaxed)) { _gfxShipped.clear(); _v2ForceKey.store(true, std::memory_order_relaxed); }
 
 	// A new client connected: also re-ship the palette this frame (its seeded pvr is the prefix
 	// snapshot; a bank written after that snapshot would otherwise be frozen/black on the new client).
@@ -969,11 +990,39 @@ static void captureFrame(u32 vframe)
 		memcpy(&buf[off], p3dBuf, p3dTail); off += p3dTail;
 	}
 
+	// ---- state-wire v2 (opt-in): republish with the DYNAMIC block dirty-diffed vs the
+	// last keyframe. The v1 buffer above is untouched; when MAPLECAST_STATEWIRE_V2 is off
+	// this is skipped and the FRMx frame publishes exactly as before. The variable-length
+	// v2 block replaces the raw dynamic bytes; the GFX/pal/HUD/BTCW/PL3D tails are copied
+	// verbatim after it (the client finds them via statewire_v2 decodeV2Len). ----
+	const uint8_t* pubPtr = buf.data();
+	size_t         pubLen = total;
+	if (statewireV2On()) {
+		_v2FrameCtr++;
+		bool isKey = _v2ForceKey.exchange(false, std::memory_order_relaxed)
+		          || _v2Key.size() != _dynTotal
+		          || (_v2FrameCtr % statewireV2KeyInterval() == 1);   // ctr==1 => first frame is a key
+		const uint8_t* dynSrc = &buf[hdr];                 // the v1 raw dynamic block
+		if (isKey) { _v2Key.assign(dynSrc, dynSrc + _dynTotal); _v2KeyId = _v2FrameCtr; }
+		statewire_v2::encode(dynSrc, _dynTotal, _v2Key.data(), _v2KeyId, isKey, _v2Blk);
+		const size_t tailOff = hdr + _dynTotal;            // GFX/pal/HUD/BTCW/PL3D tails start here
+		const size_t tailLen = total - tailOff;
+		const size_t v2total = hdr + _v2Blk.size() + tailLen;
+		std::vector<uint8_t>& out = _v2Out[which];         // double-buffered like _dynBuf
+		if (out.size() != v2total) out.resize(v2total);
+		memcpy(&out[0], &buf[0], hdr);                     // 12B FRMx header ...
+		u32 m2 = FRM2_MAGIC; memcpy(&out[0], &m2, 4);      // ... rewritten to FRM2
+		memcpy(&out[hdr], _v2Blk.data(), _v2Blk.size());   // dirty-diffed dynamic block
+		memcpy(&out[hdr + _v2Blk.size()], &buf[tailOff], tailLen);   // tails verbatim
+		pubPtr = out.data();
+		pubLen = v2total;
+	}
+
 	// ---- publish to the WS thread (drop-old: overwrite any undrained frame) ----
 	{
 		std::lock_guard<std::mutex> lk(_pubMutex);
-		_pubPtr = buf.data();
-		_pubLen = total;
+		_pubPtr = pubPtr;
+		_pubLen = pubLen;
 		_pubHasFrame = true;            // if a previous frame was pending, it's dropped
 		_dynWhich = which;              // this buffer is now the "published" one
 	}
