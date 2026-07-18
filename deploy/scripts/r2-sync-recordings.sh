@@ -16,7 +16,8 @@
 #          access_key_id=<R2_ACCESS_KEY_ID> \
 #          secret_access_key=<R2_SECRET_ACCESS_KEY> \
 #          endpoint=https://<ACCOUNT_ID>.r2.cloudflarestorage.com \
-#          acl=private
+#          acl=private \
+#          no_check_bucket=true   # REQUIRED: bucket-scoped tokens can't CreateBucket
 #   3. Cron, e.g. every 10 min:
 #        */10 * * * * /opt/maplecast/deploy/scripts/r2-sync-recordings.sh >> /var/log/mc-r2.log 2>&1
 # ─────────────────────────────────────────────────────────────────────────────
@@ -33,7 +34,7 @@ command -v rclone >/dev/null || { echo "[r2-sync] rclone not installed"; exit 1;
 echo "[r2-sync] $(date -u +%FT%TZ) uploading $REC_DIR -> $R2_REMOTE"
 rclone copy "$REC_DIR" "$R2_REMOTE" \
   --include '*.mcrec' --include '*.mctele' --include '*.mctele.zst' \
-  --transfers 4 --checkers 8 --log-level INFO
+  --s3-no-check-bucket --transfers 4 --checkers 8 --log-level INFO
 
 # 2. Prune local files older than the backstop window (already uploaded in prior runs).
 find "$REC_DIR" -type f \
