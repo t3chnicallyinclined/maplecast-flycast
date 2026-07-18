@@ -249,6 +249,54 @@ MAPLECAST_SERVER_PORT=7201 \
 
 ---
 
+## MVC2-AI Training Dataset Exporter (input-side ML)
+
+The **`mvc2-ai`** repo (sibling `../mvc2-ai`) is the input/decision-side ML layer — models that
+GENERATE inputs (behavior cloning now; RL later). Clean split: **ML emits inputs; the exact sim
+(this repo) processes them.** It consumes a per-frame dataset the headless server produces.
+Design: `docs/DATASET-EXPORTER-DESIGN.md`; field catalog: `../mvc2-ai/docs/DATASET-FIELDS.md`.
+
+### The exporter (server side, this repo)
+- **`serverPublish` state tap** (`maplecast_mirror.cpp`, before the no-subscriber early-return)
+  reads guest RAM each frame → a **`.mctele`** stream: one 8964-byte blob/frame of 6 char structs
+  (`0x8C268340`), globals (`0x8C2895E0`), camera (`0x8C26A520`), **both players' latched
+  `Input_DEC` (`0x8C2681DC`)**, and `frame_counter` (`0x8C3496B0`). The `.mctele` is
+  SELF-CONTAINED (state + inputs) — no `.mcrec` needed for the dataset.
+- **Read-only, determinism-PROVEN** (`MAPLECAST_DETLOG` gate: 1116/1116 game-state hashes
+  identical tap on vs off), ~0 CPU, on the publish thread (off the input→sim latency path).
+- **Gated on `in_match` (`0x8C289624`)** — records only real match frames, never idle.
+- Writer + runtime toggle in `replay_writer.{h,cpp}`: `setDatasetRecording(on,dir)`,
+  `datasetRecordingActive()`, `beginStateStream`/`appendState`/`closeStateStream`.
+- **Gotcha (in DATASET-FIELDS.md):** the `.mcrec` input log writes a neutral-duplicate entry
+  per frame — per-frame input must be the UNION of presses, not last-write-wins. `Input_DEC`
+  in the `.mctele` avoids this (it's the clean latched value).
+
+### Admin toggle — OFF by default (no continuous recording)
+- Control-WS command **`dataset_record {on[,dir]}`** (`maplecast_control_ws.cpp`) flips the
+  runtime flag; the tap responds live. A **"Dataset Recording"** toggle in
+  `web/client-settings.html` (control WS `:7211`) drives it. Recording is OFF unless an operator
+  flips it for a specific training session. No `dir` from the web toggle → recorder uses
+  `recordings/` (prod `WorkingDirectory=/opt/maplecast` → `/opt/maplecast/recordings`).
+
+### R2 offload + training flow
+- `deploy/scripts/r2-sync-recordings.sh` (cron on prod, root) uploads `.mctele` to Cloudflare
+  R2 bucket **`mvc2-dataset`** (rclone remote `r2`, endpoint
+  `da520a87698c3b96f1a0652b01a039c9.r2.cloudflarestorage.com`, **`no_check_bucket=true`** — a
+  bucket-scoped token can't CreateBucket), then prunes local. The 3090 rig pulls via
+  `../mvc2-ai/tools/r2-pull-dataset.sh` and trains offline (PyTorch/CUDA → ONNX; NEVER torch in
+  the input-server hot path). Reward = DIAMBRA-standard damage-dealt-minus-taken (health-delta).
+- Milestone A (input-only predictor) already beats the naive "repeat-last-input" baseline
+  **+10.4pp on decision frames** (`../mvc2-ai/src/mvc2_ai/milestone_a.py`). Next: the
+  state-conditioned model, once real 2-human matches accumulate.
+
+### Deploy state (2026-07-18)
+- **Live on prod** (149.28.44.118) as `/usr/local/bin/flycast` md5 `eacf3077…` (backup
+  `flycast.bak-20260718-225110`), built from branch **`deploy/exporter-prod`** (node-console tip
+  + the 5 `(dataset)` commits — the exporter itself is on `feat/dataset-exporter`). Exporter
+  GATED OFF; the `dataset_record` toggle is confirmed live on prod.
+- **Operator access to the toggle:** `ssh -L 7211:127.0.0.1:7211 root@149.28.44.118`, then open
+  `web/client-settings.html` (its control WS targets `localhost:7211` → tunneled to prod).
+
 ## Code Guidelines
 
 - After 2-3 failed builds, stop and ask — don't burn time on retries
