@@ -135,6 +135,7 @@ enum class CmdType {
 	RecordStart,    // .mcrec V3 in-memory record (no prerequisite .state)
 	RecordStop,
 	RecordStatus,
+	DatasetRecord,  // runtime .mctele dataset toggle (admin)
 };
 
 struct Command {
@@ -143,6 +144,8 @@ struct Command {
 	std::string path;            // record_start output path
 	std::string p1Name, p2Name;  // record_start metadata
 	bool atMatch = false;        // record_start: arm + auto-fire at in_match 0→1
+	bool datasetOn = false;      // dataset_record: on/off
+	std::string datasetDir;      // dataset_record: .mctele output dir
 	std::string reply_id;        // client correlation
 	ControlConnHdl conn;         // who to reply to
 };
@@ -467,6 +470,17 @@ static void executeRecordStatus(const Command& cmd)
 	}));
 }
 
+static void executeDatasetRecord(const Command& cmd)
+{
+	maplecast_replay::setDatasetRecording(cmd.datasetOn, cmd.datasetDir);
+	printf("[control-ws] dataset_record: %s\n", cmd.datasetOn ? "ON" : "OFF");
+	fflush(stdout);
+	sendJson(cmd.conn, okReply(cmd, "dataset_record", json{
+		{"recording", maplecast_replay::datasetRecordingActive()},
+		{"dir", cmd.datasetDir},
+	}));
+}
+
 void drainCommandQueue()
 {
 	if (!_active.load(std::memory_order_relaxed)) return;
@@ -491,6 +505,7 @@ void drainCommandQueue()
 			case CmdType::RecordStart:    executeRecordStart(cmd); break;
 			case CmdType::RecordStop:     executeRecordStop(cmd); break;
 			case CmdType::RecordStatus:   executeRecordStatus(cmd); break;
+			case CmdType::DatasetRecord:  executeDatasetRecord(cmd); break;
 		}
 	}
 }
@@ -587,6 +602,12 @@ static void onMessage(ControlConnHdl hdl, ControlWsServer::message_ptr msg)
 		cmd.type = CmdType::RecordStop;
 	} else if (cmdName == "record_status") {
 		cmd.type = CmdType::RecordStatus;
+	} else if (cmdName == "dataset_record") {
+		cmd.type = CmdType::DatasetRecord;
+		if (parsed.contains("on") && parsed["on"].is_boolean())
+			cmd.datasetOn = parsed["on"].get<bool>();
+		if (parsed.contains("dir") && parsed["dir"].is_string())
+			cmd.datasetDir = parsed["dir"].get<std::string>();
 	} else if (cmdName == "status") {
 		json data = {
 			{"slot", config::SavestateSlot.get()},

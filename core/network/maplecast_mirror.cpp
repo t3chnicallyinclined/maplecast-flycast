@@ -2772,8 +2772,7 @@ void serverPublish(TA_context* ctx)
 	// Also gate on in_match (0x8C289624): capture state ONLY during actual matches,
 	// not menu/attract idle — the dominant disk saving. Edge flap is harmless: each
 	// frame records its own in_match in the globals segment, so training filters exactly.
-	if (maplecast_replay::matchRecordingActive() && maplecast_replay::stateRecordingEnabled()
-	    && addrspace::read8(0x8C289624)) {
+	if (maplecast_replay::datasetRecordingActive() && addrspace::read8(0x8C289624)) {
 		static const maplecast_replay::StateSeg _stateSegs[] = {
 			{ 0x8C268340u, 6u * 0x5A4u },  // 6 char structs P1C1..P2C3 (whole struct each)
 			{ 0x8C2895E0u, 0xA0u },        // globals: slot table, match state, meters, combos, wins
@@ -2784,12 +2783,11 @@ void serverPublish(TA_context* ctx)
 		static const uint32_t _stateBlobLen = []{
 			uint32_t n = 0; for (const auto& s : _stateSegs) n += s.len; return n;
 		}();
-		static bool _stateStreamBegun = false;
-		if (!_stateStreamBegun) {
-			maplecast_replay::beginStateStream(_stateSegs,
-				(uint32_t)(sizeof(_stateSegs) / sizeof(_stateSegs[0])), _stateBlobLen);
-			_stateStreamBegun = true;
-		}
+		// Idempotent: opens the .mctele on the first in-match frame after the toggle
+		// flips on, no-ops while already streaming. On toggle-off the stream closes,
+		// so the next enable starts a fresh file.
+		maplecast_replay::beginStateStream(_stateSegs,
+			(uint32_t)(sizeof(_stateSegs) / sizeof(_stateSegs[0])), _stateBlobLen);
 		static thread_local std::vector<uint8_t> _stateBlob;
 		_stateBlob.resize(_stateBlobLen);
 		uint32_t off = 0;
