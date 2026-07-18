@@ -2769,7 +2769,11 @@ void serverPublish(TA_context* ctx)
 	// (cannot perturb the sim). Keyed on _localFrameNum — the same counter the
 	// input tape / .mcrec use on this path — so state and inputs align. Gated
 	// OFF unless MAPLECAST_RECORD_STATE is set alongside MAPLECAST_RECORD_MATCHES.
-	if (maplecast_replay::matchRecordingActive() && maplecast_replay::stateRecordingEnabled()) {
+	// Also gate on in_match (0x8C289624): capture state ONLY during actual matches,
+	// not menu/attract idle — the dominant disk saving. Edge flap is harmless: each
+	// frame records its own in_match in the globals segment, so training filters exactly.
+	if (maplecast_replay::matchRecordingActive() && maplecast_replay::stateRecordingEnabled()
+	    && addrspace::read8(0x8C289624)) {
 		static const maplecast_replay::StateSeg _stateSegs[] = {
 			{ 0x8C268340u, 6u * 0x5A4u },  // 6 char structs P1C1..P2C3 (whole struct each)
 			{ 0x8C2895E0u, 0xA0u },        // globals: slot table, match state, meters, combos, wins
