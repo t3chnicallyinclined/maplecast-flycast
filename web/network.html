@@ -271,6 +271,11 @@
     .match-card { cursor:pointer; transition:border-color .15s; }
     .match-card:hover { border-color:#34d399; }
     .match-card:hover .mc-watch { color:#42e0a8; }
+    /* Any online node streams (attract / character-select even with no match), so its table row previews too. */
+    tr.node-row { cursor:pointer; }
+    tr.node-row:hover { background:#12151b; }
+    tr.node-row:hover .node-watch { color:#42e0a8; }
+    .node-watch { color:#34d399; text-align:center; }
     .preview-modal { position:fixed; inset:0; z-index:1000; display:none; align-items:center; justify-content:center;
       background:rgba(6,9,13,.82); font-family:system-ui,sans-serif; padding:16px; }
     .preview-modal.open { display:flex; }
@@ -353,6 +358,7 @@
           <th>Matches Played</th>
           <th>Uptime</th>
           <th>Your Ping</th>
+          <th></th>
         </tr>
       </thead>
       <tbody id="node-tbody"></tbody>
@@ -659,7 +665,13 @@
         const uptime = formatUptime(n.uptime_s);
         const statusClass = n.status.replace(/\s/g, '_');
 
-        return `<tr>
+        // Any node with a browser-reachable relay can be previewed live — even
+        // idle ones (you'll see attract mode / character select).
+        const loc = n.geo ? ` · ${esc(n.geo.city)}` : '';
+        const rowAttr = n.relay_url ? ` class="node-row" data-relay="${esc(n.relay_url)}" data-name="${esc(n.name)}${loc}"` : '';
+        const watchCell = n.relay_url ? '<td class="node-watch" title="Watch live preview">&#9654;</td>' : '<td></td>';
+
+        return `<tr${rowAttr}>
           <td>${esc(n.name)}</td>
           <td>${esc(n.operator)}</td>
           <td>${esc(n.region)}</td>
@@ -668,6 +680,7 @@
           <td>${n.stats.total_matches}</td>
           <td>${uptime}</td>
           <td class="${pingClass}">${pingStr}</td>
+          ${watchCell}
         </tr>`;
       }).join('');
     }
@@ -780,6 +793,10 @@
     document.getElementById('live-grid').addEventListener('click', (e) => {
       const card = e.target.closest('.match-card');
       if (card && card.dataset.relay) openPreview(card.dataset.relay, card.dataset.name);
+    });
+    document.getElementById('node-tbody').addEventListener('click', (e) => {
+      const row = e.target.closest('.node-row');            // any online node — idle shows attract/char-select
+      if (row && row.dataset.relay) openPreview(row.dataset.relay, row.dataset.name);
     });
     document.getElementById('pv-close').addEventListener('click', closePreview);
     document.getElementById('preview-modal').addEventListener('click', (e) => {
