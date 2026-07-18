@@ -9,6 +9,7 @@
 // (Use a fresh local port like 7311 if 7211 is stuck "bind: Permission denied" from a
 //  prior dead tunnel — Windows leaves the socket lingering a while.)
 import http from 'node:http';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 
 // WebSocket: Node 22 has it global; Node 20 (prod) does not — fall back to the `ws` package.
 let WS = globalThis.WebSocket;
@@ -30,6 +31,13 @@ const OFF = { active:0x000, cid:0x001, x:0x034, y:0x038, vx:0x05C, vy:0x060, fac
               paltint:0x025, palid:0x52D };
 const GLOBAL = { timer:0x289630, p1meterFill:0x289646, p2meterFill:0x289648,
                  p1meterLvl:0x28964A, p2meterLvl:0x28964B, p1combo:0x289670, p2combo:0x289672 };
+const INPUT_DEC=0x2681DC, INMATCH=0x289624;
+const REC_DIR = process.env.MAPLECAST_RECORDINGS_DIR || '/opt/maplecast/recordings';
+let recordingOn = false;
+const IBITS={up:0x2000,down:0x1000,left:0x0800,right:0x0400,lp:0x0200,hp:0x0100,lk:0x0040,hk:0x0020,a1:0x0080,a2:0x0010,start:0x8000};
+const DIRS={'0,0':'N','0,1':'U','1,1':'UR','1,0':'R','1,-1':'DR','0,-1':'D','-1,-1':'DL','-1,0':'L','-1,1':'UL'};
+function decInput(v){ const o={}; for(const k in IBITS) o[k]=(v&IBITS[k])?1:0; o.dir=DIRS[(o.right-o.left)+','+(o.up-o.down)]||'N'; return o; }
+const u16le=(h,o)=>parseInt(h.slice((o+1)*2,(o+1)*2+2)+h.slice(o*2,o*2+2),16);
 const HP_FULL = 0x90;  // 144 = full health for these chars (matches live read)
 const CID = {'0x00':'Ryu','0x17':'Cable','0x23':'Dan','0x2a':'Storm','0x2c':'Magneto','0x32':'Colossus','0x34':'Sentinel','0x3a':'Servbot'};
 
@@ -173,7 +181,21 @@ async function special(base, valHex){ const v=parseInt(valHex,16)&0xFF; await wr
 
 const ACT = {
   read: readSlots,
-  dataset_record: async(q)=>{ const m=await ctrl({cmd:'dataset_record', on:!!q.on}); return m.ok ? m.data : m; },
+  dataset_record: async(q)=>{ recordingOn=!!q.on; const m=await ctrl({cmd:'dataset_record', on:!!q.on}); return m.ok ? m.data : m; },
+  monitor: async()=>{
+    const p1=await readSlot(SLOT.P1C1), p2=await readSlot(SLOT.P2C1);
+    const g=await rd(GLOBAL.timer,0x50); const gg=a=>u8(g,a-GLOBAL.timer);
+    const inMatch=parseInt(await rd(INMATCH,1),16)!==0;
+    const inp=await rd(INPUT_DEC,0x28);
+    const i1=decInput(u16le(inp,0x00)), i2=decInput(u16le(inp,0x14));
+    let mctele=null;
+    try{ const fl=readdirSync(REC_DIR).filter(f=>f.endsWith('.mctele')).map(f=>{const st=statSync(REC_DIR+'/'+f);return{name:f,size:st.size,mtime:st.mtimeMs};}).sort((a,b)=>b.mtime-a.mtime);
+      if(fl[0]) mctele={name:fl[0].name,size:fl[0].size,frames:Math.max(0,Math.floor((fl[0].size-84)/8972))}; }catch(e){}
+    return { recording:recordingOn, inMatch,
+      p1:{name:p1.name,hp:p1.hp,red:p1.red,x:p1.x,meterLvl:gg(GLOBAL.p1meterLvl),combo:gg(GLOBAL.p1combo)},
+      p2:{name:p2.name,hp:p2.hp,red:p2.red,x:p2.x,meterLvl:gg(GLOBAL.p2meterLvl),combo:gg(GLOBAL.p2combo)},
+      timer:gg(GLOBAL.timer), input:{p1:i1,p2:i2}, mctele };
+  },
   swapP1: ()=>swapPoint(['P1C1','P1C2']), swapP2: ()=>swapPoint(['P2C1','P2C2']),
   morphP1: ()=>morphInPlace(['P1C1','P1C2']), morphP2: ()=>morphInPlace(['P2C1','P2C2']),
   teleport: teleportSides,
@@ -281,6 +303,7 @@ function keyOK(req){
 http.createServer(async (req,res)=>{
   const path=req.url.split('?')[0];
   if(req.method==='GET' && (path==='/'||path==='/panel')){ res.writeHead(200,{'content-type':'text/html'}); return res.end(PANEL); }
+  if(req.method==='GET' && path==='/monitor'){ try{ res.writeHead(200,{'content-type':'text/html'}); return res.end(readFileSync('/opt/maplecast/recmon.html')); }catch(e){ res.writeHead(500); return res.end('recmon.html not found'); } }
   if(req.method==='POST' && path==='/cmd'){
     if(!keyOK(req)){ res.writeHead(403,{'content-type':'application/json'}); return res.end(JSON.stringify({ok:false,error:'bad or missing mod key'})); }
     let body=''; req.on('data',d=>body+=d); req.on('end', async ()=>{

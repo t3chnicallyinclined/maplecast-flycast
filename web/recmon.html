@@ -1,0 +1,71 @@
+<!doctype html>
+<meta charset=utf-8><title>MapleCast — Dataset Recording Monitor</title>
+<style>
+body{background:#0b0f1a;color:#cde;font:13px/1.5 system-ui,sans-serif;margin:0;padding:16px}
+h1{font-size:16px;color:#0ff;margin:0 0 10px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.card{background:#141c30;border:1px solid #22314f;border-radius:8px;padding:12px}
+.big{font-size:22px;font-weight:bold;color:#fff}
+.rec{padding:3px 12px;border-radius:12px;font-weight:bold}.on{background:#27ae60;color:#fff}.off{background:#c0392b;color:#fff}
+.k{color:#7f93a8;font-size:11px;letter-spacing:.5px}small{color:#5f7186}
+.bar{height:10px;background:#233;border-radius:5px;overflow:hidden;margin:4px 0}.bar>i{display:block;height:100%;background:#3c6;transition:width .2s}
+.btns span{display:inline-block;min-width:30px;text-align:center;padding:4px 2px;margin:2px;border-radius:4px;background:#233;color:#567;font-weight:bold;font-size:12px}
+.btns span.p{background:#3af;color:#012}
+.dir{font-size:28px;font-weight:bold;color:#0ff;display:inline-block;min-width:52px}
+button{font:bold 13px system-ui;padding:6px 16px;border:0;border-radius:6px;cursor:pointer;background:#2c5aa0;color:#fff}
+button:hover{background:#3a6fc0}button.armed{background:#c0392b}
+</style>
+<h1>&#128252; Dataset Recording Monitor &nbsp; <span id=rec class="rec off">OFF</span> <button id=tog onclick=toggle()>Start Recording</button> <span id=im class=k></span></h1>
+<div class=grid>
+  <div class=card>
+    <div class=k>SESSION FILE</div><div id=file>&mdash;</div>
+    <div style=margin-top:6px><span class=big id=frames>0</span> frames &nbsp; <span id=size>0</span> MB &nbsp;<span class=k>&middot;</span>&nbsp; <span id=rate>0</span> f/s &nbsp; <span id=kbs>0</span> KB/s</div>
+    <div style=margin-top:8px><span class=k>DECISION-FRAME RATE</span> <span class=big id=dfr>&mdash;</span><br><small>% of frames where input changes &mdash; the data-quality signal (flat 0 = idle, healthy = real play)</small></div>
+  </div>
+  <div class=card>
+    <div class=k>MATCH</div> <span id=timer></span>
+    <div style=margin-top:6px><b id=p1n>P1</b> <span id=p1meta class=k></span><div class=bar><i id=p1hp style=width:0></i></div></div>
+    <div style=margin-top:6px><b id=p2n>P2</b> <span id=p2meta class=k></span><div class=bar><i id=p2hp style=width:0></i></div></div>
+  </div>
+</div>
+<div class=grid style=margin-top:12px>
+  <div class=card><div class=k>P1 INPUT (Input_DEC, live)</div><span class=dir id=p1dir>N</span><div class=btns id=p1btn></div></div>
+  <div class=card><div class=k>P2 INPUT (Input_DEC, live)</div><span class=dir id=p2dir>N</span><div class=btns id=p2btn></div></div>
+</div>
+<pre id=err style=color:#e66;margin-top:10px></pre>
+<script>
+const KEY=new URLSearchParams(location.search).get('key')||'';
+const $=id=>document.getElementById(id);
+let last=null,lastT=0,dwin=[],lastSig='';
+const B=['lp','hp','lk','hk','a1','a2'];
+function meta(p){return p.name+' &middot; HP '+p.hp+'/144 &middot; meter L'+p.meterLvl+' &middot; combo '+p.combo+' &middot; x '+p.x;}
+function btns(el,i){el.innerHTML=B.map(k=>'<span class="'+(i[k]?'p':'')+'">'+k.toUpperCase()+'</span>').join('');}
+async function poll(){
+  try{
+    const r=await fetch('/cmd'+(KEY?'?key='+encodeURIComponent(KEY):''),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'monitor'})});
+    const j=await r.json(); const d=j.reply||j;
+    if(!d||!d.p1){$('err').textContent='no data: '+JSON.stringify(d);return;}
+    $('err').textContent='';
+    $('rec').textContent=d.recording?'ON':'OFF'; $('rec').className='rec '+(d.recording?'on':'off');
+    $('tog').textContent=d.recording?'Stop Recording':'Start Recording'; $('tog').className=d.recording?'armed':'';
+    $('im').textContent=d.inMatch?'&middot; in match':'&middot; idle (not capturing)';
+    $('timer').textContent='timer '+d.timer;
+    $('p1n').textContent='P1 '+d.p1.name; $('p2n').textContent='P2 '+d.p2.name;
+    $('p1meta').innerHTML=meta(d.p1); $('p2meta').innerHTML=meta(d.p2);
+    $('p1hp').style.width=(d.p1.hp/1.44)+'%'; $('p2hp').style.width=(d.p2.hp/1.44)+'%';
+    $('p1dir').textContent=d.input.p1.dir; $('p2dir').textContent=d.input.p2.dir;
+    btns($('p1btn'),d.input.p1); btns($('p2btn'),d.input.p2);
+    if(d.mctele){$('file').textContent=d.mctele.name; $('frames').textContent=d.mctele.frames.toLocaleString(); $('size').textContent=(d.mctele.size/1048576).toFixed(1);
+      const now=Date.now(); if(last){const dt=(now-lastT)/1000||1; $('rate').textContent=Math.max(0,Math.round((d.mctele.frames-last.frames)/dt)); $('kbs').textContent=Math.max(0,Math.round((d.mctele.size-last.size)/1024/dt));}
+      last={frames:d.mctele.frames,size:d.mctele.size}; lastT=now;
+    } else {$('file').textContent='(none yet)'; $('frames').textContent='0';}
+    const sig=JSON.stringify([d.input.p1,d.input.p2]); if(lastSig){dwin.push(sig!==lastSig); if(dwin.length>80)dwin.shift();} lastSig=sig;
+    if(dwin.length) $('dfr').textContent=(100*dwin.filter(Boolean).length/dwin.length).toFixed(0)+'%';
+  }catch(e){$('err').textContent='poll error: '+e.message;}
+}
+async function toggle(){ const on=$('rec').textContent!=='ON';
+  try{ const r=await fetch('/cmd'+(KEY?'?key='+encodeURIComponent(KEY):''),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'dataset_record',on})});
+    const j=await r.json(); if(!j.ok) $('err').textContent='toggle failed: '+JSON.stringify(j); }catch(e){$('err').textContent='toggle error: '+e.message;}
+  poll(); }
+setInterval(poll,250); poll();
+</script>
