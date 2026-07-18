@@ -953,6 +953,15 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 		}
 	}
 
+	// OFFLINE codec R&D (MAPLECAST_TDW_DUMPINNER=path): dump raw inners as
+	// [u32 len][inner] so the ACK-reference simulator can measure encoded size vs
+	// reference distance (N-1..N-60) before any ACK plumbing is wired.
+	{
+		static FILE* dumpF = [](){ const char* p = std::getenv("MAPLECAST_TDW_DUMPINNER");
+			return p && *p ? fopen(p, "wb") : (FILE*)nullptr; }();
+		if (dumpF) { uint32_t l = (uint32_t)inner.size(); fwrite(&l, 4, 1, dumpF); fwrite(inner.data(), 1, l, dumpF); fflush(dumpF); }
+	}
+
 	// TDW1 envelope: magic(4) dictEpoch(1) flags(1) seq(2) innerSize(4) + stream chunk.
 	// INDEPENDENT-FRAME mode (MAPLECAST_TDW_INDEP=1, for the QUIC/datagram wire):
 	// reset the compressor EVERY frame so each TDW1 is a self-contained zstd blob,
