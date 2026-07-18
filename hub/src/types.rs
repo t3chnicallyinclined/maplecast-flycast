@@ -73,6 +73,11 @@ pub struct Node {
     pub public_relay_url: Option<String>,
     pub public_control_url: Option<String>,
     pub public_audio_url: Option<String>,
+    /// Live in-match state (flycast getStatus.game): in_match, stage, timer,
+    /// p1/p2 chars, hp, combos, meter. Forwarded verbatim in the heartbeat so
+    /// the map can render live match cards. None when idle / not reported.
+    #[serde(default)]
+    pub game: Option<serde_json::Value>,
 }
 
 impl Node {
@@ -190,6 +195,11 @@ pub struct NodePublic {
     pub rom_hash: String,
     pub version: String,
     pub relay_url: String,
+    /// Health/throughput for operator readouts (fps proxy from frame interval,
+    /// wire bandwidth, frame flow). None until the first heartbeat.
+    pub metrics: Option<NodeMetrics>,
+    /// Live match state when this node is hosting a game (see Node.game).
+    pub game: Option<serde_json::Value>,
 }
 
 // ============================================================================
