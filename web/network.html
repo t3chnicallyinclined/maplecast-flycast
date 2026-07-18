@@ -344,14 +344,14 @@
     <p class="run-sub">Anyone with the ROM can host. One command on a Linux box with Docker &mdash; your node boots the game, registers, geolocates, and shows up on the map above. No account, no approval.</p>
     <pre class="run-cmd"><code>docker run -d --name maplecast-node --restart unless-stopped \
   -p 7201:7201/tcp -p 7100:7100/udp \
-  -v /path/to/mvc2.gdi:/data/mvc2.gdi:ro \
+  -v /path/to/mvc2-folder:/data:ro \
   -v maplecast-node:/opt/maplecast/.maplecast \
   -e MAPLECAST_NODE_NAME="my-node" -e MAPLECAST_NODE_REGION="us-east" \
   ghcr.io/t3chnicallyinclined/maplecast-node:latest</code></pre>
     <div class="run-need">
       <span>&#10003; Linux box (a cheap VPS is easiest)</span>
       <span>&#10003; Docker</span>
-      <span>&#10003; Your own MvC2 GDI &mdash; never uploaded, only its hash (ROM badge)</span>
+      <span>&#10003; Your MvC2 folder (the .gdi + track files) &mdash; never uploaded, only its hash</span>
       <span>&#10003; Ports 7201/tcp + 7100/udp open</span>
     </div>
     <p class="run-note">Native clients connect immediately; serving <em>browser</em> viewers needs a public IP + TLS. Hosting is open &amp; casual &mdash; ranked stays on trusted nodes.</p>

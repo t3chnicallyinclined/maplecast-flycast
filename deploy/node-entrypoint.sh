@@ -16,11 +16,18 @@
 
 set -e
 
-ROM_PATH="${1:-/data/mvc2.gdi}"
-
-if [ ! -f "$ROM_PATH" ]; then
-  echo "ERROR: ROM not found at $ROM_PATH"
-  echo "Mount your ROM: docker run -v /path/to/mvc2.gdi:/data/mvc2.gdi:ro ..."
+ROM_PATH="${1:-}"
+[ -f "$ROM_PATH" ] || ROM_PATH=""
+if [ -z "$ROM_PATH" ]; then
+  # A .gdi is a MULTI-FILE image (index + track01.bin, track02.raw, ...), so the
+  # whole folder must be mounted. Auto-detect the disc image in /data so the
+  # filename doesn't matter.
+  ROM_PATH="$(ls /data/*.gdi /data/*.chd /data/*.cdi 2>/dev/null | head -n1)"
+fi
+if [ -z "$ROM_PATH" ] || [ ! -f "$ROM_PATH" ]; then
+  echo "ERROR: no disc image found in /data."
+  echo "Mount the FOLDER holding your MvC2 .gdi AND its track files:"
+  echo "  docker run -v /path/to/mvc2-folder:/data:ro ..."
   exit 1
 fi
 
