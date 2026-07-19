@@ -621,11 +621,20 @@ fn main() {
     // configured default (the launcher's local rig); known nodes follow.
     // MC_SERVERS="name|ws_url|input_host;..." appends extras.
     {
+        // Entry 0 tracks MAPLECAST_WS. Its input host MUST follow that video host —
+        // else pointing MAPLECAST_WS at a remote server (e.g. play.nobd.net) while the
+        // input stays 127.0.0.1 splits video from input (the exact bug it caused).
+        // MAPLECAST_INPUT_HOST overrides; otherwise derive the host from the WS URL.
+        let ws0 = std::env::var("MAPLECAST_WS").unwrap_or_else(|_| "ws://127.0.0.1:7200".into());
+        let input0 = std::env::var("MAPLECAST_INPUT_HOST").ok()
+            .map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+            .unwrap_or_else(|| ws0.trim_start_matches("wss://").trim_start_matches("ws://")
+                .split(['/', ':']).next().unwrap_or("127.0.0.1").to_string());
         let mut servers = vec![
             debug::ServerEntry {
                 name: "local rig".into(),
-                ws: std::env::var("MAPLECAST_WS").unwrap_or_else(|_| "ws://127.0.0.1:7200".into()),
-                input: "127.0.0.1".into(),
+                ws: ws0,
+                input: input0,
             },
             debug::ServerEntry {
                 name: "nobd prod (NYC)".into(),
