@@ -79,6 +79,16 @@ td{padding:5px 8px;border-bottom:1px solid #1a2338}
   <div class=card><h2>Last R2 sync</h2><span class=big id=sync>&mdash;</span><div class=sub id=r2err></div></div>
 </div>
 
+<div class="row">
+  <div class=card>
+    <h2>Nodes (input servers) &mdash; <span id=nodesum class=dim></span></h2>
+    <div class=scroll><table>
+      <thead><tr><th>node</th><th>location</th><th>status</th><th>live</th><th>frames</th><th>ver</th><th>record</th></tr></thead>
+      <tbody id=nodes></tbody></table></div>
+    <div class=sub style=margin-top:6px>Recording runs on the authoritative node a match is played on. Only <b>this node</b> has the exporter wired today &mdash; hub-tracked per-node recording capability is roadmap.</div>
+  </div>
+</div>
+
 <div class="row c2">
   <div class=card>
     <h2>Session library</h2>
@@ -102,7 +112,7 @@ const q=p=>p+(p.includes('?')?'&':'?')+(KEY?'key='+encodeURIComponent(KEY):'');
 const api=(p,opt)=>fetch(q('api/'+p),opt).then(r=>r.json());
 const B=['lp','hp','lk','hk','a1','a2'];
 const HP=144, MB=1048576;
-let last=null,lastT=0,dwin=[],lastSig='';
+let last=null,lastT=0,dwin=[],lastSig='',recWriting=false;
 function ago(ms){ if(ms==null) return '—'; const s=(Date.now()-ms)/1000;
   if(s<60) return Math.round(s)+'s ago'; if(s<3600) return Math.round(s/60)+'m ago'; return Math.round(s/3600)+'h ago'; }
 function meta(p){ return p.name+' &middot; HP '+p.hp+'/'+HP+' &middot; meter L'+p.meterLvl+' &middot; combo '+p.combo+' &middot; x '+p.x; }
@@ -120,6 +130,7 @@ async function poll(){
     if(!d.ok||!d.p1){ $('err').textContent='monitor: '+JSON.stringify(d); return; }
     $('err').textContent='';
     // 3-state badge: OFF -> ARMED (toggle on, no data yet) -> RECORDING (bytes flowing)
+    recWriting=d.writing;
     const st = d.writing ? 'rec' : (d.recording ? 'arm' : 'off');
     $('badge').textContent = st==='rec'?'RECORDING':st==='arm'?'ARMED':'OFF';
     $('badge').className='badge '+(st==='rec'?'b-rec':st==='arm'?'b-arm':'b-off');
@@ -160,6 +171,24 @@ async function slow(){
     if(t.ok){ const T=t.training; $('tmodel').textContent=T.model||'(none trained yet)'; $('trun').textContent=T.lastRun||'—';
       $('tmetrics').innerHTML=Object.entries(T.metrics||{}).map(([k,v])=>'<div class=kv><span>'+k+'</span><b>'+v+'</b></div>').join('');
       $('tnote').textContent=T.note||''; }
+    const nd=await api('nodes');
+    if(nd.ok){ const ns=nd.nodes||[];
+      const ready=ns.filter(n=>n.status==='ready').length, inm=ns.filter(n=>n.inMatch).length;
+      $('nodesum').textContent=ns.length+' total &middot; '+ready+' ready'+(inm?' &middot; '+inm+' in match':'')+(nd.err?' &middot; hub error':'');
+      $('nodes').innerHTML = ns.length ? ns.map(n=>{
+        const dot='<span style="color:var(--'+(n.upstream?'good':'bad')+')">&#9679;</span>';
+        const st = n.status==='ready' ? '<span class="tag up">ready</span>'
+                 : n.inMatch ? '<span class=tag style="background:#123a5a;color:#5ab0f0">in match</span>'
+                 : '<span class="tag pend">'+n.status+'</span>';
+        const rec = n.self ? (recWriting ? '<span class=tag style="background:#3a1212;color:#ff6b6b">&#9679; RECORDING</span>'
+                                         : '<span class="tag up">&#9679; source</span>')
+                           : '<span class=dim title="exporter not deployed to this node yet">&mdash;</span>';
+        return '<tr'+(n.self?' style="background:#0f2033"':'')+'>'
+          +'<td class=mono>'+n.name+(n.self?' <span class=sub>(this node)</span>':'')+'</td>'
+          +'<td class=dim>'+(n.city||n.region||'')+'</td><td>'+st+'</td>'
+          +'<td>'+dot+' '+n.clients+'c/'+n.spectators+'s</td>'
+          +'<td>'+n.frames.toLocaleString()+'</td><td class=dim>'+n.version+'</td><td>'+rec+'</td></tr>';
+      }).join('') : '<tr><td colspan=7 class=dim>no nodes registered</td></tr>'; }
   }catch(e){ /* slow lane is best-effort */ }
 }
 

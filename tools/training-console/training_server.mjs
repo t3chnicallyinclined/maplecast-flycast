@@ -26,6 +26,10 @@ const R2_REMOTE = process.env.MC_R2_REMOTE || 'r2:mvc2-dataset/recordings';  // 
 const PAGE = process.env.MC_TRAIN_PAGE || '/opt/maplecast/training.html';
 const TRAIN_STATUS = process.env.MC_TRAIN_STATUS || '/opt/maplecast/training-status.json';
 const SYNC_MARK = REC_DIR + '/.last-r2-sync';            // touched by r2-sync-recordings.sh
+// Distributed node registry (Pillar 5). nginx proxies /hub/api/ -> :7220 with the
+// full path, so the hub answers /hub/api/nodes on loopback too.
+const HUB_NODES_URL = process.env.MC_HUB_NODES_URL || 'http://127.0.0.1:7220/hub/api/nodes';
+const NODE_NAME = process.env.MC_NODE_NAME || 'nobd-main';   // this box's node in the registry (the local recorder)
 
 // ---- addresses (RAM offsets = DC addr & 0xFFFFFF) ----
 const STRIDE = 0x5A4;
@@ -116,6 +120,30 @@ function apiStorage(){ const sess=listSessions();
   return { local:{ count:sess.length, bytes:localBytes, frames:localFrames, uploaded, pending:sess.length-uploaded },
            r2:{ ok:r2.ok, count:r2.count, bytes:r2.bytes, at:r2.at, err:r2.err }, lastSync:lastSync() }; }
 
+// ---- distributed node registry (Pillar 5 hub) ----
+// recordability is NOT hub-tracked (no can_record field) — recording is a per-node
+// env/toggle on that node's flycast. Today only the self node has the exporter wired,
+// so we mark self=recordable and the rest view-only until per-node recording is plumbed.
+let nodesCache={ at:0, nodes:[], err:null };
+async function apiNodes(){
+  const now=Date.now();
+  if(now-nodesCache.at < 8000 && nodesCache.nodes.length) return { nodes:nodesCache.nodes, self:NODE_NAME };
+  try{
+    const r=await fetch(HUB_NODES_URL,{signal:AbortSignal.timeout(6000)});
+    const raw=(await r.json()).nodes||[];
+    const nodes=raw.map(n=>{ const m=n.metrics||{}, g=n.geo||{}; const self=n.name===NODE_NAME;
+      return { name:n.name, node_id:n.node_id, status:n.status, region:n.region, city:g.city||null,
+               host:n.public_host, clients:m.clients||0, spectators:n.spectators||0,
+               frames:m.frames_received||0, upstream:!!m.upstream_connected,
+               inMatch:n.status==='in_match'||!!n.game, version:n.version, uptime_s:n.uptime_s||0,
+               self, recordable:self }; });
+    const rank=n=> n.self?0 : n.status==='ready'?1 : 2;              // self, then ready, then rest
+    nodes.sort((a,b)=> rank(a)-rank(b) || String(a.name).localeCompare(String(b.name)));
+    nodesCache={ at:now, nodes, err:null };
+    return { nodes, self:NODE_NAME };
+  }catch(e){ nodesCache.err=String(e.message||e); return { nodes:nodesCache.nodes, self:NODE_NAME, err:nodesCache.err }; }
+}
+
 function auth(req,url){ if(!KEY) return true; const k=url.searchParams.get('key')||req.headers['x-train-key']; return k===KEY; }
 function send(res,code,obj){ res.writeHead(code,{'content-type':'application/json'}); res.end(JSON.stringify(obj)); }
 
@@ -131,6 +159,7 @@ http.createServer(async (req,res)=>{
       if(path==='/api/monitor')  return send(res,200,{ok:true, ...(await apiMonitor())});
       if(path==='/api/sessions') return send(res,200,{ok:true, ...apiSessions()});
       if(path==='/api/storage')  return send(res,200,{ok:true, ...apiStorage()});
+      if(path==='/api/nodes')    return send(res,200,{ok:true, ...(await apiNodes())});
       if(path==='/api/training') return send(res,200,{ok:true, training:trainingStatus()});
       if(path==='/api/record'){ const v=url.searchParams.get('on'); return send(res,200,{ok:true, ...(await apiRecord(v==='1'||v==='true'))}); }
       return send(res,404,{ok:false,error:'no such endpoint'});
