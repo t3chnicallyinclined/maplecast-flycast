@@ -129,7 +129,20 @@ fn run(cfg: InputConfig, debug: std::sync::Arc<crate::debug::DebugState>) {
                 }
             }
         }
-        while gilrs.next_event().is_some() {}
+        // Pump gilrs events. Log connect/disconnect/drop so a controller dropping out
+        // (the "stuck until I reconnect" symptom) is visible in the log, and so
+        // is_connected() in read_pad reflects reality this tick.
+        while let Some(ev) = gilrs.next_event() {
+            match ev.event {
+                gilrs::EventType::Connected =>
+                    log::info!("[input] gamepad CONNECTED {:?}", ev.id),
+                gilrs::EventType::Disconnected =>
+                    log::warn!("[input] gamepad DISCONNECTED {:?} — sending neutral until it returns", ev.id),
+                gilrs::EventType::Dropped =>
+                    log::warn!("[input] gamepad DROPPED {:?}", ev.id),
+                _ => {}
+            }
+        }
         let cur = read_pad(&gilrs, pad_index);
         // MAPLECAST_INPUT_DEBUG=1: on every input change, dump the RAW gilrs state
         // (which buttons/axes actually fire) so a mis-mapped d-pad/stick is visible.
@@ -168,7 +181,11 @@ fn read_pad(gilrs: &Gilrs, pad_index: usize) -> (u16, u8, u8) {
     let mut btn: u16 = 0xFFFF;
     let mut lt: u8 = 0;
     let mut rt: u8 = 0;
-    if let Some((_id, gp)) = gilrs.gamepads().nth(pad_index) {
+    // Only read CONNECTED pads. gilrs keeps disconnected handles in gamepads(), and
+    // reading one returns its FROZEN last state — that's the "inputs stuck until I
+    // reconnect the controller" bug. Filtering to connected pads means a dropout
+    // sends neutral (no stuck buttons) and auto-recovers when the pad returns.
+    if let Some((_id, gp)) = gilrs.gamepads().filter(|(_, g)| g.is_connected()).nth(pad_index) {
         if gp.is_pressed(Button::South) { btn &= !0x0004; } // A
         if gp.is_pressed(Button::East)  { btn &= !0x0002; } // B
         if gp.is_pressed(Button::West)  { btn &= !0x0400; } // X
