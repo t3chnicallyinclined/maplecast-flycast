@@ -311,6 +311,15 @@ Design: `docs/DATASET-EXPORTER-DESIGN.md`; field catalog: `../mvc2-ai/docs/DATAS
 - **Legacy/secondary:** the Mod Command Center still exposes a **Dataset Recording** toggle and a
   `nobd.net/modcmd/monitor?key=<MOD_KEY>` page (`web/recmon.html`, bridge GET `/monitor`) — same
   control WS, mod-key-gated. The Training Console supersedes it as the home for this.
+- **Whole fleet is recordable (2026-07-19).** All 5 distributed nodes (atl/dfw/ord/sea/ewr) now run
+  ONE unified flycast build (TDW2 thin-wire + exporter, md5 `787d9b81`) — **build fleet binaries
+  `-DMAPLECAST_PORTABLE=ON`** (Skylake nodes have no AVX-512; a `-march=native` build SIGILLs them —
+  see the Vultr deploy memory). Each node has R2 sync (`recordings/<node>/` prefix) and a per-node
+  recording agent: `tools/training-console/noderec_agent.py` (python3, loopback :9098) fronted by
+  the node's **Caddy** `/noderec/*`, key-gated (`MC_NODE_KEY`), talking to that node's local control
+  WS (:7211). The Training Console's Nodes panel has **per-node Start/Stop** (`/api/node-record` fans
+  out: self→local control WS, remote→its `/noderec` agent). Deliberately NOT hub-relayed (that would
+  need a fleet rebuild of relay+hub). systemd `maplecast-noderec` per node. All gated OFF.
 
 ## Code Guidelines
 
