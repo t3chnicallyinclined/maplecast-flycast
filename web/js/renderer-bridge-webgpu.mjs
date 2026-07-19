@@ -12,6 +12,7 @@ import { AdaptiveTransport } from '../webgpu/transport.mjs';
 import { state } from './state.mjs';
 
 let R, D, P, T, PP;
+let _tdw = null, _synth = null;   // TDW dict-wire decoder + frame-synth (only when ?tdw=1)
 let _canvas = null;
 let _pendingFrame = null;
 let _pendingSnap = null;
@@ -51,6 +52,19 @@ export async function initRenderer() {
     P = new TAParser();
     T = new TextureManager(R.dev);
 
+    // Optional TDW dict-wire mode (?tdw=1): decode the sub-1Mbps wire in-browser
+    // and inject each frame as a legacy keyframe. Default OFF — legacy wire path
+    // is byte-for-byte unchanged. Input is orthogonal (gamepad → server as usual).
+    const _tdwOn = new URLSearchParams(location.search).get('tdw') === '1';
+    if (_tdwOn) {
+        try {
+            const mod = await import('../webgpu/tdw-decoder.mjs');   // lazy: zero cost on the legacy path
+            _tdw = await mod.TdwDecoder.create('/webgpu/tdw.wasm');
+            _synth = mod.synthLegacyFrame;
+            console.log('[webgpu-bridge] TDW decoder loaded');
+        } catch (e) { console.warn('[webgpu-bridge] TDW decoder load failed — legacy wire', e); _tdw = null; }
+    }
+
     // Connect via AdaptiveTransport (WebTransport QUIC first, WebSocket fallback)
     const { getRendererWsUrl } = await import('./ws-connection.mjs');
     const wsUrl = await getRendererWsUrl();
@@ -58,9 +72,18 @@ export async function initRenderer() {
 
     const transport = new AdaptiveTransport({
         wsUrl: wsUrl,
-        wtUrl: `https://${host}/webtransport`,
+        // TDW1 is a stateful streaming-zstd wire → WS only (WT datagrams reorder).
+        wtUrl: _tdw ? null : `https://${host}/webtransport`,
         onstatus: (msg) => console.log('[webgpu-bridge]', msg),
-        onopen: () => console.log('[webgpu-bridge] Stream connected via', transport.type),
+        onopen: () => {
+            console.log('[webgpu-bridge] Stream connected via', transport.type);
+            if (_tdw) {   // shed the legacy legs + get a fresh VRAM seed
+                try {
+                    transport._ws.send(JSON.stringify({ type: 'subscribe', mode: 'tdw' }));
+                    transport._ws.send(JSON.stringify({ type: 'request_sync' }));
+                } catch (e) {}
+            }
+        },
         onclose: () => {
             console.log('[webgpu-bridge] Stream disconnected');
             // Mirror WASM bridge cleanup (renderer-bridge.mjs:260) — drops the
@@ -159,22 +182,51 @@ function handleFrame(d) {
         return;
     }
 
+    // TDW dict-wire mode: decode → inject as a legacy keyframe → normal render.
+    // The legacy delta leg is skipped; the SYNC (ZCST, uncompressedSize > 1MB)
+    // still falls through to seed VRAM.
+    if (_tdw) {
+        if (d.length < 4) return;
+        try {
+            const a = d[0], b = d[1], c = d[2], e = d[3];
+            if (a === 0x54 && b === 0x44 && c === 0x57) {           // 'TDW'
+                if (e === 0x53) { _tdw.feedSnapshot(d); return; }   // 'TDWS' dict snapshot
+                if (e === 0x31 || e === 0x32) {                     // 'TDW1' / 'TDW2'
+                    const f = _tdw.feed(d);
+                    if (f) { const fr = D.applyFrame(_synth(f)); if (fr) _present(fr); }
+                    return;
+                }
+            }
+            if (a === 0x5A && b === 0x43 && c === 0x53 && e === 0x54) {   // 'ZCST'
+                const sz = (d[4] | d[5] << 8 | d[6] << 16 | d[7] << 24) >>> 0;
+                if (sz > 1024 * 1024) D.applyFrame(d);              // full-VRAM SYNC seed
+                return;                                             // skip legacy deltas
+            }
+        } catch (ex) { console.error('[webgpu-bridge][tdw]', ex); }
+        return;   // ignore all other legacy legs (GSTA/OBJS/…)
+    }
+
     try {
         const fr = D.applyFrame(d);
         if (!fr) return;
-
-        T.setDirtyPages(fr.dirtyPageList, fr.pvrDirty);
-        if (!T._pal || fr.vramDirty || fr.pvrDirty) T.updatePalette(D.pvrRegs);
-
-        const g = P.parse(fr.taBuffer, fr.taSize);
-        try { P.fillBGP(g, D.pvrRegs, D.vram); } catch (e2) {}
-
-        if (_pendingFrame) _telemetry.framesDropped++;
-        _pendingFrame = g;
-        _pendingSnap = fr.pvrSnapshot;
+        _present(fr);
     } catch (ex) {
         console.error('[webgpu-bridge]', ex);
     }
+}
+
+// Shared render hand-off: parse the TA + stage the frame for renderTick. Used by
+// both the legacy wire and the TDW path (identical downstream).
+function _present(fr) {
+    T.setDirtyPages(fr.dirtyPageList, fr.pvrDirty);
+    if (!T._pal || fr.vramDirty || fr.pvrDirty) T.updatePalette(D.pvrRegs);
+
+    const g = P.parse(fr.taBuffer, fr.taSize);
+    try { P.fillBGP(g, D.pvrRegs, D.vram); } catch (e2) {}
+
+    if (_pendingFrame) _telemetry.framesDropped++;
+    _pendingFrame = g;
+    _pendingSnap = fr.pvrSnapshot;
 }
 
 export function setOpt(opt, val) {
