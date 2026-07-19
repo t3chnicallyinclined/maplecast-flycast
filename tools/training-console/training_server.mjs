@@ -30,6 +30,7 @@ const SYNC_MARK = REC_DIR + '/.last-r2-sync';            // touched by r2-sync-r
 // full path, so the hub answers /hub/api/nodes on loopback too.
 const HUB_NODES_URL = process.env.MC_HUB_NODES_URL || 'http://127.0.0.1:7220/hub/api/nodes';
 const NODE_NAME = process.env.MC_NODE_NAME || 'nobd-main';   // this box's node in the registry (the local recorder)
+const NODE_KEY = process.env.MC_NODE_KEY || '';             // shared key for the per-node /noderec agents
 
 // ---- addresses (RAM offsets = DC addr & 0xFFFFFF) ----
 const STRIDE = 0x5A4;
@@ -125,6 +126,15 @@ function apiStorage(){ const sess=listSessions();
 // env/toggle on that node's flycast. Today only the self node has the exporter wired,
 // so we mark self=recordable and the rest view-only until per-node recording is plumbed.
 let nodesCache={ at:0, nodes:[], err:null };
+// query a remote node's /noderec agent (through its Caddy) for live recording state
+async function nodeRecStatus(host){
+  try{ const r=await fetch(`https://${host}/noderec/status?key=${encodeURIComponent(NODE_KEY)}`,{signal:AbortSignal.timeout(4000)});
+    if(!r.ok) return { agentOk:false };
+    const j=await r.json();
+    return { agentOk:!!j.ok, recording:!!j.recording, writing:!!j.writing, recInMatch:!!j.inMatch,
+             recFrames:(j.mctele&&j.mctele.frames)||0 };
+  }catch{ return { agentOk:false }; }
+}
 async function apiNodes(){
   const now=Date.now();
   if(now-nodesCache.at < 8000 && nodesCache.nodes.length) return { nodes:nodesCache.nodes, self:NODE_NAME };
@@ -136,12 +146,28 @@ async function apiNodes(){
                host:n.public_host, clients:m.clients||0, spectators:n.spectators||0,
                frames:m.frames_received||0, upstream:!!m.upstream_connected,
                inMatch:n.status==='in_match'||!!n.game, version:n.version, uptime_s:n.uptime_s||0,
-               self, recordable:self }; });
+               self, recordable:false, recording:false }; });
+    // enrich each node with live recording state: self = local flag, remotes = /noderec agent
+    await Promise.all(nodes.map(async n=>{
+      if(n.self){ n.agentOk=true; n.recordable=true; n.recording=recordingOn; }
+      else if(n.host){ Object.assign(n, await nodeRecStatus(n.host)); n.recordable=!!n.agentOk; }
+    }));
     const rank=n=> n.self?0 : n.status==='ready'?1 : 2;              // self, then ready, then rest
     nodes.sort((a,b)=> rank(a)-rank(b) || String(a.name).localeCompare(String(b.name)));
     nodesCache={ at:now, nodes, err:null };
     return { nodes, self:NODE_NAME };
   }catch(e){ nodesCache.err=String(e.message||e); return { nodes:nodesCache.nodes, self:NODE_NAME, err:nodesCache.err }; }
+}
+// toggle recording on a node: self -> local control WS; remote -> its /noderec agent
+async function apiNodeRecord(name, on){
+  if(name===NODE_NAME) return await apiRecord(on);
+  const node=(nodesCache.nodes||[]).find(n=>n.name===name);
+  if(!node || !node.host) return { ok:false, error:'unknown node '+name };
+  try{ const r=await fetch(`https://${node.host}/noderec/record?on=${on?1:0}&key=${encodeURIComponent(NODE_KEY)}`,
+        {method:'POST',signal:AbortSignal.timeout(5000)});
+    nodesCache.at=0;   // force a fresh status pull on next poll
+    return await r.json();
+  }catch(e){ return { ok:false, error:String(e.message||e) }; }
 }
 
 function auth(req,url){ if(!KEY) return true; const k=url.searchParams.get('key')||req.headers['x-train-key']; return k===KEY; }
@@ -160,6 +186,7 @@ http.createServer(async (req,res)=>{
       if(path==='/api/sessions') return send(res,200,{ok:true, ...apiSessions()});
       if(path==='/api/storage')  return send(res,200,{ok:true, ...apiStorage()});
       if(path==='/api/nodes')    return send(res,200,{ok:true, ...(await apiNodes())});
+      if(path==='/api/node-record'){ const v=url.searchParams.get('on'); return send(res,200,{ok:true, ...(await apiNodeRecord(url.searchParams.get('node'), v==='1'||v==='true'))}); }
       if(path==='/api/training') return send(res,200,{ok:true, training:trainingStatus()});
       if(path==='/api/record'){ const v=url.searchParams.get('on'); return send(res,200,{ok:true, ...(await apiRecord(v==='1'||v==='true'))}); }
       return send(res,404,{ok:false,error:'no such endpoint'});

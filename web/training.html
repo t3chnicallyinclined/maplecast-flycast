@@ -20,6 +20,7 @@ h2{font-size:11px;letter-spacing:1px;color:var(--dim);text-transform:uppercase;m
 @keyframes pulse{50%{opacity:.55}}
 button{font:600 13px system-ui;padding:7px 18px;border:0;border-radius:7px;cursor:pointer;background:#2c5aa0;color:#fff}
 button:hover{filter:brightness(1.15)}button.armed{background:var(--bad)}button:disabled{opacity:.5;cursor:default}
+button.nrec{padding:3px 12px;font-size:11px;background:#2c5aa0}button.nrec.on{background:var(--bad)}
 .bar{height:11px;background:#0c1524;border:1px solid var(--edge);border-radius:6px;overflow:hidden;margin:4px 0}.bar>i{display:block;height:100%;transition:width .2s}
 .hp>i{background:linear-gradient(90deg,#e04040,#f5a623)}.red>i{background:#6a1a1a}
 .btns span{display:inline-block;min-width:30px;text-align:center;padding:5px 2px;margin:2px;border-radius:5px;background:#1a2438;color:#4a5a72;font-weight:700;font-size:12px}
@@ -118,6 +119,11 @@ function ago(ms){ if(ms==null) return '—'; const s=(Date.now()-ms)/1000;
 function meta(p){ return p.name+' &middot; HP '+p.hp+'/'+HP+' &middot; meter L'+p.meterLvl+' &middot; combo '+p.combo+' &middot; x '+p.x; }
 function btns(el,i){ el.innerHTML=B.map(k=>'<span class="'+(i[k]?'p':'')+'">'+k.toUpperCase()+'</span>').join(''); }
 
+async function nodeRec(name,on){
+  try{ const j=await api('node-record?node='+encodeURIComponent(name)+'&on='+on,{method:'POST'});
+    if(!j.ok) $('err').textContent='node '+name+': '+JSON.stringify(j); }
+  catch(e){ $('err').textContent='node '+name+' toggle: '+e.message; }
+  slow(); }
 async function toggle(){ $('tog').disabled=true;
   try{ const on=$('badge').textContent==='OFF'; const j=await api('record?on='+(on?1:0),{method:'POST'});
     if(!j.ok) $('err').textContent='toggle failed: '+JSON.stringify(j); }
@@ -180,9 +186,11 @@ async function slow(){
         const st = n.status==='ready' ? '<span class="tag up">ready</span>'
                  : n.inMatch ? '<span class=tag style="background:#123a5a;color:#5ab0f0">in match</span>'
                  : '<span class="tag pend">'+n.status+'</span>';
-        const rec = n.self ? (recWriting ? '<span class=tag style="background:#3a1212;color:#ff6b6b">&#9679; RECORDING</span>'
-                                         : '<span class="tag up">&#9679; source</span>')
-                           : '<span class=dim title="exporter not deployed to this node yet">&mdash;</span>';
+        const rec = n.recordable
+          ? '<button class="nrec'+(n.recording?' on':'')+'" onclick="nodeRec(\''+n.name+'\','+(n.recording?'0':'1')+')">'
+            +(n.recording ? (n.writing?'&#9679; REC':'Stop') : 'Start')+'</button>'
+            +(n.self?' <span class=sub>(local)</span>':'')
+          : '<span class=dim title="agent unreachable (draining / Caddy down)">&mdash;</span>';
         return '<tr'+(n.self?' style="background:#0f2033"':'')+'>'
           +'<td class=mono>'+n.name+(n.self?' <span class=sub>(this node)</span>':'')+'</td>'
           +'<td class=dim>'+(n.city||n.region||'')+'</td><td>'+st+'</td>'

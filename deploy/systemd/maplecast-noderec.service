@@ -1,0 +1,19 @@
+[Unit]
+Description=MapleCast per-node dataset recording agent (Caddy /noderec -> control WS 7211)
+After=network.target maplecast-headless.service
+Wants=maplecast-headless.service
+
+[Service]
+Type=simple
+User=root
+Environment=MC_NODEREC_PORT=9098
+Environment=MC_CTRL_PORT=7211
+Environment=MAPLECAST_RECORDINGS_DIR=/opt/maplecast/recordings
+# Injected on the box at install time — NEVER commit the real key.
+Environment=MC_NODE_KEY=CHANGEME
+ExecStart=/usr/bin/python3 /opt/maplecast/noderec_agent.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
