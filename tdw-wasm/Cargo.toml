@@ -1,0 +1,31 @@
+[package]
+name = "tdw-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "Browser TDW decoder — native-client-tdw/src/tdw.rs compiled to wasm."
+
+# The browser side of the TDW wire. It compiles the EXACT native-client tdw.rs
+# (referenced read-only via #[path] in src/lib.rs — the QUIC/TDW2 agent OWNS that
+# file; we never edit it) to wasm32, zstd and all, and exposes a small raw C-ABI
+# the browser JS drives (see web/webgpu/tdw-decoder.mjs). Because it's the SAME
+# decoder, every wire change the native/server side makes (kfdelta, TDW2 ACK-ref,
+# …) reaches the browser on a rebuild. Run ./build.sh after any tdw.rs change.
+#
+# NOT YET a shared `tdw-core` crate (which would extract tdw.rs so native + wasm
+# both depend on it) — that restructures native-client-tdw and would collide with
+# the in-flight TDW2/QUIC work. Read-only #[path] is the zero-collision stand-in
+# until that tree's merge settles; promote to a shared crate then.
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Pinned to native-client-tdw/Cargo.toml so tdw.rs compiles identically.
+zstd = "0.13"
+zstd-safe = { version = "7", features = ["std"] }
+log = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

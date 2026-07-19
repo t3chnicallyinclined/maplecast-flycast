@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TDW wire — browser render test</title>
+<style>
+  html,body { margin:0; height:100%; background:#0a0d11; color:#cdd6e0; font:13px/1.4 system-ui,sans-serif; }
+  #wrap { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; }
+  #game-canvas { width:min(100vw,133.33vh); height:min(75vw,100vh); background:#000; image-rendering:pixelated; }
+  #hud { position:fixed; top:10px; left:10px; z-index:10; background:rgba(6,9,13,.82);
+         border:1px solid #242a33; border-radius:8px; padding:10px 12px; font:12px/1.5 ui-monospace,monospace;
+         white-space:pre; pointer-events:none; }
+  #hud b { color:#42e0a8; }
+  .warn { color:#ffb454; }
+  .bad { color:#ff6b6b; }
+  #banner { position:fixed; bottom:12px; left:50%; transform:translateX(-50%); z-index:10;
+            background:rgba(6,9,13,.85); border:1px solid #242a33; border-radius:20px; padding:8px 18px;
+            font-size:12px; color:#8fa; }
+</style>
+</head>
+<body>
+  <div id="wrap"><canvas id="game-canvas" width="640" height="480"></canvas></div>
+  <div id="hud">TDW render test — connecting…</div>
+  <div id="banner">This page renders <b>only</b> the sub-1&nbsp;Mbps TDW dict-wire. State, not video.</div>
+
+<script type="module">
+import { FrameDecoder } from './webgpu/frame-decoder.mjs';
+import { TAParser } from './webgpu/ta-parser.mjs';
+import { TextureManager } from './webgpu/texture-manager.mjs';
+import { PVR2Renderer } from './webgpu/pvr2-renderer.mjs';
+import { AdaptiveTransport } from './webgpu/transport.mjs';
+import { TdwDecoder, synthLegacyFrame } from './webgpu/tdw-decoder.mjs';
+
+// Gold-standard render flags (same as renderer-bridge-webgpu.mjs).
+const DBG = {
+  drawOpaque: true, drawPunch: true, drawTrans: true,
+  shaderMode: 'normal', trDepthFunc: 6, trDepthWrite: true,
+  noSort: true, singlePass: true, zEpsilon: 0.00005,
+  opMax: 0, trMax: 0, opSkip: 0, trSkip: 0,
+};
+
+const hud = document.getElementById('hud');
+const S = { synced:false, dict:0, tdw1:0, rendered:0, tdwB:0, legacyB:0, skipB:0, syncSeed:false, fps:0, lastFrameNum:0 };
+let R, D, P, T, dec;
+let _pending = null, _snap = null, _frames = 0, _fpsT = 0;
+
+function setHud() {
+  const mbTdw = (S.tdwB * 8 / 1e6);
+  const cls = S.synced ? 'ok' : 'warn';
+  hud.innerHTML =
+    `<b>TDW browser render</b>\n` +
+    `sync    : ${S.synced ? '<b>YES</b>' : '<span class="warn">waiting…</span>'}\n` +
+    `seed    : ${S.syncSeed ? 'SYNC applied' : '<span class="warn">no seed yet</span>'}\n` +
+    `dict    : ${S.dict} blocks\n` +
+    `TDW1    : ${S.tdw1} msgs\n` +
+    `rendered: ${S.rendered} frames  (${S.fps} fps)\n` +
+    `frame#  : ${S.lastFrameNum}\n` +
+    `TDW leg : ${(S.tdwB/1024).toFixed(0)} KiB\n` +
+    `legacy  : <span class="warn">${(S.skipB/1024).toFixed(0)} KiB skipped</span> (relay still fans it out)`;
+}
+
+async function main() {
+  const canvas = document.getElementById('game-canvas');
+  try {
+    R = new PVR2Renderer();
+    await R.init(canvas);
+  } catch (e) {
+    hud.innerHTML = '<span class="bad">WebGPU unavailable</span>\n' + (e && e.message || e);
+    return;
+  }
+  D = new FrameDecoder();
+  P = new TAParser();
+  T = new TextureManager(R.dev);
+  dec = await TdwDecoder.create('./webgpu/tdw.wasm');
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const host = location.hostname;
+  const wsOverride = new URLSearchParams(location.search).get('ws');
+  const wsUrl = wsOverride || `${proto}://${host}/ws`;
+
+  const transport = new AdaptiveTransport({
+    wsUrl,
+    wtUrl: null,                         // stateful wire → WS only (WT datagrams reorder)
+    onstatus: (m) => {},
+    onopen: () => {
+      try {
+        transport._ws.send(JSON.stringify({ type: 'subscribe', mode: 'tdw' }));
+        transport._ws.send(JSON.stringify({ type: 'request_sync' }));
+      } catch (e) {}
+      setHud();
+    },
+    onclose: () => { hud.innerHTML += '\n<span class="bad">disconnected</span>'; },
+    onframe: handleFrame,
+  });
+  transport.connect();
+  window._tdwTransport = transport;
+
+  // render loop
+  function tick(ts) {
+    requestAnimationFrame(tick);
+    if (_fpsT === 0) _fpsT = ts;
+    _frames++;
+    if (ts - _fpsT >= 1000) { S.fps = Math.round(_frames * 1000 / (ts - _fpsT)); _frames = 0; _fpsT = ts; setHud(); }
+    if (!_pending) return;
+    const g = _pending, snap = _snap; _pending = null; _snap = null;
+    try { R.renderFrame(g, T, snap, D.vram, DBG, null); } catch (e) {}
+  }
+  requestAnimationFrame(tick);
+  setHud();
+}
+
+function handleFrame(d) {
+  if (d.length >= 4 && d[0] === 0xAD && d[1] === 0x10) return;   // audio: ignore
+  if (d.length < 4) return;
+  const m = String.fromCharCode(d[0], d[1], d[2], d[3]);
+
+  if (m === 'TDWS') { dec.feedSnapshot(d); S.tdwB += d.byteLength; S.dict = dec.dictLen(); return; }
+
+  if (m === 'TDW1' || m === 'TDW2') {              // TDW2 = ACK-ref loss-tolerant wire
+    S.tdw1++; S.tdwB += d.byteLength;
+    const f = dec.feed(d);                          // feed() dispatches both internally
+    S.synced = dec.isSynced(); S.dict = dec.dictLen();
+    if (!f) return;
+    present(f);
+    return;
+  }
+
+  // SYNC seed: ZCST envelope with uncompressedSize > 1MB is a full-VRAM SYNC.
+  if (m === 'ZCST') {
+    S.legacyB += d.byteLength;
+    const sz = (d[4] | d[5] << 8 | d[6] << 16 | d[7] << 24) >>> 0;
+    if (sz > 1024 * 1024) { D.applyFrame(d); S.syncSeed = true; }  // seed VRAM
+    else S.skipB += d.byteLength;                                   // skip legacy delta
+    return;
+  }
+  // raw (non-ZCST) SYNC variants also seed
+  if (m === 'SYNC' || m === 'FSYN' || m === 'SAVE') { D.applyFrame(d); S.syncSeed = true; return; }
+  // GSTA / OBJS / EFCT / PALF / TXTR / … — not needed for the TA render
+  S.legacyB += d.byteLength;
+}
+
+function present(f) {
+  const fr = D.applyFrame(synthLegacyFrame(f));   // inject as a legacy keyframe
+  if (!fr) return;
+  T.setDirtyPages(fr.dirtyPageList, fr.pvrDirty);
+  if (!T._pal || fr.vramDirty || fr.pvrDirty) T.updatePalette(D.pvrRegs);
+  const g = P.parse(fr.taBuffer, fr.taSize);
+  try { P.fillBGP(g, D.pvrRegs, D.vram); } catch (e) {}
+  _pending = g; _snap = fr.pvrSnapshot;
+  S.rendered++; S.lastFrameNum = fr.frameNum;
+}
+
+main();
+</script>
+</body>
+</html>
