@@ -149,10 +149,14 @@ async fn run(
     // PALF stop being SENT, not just skipped) — on prod-class servers those
     // legs are multi-Mbps that this client would otherwise pay for and drop.
     if std::env::var("MC_TDW").as_deref() == Ok("players") {
+        // MC_ACKREF=1 opts into the TDW2 ACK-reference wire (thin + loss-tolerant);
+        // otherwise the classic TDW1 wire. The decoder handles both by magic, so an
+        // old server that doesn't know "tdw2" just leaves us on all-legs (still works).
+        let mode = if std::env::var("MC_ACKREF").is_ok() { "tdw2" } else { "tdw" };
         write
-            .send(Message::Text("{\"type\":\"subscribe\",\"mode\":\"tdw\"}".into()))
+            .send(Message::Text(format!("{{\"type\":\"subscribe\",\"mode\":\"{mode}\"}}").into()))
             .await?;
-        log::info!("[net] subscribed tdw-only (legacy legs shed server-side)");
+        log::info!("[net] subscribed {mode} (legacy legs shed server-side)");
     }
 
     let mut zcs2 = Zcs2::new();

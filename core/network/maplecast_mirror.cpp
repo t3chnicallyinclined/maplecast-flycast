@@ -1000,7 +1000,7 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 	// byte-exact. Client ACKs its highest decoded frameId (8-byte "ACKF"). ----
 	static const bool tdwAckOn = [](){ const char* e = std::getenv("MAPLECAST_TDW_ACKREF");
 		return e && *e && *e != '0'; }();
-	if (tdwAckOn) {
+	if (tdwAckOn && maplecast_ws::hasTdw2Subscribers()) {
 		static std::map<uint32_t, std::vector<uint8_t>> ring;   // frameId -> raw inner
 		static uint32_t curFrame = 0;
 		static ZSTD_CCtx* ackCctx = ZSTD_createCCtx();
@@ -1026,17 +1026,16 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 		msg[4] = dictEpoch;
 		msg[5] = (uint8_t)((haveRef ? 0 : 1) | (tacanonMode() == 2 ? 2 : 0) | (reliable ? 4 : 0)
 			| 8 | (hasPages ? 16 : 0) | 32 | (splitPos ? 64 : 0));
-		uint16_t s16 = (uint16_t)seq; memcpy(msg.data() + 6, &s16, 2);
+		uint16_t s16 = (uint16_t)curFrame; memcpy(msg.data() + 6, &s16, 2);
 		memcpy(msg.data() + 8, &curFrame, 4);
 		memcpy(msg.data() + 12, &refId, 4);
 		memcpy(msg.data() + 16, &innerSz, 4);
 		memcpy(msg.data() + 20, ackZ.data(), zn);
-		seq++;
 		maplecast_ws::broadcastBinary(msg.data(), (uint32_t)(20 + zn));
 		ring[curFrame].assign(inner.begin(), inner.end());   // keep for future refs
 		if (curFrame >= RING) ring.erase(curFrame - RING);
 		curFrame++;
-		return;
+		// NB: no return — TDW1 (kfdelta/streaming) still runs below for tdw subs
 	}
 	// ---- keyframe/delta TDW wire (MAPLECAST_TDW_KFDELTA=1): the loss-tolerant path
 	// (flag bit7). Dirty-diff the inner vs the last keyframe (statewire_tdw), one-shot

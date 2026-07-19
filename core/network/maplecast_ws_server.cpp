@@ -107,6 +107,11 @@ static std::set<void*> _controlOnlyConns;
 // PALF side channels are skipped per-connection (the client would just count
 // the bytes and drop them).
 static std::set<void*> _tdwOnlyConns;
+// ACK-reference (TDW2) opt-in: clients that subscribed {mode:"tdw2"} get the TDW2
+// ack-reference wire INSTEAD of TDW1. TDW1 subscribers ("tdw") are unaffected. A
+// conn is in at most one of these two sets. broadcastBinary routes TDW1->_tdwOnlyConns,
+// TDW2->_tdw2OnlyConns, TDWS(dict)->both.
+static std::set<void*> _tdw2OnlyConns;
 // ACK-reference (TDW2): per-connection highest TDW frameId the client confirmed
 // decoding. The encoder references min-across-clients so the dict frame is present
 // on everyone. Keyed by the same void* conn key as _tdwOnlyConns / _connMutex.
@@ -1088,6 +1093,7 @@ static void onClose(ConnHdl hdl)
 			_connSlot.erase(key);
 			_controlOnlyConns.erase(key);
 			_tdwOnlyConns.erase(key);
+			_tdw2OnlyConns.erase(key);   // ACK-reference (TDW2) opt-in
 			_connAckedFrame.erase(key);  // ACK-reference (TDW2)
 			_connRttUs.erase(key);       // Tele-0.3
 			_connClientStats.erase(key); // Tele-0.5
@@ -1239,22 +1245,26 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 			if (ctrl["type"] == "subscribe")
 			{
 				try {
-					bool tdw = ctrl.value("mode", "") == "tdw";
+					std::string mode = ctrl.value("mode", "");
+					bool tdw = (mode == "tdw"), tdw2 = (mode == "tdw2");
 					{
 						void* key = (void*)_ws.get_con_from_hdl(hdl).get();
 						std::lock_guard<std::mutex> lock(_connMutex);
-						if (tdw) {
-							_tdwOnlyConns.insert(key);
+						if (tdw2) {
+							_tdw2OnlyConns.insert(key); _tdwOnlyConns.erase(key);
+							printf("[maplecast-ws] client subscribed: tdw2 ACK-reference (legacy legs shed)\n");
+						} else if (tdw) {
+							_tdwOnlyConns.insert(key); _tdw2OnlyConns.erase(key);
 							printf("[maplecast-ws] client subscribed: tdw-only (legacy legs shed)\n");
 						} else {
-							_tdwOnlyConns.erase(key);
+							_tdwOnlyConns.erase(key); _tdw2OnlyConns.erase(key);
 							printf("[maplecast-ws] client subscribed: all legs\n");
 						}
 						fflush(stdout);
 					}
 					// TDW joiners need the dictionary NOW — served directly, never
 					// via the legacy SYNC broadcast (kill switches / rate limits).
-					if (tdw)
+					if (tdw || tdw2)
 						maplecast_mirror::requestTdwSnapshot();
 				} catch (...) {}
 				return;
@@ -1909,11 +1919,17 @@ uint32_t minAckedFrameId()
 {
 	std::lock_guard<std::mutex> lock(_connMutex);
 	uint32_t m = 0xFFFFFFFFu; bool any = false;
-	for (void* k : _tdwOnlyConns) {
+	for (void* k : _tdw2OnlyConns) {   // ACK-reference subscribers only
 		auto it = _connAckedFrame.find(k);
 		if (it != _connAckedFrame.end()) { any = true; if (it->second < m) m = it->second; }
 	}
 	return any ? m : 0xFFFFFFFFu;
+}
+
+bool hasTdw2Subscribers()
+{
+	std::lock_guard<std::mutex> lock(_connMutex);
+	return !_tdw2OnlyConns.empty();
 }
 
 void broadcastBinary(const void* data, size_t size)
@@ -1951,14 +1967,15 @@ void broadcastBinary(const void* data, size_t size)
 	// :7200 TCP) and (b) the per-frame page diff is complete (the full VRAM
 	// memcmp). If a TDW client is ever served over a lossy/relay path, or the
 	// memcmp is replaced by partial DMA-dirty tracking, restore SYNC for it.
-	bool tdwWanted = false;
+	bool isTdw1 = false, isTdw2 = false, isTdws = false;
 	if (size >= 4) {
 		const uint8_t* b = reinterpret_cast<const uint8_t*>(data);
-		if (memcmp(b, "TDW1", 4) == 0 || memcmp(b, "TDW2", 4) == 0 || memcmp(b, "TDWS", 4) == 0)
-			tdwWanted = true;   // TDW2 = ACK-reference wire — MUST reach tdw-only clients too
+		isTdw1 = memcmp(b, "TDW1", 4) == 0;
+		isTdw2 = memcmp(b, "TDW2", 4) == 0;   // ACK-reference wire (opt-in)
+		isTdws = memcmp(b, "TDWS", 4) == 0;   // dict snapshot (both tdw + tdw2 need it)
 	}
 	std::string payload(reinterpret_cast<const char*>(data), size);
-	_ws.get_io_service().post([payload = std::move(payload), tdwWanted]() mutable {
+	_ws.get_io_service().post([payload = std::move(payload), isTdw1, isTdw2, isTdws]() mutable {
 		std::vector<ConnHdl> targets;
 		{
 			std::lock_guard<std::mutex> lock(_connMutex);
@@ -1974,7 +1991,13 @@ void broadcastBinary(const void* data, size_t size)
 					void* key = (void*)_ws.get_con_from_hdl(conn).get();
 					if (relaySkip.count(key)) continue;
 					if (_controlOnlyConns.count(key)) continue;
-					if (!tdwWanted && _tdwOnlyConns.count(key)) continue;
+					if (_tdw2OnlyConns.count(key)) {
+						if (!(isTdw2 || isTdws)) continue;   // ack-ref subscriber: TDW2 + dict only
+					} else if (_tdwOnlyConns.count(key)) {
+						if (!(isTdw1 || isTdws)) continue;   // tdw subscriber: TDW1 + dict only
+					} else if (isTdw2) {
+						continue;                            // browser: never the opt-in TDW2 wire
+					}
 					targets.push_back(conn);
 				} catch (...) {}
 			}

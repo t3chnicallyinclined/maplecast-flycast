@@ -5,7 +5,7 @@ import WebSocket from 'ws';
 const ws = new WebSocket('ws://127.0.0.1:7200');
 let n = 0, keyN = 0, keyB = 0, delN = 0, delB = 0, relN = 0, fitDg = 0, high = -1;
 const MAXDG = 1414;
-ws.on('open', () => ws.send(JSON.stringify({ type: 'subscribe', mode: 'tdw' })));
+ws.on('open', () => ws.send(JSON.stringify({ type: 'subscribe', mode: 'tdw2' })));
 ws.on('message', (buf) => {
   if (!(buf instanceof Buffer) || buf.length < 20) return;
   if (buf.toString('latin1', 0, 4) !== 'TDW2') return;

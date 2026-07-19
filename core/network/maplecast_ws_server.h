@@ -19,6 +19,10 @@ void broadcastBinary(const void* data, size_t size);
 // on every client, so a dropped datagram never desyncs. 0xFFFFFFFF = no acks yet.
 uint32_t minAckedFrameId();
 
+// True if any client has subscribed {mode:"tdw2"} — the encoder only spends CPU
+// building the TDW2 ack-reference wire when someone actually wants it.
+bool hasTdw2Subscribers();
+
 // Drain a pending MCSV (mid-match savestate) capture request. MUST be called
 // from the EMU THREAD at a frame boundary (i.e. from serverPublish), because
 // dc_serialize captures live SH4 register state — taking it from the 1Hz
