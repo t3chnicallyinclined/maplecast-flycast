@@ -38,6 +38,13 @@ pub struct Tdw {
     /// both sides also intern its zeroed-positions twin IF ABSENT, keeping the
     /// id spaces identical with no extra wire.
     by_hash: std::collections::HashMap<u64, Vec<u32>>,
+    /// ACK-reference TDW2 wire: ring of recently-decoded raw inners (frameId ->
+    /// inner) so a delta can rebase on the exact frame the server referenced. We
+    /// ACK `tdw2_high` (highest decoded frameId) so the server only ever references
+    /// a frame we still hold -> a dropped datagram just skips, never freezes.
+    tdw2_ring: std::collections::HashMap<u32, Vec<u8>>,
+    tdw2_high: u32,
+    tdw2_have_ack: bool,
 }
 
 fn fnv64(p: &[u8]) -> u64 {
@@ -86,7 +93,16 @@ impl Tdw {
             kf_key: Vec::new(),
             kf_key_id: 0,
             by_hash: std::collections::HashMap::new(),
+            tdw2_ring: std::collections::HashMap::new(),
+            tdw2_high: 0,
+            tdw2_have_ack: false,
         }
+    }
+
+    /// ACK-reference: the highest TDW2 frameId decoded so far (to send the server
+    /// an "ACKF" so it references a frame we provably hold). None until first frame.
+    pub fn tdw2_ack_frame(&self) -> Option<u32> {
+        if self.tdw2_have_ack { Some(self.tdw2_high) } else { None }
     }
 
     fn find_block(&self, p: &[u8]) -> Option<u32> {
@@ -160,15 +176,61 @@ impl Tdw {
         Ok(())
     }
 
-    /// Feed one 'TDW1' message; returns the reassembled full TA when decodable.
+    /// ACK-reference TDW2 wire: TDW2(4) epoch(1) flags(1) seq(2) frameId(4) refId(4)
+    /// innerSz(4) zdata@20. keyframe (refId==0xFFFFFFFF) = plain zstd(inner); delta =
+    /// zstd(inner) with the raw inner of frame `refId` (which we ACKed, so we hold it)
+    /// as the LZ dict. A delta whose reference we lack is SKIPPED -> recovers next
+    /// keyframe / on a fresher reference. We ACK `tdw2_high` so refs stay in our ring.
+    fn feed_tdw2(&mut self, msg: &[u8], flags: u8) -> Result<Option<TdwFrame>, BoxErr> {
+        if msg.len() < 20 {
+            return Ok(None);
+        }
+        let frame_id = rd_u32(msg, 8)?;
+        let ref_id = rd_u32(msg, 12)?;
+        let inner_sz = rd_u32(msg, 16)? as usize;
+        let z = &msg[20..];
+        let inner = if ref_id == 0xFFFFFFFF {
+            zstd::stream::decode_all(z)
+                .map_err(|e| -> BoxErr { format!("tdw2 kf zstd: {e}").into() })?
+        } else {
+            let dict = match self.tdw2_ring.get(&ref_id) {
+                Some(d) => d.clone(), // owned; frees the &self borrow for dctx below
+                None => return Ok(None), // reference not held — skip, recover on a fresher ref
+            };
+            let mut out = vec![0u8; inner_sz];
+            let n = self.dctx.decompress_using_dict(&mut out, z, &dict).map_err(zerr)?;
+            out.truncate(n);
+            out
+        };
+        // hold this frame for future references; keep a ~1s ring, evict the rest
+        self.tdw2_ring.insert(frame_id, inner.clone());
+        if frame_id >= 64 {
+            self.tdw2_ring.remove(&frame_id.wrapping_sub(64));
+        }
+        if !self.tdw2_have_ack || frame_id > self.tdw2_high {
+            self.tdw2_high = frame_id;
+        }
+        self.tdw2_have_ack = true;
+        self.synced = true;
+        self.parse_inner(inner, flags)
+    }
+
+    /// Feed one 'TDW1'/'TDW2' message; returns the reassembled full TA when decodable.
     pub fn feed(&mut self, msg: &[u8]) -> Result<Option<TdwFrame>, BoxErr> {
-        if msg.len() < 12 || &msg[0..4] != b"TDW1" {
+        if msg.len() < 12 {
+            return Ok(None);
+        }
+        let is_tdw2 = &msg[0..4] == b"TDW2";
+        if !is_tdw2 && &msg[0..4] != b"TDW1" {
             return Ok(None);
         }
         let epoch = msg[4];
         let flags = msg[5];
         if self.dict_epoch != Some(epoch) {
             return Ok(None); // dictionary unknown for this epoch — wait for TDWS
+        }
+        if is_tdw2 {
+            return self.feed_tdw2(msg, flags);
         }
 
         // --- keyframe/delta TDW wire (flag bit7): zstd-DICTIONARY, loss-tolerant.

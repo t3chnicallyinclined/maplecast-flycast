@@ -13,6 +13,12 @@ void shutdown();
 bool active();
 void broadcastBinary(const void* data, size_t size);
 
+// ACK-reference TDW2 wire: the lowest TDW frameId that EVERY tdw-subscribed
+// client has confirmed decoding (via an 8-byte "ACKF"+frameId binary message).
+// The encoder references this frame as the zstd dictionary — guaranteed present
+// on every client, so a dropped datagram never desyncs. 0xFFFFFFFF = no acks yet.
+uint32_t minAckedFrameId();
+
 // Drain a pending MCSV (mid-match savestate) capture request. MUST be called
 // from the EMU THREAD at a frame boundary (i.e. from serverPublish), because
 // dc_serialize captures live SH4 register state — taking it from the 1Hz

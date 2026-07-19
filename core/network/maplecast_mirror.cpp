@@ -992,6 +992,52 @@ static void publish(const uint8_t* wireTA, uint32_t taSize, uint32_t frameNum, u
 		ZSTD_CCtx_setParameter(zc, ZSTD_c_windowLog, 24);
 		seq = 0;
 	}
+	// ---- ACK-reference TDW2 wire (MAPLECAST_TDW_ACKREF=1): thin AND loss-tolerant.
+	// Encode inner vs the frame the CLIENT last ACKed (single-frame zstd raw-content
+	// dict). The reference is confirmed-present on every client, so a dropped datagram
+	// just skips a frame and the next rebases on the same acked frame -> no freeze.
+	// ~1.8 Mbps (2x thinner than keyframe/delta, which references a 1s-old keyframe),
+	// byte-exact. Client ACKs its highest decoded frameId (8-byte "ACKF"). ----
+	static const bool tdwAckOn = [](){ const char* e = std::getenv("MAPLECAST_TDW_ACKREF");
+		return e && *e && *e != '0'; }();
+	if (tdwAckOn) {
+		static std::map<uint32_t, std::vector<uint8_t>> ring;   // frameId -> raw inner
+		static uint32_t curFrame = 0;
+		static ZSTD_CCtx* ackCctx = ZSTD_createCCtx();
+		static std::vector<uint8_t> ackZ;
+		const uint32_t RING = 64;
+		uint32_t acked = maplecast_ws::minAckedFrameId();
+		bool haveRef = !streamStart && acked != 0xFFFFFFFFu && acked < curFrame && ring.count(acked);
+		uint32_t refId = haveRef ? acked : 0xFFFFFFFFu;
+		size_t bound = ZSTD_compressBound(inner.size());
+		if (ackZ.size() < bound) ackZ.resize(bound);
+		size_t zn = haveRef
+			? ZSTD_compress_usingDict(ackCctx, ackZ.data(), ackZ.size(), inner.data(), inner.size(),
+				ring[refId].data(), ring[refId].size(), 3)
+			: ZSTD_compressCCtx(ackCctx, ackZ.data(), ackZ.size(), inner.data(), inner.size(), 3);
+		if (ZSTD_isError(zn)) { printf("[TADICT] ackref zstd error: %s\n", ZSTD_getErrorName(zn)); return; }
+		uint32_t innerSz = (uint32_t)inner.size();
+		uint32_t nsec = 0;
+		if (inner.size() >= 20) memcpy(&nsec, inner.data() + 16, 4);
+		bool reliable = !haveRef || hasPages || nsec > 0;   // keyframe/news/pages -> reliable stream
+		// wire: TDW2(4) epoch(1) flags(1) seq(2) frameId(4) refId(4) innerSz(4) zdata
+		msg.resize(20 + zn);
+		msg[0]='T'; msg[1]='D'; msg[2]='W'; msg[3]='2';
+		msg[4] = dictEpoch;
+		msg[5] = (uint8_t)((haveRef ? 0 : 1) | (tacanonMode() == 2 ? 2 : 0) | (reliable ? 4 : 0)
+			| 8 | (hasPages ? 16 : 0) | 32 | (splitPos ? 64 : 0));
+		uint16_t s16 = (uint16_t)seq; memcpy(msg.data() + 6, &s16, 2);
+		memcpy(msg.data() + 8, &curFrame, 4);
+		memcpy(msg.data() + 12, &refId, 4);
+		memcpy(msg.data() + 16, &innerSz, 4);
+		memcpy(msg.data() + 20, ackZ.data(), zn);
+		seq++;
+		maplecast_ws::broadcastBinary(msg.data(), (uint32_t)(20 + zn));
+		ring[curFrame].assign(inner.begin(), inner.end());   // keep for future refs
+		if (curFrame >= RING) ring.erase(curFrame - RING);
+		curFrame++;
+		return;
+	}
 	// ---- keyframe/delta TDW wire (MAPLECAST_TDW_KFDELTA=1): the loss-tolerant path
 	// (flag bit7). Dirty-diff the inner vs the last keyframe (statewire_tdw), one-shot
 	// zstd it, emit. A dropped delta skips one frame; the next rebases on the keyframe

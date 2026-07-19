@@ -107,6 +107,10 @@ static std::set<void*> _controlOnlyConns;
 // PALF side channels are skipped per-connection (the client would just count
 // the bytes and drop them).
 static std::set<void*> _tdwOnlyConns;
+// ACK-reference (TDW2): per-connection highest TDW frameId the client confirmed
+// decoding. The encoder references min-across-clients so the dict frame is present
+// on everyone. Keyed by the same void* conn key as _tdwOnlyConns / _connMutex.
+static std::map<void*, uint32_t> _connAckedFrame;
 
 struct QueueEntry {
 	void* key;
@@ -1084,6 +1088,7 @@ static void onClose(ConnHdl hdl)
 			_connSlot.erase(key);
 			_controlOnlyConns.erase(key);
 			_tdwOnlyConns.erase(key);
+			_connAckedFrame.erase(key);  // ACK-reference (TDW2)
 			_connRttUs.erase(key);       // Tele-0.3
 			_connClientStats.erase(key); // Tele-0.5
 			_queue.erase(std::remove_if(_queue.begin(), _queue.end(),
@@ -1124,6 +1129,18 @@ static void onMessage(ConnHdl hdl, WsServer::message_ptr msg)
 		if (data.size() >= 12 && memcmp(data.data(), "STPU", 4) == 0)
 		{
 			migHandleIncomingPush(hdl, data);
+			return;
+		}
+		// ACK-reference (TDW2): 8-byte "ACKF"+frameId(u32 LE) — the client reports the
+		// highest TDW frame it has decoded so the encoder can reference it as the dict.
+		if (data.size() == 8 && memcmp(data.data(), "ACKF", 4) == 0)
+		{
+			uint32_t fid; memcpy(&fid, data.data() + 4, 4);
+			try {
+				void* key = (void*)_ws.get_con_from_hdl(hdl).get();
+				std::lock_guard<std::mutex> lock(_connMutex);
+				_connAckedFrame[key] = fid;
+			} catch (...) {}
 			return;
 		}
 		if (data.size() == 4)
@@ -1886,6 +1903,17 @@ void shutdown()
 bool active()
 {
 	return _active;
+}
+
+uint32_t minAckedFrameId()
+{
+	std::lock_guard<std::mutex> lock(_connMutex);
+	uint32_t m = 0xFFFFFFFFu; bool any = false;
+	for (void* k : _tdwOnlyConns) {
+		auto it = _connAckedFrame.find(k);
+		if (it != _connAckedFrame.end()) { any = true; if (it->second < m) m = it->second; }
+	}
+	return any ? m : 0xFFFFFFFFu;
 }
 
 void broadcastBinary(const void* data, size_t size)

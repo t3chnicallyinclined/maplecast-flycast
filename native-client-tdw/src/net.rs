@@ -308,7 +308,7 @@ async fn run(
             match &b[0..4] {
                 b"ZCST" => b_zcst += b.len() as u64,
                 b"ZCS2" => b_zcs2 += b.len() as u64,
-                b"TDW1" | b"TDWS" => b_tdw += b.len() as u64,
+                b"TDW1" | b"TDW2" | b"TDWS" => b_tdw += b.len() as u64,
                 _ => b_side += b.len() as u64,
             }
         }
@@ -346,7 +346,8 @@ async fn run(
                 debug.tdw_dict_kb.store((tdw.dict_bytes() / 1024) as u64, Relaxed);
                 debug.tdw_synced.store(tdw.is_synced(), Relaxed);
             }
-            b"TDW1" if tdw_on => {
+            b"TDW1" | b"TDW2" if tdw_on => {
+                let is_t2 = &b[0..4] == b"TDW2";
                 match tdw.feed(&b) {
                     Ok(Some(fr)) => {
                         if tdw_players {
@@ -389,6 +390,20 @@ async fn run(
                 debug.tdw_dict_blocks.store(tdw.dict_len() as u64, Relaxed);
                 debug.tdw_dict_kb.store((tdw.dict_bytes() / 1024) as u64, Relaxed);
                 debug.tdw_synced.store(tdw.is_synced(), Relaxed);
+                // ACK-reference: tell the server the highest frame we hold (every other
+                // frame — an 8-byte "ACKF") so it only ever references a frame we can
+                // decode against. Direct client->server on the WS; the bridge forwards
+                // it upstream for the QUIC path.
+                if is_t2 {
+                    if let Some(fid) = tdw.tdw2_ack_frame() {
+                        if fid % 2 == 0 {
+                            let mut m = Vec::with_capacity(8);
+                            m.extend_from_slice(b"ACKF");
+                            m.extend_from_slice(&fid.to_le_bytes());
+                            let _ = write.send(Message::Binary(m.into())).await;
+                        }
+                    }
+                }
             }
             // TDW-ONLY client: ZCS2 fully ignored in players mode (no zstd decode,
             // no apply — TDW1 is the complete wire). Other modes keep it.
