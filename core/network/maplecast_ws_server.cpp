@@ -1954,8 +1954,8 @@ void broadcastBinary(const void* data, size_t size)
 	bool tdwWanted = false;
 	if (size >= 4) {
 		const uint8_t* b = reinterpret_cast<const uint8_t*>(data);
-		if (memcmp(b, "TDW1", 4) == 0 || memcmp(b, "TDWS", 4) == 0)
-			tdwWanted = true;
+		if (memcmp(b, "TDW1", 4) == 0 || memcmp(b, "TDW2", 4) == 0 || memcmp(b, "TDWS", 4) == 0)
+			tdwWanted = true;   // TDW2 = ACK-reference wire — MUST reach tdw-only clients too
 	}
 	std::string payload(reinterpret_cast<const char*>(data), size);
 	_ws.get_io_service().post([payload = std::move(payload), tdwWanted]() mutable {
