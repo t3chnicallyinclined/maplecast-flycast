@@ -48,13 +48,19 @@ def main():
         raise RuntimeError(f"{fn}: unexpected jsr/bsr (not a self-contained leaf) — reg {reg}")
 
     body = emit_function(insns, data, fn, noleaf)
+    # forward-declare any bsr callees (sub_<hex>) the body references
+    callees = sorted(set(re.findall(r'\b(sub_[0-9a-fA-F]+)\(c\);', body)))
     out = f"gen_{fn}.c"
     with open(out, "w") as f:
         f.write('#include "sh4ctx.h"\n')
         f.write(f'/* AUTO-GENERATED from {path} lines {first}-{last} via lift.py/codegen.py */\n')
+        for cal in callees:
+            f.write(f'void {cal}(Sh4Ctx*c);\n')
         f.write(f'void {fn}(Sh4Ctx*c){{\n')
         f.write(body)
         f.write('\n}\n')
+    if callees:
+        print("bsr callees (link a matching sub_<hex>):", ", ".join(callees))
     print(f"emitted {out}")
     print("DATA:", data)
 

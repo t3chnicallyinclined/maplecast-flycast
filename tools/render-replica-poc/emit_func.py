@@ -19,8 +19,18 @@ from codegen import Emitter, R, FR
 
 BRANCHES = {'bra','bsr','bf','bt','bf.s','bt.s','bf/s','bt/s','jsr','rts','jmp','braf','bsrf'}
 
-def emit_function(insns, data, fname, leaf_call_resolver):
-    """leaf_call_resolver(jsr_reg_or_target) -> C statement to call the leaf."""
+def _default_bsr(target):
+    """bsr loc_<hex> -> call the transpiled C function for that address, named
+    sub_<hex>(c) by convention. The caller links a matching sub_<hex> (often a thin
+    shim to an already-transpiled leaf, e.g. sub_8c11e730 -> rng_e730)."""
+    t=target.lower()
+    m=re.fullmatch(r'loc_([0-9a-fA-F]+)', t)
+    if m: return f"sub_{m.group(1)}(c);"
+    raise NotImplementedError(f"bsr target {target}")
+
+def emit_function(insns, data, fname, leaf_call_resolver, bsr_call_resolver=_default_bsr):
+    """leaf_call_resolver(jsr_reg_or_target) -> C statement to call the leaf.
+    bsr_call_resolver(target_label) -> C statement to call the bsr subroutine."""
     em=Emitter(data, {})
     body=[]
     def out(s): body.append("    "+s)
@@ -45,6 +55,10 @@ def emit_function(insns, data, fname, leaf_call_resolver):
             # now the transfer
             if m=='bra':
                 out(f"goto {ins.args[0].lower()};")
+            elif m=='bsr':
+                # bsr loc_X -> call the subroutine (pr save/restore is handled by
+                # the caller's sts.l/lds.l pr around the bsr; the C call is enough).
+                out(bsr_call_resolver(ins.args[0]))
             elif m=='bf':
                 out(f"if(!c->sr_t) goto {ins.args[0].lower()};")
             elif m=='bt':
