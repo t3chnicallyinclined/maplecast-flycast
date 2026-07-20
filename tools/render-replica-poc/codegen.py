@@ -409,30 +409,49 @@ class Emitter:
         raise NotImplementedError(ins.raw)
 
     def _fmov(self, ins):
-        m=ins.mnem; a=ins.args
-        src,dst=a[0],a[1]
-        # fmov frA,frB
+        # SZ-aware fmov/fmov.s (source-verified vs flycast sh4_fpu.cpp:137-313). Under
+        # FPSCR.SZ=1 (set by fschg), transfers are 8-byte register PAIRS; the raw float
+        # field's LOW BIT selects the bank (0->fr/DR, 1->xf/XD), upper 3 bits = pair index.
+        a=ins.args; src,dst=a[0],a[1]
+        SZ="(c->fpscr & 0x00100000u)"
+        rawn=lambda f:int(f[2:])
+        bank=lambda r:('xf' if (r & 1) else 'fr', r & 0xE)   # (bankname, pair base index)
+        # fmov FRm,FRn  (reg-reg)
         if is_freg(src) and is_freg(dst):
-            self.emit(f"{FR(dst)} = {FR(src)};")
+            rs,rd=rawn(src),rawn(dst); sb,sp=bank(rs); db,dp=bank(rd)
+            self.emit(f"if ({SZ}) {{ c->{db}[{dp}]=c->{sb}[{sp}]; c->{db}[{dp}+1]=c->{sb}[{sp}+1]; }}"
+                      f" else {{ c->fr[{rd}]=c->fr[{rs}]; }}")
             return
-        # fmov.s @r0,frN  where r0 may be a POOL addr (after mova)
+        # load: @Rm / @Rm+ / @(R0,Rm) / @r0(pool) -> FRn
         if is_freg(dst) and not is_freg(src):
+            rd=rawn(dst); db,dp=bank(rd)
             addr,mode,base=self._addr_or_pool(src)
             if addr=='POOL_R0':
-                self.emit(f"{{ u32 _b=c->_pool; {FR(dst)} = *(float*)&_b; }}")
-            else:
-                if mode=='+':
-                    self.emit(f"{{ u32 _a={addr}; {R(base)}+=4; u32 _w=r32(c,_a); {FR(dst)} = *(float*)&_w; }}")
-                else:
-                    self.emit(f"{{ u32 _w=r32(c,{addr}); {FR(dst)} = *(float*)&_w; }}")
+                self.emit(f"{{ u32 _b=c->_pool; c->fr[{rd}] = *(float*)&_b; }}")
+                return
+            inc8=f" {R(base)}+=8;" if mode=='+' else ""
+            inc4=f" {R(base)}+=4;" if mode=='+' else ""
+            self.emit(
+                f"if ({SZ}) {{ u32 _a={addr};{inc8} u32 _w0=r32(c,_a), _w1=r32(c,_a+4);"
+                f" c->{db}[{dp}]=*(float*)&_w0; c->{db}[{dp}+1]=*(float*)&_w1; }}"
+                f" else {{ u32 _a={addr};{inc4} u32 _w=r32(c,_a); c->fr[{rd}]=*(float*)&_w; }}")
             return
-        # fmov frN,@-r15 / @(d,r)
+        # store: FRm -> @Rn / @-Rn / @(R0,Rn)   (float reg is M; bank from M's low bit)
         if is_freg(src) and not is_freg(dst):
+            rs=rawn(src); sb,sp=bank(rs)
             addr,mode,base=self._addr_or_pool(dst)
             if mode=='-':
-                self.emit(f"{R(base)}-=4; {{ float _f={FR(src)}; w32(c,{R(base)}, *(u32*)&_f); }}")
+                self.emit(
+                    f"if ({SZ}) {{ {R(base)}-=8; u32 _a={R(base)};"
+                    f" float _f0=c->{sb}[{sp}], _f1=c->{sb}[{sp}+1];"
+                    f" w32(c,_a,*(u32*)&_f0); w32(c,_a+4,*(u32*)&_f1); }}"
+                    f" else {{ {R(base)}-=4; float _f=c->fr[{rs}]; w32(c,{R(base)},*(u32*)&_f); }}")
             else:
-                self.emit(f"{{ float _f={FR(src)}; w32(c,{addr}, *(u32*)&_f); }}")
+                self.emit(
+                    f"if ({SZ}) {{ u32 _a={addr};"
+                    f" float _f0=c->{sb}[{sp}], _f1=c->{sb}[{sp}+1];"
+                    f" w32(c,_a,*(u32*)&_f0); w32(c,_a+4,*(u32*)&_f1); }}"
+                    f" else {{ float _f=c->fr[{rs}]; w32(c,{addr},*(u32*)&_f); }}")
             return
         raise NotImplementedError(ins.raw)
 
