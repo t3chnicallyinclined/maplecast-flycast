@@ -99,3 +99,9 @@ _frame_data.json
 _ram_f9*.bin
 _ram_f90_s5*.bin
 oracle_*.bin
+
+# derived worklists + ticktrace (regenerate via _handoff/scan_tick.py + runner --trace)
+_handoff/funclist.txt
+_handoff/spl_funclist.txt
+_handoff/trace_distinct_pcs.txt
+_handoff/trace_entries.txt

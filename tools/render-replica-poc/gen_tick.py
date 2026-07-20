@@ -9,15 +9,22 @@ exactly like the live engine dispatches through RAM pointers (which are in _ram_
 
 M4 build toward EXECUTOR Test A. Failures (numeric-PC pools, unknown opcodes) are
 collected, not fatal, so the report tells us exactly which gaps remain."""
-import re, sys
+import re, sys, os
 from lift import parse_asm, extract_block, slurp_function
 from emit_func import emit_function
 from codegen import R
 from gen_one import normalize_data_pointers
 
+# durable worklists persisted in _handoff/ (regenerate via _handoff/scan_tick.py + scan_spl.py
+# from the ticktrace; see HANDOFF-EXECUTOR.md). Falls back to the original session scratchpad.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_HANDOFF = os.path.join(_HERE, "_handoff")
 _SCR = r"C:/Users/trist/AppData/Local/Temp/claude/c--Users-trist-projects-maplecast-flycast/ffa8329c-44cf-4fbe-a9d0-0eebc4f87c12/scratchpad"
-FUNCLIST     = _SCR + "/funclist.txt"
-SPL_FUNCLIST = _SCR + "/spl_funclist.txt"
+def _pick(name):
+    p = os.path.join(_HANDOFF, name)
+    return p if os.path.exists(p) else (_SCR + "/" + name)
+FUNCLIST     = _pick("funclist.txt")
+SPL_FUNCLIST = _pick("spl_funclist.txt")
 BANKDIR  = r"C:/Users/trist/projects/_marv_re/build"
 SPLDIR   = r"C:/Users/trist/projects/_marv_re/char_prg/code"
 ENTRY    = 0x8c0358be
