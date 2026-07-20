@@ -60,6 +60,14 @@ int main(int argc, char **argv) {
     c.ram = ram;
     c.r[15] = 0x8CFF0000u;   /* scratch SP */
 
+    /* entry-register overrides for reg-arg leaves: rN=0xHEX / frN=0xHEX (args 3+).
+     * MUST match the oracle's --setr/--setfr for a valid comparison. */
+    for (int ai = (truthpath ? 3 : 2); ai < argc; ai++) {
+        int idx; unsigned v;
+        if (sscanf(argv[ai], "fr%d=%x", &idx, &v) == 2)      memcpy(&c.fr[idx & 15], &v, 4);
+        else if (sscanf(argv[ai], "r%d=%x", &idx, &v) == 2)  c.r[idx & 15] = v;
+    }
+
     printf("=== verify leaf %s on %s ===\n", STR(LEAF_FN), snap);
     LEAF_FN(&c);
 

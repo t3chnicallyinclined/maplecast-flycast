@@ -277,6 +277,8 @@ int main(int argc, char** argv) {
     bool leafMode = false;    // GAME-TICK LEAF ORACLE: force pr=retPc sentinel + r15=spEntry
                               // so a self-contained leaf's rts returns to the stop sentinel.
     const char* ctxOverride = nullptr; // load entry ctx from a DIFFERENT seed than the RAM
+    // entry-register overrides for REG-ARG leaves (--setr=IDX:HEX / --setfr=IDX:HEX)
+    int setrIdx[16], setfrIdx[16], nSetr = 0, nSetfr = 0; u32 setrVal[16], setfrVal[16];
     for (int i = 1; i < argc; i++) {
         if (!std::strcmp(argv[i], "--no-isolate")) doIsolate = false;
         if (!std::strcmp(argv[i], "--drop-chars")) dropChars = true;
@@ -284,6 +286,9 @@ int main(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--min-ctx"))    minCtx = true;
         if (!std::strcmp(argv[i], "--leaf"))       leafMode = true;
         if (!std::strncmp(argv[i], "--ctx-override=", 15)) ctxOverride = argv[i] + 15;
+        { int ix; unsigned v;
+          if (std::sscanf(argv[i], "--setr=%d:%x",  &ix, &v) == 2 && nSetr  < 16) { setrIdx[nSetr]=ix;   setrVal[nSetr++]=v; }
+          if (std::sscanf(argv[i], "--setfr=%d:%x", &ix, &v) == 2 && nSetfr < 16) { setfrIdx[nSetfr]=ix; setfrVal[nSetfr++]=v; } }
     }
 
     FILE* f = std::fopen(seedPath, "rb");
@@ -426,6 +431,11 @@ int main(int argc, char** argv) {
         std::printf("[run] --leaf: pr=0x%08X r15=0x%08X (return sentinel retPc=0x%08X)\n",
                     Sh4cntx.pr, Sh4cntx.r[15], g_retPc);
     }
+    // entry-register overrides (applied last so they win over min-ctx/leaf/seed)
+    for (int k = 0; k < nSetr; k++)  { Sh4cntx.r[setrIdx[k] & 15] = setrVal[k];
+        std::printf("[run] set r%d=0x%08X\n", setrIdx[k] & 15, setrVal[k]); }
+    for (int k = 0; k < nSetfr; k++) { Sh4cntx.fr_hex(setfrIdx[k] & 15) = setfrVal[k];
+        std::printf("[run] set fr%d=0x%08X\n", setfrIdx[k] & 15, setfrVal[k]); }
 
     std::printf("[run] entry pc=0x%08X sr=0x%08X fpscr=0x%08X r15=0x%08X pr=0x%08X\n",
                 Sh4cntx.pc, Sh4cntx.sr.getFull(), Sh4cntx.fpscr.full, Sh4cntx.r[15], Sh4cntx.pr);
