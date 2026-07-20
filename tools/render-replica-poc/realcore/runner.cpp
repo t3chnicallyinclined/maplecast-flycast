@@ -53,6 +53,10 @@ static u32  g_curPc = 0;
 static u64  g_icount = 0;
 static const u64 WATCHDOG = 300ull * 1000 * 1000;  // 300M instructions
 static bool g_reached = false, g_watchdog = false, g_faulted = false;
+// --trace: log every executed PC (post-processed into the tick's function set + resolved indirects)
+static bool g_dotrace = false;
+static std::vector<u32> g_pctrace;
+static const size_t TRACE_CAP = 20000000;
 static u32  g_faultEpc = 0, g_faultEvn = 0;
 
 // zeroed-resident-miss log (read-before-write of a zeroed byte)
@@ -234,6 +238,7 @@ namespace mc_readtrace {
     bool g_armed = false;
     void onPc(u32 pc) {
         g_curPc = pc;
+        if (g_dotrace && g_pctrace.size() < TRACE_CAP) g_pctrace.push_back(pc);
         if (++g_icount > WATCHDOG) { g_watchdog = true; throw debugger::Stop(); }
         if ((pc & 0x1FFFFFFFu) == g_retPc && Sh4cntx.r[15] >= g_spEntry) {
             g_reached = true; throw debugger::Stop();
@@ -285,6 +290,7 @@ int main(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--drop-scratch")) dropScratch = true;
         if (!std::strcmp(argv[i], "--min-ctx"))    minCtx = true;
         if (!std::strcmp(argv[i], "--leaf"))       leafMode = true;
+        if (!std::strcmp(argv[i], "--trace"))      g_dotrace = true;
         if (!std::strncmp(argv[i], "--ctx-override=", 15)) ctxOverride = argv[i] + 15;
         { int ix; unsigned v;
           if (std::sscanf(argv[i], "--setr=%d:%x",  &ix, &v) == 2 && nSetr  < 16) { setrIdx[nSetr]=ix;   setrVal[nSetr++]=v; }
@@ -493,6 +499,13 @@ int main(int argc, char** argv) {
             std::fclose(tf);
             std::printf("wrote ta_out.bin (%zu bytes)\n", g_ta.size() * 32);
         }
+    }
+
+    // ---- TICKTRACE: dump the executed-PC trace (function set + resolved indirects) ----
+    if (g_dotrace && !g_pctrace.empty()) {
+        FILE* tf = std::fopen("trace_out.bin", "wb");
+        if (tf) { std::fwrite(g_pctrace.data(), 4, g_pctrace.size(), tf); std::fclose(tf); }
+        std::printf("wrote trace_out.bin (%zu PCs)\n", g_pctrace.size());
     }
 
     // ---- GAME-TICK LEAF ORACLE: dump final ctx + full RAM = flycast ground truth ----
