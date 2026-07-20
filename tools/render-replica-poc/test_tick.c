@@ -21,15 +21,21 @@ static long g_calls = 0;
 static const long CALL_LIMIT = 5000000L;   /* watchdog: a real tick is ~thousands of calls */
 int mc_call_guard(void) { return (++g_calls > CALL_LIMIT) ? 1 : 0; }
 
-/* write-trap: which function writes the bad 0x8C44xxxx block? */
+/* write-trap + shadow call stack to find the memcpy's caller chain */
 u32 mc_curfn = 0;
-static u32 g_trapfn[32], g_traprawa[32]; static int g_ntrap = 0; static long g_trapcnt = 0;
+static u32 g_stack[256]; static int g_sp = 0;
+void mc_push(u32 a) { if (g_sp < 256) g_stack[g_sp] = a; g_sp++; }
+void mc_pop(void) { if (g_sp > 0) g_sp--; }
+static u32 g_snap[256]; static int g_snapn = -1; static u32 g_snapraw = 0;
+static long g_trapcnt = 0;
 void mc_wtrap(u32 a) {
-    u32 off = a & 0x00FFFFFFu;                       /* the RAM offset mc_idx lands on */
+    u32 off = a & 0x00FFFFFFu;
     if (off >= 0x440000u && off < 0x460000u) {
         g_trapcnt++;
-        int seen = 0; for (int i = 0; i < g_ntrap; i++) if (g_trapfn[i] == mc_curfn) seen = 1;
-        if (!seen && g_ntrap < 32) { g_traprawa[g_ntrap] = a; g_trapfn[g_ntrap++] = mc_curfn; }
+        if (g_snapn < 0) {                            /* snapshot the call chain on first bad write */
+            g_snapraw = a; g_snapn = g_sp < 256 ? g_sp : 256;
+            for (int i = 0; i < g_snapn; i++) g_snap[i] = g_stack[i];
+        }
     }
 }
 
@@ -73,8 +79,12 @@ int main(int argc, char **argv) {
     }
     return 0;
 }
-/* print trap summary via a destructor */
+
 __attribute__((destructor)) static void _trapdump(void){
-  if(g_trapcnt) { printf("WTRAP 0x8C44xxxx: %ld writes from %d fns:", g_trapcnt, g_ntrap);
-    for(int i=0;i<g_ntrap;i++) printf(" fn_%08x", g_trapfn[i]); printf("\n"); }
+  if(g_trapcnt){
+    printf("WTRAP 0x44xxxx: %ld bad writes, first raw addr=0x%08X\n", g_trapcnt, g_snapraw);
+    printf("  call chain (outer->inner):");
+    for(int i=0;i<g_snapn;i++) printf(" %08x", g_snap[i]);
+    printf("\n");
+  }
 }

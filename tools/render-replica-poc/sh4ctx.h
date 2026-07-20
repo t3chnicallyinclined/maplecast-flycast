@@ -33,6 +33,11 @@ typedef struct {
 
 /* translate guest virtual -> ram[] index (area-3 only for this PoC) */
 static inline u32 mc_idx(u32 a){ return a & 0x00FFFFFFu; }
+/* Only SH4 AREA 3 (physical 0x0C000000-0x0FFFFFFF; P0/P1/P2 = 0x0C/0x8C/0xAC) is main RAM.
+ * VRAM (area 1, 0xA4/0x04xxxxxx), the TA FIFO, and MMIO are SEPARATE memories the game-tick
+ * executor does not model — writes there must be DROPPED (a memcpy uploading a texture to
+ * VRAM must NOT corrupt main RAM via the address mask). */
+static inline int mc_is_ram(u32 a){ return (a & 0x1C000000u) == 0x0C000000u; }
 
 #ifdef MC_READLOG
 /* READ-SET CAPTURE (2026-07-02, wire-read-set completeness diagnostic). When compiled with
@@ -99,14 +104,16 @@ extern void mc_wtrap(u32 a);
 #define MC_WT(a) ((void)0)
 #endif
 static inline void w32(Sh4Ctx*c, u32 a, u32 v){
+    if(!mc_is_ram(a)) return;   /* drop VRAM/TA/MMIO writes */
     MC_WT(a); MC_WLOG(a,4);
     u32 i=mc_idx(a); u8*p=c->ram+i;
     p[0]=v; p[1]=v>>8; p[2]=v>>16; p[3]=v>>24;
 }
 static inline void w16(Sh4Ctx*c, u32 a, u32 v){
+    if(!mc_is_ram(a)) return;
     MC_WLOG(a,2);
     u32 i=mc_idx(a); u8*p=c->ram+i; p[0]=v; p[1]=v>>8;
 }
-static inline void w8(Sh4Ctx*c, u32 a, u32 v){ MC_WLOG(a,1); c->ram[mc_idx(a)]=(u8)v; }
+static inline void w8(Sh4Ctx*c, u32 a, u32 v){ if(!mc_is_ram(a)) return; MC_WLOG(a,1); c->ram[mc_idx(a)]=(u8)v; }
 
 #endif

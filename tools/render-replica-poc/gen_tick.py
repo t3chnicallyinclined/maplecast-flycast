@@ -138,11 +138,11 @@ def main():
             f.write('  default: break;\n }\n')
             f.write(body)
             f.write('\n}\n')
-        f.write('\nextern u32 mc_curfn;\n')
-        f.write('void call_addr(Sh4Ctx*c,u32 a){\n if(mc_call_guard()) return;\n mc_curfn=a;\n switch(a){\n')
+        f.write('\nextern u32 mc_curfn; extern void mc_push(u32); extern void mc_pop(void);\n')
+        f.write('void call_addr(Sh4Ctx*c,u32 a){\n if(mc_call_guard()) return;\n mc_curfn=a; mc_push(a);\n switch(a){\n')
         for ba, entry in sorted(block_of.items()):
-            f.write(f'  case 0x{ba:08x}u: fn_{entry:08x}(c, 0x{ba:08x}u); return;\n')
-        f.write('  default: mc_unknown_call(a); return;\n }\n}\n')
+            f.write(f'  case 0x{ba:08x}u: fn_{entry:08x}(c, 0x{ba:08x}u); break;\n')
+        f.write('  default: mc_unknown_call(a); break;\n }\n mc_pop();\n}\n')
         f.write(f'\nvoid tick_entry(Sh4Ctx*c){{ fn_{ENTRY:08x}(c, 0x{ENTRY:08x}u); }}\n')
 
     print(f"worklist: {len(funcs)} | transpiled OK: {len(ok)} | FAILED: {len(fail)}")
