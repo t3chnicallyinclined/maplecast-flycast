@@ -127,11 +127,43 @@ class Emitter:
         elif m=='flds':
             # flds FRm, FPUL : fpul = raw bits of FRm
             self.emit(f"c->fpul = ((union {{ float f; u32 u; }}){{ .f = {FR(a[0])} }}).u;")
+        elif m=='fsts':
+            # fsts FPUL, FRn : FRn bits = fpul
+            self.emit(f"{FR(a[1])} = ((union {{ float f; u32 u; }}){{ .u = c->fpul }}).f;")
+        elif m=='fsqrt':
+            self.emit(f"{FR(a[0])} = __builtin_sqrtf({FR(a[0])});")
         elif m=='sts':
             # sts FPUL,Rn  or sts MACL,Rn
             src=a[0].upper()
             if src=='FPUL': self.emit(f"{R(a[1])} = c->fpul;")
             elif src=='MACL': self.emit(f"{R(a[1])} = c->macl;")
+            elif src=='MACH': self.emit(f"{R(a[1])} = c->mach;")
+            elif src=='PR': self.emit(f"{R(a[1])} = c->pr;")
+            else: raise NotImplementedError(raw)
+        elif m=='stc':
+            # control regs: SR is game-logic-inert (IMASK/BL don't affect gameplay); GBR real.
+            src=a[0].lower()
+            if src=='sr':   self.emit(f"{R(a[1])} = 0x60000100u; /* stc sr (inert) */")
+            elif src=='gbr':self.emit(f"{R(a[1])} = c->gbr;")
+            elif src=='vbr':self.emit(f"{R(a[1])} = 0u; /* stc vbr */")
+            else: raise NotImplementedError(raw)
+        elif m=='ldc':
+            dst=a[1].lower()
+            if dst=='sr':   self.emit(f"/* ldc {a[0]},sr inert no-op */")
+            elif dst=='gbr':self.emit(f"c->gbr = {R(a[0])};")
+            elif dst=='vbr':self.emit(f"/* ldc {a[0]},vbr no-op */")
+            else: raise NotImplementedError(raw)
+        elif m=='stc.l':
+            src=a[0].lower()
+            if src=='sr':   self.emit("c->r[15]-=4; w32(c, c->r[15], 0x60000100u);")
+            elif src=='gbr':self.emit("c->r[15]-=4; w32(c, c->r[15], c->gbr);")
+            elif src=='vbr':self.emit("c->r[15]-=4; w32(c, c->r[15], 0u);")
+            else: raise NotImplementedError(raw)
+        elif m=='ldc.l':
+            dst=a[1].lower()
+            if dst=='sr':   self.emit("c->r[15]+=4; /* ldc.l @r15+,sr inert */")
+            elif dst=='gbr':self.emit("c->gbr = r32(c, c->r[15]); c->r[15]+=4;")
+            elif dst=='vbr':self.emit("c->r[15]+=4;")
             else: raise NotImplementedError(raw)
         elif m=='sts.l':
             # sts.l pr,@-r15  or  sts.l macl,@-r15

@@ -28,9 +28,11 @@ def _default_bsr(target):
     if m: return f"sub_{m.group(1)}(c);"
     raise NotImplementedError(f"bsr target {target}")
 
-def emit_function(insns, data, fname, leaf_call_resolver, bsr_call_resolver=_default_bsr):
+def emit_function(insns, data, fname, leaf_call_resolver, bsr_call_resolver=_default_bsr,
+                  jmp_call_resolver=None):
     """leaf_call_resolver(jsr_reg_or_target) -> C statement to call the leaf.
-    bsr_call_resolver(target_label) -> C statement to call the bsr subroutine."""
+    bsr_call_resolver(target_label) -> C statement to call the bsr subroutine.
+    jmp_call_resolver(jmp_reg) -> C statement to tail-dispatch a jmp @rN target."""
     em=Emitter(data, {})
     body=[]
     def out(s): body.append("    "+s)
@@ -70,6 +72,13 @@ def emit_function(insns, data, fname, leaf_call_resolver, bsr_call_resolver=_def
             elif m=='jsr':
                 # jsr @rN -> resolve via the loaded pool value held in rN.
                 out(leaf_call_resolver(ins.args[0]))
+            elif m=='jmp':
+                # jmp @rN -> TAIL CALL: the target's rts returns to OUR caller, so
+                # dispatch the target then return here (call_addr via jmp_call_resolver).
+                if jmp_call_resolver is None:
+                    raise NotImplementedError("jmp needs jmp_call_resolver: "+ins.raw)
+                out(jmp_call_resolver(ins.args[0]))
+                out("return;")
             elif m=='rts':
                 out("return;")
             else:

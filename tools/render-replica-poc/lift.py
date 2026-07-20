@@ -62,7 +62,7 @@ def parse_asm(text):
         if s.startswith('#align'):
             continue
         if s.startswith('#data'):
-            val=s.split(None,1)[1].strip()
+            val=s.split(None,1)[1].split(';')[0].strip()   # strip inline ; comments
             # could be hex or a bank ref like bank11.loc_..
             if cur_data_label is not None:
                 data[cur_data_label]=val

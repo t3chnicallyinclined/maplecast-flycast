@@ -48,6 +48,10 @@ def normalize_data_pointers(data):
         if m:
             data[k] = '0x' + m.group(1)
             continue
+        m = re.fullmatch(r'loc_([0-9a-fA-F]{8})', v)   # bare loc_<hex> (code ptr or data addr)
+        if m:
+            data[k] = '0x' + m.group(1)
+            continue
         m = re.fullmatch(r'work\.(\S+)', v)
         if m and m.group(1) in syms:
             data[k] = syms[m.group(1)]
