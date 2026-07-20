@@ -55,7 +55,20 @@ def emit_function(insns, data, fname, leaf_call_resolver, bsr_call_resolver=_def
             ds=None
             if delayed and i+1<n:
                 ds=insns[i+1]
-            # emit delay slot FIRST (its effect happens before transfer)
+            # REGISTER-INDIRECT delayed branches (jsr/jmp/braf/bsrf) latch the target
+            # register BEFORE the delay slot runs — and the delay slot may OVERWRITE that
+            # register (e.g. jmp @r3 / mov.l @(r0,r2),r3). Capture the target first.
+            tgtvar=None
+            if m in ('jsr','jmp','braf','bsrf'):
+                reg=ins.args[0].lstrip('@')
+                if m in ('braf','bsrf'):
+                    if ins.pc is None: raise NotImplementedError(m+" needs pc: "+ins.raw)
+                    base=f"0x{ins.pc+4:08x}u + "
+                else:
+                    base=""
+                tgtvar=f"_tgt{i}"
+                out(f"u32 {tgtvar} = {base}{R(reg)};")
+            # emit delay slot (its effect happens before the transfer completes)
             if ds is not None:
                 _emit_one(em, ds, body)
             # now the transfer
@@ -73,24 +86,15 @@ def emit_function(insns, data, fname, leaf_call_resolver, bsr_call_resolver=_def
                 out(f"if(!c->sr_t) goto {ins.args[0].lower()};")
             elif m in ('bt.s','bt/s'):
                 out(f"if(c->sr_t) goto {ins.args[0].lower()};")
-            elif m=='jsr':
-                # jsr @rN -> resolve via the loaded pool value held in rN.
-                out(leaf_call_resolver(ins.args[0]))
-            elif m=='jmp':
-                # jmp @rN -> TAIL CALL: the target's rts returns to OUR caller, so
-                # dispatch the target then return here (call_addr via jmp_call_resolver).
+            elif m=='jsr' or m=='bsrf':
+                # jsr @rN / bsrf rN -> call the latched target (call, no return).
+                out(leaf_call_resolver(tgtvar))
+            elif m=='jmp' or m=='braf':
+                # jmp @rN / braf rN -> TAIL CALL to the latched target, then return.
                 if jmp_call_resolver is None:
-                    raise NotImplementedError("jmp needs jmp_call_resolver: "+ins.raw)
-                out(jmp_call_resolver(ins.args[0]))
+                    raise NotImplementedError(m+" needs jmp_call_resolver: "+ins.raw)
+                out(jmp_call_resolver(tgtvar))
                 out("return;")
-            elif m=='braf':
-                # braf rN: computed jump, target = (PC+4)+rN (a block in this fn). Dispatch
-                # to it as a tail-call; label-every-instruction makes any target re-enterable.
-                if ins.pc is None: raise NotImplementedError("braf needs pc: "+ins.raw)
-                out(f"call_addr(c, 0x{ins.pc+4:08x}u + {R(ins.args[0])}); return;")
-            elif m=='bsrf':
-                if ins.pc is None: raise NotImplementedError("bsrf needs pc: "+ins.raw)
-                out(f"call_addr(c, 0x{ins.pc+4:08x}u + {R(ins.args[0])});")
             elif m=='rts':
                 out("return;")
             else:

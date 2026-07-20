@@ -33,9 +33,10 @@ def normalize_spl_text(text, reloc):
     return re.sub(r'\b(BEG_|FUN_|LAB_|DAT_|PTR_)([0-9a-fA-F]+)\b',
                   lambda m: f"loc_{int(m.group(2),16)+reloc:08x}", text)
 
-def reg_of(a): return a.lstrip('@').strip()
-def jsr_res(a): return f"call_addr(c, {R(reg_of(a))});"
-def jmp_res(a): return f"call_addr(c, {R(reg_of(a))});"
+# resolvers now receive the LATCHED target expression (a C var captured before the
+# delay slot), not the raw @rN operand.
+def jsr_res(e): return f"call_addr(c, {e});"
+def jmp_res(e): return f"call_addr(c, {e});"
 def bsr_res(target):
     # bsr loc_X -> route through the dispatch table too (constant addr), so a not-yet
     # transpiled target is a no-op unknown_call, never a link error.
@@ -142,7 +143,7 @@ def main():
         f.write('void call_addr(Sh4Ctx*c,u32 a){\n if(mc_call_guard()) return;\n mc_curfn=a; mc_push(a);\n switch(a){\n')
         for ba, entry in sorted(block_of.items()):
             f.write(f'  case 0x{ba:08x}u: fn_{entry:08x}(c, 0x{ba:08x}u); break;\n')
-        f.write('  default: mc_unknown_call(a); break;\n }\n mc_pop();\n}\n')
+        f.write('  default: mc_unknown_call(a); { extern void mc_unk_regs(u32*); mc_unk_regs(c->r); } break;\n }\n mc_pop();\n}\n')
         f.write(f'\nvoid tick_entry(Sh4Ctx*c){{ fn_{ENTRY:08x}(c, 0x{ENTRY:08x}u); }}\n')
 
     print(f"worklist: {len(funcs)} | transpiled OK: {len(ok)} | FAILED: {len(fail)}")

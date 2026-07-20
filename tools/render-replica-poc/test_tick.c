@@ -39,8 +39,15 @@ void mc_wtrap(u32 a) {
     }
 }
 
+static u32 g_unkregs[16]; static int g_haveunkregs = 0;
+void mc_unk_regs(u32 *r) { if (!g_haveunkregs) { for (int i = 0; i < 16; i++) g_unkregs[i] = r[i]; g_haveunkregs = 1; } }
+static u32 g_usnap[256]; static int g_usnapn = -1; static u32 g_usnaptgt = 0;
 void mc_unknown_call(u32 a) {
-    if (!g_unknown) g_first_unknown = a;
+    if (!g_unknown) {
+        g_first_unknown = a;
+        g_usnaptgt = a; g_usnapn = g_sp < 256 ? g_sp : 256;   /* chain to the first garbage call */
+        for (int i = 0; i < g_usnapn; i++) g_usnap[i] = g_stack[i];
+    }
     g_unknown++;
     int seen = 0; for (int i = 0; i < g_nunk; i++) if (g_unkset[i] == a) { seen = 1; break; }
     if (!seen && g_nunk < 4096) { g_unkset[g_nunk++] = a; g_unknown_distinct++; }
@@ -86,5 +93,14 @@ __attribute__((destructor)) static void _trapdump(void){
     printf("  call chain (outer->inner):");
     for(int i=0;i<g_snapn;i++) printf(" %08x", g_snap[i]);
     printf("\n");
+  }
+  if(g_usnapn>=0){
+    printf("first UNKNOWN call target=0x%08X, chain (outer->inner):", g_usnaptgt);
+    for(int i=0;i<g_usnapn;i++) printf(" %08x", g_usnap[i]);
+    printf("\n");
+  }
+  if(g_haveunkregs){
+    printf("  regs at 1st unknown: r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x\n",
+      g_unkregs[0],g_unkregs[1],g_unkregs[2],g_unkregs[3],g_unkregs[4],g_unkregs[5],g_unkregs[6]);
   }
 }
