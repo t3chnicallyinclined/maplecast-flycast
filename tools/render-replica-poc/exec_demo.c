@@ -15,6 +15,7 @@ void rng_e730(Sh4Ctx *c);
 void accum_3015c(Sh4Ctx *c);
 void nrand_e750(Sh4Ctx *c);
 void btnmask_2d1c0(Sh4Ctx *c);
+void knockback_4f974(Sh4Ctx *c);
 /* nrand_e750 bsr's the RNG -> link the sub_<hex> convention to it */
 void sub_8c11e730(Sh4Ctx *c) { rng_e730(c); }
 
@@ -44,6 +45,15 @@ EXPORT(run_rng)     u32 run_rng(void)     { reset_regs(); rng_e730(&C);     retu
 EXPORT(run_accum)   void run_accum(void)  { reset_regs(); accum_3015c(&C);              }
 EXPORT(run_btnmask) u32 run_btnmask(void) { reset_regs(); btnmask_2d1c0(&C); return C.r[0]; }
 EXPORT(run_nrand)   float run_nrand(void) { reset_regs(); nrand_e750(&C);   return C.fr[0]; }
+
+/* symmetric pos_x knockback: r4=P1 char, r5=P2 char, r6=2-float vector, fr4=scalar.
+ * The page pokes the two chars' pos_x/facing + the vector + 0x8c28963c beforehand. */
+EXPORT(run_knockback) void run_knockback(float mag) {
+    reset_regs();
+    C.r[4] = 0x8C268340u; C.r[5] = 0x8C2688E4u; C.r[6] = 0x8CFD0000u;
+    C.fr[4] = mag;
+    knockback_4f974(&C);
+}
 
 EXPORT(get_r)  u32   get_r(int i)  { return C.r[i & 15]; }
 EXPORT(get_fr) float get_fr(int i) { return C.fr[i & 15]; }
