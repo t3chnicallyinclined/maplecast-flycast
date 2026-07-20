@@ -93,9 +93,24 @@ int main(int argc, char **argv) {
     }
     printf("--- %ld game-state byte(s) in %ld range(s); %ld stack-scratch byte(s) ---\n",
            game_bytes, ranges, stack_bytes);
-    if (truthpath)
+    if (truthpath) {
         printf("--- vs %s: %ld range(s) MATCH, %ld DIFF -> %s ---\n", truthpath,
-               matched, mismatched, mismatched ? "NOT byte-exact" : "BYTE-EXACT vs flycast");
+               matched, mismatched, mismatched ? "NOT byte-exact" : "write-set BYTE-EXACT vs flycast");
+        /* STRONG check: full game-region diff catches MISSING writes too (not just wrong
+         * ones). Exclude the stack scratch region and the 3 known TCNT0 timing values
+         * (0x8C2D5748 / 0x8C32DBAC / 0x8C268250) — proven non-cascading, masked by design. */
+        long fdiff = 0; u32 first = 0;
+        for (u32 off = 0; off < 0x01000000u; off++) {
+            if (off >= 0x00FE0000u) continue;                 /* stack scratch */
+            if (off >= 0x002D5748u && off <= 0x002D574Bu) continue;
+            if (off >= 0x0032DBACu && off <= 0x0032DBAFu) continue;
+            if (off == 0x00268250u) continue;
+            if (ram[off] != truth[off]) { if (!fdiff) first = 0x8C000000u | off; fdiff++; }
+        }
+        printf("--- full game-region diff (excl stack+timers): %ld byte(s) differ -> %s ---\n",
+               fdiff, fdiff ? "MISMATCH" : "FULLY BYTE-EXACT vs flycast");
+        if (fdiff) printf("    first diff @0x%08X\n", first);
+    }
     printf("r0=0x%08X r1=0x%08X r2=0x%08X r3=0x%08X macl=0x%08X\n",
            c.r[0], c.r[1], c.r[2], c.r[3], c.macl);
     return 0;
