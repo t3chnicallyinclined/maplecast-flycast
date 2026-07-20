@@ -36,14 +36,23 @@ void LEAF_FN(Sh4Ctx *c);
 
 static u8 ram[RAM_SIZE];
 static u8 before[RAM_SIZE];
+static u8 truth[RAM_SIZE];
+
+static int load(const char *path, u8 *dst) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { printf("cannot open %s\n", path); return 0; }
+    size_t n = fread(dst, 1, RAM_SIZE, f);
+    fclose(f);
+    if (n != RAM_SIZE) { printf("short read %zu from %s\n", n, path); return 0; }
+    return 1;
+}
 
 int main(int argc, char **argv) {
     const char *snap = (argc > 1) ? argv[1] : "_ram_f90.bin";
-    FILE *f = fopen(snap, "rb");
-    if (!f) { printf("cannot open snapshot %s\n", snap); return 2; }
-    size_t n = fread(ram, 1, RAM_SIZE, f);
-    fclose(f);
-    if (n != RAM_SIZE) { printf("short read %zu (want %u)\n", n, RAM_SIZE); return 2; }
+    /* optional next-frame snapshot = flycast ground truth for once-per-tick leaves */
+    const char *truthpath = (argc > 2) ? argv[2] : NULL;
+    if (!load(snap, ram)) return 2;
+    if (truthpath && !load(truthpath, truth)) return 2;
     memcpy(before, ram, RAM_SIZE);
 
     Sh4Ctx c;
@@ -55,7 +64,7 @@ int main(int argc, char **argv) {
     LEAF_FN(&c);
 
     /* enumerate the write bitmap -> merged ranges */
-    long game_bytes = 0, stack_bytes = 0, ranges = 0;
+    long game_bytes = 0, stack_bytes = 0, ranges = 0, matched = 0, mismatched = 0;
     u32 i = 0;
     while (i < 0x01000000u) {
         if (!(mc_writebmp[i>>3] & (1u << (i & 7)))) { i++; continue; }
@@ -73,10 +82,20 @@ int main(int argc, char **argv) {
         for (u32 k = 0; k < len && k < 16; k++) printf("%02X", before[start + k]);
         printf("  after ");
         for (u32 k = 0; k < len && k < 16; k++) printf("%02X", ram[start + k]);
+        if (truthpath) {
+            int ok = (memcmp(ram + start, truth + start, len) == 0);
+            printf("  truth ");
+            for (u32 k = 0; k < len && k < 16; k++) printf("%02X", truth[start + k]);
+            printf("  %s", ok ? "MATCH" : "*** DIFF ***");
+            if (ok) matched++; else mismatched++;
+        }
         printf("\n");
     }
     printf("--- %ld game-state byte(s) in %ld range(s); %ld stack-scratch byte(s) ---\n",
            game_bytes, ranges, stack_bytes);
+    if (truthpath)
+        printf("--- vs %s: %ld range(s) MATCH, %ld DIFF -> %s ---\n", truthpath,
+               matched, mismatched, mismatched ? "NOT byte-exact" : "BYTE-EXACT vs flycast");
     printf("r0=0x%08X r1=0x%08X r2=0x%08X r3=0x%08X macl=0x%08X\n",
            c.r[0], c.r[1], c.r[2], c.r[3], c.macl);
     return 0;
