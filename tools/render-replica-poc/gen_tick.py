@@ -147,7 +147,9 @@ def main():
             f.write(body)
             f.write('\n}\n')
         f.write('\nextern u32 mc_curfn; extern void mc_push(u32); extern void mc_pop(void);\n')
-        f.write('void call_addr(Sh4Ctx*c,u32 a){\n if(mc_call_guard()) return;\n mc_curfn=a; mc_push(a);\n switch(a){\n')
+        f.write('#ifdef MC_DHOOK\nextern void mc_dispatch_hook(u32,Sh4Ctx*);\n#endif\n')
+        f.write('void call_addr(Sh4Ctx*c,u32 a){\n if(mc_call_guard()) return;\n mc_curfn=a; mc_push(a);\n')
+        f.write('#ifdef MC_DHOOK\n mc_dispatch_hook(a,c);\n#endif\n switch(a){\n')
         for ba, entry in sorted(block_of.items()):
             f.write(f'  case 0x{ba:08x}u: fn_{entry:08x}(c, 0x{ba:08x}u); break;\n')
         f.write('  default: mc_unknown_call(a); { extern void mc_unk_regs(u32*); mc_unk_regs(c->r); } break;\n }\n mc_pop();\n}\n')

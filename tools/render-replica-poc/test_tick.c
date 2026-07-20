@@ -24,13 +24,17 @@ int mc_call_guard(void) { return (++g_calls > CALL_LIMIT) ? 1 : 0; }
 /* write-trap + shadow call stack to find the memcpy's caller chain */
 u32 mc_curfn = 0;
 static u32 g_stack[256]; static int g_sp = 0;
-void mc_push(u32 a) { if (g_sp < 256) g_stack[g_sp] = a; g_sp++; }
+static u32 g_disp[400000]; static int g_ndisp = 0;   /* every dispatch, for CF-divergence diff */
+void mc_push(u32 a) {
+    if (g_sp < 256) g_stack[g_sp] = a; g_sp++;
+    if (g_ndisp < 400000) g_disp[g_ndisp++] = a;
+}
 void mc_pop(void) { if (g_sp > 0) g_sp--; }
 static u32 g_snap[256]; static int g_snapn = -1; static u32 g_snapraw = 0;
 static long g_trapcnt = 0;
 void mc_wtrap(u32 a) {
     u32 off = a & 0x00FFFFFFu;
-    if (off >= 0x440000u && off < 0x460000u) {
+    if (off >= 0x2d6a00u && off < 0x2d6c80u) {
         g_trapcnt++;
         if (g_snapn < 0) {                            /* snapshot the call chain on first bad write */
             g_snapraw = a; g_snapn = g_sp < 256 ? g_sp : 256;
@@ -41,6 +45,15 @@ void mc_wtrap(u32 a) {
 
 static u32 g_unkregs[16]; static int g_haveunkregs = 0;
 void mc_unk_regs(u32 *r) { if (!g_haveunkregs) { for (int i = 0; i < 16; i++) g_unkregs[i] = r[i]; g_haveunkregs = 1; } }
+
+/* capture xf[]/fr[]/r4 at the first call to the back-bank matrix save (0x8c11fb80 -> 0x2D6AD8) */
+static int g_havesave = 0; static float g_xf[16], g_fr[16]; static u32 g_saver4, g_savefpscr;
+void mc_dispatch_hook(u32 a, Sh4Ctx *c) {
+    if (a == 0x8c11fb80u && !g_havesave) {
+        for (int i = 0; i < 16; i++) { g_xf[i] = c->xf[i]; g_fr[i] = c->fr[i]; }
+        g_saver4 = c->r[4]; g_savefpscr = c->fpscr; g_havesave = 1;
+    }
+}
 static u32 g_usnap[256]; static int g_usnapn = -1; static u32 g_usnaptgt = 0;
 void mc_unknown_call(u32 a) {
     if (!g_unknown) {
@@ -67,6 +80,8 @@ int main(int argc, char **argv) {
     Sh4Ctx c; memset(&c, 0, sizeof c); c.ram = ram; c.r[15] = 0x8CFF0000u;
     tick_entry(&c);
     { FILE *of = fopen("executor_out.bin", "wb"); if (of) { fwrite(ram, 1, RAM_SIZE, of); fclose(of); } }
+    { FILE *df = fopen("_exec_disp.bin", "wb"); if (df) { fwrite(g_disp, 4, g_ndisp, df); fclose(df);
+        printf("wrote _exec_disp.bin (%d dispatches)\n", g_ndisp); } }
 
     printf("tick %s. calls=%ld unknown_calls=%ld (distinct=%ld, first=0x%08X)\n",
            g_calls > CALL_LIMIT ? "HIT WATCHDOG (looping — missing fn breaks a loop)" : "ran to completion",
@@ -102,5 +117,11 @@ __attribute__((destructor)) static void _trapdump(void){
   if(g_haveunkregs){
     printf("  regs at 1st unknown: r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x\n",
       g_unkregs[0],g_unkregs[1],g_unkregs[2],g_unkregs[3],g_unkregs[4],g_unkregs[5],g_unkregs[6]);
+  }
+  if(g_havesave){
+    printf("AT 8c11fb80 save: r4(dest)=0x%08X fpscr=0x%08X (FR=%d SZ=%d)\n",
+      g_saver4, g_savefpscr, (g_savefpscr>>21)&1, (g_savefpscr>>20)&1);
+    printf("  xf[]:"); for(int i=0;i<16;i++) printf(" %.3g", g_xf[i]); printf("\n");
+    printf("  fr[]:"); for(int i=0;i<16;i++) printf(" %.3g", g_fr[i]); printf("\n");
   }
 }
