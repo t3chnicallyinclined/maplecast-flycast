@@ -274,12 +274,15 @@ int main(int argc, char** argv) {
     bool dropChars = false;   // negative control: also zero char structs/objpool (a NEEDED region)
     bool dropScratch = false; // GATING TEST: also zero the render-scratch the driver rebuilds
     bool minCtx = false;      // zero r0..r14 (keep r15/pc/pr/sr/fpscr) to test reg-invariance
+    bool leafMode = false;    // GAME-TICK LEAF ORACLE: force pr=retPc sentinel + r15=spEntry
+                              // so a self-contained leaf's rts returns to the stop sentinel.
     const char* ctxOverride = nullptr; // load entry ctx from a DIFFERENT seed than the RAM
     for (int i = 1; i < argc; i++) {
         if (!std::strcmp(argv[i], "--no-isolate")) doIsolate = false;
         if (!std::strcmp(argv[i], "--drop-chars")) dropChars = true;
         if (!std::strcmp(argv[i], "--drop-scratch")) dropScratch = true;
         if (!std::strcmp(argv[i], "--min-ctx"))    minCtx = true;
+        if (!std::strcmp(argv[i], "--leaf"))       leafMode = true;
         if (!std::strncmp(argv[i], "--ctx-override=", 15)) ctxOverride = argv[i] + 15;
     }
 
@@ -413,6 +416,16 @@ int main(int argc, char** argv) {
     Sh4cntx.pc = entryPC;
     Sh4cntx.doSqWrite = sqCapture;
     Sh4cntx.CpuRunning = 0;
+    if (leafMode) {
+        // A self-contained game-tick leaf ends in `rts` (pc <- pr). Point pr at the
+        // stop sentinel = retPc (header sets retPc, e.g. 0x8C000000 -> g_retPc=0), and
+        // set r15 = spEntry so the onPc guard (r15 >= spEntry) matches on return but not
+        // mid-function. entryPC must differ from retPc so entry doesn't stop early.
+        Sh4cntx.pr = retPc;
+        Sh4cntx.r[15] = spEntry;
+        std::printf("[run] --leaf: pr=0x%08X r15=0x%08X (return sentinel retPc=0x%08X)\n",
+                    Sh4cntx.pr, Sh4cntx.r[15], g_retPc);
+    }
 
     std::printf("[run] entry pc=0x%08X sr=0x%08X fpscr=0x%08X r15=0x%08X pr=0x%08X\n",
                 Sh4cntx.pc, Sh4cntx.sr.getFull(), Sh4cntx.fpscr.full, Sh4cntx.r[15], Sh4cntx.pr);
@@ -469,6 +482,26 @@ int main(int argc, char** argv) {
             for (auto& c : g_ta) std::fwrite(c.data, 1, 32, tf);
             std::fclose(tf);
             std::printf("wrote ta_out.bin (%zu bytes)\n", g_ta.size() * 32);
+        }
+    }
+
+    // ---- GAME-TICK LEAF ORACLE: dump final ctx + full RAM = flycast ground truth ----
+    // The transpiled executor's write-set / returned r0 is diffed against these.
+    if (g_reached) {
+        FILE* cf2 = std::fopen("oracle_ctx.txt", "w");
+        if (cf2) {
+            for (int i = 0; i < 16; i++) std::fprintf(cf2, "r%d=0x%08X\n", i, Sh4cntx.r[i]);
+            for (int i = 0; i < 16; i++) std::fprintf(cf2, "fr%d=0x%08X\n", i, Sh4cntx.fr_hex(i));
+            std::fprintf(cf2, "macl=0x%08X mach=0x%08X pr=0x%08X fpul=0x%08X\n",
+                         Sh4cntx.mac.l, Sh4cntx.mac.h, Sh4cntx.pr, Sh4cntx.fpul);
+            std::fclose(cf2);
+            std::printf("wrote oracle_ctx.txt (final r0=0x%08X)\n", Sh4cntx.r[0]);
+        }
+        FILE* mf2 = std::fopen("oracle_ram_out.bin", "wb");
+        if (mf2) {
+            std::fwrite(g_ram, 1, RAM_BYTES, mf2);
+            std::fclose(mf2);
+            std::printf("wrote oracle_ram_out.bin (%u bytes)\n", RAM_BYTES);
         }
     }
     return g_reached ? 0 : (g_faulted ? 3 : (g_watchdog ? 4 : 5));
