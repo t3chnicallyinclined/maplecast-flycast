@@ -18,14 +18,39 @@ from lift import parse_asm, extract_block, slurp_function
 from emit_func import emit_function
 
 
+WORK_ASM = r"C:\Users\trist\projects\_marv_re\memory\work.asm"
+_work_syms = None
+
+def load_work_symbols():
+    """Parse work.asm '#symbol <name> <hex>' lines -> {name: '0x<hex>'}."""
+    global _work_syms
+    if _work_syms is None:
+        _work_syms = {}
+        try:
+            for line in open(WORK_ASM, errors='replace'):
+                m = re.match(r'#symbol\s+(\S+)\s+(0x[0-9a-fA-F]+|\d+)', line)
+                if m:
+                    val = int(m.group(2), 16) if m.group(2).lower().startswith('0x') else int(m.group(2))
+                    _work_syms[m.group(1)] = f'0x{val:x}'
+        except FileNotFoundError:
+            pass
+    return _work_syms
+
 def normalize_data_pointers(data):
-    """marvelous2 label == address: a #data of the form bankNN.loc_<hex> that is a
-    DATA pointer (e.g. the RNG seed var) denotes the numeric address 0x<hex>. Resolve
-    it so codegen emits the address instead of leaf-tagging it as a code pointer."""
+    """Resolve #data pool references to numeric constants so codegen emits addresses
+    instead of leaf-tagging them as code pointers:
+      - bankNN.loc_<hex>  -> 0x<hex>  (marvelous2 label == address; e.g. RNG seed var)
+      - work.<Name>       -> the #symbol address from work.asm, e.g.
+                             work.GameGlobalPointer -> 0x8c26823c"""
+    syms = load_work_symbols()
     for k, v in list(data.items()):
         m = re.fullmatch(r'bank\d+\.loc_([0-9a-fA-F]{8})', v)
         if m:
             data[k] = '0x' + m.group(1)
+            continue
+        m = re.fullmatch(r'work\.(\S+)', v)
+        if m and m.group(1) in syms:
+            data[k] = syms[m.group(1)]
 
 
 def main():
