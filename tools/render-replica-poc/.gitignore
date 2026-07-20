@@ -89,3 +89,13 @@ _rec_syntax.cpp
 # projectile geometry-proof artifacts (ROM-derived images)
 _proj_geom.*
 *.ppm
+
+# transpiled MVC2 game code (derived from copyrighted disasm) — regenerate locally, never commit
+gen_*.c
+exec_demo.wasm
+_exec_demo.b64
+_html_b64.txt
+_frame_data.json
+_ram_f9*.bin
+_ram_f90_s5*.bin
+oracle_*.bin
