@@ -44,6 +44,10 @@ def emit_function(insns, data, fname, leaf_call_resolver, bsr_call_resolver=_def
         ins=insns[i]
         if ins.label:
             outl(f"{ins.label}:; /* bb */")
+        elif ins.pc is not None:
+            # label EVERY instruction so computed jumps / jump-tables to arbitrary
+            # (unlabeled) addresses are re-enterable via the function entry-switch.
+            outl(f"loc_{ins.pc:08x}:;")
         m=ins.mnem
         if m in BRANCHES:
             # collect the (single) delay-slot insn if delayed
@@ -79,6 +83,14 @@ def emit_function(insns, data, fname, leaf_call_resolver, bsr_call_resolver=_def
                     raise NotImplementedError("jmp needs jmp_call_resolver: "+ins.raw)
                 out(jmp_call_resolver(ins.args[0]))
                 out("return;")
+            elif m=='braf':
+                # braf rN: computed jump, target = (PC+4)+rN (a block in this fn). Dispatch
+                # to it as a tail-call; label-every-instruction makes any target re-enterable.
+                if ins.pc is None: raise NotImplementedError("braf needs pc: "+ins.raw)
+                out(f"call_addr(c, 0x{ins.pc+4:08x}u + {R(ins.args[0])}); return;")
+            elif m=='bsrf':
+                if ins.pc is None: raise NotImplementedError("bsrf needs pc: "+ins.raw)
+                out(f"call_addr(c, 0x{ins.pc+4:08x}u + {R(ins.args[0])});")
             elif m=='rts':
                 out("return;")
             else:

@@ -89,7 +89,14 @@ class Emitter:
             # special "POOLADDR|<const idx>". Simplest: stash the float bits.
             locref=re.search(r'@\(([^,]+),', a[0]).group(1)
             val=self.pool_const(locref)
-            self.emit(f"c->r[0] = 0xF0000000u; c->_pool = 0x{val:08x}u; /* mova {locref} */")
+            if isinstance(val, str) or not isinstance(val, int):
+                # jump-table / unresolvable-value pool: r0 = the pool's real guest ADDRESS
+                # so @(r0,rN) or @r0 dereferences read the table from RAM (bank data resident).
+                try: addr=int(str(locref)[4:],16)
+                except ValueError: addr=0
+                self.emit(f"c->r[0] = 0x{addr:08x}u; c->_pool = 0x{addr:08x}u; /* mova {locref} table-addr */")
+            else:
+                self.emit(f"c->r[0] = 0xF0000000u; c->_pool = 0x{val:08x}u; /* mova {locref} */")
         # ---------------- fmov family ----------------
         elif m=='fmov' or m=='fmov.s':
             self._fmov(ins)
@@ -319,6 +326,12 @@ class Emitter:
                 self.emit(f"{R(dst)} ^= 0x{imm(a[0]):x}u;")
         elif m=='not':
             self.emit(f"{R(a[1])} = ~{R(a[0])};")
+        elif m=='swap.w':
+            self.emit(f"{R(a[1])} = (({R(a[0])} << 16) | ({R(a[0])} >> 16));")
+        elif m=='swap.b':
+            self.emit(f"{R(a[1])} = ({R(a[0])} & 0xFFFF0000u) | (({R(a[0])} & 0xFFu) << 8) | (({R(a[0])} >> 8) & 0xFFu);")
+        elif m in ('ocbi','ocbp','ocbwb'):
+            self.emit(f"; /* {m} @rN: cache op, no-op in flat model */")
         elif m=='pref':
             self.emit("; /* pref @rN: cache prefetch, no-op in flat model */")
         elif m=='cmp/hs':

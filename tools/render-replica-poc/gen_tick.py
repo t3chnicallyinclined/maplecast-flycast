@@ -15,9 +15,23 @@ from emit_func import emit_function
 from codegen import R
 from gen_one import normalize_data_pointers
 
-FUNCLIST = r"C:/Users/trist/AppData/Local/Temp/claude/c--Users-trist-projects-maplecast-flycast/ffa8329c-44cf-4fbe-a9d0-0eebc4f87c12/scratchpad/funclist.txt"
+_SCR = r"C:/Users/trist/AppData/Local/Temp/claude/c--Users-trist-projects-maplecast-flycast/ffa8329c-44cf-4fbe-a9d0-0eebc4f87c12/scratchpad"
+FUNCLIST     = _SCR + "/funclist.txt"
+SPL_FUNCLIST = _SCR + "/spl_funclist.txt"
 BANKDIR  = r"C:/Users/trist/projects/_marv_re/build"
+SPLDIR   = r"C:/Users/trist/projects/_marv_re/char_prg/code"
 ENTRY    = 0x8c0358be
+
+def spl_reloc(bank):
+    # this snapshot: Storm S_PL2A in slot A (reloc 0), Cable S_PL17 in slot B (+0x8000)
+    return 0x8000 if 'S_PL17' in bank else 0
+
+def normalize_spl_text(text, reloc):
+    """Rewrite SPL labels BEG_/FUN_/LAB_/DAT_/PTR_<hex> -> loc_<hex+reloc> (defs, operands,
+    and internal #data pointers), leaving bank imports loc_8c.. and raw 0x.. untouched, so
+    the existing bank pipeline handles the SPL unchanged."""
+    return re.sub(r'\b(BEG_|FUN_|LAB_|DAT_|PTR_)([0-9a-fA-F]+)\b',
+                  lambda m: f"loc_{int(m.group(2),16)+reloc:08x}", text)
 
 def reg_of(a): return a.lstrip('@').strip()
 def jsr_res(a): return f"call_addr(c, {R(reg_of(a))});"
@@ -27,21 +41,36 @@ def bsr_res(target):
     # transpiled target is a no-op unknown_call, never a link error.
     m = re.fullmatch(r'loc_([0-9a-fA-F]+)', target.lower())
     if m: return f"call_addr(c, 0x{m.group(1)}u);"
-    raise NotImplementedError(f"bsr target {target}")
+    return f"call_addr(c, 0u); /* unresolved named bsr {target} */"
+
+# functions the trace reaches (via computed jump) that the ;==== scanners excluded but
+# which transpile fine — e.g. loc_8c031094 is a bra-jump-table, not a braf.
+EXTRA_FUNCS = [(0x8c031094, 'bank03.asm', 2411, 2492, '-')]
 
 def parse_worklist():
-    funcs = []
-    for line in open(FUNCLIST, encoding='utf-8'):
-        line = line.strip()
-        if not line or line.startswith('#'): continue
-        m = re.match(r'(loc_[0-9a-fA-F]+)\s+(\S+)\s+body_lines=(\d+)-(\d+)\s+data=(\S+)', line)
-        if not m: continue
-        funcs.append((int(m.group(1)[4:], 16), m.group(2), int(m.group(3)), int(m.group(4)), m.group(5)))
+    funcs = list(EXTRA_FUNCS)
+    seen = {a for a, _, _, _, _ in funcs}
+    for path in (FUNCLIST, SPL_FUNCLIST):
+        try: lines = open(path, encoding='utf-8').readlines()
+        except FileNotFoundError: continue
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('#'): continue
+            m = re.match(r'(loc_[0-9a-fA-F]+)\s+(\S+)\s+body_lines=(\d+)-(\d+)\s+data=(\S+)', line)
+            if not m: continue
+            addr = int(m.group(1)[4:], 16)
+            if addr in seen: continue          # dedup (EXTRA_FUNCS / cross-list overlap)
+            seen.add(addr)
+            funcs.append((addr, m.group(2), int(m.group(3)), int(m.group(4)), m.group(5)))
     return funcs
 
 _txt = {}
 def gettext(bank):
-    if bank not in _txt: _txt[bank] = slurp_function(BANKDIR + '/' + bank, None)
+    if bank not in _txt:
+        if bank.startswith('S_PL'):
+            _txt[bank] = normalize_spl_text(slurp_function(SPLDIR + '/' + bank, None), spl_reloc(bank))
+        else:
+            _txt[bank] = slurp_function(BANKDIR + '/' + bank, None)
     return _txt[bank]
 
 _globalpools = None
@@ -79,26 +108,42 @@ def main():
             # function entry -> route through the dispatch table then return.
             defined = set(re.findall(r'^(loc_[0-9a-f]+):', body, re.M))
             def _fixgoto(m):
-                lbl = m.group(1)
-                return m.group(0) if lbl in defined else f"{{ call_addr(c, 0x{lbl[4:]}u); return; }}"
-            body = re.sub(r'goto (loc_[0-9a-f]+);', _fixgoto, body)
-            ok.append((addr, fn, body))
+                tgt = m.group(1)
+                if tgt in defined: return m.group(0)   # local label: keep the goto
+                hx = re.search(r'loc_([0-9a-fA-F]+)', tgt)   # loc_<hex> or bankNN.loc_<hex>
+                if hx: return f"{{ call_addr(c, 0x{hx.group(1)}u); return; }}"
+                return m.group(0)
+            body = re.sub(r'goto ([A-Za-z0-9_.]+);', _fixgoto, body)
+            blocks = sorted(int(b[4:], 16) for b in defined)   # every basic-block addr in this fn
+            ok.append((addr, fn, body, blocks))
         except Exception as e:
             fail.append((addr, bank, f"{first}-{last}", type(e).__name__, str(e)[:90]))
 
-    okaddrs = {a for a, _, _ in ok}
+    # map EVERY basic-block address (entry + mid-function) -> its enclosing function entry,
+    # so computed jumps/jump-tables that land inside a function dispatch correctly (re-enter
+    # the function at that block via the entry-switch). First function claiming a block wins.
+    block_of = {}
+    for addr, fn, body, blocks in ok:
+        for ba in blocks:
+            block_of.setdefault(ba, addr)
     with open('gen_tick_all.c', 'w') as f:
         f.write('#include "sh4ctx.h"\n')
-        f.write('void mc_unknown_call(u32 a);\n')
+        f.write('void mc_unknown_call(u32 a);\nextern int mc_call_guard(void);\n')
         f.write('void call_addr(Sh4Ctx*c,u32 a);\n')
-        for a, fn, _ in ok: f.write(f'void {fn}(Sh4Ctx*c);\n')
-        for a, fn, body in ok:
-            f.write(f'\nvoid {fn}(Sh4Ctx*c){{\n{body}\n}}\n')
-        f.write('\nextern int mc_call_guard(void);\n')
-        f.write('void call_addr(Sh4Ctx*c,u32 a){\n if(mc_call_guard()) return;\n switch(a){\n')
-        for a, fn, _ in ok: f.write(f'  case 0x{a:08x}u: {fn}(c); return;\n')
+        for addr, fn, body, blocks in ok: f.write(f'void fn_{addr:08x}(Sh4Ctx*c,u32 _e);\n')
+        for addr, fn, body, blocks in ok:
+            f.write(f'\nvoid fn_{addr:08x}(Sh4Ctx*c,u32 _e){{\n switch(_e){{\n')
+            for ba in blocks:
+                f.write(f'  case 0x{ba:08x}u: goto loc_{ba:08x};\n')
+            f.write('  default: break;\n }\n')
+            f.write(body)
+            f.write('\n}\n')
+        f.write('\nextern u32 mc_curfn;\n')
+        f.write('void call_addr(Sh4Ctx*c,u32 a){\n if(mc_call_guard()) return;\n mc_curfn=a;\n switch(a){\n')
+        for ba, entry in sorted(block_of.items()):
+            f.write(f'  case 0x{ba:08x}u: fn_{entry:08x}(c, 0x{ba:08x}u); return;\n')
         f.write('  default: mc_unknown_call(a); return;\n }\n}\n')
-        f.write(f'\nvoid tick_entry(Sh4Ctx*c){{ sub_{ENTRY:08x}(c); }}\n')
+        f.write(f'\nvoid tick_entry(Sh4Ctx*c){{ fn_{ENTRY:08x}(c, 0x{ENTRY:08x}u); }}\n')
 
     print(f"worklist: {len(funcs)} | transpiled OK: {len(ok)} | FAILED: {len(fail)}")
     if fail:

@@ -25,9 +25,9 @@ import re, sys
 
 # ---- a parsed instruction --------------------------------------------------
 class Insn:
-    __slots__=('label','mnem','args','raw','is_delay')
+    __slots__=('label','mnem','args','raw','is_delay','pc')
     def __init__(self, mnem, args, raw):
-        self.mnem=mnem; self.args=args; self.raw=raw; self.label=None; self.is_delay=False
+        self.mnem=mnem; self.args=args; self.raw=raw; self.label=None; self.is_delay=False; self.pc=None
     def __repr__(self): return f"{self.label or '':>16} {self.mnem} {','.join(self.args)}"
 
 def split_args(argstr):
@@ -42,22 +42,48 @@ def split_args(argstr):
     if cur.strip(): out.append(cur.strip())
     return out
 
+def _rewrite_numeric_pcpool(mnem, args, pc):
+    """Rewrite raw numeric PC-relative pools `@(0xNN,PC)` into the named `@(loc_TARGET,pc)`
+    form so codegen's existing named-pool path resolves them. 0xNN is the already-multiplied
+    BYTE offset (verified vs disasm): mov.l/mova base = (PC&~3)+4; mov.w base = PC+4."""
+    if pc is None:
+        return args
+    out=[]
+    for a in args:
+        m=re.fullmatch(r'@\((0x[0-9a-fA-F]+),(PC|pc)\)', a)
+        if m and mnem in ('mov.l','mov.w','mova'):
+            off=int(m.group(1),16)
+            base=((pc & ~3)+4) if mnem in ('mov.l','mova') else (pc+4)
+            out.append(f'@(loc_{base+off:08x},pc)')
+        else:
+            out.append(a)
+    return out
+
 def parse_asm(text):
     """Parse a function body. Returns (insns[], data{label:intval}, order[])."""
     insns=[]; data={}; pending_label=None
     lines=text.splitlines()
     i=0
     cur_data_label=None
+    cur_pc=None       # running PC for numeric @(0xNN,PC) resolution; re-anchored at each loc_ label
+    pending_repeat=1  # '#repeat N' unrolls the next instruction N times
     while i < len(lines):
         ln=lines[i].rstrip('\n'); i+=1
         s=ln.strip()
         if not s or s.startswith(';'):
             continue
+        if s.startswith('#repeat'):
+            try: pending_repeat=int(s.split()[1])
+            except (IndexError, ValueError): pending_repeat=1
+            continue
         # label?
-        m=re.match(r'^(loc_[0-9a-fA-F]+|loc_[0-9a-zA-Z_]+):$', s)
+        m=re.match(r'^([A-Za-z_][A-Za-z0-9_]*):$', s)   # loc_<hex>, braf_<hex>, or a named label
         if m:
             pending_label=m.group(1).lower()
             cur_data_label=pending_label
+            # PC = trailing hex of loc_<hex>/braf_<hex>/<name>_<hex> (marvelous2: label == addr)
+            hxm=re.search(r'_([0-9a-f]{6,8})$', pending_label)
+            cur_pc = int(hxm.group(1),16) if hxm else None
             continue
         if s.startswith('#align'):
             continue
@@ -73,11 +99,17 @@ def parse_asm(text):
         if not s: continue
         parts=s.split(None,1)
         mnem=parts[0]
-        args=split_args(parts[1]) if len(parts)>1 else []
-        ins=Insn(mnem,args,s)
-        if pending_label is not None:
-            ins.label=pending_label; pending_label=None
-        insns.append(ins)
+        rawargs=split_args(parts[1]) if len(parts)>1 else []
+        for _rep in range(pending_repeat):
+            args=_rewrite_numeric_pcpool(mnem, rawargs, cur_pc)   # PC advances per repeat
+            ins=Insn(mnem,args,s)
+            ins.pc=cur_pc
+            if pending_label is not None and _rep==0:
+                ins.label=pending_label
+            insns.append(ins)
+            if cur_pc is not None: cur_pc+=2   # each insn is 2 bytes within a basic block
+        pending_label=None
+        pending_repeat=1
         cur_data_label=None
     return insns, data
 

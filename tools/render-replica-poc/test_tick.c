@@ -21,6 +21,18 @@ static long g_calls = 0;
 static const long CALL_LIMIT = 5000000L;   /* watchdog: a real tick is ~thousands of calls */
 int mc_call_guard(void) { return (++g_calls > CALL_LIMIT) ? 1 : 0; }
 
+/* write-trap: which function writes the bad 0x8C44xxxx block? */
+u32 mc_curfn = 0;
+static u32 g_trapfn[32], g_traprawa[32]; static int g_ntrap = 0; static long g_trapcnt = 0;
+void mc_wtrap(u32 a) {
+    u32 off = a & 0x00FFFFFFu;                       /* the RAM offset mc_idx lands on */
+    if (off >= 0x440000u && off < 0x460000u) {
+        g_trapcnt++;
+        int seen = 0; for (int i = 0; i < g_ntrap; i++) if (g_trapfn[i] == mc_curfn) seen = 1;
+        if (!seen && g_ntrap < 32) { g_traprawa[g_ntrap] = a; g_trapfn[g_ntrap++] = mc_curfn; }
+    }
+}
+
 void mc_unknown_call(u32 a) {
     if (!g_unknown) g_first_unknown = a;
     g_unknown++;
@@ -41,6 +53,7 @@ int main(int argc, char **argv) {
 
     Sh4Ctx c; memset(&c, 0, sizeof c); c.ram = ram; c.r[15] = 0x8CFF0000u;
     tick_entry(&c);
+    { FILE *of = fopen("executor_out.bin", "wb"); if (of) { fwrite(ram, 1, RAM_SIZE, of); fclose(of); } }
 
     printf("tick %s. calls=%ld unknown_calls=%ld (distinct=%ld, first=0x%08X)\n",
            g_calls > CALL_LIMIT ? "HIT WATCHDOG (looping — missing fn breaks a loop)" : "ran to completion",
@@ -59,4 +72,9 @@ int main(int argc, char **argv) {
                diff ? "" : "  -> EXECUTOR BYTE-EXACT vs flycast tick", first);
     }
     return 0;
+}
+/* print trap summary via a destructor */
+__attribute__((destructor)) static void _trapdump(void){
+  if(g_trapcnt) { printf("WTRAP 0x8C44xxxx: %ld writes from %d fns:", g_trapcnt, g_ntrap);
+    for(int i=0;i<g_ntrap;i++) printf(" fn_%08x", g_trapfn[i]); printf("\n"); }
 }

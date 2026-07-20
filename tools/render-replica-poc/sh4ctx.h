@@ -92,8 +92,14 @@ static inline u32 r8s(Sh4Ctx*c, u32 a){
 }
 static inline u32 r8u(Sh4Ctx*c, u32 a){ MC_RLOG(a,1); return c->ram[mc_idx(a)]; }
 
+#ifdef MC_WTRAP
+extern void mc_wtrap(u32 a);
+#define MC_WT(a) mc_wtrap(a)
+#else
+#define MC_WT(a) ((void)0)
+#endif
 static inline void w32(Sh4Ctx*c, u32 a, u32 v){
-    MC_WLOG(a,4);
+    MC_WT(a); MC_WLOG(a,4);
     u32 i=mc_idx(a); u8*p=c->ram+i;
     p[0]=v; p[1]=v>>8; p[2]=v>>16; p[3]=v>>24;
 }
