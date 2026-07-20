@@ -49,6 +49,23 @@ static inline void mc_readlog(u32 a, u32 n){
 #define MC_RLOG(a,n) ((void)0)
 #endif
 
+#ifdef MC_WRITELOG
+/* WRITE-SET CAPTURE (2026-07-20, game-tick executor verification). Symmetric to
+ * MC_READLOG: when compiled with -DMC_WRITELOG, every guest RAM store through the
+ * w32/w16/w8 accessors records the touched byte range into a coverage bitmap. A
+ * verification harness dumps the merged written RANGES = a transpiled function's
+ * exact write-set (its output I/O footprint), to diff byte-exact vs flycast /
+ * vs the frame snapshot. This is how each self-contained leaf is verified. */
+extern unsigned char mc_writebmp[0x1000000/8];   /* 2MB bitmap, one bit/RAM byte */
+static inline void mc_writelog(u32 a, u32 n){
+    u32 i0 = a & 0x00FFFFFFu;
+    for (u32 k = 0; k < n; k++){ u32 i = (i0 + k) & 0x00FFFFFFu; mc_writebmp[i>>3] |= (unsigned char)(1u << (i & 7)); }
+}
+#define MC_WLOG(a,n) mc_writelog((a),(n))
+#else
+#define MC_WLOG(a,n) ((void)0)
+#endif
+
 /* LITTLE-ENDIAN guest loads. MVC2 runs the SH4 in LE mode (flycast stores guest RAM
  * in host LE order); the prod RAM dump is verbatim LE. Earlier the PoC used BE
  * accessors + a byteswapped image — a double-inversion that cancelled for word/half
@@ -76,12 +93,14 @@ static inline u32 r8s(Sh4Ctx*c, u32 a){
 static inline u32 r8u(Sh4Ctx*c, u32 a){ MC_RLOG(a,1); return c->ram[mc_idx(a)]; }
 
 static inline void w32(Sh4Ctx*c, u32 a, u32 v){
+    MC_WLOG(a,4);
     u32 i=mc_idx(a); u8*p=c->ram+i;
     p[0]=v; p[1]=v>>8; p[2]=v>>16; p[3]=v>>24;
 }
 static inline void w16(Sh4Ctx*c, u32 a, u32 v){
+    MC_WLOG(a,2);
     u32 i=mc_idx(a); u8*p=c->ram+i; p[0]=v; p[1]=v>>8;
 }
-static inline void w8(Sh4Ctx*c, u32 a, u32 v){ c->ram[mc_idx(a)]=(u8)v; }
+static inline void w8(Sh4Ctx*c, u32 a, u32 v){ MC_WLOG(a,1); c->ram[mc_idx(a)]=(u8)v; }
 
 #endif
