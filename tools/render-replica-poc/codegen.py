@@ -124,6 +124,9 @@ class Emitter:
             # lds Rm, FPUL
             if a[1].upper()=='FPUL': self.emit(f"c->fpul = {R(a[0])};")
             else: raise NotImplementedError(raw)
+        elif m=='flds':
+            # flds FRm, FPUL : fpul = raw bits of FRm
+            self.emit(f"c->fpul = ((union {{ float f; u32 u; }}){{ .f = {FR(a[0])} }}).u;")
         elif m=='sts':
             # sts FPUL,Rn  or sts MACL,Rn
             src=a[0].upper()
@@ -131,13 +134,15 @@ class Emitter:
             elif src=='MACL': self.emit(f"{R(a[1])} = c->macl;")
             else: raise NotImplementedError(raw)
         elif m=='sts.l':
-            # sts.l pr,@-r15
-            if a[0].lower()=='pr':
-                self.emit("c->r[15]-=4; w32(c, c->r[15], c->pr);")
+            # sts.l pr,@-r15  or  sts.l macl,@-r15
+            src=a[0].lower()
+            if src=='pr': self.emit("c->r[15]-=4; w32(c, c->r[15], c->pr);")
+            elif src=='macl': self.emit("c->r[15]-=4; w32(c, c->r[15], c->macl);")
             else: raise NotImplementedError(raw)
         elif m=='lds.l':
-            if a[1].lower()=='pr':
-                self.emit("c->pr = r32(c, c->r[15]); c->r[15]+=4;")
+            dst=a[1].lower()
+            if dst=='pr': self.emit("c->pr = r32(c, c->r[15]); c->r[15]+=4;")
+            elif dst=='macl': self.emit("c->macl = r32(c, c->r[15]); c->r[15]+=4;")
             else: raise NotImplementedError(raw)
         # ---------------- integer alu ----------------
         elif m=='add':
@@ -160,6 +165,8 @@ class Emitter:
             self.emit(f"{R(a[0])} <<= 2;")
         elif m=='shll':
             self.emit(f"{R(a[0])} <<= 1;")
+        elif m=='shlr16':
+            self.emit(f"{R(a[0])} >>= 16;")
         elif m=='extu.b':
             self.emit(f"{R(a[1])} = {R(a[0])} & 0xFFu;")
         elif m=='extu.w':
@@ -172,6 +179,33 @@ class Emitter:
             self.emit(f"c->macl = (u32)((s32)(s16){R(a[0])} * (s32)(s16){R(a[1])});")
         elif m=='mulu.w':
             self.emit(f"c->macl = (u32)(((u32)((u16){R(a[0])})) * ((u32)((u16){R(a[1])})));")
+        # ---------------- integer: mul.l / dt / movt / dynamic shift / carry / divide idiom
+        #                  (game-tick opcode set; flycast interpr/sh4_opcodes.cpp) ----------
+        elif m=='mul.l':
+            self.emit(f"c->macl = (u32)((s32){R(a[1])} * (s32){R(a[0])});")
+        elif m=='dt':
+            self.emit(f"{R(a[0])} -= 1; c->sr_t = ({R(a[0])}==0);")
+        elif m=='movt':
+            self.emit(f"{R(a[0])} = c->sr_t;")
+        elif m=='shld':
+            self.emit(f"{{ u32 _s={R(a[0])}; if(!(_s&0x80000000u)) {R(a[1])} <<= (_s&0x1Fu); else if((_s&0x1Fu)==0) {R(a[1])}=0; else {R(a[1])} = ({R(a[1])} >> ((~_s&0x1Fu)+1)); }}")
+        elif m=='addc':
+            self.emit(f"{{ u32 _t1={R(a[1])}+{R(a[0])}, _t0={R(a[1])}; {R(a[1])}=_t1+c->sr_t; c->sr_t=(_t0>_t1)||(_t1>{R(a[1])}); }}")
+        elif m=='subc':
+            self.emit(f"{{ u32 _t1={R(a[1])}-{R(a[0])}, _t0={R(a[1])}; {R(a[1])}=_t1-c->sr_t; c->sr_t=(_t0<_t1)||(_t1<{R(a[1])}); }}")
+        elif m=='rotcl':
+            self.emit(f"{{ u32 _t=c->sr_t; c->sr_t={R(a[0])}>>31; {R(a[0])}=({R(a[0])}<<1)|_t; }}")
+        elif m=='rotcr':
+            self.emit(f"{{ u32 _t={R(a[0])}&1u; {R(a[0])}=({R(a[0])}>>1)|(c->sr_t<<31); c->sr_t=_t; }}")
+        elif m=='div0s':
+            self.emit(f"c->sr_q={R(a[1])}>>31; c->sr_m={R(a[0])}>>31; c->sr_t=c->sr_m^c->sr_q;")
+        elif m=='div0u':
+            self.emit("c->sr_q=0; c->sr_m=0; c->sr_t=0;")
+        elif m=='div1':
+            self.emit(f"{{ u32 _oq=c->sr_q; c->sr_q=(({R(a[1])}&0x80000000u)!=0); u32 _orm={R(a[0])}; {R(a[1])}<<=1; {R(a[1])}|=c->sr_t; u32 _orn={R(a[1])}; "
+                      f"if(_oq==0){{ if(c->sr_m==0){{ {R(a[1])}-=_orm; c->sr_q^=({R(a[1])}>_orn); }} else {{ {R(a[1])}+=_orm; c->sr_q=(!c->sr_q)^({R(a[1])}<_orn); }} }} "
+                      f"else {{ if(c->sr_m==0){{ {R(a[1])}+=_orm; c->sr_q^=({R(a[1])}<_orn); }} else {{ {R(a[1])}-=_orm; c->sr_q=(!c->sr_q)^({R(a[1])}>_orn); }} }} "
+                      f"c->sr_t=(c->sr_q==c->sr_m); }}")
         # ---------------- compares (set T) ----------------
         elif m=='tst':
             if is_reg(a[0]): self.emit(f"c->sr_t = (({R(a[0])} & {R(a[1])})==0);")
@@ -182,6 +216,8 @@ class Emitter:
             self.emit(f"c->sr_t = ((s32){R(a[1])} >= (s32){R(a[0])});")
         elif m=='cmp/pl':
             self.emit(f"c->sr_t = ((s32){R(a[0])} > 0);")
+        elif m=='cmp/pz':
+            self.emit(f"c->sr_t = ((s32){R(a[0])} >= 0);")
         elif m=='cmp/eq':
             if is_reg(a[0]): self.emit(f"c->sr_t = ({R(a[1])}=={R(a[0])});")
             else:

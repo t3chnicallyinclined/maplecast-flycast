@@ -26,6 +26,7 @@ typedef struct {
     float fr[16];
     float xf[16];      /* xmtrx bank (unused by these 2 fns, kept for generality) */
     u32 fpscr, fpul, pr, macl, mach, sr_t, gbr;
+    u32 sr_q, sr_m;    /* div0s/div1 quotient/mode bits (game-tick divide idiom) */
     u32 _pool;         /* lifter helper: last mova'd pool word (see codegen) */
     u8 *ram;           /* flat area-3 RAM, RAM_SIZE bytes */
 } Sh4Ctx;
