@@ -46,12 +46,30 @@ void mc_wtrap(u32 a) {
 static u32 g_unkregs[16]; static int g_haveunkregs = 0;
 void mc_unk_regs(u32 *r) { if (!g_haveunkregs) { for (int i = 0; i < 16; i++) g_unkregs[i] = r[i]; g_haveunkregs = 1; } }
 
-/* capture xf[]/fr[]/r4 at the first call to the back-bank matrix save (0x8c11fb80 -> 0x2D6AD8) */
-static int g_havesave = 0; static float g_xf[16], g_fr[16]; static u32 g_saver4, g_savefpscr;
+/* capture xf[]/fr[]/r4/fpscr at EVERY call to the two matrix-save fns, so we can pin
+ * which specific save (dest 0x2D6AD8 / 0x2152E0) holds the divergent bank content. */
+typedef struct { u32 fn, r4, fpscr; float xf[16], fr[16]; } SaveCap;
+static SaveCap g_caps[64]; static int g_ncaps = 0;
+/* also log every (dropped) call to the back-bank LOADER 8c120220: r4 = source ptr,
+ * plus the 16 source floats from RAM[r4] — one should be a zero matrix (-> 0x2D6AD8). */
+typedef struct { u32 r4; float src[16]; int inram; } LoadCap;
+static LoadCap g_lds[16]; static int g_nlds = 0;
+static float _rf(Sh4Ctx *c, u32 a){ u32 off=a&0x00FFFFFFu; if(off+4>RAM_SIZE) return 0.f/0.f; u32 w=r32(c,a); return *(float*)&w; }
+/* ordered interleave of loads(L)/saves(S) across the matrix subtree */
+static char g_seq[256][40]; static int g_nseq = 0;
+static void seqlog(const char*tag,u32 fn,u32 addr){ if(g_nseq<256){ snprintf(g_seq[g_nseq++],40,"%s %06X@%08X",tag,fn&0xffffff,addr); } }
 void mc_dispatch_hook(u32 a, Sh4Ctx *c) {
-    if (a == 0x8c11fb80u && !g_havesave) {
-        for (int i = 0; i < 16; i++) { g_xf[i] = c->xf[i]; g_fr[i] = c->fr[i]; }
-        g_saver4 = c->r[4]; g_savefpscr = c->fpscr; g_havesave = 1;
+    if (a==0x8c120220u) seqlog("L", a, c->r[4]);
+    if (a==0x8c11fb80u||a==0x8c11fa80u) seqlog("S", a, c->r[4]);
+    if ((a == 0x8c11fb80u || a == 0x8c11fa80u || a == 0x8c1204f0u) && g_ncaps < 64) {
+        SaveCap *s = &g_caps[g_ncaps++];
+        s->fn = a; s->r4 = c->r[4]; s->fpscr = c->fpscr;
+        for (int i = 0; i < 16; i++) { s->xf[i] = c->xf[i]; s->fr[i] = c->fr[i]; }
+    }
+    if (a == 0x8c120220u && g_nlds < 16) {
+        LoadCap *l = &g_lds[g_nlds++]; u32 r4 = c->r[4]; l->r4 = r4;
+        l->inram = ((r4 & 0x1C000000u) == 0x0C000000u);
+        for (int i = 0; i < 16; i++) l->src[i] = _rf(c, r4 + i*4);
     }
 }
 static u32 g_usnap[256]; static int g_usnapn = -1; static u32 g_usnaptgt = 0;
@@ -118,10 +136,17 @@ __attribute__((destructor)) static void _trapdump(void){
     printf("  regs at 1st unknown: r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x\n",
       g_unkregs[0],g_unkregs[1],g_unkregs[2],g_unkregs[3],g_unkregs[4],g_unkregs[5],g_unkregs[6]);
   }
-  if(g_havesave){
-    printf("AT 8c11fb80 save: r4(dest)=0x%08X fpscr=0x%08X (FR=%d SZ=%d)\n",
-      g_saver4, g_savefpscr, (g_savefpscr>>21)&1, (g_savefpscr>>20)&1);
-    printf("  xf[]:"); for(int i=0;i<16;i++) printf(" %.3g", g_xf[i]); printf("\n");
-    printf("  fr[]:"); for(int i=0;i<16;i++) printf(" %.3g", g_fr[i]); printf("\n");
+  for(int k=0;k<g_ncaps;k++){
+    SaveCap *s=&g_caps[k];
+    printf("SAVE#%d fn=%08X r4=0x%08X fpscr=0x%08X (FR=%d SZ=%d)\n",
+      k, s->fn, s->r4, s->fpscr, (s->fpscr>>21)&1, (s->fpscr>>20)&1);
+    printf("   xf:"); for(int i=0;i<16;i++) printf(" %.4g", s->xf[i]);
+    printf("\n   fr:"); for(int i=0;i<16;i++) printf(" %.4g", s->fr[i]); printf("\n");
   }
+  for(int k=0;k<g_nlds;k++){
+    LoadCap *l=&g_lds[k];
+    printf("LOAD8c120220 #%d r4=0x%08X inram=%d src:", k, l->r4, l->inram);
+    for(int i=0;i<16;i++) printf(" %.4g", l->src[i]); printf("\n");
+  }
+  printf("SEQ(%d):\n",g_nseq); for(int k=0;k<g_nseq;k++) printf("  %02d %s\n",k,g_seq[k]);
 }

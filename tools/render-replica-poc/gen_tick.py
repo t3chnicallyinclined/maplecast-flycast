@@ -53,7 +53,8 @@ def bsr_res(target):
 
 # functions the trace reaches (via computed jump) that the ;==== scanners excluded but
 # which transpile fine — e.g. loc_8c031094 is a bra-jump-table, not a braf.
-EXTRA_FUNCS = [(0x8c031094, 'bank03.asm', 2411, 2492, '-')]
+EXTRA_FUNCS = [(0x8c031094, 'bank03.asm', 2411, 2492, '-'),
+               (0x8c120220, 'bank12.asm', 1, 20, '-')]   # back-bank XMTRX loader (frchg;16x fmov @r4+;rts;frchg)
 
 def parse_worklist():
     funcs = list(EXTRA_FUNCS)
