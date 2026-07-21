@@ -138,7 +138,9 @@ class Emitter:
             # fsts FPUL, FRn : FRn bits = fpul
             self.emit(f"{FR(a[1])} = ((union {{ float f; u32 u; }}){{ .u = c->fpul }}).f;")
         elif m=='fsqrt':
-            self.emit(f"{FR(a[0])} = __builtin_sqrtf({FR(a[0])});")
+            # sqrtf (not __builtin_sqrtf): resolves via CRT on MSVC, libm on clang, and the
+            # freestanding-wasm stub — all correctly-rounded IEEE sqrt, so byte-exact.
+            self.emit(f"{FR(a[0])} = sqrtf({FR(a[0])});")
         elif m=='sts':
             # sts FPUL,Rn  or sts MACL,Rn
             src=a[0].upper()
