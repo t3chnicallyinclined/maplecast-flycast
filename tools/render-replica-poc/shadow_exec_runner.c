@@ -22,11 +22,33 @@ u32  mc_curfn = 0;
 void mc_push(u32 a){ (void)a; }
 void mc_pop(void){}
 
+/* NON-RAM READ CENSUS — answers "does the in-match tick ever read ROM / hardware?" directly.
+ * Active only when the shadow build compiles with -DMC_RTRAP (sh4ctx.h calls mc_note_read for
+ * any read outside area-3 RAM). Defined unconditionally so link never fails; when MC_RTRAP is
+ * off the hook is never called and the count stays 0. */
+static long g_nonram = 0;
+static u32  g_nonram_first = 0, g_nonram_fn = 0;
+static u32  g_nonram_set[32]; static int g_nonram_ndistinct = 0;
+void mc_note_read(u32 a, u32 n){ (void)n;
+    if(!g_nonram) { g_nonram_first = a; g_nonram_fn = mc_curfn; }  /* which game fn read outside RAM */
+    g_nonram++;
+    for(int i=0;i<g_nonram_ndistinct;i++) if(g_nonram_set[i]==a) return;
+    if(g_nonram_ndistinct<32) g_nonram_set[g_nonram_ndistinct++]=a;
+}
+long mc_shadow_last_nonram_reads(void){ return g_nonram; }
+u32  mc_shadow_last_nonram_addr(void){ return g_nonram_first; }
+u32  mc_shadow_last_nonram_fn(void){ return g_nonram_fn; }
+int  mc_shadow_nonram_distinct(u32 *out, int max){
+    int k = g_nonram_ndistinct < max ? g_nonram_ndistinct : max;
+    for(int i=0;i<k;i++) out[i]=g_nonram_set[i]; return k;
+}
+
 /* Run ONE game-logic tick on a 16 MB guest-RAM image, in place.
  * `ram` must be RAM_SIZE bytes, little-endian, the mem_b layout (offset = guestAddr&0xFFFFFF).
  * Returns the number of dispatches (a cheap liveness signal; ~2000 for a real in-match tick). */
 long mc_shadow_run_tick(unsigned char *ram){
     g_calls = 0;
+    g_nonram = 0; g_nonram_first = 0;   /* reset the non-RAM read census for this tick */
     Sh4Ctx c;
     for (unsigned i = 0; i < sizeof c; i++) ((unsigned char*)&c)[i] = 0;
     c.ram = ram;

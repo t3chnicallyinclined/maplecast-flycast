@@ -18,33 +18,44 @@ from lift import parse_asm, extract_block, slurp_function
 from emit_func import emit_function
 
 
-WORK_ASM = r"C:\Users\trist\projects\_marv_re\memory\work.asm"
-_work_syms = None
+WORK_ASM   = r"C:\Users\trist\projects\_marv_re\memory\work.asm"
+PL_MEM_ASM = r"C:\Users\trist\projects\_marv_re\memory\pl_mem.asm"
+_sym_cache = {}
 
-def load_work_symbols():
-    """Parse work.asm '#symbol <name> <hex>' lines -> {name: '0x<hex>'}."""
-    global _work_syms
-    if _work_syms is None:
-        _work_syms = {}
+def _load_symbols(path):
+    """Parse a '#symbol <name> <hex>' table -> {name: '0x<hex>'}. Cached per path."""
+    if path not in _sym_cache:
+        syms = {}
         try:
-            for line in open(WORK_ASM, errors='replace'):
+            for line in open(path, errors='replace'):
                 m = re.match(r'#symbol\s+(\S+)\s+(0x[0-9a-fA-F]+|\d+)', line)
                 if m:
                     val = int(m.group(2), 16) if m.group(2).lower().startswith('0x') else int(m.group(2))
-                    _work_syms[m.group(1)] = f'0x{val:x}'
+                    syms[m.group(1)] = f'0x{val:x}'
         except FileNotFoundError:
             pass
-    return _work_syms
+        _sym_cache[path] = syms
+    return _sym_cache[path]
+
+def load_work_symbols():   # kept for callers; work.asm is the default table
+    return _load_symbols(WORK_ASM)
 
 def normalize_data_pointers(data):
     """Resolve #data pool references to numeric constants so codegen emits addresses
     instead of leaf-tagging them as code pointers:
       - bankNN.loc_<hex>  -> 0x<hex>  (marvelous2 label == address; e.g. RNG seed var)
       - work.<Name>       -> the #symbol address from work.asm, e.g.
-                             work.GameGlobalPointer -> 0x8c26823c"""
-    syms = load_work_symbols()
+                             work.GameGlobalPointer -> 0x8c26823c
+      - pl_mem.<Name>     -> the #symbol address from pl_mem.asm, e.g.
+                             pl_mem.player_start -> 0x8c268340 (the char-struct base).
+                             WITHOUT this these DATA symbols fall through to codegen's
+                             leafptr sentinel (0x1EA00000) and every access through them
+                             reads/writes a bogus non-RAM address — silent under neutral
+                             input (the target buffers are 0) but diverges on live input."""
+    worksyms = _load_symbols(WORK_ASM)
+    plsyms   = _load_symbols(PL_MEM_ASM)
     for k, v in list(data.items()):
-        m = re.fullmatch(r'bank\d+\.loc_([0-9a-fA-F]{8})', v)
+        m = re.fullmatch(r'bank[0-9a-fA-F]+\.loc_([0-9a-fA-F]{8})', v)   # bank number is HEX (bank1c, bank1a…)
         if m:
             data[k] = '0x' + m.group(1)
             continue
@@ -53,8 +64,12 @@ def normalize_data_pointers(data):
             data[k] = '0x' + m.group(1)
             continue
         m = re.fullmatch(r'work\.(\S+)', v)
-        if m and m.group(1) in syms:
-            data[k] = syms[m.group(1)]
+        if m and m.group(1) in worksyms:
+            data[k] = worksyms[m.group(1)]
+            continue
+        m = re.fullmatch(r'pl_mem\.(\S+)', v)
+        if m and m.group(1) in plsyms:
+            data[k] = plsyms[m.group(1)]
 
 
 def main():

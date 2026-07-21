@@ -54,6 +54,17 @@ static inline void mc_readlog(u32 a, u32 n){
 #define MC_RLOG(a,n) ((void)0)
 #endif
 
+#ifdef MC_RTRAP
+/* NON-RAM READ CENSUS (2026-07-21, shadow-executor ROM-access check). Counts reads whose target
+ * is NOT area-3 main RAM (ROM/cartridge/hardware/VRAM) so the live shadow can report directly
+ * whether the in-match tick ever reaches outside the 16MB RAM snapshot. Cheap predictable branch;
+ * the census cost is ~0 (RAM reads never call the hook). */
+extern void mc_note_read(u32 a, u32 n);
+#define MC_RT(a,n) do{ if((a & 0x1C000000u) != 0x0C000000u) mc_note_read((a),(n)); }while(0)
+#else
+#define MC_RT(a,n) ((void)0)
+#endif
+
 #ifdef MC_WRITELOG
 /* WRITE-SET CAPTURE (2026-07-20, game-tick executor verification). Symmetric to
  * MC_READLOG: when compiled with -DMC_WRITELOG, every guest RAM store through the
@@ -77,22 +88,22 @@ static inline void mc_writelog(u32 a, u32 n){
  * reads but CORRUPTED sub-word BYTE reads (node+0x12c guard, node+0x5d, descriptor
  * bytes). LE everywhere + a verbatim dump copy is the correct, consistent model. */
 static inline u32 r32(Sh4Ctx*c, u32 a){
-    MC_RLOG(a,4);
+    MC_RLOG(a,4); MC_RT(a,4);
     u32 i=mc_idx(a); u8*p=c->ram+i;
     return (u32)p[0]|((u32)p[1]<<8)|((u32)p[2]<<16)|((u32)p[3]<<24);
 }
 static inline u32 r16s(Sh4Ctx*c, u32 a){
-    MC_RLOG(a,2);
+    MC_RLOG(a,2); MC_RT(a,2);
     u32 i=mc_idx(a); u8*p=c->ram+i;
     u16 v=(u16)p[0]|((u16)p[1]<<8);
     return (u32)(s32)(s16)v;       /* mov.w sign-extends */
 }
 static inline u32 r16u(Sh4Ctx*c, u32 a){
-    MC_RLOG(a,2);
+    MC_RLOG(a,2); MC_RT(a,2);
     u32 i=mc_idx(a); u8*p=c->ram+i; return (u16)p[0]|((u16)p[1]<<8);
 }
 static inline u32 r8s(Sh4Ctx*c, u32 a){
-    MC_RLOG(a,1);
+    MC_RLOG(a,1); MC_RT(a,1);
     u32 i=mc_idx(a); return (u32)(s32)(s8)c->ram[i];  /* mov.b sign-extends */
 }
 static inline u32 r8u(Sh4Ctx*c, u32 a){ MC_RLOG(a,1); return c->ram[mc_idx(a)]; }

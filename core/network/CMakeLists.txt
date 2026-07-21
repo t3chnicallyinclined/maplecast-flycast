@@ -96,7 +96,9 @@ if(MAPLECAST_SHADOW_EXEC)
         "${CMAKE_SOURCE_DIR}/tools/render-replica-poc/gen_tick_all.c")
     target_include_directories(${PROJECT_NAME} PRIVATE
         "${CMAKE_SOURCE_DIR}/tools/render-replica-poc")
-    target_compile_definitions(${PROJECT_NAME} PRIVATE MAPLECAST_SHADOW_EXEC_BUILD)
+    # MC_RTRAP arms the non-RAM (ROM/hardware) read census in sh4ctx.h so the shadow reports
+    # directly whether the in-match tick ever reads outside the 16MB RAM snapshot.
+    target_compile_definitions(${PROJECT_NAME} PRIVATE MAPLECAST_SHADOW_EXEC_BUILD MC_RTRAP)
 endif()
 
 # === Native GSTA client (feat/render-replica-live) =========================
