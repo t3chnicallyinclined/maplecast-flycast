@@ -76,7 +76,28 @@ target_sources(${PROJECT_NAME} PRIVATE
         replay_writer.h
         replay_reader.cpp
         replay_reader.h
+        maplecast_shadow_exec.cpp
+        maplecast_shadow_exec.h
         maplecast_wasm_bridge.cpp)
+
+# === Shadow executor (live game-tick validation) ==========================
+# maplecast_shadow_exec.cpp is ALWAYS compiled (no-op unless the executor is linked), so the
+# unconditional maplecast_shadow_exec::onFrame() call in serverPublish always resolves. Turning
+# on -DMAPLECAST_SHADOW_EXEC=ON links the standalone transpiled game-tick executor into the
+# server so each frame is validated vs mem_b (runtime-gated by the MAPLECAST_SHADOW_EXEC env).
+# gen_tick_all.c is DERIVED game code (gitignored): regenerate it before building via
+#   python tools/render-replica-poc/gen_tick.py
+if(MAPLECAST_SHADOW_EXEC)
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/tools/render-replica-poc/gen_tick_all.c")
+        message(FATAL_ERROR "MAPLECAST_SHADOW_EXEC=ON but gen_tick_all.c is missing — run: python tools/render-replica-poc/gen_tick.py")
+    endif()
+    target_sources(${PROJECT_NAME} PRIVATE
+        "${CMAKE_SOURCE_DIR}/tools/render-replica-poc/shadow_exec_runner.c"
+        "${CMAKE_SOURCE_DIR}/tools/render-replica-poc/gen_tick_all.c")
+    target_include_directories(${PROJECT_NAME} PRIVATE
+        "${CMAKE_SOURCE_DIR}/tools/render-replica-poc")
+    target_compile_definitions(${PROJECT_NAME} PRIVATE MAPLECAST_SHADOW_EXEC_BUILD)
+endif()
 
 # === Native GSTA client (feat/render-replica-live) =========================
 # The transpiled MVC2 render path (tools/render-replica-poc, byte-exact) is

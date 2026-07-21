@@ -78,6 +78,7 @@ uint64_t g_activePalBanks = 0;
 #endif
 #include "maplecast_gamestate.h"
 #include "maplecast_oracle_hook.h"
+#include "maplecast_shadow_exec.h"   // gated live executor validation (MAPLECAST_SHADOW_EXEC)
 #include <errno.h>
 
 
@@ -2929,6 +2930,13 @@ void serverPublish(TA_context* ctx)
 		}
 		maplecast_replay::appendState((uint64_t)_localFrameNum, _stateBlob.data(), _stateBlobLen);
 	}
+
+	// === MAPLECAST_SHADOW_EXEC — live per-frame validation of the transpiled game-tick
+	// executor against this authoritative frame. Read-only, gated OFF by default; runs the
+	// standalone executor on the PREVIOUS frame's RAM snapshot and diffs game-state regions
+	// vs mem_b (expected 0 bytes), logging any divergence. When enabled it adds a full-RAM
+	// copy + executor run to this publish-thread frame boundary (validation cost, not prod).
+	maplecast_shadow_exec::onFrame();
 
 	// === MAPLECAST_FRAME_ORACLE_HOOK — flush the LIVE block-entry attribution that
 	// the recompiler hook (0x8C03093C begin / 0x8C033E90 quad) buffered during this
