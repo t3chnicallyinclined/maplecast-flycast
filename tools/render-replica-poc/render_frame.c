@@ -833,6 +833,7 @@ void render_frame_reset(void){
 }
 int  render_frame_nscene(void){ return g_nscene; }
 const SceneQuad* render_frame_scene(void){ return g_scene; }
+unsigned long render_frame_quad_bytes(void){ return (unsigned long)sizeof(SceneQuad); }
 
 /* PER-QUAD INTRA-PART TILE (col,row) — the WIDE-PART carve key. col MUST be the part's
  * STORAGE column (facing-INDEPENDENT), so the carve always slices the same fixed storage
