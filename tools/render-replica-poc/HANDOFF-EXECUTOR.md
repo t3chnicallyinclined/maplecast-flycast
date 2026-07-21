@@ -1,10 +1,14 @@
 # HANDOFF — Thin SH-4 Game-Tick Executor (MvC2)
 
-**Status: the whole game-logic tick transpiles + runs, reproducing flycast BYTE-EXACT to
-52 bytes / 16 MB (99.99969%). One well-bounded residual remains. This doc is the complete
-continuation guide — a cold agent should be able to finish from here.**
+**★ STATUS: TEST A COMPLETE. The whole game-logic tick transpiles + runs, reproducing flycast
+BYTE-EXACT — 0 bytes / 16 MB differ (masking only 3 known hw-timer values). The executor IS the
+game-tick. NEXT PHASE = chain tick -> render_frame (input -> next-frame TA), then WASM.**
 
-Last updated 2026-07-20. Branch `feat/dataset-exporter`. Latest exec commit `56f905ef0`.
+The 52-byte residual was the dropped back-bank XMTRX loader `loc_8c120220` (a `bra`-only target the
+worklist scanner missed); adding it (bank12:1-20 in gen_tick.py EXTRA_FUNCS) drove the diff to 0.
+See §8 for the full root-cause writeup.
+
+Last updated 2026-07-20. Branch `feat/dataset-exporter`. Latest exec commit `4f93dc647`.
 Companion memory: `~/.claude/.../memory/project_thin_sh4_executor_scoped.md` (linked facts).
 
 ---
@@ -21,13 +25,16 @@ in the browser. See memory for the "why not emulate every chip" architecture not
 ## 2. Where we are (trajectory)
 
 Executor-vs-flycast game-region diff over this build:
-`6,700,000 → 25,565 → 2,612 → 113 → 52 bytes`. Each drop was a **general, source-verified** fix
-(never a patch-over). Test A (flycast form) is PROVEN: seeding flycast's own interpreter at the
-scene-FSM root reproduces the next real frame to 7 out-of-subtree bytes (frame_counter + a render
-anim counter) — so `_ram_f90` + scene-entry IS a complete deterministic game-tick domain.
+`6,700,000 → 25,565 → 2,612 → 113 → 52 → 0 bytes`. Each drop was a **general, source-verified** fix
+(never a patch-over). Test A (flycast form) is PROVEN, and now the OUR-EXECUTOR form passes too:
+seeding flycast's own interpreter at the scene-FSM root reproduces the next real frame, AND our
+standalone C executor reproduces flycast's tick byte-for-byte — so `_ram_f90` + scene-entry IS a
+complete deterministic game-tick domain, and we can now RUN it without flycast.
 
-**270 functions transpile** (249 bank + 21 roster SPL). The executor compiles, runs the whole tick
-in ~1,670 dispatches, and diffs 52 bytes vs the flycast ground truth.
+**271 functions transpile** (250 bank + 21 roster SPL). The executor compiles, runs the whole tick
+in ~2,153 dispatches, and diffs **0 bytes** vs the flycast ground truth (masking 3 hw-timer values).
+The lone `unknown_call` (0x89889011, from loc_8c17D0C0's jump table) is a non-RAM peripheral dispatch,
+dropped by `mc_is_ram` and proven benign (full game RAM byte-exact with it dropped).
 
 ## 3. Architecture (the transpile pipeline)
 
@@ -137,39 +144,40 @@ table-address, swap.w/b, ocbi, #repeat, named-label graceful, cross-;==== goto�
 inside-body data-range skip. Transpiled `gen_*.c` + `gen_tick_all.c` are **gitignored** (derived
 game code) — regenerate with `gen_tick.py`.
 
-## 8. THE REMAINING WORK — the last 52 bytes
+## 8. RESOLVED — the last 52 bytes (root cause + fix)
 
-**It is a matrix-stack (XMTRX) state divergence in the CAMERA/PROJECTION setup subtree, NOT an
-FP-transfer bug (those are fixed).** Fully mapped by the mvc2-sh4-re-expert:
+**Diff is now 0. The 52-byte residual was a DROPPED matrix loader, not an FP-bank bug.**
 
-- **The residual bytes** (mine ≠ flycast): my executor makes EXTRA XMTRX saves to matrix-stack
-  buffers flycast leaves at 0 — `0x8C2152E0` (19 B, via chain `8c02e1a4→8c1204f0→8c11fa80`) and
-  `0x8C2D6AD8..` (33 B, via `8c02e1a4→8c1219b0→8c121a54`). The main matrix slot `0x8C2D6920` now MATCHES.
-- **The system**: a 4-descriptor matrix stack based @`0x8C2D68E8` (each `{count.w@+0, top_ptr@+8}`),
-  u8 stack-index @`0x8C2D68E4`, storage from `0x8C2D6918`. desc-0 slot=`0x8C2D6920`,
-  desc-1 top_ptr=`0x8C2152E0` (all in `_ram_f90`).
-- **Save/build/load routines** (all bank11/12, the ONLY place fschg/frchg appear; NO double/PR anywhere):
-  pair push `loc_8c120950`(12:1080→0x2D6920), single save `loc_8c11fa80`(11:38251), back/XD save
-  `loc_8c11fb80`(11:38419→0x2D6AD8), build-identity `loc_8c121100`(12:2272), loads
-  `loc_8c120900/120220/120260`.
-- **Both extra-write chains are under `loc_8c02e1a4` (camera/projection setup).** So the divergence
-  is: my executor's **xf[] (XD/back bank) content OR the matrix-stack descriptor/index differs** in
-  that subtree → extra saves. Likely a subtle FP-bank (frchg) or stack-index computation difference.
-- **Acceptance gate** (expert-provided): diff MUST be 0 at `0x2D6920` AND the scratch matrices
-  `0x2D6AD8 / 0x2D6B18 / 0x2D6BC0 / 0x2D6C00 / 0x2D6C40`.
-- **Watch-outs** (expert): `loc_8c120990`(12:1120) + `loc_8c1209be`(12:1146) return with **SZ=1
-  UNBALANCED** — SZ/FR MUST persist across calls (my ctx does, but re-verify). There are 2
-  `lds r4,fpscr` (bank03:7206, bank12:35222) NOT currently handled by codegen — they are NOT in the
-  executed worklist this frame, but if a future frame executes them, add flycast's conditional
-  FR-array-swap (UpdateFPSCR: swap fr[]/xf[] when FR flips — `sh4_opcodes.cpp:1890/1913`).
+- **Symptom**: my executor wrote stale matrices where flycast leaves 0 — `0x8C2152E0` (19 B) and
+  `0x8C2D6AD8..` (33 B), both matrix-stack storage under the camera/projection subtree `loc_8c02e1a4`.
+- **Root cause (proven, no guessing)**: the back-bank XMTRX loader **`loc_8c120220`** (bank12:1-20 —
+  `frchg; 16× fmov @r4+,frN; rts; frchg` = loads 16 floats from `@r4` into the FP **back bank** xf[])
+  is reached ONLY via a static `bra bank12.loc_8c120220` from `loc_8c1201e0`. It has NO `#data`
+  reference, so the `scan_tick.py` function-boundary scanner never emitted it as a worklist entry
+  (it sits at bank12 line 1 with no preceding `;====` marker) — **even though its PCs WERE in the
+  execution trace**. Result: its 6 loads were silently DROPPED (hit the `call_addr` no-op default),
+  leaving the back bank **stale** at two matrix-stack saves (`loc_8c11fb80`→0x2D6AD8; the descriptor-1
+  store→0x2152E0).
+- **Proof**: an `MC_DHOOK` dispatch hook (test_tick.c) captured, per loader call, `r4` + the 16
+  source floats from RAM, plus an ordered load/save interleave. Decisive frame:
+  `L 120220@0x2152E0` loads a **zero** matrix into xf[] immediately before `S 11FB80@0x2D6AD8` saves
+  it. With the load dropped, the save shipped a stale projection+translation matrix — which then
+  poisoned `0x2152E0` for the *next* read-back (why both residuals shared one root).
+- **`r4` was correct all along**: `loc_8c1201e0` computes `r4 = descriptor.top_ptr` (`@0x8C2D68E8+0x8`,
+  confirmed bank12:465 by the expert). The earlier "52→75 worse" attempt failed only because it
+  predated the SZ-aware fmov fix — not because `r4` diverged.
+- **THE FIX**: add `(0x8c120220, 'bank12.asm', 1, 20, '-')` to `gen_tick.py` `EXTRA_FUNCS`. Diff 52→0.
+- **Lone remaining `unknown_call` = 0x89889011** (benign): `loc_8c17D0C0` (bank17:25794) reads a
+  fnptr from a jump table `[0x8C1C95BC + r5<<2]`; that table entry is `0x89889011`, a **non-RAM area-2
+  peripheral address**. flycast reads the same snapshot RAM so it computes the same target; the
+  executor drops it via `mc_is_ram` (area-3 only). Proven benign — full game RAM is byte-exact with
+  it dropped. It is a peripheral/DMA dispatch orthogonal to the game-state domain.
 
-**Suggested next step**: trap the writer at `0x2152E0` / `0x2D6AD8` (already done — chains above),
-then step INTO `8c02e1a4`'s subtree: capture the xf[] bank + the matrix-stack descriptor/index at
-the point the save target diverges. Compare vs what flycast would have (dump via the realcore
-oracle with a breakpoint, or reason from the disasm sequence in Sec 8 / the expert's Deliverable 3).
-Candidate root causes, in order of likelihood: (a) an frchg/FR bank-state mismatch feeding a save;
-(b) a stack push/pop index off-by-one; (c) a control-flow flag in `8c02e1a4` computed differently.
-Verify each with a trap/capture — do NOT guess.
+**General lesson for future frames**: `bra bankNN.loc_XXXX` targets that lack a `#data` ref can be
+missed by the boundary scanner even when traced. If a future frame (super/tag/different camera) shows
+a residual, first check the runtime `unknown_call` census (test_tick prints distinct targets + first
+chain) for a dropped static-`bra` loader like this one. Every reached call must resolve (or be a
+proven non-RAM peripheral drop).
 
 ## 9. The team model (how the last fixes were made — use it)
 
