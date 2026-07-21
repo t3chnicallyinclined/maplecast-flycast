@@ -14,6 +14,7 @@
 #include <stdlib.h>
 
 void tick_entry(Sh4Ctx *c);
+void call_addr(Sh4Ctx *c, u32 a);   /* executor dispatch — call any transpiled fn by address */
 void render_frame_reset(void);
 void render_frame(Sh4Ctx *c);
 int  render_frame_nscene(void);
@@ -40,18 +41,42 @@ int main(int argc, char **argv){
     if(!load(rp)){ printf("cannot load %s\n", rp); return 2; }
 
     Sh4Ctx c; memset(&c,0,sizeof c); c.ram=ram; c.r[15]=0x8CFF0000u;
-    if(!strcmp(mode,"tick") || !strcmp(mode,"tickcam")){
-        /* tickcam: the game-logic tick transiently zeroes the render-walk's projection
-         * matrix @0x2D6AD8 (the render subtree normally re-deposits it). Until we chain
-         * the render-walk proj setup (loc_8c1216c0), carry the camera projection across
-         * the tick so render_frame's world->screen transform has a valid matrix.
-         * The viewport @0x2D6B18 is already game-tick-stable, so only 0x2D6AD8 is carried. */
+    if(!strcmp(mode,"projonly")){
+        /* diagnostic: no tick — just run the proj composer on the (valid) input RAM.
+         * If it reproduces 0x2D6AD8, the composer works standalone; then the FP entry
+         * state (FR/SZ) or a tick-corrupted input is the tickproj culprit. */
+        u32 fp = getenv("FPSCR") ? (u32)strtoul(getenv("FPSCR"),0,16) : 0;
+        c.fpscr = fp;
+        call_addr(&c, 0x8c1216c0u);
+        printf("projonly (fpscr=0x%08X): 0x2D6AD8 ->", fp);
+        for(int i=0;i<16;i++){ u32 w=r32(&c,0x8C2D6AD8u+i*4); printf(" %.3g", *(float*)&w); } printf("\n");
+    }
+    if(!strcmp(mode,"tick") || !strcmp(mode,"tickcam") || !strcmp(mode,"tickproj")){
+        /* The game-logic tick transiently zeroes the render-walk's projection matrix
+         * @0x2D6AD8 (the render subtree normally re-deposits it). Three ways to handle it:
+         *   tick     : leave it (render coords go NaN — shows the raw gap)
+         *   tickcam  : carry the 64B camera proj across the tick (interim hack)
+         *   tickproj : LEGIT — run the render-walk proj composer loc_8c1216c0 post-tick,
+         *              which rebuilds 0x2D6AD8 from matrix-stack descriptors 2/3. */
         u8 projsave[64];
         if(!strcmp(mode,"tickcam")) memcpy(projsave, ram+0x002D6AD8u, 64);
         tick_entry(&c);                 /* input -> next-frame game state (in-place) */
         if(!strcmp(mode,"tickcam")) memcpy(ram+0x002D6AD8u, projsave, 64);
+        if(!strcmp(mode,"tickproj")){
+            Sh4Ctx pc; memset(&pc,0,sizeof pc); pc.ram=ram; pc.r[15]=0x8CFF0000u;
+            call_addr(&pc, 0x8c1216c0u);   /* compose proj -> 0x2D6AD8 */
+        }
+        if(getenv("DBG")){
+            for(u32 base=0x2D6900u; base<=0x2D690Cu; base+=0xC){
+                u32 idxmax=r32(&c,0x8C000000u|base), pbase=r32(&c,0x8C000000u|(base+4)), ptop=r32(&c,0x8C000000u|(base+8));
+                printf("  desc@%06X: idxmax=%08X base=%08X top=%08X  topmat[0..3]:", base, idxmax, pbase, ptop);
+                for(int i=0;i<4;i++){ u32 w=r32(&c, ptop+i*4); printf(" %.3g", *(float*)&w); } printf("\n");
+            }
+            printf("  0x2D6AD8 now:"); for(int i=0;i<16;i++){ u32 w=r32(&c,0x8C2D6AD8u+i*4); printf(" %.3g", *(float*)&w); } printf("\n");
+        }
         printf("executor tick: %ld dispatches%s\n", g_calls,
-               !strcmp(mode,"tickcam") ? " (+carried camera proj @0x2D6AD8)" : "");
+               !strcmp(mode,"tickcam") ? " (+carried camera proj @0x2D6AD8)" :
+               !strcmp(mode,"tickproj")? " (+ran loc_8c1216c0 proj composer)" : "");
     }
 
     /* render the (post-tick) resident state */
