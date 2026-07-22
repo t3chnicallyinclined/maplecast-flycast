@@ -20,6 +20,11 @@ void render_frame(Sh4Ctx *c);
 int  render_frame_nscene(void);
 const void* render_frame_scene(void);
 unsigned long render_frame_quad_bytes(void);
+/* per-quad decode metadata (for the Python decode_body port): srcdesc[m,cx,ry,flags],
+ * colrow[col,row], is_effect — the same the live client feeds body_tex::decode_body. */
+unsigned int render_frame_quad_srcdesc_impl(unsigned char* out, unsigned int cap);
+unsigned int render_frame_quad_colrow_impl(int* out, unsigned int cap);
+unsigned int render_frame_quad_is_effect_impl(unsigned char* out, unsigned int cap);
 
 /* --- minimal executor runtime deps (no debug hooks) --- */
 static long g_calls = 0;
@@ -109,7 +114,17 @@ int main(int argc, char **argv){
             { const char *scd = getenv("SCDIR");
               if(scd){ char p[512]; snprintf(p,sizeof p,"%s/scene_%03d.bin", scd, f);
                 FILE *so=fopen(p,"wb"); if(so){ int n=render_frame_nscene(); unsigned long qb=render_frame_quad_bytes();
-                  fwrite(render_frame_scene(), qb, (size_t)n, so); fclose(so); } } }
+                  /* format: u32 n | quads(n*88) | srcdesc(n*4) | colrow(n*2*i32) | effect(n*1) */
+                  static unsigned char sd[1024*4]; static int cr[1024*2]; static unsigned char ie[1024];
+                  render_frame_quad_srcdesc_impl(sd, 1024); render_frame_quad_colrow_impl(cr, 1024);
+                  render_frame_quad_is_effect_impl(ie, 1024);
+                  unsigned int un=(unsigned)n;
+                  fwrite(&un,4,1,so);
+                  fwrite(render_frame_scene(), qb, (size_t)n, so);
+                  fwrite(sd, 4, (size_t)n, so);
+                  fwrite(cr, 8, (size_t)n, so);
+                  fwrite(ie, 1, (size_t)n, so);
+                  fclose(so); } } }
             /* CHDIR=dir: dump the BYTE-EXACT game-tick state per frame — the 6 char structs
              * (page 616 @0x268340) + the global page (@0x289000). This is the proven-correct
              * data (render coords need the unsolved render-pass proj; game state does not), so
