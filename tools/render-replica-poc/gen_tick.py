@@ -67,7 +67,14 @@ EXTRA_FUNCS = [(0x8c031094, 'bank03.asm', 2411, 2492, '-'),
                # --- forward coverage: other bank14 listop handlers (non-head-insert categories) ---
                (0x8c044fe0, 'bank04.asm', 11919, 11974, '-'),  # table[1] insert-at-tail (wide range folds locals; #data 11937-58 parsed as data)
                (0x8c045066, 'bank04.asm', 12003, 12031, '-'),  # table[2] insert-after-node
-               (0x8c04503e, 'bank04.asm', 11976, 12000, '-')]  # table[3] insert-before-node
+               (0x8c04503e, 'bank04.asm', 11976, 12000, '-'),  # table[3] insert-before-node
+               # --- JUMP-PATH stack-balance fix: loc_8c051bca (traced) does `sts.l pr,@-r15` then
+               # `bf loc_8c051bde`; the balancing `lds.l @r15+,pr; rts` lives in the SEPARATE fn
+               # loc_8c051bde, so the cross-fn bf is a tail-call. When 051bde was uncranked (no-op)
+               # the pop never ran -> r15 leaked -4 -> propagated up 047dec..04761c -> loc_8c04761c's
+               # epilogue `mov.l @r15+,r13` read the char base -> loc_8c043cdc `jsr @r13` dispatched
+               # 0x8C268340 forever (JUMP-input hang). Cranking 051bde restores the pop/rts.
+               (0x8c051bde, 'bank05.asm', 4342, 4349, '-')]   # bf-continuation of loc_8c051bca (pops pr + rts)
 
 def parse_worklist():
     funcs = list(EXTRA_FUNCS)
