@@ -56,6 +56,9 @@ static bool g_reached = false, g_watchdog = false, g_faulted = false;
 // --trace: log every executed PC (post-processed into the tick's function set + resolved indirects)
 static bool g_dotrace = false;
 static std::vector<u32> g_pctrace;
+static std::vector<u32> g_dimw, g_dimh;   // DIAG: per-part width,height captured at loc_8c033c06 (the muls.w)
+static std::vector<u32> g_objs;           // DIAG: obj base (r4) at each loc_8c033b0a entry
+static std::vector<size_t> g_objPart;     // DIAG: part index when each object started
 static const size_t TRACE_CAP = 20000000;
 static u32  g_faultEpc = 0, g_faultEvn = 0;
 
@@ -137,6 +140,9 @@ static inline void writeT(u32 addr, T v) {
     if (phys >= 0x0C000000u && phys < 0x10000000u) {
         u32 off = (phys - 0x0C000000u) & RAM_MASK16;
         g_wrote[off] = 1;
+        if (off >= 0x27D734u && off <= 0x27D880u)  // DIAG: who writes pool obj 0x27D734?
+            std::printf("  [W27D734] +0x%03X %zuB <- 0x%X  pc=0x%08X\n",
+                        off - 0x27D734u, sizeof(T), (unsigned)(u32)v, g_curPc);
         std::memcpy(&g_ram[off], &v, sizeof(T));
         return;
     }
@@ -239,6 +245,8 @@ namespace mc_readtrace {
     void onPc(u32 pc) {
         g_curPc = pc;
         if (g_dotrace && g_pctrace.size() < TRACE_CAP) g_pctrace.push_back(pc);
+        if ((pc & 0x1FFFFFFFu) == 0x0C033C06u) { g_dimw.push_back(Sh4cntx.r[8]); g_dimh.push_back(Sh4cntx.r[9]); }
+        if ((pc & 0x1FFFFFFFu) == 0x0C033B0Au) { g_objs.push_back(Sh4cntx.r[4]); g_objPart.push_back(g_dimw.size()); }
         if (++g_icount > WATCHDOG) { g_watchdog = true; throw debugger::Stop(); }
         if ((pc & 0x1FFFFFFFu) == g_retPc && Sh4cntx.r[15] >= g_spEntry) {
             g_reached = true; throw debugger::Stop();
@@ -506,6 +514,16 @@ int main(int argc, char** argv) {
         FILE* tf = std::fopen("trace_out.bin", "wb");
         if (tf) { std::fwrite(g_pctrace.data(), 4, g_pctrace.size(), tf); std::fclose(tf); }
         std::printf("wrote trace_out.bin (%zu PCs)\n", g_pctrace.size());
+    }
+
+    // DIAG: flycast ground-truth objects -> per-part (width,height). Marks which object owns each part.
+    std::printf("FLYCAST tile assembly: %zu objects, %zu parts total\n", g_objs.size(), g_dimw.size());
+    for (size_t o = 0; o < g_objs.size(); o++) {
+        size_t p0 = g_objPart[o], p1 = (o+1 < g_objs.size()) ? g_objPart[o+1] : g_dimw.size();
+        std::printf("OBJ[%zu] base=0x%08X  parts #%zu..#%zu:", o, g_objs[o], p0, (p1>p0?p1-1:p0));
+        for (size_t i = p0; i < p1 && i < p0+12; i++)
+            std::printf(" %dx%d", (int)(short)g_dimw[i], (int)(short)g_dimh[i]);
+        std::printf("\n");
     }
 
     // ---- GAME-TICK LEAF ORACLE: dump final ctx + full RAM = flycast ground truth ----

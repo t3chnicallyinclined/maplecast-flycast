@@ -54,7 +54,20 @@ def bsr_res(target):
 # functions the trace reaches (via computed jump) that the ;==== scanners excluded but
 # which transpile fine — e.g. loc_8c031094 is a bra-jump-table, not a braf.
 EXTRA_FUNCS = [(0x8c031094, 'bank03.asm', 2411, 2492, '-'),
-               (0x8c120220, 'bank12.asm', 1, 20, '-')]   # back-bank XMTRX loader (frchg;16x fmov @r4+;rts;frchg)
+               (0x8c120220, 'bank12.asm', 1, 20, '-'),   # back-bank XMTRX loader (frchg;16x fmov @r4+;rts;frchg)
+               # --- object-pool SPAWN chain (effects/projectiles): the universal spawner loc_8c044f12 is
+               # reached via jsr @rN from loc_8c0e3098 (already transpiled) -> was a no-op mc_unknown_call,
+               # so pool objects (0x27D734 etc.) were never allocated/spliced. re_kb:object_pool_spawn_chain.
+               (0x8c044f12, 'bank04.asm', 11793, 11877, '-'),  # Obj_Alloc: pop free node, memset, +0x03=cat, dispatch bank14 table[listop]
+               (0x8c129728, 'bank12.asm', 22327, 22343, '-'),  # memset(dst=r4,val=r5,cnt=r6)  [Obj_Alloc callee]
+               (0x8c044fa2, 'bank04.asm', 11880, 11915, '-'),  # list insert-at-head (bank14 table[0]); +0x08=prev/+0x0C=next
+               (0x8c129560, 'bank12.asm', 22005, 22088, '-'),  # var long-copy dispatcher (jmp-table cnt<=0x40) [constructor callee]
+               (0x8c129600, 'bank12.asm', 22128, 22149, '-'),  # long-copy generic loop (cnt>0x40); has 0x8C12960C
+               (0x8c034c38, 'bank03.asm', 11312, 11397, '-'),  # Obj_LoadAnim: +0x158/9 grp/anim, +0x154 cell-data [constructor tail]
+               # --- forward coverage: other bank14 listop handlers (non-head-insert categories) ---
+               (0x8c044fe0, 'bank04.asm', 11919, 11974, '-'),  # table[1] insert-at-tail (wide range folds locals; #data 11937-58 parsed as data)
+               (0x8c045066, 'bank04.asm', 12003, 12031, '-'),  # table[2] insert-after-node
+               (0x8c04503e, 'bank04.asm', 11976, 12000, '-')]  # table[3] insert-before-node
 
 def parse_worklist():
     funcs = list(EXTRA_FUNCS)

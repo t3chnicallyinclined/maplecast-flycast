@@ -12,6 +12,7 @@
 #include "sh4ctx.h"
 
 void tick_entry(Sh4Ctx *c);
+void call_addr(Sh4Ctx *c, u32 addr);   /* address dispatch, defined in gen_tick_all.c */
 
 /* runtime deps referenced by gen_tick_all.c */
 static long g_calls = 0;
@@ -55,4 +56,19 @@ long mc_shadow_run_tick(unsigned char *ram){
     c.r[15] = 0x8CFF0000u;      /* scratch stack top, as in Test A / validate_multiframe */
     tick_entry(&c);
     return g_calls;
+}
+
+/* Rebuild the render-walk projection @0x2D6AD8 from the LIVE matrix-stack descriptors, POST-tick
+ * — the LEGIT render-state rebuild (chain_render "tickproj"). The game-logic tick transiently
+ * zeroes the render matrices; predict carries the stale 64B proj (the "tickcam" hack), which is
+ * fine 1-tick-off-a-fresh-base but COMPOUNDS over a continuous drive until render_frame follows a
+ * bad transform and segfaults. Recomposing every frame keeps the render state valid. Returns the
+ * composed proj[0] (float bits) as a liveness signal — 0 means the composer didn't run/deposit. */
+u32 mc_shadow_compose_proj(unsigned char *ram){
+    Sh4Ctx c;
+    for (unsigned i = 0; i < sizeof c; i++) ((unsigned char*)&c)[i] = 0;
+    c.ram = ram;
+    c.r[15] = 0x8CFF0000u;
+    call_addr(&c, 0x8c1216c0u);   /* compose proj -> 0x2D6AD8 */
+    return r32(&c, 0x8C2D6AD8u);
 }
