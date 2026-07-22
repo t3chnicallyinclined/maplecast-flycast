@@ -82,8 +82,16 @@ def tile_for(qd,sd,cr,ie):
         rgba,w,h=r
         if any(rgba[3::4]):
             img=Image.frombytes("RGBA",(w,h),bytes(rgba))
+            # native render.rs body loop maps screen-TOP corners (A,B) to UV v=1 and screen-
+            # BOTTOM (C,D) to v=0  (uvs=[(ulo,1),(uhi,1),(uhi,0),(ulo,0)]); shaders.wgsl samples
+            # v straight (no 1-v), so v=1 reads the decoded tile's BOTTOM row. Body parts are
+            # stored bottom-up (docs/render-state/01-sprite-pipeline.md solved-bug #6), so this
+            # is an UNCONDITIONAL vertical flip — the native body path never consults mirror_v.
+            # Omitting it pasted every tile upside-down and, with the rr=pRows-row grid mapping,
+            # scattered the body into offset blocks (the "fragmentation"). mirror (texU) stays a
+            # simple L/R flip == native's ulo/uhi swap for these axis-aligned quads.
+            img=img.transpose(Image.FLIP_TOP_BOTTOM)
             if qd['mirror']: img=img.transpose(Image.FLIP_LEFT_RIGHT)
-            if qd['mirror_v']: img=img.transpose(Image.FLIP_TOP_BOTTOM)
     cache[key]=img
     return img
 
