@@ -51,13 +51,40 @@ int main(int argc, char **argv){
          * frame. This reproduces the live ~frame-180 crash where we can localize it. */
         int N = argc>3 ? atoi(argv[3]) : 300;
         printf("driveN: %d frames of tick+compose+render on %s\n", N, rp); fflush(stdout);
+        static unsigned char projsave[64];
         for(int f=0; f<N; f++){
             g_calls = 0;
+            /* PROJCARRY: capture the SEED's valid render projection @0x2D6AD8 once (frame 0, before
+             * any tick zeroes it). The tick-only drive can't rebuild the proj (the render pass does
+             * that, and compose alone yields zeros), so for a short idle/animation demo we CARRY the
+             * seed proj into every frame's render copy -> finite screen coords across the drive. */
+            if(f==0) memcpy(projsave, ram+0x002D6AD8u, 64);
             /* Arena frame-setup (loc_8c033950, render-pass-side, NOT in the tick): reset the
              * tile-arena running cursor so the tick-side tile assembler (loc_8c033b0a) rebuilds
              * correct per-object +0xDC prefix-sums each frame instead of accumulating -> collapsing
              * to 0x180 -> render_frame DESC-base wrong -> quad fade to 0. THE render-state refresh. */
             if(!getenv("NOARENA")){ *(u32*)(ram+0x1F9D98)=0; *(u32*)(ram+0x1F9D94)=16; }
+            /* INJECT=1: drive P1's latched Input_DEC (@0x2681DC) with a scripted demo sequence so
+             * the executor VISIBLY drives the match (walk/jump/attack) — the "drivable pure-local"
+             * proof. CPS2 active-high bits (dc_to_cps2): R=0x0400 L=0x0800 U=0x2000 D=0x1000,
+             * LP=0x0200 HP=0x0100 LK=0x0040 HK=0x0020. cur@+0, prev@+2, pressed@+4, released@+6. */
+            if(getenv("INJECT")){
+                static unsigned short prev = 0;
+                unsigned short cur = 0;
+                if      (f < 30)  cur = 0x0400;              /* walk FORWARD (Right) */
+                else if (f < 42)  cur = 0x0400 | 0x2000;     /* jump forward (Right+Up) */
+                else if (f < 55)  cur = 0x0100;              /* HP punch */
+                else if (f < 70)  cur = 0x0400 | 0x0100;     /* forward + HP */
+                else if (f < 85)  cur = 0x0800;              /* walk BACK (Left) */
+                else if (f < 100) cur = 0x1000 | 0x0040;     /* crouch LK (Down+LK) */
+                else              cur = 0x0100 | 0x0200;     /* HP+LP */
+                unsigned char *idec = ram + 0x2681DCu;       /* P1 Input_DEC */
+                *(unsigned short*)(idec+0) = cur;
+                *(unsigned short*)(idec+2) = prev;
+                *(unsigned short*)(idec+4) = (unsigned short)(cur & ~prev);
+                *(unsigned short*)(idec+6) = (unsigned short)(prev & ~cur);
+                prev = cur;
+            }
             tick_entry(&c);                 /* game-logic tick, in place (persistent game state) */
             /* FIX (re expert): the deferred-render-queue counter @0x8C289F80 is reset only by the
              * STUBBED render flush -> it jams at 16. Reset it each frame so the enqueue keeps working. */
@@ -67,7 +94,8 @@ int main(int argc, char **argv){
              * the next tick reads (the fast ~5f drain). proj + render both run on the copy. */
             u8 *rram = ram;
             if(!getenv("RENDER_INPLACE")){ memcpy(scratch, ram, sizeof ram); rram = scratch; }
-            if(!getenv("NOPROJ")){ Sh4Ctx pc; memset(&pc,0,sizeof pc); pc.ram=rram; pc.r[15]=0x8CFF0000u;
+            if(getenv("PROJCARRY")){ memcpy(rram+0x002D6AD8u, projsave, 64); }   /* carry seed proj -> finite coords */
+            else if(!getenv("NOPROJ")){ Sh4Ctx pc; memset(&pc,0,sizeof pc); pc.ram=rram; pc.r[15]=0x8CFF0000u;
               call_addr(&pc, 0x8c1216c0u); }
             /* Clamp the 16 slot-table layer counts to 0x60: the walker (loc_8c0308c2) reads them
              * BLIND, and a corrupted high count overruns g_scene = the live segfault. */
@@ -75,6 +103,23 @@ int main(int argc, char **argv){
             render_frame_reset();
             { Sh4Ctx rc; memset(&rc,0,sizeof rc); rc.ram=rram; rc.r[15]=0x8CFF0000u;
               render_frame(&rc); }
+            /* SCDIR=dir: dump each frame's scene quads (nscene * 88B) so an offline rasterizer
+             * (make_demo.py) can turn the PURE-LOCAL drive into a visible PNG/GIF sequence —
+             * a demo of the executor-as-engine that sidesteps the live-client GPU driver exit. */
+            { const char *scd = getenv("SCDIR");
+              if(scd){ char p[512]; snprintf(p,sizeof p,"%s/scene_%03d.bin", scd, f);
+                FILE *so=fopen(p,"wb"); if(so){ int n=render_frame_nscene(); unsigned long qb=render_frame_quad_bytes();
+                  fwrite(render_frame_scene(), qb, (size_t)n, so); fclose(so); } } }
+            /* CHDIR=dir: dump the BYTE-EXACT game-tick state per frame — the 6 char structs
+             * (page 616 @0x268340) + the global page (@0x289000). This is the proven-correct
+             * data (render coords need the unsolved render-pass proj; game state does not), so
+             * make_demo.py visualizes the real match the executor drives: positions, health,
+             * meters, animation — pure local, no server, no flycast. Dump `ram` AFTER the tick
+             * (the persistent game state; render ran on the scratch copy, ram is untouched). */
+            { const char *chd = getenv("CHDIR");
+              if(chd){ char p[512]; snprintf(p,sizeof p,"%s/state_%03d.bin", chd, f);
+                FILE *co=fopen(p,"wb"); if(co){ /* 0x268000..0x28A000 covers chars(+0x340) + globals(+0x21000) */
+                  fwrite(ram+0x268000u, 1, 0x22000u, co); fclose(co); } } }
             printf("  f%d: %d quads (tickcalls=%ld)\n", f, render_frame_nscene(), g_calls);
             fflush(stdout);
         }
