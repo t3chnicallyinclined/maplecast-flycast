@@ -28,18 +28,21 @@ CW, CH = 720, 560
 canvas = tk.Canvas(root, width=CW, height=CH, bg="#0c0e14", highlightthickness=0); canvas.pack()
 hud = tk.Label(root, text="", fg="#8b96ac", bg="#0c0e14", font=("Consolas", 10)); hud.pack(fill="x")
 root.configure(bg="#0c0e14")
-root.bind('<KeyPress>',   lambda e: pressed.add(e.keysym))
-root.bind('<KeyRelease>', lambda e: pressed.discard(e.keysym))
+# bind_all catches keys regardless of which child has focus; force focus so the window gets them.
+root.bind_all('<KeyPress>',   lambda e: pressed.add(e.keysym.lower() if len(e.keysym)==1 else e.keysym))
+root.bind_all('<KeyRelease>', lambda e: pressed.discard(e.keysym.lower() if len(e.keysym)==1 else e.keysym))
+canvas.focus_set(); root.after(200, root.focus_force)
+IMG_ID = canvas.create_image(0, 0, anchor="nw")   # ONE image item, updated each frame (no leak)
 
-QFMT = "<5I10f6If"; cache = {}
+QFMT = "<5I10f6If"; cache = {}; rcache = {}
 def tile(qd, sd, cr, ie):
     key = (qd['gfx1'], qd['sel'], (qd['tcw']>>21)&0x3F, tuple(sd), tuple(cr), qd['mirror'])
-    if key in cache: return cache[key]
+    if key in cache: return key, cache[key]
     r = D.decode_body(qd, sd, ie, ram, cr); img = None
     if r is not None and any(r[0][3::4]):
         img = Image.frombytes("RGBA", (r[1], r[2]), bytes(r[0])).transpose(Image.FLIP_TOP_BOTTOM)
         if qd['mirror']: img = img.transpose(Image.FLIP_LEFT_RIGHT)
-    cache[key] = img; return img
+    cache[key] = img; return key, img
 
 def tx(x): return int((x - 150) * 1.05)          # fixed view fit (coords ~200..680 x, 160..520 y)
 def ty(y): return int((y - 135) * 1.05)
@@ -65,14 +68,19 @@ def frame():
         items.append((q[21], pts, qd, list(sd[i*4:i*4+4]), list(struct.unpack_from('<2i', crb, i*8)), ie[i]))
     drew = 0
     for z, pts, qd, s, c, e in sorted(items, key=lambda t: t[0]):
-        t = tile(qd, s, c, e)
+        key, t = tile(qd, s, c, e)
         if t is None: continue
         sp = [(tx(x), ty(y)) for x, y in pts]
         x0 = min(p[0] for p in sp); y0 = min(p[1] for p in sp)
         x1 = max(p[0] for p in sp); y1 = max(p[1] for p in sp)
-        img.alpha_composite(t.resize((max(1,x1-x0), max(1,y1-y0)), Image.NEAREST), (x0, y0)); drew += 1
-    state['img'] = ImageTk.PhotoImage(img.convert("RGB"))
-    canvas.create_image(0, 0, anchor="nw", image=state['img'])
+        w = max(1, x1-x0); h = max(1, y1-y0)
+        rk = (key, w, h); rt = rcache.get(rk)
+        if rt is None:                              # cache resized tiles (skip re-resize each frame)
+            rt = t.resize((w, h), Image.NEAREST)
+            if len(rcache) < 8000: rcache[rk] = rt
+        img.paste(rt, (x0, y0), rt); drew += 1      # paste-with-mask: faster than alpha_composite
+    state['img'] = ImageTk.PhotoImage(img)
+    canvas.itemconfig(IMG_ID, image=state['img'])  # reuse the one image item
     state['frames'] += 1; now = time.time()
     if now - state['fps_t'] >= 0.5:
         fps = state['frames'] / (now - state['fps_t']); state['frames'] = 0; state['fps_t'] = now
