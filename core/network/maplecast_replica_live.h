@@ -129,4 +129,10 @@ bool enabled();
 // no client is listening — preserving the zero-overhead-when-idle hot-path contract.
 bool hasClients();
 
+// True once the STATIC PREFIX (VRAM 8MB + PVR 32KB + RAM backdrop + region tables) has
+// been built from a real SH-4 render pass. The executor-drive path (maplecast_shadow_exec)
+// gates its SH-4 takeover on this: the SH-4 must render >=1 in-match frame so the prefix
+// captures valid VRAM/GFX tables before the transpiled tick replaces it. Diagnostic-safe.
+bool prefixReady();
+
 }

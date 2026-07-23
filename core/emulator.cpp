@@ -49,6 +49,7 @@
 #include "network/mc_readtrace.h"             // STEP 2 read-set delta trace (dynarec->interp flip)
 #include "network/replay_reader.h"
 #include "network/replay_writer.h"
+#include "network/maplecast_shadow_exec.h"    // MAPLECAST_EXECUTOR: transpiled tick replaces the SH-4
 #include "network/maplecast_control_ws.h"
 #include "network/maplecast_replica_live.h"
 #include "network/maplecast_player.h"
@@ -949,7 +950,12 @@ void Emulator::runInternal()
 			do {
 				resetRequested = false;
 
-				getSh4Executor()->Run();
+				// MAPLECAST_EXECUTOR: the transpiled game-tick executor advances the authoritative
+				// mem_b in place and broadcasts via /replica-live. When it drives (in-match, prefix
+				// ready) the SH-4 is bypassed for this frame; otherwise run the SH-4 normally. No-op
+				// (always runs the SH-4) unless the executor is linked AND MAPLECAST_EXECUTOR is set.
+				if (!maplecast_shadow_exec::driveFrame())
+					getSh4Executor()->Run();
 
 				if (resetRequested)
 				{

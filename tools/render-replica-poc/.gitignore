@@ -99,6 +99,11 @@ _frame_data.json
 _ram_f9*.bin
 _ram_f90_s5*.bin
 oracle_*.bin
+# captured /replica-live seed (RAM/VRAM/PVR/prefix/region-table) + tick-diff dumps — ROM-derived
+_prefix.*
+_tick_*_out.bin
+_tickhash_*.exe
+_tickhash_*.obj
 
 # derived worklists + ticktrace (regenerate via _handoff/scan_tick.py + runner --trace)
 _handoff/funclist.txt

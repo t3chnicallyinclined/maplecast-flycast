@@ -18,4 +18,14 @@ namespace maplecast_shadow_exec {
 // path). No-op unless the MAPLECAST_SHADOW_EXEC env var is set. Never mutates guest state.
 void onFrame();
 
+// EXECUTOR DRIVE (MAPLECAST_EXECUTOR) — the transpiled game-tick REPLACES the SH-4. Called
+// from Emulator::runInternal() in place of getSh4Executor()->Run(). When it returns true it
+// has advanced the AUTHORITATIVE mem_b one game-logic frame (input inject -> tick -> compose
+// render projection) and broadcast it via /replica-live; the caller must NOT run the SH-4.
+// Returns false (caller runs the SH-4 normally) when: MAPLECAST_EXECUTOR is unset, the build
+// lacks the linked executor, not in-match, or the /replica-live static prefix isn't ready yet
+// (the SH-4 must render the first in-match frames so VRAM/GFX tables are captured before the
+// tick takes over). No-op returning false in a non-MAPLECAST_SHADOW_EXEC build.
+bool driveFrame();
+
 }

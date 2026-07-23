@@ -11,22 +11,27 @@
 // never becomes an unresolved symbol.
 #ifndef MAPLECAST_SHADOW_EXEC_BUILD
 
-namespace maplecast_shadow_exec { void onFrame() {} }
+namespace maplecast_shadow_exec { void onFrame() {} bool driveFrame() { return false; } }
 
 #else
 
 #include "hw/sh4/sh4_mem.h"      // mem_b — flat 16MB area-3 image, offset = guestAddr & 0xFFFFFF
 #include "hw/mem/addrspace.h"    // addrspace::read8 (in-match gate)
+#include "input/gamepad_device.h"        // kcode[4], lt[4], rt[4] — the live input latch (drive path)
+#include "maplecast_replica_live.h"      // onRenderFrame() broadcast + prefixReady() handover gate
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
 #include <chrono>
+#include <thread>
 
 // implemented in tools/render-replica-poc/shadow_exec_runner.c (C linkage)
 extern "C" long mc_shadow_run_tick(unsigned char *ram);
 extern "C" long mc_shadow_last_nonram_reads(void);   // reads outside area-3 RAM (ROM/hw) last tick
 extern "C" unsigned mc_shadow_last_nonram_addr(void);
+extern "C" unsigned mc_shadow_compose_proj(unsigned char *ram);   // rebuild render proj @0x2D6AD8 post-tick
 
 namespace maplecast_shadow_exec {
 
@@ -176,6 +181,100 @@ void onFrame() {
     // the fresh snapshot becomes next frame's prev; recycle the (now-stale) prev buffer
     unsigned char *tmp = g_prev; g_prev = g_free; g_free = tmp;
     g_havePrev = true;
+}
+
+// ============================================================================
+// EXECUTOR DRIVE — the transpiled game-tick REPLACES the SH-4 (MAPLECAST_EXECUTOR).
+// Unlike onFrame() (read-only validation on a COPY), this runs the tick IN PLACE on the
+// AUTHORITATIVE mem_b: the executor IS the game. Same recipe proven byte-exact offline
+// (engine_loop / oracle_diff): inject Input_DEC from the live pad latch, run one game-logic
+// tick, reset the render-queue arena/counters, and recompose the render projection so the
+// /replica-live wire ships render-ready state. The existing client renders it UNCHANGED.
+// ============================================================================
+
+static const unsigned IN_MATCH = 0x8C289624;   // in-match flag (same as onFrame / the .mctele tap)
+
+// DC pad (active-low) -> CPS2 latched button bits (active-high). Byte-identical to the offline
+// executor_server_net.c / native-client replica.rs dc_to_cps2 that drove the playable demo.
+static inline uint16_t dc_to_cps2(uint16_t btn, uint8_t ltv, uint8_t rtv) {
+    #define DN(b) ((btn & (b)) == 0)
+    uint16_t m = 0;
+    if (DN(0x0010)) m |= 0x2000; if (DN(0x0020)) m |= 0x1000; if (DN(0x0040)) m |= 0x0800; if (DN(0x0080)) m |= 0x0400;
+    if (DN(0x0008)) m |= 0x8000; if (DN(0x0400)) m |= 0x0200; if (DN(0x0200)) m |= 0x0100;
+    if (DN(0x0004)) m |= 0x0040; if (DN(0x0002)) m |= 0x0020;
+    if (ltv >= 0x80) m |= 0x0080; if (rtv >= 0x80) m |= 0x0010;
+    return m;
+    #undef DN
+}
+
+static inline void wr16(unsigned char *p, uint16_t v) { p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8); }
+
+static int  g_drive = -1;                       // -1 unresolved; 0/1 from MAPLECAST_EXECUTOR
+static uint16_t g_prevIn[2] = { 0, 0 };         // per-slot previous CPS2 latch (edge computation)
+static long g_driveFrames = 0;
+static std::chrono::steady_clock::time_point g_pace; static bool g_paceInit = false;
+
+static bool driveOn() {
+    if (g_drive < 0) {
+        const char *e = getenv("MAPLECAST_EXECUTOR");
+        g_drive = (e && e[0] && e[0] != '0') ? 1 : 0;
+        if (g_drive) printf("[EXECUTOR] ENABLED — transpiled game-tick DRIVES the authoritative mem_b "
+                            "(SH-4 game-tick replaced; /replica-live broadcasts it)\n");
+    }
+    return g_drive == 1;
+}
+
+bool driveFrame() {
+    if (!driveOn()) return false;
+    // In-match gate — the executor only reproduces the in-match tick (loc_8c0358be). Outside a
+    // match, hand back to the SH-4 (menus / char-select / transitions are not transpiled).
+    if (addrspace::read8(IN_MATCH) == 0) { g_paceInit = false; return false; }
+    // HANDOVER: let the SH-4 render the first in-match frames so the /replica-live static prefix
+    // (VRAM 8MB + PVR palette + GFX tables) is captured from a real render pass before we take
+    // over. Bodies decode from RAM thereafter (VRAM static), so one valid capture suffices.
+    if (!maplecast_replica_live::prefixReady()) return false;
+
+    unsigned char *ram = (unsigned char *)&mem_b[0];
+
+    // 1. Inject Input_DEC (P1 @0x2681DC, P2 @0x2681F0; stride 0x14) from the live pad latch.
+    //    kcode is active-low DC buttons | 0xFFFF0000; lt/rt hold the 0-255 trigger in the high byte.
+    for (int p = 0; p < 2; p++) {
+        uint16_t btn = (uint16_t)(kcode[p] & 0xFFFFu);
+        uint16_t cur = dc_to_cps2(btn, (uint8_t)(lt[p] >> 8), (uint8_t)(rt[p] >> 8));
+        uint16_t prev = g_prevIn[p];
+        unsigned char *id = ram + 0x2681DC + p * 0x14;
+        wr16(id + 0, cur); wr16(id + 2, prev);
+        wr16(id + 4, (uint16_t)(cur & ~prev)); wr16(id + 6, (uint16_t)(prev & ~cur));
+        g_prevIn[p] = cur;
+    }
+    // 2. Arena frame-setup (render-queue tile arena; engine_loop recipe).
+    *(uint32_t *)(ram + 0x1F9D98) = 0; *(uint32_t *)(ram + 0x1F9D94) = 16;
+    // 3. Authoritative game-logic tick, byte-exact vs flycast, IN PLACE on mem_b.
+    mc_shadow_run_tick(ram);
+    // 4. Render-queue counter reset.
+    ram[0x289F80] = ram[0x289F81] = ram[0x289F82] = ram[0x289F83] = 0;
+    // 5. Recompose the render projection @0x2D6AD8 from the driven matrix stack (dynamic camera).
+    mc_shadow_compose_proj(ram);
+    // 6. Slot-count clamp (guard the render draw-list counts).
+    for (int L = 0; L < 16; L++) if (ram[0x2895E0 + L] > 0x60) ram[0x2895E0 + L] = 0x60;
+    // 7. Advance the guest vframe (0x3496B0) — the executor masks it (vsync-owned), but
+    //    onRenderFrame dedups on it, so bump it or every capture past the first is dropped.
+    { uint32_t v = *(uint32_t *)(ram + 0x3496B0) + 1u; *(uint32_t *)(ram + 0x3496B0) = v; }
+    // 8. Broadcast this frame via /replica-live (STARTRENDER is gone with the SH-4 render pass).
+    maplecast_replica_live::onRenderFrame(nullptr);
+    g_driveFrames++;
+
+    // 9. Pace to ~60 fps real-time — the SH-4's frame throttle went away with ->Run().
+    auto now = std::chrono::steady_clock::now();
+    if (g_paceInit) {
+        auto target = g_pace + std::chrono::microseconds(16667);
+        if (now < target) { std::this_thread::sleep_until(target); g_pace = target; }
+        else g_pace = now;   // fell behind — don't accumulate debt
+    } else { g_pace = now; g_paceInit = true; }
+
+    if ((g_driveFrames % 300) == 0)
+        printf("[EXECUTOR] drove %ld authoritative frames (SH-4 game-tick bypassed)\n", g_driveFrames);
+    return true;
 }
 
 } // namespace maplecast_shadow_exec

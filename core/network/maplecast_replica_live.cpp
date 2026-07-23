@@ -1616,4 +1616,6 @@ bool enabled() { return _armed; }
 
 bool hasClients() { return _armed && _clientCount.load(std::memory_order_relaxed) > 0; }
 
+bool prefixReady() { return _prefixReady.load(std::memory_order_acquire); }
+
 } // namespace maplecast_replica_live
