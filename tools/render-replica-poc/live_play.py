@@ -5,14 +5,18 @@ the real sprite decoder. Move: WASD / arrows. Attacks: J=LP K=HP U=LK I=HK, Spac
 
 Run: python live_play.py [_ram_f90.bin]
 """
-import subprocess, struct, sys, math
+import subprocess, struct, sys, math, os
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)                          # find mvc2_decode from any cwd
 import tkinter as tk
 from PIL import Image, ImageTk
 import mvc2_decode as D
 
-RAM = sys.argv[1] if len(sys.argv) > 1 else "_ram_f90.bin"
+RAM = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "_ram_f90.bin")
+if not os.path.isabs(RAM): RAM = os.path.join(HERE, RAM)
+ENGINE = os.path.join(HERE, "engine_loop.exe")
 ram = bytearray(open(RAM, "rb").read())          # resident sprite data for decode_body (from the seed)
-eng = subprocess.Popen(["./engine_loop.exe", RAM], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+eng = subprocess.Popen([ENGINE, RAM], cwd=HERE, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 
 # tk keysym -> CPS2 active-high bit
 KEY = {'Up':0x2000,'w':0x2000, 'Down':0x1000,'s':0x1000, 'Left':0x0800,'a':0x0800, 'Right':0x0400,'d':0x0400,
