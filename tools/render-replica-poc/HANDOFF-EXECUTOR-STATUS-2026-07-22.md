@@ -103,8 +103,52 @@ state degrades. **This is the render-state-rebuild step, orthogonal to game-logi
    The game state is correct now, so this is purely render-state plumbing.
 3. Then the live `MC_LOCAL` drive renders stably → pure-local drivable game.
 
+## 2026-07-23 — EXECUTOR INTEGRATED INTO THE HEADLESS SERVER (replaces the SH-4 game-tick)
+The executor now DRIVES flycast's authoritative `mem_b` in place of `getSh4Executor()->Run()` — the
+goal the whole effort was building toward (replace the SH-4/flycast game+input server with the executor
+for a perf boost). Committed `49376e4dc`.
+
+**How it's wired (path B — into flycast, reuse the /replica-live wire):**
+- `maplecast_shadow_exec::driveFrame()` (new, the inverse of `onFrame()`'s read-only validation) runs the
+  full offline-proven recipe IN PLACE on `mem_b`: inject `Input_DEC` from the live `kcode` latch (P1
+  `@0x2681DC`, P2 `@0x2681F0`, `dc_to_cps2`) → arena reset (`0x1F9D98`=0/`0x1F9D94`=16) →
+  `mc_shadow_run_tick` → counter reset (`0x289F80`) → `mc_shadow_compose_proj` (rebuild render proj
+  `@0x2D6AD8`) → slot clamp → advance guest vframe (`0x3496B0`) → `maplecast_replica_live::onRenderFrame(nullptr)`
+  to publish → pace to 60 fps.
+- `emulator.cpp:952` skips `->Run()` when `driveFrame()` returns true.
+- **Why the client needs NO change:** the `/replica-live` FRMx wire already ships the 24 regions that
+  are render-ready state — proj (`cam_mat` `@0x2D6AD8`), slot table, all 6 char structs, camera, objpool,
+  arena, tiledesc, effect templates (verified by decoding a captured `_prefix.regs`). Server runs
+  tick+compose_proj → `mem_b` render-ready → existing `render_frame` client renders it unchanged.
+- **`compose_proj` needs no extra sources:** its target `fn_8c1216c0` is defined in `gen_tick_all.c`
+  (47081) — the `MAPLECAST_SHADOW_EXEC` CMake block already links everything.
+
+**Gating / safety:** OFF by default. `MAPLECAST_EXECUTOR` unset → `driveFrame` returns false → SH-4 runs
+normally → byte-identical to today's binary. Handover-gated on `maplecast_replica_live::prefixReady()`:
+the SH-4 renders the first in-match frames (populating VRAM/GFX tables + the static prefix) before the
+tick takes over; bodies decode from RAM thereafter (VRAM static).
+
+**De-risked:** `_tickhash.c` proves MSVC `/O2` compiles `gen_tick_all.c` **byte-exact** vs zig `-O1` (full
+16 MB RAM identical over 300 ticks) — so the headless (cl.exe) rebuild is safe. Headless builds+links
+(11.2 MB, drive path baked in, `[EXECUTOR] ENABLED` string confirmed).
+
+**RUNTIME TEST (needs the MVC2 ROM — prod/dev box, never in-tree):**
+```
+# build once:  cmake -S . -B build-headless-win -DMAPLECAST_SHADOW_EXEC=ON && cmake --build build-headless-win --target flycast
+# run (MAPLECAST_EXECUTOR arms the drive; REPLICA_LIVE arms the :7212 broadcast; STATE_MERGE lets capture
+#  run even with no client so you can watch the drive log):
+MAPLECAST_REPLICA_LIVE=1 MAPLECAST_STATE_MERGE=1 MAPLECAST_EXECUTOR=1 \
+  build-headless-win/flycast.exe <path-to-mvc2.gdi>
+# get into a match; expect the log:  [EXECUTOR] ENABLED ...  then  [EXECUTOR] drove N authoritative frames
+# render it: connect the native GSTA client (ws://127.0.0.1:7212) or the browser /replica-live client.
+```
+**KNOWN LIMITATION — no clean handback yet.** When in-match drops, the SH-4 resumes from a pre-handover
+(stale) PC. Fine for a controlled single-match test; continuous prod needs the handback (freeze-at-match-end,
+or snapshot/restore the SH-4 context at the boundary). This is the next runtime task.
+
 ## Repo hygiene
-`gen_tick_all.c`, `gen_*.c`, `*.wasm`, `_ram_*.bin`, `truth_f*.bin`, `_step*.bin`, `realcore/*.bin` are
-DERIVED/ROM-adjacent → **gitignored, never commit.** Tracked changes this effort: `chain_render.c` (driveN/
-tickN modes), `shadow_exec_runner.c` (`mc_shadow_compose_proj`), `realcore/runner.cpp` (the per-part/obj
-logger). All temporary `gen_tick_all.c` diagnostic edits have been reverted.
+`gen_tick_all.c`, `gen_*.c`, `*.wasm`, `_ram_*.bin`, `_prefix.*`, `_tick_*_out.bin`, `truth_f*.bin`,
+`_step*.bin`, `realcore/*.bin` are DERIVED/ROM-adjacent → **gitignored, never commit.** Tracked changes:
+`maplecast_shadow_exec.{cpp,h}` (`driveFrame`), `maplecast_replica_live.{cpp,h}` (`prefixReady`),
+`emulator.cpp` (the hook), `_tickhash.c` (MSVC byte-exact gate), `chain_render.c`, `shadow_exec_runner.c`
+(`mc_shadow_compose_proj`), `realcore/runner.cpp`. All temporary `gen_tick_all.c` diagnostic edits reverted.
