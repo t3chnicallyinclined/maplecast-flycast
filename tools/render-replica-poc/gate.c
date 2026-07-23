@@ -54,6 +54,15 @@ void mc_note_read(u32 a, u32 n){ (void)n;
     if(g_nr_n<64) g_nr_set[g_nr_n++] = a;
 }
 
+/* MC_BALANCE runtime stack-leak sink: call_addr reports any dispatched fn that returns with
+ * r15 != entry (an executed `;====` continuation whose pop was uncranked). Distinct fns + delta. */
+static u32 g_imbal[128]; static int g_imbal_d[128], g_imbal_n=0; static long g_imbal_total=0;
+void mc_bal(u32 a, u32 sp0, u32 sp1){
+    g_imbal_total++;
+    for(int i=0;i<g_imbal_n;i++) if(g_imbal[i]==a) return;
+    if(g_imbal_n<128){ g_imbal[g_imbal_n]=a; g_imbal_d[g_imbal_n]=(int)(sp1-sp0); g_imbal_n++; }
+}
+
 static u8 ram[32u*1024u*1024u];
 
 /* CPS2 active-high input bits: U=0x2000 D=0x1000 L=0x0800 R=0x0400 | LP=0x0200 HP=0x0100
@@ -105,6 +114,10 @@ int main(int argc,char**argv){
             fflush(stdout); gaps++;
         }
         if(fr%100==0){ printf("[gate] f%d disp=%ld\n", fr, disp); fflush(stdout); }
+    }
+    if(g_imbal_n){
+        printf("\n[BALANCE] %d distinct fn(s) returned r15-imbalanced (%ld total) — executed stack leaks:\n", g_imbal_n, g_imbal_total);
+        for(int i=0;i<g_imbal_n;i++) printf("    loc_%08x  delta %+d\n", g_imbal[i], g_imbal_d[i]);
     }
     printf("\n[DONE] %d input-rich frames | dispatch[%ld..%ld] | %d gaps\n", N, mind, maxd, gaps);
     printf("[DONE] non-RAM (ROM/hw) footprint = %d distinct address(es), first reader fn 0x%08X:\n", g_nr_n, g_nr_fn);

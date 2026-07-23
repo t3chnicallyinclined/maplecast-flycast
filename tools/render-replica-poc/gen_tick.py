@@ -120,6 +120,7 @@ def main():
     funcs = parse_worklist()
     pools = global_pools([b for _, b, _, _, _ in funcs])
     ok, fail = [], []
+    tailcall_targets = set()   # every cross-;==== branch rewritten to call_addr(target); return
     for addr, bank, first, last, data in funcs:
         fn = f"sub_{addr:08x}"
         try:
@@ -140,7 +141,9 @@ def main():
                 tgt = m.group(1)
                 if tgt in defined: return m.group(0)   # local label: keep the goto
                 hx = re.search(r'loc_([0-9a-fA-F]+)', tgt)   # loc_<hex> or bankNN.loc_<hex>
-                if hx: return f"{{ call_addr(c, 0x{hx.group(1)}u); return; }}"
+                if hx:
+                    tailcall_targets.add(int(hx.group(1), 16))
+                    return f"{{ call_addr(c, 0x{hx.group(1)}u); return; }}"
                 return m.group(0)
             body = re.sub(r'goto ([A-Za-z0-9_.]+);', _fixgoto, body)
             blocks = sorted(int(b[4:], 16) for b in defined)   # every basic-block addr in this fn
@@ -155,6 +158,11 @@ def main():
     for addr, fn, body, blocks in ok:
         for ba in blocks:
             block_of.setdefault(ba, addr)
+    # DURABLE STACK-LEAK GUARD: every cross-;==== branch is emitted as call_addr(target); return.
+    # If `target` isn't the entry/mid-block of a transpiled function it hits mc_unknown_call (no-op)
+    # -> a `;====` continuation that pops the stack never runs -> r15 leak -> bad indirect call ->
+    # hang (the JUMP-input class). List any uncovered target so it can be added to EXTRA_FUNCS.
+    uncranked = sorted(t for t in tailcall_targets if t not in block_of)
     with open('gen_tick_all.c', 'w') as f:
         f.write('#include "sh4ctx.h"\n')
         f.write('void mc_unknown_call(u32 a);\nextern int mc_call_guard(void);\n')
@@ -170,13 +178,25 @@ def main():
         f.write('\nextern u32 mc_curfn; extern void mc_push(u32); extern void mc_pop(void);\n')
         f.write('#ifdef MC_DHOOK\nextern void mc_dispatch_hook(u32,Sh4Ctx*);\n#endif\n')
         f.write('void call_addr(Sh4Ctx*c,u32 a){\n if(mc_call_guard()) return;\n mc_curfn=a; mc_push(a);\n')
+        f.write('#ifdef MC_BALANCE\n unsigned int _sp0=c->r[15];\n#endif\n')
         f.write('#ifdef MC_DHOOK\n mc_dispatch_hook(a,c);\n#endif\n switch(a){\n')
         for ba, entry in sorted(block_of.items()):
             f.write(f'  case 0x{ba:08x}u: fn_{entry:08x}(c, 0x{ba:08x}u); break;\n')
-        f.write('  default: mc_unknown_call(a); { extern void mc_unk_regs(u32*); mc_unk_regs(c->r); } break;\n }\n mc_pop();\n}\n')
+        f.write('  default: mc_unknown_call(a); { extern void mc_unk_regs(u32*); mc_unk_regs(c->r); } break;\n }\n')
+        # MC_BALANCE: a dispatched fn that returns with r15 != entry leaked the SH4 stack — a
+        # `;==== ` continuation that pops didn't run (uncranked). Flags the executed stack-leak
+        # class at runtime (precise; static guard over-reports never-executed branches).
+        f.write('#ifdef MC_BALANCE\n if(c->r[15]!=_sp0){ extern void mc_bal(u32,u32,u32); mc_bal(a,_sp0,c->r[15]); }\n#endif\n')
+        f.write(' mc_pop();\n}\n')
         f.write(f'\nvoid tick_entry(Sh4Ctx*c){{ fn_{ENTRY:08x}(c, 0x{ENTRY:08x}u); }}\n')
 
     print(f"worklist: {len(funcs)} | transpiled OK: {len(ok)} | FAILED: {len(fail)}")
+    if uncranked:
+        print(f"--- {len(uncranked)} UNCRANKED tail-call continuation(s) (stack-leak risk; add to EXTRA_FUNCS) ---")
+        for t in uncranked:
+            print(f"  loc_{t:08x}  bank{((t>>16)&0xff):02x}.asm")
+    else:
+        print("stack-leak guard: all cross-;==== branch targets are cranked (no uncranked continuations)")
     if fail:
         print("--- failures (need a codegen/pool gap) ---")
         from collections import Counter
