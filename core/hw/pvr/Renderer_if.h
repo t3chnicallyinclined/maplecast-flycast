@@ -27,6 +27,10 @@ void rend_resync_after_rollback();
 void rend_wait_render_idle();   // A2 run-ahead: drain render pipeline before rewind
 void rend_enable_renderer(bool enabled);
 bool rend_is_enabled();
+// Predict-live re-sim render-skip: swap to a norend renderer for invisible rollback frames
+// (keeps present()->Stop + all bookkeeping, zero GPU work). See Renderer_if.cpp.
+void rend_begin_headless_resim();
+void rend_end_headless_resim();
 void rend_serialize(Serializer& ser);
 void rend_deserialize(Deserializer& deser);
 static void rend_updatePalette();

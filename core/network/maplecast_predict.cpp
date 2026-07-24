@@ -1325,7 +1325,15 @@ void advanceHeadlessOneFrame()
 	// server cross-instance — even at IDLE with 0 rollbacks (pure lockstep, which goes through
 	// runInternal, matched the server 260/260). This is why flycast's own GGPO advances with
 	// emu.run(), not a bare Run. Reference: the pure-lockstep byte-perfect path. (2026-07-24)
+	// Swap to a norend renderer for this INVISIBLE re-sim/catch-up frame so no GPU work and no
+	// re-sim pixels reach the window, while the byte-proven present()->Stop boundary + all
+	// renderer bookkeeping stay identical to the norend server. No-op on the headless build
+	// (already norend); the displayed head frame renders via Emulator::run with the GL renderer
+	// restored. Do NOT rend_enable_renderer(false) — that kills present()->Stop and diverges
+	// (flycast-internals-expert 2026-07-24).
+	rend_begin_headless_resim();
 	emu.runRollbackFrame();
+	rend_end_headless_resim();
 	settings.input.fastForwardMode = prevFF; settings.aica.muteAudio = prevMute;
 }
 

@@ -843,6 +843,31 @@ bool rend_is_enabled() {
 	return rendererEnabled;
 }
 
+// Predict-live re-sim render-skip: swap the active renderer to a persistent norend for the
+// invisible rollback re-sim / catch-up frames, so QueueRender stays TRUE -> present()->Stop
+// fires at the exact byte-proven frame boundary AND all serialized renderer bookkeeping
+// (palette_update, RenderCount, fbAddrHistory) advances identically to the norend server, with
+// ZERO GPU work / no re-sim pixels reaching the window. Do NOT use rend_enable_renderer(false)
+// here: that makes QueueRender return false -> no present -> no Stop -> runInternal over-runs
+// ~3 frames on stale input and DIVERGES (maplecast_player.cpp:1167). No-op on the headless build
+// (already norend) and in threaded mode (the swap is race-free only inline / non-threaded).
+// (flycast-internals-expert, 2026-07-24)
+static Renderer* g_resimNorend  = nullptr;
+static Renderer* g_savedRenderer = nullptr;
+void rend_begin_headless_resim() {
+	if (g_savedRenderer) return;                                        // reentrancy guard
+	if (config::ThreadedRendering) return;                             // inline (non-threaded) only
+	if (maplecast_mirror::isHeadless() || renderer == nullptr) return;  // already norend
+	if (!g_resimNorend) { g_resimNorend = rend_norend(); g_resimNorend->Init(); }
+	g_savedRenderer = renderer;
+	renderer = g_resimNorend;
+}
+void rend_end_headless_resim() {
+	if (!g_savedRenderer) return;
+	renderer = g_savedRenderer;
+	g_savedRenderer = nullptr;
+}
+
 void rend_serialize(Serializer& ser)
 {
 	ser << fb_w_cur;
