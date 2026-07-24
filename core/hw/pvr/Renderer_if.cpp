@@ -473,6 +473,7 @@ bool rend_single_frame(const bool& enabled)
 Renderer* rend_GLES2();
 Renderer* rend_GL4();
 Renderer* rend_norend();
+Renderer* rend_resim_norend();   // norend whose Process() skips ta_parse (predict re-sim)
 Renderer* rend_Vulkan();
 Renderer* rend_OITVulkan();
 Renderer* rend_DirectX9();
@@ -858,7 +859,13 @@ void rend_begin_headless_resim() {
 	if (g_savedRenderer) return;                                        // reentrancy guard
 	if (config::ThreadedRendering) return;                             // inline (non-threaded) only
 	if (maplecast_mirror::isHeadless() || renderer == nullptr) return;  // already norend
-	if (!g_resimNorend) { g_resimNorend = rend_norend(); g_resimNorend->Init(); }
+	// rend_resim_norend (not plain rend_norend): its Process() skips ta_parse — the O(TA)
+	// per-pass cost — so a ~20-frame mispredict re-sim in one displayed 16.6ms tick no longer
+	// runs 20+ TA parses. Determinism-safe: ta_parse writes ONLY host render state (ctx->rend /
+	// parser statics), never the mem_b regions confHash=gameStateRegionHash hashes; and the
+	// present()->Stop boundary + all serialized bookkeeping (RenderCount/FrameCount/fbAddrHistory)
+	// are set by QueueRender/rend_start_render, NOT by Process. (flycast-internals-expert 2026-07-24)
+	if (!g_resimNorend) { g_resimNorend = rend_resim_norend(); g_resimNorend->Init(); }
 	g_savedRenderer = renderer;
 	renderer = g_resimNorend;
 }
