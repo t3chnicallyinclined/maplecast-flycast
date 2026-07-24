@@ -68,12 +68,12 @@ static void runOneFrame(bool headless)
 	emu.getSh4Executor()->Run();     // returns after one game-frame
 }
 
-// Advance EXACTLY one MVC2 game frame headless. runOneFrame stops at the next
-// non-RTT STARTRENDER, but MVC2 emits MULTIPLE such passes per video frame; the
-// LIVE emu loop only stops at present() (once per displayed frame, single-slot
-// QueueRender drops the extra passes). So a single runOneFrame advances <1 game
-// frame. Loop until the MVC2 game-frame counter (0x3496B0) ticks so each call ==
-// one live emu-loop frame. Guard caps runaway (e.g., paused/menu with no tick).
+// Advance EXACTLY one MVC2 game frame headless (OFFLINE gates only). runOneFrame stops at
+// the next non-RTT STARTRENDER; MVC2 emits multiple per video frame, so loop until the
+// game-frame counter (0x3496B0) ticks. Guard caps runaway (paused/menu with no tick).
+// NOTE: this stops at STARTRENDER — the WRONG boundary for cross-instance determinism (it
+// freezes sh4_sched mid-render; a13c49e54). The LIVE predict path does NOT use this — it uses
+// advanceHeadlessOneFrame, which stops at Emulator::vblank() (the correct boundary; see there).
 static void runOneGameFrameHeadless()
 {
 	const uint32_t start = *(uint32_t*)&mem_b[0x3496B0];
@@ -1317,12 +1317,15 @@ void setPredictedFrame(uint64_t f) { g_predictedFrame = f; }
 void advanceHeadlessOneFrame()
 {
 	const bool prevFF = settings.input.fastForwardMode, prevMute = settings.aica.muteAudio;
-	const bool prevEnabled = rend_is_enabled();
 	settings.input.fastForwardMode = true; settings.aica.muteAudio = true;
-	g_headless.store(true, std::memory_order_relaxed);
-	runOneGameFrameHeadless();
-	g_headless.store(false, std::memory_order_relaxed);
-	rend_enable_renderer(prevEnabled);
+	// Advance ONE video frame via the EXACT byte-perfect per-frame body the normal emu loop
+	// (and pure lockstep) use — Emulator::runRollbackFrame() = runner.init() + the SH-4 run,
+	// stopping at the normal present() boundary. The OLD code did a bare getSh4Executor()->Run(),
+	// which SKIPS runner.init() + the frame setup, so the re-sim diverged from the authoritative
+	// server cross-instance — even at IDLE with 0 rollbacks (pure lockstep, which goes through
+	// runInternal, matched the server 260/260). This is why flycast's own GGPO advances with
+	// emu.run(), not a bare Run. Reference: the pure-lockstep byte-perfect path. (2026-07-24)
+	emu.runRollbackFrame();
 	settings.input.fastForwardMode = prevFF; settings.aica.muteAudio = prevMute;
 }
 

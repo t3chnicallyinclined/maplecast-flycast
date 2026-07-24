@@ -1210,6 +1210,22 @@ void EventManager::broadcastEvent(Event event)
 		pair.first(event, pair.second);
 }
 
+// Advance exactly one video frame via the byte-perfect internal per-frame body
+// (runInternal = runner.init() + the SH-4 run, stopping at the normal present()
+// boundary) that the normal loop + pure lockstep use. For the rollback re-sim /
+// predict head, which MUST reproduce the normal loop EXACTLY — a bare
+// getSh4Executor()->Run() skips runner.init() + this setup and diverges from the
+// server cross-instance (pure lockstep via runInternal matched the server 260/260;
+// bare Run diverged even at idle). NOT gated by frameGate (avoids recursion). Caller
+// sets input first. This is the piece flycast's own GGPO advances with (emu.run()).
+void Emulator::runRollbackFrame()
+{
+	startTime = sh4_sched_now64();
+	renderTimeout = false;
+	getSh4Executor()->Start();
+	runInternal();
+}
+
 void Emulator::run()
 {
 	verify(state == Running);

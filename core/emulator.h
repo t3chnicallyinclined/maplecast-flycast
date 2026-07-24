@@ -142,6 +142,12 @@ public:
 	 * Execute a single instruction.
 	 */
 	void step();
+	// Advance exactly one video frame via the byte-perfect internal per-frame body
+	// (runInternal) that the normal loop + pure lockstep use — for the rollback re-sim /
+	// predict head, which MUST reproduce the normal loop exactly (a bare
+	// getSh4Executor()->Run() skips runner.init() + the frame setup and diverges from the
+	// server cross-instance). NOT gated by frameGate (avoids recursion). See emulator.cpp.
+	void runRollbackFrame();
 	/**
 	 * Execute instructions while PC is with range.
 	 */
