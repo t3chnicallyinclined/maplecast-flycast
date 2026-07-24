@@ -81,11 +81,16 @@ impl FrameDecoder {
         self.pace_depth > 0
     }
 
-    /// Queue a decoded TDW frame for paced release. Hard-capped so a stalled render
-    /// loop can't grow the buffer unbounded (drop oldest).
+    /// Queue a decoded TDW frame for paced release. Capped at pace_depth+1 so latency
+    /// stays ~pace_depth frames: if arrival outruns the 60fps release grid we DROP the
+    /// oldest (skip a stale frame, catch up) instead of ballooning to 100s of ms. That
+    /// cap being 30 was the "press->present 500ms" bug (30 frames = 500ms).
     pub fn queue_tdw_frame(&mut self, fr: crate::tdw::TdwFrame) {
         self.tdw_pace_q.push_back(fr);
-        while self.tdw_pace_q.len() > 30 {
+        // Loose safety cap only — the PLL in pace_release holds the buffer near pace_depth
+        // by adjusting the release RATE (not by dropping), so this rarely triggers.
+        let cap = self.pace_depth + 8;
+        while self.tdw_pace_q.len() > cap {
             self.tdw_pace_q.pop_front();
         }
     }
@@ -121,19 +126,19 @@ impl FrameDecoder {
         if target == 0 {
             return;
         }
-        debug.jitter_depth.store(self.tdw_pace_q.len() as u64, Relaxed);
+        let depth = self.tdw_pace_q.len();
+        debug.jitter_depth.store(depth as u64, Relaxed);
         // The display refreshes far faster than 60fps (e.g. 240Hz), so advance the GAME
-        // at a fixed 60fps BY TIME, not once-per-render. Between ticks the render loop
-        // just re-presents the current frame (held 240/60 = 4 refreshes, evenly) -> smooth.
-        const FRAME: std::time::Duration = std::time::Duration::from_micros(16_667);
+        // at ~60fps BY TIME, not once-per-render. Between ticks the render loop re-presents
+        // the current frame (held 240/60 = 4 refreshes, evenly) -> smooth motion.
         if let Some(t) = self.next_release {
             if now < t {
                 return; // not yet time for the next game frame
             }
         }
-        // Prime the cushion first so arrival jitter (p95 41ms) can't underrun the 60fps grid.
+        // Prime the cushion first so arrival jitter (p95 41ms) can't underrun the grid.
         if !self.pace_primed {
-            if self.tdw_pace_q.len() >= target {
+            if depth >= target {
                 self.pace_primed = true;
             } else {
                 return;
@@ -142,13 +147,21 @@ impl FrameDecoder {
         match self.tdw_pace_q.pop_front() {
             Some(fr) => {
                 self.apply_tdw_frame(fr, debug);
-                // Next tick on an even 60fps grid; resync if we drifted far behind (a long
-                // stall) so we don't machine-gun a burst to catch up.
+                // PLL: hold the buffer near `target` by nudging the release INTERVAL, not by
+                // dropping frames. Too full -> release a hair faster (drain the excess); too
+                // empty -> a hair slower (build). Base 60fps (16.67ms), +/-1.2ms per frame of
+                // error, clamped 50-83fps. Smooth speed changes read far better than drops,
+                // and latency self-limits to ~target frames without the old 500ms balloon.
+                let err = ((depth as i64 - 1) - target as i64).clamp(-4, 4);
+                let interval_us = (16_667i64 - err * 1_200).clamp(12_000, 20_000) as u64;
+                let interval = std::time::Duration::from_micros(interval_us);
+                // schedule on the running grid; resync after a long stall so we don't
+                // machine-gun a burst to catch up.
                 let base = match self.next_release {
-                    Some(t) if now <= t + FRAME * 3 => t,
+                    Some(t) if now <= t + std::time::Duration::from_millis(50) => t,
                     _ => now,
                 };
-                self.next_release = Some(base + FRAME);
+                self.next_release = Some(base + interval);
             }
             None => {
                 self.pace_primed = false; // underrun -> re-prime, hold the last frame
