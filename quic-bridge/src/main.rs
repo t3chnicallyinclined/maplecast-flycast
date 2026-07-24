@@ -88,8 +88,27 @@ async fn serve_client(conn: quinn::Connection, flycast_ws: &str) -> Result<()> {
     // Seed (onOpen SYNC is pushed automatically) + go TDW-only.
     ws_tx.send(Message::Text("{\"type\":\"request_sync\"}".into())).await?;
     ws_tx
-        .send(Message::Text("{\"type\":\"subscribe\",\"mode\":\"tdw\"}".into()))
+        .send(Message::Text("{\"type\":\"subscribe\",\"mode\":\"tdw2\"}".into()))
         .await?;
+
+    // ACK-reference: forward the client's ACKs (client -> bridge over QUIC datagrams)
+    // upstream to flycast (bridge -> flycast over this WS) so the server references a
+    // frame the client provably holds. Without this the encoder degrades to keyframes.
+    let ack_conn = conn.clone();
+    let ack_task = tokio::spawn(async move {
+        loop {
+            match ack_conn.read_datagram().await {
+                Ok(b) => {
+                    if b.len() == 8 && &b[0..4] == b"ACKF" {
+                        if ws_tx.send(Message::Binary(b.to_vec())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(_) => break, // QUIC connection closed
+            }
+        }
+    });
 
     let mut dgrams: u64 = 0;
     let mut streams: u64 = 0;
@@ -118,11 +137,14 @@ async fn serve_client(conn: quinn::Connection, flycast_ws: &str) -> Result<()> {
         //     dictionary can never lose a block, and the fat keyframe never stalls the
         //     delta path (that was the ~1s spike on TCP).
         let max_dg = conn.max_datagram_size().unwrap_or(0);
-        let is_tdw1 = data.len() >= 6 && &data[0..4] == b"TDW1";
-        let flags = if is_tdw1 { data[5] } else { 0 };
-        let is_kfdelta = (flags & 0x80) != 0; // bit7
-        let is_reliable = (flags & 0x04) != 0; // bit2 = cumulative state
-        let use_datagram = is_tdw1 && is_kfdelta && !is_reliable && data.len() <= max_dg;
+        let is_tdw = data.len() >= 6 && (&data[0..4] == b"TDW1" || &data[0..4] == b"TDW2");
+        let flags = if is_tdw { data[5] } else { 0 };
+        let is_reliable = (flags & 0x04) != 0; // bit2 = cumulative (keyframe | news | pages)
+        // droppable geometry delta (bit2 clear) that fits a datagram -> UNRELIABLE datagram;
+        // everything else (reliable frames, oversized TDW2 deltas, TDWS dict) -> its OWN
+        // uni-stream. Independent streams mean a lost packet delays ONE frame, never the
+        // whole wire (the TCP head-of-line stall we're replacing).
+        let use_datagram = is_tdw && !is_reliable && data.len() <= max_dg;
         if use_datagram {
             match conn.send_datagram(Bytes::copy_from_slice(&data)) {
                 Ok(()) => dgrams += 1,
@@ -143,6 +165,7 @@ async fn serve_client(conn: quinn::Connection, flycast_ws: &str) -> Result<()> {
             log_t = std::time::Instant::now();
         }
     }
+    ack_task.abort();
     Ok(())
 }
 

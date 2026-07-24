@@ -117,6 +117,7 @@ async fn run(addr: &str, shared: &Arc<Mutex<FrameDecoder>>, debug: &DebugState) 
     let mut probe = crate::arrival::ArrivalProbe::new("QUIC");
     let mut bytes = 0u64;
     let mut t0 = std::time::Instant::now();
+    let mut last_ack = u32::MAX;
 
     loop {
         tokio::select! {
@@ -132,6 +133,19 @@ async fn run(addr: &str, shared: &Arc<Mutex<FrameDecoder>>, debug: &DebugState) 
                 handle(&b, &mut tdw, shared, debug, &mut probe);
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+        }
+
+        // ACK-reference: tell the bridge (→ flycast) the highest TDW2 frame we hold, so
+        // the server encodes each delta against a frame we can decode. Sent as an 8-byte
+        // "ACKF"+frameId QUIC datagram; the bridge forwards it upstream over its WS.
+        if let Some(f) = tdw.tdw2_ack_frame() {
+            if f != last_ack && f % 2 == 0 {
+                last_ack = f;
+                let mut m = Vec::with_capacity(8);
+                m.extend_from_slice(b"ACKF");
+                m.extend_from_slice(&f.to_le_bytes());
+                let _ = conn.send_datagram(m.into());
+            }
         }
 
         let el = t0.elapsed().as_secs_f64();
@@ -171,7 +185,7 @@ fn handle(
             debug.tdw_dict_kb.store((tdw.dict_bytes() / 1024) as u64, Relaxed);
             debug.tdw_synced.store(tdw.is_synced(), Relaxed);
         }
-        b"TDW1" => match tdw.feed(b) {
+        b"TDW1" | b"TDW2" => match tdw.feed(b) {
             Ok(Some(fr)) => {
                 probe.on_frame(fr.frame_num);   // S0: same-stage arrival jitter + loss
 
