@@ -68,6 +68,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <chrono>
 #include <ctime>
 
 #include "net_platform.h"
@@ -743,7 +744,7 @@ static bool livePredictDrive(uint64_t localFrame)
 	// the rollback re-sim and the head catch-up so the two timelines agree
 	// (rollbacks stay bounded).
 	static int PH = -2;
-	if (PH == -2) { const char* pe = std::getenv("MAPLECAST_PREDICT_PHASE"); PH = pe ? atoi(pe) : 1; }
+	if (PH == -2) { const char* pe = std::getenv("MAPLECAST_PREDICT_PHASE"); PH = pe ? atoi(pe) : 0; }   // default 0: the runInternal boundary fix obsoleted the old phase-1 hack
 
 	if (!_lpInited) {
 		if (!maplecast_predict::liveInit()) return false;
@@ -754,6 +755,13 @@ static bool livePredictDrive(uint64_t localFrame)
 		printf("[predict-live] drive ARMED: localSlot=%d confirmed=%llu head=%llu\n",
 		       ls, (unsigned long long)_lpConfirmed, (unsigned long long)P);
 	}
+
+	// Per-frame perf probe (MAPLECAST_PREDICT_PERF=1): time the whole predict drive (ingest +
+	// rollback re-sim + head catch-up) and capture the re-sim depth this frame, so we can see
+	// the rollback-burst compute vs the 16.6ms budget (the jitter).
+	static const bool _perfLog = std::getenv("MAPLECAST_PREDICT_PERF") != nullptr;
+	const auto _perfT0 = std::chrono::steady_clock::now();
+	uint64_t _perfDepth = 0;
 
 	// 1. INGEST authoritative tape (both slots) — ALL received frames < head P
 	//    (the head leads the server, so many tape frames sit between confirmed and P).
@@ -860,6 +868,7 @@ static bool livePredictDrive(uint64_t localFrame)
 		}
 		const uint64_t depth = (P > reSimFrom) ? (P - reSimFrom) : 0;
 		if (depth > _lpMaxDepth) _lpMaxDepth = depth;
+		_perfDepth = depth;
 		_lpRollbacks++;
 		maplecast_predict::ringRestore(reSimFrom);
 		// APPLY-PHASE FIX (STEP 2): the client's headless advance
@@ -930,8 +939,18 @@ static bool livePredictDrive(uint64_t localFrame)
 	// (newest_tape = server_current - latency; head = newest_tape + LP_LEAD leads by
 	// LP_LEAD - latency). The stamp == head == a future server frame => the server
 	// applies our input on time and the client applied the same value there.
-	static constexpr uint64_t LP_LEAD  = 16;               // > tape latency (~11) + margin
-	static constexpr uint64_t MAX_LEAD = 26;               // < ring DEPTH (32)
+	// LP_LEAD env-configurable (MAPLECAST_PREDICT_LEAD): the run-ahead lead in frames. Must
+	// exceed the tape-delivery latency (network RTT in frames). On a ~0-latency LOCAL server 16
+	// is huge overkill -> the head runs 16 frames ahead of a current server -> ~16-deep rollback
+	// on EVERY mispredict for no benefit -> jitter. Use 1-2 locally. Clamped to [1, 26].
+	static const uint64_t LP_LEAD = [](){ const char* e = std::getenv("MAPLECAST_PREDICT_LEAD");
+		uint64_t v = e ? (uint64_t)strtoull(e, nullptr, 10) : 16; return v < 1 ? 1 : (v > 26 ? 26 : v); }();
+	// MAX_LEAD env-configurable (MAPLECAST_PREDICT_MAXLEAD): caps the head-confirmed gap, which
+	// bounds the ROLLBACK RE-SIM DEPTH (depth <= MAX_LEAD-1). Small (e.g. 3 -> depth<=2) keeps each
+	// rollback cheap (1-2 SH-4 ticks, fits the 16ms frame) at the cost of less run-ahead. Must
+	// exceed the network RTT in frames for a REMOTE server; on a 0-latency LOCAL server, 3 is ideal.
+	static const uint64_t MAX_LEAD = [](){ const char* e = std::getenv("MAPLECAST_PREDICT_MAXLEAD");
+		uint64_t v = e ? (uint64_t)strtoull(e, nullptr, 10) : 26; return v < 2 ? 2 : (v > 30 ? 30 : v); }();  // < ring DEPTH (32)
 	uint64_t serverLive = maplecast_lockstep::lastServerFrame();   // telemetry only
 	if (_lpTapeNewest > serverLive) serverLive = _lpTapeNewest;
 	uint64_t target = _lpTapeNewest + LP_LEAD;
@@ -999,6 +1018,15 @@ static bool livePredictDrive(uint64_t localFrame)
 		       (unsigned long long)_lpConfM[1],(unsigned long long)_lpConfMM[1],
 		       (unsigned long long)_lpConfM[2],(unsigned long long)_lpConfMM[2]);
 
+	if (_perfLog) {
+		const long long _dus = std::chrono::duration_cast<std::chrono::microseconds>(
+			std::chrono::steady_clock::now() - _perfT0).count();
+		printf("[predict-perf] head=%llu drive=%lldus reSimDepth=%llu catchup=%llu rollbacks=%llu lead=%+lld gap=%llu%s\n",
+		       (unsigned long long)target, _dus, (unsigned long long)_perfDepth,
+		       (unsigned long long)(target > P ? target - P : 0), (unsigned long long)_lpRollbacks,
+		       (long long)lead, (unsigned long long)gap, _dus > 16666 ? "  <<OVER-BUDGET" : "");
+		fflush(stdout);
+	}
 	// Advance: Emulator::run renders the head frame `target` after we return true.
 	_localFrame.store(target + 1, std::memory_order_relaxed);
 	maplecast_predict::setPredictedFrame(target);
