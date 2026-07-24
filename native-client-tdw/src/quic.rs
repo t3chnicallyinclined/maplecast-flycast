@@ -107,7 +107,14 @@ async fn run(addr: &str, shared: &Arc<Mutex<FrameDecoder>>, debug: &DebugState) 
     let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_cfg);
 
-    let server: std::net::SocketAddr = addr.parse()?;
+    // Resolve MC_QUIC via DNS — accept host:port (e.g. play.nobd.net:7300), not just
+    // ip:port. SocketAddr::parse only handles literal IPs (the "invalid socket address
+    // syntax" bug when pointed at prod by hostname).
+    use std::net::ToSocketAddrs;
+    let server = addr
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| format!("MC_QUIC: could not resolve '{addr}'"))?;
     let conn = endpoint.connect(server, "maplecast-bridge")?.await?;
     log::info!("[quic] connected {server} (datagrams + uni-streams)");
     *debug.server.lock().unwrap() = format!("quic://{server}");
