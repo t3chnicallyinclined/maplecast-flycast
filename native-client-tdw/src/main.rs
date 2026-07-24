@@ -1170,7 +1170,7 @@ fn main() {
                         // when pacing is off (the receive path applied frames immediately).
                         {
                             let mut fd = shared.lock().unwrap();
-                            fd.pace_release(&debug);
+                            fd.pace_release(&debug, t0);
                         }
                         gpu.render(&shared, &replica_shared, &frame_queue, &debug);
                         let rt = t0.elapsed().as_secs_f64() * 1000.0;

@@ -43,6 +43,7 @@ pub struct FrameDecoder {
     tdw_pace_q: std::collections::VecDeque<crate::tdw::TdwFrame>,
     pace_depth: usize,
     pace_primed: bool,
+    next_release: Option<std::time::Instant>,
 }
 
 impl FrameDecoder {
@@ -62,9 +63,16 @@ impl FrameDecoder {
             tdw_cam: None,
             gsta: None,
             tdw_pace_q: std::collections::VecDeque::new(),
-            pace_depth: std::env::var("MC_PACE").ok()
-                .and_then(|s| s.trim().parse().ok()).unwrap_or(0),
+            pace_depth: {
+                let d = std::env::var("MC_PACE").ok()
+                    .and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+                if d > 0 {
+                    log::info!("[pace] present-pacing ON: {d}-frame buffer, 60fps time-based release");
+                }
+                d
+            },
             pace_primed: false,
+            next_release: None,
         }
     }
 
@@ -107,34 +115,44 @@ impl FrameDecoder {
     /// Present-pacing drain — call ONCE per vsync from the render loop. Primes to
     /// `pace_depth` frames, then releases one per call (catching up 2 if the buffer
     /// overran, re-priming on underrun) so the display advances at a steady cadence.
-    pub fn pace_release(&mut self, debug: &crate::debug::DebugState) {
+    pub fn pace_release(&mut self, debug: &crate::debug::DebugState, now: std::time::Instant) {
         use std::sync::atomic::Ordering::Relaxed;
         let target = self.pace_depth;
         if target == 0 {
             return;
         }
         debug.jitter_depth.store(self.tdw_pace_q.len() as u64, Relaxed);
+        // The display refreshes far faster than 60fps (e.g. 240Hz), so advance the GAME
+        // at a fixed 60fps BY TIME, not once-per-render. Between ticks the render loop
+        // just re-presents the current frame (held 240/60 = 4 refreshes, evenly) -> smooth.
+        const FRAME: std::time::Duration = std::time::Duration::from_micros(16_667);
+        if let Some(t) = self.next_release {
+            if now < t {
+                return; // not yet time for the next game frame
+            }
+        }
+        // Prime the cushion first so arrival jitter (p95 41ms) can't underrun the 60fps grid.
         if !self.pace_primed {
             if self.tdw_pace_q.len() >= target {
                 self.pace_primed = true;
             } else {
-                return; // still filling the cushion
+                return;
             }
         }
-        let n = self.tdw_pace_q.len();
-        let release = if n > target * 2 + 1 { 2 } else if n > 0 { 1 } else { 0 };
-        if release == 0 {
-            self.pace_primed = false; // underrun -> re-prime
-            return;
-        }
-        let mut frames = Vec::with_capacity(release);
-        for _ in 0..release {
-            if let Some(fr) = self.tdw_pace_q.pop_front() {
-                frames.push(fr);
+        match self.tdw_pace_q.pop_front() {
+            Some(fr) => {
+                self.apply_tdw_frame(fr, debug);
+                // Next tick on an even 60fps grid; resync if we drifted far behind (a long
+                // stall) so we don't machine-gun a burst to catch up.
+                let base = match self.next_release {
+                    Some(t) if now <= t + FRAME * 3 => t,
+                    _ => now,
+                };
+                self.next_release = Some(base + FRAME);
             }
-        }
-        for fr in frames {
-            self.apply_tdw_frame(fr, debug);
+            None => {
+                self.pace_primed = false; // underrun -> re-prime, hold the last frame
+            }
         }
     }
 
