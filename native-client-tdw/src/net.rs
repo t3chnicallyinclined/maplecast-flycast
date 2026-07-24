@@ -356,29 +356,20 @@ async fn run(
                     Ok(Some(fr)) => {
                         if tdw_players {
                             arr_probe.on_frame(fr.frame_num);   // S0: same-stage arrival jitter + loss
-                            // TDW-ONLY: apply directly — no ZCS2 pairing at all.
-                            // TDW1 carries geometry+camera+pvr+pages+E2E tail.
-                            {
-                                let mut fd = shared.lock().unwrap();
-                                if let Some(pg) = fr.pages.as_deref() {
-                                    let n = fd.apply_page_section(pg, 0);
-                                    debug.tdw_pages.store(n as u64, Relaxed);
-                                }
-                                fd.tdw_ta = Some(fr.ta);
-                                if fr.cam.is_some() {
-                                    fd.tdw_cam = fr.cam;
-                                }
-                                if let Some(p) = fr.pvr {
-                                    fd.pvr_snapshot = p;
-                                }
-                                fd.mark_tdw_frame(fr.frame_num);
-                            }
-                            if let Some((s0, s1)) = fr.e2e {
-                                debug.e2e_echo(s0, s1);
-                            }
+                            // TDW-ONLY: no ZCS2 pairing. Present-pacing (MC_PACE>0) queues
+                            // the frame for the render loop's paced drain to smooth bursty
+                            // arrival; else apply immediately. TDW1/TDW2 carries
+                            // geometry+camera+pvr+pages+E2E tail.
                             tdw_eq += 1;
                             debug.tdw_eq.store(tdw_eq, Relaxed);
-                            debug.wire_frame.fetch_add(1, Relaxed);
+                            {
+                                let mut fd = shared.lock().unwrap();
+                                if fd.pace_on() {
+                                    fd.queue_tdw_frame(fr);
+                                } else {
+                                    fd.apply_tdw_frame(fr, debug);
+                                }
+                            }
                         } else {
                             let cur = fr.frame_num;
                             tdw_pending.insert(fr.frame_num, fr);

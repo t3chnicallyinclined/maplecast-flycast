@@ -196,25 +196,15 @@ fn handle(
             Ok(Some(fr)) => {
                 probe.on_frame(fr.frame_num);   // S0: same-stage arrival jitter + loss
 
-                let mut fd = shared.lock().unwrap();
-                if let Some(pg) = fr.pages.as_deref() {
-                    let n = fd.apply_page_section(pg, 0);
-                    debug.tdw_pages.store(n as u64, Relaxed);
-                }
-                fd.tdw_ta = Some(fr.ta);
-                if fr.cam.is_some() {
-                    fd.tdw_cam = fr.cam;
-                }
-                if let Some(p) = fr.pvr {
-                    fd.pvr_snapshot = p;
-                }
-                fd.mark_tdw_frame(fr.frame_num);
-                drop(fd);
-                if let Some((s0, s1)) = fr.e2e {
-                    debug.e2e_echo(s0, s1);
-                }
                 debug.tdw_synced.store(tdw.is_synced(), Relaxed);
-                debug.wire_frame.fetch_add(1, Relaxed);
+                // Present-pacing (MC_PACE>0): queue for the render loop's paced drain to
+                // smooth bursty QUIC arrival; else apply immediately.
+                let mut fd = shared.lock().unwrap();
+                if fd.pace_on() {
+                    fd.queue_tdw_frame(fr);
+                } else {
+                    fd.apply_tdw_frame(fr, debug);
+                }
             }
             Ok(None) => {}
             Err(e) => log::warn!("[quic/tdw] feed: {e}"),

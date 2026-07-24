@@ -1165,6 +1165,13 @@ fn main() {
                             win_gap_max = gap;
                         }
                         last_present = Some(t0);
+                        // Present-pacing: release ONE queued TDW frame per vsync (MC_PACE>0),
+                        // turning bursty network arrival into an even display cadence. No-op
+                        // when pacing is off (the receive path applied frames immediately).
+                        {
+                            let mut fd = shared.lock().unwrap();
+                            fd.pace_release(&debug);
+                        }
                         gpu.render(&shared, &replica_shared, &frame_queue, &debug);
                         let rt = t0.elapsed().as_secs_f64() * 1000.0;
                         rt_ema = if rt_ema == 0.0 { rt } else { rt_ema * 0.9 + rt * 0.1 };
