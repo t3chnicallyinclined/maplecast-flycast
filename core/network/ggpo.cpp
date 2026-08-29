@@ -28,9 +28,17 @@
 #include "network/maplecast_input_server.h"
 #include "network/maplecast_mirror.h"
 #include "network/replay_reader.h"
+#include "network/maplecast_autoselect.h"
 #include "maplecast_compat.h"
+#include "hw/mem/addrspace.h"   // game-frame-paced movie feeder
+#include <cstdlib>
+#include <cstdio>
 #include <algorithm>
 #include <ctime>
+
+// Global (NOT in namespace ggpo) so emulator.cpp's vblank hook can increment it via a
+// plain `extern uint64_t g_moviePaceFrame;`. Once-per-vblank movie/replay pace clock.
+uint64_t g_moviePaceFrame = 0;
 
 namespace ggpo
 {
@@ -69,6 +77,43 @@ static void getLocalInput(MapleInputState inputState[4])
 	// SH4 is paused post-restore) so the lookup space lines up with
 	// the SH4's currentFrame() in the replay process.
 	const uint64_t mirrorFrame = maplecast_mirror::currentFrame();
+	// Rendered/local builds don't run the mirror publish loop, so currentFrame() is
+	// stuck at 0. Pace the movie/replay off g_moviePaceFrame, incremented ONCE PER
+	// VBLANK in emulator.cpp — NOT the getLocalInput call count, which fires several
+	// times per frame under rollback/prediction and would run the movie too fast
+	// (dropping frame-perfect combos). Headless path keeps mirrorFrame (>0 there).
+	// MAPLECAST_MOVIE_GAMEFRAME=1: pace the movie/replay by the GUEST GAME-FRAME counter
+	// (default DC 0x8C3496B0; override with MAPLECAST_MOVIE_GF_ADDR for NAOMI) instead of the
+	// publish/vblank counter, so intro/FIGHT freeze frames + rollback bookkeeping do not skew
+	// input timing (the ~6-frame skew that whiffed the first hit in the DC determinism test).
+	uint64_t paceFrameSrc;
+	{
+		static int  gfMode = -1;
+		static u32  gfAddr = 0x8C3496B0u;
+		static u32  gfBase = 0;
+		static bool gfInit = false;
+		if (gfMode < 0) {
+			const char* e = getenv("MAPLECAST_MOVIE_GAMEFRAME");
+			gfMode = (e && *e && *e != '0') ? 1 : 0;
+			const char* a = getenv("MAPLECAST_MOVIE_GF_ADDR");
+			if (a && *a) gfAddr = (u32)strtoul(a, nullptr, 0);
+			if (gfMode) fprintf(stderr, "[movie-gameframe] ON addr=0x%08X\n", gfAddr);
+		}
+		if (gfMode == 1) {
+			const u32 gvf = addrspace::read32(gfAddr);
+			if (!gfInit && maplecast_replay::playbackActive() && gvf != 0) {
+				static u32 imAddr = 0xFFFFFFFFu;
+				if (imAddr == 0xFFFFFFFFu) { const char* im = getenv("MAPLECAST_MOVIE_INMATCH_ADDR"); imAddr = (im && *im) ? (u32)strtoul(im, nullptr, 0) : 0x8C289624u; }
+				if (imAddr == 0 || addrspace::read8(imAddr) != 0) {
+					gfBase = gvf; gfInit = true;
+					fprintf(stderr, "[movie-gameframe] base=%u (gvf at in_match)\n", gfBase);
+				}
+			}
+			paceFrameSrc = gfInit ? (uint64_t)(gvf - gfBase) : 0;
+		} else {
+			paceFrameSrc = (mirrorFrame > 0) ? mirrorFrame : g_moviePaceFrame;
+		}
+	}
 
 	for (int player = 0; player < 4; player++)
 	{
@@ -77,7 +122,18 @@ static void getLocalInput(MapleInputState inputState[4])
 		// Replay hook (slots 0/1). Fires regardless of maplecastActive so
 		// standalone Windows replay works without MAPLECAST=1 / input_server.
 		bool replayHandled = false;
-		if ((player == 0 || player == 1) && maplecast_replay::playbackActive())
+		// AUTOSELECT: while at char-select, drive the cursor to pick the target team.
+		// Takes precedence over the match movie (which is held at frame 0 until handoff).
+		if ((player == 0 || player == 1) && maplecast_autoselect::active())
+		{
+			uint16_t asBtn;
+			if (maplecast_autoselect::getInput(player, asBtn))
+			{
+				state.kcode = (u32)asBtn | 0xFFFF0000u;
+				replayHandled = true;
+			}
+		}
+		if ((player == 0 || player == 1) && !replayHandled && maplecast_replay::playbackActive())
 		{
 			// V4 alignment: just hand the SH4's currentFrame() to the reader.
 			// The reader subtracts its baseline (captured at startPlayback,
@@ -91,7 +147,7 @@ static void getLocalInput(MapleInputState inputState[4])
 			// positive. V4 replays restore at frame_count=0 in the replay
 			// process and the reader handles the rebase, so the synthetic
 			// counter is no longer needed.
-			const uint64_t paceFrame = mirrorFrame;
+			const uint64_t paceFrame = paceFrameSrc;
 			uint16_t rBtn; uint8_t rLt; uint8_t rRt;
 			if (maplecast_replay::getInputAtFrame(paceFrame, player,
 			                                      rBtn, rLt, rRt))

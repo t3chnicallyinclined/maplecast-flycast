@@ -48,6 +48,7 @@
 #include "network/maplecast_predictor.h"
 #include "network/mc_readtrace.h"             // STEP 2 read-set delta trace (dynarec->interp flip)
 #include "network/replay_reader.h"
+#include "network/maplecast_autoselect.h"
 #include "network/replay_writer.h"
 #include "network/maplecast_shadow_exec.h"    // MAPLECAST_EXECUTOR: transpiled tick replaces the SH-4
 #include "network/maplecast_control_ws.h"
@@ -846,6 +847,22 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 				if (const char* s = std::getenv("MAPLECAST_REPLAY_SPEED"))
 					speed = atof(s);
 				maplecast_replay::startPlayback(speed);
+			}
+
+			// MAPLECAST_MOVIE_IN — feed a plain-text input movie (a MetaSync
+			// Steam capture via session_to_movie.py, or a converted Fightcade
+			// replay). No embedded savestate: the start state came from the
+			// autoload above, so configure a FIXED savestate slot and both
+			// determinism runs begin identically. openMovie() only fills the
+			// input log, so calling it here (post-autoload) is fine. Pair with
+			// MAPLECAST_GSHASH_LOG=path → two runs yield byte-identical hash
+			// logs iff forward + input replay are deterministic.
+			if (const char* moviePath = std::getenv("MAPLECAST_MOVIE_IN")) {
+				printf("[autoload-debug] MAPLECAST_MOVIE_IN=%s — loading input movie\n", moviePath);
+				if (maplecast_replay::openMovie(moviePath))
+					maplecast_replay::startPlayback(1.0);
+				else
+					printf("[autoload-debug] MAPLECAST_MOVIE_IN — openMovie failed\n");
 			}
 
 			// MAPLECAST_REPLAY_OUT recording start. Capturing the savestate
@@ -1725,6 +1742,24 @@ void Emulator::start()
 
 				InitAudio();
 
+				// MAPLECAST_LOAD_AT_FRAME=N[:slot] — restore the start state HERE (after
+				// InitAudio, before the frame loop). On Windows, restoring at boot races
+				// audio init (hang); restoring from the vblank hook corrupts a mid-frame.
+				// This point is post-init + pre-frame = the safe spot, like menu Load State.
+				if (const char* _loadInit = std::getenv("MAPLECAST_LOAD_AT_FRAME")) {
+					int _ls = strchr(_loadInit, ':') ? atoi(strchr(_loadInit, ':') + 1) : 0;
+					printf("[load-after-init] dc_loadstate(slot %d) before frame loop\n", _ls); fflush(stdout);
+					dc_loadstate(_ls);
+					// A mid-frame anchor (e.g. a SAVE_AT_FRAME snapshot taken while
+					// pend_rend=true) restores with render_end_schid still queued; the
+					// first post-restore SH4 dispatch would hit rend_end_render() ->
+					// renderEnd.Wait() and block FOREVER (the event was consumed pre-save
+					// and no render is in flight to Set it). Same failure the rollback
+					// rewind path fixes; clear the stuck render-thread sync here too.
+					rend_resync_after_rollback();
+					printf("[load-after-init] rend_resync_after_rollback() done\n"); fflush(stdout);
+				}
+
 				try {
 					while (state == Running || singleStep || stepRangeTo != 0)
 					{
@@ -2159,12 +2194,127 @@ void Emulator::vblank()
 	// GATE ADD (Test B): continuous per-frame game-state hash log, gated on
 	// MAPLECAST_GSHASH_LOG. Runs every vblank independent of the rollback ring.
 	{
+		// Movie/replay pace clock — advance once per vblank so getLocalInput (ggpo.cpp)
+		// paces the input feed to REAL game frames in the rendered build (no mirror
+		// publish loop). extern: ggpo.cpp reads this same counter as its fallback clock.
+		extern uint64_t g_moviePaceFrame;
+		// AUTOSELECT drives char-select each vblank and HOLDS the movie pace at frame 0
+		// through selection + intro, releasing it at round start so the match movie plays
+		// from frame 0. holdMoviePace() also ticks the picker's own per-vblank state machine.
+		const bool _asHold = maplecast_autoselect::active() && maplecast_autoselect::holdMoviePace();
+		if (maplecast_replay::playbackActive() && !_asHold) g_moviePaceFrame++;
 		static const char* _gshashLogPath = std::getenv("MAPLECAST_GSHASH_LOG");
 		if (_gshashLogPath)
 			maplecast_rollback::gshashLogTick(_gshashLogPath);
 		static const char* _lagProbePath = std::getenv("MAPLECAST_LAGPROBE");
 		if (_lagProbePath)
 			maplecast_rollback::lagProbeTick(_lagProbePath);
+		// MAPLECAST_SAVE_AT_FRAME=N[:slot] — one-shot dc_savestate(slot) at
+		// host-vblank N (counts every vblank since boot, independent of any
+		// game frame counter, which reads 0 during attract/char-select). Used to
+		// snapshot a fixed anchor (e.g. character-select) for movie
+		// reconstruction. Default slot 0 (the autoload slot).
+		{
+			static const char* _saveAtEnv = std::getenv("MAPLECAST_SAVE_AT_FRAME");
+			if (_saveAtEnv) {
+				static uint64_t _vbl = 0;
+				static bool _done = false;
+				static const uint64_t _target = strtoull(_saveAtEnv, nullptr, 10);
+				static const int _slot = strchr(_saveAtEnv, ':') ? atoi(strchr(_saveAtEnv, ':') + 1) : 0;
+				if (!_done && ++_vbl >= _target) {
+					_done = true;
+					printf("[save-at-frame] vblank %llu — dc_savestate(slot %d)\n",
+					       (unsigned long long)_vbl, _slot); fflush(stdout);
+					rend_wait_render_idle(); /* drain in-flight render so the anchor loads cleanly */ dc_savestate(_slot);
+				}
+			}
+		}
+		// MAPLECAST_LOAD_AT_FRAME=N[:slot] — one-shot dc_loadstate(slot) at host-vblank N.
+		// Restoring a savestate AT BOOT races the rendered build's audio/render startup
+		// (intermittent hang / stuck "Starting..."). Doing it a few seconds in, from the
+		// running game loop, is the SAME safe path as the TAB->Load State menu. Default slot 0.
+		{
+			static const char* _loadAtEnv = std::getenv("MAPLECAST_LOAD_AT_VBLANK_DEPRECATED"); // moved to post-InitAudio (mid-frame load was unsafe)
+			if (_loadAtEnv) {
+				static uint64_t _lvbl = 0;
+				static bool _ldone = false;
+				static const uint64_t _ltarget = strtoull(_loadAtEnv, nullptr, 10);
+				static const int _lslot = strchr(_loadAtEnv, ':') ? atoi(strchr(_loadAtEnv, ':') + 1) : 0;
+				if (!_ldone && ++_lvbl >= _ltarget) {
+					_ldone = true;
+					printf("[load-at-frame] vblank %llu — dc_loadstate(slot %d)\n",
+					       (unsigned long long)_lvbl, _lslot); fflush(stdout);
+					dc_loadstate(_lslot);
+				}
+			}
+		}
+		// MAPLECAST_TELE_OUT=<path> — build-agnostic .mctele state exporter.
+		// Mirrors the serverPublish dataset tap (maplecast_mirror.cpp) but writes
+		// its own file from this per-frame vblank hook, so the RENDERED build (which
+		// loads savestates + feeds movies but runs no serverPublish) exports training
+		// state too. Reads mem_b directly (phys offset = guest & 0x00FFFFFF; DC/NAOMI
+		// share the layout). In-match only (mem_b[0x289624]); self-contained blob
+		// (state incl. Input_DEC). Format = MCTELE01 (see mvc2_ai/tele.py).
+		{
+			static const char* _teleOut = std::getenv("MAPLECAST_TELE_OUT");
+			if (_teleOut) {
+				// The game keeps TWO stride-0x5A4 fighter arrays (roster @0x268340,
+				// on-screen instances @0x2D7088); which one holds the LIVE match
+				// varies. Pick by validity (slot0 active + valid char_id + health),
+				// which also serves as the in-match gate. Input_DEC sits at
+				// array_base - 0x164 in both. Record at CANONICAL DC seg addresses
+				// so every .mctele has an identical layout regardless of live base.
+				auto validBase = [](u32 b) -> bool {
+					u32 h = (u32)mem_b[b + 0x420] | ((u32)mem_b[b + 0x421] << 8);
+					return mem_b[b] == 1 && mem_b[b + 1] <= 0x3A && h >= 1 && h <= 200;
+				};
+				const u32 _live = validBase(0x2D7088u) ? 0x2D7088u
+				               : (validBase(0x268340u) ? 0x268340u : 0u);
+				if (_live) {
+					static u32 _gfPhys = 0; if (!_gfPhys) { const char* _ge = getenv("MAPLECAST_TELE_GF_PHYS"); _gfPhys = (_ge && *_ge) ? (u32)strtoul(_ge, nullptr, 0) : 0x3496B0u; }
+					const struct { u32 canon, src, len; } _tsegs[] = {
+						{ 0x8C268340u, _live,          6u * 0x5A4u },  // 6 char structs
+						{ 0x8C2681DCu, _live - 0x164u, 0x28u },        // Input_DEC both slots
+						{ 0x8C3496B0u, _gfPhys,        4u },           // guest game-frame counter
+					};
+					static const u32 _tblob = 6u * 0x5A4u + 0x28u + 4u;
+					static FILE* _tf = nullptr;
+					static u64  _tframe = 0;
+					if (!_tf) {
+						_tf = fopen(_teleOut, "wb");
+						if (_tf) {
+							const u32 ver = 1, nseg = (u32)(sizeof(_tsegs) / sizeof(_tsegs[0]));
+							const u64 firstFrame = ~0ull; const u8 rsv[16] = { 0 };
+							fwrite("MCTELE01", 1, 8, _tf);
+							fwrite(&ver, 4, 1, _tf); fwrite(&_tblob, 4, 1, _tf); fwrite(&nseg, 4, 1, _tf);
+							for (const auto& s : _tsegs) { fwrite(&s.canon, 4, 1, _tf); fwrite(&s.len, 4, 1, _tf); }
+							fwrite(&firstFrame, 8, 1, _tf); fwrite(rsv, 1, 16, _tf);
+							printf("[tele-out] %s (blob_len=%u, live_array=0x%x)\n", _teleOut, _tblob, _live); fflush(stdout);
+						}
+					}
+					if (_tf) {
+						fwrite(&_tframe, 8, 1, _tf); _tframe++;
+						for (const auto& s : _tsegs)
+							fwrite(&mem_b[s.src], 1, s.len, _tf);
+						fflush(_tf);
+					}
+				}
+			}
+		}
+		// MAPLECAST_RAMDUMP=<path> — one-shot dump of the first 16MB of mem_b, to
+		// locate the fighter array's real offset on this build (search for the
+		// known team's char_ids at 0x5A4 stride). Debug only.
+		{
+			static const char* _ramDump = std::getenv("MAPLECAST_RAMDUMP");
+			static bool _rdDone = false;
+			if (_ramDump && !_rdDone) {
+				_rdDone = true;
+				if (FILE* rf = fopen(_ramDump, "wb")) {
+					fwrite(&mem_b[0], 1, 0x01000000u, rf); fclose(rf);
+					printf("[ramdump] wrote 16MB of mem_b to %s\n", _ramDump); fflush(stdout);
+				}
+			}
+		}
 		// A2 RUN-AHEAD GATE (kill-list 2026-07-12, MAPLECAST_RUNAHEAD_MEASURE=1): run-ahead
 		// depth=1 needs save + 2x emulate + load inside 16.67ms. This measures the save leg
 		// (dc_serialize into a reusable buffer) per frame ON THIS HARDWARE. avg+max logged

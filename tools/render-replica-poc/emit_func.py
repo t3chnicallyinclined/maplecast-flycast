@@ -99,6 +99,21 @@ def emit_function(insns, data, fname, leaf_call_resolver, bsr_call_resolver=_def
                 out("return;")
             else:
                 raise NotImplementedError(ins.raw)
+            # BRANCH-INTO-DELAY-SLOT: when the consumed delay-slot insn is ALSO an explicit branch
+            # target (e.g. `bra L2; L: nop` where another `bf L` jumps to L), the label L must exist
+            # AND a jump to L must run the slot insn then FALL THROUGH to the following code — NOT
+            # re-take the branch. The delay slot is consumed above (dropping its label), so a `goto L`
+            # would otherwise resolve to nothing -> a no-op tail-call = a silent divergence (same class
+            # as a missing function). Emit a labeled fall-through copy of the slot insn. For branch
+            # types that FALL THROUGH after the transfer (bsr/jsr/bsrf calls; bf.s/bt.s not-taken), skip
+            # the stub on the normal path so the slot isn't executed twice.
+            if delayed and ds is not None and ds.label:
+                falls = m in ('bsr','jsr','bsrf','bf.s','bt.s','bf/s','bt/s')
+                after = f"_dsafter_{i}"
+                if falls: out(f"goto {after};")
+                outl(f"{ds.label}:; /* labeled delay-slot: jump-in runs slot then falls through */")
+                _emit_one(em, ds, body)   # emits the slot insn's EFFECT only (label handled here)
+                if falls: outl(f"{after}:;")
             i += 2 if (delayed and ds is not None) else 1
             continue
         # normal insn

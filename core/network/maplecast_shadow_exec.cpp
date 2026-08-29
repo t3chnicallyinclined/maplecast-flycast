@@ -11,7 +11,7 @@
 // never becomes an unresolved symbol.
 #ifndef MAPLECAST_SHADOW_EXEC_BUILD
 
-namespace maplecast_shadow_exec { void onFrame() {} bool driveFrame() { return false; } }
+namespace maplecast_shadow_exec { void onFrame() {} bool driveFrame() { return false; } bool reSimFrame() { return false; } }
 
 #else
 
@@ -151,6 +151,18 @@ void onFrame() {
 
     if (g_havePrev && (g_frame % g_stride) == 0) {
         auto tTot = clock::now();
+        // ALIGNED-INPUT diagnostic (MAPLECAST_SHADOW_ALIGN_INPUT): the executor tick reads Input_DEC
+        // from RAM; g_prev carries the PREVIOUS frame's input, but flycast's THIS-frame tick consumed
+        // THIS frame's input (present in g_free). On any input-CHANGING frame that 1-frame lag makes
+        // the tick diverge as a VALIDATOR ARTIFACT, not an executor bug. Copy flycast's current
+        // Input_DEC (both players @0x2681DC, 0x28 B) into g_prev so the tick sees the SAME input
+        // flycast did — isolating the tick logic from ALL input processing. If walk/jump goes
+        // byte-exact with this ON, the executor tick is correct and the client divergence is the
+        // input path (fixable in reSimFrame/relay); if it STILL diverges, the tick itself is
+        // incomplete for input-driven states (a genuine crank gap).
+        static int g_alignIn = -1;
+        if (g_alignIn < 0) g_alignIn = getenv("MAPLECAST_SHADOW_ALIGN_INPUT") ? 1 : 0;
+        if (g_alignIn) memcpy(g_prev + 0x2681DC, g_free + 0x2681DC, 0x28);
         long disp = mc_shadow_run_tick(g_prev);          // one tick, IN PLACE on the prev snapshot
         g_valFrames++;
         g_execLast = msSince(tTot); acc(g_execAvg, g_execMax, g_execLast, g_valFrames);
@@ -228,11 +240,20 @@ bool driveFrame() {
     if (!driveOn()) return false;
     // In-match gate — the executor only reproduces the in-match tick (loc_8c0358be). Outside a
     // match, hand back to the SH-4 (menus / char-select / transitions are not transpiled).
-    if (addrspace::read8(IN_MATCH) == 0) { g_paceInit = false; return false; }
-    // HANDOVER: let the SH-4 render the first in-match frames so the /replica-live static prefix
-    // (VRAM 8MB + PVR palette + GFX tables) is captured from a real render pass before we take
-    // over. Bodies decode from RAM thereafter (VRAM static), so one valid capture suffices.
-    if (!maplecast_replica_live::prefixReady()) return false;
+    // HANDOVER: also require the /replica-live static prefix (VRAM 8MB + PVR palette + GFX
+    // tables) to be captured from a real render pass first. Bodies decode from RAM thereafter.
+    bool inMatch = addrspace::read8(IN_MATCH) != 0;
+    bool pfx     = maplecast_replica_live::prefixReady();
+    if (!inMatch || !pfx) {
+        static long g_skip = 0;
+        if ((g_skip++ % 120) == 0)
+            printf("[EXECUTOR] not taking over yet: in_match@289624=%u sub@289621=%u round@28962B=%u "
+                   "prefixReady=%d clients=%d (SH-4 still driving)\n",
+                   addrspace::read8(0x8C289624), addrspace::read8(0x8C289621),
+                   addrspace::read8(0x8C28962B), (int)pfx, (int)maplecast_replica_live::hasClients());
+        if (!inMatch) g_paceInit = false;
+        return false;
+    }
 
     unsigned char *ram = (unsigned char *)&mem_b[0];
 
@@ -274,6 +295,40 @@ bool driveFrame() {
 
     if ((g_driveFrames % 300) == 0)
         printf("[EXECUTOR] drove %ld authoritative frames (SH-4 game-tick bypassed)\n", g_driveFrames);
+    return true;
+}
+
+// EXECUTOR RE-SIM (approach A, predict client) — advance the AUTHORITATIVE mem_b ONE game-logic
+// frame for an INVISIBLE rollback re-sim frame, in place of flycast's SH-4 tick. This is driveFrame's
+// state-advance recipe (steps 1-7) VERBATIM — only the render broadcast (8) and 60fps pacing (9) are
+// dropped (pure render/timing; they never feed the next tick). Everything else is MANDATORY for a
+// re-sim CHAIN: unlike onFrame (which validates a single raw tick against flycast's OWN prev, already
+// carrying flycast's render deposits), here the executor feeds itself, so compose_proj / slot-clamp /
+// counter-reset must REBUILD the render-adjacent fields the next tick consumes — most importantly the
+// screen coords @+0xE0 that the tick reads for screen-boundary clamping. Drop them and the chain
+// tracks flycast for ~3 frames, then a character drifts off-screen and world pos diverges.
+// The ONE deviation from driveFrame: Input_DEC's prev is edge-computed from mem_b's CURRENT cur
+// (rollback-safe across ringRestore), NOT the running g_prevIn static (which would be stale after a
+// rollback). Those are equivalent frame-to-frame (mem_b's cur == last frame's injected cur).
+// kcode holds this re-sim frame's input (set by the caller before advanceHeadlessOneFrame).
+bool reSimFrame() {
+    unsigned char *ram = (unsigned char *)&mem_b[0];
+    // 1. Inject Input_DEC (rollback-safe prev from mem_b).
+    for (int p = 0; p < 2; p++) {
+        uint16_t btn = (uint16_t)(kcode[p] & 0xFFFFu);
+        uint16_t cur = dc_to_cps2(btn, (uint8_t)(lt[p] >> 8), (uint8_t)(rt[p] >> 8));
+        unsigned char *id = ram + 0x2681DC + p * 0x14;
+        uint16_t prev = (uint16_t)id[0] | ((uint16_t)id[1] << 8);   // prev = current cur in mem_b
+        wr16(id + 0, cur); wr16(id + 2, prev);
+        wr16(id + 4, (uint16_t)(cur & ~prev)); wr16(id + 6, (uint16_t)(prev & ~cur));
+    }
+    *(uint32_t *)(ram + 0x1F9D98) = 0; *(uint32_t *)(ram + 0x1F9D94) = 16;  // 2. arena setup
+    mc_shadow_run_tick(ram);                                                // 3. authoritative game-logic tick
+    ram[0x289F80] = ram[0x289F81] = ram[0x289F82] = ram[0x289F83] = 0;      // 4. render-queue counter reset
+    mc_shadow_compose_proj(ram);                                            // 5. recompose render projection @0x2D6AD8
+    for (int L = 0; L < 16; L++) if (ram[0x2895E0 + L] > 0x60) ram[0x2895E0 + L] = 0x60;  // 6. slot-count clamp
+    { uint32_t v = *(uint32_t *)(ram + 0x3496B0) + 1u; *(uint32_t *)(ram + 0x3496B0) = v; }  // 7. vframe bump
+    // (skip driveFrame 8 = /replica-live broadcast, 9 = 60fps pace — render/timing, no feedback)
     return true;
 }
 

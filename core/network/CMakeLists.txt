@@ -76,6 +76,8 @@ target_sources(${PROJECT_NAME} PRIVATE
         replay_writer.h
         replay_reader.cpp
         replay_reader.h
+        maplecast_autoselect.cpp
+        maplecast_autoselect.h
         maplecast_shadow_exec.cpp
         maplecast_shadow_exec.h
         maplecast_wasm_bridge.cpp)

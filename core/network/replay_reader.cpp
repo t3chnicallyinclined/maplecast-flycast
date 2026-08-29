@@ -384,6 +384,71 @@ bool applyEmbeddedSavestateInMemory() {
 	return true;
 }
 
+// ── movie input source (Steam-capture / Fightcade-derived) ───────────
+//
+// Alternative to openReplay(): loads a plain-text input movie into the same
+// _inputLog that getInputAtFrame() serves. No embedded savestate — the start
+// state comes from the emulator's normal autoload (or boot). Frame N = line
+// N; each line "<p1_kcode_hex> <p2_kcode_hex>", ACTIVE-LOW (0xFFFF neutral).
+// Entries are change-coded (logged only when a slot's buttons change);
+// getInputAtFrame()'s sticky last-known semantics fill the gaps, so this is
+// byte-equivalent to a per-frame log but far smaller.
+bool openMovie(const std::string& path)
+{
+	std::lock_guard<std::mutex> lk(_mtx);
+	FILE* mf = fopen(path.c_str(), "r");
+	if (!mf) { printf("[movie] cannot open %s\n", path.c_str()); return false; }
+	_inputLog.clear();
+	_savestateCompressed.clear();
+	_cursor[0] = _cursor[1] = 0;
+	// prev packs (buttons | lt<<16 | rt<<24) so trigger-only edges are change-coded too.
+	uint32_t prev[2] = { 0x0000FFFFu, 0x0000FFFFu };
+	uint64_t frame = 0, entries = 0;
+	char buf[256];
+	while (fgets(buf, sizeof buf, mf)) {
+		if (buf[0] == '#' || buf[0] == '\n' || buf[0] == '\r') continue;
+		// Two accepted formats (per line):
+		//   2-col legacy:  "p1btn p2btn"                       (triggers = 0)
+		//   6-col:         "p1btn p1lt p1rt p2btn p2lt p2rt"   (MvC2 HP/HK live on the DC analog
+		//                                                       triggers; without these two of six
+		//                                                       attack buttons — and assist/tag —
+		//                                                       are silently dropped)
+		unsigned int v[6] = { 0xFFFF, 0, 0, 0xFFFF, 0, 0 };
+		int nf = sscanf(buf, "%x %x %x %x %x %x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+		if (nf < 2) continue;
+		uint16_t bt[2]; uint8_t lts[2], rts[2];
+		if (nf >= 6) { bt[0] = (uint16_t)v[0]; lts[0] = (uint8_t)v[1]; rts[0] = (uint8_t)v[2];
+		               bt[1] = (uint16_t)v[3]; lts[1] = (uint8_t)v[4]; rts[1] = (uint8_t)v[5]; }
+		else         { bt[0] = (uint16_t)v[0]; bt[1] = (uint16_t)v[1];
+		               lts[0] = lts[1] = rts[0] = rts[1] = 0; }
+		for (int slot = 0; slot < 2; slot++) {
+			const uint32_t cur = (uint32_t)bt[slot] | ((uint32_t)lts[slot] << 16) | ((uint32_t)rts[slot] << 24);
+			if (cur == prev[slot]) continue;            // change-coded (sticky)
+			uint8_t e[16] = { 0 };
+			for (int i = 0; i < 8; i++) e[i]     = (uint8_t)(frame >> (8 * i));
+			const uint32_t ss = (uint32_t)slot << 24;   // slot in high byte, seq=0
+			for (int i = 0; i < 4; i++) e[8 + i] = (uint8_t)(ss >> (8 * i));
+			e[12] = (uint8_t)(bt[slot] & 0xFF);
+			e[13] = (uint8_t)(bt[slot] >> 8);
+			e[14] = lts[slot];
+			e[15] = rts[slot];
+			_inputLog.insert(_inputLog.end(), e, e + 16);
+			prev[slot] = cur;
+			entries++;
+		}
+		frame++;
+	}
+	fclose(mf);
+	_warmupFrames = 0;
+	_formatVersion = 0;                 // not a real .mcrec; movie source
+	_info = ReplayInfo{};
+	_info.entry_count = entries;
+	_open.store(true);
+	printf("[movie] loaded %s: %llu frames, %llu change entries\n",
+	       path.c_str(), (unsigned long long)frame, (unsigned long long)entries);
+	return true;
+}
+
 // ── pull-model playback API ──────────────────────────────────────────
 //
 // startPlayback() just flips the active flag. The SH4 input read path

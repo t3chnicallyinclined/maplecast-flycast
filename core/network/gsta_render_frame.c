@@ -57,3 +57,33 @@ unsigned int gsta_quad_srcdesc(unsigned char* out, unsigned int cap){ return ren
  * amalgamated here); g_body_count is the underlying global (render_frame.c). Re-expose it. */
 extern int g_body_count;
 unsigned int render_frame_body_count(void){ return (unsigned int)g_body_count; }
+
+/* ============================================================================
+ * ABI-STABLE render entry — takes ONLY the RAM base pointer, never the fragile
+ * Sh4Ctx struct across the FFI boundary. Construct the ctx HERE (C-side), where
+ * sh4ctx.h's real layout is authoritative.
+ *
+ * WHY THIS EXISTS (2026-07-25, native-client render_frame crash):
+ *   sh4ctx.h's Sh4Ctx is 240 bytes with `ram` at offset 232 (it carries sr_q/sr_m,
+ *   the div0s/div1 bits used by the game-tick divide idiom). The native client's
+ *   Rust mirror struct (native-client-tdw-exec/src/ffi.rs GstaSh4Ctx) had drifted
+ *   out of sync — it was MISSING sr_q/sr_m, so it was 232 bytes with `ram` at
+ *   offset 224. The client wrote the RAM pointer at 224; render_frame read c->ram
+ *   from 232 (8 bytes past the field, past the end of the 232-byte struct) -> a
+ *   garbage pointer -> ACCESS VIOLATION on the FIRST guest memory access, every
+ *   frame. The offline C harness never hit it (it uses the real Sh4Ctx, ram@232).
+ *   Rust's `size_of::<GstaSh4Ctx>() == 232` compile assert passed because it only
+ *   checks Rust's own size, so the mismatch shipped silently.
+ *
+ * Passing only the pointer removes the entire struct-ABI-drift failure class: the
+ * one field that crosses the boundary is a bare `uint8_t*`. Callers should use this
+ * instead of building a ctx and calling render_frame() directly.
+ * ==========================================================================*/
+#include <string.h>
+void render_frame_ram(unsigned char *ram){
+    Sh4Ctx c;
+    memset(&c, 0, sizeof c);
+    c.ram   = ram;
+    c.r[15] = 0x8CFF0000u;   /* same seed the offline harnesses use */
+    render_frame(&c);
+}

@@ -143,6 +143,24 @@ static inline void writeT(u32 addr, T v) {
         if (off >= 0x27D734u && off <= 0x27D880u)  // DIAG: who writes pool obj 0x27D734?
             std::printf("  [W27D734] +0x%03X %zuB <- 0x%X  pc=0x%08X\n",
                         off - 0x27D734u, sizeof(T), (unsigned)(u32)v, g_curPc);
+        // DIAG (jump crank): who writes char0 velocity cluster +0x5c..+0x70?
+        if (off >= 0x26839Cu && off <= 0x2683B0u) {
+            float fv; std::memcpy(&fv, &v, sizeof(T) >= 4 ? 4 : sizeof(T));
+            std::printf("  [WVEL] char0+0x%03X %zuB <- 0x%08X (%.4f)  pc=0x%08X pr=0x%08X\n",
+                        off - 0x268340u, sizeof(T), (unsigned)(u32)v,
+                        sizeof(T) >= 4 ? fv : 0.0f, g_curPc, Sh4cntx.pr);
+        }
+        // DIAG (timer byte): who writes gs 0x289631?
+        if (off == 0x289631u)
+            std::printf("  [WTMR] gs+0x631 %zuB <- 0x%X  pc=0x%08X pr=0x%08X\n",
+                        sizeof(T), (unsigned)(u32)v, g_curPc, Sh4cntx.pr);
+        // DIAG (airborne integration): who writes char0 pos_y +0x38 or state +0x06?
+        if ((off >= 0x268378u && off <= 0x26837Bu) || off == 0x268346u) {
+            float fv; std::memcpy(&fv, &v, sizeof(T) >= 4 ? 4 : sizeof(T));
+            std::printf("  [WPOS] char0+0x%03X %zuB <- 0x%08X (%.4f)  pc=0x%08X pr=0x%08X\n",
+                        off - 0x268340u, sizeof(T), (unsigned)(u32)v,
+                        sizeof(T) >= 4 ? fv : 0.0f, g_curPc, Sh4cntx.pr);
+        }
         std::memcpy(&g_ram[off], &v, sizeof(T));
         return;
     }

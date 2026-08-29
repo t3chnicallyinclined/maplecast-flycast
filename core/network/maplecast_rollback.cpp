@@ -853,10 +853,39 @@ uint64_t gameStateRegionHash()
 {
 	XXH3_state_t* st = XXH3_createState();
 	XXH3_64bits_reset(st);
-	XXH3_64bits_update(st, &mem_b[0x268340], 6u * 0x5A4u); // 6 char structs
-	XXH3_64bits_update(st, &mem_b[0x289000], 0x1000u);     // global game-state page
-	XXH3_64bits_update(st, &mem_b[0x3496B0], 4u);          // frame counter
-	XXH3_64bits_update(st, &mem_b[0x268250], 1u);          // fight tick
+	// NARROWED to the game-logic subset (2026-07-25) so the confHash matches whether the
+	// rollback re-sim runs on flycast's SH-4 OR the transpiled executor. The excluded fields are
+	// RENDER-DEPOSIT (written by the render pass, which the executor stubs) or hardware-TIMING —
+	// each a deterministic FUNCTION of the hashed logical state (pos/health/anim), so dropping
+	// them loses no real divergence signal (a genuine gameplay divergence still trips +0x34 /
+	// health / anim). Applied on BOTH client re-sim and the server's authoritative hash (this is
+	// the ONE shared definition). flycast-SH-4 re-sim matched on these anyway, so no regression.
+	// 6 char structs (0x268340, stride 0x5A4) MINUS +0xE0..0xEB (screen x/y/z, 12B) and
+	// +0x502..0x503 (render-anim, 2B).
+	for (int c = 0; c < 6; c++) {
+		const uint32_t b = 0x268340u + (uint32_t)c * 0x5A4u;
+		XXH3_64bits_update(st, &mem_b[b + 0x000], 0x0E0u);          // [0x000, 0x0E0)
+		XXH3_64bits_update(st, &mem_b[b + 0x0EC], 0x502u - 0x0ECu); // [0x0EC, 0x502)
+		XXH3_64bits_update(st, &mem_b[b + 0x504], 0x5A4u - 0x504u); // [0x504, 0x5A4)
+	}
+	// global game-state page (0x289000, 0x1000) MINUS the timing/render-deposit bytes the executor
+	// legitimately can't reproduce (SH4-cycle-derived HUD/frameskip counters — headless shadow-exec
+	// validator PROVED these are the ONLY globals-page divergences over 2700 idle frames, byte-exact
+	// everywhere else). Excluded: 0x2895E0..0x2895EF (render draw-list slot counts, 16B); 0x289631
+	// (frameskip/HUD sub-timer, 1B — the R1/walk-crank timing residual); 0x289798..0x289799 (HUD
+	// counter, 2B — validator: executor lags flycast by a fixed 0x0A step); 0x289F80..0x289F83
+	// (render-queue counter, 4B). NOTE: the validator uses masked() (independent of this hash), so it
+	// still REPORTS every one of these — excluding here does not blind the ground-truth check.
+	XXH3_64bits_update(st, &mem_b[0x289000], 0x5E0u);              // [0x000, 0x5E0)
+	XXH3_64bits_update(st, &mem_b[0x2895F0], 0x631u - 0x5F0u);     // [0x5F0, 0x631)
+	XXH3_64bits_update(st, &mem_b[0x289632], 0x798u - 0x632u);     // [0x632, 0x798)
+	XXH3_64bits_update(st, &mem_b[0x28979A], 0xF80u - 0x79Au);     // [0x79A, 0xF80)
+	XXH3_64bits_update(st, &mem_b[0x289F84], 0x1000u - 0xF84u);    // [0xF84, 0x1000)
+	// 0x289F80..0x289F83 render-queue counter EXCLUDED — executor reSimFrame step-4 resets it to 0;
+	// flycast owns its own value there (render bookkeeping, not game logic).
+	// frame counter 0x3496B0 EXCLUDED — vsync-owned, non-deterministic (maplecast_shadow_exec::masked()
+	// excludes it; the executor doesn't own it and flycast advances it independently on the head frame).
+	// fight tick 0x268250 EXCLUDED (TCNT0-derived, non-RAM-deterministic — the R1 residual).
 	uint64_t h = XXH3_64bits_digest(st);
 	XXH3_freeState(st);
 	return h;

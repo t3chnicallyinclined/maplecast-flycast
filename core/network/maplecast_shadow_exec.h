@@ -28,4 +28,10 @@ void onFrame();
 // tick takes over). No-op returning false in a non-MAPLECAST_SHADOW_EXEC build.
 bool driveFrame();
 
+// EXECUTOR RE-SIM (MAPLECAST_PREDICT_EXEC, predict client) — advance mem_b one game-logic frame
+// for an INVISIBLE rollback re-sim, replacing flycast's SH-4 tick. State-advance only (no render,
+// no pacing); the visible head frame is rendered by flycast over this RAM (the handback). kcode
+// holds the frame's input. Returns false in a non-executor build (caller runs the SH-4).
+bool reSimFrame();
+
 }

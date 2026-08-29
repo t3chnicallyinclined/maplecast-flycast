@@ -52,6 +52,17 @@ bool loadStartSavestate();
 // Format version of the currently-open .mcrec. 0 if none open.
 uint32_t formatVersion();
 
+// Load a plain-text MOVIE as the input source (no embedded savestate).
+// Format: one line per frame, "<p1_kcode_hex> <p2_kcode_hex>" (4-hex,
+// ACTIVE-LOW, 0xFFFF = neutral — the SH4 kcode convention that
+// session_to_movie.py already emits from a MetaSync Steam capture). The
+// frame number is the line index. Fills the same _inputLog that
+// getInputAtFrame() serves, so startPlayback() + the ggpo hook drive it
+// exactly like a .mcrec. The start state is NOT supplied here — pair with a
+// savestate autoload (or a clean boot) so both determinism runs begin
+// identically. Returns false if the file won't open.
+bool openMovie(const std::string& path);
+
 // In-memory load — bypasses the disk-roundtrip + autoload dance. Builds
 // a Deserializer over the embedded state bytes and calls emu.loadstate()
 // directly. Safe now that dc_serialize round-trip is byte-perfect (commit

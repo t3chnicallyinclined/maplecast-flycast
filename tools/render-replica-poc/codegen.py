@@ -31,9 +31,34 @@ def FR(f):  # fr0..fr15
 def is_reg(x): return re.fullmatch(r'r\d+', x) is not None
 def is_freg(x): return re.fullmatch(r'fr\d+', x) is not None
 
+# marvelous2 emits symbolic immediates/displacements in instruction operands (NOT just #data
+# pools), e.g. `mov pl_mem.y_velocity,r0` or `mov.b @(pl_mem.charid0,r14),r0`. Resolve them
+# from the same work.asm/pl_mem.asm #symbol tables gen_one uses. (Loaded here — not imported
+# from gen_one — to avoid a codegen<-emit_func<-gen_one import cycle.)
+import os as _os
+_SYM_FILES = ((r"C:\Users\trist\projects\_marv_re\memory\work.asm",   'work'),
+              (r"C:\Users\trist\projects\_marv_re\memory\pl_mem.asm", 'pl_mem'))
+_SYMS = None
+def _syms():
+    global _SYMS
+    if _SYMS is None:
+        _SYMS = {}
+        for path, pfx in _SYM_FILES:
+            try:
+                for line in open(path, errors='replace'):
+                    m = re.match(r'#symbol\s+(\S+)\s+(0x[0-9a-fA-F]+|\d+)', line)
+                    if m:
+                        v = int(m.group(2), 16) if m.group(2).lower().startswith('0x') else int(m.group(2))
+                        _SYMS[pfx + '.' + m.group(1)] = v
+            except FileNotFoundError:
+                pass
+    return _SYMS
+
 def imm(x):
-    """Parse an immediate like 0x20, 0xFF, 0x00, 0xE4."""
+    """Parse an immediate like 0x20, 0xFF, 0x00, 0xE4, or a symbolic work.X/pl_mem.X operand."""
     x=x.strip()
+    s=_syms()
+    if x in s: return s[x]
     return int(x,16) if x.lower().startswith('0x') else int(x,16) if re.fullmatch(r'[0-9a-fA-F]+',x) else int(x)
 
 class Emitter:
@@ -88,7 +113,10 @@ class Emitter:
             # tag so a following fmov.s @r0 loads the data word. We model r0 as a
             # special "POOLADDR|<const idx>". Simplest: stash the float bits.
             locref=re.search(r'@\(([^,]+),', a[0]).group(1)
-            val=self.pool_const(locref)
+            try:
+                val=self.pool_const(locref)
+            except KeyError:
+                val=locref   # not in #data -> fall through to the table-addr branch (r0 = &pool)
             if isinstance(val, str) or not isinstance(val, int):
                 # jump-table / unresolvable-value pool: r0 = the pool's real guest ADDRESS
                 # so @(r0,rN) or @r0 dereferences read the table from RAM (bank data resident).
@@ -128,8 +156,14 @@ class Emitter:
             fr=FR(a[0])
             self.emit(f"{{ float _f={fr}; if(_f!=_f) c->fpul=0x80000000u; else {{ c->fpul=(u32)(s32)_f; if((s32)c->fpul>0x7fffff80) c->fpul=0x7fffffffu; }} }}")
         elif m=='lds':
-            # lds Rm, FPUL
+            # lds Rm, FPUL / lds Rm, FPSCR
             if a[1].upper()=='FPUL': self.emit(f"c->fpul = {R(a[0])};")
+            elif a[1].upper()=='FPSCR':
+                # writing FPSCR may toggle FR (bit21) -> the FR/XF banks swap. Model the swap so
+                # subsequent fmov/ftrv see the right bank (byte-exact if this site is executed).
+                self.emit(f"{{ u32 _nf={R(a[0])}; if((_nf ^ c->fpscr) & 0x00200000u){{ float _t; "
+                          f"for(int _i=0;_i<16;_i++){{_t=c->fr[_i];c->fr[_i]=c->xf[_i];c->xf[_i]=_t;}} }} "
+                          f"c->fpscr=_nf & 0x003FFFFFu; }}")
             else: raise NotImplementedError(raw)
         elif m=='flds':
             # flds FRm, FPUL : fpul = raw bits of FRm
@@ -141,6 +175,9 @@ class Emitter:
             # sqrtf (not __builtin_sqrtf): resolves via CRT on MSVC, libm on clang, and the
             # freestanding-wasm stub — all correctly-rounded IEEE sqrt, so byte-exact.
             self.emit(f"{FR(a[0])} = sqrtf({FR(a[0])});")
+        elif m=='fsrra':
+            # fsrra FRn : FRn = 1/sqrt(FRn)  (flycast sh4_fpu.cpp:363, PR==0 single-precision).
+            self.emit(f"{FR(a[0])} = 1.0f / sqrtf({FR(a[0])});")
         elif m=='sts':
             # sts FPUL,Rn  or sts MACL,Rn
             src=a[0].upper()
@@ -148,6 +185,7 @@ class Emitter:
             elif src=='MACL': self.emit(f"{R(a[1])} = c->macl;")
             elif src=='MACH': self.emit(f"{R(a[1])} = c->mach;")
             elif src=='PR': self.emit(f"{R(a[1])} = c->pr;")
+            elif src=='FPSCR': self.emit(f"{R(a[1])} = c->fpscr;")
             else: raise NotImplementedError(raw)
         elif m=='stc':
             # control regs: SR is game-logic-inert (IMASK/BL don't affect gameplay); GBR real.
@@ -155,6 +193,10 @@ class Emitter:
             if src=='sr':   self.emit(f"{R(a[1])} = 0x60000100u; /* stc sr (inert) */")
             elif src=='gbr':self.emit(f"{R(a[1])} = c->gbr;")
             elif src=='vbr':self.emit(f"{R(a[1])} = 0u; /* stc vbr */")
+            elif src.endswith('_bank'):
+                # banked GP register (r0_bank..r7_bank): only live in exception/interrupt context,
+                # which the game-tick executor never enters -> inert (0). Note if ever executed.
+                self.emit(f"{R(a[1])} = 0u; /* stc {src} inert (no banked-reg context) */")
             else: raise NotImplementedError(raw)
         elif m=='ldc':
             dst=a[1].lower()
@@ -175,15 +217,23 @@ class Emitter:
             elif dst=='vbr':self.emit("c->r[15]+=4;")
             else: raise NotImplementedError(raw)
         elif m=='sts.l':
-            # sts.l pr,@-r15  or  sts.l macl,@-r15
+            # sts.l pr,@-r15  or  sts.l macl,@-r15  or  sts.l fpscr,@-r15
             src=a[0].lower()
             if src=='pr': self.emit("c->r[15]-=4; w32(c, c->r[15], c->pr);")
             elif src=='macl': self.emit("c->r[15]-=4; w32(c, c->r[15], c->macl);")
+            elif src=='mach': self.emit("c->r[15]-=4; w32(c, c->r[15], c->mach);")
+            elif src=='fpscr': self.emit("c->r[15]-=4; w32(c, c->r[15], c->fpscr);")
+            elif src=='fpul': self.emit("c->r[15]-=4; w32(c, c->r[15], c->fpul);")
             else: raise NotImplementedError(raw)
         elif m=='lds.l':
             dst=a[1].lower()
             if dst=='pr': self.emit("c->pr = r32(c, c->r[15]); c->r[15]+=4;")
             elif dst=='macl': self.emit("c->macl = r32(c, c->r[15]); c->r[15]+=4;")
+            elif dst=='mach': self.emit("c->mach = r32(c, c->r[15]); c->r[15]+=4;")
+            elif dst=='fpul': self.emit("c->fpul = r32(c, c->r[15]); c->r[15]+=4;")
+            elif dst=='fpscr':
+                self.emit("{ u32 _nf=r32(c, c->r[15]); c->r[15]+=4; if((_nf ^ c->fpscr) & 0x00200000u){ float _t; "
+                          "for(int _i=0;_i<16;_i++){_t=c->fr[_i];c->fr[_i]=c->xf[_i];c->xf[_i]=_t;} } c->fpscr=_nf & 0x003FFFFFu; }")
             else: raise NotImplementedError(raw)
         # ---------------- integer alu ----------------
         elif m=='add':
@@ -283,6 +333,22 @@ class Emitter:
                 terms=" + ".join(f"c->xf[{i+4*k}]*_v{k}" for k in range(4))
                 self.emit(f"  {FR('fr'+str(n+i))} = {terms};")
             self.emit("}")
+        elif m=='fipr':
+            # fipr FVm, FVn : FR[n+3] = FVm . FVn  (4-elem dot product). flycast sh4_fpu.cpp:
+            # DOUBLE-precision accumulation, then cast to float (fixNaN is a no-op w/o STRICT_MODE,
+            # which the oracle build is not) -> (float)idp is byte-exact. Read fr[n+3] BEFORE write.
+            m0=int(a[0][2:]); n0=int(a[1][2:])   # a[0]=FVm base, a[1]=FVn base (result FVn.w)
+            self.emit("{")
+            self.emit(f"  double _idp=(double)c->fr[{n0}]*c->fr[{m0}];")
+            self.emit(f"  _idp+=(double)c->fr[{n0+1}]*c->fr[{m0+1}];")
+            self.emit(f"  _idp+=(double)c->fr[{n0+2}]*c->fr[{m0+2}];")
+            self.emit(f"  _idp+=(double)c->fr[{n0+3}]*c->fr[{m0+3}];")
+            self.emit(f"  c->fr[{n0+3}]=(float)_idp;")
+            self.emit("}")
+        elif m=='clrt':
+            self.emit("c->sr_t = 0;")
+        elif m=='sett':
+            self.emit("c->sr_t = 1;")
         elif m=='frchg':
             # swap FR <-> XF banks (and toggle FPSCR.FR)
             self.emit("{ float _t; for(int _i=0;_i<16;_i++){ _t=c->fr[_i]; c->fr[_i]=c->xf[_i]; c->xf[_i]=_t; } c->fpscr ^= 0x00200000u; }")
@@ -340,6 +406,10 @@ class Emitter:
             self.emit(f"c->sr_t = ({R(a[1])} >= {R(a[0])});")  # unsigned
         elif m=='cmp/hi':
             self.emit(f"c->sr_t = ({R(a[1])} > {R(a[0])});")   # unsigned
+        elif m=='cmp/str':
+            # cmp/str Rm,Rn : T=1 if ANY byte of Rm and Rn is equal (flycast sh4_opcodes.cpp:1290).
+            self.emit(f"{{ u32 _t={R(a[1])} ^ {R(a[0])}; c->sr_t = (((_t&0xFF000000u)==0)||"
+                      f"((_t&0x00FF0000u)==0)||((_t&0x0000FF00u)==0)||((_t&0x000000FFu)==0)); }}")
         # ---------------- nops/branches handled by control layer ------------
         elif m in ('nop',):
             self.emit(";")
@@ -385,6 +455,18 @@ class Emitter:
                 tag=self.leaf_tag(v)
                 self.emit(f"{R(dst)} = 0x{tag:08x}u; /* leafptr {v} */")
                 return
+            if v is None:
+                # pool label absent from every #data table: it is CODE-AS-DATA (a constant word
+                # that coincides with an instruction, e.g. a `mov.w @(loc_X,PC)` whose loc_X is a
+                # code label) or a pool in a bank we didn't enumerate. Either way the true bytes are
+                # RESIDENT in area-3 RAM at that guest address -> read them at runtime (byte-exact,
+                # eliminates the whole 'pool loc_X not in data' KeyError class by construction).
+                mhex=re.fullmatch(r'loc_([0-9a-fA-F]+)', key)
+                if mhex:
+                    addr=int(mhex.group(1),16)
+                    ldr='r16s' if sz=='w' else 'r32'   # mov.w sign-extends; mov.l is 32-bit
+                    self.emit(f"{R(dst)} = {ldr}(c, 0x{addr:08x}u); /* pool@RAM {locref} (not in #data) */")
+                    return
             val=self.pool_const(locref)
             if sz=='w': val = val & 0xFFFF
             self.emit(f"{R(dst)} = 0x{val:x}u; /* pool {locref} */")
@@ -441,7 +523,9 @@ class Emitter:
         # store: FRm -> @Rn / @-Rn / @(R0,Rn)   (float reg is M; bank from M's low bit)
         if is_freg(src) and not is_freg(dst):
             rs=rawn(src); sb,sp=bank(rs)
-            addr,mode,base=self._addr_or_pool(dst)
+            # a STORE destination is always a real address in the base reg (NEVER a mova'd pool
+            # sentinel) — use _addr, not _addr_or_pool (which would leak the POOL_R0 sentinel into C).
+            addr,mode,base=self._addr(dst)
             if mode=='-':
                 self.emit(
                     f"if ({SZ}) {{ {R(base)}-=8; u32 _a={R(base)};"

@@ -138,6 +138,12 @@ static LpInput   _lpLastConfRemote;          // remote's last confirmed input (r
 // tick's input, matching the server's Emulator::run phase.
 static LpInput   _lpHeadPipe;
 static uint64_t  _lpRollbacks = 0, _lpMaxDepth = 0, _lpReJoins = 0;
+// ROLLBACK CLASSIFIER (diagnostic, purely local): after each re-sim, compare the head's
+// state hash pre- vs post-rollback. SPURIOUS = re-sim produced an identical head state
+// (the input mispredict changed nothing on screen -> the rollback + its ~4ms/frame SH-4
+// cost was wasted). REAL = the head state actually changed (a necessary correction). The
+// spurious:real ratio decides whether the jitter is skippable or inherent.
+static uint64_t  _lpRbSpurious = 0, _lpRbReal = 0;
 // Local input at its EFFECT frame: the client samples the stick at tick H and the
 // input takes effect at frame H+INPUT_DELAY, on BOTH the client's predicted head
 // AND the server (frame-stamped) — so the predicted local input == the
@@ -819,7 +825,22 @@ static bool livePredictDrive(uint64_t localFrame)
 		};
 		const bool matchL = inSame(_lpAuth[ls][idx], _lpPred[ls][idx]);
 		const bool matchR = inSame(_lpAuth[rs][idx], _lpPred[rs][idx]);
-		if (!(matchL && matchR) && reSimFrom == UINT64_MAX) reSimFrom = N;
+		if (!(matchL && matchR) && reSimFrom == UINT64_MAX) {
+			reSimFrom = N;
+			// DIAGNOSTIC (log-only): pin whether the LOCAL (frame-stamped) or REMOTE
+			// (repeat-last-confirmed) slot drove the mispredict, and by what input
+			// delta — local miss => stamp timing/phase skew; remote miss => repeat-last
+			// gap. Rate-limited so it never floods the frame loop.
+			static uint64_t _misLog = 0;
+			if ((_misLog++ % 30) == 0) {
+				printf("[predict-mis] f=%llu Lmiss=%d Rmiss=%d | predL=%04x/%02x/%02x authL=%04x/%02x/%02x | predR=%04x authR=%04x\n",
+				       (unsigned long long)N, (int)!matchL, (int)!matchR,
+				       _lpPred[ls][idx].btn, _lpPred[ls][idx].lt, _lpPred[ls][idx].rt,
+				       _lpAuth[ls][idx].btn, _lpAuth[ls][idx].lt, _lpAuth[ls][idx].rt,
+				       _lpPred[rs][idx].btn, _lpAuth[rs][idx].btn);
+				fflush(stdout);
+			}
+		}
 		// INJECTION verify: did the server echo our (injected) local input, and did
 		// our prediction match it? Proves the forward+stamp+echo path end-to-end.
 		if (_lpInjectStart && N >= _lpInjectStart && N < _lpInjectStart + 180) {
@@ -870,6 +891,12 @@ static bool livePredictDrive(uint64_t localFrame)
 		if (depth > _lpMaxDepth) _lpMaxDepth = depth;
 		_perfDepth = depth;
 		_lpRollbacks++;
+		// ROLLBACK CLASSIFIER: snapshot the head's PRE-rollback (predicted) state hash.
+		// Step 1b captured _lpLiveHash[P-1] at the top of this drive call, so this is the
+		// predicted head state; after the re-sim we compare to decide spurious vs real.
+		const int _rbHeadIdx = (int)((P - 1) % LP_RING);
+		const bool _rbHaveHead = (P >= 1 && _lpLiveHashFrame[_rbHeadIdx] == P - 1);
+		const uint64_t _rbOldHead = _rbHaveHead ? _lpLiveHash[_rbHeadIdx] : 0;
 		maplecast_predict::ringRestore(reSimFrom);
 		// APPLY-PHASE FIX (STEP 2): the client's headless advance
 		// (runOneGameFrameHeadless, loops to the 0x3496B0 game-frame tick) consumes
@@ -920,6 +947,13 @@ static bool livePredictDrive(uint64_t localFrame)
 			_lpLiveHashFrame[idx] = f;
 			if (std::getenv("MAPLECAST_SUBHASH_LOG"))
 				maplecast_rollback::gameStateSubHashes(_lpLiveSub[idx]);
+		}
+		// ROLLBACK CLASSIFIER: the re-sim rewrote _lpLiveHash[P-1] to the re-simmed head
+		// state. Equal to the pre-rollback head hash => the rollback changed nothing on
+		// screen (SPURIOUS, wasted ~4ms/frame); different => a REAL correction.
+		if (_rbHaveHead && _lpLiveHashFrame[_rbHeadIdx] == P - 1) {
+			if (_lpLiveHash[_rbHeadIdx] == _rbOldHead) _lpRbSpurious++;
+			else                                       _lpRbReal++;
 		}
 		// Continue the head's input pipeline from the re-sim's final logical frame
 		// (P-1) so the head phase joins the confirmed timeline seamlessly (no
@@ -1007,10 +1041,10 @@ static bool livePredictDrive(uint64_t localFrame)
 	if (gap > _lpGapMax) _lpGapMax = gap;
 	if ((target % 120) == 0)
 		printf("[predict-live] tele head=%llu serverLive~%llu lead=%+lld confirmed=%llu gap=%llu "
-		       "rollbacks=%llu maxDepth=%llu reJoins=%llu confHash=%llu/%llu(match/mism)\n",
+		       "rollbacks=%llu spur=%llu real=%llu maxDepth=%llu reJoins=%llu confHash=%llu/%llu(match/mism)\n",
 		       (unsigned long long)target, (unsigned long long)serverLive, (long long)lead,
 		       (unsigned long long)_lpConfirmed, (unsigned long long)gap,
-		       (unsigned long long)_lpRollbacks, (unsigned long long)_lpMaxDepth,
+		       (unsigned long long)_lpRollbacks, (unsigned long long)_lpRbSpurious, (unsigned long long)_lpRbReal, (unsigned long long)_lpMaxDepth,
 		       (unsigned long long)_lpReJoins,
 		       (unsigned long long)_lpConfMatch, (unsigned long long)_lpConfMismatch),
 		printf("[predict-live]   confHash-by-offset  N-1:%llu/%llu  N:%llu/%llu  N+1:%llu/%llu (match/mism)\n",
@@ -1126,21 +1160,41 @@ bool frameGate()
 	// Reconcile against authoritative tape (rollback on mispredict). Confirmed
 	// timeline stays server-authoritative (clientVerify is the determinism gate).
 	if (maplecast_predict::liveActive()) {
-		// Record the head's game-state hash for the frame that just finished
-		// (RAM = END of localFrame-1). When that frame later CONFIRMS without a
-		// rollback, it's compared to the server's authoritative hash => the real
-		// determinism gate for the leading predict head.
-		if (!_lpLiveHashInit) { for (int i=0;i<LP_RING;i++) _lpLiveHashFrame[i]=UINT64_MAX; _lpLiveHashInit=true; }
-		if (localFrame > 0) {
-			const uint64_t hf = localFrame - 1;
-			_lpLiveHash[hf % LP_RING] = maplecast_rollback::gameStateRegionHash();
-			_lpLiveHashFrame[hf % LP_RING] = hf;
-			if (std::getenv("MAPLECAST_SUBHASH_LOG"))
-				maplecast_rollback::gameStateSubHashes(_lpLiveSub[hf % LP_RING]);
+		// JOIN CATCH-UP GATE (2026-07-25): the predict run-ahead is audio-paced at
+		// 60fps and CANNOT outrun the server to close a behind-JOIN gap. Worse, the
+		// render loop advances localFrame every frame while `confirmed` only advances
+		// as the (60fps) tape reconciles — so a head that starts far behind grows the
+		// head-confirmed gap past the ring and WEDGES (the lead=-408 freeze). Fix:
+		// only PREDICT when we're near the server's live edge. When far behind, fall
+		// through to the lockstep catch-up below — it fastForward-replays the
+		// authoritative tape (head AND confirmed advance together, gap stays ~0) until
+		// re-centred, then predict re-arms clean. Hysteretic so it can't flap.
+		static bool _lpCatchingUp = false;
+		const uint64_t sLive    = maplecast_lockstep::lastServerFrame();
+		const uint64_t behindBy = (sLive > localFrame) ? (sLive - localFrame) : 0;
+		if      (!_lpCatchingUp && behindBy > 16) { _lpCatchingUp = true;  _lpInited = false;
+			printf("[predict-live] fell %llu behind live edge -> lockstep catch-up\n", (unsigned long long)behindBy); fflush(stdout); }
+		else if ( _lpCatchingUp && behindBy <= 4)  { _lpCatchingUp = false;
+			printf("[predict-live] re-centred (%llu behind) -> resume predict\n", (unsigned long long)behindBy); fflush(stdout); }
+		if (!_lpCatchingUp) {
+			// Near the live edge — run the predict drive. Record the head's game-state
+			// hash for the frame that just finished (RAM = END of localFrame-1); when
+			// that frame later CONFIRMS without a rollback it's compared to the server's
+			// authoritative hash => the determinism gate for the leading predict head.
+			if (!_lpLiveHashInit) { for (int i=0;i<LP_RING;i++) _lpLiveHashFrame[i]=UINT64_MAX; _lpLiveHashInit=true; }
+			if (localFrame > 0) {
+				const uint64_t hf = localFrame - 1;
+				_lpLiveHash[hf % LP_RING] = maplecast_rollback::gameStateRegionHash();
+				_lpLiveHashFrame[hf % LP_RING] = hf;
+				if (std::getenv("MAPLECAST_SUBHASH_LOG"))
+					maplecast_rollback::gameStateSubHashes(_lpLiveSub[hf % LP_RING]);
+			}
+			if (livePredictDrive(localFrame))
+				return true;
+			return false;   // transient: not enough tape yet to start
 		}
-		if (livePredictDrive(localFrame))
-			return true;
-		return false;   // transient: not enough tape yet to start
+		// else: far behind -> DO NOT predict; fall through to the lockstep catch-up
+		// (fastForward replay of the authoritative tape) which re-centres us.
 	}
 
 	// ── Lockstep catch-up + advance (determinism-correct) ──────────────

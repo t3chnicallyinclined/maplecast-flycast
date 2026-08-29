@@ -241,3 +241,10 @@ _stage_gt/
 # ROM-derived RAM/TA captures (never commit — derived from ROM execution)
 *.mcrr
 *.zcst
+native-client-tdw-exec/target/
+_fleet_key.txt
+*_fleet_key.txt
+_marv/
+_oracle/_re/
+_oracle/tmp/
+**/*.asm

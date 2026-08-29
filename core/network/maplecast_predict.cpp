@@ -5,6 +5,7 @@
 #include "types.h"
 #include "maplecast_predict.h"
 #include "maplecast_rollback.h"        // captureFrameToBlob/restoreFromBlob, gameStateRegionHash
+#include "maplecast_shadow_exec.h"     // reSimFrame: executor state-advance for the invisible re-sim (approach A)
 #include "emulator.h"                  // emu, getSh4Executor
 #include "hw/sh4/sh4_if.h"             // Sh4Executor Run/Start/Stop
 #include "hw/pvr/Renderer_if.h"        // rend_enable_renderer / rend_is_enabled
@@ -1316,6 +1317,17 @@ void setPredictedFrame(uint64_t f) { g_predictedFrame = f; }
 
 void advanceHeadlessOneFrame()
 {
+	// APPROACH A (MAPLECAST_PREDICT_EXEC): advance the INVISIBLE re-sim frame with the transpiled
+	// executor (mc_shadow_run_tick, ~0.9ms game-logic only) instead of a full flycast SH-4 frame
+	// (~4ms) — this is the whole jitter fix. The executor advances mem_b ONLY, leaving the SH-4
+	// context at the ring-restored frame; the visible head frame is then run+rendered by flycast's
+	// SH-4 over this RAM (the handback, sound because MVC2 is RAM-driven). reSimFrame() returns
+	// false in a non-executor build, so we fall through to the flycast path (unchanged).
+	static int useExec = -1;
+	if (useExec < 0) useExec = (std::getenv("MAPLECAST_PREDICT_EXEC") != nullptr) ? 1 : 0;
+	if (useExec && maplecast_shadow_exec::reSimFrame())
+		return;
+
 	const bool prevFF = settings.input.fastForwardMode, prevMute = settings.aica.muteAudio;
 	settings.input.fastForwardMode = true; settings.aica.muteAudio = true;
 	// Advance ONE video frame via the EXACT byte-perfect per-frame body the normal emu loop
