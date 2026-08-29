@@ -42,7 +42,41 @@
 #include <linux/if_xdp.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
-#include <xdp/xsk.h>
+/* AF_XDP's xsk.h moved: it lived in libbpf (<bpf/xsk.h>) up to libbpf 0.6 and
+   was split out into libxdp (<xdp/xsk.h>) afterwards. Ubuntu 22.04 (jammy) ships
+   libbpf 0.5 and has NO libxdp-dev package at all, so hard-including <xdp/xsk.h>
+   silently disabled this whole file on every jammy build box. Accept either. */
+#if defined(__has_include)
+#  if __has_include(<xdp/xsk.h>)
+#    include <xdp/xsk.h>
+#  elif __has_include(<bpf/xsk.h>)
+#    include <bpf/xsk.h>
+#  else
+#    error "AF_XDP requested but neither <xdp/xsk.h> nor <bpf/xsk.h> was found"
+#  endif
+#else
+#  include <bpf/xsk.h>
+#endif
+
+/* bpf_xdp_attach()/bpf_xdp_detach() arrived in libbpf 0.7. Ubuntu 22.04 ships
+   libbpf 0.5, which only has the older bpf_set_link_xdp_fd(). libbpf_version.h
+   itself only exists from 0.6, so its absence also means "old". Map the new
+   names onto the old call so this file builds on both. */
+#if defined(__has_include)
+#  if __has_include(<bpf/libbpf_version.h>)
+#    include <bpf/libbpf_version.h>
+#  endif
+#endif
+#if !defined(LIBBPF_MAJOR_VERSION) || (LIBBPF_MAJOR_VERSION == 0 && LIBBPF_MINOR_VERSION < 7)
+static inline int bpf_xdp_attach(int ifindex, int prog_fd, __u32 flags, const void * /*opts*/)
+{
+	return bpf_set_link_xdp_fd(ifindex, prog_fd, flags);
+}
+static inline int bpf_xdp_detach(int ifindex, __u32 flags, const void * /*opts*/)
+{
+	return bpf_set_link_xdp_fd(ifindex, -1, flags);
+}
+#endif
 
 // gamepad globals from gamepad_device.cpp — same ones ggpo::getLocalInput() reads
 extern u32 kcode[4];

@@ -1801,15 +1801,23 @@ endif() # NOT MAPLECAST_HEADLESS
 
 # MapleCast: AF_XDP zero-copy input — NIC DMA → ring buffer → kcode[] atomics
 # Bypasses entire kernel socket layer for gamepad UDP packets
-find_path(XDP_INCLUDE xdp/xsk.h PATHS "/usr/include")
+# xsk.h lives in libxdp (<xdp/xsk.h>) on 23.04+, but inside libbpf (<bpf/xsk.h>)
+# on 22.04/jammy, which has no libxdp-dev package at all. Requiring XDP_LIB meant
+# every jammy build silently took the else() branch and shipped no XDP support.
+find_path(XDP_INCLUDE NAMES xdp/xsk.h bpf/xsk.h PATHS "/usr/include")
 find_library(XDP_LIB xdp PATHS "/usr/lib/x86_64-linux-gnu")
 find_library(BPF_LIB bpf PATHS "/usr/lib/x86_64-linux-gnu")
-if(XDP_INCLUDE AND XDP_LIB AND BPF_LIB)
-	message(STATUS "MapleCast: AF_XDP found — zero-copy input enabled")
-	target_link_libraries(${PROJECT_NAME} PRIVATE ${XDP_LIB} ${BPF_LIB})
+if(XDP_INCLUDE AND BPF_LIB)
+	if(XDP_LIB)
+		message(STATUS "MapleCast: AF_XDP found (libxdp) — zero-copy input enabled")
+		target_link_libraries(${PROJECT_NAME} PRIVATE ${XDP_LIB} ${BPF_LIB})
+	else()
+		message(STATUS "MapleCast: AF_XDP found (libbpf built-in xsk) — zero-copy input enabled")
+		target_link_libraries(${PROJECT_NAME} PRIVATE ${BPF_LIB})
+	endif()
 	target_compile_definitions(${PROJECT_NAME} PRIVATE MAPLECAST_XDP=1)
 else()
-	message(WARNING "MapleCast: libxdp/libbpf not found — XDP input disabled, using fallback")
+	message(WARNING "MapleCast: xsk.h/libbpf not found — XDP input disabled, using fallback")
 endif()
 
 # MapleCast: WebRTC DataChannel — P2P NAT hole-punching for video/input
