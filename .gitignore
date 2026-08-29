@@ -250,3 +250,5 @@ _oracle/tmp/
 **/*.asm
 tools/render-replica-poc/_handoff/funclist_full.txt
 tools/render-replica-poc/_handoff/spl_funclist_full.txt
+/_run_*.bat
+/_build_*.bat

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GSTA Render Debug Console</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 13px/1.4 system-ui, sans-serif; background:#0f1218; color:#dfe4ea; margin:0; padding:14px; }
+  h1 { font-size:16px; margin:0 0 4px; }
+  #status { font-size:12px; margin-bottom:10px; }
+  .ok { color:#5fd97a; } .bad { color:#ff6b6b; }
+  fieldset { border:1px solid #2b313c; border-radius:8px; margin:0 0 12px; padding:8px 12px 12px; }
+  legend { padding:0 6px; color:#9fb0c3; font-weight:600; }
+  .hint { color:#7c8794; font-size:11px; margin:0 0 8px; }
+  .toggles { display:flex; flex-wrap:wrap; gap:6px; margin:4px 0; }
+  button.tg { border:1px solid #3a4250; background:#1b2029; color:#cfd6df; border-radius:6px; padding:4px 10px; cursor:pointer; font-size:12px; }
+  button.tg.on { background:#2b6cb0; border-color:#3b82c4; color:#fff; }
+  button.tg.danger.on { background:#b0402b; border-color:#c4553b; }
+  .row { display:flex; align-items:center; gap:10px; margin:5px 0; }
+  .row label { flex:0 0 170px; }
+  .row input[type=range] { flex:1; }
+  .row .val { flex:0 0 56px; text-align:right; font-variant-numeric:tabular-nums; color:#8fd0ff; }
+  .colorrow { display:flex; align-items:center; gap:8px; margin:5px 0; }
+  input[type=color] { width:40px; height:24px; border:none; background:none; }
+  .cols { columns: 2; column-gap: 24px; }
+  @media (max-width:720px){ .cols { columns:1; } }
+</style>
+</head>
+<body>
+<h1>GSTA Render Debug Console</h1>
+<div id="status">connecting…</div>
+<div class="hint">Native GSTA client only. The client's control WS defaults to <b>:7221</b> (a co-located headless owns :7211, so the client uses 7221 to avoid the collision — override with MAPLECAST_CONTROL_PORT). Every knob applies LIVE, no rebuild. Defaults = shipping behavior. URL param <code>?port=7221</code>.</div>
+
+<div id="panel"></div>
+
+<script>
+const PORT = new URLSearchParams(location.search).get('port') || 7221;
+let ws=null, rid=0;
+const state = {};
+const statusEl = document.getElementById('status');
+function setStatus(t, cls){ statusEl.textContent=t; statusEl.className=cls||''; }
+
+// ---- SECTIONS: [title, hint, items[]]. item = {t:'toggle'|'slider'|'color', key, label, ...} ----
+const SECTIONS = [
+  ['Bisect: emit vs render',
+   'FORCE TEST QUAD = big bright quad, near depth, center. Shows but bars don\'t → bar geometry/state wrong. Even it invisible → emit/TA/list broken.',
+   [ {t:'toggle', key:'forceTestQuad', label:'FORCE TEST QUAD', danger:true} ]],
+
+  ['Whole frame / TA lists',
+   'Isolate the big pieces + each PVR list (OPAQUE / PUNCH-THROUGH / TRANSLUCENT). SOLO overrides the on/off buttons.',
+   [ {t:'toggle', key:'stageOn', label:'stage'},
+     {t:'toggle', key:'bodyOn', label:'bodies'},
+     {t:'toggle', key:'hudSynthOn', label:'HUD synth'},
+     {t:'toggle', key:'hudqOn', label:'HUDQ pass'},
+     {t:'toggle', key:'listOpaqueOn', label:'list OPAQUE'},
+     {t:'toggle', key:'listPunchOn', label:'list PUNCH-THRU'},
+     {t:'toggle', key:'listTransOn', label:'list TRANSLUCENT'},
+     {t:'slider', key:'soloMode', label:'SOLO (0 off,1 stage,2 body,3 hud)', min:0, max:3, step:1} ]],
+
+  ['Body (render_frame)',
+   'render_frame output isolation + the effect/cull post-passes.',
+   [ {t:'toggle', key:'bodyEffectsOn', label:'effects (bit15)'},
+     {t:'toggle', key:'bodySatellitesOn', label:'satellites'},
+     {t:'toggle', key:'bodyCull85xxx', label:'0x85xxx cull'},
+     {t:'toggle', key:'bodyEffectTcwFix', label:'effect-TCW fix'},
+     {t:'toggle', key:'bodyForceColorOn', label:'force body color'},
+     {t:'color', key:'bodyForceColorARGB', label:'body test color'} ]],
+
+  ['Stage',
+   'Baked stage geometry (floor/skybox + HUD frames). filterBakedDyn drops the baked life/meter FILLS (procedural synth replaces them).',
+   [ {t:'toggle', key:'stageReproject', label:'reproject (camera)'},
+     {t:'toggle', key:'stageFramesOn', label:'baked frames band'},
+     {t:'toggle', key:'filterBakedDyn', label:'drop baked fills'},
+     {t:'toggle', key:'stageForceColorOn', label:'force stage color'},
+     {t:'color', key:'stageForceColorARGB', label:'stage test color'} ]],
+
+  ['HUD synth (life bars + meter)',
+   'Procedural life bars + super meter from live state. Fill-color override forces one ARGB (proves emit reaches screen).',
+   [ {t:'toggle', key:'hudBarsOn', label:'life bars'},
+     {t:'toggle', key:'hudMeterOn', label:'super meter'},
+     {t:'toggle', key:'hudGradientOn', label:'bar gradient'},
+     {t:'toggle', key:'hudChipOn', label:'red chip'},
+     {t:'toggle', key:'hudHighlightOn', label:'highlight sheen'},
+     {t:'toggle', key:'fillColorOverrideOn', label:'fill color override'},
+     {t:'color', key:'fillColorARGB', label:'fill test color'},
+     {t:'toggle', key:'hudListType', label:'list: TR (vs OP)'},
+     {t:'slider', key:'zBiasMicro', label:'Z bias ×1e-6', min:-2000, max:4000, step:1},
+     {t:'slider', key:'posDX', label:'pos X (px)', min:-320, max:320, step:1},
+     {t:'slider', key:'posDY', label:'pos Y (px)', min:-240, max:240, step:1} ]],
+];
+
+function connect(){
+  ws = new WebSocket(`ws://localhost:${PORT}`);
+  ws.onopen  = () => { setStatus(`connected :${PORT}`, 'ok'); send('hud_get'); };
+  ws.onclose = () => { setStatus('disconnected — retrying…', 'bad'); setTimeout(connect, 1200); };
+  ws.onerror = () => setStatus(`ws error on :${PORT}`, 'bad');
+  ws.onmessage = e => { let m; try{m=JSON.parse(e.data);}catch{return;} if(m.cmd==='hud_get'&&m.ok) applyState(m.data); };
+}
+function send(cmd, extra={}){ if(ws&&ws.readyState===1) ws.send(JSON.stringify({cmd, reply_id:String(++rid), ...extra})); }
+function set(key, value){ state[key]=value; send('hud_set', {key, value}); }
+
+// ---- build UI ----
+const els = {};   // key -> {type, node, valNode?}
+function build(){
+  const panel = document.getElementById('panel');
+  panel.innerHTML='';
+  for (const [title, hint, items] of SECTIONS) {
+    const fs=document.createElement('fieldset');
+    const lg=document.createElement('legend'); lg.textContent=title; fs.appendChild(lg);
+    if(hint){ const h=document.createElement('div'); h.className='hint'; h.textContent=hint; fs.appendChild(h); }
+    const tg=document.createElement('div'); tg.className='toggles'; fs.appendChild(tg);
+    for (const it of items) {
+      if (it.t==='toggle') {
+        const b=document.createElement('button'); b.className='tg'+(it.danger?' danger':''); b.textContent=it.label;
+        b.onclick=()=>{ const nv=state[it.key]?0:1; set(it.key,nv); paintToggle(it.key); };
+        tg.appendChild(b); els[it.key]={type:'toggle',node:b};
+      } else if (it.t==='slider') {
+        const row=document.createElement('div'); row.className='row';
+        const l=document.createElement('label'); l.textContent=it.label;
+        const r=document.createElement('input'); r.type='range'; r.min=it.min; r.max=it.max; r.step=it.step;
+        const v=document.createElement('span'); v.className='val';
+        r.oninput=()=>{ const nv=parseInt(r.value); v.textContent=nv; set(it.key,nv); };
+        row.append(l,r,v); fs.appendChild(row); els[it.key]={type:'slider',node:r,valNode:v};
+      } else if (it.t==='color') {
+        const row=document.createElement('div'); row.className='colorrow';
+        const l=document.createElement('label'); l.textContent=it.label; l.style.flex='0 0 130px';
+        const c=document.createElement('input'); c.type='color';
+        const a=document.createElement('label'); const ck=document.createElement('input'); ck.type='checkbox'; ck.checked=true;
+        a.append(ck, document.createTextNode(' opaque'));
+        const push=()=>{ const hex=c.value; const al=ck.checked?0xFF:0x80;
+          const r=parseInt(hex.substr(1,2),16),g=parseInt(hex.substr(3,2),16),b=parseInt(hex.substr(5,2),16);
+          set(it.key, ((al<<24)|(r<<16)|(g<<8)|b)>>>0); };
+        c.oninput=push; ck.onchange=push;
+        row.append(l,c,a); fs.appendChild(row); els[it.key]={type:'color',node:c,ckNode:ck};
+      }
+    }
+    panel.appendChild(fs);
+  }
+}
+function paintToggle(key){ const e=els[key]; if(e&&e.type==='toggle') e.node.classList.toggle('on', !!state[key]); }
+function applyState(data){
+  Object.assign(state, data);
+  for (const [key,e] of Object.entries(els)) {
+    if (!(key in data)) continue;
+    if (e.type==='toggle') e.node.classList.toggle('on', !!data[key]);
+    else if (e.type==='slider'){ e.node.value=data[key]; e.valNode.textContent=data[key]; }
+    else if (e.type==='color'){ const v=data[key]>>>0; const r=(v>>16)&255,g=(v>>8)&255,b=v&255;
+      e.node.value='#'+[r,g,b].map(x=>x.toString(16).padStart(2,'0')).join('');
+      e.ckNode.checked = ((v>>>24)&255)>=0xC0; }
+  }
+}
+
+build(); connect();
+</script>
+</body>
+</html>
