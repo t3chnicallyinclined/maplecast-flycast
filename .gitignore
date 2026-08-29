@@ -248,3 +248,5 @@ _marv/
 _oracle/_re/
 _oracle/tmp/
 **/*.asm
+tools/render-replica-poc/_handoff/funclist_full.txt
+tools/render-replica-poc/_handoff/spl_funclist_full.txt
