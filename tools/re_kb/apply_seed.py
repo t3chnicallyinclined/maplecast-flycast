@@ -95,13 +95,13 @@ def split_statements(text):
     return [s for s in out if s.strip()]
 
 
-def post(stmt):
+def post(stmt, timeout=60):
     body = ("USE NS re DB kb;\n" + stmt).encode("utf-8")
     req = urllib.request.Request(URL, data=body, method="POST")
     req.add_header("Accept", "application/json")
     req.add_header("Authorization", "Basic " + base64.b64encode(AUTH.encode()).decode())
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             res = json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         try:
@@ -115,6 +115,11 @@ def post(stmt):
         return ["HTTP %s: %s" % (e.code, " ".join(detail.split())[:260])]
     except urllib.error.URLError as e:
         return ["unreachable: %s" % e]
+    except (TimeoutError, OSError) as e:
+        # A socket timeout used to propagate and KILL the whole run mid-file,
+        # which loses every result gathered so far and reports nothing. A slow
+        # statement is a FAILED statement, not a crash.
+        return ["timed out after %ss: %s" % (timeout, e)]
     return [str(b.get("result"))[:200] for b in res
             if isinstance(b, dict) and b.get("status") != "OK"]
 
@@ -129,7 +134,8 @@ def main(argv):
     for path in files:
         text = open(path, encoding="utf-8", errors="replace").read()
         if is_script_scoped(text):
-            errs = [] if dry else [(os.path.basename(path), e) for e in post(text)]
+            errs = [] if dry else [(os.path.basename(path), e)
+                                   for e in post(text, timeout=900)]
             print("%-52s  whole-script (LET-scoped)%s"
                   % (os.path.basename(path), "  <-- FAILED" if errs else ""))
             for head, e in errs[:3]:

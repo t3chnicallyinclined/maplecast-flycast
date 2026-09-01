@@ -396,6 +396,41 @@ def false_wins():
         "FROM tried_on WHERE outcome='masks_only';")
 
 
+def status_contradictions():
+    """Findings whose TEXT and STATUS disagree.
+
+    Cheap, and it catches a real class. finding:stage_pernode_matrices_closed
+    has the slug `_closed`, a statement opening "STAGE PROP/SCENERY RENDER --
+    CLOSED", and status='open'. One of those is stale and the graph cannot say
+    which -- but it can say that they conflict, which is the part a query can
+    do and a reader cannot be relied on to notice.
+
+    Deliberately NOT auto-corrected. Guessing which side is right is how a
+    status becomes decorative.
+    """
+    closed_words = "CLOSED|RESOLVED|SOLVED|FIXED"
+    open_but_closed = query(
+        "SELECT record::id(id) AS id, status, string::slice(statement ?? '', 0, 90) AS claim "
+        "FROM finding WHERE status IN ['open','inferred'] "
+        "AND string::matches(string::slice(statement ?? '', 0, 80), "
+        "'(?i)\\\\b(%s)\\\\b');" % closed_words)
+    # the reverse: still `confirmed` while the text says it was disproved
+    confirmed_but_refuted = query(
+        "SELECT record::id(id) AS id, status, string::slice(statement ?? '', 0, 90) AS claim "
+        "FROM finding WHERE status = 'confirmed' "
+        "AND string::matches(statement ?? '', "
+        "'(?i)\\\\b(SUPERSEDED BY|DISPROVEN|was wrong|no longer true)\\\\b');")
+    # CANDIDATES, not defects. Each still has to be READ -- a `confirmed`
+    # finding may legitimately contain the word RESOLVED. The value is that the
+    # list is short enough to read, and anchored to the statement's OPENING,
+    # where a verdict is actually stated. An unanchored match returned mostly
+    # noise ("re-catalog records a RESOLVED conclusion" in an `open` row) --
+    # the same loose-regex error that produced the handover's bogus "44 buried
+    # dead ends".
+    return {"candidates_open_but_text_says_closed": open_but_closed,
+            "candidates_confirmed_but_text_says_superseded": confirmed_but_refuted}
+
+
 def contradictions():
     """Two live claims about the same entity with no supersedes between them.
 

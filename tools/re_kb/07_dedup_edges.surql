@@ -16,9 +16,26 @@ LET $writes = (SELECT in, out FROM writes GROUP BY in, out);
 DELETE writes;
 FOR $p IN $writes { RELATE ($p.in)->writes->($p.out); };
 
-LET $calls = (SELECT in, out FROM calls GROUP BY in, out);
+-- `calls` carries via/resolved_by, so it must be deduped like tried_on:
+-- rebuilding from (in, out) alone DESTROYS the properties. That happened on
+-- 2026-09-01 -- 3,207 freshly-ingested edges lost `via` the moment this file
+-- ran, which silently broke the indirect-reach audit the field exists for.
+-- If you add a property to an edge table, its dedup block must group by it.
+-- First drop PROPERTY-LESS duplicates: the seeds create `calls` with a bare
+-- RELATE (no via), while ingest/marv_calls.py creates the same edge WITH via.
+-- Grouping by (in,out,via) treats those as different edges and keeps both, so
+-- the same call appears twice -- once usefully, once blank.
+LET $withvia = (SELECT in, out FROM calls WHERE via != NONE GROUP BY in, out);
+FOR $p IN $withvia {
+  DELETE calls WHERE in = $p.in AND out = $p.out AND via = NONE;
+};
+
+LET $calls = (SELECT in, out, via, resolved_by FROM calls
+              GROUP BY in, out, via, resolved_by);
 DELETE calls;
-FOR $p IN $calls { RELATE ($p.in)->calls->($p.out); };
+FOR $p IN $calls {
+  RELATE ($p.in)->calls->($p.out) SET via = $p.via, resolved_by = $p.resolved_by;
+};
 
 LET $lives_at = (SELECT in, out FROM lives_at GROUP BY in, out);
 DELETE lives_at;
