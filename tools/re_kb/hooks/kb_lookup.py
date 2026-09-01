@@ -27,17 +27,26 @@ Install: see .claude/settings.json (PreToolUse).
 Test:    echo '{"tool_name":"Bash","tool_input":{"command":"grep 0x8C268340"}}' \
            | python tools/re_kb/hooks/kb_lookup.py
 """
-import base64
 import json
 import os
 import re
 import sys
-import urllib.request
+
+# NOTE: urllib.request and base64 are imported LAZILY, inside sql().
+#
+# This hook runs on EVERY Bash/Grep/Read/Edit call, and the overwhelming
+# majority of those name no MVC2 address at all -- they return at the
+# `if not (addrs or pcs or offs)` guard without touching the network. Measured
+# on this machine: bare interpreter start 72ms, +json/sys/re 79ms,
+# +urllib.request/base64 168ms. Importing them at module scope therefore cost
+# ~88ms on every tool call to support the minority that need them. Moving them
+# into sql() halves the tax on the common path.
 
 URL = os.environ.get("REKB_URL", "http://127.0.0.1:8001/sql")
 AUTH = os.environ.get("REKB_AUTH", "root:root")
 TIMEOUT = float(os.environ.get("REKB_HOOK_TIMEOUT", "2.5"))
 MAX_CHARS = 2600          # keep the injection small; this is a pointer, not a dump
+MAX_LINES = 12            # curated lines win this budget; doc restatements fill leftovers
 
 ADDR = re.compile(r"0x[0-9A-Fa-f]{6,8}")
 PC = re.compile(r"\bloc_8c[0-9a-f]{6}\b", re.I)
@@ -45,6 +54,8 @@ OFFSET = re.compile(r"\+0x[0-9A-Fa-f]{1,4}\b")
 
 
 def sql(stmt):
+    import base64                     # lazy: see the import note at the top
+    import urllib.request
     req = urllib.request.Request(
         URL, data=("USE NS re DB kb; " + stmt).encode("utf-8"), method="POST")
     req.add_header("Accept", "application/json")
@@ -89,27 +100,39 @@ def main():
     pcs = sorted(pcs)[:6]
     offs = sorted(offs)[:6]
 
-    lines = []
+    # Two buckets, not one list. CURATED knowledge (a routine, a hand-written
+    # address row, a finding, a dead end) always wins the budget; doc-derived
+    # address rows are restatements of the same fact scraped out of markdown
+    # and only fill space that is left over.
+    #
+    # This is not cosmetic. `address` is 87% doc-derived and about to grow by
+    # ~357 more rows from the pending re-ingest. Measured before this split, a
+    # 6-address grep injected TWELVE doc_* restatements and exactly ONE curated
+    # routine -- the useful line was buried in noise the reader has to skim.
+    strong, weak = [], []
     try:
         if addrs:
             got = rows(sql(
                 "SELECT record::id(id) AS id, addr, name, note FROM address "
                 "WHERE string::uppercase(addr) IN [%s] LIMIT 40;"
                 % ", ".join(lit(a) for a in addrs)))
-            # One address can carry a dozen rows because docs_parse.py records
-            # every markdown mention of it. Those are restatements of the same
-            # fact; the hand-written row is the one worth injecting. Prefer
-            # curated, fall back to doc, and never more than two per address.
             by_addr = {}
             for r in got:
                 by_addr.setdefault(r.get("addr"), []).append(r)
             for addr in sorted(by_addr):
-                group = sorted(by_addr[addr],
-                               key=lambda r: str(r.get("id", "")).startswith("doc_"))
-                for r in group[:2]:
-                    lines.append("  %s  %s -- %s"
-                                 % (addr, r.get("name") or r.get("id"),
-                                    trim(r.get("note"), 150)))
+                cur = [r for r in by_addr[addr]
+                       if not str(r.get("id", "")).startswith("doc_")]
+                doc = [r for r in by_addr[addr]
+                       if str(r.get("id", "")).startswith("doc_")]
+                for r in cur[:2]:
+                    strong.append("  %s  %s -- %s"
+                                  % (addr, r.get("name") or r.get("id"),
+                                     trim(r.get("note"), 150)))
+                # at most ONE doc restatement per address, and only if no
+                # curated row exists for it
+                if not cur and doc:
+                    weak.append("  %s  (doc) %s"
+                                % (addr, trim(doc[0].get("note"), 130)))
 
             # The curated claims ABOUT that address -- the highest-value hit,
             # and the one a grep of the source will never surface.
@@ -121,9 +144,10 @@ def main():
                 "AND string::starts_with(record::id(in), 'doc_') = false LIMIT 5;"
                 % ", ".join(lit(a) for a in addrs)))
             for r in about:
-                lines.append("  finding:%s [%s] %s"
-                             % (r.get("f"), r.get("status"),
-                                trim(r.get("statement"), 170)))
+                strong.append("  finding:%s [%s] %s"
+                              % (r.get("f"), r.get("status"),
+                                 trim(r.get("statement"), 170)))
+        lines = strong
         if pcs:
             got = rows(sql(
                 "SELECT record::id(id) AS id, pc, role, summary FROM routine "
@@ -158,6 +182,9 @@ def main():
                                 trim(r.get("tried") or r.get("statement"), 170)))
     except Exception:
         return 0                      # advisory only; never break the session
+
+    # curated first, doc restatements only in whatever budget is left
+    lines = (lines + weak)[:MAX_LINES]
 
     if not lines:
         return 0
