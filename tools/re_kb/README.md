@@ -16,13 +16,36 @@ live Frame Oracle) and UPSERT-updated as new findings land.
 SurrealDB, local, RocksDB-backed:
 
 ```bash
+cd /c/Users/trist/projects/maplecast-flycast          # <-- REQUIRED, see below
 surreal start --user root --pass root --bind 127.0.0.1:8001 rocksdb:re_kb_data/re_kb
 ```
 
 - Endpoint: `http://127.0.0.1:8001/sql`  ·  ns=`re`  db=`kb`  ·  auth `root:root`
-- Data dir `re_kb_data/` is **gitignored** (it is a rebuildable RocksDB store).
 - The `*.surql` seed files in this folder ARE the committable, version-controlled
   source of truth — re-applying them rebuilds the graph.
+- Data dir `re_kb_data/` is **gitignored**.
+
+> **START IT FROM THE REPO ROOT.** `rocksdb:re_kb_data/re_kb` is a RELATIVE
+> path. Start `surreal` from anywhere else and it does **not** error — it
+> silently creates a NEW, EMPTY store there, on the same port, from the same
+> documented command. Every query then returns nothing, which looks exactly
+> like data loss. If a query unexpectedly returns nothing, check the server's
+> working directory before anything else.
+
+> **`re_kb_data/` was not actually rebuildable, and might not be again.** On
+> 2026-09-01, 24 hand-curated findings existed ONLY in that gitignored store —
+> applying the documented rebuild would have destroyed them. They were rescued
+> into `78_recovered_live_only.surql`. Before deleting the data dir, run
+> `python tools/re_kb/_dump_live_only.py` and confirm it reports nothing new.
+> Take a logical backup first — one command, verified working:
+>
+> ```bash
+> mkdir -p re_kb_data/_exports
+> curl -s -X POST http://127.0.0.1:8001/export -u root:root \
+>   -H "surreal-ns: re" -H "surreal-db: kb" \
+>   -H "Content-Type: application/json" -H "Accept: application/octet-stream" \
+>   --data '{}' -o "re_kb_data/_exports/re_kb_$(date +%Y%m%d-%H%M%S).surql"
+> ```
 
 ## Helpers
 
@@ -43,16 +66,34 @@ with `REKB_URL` / `REKB_AUTH`.
 
 ## Rebuild from scratch
 
-Apply in order, then dedup edges (RELATE is **not** idempotent — see below):
+```bash
+PYTHONIOENCODING=utf-8 python tools/re_kb/apply_seed.py     # every seed, one statement at a time
+tools/re_kb/rekb.sh @tools/re_kb/07_dedup_edges.surql       # RELATE is NOT idempotent
+```
+
+`apply_seed.py` applies each statement in its own request and reports which
+ones fail. **Do not go back to POSTing whole files.** SurrealDB parses a POST
+body as one script: an unbalanced quote does not raise, it consumes the
+following statements as string content, the request returns 200, and every
+block reports `OK`. That is how 58 curated findings across 12 files sat
+un-applied for months while every apply looked clean.
+
+Two supporting passes, both idempotent and both normally no-ops now:
 
 ```bash
-for f in schema_seed 01_schema 02_char_struct 03_routines 04_memory_data \
-         05_characters 06_findings_sources 08_emitter_render_model \
-         09_facing_subgraph; do
-  tools/re_kb/rekb.sh @tools/re_kb/$f.surql
-done
-tools/re_kb/rekb.sh @tools/re_kb/07_dedup_edges.surql
+PYTHONIOENCODING=utf-8 python tools/re_kb/normalize_seeds.py   # USE line + apostrophe escaping
+PYTHONIOENCODING=utf-8 python tools/re_kb/fix_quotes.py        # per-statement repair, server-verified
 ```
+
+The loop that used to be documented here named nine files by hand and stopped
+at `09_facing_subgraph` while 89 existed — so following the README rebuilt a
+fraction of the graph. Enumerate the directory; never enumerate by hand.
+
+**`07_dedup_edges.surql` must be applied WHOLE.** It is `LET`-scoped, and its
+`DELETE reads;` / `DELETE cites;` statements are only safe next to the `FOR`
+that puts the rows back. Run one of them alone and it wipes the table.
+`apply_seed.py` and `fix_quotes.py` both refuse to split any file containing
+`LET $` for exactly this reason.
 
 ---
 
