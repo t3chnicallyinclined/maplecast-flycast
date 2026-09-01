@@ -16,6 +16,11 @@ evidence -- a doc, a third-party page, a note -- is enough for `inferred`
 and never enough on its own.
 
     PYTHONIOENCODING=utf-8 python tools/re_kb/audit_seeds.py
+
+Known 1-row difference vs the live graph: this reads UPSERT/CREATE only, so a
+status changed later by an UPDATE (43 flips carve_wide_square_twiddle_open to
+'fixed') still reads as its original value here. The live graph is
+authoritative; kb.health() is the same metric with the server in the loop.
 """
 import glob
 import os
@@ -24,18 +29,14 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-STRENGTH_OF = {}
-for _k in ("oracle oracle_capture capture live_capture capture_analysis "
-           "transpile_validation").split():
-    STRENGTH_OF[_k] = "reproduction"
-for _k in "code disasm disassembly memory marvelous2 js_function implementation".split():
-    STRENGTH_OF[_k] = "code"
-for _k in "measurement tool".split():
-    STRENGTH_OF[_k] = "metric"
-for _k in "anotak doc reference recatalog format format_decode expert_trace".split():
-    STRENGTH_OF[_k] = "attestation"
+import sys as _sys
+_sys.path.insert(0, HERE)
+from ladder import STRENGTH_OF, CONFIRMING, strength_of_cite   # noqa: E402
 
-CONFIRMING = {"reproduction", "code"}
+# The map used to be spelled out here as well as in 77_epistemics.surql. It had
+# already drifted: 12 source kinds in live use were missing from this copy, so
+# the offline audit and the database graded the same citation differently.
+# There is now one definition (77) and ladder.py reads it.
 
 # a statement runs until the next line-anchored statement keyword
 STMT = r"(?=\n(?:UPSERT|RELATE|UPDATE|DEFINE|REMOVE|--)|\Z)"
@@ -46,35 +47,25 @@ NEGATIVE = re.compile(
     re.I)
 
 
-def strength_of_cite(table, ident, sources):
-    """A cite may point at a source, a routine, or another finding.
-
-    A `routine` id IS its PC (routine:loc_8c0344d4), i.e. a marvelous2
-    disassembly location -- code-grade evidence by the ladder. A finding
-    citing another finding is derived, not primary.
-    """
-    if table == "routine":
-        return "code"
-    if table == "finding":
-        return "derived"
-    return STRENGTH_OF.get(sources.get(ident), "unranked")
-
-
 def load():
     findings, sources, cites = {}, {}, {}
     for path in sorted(glob.glob(os.path.join(HERE, "*.surql"))):
         text = open(path, encoding="utf-8", errors="replace").read()
 
-        for m in re.finditer(r"UPSERT\s+source:([\w\d_]+)\s+SET(.*?)" + STMT,
+        # SET and CONTENT are both in use, and a CONTENT block writes
+        # `kind: "x"` where a SET writes `kind='x'`. Matching only the SET form
+        # silently drops whole files -- it under-counted by 8 findings and
+        # mis-ranked 12 sources as unranked that the live graph ranks fine.
+        for m in re.finditer(r"UPSERT\s+source:([\w\d_]+)\s+(?:SET|CONTENT)(.*?)" + STMT,
                              text, re.S):
             sid, body = m.group(1), m.group(2)
-            k = re.search(r"kind='([\w\d_]+)'", body)
+            k = re.search(r"""kind\s*[:=]\s*['"]([\w\d_+]+)['"]""", body)
             sources[sid] = k.group(1) if k else None
 
-        for m in re.finditer(r"UPSERT\s+finding:([\w\d_]+)\s+SET(.*?)" + STMT,
+        for m in re.finditer(r"UPSERT\s+finding:([\w\d_]+)\s+(?:SET|CONTENT)(.*?)" + STMT,
                              text, re.S):
             fid, body = m.group(1), m.group(2)
-            st = re.search(r"status='([\w\d_]+)'", body)
+            st = re.search(r"""status\s*[:=]\s*['"]([\w\d_]+)['"]""", body)
             prev = findings.get(fid, {})
             findings[fid] = {
                 "status": st.group(1) if st else prev.get("status"),
