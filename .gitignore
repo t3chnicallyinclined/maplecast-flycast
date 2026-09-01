@@ -6,10 +6,22 @@ artifact/
 __pycache__/
 *.pyc
 
-# Claude Code agent memory + projects state — operator-only context that
-# accumulates per-session notes about the codebase. Should never be in
-# the public repo. The local copy at ~/.claude/projects/... is unaffected.
-.claude/
+# Claude Code state. The per-session notes this rule was written for are the
+# part that should never be public — but they do not live here. They live in
+# ~/.claude/projects/..., which is outside the repo and unaffected either way.
+#
+# What IS in .claude/ is project configuration: the five agent charters and the
+# hooks that query the RE knowledge graph. Ignoring those meant the enforcement
+# layer did not survive a fresh clone — the hook SCRIPTS are tracked at
+# tools/re_kb/hooks/, but the settings.json that wires them up was not, so a
+# clone got the mechanism without the switch. Both are checked, contain no
+# secrets, and are as much project documentation as docs/ is.
+#
+# So: ignore everything under .claude/ EXCEPT the two shareable pieces.
+# settings.local.json (personal overrides) stays ignored by the wildcard.
+.claude/*
+!.claude/agents/
+!.claude/settings.json
 
 # Local archive of historical workstream docs. These were active during
 # development but contain operator-specific paths, home network IPs, and

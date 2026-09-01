@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Grep|Read|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONIOENCODING=utf-8 python tools/re_kb/hooks/kb_lookup.py",
+            "timeout": 10,
+            "statusMessage": "checking re_kb"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONIOENCODING=utf-8 python tools/re_kb/hooks/kb_digest.py",
+            "timeout": 20,
+            "statusMessage": "carrying re_kb facts across compaction"
+          }
+        ]
+      }
+    ]
+  }
+}

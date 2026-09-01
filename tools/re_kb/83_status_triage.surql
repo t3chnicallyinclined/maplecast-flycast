@@ -7,8 +7,12 @@
 -- that cannot be automated, because it is a judgement about whether we actually
 -- know something.
 --
--- SECTIONS 1 AND 2 ARE READY TO APPLY. They are mechanical or verified.
--- SECTIONS 3 AND 4 ARE COMMENTED OUT. They need your ruling first.
+-- ALL FOUR SECTIONS ARE LIVE. Sections 1-2 are mechanical or file-verified;
+-- sections 3-4 were written as commented proposals and the operator ruled on
+-- them on 2026-09-01 ("apply 1+2 and my recommendations in 3+4"), so they are
+-- uncommented as approved. The reasoning for each is kept in the prose above
+-- it, deliberately, so the judgement stays auditable rather than becoming an
+-- anonymous UPDATE.
 --
 --   tools/re_kb/rekb.sh @tools/re_kb/83_status_triage.surql
 --
@@ -190,68 +194,68 @@ RELATE finding:stage_bake_hud_contamination->cites->source:src_bake_stage_from_t
 -- here -- it is a schema change and should be its own decision.
 
 -- ============================================================================
--- SECTION 3 -- THE REFUTED HYPOTHESES (needs your ruling -- COMMENTED OUT)
+-- SECTION 3 -- THE REFUTED HYPOTHESES (approved 2026-09-01)
 -- ============================================================================
 -- Each of these is a losing idea that a confirmed finding explicitly refutes,
 -- with no row of its own. Giving each one a `ruled_out` row is what makes
 -- `dead_ends()` actually answer "what has already been eliminated here?".
 --
--- Uncomment what you agree with. The slugs are new; the refuting finding is
--- named in each `evidence` field so the claim stays traceable.
+-- The slugs are new; the refuting finding is named in each `evidence` field so
+-- the claim stays traceable back to what actually disproved it.
 --
--- UPSERT finding:ruled_rgb565_not_detwiddled SET status='ruled_out',
---   statement='HYPOTHESIS (2026-06): the client does not detwiddle RGB565, so the FONT texture decodes wrong.',
---   tried='Inferred from client code that was never actually read.',
---   evidence='REFUTED by finding:hud_prior_detwiddle_claim_refuted -- texture-manager.mjs _decode applies the Morton/PVR detwiddle for RGB565.',
---   date='2026-06-14';
--- RELATE finding:hud_prior_detwiddle_claim_refuted->supersedes->finding:ruled_rgb565_not_detwiddled;
+UPSERT finding:ruled_rgb565_not_detwiddled SET status='ruled_out',
+  statement='HYPOTHESIS (2026-06): the client does not detwiddle RGB565, so the FONT texture decodes wrong.',
+  tried='Inferred from client code that was never actually read.',
+  evidence='REFUTED by finding:hud_prior_detwiddle_claim_refuted -- texture-manager.mjs _decode applies the Morton/PVR detwiddle for RGB565.',
+  date='2026-06-14';
+RELATE finding:hud_prior_detwiddle_claim_refuted->supersedes->finding:ruled_rgb565_not_detwiddled;
 --
--- UPSERT finding:ruled_hud_name_vram_zeroed SET status='ruled_out',
---   statement='HYPOTHESIS: the big per-character HUD name letters are missing because their VRAM prefix block is ZEROED (the twin of the meter-segment gap).',
---   tried='Assumed by analogy with finding:hud_meter_segments_vram_gap.',
---   evidence='REFUTED by finding:hud_name_garble_is_paratype5_sprite on a fresh live capture -- the letters ARE present as 62 fmt=5 PAL4 quads.',
---   date='2026-06-14';
--- RELATE finding:hud_name_garble_is_paratype5_sprite->supersedes->finding:ruled_hud_name_vram_zeroed;
+UPSERT finding:ruled_hud_name_vram_zeroed SET status='ruled_out',
+  statement='HYPOTHESIS: the big per-character HUD name letters are missing because their VRAM prefix block is ZEROED (the twin of the meter-segment gap).',
+  tried='Assumed by analogy with finding:hud_meter_segments_vram_gap.',
+  evidence='REFUTED by finding:hud_name_garble_is_paratype5_sprite on a fresh live capture -- the letters ARE present as 62 fmt=5 PAL4 quads.',
+  date='2026-06-14';
+RELATE finding:hud_name_garble_is_paratype5_sprite->supersedes->finding:ruled_hud_name_vram_zeroed;
 --
--- UPSERT finding:ruled_sprite_needs_native_render SET status='ruled_out',
---   statement='HYPOTHESIS: correct HUD sprite UV mapping requires a native sprite render that 2 triangles cannot reproduce.',
---   tried='Assumed from the ParaType-5 sprite parameter shape.',
---   evidence='REFUTED by finding:hud_sprite_2tri_coercion_is_faithful -- flycast has no per-pixel single-plane stage; the plane equation is a one-time corner solve, after which the quad IS 2 triangles.',
---   date='2026-06-15';
--- RELATE finding:hud_sprite_2tri_coercion_is_faithful->supersedes->finding:ruled_sprite_needs_native_render;
+UPSERT finding:ruled_sprite_needs_native_render SET status='ruled_out',
+  statement='HYPOTHESIS: correct HUD sprite UV mapping requires a native sprite render that 2 triangles cannot reproduce.',
+  tried='Assumed from the ParaType-5 sprite parameter shape.',
+  evidence='REFUTED by finding:hud_sprite_2tri_coercion_is_faithful -- flycast has no per-pixel single-plane stage; the plane equation is a one-time corner solve, after which the quad IS 2 triangles.',
+  date='2026-06-15';
+RELATE finding:hud_sprite_2tri_coercion_is_faithful->supersedes->finding:ruled_sprite_needs_native_render;
 --
--- UPSERT finding:ruled_per_tile_mxm_twiddle SET status='ruled_out',
---   statement='HYPOTHESIS: GFX1 parts are stored per-tile as m x m twiddled blocks, so the carve must re-twiddle per tile.',
---   tried='Proposed as the fix for the render-replica scramble.',
---   evidence='REFUTED by finding:render_replica_scramble_fix -- the engine stores each GFX1 part ONCE, CONTIGUOUS, decodeA output verbatim and byte-exact.',
---   date='2026-06-12';
--- RELATE finding:render_replica_scramble_fix->supersedes->finding:ruled_per_tile_mxm_twiddle;
+UPSERT finding:ruled_per_tile_mxm_twiddle SET status='ruled_out',
+  statement='HYPOTHESIS: GFX1 parts are stored per-tile as m x m twiddled blocks, so the carve must re-twiddle per tile.',
+  tried='Proposed as the fix for the render-replica scramble.',
+  evidence='REFUTED by finding:render_replica_scramble_fix -- the engine stores each GFX1 part ONCE, CONTIGUOUS, decodeA output verbatim and byte-exact.',
+  date='2026-06-12';
+RELATE finding:render_replica_scramble_fix->supersedes->finding:ruled_per_tile_mxm_twiddle;
 --
--- UPSERT finding:ruled_scale_walker_hypothesis SET status='ruled_out',
---   statement='HYPOTHESIS: the CPS ratio / size modifier changes the TILE COUNT, so Storm uses a separate scale-walker.',
---   tried='Inferred from Storm 16x16 part records disagreeing with the disc rip.',
---   evidence='REFUTED by finding:storm_tilecount_count_is_scale_invariant and finding:storm_tilecount_authoritative -- the builder loc_8c033b0a reads only node+0x04/+0x144/+0x160, and tiles are LONG/SHORT so the count is storage-invariant.',
---   date='2026-07-03';
--- RELATE finding:storm_tilecount_count_is_scale_invariant->supersedes->finding:ruled_scale_walker_hypothesis;
+UPSERT finding:ruled_scale_walker_hypothesis SET status='ruled_out',
+  statement='HYPOTHESIS: the CPS ratio / size modifier changes the TILE COUNT, so Storm uses a separate scale-walker.',
+  tried='Inferred from Storm 16x16 part records disagreeing with the disc rip.',
+  evidence='REFUTED by finding:storm_tilecount_count_is_scale_invariant and finding:storm_tilecount_authoritative -- the builder loc_8c033b0a reads only node+0x04/+0x144/+0x160, and tiles are LONG/SHORT so the count is storage-invariant.',
+  date='2026-07-03';
+RELATE finding:storm_tilecount_count_is_scale_invariant->supersedes->finding:ruled_scale_walker_hypothesis;
 --
--- UPSERT finding:ruled_floor_white_intensity_override SET status='ruled_out',
---   statement='FIX ATTEMPT: override the stage floor intensity to white to recover the dark deck.',
---   tried='Applied to the native GSTA stage before the deck fix.',
---   evidence='DISPROVEN by finding:native_gsta_stage_zorder -- it washed the dark grid to bright green and HID the blue floor. Removed in favour of the bake per-vertex RGB. The real cause was margin culling (finding:gsta_stage_floor_cull_fix).',
---   date='2026-06-19';
+UPSERT finding:ruled_floor_white_intensity_override SET status='ruled_out',
+  statement='FIX ATTEMPT: override the stage floor intensity to white to recover the dark deck.',
+  tried='Applied to the native GSTA stage before the deck fix.',
+  evidence='DISPROVEN by finding:native_gsta_stage_zorder -- it washed the dark grid to bright green and HID the blue floor. Removed in favour of the bake per-vertex RGB. The real cause was margin culling (finding:gsta_stage_floor_cull_fix).',
+  date='2026-06-19';
 --
--- UPSERT finding:ruled_benched_char_overlap SET status='ruled_out',
---   statement='HYPOTHESIS: the Sentinel scramble is a benched War Machine overlapping Sentinel, or a wrong-char slot/pointer mis-read.',
---   tried='Inferred from the visual scramble.',
---   evidence='REFUTED at the DATA level by finding:sentinel_scramble_slot_data_clean -- the live char slots are clean.',
---   date='2026-06-12';
--- RELATE finding:sentinel_scramble_slot_data_clean->supersedes->finding:ruled_benched_char_overlap;
+UPSERT finding:ruled_benched_char_overlap SET status='ruled_out',
+  statement='HYPOTHESIS: the Sentinel scramble is a benched War Machine overlapping Sentinel, or a wrong-char slot/pointer mis-read.',
+  tried='Inferred from the visual scramble.',
+  evidence='REFUTED at the DATA level by finding:sentinel_scramble_slot_data_clean -- the live char slots are clean.',
+  date='2026-06-12';
+RELATE finding:sentinel_scramble_slot_data_clean->supersedes->finding:ruled_benched_char_overlap;
 --
--- UPSERT finding:ruled_p3d_per_pass_rewind SET status='ruled_out',
---   statement='HYPOTHESIS: Storm electric/hit effects are missing from the P3D capture because of a PER-PASS REWIND.',
---   tried='One of two suspected reasons for the capture drop.',
---   evidence='RULED OUT by finding:tr_effect_capture_drop_rootcause -- every sampled vframe including hits reported passes=1. The real cause was the CLASS FILTER.',
---   date='2026-07-07';
+UPSERT finding:ruled_p3d_per_pass_rewind SET status='ruled_out',
+  statement='HYPOTHESIS: Storm electric/hit effects are missing from the P3D capture because of a PER-PASS REWIND.',
+  tried='One of two suspected reasons for the capture drop.',
+  evidence='RULED OUT by finding:tr_effect_capture_drop_rootcause -- every sampled vframe including hits reported passes=1. The real cause was the CLASS FILTER.',
+  date='2026-07-07';
 --
 -- ---- the two that ARE mis-statused ----------------------------------------
 --
@@ -260,11 +264,11 @@ RELATE finding:stage_bake_hud_contamination->cites->source:src_bake_stage_from_t
 --     record, so "has anyone tried injecting state into the live SH4?" is not
 --     answerable by query. That is what the attempt subgraph in 77 is for:
 --
--- UPSERT approach:live_sh4_state_injection SET name='live_sh4_state_injection',
---   how='Inject per-frame GSTA state directly into the running SH4 (guest RAM writes into engine-owned pointers).';
--- RELATE approach:live_sh4_state_injection->tried_on->finding:state_injection_deadend
---   SET outcome='ineffective', date='2026-05',
---       note='Always crashes: corrupt engine-owned pointers, epc in 0x8C00xxxx non-code, pr in bank12. Capture timing / loadstate / ROM-presence were each ruled out -- the injection ITSELF is the trigger. The robust architecture is the asset-driven renderer with the SH4 OFF.';
+UPSERT approach:live_sh4_state_injection SET name='live_sh4_state_injection',
+  how='Inject per-frame GSTA state directly into the running SH4 (guest RAM writes into engine-owned pointers).';
+RELATE approach:live_sh4_state_injection->tried_on->finding:state_injection_deadend
+  SET outcome='ineffective', date='2026-05',
+      note='Always crashes: corrupt engine-owned pointers, epc in 0x8C00xxxx non-code, pr in bank12. Capture timing / loadstate / ROM-presence were each ruled out -- the injection ITSELF is the trigger. The robust architecture is the asset-driven renderer with the SH4 OFF.';
 --
 -- (b) part_decode_mechanism's note still says "offline LZSS decode is a dead
 --     end". That was true when written and is now FALSE: finding:offline_gfx1_lzss_feasible
@@ -274,12 +278,12 @@ RELATE finding:stage_bake_hud_contamination->cites->source:src_bake_stage_from_t
 --     tiles. Two live claims, opposite conclusions, no edge between them --
 --     exactly the contradiction kb.contradictions() is meant to surface.
 --
--- RELATE finding:offline_gfx1_lzss_feasible->corrects->finding:part_decode_mechanism;
--- UPDATE finding:part_decode_mechanism SET
---   triage_note = '2026-09-01: the note claims "offline LZSS decode is a dead end". SUPERSEDED by finding:offline_gfx1_lzss_feasible -- it is feasible; the runaway was a decoder bug. The REST of this finding (on-demand per-pose decode into transient VRAM, moving TCW, no bulk-resident store, load-burst covers only sels 0-251) still stands.';
+RELATE finding:offline_gfx1_lzss_feasible->corrects->finding:part_decode_mechanism;
+UPDATE finding:part_decode_mechanism SET
+  triage_note = '2026-09-01: the note claims "offline LZSS decode is a dead end". SUPERSEDED by finding:offline_gfx1_lzss_feasible -- it is feasible; the runaway was a decoder bug. The REST of this finding (on-demand per-pose decode into transient VRAM, moving TCW, no bulk-resident store, load-burst covers only sels 0-251) still stands.';
 
 -- ============================================================================
--- SECTION 4 -- THE REMAINING UNBACKED `confirmed` (needs your ruling)
+-- SECTION 4 -- THE REMAINING UNBACKED `confirmed` (approved 2026-09-01)
 -- ============================================================================
 -- After 82 and section 2, 37 -> ~27 `confirmed` findings still cannot show
 -- reproduction- or code-grade evidence. They split into two piles, and the
@@ -304,13 +308,13 @@ RELATE finding:stage_bake_hud_contamination->cites->source:src_bake_stage_from_t
 --   source:ctrl_ws_charswap_poc        live char-swap experiment through the control WS
 --   source:hud_nodeplete_diag          offline HUD reshape A/B on _live_hud (see section 1)
 --
--- UPDATE source SET kind='validation', strength='reproduction' WHERE id IN [
---   source:gsta_engine_pixel_truth, source:gsta_engine_palette_ram,
---   source:gsta_engine_ta_banks, source:gsta_carve_audit_2026_06_15,
---   source:engine_ta_parse, source:state_wire_churn_measure,
---   source:census_stage_hud_twins, source:p3d_classhist_hit_capture,
---   source:live4_nj_globals, source:ctrl_ws_charswap_poc,
---   source:hud_nodeplete_diag ];
+UPDATE source SET kind='validation', strength='reproduction' WHERE id IN [
+  source:gsta_engine_pixel_truth, source:gsta_engine_palette_ram,
+  source:gsta_engine_ta_banks, source:gsta_carve_audit_2026_06_15,
+  source:engine_ta_parse, source:state_wire_churn_measure,
+  source:census_stage_hud_twins, source:p3d_classhist_hit_capture,
+  source:live4_nj_globals, source:ctrl_ws_charswap_poc,
+  source:hud_nodeplete_diag ];
 --
 -- MY RECOMMENDATION: yes for all eleven. Each names a comparison against the
 -- ENGINE and reports a concrete pass/fail or a byte-level identity. A
@@ -320,12 +324,12 @@ RELATE finding:stage_bake_hud_contamination->cites->source:src_bake_stage_from_t
 -- PILE B -- GENUINELY NOT CONFIRMED. My recommendation is to demote these to
 -- `inferred`, because their own text says the mechanism is not settled:
 --
--- UPDATE finding:gsta_motion_blocks_residual_bands SET status='inferred',
---   triage_note='2026-09-01: its own text says "cull extension NOT shipped -- drift blocks exact validation". A band-multiset over-emit count is a symptom measurement, not a mechanism.';
--- UPDATE finding:overlay_passthrough_feasibility SET status='inferred',
---   triage_note='2026-09-01: a feasibility estimate ("heavier than expected -> needs delta"), not a demonstrated result.';
--- UPDATE finding:render_path_reconstruct_vs_passthrough SET status='inferred',
---   triage_note='2026-09-01: states a param-type SPLIT as measured, but the conclusion drawn from it (what to build) is a plan.';
+UPDATE finding:gsta_motion_blocks_residual_bands SET status='inferred',
+  triage_note='2026-09-01: its own text says "cull extension NOT shipped -- drift blocks exact validation". A band-multiset over-emit count is a symptom measurement, not a mechanism.';
+UPDATE finding:overlay_passthrough_feasibility SET status='inferred',
+  triage_note='2026-09-01: a feasibility estimate ("heavier than expected -> needs delta"), not a demonstrated result.';
+UPDATE finding:render_path_reconstruct_vs_passthrough SET status='inferred',
+  triage_note='2026-09-01: states a param-type SPLIT as measured, but the conclusion drawn from it (what to build) is a plan.';
 --
 -- AND THE ONE THAT SHOULD BE AN ATTEMPT, NOT A FINDING:
 -- emitter_tile_scale_charq_calibrated is a CALIBRATION -- constants tuned until
@@ -333,8 +337,8 @@ RELATE finding:stage_bake_hud_contamination->cites->source:src_bake_stage_from_t
 -- mechanism not derived. It should be recorded as an attempt with that outcome
 -- rather than sitting in the graph as a confirmed fact about the game.
 --
--- UPSERT approach:emitter_scale_charq_calibration SET name='emitter_scale_charq_calibration',
---   how='Tune the offline-atlas part-extent + flip scale constants (CPS/2) until the emitter output matches CHARQ ground truth.';
--- RELATE approach:emitter_scale_charq_calibration->tried_on->finding:emitter_tile_scale_charq_calibrated
---   SET outcome='masks_only', date='2026-06-10',
---       note='Produces the right geometry, but the scale is FITTED to CHARQ rather than derived from the engine. Ship it; do not treat the constant as a fact about MVC2 until the routine that sets it is read.';
+UPSERT approach:emitter_scale_charq_calibration SET name='emitter_scale_charq_calibration',
+  how='Tune the offline-atlas part-extent + flip scale constants (CPS/2) until the emitter output matches CHARQ ground truth.';
+RELATE approach:emitter_scale_charq_calibration->tried_on->finding:emitter_tile_scale_charq_calibrated
+  SET outcome='masks_only', date='2026-06-10',
+      note='Produces the right geometry, but the scale is FITTED to CHARQ rather than derived from the engine. Ship it; do not treat the constant as a fact about MVC2 until the routine that sets it is read.';
