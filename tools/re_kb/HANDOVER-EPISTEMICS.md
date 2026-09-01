@@ -1,5 +1,25 @@
 # Handover: re_kb epistemics work (2026-09-01)
 
+> **SUPERSEDED LATER THE SAME DAY.** Steps 1-4, 6 and 7 of §5 are done; §5 step 5
+> is written up for review in `83_status_triage.surql` and has NOT been applied.
+> Read that file and the git log (`git log --oneline -- tools/re_kb`) for current
+> state. Two numbers below are WRONG and should not be acted on:
+>
+> * **"44 findings whose TEXT records a dead end"** — the regex behind it fires
+>   on the word "failed" anywhere in a long note. Re-measured strictly: 19 match,
+>   and 17 of those are correctly `confirmed` (they are positive results that
+>   REFUTE a competing hypothesis). Demoting them would have deleted real
+>   knowledge. The genuine gap is that the refuted hypothesis gets no row of its
+>   own — see §3 of `83_status_triage.surql`.
+> * **"162 confirmed, 1 inferred, 15 open"** for the seeds — 162 was the *source*
+>   count; confirmed was 185 (now 197 after the 58 previously-unappliable
+>   findings landed).
+>
+> Also found and fixed after this was written: the seeds could not be applied at
+> all (`''` escaping, `&` concatenation, missing `USE` lines — 58 findings had
+> never reached the graph), and `kb.health()` was silently reporting ZERO
+> unbacked claims because its query errored and `_rows()` dropped failures.
+
 Written for the next agent working in `maplecast-flycast`. Everything below was
 measured today against the real files and the live graph. Where something is
 **not** verified it says so.
