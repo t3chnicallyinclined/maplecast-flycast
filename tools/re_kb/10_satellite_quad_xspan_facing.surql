@@ -2,6 +2,8 @@
 -- must follow the OWNING BODY FACING (node+0x110), not be hardcoded rightward.
 -- Pinned 2026-06-14 via _uv_tcw_diff.mjs (engine _probe2.log vs client render_frame on _uvval.mcrr vf45597).
 
+USE NS re DB kb;
+
 UPSERT source:probe_uvval_45597 SET
   kind = 'oracle_capture',
   detail = 'MAPLECAST_ORACLE_PROBE paired @0x0C034864(part)+0x0C1248CC(submit); _probe2.log + wire _uvval.mcrr vf45597; Storm(cid42 node 0x8c282354) + Cable(cid23 node 0x8c2688e4)';
@@ -16,7 +18,7 @@ UPSERT finding:satellite_quad_xspan_facing SET
 
 UPSERT routine:loc_8c1244b0_quad_xspan SET
   bank = 12,
-  pc = 0x8c1244b0,
+  pc = '0x8c1244b0',
   note = 'cell-processor finalize: per-part screen quad corner build from the foot anchor (r15+0x2C+0x04). The X span direction is set by the body facing (node+0x110) — anchor is the leading edge AWAY from which the W-wide quad extends. CONFIRMED by submit corner capture @0x0C1248CC.';
 
 RELATE finding:satellite_quad_xspan_facing -> cites -> source:probe_uvval_45597;

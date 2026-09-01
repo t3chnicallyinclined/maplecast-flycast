@@ -57,7 +57,7 @@ slot2 after widening, discriminate at the WALKER not the flush: the stage caller
 effect callers (lists 1-9) are distinct entries in loc_8c030452 dispatch - set a "current list-class"
 flag the capture can read, keeping slot2 only for effect lists. Existing MC_P3D_MAX_LINES cap +
 per-pass rewind bound overflow meanwhile. SYMMETRY: pairs with the injection-side TR-list split
-(flycast-internals) - the OP-prefix wedge fix''s translucent analog - to actually render the effects.';
+(flycast-internals) - the OP-prefix wedge fix\'s translucent analog - to actually render the effects.';
 
 UPSERT source:p3d_classhist_hit_capture SET kind='measurement',
   ref='headless build-headless-win/flycast.exe, MAPLECAST_POLY3D=1 MAPLECAST_P3D_CLASSHIST=1 MAPLECAST_P3D_CLS=all, autoload slot0 + _masher_fixed.mjs 12s; scratchpad/p3dcls.log (6404 [P3D-CLS] frames) + _trslot.mjs static Effect-Poly scan on _live4',

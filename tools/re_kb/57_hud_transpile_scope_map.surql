@@ -78,11 +78,11 @@ UPSERT routine:loc_8c044f12 SET label='loc_8c044f12', pc='0x8C044F12', bank='ban
   role='TA poly-record ALLOCATOR (called by every HUD sub-builder, r5=list 0x0B r6=1)',
   note='Reads global poly budget 0x8C287AE8 (rts 0 if <=0), pops a free record from a pool head '
      || '(loc_8c045010 deref, next=@+0x8), decrements budget + per-list counters, sets record+0x3 '
-     || '=listid, and jsr''s a per-list-type init via table loc_8c045020[listtype]. RETURNS the '
+     || '=listid, and jsr\'s a per-list-type init via table loc_8c045020[listtype]. RETURNS the '
      || 'record ptr in r0. THIS IS THE ENGINE-OWNED TA SCRATCH ALLOCATOR: a transpile must either '
      || 'replicate the free-list pop (needs the pool state 0x8C26A90c-area + 0x8C287AE8 in-wire) OR '
      || '(preferred) allocate its OWN output record array client-side, since the transpile emits '
-     || 'to OUR TA list, not the engine''s.';
+     || 'to OUR TA list, not the engine\'s.';
 
 UPSERT routine:loc_8c1294c8 SET label='loc_8c1294c8', pc='0x8C1294C8', bank='bank12',
   role='cell processor = record->TA-list Duff-device struct COPIER (HUD poly emitter)',

@@ -17,7 +17,9 @@
 -- Verified live multi-frame (stage off): frames 120/240/360/480 all clean (360 was the garbled pose).
 -- META: re_kb/44 "screenshot-confirmed" on one pose and missed this — single-frame signoff fails on
 -- pose-dependent carve bugs; verify >=12 poses + diff vs the engine's own twop, never a hand ref.
-CREATE finding:carve_nonsquare_yfirst_twiddle SET
+USE NS re DB kb;
+
+UPSERT finding:carve_nonsquare_yfirst_twiddle SET
   status = "confirmed",
   area = "gsta-carve",
   corrects = "finding:carve_nonsquare_linear_fix",

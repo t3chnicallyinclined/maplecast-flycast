@@ -59,6 +59,8 @@
 -- slot namespace (double-buffered draw build). Discriminating probe: log
 -- @0x8C2DEE54 + fire counts of the six writer PCs across a super-peak window.
 
+USE NS re DB kb;
+
 UPSERT routine:loc_8c1244b0 SET
     name = "pvr_sprite_submit",
     bank = "bank12",

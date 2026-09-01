@@ -45,4 +45,4 @@ RELATE finding:replica_effect_walker_faithful->supersedes->finding:replica_live_
 RELATE finding:replica_effect_walker_faithful->cites->routine:loc_8c0344d4;
 RELATE finding:replica_effect_walker_faithful->cites->routine:loc_8c030af8;
 
-UPSERT memdata:effect_poly_bank SET addr = 0x0CED0000, name = "Effect Poly bank", note = "shared hitspark/electric/energy textures + cell records; an effect node's GFX2 (node+0x160) points HERE and the walker loc_8c0344d4 reads its cell records by (sel&0x7FFF) — NOT a directory binding via node+0x15C";
+UPSERT memdata:effect_poly_bank SET addr = '0x0CED0000', name = "Effect Poly bank", note = "shared hitspark/electric/energy textures + cell records; an effect node's GFX2 (node+0x160) points HERE and the walker loc_8c0344d4 reads its cell records by (sel&0x7FFF) — NOT a directory binding via node+0x15C";

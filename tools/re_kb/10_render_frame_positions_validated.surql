@@ -8,6 +8,8 @@
 -- Apply: tools/re_kb/rekb.sh @tools/re_kb/10_render_frame_positions_validated.surql
 
 -- source: the ASMTRACE column layout, cited to the handler + the prod log header.
+USE NS re DB kb;
+
 UPSERT source:asmtrace_columns_loc8c034864 CONTENT {
   kind: "live_capture",
   pc:   "0x8C034864",

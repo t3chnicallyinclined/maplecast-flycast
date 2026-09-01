@@ -94,17 +94,30 @@ DEFINE TABLE IF NOT EXISTS fixes SCHEMALESS
 -- NOTE on kind='derivation': reasoned FROM other findings. That is what
 -- `inferred` is for. It is attestation-grade no matter how sound the
 -- reasoning, because the evidence is elsewhere -- cite that instead.
+--
+-- NOTE on kind='crash_dump+log': `metric`, not `reproduction`. A dump shows
+-- the state at one fault. It is evidence that something happened once, which
+-- is the definition of a correlation -- a reproduction is being able to make
+-- it happen again. Re-run it and record the run as a capture to promote it.
+--
+-- The eight kinds above (disc_asset, disc_geometry, flycast_source,
+-- client_source, disasm+measurement, crash_dump+log) were added on
+-- 2026-09-01. They surfaced by themselves: the seeds that carry them had
+-- never been applied to the live graph, and when they were, the `unranked`
+-- default below listed them instead of quietly filing them as attestation.
+-- That is the default doing its job -- keep it that way.
 
 UPDATE source SET strength='reproduction'
   WHERE kind IN ['oracle','oracle_capture','capture','live_capture','capture_analysis',
                  'transpile_validation','validation',
-                 'disc','disc_data','pldat'];
+                 'disc','disc_data','pldat','disc_asset','disc_geometry'];
 
 UPDATE source SET strength='code'
-  WHERE kind IN ['code','disasm','disassembly','memory','marvelous2','js_function','implementation'];
+  WHERE kind IN ['code','disasm','disassembly','memory','marvelous2','js_function','implementation',
+                 'flycast_source','client_source','disasm+measurement'];
 
 UPDATE source SET strength='metric'
-  WHERE kind IN ['measurement','tool','audit'];
+  WHERE kind IN ['measurement','tool','audit','crash_dump+log'];
 
 UPDATE source SET strength='attestation'
   WHERE kind IN ['anotak','doc','reference','recatalog','format','format_decode',

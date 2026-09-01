@@ -71,13 +71,13 @@ NO projectiles, NO hits. PROOF: (a) alignment is EXACT: gsta frame F pairs with 
 sels strictly idle ranges, P1/P2 health 144/144 NEVER changes, objpool active census constant
 (37 cat11 + 2 cat12 + 2 cat6 stage nodes + 1-3 Storm cape satellites cat3/cat4 sel 0x2db-0x37c);
 (c) rendering the LARGEST mirror "burst" frame (msg#213, 122 sprites) shows Storm+Cable standing IDLE in
-training stage — the sprite-count spikes (92->132, 437 of 1764 frames) are Storm''s flowing-cape idle
+training stage — the sprite-count spikes (92->132, 437 of 1764 frames) are Storm\'s flowing-cape idle
 animation varying the per-frame tile count, all quads are body-arena tiles of the same <=6 slot nodes.
 The two prior "measured facts" were artifacts: "slot table EXACTLY 2 nodes" came from _hitscan.mjs
 filtering u8(node+0)==0 (objpool satellites legitimately carry +0x00==0; real census = 4-6 nodes incl
 cape sats, matching BTCW max 6); "engine draws effect quads" was the cape tile-count variance misread as
 effect bursts. BTCW "zero effect tiles" is CORRECT for this window (nothing bit15 ever spawned). The
-user''s live symptoms (projectile wrong texture / missing hitsparks) are from gameplay OUTSIDE this
+user\'s live symptoms (projectile wrong texture / missing hitsparks) are from gameplay OUTSIDE this
 capture window and need a FRESH paired capture taken while the moves are actually performed.';
 
 UPSERT finding:typhoon_hitspark_class_open SET date='2026-07-05', confidence='medium', status='open',

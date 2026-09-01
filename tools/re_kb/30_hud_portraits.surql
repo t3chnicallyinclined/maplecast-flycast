@@ -1,4 +1,6 @@
 -- HUD character portraits decoded from DM01 (char-select POL+TEX)
+USE NS re DB kb;
+
 UPSERT source:dm01_portraits CONTENT {
   name: "DM01POL.BIN + DM01TEX.BIN",
   kind: "disc_asset",

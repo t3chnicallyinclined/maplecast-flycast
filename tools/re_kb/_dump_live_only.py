@@ -23,6 +23,9 @@ AUTH = "root:root"
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "78_recovered_live_only.surql")
 
+BS = chr(92)          # a literal backslash
+ESCQ = BS + chr(39)   # backslash-apostrophe, spelled so no tool layer can eat it
+
 SKIP = {"id"}
 
 
@@ -45,8 +48,16 @@ def rows(res):
 
 
 def lit(v):
-    """SurrealQL literal. Single quotes are escaped by doubling, matching the
-    existing seed files (see gfx1_decode_equals_vram: 'the engine''s ...')."""
+    """SurrealQL literal, BACKSLASH-escaped.
+
+    Not doubled (''). That was the old seed convention and SurrealDB 3.1.4
+    rejects it outright: "Unexpected token `a strand`". Because a .surql file
+    is POSTed as one script, the parser then consumes the following statements
+    as string content, returns 200, and every block reports OK -- so the file
+    silently applies almost nothing. This function wrote 15 such escapes into
+    the recovery seed, which meant the recovered findings could not have been
+    restored from it.
+    """
     if v is None:
         return "NONE"
     if isinstance(v, bool):
@@ -54,8 +65,8 @@ def lit(v):
     if isinstance(v, (int, float)):
         return str(v)
     if isinstance(v, (list, dict)):
-        return "'" + json.dumps(v, ensure_ascii=False).replace("'", "''") + "'"
-    return "'" + str(v).replace("'", "''") + "'"
+        return "'" + json.dumps(v, ensure_ascii=False).replace(BS, BS + BS).replace("'", ESCQ) + "'"
+    return "'" + str(v).replace(BS, BS + BS).replace("'", ESCQ) + "'"
 
 
 def main():
