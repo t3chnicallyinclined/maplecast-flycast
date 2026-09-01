@@ -146,7 +146,13 @@ def main(argv):
                 errs.append((s.split("\n")[0][:88], e))
         total += len(stmts)
         bad += len(errs)
-        flag = "  <-- %d FAILED" % len(errs) if errs else ""
+        # --dry-run never calls post(), so `errs` is necessarily empty. Saying
+        # "0 failed" there would be the SAME fail-open this file exists to
+        # prevent: a clean-looking report that never asked the server anything.
+        # (It read exactly that way until 2026-09-01 -- "1804 statements, 0
+        # failed" with the server untouched.)
+        flag = ("  (not executed)" if dry else
+                ("  <-- %d FAILED" % len(errs) if errs else ""))
         print("%-52s %4d stmts%s" % (os.path.basename(path), len(stmts), flag))
         for head, e in errs[:6]:
             print("      %s" % head)
@@ -154,6 +160,10 @@ def main(argv):
         if len(errs) > 6:
             print("      ... +%d more" % (len(errs) - 6))
     print("-" * 70)
+    if dry:
+        print("%d statements parsed. NOT EXECUTED -- this says nothing about "
+              "whether they apply." % total)
+        return 0
     print("%d statements, %d failed" % (total, bad))
     return 1 if bad else 0
 

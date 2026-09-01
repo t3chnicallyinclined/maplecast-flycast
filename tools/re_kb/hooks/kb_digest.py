@@ -60,6 +60,24 @@ def rows(res):
     return out
 
 
+def claim_of(r, *prefer):
+    """The displayable claim for a finding row.
+
+    Tries the preferred keys first, then statement -> summary -> title ->
+    result -> note. The
+    `finding` table has 55 distinct keys and 11 rows put their claim in
+    `summary`, not `statement`. Reading only `statement` meant
+    finding:render_frame_positions_validated -- "maxDX=0.00px vs engine
+    ASMTRACE, both fighters, every part" -- was emitted as an EMPTY BULLET by
+    the hook whose entire job is carrying facts across a compaction.
+    """
+    for k in list(prefer) + ["statement", "summary", "title", "result", "note"]:
+        v = r.get(k)
+        if v:
+            return v
+    return ""
+
+
 def trim(s, n):
     s = " ".join(str(s or "").split())
     return s if len(s) <= n else s[:n - 1] + "…"
@@ -73,11 +91,11 @@ def main():
 
     try:
         dead = rows(sql(
-            "SELECT record::id(id) AS id, status, statement, tried, evidence "
+            "SELECT record::id(id) AS id, status, statement, summary, note, tried, evidence "
             "FROM finding WHERE status IN ['ruled_out','superseded'] "
             "ORDER BY id;"))
         conf = rows(sql(
-            "SELECT record::id(id) AS id, statement, date FROM finding "
+            "SELECT record::id(id) AS id, statement, summary, note, date FROM finding "
             "WHERE status = 'confirmed' ORDER BY date DESC;"))
     except Exception:
         return 0
@@ -97,7 +115,7 @@ def main():
         for r in dead:
             out.append("- [%s] %s: %s"
                        % (r.get("status"), r.get("id"),
-                          trim(r.get("tried") or r.get("statement"), 220)))
+                          trim(claim_of(r, "tried"), 220)))
 
     used = sum(len(x) for x in out)
     if conf:
@@ -108,7 +126,7 @@ def main():
         for r in conf:
             line = "- %s%s: %s" % (r.get("id"),
                                    " (%s)" % r["date"] if r.get("date") else "",
-                                   trim(r.get("statement"), 200))
+                                   trim(claim_of(r), 200))
             if used + len(line) > BUDGET:
                 out.append("- … +%d more confirmed findings -- "
                            "tools/re_kb/rekb.sh \"SELECT id, statement FROM finding "

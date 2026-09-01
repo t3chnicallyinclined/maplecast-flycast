@@ -166,8 +166,42 @@ UPDATE source SET strength='unranked' WHERE strength = NONE;
 -- NEVER promoted by: a model, consensus, confidence, or a single correlation.
 -- A model may PROPOSE promotion. It may not promote.
 --
--- This rule is not enforceable through rekb.sh, which accepts arbitrary SQL
--- with root credentials -- which is precisely why the graph reached 170
--- confirmed to 1 inferred. It is enforced in tools/re_kb/kb.py instead,
--- where it is a required function parameter rather than a paragraph.
+-- WHERE THIS IS ENFORCED -- corrected 2026-09-01.
+--
+-- This file previously said: "This rule is not enforceable through rekb.sh,
+-- which accepts arbitrary SQL with root credentials... It is enforced in
+-- tools/re_kb/kb.py instead." THAT WAS FALSE, and it mattered: it justified
+-- shipping a convention wrapper and calling it a gate. kb.py is the ergonomic
+-- surface; anyone typing `rekb.sh "UPSERT finding:x SET status='confirmed'"`
+-- walked straight past it -- and README.md documents that as the primary
+-- interface.
+--
+-- SurrealDB can enforce the promotion rule itself, at the datastore, against
+-- the existing `cites` model, with no migration. Verified on 3.1.4 in a
+-- throwaway database:
+--
+--   DEFINE FIELD status ON finding TYPE string
+--     ASSERT $value != 'confirmed'
+--         OR count(SELECT VALUE id FROM $this->cites->source
+--                  WHERE strength IN ['reproduction','code']) > 0;
+--
+--   UPSERT finding:y SET status='confirmed'          -> REJECTED (no cite)
+--   RELATE finding:y->cites->source:doc1 (attestation)
+--   UPSERT finding:y SET status='confirmed'          -> REJECTED (too weak)
+--   RELATE finding:y->cites->source:orc1 (reproduction)
+--   UPSERT finding:y SET status='confirmed'          -> ACCEPTED
+--   UPSERT finding:z SET status='inferred'           -> ACCEPTED (no cite needed)
+--
+-- Two things it does NOT do, which must be said or they will be assumed:
+--   * ORDERING. The RELATE must precede the status write. The seeds are
+--     UPSERT-then-RELATE, so applying them under this ASSERT needs a two-phase
+--     pass (rows + edges first, statuses second).
+--   * DRIFT. It fires on writes to `finding`. Demoting a SOURCE's strength
+--     after the fact leaves the finding confirmed. It is a gate, not an
+--     invariant -- a periodic audit is still required.
+--
+-- The ASSERT is NOT installed yet: 62 currently-`confirmed` rows cite no
+-- reproduction- or code-grade SOURCE, so installing it today makes the seed
+-- rebuild fail on all of them. That failure is correct and is the point; it
+-- needs to be sequenced, not avoided.
 -- ============================================================================

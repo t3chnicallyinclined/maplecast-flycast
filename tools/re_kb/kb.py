@@ -296,12 +296,80 @@ def health():
         "AND count(->cites->source[WHERE strength IN ['reproduction','code']]) = 0 "
         "AND count(->cites->routine) = 0;")
     for r in unbacked:
-        claim = r.pop("statement", None) or r.pop("note", None) or ""
-        r.pop("note", None)
-        claim = " ".join(str(claim).split())
-        r["claim"] = claim[:110] + ("…" if len(claim) > 110 else "")
+        r["claim"] = _claim(r)
+
+    # The STRICTER count. The query above lets any ->cites->routine edge stand
+    # in for evidence, but that edge carries only (in, out) -- no line, no
+    # instruction, no excerpt. `finding:x -> cites -> routine:loc_8c0344d4`
+    # asserts "this claim mentions that routine", not "this claim is visible at
+    # these instructions". A locator is not a citation. Report both numbers so
+    # the gap between them is visible instead of flattering.
+    strict = query(
+        "SELECT count() AS n FROM finding WHERE status='confirmed' "
+        "AND count(->cites->source[WHERE strength IN ['reproduction','code']]) = 0 "
+        "GROUP ALL;")
+
+    # A confirmed finding with no `about` edge cannot be reached by the
+    # PreToolUse hook's address/PC lookup at all -- it is in the graph and
+    # invisible to the mechanism built to surface it.
+    unattached = query(
+        "SELECT count() AS n FROM finding WHERE status='confirmed' "
+        "AND count(->about) = 0 GROUP ALL;")
+
     return {"status_distribution": dist,
-            "confirmed_without_qualifying_evidence": unbacked}
+            "confirmed_without_qualifying_evidence": unbacked,
+            "confirmed_without_qualifying_SOURCE (strict)":
+                (strict[0]["n"] if strict else 0),
+            "confirmed_unreachable_by_hook (no about edge)":
+                (unattached[0]["n"] if unattached else 0),
+            "dangling_edges": dangling_edges()}
+
+
+def _claim(r):
+    """Pull a displayable claim off a finding row.
+
+    Reads statement -> summary -> title -> result -> note. This chain matters: the
+    `finding` table has 55 distinct keys and 11 rows carry their claim in
+    `summary` rather than `statement`. Reading only `statement` made
+    finding:render_frame_positions_validated -- "maxDX=0.00px vs engine
+    ASMTRACE, both fighters, every part", one of the best-evidenced rows in the
+    graph -- render as an EMPTY LINE in the PreCompact digest.
+    """
+    for k in ("statement", "summary", "title", "result", "note"):
+        v = r.pop(k, None)
+        if v:
+            r.pop("summary", None)
+            r.pop("note", None)
+            v = " ".join(str(v).split())
+            return v[:110] + ("…" if len(v) > 110 else "")
+    return ""
+
+
+#: every edge table in the graph. Named explicitly so a new one has to be
+#: added here deliberately -- the integrity check that only knew about `cites`
+#: reported "0 dangling" while two `about` edges pointed at nothing.
+EDGE_TABLES = ["cites", "about", "supersedes", "corrects", "fixes", "tried_on",
+               "reads", "writes", "calls", "lives_at", "maps_to", "owns",
+               "has_field", "part_of", "instance_of", "confirms"]
+
+
+def dangling_edges():
+    """Edges whose `in` or `out` record does not exist, per table.
+
+    RELATE does not require its target to exist, so a citation can look
+    satisfied in every traversal and resolve to nothing.
+    """
+    out = {}
+    for t in EDGE_TABLES:
+        try:
+            rows_ = query("SELECT count() AS n FROM %s "
+                          "WHERE out.id = NONE OR in.id = NONE GROUP ALL;" % t)
+        except KBError:
+            continue                       # table not present in this graph
+        n = rows_[0]["n"] if rows_ else 0
+        if n:
+            out[t] = n
+    return out
 
 
 def dead_ends(about=None):
