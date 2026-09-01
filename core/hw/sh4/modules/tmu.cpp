@@ -7,6 +7,7 @@
 #include "hw/sh4/sh4_interrupts.h"
 #include "hw/sh4/sh4_mmr.h"
 #include "serialize.h"
+#include <cstdlib>
 
 #define tmu_underflow 0x0100
 #define tmu_UNIE      0x0020
@@ -65,10 +66,20 @@ template<u32 ch>
 static u32 read_TMU_TCNT(u32 addr)
 {
 	s64 v = read_TMU_TCNTch(ch);
+	u32 real;
 	if (v < 0)
-		return reloadCounter(ch, v);
+		real = reloadCounter(ch, v);   // keep the reload/interrupt path intact
 	else
-		return (u32)v;
+		real = (u32)v;
+	// R1 stopwatch-inertness probe (MAPLECAST_TCNT0_CONST): force the GAME-VISIBLE
+	// TCNT0 to a constant. MVC2's stopwatch (loc_8C11D3F0 -> 0x8C2D5748) reads TCNT0;
+	// if the game-state DETLOG hash is invariant to this, the stopwatch is inert and a
+	// from-snapshot executor (browser prediction) can safely exclude it. Env-gated,
+	// off by default; interrupt scheduling above is unaffected.
+	static const bool _tcnt0_const = std::getenv("MAPLECAST_TCNT0_CONST") != nullptr;
+	if (ch == 0 && _tcnt0_const)
+		return 0x40000000u;
+	return real;
 }
 
 template<u32 ch>

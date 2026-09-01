@@ -241,3 +241,8 @@ _stage_gt/
 # ROM-derived RAM/TA captures (never commit — derived from ROM execution)
 *.mcrr
 *.zcst
+native-client-tdw/target/
+*.ticktrace-bak
+
+# RealESRGAN model weights - redownload from github.com/xinntao/Real-ESRGAN releases
+sprite_hd/models/*.pth

@@ -11,6 +11,7 @@
 #include <vector>
 #include <set>
 #include <cstdint>
+#include <algorithm>
 
 namespace mc_readtrace {
 
@@ -22,6 +23,41 @@ static const u32 DRIVER_PC    = 0x8C030858u & AREA_MASK;   // loc_8c030858 rende
 static bool g_done   = false;      // one-shot: capture the FIRST driver call only
 static u32  g_spEntry = 0;
 static u32  g_retPc   = 0;
+
+// ============================================================================
+// GAME-TICK read-set mode (MAPLECAST_TICKTRACE) — measures the read-set of the
+// WHOLE per-frame SH4 game tick f(): state(t+1)=f(state(t),input(t)), NOT just
+// the render driver subtree. Same fastmem-proof mechanism: boot dynarec, flip to
+// interpreter at a trigger frame, then trace EVERY guest read/instruction-fetch
+// (all funnel through addrspace::readt<T>) over N vblank-delimited ticks. Per tick
+// we reset a read/write/read-before-write bitset; a byte is DYNAMIC live-in iff it
+// was read-before-written in the tick and is outside the CODE/const/art bands,
+// SCRATCH iff written-then-read, STATIC iff in a code/const/art band. Union across
+// ticks classifies the whole match-wide read-set. READ-ONLY, gated OFF by default.
+// ============================================================================
+static bool g_tickMode = false;          // MAPLECAST_TICKTRACE
+static u32  g_tkTicks  = 200;            // MAPLECAST_TICKTRACE_TICKS
+static u32  g_tkTickN  = 0;              // completed ticks so far
+static bool g_tkFirst  = true;           // first vblank after flip = partial tick, discard
+static bool g_tkInRender = false;        // inside a render-driver (0x8C030858) call
+static u32  g_tkRenderSp = 0;            // r15 at that driver entry
+static bool g_tkRenderPushed = false;    // saw r15 dip below entry sp (frame pushed)
+
+// per-tick bitsets (reset each tick)
+static uint8_t* g_tkRead = nullptr;      // read this tick
+static uint8_t* g_tkWr   = nullptr;      // written this tick
+static uint8_t* g_tkRbw  = nullptr;      // read-before-write this tick (genuine live-in)
+// union bitsets (never reset — whole-run classification)
+static uint8_t* g_tkURead = nullptr;     // any read, any tick
+static uint8_t* g_tkURbw  = nullptr;     // read-before-write in >=1 tick (dynamic live-in)
+static uint8_t* g_tkUWr   = nullptr;     // WRITTEN in >=1 tick (distinguishes state vs const table)
+static uint8_t* g_tkSim   = nullptr;     // read OUTSIDE render driver (game-update/sim)
+static uint8_t* g_tkRen   = nullptr;     // read INSIDE render driver
+static uint8_t* g_tkPc    = nullptr;     // distinct instruction addresses executed
+// per-tick distributions
+static std::vector<u32> g_tkWholeHist;   // per-tick distinct read bytes
+static std::vector<u32> g_tkDynHist;     // per-tick dynamic live-in bytes
+static std::set<u32>    g_tkOther;       // non-RAM distinct reads (whole run)
 
 // dynarec->interpreter flip state (boot dynarec-fast, trace one interpreted frame)
 static u32  g_triggerFrame  = 60;      // env MAPLECAST_READTRACE_FRAME
@@ -48,6 +84,47 @@ static inline void setWrBit (u32 off){ g_ramWr  [off >> 3] |= (uint8_t)(1u << (o
 static inline bool getWrBit (u32 off){ return (g_ramWr  [off >> 3] >> (off & 7)) & 1u; }
 static inline void setRbwBit(u32 off){ g_ramRbw [off >> 3] |= (uint8_t)(1u << (off & 7)); }
 static inline bool getRbwBit(u32 off){ return (g_ramRbw [off >> 3] >> (off & 7)) & 1u; }
+
+// --- tick-mode bit helpers (generic, over any 2MB bitset) --------------------
+static inline void tkSet(uint8_t* bm, u32 off){ bm[off >> 3] |= (uint8_t)(1u << (off & 7)); }
+static inline bool tkGet(uint8_t* bm, u32 off){ return (bm[off >> 3] >> (off & 7)) & 1u; }
+
+// STATIC/DYNAMIC/SCRATCH classifier for the GAME TICK read-set. STATIC = code /
+// literal-pool / const-table / load-time art (frame-invariant, ship once). All
+// instruction fetches land in the code band. DYNAMIC = mutable per-frame game
+// state (char structs, globals, objpool, render lists, camera, frame counter).
+// A read outside a STATIC band is then split by read-before-write: RBW = genuine
+// DYNAMIC live-in; written-then-read = SCRATCH. So this returns only whether the
+// address is a STATIC band (region wins) — the RBW test does dynamic/scratch.
+// masked = area-masked guest addr (0x0Cxxxxxx).
+enum TkClass { TK_STATIC, TK_MAYBE_DYN };
+static TkClass tkRegion(u32 masked, const char** name){
+    struct R { u32 lo, hi; TkClass k; const char* n; };
+    static const R RS[] = {
+        // ---- STATIC: code, literals, const tables, load-time art ----
+        {0x0C000000u, 0x0C010000u, TK_STATIC, "BIOS/low-RAM (below EntryPoint)"},
+        {0x0C010000u, 0x0C1F0000u, TK_STATIC, "GAME CODE + literal pools + const tables"},
+        {0x0C200000u, 0x0C268000u, TK_STATIC, "GFX/heap art blobs (node+0x15C/0x160 load-time)"},
+        {0x0C400000u, 0x0CE00000u, TK_STATIC, "resident POL/effect/model 3D art (load-time)"},
+        {0x0CE00000u, 0x0D000000u, TK_STATIC, "resident 3D model/POL/Effect art (0x8CE8-ED)"},
+        // ---- DYNAMIC candidates: mutable per-frame game state ----
+        {0x0C1F0000u, 0x0C200000u, TK_MAYBE_DYN, "low game-state / render scratch (0x8C1Fxxxx)"},
+        {0x0C268000u, 0x0C26A600u, TK_MAYBE_DYN, "CHAR STRUCTS P1C1..P2C3 (0x8C268340, game state)"},
+        {0x0C26A600u, 0x0C287000u, TK_MAYBE_DYN, "objpool / object+satellite nodes (0x8C26AA54)"},
+        {0x0C287000u, 0x0C289000u, TK_MAYBE_DYN, "render list/slot/layer tables (rebuilt/frame)"},
+        {0x0C289000u, 0x0C28A000u, TK_MAYBE_DYN, "GLOBAL GAME-STATE page (0x8C289xxx)"},
+        {0x0C28A000u, 0x0C2D6000u, TK_MAYBE_DYN, "game heap/state mid (0x8C28A-0x8C2D6)"},
+        {0x0C2D6000u, 0x0C2D7000u, TK_MAYBE_DYN, "CAMERA/proj/viewport matrices"},
+        {0x0C2D7000u, 0x0C349000u, TK_MAYBE_DYN, "game heap/state hi (0x8C2D7-0x8C349)"},
+        {0x0C349000u, 0x0C34A000u, TK_MAYBE_DYN, "frame_counter/global (0x8C3496B0)"},
+        {0x0C34A000u, 0x0C400000u, TK_MAYBE_DYN, "game heap/state (0x8C34A-0x8C400)"},
+        {0x0D000000u, 0x10000000u, TK_MAYBE_DYN, "RAM mirror / high (0x0D-0x0F)"},
+    };
+    for (const auto& r : RS)
+        if (masked >= r.lo && masked < r.hi){ if(name)*name=r.n; return r.k; }
+    if(name)*name="UNMAPPED-area3 (candidate DYNAMIC)";
+    return TK_MAYBE_DYN;
+}
 
 // --- region classifier for the DUMP (not the hot path) -----------------------
 struct Region { u32 lo, hi; const char* name; int shippable; };
@@ -169,9 +246,146 @@ static void dump(){
                  g_other.size(), outPath);
 }
 
+// ---- tick-mode dump: classify the union read-set + per-tick distribution -----
+static u32 tk_med(std::vector<u32> v){ if(v.empty())return 0; std::sort(v.begin(),v.end()); return v[v.size()/2]; }
+static void tk_dump(){
+    const char* outPath = std::getenv("MAPLECAST_TICKTRACE_OUT");
+    if (!outPath || !outPath[0]) outPath = "ticktrace.txt";
+    FILE* f = std::fopen(outPath, "w");
+    if (!f){ std::fprintf(stderr, "[ticktrace] cannot open %s\n", outPath); return; }
+
+    // Classify the UNION read-set (whole run). Byte-skip the zero bitmap bytes.
+    // A read outside a static region:
+    //   read-before-write in >=1 tick AND written in >=1 tick  -> TRUE DYNAMIC state (live-in)
+    //   read-before-write but NEVER written (read-only)         -> const table -> STATIC (ship once)
+    //   written-then-read only                                  -> SCRATCH
+    struct Bucket { const char* name; u64 bytes; int isStatic; };
+    std::vector<Bucket> bk;
+    auto bump=[&](const char* n,int st,u32 add){ for(auto&b:bk) if(b.name==n){b.bytes+=add;return;} bk.push_back({n,add,st}); };
+    u64 uStatic=0, uDyn=0, uScratch=0, uConstRO=0, uTotal=0;
+    for (u32 byteIdx=0; byteIdx < RT_RAM_SZ/8; byteIdx++){
+        uint8_t rb = g_tkURead[byteIdx]; if(!rb) continue;
+        for (int b=0;b<8;b++){
+            if(!((rb>>b)&1)) continue;
+            u32 off = (byteIdx<<3)|b;
+            u32 masked = RT_RAM_LO + off;
+            const char* nm=nullptr; TkClass k=tkRegion(masked,&nm);
+            uTotal++;
+            if (tkGet(g_tkPc,off)){ uStatic++; bump("executed CODE (instruction fetch)",1,1); }
+            else if (k==TK_STATIC){ uStatic++; bump(nm,1,1); }
+            else if (tkGet(g_tkURbw,off)){
+                if (tkGet(g_tkUWr,off)){ uDyn++; bump(nm,0,1); }          // written => true state
+                else { uConstRO++; uStatic++; bump("read-only const table in dyn region (never written)",1,1); }
+            }
+            else { uScratch++; bump("BUILD-THEN-READ scratch (written before read)",1,1); }
+        }
+    }
+    // sim vs render union byte counts (clamped to the finalized-tick read union)
+    u64 simB=0, renB=0, bothB=0, pcB=0;
+    for (u32 byteIdx=0; byteIdx < RT_RAM_SZ/8; byteIdx++){
+        uint8_t u=g_tkURead[byteIdx];
+        uint8_t s=g_tkSim[byteIdx]&u, r=g_tkRen[byteIdx]&u, p=g_tkPc[byteIdx];
+        for(int b=0;b<8;b++){ int sb=(s>>b)&1, rb2=(r>>b)&1; simB+=sb; renB+=rb2; bothB+=(sb&rb2); pcB+=(p>>b)&1; }
+    }
+
+    // per-tick distribution
+    u64 wSum=0; u32 wMin=0xffffffff,wMax=0; for(u32 v:g_tkWholeHist){wSum+=v; if(v<wMin)wMin=v; if(v>wMax)wMax=v;}
+    u64 dSum=0; u32 dMin=0xffffffff,dMax=0; for(u32 v:g_tkDynHist){dSum+=v; if(v<dMin)dMin=v; if(v>dMax)dMax=v;}
+    u32 nT=(u32)g_tkWholeHist.size();
+    if(!nT){wMin=dMin=0;}
+
+    std::fprintf(f,"=== GAME-TICK READ-SET (MAPLECAST_TICKTRACE) ===\n");
+    std::fprintf(f,"ticks measured: %u (vblank-delimited, interpreter)\n",nT);
+    std::fprintf(f,"tick = one full per-frame SH4 game step f(): input latch + game logic + render.\n");
+    std::fprintf(f,"Reads include instruction fetches (they route through readt<u16>) => CODE band = code+literals.\n\n");
+
+    std::fprintf(f,"--- PER-TICK distinct bytes read (whole tick f(), incl. code fetch) ---\n");
+    std::fprintf(f,"  min=%u  median=%u  mean=%llu  max=%u\n",
+        wMin, tk_med(g_tkWholeHist), (unsigned long long)(nT?wSum/nT:0), wMax);
+    std::fprintf(f,"--- PER-TICK DYNAMIC live-in bytes (read-before-write, non-static region; UPPER bound, includes read-only const tables) ---\n");
+    std::fprintf(f,"  min=%u  median=%u  mean=%llu  max=%u\n",
+        dMin, tk_med(g_tkDynHist), (unsigned long long)(nT?dSum/nT:0), dMax);
+
+    std::fprintf(f,"\n--- UNION over all %u ticks (match-wide distinct bytes) ---\n",nT);
+    std::fprintf(f,"  total distinct bytes read : %llu\n",(unsigned long long)uTotal);
+    std::fprintf(f,"  STATIC  (code/literal/const/art, ship once) : %llu\n",(unsigned long long)uStatic);
+    std::fprintf(f,"    of which read-only const table in dyn region: %llu\n",(unsigned long long)uConstRO);
+    std::fprintf(f,"  DYNAMIC live-in (read-before-write AND written; per-frame state) : %llu\n",(unsigned long long)uDyn);
+    std::fprintf(f,"  SCRATCH (written-then-read within a tick)   : %llu\n",(unsigned long long)uScratch);
+    std::fprintf(f,"  distinct instruction addresses executed    : %llu  (~recompilation code surface)\n",(unsigned long long)pcB);
+    std::fprintf(f,"  reads outside render driver (sim/update)    : %llu bytes\n",(unsigned long long)simB);
+    std::fprintf(f,"  reads inside  render driver (0x8C030858)    : %llu bytes\n",(unsigned long long)renB);
+    std::fprintf(f,"  read by BOTH sim and render                 : %llu bytes\n",(unsigned long long)bothB);
+    std::fprintf(f,"  non-RAM distinct reads (PVR/VRAM/SQ/P4)     : %zu\n",g_tkOther.size());
+
+    std::fprintf(f,"\n--- UNION region histogram (all distinct read bytes, by region) ---\n");
+    std::sort(bk.begin(),bk.end(),[](const Bucket&a,const Bucket&b){return a.bytes>b.bytes;});
+    for(auto&b:bk)
+        std::fprintf(f,"  %-56s %9llu B  %s\n", b.name, (unsigned long long)b.bytes,
+            b.isStatic ? "STATIC/scratch" : ">>> DYNAMIC <<<");
+
+    // Coalesced TRUE-DYNAMIC live-in address ranges (read-before-write, written, non-static
+    // region, not code). This IS the per-frame state a re-simulator must be fed each tick.
+    std::fprintf(f,"\n--- TRUE-DYNAMIC live-in coalesced runs (guest P1 addr; gap<=16 merged) ---\n");
+    { u32 runLo=0, runEnd=0; bool inRun=false; u32 nRuns=0; u64 dynRunBytes=0;
+      auto emit=[&](u32 lo,u32 end){ const char* nm; tkRegion(RT_RAM_LO+lo,&nm);
+          if(nRuns<1200) std::fprintf(f,"  0x%08X..0x%08X  %5u B   %s\n", 0x8C000000u|lo, 0x8C000000u|end, end-lo, nm);
+          nRuns++; dynRunBytes += end-lo; };
+      for (u32 off=0; off<RT_RAM_SZ; off++){
+          bool dyn=false;
+          if (tkGet(g_tkURead,off)){
+              const char* nm; TkClass k=tkRegion(RT_RAM_LO+off,&nm);
+              dyn = !tkGet(g_tkPc,off) && k!=TK_STATIC && tkGet(g_tkURbw,off) && tkGet(g_tkUWr,off);
+          }
+          if (dyn){
+              if (!inRun){ inRun=true; runLo=off; }
+              else if (off - runEnd > 16){ emit(runLo,runEnd); runLo=off; }
+              runEnd = off+1;
+          }
+      }
+      if (inRun) emit(runLo,runEnd);
+      std::fprintf(f,"  (%u runs, %llu bytes)\n", nRuns, (unsigned long long)dynRunBytes);
+    }
+
+    std::fclose(f);
+    std::fprintf(stderr,"[ticktrace] DONE ticks=%u perTickWhole[min=%u med=%u max=%u] perTickDyn[min=%u med=%u max=%u] "
+        "UNION total=%lluB static=%lluB dynamic=%lluB scratch=%lluB instrAddrs=%lluB -> %s\n",
+        nT, wMin, tk_med(g_tkWholeHist), wMax, dMin, tk_med(g_tkDynHist), dMax,
+        (unsigned long long)uTotal,(unsigned long long)uStatic,(unsigned long long)uDyn,
+        (unsigned long long)uScratch,(unsigned long long)pcB, outPath);
+}
+
+// finalize the tick that just ended at this vblank: classify its read bitset,
+// record per-tick counts, merge into the union, then reset the per-tick bitsets.
+static void tk_finalizeTick(){
+    u32 whole=0, dyn=0;
+    for (u32 byteIdx=0; byteIdx < RT_RAM_SZ/8; byteIdx++){
+        uint8_t rb = g_tkRead[byteIdx]; if(!rb) continue;
+        for (int b=0;b<8;b++){
+            if(!((rb>>b)&1)) continue;
+            u32 off = (byteIdx<<3)|b;
+            tkSet(g_tkURead, off);                 // union read
+            whole++;
+            bool rbw = tkGet(g_tkRbw, off);
+            if (rbw) tkSet(g_tkURbw, off);          // union dynamic live-in
+            const char* nm; TkClass k = tkRegion(RT_RAM_LO+off,&nm);
+            bool isCode = tkGet(g_tkPc, off);        // executed instruction addr = code
+            if (!isCode && k!=TK_STATIC && rbw) dyn++;  // per-tick dynamic live-in
+        }
+    }
+    g_tkWholeHist.push_back(whole);
+    g_tkDynHist.push_back(dyn);
+    // OR the per-tick write set into the union (state-vs-const-table discriminator)
+    for (u32 i=0;i<RT_RAM_SZ/8;i++) g_tkUWr[i] |= g_tkWr[i];
+    std::memset(g_tkRead, 0, RT_RAM_SZ/8);
+    std::memset(g_tkWr,   0, RT_RAM_SZ/8);
+    std::memset(g_tkRbw,  0, RT_RAM_SZ/8);
+}
+
 // --- public API --------------------------------------------------------------
 void init(){
-    g_enabled = (std::getenv("MAPLECAST_READTRACE") != nullptr);
+    g_tickMode = (std::getenv("MAPLECAST_TICKTRACE") != nullptr);
+    g_enabled = g_tickMode || (std::getenv("MAPLECAST_READTRACE") != nullptr);
     if (!g_enabled) return;
     g_ramBits = (uint8_t*)std::calloc(RT_RAM_SZ/8, 1);
     g_ramWr   = (uint8_t*)std::calloc(RT_RAM_SZ/8, 1);
@@ -180,13 +394,58 @@ void init(){
         u32 v = (u32)std::strtoul(f, nullptr, 10);
         if (v) g_triggerFrame = v;
     }
+    if (const char* f = std::getenv("MAPLECAST_TICKTRACE_FRAME")) {
+        u32 v = (u32)std::strtoul(f, nullptr, 10);
+        if (v) g_triggerFrame = v;
+    }
+    if (g_tickMode){
+        g_tkRead  = (uint8_t*)std::calloc(RT_RAM_SZ/8, 1);
+        g_tkWr    = (uint8_t*)std::calloc(RT_RAM_SZ/8, 1);
+        g_tkRbw   = (uint8_t*)std::calloc(RT_RAM_SZ/8, 1);
+        g_tkURead = (uint8_t*)std::calloc(RT_RAM_SZ/8, 1);
+        g_tkURbw  = (uint8_t*)std::calloc(RT_RAM_SZ/8, 1);
+        g_tkUWr   = (uint8_t*)std::calloc(RT_RAM_SZ/8, 1);
+        g_tkSim   = (uint8_t*)std::calloc(RT_RAM_SZ/8, 1);
+        g_tkRen   = (uint8_t*)std::calloc(RT_RAM_SZ/8, 1);
+        g_tkPc    = (uint8_t*)std::calloc(RT_RAM_SZ/8, 1);
+        if (const char* t = std::getenv("MAPLECAST_TICKTRACE_TICKS")) {
+            u32 v = (u32)std::strtoul(t, nullptr, 10); if(v) g_tkTicks = v;
+        }
+        if (!g_triggerFrame || g_triggerFrame < 60) g_triggerFrame = 120;
+        std::fprintf(stderr, "[ticktrace] ENABLED — GAME-TICK read-set; dynarec boot; flip->interpreter at frame %u; trace %u vblank-delimited ticks\n",
+                     g_triggerFrame, g_tkTicks);
+        return;
+    }
     // Boot stays DYNAREC (fast). We flip to interpreter at g_triggerFrame.
     std::fprintf(stderr, "[readtrace] ENABLED — dynarec boot; flip->interpreter+arm at frame %u (driver 0x8C030858)\n",
                  g_triggerFrame);
 }
 
 void onFrame(){
-    if (!g_enabled || g_flipApplied) return;
+    if (!g_enabled) return;
+    if (g_tickMode){
+        if (!g_flipApplied){                       // pre-flip: count to trigger
+            if (++g_frameCount >= g_triggerFrame) g_flipRequested = true;
+            return;
+        }
+        // post-flip: each vblank is a TICK boundary.
+        if (g_tkFirst){                            // first is a partial tick — discard
+            g_tkFirst = false;
+            std::memset(g_tkRead, 0, RT_RAM_SZ/8);
+            std::memset(g_tkWr,   0, RT_RAM_SZ/8);
+            std::memset(g_tkRbw,  0, RT_RAM_SZ/8);
+            return;
+        }
+        tk_finalizeTick();
+        if (++g_tkTickN >= g_tkTicks){
+            g_armed = false;
+            tk_dump();
+            std::fflush(nullptr);
+            std::_Exit(0);                          // hard stop; file already flushed
+        }
+        return;
+    }
+    if (g_flipApplied) return;
     if (++g_frameCount >= g_triggerFrame) g_flipRequested = true;
 }
 
@@ -198,6 +457,11 @@ bool applyFlip(){
     if (!g_enabled || !g_flipRequested || g_flipApplied) return false;
     g_flipApplied = true;
     config::DynarecEnabled.override(false);   // getSh4Executor() now returns interpreter
+    if (g_tickMode){
+        g_armed = true;                       // whole-frame trace begins now
+        std::fprintf(stderr, "[ticktrace] FLIP at frame %u — interpreter armed; tracing whole-tick read-set\n", g_frameCount);
+        return true;
+    }
     std::fprintf(stderr, "[readtrace] FLIP at frame %u — interpreter armed; tracing next driver call\n",
                  g_frameCount);
     return true;   // caller does ResetCache()+Start()
@@ -263,6 +527,22 @@ static void step3_zero_non_resident(){
 }
 
 void onPc(u32 pc){
+    if (g_tickMode){
+        if (!g_armed) return;
+        u32 m = pc & AREA_MASK;
+        // distinct executed instruction addresses = recompilation code surface
+        if (m >= RT_RAM_LO && m < RT_RAM_LO + RT_RAM_SZ) tkSet(g_tkPc, m - RT_RAM_LO);
+        // render-driver depth (best-effort sim/render split): enter at 0x8C030858,
+        // exit when r15 climbs back above the entry sp after dipping below it.
+        u32 sp = Sh4cntx.r[15];
+        if (!g_tkInRender){
+            if (m == DRIVER_PC){ g_tkInRender = true; g_tkRenderSp = sp; g_tkRenderPushed = false; }
+        } else {
+            if (sp < g_tkRenderSp) g_tkRenderPushed = true;
+            else if (g_tkRenderPushed && sp >= g_tkRenderSp) g_tkInRender = false;
+        }
+        return;
+    }
     if (!g_enabled || g_done) return;
     u32 m = pc & AREA_MASK;
     if (!g_armed){
@@ -300,7 +580,21 @@ void onPc(u32 pc){
     }
 }
 
-void onRead(u32 addr){
+void onRead(u32 addr, u32 size){
+    if (g_tickMode){
+        u32 m = addr & AREA_MASK;
+        if (m >= RT_RAM_LO && m < RT_RAM_LO + RT_RAM_SZ){
+            uint8_t* rt = g_tkInRender ? g_tkRen : g_tkSim;   // sim vs render split
+            for (u32 i=0;i<size;i++){
+                u32 mm = m + i; if (mm >= RT_RAM_LO + RT_RAM_SZ) break;
+                u32 off = mm - RT_RAM_LO;
+                tkSet(g_tkRead, off);
+                if (!tkGet(g_tkWr, off)) tkSet(g_tkRbw, off); // read-before-write this tick
+                tkSet(rt, off);
+            }
+        } else g_tkOther.insert(m);
+        return;
+    }
     // Scope to the driver's own call subtree (deeper stack than entry).
     if (Sh4cntx.r[15] >= g_spEntry) return;
     u32 m = addr & AREA_MASK;
@@ -314,7 +608,13 @@ void onRead(u32 addr){
     else g_other.insert(m);
 }
 
-void onWrite(u32 addr){
+void onWrite(u32 addr, u32 size){
+    if (g_tickMode){
+        u32 m = addr & AREA_MASK;
+        if (m >= RT_RAM_LO && m < RT_RAM_LO + RT_RAM_SZ)
+            for (u32 i=0;i<size;i++){ u32 mm=m+i; if(mm>=RT_RAM_LO+RT_RAM_SZ)break; tkSet(g_tkWr, mm-RT_RAM_LO); }
+        return;
+    }
     // Same subtree scope. A write marks the byte as build-then-read scratch: a
     // later read of it is not an external dependency (the pass produced it).
     if (Sh4cntx.r[15] >= g_spEntry) return;
@@ -327,6 +627,7 @@ void onWrite(u32 addr){
 // fires inside the driver window (entry..retPc) — the SAME window the standalone
 // runner captures, so g_engineTa is byte-comparable to runner_ta.bin.
 void onSqWrite(u32 dest, Sh4Context* ctx){
+    if (g_tickMode) return;   // tick mode: don't accumulate engine TA (unbounded over N ticks)
     const uint8_t* sq = ctx->sq_buffer[(dest >> 5) & 1].data;
     g_engineTa.insert(g_engineTa.end(), sq, sq + 32);
 }

@@ -53,13 +53,14 @@ bool applyFlip();
 void onPc(u32 pc);
 
 // addrspace::readt<T> when g_armed. Logs the distinct guest address if the read
-// is within the driver's call subtree (r15 < spEntry).
-void onRead(u32 addr);
+// is within the driver's call subtree (r15 < spEntry). size = read width in bytes
+// (1/2/4/8); tick mode marks the full [addr,addr+size) span, render mode uses addr.
+void onRead(u32 addr, u32 size);
 
 // addrspace::writet<T> when g_armed. Records writes within the driver closure so
 // the dump distinguishes build-then-read scratch (written earlier this closure)
-// from a genuine external read dependency.
-void onWrite(u32 addr);
+// from a genuine external read dependency. size = write width in bytes.
+void onWrite(u32 addr, u32 size);
 
 // STEP 3 byte-gate: capture the ENGINE's native store-queue TA emission (the same
 // 32-byte SQ parcels the standalone runner captures) during the driver window.

@@ -77,6 +77,7 @@ uint64_t g_activePalBanks = 0;
 #include "maplecast_gamestate.h"
 #include "maplecast_oracle_hook.h"
 #include <errno.h>
+#include <cstdlib>
 
 
 extern Renderer* renderer;
@@ -2737,6 +2738,8 @@ void serverPublish(TA_context* ctx)
 	// Still increment the frame counter so local overlays/telemetry work.
 	static uint32_t _localFrameNum = 0;
 	_localFrameNum++;
+	{ static const bool _gsh = std::getenv("MAPLECAST_GSHASH") != nullptr;
+	  if (_gsh) { uint64_t o[5]; maplecast_rollback::gameStateSubHashes(o); printf("[GSHASH] f=%u cs=%016llx gs=%016llx fc=%016llx ft=%016llx in=%016llx\n", (unsigned)_localFrameNum,(unsigned long long)o[0],(unsigned long long)o[1],(unsigned long long)o[2],(unsigned long long)o[3],(unsigned long long)o[4]); fflush(stdout); } }
 	// A2 ADAPTIVE proof metric: a real (non-hidden) composite reached publish this tick.
 	_publishBroadcasts.fetch_add(1, std::memory_order_relaxed);
 

@@ -107,8 +107,8 @@ T DYNACALL readt(u32 addr)
 {
 	// STEP 2 read-set trace (MAPLECAST_READTRACE): gated OFF in prod — g_armed is
 	// false unless the render-driver subtree is executing under interpreter mode.
-	if (unlikely(mc_readtrace::g_armed)) mc_readtrace::onRead(addr);
 	constexpr u32 sz = sizeof(T);
+	if (unlikely(mc_readtrace::g_armed)) mc_readtrace::onRead(addr, sz);
 
 	u32 page = addr >> 24;	//1 op, shift/extract
 	uintptr_t iirf = (uintptr_t)memInfo_ptr[page]; //2 ops, insert + read [vmem table will be on reg ]
@@ -155,8 +155,8 @@ void DYNACALL writet(u32 addr, T data)
 	// STEP 2 read-set trace: record writes within the driver closure so a later
 	// read of a WRITTEN-THIS-CLOSURE address is classified build-then-read scratch,
 	// not an external dependency. Gated OFF in prod (g_armed false).
-	if (unlikely(mc_readtrace::g_armed)) mc_readtrace::onWrite(addr);
 	constexpr u32 sz = sizeof(T);
+	if (unlikely(mc_readtrace::g_armed)) mc_readtrace::onWrite(addr, sz);
 
 	u32 page = addr>>24;
 	uintptr_t iirf = (uintptr_t)memInfo_ptr[page];
