@@ -76,21 +76,52 @@ DEFINE TABLE IF NOT EXISTS fixes SCHEMALESS
 -- NOTE on kind='memory': in this graph that means the marvelous2 memory-map
 -- files (pl_mem.asm, work.asm, buildSPL.sh) -- authoritative symbol tables,
 -- NOT somebody's recollection. It ranks as `code`.
+--
+-- NOTE on the ROM/disc kinds (disc, disc_data, pldat): these rank
+-- `reproduction`. They are not opinions about the game -- they are the game,
+-- read off the user's own disc by a deterministic decoder. Anyone with the
+-- ROM re-derives the same bytes, which is exactly the "we can make it happen
+-- again" test. (Example: source:pl00_gfx2_cell63 backs
+-- finding:ryu_sid63_two_part_is_correct_not_wire_gap by showing the decoded
+-- GFX2 cell really does carry two parts.)
+--
+-- NOTE on kind='validation' vs kind='audit'. Both sound like proof; only one
+-- is. `validation` is a deterministic differ pass with a pass/fail (0.00px
+-- geometry, byte-exact transpile) -> reproduction. `audit` is a systematic
+-- read-through producing a summary -- it establishes coverage, not
+-- mechanism -> metric, never sufficient alone.
+--
+-- NOTE on kind='derivation': reasoned FROM other findings. That is what
+-- `inferred` is for. It is attestation-grade no matter how sound the
+-- reasoning, because the evidence is elsewhere -- cite that instead.
 
 UPDATE source SET strength='reproduction'
-  WHERE kind IN ['oracle','oracle_capture','capture','live_capture','capture_analysis','transpile_validation'];
+  WHERE kind IN ['oracle','oracle_capture','capture','live_capture','capture_analysis',
+                 'transpile_validation','validation',
+                 'disc','disc_data','pldat'];
 
 UPDATE source SET strength='code'
   WHERE kind IN ['code','disasm','disassembly','memory','marvelous2','js_function','implementation'];
 
 UPDATE source SET strength='metric'
-  WHERE kind IN ['measurement','tool'];
+  WHERE kind IN ['measurement','tool','audit'];
 
 UPDATE source SET strength='attestation'
-  WHERE kind IN ['anotak','doc','reference','recatalog','format','format_decode','expert_trace'];
+  WHERE kind IN ['anotak','doc','reference','recatalog','format','format_decode',
+                 'expert_trace','spec','derivation'];
 
--- anything new/unmapped defaults to the weakest reading, never the strongest
-UPDATE source SET strength='attestation' WHERE strength = NONE;
+-- Anything still unmapped is 'unranked', NOT 'attestation'.
+--
+-- Defaulting an unknown kind to attestation is the weakest reading, which
+-- sounds safe -- but it makes an unmapped kind INDISTINGUISHABLE from a
+-- deliberately-weak one, so it never gets looked at again. `unranked` is
+-- also unable to confirm anything, and it is greppable:
+--
+--     SELECT kind, count() FROM source WHERE strength='unranked' GROUP BY kind;
+--
+-- If that returns rows, the map above is out of date -- extend it, do not
+-- let the default absorb it.
+UPDATE source SET strength='unranked' WHERE strength = NONE;
 
 -- ---- 4. the status vocabulary ----------------------------------------------
 -- finding.status
