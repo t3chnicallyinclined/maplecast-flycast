@@ -316,7 +316,18 @@ def health():
         "SELECT count() AS n FROM finding WHERE status='confirmed' "
         "AND count(->about) = 0 GROUP ALL;")
 
+    # A finding with NO status at all. The promotion ASSERT declares `status`
+    # as option<string> so the two-phase apply can write a row before its
+    # status -- which also means a hand-written UPSERT that simply forgets one
+    # is ACCEPTED. That happened the first time 89 was applied: five ruled_out
+    # findings landed statusless and read as neither confirmed nor ruled out.
+    # A row with no status is invisible to every status query, so it has to be
+    # its own number.
+    statusless = query("SELECT count() AS n FROM finding "
+                       "WHERE status = NONE GROUP ALL;")
+
     return {"status_distribution": dist,
+            "findings_with_NO_status": (statusless[0]["n"] if statusless else 0),
             "confirmed_without_qualifying_evidence": unbacked,
             "confirmed_without_qualifying_SOURCE (strict)":
                 (strict[0]["n"] if strict else 0),
