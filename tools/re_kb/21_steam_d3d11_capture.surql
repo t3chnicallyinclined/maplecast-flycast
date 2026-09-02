@@ -128,3 +128,93 @@ UPSERT finding:steam_assembly_record_is_many_quads SET
            || 'sel==0xFF records consuming tiledesc slots, column-pair-major order for wide parts.';
 RELATE finding:steam_assembly_record_is_many_quads->cites->source:d3dcap_steam_capture;
 RELATE finding:steam_assembly_record_is_many_quads->relates_to->finding:steam_char_sprite_plane_384x224;
+
+-- ---- 2026-09-02: the blk delta lane -------------------------------------------------------------
+-- Measured with replay-kit/blkdelta.py (read-only, live, 600 consecutive in-battle frames, twice).
+-- INFERRED throughout: this is our instrument observing the game, not the game's own bytes.
+UPSERT source:blkdelta_measurement SET
+  kind = 'steam_memory',
+  strength = 'metric',
+  ref = 'mvc-live-skins-quarters/replay-kit/blkdelta.py -- polls blk+0x3CC8, snapshots blk[0..0x33B18) '
+     || 'on each advance, reports changed bytes/words/runs and gzipped payload as percentiles plus a '
+     || 'per-word change histogram. Rollback frames counted and EXCLUDED, not absorbed.',
+  note = 'A SIZE, not a mechanism. Says nothing about whether Steam command list is a function of blk.';
+
+UPSERT finding:steam_blk_is_mostly_static SET
+  statement = 'blk splits into match data loaded once plus per-frame simulation state. Outside the '
+           || 'fighter slots, options, camera and object pool, 95% of blk does not change across 600 '
+           || 'frames -- so the static majority can ship ONCE in an anchor and only the volatile part '
+           || 'is per-frame. Region volatility: fighter slots 9.7%, match options 18%, camera 75%, '
+           || 'object pool 31.6% (and 84.6% of blk by size), everything else 5.0%.',
+  status = 'inferred', confidence = 0.85, about = 'field:blk_layout',
+  reasoning = 'Per-word change histogram over 600 consecutive in-battle frames, sampled at 60.1/s.';
+RELATE finding:steam_blk_is_mostly_static->cites->source:blkdelta_measurement;
+
+UPSERT finding:steam_blk_delta_rate SET
+  statement = 'A per-frame blk delta costs roughly 0.6-1.2 KB, i.e. 6-13 MB for a 3-minute match. '
+           || 'That is 40-80x below the D3D11 draw stream and ~5x above the agent state tape, and '
+           || 'unlike either it needs no simulation, no input replay and no determinism certificate. '
+           || 'Run-length is the WRONG encoding: 563 changed bytes over 231 runs is 2.4 bytes per run, '
+           || 'so per-run headers cost more than the payload -- use a static volatile-word index plus a '
+           || 'per-frame sparse bitmap.',
+  status = 'inferred', confidence = 0.8, about = 'field:blk_layout',
+  reasoning = 'Two 600-frame runs: changed bytes mean 563-568, gzipped payload mean 388-484 B/frame '
+           || '(EXCLUDING run headers, which the naive encoding puts at ~2.4 KB/frame raw).';
+RELATE finding:steam_blk_delta_rate->cites->source:blkdelta_measurement;
+
+UPSERT finding:steam_object_pool_stride_0x280 SET
+  statement = 'The region that dominates blk (84.6% by size) is a 0x280-stride array, confirmed by '
+           || 'PERIODICITY rather than by assertion: 85% of columns separate decisively into hot/cold '
+           || 'at stride 0x280, against ~16% at 0x400, 0x380, 0x300, 0x200 and 0x180 -- a 5x margin. '
+           || '69 of 160 words per node are volatile in over half the nodes, and only ~3.5 nodes worth '
+           || 'of hot columns change per frame. Corroborates the object-pool stride from a completely '
+           || 'different direction than the disassembly that first established it. '
+           || 'WARNING: the node PHASE is UNDETERMINED. A field mapping derived from this histogram was '
+           || 'RETRACTED before recording -- a random 69-of-160 hot set hits ~7.8 of 18 known '
+           || 'fighter-struct fields by chance, and a full phase sweep ties four different bases at '
+           || '12/18. Volatility cannot fix the phase; that needs the allocator or a live pointer walk. '
+           || 'Do NOT quote node offsets from this finding.',
+  status = 'inferred', confidence = 0.85, about = 'field:object_pool',
+  reasoning = 'Stride scan over the per-word change histogram, 600 frames.';
+RELATE finding:steam_object_pool_stride_0x280->cites->source:blkdelta_measurement;
+
+UPSERT finding:state_tape_keeps_an_eighth SET
+  statement = 'The agent state tape carries 32 B per object node; the volatile part of a pool node is '
+           || '69 words = 276 B. The tape keeps under an EIGHTH of what changes per node. This is why '
+           || 'a reconstruct-from-state renderer has a pixel ceiling and always will, while a blk-delta '
+           || 'feed does not. The ratio holds regardless of the undetermined node phase.',
+  status = 'inferred', confidence = 0.8, about = 'field:object_pool',
+  reasoning = 'Tape node size from reader.rs ObjNode (32 B at 0.3.32); volatile node width from the '
+           || 'stride scan above.';
+RELATE finding:state_tape_keeps_an_eighth->cites->source:blkdelta_measurement;
+RELATE finding:state_tape_keeps_an_eighth->relates_to->finding:steam_object_pool_stride_0x280;
+
+-- ---- 2026-09-02: the pool phase, settled from a LIVE POINTER (not the histogram) ----------------
+UPSERT source:poolphase_live_walk SET
+  kind = 'steam_memory',
+  strength = 'reproduction',
+  ref = 'mvc-live-skins-quarters/replay-kit/poolphase.py -- dereferences the list head at '
+     || '*(blk+0x2EEB0), walks it via +0x08, reads the category byte at +0x03, and reports '
+     || '(node - blk) mod 0x280. Run live, in battle, four times with identical output.',
+  note = 'Reproduction-grade: real node ADDRESSES from the running game, unanimous across 44 nodes '
+      || 'and four independent runs. This is what fixed a phase the volatility histogram could not.';
+
+UPSERT finding:steam_object_pool_phase_0x258 SET
+  statement = 'The blk object pool is at blk + 0x258 + k*0x280. Measured from a live walk of the '
+           || 'list-0x0B chain: all 44 nodes share residue 0x258 mod 0x280, reproduced identically '
+           || 'across four runs, every node carrying category byte 0x0B at +0x03. The first node at '
+           || 'or after the six 0x738 fighter structs is blk+0x6B58. This CONFIRMS the previously '
+           || 'recorded base blk+0x6DD8 (also residue 0x258) and REFUTES blk+0x6908 (residue 0x008). '
+           || 'The array holds MULTIPLE categories -- the 44 list-0x0B nodes are one tenant of ~287 '
+           || 'slots. At this confirmed phase, 12 of 17 in-range known fighter-struct fields land on '
+           || 'volatile columns (chance ~7.3): px, py, screenX, screenY, depth, zx, zy, facing, '
+           || 'drawn, sid, gfx1, anim_state are hot; vx, vy, sprite_id, anim_ptr, gfx2 are not. '
+           || 'Every render-relevant field is hot, which is consistent with node = fighter-struct '
+           || 'prefix. There is also an unidentified 8-byte-strided run of hot words from +0x1A8 to '
+           || '+0x228 (17 entries), the shape of a pointer table.',
+  status = 'confirmed', confidence = 0.92, about = 'field:object_pool',
+  reasoning = 'Live pointer walk, four reproductions, unanimous residue. The field mapping rests on '
+           || 'the independently measured phase, not on the hit count -- 12 vs 7.3 on n=17 is '
+           || 'suggestive on its own, not conclusive.';
+RELATE finding:steam_object_pool_phase_0x258->cites->source:poolphase_live_walk;
+RELATE finding:steam_object_pool_phase_0x258->relates_to->finding:steam_object_pool_stride_0x280;
