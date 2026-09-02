@@ -110,6 +110,77 @@ def gen_anotak(pl):
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# anotak attack tables -> attack rows (the frame-data layer)
+# ---------------------------------------------------------------------------
+#: the fields worth their own column. Everything else (the unkNN soup) is kept
+#: verbatim in `raw` rather than inventing 20 speculative column names.
+ATK_FIELDS = [
+    ("Damage", "damage"), ("HitReaction", "hit_reaction"),
+    ("BlockFlags", "block_flags"), ("DamageType", "damage_type"),
+    ("Undizzy", "undizzy"), ("Hitstop", "hitstop"),
+    ("KDDuration", "kd_duration"), ("JuggleX", "juggle_x"),
+    ("JuggleY", "juggle_y"), ("Hitspark", "hitspark"),
+    ("ImpactSound", "impact_sound"),
+    ("InvincibilityTime", "invincibility"),
+    ("HitstunOrPushback??", "hitstun_or_pushback"),
+    ("unkFlags0a", "unk_flags_0a"), ("flags", "flags"),
+]
+
+
+def gen_attacks(pl):
+    """anotak's per-character attack table -> `attack` rows.
+
+    These were PARSED and then dropped: 3,384 records across 59 characters sat
+    in ingest/data/anotak_PL*.json and gen_anotak() never referenced them. That
+    is the whole frame-data layer -- damage, hitstun, undizzy, juggle, hitstop,
+    invincibility -- and docs/GAME-DATA-COMPLETENESS-LEDGER.md flags a
+    frame-data/hitbox viewer as wanted.
+
+    Zero network cost: the crawl is already cached.
+
+    An attack row is an ARTIFACT, not a claim -- it has an address in the DAT
+    and a `raw data` blob, and anyone with the ROM re-derives it. So it gets no
+    status and never touches `finding`.
+    """
+    pl = pl.upper()
+    rec = common.read_json(f"anotak_{pl}.json")
+    cid = pl[2:].lower()
+    char_id = f"character:pl{cid}"
+    base = "https://zachd.com/mvc2/data/anotak/"
+    lines = ["USE NS re DB kb;", ""]
+
+    src = f"source:anotak_{pl.lower()}_atk"
+    lines.append(
+        f"UPSERT {src} SET kind='anotak', strength='attestation', "
+        f"ref={S(base + pl + '_DAT_atk.html')}, "
+        f"title={S(pl + ' attack table (anotak DATA site)')};")
+    lines.append("")
+
+    atks = rec.get("attacks") or []
+    for a in atks:
+        num = str(a.get("attack number") or "").strip()
+        if not num:
+            continue
+        slug = _slug(num)                       # '0 LP' -> '0_lp'
+        aid = f"attack:pl{cid}_{slug}"
+        sets = [f"char_id={S('0x' + cid.upper())}",
+                f"name={S(num)}"]
+        for src_key, col in ATK_FIELDS:
+            v = a.get(src_key)
+            if v not in (None, ""):
+                sets.append(f"{col}={S(v)}")
+        if a.get("address"):
+            sets.append(f"addr={S(a['address'])}")
+        if a.get("raw data"):
+            sets.append(f"raw={S(a['raw data'])}")
+        lines.append(f"UPSERT {aid} SET {', '.join(sets)};")
+        lines.append(f"RELATE {char_id}->owns->{aid};")
+        lines.append(f"RELATE {aid}->cites->{src};")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def gen_anotak_fields(do_label):
     """Field-semantics dictionary -> dataformat rows + a source row."""
     fields = common.read_json("anotak_fields.json")
@@ -521,6 +592,7 @@ def main(argv):
         total_err += apply("anotak_fields.surql", gen_anotak_fields(do_label))
         for pl in (args.anotak or ["PL00"]):
             total_err += apply(f"anotak_{pl.upper()}.surql", gen_anotak(pl))
+            total_err += apply(f"anotak_{pl.lower()}_atk.surql", gen_attacks(pl))
 
     if args.marv:
         total_err += apply("marv_symbols.surql", gen_marv(do_label))
