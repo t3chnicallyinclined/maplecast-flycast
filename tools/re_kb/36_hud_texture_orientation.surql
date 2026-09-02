@@ -47,7 +47,7 @@ UPSERT source:replica_buildHudTA SET
 UPSERT finding:hud_texture_orientation_sprite_vs_poly SET
   title = 'HUD names flip / portraits upright = ParaType-5 sprite vs ParaType-4 poly '
        || 'UV-corner mapping in client buildHudTA, NOT the texture decoder',
-  status = 'confirmed', confidence = 0.95, date = '2026-06-15',
+  status = 'inferred', confidence = 0.95, date = '2026-06-15',
   summary =
     'SYMPTOM: HUD character-NAME/TIME/FONT glyphs decode upside-down; PORTRAITS upright; '
  || 'a global decoder V-flip fixes names but breaks portraits. Both go through one '

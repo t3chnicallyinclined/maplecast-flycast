@@ -23,7 +23,7 @@ UPSERT finding:replica_live_objpool_readset SET
 -- ---- NEW open item: the satellite still does not RENDER client-side (effect stub) ----
 UPSERT finding:replica_live_effect_path_stub SET
   statement='AFTER the server read-set fix, the cat 1..4 satellite STILL does not render in render_frame because the CLIENT transpiled root walker (tools/render-replica-poc/gen_walker_root.c) dispatches cat!=0 nodes to render_effect_030af8 which is a Phase-3 STUB (no-op, "DEFER to Phase 3"). Proof: /tmp/poolcap.mcrr vframe 17887 slot-walk = L5 node 0x8C268340 cat=0 (Sentinel body), L6 node 0x8C2688E4 cat=0 (Cable body), L7 node 0x8C271E54 cat=4 (Cable drone/satellite); render_frame emits 60 quads (2 bodies) and SKIPS the 70-part cat=4 node. ROOT CAUSE has SHIFTED from server (data now present, validated 0.00px) to client (the effect path is unimplemented). FIX (sprite-render side, mvc2-sprite-render-expert): in gen_walker_root.c route cat in [1,5) satellites that carry a body sprite through render_object_full (loc_8c030af8 reads the same +0x24/+0x34/+0x38/+0x3C/+0x50 fields and emits a body via loc_8c0344d4, bank03.asm:1526 loc_8c030af8 gate cmp/pl & cmp/ge 0x5). The data the client needs (node anchor/scale/GFX) is now fully shipped; only the dispatch is missing.',
-  status='open', confidence='high', date='2026-06-13';
+  status='confirmed', confidence='high', date='2026-06-13';
 
 RELATE finding:replica_live_objpool_readset->cites->source:objpool_initconsts;
 RELATE finding:replica_live_objpool_readset->cites->source:prod_asmtrace_poolnodes;

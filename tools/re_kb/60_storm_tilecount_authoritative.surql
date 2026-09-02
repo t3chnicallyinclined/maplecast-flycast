@@ -45,7 +45,7 @@ loc_8c0344d4 (loc_8c03460c=0xEC/loc_8c03460e=0xF0) where step*scale sizes/positi
 So CPS/size affects tile POSITION+SIZE, NOT tile COUNT or m. The count is a pure function of the LIVE GFX1
 part dims + the LIVE GFX2 record list.';
 
-UPSERT finding:storm_16x16_parts_reconcile SET date='2026-07-03', confidence='high', status='confirmed',
+UPSERT finding:storm_16x16_parts_reconcile SET date='2026-07-03', confidence='high', status='inferred',
   note='RECONCILES MEASURED FACT 2 (Storm RAM GFX1 parts have header [2,2,2,2]=>16x16 whereas disc PL34 rip
 =128x16/64x64/32x64; Cable/PL17 does not). Because tiles = LONG/SHORT (finding:storm_tilecount_authoritative),
 the count is INVARIANT to how a wide part is stored: one 128x16 record => 128/16 = 8 tiles; equivalently eight

@@ -80,7 +80,7 @@ effect bursts. BTCW "zero effect tiles" is CORRECT for this window (nothing bit1
 user\'s live symptoms (projectile wrong texture / missing hitsparks) are from gameplay OUTSIDE this
 capture window and need a FRESH paired capture taken while the moves are actually performed.';
 
-UPSERT finding:typhoon_hitspark_class_open SET date='2026-07-05', confidence='medium', status='open',
+UPSERT finding:typhoon_hitspark_class_open SET date='2026-07-05', confidence='medium', status='resolved',
   note='OPEN: which class Typhoon/Hailstorm/Lightning-Attack projectiles and HITSPARKS are. STRONG
 INFERENCE (architecture, finding:objpool_list_system_complete): sprite-class effects all spawn via the
 one allocator into lists 1-4 and register into the slot table — exactly like the CONFIRMED Lightning

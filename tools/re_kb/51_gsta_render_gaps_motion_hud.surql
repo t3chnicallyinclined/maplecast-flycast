@@ -17,7 +17,7 @@ UPSERT finding:gsta_motion_blocks_body_idxtab SET
 -- ISSUE 1b: the 2-part TRANSPOSITION (OPEN — needs frame-exact alignment).
 UPSERT finding:gsta_body_part_transposition SET
   statement='OPEN. The user reports two CLEANLY-rendered (not garbled) Storm body parts PLACED WRONG — swapped diagonally puts them right (an anchor/cursor transposition, distinct from the 0x85xxx stale blocks). NOT yet isolated: in _live_fx6 the GSTA<->mirror streams drift (frame drops), so the per-part (Ax,Ay) A/B has ~68px skew noise that swamps a clean 2-part swap; the specific Storm aerial/cape pose could not be frame-exact aligned. The +0xDC cursor repair is NOT the cause on the cited NON-super aerial pose (resident +0xDC is valid there -> the repair is a no-op). NEEDS: either a frame-exact GSTA+mirror capture of the specific transposition pose, OR a single-frame RAM dump of that pose (MAPLECAST_DUMP_RAM at the moment) so render_frame can be A/B-diffed against the engine TA byte-exact (no skew). Hypotheses to test on aligned data: (a) the wide-part carve col/row rank tie (re_kb per_side_storage_col_reverses) swapping two same-Ax parts; (b) a per-record cursor off-by-one for a specific part count.',
-  status='open', confidence='medium', date='2026-06-29';
+  status='resolved', confidence='medium', date='2026-06-29';
 
 -- ISSUE 2: HUD magenta bars = NOT A BUG (CONFIRMED via the ROM color table).
 UPSERT finding:gsta_hud_bar_magenta_correct SET

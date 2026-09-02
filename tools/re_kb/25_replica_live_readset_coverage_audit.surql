@@ -28,7 +28,7 @@ UPSERT finding:replica_live_stray_field_pin SET
 
 UPSERT finding:replica_live_readset_fix_priority SET
   statement='PRIORITIZED regions to ADD to the freshly-shipped read-set (the fixes that follow this trace). P0 (causes the visible strays): ON-CHANGE DYNAMIC GFX per ACTIVE body — already specified as finding:replica_live_static_gfx_fix option (a): each frame walk the slot table, for every cat==0 body node read GFX1(+0x15C)/GFX2(+0x160); if a base is not covered by the shipped static GFX regions OR its content changed since last ship, emit that body GFX1+GFX2 (page-aligned, ~121KB zstd) as a tagged DYNAMIC region ONLY on (re)load frames (~0 steady state). This fixes BOTH the geometry (walker cell records) AND the texture decode (client body_decoder reads the same GFX). It supersedes the connect-time-only static GFX. NOTHING ELSE is missing: the fixed-address resident read-set is provably complete (stale universe = 0 bytes) and every chased pointer is covered. P2 (benign / not a stray cause, leave as-is): the cat 1..4 satellite EFFECT path is a CLIENT dispatch stub (finding:replica_live_effect_path_stub) — body-sprite satellites do not yet render, but that is a MISSING render, not a stray, and is not driven by a stale wire field (the objpool dyn region already ships their state, validated 0.00px). No new server read-set region is required for it.',
-  status='proposed', confidence='high', date='2026-06-13';
+  status='inferred', confidence='high', date='2026-06-13';
 
 RELATE finding:replica_live_readset_coverage_audit->cites->source:replica_live_readset_probes;
 RELATE finding:replica_live_readset_coverage_audit->cites->source:replica_live_strays_capture;

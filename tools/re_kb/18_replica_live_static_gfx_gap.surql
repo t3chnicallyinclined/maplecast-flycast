@@ -19,7 +19,7 @@ UPSERT finding:replica_live_static_gfx_gap SET
 
 UPSERT finding:replica_live_static_gfx_fix SET
   statement='FIX (server core/network/maplecast_replica_live.cpp): make the shipped GFX fresh per active body. Preferred option (a) ON-CHANGE DYNAMIC GFX: each frame, walk the slot table, for each body node read GFX1(+0x15C)/GFX2(+0x160) bases; if a base is not already covered by the shipped static GFX regions OR its content changed vs last shipped, emit that body s GFX1+GFX2 (0x20000 each, page-aligned) as a tagged DYNAMIC region (tag "GFXdyn") only on the frames where it changed. Client (replay.html liveApplyFrame/applyDynamic) routes a "GFXdyn" region the same as any RAM region (ram.set at addr&0xFFFFFF) — both render_frame and body_decoder then walk fresh GFX. WIRE COST: a body s GFX1+GFX2 = 256KB raw -> ~121KB zstd (GFX1 ~91KB, GFX2 ~30KB), shipped ONLY on (re)load, ~0 steady-state (GFX bases are constant across frames in capture). render_frame.wasm needs NO rebuild (render_frame.c unchanged); only the server read-set + client region routing change.',
-  status='proposed', confidence='high', date='2026-06-13';
+  status='inferred', confidence='high', date='2026-06-13';
 
 RELATE finding:replica_live_static_gfx_gap->cites->source:replica_live_cpp;
 RELATE finding:replica_live_static_gfx_gap->cites->source:gen_walker_c;

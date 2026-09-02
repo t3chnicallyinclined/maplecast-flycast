@@ -36,7 +36,7 @@ UPSERT finding:emitter_facing_dump_tool SET
   confidence='high',
   date='2026-06-11',
   statement='DUMP-FRAME TOOL added (webgpu-test.html v=78, sprite-client.mjs gated window._emitDumpReq; deployed 149.28.44.118 sprite-client md5 3ea12bcf / webgpu-test md5 e578353e). Exports per-frame JSON for BOTH on-screen chars: gsta{facing,screen_x,screen_y,cid,slot,sid} + TA-TRUTH per-part quads (from window._lastParsed opaque/pt/tr lists, z>=reCut foreground, bbox x,y,w,h,cx,cy = the green DIFF ground truth, grouped per-player by nearest anchorX) + EMITTER per-part quads (sel,x,y,w,h,flip,posReflect in game-space 640x480) + taExtent/emitterExtent leftReach/rightReach from anchor. PURPOSE: derive facing numerically, not by eyeball A/B. V77-vs-V76 FUNCTIONAL DIFF (the ONLY code change, all else comment-only): faceInv default TRUE to FALSE; bodyFace replaced by single sense F = (faceInv? !facing : facing) XOR faceFlip, with posReflect = F and flip = F XOR r.flip — so faceFlip now wholesale-inverts BOTH transforms together. RESULT: reachable toggle space collapsed to 2 states (F or !F); POSITION reflect and TEXTURE-U mirror are RIGIDLY coupled and can never take opposite senses. Operator reports neither state makes both players correct => PROVES position and texture need INDEPENDENT polarity (one of the two JS transforms is inverted relative to the engine). The dump derives WHICH from the numbers: TA-truth leftReach vs rightReach per char = the real facing direction; compared to emitterExtent + the facing byte it yields the facing-byte to screen-direction map and whether posReflect and flip each need facing or !facing.',
-  status='confirmed';
+  status='inferred';
 
 UPSERT finding:emitter_roster_deploy_2026_06_10 SET
   date='2026-06-10',
@@ -44,7 +44,7 @@ UPSERT finding:emitter_roster_deploy_2026_06_10 SET
   id_str='emitter_roster_deploy_2026_06_10',
   in_match='7=PL07 Wolverine, 19=PL13 RubyHeart, 1=PL01 Zangief, 38=PL26 Bison, 45=PL2D Shuma, 48=PL30 OmegaRed, 10=PL0A Rogue, 13=PL0D Hulk, 14=PL0E Venom, 42=PL2A Storm, 23=PL17 Cable; all renderable now',
   mapping='char_id to PLxx = RAW 2-digit uppercase hex, NO lookup table. sprite-client.mjs:693 loadAsmChar hex=(cid and 0xff).toString(16).padStart(2).toUpperCase(). Verified vs KB roster 0x00 to 0x3A and char23=PL17 Cable, char42=PL2A Storm.',
-  status='RESOLVED',
+  status='resolved',
   summary='All 59 PLxx emitter atlases (parts.png/parts.json/asm.json + idx.png/lut.json) extracted FULLY OFFLINE from dasm_PLDAT/Output via tools/extract_gfx1_atlas.py (GFX1 LZSS loc_8c0354c0 + PVR PAL4 detwiddle + GFX2 cumulative-pen). 0 decode failures, 100 percent PAL4. Deployed scp-only to 149.28.44.118 test-atlas/chars/ (backup chars-backup-20260610-214949). Prod 59/59 asm.json, all HTTP-200.',
   title='Full 59-char emitter atlas roster extracted + deployed to prod';
 
@@ -54,7 +54,7 @@ UPSERT finding:emitter_tile_scale_charq_calibrated SET
   files='["web/webgpu/sprite-client.mjs:buildEmitterDrawList", "web/webgpu-test.html?v=68"]',
   source='CHARQ _ryu_capture/chosen_body.json (sid64 scale[1,1]); operator DIFF-overlay frames _emframes/f_03,06,07; deploy md5 abb9667d sprite-client.mjs v=68',
   statement='EMITTER selKeyed (offline GFX1-detwiddle atlas) part-extent + flip calibrated to CHARQ ground truth. SIZE: the offline atlas emits BOTH the cumulative pen (r.dx/r.dy) AND the part pixels at 2x the cell grid (1 pen cell-unit = 2 native px), so the WHOLE assembly shares ONE scale native->screen = CPS/2 = (5/3/2, 15/7/2) = (0.833, 1.071). Proof: CHARQ chosen_body.json scale[1,1] a 128x128 body tile renders to 106x137 screen px = CPS/2 within 0.3pct; sid64 full-assembly bbox at CPS/2 ~ 67x137 ~= GT 146 tall. OLD bug: pen used full CPS (pcX/pcY) while tile used only live-zoom (cpsx~1) = two different scales -> skeleton spread 2x wider than tiles -> fragmented/small body (operator Size slider ~1.75x was hand-undoing the missing X CPS). FIX (sprite-client.mjs buildEmitterDrawList selKeyed branch ~1548): pen AND tile AND ax/ay all use tsX/tsY = (CPS*tileScale)*zoom, tileScale default 0.5, exposed as window._asmCfg.tileScale. FLIP: the cumulative-pen rip is FACING-NEUTRAL (rip_gfx2_assembly.py:177 X-acc += dx, no sign flip) baking ONE branch of (X-acc +/-dx by facing@0x110); frames proved that branch is OPPOSITE the raw owner.facing byte (live Ryu faced right yet emitter mirrored him). FIX: flip = (faceInv ? !owner.facing : !!owner.facing) XOR r.flip, faceInv default true (window._emitFaceInv). r.flip (per-part 0x4000 X-mirror) still XORs on top.',
-  status='confirmed';
+  status='inferred';
 
 UPSERT finding:gsta_draw_layer_per_slot SET
   confidence='high',

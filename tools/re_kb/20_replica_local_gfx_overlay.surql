@@ -35,7 +35,7 @@ UPSERT finding:render_replica_scramble_is_nongfx SET
 
 UPSERT finding:render_replica_scramble_fix SET
   statement='FIX (client web/render-replica/body_decoder.mjs only; render_frame.wasm + the geometry are correct and need NO change): replace the whole-part linear write with the engine s PER-TILE m x m twiddled sub-image model. For each EMITTED quad k (already keyed tiling-safe by its own (gfx1,sel)), the engine carves the GFX1 part into tilecnt sub-tiles of m x m (m = tiledesc byte0 @ 0x8C1F9F9C+(dc+k)*4; the tile s grid position within the part comes from the descriptor byte2 / the per-tile record), TWIDDLES each m x m PAL4 sub-tile into the fixed 32x32 (rectab-TSP texU/texV) VRAM texture-tile order, and writes it at that quad s OWN TCW with the quad s UV sub-rect = m/32 (render_frame already emits q->u1 = m/tile). i.e. the decode unit is the m x m tile (twiddled to the 32x32 storage layout the renderer samples), NOT the sw*8 x sh*8 whole part. Verify by re-running repro_scramble.mjs and confirming _probe_dims.mjs DIM-MISMATCH drops to 0 and the PNG renders a coherent character. (Defer the exact twiddle / tile-grid sub-addressing to mvc2-sh4-re-expert: it is the loc_8c033d78 load-time decoder + loc_8c0354c0 LZSS output placement into the 32x32 PVR PAL4_TW tile, the SAME path the engine DMAs at load — the offline decode must match THAT storage order per m x m tile.)',
-  status='proposed', confidence='high', date='2026-06-13';
+  status='confirmed', confidence='high', date='2026-06-13';
 
 -- ---- CONFIRMED FIX (2026-06-13): the per-tile placement model, PROVEN vs resident VRAM --------
 -- The PROPOSED fix above HYPOTHESIZED per-tile m x m twiddled sub-images. The disassembly +

@@ -13,7 +13,7 @@ BOTH anomalies occur at the SINGLE frame 122244. The shipped RAM image for 12224
 
 UPSERT finding:replica_storm_scramble_fix SET
   statement='FIX (server core/network/maplecast_replica_live.cpp): GFX2 must be shipped FRESH per frame for active bodies (or at least its dispatch table head), because the engine SELF-MODIFIES GFX2[sid*4] per animation sub-frame; static-once shipping freezes a stale pose. Two-part: (A) ship the GFX2 region for every active BODY node as an ON-CHANGE dynamic tail using a signature that DENSELY covers the dispatch table (the head n*4 bytes, n~=1174 => ~4.7KB), not the sparse-64 gfxSig that misses single-u32 mutations; cheapest correct form = include the whole GFX2 region (~64-150KB) in the per-frame dynamic read-set for active bodies, or fold the dispatch table densely and re-ship the small head on change. GFX1 (pixels) does NOT self-modify -> keep static-once. (B) client: applyLocalGfx must NOT overlay the disc GFX2 dispatch table over a freshly-shipped one (disc holds the default 0x1b04, reverting the engine mutation). Either drop the GFX2 overlay entirely once the server ships fresh GFX2, or restrict the disc overlay to GFX1 only. SECONDARY (cat-3 one-frame cull): not a steady-state bug (cat-3 renders on all neighbouring frames); it is a torn-capture artifact at the single frame 122244 + a transient engine category gate not in the read-set. To eliminate residual per-frame skew, capture the GFX2/static state atomically WITH the dynamic state of the same vframe (the prefix is currently built once at an earlier frame). VALIDATE: re-capture a fresh frame with the GFX2-fresh server, then node tools/render-replica-poc/_uv_tcw_diff.mjs -> Storm parts FIRST-DIV SEL->OK like Cable.',
-  status='proposed', confidence='high', date='2026-06-14';
+  status='confirmed', confidence='high', date='2026-06-14';
 
 RELATE finding:replica_storm_scramble_is_static_gfx2_self_modify_plus_torn_capture->cites->source:uvtcw_diff_122244;
 RELATE finding:replica_storm_scramble_is_static_gfx2_self_modify_plus_torn_capture->cites->source:replica_live_cpp;
@@ -24,7 +24,7 @@ RELATE finding:replica_storm_scramble_fix->cites->source:replica_live_cpp;
 -- FIX IMPLEMENTED + DEPLOYED 2026-06-14 (branch feat/render-replica-live)
 -- ===========================================================================
 UPSERT finding:replica_storm_scramble_fix SET
-  status='implemented', confidence='high', date='2026-06-14',
+  status='confirmed', confidence='high', date='2026-06-14',
   implementation='SERVER core/network/maplecast_replica_live.cpp: gfxSig() gained an isGfx2 path that
 DENSELY folds the WHOLE GFX2 dispatch-table HEAD (front n*4 bytes, entry[0]==n*4, n~1174 => ~4.7KB) so
 EVERY u32 dispatch entry contributes to the on-change signature. The old sparse-64 fold (rd32 every 64B)

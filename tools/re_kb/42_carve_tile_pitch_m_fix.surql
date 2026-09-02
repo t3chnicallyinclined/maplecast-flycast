@@ -34,7 +34,7 @@ UPSERT finding:carve_tile_pitch_m SET date='2026-06-15', confidence='high', stat
      + 'loc_8c0344d4; finding:wide_part_tile_storage_order_v2; tools/render-replica-poc/_validate_all_multi.mjs.';
 
 -- The 2 still-failing SQUARE runs (W>32 AND H>32, m=32): NOT this bug, pre-existing.
-UPSERT finding:carve_wide_square_twiddle_open SET date='2026-06-15', confidence='high', status='open',
+UPSERT finding:carve_wide_square_twiddle_open SET date='2026-06-15', confidence='high', status='resolved',
   note='OPEN (pre-existing, distinct from the carve-pitch grey-gap fix). After finding:carve_tile_pitch_m, '
      + '17/19 multi-tile runs are BYTE-EXACT; the 2 remaining failures are the W>32 AND H>32 SQUARE parts '
      + '(sel124 128x128 4x4 m32 diff 10718/16384; sel285 64x128 2x4 m32 diff 2098/8192). These need the '

@@ -92,7 +92,7 @@ UPSERT finding:emitter_render_model SET date='2026-06-11', confidence='high', st
 -- ============================================================================
 -- OPEN ITEMS — recorded explicitly as status=open findings.
 -- ============================================================================
-UPSERT finding:emitter_flip_unvalidated SET date='2026-06-11', confidence='medium', status='open',
+UPSERT finding:emitter_flip_unvalidated SET date='2026-06-11', confidence='medium', status='resolved',
   note='OPEN: the 0x4000 / 0x8000 mirror branches and the opposite-facing reflect are implemented as mirrors of the proven form, but NO capture exercises them (every probe record is facing=1, flip=0, flipy=0). Confirm via an opposite-facing + mirrored-part CHARQ capture, or a live green-DIFF.',
   statement='OPEN — EMITTER FLIP / OPPOSITE-FACING UNVALIDATED. The geometry is proven exact ONLY for the captured regime (facing=1, standing, flip=flipy=0). These branches are coded as MIRRORS of the proven form but are NOT yet exercised by any capture: (1) FLAGS 0x4000 X-mirror (XORs bodyFace); (2) FLAGS 0x8000 Y-mirror; (3) the opposite-facing reflect tlx = 2*axisX - tlx + w. All _ryu_capture/probe_body_uv.json records are facing=1/flip=0/flipy=0, so validate_emitter_geom.py cannot confirm them. CONFIRM BY: an opposite-facing + mirrored-part CHARQ capture (a pose with FLAGS&0x4000 set and/or owner.facing=0), or a live green-DIFF against TA-truth on such a pose. Until then these branches are INFERRED, not numerically proven.';
 

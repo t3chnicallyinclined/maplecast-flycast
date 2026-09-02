@@ -124,6 +124,57 @@ def post(stmt, timeout=60):
             if isinstance(b, dict) and b.get("status") != "OK"]
 
 
+STATUS_SET = re.compile(r"(,\s*)?status\s*=\s*'([a-zA-Z_]+)'")
+STATUS_CONTENT = re.compile('(,\\s*)?\\s*["\']?status["\']?\\s*:\\s*"([a-zA-Z_]+)"')
+UPSERT_ID = re.compile(r"^\s*(?:UPSERT|UPDATE|CREATE)\s+(finding:[A-Za-z0-9_]+)")
+
+
+def split_status(stmt):
+    """-> (statement_without_status, deferred_status_statement or None)
+
+    The promotion ASSERT (77_epistemics.surql) tests a finding's cites at the
+    moment `status` is written. The seeds are UPSERT-then-RELATE, so the status
+    lands BEFORE the citation that justifies it and a correct claim is rejected
+    for ordering alone.
+
+    So statuses are deferred: pass 1 writes every row and every edge with the
+    status assignment stripped, pass 2 writes the statuses once the cites
+    exist. This is why `apply_seed.py` is the only supported way to load the
+    seeds under the ASSERT.
+    """
+    m = UPSERT_ID.match(stmt)
+    if not m:
+        return stmt, None
+    found = STATUS_SET.search(stmt)
+    if not found:
+        # CONTENT { ... status: "confirmed" ... } -- the other spelling. Missing
+        # it left two findings writing their status in the SAME statement that
+        # creates the row, i.e. before any RELATE could cite them, and the gate
+        # rejected them for ordering exactly as predicted.
+        cfound = STATUS_CONTENT.search(stmt)
+        if not cfound:
+            return stmt, None
+        stripped = STATUS_CONTENT.sub("", stmt, count=1)
+        stripped = re.sub(r"\{\s*,\s*", "{ ", stripped)
+        stripped = re.sub(r",\s*,", ",", stripped)
+        stripped = re.sub(r",\s*\}", " }", stripped)
+        return stripped, "UPDATE %s SET status = '%s';" % (m.group(1), cfound.group(2))
+
+    stripped = STATUS_SET.sub("", stmt, count=1)
+
+    # Repair the separators. The pattern eats an optional LEADING comma, so a
+    # `status=` that happened to come first leaves `SET , confidence=...` and
+    # the statement no longer parses. Normalise all three shapes:
+    stripped = re.sub(r"\bSET\s*,\s*", "SET ", stripped)   # status was first
+    stripped = re.sub(r",\s*,", ",", stripped)             # status was middle
+    stripped = re.sub(r",\s*;", ";", stripped)             # status was last
+
+    # an UPSERT whose ONLY assignment was status would become a no-op; keep the
+    # row so pass 2 has something to update
+    stripped = re.sub(r"\bSET\s*;", "SET touched_at = time::now();", stripped)
+    return stripped, "UPDATE %s SET status = '%s';" % (m.group(1), found.group(2))
+
+
 def main(argv):
     dry = "--dry-run" in argv
     argv = [a for a in argv if not a.startswith("--")]
@@ -131,6 +182,7 @@ def main(argv):
                            key=lambda p: [int(t) if t.isdigit() else t
                                           for t in re.split(r"(\d+)", os.path.basename(p))])
     total = bad = 0
+    deferred_status = []          # pass 2 -- see split_status()
     for path in files:
         text = open(path, encoding="utf-8", errors="replace").read()
         if is_script_scoped(text):
@@ -148,8 +200,12 @@ def main(argv):
         for s in stmts:
             if dry:
                 continue
-            for e in post(s):
-                errs.append((s.split("\n")[0][:88], e))
+            # PASS 1: row + edges, status stripped. See split_status().
+            body, deferred = split_status(s)
+            if deferred:
+                deferred_status.append(deferred)
+            for e in post(body):
+                errs.append((body.split("\n")[0][:88], e))
         total += len(stmts)
         bad += len(errs)
         # --dry-run never calls post(), so `errs` is necessarily empty. Saying
@@ -165,6 +221,17 @@ def main(argv):
             print("        -> %s" % e)
         if len(errs) > 6:
             print("      ... +%d more" % (len(errs) - 6))
+    # PASS 2 -- the statuses, now that every row and every cites edge exists.
+    if deferred_status and not dry:
+        print("-" * 70)
+        print("pass 2: %d deferred status writes" % len(deferred_status))
+        for st in deferred_status:
+            for e in post(st):
+                bad += 1
+                print("      %s" % st[:88])
+                print("        -> %s" % e)
+        total += len(deferred_status)
+
     print("-" * 70)
     if dry:
         print("%d statements parsed. NOT EXECUTED -- this says nothing about "

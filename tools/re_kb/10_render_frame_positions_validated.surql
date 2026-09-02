@@ -43,7 +43,7 @@ UPSERT finding:render_frame_positions_validated CONTENT {
 -- operational note: ASMTRACE log has no rotation and freezes silently on /dev/shm ENOSPC.
 UPSERT finding:asmtrace_log_enospc_freeze CONTENT {
   title: "ASMTRACE /dev/shm/mc_assembly.log freezes silently when tmpfs fills",
-  status: "confirmed",
+  status: "inferred",
   confidence: 1.0,
   date: "2026-06-13",
   detail: "log grows ~25MB/min, no rotation; at /dev/shm 100% the fprintf appends fail (last line is a partial mid-write), freezing the frame counter while the live engine + replica-live stream advance. Symptom: log frame far behind live vframe though both read 0x8C3496B0 on the same pid. Fix: rm /dev/shm/mc_assembly.log (handler fopen('a') recreates with header); periodically truncate during long captures."

@@ -43,7 +43,7 @@ UPSERT finding:carve_wide_square_twiddle_fix SET date='2026-06-15', confidence='
      + 'NOT this carve garbling (cape geometry + duplication fully resolved). CITE: loc_8c0344d4; '
      + 'finding:wide_part_tile_storage_order twTile; _measure_chunk.mjs; _validate_all_multi.mjs.';
 
-UPDATE finding:carve_wide_square_twiddle_open SET status='fixed',
+UPDATE finding:carve_wide_square_twiddle_open SET status='resolved',
   note=note + ' [CLOSED 2026-06-15 by finding:carve_wide_square_twiddle_fix: the native-chunk carve '
      + '(copy raw decodeA chunk at twTile(col,row)*512 verbatim for m==32 && cols>1 && rows>1) makes both '
      + 'square parts byte-exact (19/19) and the live Storm cape coherent. Was HYP 1, MEASURED — not the '
