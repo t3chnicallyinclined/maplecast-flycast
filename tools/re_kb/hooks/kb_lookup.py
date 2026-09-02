@@ -143,7 +143,14 @@ def main():
                 "AND string::uppercase(out.addr) IN [%s] "
                 "AND string::starts_with(record::id(in), 'doc_') = false LIMIT 5;"
                 % ", ".join(lit(a) for a in addrs)))
+            # dedupe by finding id: one finding reachable through two
+            # anchors (the slot COUNT table and the slot POINTER table, say)
+            # would otherwise be printed twice and eat the line budget.
+            seen_f = set()
             for r in about:
+                if r.get("f") in seen_f:
+                    continue
+                seen_f.add(r.get("f"))
                 strong.append("  finding:%s [%s] %s"
                               % (r.get("f"), r.get("status"),
                                  trim(r.get("statement"), 170)))

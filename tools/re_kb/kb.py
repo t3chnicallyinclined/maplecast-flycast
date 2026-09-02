@@ -56,6 +56,22 @@ STRENGTH = ["reproduction", "code", "metric", "recurrence", "attestation"]
 CONFIRMING = {"reproduction", "code"}
 
 FINDING_STATUS = {"open", "inferred", "confirmed", "ruled_out", "superseded", "resolved"}
+
+#: Stamped on every row this module writes.
+#:
+#: Without it the confirmed:inferred ratio is UNINTERPRETABLE, which was the
+#: process review's first finding. 236 findings carry a human-typed `date` (a
+#: claim date), exactly one carried `updated_at`, and NONE carried a creation
+#: time or a write path -- so "the rule works" and "writes still bypass it"
+#: made identical predictions about the table. The cohort query that separates
+#: them needs a marker the gate itself applies:
+#:
+#:   SELECT status, via, count() FROM finding
+#:    WHERE wrote_at > '<date the gate landed>' GROUP BY status, via;
+#:
+#: A post-gate cohort that is again ~100% confirmed, or ANY confirmed row with
+#: via != 'kb.py', disproves "the rule is working".
+PROVENANCE = "via='kb.py', wrote_at=time::now()"
 OUTCOMES = {"effective", "masks_only", "ineffective", "unproven"}
 
 
@@ -165,7 +181,7 @@ def propose(slug, statement, about=None, reasoning=None, date=None):
     not promote. Promotion goes through confirm(), which requires evidence.
     """
     fid = "finding:" + slug
-    sets = ["statement='%s'" % _q(statement), "status='inferred'"]
+    sets = ["statement='%s'" % _q(statement), "status='inferred'", PROVENANCE]
     if reasoning:
         sets.append("reasoning='%s'" % _q(reasoning))
     if date:
@@ -198,7 +214,7 @@ def confirm(finding, source, note=None):
             "This claim can be recorded as inferred; say what would confirm it."
             % (sid, strength or "unranked", rows[0].get("kind")))
 
-    sets = ["status='confirmed'", "confidence='high'"]
+    sets = ["status='confirmed'", "confidence='high'", PROVENANCE]
     if note:
         sets.append("note='%s'" % _q(note))
     _sql("UPSERT %s SET %s;" % (fid, ", ".join(sets)))
@@ -218,7 +234,8 @@ def rule_out(slug, statement, tried, evidence, date=None):
     sets = ["statement='%s'" % _q(statement),
             "status='ruled_out'",
             "tried='%s'" % _q(tried),
-            "evidence='%s'" % _q(evidence)]
+            "evidence='%s'" % _q(evidence),
+            PROVENANCE]
     if date:
         sets.append("date='%s'" % _q(date))
     _sql("UPSERT %s SET %s;" % (fid, ", ".join(sets)))
@@ -248,7 +265,7 @@ def record_attempt(approach, on, outcome, note=None, date=None, how=None):
     aid = approach if ":" in str(approach) else "approach:" + str(approach)
     tid = on if ":" in str(on) else "finding:" + str(on)
 
-    sets = ["name='%s'" % _q(str(approach).split(":")[-1])]
+    sets = ["name='%s'" % _q(str(approach).split(":")[-1]), PROVENANCE]
     if how:
         sets.append("how='%s'" % _q(how))
     _sql("UPSERT %s SET %s;" % (aid, ", ".join(sets)))
@@ -270,7 +287,8 @@ def supersede(old, new, why):
     """
     o = old if ":" in str(old) else "finding:" + str(old)
     n = new if ":" in str(new) else "finding:" + str(new)
-    _sql("UPSERT %s SET status='superseded', superseded_why='%s';" % (o, _q(why)))
+    _sql("UPSERT %s SET status='superseded', superseded_why='%s', %s;"
+         % (o, _q(why), PROVENANCE))
     _sql("RELATE %s->supersedes->%s;" % (n, o))
     return n
 
