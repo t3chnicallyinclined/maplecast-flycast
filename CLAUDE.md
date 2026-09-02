@@ -321,6 +321,52 @@ Design: `docs/DATASET-EXPORTER-DESIGN.md`; field catalog: `../mvc2-ai/docs/DATAS
   out: self→local control WS, remote→its `/noderec` agent). Deliberately NOT hub-relayed (that would
   need a fleet rebuild of relay+hub). systemd `maplecast-noderec` per node. All gated OFF.
 
+## The RE knowledge graph (`tools/re_kb`) — READ BEFORE RE-DERIVING
+
+Every MVC2 address, struct offset, SH4 routine and reverse-engineering finding
+this project has established lives in a queryable graph, **including what has
+been RULED OUT**. Ask it before you re-derive an address or re-walk a dead end.
+
+```bash
+tools/re_kb/start.sh                       # start it (idempotent; needs the repo root)
+tools/re_kb/start.sh --status              # up? how many findings?
+
+tools/re_kb/rekb.sh "SELECT id, statement FROM finding WHERE status='ruled_out';"
+tools/re_kb/rekb.sh "SELECT * FROM routine:loc_8c0344d4;"
+tools/re_kb/rekb.sh "SELECT record::id(in) AS caller, via FROM calls WHERE record::id(out)='loc_8c0344d4';"
+```
+
+**It is not automatic unless the server is running.** Two hooks
+(`.claude/settings.json`) inject known facts when a tool call names an address
+or PC, and re-inject settled facts before compaction — but both exit silently
+when the graph is down, so silence means "not running", not "nothing known".
+`tools/re_kb/start.sh` first.
+
+**Writing to it — never with raw SQL.** Use `tools/re_kb/kb.py`:
+
+```python
+kb.propose(slug, statement, about='address:...')   # always lands as `inferred`
+kb.confirm(slug, source='...')                     # REQUIRES reproduction- or code-grade evidence
+kb.rule_out(slug, statement, tried=..., evidence=...)
+kb.record_attempt(approach, on=slug, outcome='ineffective'|'masks_only'|...)
+kb.health()                                        # the audit
+```
+
+`confirm()` refuses an attestation-grade source on purpose. **A pixel diff that
+improved is a measurement, not a mechanism** — if the output is right and you
+cannot say why, that is `record_attempt(..., outcome='masks_only')`, not a
+confirmed finding. This project has repeatedly declared false wins; that
+outcome value exists to catch them.
+
+**Bulk ingest may never write `finding`.** Doc/asset ingestion goes to
+`docnote` / `attack` / `routine` — artifacts, not claims. Promotion happens one
+row at a time through `kb.confirm()`. (576 markdown bullets were once 90% of
+the `finding` table, carrying `status='confirmed'` inherited from doc
+checkmarks.)
+
+Full docs: `tools/re_kb/README.md`. Rules and evidence ladder:
+`tools/re_kb/77_epistemics.surql`.
+
 ## Code Guidelines
 
 - After 2-3 failed builds, stop and ask — don't burn time on retries
