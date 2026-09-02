@@ -433,6 +433,29 @@ def dangling_edges():
     return out
 
 
+def docnote_queue():
+    """The doc-ingest backlog, as a QUEUE with a drain rate.
+
+    `docnote` is not an archive. Every ingest run adds to it; nothing removes
+    from it unless someone triages. 900 of its rows carry doc_cue='confirmed',
+    which is a CHECKMARK SCRAPED FROM MARKDOWN -- the same value that, when it
+    was called `status`, made 478 changelog ticks indistinguishable from
+    disassembly-backed findings. Reporting the queue depth is what stops that
+    pile being mistaken for knowledge again.
+    """
+    total = query("SELECT count() AS n FROM docnote GROUP ALL;")
+    done = query("SELECT count() AS n FROM docnote WHERE triaged = true GROUP ALL;")
+    promoted = query("SELECT count() AS n FROM docnote "
+                     "WHERE promoted_to != NONE GROUP ALL;")
+    by_disp = query("SELECT disposition, count() AS n FROM docnote "
+                    "WHERE triaged = true GROUP BY disposition ORDER BY n DESC;")
+    t = total[0]["n"] if total else 0
+    d = done[0]["n"] if done else 0
+    return {"total": t, "triaged": d, "remaining": t - d,
+            "promoted_to_findings": promoted[0]["n"] if promoted else 0,
+            "by_disposition": by_disp}
+
+
 def dead_ends(about=None):
     """What has already been ruled out, and what has already failed.
 
