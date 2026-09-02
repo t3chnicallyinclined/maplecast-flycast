@@ -42,6 +42,7 @@ Server: surreal start --user root --pass root --bind 127.0.0.1:8001 \
 """
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 
@@ -122,13 +123,16 @@ def query(sql):
     Writes go through the typed helpers, so the rules cannot be sidestepped
     by passing raw SQL to a function called `query`.
     """
+    # WORD boundaries, not substrings. A plain `"RELATE" in sql` also matches
+    # the TABLE `relates_to`, so `SELECT ... FROM relates_to` -- a read -- was
+    # rejected as a write. A safety check that blocks legitimate reads gets
+    # worked around, and a worked-around check protects nothing.
     banned = ("UPSERT", "UPDATE", "DELETE", "CREATE", "RELATE", "REMOVE",
               "DEFINE", "INSERT")
-    head = sql.upper()
-    for b in banned:
-        if b in head:
-            raise KBError("query() is read-only; use the typed helpers for writes "
-                          "(found %r)" % b)
+    hit = re.search(r"\b(%s)\b" % "|".join(banned), sql, re.I)
+    if hit:
+        raise KBError("query() is read-only; use the typed helpers for writes "
+                      "(found %r)" % hit.group(1).upper())
     return _rows(_sql(sql))
 
 
@@ -326,8 +330,25 @@ def health():
     statusless = query("SELECT count() AS n FROM finding "
                        "WHERE status = NONE GROUP ALL;")
 
+    # DRIFT. The promotion ASSERT (88) fires when `status` is WRITTEN. Demote a
+    # source's strength afterwards and the finding stays `confirmed` on
+    # evidence that no longer qualifies -- the gate is a check at the door, not
+    # an invariant over time.
+    #
+    # This is the one thing a real truth-maintenance system does that this
+    # graph does not: propagate a retracted justification to the beliefs
+    # resting on it. Until it does, the propagation is THIS AUDIT, and an audit
+    # nobody runs is not a safeguard -- so it is reported by default rather
+    # than being an extra call.
+    drift = query(
+        "SELECT count() AS n FROM finding WHERE status='confirmed' "
+        "AND count(->cites->source[WHERE strength IN ['reproduction','code']]) = 0 "
+        "AND count(->cites->routine) = 0 GROUP ALL;")
+
     return {"status_distribution": dist,
             "findings_with_NO_status": (statusless[0]["n"] if statusless else 0),
+            "DRIFT_confirmed_that_would_fail_the_gate_today":
+                (drift[0]["n"] if drift else 0),
             "confirmed_without_qualifying_evidence": unbacked,
             "confirmed_without_qualifying_SOURCE (strict)":
                 (strict[0]["n"] if strict else 0),
@@ -442,17 +463,72 @@ def status_contradictions():
             "candidates_confirmed_but_text_says_superseded": confirmed_but_refuted}
 
 
-def contradictions():
-    """Two live claims about the same entity with no supersedes between them.
+def unreconciled_claims(min_claims=2, max_claims=5):
+    """Small clusters of LIVE claims about one entity, NONE of them linked.
 
-    Nobody linked them, so traversal returns both and both look authoritative.
-    A graph does not detect this on its own -- you have to ask.
+    NOT a contradiction detector, and the name says so. Nothing here reads the
+    claims -- it cannot know that two statements disagree. What it finds is
+    claims that share a subject and have no relationship recorded between them,
+    which is where a genuine either/or hides.
+
+    Nobody linked them, so traversal returns all of them and each looks
+    authoritative. A graph does not detect this on its own -- you have to ask.
+
+    This query was broken until 2026-09-01, and broken in the way that matters:
+    it RETURNED something. 164 rows of mostly-empty arrays, because `about`
+    was carrying both finding->entity and finding->finding, so grouping claims
+    by "the thing they are about" grouped them by other claims. A detector that
+    answers is never re-examined. 91_about_split.surql separated the two edges;
+    this reads the fixed one.
+
+    THE SIZE CAP IS THE WHOLE TRICK. Without it, routine:loc_8c0344d4 comes
+    back with 1,035 "unarbitrated pairs" because 46 findings are about the body
+    walker -- that is a POPULAR ENTITY, not a conflict, and burying the real
+    pairs under it is the same false-positive failure that produced the
+    handover's bogus "44 buried dead ends". A subject carrying 2-5 live claims
+    is where an either/or plausibly lives; a subject carrying 46 is a topic.
+
+    Arbitrated pairs are excluded: supersedes, corrects, AND relates_to. If
+    someone recorded ANY relationship, the pair has been looked at.
     """
-    return query(
-        "SELECT ->about->(?) AS subject, "
-        "  array::group(<-about<-finding.id) AS claims "
-        "FROM finding WHERE status IN ['confirmed','inferred'] "
-        "GROUP BY subject;")
+    edges = query(
+        "SELECT record::id(in) AS f, in.status AS st, "
+        "record::tb(out) AS tb, record::id(out) AS subj "
+        "FROM about WHERE in.status IN ['confirmed','inferred'];")
+    arb = set()
+    for e in query("SELECT record::id(in) AS a, record::id(out) AS b "
+                   "FROM supersedes, corrects, relates_to;"):
+        arb.add((e["a"], e["b"]))
+        arb.add((e["b"], e["a"]))
+
+    by_subject = {}
+    status = {}
+    for e in edges:
+        key = "%s:%s" % (e["tb"], e["subj"])
+        by_subject.setdefault(key, set()).add(e["f"])
+        status[e["f"]] = e["st"]
+
+    out = []
+    for subj, claims in by_subject.items():
+        claims = sorted(claims)
+        if not (min_claims <= len(claims) <= max_claims):
+            continue
+        unarbitrated = [(a, b) for i, a in enumerate(claims)
+                        for b in claims[i + 1:] if (a, b) not in arb]
+        if not unarbitrated:
+            continue
+        out.append({"subject": subj,
+                    "claims": [{"id": c, "status": status.get(c)} for c in claims],
+                    "unarbitrated_pairs": len(unarbitrated)})
+    # fewest claims first: a 2-claim subject with no link between them is the
+    # cleanest candidate for a real either/or
+    out.sort(key=lambda r: (len(r["claims"]), r["subject"]))
+    return out
+
+
+def contradictions(*a, **kw):
+    """Deprecated alias -- the old name overclaimed. See unreconciled_claims()."""
+    return unreconciled_claims(*a, **kw)
 
 
 if __name__ == "__main__":
