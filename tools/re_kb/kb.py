@@ -363,7 +363,18 @@ def health():
         "AND count(->cites->source[WHERE strength IN ['reproduction','code']]) = 0 "
         "AND count(->cites->routine) = 0 GROUP ALL;")
 
+    # A claim with a newer claim SUPERSEDING it that still reads as confirmed.
+    # Traversal returns it, the digest carries it as settled, the hook offers
+    # it as current. Ten of these were live the moment 93 made the supersession
+    # graph queryable -- including a five-generation HUD chain where every
+    # generation read `confirmed` at once. `corrects` deliberately does NOT
+    # count: that is the narrower relation and the corrected claim still stands.
+    stale = query(
+        "SELECT record::id(id) AS id FROM finding "
+        "WHERE count(<-supersedes) > 0 AND status = 'confirmed';")
+
     return {"status_distribution": dist,
+            "confirmed_but_superseded": [r["id"] for r in stale],
             "findings_with_NO_status": (statusless[0]["n"] if statusless else 0),
             "DRIFT_confirmed_that_would_fail_the_gate_today":
                 (drift[0]["n"] if drift else 0),
