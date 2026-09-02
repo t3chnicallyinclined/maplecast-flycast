@@ -1,5 +1,13 @@
 # HANDOFF — Character Flip / TA-Wire v2 (2026-07-09)
 
+> **STALE PROD BOX - historical record.** Written when prod was `149.28.44.118`
+> (Vultr, hostname `flycast-inputserver-nyc`). Since 2026-09-01 `nobd.net` /
+> `play.nobd.net` are served by **rise3** (`15.204.141.58`, `ubuntu@`, key
+> `~/.ssh/ovh_maplecast`, passwordless sudo), unit `maplecast-flycast.service`.
+> Current server architecture lives in ONE place: forgily-creations
+> `plans/rise3_handover.md` section 0 (copy `~/HANDOVER.md` on rise3).
+> Read the host facts below as history, never as a deploy target.
+
 > Complete session handover: the character flip (strip chars from the ZCS2 wire, redraw
 > client-side) went from plan (render-state/09) to LIVE ON PROD in one arc, plus the VCACHE
 > join-gap fix. Everything below is committed on `feat/render-replica-live`

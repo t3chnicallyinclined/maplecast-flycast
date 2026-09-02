@@ -3,10 +3,13 @@
 # MAPLECAST WEB — Deploy static files to VPS
 #
 # Usage:
-#   ./deploy/scripts/deploy-web.sh [VPS_HOST]
+#   ./deploy/scripts/deploy-web.sh <VPS_HOST>
 #
-# Example:
-#   ./deploy/scripts/deploy-web.sh root@66.55.128.93
+# Example (prod = rise3 since 2026-09-01):
+#   ./deploy/scripts/deploy-web.sh ubuntu@15.204.141.58
+#   NOTE: on rise3 you log in as `ubuntu`, not root - /var/www/maplecast writes need sudo.
+#   Retired, do NOT target: 66.55.128.93 (dead), 149.28.44.118 (no longer the nobd origin).
+#   Server architecture SSOT: forgily-creations `plans/rise3_handover.md` section 0 (copy `~/HANDOVER.md` on rise3).
 #
 # What this does:
 #   1. Backs up the current production web files on the VPS
@@ -22,7 +25,7 @@
 
 set -euo pipefail
 
-VPS_HOST="${1:-root@66.55.128.93}"
+VPS_HOST="${1:?Usage: ./deploy-web.sh <VPS_HOST>   (prod = ubuntu@15.204.141.58, rise3)}"
 REMOTE_DIR="/var/www/maplecast"
 SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 REPO_ROOT="$( cd -- "$SCRIPT_DIR/../.." &> /dev/null && pwd )"

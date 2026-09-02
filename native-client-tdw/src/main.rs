@@ -637,14 +637,17 @@ fn main() {
                 input: input0,
             },
             debug::ServerEntry {
-                name: "nobd prod (NYC)".into(),
+                name: "nobd prod (rise3)".into(),
                 ws: "ws://nobd.net:7200".into(),
                 input: "nobd.net".into(),
             },
             debug::ServerEntry {
-                name: "dev0ps".into(),
-                ws: "ws://65.109.77.178:7200".into(),
-                input: "65.109.77.178".into(),
+                // rise3 by raw IP - a DNS-independent handle on the same prod box as the
+                // nobd.net entry above. (Was "dev0ps" 65.109.77.178, which serves no
+                // maplecast at all since the 2026-09-01 cutover.)
+                name: "rise3 (direct IP)".into(),
+                ws: "ws://15.204.141.58:7200".into(),
+                input: "15.204.141.58".into(),
             },
         ];
         if let Ok(extra) = std::env::var("MC_SERVERS") {
@@ -672,7 +675,7 @@ fn main() {
         // non-registry statics survive refreshes (dev boxes, MC_SERVERS extras)
         let static_extras: Vec<debug::ServerEntry> = {
             let s = debug.servers.lock().unwrap();
-            s.iter().skip(2).cloned().collect() // dev0ps + MC_SERVERS entries
+            s.iter().skip(2).cloned().collect() // rise3-direct + MC_SERVERS entries
         };
         std::thread::Builder::new()
             .name("maplecast-hub".into())

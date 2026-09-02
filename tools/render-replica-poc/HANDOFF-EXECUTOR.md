@@ -68,7 +68,7 @@ else 0. No captured entry registers needed (verified via `--min-ctx` reproducing
   (Any Zig 0.16 works; it's the C compiler here. Native gcc/clang also fine for the native harness.)
 - **MSVC** for the realcore oracle: `realcore/dobuild.bat` (calls vcvars64; NOT `build.cmd` — it
   misses the `core/deps` include → md5.h fail).
-- **Disasm**: `C:/Users/trist/projects/_marv_re/build/bankNN.asm` (dev box `tris@65.109.77.178`).
+- **Disasm**: `C:/Users/trist/projects/_marv_re/build/bankNN.asm` (build box: rise3 `ubuntu@15.204.141.58`; dev0ps `tris@65.109.77.178` has an older copy).
 - **SPL**: `C:/Users/trist/projects/_marv_re/char_prg/code/{S_PL2A.asm=Storm,S_PL17.asm=Cable}`.
 - **work symbols**: `C:/Users/trist/projects/_marv_re/memory/work.asm` (`#symbol Name 0xADDR`).
 

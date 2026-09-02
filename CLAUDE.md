@@ -1,6 +1,25 @@
 # CLAUDE.md — Rules and Context for AI Assistants on MapleCast
 
-## CRITICAL DEPLOYMENT RULES — READ FIRST
+## WHERE PRODUCTION IS (read before any deploy)
+
+**Prod = rise3, `15.204.141.58`** (OVH RISE, North America; hostname `ns1012691`) since the
+2026-09-01 nobd.net cutover. `ssh -i ~/.ssh/ovh_maplecast ubuntu@15.204.141.58` (passwordless
+sudo; **not** `root@`). Live there: unit `maplecast-flycast.service` running
+`/home/ubuntu/src/maplecast-flycast/build-headless/flycast`, env `/etc/maplecast/headless.env`,
+web root `/var/www/maplecast`, ports 7200/7201/7203 public. `maplecast-headless.service` is
+**masked** on rise3 - the unit name changed.
+
+Retired boxes - never deploy to these: `66.55.128.93` (decommissioned 2026-04-15),
+`149.28.44.118` (Vultr `flycast-inputserver-nyc`; served nobd.net until 2026-09-01, still
+powered on, no longer the origin - DNS failback lever is forgily-creations
+`scripts/nobd_dns_flip.sh vultr`), `65.109.77.178` (dev0ps, Hetzner - forgily rollback standby
+only, runs no maplecast).
+
+**Server architecture is documented in ONE place:** forgily-creations
+`plans/rise3_handover.md` section 0 "CURRENT ARCHITECTURE" (synced copy `~/HANDOVER.md` on
+rise3). Do not restate those facts in this repo - restated facts are how they drift.
+
+## CRITICAL DEPLOYMENT RULES - READ FIRST
 
 ### NEVER deploy to production without a backup
 - **ALWAYS** use `./deploy/scripts/deploy-web.sh` for web files — it creates a timestamped backup
@@ -12,20 +31,20 @@
 ### Deploy workflow
 ```bash
 # Web files (king.html, JS modules):
-./deploy/scripts/deploy-web.sh root@66.55.128.93
+./deploy/scripts/deploy-web.sh ubuntu@15.204.141.58     # rise3 (needs sudo for /var/www)
 
 # Headless flycast server:
-./deploy/scripts/deploy-headless.sh root@66.55.128.93
+./deploy/scripts/deploy-headless.sh ubuntu@15.204.141.58   # see caveat in the script header
 
 # Rollback (printed by deploy script):
-ssh root@66.55.128.93 'rm -rf /var/www/maplecast && mv /var/www/maplecast-backup-YYYYMMDD-HHMMSS /var/www/maplecast'
+ssh ubuntu@15.204.141.58 'sudo rm -rf /var/www/maplecast && sudo mv /var/www/maplecast-backup-YYYYMMDD-HHMMSS /var/www/maplecast'
 ```
 
 ### If production files were edited directly
 Sync production → git BEFORE making any local changes:
 ```bash
-scp root@66.55.128.93:/var/www/maplecast/king.html web/king.html
-scp root@66.55.128.93:/var/www/maplecast/js/*.mjs web/js/
+scp ubuntu@15.204.141.58:/var/www/maplecast/king.html web/king.html
+scp ubuntu@15.204.141.58:/var/www/maplecast/js/*.mjs web/js/
 git add web/ && git commit -m "sync: pull production web files from VPS"
 ```
 
@@ -56,7 +75,9 @@ An AI assistant scp'd the git version of king.html to production, overwriting th
 > distributed node network + native/desktop clients keep working. Every `*.html`
 > game page 301s from nobd.net → play.nobd.net; `zero.nobd.net` 301s → nobd.net.
 > The hub URL deliberately stays `nobd.net/hub/api`. Details: `docs/DEPLOYMENT.md`
-> (DNS section). Same prod box (149.28.44.118); routing is nginx `server_name`.
+> (DNS section). Same prod box (**rise3** `15.204.141.58` since 2026-09-01); routing is
+> nginx `server_name` on rise3's host nginx at **:8081**, behind the k8s ingress that owns
+> 80/443 there.
 
 MapleCast turns Flycast (Dreamcast emulator) into a game streaming server. One MVC2 instance runs on a single 2-vCPU VPS with NO GPU. ~322 MB RAM, ~12% CPU. 60fps to `wss://play.nobd.net/ws`.
 
@@ -230,7 +251,7 @@ Atomic layout: `[buttons:16][lt:8][rt:8][seq:32]` — 64-bit packed, single atom
 ### How to run
 ```bash
 MAPLECAST_MIRROR_CLIENT=1 \
-MAPLECAST_SERVER_HOST=66.55.128.93 \
+MAPLECAST_SERVER_HOST=15.204.141.58 \
 MAPLECAST_SERVER_PORT=7201 \
 ./build/flycast
 ```
@@ -292,8 +313,8 @@ Design: `docs/DATASET-EXPORTER-DESIGN.md`; field catalog: `../mvc2-ai/docs/DATAS
   **+10.4pp on decision frames** (`../mvc2-ai/src/mvc2_ai/milestone_a.py`). Next: the
   state-conditioned model, once real 2-human matches accumulate.
 
-### Deploy state (2026-07-18)
-- **Live on prod** (149.28.44.118) as `/usr/local/bin/flycast` md5 `eacf3077…` (backup
+### Deploy state (2026-07-18) — HISTORICAL, pre-cutover box
+- **Was live on the then-prod box** (149.28.44.118) as `/usr/local/bin/flycast` md5 `eacf3077…` (backup
   `flycast.bak-20260718-225110`), built from branch **`deploy/exporter-prod`** (node-console tip
   + the 5 `(dataset)` commits — the exporter itself is on `feat/dataset-exporter`). Exporter
   GATED OFF; the `dataset_record` toggle is confirmed live on prod.

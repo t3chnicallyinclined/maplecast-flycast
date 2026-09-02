@@ -34,7 +34,7 @@ New contributor or AI agent: read these 5–8 before touching anything.
    - **Current shipping render config (2026-07-11):** [../RENDER-ARCHITECTURE-CHECKPOINT-2026-07-11.md](../RENDER-ARCHITECTURE-CHECKPOINT-2026-07-11.md) — the live stage/bodies/effects split, prod env flags, and end-to-end frame flow for the default **render_frame + ZCS2 streaming-zstd** client (`webgpu-test.html`). *(CURRENT)*
 3. **[LESSONS-AND-GOTCHAS.md](./LESSONS-AND-GOTCHAS.md)** — the six determinism fixes, the four-parser rule, the pull-model input law, and every trap that has cost time. *(CURRENT)*
 4. **[../DEVELOPER-GUIDE.md](../DEVELOPER-GUIDE.md)** — run the whole stack locally in 3 terminals; components, ports, build targets. *(CURRENT)*
-5. **[../DEPLOYMENT.md](../DEPLOYMENT.md)** — prod topology (149.28.44.118 / nobd.net), from-scratch bring-up, and the deploy-discipline rules. *(CURRENT)*
+5. **[../DEPLOYMENT.md](../DEPLOYMENT.md)** — prod topology (rise3 `15.204.141.58` / nobd.net), from-scratch bring-up, and the deploy-discipline rules. *(CURRENT)*
 6. **[../MVC2-MEMORY-MAP.md](../MVC2-MEMORY-MAP.md)** — the definitive MVC2 RAM address map (char structs, globals, object pool). The reference every RE task leans on. *(REFERENCE)*
 7. **[../GSTA-FINDINGS-FOR-BROWSER.md](../GSTA-FINDINGS-FOR-BROWSER.md)** — the one CURRENT render *findings* doc: measured fixes that must port to the browser. *(CURRENT)*
 

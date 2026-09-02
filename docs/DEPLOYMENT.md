@@ -85,10 +85,10 @@ vim web/king.html
 git add web/ && git commit -m "feat: description"
 
 # 3. Deploy (creates backup, asks confirmation)
-./deploy/scripts/deploy-web.sh root@66.55.128.93
+./deploy/scripts/deploy-web.sh ubuntu@15.204.141.58   # rise3 (sudo needed for /var/www)
 
 # 4. Rollback if needed (command printed by deploy script)
-ssh root@66.55.128.93 'rm -rf /var/www/maplecast && mv /var/www/maplecast-backup-YYYYMMDD-HHMMSS /var/www/maplecast'
+ssh ubuntu@15.204.141.58 'sudo rm -rf /var/www/maplecast && sudo mv /var/www/maplecast-backup-YYYYMMDD-HHMMSS /var/www/maplecast'
 ```
 
 ### Syncing production → git
@@ -96,8 +96,8 @@ ssh root@66.55.128.93 'rm -rf /var/www/maplecast && mv /var/www/maplecast-backup
 If someone edited production files directly (via scp), sync them back to git BEFORE making any changes:
 
 ```bash
-scp root@66.55.128.93:/var/www/maplecast/king.html web/king.html
-scp root@66.55.128.93:/var/www/maplecast/js/*.mjs web/js/
+scp ubuntu@15.204.141.58:/var/www/maplecast/king.html web/king.html
+scp ubuntu@15.204.141.58:/var/www/maplecast/js/*.mjs web/js/
 git add web/ && git commit -m "sync: pull production web files from VPS"
 ```
 
@@ -149,8 +149,8 @@ Input flow end-to-end: browser `/play` WS → `:7200` `onMessage` (binary 4-byte
 
 ### No-sudo / firewalled box → public endpoint (caddy + cloudflared)
 
-For a box with **no root** and **no openable inbound port** (e.g. a Hetzner
-dedicated box whose firewall you can't touch). A closed inbound port is a closed
+For a box with **no root** and **no openable inbound port** (e.g. the Hetzner dev0ps box
+`65.109.77.178`, whose firewall you can't touch). A closed inbound port is a closed
 door — so go **outbound**:
 
 ```
@@ -184,9 +184,27 @@ browser ──HTTPS──▶ Cloudflare edge ──▶ cloudflared (outbound tun
 
 ## Current production target
 
-- **VPS**: `149.28.44.118` (dedicated AMD EPYC Genoa, 2 threads, 4 GB RAM, Ubuntu 24.04)
-- **DNS**: `nobd.net` → `149.28.44.118` (marketing board + hub at `nobd.net/hub/api`); `play.nobd.net` → `149.28.44.118` (game front end / stream — King of Marvel client + `/ws`, `/play`, `/audio`, `/replica-live`); `zero.nobd.net` → 301 redirect → `nobd.net`
-- **Old VPS** (`66.55.128.93`): decommissioned on 2026-04-15
+> **Server architecture is documented in ONE place:** forgily-creations `plans/rise3_handover.md` section 0 (copy `~/HANDOVER.md` on rise3).
+> Treat that as authoritative over anything restated here.
+
+- **Box**: **rise3** `15.204.141.58` (OVH RISE, North America; hostname `ns1012691`;
+  `ssh -i ~/.ssh/ovh_maplecast ubuntu@15.204.141.58`, passwordless sudo). Cut over 2026-09-01.
+- **Front door**: rise3's k8s ingress owns ports 80/443; the arcade nginx below runs on
+  **:8081** and the ingress (ns `arcade`) forwards to it. A systemd drop-in
+  (`/etc/systemd/system/nginx.service.d/no-port-80-443.conf`) makes host nginx refuse to start
+  if it ever regresses to 80/443 — **never remove that guard**.
+- **Unit**: `maplecast-flycast.service` (user `ubuntu`, binary
+  `/home/ubuntu/src/maplecast-flycast/build-headless/flycast`, ROM `/home/ubuntu/roms/mvc2.gdi`).
+  `maplecast-headless.service` is **masked** on rise3.
+- **DNS**: `nobd.net` → rise3 (marketing board + hub at `nobd.net/hub/api`); `play.nobd.net` →
+  rise3 (game front end / stream — King of Marvel client + `/ws`, `/play`, `/audio`,
+  `/replica-live`); `zero.nobd.net` → 301 redirect → `nobd.net`. Failback lever:
+  forgily-creations `scripts/nobd_dns_flip.sh vultr`.
+- **Regional relays** `atl/dfw/ewr/ord/sea.nobd.net`: still their own Vultr boxes, still live —
+  **not** migrated, leave alone.
+- **Retired VPSes** — never deploy to these: `66.55.128.93` (decommissioned 2026-04-15),
+  `149.28.44.118` (Vultr `flycast-inputserver-nyc`; was prod until 2026-09-01, still powered on
+  but no longer the nobd origin).
 - **Co-tenant (non-MapleCast):** the **NOBD Discord bots** also run on this box as systemd units
   (`nobd-oracle`, `nobd-roles`), fully isolated under `/opt/nobd-oracle/` with their own venv. They
   don't touch the flycast/relay/hub/SurrealDB stack — leave them alone (and they leave us alone).

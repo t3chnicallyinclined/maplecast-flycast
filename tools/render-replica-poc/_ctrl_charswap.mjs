@@ -2,7 +2,7 @@
 // Swaps the FULL P1C1 <-> P1C2 char structs (0x5A4 bytes) via the control WS
 // ram_read/ram_write, preserving each slot's original world position, with a
 // savestate safety net. Node 22 built-in WebSocket; run against an ssh tunnel:
-//   ssh -N -L 7211:127.0.0.1:7211 root@149.28.44.118 &
+//   ssh -N -L 7211:127.0.0.1:7211 -i ~/.ssh/ovh_maplecast ubuntu@15.204.141.58 &
 //   node _ctrl_charswap.mjs [--mode read|teleport|swap|restore]
 const MODE = (process.argv.includes('--mode') ? process.argv[process.argv.indexOf('--mode')+1] : 'read');
 const P1C1 = 0x268340, P1C2 = 0x268E88, P2C1 = 0x2688E4, STRIDE = 0x5A4;

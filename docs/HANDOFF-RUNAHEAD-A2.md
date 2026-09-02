@@ -1,5 +1,13 @@
 # HANDOFF: A2 Run-Ahead + the latency campaign
 
+> **STALE PROD BOX - historical record.** Written when prod was `149.28.44.118`
+> (Vultr, hostname `flycast-inputserver-nyc`). Since 2026-09-01 `nobd.net` /
+> `play.nobd.net` are served by **rise3** (`15.204.141.58`, `ubuntu@`, key
+> `~/.ssh/ovh_maplecast`, passwordless sudo), unit `maplecast-flycast.service`.
+> Current server architecture lives in ONE place: forgily-creations
+> `plans/rise3_handover.md` section 0 (copy `~/HANDOVER.md` on rise3).
+> Read the host facts below as history, never as a deploy target.
+
 Branch `feat/render-replica-live`, HEAD `97d14426d`. Prod = 149.28.44.118 (nobd.net), 2-vCPU no-GPU.
 Dev/build box = AX102 Ryzen 9 7950X3D at tris@65.109.77.178 (holds the ROM + assets).
 Memory: `project_a2_runahead_state`, `project_e2e_latency_baseline`, `project_render_checkpoint_2026_07_11`,

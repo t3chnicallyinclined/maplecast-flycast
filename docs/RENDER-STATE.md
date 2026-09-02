@@ -23,7 +23,7 @@ Render paths for the MVC2 stream, ranked. Any new session starts at the top.
 > and its wire-size edge is gone)**. The split: **stage + HUD + effects ride the wire pixel-perfect
 > (`STAGESTRIP=0` — static content is ~0 cost under zstd streaming-window dedup); character bodies
 > are server char-stripped (`CHARSTRIP=1`) and drawn locally by render_frame from the folded STM2
-> body state (`STATE_MERGE=1`), byte-exact.** Prod env (149.28.44.118): `ZSTREAM=1 ZSTREAM_LEVEL=9
+> body state (`STATE_MERGE=1`), byte-exact.** Prod env (rise3 `15.204.141.58`): `ZSTREAM=1 ZSTREAM_LEVEL=9
 > ZSTREAM_SOA=1 ZSTREAM_RESET=600 STAGESTRIP=0 CHARSTRIP=1 STATE_MERGE=1 VCACHE=1 NO_SCENE_SYNC=1`.
 > Measured **~3 Mbps gameplay / ~6 Mbps triple super** (§3; #1 open opt = client-side body-quad skip
 > → ~0.6 Mbps). Ranks 1–2 (lockstep / native charpass) are UNCHANGED as the ROM-holding / thin-client

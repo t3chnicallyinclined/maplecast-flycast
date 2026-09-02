@@ -178,7 +178,7 @@ def main():
     parser = argparse.ArgumentParser(description="Import MVC2 skins to SurrealDB")
     parser.add_argument("--skin-dir", default="tools/mvc2-skins/skins",
                        help="Path to skin PNGs directory")
-    parser.add_argument("--db-url", default="http://66.55.128.93:8000",
+    parser.add_argument("--db-url", default="http://127.0.0.1:8000",  # SurrealDB is loopback-only on rise3; tunnel in
                        help="SurrealDB URL")
     parser.add_argument("--db-pass", default="nobd_arcade_2026",
                        help="SurrealDB password")

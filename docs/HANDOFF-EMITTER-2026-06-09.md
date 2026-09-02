@@ -1,5 +1,13 @@
 # MapleCast Emitter — Session Handoff (2026-06-09)
 
+> **STALE PROD BOX - historical record.** Written when prod was `149.28.44.118`
+> (Vultr, hostname `flycast-inputserver-nyc`). Since 2026-09-01 `nobd.net` /
+> `play.nobd.net` are served by **rise3** (`15.204.141.58`, `ubuntu@`, key
+> `~/.ssh/ovh_maplecast`, passwordless sudo), unit `maplecast-flycast.service`.
+> Current server architecture lives in ONE place: forgily-creations
+> `plans/rise3_handover.md` section 0 (copy `~/HANDOVER.md` on rise3).
+> Read the host facts below as history, never as a deploy target.
+
 Pick-up doc for the next agent. The off-SH4 **emitter** (reconstruct-from-state, the pixel-perfect render path) is ~95% done and **blocked only on a build host**, not on design. Read this + `docs/PER-OBJECT-QUAD-SPEC.md` + `docs/MARVELOUS2-GFX-NOTES.md §3a` + memory `project_render_pipeline_state` + the new expert `.claude/agents/mvc2-sprite-render-expert.md` before touching render code.
 
 ---

@@ -6,8 +6,15 @@
 #   ./deploy/scripts/deploy-headless.sh <VPS_HOST> [<ROM_PATH>]
 #
 # Example:
-#   ./deploy/scripts/deploy-headless.sh root@66.55.128.93
-#   ./deploy/scripts/deploy-headless.sh root@66.55.128.93 ~/roms/mvc2.gdi
+#   ./deploy/scripts/deploy-headless.sh ubuntu@15.204.141.58
+#   ./deploy/scripts/deploy-headless.sh ubuntu@15.204.141.58 ~/roms/mvc2.gdi
+#
+# CAVEAT (post-2026-09-01 cutover): prod is rise3 and its layout does NOT match what
+# this script installs. rise3 runs unit `maplecast-flycast.service` (NOT
+# `maplecast-headless.service`, which is masked there) as user `ubuntu`, from
+# `/home/ubuntu/src/maplecast-flycast/build-headless/flycast`. Running this against rise3
+# unchanged will install a second, unused unit. Deploy the binary by hand until this
+# script is reworked. Server architecture SSOT: forgily-creations `plans/rise3_handover.md` section 0 (copy `~/HANDOVER.md` on rise3).
 #
 # What this does:
 #   1. Builds the headless flycast binary locally (cmake -DMAPLECAST_HEADLESS=ON)

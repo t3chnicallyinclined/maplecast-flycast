@@ -1,5 +1,13 @@
 # Render Architecture — CHECKPOINT (2026-07-11)
 
+> **STALE PROD BOX - historical record.** Written when prod was `149.28.44.118`
+> (Vultr, hostname `flycast-inputserver-nyc`). Since 2026-09-01 `nobd.net` /
+> `play.nobd.net` are served by **rise3** (`15.204.141.58`, `ubuntu@`, key
+> `~/.ssh/ovh_maplecast`, passwordless sudo), unit `maplecast-flycast.service`.
+> Current server architecture lives in ONE place: forgily-creations
+> `plans/rise3_handover.md` section 0 (copy `~/HANDOVER.md` on rise3).
+> Read the host facts below as history, never as a deploy target.
+
 The stable, shipping render config after the wire-thinning + stage campaign. This is the DEFAULT
 on https://nobd.net/webgpu-test.html. Supersedes the "strip everything / bake the stage" detour.
 

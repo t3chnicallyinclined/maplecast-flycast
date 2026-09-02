@@ -30,8 +30,15 @@ SurrealDB 127.0.0.1:8000 (skins, telemetry)   maplecast-hub 127.0.0.1:7220 (/hub
 input UDP :7100 (public)   audio :7203   control WS :7211 (loopback ONLY)
 ```
 - flycast is **never** publicly exposed. Footprint ≈ 322 MB RAM, ~12% of 2 vCPU, ~59.7 fps.
-- **Current prod box = `149.28.44.118` (nobd.net).** `66.55.128.93` is **decommissioned** —
-  CLAUDE.md still names it; trust `149.28.44.118`.
+- **Current prod box = rise3 `15.204.141.58`** (OVH RISE, North America; `ubuntu@`, key
+  `~/.ssh/ovh_maplecast`, passwordless sudo), serving `nobd.net` / `play.nobd.net` since the
+  2026-09-01 cutover. Unit `maplecast-flycast.service` from
+  `/home/ubuntu/src/maplecast-flycast/build-headless/flycast`; `maplecast-headless.service`
+  is **masked** there. Host nginx is on **:8081** behind the k8s ingress (which owns 80/443).
+  Retired: `149.28.44.118` (Vultr, was prod until 2026-09-01 — still powered on, no longer the
+  origin; DNS failback = forgily-creations `scripts/nobd_dns_flip.sh vultr`) and
+  `66.55.128.93` (**decommissioned** 2026-04-15).
+  **Server architecture SSOT:** forgily-creations `plans/rise3_handover.md` section 0 (copy `~/HANDOVER.md` on rise3).
 
 **Five pillars:** (1) emulator/authoritative sim, (2) input server (built into flycast, UDP :7100),
 (3) TA-mirror stream, (4) Rust relay fan-out, (5) **Distributed Input Server Network** — anyone runs a
@@ -152,7 +159,7 @@ Deduped, current/reference-grade only. Source doc in **bold**.
 | **Rollback / predict-live client** | **IN PROGRESS (current session — see §4)** | Byte-determinism foundation validated; predictor = the reused headless build (not the mirror client). The old `0x5e6bb82b5f80` SIGSEGV is fixed (pull-model). Gated `MAPLECAST_PREDICT_LIVE`. |
 | **GSTA reconstruction / browser render** | **DEFAULT off; render_frame path byte-exact** | render_frame transpile + lockstep decoders = the byte-exact default drawer; sprite machine **CLOSED 5/5** (`189544592`). **Phase 2a native char-pass** (`MAPLECAST_GSTA_NATIVE_CHARPASS`, `483511fef`) byte-gate CLOSED offline but **SHELVED by lockstep** and **renders bodies invisible LIVE** (first live A/B 2026-07-08 — the live composite-RAM byte gate has never run). Browser `replay.html` default still `emitter` despite the standing decision to flip to render_frame — OPEN. |
 | **RE / assets** | **REFERENCE-complete for bodies** | marvelous2 disasm = canonical goldmine (clean-room, gitignored). Bodies texels+geometry byte-exact; HUD closure mapped (Phase 2b, `loc_8c03012c`), byte-matched vs HUDQ oracle but not yet run char-pass-style. Stage: only **STG0B** baked; full stage_id→STGxx map incomplete. Effects captured inside the 2a TA by construction (3D re-impl campaign DEAD). |
-| **Deploy** | **LIVE, disciplined** | Prod `149.28.44.118`. Always edit-local → commit → **deploy script** (`deploy-headless.sh` / `deploy-web.sh`, both back up). Never raw scp; prod may be AHEAD of git; systemd capability-stripping and Docker `/dev/shm` 64→256 MB are recurring bites (see LESSONS doc). |
+| **Deploy** | **LIVE, disciplined** | Prod rise3 `15.204.141.58`. Always edit-local → commit → **deploy script** (`deploy-headless.sh` / `deploy-web.sh`, both back up). Never raw scp; prod may be AHEAD of git; systemd capability-stripping and Docker `/dev/shm` 64→256 MB are recurring bites (see LESSONS doc). |
 | **Pixel-shipping (mirror/STAF/VCACHE)** | **DEAD** | Whole family abandoned (floors at 36–88 Mbps, ~73% geometry). Superseded by reconstruct-from-state. Do not resume TX64/STAF/VCACHE or whole-frame TA dedup. |
 | **Match-data platform / matchmaking / Saturn / Option 6 ideas** | **VISION / research / shelved** | MATCH-DATA-PLATFORM + MATCHMAKING are current plans (not built); Option 6 cache-dedup is a proven dead end (bandwidth was never the user-felt bottleneck — latency was); Saturn/Ymir is a viable-but-unbuilt second-console study. |
 

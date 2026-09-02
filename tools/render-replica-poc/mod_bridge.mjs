@@ -3,7 +3,7 @@
 // loopback control WS (7211) through your ssh tunnel. RAM-write NEVER hits the
 // public internet. Dependency-free (Node 22 built-in WebSocket + http).
 //
-//   1) tunnel:  ssh -N -L 7311:127.0.0.1:7211 root@149.28.44.118
+//   1) tunnel:  ssh -N -L 7311:127.0.0.1:7211 -i ~/.ssh/ovh_maplecast ubuntu@15.204.141.58
 //   2) bridge:  node mod_bridge.mjs 7311     (arg = your local tunnel port; default 7211)
 //   3) open:    http://localhost:9099        (keep the webgpu-test tab open to watch)
 // (Use a fresh local port like 7311 if 7211 is stuck "bind: Permission denied" from a

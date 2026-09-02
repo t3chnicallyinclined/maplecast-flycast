@@ -232,7 +232,7 @@ frame, so they cost wire, so that is exactly where the server strip + local rend
 | **Effects / projectiles / supers** | dynamic | ride the wire TA, drawn by the client | modest |
 | **HUD** | wire | rides the wire TA | modest |
 
-### Prod env flags (149.28.44.118, `/etc/maplecast/headless.env`)
+### Prod env flags (rise3 `15.204.141.58`, `/etc/maplecast/headless.env`)
 
 ```
 MAPLECAST_ZSTREAM=1  ZSTREAM_LEVEL=9  ZSTREAM_SOA=1  ZSTREAM_RESET=600  # ZCS2 streaming-zstd wire

@@ -27,7 +27,7 @@ the contiguous PL00..PL3A set the emitter baker already encodes (re_kb 05_charac
 SOURCE: dasm_PLDAT/Output/PL{HEX}_DAT/PL{HEX}_DAT_GFX_DATA_00.BIN (GFX1)
                                        /PL{HEX}_DAT_GFX_DATA_01.BIN (GFX2)
         (dasm_PLDAT_v005a.py already splits each PLDAT into its segments; the disc is
-         the MVC2 Dev Files / dev box 65.109.77.178 set — see project_full_asset_dataset_local.)
+         the MVC2 Dev Files / build box set (rise3 ~/src/maplecast-flycast; dev0ps 65.109.77.178 has an older copy) — see project_full_asset_dataset_local.)
 
 OUTPUT (operator-local, ROM-derived, GITIGNORED — web/render-replica/gfx/):
   PL{NN}_gfx1.bin   raw GFX1 segment  (NN = upper-hex char_id == PLxx index)

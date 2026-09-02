@@ -77,7 +77,7 @@ echo "  Flycast:    MVC2 + TA Mirror (ws://0.0.0.0:7200)"
 if [ -z "$RELAY_ONLY" ]; then
 echo "  Web app:    http://localhost:$WEB_PORT"
 fi
-echo "  Relay VPS:  http://66.55.128.93 (ws://66.55.128.93/ws)"
+echo "  Relay VPS:  https://play.nobd.net (wss://play.nobd.net/ws) - rise3"
 echo "  Telemetry:  UDP:7300"
 echo "  Gamepad:    UDP:7100 (input server)"
 echo "  Collector:  SurrealDB → maplecast.db"

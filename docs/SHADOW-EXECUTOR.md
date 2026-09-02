@@ -41,9 +41,12 @@ gitignored, so it must be produced there and copied over:
 python C:/Users/trist/projects/maplecast-flycast/tools/render-replica-poc/gen_tick.py
 #    -> tools/render-replica-poc/gen_tick_all.c  (271 fns, ~byte-exact)
 
-# 2) Copy the 3 executor files to the dev box (gitignored, so out-of-band):
-scp tools/render-replica-poc/{gen_tick_all.c,shadow_exec_runner.c,sh4ctx.h} \
-    tris@65.109.77.178:/path/to/maplecast-flycast/tools/render-replica-poc/
+# 2) Copy the 3 executor files to the build box (gitignored, so out-of-band).
+#    Build box = rise3 (also prod, and it holds ~/roms/mvc2.gdi) since the 2026-09-01 cutover.
+#    dev0ps tris@65.109.77.178 still has a checkout + a ROM copy and can build, but it runs no
+#    maplecast services and is now the frozen forgily rollback standby.
+scp -i ~/.ssh/ovh_maplecast tools/render-replica-poc/{gen_tick_all.c,shadow_exec_runner.c,sh4ctx.h} \
+    ubuntu@15.204.141.58:/home/ubuntu/src/maplecast-flycast/tools/render-replica-poc/
 
 # 3) On the dev box, configure + build the headless server WITH the option:
 cmake -S . -B build-shadow -DMAPLECAST_HEADLESS=ON -DMAPLECAST_SHADOW_EXEC=ON

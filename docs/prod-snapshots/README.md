@@ -1,5 +1,13 @@
 # Prod snapshots — preserved uncommitted production content
 
+> **STALE PROD BOX - historical record.** Written when prod was `149.28.44.118`
+> (Vultr, hostname `flycast-inputserver-nyc`). Since 2026-09-01 `nobd.net` /
+> `play.nobd.net` are served by **rise3** (`15.204.141.58`, `ubuntu@`, key
+> `~/.ssh/ovh_maplecast`, passwordless sudo), unit `maplecast-flycast.service`.
+> Current server architecture lives in ONE place: forgily-creations
+> `plans/rise3_handover.md` section 0 (copy `~/HANDOVER.md` on rise3).
+> Read the host facts below as history, never as a deploy target.
+
 Files here are EXACT captures of content found live on prod (`root@149.28.44.118`,
 `/var/www/maplecast/`) that was **not present in any git commit** at capture time.
 They exist so a later deploy can never silently erase prod-only work (the

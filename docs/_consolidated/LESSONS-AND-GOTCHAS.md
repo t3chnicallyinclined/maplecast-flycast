@@ -314,11 +314,18 @@ Each entry: **Trap** (what bites) → **Why** (root cause) → **Rule** (what to
   **Rule:** ALWAYS deploy via `deploy/scripts/deploy-web.sh` / `deploy-headless.sh` (they make timestamped backups + print the rollback command); verify md5 before/after. If prod was edited directly, sync prod→git BEFORE any local change. Edit-local → commit → deploy — never edit prod directly. On the prod box: never pull/commit (prod-overwrite risk) — transplant fixed files + build only.
 
 - **Trap: using the wrong / decommissioned prod host.**
-  **Why:** topology drifted. CLAUDE.md still says `66.55.128.93` in places.
-  **Rule:** current prod = `149.28.44.118` (DNS nobd.net). `66.55.128.93` is DECOMMISSIONED. The dev box with the ROM + gitignored assets is `65.109.77.178`.
+  **Why:** topology drifted TWICE (66.55 -> 149.28 -> rise3). Docs keep restating box facts.
+  **Rule:** current prod = **rise3 `15.204.141.58`** (DNS nobd.net / play.nobd.net, cut over
+  2026-09-01), login `ubuntu@` with key `~/.ssh/ovh_maplecast`. rise3 is ALSO the build box:
+  it holds `~/src/maplecast-flycast` + `~/roms/mvc2.gdi`. `66.55.128.93` is DECOMMISSIONED;
+  `149.28.44.118` is no longer the nobd origin (still powered on). dev0ps `65.109.77.178`
+  still has a checkout + a ROM copy and can build, but runs NO maplecast services — it is the
+  frozen forgily rollback standby. Do not restate any of this in another doc: the SSOT is
+  forgily-creations `plans/rise3_handover.md` section 0 (copy `~/HANDOVER.md` on rise3).
 
 - **Trap: `deploy-web.sh` is itself partly wrong — wrong host, wholesale, interactive.**
-  **Why:** it points at the decommissioned 66.55 host and overwrites wholesale.
+  **Why:** it used to default to the decommissioned 66.55 host (that default is now removed —
+  the host argument is required) and it still overwrites wholesale.
   **Rule:** deploy web SURGICALLY — file backup + scp ONE file + in-place `?v=` sed bump + md5 verify. Bump `?v=` on EVERY web module change or stale browser cache silently ships regressions (real regressions came from stale caching). `relay/deploy.sh` overwrites the ENTIRE relay systemd unit — prefer manual scp+install+restart.
 
 - **Trap: scp'ing the headless binary strips +x → 203/EXEC; or installing over a running binary → "Text file busy".**

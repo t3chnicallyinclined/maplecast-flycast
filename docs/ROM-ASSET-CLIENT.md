@@ -19,10 +19,12 @@ pushed the work forward. State now:
   (HEX). 0=Ryu=PL00, **23/0x17=Cable=PL17**, 35/0x23=Dan=PL23. ⚠️ a prior note's
   "Cable=PL23" was WRONG (PL23 is Dan).
 - **60Hz GSTA binary built** (`build-headless/flycast`; old one saved as
-  `flycast.bak-20hz`). NOT deployed. ⚠️ **prod is `149.28.44.118`** (hostname
-  `flycast-inputserver-nyc`), and its live binary is newer than our git baseline —
-  **prod is ahead of git**; back up the live binary before any headless deploy.
-  (CLAUDE.md still says 66.55.128.93 — topology drifted; reconcile.)
+  `flycast.bak-20hz`). NOT deployed. ⚠️ **prod is rise3 `15.204.141.58`** (OVH; `ubuntu@`,
+  key `~/.ssh/ovh_maplecast`; unit `maplecast-flycast.service`, binary
+  `/home/ubuntu/src/maplecast-flycast/build-headless/flycast`) since the 2026-09-01 cutover,
+  and its live binary is newer than our git baseline — **prod is ahead of git**; back up the
+  live binary before any headless deploy. (`149.28.44.118` = the previous prod box,
+  `flycast-inputserver-nyc`; `66.55.128.93` = decommissioned. Architecture SSOT: forgily-creations `plans/rise3_handover.md` section 0 (copy `~/HANDOVER.md` on rise3).)
 - **PalMod investigated and RULED OUT** as the MVC2 ROM decoder (it ships
   pre-extracted preview sheets in its own zlib `img2020.dat`; `RLEData` is its
   storage codec, not MVC2's). See §3a of the PLAN doc.

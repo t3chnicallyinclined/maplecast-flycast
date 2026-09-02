@@ -1,5 +1,13 @@
 # HANDOFF — Dark band CLOSED + HUD/stage/panel arc (2026-07-09 → 07-10)
 
+> **STALE PROD BOX - historical record.** Written when prod was `149.28.44.118`
+> (Vultr, hostname `flycast-inputserver-nyc`). Since 2026-09-01 `nobd.net` /
+> `play.nobd.net` are served by **rise3** (`15.204.141.58`, `ubuntu@`, key
+> `~/.ssh/ovh_maplecast`, passwordless sudo), unit `maplecast-flycast.service`.
+> Current server architecture lives in ONE place: forgily-creations
+> `plans/rise3_handover.md` section 0 (copy `~/HANDOVER.md` on rise3).
+> Read the host facts below as history, never as a deploy target.
+
 > Continues `docs/HANDOFF-SATELLITE-READSET-2026-07-09.md`. This session CLOSED the
 > re_kb/51 "dark band" residual (BOTH mechanisms), fixed the live HUD (stage-bake
 > contamination), fixed two splice/pairing bugs, and rebuilt the debug cockpit with

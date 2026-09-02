@@ -1,5 +1,13 @@
 # RENDER-STATE appendix 07 — TA-wire compression lab: measured results (2026-07-08)
 
+> **STALE PROD BOX - historical record.** Written when prod was `149.28.44.118`
+> (Vultr, hostname `flycast-inputserver-nyc`). Since 2026-09-01 `nobd.net` /
+> `play.nobd.net` are served by **rise3** (`15.204.141.58`, `ubuntu@`, key
+> `~/.ssh/ovh_maplecast`, passwordless sudo), unit `maplecast-flycast.service`.
+> Current server architecture lives in ONE place: forgily-creations
+> `plans/rise3_handover.md` section 0 (copy `~/HANDOVER.md` on rise3).
+> Read the host facts below as history, never as a deploy target.
+
 > Empirical companion to appendix 06 (prior-art survey). Every number below was MEASURED on a
 > fresh 35.07 s in-match capture (2104 ZCST frames) from the local Windows headless rig.
 > Re-runnable: `_bwlab\decompose.py / experiments.py / experiments2.py / experiments3.py`

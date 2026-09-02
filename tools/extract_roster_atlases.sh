@@ -13,7 +13,7 @@
 #
 # Then deploy (ROM-derived -> scp only):
 #   scp web/test-atlas/chars/PL*_{parts.png,parts.json,asm.json,idx.png,lut.json} \
-#       root@149.28.44.118:/var/www/maplecast/test-atlas/chars/
+#       ubuntu@15.204.141.58:/var/www/maplecast/test-atlas/chars/   # rise3 (sudo needed to write)
 #
 # The client picks each char up lazily: loadAsmChar(char_id) fetches PL{HEX}_parts/_asm
 # by char_id (cache-busted), buildEmitterDrawList renders every sprite_id (all poses).

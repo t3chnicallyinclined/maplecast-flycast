@@ -50,7 +50,7 @@ cmake --build build-win --config Release --target flycast
 Place `mvc2.state` + BIOS in flycast's data dir, `emu.cfg` in its config dir
 (`%LOCALAPPDATA%\flycast\` typically; confirm where the build looks). Then:
 ```
-set MAPLECAST_STATE_REPLICA=149.28.44.118:7201
+set MAPLECAST_STATE_REPLICA=15.204.141.58:7201
 set MAPLECAST_HEADLESS_AUTOLOAD=1
 flycast.exe "C:\roms\mvc2_us\mvc2.gdi"
 ```
