@@ -134,7 +134,12 @@ def kb_apply_file(path, label=""):
         headers={"Accept": "application/json", "Authorization": auth,
                  "Content-Type": "text/plain"},
     )
-    with urllib.request.urlopen(req, timeout=120) as resp:
+    # 900s, not 120s. This path is used for LET-scoped whole-file scripts --
+    # notably 07_dedup_edges.surql, which rebuilds every edge table and now
+    # walks thousands of `calls` rows. At 120s it timed out and took the whole
+    # ingest run down AFTER all 5,786 statements had already applied
+    # successfully, which reads like a failed ingest and is not one.
+    with urllib.request.urlopen(req, timeout=900) as resp:
         out = resp.read().decode("utf-8", errors="replace")
     res = json.loads(out)
     errs = [r for r in res if isinstance(r, dict) and r.get("status") == "ERR"]

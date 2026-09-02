@@ -201,12 +201,35 @@ def _iter_sources(repo, memory_dir):
     cm = os.path.join(repo, "CLAUDE.md")
     if os.path.exists(cm):
         yield cm, "CLAUDE.md", "doc"
-    # docs/*.md
-    for p in sorted(glob.glob(os.path.join(repo, "docs", "*.md"))):
-        yield p, "docs/" + os.path.basename(p), "doc"
-    # re-catalog/*.md
-    for p in sorted(glob.glob(os.path.join(repo, "re-catalog", "*.md"))):
-        yield p, "re-catalog/" + os.path.basename(p), "recatalog"
+    # docs/**/*.md and re-catalog/**/*.md -- RECURSIVE.
+    #
+    # These were non-recursive (`docs/*.md`), which silently excluded every
+    # handoff living beside the code it describes. Measured 2026-09-01, the
+    # files that were structurally invisible included BOTH executor handoffs --
+    # tools/render-replica-poc/HANDOFF-EXECUTOR.md and
+    # HANDOFF-EXECUTOR-STATUS-2026-07-22.md, the latter of which literally names
+    # a finding slug as an upsert candidate that was never written.
+    for p in sorted(glob.glob(os.path.join(repo, "docs", "**", "*.md"),
+                              recursive=True)):
+        yield p, "docs/" + os.path.relpath(p, os.path.join(repo, "docs")).replace(os.sep, "/"), "doc"
+    for p in sorted(glob.glob(os.path.join(repo, "re-catalog", "**", "*.md"),
+                              recursive=True)):
+        yield p, "re-catalog/" + os.path.relpath(p, os.path.join(repo, "re-catalog")).replace(os.sep, "/"), "recatalog"
+    # Handoffs that live next to the code they describe rather than in docs/.
+    # Explicit list, not a repo-wide glob: a blanket **/*.md would sweep in
+    # node_modules, vendored trees and every scratch note, and the whole point
+    # of the docnote split is that bulk ingest stays deliberate.
+    # NOT tools/re_kb: those are the graph's OWN process docs (README,
+    # HANDOVER-EPISTEMICS). Ingesting them makes the KB assert things about
+    # itself -- 61 claims of pure self-reference, including the handover's two
+    # numbers that are already marked wrong. A knowledge graph should not cite
+    # its own paperwork as evidence about MVC2.
+    for sub in ("tools/render-replica-poc", "relay", "packages/renderer"):
+        d = os.path.join(repo, sub)
+        if not os.path.isdir(d):
+            continue
+        for p in sorted(glob.glob(os.path.join(d, "*.md"))):
+            yield p, sub + "/" + os.path.basename(p), "doc"
     # auto-memory (OUTSIDE the repo, read-only)
     if memory_dir and os.path.isdir(memory_dir):
         for p in sorted(glob.glob(os.path.join(memory_dir, "*.md"))):

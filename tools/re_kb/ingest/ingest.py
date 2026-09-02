@@ -462,14 +462,42 @@ def gen_disc():
 
 # ---------------------------------------------------------------------------
 def apply(name, sql):
+    """Write the generated seed, then apply it ONE STATEMENT AT A TIME.
+
+    This used to POST the whole file. SurrealDB parses a POST body as a single
+    script, so an unbalanced quote does not raise -- it consumes the following
+    statements as string content, the request returns 200, and every block
+    reports OK. That is how 58 curated findings sat un-applied for months while
+    every ingest run looked clean (see tools/re_kb/apply_seed.py). The ingest
+    pipeline was the last place still doing it.
+    """
     path = os.path.join(common.GEN_DIR, name)
     with open(path, "w", encoding="utf-8") as f:
         f.write(sql)
-    res = common.kb_apply_file(path, label=name)
-    ok = sum(1 for r in res if isinstance(r, dict) and r.get("status") == "OK")
-    err = sum(1 for r in res if isinstance(r, dict) and r.get("status") == "ERR")
-    print(f"[ingest] {name}: {ok} OK / {err} ERR statements")
-    return err
+
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    from apply_seed import split_statements, post, is_script_scoped
+
+    text = open(path, encoding="utf-8").read()
+    if is_script_scoped(text):
+        errs = post(text, timeout=900)
+        print("[ingest] %s: whole-script (LET-scoped), %d ERR" % (name, len(errs)))
+        for e in errs[:5]:
+            print("           -> %s" % e)
+        return len(errs)
+
+    stmts = split_statements(text)
+    errs = []
+    for st in stmts:
+        for e in post(st):
+            errs.append((st.splitlines()[0][:80] if st.strip() else "", e))
+    print("[ingest] %s: %d statements / %d ERR" % (name, len(stmts), len(errs)))
+    for head, e in errs[:5]:
+        print("           %s" % head)
+        print("             -> %s" % e)
+    if len(errs) > 5:
+        print("           ... +%d more" % (len(errs) - 5))
+    return len(errs)
 
 
 def main(argv):

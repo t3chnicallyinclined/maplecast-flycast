@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "PYTHONIOENCODING=utf-8 python tools/re_kb/hooks/kb_lookup.py",
+            "command": "PYTHONIOENCODING=utf-8 python \"${CLAUDE_PROJECT_DIR:-.}/tools/re_kb/hooks/kb_lookup.py\" 2>/dev/null || true",
             "timeout": 10,
             "statusMessage": "checking re_kb"
           }
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "PYTHONIOENCODING=utf-8 python tools/re_kb/hooks/kb_digest.py",
+            "command": "PYTHONIOENCODING=utf-8 python \"${CLAUDE_PROJECT_DIR:-.}/tools/re_kb/hooks/kb_digest.py\" 2>/dev/null || true",
             "timeout": 20,
             "statusMessage": "carrying re_kb facts across compaction"
           }
