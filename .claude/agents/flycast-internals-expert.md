@@ -115,3 +115,4 @@ Before any live probe, new tape field, or guess: query the graph (`re_kb` Surrea
 mvc-live-skins-quarters). Every new pair/offset meaning goes into a versioned `tools/re_kb/NN_*.surql`
 seed and is applied to the live graph (backup first) — never only into a doc. Say which step you are at.
 Canonical text: C:\Users\trist\projects\mvc-live-skins-quarters\docs\RE-METHOD.md — read it first; it lists what is already settled so you do not re-derive it.
+Current render checkpoint (what is proven, what is open, which gate owns it): C:\Users\trist\projects\mvc-live-skins-quarters\docs\RENDER-STATUS-2026-09-03.md — read it before proposing work on the tape/emitter/renderer.
