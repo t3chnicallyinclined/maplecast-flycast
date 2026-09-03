@@ -349,6 +349,11 @@ def scan_model(pol, address):
         m_base = sa
         base_params = u32(pol, m_base + M_BASE_PARAMS)
         tex_instr = u32(pol, m_base + M_TEX_INSTR)
+        # The three words @+0/+4/+8 are the DC TA polygon header verbatim: PCW (baseParams), ISP
+        # (texInstr), TSP. Steam's consumer FUN_1408482a0 derives blend/sampler/ignore-tex-alpha from
+        # the FULL TSP word (bits 13-31); texSizeVal keeps only its low byte, so emit the word too
+        # (mvc-live-skins-quarters/docs/TSP-RENDER-STATE-GHIDRA.md).
+        tsp_word = u32(pol, m_base + M_TEX_SIZE)
         tex_size_val = u8(pol, m_base + M_TEX_SIZE)
         uv_flip = u8(pol, m_base + M_UV_FLIP)
         tex_ctrl = u32(pol, m_base + M_TEX_CTRL)
@@ -462,6 +467,7 @@ def scan_model(pol, address):
             "isOpaque": is_opaque,
             "baseParams": base_params,
             "texInstr": tex_instr,
+            "tsp": tsp_word,                    # full TSP u32 @ +0x08 (see tsp_word above)
             "tris": tris,
         })
     return meshes
