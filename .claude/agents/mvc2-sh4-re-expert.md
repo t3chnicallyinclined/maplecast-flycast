@@ -234,3 +234,19 @@ gbr, r0..r6`. Decode: **expEvn** 0x040 TLB-miss-r · 0x060 TLB-miss-w · 0x0E0 a
 - Reuse flycast's proven code (e.g. its detwiddle / `ConvertTwiddlePal4`) over re-deriving a format blind —
   flycast doesn't guess either; `core/hw/holly/sb.h` + `core/hw/maple/` are the hardware-register ground truth.
 - Use the Oracle to confirm-not-guess: it is the tiebreaker for runtime behavior, not the first resort.
+
+## RE METHOD (mandatory — restate at the start of every RE task; Tris, 2026-09-03)
+Steam MvC2 is a STATIC RECOMPILATION of the SH4 game. Reference binary = the annotated `marvelous2`
+SH4 disassembly; target binary = the Steam x86-64 exe in Ghidra. The method is annotation transfer by
+cross-architecture function matching, then graph queries — never a fresh top-down trace of one symptom.
+1. "Port the SH4 annotations to the Steam binary by function matching."
+2. "Seed with unique constants, then propagate along the call graph."
+3. "Translate globals through the block map before comparing reference sets."
+4. "Tag confirmed versus inferred, and store the pairs as edges in the knowledge graph."
+Vocabulary: function fingerprinting (constants, float literals, global refs, strings, callees — never
+bytes/registers) · semantic anchors · call-graph propagation · global reference translation (DC work-RAM →
+Steam `blk` via the block-map deltas) · CONFIRMED (both sides read) vs INFERRED (fingerprint only).
+Before any live probe, new tape field, or guess: query the graph (`re_kb` SurrealDB :8001 —
+`steam_routine` -recompiles-> `routine`, `docs/STEAM-SH4-FUNCTION-MAP.md`, `docs/steam_sh4_map.csv` in
+mvc-live-skins-quarters). Every new pair/offset meaning goes into a versioned `tools/re_kb/NN_*.surql`
+seed and is applied to the live graph (backup first) — never only into a doc. Say which step you are at.
