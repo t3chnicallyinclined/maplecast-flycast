@@ -468,6 +468,10 @@ def scan_model(pol, address):
             "baseParams": base_params,
             "texInstr": tex_instr,
             "tsp": tsp_word,                    # full TSP u32 @ +0x08 (see tsp_word above)
+            # NaomiLib mesh bounding sphere @ +0x10..+0x1C: Steam's translucent sort key is this centre
+            # through W x V x P (FUN_140843320), radius < 0 = forced key (docs/TRANSLUCENT-SORT-GHIDRA.md)
+            "center": [f32(pol, m_base + M_POSITION + 4 * k) for k in range(3)],
+            "radius": f32(pol, m_base + M_POSITION + 12),
             "tris": tris,
         })
     return meshes
