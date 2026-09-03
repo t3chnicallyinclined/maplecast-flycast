@@ -400,3 +400,10 @@ Full docs: `tools/re_kb/README.md`. Rules and evidence ladder:
 - Server publish: ~80µs compress, ~1µs palette override
 - Client render: ~700-1200µs depending on resolution
 - E2E: ~10ms button-to-pixel over public internet
+
+## RE METHOD (locked 2026-09-03) — read `../mvc-live-skins-quarters/docs/RE-METHOD.md` first
+1. Port the SH4 annotations to the Steam binary by function matching.
+2. Seed with unique constants, then propagate along the call graph.
+3. Translate globals through the block map before comparing reference sets.
+4. Tag confirmed versus inferred, and store the pairs as edges in the knowledge graph (`re_kb`, seeds in `tools/re_kb/NN_*.surql`, apply with `tools/re_kb/apply_seed.py`).
+Query the graph before deriving; derive before capturing; cite an address for every claim; say UNKNOWN rather than guess.
