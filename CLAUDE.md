@@ -407,3 +407,6 @@ Full docs: `tools/re_kb/README.md`. Rules and evidence ladder:
 3. Translate globals through the block map before comparing reference sets.
 4. Tag confirmed versus inferred, and store the pairs as edges in the knowledge graph (`re_kb`, seeds in `tools/re_kb/NN_*.surql`, apply with `tools/re_kb/apply_seed.py`).
 Query the graph before deriving; derive before capturing; cite an address for every claim; say UNKNOWN rather than guess.
+
+## RETRO RECEIPTS replay system (2026-09-03)
+The Steam-lane gold standard lives in `../mvc-live-skins-quarters/docs/RETRO-RECEIPTS-REPLAY-SYSTEM.md` (tape, receipt proofs, renderer, gates). re_kb seeds 100-113 are the Steam lane; apply with apply_seed.py after the documented backup.
