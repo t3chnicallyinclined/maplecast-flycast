@@ -39,6 +39,22 @@ OUT="$(printf '%s' "$BODY" | curl -s -X POST "$URL" -u "$AUTH" \
         -H "Accept: application/json" --data-binary @-)"
 printf '%s' "$OUT"
 
+# A REQUEST-level failure (parse error, bad auth) returns a JSON OBJECT, not the array of statement
+# results -- and it contains no "status":"ERR", so the statement check below sails straight past it
+# and exits 0 while NOTHING ran. That is how 175_select_state_machine.surql reported success and
+# applied zero statements: a Windows path in a single-quoted string is an invalid escape sequence,
+# SurrealDB answered 400 "Parse error", and the whole file was discarded silently.
+case "$(printf '%s' "$OUT" | sed -e 's/^[[:space:]]*//' | cut -c1)" in
+  '[') ;;
+  *)
+    echo >&2
+    echo "rekb.sh: REQUEST-LEVEL failure -- NO statement ran. Response was:" >&2
+    printf '%s\n' "$OUT" | head -c 600 >&2
+    echo >&2
+    exit 1
+    ;;
+esac
+
 if printf '%s' "$OUT" | grep -q '"status":"ERR"'; then
   echo >&2
   echo "rekb.sh: at least one statement FAILED (\"status\":\"ERR\" in the response)." >&2

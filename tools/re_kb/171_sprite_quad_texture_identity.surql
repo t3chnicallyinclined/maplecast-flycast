@@ -1,0 +1,54 @@
+-- 171_sprite_quad_texture_identity.surql -- the 2D CHARACTER sprite path end to end:
+-- DC store-queue TA stream vs Steam ctx display list; the per-quad INTEGER texture id;
+-- the 64-bank palette space; the per-frame reset that bounds the read window.
+-- mvc2-sh4-re-expert lane, 2026-09-05. Extends finding:ctx_display_list_layout (seed 168).
+USE NS re DB kb;
+
+UPSERT source:sh4_bank12_sq_ta_stream SET kind='disasm', strength='code',
+  ref='_marv_re/build/bank12.asm loc_8C1244B0 (per-quad sprite submit) lines 9791-10520; literal pool loc_8c124994=0xFF000038 (QACR0), loc_8c124998=0xFF00003C (QACR1), loc_8c1249a0=0xE0000000 (store queue), loc_8c12499c=0x03FFFFFF, loc_8c1249b0=0xFC000000, loc_8c124990=0x8C2AA508 (per-list destination table ptr), loc_8c1249a8=0xF0000000 (TA vertex param, end-of-strip)',
+  note='Reached from bank03 loc_8c034bea -> loc_8c0344d4 (tiled body) / loc_8c0348c8 (scale walker); the jsr target constant is bank03 loc_8c034944 = bank12.loc_8c1244b0.';
+
+UPSERT source:steam_dump_sprite_path_20260905 SET kind='ghidra', strength='code',
+  ref='C:/Users/trist/ghidra_projects/mvc_dump.bin base 0x140000000, capstone from C:/Users/trist/AppData/Local/Temp/sg_dis. Read in full: FUN_140845e20, FUN_1408436a0 and its 0x19-entry kind table at 0x140843e4c, the append tail at 0x140843d67, FUN_1408441d0, FUN_140613390, FUN_140048970, FUN_140612180 at 0x1406122ac and 0x1406123c0, FUN_1406129f0 / FUN_140612a10 / FUN_140612f70',
+  note='GhidraMCP was down; offline capstone only. Every address below was disassembled, not decompiled.';
+
+UPSERT finding:dc_2d_sprite_is_a_ta_write_stream SET status='open', confidence='high', date='2026-09-05',
+  title='On the DC/NAOMI original the 2D character sprite path is a STORE-QUEUE TA PARAMETER STREAM, not a walkable list',
+  statement='bank03 loc_8c034bea dispatches per object to loc_8c0344d4 (tiled body, sid bit 15 clear) or loc_8c0348c8 (scale walker), and BOTH submit one quad at a time by jsr to bank12 loc_8C1244B0. That routine takes a per-list destination from a table: r3 = *0x8C2AA508; dest = *(table + list*4) with list 0 or 2; QACR0 (0xFF000038) = QACR1 (0xFF00003C) = dest>>24; r14 = 0xE0000000 | (dest & 0x03FFFFFF). It then builds 32-byte blocks at r14 and issues pref @r14 per block -- one global-parameter block (PCW/ISP/TSP/TCW from the record at r12 OR-ed with r4) followed by two vertex blocks headed by 0xF0000000 (TA vertex parameter with end-of-strip). At the end it writes the advanced cursor back as (old & 0xFC000000) | (r14 & 0x03FFFFFF). bank12 contains 255 pref instructions; banks 00-10 and 14-16 contain ZERO. There is no per-quad node, no retained array, and nothing with a stride to walk: the 2D display list existed only as a byte stream of PVR TA parameters.',
+  open='Whether the destination in *0x8C2AA508 is the TA polygon FIFO (0x10000000) or a per-list RAM/VRAM buffer later CH2-DMAd to the TA (SB_C2DSTAT/LEN/ST 0xA05F6800/04/08 appear only in bank18 and bank1a, the system layer) was NOT read. It does not change the verdict -- either way the payload is a raw TA parameter stream.';
+RELATE finding:dc_2d_sprite_is_a_ta_write_stream -> cites -> source:sh4_bank12_sq_ta_stream SET id='dc_sq_ta_disasm';
+UPSERT finding:dc_2d_sprite_is_a_ta_write_stream SET status='confirmed';
+
+UPSERT finding:sprite_quad_record_layout SET status='open', confidence='high', date='2026-09-05',
+  contribution_candidate=true,
+  title='The Steam 2D sprite quad is an 80-byte SELF-CONTAINED record whose first dword is an INTEGER texture id plus palette bank',
+  statement='FUN_140845e20(RCX = &quad) is the Steam counterpart of DC loc_8C1244B0 and the ONLY submit for both character sprite walkers (called at 0x140612e9a in the tiled path FUN_140612a10 = loc_8c0344d4, and at 0x14061331a in the scale-walker path FUN_140612f70 = loc_8c0348c8). It copies 0x50 bytes to its own frame, rejects the quad if quad+0x2C (f32 alpha) <= 0 or if the u16 at quad+0x00 >= 0x1000, reads the slot-table entry ctx+0x1e00a0 + idx*0x18, requires its u16 used flag at +0 to be non-zero, and if the i16 palette field at +4 is >= 0 REWRITES quad+0x00 to ((pal+1)<<16) | idx. It then calls FUN_1408436a0(kind = 0xC, &quad, len = 0x50). Fields read: +0x00 u16 texture slot index and u16 (palbank+1); +0x2C f32 alpha (clamped, x255 into the colour byte); +0x30 u32 mode; +0x34 u32 flags (bit 17 = per-quad packed colour at +0x38, bit 13 = ctx colour multipliers ctx+0x1f825c/60/64, else white); +0x38 u32 packed colour; +0x3C masked to 0xFFFFFF. Kind 0xC case in FUN_1408436a0 at 0x140843b81: sort key = quad+0x0C passed through FUN_1408432e0 and written back; bucket cat = (quad+0x30 != 0) ? 3 : 0 -- the mode dword alone chooses the sorted translucent bucket. NO POINTER anywhere in the record.',
+  consequence='This is exactly the shape SUPERGUN wants: walk the engine bucket, read an INTEGER texture id per quad, no content hashing and no draw-list reconstruction.';
+RELATE finding:sprite_quad_record_layout -> cites -> source:steam_dump_sprite_path_20260905 SET id='sprite_quad_disasm';
+RELATE finding:sprite_quad_record_layout -> cites -> source:sh4_bank12_sq_ta_stream SET id='sprite_quad_sh4';
+UPSERT finding:sprite_quad_record_layout SET status='confirmed';
+
+UPSERT finding:character_sprite_texture_id_bases SET status='open', confidence='high', date='2026-09-05',
+  contribution_candidate=true,
+  title='Character sprites use TWO texture-id ranges, neither of them 0xC10/0xC50/0xC90: per-fighter sheets at 0x390+slot*0x100 and DOUBLE-BUFFERED tile slots at 0x10 / 0x190',
+  statement='SCALE-WALKER path (FUN_140612f70 at 0x140613119-0x14061313b): idx = ((u8)node+0x230 << 8) + 0x390 + alloc, where alloc is the per-part byte from the allocation list. Registration matches: FUN_140612180 at 0x1406123c5 computes ECX = (slot << 8) + 0x390, calls FUN_1408458a0(base) then FUN_140845fe0(list, flags) which assigns base+i to each record, and finally FUN_1408458a0(0). TILED BODY path (FUN_140612a10 at 0x140612b57): idx = *(blk+0x32bec) + *(u32*)(node+0x120), then INC per tile at 0x140612e9f. blk+0x32bec and blk+0x32be8 are a PING-PONG PAIR set every frame by FUN_140613390 at 0x1406133c5-0x1406133f3 from the parity of the counter blk+0x32bd8: one gets 0x10 and the other 0x190. So live character tiles occupy slots 0x10..0x30F alternating, and per-fighter static sheets occupy 0x390..0x8FF (6 x 0x100). Both are ordinary entries of the SAME global 0xFFF-slot table ctx+0x1e00a0 + idx*0x18 that stage (0xC10), effects (0xC50) and HUD (0xC90) use.',
+  corrects='TEXTURE-BANKS-GHIDRA.md section 2 lists 0x390+slot*0x100 for FUN_140612180 but does not name the tiled ping-pong bases; PALETTE-SOURCE-GHIDRA.md section 0 states both formulas but not that blk+0x32bec alternates 0x10/0x190 per frame.';
+RELATE finding:character_sprite_texture_id_bases -> cites -> source:steam_dump_sprite_path_20260905 SET id='char_tex_base_disasm';
+UPSERT finding:character_sprite_texture_id_bases SET status='confirmed';
+
+UPSERT finding:palette_ram_is_one_64_bank_space SET status='open', confidence='high', date='2026-09-05',
+  contribution_candidate=true,
+  title='The rendered palette is ONE contiguous 4 KB / 1024-entry / 64-bank space; a single upload indexed by bank number is faithful',
+  statement='FUN_140048970 (the per-frame LUT refresh called from the flush FUN_140843eb0) loops EBX from 0 to 0x400 in steps of 0x10 -- exactly 64 banks of 16 entries -- over dev+0xd8d04 (dev = *(0x140acd3a8)), comparing each against the per-flip shadow at dev+0xd9d04 + flip*0x1000 (0x36741*4 = 0xd9d04, RAX<<0xa at 0x1400489d5) and mapping only the changed ones into the per-bank D3D texture dev+0xd8500 + (bank + flip*0x40)*8. The compare/copy length is 0x40 bytes (16 entries) except where (bank & 0xF) == 0, which use 0x400 bytes. So: BASE dev+0xd8d04, STRIDE 0x40 bytes per bank, EXTENT 0x1000 bytes = 1024 u32 = 64 banks, double-buffered by dev+0xd8d00. The source is the staging lines: FUN_140613390 walks 128 lines at blk+0x1040 stride 0x38 (ESI = 0x80 at 0x140613581) and for each pending line calls FUN_140845670(entry = (*(u32*)(line+0)) << 4, colours, count = *(u32*)(line+4)) -- the bank index is a FIELD of the line, not the line index. Bank selection at draw time (FUN_140612180 at 0x1406122ac-0x1406122d6): flags = u16 at rec-2; bank = (node+0x171 != 0) ? ((i16)(node+0x172)*16 + flags) >> 4 : (flags >> 4); AND 0x3F is applied to BOTH branches at 0x1406122d3.',
+  consequence='SUPERGUN can upload the whole 4 KB once (a 16x64 or 256x64 RGBA8 LUT) and index it by the 6-bit bank the quad already carries at record+0x02, instead of materialising a 256-colour texture per row per frame. The mask makes the bank space exactly 64 wide, so no bank can escape the texture.',
+  open='Banks 0x00..0x0F: the address space covers them and the non-gated branch (node+0x171 == 0) can legally produce them, but every bank observed by palette_gate.py on four capture frames was >= 0x10 (0x13, 0x20, 0x23, 0x28, 0x29, 0x2B) and the fighter bases are 0x10, 0x18, 0x20, 0x28, 0x30, 0x38. Whether anything DRAWN uses 0x00..0x0F is INFERRED-unused, not confirmed; uploading all 64 costs nothing and makes the question moot.';
+RELATE finding:palette_ram_is_one_64_bank_space -> cites -> source:steam_dump_sprite_path_20260905 SET id='pal64_disasm';
+UPSERT finding:palette_ram_is_one_64_bank_space SET status='confirmed';
+
+UPSERT finding:display_list_reset_bounds_the_read_window SET status='open', confidence='high', date='2026-09-05',
+  title='FUN_1408441d0 is the per-frame display-list RESET, and it independently proves the counter block layout',
+  statement='FUN_1408441d0 does memset(ctx + 0x1e0030, 0, 0x50) then ctx+0x1e0080 = 0 (and ctx+0x1f8284 = 0, ctx+0x1f8288 = 1). 0x50 bytes = the 16 bucket counts at ctx+0x1e0030 IMMEDIATELY followed by the 4 layer totals at ctx+0x1e0070 -- one memset covers both, which independently confirms the layout read out of FUN_1408436a0 in finding:ctx_display_list_layout. The consumer tail at 0x1408440c0 (FUN_140843eb0) walks layers in the order 2, 3, 0, each gated on its layer total (ctx+0x1e0078, ctx+0x1e007c, ctx+0x1e0070), emitting ring cmd 0 with the layer id via FUN_1400483c0 and then FUN_140842e30(layer, sub) for sub = 0..3.',
+  consequence='The window in which the list is complete and readable is AFTER the frame function builds it and BEFORE FUN_1408441d0 runs. A consumer that owns the tick owns that window; nothing needs to be hooked inside the renderer.';
+RELATE finding:display_list_reset_bounds_the_read_window -> cites -> source:steam_dump_sprite_path_20260905 SET id='dl_reset_disasm';
+RELATE finding:display_list_reset_bounds_the_read_window -> about -> finding:ctx_display_list_layout SET id='dl_reset_about_layout';
+UPSERT finding:display_list_reset_bounds_the_read_window SET status='confirmed';

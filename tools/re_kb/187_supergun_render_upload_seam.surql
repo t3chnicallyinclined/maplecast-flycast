@@ -1,0 +1,46 @@
+-- 187_supergun_render_upload_seam.surql -- the SUPERGUN runner's character/effect render path,
+-- settled on the live game 2026-09-06: the texture upload routine is the one seam every page goes
+-- through; the game's slot table is persistent and the staging ring is only the delta; the sprite
+-- consumer FUN_1408458b0 ported verbatim; the KO freeze. Forward slashes only in ref/note.
+USE NS re DB kb;
+
+UPSERT source:supergun_render_upload_seam_20260906 SET kind='reproduction', strength='reproduction',
+  ref='GhidraMCP over mvc_dump.bin: FUN_140048910 (thunk), FUN_14004d290 (upload routine: map FUN_140272700 / detwiddle FUN_14004ba50 / unmap FUN_140272ea0), FUN_140048460 (D3D create, calls FUN_14004d290 directly), FUN_1408435d0 (slot registrar from a 16-byte descriptor), FUN_140845fe0 (bulk registrar), FUN_140845830 (register slot from a scratch address), FUN_1406162e0 (0xC99 big portrait: LZSS into dcram+0xe60000 then FUN_140845830), FUN_140843eb0 (frame flush: ring drain + category passes 2,3,0), FUN_1408456a0 (tile copy-out into the staging ring at config+0x208). Runner: supergun/supersoaker/runner/sg_runner/src/main.rs rr_tex_upload, walk_tile_ring, merge_uploads, dlist_render, win_menu_step. Live runs cgeom5..cgeom9 (runner.log RING LIVE / RING MISS / UPLOAD lines) and three recordings cut frame by frame.',
+  note='Every claim below was checked on screen after the change and against the runner log lines named. The prior model (decode character pixels from the offline pack via a stale slot map) is retired.';
+
+UPSERT finding:supergun_texture_upload_seam SET status='confirmed', confidence='high', date='2026-09-06',
+  contribution_candidate=true,
+  title='FUN_14004d290(hostdev, slot, w, h, fmt, src) is the ONE routine every texture upload ends in; capturing it per slot gives the shell every on-demand page (select preview, 0xC99 cut-in, VS-screen pages, hyper/special/drone tiles)',
+  statement='Two callers reach it: the thunk FUN_140048910(slot,w,h,fmt,src) -- used by the frame flush FUN_140843eb0 to drain the staging ring entry by entry, by FUN_140845830 (slot registered from a scratch address: FUN_1406162e0 decompresses the 0xC99 big portrait into dcram+0xe60000 and registers it from there; the character-select preview re-uploads slots 0x0810 (256x256 fmt 0x0101 RGB565 twiddled, from dcram+0xdb0000) and 0x081C (256x256 fmt 0x0300 VQ, from dcram+0xdf0000) on every cursor move), and by FUN_14060d560 -- AND the D3D create FUN_140048460, which FUN_1408435d0 calls when it registers a slot from a 16-byte descriptor {u16 w, u16 h, u16 fmt, u16 pad, u32 loc}: it writes the slot table {occ 1, +2 fmt, +4 pal (0 paletted / -1), +6 w, +8 h}, creates the host texture and uploads dcram + (loc & 0x1FFFFFF) through FUN_14004d290 directly, not through the thunk. The special-move / drone / hyper tiles are registered that way at slots 930+ with their REAL dimensions (8x8, 16x8, 16x64, fmt 0x0502 PAL4). Under --host-gfx the map returns one shared scratch that the next upload overwrites, so nothing FUN_14004d290 produced was ever readable. The runner replaces FUN_14004d290 with a per-slot raw capture (size from the fmt word: PAL4 w*h/2, PAL8 w*h, VQ 0x800+w*h/4, 16bpp w*h*2) and decodes with the proven decoders; hooking only the thunk left every create-path slot logged as never uploaded (Sentinel vanished on drones, Magneto lost his body on the hyper, the VS screen drew stale bank pages).',
+  consequence='Select preview follows the highlight, the hyper cut-in shows the character, VS screen correct, Sentinel drones and the triple super render. The bank-header location is only right for pages the loader placed there; a captured page must be consulted first, and a captured page is dynamic whatever its bank (the select preview is a static-bank page that changes per highlight).';
+
+UPSERT finding:supergun_slot_table_persistent_ring_delta SET status='confirmed', confidence='high', date='2026-09-06',
+  contribution_candidate=true,
+  title='The game slot table is persistent and the staging ring is only the delta: a per-tick slot map drops every entity that was not re-uploaded that tick',
+  statement='FUN_140612430 decodes each entity body into one scratch window at DC 0x0CE60000 with a cursor that restarts per entity, and FUN_1408456a0 copies each tile out into the staging ring at *(config+0x208) (header 6 x u32 {kind, slot, w, h, fmt, n} then n bytes; count config+0x210, byte cursor config+0x214). The flush FUN_140843eb0 drains it and zeroes +0x214; the game reset FUN_1408441d0 touches only the display-list counts, so a shell that cuts the flush must zero +0x210/+0x214 per tick itself or the ring grows unbounded. An entity holding a pose (a grabbed opponent, Magneto during his hyper) is NOT re-uploaded; its records reference slots uploaded on an earlier tick. A map rebuilt per tick lost them (cape drawn, body gone) and a fallback that resolved any off-ring slot to bank_base+slot drew a HUD page in their place (the wrong-animation flash). The runner keeps one persistent slot map merged from each tick ring plus the captured uploads, cleared only on a match re-entry, and never applies the static-page fallback to a paletted (0x0502) slot.',
+  consequence='Held poses, grabs and the other ping-pong parity draw from their last upload, as the game host texture would.';
+
+UPSERT finding:supergun_sprite_consumer_port SET status='confirmed', confidence='high', date='2026-09-06',
+  contribution_candidate=true,
+  title='The opcode-0xC sprite consumer FUN_1408458b0 ported verbatim (32x32 page times scale, anchor rule, record UVs, flipU / V inversion, rotation about the anchor) and category 3 drawn in the flush order (key descending, sequence ascending)',
+  statement='W = slot.w * scaleX and H = slot.h * scaleY where the slot page is 32x32 for ring tiles (the emitter bakes T/32 into the scale; an 8-px tile carries 0.417 = 1.667/4 and drew 4x too small as sz*scale); xoff = (flags&3)==3 ? W : ==2 ? floor(W/2) : 0 (==1 is 0, the old port had it inverted so both facings landed on the wrong side); yoff = (flags&0xC)==0xC ? H : ==8 ? floor(H/2) : 0; UVs are the record own +0x18..+0x24, then if (flags & 0x10) u = 1-u and if !(flags & 0x20) v = 1-v (flip was hard-coded before, which is the P1-faces-away report); rotation rec+0x28 as u16 angle, -(a*2pi/65536) about (rec.x, rec.y). Category 0..2 draw in submission order and category 3 is qsorted by f32 item+0x14 descending then u32 item+0 ascending (re_kb 109); drawing category 3 in array order put a cape over its body. Pixels: PAL4 twiddled decoded with the flycast twiddle_slow port (low nibble = even index), 16bpp ring entries through detwiddle16.',
+  consequence='Characters assemble at the right size and facing on both sides with the cape behind the body; effects and the hit counter draw (page 0x0817 was dropped by a slot-vs-header dims mismatch: the slot table is stale from select, the bank header is what the game uploads from, so the resolver falls back to the tcw own range bank).';
+
+UPSERT finding:supergun_ko_freeze_menu SET status='confirmed', confidence='high', date='2026-09-06',
+  title='The KO menu holds the last battle frame: the tick that enters the win sub-state (G+2=2, G+3=4, G+4=1, config+0x7C0 != 0) is never rendered and no further tick runs; the menu reads the raw pad',
+  statement='The previous frame world batches and sprite framebuffer are re-presented while the menu waits; a frozen sim never refreshes the seat words blk+0x3C66/0x3C7A so the menu edge-detects the raw pad (PAD_A1 0x200 same team, PAD_A2 0x800 change teams). On a choice the texture cache is released only AFTER that final present (releasing before it handed D3D freed views through the re-presented batches -- the crash after the menu). The same-team rematch restores the human-side masks G+0x84 (blk+0x3D3C) and G+0x18 (blk+0x3CD0) captured at match start (finding:supergun_rematch_both_cpu_fix).',
+  consequence='No winner page; rematch and character select both work from the frozen frame.';
+
+RELATE finding:supergun_texture_upload_seam->cites->source:supergun_render_upload_seam_20260906 SET id='e187_seam_src';
+RELATE finding:supergun_slot_table_persistent_ring_delta->cites->source:supergun_render_upload_seam_20260906 SET id='e187_ring_src';
+RELATE finding:supergun_sprite_consumer_port->cites->source:supergun_render_upload_seam_20260906 SET id='e187_port_src';
+RELATE finding:supergun_ko_freeze_menu->cites->source:supergun_render_upload_seam_20260906 SET id='e187_ko_src';
+RELATE finding:supergun_slot_table_persistent_ring_delta->cites->finding:supergun_body_tile_pixel_source SET id='e187_ring_pix';
+RELATE finding:supergun_sprite_consumer_port->cites->finding:supergun_sprite_consumer_flip_anchor_rule SET id='e187_port_rule';
+RELATE finding:supergun_sprite_consumer_port->cites->finding:steam_translucent_sort_order SET id='e187_port_sort';
+RELATE finding:supergun_ko_freeze_menu->cites->finding:supergun_rematch_both_cpu_fix SET id='e187_ko_mask';
+
+UPDATE finding:supergun_texture_upload_seam SET status='confirmed';
+UPDATE finding:supergun_slot_table_persistent_ring_delta SET status='confirmed';
+UPDATE finding:supergun_sprite_consumer_port SET status='confirmed';
+UPDATE finding:supergun_ko_freeze_menu SET status='confirmed';
